@@ -18,7 +18,12 @@
 #include "../common/synth.h"
 #include "game/sound/989snd/vagvoice.h"
 
+#ifdef __3DS__
+#include <atomic>
+#include <thread>
+#else
 #include "third-party/cubeb/cubeb/include/cubeb/cubeb.h"
+#endif
 
 namespace snd {
 
@@ -86,6 +91,13 @@ class Player {
   VoiceManager mVmanager;
   s32 mTick{0};
 
+#ifdef __3DS__
+  // No audio output yet: a thread advances the 240 Hz sound handler tick without synthesizing
+  // samples, so sounds start/stop and snd_GetTick() moves like on PC.
+  std::thread mHandlerThread;
+  std::atomic<bool> mHandlerThreadStop{false};
+  void HandlerTickThread();
+#else
   cubeb* mCtx{nullptr};
   cubeb_stream* mStream{nullptr};
 
@@ -95,5 +107,6 @@ class Player {
                              void* output_buffer,
                              long len);
   static void state_callback(cubeb_stream* stream, void* user, cubeb_state state);
+#endif
 };
 }  // namespace snd

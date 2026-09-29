@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: ISC
 #include "player.h"
 
+#include <chrono>
 #include <fstream>
 
 #include "sfxblock.h"
@@ -27,6 +28,43 @@ Player::~Player() {
   DestroyCubeb();
 }
 
+#ifdef __3DS__
+void Player::InitCubeb() {
+  mHandlerThreadStop = false;
+  mHandlerThread = std::thread(&Player::HandlerTickThread, this);
+}
+
+void Player::DestroyCubeb() {
+  mHandlerThreadStop = true;
+  if (mHandlerThread.joinable()) {
+    mHandlerThread.join();
+  }
+}
+
+void Player::HandlerTickThread() {
+  using clock = std::chrono::steady_clock;
+  constexpr auto kTick = std::chrono::nanoseconds(1000000000 / 240);
+  auto next = clock::now();
+  while (!mHandlerThreadStop) {
+    // run 4 handler ticks per wakeup (60 Hz) to keep the thread cheap
+    for (int i = 0; i < 4; i++) {
+      std::scoped_lock lock(mTickLock);
+      mTick++;
+      for (auto it = mHandlers.begin(); it != mHandlers.end();) {
+        bool done = it->second->Tick();
+        if (done) {
+          mHandleAllocator.FreeId(it->first);
+          it = mHandlers.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    next += 4 * kTick;
+    std::this_thread::sleep_until(next);
+  }
+}
+#else
 void Player::InitCubeb() {
 #ifdef _WIN32
   HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -81,6 +119,9 @@ void Player::DestroyCubeb() {
 #endif
 }
 
+#endif  // __3DS__
+
+#ifndef __3DS__
 long Player::sound_callback([[maybe_unused]] cubeb_stream* stream,
                             void* user,
                             [[maybe_unused]] const void* input,
@@ -93,6 +134,7 @@ long Player::sound_callback([[maybe_unused]] cubeb_stream* stream,
 void Player::state_callback([[maybe_unused]] cubeb_stream* stream,
                             [[maybe_unused]] void* user,
                             [[maybe_unused]] cubeb_state state) {}
+#endif
 
 void Player::Tick(s16Output* stream, int samples) {
   std::scoped_lock lock(mTickLock);

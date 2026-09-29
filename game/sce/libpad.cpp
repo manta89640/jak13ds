@@ -7,6 +7,10 @@
 #include "game/kernel/common/kernel_types.h"
 #include "game/system/hid/input_bindings.h"
 
+#ifdef __3DS__
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 /*!
  * @file libpad.cpp
  * Stub implementation of the EE pad (controller) library
@@ -65,6 +69,33 @@ int scePadRead(int port, int /*slot*/, u8* rdata) {
   cpad->valid = 0;  // success
 
   cpad->status = 0x70 /* (dualshock2) */ | (20 / 2); /* (dualshock2 data size) */
+
+#ifdef __3DS__
+  // 3DS buttons and circle pad (C-stick on New 3DS) are controller 0. No second controller.
+  cpad->button0 = 0;
+  cpad->leftx = cpad->lefty = cpad->rightx = cpad->righty = 127;
+  for (auto& p : cpad->abutton) {
+    p = 0;
+  }
+  if (port == 0) {
+    ctr_pad_state state;
+    ctr_pad_read(&state);
+    cpad->button0 = state.buttons;
+    cpad->leftx = state.lx;
+    cpad->lefty = state.ly;
+    cpad->rightx = state.rx;
+    cpad->righty = state.ry;
+    // digital buttons: report full pressure for the pressure-sensitive ones
+    static constexpr int kPressureButtons[12] = {
+        PadData::DPAD_RIGHT, PadData::DPAD_LEFT, PadData::DPAD_UP, PadData::DPAD_DOWN,
+        PadData::TRIANGLE,   PadData::CIRCLE,    PadData::CROSS,   PadData::SQUARE,
+        PadData::L1,         PadData::R1,        PadData::L2,      PadData::R2};
+    for (int i = 0; i < 12; i++) {
+      cpad->abutton[i] = (state.buttons & (1 << kPressureButtons[i])) ? 255 : 0;
+    }
+  }
+  return 32;
+#endif
 
   std::optional<std::shared_ptr<PadData>> pad_data = std::nullopt;
   if (Display::GetMainDisplay()) {
