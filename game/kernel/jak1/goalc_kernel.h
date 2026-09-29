@@ -21,6 +21,13 @@ constexpr u32 GOALC_SUSPENDED_PC = 0xc0de5000;
 //! Register the C-mode kernel primitives as GOAL functions. Call after the symbol table exists.
 void goalc_kernel_init();
 
+//! For tests: use the given symbol addresses instead of interning symbols (0 = not available).
+void goalc_kernel_set_symbols(u32 kernel_sp,
+                              u32 running,
+                              u32 suspended,
+                              u32 return_from_thread_dead,
+                              u32 set_to_run_bootstrap);
+
 // the primitives, exposed for testing. Arguments and return values are GOAL values.
 u64 goalc_k_return_to_kernel(u64 value);
 u64 goalc_k_reset_and_call(u64 thread, u64 func);

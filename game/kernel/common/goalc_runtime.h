@@ -153,3 +153,6 @@ u64 goalc_suspend_impl(goalc_ctx* caller_ctx) __attribute__((visibility("hidden"
 
 //! Stack pointer stored in a saved context (host address).
 uintptr_t goalc_ctx_sp(const goalc_ctx* ctx);
+
+//! Debug: print the return addresses of the frames of a saved context (frame pointer chain).
+void goalc_print_backtrace(const goalc_ctx* ctx);
