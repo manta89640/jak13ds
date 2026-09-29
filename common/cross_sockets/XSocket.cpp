@@ -132,7 +132,12 @@ int set_socket_option(int socket, int level, int optname, const void* optval, in
 }
 
 int set_socket_timeout(int socket, long microSeconds) {
-#ifdef OS_POSIX
+#if defined(__3DS__)
+  // libctru's soc:U has no SO_RCVTIMEO; the listener uses select() with a timeout instead.
+  (void)socket;
+  (void)microSeconds;
+  return 0;
+#elif defined(OS_POSIX)
   struct timeval timeout = {};
   timeout.tv_sec = 0;
   timeout.tv_usec = microSeconds;

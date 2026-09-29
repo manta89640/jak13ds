@@ -82,6 +82,9 @@ fs::path get_user_config_dir() {
 #elif __APPLE__
   auto config_base_dir = get_env("HOME");
   config_base_path = fs::path(config_base_dir) / "Library" / "Application Support";
+#elif defined(__3DS__)
+  // settings and saves live next to the game data on the SD card (docs/3ds-port/3ds_build.md)
+  config_base_path = fs::path(OPENGOAL_3DS_SD_ROOT) / "user";
 #endif
   return config_base_path / "OpenGOAL";
 }
@@ -165,6 +168,8 @@ std::string get_current_executable_path() {
     return std::string(argv[0]);
   }
   return std::string(buffer);
+#elif defined(__3DS__)
+  return std::string(OPENGOAL_3DS_SD_ROOT) + "/gk.3dsx";
 #endif
 }
 

@@ -29,6 +29,10 @@ size_t get_peak_rss() {
     return 0;
   }
 }
+#elif defined(__3DS__)
+size_t get_peak_rss() {
+  return 0;
+}
 #else
 #include <sys/resource.h>
 size_t get_peak_rss() {

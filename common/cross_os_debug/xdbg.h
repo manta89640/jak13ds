@@ -11,7 +11,7 @@
 
 #include "common/common_types.h"
 
-#ifdef __linux
+#if defined(__linux) || defined(__3DS__)
 #include <sys/types.h>
 #elif _WIN32
 #define NOMINMAX
