@@ -1,0 +1,160 @@
+/*
+ * (AI-assisted)
+ * libctru side of the OpenGOAL 3DS platform layer. See ctr_port.h.
+ */
+
+#include "ctr_port.h"
+
+#include <3ds.h>
+#include <malloc.h>
+#include <stdio.h>
+
+static int s_console = 0;
+static int s_irrst = 0;
+static u32* s_soc_buffer = NULL;
+
+int ctr_platform_init(int enable_console) {
+  osSetSpeedupEnable(true); /* 804 MHz + L2 cache on New 3DS, no-op otherwise */
+  gfxInitDefault();
+  if (enable_console) {
+    consoleInit(GFX_BOTTOM, NULL);
+    s_console = 1;
+  }
+  /* C-stick / ZL / ZR on New 3DS (and the Circle Pad Pro) */
+  s_irrst = R_SUCCEEDED(irrstInit()) ? 1 : 0;
+  return 0;
+}
+
+void ctr_platform_exit(void) {
+  ctr_net_exit();
+  if (s_irrst) {
+    irrstExit();
+    s_irrst = 0;
+  }
+  gfxExit();
+}
+
+int ctr_main_loop(void) {
+  int running = aptMainLoop() ? 1 : 0;
+  if (s_console) {
+    gfxFlushBuffers();
+    gfxSwapBuffers();
+  }
+  return running;
+}
+
+int ctr_is_new3ds(void) {
+  bool is_new = false;
+  APT_CheckNew3DS(&is_new);
+  return is_new ? 1 : 0;
+}
+
+static unsigned char stick_axis(int v, int invert) {
+  /* circle pad reports about +-156, c-stick about +-146 */
+  int s = (v * 128) / 150;
+  if (invert) {
+    s = -s;
+  }
+  s += 128;
+  if (s < 0) {
+    s = 0;
+  }
+  if (s > 255) {
+    s = 255;
+  }
+  return (unsigned char)s;
+}
+
+enum {
+  B_SELECT = 0,
+  B_L3,
+  B_R3,
+  B_START,
+  B_UP,
+  B_RIGHT,
+  B_DOWN,
+  B_LEFT,
+  B_L2,
+  B_R2,
+  B_L1,
+  B_R1,
+  B_TRIANGLE,
+  B_CIRCLE,
+  B_CROSS,
+  B_SQUARE
+};
+
+void ctr_pad_read(ctr_pad_state* out) {
+  hidScanInput();
+  if (s_irrst) {
+    irrstScanInput();
+  }
+  u32 held = hidKeysHeld();
+  unsigned short b = 0;
+  /* face buttons by position: A right, B bottom, Y left, X top */
+  if (held & KEY_A) b |= 1 << B_CIRCLE;
+  if (held & KEY_B) b |= 1 << B_CROSS;
+  if (held & KEY_Y) b |= 1 << B_SQUARE;
+  if (held & KEY_X) b |= 1 << B_TRIANGLE;
+  if (held & KEY_L) b |= 1 << B_L1;
+  if (held & KEY_R) b |= 1 << B_R1;
+  if (held & KEY_ZL) b |= 1 << B_L2;
+  if (held & KEY_ZR) b |= 1 << B_R2;
+  if (held & KEY_START) b |= 1 << B_START;
+  if (held & KEY_SELECT) b |= 1 << B_SELECT;
+  if (held & KEY_DUP) b |= 1 << B_UP;
+  if (held & KEY_DDOWN) b |= 1 << B_DOWN;
+  if (held & KEY_DLEFT) b |= 1 << B_LEFT;
+  if (held & KEY_DRIGHT) b |= 1 << B_RIGHT;
+  /* no stick clicks on the 3DS: touching the lower/upper half of the touch screen */
+  if (held & KEY_TOUCH) {
+    touchPosition t;
+    hidTouchRead(&t);
+    b |= 1 << (t.py < 120 ? B_L3 : B_R3);
+  }
+  out->buttons = b;
+
+  circlePosition cp;
+  hidCircleRead(&cp);
+  out->lx = stick_axis(cp.dx, 0);
+  out->ly = stick_axis(cp.dy, 1);
+
+  circlePosition cs = {0, 0};
+  if (s_irrst) {
+    irrstCstickRead(&cs);
+  }
+  out->rx = stick_axis(cs.dx, 0);
+  out->ry = stick_axis(cs.dy, 1);
+}
+
+int ctr_net_init(unsigned int buffer_size) {
+  if (s_soc_buffer) {
+    return 0;
+  }
+  s_soc_buffer = (u32*)memalign(0x1000, buffer_size);
+  if (!s_soc_buffer) {
+    return -1;
+  }
+  if (R_FAILED(socInit(s_soc_buffer, buffer_size))) {
+    free(s_soc_buffer);
+    s_soc_buffer = NULL;
+    return -2;
+  }
+  return 0;
+}
+
+void ctr_net_exit(void) {
+  if (s_soc_buffer) {
+    socExit();
+    free(s_soc_buffer);
+    s_soc_buffer = NULL;
+  }
+}
+
+unsigned int ctr_app_mem_free(void) {
+  return (unsigned int)osGetMemRegionFree(MEMREGION_APPLICATION);
+}
+
+unsigned int ctr_linear_mem_free(void) {
+  return (unsigned int)linearSpaceFree();
+}
