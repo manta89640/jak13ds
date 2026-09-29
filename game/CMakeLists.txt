@@ -37,6 +37,7 @@ set(RUNTIME_SOURCE
         graphics/display.cpp
         graphics/gfx_test.cpp
         graphics/gfx.cpp
+        graphics/pipelines/null.cpp
         graphics/jak2_texture_remap.cpp
         graphics/jak3_texture_remap.cpp
         graphics/jakx_texture_remap.cpp
@@ -383,6 +384,7 @@ set(RUNTIME_SOURCE
         system/iop_thread.cpp
         system/SystemThread.cpp
         tools/filter_menu/filter_menu.cpp
+        tools/filter_menu/filter_menu_json.cpp
         tools/subtitle_editor/subtitle_editor_db.cpp
         tools/subtitle_editor/subtitle_editor_repl_client.cpp
         tools/subtitle_editor/subtitle_editor.cpp
