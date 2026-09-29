@@ -43,7 +43,7 @@ set(CMAKE_AR ${DEVKITARM}/bin/arm-none-eabi-gcc-ar CACHE FILEPATH "")
 set(CMAKE_RANLIB ${DEVKITARM}/bin/arm-none-eabi-gcc-ranlib CACHE FILEPATH "")
 
 set(ARCH_FLAGS "-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft")
-set(CMAKE_C_FLAGS_INIT "${ARCH_FLAGS} -D__3DS__ -ffunction-sections -fdata-sections -mword-relocations")
+set(CMAKE_C_FLAGS_INIT "${ARCH_FLAGS} -D__3DS__ -fsigned-char -ffunction-sections -fdata-sections -mword-relocations")
 set(CMAKE_CXX_FLAGS_INIT "${CMAKE_C_FLAGS_INIT}")
 set(CMAKE_ASM_FLAGS_INIT "${ARCH_FLAGS}")
 set(CMAKE_EXE_LINKER_FLAGS_INIT "-specs=3dsx.specs ${ARCH_FLAGS} -Wl,--gc-sections -L${CTRULIB}/lib")
