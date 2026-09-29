@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -51,10 +52,17 @@ enum class GameTextVersion {
 class GameTextFontBank {
   GameTextVersion m_version;  // the version of the game text. we determine this ourselves.
 
-  Trie<EncodeInfo> m_encode_to_utf8_trie;
-  Trie<EncodeInfo> m_encode_to_game_trie;
-  Trie<ReplaceInfo> m_replace_to_utf8_trie;
-  Trie<ReplaceInfo> m_replace_to_game_trie;
+  // The tries are built on first use: they are large (a node is 256 pointers), and every font
+  // bank is a global, so building them eagerly cost ~40 MB (64-bit) / ~21 MB (32-bit) at startup
+  // even for banks that are never used.
+  std::vector<EncodeInfo>* m_encode_info;
+  std::vector<ReplaceInfo>* m_replace_info;
+  mutable std::once_flag m_tries_built;
+  mutable Trie<EncodeInfo> m_encode_to_utf8_trie;
+  mutable Trie<EncodeInfo> m_encode_to_game_trie;
+  mutable Trie<ReplaceInfo> m_replace_to_utf8_trie;
+  mutable Trie<ReplaceInfo> m_replace_to_game_trie;
+  void build_tries() const;
 
   std::unordered_set<char>* m_passthrus;
   // jamo=>6 orientations with their drawing info

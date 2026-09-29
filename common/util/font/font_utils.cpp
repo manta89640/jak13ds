@@ -58,16 +58,23 @@ GameTextFontBank::GameTextFontBank(GameTextVersion version,
                                    std::vector<EncodeInfo>* encode_info,
                                    std::vector<ReplaceInfo>* replace_info,
                                    std::unordered_set<char>* passthrus)
-    : m_version(version), m_passthrus(passthrus) {
-  // Insert the encode and replacement info into a Trie, much faster lookups that way
-  for (const auto& encoding : *encode_info) {
-    m_encode_to_utf8_trie.insert(encoding.game_bytes, encoding);
-    m_encode_to_game_trie.insert(encoding.utf8, encoding);
-  }
-  for (const auto& replacement : *replace_info) {
-    m_replace_to_utf8_trie.insert(replacement.game_encoding, replacement);
-    m_replace_to_game_trie.insert(replacement.utf8_string, replacement);
-  }
+    : m_version(version),
+      m_encode_info(encode_info),
+      m_replace_info(replace_info),
+      m_passthrus(passthrus) {}
+
+void GameTextFontBank::build_tries() const {
+  std::call_once(m_tries_built, [this]() {
+    // Insert the encode and replacement info into a Trie, much faster lookups that way
+    for (const auto& encoding : *m_encode_info) {
+      m_encode_to_utf8_trie.insert(encoding.game_bytes, encoding);
+      m_encode_to_game_trie.insert(encoding.utf8, encoding);
+    }
+    for (const auto& replacement : *m_replace_info) {
+      m_replace_to_utf8_trie.insert(replacement.game_encoding, replacement);
+      m_replace_to_game_trie.insert(replacement.utf8_string, replacement);
+    }
+  });
 }
 
 bool GameTextFontBank::is_language_id_korean(const int language_id) const {
@@ -110,6 +117,7 @@ bool font_bank_exists(GameTextVersion version) {
 }
 
 std::string GameTextFontBank::replace_to_game(const std::string& str) const {
+  build_tries();
   std::string newstr;
   newstr.reserve(str.size());
   for (int i = 0; i < str.length();) {
@@ -130,6 +138,7 @@ std::string GameTextFontBank::replace_to_game(const std::string& str) const {
 }
 
 std::string GameTextFontBank::encode_utf8_to_game(const std::string& str) const {
+  build_tries();
   std::string newstr;
   newstr.reserve(str.size());
   for (int i = 0; i < str.length();) {
@@ -156,6 +165,7 @@ std::string GameTextFontBank::convert_utf8_to_game(const std::string& str) const
 }
 
 std::string GameTextFontBank::replace_to_utf8(const std::string& str) const {
+  build_tries();
   std::string result;
   result.reserve(str.size());
   for (size_t i = 0; i < str.size();) {
@@ -186,6 +196,7 @@ bool GameTextFontBank::valid_char_range(const char& in) const {
 }
 
 std::string GameTextFontBank::encode_game_to_utf8(const std::string& str) const {
+  build_tries();
   std::string newstr;
   newstr.reserve(str.size());
   for (size_t i = 0; i < str.size();) {
