@@ -205,3 +205,27 @@ platform/3ds/tools/run_emu.sh --seconds 60 --gdb     # --gdb-script FILE for cus
     reader threads, and boot hung at `FS Open VAGDIR.AYB`.
   - Now the priorities are set per thread (`ctr_port.h`): IO helpers > IOP > listener > worker
     > EE. `IOP_Kernel::dispatch` also sleeps 100 µs when nothing is runnable.
+- **`char` signedness:** on ARM, `char` is unsigned by default, while x86 and macOS arm64 use
+  signed `char`. GOAL's `format` (`jak1/kprint.cpp`, `format_struct::data` holding -1 as "not
+  set") printed 255 pad characters of `0xff` for every `~D`. The toolchain file now passes
+  `-fsigned-char` to all 3DS code, including the C modules.
+
+### Boot status (M3)
+
+Tested in Azahar 2126.1.2 as a New 3DS, about 9 s of emulated boot. The runtime:
+- starts
+- allocates the 48 MB EE space
+- registers the 518 static C modules
+- loads KERNEL.CGO and GAME.CGO (346 objects)
+- initializes the settings
+- calls `play` and loads `title-vis` (TIT.DGO)
+- reaches `kernel: machine started`
+
+It then stops on:
+
+    goalc: thread-suspend of camera-combiner with 1704 bytes of stack used, but the thread only has 1024
+
+C-mode frames are bigger than native ones. The runtime-side stack floor for suspended processes
+needs to cover this (runtime work). Before that, the log shows `kmalloc: !alloc mem global-object
+(11264000 bytes)` during `play`, which the small memory layout has to account for.
+
