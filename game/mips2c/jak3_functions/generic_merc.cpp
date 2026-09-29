@@ -443,11 +443,32 @@ void vcallms_311_case_314(ExecutionContext* c, u16* vis) {
   //  c->acc.vf.madda_xyzw(c->vfs[vf22].vf, c->vfs[vf10].vf.w());
   //  c->acc.vf.madd_xyzw(c->vfs[vf15].vf, c->vf_src(vf23).vf, c->vf_src(vf00).vf.w());
 
+#ifndef OPENGOAL_SCALAR_SIMD
   __m128 acc = _mm_mul_ps(_mm_load_ps(c->vf_src(vf20).vf.data), _mm_set1_ps(c->vf_src(vf08).vf.w()));
   acc = _mm_add_ps(_mm_mul_ps(_mm_load_ps(c->vf_src(vf21).vf.data), _mm_set1_ps(c->vf_src(vf09).vf.w())), acc);
   acc = _mm_add_ps(_mm_mul_ps(_mm_load_ps(c->vf_src(vf22).vf.data), _mm_set1_ps(c->vf_src(vf10).vf.w())), acc);
   acc = _mm_add_ps(_mm_load_ps(c->vf_src(vf23).vf.data), acc);
   _mm_store_ps(c->vfs[vf15].vf.data, acc);
+#else
+  {
+    // same operation order as the SIMD path (mul, then add, as separate roundings)
+    const auto m0 = c->vf_src(vf20).vf;
+    const auto m1 = c->vf_src(vf21).vf;
+    const auto m2 = c->vf_src(vf22).vf;
+    const auto m3 = c->vf_src(vf23).vf;
+    const float s0 = c->vf_src(vf08).vf.w();
+    const float s1 = c->vf_src(vf09).vf.w();
+    const float s2 = c->vf_src(vf10).vf.w();
+    for (int i = 0; i < 4; i++) {
+      float acc = m0.data[i] * s0;
+      const float p1 = m1.data[i] * s1;
+      acc = p1 + acc;
+      const float p2 = m2.data[i] * s2;
+      acc = p2 + acc;
+      c->vfs[vf15].vf.data[i] = m3.data[i] + acc;
+    }
+  }
+#endif
 
 
   //  lq_xyzw(c->vfs[vf20].vf, vis[vi11] + -128);

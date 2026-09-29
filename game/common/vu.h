@@ -1,5 +1,6 @@
 #pragma once
 #include <cfloat>
+#include <cstring>
 
 #include "common/common_types.h"
 #include "common/math/Vector.h"
@@ -29,14 +30,21 @@ enum class Mask {
 #define REALLY_INLINE __attribute__((always_inline))
 #elif __APPLE__
 #define REALLY_INLINE __attribute__((always_inline))
-#else
+#elif defined(_WIN32)
 #define REALLY_INLINE __forceinline
+#else
+// other GCC-compatible targets (e.g. devkitARM for the 3DS)
+#define REALLY_INLINE __attribute__((always_inline))
 #endif
 
 // note: must be aligned.
 static inline REALLY_INLINE void copy_vector(void* dest, const void* src) {
+#ifndef OPENGOAL_SCALAR_SIMD
   __m128 val = _mm_load_ps((const float*)src);
   _mm_store_ps((float*)dest, val);
+#else
+  memcpy(dest, src, 16);
+#endif
 }
 
 inline float vu_max(float a, float b) {
@@ -216,19 +224,43 @@ struct alignas(16) Vf {
   }
 
   REALLY_INLINE void max_xyzw(const Vf& a, const Vf& b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     _mm_store_ps(data, _mm_max_ps(_mm_load_ps(a.data), _mm_load_ps(b.data)));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = a.data[i] > b.data[i] ? a.data[i] : b.data[i];
+    }
+#endif
   }
 
   REALLY_INLINE void max_xyzw(const Vf& a, float b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     _mm_store_ps(data, _mm_max_ps(_mm_load_ps(a.data), _mm_set1_ps(b)));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = a.data[i] > b ? a.data[i] : b;
+    }
+#endif
   }
 
   REALLY_INLINE void mini_xyzw(const Vf& a, const Vf& b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     _mm_store_ps(data, _mm_min_ps(_mm_load_ps(a.data), _mm_load_ps(b.data)));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = a.data[i] < b.data[i] ? a.data[i] : b.data[i];
+    }
+#endif
   }
 
   REALLY_INLINE void mini_xyzw(const Vf& a, float b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     _mm_store_ps(data, _mm_min_ps(_mm_load_ps(a.data), _mm_set1_ps(b)));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = a.data[i] < b ? a.data[i] : b;
+    }
+#endif
   }
 
   void minii(Mask mask, const Vf& other, float I) {
@@ -286,7 +318,13 @@ struct alignas(16) Vf {
   }
 
   REALLY_INLINE void add_xyzw(const Vf& a, const Vf& b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     _mm_store_ps(data, _mm_add_ps(_mm_load_ps(a.data), _mm_load_ps(b.data)));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = a.data[i] + b.data[i];
+    }
+#endif
   }
 
   void add(Mask mask, const Vf& a, float b) {
@@ -340,11 +378,23 @@ struct alignas(16) Vf {
   }
 
   REALLY_INLINE void mul_xyzw(const Vf& a, const Vf& b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     _mm_store_ps(data, _mm_mul_ps(_mm_load_ps(a.data), _mm_load_ps(b.data)));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = a.data[i] * b.data[i];
+    }
+#endif
   }
 
   REALLY_INLINE void mul_xyzw(const Vf& a, float b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     _mm_store_ps(data, _mm_mul_ps(_mm_load_ps(a.data), _mm_set1_ps(b)));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = a.data[i] * b;
+    }
+#endif
   }
 
   void mul(Mask mask, const Vf& a, const Vf& b) {
@@ -491,17 +541,31 @@ struct alignas(16) Accumulator {
   }
 
   REALLY_INLINE void madda_xyzw(const Vf& _a, float _b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     auto b = _mm_set1_ps(_b);
     auto a = _mm_load_ps(_a.data);
     auto acc = _mm_load_ps(data);
     _mm_store_ps(data, _mm_add_ps(_mm_mul_ps(a, b), acc));
+#else
+    for (int i = 0; i < 4; i++) {
+      const float prod = _a.data[i] * _b;  // separate statement: no FMA contraction
+      data[i] = prod + data[i];
+    }
+#endif
   }
 
   REALLY_INLINE void madda_xyzw(const Vf& _a, const Vf& _b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     auto b = _mm_load_ps(_b.data);
     auto a = _mm_load_ps(_a.data);
     auto acc = _mm_load_ps(data);
     _mm_store_ps(data, _mm_add_ps(_mm_mul_ps(a, b), acc));
+#else
+    for (int i = 0; i < 4; i++) {
+      const float prod = _a.data[i] * _b.data[i];  // separate statement: no FMA contraction
+      data[i] = prod + data[i];
+    }
+#endif
   }
 
   void madd(Mask mask, Vf& dest, const Vf& a, const Vf& b) {
@@ -513,19 +577,33 @@ struct alignas(16) Accumulator {
   }
 
   REALLY_INLINE void madd_xyzw(Vf& dest, const Vf& _a, float _b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     auto b = _mm_set1_ps(_b);
     auto a = _mm_load_ps(_a.data);
     auto acc = _mm_load_ps(data);
     _mm_store_ps(dest.data, _mm_add_ps(_mm_mul_ps(a, b), acc));
+#else
+    for (int i = 0; i < 4; i++) {
+      const float prod = _a.data[i] * _b;  // separate statement: no FMA contraction
+      dest.data[i] = prod + data[i];
+    }
+#endif
   }
 
   REALLY_INLINE void madd_xyz(Vf& dest, const Vf& _a, float _b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     auto b = _mm_set1_ps(_b);
     auto a = _mm_load_ps(_a.data);
     auto acc = _mm_load_ps(data);
     auto prod = _mm_add_ps(_mm_mul_ps(a, b), acc);
     prod = _mm_blend_ps(prod, _mm_load_ps(dest.data), 0b1000);
     _mm_store_ps(dest.data, prod);
+#else
+    for (int i = 0; i < 3; i++) {
+      const float prod = _a.data[i] * _b;  // separate statement: no FMA contraction
+      dest.data[i] = prod + data[i];
+    }
+#endif
   }
 
   void madd(Mask mask, Vf& dest, const Vf& a, float b) {
@@ -585,15 +663,27 @@ struct alignas(16) Accumulator {
   }
 
   REALLY_INLINE void mula_xyzw(const Vf& _a, float _b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     auto b = _mm_set1_ps(_b);
     auto a = _mm_load_ps(_a.data);
     _mm_store_ps(data, _mm_mul_ps(a, b));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = _a.data[i] * _b;
+    }
+#endif
   }
 
   REALLY_INLINE void mula_xyzw(const Vf& _a, const Vf& _b) {
+#ifndef OPENGOAL_SCALAR_SIMD
     auto b = _mm_load_ps(_b.data);
     auto a = _mm_load_ps(_a.data);
     _mm_store_ps(data, _mm_mul_ps(a, b));
+#else
+    for (int i = 0; i < 4; i++) {
+      data[i] = _a.data[i] * _b.data[i];
+    }
+#endif
   }
 
   void opmula(const Vf& a, const Vf& b) {
