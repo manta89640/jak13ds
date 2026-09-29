@@ -19,3 +19,8 @@ target_link_libraries(type_searcher common decomp)
 add_executable(formatter
         formatter/main.cpp)
 target_link_libraries(formatter common tree-sitter)
+
+# (AI-assisted) .fr3 -> .c3l converter for the 3DS renderer (docs/3ds-port/c3l_format.md)
+add_executable(ctr_level_converter
+        ctr_level_converter/main.cpp)
+target_link_libraries(ctr_level_converter common)
