@@ -6,14 +6,7 @@
 #include "third-party/imgui/imgui.h"
 #include "third-party/imgui/imgui_stdlib.h"
 
-void to_json(json& j, const DebugTextFilter& obj) {
-  j = json{{"content", obj.content}, {"type", obj.type}};
-}
-
-void from_json(const json& j, DebugTextFilter& obj) {
-  j.at("content").get_to(obj.content);
-  j.at("type").get_to(obj.type);
-}
+// to_json / from_json for DebugTextFilter: filter_menu_json.cpp (no imgui dependency)
 
 // TODO:
 // - ability to remove individual filter

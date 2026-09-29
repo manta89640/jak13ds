@@ -5,7 +5,9 @@
 
 #include "gfx.h"
 
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <functional>
 #include <utility>
 
@@ -21,7 +23,13 @@
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/runtime.h"
+#include "pipelines/null.h"
+#ifdef __3DS__
+#include "platform/3ds/port/ctr_port.h"
+#endif
+#ifndef __3DS__
 #include "pipelines/opengl.h"
+#endif
 
 namespace Gfx {
 
@@ -36,7 +44,14 @@ const GfxRendererModule* GetRenderer(GfxPipeline pipeline) {
       lg::error("Requested invalid renderer", fmt::underlying(pipeline));
       return NULL;
     case GfxPipeline::OpenGL:
+#ifndef __3DS__
       return &gRendererOpenGL;
+#else
+      lg::error("OpenGL renderer is not available on this platform");
+      return NULL;
+#endif
+    case GfxPipeline::Null:
+      return &gRendererNull;
     default:
       lg::error("Requested unknown renderer {}", fmt::underlying(pipeline));
       return NULL;
@@ -45,6 +60,16 @@ const GfxRendererModule* GetRenderer(GfxPipeline pipeline) {
 
 void SetRenderer(GfxPipeline pipeline) {
   g_global_settings.renderer = GetRenderer(pipeline);
+}
+
+#ifdef __3DS__
+GfxPipeline g_preferred_pipeline = GfxPipeline::Null;
+#else
+GfxPipeline g_preferred_pipeline = GfxPipeline::OpenGL;
+#endif
+
+void SetPreferredPipeline(GfxPipeline pipeline) {
+  g_preferred_pipeline = pipeline;
 }
 
 const GfxRendererModule* GetCurrentRenderer() {
@@ -59,7 +84,11 @@ u32 Init(GameVersion version) {
   g_debug_settings.load_settings();
   {
     auto p = scoped_prof("startup::gfx::get_renderer");
-    g_global_settings.renderer = GetRenderer(GfxPipeline::OpenGL);
+    g_global_settings.renderer = GetRenderer(g_preferred_pipeline);
+  }
+  if (!GetCurrentRenderer()) {
+    lg::error("Gfx::Init error: no renderer");
+    return 1;
   }
 
   {
@@ -70,7 +99,9 @@ u32 Init(GameVersion version) {
     }
   }
 
-  if (g_main_thread_id != std::this_thread::get_id()) {
+  if (GetCurrentRenderer()->pipeline == GfxPipeline::Null) {
+    // no window
+  } else if (g_main_thread_id != std::this_thread::get_id()) {
     lg::error("Ran Gfx::Init outside main thread. Init display elsewhere?");
   } else {
     {
@@ -96,14 +127,28 @@ void Loop(std::function<bool()> f) {
     // check if we have a display
     if (Display::GetMainDisplay()) {
       Display::GetMainDisplay()->render();
+    } else {
+      // no window (null renderer): don't spin the main thread
+      std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
+#ifdef __3DS__
+    // APT (HOME menu, sleep, power button) must be serviced from the main thread
+    if (!ctr_main_loop()) {
+      lg::info("3DS: application close requested");
+      MasterExit = RuntimeExitStatus::EXIT;
+    }
+#endif
   }
 }
 
 u32 Exit() {
   lg::info("GFX Exit");
-  Display::KillMainDisplay();
-  GetCurrentRenderer()->exit();
+  if (Display::GetMainDisplay()) {
+    Display::KillMainDisplay();
+  }
+  if (GetCurrentRenderer()) {
+    GetCurrentRenderer()->exit();
+  }
   g_debug_settings.save_settings();
   return 0;
 }

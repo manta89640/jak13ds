@@ -19,6 +19,7 @@
 #include "common/versions/versions.h"
 
 #include "game/common/game_common_types.h"
+#include "graphics/gfx.h"
 #include "graphics/gfx_test.h"
 
 #include "third-party/CLI11.hpp"
@@ -95,6 +96,7 @@ int main(int argc, char** argv) {
   bool verbose_logging = false;
   bool disable_avx2 = false;
   bool disable_display = false;
+  bool null_gfx = false;
   bool enable_profiling = false;
   bool enable_portable = false;
   bool disable_save_location_override = false;
@@ -114,6 +116,8 @@ int main(int argc, char** argv) {
       "Specify port number for listener connection (default is 8112 for Jak 1 and 8113 for Jak 2)");
   app.add_flag("--no-avx2", disable_avx2, "Disable AVX2 for testing");
   app.add_flag("--no-display", disable_display, "Disable video display");
+  app.add_flag("--null-gfx", null_gfx,
+               "Use the null renderer: no window, but vsync is paced at 60 Hz (headless runs)");
   app.add_flag("--profile", enable_profiling, "Enables profiling immediately from startup");
   app.add_flag("--portable", enable_portable,
                "Save settings and saves relative to the game's executable, takes precedence over "
@@ -174,6 +178,9 @@ int main(int argc, char** argv) {
   // Create struct with all non-kmachine handled args to pass to the runtime
   GameLaunchOptions game_options;
   game_options.disable_display = disable_display;
+  if (null_gfx) {
+    Gfx::SetPreferredPipeline(GfxPipeline::Null);
+  }
   game_options.game_version = game_name_to_version(game_name);
   game_options.server_port =
       port_number == -1 ? DECI2_PORT - 1 + (int)game_options.game_version : port_number;

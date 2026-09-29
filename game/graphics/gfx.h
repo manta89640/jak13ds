@@ -25,7 +25,7 @@ struct GfxGlobalSettings;
 class GfxDisplay;
 
 // enum for rendering pipeline
-enum class GfxPipeline { Invalid = 0, OpenGL };
+enum class GfxPipeline { Invalid = 0, OpenGL, Null };
 
 // module for the different rendering pipelines
 struct GfxRendererModule {
@@ -118,6 +118,8 @@ extern GfxGlobalSettings g_global_settings;
 extern game_settings::DebugSettings g_debug_settings;
 
 const GfxRendererModule* GetCurrentRenderer();
+// Select the renderer used by the next Init(). Default: OpenGL (Null on the 3DS).
+void SetPreferredPipeline(GfxPipeline pipeline);
 
 u32 Init(GameVersion version);
 void Loop(std::function<bool()> f);
