@@ -11,10 +11,6 @@
 
 namespace jak1 {
 
-//! Bytes reserved after a main cpu-thread's backup stack for its saved context.
-//! Must match GOALC_THREAD_CTX_SIZE in goal_src/jak1/kernel/gkernel-h.gc.
-constexpr u32 GOALC_THREAD_CTX_SIZE = 192;
-
 //! Value of the thread pc field of a thread suspended in C mode.
 constexpr u32 GOALC_SUSPENDED_PC = 0xc0de5000;
 
@@ -35,5 +31,8 @@ u64 goalc_k_thread_resume(u64 thread);
 u64 goalc_k_reset_stack_and_call(u64 stack_top, u64 func, u64 a0, u64 a1, u64 a2, u64 a3);
 u64 goalc_k_catch(u64 allocation, u64 type, u64 name, u64 func, u64 param_block);
 u64 goalc_k_throw(u64 frame, u64 value);
+u64 goalc_k_thread_release(u64 thread);
+//! number of threads suspended right now (for tests and leak checks)
+u32 goalc_suspended_thread_count();
 
 }  // namespace jak1

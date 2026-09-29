@@ -140,9 +140,9 @@ struct FakeGoal {
 
   u32 make_process() { return alloc(128) + 4; }
 
-  //! a main cpu-thread, with room for the context after the backup stack.
+  //! a main cpu-thread
   u32 make_thread(u32 proc, u32 backup_size) {
-    u32 thread = alloc(128 + backup_size + jak1::GOALC_THREAD_CTX_SIZE) + 4;
+    u32 thread = alloc(128 + backup_size) + 4;
     w(thread + THREAD_PROCESS) = proc;
     w(thread + THREAD_STACK_TOP) = exec_stack_top;
     w(thread + THREAD_SP) = exec_stack_top;
@@ -246,6 +246,12 @@ u64 kernel_run_threads(void*) {
   for (int t = 0; t < kThreads; t++) {
     EXPECT_EQ(results[t], 100u + t);
   }
+  EXPECT_EQ(jak1::goalc_suspended_thread_count(), 0u);
+  return 0;
+}
+
+u64 kernel_resume_once(void*) {
+  EXPECT_EQ(jak1::goalc_k_thread_resume(g_threads[0]), 0u);
   return 0;
 }
 
@@ -272,6 +278,16 @@ TEST(GoalcKernel, SuspendResumeSharedStack) {
   u32 ksp = goal.w(goal.sym_kernel_sp);
   EXPECT_LT(ksp, goal.kernel_stack_top);
   EXPECT_GT(ksp, goal.kernel_stack_top - kStackSize);
+  // a thread thrown away while suspended (deactivate, set-to-run) releases its saved state
+  goal.set_to_run(g_threads[0], body, 0);
+  g_progress[0] = -1;
+  goalc_call_on_stack(goal.mem + goal.kernel_stack_top, kernel_resume_once, nullptr);
+  EXPECT_EQ(jak1::goalc_suspended_thread_count(), 1u);
+  jak1::goalc_k_thread_release(g_threads[0]);
+  EXPECT_EQ(jak1::goalc_suspended_thread_count(), 0u);
+  EXPECT_EQ(goal.w(g_threads[0] + THREAD_PC), 0u);
+  jak1::goalc_k_thread_release(g_threads[0]);  // twice is fine
+  EXPECT_EQ(jak1::goalc_suspended_thread_count(), 0u);
   g_goal = nullptr;
 }
 
