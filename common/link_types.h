@@ -16,6 +16,7 @@ enum LinkKind {
   LINK_PTR = 5,                       //! link a pointer within this segment
   LINK_ARM64_SYMBOL_MOV32 = 6,        //! symbol offset encoded in a movz/movk pair
   LINK_ARM64_OTHER_SEG_MOV32 = 7,     //! cross-segment address encoded in a movz/movk pair
+  LINK_C_MODULE = 8,                  //! function stubs of a module compiled to C (goal_c_abi.h)
 };
 
 /*!
