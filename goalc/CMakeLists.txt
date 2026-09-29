@@ -42,6 +42,8 @@ add_library(compiler
         compiler/Env.cpp
         compiler/Val.cpp
         compiler/IR.cpp
+        compiler/IR_C.cpp
+        compiler/CEmitter.cpp
         compiler/CompilerSettings.cpp
         compiler/CodeGenerator.cpp
         compiler/StaticObject.cpp

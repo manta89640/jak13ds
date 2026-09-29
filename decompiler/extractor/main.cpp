@@ -231,8 +231,12 @@ int main(int argc, char** argv) {
     instr_set = emitter::InstructionSet::X86;
   } else if (instr_set_name == "arm64") {
     instr_set = emitter::InstructionSet::ARM64;
+  } else if (instr_set_name == "c") {
+    // the C backend uses the ARM64 front end, see docs/3ds-port/c_backend.md
+    instr_set = emitter::InstructionSet::ARM64;
+    setenv("OPENGOAL_C_BACKEND", "1", 1);
   } else {
-    lg::error("Instruction set '{}' must be 'x86' or 'arm64'", instr_set_name);
+    lg::error("Instruction set '{}' must be 'x86', 'arm64' or 'c'", instr_set_name);
     return 1;
   }
 

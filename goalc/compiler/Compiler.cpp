@@ -53,6 +53,10 @@ Compiler::Compiler(GameVersion version,
       "INSTRUCTION_SET",
       m_goos.intern(m_instr_set == emitter::InstructionSet::ARM64 ? "arm64" : "x86"));
 
+  if (c_backend_from_env()) {
+    set_c_backend(true);
+  }
+
   // user profile stuff
   if (user_profile != "#f" && fs::exists(file_util::get_jak_project_dir() / "goal_src" / "user" /
                                          user_profile / "user.gc")) {
@@ -257,7 +261,60 @@ Val* Compiler::compile_error_guard(const goos::Object& code, Env* env) {
   }
 }
 
+bool Compiler::c_backend_from_env() {
+  const char* env = std::getenv("OPENGOAL_C_BACKEND");
+  return env && std::string(env) == "1";
+}
+
+void Compiler::set_c_backend(bool enable) {
+  if (enable && m_instr_set != emitter::InstructionSet::ARM64) {
+    throw std::runtime_error("The C backend uses the ARM64 front end");
+  }
+  m_c_backend = enable;
+  m_goos.set_global_variable_by_name(
+      "INSTRUCTION_SET",
+      m_goos.intern(enable ? "c" : (m_instr_set == emitter::InstructionSet::ARM64 ? "arm64"
+                                                                                  : "x86")));
+}
+
+void Compiler::build_c_module(const std::string& obj_name, const std::string& source, u64 hash) {
+  auto out_dir = file_util::get_jak_project_dir() / "out" / m_make.compiler_output_prefix();
+  // keep the source by object name, for static builds (3DS)
+  auto src_path = out_dir / "csrc" / (obj_name + ".c");
+  file_util::create_dir_if_needed_for_file(src_path);
+  file_util::write_text_file(src_path, source);
+
+  auto lib_path = out_dir / "cmod" / fmt::format("{:016x}.so", hash);
+  if (fs::exists(lib_path)) {
+    return;  // same hash, same code
+  }
+  file_util::create_dir_if_needed_for_file(lib_path);
+  auto tmp_src = out_dir / "cmod" / fmt::format("{:016x}.c", hash);
+  file_util::write_text_file(tmp_src, source);
+  auto proj = file_util::get_jak_project_dir();
+  const char* cc = std::getenv("OPENGOAL_C_BACKEND_CC");
+  std::string cmd = fmt::format(
+      "{} -std=gnu11 -O1 -fPIC -shared -fno-strict-aliasing -w -I\"{}\" -I\"{}\" {} -o \"{}\" "
+      "\"{}\"",
+      cc ? cc : "cc", (proj / "goalc" / "cbackend").string(),
+      (proj / "game" / "kernel" / "common").string(),
+#ifdef __APPLE__
+      "-undefined dynamic_lookup",
+#else
+      "",
+#endif
+      (lib_path.string() + ".tmp"), tmp_src.string());
+  if (std::system(cmd.c_str()) != 0) {
+    throw_compiler_error_no_code("C backend: failed to compile {} ({})", obj_name,
+                                 tmp_src.string());
+  }
+  fs::rename(lib_path.string() + ".tmp", lib_path);
+}
+
 void Compiler::color_object_file(FileEnv* env) {
+  if (m_c_backend) {
+    return;  // C code does not need register allocation
+  }
   int num_spills_in_file = 0;
   for (auto& f : env->functions()) {
     AllocationInput input;
@@ -317,9 +374,14 @@ std::vector<u8> Compiler::codegen_object_file(FileEnv* env) {
   try {
     auto debug_info = &m_debugger.get_debug_info_for_object(env->name());
     debug_info->clear();
-    CodeGenerator gen(env, debug_info, m_version, m_instr_set);
+    CodeGenerator gen(env, debug_info, m_version, m_instr_set, m_c_backend);
     bool ok = true;
     auto result = gen.run(&m_ts);
+    if (m_c_backend) {
+      build_c_module(env->name(), gen.c_source(), gen.c_hash());
+      env->cleanup_after_codegen();
+      return result;
+    }
     for (auto& f : env->functions()) {
       if (f->settings.print_asm) {
         lg::print("{}\n", debug_info->disassemble_function_by_name(f->name(), &ok, &m_goos.reader));
@@ -341,8 +403,13 @@ bool Compiler::codegen_and_disassemble_object_file(FileEnv* env,
                                                    bool omit_ir) {
   auto debug_info = &m_debugger.get_debug_info_for_object(env->name());
   debug_info->clear();
-  CodeGenerator gen(env, debug_info, m_version, m_instr_set);
+  CodeGenerator gen(env, debug_info, m_version, m_instr_set, m_c_backend);
   *data_out = gen.run(&m_ts);
+  if (m_c_backend) {
+    build_c_module(env->name(), gen.c_source(), gen.c_hash());
+    *asm_out = gen.c_source();
+    return true;
+  }
   bool ok = true;
   *asm_out = debug_info->disassemble_all_functions(&ok, &m_goos.reader, omit_ir);
   return ok;

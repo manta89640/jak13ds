@@ -103,6 +103,17 @@ class ObjectGenerator {
 
   InstructionSet instr_set() const { return m_instruction_set; }
 
+  // C backend: functions are 8-byte stubs described by a LINK_C_MODULE entry per segment.
+  void set_c_backend(bool enable) { m_c_backend = enable; }
+  bool c_backend() const { return m_c_backend; }
+  //! Segment offset of static data. Only valid after generate_data_v3.
+  int get_static_location(const StaticRecord& rec) const;
+  //! Segment offset of the first byte of a function (after the type tag). Only valid after
+  //! generate_data_v3.
+  int get_function_location(const FunctionRecord& rec) const;
+  //! Write the module hash into every LINK_C_MODULE entry of generated object data.
+  void patch_c_module_hash(ObjectFileData& data, u64 hash) const;
+
  private:
   void handle_temp_static_type_links(int seg);
   void handle_temp_jump_links(int seg);
@@ -118,6 +129,7 @@ class ObjectGenerator {
   void emit_link_symbol(int seg);
   void emit_link_rip(int seg);
   void emit_link_ptr(int seg);
+  void emit_link_c_module(int seg);
   std::vector<u8> generate_header_v3();
 
   template <typename T>
@@ -242,6 +254,9 @@ class ObjectGenerator {
   seg_vector<PointerLink> m_pointer_links_by_seg;
 
   std::vector<FunctionRecord> m_all_function_records;
+  bool m_c_backend = false;
+  //! location of the hash of each LINK_C_MODULE entry in the link table of that segment
+  std::array<int, N_SEG> m_c_module_hash_locations = {-1, -1, -1};
 
   ObjectGeneratorStats m_stats;
 };
