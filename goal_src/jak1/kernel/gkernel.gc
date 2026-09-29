@@ -183,8 +183,9 @@
   This should be done immediately after allocating the main-thread.
    Users can do this if they want a larger or smaller backup stack than the default."
   (#when (eq? INSTRUCTION_SET 'c)
-    ;; sizes in the game are for native frames.
-    (set! stack-size (* GOALC_STACK_SCALE stack-size)))
+    ;; sizes in the game are for native frames. Some processes ask for less than the default,
+    ;; which isn't enough for C frames, so don't go below the default.
+    (set! stack-size (max PROCESS_STACK_SAVE_SIZE (* GOALC_STACK_SCALE stack-size))))
   (let ((proc (-> this process)))
     (cond
       ((neq? this (-> proc main-thread))

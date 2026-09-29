@@ -23,8 +23,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #include "common/log/log.h"
+#include "common/symbols.h"
 #include "common/util/Assert.h"
 
 #include "game/kernel/common/goalc_runtime.h"
@@ -46,6 +48,7 @@ constexpr u32 CPU_THREAD_RREG = 40 - 4;
 constexpr u32 CPU_THREAD_STACK = 128 - 4;
 
 // process
+constexpr u32 PROCESS_NAME = 4 - 4;
 constexpr u32 PROCESS_STATUS = 36 - 4;
 constexpr u32 PROCESS_TOP_THREAD = 48 - 4;
 constexpr u32 PROCESS_STACK_FRAME_TOP = 92 - 4;
@@ -127,6 +130,21 @@ void set_kernel_sp() {
   if (g_syms.kernel_sp) {
     word(g_syms.kernel_sp) = (u32)goalc_get_sp();
   }
+}
+
+//! Name of a symbol or string, for error messages.
+std::string goal_name(u32 obj) {
+  if (!obj || (obj & 7) != 4) {
+    return fmt::format("#x{:x}", obj);
+  }
+  u32 type = word(obj - 4);
+  if (type == *(s7 + jak1_symbols::FIX_SYM_SYMBOL_TYPE)) {
+    return info(Ptr<Symbol>(obj))->str->data();
+  }
+  if (type == *(s7 + jak1_symbols::FIX_SYM_STRING_TYPE)) {
+    return Ptr<String>(obj)->data();
+  }
+  return fmt::format("#x{:x}", obj);
 }
 
 //! Where a main cpu-thread keeps its context while suspended.
@@ -227,8 +245,9 @@ u64 goalc_suspend_impl(goalc_ctx* caller_ctx) {
   u32 stack_top = word(thread + THREAD_STACK_TOP);
   u32 copy_size = stack_copy_size(stack_top, sp);
   if (used > stack_size || (s32)copy_size > stack_size) {
-    lg::error("goalc: thread-suspend with {} bytes of stack used, but the thread only has {}", used,
-              stack_size);
+    lg::error("goalc: thread-suspend of {} with {} bytes of stack used, but the thread only has {}",
+              goal_name(word(proc + PROCESS_NAME)), used, stack_size);
+    goalc_print_backtrace(caller_ctx);
     goalc_break();
     // continuing would overwrite the saved context and the heap.
     abort();
@@ -367,6 +386,19 @@ u64 goalc_k_throw(u64 frame_arg, u64 value) {
   }
   cc->value = value;
   goalc_ctx_restore(&cc->ctx, 1);
+}
+
+void goalc_kernel_set_symbols(u32 kernel_sp,
+                              u32 running,
+                              u32 suspended,
+                              u32 return_from_thread_dead,
+                              u32 set_to_run_bootstrap) {
+  g_kernel_frame = nullptr;
+  g_syms.kernel_sp = kernel_sp;
+  g_syms.running = running;
+  g_syms.suspended = suspended;
+  g_syms.return_from_thread_dead = return_from_thread_dead;
+  g_syms.set_to_run_bootstrap = set_to_run_bootstrap;
 }
 
 void goalc_kernel_init() {

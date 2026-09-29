@@ -493,3 +493,43 @@ u64 goalc_call_goal8(u32 f, const u64* args, u64 pp) {
   goalc_pp = saved_pp;
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Debugging
+// ---------------------------------------------------------------------------
+
+void goalc_print_backtrace(const goalc_ctx* ctx) {
+#if defined(__aarch64__)
+  uintptr_t fp = ctx->regs[10];
+  uintptr_t pc = ctx->regs[11];
+#elif defined(__x86_64__)
+  uintptr_t fp = ctx->regs[1];
+  uintptr_t pc = ctx->regs[7];
+#else
+  // ARM32 frame records aren't standardized, don't try.
+  uintptr_t fp = 0;
+  uintptr_t pc = 0;
+  (void)ctx;
+#endif
+  for (int depth = 0; depth < 64 && pc; depth++) {
+    std::string where = "?";
+#if GOALC_USE_DLOPEN
+    Dl_info info;
+    if (dladdr((void*)pc, &info) && info.dli_fname) {
+      where = fmt::format("{} +0x{:x} ({})", info.dli_fname, pc - (uintptr_t)info.dli_fbase,
+                          info.dli_sname ? info.dli_sname : "?");
+    }
+#endif
+    lg::error("  [{}] pc 0x{:x} sp/fp #x{:x}: {}", depth, pc, fp - (uintptr_t)goalc_mem, where);
+    if (!fp || fp < (uintptr_t)goalc_mem || fp >= (uintptr_t)goalc_mem + EE_MAIN_MEM_SIZE) {
+      break;
+    }
+    uintptr_t next_fp;
+    memcpy(&next_fp, (void*)fp, sizeof(uintptr_t));
+    memcpy(&pc, (void*)(fp + sizeof(uintptr_t)), sizeof(uintptr_t));
+    if (next_fp <= fp) {
+      break;
+    }
+    fp = next_fp;
+  }
+}
