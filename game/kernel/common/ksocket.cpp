@@ -35,10 +35,10 @@ u32 ReceiveToBuffer(char* buff) {
     protoBlock.last_receive_size = -1;
   } else {
     // not our protocol, something has gone wrong.
-    MsgErr("dkernel: got a bad packet to goal proto (goal #x%lx bytes %d %d %d %ld %d)\n",
-           (int64_t)protoBlock.receive_buffer, protoBlock.last_receive_size,
+    MsgErr("dkernel: got a bad packet to goal proto (goal #x%llx bytes %d %d %d %lld %d)\n",
+           (unsigned long long)(uintptr_t)protoBlock.receive_buffer, protoBlock.last_receive_size,
            u32(protoBlock.receive_buffer->msg_kind), protoBlock.receive_buffer->u6,
-           protoBlock.receive_buffer->msg_id, msg_size);
+           (long long)protoBlock.receive_buffer->msg_id, (int)msg_size);
     protoBlock.last_receive_size = -1;
     return -1;
   }

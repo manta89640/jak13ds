@@ -17,6 +17,7 @@
 #include "game/kernel/common/kmemcard.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
+#include "game/kernel/common/memory_layout.h"
 #include "game/kernel/jak1/fileio.h"
 #include "game/kernel/jak1/goalc_kernel.h"
 #include "game/kernel/jak1/kdgo.h"
@@ -266,6 +267,7 @@ u64 make_string_from_c(const char* c_str) {
   return mem;
 }
 
+#if GOALC_HAS_NATIVE_BACKEND
 extern "C" {
 #ifndef __aarch64__
 #ifdef __APPLE__
@@ -513,6 +515,8 @@ Ptr<Function> make_stack_arg_function_from_c_win32(void* func) {
 }
 #endif
 
+#endif  // GOALC_HAS_NATIVE_BACKEND
+
 /*!
  * C backend: create a GOAL function object whose stub refers to function id `id`.
  */
@@ -530,13 +534,22 @@ Ptr<Function> make_goalc_function(u32 id) {
  *
  * The implementation is to create a simple trampoline function which jumps to the C function.
  */
-Ptr<Function> make_function_from_c(void* func, bool arg3_is_pp = false) {
+Ptr<Function> make_function_from_c(KernelFunction kfunc, bool arg3_is_pp = false) {
   if (goalc_enabled()) {
-    return make_goalc_function(arg3_is_pp
-                                   ? goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, func, 0)
-                                   : goalc_fn_id_for_host(func));
+    // see kernel_function.h
+    if (kfunc.adapter) {
+      return make_goalc_function(
+          goalc_fn_id_for_adapted(kfunc.adapter, kfunc.ptr, arg3_is_pp ? 1 : 0));
+    }
+    return make_goalc_function(
+        arg3_is_pp ? goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, kfunc.ptr, 0)
+                   : goalc_fn_id_for_host(kfunc.ptr));
   }
-#ifdef __linux__
+  [[maybe_unused]] void* func = kfunc.ptr;
+#if !GOALC_HAS_NATIVE_BACKEND
+  ASSERT_NOT_REACHED_MSG("no native GOAL backend on this host");
+  return Ptr<Function>(0);
+#elif defined(__linux__)
   return make_function_from_c_systemv(func, arg3_is_pp);
 #elif __APPLE__
   return make_function_from_c_systemv(func, arg3_is_pp);
@@ -545,11 +558,16 @@ Ptr<Function> make_function_from_c(void* func, bool arg3_is_pp = false) {
 #endif
 }
 
-Ptr<Function> make_stack_arg_function_from_c(void* func) {
+Ptr<Function> make_stack_arg_function_from_c(KernelFunction kfunc) {
   if (goalc_enabled()) {
-    return make_goalc_function(goalc_fn_id_for_adapted(goalc_adapter_stack_args, func, 0));
+    ASSERT_MSG(kfunc.stack_adapter, "stack argument functions must take a single pointer");
+    return make_goalc_function(goalc_fn_id_for_adapted(kfunc.stack_adapter, kfunc.ptr, 0));
   }
-#ifdef __linux__
+  [[maybe_unused]] void* func = kfunc.ptr;
+#if !GOALC_HAS_NATIVE_BACKEND
+  ASSERT_NOT_REACHED_MSG("no native GOAL backend on this host");
+  return Ptr<Function>(0);
+#elif defined(__linux__)
   return make_stack_arg_function_from_c_systemv(func);
 #elif __APPLE__
   return make_stack_arg_function_from_c_systemv(func);
@@ -596,7 +614,7 @@ Ptr<Function> make_zero_func() {
  * This work on both Linux and Windows, but only supports up to 6 arguments on linux and 4 args on
  * windows.
  */
-Ptr<Function> make_function_symbol_from_c(const char* name, void* f) {
+Ptr<Function> make_function_symbol_from_c(const char* name, KernelFunction f) {
   auto sym = intern_from_c(name);
   auto func = make_function_from_c(f);
   sym->value = func.offset;
@@ -607,7 +625,7 @@ Ptr<Function> make_function_symbol_from_c(const char* name, void* f) {
  * Like make_function_symbol_from_c, but all 8 GOAL arguments are put into an array on the stack.
  * The address of this array is passed as the first and only argument to f.
  */
-Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name, void* f) {
+Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name, KernelFunction f) {
   auto sym = intern_from_c(name);
   auto func = make_stack_arg_function_from_c(f);
   sym->value = func.offset;
@@ -1029,7 +1047,7 @@ u64 method_set(u32 type_, u32 method_id, u32 method) {
     auto sym = s7.offset;
     for (; sym < LastSymbol.offset; sym += 8) {
       auto symValue = *Ptr<u32>(sym);
-      if ((symValue < SymbolTable2.offset || 0x7ffffff < symValue) &&  // not in normal memory
+      if ((symValue < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < symValue) &&  // not in normal memory
           (symValue < 0x84000 || 0x100000 <= symValue)) {              // not in kernel memory
         continue;
       }
@@ -1070,7 +1088,7 @@ u64 method_set(u32 type_, u32 method_id, u32 method) {
     sym = SymbolTable2.offset;
     for (; sym < s7.offset; sym += 8) {
       auto symValue = *Ptr<u32>(sym);
-      if ((symValue < SymbolTable2.offset || 0x7ffffff < symValue) &&  // not in normal memory
+      if ((symValue < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < symValue) &&  // not in normal memory
           (symValue < 0x84000 || 0x100000 <= symValue)) {              // not in kernel memory
         continue;
       }
@@ -1115,7 +1133,7 @@ u64 method_set(u32 type_, u32 method_id, u32 method) {
  * Call a GOAL method of a given type.
  */
 u64 call_method_of_type(u64 arg, Ptr<Type> type, u32 method_id) {
-  if (((type.offset < SymbolTable2.offset || 0x7ffffff < type.offset) &&  // not in normal memory
+  if (((type.offset < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < type.offset) &&  // not in normal memory
        (type.offset < 0x84000 || 0x100000 <= type.offset))                // not in kernel memory
       || ((type.offset & OFFSET_MASK) != BASIC_OFFSET)) {                 // invalid type
     cprintf("#<#%x has invalid type ptr #x%x>\n", (u32)arg, type.offset);
@@ -1144,7 +1162,7 @@ u64 call_goal_function_by_name(const char* name) {
  * Like call_method_of_type, but has two arguments. Used to "relocate" v2/s4 loads.
  */
 u64 call_method_of_type_arg2(u32 arg, Ptr<Type> type, u32 method_id, u32 a1, u32 a2) {
-  if (((type.offset < SymbolTable2.offset || 0x7ffffff < type.offset) &&  // not in normal memory
+  if (((type.offset < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < type.offset) &&  // not in normal memory
        (type.offset < 0x84000 || 0x100000 <= type.offset))                // not in kernel memory
       || ((type.offset & OFFSET_MASK) != BASIC_OFFSET)) {                 // invalid type
     cprintf("#<#%x has invalid type ptr #x%x>\n", arg, type.offset);
@@ -1183,7 +1201,7 @@ u64 print_object(u32 obj) {
   if ((obj & OFFSET_MASK) == BINTEGER_OFFSET) {
     return print_binteger(s64(s32(obj)));
   } else {
-    if ((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+    if ((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
         (obj < 0x84000 || 0x100000 <= obj)) {              // not in kernel memory
       cprintf("#<invalid object #x%x>", obj);
     } else if ((obj & OFFSET_MASK) == PAIR_OFFSET) {
@@ -1202,7 +1220,7 @@ u64 print_object(u32 obj) {
  * Confirms basic is valid and prints the type name.
  */
 u64 print_basic(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET)) {
     cprintf("#<invalid basic #x%x>", obj);
@@ -1251,7 +1269,7 @@ u64 print_pair(u32 obj) {
  * Print method for symbol.  Just prints the name without quotes or anything fancy.
  */
 u64 print_symbol(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != *(s7 + FIX_SYM_SYMBOL_TYPE)) {
@@ -1267,7 +1285,7 @@ u64 print_symbol(u32 obj) {
  * Print method for type.  Just prints the name without quotes
  */
 u64 print_type(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) || *Ptr<u32>(obj - 4) != *(s7 + FIX_SYM_TYPE_TYPE)) {
     cprintf("#<invalid type #x%x>", obj);
@@ -1281,7 +1299,7 @@ u64 print_type(u32 obj) {
  * Print method for string.  Prints the string in quotes.
  */
 u64 print_string(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != *(s7 + FIX_SYM_STRING_TYPE)) {
@@ -1343,7 +1361,7 @@ u64 inspect_object(u32 obj) {
   if ((obj & OFFSET_MASK) == BINTEGER_OFFSET) {
     return inspect_binteger(obj);
   } else {
-    if ((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+    if ((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
         (obj < 0x84000 || 0x100000 <= obj)) {              // not in kernel memory
       cprintf("#<invalid object #x%x>", obj);
     } else if ((obj & OFFSET_MASK) == PAIR_OFFSET) {
@@ -1373,7 +1391,7 @@ u64 inspect_pair(u32 obj) {
  * This typo is fixed in later games.
  */
 u64 inspect_string(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != *(s7 + FIX_SYM_STRING_TYPE)) {
@@ -1389,7 +1407,7 @@ u64 inspect_string(u32 obj) {
  * Inspect a symbol.
  */
 u64 inspect_symbol(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != *(s7 + FIX_SYM_SYMBOL_TYPE)) {
@@ -1408,7 +1426,7 @@ u64 inspect_symbol(u32 obj) {
  * Inspect a type.
  */
 u64 inspect_type(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) || *Ptr<u32>(obj - 4) != *(s7 + FIX_SYM_TYPE_TYPE)) {
     cprintf("#<invalid type #x%x>\n", obj);
@@ -1434,7 +1452,7 @@ u64 inspect_type(u32 obj) {
  * We just use print_object.
  */
 u64 inspect_basic(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET)) {
     cprintf("#<invalid basic #x%x>\n", obj);
@@ -1526,12 +1544,12 @@ s32 InitHeapAndSymbol() {
   set_fixed_symbol(FIX_SYM_NOTHING_FUNC, "nothing", make_nothing_func().offset);
   set_fixed_symbol(FIX_SYM_ZERO_FUNC, "zero-func", make_zero_func().offset);
   set_fixed_symbol(FIX_SYM_ASIZE_OF_BASIC_FUNC, "asize-of-basic-func",
-                   make_function_from_c((void*)asize_of_basic).offset);
+                   make_function_from_c(asize_of_basic).offset);
   // NOTE: this is a typo in the game too.
   set_fixed_symbol(FIX_SYM_COPY_BASIC_FUNC, "asize-of-basic-func",
-                   make_function_from_c((void*)copy_basic, true).offset);
+                   make_function_from_c(copy_basic, true).offset);
   set_fixed_symbol(FIX_SYM_DEL_BASIC_FUNC, "delete-basic",
-                   make_function_from_c((void*)delete_basic).offset);
+                   make_function_from_c(delete_basic).offset);
 
   // heap symbols
   set_fixed_symbol(FIX_SYM_GLOBAL_HEAP, "global", kglobalheap.offset);
@@ -1554,37 +1572,37 @@ s32 InitHeapAndSymbol() {
   set_fixed_symbol(FIX_SYM_TOP_LEVEL, "top-level", *(s7 + FIX_SYM_NOTHING_FUNC));
 
   // OBJECT type
-  auto new_illegal_func = make_function_from_c((void*)new_illegal);
-  auto delete_illegal_func = make_function_from_c((void*)delete_illegal);
-  auto print_object_func = make_function_from_c((void*)print_object);
-  auto inspect_object_func = make_function_from_c((void*)inspect_object);
+  auto new_illegal_func = make_function_from_c(new_illegal);
+  auto delete_illegal_func = make_function_from_c(delete_illegal);
+  auto print_object_func = make_function_from_c(print_object);
+  auto inspect_object_func = make_function_from_c(inspect_object);
   set_fixed_type(FIX_SYM_OBJECT_TYPE, "object", (s7 + FIX_SYM_OBJECT_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 4), print_object_func.offset, inspect_object_func.offset);
   auto object_type = Ptr<Type>(*(s7 + FIX_SYM_OBJECT_TYPE));
   object_type->new_method = new_illegal_func;
   object_type->delete_method = delete_illegal_func;
   object_type->asize_of_method.offset = *(s7 + FIX_SYM_ZERO_FUNC);
-  auto copy_fixed_function = make_function_from_c((void*)copy_fixed);
+  auto copy_fixed_function = make_function_from_c(copy_fixed);
   object_type->copy_method = copy_fixed_function;
 
   // STRUCTURE type
-  auto print_structure_func = make_function_from_c((void*)print_structure);
-  auto inspect_structure_func = make_function_from_c((void*)inspect_structure);
+  auto print_structure_func = make_function_from_c(print_structure);
+  auto inspect_structure_func = make_function_from_c(inspect_structure);
   set_fixed_type(FIX_SYM_STRUCTURE_TYPE, "structure", (s7 + FIX_SYM_OBJECT_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 4), print_structure_func.offset,
                  inspect_structure_func.offset);
-  auto new_structure_func = make_function_from_c((void*)new_structure);
-  auto delete_structure_func = make_function_from_c((void*)delete_structure);
+  auto new_structure_func = make_function_from_c(new_structure);
+  auto delete_structure_func = make_function_from_c(delete_structure);
   auto structureType = Ptr<Type>(*(s7 + FIX_SYM_STRUCTURE_TYPE));
   structureType->new_method = new_structure_func;
   structureType->delete_method = delete_structure_func;
 
   // BASIC type
-  auto print_basic_func = make_function_from_c((void*)print_basic);
-  auto inspect_basic_function = make_function_from_c((void*)inspect_basic);
+  auto print_basic_func = make_function_from_c(print_basic);
+  auto inspect_basic_function = make_function_from_c(inspect_basic);
   set_fixed_type(FIX_SYM_BASIC_TYPE, "basic", (s7 + FIX_SYM_STRUCTURE_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 4), print_basic_func.offset, inspect_basic_function.offset);
-  auto new_basic_func = make_function_from_c((void*)new_basic, true);
+  auto new_basic_func = make_function_from_c(new_basic, true);
   auto basicType = Ptr<Type>(*(s7 + FIX_SYM_BASIC_TYPE));
   basicType->new_method = new_basic_func;
   basicType->delete_method.offset = *(s7 + FIX_SYM_DEL_BASIC_FUNC);
@@ -1592,8 +1610,8 @@ s32 InitHeapAndSymbol() {
   basicType->copy_method.offset = *(s7 + FIX_SYM_COPY_BASIC_FUNC);
 
   // SYMBOL type
-  auto print_symbol_func = make_function_from_c((void*)print_symbol);
-  auto inspect_symbol_func = make_function_from_c((void*)inspect_symbol);
+  auto print_symbol_func = make_function_from_c(print_symbol);
+  auto inspect_symbol_func = make_function_from_c(inspect_symbol);
   set_fixed_type(FIX_SYM_SYMBOL_TYPE, "symbol", (s7 + FIX_SYM_BASIC_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 8), print_symbol_func.offset, inspect_symbol_func.offset);
   auto symbolType = Ptr<Type>(*(s7 + FIX_SYM_SYMBOL_TYPE));
@@ -1601,35 +1619,35 @@ s32 InitHeapAndSymbol() {
   symbolType->delete_method = delete_illegal_func;
 
   // TYPE type
-  auto print_type_func = make_function_from_c((void*)print_type);
-  auto inspect_type_func = make_function_from_c((void*)inspect_type);
+  auto print_type_func = make_function_from_c(print_type);
+  auto inspect_type_func = make_function_from_c(inspect_type);
   set_fixed_type(FIX_SYM_TYPE_TYPE, "type", (s7 + FIX_SYM_BASIC_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 0x38), print_type_func.offset, inspect_type_func.offset);
   auto typeType = Ptr<Type>(*(s7 + FIX_SYM_TYPE_TYPE));
-  auto new_type_func = make_function_from_c((void*)new_type);
+  auto new_type_func = make_function_from_c(new_type);
   typeType->new_method = new_type_func;
   typeType->delete_method = delete_illegal_func;
 
   // STRING type
-  auto print_string_func = make_function_from_c((void*)print_string);
-  auto inspect_string_func = make_function_from_c((void*)inspect_string);
+  auto print_string_func = make_function_from_c(print_string);
+  auto inspect_string_func = make_function_from_c(inspect_string);
   set_fixed_type(FIX_SYM_STRING_TYPE, "string", (s7 + FIX_SYM_BASIC_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 8), print_string_func.offset, inspect_string_func.offset);
 
   // FUNCTION type
-  auto print_function_func = make_function_from_c((void*)print_function);
+  auto print_function_func = make_function_from_c(print_function);
   set_fixed_type(FIX_SYM_FUNCTION_TYPE, "function", (s7 + FIX_SYM_BASIC_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 4), print_function_func.offset, 0);
 
   // VU FUNCTION type
-  auto print_vu_function_func = make_function_from_c((void*)print_vu_function);
-  auto inspect_vu_function_func = make_function_from_c((void*)inspect_vu_function);
+  auto print_vu_function_func = make_function_from_c(print_vu_function);
+  auto inspect_vu_function_func = make_function_from_c(inspect_vu_function);
   set_fixed_type(FIX_SYM_VU_FUNCTION_TYPE, "vu-function",
                  (s7 + FIX_SYM_STRUCTURE_TYPE).cast<Symbol>(), pack_type_flag(9, 0, 0x10),
                  print_vu_function_func.offset, inspect_vu_function_func.offset);
 
   // LINK BLOCK type
-  auto inspect_link_block_func = make_function_from_c((void*)inspect_link_block);
+  auto inspect_link_block_func = make_function_from_c(inspect_link_block);
   set_fixed_type(FIX_SYM_LINK_BLOCK, "link-block", (s7 + FIX_SYM_BASIC_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 0xc), 0, inspect_link_block_func.offset);
   auto linkBlockType = Ptr<Type>(*(s7 + FIX_SYM_LINK_BLOCK));
@@ -1637,7 +1655,7 @@ s32 InitHeapAndSymbol() {
   linkBlockType->delete_method = delete_illegal_func;
 
   // KHEAP
-  auto inspect_kheap_func = make_function_from_c((void*)inspect_kheap);
+  auto inspect_kheap_func = make_function_from_c(inspect_kheap);
   set_fixed_type(FIX_SYM_KHEAP, "kheap", (s7 + FIX_SYM_STRUCTURE_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 0x10), 0, inspect_kheap_func.offset);
 
@@ -1646,13 +1664,13 @@ s32 InitHeapAndSymbol() {
                  pack_type_flag(9, 0, 0x10), 0, 0);
 
   // PAIR
-  auto print_pair_func = make_function_from_c((void*)print_pair);
-  auto inspect_pair_func = make_function_from_c((void*)inspect_pair);
+  auto print_pair_func = make_function_from_c(print_pair);
+  auto inspect_pair_func = make_function_from_c(inspect_pair);
   set_fixed_type(FIX_SYM_PAIR_TYPE, "pair", (s7 + FIX_SYM_OBJECT_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 8), print_pair_func.offset, inspect_pair_func.offset);
   auto pairType = Ptr<Type>(*(s7 + FIX_SYM_PAIR_TYPE));
-  auto new_pair_func = make_function_from_c((void*)new_pair);
-  auto delete_pair_func = make_function_from_c((void*)delete_pair);
+  auto new_pair_func = make_function_from_c(new_pair);
+  auto delete_pair_func = make_function_from_c(delete_pair);
   pairType->new_method = new_pair_func;
   pairType->delete_method = delete_pair_func;
 
@@ -1675,21 +1693,21 @@ s32 InitHeapAndSymbol() {
                  pack_type_flag(9, 0, 4), 0, 0);
 
   // NUMERIC TYPES
-  auto print_integer_func = make_function_from_c((void*)print_integer);
-  auto inspect_integer_func = make_function_from_c((void*)inspect_integer);
+  auto print_integer_func = make_function_from_c(print_integer);
+  auto inspect_integer_func = make_function_from_c(inspect_integer);
   set_fixed_type(FIX_SYM_NUMBER_TYPE, "number", (s7 + FIX_SYM_OBJECT_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 8), print_integer_func.offset, inspect_integer_func.offset);
 
-  auto print_float_func = make_function_from_c((void*)print_float);
-  auto inspect_float_func = make_function_from_c((void*)inspect_float);
+  auto print_float_func = make_function_from_c(print_float);
+  auto inspect_float_func = make_function_from_c(inspect_float);
   set_fixed_type(FIX_SYM_FLOAT_TYPE, "float", (s7 + FIX_SYM_NUMBER_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 4), print_float_func.offset, inspect_float_func.offset);
 
   set_fixed_type(FIX_SYM_INTEGER_TYPE, "integer", (s7 + FIX_SYM_NUMBER_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 8), 0, 0);
 
-  auto print_binteger_func = make_function_from_c((void*)print_binteger);
-  auto inspect_binteger_func = make_function_from_c((void*)inspect_binteger);
+  auto print_binteger_func = make_function_from_c(print_binteger);
+  auto inspect_binteger_func = make_function_from_c(inspect_binteger);
   set_fixed_type(FIX_SYM_BINTEGER_TYPE, "binteger", (s7 + FIX_SYM_INTEGER_TYPE).cast<Symbol>(),
                  pack_type_flag(9, 0, 8), print_binteger_func.offset, inspect_binteger_func.offset);
 
@@ -1720,31 +1738,31 @@ s32 InitHeapAndSymbol() {
                  pack_type_flag(9, 0, 0x10), 0, 0);
 
   // Object new macro
-  auto goal_new_object_func = make_function_from_c((void*)alloc_heap_object, true);
+  auto goal_new_object_func = make_function_from_c(alloc_heap_object, true);
   object_type->new_method = goal_new_object_func;
 
   // Stuff that isn't in a fixed spot:
-  make_function_symbol_from_c("string->symbol", (void*)intern);
-  make_function_symbol_from_c("print", (void*)sprint);
-  make_function_symbol_from_c("inspect", (void*)inspect_object);
+  make_function_symbol_from_c("string->symbol", intern);
+  make_function_symbol_from_c("print", sprint);
+  make_function_symbol_from_c("inspect", inspect_object);
 
   // loads
-  make_function_symbol_from_c("load", (void*)load);
-  make_function_symbol_from_c("loado", (void*)loado);
-  make_function_symbol_from_c("unload", (void*)unload);
-  make_stack_arg_function_symbol_from_c("_format", (void*)format_impl_jak1);
+  make_function_symbol_from_c("load", load);
+  make_function_symbol_from_c("loado", loado);
+  make_function_symbol_from_c("unload", unload);
+  make_stack_arg_function_symbol_from_c("_format", format_impl_jak1);
 
   // allocations
-  make_function_symbol_from_c("malloc", (void*)alloc_heap_memory);
-  make_function_symbol_from_c("kmalloc", (void*)goal_malloc);
-  make_function_symbol_from_c("new-dynamic-structure", (void*)new_dynamic_structure);
+  make_function_symbol_from_c("malloc", alloc_heap_memory);
+  make_function_symbol_from_c("kmalloc", goal_malloc);
+  make_function_symbol_from_c("new-dynamic-structure", new_dynamic_structure);
 
   // type system
-  make_function_symbol_from_c("method-set!", (void*)method_set);
+  make_function_symbol_from_c("method-set!", method_set);
 
   // dgo
-  make_stack_arg_function_symbol_from_c("link", (void*)link_and_exec_wrapper);
-  make_function_symbol_from_c("dgo-load", (void*)load_and_link_dgo);
+  make_stack_arg_function_symbol_from_c("link", link_and_exec_wrapper);
+  make_function_symbol_from_c("dgo-load", load_and_link_dgo);
 
   // forward declare
   make_raw_function_symbol_from_c("ultimate-memcpy", 0);
@@ -1753,18 +1771,18 @@ s32 InitHeapAndSymbol() {
   make_raw_function_symbol_from_c("symlink3", 0);
 
   // game stuff
-  make_stack_arg_function_symbol_from_c("link-begin", (void*)link_begin);
-  make_function_symbol_from_c("link-resume", (void*)link_resume);
-  make_function_symbol_from_c("mc-run", (void*)MC_run);
-  make_function_symbol_from_c("mc-format", (void*)MC_format);
-  make_function_symbol_from_c("mc-unformat", (void*)MC_unformat);
-  make_function_symbol_from_c("mc-create-file", (void*)MC_createfile);
-  make_function_symbol_from_c("mc-save", (void*)MC_save);
-  make_function_symbol_from_c("mc-load", (void*)MC_load);
-  make_function_symbol_from_c("mc-check-result", (void*)MC_check_result);
-  make_function_symbol_from_c("mc-get-slot-info", (void*)MC_get_status);
-  make_function_symbol_from_c("mc-makefile", (void*)MC_makefile);
-  make_function_symbol_from_c("kset-language", (void*)MC_set_language);
+  make_stack_arg_function_symbol_from_c("link-begin", link_begin);
+  make_function_symbol_from_c("link-resume", link_resume);
+  make_function_symbol_from_c("mc-run", MC_run);
+  make_function_symbol_from_c("mc-format", MC_format);
+  make_function_symbol_from_c("mc-unformat", MC_unformat);
+  make_function_symbol_from_c("mc-create-file", MC_createfile);
+  make_function_symbol_from_c("mc-save", MC_save);
+  make_function_symbol_from_c("mc-load", MC_load);
+  make_function_symbol_from_c("mc-check-result", MC_check_result);
+  make_function_symbol_from_c("mc-get-slot-info", MC_get_status);
+  make_function_symbol_from_c("mc-makefile", MC_makefile);
+  make_function_symbol_from_c("kset-language", MC_set_language);
 
   // set *debug-segment*
   auto ds_symbol = intern_from_c("*debug-segment*");
@@ -1801,6 +1819,18 @@ s32 InitHeapAndSymbol() {
                              0x400000, true);
     method_set_symbol->value--;
 
+    // check that the kernel was compiled for our memory layout (see memory_layout.h)
+    bool goal_small_memory =
+        intern_from_c("*goal-small-memory*")->value == (s7 + FIX_SYM_TRUE).offset;
+    if (goal_small_memory != (bool)OPENGOAL_SMALL_MEMORY) {
+      lg::die(
+          "The GOAL code was compiled for {} memory, but this runtime uses {} memory. Build the "
+          "GOAL code with OPENGOAL_SMALL_MEMORY={} in the environment.",
+          goal_small_memory ? "small" : "big", OPENGOAL_SMALL_MEMORY ? "small" : "big",
+          OPENGOAL_SMALL_MEMORY);
+      return -1;
+    }
+
     // check the kernel version!
     auto kernel_version = intern_from_c("*kernel-version*")->value;
     if (!kernel_version || ((kernel_version >> 0x13) != KERNEL_VERSION_MAJOR)) {
@@ -1826,7 +1856,7 @@ s32 InitHeapAndSymbol() {
   jak1::InitMachineScheme();
 
   // testing stuff:
-  make_function_symbol_from_c("test-function", (void*)test_function);
+  make_function_symbol_from_c("test-function", test_function);
 
   return 0;
 }

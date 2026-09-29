@@ -286,7 +286,7 @@ u64 copy_structure(u32 it, u32 unknown) {
  */
 u64 inspect_integer(u64 obj) {
   // and now we're using cprintf. Why doesn't print do this?
-  cprintf("[%16lx] fixnum %ld\n", obj, obj);
+  cprintf("[%16llx] fixnum %lld\n", (unsigned long long)obj, (long long)obj);
   return obj;
 }
 
@@ -294,7 +294,7 @@ u64 inspect_integer(u64 obj) {
  * Inspect a boxed integer (works correctly on 64-integers)
  */
 u64 inspect_binteger(u64 obj) {
-  cprintf("[%16lx] boxed-fixnum %ld\n", obj, s64(obj) >> 3);
+  cprintf("[%16llx] boxed-fixnum %lld\n", (unsigned long long)obj, (long long)(s64(obj) >> 3));
   return obj;
 }
 

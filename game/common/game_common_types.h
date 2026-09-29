@@ -3,6 +3,16 @@
 #include "common/listener_common.h"
 #include "common/versions/versions.h"
 
+//! When set, the runtime only contains Jak 1 (the 3DS build). Code for the other games in
+//! runtime.cpp and mips2c_table.cpp is compiled out.
+#if !defined(OPENGOAL_ONLY_JAK1)
+#if defined(__3DS__)
+#define OPENGOAL_ONLY_JAK1 1
+#else
+#define OPENGOAL_ONLY_JAK1 0
+#endif
+#endif
+
 //! Supported languages.
 enum class Language {
   English = 0,

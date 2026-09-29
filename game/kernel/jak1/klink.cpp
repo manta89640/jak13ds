@@ -587,7 +587,7 @@ void link_control::jak1_finish(bool jump_from_c_to_goal) {
     // execute top level!
     if (m_entry.offset && (m_flags & LINK_FLAG_EXECUTE)) {
       if (jump_from_c_to_goal) {
-        u64 goal_stack = u64(g_ee_main_mem) + EE_MAIN_MEM_SIZE - GOAL_STACK_TOP_OFFSET;
+        u64 goal_stack = u64(g_ee_main_mem) + GOAL_KERNEL_STACK_TOP - GOAL_STACK_TOP_OFFSET;
         call_goal_on_stack(m_entry.cast<Function>(), goal_stack, s7.offset, g_ee_main_mem);
       } else {
         call_goal(m_entry.cast<Function>(), 0, 0, 0, s7.offset, g_ee_main_mem);

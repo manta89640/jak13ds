@@ -21,6 +21,7 @@
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/common/ksocket.h"
+#include "game/kernel/common/memory_layout.h"
 #include "game/kernel/jak1/klisten.h"
 #include "game/kernel/jak1/kmachine.h"
 #include "game/sce/libscf.h"
@@ -106,7 +107,7 @@ s32 goal_main(int argc, const char* const* argv) {
  * Main loop to dispatch the GOAL kernel.
  */
 void KernelCheckAndDispatch() {
-  u64 goal_stack = u64(g_ee_main_mem) + EE_MAIN_MEM_SIZE - GOAL_STACK_TOP_OFFSET;
+  u64 goal_stack = u64(g_ee_main_mem) + GOAL_KERNEL_STACK_TOP - GOAL_STACK_TOP_OFFSET;
 
   while (MasterExit == RuntimeExitStatus::RUNNING) {
     // try to get a message from the listener, and process it if needed
@@ -130,11 +131,7 @@ void KernelCheckAndDispatch() {
       if (ListenerFunction->value != s7.offset) {
         auto result = call_goal_on_stack(Ptr<Function>(ListenerFunction->value), goal_stack,
                                          s7.offset, g_ee_main_mem);
-#ifdef __linux__
-        cprintf("%ld\n", result);
-#else
-        cprintf("%lld\n", result);
-#endif
+        cprintf("%lld\n", (long long)result);
         ListenerFunction->value = s7.offset;
       }
     }

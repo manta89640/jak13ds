@@ -196,9 +196,27 @@ Design:
   and `(mi) (lt) (lg) (test-play)` from the REPL. Tested: title screen, village1, Jak in
   target-stance, dying and respawning.
 
+### Typed kernel functions (ARM32)
+
+GOAL calls every function as `u64 f(u64 x8)`. On ARM32, a C function with `u32`/`s32`
+parameters, `float` parameters (hard-float: in VFP registers) or a 32-bit return can't be called
+that way. `game/kernel/common/kernel_function.h`: every registration site
+(`make_function_from_c`, `make_function_symbol_from_c`, `make_stack_arg_function_symbol_from_c`,
+the common `init_common_pc_port_functions`) takes a `KernelFunction`, implicitly built from the
+function pointer, which keeps the signature. In C mode, functions whose parameters and return are
+not all 64-bit integers get a generated adapter (called through the thunk pool):
+
+- integer parameters are truncated to their type, pointers get the raw value (like native),
+  `float` parameters are the low 32 bits of the argument (GOAL passes floats as bit patterns);
+- returns: narrower integers are zero-extended (like a 32-bit return in eax/w0), floats become
+  their bits, void is 0;
+- `arg3_is_pp` replaces argument 3 with `goalc_pp`; stack-argument functions get a pointer to the
+  8 arguments and their return is converted the same way.
+
+The same adapters run on the Mac in C mode, so the C-mode test suite covers them. Unit test:
+`GoalcRuntime.TypedAdapters`.
+
 ## Known later work
 
-- ARM32: kernel functions with `u32` parameters cannot be called through `goalc_fn8` (64-bit
-  arguments occupy register pairs). Needs typed adapters.
 - Performance: generated code uses `uint64_t` everywhere; narrowing to 32 bits where types allow
   matters on ARM11.

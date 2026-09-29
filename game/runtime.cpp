@@ -4,7 +4,10 @@
  */
 
 #include "common/common_types.h"
-#ifdef OS_POSIX
+#if defined(__3DS__)
+#include <malloc.h>
+#include <unistd.h>
+#elif defined(OS_POSIX)
 #include <unistd.h>
 
 #include <sys/mman.h>
@@ -49,6 +52,7 @@
 #include "game/kernel/jak1/kdgo.h"
 #include "game/kernel/jak1/klisten.h"
 #include "game/kernel/jak1/kscheme.h"
+#if !OPENGOAL_ONLY_JAK1
 #include "game/kernel/jak2/kboot.h"
 #include "game/kernel/jak2/kdgo.h"
 #include "game/kernel/jak2/klisten.h"
@@ -58,6 +62,7 @@
 #include "game/kernel/jak3/klisten.h"
 #include "game/kernel/jak3/kscheme.h"
 #include "game/kernel/jakx/kboot.h"
+#endif
 #include "game/overlord/common/fake_iso.h"
 #include "game/overlord/common/iso.h"
 #include "game/overlord/common/sbank.h"
@@ -71,6 +76,7 @@
 #include "game/overlord/jak1/ramdisk.h"
 #include "game/overlord/jak1/srpc.h"
 #include "game/overlord/jak1/stream.h"
+#if !OPENGOAL_ONLY_JAK1
 #include "game/overlord/jak2/dma.h"
 #include "game/overlord/jak2/iso_cd.h"
 #include "game/overlord/jak2/iso_queue.h"
@@ -82,6 +88,7 @@
 #include "game/overlord/jak2/streamlist.h"
 #include "game/overlord/jak2/vag.h"
 #include "game/overlord/jak3/overlord.h"
+#endif
 #include "game/system/Deci2Server.h"
 #include "game/system/iop_thread.h"
 #include "sce/deci2.h"
@@ -155,6 +162,15 @@ void ee_runner(SystemThreadInterface& iface) {
   prof().root_event();
   // Allocate Main RAM. Must have execute enabled.
   // Apple Silicon uses separate writable and executable mappings for EE memory.
+#if defined(__3DS__)
+  // No mmap. GOAL code is compiled to C, so the memory doesn't need to be executable.
+  g_ee_main_mem = (u8*)memalign(4096, EE_MAIN_MEM_SIZE);
+  if (!g_ee_main_mem) {
+    lg::error("Failed to allocate {} MB of main memory!", EE_MAIN_MEM_SIZE >> 20);
+    iface.initialization_complete();
+    return;
+  }
+#else
   if (EE_MEM_LOW_MAP) {
     g_ee_main_mem =
         (u8*)mmap((void*)0x10000000, EE_MAIN_MEM_SIZE, PROT_EXEC | PROT_READ | PROT_WRITE,
@@ -181,6 +197,7 @@ void ee_runner(SystemThreadInterface& iface) {
     iface.initialization_complete();
     return;
   }
+#endif
 
   g_ee_main_mem_exec = g_ee_main_mem;
 
@@ -224,36 +241,46 @@ void ee_runner(SystemThreadInterface& iface) {
   // prevent access to the first 512 kB of memory.
   // On the PS2 this is the kernel and can't be accessed either.
   // this may not work well on systems with a page size > 1 MB.
+#if !defined(__3DS__)
   mprotect((void*)g_ee_main_mem, EE_MAIN_MEM_LOW_PROTECT, PROT_NONE);
+#endif
   fileio_init_globals();
   jak1::kboot_init_globals();
+#if !OPENGOAL_ONLY_JAK1
   jak2::kboot_init_globals();
   jak3::kboot_init_globals();
+#endif
 
   kboot_init_globals_common();
   kdgo_init_globals();
   jak1::kdgo_init_globals();
+#if !OPENGOAL_ONLY_JAK1
   jak2::kdgo_init_globals();
   jak3::kdgo_init_globals();
+#endif
 
   kdsnetm_init_globals_common();
   klink_init_globals();
 
   kmachine_init_globals_common();
   jak1::kscheme_init_globals();
+#if !OPENGOAL_ONLY_JAK1
   jak2::kscheme_init_globals();
   jak3::kscheme_init_globals();
+#endif
   kscheme_init_globals_common();
   kmalloc_init_globals_common();
 
   klisten_init_globals();
   jak1::klisten_init_globals();
+#if !OPENGOAL_ONLY_JAK1
   jak2::klisten_init_globals();
   jak3::klisten_init_globals();
 
   jak2::vag_init_globals();
 
   jak2::init_globals_streamlist();
+#endif
 
   kmemcard_init_globals();
   kprint_init_globals_common();
@@ -265,6 +292,7 @@ void ee_runner(SystemThreadInterface& iface) {
     case GameVersion::Jak1:
       jak1::goal_main(g_argc, g_argv);
       break;
+#if !OPENGOAL_ONLY_JAK1
     case GameVersion::Jak2:
       jak2::goal_main(g_argc, g_argv);
       break;
@@ -274,6 +302,7 @@ void ee_runner(SystemThreadInterface& iface) {
     case GameVersion::JakX:
       jakx::goal_main(g_argc, g_argv);
       break;
+#endif
     default:
       ASSERT_MSG(false, "Unsupported game version");
   }
@@ -315,32 +344,28 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
 
   if (version != GameVersion::Jak3 && version != GameVersion::JakX) {
     jak1::dma_init_globals();
-    jak2::dma_init_globals();
-
     iso_init_globals();
     jak1::iso_init_globals();
-    jak2::iso_init_globals();
-
     fake_iso_init_globals();
     jak1::fake_iso_init_globals();
-    jak2::iso_cd_init_globals();
-
     jak1::iso_queue_init_globals();
-    jak2::iso_queue_init_globals();
-
-    jak2::spusstreams_init_globals();
     jak1::ramdisk_init_globals();
     sbank_init_globals();
-
     // soundcommon
     jak1::srpc_init_globals();
-    jak2::srpc_init_globals();
     srpc_init_globals();
     ssound_init_globals();
-    jak2::ssound_init_globals();
-
     jak1::stream_init_globals();
+#if !OPENGOAL_ONLY_JAK1
+    jak2::dma_init_globals();
+    jak2::iso_init_globals();
+    jak2::iso_cd_init_globals();
+    jak2::iso_queue_init_globals();
+    jak2::spusstreams_init_globals();
+    jak2::srpc_init_globals();
+    jak2::ssound_init_globals();
     jak2::stream_init_globals();
+#endif
   }
 
   prof().end_event();
@@ -369,6 +394,7 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
       case GameVersion::Jak1:
         jak1::start_overlord_wrapper(iop.overlord_argc, iop.overlord_argv, &complete);
         break;
+#if !OPENGOAL_ONLY_JAK1
       case GameVersion::Jak2:
         jak2::start_overlord_wrapper(iop.overlord_argc, iop.overlord_argv, &complete);
         break;
@@ -376,6 +402,7 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
       case GameVersion::JakX:
         jak3::start_overlord_wrapper(&complete);
         break;
+#endif
       default:
         ASSERT_NOT_REACHED();
     }
@@ -514,7 +541,11 @@ RuntimeExitStatus exec_runtime(GameLaunchOptions game_options, int argc, const c
     Gfx::Exit();
   }
   lg::info("GOAL Runtime Shutdown (code {})", fmt::underlying(MasterExit));
+#if defined(__3DS__)
+  free(g_ee_main_mem);
+#else
   munmap(g_ee_main_mem, EE_MAIN_MEM_SIZE);
+#endif
   Discord_Shutdown();
   return MasterExit;
 }

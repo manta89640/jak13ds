@@ -3,6 +3,7 @@
 #include "common/common_types.h"
 
 #include "game/graphics/gfx.h"
+#include "game/kernel/common/kernel_function.h"
 #include "game/kernel/common/kscheme.h"
 
 /*!
@@ -88,6 +89,6 @@ extern CommonPCPortFunctionWrappers g_pc_port_funcs;
 
 /// Initializes all common PC Port functions for all Jak games
 void init_common_pc_port_functions(
-    std::function<Ptr<Function>(const char*, void*)> make_func_symbol_func,
+    std::function<Ptr<Function>(const char*, KernelFunction)> make_func_symbol_func,
     std::function<InternFromCInfo(const char*)> intern_from_c_func,
     std::function<u64(const char*)> make_string_from_c_func);

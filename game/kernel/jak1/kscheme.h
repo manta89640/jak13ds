@@ -3,6 +3,7 @@
 #include "common/goal_constants.h"
 
 #include "game/kernel/common/kmalloc.h"
+#include "game/kernel/common/kernel_function.h"
 #include "game/kernel/common/kscheme.h"
 
 namespace jak1 {
@@ -67,8 +68,8 @@ u64 call_method_of_type(u64 arg, Ptr<Type> type, u32 method_id);
 Ptr<Type> intern_type_from_c(const char* name, u64 methods);
 u64 call_method_of_type_arg2(u32 arg, Ptr<Type> type, u32 method_id, u32 a1, u32 a2);
 u64 alloc_heap_object(u32 heap, u32 type, u32 size, u32 pp);
-Ptr<Function> make_function_symbol_from_c(const char* name, void* f);
-Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name, void* f);
+Ptr<Function> make_function_symbol_from_c(const char* name, KernelFunction f);
+Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name, KernelFunction f);
 s32 InitHeapAndSymbol();
 u64 call_goal_function_by_name(const char* name);
 Ptr<Type> alloc_and_init_type(Ptr<Symbol> sym, u32 method_count);
