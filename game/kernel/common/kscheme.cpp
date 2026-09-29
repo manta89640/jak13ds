@@ -1,6 +1,7 @@
 #include "kscheme.h"
 
 #include "game/kernel/common/fileio.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kmalloc.h"
 #include "game/kernel/common/kprint.h"
 
@@ -145,6 +146,9 @@ uint64_t _call_goal_on_stack_asm_win32(u64 rsp, void* fptr, void* st_ptr, void* 
  */
 u64 call_goal(Ptr<Function> f, u64 a, u64 b, u64 c, u64 st, void* offset) {
   // auto st_ptr = (void*)((uint8_t*)(offset) + st); updated for the new compiler!
+  if (goalc_enabled()) {
+    return goalc_call_goal(f.offset, a, b, c, st);
+  }
   void* st_ptr = (void*)st;
 
   [[maybe_unused]] void* fptr = f.c();
@@ -168,6 +172,9 @@ u64 call_goal(Ptr<Function> f, u64 a, u64 b, u64 c, u64 st, void* offset) {
  * Wrapper around _call_goal_asm_on_stack for switching stacks and calling a GOAL function there.
  */
 u64 call_goal_on_stack(Ptr<Function> f, u64 rsp, u64 st, void* offset) {
+  if (goalc_enabled()) {
+    return goalc_call_goal_on_stack(f.offset, (u8*)rsp, st);
+  }
   void* st_ptr = (void*)st;
 
   [[maybe_unused]] void* fptr = f.c();

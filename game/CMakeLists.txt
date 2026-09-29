@@ -103,6 +103,8 @@ set(RUNTIME_SOURCE
         graphics/texture/TexturePool.cpp
         ${OG_ASM_FUNCS_FILE}
         kernel/common/fileio.cpp
+        kernel/common/goalc_context.cpp
+        kernel/common/goalc_runtime.cpp
         kernel/common/kboot.cpp
         kernel/common/kdgo.cpp
         kernel/common/kdsnetm.cpp
@@ -116,6 +118,7 @@ set(RUNTIME_SOURCE
         kernel/common/ksocket.cpp
         kernel/common/ksound.cpp
         kernel/jak1/fileio.cpp
+        kernel/jak1/goalc_kernel.cpp
         kernel/jak1/kboot.cpp
         kernel/jak1/kdgo.cpp
         kernel/jak1/klink.cpp
@@ -267,6 +270,7 @@ set(RUNTIME_SOURCE
         mips2c/jakx_functions/shadow.cpp
         mips2c/jakx_functions/ocean.cpp
         mips2c/jakx_functions/generic_merc.cpp
+        mips2c/mips2c_goalc.cpp
         mips2c/mips2c_table.cpp
         overlord/common/dma.cpp
         overlord/common/fake_iso.cpp
@@ -398,6 +402,8 @@ endif()
 
 add_executable(gk main.cpp)
 target_link_libraries(gk runtime)
+# GOAL modules compiled to C (out/<game>/cmod/*.so) use the goalc_* symbols of the executable.
+set_target_properties(gk PROPERTIES ENABLE_EXPORTS ON)
 if(WIN32)
     set_target_properties(gk PROPERTIES VS_DPI_AWARE "PerMonitor")
 endif()
