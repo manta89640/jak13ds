@@ -344,6 +344,11 @@ It type checks the arguments for the entry function.
          ;; - make sure that when this code returns, we do a deactivate
          ;; - reset the stack to the top, so we can't just call the code.
          (#cond
+          ((eq? INSTRUCTION_SET 'c)
+           ;; the runtime resets the stack, calls the code and deactivates when it returns.
+           (__goalc-reset-stack-and-call (-> pp main-thread stack-top) (-> new-state code) arg0 arg1 arg2 arg3)
+           #f ;; can't get here
+           )
           ((eq? INSTRUCTION_SET 'arm64)
            (rlet ((func)
                   (sp :reg sp :type uint)
@@ -420,6 +425,10 @@ It type checks the arguments for the entry function.
          ;; I can't see how this makes a difference, as all non-main threads seem
          ;; temporary, but if this turns out to be false, we will need to change this.
          (#cond
+          ((eq? INSTRUCTION_SET 'c)
+           (return-from-thread)
+           #f ;; can't get here
+           )
           ((eq? INSTRUCTION_SET 'arm64)
            ;; branch to return-from-thread through the executable alias
            (rlet ((temp)
