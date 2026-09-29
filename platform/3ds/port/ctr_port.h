@@ -42,6 +42,26 @@ void ctr_pad_read(ctr_pad_state* out);
 int ctr_net_init(unsigned int buffer_size);
 void ctr_net_exit(void);
 
+/* Copy everything written to stdout/stderr (console) into a file as well, flushed at every
+ * newline, so logs survive a crash and can be read from the SD card. Returns 0 on success. */
+int ctr_stdio_tee(const char* path);
+
+/* Thread priorities (0x18 = highest for apps, 0x3F = lowest). The 3DS scheduler never time-slices
+ * threads of the same priority, so a thread that polls (the EE, the IOP kernel) must run at a
+ * lower priority than the threads it waits for. See docs/3ds-port/3ds_build.md. */
+enum {
+  CTR_PRIO_MAIN = 0x30,     /* main thread (libctru default): APT + gfx loop, mostly sleeping */
+  CTR_PRIO_IO = 0x31,       /* short blocking helpers: fake ISO file reads, sound tick */
+  CTR_PRIO_IOP = 0x34,      /* IOP kernel (polls during overlord init) */
+  CTR_PRIO_DECI = 0x35,     /* listener */
+  CTR_PRIO_WORKER = 0x36,   /* EE background worker */
+  CTR_PRIO_EE = 0x3A,       /* the game (polls on RPC / DMA) */
+};
+/* Set the priority of the calling thread. */
+void ctr_thread_set_priority(int prio);
+/* Sleep for at least `us` microseconds (0 = yield). */
+void ctr_thread_sleep_us(unsigned int us);
+
 /* Free application memory in bytes (heap), and linear memory. */
 unsigned int ctr_app_mem_free(void);
 unsigned int ctr_linear_mem_free(void);

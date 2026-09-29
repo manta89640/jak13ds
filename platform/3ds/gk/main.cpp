@@ -7,12 +7,14 @@
  * SD card layout: see docs/3ds-port/3ds_build.md
  *
  * Game arguments: read from sdmc:/3ds/jak1/args.txt (whitespace separated) if it exists,
- * otherwise "-boot" (retail boot, no REPL). "-debug" etc. work like on PC.
+ * otherwise "-boot -cbackend" (retail boot, no REPL, GOAL code compiled to C). "-debug" etc. work like on PC.
  * If sdmc:/3ds/jak1/listener exists, the soc:U socket service is started so the REPL (goalc)
  * can connect over Wi-Fi (costs 1 MB of RAM).
  */
 
 #include <cstdio>
+#include <cstdlib>
+#include <malloc.h>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -38,6 +40,7 @@ std::vector<std::string> read_game_args() {
     }
   } else {
     args.push_back("-boot");
+    args.push_back("-cbackend");
   }
   return args;
 }
@@ -45,22 +48,34 @@ std::vector<std::string> read_game_args() {
 
 int main(int /*argc*/, char** /*argv*/) {
   ctr_platform_init(1);
+  const fs::path data_dir = fs::path(OPENGOAL_3DS_SD_ROOT) / "data";
+  {
+    std::error_code ec;
+    fs::create_directories(data_dir / "log", ec);
+    ctr_stdio_tee((data_dir / "log" / "stdout.log").string().c_str());
+  }
   printf("OpenGOAL %d.%d for 3DS (%s)\n", versions::GOAL_VERSION_MAJOR,
          versions::GOAL_VERSION_MINOR, ctr_is_new3ds() ? "New 3DS" : "Old 3DS");
-  printf("app mem free: %u KB, linear: %u KB\n", ctr_app_mem_free() / 1024,
+  printf("heap: %u KB, linear free: %u KB\n", ctr_app_mem_free() / 1024,
          ctr_linear_mem_free() / 1024);
 
-  const fs::path data_dir = fs::path(OPENGOAL_3DS_SD_ROOT) / "data";
   if (!file_util::setup_project_path(data_dir)) {
     printf("could not use %s\n", data_dir.string().c_str());
   }
 
-  lg::set_file("jak1");
+  // logs on the SD card, flushed line by line so they survive crashes (read them after an
+  // emulator run: platform/3ds/tools/run_emu.sh):
+  //   data/log/stdout.log  everything printed to the console (GOAL output, lg at info+)
+  //   data/log/gk.log      the lg log at debug level
+  printf("[gk] project path %s\n", data_dir.string().c_str());
+  lg::set_file("gk.log", false, false);
   lg::set_file_level(lg::level::debug);
   lg::set_stdout_level(lg::level::info);
-  lg::set_flush_level(lg::level::warn);
+  lg::set_flush_level(lg::level::debug);
   lg::disable_ansi_colors();
   lg::initialize();
+  lg::info("3DS: {}, heap {} KB, linear free {} KB", ctr_is_new3ds() ? "New 3DS" : "Old 3DS",
+           ctr_app_mem_free() / 1024, ctr_linear_mem_free() / 1024);
 
   {
     std::error_code ec;
@@ -82,6 +97,11 @@ int main(int /*argc*/, char** /*argv*/) {
     arg_ptrs.push_back(a.c_str());
   }
 
+  {
+    struct mallinfo mi = mallinfo();
+    lg::info("3DS: malloc in use at startup: {} KB", mi.uordblks / 1024);
+  }
+  printf("[gk] starting the runtime\n");
   RuntimeExitStatus status = RuntimeExitStatus::RUNNING;
   do {
     MasterExit = RuntimeExitStatus::RUNNING;

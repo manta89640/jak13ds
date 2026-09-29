@@ -105,7 +105,7 @@ sdmc:/3ds/jak1/
     saves/                    memory card files (created)
 ```
 
-`sdmc:/3ds/jak1` is `OPENGOAL_3DS_SD_ROOT` in `common/util/FileUtil.h`. When compiled C modules
+`OPENGOAL_3DS_SD_ROOT` (`common/util/FileUtil.h`) is `/3ds/jak1`. gk changes directory to `sdmc:/` at startup, so `std::filesystem` treats the path as absolute. `sdmc:/...` would be a relative path to it. When compiled C modules
 are loaded from files (`out/jak1/cmod`), they would go under `data/` too, but the plan is to link
 them into `gk.3dsx` through the static registry.
 
@@ -167,3 +167,65 @@ properly; the workarounds can then be removed.
 
 Nothing else in `game/kernel/**` failed to compile. All Jak 1 kernel files build with devkitARM
 as they are.
+
+## Running in the emulator (M3)
+
+(AI-assisted.) This needs Azahar in `~/devkitpro-3ds/emu` (see `toolchain.md`). Four steps:
+
+```sh
+# 1. compile the game to C in a mirror project (../p3ds: symlinks to this repo, its own out/),
+#    with the small memory layout, then link every module into gk.3dsx
+platform/3ds/tools/build_cmodules.sh            # --no-goal: only relink, --big-memory: 128 MB layout
+# 2. copy gk.3dsx and out/jak1/iso to the SD card (default: Azahar's virtual SD card)
+platform/3ds/tools/stage_sd.sh --proj ../p3ds --clean-logs
+# 3. run for N seconds, then collect the logs into build-3ds/emu-run/
+platform/3ds/tools/run_emu.sh --seconds 90
+# 4. optional: attach gdb, then dump every thread's backtrace at the end (or at a crash)
+platform/3ds/tools/run_emu.sh --seconds 60 --gdb     # --gdb-script FILE for custom gdb commands
+```
+
+- **C modules:** `-DOG3DS_CSRC_DIR=<proj>/out/jak1/csrc` (`platform/3ds/cmake/cmodules.cmake`)
+  compiles every `csrc/*.c` with `-DGOALC_STATIC` into `og3ds_goal_modules`.
+  `scripts/3ds/gen_c_registry.py` generates the registry, which is compiled into gk itself (not
+  an archive), so it replaces the weak `goalc_register_static_modules`.
+  - The staged `out/jak1/iso` must come from the same goalc run, because modules are matched by
+    hash.
+  - `OG3DS_SMALL_MEMORY` (default ON) must match `OPENGOAL_SMALL_MEMORY` in goalc's environment;
+    `build_cmodules.sh` sets both.
+  - A full rebuild takes about 3 minutes of goalc plus about 1 minute of devkitARM. Result:
+    11.8 MB of code.
+- **Where things are on macOS:**
+  - Azahar's virtual SD card is `~/Library/Application Support/Azahar/sdmc` (`sdmc_directory` in
+    `config/qt-config.ini`).
+  - Its log is `~/Library/Application Support/Azahar/log/azahar_log.txt`.
+- **Logs:** gk writes these on the SD card, flushed line by line:
+  - `data/log/stdout.log`: everything printed, including GOAL output.
+  - `data/log/gk.log`: the lg log at debug level.
+  - Everything printed also goes to `svcOutputDebugString`, which shows up as `Debug.Emulated`
+    in Azahar's log.
+  - `abort()` (asserts, `lg::die`) flushes the log and calls `svcBreak(PANIC)`. Azahar logs:
+    "Emulated program broke execution! Reason: PANIC".
+- **Running without a visible terminal:**
+  - Azahar has no headless mode.
+  - Starting its binary directly from a shell with no GUI session (for example an agent
+    session) hangs before it loads the ROM: 0 % CPU, and SIGTERM is ignored.
+  - `open -n -a Azahar.app --args -w <3dsx>` (LaunchServices) works. A window opens.
+  - `run_emu.sh` turns off the first-start wizard, the update check and the close confirmation,
+    and sets `instant_debug_log` so that a SIGKILL doesn't lose log lines. The original config
+    is kept as `qt-config.ini.orig`.
+  - The run ends with SIGKILL.
+- **Memory:**
+  - A `.3dsx` in Azahar with `is_new_3ds=true` gets the New 3DS 124 MB application region: about
+    105 MB of heap after the 11.8 MB of code.
+  - `ctr_port.c` shrinks libctru's linear heap to 8 MB (`__ctru_linear_heap_size`). Otherwise
+    libctru caps the regular heap (malloc) at 24 MB.
+  - Fixed along the way (all platform-side):
+    - The listener buffer (`XSocketServer`) was 32 MB; it is 1 MB on the 3DS.
+    - The profiler event buffer was 10 MB; it is 1024 events on the 3DS.
+    - The font banks built all their tries at static init: ~21 MB on ARM32, ~40 MB on 64-bit PCs.
+      They are now built lazily on first use, which helps the PC too.
+- **Threads:** the 3DS scheduler never time-slices between threads of equal priority.
+  - With everything at 0x3F, the IOP's polling loop during overlord init starved the fake-ISO
+    reader threads, and boot hung at `FS Open VAGDIR.AYB`.
+  - Now the priorities are set per thread (`ctr_port.h`): IO helpers > IOP > listener > worker
+    > EE. `IOP_Kernel::dispatch` also sleeps 100 µs when nothing is runnable.
