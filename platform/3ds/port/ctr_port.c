@@ -19,6 +19,11 @@
 u32 __ctru_linear_heap_size = 8 << 20;
 
 static int s_console = 0;
+static volatile int s_gpu_active = 0;
+
+void ctr_port_set_gpu_active(int active) {
+  s_gpu_active = active;
+}
 static int s_irrst = 0;
 static u32* s_soc_buffer = NULL;
 
@@ -49,8 +54,13 @@ void ctr_platform_exit(void) {
 int ctr_main_loop(void) {
   int running = aptMainLoop() ? 1 : 0;
   if (s_console) {
-    gfxFlushBuffers();
-    gfxSwapBuffers();
+    if (s_gpu_active) {
+      /* citro3d swaps the screens; the console screen is single buffered, flush it only */
+      gfxFlushBuffers();
+    } else {
+      gfxFlushBuffers();
+      gfxSwapBuffers();
+    }
   }
   return running;
 }

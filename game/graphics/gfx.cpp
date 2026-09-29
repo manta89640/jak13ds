@@ -23,6 +23,7 @@
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/runtime.h"
+#include "ctr/CtrRenderer.h"
 #include "pipelines/null.h"
 #ifdef __3DS__
 #include "platform/3ds/port/ctr_port.h"
@@ -52,6 +53,8 @@ const GfxRendererModule* GetRenderer(GfxPipeline pipeline) {
 #endif
     case GfxPipeline::Null:
       return &gRendererNull;
+    case GfxPipeline::Ctr:
+      return &gRendererCtr;
     default:
       lg::error("Requested unknown renderer {}", fmt::underlying(pipeline));
       return NULL;
@@ -63,7 +66,7 @@ void SetRenderer(GfxPipeline pipeline) {
 }
 
 #ifdef __3DS__
-GfxPipeline g_preferred_pipeline = GfxPipeline::Null;
+GfxPipeline g_preferred_pipeline = GfxPipeline::Ctr;
 #else
 GfxPipeline g_preferred_pipeline = GfxPipeline::OpenGL;
 #endif
@@ -94,12 +97,20 @@ u32 Init(GameVersion version) {
   {
     auto p = scoped_prof("startup::gfx::init_current_renderer");
     if (GetCurrentRenderer()->init(g_global_settings)) {
-      lg::error("Gfx::Init error");
-      return 1;
+      if (GetCurrentRenderer()->pipeline == GfxPipeline::Ctr) {
+        // no GPU: keep the game running with the null renderer
+        lg::error("Gfx::Init: 3DS renderer failed, using the null renderer");
+        g_global_settings.renderer = GetRenderer(GfxPipeline::Null);
+        GetCurrentRenderer()->init(g_global_settings);
+      } else {
+        lg::error("Gfx::Init error");
+        return 1;
+      }
     }
   }
 
-  if (GetCurrentRenderer()->pipeline == GfxPipeline::Null) {
+  if (GetCurrentRenderer()->pipeline == GfxPipeline::Null ||
+      GetCurrentRenderer()->pipeline == GfxPipeline::Ctr) {
     // no window
   } else if (g_main_thread_id != std::this_thread::get_id()) {
     lg::error("Ran Gfx::Init outside main thread. Init display elsewhere?");

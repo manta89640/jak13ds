@@ -153,6 +153,14 @@ else
 fi
 cp "$LOGDIR/stdout.log" "$OUT/stdout.log" 2>/dev/null || : > "$OUT/stdout.log"
 cp "$LOGDIR/gk.log" "$OUT/gk.log" 2>/dev/null || : > "$OUT/gk.log"
+# screenshots (stage_sd.sh --screenshots), converted to PNG
+rm -f "$OUT"/shot_*.png
+for f in "$LOGDIR"/shot_*.bmp; do
+  [ -f "$f" ] || continue
+  sips -s format png "$f" --out "$OUT/$(basename "${f%.bmp}").png" > /dev/null 2>&1
+  rm -f "$f"
+done
+ls "$OUT"/shot_*.png 2>/dev/null | sed 's/^/screenshot: /'
 
 echo "== logs in $OUT: stdout.log $(wc -l < "$OUT/stdout.log") lines, gk.log $(wc -l < "$OUT/gk.log") lines"
 echo "== last lines of stdout.log:"

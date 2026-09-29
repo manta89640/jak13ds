@@ -38,6 +38,10 @@ set(RUNTIME_SOURCE
         graphics/gfx_test.cpp
         graphics/gfx.cpp
         graphics/pipelines/null.cpp
+        graphics/ctr/CtrDirect.cpp
+        graphics/ctr/CtrRenderer.cpp
+        graphics/ctr/CtrVram.cpp
+        graphics/ctr/ctr_gpu_soft.cpp
         graphics/jak2_texture_remap.cpp
         graphics/jak3_texture_remap.cpp
         graphics/jakx_texture_remap.cpp

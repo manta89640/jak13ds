@@ -24,6 +24,7 @@
 #include "common/versions/versions.h"
 
 #include "game/common/game_common_types.h"
+#include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/gfx.h"
 #include "game/runtime.h"
 
@@ -89,7 +90,18 @@ int main(int /*argc*/, char** /*argv*/) {
   game_options.game_version = GameVersion::Jak1;
   game_options.disable_display = false;  // "display" = the null renderer, which paces vsync
   game_options.server_port = DECI2_PORT;
-  Gfx::SetPreferredPipeline(GfxPipeline::Null);
+  Gfx::SetPreferredPipeline(GfxPipeline::Ctr);
+  {
+    // sdmc:/3ds/jak1/screenshots (empty file): save a screenshot every 10 s to data/log
+    std::error_code ec;
+    auto flag = fs::path(OPENGOAL_3DS_SD_ROOT) / "screenshots";
+    if (fs::exists(flag, ec)) {
+      int every = 600;
+      std::ifstream f(flag.string());
+      f >> every;
+      ctr_gfx::set_screenshots((data_dir / "log").string(), every > 0 ? every : 600);
+    }
+  }
 
   auto game_args = read_game_args();
   std::vector<const char*> arg_ptrs = {""};  // kmachine starts at argv[1]
