@@ -101,8 +101,13 @@ GC_INLINE void gc_st_v128(u64 a, v128 v) {
 }
 
 //! GOAL address of a host pointer (only valid for pointers into GOAL memory, like the stack).
+//! The empty asm makes the pointer escape: otherwise, on 32-bit hosts, the compiler can see that
+//! goalc_mem + result is the original pointer, conclude that stack arrays are never accessed
+//! through GOAL addresses, and delete stores to them.
 GC_INLINE u64 gc_goal_ptr(const void* host) {
-  return (u64)(u32)((const u8*)host - goalc_mem);
+  const u8* p = (const u8*)host;
+  __asm__ volatile("" : "+r"(p) : : "memory");
+  return (u64)(u32)(p - goalc_mem);
 }
 
 // ---------------------------------------------------------------------------
