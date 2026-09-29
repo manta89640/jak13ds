@@ -88,6 +88,11 @@ class Compiler {
   }
   Debugger& get_debugger() { return m_debugger; }
   emitter::InstructionSet instruction_set() const { return m_instr_set; }
+  //! Generate C instead of machine code (see docs/3ds-port/c_backend.md). Requires ARM64.
+  void set_c_backend(bool enable);
+  bool c_backend() const { return m_c_backend; }
+  //! Is the C backend requested by the environment (OPENGOAL_C_BACKEND=1)?
+  static bool c_backend_from_env();
   listener::Listener& listener() { return m_listener; }
   void poke_target() { m_listener.send_poke(); }
   bool connect_to_target();
@@ -122,6 +127,9 @@ class Compiler {
  private:
   GameVersion m_version;
   emitter::InstructionSet m_instr_set;
+  bool m_c_backend = false;
+  //! write the C module for an object and build it as a shared library for the runtime to load
+  void build_c_module(const std::string& obj_name, const std::string& source, u64 hash);
   TypeSystem m_ts;
   std::unique_ptr<GlobalEnv> m_global_env = nullptr;
   std::unique_ptr<None> m_none = nullptr;

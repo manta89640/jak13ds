@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "CEmitter.h"
 #include "IR.h"
 
 #include "goalc/debugger/DebugInfo.h"
@@ -121,8 +122,14 @@ void record_local_variables(const FunctionEnv* func, FunctionDebugInfo* debug) {
 CodeGenerator::CodeGenerator(FileEnv* env,
                              DebugInfo* debug_info,
                              GameVersion version,
-                             InstructionSet instruction_set)
-    : m_gen(version, instruction_set), m_fe(env), m_debug_info(debug_info) {}
+                             InstructionSet instruction_set,
+                             bool c_backend)
+    : m_gen(version, instruction_set),
+      m_fe(env),
+      m_debug_info(debug_info),
+      m_c_backend(c_backend) {
+  m_gen.set_c_backend(c_backend);
+}
 
 /*!
  * Generate an object file.
@@ -155,6 +162,10 @@ std::vector<u8> CodeGenerator::run(const TypeSystem* ts) {
     static_obj->generate(&m_gen);
   }
 
+  if (m_c_backend) {
+    return run_c(ts);
+  }
+
   // next, add instructions to functions
   for (size_t i = 0; i < m_fe->functions().size(); i++) {
     do_function(m_fe->functions().at(i).get(), i);
@@ -162,6 +173,32 @@ std::vector<u8> CodeGenerator::run(const TypeSystem* ts) {
 
   // generate a v3 object.
   return m_gen.generate_data_v3(ts).to_vector();
+}
+
+/*!
+ * C backend: each function becomes an 8-byte stub in the object and a C function in the module.
+ */
+std::vector<u8> CodeGenerator::run_c(const TypeSystem* ts) {
+  CModuleEmitter module(m_fe->name(), &m_gen, m_gen.version());
+  for (size_t i = 0; i < m_fe->functions().size(); i++) {
+    auto* env = m_fe->functions().at(i).get();
+    auto f_rec = m_gen.get_existing_function_record(i);
+    // stub: function id (patched by the linker), index in module
+    m_gen.add_instr_no_ir(
+        f_rec,
+        InstructionARM64(InstructionARM64(0xffffffffu),
+                                      InstructionARM64(0x80000000u | (u32)i)),
+        InstructionInfo::Kind::PROLOGUE);
+    module.function_seg[i] = env->segment;
+  }
+  for (size_t i = 0; i < m_fe->functions().size(); i++) {
+    auto* env = m_fe->functions().at(i).get();
+    module.add_function(env, i, env->segment);
+  }
+  auto data = m_gen.generate_data_v3(ts);
+  m_c_source = module.finish(&m_c_hash);
+  m_gen.patch_c_module_hash(data, m_c_hash);
+  return data.to_vector();
 }
 
 void CodeGenerator::do_function(FunctionEnv* env, int f_idx) {

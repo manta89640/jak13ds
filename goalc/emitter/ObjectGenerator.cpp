@@ -662,7 +662,55 @@ void ObjectGenerator::emit_link_table(int seg, const TypeSystem* ts) {
   emit_link_type_pointer(seg, ts);
   emit_link_rip(seg);
   emit_link_ptr(seg);
+  if (m_c_backend) {
+    emit_link_c_module(seg);
+  }
   m_link_by_seg.at(seg).push_back(LINK_TABLE_END);
+}
+
+/*!
+ * C backend: describe the function stubs in this segment. The module hash is patched in later
+ * because it depends on the generated C, which depends on the memory layout.
+ */
+void ObjectGenerator::emit_link_c_module(int seg) {
+  std::vector<std::pair<u32, u32>> stubs;  // location, index in module
+  for (size_t f_idx = 0; f_idx < m_all_function_records.size(); f_idx++) {
+    const auto& rec = m_all_function_records[f_idx];
+    if (rec.seg == seg) {
+      stubs.emplace_back(get_function_location(rec), f_idx);
+    }
+  }
+  if (stubs.empty()) {
+    return;
+  }
+  auto& out = m_link_by_seg.at(seg);
+  out.push_back(LINK_C_MODULE);
+  m_c_module_hash_locations.at(seg) = out.size();
+  push_data<u64>(0, out);
+  push_data<u32>(stubs.size(), out);
+  for (auto& [loc, idx] : stubs) {
+    push_data<u32>(loc, out);
+    push_data<u32>(idx, out);
+  }
+}
+
+int ObjectGenerator::get_static_location(const StaticRecord& rec) const {
+  int loc = m_static_data_by_seg.at(rec.seg).at(rec.static_id).location;
+  ASSERT(loc >= 0);
+  return loc;
+}
+
+int ObjectGenerator::get_function_location(const FunctionRecord& rec) const {
+  return m_function_data_by_seg.at(rec.seg).at(rec.func_id).instruction_to_byte_in_data.at(0);
+}
+
+void ObjectGenerator::patch_c_module_hash(ObjectFileData& data, u64 hash) const {
+  for (int seg = 0; seg < N_SEG; seg++) {
+    int loc = m_c_module_hash_locations.at(seg);
+    if (loc >= 0) {
+      memcpy(data.link_tables.at(seg).data() + loc, &hash, sizeof(u64));
+    }
+  }
 }
 
 /*!

@@ -34,7 +34,8 @@ Use separate CMake build directories (`build-rt`, `build-3ds`, ...) so builds do
 Unchanged v3 layout. Differences in C mode:
 
 - Each function body in a segment is an 8-byte stub (after the usual `function` type tag):
-  `u32 id` (placeholder `0xffffffff`, patched by the linker) and `u32 func_index`.
+  `u32 id` (placeholder `0xffffffff`, patched by the linker) and `u32 0x80000000 | func_index`
+  (debug only).
 - Static data, type links, symbol links and pointer links in data are exactly as before.
 - There are no instruction relocations. Each segment that has functions gets one
   `LINK_C_MODULE` (8) entry in its link table:
@@ -76,6 +77,20 @@ Loading a module with the same hash twice re-links it (the latest seg_base/syms 
   bootstrap, catch/throw, gstate's "reset stack and jump to state code". Design: setjmp/longjmp
   style contexts plus a small per-architecture "call on stack" helper (AArch64 now, ARMv6/ARM32
   for the 3DS, x86-64 optional).
+
+## Building and loading modules
+
+- goalc writes `out/<game>/csrc/<object name>.c` (latest source per object, for static builds) and
+  builds `out/<game>/cmod/<hash>.so` for dynamic loading (PC development, REPL, tests). The
+  compiler for these is `cc` unless `OPENGOAL_C_BACKEND_CC` is set.
+- `OPENGOAL_C_BACKEND=1` in the environment turns on C mode in any Compiler (goalc, extractor,
+  goalc-test). goalc/extractor `--instruction-set c` set it.
+- `OPENGOAL_C_BACKEND_LENIENT=1`: functions the backend can't compile become stubs that call
+  `goalc_break()` (for finding all problems in one build).
+- Static linking (3DS): compile every `csrc/*.c` with `-DGOALC_STATIC`; each exports
+  `const GoalCModule* goalc_static_<name>_<hash>(void)`. `scripts/3ds/gen_c_registry.py` generates
+  `void goalc_register_static_modules(void)` which registers them all; the runtime calls it at
+  startup (declare it weak so builds without modules still link).
 
 ## Known later work
 
