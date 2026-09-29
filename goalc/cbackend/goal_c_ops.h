@@ -27,6 +27,10 @@ typedef goalc_v128 v128;
 
 // ---------------------------------------------------------------------------
 // memory. GOAL addresses are 32 bits: truncate before adding the host base.
+// Alignment: accesses use memcpy, and on 32-bit ARM the compiler may still use LDRD/VLDR, which
+// need word alignment. That is fine for GOAL: the EE (MIPS) requires natural alignment for 32/64
+// bit and float loads/stores, so the game never does unaligned accesses of those sizes. (Forcing
+// byte-safe accesses with packed structs roughly doubled ARM11 code size.)
 // ---------------------------------------------------------------------------
 
 GC_INLINE u8* gc_addr(u64 goal_addr) {
