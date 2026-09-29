@@ -196,7 +196,7 @@ s32 goalc_resolve_symbol(const char* name) {
  */
 uint32_t c_module_link_v3(Ptr<u8> link, ObjectFileHeader* ofh, int current_seg, const char* name) {
   u32 seg_bases[3] = {0, 0, 0};
-  for (int i = 0; i < ofh->segment_count && i < 3; i++) {
+  for (u32 i = 0; i < ofh->segment_count && i < 3; i++) {
     seg_bases[i] = ofh->code_infos[i].offset;
   }
   return goalc_link_module_entry(link.c(), seg_bases,
