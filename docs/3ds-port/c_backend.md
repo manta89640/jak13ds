@@ -220,3 +220,17 @@ The same adapters run on the Mac in C mode, so the C-mode test suite covers them
 
 - Performance: generated code uses `uint64_t` everywhere; narrowing to 32 bits where types allow
   matters on ARM11.
+
+## Performance notes (ARM11)
+
+- Stack frames are much bigger on ARM32 than on AArch64 (camera-combiner's state code: 1632 vs 528
+  bytes, measured with `-fstack-usage`). Cause: `goalc_v128` is a union, which GCC keeps in memory,
+  so every 128-bit temporary gets its own 16-byte stack slot; ARM32 also has fewer registers for
+  64-bit values. This drives the suspended-stack sizes in C mode.
+- Planned: represent `v128` in generated code as a struct of four floats (scalarized into VFP
+  registers by GCC), with integer lane views through bit casts, keeping the `goalc_v128` layout
+  and by-value ABI. Expected to shrink frames and speed up vector-heavy code. Do this after the
+  game boots on the 3DS, and measure.
+- Also planned: 32-bit arithmetic where the GOAL type guarantees the upper half doesn't matter
+  (pointers, structures, 32-bit integers), since every `u64` operation costs 2+ instructions on
+  ARM11.
