@@ -139,7 +139,7 @@
       (suspend)
       )
     (#cond
-     ((eq? INSTRUCTION_SET 'arm64) (arm64-suspend-vector-check))
+     ((or (eq? INSTRUCTION_SET 'arm64) (eq? INSTRUCTION_SET 'c)) (arm64-suspend-vector-check))
      (#t (none)))
     ;; get the wreck process and make it go to die state.
     (go-process (process-by-name 'wreck-proc *active-pool*) die-state)
@@ -152,7 +152,7 @@
   "This function intentionally overwrites xmm8 and xmm9 and suspends"
   ;; :reg needs a literal, so use the saved register for this backend
   (#cond
-   ((eq? INSTRUCTION_SET 'arm64)
+   ((or (eq? INSTRUCTION_SET 'arm64) (eq? INSTRUCTION_SET 'c))
     (while #t
       (rlet ((x :class fpr :type float :reg v8)
              (y :class fpr :type float :reg v9))
@@ -207,7 +207,7 @@
   )
 
 (#cond
- ((eq? INSTRUCTION_SET 'arm64)
+ ((or (eq? INSTRUCTION_SET 'arm64) (eq? INSTRUCTION_SET 'c))
 (defun arm64-throw-vector-check ()
   (let ((src (new 'stack-no-clear 'array 'uint64 4))
         (dst (new 'stack-no-clear 'array 'uint64 4)))
@@ -240,7 +240,7 @@
 
 (defun throw-backup-test ()
   (#cond
-   ((eq? INSTRUCTION_SET 'arm64)
+   ((or (eq? INSTRUCTION_SET 'arm64) (eq? INSTRUCTION_SET 'c))
   (rlet ((x :reg v10 :class fpr :type float))
     (set! x 10.10)
     (let ((proc (get-process *nk-dead-pool* process 1024)))

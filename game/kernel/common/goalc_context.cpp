@@ -85,7 +85,31 @@ asm(".text\n"
     "  ldr x19, [sp, #16]\n"
     "  ldp x29, x30, [sp], #32\n"
     "  ret\n"
-    GOALC_FUNC_END(goalc_call_on_stack));
+    GOALC_FUNC_END(goalc_call_on_stack)
+
+    // Save the caller's context (as if goalc_ctx_save had been called at the call site of this
+    // function) in a goalc_ctx on the stack, below the caller's sp, then call
+    // goalc_suspend_impl(ctx). Restoring that context returns from this function.
+    GOALC_FUNC_BEGIN(goalc_suspend_entry)
+    "  sub sp, sp, #176\n"
+    "  stp x19, x20, [sp, #0]\n"
+    "  stp x21, x22, [sp, #16]\n"
+    "  stp x23, x24, [sp, #32]\n"
+    "  stp x25, x26, [sp, #48]\n"
+    "  stp x27, x28, [sp, #64]\n"
+    "  stp x29, x30, [sp, #80]\n"
+    "  add x9, sp, #176\n"
+    "  str x9, [sp, #96]\n"
+    "  stp d8, d9, [sp, #104]\n"
+    "  stp d10, d11, [sp, #120]\n"
+    "  stp d12, d13, [sp, #136]\n"
+    "  stp d14, d15, [sp, #152]\n"
+    "  mov x0, sp\n"
+    "  bl " GOALC_SYM(goalc_suspend_impl) "\n"
+    "  ldr x30, [sp, #88]\n"
+    "  add sp, sp, #176\n"
+    "  ret\n"
+    GOALC_FUNC_END(goalc_suspend_entry));
 
 uintptr_t goalc_ctx_sp(const goalc_ctx* ctx) {
   return ctx->regs[12];
@@ -103,8 +127,12 @@ uintptr_t goalc_ctx_sp(const goalc_ctx* ctx) {
 #define GOALC_ARM_RESTORE_VFP \
   "  add r2, r0, #40\n"       \
   "  vldmia r2, {d8-d15}\n"
+#define GOALC_ARM_SAVE_VFP_SP \
+  "  add r12, sp, #40\n"       \
+  "  vstmia r12, {d8-d15}\n"
 #define GOALC_ARM_FPU ".fpu vfp\n"
 #else
+#define GOALC_ARM_SAVE_VFP_SP ""
 #define GOALC_ARM_SAVE_VFP ""
 #define GOALC_ARM_RESTORE_VFP ""
 #define GOALC_ARM_FPU ""
@@ -145,6 +173,21 @@ asm(".text\n"
     "  mov sp, r4\n"
     "  pop {r4, pc}\n"
     GOALC_FUNC_END(goalc_call_on_stack)
+
+    // see the AArch64 version
+    GOALC_FUNC_BEGIN(goalc_suspend_entry)
+    "  sub sp, sp, #176\n"
+    "  stmia sp, {r4-r11}\n"
+    "  add r12, sp, #176\n"
+    "  str r12, [sp, #32]\n"
+    "  str lr, [sp, #36]\n"
+    GOALC_ARM_SAVE_VFP_SP
+    "  mov r0, sp\n"
+    "  bl " GOALC_SYM(goalc_suspend_impl) "\n"
+    "  ldr lr, [sp, #36]\n"
+    "  add sp, sp, #176\n"
+    "  bx lr\n"
+    GOALC_FUNC_END(goalc_suspend_entry)
     // go back to the instruction set the compiler uses for the rest of this file
 #if defined(__thumb__)
     ".thumb\n"
@@ -209,7 +252,26 @@ asm(".text\n"
     "  popq %rbx\n"
     "  popq %rbp\n"
     "  ret\n"
-    GOALC_FUNC_END(goalc_call_on_stack));
+    GOALC_FUNC_END(goalc_call_on_stack)
+
+    // see the AArch64 version. On entry, rsp is 8 mod 16. 184 bytes keep the call aligned.
+    GOALC_FUNC_BEGIN(goalc_suspend_entry)
+    "  subq $184, %rsp\n"
+    "  movq %rbx, 0(%rsp)\n"
+    "  movq %rbp, 8(%rsp)\n"
+    "  movq %r12, 16(%rsp)\n"
+    "  movq %r13, 24(%rsp)\n"
+    "  movq %r14, 32(%rsp)\n"
+    "  movq %r15, 40(%rsp)\n"
+    "  leaq 192(%rsp), %rax\n"
+    "  movq %rax, 48(%rsp)\n"
+    "  movq 184(%rsp), %rax\n"
+    "  movq %rax, 56(%rsp)\n"
+    "  movq %rsp, %rdi\n"
+    "  callq " GOALC_SYM(goalc_suspend_impl) "\n"
+    "  addq $184, %rsp\n"
+    "  ret\n"
+    GOALC_FUNC_END(goalc_suspend_entry));
 
 uintptr_t goalc_ctx_sp(const goalc_ctx* ctx) {
   return ctx->regs[6];

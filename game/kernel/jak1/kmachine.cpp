@@ -71,7 +71,7 @@ void InitParms(int argc, const char* const* argv) {
   // Run GOAL code compiled to C (docs/3ds-port/c_backend.md). Same environment variable as the
   // compiler uses, so goalc-test and the REPL can run everything through the C backend.
   const char* c_backend_env = getenv("OPENGOAL_C_BACKEND");
-  goalc_set_enabled(c_backend_env && c_backend_env[0] && strcmp(c_backend_env, "0") != 0);
+  goalc_set_enabled(c_backend_env && strcmp(c_backend_env, "1") == 0);
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];

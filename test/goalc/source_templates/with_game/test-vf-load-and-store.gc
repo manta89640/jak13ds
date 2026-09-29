@@ -8,7 +8,7 @@
     
     ;; :reg needs a literal vector register for this backend
     (#cond
-     ((eq? INSTRUCTION_SET 'arm64)
+     ((or (eq? INSTRUCTION_SET 'arm64) (eq? INSTRUCTION_SET 'c))
     (rlet ((vf1 :class vf  :reset-here #t)
            (vf2 :class vf :reg v1 :reset-here #t))
           (.lvf vf1 vector-0)

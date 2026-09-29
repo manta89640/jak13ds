@@ -141,6 +141,14 @@ int goalc_ctx_save(goalc_ctx* ctx) __attribute__((returns_twice));
 //! Call fn(arg) with the host stack pointer set to stack_top (aligned down to 16 bytes).
 //! Returns what fn returns, back on the original stack.
 u64 goalc_call_on_stack(void* stack_top, u64 (*fn)(void*), void* arg);
+
+//! Save the context of the caller (sp and resume address at the call site, like goalc_ctx_save)
+//! in a goalc_ctx on the stack, then call goalc_suspend_impl with it. Restoring a copy of that
+//! context returns from goalc_suspend_entry. Unlike a C function calling goalc_ctx_save, the
+//! frame of this function doesn't have to be preserved, which keeps suspended stacks small.
+u64 goalc_suspend_entry();
+//! Implemented by the game kernel (Jak 1: goalc_kernel.cpp).
+u64 goalc_suspend_impl(goalc_ctx* caller_ctx) __attribute__((visibility("hidden")));
 }
 
 //! Stack pointer stored in a saved context (host address).

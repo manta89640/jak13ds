@@ -54,8 +54,12 @@
 ;; OpenGOAL NOTE: 7kB -> 24kB
 (defconstant PROCESS_STACK_SIZE (#if PC_PORT #x6000 #x1c00))
 
+;; C backend: frames of GOAL code compiled to C are larger than native ones (about 2x on AArch64),
+;; so backup stack sizes are scaled by this.
+(defconstant GOALC_STACK_SCALE (#if (eq? INSTRUCTION_SET 'c) 2 1))
+
 ;; default size of stack to backup for a process
-(defconstant PROCESS_STACK_SAVE_SIZE 256)
+(defconstant PROCESS_STACK_SAVE_SIZE (* GOALC_STACK_SCALE 256))
 
 ;; C backend (INSTRUCTION_SET 'c): a main cpu-thread keeps its saved register context right after
 ;; its backup stack, so it needs this many extra bytes. Must match GOALC_THREAD_CTX_SIZE in

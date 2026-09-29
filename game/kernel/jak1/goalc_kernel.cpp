@@ -42,6 +42,7 @@ constexpr u32 THREAD_PC = 24 - 4;
 constexpr u32 THREAD_SP = 28 - 4;
 constexpr u32 THREAD_STACK_TOP = 32 - 4;
 constexpr u32 THREAD_STACK_SIZE = 36 - 4;
+constexpr u32 CPU_THREAD_RREG = 40 - 4;
 constexpr u32 CPU_THREAD_STACK = 128 - 4;
 
 // process
@@ -84,6 +85,7 @@ struct KernelSymbols {
   u32 running = 0;
   u32 suspended = 0;
   u32 return_from_thread_dead = 0;
+  u32 set_to_run_bootstrap = 0;
 } g_syms;
 
 // the innermost kernel context, active while a thread runs.
@@ -147,17 +149,22 @@ goalc_ctx* thread_ctx(u32 thread) {
   return_to_kernel(value);
 }
 
+// These run at the top of a thread's stack, and everything they keep on the stack counts against
+// the backup stack of a suspending thread. So the arguments are passed straight from g_pending.
+
 //! Entry for reset-and-call: call the function, then return to the kernel with its result.
 u64 reset_and_call_entry(void*) {
-  PendingCall call = g_pending;
-  u64 result = call_goal_fn(call.f, call.args);
+  u64 result = ((goalc_fn8)goalc_fn(g_pending.f))(
+      g_pending.args[0], g_pending.args[1], g_pending.args[2], g_pending.args[3],
+      g_pending.args[4], g_pending.args[5], g_pending.args[6], g_pending.args[7]);
   return_to_kernel(result);
 }
 
 //! Entry for threads that end with return-from-thread-dead (set-to-run, enter-state).
 u64 dead_on_return_entry(void*) {
-  PendingCall call = g_pending;
-  u64 result = call_goal_fn(call.f, call.args);
+  u64 result = ((goalc_fn8)goalc_fn(g_pending.f))(
+      g_pending.args[0], g_pending.args[1], g_pending.args[2], g_pending.args[3],
+      g_pending.args[4], g_pending.args[5], g_pending.args[6], g_pending.args[7]);
   call_return_from_thread_dead(result);
 }
 
@@ -195,46 +202,47 @@ u64 goalc_k_reset_and_call(u64 thread, u64 func) {
   return kf.value;
 }
 
+}  // namespace jak1
+
 /*!
- * thread-suspend for a cpu-thread. pp holds the thread. Saves the context and the stack, then
- * returns to the kernel. Returns (0) when the thread is resumed.
+ * thread-suspend for a cpu-thread (called through goalc_suspend_entry, so caller_ctx is the context
+ * of the GOAL thread-suspend method at the call). pp holds the thread. Saves the context and the
+ * stack, then returns to the kernel. Resuming the thread returns from goalc_suspend_entry.
  */
-u64 goalc_k_thread_suspend() {
+u64 goalc_suspend_impl(goalc_ctx* caller_ctx) {
+  using namespace jak1;
   u32 thread = (u32)goalc_pp;
   goalc_ctx* ctx = thread_ctx(thread);
-  if (goalc_ctx_save(ctx) == 0) {
-    uintptr_t host_sp;
-    GOALC_READ_HOST_SP(host_sp);
-    host_sp = std::min(host_sp, goalc_ctx_sp(ctx));
-    u32 sp = goal_addr_of((void*)host_sp);
-    ctx->regs[CTX_MAGIC_WORD] = THREAD_CTX_MAGIC;
+  memcpy(ctx, caller_ctx, sizeof(goalc_ctx));
+  ctx->regs[CTX_MAGIC_WORD] = THREAD_CTX_MAGIC;
+  u32 sp = goal_addr_of((void*)goalc_ctx_sp(caller_ctx));
 
-    word(thread + THREAD_PC) = GOALC_SUSPENDED_PC;
-    word(thread + THREAD_SP) = sp;
+  word(thread + THREAD_PC) = GOALC_SUSPENDED_PC;
+  word(thread + THREAD_SP) = sp;
 
-    u32 proc = word(thread + THREAD_PROCESS);
-    u32 top_thread = word(proc + PROCESS_TOP_THREAD);
-    s32 used = (s32)(word(top_thread + THREAD_STACK_TOP) - word(top_thread + THREAD_SP));
-    s32 stack_size = (s32)word(thread + THREAD_STACK_SIZE);
-    u32 stack_top = word(thread + THREAD_STACK_TOP);
-    u32 copy_size = stack_copy_size(stack_top, sp);
-    if (used > stack_size || (s32)copy_size > stack_size) {
-      lg::error("goalc: thread-suspend with {} bytes of stack used, but the thread only has {}",
-                used, stack_size);
-      goalc_break();
-      // continuing would overwrite the saved context and the heap.
-      abort();
-    }
-
-    word(proc + PROCESS_STATUS) = g_syms.suspended;
-    u32 backup_end = thread + CPU_THREAD_STACK + (u32)stack_size;
-    memcpy(host(backup_end - copy_size), host(stack_top - copy_size), copy_size);
-
-    goalc_pp = 0;
-    return_to_kernel(0);
+  u32 proc = word(thread + THREAD_PROCESS);
+  u32 top_thread = word(proc + PROCESS_TOP_THREAD);
+  s32 used = (s32)(word(top_thread + THREAD_STACK_TOP) - word(top_thread + THREAD_SP));
+  s32 stack_size = (s32)word(thread + THREAD_STACK_SIZE);
+  u32 stack_top = word(thread + THREAD_STACK_TOP);
+  u32 copy_size = stack_copy_size(stack_top, sp);
+  if (used > stack_size || (s32)copy_size > stack_size) {
+    lg::error("goalc: thread-suspend with {} bytes of stack used, but the thread only has {}", used,
+              stack_size);
+    goalc_break();
+    // continuing would overwrite the saved context and the heap.
+    abort();
   }
-  return 0;
+
+  word(proc + PROCESS_STATUS) = g_syms.suspended;
+  u32 backup_end = thread + CPU_THREAD_STACK + (u32)stack_size;
+  memcpy(host(backup_end - copy_size), host(stack_top - copy_size), copy_size);
+
+  goalc_pp = 0;
+  return_to_kernel(0);
 }
+
+namespace jak1 {
 
 /*!
  * thread-resume for a cpu-thread. Called by the kernel. Returns when the thread returns to the
@@ -275,8 +283,18 @@ u64 goalc_k_thread_resume(u64 thread_arg) {
       word(proc + PROCESS_TOP_THREAD) = thread;
       word(proc + PROCESS_STATUS) = g_syms.running;
       goalc_pp = proc;
-      g_pending.f = pc;
       memset(g_pending.args, 0, sizeof(g_pending.args));
+      if (g_syms.set_to_run_bootstrap && pc == word(g_syms.set_to_run_bootstrap)) {
+        // do what set-to-run-bootstrap does directly, to save a frame on the thread's stack:
+        // call the function in rreg 0 with the arguments in rreg 1-6.
+        const u64* rreg = (const u64*)host(thread + CPU_THREAD_RREG);
+        g_pending.f = (u32)rreg[0];
+        for (int i = 0; i < 6; i++) {
+          g_pending.args[i] = rreg[i + 1];
+        }
+      } else {
+        g_pending.f = pc;
+      }
       goalc_call_on_stack(host(sp), dead_on_return_entry, nullptr);
     }
     ASSERT_NOT_REACHED();
@@ -357,10 +375,11 @@ void goalc_kernel_init() {
   g_syms.running = intern_from_c("running").offset;
   g_syms.suspended = intern_from_c("suspended").offset;
   g_syms.return_from_thread_dead = intern_from_c("return-from-thread-dead").offset;
+  g_syms.set_to_run_bootstrap = intern_from_c("set-to-run-bootstrap").offset;
 
   make_function_symbol_from_c("__goalc-return-to-kernel", (void*)goalc_k_return_to_kernel);
   make_function_symbol_from_c("__goalc-reset-and-call", (void*)goalc_k_reset_and_call);
-  make_function_symbol_from_c("__goalc-thread-suspend", (void*)goalc_k_thread_suspend);
+  make_function_symbol_from_c("__goalc-thread-suspend", (void*)goalc_suspend_entry);
   make_function_symbol_from_c("__goalc-thread-resume", (void*)goalc_k_thread_resume);
   make_function_symbol_from_c("__goalc-reset-stack-and-call",
                               (void*)goalc_k_reset_stack_and_call);
