@@ -44,7 +44,9 @@ namespace fs = ghc::filesystem;
 
 #ifdef __3DS__
 // Root of the OpenGOAL files on the SD card (see docs/3ds-port/3ds_build.md)
-#define OPENGOAL_3DS_SD_ROOT "sdmc:/3ds/jak1"
+// (a plain POSIX path: gk sets the current directory to sdmc:/, so std::filesystem sees it as
+// absolute)
+#define OPENGOAL_3DS_SD_ROOT "/3ds/jak1"
 #endif
 
 namespace file_util {

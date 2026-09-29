@@ -35,7 +35,11 @@ class GlobalProfiler {
 
  private:
   std::atomic_bool m_enabled = false;
+#ifdef __3DS__
+  size_t m_max_events = 1024;  // 152 bytes each: 10 MB at the PC default
+#else
   size_t m_max_events = 65536;
+#endif
   u64 m_t0 = 0;
   std::atomic_size_t m_next_idx = 0;
   std::vector<ProfNode> m_nodes;

@@ -27,6 +27,15 @@
 #include "game/sce/iop.h"
 #include "game/sound/sndshim.h"
 
+#ifdef __3DS__
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <thread>
+
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 using namespace iop;
 
 BS::thread_pool thpool(4);
@@ -49,6 +58,31 @@ void fake_iso_init_globals() {
   memset(sFiles, 0, sizeof(sFiles));
 
   fake_iso_entry_count = 0;
+
+#ifdef __3DS__
+  // The reader threads must be able to run while the IOP polls for their results: raise their
+  // priority (no time slicing between equal priorities on the 3DS). One task per pool thread,
+  // held until all of them started so that each thread takes exactly one.
+  static bool s_prio_set = false;
+  if (!s_prio_set) {
+    s_prio_set = true;
+    const int n = (int)thpool.get_thread_count();
+    std::atomic<int> started{0};
+    std::vector<std::future<void>> tasks;
+    for (int i = 0; i < n; i++) {
+      tasks.push_back(thpool.submit([&started, n]() {
+        ctr_thread_set_priority(CTR_PRIO_IO);
+        started++;
+        while (started.load() < n) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }));
+    }
+    for (auto& t : tasks) {
+      t.wait();
+    }
+  }
+#endif
 }
 
 /*!

@@ -28,6 +28,15 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 set(CMAKE_C_FLAGS_RELEASE "-O2")
 
+# 32/48 MB GOAL memory layout (common/goal_constants.h). The GOAL code (C modules, CGO/DGO) must be
+# built with the same setting: platform/3ds/tools/build_cmodules.sh
+option(OG3DS_SMALL_MEMORY "Small (48 MB) EE memory layout" ON)
+if(OG3DS_SMALL_MEMORY)
+  add_compile_definitions(OPENGOAL_SMALL_MEMORY=1)
+else()
+  add_compile_definitions(OPENGOAL_SMALL_MEMORY=0)
+endif()
+
 add_compile_definitions(
   FMT_HEADER_ONLY=0
   OPENGOAL_3DS=1
@@ -229,10 +238,13 @@ add_custom_command(
   VERBATIM)
 add_library(og3ds_stubs STATIC ${CMAKE_CURRENT_SOURCE_DIR}/stubs/other_games.cpp ${OG3DS_MIPS2C_STUBS})
 
-add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmodules.cmake)
+
+add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp ${OG3DS_REGISTRY_OBJ})
 target_link_libraries(gk
   -Wl,--start-group
   og3ds_kernel og3ds_runtime og3ds_sound og3ds_common og3ds_fmt og3ds_libco og3ds_port og3ds_stubs
+  ${OG3DS_GOAL_MODULES_LIB}
   -Wl,--end-group
   citro3d ctru m)
 set_target_properties(gk PROPERTIES SUFFIX ".elf")

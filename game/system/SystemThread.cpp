@@ -4,6 +4,10 @@
 #include "common/log/log.h"
 #include "common/util/unicode_util.h"
 
+#ifdef __3DS__
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 #ifdef OS_POSIX
 #include <pthread.h>
 #else
@@ -102,7 +106,16 @@ void* bootstrap_thread_func(void* x) {
 #elif __APPLE__
   pthread_setname_np(thd->name.c_str());
 #elif defined(__3DS__)
-  // no thread names
+  // no thread names. Priorities: see ctr_port.h (no time slicing between equal priorities)
+  if (thd->name == "EE") {
+    ctr_thread_set_priority(CTR_PRIO_EE);
+  } else if (thd->name == "IOP") {
+    ctr_thread_set_priority(CTR_PRIO_IOP);
+  } else if (thd->name == "DMP") {
+    ctr_thread_set_priority(CTR_PRIO_DECI);
+  } else {
+    ctr_thread_set_priority(CTR_PRIO_WORKER);
+  }
 #else
   SetThreadDescription(GetCurrentThread(), (LPCWSTR)utf8_string_to_wide_string(thd->name).c_str());
 #endif

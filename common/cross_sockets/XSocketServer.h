@@ -11,7 +11,11 @@
 /// @brief A cross platform generic socket server implementation
 class XSocketServer {
  public:
+#ifdef __3DS__
+  static constexpr int DEF_BUFFER_SIZE = 1024 * 1024;  // memory is tight
+#else
   static constexpr int DEF_BUFFER_SIZE = 32 * 1024 * 1024;
+#endif
   XSocketServer(std::function<bool()> shutdown_callback,
                 int _tcp_port,
                 int _buffer_size = DEF_BUFFER_SIZE);

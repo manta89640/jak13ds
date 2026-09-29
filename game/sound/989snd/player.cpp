@@ -29,6 +29,8 @@ Player::~Player() {
 }
 
 #ifdef __3DS__
+#include "platform/3ds/port/ctr_port.h"
+
 void Player::InitCubeb() {
   mHandlerThreadStop = false;
   mHandlerThread = std::thread(&Player::HandlerTickThread, this);
@@ -42,6 +44,7 @@ void Player::DestroyCubeb() {
 }
 
 void Player::HandlerTickThread() {
+  ctr_thread_set_priority(CTR_PRIO_IO);
   using clock = std::chrono::steady_clock;
   constexpr auto kTick = std::chrono::nanoseconds(1000000000 / 240);
   auto next = clock::now();
