@@ -9,11 +9,10 @@
  * - The kernel side of a switch (thread-resume, reset-and-call) saves a KernelFrame in its own C
  *   frame on the kernel stack. Returning to the kernel (return-from-thread, suspend, deactivate)
  *   restores the innermost KernelFrame.
- * - A suspending thread saves its context in the thread object, right after the backup stack
- *   (GOALC_THREAD_CTX_SIZE extra bytes are allocated for main threads in C mode), then copies its
- *   stack [sp, stack-top) to the backup stack, like the native kernel. Resuming copies the stack
- *   back to the same addresses and restores the context. Compiled C frames only point into their
- *   own stack (or GOAL memory), so they survive this.
+ * - A suspending thread saves its context and copies its stack [sp, stack-top) to host memory
+ *   (a SuspendedThread, found through the thread object), instead of to the backup stack in the
+ *   process heap. Resuming copies the stack back to the same addresses and restores the context.
+ *   Compiled C frames only point into their own stack (or GOAL memory), so they survive this.
  * - catch saves a context in its C frame. throw restores it.
  *
  * Structure layouts (see gkernel-h.gc). For basics, the field at layout offset X is at obj - 4 + X.
@@ -23,7 +22,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "common/log/log.h"
 #include "common/symbols.h"
@@ -60,13 +61,8 @@ constexpr u32 FRAME_NEXT = 8 - 4;
 constexpr u32 CATCH_FRAME_SP = 12 - 4;
 constexpr u32 CATCH_FRAME_RA = 16 - 4;
 
-constexpr u64 THREAD_CTX_MAGIC = 0x7478637463616f67;  // "goactctx"
 constexpr u32 CATCH_MAGIC = 0x63746368;               // "hctc"
 
-static_assert(sizeof(goalc_ctx) + 16 <= GOALC_THREAD_CTX_SIZE);
-// the thread context stores a magic value in the last word, which the assembly never touches.
-static_assert(sizeof(goalc_ctx::regs) / sizeof(u64) == 22);
-constexpr int CTX_MAGIC_WORD = 21;
 
 u32& word(u32 goal_addr) {
   return *(u32*)(goalc_mem + goal_addr);
@@ -147,11 +143,82 @@ std::string goal_name(u32 obj) {
   return fmt::format("#x{:x}", obj);
 }
 
-//! Where a main cpu-thread keeps its context while suspended.
-goalc_ctx* thread_ctx(u32 thread) {
-  u32 backup_end = thread + CPU_THREAD_STACK + word(thread + THREAD_STACK_SIZE);
-  u32 addr = (backup_end + 15) & ~15u;
-  return (goalc_ctx*)host(addr);
+// Suspended threads: their context and stack live in host memory, not in the process heap.
+// Compiled C frames are bigger than native ones by an amount that depends on the host and the
+// code (up to ~12x for vector heavy functions on ARM32), so the game's backup stack sizes are
+// useless, and making them big enough for the worst case costs too much process heap.
+// The slot is found through the thread: pc is GOALC_SUSPENDED_PC and rreg 0 holds
+// (token << 32) | slot index. Slots are freed on resume and by __goalc-thread-release, which the
+// GOAL kernel calls when a suspended thread is thrown away (deactivate, set-to-run).
+struct SuspendedThread {
+  goalc_ctx ctx;
+  std::vector<u8> stack;
+  u32 token = 0;
+  bool used = false;
+};
+std::vector<std::unique_ptr<SuspendedThread>> g_suspended;
+std::vector<u32> g_free_slots;
+u32 g_next_token = 1;
+u32 g_slots_in_use = 0;
+
+//! the biggest stack a thread may suspend with
+constexpr u32 MAX_SUSPENDED_STACK = 64 * 1024;
+
+u64& thread_rreg0(u32 thread) {
+  return *(u64*)host(thread + CPU_THREAD_RREG);
+}
+
+u32 alloc_slot() {
+  u32 idx;
+  if (!g_free_slots.empty()) {
+    idx = g_free_slots.back();
+    g_free_slots.pop_back();
+  } else {
+    idx = (u32)g_suspended.size();
+    g_suspended.push_back(std::make_unique<SuspendedThread>());
+  }
+  auto& slot = *g_suspended[idx];
+  slot.used = true;
+  slot.token = g_next_token++;
+  if (!g_next_token) {
+    g_next_token = 1;
+  }
+  g_slots_in_use++;
+  return idx;
+}
+
+//! The slot of a suspended thread, or null if the thread isn't suspended (in C mode).
+SuspendedThread* thread_slot(u32 thread) {
+  if (word(thread + THREAD_PC) != GOALC_SUSPENDED_PC) {
+    return nullptr;
+  }
+  u64 handle = thread_rreg0(thread);
+  u32 idx = (u32)handle;
+  u32 token = (u32)(handle >> 32);
+  if (idx >= g_suspended.size()) {
+    return nullptr;
+  }
+  auto* slot = g_suspended[idx].get();
+  if (!slot->used || slot->token != token) {
+    return nullptr;
+  }
+  return slot;
+}
+
+void free_slot(SuspendedThread* slot) {
+  slot->used = false;
+  slot->token = 0;
+  // keep the stack buffer for the next user, unless it's unusually big
+  if (slot->stack.capacity() > 8192) {
+    std::vector<u8>().swap(slot->stack);
+  }
+  for (u32 i = 0; i < g_suspended.size(); i++) {
+    if (g_suspended[i].get() == slot) {
+      g_free_slots.push_back(i);
+      break;
+    }
+  }
+  g_slots_in_use--;
 }
 
 [[noreturn]] void call_return_from_thread_dead(u64 value) {
@@ -230,32 +297,35 @@ u64 goalc_k_reset_and_call(u64 thread, u64 func) {
 u64 goalc_suspend_impl(goalc_ctx* caller_ctx) {
   using namespace jak1;
   u32 thread = (u32)goalc_pp;
-  goalc_ctx* ctx = thread_ctx(thread);
-  memcpy(ctx, caller_ctx, sizeof(goalc_ctx));
-  ctx->regs[CTX_MAGIC_WORD] = THREAD_CTX_MAGIC;
   u32 sp = goal_addr_of((void*)goalc_ctx_sp(caller_ctx));
-
-  word(thread + THREAD_PC) = GOALC_SUSPENDED_PC;
-  word(thread + THREAD_SP) = sp;
-
   u32 proc = word(thread + THREAD_PROCESS);
-  u32 top_thread = word(proc + PROCESS_TOP_THREAD);
-  s32 used = (s32)(word(top_thread + THREAD_STACK_TOP) - word(top_thread + THREAD_SP));
-  s32 stack_size = (s32)word(thread + THREAD_STACK_SIZE);
   u32 stack_top = word(thread + THREAD_STACK_TOP);
   u32 copy_size = stack_copy_size(stack_top, sp);
-  if (used > stack_size || (s32)copy_size > stack_size) {
-    lg::error("goalc: thread-suspend of {} with {} bytes of stack used, but the thread only has {}",
-              goal_name(word(proc + PROCESS_NAME)), used, stack_size);
+  if (copy_size > MAX_SUSPENDED_STACK) {
+    lg::error("goalc: thread-suspend of {} with {} bytes of stack used",
+              goal_name(word(proc + PROCESS_NAME)), copy_size);
     goalc_print_backtrace(caller_ctx);
     goalc_break();
-    // continuing would overwrite the saved context and the heap.
     abort();
   }
 
+  // a thread that is suspended again without being resumed (shouldn't happen) reuses its slot
+  SuspendedThread* slot = thread_slot(thread);
+  u32 idx;
+  if (slot) {
+    idx = (u32)thread_rreg0(thread);
+  } else {
+    idx = alloc_slot();
+    slot = g_suspended[idx].get();
+  }
+  memcpy(&slot->ctx, caller_ctx, sizeof(goalc_ctx));
+  slot->stack.resize(copy_size);
+  memcpy(slot->stack.data(), host(stack_top - copy_size), copy_size);
+
+  thread_rreg0(thread) = ((u64)slot->token << 32) | idx;
+  word(thread + THREAD_PC) = GOALC_SUSPENDED_PC;
+  word(thread + THREAD_SP) = sp;
   word(proc + PROCESS_STATUS) = g_syms.suspended;
-  u32 backup_end = thread + CPU_THREAD_STACK + (u32)stack_size;
-  memcpy(host(backup_end - copy_size), host(stack_top - copy_size), copy_size);
 
   goalc_pp = 0;
   return_to_kernel(0);
@@ -280,19 +350,21 @@ u64 goalc_k_thread_resume(u64 thread_arg) {
     u32 stack_top = word(thread + THREAD_STACK_TOP);
 
     if (pc == GOALC_SUSPENDED_PC) {
-      goalc_ctx* ctx = thread_ctx(thread);
-      if (ctx->regs[CTX_MAGIC_WORD] != THREAD_CTX_MAGIC) {
+      SuspendedThread* slot = thread_slot(thread);
+      if (!slot) {
         lg::die("goalc: thread-resume of thread #x{:x} which has no saved context", thread);
       }
-      ctx->regs[CTX_MAGIC_WORD] = 0;
       // restore the stack
       u32 copy_size = stack_copy_size(stack_top, sp);
-      u32 backup_end = thread + CPU_THREAD_STACK + word(thread + THREAD_STACK_SIZE);
-      memcpy(host(stack_top - copy_size), host(backup_end - copy_size), copy_size);
+      ASSERT(copy_size == slot->stack.size());
+      memcpy(host(stack_top - copy_size), slot->stack.data(), copy_size);
       word(proc + PROCESS_TOP_THREAD) = thread;
       word(proc + PROCESS_STATUS) = g_syms.running;
+      word(thread + THREAD_PC) = 0;
       goalc_pp = proc;
-      goalc_ctx_restore(ctx, 1);
+      // the slot memory stays valid until the next suspend, which can't happen before the restore
+      free_slot(slot);
+      goalc_ctx_restore(&slot->ctx, 1);
     } else {
       // A thread that was set up with set-to-run: pc is a GOAL function (set-to-run-bootstrap),
       // which natively gets jumped to with sp at thread.sp (the stack top).
@@ -388,12 +460,34 @@ u64 goalc_k_throw(u64 frame_arg, u64 value) {
   goalc_ctx_restore(&cc->ctx, 1);
 }
 
+/*!
+ * The GOAL kernel no longer needs a suspended thread (deactivate, set-to-run): free its saved
+ * context and stack.
+ */
+u64 goalc_k_thread_release(u64 thread) {
+  if ((u32)thread && (u32)thread != (u32)goalc_st) {
+    SuspendedThread* slot = thread_slot((u32)thread);
+    if (slot) {
+      free_slot(slot);
+      word((u32)thread + THREAD_PC) = 0;
+    }
+  }
+  return 0;
+}
+
+u32 goalc_suspended_thread_count() {
+  return g_slots_in_use;
+}
+
 void goalc_kernel_set_symbols(u32 kernel_sp,
                               u32 running,
                               u32 suspended,
                               u32 return_from_thread_dead,
                               u32 set_to_run_bootstrap) {
   g_kernel_frame = nullptr;
+  g_suspended.clear();
+  g_free_slots.clear();
+  g_slots_in_use = 0;
   g_syms.kernel_sp = kernel_sp;
   g_syms.running = running;
   g_syms.suspended = suspended;
@@ -403,16 +497,21 @@ void goalc_kernel_set_symbols(u32 kernel_sp,
 
 void goalc_kernel_init() {
   g_kernel_frame = nullptr;
+  g_suspended.clear();
+  g_free_slots.clear();
+  g_slots_in_use = 0;
   g_syms.kernel_sp = intern_from_c("*kernel-sp*").offset;
   g_syms.running = intern_from_c("running").offset;
   g_syms.suspended = intern_from_c("suspended").offset;
   g_syms.return_from_thread_dead = intern_from_c("return-from-thread-dead").offset;
   g_syms.set_to_run_bootstrap = intern_from_c("set-to-run-bootstrap").offset;
 
+
   make_function_symbol_from_c("__goalc-return-to-kernel", goalc_k_return_to_kernel);
   make_function_symbol_from_c("__goalc-reset-and-call", goalc_k_reset_and_call);
   make_function_symbol_from_c("__goalc-thread-suspend", goalc_suspend_entry);
   make_function_symbol_from_c("__goalc-thread-resume", goalc_k_thread_resume);
+  make_function_symbol_from_c("__goalc-thread-release", goalc_k_thread_release);
   make_function_symbol_from_c("__goalc-reset-stack-and-call",
                               goalc_k_reset_stack_and_call);
   make_function_symbol_from_c("__goalc-catch", goalc_k_catch);

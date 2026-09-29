@@ -182,10 +182,6 @@
   "Set the backup stack size of a thread. This should only be done on the main-thread.
   This should be done immediately after allocating the main-thread.
    Users can do this if they want a larger or smaller backup stack than the default."
-  (#when (eq? INSTRUCTION_SET 'c)
-    ;; sizes in the game are for native frames. Some processes ask for less than the default,
-    ;; which isn't enough for C frames, so don't go below the default.
-    (set! stack-size (max PROCESS_STACK_SAVE_SIZE (* GOALC_STACK_SCALE stack-size))))
   (let ((proc (-> this process)))
     (cond
       ((neq? this (-> proc main-thread))
@@ -196,10 +192,9 @@
       ((= (-> this stack-size) stack-size)
        ;; we already have this size. Don't do anything.
        )
-      ((eq? (-> proc heap-cur) (&+ this (-> this type size) (- *gtype-basic-offset*) (-> this stack-size) GOALC_THREAD_CTX_SIZE))
+      ((eq? (-> proc heap-cur) (&+ this (-> this type size) (- *gtype-basic-offset*) (-> this stack-size)))
        ;; our heap cur point to right after us. So we can safely bump it forward to give us more space.
-       ;; (in C mode, the saved context after the backup stack moves too)
-       (set! (-> proc heap-cur) (the pointer (&+ this (-> this type size) (- *gtype-basic-offset*) stack-size GOALC_THREAD_CTX_SIZE)))
+       (set! (-> proc heap-cur) (the pointer (&+ this (-> this type size) (- *gtype-basic-offset*) stack-size)))
        (set! (-> this stack-size) stack-size))
       (else (msg-err "illegal attempt change stack size of ~A after more heap allocation has occured.~%" proc) (break))))
   (none))
@@ -223,8 +218,7 @@
                   ;; process heap.
                   (let ((alloc (align16 (-> parent-process heap-cur)))) ;; start at heap cur, aligned
                     ;; bump heap to include our thread + its stack
-                    ;; (+ room for the saved context in C mode, see goalc_kernel.cpp)
-                    (set! (-> parent-process heap-cur) (the pointer (+ alloc (-> type-to-make size) stack-size GOALC_THREAD_CTX_SIZE)))
+                    (set! (-> parent-process heap-cur) (the pointer (+ alloc (-> type-to-make size) stack-size)))
                     (the cpu-thread (+ alloc *gtype-basic-offset*)))))))
     ;; set up the type manually, as we allocated the memory manually
     (set! (-> this type) type-to-make)
@@ -249,7 +243,7 @@
 (defmethod asize-of ((this cpu-thread))
   "Get the size of a cpu-thread"
   ;; we need this because the cpu-thread is stored in the process stack
-  (the int (+ (-> this type size) (-> this stack-size) GOALC_THREAD_CTX_SIZE)))
+  (the int (+ (-> this type size) (-> this stack-size))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Remove Exit
@@ -2413,6 +2407,9 @@
   "Set the given thread to call the given function with the given arguments next time it resumes.
   Only for main threads.
   Once the function returns, the process deactivates."
+  ;; C backend: if the thread is suspended, it won't be resumed where it was
+  (#when (eq? INSTRUCTION_SET 'c)
+    (__goalc-thread-release thread))
   (let ((proc (-> thread process)))
     (set! (-> proc status) 'waiting-to-run)
     ;; we store arguments and the function to call in saved registers
@@ -2461,6 +2458,10 @@
   vars from within your exit handlers."
   ;; don't do anything if we already died.
   (unless (eq? (-> this status) 'dead)
+    ;; C backend: free the saved stack of the main thread, if it's suspended
+    (#when (eq? INSTRUCTION_SET 'c)
+      (if (-> this main-thread)
+        (__goalc-thread-release (-> this main-thread))))
     ;; set our state to a dead-state that does nothing.
     (set! (-> this next-state) dead-state)
     ;; call entity handler if we're from an entity.

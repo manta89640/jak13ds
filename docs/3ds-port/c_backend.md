@@ -149,6 +149,7 @@ Primitives are C++ functions registered as GOAL functions at heap init (C mode o
 | `return-from-thread-dead` | `(deactivate pp)` then `__goalc-return-to-kernel` |
 | `thread-suspend` (cpu-thread) | `__goalc-thread-suspend` (thread in pp) |
 | `thread-resume` (cpu-thread) | `__goalc-thread-resume` |
+| `set-to-run`, `deactivate` | also `__goalc-thread-release` (frees a suspended thread's saved state) |
 | `set-to-run-bootstrap` | calls rreg 0 with rreg 1-6, then `return-from-thread-dead` (the runtime does this directly when a thread's pc is `set-to-run-bootstrap`, to save a frame) |
 | `enter-state` "reset stack and jump to code" | `__goalc-reset-stack-and-call` |
 | `new catch-frame` | `__goalc-catch` |
@@ -165,23 +166,27 @@ Design:
   the kernel restores the innermost one with a value. `*kernel-sp*` is still set.
 - Suspend: `__goalc-thread-suspend` is the assembly `goalc_suspend_entry`, which saves the
   context of its caller (as if saved at the call site), so only GOAL frames end up in the saved
-  stack. The context is stored in the thread object, right after the backup stack
-  (`GOALC_THREAD_CTX_SIZE` = 192 extra bytes for main threads in C mode: `new cpu-thread`,
-  `stack-size-set!` and `asize-of` account for it, so relocation moves it with the process). pc
-  becomes `0xc0de5000`, sp the caller's sp, then [sp, stack-top) is copied to the backup stack and
-  the kernel context is restored. Resume copies the stack back to the same addresses, sets
-  top-thread/status/pp and restores the thread context. C frames survive because they only point
-  into their own stack or GOAL memory.
+  stack. The context and a copy of [sp, stack-top) go to host memory (a `SuspendedThread` slot),
+  not to the backup stack in the process heap: pc becomes `0xc0de5000`, rreg 0 holds
+  `(token << 32) | slot`, sp is the caller's sp. Resume copies the stack back to the same
+  addresses, sets top-thread/status/pp, frees the slot and restores the context. C frames
+  survive because they only point into their own stack or GOAL memory.
+  - Why host memory: compiled C frames are bigger than native ones by an amount that depends on
+    the host and the code. Measured with `-fstack-usage` over all of Jak 1: the median frame is
+    the same size, but vector heavy functions are up to ~3.5x bigger on AArch64 and ~12x on ARM32
+    (camera-combiner suspends with 1704 bytes where the game reserves 512). Scaling the backup
+    stacks to cover that made small process heaps overflow on the 3DS. Process heaps are now laid
+    out exactly like in the native version (the backup stack is allocated but unused).
+  - Slots are freed when the thread is resumed, and by `__goalc-thread-release`, which
+    `set-to-run` and `deactivate` (for the main thread) call in C mode, so a thread that is thrown
+    away while suspended doesn't leak. The token guards against stale handles.
+  - The only limit is 64 kB of suspended stack.
 - A thread whose pc is anything else (after `set-to-run`) is started by calling pc on a fresh
   stack at thread sp (the stack top).
 - catch: the context lives in the C frame of `__goalc-catch` (on the GOAL stack), the catch
   frame's `ra` field holds its GOAL address and `sp` the stack pointer. throw pops frames through
   the catch frame (stack-frame-top = next) and restores the context; pp is not restored, like the
   native version.
-- Backup stack sizes: compiled C frames are about twice as big as native ones on AArch64, so in C
-  mode `PROCESS_STACK_SAVE_SIZE` is 512 and `stack-size-set!` doubles the requested size, with a
-  floor of 512 (`GOALC_STACK_SCALE` in gkernel-h.gc). An overflow prints the process name and a
-  backtrace, then breaks.
 
 ### Testing
 

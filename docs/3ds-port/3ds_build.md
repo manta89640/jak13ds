@@ -140,6 +140,10 @@ them into `gk.3dsx` through the static registry.
     loads village1; `-debug-mem` + REPL `(lg) (test-play)` spawns Jak and runs, dying and
     respawning works.
   - `-debug` (debug segments) won't fit in the 4 MB debug heap; use `-debug-mem` for the REPL.
+  - If `play` fails with `kmalloc: !alloc mem global-object (11264000 bytes)`, the GOAL code was
+    built with the big-memory sizes (3x process heap, 3x DMA buffers: ~19 MB more). The first
+    M3 run used a mirror built while `SMALL_MEMORY` in gcommon.gc was still broken (it evaluated
+    to a list, so both SMALL_MEMORY and BIG_MEMORY were true); rebuilding fixes it.
 - **Types / formats:** `klink.cpp` uses `u32`; the `%ld`/`%lx` with 64-bit values are fixed.
   (`%d`/`%x` with `uint32_t` still warn on ARM32; harmless, same size.)
 - **Calls from GOAL to C functions on ARM32:** see "Typed kernel functions" in `c_backend.md`.
