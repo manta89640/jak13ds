@@ -69,6 +69,7 @@ class CFunctionEmitter {
   const VarInfo& var(const RegVal* rv) const;
   std::string var_name(int id) const;
   std::string access(const RegVal* rv, bool for_write);
+  std::string seg_addr(int seg, const std::string& offset);
 
   CModuleEmitter* m_module = nullptr;
   FunctionEnv* m_env = nullptr;

@@ -196,9 +196,16 @@ GC_INLINE u64 gc_sar(u64 a, u64 s) {
 // float math
 // ---------------------------------------------------------------------------
 
-//! cvttss2si with 32-bit destination: truncate, out of range or NaN gives INT32_MIN.
+//! float to int32, truncating and saturating like the EE (CVT.W.S) and the ARM64 backend.
+//! NaN gives 0 (the EE has no NaNs, ARM64 gives 0).
 GC_INLINE s32 gc_cvtt(float f) {
-  if (!(f >= -2147483648.0f && f < 2147483648.0f)) {
+  if (f != f) {
+    return 0;
+  }
+  if (f >= 2147483648.0f) {
+    return INT32_MAX;
+  }
+  if (f <= -2147483648.0f) {
     return INT32_MIN;
   }
   return (s32)f;
@@ -472,3 +479,6 @@ GC_INLINE v128 gc_pshufhw(v128 a, u32 c) {
 //! Address of symbol k's value slot relative to st (jak 1: symbol value is at the symbol).
 #define GC_SYM(k) (goalc_st + (u64)(s64)gc_sym_offsets[k])
 #define GC_SEG(s) ((u64)gc_seg_base[s])
+//! address in another segment of this object: 0 if that segment isn't loaded (like the native
+//! linker), so method-set! of a function in an unloaded debug segment does nothing.
+#define GC_SEG_ADDR(s, off) (gc_seg_base[s] ? (u64)gc_seg_base[s] + (u64)(off) : 0)

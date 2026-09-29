@@ -227,13 +227,19 @@ int CFunctionEmitter::symbol(const std::string& name) {
   return m_module->symbol(name);
 }
 
+std::string CFunctionEmitter::seg_addr(int seg, const std::string& offset) {
+  if (seg == m_env->segment) {
+    return fmt::format("(GC_SEG({}) + {})", seg, offset);  // our own segment is always loaded
+  }
+  return fmt::format("GC_SEG_ADDR({}, {})", seg, offset);
+}
+
 std::string CFunctionEmitter::static_addr(const emitter::StaticRecord& rec, int offset) {
-  return fmt::format("(GC_SEG({}) + {} + {})", rec.seg, m_module->static_token(rec), offset);
+  return seg_addr(rec.seg, fmt::format("{} + {}", m_module->static_token(rec), offset));
 }
 
 std::string CFunctionEmitter::function_addr(int f_idx) {
-  return fmt::format("(GC_SEG({}) + {})", m_module->function_seg.at(f_idx),
-                     m_module->function_token(f_idx));
+  return seg_addr(m_module->function_seg.at(f_idx), m_module->function_token(f_idx));
 }
 
 std::string CFunctionEmitter::stack_slot_addr(int slot) {
