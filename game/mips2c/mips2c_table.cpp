@@ -7,10 +7,13 @@
 #include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kmalloc.h"
 #include "game/kernel/common/kscheme.h"
+#include "game/common/game_common_types.h"
 #include "game/kernel/jak1/kscheme.h"
+#if !OPENGOAL_ONLY_JAK1
 #include "game/kernel/jak2/kscheme.h"
 #include "game/kernel/jak3/kscheme.h"
 #include "game/kernel/jakx/kscheme.h"
+#endif
 #include "game/runtime.h"
 
 extern "C" {
@@ -127,6 +130,7 @@ namespace generic_no_light_dproc { extern void link(); }
 namespace generic_tie_convert { extern void link(); }
 }  // namespace jak1
 
+#if !OPENGOAL_ONLY_JAK1
 namespace jak2 {
 namespace collide_do_primitives { extern void link(); }
 namespace moving_sphere_triangle_intersect { extern void link(); }
@@ -535,6 +539,7 @@ namespace shadow_add_double_tris { extern void link(); }
 namespace shadow_execute { extern void link(); }
 namespace method_21_cloth_system { extern void link(); }
 }
+#endif  // !OPENGOAL_ONLY_JAK1
 // clang-format on
 
 LinkedFunctionTable gLinkedFunctionTable;
@@ -606,6 +611,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
       {jak1::draw_inline_array_instance_tie::link,
        jak1::draw_inline_array_prototype_tie_generic_asm::link}},
      {"generic-tie", {jak1::generic_tie_dma_to_spad_sync::link, jak1::generic_tie_convert::link}}},
+#if !OPENGOAL_ONLY_JAK1
     /////////// JAK 2
     {{"collide-func",
       {jak2::collide_do_primitives::link, jak2::moving_sphere_triangle_intersect::link}},
@@ -905,7 +911,12 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jakx::shadow_add_verts::link, jakx::shadow_add_facing_single_tris::link,
        jakx::shadow_add_single_edges::link, jakx::shadow_add_double_edges::link,
        jakx::shadow_add_single_tris::link, jakx::shadow_add_double_tris::link}},
-     {"cloth", {jakx::method_21_cloth_system::link}}},
+     {"cloth", {jakx::method_21_cloth_system::link}}}
+#else
+    {},
+    {},
+    {},
+#endif
 };
 
 // C backend: calls a mips2c function from GOAL (mips2c_goalc.cpp)
@@ -926,6 +937,7 @@ void LinkedFunctionTable::reg(const std::string& name, u64 (*exec)(void*), u32 s
                                                       *(s7 + jak1_symbols::FIX_SYM_FUNCTION_TYPE),
                                                       0x40, UNKNOWN_PP));
       break;
+#if !OPENGOAL_ONLY_JAK1
     case GameVersion::Jak2:
       jump_to_asm = Ptr<u8>(::jak2::alloc_heap_object(
           s7.offset + jak2_symbols::FIX_SYM_GLOBAL_HEAP,
@@ -941,6 +953,7 @@ void LinkedFunctionTable::reg(const std::string& name, u64 (*exec)(void*), u32 s
           s7.offset + jak3_symbols::FIX_SYM_GLOBAL_HEAP,
           ::jakx::u32_in_fixed_sym(jakx_symbols::FIX_SYM_FUNCTION_TYPE), 0x40, UNKNOWN_PP));
       break;
+#endif
     default:
       ASSERT(false);
   }

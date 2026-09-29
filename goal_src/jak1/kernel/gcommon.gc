@@ -15,10 +15,23 @@
 ;; disable PS2 only code and enable PC-specific code
 (defglobalconstant PC_PORT #t)
 
-;; whether we're allowed to use more memory than the original game or not
-(defglobalconstant BIG_MEMORY #t)
+;; Small memory mode (3DS): 48 MB of EE memory instead of 128 MB, set with
+;; OPENGOAL_SMALL_MEMORY=1 in the environment of the compiler. The runtime must be built with the
+;; same setting (OPENGOAL_SMALL_MEMORY in common/goal_constants.h, on by default for the 3DS),
+;; which the C kernel checks against *goal-small-memory* after loading the kernel.
+;; (defglobalconstant doesn't evaluate its value, so these use #if to get #t or #f)
+(#if (eq? (get-environment-variable "OPENGOAL_SMALL_MEMORY" :default "0") "1")
+  (defglobalconstant SMALL_MEMORY #t)
+  (defglobalconstant SMALL_MEMORY #f))
 
-(defglobalconstant PC_BIG_MEMORY (and PC_PORT BIG_MEMORY))
+;; whether we're allowed to use more memory than the original game or not
+(#if SMALL_MEMORY
+  (defglobalconstant BIG_MEMORY #f)
+  (defglobalconstant BIG_MEMORY #t))
+
+(#if (and PC_PORT BIG_MEMORY)
+  (defglobalconstant PC_BIG_MEMORY #t)
+  (defglobalconstant PC_BIG_MEMORY #f))
 
 ;; redirects access to EE memory mapped registers through get-vm-ptr to valid addresses that
 ;; are monitored in the runtime for debugging.
@@ -38,7 +51,8 @@
 (defconstant SYM_TO_STRING_OFFSET #x20000) ;; changed from #xff38
 
 ;; pointers larger than this are invalid by valid?
-(defconstant END_OF_MEMORY #x8000000)
+;; (EE_MAIN_MEM_SIZE in common/goal_constants.h)
+(defconstant END_OF_MEMORY (#if SMALL_MEMORY #x3000000 #x8000000))
 
 ;; GOAL boxed offsets use the lower three bits to indicate if they are
 ;; an integer (binteger), a pair, or a strucutre with type info (basic)
@@ -695,6 +709,9 @@
 
 ;; the column that will be printed to by format.
 (define *print-column* (the binteger 0))
+
+;; checked by the C kernel, which must use the same memory layout (see SMALL_MEMORY)
+(define *goal-small-memory* (#if SMALL_MEMORY #t #f))
 
 ;; note: normal use of print/inspect will have the compiler pick the appropriate method
 ;; for non-basics.  However, it may be useful to have print/inpsect available as a function

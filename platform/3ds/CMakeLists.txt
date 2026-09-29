@@ -159,11 +159,6 @@ set(OG3DS_KERNEL_SOURCES
 )
 list(TRANSFORM OG3DS_KERNEL_SOURCES PREPEND ${OG_ROOT}/game/)
 add_library(og3ds_kernel STATIC ${OG3DS_KERNEL_SOURCES})
-# platform shims (sys/mman.h) for code we don't modify
-target_include_directories(og3ds_kernel BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-# TEMPORARY: uint32_t* vs u32* (int32_t is long on arm-none-eabi). Remove once the kernel
-# sources use u32 consistently (see docs/3ds-port/3ds_build.md).
-set_source_files_properties(${OG_ROOT}/game/kernel/common/klink.cpp PROPERTIES COMPILE_OPTIONS "-fpermissive")
 
 # ---------------- runtime: everything else (platform-owned) ----------------
 file(GLOB OG3DS_MIPS2C_JAK1 ${OG_ROOT}/game/mips2c/jak1_functions/*.cpp)
@@ -226,24 +221,12 @@ add_library(og3ds_runtime STATIC ${OG3DS_RUNTIME_SOURCES} ${OG3DS_MIPS2C_JAK1})
 # ---------------- gk.3dsx ----------------
 add_library(og3ds_port STATIC ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_port.c)
 
-# TEMPORARY stubs for the other games (see stubs/other_games.cpp)
-set(OG3DS_MIPS2C_STUBS ${CMAKE_CURRENT_BINARY_DIR}/mips2c_other_games.cpp)
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-add_custom_command(
-  OUTPUT ${OG3DS_MIPS2C_STUBS}
-  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_mips2c_stubs.py
-          ${OG_ROOT}/game/mips2c/mips2c_table.cpp ${OG3DS_MIPS2C_STUBS}
-  DEPENDS ${OG_ROOT}/game/mips2c/mips2c_table.cpp ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_mips2c_stubs.py
-  COMMENT "Generating mips2c stubs for the other games"
-  VERBATIM)
-add_library(og3ds_stubs STATIC ${CMAKE_CURRENT_SOURCE_DIR}/stubs/other_games.cpp ${OG3DS_MIPS2C_STUBS})
-
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmodules.cmake)
 
 add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp ${OG3DS_REGISTRY_OBJ})
 target_link_libraries(gk
   -Wl,--start-group
-  og3ds_kernel og3ds_runtime og3ds_sound og3ds_common og3ds_fmt og3ds_libco og3ds_port og3ds_stubs
+  og3ds_kernel og3ds_runtime og3ds_sound og3ds_common og3ds_fmt og3ds_libco og3ds_port
   ${OG3DS_GOAL_MODULES_LIB}
   -Wl,--end-group
   citro3d ctru m)

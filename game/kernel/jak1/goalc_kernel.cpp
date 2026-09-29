@@ -409,14 +409,14 @@ void goalc_kernel_init() {
   g_syms.return_from_thread_dead = intern_from_c("return-from-thread-dead").offset;
   g_syms.set_to_run_bootstrap = intern_from_c("set-to-run-bootstrap").offset;
 
-  make_function_symbol_from_c("__goalc-return-to-kernel", (void*)goalc_k_return_to_kernel);
-  make_function_symbol_from_c("__goalc-reset-and-call", (void*)goalc_k_reset_and_call);
-  make_function_symbol_from_c("__goalc-thread-suspend", (void*)goalc_suspend_entry);
-  make_function_symbol_from_c("__goalc-thread-resume", (void*)goalc_k_thread_resume);
+  make_function_symbol_from_c("__goalc-return-to-kernel", goalc_k_return_to_kernel);
+  make_function_symbol_from_c("__goalc-reset-and-call", goalc_k_reset_and_call);
+  make_function_symbol_from_c("__goalc-thread-suspend", goalc_suspend_entry);
+  make_function_symbol_from_c("__goalc-thread-resume", goalc_k_thread_resume);
   make_function_symbol_from_c("__goalc-reset-stack-and-call",
-                              (void*)goalc_k_reset_stack_and_call);
-  make_function_symbol_from_c("__goalc-catch", (void*)goalc_k_catch);
-  make_function_symbol_from_c("__goalc-throw", (void*)goalc_k_throw);
+                              goalc_k_reset_stack_and_call);
+  make_function_symbol_from_c("__goalc-catch", goalc_k_catch);
+  make_function_symbol_from_c("__goalc-throw", goalc_k_throw);
 }
 
 }  // namespace jak1

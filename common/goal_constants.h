@@ -105,8 +105,27 @@ constexpr u32 GOAL_COPY_METHOD = 6;      // method ID of GOAL copy
 constexpr u32 GOAL_RELOC_METHOD = 7;     // method ID of GOAL relocate
 constexpr u32 GOAL_MEMUSAGE_METHOD = 8;  // method ID of GOAL mem-usage
 
-constexpr int EE_MAIN_MEM_LOW_PROTECT = 512 * 1024;
+/*!
+ * Small memory mode (Jak 1 only): 48 MB of EE memory instead of the 128 MB of a PS2 TOOL, with
+ * BIG_MEMORY off in GOAL. Used on the 3DS. The GOAL code must be compiled with
+ * the same setting (OPENGOAL_SMALL_MEMORY=1 in the environment of goalc, see gcommon.gc), which
+ * the kernel checks at boot. See game/kernel/common/memory_layout.h for the layout.
+ */
+#if !defined(OPENGOAL_SMALL_MEMORY)
+#if defined(__3DS__)
+#define OPENGOAL_SMALL_MEMORY 1
+#else
+#define OPENGOAL_SMALL_MEMORY 0
+#endif
+#endif
+
+#if OPENGOAL_SMALL_MEMORY
+// See game/kernel/common/memory_layout.h. Must match END_OF_MEMORY in gcommon.gc.
+constexpr int EE_MAIN_MEM_SIZE = 48 * (1 << 20);
+#else
 constexpr int EE_MAIN_MEM_SIZE = 128 * (1 << 20);  // 128 MB, same as PS2 TOOL
+#endif
+constexpr int EE_MAIN_MEM_LOW_PROTECT = 512 * 1024;
 constexpr u64 EE_MAIN_MEM_MAP = 0x2123000000;      // intentionally > 32-bit to catch pointer bugs
 
 // when true, attempt to map the EE memory in the low 2 GB of RAM

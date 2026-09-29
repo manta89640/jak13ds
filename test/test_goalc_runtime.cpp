@@ -3,6 +3,7 @@
 // These run on the host with a fake GOAL memory, without compiled GOAL code.
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include "common/link_types.h"
 
 #include "game/kernel/common/goalc_runtime.h"
+#include "game/kernel/common/kernel_function.h"
 #include "game/kernel/jak1/goalc_kernel.h"
 #include "gtest/gtest.h"
 
@@ -466,6 +468,64 @@ TEST(GoalcRuntime, FunctionIds) {
 
   EXPECT_EQ(goalc_nothing_fn(5, 0, 0, 0, 0, 0, 0, 0), 5u);
   EXPECT_EQ(goalc_zero_fn(5, 0, 0, 0, 0, 0, 0, 0), 0u);
+}
+
+// typed adapters (kernel_function.h)
+u32 g_seen_u32 = 0;
+float g_seen_float = 0;
+s32 returns_s32(u32 a, s32 b) {
+  g_seen_u32 = a;
+  return b;
+}
+float scale(float x, u32 n) {
+  return x * (float)n;
+}
+void takes_pp_typed(u32 a0, u32, u32, u32 pp) {
+  g_seen_u32 = a0 + pp;
+}
+u8 returns_u8(u64 x) {
+  return (u8)x;
+}
+u64 takes_rpc_args(void* args) {
+  return ((u64*)args)[7];
+}
+
+u64 call_kernel_function(KernelFunction kf, u64 extra, std::array<u64, 8> args) {
+  u32 id = kf.adapter ? goalc_fn_id_for_adapted(kf.adapter, kf.ptr, extra)
+                      : goalc_fn_id_for_host(kf.ptr);
+  return ((goalc_fn8)goalc_fn_table[id])(args[0], args[1], args[2], args[3], args[4], args[5],
+                                         args[6], args[7]);
+}
+
+TEST(GoalcRuntime, TypedAdapters) {
+  FakeGoal goal;
+  // 32-bit arguments are truncated, 32-bit returns zero-extended
+  EXPECT_EQ(call_kernel_function(returns_s32, 0, {0x1234567800000005ull, 0xffffffffffffffffull}),
+            0xffffffffull);
+  EXPECT_EQ(g_seen_u32, 5u);
+  // floats travel as bit patterns
+  float x = 1.5f;
+  u32 xbits;
+  memcpy(&xbits, &x, 4);
+  u64 r = call_kernel_function(scale, 0, {xbits, 4});
+  float result;
+  u32 rbits = (u32)r;
+  memcpy(&result, &rbits, 4);
+  EXPECT_EQ(result, 6.0f);
+  EXPECT_EQ(r >> 32, 0u);
+  // arg3 is pp
+  goalc_pp = 100;
+  call_kernel_function(takes_pp_typed, 1, {7, 0, 0, 12345});
+  EXPECT_EQ(g_seen_u32, 107u);
+  EXPECT_EQ(call_kernel_function(returns_u8, 0, {0x1ff}), 0xffu);
+  // 64-bit functions don't need an adapter
+  EXPECT_EQ(KernelFunction(add8).adapter, nullptr);
+  EXPECT_NE(KernelFunction(returns_s32).adapter, nullptr);
+  // stack argument functions get a pointer to the arguments
+  KernelFunction rpc(takes_rpc_args);
+  ASSERT_NE(rpc.stack_adapter, nullptr);
+  u32 id = goalc_fn_id_for_adapted(rpc.stack_adapter, rpc.ptr, 0);
+  EXPECT_EQ(((goalc_fn8)goalc_fn_table[id])(1, 2, 3, 4, 5, 6, 7, 8), 8u);
 }
 
 // a statically registered module

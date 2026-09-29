@@ -24,7 +24,6 @@ builds these static libraries and links them into `gk.3dsx`:
 | `og3ds_kernel` | files owned by the runtime work: `game/kernel/{common,jak1}`, `mips2c_table.cpp`, `mips2c_goalc.cpp`, `runtime.cpp` (unmodified) |
 | `og3ds_runtime` | overlord (common + jak1), sce, system, settings, null renderer, all Jak 1 mips2c functions, discord logic on a no-op discord-rpc, HID stubs |
 | `og3ds_port` | `platform/3ds/port/ctr_port.c`, the only file that includes `<3ds.h>` |
-| `og3ds_stubs` | TEMPORARY link stubs for Jak 2/3/X symbols (see "Changes needed" below) |
 | `og3ds_fmt`, `og3ds_libco` | third party (libco uses its ARM32 backend) |
 
 Status: everything compiles and `gk.3dsx` links. Sizes: 2.3 MB of code and 1.3 MB of BSS. It has
@@ -38,9 +37,7 @@ EE memory (see "Changes needed" below).
   be included in the same file as `common_types.h`. All libctru calls go through
   `platform/3ds/port/ctr_port.h`, which uses plain C types.
 - **POSIX:** `OS_POSIX` is defined on the 3DS. newlib and libctru provide pthreads,
-  `clock_gettime`, `unistd` and BSD sockets. `platform/3ds/include/sys/mman.h` is a
-  malloc-backed `mmap`/`munmap`/`mprotect`, used only by the kernel library so that
-  `runtime.cpp` compiles unchanged.
+  `clock_gettime`, `unistd` and BSD sockets. There is no mmap; `runtime.cpp` uses `memalign`.
 - **Filesystem:** `common/util/FileUtil.h` uses libstdc++ `std::filesystem` on the 3DS instead of
   ghc (which fails with `#error`). `fs` is a namespace that also provides `fs::ifstream` and
   `fs::ofstream`.
@@ -109,64 +106,43 @@ sdmc:/3ds/jak1/
 are loaded from files (`out/jak1/cmod`), they would go under `data/` too, but the plan is to link
 them into `gk.3dsx` through the static registry.
 
-## Changes needed in runtime-owned files
+## Runtime-side changes for the 3DS (done)
 
-The 3DS build currently works around each of these. Items marked (workaround) should be fixed
-properly; the workarounds can then be removed.
+(AI-assisted.) The workarounds (`stubs/other_games.cpp`, `tools/gen_mips2c_stubs.py`, the
+`include/sys/mman.h` shim, `-fpermissive` on `klink.cpp`) are gone:
 
-1. **`game/runtime.cpp`**
-   - 157-227: `mmap`/`mprotect`/`munmap` of `EE_MAIN_MEM_SIZE` (128 MB).
-     - (workaround) The `sys/mman.h` shim compiles it, but a 128 MB `memalign` fails on every
-       3DS model.
-     - Needs a `__3DS__` path that allocates a smaller EE space; see item 7.
-     - `mprotect` of the low 512 KB does nothing on the 3DS.
-   - 52-84, 230-275, 318-343, 373-377: includes and unconditional calls to jak2/jak3/jakx
-     (`kboot/kdgo/klisten/kscheme_init_globals`, overlord init globals, `goal_main`,
-     `start_overlord_wrapper`, `vag_init_globals`, `init_globals_streamlist`, ...).
-     - (workaround) `platform/3ds/stubs/other_games.cpp`.
-     - Fix: guard with a "games built" macro, e.g. `OPENGOAL_JAK1_ONLY` or
-       `#ifndef __3DS__`.
-2. **`game/mips2c/mips2c_table.cpp`**
-   - Declares and registers the `link()` functions of all games.
-   - Calls `jak2/jak3/jakx::alloc_heap_object` and `u32_in_fixed_sym` (around line 930).
-   - (workaround) `platform/3ds/tools/gen_mips2c_stubs.py` generates no-op `link()`s for the
-     other games at build time. Fix: guard per game.
-3. **`game/kernel/common/klink.cpp:31-38`:** passes a `uint32_t*` to `arm64_write_mov32(u32*)`.
-   On the 3DS `uint32_t` is `unsigned long`, so this is a hard error. (workaround) The file is
-   compiled with `-fpermissive`. Fix: use `u32` (`Ptr<u32>`, `cast<u32>()`).
-4. **`game/kernel/common/goal_c_abi.h:86-87`:** `int32_t*` / `uint32_t*` fields. These are
-   `long` on the 3DS, while kernel code uses `s32`/`u32` = `int`. Sizes match, but converting
-   pointers needs casts. Keep the C side on `<stdint.h>` types and cast in C++, or use
-   `int`/`unsigned` in the ABI header.
-5. **`printf` formats that are wrong on ARM32** (from `-Wformat`, devkitARM):
-   - `kscheme.cpp:289,297`: `%lx`/`%ld` with `u64`/`s64` in `inspect_integer` /
-     `inspect_binteger`, so output is garbage and varargs are misread. Use `%llx`/`%lld` or
-     `PRIx64`.
-   - `ksocket.cpp:38`: `%lx`/`%ld` with `int64_t`/`u64`.
-   - `kprint.cpp:135`: `%lx` with `uintptr_t`.
-   - `%d`/`%x` with `uint32_t` (warnings only, harmless on ARM32): `kprint.cpp:166`,
-     `klink.cpp:112-116`, `kmalloc.cpp:136`, `jak1/klink.cpp:239,255,271,395`.
-   - Not caught because it isn't compiled for the 3DS: `jak1/kboot.cpp:134` (`%ld`).
-6. **`game/kernel/jak1/kscheme.cpp:272-295, 408-434`:** outside `__aarch64__`, the x86
-   `_arg_call_systemv`/`_stack_call_systemv` trampolines are referenced. They only link today
-   because `--gc-sections` removes the unused functions (a build without `-ffunction-sections`
-   fails to link). Guard them for C mode / `__arm__`.
-7. **Memory layout** (`common/goal_constants.h:109-110`, `game/kernel/common/memory_layout.h`,
-   `goal_src/jak1/kernel/gcommon.gc:19`, `jak1/kboot.cpp:109`, `jak1/klink.cpp:565`,
-   `jak1/kmachine.cpp:310`):
-   - The 3DS needs an `EE_MAIN_MEM_SIZE` of about 32 MB with `BIG_MEMORY` off, set the same in
-     C++ and GOAL.
-   - The GOAL stack should sit just above `GLOBAL_HEAP_END` instead of at the top of 128 MB.
-   - `MasterDebug` off (no debug heap at `0x5000000`).
-   - Budget: Old 3DS app region 64 MB, New 3DS 124 MB (178 MB in extended mode).
-   - Already used by gk: code 2.3 MB, BSS 1.3 MB, thread stacks about 1 MB, IOP / overlord
-     buffers, and the `soc:U` 1 MB if enabled.
-8. **Host stack for the EE thread** (`game/system/SystemThread.cpp`, platform-owned): 512 KB
-   right now. If the C backend runs deep native recursion on the host stack before switching to
-   the GOAL stack, change the size there.
+- **Games:** `OPENGOAL_ONLY_JAK1` (`game/common/game_common_types.h`, on for `__3DS__`) compiles
+  the Jak 2/3/X code out of `game/runtime.cpp` and `game/mips2c/mips2c_table.cpp`.
+- **EE memory:** `runtime.cpp` allocates it with `memalign(4096, EE_MAIN_MEM_SIZE)` on the 3DS (no
+  mmap, no executable view, no `PROT_NONE` guard).
+- **Memory layout:** `OPENGOAL_SMALL_MEMORY` (`common/goal_constants.h`, default on for `__3DS__`,
+  `OG3DS_SMALL_MEMORY` in this CMake project): 48 MB of EE memory. Layout in
+  `game/kernel/common/memory_layout.h`:
 
-Nothing else in `game/kernel/**` failed to compile. All Jak 1 kernel files build with devkitARM
-as they are.
+  | GOAL address | contents |
+  |---|---|
+  | `0x0000000` | kernel data, symbol table |
+  | `0x013fd20` | global heap (42.5 MB) |
+  | `0x2bc0000` | kernel stack (256 kB, top at `0x2c00000`) |
+  | `0x2c00000` | debug heap (4 MB, only with `-debug`/`-debug-mem`) |
+  | `0x3000000` | end |
+
+  The GOAL code must be compiled with `OPENGOAL_SMALL_MEMORY=1` in goalc's environment
+  (`gcommon.gc`: `SMALL_MEMORY`, `BIG_MEMORY` off, `END_OF_MEMORY`). The kernel dies at boot with a
+  clear message if `*goal-small-memory*` doesn't match the runtime.
+  - Why not the original 32 MB: with BIG_MEMORY off, Jak 1 (PC port, C mode, so no code in GOAL
+    memory) allocates 22.5 MB of level heaps (2 x 11 MB, `alloc-levels!` is always called with
+    `#f`, so the debug size) plus 5.4 MB of DMA buffers, 3.3 MB of GAME.CGO data and ~2.5 MB
+    of other data at boot: ~34 MB. It ran out at 30.5 MB. With 42.5 MB there are ~9.5 MB free in
+    village1.
+  - Tested on the Mac with a small-memory host build (`-DOPENGOAL_SMALL_MEMORY=1` in
+    CMAKE_CXX_FLAGS) and the game compiled with the C backend: `-boot` reaches the title and
+    loads village1; `-debug-mem` + REPL `(lg) (test-play)` spawns Jak and runs, dying and
+    respawning works.
+  - `-debug` (debug segments) won't fit in the 4 MB debug heap; use `-debug-mem` for the REPL.
+- **Types / formats:** `klink.cpp` uses `u32`; the `%ld`/`%lx` with 64-bit values are fixed.
+  (`%d`/`%x` with `uint32_t` still warn on ARM32; harmless, same size.)
+- **Calls from GOAL to C functions on ARM32:** see "Typed kernel functions" in `c_backend.md`.
 
 ## Running in the emulator (M3)
 

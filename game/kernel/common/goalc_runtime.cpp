@@ -23,6 +23,7 @@
 #include "common/util/FileUtil.h"
 #include "common/versions/versions.h"
 
+#include "game/kernel/common/memory_layout.h"
 #include "game/runtime.h"
 
 #include "fmt/format.h"
@@ -111,7 +112,7 @@ FnTable g_fn_table;
 // kernel functions, mips2c functions) need a distinct goalc_fn8 entry point that knows which
 // function to call. There is no runtime code generation, so we use a fixed pool of thunks.
 
-constexpr u32 kMaxThunks = 1024;
+constexpr u32 kMaxThunks = 2048;
 
 struct ThunkSlot {
   goalc_adapter adapter = nullptr;
@@ -427,7 +428,7 @@ bool goalc_on_goal_stack() {
 namespace {
 u8* default_goal_stack_top() {
   // same stack as KernelCheckAndDispatch uses for the kernel.
-  return goalc_mem + EE_MAIN_MEM_SIZE - 16;
+  return goalc_mem + GOAL_KERNEL_STACK_TOP - 16;
 }
 
 u64 call_on_foreign_thread(u32 f, const u64* args) {
