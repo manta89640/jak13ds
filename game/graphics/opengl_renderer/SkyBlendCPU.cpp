@@ -5,7 +5,7 @@
 
 #include "game/graphics/opengl_renderer/AdgifHandler.h"
 
-#ifdef __aarch64__
+#if defined(__aarch64__) && !defined(OPENGOAL_SCALAR_SIMD)
 #include <arm_neon.h>
 #endif
 
@@ -29,7 +29,12 @@ SkyBlendCPU::~SkyBlendCPU() {
  * out[i] = saturate_u8((in[i] * intensity) >> 7)
  */
 void blend_sky_initial_fast(u8 intensity, u8* out, const u8* in, u32 size) {
-#ifdef __aarch64__
+#if defined(OPENGOAL_SCALAR_SIMD)
+  for (u32 i = 0; i < size; i++) {
+    const u32 v = ((u32)in[i] * intensity) >> 7;
+    out[i] = v > 255 ? 255 : (u8)v;
+  }
+#elif defined(__aarch64__)
   // widen u8 to u16, multiply, shift, then narrow with saturation. 255*255 fits in a u16 so
   // the multiply can't overflow, and vqmovn_u16 clamps at 255 like packus does.
   const uint16x8_t intensity_vec = vdupq_n_u16(intensity);
@@ -77,7 +82,15 @@ void blend_sky_initial_fast(u8 intensity, u8* out, const u8* in, u32 size) {
  * out[i] = saturating_add_u8(out[i], saturate_u8((in[i] * intensity) >> 7))
  */
 void blend_sky_fast(u8 intensity, u8* out, const u8* in, u32 size) {
-#ifdef __aarch64__
+#if defined(OPENGOAL_SCALAR_SIMD)
+  for (u32 i = 0; i < size; i++) {
+    u32 v = ((u32)in[i] * intensity) >> 7;
+    if (v > 255)
+      v = 255;
+    const u32 sum = out[i] + v;
+    out[i] = sum > 255 ? 255 : (u8)sum;
+  }
+#elif defined(__aarch64__)
   const uint16x8_t intensity_vec = vdupq_n_u16(intensity);
   u32 i = 0;
   for (; i + 16 <= size; i += 16) {
