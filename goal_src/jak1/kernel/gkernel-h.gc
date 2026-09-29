@@ -57,6 +57,30 @@
 ;; default size of stack to backup for a process
 (defconstant PROCESS_STACK_SAVE_SIZE 256)
 
+;; C backend (INSTRUCTION_SET 'c): a main cpu-thread keeps its saved register context right after
+;; its backup stack, so it needs this many extra bytes. Must match GOALC_THREAD_CTX_SIZE in
+;; game/kernel/jak1/goalc_kernel.h.
+(defconstant GOALC_THREAD_CTX_SIZE (#if (eq? INSTRUCTION_SET 'c) 192 0))
+
+;; C backend kernel primitives (game/kernel/jak1/goalc_kernel.cpp). They replace the assembly
+;; used for context switching in gkernel.gc and gstate.gc.
+(#when (eq? INSTRUCTION_SET 'c)
+  ;; return to the kernel (the innermost thread-resume/reset-and-call) with a value. Never returns.
+  (define-extern __goalc-return-to-kernel (function object none))
+  ;; run the function on the thread's stack, return its result (or what's returned to the kernel)
+  (define-extern __goalc-reset-and-call (function object function object))
+  ;; suspend the cpu-thread in pp. Returns once the thread is resumed.
+  (define-extern __goalc-thread-suspend (function none))
+  ;; resume (or start, after set-to-run) a cpu-thread. Returns when the thread returns to the kernel.
+  (define-extern __goalc-thread-resume (function object none))
+  ;; reset the stack to the given top and call the function with 4 args there, then
+  ;; return-from-thread-dead. Never returns.
+  (define-extern __goalc-reset-stack-and-call (function pointer function object object object object none))
+  ;; catch-frame new: allocation, type, name, function, param block
+  (define-extern __goalc-catch (function object type symbol function (pointer uint64) object))
+  ;; throw-dispatch: catch frame, value
+  (define-extern __goalc-throw (function object object none)))
+
 ;; the size of the shared heap used by dynamically sized processes
 (#if PC_BIG_MEMORY
   (defconstant PROCESS_HEAP_MULT 3) ;; 3x actors
@@ -464,14 +488,25 @@
   `(rlet ((pp :reg r13 :reset-here #t))
     ;; debug check for stack overflow here, where we can easily print the process name.
     (#when (or KERNEL_DEBUG)
-      (rlet ((sp :reg rsp :reset-here #t :type int)
-             (off :reg r15 :type uint))
-        (let* ((sp-goal (- sp off))
-               (stack-top-goal (-> (the process pp) top-thread stack-top))
-               (stack-used (&- stack-top-goal sp-goal))
-               (stack-size (-> (the process pp) top-thread stack-size)))
-          (when (> stack-used stack-size)
-            (format 0 "ERROR: suspend called without enough stack in proc:~%~A~%Stack: ~D/~D~%" pp stack-used stack-size)))))
+      (#cond
+       ((eq? INSTRUCTION_SET 'c)
+        ;; in C, sp is already a GOAL address.
+        (rlet ((sp :reg rsp :reset-here #t :type int))
+          (let* ((sp-goal sp)
+                 (stack-top-goal (-> (the process pp) top-thread stack-top))
+                 (stack-used (&- stack-top-goal sp-goal))
+                 (stack-size (-> (the process pp) top-thread stack-size)))
+            (when (> stack-used stack-size)
+              (format 0 "ERROR: suspend called without enough stack in proc:~%~A~%Stack: ~D/~D~%" pp stack-used stack-size)))))
+       (#t
+        (rlet ((sp :reg rsp :reset-here #t :type int)
+               (off :reg r15 :type uint))
+          (let* ((sp-goal (- sp off))
+                 (stack-top-goal (-> (the process pp) top-thread stack-top))
+                 (stack-used (&- stack-top-goal sp-goal))
+                 (stack-size (-> (the process pp) top-thread stack-size)))
+            (when (> stack-used stack-size)
+              (format 0 "ERROR: suspend called without enough stack in proc:~%~A~%Stack: ~D/~D~%" pp stack-used stack-size)))))))
     ;; set to the current thread
     (set! pp (-> (the process pp) top-thread))
     ;; call the suspend hook (put nothing as the argument)
