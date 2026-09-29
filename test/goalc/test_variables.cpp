@@ -71,6 +71,9 @@ TEST_F(VariableTests, Bitfields) {
 }
 
 TEST_F(VariableTests, InlineAsm) {
+  if (shared_compiler->compiler.c_backend()) {
+    GTEST_SKIP() << ".push/.pop can't be expressed in C";
+  }
   shared_compiler->runner.run_static_test(testCategory, "inline-asm.static.gc", {"1\n"});
 }
 
