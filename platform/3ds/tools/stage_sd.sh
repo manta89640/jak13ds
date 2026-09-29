@@ -14,6 +14,7 @@
 #   --listener  create the "listener" flag file (Wi-Fi REPL)
 #   --clean-logs  delete data/log before the run
 #   --clean-user  delete user/ (settings, saves) before the run
+#   --screenshots N  gk saves a screenshot every N frames to data/log/shot_<frame>.bmp
 #
 # Files are copied with APFS clones (cp -c) when possible, so staging 1.3 GB is instant on macOS.
 set -euo pipefail
@@ -27,6 +28,7 @@ HAVE_ARGS=0
 LISTENER=0
 CLEAN_LOGS=0
 CLEAN_USER=0
+SHOTS=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
     --listener) LISTENER=1; shift ;;
     --clean-logs) CLEAN_LOGS=1; shift ;;
     --clean-user) CLEAN_USER=1; shift ;;
+    --screenshots) SHOTS="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
@@ -84,5 +87,6 @@ fi
 if [ "$LISTENER" = 1 ]; then touch "$BASE/listener"; else rm -f "$BASE/listener"; fi
 if [ "$CLEAN_LOGS" = 1 ]; then rm -rf "$DATA/log"; fi
 if [ "$CLEAN_USER" = 1 ]; then rm -rf "$BASE/user"; fi
+if [ "$SHOTS" != 0 ]; then echo "$SHOTS" > "$BASE/screenshots"; else rm -f "$BASE/screenshots"; fi
 
 echo "staged $n files + gk.3dsx in $BASE"

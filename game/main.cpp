@@ -19,6 +19,7 @@
 #include "common/versions/versions.h"
 
 #include "game/common/game_common_types.h"
+#include "graphics/ctr/CtrRenderer.h"
 #include "graphics/gfx.h"
 #include "graphics/gfx_test.h"
 
@@ -97,6 +98,9 @@ int main(int argc, char** argv) {
   bool disable_avx2 = false;
   bool disable_display = false;
   bool null_gfx = false;
+  bool ctr_gfx = false;
+  std::string ctr_dump_dir;
+  int ctr_dump_every = 60;
   bool enable_profiling = false;
   bool enable_portable = false;
   bool disable_save_location_override = false;
@@ -118,6 +122,10 @@ int main(int argc, char** argv) {
   app.add_flag("--no-display", disable_display, "Disable video display");
   app.add_flag("--null-gfx", null_gfx,
                "Use the null renderer: no window, but vsync is paced at 60 Hz (headless runs)");
+  app.add_flag("--ctr-gfx", ctr_gfx,
+               "Use the 3DS renderer with its software backend (no window, for testing)");
+  app.add_option("--ctr-dump", ctr_dump_dir, "With --ctr-gfx: write frames as PNG to this folder");
+  app.add_option("--ctr-dump-every", ctr_dump_every, "With --ctr-dump: write every nth frame");
   app.add_flag("--profile", enable_profiling, "Enables profiling immediately from startup");
   app.add_flag("--portable", enable_portable,
                "Save settings and saves relative to the game's executable, takes precedence over "
@@ -180,6 +188,10 @@ int main(int argc, char** argv) {
   game_options.disable_display = disable_display;
   if (null_gfx) {
     Gfx::SetPreferredPipeline(GfxPipeline::Null);
+  }
+  if (ctr_gfx) {
+    Gfx::SetPreferredPipeline(GfxPipeline::Ctr);
+    ctr_gfx::set_soft_frame_dump(ctr_dump_dir, ctr_dump_every);
   }
   game_options.game_version = game_name_to_version(game_name);
   game_options.server_port =

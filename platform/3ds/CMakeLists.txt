@@ -220,6 +220,7 @@ add_library(og3ds_runtime STATIC ${OG3DS_RUNTIME_SOURCES} ${OG3DS_MIPS2C_JAK1})
 
 # ---------------- gk.3dsx ----------------
 add_library(og3ds_port STATIC ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_port.c)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ctr_renderer.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmodules.cmake)
 
