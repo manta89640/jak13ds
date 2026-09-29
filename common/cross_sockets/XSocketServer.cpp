@@ -49,11 +49,13 @@ bool XSocketServer::init_server(bool failure_may_occur) {
     close_server_socket();
     return false;
   }
+#ifdef SO_REUSEPORT
   // macOS doesn't support setting multiple options at once, so we have to do this separately.
   if (set_socket_option(listening_socket, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes)) < 0) {
     close_server_socket();
     return false;
   }
+#endif
 #elif _WIN32
   if (set_socket_option(listening_socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, &yes, sizeof(yes)) < 0) {
     close_server_socket();

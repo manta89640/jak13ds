@@ -10,7 +10,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#ifdef __3DS__
+// ghc::filesystem does not know the 3DS; libstdc++'s std::filesystem works on newlib + libctru.
+#include <filesystem>
+#include <fstream>
+#else
 #include "third-party/filesystem.hpp"
+#endif
 
 #ifdef _WIN32
 #undef FALSE
@@ -24,7 +30,22 @@
 #include "common/common_types.h"
 #include "common/versions/versions.h"
 
+#ifdef __3DS__
+namespace fs {
+using namespace std::filesystem;
+// ghc::filesystem extensions used by the codebase
+using ifstream = std::ifstream;
+using ofstream = std::ofstream;
+using fstream = std::fstream;
+}  // namespace fs
+#else
 namespace fs = ghc::filesystem;
+#endif
+
+#ifdef __3DS__
+// Root of the OpenGOAL files on the SD card (see docs/3ds-port/3ds_build.md)
+#define OPENGOAL_3DS_SD_ROOT "sdmc:/3ds/jak1"
+#endif
 
 namespace file_util {
 fs::path get_user_home_dir();
