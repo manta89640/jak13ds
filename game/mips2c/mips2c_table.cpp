@@ -4,6 +4,7 @@
 #include "common/symbols.h"
 
 #include "game/kernel/common/codegen.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kmalloc.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/jak1/kscheme.h"
@@ -907,6 +908,9 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
      {"cloth", {jakx::method_21_cloth_system::link}}},
 };
 
+// C backend: calls a mips2c function from GOAL (mips2c_goalc.cpp)
+u64 mips2c_goalc_adapter(void* fn, u64 stack_size, u64* args);
+
 void LinkedFunctionTable::reg(const std::string& name, u64 (*exec)(void*), u32 stack_size) {
   const auto& it = m_executes.insert({name, {exec, Ptr<u8>()}});
   if (!it.second) {
@@ -942,6 +946,14 @@ void LinkedFunctionTable::reg(const std::string& name, u64 (*exec)(void*), u32 s
   }
 
   it.first->second.goal_trampoline = jump_to_asm;
+
+  if (goalc_enabled()) {
+    // GOAL compiled to C: a function stub whose id calls the adapter above.
+    goalc_write_stub(jump_to_asm.offset,
+                     goalc_fn_id_for_adapted(mips2c_goalc_adapter, (void*)exec, stack_size),
+                     0xffffffff);
+    return;
+  }
 
   u8* ptr = jump_to_asm.c();
   int written;

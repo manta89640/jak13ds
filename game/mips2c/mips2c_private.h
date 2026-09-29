@@ -10,6 +10,7 @@
 #include "common/util/BitUtils.h"
 
 #include "game/common/vu.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/mips2c/mips2c_table.h"
 
 #include "fmt/format.h"
@@ -372,6 +373,11 @@ struct ExecutionContext {
     u64 args[8] = {gprs[a0].du64[0], gprs[a1].du64[0], gprs[a2].du64[0], gprs[a3].du64[0],
                    gprs[t0].du64[0], gprs[t1].du64[0], gprs[t2].du64[0], gprs[t3].du64[0]};
     ASSERT(addr);
+    if (goalc_enabled()) {
+      // GOAL compiled to C: call through the function table, with pp from s6.
+      gprs[v0].du64[0] = goalc_call_goal8(addr, args, gprs[s6].du64[0]);
+      return;
+    }
 #ifdef __aarch64__
     // use the executable mapping for the function and GOAL base
     gprs[v0].du64[0] = _call_goal8_asm_arm64(g_ee_main_mem_exec + addr, args, 0, gprs[s6].du64[0],

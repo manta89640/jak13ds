@@ -8,6 +8,8 @@
 
 #include "kmachine.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "common/log/log.h"
@@ -20,6 +22,7 @@
 #include "game/graphics/gfx.h"
 #include "game/graphics/sceGraphicsInterface.h"
 #include "game/kernel/common/fileio.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kboot.h"
 #include "game/kernel/common/kdgo.h"
 #include "game/kernel/common/kdsnetm.h"
@@ -65,8 +68,19 @@ void InitParms(int argc, const char* const* argv) {
     MasterDebug = 0;
   }
 
+  // Run GOAL code compiled to C (docs/3ds-port/c_backend.md). Same environment variable as the
+  // compiler uses, so goalc-test and the REPL can run everything through the C backend.
+  const char* c_backend_env = getenv("OPENGOAL_C_BACKEND");
+  goalc_set_enabled(c_backend_env && c_backend_env[0] && strcmp(c_backend_env, "0") != 0);
+
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
+
+    // Code compiled with the C backend (goalc --instruction-set c)
+    if (arg == "-cbackend") {
+      goalc_set_enabled(true);
+    }
+
     // DVD Settings
     // ----------------------------
 
@@ -162,6 +176,10 @@ void InitParms(int argc, const char* const* argv) {
       Msg(6, "dkernel: level %s\n", levelName.c_str());
       kstrcpy(DebugBootLevel, levelName.c_str());
     }
+  }
+
+  if (goalc_enabled()) {
+    lg::info("Running GOAL code compiled to C");
   }
 }
 

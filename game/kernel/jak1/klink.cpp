@@ -4,6 +4,7 @@
 #include "common/symbols.h"
 
 #include "game/kernel/common/fileio.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/klink.h"
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kprint.h"
@@ -183,6 +184,26 @@ uint32_t symlink_v3(Ptr<uint8_t> link, Ptr<uint8_t> data, bool patch_mov32) {
   return seek;
 }
 
+/*!
+ * Symbol resolver for modules compiled to C: st-relative offset of the interned symbol.
+ */
+s32 goalc_resolve_symbol(const char* name) {
+  return jak1::intern_from_c(name).cast<u32>() - s7;
+}
+
+/*!
+ * Link a LINK_C_MODULE entry: find the module and patch the function stubs of this segment.
+ */
+uint32_t c_module_link_v3(Ptr<u8> link, ObjectFileHeader* ofh, int current_seg, const char* name) {
+  u32 seg_bases[3] = {0, 0, 0};
+  for (int i = 0; i < ofh->segment_count && i < 3; i++) {
+    seg_bases[i] = ofh->code_infos[i].offset;
+  }
+  return goalc_link_module_entry(link.c(), seg_bases,
+                                 Ptr<u8>(ofh->code_infos[current_seg].offset).c(),
+                                 goalc_resolve_symbol, name);
+}
+
 }  // namespace
 /*!
  * Run the linker. For now, all linking is done in two runs.  If this turns out to be too slow,
@@ -300,6 +321,10 @@ uint32_t link_control::jak1_work_v3() {
             case LINK_PTR:
               lp = lp + 1;
               lp = lp + ptr_link_v3(lp, ofh, m_segment_process);
+              break;
+            case LINK_C_MODULE:
+              lp = lp + 1;
+              lp = lp + c_module_link_v3(lp, ofh, m_segment_process, m_object_name);
               break;
             default:
               ASSERT_MSG(false, fmt::format("unknown link table thing {}", *lp));

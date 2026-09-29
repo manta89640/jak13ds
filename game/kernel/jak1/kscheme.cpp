@@ -9,6 +9,7 @@
 
 #include "game/kernel/common/codegen.h"
 #include "game/kernel/common/fileio.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kdgo.h"
 #include "game/kernel/common/kdsnetm.h"
 #include "game/kernel/common/klink.h"
@@ -17,6 +18,7 @@
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/jak1/fileio.h"
+#include "game/kernel/jak1/goalc_kernel.h"
 #include "game/kernel/jak1/kdgo.h"
 #include "game/kernel/jak1/klink.h"
 #include "game/kernel/jak1/klisten.h"
@@ -512,12 +514,28 @@ Ptr<Function> make_stack_arg_function_from_c_win32(void* func) {
 #endif
 
 /*!
+ * C backend: create a GOAL function object whose stub refers to function id `id`.
+ */
+Ptr<Function> make_goalc_function(u32 id) {
+  auto mem = Ptr<u8>(alloc_heap_object(s7.offset + FIX_SYM_GLOBAL_HEAP,
+                                       *(s7 + FIX_SYM_FUNCTION_TYPE), 0x10, UNKNOWN_PP));
+  // the second word is only for debugging. Use a value that can't be a module function index.
+  goalc_write_stub(mem.offset, id, 0xffffffff);
+  return mem.cast<Function>();
+}
+
+/*!
  * Create a GOAL function from a C function. This doesn't export it as a global function, it just
  * creates a function object on the global heap.
  *
  * The implementation is to create a simple trampoline function which jumps to the C function.
  */
 Ptr<Function> make_function_from_c(void* func, bool arg3_is_pp = false) {
+  if (goalc_enabled()) {
+    return make_goalc_function(arg3_is_pp
+                                   ? goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, func, 0)
+                                   : goalc_fn_id_for_host(func));
+  }
 #ifdef __linux__
   return make_function_from_c_systemv(func, arg3_is_pp);
 #elif __APPLE__
@@ -528,6 +546,9 @@ Ptr<Function> make_function_from_c(void* func, bool arg3_is_pp = false) {
 }
 
 Ptr<Function> make_stack_arg_function_from_c(void* func) {
+  if (goalc_enabled()) {
+    return make_goalc_function(goalc_fn_id_for_adapted(goalc_adapter_stack_args, func, 0));
+  }
 #ifdef __linux__
   return make_stack_arg_function_from_c_systemv(func);
 #elif __APPLE__
@@ -541,6 +562,9 @@ Ptr<Function> make_stack_arg_function_from_c(void* func) {
  * Create a GOAL function which does nothing and immediately returns.
  */
 Ptr<Function> make_nothing_func() {
+  if (goalc_enabled()) {
+    return make_goalc_function(goalc_fn_id_for_host((void*)goalc_nothing_fn));
+  }
   auto mem = Ptr<u8>(alloc_heap_object(s7.offset + FIX_SYM_GLOBAL_HEAP,
                                        *(s7 + FIX_SYM_FUNCTION_TYPE), 0x14, UNKNOWN_PP));
 
@@ -554,6 +578,9 @@ Ptr<Function> make_nothing_func() {
  * Create a GOAL function which returns 0.
  */
 Ptr<Function> make_zero_func() {
+  if (goalc_enabled()) {
+    return make_goalc_function(goalc_fn_id_for_host((void*)goalc_zero_fn));
+  }
   auto mem = Ptr<u8>(alloc_heap_object(s7.offset + FIX_SYM_GLOBAL_HEAP,
                                        *(s7 + FIX_SYM_FUNCTION_TYPE), 0x14, UNKNOWN_PP));
   const int written = emit_zero_stub(mem.c());
@@ -1471,6 +1498,10 @@ s32 InitHeapAndSymbol() {
   // the last symbol we will ever access.
   LastSymbol = symbol_table + SYM_TABLE_END * 8;
   NumSymbols = 0;
+  if (goalc_enabled()) {
+    // reset the function ids of code compiled to C, and give the ABI globals their values.
+    goalc_runtime_init(g_ee_main_mem, s7.offset);
+  }
   // inform compiler the symbol table is reset, and where it is.
   reset_output();
 
@@ -1750,6 +1781,15 @@ s32 InitHeapAndSymbol() {
 
   // set *boot-video-mode*
   intern_from_c("*boot-video-mode*")->value = 0;  // (u32)BootVideoMode;
+
+  if (goalc_enabled()) {
+    // kernel primitives used by the C versions of the context switching code in gkernel.gc
+    goalc_kernel_init();
+    // stack for GOAL code called from other host threads (VIF interrupt callbacks)
+    constexpr u32 kForeignStackSize = 32 * 1024;
+    auto foreign_stack = kmalloc(kglobalheap, kForeignStackSize, 0, "goalc-foreign-stack");
+    goalc_set_foreign_stack(foreign_stack.c(), kForeignStackSize);
+  }
 
   lg::info("Initialized GOAL heap in {:.2} ms", heap_init_timer.getMs());
   // load the kernel!
