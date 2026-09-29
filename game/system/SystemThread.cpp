@@ -101,6 +101,8 @@ void* bootstrap_thread_func(void* x) {
   pthread_setname_np(pthread_self(), thd->name.c_str());
 #elif __APPLE__
   pthread_setname_np(thd->name.c_str());
+#elif defined(__3DS__)
+  // no thread names
 #else
   SetThreadDescription(GetCurrentThread(), (LPCWSTR)utf8_string_to_wide_string(thd->name).c_str());
 #endif
@@ -117,7 +119,22 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
   lg::debug("# Initialize {}...", name.c_str());
 
   function = f;
+#ifdef __3DS__
+  {
+    // The EE thread runs the kernel and deep C++ call chains (fmt, file IO). Others are small.
+    const size_t stack_size = (name == "EE") ? 512 * 1024 : 128 * 1024;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, stack_size);
+    int err = pthread_create(&thread, &attr, bootstrap_thread_func, this);
+    pthread_attr_destroy(&attr);
+    if (err) {
+      lg::die("Failed to create thread {} (error {})", name, err);
+    }
+  }
+#else
   thread = std::thread(bootstrap_thread_func, this);
+#endif
   running = true;
 
   // and wait for initialization
@@ -133,7 +150,11 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
  * Join a system thread
  */
 void SystemThread::join() {
+#ifdef __3DS__
+  pthread_join(thread, nullptr);
+#else
   thread.join();
+#endif
   running = false;
 }
 

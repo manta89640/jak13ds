@@ -5,7 +5,7 @@
 #include "game/mips2c/mips2c_private.h"
 using namespace jak1;
 
-const uint32_t* max_tri_count = nullptr;
+const u32* max_tri_count = nullptr;
 namespace {
 u32 vu0_buffer[1024];  // todo, maybe can be 512.
 u32 vi1 = 0;

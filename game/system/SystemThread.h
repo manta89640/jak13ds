@@ -15,6 +15,10 @@
 #include <string>
 #include <thread>
 
+#ifdef __3DS__
+#include <pthread.h>
+#endif
+
 #include "common/util/Timer.h"
 
 constexpr int MAX_SYSTEM_THREADS = 16;
@@ -40,7 +44,12 @@ class SystemThread {
   friend void* bootstrap_thread_func(void* thd);
 
   std::string name = "invalid";
+#ifdef __3DS__
+  // std::thread cannot set a stack size, and libctru's default is only 32 KB.
+  pthread_t thread{};
+#else
   std::thread thread;
+#endif
   SystemThreadManager* manager;
   std::function<void(SystemThreadInterface&)> function;
   bool initialization_complete = false;

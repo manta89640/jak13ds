@@ -739,7 +739,7 @@ u32 ISOThread() {
           ReturnMessage(cmd);
         } break;
         default:
-          printf("[OVERLORD] Unknown ISOThread message id 0x%x\n", msg_from_mbx->cmd_id);
+          printf("[OVERLORD] Unknown ISOThread message id 0x%x\n", (unsigned)msg_from_mbx->cmd_id);
       }
     } else if (mbx_status == KE_WAIT_DELETE) {
       return 0;

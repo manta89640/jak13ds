@@ -140,7 +140,7 @@ IsoBufferHeader* TryAllocateBuffer(uint32_t size) {
       return (IsoBufferHeader*)top_str;
     }
   }
-  printf("[OVERLORD] Failed to allocate buffer (requested size 0x%x)\n", size);
+  printf("[OVERLORD] Failed to allocate buffer (requested size 0x%x)\n", (unsigned)size);
   return nullptr;
 }
 
