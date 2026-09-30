@@ -140,7 +140,7 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
     const size_t stack_size = (name == "EE") ? 512 * 1024 : 128 * 1024;
     // Core 0 is for the game (EE). The IOP (overlord, DGO loading), the listener and the EE worker
     // run on the system core when the app got a share of it (ctr_port.c).
-    const int core = (name == "EE") ? CTR_CORE_APP : CTR_CORE_SYS;
+    const int core = (name == "EE" || !ctr_syscore_available()) ? CTR_CORE_APP : CTR_CORE_SYS;
     int prio = CTR_PRIO_WORKER;
     if (name == "EE") {
       prio = CTR_PRIO_EE;
