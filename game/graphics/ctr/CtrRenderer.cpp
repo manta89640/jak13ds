@@ -56,6 +56,14 @@ void CtrSkipRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
 void CtrTextureUploadRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   // same data as TextureUploadHandler: 16-byte PC_PORT tags with {u64 page, s64 mode}
   while (dma.current_tag_offset() != rs.next_bucket) {
+    // the eyes of the level's characters (like TextureUploadHandler): their GS setup is 8 qw
+    if (m_eyes && dma.current_tag().qwc == 8) {
+      const u32 before = dma.current_tag_offset();
+      m_eyes->handle_eye_dma(dma, rs);
+      if (dma.current_tag_offset() != before) {
+        continue;
+      }
+    }
     auto data = dma.read_and_advance();
     if (data.size_bytes == 16 && data.vifcode0().kind == VifCode::Kind::PC_PORT &&
         data.vif1() == 3) {
@@ -137,6 +145,9 @@ CtrRenderer::CtrRenderer()
                                                  m_vram.get());
     for (auto& [id, merc] : m_merc) {
       merc->set_eye_renderer(eyes.get());
+    }
+    for (auto id : {BucketId::PRIS_TEX_LEVEL0, BucketId::PRIS_TEX_LEVEL1}) {
+      static_cast<CtrTextureUploadRenderer*>(m_buckets[(int)id].get())->set_eye_renderer(eyes.get());
     }
     set(BucketId::MERC_EYES_AFTER_PRIS, std::move(eyes));
   }

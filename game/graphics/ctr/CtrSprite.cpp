@@ -12,6 +12,7 @@
 
 #include "common/dma/dma.h"
 #include "common/log/log.h"
+#include "common/util/FileUtil.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrSettings.h"
@@ -308,6 +309,35 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       }
       st.tex = m_last_tex;
       st.tcc = tex0.tcc();
+#ifndef __3DS__
+      {
+        // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
+        static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
+        static std::vector<u64> dumped;
+        if (dump_dir && dumped.size() < 48 &&
+            std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
+          dumped.push_back(ad.tex0_data);
+          std::vector<u32> rgba;
+          int w = 0, h = 0;
+          if (m_vram->decode_for_cpu(ad.tex0_data, &rgba, &w, &h) && w > 0 && h > 0) {
+            u32 amin = 255, amax = 0;
+            for (u32 c : rgba) {
+              amin = std::min(amin, c >> 24);
+              amax = std::max(amax, c >> 24);
+            }
+            lg::info("[sprite dump {}] tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
+                     dumped.size(), ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
+                     ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
+            try {
+              file_util::write_rgba_png(
+                  fs::path(dump_dir) / fmt::format("sprite_{:02d}.png", dumped.size()),
+                  rgba.data(), w, h);
+            } catch (std::exception&) {
+            }
+          }
+        }
+      }
+#endif
       st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
       bool zwrite = false;
       if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {

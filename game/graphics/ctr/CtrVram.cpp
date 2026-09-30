@@ -43,9 +43,12 @@ u32 pack_rgba(u32 r, u32 g, u32 b, u32 a) {
   return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-// 16-bit GS color to our RGBA8 (alpha: TEXA with TA0 = TA1 = 0x80, the game's setting)
+// 16-bit GS color to our RGBA8. Alpha from the A bit and TEXA: the game's usual TEXA has TA0 = 0,
+// TA1 = 0x80 (like rgba16_to_rgba32 on PC), so A = 0 is transparent. With 0x80 for both, particles
+// with 16-bit CLUTs were drawn as squares and black quads.
 u32 ct16_to_rgba(u32 c) {
-  return pack_rgba((c & 0x1f) << 3, ((c >> 5) & 0x1f) << 3, ((c >> 10) & 0x1f) << 3, 0x80);
+  return pack_rgba((c & 0x1f) << 3, ((c >> 5) & 0x1f) << 3, ((c >> 10) & 0x1f) << 3,
+                   (c & 0x8000) ? 0x80 : 0);
 }
 
 // in-game texture (see GoalTexture in game/graphics/texture/TexturePool.h)

@@ -15,7 +15,7 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 6;
+constexpr uint32_t kVersion = 7;
 
 enum TextureFormat : uint8_t {
   TEX_RGB565 = 0,  // u16: r5 g6 b5 (r in the high bits)
@@ -46,7 +46,8 @@ struct Header {
   uint32_t merc_index_size;
   uint32_t merc_draw_offset;  // MercDraw[]
   uint32_t merc_draw_size;
-  uint32_t pad[2];
+  uint32_t merc_blerc_offset;  // MercBlercHeader, then its arrays (0: none)
+  uint32_t merc_blerc_size;
 };
 static_assert(sizeof(Header) == 128);
 
@@ -128,7 +129,9 @@ struct MercModel {
   uint32_t first_draw;    // into the merc draw data
   uint32_t draw_count;
   float scale;  // model position = pos * scale
-  uint32_t pad[3];
+  uint32_t blerc_first;  // blend shape vertices (MercBlercVertex) of the model: face animation
+  uint32_t blerc_count;
+  uint32_t pad;
 };
 static_assert(sizeof(MercModel) == 96);
 
@@ -158,5 +161,34 @@ struct MercVertex {
   uint8_t pad;
 };
 static_assert(sizeof(MercVertex) == 24);
+
+/*!
+ * Blend shapes (merc "blerc", faces): each frame the game sends up to kMercBlercWeights weights
+ * for a model, and the positions of its blend shape vertices are
+ *   base + sum(targets: weight[target.weight] * target.offset)
+ * written to the model's vertices dest[first_dest .. first_dest + dest_count) (the same source
+ * vertex can be in several draws). The section: MercBlercHeader, vertices, targets, dests (u16).
+ */
+constexpr int kMercBlercWeights = 40;
+
+struct MercBlercHeader {
+  uint32_t num_vertices, num_targets, num_dests, pad;
+};
+static_assert(sizeof(MercBlercHeader) == 16);
+
+struct MercBlercVertex {
+  float base[3];  // model space (MercVertex::pos * MercModel::scale)
+  uint32_t first_target;
+  uint16_t target_count;
+  uint16_t dest_count;
+  uint32_t first_dest;
+};
+static_assert(sizeof(MercBlercVertex) == 24);
+
+struct MercBlercTarget {
+  float offset[3];
+  uint32_t weight;  // index into the weights
+};
+static_assert(sizeof(MercBlercTarget) == 16);
 
 }  // namespace c3l

@@ -27,6 +27,9 @@ struct CtrMercModelData {
   int mesh = -1;
   float scale = 1.f;
   std::vector<c3l::MercDraw> draws;
+  // blend shapes (faces): CtrLevelData::blerc_verts[blerc_first, + blerc_count)
+  u32 blerc_first = 0, blerc_count = 0;
+  mutable bool blerc_moved = false;  // vertices not in the base pose (CtrMercRenderer)
 };
 
 struct CtrLevelData {
@@ -37,6 +40,9 @@ struct CtrLevelData {
   std::vector<ctr_draw_state> draw_states;  // per draw
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<int> meshes;    // one per chunk
+  std::vector<c3l::MercBlercVertex> blerc_verts;
+  std::vector<c3l::MercBlercTarget> blerc_targets;
+  std::vector<u16> blerc_dests;
   u64 last_used_frame = 0;
   float bbox_min[3] = {0, 0, 0}, bbox_max[3] = {0, 0, 0};  // tfrag + tie, game units
   bool has_lowres = false;  // chunks with lod_tier 3

@@ -13,14 +13,14 @@
 struct CtrSettings {
   // level geometry: chunks further than this are not drawn, with extra fog towards it so the
   // cutoff blends into the sky (meters, 0 = no limit)
-  float draw_distance = 300.f;
+  float draw_distance = 500.f;
   // the extra fog starts at this fraction of draw_distance
   float fog_start = 0.6f;
   // the game's own distance fog (like the PC renderer)
   bool fog = true;
   // tfrag: the detailed version up to this distance, the coarse one beyond (meters, 0 = always
   // detailed). Needs .c3l files with both versions (ctr_level_converter --far-lod).
-  float lod_distance = 120.f;
+  float lod_distance = 200.f;
   // a level whose bounds are further than this from the camera (seen from a neighbouring level)
   // is drawn with only its low resolution tfrag, no tie (meters, 0 = off)
   float far_level_distance = 40.f;

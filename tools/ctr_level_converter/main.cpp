@@ -302,6 +302,9 @@ struct MercOut {
   std::vector<c3l::MercVertex> verts;
   std::vector<u16> indices;
   std::vector<c3l::MercDraw> draws;
+  std::vector<c3l::MercBlercVertex> blerc_verts;
+  std::vector<c3l::MercBlercTarget> blerc_targets;
+  std::vector<u16> blerc_dests;
   int skipped_models = 0;
 };
 
@@ -328,13 +331,40 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
         }
       }
     }
-    mm.scale = max_abs / 32767.f;
+    // blend shapes move vertices away from the base pose: room for that
+    bool any_blerc = false;
+    for (const auto& eff : model.effects) {
+      any_blerc |= !eff.mod.mod_draw.empty() && !eff.mod.blerc.int_data.empty();
+    }
+    mm.scale = max_abs * (any_blerc ? 1.5f : 1.f) / 32767.f;
+    mm.blerc_first = out->blerc_verts.size();
 
     // model vertices: (source vertex, draw) -> local index
     std::vector<c3l::MercVertex> local_verts;
     bool too_big = false;
     for (size_t ei = 0; ei < model.effects.size(); ei++) {
-      for (const auto& d : model.effects[ei].all_draws) {
+      const auto& eff = model.effects[ei];
+      // Effects with blend shapes (faces): the PC draws the vertices they move from a copy
+      // (mod.vertices, drawn by mod_draw, the rest by fix_draw), and so do we, to know which of
+      // our vertices a blend shape vertex writes to.
+      const bool use_blerc = !eff.mod.mod_draw.empty() && !eff.mod.blerc.int_data.empty();
+      std::unordered_map<u32, std::vector<u16>> mod_local;  // mod vertex -> model vertices
+      std::vector<std::pair<const tfrag3::MercDraw*, bool>> draw_list;  // (draw, from mod.vertices)
+      if (use_blerc) {
+        for (const auto& d : eff.mod.fix_draw) {
+          draw_list.push_back({&d, false});
+        }
+        for (const auto& d : eff.mod.mod_draw) {
+          draw_list.push_back({&d, true});
+        }
+      } else {
+        for (const auto& d : eff.all_draws) {
+          draw_list.push_back({&d, false});
+        }
+      }
+      for (const auto& [dp, from_mod] : draw_list) {
+        const auto& d = *dp;
+        const std::vector<tfrag3::MercVertex>& vsrc = from_mod ? eff.mod.vertices : group.vertices;
         // Eye draws (eye_id != 0xff) use the texture CtrEyeRenderer draws every frame from the
         // game's eye sprites (iris, pupil, lids). The level texture is only a gray placeholder,
         // used until the first eye frame.
@@ -377,7 +407,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           std::vector<u8> palette;
           std::unordered_map<u32, u16> vmap;
           auto bones_of = [&](u32 vi, std::vector<u8>* bones) {
-            const auto& v = group.vertices[vi];
+            const auto& v = vsrc[vi];
             for (int k = 0; k < 3; k++) {
               if (v.weights[k] > 0.f &&
                   std::find(bones->begin(), bones->end(), v.mats[k]) == bones->end()) {
@@ -397,7 +427,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
             for (u32 vi : tris[t]) {
               auto it = vmap.find(vi);
               if (it == vmap.end()) {
-                const auto& v = group.vertices[vi];
+                const auto& v = vsrc[vi];
                 c3l::MercVertex o{};
                 for (int c = 0; c < 3; c++) {
                   o.pos[c] = (s16)std::clamp((int)std::lround(v.pos[c] / mm.scale), -32767, 32767);
@@ -428,6 +458,9 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
                   break;
                 }
                 it = vmap.emplace(vi, (u16)local_verts.size()).first;
+                if (from_mod) {
+                  mod_local[vi].push_back((u16)local_verts.size());
+                }
                 local_verts.push_back(o);
               }
               out->indices.push_back(it->second);
@@ -459,14 +492,56 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
       if (too_big) {
         break;
       }
+      if (use_blerc) {
+        // per vertex: int [target weight indices..., terminator, dest mod vertex],
+        // float [base, target offsets...] (tfrag3::Blerc)
+        const auto& bl = eff.mod.blerc;
+        size_t ii = 0, fi = 0;
+        while (ii < bl.int_data.size() && fi < bl.float_data.size()) {
+          c3l::MercBlercVertex bv{};
+          for (int c = 0; c < 3; c++) {
+            bv.base[c] = bl.float_data[fi].v[c];
+          }
+          fi++;
+          bv.first_target = out->blerc_targets.size();
+          while (ii < bl.int_data.size() && bl.int_data[ii] != tfrag3::Blerc::kTargetIdxTerminator &&
+                 fi < bl.float_data.size()) {
+            c3l::MercBlercTarget t{};
+            for (int c = 0; c < 3; c++) {
+              t.offset[c] = bl.float_data[fi].v[c];
+            }
+            t.weight = bl.int_data[ii];
+            out->blerc_targets.push_back(t);
+            ii++;
+            fi++;
+          }
+          ii++;  // terminator
+          if (ii >= bl.int_data.size()) {
+            break;
+          }
+          const u32 dest = bl.int_data[ii++];
+          bv.target_count = out->blerc_targets.size() - bv.first_target;
+          auto dit = mod_local.find(dest);
+          if (dit == mod_local.end() || dit->second.empty()) {
+            out->blerc_targets.resize(bv.first_target);  // not drawn
+            continue;
+          }
+          bv.first_dest = out->blerc_dests.size();
+          bv.dest_count = dit->second.size();
+          out->blerc_dests.insert(out->blerc_dests.end(), dit->second.begin(), dit->second.end());
+          out->blerc_verts.push_back(bv);
+        }
+      }
     }
     if (too_big) {
       lg::warn("merc model {} has more than 65535 vertices, skipped", model.name);
       out->indices.resize(idx_start);
       out->draws.resize(mm.first_draw);
+      out->blerc_verts.resize(mm.blerc_first);
       out->skipped_models++;
       continue;
     }
+    mm.blerc_count = out->blerc_verts.size() - mm.blerc_first;
     mm.vertex_count = local_verts.size();
     mm.draw_count = out->draws.size() - mm.first_draw;
     out->verts.insert(out->verts.end(), local_verts.begin(), local_verts.end());
@@ -768,6 +843,20 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   hdr.merc_index_size = merc.indices.size() * 2;
   hdr.merc_draw_offset = append(buf, merc.draws.data(), merc.draws.size());
   hdr.merc_draw_size = merc.draws.size() * sizeof(c3l::MercDraw);
+  if (!merc.blerc_verts.empty()) {
+    c3l::MercBlercHeader bh{};
+    bh.num_vertices = merc.blerc_verts.size();
+    bh.num_targets = merc.blerc_targets.size();
+    bh.num_dests = merc.blerc_dests.size();
+    hdr.merc_blerc_offset = append(buf, &bh, 1);
+    buf.insert(buf.end(), (const u8*)merc.blerc_verts.data(),
+               (const u8*)(merc.blerc_verts.data() + merc.blerc_verts.size()));
+    buf.insert(buf.end(), (const u8*)merc.blerc_targets.data(),
+               (const u8*)(merc.blerc_targets.data() + merc.blerc_targets.size()));
+    buf.insert(buf.end(), (const u8*)merc.blerc_dests.data(),
+               (const u8*)(merc.blerc_dests.data() + merc.blerc_dests.size()));
+    hdr.merc_blerc_size = buf.size() - hdr.merc_blerc_offset;
+  }
   align16(buf);
   hdr.texture_data_offset = buf.size();
   for (size_t i = 0; i < tex_descs.size(); i++) {

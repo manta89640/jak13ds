@@ -29,6 +29,14 @@ class CtrMercRenderer : public CtrBucketRenderer {
   void render(DmaFollower& dma, CtrRenderState& rs) override;
   /*! Where the eye draws (c3l::MercDraw::eye_id) get their textures. */
   void set_eye_renderer(const class CtrEyeRenderer* eyes) { m_eyes = eyes; }
+
+ private:
+  /*! Blend shapes: move the model's face vertices for these weights (all 0: the base pose). */
+  void apply_blerc(const struct CtrLevelData& lev,
+                   const struct CtrMercModelData& model,
+                   const float* weights);
+
+ public:
   /*! Game thread, before the frame is handed to the render thread: copy the bone matrices the
    * bucket's models use (see handle_model). */
   void snapshot_bones(DmaFollower& dma, CtrRenderState& rs);
