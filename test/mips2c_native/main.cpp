@@ -3,9 +3,15 @@
  * (AI-assisted)
  * Differential tests of native mips2c replacements against the mips2c versions (see harness.h).
  *
- *   mips2c-native-test [--filter SUBSTR] [--scale X] [--seed N] [--self] [--list]
+ *   mips2c-native-test [--filter SUBSTR] [--scale X] [--seed N] [--self] [--reports N] [--case N]
+ *                      [--bench mips2c|native] [--fpscr HEX]
  *
  * --self runs the mips2c version twice instead of mips2c against native (tests the harness).
+ *
+ * The ARM build (-D__3DS__) runs with the 3DS's VFP mode, which libctru sets for every thread:
+ * default NaN and flush-to-zero, round to nearest (FPSCR 0x03000000). --fpscr HEX sets another.
+ * (With default NaN off, a multiply-subtract that GCC fuses into VMLS gives a NaN of the opposite
+ * sign than separate VMUL and VSUB do, so natives and mips2c can differ in the sign of NaNs.)
  */
 
 #include <cstdio>
@@ -62,6 +68,9 @@ void register_all();
 
 int main(int argc, char** argv) {
   harness::RunOptions opt;
+#if defined(__arm__) && defined(__3DS__)
+  u32 fpscr = 0x03000000;
+#endif
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--filter") && i + 1 < argc) {
       opt.filter = argv[++i];
@@ -77,12 +86,21 @@ int main(int argc, char** argv) {
       opt.bench = argv[++i];
     } else if (!strcmp(argv[i], "--reports") && i + 1 < argc) {
       opt.max_reports = atoi(argv[++i]);
+#if defined(__arm__) && defined(__3DS__)
+    } else if (!strcmp(argv[i], "--fpscr") && i + 1 < argc) {
+      fpscr = (u32)strtoul(argv[++i], nullptr, 16);
+#endif
     } else {
-      fprintf(stderr, "usage: %s [--filter SUBSTR] [--scale X] [--seed N] [--self] [--reports N]\n",
+      fprintf(stderr,
+              "usage: %s [--filter SUBSTR] [--scale X] [--seed N] [--self] [--reports N] "
+              "[--case N] [--bench mips2c|native] [--fpscr HEX]\n",
               argv[0]);
       return 2;
     }
   }
+#if defined(__arm__) && defined(__3DS__)
+  asm volatile("vmsr fpscr, %0" : : "r"(fpscr));
+#endif
 
   g_ee_main_mem = (u8*)aligned_alloc(64, harness::kMemSize);
   memset(g_ee_main_mem, 0, harness::kMemSize);

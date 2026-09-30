@@ -6,6 +6,7 @@
  */
 
 #include <algorithm>
+#include <cmath>
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
@@ -181,9 +182,199 @@ u64 sp_process_block_2d_impl(const NativeArgs& args) {
   return index;
 }
 
+/*!
+ * (sp-process-block-3d system cpuinfo vecdata index count paused?) -> index + count
+ * Like sp-process-block-2d, for 3d particles (sprite-vec-data-3d: position and x size, the
+ * rotation quaternion's x y z and the y size, the color): timers, the user callback, relaunching,
+ * velocity, position and sizes, the color, and the rotation: the quaternion (its w from x y z)
+ * times the particle's rotvel3d, twice at 30 frames per second and below, stored with w >= 0.
+ * No orbiter. Frees the ones that are done.
+ */
+u64 sp_process_block_3d_impl(const NativeArgs& args) {
+  static const u32 frame_time_sym = sym_addr("*sp-frame-time*");
+  static const u32 quaternion_mul_sym = sym_addr("quaternion*!");
+  static const u32 free_particle_sym = sym_addr("sp-free-particle");
+  static const u32 relaunch_sym = sym_addr("sp-relaunch-particle-3d");
+
+  const u64 system = args.a[0];
+  u32 info = (u32)args.a[1];
+  u32 vec = (u32)args.a[2];
+  u64 index = args.a[3];
+  u64 count = args.a[4];
+  const bool paused = args.a[5] != args.st;
+  const u64 st = args.st;
+  // the quaternion passed to quaternion*! (the mips2c version's stack frame)
+  const u32 quat = args.stack - 16;
+
+  // x: the frame count (int), y: velocity scale, z: acceleration scale, w: friction scale
+  float frame_time[4];
+  memcpy(frame_time, gptr(gload<u32>(frame_time_sym)), 16);
+  const u64 frames = f2u(frame_time[0]) & 255;
+
+  // a3 is not set by this function before calling the callbacks and quaternion*!: it is the
+  // argument, or the last vecdata passed to sp-relaunch-particle-3d / sp-free-particle
+  u64 reg_a3 = args.a[3];
+  auto call = [&](u32 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
+    reg_a3 = a3;
+    const u64 call_args[8] = {a0, a1, a2, a3, args.a[4], args.a[5], args.a[6], args.a[7]};
+    native_call_goal(fn, call_args, args);
+  };
+  auto free_particle = [&]() { call(gload<u32>(free_particle_sym), system, index, info, vec); };
+
+  do {
+    const s64 key = load_s32(info + 128);
+    if (key == (s64)st) {
+      // not in use
+    } else if (paused && !(gload<u32>(info + 104) & 8192)) {
+      // paused: only count down timers that are already done
+      const s64 timer = load_s32(info + 100);
+      if (timer != -1 && timer == 0) {
+        free_particle();
+      } else {
+        const u32 flags = gload<u32>(info + 104);
+        gstore<u32>(info + 104, flags ^ (flags & 64));
+        if (flags & 64) {
+          gstore<u32>(vec + 44, gload<u32>(info + 124));
+        }
+      }
+    } else {
+      bool do_free = false;
+      const s64 timer = load_s32(info + 100);
+      if (timer != -1) {
+        if (timer == 0) {
+          do_free = true;
+        } else {
+          gstore<s32>(info + 100, std::max((s32)(u32)(timer - frames), 0));
+        }
+      }
+      if (!do_free) {
+        const u32 flags = gload<u32>(info + 104);
+        gstore<u32>(info + 104, flags ^ (flags & 64));
+        if (flags & 64) {
+          gstore<u32>(vec + 44, gload<u32>(info + 124));
+        }
+
+        // user callback
+        if (const u32 callback = gload<u32>(info + 112)) {
+          call(callback, system, info, vec, reg_a3);
+        }
+
+        // relaunch
+        const s64 next_launcher = load_s32(info + 120);
+        const s64 next_time = load_s32(info + 116) - (s64)frames;
+        if (next_launcher != 0) {
+          gstore<u32>(info + 116, (u32)next_time);
+          if (next_time < 0) {
+            call(gload<u32>(relaunch_sym), system, (u64)next_launcher, info, vec);
+          }
+        }
+
+        // motion
+        float pos[4], rot[4], color[4], vel[4], rot_vel[4], fade[4], accel[4];
+        memcpy(pos, gptr(vec), 16);
+        memcpy(rot, gptr(vec + 16), 16);
+        memcpy(color, gptr(vec + 32), 16);
+        memcpy(vel, gptr(info + 16), 16);
+        memcpy(rot_vel, gptr(info + 32), 16);
+        memcpy(fade, gptr(info + 48), 16);
+        memcpy(accel, gptr(info + 64), 16);
+        const u32 friction_bits = gload<u32>(info + 96);
+        for (int i = 0; i < 4; i++) {
+          accel[i] = accel[i] * frame_time[2];
+        }
+        for (int i = 0; i < 3; i++) {
+          vel[i] = vel[i] + accel[i];
+        }
+        if (friction_bits != 0) {
+          const float a = 1.f - u2f(friction_bits);
+          const float b = a * frame_time[3];
+          const float c = 1.f - b;
+          for (int i = 0; i < 3; i++) {
+            vel[i] = vel[i] * c;
+          }
+        }
+        float d_pos[4], d_rot[4], d_color[4];
+        for (int i = 0; i < 4; i++) {
+          d_pos[i] = vel[i] * frame_time[1];
+          d_rot[i] = rot_vel[i] * frame_time[1];
+          d_color[i] = fade[i] * frame_time[1];
+        }
+        for (int i = 0; i < 4; i++) {
+          pos[i] = pos[i] + d_pos[i];
+          color[i] = color[i] + d_color[i];
+        }
+        rot[3] = rot[3] + d_rot[3];
+        for (int i = 0; i < 4; i++) {
+          color[i] = std::max(color[i], 0.f);
+        }
+        gstore_bytes(info + 16, vel, 16);
+        gstore_bytes(vec, pos, 16);
+        gstore_bytes(vec + 16, rot, 16);
+        gstore_bytes(vec + 32, color, 16);
+
+        // the rotation: w from x y z, times rotvel3d (twice at 10 or more frames)
+        {
+          const float x = rot[0], y = rot[1], z = rot[2];
+          gstore<float>(quat, x);
+          gstore<float>(quat + 4, y);
+          gstore<float>(quat + 8, z);
+          const float zz = z * z;
+          float w = 1.f - zz;
+          const float yy = y * y;
+          w = w - yy;
+          const float xx = x * x;
+          w = w - xx;
+          gstore<float>(quat + 12, std::sqrt(std::abs(w)));
+        }
+        const u32 frame_bits = gload<u32>(gload<u32>(frame_time_sym));
+        const u32 rot_vel_3d = info + 80;
+        if ((s64)(frame_bits & 255) - 10 >= 0) {
+          call(gload<u32>(quaternion_mul_sym), quat, quat, rot_vel_3d, reg_a3);
+        }
+        call(gload<u32>(quaternion_mul_sym), quat, quat, rot_vel_3d, reg_a3);
+        float q[4], out[4];
+        memcpy(q, gptr(quat), 16);
+        memcpy(out, gptr(vec + 16), 16);
+        if (q[3] < 0.f) {
+          for (int i = 0; i < 3; i++) {
+            out[i] = 0.f - q[i];
+          }
+        } else {
+          for (int i = 0; i < 3; i++) {
+            out[i] = 0.f + q[i];
+          }
+        }
+        gstore_bytes(vec + 16, out, 16);
+
+        // done?
+        u32 c[4];
+        memcpy(c, color, 16);
+        const u32 flags2 = gload<u32>(info + 104);
+        if ((flags2 & 2) && c[0] == 0 && c[1] == 0 && c[2] == 0) {
+          do_free = true;  // r, g and b are 0
+        } else if ((flags2 & 4) && (s32)c[3] <= 0) {
+          do_free = true;  // alpha
+        } else if ((flags2 & 1) && ((s32)f2u(pos[3]) < 0 || (s32)f2u(rot[3]) < 0)) {
+          do_free = true;  // x or y size below 0
+        }
+      }
+      if (do_free) {
+        free_particle();
+      }
+    }
+    count--;
+    info += 144;
+    vec += 48;
+    index++;
+  } while (count != 0);
+  return index;
+}
+
 }  // namespace
 
 const NativeImpl sp_process_block_2d =
     MIPS2C_NATIVE_IMPL(sp_process_block_2d_impl, NATIVE_CALLS_GOAL, 0);
+const NativeImpl sp_process_block_3d =
+    MIPS2C_NATIVE_IMPL(sp_process_block_3d_impl, NATIVE_CALLS_GOAL, 16);
 
 }  // namespace Mips2C::jak1::native
