@@ -16,6 +16,8 @@ extern "C" {
 
 /* Initialize services and the bottom-screen console. Returns 0 on success. */
 int ctr_platform_init(int enable_console);
+/* Append a line to sdmc:/3ds/jak1/boot.txt (boot progress, for hangs on hardware). */
+void ctr_boot_mark(const char* step);
 void ctr_platform_exit(void);
 
 /* Call regularly from the main thread. Returns 0 when the app should quit (HOME -> close,

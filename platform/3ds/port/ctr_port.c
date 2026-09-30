@@ -76,12 +76,37 @@ static int s_sound = 0;
 static int s_sound_core = 1;
 static u32* s_soc_buffer = NULL;
 
+/* Boot progress on the SD card (sdmc:/3ds/jak1/boot.txt): on hardware a hang before the first
+ * frame shows nothing but the launch screen; this file tells how far the boot got. The first
+ * line is written by a constructor, which runs after libctru's startup (heaps, services, SD card
+ * mounted) and before main. */
+#define CTR_BOOT_FILE "sdmc:/3ds/jak1/boot.txt"
+
+__attribute__((constructor(101))) static void ctr_boot_mark_first(void) {
+  FILE* f = fopen(CTR_BOOT_FILE, "w");
+  if (f) {
+    fputs("1 libctru started (heaps, services, SD card)\n", f);
+    fclose(f);
+  }
+}
+
+void ctr_boot_mark(const char* step) {
+  FILE* f = fopen(CTR_BOOT_FILE, "a");
+  if (f) {
+    fprintf(f, "%s\n", step);
+    fclose(f);
+  }
+}
+
 int ctr_platform_init(int enable_console) {
   /* paths without a device name ("/3ds/jak1/...") then refer to the SD card, and
    * std::filesystem treats them as absolute ("sdmc:/..." would be a relative path to it) */
+  ctr_boot_mark("2 main");
   chdir("sdmc:/");
   osSetSpeedupEnable(true); /* 804 MHz + L2 cache on New 3DS, no-op otherwise */
+  ctr_boot_mark("3 speedup");
   gfxInitDefault();
+  ctr_boot_mark("4 screens");
   if (enable_console) {
     consoleInit(GFX_BOTTOM, &s_stat_con);
     consoleInit(GFX_BOTTOM, &s_log_con);
@@ -116,6 +141,7 @@ int ctr_platform_init(int enable_console) {
   s_syscore = (want_syscore && s_cpu_limit) ? 1 : 0;
   /* C-stick / ZL / ZR on New 3DS (and the Circle Pad Pro) */
   s_irrst = R_SUCCEEDED(irrstInit()) ? 1 : 0;
+  ctr_boot_mark("5 console and input");
   return 0;
 }
 

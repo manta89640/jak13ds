@@ -83,6 +83,7 @@ int main(int /*argc*/, char** /*argv*/) {
   lg::initialize();
   lg::info("3DS: {} ({}), started as {}", mem.model, mem.is_new3ds ? "New" : "Old",
            mem.is_hbl ? "a 3dsx from the Homebrew Launcher" : "a title (CIA, or an emulator)");
+  ctr_boot_mark("6 logs");
   lg::info("3DS memory: application region {} KB ({} KB used), heap {} KB, linear {} KB ({} KB "
            "free)",
            mem.app_region_total / 1024, mem.app_region_used / 1024, mem.heap_size / 1024,
@@ -163,6 +164,7 @@ int main(int /*argc*/, char** /*argv*/) {
     lg::info("3DS: malloc in use at startup: {} KB", mi.uordblks / 1024);
   }
   printf("[gk] starting the runtime\n");
+  ctr_boot_mark("7 runtime start");
   RuntimeExitStatus status = RuntimeExitStatus::RUNNING;
   do {
     MasterExit = RuntimeExitStatus::RUNNING;
