@@ -78,6 +78,13 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // TEX0 -> texture lookups, per frame
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
+  bool m_last_tex_valid = false;
+  // state of the previous sprite (same adgif: same state and bucket)
+  AdGif m_last_ad;
+  bool m_have_last_ad = false;
+  ctr_draw_state m_last_state;
+  std::vector<ctr_vertex>* m_last_verts = nullptr;
+  float m_corner_reach = 0;
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0;
