@@ -498,6 +498,14 @@ process pointer (s6) the original clobbers, stores in branch delay slots, delibe
   20 s. `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the checker).
 - `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions.
 - Native code must store to GOAL memory only through `gstore*` (verify mode logs them).
+- Quadwords that the mips2c code moves with `lqc2`/`sqc2` (which assert 16-byte alignment) or
+  `lq`/`sq` (which align down) should use `gload_q`/`gstore_q`: the compiler then moves them with
+  VFP loads or `ldm`/`stm` instead of byte copies through the stack. Only for those addresses: an
+  unaligned address would fault on the 3DS. Hot loops can also keep `g_ee_main_mem` in a local
+  (see `ParticleMem` in `native_sparticle.cpp`): every store to GOAL memory otherwise makes the
+  compiler load it again.
+- The 3DS build compiles the native files with -O3 (`platform/3ds/CMakeLists.txt`): their small
+  loops over vector lanes stay in stack arrays at -O2.
 - A native that calls another native through a symbol or method calls its `_impl` directly when
   the symbol holds that function's stub (`native_stub_slot`), with its scratch space below its
   own.
