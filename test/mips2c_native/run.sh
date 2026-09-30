@@ -11,6 +11,8 @@
 #   arm       ARMv6K + VFPv2 hard float, -D__3DS__ like the 3DS build (arm-linux-gnueabihf-g++,
 #             run with qemu-arm)
 #   coverage  g++ -O0 --coverage, then prints the mips2c line coverage of every tested function
+#   bench     the arm build, then ARM instructions per call of the mips2c and the native version
+#             (test args: [--scale X] test names), counted with qemu-arm
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -91,6 +93,12 @@ for cfg in "${configs[@]}"; do
       LINK_EXTRA="-static" build arm arm-linux-gnueabihf-g++ -O2 -g -marm -march=armv6k \
         -mfpu=vfp -mfloat-abi=hard -D__3DS__
       qemu-arm "$OUT/arm/mips2c-native-test" "${test_args[@]}" || status=1
+      ;;
+    bench)
+      # ARM instructions per call, mips2c vs native (test args: [--scale X] test names)
+      LINK_EXTRA="-static -Wl,-Map=$OUT/bench/link.map" build bench arm-linux-gnueabihf-g++ -O2 -g \
+        -marm -march=armv6k -mfpu=vfp -mfloat-abi=hard -D__3DS__
+      python3 "$HERE/bench.py" "$OUT/bench/mips2c-native-test" "$OUT/bench/link.map" "${test_args[@]}"
       ;;
     coverage)
       rm -f "$OUT/coverage"/*.gcda
