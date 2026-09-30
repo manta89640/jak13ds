@@ -58,8 +58,8 @@ u64 method_16_collide_edge_work_impl(const NativeArgs& args) {
   const u32 work = (u32)args.a[0];
   const u32 cache = gload<u32>(work);
   s32 bmin[4], bmax[4];
-  memcpy(bmin, gptr((work + 96) & ~15u), 16);
-  memcpy(bmax, gptr((work + 112) & ~15u), 16);
+  gload_q(bmin, (work + 96) & ~15u);
+  gload_q(bmax, (work + 112) & ~15u);
   u32 tri = cache + 4908;
   u32 out = work + 6272;
   u32 count = 0;
@@ -76,9 +76,9 @@ u64 method_16_collide_edge_work_impl(const NativeArgs& args) {
       break;
     }
     float v0[4], v1[4], v2[4];
-    memcpy(v0, gptr(tri), 16);
-    memcpy(v1, gptr(tri + 16), 16);
-    memcpy(v2, gptr(tri + 32), 16);
+    gload_q(v0, tri);
+    gload_q(v1, tri + 16);
+    gload_q(v2, tri + 32);
     s32 tmin[3], tmax[3];
     for (int i = 0; i < 3; i++) {
       tmin[i] = (s32)std::min(std::min(v0[i], v1[i]), v2[i]);
@@ -119,7 +119,7 @@ u64 method_16_collide_edge_work_impl(const NativeArgs& args) {
     }
     count++;
     gstore<u32>(out, tri);
-    gstore_bytes(out + 16, nrm, 16);
+    gstore_q(out + 16, nrm);
     out += 32;
     tri += 64;
   }
@@ -139,7 +139,7 @@ u64 find_vertex(u64 work64, const float v[4]) {
   u32 k = 0;
   for (; k != nverts; k++) {
     float p[4], d[4];
-    memcpy(p, gptr(work + 640 + 16 * k), 16);
+    gload_q(p, work + 640 + 16 * k);
     for (int i = 0; i < 4; i++) {
       d[i] = p[i] - v[i];
     }
@@ -155,7 +155,7 @@ u64 find_vertex(u64 work64, const float v[4]) {
   if (nverts == 64) {
     return kFalse;
   }
-  gstore_bytes(work + 640 + 16 * k, v, 16);
+  gstore_q(work + 640 + 16 * k, v);
   gstore<u32>(work + 8, nverts + 1);
   return work64 + 640 + 16 * k;
 }
@@ -187,8 +187,8 @@ u64 add_edge(u64 work64, u64 etri, u64 a, u64 b, const float player[4], u64 st) 
   gstore<u32>(work + 12, nedges + 1);
 
   float va[4], vb[4], ev[4], d[4], sq[4];
-  memcpy(va, gptr((u32)a), 16);
-  memcpy(vb, gptr((u32)b), 16);
+  gload_q(va, (u32)a);
+  gload_q(vb, (u32)b);
   for (int i = 0; i < 4; i++) {
     ev[i] = vb[i] - va[i];
     d[i] = player[i] - va[i];
@@ -216,11 +216,11 @@ u64 add_edge(u64 work64, u64 etri, u64 a, u64 b, const float player[4], u64 st) 
   }
   const float q2 = rsqrt_q(sq[0]);
   ev[3] = 1.f * 1.f;
-  gstore_bytes(e + 16, out, 16);
+  gstore_q(e + 16, out);
   for (int i = 0; i < 3; i++) {
     ev[i] = ev[i] * q2;
   }
-  gstore_bytes(e + 32, ev, 16);
+  gstore_q(e + 32, ev);
   return e;
 }
 
@@ -233,14 +233,16 @@ u64 method_15_collide_edge_work_impl(const NativeArgs& args) {
   const u64 work64 = args.a[0];
   const u32 work = (u32)work64;
   float player[4];
-  memcpy(player, gptr(gload<u32>(work + 4) + 12), 16);  // cshape trans
+  gload_q(player, gload<u32>(work + 4) + 12);  // cshape trans
   player[1] = 0.f + gload<float>(work + 68);            // within-reach-box min y
   u32 tri = work + 6272;
   u64 tri64 = work64 + 6272;
   for (u32 n = gload<u32>(work + 16); n != 0; n--, tri += 32, tri64 += 32) {
     const u32 ctri = gload<u32>(tri);
     float v[3][4];
-    memcpy(v, gptr(ctri), 48);
+    for (int k = 0; k < 3; k++) {
+      gload_q(v[k], ctri + 16 * k);
+    }
     u64 vert[3];
     for (int k = 0; k < 3; k++) {
       vert[k] = find_vertex(work64, v[k]);
