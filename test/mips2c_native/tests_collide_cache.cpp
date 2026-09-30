@@ -14,6 +14,11 @@ namespace tests {
 
 using namespace harness;
 
+// tests_collide_mesh.cpp
+u32 collide_mesh_type();
+u32 gen_real_collide_mesh(Gen& g, int nverts, int ntris, float range);
+u32 gen_bone_matrix(Gen& g);
+
 namespace {
 
 u32* vu0_buffer() {
@@ -363,33 +368,41 @@ void gen_prim_mesh(Case& c) {
   gen_collide_work(g, range);
 
   // the mesh: triangles (3 vertex indices, pat), and the vertices its method writes
-  const u32 type = sym_value("collide-mesh-fake");
-  const u32 mesh = alloc_basic(type, 28 + 8 * 64);
   const int nverts = g.range(3, 64);
   const int ntris = g.chance(0.05f) ? 0 : g.range(1, 60);
-  st<u32>(mesh + 4, (u32)ntris);
-  st<u32>(mesh + 8, (u32)nverts);
-  const u32 verts = alloc(32 * nverts);
-  for (int k = 0; k < nverts; k++) {
-    for (int i = 0; i < 4; i++) {
-      st<float>(verts + 32 * k + 4 * i, g.f(-1e5f, 1e5f));
-      st<s32>(verts + 32 * k + 16 + 4 * i, g.range(-range, range));
+  const bool real_mesh = g.chance(0.5f);
+  u32 mesh;
+  if (real_mesh) {
+    // collide-mesh with the mips2c / native methods 14 and 15
+    mesh = gen_real_collide_mesh(g, nverts, ntris, (float)range);
+  } else {
+    const u32 type = sym_value("collide-mesh-fake");
+    mesh = alloc_basic(type, 28 + 8 * 64);
+    st<u32>(mesh + 4, (u32)ntris);
+    st<u32>(mesh + 8, (u32)nverts);
+    const u32 verts = alloc(32 * nverts);
+    for (int k = 0; k < nverts; k++) {
+      for (int i = 0; i < 4; i++) {
+        st<float>(verts + 32 * k + 4 * i, g.f(-1e5f, 1e5f));
+        st<s32>(verts + 32 * k + 16 + 4 * i, g.range(-range, range));
+      }
     }
-  }
-  st<u32>(mesh + 12, verts);
-  for (int t = 0; t < ntris; t++) {
-    for (int k = 0; k < 3; k++) {
-      st<u8>(mesh + 28 + 8 * t + k, (u8)g.range(0, nverts - 1));
+    st<u32>(mesh + 12, verts);
+    for (int t = 0; t < ntris; t++) {
+      for (int k = 0; k < 3; k++) {
+        st<u8>(mesh + 28 + 8 * t + k, (u8)g.range(0, nverts - 1));
+      }
+      st<u8>(mesh + 28 + 8 * t + 3, (u8)g.u32_());
+      st<u32>(mesh + 28 + 8 * t + 4, g.u32_() & (g.chance(0.5f) ? 0xff : 0xffffffff));
     }
-    st<u8>(mesh + 28 + 8 * t + 3, (u8)g.u32_());
-    st<u32>(mesh + 28 + 8 * t + 4, g.u32_() & (g.chance(0.5f) ? 0xff : 0xffffffff));
   }
 
   // the prim and the joint it follows: prim cshape -> process (at 136) -> node-list (at 112)
   const s32 joint = g.range(-1, 6);
   const u32 node_list = alloc(32 * 10) + 32;
   for (int k = -1; k < 8; k++) {
-    st<u32>(node_list + 32 * k + 28, g.u32_());  // the bone (only passed on)
+    // the bone: a matrix for the real mesh methods, only passed on to the fake ones
+    st<u32>(node_list + 32 * k + 28, real_mesh ? gen_bone_matrix(g) : g.u32_());
   }
   const u32 proc = alloc(128);
   st<u32>(proc + 112, node_list);
@@ -412,46 +425,11 @@ void gen_prim_mesh(Case& c) {
 void setup_prim_mesh() {
   setup_cache_common();
   add_mesh_method_fakes();
+  collide_mesh_type();
 }
 
 void setup_mssi() {
   setup_cache_common();
-  static bool done = false;
-  if (done) {
-    return;
-  }
-  done = true;
-  // (moving-sphere-sphere-intersect sphere move other-sphere out-point)
-  set_sym("moving-sphere-sphere-intersect",
-          add_goal_fn("moving-sphere-sphere-intersect", 4, [](const u64* a) -> u64 {
-            float s[4], mv[4], o[4];
-            memcpy(s, hptr((u32)a[0]), 16);
-            memcpy(mv, hptr((u32)a[1]), 16);
-            memcpy(o, hptr((u32)a[2]), 16);
-            const float t = fake_ray_sphere(s, mv, o, s[3] + o[3]);
-            if (t >= 0) {
-              float p[4];
-              for (int i = 0; i < 4; i++) {
-                p[i] = s[i] + mv[i] * t + (o[i] - s[i]) * 0.5f;
-              }
-              st_bytes((u32)a[3], p, 16);
-            }
-            return f_bits(t);
-          }));
-  // (closest-pt-in-triangle out point tri normal)
-  set_sym("closest-pt-in-triangle",
-          add_goal_fn("closest-pt-in-triangle", 4, [](const u64* a) -> u64 {
-            float p[4], v[3][4];
-            memcpy(p, hptr((u32)a[1]), 16);
-            memcpy(v, hptr((u32)a[2]), 48);
-            float out[4];
-            const float w = (float)(ld<u32>((u32)a[2] + 48) & 3) * 0.25f;
-            for (int i = 0; i < 4; i++) {
-              out[i] = (v[0][i] + v[1][i] + v[2][i]) * (1.f / 3.f) * (1.f - w) + p[i] * w;
-            }
-            st_bytes((u32)a[0], out, 16);
-            return 0;
-          }));
 }
 
 }  // namespace

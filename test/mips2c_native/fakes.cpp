@@ -17,6 +17,39 @@ void add_collide_fakes() {
   }
   done = true;
 
+  // (moving-sphere-sphere-intersect sphere move other-sphere out-point)
+  set_sym("moving-sphere-sphere-intersect",
+          add_goal_fn("moving-sphere-sphere-intersect", 4, [](const u64* a) -> u64 {
+            float s[4], mv[4], o[4];
+            memcpy(s, hptr((u32)a[0]), 16);
+            memcpy(mv, hptr((u32)a[1]), 16);
+            memcpy(o, hptr((u32)a[2]), 16);
+            const float t = fake_ray_sphere(s, mv, o, s[3] + o[3]);
+            if (t >= 0) {
+              float p[4];
+              for (int i = 0; i < 4; i++) {
+                p[i] = s[i] + mv[i] * t + (o[i] - s[i]) * 0.5f;
+              }
+              st_bytes((u32)a[3], p, 16);
+            }
+            return f_bits(t);
+          }));
+  // (closest-pt-in-triangle out point tri normal): somewhere between the triangle's center and
+  // the point
+  set_sym("closest-pt-in-triangle",
+          add_goal_fn("closest-pt-in-triangle", 4, [](const u64* a) -> u64 {
+            float p[4], v[3][4];
+            memcpy(p, hptr((u32)a[1]), 16);
+            memcpy(v, hptr((u32)a[2]), 48);
+            float out[4];
+            const float w = (float)(ld<u32>((u32)a[2] + 48) & 3) * 0.25f;
+            for (int i = 0; i < 4; i++) {
+              out[i] = (v[0][i] + v[1][i] + v[2][i]) * (1.f / 3.f) * (1.f - w) + p[i] * w;
+            }
+            st_bytes((u32)a[0], out, 16);
+            return 0;
+          }));
+
   set_sym("ray-sphere-intersect",
           add_goal_fn("ray-sphere-intersect", 4, [](const u64* a) -> u64 {
             float o[4], d[4], c[4];
