@@ -93,6 +93,13 @@ u8 map_blend(const GsAlpha& a) {
   return CTR_BLEND_ALPHA;
 }
 
+}  // namespace
+
+u8 ctr_blend_from_gs_alpha(u64 alpha) {
+  return map_blend(GsAlpha(alpha));
+}
+
+namespace {
 bool same_state(const ctr_draw_state& a, const ctr_draw_state& b) {
   return memcmp(&a, &b, sizeof(ctr_draw_state)) == 0;
 }
