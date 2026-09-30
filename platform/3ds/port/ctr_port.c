@@ -76,22 +76,38 @@ static int s_sound = 0;
 static int s_sound_core = 1;
 static u32* s_soc_buffer = NULL;
 
-/* Boot progress on the SD card (sdmc:/3ds/jak1/boot.txt): on hardware a hang before the first
- * frame shows nothing but the launch screen; this file tells how far the boot got. The first
- * line is written by a constructor, which runs after libctru's startup (heaps, services, SD card
- * mounted) and before main. */
-#define CTR_BOOT_FILE "sdmc:/3ds/jak1/boot.txt"
+/* Boot progress on the SD card: on hardware a hang before the first frame shows nothing but the
+ * launch screen; this file tells how far the boot got. sdmc:/3ds/jak1/boot.txt when started from
+ * the Homebrew Launcher, boot_cia.txt otherwise (the installed title; also a .3dsx in the
+ * emulator), so running one doesn't overwrite what the other got to. The first lines are written
+ * by __appInit below, before main. */
+static const char* boot_file(void) {
+  return envIsHomebrew() ? "sdmc:/3ds/jak1/boot.txt" : "sdmc:/3ds/jak1/boot_cia.txt";
+}
 
-__attribute__((constructor(101))) static void ctr_boot_mark_first(void) {
-  FILE* f = fopen(CTR_BOOT_FILE, "w");
+/* libctru's __appInit (services, before the constructors and main), except that the SD card is
+ * mounted before APT so the boot file can show whether the installed title stops in aptInit,
+ * which waits for the HOME Menu to wake the application up. */
+void __appInit(void) {
+  srvInit();
+  fsInit();
+  archiveMountSdmc();
+  FILE* f = fopen(boot_file(), "w");
   if (f) {
-    fputs("1 libctru started (heaps, services, SD card)\n", f);
+    fprintf(f, "0 services, SD card (%s)\n", envIsHomebrew() ? "Homebrew Launcher" : "title");
     fclose(f);
   }
+  aptInit();
+  ctr_boot_mark("0 APT (HOME Menu handshake)");
+  hidInit();
+}
+
+__attribute__((constructor(101))) static void ctr_boot_mark_first(void) {
+  ctr_boot_mark("1 libctru started (heaps, services, SD card)");
 }
 
 void ctr_boot_mark(const char* step) {
-  FILE* f = fopen(CTR_BOOT_FILE, "a");
+  FILE* f = fopen(boot_file(), "a");
   if (f) {
     fprintf(f, "%s\n", step);
     fclose(f);
