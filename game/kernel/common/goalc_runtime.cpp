@@ -307,8 +307,11 @@ u32 goalc_fn_count() {
 }
 
 void goalc_write_stub(u32 goal_addr, u32 id, u32 index) {
-  memcpy(goalc_mem + goal_addr, &id, 4);
+  // see goal_c_abi.h: the stub holds the host address of the function
+  ASSERT(id < g_fn_table.size);
   memcpy(goalc_mem + goal_addr + 4, &index, 4);
+  void* fn = goalc_fn_table[id];
+  memcpy(goalc_mem + goal_addr, &fn, sizeof(void*));
 }
 
 u64 goalc_adapter_arg3_pp(void* fn, u64, u64* args) {
@@ -417,8 +420,9 @@ u32 goalc_link_module_entry(const u8* link,
     ASSERT_MSG(func_index < mod->n_funcs,
                fmt::format("goalc: object {} references function {} but module {} has {}",
                            object_name, func_index, mod->name ? mod->name : "?", mod->n_funcs));
-    u32 id = base_id + func_index;
-    memcpy(seg_data + stub_offset, &id, 4);
+    // see goal_c_abi.h: the stub holds the host address of the function
+    void* fn = goalc_fn_table[base_id + func_index];
+    memcpy(seg_data + stub_offset, &fn, sizeof(void*));
   }
 
   return (u32)(link - start);
