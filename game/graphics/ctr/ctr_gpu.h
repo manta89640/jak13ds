@@ -92,6 +92,10 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
 /* Texture from texels already in the GPU tiled layout. format: 0 = RGB565, 1 = RGBA4444. */
 int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int size);
 
+/* Store RGBA4 textures as RGBA8 (twice the memory). On by default: Azahar (OpenGL and Vulkan)
+ * renders RGBA4 textures as noise or a solid color (render.ini rgba4_as_rgba8). */
+void ctr_gpu_set_rgba4_as_rgba8(int on);
+
 /* Copy a vertex / index (u16, triangle list) buffer to GPU memory. Returns a handle or -1. */
 int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
                         int index_count);

@@ -439,6 +439,7 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `sprites` | on | draw world sprites (particles); the HUD is always drawn |
   | `max_sprites` | 1000 | world sprites per frame |
   | `ocean` | on | draw the ocean |
+  | `rgba4_as_rgba8` | on | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. Untested on hardware: off may work there and save memory |
 
 - **Timing in the log:** every 300 frames or 5 seconds, `[ctr] render ms/frame` (render thread:
   waiting for the GPU, building commands, submitting; GPU time from citro3d), `[ctr] build

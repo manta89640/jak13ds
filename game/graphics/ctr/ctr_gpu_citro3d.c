@@ -404,6 +404,12 @@ static inline u32 morton8(u32 x, u32 y) {
 /* Textures go to VRAM while there is room (linear memory is only ~24 MB and holds the level
  * meshes; the GPU also reads VRAM faster), else to linear memory. tex_alloc returns the buffer to
  * write the texels to (a linear staging buffer for VRAM), tex_commit uploads it. */
+static int g_rgba4_as_rgba8 = 1;
+
+void ctr_gpu_set_rgba4_as_rgba8(int on) {
+  g_rgba4_as_rgba8 = on;
+}
+
 static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vram) {
   *on_vram = 0;
   /* only outside of a frame: a copy in a frame needs a command list split and a queue entry
@@ -697,6 +703,30 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
   }
   C3D_Tex* tex = &g.textures[slot].tex;
   int on_vram;
+  if (format == 1 && g_rgba4_as_rgba8) {
+    /* RGBA4 texels expanded to RGBA8 (same tiled order; GPU_RGBA8 is stored A, B, G, R) */
+    uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram);
+    if (!dst) {
+      return -1;
+    }
+    const uint16_t* src = (const uint16_t*)data;
+    int n = size / 2;
+    if (n > w * h) {
+      n = w * h;
+    }
+    for (int i = 0; i < n; i++) {
+      const uint16_t v = src[i];
+      dst[4 * i + 0] = (uint8_t)((v & 0xf) * 17);
+      dst[4 * i + 1] = (uint8_t)(((v >> 4) & 0xf) * 17);
+      dst[4 * i + 2] = (uint8_t)(((v >> 8) & 0xf) * 17);
+      dst[4 * i + 3] = (uint8_t)(((v >> 12) & 0xf) * 17);
+    }
+    if (!tex_commit(tex, dst, on_vram)) {
+      return -1;
+    }
+    g.textures[slot].used = 1;
+    return slot;
+  }
   void* dst = tex_alloc(tex, w, h, format == 0 ? GPU_RGB565 : GPU_RGBA4, &on_vram);
   if (!dst) {
     return -1;

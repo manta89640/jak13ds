@@ -22,6 +22,7 @@
 #include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
+#include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
 #include "game/kernel/common/kboot.h"
@@ -339,6 +340,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
     lg::error("[ctr] GPU init failed");
     return 1;
   }
+  ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   g_ctr = std::make_unique<CtrRenderer>();
   g_ctr->levels().load_common();
   g_async = ctr_gpu_async_start(render_job, nullptr) != 0;
