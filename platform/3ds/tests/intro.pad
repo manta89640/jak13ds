@@ -1,0 +1,13 @@
+# (AI-assisted) intro cutscene test: title -> New Game -> the whole intro plays, nothing pressed
+# (frames are game frames; game/sce/pad_script.h). Watch the log for "[OVERLORD] ... STR" loads
+# (SAISA, then the misty parts, then SAISD1 / SAISE) and the screenshots.
+0 wait *target* target-title-wait
+60 start
+66 -
+150 x
+156 -
+190 x
+196 -
+230 x
+236 -
+14000 log done

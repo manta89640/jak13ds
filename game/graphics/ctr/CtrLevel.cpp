@@ -376,6 +376,16 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       ++it;
     }
   }
+  // Load the wanted levels before the next frame, not only when their background is drawn: a level
+  // can be loaded just for its models. The intro loads the "intro" level (Gol and Maia) next to
+  // misty with display mode special, so it never draws a background and was never loaded.
+  for (auto& n : names) {
+    if (n.empty() || m_levels.count(n) || m_missing.count(n) ||
+        std::find(m_pending_loads.begin(), m_pending_loads.end(), n) != m_pending_loads.end()) {
+      continue;
+    }
+    m_pending_loads.push_back(n);
+  }
 }
 
 // ---------------------------------------------------------------------------
