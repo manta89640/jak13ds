@@ -46,6 +46,8 @@ CtrEyeRenderer::CtrEyeRenderer(std::string name, int id, CtrVram* vram)
   for (int i = 0; i < kSlots; i++) {
     m_tex[i] = -1;
     m_hash[i] = 0;
+    m_key[i] = 0;
+    m_age[i] = 0;
   }
 }
 
@@ -305,6 +307,30 @@ void CtrEyeRenderer::composite(const Eye& e) {
   if (slot < 0 || slot >= kSlots) {
     return;
   }
+  // Same sprites and textures as last time: the eye didn't move (most frames, between blinks and
+  // glances). Redone every 30 frames anyway, in case the texture data changed under it.
+  u64 key = 1469598103934665603ull;
+  auto mix = [&](const void* p, size_t n) {
+    const u8* b = (const u8*)p;
+    for (size_t i = 0; i < n; i++) {
+      key = (key ^ b[i]) * 1099511628211ull;
+    }
+  };
+  const Sprite* sprites[3] = {&e.iris, &e.pupil, &e.lid};
+  for (const Sprite* sp : sprites) {
+    mix(sp->xyz0, sizeof(sp->xyz0));
+    mix(sp->xyz1, sizeof(sp->xyz1));
+    mix(&sp->valid, sizeof(sp->valid));
+  }
+  mix(&e.iris_tex0, 8);
+  mix(&e.pupil_tex0, 8);
+  mix(&e.lid_tex0, 8);
+  mix(&e.using_64, sizeof(e.using_64));
+  if (m_tex[slot] >= 0 && m_key[slot] == key && ++m_age[slot] < 30) {
+    return;
+  }
+  m_key[slot] = key;
+  m_age[slot] = 0;
   const Source* iris = source(e.iris_tex0);
   const Source* pupil = source(e.pupil_tex0);
   const Source* lid = source(e.lid_tex0);
