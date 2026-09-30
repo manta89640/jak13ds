@@ -1190,13 +1190,16 @@
   (camera-pos)
   (new 'static 'boxed-array :type symbol :length 0 :allocated-length 2)
   ;; compute the settings for this frame
-  (update *setting-control*)
+  (with-profiler "lu-settings"
+    (update *setting-control*))
   ;; run the art loading system
-  (update *art-control* #t)
-  (clear-rec *art-control*)
+  (with-profiler "lu-art-control"
+    (update *art-control* #t)
+    (clear-rec *art-control*))
   ;; run level loading!
-  (dotimes (s5-0 2)
-    (load-continue (-> this level s5-0)))
+  (with-profiler "lu-load-continue"
+    (dotimes (s5-0 2)
+      (load-continue (-> this level s5-0))))
   ;; compute inside for each level
   (dotimes (s5-1 (-> this length))
     (let ((s4-0 (-> this level s5-1)))
@@ -1206,7 +1209,8 @@
         ;; being inside sets your meta-inside to #t. If you are outside, remember your old inside.
         (if (-> s4-0 inside-boxes?) (set! (-> s4-0 meta-inside?) #t)))))
   ;; update load state machine (the level-border one)
-  (update! *load-state*)
+  (with-profiler "lu-load-state"
+    (update! *load-state*))
   ;; checkpoint assignment
   (dotimes (s5-2 (-> this length))
     (let ((s4-1 (-> this level s5-2)))
