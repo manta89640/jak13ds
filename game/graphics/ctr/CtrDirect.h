@@ -20,6 +20,9 @@
 
 class CtrVram;
 
+/*! GS ALPHA register -> enum ctr_blend (unknown equations: normal alpha blending). */
+u8 ctr_blend_from_gs_alpha(u64 alpha);
+
 class CtrDirect {
  public:
   explicit CtrDirect(CtrVram* vram);

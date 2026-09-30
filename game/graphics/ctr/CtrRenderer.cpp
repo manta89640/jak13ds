@@ -19,6 +19,7 @@
 #include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrMerc.h"
+#include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
@@ -122,6 +123,8 @@ CtrRenderer::CtrRenderer()
                   BucketId::MERC_WATER_LEVEL1}) {
     set(id, std::make_unique<CtrMercRenderer>("merc", (int)id, m_levels.get()));
   }
+  set(BucketId::SPRITE,
+      std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));
   set(BucketId::DEBUG,
       std::make_unique<CtrDirectBucketRenderer>("debug", (int)BucketId::DEBUG, m_vram.get(), true));
   set(BucketId::DEBUG_NO_ZBUF,

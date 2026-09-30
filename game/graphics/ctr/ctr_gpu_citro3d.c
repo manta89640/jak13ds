@@ -208,12 +208,13 @@ static void setup_projection(void) {
   g.projection.r[2].z = -1.0f;
   g.projection.r[2].w = 0.0f;
 
-  /* OpenGL-style clip space -> PICA: same x/y mapping, z' = (z - w) / 2 so the depth (-z'/w) is 1 at
-   * the near plane and 0 at the far plane (larger = closer, like the GS) */
+  /* OpenGL-style clip space -> PICA: same x/y mapping, z' = -(z + w) / 2 so the depth (-z'/w) is
+   * (z/w + 1) / 2, the OpenGL depth. The game's matrices (tfrag3.vert, merc2.vert) put the GS
+   * depth (larger = closer) there, and the PC renderer tests it with GL_GEQUAL. */
   Mtx_OrthoTilt(&g.gl_to_pica, -1.25f, 1.25f, -1.0f, 1.0f, 0.0f, 1.0f, true);
   g.gl_to_pica.r[2].x = 0.0f;
   g.gl_to_pica.r[2].y = 0.0f;
-  g.gl_to_pica.r[2].z = 0.5f;
+  g.gl_to_pica.r[2].z = -0.5f;
   g.gl_to_pica.r[2].w = -0.5f;
   g.gl_to_pica.r[3].x = 0.0f;
   g.gl_to_pica.r[3].y = 0.0f;

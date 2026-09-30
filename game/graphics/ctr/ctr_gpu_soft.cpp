@@ -407,7 +407,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
       }
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
-      tri[k].z = (1.f - c[2] / c[3]) * 0.5f;
+      tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
       tri[k].s = st[0] / 1024.f;
       tri[k].t = st[1] / 1024.f;
       tri[k].r = src[12];
@@ -484,7 +484,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
       }
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
-      tri[k].z = (1.f - c[2] / c[3]) * 0.5f;
+      tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
       tri[k].s = st[0] / 1024.f;
       tri[k].t = st[1] / 1024.f;
       tri[k].r = (uint8_t)(rgba[0] * tint[0]);
