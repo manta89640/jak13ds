@@ -360,7 +360,12 @@
          (when (and (>= 0.0 (-> self root transv y)) (>= (-> self base y) (-> self root trans y)))
            (set! (-> self root trans y) (-> self base y))
            (cond
-             ((< (-> self root transv y) -8192.0) (set! (-> self root transv y) (/ (-> self root transv y) -2)))
+             ;; A slow frame can add more than 8192 of downward velocity in one step.
+             ;; Use at least one frame's gravity impulse as the settling threshold,
+             ;; otherwise small bounces can repeat forever while x/z velocity persists.
+             ((< (-> self root transv y)
+                 (- (fmax 8192.0 (* (-> self root dynam gravity-length) (seconds-per-frame)))))
+              (set! (-> self root transv y) (/ (-> self root transv y) -2)))
              (else
               (vector-reset! (-> self root transv))
               (logclear! (-> self flags) (collectable-flags trans))
