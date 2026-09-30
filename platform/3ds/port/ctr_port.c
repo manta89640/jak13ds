@@ -15,9 +15,10 @@
 /* libctru splits free memory between the regular heap (malloc) and the linear heap (GPU/DSP
  * buffers) at startup, capping the regular heap at 24 MB by default. The runtime needs one big
  * malloc for the EE memory (48 MB in the small layout), so set the linear heap explicitly; the
- * regular heap gets the rest. Linear memory holds the renderer's vertex ring buffer (4 MB),
- * textures and the loaded level backgrounds (~5 MB per level). */
-u32 __ctru_linear_heap_size = 24 << 20;
+ * regular heap gets the rest. Linear memory holds the renderer's vertex ring buffer, textures and
+ * the loaded level backgrounds (two big levels can need ~20 MB). 32 MB leaves ~17 MB of the regular
+ * heap free in the 124 MB mode (about 63 MB of it is used, mostly by the 48 MB of EE memory). */
+u32 __ctru_linear_heap_size = 32 << 20;
 
 static int s_console = 0;
 static FILE* s_tee_file;
