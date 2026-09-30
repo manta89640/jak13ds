@@ -408,6 +408,19 @@ MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
 }
 
 BankHandle Loader::BankLoad(std::span<u8> bank) {
+  return AddBank(ParseBank(bank));
+}
+
+BankHandle Loader::AddBank(std::unique_ptr<SoundBank> bank) {
+  if (!bank) {
+    return nullptr;
+  }
+  BankHandle handle = bank.get();
+  mBanks.emplace_back(std::move(bank));
+  return handle;
+}
+
+std::unique_ptr<SoundBank> Loader::ParseBank(std::span<u8> bank) {
   BinaryReader reader(bank);
   FileAttributes fa;
   fa.Read(reader);
@@ -425,19 +438,13 @@ BankHandle Loader::BankLoad(std::span<u8> bank) {
   if (fourcc == snd::fourcc("SBv2")) {
     if (fa.num_chunks != 3) {
       fmt::print("SBv2 without midi data not supported\n");
-      return 0;
+      return nullptr;
     }
     std::span<u8> midi_data(std::span<u8>(bank).subspan(fa.where[2].offset, fa.where[2].size));
 
-    auto bank = MusicBank::ReadBank(bank_data, sample_data, midi_data);
-    mBanks.emplace_back(bank);
-
-    return bank;
+    return std::unique_ptr<SoundBank>(MusicBank::ReadBank(bank_data, sample_data, midi_data));
   } else if (fourcc == snd::fourcc("SBlk")) {
-    auto block = SFXBlock::ReadBlock(bank_data, sample_data);
-    mBanks.emplace_back(block);
-
-    return block;
+    return std::unique_ptr<SoundBank>(SFXBlock::ReadBlock(bank_data, sample_data));
   }
 
   return nullptr;

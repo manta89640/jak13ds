@@ -105,6 +105,7 @@ void CtrLevels::loader_main() {
     Job job = *it;
     m_queue.erase(it);
     m_loading = job.name;
+    m_loading_prefetch = job.prefetch;
     m_cancel = false;
     lk.unlock();
     run_job(job);
@@ -605,8 +606,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
         ++it;
       }
     }
-    if (!m_loading.empty() && m_loading != "GAME" && !wanted(m_loading) &&
-        !m_prefetched.count(m_loading)) {
+    if (!m_loading.empty() && !m_loading_prefetch && m_loading != "GAME" && !wanted(m_loading)) {
       m_cancel = true;
     }
   }

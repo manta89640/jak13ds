@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -384,6 +385,8 @@ struct EeTiming {
 constexpr double kLongFrameMs = 200.0;
 double g_wait_render_total = 0;  // never reset: the wait in one frame is the difference
 double g_wait_render_mark = 0;
+double g_upload_total = 0, g_upload_mark = 0;  // same for texture uploads / relocates
+int g_upload_count_total = 0, g_upload_count_mark = 0;
 
 void render_job(void*) {
   g_ctr->render_frame(g_job_mem, g_job_offset);
@@ -461,11 +464,15 @@ void ctr_send_chain(const void* data, u32 offset) {
     g_ee.frames++;
     g_ee.max_frame_ms = std::max(g_ee.max_frame_ms, dt);
     if (dt >= kLongFrameMs) {
-      lg::info("[ctr] long frame {}: {:.0f} ms, of which {:.0f} ms waiting for the render thread",
-               g_frame_idx, dt, g_wait_render_total - g_wait_render_mark);
+      lg::info("[ctr] long frame {}: {:.0f} ms, of which {:.0f} ms waiting for the render thread, "
+               "{:.0f} ms in {} texture uploads",
+               g_frame_idx, dt, g_wait_render_total - g_wait_render_mark,
+               g_upload_total - g_upload_mark, g_upload_count_total - g_upload_count_mark);
     }
   }
   g_wait_render_mark = g_wait_render_total;
+  g_upload_mark = g_upload_total;
+  g_upload_count_mark = g_upload_count_total;
   g_ee.last_send = now;
   if (g_async) {
     wait_render_idle();
@@ -504,8 +511,11 @@ void ctr_texture_upload_now(const u8* tpage, int mode, u32 s7_ptr) {
     wait_render_idle();
     const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().upload_texture_page_now(tpage, mode, g_ee_main_mem, s7_ptr);
-    g_ee.upload_ms += ctr_gpu_time_ms() - t0;
+    const double dt = ctr_gpu_time_ms() - t0;
+    g_ee.upload_ms += dt;
     g_ee.uploads++;
+    g_upload_total += dt;
+    g_upload_count_total++;
   }
 }
 
@@ -514,8 +524,11 @@ void ctr_texture_relocate(u32 destination, u32 source, u32 format) {
     wait_render_idle();
     const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().relocate(destination, source, format);
-    g_ee.upload_ms += ctr_gpu_time_ms() - t0;
+    const double dt = ctr_gpu_time_ms() - t0;
+    g_ee.upload_ms += dt;
     g_ee.relocates++;
+    g_upload_total += dt;
+    g_upload_count_total++;
   }
 }
 
@@ -552,10 +565,14 @@ void ctr_level_dgo_started(const char* dgo_name) {
   if (!dgo_name || !g_ctr_ready) {
     return;
   }
+  // the game asks for "vi1.DGO"
   std::string n(dgo_name);
   const auto dot = n.find('.');
   if (dot != std::string::npos) {
     n.resize(dot);
+  }
+  for (auto& c : n) {
+    c = (char)toupper((unsigned char)c);
   }
   for (const auto& l : kLevels) {
     if (n == l.dgo) {

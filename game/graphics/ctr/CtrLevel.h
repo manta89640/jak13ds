@@ -122,13 +122,14 @@ class CtrLevels {
   std::deque<Job> m_queue;
   std::vector<Done> m_done;
   std::string m_loading;  // the level the loader works on ("" if none)
+  bool m_loading_prefetch = false;  // ... for a prefetch (never cancelled: the level is coming)
   std::atomic<bool> m_cancel{false};  // m_loading is no longer wanted: stop early
   bool m_quit = false;
   std::vector<std::string> m_prefetch_requests;
   int m_levels_loaded = 0;  // m_levels + m_prefetched (a prefetch waits while it's 2 or more)
   std::set<std::string> m_resident;  // names in m_levels + m_prefetched (a prefetch skips them)
   void* m_thread = nullptr;
-  std::set<std::string> m_requested;  // render thread: queued, loading or done but not taken
+  std::set<std::string> m_requested;  // queued, loading or done but not taken (under m_lock)
   struct Prefetched {
     std::unique_ptr<CtrLevelData> lev;
     double since_ms = 0;  // when the load finished (ctr_gpu_time_ms)
