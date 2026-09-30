@@ -18,6 +18,7 @@
 
 #include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
@@ -114,6 +115,13 @@ CtrRenderer::CtrRenderer()
                                                                  m_levels.get()));
   set(BucketId::TFRAG_LEVEL1, std::make_unique<CtrTfragRenderer>("l1-tfrag", (int)BucketId::TFRAG_LEVEL1,
                                                                  m_levels.get()));
+  // merc (characters, objects)
+  for (auto id : {BucketId::MERC_TFRAG_TEX_LEVEL0, BucketId::MERC_TFRAG_TEX_LEVEL1,
+                  BucketId::MERC_AFTER_ALPHA, BucketId::MERC_PRIS_LEVEL0, BucketId::MERC_PRIS_LEVEL1,
+                  BucketId::MERC_AFTER_PRIS, BucketId::MERC_WATER_LEVEL0,
+                  BucketId::MERC_WATER_LEVEL1}) {
+    set(id, std::make_unique<CtrMercRenderer>("merc", (int)id, m_levels.get()));
+  }
   set(BucketId::DEBUG,
       std::make_unique<CtrDirectBucketRenderer>("debug", (int)BucketId::DEBUG, m_vram.get(), true));
   set(BucketId::DEBUG_NO_ZBUF,
@@ -134,7 +142,20 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_rs.ee_mem = (const u8*)ee_mem;
   m_rs.offset_of_s7 = s7.offset;
   m_rs.vram = m_vram.get();
-  ctr_gpu_frame_begin(0, 0, 0);
+  // No sky renderer yet: clear to the fog color from the default GS registers (the same place
+  // OpenGLRenderer reads it), which is close to the sky color at the horizon.
+  u8 clear[4] = {0, 0, 0, 0};
+  {
+    DmaFollower peek(ee_mem, chain_offset);
+    if (peek.current_tag().kind == DmaTag::Kind::CALL) {
+      peek.read_and_advance();
+      auto regs = peek.read_and_advance();
+      if (regs.size_bytes > 148) {
+        memcpy(clear, regs.data + 144, 4);
+      }
+    }
+  }
+  ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
     const char* ext = "bmp";
@@ -205,6 +226,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
     return 1;
   }
   g_ctr = std::make_unique<CtrRenderer>();
+  g_ctr->levels().load_common();
   lg::info("[ctr] renderer ready");
   return 0;
 }

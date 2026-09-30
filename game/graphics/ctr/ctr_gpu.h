@@ -7,7 +7,7 @@
  * renderer (C++ with common_types.h) never includes <3ds.h> (whose u32 conflicts with ours).
  *
  * Implementations:
- *  - platform/3ds/port/ctr_gpu_citro3d.c: citro3d on the 3DS
+ *  - game/graphics/ctr/ctr_gpu_citro3d.c: citro3d on the 3DS
  *  - game/graphics/ctr/ctr_gpu_soft.cpp: small software rasterizer on PC (for testing the renderer
  *    without an emulator; writes PNG frames)
  *
@@ -101,6 +101,21 @@ void ctr_gpu_mesh_delete(int mesh);
  * OpenGL-style clip space (x, y in [-w, w] cover the 4:3 area, z in [-w, w], near = -w). */
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
                        int first_index, int index_count);
+
+/* ---------------- skinned meshes (merc, see c3l::MercVertex, 20 bytes) ----------------
+ * Vertex: s16 pos[3], u8 bones[3] (palette index), u8 weights[3] (0..255), s16 st[2] (* 1024),
+ * u8 rgba[4] (GS units). Deleted with ctr_gpu_mesh_delete.
+ */
+#define CTR_MAX_PALETTE 24
+int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
+                                int index_count);
+
+/* bones: palette_count 3x4 row-major matrices, (pos, 1) -> camera space (x, y, z).
+ * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.
+ * tint: multiplies the final color (lighting approximation), 0..1. */
+void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
+                          int palette_count, const float tint[3], int mesh, int first_index,
+                          int index_count);
 
 /* Request a screenshot of the next finished frame (written when it is available: after the next
  * ctr_gpu_frame_begin on the 3DS). PNG on PC, BMP on the 3DS. */

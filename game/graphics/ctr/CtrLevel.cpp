@@ -26,6 +26,9 @@ CtrLevels::~CtrLevels() {
   for (auto& [name, lev] : m_levels) {
     unload(*lev);
   }
+  if (m_common) {
+    unload(*m_common);
+  }
 }
 
 bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
@@ -85,8 +88,38 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
       out->draws[d].first_index -= first;
     }
   }
-  lg::info("[ctr] loaded {} ({} chunks, {} textures, {} KB) in {:.0f} ms", name,
-           out->chunks.size(), out->textures.size(), file.size() / 1024, timer.getMs());
+  // merc models: one skinned mesh per model
+  if (hdr.num_merc_models) {
+    std::vector<c3l::MercModel> models(hdr.num_merc_models);
+    memcpy(models.data(), file.data() + hdr.merc_models_offset,
+           hdr.num_merc_models * sizeof(c3l::MercModel));
+    const auto* mverts = (const c3l::MercVertex*)(file.data() + hdr.merc_vertex_offset);
+    const auto* mindices = (const u16*)(file.data() + hdr.merc_index_offset);
+    const auto* mdraws = (const c3l::MercDraw*)(file.data() + hdr.merc_draw_offset);
+    for (auto& m : models) {
+      CtrMercModelData md;
+      md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
+      md.scale = m.scale;
+      md.draws.assign(mdraws + m.first_draw, mdraws + m.first_draw + m.draw_count);
+      if (md.draws.empty()) {
+        continue;
+      }
+      u32 first = UINT32_MAX, end = 0;
+      for (auto& d : md.draws) {
+        first = std::min<u32>(first, d.first_index);
+        end = std::max<u32>(end, d.first_index + d.index_count);
+      }
+      for (auto& d : md.draws) {
+        d.first_index -= first;
+      }
+      md.mesh = ctr_gpu_skinned_mesh_create(mverts + m.first_vertex, m.vertex_count,
+                                            mindices + first, end - first);
+      out->merc_models.push_back(std::move(md));
+    }
+  }
+  lg::info("[ctr] loaded {} ({} chunks, {} merc models, {} textures, {} KB) in {:.0f} ms", name,
+           out->chunks.size(), out->merc_models.size(), out->textures.size(), file.size() / 1024,
+           timer.getMs());
   return true;
 }
 
@@ -97,8 +130,49 @@ void CtrLevels::unload(CtrLevelData& lev) {
   for (int m : lev.meshes) {
     ctr_gpu_mesh_delete(m);
   }
+  for (auto& m : lev.merc_models) {
+    ctr_gpu_mesh_delete(m.mesh);
+  }
+  lev.merc_models.clear();
   lev.textures.clear();
   lev.meshes.clear();
+}
+
+void CtrLevels::load_common() {
+  if (m_common) {
+    return;
+  }
+  auto lev = std::make_unique<CtrLevelData>();
+  if (load("GAME", lev.get())) {
+    m_common = std::move(lev);
+    rebuild_merc_index();
+  } else {
+    lg::warn("[ctr] no common models (out/jak1/c3l/GAME.c3l): Jak won't be drawn");
+  }
+}
+
+void CtrLevels::rebuild_merc_index() {
+  m_merc_index.clear();
+  if (m_common) {
+    for (size_t i = 0; i < m_common->merc_models.size(); i++) {
+      m_merc_index[m_common->merc_models[i].name] = {m_common.get(), (int)i};
+    }
+  }
+  for (auto& [name, lev] : m_levels) {
+    for (size_t i = 0; i < lev->merc_models.size(); i++) {
+      m_merc_index[lev->merc_models[i].name] = {lev.get(), (int)i};
+    }
+  }
+}
+
+const CtrMercModelData* CtrLevels::find_merc_model(const std::string& name,
+                                                   const CtrLevelData** lev) {
+  auto it = m_merc_index.find(name);
+  if (it == m_merc_index.end()) {
+    return nullptr;
+  }
+  *lev = it->second.first;
+  return &it->second.first->merc_models[it->second.second];
 }
 
 CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
@@ -114,6 +188,7 @@ CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
       return nullptr;
     }
     it = m_levels.emplace(name, std::move(lev)).first;
+    rebuild_merc_index();
   }
   it->second->last_used_frame = frame;
   return it->second.get();
@@ -129,6 +204,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       lg::info("[ctr] unloading {}", it->first);
       unload(*it->second);
       it = m_levels.erase(it);
+      rebuild_merc_index();
     } else {
       ++it;
     }
@@ -190,7 +266,9 @@ bool sphere_in_view(const float* s, const math::Vector4f* planes) {
   return acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3];
 }
 
-ctr_draw_state state_from_draw_mode(DrawMode mode, int tex) {
+}  // namespace
+
+ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex) {
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
   st.tex = tex;
@@ -253,7 +331,6 @@ ctr_draw_state state_from_draw_mode(DrawMode mode, int tex) {
   st.zwrite = mode.get_depth_write_enable();
   return st;
 }
-}  // namespace
 
 CtrTfragRenderer::CtrTfragRenderer(std::string name, int id, CtrLevels* levels)
     : CtrBucketRenderer(std::move(name), id), m_levels(levels) {}
@@ -326,7 +403,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev, const CtrBackgroundCamera& 
       int tex = dr.texture == 0xffff ? -1 : lev.textures[dr.texture];
       DrawMode mode;
       mode.as_int() = dr.mode;
-      ctr_draw_state st = state_from_draw_mode(mode, tex);
+      ctr_draw_state st = ctr_state_from_draw_mode(mode, tex);
       ctr_gpu_draw_mesh(&st, m, lev.meshes[ci], dr.first_index, dr.index_count);
     }
     drawn++;

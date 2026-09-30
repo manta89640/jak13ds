@@ -24,7 +24,7 @@ if(OG3DS_CSRC_DIR)
   target_compile_definitions(og3ds_goal_modules PRIVATE GOALC_STATIC)
   target_include_directories(og3ds_goal_modules PRIVATE
     ${OG_ROOT}/goalc/cbackend ${OG_ROOT}/game/kernel/common)
-  target_compile_options(og3ds_goal_modules PRIVATE -O2 -fno-strict-aliasing -w)
+  target_compile_options(og3ds_goal_modules PRIVATE -O2 -fno-strict-aliasing -fno-math-errno -w)
 
   # registry: compiled into gk itself (an object, not an archive member), so it replaces the
   # runtime's weak goalc_register_static_modules() and pulls in every module.

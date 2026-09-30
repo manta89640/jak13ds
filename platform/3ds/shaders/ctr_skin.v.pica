@@ -1,0 +1,53 @@
+; (AI-assisted)
+; Vertex shader for skinned meshes (merc, c3l::MercVertex): up to 3 bones per vertex from a
+; palette of 24 (3 rows each), giving camera space; then one matrix to clip space.
+
+.fvec clip[4]
+.fvec row0[24]
+.fvec row1[24]
+.fvec row2[24]
+.fvec scales        ; x: texture coordinate scale (1/1024), y: 1/255, z: 1.0
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias inidx v1
+.alias inwgt v2
+.alias intex v3
+.alias inclr v4
+
+.proc main
+  mov r0.xyz, inpos
+  mov r0.w, scales.zzzz
+  mul r2, scales.yyyy, inwgt
+
+  ; bones 0 and 1
+  mova a0.xy, inidx.xy
+  dp4 r4.x, row0[a0.x], r0
+  dp4 r4.y, row1[a0.x], r0
+  dp4 r4.z, row2[a0.x], r0
+  mul r5.xyz, r2.xxxx, r4.xyz
+  dp4 r4.x, row0[a0.y], r0
+  dp4 r4.y, row1[a0.y], r0
+  dp4 r4.z, row2[a0.y], r0
+  mad r5.xyz, r2.yyyy, r4.xyz, r5.xyz
+
+  ; bone 2
+  mova a0.x, inidx.zzzz
+  dp4 r4.x, row0[a0.x], r0
+  dp4 r4.y, row1[a0.x], r0
+  dp4 r4.z, row2[a0.x], r0
+  mad r5.xyz, r2.zzzz, r4.xyz, r5.xyz
+  mov r5.w, scales.zzzz
+
+  dp4 outpos.x, clip[0], r5
+  dp4 outpos.y, clip[1], r5
+  dp4 outpos.z, clip[2], r5
+  dp4 outpos.w, clip[3], r5
+
+  mul outtc0, scales.xxxx, intex
+  mul outclr, scales.yyyy, inclr
+  end
+.end
