@@ -540,3 +540,98 @@
       (else (set! *ocean-facing* 1))))
   0
   (none))
+
+;; 3DS port (AI-assisted). With SKIP_OCEAN_DRAW, draw-ocean (the PS2 ocean: VU1 DMA for the far,
+;; mid, transition and near parts and the wave texture) is too slow for the 3DS. This sends only
+;; what the 3DS renderer (game/graphics/ctr/CtrOcean.cpp) needs to draw the ocean itself, as one
+;; pc-port packet in the ocean-near bucket (after the opaque level geometry):
+;;   qw 0: "OCN3", *ocean-heights* (32x32 floats of this frame's waves), ocean-colors, flags
+;;   qw 1: ocean-mid-indices, ocean-mid-masks data, ocean-trans-indices, 0
+;;   qw 2: start-corner (y = ocean height), qw 3: far-color
+;;   qw 4-26: the camera, like add-pc-tfrag3-data (planes, itimes (0), camera-temp, hvdf-off, fog,
+;;            position, camera-rot, perspective)
+;; The ocean tables are static data in ENGINE/GAME, so the renderer can read them a frame later.
+;; The wave heights are still computed, so ocean-get-height (boats, floating objects) works.
+(defun draw-ocean-3ds ()
+  (set! *ocean-heights* #f)
+  (set! *ocean-verts* (the-as (inline-array vector) #f))
+  (let ((buf (-> *display* frames (-> *display* on-screen) frame global-buf)))
+    (set! *ocean-heights* (the-as ocean-wave-info (-> buf base)))
+    (ocean-interp-wave *ocean-heights*
+                       (the uint (* (/ (-> *display* time-factor) 5.0) (-> *display* integral-frame-counter))))
+    (&+! (-> buf base) 4096))
+  (when *ocean-map*
+    ;; same height choice as draw-ocean
+    (let* ((cam (camera-pos))
+           (marker *swamp-low-ocean-marker*)
+           (dx (* 0.00024414062 (- (-> cam x) (-> marker x))))
+           (dz (* 0.00024414062 (- (-> cam z) (-> marker z)))))
+      (cond
+        ((< (+ (* dx dx) (* dz dz)) 40000.0) (set! (-> *ocean-map* start-corner y) -4096.0))
+        ((or (< -409600.0 (-> cam y)) (movie?)) (set! (-> *ocean-map* start-corner y) 0.0))
+        (else (set! (-> *ocean-map* start-corner y) -98304.0))))
+    (when (and (not *ocean-off*) (logtest? *vu1-enable-user* (vu1-renderer-mask ocean)))
+      (let* ((buf (-> *display* frames (-> *display* on-screen) frame global-buf))
+             (start (-> buf base)))
+        (let ((packet (the-as dma-packet (-> buf base))))
+          (set! (-> packet dma) (new 'static 'dma-tag :id (dma-tag-id cnt) :qwc 27))
+          (set! (-> packet vif0) (new 'static 'vif-tag))
+          (set! (-> packet vif1) (new 'static 'vif-tag :cmd (vif-cmd pc-port)))
+          (set! (-> buf base) (the pointer (&+ packet 16))))
+        (let ((words (the-as (pointer uint32) (-> buf base)))
+              (quads (the-as (pointer uint128) (-> buf base)))
+              (map *ocean-map*))
+          (set! (-> words 0) #x334e434f) ;; "OCN3"
+          (set! (-> words 1) (the-as uint *ocean-heights*))
+          (set! (-> words 2) (the-as uint (-> map ocean-colors)))
+          (set! (-> words 3) (the-as uint (if (or *ocean-mid-off* (= map *ocean-map-sunken*)) 1 0)))
+          (set! (-> words 4) (the-as uint (-> map ocean-mid-indices)))
+          (set! (-> words 5) (the-as uint (-> map ocean-mid-masks data)))
+          (set! (-> words 6) (the-as uint (-> map ocean-trans-indices)))
+          (set! (-> words 7) 0)
+          (set! (-> quads 2) (-> map start-corner quad))
+          (set! (-> quads 3) (-> map far-color quad))
+          (set! (-> quads 4) (-> *math-camera* plane 0 quad))
+          (set! (-> quads 5) (-> *math-camera* plane 1 quad))
+          (set! (-> quads 6) (-> *math-camera* plane 2 quad))
+          (set! (-> quads 7) (-> *math-camera* plane 3 quad))
+          (set! (-> quads 8) (the uint128 0))
+          (set! (-> quads 9) (the uint128 0))
+          (set! (-> quads 10) (the uint128 0))
+          (set! (-> quads 11) (the uint128 0))
+          (set! (-> quads 12) (-> *math-camera* camera-temp vector 0 quad))
+          (set! (-> quads 13) (-> *math-camera* camera-temp vector 1 quad))
+          (set! (-> quads 14) (-> *math-camera* camera-temp vector 2 quad))
+          (set! (-> quads 15) (-> *math-camera* camera-temp vector 3 quad))
+          (set! (-> quads 16) (-> *math-camera* hvdf-off quad))
+          (let ((fog (-> (the (inline-array vector) quads) 17)))
+            (set! (-> fog x) (-> *math-camera* pfog0))
+            (set! (-> fog y) (-> *math-camera* fog-min))
+            (set! (-> fog z) (-> *math-camera* fog-max))
+            (set! (-> fog w) 0.0))
+          (set! (-> quads 18) (-> (math-camera-pos) quad))
+          (set! (-> quads 19) (-> *math-camera* camera-rot vector 0 quad))
+          (set! (-> quads 20) (-> *math-camera* camera-rot vector 1 quad))
+          (set! (-> quads 21) (-> *math-camera* camera-rot vector 2 quad))
+          (set! (-> quads 22) (-> *math-camera* camera-rot vector 3 quad))
+          (set! (-> quads 23) (-> *math-camera* perspective vector 0 quad))
+          (set! (-> quads 24) (-> *math-camera* perspective vector 1 quad))
+          (set! (-> quads 25) (-> *math-camera* perspective vector 2 quad))
+          (set! (-> quads 26) (-> *math-camera* perspective vector 3 quad)))
+        (&+! (-> buf base) (* 16 27))
+        (let ((end (-> buf base)))
+          (let ((next (the-as dma-packet (-> buf base))))
+            (set! (-> next dma) (new 'static 'dma-tag :id (dma-tag-id next)))
+            (set! (-> next vif0) (new 'static 'vif-tag))
+            (set! (-> next vif1) (new 'static 'vif-tag))
+            (set! (-> buf base) (the pointer (&+ next 16))))
+          (dma-bucket-insert-tag (-> *display* frames (-> *display* on-screen) frame bucket-group)
+                                 (bucket-id ocean-near)
+                                 start
+                                 (the-as (pointer dma-tag) end))))))
+  (when (not (paused?))
+    (set! *ocean-off* #f)
+    (set! *ocean-mid-off* #f)
+    (set! *ocean-near-off* #f))
+  0
+  (none))

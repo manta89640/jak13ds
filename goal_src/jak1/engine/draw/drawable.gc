@@ -854,6 +854,8 @@
     (update-ocean) ;; ocean map update
     (#unless SKIP_OCEAN_DRAW
       (draw-ocean)) ;; far, mid, near, transition, and texture.
+    (#when SKIP_OCEAN_DRAW
+      (draw-ocean-3ds)) ;; 3DS: only the parameters, the 3DS renderer draws the ocean
     )
   (add-ee-profile-frame 'draw :b #xff :a #x80)
   ;; reset MERC

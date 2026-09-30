@@ -25,6 +25,7 @@ struct Entry {
   std::vector<std::string> prints;
   std::vector<std::string> logs;
   std::vector<std::string> positions;
+  std::vector<std::string> continues;
   std::string wait_sym, wait_state;
   bool exit = false;
   bool crash = false;
@@ -49,6 +50,7 @@ PrintSymbolHook g_print_hook = nullptr;
 StateNameHook g_state_hook = nullptr;
 PositionHook g_position_hook = nullptr;
 ExitHook g_exit_hook = nullptr;
+ContinueHook g_continue_hook = nullptr;
 
 // PadData::ButtonIndex
 int button_index(const std::string& name) {
@@ -106,6 +108,10 @@ void load() {
         std::string sym;
         ss >> sym;
         e.positions.push_back(sym);
+      } else if (item == "continue") {
+        std::string name;
+        ss >> name;
+        e.continues.push_back(name);
       } else if (item == "wait") {
         ss >> e.wait_sym >> e.wait_state;
       } else if (item == "exit") {
@@ -193,6 +199,12 @@ PadState next_frame() {
         lg::info("[pad script] frame {}: {} has no position", frame, p);
       }
     }
+    for (auto& name : e.continues) {
+      lg::info("[pad script] frame {}: continue {}", frame, name);
+      if (g_continue_hook) {
+        g_continue_hook(name.c_str());
+      }
+    }
     if (!e.wait_sym.empty()) {
       lg::info("[pad script] frame {}: waiting for {} to be in {}", frame, e.wait_sym,
                e.wait_state);
@@ -225,6 +237,10 @@ void set_state_name_hook(StateNameHook hook) {
 
 void set_position_hook(PositionHook hook) {
   g_position_hook = hook;
+}
+
+void set_continue_hook(ContinueHook hook) {
+  g_continue_hook = hook;
 }
 
 void set_exit_hook(ExitHook hook) {

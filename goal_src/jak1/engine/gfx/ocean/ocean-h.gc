@@ -10,6 +10,9 @@
 
 (define-extern draw-ocean (function none))
 
+;; 3DS port (SKIP_OCEAN_DRAW): parameters for the 3DS renderer instead of the PS2 ocean DMA
+(define-extern draw-ocean-3ds (function none))
+
 (define-extern draw-ocean-texture (function dma-buffer (inline-array vector) symbol none))
 
 (define-extern draw-ocean-transition (function dma-buffer none))
