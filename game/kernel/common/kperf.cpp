@@ -6,8 +6,12 @@
 
 #include "kperf.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "common/log/log.h"
 
@@ -22,7 +26,38 @@ namespace {
 u64 g_totals[(int)Cat::COUNT] = {};
 u64 g_frames = 0;
 u64 g_window_start = 0;
+
+struct Section {
+  std::string name;
+  u64 us = 0;
+  u64 count = 0;
+};
+// keyed by the name pointer: with-profiler names are static GOAL strings
+std::unordered_map<const char*, Section> g_sections;
+struct Open {
+  const char* name;
+  u64 start;
+};
+std::vector<Open> g_open;
 }  // namespace
+
+void section_begin(const char* name) {
+  g_open.push_back({name, now_us()});
+}
+
+void section_end() {
+  if (g_open.empty()) {
+    return;
+  }
+  auto o = g_open.back();
+  g_open.pop_back();
+  auto& s = g_sections[o.name];
+  if (s.name.empty()) {
+    s.name = std::string(g_open.size(), '.') + o.name;
+  }
+  s.us += now_us() - o.start;
+  s.count++;
+}
 
 u64 now_us() {
   return (u64)std::chrono::duration_cast<std::chrono::microseconds>(
@@ -69,6 +104,25 @@ void frame_done() {
     }
   }
   lg::info("perf: {}", line);
+  if (!g_sections.empty()) {
+    std::vector<const Section*> top;
+    for (auto& [k, v] : g_sections) {
+      top.push_back(&v);
+    }
+    std::sort(top.begin(), top.end(), [](auto* a, auto* b) { return a->us > b->us; });
+    std::string sec;
+    for (size_t i = 0; i < top.size() && i < 16; i++) {
+      char buf[96];
+      snprintf(buf, sizeof(buf), "%s%s %.1f", i ? ", " : "", top[i]->name.c_str(),
+               top[i]->us / 1000.0 / frames);
+      sec += buf;
+    }
+    lg::info("perf sections (ms/frame): {}", sec);
+    for (auto& [k, v] : g_sections) {
+      v.us = 0;
+      v.count = 0;
+    }
+  }
   for (auto& t : g_totals) {
     t = 0;
   }

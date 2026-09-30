@@ -22,6 +22,11 @@ void add(Cat cat, u64 us);
 void frame_done();
 u64 now_us();
 
+//! Named sections from the game's with-profiler blocks (pc-prof). Inclusive time per name is
+//! reported once a second with the frame stats (top sections by ms per frame).
+void section_begin(const char* name);
+void section_end();
+
 struct Scope {
   explicit Scope(Cat c) : cat(c), start(now_us()) {}
   ~Scope() { add(cat, now_us() - start); }

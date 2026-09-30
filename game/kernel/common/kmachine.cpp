@@ -1071,7 +1071,14 @@ u64 pc_mkdir_filepath(u32 filepath) {
 }
 
 void pc_prof(u32 name, ProfNode::Kind kind) {
-  prof().event(Ptr<String>(name).c()->data(), kind);
+  const char* str = Ptr<String>(name).c()->data();
+  prof().event(str, kind);
+  // per-section frame timing for the perf log (kperf)
+  if (kind == ProfNode::Kind::BEGIN) {
+    kperf::section_begin(str);
+  } else if (kind == ProfNode::Kind::END) {
+    kperf::section_end();
+  }
 }
 
 std::mt19937 extra_random_generator;
