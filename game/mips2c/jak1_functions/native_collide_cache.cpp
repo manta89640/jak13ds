@@ -496,16 +496,26 @@ void add_prim_mesh(const NativeArgs& args, bool collide_work_box) {
   const u32 spad = fake_spad();
   const u32 node_list = gload<u32>(gload<u32>(gload<u32>(prim) + 136) + 112);
   const u32 bone = gload<u32>(node_list + ((u32)(s32)gload<s8>(prim + 8) << 5) + 28);
+  static const u32* method_14_stub = native_stub_slot("(method 14 collide-mesh)");
+  static const u32* method_15_stub = native_stub_slot("(method 15 collide-mesh)");
   const u32 method = gload<u32>(gload<u32>(mesh - 4) + (collide_work_box ? 76 : 72));
   if (collide_work_box) {
     const u64 call_args[8] = {mesh,      bone,      gload<u32>(collide_work_sym) + 48u,
                               spad,      args.a[4], args.a[5],
                               args.a[6], args.a[7]};
-    native_call_goal(method, call_args, args);
+    if (method == *method_15_stub) {
+      method_15_collide_mesh_impl(NativeArgs{call_args, args.pp, args.st, args.stack});
+    } else {
+      native_call_goal(method, call_args, args);
+    }
   } else {
     const u64 call_args[8] = {mesh,      bone,      spad,      args.a[3],
                               args.a[4], args.a[5], args.a[6], args.a[7]};
-    native_call_goal(method, call_args, args);
+    if (method == *method_14_stub) {
+      method_14_collide_mesh_impl(NativeArgs{call_args, args.pp, args.st, args.stack});
+    } else {
+      native_call_goal(method, call_args, args);
+    }
   }
 
   // extra quad of the triangles: pat, then the prim index

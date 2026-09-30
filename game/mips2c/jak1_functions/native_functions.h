@@ -20,6 +20,13 @@ u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args);
 // native_collide_probe.cpp
 extern const NativeImpl collide_probe_node;
 extern const NativeImpl collide_probe_instance_tie;
+// native_collide_mesh.cpp
+extern const NativeImpl method_11_collide_mesh;
+extern const NativeImpl method_12_collide_mesh;
+extern const NativeImpl method_14_collide_mesh;
+extern const NativeImpl method_15_collide_mesh;
+u64 method_14_collide_mesh_impl(const NativeArgs& args);
+u64 method_15_collide_mesh_impl(const NativeArgs& args);
 // native_collide_cache.cpp
 extern const NativeImpl method_9_collide_cache_prim;
 extern const NativeImpl method_26_collide_cache;
