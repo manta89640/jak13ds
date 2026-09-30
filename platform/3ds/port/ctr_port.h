@@ -71,10 +71,15 @@ enum {
  * ctr_thread_join. Returns 0 on success. */
 int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio, int core,
                       void** handle);
+/* Same, but fails (-2: no share of core 1, -1: thread not created) instead of using core 0. */
+int ctr_thread_create_pinned(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio,
+                             int core, void** handle);
 void ctr_thread_join(void* handle);
 /* 1 if the IOP / IO threads should run on the system core (core 1): the use_syscore flag file,
  * and the app got a share of that core. */
 int ctr_syscore_available(void);
+/* The app's share of core 1 in percent (APT_SetAppCpuTimeLimit: 80, 30 if refused, 0: none). */
+int ctr_core1_share(void);
 
 /* Audio output through the DSP (libctru ndsp): one stereo PCM16 channel that a software mixer
  * feeds, `nbufs` buffers of `frames` stereo frames each, resampled by the DSP from `rate` Hz.
@@ -95,8 +100,14 @@ unsigned int ctr_audio_dropped_frames(void);
  * on); *core = the core for the mixer thread (the file's content, default 1). */
 int ctr_sound_config(int* core);
 
+/* Rough CPU clock and memory load latencies (L1, L2, RAM), one line for the log: shows whether the
+ * New 3DS speedup (804 MHz, L2 cache) is on. Takes ~50 ms and 16 MB of heap for a moment. */
+void ctr_hw_probe(char* out, int size);
+
 /* Set the priority of the calling thread. */
 void ctr_thread_set_priority(int prio);
+/* The calling thread's id (kernel thread id). */
+unsigned int ctr_thread_current_id(void);
 /* Sleep for at least `us` microseconds (0 = yield). */
 void ctr_thread_sleep_us(unsigned int us);
 
