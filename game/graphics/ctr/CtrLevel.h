@@ -33,6 +33,7 @@ struct CtrLevelData {
   std::vector<CtrMercModelData> merc_models;
   std::vector<c3l::Chunk> chunks;
   std::vector<c3l::Draw> draws;
+  std::vector<ctr_draw_state> draw_states;  // per draw
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<int> meshes;    // one per chunk
   u64 last_used_frame = 0;

@@ -507,6 +507,22 @@ void ctr_gpu_request_screenshot(const char* path) {
 void ctr_gpu_get_stats(ctr_gpu_stats* out) {
   *out = g_soft.last;
 }
+
+double ctr_gpu_time_ms(void) {
+  using namespace std::chrono;
+  return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+
+// the software backend renders synchronously
+int ctr_gpu_async_start(ctr_gpu_job_fn, void*) {
+  return 0;
+}
+void ctr_gpu_async_submit(void) {}
+double ctr_gpu_async_wait(void) {
+  return 0;
+}
+void ctr_gpu_async_stop(void) {}
+
 }
 
 namespace ctr_gfx {

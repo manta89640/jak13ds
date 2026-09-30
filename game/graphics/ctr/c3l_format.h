@@ -15,7 +15,7 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 
 enum TextureFormat : uint8_t {
   TEX_RGB565 = 0,  // u16: r5 g6 b5 (r in the high bits)
@@ -75,8 +75,11 @@ struct Chunk {
   uint32_t vertex_count;  // <= 65536
   uint32_t first_draw;    // index into the draw data
   uint32_t draw_count;
+  float max_dist;  // not drawn if the bounding sphere is further than this from the camera
+                   // (game units; 0 = no limit). Small objects are put in separate chunks.
+  uint32_t pad[3];
 };
-static_assert(sizeof(Chunk) == 48);
+static_assert(sizeof(Chunk) == 64);
 
 struct Vertex {
   int16_t pos[3];  // quantized, see Chunk

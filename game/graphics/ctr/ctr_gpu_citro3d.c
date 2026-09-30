@@ -67,6 +67,10 @@ static struct {
   int last_state_mesh;
   uint32_t last_tint;
   int last_state_valid;
+  /* last ctr_gpu_draw_mesh: mesh and matrix (invalidated by any other program use) */
+  int last_mesh_valid;
+  int last_mesh;
+  float last_clip[16];
   C3D_Mtx gl_to_pica;
   MeshSlot meshes[MAX_MESHES];
   int pending_mesh_delete[MAX_MESHES];
@@ -164,6 +168,7 @@ static void use_program(int prog) {
   if (g.cur_prog == prog) {
     return;
   }
+  g.last_mesh_valid = 0;
   C3D_AttrInfo* attr = C3D_GetAttrInfo();
   AttrInfo_Init(attr);
   if (prog == PROG_BASIC) {
@@ -296,7 +301,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
   }
-  C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+  C3D_FrameBegin(0); /* waits for the GPU; the game thread already paces to vblank */
   process_pending_deletes();
   if (g.screenshot_state == 2) {
     write_screenshot();
@@ -334,11 +339,22 @@ void ctr_gpu_frame_end(void) {
   }
   g.cur.textures = count;
   g.cur.tex_bytes = bytes;
+  /* times of the last frame the GPU finished (the one before this) */
+  g.cur.gpu_ms = C3D_GetProcessingTime();
+  g.cur.draw_ms = C3D_GetDrawingTime();
+  g.cur.linear_free = (unsigned int)linearSpaceFree();
   g.last = g.cur;
 }
 
 void ctr_gpu_wait_vblank(void) {
-  gspWaitForVBlank();
+  /* Like a swap with vsync: only wait if no vertical blank happened since the last call. A frame
+   * that took longer than 16.7 ms goes on screen at the next vblank anyway (citro3d swaps the
+   * screen buffers there), so waiting for another one only loses time. */
+  static u32 last_count;
+  if (C3D_FrameCounter(0) == last_count) {
+    gspWaitForVBlank();
+  }
+  last_count = C3D_FrameCounter(0);
 }
 
 /* ---------------- textures ---------------- */
@@ -427,6 +443,7 @@ static void apply_state(const ctr_draw_state* st, int mesh);
 static void check_cmdbuf(void) {
   if (C3D_GetCmdBufUsage() > 0.85f) {
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    g.cur.cmd_splits++;
   }
 }
 
@@ -646,6 +663,18 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
   }
   check_cmdbuf();
   use_program(PROG_MESH);
+  /* consecutive draws of a level chunk share the matrix and the vertex buffer */
+  if (g.last_mesh_valid && g.last_mesh == mesh && !memcmp(g.last_clip, clip, sizeof(g.last_clip))) {
+    apply_state(state, 1);
+    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
+                     g.meshes[mesh].indices + first_index);
+    g.cur.draws++;
+    g.cur.triangles += index_count / 3;
+    return;
+  }
+  g.last_mesh_valid = 1;
+  g.last_mesh = mesh;
+  memcpy(g.last_clip, clip, sizeof(g.last_clip));
   /* final = gl_to_pica * clip */
   C3D_Mtx m;
   for (int r = 0; r < 4; r++) {
@@ -758,4 +787,87 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
 
 void ctr_gpu_get_stats(ctr_gpu_stats* out) {
   *out = g.last;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * timing and the render thread
+ * --------------------------------------------------------------------------------------------- */
+
+double ctr_gpu_time_ms(void) {
+  return (double)svcGetSystemTick() / (double)(SYSCLOCK_ARM11 / 1000);
+}
+
+static struct {
+  Thread thread;
+  LightEvent start; /* one-shot: a job was submitted (or quit) */
+  LightEvent idle;  /* sticky: no job running */
+  ctr_gpu_job_fn fn;
+  void* arg;
+  volatile int quit;
+  int running;
+} as;
+
+static void render_thread_main(void* unused) {
+  (void)unused;
+  for (;;) {
+    LightEvent_Wait(&as.start);
+    if (as.quit) {
+      break;
+    }
+    as.fn(as.arg);
+    LightEvent_Signal(&as.idle);
+  }
+  LightEvent_Signal(&as.idle);
+}
+
+int ctr_gpu_async_start(ctr_gpu_job_fn fn, void* arg) {
+  if (as.running) {
+    return 1;
+  }
+  bool is_new = false;
+  APT_CheckNew3DS(&is_new);
+  if (!is_new) {
+    return 0;
+  }
+  as.fn = fn;
+  as.arg = arg;
+  as.quit = 0;
+  LightEvent_Init(&as.start, RESET_ONESHOT);
+  LightEvent_Init(&as.idle, RESET_STICKY);
+  LightEvent_Signal(&as.idle);
+  /* core 2 is free for applications on the New 3DS; the priority only matters against other
+   * threads on that core */
+  as.thread = threadCreate(render_thread_main, NULL, 64 * 1024, 0x2F, 2, false);
+  if (!as.thread) {
+    return 0;
+  }
+  as.running = 1;
+  return 1;
+}
+
+void ctr_gpu_async_submit(void) {
+  LightEvent_Wait(&as.idle);
+  LightEvent_Clear(&as.idle);
+  LightEvent_Signal(&as.start);
+}
+
+double ctr_gpu_async_wait(void) {
+  if (!as.running) {
+    return 0;
+  }
+  double t0 = ctr_gpu_time_ms();
+  LightEvent_Wait(&as.idle);
+  return ctr_gpu_time_ms() - t0;
+}
+
+void ctr_gpu_async_stop(void) {
+  if (!as.running) {
+    return;
+  }
+  LightEvent_Wait(&as.idle);
+  as.quit = 1;
+  LightEvent_Signal(&as.start);
+  threadJoin(as.thread, U64_MAX);
+  threadFree(as.thread);
+  as.running = 0;
 }
