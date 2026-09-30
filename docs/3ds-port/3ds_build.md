@@ -81,14 +81,16 @@ A `.3dsx` runs inside another title's memory:
 - Optional flag files in `sdmc:/3ds/jak1/`: `args.txt` (game arguments, default `-boot
   -cbackend`), `listener` (Wi-Fi REPL), `screenshots` (a number N: save the top screen every N
   frames to `data/log`), `pad_script.txt` (scripted input, see below), `use_syscore`
-  (experimental: IOP / IO threads on core 1; hangs at boot in Azahar, untested on hardware).
+  (experimental: IOP / IO threads on core 1; hangs at boot in Azahar, untested on hardware),
+  `perf_sections` (per-section frame timing in the log, `stage_sd.sh --perf-sections`).
 
 ### Automated gameplay test (scripted input)
 
 `game/sce/pad_script.h` replays a timeline of pad states on controller 0 (format in the header):
 buttons and sticks per game frame, `wait *target* <state>` (stops the script's clock until Jak is
-in that state), `print SYM`, `pos *target*` (position in meters and state), `crash` (tests the
-crash screen), `exit`.
+in that state), `print SYM`, `pos *target*` (position in meters and state), `continue NAME`
+(jumps to a checkpoint: `(start 'play (get-continue-by-name *game-info* NAME))`, for example
+`beach-start`), `crash` (tests the crash screen), `exit`.
 
 - 3DS: `sdmc:/3ds/jak1/pad_script.txt` (`stage_sd.sh --pad-script FILE`).
 - PC: `OPENGOAL_PAD_SCRIPT=FILE gk ...` (with `--null-gfx`, or `--ctr-gfx` to get frames).
@@ -96,6 +98,8 @@ crash screen), `exit`.
   save) -> skips the intro cutscene (taps Triangle) -> waits for `target-stance` on Geyser Rock ->
   walks forward, jumps while walking, jumps, punches, spin kicks, crouches, walks left and right,
   logging Jak's position and state after each step.
+- `platform/3ds/tests/ocean.pad`: the title screen (village1), Geyser Rock, then the checkpoints
+  `village1-hut` and `beach-start`, turning the camera around at each (use with `--screenshots`).
 
 ```sh
 platform/3ds/tools/run_emu.sh --seconds 900 --out build-3ds/emu-game \
@@ -385,7 +389,26 @@ PC it runs with `gk --ctr-gfx`.
 - **Fog:** the game's fog (like `tfrag3.vert`) plus fog towards the draw distance, computed in
   the level vertex shader and applied with a fog ramp texture in the second TEV stage. The
   screen is cleared to the fog color (no sky renderer).
-- **Not drawn yet:** generic, shrub, sky, ocean, shadows, eyes, blend shapes, envmap, the sprite
+- **Ocean** (`CtrOceanRenderer`, bucket `ocean-near`, after the level, merc and water): the
+  PS2 ocean code (`draw-ocean`: VU1 DMA for the far/mid/transition/near ocean and a wave texture
+  rendered every frame) cost about 12 ms per frame on the 3DS, so the small memory build skips it
+  (`SKIP_OCEAN_DRAW`) and runs `draw-ocean-3ds` (`goal_src/jak1/engine/gfx/ocean/ocean.gc`)
+  instead: it computes the 32x32 wave heights (so `ocean-get-height` works for boats and floating
+  objects), picks the ocean height like `draw-ocean`, and sends one 27-quadword packet with the
+  ocean map addresses, the height and the camera.
+  - The renderer turns the ocean map into one static mesh when the map changes: the "mid" ocean
+    grid (6x6 tiles of 8x8 cells of 96 m, cells without water left out by the map's masks), shore
+    cells cut to the 24 m sub-cells of the transition masks, open cells as 48 m quads, vertex
+    colors from the map's color grid. village1: 2002 cells (44 shore), 16k triangles, 150 KB.
+  - One draw per visible tile (frustum and draw distance culled), fog like the level.
+  - Texture: 32x32, one repeat per 96 m, shaded every frame from the wave heights (brighter on
+    slopes facing the light and on crests), so the waves move like the PS2's.
+  - Cost in Azahar (New 3DS): game thread 0.5 ms per frame for the `ocean` section (update-ocean
+    + draw-ocean-3ds, nearly all of it the `ocean-interp-wave` mips2c call), render thread
+    0.45 ms (texture shading + 2-4 tile draws, about 1-2k triangles in view).
+  - Not done: the near ocean's wave geometry, the env map (sky reflection) pass, the far ocean
+    (beyond the 4.6 km map, always in the fog at the default draw distance).
+- **Not drawn yet:** generic, shrub, sky, shadows, eyes, blend shapes, envmap, the sprite
   distorter, debug lines, scissor.
 - **Memory:** textures go to VRAM first (through a linear staging buffer and a GX copy), then to
   linear memory. Meshes and the 1.5 MB vertex ring are in linear memory (24 MB total). The frame
@@ -415,6 +438,7 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `merc` | on | draw merc models |
   | `sprites` | on | draw world sprites (particles); the HUD is always drawn |
   | `max_sprites` | 1000 | world sprites per frame |
+  | `ocean` | on | draw the ocean |
 
 - **Timing in the log:** every 300 frames or 5 seconds, `[ctr] render ms/frame` (render thread:
   waiting for the GPU, building commands, submitting; GPU time from citro3d), `[ctr] build

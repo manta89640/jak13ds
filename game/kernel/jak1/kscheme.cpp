@@ -1562,6 +1562,30 @@ bool pad_script_position(const char* name, float* xyz) {
   return true;
 }
 
+//! "continue NAME" in a pad script: (start 'play (get-continue-by-name *game-info* NAME))
+void pad_script_continue(const char* name) {
+  auto gi_sym = find_symbol_from_c("*game-info*");
+  auto start_sym = find_symbol_from_c("start");
+  if (!gi_sym.offset || !start_sym.offset) {
+    lg::warn("[pad script] continue: no *game-info* / start");
+    return;
+  }
+  const u32 gi = gi_sym->value;
+  if (gi == s7.offset || (gi & OFFSET_MASK) != BASIC_OFFSET) {
+    lg::warn("[pad script] continue: no *game-info*");
+    return;
+  }
+  // get-continue-by-name is method 18 of game-info (9 basic methods, then game-info-h.gc)
+  const u32 str = (u32)make_string_from_c(name);
+  const u32 cp = (u32)call_method_of_type_arg2(gi, Ptr<Type>(*Ptr<u32>(gi - 4)), 18, str, 0);
+  if (cp == s7.offset) {
+    lg::warn("[pad script] continue: no continue point {}", name);
+    return;
+  }
+  call_goal(Ptr<Function>(start_sym->value), intern_from_c("play").offset, cp, 0, s7.offset,
+            g_ee_main_mem);
+}
+
 void pad_script_exit() {
   MasterExit = RuntimeExitStatus::EXIT;
 }
@@ -1570,6 +1594,7 @@ void pad_script_exit() {
 s32 InitHeapAndSymbol() {
   pad_script::set_print_symbol_hook(pad_script_print_symbol);
   pad_script::set_exit_hook(pad_script_exit);
+  pad_script::set_continue_hook(pad_script_continue);
   pad_script::set_state_name_hook(pad_script_state_name);
   pad_script::set_position_hook(pad_script_position);
   Timer heap_init_timer;
