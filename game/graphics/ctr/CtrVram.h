@@ -14,6 +14,11 @@
  *
  * Decoded textures are cached per TEX0 value and dropped when the VRAM they were read from
  * changes.
+ *
+ * Texture page uploads are lazy: the game uploads the tfrag, shrub, tie, ... pages to the same
+ * VRAM area every frame, but those renderers take their textures from the .c3l files. An upload
+ * is only recorded (and replaces a pending upload to the same area); it is written to the VRAM
+ * copy when something reads VRAM that it overlaps.
  */
 
 #include <cstdint>
@@ -75,6 +80,17 @@ class CtrVram {
 
  private:
   void invalidate_blocks(u32 first_block, u32 end_block);
+  void write_upload(const u8* src, u32 dest_block, u32 words);
+  // write the pending uploads (all, or only those overlapping the given block ranges)
+  void flush_pending();
+  bool pending_overlaps(u32 first_block, u32 end_block) const;
+  struct PendingUpload {
+    const u8* src;
+    u32 dest_block;
+    u32 end_block;
+    u32 words;
+  };
+  std::vector<PendingUpload> m_pending;
   u32 read32(u32 byte_addr) const;
   u32 clut_color(u32 cbp, u32 cpsm, u32 entry) const;
 

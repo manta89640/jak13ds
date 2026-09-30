@@ -127,8 +127,28 @@ typedef struct {
   int triangles;
   int textures;
   unsigned int tex_bytes;
+  float gpu_ms;     /* GPU time of the frame: command processing (C3D_GetProcessingTime) */
+  float draw_ms;    /* and drawing (C3D_GetDrawingTime) */
+  int cmd_splits;   /* command buffer flushes in the middle of the frame */
+  unsigned int linear_free; /* free linear memory (meshes, textures, vertex ring), bytes */
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
+
+/* Monotonic time in milliseconds. */
+double ctr_gpu_time_ms(void);
+
+/* Asynchronous rendering (the PS2 overlaps DMA/VU1/GS with the next frame's game logic).
+ * ctr_gpu_async_start creates a render thread on another CPU core (New 3DS: core 2) that runs
+ * fn(arg) for each ctr_gpu_async_submit. Returns 1 if the thread runs, 0 if rendering has to stay
+ * synchronous (Old 3DS, PC). All renderer and GPU work must then happen either on the render
+ * thread or on the game thread while the render thread is idle (ctr_gpu_async_wait). */
+typedef void (*ctr_gpu_job_fn)(void* arg);
+int ctr_gpu_async_start(ctr_gpu_job_fn fn, void* arg);
+/* Wait for the previous job, then start fn(arg) on the render thread. */
+void ctr_gpu_async_submit(void);
+/* Wait until the render thread is idle. Returns the milliseconds waited. */
+double ctr_gpu_async_wait(void);
+void ctr_gpu_async_stop(void);
 
 #ifdef __cplusplus
 }

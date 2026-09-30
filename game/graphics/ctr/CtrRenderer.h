@@ -6,8 +6,10 @@
  * The 3DS renderer ("ctr" = the 3DS's internal name). Walks the game's DMA chain bucket by bucket
  * like OpenGLRenderer::dispatch_buckets_jak1, with 3DS bucket renderers (default: skip).
  *
- * It runs synchronously on the EE thread: send_chain() renders the whole frame and vsync() waits
- * for the next vertical blank. The GPU side is ctr_gpu.h (citro3d on the 3DS, a software
+ * On the New 3DS it runs on a render thread on core 2, one frame behind the game like the PS2
+ * (send_chain() hands the chain over, sync_path() waits for it; the DMA buffers are double
+ * buffered by the game, so the chain stays valid while the next frame is computed). On the Old 3DS
+ * and PC it runs synchronously in send_chain(). vsync() waits for the next vertical blank. The GPU side is ctr_gpu.h (citro3d on the 3DS, a software
  * rasterizer on PC for testing: gk --ctr-gfx).
  */
 
@@ -32,6 +34,7 @@ struct CtrRenderState {
   u32 default_regs_buffer = 0;
   CtrVram* vram = nullptr;
   u64 frame_idx = 0;
+  bool call_vif_callback = true;  // not from the render thread: it runs GOAL code
 };
 
 class CtrBucketRenderer {
@@ -76,6 +79,17 @@ class CtrRenderer {
   CtrRenderer();
   ~CtrRenderer();
   void render_frame(const void* ee_mem, u32 chain_offset);
+  void set_async(bool async) { m_rs.call_vif_callback = !async; }
+  // timing, averaged over the frames between two log lines
+  struct Timing {
+    double begin_ms = 0;  // frame begin: waiting for the GPU to finish the previous frame
+    double build_ms = 0;  // walking the DMA chain, building GPU commands
+    double end_ms = 0;    // frame end: submitting the command list
+    double gpu_ms = 0;    // GPU processing time (from citro3d)
+    double gpu_draw_ms = 0;
+    int splits = 0;
+    int frames = 0;
+  };
   CtrVram& vram() { return *m_vram; }
   CtrLevels& levels() { return *m_levels; }
 
@@ -85,6 +99,8 @@ class CtrRenderer {
   std::unique_ptr<CtrLevels> m_levels;
   std::vector<std::unique_ptr<CtrBucketRenderer>> m_buckets;
   CtrRenderState m_rs;
+  Timing m_timing;
+  std::vector<double> m_bucket_ms;
 };
 
 extern const GfxRendererModule gRendererCtr;

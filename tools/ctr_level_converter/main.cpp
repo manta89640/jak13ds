@@ -29,11 +29,17 @@
 namespace {
 
 struct Options {
-  int tfrag_geo = 2;  // 0 = most detailed, 2 = least
+  int tfrag_geo = 1;  // 0 = most detailed, 2 = least (2 has large holes)
   int tie_geo = 3;    // 0 = most detailed, 3 = least
   int palette = 1;    // time of day palette to bake (0..7)
   int max_tex = 128;
-  float cell_meters = 100.f;
+  float cell_meters = 200.f;
+  // tie instances smaller than detail_radius (bounding sphere radius, meters) are only drawn up
+  // to detail_dist meters away; smaller than medium_radius: up to medium_dist
+  float detail_radius = 4.f;
+  float detail_dist = 100.f;
+  float medium_radius = 12.f;
+  float medium_dist = 300.f;
   bool no_tie = false;
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
@@ -49,6 +55,7 @@ struct SrcVertex {
 struct SrcTri {
   u32 v[3];         // into the global SrcVertex list
   u32 draw_key;     // index into draw_keys
+  u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist)
 };
 
 struct DrawKey {
@@ -164,6 +171,47 @@ struct Converter {
     }
   }
 
+  // bounding sphere radius of the triangles from `first` on
+  float tris_radius(size_t first) const {
+    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    for (size_t i = first; i < tris.size(); i++) {
+      for (u32 vi : tris[i].v) {
+        const auto& v = verts[vi];
+        const float p[3] = {v.x, v.y, v.z};
+        for (int c = 0; c < 3; c++) {
+          mn[c] = std::min(mn[c], p[c]);
+          mx[c] = std::max(mx[c], p[c]);
+        }
+      }
+    }
+    if (first >= tris.size()) {
+      return 0;
+    }
+    float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
+    return 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz);
+  }
+
+  size_t radius_hist[8] = {};
+  void mark_small(size_t first) {
+    const float r = tris_radius(first);
+    {
+      int b = 0;
+      for (float lim = 2 * 4096.f; b < 7 && r >= lim; lim *= 2) {
+        b++;
+      }
+      radius_hist[b] += tris.size() - first;
+    }
+    u32 detail = r < opt.detail_radius * 4096.f ? 1 : (r < opt.medium_radius * 4096.f ? 2 : 0);
+    if (detail) {
+      for (size_t i = first; i < tris.size(); i++) {
+        tris[i].detail = detail;
+      }
+      small_tris += tris.size() - first;
+    }
+  }
+  size_t small_tris = 0;
+  size_t wind_tris = 0;
+
   void add_tie_tree(tfrag3::TieTree& tree) {
     tree.unpack();
     u32 base = verts.size();
@@ -179,10 +227,60 @@ struct Converter {
       }
       verts.push_back(sv);
     }
-    for (auto& d : tree.static_draws) {
-      DrawKey k{d.mode.as_int(), texture_id(d.tree_tex_id), 1};
-      add_strips(tree.unpacked.indices, d.unpacked.idx_of_first_idx_in_full_buffer,
-                 draw_index_count(d), base, key_id(k));
+    // static instances (already in world space), one vis group per instance
+    // categories: normal, trans, water, then envmap draws (not supported)
+    u32 last_draw = tree.category_draw_indices[(int)tfrag3::TieCategory::WATER + 1];
+    if (last_draw == 0) {
+      last_draw = tree.static_draws.size();
+    }
+    for (u32 di = 0; di < tree.static_draws.size() && di < last_draw; di++) {
+      const auto& d = tree.static_draws[di];
+      u32 key = key_id(DrawKey{d.mode.as_int(), texture_id(d.tree_tex_id), 1});
+      size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
+      for (auto& g : d.vis_groups) {
+        size_t first_tri = tris.size();
+        add_strips(tree.unpacked.indices, idx, g.num_inds, base, key);
+        mark_small(first_tri);
+        idx += g.num_inds;
+      }
+    }
+    // instances moved by the wind (plants, trees): baked at rest with their instance matrix
+    for (const auto& d : tree.instanced_wind_draws) {
+      u32 key = key_id(DrawKey{d.mode.as_int(), texture_id(d.tree_tex_id), 1});
+      size_t idx = 0;
+      for (const auto& g : d.instance_groups) {
+        const auto& mat = tree.wind_instance_info.at(g.instance_idx).matrix;
+        std::vector<u32> local;  // strip indices into new world space vertices
+        std::unordered_map<u32, u32> remap;
+        for (size_t i = idx; i < idx + g.num && i < d.vertex_index_stream.size(); i++) {
+          u32 vi = d.vertex_index_stream[i];
+          if (vi == UINT32_MAX) {
+            local.push_back(UINT32_MAX);
+            continue;
+          }
+          auto it = remap.find(vi);
+          if (it == remap.end()) {
+            const auto& v = tree.unpacked.vertices.at(vi);
+            SrcVertex sv;
+            sv.x = mat[0].x() * v.x + mat[1].x() * v.y + mat[2].x() * v.z + mat[3].x();
+            sv.y = mat[0].y() * v.x + mat[1].y() * v.y + mat[2].y() * v.z + mat[3].y();
+            sv.z = mat[0].z() * v.x + mat[1].z() * v.y + mat[2].z() * v.z + mat[3].z();
+            sv.s = v.s;
+            sv.t = v.t;
+            for (int c = 0; c < 4; c++) {
+              sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
+            }
+            it = remap.emplace(vi, verts.size()).first;
+            verts.push_back(sv);
+          }
+          local.push_back(it->second);
+        }
+        size_t first_tri = tris.size();
+        add_strips(local, 0, local.size(), 0, key);
+        wind_tris += tris.size() - first_tri;
+        mark_small(first_tri);
+        idx += g.num;
+      }
     }
   }
 };
@@ -481,7 +579,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
 
   // ---- chunking: grid cells by triangle centroid ----
   const float cell = opt.cell_meters * 4096.f;
-  std::map<std::tuple<int, int, int>, std::vector<u32>> cells;  // cell -> triangle indices
+  // (detail, cell) -> triangle indices
+  std::map<std::tuple<int, int, int, int>, std::vector<u32>> cells;
   for (u32 i = 0; i < cv.tris.size(); i++) {
     const auto& t = cv.tris[i];
     float cx = 0, cy = 0, cz = 0;
@@ -490,8 +589,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       cy += cv.verts[t.v[k]].y;
       cz += cv.verts[t.v[k]].z;
     }
-    auto key = std::make_tuple((int)std::floor(cx / 3 / cell), (int)std::floor(cy / 3 / cell),
-                               (int)std::floor(cz / 3 / cell));
+    auto key = std::make_tuple((int)t.detail, (int)std::floor(cx / 3 / cell),
+                               (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell));
     cells[key].push_back(i);
   }
 
@@ -529,6 +628,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       }
 
       c3l::Chunk ch{};
+      const int detail = std::get<0>(key);
+      ch.max_dist = detail == 1 ? opt.detail_dist * 4096.f
+                                : (detail == 2 ? opt.medium_dist * 4096.f : 0.f);
       float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
       for (u32 s : local_src) {
         const auto& v = cv.verts[s];
@@ -638,11 +740,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
 
   lg::info(
       "{}: {} tfrag + {} tie trees -> {} chunks, {} verts ({} KB), {} tris, {} draws, {} textures "
-      "({} KB), {} merc models ({} verts, {} tris, {} draws), file {} KB",
+      "({} KB), {} merc models ({} verts, {} tris, {} draws), file {} KB; tie: {} wind tris, "
+      "{} small/medium-object tris",
       level.level_name, tfrag_trees, tie_trees, chunks.size(), out_verts.size(),
       out_verts.size() * sizeof(c3l::Vertex) / 1024, out_indices.size() / 3, out_draws.size(),
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
-      merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024);
+      merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024, cv.wind_tris, cv.small_tris);
+  lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
+            cv.radius_hist[0], cv.radius_hist[1], cv.radius_hist[2], cv.radius_hist[3],
+            cv.radius_hist[4], cv.radius_hist[5], cv.radius_hist[6], cv.radius_hist[7]);
   return true;
 }
 }  // namespace
@@ -660,6 +766,12 @@ int main(int argc, char** argv) {
   app.add_option("--palette", opt.palette, "time of day palette to bake (0-7)");
   app.add_option("--max-tex", opt.max_tex, "maximum texture size (power of two, <= 1024)");
   app.add_option("--cell", opt.cell_meters, "chunk grid size in meters");
+  app.add_option("--detail-radius", opt.detail_radius,
+                 "tie instances smaller than this (meters) are small objects");
+  app.add_option("--detail-dist", opt.detail_dist,
+                 "small objects are drawn up to this distance (meters)");
+  app.add_option("--medium-radius", opt.medium_radius, "same for medium objects");
+  app.add_option("--medium-dist", opt.medium_dist, "same for medium objects");
   app.add_flag("--no-tie", opt.no_tie, "leave out tie");
   app.add_flag("--no-merc", opt.no_merc, "leave out merc models");
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");

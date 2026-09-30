@@ -88,6 +88,14 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
       out->draws[d].first_index -= first;
     }
   }
+  // GPU state per draw, so drawing doesn't decode the draw modes every frame
+  out->draw_states.reserve(out->draws.size());
+  for (auto& d : out->draws) {
+    DrawMode mode;
+    mode.as_int() = d.mode;
+    out->draw_states.push_back(
+        ctr_state_from_draw_mode(mode, d.texture == 0xffff ? -1 : out->textures[d.texture]));
+  }
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models(hdr.num_merc_models);
@@ -117,9 +125,23 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
       out->merc_models.push_back(std::move(md));
     }
   }
+  int failed = 0;
+  for (int t : out->textures) {
+    failed += t < 0;
+  }
+  for (size_t i = 0; i < out->meshes.size(); i++) {
+    failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0;
+  }
+  for (auto& m : out->merc_models) {
+    failed += m.mesh < 0;
+  }
   lg::info("[ctr] loaded {} ({} chunks, {} merc models, {} textures, {} KB) in {:.0f} ms", name,
            out->chunks.size(), out->merc_models.size(), out->textures.size(), file.size() / 1024,
            timer.getMs());
+  if (failed) {
+    lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
+              failed);
+  }
   return true;
 }
 
@@ -377,6 +399,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev, const CtrBackgroundCamera& 
     if (lev.meshes[ci] < 0 || !sphere_in_view(ch.bsphere, cam.planes)) {
       continue;
     }
+    if (ch.max_dist > 0) {
+      // small objects: only up close
+      const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                  dz = ch.bsphere[2] - cam.trans[2];
+      const float lim = ch.max_dist + ch.bsphere[3];
+      if (dx * dx + dy * dy + dz * dz > lim * lim) {
+        continue;
+      }
+    }
     // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
     // The translation is done in double: world coordinates are large.
     double d[3];
@@ -400,11 +431,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev, const CtrBackgroundCamera& 
     }
     for (u32 di = ch.first_draw; di < ch.first_draw + ch.draw_count; di++) {
       const auto& dr = lev.draws[di];
-      int tex = dr.texture == 0xffff ? -1 : lev.textures[dr.texture];
-      DrawMode mode;
-      mode.as_int() = dr.mode;
-      ctr_draw_state st = ctr_state_from_draw_mode(mode, tex);
-      ctr_gpu_draw_mesh(&st, m, lev.meshes[ci], dr.first_index, dr.index_count);
+      ctr_gpu_draw_mesh(&lev.draw_states[di], m, lev.meshes[ci], dr.first_index,
+                        dr.index_count);
     }
     drawn++;
   }

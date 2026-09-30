@@ -103,7 +103,7 @@ u32 CtrVram::read32(u32 byte_addr) const {
 }
 
 void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
-  m_stats.uploads++;
+  flush_pending();  // keep the order of writes (no-op when called from flush_pending)
   m_stats.uploads_changed++;
   const u32 pages_per_row = std::max(1u, width / 64);
   const u32 base = dest_block * kBlockBytes;
@@ -176,15 +176,47 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
       continue;
     }
     m_last_upload[dest_block] = UploadRecord{src, seg.size, hash};
-    if (seg.size % 128) {
-      // partial last row: copy the full rows, then the rest through a padded buffer
-      std::vector<u32> tmp(rows * 128, 0);
-      memcpy(tmp.data(), ee_mem + seg.block_data_ptr, seg.size * 4);
-      upload_ct32((const u8*)tmp.data(), dest_block, 128, rows);
-    } else {
-      upload_ct32(ee_mem + seg.block_data_ptr, dest_block, 128, rows);
+    // record it: drop pending uploads that this one completely overwrites
+    const u32 end_block = dest_block + (rows * 128 * 4 + kBlockBytes - 1) / kBlockBytes;
+    m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
+                                   [&](const PendingUpload& p) {
+                                     return p.dest_block >= dest_block && p.end_block <= end_block;
+                                   }),
+                    m_pending.end());
+    m_pending.push_back(PendingUpload{src, dest_block, end_block, seg.size});
+    m_stats.uploads++;
+  }
+}
+
+void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words) {
+  // The game uploads 128 pixel wide PSMCT32 images (upload-vram-data in texture.gc).
+  const u32 rows = (words + 127) / 128;
+  if (words % 128) {
+    // partial last row: copy through a padded buffer
+    std::vector<u32> tmp(rows * 128, 0);
+    memcpy(tmp.data(), src, words * 4);
+    upload_ct32((const u8*)tmp.data(), dest_block, 128, rows);
+  } else {
+    upload_ct32(src, dest_block, 128, rows);
+  }
+}
+
+void CtrVram::flush_pending() {
+  // in order: later uploads may overlap earlier ones
+  std::vector<PendingUpload> pending;
+  pending.swap(m_pending);
+  for (const auto& p : pending) {
+    write_upload(p.src, p.dest_block, p.words);
+  }
+}
+
+bool CtrVram::pending_overlaps(u32 first_block, u32 end_block) const {
+  for (const auto& p : m_pending) {
+    if (p.dest_block < end_block && first_block < p.end_block) {
+      return true;
     }
   }
+  return false;
 }
 
 namespace {
@@ -202,6 +234,7 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     return;
   }
   const TexInfo info = it->second;
+  flush_pending();
   if (!is_indexed(info.psm) || !is_indexed(dest_psm)) {
     lg::warn("[ctr vram] relocate {} -> {} not supported", info.psm, dest_psm);
     return;
@@ -413,6 +446,7 @@ bool decode_impl(const CtrVram* self,
 }  // namespace
 
 bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
+  const_cast<CtrVram*>(this)->flush_pending();
   Range r;
   return decode_impl(this, m_vram, tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
@@ -424,8 +458,20 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   u64 key = tex0 & kKeyMask;
   auto it = m_cache.find(key);
   if (it != m_cache.end()) {
-    m_stats.cached++;
-    return &it->second.tex;
+    const auto& e = it->second;
+    if (m_pending.empty() || (!pending_overlaps(e.first_block, e.end_block) &&
+                              !pending_overlaps(e.clut_first, e.clut_end))) {
+      m_stats.cached++;
+      return &it->second.tex;
+    }
+  }
+  if (!m_pending.empty()) {
+    flush_pending();
+    it = m_cache.find(key);
+    if (it != m_cache.end()) {
+      m_stats.cached++;
+      return &it->second.tex;
+    }
   }
 
   std::vector<u32> data;
