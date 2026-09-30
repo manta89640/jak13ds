@@ -10,21 +10,32 @@
  * blend shapes, envmap, eyes, vertex modification (ripple), fog.
  */
 
+#include <vector>
+
 #include "common/math/Vector.h"
 
 #include "game/graphics/ctr/CtrRenderer.h"
 
 class CtrLevels;
 
+struct CtrMercMat {
+  math::Vector4f tmat[4];
+  math::Vector4f nmat[3];
+};
+
 class CtrMercRenderer : public CtrBucketRenderer {
  public:
   CtrMercRenderer(std::string name, int id, CtrLevels* levels);
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  /*! Game thread, before the frame is handed to the render thread: copy the bone matrices the
+   * bucket's models use (see handle_model). */
+  void snapshot_bones(DmaFollower& dma, CtrRenderState& rs);
 
   struct Stats {
     int models = 0;
     int missing = 0;
     int draws = 0;
+    int bad_bones = 0;
   };
 
  private:
@@ -39,4 +50,8 @@ class CtrMercRenderer : public CtrBucketRenderer {
   float m_clip[16];
   bool m_have_camera = false;
   Stats m_stats;
+  std::vector<CtrMercMat> m_snap;
+  size_t m_snap_pos = 0, m_snap_first = 0;
+  bool m_snap_valid = false;
+  bool m_snapshot_mode = false;
 };

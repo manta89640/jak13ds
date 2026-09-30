@@ -78,6 +78,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // TEX0 -> texture lookups, per frame
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
+  int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0;
   } m_stats;

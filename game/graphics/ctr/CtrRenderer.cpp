@@ -85,7 +85,7 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     }
   }
   m_direct->flush();
-  if (rs.frame_idx % 300 == 0) {
+  if (rs.log_now) {
     const auto& st = m_direct->stats();
     lg::debug("[ctr] {}: {} packets, {} triangles, {} draws, {} skipped prims", m_name, st.packets,
              st.triangles, st.flushes, st.skipped_prims);
@@ -121,7 +121,9 @@ CtrRenderer::CtrRenderer()
                   BucketId::MERC_AFTER_ALPHA, BucketId::MERC_PRIS_LEVEL0, BucketId::MERC_PRIS_LEVEL1,
                   BucketId::MERC_AFTER_PRIS, BucketId::MERC_WATER_LEVEL0,
                   BucketId::MERC_WATER_LEVEL1}) {
-    set(id, std::make_unique<CtrMercRenderer>("merc", (int)id, m_levels.get()));
+    auto merc = std::make_unique<CtrMercRenderer>("merc", (int)id, m_levels.get());
+    m_merc.emplace_back((int)id, merc.get());
+    set(id, std::move(merc));
   }
   set(BucketId::SPRITE,
       std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));
@@ -159,6 +161,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
   }
   const double t0 = ctr_gpu_time_ms();
+  m_rs.log_now = m_rs.frame_idx % 300 == 0 || t0 - m_rs.last_log_ms > 5000.0;
+  if (m_rs.log_now) {
+    m_rs.last_log_ms = t0;
+  }
+  memcpy(m_rs.fog_color, clear, 4);
+  m_levels->process_pending_loads(m_rs.frame_idx);
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
@@ -183,12 +191,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.gpu_draw_ms += gs.draw_ms;
   m_timing.splits += gs.cmd_splits;
   m_timing.frames++;
-  if (m_rs.frame_idx % 300 == 0) {
+  if (m_rs.log_now) {
     const auto& vs = m_vram->stats();
-    lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (changed {}), textures decoded {}, "
-             "gpu textures {} ({} KB), linear free {} KB",
-             m_rs.frame_idx, gs.draws, gs.triangles, vs.uploads, vs.uploads_changed, vs.decoded,
-             gs.textures, gs.tex_bytes / 1024, gs.linear_free / 1024);
+    lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (written {}), relocates skipped "
+             "{}, textures decoded {} (reused {}), gpu textures {} ({} KB), linear free {} KB, vram free {} KB",
+             m_rs.frame_idx, gs.draws, gs.triangles, vs.uploads, vs.uploads_changed,
+             vs.relocates_skipped, vs.decoded, vs.revived, gs.textures, gs.tex_bytes / 1024,
+             gs.linear_free / 1024, gs.vram_free / 1024);
     if (m_timing.frames) {
       const double n = m_timing.frames;
       lg::info(
@@ -226,6 +235,20 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     m_timing = Timing();
   }
   m_rs.frame_idx++;
+}
+
+void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
+  // game thread, before handing the frame to the render thread: copy what the frame needs from
+  // game memory that is not double buffered (merc bone matrices)
+  CtrRenderState rs;
+  rs.ee_mem = (const u8*)ee_mem;
+  rs.offset_of_s7 = s7.offset;
+  const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
+  for (auto& [id, merc] : m_merc) {
+    rs.next_bucket = base + 16 * (id + 1);
+    DmaFollower dma(ee_mem, base + 16 * id);
+    merc->snapshot_bones(dma, rs);
+  }
 }
 
 void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
@@ -288,6 +311,10 @@ struct EeTiming {
   double wait_render_ms = 0; // sync_path/send_chain waiting for the render thread
   double vsync_ms = 0;       // waiting for vblank
   double render_ms = 0;      // synchronous rendering in send_chain
+  double upload_ms = 0;      // texture_upload_now / relocate (VRAM emulation, game thread)
+  double prepare_ms = 0;     // prepare_frame (bone matrix snapshot)
+  int uploads = 0, relocates = 0;
+  double last_log = 0;
   int frames = 0;
 } g_ee;
 
@@ -355,6 +382,9 @@ void ctr_send_chain(const void* data, u32 offset) {
   g_ee.last_send = now;
   if (g_async) {
     wait_render_idle();
+    const double tp = ctr_gpu_time_ms();
+    g_ctr->prepare_frame(data, offset);
+    g_ee.prepare_ms += ctr_gpu_time_ms() - tp;
     g_job_mem = data;
     g_job_offset = offset;
     ctr_gpu_async_submit();
@@ -362,31 +392,42 @@ void ctr_send_chain(const void* data, u32 offset) {
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;
   }
-  if (g_ee.frames >= 300) {
+  if (g_ee.frames >= 300 || (g_ee.frames > 0 && now - g_ee.last_log > 5000.0)) {
     const double n = g_ee.frames;
-    const double logic = (g_ee.frame_ms - g_ee.wait_render_ms - g_ee.vsync_ms - g_ee.render_ms) / n;
+    const double logic = (g_ee.frame_ms - g_ee.wait_render_ms - g_ee.vsync_ms - g_ee.render_ms -
+                          g_ee.upload_ms - g_ee.prepare_ms) /
+                         n;
     lg::info(
         "[ctr] game thread ms/frame over {} frames: frame {:.2f} ({:.1f} fps) = logic {:.2f} + "
-        "sync render {:.2f} + wait render thread {:.2f} + vsync {:.2f}",
+        "sync render {:.2f} + wait render thread {:.2f} + vsync {:.2f} + texture uploads {:.2f} "
+        "({:.1f} uploads, {:.1f} relocates per frame) + bone snapshot {:.2f}",
         g_ee.frames, g_ee.frame_ms / n, 1000.0 * n / g_ee.frame_ms, logic, g_ee.render_ms / n,
-        g_ee.wait_render_ms / n, g_ee.vsync_ms / n);
+        g_ee.wait_render_ms / n, g_ee.vsync_ms / n, g_ee.upload_ms / n, g_ee.uploads / n,
+        g_ee.relocates / n, g_ee.prepare_ms / n);
     const double last = g_ee.last_send;
     g_ee = EeTiming();
     g_ee.last_send = last;
+    g_ee.last_log = now;
   }
 }
 
 void ctr_texture_upload_now(const u8* tpage, int mode, u32 s7_ptr) {
   if (g_ctr) {
     wait_render_idle();
+    const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().upload_texture_page(tpage, mode, g_ee_main_mem, s7_ptr);
+    g_ee.upload_ms += ctr_gpu_time_ms() - t0;
+    g_ee.uploads++;
   }
 }
 
 void ctr_texture_relocate(u32 destination, u32 source, u32 format) {
   if (g_ctr) {
     wait_render_idle();
+    const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().relocate(destination, source, format);
+    g_ee.upload_ms += ctr_gpu_time_ms() - t0;
+    g_ee.relocates++;
   }
 }
 

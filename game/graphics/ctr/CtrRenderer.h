@@ -34,6 +34,9 @@ struct CtrRenderState {
   u32 default_regs_buffer = 0;
   CtrVram* vram = nullptr;
   u64 frame_idx = 0;
+  bool log_now = false;  // print statistics this frame (every 300 frames or 5 seconds)
+  double last_log_ms = 0;
+  u8 fog_color[4] = {0, 0, 0, 0};  // from the default GS registers (also the clear color)
   bool call_vif_callback = true;  // not from the render thread: it runs GOAL code
 };
 
@@ -79,6 +82,8 @@ class CtrRenderer {
   CtrRenderer();
   ~CtrRenderer();
   void render_frame(const void* ee_mem, u32 chain_offset);
+  /*! Game thread, before render_frame runs on the render thread (see prepare_frame). */
+  void prepare_frame(const void* ee_mem, u32 chain_offset);
   void set_async(bool async) { m_rs.call_vif_callback = !async; }
   // timing, averaged over the frames between two log lines
   struct Timing {
@@ -101,6 +106,7 @@ class CtrRenderer {
   CtrRenderState m_rs;
   Timing m_timing;
   std::vector<double> m_bucket_ms;
+  std::vector<std::pair<int, class CtrMercRenderer*>> m_merc;
 };
 
 extern const GfxRendererModule gRendererCtr;

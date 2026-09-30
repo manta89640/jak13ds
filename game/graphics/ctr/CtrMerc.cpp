@@ -8,12 +8,14 @@
 
 #include "CtrMerc.h"
 
+#include <cmath>
 #include <cstring>
 
 #include "common/dma/dma.h"
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 namespace {
@@ -32,10 +34,7 @@ struct VuLights {
 };
 static_assert(sizeof(VuLights) == 7 * 16);
 
-struct MercMat {
-  math::Vector4f tmat[4];
-  math::Vector4f nmat[3];
-};
+using MercMat = CtrMercMat;
 static_assert(sizeof(MercMat) == 7 * 16);
 
 struct PcMercFlags {
@@ -103,9 +102,24 @@ void CtrMercRenderer::handle_setup(const DmaTransfer& setup) {
   m_have_camera = true;
 }
 
+void CtrMercRenderer::snapshot_bones(DmaFollower& dma, CtrRenderState& rs) {
+  m_snap.clear();
+  m_snapshot_mode = true;
+  render(dma, rs);
+  m_snapshot_mode = false;
+  m_snap_valid = true;
+}
+
 void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
+  m_snap_pos = 0;
   // same structure as Merc2::handle_all_dma, but without asserts: skip what we don't know
   if (dma.current_tag_offset() == rs.next_bucket) {
+    return;
+  }
+  if (!ctr_settings().merc && !m_snapshot_mode) {
+    while (dma.current_tag_offset() != rs.next_bucket) {
+      dma.read_and_advance();
+    }
     return;
   }
   dma.read_and_advance();  // jump to the merc dma
@@ -150,18 +164,45 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     }
   }
 
-  if (rs.frame_idx % 300 == 0 && m_stats.models) {
-    lg::debug("[ctr] {}: {} models ({} missing), {} draws", m_name, m_stats.models,
-              m_stats.missing, m_stats.draws);
+  if (m_snapshot_mode) {
+    return;
+  }
+  m_snap_valid = false;  // used up: the next frame needs a new snapshot
+  if (rs.log_now && m_stats.models) {
+    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws", m_name,
+              m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.draws);
     m_stats = Stats();
   }
 }
 
 void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) {
+  const u8* input = init.data;
+  // The bone matrices are not in the DMA data (they're in game memory that the next frame's
+  // game logic rewrites while the render thread draws this one): snapshot_bones copies them on
+  // the game thread, in the order of the models, and drawing reads that copy.
+  {
+    const u8* sl = input + 128 + sizeof(VuLights) + 16;
+    const u32* ma = (const u32*)(sl + 128);
+    int n = 0;
+    while (n < 128 && sl[n] != 0xff) {
+      n++;
+    }
+    if (m_snapshot_mode) {
+      for (int b = 0; b < n; b++) {
+        u32 addr;
+        memcpy(&addr, &ma[b * 4], 4);
+        MercMat m;
+        memcpy(&m, rs.ee_mem + addr, sizeof(MercMat));
+        m_snap.push_back(m);
+      }
+      return;
+    }
+    m_snap_first = m_snap_pos;
+    m_snap_pos += n;
+  }
   if (!m_have_camera) {
     return;
   }
-  const u8* input = init.data;
   char name[128];
   memcpy(name, input, 128);
   name[127] = 0;
@@ -192,12 +233,35 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     u32 addr;
     memcpy(&addr, &matrix_array[i * 4], 4);
     if (slots[i] < 128) {
-      memcpy(&bones[slots[i]], rs.ee_mem + addr, sizeof(MercMat));
+      if (m_snap_valid && m_snap_first + i < m_snap.size()) {
+        bones[slots[i]] = m_snap[m_snap_first + i];
+      } else {
+        memcpy(&bones[slots[i]], rs.ee_mem + addr, sizeof(MercMat));
+      }
     }
   }
   input += 128 + 16 * i;
   PcMercFlags flags;
   memcpy(&flags, input, sizeof(flags));
+
+  // Bone matrices that are garbage (seen in cutscenes whose streamed animation is missing) make
+  // screen-filling triangles: skip the model instead.
+  for (int b = 0; b < i; b++) {
+    if (slots[b] >= 128) {
+      continue;
+    }
+    const MercMat& m = bones[slots[b]];
+    for (int r = 0; r < 4; r++) {
+      for (int c = 0; c < 3; c++) {
+        const float v = m.tmat[r][c];
+        const float lim = r < 3 ? 64.f : 1e8f;
+        if (!(std::abs(v) < lim)) {  // also catches NaN
+          m_stats.bad_bones++;
+          return;
+        }
+      }
+    }
+  }
 
   // a crude light: ambient + half of the first light, applied to the whole model
   float tint[3];

@@ -15,7 +15,7 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 3;
+constexpr uint32_t kVersion = 4;
 
 enum TextureFormat : uint8_t {
   TEX_RGB565 = 0,  // u16: r5 g6 b5 (r in the high bits)
@@ -77,9 +77,14 @@ struct Chunk {
   uint32_t draw_count;
   float max_dist;  // not drawn if the bounding sphere is further than this from the camera
                    // (game units; 0 = no limit). Small objects are put in separate chunks.
+  uint32_t lod_tier;  // 0: always (tie), 1: detailed tfrag, 2: coarse tfrag (see lod_center),
+                      // 3: the game's low resolution tfrag, only for views from outside the level
+  float lod_center[3];  // tiers 1 and 2: the detailed version is drawn when the camera is closer
+                        // to this point than the LOD distance (the same point for both versions
+                        // of a grid cell, so exactly one of them is drawn)
   uint32_t pad[3];
 };
-static_assert(sizeof(Chunk) == 64);
+static_assert(sizeof(Chunk) == 80);
 
 struct Vertex {
   int16_t pos[3];  // quantized, see Chunk

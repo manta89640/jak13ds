@@ -103,8 +103,8 @@ u32 CtrVram::read32(u32 byte_addr) const {
 }
 
 void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
-  flush_pending();  // keep the order of writes (no-op when called from flush_pending)
   m_stats.uploads_changed++;
+  m_last_relocate.clear();  // a relocated texture may have been overwritten
   const u32 pages_per_row = std::max(1u, width / 64);
   const u32 base = dest_block * kBlockBytes;
   for (u32 y = 0; y < height; y++) {
@@ -210,6 +210,29 @@ void CtrVram::flush_pending() {
   }
 }
 
+void CtrVram::flush_pending(u32 first_block, u32 end_block) {
+  // write the uploads that overlap the range, in order; keep the others pending
+  if (m_pending.empty()) {
+    return;
+  }
+  std::vector<PendingUpload> keep;
+  std::vector<PendingUpload> write;
+  for (const auto& p : m_pending) {
+    if (p.dest_block < end_block && first_block < p.end_block) {
+      write.push_back(p);
+    } else {
+      keep.push_back(p);
+    }
+  }
+  if (write.empty()) {
+    return;
+  }
+  m_pending.swap(keep);
+  for (const auto& p : write) {
+    write_upload(p.src, p.dest_block, p.words);
+  }
+}
+
 bool CtrVram::pending_overlaps(u32 first_block, u32 end_block) const {
   for (const auto& p : m_pending) {
     if (p.dest_block < end_block && first_block < p.end_block) {
@@ -234,11 +257,41 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     return;
   }
   const TexInfo info = it->second;
-  flush_pending();
   if (!is_indexed(info.psm) || !is_indexed(dest_psm)) {
     lg::warn("[ctr vram] relocate {} -> {} not supported", info.psm, dest_psm);
     return;
   }
+  // source texture and CLUT, in blocks (generous: whole pages)
+  const u32 bits = (info.psm == (u32)GsTex0::PSM::PSMT4) ? 4
+                   : (info.psm == (u32)GsTex0::PSM::PSMT8) ? 8
+                                                            : 32;
+  const u32 src_blocks = ((u32)info.w * info.h * bits / 8 + 8191) / 8192 * 32;
+  flush_pending(src_block, src_block + src_blocks);
+  flush_pending(info.clutdest, info.clutdest + 4);
+  // the game relocates the font every frame: skip if the source and CLUT didn't change
+  u64 sig = ((u64)src_block << 40) ^ ((u64)dest_psm << 32) ^ info.clutdest;
+  {
+    const u32 base = (src_block * kBlockBytes) & kVramMask;
+    const u32 bytes = std::min(src_blocks * kBlockBytes, kVramBytes - base);
+    for (u32 o = 0; o + 8 <= bytes; o += 8) {
+      u64 v;
+      memcpy(&v, m_vram.data() + base + o, 8);
+      sig = (sig ^ v) * 1099511628211ull;
+    }
+    const u32 cbase = (info.clutdest * kBlockBytes) & kVramMask;
+    for (u32 o = 0; o + 8 <= 4 * kBlockBytes && cbase + o + 8 <= kVramBytes; o += 8) {
+      u64 v;
+      memcpy(&v, m_vram.data() + cbase + o, 8);
+      sig = (sig ^ v) * 1099511628211ull;
+    }
+  }
+  const u64 reloc_key = ((u64)dest_block << 8) | (dest_psm & 0xff);
+  auto last = m_last_relocate.find(reloc_key);
+  if (last != m_last_relocate.end() && last->second == sig) {
+    m_stats.relocates_skipped++;
+    return;
+  }
+  m_last_relocate[reloc_key] = sig;
   const u32 width = std::max<u32>(1, info.width) * 64;
   Range range;
   for (u32 y = 0; y < info.h; y++) {
@@ -466,11 +519,33 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     }
   }
   if (!m_pending.empty()) {
-    flush_pending();
+    // write the pending uploads this texture (or its cached version) may read
+    GsTex0 t(tex0);
+    const u32 texels = (1u << t.tw()) * (1u << t.th());
+    const u32 blocks = texels * 4 / kBlockBytes + 64;  // as if 32 bit, plus slack
+    flush_pending(t.tbp0(), t.tbp0() + blocks);
+    flush_pending(t.cbp(), t.cbp() + 4);
     it = m_cache.find(key);
     if (it != m_cache.end()) {
       m_stats.cached++;
       return &it->second.tex;
+    }
+  }
+
+  // same VRAM contents as a texture decoded before (the game re-uploads pages every frame,
+  // alternating pages in the same VRAM): reuse it instead of decoding again
+  auto stale = m_stale.find(key);
+  if (stale != m_stale.end()) {
+    Entry e = stale->second;
+    m_stale.erase(stale);
+    if (content_hash(e, find_relocation(GsTex0(tex0).tbp0(), (u32)GsTex0(tex0).psm())) ==
+        e.hash) {
+      m_stats.revived++;
+      auto res = m_cache.emplace(key, e);
+      return &res.first->second.tex;
+    }
+    if (e.tex.handle >= 0) {
+      ctr_gpu_tex_delete(e.tex.handle);
     }
   }
 
@@ -518,20 +593,27 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   } else {
     e.clut_first = e.clut_end = 0;
   }
+  e.hash = content_hash(e, reloc);
   m_stats.decoded++;
   auto res = m_cache.emplace(key, e);
   return &res.first->second.tex;
 }
 
 void CtrVram::invalidate_blocks(u32 first_block, u32 end_block) {
+  if (m_stale.size() > 256) {
+    clear_stale();  // bound the GPU memory of kept textures
+  }
   for (auto it = m_cache.begin(); it != m_cache.end();) {
     const auto& e = it->second;
     bool hit = (e.first_block < end_block && first_block < e.end_block) ||
                (e.clut_first < end_block && first_block < e.clut_end);
     if (hit) {
-      if (e.tex.handle >= 0) {
-        ctr_gpu_tex_delete(e.tex.handle);
+      // keep it: the same data often comes back (see get_texture)
+      auto old = m_stale.find(it->first);
+      if (old != m_stale.end() && old->second.tex.handle >= 0) {
+        ctr_gpu_tex_delete(old->second.tex.handle);
       }
+      m_stale[it->first] = e;
       it = m_cache.erase(it);
     } else {
       ++it;
@@ -546,4 +628,35 @@ void CtrVram::clear_cache() {
     }
   }
   m_cache.clear();
+  clear_stale();
+}
+
+void CtrVram::clear_stale() {
+  for (auto& [key, e] : m_stale) {
+    if (e.tex.handle >= 0) {
+      ctr_gpu_tex_delete(e.tex.handle);
+    }
+  }
+  m_stale.clear();
+}
+
+u64 CtrVram::content_hash(const Entry& e, const Relocation* reloc) const {
+  u64 h = 1469598103934665603ull;
+  auto add_range = [&](u32 first, u32 end) {
+    const u32 lo = std::min(first * kBlockBytes, kVramBytes);
+    const u32 hi = std::min(end * kBlockBytes, kVramBytes);
+    for (u32 o = lo; o + 8 <= hi; o += 8) {
+      u64 v;
+      memcpy(&v, m_vram.data() + o, 8);
+      h = (h ^ v) * 1099511628211ull;
+    }
+  };
+  add_range(e.first_block, e.end_block);
+  add_range(e.clut_first, e.clut_end);
+  if (reloc) {
+    for (u32 c : reloc->clut) {
+      h = (h ^ c) * 1099511628211ull;
+    }
+  }
+  return h;
 }

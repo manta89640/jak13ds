@@ -75,6 +75,8 @@ class CtrVram {
     int uploads_changed = 0;
     int decoded = 0;
     int cached = 0;
+    int relocates_skipped = 0;
+    int revived = 0;
   };
   const Stats& stats() const { return m_stats; }
 
@@ -83,6 +85,8 @@ class CtrVram {
   void write_upload(const u8* src, u32 dest_block, u32 words);
   // write the pending uploads (all, or only those overlapping the given block ranges)
   void flush_pending();
+  void flush_pending(u32 first_block, u32 end_block);
+  std::unordered_map<u64, u64> m_last_relocate;  // (dest, psm) -> signature of the source
   bool pending_overlaps(u32 first_block, u32 end_block) const;
   struct PendingUpload {
     const u8* src;
@@ -99,8 +103,12 @@ class CtrVram {
     CtrTexture tex;
     u32 first_block, end_block;  // VRAM range the texture (and its CLUT) was read from
     u32 clut_first, clut_end;
+    u64 hash = 0;  // of the VRAM it was decoded from (content_hash)
   };
   std::unordered_map<u64, Entry> m_cache;
+  // invalidated textures, kept (with their GPU texture) in case the same data comes back
+  std::unordered_map<u64, Entry> m_stale;
+  void clear_stale();
 
   // last upload per destination block: the game re-uploads the same pages every frame
   struct UploadRecord {
@@ -126,5 +134,6 @@ class CtrVram {
   };
   std::unordered_map<u32, std::vector<Relocation>> m_relocations;  // by dest block
   const Relocation* find_relocation(u32 block, u32 psm) const;
+  u64 content_hash(const Entry& e, const Relocation* reloc) const;
   Stats m_stats;
 };

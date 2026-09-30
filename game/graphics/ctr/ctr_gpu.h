@@ -117,6 +117,13 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
                           int palette_count, const float tint[3], int mesh, int first_index,
                           int index_count);
 
+/* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh.v.pica), from clip w:
+ *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)
+ *   distance fog = (w * fog1.x - fog1.y) * fog1.z
+ * the larger of the two mixes the color towards (r, g, b). Call after ctr_gpu_frame_begin. */
+void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, uint8_t g,
+                          uint8_t b);
+
 /* Request a screenshot of the next finished frame (written when it is available: after the next
  * ctr_gpu_frame_begin on the 3DS). PNG on PC, BMP on the 3DS. */
 void ctr_gpu_request_screenshot(const char* path);
@@ -131,6 +138,7 @@ typedef struct {
   float draw_ms;    /* and drawing (C3D_GetDrawingTime) */
   int cmd_splits;   /* command buffer flushes in the middle of the frame */
   unsigned int linear_free; /* free linear memory (meshes, textures, vertex ring), bytes */
+  unsigned int vram_free;   /* free VRAM (render target, textures), bytes */
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
 

@@ -5,6 +5,7 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrDirect.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrLevel.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrMerc.cpp
+  ${OG_ROOT}/game/graphics/ctr/CtrSettings.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSprite.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrRenderer.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrVram.cpp

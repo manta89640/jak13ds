@@ -31,8 +31,9 @@ void ctr_port_set_gpu_active(int active);
    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-#define VBUF_BYTES (4 * 1024 * 1024)
-#define MAX_TEXTURES 1024
+#define VBUF_BYTES (1536 * 1024)
+#define MAX_STAGING 1024
+#define MAX_TEXTURES 2048
 
 typedef struct {
   C3D_Tex tex;
@@ -59,6 +60,11 @@ static struct {
   shaderProgram_s mesh_program;
   int uloc_clip;
   int uloc_scales;
+  int uloc_fog0, uloc_fog1;
+  float fog0[4], fog1[4]; /* see ctr_gpu_set_mesh_fog */
+  C3D_Tex fog_tex;        /* 64x8: alpha ramp 0..1 along s, fog color */
+  uint32_t fog_tex_rgb;
+  int fog_tex_valid;
   DVLB_s* skin_dvlb;
   shaderProgram_s skin_program;
   int uloc_skin_clip, uloc_skin_rows[3], uloc_skin_scales;
@@ -83,6 +89,9 @@ static struct {
   int in_frame;
   int pending_delete[MAX_TEXTURES];
   int pending_delete_count;
+  void* pending_staging[MAX_STAGING]; /* linear buffers of queued VRAM texture copies */
+  int pending_staging_count;
+  int vram_textures;
   char screenshot_path[256];
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
@@ -142,6 +151,10 @@ void ctr_gpu_request_screenshot(const char* path) {
 /* textures deleted during a frame may still be read by the GPU: free them at the start of the
  * next frame, after C3D_FrameBegin(C3D_FRAME_SYNCDRAW) waited for the GPU */
 static void process_pending_deletes(void) {
+  for (int i = 0; i < g.pending_staging_count; i++) {
+    linearFree(g.pending_staging[i]);
+  }
+  g.pending_staging_count = 0;
   for (int i = 0; i < g.pending_delete_count; i++) {
     int h = g.pending_delete[i];
     if (g.textures[h].used == 2) {
@@ -195,6 +208,8 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord * 1024 */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
   }
   g.cur_prog = prog;
 }
@@ -246,6 +261,23 @@ int ctr_gpu_init(void) {
   shaderProgramSetVsh(&g.mesh_program, &g.mesh_dvlb->DVLE[0]);
   g.uloc_clip = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "clip");
   g.uloc_scales = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "scales");
+  g.uloc_fog0 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog0");
+  g.uloc_fog1 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog1");
+  /* no fog until ctr_gpu_set_mesh_fog */
+  g.fog0[0] = 0.0f;
+  g.fog0[1] = 255.0f;
+  g.fog0[2] = 255.0f;
+  g.fog0[3] = -1.0f / 255.0f;
+  g.fog1[0] = 0.0f;
+  g.fog1[1] = 1.0f;
+  g.fog1[2] = 0.0f;
+  g.fog1[3] = 0.0f;
+  if (C3D_TexInit(&g.fog_tex, 64, 8, GPU_RGBA8)) {
+    C3D_TexSetFilter(&g.fog_tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&g.fog_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    g.fog_tex_valid = 1;
+    g.fog_tex_rgb = 0xffffffff; /* force the first fill */
+  }
   g.skin_dvlb = DVLB_ParseFile((u32*)ctr_skin_shbin, (u32)ctr_skin_shbin_size);
   shaderProgramInit(&g.skin_program);
   shaderProgramSetVsh(&g.skin_program, &g.skin_dvlb->DVLE[0]);
@@ -344,6 +376,7 @@ void ctr_gpu_frame_end(void) {
   g.cur.gpu_ms = C3D_GetProcessingTime();
   g.cur.draw_ms = C3D_GetDrawingTime();
   g.cur.linear_free = (unsigned int)linearSpaceFree();
+  g.cur.vram_free = (unsigned int)vramSpaceFree();
   g.last = g.cur;
 }
 
@@ -365,6 +398,38 @@ static inline u32 morton8(u32 x, u32 y) {
          ((y & 4) << 3);
 }
 
+/* Textures go to VRAM while there is room (linear memory is only ~24 MB and holds the level
+ * meshes; the GPU also reads VRAM faster), else to linear memory. tex_alloc returns the buffer to
+ * write the texels to (a linear staging buffer for VRAM), tex_commit uploads it. */
+static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vram) {
+  *on_vram = 0;
+  /* only outside of a frame: a copy in a frame needs a command list split and a queue entry
+   * each, and a level's worth of them overflows the GX queue */
+  if (!g.in_frame && C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
+    void* staging = linearAlloc(tex->size);
+    if (staging) {
+      *on_vram = 1;
+      return staging;
+    }
+    C3D_TexDelete(tex);
+  }
+  if (!C3D_TexInit(tex, (u16)w, (u16)h, fmt)) {
+    return NULL;
+  }
+  return tex->data;
+}
+
+static void tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
+  if (!on_vram) {
+    C3D_TexFlush(tex);
+    return;
+  }
+  GSPGPU_FlushDataCache(buf, tex->size);
+  C3D_SyncTextureCopy((u32*)buf, 0, (u32*)tex->data, 0, tex->size, 8);
+  linearFree(buf);
+  g.vram_textures++;
+}
+
 int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
   if (!g.ready || w < 8 || h < 8 || w > 1024 || h > 1024) {
     return -1;
@@ -380,11 +445,12 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
     return -1;
   }
   C3D_Tex* tex = &g.textures[slot].tex;
-  if (!C3D_TexInit(tex, (u16)w, (u16)h, GPU_RGBA8)) {
+  int on_vram;
+  uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram);
+  if (!dst) {
     return -1;
   }
   /* tiled: 8x8 tiles in rows, morton order inside a tile */
-  uint8_t* dst = (uint8_t*)tex->data;
   const int tiles_x = w / 8;
   for (int y = 0; y < h; y++) {
     for (int x = 0; x < w; x++) {
@@ -400,7 +466,7 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
       dst[off + 3] = p[0];
     }
   }
-  C3D_TexFlush(tex);
+  tex_commit(tex, dst, on_vram);
   g.textures[slot].used = 1;
   return slot;
 }
@@ -465,6 +531,14 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, 0);
     C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvColor(env1, tint);
+  } else if (mesh == 1 && g.fog_tex_valid) {
+    /* fog: rgb = mix(previous, fog color, fog amount) with the amount from the fog ramp texture
+     * (texcoord1 from the mesh shader) */
+    C3D_TexBind(1, &g.fog_tex);
+    C3D_TexEnvSrc(env1, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
+    C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(env1, C3D_RGB, GPU_INTERPOLATE);
   }
   C3D_TexEnv* env = C3D_GetTexEnv(0);
   C3D_TexEnvInit(env);
@@ -601,11 +675,13 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
     return -1;
   }
   C3D_Tex* tex = &g.textures[slot].tex;
-  if (!C3D_TexInit(tex, (u16)w, (u16)h, format == 0 ? GPU_RGB565 : GPU_RGBA4)) {
+  int on_vram;
+  void* dst = tex_alloc(tex, w, h, format == 0 ? GPU_RGB565 : GPU_RGBA4, &on_vram);
+  if (!dst) {
     return -1;
   }
-  memcpy(tex->data, data, (size_t)size < tex->size ? (size_t)size : tex->size);
-  C3D_TexFlush(tex);
+  memcpy(dst, data, (size_t)size < tex->size ? (size_t)size : tex->size);
+  tex_commit(tex, dst, on_vram);
   g.textures[slot].used = 1;
   return slot;
 }
@@ -871,4 +947,38 @@ void ctr_gpu_async_stop(void) {
   threadJoin(as.thread, U64_MAX);
   threadFree(as.thread);
   as.running = 0;
+}
+
+/* ---------------- fog for level meshes ---------------- */
+
+void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, uint8_t gr,
+                          uint8_t b) {
+  memcpy(g.fog0, fog0, sizeof(g.fog0));
+  memcpy(g.fog1, fog1, sizeof(g.fog1));
+  if (g.cur_prog == PROG_MESH) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
+  }
+  uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)gr << 8) | b;
+  if (!g.fog_tex_valid || rgb == g.fog_tex_rgb) {
+    return;
+  }
+  /* the GPU may still read the old texture from the previous frame: that frame is finished
+   * when this is called (after C3D_FrameBegin), so writing it here is safe */
+  g.fog_tex_rgb = rgb;
+  uint8_t* dst = (uint8_t*)g.fog_tex.data;
+  for (int y = 0; y < 8; y++) {
+    for (int x = 0; x < 64; x++) {
+      uint32_t tile = (uint32_t)x / 8; /* one row of 8x8 tiles */
+      uint32_t m = (uint32_t)((x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) |
+                              ((x & 4) << 2) | ((y & 4) << 3));
+      uint8_t* p = dst + (tile * 64 + m) * 4;
+      p[0] = (uint8_t)(x * 255 / 63); /* A B G R */
+      p[1] = b;
+      p[2] = gr;
+      p[3] = r;
+    }
+  }
+  C3D_TexFlush(&g.fog_tex);
+  g.last_state_valid = 0;
 }

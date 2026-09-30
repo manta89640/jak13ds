@@ -30,6 +30,7 @@ namespace {
 
 struct Options {
   int tfrag_geo = 1;  // 0 = most detailed, 2 = least (2 has large holes)
+  int far_tfrag_geo = 2;  // coarse version for far away cells (-1: none)
   int tie_geo = 3;    // 0 = most detailed, 3 = least
   int palette = 1;    // time of day palette to bake (0..7)
   int max_tex = 128;
@@ -56,6 +57,7 @@ struct SrcTri {
   u32 v[3];         // into the global SrcVertex list
   u32 draw_key;     // index into draw_keys
   u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist)
+  u32 tier = 0;     // c3l::Chunk::lod_tier
 };
 
 struct DrawKey {
@@ -138,7 +140,15 @@ struct Converter {
     return n;
   }
 
+  u32 cur_tier = 0;
   void add_tfrag_tree(tfrag3::TfragTree& tree) {
+    size_t first_tri = tris.size();
+    add_tfrag_tree_impl(tree);
+    for (size_t i = first_tri; i < tris.size(); i++) {
+      tris[i].tier = cur_tier;
+    }
+  }
+  void add_tfrag_tree_impl(tfrag3::TfragTree& tree) {
     tree.unpack();
     u32 base = verts.size();
     for (auto& v : tree.unpacked.vertices) {
@@ -561,6 +571,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   if (!opt.no_merc) {
     convert_merc(level.merc_data, cv, &merc);
   }
+  const bool two_tiers = opt.far_tfrag_geo >= 0 && opt.far_tfrag_geo != opt.tfrag_geo;
+  cv.cur_tier = two_tiers ? 1 : 0;
   for (auto& tree : level.tfrag_trees[opt.tfrag_geo]) {
     if (opt.merc_only) {
       break;
@@ -570,6 +582,30 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       tfrag_trees++;
     }
   }
+  size_t far_first = cv.tris.size();
+  const char* far_source = "none";
+  if (two_tiers && !opt.merc_only) {
+    // coarse version of each grid cell: the coarsest tfrag level of detail
+    cv.cur_tier = 2;
+    for (auto& tree : level.tfrag_trees[opt.far_tfrag_geo]) {
+      if (is_drawn_tfrag_kind(tree.kind)) {
+        cv.add_tfrag_tree(tree);
+      }
+    }
+    far_source = "lod";
+    // the game's low resolution tfrag (drawn by the PS2 when the level is seen from another
+    // level; often only the parts visible from there): used when the camera is outside the level
+    cv.cur_tier = 3;
+    using K = tfrag3::TFragmentTreeKind;
+    for (auto& tree : level.tfrag_trees[0]) {
+      if (tree.kind == K::LOWRES || tree.kind == K::LOWRES_TRANS) {
+        cv.add_tfrag_tree(tree);
+        far_source = "lod + lowres";
+      }
+    }
+  }
+  const size_t far_tris = cv.tris.size() - far_first;
+  cv.cur_tier = 0;
   if (!opt.no_tie && !opt.merc_only) {
     for (auto& tree : level.tie_trees[opt.tie_geo]) {
       cv.add_tie_tree(tree);
@@ -589,7 +625,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       cy += cv.verts[t.v[k]].y;
       cz += cv.verts[t.v[k]].z;
     }
-    auto key = std::make_tuple((int)t.detail, (int)std::floor(cx / 3 / cell),
+    auto key = std::make_tuple((int)(t.detail + 4 * t.tier), (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell));
     cells[key].push_back(i);
   }
@@ -628,7 +664,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       }
 
       c3l::Chunk ch{};
-      const int detail = std::get<0>(key);
+      const int detail = std::get<0>(key) % 4;
+      ch.lod_tier = std::get<0>(key) / 4;
+      ch.lod_center[0] = (std::get<1>(key) + 0.5f) * cell;
+      ch.lod_center[1] = (std::get<2>(key) + 0.5f) * cell;
+      ch.lod_center[2] = (std::get<3>(key) + 0.5f) * cell;
       ch.max_dist = detail == 1 ? opt.detail_dist * 4096.f
                                 : (detail == 2 ? opt.medium_dist * 4096.f : 0.f);
       float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
@@ -741,11 +781,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   lg::info(
       "{}: {} tfrag + {} tie trees -> {} chunks, {} verts ({} KB), {} tris, {} draws, {} textures "
       "({} KB), {} merc models ({} verts, {} tris, {} draws), file {} KB; tie: {} wind tris, "
-      "{} small/medium-object tris",
+      "{} small/medium-object tris; far tfrag: {} tris ({})",
       level.level_name, tfrag_trees, tie_trees, chunks.size(), out_verts.size(),
       out_verts.size() * sizeof(c3l::Vertex) / 1024, out_indices.size() / 3, out_draws.size(),
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
-      merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024, cv.wind_tris, cv.small_tris);
+      merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024, cv.wind_tris, cv.small_tris,
+      far_tris, far_source);
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
             cv.radius_hist[0], cv.radius_hist[1], cv.radius_hist[2], cv.radius_hist[3],
             cv.radius_hist[4], cv.radius_hist[5], cv.radius_hist[6], cv.radius_hist[7]);
@@ -763,6 +804,8 @@ int main(int argc, char** argv) {
   app.add_flag("--all", all, "convert every .fr3 in the input folder");
   app.add_option("--tfrag-geo", opt.tfrag_geo, "tfrag level of detail (0 = most detailed, 2)");
   app.add_option("--tie-geo", opt.tie_geo, "tie level of detail (0 = most detailed, 3)");
+  app.add_option("--far-tfrag-geo", opt.far_tfrag_geo,
+                 "tfrag level of detail for far away cells (-1: no far version)");
   app.add_option("--palette", opt.palette, "time of day palette to bake (0-7)");
   app.add_option("--max-tex", opt.max_tex, "maximum texture size (power of two, <= 1024)");
   app.add_option("--cell", opt.cell_meters, "chunk grid size in meters");
