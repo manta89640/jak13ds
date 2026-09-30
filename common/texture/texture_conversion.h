@@ -3,6 +3,9 @@
 #include "common/common_types.h"
 #include "common/util/Assert.h"
 
+// (AI-assisted) The lookup tables below are static constexpr: as plain local arrays, GCC (the 3DS
+// build) copied them onto the stack on every call, which is once per texel (up to 1.1 KB each).
+
 /*!
  * Convert from a pixel location in a texture (x, y, texture buffer width) to VRAM address (byte).
  * Uses the PSMCT32 format.
@@ -27,10 +30,12 @@ inline u32 psmct32_addr(u32 x, u32 y, u32 width) {
   u32 block_row = page_y / 8;
   u32 block_x = page_x % 8;
   u32 block_y = page_y % 8;
-  const u32 psm32_table[4][8] = {{0, 1, 4, 5, 16, 17, 20, 21},
-                                 {2, 3, 6, 7, 18, 19, 22, 23},
-                                 {8, 9, 12, 13, 24, 25, 28, 29},
-                                 {10, 11, 14, 15, 26, 27, 30, 31}};
+  static constexpr u32 psm32_table[4][8] = {
+      {0, 1, 4, 5, 16, 17, 20, 21},
+      {2, 3, 6, 7, 18, 19, 22, 23},
+      {8, 9, 12, 13, 24, 25, 28, 29},
+      {10, 11, 14, 15, 26, 27, 30, 31},
+  };
 
   u32 block = psm32_table[block_row][block_col];
 
@@ -40,7 +45,10 @@ inline u32 psmct32_addr(u32 x, u32 y, u32 width) {
   u32 col_x = block_x;
 
   // next the pixel
-  const u32 psm32_pix_table[2][8] = {{0, 1, 4, 5, 8, 9, 12, 13}, {2, 3, 6, 7, 10, 11, 14, 15}};
+  static constexpr u32 psm32_pix_table[2][8] = {
+      {0, 1, 4, 5, 8, 9, 12, 13},
+      {2, 3, 6, 7, 10, 11, 14, 15},
+  };
   u32 pixel = psm32_pix_table[col_y][col_x];
 
   // now the sum
@@ -72,14 +80,16 @@ inline u32 psmt8_addr(u32 x, u32 y, u32 width) {
   u32 block_row = page_y / 16;
   u32 block_x = page_x % 16;
   u32 block_y = page_y % 16;
-  const u32 psm32_table[4][8] = {{0, 1, 4, 5, 16, 17, 20, 21},
-                                 {2, 3, 6, 7, 18, 19, 22, 23},
-                                 {8, 9, 12, 13, 24, 25, 28, 29},
-                                 {10, 11, 14, 15, 26, 27, 30, 31}};
+  static constexpr u32 psm32_table[4][8] = {
+      {0, 1, 4, 5, 16, 17, 20, 21},
+      {2, 3, 6, 7, 18, 19, 22, 23},
+      {8, 9, 12, 13, 24, 25, 28, 29},
+      {10, 11, 14, 15, 26, 27, 30, 31},
+  };
   u32 block = psm32_table[block_row][block_col];  // it's the same table!!!
 
   // both columns and pixels within columns.
-  const uint8_t pix_table[16][16] = {
+  static constexpr uint8_t pix_table[16][16] = {
       {0, 4, 16, 20, 32, 36, 48, 52, 2, 6, 18, 22, 34, 38, 50, 54},
       {8, 12, 24, 28, 40, 44, 56, 60, 10, 14, 26, 30, 42, 46, 58, 62},
       {33, 37, 49, 53, 1, 5, 17, 21, 35, 39, 51, 55, 3, 7, 19, 23},
@@ -120,12 +130,13 @@ inline u32 psmct16_addr(u32 x, u32 y, u32 width) {
   u32 block_row = page_y / 8;
   u32 block_x = page_x % 16;
   u32 block_y = page_y % 8;
-  const u32 psm16_table[8][4] = {{0, 2, 8, 10},    {1, 3, 9, 11},    {4, 6, 12, 14},
-                                 {5, 7, 13, 15},   {16, 18, 24, 26}, {17, 19, 25, 27},
-                                 {20, 22, 28, 30}, {21, 23, 29, 31}};
+  static constexpr u32 psm16_table[8][4] = {
+      {0, 2, 8, 10},    {1, 3, 9, 11},    {4, 6, 12, 14},   {5, 7, 13, 15},
+      {16, 18, 24, 26}, {17, 19, 25, 27}, {20, 22, 28, 30}, {21, 23, 29, 31},
+  };
   u32 block = psm16_table[block_row][block_col];
 
-  const uint8_t pix_tabel[8][16] = {
+  static constexpr uint8_t pix_tabel[8][16] = {
       {0, 2, 8, 10, 16, 18, 24, 26, 1, 3, 9, 11, 17, 19, 25, 27},
       {4, 6, 12, 14, 20, 22, 28, 30, 5, 7, 13, 15, 21, 23, 29, 31},
       {32, 34, 40, 42, 48, 50, 56, 58, 33, 35, 41, 43, 49, 51, 57, 59},
@@ -157,15 +168,16 @@ inline u32 psmt4_addr_half_byte(u32 x, u32 y, u32 width) {
   u32 block_row = page_y / 16;
   u32 block_x = page_x % 32;
   u32 block_y = page_y % 16;
-  const u32 psm4_table[8][4] = {{0, 2, 8, 10},    {1, 3, 9, 11},    {4, 6, 12, 14},
-                                {5, 7, 13, 15},   {16, 18, 24, 26}, {17, 19, 25, 27},
-                                {20, 22, 28, 30}, {21, 23, 29, 31}};
+  static constexpr u32 psm4_table[8][4] = {
+      {0, 2, 8, 10},    {1, 3, 9, 11},    {4, 6, 12, 14},   {5, 7, 13, 15},
+      {16, 18, 24, 26}, {17, 19, 25, 27}, {20, 22, 28, 30}, {21, 23, 29, 31},
+  };
   ASSERT(block_row < 8);
   ASSERT(block_col < 4);
   u32 block = psm4_table[block_row][block_col];  // it's the same table!!!
 
   // both columns and pixels within columns.
-  const uint16_t pix_table[16][32] = {
+  static constexpr uint16_t pix_table[16][32] = {
       {0, 8,  32, 40, 64, 72, 96,  104, 2, 10, 34, 42, 66, 74, 98,  106,
        4, 12, 36, 44, 68, 76, 100, 108, 6, 14, 38, 46, 70, 78, 102, 110},
       {16, 24, 48, 56, 80, 88, 112, 120, 18, 26, 50, 58, 82, 90, 114, 122,
