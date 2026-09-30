@@ -35,7 +35,13 @@ void kboot_init_globals_common() {
   MasterDebug = 1;
   DebugSegment = 1;
   MasterUseKernel = 1;
+#ifdef __3DS__
+  // (AI-assisted) The 3DS renderer never draws the splash (Gfx::g_splash): InitVideo would read
+  // the image and then wait 3 seconds with nothing on the screen.
+  SplashScreen = 0;
+#else
   SplashScreen = 1;
+#endif
   strcpy(DebugBootLevel, "#f");      // no specified level
   strcpy(DebugBootMessage, "play");  // play mode, the default retail mode
   memset(&masterConfig, 0, sizeof(MasterConfig));
