@@ -92,16 +92,11 @@ GK="$SD/3ds/jak1/gk.3dsx"
 if [ -n "$CIA" ]; then
   pkill -9 -f 'Azahar.app/Contents/MacOS/azahar' 2>/dev/null || true
   echo "installing $CIA"
-  # title id 00040000 000f7a11 (platform/3ds/cia/gk.rsf); Azahar keeps installed titles on its SD
-  rm -rf "$SD"/Nintendo\ 3DS/*/*/title/00040000/000f7a11
-  open -n -a "$APP" --args -i "$(cd "$(dirname "$CIA")" && pwd)/$(basename "$CIA")"
-  for _ in $(seq 60); do
-    sleep 1
-    GK="$(ls "$SD"/Nintendo\ 3DS/*/*/title/00040000/000f7a11/content/*.app 2>/dev/null | head -1)"
-    [ -z "$GK" ] || break
-  done
-  sleep 3
-  pkill -9 -f 'Azahar.app/Contents/MacOS/azahar' 2>/dev/null || true
+  # title id 00040000 0f7a1100 (UniqueId 0xF7A11 in platform/3ds/cia/gk.rsf); Azahar keeps
+  # installed titles on its virtual SD card
+  rm -rf "$SD"/Nintendo\ 3DS/*/*/title/00040000/0f7a1100
+  "$APP/Contents/MacOS/azahar" -i "$(cd "$(dirname "$CIA")" && pwd)/$(basename "$CIA")"
+  GK="$(ls "$SD"/Nintendo\ 3DS/*/*/title/00040000/0f7a1100/content/*.app 2>/dev/null | head -1)"
   [ -n "$GK" ] || { echo "the CIA was not installed" >&2; exit 1; }
   echo "running the installed title $GK"
 fi
