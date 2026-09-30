@@ -41,14 +41,18 @@ void mesh_vertices(u32 mesh, u32 bone, u32 inv, u32 out) {
   u32 src = gload<u32>(mesh + 12);
   s64 n = gload<u32>(mesh + 8);
   float m[4][4], m2[4][4];
-  memcpy(m, gptr(bone), 64);
+  for (int i = 0; i < 4; i++) {
+    gload_q(m[i], bone + 16 * i);
+  }
   if (inv) {
-    memcpy(m2, gptr(inv), 64);
+    for (int i = 0; i < 4; i++) {
+      gload_q(m2[i], inv + 16 * i);
+    }
   }
   do {
     for (int k = 0; k < 4; k++) {
       float v[4], p[4];
-      memcpy(v, gptr(src + 16 * k), 16);
+      gload_q(v, src + 16 * k);
       transform4(p, m, v);
       s32 q[4];
       if (inv) {
@@ -62,8 +66,8 @@ void mesh_vertices(u32 mesh, u32 bone, u32 inv, u32 out) {
           q[i] = (s32)p[i];
         }
       }
-      gstore_bytes(out + 32 * k, p, 16);
-      gstore_bytes(out + 32 * k + 16, q, 16);
+      gstore_q(out + 32 * k, p);
+      gstore_q(out + 32 * k + 16, q);
     }
     src += 64;
     out += 128;
