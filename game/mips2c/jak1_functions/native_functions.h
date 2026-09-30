@@ -27,6 +27,11 @@ extern const NativeImpl method_14_collide_mesh;
 extern const NativeImpl method_15_collide_mesh;
 u64 method_14_collide_mesh_impl(const NativeArgs& args);
 u64 method_15_collide_mesh_impl(const NativeArgs& args);
+// native_collide_edge_grab.cpp
+extern const NativeImpl method_15_collide_edge_work;
+extern const NativeImpl method_16_collide_edge_work;
+extern const NativeImpl method_18_collide_edge_work;
+extern const NativeImpl method_10_collide_edge_hold_list;
 // native_collide_cache.cpp
 extern const NativeImpl method_9_collide_cache_prim;
 extern const NativeImpl method_26_collide_cache;
