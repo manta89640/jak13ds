@@ -52,6 +52,26 @@ u64 _call_goal8_asm_win32(void* func, u64* arg_array, u64 zero, u64 pp, u64 st, 
 
 namespace Mips2C {
 
+// Differential testing of native replacements (mips2c_native.cpp): while a mips2c function runs
+// under OPENGOAL_MIPS2C_VERIFY, every store to GOAL memory is logged (address, size, old bytes).
+#if !defined(__3DS__)
+#define MIPS2C_WRITE_LOG 1
+extern bool g_write_log_on;
+//! Record a store of size bytes at GOAL address addr, before it happens.
+void write_log_record(u32 addr, u32 size);
+#define MIPS2C_LOG_STORE(addr, size)                    \
+  do {                                                  \
+    if (::Mips2C::g_write_log_on) {                     \
+      ::Mips2C::write_log_record((u32)(addr), (size)); \
+    }                                                   \
+  } while (0)
+#else
+#define MIPS2C_WRITE_LOG 0
+#define MIPS2C_LOG_STORE(addr, size) \
+  do {                               \
+  } while (0)
+#endif
+
 // nicknames for GPRs
 enum Gpr {
   r0 = 0,  // hardcoded to zero
@@ -300,7 +320,10 @@ struct ExecutionContext {
     gprs[gpr].ds64[0] = val;  // sign extend and set
   }
 
-  void store_symbol2(int gpr, void* sym_addr) { memcpy((u8*)sym_addr - 1, &gprs[gpr].ds32[0], 4); }
+  void store_symbol2(int gpr, void* sym_addr) {
+    MIPS2C_LOG_STORE((u8*)sym_addr - 1 - g_ee_main_mem, 4);
+    memcpy((u8*)sym_addr - 1, &gprs[gpr].ds32[0], 4);
+  }
 
   void load_symbol_addr(int gpr, void* sym_addr) {
     gprs[gpr].du64[0] = ((const u8*)sym_addr) - g_ee_main_mem;
@@ -366,6 +389,7 @@ struct ExecutionContext {
 
   void sw(int src, int offset, int addr) {
     auto s = gpr_src(src);
+    MIPS2C_LOG_STORE(gpr_addr(addr) + offset, 4);
     memcpy(g_ee_main_mem + gpr_addr(addr) + offset, &s.du32[0], 4);
   }
 
@@ -399,32 +423,38 @@ struct ExecutionContext {
 
   void sb(int src, int offset, int addr) {
     auto s = gpr_src(src);
+    MIPS2C_LOG_STORE(gpr_addr(addr) + offset, 1);
     memcpy(g_ee_main_mem + gpr_addr(addr) + offset, &s.du32[0], 1);
   }
 
   void sh(int src, int offset, int addr) {
     auto s = gpr_src(src);
+    MIPS2C_LOG_STORE(gpr_addr(addr) + offset, 2);
     memcpy(g_ee_main_mem + gpr_addr(addr) + offset, &s.du32[0], 2);
   }
 
   void sd(int src, int offset, int addr) {
     auto s = gpr_src(src);
+    MIPS2C_LOG_STORE(gpr_addr(addr) + offset, 8);
     memcpy(g_ee_main_mem + gpr_addr(addr) + offset, &s.du32[0], 8);
   }
 
   void sq(int src, int offset, int addr) {
     auto s = gpr_src(src);
     // ASSERT((offset & 15) == 0);
+    MIPS2C_LOG_STORE((gpr_addr(addr) + offset) & (~15), 16);
     memcpy(g_ee_main_mem + ((gpr_addr(addr) + offset) & (~15)), &s.du32[0], 16);
   }
 
   void sqc2(int src, int offset, int addr) {
     auto s = vf_src(src);
     ASSERT(((gpr_addr(addr) + offset) & 0xf) == 0);
+    MIPS2C_LOG_STORE(gpr_addr(addr) + offset, 16);
     memcpy(g_ee_main_mem + gpr_addr(addr) + offset, &s.du32[0], 16);
   }
 
   void swc1(int src, int offset, int addr) {
+    MIPS2C_LOG_STORE(gpr_addr(addr) + offset, 4);
     memcpy(g_ee_main_mem + gpr_addr(addr) + offset, &fprs[src], 4);
   }
 
@@ -1684,6 +1714,7 @@ inline void spad_to_dma(void* spad_sym_addr, u32 madr, u32 sadr, u32 qwc) {
 
   void* spad_addr_c = g_ee_main_mem + spad_addr_goal + sadr;
 
+  MIPS2C_LOG_STORE(spad_addr_goal + sadr, qwc * 16);
   memcpy(spad_addr_c, g_ee_main_mem + madr, qwc * 16);
 }
 
@@ -1699,6 +1730,7 @@ inline void spad_to_dma_no_sadr_off(void* spad_sym_addr, u32 madr, u32 sadr, u32
 
   void* spad_addr_c = g_ee_main_mem + spad_addr_goal + sadr;
 
+  MIPS2C_LOG_STORE(spad_addr_goal + sadr, qwc * 16);
   memcpy(spad_addr_c, g_ee_main_mem + madr, qwc * 16);
 }
 
@@ -1720,6 +1752,7 @@ inline void spad_to_dma_no_sadr_off_bones_interleave(void* spad_sym_addr,
   ASSERT((qwc & 3) == 0);
   while (qwc > 0) {
     // transfer 4.
+    MIPS2C_LOG_STORE(spad_addr_c - g_ee_main_mem, 4 * 16);
     memcpy(spad_addr_c, mem_addr, 4 * 16);
     spad_addr_c += (4 * 16);
     sadr += 4 * 16;
@@ -1741,6 +1774,7 @@ inline void spad_from_dma(void* spad_sym_addr, u32 madr, u32 sadr, u32 qwc) {
 
   void* spad_addr_c = g_ee_main_mem + spad_addr_goal + sadr;
 
+  MIPS2C_LOG_STORE(madr, qwc * 16);
   memcpy(g_ee_main_mem + madr, spad_addr_c, qwc * 16);
 }
 
@@ -1755,6 +1789,7 @@ inline void spad_from_dma_no_sadr_off(void* spad_sym_addr, u32 madr, u32 sadr, u
 
   void* spad_addr_c = g_ee_main_mem + spad_addr_goal + sadr;
 
+  MIPS2C_LOG_STORE(madr, qwc * 16);
   memcpy(g_ee_main_mem + madr, spad_addr_c, qwc * 16);
 }
 

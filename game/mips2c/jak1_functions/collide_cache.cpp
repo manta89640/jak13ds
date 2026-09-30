@@ -3,6 +3,7 @@
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 
 const u32* max_tri_count = nullptr;
@@ -17,6 +18,11 @@ void vlqi(Mips2C::ExecutionContext* c, int reg) {
 }  // namespace
 
 namespace Mips2C::jak1 {
+
+//! the vertices __pc-upload-collide-frag unpacked, for native_collide_cache.cpp
+const u32* collide_vu0_buffer() {
+  return vu0_buffer;
+}
 
 namespace pc_upload_collide_frag {
 u64 execute(void* ctxt) {
@@ -500,7 +506,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 32 collide-cache)", execute, 128);
+  gLinkedFunctionTable.reg("(method 32 collide-cache)", execute, 128,
+                           &native::method_32_collide_cache);
   max_tri_count = intern_from_c("*collide-cache-max-tris*").cast<u32>().c();
 }
 
@@ -785,7 +792,8 @@ void link() {
   cache.debug = intern_from_c("debug").c();
   cache.format = intern_from_c("format").c();
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 26 collide-cache)", execute, 512);
+  gLinkedFunctionTable.reg("(method 26 collide-cache)", execute, 512,
+                           &native::method_26_collide_cache);
 }
 
 } // namespace method_26_collide_cache
@@ -1364,7 +1372,8 @@ void link() {
   cache.debug = intern_from_c("debug").c();
   cache.format = intern_from_c("format").c();
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 27 collide-cache)", execute, 512);
+  gLinkedFunctionTable.reg("(method 27 collide-cache)", execute, 512,
+                           &native::method_27_collide_cache);
 }
 
 } // namespace method_27_collide_cache
@@ -1553,7 +1562,8 @@ u64 execute(void* ctxt) {
 void link() {
   cache.collide_work = intern_from_c("*collide-work*").c();
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 29 collide-cache)", execute, 128);
+  gLinkedFunctionTable.reg("(method 29 collide-cache)", execute, 128,
+                           &native::method_29_collide_cache);
 }
 
 } // namespace method_29_collide_cache
@@ -2685,7 +2695,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.moving_sphere_triangle_intersect = intern_from_c("moving-sphere-triangle-intersect").c();
-  gLinkedFunctionTable.reg("(method 9 collide-cache-prim)", execute, 512);
+  gLinkedFunctionTable.reg("(method 9 collide-cache-prim)", execute, 512,
+                           &native::method_9_collide_cache_prim);
 }
 
 } // namespace method_9_collide_cache_prim
