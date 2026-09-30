@@ -908,6 +908,7 @@
   (none))
 
 (defbehavior target-real-post target ()
+  (profiler-start-event "tgt-physics")
   (let ((gp-0 (the int (-> *display* time-ratio))))
     (set-time-ratios *display* 1.0)
     (countdown (s5-0 gp-0)
@@ -955,16 +956,21 @@
       (bend-gravity)
       (post-flag-setup))
     (set-time-ratios *display* (the float gp-0)))
+  (profiler-end-event)
   (if *debug-segment*
     (add-frame (-> *display* frames (-> *display* on-screen) frame profile-bar 0)
                'draw
                (new 'static 'rgba :r #x40 :b #x40 :a #x80)))
-  (ja-post)
+  (with-profiler "tgt-ja-post"
+    (ja-post))
   (if *debug-segment*
     (add-frame (-> *display* frames (-> *display* on-screen) frame profile-bar 0) 'draw (new 'static 'rgba :r #x80 :a #x80)))
-  (joint-points)
-  (do-target-shadow)
-  (target-powerup-process)
+  (with-profiler "tgt-joint-points"
+    (joint-points))
+  (with-profiler "tgt-shadow"
+    (do-target-shadow))
+  (with-profiler "tgt-powerup"
+    (target-powerup-process))
   (none))
 
 (defbehavior target-post target ()

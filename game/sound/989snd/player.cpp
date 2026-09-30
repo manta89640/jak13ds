@@ -16,6 +16,10 @@
 #endif
 #include "common/log/log.h"
 
+#ifdef __3DS__
+#include "game/kernel/common/kperf.h"
+#endif
+
 namespace snd {
 
 u8 g_global_excite = 0;
@@ -49,6 +53,7 @@ void Player::HandlerTickThread() {
   constexpr auto kTick = std::chrono::nanoseconds(1000000000 / 240);
   auto next = clock::now();
   while (!mHandlerThreadStop) {
+    const u64 t_start = kperf::ticks();
     // run 4 handler ticks per wakeup (60 Hz) to keep the thread cheap
     for (int i = 0; i < 4; i++) {
       std::scoped_lock lock(mTickLock);
@@ -63,6 +68,8 @@ void Player::HandlerTickThread() {
         }
       }
     }
+    kperf::add_thread(kperf::Thread::SOUND, kperf::ticks() - t_start, 1);
+    kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, (u32)mHandlers.size());
     next += 4 * kTick;
     std::this_thread::sleep_until(next);
   }

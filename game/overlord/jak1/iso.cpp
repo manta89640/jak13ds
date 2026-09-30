@@ -811,7 +811,13 @@ u32 ISOThread() {
 
     if (!read_buffer) {
       // didn't actually start a read, just delay for a bit I guess.
+#ifdef __3DS__
+      // (AI-assisted) On the 3DS every IOP wakeup takes time from the game's core: polling every
+      // 100 us cost ~15% of it (5000+ dispatches a second). Reads in progress don't wait here.
+      DelayThread(1000);
+#else
       DelayThread(100);
+#endif
     } else {
       // attempt to sync read.  If we closed the file mid-read in ProcessMessageData, this returns
       // an error code.

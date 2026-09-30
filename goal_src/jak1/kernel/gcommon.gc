@@ -51,6 +51,8 @@
 
 ;; enables the with-profiler statements, which send profiling data from
 ;; GOAL code to the frame profiler in C++.
+;; At run time they only call the C++ side when *pc-prof-on* is true (set by the C kernel: always
+;; on PC, on the 3DS only with the perf_sections flag file), so they cost almost nothing otherwise.
 (defglobalconstant PC_PROFILER_ENABLE #t)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -995,19 +997,19 @@
    when no timed events are in progress, to allow the profiler
    to correctly recover the event stack."
   `(#when PC_PROFILER_ENABLE
-    (pc-prof ,name (pc-prof-event instant))))
+    (if *pc-prof-on* (pc-prof ,name (pc-prof-event instant)))))
 
 (defmacro profiler-start-event (name)
   "Start a timed event with the given name."
   `(#when PC_PROFILER_ENABLE
-    (pc-prof ,name (pc-prof-event begin))))
+    (if *pc-prof-on* (pc-prof ,name (pc-prof-event begin)))))
 
 (defmacro profiler-end-event ()
   "End the most recently started event that hasn't been stopped yet.
    It is up to you to correctly balance the starts/ends, otherwise
    the profiling data will be corrupted."
   `(#when PC_PROFILER_ENABLE
-    (pc-prof "" (pc-prof-event end))))
+    (if *pc-prof-on* (pc-prof "" (pc-prof-event end)))))
 
 (defmacro with-profiler (name &rest body)
   "Execute the body in a named profiler block.
@@ -1015,8 +1017,8 @@
    otherwise the end will be skipped."
   `(#if PC_PROFILER_ENABLE
     (begin
-      (pc-prof ,name (pc-prof-event begin))
+      (if *pc-prof-on* (pc-prof ,name (pc-prof-event begin)))
       ,@body
-      (pc-prof ,name (pc-prof-event end)))
+      (if *pc-prof-on* (pc-prof ,name (pc-prof-event end))))
     (begin
       ,@body)))

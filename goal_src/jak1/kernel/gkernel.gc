@@ -1695,7 +1695,9 @@
                                   ;; it is safe to do this because the main-thread is currently suspended or hasn't run yet.
                                   (let ((trans (new 'process 'cpu-thread this 'trans PROCESS_STACK_SAVE_SIZE (-> this main-thread stack-top))))
                                     ;; call the function in the thread.
+                                    (profiler-start-event "run-trans")
                                     (reset-and-call trans (-> this trans-hook))
+                                    (profiler-end-event)
                                     (#when KERNEL_DEBUG
                                       (when (!= (-> trans type) cpu-thread)
                                         (format 0 "corrupted stack after trans for ~A~%" this)))
@@ -1712,7 +1714,10 @@
                                  ;; we're sleeping. Move us to suspended, in case we were in waiting to run.
                                  (set! (-> this status) 'suspended)
                                  ;; not sleeping. call resume hook. This will return once the main thread suspends again.
-                                 ((-> this main-thread resume-hook) (-> this main-thread)))
+                                 (begin
+                                   (profiler-start-event "run-code")
+                                   ((-> this main-thread resume-hook) (-> this main-thread))
+                                   (profiler-end-event)))
                                ;; check for deadness
                                (cond
                                  ((eq? (-> this status) 'dead)
@@ -1728,7 +1733,9 @@
                                      ;; Note: use dram stack always. This will allow actors to use the scratchpad stack and get a speedup for trans/code
                                      ;; but still be able to do joint-animation stuff that uses the scratchpad in post.
                                      (let ((post (new 'process 'cpu-thread this 'post PROCESS_STACK_SAVE_SIZE *kernel-dram-stack*)))
+                                       (profiler-start-event "run-post")
                                        (reset-and-call post (-> this post-hook))
+                                       (profiler-end-event)
                                        (delete post)
                                        (when (eq? (-> this status) 'dead)
                                          ;; oops we died.

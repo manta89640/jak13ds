@@ -31,6 +31,7 @@
 #include "common/util/Assert.h"
 
 #include "game/kernel/common/goalc_runtime.h"
+#include "game/kernel/common/kperf.h"
 #include "game/kernel/jak1/kscheme.h"
 
 #include "fmt/format.h"
@@ -156,6 +157,7 @@ struct SuspendedThread {
   u32 token = 0;
   bool used = false;
   u32 owner = 0;  // thread address when it suspended (for error messages; relocation moves threads)
+  u32 index = 0;  // in g_suspended
 };
 std::vector<std::unique_ptr<SuspendedThread>> g_suspended;
 std::vector<u32> g_free_slots;
@@ -177,6 +179,7 @@ u32 alloc_slot() {
   } else {
     idx = (u32)g_suspended.size();
     g_suspended.push_back(std::make_unique<SuspendedThread>());
+    g_suspended.back()->index = idx;
   }
   auto& slot = *g_suspended[idx];
   slot.used = true;
@@ -213,12 +216,7 @@ void free_slot(SuspendedThread* slot) {
   if (slot->stack.capacity() > 8192) {
     std::vector<u8>().swap(slot->stack);
   }
-  for (u32 i = 0; i < g_suspended.size(); i++) {
-    if (g_suspended[i].get() == slot) {
-      g_free_slots.push_back(i);
-      break;
-    }
-  }
+  g_free_slots.push_back(slot->index);
   g_slots_in_use--;
 }
 
@@ -323,6 +321,8 @@ u64 goalc_suspend_impl(goalc_ctx* caller_ctx) {
   slot->owner = thread;
   slot->stack.resize(copy_size);
   memcpy(slot->stack.data(), host(stack_top - copy_size), copy_size);
+  kperf::count(kperf::Counter::SUSPEND, 1);
+  kperf::count(kperf::Counter::SUSPEND_BYTES, copy_size);
 
   thread_rreg0(thread) = ((u64)slot->token << 32) | idx;
   word(thread + THREAD_PC) = GOALC_SUSPENDED_PC;

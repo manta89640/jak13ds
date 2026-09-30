@@ -1,0 +1,119 @@
+# (AI-assisted) performance measurement: the gameplay.pad route with fixed idle windows between
+# "perf-mark" log lines, so every run measures the same scenes over the same frames. Summarize a
+# run with platform/3ds/tools/perf_report.py <stdout.log>. Windows (game frames):
+#   title      600 frames on the title screen (village1 in the background)
+#   menu       600 frames in the title menu (progress), nothing pressed
+#   newgame    New Game: menu taps, loading village1 (the "intro" continue)
+#   intro      the intro cutscene before it is skipped
+#   skip       skipping the intro, loading
+#   idle       1800 frames: Jak idle in village1 (intro-start, where Jak lands after the intro)
+#   moves      walking, jumping, attacks (gameplay.pad's moves)
+#   idle2      1800 frames idle after the moves (the scene of the older "after done" numbers)
+0 wait *target* target-title-wait
+0 log perf-mark title
+600 log perf-mark menu
+600 start
+606 -
+1200 log perf-mark newgame
+1290 x
+1296 -
+1330 x
+1336 -
+1370 x
+1376 -
+1410 x
+1416 -
+1450 x
+1456 -
+1490 x
+1496 -
+1530 x
+1536 -
+1570 x
+1576 -
+1610 x
+1616 -
+1650 x
+1656 -
+1690 x
+1696 -
+1730 x
+1736 -
+1770 x
+1776 -
+1810 x
+1816 -
+1850 x
+1856 -
+1890 x
+1896 -
+1930 x
+1936 -
+2000 log perf-mark intro
+2300 log perf-mark skip
+2300 triangle
+2306 -
+2360 triangle
+2366 -
+2420 triangle
+2426 -
+2480 triangle
+2486 -
+2540 triangle
+2546 -
+2600 triangle
+2606 -
+2660 triangle
+2666 -
+2720 triangle
+2726 -
+2780 triangle
+2786 -
+2840 triangle
+2846 -
+2900 triangle
+2906 -
+2960 triangle
+2966 -
+3020 triangle
+3026 -
+3080 triangle
+3086 -
+3140 triangle
+3146 -
+3200 triangle
+3206 -
+4440 wait *target* target-stance
+4441 log perf-mark idle
+4441 pos *target*
+6241 log perf-mark moves
+6241 pos *target*
+6290 ly=0
+6380 ly=0 pos *target*
+6380 ly=0 x
+6386 ly=0
+6426 ly=0 pos *target*
+6436 -
+6466 x
+6472 -
+6482 pos *target*
+6512 square
+6518 -
+6528 pos *target*
+6568 circle
+6574 -
+6584 pos *target*
+6624 r1
+6644 r1 pos *target*
+6654 -
+6674 lx=0
+6764 lx=0 pos *target*
+6764 lx=255
+6854 lx=255 pos *target*
+6854 -
+6914 pos *target*
+6924 log perf-mark idle2
+8724 log perf-mark end
+8724 pos *target*
+8724 print *target*
+8730 log done

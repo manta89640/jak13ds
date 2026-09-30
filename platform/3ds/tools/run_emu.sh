@@ -60,14 +60,16 @@ done
 # files in the middle of a run. A stale lock (its owner is gone) is taken over.
 EMU_LOCK="${TMPDIR:-/tmp}/opengoal-azahar.lock"
 # (edit this script with a copy + mv: bash reads a running script as it goes)
-waited=0
+# A lock without a pid is only stale if it has been like that for 30 s: another waiter may have
+# just created it (it writes its pid right after mkdir). Deleting that lock let two runs share the
+# emulator (and its log files).
 while ! mkdir "$EMU_LOCK" 2>/dev/null; do
   owner="$(cat "$EMU_LOCK/pid" 2>/dev/null || true)"
-  if { [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; } || { [ -z "$owner" ] && [ "$waited" -ge 30 ]; }; then
+  age=$(( $(date +%s) - $(stat -f %m "$EMU_LOCK" 2>/dev/null || date +%s) ))
+  if { [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; } || { [ -z "$owner" ] && [ "$age" -ge 30 ]; }; then
     rm -rf "$EMU_LOCK"
     continue
   fi
-  waited=$((waited + 10))
   echo "waiting for the emulator (used by pid ${owner:-?})"
   sleep 10
 done

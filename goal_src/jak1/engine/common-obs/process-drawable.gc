@@ -227,6 +227,7 @@
                             (the rgba -1))))))))
 
 (defmethod do-joint-math! ((obj process-drawable))
+  (profiler-start-event "joint-math")
   (cond
     ((logtest? (-> obj draw status) (draw-status hidden no-anim)))
     ((zero? (-> obj skel))
@@ -271,6 +272,7 @@
     (when *debug-segment*
       (if *display-bones* (draw-bone-lines obj))
       (if *display-joint-names* (draw-joint-spheres obj))))
+  (profiler-end-event)
   0
   (none))
 
@@ -633,7 +635,8 @@
     (let ((gp-1 (logtest? (-> self draw status) (draw-status no-skeleton-update))))
       (logclear! (-> self draw status) (draw-status no-anim no-skeleton-update))
       (when (nonzero? (-> self skel))
-        (evaluate-joint-control self)
+        (with-profiler "eval-joint-control"
+          (evaluate-joint-control self))
         (when (or (logtest? (-> self skel status) (janim-status inited)) gp-1)
           (do-joint-math! self)
           (if (and gp-1 (type-type? (-> self root type) collide-shape)) (update-transforms! (the-as collide-shape (-> self root))))

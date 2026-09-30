@@ -12,6 +12,7 @@
 #include "common/util/FileUtil.h"
 
 #include "game/common/ee_mem_write.h"
+#include "game/kernel/common/kperf.h"
 #include "game/sce/iop.h"
 
 using namespace std::chrono;
@@ -402,6 +403,10 @@ void IOP_Kernel::processWakeups() {
  * Run the next IOP thread.
  */
 std::optional<time_stamp> IOP_Kernel::dispatch() {
+#ifdef __3DS__
+  // time the IOP takes from the game's core (kperf "perf threads" line)
+  const u64 t_start = kperf::ticks();
+#endif
   // Update thread states
   updateDelay();
   processWakeups();
@@ -428,6 +433,7 @@ std::optional<time_stamp> IOP_Kernel::dispatch() {
 
   // printf("[IOP Kernel] No runnable threads\n");
 #ifdef __3DS__
+  kperf::add_thread(kperf::Thread::IOP, kperf::ticks() - t_start, 1);
   // Some callers poll dispatch() in a loop (overlord init). Let lower priority threads run.
   ctr_thread_sleep_us(100);
 #endif

@@ -40,8 +40,16 @@ void VoiceManager::StartTone(std::shared_ptr<VagVoice> voice) {
   voice->KeyOn();
 
   CleanVoices();
+#ifdef __3DS__
+  // (AI-assisted) No audio output on the 3DS yet: the synth never runs, so a voice given to it
+  // would never finish, and neither would its sound handler. They piled up (hundreds after a few
+  // minutes of play, all ticked 240 times a second). Without an owner the voice ends right away,
+  // like a sound that played instantly; looping sounds keep their handler until stopped.
+  (void)voice;
+#else
   mVoices.emplace_front(voice);
   mSynth.AddVoice(voice);
+#endif
 }
 VolPair VoiceManager::MakeVolume(int vol1, int pan1, int vol2, int pan2, int vol3, int pan3) {
   // Scale up as close as we can to max positive 16bit volume

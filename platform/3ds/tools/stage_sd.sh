@@ -20,6 +20,8 @@
 #   --pad-script FILE  scripted controller input (game/sce/pad_script.h), for automated tests
 #   --use-syscore  run the IOP / listener / worker threads on core 1 (experimental)
 #   --perf-sections  per-section frame timing in the log (the perf_sections flag file)
+#   --render-ini FILE  renderer settings for this run (copied to data/render.ini, which takes
+#            precedence over sdmc:/3ds/jak1/render.ini; removed when the option is not given)
 #
 # Files are copied with APFS clones (cp -c) when possible, so staging 1.3 GB is instant on macOS.
 set -euo pipefail
@@ -38,6 +40,7 @@ SHOTS=0
 PAD_SCRIPT=""
 USE_SYSCORE=0
 PERF_SECTIONS=0
+RENDER_INI=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -53,6 +56,7 @@ while [ $# -gt 0 ]; do
     --pad-script) PAD_SCRIPT="$2"; shift 2 ;;
     --use-syscore) USE_SYSCORE=1; shift ;;
     --perf-sections) PERF_SECTIONS=1; shift ;;
+    --render-ini) RENDER_INI="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
@@ -129,6 +133,7 @@ if [ "$USE_SYSCORE" = 1 ]; then touch "$BASE/use_syscore"; else rm -f "$BASE/use
 if [ "$PERF_SECTIONS" = 1 ]; then touch "$BASE/perf_sections"; else rm -f "$BASE/perf_sections"; fi
 rm -f "$BASE/single_core"
 if [ -n "$PAD_SCRIPT" ]; then cp "$PAD_SCRIPT" "$BASE/pad_script.txt"; else rm -f "$BASE/pad_script.txt"; fi
+if [ -n "$RENDER_INI" ]; then cp "$RENDER_INI" "$DATA/render.ini"; else rm -f "$DATA/render.ini"; fi
 if [ "$SHOTS" != 0 ]; then echo "$SHOTS" > "$BASE/screenshots"; else rm -f "$BASE/screenshots"; fi
 
 echo "staged $n files + gk.3dsx in $BASE"
