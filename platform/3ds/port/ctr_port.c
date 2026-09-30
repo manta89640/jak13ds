@@ -74,7 +74,7 @@ static int s_irrst = 0;
 static int s_syscore = 0;   /* IOP / IO threads on core 1 (use_syscore) */
 static int s_cpu_limit = 0; /* the app got a share of core 1 (APT_SetAppCpuTimeLimit) */
 static int s_sound = 0;
-static int s_sound_core = 1;
+static int s_sound_core = 1; /* 2 on New 3DS: see ctr_platform_init */
 static u32* s_soc_buffer = NULL;
 
 /* Boot progress on the SD card: on hardware a hang before the first frame shows nothing but the
@@ -138,13 +138,17 @@ int ctr_platform_init(int enable_console) {
   /* Experimental, off by default: in Azahar, boot hangs at the first IOP file load when the IOP
    * thread runs on core 1 (not investigated further; untested on hardware). Turned on by the file
    * sdmc:/3ds/jak1/use_syscore. */
-  /* Audio output (flag file sdmc:/3ds/jak1/sound, content: the mixer's core, default 1). The
-   * mixer thread on core 1 also needs the time limit; the kernel allows one app thread there. */
+  /* Audio output (flag file sdmc:/3ds/jak1/sound, content: the mixer's core). Default: core 2 on
+   * New 3DS, which is all the application's (it shares it with the render thread), else core 1.
+   * Core 1 is the system core: the system's services (GPU, SD card, DSP, input) run there, so a
+   * busy mixer on it slows every service call of the game on real hardware, and the app only gets
+   * a share of it (APT_SetAppCpuTimeLimit; the kernel allows one app thread there). */
   {
     FILE* f = fopen("/3ds/jak1/sound", "r");
     if (f) {
       s_sound = 1;
-      int core = 1;
+      s_sound_core = ctr_is_new3ds() ? 2 : 1;
+      int core = s_sound_core;
       if (fscanf(f, "%d", &core) == 1 && core >= 0 && core <= 3) {
         s_sound_core = core;
       }
@@ -153,11 +157,7 @@ int ctr_platform_init(int enable_console) {
   }
   int want_syscore = access("/3ds/jak1/use_syscore", F_OK) == 0;
   if (want_syscore || (s_sound && s_sound_core == 1)) {
-    /* (AI-assisted) 30% if 80% is refused; without any share, ctr_thread_create_pinned refuses
-     * core 1 (the mixer then stays off rather than taking the game's core) */
-    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80)) ? 80
-                  : R_SUCCEEDED(APT_SetAppCpuTimeLimit(30)) ? 30
-                                                             : 0;
+    ctr_core1_enable();
   }
   s_syscore = (want_syscore && s_cpu_limit) ? 1 : 0;
   /* C-stick / ZL / ZR on New 3DS (and the Circle Pad Pro) */
@@ -760,6 +760,16 @@ int ctr_syscore_available(void) {
 }
 
 int ctr_core1_share(void) {
+  return s_cpu_limit;
+}
+
+int ctr_core1_enable(void) {
+  /* 30% if 80% is refused; without any share, ctr_thread_create_pinned refuses core 1 */
+  if (!s_cpu_limit) {
+    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80))   ? 80
+                  : R_SUCCEEDED(APT_SetAppCpuTimeLimit(30)) ? 30
+                                                             : 0;
+  }
   return s_cpu_limit;
 }
 

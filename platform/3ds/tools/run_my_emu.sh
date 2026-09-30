@@ -7,7 +7,7 @@
 #                 [--screenshots N] [--args "..."] [--gl] [--sound [CORE]]
 #
 #   --sound  audio output on (flag file sdmc:/3ds/jak1/sound; CORE = the mixer thread's core,
-#            default 1). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
+#            default 2 on New 3DS, else 1). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
 #            Azahar's HLE DSP accepts any file (real hardware needs a real dump).
 #
 # DIR/Azahar.app and DIR/user/ (config/qt-config.ini with sdmc_directory=DIR/user/sdmc/).
@@ -25,7 +25,7 @@ while [ $# -gt 0 ]; do
     --screenshots) SHOTS="$2"; shift 2 ;;
     --args) ARGS="$2"; HAVE_ARGS=1; shift 2 ;;
     --gl) GL=1; shift ;;
-    --sound) SOUND=1; if [ $# -gt 1 ] && [[ "$2" =~ ^[0-3]$ ]]; then SOUND="$2"; shift; fi; shift ;;
+    --sound) SOUND=auto; if [ $# -gt 1 ] && [[ "$2" =~ ^[0-3]$ ]]; then SOUND="$2"; shift; fi; shift ;;
     --ini) INI="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
