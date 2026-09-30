@@ -182,6 +182,8 @@ struct RunOptions {
   u32 seed = 1;
   bool self_check = false;  //! the second run is the mips2c version again (checks the harness)
   int max_reports = 3;
+  //! benchmark: run only this version ("mips2c" or "native") on every case, compare nothing
+  std::string bench;
 };
 //! Runs the selected tests, returns the number that failed
 int run_tests(const RunOptions& opt);

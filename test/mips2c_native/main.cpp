@@ -71,6 +71,8 @@ int main(int argc, char** argv) {
       opt.seed = (u32)strtoul(argv[++i], nullptr, 10);
     } else if (!strcmp(argv[i], "--self")) {
       opt.self_check = true;
+    } else if (!strcmp(argv[i], "--bench") && i + 1 < argc) {
+      opt.bench = argv[++i];
     } else if (!strcmp(argv[i], "--reports") && i + 1 < argc) {
       opt.max_reports = atoi(argv[++i]);
     } else {

@@ -430,6 +430,29 @@ int run_tests(const RunOptions& opt) {
     take(clean, *t);
 
     const int n = std::max(1, (int)(t->cases * opt.case_scale));
+    const u32 name_hash0 = (u32)std::hash<std::string>()(t->name);
+    if (!opt.bench.empty()) {
+      // the same cases as the test, one version only, no snapshots
+      const Mode mode = opt.bench == "native" ? Mode::NATIVE : Mode::MIPS2C;
+      int ran = 0;
+      for (int i = 0; i < n; i++) {
+        g_current_case = i;
+        g_heap_top = kHeap;
+        Gen g(name_hash0 ^ (opt.seed * 0x9e3779b9u) ^ (u32)i * 0x85ebca6bu);
+        Case c{g};
+        try {
+          t->gen(c);
+        } catch (const AssertFailed&) {
+          continue;
+        }
+        if (!run_one(mode, e, c.args).threw) {
+          ran++;
+        }
+      }
+      printf("%-40s  %6d cases run (%s)\n", t->name.c_str(), ran, opt.bench.c_str());
+      e.native = saved_native;
+      continue;
+    }
     int invalid = 0, fails = 0;
     u64 calls_seen = 0;
     const u32 name_hash = (u32)std::hash<std::string>()(t->name);
