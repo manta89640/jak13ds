@@ -72,9 +72,12 @@ class CtrDirectBucketRenderer : public CtrBucketRenderer {
   CtrDirectBucketRenderer(std::string name, int id, CtrVram* vram, bool depth);
   ~CtrDirectBucketRenderer();
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  /*! The last render() drew something (for the sky bucket: there is no sky). */
+  bool drew() const { return m_drew; }
 
  private:
   std::unique_ptr<CtrDirect> m_direct;
+  bool m_drew = false;
 };
 
 class CtrRenderer {
@@ -107,6 +110,7 @@ class CtrRenderer {
   Timing m_timing;
   std::vector<double> m_bucket_ms;
   std::vector<std::pair<int, class CtrMercRenderer*>> m_merc;
+  CtrDirectBucketRenderer* m_sky = nullptr;
 };
 
 extern const GfxRendererModule gRendererCtr;

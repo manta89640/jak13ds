@@ -898,16 +898,17 @@
   (let ((gp-9 (-> *display* frames (-> *display* on-screen) frame global-buf)))
     (with-profiler "bones"
       (bones-mtx-calc-execute)) ;; skinning matrix calculation
-    ;; 3DS: the 3DS renderer skips the generic, shadow and eye buckets (it has no renderer for
-    ;; them), so the work that fills them is skipped too. Objects that would be drawn with generic
-    ;; merc and the shadows are not drawn either way. (Generic merc took ~9 ms/frame in the menus.)
+    ;; 3DS: the 3DS renderer skips the generic and shadow buckets (it has no renderer for them),
+    ;; so the work that fills them is skipped too. Objects that would be drawn with generic merc
+    ;; and the shadows are not drawn either way. (Generic merc took ~9 ms/frame in the menus.)
+    ;; The eyes are drawn (CtrEyeRenderer).
     (#unless TARGET_3DS
       (with-profiler "gmerc"
         (generic-merc-execute-all gp-9)) ;; mercneric conversion.
       (with-profiler "shadow"
-        (shadow-execute-all gp-9 *shadow-queue*))
-      (with-profiler "eyes"
-        (update-eyes))))
+        (shadow-execute-all gp-9 *shadow-queue*)))
+    (with-profiler "eyes"
+      (update-eyes)))
   ;; sprite draw
   (when (logtest? (vu1-renderer-mask sprite) *vu1-enable-user*)
     (with-profiler "sprite"

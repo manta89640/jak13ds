@@ -335,9 +335,9 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     bool too_big = false;
     for (size_t ei = 0; ei < model.effects.size(); ei++) {
       for (const auto& d : model.effects[ei].all_draws) {
-        if (d.eye_id != 0xff) {
-          continue;  // eyes are drawn by the eye renderer (not done yet)
-        }
+        // Eye draws (eye_id != 0xff) use the texture CtrEyeRenderer draws every frame from the
+        // game's eye sprites (iris, pupil, lids). The level texture is only a gray placeholder,
+        // used until the first eye frame.
         // strips (or plain triangles for custom models) -> triangles
         std::vector<std::array<u32, 3>> tris;
         if (d.no_strip) {
@@ -370,7 +370,8 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
         while (t < tris.size()) {
           c3l::MercDraw md{};
           md.mode = d.mode.as_int();
-          md.texture = cv.texture_id(d.tree_tex_id);
+          md.texture = cv.texture_id(d.tree_tex_id);  // for eyes: the gray eye placeholder
+          md.eye_id = d.eye_id;
           md.effect = ei;
           md.first_index = out->indices.size();
           std::vector<u8> palette;
@@ -419,6 +420,9 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
                 o.st[0] = (s16)std::clamp((int)std::lround(v.st[0] * 1024.f), -32768, 32767);
                 o.st[1] = (s16)std::clamp((int)std::lround(v.st[1] * 1024.f), -32768, 32767);
                 memcpy(o.rgba, v.rgba, 4);
+                for (int c = 0; c < 3; c++) {
+                  o.normal[c] = (s8)std::clamp((int)std::lround(v.normal[c] * 127.f), -127, 127);
+                }
                 if (local_verts.size() >= 65535) {
                   too_big = true;
                   break;

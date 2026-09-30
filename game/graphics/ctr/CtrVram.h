@@ -42,6 +42,14 @@ class CtrVram {
    * mode: -1 = whole page, 0 = segment 0, -2 = segments 0 and 1, 2 = segment 2.
    */
   void upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr);
+  /*!
+   * The same, written to the VRAM copy right away (texture-upload-now): the game may reuse the
+   * source memory afterwards (the common textures are uploaded once, at boot).
+   */
+  void upload_texture_page_now(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr) {
+    upload_texture_page(tpage, mode, ee_mem, s7_ptr);
+    flush_pending();
+  }
 
   /*!
    * Emulate the VRAM to VRAM copy of texture-relocate (the font is moved into the upper bits of
@@ -67,6 +75,11 @@ class CtrVram {
    * Used by tests. Returns false for unsupported formats.
    */
   bool decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const;
+  /*!
+   * The same for the renderer (eyes): only writes the pending uploads the texture reads, and uses
+   * the CLUT a relocated texture was moved with (like get_texture).
+   */
+  bool decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h);
 
   void clear_cache();
 
@@ -117,6 +130,8 @@ class CtrVram {
     u64 hash;
   };
   std::unordered_map<u32, UploadRecord> m_last_upload;
+  // drop the upload records overlapping these blocks (their data is being overwritten)
+  void forget_uploads(u32 first_block, u32 end_block);
   std::vector<u32> m_ct32_page_table;  // byte offset in a PSMCT32 page, by x + 64 * y
 
   struct TexInfo {

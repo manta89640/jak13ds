@@ -34,6 +34,7 @@ struct CtrSettings {
   int max_sprites = 1000;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise
   bool rgba4_as_rgba8 = true;
+  bool vram_textures = false;  // on: textures in VRAM while there is room (Azahar draws VRAM textures as noise)
 
   std::string summary() const;
 };

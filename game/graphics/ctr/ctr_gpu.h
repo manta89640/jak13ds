@@ -95,6 +95,9 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
 /* Store RGBA4 textures as RGBA8 (twice the memory). On by default: Azahar (OpenGL and Vulkan)
  * renders RGBA4 textures as noise or a solid color (render.ini rgba4_as_rgba8). */
 void ctr_gpu_set_rgba4_as_rgba8(int on);
+/* textures in VRAM while there is room (default), or all in linear memory (render.ini
+ * vram_textures) */
+void ctr_gpu_set_vram_textures(int on);
 
 /* Copy a vertex / index (u16, triangle list) buffer to GPU memory. Returns a handle or -1. */
 int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
@@ -117,8 +120,10 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
 /* bones: palette_count 3x4 row-major matrices, (pos, 1) -> camera space (x, y, z).
  * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.
  * tint: multiplies the final color (lighting approximation), 0..1. */
+/* lights: 7 vec4 like merc2.vert: light direction rows 0-2 (light_dir0/1/2), light colors 0-2,
+ * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal). */
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
-                          int palette_count, const float tint[3], int mesh, int first_index,
+                          int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count);
 
 /* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh.v.pica), from clip w:

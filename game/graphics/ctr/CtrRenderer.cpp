@@ -17,6 +17,7 @@
 #include "fmt/format.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
+#include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
@@ -76,6 +77,7 @@ CtrDirectBucketRenderer::~CtrDirectBucketRenderer() = default;
 
 void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   m_direct->reset_state();
+  const int triangles_before = m_direct->stats().triangles;
   while (dma.current_tag_offset() != rs.next_bucket) {
     auto data = dma.read_and_advance();
     if (data.size_bytes) {
@@ -87,6 +89,7 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     }
   }
   m_direct->flush();
+  m_drew = m_direct->stats().triangles != triangles_before;
   if (rs.log_now) {
     const auto& st = m_direct->stats();
     lg::debug("[ctr] {}: {} packets, {} triangles, {} draws, {} skipped prims", m_name, st.packets,
@@ -127,9 +130,27 @@ CtrRenderer::CtrRenderer()
     m_merc.emplace_back((int)id, merc.get());
     set(id, std::move(merc));
   }
+  // eyes: drawn to textures that the merc eye draws use (the draws before this bucket use the
+  // previous frame's)
+  {
+    auto eyes = std::make_unique<CtrEyeRenderer>("eyes", (int)BucketId::MERC_EYES_AFTER_PRIS,
+                                                 m_vram.get());
+    for (auto& [id, merc] : m_merc) {
+      merc->set_eye_renderer(eyes.get());
+    }
+    set(BucketId::MERC_EYES_AFTER_PRIS, std::move(eyes));
+  }
   // the ocean (after the level and merc, like the PS2's ocean-near)
   set(BucketId::OCEAN_NEAR,
       std::make_unique<CtrOceanRenderer>("ocean", (int)BucketId::OCEAN_NEAR));
+  // the background when there is no sky (the ND logo, interiors): a full screen gradient in the
+  // time of day's erase color. With a sky, the clear color (the fog color) stands in for it.
+  {
+    auto sky = std::make_unique<CtrDirectBucketRenderer>("sky", (int)BucketId::SKY_DRAW,
+                                                         m_vram.get(), false);
+    m_sky = sky.get();
+    set(BucketId::SKY_DRAW, std::move(sky));
+  }
   set(BucketId::SPRITE,
       std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));
   set(BucketId::DEBUG,
@@ -171,6 +192,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     m_rs.last_log_ms = t0;
   }
   memcpy(m_rs.fog_color, clear, 4);
+  // No sky (its bucket had the background gradient last frame): black, like the PS2 outside of
+  // the 4:3 picture. Else the fog color stands in for the sky.
+  if (m_sky && m_sky->drew()) {
+    clear[0] = clear[1] = clear[2] = 0;
+  }
   m_levels->process_pending_loads(m_rs.frame_idx);
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   const double t1 = ctr_gpu_time_ms();
@@ -341,6 +367,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
     return 1;
   }
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
+  ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   g_ctr = std::make_unique<CtrRenderer>();
   g_ctr->levels().load_common();
   g_async = ctr_gpu_async_start(render_job, nullptr) != 0;
@@ -422,7 +449,7 @@ void ctr_texture_upload_now(const u8* tpage, int mode, u32 s7_ptr) {
   if (g_ctr) {
     wait_render_idle();
     const double t0 = ctr_gpu_time_ms();
-    g_ctr->vram().upload_texture_page(tpage, mode, g_ee_main_mem, s7_ptr);
+    g_ctr->vram().upload_texture_page_now(tpage, mode, g_ee_main_mem, s7_ptr);
     g_ee.upload_ms += ctr_gpu_time_ms() - t0;
     g_ee.uploads++;
   }

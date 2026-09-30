@@ -1,12 +1,21 @@
 ; (AI-assisted)
 ; Vertex shader for skinned meshes (merc, c3l::MercVertex): up to 3 bones per vertex from a
 ; palette of 24 (3 rows each), giving camera space; then one matrix to clip space.
+; Lighting like the PC port's merc2.vert: the normal is rotated by the same bones (the 3x3 part of
+; the rows), then three directional lights and ambient light the vertex color.
 
 .fvec clip[4]
 .fvec row0[24]
 .fvec row1[24]
 .fvec row2[24]
-.fvec scales        ; x: texture coordinate scale (1/1024), y: 1/255, z: 1.0
+.fvec scales        ; x: texture coordinate scale (1/1024), y: 1/255, z: 1.0, w: normal scale (1/127)
+.fvec lights[7]     ; 0-2: light direction rows (merc2.vert light_dir0/1/2), 3-5: light colors,
+                    ; 6: ambient
+
+.constf consts(0.0, 0.5, 0.000001, 0.0)
+.alias zero consts.xxxx
+.alias half consts.yyyy
+.alias tiny consts.zzzz
 
 .out outpos position
 .out outtc0 texcoord0
@@ -17,22 +26,32 @@
 .alias inwgt v2
 .alias intex v3
 .alias inclr v4
+.alias innrm v5
 
 .proc main
   mov r0.xyz, inpos
   mov r0.w, scales.zzzz
   mul r2, scales.yyyy, inwgt
+  mul r1, scales.wwww, innrm
 
-  ; bones 0 and 1
+  ; bones 0 and 1: position (r5) and normal (r6)
   mova a0.xy, inidx.xy
   dp4 r4.x, row0[a0.x], r0
   dp4 r4.y, row1[a0.x], r0
   dp4 r4.z, row2[a0.x], r0
   mul r5.xyz, r2.xxxx, r4.xyz
+  dp3 r4.x, row0[a0.x], r1
+  dp3 r4.y, row1[a0.x], r1
+  dp3 r4.z, row2[a0.x], r1
+  mul r6.xyz, r2.xxxx, r4.xyz
   dp4 r4.x, row0[a0.y], r0
   dp4 r4.y, row1[a0.y], r0
   dp4 r4.z, row2[a0.y], r0
   mad r5.xyz, r2.yyyy, r4.xyz, r5.xyz
+  dp3 r4.x, row0[a0.y], r1
+  dp3 r4.y, row1[a0.y], r1
+  dp3 r4.z, row2[a0.y], r1
+  mad r6.xyz, r2.yyyy, r4.xyz, r6.xyz
 
   ; bone 2
   mova a0.x, inidx.zzzz
@@ -40,6 +59,10 @@
   dp4 r4.y, row1[a0.x], r0
   dp4 r4.z, row2[a0.x], r0
   mad r5.xyz, r2.zzzz, r4.xyz, r5.xyz
+  dp3 r4.x, row0[a0.x], r1
+  dp3 r4.y, row1[a0.x], r1
+  dp3 r4.z, row2[a0.x], r1
+  mad r6.xyz, r2.zzzz, r4.xyz, r6.xyz
   mov r5.w, scales.zzzz
 
   dp4 outpos.x, clip[0], r5
@@ -48,6 +71,26 @@
   dp4 outpos.w, clip[3], r5
 
   mul outtc0, scales.xxxx, intex
-  mul outclr, scales.yyyy, inclr
+
+  ; lighting. The rows are the negated bone matrices (see CtrMerc), so the rotated normal is -r6.
+  mov r6.w, zero
+  dp3 r7.x, r6, r6
+  add r7.x, tiny, r7.x
+  rsq r7.x, r7.x
+  mul r6, r6, r7.xxxx
+  ; (mad takes a uniform only as its middle operand)
+  mul r8, lights[0], -r6.xxxx
+  mad r8, -r6.yyyy, lights[1], r8
+  mad r8, -r6.zzzz, lights[2], r8
+  max r8, zero, r8
+  mov r9, lights[6]
+  mad r9, r8.xxxx, lights[3], r9
+  mad r9, r8.yyyy, lights[4], r9
+  mad r9, r8.zzzz, lights[5], r9
+  ; half: the texture stage multiplies merc colors by 4, so lights brighter than 1 aren't clamped
+  mul r9, half, r9
+  mul r10, scales.yyyy, inclr
+  mul outclr.xyz, r10.xyz, r9.xyz
+  mov outclr.w, r10.w
   end
 .end

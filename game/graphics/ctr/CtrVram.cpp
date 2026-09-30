@@ -175,9 +175,13 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
       m_stats.uploads++;
       continue;
     }
-    m_last_upload[dest_block] = UploadRecord{src, seg.size, hash};
     // record it: drop pending uploads that this one completely overwrites
     const u32 end_block = dest_block + (rows * 128 * 4 + kBlockBytes - 1) / kBlockBytes;
+    // Other uploads this one overwrites are no longer "already there": without this, a page
+    // that is uploaded again after another page covered its area (the common textures, e.g.
+    // the eye textures, after a level's pris page) was skipped and read back as garbage.
+    forget_uploads(dest_block, end_block);
+    m_last_upload[dest_block] = UploadRecord{src, seg.size, hash};
     m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
                                    [&](const PendingUpload& p) {
                                      return p.dest_block >= dest_block && p.end_block <= end_block;
@@ -185,6 +189,18 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
                     m_pending.end());
     m_pending.push_back(PendingUpload{src, dest_block, end_block, seg.size});
     m_stats.uploads++;
+  }
+}
+
+void CtrVram::forget_uploads(u32 first_block, u32 end_block) {
+  for (auto it = m_last_upload.begin(); it != m_last_upload.end();) {
+    const u32 rows = (it->second.words + 127) / 128;
+    const u32 b0 = it->first, b1 = b0 + (rows * 128 * 4 + kBlockBytes - 1) / kBlockBytes;
+    if (b0 < end_block && first_block < b1) {
+      it = m_last_upload.erase(it);
+    } else {
+      ++it;
+    }
   }
 }
 
@@ -503,6 +519,26 @@ bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
   Range r;
   return decode_impl(this, m_vram, tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
+}
+
+bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
+  GsTex0 t(tex0);
+  if (!m_pending.empty()) {
+    // only the pending uploads this texture reads (as get_texture)
+    const u32 texels = (1u << t.tw()) * (1u << t.th());
+    const u32 blocks = texels * 4 / kBlockBytes + 64;
+    flush_pending(t.tbp0(), t.tbp0() + blocks);
+    flush_pending(t.cbp(), t.cbp() + 4);
+  }
+  const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
+  std::function<u32(u32, u32, u32)> clut;
+  if (reloc) {
+    clut = [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; };
+  } else {
+    clut = [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); };
+  }
+  Range r;
+  return decode_impl(this, m_vram, tex0, out, w, h, &r, clut);
 }
 
 const CtrTexture* CtrVram::get_texture(u64 tex0) {

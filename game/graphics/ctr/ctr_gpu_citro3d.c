@@ -67,7 +67,7 @@ static struct {
   int fog_tex_valid;
   DVLB_s* skin_dvlb;
   shaderProgram_s skin_program;
-  int uloc_skin_clip, uloc_skin_rows[3], uloc_skin_scales;
+  int uloc_skin_clip, uloc_skin_rows[3], uloc_skin_scales, uloc_skin_lights;
   int cur_prog;
   ctr_draw_state last_state;
   int last_state_mesh;
@@ -200,8 +200,9 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 3); /* weights */
     AttrInfo_AddLoader(attr, 3, GPU_SHORT, 2);         /* texcoord * 1024 */
     AttrInfo_AddLoader(attr, 4, GPU_UNSIGNED_BYTE, 4); /* color */
+    AttrInfo_AddLoader(attr, 5, GPU_BYTE, 3);          /* normal * 127 */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_skin_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f,
-                  0.0f);
+                  1.0f / 127.0f);
   } else {
     C3D_BindProgram(&g.mesh_program);
     g.last_state_valid = 0;
@@ -287,6 +288,7 @@ int ctr_gpu_init(void) {
   g.uloc_skin_rows[1] = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "row1");
   g.uloc_skin_rows[2] = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "row2");
   g.uloc_skin_scales = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "scales");
+  g.uloc_skin_lights = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "lights");
   g.cur_prog = PROG_NONE;
 
   g.vbuf = (uint8_t*)linearAlloc(VBUF_BYTES);
@@ -298,6 +300,11 @@ int ctr_gpu_init(void) {
   C3D_CullFace(GPU_CULL_NONE);
   ctr_port_set_gpu_active(1);
   g.ready = 1;
+  /* one dark frame right away: until the game draws its first frame (after loading the common
+   * files and the title level), the top screen keeps the HOME Menu's launch logo and the boot
+   * looks frozen */
+  ctr_gpu_frame_begin(12, 12, 20);
+  ctr_gpu_frame_end();
   return 0;
 }
 
@@ -410,11 +417,17 @@ void ctr_gpu_set_rgba4_as_rgba8(int on) {
   g_rgba4_as_rgba8 = on;
 }
 
+static int g_vram_textures = 0;
+
+void ctr_gpu_set_vram_textures(int on) {
+  g_vram_textures = on;
+}
+
 static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vram) {
   *on_vram = 0;
   /* only outside of a frame: a copy in a frame needs a command list split and a queue entry
    * each, and a level's worth of them overflows the GX queue */
-  if (!g.in_frame && C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
+  if (g_vram_textures && !g.in_frame && C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
     void* staging = linearAlloc(tex->size);
     if (staging) {
       *on_vram = 1;
@@ -578,10 +591,11 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
                    st->clamp_t ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
     C3D_TexBind(0, tex);
     if (mesh) {
-      /* level meshes / merc: texture alpha 0xff = 1, vertex color 0x80 = 1 */
+      /* level meshes / merc: texture alpha 0xff = 1, vertex color 0x80 = 1 (merc: the skin shader
+       * outputs half the lit color, so x4) */
       C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
       C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
-      C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
+      C3D_TexEnvScale(env, C3D_RGB, mesh == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_2);
       C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
     } else if (st->decal) {
       C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, 0, 0);
@@ -608,7 +622,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
   } else {
     C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
     C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-    C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
+    C3D_TexEnvScale(env, C3D_RGB, mesh == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_2);
     C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
   }
 
@@ -844,7 +858,7 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   if (slot < 0) {
     return -1;
   }
-  size_t vbytes = (size_t)vertex_count * 20;
+  size_t vbytes = (size_t)vertex_count * 24; /* c3l::MercVertex */
   size_t ibytes = (size_t)index_count * 2;
   void* v = linearAlloc(vbytes);
   uint16_t* ix = (uint16_t*)linearAlloc(ibytes);
@@ -868,7 +882,7 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
 }
 
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
-                          int palette_count, const float tint[3], int mesh, int first_index,
+                          int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count) {
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
@@ -900,15 +914,17 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       dst[p].w = src[3];
     }
   }
-  uint32_t t = 0xff000000u;
-  for (int c = 0; c < 3; c++) {
-    float v = tint[c] < 0.f ? 0.f : (tint[c] > 1.f ? 1.f : tint[c]);
-    t |= (uint32_t)(v * 255.f) << (8 * c);
+  C3D_FVec* lv = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_lights, 7);
+  for (int i = 0; i < 7; i++) {
+    lv[i].x = lights[4 * i];
+    lv[i].y = lights[4 * i + 1];
+    lv[i].z = lights[4 * i + 2];
+    lv[i].w = lights[4 * i + 3];
   }
-  apply_state_tint(state, 2, t);
+  apply_state_tint(state, 2, 0xffffffffu);
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
-  BufInfo_Add(buf, g.meshes[mesh].verts, 20, 5, 0x43210);
+  BufInfo_Add(buf, g.meshes[mesh].verts, 24, 6, 0x543210);
   C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
                    g.meshes[mesh].indices + first_index);
   g.cur.draws++;
