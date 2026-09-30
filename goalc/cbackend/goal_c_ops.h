@@ -21,7 +21,18 @@ typedef int8_t s8;
 typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
-typedef goalc_v128 v128;
+//! 128-bit values in generated code: four floats, so the compiler can keep them in (VFP/SIMD)
+//! registers. Same size, layout and alignment as goalc_v128 (lane 0 = x = lowest address).
+//! Integer views go through gc_m128 (a union, which lives in memory: only used by the less common
+//! 128-bit integer ops and mixed-class registers).
+typedef struct {
+  float x, y, z, w;
+} v128;
+typedef union {
+  v128 v;
+  goalc_v128 u;
+} gc_m128;
+_Static_assert(sizeof(v128) == 16, "v128 size");
 
 #define GC_INLINE static inline __attribute__((always_inline))
 
@@ -127,26 +138,41 @@ GC_INLINE float gc_g2f(u64 g) {
   memcpy(&f, &v, 4);
   return f;
 }
+GC_INLINE u32 gc_fbits(float f) {
+  u32 u;
+  memcpy(&u, &f, 4);
+  return u;
+}
+GC_INLINE float gc_bitsf(u32 u) {
+  float f;
+  memcpy(&f, &u, 4);
+  return f;
+}
 //! gpr -> 128: low 64 bits, upper cleared (movq)
 GC_INLINE v128 gc_g2q(u64 g) {
-  v128 r;
-  r.du64[0] = g;
-  r.du64[1] = 0;
+  v128 r = {gc_bitsf((u32)g), gc_bitsf((u32)(g >> 32)), 0.f, 0.f};
   return r;
 }
 //! float -> 128: lane 0
 GC_INLINE v128 gc_f2q(float f) {
-  v128 r;
-  r.du64[0] = 0;
-  r.du64[1] = 0;
-  r.f[0] = f;
+  v128 r = {f, 0.f, 0.f, 0.f};
   return r;
 }
 GC_INLINE u64 gc_q2g(v128 q) {
-  return q.du64[0];
+  return (u64)gc_fbits(q.x) | ((u64)gc_fbits(q.y) << 32);
 }
 GC_INLINE float gc_q2f(v128 q) {
-  return q.f[0];
+  return q.x;
+}
+GC_INLINE goalc_v128 gc_mu(v128 v) {
+  gc_m128 m;
+  m.v = v;
+  return m.u;
+}
+GC_INLINE v128 gc_um(goalc_v128 u) {
+  gc_m128 m;
+  m.u = u;
+  return m.v;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,170 +263,196 @@ GC_INLINE float gc_fmax(float a, float b) {
 // vector float (lane-wise)
 // ---------------------------------------------------------------------------
 
-#define GC_VF_LANES(expr)       \
-  v128 r;                       \
-  for (int i = 0; i < 4; i++) { \
-    expr;                       \
-  }                             \
-  return r;
+#define GC_EACH(OP) OP(x) OP(y) OP(z) OP(w)
+#define GC_LANEWISE2(name, EXPR)       \
+  GC_INLINE v128 name(v128 a, v128 b) { \
+    v128 r;                             \
+    GC_EACH(EXPR)                       \
+    return r;                           \
+  }
+#define GC_ADD(l) r.l = a.l + b.l;
+#define GC_SUB(l) r.l = a.l - b.l;
+#define GC_MUL(l) r.l = a.l * b.l;
+#define GC_DIV(l) r.l = a.l / b.l;
+#define GC_MIN(l) r.l = a.l < b.l ? a.l : b.l;
+#define GC_MAX(l) r.l = a.l > b.l ? a.l : b.l;
+#define GC_XOR(l) r.l = gc_bitsf(gc_fbits(a.l) ^ gc_fbits(b.l));
+GC_LANEWISE2(gc_vf_add, GC_ADD)
+GC_LANEWISE2(gc_vf_sub, GC_SUB)
+GC_LANEWISE2(gc_vf_mul, GC_MUL)
+GC_LANEWISE2(gc_vf_div, GC_DIV)
+GC_LANEWISE2(gc_vf_min, GC_MIN)
+GC_LANEWISE2(gc_vf_max, GC_MAX)
+GC_LANEWISE2(gc_vf_xor, GC_XOR)
 
-GC_INLINE v128 gc_vf_add(v128 a, v128 b) {
-  GC_VF_LANES(r.f[i] = a.f[i] + b.f[i])
-}
-GC_INLINE v128 gc_vf_sub(v128 a, v128 b) {
-  GC_VF_LANES(r.f[i] = a.f[i] - b.f[i])
-}
-GC_INLINE v128 gc_vf_mul(v128 a, v128 b) {
-  GC_VF_LANES(r.f[i] = a.f[i] * b.f[i])
-}
-GC_INLINE v128 gc_vf_div(v128 a, v128 b) {
-  GC_VF_LANES(r.f[i] = a.f[i] / b.f[i])
-}
-GC_INLINE v128 gc_vf_min(v128 a, v128 b) {
-  GC_VF_LANES(r.f[i] = a.f[i] < b.f[i] ? a.f[i] : b.f[i])
-}
-GC_INLINE v128 gc_vf_max(v128 a, v128 b) {
-  GC_VF_LANES(r.f[i] = a.f[i] > b.f[i] ? a.f[i] : b.f[i])
-}
-GC_INLINE v128 gc_vf_xor(v128 a, v128 b) {
-  GC_VF_LANES(r.du32[i] = a.du32[i] ^ b.du32[i])
-}
 GC_INLINE v128 gc_vf_sqrt(v128 a) {
-  GC_VF_LANES(r.f[i] = sqrtf(a.f[i]))
+  v128 r = {__builtin_sqrtf(a.x), __builtin_sqrtf(a.y), __builtin_sqrtf(a.z),
+            __builtin_sqrtf(a.w)};
+  return r;
 }
 GC_INLINE v128 gc_vf_ftoi(v128 a) {
-  GC_VF_LANES(r.ds32[i] = gc_cvtt(a.f[i]))
+  v128 r = {gc_bitsf((u32)gc_cvtt(a.x)), gc_bitsf((u32)gc_cvtt(a.y)),
+            gc_bitsf((u32)gc_cvtt(a.z)), gc_bitsf((u32)gc_cvtt(a.w))};
+  return r;
 }
 GC_INLINE v128 gc_vf_itof(v128 a) {
-  GC_VF_LANES(r.f[i] = (float)a.ds32[i])
+  v128 r = {(float)(s32)gc_fbits(a.x), (float)(s32)gc_fbits(a.y), (float)(s32)gc_fbits(a.z),
+            (float)(s32)gc_fbits(a.w)};
+  return r;
 }
 //! blendps: mask bit i set takes lane i from b
 GC_INLINE v128 gc_vf_blend(v128 a, v128 b, u32 mask) {
-  GC_VF_LANES(r.du32[i] = ((mask >> i) & 1) ? b.du32[i] : a.du32[i])
+  v128 r = {(mask & 1) ? b.x : a.x, (mask & 2) ? b.y : a.y, (mask & 4) ? b.z : a.z,
+            (mask & 8) ? b.w : a.w};
+  return r;
+}
+//! lane by index (the index is a constant in generated code, so this folds away)
+GC_INLINE float gc_lane(v128 a, u32 lane) {
+  switch (lane & 3) {
+    case 0:
+      return a.x;
+    case 1:
+      return a.y;
+    case 2:
+      return a.z;
+    default:
+      return a.w;
+  }
 }
 GC_INLINE v128 gc_vf_splat(v128 a, u32 lane) {
-  GC_VF_LANES(r.du32[i] = a.du32[lane])
+  float f = gc_lane(a, lane);
+  v128 r = {f, f, f, f};
+  return r;
 }
 //! shufps a, a, ctrl: lane i = a[(ctrl >> 2i) & 3]
 GC_INLINE v128 gc_vf_swizzle(v128 a, u32 ctrl) {
-  GC_VF_LANES(r.du32[i] = a.du32[(ctrl >> (2 * i)) & 3])
+  v128 r = {gc_lane(a, ctrl), gc_lane(a, ctrl >> 2), gc_lane(a, ctrl >> 4), gc_lane(a, ctrl >> 6)};
+  return r;
 }
 
 // ---------------------------------------------------------------------------
 // 128-bit integer (PS2 MMI), MIPS operand order: rd = op(rs = a, rt = b)
 // ---------------------------------------------------------------------------
 
-GC_INLINE v128 gc_pextlb(v128 s, v128 t) {
-  v128 r;
+#define GC_U_LANES(expr)        \
+  goalc_v128 r;                 \
+  for (int i = 0; i < 4; i++) { \
+    expr;                       \
+  }                             \
+  return r;
+
+
+GC_INLINE goalc_v128 gc_pextlb_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 8; i++) {
     r.du8[2 * i] = t.du8[i];
     r.du8[2 * i + 1] = s.du8[i];
   }
   return r;
 }
-GC_INLINE v128 gc_pextub(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pextub_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 8; i++) {
     r.du8[2 * i] = t.du8[8 + i];
     r.du8[2 * i + 1] = s.du8[8 + i];
   }
   return r;
 }
-GC_INLINE v128 gc_pextlh(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pextlh_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 4; i++) {
     r.du16[2 * i] = t.du16[i];
     r.du16[2 * i + 1] = s.du16[i];
   }
   return r;
 }
-GC_INLINE v128 gc_pextuh(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pextuh_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 4; i++) {
     r.du16[2 * i] = t.du16[4 + i];
     r.du16[2 * i + 1] = s.du16[4 + i];
   }
   return r;
 }
-GC_INLINE v128 gc_pextlw(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pextlw_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   r.du32[0] = t.du32[0];
   r.du32[1] = s.du32[0];
   r.du32[2] = t.du32[1];
   r.du32[3] = s.du32[1];
   return r;
 }
-GC_INLINE v128 gc_pextuw(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pextuw_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   r.du32[0] = t.du32[2];
   r.du32[1] = s.du32[2];
   r.du32[2] = t.du32[3];
   r.du32[3] = s.du32[3];
   return r;
 }
-GC_INLINE v128 gc_pcpyld(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pcpyld_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   r.du64[0] = t.du64[0];
   r.du64[1] = s.du64[0];
   return r;
 }
-GC_INLINE v128 gc_pcpyud(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pcpyud_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   r.du64[0] = s.du64[1];
   r.du64[1] = t.du64[1];
   return r;
 }
-GC_INLINE v128 gc_psubw(v128 s, v128 t) {
-  GC_VF_LANES(r.du32[i] = s.du32[i] - t.du32[i])
+GC_INLINE goalc_v128 gc_psubw_u(goalc_v128 s, goalc_v128 t) {
+  GC_U_LANES(r.du32[i] = s.du32[i] - t.du32[i])
 }
-GC_INLINE v128 gc_pceqb(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pceqb_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 16; i++) {
     r.du8[i] = s.du8[i] == t.du8[i] ? 0xff : 0;
   }
   return r;
 }
-GC_INLINE v128 gc_pceqh(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pceqh_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 8; i++) {
     r.du16[i] = s.du16[i] == t.du16[i] ? 0xffff : 0;
   }
   return r;
 }
-GC_INLINE v128 gc_pceqw(v128 s, v128 t) {
-  GC_VF_LANES(r.du32[i] = s.du32[i] == t.du32[i] ? 0xffffffffu : 0)
+GC_INLINE goalc_v128 gc_pceqw_u(goalc_v128 s, goalc_v128 t) {
+  GC_U_LANES(r.du32[i] = s.du32[i] == t.du32[i] ? 0xffffffffu : 0)
 }
-GC_INLINE v128 gc_pcgtb(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pcgtb_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 16; i++) {
     r.du8[i] = s.ds8[i] > t.ds8[i] ? 0xff : 0;
   }
   return r;
 }
-GC_INLINE v128 gc_pcgth(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pcgth_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   for (int i = 0; i < 8; i++) {
     r.du16[i] = s.ds16[i] > t.ds16[i] ? 0xffff : 0;
   }
   return r;
 }
-GC_INLINE v128 gc_pcgtw(v128 s, v128 t) {
-  GC_VF_LANES(r.du32[i] = s.ds32[i] > t.ds32[i] ? 0xffffffffu : 0)
+GC_INLINE goalc_v128 gc_pcgtw_u(goalc_v128 s, goalc_v128 t) {
+  GC_U_LANES(r.du32[i] = s.ds32[i] > t.ds32[i] ? 0xffffffffu : 0)
 }
-GC_INLINE v128 gc_por(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_por_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   r.du64[0] = s.du64[0] | t.du64[0];
   r.du64[1] = s.du64[1] | t.du64[1];
   return r;
 }
-GC_INLINE v128 gc_pxor(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pxor_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   r.du64[0] = s.du64[0] ^ t.du64[0];
   r.du64[1] = s.du64[1] ^ t.du64[1];
   return r;
 }
-GC_INLINE v128 gc_pand(v128 s, v128 t) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pand_u(goalc_v128 s, goalc_v128 t) {
+  goalc_v128 r;
   r.du64[0] = s.du64[0] & t.du64[0];
   r.du64[1] = s.du64[1] & t.du64[1];
   return r;
@@ -409,76 +461,166 @@ GC_INLINE u8 gc_sat_u8(s16 x) {
   return x < 0 ? 0 : (x > 255 ? 255 : (u8)x);
 }
 //! vpackuswb a, b: signed halfwords of a -> bytes 0-7, of b -> bytes 8-15, unsigned saturation
-GC_INLINE v128 gc_packuswb(v128 a, v128 b) {
-  v128 r;
+GC_INLINE goalc_v128 gc_packuswb_u(goalc_v128 a, goalc_v128 b) {
+  goalc_v128 r;
   for (int i = 0; i < 8; i++) {
     r.du8[i] = gc_sat_u8(a.ds16[i]);
     r.du8[8 + i] = gc_sat_u8(b.ds16[i]);
   }
   return r;
 }
-GC_INLINE v128 gc_paddb(v128 a, v128 b) {
-  v128 r;
+GC_INLINE goalc_v128 gc_paddb_u(goalc_v128 a, goalc_v128 b) {
+  goalc_v128 r;
   for (int i = 0; i < 16; i++) {
     r.du8[i] = (u8)(a.du8[i] + b.du8[i]);
   }
   return r;
 }
 // shifts by immediate, x86 semantics: logical shifts >= width give 0, arithmetic gives sign fill
-GC_INLINE v128 gc_pw_sll(v128 a, u32 s) {
-  GC_VF_LANES(r.du32[i] = s > 31 ? 0 : a.du32[i] << s)
+GC_INLINE goalc_v128 gc_pw_sll_u(goalc_v128 a, u32 s) {
+  GC_U_LANES(r.du32[i] = s > 31 ? 0 : a.du32[i] << s)
 }
-GC_INLINE v128 gc_pw_srl(v128 a, u32 s) {
-  GC_VF_LANES(r.du32[i] = s > 31 ? 0 : a.du32[i] >> s)
+GC_INLINE goalc_v128 gc_pw_srl_u(goalc_v128 a, u32 s) {
+  GC_U_LANES(r.du32[i] = s > 31 ? 0 : a.du32[i] >> s)
 }
-GC_INLINE v128 gc_pw_sra(v128 a, u32 s) {
-  GC_VF_LANES(r.ds32[i] = a.ds32[i] >> (s > 31 ? 31 : s))
+GC_INLINE goalc_v128 gc_pw_sra_u(goalc_v128 a, u32 s) {
+  GC_U_LANES(r.ds32[i] = a.ds32[i] >> (s > 31 ? 31 : s))
 }
-GC_INLINE v128 gc_ph_sll(v128 a, u32 s) {
-  v128 r;
+GC_INLINE goalc_v128 gc_ph_sll_u(goalc_v128 a, u32 s) {
+  goalc_v128 r;
   for (int i = 0; i < 8; i++) {
     r.du16[i] = s > 15 ? 0 : (u16)(a.du16[i] << s);
   }
   return r;
 }
-GC_INLINE v128 gc_ph_srl(v128 a, u32 s) {
-  v128 r;
+GC_INLINE goalc_v128 gc_ph_srl_u(goalc_v128 a, u32 s) {
+  goalc_v128 r;
   for (int i = 0; i < 8; i++) {
     r.du16[i] = s > 15 ? 0 : (u16)(a.du16[i] >> s);
   }
   return r;
 }
 //! vpsrldq: shift the whole register right by s bytes
-GC_INLINE v128 gc_psrldq(v128 a, u32 s) {
-  v128 r;
+GC_INLINE goalc_v128 gc_psrldq_u(goalc_v128 a, u32 s) {
+  goalc_v128 r;
   for (int i = 0; i < 16; i++) {
     r.du8[i] = (i + s < 16) ? a.du8[i + s] : 0;
   }
   return r;
 }
 //! vpslldq: shift the whole register left by s bytes
-GC_INLINE v128 gc_pslldq(v128 a, u32 s) {
-  v128 r;
+GC_INLINE goalc_v128 gc_pslldq_u(goalc_v128 a, u32 s) {
+  goalc_v128 r;
   for (int i = 0; i < 16; i++) {
     r.du8[i] = (i >= (int)s) ? a.du8[i - s] : 0;
   }
   return r;
 }
 //! vpshuflw: shuffle the low 4 halfwords, copy the high 4
-GC_INLINE v128 gc_pshuflw(v128 a, u32 c) {
-  v128 r = a;
+GC_INLINE goalc_v128 gc_pshuflw_u(goalc_v128 a, u32 c) {
+  goalc_v128 r = a;
   for (int i = 0; i < 4; i++) {
     r.du16[i] = a.du16[(c >> (2 * i)) & 3];
   }
   return r;
 }
 //! vpshufhw: shuffle the high 4 halfwords, copy the low 4
-GC_INLINE v128 gc_pshufhw(v128 a, u32 c) {
-  v128 r = a;
+GC_INLINE goalc_v128 gc_pshufhw_u(goalc_v128 a, u32 c) {
+  goalc_v128 r = a;
   for (int i = 0; i < 4; i++) {
     r.du16[4 + i] = a.du16[4 + ((c >> (2 * i)) & 3)];
   }
   return r;
+}
+
+
+// wrappers taking the register representation
+GC_INLINE v128 gc_pextlb(v128 s, v128 t) {
+  return gc_um(gc_pextlb_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pextub(v128 s, v128 t) {
+  return gc_um(gc_pextub_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pextlh(v128 s, v128 t) {
+  return gc_um(gc_pextlh_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pextuh(v128 s, v128 t) {
+  return gc_um(gc_pextuh_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pextlw(v128 s, v128 t) {
+  return gc_um(gc_pextlw_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pextuw(v128 s, v128 t) {
+  return gc_um(gc_pextuw_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pcpyld(v128 s, v128 t) {
+  return gc_um(gc_pcpyld_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pcpyud(v128 s, v128 t) {
+  return gc_um(gc_pcpyud_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_psubw(v128 s, v128 t) {
+  return gc_um(gc_psubw_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pceqb(v128 s, v128 t) {
+  return gc_um(gc_pceqb_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pceqh(v128 s, v128 t) {
+  return gc_um(gc_pceqh_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pceqw(v128 s, v128 t) {
+  return gc_um(gc_pceqw_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pcgtb(v128 s, v128 t) {
+  return gc_um(gc_pcgtb_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pcgth(v128 s, v128 t) {
+  return gc_um(gc_pcgth_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pcgtw(v128 s, v128 t) {
+  return gc_um(gc_pcgtw_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_por(v128 s, v128 t) {
+  return gc_um(gc_por_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pxor(v128 s, v128 t) {
+  return gc_um(gc_pxor_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_pand(v128 s, v128 t) {
+  return gc_um(gc_pand_u(gc_mu(s), gc_mu(t)));
+}
+GC_INLINE v128 gc_packuswb(v128 a, v128 b) {
+  return gc_um(gc_packuswb_u(gc_mu(a), gc_mu(b)));
+}
+GC_INLINE v128 gc_paddb(v128 a, v128 b) {
+  return gc_um(gc_paddb_u(gc_mu(a), gc_mu(b)));
+}
+GC_INLINE v128 gc_pw_sll(v128 a, u32 s) {
+  return gc_um(gc_pw_sll_u(gc_mu(a), s));
+}
+GC_INLINE v128 gc_pw_srl(v128 a, u32 s) {
+  return gc_um(gc_pw_srl_u(gc_mu(a), s));
+}
+GC_INLINE v128 gc_pw_sra(v128 a, u32 s) {
+  return gc_um(gc_pw_sra_u(gc_mu(a), s));
+}
+GC_INLINE v128 gc_ph_sll(v128 a, u32 s) {
+  return gc_um(gc_ph_sll_u(gc_mu(a), s));
+}
+GC_INLINE v128 gc_ph_srl(v128 a, u32 s) {
+  return gc_um(gc_ph_srl_u(gc_mu(a), s));
+}
+GC_INLINE v128 gc_psrldq(v128 a, u32 s) {
+  return gc_um(gc_psrldq_u(gc_mu(a), s));
+}
+GC_INLINE v128 gc_pslldq(v128 a, u32 s) {
+  return gc_um(gc_pslldq_u(gc_mu(a), s));
+}
+GC_INLINE v128 gc_pshuflw(v128 a, u32 c) {
+  return gc_um(gc_pshuflw_u(gc_mu(a), c));
+}
+GC_INLINE v128 gc_pshufhw(v128 a, u32 c) {
+  return gc_um(gc_pshufhw_u(gc_mu(a), c));
 }
 
 // ---------------------------------------------------------------------------
