@@ -548,11 +548,11 @@ void add_prim_mesh(const NativeArgs& args, bool collide_work_box) {
   s32 bmin[4], bmax[4];
   if (collide_work_box) {
     const u32 cw = gload<u32>(collide_work_sym);
-    memcpy(bmin, gptr(cw + 16), 16);
-    memcpy(bmax, gptr(cw + 32), 16);
+    gload_q(bmin, (cw + 16) & ~15u);
+    gload_q(bmax, (cw + 32) & ~15u);
   } else {
-    memcpy(bmin, gptr(cache + 60), 16);
-    memcpy(bmax, gptr(cache + 76), 16);
+    gload_q(bmin, (cache + 60) & ~15u);
+    gload_q(bmax, (cache + 76) & ~15u);
   }
   const u32 ignore_mask = gload<u32>(cache + 8);
   const u32 extra[4] = {0, prim_index, 0, 0};
@@ -563,9 +563,9 @@ void add_prim_mesh(const NativeArgs& args, bool collide_work_box) {
     const u32 p1 = spad + ((u32)gload<u8>(tri + 1) << 5);
     const u32 p2 = spad + ((u32)gload<u8>(tri + 2) << 5);
     s32 a[4], b[4], c[4];
-    memcpy(a, gptr(p0 + 16), 16);
-    memcpy(b, gptr(p1 + 16), 16);
-    memcpy(c, gptr(p2 + 16), 16);
+    gload_q(a, p0 + 16);
+    gload_q(b, p1 + 16);
+    gload_q(c, p2 + 16);
     bool outside = false;
     for (int i = 0; i < 3; i++) {
       const s32 lo = std::min(std::min(a[i], b[i]), c[i]);
@@ -576,24 +576,22 @@ void add_prim_mesh(const NativeArgs& args, bool collide_work_box) {
     if (outside) {
       continue;
     }
-    gstore_bytes(out + 48, extra, 16);
+    gstore_q(out + 48, extra);
     if (num_tris == max_tris) {
       print_too_many_tris_short(args.st);
       return;
     }
     gstore<u32>(out + 48, pat);
-    u8 v0[16];
-    memcpy(v0, gptr(p0), 16);
-    gstore_bytes(out, v0, 16);
+    copy_quad(out, p0);
     if (pat & ignore_mask) {
       continue;
     }
-    u8 v1[16], v2[16];
-    memcpy(v1, gptr(p1), 16);
-    memcpy(v2, gptr(p2), 16);
-    gstore_bytes(out + 16, v1, 16);
+    u32 v1[4], v2[4];
+    gload_q(v1, p1);
+    gload_q(v2, p2);
+    gstore_q(out + 16, v1);
     num_tris++;
-    gstore_bytes(out + 32, v2, 16);
+    gstore_q(out + 32, v2);
     out += 64;
   }
 
@@ -602,12 +600,13 @@ void add_prim_mesh(const NativeArgs& args, bool collide_work_box) {
   if (added == 0) {
     return;
   }
-  u8 core[32];
-  memcpy(core, gptr((prim + 12) & ~15u), 16);
-  memcpy(core + 16, gptr((prim + 28) & ~15u), 16);
+  u32 core0[4], core1[4];
+  gload_q(core0, (prim + 12) & ~15u);
+  gload_q(core1, (prim + 28) & ~15u);
   const u32 extra_quad[4] = {cache, prim, (first & 0xffff) | (added << 16), 0};
-  gstore_bytes(prim_out + 32, extra_quad, 16);
-  gstore_bytes(prim_out, core, 32);
+  gstore_q(prim_out + 32, extra_quad);
+  gstore_q(prim_out, core0);
+  gstore_q(prim_out + 16, core1);
   gstore<u32>(cache + 4, old_prims + 1);
   gstore<u32>(cache, num_tris);
 }
@@ -636,16 +635,16 @@ u64 method_30_collide_cache_impl(const NativeArgs& args) {
   u32 n = gload<u16>(prim + 42);
   float best = gload<float>(work);
   float start[4], mv[4];
-  memcpy(start, gptr(work + 16), 16);
-  memcpy(mv, gptr(work + 32), 16);
+  gload_q(start, work + 16);
+  gload_q(mv, work + 32);
   const u32 ignore = gload<u32>(work + 4);
   const u32 tri_out = gload<u32>(work + 8);
 
   for (; n != 0; n--, tri += 64) {
     float v0[4], v1[4], v2[4];
-    memcpy(v0, gptr(tri), 16);
-    memcpy(v1, gptr(tri + 16), 16);
-    memcpy(v2, gptr(tri + 32), 16);
+    gload_q(v0, tri);
+    gload_q(v1, tri + 16);
+    gload_q(v2, tri + 32);
     float e5[4], e6[4], e7[4];
     for (int i = 0; i < 4; i++) {
       e5[i] = v1[i] - v0[i];
@@ -720,12 +719,12 @@ u64 method_30_collide_cache_impl(const NativeArgs& args) {
     }
     best = u;
     gstore<float>(work, u);
-    gstore_bytes(tri_out, v0, 16);
-    gstore_bytes(tri_out + 16, v1, 16);
-    gstore_bytes(tri_out + 32, v2, 16);
-    gstore_bytes(tri_out + 64, nrm, 16);
+    gstore_q(tri_out, v0);
+    gstore_q(tri_out + 16, v1);
+    gstore_q(tri_out + 32, v2);
+    gstore_q(tri_out + 64, nrm);
     gstore<u32>(tri_out + 80, gload<u32>(tri + 48));
-    gstore_bytes(tri_out + 48, p, 16);
+    gstore_q(tri_out + 48, p);
   }
   return 0;
 }
@@ -749,8 +748,8 @@ u64 method_10_collide_cache_prim_impl(const NativeArgs& args) {
   const float t = u2f((u32)v0);
   const float max_t = u2f((u32)args.a[4]);
   float pt[4], center[4];
-  memcpy(pt, gptr(out_point), 16);
-  memcpy(center, gptr(prim), 16);
+  gload_q(pt, out_point);
+  gload_q(center, prim);
   if (t < 0.f) {
     return f2gpr(t);
   }
@@ -767,7 +766,7 @@ u64 method_10_collide_cache_prim_impl(const NativeArgs& args) {
   }
   if (facing_test) {
     float mv[4], p[4];
-    memcpy(mv, gptr((u32)args.a[3]), 16);
+    gload_q(mv, (u32)args.a[3]);
     for (int i = 0; i < 4; i++) {
       p[i] = mv[i] * d[i];
     }
@@ -783,7 +782,7 @@ u64 method_10_collide_cache_prim_impl(const NativeArgs& args) {
   for (int i = 0; i < 4; i++) {
     sq[i] = d[i] * d[i];
   }
-  gstore_bytes(result + 48, pt, 16);
+  gstore_q(result + 48, pt);
   float len2 = 1.f * sq[0];
   len2 += 1.f * sq[1];
   len2 = len2 + 1.f * sq[2];
@@ -793,7 +792,7 @@ u64 method_10_collide_cache_prim_impl(const NativeArgs& args) {
     d[i] = d[i] * q;
   }
   const float sq14[2] = {d[0] * d[0], d[1] * d[1]};
-  gstore_bytes(result + 64, d, 16);
+  gstore_q(result + 64, d);
   gstore<u32>(result + 80, pat);
   float t2[4] = {0.f, 0.f, 0.f, 1.f};
   const float s14 = sq14[0] + sq14[1];
@@ -822,7 +821,7 @@ u64 method_10_collide_cache_prim_impl(const NativeArgs& args) {
       out[i] = acc + t3[i] * c[2];
     }
     out[3] = c[3];
-    gstore_bytes(result + 16 * k, out, 16);
+    gstore_q(result + 16 * k, out);
   }
   return f2gpr(t);
 }
@@ -836,13 +835,13 @@ u64 method_10_collide_puss_work_impl(const NativeArgs& args) {
   const u32 work = (u32)args.a[0];
   const u32 num = gload<u32>((u32)args.a[2] + 4);
   float s[4];
-  memcpy(s, gptr((u32)args.a[1]), 16);
+  gload_q(s, (u32)args.a[1]);
   if (num == 0) {
     return args.st;
   }
   s32 bmin[4], bmax[4], mn[3], mx[3];
-  memcpy(bmin, gptr((work + 64) & ~15u), 16);
-  memcpy(bmax, gptr((work + 80) & ~15u), 16);
+  gload_q(bmin, (work + 64) & ~15u);
+  gload_q(bmax, (work + 80) & ~15u);
   for (int i = 0; i < 3; i++) {
     mn[i] = (s32)(s[i] - s[3]);
     mx[i] = (s32)(s[i] + s[3]);
@@ -858,7 +857,7 @@ u64 method_10_collide_puss_work_impl(const NativeArgs& args) {
   u32 sphere = work + 96;
   for (u32 k = 0; k != num; k++, sphere += 48) {
     float p[4];
-    memcpy(p, gptr(sphere), 16);
+    gload_q(p, sphere);
     float d[4];
     for (int i = 0; i < 4; i++) {
       d[i] = p[i] - s[i];
@@ -893,17 +892,17 @@ u64 method_9_collide_puss_work_impl(const NativeArgs& args) {
   u32 ntri = gload<u16>(prim + 42);
   for (; ntri != 0; ntri--, tri += 64) {
     float v0[4], v1[4], v2[4];
-    memcpy(v0, gptr(tri), 16);
-    memcpy(v1, gptr(tri + 16), 16);
-    memcpy(v2, gptr(tri + 32), 16);
+    gload_q(v0, tri);
+    gload_q(v1, tri + 16);
+    gload_q(v2, tri + 32);
     float e4[4], e5[4];
     for (int i = 0; i < 4; i++) {
       e4[i] = v1[i] - v0[i];
       e5[i] = v2[i] - v0[i];
     }
     s32 bmin[4], bmax[4];
-    memcpy(bmin, gptr((work + 64) & ~15u), 16);
-    memcpy(bmax, gptr((work + 80) & ~15u), 16);
+    gload_q(bmin, (work + 64) & ~15u);
+    gload_q(bmax, (work + 80) & ~15u);
     s32 tmin[4], tmax[4];
     for (int i = 0; i < 4; i++) {
       tmin[i] = (s32)std::min(std::min(v0[i], v1[i]), v2[i]);
@@ -916,10 +915,10 @@ u64 method_9_collide_puss_work_impl(const NativeArgs& args) {
     for (int i = 0; i < 4; i++) {
       sq[i] = nrm[i] * nrm[i];
     }
-    gstore_bytes(work + 32, tmin, 16);
+    gstore_q(work + 32, tmin);
     float len2 = 1.f * sq[0];
     len2 += 1.f * sq[1];
-    gstore_bytes(work + 48, tmax, 16);
+    gstore_q(work + 48, tmax);
     len2 = len2 + 1.f * sq[2];
     bool outside = false;
     for (int i = 0; i < 3; i++) {
@@ -933,15 +932,15 @@ u64 method_9_collide_puss_work_impl(const NativeArgs& args) {
       nrm[i] = nrm[i] * q;
     }
     const u32 num_spheres = gload<u32>((u32)args.a[2] + 4);
-    gstore_bytes(work + 16, nrm, 16);
+    gstore_q(work + 16, nrm);
 
     u32 sphere = work + 96;
     for (u32 k = 0; k != num_spheres; k++, sphere += 48) {
       s32 smin[4], smax[4], wmin[4], wmax[4];
-      memcpy(smin, gptr((sphere + 16) & ~15u), 16);
-      memcpy(wmax, gptr((work + 48) & ~15u), 16);
-      memcpy(smax, gptr((sphere + 32) & ~15u), 16);
-      memcpy(wmin, gptr((work + 32) & ~15u), 16);
+      gload_q(smin, (sphere + 16) & ~15u);
+      gload_q(wmax, (work + 48) & ~15u);
+      gload_q(smax, (sphere + 32) & ~15u);
+      gload_q(wmin, (work + 32) & ~15u);
       bool out = false;
       for (int i = 0; i < 3; i++) {
         out |= (smin[i] > wmax[i]) | (wmin[i] > smax[i]);
@@ -953,8 +952,8 @@ u64 method_9_collide_puss_work_impl(const NativeArgs& args) {
                                 args.a[4], args.a[5], args.a[6], args.a[7]};
       native_call_goal(gload<u32>(closest_sym), call_args, args);
       float pt[4], sp[4];
-      memcpy(pt, gptr(work), 16);
-      memcpy(sp, gptr(sphere), 16);
+      gload_q(pt, work);
+      gload_q(sp, sphere);
       float d[4];
       for (int i = 0; i < 3; i++) {
         d[i] = pt[i] - sp[i];
