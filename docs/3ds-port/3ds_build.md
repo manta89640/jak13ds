@@ -106,6 +106,22 @@ grep -a "pad script" build-3ds/emu-game/stdout.log
 `run_emu.sh` takes a lock (`$TMPDIR/opengoal-azahar.lock`) because Azahar and its virtual SD card
 are shared; `--stage` stages the SD card inside the lock.
 
+Results in Azahar (New 3DS, CIA with the 124 MB mode, build of 3ds-port d8c3b9c7):
+- Boot, title screen, Start, New Game, the intro cutscene skipped, Jak on Geyser Rock in
+  `target-stance`, then walking, jumping (`target-jump` / `target-hit-ground`), punching,
+  spin kick, crouching (`target-duck-stance`) and walking left / right all work, no crash.
+- Game logic takes 12-15 ms per frame on the title screen (about 50 fps) and 65-85 ms in
+  Geyser Rock and village1 (12-15 fps) in the emulator.
+
+### Where the threads run (New 3DS)
+
+Measured in Azahar with the gameplay script:
+- Everything but the renderer on core 0 (default): title 50+ fps, gameplay 12-15 fps.
+- IOP / listener / EE worker on core 2 (with the render thread): 1.4 fps (695 ms of logic per
+  frame, the EE waits for the IOP). Not used.
+- IOP on core 1 (`APT_SetAppCpuTimeLimit(80)`, flag file `use_syscore`): boot hangs at the first
+  IOP file load. Off by default.
+
 ### Controls
 
 Face buttons by position, like the PS2 pad:
