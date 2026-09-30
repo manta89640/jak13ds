@@ -162,7 +162,7 @@ u64 method_32_collide_cache_impl(const NativeArgs& args) {
   ASSERT(args.a[3] == 0);
 
   s32 base_i[4];
-  memcpy(base_i, gptr(mesh + 12), 16);
+  gload_q(base_i, mesh + 12);
   float offset[4];
   for (int i = 0; i < 4; i++) {
     offset[i] = u2f(i < 3 ? 0x4d000000 : 0) - (float)base_i[i];
@@ -178,8 +178,8 @@ u64 method_32_collide_cache_impl(const NativeArgs& args) {
   auto store = [&](int k, const float f[4]) {
     s32 n[4];
     ftoi0(n, f);
-    gstore_bytes(spad + 32 * k + 16, f, 16);
-    gstore_bytes(spad + 32 * k, n, 16);
+    gstore_q(spad + 32 * k + 16, f);
+    gstore_q(spad + 32 * k, n);
   };
 
   if (args.a[2] == args.st) {
@@ -199,7 +199,7 @@ u64 method_32_collide_cache_impl(const NativeArgs& args) {
   unpack_halves(r1, gload<u64>(xf + 36), 16);
   unpack_halves(r2, gload<u64>(xf + 44), 16);
   float trans_add[4];
-  memcpy(trans_add, gptr(xf + 12), 16);
+  gload_q(trans_add, xf + 12);
   float m[4][4];
   for (int i = 0; i < 4; i++) {
     m[3][i] = (float)trans_i[i];
@@ -231,15 +231,17 @@ u64 method_29_collide_cache_impl(const NativeArgs& args) {
   const u32 spad = fake_spad();
   const int count = gload<u8>((u32)args.a[1] + 24);
   float m[4][4];
-  memcpy(m, gptr(cw + 48), 64);
+  for (int i = 0; i < 4; i++) {
+    gload_q(m[i], cw + 48 + 16 * i);
+  }
   const int groups = count <= 4 ? 1 : (count + 3) / 4;
   for (int k = 0; k < groups * 4; k++) {
     float v[4], out[4];
     s32 n[4];
-    memcpy(v, gptr(spad + 32 * k + 16), 16);
+    gload_q(v, spad + 32 * k + 16);
     transform_point(out, m, v);
     ftoi0(n, out);
-    gstore_bytes(spad + 4096 + 32 * k, n, 16);
+    gstore_q(spad + 4096 + 32 * k, n);
   }
   return 0;
 }
@@ -260,6 +262,26 @@ void print_too_many_tris(u64 st) {
 struct Vec4i {
   s32 v[4];
 };
+
+//! lq of an aligned quadword (the scratchpad vertices: spad + 32 * i, int part at 0 or 4096)
+inline Vec4i load_vec4i(u32 addr) {
+  Vec4i v;
+  gload_q(&v, addr);
+  return v;
+}
+
+//! lq then sq of a quadword, both aligned
+inline void copy_quad(u32 dst, u32 src) {
+  u32 t[4];
+  gload_q(t, src);
+  gstore_q(dst, t);
+}
+
+//! sq r0 then sw pat: the pat word of a collide-cache-tri, the rest of its quadword zero
+inline void store_pat_quad(u32 addr, u32 pat) {
+  const u32 t[4] = {pat, 0, 0, 0};
+  gstore_q(addr, t);
+}
 
 //! Is the bounding box of three int vertices outside [bmin, bmax] in x, y or z?
 inline bool outside_box(const Vec4i& a,
@@ -304,7 +326,6 @@ void add_mesh_tris(u32 cache,
   u32 pat_index = strip + gload<u16>(mesh + 8);
   const u32 pats = gload<u32>(mesh + 4);
   const u32 ignore_mask = gload<u32>(cache + 8);
-  const u8 zero[16] = {};
 
   for (;;) {
     // new strip
@@ -319,9 +340,9 @@ void add_mesh_tris(u32 cache,
     u32 p0 = spad + i0 * 32;
     u32 p1 = spad + i1 * 32;
     u32 p2 = spad + i2 * 32;
-    Vec4i a = gload<Vec4i>(p0 + int_offset);
-    Vec4i b = gload<Vec4i>(p1 + int_offset);
-    Vec4i c = gload<Vec4i>(p2 + int_offset);
+    Vec4i a = load_vec4i(p0 + int_offset);
+    Vec4i b = load_vec4i(p1 + int_offset);
+    Vec4i c = load_vec4i(p2 + int_offset);
     const u32 pat_addr = pats + ((u32)gload<u8>(pat_index) << 2);
     if (!outside_box(a, b, c, bmin, bmax)) {
       if (num_tris == max_tris) {
@@ -330,14 +351,11 @@ void add_mesh_tris(u32 cache,
       }
       const u32 pat = gload<u32>(pat_addr);
       if (!(pat & ignore_mask)) {
-        gstore_bytes(tri_out + 48, zero, 16);
+        store_pat_quad(tri_out + 48, pat);
         num_tris++;
-        gstore<u32>(tri_out + 48, pat);
-        u8 v[48];
-        memcpy(v, gptr(p0 + 16), 16);
-        memcpy(v + 16, gptr(p1 + 16), 16);
-        memcpy(v + 32, gptr(p2 + 16), 16);
-        gstore_bytes(tri_out, v, 48);
+        copy_quad(tri_out, p0 + 16);
+        copy_quad(tri_out + 16, p1 + 16);
+        copy_quad(tri_out + 32, p2 + 16);
         tri_out += 64;
       }
     }
@@ -362,7 +380,7 @@ void add_mesh_tris(u32 cache,
       b = c;
       p2 = spad + (n - 1) * 32;
       const u32 pidx = gload<u8>(pat_index);
-      c = gload<Vec4i>(p2 + int_offset);
+      c = load_vec4i(p2 + int_offset);
       pat_index++;
       if (outside_box(a, b, c, bmin, bmax)) {
         continue;
@@ -376,16 +394,11 @@ void add_mesh_tris(u32 cache,
         return;
       }
       // p1 in the middle, p0 and p2 on either side depending on the winding
-      gstore_bytes(tri_out + 48, zero, 16);
+      store_pat_quad(tri_out + 48, pat);
       num_tris++;
-      gstore<u32>(tri_out + 48, pat);
-      u8 v1[16], v0[16], v2[16];
-      memcpy(v1, gptr(p1 + 16), 16);
-      memcpy(v0, gptr(p0 + 16), 16);
-      memcpy(v2, gptr(p2 + 16), 16);
-      gstore_bytes(tri_out + 16, v1, 16);
-      gstore_bytes(tri_out + 16 - flip, v0, 16);
-      gstore_bytes(tri_out + 16 + flip, v2, 16);
+      copy_quad(tri_out + 16, p1 + 16);
+      copy_quad(tri_out + 16 - flip, p0 + 16);
+      copy_quad(tri_out + 16 + flip, p2 + 16);
       tri_out += 64;
     }
   }
