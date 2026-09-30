@@ -693,13 +693,31 @@
 
 (defbehavior mod-var-jump target ((arg0 symbol) (arg1 symbol) (arg2 symbol) (arg3 vector))
   (local-vars (v0-2 vector))
-  (let ((f30-0 (* 0.033333335 (the float (- (current-time) (-> self state-time))))))
+  (let ((f30-0 (* 0.033333335 (the float (- (current-time) (-> self state-time)))))
+        (last-sample #f))
+    ;; og:preserve-this 3DS: low frame rates (AI-assisted).
+    ;; The jump rises higher while the button is held during its first 0.1 s (f30-0 from 0 to 1),
+    ;; but the button is read once a frame. Below ~20 fps (time-ratio 3-4: a frame is 0.05-0.067 s
+    ;; of game time, and longer in real time) that failed in two ways: the read that crossed 0.1 s
+    ;; was dropped, so the maximum height was out of reach (2.7 m instead of 3.5 m at time-ratio 4),
+    ;; and a normal press was usually released before the next read, so the jump stayed at the
+    ;; minimum height (1 m). Here the read that crosses 0.1 s counts as the end of the window, and
+    ;; when the game lags, a release counts as happening at the read that sees it.
+    ;; unknown-float124 (not used elsewhere) keeps the last raise: below 1.0 the jump can still rise.
+    (#when TARGET_3DS
+      (when (< (-> self control unknown-float124) 1.0)
+        (set! f30-0 (fmin 1.0 f30-0))
+        (when (and (not arg2) (< 2.5 (-> *display* time-ratio)))
+          (set! arg2 #t)
+          (set! last-sample #t))))
     (cond
       ((or (< 1.0 f30-0) (< (-> self control unknown-float123) 0.0) (not arg2))
-       (set! (-> self control unknown-float123) -1.0))
+       (set! (-> self control unknown-float123) -1.0)
+       (#when TARGET_3DS
+         (set! (-> self control unknown-float124) 1.0)))
       (else
        (set! (-> self control unknown-float123) f30-0)
-       (set! (-> self control unknown-float124) f30-0)
+       (set! (-> self control unknown-float124) (if last-sample 1.0 f30-0))
        (when arg0
          (let ((s3-1 (vector-! (new-stack-vector0) (-> self control trans) (-> self control unknown-vector102)))
                (s4-0 (new-stack-vector0)))
