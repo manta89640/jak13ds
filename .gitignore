@@ -91,3 +91,4 @@ goalc-report.html
 _new-all-types.gc
 # differential tests of native mips2c functions (test/mips2c_native/run.sh)
 /build-mips2c-test/
+/build-goalc/
