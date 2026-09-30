@@ -15,7 +15,7 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 7;
+constexpr uint32_t kVersion = 8;  // 8: merc envmap (7 is still read, without it)
 
 enum TextureFormat : uint8_t {
   TEX_RGB565 = 0,  // u16: r5 g6 b5 (r in the high bits)
@@ -48,8 +48,12 @@ struct Header {
   uint32_t merc_draw_size;
   uint32_t merc_blerc_offset;  // MercBlercHeader, then its arrays (0: none)
   uint32_t merc_blerc_size;
+  // v8: MercEnvmap[], one per MercDraw (same order), 0: none
+  uint32_t merc_envmap_offset;
+  uint32_t merc_envmap_size;
 };
-static_assert(sizeof(Header) == 128);
+static_assert(sizeof(Header) == 136);
+constexpr uint32_t kHeaderSizeV7 = 128;
 
 /*!
  * Texture, already in the 3DS GPU layout: 8x8 tiles (rows of tiles), Morton order inside a tile,
@@ -150,6 +154,19 @@ struct MercDraw {
   uint8_t eye_id;       // 0xff: not an eye. Else the eye texture slot (CtrEyeRenderer) to use
 };
 static_assert(sizeof(MercDraw) == 48);
+
+/*!
+ * Environment map of a merc draw's effect (v8): the PC's emerc pass, drawn over the draw's
+ * triangles with a sphere-mapped texture, added in proportion to the destination alpha (the base
+ * texture's alpha is the reflectivity), with the color the game sends per effect ("fade").
+ * The chrome and gold of the title logo, shiny metal and water drops come from it.
+ */
+struct MercEnvmap {
+  uint32_t mode;     // tfrag3 DrawMode bits of the envmap pass
+  uint16_t texture;  // 0xffff: the effect has no envmap
+  uint16_t pad;
+};
+static_assert(sizeof(MercEnvmap) == 8);
 
 struct MercVertex {
   int16_t pos[3];      // * MercModel::scale

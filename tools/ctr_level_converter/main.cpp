@@ -302,6 +302,7 @@ struct MercOut {
   std::vector<c3l::MercVertex> verts;
   std::vector<u16> indices;
   std::vector<c3l::MercDraw> draws;
+  std::vector<c3l::MercEnvmap> envmaps;  // one per draw
   std::vector<c3l::MercBlercVertex> blerc_verts;
   std::vector<c3l::MercBlercTarget> blerc_targets;
   std::vector<u16> blerc_dests;
@@ -477,6 +478,14 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           md.index_count = out->indices.size() - md.first_index;
           if (md.index_count) {
             out->draws.push_back(md);
+            // the effect's environment map (the PC's emerc pass), drawn over the same triangles
+            c3l::MercEnvmap em{};
+            em.texture = 0xffff;
+            if (eff.has_envmap) {
+              em.texture = cv.texture_id((s32)eff.envmap_texture);
+              em.mode = eff.envmap_mode.as_int();
+            }
+            out->envmaps.push_back(em);
           }
           if (too_big) {
             break;
@@ -856,6 +865,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
     buf.insert(buf.end(), (const u8*)merc.blerc_dests.data(),
                (const u8*)(merc.blerc_dests.data() + merc.blerc_dests.size()));
     hdr.merc_blerc_size = buf.size() - hdr.merc_blerc_offset;
+  }
+  if (!merc.envmaps.empty()) {
+    hdr.merc_envmap_offset = append(buf, merc.envmaps.data(), merc.envmaps.size());
+    hdr.merc_envmap_size = merc.envmaps.size() * sizeof(c3l::MercEnvmap);
   }
   align16(buf);
   hdr.texture_data_offset = buf.size();
