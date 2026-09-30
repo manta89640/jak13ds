@@ -427,3 +427,31 @@ platform/3ds/tools/run_emu.sh --seconds 150
 - **Memory:**
   - `ctr_port.c` sets the linear heap to 24 MB. The regular heap gets about 80 MB.
   - IOP coroutine stacks are 512 KB on the 3DS (3 MB on PC; about 9 threads).
+
+## Native versions of hot mips2c functions
+
+(AI-assisted.) mips2c code emulates the MIPS/VU0 registers in memory (~10 ARM instructions per
+MIPS instruction on the 3DS). The hottest functions have plain C++ versions in
+`game/mips2c/jak1_functions/native_*.cpp` (see `game/mips2c/mips2c_native.h`), used by default on
+every platform: `cspace<-parented-transformq-joint!`, `moving-sphere-triangle-intersect`,
+`(method 9 collide-cache-prim)`, collide-cache methods 26 / 27 / 29 / 32, `sp-process-block-2d`.
+They do the same float operations grouped the same way as the mips2c code, so results are
+bit-identical (clang fuses `a + b * c` within one expression on arm64; the 3DS has no FMA).
+
+- `OPENGOAL_MIPS2C_VERIFY=1` (host, C backend): every call runs the mips2c and the native
+  version on the same inputs and compares v0 and every byte stored (logged stores); functions
+  with GOAL callbacks (`sp-process-block-2d`) are checked on one call in
+  `OPENGOAL_MIPS2C_VERIFY_FULL_EVERY` (default 8) by saving, restoring and comparing all of GOAL
+  memory. Mismatches are logged as `mips2c verify MISMATCH`, a summary line `mips2c verify:` every
+  20 s. `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the checker).
+- `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions.
+- Native code must store to GOAL memory only through `gstore*` (verify mode logs them).
+- Run on the Mac with scripted input and a clean user folder, e.g.
+  `OPENGOAL_MIPS2C_VERIFY=1 OPENGOAL_PAD_SCRIPT=platform/3ds/tests/gameplay.pad gk --config-path <empty dir> --proj-path <C mirror> --null-gfx -- -boot -fakeiso -cbackend`
+  (without `--config-path` the menu taps change your real settings).
+
+Azahar, gameplay.pad, last 20 s (Jak on Geyser Rock), before (3ds-port 7e36955c) -> after:
+game logic 94.4 -> 66.0 ms per frame (10.1 -> 14.4 fps); method 9 collide-cache-prim 9.3 -> 7.7
+(now includes moving-sphere-triangle-intersect, 5.6 before, and collide-do-primitives 2.7),
+cspace<- 8.9 -> 4.0, sp-process-block-2d 5.2 -> 2.0, collide-cache 32 / 26 / 27(+29)
+5.0 / 4.7 / 4.2 -> 1.7 / 1.8 / 1.8 ms.
