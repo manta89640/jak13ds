@@ -18,6 +18,8 @@
 
 extern const uint8_t ctr_basic_shbin[];
 extern const size_t ctr_basic_shbin_size;
+extern const uint8_t ctr_mesh_shbin[];
+extern const size_t ctr_mesh_shbin_size;
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
@@ -35,12 +37,34 @@ typedef struct {
   int used;
 } TexSlot;
 
+#define MAX_MESHES 8192
+
+typedef struct {
+  void* verts;
+  uint16_t* indices;
+  int used; /* 0 free, 1 used, 2 pending delete */
+} MeshSlot;
+
+enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH };
+
 static struct {
   int ready;
   C3D_RenderTarget* top;
   DVLB_s* dvlb;
   shaderProgram_s program;
   int uloc_projection;
+  DVLB_s* mesh_dvlb;
+  shaderProgram_s mesh_program;
+  int uloc_clip;
+  int uloc_scales;
+  int cur_prog;
+  ctr_draw_state last_state;
+  int last_state_mesh;
+  int last_state_valid;
+  C3D_Mtx gl_to_pica;
+  MeshSlot meshes[MAX_MESHES];
+  int pending_mesh_delete[MAX_MESHES];
+  int pending_mesh_delete_count;
   C3D_Mtx projection;
   uint8_t* vbuf;
   size_t vbuf_used;
@@ -116,6 +140,42 @@ static void process_pending_deletes(void) {
     }
   }
   g.pending_delete_count = 0;
+  for (int i = 0; i < g.pending_mesh_delete_count; i++) {
+    MeshSlot* m = &g.meshes[g.pending_mesh_delete[i]];
+    if (m->used == 2) {
+      linearFree(m->verts);
+      linearFree(m->indices);
+      m->verts = NULL;
+      m->indices = NULL;
+      m->used = 0;
+    }
+  }
+  g.pending_mesh_delete_count = 0;
+}
+
+/* Programs have different vertex layouts and uniforms: switch both together. */
+static void use_program(int prog) {
+  if (g.cur_prog == prog) {
+    return;
+  }
+  C3D_AttrInfo* attr = C3D_GetAttrInfo();
+  AttrInfo_Init(attr);
+  if (prog == PROG_BASIC) {
+    C3D_BindProgram(&g.program);
+    g.last_state_valid = 0;
+    AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 3);         /* position */
+    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);         /* texcoord */
+    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_projection, &g.projection);
+  } else {
+    C3D_BindProgram(&g.mesh_program);
+    g.last_state_valid = 0;
+    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
+    AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord * 1024 */
+    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f, 0.0f);
+  }
+  g.cur_prog = prog;
 }
 
 static void setup_projection(void) {
@@ -126,13 +186,25 @@ static void setup_projection(void) {
   g.projection.r[2].y = 0.0f;
   g.projection.r[2].z = -1.0f;
   g.projection.r[2].w = 0.0f;
+
+  /* OpenGL-style clip space -> PICA: same x/y mapping, z' = (z - w) / 2 so the depth (-z'/w) is 1 at
+   * the near plane and 0 at the far plane (larger = closer, like the GS) */
+  Mtx_OrthoTilt(&g.gl_to_pica, -1.25f, 1.25f, -1.0f, 1.0f, 0.0f, 1.0f, true);
+  g.gl_to_pica.r[2].x = 0.0f;
+  g.gl_to_pica.r[2].y = 0.0f;
+  g.gl_to_pica.r[2].z = 0.5f;
+  g.gl_to_pica.r[2].w = -0.5f;
+  g.gl_to_pica.r[3].x = 0.0f;
+  g.gl_to_pica.r[3].y = 0.0f;
+  g.gl_to_pica.r[3].z = 0.0f;
+  g.gl_to_pica.r[3].w = 1.0f;
 }
 
 int ctr_gpu_init(void) {
   if (g.ready) {
     return 0;
   }
-  if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2)) {
+  if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4)) {
     return -1;
   }
   g.top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
@@ -147,17 +219,19 @@ int ctr_gpu_init(void) {
   C3D_BindProgram(&g.program);
   g.uloc_projection = shaderInstanceGetUniformLocation(g.program.vertexShader, "projection");
 
-  C3D_AttrInfo* attr = C3D_GetAttrInfo();
-  AttrInfo_Init(attr);
-  AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 3);          /* position */
-  AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);          /* texcoord */
-  AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4);  /* color */
+  g.mesh_dvlb = DVLB_ParseFile((u32*)ctr_mesh_shbin, (u32)ctr_mesh_shbin_size);
+  shaderProgramInit(&g.mesh_program);
+  shaderProgramSetVsh(&g.mesh_program, &g.mesh_dvlb->DVLE[0]);
+  g.uloc_clip = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "clip");
+  g.uloc_scales = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "scales");
+  g.cur_prog = PROG_NONE;
 
   g.vbuf = (uint8_t*)linearAlloc(VBUF_BYTES);
   if (!g.vbuf) {
     return -3;
   }
   setup_projection();
+  use_program(PROG_BASIC);
   C3D_CullFace(GPU_CULL_NONE);
   ctr_port_set_gpu_active(1);
   g.ready = 1;
@@ -174,9 +248,18 @@ void ctr_gpu_exit(void) {
       g.textures[i].used = 0;
     }
   }
+  for (int i = 0; i < MAX_MESHES; i++) {
+    if (g.meshes[i].used) {
+      linearFree(g.meshes[i].verts);
+      linearFree(g.meshes[i].indices);
+      g.meshes[i].used = 0;
+    }
+  }
   linearFree(g.vbuf);
   shaderProgramFree(&g.program);
   DVLB_Free(g.dvlb);
+  shaderProgramFree(&g.mesh_program);
+  DVLB_Free(g.mesh_dvlb);
   C3D_RenderTargetDelete(g.top);
   C3D_Fini();
   ctr_port_set_gpu_active(0);
@@ -196,7 +279,9 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   u32 clear = ((u32)r << 24) | ((u32)gr << 16) | ((u32)b << 8) | 0xff;
   C3D_RenderTargetClear(g.top, C3D_CLEAR_ALL, clear, 0);
   C3D_FrameDrawOn(g.top);
-  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_projection, &g.projection);
+  g.cur_prog = PROG_NONE;
+  g.last_state_valid = 0;
+  use_program(PROG_BASIC);
   g.vbuf_used = 0;
   memset(&g.cur, 0, sizeof(g.cur));
   g.in_frame = 1;
@@ -206,7 +291,9 @@ void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
-  C3D_FrameEnd(0);
+  /* all our buffers are flushed when written: only flush the command list, not the whole
+   * linear heap (C3D_FrameEnd's default) */
+  C3D_FrameEnd(GX_CMDLIST_FLUSH);
   g.in_frame = 0;
   if (g.screenshot_state == 1) {
     g.screenshot_state = 2;
@@ -307,7 +394,22 @@ static GPU_TESTFUNC map_test(uint8_t t) {
   return GPU_ALWAYS;
 }
 
-static void apply_state(const ctr_draw_state* st) {
+/* The GPU command buffer is fixed size: submit what we have when it gets full (a frame with many
+ * draws would overflow it, and libctru panics then). */
+static void check_cmdbuf(void) {
+  if (C3D_GetCmdBufUsage() > 0.85f) {
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+  }
+}
+
+static void apply_state(const ctr_draw_state* st, int mesh) {
+  if (g.last_state_valid && g.last_state_mesh == mesh &&
+      !memcmp(&g.last_state, st, sizeof(*st))) {
+    return;
+  }
+  g.last_state = *st;
+  g.last_state_mesh = mesh;
+  g.last_state_valid = 1;
   C3D_TexEnv* env = C3D_GetTexEnv(0);
   C3D_TexEnvInit(env);
   int textured = st->tex >= 0 && st->tex < MAX_TEXTURES && g.textures[st->tex].used == 1;
@@ -318,7 +420,13 @@ static void apply_state(const ctr_draw_state* st) {
     C3D_TexSetWrap(tex, st->clamp_s ? GPU_CLAMP_TO_EDGE : GPU_REPEAT,
                    st->clamp_t ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
     C3D_TexBind(0, tex);
-    if (st->decal) {
+    if (mesh) {
+      /* level meshes: texture alpha 0xff = 1, vertex color 0x80 = 1 */
+      C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+      C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+      C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
+      C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+    } else if (st->decal) {
       C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, 0, 0);
       C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
       C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_1);
@@ -368,6 +476,9 @@ static void apply_state(const ctr_draw_state* st) {
     case CTR_BLEND_ADD_DST_A:
       C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_DST_ALPHA, GPU_ONE, GPU_ONE, GPU_ZERO);
       break;
+    case CTR_BLEND_ONE_ONE:
+      C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE, GPU_ONE, GPU_ZERO);
+      break;
     default:
       C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
       break;
@@ -402,13 +513,117 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   GSPGPU_FlushDataCache(dst, bytes);
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
 
-  apply_state(state);
+  check_cmdbuf();
+  use_program(PROG_BASIC);
+  apply_state(state, 0);
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
   BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
   C3D_DrawArrays(GPU_TRIANGLES, 0, count);
   g.cur.draws++;
   g.cur.triangles += count / 3;
+}
+
+/* ---------------- static meshes ---------------- */
+
+int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int size) {
+  if (!g.ready || w < 8 || h < 8 || w > 1024 || h > 1024) {
+    return -1;
+  }
+  int slot = -1;
+  for (int i = 0; i < MAX_TEXTURES; i++) {
+    if (g.textures[i].used == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    return -1;
+  }
+  C3D_Tex* tex = &g.textures[slot].tex;
+  if (!C3D_TexInit(tex, (u16)w, (u16)h, format == 0 ? GPU_RGB565 : GPU_RGBA4)) {
+    return -1;
+  }
+  memcpy(tex->data, data, (size_t)size < tex->size ? (size_t)size : tex->size);
+  C3D_TexFlush(tex);
+  g.textures[slot].used = 1;
+  return slot;
+}
+
+int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
+                        int index_count) {
+  if (!g.ready) {
+    return -1;
+  }
+  int slot = -1;
+  for (int i = 0; i < MAX_MESHES; i++) {
+    if (g.meshes[i].used == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    return -1;
+  }
+  size_t vbytes = (size_t)vertex_count * 16;
+  size_t ibytes = (size_t)index_count * 2;
+  void* v = linearAlloc(vbytes);
+  uint16_t* ix = (uint16_t*)linearAlloc(ibytes);
+  if (!v || !ix) {
+    if (v) {
+      linearFree(v);
+    }
+    if (ix) {
+      linearFree(ix);
+    }
+    return -1;
+  }
+  memcpy(v, verts, vbytes);
+  memcpy(ix, indices, ibytes);
+  GSPGPU_FlushDataCache(v, vbytes);
+  GSPGPU_FlushDataCache(ix, ibytes);
+  g.meshes[slot].verts = v;
+  g.meshes[slot].indices = ix;
+  g.meshes[slot].used = 1;
+  return slot;
+}
+
+void ctr_gpu_mesh_delete(int mesh) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+    return;
+  }
+  g.meshes[mesh].used = 2;
+  g.pending_mesh_delete[g.pending_mesh_delete_count++] = mesh;
+}
+
+void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
+                       int first_index, int index_count) {
+  if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
+      index_count < 3) {
+    return;
+  }
+  check_cmdbuf();
+  use_program(PROG_MESH);
+  /* final = gl_to_pica * clip */
+  C3D_Mtx m;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      float acc = 0.0f;
+      for (int k = 0; k < 4; k++) {
+        acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
+      }
+      m.r[r].c[3 - c] = acc;
+    }
+  }
+  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip, &m);
+  apply_state(state, 1);
+  C3D_BufInfo* buf = C3D_GetBufInfo();
+  BufInfo_Init(buf);
+  BufInfo_Add(buf, g.meshes[mesh].verts, 16, 3, 0x210);
+  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
+                   g.meshes[mesh].indices + first_index);
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
 }
 
 void ctr_gpu_get_stats(ctr_gpu_stats* out) {

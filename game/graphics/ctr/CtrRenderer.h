@@ -22,6 +22,7 @@
 
 class CtrVram;
 class CtrDirect;
+class CtrLevels;
 
 struct CtrRenderState {
   const u8* ee_mem = nullptr;
@@ -76,10 +77,12 @@ class CtrRenderer {
   ~CtrRenderer();
   void render_frame(const void* ee_mem, u32 chain_offset);
   CtrVram& vram() { return *m_vram; }
+  CtrLevels& levels() { return *m_levels; }
 
  private:
   void dispatch_buckets_jak1(DmaFollower dma);
   std::unique_ptr<CtrVram> m_vram;
+  std::unique_ptr<CtrLevels> m_levels;
   std::vector<std::unique_ptr<CtrBucketRenderer>> m_buckets;
   CtrRenderState m_rs;
 };

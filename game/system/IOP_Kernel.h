@@ -57,7 +57,12 @@ struct IopThread {
 
   IopThread(std::string n, void (*f)(), s32 ID, u32 pri)
       : name(std::move(n)), function(f), priority(pri), thID(ID) {
+#ifdef __3DS__
+    // 3 MB per IOP thread is 30 MB on the 3DS. The overlord threads need far less.
+    thread = co_create(0x80000, functionWrapper);
+#else
     thread = co_create(0x300000, functionWrapper);
+#endif
   }
 
   ~IopThread() { co_delete(thread); }

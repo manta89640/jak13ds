@@ -35,10 +35,17 @@ struct SoftTex {
   std::vector<uint8_t> rgba;
 };
 
+struct SoftMesh {
+  bool used = false;
+  std::vector<uint8_t> verts;  // c3l::Vertex
+  std::vector<uint16_t> indices;
+};
+
 struct SoftState {
   std::vector<uint8_t> color;  // RGBA8, top row first
   std::vector<float> depth;
   std::vector<SoftTex> textures;
+  std::vector<SoftMesh> meshes;
   int frame = 0;
   std::string dump_dir;
   int dump_every = 0;
@@ -87,8 +94,14 @@ void sample(const SoftTex& tex, const ctr_draw_state& st, float s, float t, floa
   }
 }
 
-void shade_pixel(const ctr_draw_state& st, int px, int py, float z, const float col[4], float s,
-                 float t) {
+void shade_pixel(const ctr_draw_state& st,
+                 int px,
+                 int py,
+                 float z,
+                 const float col[4],
+                 float s,
+                 float t,
+                 bool tex_alpha_full = false) {
   // color in GS units (0x80 = 1.0 for vertex color / alpha)
   float r = col[0], g = col[1], b = col[2], a = col[3];
   static const bool force_white = getenv("CTR_SOFT_WHITE") != nullptr;
@@ -109,7 +122,9 @@ void shade_pixel(const ctr_draw_state& st, int px, int py, float z, const float 
       r = tc[0] * r / 128.f;
       g = tc[1] * g / 128.f;
       b = tc[2] * b / 128.f;
-      if (st.tcc) {
+      if (tex_alpha_full) {
+        a = tc[3] / 255.f * a;
+      } else if (st.tcc) {
         a = tc[3] * a / 128.f;
       }
     }
@@ -152,6 +167,9 @@ void shade_pixel(const ctr_draw_state& st, int px, int py, float z, const float 
       case CTR_BLEND_ADD_DST_A:
         o = src[i] * (d[3] / 128.f) + dst;
         break;
+      case CTR_BLEND_ONE_ONE:
+        o = src[i] + dst;
+        break;
       default:
         o = src[i];
         break;
@@ -163,7 +181,7 @@ void shade_pixel(const ctr_draw_state& st, int px, int py, float z, const float 
   }
 }
 
-void raster_triangle(const ctr_draw_state& st, const ctr_vertex* v) {
+void raster_triangle(const ctr_draw_state& st, const ctr_vertex* v, bool tex_alpha_full = false) {
   // to screen: x in [-1, 1] -> [40, 360], y in [-1, 1] -> [240, 0]
   float sx[3], sy[3];
   for (int i = 0; i < 3; i++) {
@@ -193,7 +211,7 @@ void raster_triangle(const ctr_draw_state& st, const ctr_vertex* v) {
       float z = w0 * v[0].z + w1 * v[1].z + w2 * v[2].z;
       float s = w0 * v[0].s + w1 * v[1].s + w2 * v[2].s;
       float t = w0 * v[0].t + w1 * v[1].t + w2 * v[2].t;
-      shade_pixel(st, px, py, z, col, s, t);
+      shade_pixel(st, px, py, z, col, s, t, tex_alpha_full);
     }
   }
 }
@@ -296,6 +314,115 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   g_soft.cur.draws++;
   for (int i = 0; i + 2 < count; i += 3) {
     raster_triangle(*state, verts + i);
+    g_soft.cur.triangles++;
+  }
+}
+
+int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int /*size*/) {
+  // untile to RGBA8 (see c3l::tiled_index)
+  std::vector<uint8_t> rgba(w * h * 4);
+  const uint16_t* texels = (const uint16_t*)data;
+  auto morton8 = [](uint32_t x, uint32_t y) {
+    return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
+           ((y & 4) << 3);
+  };
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      uint32_t ty = h - 1 - y;
+      uint32_t idx = ((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8(x & 7, ty & 7);
+      uint16_t v = texels[idx];
+      uint8_t* p = &rgba[4 * (x + y * w)];
+      if (format == 0) {
+        p[0] = ((v >> 11) & 31) << 3;
+        p[1] = ((v >> 5) & 63) << 2;
+        p[2] = (v & 31) << 3;
+        p[3] = 255;
+      } else {
+        p[0] = ((v >> 12) & 15) * 17;
+        p[1] = ((v >> 8) & 15) * 17;
+        p[2] = ((v >> 4) & 15) * 17;
+        p[3] = (v & 15) * 17;
+      }
+    }
+  }
+  return ctr_gpu_tex_create(w, h, rgba.data());
+}
+
+int ctr_gpu_mesh_create(const void* verts,
+                        int vertex_count,
+                        const uint16_t* indices,
+                        int index_count) {
+  int slot = -1;
+  for (size_t i = 0; i < g_soft.meshes.size(); i++) {
+    if (!g_soft.meshes[i].used) {
+      slot = (int)i;
+      break;
+    }
+  }
+  if (slot < 0) {
+    slot = (int)g_soft.meshes.size();
+    g_soft.meshes.emplace_back();
+  }
+  auto& m = g_soft.meshes[slot];
+  m.used = true;
+  m.verts.assign((const uint8_t*)verts, (const uint8_t*)verts + vertex_count * 16);
+  m.indices.assign(indices, indices + index_count);
+  return slot;
+}
+
+void ctr_gpu_mesh_delete(int mesh) {
+  if (mesh >= 0 && mesh < (int)g_soft.meshes.size()) {
+    g_soft.meshes[mesh] = SoftMesh();
+  }
+}
+
+void ctr_gpu_draw_mesh(const ctr_draw_state* state,
+                       const float clip[16],
+                       int mesh,
+                       int first_index,
+                       int index_count) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+    return;
+  }
+  const auto& m = g_soft.meshes[mesh];
+  g_soft.cur.draws++;
+  for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
+    ctr_vertex tri[3];
+    bool ok = true;
+    for (int k = 0; k < 3; k++) {
+      const uint8_t* src = &m.verts[16 * m.indices[i + k]];
+      int16_t pos[3], st[2];
+      memcpy(pos, src, 6);
+      memcpy(st, src + 8, 4);
+      float in[4] = {(float)pos[0], (float)pos[1], (float)pos[2], 1.f};
+      float c[4];
+      for (int r = 0; r < 4; r++) {
+        c[r] = clip[4 * r] * in[0] + clip[4 * r + 1] * in[1] + clip[4 * r + 2] * in[2] +
+               clip[4 * r + 3];
+      }
+      if (c[3] < 1e-3f) {
+        ok = false;  // crude near clipping: drop the triangle
+        break;
+      }
+      tri[k].x = c[0] / c[3];
+      tri[k].y = c[1] / c[3];
+      tri[k].z = (1.f - c[2] / c[3]) * 0.5f;
+      tri[k].s = st[0] / 1024.f;
+      tri[k].t = st[1] / 1024.f;
+      tri[k].r = src[12];
+      tri[k].g = src[13];
+      tri[k].b = src[14];
+      tri[k].a = src[15];
+    }
+    if (!ok) {
+      continue;
+    }
+    // behind the far plane / outside z
+    if ((tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
+        (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
+      continue;
+    }
+    raster_triangle(*state, tri, true);
     g_soft.cur.triangles++;
   }
 }

@@ -1,0 +1,28 @@
+; (AI-assisted)
+; Vertex shader for static meshes (level backgrounds, c3l::Vertex): quantized positions go through
+; one matrix straight to clip space (camera, chunk origin/scale, screen rotation all folded in).
+
+.fvec clip[4]
+.fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255), z: 1.0
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+
+.proc main
+  mov r0.xyz, inpos
+  mov r0.w, scales.zzzz
+
+  dp4 outpos.x, clip[0], r0
+  dp4 outpos.y, clip[1], r0
+  dp4 outpos.z, clip[2], r0
+  dp4 outpos.w, clip[3], r0
+
+  mul outtc0, scales.xxxx, intex
+  mul outclr, scales.yyyy, inclr
+  end
+.end
