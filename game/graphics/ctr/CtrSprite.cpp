@@ -314,7 +314,7 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
         static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
         static std::vector<u64> dumped;
-        if (dump_dir && dumped.size() < 48 &&
+        if (dump_dir && dumped.size() < 200 &&
             std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
           dumped.push_back(ad.tex0_data);
           std::vector<u32> rgba;
