@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "common/goal_constants.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 #include "common/versions/versions.h"
@@ -55,10 +56,12 @@ int main(int /*argc*/, char** /*argv*/) {
     fs::create_directories(data_dir / "log", ec);
     ctr_stdio_tee((data_dir / "log" / "stdout.log").string().c_str());
   }
-  printf("OpenGOAL %d.%d for 3DS (%s)\n", versions::GOAL_VERSION_MAJOR,
-         versions::GOAL_VERSION_MINOR, ctr_is_new3ds() ? "New 3DS" : "Old 3DS");
-  printf("heap: %u KB, linear free: %u KB\n", ctr_app_mem_free() / 1024,
-         ctr_linear_mem_free() / 1024);
+  ctr_mem_info mem;
+  ctr_get_mem_info(&mem);
+  printf("OpenGOAL %d.%d for 3DS (%s, %s)\n", versions::GOAL_VERSION_MAJOR,
+         versions::GOAL_VERSION_MINOR, mem.model, mem.is_hbl ? "3dsx" : "installed");
+  printf("memory: app %u MB, heap %u MB, linear %u MB\n", mem.app_region_total >> 20,
+         mem.heap_size >> 20, mem.linear_size >> 20);
 
   if (!file_util::setup_project_path(data_dir)) {
     printf("could not use %s\n", data_dir.string().c_str());
@@ -75,8 +78,33 @@ int main(int /*argc*/, char** /*argv*/) {
   lg::set_flush_level(lg::level::debug);
   lg::disable_ansi_colors();
   lg::initialize();
-  lg::info("3DS: {}, heap {} KB, linear free {} KB", ctr_is_new3ds() ? "New 3DS" : "Old 3DS",
-           ctr_app_mem_free() / 1024, ctr_linear_mem_free() / 1024);
+  lg::info("3DS: {} ({}), started as {}", mem.model, mem.is_new3ds ? "New" : "Old",
+           mem.is_hbl ? "3dsx (Homebrew Launcher)" : "installed title (CIA)");
+  lg::info("3DS memory: application region {} KB ({} KB used), heap {} KB, linear {} KB ({} KB "
+           "free)",
+           mem.app_region_total / 1024, mem.app_region_used / 1024, mem.heap_size / 1024,
+           mem.linear_size / 1024, mem.linear_free / 1024);
+
+  lg::info("3DS: system core (core 1) for the IOP/IO threads: {}",
+           ctr_syscore_available() ? "yes (80%)" : "no, everything on core 0");
+
+  // The EE memory (48 MB) is one malloc; the rest of the runtime needs about 20 MB more.
+  constexpr unsigned kHeapNeeded = (unsigned)EE_MAIN_MEM_SIZE + (20u << 20);
+  if (mem.heap_size < kHeapNeeded) {
+    char text[512];
+    snprintf(text, sizeof(text),
+             "Not enough memory: %u MB of heap, the game needs %u MB.\n\n"
+             "Install the CIA (it asks for the New 3DS\n124 MB mode) and start it from the\n"
+             "HOME Menu. A .3dsx started from the\nHomebrew Launcher only gets the memory of\n"
+             "the app it runs in; hold R while starting\na game (title takeover) to get more.\n"
+             "An Old 3DS doesn't have enough memory.\n",
+             mem.heap_size >> 20, kHeapNeeded >> 20);
+    lg::error("{}", text);
+    ctr_message_wait("Not enough memory", text);
+    lg::finish();
+    ctr_platform_exit();
+    return 1;
+  }
 
   {
     std::error_code ec;
@@ -100,6 +128,16 @@ int main(int /*argc*/, char** /*argv*/) {
       std::ifstream f(flag.string());
       f >> every;
       ctr_gfx::set_screenshots((data_dir / "log").string(), every > 0 ? every : 600);
+    }
+  }
+
+  {
+    // sdmc:/3ds/jak1/pad_script.txt: scripted controller input for tests (game/sce/pad_script.h)
+    std::error_code ec;
+    auto script = fs::path(OPENGOAL_3DS_SD_ROOT) / "pad_script.txt";
+    if (fs::exists(script, ec)) {
+      setenv("OPENGOAL_PAD_SCRIPT", script.string().c_str(), 1);
+      lg::info("pad script: {}", script.string());
     }
   }
 

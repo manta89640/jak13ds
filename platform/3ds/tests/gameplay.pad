@@ -1,0 +1,100 @@
+# (AI-assisted) automated gameplay test: title -> new game -> skip the intro -> walk, jump, attack
+# frames are game frames; 'wait' stops the clock until a state is reached (game/sce/pad_script.h)
+0 wait *target* target-title-wait
+60 start
+66 -
+150 x
+156 -
+190 x
+196 -
+230 x
+236 -
+270 x
+276 -
+310 x
+316 -
+350 x
+356 -
+390 x
+396 -
+430 x
+436 -
+470 x
+476 -
+510 x
+516 -
+550 x
+556 -
+590 x
+596 -
+630 x
+636 -
+670 x
+676 -
+710 x
+716 -
+750 x
+756 -
+790 x
+796 -
+860 triangle
+866 -
+920 triangle
+926 -
+980 triangle
+986 -
+1040 triangle
+1046 -
+1100 triangle
+1106 -
+1160 triangle
+1166 -
+1220 triangle
+1226 -
+1280 triangle
+1286 -
+1340 triangle
+1346 -
+1400 triangle
+1406 -
+1460 triangle
+1466 -
+1520 triangle
+1526 -
+1580 triangle
+1586 -
+1640 triangle
+1646 -
+1700 triangle
+1706 -
+1760 triangle
+1766 -
+3000 wait *target* target-stance
+3060 log in the game: first position
+3060 pos *target*
+3090 ly=0
+3180 ly=0 pos *target*
+3180 ly=0 x
+3186 ly=0
+3226 ly=0 pos *target*
+3236 -
+3266 x
+3272 -
+3282 pos *target*
+3312 square
+3318 -
+3328 pos *target*
+3368 circle
+3374 -
+3384 pos *target*
+3424 r1
+3444 r1 pos *target*
+3454 -
+3474 lx=0
+3564 lx=0 pos *target*
+3564 lx=255
+3654 lx=255 pos *target*
+3654 -
+3714 pos *target*
+3714 print *target*
+3724 log done

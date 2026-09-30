@@ -18,6 +18,7 @@
 
 #include "game/common/game_common_types.h"
 #include "game/kernel/common/klisten.h"
+#include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/common/ksocket.h"
@@ -137,9 +138,14 @@ void KernelCheckAndDispatch() {
     }
 
     auto time_ms = kernel_dispatch_timer.getMs();
+    kperf::add(kperf::Cat::DISPATCH, (u64)(time_ms * 1000));
+    kperf::frame_done();
+#ifndef __3DS__
+    // (on the 3DS, the stats from kperf are shown once a second instead)
     if (time_ms > 50) {
       lg::print("Kernel dispatch time: {:.3f} ms\n", time_ms);
     }
+#endif
 
     ClearPending();
 

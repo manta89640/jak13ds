@@ -5,6 +5,7 @@
 #include "game/graphics/display.h"
 #include "game/graphics/gfx.h"
 #include "game/kernel/common/kernel_types.h"
+#include "game/sce/pad_script.h"
 #include "game/system/hid/input_bindings.h"
 
 #ifdef __3DS__
@@ -69,6 +70,28 @@ int scePadRead(int port, int /*slot*/, u8* rdata) {
   cpad->valid = 0;  // success
 
   cpad->status = 0x70 /* (dualshock2) */ | (20 / 2); /* (dualshock2 data size) */
+
+  // scripted input for automated tests (pad_script.h) replaces controller 0
+  if (port == 0 && pad_script::active()) {
+    auto state = pad_script::next_frame();
+    cpad->button0 = state.buttons;
+    cpad->leftx = state.lx;
+    cpad->lefty = state.ly;
+    cpad->rightx = state.rx;
+    cpad->righty = state.ry;
+    for (int i = 0; i < 12; i++) {
+      cpad->abutton[i] = 0;
+    }
+    // pressure: full for the pressure sensitive buttons that are held
+    static constexpr int kPressureButtons[12] = {
+        PadData::DPAD_RIGHT, PadData::DPAD_LEFT, PadData::DPAD_UP, PadData::DPAD_DOWN,
+        PadData::TRIANGLE,   PadData::CIRCLE,    PadData::CROSS,   PadData::SQUARE,
+        PadData::L1,         PadData::R1,        PadData::L2,      PadData::R2};
+    for (int i = 0; i < 12; i++) {
+      cpad->abutton[i] = (state.buttons & (1 << kPressureButtons[i])) ? 255 : 0;
+    }
+    return 32;
+  }
 
 #ifdef __3DS__
   // 3DS buttons and circle pad (C-stick on New 3DS) are controller 0. No second controller.

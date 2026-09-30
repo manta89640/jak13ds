@@ -26,6 +26,7 @@
 #include "game/kernel/jak1/kmachine.h"
 #include "game/kernel/jak1/kprint.h"
 #include "game/mips2c/mips2c_table.h"
+#include "game/sce/pad_script.h"
 
 using namespace jak1_symbols;
 
@@ -1501,7 +1502,76 @@ s32 test_function(s32 arg0, s32 arg1, s32 arg2, s32 arg3) {
  *
  * This takes care of all initialization that isn't for the hardware itself.
  */
+namespace {
+//! "print SYM" in a pad script (pad_script.h)
+void pad_script_print_symbol(const char* name) {
+  auto sym = find_symbol_from_c(name);
+  if (!sym.offset) {
+    lg::warn("[pad script] no symbol {}", name);
+    return;
+  }
+  cprintf("[pad script] %s: ", name);
+  print_object(sym->value);
+  cprintf("\n");
+}
+
+//! "wait SYM STATE" in a pad script: the state name of the process in a symbol
+std::string pad_script_state_name(const char* name) {
+  auto sym = find_symbol_from_c(name);
+  if (!sym.offset) {
+    return "";
+  }
+  u32 proc = sym->value;
+  // a process: a basic in GOAL memory, not #f. state is at layout offset 56 (gkernel-h.gc).
+  if (proc == s7.offset || (proc & OFFSET_MASK) != BASIC_OFFSET || proc < 0x100000 ||
+      proc >= (u32)EE_MAIN_MEM_SIZE) {
+    return "";
+  }
+  u32 state = *Ptr<u32>(proc + 56 - 4);
+  if (state == s7.offset || (state & OFFSET_MASK) != BASIC_OFFSET) {
+    return "";
+  }
+  // state is a stack-frame: its name is at layout offset 4
+  u32 state_name = *Ptr<u32>(state + 4 - 4);
+  if ((state_name & OFFSET_MASK) != BASIC_OFFSET) {
+    return "";
+  }
+  return info(Ptr<Symbol>(state_name))->str->data();
+}
+
+//! "pos SYM" in a pad script: (-> (the process-drawable SYM) root trans), in meters
+bool pad_script_position(const char* name, float* xyz) {
+  auto sym = find_symbol_from_c(name);
+  if (!sym.offset) {
+    return false;
+  }
+  u32 proc = sym->value;
+  if (proc == s7.offset || (proc & OFFSET_MASK) != BASIC_OFFSET || proc < 0x100000 ||
+      proc >= (u32)EE_MAIN_MEM_SIZE) {
+    return false;
+  }
+  // process-drawable root is at layout offset 112, trsqv trans at 16
+  u32 root = *Ptr<u32>(proc + 112 - 4);
+  if (root < 0x100000 || root >= (u32)EE_MAIN_MEM_SIZE || (root & OFFSET_MASK) != BASIC_OFFSET) {
+    return false;
+  }
+  const float* trans = Ptr<float>(root + 16 - 4).c();
+  for (int i = 0; i < 3; i++) {
+    xyz[i] = trans[i] / 4096.f;
+  }
+  return true;
+}
+
+void pad_script_exit() {
+  MasterExit = RuntimeExitStatus::EXIT;
+}
+}  // namespace
+
 s32 InitHeapAndSymbol() {
+  pad_script::set_print_symbol_hook(pad_script_print_symbol);
+  pad_script::set_exit_hook(pad_script_exit);
+  pad_script::set_state_name_hook(pad_script_state_name);
+  pad_script::set_position_hook(pad_script_position);
   Timer heap_init_timer;
   // reset all mips2c functions
   Mips2C::gLinkedFunctionTable = {};

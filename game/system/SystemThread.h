@@ -45,8 +45,9 @@ class SystemThread {
 
   std::string name = "invalid";
 #ifdef __3DS__
-  // std::thread cannot set a stack size, and libctru's default is only 32 KB.
-  pthread_t thread{};
+  // std::thread cannot set a stack size or a core, and libctru's default stack is only 32 KB.
+  // A libctru Thread (ctr_thread_create).
+  void* thread = nullptr;
 #else
   std::thread thread;
 #endif

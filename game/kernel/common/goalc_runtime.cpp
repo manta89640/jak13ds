@@ -28,6 +28,10 @@
 
 #include "fmt/format.h"
 
+#if defined(__3DS__)
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 #if !defined(_WIN32) && !defined(__3DS__) && !defined(GOALC_NO_DLOPEN)
 #define GOALC_USE_DLOPEN 1
 #include <dlfcn.h>
@@ -199,6 +203,11 @@ uint64_t goalc_get_sp(void) {
 
 void goalc_break(void) {
   lg::error("[goalc] (break) at pp #x{:x}", goalc_pp);
+#if defined(__3DS__)
+  char detail[64];
+  snprintf(detail, sizeof(detail), "GOAL (break), pp #x%x", (unsigned)goalc_pp);
+  ctr_crash("The game stopped (GOAL break)", detail);
+#endif
 #if defined(SIGTRAP)
   raise(SIGTRAP);
 #else

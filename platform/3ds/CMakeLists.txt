@@ -138,6 +138,7 @@ set(OG3DS_KERNEL_SOURCES
   kernel/common/klisten.cpp
   kernel/common/kmachine.cpp
   kernel/common/kmalloc.cpp
+  kernel/common/kperf.cpp
   kernel/common/kmemcard.cpp
   kernel/common/kprint.cpp
   kernel/common/kscheme.cpp
@@ -194,6 +195,7 @@ set(OG3DS_RUNTIME_SOURCES
   sce/libdma.cpp
   sce/libgraph.cpp
   sce/libpad.cpp
+  sce/pad_script.cpp
   sce/libscf.cpp
   sce/sif_ee_memcard.cpp
   sce/sif_ee.cpp

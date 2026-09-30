@@ -30,6 +30,7 @@
 #include "game/kernel/common/klink.h"
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kmalloc.h"
+#include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/common/ksocket.h"
@@ -593,9 +594,16 @@ void InitMachine_PCPort() {
  * If DiskBooting, will load the GAME CGO, containing the engine, and calls "play", the function
  * which should prepare the game engine.
  */
+namespace {
+u32 syncv_timed(u32 mode) {
+  kperf::Scope perf_scope(kperf::Cat::VSYNC);
+  return sceGsSyncV(mode);
+}
+}  // namespace
+
 void InitMachineScheme() {
   make_function_symbol_from_c("put-display-env", PutDisplayEnv);       // used in drawable
-  make_function_symbol_from_c("syncv", sceGsSyncV);                    // used in drawable
+  make_function_symbol_from_c("syncv", syncv_timed);                    // used in drawable
   make_function_symbol_from_c("sync-path", sceGsSyncPath);             // used
   make_function_symbol_from_c("reset-path", sceGsResetPath);           // used in dma
   make_function_symbol_from_c("reset-graph", sceGsResetGraph);         // used

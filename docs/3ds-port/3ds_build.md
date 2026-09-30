@@ -30,6 +30,69 @@ Status: everything compiles and `gk.3dsx` links. Sizes: 2.3 MB of code and 1.3 M
 not been run on hardware or in an emulator yet. Expected first failure: allocating the 128 MB of
 EE memory (see "Changes needed" below).
 
+## Playing on a real 3DS
+
+(AI-assisted.) Needs a New 3DS / New 2DS XL with custom firmware (Luma3DS) and the game files
+built from your own copy of Jak 1 (same `out/jak1/iso` + `c3l` as for the emulator).
+
+### What to copy to the SD card
+
+Stage the files into a folder with `stage_sd.sh --sd <folder>` (or the SD card's mount point):
+
+```sh
+platform/3ds/tools/build_cmodules.sh                  # GOAL -> C modules, gk.3dsx (see M3 below)
+platform/3ds/tools/make_cia.sh                        # build-3ds/jak1.cia
+platform/3ds/tools/stage_sd.sh --proj ../p3ds --sd /Volumes/3DS --clean-logs
+cp build-3ds/jak1.cia /Volumes/3DS/cias/              # any folder FBI can browse
+```
+
+On the card: `3ds/jak1/gk.3dsx`, `3ds/jak1/data/out/jak1/iso/*` (~1.3 GB), `3ds/jak1/data/out/jak1/c3l/*`.
+
+### Install and start (recommended: CIA)
+
+1. Put the SD card back, start FBI, open `cias/`, select `jak1.cia`, "Install CIA".
+2. Start "OpenGOAL Jak1" from the HOME Menu (it has an icon but no banner animation).
+
+The CIA asks for the New 3DS 124 MB memory mode (`platform/3ds/cia/gk.rsf`: `SystemModeExt:
+124MB`, 804 MHz, L2 cache). The game needs about 95 MB: 48 MB of PS2 memory, 12 MB of code, 24 MB
+of GPU memory, plus buffers.
+
+### Without installing: gk.3dsx
+
+A `.3dsx` runs inside another title's memory:
+- From the Homebrew Launcher started as an applet (Rosalina menu, Mii Maker...) there is much less
+  memory: the game shows "Not enough memory" and waits for START.
+- With title takeover (hold R while starting a game from the HOME Menu, which opens the
+  Homebrew Launcher in that game's place) it gets that game's memory: 64 MB for most games,
+  124 MB only for New 3DS exclusive titles (for example Xenoblade). Use the CIA instead.
+
+### Screens and logs
+
+- Top screen: the game. Bottom screen: 3 lines of stats (fps, ms per frame for game logic,
+  rendering, waiting for vsync, heap use), then the log.
+- On a crash (failed assert, CPU exception, GOAL `(break)`), the bottom screen shows what happened
+  and the last log lines, and waits for START; then the app exits. CPU exceptions are shown only if
+  Luma3DS lets the app handle them; otherwise Luma's exception screen appears (take a photo).
+- Logs: `sdmc:/3ds/jak1/data/log/stdout.log` (everything printed) and `gk.log` (debug level).
+- Old 3DS / Old 2DS: not enough memory (64 MB); the game says so and exits.
+
+### Controls
+
+Face buttons by position, like the PS2 pad:
+
+| 3DS | PS2 | Jak |
+|---|---|---|
+| B (bottom) | Cross | jump (hold for higher), confirm in menus |
+| Y (left) | Square | punch; roll / dive while running |
+| A (right) | Circle | spin kick |
+| X (top) | Triangle | look around (first person), back in menus |
+| L, R | L1, R1 | crouch (+ jump: high jump, + square: roll) |
+| ZL, ZR | L2, R2 | not used in gameplay |
+| Circle Pad | left stick | move |
+| C-stick | right stick | camera (New 3DS only) |
+| Start / Select | Start / Select | pause menu / (unused) |
+| touch screen top / bottom half | L3 / R3 | (unused in Jak 1) |
+
 ## Platform pieces
 
 - **Types:** on `__3DS__`, `s32`/`u32` are `int`/`unsigned int` (`common/common_types.h`),
