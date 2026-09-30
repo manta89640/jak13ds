@@ -233,3 +233,55 @@ C-mode frames are bigger than native ones. The runtime-side stack floor for susp
 needs to cover this (runtime work). Before that, the log shows `kmalloc: !alloc mem global-object
 (11264000 bytes)` during `play`, which the small memory layout has to account for.
 
+
+## Renderer (M4 phase 1)
+
+(AI-assisted.) `GfxPipeline::Ctr`, in `game/graphics/ctr`. It is the default on the 3DS, and on
+PC it runs with `gk --ctr-gfx`.
+
+- **Structure:**
+  - `CtrRenderer` walks the Jak 1 DMA chain bucket by bucket, like
+    `OpenGLRenderer::dispatch_buckets_jak1`, using 3DS bucket renderers. Buckets without one are
+    skipped.
+  - It runs synchronously on the EE thread: `send_chain` draws the frame, `vsync` waits for the
+    vertical blank.
+- **GPU interface:** `ctr_gpu.h`, a small C API with plain types (see "Types" above). There are
+  two implementations:
+  - `platform/3ds/port/ctr_gpu_citro3d.c`: citro3d, with two picasso shaders
+    (`platform/3ds/shaders`).
+  - `game/graphics/ctr/ctr_gpu_soft.cpp`: a software rasterizer for PC. It writes PNG frames
+    (`gk --ctr-gfx --ctr-dump DIR --ctr-dump-every N`), which lets the renderer be tested without
+    an emulator.
+- **Text, menus, debug draws** (buckets `debug`, `debug-no-zbuf`, `subtitle`): `CtrDirect`
+  interprets the GIF packets, like `DirectRenderer`.
+  - Textures come from `CtrVram`, an emulation of the 4 MB GS VRAM.
+  - Texture page uploads (`texture-upload-now` and the `*-tex` buckets) and the font's
+    `texture-relocate` are written into it.
+  - Textures are decoded on first use from the TEX0 register: PSMCT32/24/16, PSMT8, PSMT4,
+    PSMT8H/4HH/4HL, with CLUTs.
+  - Decoded textures are cached and dropped when their VRAM changes.
+- **Level backgrounds:** tfrag and static tie from `.c3l` files (`docs/3ds-port/c3l_format.md`,
+  made by `ctr_level_converter`).
+  - They are drawn from the `TFRAG_LEVEL0/1` buckets with the camera the game puts in those
+    buckets. The math is the PC tfrag shader's, folded into one matrix per chunk.
+  - Chunks are frustum culled by bounding sphere.
+  - Levels load on first use from `out/jak1/c3l/<name>.c3l` and unload through `set_levels`.
+- **Not drawn yet:** merc (characters), generic, shrub, sprites / HUD, sky, ocean, particles,
+  shadows, eyes, debug lines, fog, scissor.
+- **Screenshots:** `stage_sd.sh --screenshots N` makes gk save the top screen every N frames to
+  `data/log/shot_<frame>.bmp`, read back from the GPU render target. `run_emu.sh` converts them
+  to PNG in `build-3ds/emu-run/`.
+
+```sh
+build-plat-native/tools/ctr_level_converter --all out/jak1/fr3 ../p3ds/out/jak1/c3l
+platform/3ds/tools/stage_sd.sh --proj ../p3ds --clean-logs --screenshots 120
+platform/3ds/tools/run_emu.sh --seconds 150
+```
+
+- **Status in Azahar (New 3DS):** the title screen shows village1 (tfrag + tie) and the PRESS
+  START text.
+  - About 1250 draws and 103k triangles per frame (the title camera sees nearly the whole level).
+  - About 8-9 fps, against about 13 fps for the game logic alone with the null renderer.
+- **Memory:**
+  - `ctr_port.c` sets the linear heap to 24 MB. The regular heap gets about 80 MB.
+  - IOP coroutine stacks are 512 KB on the 3DS (3 MB on PC; about 9 threads).

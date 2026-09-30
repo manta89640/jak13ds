@@ -14,9 +14,10 @@
 
 /* libctru splits free memory between the regular heap (malloc) and the linear heap (GPU/DSP
  * buffers) at startup, capping the regular heap at 24 MB by default. The runtime needs one big
- * malloc for the EE memory (48 MB in the small layout), so keep the linear heap small; the
- * regular heap gets the rest. Raise this when the renderer needs more linear memory. */
-u32 __ctru_linear_heap_size = 8 << 20;
+ * malloc for the EE memory (48 MB in the small layout), so set the linear heap explicitly; the
+ * regular heap gets the rest. Linear memory holds the renderer's vertex ring buffer (4 MB),
+ * textures and the loaded level backgrounds (~5 MB per level). */
+u32 __ctru_linear_heap_size = 24 << 20;
 
 static int s_console = 0;
 static volatile int s_gpu_active = 0;
@@ -196,10 +197,12 @@ void ctr_thread_sleep_us(unsigned int us) {
  * which without the Homebrew Launcher jumps to address 0. */
 static FILE* s_tee_file;
 void abort(void) {
-  static const char msg[] = "gk: abort() called";
-  svcOutputDebugString(msg, sizeof(msg) - 1);
+  char msg[96];
+  int len = snprintf(msg, sizeof(msg), "gk: abort() called from %p (addr2line -e gk.elf)",
+                     __builtin_return_address(0));
+  svcOutputDebugString(msg, len);
   if (s_tee_file) {
-    fputs("\ngk: abort() called\n", s_tee_file);
+    fprintf(s_tee_file, "\n%s\n", msg);
     fflush(s_tee_file);
   }
   svcBreak(USERBREAK_PANIC);

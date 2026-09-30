@@ -10,6 +10,8 @@
 #   --sd     root of the SD card (default: Azahar's virtual SD card, read from its qt-config.ini,
 #            normally ~/Library/Application Support/Azahar/sdmc). For a real card: its mount point.
 #   --gk     gk.3dsx to copy (default: build-3ds/gk.3dsx)
+#   --c3l    folder with the level backgrounds (default: <proj>/out/jak1/c3l if it exists;
+#            make them with: ctr_level_converter --all out/jak1/fr3 <dir>)
 #   --args   write args.txt (default: remove it, gk then uses "-boot -cbackend")
 #   --listener  create the "listener" flag file (Wi-Fi REPL)
 #   --clean-logs  delete data/log before the run
@@ -23,6 +25,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PROJ=""
 SD=""
 GK="$ROOT/build-3ds/gk.3dsx"
+C3L=""
 ARGS=""
 HAVE_ARGS=0
 LISTENER=0
@@ -35,6 +38,7 @@ while [ $# -gt 0 ]; do
     --proj) PROJ="$2"; shift 2 ;;
     --sd) SD="$2"; shift 2 ;;
     --gk) GK="$2"; shift 2 ;;
+    --c3l) C3L="$2"; shift 2 ;;
     --args) ARGS="$2"; HAVE_ARGS=1; shift 2 ;;
     --listener) LISTENER=1; shift ;;
     --clean-logs) CLEAN_LOGS=1; shift ;;
@@ -78,6 +82,17 @@ for f in "$ISO"/*; do
 done
 
 copy "$GK" "$BASE/gk.3dsx"
+
+# level backgrounds for the 3DS renderer
+[ -n "$C3L" ] || C3L="$PROJ/out/jak1/c3l"
+if [ -d "$C3L" ]; then
+  rm -rf "$DATA/out/jak1/c3l"
+  mkdir -p "$DATA/out/jak1/c3l"
+  for f in "$C3L"/*.c3l; do
+    copy "$f" "$DATA/out/jak1/c3l/"
+  done
+  echo "staged level backgrounds from $C3L"
+fi
 
 if [ "$HAVE_ARGS" = 1 ]; then
   echo "$ARGS" > "$BASE/args.txt"

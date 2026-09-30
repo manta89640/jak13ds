@@ -17,6 +17,7 @@
 #include "fmt/format.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
+#include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
@@ -94,7 +95,8 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
 // Renderer
 // ---------------------------------------------------------------------------
 
-CtrRenderer::CtrRenderer() : m_vram(std::make_unique<CtrVram>()) {
+CtrRenderer::CtrRenderer()
+    : m_vram(std::make_unique<CtrVram>()), m_levels(std::make_unique<CtrLevels>()) {
   using jak1::BucketId;
   m_buckets.resize((int)BucketId::MAX_BUCKETS);
   auto set = [&](BucketId id, std::unique_ptr<CtrBucketRenderer> r) {
@@ -107,6 +109,11 @@ CtrRenderer::CtrRenderer() : m_vram(std::make_unique<CtrVram>()) {
                   BucketId::PRE_SPRITE_TEX}) {
     set(id, std::make_unique<CtrTextureUploadRenderer>("tex", (int)id));
   }
+  // level backgrounds (tfrag + tie from the .c3l files) are drawn from the tfrag buckets
+  set(BucketId::TFRAG_LEVEL0, std::make_unique<CtrTfragRenderer>("l0-tfrag", (int)BucketId::TFRAG_LEVEL0,
+                                                                 m_levels.get()));
+  set(BucketId::TFRAG_LEVEL1, std::make_unique<CtrTfragRenderer>("l1-tfrag", (int)BucketId::TFRAG_LEVEL1,
+                                                                 m_levels.get()));
   set(BucketId::DEBUG,
       std::make_unique<CtrDirectBucketRenderer>("debug", (int)BucketId::DEBUG, m_vram.get(), true));
   set(BucketId::DEBUG_NO_ZBUF,
@@ -242,7 +249,11 @@ void ctr_texture_relocate(u32 destination, u32 source, u32 format) {
   }
 }
 
-void ctr_set_levels(const std::vector<std::string>&) {}
+void ctr_set_levels(const std::vector<std::string>& levels) {
+  if (g_ctr) {
+    g_ctr->levels().set_wanted(levels);
+  }
+}
 void ctr_set_active_levels(const std::vector<std::string>&) {}
 void ctr_force_reload_all() {}
 void ctr_force_reload_level(const std::string&) {}

@@ -39,6 +39,7 @@ enum ctr_blend {
   CTR_BLEND_SUB,         // Cd - Cs * As
   CTR_BLEND_FIX,         // Cs * fix + Cd * (1 - fix)
   CTR_BLEND_ADD_DST_A,   // Cs * Ad + Cd
+  CTR_BLEND_ONE_ONE,     // Cs + Cd
 };
 
 enum ctr_test {
@@ -82,6 +83,24 @@ void ctr_gpu_tex_delete(int handle);
 
 /* Draw a triangle list. */
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count);
+
+/* ---------------- static meshes (level background, see c3l_format.h) ----------------
+ * Vertex layout = c3l::Vertex (16 bytes): s16 pos[3], s16 pad, s16 st[2] (* 1024), u8 rgba[4]
+ * (GS units). Textured draws: rgb = tex.rgb * v.rgb / 128, a = tex.a (0xff = 1) * v.a / 128.
+ */
+
+/* Texture from texels already in the GPU tiled layout. format: 0 = RGB565, 1 = RGBA4444. */
+int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int size);
+
+/* Copy a vertex / index (u16, triangle list) buffer to GPU memory. Returns a handle or -1. */
+int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
+                        int index_count);
+void ctr_gpu_mesh_delete(int mesh);
+
+/* Draw part of a mesh. clip = row-major 4x4 matrix from (pos.x, pos.y, pos.z, 1) (quantized) to
+ * OpenGL-style clip space (x, y in [-w, w] cover the 4:3 area, z in [-w, w], near = -w). */
+void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
+                       int first_index, int index_count);
 
 /* Request a screenshot of the next finished frame (written when it is available: after the next
  * ctr_gpu_frame_begin on the 3DS). PNG on PC, BMP on the 3DS. */
