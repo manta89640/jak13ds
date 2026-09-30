@@ -648,7 +648,10 @@
       (set! (-> v1-6 ambient quad) (-> a0-3 ambient quad)))
     (lod-set! arg1 0)
     (logior! (-> arg1 status) (draw-status was-drawn))
-    (draw-bones-hud arg1 arg3))
+    ;; 3DS: HUD models (the orb and power cell icons, the progress menu's models, collected
+    ;; items flying to the HUD) go through generic merc here, and the 3DS renderer has no generic
+    ;; renderer: draw them with merc instead.
+    (#if TARGET_3DS (draw-bones-hud-merc arg1 arg3) (draw-bones-hud arg1 arg3)))
   0
   (none))
 

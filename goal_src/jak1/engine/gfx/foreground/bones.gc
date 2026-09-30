@@ -909,13 +909,17 @@
   :bitfield #t
   (update-verts 0)
   (disable-fog 1)
-  (pc-blerc 2))
+  (pc-blerc 2)
+  (hud 3) ;; 3DS: a HUD model (draw-bones-hud-merc), projected with the isometric matrix
+  )
 
 (deftype pc-merc-flags (structure)
   ((enable-mask       uint64)
    (ignore-alpha-mask uint64)
    (effect-count      uint8)
-   (bit-flags         pc-merc-bits)))
+   (bit-flags         pc-merc-bits)
+   (hud-y-scale       float :offset 20) ;; 3DS: y scale of the isometric matrix, for hud models
+   ))
 
 (defun draw-control-uses-water-bucket ((dc draw-control))
   "Does this draw control use a water bucket?"
@@ -990,9 +994,14 @@
             (set! (-> flags effect-count) (-> merc-ctrl header effect-count))
             (set! (-> flags bit-flags) (the pc-merc-bits 0))
             (when update-verts
-              (if (= update-verts 'blerc)
-                (logior! (-> flags bit-flags) (pc-merc-bits pc-blerc))
-                (logior! (-> flags bit-flags) (pc-merc-bits update-verts))))
+              (cond
+                ((= update-verts 'blerc) (logior! (-> flags bit-flags) (pc-merc-bits pc-blerc)))
+                ;; 3DS: HUD models are drawn with merc (draw-bones-hud-merc), and projected like
+                ;; generic's HUD draws, with the isometric matrix instead of the perspective one
+                ((= update-verts 'hud)
+                 (logior! (-> flags bit-flags) (pc-merc-bits hud))
+                 (set! (-> flags hud-y-scale) (-> *math-camera* isometric vector 1 y)))
+                (else (logior! (-> flags bit-flags) (pc-merc-bits update-verts)))))
             (set! (-> flags enable-mask) enable-mask)
             (set! (-> flags ignore-alpha-mask) ignore-alpha-mask))
           (&+! dma-buf (* 16 2))
@@ -1547,6 +1556,10 @@
         (set! (-> (the (pointer uint128) dma-start))
               (logior (-> spr-work work foreground bone-mem work next-tag quad) (shl (the-as int a2-2) 32)))
         (when (= (-> draw data-format) 1)
+          ;; 3DS: pc-merc-draw-request sends *merc-bucket-info* light, which is only set below for
+          ;; envmap effects: set it to the HUD lights for every model.
+          (#when TARGET_3DS
+            (quad-copy! (the pointer (-> *merc-bucket-info* light)) (the pointer (scratchpad-object vu-lights :offset 64)) 7))
           (let ((mgeo (-> draw lod-set lod 0 geo)))
             (dotimes (effect-idx (the-as int (-> mgeo header effect-count)))
               (cond
@@ -1595,9 +1608,16 @@
                  (set! (-> *merc-bucket-info* effect effect-idx color-fade) (new 'static 'rgba :r #x80 :g #x80 :b #x80 :a #x80))
                  (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 0))
                  (set! (-> *merc-bucket-info* effect effect-idx ignore-alpha) (the-as uint 1)))
-                (else (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 1))))))
+                (else
+                 ;; 3DS: no generic renderer, so the other effects are drawn with merc too
+                 (#if TARGET_3DS
+                   (begin
+                     (set! (-> *merc-bucket-info* effect effect-idx color-fade) (new 'static 'rgba))
+                     (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 0))
+                     (set! (-> *merc-bucket-info* effect effect-idx ignore-alpha) (the-as uint 0)))
+                   (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 1)))))))
           (when (logtest? *vu1-enable-user* (vu1-renderer-mask merc))
-            (set! (-> buf base) (pc-merc-draw-request draw (the pointer a2-2) (the pointer mat-data) #f (the (pointer float) 0)))
+            (set! (-> buf base) (pc-merc-draw-request draw (the pointer a2-2) (the pointer mat-data) (#if TARGET_3DS 'hud #f) (the (pointer float) 0)))
             (set! a2-2 (-> buf base))))
         (let ((a0-17 (logand (the int a2-2) 48)))
           (b! (zero? a0-17) cfg-22 :delay (set! at-2 #x20000000))
