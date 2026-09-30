@@ -86,10 +86,11 @@ void CtrMercRenderer::handle_setup(const DmaTransfer& setup) {
   // linear map of t. v = (camera xyz, -1): the bone matrices give -X * p with w = -1.
   const float fx = m_fog.x();
   constexpr float k = 512.f / 448.f;  // Jak 1 scissor adjust
-  float L[16] = {fx / 256.f, 0, 0, (m_hvdf_offset.x() - 2048.f) / 256.f,
-                 0, -fx / 128.f * k, 0, -(m_hvdf_offset.y() - 2048.f) / 128.f * k,
-                 0, 0, fx / 8388608.f, m_hvdf_offset.z() / 8388608.f - 1.f,
-                 0, 0, 0, 1};
+  const float L[16] = {fx / 256.f, 0, 0, (m_hvdf_offset.x() - 2048.f) / 256.f,
+                       0, -fx / 128.f * k, 0, -(m_hvdf_offset.y() - 2048.f) / 128.f * k,
+                       0, 0, fx / 8388608.f, m_hvdf_offset.z() / 8388608.f - 1.f,
+                       0, 0, 0, 1};
+  memcpy(m_screen, L, sizeof(L));
   float P[16];
   for (int r = 0; r < 4; r++) {
     for (int c = 0; c < 4; c++) {
@@ -102,6 +103,24 @@ void CtrMercRenderer::handle_setup(const DmaTransfer& setup) {
   }
   mul44(m_clip, L, P);
   m_have_camera = true;
+}
+
+void CtrMercRenderer::hud_clip(float* out, float y_scale) const {
+  // HUD models (draw-bones-hud-merc): generic draws them with *math-camera* isometric instead of
+  // the perspective matrix, columns (1 0 0 0) (0 y 0 0) (0 0 -1 0) (0 0 16777215-hvdf.z pfog0).
+  // w is then constant: the model's coordinates are GS pixels around the screen center.
+  const float iso[4][4] = {{1.f, 0, 0, 0},
+                           {0, y_scale, 0, 0},
+                           {0, 0, -1.f, 0},
+                           {0, 0, 16777215.f - m_hvdf_offset.z(), m_fog.x()}};
+  float P[16];
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      P[4 * r + c] = iso[c][r];
+    }
+    P[4 * r + 3] = -P[4 * r + 3];  // D, as in handle_setup
+  }
+  mul44(out, m_screen, P);
 }
 
 void CtrMercRenderer::snapshot_bones(DmaFollower& dma, CtrRenderState& rs) {
@@ -281,6 +300,15 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   input += 128 + 16 * i;
   PcMercFlags flags;
   memcpy(&flags, input, sizeof(flags));
+  // HUD models (the orb and power cell icons...): isometric projection, see hud_clip
+  float hud[16];
+  const float* clip = m_clip;
+  if (flags.bitflags & 8) {
+    float y_scale;
+    memcpy(&y_scale, input + 20, sizeof(y_scale));
+    hud_clip(hud, y_scale);
+    clip = hud;
+  }
 
   // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model)
   if (model->blerc_count) {
@@ -366,7 +394,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       st.atest = CTR_TEST_GEQUAL;
       st.aref = 17;  // x2 in the GPU state: 34 / 255
     }
-    ctr_gpu_draw_skinned(&st, m_clip, palette_rows, draw.palette_count, light_data, model->mesh,
+    ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count, light_data, model->mesh,
                          draw.first_index, draw.index_count);
     m_stats.draws++;
   }

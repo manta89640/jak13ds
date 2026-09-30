@@ -186,7 +186,7 @@ void raster_triangle(const ctr_draw_state& st, const ctr_vertex* v, bool tex_alp
   // to screen: x in [-1, 1] -> [40, 360], y in [-1, 1] -> [240, 0]
   float sx[3], sy[3];
   for (int i = 0; i < 3; i++) {
-    sx[i] = 200.f + v[i].x * 160.f;
+    sx[i] = 200.f + v[i].x * 200.f;  // x in [-1, 1]: the whole 400 pixel width (5:3)
     sy[i] = 120.f - v[i].y * 120.f;
   }
   float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);

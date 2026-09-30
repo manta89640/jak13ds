@@ -132,7 +132,8 @@
       (vu-lights<-light-group! vu-lgt lgt))
     (lod-set! draw 0)
     (logior! (-> draw status) (draw-status was-drawn))
-    (draw-bones-hud draw buf))
+    ;; 3DS: no generic renderer, draw with merc (see dma-add-process-drawable-hud)
+    (#if TARGET_3DS (draw-bones-hud-merc draw buf) (draw-bones-hud draw buf)))
   0
   (none))
 
@@ -150,7 +151,8 @@
       (set! (-> vu-lgt ambient quad) (-> lgt ambient quad)))
     (lod-set! draw 0)
     (logior! (-> draw status) (draw-status was-drawn))
-    (draw-bones-hud draw buf))
+    ;; 3DS: no generic renderer, draw with merc (see dma-add-process-drawable-hud)
+    (#if TARGET_3DS (draw-bones-hud-merc draw buf) (draw-bones-hud draw buf)))
   0
   (none))
 

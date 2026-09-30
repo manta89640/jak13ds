@@ -51,6 +51,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
  private:
   void handle_setup(const DmaTransfer& setup);
   void handle_model(const DmaTransfer& init, CtrRenderState& rs);
+  void hud_clip(float* out, float y_scale) const;
 
   CtrLevels* m_levels;
   const class CtrEyeRenderer* m_eyes = nullptr;
@@ -59,6 +60,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   math::Vector4f m_perspective[4];
   math::Vector4f m_fog;
   float m_clip[16];
+  float m_screen[16];  // the GS screen mapping part of m_clip (for HUD models' projection)
   bool m_have_camera = false;
   Stats m_stats;
   std::vector<CtrMercMat> m_snap;
