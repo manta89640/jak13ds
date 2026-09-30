@@ -13,7 +13,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 BRANCH=3ds-port
 
-commit_time() {  # newest commit on the branch touching the given paths (or anything)
+commit_time() {  # newest commit on the branch touching the given paths (or any code: not docs/)
+  if [ $# -eq 0 ]; then set -- . ':(exclude)docs'; fi
   git -C "$ROOT" log -1 --format=%ct "$BRANCH" -- "$@" 2>/dev/null || echo 0
 }
 mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
