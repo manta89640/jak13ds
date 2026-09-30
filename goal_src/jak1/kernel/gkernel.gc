@@ -227,6 +227,11 @@
     (set! (-> this process) parent-process)
     ;; start stack at the top
     (set! (-> this sp) stack-top)
+    ;; C backend: the runtime finds a suspended thread's saved state through pc and rreg 0. The
+    ;; memory may hold an old thread (a relocated process leaves a copy behind), so clear them.
+    (#when (eq? INSTRUCTION_SET 'c)
+      (set! (-> this pc) (the pointer 0))
+      (set! (-> this rreg 0) 0))
     (set! (-> this stack-top) stack-top)
     ;; remember the previous thread, in case we're a temp thread
     (set! (-> this previous) (-> parent-process top-thread))

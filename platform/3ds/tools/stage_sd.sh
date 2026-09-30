@@ -18,6 +18,7 @@
 #   --clean-user  delete user/ (settings, saves) before the run
 #   --screenshots N  gk saves a screenshot every N frames to data/log/shot_<frame>.bmp
 #   --pad-script FILE  scripted controller input (game/sce/pad_script.h), for automated tests
+#   --use-syscore  run the IOP / listener / worker threads on core 1 (experimental)
 #
 # Files are copied with APFS clones (cp -c) when possible, so staging 1.3 GB is instant on macOS.
 set -euo pipefail
@@ -34,6 +35,7 @@ CLEAN_LOGS=0
 CLEAN_USER=0
 SHOTS=0
 PAD_SCRIPT=""
+USE_SYSCORE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
     --clean-user) CLEAN_USER=1; shift ;;
     --screenshots) SHOTS="$2"; shift 2 ;;
     --pad-script) PAD_SCRIPT="$2"; shift 2 ;;
+    --use-syscore) USE_SYSCORE=1; shift ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
@@ -117,6 +120,8 @@ fi
 if [ "$LISTENER" = 1 ]; then touch "$BASE/listener"; else rm -f "$BASE/listener"; fi
 if [ "$CLEAN_LOGS" = 1 ]; then rm -rf "$DATA/log"; fi
 if [ "$CLEAN_USER" = 1 ]; then rm -rf "$BASE/user"; fi
+if [ "$USE_SYSCORE" = 1 ]; then touch "$BASE/use_syscore"; else rm -f "$BASE/use_syscore"; fi
+rm -f "$BASE/single_core"
 if [ -n "$PAD_SCRIPT" ]; then cp "$PAD_SCRIPT" "$BASE/pad_script.txt"; else rm -f "$BASE/pad_script.txt"; fi
 if [ "$SHOTS" != 0 ]; then echo "$SHOTS" > "$BASE/screenshots"; else rm -f "$BASE/screenshots"; fi
 

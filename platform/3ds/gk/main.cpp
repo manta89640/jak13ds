@@ -59,7 +59,7 @@ int main(int /*argc*/, char** /*argv*/) {
   ctr_mem_info mem;
   ctr_get_mem_info(&mem);
   printf("OpenGOAL %d.%d for 3DS (%s, %s)\n", versions::GOAL_VERSION_MAJOR,
-         versions::GOAL_VERSION_MINOR, mem.model, mem.is_hbl ? "3dsx" : "installed");
+         versions::GOAL_VERSION_MINOR, mem.model, mem.is_hbl ? "Homebrew Launcher" : "direct");
   printf("memory: app %u MB, heap %u MB, linear %u MB\n", mem.app_region_total >> 20,
          mem.heap_size >> 20, mem.linear_size >> 20);
 
@@ -79,14 +79,14 @@ int main(int /*argc*/, char** /*argv*/) {
   lg::disable_ansi_colors();
   lg::initialize();
   lg::info("3DS: {} ({}), started as {}", mem.model, mem.is_new3ds ? "New" : "Old",
-           mem.is_hbl ? "3dsx (Homebrew Launcher)" : "installed title (CIA)");
+           mem.is_hbl ? "a 3dsx from the Homebrew Launcher" : "a title (CIA, or an emulator)");
   lg::info("3DS memory: application region {} KB ({} KB used), heap {} KB, linear {} KB ({} KB "
            "free)",
            mem.app_region_total / 1024, mem.app_region_used / 1024, mem.heap_size / 1024,
            mem.linear_size / 1024, mem.linear_free / 1024);
 
   lg::info("3DS: system core (core 1) for the IOP/IO threads: {}",
-           ctr_syscore_available() ? "yes (80%)" : "no, everything on core 0");
+           ctr_syscore_available() ? "yes (80%, experimental: use_syscore)" : "no, core 0");
 
   // The EE memory (48 MB) is one malloc; the rest of the runtime needs about 20 MB more.
   constexpr unsigned kHeapNeeded = (unsigned)EE_MAIN_MEM_SIZE + (20u << 20);
