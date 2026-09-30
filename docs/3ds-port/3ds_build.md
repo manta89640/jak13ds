@@ -82,7 +82,9 @@ A `.3dsx` runs inside another title's memory:
   -cbackend`), `listener` (Wi-Fi REPL), `screenshots` (a number N: save the top screen every N
   frames to `data/log`), `pad_script.txt` (scripted input, see below), `use_syscore`
   (experimental: IOP / IO threads on core 1; hangs at boot in Azahar, untested on hardware),
-  `perf_sections` (per-section frame timing in the log, `stage_sd.sh --perf-sections`).
+  `perf_sections` (per-section frame timing in the log, `stage_sd.sh --perf-sections`), `sound`
+  (audio output through the DSP; its content is the mixer thread's core, default 1;
+  `stage_sd.sh --sound [core]`, see "Sound" below).
 
 ### Automated gameplay test (scripted input)
 
@@ -183,10 +185,20 @@ Face buttons by position, like the PS2 pad:
   `game/system/hid/hid_null.cpp` provides link stubs for `DisplayManager`, `InputManager` and
   `sdl_util`. The kernel only reaches them through `Display::GetMainDisplay()`, which is always
   null on the 3DS.
-- **Sound:** `snd::Player` without cubeb. On the 3DS a thread advances the 240 Hz handler tick,
-  so sounds start and stop and `snd_GetTick()` moves, but no samples are synthesized. Audio
-  output (ndsp) is later work. FakePlayer was not used because its API doesn't match what
-  `sndshim.cpp` calls.
+- **Sound:** `snd::Player` without cubeb. The whole stack (overlord, RPCs, bank loading, 989snd
+  handlers, VAG streaming) runs as on PC. Audio output is opt-in with the flag file
+  `sdmc:/3ds/jak1/sound` (`platform/3ds/port/ctr_port.c`, `ctr_audio_*`): the 989snd software
+  mixer (48 kHz stereo, PS2 SPU emulation, unchanged) runs on its own thread at `CTR_PRIO_SOUND`
+  on the core named in the file (default 1, the system core: the app gets 80% of it with
+  `APT_SetAppCpuTimeLimit` and may create one thread there, so cores 0 and 2 keep their time),
+  filling 3 buffers of 1024 frames (21 ms each) that one ndsp channel plays; the DSP resamples
+  to its 32.7 kHz. It needs the DSP firmware `sdmc:/3ds/dspfirm.cdc` (real hardware: dump it
+  once with the DSP1 homebrew; Azahar's HLE audio accepts any file, the scripts create a
+  placeholder). Without the flag file, or if the DSP can't start, a thread advances the 240 Hz
+  handler tick without synthesizing samples, voices are dropped as they start
+  (`vagvoice.cpp`), and the VAG stream position for spooled cutscenes comes from the frame
+  counter (`iso.cpp`, fake VAG clock) instead of the stream voice, which never moves then.
+  `kperf` reports the mixer's time as `sound` in the "perf threads" line.
 - **Listener / DECI2:** `common/cross_sockets` compiles against libctru's BSD sockets.
   - `set_socket_timeout` does nothing; `SO_REUSEPORT` is skipped when it isn't defined.
   - `gk` starts `soc:U` (1 MB of RAM) only if `sdmc:/3ds/jak1/listener` exists. Otherwise the

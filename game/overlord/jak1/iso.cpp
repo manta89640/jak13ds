@@ -682,7 +682,10 @@ u32 ISOThread() {
             }
           }
           if (thing) {
-            if (!in_progress_vag_command || in_progress_vag_command->fd) {
+            // (AI-assisted) The real clock reads the stream voice's position, which only moves
+            // when the synth runs (3DS without audio output: never). The fake clock counts
+            // frames instead, so spooled cutscenes keep their timing.
+            if (snd_HasOutput() && (!in_progress_vag_command || in_progress_vag_command->fd)) {
               gRealVAGClock = 0;
               gRealVAGClockS = 0;
               gRealVAGClockRunning = true;

@@ -70,7 +70,10 @@ void ctr_port_set_gpu_active(int active) {
   s_gpu_active = active;
 }
 static int s_irrst = 0;
-static int s_syscore = 0;
+static int s_syscore = 0;   /* IOP / IO threads on core 1 (use_syscore) */
+static int s_cpu_limit = 0; /* the app got a share of core 1 (APT_SetAppCpuTimeLimit) */
+static int s_sound = 0;
+static int s_sound_core = 1;
 static u32* s_soc_buffer = NULL;
 
 int ctr_platform_init(int enable_console) {
@@ -93,11 +96,24 @@ int ctr_platform_init(int enable_console) {
   /* Experimental, off by default: in Azahar, boot hangs at the first IOP file load when the IOP
    * thread runs on core 1 (not investigated further; untested on hardware). Turned on by the file
    * sdmc:/3ds/jak1/use_syscore. */
-  if (access("/3ds/jak1/use_syscore", F_OK) == 0) {
-    s_syscore = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80)) ? 1 : 0;
-  } else {
-    s_syscore = 0;
+  /* Audio output (flag file sdmc:/3ds/jak1/sound, content: the mixer's core, default 1). The
+   * mixer thread on core 1 also needs the time limit; the kernel allows one app thread there. */
+  {
+    FILE* f = fopen("/3ds/jak1/sound", "r");
+    if (f) {
+      s_sound = 1;
+      int core = 1;
+      if (fscanf(f, "%d", &core) == 1 && core >= 0 && core <= 3) {
+        s_sound_core = core;
+      }
+      fclose(f);
+    }
   }
+  int want_syscore = access("/3ds/jak1/use_syscore", F_OK) == 0;
+  if (want_syscore || (s_sound && s_sound_core == 1)) {
+    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80)) ? 1 : 0;
+  }
+  s_syscore = (want_syscore && s_cpu_limit) ? 1 : 0;
   /* C-stick / ZL / ZR on New 3DS (and the Circle Pad Pro) */
   s_irrst = R_SUCCEEDED(irrstInit()) ? 1 : 0;
   return 0;
@@ -611,7 +627,7 @@ int ctr_syscore_available(void) {
 
 int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio, int core,
                       void** handle) {
-  if (core == CTR_CORE_SYS && !s_syscore) {
+  if (core == CTR_CORE_SYS && !s_cpu_limit) {
     core = CTR_CORE_APP;
   }
   ThreadStart* start = (ThreadStart*)malloc(sizeof(ThreadStart));
@@ -636,4 +652,130 @@ void ctr_thread_join(void* handle) {
   Thread t = (Thread)handle;
   threadJoin(t, U64_MAX);
   threadFree(t);
+}
+
+/* ---------------- audio output (ndsp) ---------------- */
+
+int ctr_sound_config(int* core) {
+  if (core) {
+    *core = s_sound_core;
+  }
+  return s_sound;
+}
+
+#define AUDIO_MAX_BUFS 4
+static int s_audio_on = 0;
+static short* s_audio_mem = NULL; /* linear memory: nbufs * frames * 2 samples */
+static ndspWaveBuf s_audio_wbuf[AUDIO_MAX_BUFS];
+static unsigned int s_audio_frames = 0;
+static unsigned int s_audio_nbufs = 0;
+static unsigned int s_audio_next = 0; /* the next buffer to hand out (round robin) */
+static LightEvent s_audio_event;
+
+static void audio_frame_callback(void* data) {
+  (void)data;
+  LightEvent_Signal(&s_audio_event);
+}
+
+int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
+  if (s_audio_on) {
+    return 0;
+  }
+  if (nbufs < 2) {
+    nbufs = 2;
+  }
+  if (nbufs > AUDIO_MAX_BUFS) {
+    nbufs = AUDIO_MAX_BUFS;
+  }
+  Result rc = ndspInit();
+  if (R_FAILED(rc)) {
+    printf("[ctr] ndspInit failed: 0x%08lx (DSP firmware sdmc:/3ds/dspfirm.cdc missing?)\n",
+           (unsigned long)rc);
+    return -1;
+  }
+  const size_t bytes = (size_t)nbufs * frames * 2 * sizeof(short);
+  s_audio_mem = (short*)linearAlloc(bytes);
+  if (!s_audio_mem) {
+    printf("[ctr] audio: linearAlloc(%u) failed\n", (unsigned int)bytes);
+    ndspExit();
+    return -2;
+  }
+  memset(s_audio_mem, 0, bytes);
+  DSP_FlushDataCache(s_audio_mem, bytes);
+
+  ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+  ndspChnReset(0);
+  ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
+  ndspChnSetRate(0, (float)rate);
+  ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
+  float mix[12];
+  memset(mix, 0, sizeof(mix));
+  mix[0] = 1.0f; /* front left */
+  mix[1] = 1.0f; /* front right */
+  ndspChnSetMix(0, mix);
+
+  memset(s_audio_wbuf, 0, sizeof(s_audio_wbuf));
+  for (unsigned int i = 0; i < nbufs; i++) {
+    s_audio_wbuf[i].data_vaddr = s_audio_mem + (size_t)i * frames * 2;
+    s_audio_wbuf[i].nsamples = frames;
+    s_audio_wbuf[i].status = NDSP_WBUF_FREE;
+  }
+  s_audio_frames = frames;
+  s_audio_nbufs = nbufs;
+  s_audio_next = 0;
+  LightEvent_Init(&s_audio_event, RESET_ONESHOT);
+  ndspSetCallback(audio_frame_callback, NULL);
+  s_audio_on = 1;
+  printf("[ctr] audio: ndsp on, %u Hz, %u buffers of %u frames (%.1f ms each)\n", rate, nbufs,
+         frames, 1000.0 * frames / rate);
+  return 0;
+}
+
+void ctr_audio_exit(void) {
+  if (!s_audio_on) {
+    return;
+  }
+  ndspSetCallback(NULL, NULL);
+  ndspChnWaveBufClear(0);
+  ndspExit();
+  linearFree(s_audio_mem);
+  s_audio_mem = NULL;
+  s_audio_on = 0;
+}
+
+short* ctr_audio_get_buffer(void) {
+  if (!s_audio_on) {
+    return NULL;
+  }
+  ndspWaveBuf* wb = &s_audio_wbuf[s_audio_next];
+  if (wb->status == NDSP_WBUF_FREE || wb->status == NDSP_WBUF_DONE) {
+    return (short*)wb->data_vaddr;
+  }
+  return NULL;
+}
+
+void ctr_audio_submit(short* buffer) {
+  if (!s_audio_on) {
+    return;
+  }
+  ndspWaveBuf* wb = &s_audio_wbuf[s_audio_next];
+  if ((short*)wb->data_vaddr != buffer) {
+    printf("[ctr] audio: submit out of order\n");
+    return;
+  }
+  DSP_FlushDataCache(buffer, (size_t)s_audio_frames * 2 * sizeof(short));
+  ndspChnWaveBufAdd(0, wb);
+  s_audio_next = (s_audio_next + 1) % s_audio_nbufs;
+}
+
+void ctr_audio_wait(unsigned int us) {
+  if (!s_audio_on) {
+    svcSleepThread((s64)us * 1000);
+    return;
+  }
+  LightEvent_WaitTimeout(&s_audio_event, (s64)us * 1000);
+}
+
+unsigned int ctr_audio_dropped_frames(void) {
+  return s_audio_on ? ndspGetDroppedFrames() : 0;
 }

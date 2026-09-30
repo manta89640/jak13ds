@@ -90,6 +90,14 @@ int main(int /*argc*/, char** /*argv*/) {
 
   lg::info("3DS: system core (core 1) for the IOP/IO threads: {}",
            ctr_syscore_available() ? "yes (80%, experimental: use_syscore)" : "no, core 0");
+  {
+    int sound_core = 1;
+    if (ctr_sound_config(&sound_core)) {
+      lg::info("3DS: sound on (flag file sound), mixer thread on core {}", sound_core);
+    } else {
+      lg::info("3DS: sound off (no flag file sound)");
+    }
+  }
 
   // The EE memory (48 MB) is one malloc; the rest of the runtime needs about 20 MB more.
   constexpr unsigned kHeapNeeded = (unsigned)EE_MAIN_MEM_SIZE + (20u << 20);

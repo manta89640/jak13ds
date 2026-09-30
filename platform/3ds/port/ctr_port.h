@@ -50,6 +50,7 @@ int ctr_stdio_tee(const char* path);
  * threads of the same priority, so a thread that polls (the EE, the IOP kernel) must run at a
  * lower priority than the threads it waits for. See docs/3ds-port/3ds_build.md. */
 enum {
+  CTR_PRIO_SOUND = 0x2E,    /* audio mixer: fills the DSP's buffers, must never be starved */
   CTR_PRIO_MAIN = 0x30,     /* main thread (libctru default): APT + gfx loop, mostly sleeping */
   CTR_PRIO_IO = 0x31,       /* short blocking helpers: fake ISO file reads, sound tick */
   CTR_PRIO_IOP = 0x34,      /* IOP kernel (polls during overlord init) */
@@ -69,8 +70,28 @@ enum {
 int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio, int core,
                       void** handle);
 void ctr_thread_join(void* handle);
-/* 1 if threads can run on the system core (core 1) */
+/* 1 if the IOP / IO threads should run on the system core (core 1): the use_syscore flag file,
+ * and the app got a share of that core. */
 int ctr_syscore_available(void);
+
+/* Audio output through the DSP (libctru ndsp): one stereo PCM16 channel that a software mixer
+ * feeds, `nbufs` buffers of `frames` stereo frames each, resampled by the DSP from `rate` Hz.
+ * Needs the DSP firmware (sdmc:/3ds/dspfirm.cdc on real hardware; Azahar's HLE accepts any file).
+ * ctr_audio_init returns 0 on success, or a negative error (nothing was started). */
+int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs);
+void ctr_audio_exit(void);
+/* The next buffer to fill (`frames` * 2 s16 samples, interleaved L/R), or NULL if all are still
+ * queued to the DSP. Buffers are returned in order; fill it, then ctr_audio_submit it. */
+short* ctr_audio_get_buffer(void);
+void ctr_audio_submit(short* buffer);
+/* Wait until the DSP finished a frame (about every 5 ms), or `us` microseconds. */
+void ctr_audio_wait(unsigned int us);
+/* Frames the DSP had to skip because the mixer was late (total since init). */
+unsigned int ctr_audio_dropped_frames(void);
+
+/* Sound settings from the flag file sdmc:/3ds/jak1/sound: returns 1 if it exists (audio output
+ * on); *core = the core for the mixer thread (the file's content, default 1). */
+int ctr_sound_config(int* core);
 
 /* Set the priority of the calling thread. */
 void ctr_thread_set_priority(int prio);

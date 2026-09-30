@@ -18,11 +18,13 @@
 
 #ifdef __3DS__
 #include "game/kernel/common/kperf.h"
+#include "platform/3ds/port/ctr_port.h"
 #endif
 
 namespace snd {
 
 u8 g_global_excite = 0;
+bool g_output_active = false;
 
 Player::Player() : mVmanager(mSynth) {
   InitCubeb();
@@ -33,17 +35,74 @@ Player::~Player() {
 }
 
 #ifdef __3DS__
-#include "platform/3ds/port/ctr_port.h"
+// The DSP resamples our 48 kHz stereo stream to its own rate. 1024 frames = 21.3 ms per buffer,
+// 3 buffers = 64 ms of latency at most; the mixer wakes at every DSP frame (~5 ms) and refills
+// whatever is done.
+static constexpr unsigned kMixRate = 48000;
+static constexpr unsigned kMixFrames = 1024;
+static constexpr unsigned kMixBuffers = 3;
 
 void Player::InitCubeb() {
   mHandlerThreadStop = false;
-  mHandlerThread = std::thread(&Player::HandlerTickThread, this);
+  g_output_active = false;
+  int core = 1;
+  if (ctr_sound_config(&core)) {
+    if (ctr_audio_init(kMixRate, kMixFrames, kMixBuffers) == 0) {
+      int err = ctr_thread_create(&Player::MixerThreadEntry, this, 128 * 1024, CTR_PRIO_SOUND,
+                                  core, &mMixerThread);
+      if (err == 0) {
+        g_output_active = true;
+        lg::info("3DS sound: mixer thread on core {} (48 kHz software mix -> DSP)", core);
+      } else {
+        lg::error("3DS sound: could not create the mixer thread ({}), no audio", err);
+        ctr_audio_exit();
+      }
+    } else {
+      lg::error("3DS sound: DSP not available (sdmc:/3ds/dspfirm.cdc?), no audio");
+    }
+  } else {
+    lg::info("3DS sound: off (no sdmc:/3ds/jak1/sound flag file)");
+  }
+  if (!g_output_active) {
+    mHandlerThread = std::thread(&Player::HandlerTickThread, this);
+  }
 }
 
 void Player::DestroyCubeb() {
   mHandlerThreadStop = true;
+  if (mMixerThread) {
+    ctr_thread_join(mMixerThread);
+    mMixerThread = nullptr;
+    ctr_audio_exit();
+  }
   if (mHandlerThread.joinable()) {
     mHandlerThread.join();
+  }
+}
+
+void* Player::MixerThreadEntry(void* self) {
+  ((Player*)self)->MixerThread();
+  return nullptr;
+}
+
+void Player::MixerThread() {
+  ctr_thread_install_crash_handler();
+  u32 last_dropped = 0;
+  while (!mHandlerThreadStop) {
+    short* buf;
+    while (!mHandlerThreadStop && (buf = ctr_audio_get_buffer()) != nullptr) {
+      const u64 t_start = kperf::ticks();
+      Tick((s16Output*)buf, kMixFrames);
+      ctr_audio_submit(buf);
+      kperf::add_thread(kperf::Thread::SOUND, kperf::ticks() - t_start, 1);
+      kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, (u32)mHandlers.size());
+    }
+    u32 dropped = ctr_audio_dropped_frames();
+    if (dropped != last_dropped) {
+      lg::warn("3DS sound: DSP dropped {} frames (mixer late)", dropped - last_dropped);
+      last_dropped = dropped;
+    }
+    ctr_audio_wait(20000);
   }
 }
 

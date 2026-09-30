@@ -32,6 +32,8 @@ class Voice {
     return mADSR.GetPhase() == ADSR::Phase::Stopped;
   }
 
+  bool Stopped() { return mADSR.GetPhase() == ADSR::Phase::Stopped; }
+
   void SetPitch(u16 reg) {
     // fmt::print("VOICE[{}] PITCH WRITE {:x}\n", m_channel, reg);
     mPitch = reg;

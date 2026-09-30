@@ -92,11 +92,16 @@ class Player {
   s32 mTick{0};
 
 #ifdef __3DS__
-  // No audio output yet: a thread advances the 240 Hz sound handler tick without synthesizing
-  // samples, so sounds start/stop and snd_GetTick() moves like on PC.
+  // (AI-assisted) Two modes. With the flag file sdmc:/3ds/jak1/sound, a mixer thread (on the
+  // core the file names, default 1) runs Tick() into the DSP's buffers (ctr_audio_*). Without it,
+  // or if the DSP can't be started, a thread advances the 240 Hz sound handler tick without
+  // synthesizing samples, so sounds start/stop and snd_GetTick() moves like on PC.
   std::thread mHandlerThread;
   std::atomic<bool> mHandlerThreadStop{false};
   void HandlerTickThread();
+  void* mMixerThread{nullptr};
+  static void* MixerThreadEntry(void* self);
+  void MixerThread();
 #else
   cubeb* mCtx{nullptr};
   cubeb_stream* mStream{nullptr};
