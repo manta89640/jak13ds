@@ -20,6 +20,44 @@
  * heap free in the 124 MB mode (about 63 MB of it is used, mostly by the 48 MB of EE memory). */
 u32 __ctru_linear_heap_size = 32 << 20;
 
+extern char* fake_heap_start;
+extern char* fake_heap_end;
+extern u32 __ctru_heap;
+extern u32 __ctru_linear_heap;
+extern u32 __ctru_heap_size;
+
+/* libctru's __system_allocateHeaps, except that it doesn't stop the process when the 32 MB linear
+ * heap doesn't fit (svcBreak before main: the screen just stays on the launch screen, e.g. for a
+ * .3dsx started from the Homebrew Launcher, which only gets the memory of the app it runs in).
+ * With less memory the heaps are smaller and main() explains what to do instead. */
+void __system_allocateHeaps(void) {
+  Handle reslimit = 0;
+  if (R_FAILED(svcGetResourceLimit(&reslimit, CUR_PROCESS_HANDLE))) {
+    svcBreak(USERBREAK_PANIC);
+  }
+  s64 max_commit = 0, cur_commit = 0;
+  ResourceLimitType type = RESLIMIT_COMMIT;
+  svcGetResourceLimitLimitValues(&max_commit, reslimit, &type, 1);
+  svcGetResourceLimitCurrentValues(&cur_commit, reslimit, &type, 1);
+  svcCloseHandle(reslimit);
+  const u32 remaining = (u32)(max_commit - cur_commit) & ~0xFFFu;
+  if (__ctru_linear_heap_size > remaining / 2) {
+    __ctru_linear_heap_size = (remaining / 2) & ~0xFFFu;
+  }
+  __ctru_heap_size = remaining - __ctru_linear_heap_size;
+  if (R_FAILED(svcControlMemory(&__ctru_heap, OS_HEAP_AREA_BEGIN, 0x0, __ctru_heap_size,
+                                MEMOP_ALLOC, MEMPERM_READ | MEMPERM_WRITE))) {
+    svcBreak(USERBREAK_PANIC);
+  }
+  if (R_FAILED(svcControlMemory(&__ctru_linear_heap, 0x0, 0x0, __ctru_linear_heap_size,
+                                MEMOP_ALLOC_LINEAR, MEMPERM_READ | MEMPERM_WRITE))) {
+    svcBreak(USERBREAK_PANIC);
+  }
+  mappableInit(OS_MAP_AREA_BEGIN, OS_MAP_AREA_END);
+  fake_heap_start = (char*)__ctru_heap;
+  fake_heap_end = fake_heap_start + __ctru_heap_size;
+}
+
 static int s_console = 0;
 static FILE* s_tee_file;
 /* bottom screen: status lines (perf stats) at the top, the log below */
@@ -264,8 +302,15 @@ static void tee_to_file(const char* ptr, size_t len) {
     return;
   }
   fwrite(ptr, 1, len, s_tee_file);
+  /* at most twice a second: each flush is a write to the SD card, slow on hardware (crashes flush
+   * what is left, see ctr_crash) */
+  static u64 s_last_flush;
   if (memchr(ptr, '\n', len)) {
-    fflush(s_tee_file);
+    const u64 now = svcGetSystemTick();
+    if (now - s_last_flush > SYSCLOCK_ARM11 / 2) {
+      fflush(s_tee_file);
+      s_last_flush = now;
+    }
   }
 }
 

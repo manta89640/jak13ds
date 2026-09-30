@@ -73,9 +73,12 @@ int main(int /*argc*/, char** /*argv*/) {
   //   data/log/gk.log      the lg log at debug level
   printf("[gk] project path %s\n", data_dir.string().c_str());
   lg::set_file("gk.log", false, false);
-  lg::set_file_level(lg::level::debug);
+  // Debug lines (thousands during level loads) only with the flag file debug_log: every flush is
+  // a write to the SD card, which is slow on hardware (the emulator doesn't notice).
+  const bool debug_log = fs::exists(fs::path(OPENGOAL_3DS_SD_ROOT) / "debug_log");
+  lg::set_file_level(debug_log ? lg::level::debug : lg::level::info);
   lg::set_stdout_level(lg::level::info);
-  lg::set_flush_level(lg::level::debug);
+  lg::set_flush_level(debug_log ? lg::level::debug : lg::level::warn);
   lg::disable_ansi_colors();
   lg::initialize();
   lg::info("3DS: {} ({}), started as {}", mem.model, mem.is_new3ds ? "New" : "Old",
