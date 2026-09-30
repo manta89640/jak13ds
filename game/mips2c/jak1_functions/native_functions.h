@@ -26,6 +26,15 @@ extern const NativeImpl method_26_collide_cache;
 extern const NativeImpl method_27_collide_cache;
 extern const NativeImpl method_29_collide_cache;
 extern const NativeImpl method_32_collide_cache;
+extern const NativeImpl method_28_collide_cache;
+extern const NativeImpl method_30_collide_cache;
+extern const NativeImpl method_10_collide_cache_prim;
+extern const NativeImpl method_9_collide_puss_work;
+extern const NativeImpl method_10_collide_puss_work;
+extern const NativeImpl method_12_collide_shape_prim_mesh;
+extern const NativeImpl method_13_collide_shape_prim_mesh;
+extern const NativeImpl method_14_collide_shape_prim_mesh;
+extern const NativeImpl pc_upload_collide_frag;
 // native_sparticle.cpp
 extern const NativeImpl sp_process_block_2d;
 }  // namespace Mips2C::jak1::native

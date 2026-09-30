@@ -24,9 +24,12 @@ const u32* collide_vu0_buffer() {
   return vu0_buffer;
 }
 
-namespace pc_upload_collide_frag {
-u64 execute(void* ctxt) {
-  auto* c = (ExecutionContext*)ctxt;
+/*!
+ * __pc-upload-collide-frag (packed-data qwc vertex-count): unpacks vertex-count vertices (3 u16
+ * each) to VU0 memory as floats offset by 2^27 (x, y, z) and 1.0 (w), like the VIF unpack.
+ * Shared by the mips2c and the native version.
+ */
+void upload_collide_frag(u64 data, u64 count) {
   // vif init is
   // #x30000000 = STROW
   // #x4d000000 ROW x
@@ -39,8 +42,8 @@ u64 execute(void* ctxt) {
   // #x1000404  = STCYCL cl: 4 wl: 4
 
   // int qw_in_source = c->sgpr64(a1);
-  int qw_to_write = c->sgpr64(a2);
-  const u16* data_in = (const u16*)(g_ee_main_mem + c->sgpr64(a0));
+  int qw_to_write = count;
+  const u16* data_in = (const u16*)(g_ee_main_mem + data);
   // I don't quite get why this is wrong sometimes.
   //  ASSERT(qw_to_write * 3 == qw_in_source * 8);
   ASSERT(qw_to_write <= 128);
@@ -54,7 +57,12 @@ u64 execute(void* ctxt) {
     vu0_buffer[out_idx++] = 0x4d000000 + data_in[in_idx++];
     vu0_buffer[out_idx++] = 0x3f800000;
   }
+}
 
+namespace pc_upload_collide_frag {
+u64 execute(void* ctxt) {
+  auto* c = (ExecutionContext*)ctxt;
+  upload_collide_frag(c->sgpr64(a0), c->sgpr64(a2));
   return 0;
 
   // (vif-cmd unpack-v3-16)
@@ -63,7 +71,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("__pc-upload-collide-frag", execute, 128);
+  gLinkedFunctionTable.reg("__pc-upload-collide-frag", execute, 128,
+                           &native::pc_upload_collide_frag);
 }
 
 }  // namespace pc_upload_collide_frag
@@ -1076,7 +1085,8 @@ void link() {
   cache.debug = intern_from_c("debug").c();
   cache.format = intern_from_c("format").c();
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 28 collide-cache)", execute, 512);
+  gLinkedFunctionTable.reg("(method 28 collide-cache)", execute, 512,
+                           &native::method_28_collide_cache);
 }
 
 } // namespace method_28_collide_cache
@@ -1808,7 +1818,8 @@ void link() {
   cache.debug = intern_from_c("debug").c();
   cache.format = intern_from_c("format").c();
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 12 collide-shape-prim-mesh)", execute, 128);
+  gLinkedFunctionTable.reg("(method 12 collide-shape-prim-mesh)", execute, 128,
+                           &native::method_12_collide_shape_prim_mesh);
 }
 
 } // namespace method_12_collide_shape_prim_mesh
@@ -2054,7 +2065,8 @@ void link() {
   cache.debug = intern_from_c("debug").c();
   cache.format = intern_from_c("format").c();
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 14 collide-shape-prim-mesh)", execute, 256);
+  gLinkedFunctionTable.reg("(method 14 collide-shape-prim-mesh)", execute, 256,
+                           &native::method_14_collide_shape_prim_mesh);
 }
 
 } // namespace method_14_collide_shape_prim_mesh
@@ -2305,7 +2317,8 @@ void link() {
   cache.debug = intern_from_c("debug").c();
   cache.format = intern_from_c("format").c();
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 13 collide-shape-prim-mesh)", execute, 128);
+  gLinkedFunctionTable.reg("(method 13 collide-shape-prim-mesh)", execute, 128,
+                           &native::method_13_collide_shape_prim_mesh);
 }
 
 } // namespace method_13_collide_shape_prim_mesh
@@ -2507,7 +2520,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 30 collide-cache)", execute, 128);
+  gLinkedFunctionTable.reg("(method 30 collide-cache)", execute, 128,
+                           &native::method_30_collide_cache);
 }
 
 } // namespace method_30_collide_cache
@@ -2908,7 +2922,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.moving_sphere_sphere_intersect = intern_from_c("moving-sphere-sphere-intersect").c();
-  gLinkedFunctionTable.reg("(method 10 collide-cache-prim)", execute, 512);
+  gLinkedFunctionTable.reg("(method 10 collide-cache-prim)", execute, 512,
+                           &native::method_10_collide_cache_prim);
 }
 
 } // namespace method_10_collide_cache_prim
@@ -3077,7 +3092,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 10 collide-puss-work)", execute, 128);
+  gLinkedFunctionTable.reg("(method 10 collide-puss-work)", execute, 128,
+                           &native::method_10_collide_puss_work);
 }
 
 } // namespace method_10_collide_puss_work
@@ -3282,7 +3298,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.closest_pt_in_triangle = intern_from_c("closest-pt-in-triangle").c();
-  gLinkedFunctionTable.reg("(method 9 collide-puss-work)", execute, 256);
+  gLinkedFunctionTable.reg("(method 9 collide-puss-work)", execute, 256,
+                           &native::method_9_collide_puss_work);
 }
 
 } // namespace method_9_collide_puss_work
