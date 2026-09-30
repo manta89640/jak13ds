@@ -10,6 +10,7 @@ void register_collide_cache_tests();
 void register_joint_tests();
 void register_collide_probe_tests();
 void register_collide_mesh_tests();
+void register_collide_edge_grab_tests();
 
 void register_all() {
   register_collide_func_tests();
@@ -17,5 +18,6 @@ void register_all() {
   register_joint_tests();
   register_collide_probe_tests();
   register_collide_mesh_tests();
+  register_collide_edge_grab_tests();
 }
 }  // namespace tests
