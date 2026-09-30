@@ -90,6 +90,7 @@ if [ -z "$SD" ]; then
 fi
 GK="$SD/3ds/jak1/gk.3dsx"
 if [ -n "$CIA" ]; then
+  "$(dirname "$0")/check_fresh.sh" gk "$CIA" || exit 1
   pkill -9 -f 'Azahar.app/Contents/MacOS/azahar' 2>/dev/null || true
   echo "installing $CIA"
   # title id 00040000 0f7a1100 (UniqueId 0xF7A11 in platform/3ds/cia/gk.rsf); Azahar keeps
