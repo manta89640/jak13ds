@@ -101,14 +101,15 @@ for cfg in "${configs[@]}"; do
       "$OUT/fma/mips2c-native-test" "${test_args[@]}" || status=1
       ;;
     arm)
-      LINK_EXTRA="-static" build arm arm-linux-gnueabihf-g++ -O2 -g -marm -march=armv6k \
-        -mfpu=vfp -mfloat-abi=hard -D__3DS__
+      # like devkitARM: no PIE, no stack protector (the Ubuntu cross compiler enables both)
+      LINK_EXTRA="-static -no-pie" build arm arm-linux-gnueabihf-g++ -O2 -g -marm -march=armv6k \
+        -mfpu=vfp -mfloat-abi=hard -D__3DS__ -fno-pie -fno-stack-protector
       qemu-arm "$OUT/arm/mips2c-native-test" "${test_args[@]}" || status=1
       ;;
     bench)
       # ARM instructions per call, mips2c vs native (test args: [--scale X] test names)
-      LINK_EXTRA="-static -Wl,-Map=$OUT/bench/link.map" build bench arm-linux-gnueabihf-g++ -O2 -g \
-        -marm -march=armv6k -mfpu=vfp -mfloat-abi=hard -D__3DS__
+      LINK_EXTRA="-static -no-pie -Wl,-Map=$OUT/bench/link.map" build bench arm-linux-gnueabihf-g++ \
+        -O2 -g -marm -march=armv6k -mfpu=vfp -mfloat-abi=hard -D__3DS__ -fno-pie -fno-stack-protector
       python3 "$HERE/bench.py" "$OUT/bench/mips2c-native-test" "$OUT/bench/link.map" "${test_args[@]}"
       ;;
     coverage)

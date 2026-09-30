@@ -270,15 +270,13 @@ struct Vec4i {
 //! lq of an aligned quadword (the scratchpad vertices: spad + 32 * i, int part at 0 or 4096)
 inline Vec4i load_vec4i(u32 addr) {
   Vec4i v;
-  gload_q(&v, addr);
+  gload_q(v.v, addr);
   return v;
 }
 
 //! lq then sq of a quadword, both aligned
 inline void copy_quad(u32 dst, u32 src) {
-  u32 t[4];
-  gload_q(t, src);
-  gstore_q(dst, t);
+  gcopy_q(dst, src);
 }
 
 //! sq r0 then sw pat: the pat word of a collide-cache-tri, the rest of its quadword zero
@@ -586,12 +584,9 @@ void add_prim_mesh(const NativeArgs& args, bool collide_work_box) {
     if (pat & ignore_mask) {
       continue;
     }
-    u32 v1[4], v2[4];
-    gload_q(v1, p1);
-    gload_q(v2, p2);
-    gstore_q(out + 16, v1);
+    copy_quad(out + 16, p1);
     num_tris++;
-    gstore_q(out + 32, v2);
+    copy_quad(out + 32, p2);
     out += 64;
   }
 
