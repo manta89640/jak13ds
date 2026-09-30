@@ -53,6 +53,9 @@ On the card: `3ds/jak1/gk.3dsx`, `3ds/jak1/data/out/jak1/iso/*` (~1.3 GB), `3ds/
 1. Put the SD card back, start FBI, open `cias/`, select `jak1.cia`, "Install CIA".
 2. Start "OpenGOAL Jak1" from the HOME Menu (it has an icon but no banner animation).
 
+To try the CIA in Azahar first: `run_emu.sh --cia build-3ds/jak1.cia --stage "--proj ../p3ds"`
+(installs it in the emulator and runs the installed title).
+
 The CIA asks for the New 3DS 124 MB memory mode (`platform/3ds/cia/gk.rsf`: `SystemModeExt:
 124MB`, 804 MHz, L2 cache). The game needs about 95 MB: 48 MB of PS2 memory, 12 MB of code, 24 MB
 of GPU memory, plus buffers.
