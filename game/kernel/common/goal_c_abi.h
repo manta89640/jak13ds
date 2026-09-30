@@ -48,15 +48,20 @@ void goalc_break(void);
 // ---------------------------------------------------------------------------
 // Function values
 // ---------------------------------------------------------------------------
-// A GOAL function value f is the GOAL address of an 8-byte stub inside a code segment:
-//   u32 id     : index into goalc_fn_table, written by the linker (placeholder 0xffffffff)
-//   u32 index  : index of the function in its module (debug only)
+// A GOAL function value f is the GOAL address of an 8-byte stub inside a code segment. In object
+// files the stub is
+//   u32 0xffffffff               : placeholder
+//   u32 0x80000000 | func_index  : index of the function in its module (debug only)
+// The linker (and goalc_write_stub) replaces the start of the stub with the host address of the
+// function (sizeof(void*) bytes: the whole stub on 64-bit hosts), so a call is a load and an
+// indirect branch. Every host function also has an id in goalc_fn_table, used by the runtime to
+// allocate and deduplicate entry points.
 // The stub is preceded by the usual 4-byte `function` type tag, like native code.
 
 static inline void* goalc_fn(uint64_t f) {
-  uint32_t id;
-  memcpy(&id, goalc_mem + (uint32_t)f, 4);
-  return goalc_fn_table[id];
+  void* p;
+  memcpy(&p, goalc_mem + (uint32_t)f, sizeof(void*));
+  return p;
 }
 
 // Calling convention for compiled GOAL functions:

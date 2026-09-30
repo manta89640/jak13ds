@@ -38,6 +38,7 @@ class CFunctionEmitter {
   //! C expression to read a register value (in the register class of rv)
   std::string read(const RegVal* rv);
   //! C lvalue to write a register value (in the register class of rv). Throws for read-only regs.
+  //! The statement must be added with line() before the next write().
   std::string write(const RegVal* rv);
   //! C statement(s) for "dst = src" with the conversions of regset_common
   void move(const RegVal* dst, const RegVal* src);
@@ -47,6 +48,10 @@ class CFunctionEmitter {
   int symbol(const std::string& name);
   //! C expression for the GOAL address of static data (plus offset)
   std::string static_addr(const emitter::StaticRecord& rec, int offset);
+  //! C expressions (base, offset) for a load/store of static data (plus offset)
+  std::pair<std::string, std::string> static_access(const emitter::StaticRecord& rec, int offset);
+  //! after a call: the callee may have changed the process register
+  void after_call();
   //! C expression for the GOAL address of a function in this object
   std::string function_addr(int f_idx);
   //! C expression for a stack variable slot's GOAL address
@@ -73,6 +78,8 @@ class CFunctionEmitter {
   std::string access(const RegVal* rv, bool for_write);
   std::string var_expr(int id, RegClass want);
   std::string seg_addr(int seg, const std::string& offset);
+  //! base expression of our own segment (a local set in the prologue)
+  std::string own_seg_base();
 
   CModuleEmitter* m_module = nullptr;
   FunctionEnv* m_env = nullptr;
@@ -80,6 +87,11 @@ class CFunctionEmitter {
   std::vector<VarInfo> m_vars;
   std::vector<std::string> m_body;
   bool m_ret_is_128 = false;
+  //! the process register is read or written: it is kept in the local gc_pp, see emit()
+  bool m_uses_pp = false;
+  //! the statement being built writes the process register
+  bool m_pp_written = false;
+  bool m_uses_own_seg = false;
 };
 
 class CModuleEmitter {

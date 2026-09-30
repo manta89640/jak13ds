@@ -21,7 +21,7 @@ std::string hex(u64 x) {
 }
 
 std::string sym_value_load(CFunctionEmitter& e, const std::string& name, bool sext) {
-  return fmt::format("gc_ld_{}32(GC_SYM({}))", sext ? "s" : "u", e.symbol(name));
+  return fmt::format("gc_ld_{}32(gc_stl, GC_SYMOFF({}))", sext ? "s" : "u", e.symbol(name));
 }
 
 //! write a u64 value into a register of any class
@@ -50,9 +50,9 @@ void IR_LoadSymbolPointer::do_codegen_c(CFunctionEmitter& e) {
   if (m_name == "#f") {
     value = "gc_stl";
   } else if (m_name == "#t") {
-    value = fmt::format("(gc_stl + {})", true_symbol_offset(e.version()));
+    value = fmt::format("((u64)(u32)(gc_stl + {}))", true_symbol_offset(e.version()));
   } else if (m_name == "_empty_") {
-    value = fmt::format("(gc_stl + {})", empty_pair_offset_from_s7(e.version()));
+    value = fmt::format("((u64)(u32)(gc_stl + {}))", empty_pair_offset_from_s7(e.version()));
   } else {
     value = fmt::format("GC_SYM({})", e.symbol(m_name));
   }
@@ -60,7 +60,8 @@ void IR_LoadSymbolPointer::do_codegen_c(CFunctionEmitter& e) {
 }
 
 void IR_SetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
-  e.line(fmt::format("gc_st_u32(GC_SYM({}), {});", e.symbol(m_dest->name()), e.read(m_src)));
+  e.line(fmt::format("gc_st_u32(gc_stl, GC_SYMOFF({}), {});", e.symbol(m_dest->name()),
+                     e.read(m_src)));
 }
 
 void IR_GetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
@@ -87,8 +88,9 @@ void IR_FunctionCall::do_codegen_c(CFunctionEmitter& e) {
     sig = "void";
   }
   bool ret_wide = is_128(m_ret->ireg().reg_class);
-  e.line(fmt::format("{} = (({} (*)({}))goalc_fn({}))({});", e.write(m_ret),
+  e.line(fmt::format("{} = (({} (*)({}))gc_fn({}))({});", e.write(m_ret),
                      ret_wide ? "v128" : "u64", sig, e.read(m_func), args));
+  e.after_call();
 }
 
 void IR_RegValAddr::do_codegen_c(CFunctionEmitter& e) {
@@ -100,12 +102,12 @@ void IR_StaticVarAddr::do_codegen_c(CFunctionEmitter& e) {
 }
 
 void IR_StaticVarLoad::do_codegen_c(CFunctionEmitter& e) {
-  auto addr = e.static_addr(m_src->rec, 0);
+  auto [base, off] = e.static_access(m_src->rec, 0);
   auto c = m_dest->ireg().reg_class;
   if (c == RegClass::FLOAT) {
-    e.line(fmt::format("{} = gc_ld_f32({});", e.write(m_dest), addr));
+    e.line(fmt::format("{} = gc_ld_f32({}, {});", e.write(m_dest), base, off));
   } else if (c == RegClass::VECTOR_FLOAT) {
-    e.line(fmt::format("{} = gc_ld_v128({});", e.write(m_dest), addr));
+    e.line(fmt::format("{} = gc_ld_v128({}, {});", e.write(m_dest), base, off));
   } else {
     e.error("unsupported static var load");
   }
@@ -270,7 +272,7 @@ void IR_GetStackAddr::do_codegen_c(CFunctionEmitter& e) {
 void IR_Nop::do_codegen_c(CFunctionEmitter&) {}
 
 void IR_LoadConstOffset::do_codegen_c(CFunctionEmitter& e) {
-  auto addr = fmt::format("{} + {}", e.read(m_base), m_offset);
+  auto addr = fmt::format("{}, {}", e.read(m_base), m_offset);
   auto c = m_dest->ireg().reg_class;
   auto d = e.write(m_dest);
   if (c == RegClass::GPR_64) {
@@ -298,7 +300,7 @@ void IR_LoadConstOffset::do_codegen_c(CFunctionEmitter& e) {
 }
 
 void IR_StoreConstOffset::do_codegen_c(CFunctionEmitter& e) {
-  auto addr = fmt::format("{} + {}", e.read(m_base), m_offset);
+  auto addr = fmt::format("{}, {}", e.read(m_base), m_offset);
   auto c = m_value->ireg().reg_class;
   auto v = e.read(m_value);
   if (c == RegClass::GPR_64) {

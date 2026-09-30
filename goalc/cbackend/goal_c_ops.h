@@ -36,8 +36,12 @@ _Static_assert(sizeof(v128) == 16, "v128 size");
 
 #define GC_INLINE static inline __attribute__((always_inline))
 
+//! Changes whenever generated code and this header must be rebuilt together (the check is in
+//! every module, and the version is part of the module source, so of its hash).
+#define GOALC_ABI_VERSION 2
+
 // ---------------------------------------------------------------------------
-// memory. GOAL addresses are 32 bits: truncate before adding the host base.
+// memory. GOAL addresses are 32 bits.
 // Alignment: accesses use memcpy, and on 32-bit ARM the compiler may still use LDRD/VLDR, which
 // need word alignment. That is fine for GOAL: the EE (MIPS) requires natural alignment for 32/64
 // bit and float loads/stores, so the game never does unaligned accesses of those sizes. (Forcing
@@ -48,73 +52,87 @@ _Static_assert(sizeof(v128) == 16, "v128 size");
 // the compiler can keep both in registers (they never change after startup, but the compiler
 // would have to reload the globals after every call). The helpers below take the base as a
 // parameter named gc_mb, and macros of the same name pass the local copy.
-GC_INLINE u8* gc_addr_(u8* gc_mb, u64 goal_addr) {
-  return gc_mb + (u32)goal_addr;
-}
-#define gc_addr(a) gc_addr_(gc_mb, (a))
+//
+// Accesses are emitted as a base register and a constant offset, like the instructions of the
+// native backends: gc_ld_u32(r3, 8) loads GOAL address r3 + 8.
 
-GC_INLINE u64 gc_ld_u8_(u8* gc_mb, u64 a) {
-  return *gc_addr(a);
+//! Host address of the GOAL address base + off.
+//! On 32-bit hosts, host pointer arithmetic wraps around at 4 GB like the 32-bit GOAL address, so
+//! the offset can be added after the base: the compiler then folds constant offsets into the
+//! load/store instructions and shares gc_mb + base between the fields of one object (truncating
+//! base + off first cost an extra instruction per access on ARM11). On 64-bit hosts the GOAL
+//! address is truncated to 32 bits first.
+GC_INLINE u8* gc_addr_(u8* gc_mb, u64 base, s32 off) {
+#if UINTPTR_MAX == 0xffffffffu
+  return (u8*)((uintptr_t)gc_mb + (u32)base + (uintptr_t)off);
+#else
+  return gc_mb + (u32)(base + (u64)(s64)off);
+#endif
 }
-GC_INLINE u64 gc_ld_s8_(u8* gc_mb, u64 a) {
-  return (u64)(s64)(s8)*gc_addr(a);
+#define gc_addr(b, off) gc_addr_(gc_mb, (b), (off))
+
+GC_INLINE u64 gc_ld_u8_(u8* gc_mb, u64 b, s32 o) {
+  return *gc_addr(b, o);
 }
-GC_INLINE u64 gc_ld_u16_(u8* gc_mb, u64 a) {
+GC_INLINE u64 gc_ld_s8_(u8* gc_mb, u64 b, s32 o) {
+  return (u64)(s64)(s8)*gc_addr(b, o);
+}
+GC_INLINE u64 gc_ld_u16_(u8* gc_mb, u64 b, s32 o) {
   u16 v;
-  memcpy(&v, gc_addr(a), 2);
+  memcpy(&v, gc_addr(b, o), 2);
   return v;
 }
-GC_INLINE u64 gc_ld_s16_(u8* gc_mb, u64 a) {
+GC_INLINE u64 gc_ld_s16_(u8* gc_mb, u64 b, s32 o) {
   s16 v;
-  memcpy(&v, gc_addr(a), 2);
+  memcpy(&v, gc_addr(b, o), 2);
   return (u64)(s64)v;
 }
-GC_INLINE u64 gc_ld_u32_(u8* gc_mb, u64 a) {
+GC_INLINE u64 gc_ld_u32_(u8* gc_mb, u64 b, s32 o) {
   u32 v;
-  memcpy(&v, gc_addr(a), 4);
+  memcpy(&v, gc_addr(b, o), 4);
   return v;
 }
-GC_INLINE u64 gc_ld_s32_(u8* gc_mb, u64 a) {
+GC_INLINE u64 gc_ld_s32_(u8* gc_mb, u64 b, s32 o) {
   s32 v;
-  memcpy(&v, gc_addr(a), 4);
+  memcpy(&v, gc_addr(b, o), 4);
   return (u64)(s64)v;
 }
-GC_INLINE u64 gc_ld_u64_(u8* gc_mb, u64 a) {
+GC_INLINE u64 gc_ld_u64_(u8* gc_mb, u64 b, s32 o) {
   u64 v;
-  memcpy(&v, gc_addr(a), 8);
+  memcpy(&v, gc_addr(b, o), 8);
   return v;
 }
 // floats and vectors are accessed lane by lane through word-aligned float pointers, so they go
 // straight into FPU registers (VLDR/VSTR on ARM) instead of through integer registers.
 typedef float __attribute__((may_alias)) gc_af32;
-GC_INLINE float gc_ld_f32_(u8* gc_mb, u64 a) {
-  return *(const gc_af32*)gc_addr(a);
+GC_INLINE float gc_ld_f32_(u8* gc_mb, u64 b, s32 o) {
+  return *(const gc_af32*)gc_addr(b, o);
 }
-GC_INLINE v128 gc_ld_v128_(u8* gc_mb, u64 a) {
-  const gc_af32* p = (const gc_af32*)gc_addr(a);
+GC_INLINE v128 gc_ld_v128_(u8* gc_mb, u64 b, s32 o) {
+  const gc_af32* p = (const gc_af32*)gc_addr(b, o);
   v128 v = {p[0], p[1], p[2], p[3]};
   return v;
 }
 
-GC_INLINE void gc_st_u8_(u8* gc_mb, u64 a, u64 v) {
-  *gc_addr(a) = (u8)v;
+GC_INLINE void gc_st_u8_(u8* gc_mb, u64 b, s32 o, u64 v) {
+  *gc_addr(b, o) = (u8)v;
 }
-GC_INLINE void gc_st_u16_(u8* gc_mb, u64 a, u64 v) {
+GC_INLINE void gc_st_u16_(u8* gc_mb, u64 b, s32 o, u64 v) {
   u16 x = (u16)v;
-  memcpy(gc_addr(a), &x, 2);
+  memcpy(gc_addr(b, o), &x, 2);
 }
-GC_INLINE void gc_st_u32_(u8* gc_mb, u64 a, u64 v) {
+GC_INLINE void gc_st_u32_(u8* gc_mb, u64 b, s32 o, u64 v) {
   u32 x = (u32)v;
-  memcpy(gc_addr(a), &x, 4);
+  memcpy(gc_addr(b, o), &x, 4);
 }
-GC_INLINE void gc_st_u64_(u8* gc_mb, u64 a, u64 v) {
-  memcpy(gc_addr(a), &v, 8);
+GC_INLINE void gc_st_u64_(u8* gc_mb, u64 b, s32 o, u64 v) {
+  memcpy(gc_addr(b, o), &v, 8);
 }
-GC_INLINE void gc_st_f32_(u8* gc_mb, u64 a, float v) {
-  *(gc_af32*)gc_addr(a) = v;
+GC_INLINE void gc_st_f32_(u8* gc_mb, u64 b, s32 o, float v) {
+  *(gc_af32*)gc_addr(b, o) = v;
 }
-GC_INLINE void gc_st_v128_(u8* gc_mb, u64 a, v128 v) {
-  gc_af32* p = (gc_af32*)gc_addr(a);
+GC_INLINE void gc_st_v128_(u8* gc_mb, u64 b, s32 o, v128 v) {
+  gc_af32* p = (gc_af32*)gc_addr(b, o);
   p[0] = v.x;
   p[1] = v.y;
   p[2] = v.z;
@@ -654,9 +672,19 @@ GC_INLINE v128 gc_pshufhw(v128 a, u32 c) {
 // module support
 // ---------------------------------------------------------------------------
 
-//! Address of symbol k's value slot relative to st (jak 1: symbol value is at the symbol).
-#define GC_SYM(k) (gc_stl + (u64)(s64)gc_sym_offsets[k])
+//! GOAL address (zero extended, like every GOAL address) of symbol k (jak 1: the symbol value is
+//! at the symbol). Its value is accessed as gc_ld_u32(gc_stl, GC_SYMOFF(k)).
+#define GC_SYM(k) ((u64)(u32)(gc_stl + (u64)(s64)gc_sym_offsets[k]))
+#define GC_SYMOFF(k) (gc_sym_offsets[k])
 #define GC_SEG(s) ((u64)gc_seg_base[s])
 //! address in another segment of this object: 0 if that segment isn't loaded (like the native
 //! linker), so method-set! of a function in an unloaded debug segment does nothing.
-#define GC_SEG_ADDR(s, off) (gc_seg_base[s] ? (u64)gc_seg_base[s] + (u64)(off) : 0)
+#define GC_SEG_ADDR(s, off) (gc_seg_base[s] ? (u64)(u32)(gc_seg_base[s] + (u32)(off)) : 0)
+
+//! Host function of a GOAL function value (see goal_c_abi.h), with the local memory base.
+GC_INLINE void* gc_fn_(u8* gc_mb, u64 f) {
+  void* p;
+  memcpy(&p, gc_mb + (u32)f, sizeof(void*));
+  return p;
+}
+#define gc_fn(f) gc_fn_(gc_mb, (f))
