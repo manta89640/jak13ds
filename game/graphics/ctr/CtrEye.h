@@ -31,6 +31,13 @@ class CtrEyeRenderer : public CtrBucketRenderer {
 
   /*! Texture for a merc draw's eye_id (the slot the game draws that eye to), -1 if none yet. */
   int texture(int eye_id) const;
+  /*!
+   * Eye DMA from its GS setup transfer (8 qw) on. The eyes of Jak and Daxter are in the eyes
+   * bucket; the eyes of a level's characters follow the level's texture upload in its pris
+   * texture bucket (CtrTextureUploadRenderer calls this). Stops at the transfer that restores the
+   * GS, or anything unexpected.
+   */
+  void handle_eye_dma(DmaFollower& dma, CtrRenderState& rs);
 
  private:
   struct Sprite {
@@ -54,7 +61,7 @@ class CtrEyeRenderer : public CtrBucketRenderer {
   bool read_pair(DmaFollower& dma, CtrRenderState& rs, std::vector<Eye>* eyes);
   const Source* source(u64 tex0);
   void composite(const Eye& eye);
-  void draw_sprite(const Eye& eye, const Sprite& s, const Source* src, bool blend);
+  void draw_sprite(const Eye& eye, const Sprite& s, const Source* src, bool blend, bool keep_alpha);
 
   CtrVram* m_vram;
   int m_tex[kSlots];

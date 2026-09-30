@@ -74,49 +74,50 @@ void CtrEyeRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
   dma.read_and_advance();  // jump to the bucket's data
-  if (dma.current_tag_offset() == rs.next_bucket ||
-      dma.current_tag().kind == DmaTag::Kind::CALL) {  // no eyes this frame
-    skip_rest();
-    return;
-  }
-  // GS setup for drawing to the eye texture area (128 bytes), alpha setup (32 bytes)
-  auto setup = dma.read_and_advance();
-  if (setup.size_bytes != 128 || dma.current_tag_offset() == rs.next_bucket) {
-    m_stats.bad_dma++;
-    skip_rest();
-    return;
-  }
-  auto alpha = dma.read_and_advance();
-  if (alpha.size_bytes != 32) {
-    m_stats.bad_dma++;
-    skip_rest();
-    return;
-  }
-  // jak 1: the empty transfer of the add to bucket
-  if (dma.current_tag_offset() != rs.next_bucket && dma.current_tag().qwc == 0) {
-    dma.read_and_advance();
-  }
-
-  std::vector<Eye> eyes;
-  // pairs of eyes until the 8 qw transfer that restores the GS
-  while (dma.current_tag_offset() != rs.next_bucket && dma.current_tag().qwc != 8) {
-    if (!read_pair(dma, rs, &eyes)) {
-      m_stats.bad_dma++;
-      break;
-    }
+  if (dma.current_tag_offset() != rs.next_bucket &&
+      dma.current_tag().kind != DmaTag::Kind::CALL) {  // (CALL: no eyes this frame)
+    handle_eye_dma(dma, rs);
   }
   skip_rest();
-
-  m_sources.clear();
-  for (const auto& e : eyes) {
-    composite(e);
-  }
-  m_stats.eyes += (int)eyes.size();
   if (rs.log_now && (m_stats.eyes || m_stats.bad_dma)) {
     lg::debug("[ctr] eyes: {} drawn, {} texture uploads, {} bad dma", m_stats.eyes,
               m_stats.uploads, m_stats.bad_dma);
     m_stats = Stats();
   }
+}
+
+void CtrEyeRenderer::handle_eye_dma(DmaFollower& dma, CtrRenderState& rs) {
+  auto more = [&]() { return dma.current_tag_offset() != rs.next_bucket; };
+  // GS setup for drawing to the eye texture area (128 bytes), alpha setup (32 bytes)
+  if (!more() || dma.current_tag().qwc != 8) {
+    return;
+  }
+  dma.read_and_advance();
+  if (!more() || dma.current_tag().qwc != 2) {
+    m_stats.bad_dma++;
+    return;
+  }
+  dma.read_and_advance();
+  // jak 1: the empty transfer of the add to bucket
+  if (more() && dma.current_tag().qwc == 0) {
+    dma.read_and_advance();
+  }
+
+  std::vector<Eye> eyes;
+  // pairs of eyes until the 8 qw transfer that restores the GS
+  while (more() && dma.current_tag().qwc != 8) {
+    if (!read_pair(dma, rs, &eyes)) {
+      m_stats.bad_dma++;
+      break;
+    }
+  }
+
+  // the textures of this bucket's level (the pris buckets upload a level's page just before)
+  m_sources.clear();
+  for (const auto& e : eyes) {
+    composite(e);
+  }
+  m_stats.eyes += (int)eyes.size();
 }
 
 bool CtrEyeRenderer::read_pair(DmaFollower& dma, CtrRenderState& rs, std::vector<Eye>* eyes) {
@@ -236,7 +237,11 @@ inline u32 alpha255(u32 c) {
 }
 }  // namespace
 
-void CtrEyeRenderer::draw_sprite(const Eye& e, const Sprite& s, const Source* src, bool blend) {
+void CtrEyeRenderer::draw_sprite(const Eye& e,
+                                 const Sprite& s,
+                                 const Source* src,
+                                 bool blend,
+                                 bool keep_alpha) {
   if (!s.valid || !src) {
     return;
   }
@@ -279,9 +284,11 @@ void CtrEyeRenderer::draw_sprite(const Eye& e, const Sprite& s, const Source* sr
       const u32 a = alpha255(c);
       u32& d = m_pixels[py * kSize + px];
       if (!blend) {
-        d = (c & 0xffffffu) | (a << 24);
+        // the lid: the game draws it with alpha test NEVER and AFAIL RGB only, so only the color
+        // changes and the eye keeps the alpha of the iris / background
+        d = keep_alpha ? ((c & 0xffffffu) | (d & 0xff000000u)) : ((c & 0xffffffu) | (a << 24));
       } else {
-        // src alpha, 1 - src alpha (the pupil over the iris)
+        // src alpha, 1 - src alpha (the pupil over the iris), alpha kept (as above)
         u32 out = d & 0xff000000u;
         for (int ch = 0; ch < 24; ch += 8) {
           const u32 sc = (c >> ch) & 0xff, dc = (d >> ch) & 0xff;
@@ -305,9 +312,9 @@ void CtrEyeRenderer::composite(const Eye& e) {
   const u32 bg = iris ? ((iris->rgba[0] & 0xffffffu) | (alpha255(iris->rgba[0]) << 24))
                       : 0xff000000u;
   m_pixels.assign(kSize * kSize, bg);
-  draw_sprite(e, e.iris, iris, false);
-  draw_sprite(e, e.pupil, pupil, true);
-  draw_sprite(e, e.lid, lid, false);
+  draw_sprite(e, e.iris, iris, false, false);
+  draw_sprite(e, e.pupil, pupil, true, true);
+  draw_sprite(e, e.lid, lid, false, true);
 
   // upload when it changed (eyes are still most of the time)
   u64 h = 1469598103934665603ull;

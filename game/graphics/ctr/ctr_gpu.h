@@ -116,6 +116,10 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
 #define CTR_MAX_PALETTE 24
 int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
                                 int index_count);
+/* A mesh's vertices, to change them (blend shapes) before its draws of the frame; then flush the
+ * changed bytes. The GPU finished the previous frame when a frame begins. */
+void* ctr_gpu_mesh_vertices(int mesh);
+void ctr_gpu_mesh_flush(int mesh, int offset, int size);
 
 /* bones: palette_count 3x4 row-major matrices, (pos, 1) -> camera space (x, y, z).
  * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.

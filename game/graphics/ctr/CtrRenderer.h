@@ -64,6 +64,11 @@ class CtrTextureUploadRenderer : public CtrBucketRenderer {
  public:
   using CtrBucketRenderer::CtrBucketRenderer;
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  /*! The pris texture buckets also have the eyes of their level's characters. */
+  void set_eye_renderer(class CtrEyeRenderer* eyes) { m_eyes = eyes; }
+
+ private:
+  class CtrEyeRenderer* m_eyes = nullptr;
 };
 
 /*! GIF packets drawn directly (debug text, menus, debug draws). */

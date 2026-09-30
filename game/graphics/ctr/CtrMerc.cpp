@@ -8,6 +8,7 @@
 
 #include "CtrMerc.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -176,6 +177,42 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
 }
 
+void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
+                                  const CtrMercModelData& model,
+                                  const float* weights) {
+  u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
+  if (!verts || model.scale <= 0.f) {
+    return;
+  }
+  const float inv_scale = 1.f / model.scale;
+  u32 lo = UINT32_MAX, hi = 0;
+  for (u32 k = 0; k < model.blerc_count; k++) {
+    const auto& bv = lev.blerc_verts[model.blerc_first + k];
+    float p[3] = {bv.base[0], bv.base[1], bv.base[2]};
+    for (u32 t = 0; t < bv.target_count && bv.first_target + t < lev.blerc_targets.size(); t++) {
+      const auto& tg = lev.blerc_targets[bv.first_target + t];
+      const float w = weights[tg.weight % c3l::kMercBlercWeights];
+      p[0] += w * tg.offset[0];
+      p[1] += w * tg.offset[1];
+      p[2] += w * tg.offset[2];
+    }
+    s16 q[3];
+    for (int c = 0; c < 3; c++) {
+      q[c] = (s16)std::clamp((int)std::lround(p[c] * inv_scale), -32767, 32767);
+    }
+    for (u32 d = 0; d < bv.dest_count && bv.first_dest + d < lev.blerc_dests.size(); d++) {
+      const u32 vi = lev.blerc_dests[bv.first_dest + d];
+      memcpy(verts + sizeof(c3l::MercVertex) * vi, q, sizeof(q));  // pos is the first member
+      lo = std::min(lo, vi);
+      hi = std::max(hi, vi);
+    }
+  }
+  if (lo <= hi) {
+    ctr_gpu_mesh_flush(model.mesh, (int)(lo * sizeof(c3l::MercVertex)),
+                       (int)((hi - lo + 1) * sizeof(c3l::MercVertex)));
+  }
+}
+
 void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) {
   const u8* input = init.data;
   // The bone matrices are not in the DMA data (they're in game memory that the next frame's
@@ -244,6 +281,19 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   input += 128 + 16 * i;
   PcMercFlags flags;
   memcpy(&flags, input, sizeof(flags));
+
+  // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model)
+  if (model->blerc_count) {
+    const bool uses_blerc = flags.bitflags & 4;
+    if (uses_blerc || model->blerc_moved) {
+      float weights[c3l::kMercBlercWeights] = {};
+      if (uses_blerc) {
+        memcpy(weights, input + 32, sizeof(weights));
+      }
+      apply_blerc(*lev, *model, weights);
+      model->blerc_moved = uses_blerc;
+    }
+  }
 
   // Bone matrices that are garbage (seen in cutscenes whose streamed animation is missing) make
   // screen-filling triangles: skip the model instead.

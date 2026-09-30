@@ -439,6 +439,15 @@ int ctr_gpu_skinned_mesh_create(const void* verts,
   return h;
 }
 
+void* ctr_gpu_mesh_vertices(int mesh) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+    return nullptr;
+  }
+  return g_soft.meshes[mesh].verts.data();
+}
+
+void ctr_gpu_mesh_flush(int, int, int) {}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           const float clip[16],
                           const float* bones,

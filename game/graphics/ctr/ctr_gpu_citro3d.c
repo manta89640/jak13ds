@@ -881,6 +881,20 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   return slot;
 }
 
+void* ctr_gpu_mesh_vertices(int mesh) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+    return NULL;
+  }
+  return g.meshes[mesh].verts;
+}
+
+void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || size <= 0) {
+    return;
+  }
+  GSPGPU_FlushDataCache((uint8_t*)g.meshes[mesh].verts + offset, (u32)size);
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count) {

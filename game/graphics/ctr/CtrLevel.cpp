@@ -235,11 +235,36 @@ bool CtrLevels::load_file(const fs::path& path,
       lg::error("[ctr] {}: truncated file", path.string());
       return false;
     }
+    // blend shapes
+    if (hdr.merc_blerc_offset && hdr.merc_blerc_size >= sizeof(c3l::MercBlercHeader)) {
+      c3l::MercBlercHeader bh;
+      u32 off = hdr.merc_blerc_offset;
+      if (f.read(off, &bh, sizeof(bh))) {
+        off += sizeof(bh);
+        if (f.read_array(off, bh.num_vertices, &out->blerc_verts)) {
+          off += bh.num_vertices * sizeof(c3l::MercBlercVertex);
+          if (f.read_array(off, bh.num_targets, &out->blerc_targets)) {
+            off += bh.num_targets * sizeof(c3l::MercBlercTarget);
+            f.read_array(off, bh.num_dests, &out->blerc_dests);
+          }
+        }
+      }
+      if (out->blerc_dests.size() != bh.num_dests) {
+        lg::warn("[ctr] {}: bad blend shape data", path.string());
+        out->blerc_verts.clear();
+        out->blerc_targets.clear();
+        out->blerc_dests.clear();
+      }
+    }
     std::vector<c3l::MercVertex> mverts;
     for (auto& m : models) {
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
+      if (m.blerc_first + m.blerc_count <= out->blerc_verts.size()) {
+        md.blerc_first = m.blerc_first;
+        md.blerc_count = m.blerc_count;
+      }
       if (m.first_draw + m.draw_count > mdraws.size()) {
         continue;
       }
