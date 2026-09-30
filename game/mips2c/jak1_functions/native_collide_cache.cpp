@@ -62,20 +62,20 @@ u64 method_9_collide_cache_prim_impl(const NativeArgs& args) {
                                         NativeArgs{call_args, args.pp, args.st, out_point})
                                   : native_call_goal(fn, call_args, args)));
     float mv[4], normal[4];
-    memcpy(mv, gptr(move), 16);
-    memcpy(normal, gptr(out_normal), 16);
+    gload_q(mv, move);
+    gload_q(normal, out_normal);
     if (t < 0.f) {
       continue;
     }
     float point[4];
-    memcpy(point, gptr(out_point), 16);
+    gload_q(point, out_point);
     if (best <= t) {
       continue;
     }
     if (flags & 1) {
       // moving against the triangle, and the sphere in front of it
       float c[4], m[4], d[4], s[4];
-      memcpy(c, gptr(sphere), 16);
+      gload_q(c, sphere);
       for (int k = 0; k < 4; k++) {
         m[k] = mv[k] * normal[k];
         d[k] = c[k] - point[k];
@@ -94,13 +94,17 @@ u64 method_9_collide_cache_prim_impl(const NativeArgs& args) {
         continue;
       }
     }
-    u8 verts[48];
-    memcpy(verts, gptr(tri), 48);
+    u32 verts[3][4];
+    for (int k = 0; k < 3; k++) {
+      gload_q(verts[k], tri + 16 * k);
+    }
     const u32 pat = gload<u32>(tri + 48);
     best = t;
-    gstore_bytes(result + 48, point, 16);
-    gstore_bytes(result + 64, normal, 16);
-    gstore_bytes(result, verts, 48);
+    gstore_q(result + 48, point);
+    gstore_q(result + 64, normal);
+    for (int k = 0; k < 3; k++) {
+      gstore_q(result + 16 * k, verts[k]);
+    }
     gstore<u32>(result + 80, pat);
   }
   return f2gpr(best == start ? u2f(kMiss) : best);
