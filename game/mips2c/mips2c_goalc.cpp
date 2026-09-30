@@ -27,8 +27,14 @@ void mips2c_goalc_set_name(void* fn, const std::string& name) {
  * return v0. fn is the mips2c execute function.
  */
 u64 mips2c_goalc_adapter(void* fn, u64 stack_size, u64* args) {
-  auto name = g_names.find(fn);
-  kperf::SectionScope perf_section(name == g_names.end() ? "m2c:?" : name->second.c_str());
+  const char* perf_name = "m2c:?";
+  if (kperf::g_sections_enabled) {
+    auto name = g_names.find(fn);
+    if (name != g_names.end()) {
+      perf_name = name->second.c_str();
+    }
+  }
+  kperf::SectionScope perf_section(perf_name);
   u64 stack_bytes = (stack_size + 15) & ~u64(15);
   u8* buf = (u8*)__builtin_alloca(sizeof(ExecutionContext) + stack_bytes + 16);
   auto ctx_addr = ((uintptr_t)buf + stack_bytes + 15) & ~uintptr_t(15);
