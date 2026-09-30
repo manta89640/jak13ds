@@ -226,7 +226,9 @@ void shade_pixel(const ctr_draw_state& st,
       r = tc[0];
       g = tc[1];
       b = tc[2];
-      if (st.tcc) {
+      if (tex_alpha_full) {
+        a = tc[3] / 255.f * a;
+      } else if (st.tcc) {
         a = tc[3];
       }
     } else {

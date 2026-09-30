@@ -825,6 +825,8 @@ ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex) {
   memset(&st, 0, sizeof(st));
   st.tex = tex;
   st.tcc = 1;
+  // the texture color alone (tfrag3.vert, shrub.vert, merc2.frag: TEX0 decal bit)
+  st.decal = mode.get_decal();
   st.filter = mode.get_filt_enable();
   st.clamp_s = mode.get_clamp_s_enable();
   st.clamp_t = mode.get_clamp_t_enable();

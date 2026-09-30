@@ -1123,6 +1123,12 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
       C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
       C3D_TexEnvScale(env, C3D_RGB, mesh == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_2);
       C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+      if (st->decal) {
+        /* decal: the texture color alone (alpha as above) */
+        C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, 0, 0);
+        C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+        C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_1);
+      }
     } else if (st->decal) {
       C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, 0, 0);
       C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);

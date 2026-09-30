@@ -44,6 +44,10 @@ struct Options {
   float medium_radius = 12.f;
   float medium_dist = 300.f;
   bool no_tie = false;
+  bool no_shrub = false;
+  // shrubs (grass, bushes, small plants): drawn up to this distance (meters), in chunks of this size
+  float shrub_dist = 100.f;
+  float shrub_cell = 50.f;
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
   // Textures: ETC1 (opaque) / ETC1A4 (with alpha) instead of RGB565 / RGBA4: 1/4 and 1/2 of the
@@ -75,7 +79,8 @@ struct SrcVertex {
 struct SrcTri {
   u32 v[3];         // into the global SrcVertex list
   u32 draw_key;     // index into draw_keys
-  u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist)
+  u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist),
+                    // 3: shrub (drawn up to shrub_dist)
   u32 tier = 0;     // c3l::Chunk::lod_tier
 };
 
@@ -259,6 +264,39 @@ struct Converter {
   size_t small_tris = 0;
   size_t wind_tris = 0;
 
+  size_t shrub_tris = 0;
+  void add_shrub_tree(tfrag3::ShrubTree& tree) {
+    tree.unpack();
+    const u32 base = verts.size();
+    for (const auto& v : tree.unpacked.vertices) {
+      SrcVertex sv;
+      sv.x = v.x;
+      sv.y = v.y;
+      sv.z = v.z;
+      // shrub.vert: texture coordinates in 1/4096, color = base color * time of day color * 4;
+      // our level shader does texture * color * 2 (GS units), like the tfrag colors
+      sv.s = v.s / 4096.f;
+      sv.t = v.t / 4096.f;
+      for (int c = 0; c < 3; c++) {
+        const int tod = tree.time_of_day_colors.read(v.color_index, opt.palette, c);
+        sv.rgba[c] = (u8)std::min(255, v.rgba_base[c] * tod * 2 / 255);
+      }
+      sv.rgba[3] = tree.time_of_day_colors.read(v.color_index, opt.palette, 3);
+      verts.push_back(sv);
+    }
+    for (const auto& d : tree.static_draws) {
+      const u16 tex = texture_id((s32)d.tree_tex_id);
+      note_use(tex, d.mode.as_int(), false);
+      const u32 key = key_id(DrawKey{d.mode.as_int(), tex, 2});
+      const size_t first_tri = tris.size();
+      add_strips(tree.indices, d.first_index_index, d.num_indices, base, key);
+      for (size_t i = first_tri; i < tris.size(); i++) {
+        tris[i].detail = 3;
+      }
+      shrub_tris += tris.size() - first_tri;
+    }
+  }
+
   void add_tie_tree(tfrag3::TieTree& tree) {
     tree.unpack();
     u32 base = verts.size();
@@ -275,8 +313,9 @@ struct Converter {
       verts.push_back(sv);
     }
     // static instances (already in world space), one vis group per instance
-    // categories: normal, trans, water, then envmap draws (not supported)
-    u32 last_draw = tree.category_draw_indices[(int)tfrag3::TieCategory::WATER + 1];
+    // categories: normal, trans, water, the base draws of envmapped ties (drawn like the others:
+    // same colors as tfrag3, see etie_base.vert), then the envmap shine draws (not supported)
+    u32 last_draw = tree.category_draw_indices[(int)tfrag3::TieCategory::WATER_ENVMAP + 1];
     if (last_draw == 0) {
       last_draw = tree.static_draws.size();
     }
@@ -775,9 +814,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       tie_trees++;
     }
   }
+  int shrub_trees = 0;
+  if (!opt.no_shrub && !opt.merc_only) {
+    for (auto& tree : level.shrub_trees) {
+      cv.add_shrub_tree(tree);
+      shrub_trees++;
+    }
+  }
 
   // ---- chunking: grid cells by triangle centroid ----
-  const float cell = opt.cell_meters * 4096.f;
+  // shrubs are small and only drawn up close: smaller cells cull them better
+  auto cell_of_detail = [&](int detail) {
+    return (detail == 3 ? opt.shrub_cell : opt.cell_meters) * 4096.f;
+  };
   // (detail, cell) -> triangle indices
   std::map<std::tuple<int, int, int, int>, std::vector<u32>> cells;
   for (u32 i = 0; i < cv.tris.size(); i++) {
@@ -788,6 +837,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       cy += cv.verts[t.v[k]].y;
       cz += cv.verts[t.v[k]].z;
     }
+    const float cell = cell_of_detail((int)t.detail);
     auto key = std::make_tuple((int)(t.detail + 4 * t.tier), (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell));
     cells[key].push_back(i);
@@ -828,12 +878,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
 
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
+      const float cell = cell_of_detail(detail);
       ch.lod_tier = std::get<0>(key) / 4;
       ch.lod_center[0] = (std::get<1>(key) + 0.5f) * cell;
       ch.lod_center[1] = (std::get<2>(key) + 0.5f) * cell;
       ch.lod_center[2] = (std::get<3>(key) + 0.5f) * cell;
-      ch.max_dist = detail == 1 ? opt.detail_dist * 4096.f
-                                : (detail == 2 ? opt.medium_dist * 4096.f : 0.f);
+      ch.max_dist = detail == 1   ? opt.detail_dist * 4096.f
+                    : detail == 2 ? opt.medium_dist * 4096.f
+                    : detail == 3 ? opt.shrub_dist * 4096.f
+                                  : 0.f;
       float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
       for (u32 s : local_src) {
         const auto& v = cv.verts[s];
@@ -988,10 +1041,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   file_util::write_binary_file(out, buf.data(), buf.size());
 
   lg::info(
-      "{}: {} tfrag + {} tie trees -> {} chunks, {} verts ({} KB), {} tris, {} draws, {} textures "
-      "({} KB), {} merc models ({} verts, {} tris, {} draws), file {} KB; tie: {} wind tris, "
-      "{} small/medium-object tris; far tfrag: {} tris ({})",
-      level.level_name, tfrag_trees, tie_trees, chunks.size(), out_verts.size(),
+      "{}: {} tfrag + {} tie + {} shrub trees ({} shrub tris) -> {} chunks, {} verts ({} KB), {} "
+      "tris, {} draws, {} textures ({} KB), {} merc models ({} verts, {} tris, {} draws), file {} "
+      "KB; tie: {} wind tris, {} small/medium-object tris; far tfrag: {} tris ({})",
+      level.level_name, tfrag_trees, tie_trees, shrub_trees, cv.shrub_tris, chunks.size(),
+      out_verts.size(),
       out_verts.size() * sizeof(c3l::Vertex) / 1024, out_indices.size() / 3, out_draws.size(),
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
       merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024, cv.wind_tris, cv.small_tris,
@@ -1031,6 +1085,9 @@ int main(int argc, char** argv) {
   app.add_option("--medium-radius", opt.medium_radius, "same for medium objects");
   app.add_option("--medium-dist", opt.medium_dist, "same for medium objects");
   app.add_flag("--no-tie", opt.no_tie, "leave out tie");
+  app.add_flag("--no-shrub", opt.no_shrub, "leave out shrubs (grass, bushes, small plants)");
+  app.add_option("--shrub-dist", opt.shrub_dist, "shrubs are drawn up to this distance (meters)");
+  app.add_option("--shrub-cell", opt.shrub_cell, "chunk grid size for shrubs in meters");
   app.add_flag("--no-merc", opt.no_merc, "leave out merc models");
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
   bool no_etc1 = false, no_mips = false;
