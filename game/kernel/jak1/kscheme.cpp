@@ -1,6 +1,7 @@
 #include "kscheme.h"
 
 #include <cstring>
+#include <vector>
 
 #include "common/common_types.h"
 #include "common/log/log.h"
@@ -34,8 +35,16 @@ namespace jak1 {
 // where to put a new symbol for the most recently searched for symbol that wasn't found
 u32 symbol_slot;
 
+namespace {
+// (AI-assisted) Every type object, in allocation order (all of them come from
+// alloc_and_init_type). method_set looks through these for child types instead of through every
+// slot of the symbol table (16k slots for each method defined while GAME.CGO loads).
+std::vector<u32> g_all_types;
+}  // namespace
+
 void kscheme_init_globals() {
   symbol_slot = 0;
+  g_all_types.clear();
 }
 
 /*!
@@ -823,6 +832,7 @@ Ptr<Type> alloc_and_init_type(Ptr<Symbol> sym, u32 method_count) {
 
   // add to symbol table.
   sym->value = new_type;
+  g_all_types.push_back(new_type);
   return Ptr<Type>(new_type);
 }
 
@@ -1044,66 +1054,17 @@ u64 method_set(u32 type_, u32 method_id, u32 method) {
 
   // this is kind of a strange combination...
   if (*EnableMethodSet || (!FastLink && MasterDebug && !DiskBoot)) {
-    // upper table
-    auto sym = s7.offset;
-    for (; sym < LastSymbol.offset; sym += 8) {
-      auto symValue = *Ptr<u32>(sym);
-      if ((symValue < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < symValue) &&  // not in normal memory
-          (symValue < 0x84000 || 0x100000 <= symValue)) {              // not in kernel memory
+    // (AI-assisted) The original loops over every symbol and updates the types among their
+    // values. All types are in g_all_types (see alloc_and_init_type), and they are the same
+    // objects the symbols point to, so this checks the same types with the same tests, without
+    // visiting the 16k symbol slots (most of them not types) for every method definition.
+    const u32 type_type = *(s7 + FIX_SYM_TYPE_TYPE);
+    for (u32 t : g_all_types) {
+      if (*Ptr<u32>(t - 4) != type_type) {
         continue;
       }
 
-      if ((symValue & OFFSET_MASK) != BASIC_OFFSET) {
-        continue;
-      }
-
-      auto objType = *Ptr<Ptr<Type>>(symValue - 4);
-      if (objType.offset != *(s7 + FIX_SYM_TYPE_TYPE)) {
-        continue;
-      }
-
-      auto symAsType = Ptr<Type>(symValue);
-      if (method_id >= symAsType->num_methods) {
-        continue;
-      }
-
-      if (symAsType->get_method(method_id).offset != existing_method) {
-        continue;
-      }
-
-      if (type_typep(symAsType, type) == s7.offset) {
-        continue;
-      }
-
-      if (FastLink) {
-        // you were saved by EnableMethodSet.  I guess we warn.
-        printf("************ WARNING **************\n");
-        printf("method %d of %s redefined - you must define class heirarchies in order now\n",
-               method_id, info(symAsType->symbol)->str->data());
-        printf("***********************************\n");
-      }
-
-      symAsType->get_method(method_id).offset = method;
-    }
-
-    sym = SymbolTable2.offset;
-    for (; sym < s7.offset; sym += 8) {
-      auto symValue = *Ptr<u32>(sym);
-      if ((symValue < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < symValue) &&  // not in normal memory
-          (symValue < 0x84000 || 0x100000 <= symValue)) {              // not in kernel memory
-        continue;
-      }
-
-      if ((symValue & OFFSET_MASK) != BASIC_OFFSET) {
-        continue;
-      }
-
-      auto objType = *Ptr<Ptr<Type>>(symValue - 4);
-      if (objType.offset != *(s7 + FIX_SYM_TYPE_TYPE)) {
-        continue;
-      }
-
-      auto symAsType = Ptr<Type>(symValue);
+      auto symAsType = Ptr<Type>(t);
       if (method_id >= symAsType->num_methods) {
         continue;
       }
