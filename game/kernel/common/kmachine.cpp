@@ -624,7 +624,28 @@ s64 pc_get_active_display_refresh_rate() {
   return 0;
 }
 
+// (AI-assisted) The 3DS renderer (and its PC software rasterizer) draws on the 400x240 top screen:
+// report that size, so that the game renders for 5:3 like the PC port's widescreen (auto aspect
+// ratio, no PS2 vis): camera, culling and HUD for the screen's width instead of the PS2's 4:3.
+static bool ctr_screen() {
+#ifdef __3DS__
+  return true;
+#else
+  const auto* renderer = Gfx::GetCurrentRenderer();
+  return renderer && renderer->pipeline == GfxPipeline::Ctr;
+#endif
+}
+
 void pc_get_window_size(u32 w_ptr, u32 h_ptr) {
+  if (ctr_screen()) {
+    if (w_ptr && Ptr<s64>(w_ptr).c()) {
+      *Ptr<s64>(w_ptr).c() = 400;
+    }
+    if (h_ptr && Ptr<s64>(h_ptr).c()) {
+      *Ptr<s64>(h_ptr).c() = 240;
+    }
+    return;
+  }
   if (!Display::GetMainDisplay()) {
     return;
   }

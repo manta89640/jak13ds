@@ -7,8 +7,13 @@
  * <project>/out/jak1/c3l and draws them from the tfrag buckets with the camera the game sends.
  */
 
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -51,33 +56,86 @@ struct CtrLevelData {
 /*! DrawMode (tfrag3 draw settings) to ctr_gpu state. */
 ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex);
 
+/*!
+ * The .c3l files of the levels the game has loaded. On the 3DS they are read on a loader thread
+ * (core 2, below the render thread and the sound mixer): a level file takes a few hundred ms to
+ * seconds to read from the SD card and build, and loading it on the render thread froze the game
+ * for that long (the game waits for the render thread). A level is drawn from the frame after its
+ * load finished. Elsewhere (PC tools) the loads run on the render thread, as before.
+ * Threads: get/find_merc_model/process_pending_loads run on the render thread, set_wanted on the
+ * game thread while the render thread is idle, prefetch on any thread.
+ */
 class CtrLevels {
  public:
+  CtrLevels();
   ~CtrLevels();
   /*! Load the common file (GAME.c3l: Jak and other shared models), kept loaded. */
   void load_common();
+  /*! Start loading a level before the game asks for it (any thread). Kept aside, not drawn, until
+   * set_wanted or get asks for it; dropped if nothing does for a minute. */
+  void prefetch(const std::string& name);
   /*! Find a merc model in the loaded levels. Returns the level too (for its textures). */
   const CtrMercModelData* find_merc_model(const std::string& name, const CtrLevelData** lev);
-  /*! Get a level, loading it if needed. nullptr if there is no .c3l for it. */
+  /*! Get a level, starting its load if needed. nullptr while it loads, or if there is no .c3l. */
   CtrLevelData* get(const std::string& name, u64 frame);
-  /*! Load the levels get() was asked for (call outside of a GPU frame). */
+  /*! Start the loads get()/set_wanted asked for and take the finished ones (render thread, outside
+   * of a GPU frame). Doesn't wait for loads on the 3DS. */
   void process_pending_loads(u64 frame);
   /*! Levels the game wants (set_levels): others are unloaded. */
   void set_wanted(const std::vector<std::string>& names);
 
  private:
-  bool load(const std::string& name, CtrLevelData* out);
+  enum class LoadResult { LOADED, MISSING, FAILED, CANCELLED };
+  LoadResult load(const std::string& name, CtrLevelData* out);
   bool load_file(const fs::path& path, const std::string& name, CtrLevelData* out, long* file_size);
   void unload(CtrLevelData& lev);
+  bool cancelled() const { return m_cancel.load(std::memory_order_relaxed); }
   std::map<std::string, std::unique_ptr<CtrLevelData>> m_levels;
   std::map<std::string, bool> m_missing;
   std::vector<std::string> m_pending_loads;
+  std::vector<std::string> m_wanted;
   bool m_common_wanted = false;
-  void load_common_now();  // no file: don't retry every frame
   std::unique_ptr<CtrLevelData> m_common;
   // merc model name -> (level, model index); rebuilt when levels change
   std::map<std::string, std::pair<CtrLevelData*, int>> m_merc_index;
   void rebuild_merc_index();
+  // a level that loaded (or was prefetched) and is taken into m_levels
+  void publish(const std::string& name, std::unique_ptr<CtrLevelData> lev, u64 frame);
+
+  // ---- loader ----
+  struct Job {
+    std::string name;
+    bool common = false;
+    bool prefetch = false;
+  };
+  struct Done {
+    Job job;
+    std::unique_ptr<CtrLevelData> lev;
+    LoadResult result = LoadResult::FAILED;
+  };
+  void request(const Job& job);  // render thread
+  void run_job(const Job& job);  // loader thread (or inline without one)
+  void loader_main();
+  static void* loader_entry(void* self);
+  std::mutex m_lock;  // m_queue, m_done, m_loading, m_quit, m_prefetch_requests, m_levels_loaded
+  std::condition_variable m_cv;
+  std::deque<Job> m_queue;
+  std::vector<Done> m_done;
+  std::string m_loading;  // the level the loader works on ("" if none)
+  bool m_loading_prefetch = false;  // ... for a prefetch (never cancelled: the level is coming)
+  std::atomic<bool> m_cancel{false};  // m_loading is no longer wanted: stop early
+  bool m_quit = false;
+  std::vector<std::string> m_prefetch_requests;
+  int m_levels_loaded = 0;  // m_levels + m_prefetched (a prefetch waits while it's 2 or more)
+  std::set<std::string> m_resident;  // names in m_levels + m_prefetched (a prefetch skips them)
+  void* m_thread = nullptr;
+  std::set<std::string> m_requested;  // queued, loading or done but not taken (under m_lock)
+  struct Prefetched {
+    std::unique_ptr<CtrLevelData> lev;
+    double since_ms = 0;  // when the load finished (ctr_gpu_time_ms)
+  };
+  std::map<std::string, Prefetched> m_prefetched;
+  void update_level_count();
 };
 
 /*! The camera the game sends to the background renderers (GoalBackgroundCameraData). */
