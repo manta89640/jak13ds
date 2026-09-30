@@ -94,7 +94,7 @@ u64 mesh_sphere(const NativeArgs& args, bool method_12) {
   const u32 closest = args.stack - 16;
 
   float s[4];
-  memcpy(s, gptr(sphere), 16);
+  gload_q(s, sphere);
   if (method_12) {
     s[3] = s[3] + u2f(0x42f5c28f);  // 122.88
   }
@@ -112,8 +112,8 @@ u64 mesh_sphere(const NativeArgs& args, bool method_12) {
       }
     }
     s32 tmin[4], tmax[4];
-    memcpy(tmin, gptr((tri + 64) & ~15u), 16);
-    memcpy(tmax, gptr((tri + 80) & ~15u), 16);
+    gload_q(tmin, (tri + 64) & ~15u);
+    gload_q(tmax, (tri + 80) & ~15u);
     bool outside = false;
     for (int i = 0; i < 3; i++) {
       outside |= (tmin[i] > smax[i]) | (smin[i] > tmax[i]);
@@ -128,9 +128,9 @@ u64 mesh_sphere(const NativeArgs& args, bool method_12) {
     native_call_goal(gload<u32>(closest_sym), call_args, args);
 
     float c[4], sp[4], nrm[4];
-    memcpy(c, gptr(closest), 16);
-    memcpy(sp, gptr(sphere), 16);
-    memcpy(nrm, gptr(tri + 48), 16);
+    gload_q(c, closest);
+    gload_q(sp, sphere);
+    gload_q(nrm, tri + 48);
     const u32 pat = gload<u32>(tri + 60);
     float d[4], dn[4], dd[4];
     for (int i = 0; i < 4; i++) {
@@ -171,11 +171,15 @@ u64 mesh_sphere(const NativeArgs& args, bool method_12) {
       continue;
     }
     best = f2gpr(dist);
-    u8 verts[48];
-    memcpy(verts, gptr(tri), 48);
-    gstore_bytes(result, verts, 48);
-    gstore_bytes(result + 48, c, 16);
-    gstore_bytes(result + 64, nrm, 16);
+    u32 verts[3][4];
+    for (int k = 0; k < 3; k++) {
+      gload_q(verts[k], tri + 16 * k);
+    }
+    for (int k = 0; k < 3; k++) {
+      gstore_q(result + 16 * k, verts[k]);
+    }
+    gstore_q(result + 48, c);
+    gstore_q(result + 64, nrm);
     gstore<u32>(result + 80, pat);
   }
   return best;
