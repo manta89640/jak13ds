@@ -17,6 +17,9 @@ extern const NativeImpl collide_do_primitives;
 extern const NativeImpl moving_sphere_triangle_intersect;
 u64 collide_do_primitives_impl(const NativeArgs& args);
 u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args);
+// native_collide_probe.cpp
+extern const NativeImpl collide_probe_node;
+extern const NativeImpl collide_probe_instance_tie;
 // native_collide_cache.cpp
 extern const NativeImpl method_9_collide_cache_prim;
 extern const NativeImpl method_26_collide_cache;

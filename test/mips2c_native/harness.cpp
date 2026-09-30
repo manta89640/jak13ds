@@ -457,6 +457,9 @@ int run_tests(const RunOptions& opt) {
     u64 calls_seen = 0;
     const u32 name_hash = (u32)std::hash<std::string>()(t->name);
     for (int i = 0; i < n; i++) {
+      if (opt.only_case >= 0 && i != opt.only_case) {
+        continue;
+      }
       g_current_case = i;
       restore(clean, *t);
       g_heap_top = kHeap;
@@ -465,7 +468,9 @@ int run_tests(const RunOptions& opt) {
       try {
         t->gen(c);
       } catch (const AssertFailed& ex) {
-        invalid++;
+        if (invalid++ < 3) {
+          printf("  [%s case %d] generator failed: %s\n", t->name.c_str(), i, ex.what());
+        }
         continue;
       }
       take(before, *t);

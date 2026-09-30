@@ -184,6 +184,8 @@ struct RunOptions {
   int max_reports = 3;
   //! benchmark: run only this version ("mips2c" or "native") on every case, compare nothing
   std::string bench;
+  //! run only this case (-1: all)
+  int only_case = -1;
 };
 //! Runs the selected tests, returns the number that failed
 int run_tests(const RunOptions& opt);

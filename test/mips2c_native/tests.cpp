@@ -8,10 +8,12 @@ namespace tests {
 void register_collide_func_tests();
 void register_collide_cache_tests();
 void register_joint_tests();
+void register_collide_probe_tests();
 
 void register_all() {
   register_collide_func_tests();
   register_collide_cache_tests();
   register_joint_tests();
+  register_collide_probe_tests();
 }
 }  // namespace tests
