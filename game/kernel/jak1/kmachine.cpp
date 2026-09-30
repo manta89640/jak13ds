@@ -554,6 +554,19 @@ void pc_set_levels(u32 l0, u32 l1) {
     levels.push_back(l1s);
   }
 
+#ifdef __3DS__
+  // (AI-assisted) level-update calls this every frame. The 3DS renderer's set_levels waits for the
+  // render thread to finish the frame that was just handed to it, so calling it every frame made
+  // the game wait for the whole render (~18 ms/frame in village1) and the two threads never ran at
+  // the same time. The list only matters when it changes.
+  static std::vector<std::string> last_levels;
+  static bool have_last = false;
+  if (have_last && levels == last_levels) {
+    return;
+  }
+  last_levels = levels;
+  have_last = true;
+#endif
   Gfx::GetCurrentRenderer()->set_levels(levels);
 }
 
@@ -585,6 +598,17 @@ void InitMachine_PCPort() {
   auto settings_path = file_util::get_user_settings_dir(g_game_version);
   intern_from_c("*pc-settings-folder*")->value = make_string_from_c(settings_path.string().c_str());
   intern_from_c("*pc-settings-built-sha*")->value = make_string_from_c(build_revision().c_str());
+
+  // GOAL's with-profiler blocks only call pc-prof when this is true: always on PC (the imgui frame
+  // profiler), only with per-section timing on the 3DS, where the calls would cost time for nothing.
+#ifdef __3DS__
+  kperf::init_sections();
+  const bool prof_on = kperf::g_sections_enabled;
+#else
+  const bool prof_on = true;
+#endif
+  intern_from_c("*pc-prof-on*")->value =
+      prof_on ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
 }
 
 /*!

@@ -1196,9 +1196,11 @@
       ;; add a bonus size if we are target.
       (let ((f0-2 (+ (vector-length a0-1) (if (= (-> obj process type) target) 4096.0 0.0))))
         ;; and now fill the cache with all things we could hit
-        (fill-cache-for-shape! obj f0-2 arg1)))
+        (with-profiler "fill-cache"
+          (fill-cache-for-shape! obj f0-2 arg1))))
     ;; do the integration, colliding with stuff in the cache.
-    (integrate-and-collide! obj arg0)
+    (with-profiler "integrate-collide"
+      (integrate-and-collide! obj arg0))
     (none)))
 
 (defmethod fill-cache-for-shape! ((obj collide-shape) (arg0 float) (arg1 collide-kind))

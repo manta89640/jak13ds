@@ -33,6 +33,13 @@ static MemoryCardOperation op;
 static MemoryCardFile mc_files[4];
 // keep track of latest file selected. this is only used in an auto-save mode thats not used
 static int mc_last_file = -1;
+// (AI-assisted) pc_update_card reads every save file (stat + both banks of each slot). The menus
+// ask for the card status every frame, which on the 3DS meant up to 8 file reads from the SD card
+// per frame. The files only change when the game saves (pc_game_save_synch), so the result is kept
+// until then. On PC it is also refreshed once a second, in case the files are changed outside the
+// game.
+static bool mc_card_dirty = true;
+static Timer mc_card_timer;
 
 // a random value we will use as the memory card "handle" for the pc port, which has no memcards.
 constexpr u32 PC_MEM_CARD_HANDLE = 0x6C616F67;
@@ -125,6 +132,7 @@ void kmemcard_init_globals() {
   mc_files[1] = {};
   mc_files[2] = {};
   mc_files[3] = {};
+  mc_card_dirty = true;
   callback = nullptr;
   p1 = 0;
   p2 = 0;
@@ -228,6 +236,7 @@ void pc_update_card() {
 void pc_game_save_synch() {
   Timer mc_timer;
   mc_timer.start();
+  mc_card_dirty = true;
   pc_update_card();
   auto path = mc_get_filename(g_game_version, 0);
   file_util::create_dir_if_needed_for_file(path.string());
@@ -699,7 +708,15 @@ void MC_get_status(s32 /*slot*/, Ptr<mc_slot_info> info) {
   info->mem_required = SAVE_SIZE[g_game_version];
   info->mem_actual = 0;
 
-  pc_update_card();
+  bool refresh = mc_card_dirty;
+#ifndef __3DS__
+  refresh = refresh || mc_card_timer.getSeconds() > 1.0;
+#endif
+  if (refresh) {
+    pc_update_card();
+    mc_card_dirty = false;
+    mc_card_timer.start();
+  }
   info->known = 1;
   info->handle = PC_MEM_CARD_HANDLE;
   info->formatted = 1;

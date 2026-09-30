@@ -606,6 +606,8 @@
   (instant 2))
 
 (define-extern pc-prof (function string pc-prof-event none))
+;; set by the C kernel: #t when pc-prof events are wanted (see with-profiler)
+(define-extern *pc-prof-on* symbol)
 
 (defmacro get-user ()
   `(quote ,*user*))
