@@ -155,6 +155,7 @@ set(OG3DS_KERNEL_SOURCES
   kernel/jak1/kscheme.cpp
   kernel/jak1/ksound.cpp
   mips2c/mips2c_goalc.cpp
+  mips2c/mips2c_native.cpp
   mips2c/mips2c_table.cpp
   runtime.cpp
 )

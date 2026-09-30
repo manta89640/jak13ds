@@ -4,6 +4,7 @@
 
 #include "common/util/Assert.h"
 
+#include "game/common/ee_mem_write.h"
 #include "game/system/iop_thread.h"
 
 namespace iop {
@@ -191,7 +192,7 @@ u32 sceSifSetDma(sceSifDmaData* sdd, int len) {
   ASSERT(len == 1);
   ASSERT(len <= 0xc000);
   // todo - sanity check the destination address.
-  memcpy(iop->ee_main_mem + (u64)(sdd->addr), sdd->data, sdd->size);
+  iop_write_ee_mem(iop->ee_main_mem + (u64)(sdd->addr), sdd->data, sdd->size);
   return 1;
 }
 
