@@ -11,6 +11,12 @@
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#define NATIVE_ALIGNED4(p) __builtin_assume_aligned((p), 4)
+#else
+#define NATIVE_ALIGNED4(p) (p)
+#endif
+
 namespace Mips2C::jak1::native {
 
 namespace {
@@ -19,15 +25,45 @@ u32 sym_addr(const char* name) {
   return ::jak1::intern_from_c(name).offset;
 }
 
-inline s64 load_s32(u32 addr) {
-  return gload<s32>(addr);
-}
+/*!
+ * Words of the particles in GOAL memory. They are aligned (the mips2c code loads their quadwords
+ * with lqc2), so each access is one ARM or VFP load or store, and the base pointer is a local:
+ * a store to GOAL memory doesn't make the compiler load g_ee_main_mem again.
+ */
+struct ParticleMem {
+  u8* const base = g_ee_main_mem;
+  float f(u32 addr) const {
+    float v;
+    memcpy(&v, NATIVE_ALIGNED4(base + addr), 4);
+    return v;
+  }
+  u32 u(u32 addr) const {
+    u32 v;
+    memcpy(&v, NATIVE_ALIGNED4(base + addr), 4);
+    return v;
+  }
+  //! lw: sign-extended
+  s64 s(u32 addr) const { return (s32)u(addr); }
+  void set_f(u32 addr, float v) const {
+    MIPS2C_NATIVE_LOG_STORE(addr, 4);
+    memcpy(NATIVE_ALIGNED4(base + addr), &v, 4);
+  }
+  void set_u(u32 addr, u32 v) const {
+    MIPS2C_NATIVE_LOG_STORE(addr, 4);
+    memcpy(NATIVE_ALIGNED4(base + addr), &v, 4);
+  }
+};
+
+// sparticle-cpuinfo (144 bytes): sprite 0, adgif 4, radius 8, omega 12, vel-sxvel 16,
+// rot-syvel 32, fade 48, acc 64, rotvel3d 80, friction 96, timer 100, flags 104, user 108,
+// func 112, next-time 116, next-launcher 120, cache-alpha 124, valid 128, key 132, binding 136.
+// The vecdata (48 bytes): x y z sx, then (2d) flag matrix rot sy or (3d) qx qy qz sy, r g b a.
 
 /*!
  * (sp-process-block-2d system cpuinfo vecdata index count paused?) -> index + count
- * Updates count 2d particles (sparticle-cpuinfo, 144 bytes, and sprite-vec-data-2d, 48 bytes):
- * timers, the user callback, relaunching, velocity (with acceleration and friction), position,
- * rotation and scale, the orbiter, and frees the ones that are done.
+ * Updates count 2d particles (sparticle-cpuinfo and sprite-vec-data-2d): timers, the user
+ * callback, relaunching, velocity (with acceleration and friction), position, rotation and color,
+ * the orbiter, and frees the ones that are done.
  */
 u64 sp_process_block_2d_impl(const NativeArgs& args) {
   static const u32 frame_time_sym = sym_addr("*sp-frame-time*");
@@ -35,18 +71,21 @@ u64 sp_process_block_2d_impl(const NativeArgs& args) {
   static const u32 orbiter_sym = sym_addr("sp-orbiter");
   static const u32 relaunch_sym = sym_addr("sp-relaunch-particle-2d");
 
+  const ParticleMem m;
   const u64 system = args.a[0];
   u32 info = (u32)args.a[1];
   u32 vec = (u32)args.a[2];
   u64 index = args.a[3];
   u64 count = args.a[4];
   const bool paused = args.a[5] != args.st;
-  const u64 st = args.st;
+  const s64 st = (s64)args.st;
 
   // x: the frame count (int), y: velocity scale, z: acceleration scale, w: friction scale
-  float frame_time[4];
-  memcpy(frame_time, gptr(gload<u32>(frame_time_sym)), 16);
-  const u64 frames = f2u(frame_time[0]) & 255;
+  const u32 frame_time = m.u(frame_time_sym);
+  const u64 frames = m.u(frame_time) & 255;
+  const float ft_vel = m.f(frame_time + 4);
+  const float ft_acc = m.f(frame_time + 8);
+  const float ft_friction = m.f(frame_time + 12);
 
   // a3 is not set by this function before calling the callbacks: it is the argument, or the last
   // vecdata passed to sp-relaunch-particle-2d / sp-free-particle
@@ -56,118 +95,123 @@ u64 sp_process_block_2d_impl(const NativeArgs& args) {
     const u64 call_args[8] = {a0, a1, a2, a3, args.a[4], args.a[5], args.a[6], args.a[7]};
     native_call_goal(fn, call_args, args);
   };
-  auto free_particle = [&]() { call(gload<u32>(free_particle_sym), system, index, info, vec); };
+  auto free_particle = [&]() { call(m.u(free_particle_sym), system, index, info, vec); };
 
   do {
-    const s64 key = load_s32(info + 128);
-    if (key == (s64)st) {
+    if (m.s(info + 128) == st) {
       // not in use
-    } else if (paused && !(gload<u32>(info + 104) & 8192)) {
-      // paused: only count down timers that are already done
-      const s64 timer = load_s32(info + 100);
-      if (timer != -1 && timer == 0) {
+    } else if (paused && !(m.u(info + 104) & 8192)) {
+      // paused: only free the ones whose timer is done
+      if (m.s(info + 100) == 0) {
         free_particle();
       } else {
-        const u32 flags = gload<u32>(info + 104);
-        gstore<u32>(info + 104, flags ^ (flags & 64));
+        const u32 flags = m.u(info + 104);
+        m.set_u(info + 104, flags & ~64u);
         if (flags & 64) {
-          gstore<u32>(vec + 44, gload<u32>(info + 124));
+          m.set_u(vec + 44, m.u(info + 124));
         }
       }
     } else {
       bool do_free = false;
-      const s64 timer = load_s32(info + 100);
+      const s64 timer = m.s(info + 100);
       if (timer != -1) {
         if (timer == 0) {
           do_free = true;
         } else {
-          gstore<s32>(info + 100, std::max((s32)(u32)(timer - frames), 0));
+          m.set_u(info + 100, (u32)std::max((s32)(u32)(timer - frames), 0));
         }
       }
       if (!do_free) {
-        const u32 flags = gload<u32>(info + 104);
-        gstore<u32>(info + 104, flags ^ (flags & 64));
+        const u32 flags = m.u(info + 104);
+        m.set_u(info + 104, flags & ~64u);
         if (flags & 64) {
-          gstore<u32>(vec + 44, gload<u32>(info + 124));
+          m.set_u(vec + 44, m.u(info + 124));
         }
 
         // user callback
-        if (const u32 callback = gload<u32>(info + 112)) {
+        if (const u32 callback = m.u(info + 112)) {
           call(callback, system, info, vec, reg_a3);
         }
 
         // relaunch
-        const s64 next_launcher = load_s32(info + 120);
-        const s64 next_time = load_s32(info + 116) - (s64)frames;
+        const s64 next_launcher = m.s(info + 120);
+        const s64 next_time = m.s(info + 116) - (s64)frames;
         if (next_launcher != 0) {
-          gstore<u32>(info + 116, (u32)next_time);
+          m.set_u(info + 116, (u32)next_time);
           if (next_time - 1 < 0) {
-            call(gload<u32>(relaunch_sym), system, (u64)next_launcher, info, vec);
+            call(m.u(relaunch_sym), system, (u64)next_launcher, info, vec);
           }
         }
 
-        // motion
-        float v1[4], v2[4], v3[4], vel[4], rot_vel[4], scale_vel[4], accel[4];
-        memcpy(v1, gptr(vec), 16);
-        memcpy(v2, gptr(vec + 16), 16);
-        memcpy(v3, gptr(vec + 32), 16);
-        memcpy(vel, gptr(info + 16), 16);
-        memcpy(rot_vel, gptr(info + 32), 16);
-        memcpy(scale_vel, gptr(info + 48), 16);
-        memcpy(accel, gptr(info + 64), 16);
-        const u32 friction_bits = gload<u32>(info + 96);
-        for (int i = 0; i < 4; i++) {
-          accel[i] = accel[i] * frame_time[2];
-        }
-        for (int i = 0; i < 3; i++) {
-          vel[i] = vel[i] + accel[i];
-        }
+        // motion: vmulz (acceleration), vadd.xyz, friction, vmuly, then vadd and vmaxx
+        float vx = m.f(info + 16), vy = m.f(info + 20), vz = m.f(info + 24);
+        const float vw = m.f(info + 28);
+        const float rot_vz = m.f(info + 40), rot_vw = m.f(info + 44);
+        const float fade_x = m.f(info + 48), fade_y = m.f(info + 52), fade_z = m.f(info + 56),
+                    fade_w = m.f(info + 60);
+        const float ax = m.f(info + 64) * ft_acc;
+        const float ay = m.f(info + 68) * ft_acc;
+        const float az = m.f(info + 72) * ft_acc;
+        const u32 friction_bits = m.u(info + 96);
+        float px = m.f(vec), py = m.f(vec + 4), pz = m.f(vec + 8), pw = m.f(vec + 12);
+        float rot = m.f(vec + 24), sy = m.f(vec + 28);
+        float cx = m.f(vec + 32), cy = m.f(vec + 36), cz = m.f(vec + 40), cw = m.f(vec + 44);
+        vx = vx + ax;
+        vy = vy + ay;
+        vz = vz + az;
         if (friction_bits != 0) {
           const float a = 1.f - u2f(friction_bits);
-          const float b = a * frame_time[3];
+          const float b = a * ft_friction;
           const float c = 1.f - b;
-          for (int i = 0; i < 3; i++) {
-            vel[i] = vel[i] * c;
-          }
+          vx = vx * c;
+          vy = vy * c;
+          vz = vz * c;
         }
-        float d1[4], d2[4], d3[4];
-        for (int i = 0; i < 4; i++) {
-          d1[i] = vel[i] * frame_time[1];
-          d2[i] = rot_vel[i] * frame_time[1];
-          d3[i] = scale_vel[i] * frame_time[1];
-        }
-        for (int i = 0; i < 4; i++) {
-          v1[i] = v1[i] + d1[i];
-          v3[i] = v3[i] + d3[i];
-        }
-        for (int i = 2; i < 4; i++) {
-          v2[i] = v2[i] + d2[i];
-        }
-        for (int i = 0; i < 4; i++) {
-          v3[i] = std::max(v3[i], 0.f);
-        }
-        gstore_bytes(info + 16, vel, 16);
-        gstore_bytes(vec, v1, 16);
-        gstore_bytes(vec + 16, v2, 16);
-        gstore_bytes(vec + 32, v3, 16);
-        // the rotation (vec + 24) wraps like a 16-bit int
-        const s32 rot = (s32)gload<float>(vec + 24);
-        gstore<float>(vec + 24, (float)(s32)(s16)rot);
+        const float dpx = vx * ft_vel, dpy = vy * ft_vel, dpz = vz * ft_vel, dpw = vw * ft_vel;
+        const float drot = rot_vz * ft_vel, dsy = rot_vw * ft_vel;
+        const float dcx = fade_x * ft_vel, dcy = fade_y * ft_vel, dcz = fade_z * ft_vel,
+                    dcw = fade_w * ft_vel;
+        px = px + dpx;
+        py = py + dpy;
+        pz = pz + dpz;
+        pw = pw + dpw;
+        cx = cx + dcx;
+        cy = cy + dcy;
+        cz = cz + dcz;
+        cw = cw + dcw;
+        rot = rot + drot;
+        sy = sy + dsy;
+        cx = std::max(cx, 0.f);
+        cy = std::max(cy, 0.f);
+        cz = std::max(cz, 0.f);
+        cw = std::max(cw, 0.f);
+        m.set_f(info + 16, vx);
+        m.set_f(info + 20, vy);
+        m.set_f(info + 24, vz);
+        m.set_f(vec, px);
+        m.set_f(vec + 4, py);
+        m.set_f(vec + 8, pz);
+        m.set_f(vec + 12, pw);
+        // the rotation wraps like a 16-bit int
+        m.set_f(vec + 24, (float)(s32)(s16)(s32)rot);
+        m.set_f(vec + 28, sy);
+        m.set_f(vec + 32, cx);
+        m.set_f(vec + 36, cy);
+        m.set_f(vec + 40, cz);
+        m.set_f(vec + 44, cw);
 
-        if (gload<u32>(info + 104) & 128) {
-          call(gload<u32>(orbiter_sym), system, info, vec, reg_a3);
+        if (m.u(info + 104) & 128) {
+          call(m.u(orbiter_sym), system, info, vec, reg_a3);
         }
 
-        // done?
-        u32 scale[4];
-        memcpy(scale, gptr(vec + 32), 16);
-        const u32 flags2 = gload<u32>(info + 104);
-        if ((flags2 & 2) && scale[0] == 0 && scale[1] == 0 && scale[2] == 0) {
-          do_free = true;  // scale x, y and z are 0
-        } else if ((flags2 & 4) && (s32)scale[3] <= 0) {
+        // done? (the color as it is now in memory, the sizes as computed)
+        const u32 flags2 = m.u(info + 104);
+        if ((flags2 & 2) && m.u(vec + 32) == 0 && m.u(vec + 36) == 0 && m.u(vec + 40) == 0) {
+          do_free = true;  // r, g and b are 0
+        } else if ((flags2 & 4) && (s32)m.u(vec + 44) <= 0) {
           do_free = true;  // alpha
-        } else if ((flags2 & 1) && ((s32)f2u(v1[3]) < 0 || (s32)f2u(v2[3]) < 0)) {
-          do_free = true;  // w of the position or of the second vector below 0
+        } else if ((flags2 & 1) && ((s32)f2u(pw) < 0 || (s32)f2u(sy) < 0)) {
+          do_free = true;  // x or y size below 0
         }
       }
       if (do_free) {
@@ -196,20 +240,23 @@ u64 sp_process_block_3d_impl(const NativeArgs& args) {
   static const u32 free_particle_sym = sym_addr("sp-free-particle");
   static const u32 relaunch_sym = sym_addr("sp-relaunch-particle-3d");
 
+  const ParticleMem m;
   const u64 system = args.a[0];
   u32 info = (u32)args.a[1];
   u32 vec = (u32)args.a[2];
   u64 index = args.a[3];
   u64 count = args.a[4];
   const bool paused = args.a[5] != args.st;
-  const u64 st = args.st;
+  const s64 st = (s64)args.st;
   // the quaternion passed to quaternion*! (the mips2c version's stack frame)
   const u32 quat = args.stack - 16;
 
   // x: the frame count (int), y: velocity scale, z: acceleration scale, w: friction scale
-  float frame_time[4];
-  memcpy(frame_time, gptr(gload<u32>(frame_time_sym)), 16);
-  const u64 frames = f2u(frame_time[0]) & 255;
+  const u32 frame_time = m.u(frame_time_sym);
+  const u64 frames = m.u(frame_time) & 255;
+  const float ft_vel = m.f(frame_time + 4);
+  const float ft_acc = m.f(frame_time + 8);
+  const float ft_friction = m.f(frame_time + 12);
 
   // a3 is not set by this function before calling the callbacks and quaternion*!: it is the
   // argument, or the last vecdata passed to sp-relaunch-particle-3d / sp-free-particle
@@ -219,142 +266,146 @@ u64 sp_process_block_3d_impl(const NativeArgs& args) {
     const u64 call_args[8] = {a0, a1, a2, a3, args.a[4], args.a[5], args.a[6], args.a[7]};
     native_call_goal(fn, call_args, args);
   };
-  auto free_particle = [&]() { call(gload<u32>(free_particle_sym), system, index, info, vec); };
+  auto free_particle = [&]() { call(m.u(free_particle_sym), system, index, info, vec); };
 
   do {
-    const s64 key = load_s32(info + 128);
-    if (key == (s64)st) {
+    if (m.s(info + 128) == st) {
       // not in use
-    } else if (paused && !(gload<u32>(info + 104) & 8192)) {
-      // paused: only count down timers that are already done
-      const s64 timer = load_s32(info + 100);
-      if (timer != -1 && timer == 0) {
+    } else if (paused && !(m.u(info + 104) & 8192)) {
+      // paused: only free the ones whose timer is done
+      if (m.s(info + 100) == 0) {
         free_particle();
       } else {
-        const u32 flags = gload<u32>(info + 104);
-        gstore<u32>(info + 104, flags ^ (flags & 64));
+        const u32 flags = m.u(info + 104);
+        m.set_u(info + 104, flags & ~64u);
         if (flags & 64) {
-          gstore<u32>(vec + 44, gload<u32>(info + 124));
+          m.set_u(vec + 44, m.u(info + 124));
         }
       }
     } else {
       bool do_free = false;
-      const s64 timer = load_s32(info + 100);
+      const s64 timer = m.s(info + 100);
       if (timer != -1) {
         if (timer == 0) {
           do_free = true;
         } else {
-          gstore<s32>(info + 100, std::max((s32)(u32)(timer - frames), 0));
+          m.set_u(info + 100, (u32)std::max((s32)(u32)(timer - frames), 0));
         }
       }
       if (!do_free) {
-        const u32 flags = gload<u32>(info + 104);
-        gstore<u32>(info + 104, flags ^ (flags & 64));
+        const u32 flags = m.u(info + 104);
+        m.set_u(info + 104, flags & ~64u);
         if (flags & 64) {
-          gstore<u32>(vec + 44, gload<u32>(info + 124));
+          m.set_u(vec + 44, m.u(info + 124));
         }
 
         // user callback
-        if (const u32 callback = gload<u32>(info + 112)) {
+        if (const u32 callback = m.u(info + 112)) {
           call(callback, system, info, vec, reg_a3);
         }
 
         // relaunch
-        const s64 next_launcher = load_s32(info + 120);
-        const s64 next_time = load_s32(info + 116) - (s64)frames;
+        const s64 next_launcher = m.s(info + 120);
+        const s64 next_time = m.s(info + 116) - (s64)frames;
         if (next_launcher != 0) {
-          gstore<u32>(info + 116, (u32)next_time);
+          m.set_u(info + 116, (u32)next_time);
           if (next_time < 0) {
-            call(gload<u32>(relaunch_sym), system, (u64)next_launcher, info, vec);
+            call(m.u(relaunch_sym), system, (u64)next_launcher, info, vec);
           }
         }
 
-        // motion
-        float pos[4], rot[4], color[4], vel[4], rot_vel[4], fade[4], accel[4];
-        memcpy(pos, gptr(vec), 16);
-        memcpy(rot, gptr(vec + 16), 16);
-        memcpy(color, gptr(vec + 32), 16);
-        memcpy(vel, gptr(info + 16), 16);
-        memcpy(rot_vel, gptr(info + 32), 16);
-        memcpy(fade, gptr(info + 48), 16);
-        memcpy(accel, gptr(info + 64), 16);
-        const u32 friction_bits = gload<u32>(info + 96);
-        for (int i = 0; i < 4; i++) {
-          accel[i] = accel[i] * frame_time[2];
-        }
-        for (int i = 0; i < 3; i++) {
-          vel[i] = vel[i] + accel[i];
-        }
+        // motion: vmulz (acceleration), vadd.xyz, friction, vmuly, then vadd and vmaxx
+        float vx = m.f(info + 16), vy = m.f(info + 20), vz = m.f(info + 24);
+        const float vw = m.f(info + 28);
+        const float rot_vw = m.f(info + 44);
+        const float fade_x = m.f(info + 48), fade_y = m.f(info + 52), fade_z = m.f(info + 56),
+                    fade_w = m.f(info + 60);
+        const float ax = m.f(info + 64) * ft_acc;
+        const float ay = m.f(info + 68) * ft_acc;
+        const float az = m.f(info + 72) * ft_acc;
+        const u32 friction_bits = m.u(info + 96);
+        float px = m.f(vec), py = m.f(vec + 4), pz = m.f(vec + 8), pw = m.f(vec + 12);
+        const float qx = m.f(vec + 16), qy = m.f(vec + 20), qz = m.f(vec + 24);
+        float sy = m.f(vec + 28);
+        float cx = m.f(vec + 32), cy = m.f(vec + 36), cz = m.f(vec + 40), cw = m.f(vec + 44);
+        vx = vx + ax;
+        vy = vy + ay;
+        vz = vz + az;
         if (friction_bits != 0) {
           const float a = 1.f - u2f(friction_bits);
-          const float b = a * frame_time[3];
+          const float b = a * ft_friction;
           const float c = 1.f - b;
-          for (int i = 0; i < 3; i++) {
-            vel[i] = vel[i] * c;
-          }
+          vx = vx * c;
+          vy = vy * c;
+          vz = vz * c;
         }
-        float d_pos[4], d_rot[4], d_color[4];
-        for (int i = 0; i < 4; i++) {
-          d_pos[i] = vel[i] * frame_time[1];
-          d_rot[i] = rot_vel[i] * frame_time[1];
-          d_color[i] = fade[i] * frame_time[1];
-        }
-        for (int i = 0; i < 4; i++) {
-          pos[i] = pos[i] + d_pos[i];
-          color[i] = color[i] + d_color[i];
-        }
-        rot[3] = rot[3] + d_rot[3];
-        for (int i = 0; i < 4; i++) {
-          color[i] = std::max(color[i], 0.f);
-        }
-        gstore_bytes(info + 16, vel, 16);
-        gstore_bytes(vec, pos, 16);
-        gstore_bytes(vec + 16, rot, 16);
-        gstore_bytes(vec + 32, color, 16);
+        const float dpx = vx * ft_vel, dpy = vy * ft_vel, dpz = vz * ft_vel, dpw = vw * ft_vel;
+        const float dsy = rot_vw * ft_vel;
+        const float dcx = fade_x * ft_vel, dcy = fade_y * ft_vel, dcz = fade_z * ft_vel,
+                    dcw = fade_w * ft_vel;
+        px = px + dpx;
+        py = py + dpy;
+        pz = pz + dpz;
+        pw = pw + dpw;
+        sy = sy + dsy;
+        cx = cx + dcx;
+        cy = cy + dcy;
+        cz = cz + dcz;
+        cw = cw + dcw;
+        cx = std::max(cx, 0.f);
+        cy = std::max(cy, 0.f);
+        cz = std::max(cz, 0.f);
+        cw = std::max(cw, 0.f);
+        m.set_f(info + 16, vx);
+        m.set_f(info + 20, vy);
+        m.set_f(info + 24, vz);
+        m.set_f(vec, px);
+        m.set_f(vec + 4, py);
+        m.set_f(vec + 8, pz);
+        m.set_f(vec + 12, pw);
+        m.set_f(vec + 28, sy);
+        m.set_f(vec + 32, cx);
+        m.set_f(vec + 36, cy);
+        m.set_f(vec + 40, cz);
+        m.set_f(vec + 44, cw);
 
         // the rotation: w from x y z, times rotvel3d (twice at 10 or more frames)
         {
-          const float x = rot[0], y = rot[1], z = rot[2];
-          gstore<float>(quat, x);
-          gstore<float>(quat + 4, y);
-          gstore<float>(quat + 8, z);
-          const float zz = z * z;
+          m.set_f(quat, qx);
+          m.set_f(quat + 4, qy);
+          m.set_f(quat + 8, qz);
+          const float zz = qz * qz;
           float w = 1.f - zz;
-          const float yy = y * y;
+          const float yy = qy * qy;
           w = w - yy;
-          const float xx = x * x;
+          const float xx = qx * qx;
           w = w - xx;
-          gstore<float>(quat + 12, std::sqrt(std::abs(w)));
+          m.set_f(quat + 12, std::sqrt(std::abs(w)));
         }
-        const u32 frame_bits = gload<u32>(gload<u32>(frame_time_sym));
+        const u32 frame_bits = m.u(m.u(frame_time_sym));
         const u32 rot_vel_3d = info + 80;
         if ((s64)(frame_bits & 255) - 10 >= 0) {
-          call(gload<u32>(quaternion_mul_sym), quat, quat, rot_vel_3d, reg_a3);
+          call(m.u(quaternion_mul_sym), quat, quat, rot_vel_3d, reg_a3);
         }
-        call(gload<u32>(quaternion_mul_sym), quat, quat, rot_vel_3d, reg_a3);
-        float q[4], out[4];
-        memcpy(q, gptr(quat), 16);
-        memcpy(out, gptr(vec + 16), 16);
-        if (q[3] < 0.f) {
-          for (int i = 0; i < 3; i++) {
-            out[i] = 0.f - q[i];
-          }
+        call(m.u(quaternion_mul_sym), quat, quat, rot_vel_3d, reg_a3);
+        const float rx = m.f(quat), ry = m.f(quat + 4), rz = m.f(quat + 8);
+        if (m.f(quat + 12) < 0.f) {
+          m.set_f(vec + 16, 0.f - rx);
+          m.set_f(vec + 20, 0.f - ry);
+          m.set_f(vec + 24, 0.f - rz);
         } else {
-          for (int i = 0; i < 3; i++) {
-            out[i] = 0.f + q[i];
-          }
+          m.set_f(vec + 16, 0.f + rx);
+          m.set_f(vec + 20, 0.f + ry);
+          m.set_f(vec + 24, 0.f + rz);
         }
-        gstore_bytes(vec + 16, out, 16);
 
-        // done?
-        u32 c[4];
-        memcpy(c, color, 16);
-        const u32 flags2 = gload<u32>(info + 104);
-        if ((flags2 & 2) && c[0] == 0 && c[1] == 0 && c[2] == 0) {
+        // done? (the color and sizes as computed)
+        const u32 flags2 = m.u(info + 104);
+        if ((flags2 & 2) && f2u(cx) == 0 && f2u(cy) == 0 && f2u(cz) == 0) {
           do_free = true;  // r, g and b are 0
-        } else if ((flags2 & 4) && (s32)c[3] <= 0) {
+        } else if ((flags2 & 4) && (s32)f2u(cw) <= 0) {
           do_free = true;  // alpha
-        } else if ((flags2 & 1) && ((s32)f2u(pos[3]) < 0 || (s32)f2u(rot[3]) < 0)) {
+        } else if ((flags2 & 1) && ((s32)f2u(pw) < 0 || (s32)f2u(sy) < 0)) {
           do_free = true;  // x or y size below 0
         }
       }
@@ -374,6 +425,7 @@ u64 sp_process_block_3d_impl(const NativeArgs& args) {
 
 const NativeImpl sp_process_block_2d =
     MIPS2C_NATIVE_IMPL(sp_process_block_2d_impl, NATIVE_CALLS_GOAL, 0);
+// scratch: the quaternion passed to quaternion*!
 const NativeImpl sp_process_block_3d =
     MIPS2C_NATIVE_IMPL(sp_process_block_3d_impl, NATIVE_CALLS_GOAL, 16);
 

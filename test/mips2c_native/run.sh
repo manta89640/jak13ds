@@ -55,7 +55,9 @@ build() {
     objs+=("$obj")
     if [[ ! -f "$obj" || "$src" -nt "$obj" || "$HERE/harness.h" -nt "$obj" || "$HERE/fakes.h" -nt "$obj" ||
           "$ROOT/game/mips2c/mips2c_native.h" -nt "$obj" || "$M2C/native_functions.h" -nt "$obj" ]]; then
-      "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" -c "$src" -o "$obj" &
+      local extra=()
+      [[ "$(basename "$src")" == native_* ]] && extra=(${NATIVE_EXTRA_FLAGS:-})
+      "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" "${extra[@]}" -c "$src" -o "$obj" &
       pids+=($!)
     fi
   done
