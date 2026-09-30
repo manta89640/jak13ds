@@ -198,10 +198,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   if (m_rs.log_now) {
     const auto& vs = m_vram->stats();
     lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (written {}), relocates skipped "
-             "{}, textures decoded {} (reused {}), gpu textures {} ({} KB), linear free {} KB, vram free {} KB",
+             "{}, textures decoded {} (reused {}), gpu textures {} ({} KB), linear free {} KB, vram free {} KB ({} vram textures, {} failed copies)",
              m_rs.frame_idx, gs.draws, gs.triangles, vs.uploads, vs.uploads_changed,
              vs.relocates_skipped, vs.decoded, vs.revived, gs.textures, gs.tex_bytes / 1024,
-             gs.linear_free / 1024, gs.vram_free / 1024);
+             gs.linear_free / 1024, gs.vram_free / 1024, gs.vram_textures,
+             gs.vram_copy_failures);
     if (m_timing.frames) {
       const double n = m_timing.frames;
       lg::info(
