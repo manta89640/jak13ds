@@ -109,6 +109,8 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
 
   m_last_tex = -1;  // textures may have changed since the last frame
+  m_last_tex_valid = false;
+  m_have_last_ad = false;
   m_world_left = ctr_settings().sprites ? ctr_settings().max_sprites : 0;
   // direct GS data sent before the sprites
   m_direct->reset_state();
@@ -146,6 +148,17 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   m_fog_max = fd.fog_max;
   m_basis_x = fd.basis_x;
   m_basis_y = fd.basis_y;
+  {
+    // largest distance of a sprite corner from its center, per unit of scale
+    float b = 0, xy = 0;
+    for (int c = 0; c < 2; c++) {
+      b = std::max({b, std::abs(m_basis_x[c]), std::abs(m_basis_y[c])});
+    }
+    for (auto& a : m_xy_array) {
+      xy = std::max({xy, std::abs(a.x()), std::abs(a.y())});
+    }
+    m_corner_reach = b * xy;
+  }
   dma.read_and_advance();  // mscalf
   dma.read_and_advance();  // base / offset
 
@@ -266,6 +279,7 @@ void CtrSpriteRenderer::flush() {
   }
   m_bucket_count = 0;
   m_last_bucket = 0;
+  m_have_last_ad = false;  // m_last_verts pointed into a bucket
 }
 
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
@@ -279,33 +293,40 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     const VecData& v = m_vec[i];
     const AdGif& ad = m_adgif[i];
 
-    // GS state from the adgif (Sprite3::handle_tex0 etc.), starting from the default mode:
-    // z test GEQUAL without writes, alpha blending
-    ctr_draw_state st;
-    memset(&st, 0, sizeof(st));
-    GsTex0 tex0(ad.tex0_data);
-    if (ad.tex0_data != m_last_tex0 || m_last_tex < 0) {
-      const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
-      m_last_tex0 = ad.tex0_data;
-      m_last_tex = tex ? tex->handle : -1;
+    // GS state from the adgif (Sprite3::handle_tex0 etc.). Consecutive sprites mostly share it.
+    if (!m_have_last_ad || memcmp(&ad, &m_last_ad, sizeof(AdGif)) != 0) {
+      m_last_ad = ad;
+      m_have_last_ad = true;
+      ctr_draw_state& st = m_last_state;
+      memset(&st, 0, sizeof(st));
+      GsTex0 tex0(ad.tex0_data);
+      if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
+        const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
+        m_last_tex0 = ad.tex0_data;
+        m_last_tex = tex ? tex->handle : -1;
+        m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
+      }
+      st.tex = m_last_tex;
+      st.tcc = tex0.tcc();
+      st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
+      bool zwrite = false;
+      if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
+        zwrite = !GsZbuf(ad.clamp_data).zmsk();
+      } else {
+        st.clamp_s = (ad.clamp_data & 0b001) != 0;
+        st.clamp_t = (ad.clamp_data & 0b100) != 0;
+      }
+      st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
+      st.fix = GsAlpha(ad.alpha_data).fix();
+      // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with
+      // FB_ONLY (only matters for depth writes)
+      st.ztest = CTR_TEST_GEQUAL;
+      st.zwrite = zwrite;
+      st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
+      st.aref = 38;
+      m_last_verts = &bucket_for(st);
     }
-    st.tex = m_last_tex;
-    st.tcc = tex0.tcc();
-    st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
-    bool zwrite = false;
-    if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
-      zwrite = !GsZbuf(ad.clamp_data).zmsk();
-    } else {
-      st.clamp_s = (ad.clamp_data & 0b001) != 0;
-      st.clamp_t = (ad.clamp_data & 0b100) != 0;
-    }
-    st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
-    st.fix = GsAlpha(ad.alpha_data).fix();
-    st.ztest = CTR_TEST_GEQUAL;
-    st.zwrite = zwrite;
-    // alpha test GEQUAL 38 with FB_ONLY: only matters for depth writes
-    st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
-    st.aref = 38;
+    const ctr_draw_state& st = m_last_state;
 
     // sprite3_3d.vert
     const math::Vector4f pos(v.xyz_sx.x(), v.xyz_sx.y(), v.xyz_sx.z(), 1.f);
@@ -375,6 +396,14 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         scale_x = std::clamp(scale_x, m_min_scale, m_max_scale);
         m_stats.sprites_2d++;
       }
+      if (mode == MODE_2D) {
+        // quick reject: center further off screen than the sprite can reach
+        const float reach = (std::abs(scale_x) + std::abs(scale_y)) * m_corner_reach;
+        if (base.x() + reach < 1792.f || base.x() - reach > 2304.f ||
+            base.y() + reach < 1824.f || base.y() - reach > 2272.f) {
+          continue;
+        }
+      }
       const float angle = v.flag_rot_sy.z() * m_deg_to_rad;
       const float s = angle == 0.f ? 0.f : std::sin(angle);
       const float c = angle == 0.f ? 1.f : std::cos(angle);
@@ -386,16 +415,20 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       }
     }
 
+    {
+      // bounding box against the visible GS area (about 1792..2304 x 1824..2272)
+      float x0 = corners[0].x(), x1 = x0, y0 = corners[0].y(), y1 = y0;
+      for (int k = 1; k < 4; k++) {
+        x0 = std::min(x0, corners[k].x());
+        x1 = std::max(x1, corners[k].x());
+        y0 = std::min(y0, corners[k].y());
+        y1 = std::max(y1, corners[k].y());
+      }
+      if (x1 < 1792.f || x0 > 2304.f || y1 < 1824.f || y0 > 2272.f) {
+        continue;
+      }
+    }
     ctr_vertex out[4];
-    bool on_screen = false;
-    for (int k = 0; k < 4 && !on_screen; k++) {
-      // the visible GS area is about 1792..2304 x 1824..2272
-      on_screen = corners[k].x() > 1700.f && corners[k].x() < 2400.f &&
-                  corners[k].y() > 1750.f && corners[k].y() < 2350.f;
-    }
-    if (!on_screen) {
-      continue;
-    }
     for (int k = 0; k < 4; k++) {
       // GS screen -> ctr_gpu coordinates (see CtrDirect::handle_xyz)
       out[k].x = (corners[k].x() - 2048.f) / 256.f;
@@ -410,9 +443,11 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     }
     // vertex k is corner k of a strip 0, 1, 3, 2 (Sprite3::do_block_common)
     static const int kTri[6] = {0, 1, 3, 3, 1, 2};
-    auto& verts = bucket_for(st);
-    for (int k : kTri) {
-      verts.push_back(out[k]);
+    auto& verts = *m_last_verts;
+    const size_t n = verts.size();
+    verts.resize(n + 6);
+    for (int k = 0; k < 6; k++) {
+      verts[n + k] = out[kTri[k]];
     }
   }
 }
