@@ -17,7 +17,7 @@ extern const u32* max_tri_count;  // collide_cache.cpp
 namespace Mips2C::jak1 {
 const u32* collide_vu0_buffer();                // collide_cache.cpp
 void upload_collide_frag(u64 data, u64 count);  // collide_cache.cpp
-}
+}  // namespace Mips2C::jak1
 
 namespace Mips2C::jak1::native {
 
@@ -54,13 +54,13 @@ u64 method_9_collide_cache_prim_impl(const NativeArgs& args) {
   static const u32* mst_stub = native_stub_slot("moving-sphere-triangle-intersect");
 
   for (u32 i = gload<u16>(prim + 42); i != 0; i--, tri += 64) {
-    const u64 call_args[8] = {sphere, move, f2gpr(gload<float>(sphere + 12)),
-                              tri,    out_point, out_normal, args.a[6], args.a[7]};
+    const u64 call_args[8] = {sphere,    move,      f2gpr(gload<float>(sphere + 12)),
+                              tri,       out_point, out_normal,
+                              args.a[6], args.a[7]};
     const u32 fn = gload<u32>(mst_sym);
-    const float t = u2f((u32)(fn == *mst_stub
-                                  ? moving_sphere_triangle_intersect_impl(
-                                        NativeArgs{call_args, args.pp, args.st, out_point})
-                                  : native_call_goal(fn, call_args, args)));
+    const float t = u2f((u32)(fn == *mst_stub ? moving_sphere_triangle_intersect_impl(NativeArgs{
+                                                    call_args, args.pp, args.st, out_point})
+                                              : native_call_goal(fn, call_args, args)));
     float mv[4], normal[4];
     gload_q(mv, move);
     gload_q(normal, out_normal);
@@ -260,7 +260,8 @@ void print_too_many_tris(u64 st) {
   if ((s64)gload<s32>(cheat_sym) != (s64)(st + 8)) {  // #t
     return;
   }
-  printf("exceeded maximum collide cache tris (should print on screen but too lazy for that now)\n");
+  printf(
+      "exceeded maximum collide cache tris (should print on screen but too lazy for that now)\n");
 }
 
 struct Vec4i {
@@ -442,7 +443,6 @@ u64 method_27_collide_cache_impl(const NativeArgs& args) {
   add_mesh_tris(cache, mesh, bmin, bmax, 4096, args.st);
   return 0;
 }
-
 
 // ---------------------------------------------------------------------------
 // Foreground meshes and other primitives

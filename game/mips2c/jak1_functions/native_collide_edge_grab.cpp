@@ -234,7 +234,7 @@ u64 method_15_collide_edge_work_impl(const NativeArgs& args) {
   const u32 work = (u32)work64;
   float player[4];
   gload_q(player, gload<u32>(work + 4) + 12);  // cshape trans
-  player[1] = 0.f + gload<float>(work + 68);            // within-reach-box min y
+  player[1] = 0.f + gload<float>(work + 68);   // within-reach-box min y
   u32 tri = work + 6272;
   u64 tri64 = work64 + 6272;
   for (u32 n = gload<u32>(work + 16); n != 0; n--, tri += 32, tri64 += 32) {

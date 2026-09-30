@@ -88,7 +88,9 @@ void gen_msti(Case& c) {
 }  // namespace
 
 void register_collide_func_tests() {
-  add_test({"moving-sphere-triangle-intersect", "moving-sphere-triangle-intersect", 20000,
+  add_test({"moving-sphere-triangle-intersect",
+            "moving-sphere-triangle-intersect",
+            20000,
             [] {
               add_collide_fakes();
               bind_mips2c_symbol("collide-do-primitives");
@@ -97,7 +99,9 @@ void register_collide_func_tests() {
             gen_msti,
             {}});
 
-  add_test({"collide-do-primitives", "collide-do-primitives", 20000,
+  add_test({"collide-do-primitives",
+            "collide-do-primitives",
+            20000,
             [] {
               add_collide_fakes();
               bind_mips2c_symbol("collide-do-primitives");

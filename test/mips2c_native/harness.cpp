@@ -208,8 +208,8 @@ u32 sym_value(const std::string& name) {
 
 u32 make_type(const std::string& name, int num_methods) {
   const u32 t = static_alloc(16 + 4 * num_methods + 16, 16) + 4;
-  st<u32>(t - 4, 0);                 // type of type: not needed
-  st<u32>(t, sym(name));             // symbol
+  st<u32>(t - 4, 0);                  // type of type: not needed
+  st<u32>(t, sym(name));              // symbol
   st<u16>(t + 14, (u16)num_methods);  // allocated-length
   set_sym(name, t);
   return t;
@@ -486,8 +486,8 @@ int run_tests(const RunOptions& opt) {
       }
       take(after_m, *t);
       restore(before, *t);
-      Result rn = opt.self_check ? run_one(Mode::MIPS2C, e, c.args)
-                                 : run_one(Mode::NATIVE, e, c.args);
+      Result rn =
+          opt.self_check ? run_one(Mode::MIPS2C, e, c.args) : run_one(Mode::NATIVE, e, c.args);
       calls_seen += rm.calls.size();
 
       std::string why;
@@ -498,8 +498,8 @@ int run_tests(const RunOptions& opt) {
                  rm.v0 != rn.v0) {
         why = fmt::format("v0: mips2c {:x} native {:x}", rm.v0, rn.v0);
       } else if (rm.calls.size() != rn.calls.size()) {
-        why = fmt::format("{} GOAL calls by mips2c, {} by native", rm.calls.size(),
-                          rn.calls.size());
+        why =
+            fmt::format("{} GOAL calls by mips2c, {} by native", rm.calls.size(), rn.calls.size());
         for (size_t k = 0; k < std::max(rm.calls.size(), rn.calls.size()) && k < 6; k++) {
           why += fmt::format("\n      {:<50} | {}",
                              k < rm.calls.size() ? describe_call(rm.calls[k]) : "-",
@@ -531,9 +531,9 @@ int run_tests(const RunOptions& opt) {
         int listed = 0;
         u32 ndiff = 0;
         std::string where;
-        const bool same =
-            !memcmp(after_m.mem.data(), g_ee_main_mem, kStackBottom) &&
-            !memcmp(after_m.mem.data() + kStackTop, g_ee_main_mem + kStackTop, kMemSize - kStackTop);
+        const bool same = !memcmp(after_m.mem.data(), g_ee_main_mem, kStackBottom) &&
+                          !memcmp(after_m.mem.data() + kStackTop, g_ee_main_mem + kStackTop,
+                                  kMemSize - kStackTop);
         for (u32 a = 0; !same && a < kMemSize; a += 16) {
           if (a >= kStackBottom && a < kStackTop) {
             continue;
@@ -541,9 +541,9 @@ int run_tests(const RunOptions& opt) {
           if (memcmp(after_m.mem.data() + a, g_ee_main_mem + a, 16)) {
             ndiff++;
             if (listed++ < 4) {
-              where += fmt::format("\n      0x{:06x} mips2c{}\n               native{}", a,
-                                   describe16(after_m.mem.data() + a),
-                                   describe16(g_ee_main_mem + a));
+              where +=
+                  fmt::format("\n      0x{:06x} mips2c{}\n               native{}", a,
+                              describe16(after_m.mem.data() + a), describe16(g_ee_main_mem + a));
             }
           }
         }
@@ -563,8 +563,8 @@ int run_tests(const RunOptions& opt) {
     }
     e.native = saved_native;
     printf("%-40s  %6d cases  %6d invalid  %8llu GOAL calls  %s\n", t->name.c_str(), n, invalid,
-           (unsigned long long)calls_seen, fails ? fmt::format("{} MISMATCHES", fails).c_str()
-                                                : "ok");
+           (unsigned long long)calls_seen,
+           fails ? fmt::format("{} MISMATCHES", fails).c_str() : "ok");
     if (fails) {
       total_fail++;
     }

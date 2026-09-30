@@ -197,8 +197,8 @@ void gen_particle(Gen& g, u32 info, u32 vec, bool is_3d) {
   } else {
     // size y, (unused), rotation (wraps at 16 bits), size y
     st_vec(vec + 16, g.f(-10.f, 10.f), g.f(-10.f, 10.f),
-           g.pick(std::vector<float>{g.f(-40000.f, 40000.f), g.f(-1e6f, 1e6f), 32767.9f,
-                                     -32768.5f, 65535.f}),
+           g.pick(std::vector<float>{g.f(-40000.f, 40000.f), g.f(-1e6f, 1e6f), 32767.9f, -32768.5f,
+                                     65535.f}),
            g.chance(0.1f) ? g.f(-10.f, 0.f) : g.f_edge(0.f, 5000.f));
   }
   // color: sometimes black, sometimes transparent or -0
@@ -255,10 +255,18 @@ void gen_process_block(Case& c, bool is_3d) {
 }  // namespace
 
 void register_sparticle_tests() {
-  add_test({"sp-process-block-2d", "sp-process-block-2d", 4000, setup_sparticle,
-            [](Case& c) { gen_process_block(c, false); }, {}});
-  add_test({"sp-process-block-3d", "sp-process-block-3d", 4000, setup_sparticle,
-            [](Case& c) { gen_process_block(c, true); }, {}});
+  add_test({"sp-process-block-2d",
+            "sp-process-block-2d",
+            4000,
+            setup_sparticle,
+            [](Case& c) { gen_process_block(c, false); },
+            {}});
+  add_test({"sp-process-block-3d",
+            "sp-process-block-3d",
+            4000,
+            setup_sparticle,
+            [](Case& c) { gen_process_block(c, true); },
+            {}});
 }
 
 }  // namespace tests

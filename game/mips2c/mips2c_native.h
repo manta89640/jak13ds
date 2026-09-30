@@ -71,14 +71,17 @@ u64 native_as_exec(void* ctxt) {
   return F(NativeArgs{args, c->gprs[s6].du64[0], c->gprs[s7].du64[0], c->gprs[sp].du32[0]});
 }
 
-#define MIPS2C_NATIVE_IMPL(fn, flags, scratch) \
-  ::Mips2C::NativeImpl{&fn, &::Mips2C::native_as_exec<&fn>, flags, scratch}
+#define MIPS2C_NATIVE_IMPL(fn, flags, scratch)          \
+  ::Mips2C::NativeImpl {                                \
+    &fn, &::Mips2C::native_as_exec<&fn>, flags, scratch \
+  }
 
 //! Call a GOAL function from native code (like ExecutionContext::jalr).
 u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller);
 
 //! Where the GOAL address of the stub of a registered mips2c/native function is kept (0 until it
-//! is registered). The pointer stays valid; the address changes if the function is registered again.
+//! is registered). The pointer stays valid; the address changes if the function is registered
+//! again.
 const u32* native_stub_slot(const char* name);
 
 // ---------------------------------------------------------------------------

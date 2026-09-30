@@ -50,8 +50,7 @@ void add_collide_fakes() {
             return 0;
           }));
 
-  set_sym("ray-sphere-intersect",
-          add_goal_fn("ray-sphere-intersect", 4, [](const u64* a) -> u64 {
+  set_sym("ray-sphere-intersect", add_goal_fn("ray-sphere-intersect", 4, [](const u64* a) -> u64 {
             float o[4], d[4], c[4];
             memcpy(o, hptr((u32)a[0]), 16);
             memcpy(d, hptr((u32)a[1]), 16);

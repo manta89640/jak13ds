@@ -22,8 +22,8 @@
 #include "harness.h"
 
 namespace Mips2C::jak1 {
-#define LINK(ns)   \
-  namespace ns {   \
+#define LINK(ns)      \
+  namespace ns {      \
   extern void link(); \
   }
 LINK(collide_do_primitives)

@@ -123,7 +123,6 @@ u32 gen_mesh_and_cache(Case& c, int& vertex_count) {
   return cache;
 }
 
-
 //! symbols for the overflow printfs
 void gen_print_syms(Gen& g) {
   set_sym("*already-printed-exeeded-max-cache-tris*", g.chance(0.5f) ? st() : true_sym());
@@ -181,8 +180,8 @@ void gen_method_30(Case& c) {
   const u32 out = alloc(96);
   st<u32>(work + 8, out);
   const float h = g.f(0.f, 3.f * size);
-  st_vec(work + 16, center[0] + g.f_edge(-size, size), center[1] + h, center[2] + g.f_edge(-size, size),
-         g.f(-1, 1));
+  st_vec(work + 16, center[0] + g.f_edge(-size, size), center[1] + h,
+         center[2] + g.f_edge(-size, size), g.f(-1, 1));
   if (g.chance(0.8f)) {
     st_vec(work + 32, g.chance(0.2f) ? g.f(-100, 100) : 0.f, -g.f(0.f, 4.f * size),
            g.chance(0.2f) ? g.f(-100, 100) : 0.f, g.f(-1, 1));
@@ -241,7 +240,8 @@ u32 gen_puss_work(Gen& g, int n, const float center[4], float size) {
   for (int i = 0; i < 96; i += 4) {
     st<u32>(work + i, g.u32_());
   }
-  s32 bmin[4] = {INT32_MAX, INT32_MAX, INT32_MAX, 0}, bmax[4] = {INT32_MIN, INT32_MIN, INT32_MIN, 0};
+  s32 bmin[4] = {INT32_MAX, INT32_MAX, INT32_MAX, 0},
+      bmax[4] = {INT32_MIN, INT32_MIN, INT32_MIN, 0};
   for (int k = 0; k < n + 4; k++) {
     const u32 s = work + 96 + 48 * k;
     float p[4];
@@ -435,13 +435,24 @@ void setup_mssi() {
 }  // namespace
 
 void register_collide_cache_tests() {
-  add_test({"(method 9 collide-cache-prim)", "(method 9 collide-cache-prim)", 4000,
-            setup_cache_common, gen_method_9_prim, {}});
+  add_test({"(method 9 collide-cache-prim)",
+            "(method 9 collide-cache-prim)",
+            4000,
+            setup_cache_common,
+            gen_method_9_prim,
+            {}});
 
-  add_test({"(method 26 collide-cache)", "(method 26 collide-cache)", 6000, setup_cache_common,
-            gen_method_26_28, {}});
+  add_test({"(method 26 collide-cache)",
+            "(method 26 collide-cache)",
+            6000,
+            setup_cache_common,
+            gen_method_26_28,
+            {}});
 
-  add_test({"(method 29 collide-cache)", "(method 29 collide-cache)", 3000, setup_cache_common,
+  add_test({"(method 29 collide-cache)",
+            "(method 29 collide-cache)",
+            3000,
+            setup_cache_common,
             [](Case& c) {
               int n;
               gen_mesh_and_cache(c, n);
@@ -455,7 +466,10 @@ void register_collide_cache_tests() {
             },
             {}});
 
-  add_test({"(method 27 collide-cache)", "(method 27 collide-cache)", 6000, setup_cache_common,
+  add_test({"(method 27 collide-cache)",
+            "(method 27 collide-cache)",
+            6000,
+            setup_cache_common,
             [](Case& c) {
               int n;
               gen_mesh_and_cache(c, n);
@@ -464,50 +478,75 @@ void register_collide_cache_tests() {
             },
             {}});
 
-  add_test(
-      {"(method 32 collide-cache)", "(method 32 collide-cache)", 4000, setup_cache_common,
-       [](Case& c) {
-         auto& g = c.g;
-         const int n = g.range(1, 127);
-         const u32 mesh = gen_frag_mesh(g, n);
-         // the unpacked vertices from __pc-upload-collide-frag (and older ones after them)
-         u32* buf = vu0_buffer();
-         for (int i = 0; i < 1024; i += 4) {
-           buf[i] = 0x4d000000 + (g.u32_() & 0xffff);
-           buf[i + 1] = 0x4d000000 + (g.u32_() & 0xffff);
-           buf[i + 2] = 0x4d000000 + (g.u32_() & 0xffff);
-           buf[i + 3] = 0x3f800000;
-         }
-         u32 xf = st();
-         if (g.chance(0.6f)) {
-           xf = alloc_basic(0, 64);
-           for (int i = 0; i < 64; i += 2) {
-             st<s16>(xf + i, (s16)g.range(-4096, 4096));
-           }
-           st_vec(xf + 12, g.f(-1e5f, 1e5f), g.f(-1e5f, 1e5f), g.f(-1e5f, 1e5f), g.f(-2, 2));
-         }
-         c.args[0] = alloc_basic(collide_cache_type(), 16);
-         c.args[1] = mesh;
-         c.args[2] = xf;
-         c.args[3] = 0;
-       },
-       {{vu0_buffer(), 4096}}});
+  add_test({"(method 32 collide-cache)",
+            "(method 32 collide-cache)",
+            4000,
+            setup_cache_common,
+            [](Case& c) {
+              auto& g = c.g;
+              const int n = g.range(1, 127);
+              const u32 mesh = gen_frag_mesh(g, n);
+              // the unpacked vertices from __pc-upload-collide-frag (and older ones after them)
+              u32* buf = vu0_buffer();
+              for (int i = 0; i < 1024; i += 4) {
+                buf[i] = 0x4d000000 + (g.u32_() & 0xffff);
+                buf[i + 1] = 0x4d000000 + (g.u32_() & 0xffff);
+                buf[i + 2] = 0x4d000000 + (g.u32_() & 0xffff);
+                buf[i + 3] = 0x3f800000;
+              }
+              u32 xf = st();
+              if (g.chance(0.6f)) {
+                xf = alloc_basic(0, 64);
+                for (int i = 0; i < 64; i += 2) {
+                  st<s16>(xf + i, (s16)g.range(-4096, 4096));
+                }
+                st_vec(xf + 12, g.f(-1e5f, 1e5f), g.f(-1e5f, 1e5f), g.f(-1e5f, 1e5f), g.f(-2, 2));
+              }
+              c.args[0] = alloc_basic(collide_cache_type(), 16);
+              c.args[1] = mesh;
+              c.args[2] = xf;
+              c.args[3] = 0;
+            },
+            {{vu0_buffer(), 4096}}});
 
-  add_test({"(method 28 collide-cache)", "(method 28 collide-cache)", 6000, setup_cache_common,
-            gen_method_26_28, {}});
-  add_test({"(method 30 collide-cache)", "(method 30 collide-cache)", 8000, setup_cache_common,
-            gen_method_30, {}});
-  add_test({"(method 10 collide-cache-prim)", "(method 10 collide-cache-prim)", 8000, setup_mssi,
-            gen_method_10_prim, {}});
-  add_test({"(method 9 collide-puss-work)", "(method 9 collide-puss-work)", 6000, setup_mssi,
-            gen_puss_9, {}});
-  add_test({"(method 10 collide-puss-work)", "(method 10 collide-puss-work)", 8000, setup_mssi,
-            gen_puss_10, {}});
+  add_test({"(method 28 collide-cache)",
+            "(method 28 collide-cache)",
+            6000,
+            setup_cache_common,
+            gen_method_26_28,
+            {}});
+  add_test({"(method 30 collide-cache)",
+            "(method 30 collide-cache)",
+            8000,
+            setup_cache_common,
+            gen_method_30,
+            {}});
+  add_test({"(method 10 collide-cache-prim)",
+            "(method 10 collide-cache-prim)",
+            8000,
+            setup_mssi,
+            gen_method_10_prim,
+            {}});
+  add_test({"(method 9 collide-puss-work)",
+            "(method 9 collide-puss-work)",
+            6000,
+            setup_mssi,
+            gen_puss_9,
+            {}});
+  add_test({"(method 10 collide-puss-work)",
+            "(method 10 collide-puss-work)",
+            8000,
+            setup_mssi,
+            gen_puss_10,
+            {}});
   for (int m : {12, 13, 14}) {
     const std::string name = fmt::format("(method {} collide-shape-prim-mesh)", m);
     add_test({name, name, 5000, setup_prim_mesh, gen_prim_mesh, {}});
   }
-  add_test({"__pc-upload-collide-frag", "__pc-upload-collide-frag", 3000, setup_cache_common,
+  add_test({"__pc-upload-collide-frag",
+            "__pc-upload-collide-frag",
+            3000,
+            setup_cache_common,
             [](Case& c) {
               auto& g = c.g;
               const int n = g.range(0, 128);
