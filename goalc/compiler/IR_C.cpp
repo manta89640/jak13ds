@@ -48,11 +48,11 @@ void IR_LoadConstant64::do_codegen_c(CFunctionEmitter& e) {
 void IR_LoadSymbolPointer::do_codegen_c(CFunctionEmitter& e) {
   std::string value;
   if (m_name == "#f") {
-    value = "goalc_st";
+    value = "gc_stl";
   } else if (m_name == "#t") {
-    value = fmt::format("(goalc_st + {})", true_symbol_offset(e.version()));
+    value = fmt::format("(gc_stl + {})", true_symbol_offset(e.version()));
   } else if (m_name == "_empty_") {
-    value = fmt::format("(goalc_st + {})", empty_pair_offset_from_s7(e.version()));
+    value = fmt::format("(gc_stl + {})", empty_pair_offset_from_s7(e.version()));
   } else {
     value = fmt::format("GC_SYM({})", e.symbol(m_name));
   }
