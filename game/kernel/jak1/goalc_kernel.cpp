@@ -155,6 +155,7 @@ struct SuspendedThread {
   std::vector<u8> stack;
   u32 token = 0;
   bool used = false;
+  u32 owner = 0;  // thread address when it suspended (for error messages; relocation moves threads)
 };
 std::vector<std::unique_ptr<SuspendedThread>> g_suspended;
 std::vector<u32> g_free_slots;
@@ -319,6 +320,7 @@ u64 goalc_suspend_impl(goalc_ctx* caller_ctx) {
     slot = g_suspended[idx].get();
   }
   memcpy(&slot->ctx, caller_ctx, sizeof(goalc_ctx));
+  slot->owner = thread;
   slot->stack.resize(copy_size);
   memcpy(slot->stack.data(), host(stack_top - copy_size), copy_size);
 
@@ -352,7 +354,16 @@ u64 goalc_k_thread_resume(u64 thread_arg) {
     if (pc == GOALC_SUSPENDED_PC) {
       SuspendedThread* slot = thread_slot(thread);
       if (!slot) {
-        lg::die("goalc: thread-resume of thread #x{:x} which has no saved context", thread);
+        u64 handle = thread_rreg0(thread);
+        u32 idx = (u32)handle;
+        std::string detail = "no such slot";
+        if (idx < g_suspended.size()) {
+          auto* s = g_suspended[idx].get();
+          detail = fmt::format("slot {} used {} token {} (thread has {}), last owner #x{:x}", idx,
+                               s->used, s->token, (u32)(handle >> 32), s->owner);
+        }
+        lg::die("goalc: thread-resume of thread #x{:x} ({}) which has no saved context: {}", thread,
+                goal_name(word(proc + PROCESS_NAME)), detail);
       }
       // restore the stack
       u32 copy_size = stack_copy_size(stack_top, sp);
@@ -468,6 +479,8 @@ u64 goalc_k_thread_release(u64 thread) {
   if ((u32)thread && (u32)thread != (u32)goalc_st) {
     SuspendedThread* slot = thread_slot((u32)thread);
     if (slot) {
+      lg::debug("goalc: releasing the saved state of suspended thread #x{:x} (suspended as #x{:x})",
+                (u32)thread, slot->owner);
       free_slot(slot);
       word((u32)thread + THREAD_PC) = 0;
     }

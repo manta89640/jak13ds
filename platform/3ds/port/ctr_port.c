@@ -51,7 +51,14 @@ int ctr_platform_init(int enable_console) {
   ctr_thread_install_crash_handler();
   /* Let the app use part of the system core (core 1) for the IO / IOP threads, so that core 0 is
    * left to the game logic (EE thread). 80% of core 1; the system keeps the rest. */
-  s_syscore = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80)) ? 1 : 0;
+  /* Experimental, off by default: in Azahar, boot hangs at the first IOP file load when the IOP
+   * thread runs on core 1 (not investigated further; untested on hardware). Turned on by the file
+   * sdmc:/3ds/jak1/use_syscore. */
+  if (access("/3ds/jak1/use_syscore", F_OK) == 0) {
+    s_syscore = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80)) ? 1 : 0;
+  } else {
+    s_syscore = 0;
+  }
   /* C-stick / ZL / ZR on New 3DS (and the Circle Pad Pro) */
   s_irrst = R_SUCCEEDED(irrstInit()) ? 1 : 0;
   return 0;

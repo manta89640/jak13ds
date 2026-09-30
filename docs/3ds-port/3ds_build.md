@@ -75,6 +75,33 @@ A `.3dsx` runs inside another title's memory:
   Luma3DS lets the app handle them; otherwise Luma's exception screen appears (take a photo).
 - Logs: `sdmc:/3ds/jak1/data/log/stdout.log` (everything printed) and `gk.log` (debug level).
 - Old 3DS / Old 2DS: not enough memory (64 MB); the game says so and exits.
+- Optional flag files in `sdmc:/3ds/jak1/`: `args.txt` (game arguments, default `-boot
+  -cbackend`), `listener` (Wi-Fi REPL), `screenshots` (a number N: save the top screen every N
+  frames to `data/log`), `pad_script.txt` (scripted input, see below), `use_syscore`
+  (experimental: IOP / IO threads on core 1; hangs at boot in Azahar, untested on hardware).
+
+### Automated gameplay test (scripted input)
+
+`game/sce/pad_script.h` replays a timeline of pad states on controller 0 (format in the header):
+buttons and sticks per game frame, `wait *target* <state>` (stops the script's clock until Jak is
+in that state), `print SYM`, `pos *target*` (position in meters and state), `crash` (tests the
+crash screen), `exit`.
+
+- 3DS: `sdmc:/3ds/jak1/pad_script.txt` (`stage_sd.sh --pad-script FILE`).
+- PC: `OPENGOAL_PAD_SCRIPT=FILE gk ...` (with `--null-gfx`, or `--ctr-gfx` to get frames).
+- `platform/3ds/tests/gameplay.pad`: title -> Start -> New Game (taps Cross, fine with an empty
+  save) -> skips the intro cutscene (taps Triangle) -> waits for `target-stance` on Geyser Rock ->
+  walks forward, jumps while walking, jumps, punches, spin kicks, crouches, walks left and right,
+  logging Jak's position and state after each step.
+
+```sh
+platform/3ds/tools/run_emu.sh --seconds 900 --out build-3ds/emu-game \
+  --stage "--proj ../p3ds --clean-logs --clean-user --screenshots 300 --pad-script $PWD/platform/3ds/tests/gameplay.pad"
+grep -a "pad script" build-3ds/emu-game/stdout.log
+```
+
+`run_emu.sh` takes a lock (`$TMPDIR/opengoal-azahar.lock`) because Azahar and its virtual SD card
+are shared; `--stage` stages the SD card inside the lock.
 
 ### Controls
 

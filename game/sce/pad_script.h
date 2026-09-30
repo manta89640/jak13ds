@@ -22,6 +22,7 @@
  *   pos SYM   log the position (in meters) of the process-drawable in SYM (pos *target*)
  *   log TEXT  write TEXT to the log
  *   exit      stop the runtime
+ *   crash     fail an assert (to test the crash screen)
  * Buttons and sticks not mentioned are released / centered.
  *
  * Example (title screen, start a new game, walk forward and jump):

@@ -12,6 +12,9 @@
 #include <vector>
 
 #include "common/log/log.h"
+#include "common/util/Assert.h"
+
+#include "fmt/format.h"
 
 namespace pad_script {
 namespace {
@@ -24,6 +27,7 @@ struct Entry {
   std::vector<std::string> positions;
   std::string wait_sym, wait_state;
   bool exit = false;
+  bool crash = false;
 };
 
 struct Script {
@@ -106,6 +110,8 @@ void load() {
         ss >> e.wait_sym >> e.wait_state;
       } else if (item == "exit") {
         e.exit = true;
+      } else if (item == "crash") {
+        e.crash = true;
       } else if (item.size() > 3 && item[2] == '=') {
         int v = atoi(item.c_str() + 3);
         v = v < 0 ? 0 : (v > 255 ? 255 : v);
@@ -195,6 +201,9 @@ PadState next_frame() {
       g_script.wait_state = e.wait_state;
       g_script.wait_start = real;
       break;
+    }
+    if (e.crash) {
+      ASSERT_MSG(false, fmt::format("pad script crash test at frame {}", frame));
     }
     if (e.exit) {
       lg::info("[pad script] frame {}: exit", frame);
