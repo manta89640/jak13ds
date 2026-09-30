@@ -14,8 +14,8 @@
 
 namespace c3l {
 
-constexpr char kMagic[4] = {'C', '3', 'L', '1'};
-constexpr uint32_t kVersion = 1;
+constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
+constexpr uint32_t kVersion = 2;
 
 enum TextureFormat : uint8_t {
   TEX_RGB565 = 0,  // u16: r5 g6 b5 (r in the high bits)
@@ -38,9 +38,17 @@ struct Header {
   uint32_t draw_data_size;
   uint32_t texture_data_offset;  // all texture texels
   uint32_t texture_data_size;
+  uint32_t num_merc_models;
+  uint32_t merc_models_offset;  // MercModel[num_merc_models]
+  uint32_t merc_vertex_offset;  // MercVertex[]
+  uint32_t merc_vertex_size;
+  uint32_t merc_index_offset;  // u16[], relative to the model's first vertex
+  uint32_t merc_index_size;
+  uint32_t merc_draw_offset;  // MercDraw[]
+  uint32_t merc_draw_size;
   uint32_t pad[2];
 };
-static_assert(sizeof(Header) == 96);
+static_assert(sizeof(Header) == 128);
 
 /*!
  * Texture, already in the 3DS GPU layout: 8x8 tiles (rows of tiles), Morton order inside a tile,
@@ -97,5 +105,47 @@ inline uint32_t tiled_index(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
   uint32_t ty = h - 1 - y;
   return ((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8(x & 7, ty & 7);
 }
+
+// ---------------- merc (skinned models) ----------------
+
+constexpr int kMercPaletteSize = 24;  // bones per draw (vertex shader uniform budget)
+
+/*!
+ * A merc model (characters, objects). Found by name: the game sends the name with its bones.
+ */
+struct MercModel {
+  char name[64];
+  uint32_t first_vertex;  // into the merc vertex data
+  uint32_t vertex_count;  // <= 65536
+  uint32_t first_draw;    // into the merc draw data
+  uint32_t draw_count;
+  float scale;  // model position = pos * scale
+  uint32_t pad[3];
+};
+static_assert(sizeof(MercModel) == 96);
+
+/*!
+ * One draw of a merc model, limited to kMercPaletteSize bones: palette[i] is the model bone used
+ * by vertices with bone index i.
+ */
+struct MercDraw {
+  uint32_t mode;         // tfrag3 DrawMode bits
+  uint16_t texture;      // 0xffff = untextured
+  uint8_t effect;        // merc effect index (the game can disable effects)
+  uint8_t palette_count;
+  uint32_t first_index;  // triangle list, into the merc index data
+  uint32_t index_count;
+  uint8_t palette[32];
+};
+static_assert(sizeof(MercDraw) == 48);
+
+struct MercVertex {
+  int16_t pos[3];      // * MercModel::scale
+  uint8_t bones[3];    // index into the draw's palette
+  uint8_t weights[3];  // 0..255
+  int16_t st[2];       // * 1024
+  uint8_t rgba[4];
+};
+static_assert(sizeof(MercVertex) == 20);
 
 }  // namespace c3l

@@ -4,6 +4,7 @@
 target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrDirect.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrLevel.cpp
+  ${OG_ROOT}/game/graphics/ctr/CtrMerc.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrRenderer.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrVram.cpp
 )
@@ -11,7 +12,7 @@ target_sources(og3ds_runtime PRIVATE
 find_program(PICASSO picasso HINTS ${DEVKITPRO}/tools/bin ${CTRULIB}/../tools/bin REQUIRED)
 
 set(OG3DS_SHADER_CS "")
-foreach(shader ctr_basic ctr_mesh)
+foreach(shader ctr_basic ctr_mesh ctr_skin)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
   set(csrc ${CMAKE_CURRENT_BINARY_DIR}/${shader}_shbin.c)
@@ -27,7 +28,7 @@ foreach(shader ctr_basic ctr_mesh)
 endforeach()
 
 target_sources(og3ds_port PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_gpu_citro3d.c
+  ${OG_ROOT}/game/graphics/ctr/ctr_gpu_citro3d.c
   ${OG3DS_SHADER_CS}
 )
 target_include_directories(og3ds_port PRIVATE ${OG_ROOT})

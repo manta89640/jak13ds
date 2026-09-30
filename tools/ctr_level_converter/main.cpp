@@ -35,6 +35,8 @@ struct Options {
   int max_tex = 128;
   float cell_meters = 100.f;
   bool no_tie = false;
+  bool no_merc = false;
+  bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
 };
 
 // A triangle soup vertex before chunking
@@ -185,6 +187,181 @@ struct Converter {
   }
 };
 
+// ---------------- merc ----------------
+
+struct MercOut {
+  std::vector<c3l::MercModel> models;
+  std::vector<c3l::MercVertex> verts;
+  std::vector<u16> indices;
+  std::vector<c3l::MercDraw> draws;
+  int skipped_models = 0;
+};
+
+void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* out) {
+  for (const auto& model : group.models) {
+    c3l::MercModel mm{};
+    strncpy(mm.name, model.name.c_str(), sizeof(mm.name) - 1);
+    mm.first_vertex = out->verts.size();
+    mm.first_draw = out->draws.size();
+    size_t idx_start = out->indices.size();
+
+    // position scale for the whole model
+    float max_abs = 1.f;
+    for (const auto& eff : model.effects) {
+      for (const auto& d : eff.all_draws) {
+        for (u32 i = d.first_index; i < d.first_index + d.index_count; i++) {
+          u32 vi = group.indices[i];
+          if (vi == UINT32_MAX) {
+            continue;
+          }
+          for (float p : group.vertices[vi].pos) {
+            max_abs = std::max(max_abs, std::abs(p));
+          }
+        }
+      }
+    }
+    mm.scale = max_abs / 32767.f;
+
+    // model vertices: (source vertex, draw) -> local index
+    std::vector<c3l::MercVertex> local_verts;
+    bool too_big = false;
+    for (size_t ei = 0; ei < model.effects.size(); ei++) {
+      for (const auto& d : model.effects[ei].all_draws) {
+        if (d.eye_id != 0xff) {
+          continue;  // eyes are drawn by the eye renderer (not done yet)
+        }
+        // strips (or plain triangles for custom models) -> triangles
+        std::vector<std::array<u32, 3>> tris;
+        if (d.no_strip) {
+          for (u32 i = d.first_index; i + 2 < d.first_index + d.index_count; i += 3) {
+            tris.push_back({group.indices[i], group.indices[i + 1], group.indices[i + 2]});
+          }
+        } else {
+          std::vector<u32> strip;
+          auto flush = [&]() {
+            for (size_t i = 2; i < strip.size(); i++) {
+              if (strip[i - 2] != strip[i - 1] && strip[i - 1] != strip[i] &&
+                  strip[i - 2] != strip[i]) {
+                tris.push_back({strip[i - 2], strip[i - 1], strip[i]});
+              }
+            }
+            strip.clear();
+          };
+          for (u32 i = d.first_index; i < d.first_index + d.index_count; i++) {
+            if (group.indices[i] == UINT32_MAX) {
+              flush();
+            } else {
+              strip.push_back(group.indices[i]);
+            }
+          }
+          flush();
+        }
+
+        // split into draws that use at most kMercPaletteSize bones
+        size_t t = 0;
+        while (t < tris.size()) {
+          c3l::MercDraw md{};
+          md.mode = d.mode.as_int();
+          md.texture = cv.texture_id(d.tree_tex_id);
+          md.effect = ei;
+          md.first_index = out->indices.size();
+          std::vector<u8> palette;
+          std::unordered_map<u32, u16> vmap;
+          auto bones_of = [&](u32 vi, std::vector<u8>* bones) {
+            const auto& v = group.vertices[vi];
+            for (int k = 0; k < 3; k++) {
+              if (v.weights[k] > 0.f &&
+                  std::find(bones->begin(), bones->end(), v.mats[k]) == bones->end()) {
+                bones->push_back(v.mats[k]);
+              }
+            }
+          };
+          for (; t < tris.size(); t++) {
+            std::vector<u8> merged = palette;
+            for (u32 vi : tris[t]) {
+              bones_of(vi, &merged);
+            }
+            if ((int)merged.size() > c3l::kMercPaletteSize) {
+              break;
+            }
+            palette = merged;
+            for (u32 vi : tris[t]) {
+              auto it = vmap.find(vi);
+              if (it == vmap.end()) {
+                const auto& v = group.vertices[vi];
+                c3l::MercVertex o{};
+                for (int c = 0; c < 3; c++) {
+                  o.pos[c] = (s16)std::clamp((int)std::lround(v.pos[c] / mm.scale), -32767, 32767);
+                }
+                int wsum = 0;
+                for (int k = 0; k < 3; k++) {
+                  int w = std::clamp((int)std::lround(v.weights[k] * 255.f), 0, 255);
+                  if (v.weights[k] <= 0.f) {
+                    w = 0;
+                  }
+                  o.weights[k] = w;
+                  wsum += w;
+                  // unused bones point at palette entry 0 (weight 0, but must be a valid bone)
+                  auto pit = std::find(palette.begin(), palette.end(), v.mats[k]);
+                  o.bones[k] = (w > 0 && pit != palette.end()) ? (u8)(pit - palette.begin()) : 0;
+                }
+                if (wsum != 255 && wsum > 0) {
+                  o.weights[0] += 255 - wsum;  // keep the sum exact
+                }
+                o.st[0] = (s16)std::clamp((int)std::lround(v.st[0] * 1024.f), -32768, 32767);
+                o.st[1] = (s16)std::clamp((int)std::lround(v.st[1] * 1024.f), -32768, 32767);
+                memcpy(o.rgba, v.rgba, 4);
+                if (local_verts.size() >= 65535) {
+                  too_big = true;
+                  break;
+                }
+                it = vmap.emplace(vi, (u16)local_verts.size()).first;
+                local_verts.push_back(o);
+              }
+              out->indices.push_back(it->second);
+            }
+            if (too_big) {
+              break;
+            }
+          }
+          if (palette.empty()) {
+            palette.push_back(0);
+          }
+          md.palette_count = palette.size();
+          memcpy(md.palette, palette.data(), palette.size());
+          md.index_count = out->indices.size() - md.first_index;
+          if (md.index_count) {
+            out->draws.push_back(md);
+          }
+          if (too_big) {
+            break;
+          }
+          if (t < tris.size() && md.index_count == 0) {
+            t++;  // a single triangle with > 24 bones: can't happen (max 9), but don't loop
+          }
+        }
+        if (too_big) {
+          break;
+        }
+      }
+      if (too_big) {
+        break;
+      }
+    }
+    if (too_big) {
+      lg::warn("merc model {} has more than 65535 vertices, skipped", model.name);
+      out->indices.resize(idx_start);
+      out->draws.resize(mm.first_draw);
+      out->skipped_models++;
+      continue;
+    }
+    mm.vertex_count = local_verts.size();
+    mm.draw_count = out->draws.size() - mm.first_draw;
+    out->verts.insert(out->verts.end(), local_verts.begin(), local_verts.end());
+    out->models.push_back(mm);
+  }
+}
+
 bool is_drawn_tfrag_kind(tfrag3::TFragmentTreeKind k) {
   using K = tfrag3::TFragmentTreeKind;
   return k == K::NORMAL || k == K::TRANS || k == K::DIRT || k == K::ICE || k == K::WATER;
@@ -282,13 +459,20 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   cv.opt = opt;
   cv.level = &level;
   int tfrag_trees = 0, tie_trees = 0;
+  MercOut merc;
+  if (!opt.no_merc) {
+    convert_merc(level.merc_data, cv, &merc);
+  }
   for (auto& tree : level.tfrag_trees[opt.tfrag_geo]) {
+    if (opt.merc_only) {
+      break;
+    }
     if (is_drawn_tfrag_kind(tree.kind)) {
       cv.add_tfrag_tree(tree);
       tfrag_trees++;
     }
   }
-  if (!opt.no_tie) {
+  if (!opt.no_tie && !opt.merc_only) {
     for (auto& tree : level.tie_trees[opt.tie_geo]) {
       cv.add_tie_tree(tree);
       tie_trees++;
@@ -430,6 +614,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   hdr.index_data_size = out_indices.size() * 2;
   hdr.draw_data_offset = append(buf, out_draws.data(), out_draws.size());
   hdr.draw_data_size = out_draws.size() * sizeof(c3l::Draw);
+  hdr.num_merc_models = merc.models.size();
+  hdr.merc_models_offset = append(buf, merc.models.data(), merc.models.size());
+  hdr.merc_vertex_offset = append(buf, merc.verts.data(), merc.verts.size());
+  hdr.merc_vertex_size = merc.verts.size() * sizeof(c3l::MercVertex);
+  hdr.merc_index_offset = append(buf, merc.indices.data(), merc.indices.size());
+  hdr.merc_index_size = merc.indices.size() * 2;
+  hdr.merc_draw_offset = append(buf, merc.draws.data(), merc.draws.size());
+  hdr.merc_draw_size = merc.draws.size() * sizeof(c3l::MercDraw);
   align16(buf);
   hdr.texture_data_offset = buf.size();
   for (size_t i = 0; i < tex_descs.size(); i++) {
@@ -446,10 +638,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
 
   lg::info(
       "{}: {} tfrag + {} tie trees -> {} chunks, {} verts ({} KB), {} tris, {} draws, {} textures "
-      "({} KB), file {} KB",
+      "({} KB), {} merc models ({} verts, {} tris, {} draws), file {} KB",
       level.level_name, tfrag_trees, tie_trees, chunks.size(), out_verts.size(),
       out_verts.size() * sizeof(c3l::Vertex) / 1024, out_indices.size() / 3, out_draws.size(),
-      tex_descs.size(), hdr.texture_data_size / 1024, buf.size() / 1024);
+      tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
+      merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024);
   return true;
 }
 }  // namespace
@@ -468,16 +661,20 @@ int main(int argc, char** argv) {
   app.add_option("--max-tex", opt.max_tex, "maximum texture size (power of two, <= 1024)");
   app.add_option("--cell", opt.cell_meters, "chunk grid size in meters");
   app.add_flag("--no-tie", opt.no_tie, "leave out tie");
+  app.add_flag("--no-merc", opt.no_merc, "leave out merc models");
+  app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
   CLI11_PARSE(app, argc, argv);
   lg::initialize();
 
   if (all) {
     file_util::create_dir_if_needed(out);
     for (auto& e : fs::directory_iterator(in)) {
-      if (e.path().extension() == ".fr3" && e.path().stem() != "GAME" &&
-          e.path().stem() != "common") {
+      if (e.path().extension() == ".fr3") {
         auto dst = fs::path(out) / (e.path().stem().string() + ".c3l");
-        if (!convert(e.path(), dst, opt)) {
+        Options o = opt;
+        // GAME.fr3 holds the models and textures shared by all levels (Jak, HUD...)
+        o.merc_only = opt.merc_only || e.path().stem() == "GAME";
+        if (!convert(e.path(), dst, o)) {
           return 1;
         }
       }

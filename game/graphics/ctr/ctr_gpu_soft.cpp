@@ -37,7 +37,8 @@ struct SoftTex {
 
 struct SoftMesh {
   bool used = false;
-  std::vector<uint8_t> verts;  // c3l::Vertex
+  int stride = 16;             // 16: c3l::Vertex, 20: c3l::MercVertex
+  std::vector<uint8_t> verts;
   std::vector<uint16_t> indices;
 };
 
@@ -420,6 +421,78 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     // behind the far plane / outside z
     if ((tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
         (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
+      continue;
+    }
+    raster_triangle(*state, tri, true);
+    g_soft.cur.triangles++;
+  }
+}
+
+int ctr_gpu_skinned_mesh_create(const void* verts,
+                                int vertex_count,
+                                const uint16_t* indices,
+                                int index_count) {
+  int h = ctr_gpu_mesh_create(verts, 0, indices, index_count);
+  auto& m = g_soft.meshes[h];
+  m.stride = 20;
+  m.verts.assign((const uint8_t*)verts, (const uint8_t*)verts + vertex_count * 20);
+  return h;
+}
+
+void ctr_gpu_draw_skinned(const ctr_draw_state* state,
+                          const float clip[16],
+                          const float* bones,
+                          int palette_count,
+                          const float tint[3],
+                          int mesh,
+                          int first_index,
+                          int index_count) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+    return;
+  }
+  const auto& m = g_soft.meshes[mesh];
+  g_soft.cur.draws++;
+  for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
+    ctr_vertex tri[3];
+    bool ok = true;
+    for (int k = 0; k < 3; k++) {
+      const uint8_t* src = &m.verts[20 * m.indices[i + k]];
+      int16_t pos[3], st[2];
+      memcpy(pos, src, 6);
+      const uint8_t* bidx = src + 6;
+      const uint8_t* bw = src + 9;
+      memcpy(st, src + 12, 4);
+      const uint8_t* rgba = src + 16;
+      float cam[4] = {0, 0, 0, 1};
+      for (int b = 0; b < 3; b++) {
+        int bi = bidx[b] < palette_count ? bidx[b] : 0;
+        const float* r = bones + 12 * bi;
+        float w = bw[b] / 255.f;
+        for (int row = 0; row < 3; row++) {
+          cam[row] += w * (r[4 * row] * pos[0] + r[4 * row + 1] * pos[1] + r[4 * row + 2] * pos[2] +
+                           r[4 * row + 3]);
+        }
+      }
+      float c[4];
+      for (int r = 0; r < 4; r++) {
+        c[r] = clip[4 * r] * cam[0] + clip[4 * r + 1] * cam[1] + clip[4 * r + 2] * cam[2] +
+               clip[4 * r + 3];
+      }
+      if (c[3] < 1e-3f) {
+        ok = false;
+        break;
+      }
+      tri[k].x = c[0] / c[3];
+      tri[k].y = c[1] / c[3];
+      tri[k].z = (1.f - c[2] / c[3]) * 0.5f;
+      tri[k].s = st[0] / 1024.f;
+      tri[k].t = st[1] / 1024.f;
+      tri[k].r = (uint8_t)(rgba[0] * tint[0]);
+      tri[k].g = (uint8_t)(rgba[1] * tint[1]);
+      tri[k].b = (uint8_t)(rgba[2] * tint[2]);
+      tri[k].a = rgba[3];
+    }
+    if (!ok) {
       continue;
     }
     raster_triangle(*state, tri, true);

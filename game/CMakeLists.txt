@@ -40,6 +40,7 @@ set(RUNTIME_SOURCE
         graphics/pipelines/null.cpp
         graphics/ctr/CtrDirect.cpp
         graphics/ctr/CtrLevel.cpp
+        graphics/ctr/CtrMerc.cpp
         graphics/ctr/CtrRenderer.cpp
         graphics/ctr/CtrVram.cpp
         graphics/ctr/ctr_gpu_soft.cpp
@@ -370,6 +371,7 @@ set(RUNTIME_SOURCE
         sce/libdma.cpp
         sce/libgraph.cpp
         sce/libpad.cpp
+        sce/pad_script.cpp
         sce/libscf.cpp
         sce/sif_ee_memcard.cpp
         sce/sif_ee.cpp
