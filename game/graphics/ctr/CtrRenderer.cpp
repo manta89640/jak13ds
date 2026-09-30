@@ -207,8 +207,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     m_rs.last_log_ms = t0;
   }
   memcpy(m_rs.fog_color, clear, 4);
-  // No sky (its bucket had the background gradient last frame): black, like the PS2 outside of
-  // the 4:3 picture. Else the fog color stands in for the sky.
+  // The sky's bucket drew the background gradient last frame: clear to black (the PS2's clear
+  // color). Else the fog color stands in for the sky.
   if (m_sky && m_sky->drew()) {
     clear[0] = clear[1] = clear[2] = 0;
   }

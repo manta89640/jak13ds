@@ -218,8 +218,10 @@ static void use_program(int prog) {
 }
 
 static void setup_projection(void) {
-  /* x in [-1.25, 1.25] covers the 400 pixel width, so [-1, 1] is a centered 320x240 4:3 area */
-  Mtx_OrthoTilt(&g.projection, -1.25f, 1.25f, -1.0f, 1.0f, 0.0f, 1.0f, true);
+  /* x, y in [-1, 1] cover the whole 400x240 screen: the game renders for 5:3 (the kernel reports
+   * a 400x240 window, so it widens the view like the PC port's widescreen; HUD and text keep their
+   * proportions through its aspect ratio settings) */
+  Mtx_OrthoTilt(&g.projection, -1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 1.0f, true);
   /* depth: clip z = -z, so the stored depth (-z / w) is our z (GS: larger = closer) */
   g.projection.r[2].x = 0.0f;
   g.projection.r[2].y = 0.0f;
@@ -229,7 +231,7 @@ static void setup_projection(void) {
   /* OpenGL-style clip space -> PICA: same x/y mapping, z' = -(z + w) / 2 so the depth (-z'/w) is
    * (z/w + 1) / 2, the OpenGL depth. The game's matrices (tfrag3.vert, merc2.vert) put the GS
    * depth (larger = closer) there, and the PC renderer tests it with GL_GEQUAL. */
-  Mtx_OrthoTilt(&g.gl_to_pica, -1.25f, 1.25f, -1.0f, 1.0f, 0.0f, 1.0f, true);
+  Mtx_OrthoTilt(&g.gl_to_pica, -1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 1.0f, true);
   g.gl_to_pica.r[2].x = 0.0f;
   g.gl_to_pica.r[2].y = 0.0f;
   g.gl_to_pica.r[2].z = -0.5f;

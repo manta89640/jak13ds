@@ -16,8 +16,9 @@
  *  - texture color: RGB 0..255, alpha 0x80 = 1.0
  *  - textured, modulate: rgb = tex.rgb * v.rgb / 128, a = (tcc ? tex.a * v.a / 128 : v.a)
  *  - blending and alpha test use alpha with 0x80 = 1.0
- * The target is the 400x240 top screen. Positions: x, y in [-1, 1] cover a centered 4:3 area
- * (320x240), +y up. z in [0, 1], larger = closer (GS convention).
+ * The target is the 400x240 top screen. Positions: x, y in [-1, 1] cover the whole screen (the
+ * game renders for 5:3, see pc_get_window_size), +y up. z in [0, 1], larger = closer (GS
+ * convention).
  */
 
 #include <stdint.h>
@@ -105,7 +106,7 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
 void ctr_gpu_mesh_delete(int mesh);
 
 /* Draw part of a mesh. clip = row-major 4x4 matrix from (pos.x, pos.y, pos.z, 1) (quantized) to
- * OpenGL-style clip space (x, y in [-w, w] cover the 4:3 area, z in [-w, w], near = -w). */
+ * OpenGL-style clip space (x, y in [-w, w] cover the screen, z in [-w, w], near = -w). */
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
                        int first_index, int index_count);
 
