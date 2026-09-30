@@ -2,10 +2,14 @@
  * (AI-assisted)
  * citro3d implementation of game/graphics/ctr/ctr_gpu.h (see the conventions there).
  *
- * - top screen, 400x240, RGBA8 color + 24/8 depth-stencil, black letterbox bars
- * - one vertex shader (platform/3ds/shaders/ctr_basic.v.pica), one TEV stage per draw
- * - vertices are copied into a linear-memory ring buffer that is reset every frame
- *   (C3D_FRAME_SYNCDRAW makes sure the GPU finished the previous frame first)
+ * - top screen, 400x240, RGBA8 color + 24/8 depth-stencil
+ * - three vertex shaders (platform/3ds/shaders): immediate draws, level meshes, skinned meshes
+ * - immediate vertices are copied into a linear-memory buffer that is reset every frame
+ *   (C3D_FrameBegin waits until the GPU finished the previous frame first)
+ * - level textures live in pools that move to VRAM while there is room (see ctr_gpu_pool_create)
+ * - the GPU's texture cache is cleared at every texture change (citro3d), so textures are only
+ *   bound again when they really change (bind_texture), and draws are sorted by texture where
+ *   the order doesn't matter (CtrTfragRenderer)
  */
 
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -36,11 +40,35 @@ void ctr_linear_unlock(void);
 #define VBUF_BYTES (1536 * 1024)
 #define MAX_STAGING 1024
 #define MAX_TEXTURES 2048
+#define MAX_POOLS 16
+/* GPU command buffer: a frame's commands must all fit (splitting it doesn't make room). 2 MB of
+ * linear memory; a busy frame (3000 level draws) takes ~1 MB. */
+#define CMDBUF_BYTES (2 * 1024 * 1024)
+/* command words kept free for the end of the frame, and needed for one draw with state changes */
+#define CMD_RESERVE_WORDS 512
+#define CMD_DRAW_WORDS 384
+/* quads per ctr_gpu_draw_quads batch: 4 vertices each, u16 indices */
+#define QUAD_MAX 4096
+/* texture pools moved to VRAM per frame (each is one GX queue entry; the queue has 32) */
+#define POOL_COPIES_PER_FRAME 2
 
 typedef struct {
   C3D_Tex tex;
   int used;
+  int pool;          /* -1: own memory, else the pool the texels are in */
+  unsigned int offset; /* in the pool */
+  uint8_t levels;
 } TexSlot;
+
+typedef struct {
+  int used;           /* 0 free, 1 used, 2 pending delete, 3 reserved (being filled) */
+  int ready;          /* all texels written (ctr_gpu_pool_ready) */
+  uint8_t* linear;    /* the texels (always kept: moving out of VRAM is free) */
+  void* vram;         /* the VRAM copy the GPU reads, or NULL */
+  unsigned int bytes;
+  int priority;
+  int no_room_frame;  /* last frame it didn't fit in VRAM (don't try again every frame) */
+} TexPool;
 
 #define MAX_MESHES 8192
 
@@ -79,6 +107,10 @@ static struct {
   int last_mesh_valid;
   int last_mesh;
   float last_clip[16];
+  /* last ctr_gpu_draw_skinned: its matrix and lights (a model's draws share them) */
+  int last_skin_valid;
+  float last_skin_clip[16];
+  float last_skin_lights[28];
   C3D_Mtx gl_to_pica;
   MeshSlot meshes[MAX_MESHES];
   int pending_mesh_delete[MAX_MESHES];
@@ -88,6 +120,15 @@ static struct {
   size_t vbuf_used;
   size_t vbuf_flushed; /* vbuf bytes already flushed from the CPU cache (flush_vbuf) */
   TexSlot textures[MAX_TEXTURES];
+  TexPool pools[MAX_POOLS];
+  uint16_t* quad_indices; /* QUAD_MAX quads: 0 1 3 3 1 2, + 4 per quad */
+  /* texture unit 0 as the GPU has it: bind_texture only binds (and clears the texture cache) when
+   * the texture, its memory or its parameters change */
+  const C3D_Tex* bound_tex;
+  const void* bound_data;
+  u32* cmd_base; /* the command buffer at C3D_FrameBegin */
+  u32 bound_param, bound_lod;
+  int frame_no;
   ctr_gpu_stats cur, last;
   int in_frame;
   int pending_delete[MAX_TEXTURES];
@@ -109,6 +150,7 @@ static void write_screenshot(void) {
   if (!f) {
     return;
   }
+  (void)fh;
   const int W = 400, H = 240;
   const int row = W * 3;
   uint32_t data_size = row * H;
@@ -202,11 +244,24 @@ static void process_pending_deletes(void) {
   for (int i = 0; i < g.pending_delete_count; i++) {
     int h = g.pending_delete[i];
     if (g.textures[h].used == 2) {
-      C3D_TexDelete(&g.textures[h].tex);
+      if (g.textures[h].pool < 0) {
+        C3D_TexDelete(&g.textures[h].tex);
+      }
       g.textures[h].used = 0;
+      g.textures[h].pool = -1;
     }
   }
   g.pending_delete_count = 0;
+  for (int i = 0; i < MAX_POOLS; i++) {
+    TexPool* p = &g.pools[i];
+    if (p->used == 2) {
+      if (p->vram) {
+        vramFree(p->vram);
+      }
+      linearFree(p->linear);
+      memset(p, 0, sizeof(*p));
+    }
+  }
   for (int i = 0; i < g.pending_mesh_delete_count; i++) {
     MeshSlot* m = &g.meshes[g.pending_mesh_delete[i]];
     if (m->used == 2) {
@@ -227,6 +282,7 @@ static void use_program(int prog) {
     return;
   }
   g.last_mesh_valid = 0;
+  g.last_skin_valid = 0;
   C3D_AttrInfo* attr = C3D_GetAttrInfo();
   AttrInfo_Init(attr);
   if (prog == PROG_BASIC) {
@@ -289,7 +345,7 @@ int ctr_gpu_init(void) {
   if (g.ready) {
     return 0;
   }
-  if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4)) {
+  if (!C3D_Init(CMDBUF_BYTES)) {
     return -1;
   }
   g.top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
@@ -341,6 +397,20 @@ int ctr_gpu_init(void) {
   if (!g.vbuf) {
     return -3;
   }
+  g.quad_indices = (uint16_t*)linearAlloc(QUAD_MAX * 6 * sizeof(uint16_t));
+  if (!g.quad_indices) {
+    return -4;
+  }
+  for (int q = 0; q < QUAD_MAX; q++) {
+    static const uint16_t kQuad[6] = {0, 1, 3, 3, 1, 2};
+    for (int k = 0; k < 6; k++) {
+      g.quad_indices[6 * q + k] = (uint16_t)(4 * q + kQuad[k]);
+    }
+  }
+  GSPGPU_FlushDataCache(g.quad_indices, QUAD_MAX * 6 * sizeof(uint16_t));
+  for (int i = 0; i < MAX_TEXTURES; i++) {
+    g.textures[i].pool = -1;
+  }
   setup_projection();
   use_program(PROG_BASIC);
   C3D_CullFace(GPU_CULL_NONE);
@@ -361,10 +431,22 @@ void ctr_gpu_exit(void) {
   ctr_linear_lock();
   for (int i = 0; i < MAX_TEXTURES; i++) {
     if (g.textures[i].used) {
-      C3D_TexDelete(&g.textures[i].tex);
+      if (g.textures[i].pool < 0) {
+        C3D_TexDelete(&g.textures[i].tex);
+      }
       g.textures[i].used = 0;
     }
   }
+  for (int i = 0; i < MAX_POOLS; i++) {
+    if (g.pools[i].used) {
+      if (g.pools[i].vram) {
+        vramFree(g.pools[i].vram);
+      }
+      linearFree(g.pools[i].linear);
+      memset(&g.pools[i], 0, sizeof(g.pools[i]));
+    }
+  }
+  linearFree(g.quad_indices);
   for (int i = 0; i < MAX_MESHES; i++) {
     if (g.meshes[i].used) {
       linearFree(g.meshes[i].verts);
@@ -386,12 +468,19 @@ void ctr_gpu_exit(void) {
   g.ready = 0;
 }
 
+static void update_pool_residency(void);
+static int g_vram_textures;
+
 void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
   }
   C3D_FrameBegin(0); /* waits for the GPU; the game thread already paces to vblank */
+  g.cmd_base = gpuCmdBuf;
+  g.frame_no++;
   process_pending_deletes();
+  /* before any draw: copies to VRAM are queued ahead of this frame's draws */
+  update_pool_residency();
   if (g.screenshot_state == 2) {
     write_screenshot();
     g.screenshot_state = 0;
@@ -401,7 +490,13 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   C3D_FrameDrawOn(g.top);
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
+  g.bound_tex = NULL;
   use_program(PROG_BASIC);
+  /* the fog ramp stays on texture unit 1 for the whole frame (binding a texture clears the GPU's
+   * texture cache: once per frame, not at every level draw) */
+  if (g.fog_tex_valid) {
+    C3D_TexBind(1, &g.fog_tex);
+  }
   g.vbuf_used = 0;
   g.vbuf_flushed = 0;
   memset(&g.cur, 0, sizeof(g.cur));
@@ -424,6 +519,8 @@ void ctr_gpu_frame_end(void) {
     return;
   }
   flush_vbuf();
+  /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
+  g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
   C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -448,6 +545,17 @@ void ctr_gpu_frame_end(void) {
   g.cur.vram_free = (unsigned int)vramSpaceFree();
   g.cur.vram_textures = g.vram_textures;
   g.cur.vram_copy_failures = g.vram_copy_failures;
+  for (int i = 0; i < MAX_POOLS; i++) {
+    const TexPool* p = &g.pools[i];
+    if (p->used == 1) {
+      g.cur.pools++;
+      g.cur.pool_bytes += p->bytes;
+      if (p->vram) {
+        g.cur.pools_in_vram++;
+        g.cur.pool_vram_bytes += p->bytes;
+      }
+    }
+  }
   g.last = g.cur;
 }
 
@@ -469,19 +577,284 @@ static inline u32 morton8(u32 x, u32 y) {
          ((y & 4) << 3);
 }
 
-/* Textures go to VRAM while there is room (linear memory is only ~24 MB and holds the level
- * meshes; the GPU also reads VRAM faster), else to linear memory. tex_alloc returns the buffer to
- * write the texels to (a linear staging buffer for VRAM), tex_commit uploads it. */
+/* Settings (render.ini, see CtrSettings). */
 static int g_rgba4_as_rgba8 = 1;
 
 void ctr_gpu_set_rgba4_as_rgba8(int on) {
   g_rgba4_as_rgba8 = on;
 }
 
+int ctr_gpu_rgba4_as_rgba8(void) {
+  return g_rgba4_as_rgba8;
+}
+
+/* texture pools in VRAM (update_pool_residency) */
 static int g_vram_textures = 0;
 
 void ctr_gpu_set_vram_textures(int on) {
   g_vram_textures = on;
+}
+
+/* Textures made on the fly (ctr_gpu_tex_create) outside of a frame in VRAM: off. Their upload
+ * check reads VRAM with the CPU, which isn't mapped for every kind of launch. */
+static const int g_vram_dynamic = 0;
+
+static int g_mip_mode = 1;
+
+void ctr_gpu_set_mip_mode(int mode) {
+  g_mip_mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+}
+
+int ctr_gpu_is_emulator(void) {
+  /* Citra and Azahar answer svcGetSystemInfo(0x20000 "emulator information", 0 "emulator id")
+   * with their id; the 3DS kernel (and Luma3DS) reject the type */
+  static int cached = -1;
+  if (cached < 0) {
+    s64 out = 0;
+    Result r = svcGetSystemInfo(&out, 0x20000, 0);
+    cached = (R_SUCCEEDED(r) && out != 0) ? 1 : 0;
+  }
+  return cached;
+}
+
+static GPU_TEXCOLOR gpu_format(int format) {
+  switch (format) {
+    case CTR_TEX_RGB565:
+      return GPU_RGB565;
+    case CTR_TEX_RGBA4:
+      return GPU_RGBA4;
+    case CTR_TEX_ETC1:
+      return GPU_ETC1;
+    case CTR_TEX_ETC1A4:
+      return GPU_ETC1A4;
+    default:
+      return GPU_RGBA8;
+  }
+}
+
+static unsigned int format_bits(int format) {
+  switch (format) {
+    case CTR_TEX_RGB565:
+    case CTR_TEX_RGBA4:
+      return 16;
+    case CTR_TEX_ETC1:
+      return 4;
+    case CTR_TEX_ETC1A4:
+      return 8;
+    default:
+      return 32;
+  }
+}
+
+unsigned int ctr_gpu_tex_bytes(int w, int h, int format, int levels) {
+  unsigned int total = 0;
+  for (int l = 0; l < levels; l++) {
+    total += (unsigned int)((w >> l) * (h >> l)) * format_bits(format) / 8;
+  }
+  return total;
+}
+
+/* A C3D_Tex over memory that isn't its own (pools): like C3D_TexInitWithParams. */
+static void tex_init_external(C3D_Tex* tex, void* data, int w, int h, int format, int levels) {
+  memset(tex, 0, sizeof(*tex));
+  const GPU_TEXCOLOR fmt = gpu_format(format);
+  tex->data = data;
+  tex->width = (u16)w;
+  tex->height = (u16)h;
+  tex->param = GPU_TEXTURE_MODE(GPU_TEX_2D);
+  if (fmt == GPU_ETC1) {
+    tex->param |= GPU_TEXTURE_ETC1_PARAM;
+  }
+  tex->fmt = fmt;
+  tex->size = (u32)w * (u32)h * format_bits(format) / 8;
+  tex->border = 0;
+  tex->lodBias = 0;
+  tex->maxLevel = (u8)(levels > 0 ? levels - 1 : 0);
+  tex->minLevel = 0;
+}
+
+/* ---------------- texture pools ---------------- */
+
+int ctr_gpu_pool_create(unsigned int bytes) {
+  if (!g.ready || bytes == 0) {
+    return -1;
+  }
+  int slot = -1;
+  ctr_linear_lock();
+  for (int i = 0; i < MAX_POOLS; i++) {
+    if (g.pools[i].used == 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot >= 0) {
+    uint8_t* mem = (uint8_t*)linearAlloc(bytes);
+    if (mem) {
+      TexPool* p = &g.pools[slot];
+      memset(p, 0, sizeof(*p));
+      p->used = 3;
+      p->linear = mem;
+      p->bytes = bytes;
+      p->no_room_frame = -1000;
+    } else {
+      slot = -1;
+    }
+  }
+  ctr_linear_unlock();
+  return slot;
+}
+
+void* ctr_gpu_pool_data(int pool) {
+  if (pool < 0 || pool >= MAX_POOLS || !g.pools[pool].used) {
+    return NULL;
+  }
+  return g.pools[pool].linear;
+}
+
+int ctr_gpu_pool_tex(int pool, unsigned int offset, int w, int h, int format, int levels) {
+  if (pool < 0 || pool >= MAX_POOLS || !g.pools[pool].used || w < 8 || h < 8 || w > 1024 ||
+      h > 1024 || levels < 1 || (offset & 0x7f) ||
+      offset + ctr_gpu_tex_bytes(w, h, format, levels) > g.pools[pool].bytes) {
+    return -1;
+  }
+  const int slot = reserve_tex_slot();
+  if (slot < 0) {
+    return -1;
+  }
+  TexSlot* t = &g.textures[slot];
+  TexPool* p = &g.pools[pool];
+  /* reads the pool's current place: set before the pool is ready (it stays in linear memory
+   * until then) */
+  tex_init_external(&t->tex, (p->vram ? (uint8_t*)p->vram : p->linear) + offset, w, h, format,
+                    levels);
+  t->pool = pool;
+  t->offset = offset;
+  t->levels = (uint8_t)levels;
+  ctr_linear_lock();
+  t->used = 1;
+  ctr_linear_unlock();
+  return slot;
+}
+
+void ctr_gpu_pool_ready(int pool) {
+  if (pool < 0 || pool >= MAX_POOLS || !g.pools[pool].used) {
+    return;
+  }
+  TexPool* p = &g.pools[pool];
+  GSPGPU_FlushDataCache(p->linear, p->bytes);
+  ctr_linear_lock();
+  p->ready = 1;
+  if (p->used == 3) {
+    p->used = 1;
+  }
+  ctr_linear_unlock();
+}
+
+void ctr_gpu_pool_delete(int pool) {
+  if (pool < 0 || pool >= MAX_POOLS) {
+    return;
+  }
+  ctr_linear_lock();
+  if (g.pools[pool].used == 1 || g.pools[pool].used == 3) {
+    g.pools[pool].used = 2; /* freed at the next frame begin, after the GPU is done with it */
+  }
+  ctr_linear_unlock();
+}
+
+void ctr_gpu_pool_set_priority(int pool, int priority) {
+  if (pool >= 0 && pool < MAX_POOLS && g.pools[pool].used) {
+    g.pools[pool].priority = priority;
+  }
+}
+
+/* point the pool's textures at its linear memory or its VRAM copy */
+static void pool_repoint(int pool) {
+  TexPool* p = &g.pools[pool];
+  uint8_t* base = p->vram ? (uint8_t*)p->vram : p->linear;
+  for (int i = 0; i < MAX_TEXTURES; i++) {
+    TexSlot* t = &g.textures[i];
+    if (t->used && t->pool == pool) {
+      t->tex.data = base + t->offset;
+    }
+  }
+  g.bound_tex = NULL;
+}
+
+static void pool_leave_vram(int pool) {
+  TexPool* p = &g.pools[pool];
+  if (!p->vram) {
+    return;
+  }
+  void* v = p->vram;
+  p->vram = NULL;
+  pool_repoint(pool);
+  /* at frame begin: the GPU finished the frames that read it, and this frame reads the linear
+   * copy from now on */
+  vramFree(v);
+}
+
+/* At frame begin, before any draw: copy the pools that want to be in VRAM there, most wanted
+ * first, moving pools with a lower priority out if that makes room. The copies are queued ahead of
+ * this frame's draws, which read the VRAM copy. */
+static void update_pool_residency(void) {
+  if (!g_vram_textures) {
+    for (int i = 0; i < MAX_POOLS; i++) {
+      if (g.pools[i].used == 1 && g.pools[i].vram) {
+        pool_leave_vram(i);
+      }
+    }
+    return;
+  }
+  int copies = 0;
+  int tried[MAX_POOLS] = {0};
+  while (copies < POOL_COPIES_PER_FRAME) {
+    int best = -1;
+    ctr_linear_lock();
+    for (int i = 0; i < MAX_POOLS; i++) {
+      const TexPool* p = &g.pools[i];
+      if (p->used != 1 || !p->ready || p->vram || tried[i] ||
+          g.frame_no - p->no_room_frame < 60) {
+        continue;
+      }
+      if (best < 0 || p->priority > g.pools[best].priority) {
+        best = i;
+      }
+    }
+    ctr_linear_unlock();
+    if (best < 0) {
+      break;
+    }
+    tried[best] = 1;
+    TexPool* p = &g.pools[best];
+    ctr_linear_lock();
+    void* v = vramAlloc(p->bytes);
+    while (!v) {
+      /* move out the resident pool with the lowest priority below this one's */
+      int victim = -1;
+      for (int i = 0; i < MAX_POOLS; i++) {
+        const TexPool* q = &g.pools[i];
+        if (q->used == 1 && q->vram && q->priority < p->priority &&
+            (victim < 0 || q->priority < g.pools[victim].priority)) {
+          victim = i;
+        }
+      }
+      if (victim < 0) {
+        break;
+      }
+      pool_leave_vram(victim);
+      v = vramAlloc(p->bytes);
+    }
+    ctr_linear_unlock();
+    if (!v) {
+      p->no_room_frame = g.frame_no;
+      continue;
+    }
+    /* one GPU copy of the whole pool (in a frame: queued, runs before the draws) */
+    C3D_SyncTextureCopy((u32*)p->linear, 0, (u32*)v, 0, p->bytes, 8);
+    p->vram = v;
+    pool_repoint(best);
+    copies++;
+  }
 }
 
 /* allow_vram: only from the render thread (the copy to VRAM goes through the GX queue) */
@@ -491,7 +864,7 @@ static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vra
   ctr_linear_lock();
   /* only outside of a frame: a copy in a frame needs a command list split and a queue entry
    * each, and a level's worth of them overflows the GX queue */
-  if (allow_vram && g_vram_textures && !g.in_frame &&
+  if (allow_vram && g_vram_dynamic && !g.in_frame &&
       C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
     void* staging = linearAlloc(tex->size);
     if (staging) {
@@ -540,6 +913,26 @@ static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
   return 1;
 }
 
+/* linear RGBA8 (top row first) -> the GPU's tiled RGBA8 (A, B, G, R; bottom row first) */
+static void swizzle_rgba8(uint8_t* dst, int w, int h, const uint8_t* rgba) {
+  /* tiled: 8x8 tiles in rows, morton order inside a tile */
+  const int tiles_x = w / 8;
+  for (int y = 0; y < h; y++) {
+    /* the GPU samples t = 0 from the last row in memory: store the image bottom row first */
+    const int ty = h - 1 - y;
+    const uint8_t* p = rgba + 4 * y * w;
+    for (int x = 0; x < w; x++, p += 4) {
+      u32 tile = (u32)((ty / 8) * tiles_x + (x / 8));
+      u32 off = (tile * 64 + morton8(x & 7, ty & 7)) * 4;
+      /* GPU_RGBA8 is stored as A, B, G, R */
+      dst[off + 0] = p[3];
+      dst[off + 1] = p[2];
+      dst[off + 2] = p[1];
+      dst[off + 3] = p[0];
+    }
+  }
+}
+
 int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
   if (!g.ready || w < 8 || h < 8 || w > 1024 || h > 1024) {
     return -1;
@@ -555,28 +948,61 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
     release_tex_slot(slot);
     return -1;
   }
-  /* tiled: 8x8 tiles in rows, morton order inside a tile */
-  const int tiles_x = w / 8;
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      const uint8_t* p = rgba + 4 * (x + y * w);
-      /* the GPU samples t = 0 from the last row in memory: store the image bottom row first */
-      int ty = h - 1 - y;
-      u32 tile = (u32)((ty / 8) * tiles_x + (x / 8));
-      u32 off = (tile * 64 + morton8(x & 7, ty & 7)) * 4;
-      /* GPU_RGBA8 is stored as A, B, G, R */
-      dst[off + 0] = p[3];
-      dst[off + 1] = p[2];
-      dst[off + 2] = p[1];
-      dst[off + 3] = p[0];
-    }
-  }
+  swizzle_rgba8(dst, w, h, rgba);
   if (!tex_commit(tex, dst, on_vram)) {
     release_tex_slot(slot);
     return -1;
   }
+  g.textures[slot].pool = -1;
+  g.textures[slot].levels = 1;
   g.textures[slot].used = 1;
   return slot;
+}
+
+int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
+  if (!g.ready || w < 8 || h < 8 || w > 1024 || h > 1024) {
+    return -1;
+  }
+  const int slot = reserve_tex_slot();
+  if (slot < 0) {
+    return -1;
+  }
+  C3D_Tex* tex = &g.textures[slot].tex;
+  ctr_linear_lock();
+  const bool ok = C3D_TexInitMipmap(tex, (u16)w, (u16)h, GPU_RGBA8);
+  ctr_linear_unlock();
+  if (!ok) {
+    release_tex_slot(slot);
+    return -1;
+  }
+  swizzle_rgba8((uint8_t*)tex->data, w, h, rgba);
+  C3D_TexGenerateMipmap(tex, GPU_TEXFACE_2D); /* 2x2 averages, on the tiled data */
+  C3D_TexFlush(tex);
+  g.textures[slot].pool = -1;
+  g.textures[slot].levels = (uint8_t)(tex->maxLevel + 1);
+  g.textures[slot].used = 1;
+  return slot;
+}
+
+void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
+  if (handle < 0 || handle >= MAX_TEXTURES || g.textures[handle].used != 1 ||
+      g.textures[handle].pool >= 0) {
+    return;
+  }
+  C3D_Tex* tex = &g.textures[handle].tex;
+  const u32 addr = (u32)tex->data;
+  if (tex->fmt != GPU_RGBA8 || (addr >= OS_VRAM_VADDR && addr < OS_VRAM_VADDR + OS_VRAM_SIZE)) {
+    return;
+  }
+  swizzle_rgba8((uint8_t*)tex->data, tex->width, tex->height, rgba);
+  if (tex->maxLevel > 0) {
+    C3D_TexGenerateMipmap(tex, GPU_TEXFACE_2D);
+  }
+  C3D_TexFlush(tex);
+  /* bind again at the next use: that clears the GPU's texture cache (it may hold old texels) */
+  if (g.bound_tex == tex) {
+    g.bound_tex = NULL;
+  }
 }
 
 void ctr_gpu_tex_delete(int handle) {
@@ -617,13 +1043,47 @@ static GPU_TESTFUNC map_test(uint8_t t) {
 
 static void apply_state(const ctr_draw_state* st, int mesh);
 
-/* The GPU command buffer is fixed size: submit what we have when it gets full (a frame with many
- * draws would overflow it, and libctru panics then). */
-static void check_cmdbuf(void) {
-  if (C3D_GetCmdBufUsage() > 0.85f) {
-    C3D_FrameSplit(GX_CMDLIST_FLUSH);
-    g.cur.cmd_splits++;
+/* The GPU command buffer is fixed size, and a frame's commands must all fit (libctru panics when
+ * it overflows; splitting the frame doesn't make room: the buffer only restarts at the next
+ * C3D_FrameBegin). A draw that might not fit is dropped (counted in the stats). */
+static int cmd_room(void) {
+  if (gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS) {
+    g.cur.dropped_draws++;
+    return 0;
   }
+  return 1;
+}
+
+/* Texture unit 0: only bound again (which clears the GPU's texture cache) when the texture, its
+ * memory (pools move to VRAM) or its parameters change. */
+static void bind_texture(TexSlot* slot, const ctr_draw_state* st) {
+  C3D_Tex* tex = &slot->tex;
+  const GPU_TEXTURE_FILTER_PARAM f = st->filter ? GPU_LINEAR : GPU_NEAREST;
+  u32 param = tex->param & ~(GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
+                             GPU_TEXTURE_WRAP_S(3) | GPU_TEXTURE_WRAP_T(3) |
+                             GPU_TEXTURE_MIP_FILTER(GPU_LINEAR));
+  param |= GPU_TEXTURE_MAG_FILTER(f) | GPU_TEXTURE_MIN_FILTER(f) |
+           GPU_TEXTURE_WRAP_S(st->clamp_s ? GPU_CLAMP_TO_EDGE : GPU_REPEAT) |
+           GPU_TEXTURE_WRAP_T(st->clamp_t ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
+  /* mip levels: the nearest one (bilinear inside it), or blending two (trilinear) */
+  u8 max_level = 0;
+  if (slot->levels > 1 && g_mip_mode > 0) {
+    max_level = (u8)(slot->levels - 1);
+    if (g_mip_mode == 2) {
+      param |= GPU_TEXTURE_MIP_FILTER(GPU_LINEAR);
+    }
+  }
+  if (g.bound_tex == tex && g.bound_data == tex->data && g.bound_param == param &&
+      tex->maxLevel == max_level) {
+    return;
+  }
+  tex->param = param;
+  tex->maxLevel = max_level;
+  C3D_TexBind(0, tex);
+  g.bound_tex = tex;
+  g.bound_data = tex->data;
+  g.bound_param = param;
+  g.cur.tex_binds++;
 }
 
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage) */
@@ -645,8 +1105,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
     C3D_TexEnvColor(env1, tint);
   } else if (mesh == 1 && g.fog_tex_valid) {
     /* fog: rgb = mix(previous, fog color, fog amount) with the amount from the fog ramp texture
-     * (texcoord1 from the mesh shader) */
-    C3D_TexBind(1, &g.fog_tex);
+     * (texcoord1 from the mesh shader; bound on unit 1 at frame begin) */
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
     C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
                     GPU_TEVOP_RGB_SRC_ALPHA);
@@ -656,12 +1115,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
   C3D_TexEnvInit(env);
   int textured = st->tex >= 0 && st->tex < MAX_TEXTURES && g.textures[st->tex].used == 1;
   if (textured) {
-    C3D_Tex* tex = &g.textures[st->tex].tex;
-    GPU_TEXTURE_FILTER_PARAM f = st->filter ? GPU_LINEAR : GPU_NEAREST;
-    C3D_TexSetFilter(tex, f, f);
-    C3D_TexSetWrap(tex, st->clamp_s ? GPU_CLAMP_TO_EDGE : GPU_REPEAT,
-                   st->clamp_t ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
-    C3D_TexBind(0, tex);
+    bind_texture(&g.textures[st->tex], st);
     if (mesh) {
       /* level meshes / merc: texture alpha 0xff = 1, vertex color 0x80 = 1 (merc: the skin shader
        * outputs half the lit color, so x4) */
@@ -751,11 +1205,13 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
     /* out of vertex space this frame: drop the draw (the buffer is reset every frame) */
     return;
   }
+  if (!cmd_room()) {
+    return;
+  }
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes); /* flushed once at the end of the frame (flush_vbuf) */
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
 
-  check_cmdbuf();
   use_program(PROG_BASIC);
   apply_state(state, 0);
   C3D_BufInfo* buf = C3D_GetBufInfo();
@@ -764,6 +1220,33 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   C3D_DrawArrays(GPU_TRIANGLES, 0, count);
   g.cur.draws++;
   g.cur.triangles += count / 3;
+}
+
+void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
+  if (!g.ready || !g.in_frame) {
+    return;
+  }
+  while (quad_count > 0) {
+    const int n = quad_count > QUAD_MAX ? QUAD_MAX : quad_count;
+    const size_t bytes = (size_t)n * 4 * sizeof(ctr_vertex);
+    if (g.vbuf_used + bytes > VBUF_BYTES || !cmd_room()) {
+      return;
+    }
+    uint8_t* dst = g.vbuf + g.vbuf_used;
+    memcpy(dst, verts, bytes);
+    g.vbuf_used += (bytes + 15) & ~(size_t)15;
+    use_program(PROG_BASIC);
+    apply_state(state, 0);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
+    /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
+    C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
+    g.cur.draws++;
+    g.cur.triangles += n * 2;
+    verts += 4 * n;
+    quad_count -= n;
+  }
 }
 
 static void apply_state(const ctr_draw_state* st, int mesh) {
@@ -806,6 +1289,8 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
       release_tex_slot(slot);
       return -1;
     }
+    g.textures[slot].pool = -1;
+    g.textures[slot].levels = 1;
     g.textures[slot].used = 1;
     return slot;
   }
@@ -819,6 +1304,8 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
     release_tex_slot(slot);
     return -1;
   }
+  g.textures[slot].pool = -1;
+  g.textures[slot].levels = 1;
   g.textures[slot].used = 1;
   return slot;
 }
@@ -877,7 +1364,9 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
       index_count < 3) {
     return;
   }
-  check_cmdbuf();
+  if (!cmd_room()) {
+    return;
+  }
   use_program(PROG_MESH);
   /* consecutive draws of a level chunk share the matrix and the vertex buffer */
   if (g.last_mesh_valid && g.last_mesh == mesh && !memcmp(g.last_clip, clip, sizeof(g.last_clip))) {
@@ -972,19 +1461,28 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       index_count < 3) {
     return;
   }
-  check_cmdbuf();
-  use_program(PROG_SKIN);
-  C3D_Mtx m;
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 4; c++) {
-      float acc = 0.0f;
-      for (int k = 0; k < 4; k++) {
-        acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
-      }
-      m.r[r].c[3 - c] = acc;
-    }
+  if (!cmd_room()) {
+    return;
   }
-  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_skin_clip, &m);
+  use_program(PROG_SKIN);
+  /* matrix and lights: uploaded when they change (the draws of a model share them) */
+  const int same_clip = g.last_skin_valid && !memcmp(g.last_skin_clip, clip, sizeof(g.last_skin_clip));
+  const int same_lights =
+      g.last_skin_valid && !memcmp(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
+  if (!same_clip) {
+    C3D_Mtx m;
+    for (int r = 0; r < 4; r++) {
+      for (int c = 0; c < 4; c++) {
+        float acc = 0.0f;
+        for (int k = 0; k < 4; k++) {
+          acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
+        }
+        m.r[r].c[3 - c] = acc;
+      }
+    }
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_skin_clip, &m);
+    memcpy(g.last_skin_clip, clip, sizeof(g.last_skin_clip));
+  }
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;
   }
@@ -998,13 +1496,17 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       dst[p].w = src[3];
     }
   }
-  C3D_FVec* lv = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_lights, 7);
-  for (int i = 0; i < 7; i++) {
-    lv[i].x = lights[4 * i];
-    lv[i].y = lights[4 * i + 1];
-    lv[i].z = lights[4 * i + 2];
-    lv[i].w = lights[4 * i + 3];
+  if (!same_lights) {
+    C3D_FVec* lv = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_lights, 7);
+    for (int i = 0; i < 7; i++) {
+      lv[i].x = lights[4 * i];
+      lv[i].y = lights[4 * i + 1];
+      lv[i].z = lights[4 * i + 2];
+      lv[i].w = lights[4 * i + 3];
+    }
+    memcpy(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
   }
+  g.last_skin_valid = 1;
   apply_state_tint(state, 2, 0xffffffffu);
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
@@ -1133,5 +1635,8 @@ void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, u
     }
   }
   C3D_TexFlush(&g.fog_tex);
+  if (g.in_frame) {
+    C3D_TexBind(1, &g.fog_tex); /* clears the texture cache: the GPU must not use the old texels */
+  }
   g.last_state_valid = 0;
 }

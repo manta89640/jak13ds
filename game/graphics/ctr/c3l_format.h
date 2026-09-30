@@ -15,11 +15,15 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 7;
+constexpr uint32_t kVersion = 8;
+// v7 files (16-bit textures without mip levels) still load
+constexpr uint32_t kMinVersion = 7;
 
 enum TextureFormat : uint8_t {
   TEX_RGB565 = 0,  // u16: r5 g6 b5 (r in the high bits)
   TEX_RGBA4 = 1,   // u16: r4 g4 b4 a4 (r in the high bits)
+  TEX_ETC1 = 2,    // v8: ETC1, 4 bits per texel
+  TEX_ETC1A4 = 3,  // v8: ETC1 + 4 bit alpha, 8 bits per texel
 };
 
 struct Header {
@@ -53,12 +57,15 @@ static_assert(sizeof(Header) == 128);
 
 /*!
  * Texture, already in the 3DS GPU layout: 8x8 tiles (rows of tiles), Morton order inside a tile,
- * bottom row of the image first. Power of two, 8..128.
+ * bottom row of the image first (ETC1: see tools/ctr_level_converter/ctr_texture.h). Power of two,
+ * 8..128. v8: `levels` mip levels one after the other (each half the size of the previous one, the
+ * last one at least 8 texels on its short side); v7: always one level (levels = 0).
  */
 struct Texture {
   uint16_t w, h;
   uint8_t format;  // TextureFormat
-  uint8_t pad[3];
+  uint8_t levels;  // v8: number of mip levels in the data (>= 1). v7: 0
+  uint8_t pad[2];
   uint32_t data_offset;  // absolute
   uint32_t data_size;
 };
@@ -107,6 +114,18 @@ static_assert(sizeof(Draw) == 16);
 inline uint32_t morton8(uint32_t x, uint32_t y) {
   return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
          ((y & 4) << 3);
+}
+
+/*! Bytes of one mip level of a texture. */
+inline uint32_t texture_level_bytes(uint32_t w, uint32_t h, uint8_t format) {
+  switch (format) {
+    case TEX_ETC1:
+      return w * h / 2;
+    case TEX_ETC1A4:
+      return w * h;
+    default:
+      return w * h * 2;
+  }
 }
 
 /*! Texel index in the 3DS tiled layout for image pixel (x, y), y = 0 at the top. */

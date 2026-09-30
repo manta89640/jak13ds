@@ -12,6 +12,8 @@
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 
+#include "game/graphics/ctr/ctr_gpu.h"
+
 #include "fmt/format.h"
 
 namespace {
@@ -31,6 +33,10 @@ bool parse_bool(const std::string& v) {
 
 CtrSettings load() {
   CtrSettings s;
+  // auto defaults: what the emulator draws correctly / what is fast on the 3DS
+  s.emulator = ctr_gpu_is_emulator() != 0;
+  s.rgba4_as_rgba8 = s.emulator;
+  s.vram_textures = !s.emulator;
   const auto dir = file_util::get_jak_project_dir();
   fs::path path;
   for (const auto& p : {dir / "render.ini", dir.parent_path() / "render.ini"}) {
@@ -81,9 +87,17 @@ CtrSettings load() {
     } else if (key == "max_sprites") {
       s.max_sprites = std::atoi(v.c_str());
     } else if (key == "rgba4_as_rgba8") {
-      s.rgba4_as_rgba8 = parse_bool(v);
+      if (v != "auto") {
+        s.rgba4_as_rgba8 = parse_bool(v);
+      }
     } else if (key == "vram_textures") {
-      s.vram_textures = parse_bool(v);
+      if (v != "auto") {
+        s.vram_textures = parse_bool(v);
+      }
+    } else if (key == "mipmaps") {
+      s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
+    } else if (key == "gpu_profile") {
+      s.gpu_profile = parse_bool(v);
     } else {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);
     }
@@ -94,10 +108,14 @@ CtrSettings load() {
 }  // namespace
 
 std::string CtrSettings::summary() const {
-  return fmt::format("dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) ocean {} rgba4_as_rgba8 {} vram_textures {}",
-                     draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
-                     merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
-                     rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off");
+  return fmt::format(
+      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) "
+      "ocean {} rgba4_as_rgba8 {} vram_textures {} mipmaps {}{}{}",
+      draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
+      merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
+      rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
+      mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), gpu_profile ? " gpu_profile" : "",
+      emulator ? " (emulator)" : "");
 }
 
 const CtrSettings& ctr_settings() {

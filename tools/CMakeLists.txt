@@ -22,5 +22,9 @@ target_link_libraries(formatter common tree-sitter)
 
 # (AI-assisted) .fr3 -> .c3l converter for the 3DS renderer (docs/3ds-port/c3l_format.md)
 add_executable(ctr_level_converter
-        ctr_level_converter/main.cpp)
+        ctr_level_converter/main.cpp
+        ctr_level_converter/ctr_texture.cpp
+        ${CMAKE_SOURCE_DIR}/third-party/rg_etc1/rg_etc1.cpp)
+# third-party ETC1 encoder: not our warnings
+set_source_files_properties(${CMAKE_SOURCE_DIR}/third-party/rg_etc1/rg_etc1.cpp PROPERTIES COMPILE_OPTIONS "-w")
 target_link_libraries(ctr_level_converter common)

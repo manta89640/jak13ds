@@ -43,7 +43,12 @@ struct CtrLevelData {
   std::vector<c3l::Chunk> chunks;
   std::vector<c3l::Draw> draws;
   std::vector<ctr_draw_state> draw_states;  // per draw
+  // per draw: sort key for the draws whose order doesn't matter (texture, then GPU state), and
+  // whether the order matters (blending, or no depth write: decals); see CtrTfragRenderer
+  std::vector<u32> draw_sort_keys;
+  std::vector<u8> draw_ordered;
   std::vector<int> textures;  // ctr_gpu handles
+  int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
   std::vector<int> meshes;    // one per chunk
   std::vector<c3l::MercBlercVertex> blerc_verts;
   std::vector<c3l::MercBlercTarget> blerc_targets;
@@ -162,4 +167,12 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;
+  // this frame's visible chunks and draws (kept to avoid allocations)
+  struct VisibleChunk {
+    u32 chunk;
+    float clip[16];
+  };
+  std::vector<VisibleChunk> m_visible;
+  std::vector<u64> m_sorted;   // (sort key << 32) | (visible index << 20) | draw in chunk
+  std::vector<u32> m_ordered;  // (visible index << 20) | draw in chunk
 };

@@ -300,10 +300,13 @@ void CtrOceanRenderer::update_texture(const u8* ee, u32 heights) {
       t[3] = 255;
     }
   }
-  if (m_tex >= 0) {
-    ctr_gpu_tex_delete(m_tex);
+  // one texture, updated in place (with mip levels: at the horizon a 96 m repeat is a few
+  // pixels, and the GPU reads the smallest level there)
+  if (m_tex < 0) {
+    m_tex = ctr_gpu_tex_create_mipmapped(N, N, m_texels.data());
+  } else {
+    ctr_gpu_tex_update(m_tex, m_texels.data());
   }
-  m_tex = ctr_gpu_tex_create(N, N, m_texels.data());
 }
 
 void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
