@@ -17,25 +17,28 @@ static thread_local unsigned long co_active_buffer[64];
 static thread_local cothread_t co_active_handle = 0;
 static void (*co_swap)(cothread_t, cothread_t) = 0;
 
-#ifdef LIBCO_MPROTECT
-  alignas(4096)
-#else
-  section(text)
+/* (AI-assisted, OpenGOAL 3DS port) The switch is a real function instead of instructions in a
+ * const array called as code: on the 3DS that array ends up in the read-only data segment, which
+ * the hardware doesn't execute (prefetch abort at the first IOP thread; emulators don't check).
+ * It also saves d8-d15, which the hard float ABI makes callee saved.
+ * Context: r4-r11, sp, lr (10 words), then d8-d15 (16 words); a new context starts at lr. */
+__attribute__((naked, noinline, target("arm")))
+static void co_swap_function(cothread_t to, cothread_t from) {
+  (void)to;
+  (void)from;
+  __asm__ volatile(
+    "stmia r1!, {r4-r11, sp, lr}\n\t"
+#ifndef __SOFTFP__
+    "vstmia r1!, {d8-d15}\n\t"
 #endif
-static const unsigned long co_swap_function[1024] = {
-  0xe8a16ff0,  /* stmia r1!, {r4-r11,sp,lr} */
-  0xe8b0aff0,  /* ldmia r0!, {r4-r11,sp,pc} */
-  0xe12fff1e,  /* bx lr                     */
-};
-
-static void co_init() {
-  #ifdef LIBCO_MPROTECT
-  unsigned long addr = (unsigned long)co_swap_function;
-  unsigned long base = addr - (addr % sysconf(_SC_PAGESIZE));
-  unsigned long size = (addr - base) + sizeof co_swap_function;
-  mprotect((void*)base, size, PROT_READ | PROT_EXEC);
-  #endif
+    "ldmia r0!, {r4-r11, sp, lr}\n\t"
+#ifndef __SOFTFP__
+    "vldmia r0!, {d8-d15}\n\t"
+#endif
+    "bx lr\n\t");
 }
+
+static void co_init() {}
 
 cothread_t co_active() {
   if(!co_active_handle) co_active_handle = &co_active_buffer;
@@ -46,7 +49,7 @@ cothread_t co_derive(void* memory, unsigned int size, void (*entrypoint)(void)) 
   unsigned long* handle;
   if(!co_swap) {
     co_init();
-    co_swap = (void (*)(cothread_t, cothread_t))co_swap_function;
+    co_swap = co_swap_function;
   }
   if(!co_active_handle) co_active_handle = &co_active_buffer;
 

@@ -17,6 +17,10 @@
 #include "fmt/format.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
+
+#ifdef __3DS__
+extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.c
+#endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrMerc.h"
@@ -208,6 +212,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   if (m_sky && m_sky->drew()) {
     clear[0] = clear[1] = clear[2] = 0;
   }
+#ifdef __3DS__
+  if (m_rs.frame_idx == 1 || m_rs.frame_idx == 300) {
+    ctr_boot_mark(m_rs.frame_idx == 1 ? "9 first game frame" : "10 300 game frames");
+  }
+#endif
   m_levels->process_pending_loads(m_rs.frame_idx);
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   const double t1 = ctr_gpu_time_ms();
@@ -377,6 +386,9 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
     lg::error("[ctr] GPU init failed");
     return 1;
   }
+#ifdef __3DS__
+  ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
+#endif
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   g_ctr = std::make_unique<CtrRenderer>();

@@ -4,13 +4,13 @@
 # 124 MB on New 3DS (SystemModeExt), which the game needs (48 MB of EE memory + code + GPU).
 
 BasicInfo:
-  Title                   : "OpenGOAL Jak1"
-  ProductCode             : "CTR-H-OGJK"
+  Title                   : "Jak1 boot test"
+  ProductCode             : "CTR-H-OGBT"
   Logo                    : Homebrew
 
 TitleInfo:
   Category                : Application
-  UniqueId                : 0xF7A11
+  UniqueId                : 0xF7A12
 
 Option:
   UseOnSD                 : true
