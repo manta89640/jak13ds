@@ -294,70 +294,6 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     const VecData& v = m_vec[i];
     const AdGif& ad = m_adgif[i];
 
-    // GS state from the adgif (Sprite3::handle_tex0 etc.). Consecutive sprites mostly share it.
-    if (!m_have_last_ad || memcmp(&ad, &m_last_ad, sizeof(AdGif)) != 0) {
-      m_last_ad = ad;
-      m_have_last_ad = true;
-      ctr_draw_state& st = m_last_state;
-      memset(&st, 0, sizeof(st));
-      GsTex0 tex0(ad.tex0_data);
-      if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
-        const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
-        m_last_tex0 = ad.tex0_data;
-        m_last_tex = tex ? tex->handle : -1;
-        m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
-      }
-      st.tex = m_last_tex;
-      st.tcc = tex0.tcc();
-#ifndef __3DS__
-      {
-        // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
-        static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
-        static std::vector<u64> dumped;
-        if (dump_dir && dumped.size() < 200 &&
-            std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
-          dumped.push_back(ad.tex0_data);
-          std::vector<u32> rgba;
-          int w = 0, h = 0;
-          if (m_vram->decode_for_cpu(ad.tex0_data, &rgba, &w, &h) && w > 0 && h > 0) {
-            u32 amin = 255, amax = 0;
-            for (u32 c : rgba) {
-              amin = std::min(amin, c >> 24);
-              amax = std::max(amax, c >> 24);
-            }
-            lg::info("[sprite dump {}] tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
-                     dumped.size(), ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
-                     ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
-            try {
-              file_util::write_rgba_png(
-                  fs::path(dump_dir) / fmt::format("sprite_{:02d}.png", dumped.size()),
-                  rgba.data(), w, h);
-            } catch (std::exception&) {
-            }
-          }
-        }
-      }
-#endif
-      st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
-      bool zwrite = false;
-      if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
-        zwrite = !GsZbuf(ad.clamp_data).zmsk();
-      } else {
-        st.clamp_s = (ad.clamp_data & 0b001) != 0;
-        st.clamp_t = (ad.clamp_data & 0b100) != 0;
-      }
-      st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
-      st.fix = GsAlpha(ad.alpha_data).fix();
-      // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with
-      // FB_ONLY (only matters for depth writes)
-      st.ztest = CTR_TEST_GEQUAL;
-      st.zwrite = zwrite;
-      st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
-      st.aref = 38;
-      m_last_verts = &bucket_for(st);
-    }
-    const ctr_draw_state& st = m_last_state;
-
     // sprite3_3d.vert
     const math::Vector4f pos(v.xyz_sx.x(), v.xyz_sx.y(), v.xyz_sx.z(), 1.f);
     const float sx = v.xyz_sx.w();
@@ -458,6 +394,70 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         continue;
       }
     }
+    // Resolve GS state only for sprites that survived the screen bounds test.
+    // Texture lookup can decode/upload a texture, and offscreen sprites never use it.
+    if (!m_have_last_ad || memcmp(&ad, &m_last_ad, sizeof(AdGif)) != 0) {
+      m_last_ad = ad;
+      m_have_last_ad = true;
+      ctr_draw_state& st = m_last_state;
+      memset(&st, 0, sizeof(st));
+      GsTex0 tex0(ad.tex0_data);
+      if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
+        const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
+        m_last_tex0 = ad.tex0_data;
+        m_last_tex = tex ? tex->handle : -1;
+        m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
+      }
+      st.tex = m_last_tex;
+      st.tcc = tex0.tcc();
+#ifndef __3DS__
+      {
+        // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
+        static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
+        static std::vector<u64> dumped;
+        if (dump_dir && dumped.size() < 200 &&
+            std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
+          dumped.push_back(ad.tex0_data);
+          std::vector<u32> rgba;
+          int w = 0, h = 0;
+          if (m_vram->decode_for_cpu(ad.tex0_data, &rgba, &w, &h) && w > 0 && h > 0) {
+            u32 amin = 255, amax = 0;
+            for (u32 c : rgba) {
+              amin = std::min(amin, c >> 24);
+              amax = std::max(amax, c >> 24);
+            }
+            lg::info("[sprite dump {}] tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
+                     dumped.size(), ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
+                     ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
+            try {
+              file_util::write_rgba_png(
+                  fs::path(dump_dir) / fmt::format("sprite_{:02d}.png", dumped.size()),
+                  rgba.data(), w, h);
+            } catch (std::exception&) {
+            }
+          }
+        }
+      }
+#endif
+      st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
+      bool zwrite = false;
+      if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
+        zwrite = !GsZbuf(ad.clamp_data).zmsk();
+      } else {
+        st.clamp_s = (ad.clamp_data & 0b001) != 0;
+        st.clamp_t = (ad.clamp_data & 0b100) != 0;
+      }
+      st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
+      st.fix = GsAlpha(ad.alpha_data).fix();
+      // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with
+      // FB_ONLY (only matters for depth writes)
+      st.ztest = CTR_TEST_GEQUAL;
+      st.zwrite = zwrite;
+      st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
+      st.aref = 38;
+      m_last_verts = &bucket_for(st);
+    }
+
     ctr_vertex out[4];
     for (int k = 0; k < 4; k++) {
       // GS screen -> ctr_gpu coordinates (see CtrDirect::handle_xyz)
