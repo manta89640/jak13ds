@@ -468,12 +468,27 @@ platform/3ds/tools/run_emu.sh --seconds 150
 ## Native versions of hot mips2c functions
 
 (AI-assisted.) mips2c code emulates the MIPS/VU0 registers in memory (~10 ARM instructions per
-MIPS instruction on the 3DS). The hottest functions have plain C++ versions in
+MIPS instruction on the 3DS). Every mips2c function the game logic uses has a plain C++ version in
 `game/mips2c/jak1_functions/native_*.cpp` (see `game/mips2c/mips2c_native.h`), used by default on
-every platform: `cspace<-parented-transformq-joint!`, `moving-sphere-triangle-intersect`,
-`(method 9 collide-cache-prim)`, collide-cache methods 26 / 27 / 29 / 32, `sp-process-block-2d`.
+every platform:
+
+- collision: `collide-do-primitives`, `moving-sphere-triangle-intersect`, `collide-probe-node`,
+  `collide-probe-instance-tie`, `__pc-upload-collide-frag`, collide-cache methods 26-30 and 32,
+  collide-cache-prim 9 and 10, collide-puss-work 9 and 10, collide-shape-prim-mesh 12-14,
+  collide-mesh 11, 12, 14 and 15, collide-edge-work 15, 16 and 18, collide-edge-hold-list 10
+- animation: `cspace<-parented-transformq-joint!`
+- particles: `sp-process-block-2d`, `sp-process-block-3d`, `sp-launch-particles-var`,
+  `particle-adgif`
+- ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame)
+
+Still mips2c: the renderers' functions (bones, merc, generic, tie, tfrag, shadow, sky, ocean
+drawing, ripple, time-of-day colors, draw-string, textures) and `calc-animation-from-spr` (never
+called: `*use-new-decompressor*` is #t).
+
 They do the same float operations grouped the same way as the mips2c code, so results are
-bit-identical (clang fuses `a + b * c` within one expression on arm64; the 3DS has no FMA).
+bit-identical (clang fuses `a + b * c` within one expression on arm64; the 3DS has no FMA). They
+also keep the original's quirks: registers passed to callees that the callee ignores or not, the
+process pointer (s6) the original clobbers, stores in branch delay slots, deliberate crashes.
 
 - `OPENGOAL_MIPS2C_VERIFY=1` (host, C backend): every call runs the mips2c and the native
   version on the same inputs and compares v0 and every byte stored (logged stores); functions
@@ -483,6 +498,9 @@ bit-identical (clang fuses `a + b * c` within one expression on arm64; the 3DS h
   20 s. `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the checker).
 - `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions.
 - Native code must store to GOAL memory only through `gstore*` (verify mode logs them).
+- A native that calls another native through a symbol or method calls its `_impl` directly when
+  the symbol holds that function's stub (`native_stub_slot`), with its scratch space below its
+  own.
 - Run on the Mac with scripted input and a clean user folder, e.g.
   `OPENGOAL_MIPS2C_VERIFY=1 OPENGOAL_PAD_SCRIPT=platform/3ds/tests/gameplay.pad gk --config-path <empty dir> --proj-path <C mirror> --null-gfx -- -boot -fakeiso -cbackend`
   (without `--config-path` the menu taps change your real settings).
@@ -492,3 +510,25 @@ game logic 94.4 -> 66.0 ms per frame (10.1 -> 14.4 fps); method 9 collide-cache-
 (now includes moving-sphere-triangle-intersect, 5.6 before, and collide-do-primitives 2.7),
 cspace<- 8.9 -> 4.0, sp-process-block-2d 5.2 -> 2.0, collide-cache 32 / 26 / 27(+29)
 5.0 / 4.7 / 4.2 -> 1.7 / 1.8 / 1.8 ms.
+
+### Differential tests
+
+`test/mips2c_native/run.sh [host] [fma] [arm] [coverage] [bench] [-- test args]` (default: host
+arm) builds a test program that links the mips2c and the native versions without the rest of the
+runtime: GOAL memory, symbols, types and the GOAL functions they call are fakes set up by each test
+(`test/mips2c_native/tests_*.cpp`). For thousands of generated inputs per function (random data
+with edge values: 0, -0, ties, full caches, overflowing lists, NaN), it runs both versions from the
+same memory and compares v0, every byte of GOAL memory outside the stack, the GOAL calls made (the
+arguments the callee uses and the process pointer) and the VU0 random generator.
+
+- host: g++ -O2. fma: clang++ -mfma -ffp-contract=on (fuses `a + b * c` in one expression like
+  clang on arm64, so a native that groups float operations differently fails).
+- arm: ARMv6K + VFPv2 like the 3DS (arm-linux-gnueabihf-g++, run with qemu-arm), in the 3DS's VFP
+  mode: default NaN and flush-to-zero, which libctru sets for every thread (FPSCR 0x03000000).
+  Without default NaN, GCC's fused `vmls` (non-fused on VFPv2, same results otherwise) gives NaNs
+  the opposite sign than a `vmul` and `vsub`, so natives and mips2c could differ in NaN signs only.
+- coverage: gcov line coverage of the tested mips2c functions (100% for all of them).
+- bench: ARM instructions per call of each version (their own code, not the GOAL functions they
+  call), counted with qemu-arm.
+- Test args: `--filter SUBSTR`, `--scale X` (cases), `--seed N`, `--case N`, `--reports N`,
+  `--self` (mips2c against mips2c: tests the harness).
