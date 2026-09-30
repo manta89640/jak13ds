@@ -1,0 +1,61 @@
+# (AI-assisted) ocean test: village1 from the title screen, Geyser Rock, then the village1 shore
+# (checkpoint village1-hut) and the beach (beach-start), turning the camera around each time.
+# Use with screenshots (stage_sd.sh --screenshots N). Format: game/sce/pad_script.h
+0 wait *target* target-title-wait
+400 start
+406 -
+450 x
+456 -
+490 x
+496 -
+530 x
+536 -
+570 x
+576 -
+610 x
+616 -
+650 x
+656 -
+700 triangle
+706 -
+760 triangle
+766 -
+820 triangle
+826 -
+880 triangle
+886 -
+940 triangle
+946 -
+1000 triangle
+1006 -
+1060 triangle
+1066 -
+1120 triangle
+1126 -
+1180 triangle
+1186 -
+1240 triangle
+1246 -
+1300 triangle
+1306 -
+1400 wait *target* target-stance
+1401 log geyser rock
+1401 pos *target*
+1460 rx=255
+1760 -
+1800 continue village1-hut
+1801 wait *target* target-continue
+1802 wait *target* target-stance
+1803 log village1 shore
+1803 pos *target*
+1860 rx=255
+2460 -
+2500 continue beach-start
+2501 wait *target* target-continue
+2502 wait *target* target-stance
+2503 log beach
+2503 pos *target*
+2560 rx=255
+3160 -
+3200 log done
+3210 exit

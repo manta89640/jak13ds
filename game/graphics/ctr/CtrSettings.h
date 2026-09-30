@@ -29,6 +29,7 @@ struct CtrSettings {
   // renderers
   bool merc = true;
   bool sprites = true;
+  bool ocean = true;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
 

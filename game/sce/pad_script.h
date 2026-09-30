@@ -21,6 +21,8 @@
  *             frames. Frames of later entries don't count the waiting time.
  *   pos SYM   log the position (in meters) of the process-drawable in SYM (pos *target*)
  *   log TEXT  write TEXT to the log
+ *   continue NAME  (start 'play (get-continue-by-name *game-info* NAME)): jump to a checkpoint,
+ *             for example "continue beach-start" (tests of other levels)
  *   exit      stop the runtime
  *   crash     fail an assert (to test the crash screen)
  * Buttons and sticks not mentioned are released / centered.
@@ -63,6 +65,10 @@ void set_state_name_hook(StateNameHook hook);
 //! Called for "pos": the position of the process-drawable in a symbol, false if none.
 using PositionHook = bool (*)(const char* symbol, float* xyz);
 void set_position_hook(PositionHook hook);
+
+//! Called for "continue NAME".
+using ContinueHook = void (*)(const char* name);
+void set_continue_hook(ContinueHook hook);
 
 //! Called for "exit".
 using ExitHook = void (*)();

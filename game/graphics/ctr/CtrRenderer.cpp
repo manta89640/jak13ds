@@ -19,6 +19,7 @@
 #include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrMerc.h"
+#include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -125,6 +126,9 @@ CtrRenderer::CtrRenderer()
     m_merc.emplace_back((int)id, merc.get());
     set(id, std::move(merc));
   }
+  // the ocean (after the level and merc, like the PS2's ocean-near)
+  set(BucketId::OCEAN_NEAR,
+      std::make_unique<CtrOceanRenderer>("ocean", (int)BucketId::OCEAN_NEAR));
   set(BucketId::SPRITE,
       std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));
   set(BucketId::DEBUG,
