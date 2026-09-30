@@ -138,11 +138,11 @@ u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args) {
   const float vf0[4] = {0.f, 0.f, 0.f, 1.f};
 
   float pos[4], move[4], v0[4], v1[4], v2[4];
-  memcpy(pos, gptr(pos_addr), 16);
-  memcpy(move, gptr(move_addr), 16);
-  memcpy(v0, gptr(tri), 16);
-  memcpy(v1, gptr(tri + 16), 16);
-  memcpy(v2, gptr(tri + 32), 16);
+  gload_q(pos, pos_addr);
+  gload_q(move, move_addr);
+  gload_q(v0, tri);
+  gload_q(v1, tri + 16);
+  gload_q(v2, tri + 32);
 
   // relative to v1: the other two corners, the start and the end of the move
   float e0[4], e2[4], p[4], pe[4];
@@ -210,7 +210,7 @@ u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args) {
   // ta = (np + radius) / nm, tb = (np - radius) / nm (lanes x and y)
   float ta[2] = {np[0] * q, np[1] * q};
   float tb[2] = {np[0] * q, np[1] * q};
-  gstore_bytes(out_normal, n, 16);
+  gstore_q(out_normal, n);
   const float q2 = one / nmx;  // vdiv
   ta[1] = ta[1] + radius;
   tb[1] = tb[1] - radius;
@@ -288,7 +288,7 @@ u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args) {
   for (int i = 0; i < 4; i++) {
     out[i] = b[i] + v1[i];
   }
-  gstore_bytes(out_point, out, 16);
+  gstore_q(out_point, out);
   return result;
 }
 

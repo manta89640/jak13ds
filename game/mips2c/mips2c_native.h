@@ -124,6 +124,24 @@ inline void gstore_bytes(u32 addr, const void* src, u32 size) {
   memcpy(g_ee_main_mem + addr, src, size);
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+#define MIPS2C_ASSUME_ALIGNED(p, n) __builtin_assume_aligned((p), (n))
+#else
+#define MIPS2C_ASSUME_ALIGNED(p, n) (p)
+#endif
+
+//! A quadword that the mips2c code loads with lqc2 (which requires 16-byte alignment): the
+//! compiler can load it straight into float registers. Only for such addresses.
+inline void gload_q(void* out, u32 addr) {
+  memcpy(out, MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + addr, 16), 16);
+}
+
+//! A quadword that the mips2c code stores with sqc2 (16-byte aligned). Only for such addresses.
+inline void gstore_q(u32 addr, const void* src) {
+  MIPS2C_NATIVE_LOG_STORE(addr, 16);
+  memcpy(MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + addr, 16), src, 16);
+}
+
 //! a quadword as 4 floats (a VU0 register)
 struct Vec4f {
   float x, y, z, w;
