@@ -84,14 +84,15 @@ GC_INLINE u64 gc_ld_u64_(u8* gc_mb, u64 a) {
   memcpy(&v, gc_addr(a), 8);
   return v;
 }
+// floats and vectors are accessed lane by lane through word-aligned float pointers, so they go
+// straight into FPU registers (VLDR/VSTR on ARM) instead of through integer registers.
+typedef float __attribute__((may_alias)) gc_af32;
 GC_INLINE float gc_ld_f32_(u8* gc_mb, u64 a) {
-  float v;
-  memcpy(&v, gc_addr(a), 4);
-  return v;
+  return *(const gc_af32*)gc_addr(a);
 }
 GC_INLINE v128 gc_ld_v128_(u8* gc_mb, u64 a) {
-  v128 v;
-  memcpy(&v, gc_addr(a), 16);
+  const gc_af32* p = (const gc_af32*)gc_addr(a);
+  v128 v = {p[0], p[1], p[2], p[3]};
   return v;
 }
 
@@ -110,10 +111,14 @@ GC_INLINE void gc_st_u64_(u8* gc_mb, u64 a, u64 v) {
   memcpy(gc_addr(a), &v, 8);
 }
 GC_INLINE void gc_st_f32_(u8* gc_mb, u64 a, float v) {
-  memcpy(gc_addr(a), &v, 4);
+  *(gc_af32*)gc_addr(a) = v;
 }
 GC_INLINE void gc_st_v128_(u8* gc_mb, u64 a, v128 v) {
-  memcpy(gc_addr(a), &v, 16);
+  gc_af32* p = (gc_af32*)gc_addr(a);
+  p[0] = v.x;
+  p[1] = v.y;
+  p[2] = v.z;
+  p[3] = v.w;
 }
 
 #define gc_ld_u8(...) gc_ld_u8_(gc_mb, __VA_ARGS__)
