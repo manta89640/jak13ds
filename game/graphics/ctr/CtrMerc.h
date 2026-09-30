@@ -27,6 +27,8 @@ class CtrMercRenderer : public CtrBucketRenderer {
  public:
   CtrMercRenderer(std::string name, int id, CtrLevels* levels);
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  /*! Where the eye draws (c3l::MercDraw::eye_id) get their textures. */
+  void set_eye_renderer(const class CtrEyeRenderer* eyes) { m_eyes = eyes; }
   /*! Game thread, before the frame is handed to the render thread: copy the bone matrices the
    * bucket's models use (see handle_model). */
   void snapshot_bones(DmaFollower& dma, CtrRenderState& rs);
@@ -43,6 +45,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   void handle_model(const DmaTransfer& init, CtrRenderState& rs);
 
   CtrLevels* m_levels;
+  const class CtrEyeRenderer* m_eyes = nullptr;
   // camera from the merc setup packet (low memory of the merc VU program)
   math::Vector4f m_hvdf_offset;
   math::Vector4f m_perspective[4];

@@ -15,7 +15,7 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 4;
+constexpr uint32_t kVersion = 6;
 
 enum TextureFormat : uint8_t {
   TEX_RGB565 = 0,  // u16: r5 g6 b5 (r in the high bits)
@@ -143,7 +143,8 @@ struct MercDraw {
   uint8_t palette_count;
   uint32_t first_index;  // triangle list, into the merc index data
   uint32_t index_count;
-  uint8_t palette[32];
+  uint8_t palette[31];  // kMercPaletteSize used
+  uint8_t eye_id;       // 0xff: not an eye. Else the eye texture slot (CtrEyeRenderer) to use
 };
 static_assert(sizeof(MercDraw) == 48);
 
@@ -153,7 +154,9 @@ struct MercVertex {
   uint8_t weights[3];  // 0..255
   int16_t st[2];       // * 1024
   uint8_t rgba[4];
+  int8_t normal[3];    // * 127 (lighting)
+  uint8_t pad;
 };
-static_assert(sizeof(MercVertex) == 20);
+static_assert(sizeof(MercVertex) == 24);
 
 }  // namespace c3l

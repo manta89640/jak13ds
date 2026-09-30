@@ -435,7 +435,7 @@ int ctr_gpu_skinned_mesh_create(const void* verts,
   int h = ctr_gpu_mesh_create(verts, 0, indices, index_count);
   auto& m = g_soft.meshes[h];
   m.stride = 20;
-  m.verts.assign((const uint8_t*)verts, (const uint8_t*)verts + vertex_count * 20);
+  m.verts.assign((const uint8_t*)verts, (const uint8_t*)verts + vertex_count * 24);
   return h;
 }
 
@@ -443,7 +443,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           const float clip[16],
                           const float* bones,
                           int palette_count,
-                          const float tint[3],
+                          const float lights[28],
                           int mesh,
                           int first_index,
                           int index_count) {
@@ -456,14 +456,16 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
     ctr_vertex tri[3];
     bool ok = true;
     for (int k = 0; k < 3; k++) {
-      const uint8_t* src = &m.verts[20 * m.indices[i + k]];
+      const uint8_t* src = &m.verts[24 * m.indices[i + k]];
       int16_t pos[3], st[2];
       memcpy(pos, src, 6);
       const uint8_t* bidx = src + 6;
       const uint8_t* bw = src + 9;
       memcpy(st, src + 12, 4);
       const uint8_t* rgba = src + 16;
+      const int8_t* nrm = (const int8_t*)(src + 20);
       float cam[4] = {0, 0, 0, 1};
+      float rn[3] = {0, 0, 0};
       for (int b = 0; b < 3; b++) {
         int bi = bidx[b] < palette_count ? bidx[b] : 0;
         const float* r = bones + 12 * bi;
@@ -471,7 +473,20 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
         for (int row = 0; row < 3; row++) {
           cam[row] += w * (r[4 * row] * pos[0] + r[4 * row + 1] * pos[1] + r[4 * row + 2] * pos[2] +
                            r[4 * row + 3]);
+          rn[row] += w * (r[4 * row] * nrm[0] + r[4 * row + 1] * nrm[1] + r[4 * row + 2] * nrm[2]);
         }
+      }
+      // lighting as merc2.vert (and ctr_skin.v.pica): the rows are the negated bones
+      float len = std::sqrt(rn[0] * rn[0] + rn[1] * rn[1] + rn[2] * rn[2]) + 1e-6f;
+      float l[3];
+      for (int c = 0; c < 3; c++) {
+        l[c] = -(lights[c] * rn[0] + lights[4 + c] * rn[1] + lights[8 + c] * rn[2]) / len;
+        l[c] = l[c] < 0.f ? 0.f : l[c];
+      }
+      float lit[3];
+      for (int c = 0; c < 3; c++) {
+        lit[c] = lights[24 + c] + l[0] * lights[12 + c] + l[1] * lights[16 + c] +
+                 l[2] * lights[20 + c];
       }
       float c[4];
       for (int r = 0; r < 4; r++) {
@@ -487,9 +502,9 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
       tri[k].s = st[0] / 1024.f;
       tri[k].t = st[1] / 1024.f;
-      tri[k].r = (uint8_t)(rgba[0] * tint[0]);
-      tri[k].g = (uint8_t)(rgba[1] * tint[1]);
-      tri[k].b = (uint8_t)(rgba[2] * tint[2]);
+      tri[k].r = (uint8_t)std::clamp(rgba[0] * lit[0], 0.f, 255.f);
+      tri[k].g = (uint8_t)std::clamp(rgba[1] * lit[1], 0.f, 255.f);
+      tri[k].b = (uint8_t)std::clamp(rgba[2] * lit[2], 0.f, 255.f);
       tri[k].a = rgba[3];
     }
     if (!ok) {
@@ -511,6 +526,8 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out) {
 // the software backend has no fog
 void ctr_gpu_set_mesh_fog(const float*, const float*, uint8_t, uint8_t, uint8_t) {}
 void ctr_gpu_set_rgba4_as_rgba8(int) {}
+
+void ctr_gpu_set_vram_textures(int) {}
 
 double ctr_gpu_time_ms(void) {
   using namespace std::chrono;

@@ -82,6 +82,8 @@ CtrSettings load() {
       s.max_sprites = std::atoi(v.c_str());
     } else if (key == "rgba4_as_rgba8") {
       s.rgba4_as_rgba8 = parse_bool(v);
+    } else if (key == "vram_textures") {
+      s.vram_textures = parse_bool(v);
     } else {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);
     }
@@ -92,10 +94,10 @@ CtrSettings load() {
 }  // namespace
 
 std::string CtrSettings::summary() const {
-  return fmt::format("dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) ocean {} rgba4_as_rgba8 {}",
+  return fmt::format("dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) ocean {} rgba4_as_rgba8 {} vram_textures {}",
                      draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
                      merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
-                     rgba4_as_rgba8 ? "on" : "off");
+                     rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off");
 }
 
 const CtrSettings& ctr_settings() {

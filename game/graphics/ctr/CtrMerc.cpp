@@ -14,6 +14,7 @@
 #include "common/dma/dma.h"
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -263,11 +264,18 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
   }
 
-  // a crude light: ambient + half of the first light, applied to the whole model
-  float tint[3];
-  for (int c = 0; c < 3; c++) {
-    float v = lights.ambient[c] + 0.5f * lights.color0[c];
-    tint[c] = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+  // the model's lights, for the skin shader's per vertex lighting (like merc2.vert)
+  float light_data[28];
+  {
+    const float* src[7] = {lights.direction0.data(), lights.direction1.data(),
+                           lights.direction2.data(), lights.color0.data(), lights.color1.data(),
+                           lights.color2.data(), lights.ambient.data()};
+    for (int i = 0; i < 7; i++) {
+      for (int c = 0; c < 3; c++) {
+        light_data[4 * i + c] = src[i][c];
+      }
+      light_data[4 * i + 3] = 0.f;
+    }
   }
 
   // bones as 3x4 rows: camera = -(tmat[0] * x + tmat[1] * y + tmat[2] * z + tmat[3]),
@@ -287,11 +295,28 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         rows[4 * r + 3] = -m.tmat[3][r];
       }
     }
-    int tex = draw.texture == 0xffff ? -1 : lev->textures[draw.texture];
+    int tex = draw.texture < lev->textures.size() ? lev->textures[draw.texture] : -1;
+    if (draw.eye_id != 0xff && m_eyes) {
+      const int eye = m_eyes->texture(draw.eye_id);
+      if (eye >= 0) {
+        tex = eye;
+      }
+    }
     DrawMode mode;
     mode.as_int() = draw.mode;
     ctr_draw_state st = ctr_state_from_draw_mode(mode, tex);
-    ctr_gpu_draw_skinned(&st, m_clip, palette_rows, draw.palette_count, tint, model->mesh,
+    // Alpha like merc2.frag, not like the draw mode's alpha test: only (nearly) transparent pixels
+    // are dropped (alpha < 0.128), the rest is blended. The draw modes of hair, eyes and many
+    // objects ask for alpha >= 0x26, which throws away most of a hair texture (see-through, noisy
+    // hair). Effects the game draws with ignore-alpha are opaque.
+    if (flags.ignore_alpha_mask & (1ull << draw.effect)) {
+      st.atest = CTR_TEST_ALWAYS;
+      st.blend = CTR_BLEND_OFF;
+    } else {
+      st.atest = CTR_TEST_GEQUAL;
+      st.aref = 17;  // x2 in the GPU state: 34 / 255
+    }
+    ctr_gpu_draw_skinned(&st, m_clip, palette_rows, draw.palette_count, light_data, model->mesh,
                          draw.first_index, draw.index_count);
     m_stats.draws++;
   }
