@@ -1,5 +1,7 @@
 #include "srpc.h"
 
+#include <chrono>
+
 #include <cstdio>
 #include <cstring>
 
@@ -466,9 +468,28 @@ s32 VBlank_Handler(void*) {
 
   gFrameNum++;
 
+#ifdef __3DS__
+  // The 3DS has no audio output, so every stream runs on the fake clock (iso.cpp). This handler
+  // runs once per game frame, not at 60 Hz: advance the clock by real time (1024 per second), or
+  // cutscenes would slow down with the frame rate.
+  {
+    static u64 last_us = 0;
+    static u64 rest_us = 0;
+    const u64 now_us = (u64)std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count();
+    if (gFakeVAGClockRunning && !gFakeVAGClockPaused && last_us) {
+      rest_us += (now_us - last_us) * 1024;
+      gFakeVAGClock += (s32)(rest_us / 1000000);
+      rest_us %= 1000000;
+    }
+    last_us = now_us;
+  }
+#else
   if (gFakeVAGClockRunning && !gFakeVAGClockPaused) {
     gFakeVAGClock += (s32)(1024 / Gfx::g_global_settings.target_fps);
   }
+#endif
 
   // We don't need this, our DMA's are instant
   // if (dmaid) {

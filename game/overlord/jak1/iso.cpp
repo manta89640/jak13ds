@@ -608,9 +608,12 @@ u32 ISOThread() {
             InitVAGCmd(&vag_cmd, 1);
             LoadStackEntry* file = nullptr;
             if (QueueMessage(&vag_cmd, 3, "QueueVAG")) {
+#ifndef __3DS__
+              // (3DS: no audio output, the stream audio isn't read: see PLAY_VAG_STREAM)
               if (vag_cmd.vag) {
                 file = isofs->open_wad(vag_cmd.file, vag_cmd.vag->offset);
               }
+#endif
               vag_cmd.fd = file;
               vag_cmd.status = -1;
               vag_cmd.callback_function = ProcessVAGData;
@@ -657,11 +660,19 @@ u32 ISOThread() {
               vag_cmd.messagebox_to_reply = 0;
               vag_cmd.thread_id = 0;
               if (QueueMessage(&vag_cmd, 3, "PlayVag")) {
+#ifdef __3DS__
+                // No audio output on the 3DS: nothing would play the stream, so its position (which
+                // times cutscenes and dialogue, and aborts them if it doesn't move for 4 seconds)
+                // would never advance. Without a file, the stream runs on the fake clock instead,
+                // like a VAG that is missing on PC (VBlank_Handler advances it in real time).
+                vag_cmd.fd = nullptr;
+#else
                 if (vag_cmd.vag) {
                   vag_cmd.fd = isofs->open_wad(vag_cmd.file, vag_cmd.vag->offset);
                 } else {
                   vag_cmd.fd = nullptr;
                 }
+#endif
                 vag_cmd.status = -1;
                 vag_cmd.callback_function = ProcessVAGData;
                 gVAGCMD = &vag_cmd;
