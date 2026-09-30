@@ -135,14 +135,22 @@ void register_collide_mesh_tests() {
     add_collide_fakes();
     collide_mesh_type();
   };
-  add_test({"(method 11 collide-mesh)", "(method 11 collide-mesh)", 8000, setup, gen_mesh_sphere,
+  add_test(
+      {"(method 11 collide-mesh)", "(method 11 collide-mesh)", 8000, setup, gen_mesh_sphere, {}});
+  add_test(
+      {"(method 12 collide-mesh)", "(method 12 collide-mesh)", 8000, setup, gen_mesh_sphere, {}});
+  add_test({"(method 14 collide-mesh)",
+            "(method 14 collide-mesh)",
+            4000,
+            setup,
+            [](Case& c) { gen_mesh_vertices(c, false); },
             {}});
-  add_test({"(method 12 collide-mesh)", "(method 12 collide-mesh)", 8000, setup, gen_mesh_sphere,
+  add_test({"(method 15 collide-mesh)",
+            "(method 15 collide-mesh)",
+            4000,
+            setup,
+            [](Case& c) { gen_mesh_vertices(c, true); },
             {}});
-  add_test({"(method 14 collide-mesh)", "(method 14 collide-mesh)", 4000, setup,
-            [](Case& c) { gen_mesh_vertices(c, false); }, {}});
-  add_test({"(method 15 collide-mesh)", "(method 15 collide-mesh)", 4000, setup,
-            [](Case& c) { gen_mesh_vertices(c, true); }, {}});
 }
 
 //! for the collide-shape-prim-mesh tests: a real collide-mesh (its methods are the mips2c ones)

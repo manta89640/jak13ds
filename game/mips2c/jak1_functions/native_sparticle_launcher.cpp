@@ -47,8 +47,8 @@ u64 particle_adgif_impl(const NativeArgs& args) {
   const u32 cache = gload<u32>(cache_sym);
   // (particle-setup-adgif adgif texture-id), with the other registers as the original has them
   auto setup = [&](u64 adgif, u32 key_slot) {
-    const u64 call_args[8] = {adgif, tex,       args.a[2], key, (u64)((s64)tex >> 8),
-                              lw(cache_sym), 0, key_slot};
+    const u64 call_args[8] = {adgif,         tex, args.a[2], key, (u64)((s64)tex >> 8),
+                              lw(cache_sym), 0,   key_slot};
     native_call_goal(gload<u32>(setup_sym), call_args, args);
   };
 

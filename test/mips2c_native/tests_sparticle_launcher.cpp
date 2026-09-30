@@ -130,9 +130,8 @@ void setup_launcher() {
             st_bytes(fs + 48, hptr((u32)a[2]), 16);
             return a[1];
           }));
-  set_sym("add-to-sprite-aux-list", add_goal_fn("add-to-sprite-aux-list", 3, [](const u64*) -> u64 {
-            return 0;
-          }));
+  set_sym("add-to-sprite-aux-list",
+          add_goal_fn("add-to-sprite-aux-list", 3, [](const u64*) -> u64 { return 0; }));
   // birth functions (system cpuinfo launchinfo launcher launch-state)
   g_birth_funcs[0] = add_goal_fn("birth-fade", 5, [](const u64* a) -> u64 {
     st_vec((u32)a[2] + 32, 128.f, 64.f, 32.f, ld<float>((u32)a[2] + 44));
@@ -300,7 +299,7 @@ void gen_launch(Case& c) {
     st<float>(spec(k), g.f_edge(-300.f, 300.f));
   }
   st<float>(spec(13), g.pick(std::vector<float>{g.f(-40000.f, 40000.f), 32767.9f, -32768.5f,
-                                                  g.f(-1e6f, 1e6f)}));
+                                                g.f(-1e6f, 1e6f)}));
   for (u32 k = 15; k <= 18; k++) {
     st<float>(spec(k), g.chance(0.2f) ? g.f(255.f, 400.f) : g.f(0.f, 255.f));
   }
@@ -308,8 +307,8 @@ void gen_launch(Case& c) {
   for (u32 k = 19; k <= 46; k++) {
     st<float>(spec(k), g.f(-10.f, 10.f));
   }
-  u32 flags = g.u32_() & ~(4u | 8u | 16u | 32u | 128u | 256u | 512u | 1024u | 2048u | 4096u |
-                           16384u);
+  u32 flags =
+      g.u32_() & ~(4u | 8u | 16u | 32u | 128u | 256u | 512u | 1024u | 2048u | 4096u | 16384u);
   for (u32 bit : {4u, 8u, 16u, 32u, 128u, 256u, 512u, 4096u, 4096u, 16384u}) {
     if (g.chance(0.3f)) {
       flags |= bit;
@@ -357,8 +356,8 @@ void gen_launch(Case& c) {
 
 void register_sparticle_launcher_tests() {
   add_test({"particle-adgif", "particle-adgif", 6000, setup_launcher, gen_particle_adgif, {}});
-  add_test({"sp-launch-particles-var", "sp-launch-particles-var", 6000, setup_launcher,
-            gen_launch, {}});
+  add_test(
+      {"sp-launch-particles-var", "sp-launch-particles-var", 6000, setup_launcher, gen_launch, {}});
 }
 
 }  // namespace tests

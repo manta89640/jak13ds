@@ -70,7 +70,7 @@ u64 collide_do_primitives_impl(const NativeArgs& args) {
   // corners
   for (int i = 0; i < 3; i++) {
     const u64 call_args[8] = {args.a[0], args.a[1], tri + 16 * i, args.a[2],
-                              args.a[4], args.a[5], args.a[6], args.a[7]};
+                              args.a[4], args.a[5], args.a[6],    args.a[7]};
     const float t = u2f((u32)native_call_goal(gload<u32>(sphere_sym), call_args, args));
     // (the first hit is taken even if it's above 2.0)
     if (t < 0.f || (i > 0 && !(t < best))) {
@@ -103,8 +103,8 @@ u64 collide_do_primitives_impl(const NativeArgs& args) {
       d[k] = d[k] * q;
     }
     gstore_bytes(dir, d, 16);
-    const u64 call_args[8] = {args.a[0], args.a[1], tri + 16 * i, dir,
-                              args.a[2], f2gpr(len), args.a[4], args.a[7]};
+    const u64 call_args[8] = {args.a[0], args.a[1],  tri + 16 * i, dir,
+                              args.a[2], f2gpr(len), args.a[4],    args.a[7]};
     const float t = u2f((u32)native_call_goal(gload<u32>(cylinder_sym), call_args, args));
     if (t < 0.f || !(t < best)) {
       continue;
@@ -219,7 +219,7 @@ u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args) {
     tb[i] = tb[i] * q2;
   }
 
-  float pt[4];                // the sphere's center when it touches the plane
+  float pt[4];  // the sphere's center when it touches the plane
   const float* center = pt;
   u64 result;
   if (sign_bit(ta[1]) || sign_bit(tb[1])) {

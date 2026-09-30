@@ -32,7 +32,9 @@ u32 gen_bone(Gen& g) {
 }  // namespace
 
 void register_joint_tests() {
-  add_test({"cspace<-parented-transformq-joint!", "cspace<-parented-transformq-joint!", 20000,
+  add_test({"cspace<-parented-transformq-joint!",
+            "cspace<-parented-transformq-joint!",
+            20000,
             nullptr,
             [](Case& c) {
               auto& g = c.g;

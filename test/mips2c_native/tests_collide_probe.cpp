@@ -14,9 +14,9 @@ namespace {
 
 struct TreeGen {
   Gen& g;
-  float range;       // sphere centers in [-range, range]
-  int leaves = 0;    // upper bound of the items the probes can add
-  bool instances;    // leaves are instance-tie arrays (collide-probe-instance-tie)
+  float range;     // sphere centers in [-range, range]
+  int leaves = 0;  // upper bound of the items the probes can add
+  bool instances;  // leaves are instance-tie arrays (collide-probe-instance-tie)
 
   void sphere(u32 addr) {
     const float r = g.chance(0.1f) ? 0.f : g.f(0.f, range * 0.3f);
@@ -58,7 +58,7 @@ struct TreeGen {
       for (int c = 0; c < 4; c++) {
         st<s16>(inst + 52 + 2 * c, (s16)g.range(-(s32)(range / 64), (s32)(range / 64)));
       }
-      st<u16>(inst + 34, (u16)g.range(0, 12000));                   // max-scale
+      st<u16>(inst + 34, (u16)g.range(0, 12000));               // max-scale
       st<u16>(inst + 42, g.chance(0.85f) ? 0 : (u16)g.u32_());  // flags
       const u32 bucket = alloc(160);
       st<u32>(bucket + 136, g.chance(0.1f) ? 0 : frag_array());
@@ -91,7 +91,7 @@ struct TreeGen {
         st<u32>(node + 4, instances ? instance_array(children) : node_array(children, 1));
       } else {
         st<u8>(node + 3, (u8)g.u32_());  // not read
-        st<u32>(node + 4, g.u32_());      // a collide fragment (not read)
+        st<u32>(node + 4, g.u32_());     // a collide fragment (not read)
         leaves++;
       }
     }
@@ -140,10 +140,16 @@ void gen_probe(Case& c, bool instances) {
 }  // namespace
 
 void register_collide_probe_tests() {
-  add_test({"collide-probe-node", "collide-probe-node", 6000, setup_probe,
+  add_test({"collide-probe-node",
+            "collide-probe-node",
+            6000,
+            setup_probe,
             [](Case& c) { gen_probe(c, false); },
             {}});
-  add_test({"collide-probe-instance-tie", "collide-probe-instance-tie", 6000, setup_probe,
+  add_test({"collide-probe-instance-tie",
+            "collide-probe-instance-tie",
+            6000,
+            setup_probe,
             [](Case& c) { gen_probe(c, true); },
             {}});
 }

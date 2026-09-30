@@ -107,11 +107,11 @@ u32 gen_frag_mesh(Gen& g, int vertex_count) {
     st<u32>(pats + 4 * i, g.u32_() & (g.chance(0.5f) ? 0xff : 0xffffffff));
   }
 
-  st<u32>(mesh + 0, data);                     // packed-data
-  st<u32>(mesh + 4, pats);                     // pat-array
-  st<u16>(mesh + 8, (u16)strips.size());       // strip-data-len
-  st<u16>(mesh + 10, (u16)pat_idx.size());     // poly-count
-  for (int i = 0; i < 3; i++) {                // base-trans (ints)
+  st<u32>(mesh + 0, data);                  // packed-data
+  st<u32>(mesh + 4, pats);                  // pat-array
+  st<u16>(mesh + 8, (u16)strips.size());    // strip-data-len
+  st<u16>(mesh + 10, (u16)pat_idx.size());  // poly-count
+  for (int i = 0; i < 3; i++) {             // base-trans (ints)
     st<s32>(mesh + 12 + 4 * i, g.range(-200000, 200000));
   }
   st<u8>(mesh + 24, (u8)vertex_count);  // vertex-count (base-trans w)

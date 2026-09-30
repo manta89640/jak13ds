@@ -145,8 +145,8 @@ void gen_edge_15(Case& c) {
   st<u32>(work + 8, nverts);
   st<u32>(work + 12, nedges);
   for (u32 k = 0; k < 64; k++) {
-    st_vec(work + 640 + 16 * k, center[0] + g.f(-size, size), center[1], center[2] + g.f(-size, size),
-           1.f);
+    st_vec(work + 640 + 16 * k, center[0] + g.f(-size, size), center[1],
+           center[2] + g.f(-size, size), 1.f);
   }
   for (u32 k = 0; k < 96; k++) {
     for (u32 i = 0; i < 48; i += 4) {
@@ -166,8 +166,8 @@ void gen_edge_15(Case& c) {
 //! a hold list: n items (48 bytes: next, rating, split, edge, center-pt, outward-pt) sorted by
 //! rating, in the list's items
 u32 gen_hold_list(Gen& g, u32 list, int n, u32 work) {
-  st<u32>(list, (u32)n);                     // num-allocs
-  st<u32>(list + 4, (u32)g.range(0, 16));    // num-attempts
+  st<u32>(list, (u32)n);                   // num-allocs
+  st<u32>(list + 4, (u32)g.range(0, 16));  // num-attempts
   std::vector<float> ratings(n);
   for (auto& r : ratings) {
     r = g.f(-100.f, 100.f);
@@ -192,8 +192,7 @@ u32 gen_hold_list(Gen& g, u32 list, int n, u32 work) {
     const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) + 1e-6f;
     st_vec(edge + 32, d[0] / len, d[1] / len, d[2] / len, 1.f);
     st<u32>(item + 12, edge);
-    st_vec(item + 16, g.f(-20000.f, 20000.f), g.f(-20000.f, 20000.f), g.f(-20000.f, 20000.f),
-           1.f);
+    st_vec(item + 16, g.f(-20000.f, 20000.f), g.f(-20000.f, 20000.f), g.f(-20000.f, 20000.f), 1.f);
     if (prev) {
       st<u32>(prev, item);
     } else {
@@ -254,14 +253,30 @@ void gen_edge_18(Case& c) {
 }  // namespace
 
 void register_collide_edge_grab_tests() {
-  add_test({"(method 16 collide-edge-work)", "(method 16 collide-edge-work)", 6000, setup_edge,
-            gen_edge_16, {}});
-  add_test({"(method 15 collide-edge-work)", "(method 15 collide-edge-work)", 6000, setup_edge,
-            gen_edge_15, {}});
-  add_test({"(method 10 collide-edge-hold-list)", "(method 10 collide-edge-hold-list)", 6000,
-            setup_edge, gen_hold_10, {}});
-  add_test({"(method 18 collide-edge-work)", "(method 18 collide-edge-work)", 8000, setup_edge,
-            gen_edge_18, {}});
+  add_test({"(method 16 collide-edge-work)",
+            "(method 16 collide-edge-work)",
+            6000,
+            setup_edge,
+            gen_edge_16,
+            {}});
+  add_test({"(method 15 collide-edge-work)",
+            "(method 15 collide-edge-work)",
+            6000,
+            setup_edge,
+            gen_edge_15,
+            {}});
+  add_test({"(method 10 collide-edge-hold-list)",
+            "(method 10 collide-edge-hold-list)",
+            6000,
+            setup_edge,
+            gen_hold_10,
+            {}});
+  add_test({"(method 18 collide-edge-work)",
+            "(method 18 collide-edge-work)",
+            8000,
+            setup_edge,
+            gen_edge_18,
+            {}});
 }
 
 }  // namespace tests
