@@ -24,6 +24,13 @@
   (defglobalconstant SMALL_MEMORY #t)
   (defglobalconstant SMALL_MEMORY #f))
 
+;; 3DS port: the 3DS renderer doesn't draw the ocean, so skip generating its DMA (about 12 ms/frame
+;; on the 3DS). The small memory layout is only used by the 3DS build.
+;; (defglobalconstant doesn't evaluate its value, so use #if)
+(#if SMALL_MEMORY
+  (defglobalconstant SKIP_OCEAN_DRAW #t)
+  (defglobalconstant SKIP_OCEAN_DRAW #f))
+
 ;; whether we're allowed to use more memory than the original game or not
 (#if SMALL_MEMORY
   (defglobalconstant BIG_MEMORY #f)

@@ -392,6 +392,12 @@
   (set! (-> obj lod-force-tie) 0)
   (set! (-> obj lod-force-ocean) 0)
   (set! (-> obj lod-force-actor) 0)
+  ;; 3DS port (the small memory layout is only used there): the PS2's particle cap and distance
+  ;; falloff and the PS2 LOD distances; environment maps aren't drawn by the 3DS renderer.
+  (#when SMALL_MEMORY
+    (set! (-> obj ps2-parts?) #t)
+    (set! (-> obj ps2-lod-dist?) #t)
+    (set! (-> obj force-envmap?) #f))
   0)
 
 (defmethod reset-misc ((obj pc-settings) (call-handlers symbol))

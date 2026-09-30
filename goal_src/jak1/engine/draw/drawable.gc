@@ -852,7 +852,8 @@
   ;;;;;;; OCEAN
   (with-profiler "ocean"
     (update-ocean) ;; ocean map update
-    (draw-ocean) ;; far, mid, near, transition, and texture.
+    (#unless SKIP_OCEAN_DRAW
+      (draw-ocean)) ;; far, mid, near, transition, and texture.
     )
   (add-ee-profile-frame 'draw :b #xff :a #x80)
   ;; reset MERC
