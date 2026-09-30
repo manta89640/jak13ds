@@ -49,4 +49,7 @@ extern const NativeImpl method_14_collide_shape_prim_mesh;
 extern const NativeImpl pc_upload_collide_frag;
 // native_sparticle.cpp
 extern const NativeImpl sp_process_block_2d;
+extern const NativeImpl sp_process_block_3d;
+// native_ocean.cpp
+extern const NativeImpl ocean_interp_wave;
 }  // namespace Mips2C::jak1::native

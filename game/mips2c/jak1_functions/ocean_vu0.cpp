@@ -2,6 +2,7 @@
 //--------------------------MIPS2C---------------------
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak1/kscheme.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 namespace Mips2C::jak1 {
 namespace ocean_interp_wave {
@@ -194,7 +195,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.ocean_wave_frames = intern_from_c("*ocean-wave-frames*").c();
   cache.ocean_work = intern_from_c("*ocean-work*").c();
-  gLinkedFunctionTable.reg("ocean-interp-wave", execute, 256);
+  gLinkedFunctionTable.reg("ocean-interp-wave", execute, 256, &native::ocean_interp_wave);
 }
 
 } // namespace ocean_interp_wave

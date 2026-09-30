@@ -363,7 +363,7 @@ void link() {
   cache.quaternion = intern_from_c("quaternion*!").c();
   cache.sp_free_particle = intern_from_c("sp-free-particle").c();
   cache.sp_relaunch_particle_3d = intern_from_c("sp-relaunch-particle-3d").c();
-  gLinkedFunctionTable.reg("sp-process-block-3d", execute, 256);
+  gLinkedFunctionTable.reg("sp-process-block-3d", execute, 256, &native::sp_process_block_3d);
 }
 
 } // namespace sp_process_block_3d
