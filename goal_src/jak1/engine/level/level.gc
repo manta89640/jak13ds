@@ -1201,6 +1201,7 @@
     (dotimes (s5-0 2)
       (load-continue (-> this level s5-0))))
   ;; compute inside for each level
+  (profiler-start-event "lu-inside")
   (dotimes (s5-1 (-> this length))
     (let ((s4-0 (-> this level s5-1)))
       (when (= (-> s4-0 status) 'active)
@@ -1208,10 +1209,12 @@
         (set! (-> s4-0 inside-sphere?) (>= (-> s4-0 bsp bsphere w) (-> s4-0 level-distance)))
         ;; being inside sets your meta-inside to #t. If you are outside, remember your old inside.
         (if (-> s4-0 inside-boxes?) (set! (-> s4-0 meta-inside?) #t)))))
+  (profiler-end-event)
   ;; update load state machine (the level-border one)
   (with-profiler "lu-load-state"
     (update! *load-state*))
   ;; checkpoint assignment
+  (profiler-start-event "lu-checkpoint")
   (dotimes (s5-2 (-> this length))
     (let ((s4-1 (-> this level s5-2)))
       (when (= (-> s4-1 status) 'active)
@@ -1232,6 +1235,7 @@
                 (set! s4-2 (cdr s4-2))
                 (set! s1-0 (the-as continue-point (car s4-2)))))
             (set-continue! *game-info* s3-0))))))
+  (profiler-end-event)
   ;; determine vis info idx for each level
   (dotimes (v1-67 (-> this length))
     (let ((a0-26 (-> this level v1-67)))
