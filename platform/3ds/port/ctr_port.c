@@ -116,6 +116,8 @@ void ctr_boot_mark(const char* step) {
 }
 
 int ctr_platform_init(int enable_console) {
+  ctr_linear_lock(); /* creates the lock while there is one thread */
+  ctr_linear_unlock();
   /* paths without a device name ("/3ds/jak1/...") then refer to the SD card, and
    * std::filesystem treats them as absolute ("sdmc:/..." would be a relative path to it) */
   ctr_boot_mark("2 main");
@@ -316,6 +318,21 @@ unsigned int ctr_linear_mem_free(void) {
 
 void ctr_thread_set_priority(int prio) {
   svcSetThreadPriority(CUR_THREAD_HANDLE, prio);
+}
+
+static RecursiveLock s_linear_lock;
+static volatile int s_linear_lock_ready = 0;
+
+void ctr_linear_lock(void) {
+  if (!s_linear_lock_ready) { /* first use is at startup, before other threads exist */
+    RecursiveLock_Init(&s_linear_lock);
+    s_linear_lock_ready = 1;
+  }
+  RecursiveLock_Lock(&s_linear_lock);
+}
+
+void ctr_linear_unlock(void) {
+  RecursiveLock_Unlock(&s_linear_lock);
 }
 
 unsigned int ctr_thread_current_id(void) {
@@ -848,8 +865,11 @@ int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
   if (nbufs > AUDIO_MAX_BUFS) {
     nbufs = AUDIO_MAX_BUFS;
   }
+  /* ndspInit allocates linear memory too (the IOP thread runs this while the renderer loads) */
+  ctr_linear_lock();
   Result rc = ndspInit();
   if (R_FAILED(rc)) {
+    ctr_linear_unlock();
     printf("[ctr] ndspInit failed: 0x%08lx (DSP firmware sdmc:/3ds/dspfirm.cdc missing?)\n",
            (unsigned long)rc);
     return -1;
@@ -857,10 +877,12 @@ int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
   const size_t bytes = (size_t)nbufs * frames * 2 * sizeof(short);
   s_audio_mem = (short*)linearAlloc(bytes);
   if (!s_audio_mem) {
-    printf("[ctr] audio: linearAlloc(%u) failed\n", (unsigned int)bytes);
     ndspExit();
+    ctr_linear_unlock();
+    printf("[ctr] audio: linearAlloc(%u) failed\n", (unsigned int)bytes);
     return -2;
   }
+  ctr_linear_unlock();
   memset(s_audio_mem, 0, bytes);
   DSP_FlushDataCache(s_audio_mem, bytes);
 
@@ -898,8 +920,10 @@ void ctr_audio_exit(void) {
   }
   ndspSetCallback(NULL, NULL);
   ndspChnWaveBufClear(0);
+  ctr_linear_lock();
   ndspExit();
   linearFree(s_audio_mem);
+  ctr_linear_unlock();
   s_audio_mem = NULL;
   s_audio_on = 0;
 }

@@ -25,6 +25,8 @@ extern const size_t ctr_skin_shbin_size;
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
+void ctr_linear_lock(void);
+void ctr_linear_unlock(void);
 
 #define DISPLAY_TRANSFER_FLAGS                                                              \
   (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |        \
@@ -150,9 +152,49 @@ void ctr_gpu_request_screenshot(const char* path) {
   g.screenshot_state = 1;
 }
 
+/* Texture and mesh slots, the delete lists and linear memory are shared with the level loader
+ * thread (CtrLevels creates a level's textures and meshes there): slot reservations, allocations,
+ * frees and the delete lists are done under ctr_linear_lock (libctru's linear allocator has no lock
+ * of its own). A slot is 3 (reserved) while its creator fills it; the renderer only draws handles
+ * it was given, so it never reads a slot the loader is filling. */
+static int reserve_tex_slot(void) {
+  int slot = -1;
+  ctr_linear_lock();
+  for (int i = 0; i < MAX_TEXTURES; i++) {
+    if (g.textures[i].used == 0) {
+      g.textures[i].used = 3;
+      slot = i;
+      break;
+    }
+  }
+  ctr_linear_unlock();
+  return slot;
+}
+
+static void release_tex_slot(int slot) {
+  ctr_linear_lock();
+  g.textures[slot].used = 0;
+  ctr_linear_unlock();
+}
+
+static int reserve_mesh_slot(void) {
+  int slot = -1;
+  ctr_linear_lock();
+  for (int i = 0; i < MAX_MESHES; i++) {
+    if (g.meshes[i].used == 0) {
+      g.meshes[i].used = 3;
+      slot = i;
+      break;
+    }
+  }
+  ctr_linear_unlock();
+  return slot;
+}
+
 /* textures deleted during a frame may still be read by the GPU: free them at the start of the
  * next frame, after C3D_FrameBegin(C3D_FRAME_SYNCDRAW) waited for the GPU */
 static void process_pending_deletes(void) {
+  ctr_linear_lock();
   for (int i = 0; i < g.pending_staging_count; i++) {
     linearFree(g.pending_staging[i]);
   }
@@ -176,6 +218,7 @@ static void process_pending_deletes(void) {
     }
   }
   g.pending_mesh_delete_count = 0;
+  ctr_linear_unlock();
 }
 
 /* Programs have different vertex layouts and uniforms: switch both together. */
@@ -315,6 +358,7 @@ void ctr_gpu_exit(void) {
   if (!g.ready) {
     return;
   }
+  ctr_linear_lock();
   for (int i = 0; i < MAX_TEXTURES; i++) {
     if (g.textures[i].used) {
       C3D_TexDelete(&g.textures[i].tex);
@@ -329,6 +373,7 @@ void ctr_gpu_exit(void) {
     }
   }
   linearFree(g.vbuf);
+  ctr_linear_unlock();
   shaderProgramFree(&g.program);
   DVLB_Free(g.dvlb);
   shaderProgramFree(&g.mesh_program);
@@ -439,22 +484,28 @@ void ctr_gpu_set_vram_textures(int on) {
   g_vram_textures = on;
 }
 
-static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vram) {
+/* allow_vram: only from the render thread (the copy to VRAM goes through the GX queue) */
+static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vram, int allow_vram) {
   *on_vram = 0;
+  void* result = NULL;
+  ctr_linear_lock();
   /* only outside of a frame: a copy in a frame needs a command list split and a queue entry
    * each, and a level's worth of them overflows the GX queue */
-  if (g_vram_textures && !g.in_frame && C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
+  if (allow_vram && g_vram_textures && !g.in_frame &&
+      C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
     void* staging = linearAlloc(tex->size);
     if (staging) {
       *on_vram = 1;
-      return staging;
+      result = staging;
+    } else {
+      C3D_TexDelete(tex);
     }
-    C3D_TexDelete(tex);
   }
-  if (!C3D_TexInit(tex, (u16)w, (u16)h, fmt)) {
-    return NULL;
+  if (!result && C3D_TexInit(tex, (u16)w, (u16)h, fmt)) {
+    result = tex->data;
   }
-  return tex->data;
+  ctr_linear_unlock();
+  return result;
 }
 
 static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
@@ -470,17 +521,22 @@ static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
     g.vram_copy_failures++;
     GPU_TEXCOLOR fmt = tex->fmt;
     u16 w = tex->width, h = tex->height;
+    ctr_linear_lock();
     C3D_TexDelete(tex);
     if (!C3D_TexInit(tex, w, h, fmt)) {
       linearFree(buf);
+      ctr_linear_unlock();
       return 0;
     }
+    ctr_linear_unlock();
     memcpy(tex->data, buf, tex->size);
     C3D_TexFlush(tex);
   } else {
     g.vram_textures++;
   }
+  ctr_linear_lock();
   linearFree(buf);
+  ctr_linear_unlock();
   return 1;
 }
 
@@ -488,20 +544,15 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
   if (!g.ready || w < 8 || h < 8 || w > 1024 || h > 1024) {
     return -1;
   }
-  int slot = -1;
-  for (int i = 0; i < MAX_TEXTURES; i++) {
-    if (g.textures[i].used == 0) {
-      slot = i;
-      break;
-    }
-  }
+  const int slot = reserve_tex_slot();
   if (slot < 0) {
     return -1;
   }
   C3D_Tex* tex = &g.textures[slot].tex;
   int on_vram;
-  uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram);
+  uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram, 1);
   if (!dst) {
+    release_tex_slot(slot);
     return -1;
   }
   /* tiled: 8x8 tiles in rows, morton order inside a tile */
@@ -521,6 +572,7 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
     }
   }
   if (!tex_commit(tex, dst, on_vram)) {
+    release_tex_slot(slot);
     return -1;
   }
   g.textures[slot].used = 1;
@@ -528,11 +580,15 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
 }
 
 void ctr_gpu_tex_delete(int handle) {
-  if (handle < 0 || handle >= MAX_TEXTURES || !g.textures[handle].used) {
+  if (handle < 0 || handle >= MAX_TEXTURES) {
     return;
   }
-  g.textures[handle].used = 2; /* pending */
-  g.pending_delete[g.pending_delete_count++] = handle;
+  ctr_linear_lock();
+  if (g.textures[handle].used == 1) {
+    g.textures[handle].used = 2; /* pending */
+    g.pending_delete[g.pending_delete_count++] = handle;
+  }
+  ctr_linear_unlock();
 }
 
 /* ---------------- drawing ---------------- */
@@ -716,17 +772,12 @@ static void apply_state(const ctr_draw_state* st, int mesh) {
 
 /* ---------------- static meshes ---------------- */
 
+/* Also called from the level loader thread: always in linear memory (see tex_alloc). */
 int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int size) {
   if (!g.ready || w < 8 || h < 8 || w > 1024 || h > 1024) {
     return -1;
   }
-  int slot = -1;
-  for (int i = 0; i < MAX_TEXTURES; i++) {
-    if (g.textures[i].used == 0) {
-      slot = i;
-      break;
-    }
-  }
+  const int slot = reserve_tex_slot();
   if (slot < 0) {
     return -1;
   }
@@ -734,8 +785,9 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
   int on_vram;
   if (format == 1 && g_rgba4_as_rgba8) {
     /* RGBA4 texels expanded to RGBA8 (same tiled order; GPU_RGBA8 is stored A, B, G, R) */
-    uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram);
+    uint8_t* dst = (uint8_t*)tex_alloc(tex, w, h, GPU_RGBA8, &on_vram, 0);
     if (!dst) {
+      release_tex_slot(slot);
       return -1;
     }
     const uint16_t* src = (const uint16_t*)data;
@@ -751,17 +803,20 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
       dst[4 * i + 3] = (uint8_t)(((v >> 12) & 0xf) * 17);
     }
     if (!tex_commit(tex, dst, on_vram)) {
+      release_tex_slot(slot);
       return -1;
     }
     g.textures[slot].used = 1;
     return slot;
   }
-  void* dst = tex_alloc(tex, w, h, format == 0 ? GPU_RGB565 : GPU_RGBA4, &on_vram);
+  void* dst = tex_alloc(tex, w, h, format == 0 ? GPU_RGB565 : GPU_RGBA4, &on_vram, 0);
   if (!dst) {
+    release_tex_slot(slot);
     return -1;
   }
   memcpy(dst, data, (size_t)size < tex->size ? (size_t)size : tex->size);
   if (!tex_commit(tex, dst, on_vram)) {
+    release_tex_slot(slot);
     return -1;
   }
   g.textures[slot].used = 1;
@@ -773,18 +828,13 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
   if (!g.ready) {
     return -1;
   }
-  int slot = -1;
-  for (int i = 0; i < MAX_MESHES; i++) {
-    if (g.meshes[i].used == 0) {
-      slot = i;
-      break;
-    }
-  }
+  const int slot = reserve_mesh_slot();
   if (slot < 0) {
     return -1;
   }
   size_t vbytes = (size_t)vertex_count * 16;
   size_t ibytes = (size_t)index_count * 2;
+  ctr_linear_lock();
   void* v = linearAlloc(vbytes);
   uint16_t* ix = (uint16_t*)linearAlloc(ibytes);
   if (!v || !ix) {
@@ -794,8 +844,11 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
     if (ix) {
       linearFree(ix);
     }
+    g.meshes[slot].used = 0;
+    ctr_linear_unlock();
     return -1;
   }
+  ctr_linear_unlock();
   memcpy(v, verts, vbytes);
   memcpy(ix, indices, ibytes);
   GSPGPU_FlushDataCache(v, vbytes);
@@ -807,11 +860,15 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
 }
 
 void ctr_gpu_mesh_delete(int mesh) {
-  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+  if (mesh < 0 || mesh >= MAX_MESHES) {
     return;
   }
-  g.meshes[mesh].used = 2;
-  g.pending_mesh_delete[g.pending_mesh_delete_count++] = mesh;
+  ctr_linear_lock();
+  if (g.meshes[mesh].used == 1) {
+    g.meshes[mesh].used = 2;
+    g.pending_mesh_delete[g.pending_mesh_delete_count++] = mesh;
+  }
+  ctr_linear_unlock();
 }
 
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
@@ -863,18 +920,13 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   if (!g.ready) {
     return -1;
   }
-  int slot = -1;
-  for (int i = 0; i < MAX_MESHES; i++) {
-    if (g.meshes[i].used == 0) {
-      slot = i;
-      break;
-    }
-  }
+  const int slot = reserve_mesh_slot();
   if (slot < 0) {
     return -1;
   }
   size_t vbytes = (size_t)vertex_count * 24; /* c3l::MercVertex */
   size_t ibytes = (size_t)index_count * 2;
+  ctr_linear_lock();
   void* v = linearAlloc(vbytes);
   uint16_t* ix = (uint16_t*)linearAlloc(ibytes);
   if (!v || !ix) {
@@ -884,8 +936,11 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
     if (ix) {
       linearFree(ix);
     }
+    g.meshes[slot].used = 0;
+    ctr_linear_unlock();
     return -1;
   }
+  ctr_linear_unlock();
   memcpy(v, verts, vbytes);
   memcpy(ix, indices, ibytes);
   GSPGPU_FlushDataCache(v, vbytes);

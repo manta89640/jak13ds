@@ -6,6 +6,9 @@
 
 #include "CtrRenderer.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <thread>
@@ -217,7 +220,14 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     ctr_boot_mark(m_rs.frame_idx == 1 ? "9 first game frame" : "10 300 game frames");
   }
 #endif
-  m_levels->process_pending_loads(m_rs.frame_idx);
+  {
+    const double tl = ctr_gpu_time_ms();
+    m_levels->process_pending_loads(m_rs.frame_idx);
+    const double load_ms = ctr_gpu_time_ms() - tl;
+    if (load_ms >= 20.0) {
+      lg::info("[ctr] render thread frame {}: {:.0f} ms in level loads", m_rs.frame_idx, load_ms);
+    }
+  }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
@@ -350,6 +360,7 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
 namespace {
 std::unique_ptr<CtrRenderer> g_ctr;
 u32 g_frame_idx = 0;
+std::atomic<bool> g_ctr_ready{false};  // g_ctr can take prefetches (ctr_level_dgo_started)
 
 // render thread (New 3DS): the chain handed over by send_chain
 bool g_async = false;
@@ -368,7 +379,14 @@ struct EeTiming {
   int uploads = 0, relocates = 0;
   double last_log = 0;
   int frames = 0;
+  double max_frame_ms = 0;   // longest frame in the log window
 } g_ee;
+// frames this long are logged one by one (hangs: level loads, SD card reads)
+constexpr double kLongFrameMs = 200.0;
+double g_wait_render_total = 0;  // never reset: the wait in one frame is the difference
+double g_wait_render_mark = 0;
+double g_upload_total = 0, g_upload_mark = 0;  // same for texture uploads / relocates
+int g_upload_count_total = 0, g_upload_count_mark = 0;
 
 void render_job(void*) {
   g_ctr->render_frame(g_job_mem, g_job_offset);
@@ -377,7 +395,9 @@ void render_job(void*) {
 // before touching renderer state from the game thread
 void wait_render_idle() {
   if (g_async) {
-    g_ee.wait_render_ms += ctr_gpu_async_wait();
+    const double w = ctr_gpu_async_wait();
+    g_ee.wait_render_ms += w;
+    g_wait_render_total += w;
   }
 }
 
@@ -392,8 +412,13 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   g_ctr = std::make_unique<CtrRenderer>();
+  // Both load on the loader thread while the game boots. The title level (the Naughty Dog logo,
+  // the title screen) is the first one the game wants; loaded only when the game has it, the logo
+  // started after a ~1.5 s stall on hardware.
   g_ctr->levels().load_common();
+  g_ctr->levels().prefetch("title");
   g_async = ctr_gpu_async_start(render_job, nullptr) != 0;
+  g_ctr_ready = true;
   g_ctr->set_async(g_async);
   lg::info("[ctr] renderer ready ({})",
            g_async ? "render thread on core 2" : "synchronous rendering");
@@ -406,6 +431,7 @@ std::shared_ptr<GfxDisplay> ctr_make_display(int, int, const char*, GfxGlobalSet
 }
 
 void ctr_exit() {
+  g_ctr_ready = false;
   ctr_gpu_async_stop();
   g_async = false;
   g_ctr.reset();
@@ -433,9 +459,20 @@ void ctr_send_chain(const void* data, u32 offset) {
   }
   const double now = ctr_gpu_time_ms();
   if (g_ee.last_send != 0) {
-    g_ee.frame_ms += now - g_ee.last_send;
+    const double dt = now - g_ee.last_send;
+    g_ee.frame_ms += dt;
     g_ee.frames++;
+    g_ee.max_frame_ms = std::max(g_ee.max_frame_ms, dt);
+    if (dt >= kLongFrameMs) {
+      lg::info("[ctr] long frame {}: {:.0f} ms, of which {:.0f} ms waiting for the render thread, "
+               "{:.0f} ms in {} texture uploads",
+               g_frame_idx, dt, g_wait_render_total - g_wait_render_mark,
+               g_upload_total - g_upload_mark, g_upload_count_total - g_upload_count_mark);
+    }
   }
+  g_wait_render_mark = g_wait_render_total;
+  g_upload_mark = g_upload_total;
+  g_upload_count_mark = g_upload_count_total;
   g_ee.last_send = now;
   if (g_async) {
     wait_render_idle();
@@ -457,10 +494,11 @@ void ctr_send_chain(const void* data, u32 offset) {
     lg::info(
         "[ctr] game thread ms/frame over {} frames: frame {:.2f} ({:.1f} fps) = logic {:.2f} + "
         "sync render {:.2f} + wait render thread {:.2f} + vsync {:.2f} + texture uploads {:.2f} "
-        "({:.1f} uploads, {:.1f} relocates per frame) + bone snapshot {:.2f}",
+        "({:.1f} uploads, {:.1f} relocates per frame) + bone snapshot {:.2f}; longest frame "
+        "{:.0f} ms",
         g_ee.frames, g_ee.frame_ms / n, 1000.0 * n / g_ee.frame_ms, logic, g_ee.render_ms / n,
         g_ee.wait_render_ms / n, g_ee.vsync_ms / n, g_ee.upload_ms / n, g_ee.uploads / n,
-        g_ee.relocates / n, g_ee.prepare_ms / n);
+        g_ee.relocates / n, g_ee.prepare_ms / n, g_ee.max_frame_ms);
     const double last = g_ee.last_send;
     g_ee = EeTiming();
     g_ee.last_send = last;
@@ -473,8 +511,11 @@ void ctr_texture_upload_now(const u8* tpage, int mode, u32 s7_ptr) {
     wait_render_idle();
     const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().upload_texture_page_now(tpage, mode, g_ee_main_mem, s7_ptr);
-    g_ee.upload_ms += ctr_gpu_time_ms() - t0;
+    const double dt = ctr_gpu_time_ms() - t0;
+    g_ee.upload_ms += dt;
     g_ee.uploads++;
+    g_upload_total += dt;
+    g_upload_count_total++;
   }
 }
 
@@ -483,8 +524,11 @@ void ctr_texture_relocate(u32 destination, u32 source, u32 format) {
     wait_render_idle();
     const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().relocate(destination, source, format);
-    g_ee.upload_ms += ctr_gpu_time_ms() - t0;
+    const double dt = ctr_gpu_time_ms() - t0;
+    g_ee.upload_ms += dt;
     g_ee.relocates++;
+    g_upload_total += dt;
+    g_upload_count_total++;
   }
 }
 
@@ -500,6 +544,43 @@ void ctr_force_reload_level(const std::string&) {}
 void ctr_force_reload_common() {}
 void ctr_set_pmode_alp(float) {}
 }  // namespace
+
+// (AI-assisted) The overlord (IOP thread) started loading a level's DGO: start reading the
+// level's .c3l at the same time. The game only reports a level (set_levels) once its DGO is in,
+// and the .c3l took as long again after that (on hardware several seconds without a background).
+void ctr_level_dgo_started(const char* dgo_name) {
+  // DGO file names are the levels' nicknames (engine/level/level-info.gc)
+  static const struct {
+    const char* dgo;
+    const char* level;
+  } kLevels[] = {
+      {"TRA", "training"},   {"VI1", "village1"}, {"BEA", "beach"},      {"JUN", "jungle"},
+      {"JUB", "jungleb"},    {"MIS", "misty"},    {"FIC", "firecanyon"}, {"VI2", "village2"},
+      {"SUN", "sunken"},     {"SUB", "sunkenb"},  {"SWA", "swamp"},      {"ROL", "rolling"},
+      {"OGR", "ogre"},       {"VI3", "village3"}, {"SNO", "snow"},       {"MAI", "maincave"},
+      {"DAR", "darkcave"},   {"ROB", "robocave"}, {"LAV", "lavatube"},   {"CIT", "citadel"},
+      {"FIN", "finalboss"},  {"INT", "intro"},    {"DEM", "demo"},       {"TIT", "title"},
+      {"TSZ", "test-zone"},
+  };
+  if (!dgo_name || !g_ctr_ready) {
+    return;
+  }
+  // the game asks for "vi1.DGO"
+  std::string n(dgo_name);
+  const auto dot = n.find('.');
+  if (dot != std::string::npos) {
+    n.resize(dot);
+  }
+  for (auto& c : n) {
+    c = (char)toupper((unsigned char)c);
+  }
+  for (const auto& l : kLevels) {
+    if (n == l.dgo) {
+      g_ctr->levels().prefetch(l.level);
+      return;
+    }
+  }
+}
 
 const GfxRendererModule gRendererCtr = {
     ctr_init,                 // init
