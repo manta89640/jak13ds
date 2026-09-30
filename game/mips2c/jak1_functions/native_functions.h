@@ -50,6 +50,10 @@ extern const NativeImpl pc_upload_collide_frag;
 // native_sparticle.cpp
 extern const NativeImpl sp_process_block_2d;
 extern const NativeImpl sp_process_block_3d;
+// native_sparticle_launcher.cpp
+extern const NativeImpl particle_adgif;
+extern const NativeImpl sp_launch_particles_var;
+u64 particle_adgif_impl(const NativeArgs& args);
 // native_ocean.cpp
 extern const NativeImpl ocean_interp_wave;
 }  // namespace Mips2C::jak1::native

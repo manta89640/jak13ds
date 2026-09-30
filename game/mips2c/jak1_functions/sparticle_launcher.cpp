@@ -2,6 +2,7 @@
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak1/kscheme.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 
 namespace Mips2C::jak1 {
@@ -131,7 +132,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.particle_adgif_cache = intern_from_c("*particle-adgif-cache*").c();
   cache.particle_setup_adgif = intern_from_c("particle-setup-adgif").c();
-  gLinkedFunctionTable.reg("particle-adgif", execute, 128);
+  gLinkedFunctionTable.reg("particle-adgif", execute, 128, &native::particle_adgif);
 }
 
 } // namespace particle_adgif
@@ -834,7 +835,8 @@ void link() {
   cache.sp_init_fields = intern_from_c("sp-init-fields!").c();
   cache.sp_queue_launch = intern_from_c("sp-queue-launch").c();
   cache.sp_rotate_system = intern_from_c("sp-rotate-system").c();
-  gLinkedFunctionTable.reg("sp-launch-particles-var", execute, 512);
+  gLinkedFunctionTable.reg("sp-launch-particles-var", execute, 512,
+                           &native::sp_launch_particles_var);
 }
 
 } // namespace sp_launch_particles_var
