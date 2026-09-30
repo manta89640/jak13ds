@@ -540,3 +540,41 @@ arguments the callee uses and the process pointer) and the VU0 random generator.
   call), counted with qemu-arm.
 - Test args: `--filter SUBSTR`, `--scale X` (cases), `--seed N`, `--case N`, `--reports N`,
   `--self` (mips2c against mips2c: tests the harness).
+
+ARM instructions per call on the tests' inputs (`run.sh bench`: the functions' own code, not the
+GOAL functions they call; ARMv6K, -O2 for mips2c and -O3 for the natives like the 3DS build).
+(`__pc-upload-collide-frag` is the same C++ in both.)
+
+| function | mips2c | native | ratio |
+|---|---:|---:|---:|
+| `moving-sphere-triangle-intersect` | 1369 | 340 | 4.0x |
+| `collide-do-primitives` | 1171 | 522 | 2.2x |
+| `(method 9 collide-cache-prim)` | 20336 | 5063 | 4.0x |
+| `(method 26 collide-cache)` | 11725 | 2772 | 4.2x |
+| `(method 29 collide-cache)` | 15952 | 2551 | 6.3x |
+| `(method 27 collide-cache)` | 27830 | 5337 | 5.2x |
+| `(method 32 collide-cache)` | 30038 | 2584 | 11.6x |
+| `(method 28 collide-cache)` | 11317 | 2636 | 4.3x |
+| `(method 30 collide-cache)` | 9413 | 581 | 16.2x |
+| `(method 10 collide-cache-prim)` | 1225 | 71 | 17.2x |
+| `(method 9 collide-puss-work)` | 10123 | 1884 | 5.4x |
+| `(method 10 collide-puss-work)` | 2587 | 126 | 20.5x |
+| `(method 12 collide-shape-prim-mesh)` | 17222 | 2341 | 7.4x |
+| `(method 13 collide-shape-prim-mesh)` | 19617 | 2598 | 7.6x |
+| `(method 14 collide-shape-prim-mesh)` | 16795 | 2302 | 7.3x |
+| `cspace<-parented-transformq-joint!` | 2220 | 266 | 8.4x |
+| `collide-probe-node` | 3731 | 444 | 8.4x |
+| `collide-probe-instance-tie` | 4510 | 441 | 10.2x |
+| `(method 11 collide-mesh)` | 4282 | 914 | 4.7x |
+| `(method 12 collide-mesh)` | 2424 | 519 | 4.7x |
+| `(method 14 collide-mesh)` | 5804 | 1165 | 5.0x |
+| `(method 15 collide-mesh)` | 12513 | 2073 | 6.0x |
+| `(method 16 collide-edge-work)` | 7723 | 1066 | 7.2x |
+| `(method 15 collide-edge-work)` | 93947 | 20402 | 4.6x |
+| `(method 10 collide-edge-hold-list)` | 150 | 86 | 1.8x |
+| `(method 18 collide-edge-work)` | 3139 | 915 | 3.4x |
+| `sp-process-block-2d` | 19215 | 4534 | 4.2x |
+| `sp-process-block-3d` | 21529 | 6014 | 3.6x |
+| `ocean-interp-wave` | 60782 | 12192 | 5.0x |
+| `particle-adgif` | 803 | 342 | 2.3x |
+| `sp-launch-particles-var` | 2760 | 1297 | 2.1x |
