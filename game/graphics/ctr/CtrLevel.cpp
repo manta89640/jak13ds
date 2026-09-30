@@ -35,44 +35,144 @@ CtrLevels::~CtrLevels() {
   }
 }
 
+namespace {
+/*!
+ * Reads the pieces of a .c3l file as they are needed. A level file is ~10 MB: reading it in one
+ * piece needs a free block of memory that big, which the 3DS heap often doesn't have by the time
+ * a level loads (std::bad_alloc, and the level has no background).
+ */
+class C3lReader {
+ public:
+  explicit C3lReader(const fs::path& path) : m_f(fopen(path.string().c_str(), "rb")) {
+    if (m_f) {
+      setvbuf(m_f, nullptr, _IOFBF, 64 * 1024);
+      fseek(m_f, 0, SEEK_END);
+      m_size = ftell(m_f);
+      fseek(m_f, 0, SEEK_SET);
+    }
+  }
+  ~C3lReader() {
+    if (m_f) {
+      fclose(m_f);
+    }
+  }
+  bool ok() const { return m_f && !m_error; }
+  long size() const { return m_size; }
+  bool read(u32 offset, void* dst, size_t bytes) {
+    if (!ok() || (long)offset + (long)bytes > m_size) {
+      m_error = true;
+      return false;
+    }
+    if (bytes == 0) {
+      return true;
+    }
+    if (m_pos != (long)offset && fseek(m_f, offset, SEEK_SET) != 0) {
+      m_error = true;
+      return false;
+    }
+    if (fread(dst, 1, bytes, m_f) != bytes) {
+      m_error = true;
+      return false;
+    }
+    m_pos = (long)offset + (long)bytes;
+    return true;
+  }
+  template <typename T>
+  bool read_array(u32 offset, size_t count, std::vector<T>* out) {
+    out->resize(count);
+    return read(offset, out->data(), count * sizeof(T));
+  }
+
+ private:
+  FILE* m_f;
+  long m_size = 0;
+  long m_pos = 0;
+  bool m_error = false;
+};
+}  // namespace
+
 bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
   auto path = file_util::get_jak_project_dir() / "out" / "jak1" / "c3l" / (name + ".c3l");
   if (!fs::exists(path)) {
     return false;
   }
   Timer timer;
-  std::vector<u8> file;
+  bool ok = false;
+  long file_size = 0;
   try {
-    file = file_util::read_binary_file(path);
+    ok = load_file(path, name, out, &file_size);
   } catch (std::exception& e) {
-    lg::error("[ctr] failed to read {}: {}", path.string(), e.what());
+    lg::error("[ctr] failed to load {}: {}", path.string(), e.what());
+  }
+  if (!ok) {
+    unload(*out);
     return false;
   }
-  if (file.size() < sizeof(c3l::Header)) {
-    return false;
+  int failed = 0;
+  for (int t : out->textures) {
+    failed += t < 0;
   }
+  for (size_t i = 0; i < out->meshes.size(); i++) {
+    failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0;
+  }
+  for (auto& m : out->merc_models) {
+    failed += m.mesh < 0;
+  }
+  lg::info("[ctr] loaded {} ({} chunks, {} merc models, {} textures, {} KB) in {:.0f} ms", name,
+           out->chunks.size(), out->merc_models.size(), out->textures.size(), file_size / 1024,
+           timer.getMs());
+  if (failed) {
+    lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
+              failed);
+  }
+  return true;
+}
+
+bool CtrLevels::load_file(const fs::path& path,
+                          const std::string& name,
+                          CtrLevelData* out,
+                          long* file_size) {
+  C3lReader f(path);
   c3l::Header hdr;
-  memcpy(&hdr, file.data(), sizeof(hdr));
+  if (!f.read(0, &hdr, sizeof(hdr))) {
+    lg::error("[ctr] failed to read {}", path.string());
+    return false;
+  }
+  *file_size = f.size();
   if (memcmp(hdr.magic, c3l::kMagic, 4) || hdr.version != c3l::kVersion) {
     lg::error("[ctr] {}: not a C3L v{} file", path.string(), c3l::kVersion);
     return false;
   }
   out->name = name;
-  out->chunks.resize(hdr.num_chunks);
-  memcpy(out->chunks.data(), file.data() + hdr.chunks_offset,
-         hdr.num_chunks * sizeof(c3l::Chunk));
-  out->draws.resize(hdr.draw_data_size / sizeof(c3l::Draw));
-  memcpy(out->draws.data(), file.data() + hdr.draw_data_offset, hdr.draw_data_size);
-
-  std::vector<c3l::Texture> texs(hdr.num_textures);
-  memcpy(texs.data(), file.data() + hdr.textures_offset, hdr.num_textures * sizeof(c3l::Texture));
-  for (auto& t : texs) {
-    out->textures.push_back(ctr_gpu_tex_create_tiled(t.w, t.h, t.format,
-                                                     file.data() + t.data_offset, t.data_size));
+  if (!f.read_array(hdr.chunks_offset, hdr.num_chunks, &out->chunks) ||
+      !f.read_array(hdr.draw_data_offset, hdr.draw_data_size / sizeof(c3l::Draw), &out->draws)) {
+    lg::error("[ctr] {}: truncated file", path.string());
+    return false;
   }
 
-  const auto* verts = (const c3l::Vertex*)(file.data() + hdr.vertex_data_offset);
-  const auto* indices = (const u16*)(file.data() + hdr.index_data_offset);
+  std::vector<c3l::Texture> texs;
+  if (!f.read_array(hdr.textures_offset, hdr.num_textures, &texs)) {
+    lg::error("[ctr] {}: truncated file", path.string());
+    return false;
+  }
+  std::vector<u8> texels;
+  for (auto& t : texs) {
+    texels.resize(t.data_size);
+    int handle = -1;
+    if (f.read(t.data_offset, texels.data(), t.data_size)) {
+      handle = ctr_gpu_tex_create_tiled(t.w, t.h, t.format, texels.data(), t.data_size);
+    }
+    out->textures.push_back(handle);
+  }
+
+  // all indices at once (~1 MB): reading them chunk by chunk between the vertex reads would seek
+  // back and forth, and every seek throws away the read buffer
+  std::vector<u16> indices;
+  if (!f.read_array(hdr.index_data_offset, hdr.index_data_size / sizeof(u16), &indices)) {
+    lg::error("[ctr] {}: truncated file", path.string());
+    return false;
+  }
+  std::vector<c3l::Vertex> verts;
   for (auto& ch : out->chunks) {
     // the chunk's draws cover a contiguous range of the index data
     u32 first = UINT32_MAX, end = 0;
@@ -84,8 +184,13 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
       out->meshes.push_back(-1);
       continue;
     }
-    int mesh = ctr_gpu_mesh_create(verts + ch.first_vertex, ch.vertex_count, indices + first,
-                                   end - first);
+    int mesh = -1;
+    if (end <= indices.size() &&
+        f.read_array(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
+                     ch.vertex_count, &verts)) {
+      mesh = ctr_gpu_mesh_create(verts.data(), ch.vertex_count, indices.data() + first,
+                                 end - first);
+    }
     out->meshes.push_back(mesh);
     // make the draws relative to the mesh's index buffer
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
@@ -115,22 +220,31 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
   for (auto& d : out->draws) {
     DrawMode mode;
     mode.as_int() = d.mode;
-    out->draw_states.push_back(
-        ctr_state_from_draw_mode(mode, d.texture == 0xffff ? -1 : out->textures[d.texture]));
+    out->draw_states.push_back(ctr_state_from_draw_mode(
+        mode, d.texture < out->textures.size() ? out->textures[d.texture] : -1));
   }
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
-    std::vector<c3l::MercModel> models(hdr.num_merc_models);
-    memcpy(models.data(), file.data() + hdr.merc_models_offset,
-           hdr.num_merc_models * sizeof(c3l::MercModel));
-    const auto* mverts = (const c3l::MercVertex*)(file.data() + hdr.merc_vertex_offset);
-    const auto* mindices = (const u16*)(file.data() + hdr.merc_index_offset);
-    const auto* mdraws = (const c3l::MercDraw*)(file.data() + hdr.merc_draw_offset);
+    std::vector<c3l::MercModel> models;
+    std::vector<c3l::MercDraw> mdraws;
+    std::vector<u16> mindices;
+    if (!f.read_array(hdr.merc_models_offset, hdr.num_merc_models, &models) ||
+        !f.read_array(hdr.merc_draw_offset, hdr.merc_draw_size / sizeof(c3l::MercDraw),
+                      &mdraws) ||
+        !f.read_array(hdr.merc_index_offset, hdr.merc_index_size / sizeof(u16), &mindices)) {
+      lg::error("[ctr] {}: truncated file", path.string());
+      return false;
+    }
+    std::vector<c3l::MercVertex> mverts;
     for (auto& m : models) {
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
-      md.draws.assign(mdraws + m.first_draw, mdraws + m.first_draw + m.draw_count);
+      if (m.first_draw + m.draw_count > mdraws.size()) {
+        continue;
+      }
+      md.draws.assign(mdraws.begin() + m.first_draw,
+                      mdraws.begin() + m.first_draw + m.draw_count);
       if (md.draws.empty()) {
         continue;
       }
@@ -142,27 +256,14 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
       for (auto& d : md.draws) {
         d.first_index -= first;
       }
-      md.mesh = ctr_gpu_skinned_mesh_create(mverts + m.first_vertex, m.vertex_count,
-                                            mindices + first, end - first);
+      if (end <= mindices.size() &&
+          f.read_array(hdr.merc_vertex_offset + m.first_vertex * sizeof(c3l::MercVertex),
+                       m.vertex_count, &mverts)) {
+        md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count,
+                                              mindices.data() + first, end - first);
+      }
       out->merc_models.push_back(std::move(md));
     }
-  }
-  int failed = 0;
-  for (int t : out->textures) {
-    failed += t < 0;
-  }
-  for (size_t i = 0; i < out->meshes.size(); i++) {
-    failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0;
-  }
-  for (auto& m : out->merc_models) {
-    failed += m.mesh < 0;
-  }
-  lg::info("[ctr] loaded {} ({} chunks, {} merc models, {} textures, {} KB) in {:.0f} ms", name,
-           out->chunks.size(), out->merc_models.size(), out->textures.size(), file.size() / 1024,
-           timer.getMs());
-  if (failed) {
-    lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
-              failed);
   }
   return true;
 }

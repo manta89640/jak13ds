@@ -16,6 +16,7 @@
 #include "common/math/Vector.h"
 
 #include "common/dma/gs.h"
+#include "common/util/FileUtil.h"
 
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -60,6 +61,7 @@ class CtrLevels {
 
  private:
   bool load(const std::string& name, CtrLevelData* out);
+  bool load_file(const fs::path& path, const std::string& name, CtrLevelData* out, long* file_size);
   void unload(CtrLevelData& lev);
   std::map<std::string, std::unique_ptr<CtrLevelData>> m_levels;
   std::map<std::string, bool> m_missing;
