@@ -238,8 +238,8 @@ set_target_properties(gk PROPERTIES SUFFIX ".elf")
 
 if(3DSXTOOL AND SMDHTOOL)
   add_custom_command(TARGET gk POST_BUILD
-    COMMAND ${SMDHTOOL} --create "OpenGOAL" "Jak and Daxter (OpenGOAL 3DS port)" "OpenGOAL"
-            ${CTRULIB}/default_icon.png ${CMAKE_CURRENT_BINARY_DIR}/gk.smdh
+    COMMAND ${SMDHTOOL} --create "Jak and Daxter" "The Precursor Legacy (OpenGOAL 3DS port)"
+            "OpenGOAL" ${CMAKE_CURRENT_SOURCE_DIR}/cia/icon.png ${CMAKE_CURRENT_BINARY_DIR}/gk.smdh
     COMMAND ${3DSXTOOL} $<TARGET_FILE:gk> ${CMAKE_CURRENT_BINARY_DIR}/gk.3dsx
             --smdh=${CMAKE_CURRENT_BINARY_DIR}/gk.smdh
     COMMENT "Building gk.3dsx"

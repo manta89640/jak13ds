@@ -5,8 +5,13 @@
 #   platform/3ds/tools/make_cia.sh [--build-dir DIR] [--out FILE]
 #
 # Needs makerom in PATH or in ~/devkitpro-3ds/tools/bin (https://github.com/3DSGuy/Project_CTR
-# releases). The CIA has no banner (the HOME Menu shows the icon only), because bannertool has no
-# macOS build.
+# releases). The banner (platform/3ds/cia/banner.png + banner.wav, the title screen) and the icon
+# (cia/icon.png) are made with bannertool, from PATH or ~/devkitpro-3ds/tools/bin. There is no
+# macOS release: build it from https://github.com/diasurgical/bannertool with
+#   clang -c source/pc/stb_image.c source/pc/stb_vorbis.c
+#   clang++ -std=c++14 -DVERSION_MAJOR=1 -DVERSION_MINOR=2 -DVERSION_MICRO=0 -Isource \
+#     source/*.cpp source/pc/wav.cpp source/3ds/*.cpp stb_image.o stb_vorbis.o -o bannertool
+# Without bannertool the CIA has no banner and the icon of gk.smdh.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -31,10 +36,26 @@ SMDH="$BUILD_DIR/gk.smdh"
 [ -f "$ELF" ] || { echo "no $ELF (build gk first)" >&2; exit 1; }
 [ -f "$SMDH" ] || { echo "no $SMDH" >&2; exit 1; }
 
+# banner and icon
+CIA_DIR="$ROOT/platform/3ds/cia"
+BANNERTOOL="$(command -v bannertool || true)"
+[ -n "$BANNERTOOL" ] || BANNERTOOL="$HOME/devkitpro-3ds/tools/bin/bannertool"
+BANNER_ARGS=()
+if [ -x "$BANNERTOOL" ]; then
+  "$BANNERTOOL" makebanner -i "$CIA_DIR/banner.png" -a "$CIA_DIR/banner.wav" \
+    -o "$BUILD_DIR/banner.bnr" > /dev/null
+  "$BANNERTOOL" makesmdh -s "Jak and Daxter" -l "The Precursor Legacy (OpenGOAL 3DS port)" \
+    -p "OpenGOAL" -i "$CIA_DIR/icon.png" -o "$BUILD_DIR/gk_cia.smdh" > /dev/null
+  SMDH="$BUILD_DIR/gk_cia.smdh"
+  BANNER_ARGS=(-banner "$BUILD_DIR/banner.bnr")
+else
+  echo "bannertool not found: no banner (see the header of this script)" >&2
+fi
+
 # makerom wants a stripped elf
 STRIPPED="$BUILD_DIR/gk_cia.elf"
 "${DEVKITARM:-/opt/devkitpro/devkitARM}/bin/arm-none-eabi-strip" -o "$STRIPPED" "$ELF"
 
 "$MAKEROM" -f cia -o "$OUT" -elf "$STRIPPED" -rsf "$ROOT/platform/3ds/cia/gk.rsf" \
-  -icon "$SMDH" -exefslogo -target t -ver 0
+  -icon "$SMDH" "${BANNER_ARGS[@]}" -exefslogo -target t -ver 0
 echo "cia: $OUT"
