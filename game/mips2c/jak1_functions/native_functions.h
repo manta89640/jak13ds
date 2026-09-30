@@ -13,7 +13,9 @@ namespace Mips2C::jak1::native {
 // native_joint.cpp
 extern const NativeImpl cspace_parented_transformq_joint;
 // native_collide_func.cpp
+extern const NativeImpl collide_do_primitives;
 extern const NativeImpl moving_sphere_triangle_intersect;
+u64 collide_do_primitives_impl(const NativeArgs& args);
 u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args);
 // native_collide_cache.cpp
 extern const NativeImpl method_9_collide_cache_prim;

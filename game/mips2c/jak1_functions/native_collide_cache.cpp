@@ -57,7 +57,7 @@ u64 method_9_collide_cache_prim_impl(const NativeArgs& args) {
     const u32 fn = gload<u32>(mst_sym);
     const float t = u2f((u32)(fn == *mst_stub
                                   ? moving_sphere_triangle_intersect_impl(
-                                        NativeArgs{call_args, args.pp, args.st, 0})
+                                        NativeArgs{call_args, args.pp, args.st, out_point})
                                   : native_call_goal(fn, call_args, args)));
     float mv[4], normal[4];
     memcpy(mv, gptr(move), 16);
@@ -428,8 +428,9 @@ u64 method_27_collide_cache_impl(const NativeArgs& args) {
 
 }  // namespace
 
+// scratch: the two vectors, then moving-sphere-triangle-intersect's (called directly)
 const NativeImpl method_9_collide_cache_prim =
-    MIPS2C_NATIVE_IMPL(method_9_collide_cache_prim_impl, 0, 32);
+    MIPS2C_NATIVE_IMPL(method_9_collide_cache_prim_impl, 0, 48);
 const NativeImpl method_26_collide_cache = MIPS2C_NATIVE_IMPL(method_26_collide_cache_impl, 0, 0);
 const NativeImpl method_27_collide_cache = MIPS2C_NATIVE_IMPL(method_27_collide_cache_impl, 0, 0);
 const NativeImpl method_29_collide_cache = MIPS2C_NATIVE_IMPL(method_29_collide_cache_impl, 0, 0);
