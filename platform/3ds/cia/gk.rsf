@@ -49,6 +49,11 @@ AccessControlInfo:
   CanShareDeviceMemory          : true
   RunnableOnSleep               : false
   SpecialMemoryArrange          : true
+  # VRAM mapped for CPU reads: the renderer checks its texture uploads and reads screenshots back
+  # from VRAM. Without this an installed title can't read VRAM (a data abort on hardware; Azahar
+  # returns zeros). The .3dsx gets it from the Homebrew Launcher's own mapping.
+  MemoryMapping:
+    - 1f000000-1f5fffff:r
   SystemCallAccess:
     ControlMemory: 1
     QueryMemory: 2
