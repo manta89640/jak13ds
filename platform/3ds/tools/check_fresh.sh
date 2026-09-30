@@ -24,8 +24,11 @@ fail() { echo "STALE BUILD: $1" >&2; echo "rebuild first (see docs/3ds-port/3ds_
 case "${1:-}" in
   gk)
     f="$2"; [ -f "$f" ] || fail "$f does not exist"
-    c=$(commit_time)
-    [ "$(mtime "$f")" -ge "$c" ] || fail "$f is older than the newest commit on $BRANCH ($(git -C "$ROOT" log -1 --format='%h %s' "$BRANCH"))"
+    # code that is built into gk (not docs, not these tools)
+    set -- game common third-party goalc/cbackend platform/3ds/gk platform/3ds/port \
+      platform/3ds/shaders platform/3ds/cmake platform/3ds/CMakeLists.txt platform/3ds/cia
+    c=$(commit_time "$@")
+    [ "$(mtime "$f")" -ge "$c" ] || fail "$f is older than the newest commit on $BRANCH that changes it ($(git -C "$ROOT" log -1 --format='%h %s' "$BRANCH" -- "$@"))"
     ;;
   proj)
     p="$2"
