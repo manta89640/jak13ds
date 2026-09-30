@@ -73,6 +73,12 @@ void Player::InitCubeb() {
       // it once mixing falls behind (the game stops). No audio instead.
       int err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, 128 * 1024,
                                          CTR_PRIO_SOUND, core, &mMixerThread);
+      if (err != 0 && core == 2 && ctr_core1_enable() > 0) {
+        // no core 2 (Old 3DS): the system core, with the share of it the app got
+        core = 1;
+        err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, 128 * 1024,
+                                       CTR_PRIO_SOUND, core, &mMixerThread);
+      }
       if (err == 0) {
         g_output_active = true;
         lg::info("3DS sound: mixer thread on core {} (48 kHz software mix -> DSP)", core);

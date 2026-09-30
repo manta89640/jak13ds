@@ -80,6 +80,8 @@ void ctr_thread_join(void* handle);
 int ctr_syscore_available(void);
 /* The app's share of core 1 in percent (APT_SetAppCpuTimeLimit: 80, 30 if refused, 0: none). */
 int ctr_core1_share(void);
+/* Ask for a share of core 1 (if not done yet); returns the share in percent (0: refused). */
+int ctr_core1_enable(void);
 
 /* Audio output through the DSP (libctru ndsp): one stereo PCM16 channel that a software mixer
  * feeds, `nbufs` buffers of `frames` stereo frames each, resampled by the DSP from `rate` Hz.
