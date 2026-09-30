@@ -352,11 +352,14 @@ PC it runs with `gk --ctr-gfx`.
   - `CtrRenderer` walks the Jak 1 DMA chain bucket by bucket, like
     `OpenGLRenderer::dispatch_buckets_jak1`, using 3DS bucket renderers. Buckets without one are
     skipped.
-  - It runs synchronously on the EE thread: `send_chain` draws the frame, `vsync` waits for the
-    vertical blank.
+  - It runs on a render thread on core 2 of the New 3DS, one frame behind the game like the PS2
+    (`send_chain` hands the chain over, `sync_path` waits for it). The game's DMA buffers are
+    double buffered; merc bone matrices are not, so `send_chain` copies them first
+    (`CtrRenderer::prepare_frame`).
+  - `vsync` only waits if no vertical blank happened since the last call.
 - **GPU interface:** `ctr_gpu.h`, a small C API with plain types (see "Types" above). There are
   two implementations:
-  - `platform/3ds/port/ctr_gpu_citro3d.c`: citro3d, with two picasso shaders
+  - `game/graphics/ctr/ctr_gpu_citro3d.c`: citro3d, with two picasso shaders
     (`platform/3ds/shaders`).
   - `game/graphics/ctr/ctr_gpu_soft.cpp`: a software rasterizer for PC. It writes PNG frames
     (`gk --ctr-gfx --ctr-dump DIR --ctr-dump-every N`), which lets the renderer be tested without
@@ -375,8 +378,19 @@ PC it runs with `gk --ctr-gfx`.
     buckets. The math is the PC tfrag shader's, folded into one matrix per chunk.
   - Chunks are frustum culled by bounding sphere.
   - Levels load on first use from `out/jak1/c3l/<name>.c3l` and unload through `set_levels`.
-- **Not drawn yet:** merc (characters), generic, shrub, sprites / HUD, sky, ocean, particles,
-  shadows, eyes, debug lines, fog, scissor.
+- **Merc** (characters): `CtrMercRenderer`, models from the `.c3l` files (GAME.c3l has Jak and
+  the shared ones), GPU skinning with 24-bone palettes, one light approximation (tint).
+- **Sprites and HUD:** `CtrSpriteRenderer` (bucket `sprite`): world 2D sprites, 3D sprites and
+  the HUD, the `sprite3_3d.vert` math on the CPU, grouped by GS state.
+- **Fog:** the game's fog (like `tfrag3.vert`) plus fog towards the draw distance, computed in
+  the level vertex shader and applied with a fog ramp texture in the second TEV stage. The
+  screen is cleared to the fog color (no sky renderer).
+- **Not drawn yet:** generic, shrub, sky, ocean, shadows, eyes, blend shapes, envmap, the sprite
+  distorter, debug lines, scissor.
+- **Memory:** textures go to VRAM first (through a linear staging buffer and a GX copy), then to
+  linear memory. Meshes and the 1.5 MB vertex ring are in linear memory (24 MB total). The frame
+  statistics in the log show what is left (`linear free`, `vram free`); a level that doesn't fit
+  logs `N textures/meshes could not be created`.
 - **Screenshots:** `stage_sd.sh --screenshots N` makes gk save the top screen every N frames to
   `data/log/shot_<frame>.bmp`, read back from the GPU render target. `run_emu.sh` converts them
   to PNG in `build-3ds/emu-run/`.
@@ -387,7 +401,26 @@ platform/3ds/tools/stage_sd.sh --proj ../p3ds --clean-logs --screenshots 120
 platform/3ds/tools/run_emu.sh --seconds 150
 ```
 
-- **Status in Azahar (New 3DS):** the title screen shows village1 (tfrag + tie) and the PRESS
+- **Settings (`render.ini`):** read at startup from `sdmc:/3ds/jak1/render.ini` (on PC:
+  `<project>/render.ini`), `key = value` lines, `#` comments. The log prints the values in use.
+
+  | key | default | meaning |
+  |---|---|---|
+  | `draw_distance` | 300 | meters; level chunks further away are not drawn, fog hides the cut (0 = off) |
+  | `fog_start` | 0.6 | the extra fog starts at this fraction of the draw distance |
+  | `fog` | on | the game's own distance fog |
+  | `lod_distance` | 120 | meters; near tfrag version up to here, coarse beyond (0 = always near) |
+  | `far_level_distance` | 40 | meters; a level whose bounds are further away (seen from a neighbouring level) is drawn with only its lowres tfrag, no tie (0 = off) |
+  | `detail_scale` | 1 | multiplies the draw distance of small and medium tie objects |
+  | `merc` | on | draw merc models |
+  | `sprites` | on | draw world sprites (particles); the HUD is always drawn |
+  | `max_sprites` | 1000 | world sprites per frame |
+
+- **Timing in the log:** every 300 frames or 5 seconds, `[ctr] render ms/frame` (render thread:
+  waiting for the GPU, building commands, submitting; GPU time from citro3d), `[ctr] build
+  ms/frame by renderer`, and `[ctr] game thread ms/frame` (logic, waiting for the render thread,
+  vsync, texture uploads, bone snapshot).
+- **Status in Azahar (New 3DS), old numbers from M4 phase 1:** the title screen shows village1 (tfrag + tie) and the PRESS
   START text.
   - About 1250 draws and 103k triangles per frame (the title camera sees nearly the whole level).
   - About 8-9 fps, against about 13 fps for the game logic alone with the null renderer.

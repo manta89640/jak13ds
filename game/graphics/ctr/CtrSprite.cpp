@@ -14,6 +14,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
+#include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
 
 namespace {
@@ -108,6 +109,7 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
 
   m_last_tex = -1;  // textures may have changed since the last frame
+  m_world_left = ctr_settings().sprites ? ctr_settings().max_sprites : 0;
   // direct GS data sent before the sprites
   m_direct->reset_state();
   while (dma.current_tag().qwc != 7 && dma.current_tag_offset() != rs.next_bucket) {
@@ -190,7 +192,7 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   flush();
   skip_rest();
 
-  if (rs.frame_idx % 300 == 0) {
+  if (rs.log_now) {
     lg::debug("[ctr] sprite: {} 2d, {} hud, {} 3d sprites, {} draws (last 300 frames)",
               m_stats.sprites_2d, m_stats.sprites_hud, m_stats.sprites_3d, m_stats.draws);
     m_stats = Stats();
@@ -268,6 +270,12 @@ void CtrSpriteRenderer::flush() {
 
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
   for (u32 i = 0; i < count; i++) {
+    if (mode != MODE_HUD) {
+      if (m_world_left <= 0) {
+        return;
+      }
+      m_world_left--;
+    }
     const VecData& v = m_vec[i];
     const AdGif& ad = m_adgif[i];
 
@@ -368,7 +376,8 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         m_stats.sprites_2d++;
       }
       const float angle = v.flag_rot_sy.z() * m_deg_to_rad;
-      const float s = std::sin(angle), c = std::cos(angle);
+      const float s = angle == 0.f ? 0.f : std::sin(angle);
+      const float c = angle == 0.f ? 1.f : std::cos(angle);
       const math::Vector4f r12 = (m_basis_x * c - m_basis_y * s) * scale_x;
       const math::Vector4f r13 = (m_basis_x * s + m_basis_y * c) * scale_y;
       for (int k = 0; k < 4; k++) {

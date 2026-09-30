@@ -37,6 +37,8 @@ struct CtrLevelData {
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<int> meshes;    // one per chunk
   u64 last_used_frame = 0;
+  float bbox_min[3] = {0, 0, 0}, bbox_max[3] = {0, 0, 0};  // tfrag + tie, game units
+  bool has_lowres = false;  // chunks with lod_tier 3
 };
 
 /*! DrawMode (tfrag3 draw settings) to ctr_gpu state. */
@@ -51,6 +53,8 @@ class CtrLevels {
   const CtrMercModelData* find_merc_model(const std::string& name, const CtrLevelData** lev);
   /*! Get a level, loading it if needed. nullptr if there is no .c3l for it. */
   CtrLevelData* get(const std::string& name, u64 frame);
+  /*! Load the levels get() was asked for (call outside of a GPU frame). */
+  void process_pending_loads(u64 frame);
   /*! Levels the game wants (set_levels): others are unloaded. */
   void set_wanted(const std::vector<std::string>& names);
 
@@ -58,7 +62,8 @@ class CtrLevels {
   bool load(const std::string& name, CtrLevelData* out);
   void unload(CtrLevelData& lev);
   std::map<std::string, std::unique_ptr<CtrLevelData>> m_levels;
-  std::map<std::string, bool> m_missing;  // no file: don't retry every frame
+  std::map<std::string, bool> m_missing;
+  std::vector<std::string> m_pending_loads;  // no file: don't retry every frame
   std::unique_ptr<CtrLevelData> m_common;
   // merc model name -> (level, model index); rebuilt when levels change
   std::map<std::string, std::pair<CtrLevelData*, int>> m_merc_index;
@@ -85,6 +90,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   void render(DmaFollower& dma, CtrRenderState& rs) override;
 
  private:
-  void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam);
+  void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
   CtrLevels* m_levels;
+  int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
+  int m_level_draws = 0;
 };
