@@ -13,6 +13,9 @@
 #   coverage  g++ -O0 --coverage, then prints the mips2c line coverage of every tested function
 #   bench     the arm build, then ARM instructions per call of the mips2c and the native version
 #             (test args: [--scale X] test names), counted with qemu-arm
+#
+# The native files are compiled with -O3 like in the 3DS build (platform/3ds/CMakeLists.txt);
+# NATIVE_EXTRA_FLAGS replaces that (NATIVE_EXTRA_FLAGS= for the other files' -O2).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -48,6 +51,12 @@ build() {
   local flags=("$@")
   local dir="$OUT/$cfg"
   mkdir -p "$dir"
+  # rebuild everything when the flags change
+  local want="$cxx ${flags[*]} | ${NATIVE_EXTRA_FLAGS--O3} | ${M2C_EXTRA_FLAGS:-} | ${LINK_EXTRA:-}"
+  if [[ "$(cat "$dir/.flags" 2>/dev/null)" != "$want" ]]; then
+    rm -f "$dir"/*.o
+    echo "$want" > "$dir/.flags"
+  fi
   local objs=()
   local pids=()
   for src in "${HARNESS_SRCS[@]}" "${NATIVE_SRCS[@]}"; do
@@ -56,7 +65,7 @@ build() {
     if [[ ! -f "$obj" || "$src" -nt "$obj" || "$HERE/harness.h" -nt "$obj" || "$HERE/fakes.h" -nt "$obj" ||
           "$ROOT/game/mips2c/mips2c_native.h" -nt "$obj" || "$M2C/native_functions.h" -nt "$obj" ]]; then
       local extra=()
-      [[ "$(basename "$src")" == native_* ]] && extra=(${NATIVE_EXTRA_FLAGS:-})
+      [[ "$(basename "$src")" == native_* ]] && extra=(${NATIVE_EXTRA_FLAGS--O3})
       "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" "${extra[@]}" -c "$src" -o "$obj" &
       pids+=($!)
     fi

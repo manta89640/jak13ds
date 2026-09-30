@@ -164,6 +164,12 @@ add_library(og3ds_kernel STATIC ${OG3DS_KERNEL_SOURCES})
 
 # ---------------- runtime: everything else (platform-owned) ----------------
 file(GLOB OG3DS_MIPS2C_JAK1 ${OG_ROOT}/game/mips2c/jak1_functions/*.cpp)
+# (AI-assisted) The native versions of the game logic's mips2c functions (collision, particles,
+# joints) are float code in small loops over vector lanes: -O3 unrolls them into registers, 1.2x
+# to 2.3x fewer ARM instructions per call than -O2 (test/mips2c_native/run.sh bench), same results
+# (the differential tests pass with NATIVE_EXTRA_FLAGS=-O3).
+file(GLOB OG3DS_MIPS2C_NATIVE ${OG_ROOT}/game/mips2c/jak1_functions/native_*.cpp)
+set_source_files_properties(${OG3DS_MIPS2C_NATIVE} PROPERTIES COMPILE_OPTIONS "-O3")
 set(OG3DS_RUNTIME_SOURCES
   graphics/gfx.cpp
   graphics/display.cpp
