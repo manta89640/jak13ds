@@ -29,7 +29,8 @@ case "${1:-}" in
     ;;
   proj)
     p="$2"
-    c=$(commit_time goalc goal_src/jak1 game/kernel)
+    # the generated C depends on the compiler, the GOAL sources and the shared C ABI header
+    c=$(commit_time goalc goal_src/jak1 game/kernel/common/goal_c_abi.h)
     m=$(newest_in "$p/out/jak1/csrc" c)
     [ "$m" -ge "$c" ] || fail "C modules in $p/out/jak1/csrc are older than the last compiler/GOAL change on $BRANCH (run build_cmodules.sh)"
     if [ -d "$p/out/jak1/c3l" ]; then
