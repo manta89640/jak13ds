@@ -34,8 +34,9 @@ Use separate CMake build directories (`build-rt`, `build-3ds`, ...) so builds do
 Unchanged v3 layout. Differences in C mode:
 
 - Each function body in a segment is an 8-byte stub (after the usual `function` type tag):
-  `u32 id` (placeholder `0xffffffff`, patched by the linker) and `u32 0x80000000 | func_index`
-  (debug only).
+  `u32 0xffffffff` (placeholder) and `u32 0x80000000 | func_index` (debug only). The linker
+  replaces the start of the stub with the host address of the C function (`sizeof(void*)`
+  bytes, so the whole stub on 64-bit hosts): a call is one load and an indirect branch.
 - Static data, type links, symbol links and pointer links in data are exactly as before.
 - There are no instruction relocations. Each segment that has functions gets one
   `LINK_C_MODULE` (8) entry in its link table:
@@ -55,10 +56,18 @@ n x { u32 stub_offset_in_segment, u32 func_index }
 2. `mod->seg_base[i] = code_infos[i].offset` for all 3 segments (0 when absent).
 3. Resolve symbols: `mod->sym_offsets[k] = intern(mod->sym_names[k]) - s7` (same meaning as the
    x86 symbol memory link: st-relative offset of the symbol).
-4. Give every module function a global id (entries in `goalc_fn_table`), and write the id of
-   `func_index` at each `stub_offset`.
+4. Give every module function a global id (entries in `goalc_fn_table`), and write the host
+   address of `func_index` at each `stub_offset`.
 
 Loading a module with the same hash twice re-links it (the latest seg_base/syms win).
+
+Known hazard (not fixed): the module keeps one `seg_base` per segment, so if two loaded levels
+contain the same object file (same code, so the same hash), linking the second copy points the
+first copy's functions at the second copy's static data (constants, static structures, strings).
+That is harmless while both are loaded and the data is read-only, but the first level then
+modifies the other copy's static data, and reads freed memory after the second level unloads.
+A fix would give each linked copy its own segment bases (for example, one module instance per
+link, with the bases passed through the stub).
 
 ## Runtime duties
 
@@ -67,8 +76,8 @@ Loading a module with the same hash twice re-links it (the latest seg_base/syms 
 - `call_goal` / `call_goal_on_stack` dispatch through `goalc_fn()` in C mode. Compiled code must
   run on a stack inside GOAL memory (stack variables are C locals whose GOAL address is
   `host address - goalc_mem`), so `call_goal_on_stack` switches the host stack pointer.
-- `make_function_from_c` & friends: in C mode write a stub whose id refers to a host function
-  callable as `goalc_fn8`. `arg3_is_pp` functions receive `goalc_pp` as argument 3. Stack-arg
+- `make_function_from_c` & friends: in C mode write a stub (`goalc_write_stub`: the host address
+  of the entry point of that id) for a host function callable as `goalc_fn8`. `arg3_is_pp` functions receive `goalc_pp` as argument 3. Stack-arg
   (varargs, e.g. format) functions receive a pointer to the 8 arguments, like the native trampoline.
 - mips2c functions: callable from GOAL through stubs; mips2c code calling GOAL goes through
   `goalc_fn()`.
@@ -224,7 +233,9 @@ The same adapters run on the Mac in C mode, so the C-mode test suite covers them
 ## Known later work
 
 - Performance: generated code uses `uint64_t` everywhere; narrowing to 32 bits where types allow
-  matters on ARM11.
+  matters on ARM11. GOAL functions take `u64` arguments, so on ARM32 only the first two are
+  passed in registers (a third argument is two stack stores and a reload): 3-argument calls are
+  the most common kind (39% of the call sites in Jak 1).
 
 ## Performance notes (ARM11)
 
@@ -239,3 +250,29 @@ The same adapters run on the Mac in C mode, so the C-mode test suite covers them
 - Also planned: 32-bit arithmetic where the GOAL type guarantees the upper half doesn't matter
   (pointers, structures, 32-bit integers), since every `u64` operation costs 2+ instructions on
   ARM11.
+
+### Code shape (ABI version 2)
+
+Measured on the whole of Jak 1 compiled for the 3DS (devkitARM, `-O2`, instructions in the
+module objects): 1.904M -> 1.489M instructions (-22%), loads -32%, 64-bit carry instructions
+(`adc`/`movcs`) 36k -> 11k.
+
+- Memory accesses are `gc_ld_T(base, offset)` / `gc_st_T(base, offset, value)`, like the native
+  backends' base + constant offset addressing. On 32-bit hosts the host address is
+  `gc_mb + (u32)base + offset` (host pointer arithmetic wraps at 4 GB like the GOAL address), so
+  the offset folds into the `ldr`/`vldr` and `gc_mb + base` is shared by the fields of an object.
+  Truncating `base + offset` first cost an extra instruction per access.
+- Calls read the host function from the stub (`gc_fn`, with the local memory base): a load and a
+  `blx`, instead of reloading `goalc_mem` and `goalc_fn_table` after every call plus the table
+  lookup.
+- `gc_stl`, `GC_SYM`, `#t`/`_empty_` and static data addresses are zero-extended 32-bit values,
+  so symbol addresses and `#f` compares are 32-bit operations.
+- The process register lives in the local `gc_pp` when a function uses it. Writes also update
+  `goalc_pp` right away (callees and the runtime read the global), and `gc_pp` is read again after
+  every call, since the callee can change it (a suspended process can be moved to another heap
+  location before it resumes). Unlike the global, the local isn't reloaded after every memory
+  store (stores through GOAL pointers may alias any global).
+- The function's own segment base is read once (`gc_sb`).
+- `GOALC_ABI_VERSION` in `goal_c_ops.h` is checked by a `_Static_assert` in every module and is
+  part of the module source (and hash): a module and a header from different versions don't
+  compile together, and cached `cmod/*.so` files of another version are not reused.

@@ -15,6 +15,9 @@
 #include "fmt/format.h"
 
 namespace {
+// must match GOALC_ABI_VERSION in goal_c_ops.h
+constexpr int kCBackendAbiVersion = 2;
+
 // tokens are resolved after memory layout: \x01 <kind> <index> \x02
 constexpr char TOKEN_START = '\x01';
 constexpr char TOKEN_END = '\x02';
@@ -116,6 +119,7 @@ CFunctionEmitter::CFunctionEmitter(CModuleEmitter* module, FunctionEnv* env, int
     const auto& r = c.desired_register;
     if (r == ri.get_process_reg()) {
       v.special = Special::PP;
+      m_uses_pp = true;
     } else if (r == ri.get_st_reg()) {
       v.special = Special::ST;
     } else if (r == ri.get_offset_reg() || r == ri.get_exec_base_reg()) {
@@ -147,7 +151,11 @@ std::string CFunctionEmitter::access(const RegVal* rv, bool for_write) {
   auto want = rv->ireg().reg_class;
   switch (v.special) {
     case Special::PP:
-      return "goalc_pp";
+      // the local copy, see emit(). A write is copied to the global by line().
+      if (for_write) {
+        m_pp_written = true;
+      }
+      return "gc_pp";
     case Special::ST:
       if (for_write) {
         error("the st register can't be written");
@@ -202,6 +210,16 @@ std::string CFunctionEmitter::write(const RegVal* rv) {
 
 void CFunctionEmitter::line(const std::string& text) {
   m_body.push_back("  " + text);
+  if (m_pp_written) {
+    m_body.push_back("  goalc_pp = gc_pp;");
+    m_pp_written = false;
+  }
+}
+
+void CFunctionEmitter::after_call() {
+  if (m_uses_pp) {
+    m_body.push_back("  gc_pp = goalc_pp;");
+  }
 }
 
 void CFunctionEmitter::move(const RegVal* dst, const RegVal* src) {
@@ -210,6 +228,7 @@ void CFunctionEmitter::move(const RegVal* dst, const RegVal* src) {
   auto s = read(src);
   auto d = write(dst);
   if (d == s) {
+    m_pp_written = false;  // nothing changes
     return;
   }
   std::string value;
@@ -237,15 +256,31 @@ int CFunctionEmitter::symbol(const std::string& name) {
   return m_module->symbol(name);
 }
 
+std::string CFunctionEmitter::own_seg_base() {
+  m_uses_own_seg = true;
+  return "gc_sb";
+}
+
 std::string CFunctionEmitter::seg_addr(int seg, const std::string& offset) {
   if (seg == m_env->segment) {
-    return fmt::format("(GC_SEG({}) + {})", seg, offset);  // our own segment is always loaded
+    // our own segment is always loaded
+    return fmt::format("((u64)(u32)({} + {}))", own_seg_base(), offset);
   }
   return fmt::format("GC_SEG_ADDR({}, {})", seg, offset);
 }
 
 std::string CFunctionEmitter::static_addr(const emitter::StaticRecord& rec, int offset) {
   return seg_addr(rec.seg, fmt::format("{} + {}", m_module->static_token(rec), offset));
+}
+
+std::pair<std::string, std::string> CFunctionEmitter::static_access(
+    const emitter::StaticRecord& rec,
+    int offset) {
+  auto off = fmt::format("{} + {}", m_module->static_token(rec), offset);
+  if (rec.seg == m_env->segment) {
+    return {own_seg_base(), off};
+  }
+  return {fmt::format("GC_SEG_ADDR({}, {})", rec.seg, off), "0"};
 }
 
 std::string CFunctionEmitter::function_addr(int f_idx) {
@@ -355,7 +390,21 @@ void CFunctionEmitter::emit() {
     text += "void";
   }
   text += ") {\n";
-  text += "  u8* const gc_mb = goalc_mem;\n  const u64 gc_stl = goalc_st;\n";
+  // GOAL addresses are 32 bits: telling the compiler that the upper half of the symbol table
+  // address is 0 makes symbol addresses and #f compares 32-bit operations on 32-bit hosts.
+  text += "  u8* const gc_mb = goalc_mem;\n  const u64 gc_stl = (u32)goalc_st;\n";
+  if (m_uses_own_seg) {
+    // the segment base only changes when the module is linked again
+    text += fmt::format("  const u64 gc_sb = GC_SEG({});\n", m_env->segment);
+  }
+  if (m_uses_pp) {
+    // The process register is a global (the runtime and other functions read it). The function
+    // works on a local copy, written back on every change and read again after every call (the
+    // callee may change it, for example when the process is suspended and moved to another heap
+    // location before it resumes). This lets the compiler keep it in a register across memory
+    // stores, which it can't do for a global.
+    text += "  u64 gc_pp = goalc_pp;\n";
+  }
 
   // locals
   for (int id = 0; id < (int)m_vars.size(); id++) {
@@ -458,6 +507,10 @@ std::string CModuleEmitter::finish(u64* hash_out) {
   out += fmt::format("// GOAL object {} compiled to C by goalc. Do not edit.\n",
                      escape_comment(m_obj_name));
   out += "#include \"goal_c_ops.h\"\n\n";
+  out += fmt::format(
+      "_Static_assert(GOALC_ABI_VERSION == {}, \"goal_c_ops.h does not match the goalc that "
+      "made this file\");\n\n",
+      kCBackendAbiVersion);
 
   // symbols
   int n_syms = std::max(1, (int)m_symbols.size());
