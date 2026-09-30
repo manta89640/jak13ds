@@ -24,6 +24,11 @@
   (defglobalconstant SMALL_MEMORY #t)
   (defglobalconstant SMALL_MEMORY #f))
 
+;; 3DS port: the small memory layout is only used by the 3DS build, so it also marks the 3DS target.
+(#if SMALL_MEMORY
+  (defglobalconstant TARGET_3DS #t)
+  (defglobalconstant TARGET_3DS #f))
+
 ;; 3DS port: the 3DS renderer doesn't draw the ocean, so skip generating its DMA (about 12 ms/frame
 ;; on the 3DS). The small memory layout is only used by the 3DS build.
 ;; (defglobalconstant doesn't evaluate its value, so use #if)

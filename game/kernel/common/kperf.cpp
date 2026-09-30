@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <unordered_map>
@@ -41,6 +42,24 @@ struct Open {
 std::vector<Open> g_open;
 }  // namespace
 
+bool g_sections_enabled = false;
+
+void init_sections() {
+#ifdef __3DS__
+  FILE* f = fopen("/3ds/jak1/perf_sections", "r");
+  if (f) {
+    fclose(f);
+    g_sections_enabled = true;
+  }
+#else
+  const char* env = getenv("OPENGOAL_PERF_SECTIONS");
+  g_sections_enabled = env && env[0] == '1';
+#endif
+  if (g_sections_enabled) {
+    lg::info("perf: per-section timing enabled");
+  }
+}
+
 void section_begin(const char* name) {
   g_open.push_back({name, now_us()});
 }
@@ -72,6 +91,7 @@ void add(Cat cat, u64 us) {
 void frame_done() {
   u64 now = now_us();
   if (!g_window_start) {
+    init_sections();
     g_window_start = now;
     return;
   }

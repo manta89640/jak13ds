@@ -1074,6 +1074,9 @@ void pc_prof(u32 name, ProfNode::Kind kind) {
   const char* str = Ptr<String>(name).c()->data();
   prof().event(str, kind);
   // per-section frame timing for the perf log (kperf)
+  if (!kperf::g_sections_enabled) {
+    return;
+  }
   if (kind == ProfNode::Kind::BEGIN) {
     kperf::section_begin(str);
   } else if (kind == ProfNode::Kind::END) {

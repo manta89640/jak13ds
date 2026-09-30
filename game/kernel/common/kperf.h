@@ -24,12 +24,25 @@ u64 now_us();
 
 //! Named sections from the game's with-profiler blocks (pc-prof). Inclusive time per name is
 //! reported once a second with the frame stats (top sections by ms per frame).
+//! Off by default (the timing costs a few ms per frame): enabled by the flag file
+//! sdmc:/3ds/jak1/perf_sections on the 3DS, OPENGOAL_PERF_SECTIONS=1 on PC.
+extern bool g_sections_enabled;
+void init_sections();
 void section_begin(const char* name);
 void section_end();
 
 struct SectionScope {
-  explicit SectionScope(const char* name) { section_begin(name); }
-  ~SectionScope() { section_end(); }
+  explicit SectionScope(const char* name) : on(g_sections_enabled) {
+    if (on) {
+      section_begin(name);
+    }
+  }
+  ~SectionScope() {
+    if (on) {
+      section_end();
+    }
+  }
+  bool on;
 };
 
 struct Scope {

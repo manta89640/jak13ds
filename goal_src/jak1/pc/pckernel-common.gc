@@ -184,9 +184,12 @@
    This will update things like the aspect-ratio, which will be used for graphics code later."
   (update-from-os obj)
   (update-to-os obj)
-  (update-discord-rpc obj)
-  ;; update auto-splitter info
-  (update-speedrun obj)
+  ;; 3DS port: no Discord or auto-splitter there. The Discord update searches the process tree by
+  ;; name several times per frame, which is expensive on the 3DS.
+  (#unless TARGET_3DS
+    (update-discord-rpc obj)
+    ;; update auto-splitter info
+    (update-speedrun obj))
   (when (not (-> obj use-vis?))
     (update-video-hacks obj))
   (cond
