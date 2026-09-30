@@ -26,6 +26,8 @@ class Synth {
   }
 
   s16Output Tick();
+  // n samples at once: the same output as n calls of Tick(), several times cheaper
+  void TickBlock(s16Output* out, int n);
   void AddVoice(std::shared_ptr<Voice> voice);
   void SetMasterVol(u32 volume);
 

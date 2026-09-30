@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: ISC
 #include "player.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 
@@ -244,11 +245,10 @@ void Player::state_callback([[maybe_unused]] cubeb_stream* stream,
 
 void Player::Tick(s16Output* stream, int samples) {
   std::scoped_lock lock(mTickLock);
+  // The handlers expect to tick at 240hz: 48000/240 = 200 samples. The synth runs in blocks
+  // between handler ticks (Synth::TickBlock), which gives the same output as ticking it per sample.
   static int htick = 200;
-  static int stick = 48000;
-  for (int i = 0; i < samples; i++) {
-    // The handlers expect to tick at 240hz
-    // 48000/240 = 200
+  while (samples > 0) {
     if (htick == 200) {
       mTick++;
 
@@ -266,14 +266,11 @@ void Player::Tick(s16Output* stream, int samples) {
       htick = 0;
     }
 
-    if (stick == 48000) {
-      // fmt::print("{} handlers active\n", m_handlers.size());
-      stick = 0;
-    }
-
-    stick++;
-    htick++;
-    *stream++ = mSynth.Tick();
+    const int n = std::min(samples, 200 - htick);
+    mSynth.TickBlock(stream, n);
+    stream += n;
+    samples -= n;
+    htick += n;
   }
 }
 

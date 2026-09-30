@@ -19,6 +19,10 @@ class Voice {
 
   Voice(AllocationType alloc = AllocationType::Managed) : mAlloc(alloc) {}
   s16Output Run();
+  // Run() for up to n samples, adding each sample to mixL/mixR with 16-bit saturation (like
+  // Synth's per-sample sum). Stops early when the voice has stopped (the synth skips or drops
+  // stopped voices); returns the number of samples run.
+  int RunBlock(s32* __restrict mixL, s32* __restrict mixR, int n);
 
   void KeyOn();
 

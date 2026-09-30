@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: ISC
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+
 #include "bitfield.h"
 
 #include "common/common_types.h"
@@ -41,9 +44,18 @@ union VolReg {
 
 class Envelope {
  public:
-  void Step();
+  inline void Step();
 
  protected:
+  // Step() adds 0x800000 >> CounterShift() to m_Counter (a power of two, 2 at the least) and
+  // changes the level when m_Counter reaches 0x800000
+  int CounterShift() const {
+    int t = m_Shift > 11 ? m_Shift - 11 : 0;
+    if (m_Exp && !m_Decrease && m_Level > 0x6000)
+      t += 2;
+    return t;
+  }
+
   u8 m_Shift{0};
   s8 m_Step{0};
   bool m_Inv{false};
@@ -64,11 +76,16 @@ class ADSR : Envelope {
     Stopped,
   };
 
-  void Run();
+  inline void Run();
+  // The number of samples in a row (1 to limit) that see the current Level(): the Run()s after
+  // them can't change the level or the phase, except the last one.
+  inline int ConstantRun(int limit) const;
+  // k Run()s, for k <= ConstantRun(): the first k - 1 only advance the counter.
+  inline void RunConstant(int k);
   void Attack();
   void Release();
   void Stop();
-  [[nodiscard]] s16 Level() const;
+  [[nodiscard]] s16 Level() const { return static_cast<u16>(m_Level); }
   void SetLevel(s16 value) { m_Level = value; }
   void UpdateSettings();
   ADSRReg m_Reg{0};
@@ -93,10 +110,11 @@ class ADSR : Envelope {
 
 class Volume : Envelope {
  public:
-  void Run();
+  inline void Run();
+  [[nodiscard]] bool Sweeping() { return m_Sweep.EnableSweep.get(); }
   void Set(u16 volume);
-  [[nodiscard]] u16 Get() const;
-  [[nodiscard]] s16 GetCurrent() const;
+  [[nodiscard]] u16 Get() const { return m_Sweep.bits; }
+  [[nodiscard]] s16 GetCurrent() const { return static_cast<s16>(m_Level); }
 
   void Reset() {
     m_Sweep.bits = 0;
@@ -128,4 +146,90 @@ struct VolumePair {
     right.Reset();
   }
 };
+// The per-sample envelope steps are inline so that the mixer's block loop (Voice::RunBlock) can
+// inline them (they run for every voice at 48 kHz).
+
+inline void Envelope::Step() {
+  // arbitrary number of bits, this is probably incorrect for the
+  // "reserved" and infinite duration values
+  // test hw or copy mednafen instead?
+  u32 cStep = 0x800000;
+
+  s32 shift = m_Shift - 11;
+  if (shift > 0)
+    cStep >>= shift;
+
+  s16 step = static_cast<s16>(m_Step << std::max(0, 11 - m_Shift));
+
+  if (m_Exp) {
+    if (!m_Decrease && m_Level > 0x6000)
+      cStep >>= 2;
+
+    if (m_Decrease)
+      step = static_cast<s16>((step * m_Level) >> 15);
+  }
+
+  m_Counter += cStep;
+
+  if (m_Counter >= 0x800000) {
+    m_Counter = 0;
+    m_Level = std::clamp<s32>(m_Level + step, 0, INT16_MAX);
+  }
+}
+
+inline void ADSR::Run() {
+  // Let's not waste time calculating silent voices
+  if (m_Phase == Phase::Stopped)
+    return;
+
+  Step();
+
+  if (m_Phase == Phase::Sustain)
+    return;
+
+  if ((!m_Decrease && m_Level >= m_Target) || (m_Decrease && m_Level <= m_Target)) {
+    switch (m_Phase) {
+      case Phase::Attack:
+        m_Phase = Phase::Decay;
+        break;
+      case Phase::Decay:
+        m_Phase = Phase::Sustain;
+        break;
+      case Phase::Release:
+        m_Phase = Phase::Stopped;
+        break;
+      default:
+        break;
+    }
+
+    UpdateSettings();
+  }
+}
+
+inline int ADSR::ConstantRun(int limit) const {
+  if (m_Phase == Phase::Stopped)
+    return limit;
+  // a phase change can come at the next Run() without a level change
+  if (m_Phase != Phase::Sustain &&
+      ((!m_Decrease && m_Level >= m_Target) || (m_Decrease && m_Level <= m_Target)))
+    return 1;
+  // Run() number k changes the level: the first with m_Counter + k * step >= 0x800000
+  const int t = CounterShift();
+  const u32 k = (0x800000u - m_Counter + (0x7FFFFFu >> t)) >> (23 - t);
+  return k < static_cast<u32>(limit) ? static_cast<int>(k) : limit;
+}
+
+inline void ADSR::RunConstant(int k) {
+  if (m_Phase == Phase::Stopped)
+    return;
+  m_Counter += static_cast<u32>(k - 1) << (23 - CounterShift());
+  Run();
+}
+
+inline void Volume::Run() {
+  if (!m_Sweep.EnableSweep.get())
+    return;
+
+  Step();
+}
 }  // namespace snd
