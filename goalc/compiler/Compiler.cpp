@@ -294,7 +294,7 @@ void Compiler::build_c_module(const std::string& obj_name, const std::string& so
   auto proj = file_util::get_jak_project_dir();
   const char* cc = std::getenv("OPENGOAL_C_BACKEND_CC");
   std::string cmd = fmt::format(
-      "{} -std=gnu11 -O1 -fPIC -shared -fno-strict-aliasing -w -I\"{}\" -I\"{}\" {} -o \"{}\" "
+      "{} -std=gnu11 -O1 -fPIC -shared -fno-strict-aliasing -fno-math-errno -w -I\"{}\" -I\"{}\" {} -o \"{}\" "
       "\"{}\"",
       cc ? cc : "cc", (proj / "goalc" / "cbackend").string(),
       (proj / "game" / "kernel" / "common").string(),

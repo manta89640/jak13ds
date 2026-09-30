@@ -93,8 +93,9 @@ CFunctionEmitter::CFunctionEmitter(CModuleEmitter* module, FunctionEnv* env, int
     auto id = rv->ireg().id;
     auto& v = m_vars.at(id);
     auto cls = rv->ireg().reg_class;
-    if (v.used && v.reg_class != cls) {
-      // prefer the widest class. Accesses in another class are converted.
+    if (v.used && v.reg_class != cls && !(is_128(v.reg_class) && is_128(cls))) {
+      // prefer the widest class. Accesses in another class use the union views.
+      v.mixed = true;
       if (is_128(cls)) {
         v.reg_class = cls;
       }
@@ -166,19 +167,28 @@ std::string CFunctionEmitter::access(const RegVal* rv, bool for_write) {
       break;
   }
 
-  auto name = var_name(rv->ireg().id);
-  if (v.reg_class == want || (is_128(v.reg_class) && is_128(want))) {
-    return name;
-  }
-  if (is_128(v.reg_class)) {
+  return var_expr(rv->ireg().id, want);
+}
+
+std::string CFunctionEmitter::var_expr(int id, RegClass want) {
+  const auto& v = m_vars.at(id);
+  auto name = var_name(id);
+  if (!v.mixed) {
+    if (v.reg_class == want || (is_128(v.reg_class) && is_128(want))) {
+      return name;
+    }
+  } else if (is_128(v.reg_class)) {
+    if (is_128(want)) {
+      return name + ".v";
+    }
     if (want == RegClass::GPR_64) {
-      return name + ".du64[0]";
+      return name + ".u.du64[0]";
     }
     if (want == RegClass::FLOAT) {
-      return name + ".f[0]";
+      return name + ".u.f[0]";
     }
   }
-  error(fmt::format("register {} is used as both {} and {}", rv->print(), c_type(v.reg_class),
+  error(fmt::format("register r{} is used as both {} and {}", id, c_type(v.reg_class),
                     c_type(want)));
 }
 
@@ -352,16 +362,27 @@ void CFunctionEmitter::emit() {
     if (!v.used || v.special != Special::NONE) {
       continue;
     }
-    const char* init = is_128(v.reg_class) ? "{{0}}" : "0";
-    text += fmt::format("  {}{} {} = {};\n", v.on_stack ? "volatile " : "", c_type(v.reg_class),
-                        var_name(id), init);
+    const char* type = c_type(v.reg_class);
+    const char* init = is_128(v.reg_class) ? "{0}" : "0";
+    if (v.mixed) {
+      if (!is_128(v.reg_class)) {
+        error(fmt::format("register r{} is used as both a gpr and a float", id));
+      }
+      type = "gc_m128";
+      init = "{{0}}";
+    }
+    text += fmt::format("  {}{} {} = {};\n", v.on_stack ? "volatile " : "", type, var_name(id),
+                        init);
   }
   if (m_env->stack_slots_used_for_stack_vars() > 0) {
     text += fmt::format("  u64 gc_stack[{}] __attribute__((aligned(16)));\n",
                         m_env->stack_slots_used_for_stack_vars());
   }
   for (auto& [idx, id] : params) {
-    text += fmt::format("  {} = a{};\n", var_name(id), idx);
+    text += fmt::format("  {} = a{};\n",
+                        var_expr(id, arg_types.at(idx) == "v128" ? RegClass::INT_128
+                                                                 : RegClass::GPR_64),
+                        idx);
   }
 
   for (auto& l : m_body) {
@@ -370,9 +391,10 @@ void CFunctionEmitter::emit() {
   }
 
   if (return_var >= 0) {
-    text += fmt::format("  return {};\n", var_name(return_var));
+    text += fmt::format("  return {};\n",
+                        var_expr(return_var, m_ret_is_128 ? RegClass::INT_128 : RegClass::GPR_64));
   } else {
-    text += m_ret_is_128 ? "  { v128 z = {{0}}; return z; }\n" : "  return 0;\n";
+    text += m_ret_is_128 ? "  { v128 z = {0}; return z; }\n" : "  return 0;\n";
   }
   text += "}\n\n";
   m_module->function_text[m_f_idx] = text;

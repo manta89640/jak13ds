@@ -65,10 +65,13 @@ class CFunctionEmitter {
     RegClass reg_class = RegClass::GPR_64;
     Special special = Special::NONE;
     bool on_stack = false;
+    //! used in more than one register class: declared as a gc_m128 union
+    bool mixed = false;
   };
   const VarInfo& var(const RegVal* rv) const;
   std::string var_name(int id) const;
   std::string access(const RegVal* rv, bool for_write);
+  std::string var_expr(int id, RegClass want);
   std::string seg_addr(int seg, const std::string& offset);
 
   CModuleEmitter* m_module = nullptr;
