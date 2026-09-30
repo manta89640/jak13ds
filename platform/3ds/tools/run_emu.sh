@@ -3,7 +3,10 @@
 # Run gk.3dsx in Azahar for a while, then kill it and collect the logs.
 #
 #   platform/3ds/tools/run_emu.sh [--seconds N] [--out DIR] [--azahar Azahar.app] [--sd DIR]
-#                                 [--stage "<stage_sd.sh arguments>"]
+#                                 [--stage "<stage_sd.sh arguments>"] [--cia jak1.cia]
+#
+#   --cia   install the CIA in the emulator and run the installed title instead of gk.3dsx
+#           (tests the CIA's memory mode; the game files still come from the staged SD card)
 #                                 [--gdb [--elf gk.elf] [--gdb-script FILE]]
 #
 #   --gdb   enable Azahar's GDB stub and attach arm-none-eabi-gdb; after N seconds the game is
@@ -31,6 +34,7 @@ OUT="$ROOT/build-3ds/emu-run"
 APP="${AZAHAR_APP:-$HOME/devkitpro-3ds/emu/azahar-macos-arm64-2126.1.2/Azahar.app}"
 SD=""
 STAGE_ARGS=""
+CIA=""
 DEVKITARM_BIN="${DEVKITARM:-/opt/devkitpro/devkitARM}/bin"
 GDB=0
 ELF="$ROOT/build-3ds/gk.elf"
@@ -46,6 +50,7 @@ while [ $# -gt 0 ]; do
     --elf) ELF="$2"; shift 2 ;;
     --gdb-script) GDB=1; GDB_SCRIPT="$2"; shift 2 ;;
     --stage) STAGE_ARGS="$2"; shift 2 ;;
+    --cia) CIA="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
@@ -54,12 +59,15 @@ done
 # and stage the SD card inside it (--stage "<stage_sd.sh arguments>") so that nobody replaces the
 # files in the middle of a run. A stale lock (its owner is gone) is taken over.
 EMU_LOCK="${TMPDIR:-/tmp}/opengoal-azahar.lock"
+# (edit this script with a copy + mv: bash reads a running script as it goes)
+waited=0
 while ! mkdir "$EMU_LOCK" 2>/dev/null; do
   owner="$(cat "$EMU_LOCK/pid" 2>/dev/null || true)"
-  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+  if { [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; } || { [ -z "$owner" ] && [ "$waited" -ge 30 ]; }; then
     rm -rf "$EMU_LOCK"
     continue
   fi
+  waited=$((waited + 10))
   echo "waiting for the emulator (used by pid ${owner:-?})"
   sleep 10
 done
@@ -81,6 +89,22 @@ if [ -z "$SD" ]; then
   SD="${SD%/}"
 fi
 GK="$SD/3ds/jak1/gk.3dsx"
+if [ -n "$CIA" ]; then
+  pkill -9 -f 'Azahar.app/Contents/MacOS/azahar' 2>/dev/null || true
+  echo "installing $CIA"
+  # title id 00040000 000f7a11 (platform/3ds/cia/gk.rsf); Azahar keeps installed titles on its SD
+  rm -rf "$SD"/Nintendo\ 3DS/*/*/title/00040000/000f7a11
+  open -n -a "$APP" --args -i "$(cd "$(dirname "$CIA")" && pwd)/$(basename "$CIA")"
+  for _ in $(seq 60); do
+    sleep 1
+    GK="$(ls "$SD"/Nintendo\ 3DS/*/*/title/00040000/000f7a11/content/*.app 2>/dev/null | head -1)"
+    [ -z "$GK" ] || break
+  done
+  sleep 3
+  pkill -9 -f 'Azahar.app/Contents/MacOS/azahar' 2>/dev/null || true
+  [ -n "$GK" ] || { echo "the CIA was not installed" >&2; exit 1; }
+  echo "running the installed title $GK"
+fi
 LOGDIR="$SD/3ds/jak1/data/log"
 [ -f "$GK" ] || { echo "no $GK, run stage_sd.sh first" >&2; exit 1; }
 
