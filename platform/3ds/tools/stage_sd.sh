@@ -55,6 +55,8 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PROJ" ] || { echo "--proj is required" >&2; exit 1; }
+"$(dirname "$0")/check_fresh.sh" proj "$PROJ" || exit 1
+"$(dirname "$0")/check_fresh.sh" gk "$GK" || exit 1
 
 # don't replace the files of an emulator run in progress (run_emu.sh holds this lock; it calls us
 # itself with --stage)
