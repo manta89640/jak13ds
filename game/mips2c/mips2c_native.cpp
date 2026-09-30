@@ -35,6 +35,10 @@
 #include "game/common/ee_mem_write.h"
 #include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kperf.h"
+#include "game/kernel/jak1/kscheme.h"
+#include "game/runtime.h"
+
+extern std::mt19937 extra_random_generator;  // pc-rand (kmachine.cpp)
 
 namespace Mips2C {
 
@@ -133,6 +137,40 @@ u64 g_reports = 0;
 // the stack below the caller is scratch space for both versions
 constexpr u32 kStackScratch = 256 * 1024;
 
+/*!
+ * Bottom of the stack scratch space below sp (the stack of the verified call: not compared).
+ * Processes can run with their stack on the fake scratchpad (above its first 16 kB, which is data
+ * that collide / particle code writes), so the window stops above that data.
+ */
+u32 scratch_low(u32 sp) {
+  u32 lo = sp > kStackScratch ? sp - kStackScratch : 0;
+  if (g_game_version == GameVersion::Jak1) {
+    static const u32 spad_sym = ::jak1::intern_from_c("*fake-scratchpad-data*").offset;
+    const u32 spad = gload<u32>(spad_sym);
+    const u32 spad_data_end = spad + 16 * 1024;
+    if (spad < sp && spad_data_end > lo) {
+      lo = std::min(spad_data_end, sp);
+    }
+  }
+  return lo;
+}
+
+//! " (symbol NAME)" if addr is the value of a symbol (Jak 1)
+std::string symbol_at(u32 addr) {
+  if (g_game_version != GameVersion::Jak1) {
+    return "";
+  }
+  const u32 sym = addr & ~3u;
+  if (sym + 0x10000 < goalc_st || sym > goalc_st + 0x10000 || ((sym - goalc_st) & 7)) {
+    return "";
+  }
+  auto inf = ::jak1::info(Ptr<::jak1::Symbol>(sym));
+  if (!inf->str.offset) {
+    return "";
+  }
+  return fmt::format(" (symbol {})", inf->str->data());
+}
+
 void print_summary() {
   std::string s;
   for (auto* e : g_entries) {
@@ -168,13 +206,23 @@ void report(NativeEntry* e, const u64* args, const std::string& what) {
   }
 }
 
+// OPENGOAL_MIPS2C_VERIFY_SELF=1: the second run is the mips2c version again (tests the checker)
+bool g_verify_self = false;
+
+u64 second_run(NativeEntry* e, u64* args) {
+  if (g_verify_self) {
+    return mips2c_goalc_adapter((void*)e->exec, e->stack_size, args);
+  }
+  return run_native(e->impl, args);
+}
+
 u64 verify_call(NativeEntry* e, u64* args_in) {
   u64 args[8];
   memcpy(args, args_in, sizeof(args));
   uintptr_t host_sp;
   GOALC_READ_HOST_SP(host_sp);
   const u32 sp = (u32)(host_sp - (uintptr_t)g_ee_main_mem);
-  const u32 scratch_lo = sp > kStackScratch ? sp - kStackScratch : 0;
+  const u32 scratch_lo = scratch_low(sp);
   auto in_scratch = [&](u32 addr, u32 size) { return addr + size > scratch_lo && addr < sp; };
 
   e->calls++;
@@ -203,7 +251,7 @@ u64 verify_call(NativeEntry* e, u64* args_in) {
   g_native_log.clear();
   g_native_log_on = true;
   g_state = VerifyState::IN_NATIVE;
-  const u64 v0_native = run_native(e->impl, args);
+  const u64 v0_native = second_run(e, args);
   g_state = VerifyState::NONE;
   g_native_log_on = false;
 
@@ -296,7 +344,7 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
   GOALC_READ_HOST_SP(host_sp);
   const u32 sp = (u32)(host_sp - (uintptr_t)g_ee_main_mem);
   const u32 lo = EE_MAIN_MEM_LOW_PROTECT;
-  const u32 scratch_lo = sp - kStackScratch;
+  const u32 scratch_lo = scratch_low(sp);
   const u32 scratch_hi = sp + 4096;  // the frames of this function and the adapter
   const u32 end = EE_MAIN_MEM_SIZE;
   e->calls++;
@@ -313,6 +361,13 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
     g_iop_bytes.clear();
     memcpy(g_snap_before + lo, g_ee_main_mem + lo, end - lo);
   }
+  // random generators in host memory: the VU0 one of mips2c code (sp-launch-particles-var...)
+  // and pc-rand (rand-vu)
+  // (kept off the stack: this may run on a small stack on the fake scratchpad)
+  static Rng* rng_before = new Rng();
+  static std::mt19937* pc_rand_before = new std::mt19937();
+  *rng_before = gRng;
+  *pc_rand_before = extra_random_generator;
   g_state = VerifyState::IN_MIPS2C;
   const u64 v0_mips2c = mips2c_goalc_adapter((void*)e->exec, e->stack_size, args);
   g_state = VerifyState::NONE;
@@ -325,8 +380,10 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
       memcpy(g_ee_main_mem + w.addr, g_iop_bytes.data() + w.old_offset, w.size);
     }
   }
+  gRng = *rng_before;
+  extra_random_generator = *pc_rand_before;
   g_state = VerifyState::IN_NATIVE;
-  const u64 v0_native = run_native(e->impl, args);
+  const u64 v0_native = second_run(e, args);
   g_state = VerifyState::NONE;
 
   std::lock_guard<std::mutex> lock(g_iop_mutex);
@@ -346,20 +403,24 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
     if (!memcmp(g_ee_main_mem + a, g_snap_after + a, b - a)) {
       continue;
     }
-    u32 first = a;
-    while (g_ee_main_mem[first] == g_snap_after[first]) {
-      first++;
-    }
     u32 n = 0;
-    for (u32 i = first; i < b; i++) {
-      n += g_ee_main_mem[i] != g_snap_after[i];
+    std::string where;
+    int listed = 0;
+    for (u32 i = a; i < b; i++) {
+      if (g_ee_main_mem[i] == g_snap_after[i]) {
+        continue;
+      }
+      n++;
+      if (listed < 6) {
+        const u32 q = i & ~15u;
+        where += fmt::format(" [0x{:x}{}: mips2c{} native{}]", i, symbol_at(i),
+                             describe_bytes(g_snap_after + q, 16),
+                             describe_bytes(g_ee_main_mem + q, 16));
+        listed++;
+        i = q + 15;
+      }
     }
-    const u32 q = first & ~15u;
-    report(e, args,
-           fmt::format("{} bytes of memory differ, the first at 0x{:x}; qword there: mips2c{} "
-                       "native{}",
-                       n, first, describe_bytes(g_snap_after + q, 16),
-                       describe_bytes(g_ee_main_mem + q, 16)));
+    report(e, args, fmt::format("{} bytes of memory differ:{}", n, where));
     break;
   }
   return v0_native;
@@ -372,7 +433,7 @@ u64 verify_adapter(void* fn, u64 idx, u64* args) {
     case VerifyState::IN_MIPS2C:
       return mips2c_goalc_adapter((void*)e->exec, e->stack_size, args);
     case VerifyState::IN_NATIVE:
-      return run_native(e->impl, args);
+      return second_run(e, args);
     default:
       if (e->impl->flags & NATIVE_CALLS_GOAL) {
         return verify_call_full(e, args);
@@ -450,6 +511,9 @@ u32 native_goalc_fn_id(const std::string& name,
       announced = true;
       g_mips2c_clear_context = true;
       g_iop_use_mutex = true;
+      if (const char* v = getenv("OPENGOAL_MIPS2C_VERIFY_SELF")) {
+        g_verify_self = v[0] == '1';
+      }
       if (const char* f = getenv("OPENGOAL_MIPS2C_VERIFY_FULL_EVERY")) {
         g_full_every = strtoull(f, nullptr, 10);
       }
