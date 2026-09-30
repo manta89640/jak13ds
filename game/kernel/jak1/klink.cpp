@@ -1,5 +1,7 @@
 #include "klink.h"
 
+#include "game/kernel/common/kperf.h"
+
 #include "common/log/log.h"
 #include "common/symbols.h"
 
@@ -655,6 +657,7 @@ u64 link_and_exec_wrapper(u64* args) {
  * 39 -> no 8 (s7)
  */
 uint64_t link_begin(u64* args) {
+  kperf::SectionScope perf_section("link-begin");
   // object data, name size, heap flags
   saved_link_control.jak1_jak2_begin(Ptr<u8>(args[0]), Ptr<char>(args[1]).c(), args[2],
                                      Ptr<kheapinfo>(args[3]), args[4]);
@@ -672,6 +675,7 @@ uint64_t link_begin(u64* args) {
  * GOAL exported function for doing a small amount of linking work on the saved_link_control
  */
 uint64_t link_resume() {
+  kperf::SectionScope perf_section("link-resume");
   auto work_result = saved_link_control.jak1_work();
   if (work_result) {
     // called from goal
@@ -687,6 +691,7 @@ uint64_t link_resume() {
  * if GOAL isn't loaded, or if the alignment isn't good enough.
  */
 void ultimate_memcpy(void* dst, void* src, uint32_t size) {
+  kperf::SectionScope perf_section("ultimate-memcpy");
   // only possible if alignment is good.
   if (!(u64(dst) & 0xf) && !(u64(src) & 0xf) && !(u64(size) & 0xf) && size > 0xfff) {
     if (!gfunc_774.offset) {

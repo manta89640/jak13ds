@@ -1,5 +1,7 @@
 #include "kdgo.h"
 
+#include "game/kernel/common/kperf.h"
+
 #include <cstring>
 
 #include "common/log/log.h"
@@ -81,6 +83,7 @@ u32 RpcBusy(s32 channel) {
  */
 void RpcSync(s32 channel) {
   if (RpcBusy(channel)) {
+    kperf::SectionScope perf_section("rpc-sync-wait");
     if (sShowStallMsg) {
       Msg(6, "STALL: [kernel] waiting for IOP on RPC port #%d\n", channel);
     }

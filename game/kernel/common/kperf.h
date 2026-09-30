@@ -27,6 +27,11 @@ u64 now_us();
 void section_begin(const char* name);
 void section_end();
 
+struct SectionScope {
+  explicit SectionScope(const char* name) { section_begin(name); }
+  ~SectionScope() { section_end(); }
+};
+
 struct Scope {
   explicit Scope(Cat c) : cat(c), start(now_us()) {}
   ~Scope() { add(cat, now_us() - start); }
