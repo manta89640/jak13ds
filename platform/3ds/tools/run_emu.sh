@@ -75,7 +75,10 @@ echo $$ > "$EMU_LOCK/pid"
 trap 'rm -rf "$EMU_LOCK"' EXIT
 if [ -n "$STAGE_ARGS" ]; then
   # shellcheck disable=SC2086
-  "$(dirname "$0")/stage_sd.sh" $STAGE_ARGS
+  if ! "$(dirname "$0")/stage_sd.sh" $STAGE_ARGS; then
+    echo "staging failed: not running (the SD card would still hold an older build)" >&2
+    exit 1
+  fi
 fi
 
 AZ_DIR="$HOME/Library/Application Support/Azahar"
