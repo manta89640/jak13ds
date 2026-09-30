@@ -1,6 +1,7 @@
 //--------------------------MIPS2C---------------------
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 // clang-format off
 
@@ -2525,7 +2526,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("cspace<-parented-transformq-joint!", execute, 128);
+  gLinkedFunctionTable.reg("cspace<-parented-transformq-joint!", execute, 128,
+                           &native::cspace_parented_transformq_joint);
 }
 
 } // namespace cspace<_parented_transformq_joint

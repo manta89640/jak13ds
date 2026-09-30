@@ -13,9 +13,15 @@
 
 namespace Mips2C {
 
+struct NativeImpl;
+
 class LinkedFunctionTable {
  public:
-  void reg(const std::string& name, u64 (*exec)(void*), u32 goal_stack_size);
+  //! native: optional native C++ version of the function, used instead of exec (mips2c_native.h)
+  void reg(const std::string& name,
+           u64 (*exec)(void*),
+           u32 goal_stack_size,
+           const NativeImpl* native = nullptr);
   u32 get(const std::string& name);
 
  private:

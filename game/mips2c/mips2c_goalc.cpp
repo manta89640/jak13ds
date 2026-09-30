@@ -17,6 +17,11 @@ namespace {
 std::unordered_map<void*, std::string> g_names;
 }  // namespace
 
+// set in verify mode (mips2c_native.cpp): start every mips2c function with all registers zero, so
+// that functions reading registers they never set (for example collide-do-primitives storing vf31
+// when nothing was hit) give the same result in both runs.
+bool g_mips2c_clear_context = false;
+
 void mips2c_goalc_set_name(void* fn, const std::string& name) {
   g_names[fn] = "m2c:" + name;
 }
@@ -39,6 +44,9 @@ u64 mips2c_goalc_adapter(void* fn, u64 stack_size, u64* args) {
   u8* buf = (u8*)__builtin_alloca(sizeof(ExecutionContext) + stack_bytes + 16);
   auto ctx_addr = ((uintptr_t)buf + stack_bytes + 15) & ~uintptr_t(15);
   auto* ctx = (ExecutionContext*)ctx_addr;
+  if (g_mips2c_clear_context) {
+    memset((void*)ctx, 0, sizeof(ExecutionContext));
+  }
   const int arg_regs[8] = {a0, a1, a2, a3, t0, t1, t2, t3};
   for (int i = 0; i < 8; i++) {
     ctx->gprs[arg_regs[i]].du64[0] = args[i];

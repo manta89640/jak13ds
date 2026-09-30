@@ -11,6 +11,7 @@
 #include "common/util/Assert.h"
 #include "common/util/FileUtil.h"
 
+#include "game/common/ee_mem_write.h"
 #include "game/sce/iop.h"
 
 using namespace std::chrono;
@@ -534,7 +535,7 @@ void IOP_Kernel::rpc_loop(iop::sceSifQueueData* qd) {
         ASSERT(func);
         auto data = func(cmd.fno, cmd.buff, cmd.size);
         if (cmd.copy_back_buff && cmd.copy_back_size) {
-          memcpy(cmd.copy_back_buff, data, cmd.copy_back_size);
+          iop_write_ee_mem(cmd.copy_back_buff, data, cmd.copy_back_size);
         }
 
         sif_mtx.lock();

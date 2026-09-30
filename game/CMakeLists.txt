@@ -188,6 +188,10 @@ set(RUNTIME_SOURCE
         mips2c/jak1_functions/generic_merc.cpp
         mips2c/jak1_functions/generic_tie.cpp
         mips2c/jak1_functions/joint.cpp
+        mips2c/jak1_functions/native_collide_cache.cpp
+        mips2c/jak1_functions/native_collide_func.cpp
+        mips2c/jak1_functions/native_joint.cpp
+        mips2c/jak1_functions/native_sparticle.cpp
         mips2c/jak1_functions/merc_blend_shape.cpp
         mips2c/jak1_functions/ocean_vu0.cpp
         mips2c/jak1_functions/ocean.cpp
@@ -281,6 +285,7 @@ set(RUNTIME_SOURCE
         mips2c/jakx_functions/ocean.cpp
         mips2c/jakx_functions/generic_merc.cpp
         mips2c/mips2c_goalc.cpp
+        mips2c/mips2c_native.cpp
         mips2c/mips2c_table.cpp
         overlord/common/dma.cpp
         overlord/common/fake_iso.cpp

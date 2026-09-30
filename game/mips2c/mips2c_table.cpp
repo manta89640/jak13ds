@@ -922,8 +922,19 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
 // C backend: calls a mips2c function from GOAL (mips2c_goalc.cpp)
 u64 mips2c_goalc_adapter(void* fn, u64 stack_size, u64* args);
 void mips2c_goalc_set_name(void* fn, const std::string& name);
+// native versions (mips2c_native.cpp)
+u32 native_goalc_fn_id(const std::string& name,
+                       u64 (*exec)(void*),
+                       u32 stack_size,
+                       const NativeImpl* impl);
+//! execute function for the native GOAL backends: the native version, or null (use mips2c)
+u64 (*native_exec_for_backend(const NativeImpl* impl))(void*);
+void native_set_stub_addr(const std::string& name, u32 addr);
 
-void LinkedFunctionTable::reg(const std::string& name, u64 (*exec)(void*), u32 stack_size) {
+void LinkedFunctionTable::reg(const std::string& name,
+                              u64 (*exec)(void*),
+                              u32 stack_size,
+                              const NativeImpl* native) {
   const auto& it = m_executes.insert({name, {exec, Ptr<u8>()}});
   if (!it.second) {
     lg::error("MIPS2C Function {} is registered multiple times, ignoring later registrations.",
@@ -960,14 +971,27 @@ void LinkedFunctionTable::reg(const std::string& name, u64 (*exec)(void*), u32 s
   }
 
   it.first->second.goal_trampoline = jump_to_asm;
+  native_set_stub_addr(name, jump_to_asm.offset);
 
   if (goalc_enabled()) {
     mips2c_goalc_set_name((void*)exec, name);
+    if (native) {
+      if (u32 id = native_goalc_fn_id(name, exec, stack_size, native)) {
+        goalc_write_stub(jump_to_asm.offset, id, 0xffffffff);
+        return;
+      }
+    }
     // GOAL compiled to C: a function stub whose id calls the adapter above.
     goalc_write_stub(jump_to_asm.offset,
                      goalc_fn_id_for_adapted(mips2c_goalc_adapter, (void*)exec, stack_size),
                      0xffffffff);
     return;
+  }
+
+  if (native) {
+    if (auto native_exec = native_exec_for_backend(native)) {
+      exec = native_exec;
+    }
   }
 
   u8* ptr = jump_to_asm.c();

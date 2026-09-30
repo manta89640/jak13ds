@@ -2,6 +2,7 @@
 //--------------------------MIPS2C---------------------
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak1/kscheme.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 namespace Mips2C::jak1 {
 namespace sp_process_block_3d {
@@ -683,7 +684,7 @@ void link() {
   cache.sp_free_particle = intern_from_c("sp-free-particle").c();
   cache.sp_orbiter = intern_from_c("sp-orbiter").c();
   cache.sp_relaunch_particle_2d = intern_from_c("sp-relaunch-particle-2d").c();
-  gLinkedFunctionTable.reg("sp-process-block-2d", execute, 256);
+  gLinkedFunctionTable.reg("sp-process-block-2d", execute, 256, &native::sp_process_block_2d);
 }
 
 } // namespace sp_process_block_2d
