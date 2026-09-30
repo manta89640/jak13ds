@@ -236,12 +236,18 @@ u32 InitISOFS(const char* fs_mode, const char* loading_screen) {
     printf("IOP: ======================================================================\n");
   }
 
+#ifndef __3DS__
+  // (AI-assisted) Not on the 3DS: the PS2 showed this image from EE memory, nothing reads it in
+  // the port (InitVideo loads the splash itself), and it costs 0.9 MB of SD card reads.
   constexpr int LOADING_SCREEN_SIZE = 0x800000;
   constexpr u32 LOADING_SCREEN_DEST_ADDR = 0x1000000;
   FileRecord* loading_screen_file = FindISOFile(loading_screen);
   if (loading_screen_file) {
     LoadISOFileToEE(loading_screen_file, LOADING_SCREEN_DEST_ADDR, LOADING_SCREEN_SIZE);
   }
+#else
+  (void)loading_screen;
+#endif
 
   // should be set by ISOThread to 0 before the WaitMbx(sync_mbx);
   return iso_init_flag;
