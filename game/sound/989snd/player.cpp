@@ -418,8 +418,11 @@ void Player::SetMasterVolume(u32 group, s32 volume) {
 }
 
 BankHandle Player::LoadBank(std::span<u8> bank) {
+  // (AI-assisted) Parse outside the lock (it copies all the samples of the bank), install under
+  // it: the mixer holds the lock while it mixes, so a long parse under it held up the audio.
+  auto parsed = Loader::ParseBank(bank);
   std::scoped_lock lock(mTickLock);
-  return mLoader.BankLoad(bank);
+  return mLoader.AddBank(std::move(parsed));
 }
 
 void Player::UnloadBank(BankHandle bank_handle) {

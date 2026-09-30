@@ -108,6 +108,11 @@ void ctr_hw_probe(char* out, int size);
 
 /* Set the priority of the calling thread. */
 void ctr_thread_set_priority(int prio);
+/* libctru's linear heap (linearAlloc/linearFree, C3D_TexInit, ndsp) has no lock of its own: code
+ * that allocates or frees linear or VRAM memory while other threads can do the same (the level
+ * loader thread, the render thread, sound init on the IOP thread) holds this (recursive). */
+void ctr_linear_lock(void);
+void ctr_linear_unlock(void);
 /* The calling thread's id (kernel thread id). */
 unsigned int ctr_thread_current_id(void);
 /* Sleep for at least `us` microseconds (0 = yield). */

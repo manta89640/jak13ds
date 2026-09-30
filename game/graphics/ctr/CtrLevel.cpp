@@ -22,17 +22,148 @@
 
 #include "game/graphics/ctr/ctr_gpu.h"
 
+#ifdef __3DS__
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
 
+namespace {
+// below the render thread (0x2F) and the sound mixer (0x2E), which share core 2 with the loader
+constexpr int kLoaderPrio = 0x3C;
+// a prefetched level nothing asked for is dropped after this long
+constexpr double kPrefetchKeepMs = 60000.0;
+}  // namespace
+
+CtrLevels::CtrLevels() {
+#ifdef __3DS__
+  // core 2 on New 3DS (ctr_thread_create falls back to core 0 without it)
+  if (ctr_thread_create(&CtrLevels::loader_entry, this, 64 * 1024, kLoaderPrio, 2, &m_thread) !=
+      0) {
+    m_thread = nullptr;
+    lg::warn("[ctr] no level loader thread: levels load on the render thread");
+  }
+#endif
+}
+
 CtrLevels::~CtrLevels() {
+  if (m_thread) {
+    {
+      std::lock_guard<std::mutex> lk(m_lock);
+      m_quit = true;
+      m_cancel = true;
+    }
+    m_cv.notify_all();
+#ifdef __3DS__
+    ctr_thread_join(m_thread);
+#endif
+    m_thread = nullptr;
+  }
+  for (auto& d : m_done) {
+    if (d.lev) {
+      unload(*d.lev);
+    }
+  }
+  for (auto& [name, p] : m_prefetched) {
+    unload(*p.lev);
+  }
   for (auto& [name, lev] : m_levels) {
     unload(*lev);
   }
   if (m_common) {
     unload(*m_common);
   }
+}
+
+void* CtrLevels::loader_entry(void* self) {
+#ifdef __3DS__
+  ctr_thread_install_crash_handler();
+#endif
+  static_cast<CtrLevels*>(self)->loader_main();
+  return nullptr;
+}
+
+void CtrLevels::loader_main() {
+  std::unique_lock<std::mutex> lk(m_lock);
+  while (!m_quit) {
+    // the first job that can run: a prefetch waits while two levels are loaded (the game has two
+    // level slots, so the level it replaces is still in memory)
+    auto it = m_queue.begin();
+    while (it != m_queue.end() && it->prefetch && m_levels_loaded >= 2) {
+      ++it;
+    }
+    if (it == m_queue.end()) {
+      if (m_queue.empty()) {
+        m_cv.wait(lk);
+      } else {
+        m_cv.wait_for(lk, std::chrono::milliseconds(100));
+      }
+      continue;
+    }
+    Job job = *it;
+    m_queue.erase(it);
+    m_loading = job.name;
+    m_loading_prefetch = job.prefetch;
+    m_cancel = false;
+    lk.unlock();
+    run_job(job);
+    lk.lock();
+    m_loading.clear();
+  }
+}
+
+void CtrLevels::run_job(const Job& job) {
+  Done d;
+  d.job = job;
+  d.lev = std::make_unique<CtrLevelData>();
+  d.result = load(job.name, d.lev.get());
+  if (d.result != LoadResult::LOADED) {
+    d.lev.reset();
+  }
+  std::lock_guard<std::mutex> lk(m_lock);
+  m_done.push_back(std::move(d));
+}
+
+void CtrLevels::request(const Job& job) {
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    if (m_requested.count(job.name) || (job.prefetch && m_resident.count(job.name))) {
+      return;
+    }
+    if (job.prefetch) {
+      lg::info("[ctr] prefetching {}", job.name);
+    }
+    m_requested.insert(job.name);
+    m_queue.push_back(job);
+  }
+  m_cv.notify_all();
+}
+
+void CtrLevels::prefetch(const std::string& name) {
+  request({name, false, true});
+}
+
+void CtrLevels::update_level_count() {
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    m_levels_loaded = (int)(m_levels.size() + m_prefetched.size());
+    m_resident.clear();
+    for (auto& [name, lev] : m_levels) {
+      m_resident.insert(name);
+    }
+    for (auto& [name, p] : m_prefetched) {
+      m_resident.insert(name);
+    }
+  }
+  m_cv.notify_all();
+}
+
+void CtrLevels::publish(const std::string& name, std::unique_ptr<CtrLevelData> lev, u64 frame) {
+  lev->last_used_frame = frame;
+  m_levels[name] = std::move(lev);
+  rebuild_merc_index();
 }
 
 namespace {
@@ -91,10 +222,10 @@ class C3lReader {
 };
 }  // namespace
 
-bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
+CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out) {
   auto path = file_util::get_jak_project_dir() / "out" / "jak1" / "c3l" / (name + ".c3l");
   if (!fs::exists(path)) {
-    return false;
+    return LoadResult::MISSING;
   }
   Timer timer;
   bool ok = false;
@@ -106,7 +237,11 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
   }
   if (!ok) {
     unload(*out);
-    return false;
+    if (cancelled()) {
+      lg::info("[ctr] load of {} cancelled (no longer wanted)", name);
+      return LoadResult::CANCELLED;
+    }
+    return LoadResult::FAILED;
   }
   int failed = 0;
   for (int t : out->textures) {
@@ -125,7 +260,7 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
     lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
               failed);
   }
-  return true;
+  return LoadResult::LOADED;
 }
 
 bool CtrLevels::load_file(const fs::path& path,
@@ -157,6 +292,9 @@ bool CtrLevels::load_file(const fs::path& path,
   }
   std::vector<u8> texels;
   for (auto& t : texs) {
+    if (cancelled()) {
+      return false;
+    }
     texels.resize(t.data_size);
     int handle = -1;
     if (f.read(t.data_offset, texels.data(), t.data_size)) {
@@ -174,6 +312,9 @@ bool CtrLevels::load_file(const fs::path& path,
   }
   std::vector<c3l::Vertex> verts;
   for (auto& ch : out->chunks) {
+    if (cancelled()) {
+      return false;
+    }
     // the chunk's draws cover a contiguous range of the index data
     u32 first = UINT32_MAX, end = 0;
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
@@ -258,6 +399,9 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     std::vector<c3l::MercVertex> mverts;
     for (auto& m : models) {
+      if (cancelled()) {
+        return false;
+      }
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
@@ -294,22 +438,87 @@ bool CtrLevels::load_file(const fs::path& path,
 }
 
 void CtrLevels::process_pending_loads(u64 frame) {
-  load_common_now();
   for (const auto& name : m_pending_loads) {
-    if (m_levels.count(name)) {
-      continue;
+    if (!m_levels.count(name) && !m_prefetched.count(name) && !m_missing.count(name)) {
+      request({name, false, false});
     }
-    auto lev = std::make_unique<CtrLevelData>();
-    if (!load(name, lev.get())) {
-      lg::warn("[ctr] no background for level {} (out/jak1/c3l/{}.c3l)", name, name);
-      m_missing[name] = true;
-      continue;
-    }
-    lev->last_used_frame = frame;
-    m_levels.emplace(name, std::move(lev));
-    rebuild_merc_index();
   }
   m_pending_loads.clear();
+  if (!m_thread) {
+    // no loader thread: run the queued loads here
+    for (;;) {
+      Job job;
+      {
+        std::lock_guard<std::mutex> lk(m_lock);
+        if (m_queue.empty()) {
+          break;
+        }
+        job = m_queue.front();
+        m_queue.pop_front();
+      }
+      run_job(job);
+    }
+  }
+  // finished loads
+  std::vector<Done> done;
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    done.swap(m_done);
+    for (auto& d : done) {
+      m_requested.erase(d.job.name);
+    }
+  }
+  bool levels_changed = false;
+  const double now = ctr_gpu_time_ms();
+  for (auto& d : done) {
+    const std::string& name = d.job.name;
+    if (d.job.common) {
+      if (d.result == LoadResult::LOADED) {
+        m_common = std::move(d.lev);
+        rebuild_merc_index();
+      } else {
+        lg::warn("[ctr] no common models (out/jak1/c3l/GAME.c3l): Jak won't be drawn");
+      }
+      continue;
+    }
+    switch (d.result) {
+      case LoadResult::MISSING:
+        lg::warn("[ctr] no background for level {} (out/jak1/c3l/{}.c3l)", name, name);
+        m_missing[name] = true;
+        break;
+      case LoadResult::FAILED:
+        m_missing[name] = true;  // don't retry every frame
+        break;
+      case LoadResult::CANCELLED:
+        break;
+      case LoadResult::LOADED:
+        if (m_levels.count(name) || m_prefetched.count(name)) {
+          unload(*d.lev);  // loaded twice (asked for again while it loaded)
+        } else if (std::find(m_wanted.begin(), m_wanted.end(), name) != m_wanted.end() ||
+                   !d.job.prefetch) {
+          publish(name, std::move(d.lev), frame);
+          levels_changed = true;
+        } else {
+          m_prefetched[name] = Prefetched{std::move(d.lev), now};
+          levels_changed = true;
+        }
+        break;
+    }
+  }
+  // prefetched levels nothing asked for
+  for (auto it = m_prefetched.begin(); it != m_prefetched.end();) {
+    if (now - it->second.since_ms > kPrefetchKeepMs) {
+      lg::info("[ctr] dropping prefetched {} (not used)", it->first);
+      unload(*it->second.lev);
+      it = m_prefetched.erase(it);
+      levels_changed = true;
+    } else {
+      ++it;
+    }
+  }
+  if (levels_changed) {
+    update_level_count();
+  }
 }
 
 void CtrLevels::unload(CtrLevelData& lev) {
@@ -328,23 +537,10 @@ void CtrLevels::unload(CtrLevelData& lev) {
 }
 
 void CtrLevels::load_common() {
-  // loaded with the levels, on the render thread before a frame: GPU transfers from the thread
-  // that runs gk's init could overlap the console's last buffer swaps
+  // on the loader thread (from the first frame without one): level textures always go to linear
+  // memory, so creating them away from the render thread doesn't touch the GX queue
   m_common_wanted = true;
-}
-
-void CtrLevels::load_common_now() {
-  if (m_common || !m_common_wanted) {
-    return;
-  }
-  m_common_wanted = false;
-  auto lev = std::make_unique<CtrLevelData>();
-  if (load("GAME", lev.get())) {
-    m_common = std::move(lev);
-    rebuild_merc_index();
-  } else {
-    lg::warn("[ctr] no common models (out/jak1/c3l/GAME.c3l): Jak won't be drawn");
-  }
+  request({"GAME", true, false});
 }
 
 void CtrLevels::rebuild_merc_index() {
@@ -374,8 +570,16 @@ const CtrMercModelData* CtrLevels::find_merc_model(const std::string& name,
 CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
   auto it = m_levels.find(name);
   if (it == m_levels.end()) {
-    // loaded before the next frame (process_pending_loads), outside of a GPU frame: textures go
-    // to VRAM through copies that can't be queued in the middle of a frame
+    // prefetched: drawn from now on
+    auto pf = m_prefetched.find(name);
+    if (pf != m_prefetched.end()) {
+      auto lev = std::move(pf->second.lev);
+      m_prefetched.erase(pf);
+      publish(name, std::move(lev), frame);
+      update_level_count();
+      return m_levels[name].get();
+    }
+    // loading starts before the next frame (process_pending_loads)
     if (!m_missing.count(name) &&
         std::find(m_pending_loads.begin(), m_pending_loads.end(), name) == m_pending_loads.end()) {
       m_pending_loads.push_back(name);
@@ -387,6 +591,36 @@ CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
 }
 
 void CtrLevels::set_wanted(const std::vector<std::string>& names) {
+  m_wanted = names;
+  // stop loads of levels that are no longer wanted (prefetches are for levels to come: kept)
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    auto wanted = [&](const std::string& n) {
+      return std::find(names.begin(), names.end(), n) != names.end();
+    };
+    for (auto it = m_queue.begin(); it != m_queue.end();) {
+      if (!it->common && !it->prefetch && !wanted(it->name)) {
+        m_requested.erase(it->name);
+        it = m_queue.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (!m_loading.empty() && !m_loading_prefetch && m_loading != "GAME" && !wanted(m_loading)) {
+      m_cancel = true;
+    }
+  }
+  bool changed = false;
+  // prefetched levels the game now wants
+  for (auto& n : names) {
+    auto pf = m_prefetched.find(n);
+    if (pf != m_prefetched.end() && !m_levels.count(n)) {
+      auto lev = std::move(pf->second.lev);
+      m_prefetched.erase(pf);
+      publish(n, std::move(lev), 0);
+      changed = true;
+    }
+  }
   for (auto it = m_levels.begin(); it != m_levels.end();) {
     bool wanted = false;
     for (auto& n : names) {
@@ -397,9 +631,13 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       unload(*it->second);
       it = m_levels.erase(it);
       rebuild_merc_index();
+      changed = true;
     } else {
       ++it;
     }
+  }
+  if (changed) {
+    update_level_count();
   }
   // Load the wanted levels before the next frame, not only when their background is drawn: a level
   // can be loaded just for its models. The intro loads the "intro" level (Gol and Maia) next to

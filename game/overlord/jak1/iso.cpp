@@ -30,6 +30,10 @@
 
 using namespace iop;
 
+#ifdef __3DS__
+void ctr_level_dgo_started(const char* dgo_name);  // game/graphics/ctr/CtrRenderer.cpp
+#endif
+
 namespace jak1 {
 u32 ISOThread();
 u32 DGOThread();
@@ -337,6 +341,10 @@ void LoadDGO(RPC_Dgo_Cmd* cmd) {
     cmd->result = DGO_RPC_RESULT_ERROR;
     return;
   }
+#ifdef __3DS__
+  // (AI-assisted) the 3DS renderer reads the level's .c3l meanwhile (CtrRenderer.cpp)
+  ::ctr_level_dgo_started(cmd->name);
+#endif
 
   // cancel an in progress command and wait for it to end.
   // note - this doesn't handle a nullptr correctly, so if this actually ends up cancelling
