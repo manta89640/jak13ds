@@ -3,10 +3,23 @@
  * Calling mips2c functions from GOAL code compiled to C (see docs/3ds-port/c_backend.md).
  */
 
+#include <string>
+#include <unordered_map>
+
 #include "game/kernel/common/goalc_runtime.h"
+#include "game/kernel/common/kperf.h"
 #include "game/mips2c/mips2c_private.h"
 
 namespace Mips2C {
+
+namespace {
+// execute function -> "m2c:<name>", for the per-section frame timing (kperf)
+std::unordered_map<void*, std::string> g_names;
+}  // namespace
+
+void mips2c_goalc_set_name(void* fn, const std::string& name) {
+  g_names[fn] = "m2c:" + name;
+}
 
 /*!
  * Does what the native _mips2c_call trampolines do: build the MIPS register context on the stack
@@ -14,6 +27,8 @@ namespace Mips2C {
  * return v0. fn is the mips2c execute function.
  */
 u64 mips2c_goalc_adapter(void* fn, u64 stack_size, u64* args) {
+  auto name = g_names.find(fn);
+  kperf::SectionScope perf_section(name == g_names.end() ? "m2c:?" : name->second.c_str());
   u64 stack_bytes = (stack_size + 15) & ~u64(15);
   u8* buf = (u8*)__builtin_alloca(sizeof(ExecutionContext) + stack_bytes + 16);
   auto ctx_addr = ((uintptr_t)buf + stack_bytes + 15) & ~uintptr_t(15);

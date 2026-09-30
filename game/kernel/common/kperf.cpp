@@ -111,7 +111,7 @@ void frame_done() {
     }
     std::sort(top.begin(), top.end(), [](auto* a, auto* b) { return a->us > b->us; });
     std::string sec;
-    for (size_t i = 0; i < top.size() && i < 16; i++) {
+    for (size_t i = 0; i < top.size() && i < 24; i++) {
       char buf[96];
       snprintf(buf, sizeof(buf), "%s%s %.1f", i ? ", " : "", top[i]->name.c_str(),
                top[i]->us / 1000.0 / frames);
