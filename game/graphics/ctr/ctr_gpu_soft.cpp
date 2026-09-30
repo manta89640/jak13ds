@@ -510,6 +510,7 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out) {
 
 // the software backend has no fog
 void ctr_gpu_set_mesh_fog(const float*, const float*, uint8_t, uint8_t, uint8_t) {}
+void ctr_gpu_set_rgba4_as_rgba8(int) {}
 
 double ctr_gpu_time_ms(void) {
   using namespace std::chrono;

@@ -32,6 +32,8 @@ struct CtrSettings {
   bool ocean = true;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
+  // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise
+  bool rgba4_as_rgba8 = true;
 
   std::string summary() const;
 };
