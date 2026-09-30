@@ -3,6 +3,7 @@
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak1/kscheme.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 namespace Mips2C::jak1 {
 namespace collide_probe_node {
@@ -346,7 +347,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.collide_probe_stack = intern_from_c("*collide-probe-stack*").c();
   cache.collide_work = intern_from_c("*collide-work*").c();
-  gLinkedFunctionTable.reg("collide-probe-node", execute, 256);
+  gLinkedFunctionTable.reg("collide-probe-node", execute, 256, &native::collide_probe_node);
 }
 
 } // namespace collide_probe_node
@@ -1137,7 +1138,8 @@ u64 execute(void* ctxt) {
 void link() {
   cache.collide_probe_stack = intern_from_c("*collide-probe-stack*").c();
   cache.collide_work = intern_from_c("*collide-work*").c();
-  gLinkedFunctionTable.reg("collide-probe-instance-tie", execute, 512);
+  gLinkedFunctionTable.reg("collide-probe-instance-tie", execute, 512,
+                           &native::collide_probe_instance_tie);
 }
 
 } // namespace collide_probe_instance_tie
