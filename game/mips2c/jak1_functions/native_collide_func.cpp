@@ -40,7 +40,85 @@ inline u64 low64(const float v[4]) {
 
 constexpr u64 kMiss = 0xffffffffccbebc20;  // -100000000.0, sign-extended
 
+u32 sym_addr(const char* name) {
+  return ::jak1::intern_from_c(name).offset;
+}
+
 }  // namespace
+
+/*!
+ * (collide-do-primitives pos move radius tri out-point) -> float
+ * moving-sphere-triangle-intersect's test for a sphere that touches the triangle's plane outside
+ * the triangle: the sphere swept along move against the corners (ray-sphere-intersect) and the
+ * edges (ray-cylinder-intersect) of the triangle. Returns the smallest t, or -100000000.0 if it is
+ * above 1.0 or nothing was hit, and stores the touching point (the corner, or the point on the
+ * edge) in out-point.
+ */
+u64 collide_do_primitives_impl(const NativeArgs& args) {
+  static const u32 sphere_sym = sym_addr("ray-sphere-intersect");
+  static const u32 cylinder_sym = sym_addr("ray-cylinder-intersect");
+  const u64 tri = args.a[3];
+  const u32 out = (u32)args.a[4];
+  // the edge direction is passed by address
+  const u32 dir = args.stack - 16;
+
+  float best = 2.f;
+  // vf31: the point of the best hit. If nothing is hit, the mips2c version stores whatever the
+  // register held (zero in verify mode).
+  u8 point[16] = {};
+
+  // corners
+  for (int i = 0; i < 3; i++) {
+    const u64 call_args[8] = {args.a[0], args.a[1], tri + 16 * i, args.a[2],
+                              args.a[4], args.a[5], args.a[6], args.a[7]};
+    const float t = u2f((u32)native_call_goal(gload<u32>(sphere_sym), call_args, args));
+    // (the first hit is taken even if it's above 2.0)
+    if (t < 0.f || (i > 0 && !(t < best))) {
+      continue;
+    }
+    best = t;
+    memcpy(point, gptr((u32)tri + 16 * i), 16);
+  }
+
+  // edges: v0 -> v1, v1 -> v2, v2 -> v0
+  for (int i = 0; i < 3; i++) {
+    const u32 a = (u32)tri + 16 * i;
+    const u32 b = (u32)tri + 16 * ((i + 1) % 3);
+    float d[4], sq[4];
+    const Vec4f va = gload_vec(a);
+    const Vec4f vb = gload_vec(b);
+    d[0] = vb.x - va.x;
+    d[1] = vb.y - va.y;
+    d[2] = vb.z - va.z;
+    d[3] = vb.w - va.w;
+    for (int k = 0; k < 4; k++) {
+      sq[k] = d[k] * d[k];
+    }
+    float len2 = sq[0] + sq[1];
+    len2 = len2 + sq[2];
+    // vrsqrt and sqrt.s
+    const float len = std::sqrt(std::abs(len2));
+    const float q = len == 0 ? 0.f : 1.f / len;
+    for (int k = 0; k < 4; k++) {
+      d[k] = d[k] * q;
+    }
+    gstore_bytes(dir, d, 16);
+    const u64 call_args[8] = {args.a[0], args.a[1], tri + 16 * i, dir,
+                              args.a[2], f2gpr(len), args.a[4], args.a[7]};
+    const float t = u2f((u32)native_call_goal(gload<u32>(cylinder_sym), call_args, args));
+    if (t < 0.f || !(t < best)) {
+      continue;
+    }
+    best = t;
+    memcpy(point, gptr(out), 16);
+  }
+
+  if (1.f < best) {
+    best = u2f((u32)kMiss);
+  }
+  gstore_bytes(out, point, 16);
+  return f2gpr(best);
+}
 
 /*!
  * (moving-sphere-triangle-intersect pos move radius tri out-point out-normal)
@@ -190,10 +268,15 @@ u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args) {
   const u64 or01 = low64(c0) | low64(c1);
   if ((s64)(or01 | low64(c2)) < 0) {
     // outside: test the edges and corners
-    static const u32 sym = ::jak1::intern_from_c("collide-do-primitives").offset;
+    static const u32 sym = sym_addr("collide-do-primitives");
+    static const u32* stub = native_stub_slot("collide-do-primitives");
     const u64 call_args[8] = {args.a[0], args.a[1], args.a[2], args.a[3],
                               args.a[4], or01,      low64(c1), args.a[7]};
-    return native_call_goal(gload<u32>(sym), call_args, args);
+    const u32 fn = gload<u32>(sym);
+    if (fn == *stub) {
+      return collide_do_primitives_impl(NativeArgs{call_args, args.pp, args.st, args.stack});
+    }
+    return native_call_goal(fn, call_args, args);
   }
 
   // the touching point: the center projected on the plane (n x (center x n)), plus v1
@@ -209,7 +292,9 @@ u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args) {
   return result;
 }
 
+const NativeImpl collide_do_primitives = MIPS2C_NATIVE_IMPL(collide_do_primitives_impl, 0, 16);
+// scratch: collide-do-primitives', which it calls directly
 const NativeImpl moving_sphere_triangle_intersect =
-    MIPS2C_NATIVE_IMPL(moving_sphere_triangle_intersect_impl, 0, 0);
+    MIPS2C_NATIVE_IMPL(moving_sphere_triangle_intersect_impl, 0, 16);
 
 }  // namespace Mips2C::jak1::native
