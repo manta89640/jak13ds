@@ -821,7 +821,9 @@
       ;; we generate sky textures on the previous frame and they sit in vram (8160) until the next frame.
       ;; on the first frame after we request sky, we draw the textures, but they aren't ready until the next frame.
       (cond
-        ((and (-> *time-of-day-context* sky) *sky-drawn*) (render-sky-tng *time-of-day-context*))
+        ;; 3DS: the 3DS renderer has no sky renderer (it clears to the fog color), so the sky DMA
+        ;; (render-sky-tng, ~1.5 ms/frame there) is not generated.
+        ((and (-> *time-of-day-context* sky) *sky-drawn*) (#unless TARGET_3DS (render-sky-tng *time-of-day-context*)))
         (else
          ;; todo
          (with-dma-buffer-add-bucket ((dma-buf (-> (current-frame) global-buf)) (bucket-id sky-draw))
@@ -896,12 +898,16 @@
   (let ((gp-9 (-> *display* frames (-> *display* on-screen) frame global-buf)))
     (with-profiler "bones"
       (bones-mtx-calc-execute)) ;; skinning matrix calculation
-    (with-profiler "gmerc"
-      (generic-merc-execute-all gp-9)) ;; mercneric conversion.
-    (with-profiler "shadow"
-      (shadow-execute-all gp-9 *shadow-queue*))
-    (with-profiler "eyes"
-      (update-eyes)))
+    ;; 3DS: the 3DS renderer skips the generic, shadow and eye buckets (it has no renderer for
+    ;; them), so the work that fills them is skipped too. Objects that would be drawn with generic
+    ;; merc and the shadows are not drawn either way. (Generic merc took ~9 ms/frame in the menus.)
+    (#unless TARGET_3DS
+      (with-profiler "gmerc"
+        (generic-merc-execute-all gp-9)) ;; mercneric conversion.
+      (with-profiler "shadow"
+        (shadow-execute-all gp-9 *shadow-queue*))
+      (with-profiler "eyes"
+        (update-eyes))))
   ;; sprite draw
   (when (logtest? (vu1-renderer-mask sprite) *vu1-enable-user*)
     (with-profiler "sprite"
