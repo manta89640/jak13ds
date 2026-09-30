@@ -29,10 +29,13 @@ struct ProbeWork {
 };
 
 ProbeWork load_work(u32 cw) {
+  // lq of the boxes (cw is quadword aligned), lqc2 of the matrix
   ProbeWork w;
-  memcpy(w.bmin, gptr(cw + 16), 16);
-  memcpy(w.bmax, gptr(cw + 32), 16);
-  memcpy(w.m, gptr(cw + 48), 64);
+  gload_q(w.bmin, cw + 16);
+  gload_q(w.bmax, cw + 32);
+  for (int i = 0; i < 4; i++) {
+    gload_q(w.m[i], cw + 48 + 16 * i);
+  }
   return w;
 }
 
@@ -84,7 +87,7 @@ inline void visit_nodes(u32 node, s64 count, u32 stride, const ProbeWork& w, F&&
     // the original reads the 4 spheres of the group first
     float s[4][4];
     for (int k = 0; k < 4; k++) {
-      memcpy(s[k], gptr(node + 12 + stride * k), 16);
+      gload_q(s[k], node + 12 + stride * k);  // lqc2
     }
     for (int k = 0; k < 4; k++) {
       count--;
@@ -178,7 +181,7 @@ void probe_instance(u32 inst, u32 list, const ProbeWork& w) {
   halves(r2, gload<u64>(q1), 16);
   halves(tr, gload<u64>(q1 + 8), 10);
   float center[4];
-  memcpy(center, gptr(inst + 12), 16);
+  gload_q(center, inst + 12);  // lqc2
 
   // vcallms 32: the instance matrix in the frame of the inverse matrix
   float t[4], a[4], b[4], c[4];
@@ -219,7 +222,7 @@ void probe_instance(u32 inst, u32 list, const ProbeWork& w) {
   s32 left = gload<u16>(frags + 2);
   do {
     float s[4];
-    memcpy(s, gptr((frag + 12) & ~15u), 16);  // lq, or lqc2 of an aligned address
+    gload_q(s, (frag + 12) & ~15u);  // lq, or lqc2 of an aligned address
     const float rad = scale * s[3];
     s32 mn[3], mx[3];
     for (int i = 0; i < 3; i++) {
