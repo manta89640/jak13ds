@@ -44,82 +44,104 @@ _Static_assert(sizeof(v128) == 16, "v128 size");
 // byte-safe accesses with packed structs roughly doubled ARM11 code size.)
 // ---------------------------------------------------------------------------
 
-GC_INLINE u8* gc_addr(u64 goal_addr) {
-  return goalc_mem + (u32)goal_addr;
+// Generated functions start with `u8* const gc_mb = goalc_mem; const u64 gc_stl = goalc_st;` so
+// the compiler can keep both in registers (they never change after startup, but the compiler
+// would have to reload the globals after every call). The helpers below take the base as a
+// parameter named gc_mb, and macros of the same name pass the local copy.
+GC_INLINE u8* gc_addr_(u8* gc_mb, u64 goal_addr) {
+  return gc_mb + (u32)goal_addr;
 }
+#define gc_addr(a) gc_addr_(gc_mb, (a))
 
-GC_INLINE u64 gc_ld_u8(u64 a) {
+GC_INLINE u64 gc_ld_u8_(u8* gc_mb, u64 a) {
   return *gc_addr(a);
 }
-GC_INLINE u64 gc_ld_s8(u64 a) {
+GC_INLINE u64 gc_ld_s8_(u8* gc_mb, u64 a) {
   return (u64)(s64)(s8)*gc_addr(a);
 }
-GC_INLINE u64 gc_ld_u16(u64 a) {
+GC_INLINE u64 gc_ld_u16_(u8* gc_mb, u64 a) {
   u16 v;
   memcpy(&v, gc_addr(a), 2);
   return v;
 }
-GC_INLINE u64 gc_ld_s16(u64 a) {
+GC_INLINE u64 gc_ld_s16_(u8* gc_mb, u64 a) {
   s16 v;
   memcpy(&v, gc_addr(a), 2);
   return (u64)(s64)v;
 }
-GC_INLINE u64 gc_ld_u32(u64 a) {
+GC_INLINE u64 gc_ld_u32_(u8* gc_mb, u64 a) {
   u32 v;
   memcpy(&v, gc_addr(a), 4);
   return v;
 }
-GC_INLINE u64 gc_ld_s32(u64 a) {
+GC_INLINE u64 gc_ld_s32_(u8* gc_mb, u64 a) {
   s32 v;
   memcpy(&v, gc_addr(a), 4);
   return (u64)(s64)v;
 }
-GC_INLINE u64 gc_ld_u64(u64 a) {
+GC_INLINE u64 gc_ld_u64_(u8* gc_mb, u64 a) {
   u64 v;
   memcpy(&v, gc_addr(a), 8);
   return v;
 }
-GC_INLINE float gc_ld_f32(u64 a) {
+GC_INLINE float gc_ld_f32_(u8* gc_mb, u64 a) {
   float v;
   memcpy(&v, gc_addr(a), 4);
   return v;
 }
-GC_INLINE v128 gc_ld_v128(u64 a) {
+GC_INLINE v128 gc_ld_v128_(u8* gc_mb, u64 a) {
   v128 v;
   memcpy(&v, gc_addr(a), 16);
   return v;
 }
 
-GC_INLINE void gc_st_u8(u64 a, u64 v) {
+GC_INLINE void gc_st_u8_(u8* gc_mb, u64 a, u64 v) {
   *gc_addr(a) = (u8)v;
 }
-GC_INLINE void gc_st_u16(u64 a, u64 v) {
+GC_INLINE void gc_st_u16_(u8* gc_mb, u64 a, u64 v) {
   u16 x = (u16)v;
   memcpy(gc_addr(a), &x, 2);
 }
-GC_INLINE void gc_st_u32(u64 a, u64 v) {
+GC_INLINE void gc_st_u32_(u8* gc_mb, u64 a, u64 v) {
   u32 x = (u32)v;
   memcpy(gc_addr(a), &x, 4);
 }
-GC_INLINE void gc_st_u64(u64 a, u64 v) {
+GC_INLINE void gc_st_u64_(u8* gc_mb, u64 a, u64 v) {
   memcpy(gc_addr(a), &v, 8);
 }
-GC_INLINE void gc_st_f32(u64 a, float v) {
+GC_INLINE void gc_st_f32_(u8* gc_mb, u64 a, float v) {
   memcpy(gc_addr(a), &v, 4);
 }
-GC_INLINE void gc_st_v128(u64 a, v128 v) {
+GC_INLINE void gc_st_v128_(u8* gc_mb, u64 a, v128 v) {
   memcpy(gc_addr(a), &v, 16);
 }
+
+#define gc_ld_u8(...) gc_ld_u8_(gc_mb, __VA_ARGS__)
+#define gc_ld_s8(...) gc_ld_s8_(gc_mb, __VA_ARGS__)
+#define gc_ld_u16(...) gc_ld_u16_(gc_mb, __VA_ARGS__)
+#define gc_ld_s16(...) gc_ld_s16_(gc_mb, __VA_ARGS__)
+#define gc_ld_u32(...) gc_ld_u32_(gc_mb, __VA_ARGS__)
+#define gc_ld_s32(...) gc_ld_s32_(gc_mb, __VA_ARGS__)
+#define gc_ld_u64(...) gc_ld_u64_(gc_mb, __VA_ARGS__)
+#define gc_ld_f32(...) gc_ld_f32_(gc_mb, __VA_ARGS__)
+#define gc_ld_v128(...) gc_ld_v128_(gc_mb, __VA_ARGS__)
+#define gc_st_u8(...) gc_st_u8_(gc_mb, __VA_ARGS__)
+#define gc_st_u16(...) gc_st_u16_(gc_mb, __VA_ARGS__)
+#define gc_st_u32(...) gc_st_u32_(gc_mb, __VA_ARGS__)
+#define gc_st_u64(...) gc_st_u64_(gc_mb, __VA_ARGS__)
+#define gc_st_f32(...) gc_st_f32_(gc_mb, __VA_ARGS__)
+#define gc_st_v128(...) gc_st_v128_(gc_mb, __VA_ARGS__)
 
 //! GOAL address of a host pointer (only valid for pointers into GOAL memory, like the stack).
 //! The empty asm makes the pointer escape: otherwise, on 32-bit hosts, the compiler can see that
 //! goalc_mem + result is the original pointer, conclude that stack arrays are never accessed
 //! through GOAL addresses, and delete stores to them.
-GC_INLINE u64 gc_goal_ptr(const void* host) {
+GC_INLINE u64 gc_goal_ptr_(u8* gc_mb, const void* host) {
   const u8* p = (const u8*)host;
   __asm__ volatile("" : "+r"(p) : : "memory");
-  return (u64)(u32)(p - goalc_mem);
+  return (u64)(u32)(p - gc_mb);
 }
+#define gc_goal_ptr(h) gc_goal_ptr_(gc_mb, (h))
 
 // ---------------------------------------------------------------------------
 // register class conversions (regset_common in IR.cpp)
@@ -628,7 +650,7 @@ GC_INLINE v128 gc_pshufhw(v128 a, u32 c) {
 // ---------------------------------------------------------------------------
 
 //! Address of symbol k's value slot relative to st (jak 1: symbol value is at the symbol).
-#define GC_SYM(k) (goalc_st + (u64)(s64)gc_sym_offsets[k])
+#define GC_SYM(k) (gc_stl + (u64)(s64)gc_sym_offsets[k])
 #define GC_SEG(s) ((u64)gc_seg_base[s])
 //! address in another segment of this object: 0 if that segment isn't loaded (like the native
 //! linker), so method-set! of a function in an unloaded debug segment does nothing.

@@ -152,12 +152,12 @@ std::string CFunctionEmitter::access(const RegVal* rv, bool for_write) {
       if (for_write) {
         error("the st register can't be written");
       }
-      return "goalc_st";
+      return "gc_stl";
     case Special::OFF:
       if (for_write) {
         error("the off register can't be written");
       }
-      return "((u64)(uintptr_t)goalc_mem)";
+      return "((u64)(uintptr_t)gc_mb)";
     case Special::SP:
       if (for_write) {
         error("the stack pointer can't be written");
@@ -355,6 +355,7 @@ void CFunctionEmitter::emit() {
     text += "void";
   }
   text += ") {\n";
+  text += "  u8* const gc_mb = goalc_mem;\n  const u64 gc_stl = goalc_st;\n";
 
   // locals
   for (int id = 0; id < (int)m_vars.size(); id++) {
