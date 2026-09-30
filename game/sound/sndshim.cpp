@@ -27,6 +27,20 @@ void snd_StopSoundSystem() {
   }
 }
 
+#ifdef __3DS__
+namespace snd {
+extern bool g_output_active;
+}
+#endif
+
+bool snd_HasOutput() {
+#ifdef __3DS__
+  return snd::g_output_active;
+#else
+  return true;
+#endif
+}
+
 // dma is always instant, allocation not required
 s32 snd_GetFreeSPUDMA() {
   return 0;
