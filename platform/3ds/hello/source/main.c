@@ -12,6 +12,12 @@
    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
 int main(void) {
+  // boot test for the CIA settings (platform/3ds/cia/boottest.rsf): proves main was reached
+  FILE* f = fopen("sdmc:/3ds/jak1/boottest.txt", "w");
+  if (f) {
+    fputs("main reached\n", f);
+    fclose(f);
+  }
   gfxInitDefault();
   consoleInit(GFX_BOTTOM, NULL);
   C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -19,7 +25,9 @@ int main(void) {
   C3D_RenderTarget* top = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
   C3D_RenderTargetSetOutput(top, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
 
-  printf("OpenGOAL 3DS hello\n");
+  printf("OpenGOAL Jak1 boot test (CIA settings)\n");
+  printf("app memory region: %lu KiB\n",
+         (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024));
   printf("sizeof(void*) = %u\n", (unsigned)sizeof(void*));
   printf("linear free: %lu KiB\n", (unsigned long)(linearSpaceFree() / 1024));
   printf("heap: %lu KiB free\n", (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) / 1024));
