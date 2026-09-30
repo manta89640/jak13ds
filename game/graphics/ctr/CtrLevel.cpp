@@ -168,6 +168,7 @@ bool CtrLevels::load(const std::string& name, CtrLevelData* out) {
 }
 
 void CtrLevels::process_pending_loads(u64 frame) {
+  load_common_now();
   for (const auto& name : m_pending_loads) {
     if (m_levels.count(name)) {
       continue;
@@ -201,9 +202,16 @@ void CtrLevels::unload(CtrLevelData& lev) {
 }
 
 void CtrLevels::load_common() {
-  if (m_common) {
+  // loaded with the levels, on the render thread before a frame: GPU transfers from the thread
+  // that runs gk's init could overlap the console's last buffer swaps
+  m_common_wanted = true;
+}
+
+void CtrLevels::load_common_now() {
+  if (m_common || !m_common_wanted) {
     return;
   }
+  m_common_wanted = false;
   auto lev = std::make_unique<CtrLevelData>();
   if (load("GAME", lev.get())) {
     m_common = std::move(lev);

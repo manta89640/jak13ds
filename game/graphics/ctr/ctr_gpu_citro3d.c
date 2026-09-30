@@ -92,6 +92,7 @@ static struct {
   void* pending_staging[MAX_STAGING]; /* linear buffers of queued VRAM texture copies */
   int pending_staging_count;
   int vram_textures;
+  int vram_copy_failures;
   char screenshot_path[256];
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
@@ -377,6 +378,8 @@ void ctr_gpu_frame_end(void) {
   g.cur.draw_ms = C3D_GetDrawingTime();
   g.cur.linear_free = (unsigned int)linearSpaceFree();
   g.cur.vram_free = (unsigned int)vramSpaceFree();
+  g.cur.vram_textures = g.vram_textures;
+  g.cur.vram_copy_failures = g.vram_copy_failures;
   g.last = g.cur;
 }
 
@@ -419,15 +422,31 @@ static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vra
   return tex->data;
 }
 
-static void tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
+static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
   if (!on_vram) {
     C3D_TexFlush(tex);
-    return;
+    return 1;
   }
   GSPGPU_FlushDataCache(buf, tex->size);
   C3D_SyncTextureCopy((u32*)buf, 0, (u32*)tex->data, 0, tex->size, 8);
+  /* check that the copy landed (VRAM is readable by the CPU); if not, use linear memory */
+  int ok = memcmp(tex->data, buf, tex->size) == 0;
+  if (!ok) {
+    g.vram_copy_failures++;
+    GPU_TEXCOLOR fmt = tex->fmt;
+    u16 w = tex->width, h = tex->height;
+    C3D_TexDelete(tex);
+    if (!C3D_TexInit(tex, w, h, fmt)) {
+      linearFree(buf);
+      return 0;
+    }
+    memcpy(tex->data, buf, tex->size);
+    C3D_TexFlush(tex);
+  } else {
+    g.vram_textures++;
+  }
   linearFree(buf);
-  g.vram_textures++;
+  return 1;
 }
 
 int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
@@ -466,7 +485,9 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
       dst[off + 3] = p[0];
     }
   }
-  tex_commit(tex, dst, on_vram);
+  if (!tex_commit(tex, dst, on_vram)) {
+    return -1;
+  }
   g.textures[slot].used = 1;
   return slot;
 }
@@ -681,7 +702,9 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
     return -1;
   }
   memcpy(dst, data, (size_t)size < tex->size ? (size_t)size : tex->size);
-  tex_commit(tex, dst, on_vram);
+  if (!tex_commit(tex, dst, on_vram)) {
+    return -1;
+  }
   g.textures[slot].used = 1;
   return slot;
 }

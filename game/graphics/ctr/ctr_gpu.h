@@ -139,6 +139,8 @@ typedef struct {
   int cmd_splits;   /* command buffer flushes in the middle of the frame */
   unsigned int linear_free; /* free linear memory (meshes, textures, vertex ring), bytes */
   unsigned int vram_free;   /* free VRAM (render target, textures), bytes */
+  int vram_textures;        /* textures created in VRAM so far */
+  int vram_copy_failures;   /* VRAM uploads that didn't land (then in linear memory) */
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
 

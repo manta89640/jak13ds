@@ -63,7 +63,9 @@ class CtrLevels {
   void unload(CtrLevelData& lev);
   std::map<std::string, std::unique_ptr<CtrLevelData>> m_levels;
   std::map<std::string, bool> m_missing;
-  std::vector<std::string> m_pending_loads;  // no file: don't retry every frame
+  std::vector<std::string> m_pending_loads;
+  bool m_common_wanted = false;
+  void load_common_now();  // no file: don't retry every frame
   std::unique_ptr<CtrLevelData> m_common;
   // merc model name -> (level, model index); rebuilt when levels change
   std::map<std::string, std::pair<CtrLevelData*, int>> m_merc_index;
