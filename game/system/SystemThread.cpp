@@ -106,6 +106,8 @@ void* bootstrap_thread_func(void* x) {
 #elif __APPLE__
   pthread_setname_np(thd->name.c_str());
 #elif defined(__3DS__)
+  // show a crash screen for CPU exceptions in this thread
+  ctr_thread_install_crash_handler();
   // no thread names. Priorities: see ctr_port.h (no time slicing between equal priorities)
   if (thd->name == "EE") {
     ctr_thread_set_priority(CTR_PRIO_EE);
@@ -136,11 +138,18 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
   {
     // The EE thread runs the kernel and deep C++ call chains (fmt, file IO). Others are small.
     const size_t stack_size = (name == "EE") ? 512 * 1024 : 128 * 1024;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, stack_size);
-    int err = pthread_create(&thread, &attr, bootstrap_thread_func, this);
-    pthread_attr_destroy(&attr);
+    // Core 0 is for the game (EE). The IOP (overlord, DGO loading), the listener and the EE worker
+    // run on the system core when the app got a share of it (ctr_port.c).
+    const int core = (name == "EE") ? CTR_CORE_APP : CTR_CORE_SYS;
+    int prio = CTR_PRIO_WORKER;
+    if (name == "EE") {
+      prio = CTR_PRIO_EE;
+    } else if (name == "IOP") {
+      prio = CTR_PRIO_IOP;
+    } else if (name == "DMP") {
+      prio = CTR_PRIO_DECI;
+    }
+    int err = ctr_thread_create(bootstrap_thread_func, this, stack_size, prio, core, &thread);
     if (err) {
       lg::die("Failed to create thread {} (error {})", name, err);
     }
@@ -164,7 +173,8 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
  */
 void SystemThread::join() {
 #ifdef __3DS__
-  pthread_join(thread, nullptr);
+  ctr_thread_join(thread);
+  thread = nullptr;
 #else
   thread.join();
 #endif

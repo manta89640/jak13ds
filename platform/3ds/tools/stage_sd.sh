@@ -17,6 +17,7 @@
 #   --clean-logs  delete data/log before the run
 #   --clean-user  delete user/ (settings, saves) before the run
 #   --screenshots N  gk saves a screenshot every N frames to data/log/shot_<frame>.bmp
+#   --pad-script FILE  scripted controller input (game/sce/pad_script.h), for automated tests
 #
 # Files are copied with APFS clones (cp -c) when possible, so staging 1.3 GB is instant on macOS.
 set -euo pipefail
@@ -32,6 +33,7 @@ LISTENER=0
 CLEAN_LOGS=0
 CLEAN_USER=0
 SHOTS=0
+PAD_SCRIPT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,11 +46,24 @@ while [ $# -gt 0 ]; do
     --clean-logs) CLEAN_LOGS=1; shift ;;
     --clean-user) CLEAN_USER=1; shift ;;
     --screenshots) SHOTS="$2"; shift 2 ;;
+    --pad-script) PAD_SCRIPT="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
 
 [ -n "$PROJ" ] || { echo "--proj is required" >&2; exit 1; }
+
+# don't replace the files of an emulator run in progress (run_emu.sh holds this lock; it calls us
+# itself with --stage)
+EMU_LOCK="${TMPDIR:-/tmp}/opengoal-azahar.lock"
+while [ -d "$EMU_LOCK" ]; do
+  owner="$(cat "$EMU_LOCK/pid" 2>/dev/null || true)"
+  if [ -z "$owner" ] || [ "$owner" = "$PPID" ] || ! kill -0 "$owner" 2>/dev/null; then
+    break
+  fi
+  echo "waiting for the emulator run of pid $owner to finish"
+  sleep 10
+done
 ISO="$PROJ/out/jak1/iso"
 [ -d "$ISO" ] || { echo "no $ISO (build the game first)" >&2; exit 1; }
 [ -f "$GK" ] || { echo "no $GK" >&2; exit 1; }
@@ -102,6 +117,7 @@ fi
 if [ "$LISTENER" = 1 ]; then touch "$BASE/listener"; else rm -f "$BASE/listener"; fi
 if [ "$CLEAN_LOGS" = 1 ]; then rm -rf "$DATA/log"; fi
 if [ "$CLEAN_USER" = 1 ]; then rm -rf "$BASE/user"; fi
+if [ -n "$PAD_SCRIPT" ]; then cp "$PAD_SCRIPT" "$BASE/pad_script.txt"; else rm -f "$BASE/pad_script.txt"; fi
 if [ "$SHOTS" != 0 ]; then echo "$SHOTS" > "$BASE/screenshots"; else rm -f "$BASE/screenshots"; fi
 
 echo "staged $n files + gk.3dsx in $BASE"

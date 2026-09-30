@@ -57,6 +57,21 @@ enum {
   CTR_PRIO_WORKER = 0x36,   /* EE background worker */
   CTR_PRIO_EE = 0x3A,       /* the game (polls on RPC / DMA) */
 };
+/* Cores. Old 3DS: 0 (application), 1 (system core, a share of it with APT_SetAppCpuTimeLimit).
+ * New 3DS: also 2 (fully available to the application) and 3. Threads can't move between cores
+ * after they are created, and libctru's pthreads (std::thread) always use core 0. */
+enum {
+  CTR_CORE_APP = 0,
+  CTR_CORE_SYS = 1, /* usable when ctr_platform_init got a time limit (ctr_syscore_available) */
+};
+/* Create a thread on a core (falls back to core 0 if that core isn't usable). The handle is for
+ * ctr_thread_join. Returns 0 on success. */
+int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio, int core,
+                      void** handle);
+void ctr_thread_join(void* handle);
+/* 1 if threads can run on the system core (core 1) */
+int ctr_syscore_available(void);
+
 /* Set the priority of the calling thread. */
 void ctr_thread_set_priority(int prio);
 /* Sleep for at least `us` microseconds (0 = yield). */
@@ -65,6 +80,35 @@ void ctr_thread_sleep_us(unsigned int us);
 /* Free application memory in bytes (heap), and linear memory. */
 unsigned int ctr_app_mem_free(void);
 unsigned int ctr_linear_mem_free(void);
+
+typedef struct {
+  unsigned int app_region_total; /* APPLICATION memory region: 64 MB (Old 3DS), 124 MB (New 3DS
+                                    extended mode), less when started as an applet */
+  unsigned int app_region_used;
+  unsigned int heap_size;        /* malloc heap */
+  unsigned int linear_size;      /* linear heap (GPU buffers, textures) */
+  unsigned int linear_free;
+  int is_new3ds;
+  int is_hbl;                    /* started from the Homebrew Launcher (3dsx) */
+  const char* model;             /* "New 3DS XL", "Old 2DS"... */
+} ctr_mem_info;
+void ctr_get_mem_info(ctr_mem_info* out);
+
+/* Bottom screen: the top 3 lines are a status area (performance stats), the rest is the log.
+ * Replaces the status area with `text` (may contain newlines, at most 3 lines). */
+void ctr_console_status(const char* text);
+
+/* Show a crash / error screen on the bottom screen: title, detail, the last lines of the log and
+ * where the logs are, then wait for START (or A) and exit the app. Never returns. Safe to call
+ * from any thread; only the first caller shows its screen. */
+void ctr_crash(const char* title, const char* detail) __attribute__((noreturn));
+
+/* Show a message and wait for START / A, without exiting (for example: not enough memory). */
+void ctr_message_wait(const char* title, const char* text);
+
+/* Install the CPU exception handler (data abort, prefetch abort, undefined instruction) for the
+ * calling thread; it shows the crash screen. Call at the start of every thread. */
+void ctr_thread_install_crash_handler(void);
 
 #ifdef __cplusplus
 }

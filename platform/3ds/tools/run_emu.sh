@@ -3,6 +3,7 @@
 # Run gk.3dsx in Azahar for a while, then kill it and collect the logs.
 #
 #   platform/3ds/tools/run_emu.sh [--seconds N] [--out DIR] [--azahar Azahar.app] [--sd DIR]
+#                                 [--stage "<stage_sd.sh arguments>"]
 #                                 [--gdb [--elf gk.elf] [--gdb-script FILE]]
 #
 #   --gdb   enable Azahar's GDB stub and attach arm-none-eabi-gdb; after N seconds the game is
@@ -29,6 +30,7 @@ SECONDS_TO_RUN=60
 OUT="$ROOT/build-3ds/emu-run"
 APP="${AZAHAR_APP:-$HOME/devkitpro-3ds/emu/azahar-macos-arm64-2126.1.2/Azahar.app}"
 SD=""
+STAGE_ARGS=""
 DEVKITARM_BIN="${DEVKITARM:-/opt/devkitpro/devkitARM}/bin"
 GDB=0
 ELF="$ROOT/build-3ds/gk.elf"
@@ -43,9 +45,30 @@ while [ $# -gt 0 ]; do
     --gdb) GDB=1; shift ;;
     --elf) ELF="$2"; shift 2 ;;
     --gdb-script) GDB=1; GDB_SCRIPT="$2"; shift 2 ;;
+    --stage) STAGE_ARGS="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
+
+# Several agents share one Azahar (one config, one virtual SD card): take a lock for the whole run,
+# and stage the SD card inside it (--stage "<stage_sd.sh arguments>") so that nobody replaces the
+# files in the middle of a run. A stale lock (its owner is gone) is taken over.
+EMU_LOCK="${TMPDIR:-/tmp}/opengoal-azahar.lock"
+while ! mkdir "$EMU_LOCK" 2>/dev/null; do
+  owner="$(cat "$EMU_LOCK/pid" 2>/dev/null || true)"
+  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+    rm -rf "$EMU_LOCK"
+    continue
+  fi
+  echo "waiting for the emulator (used by pid ${owner:-?})"
+  sleep 10
+done
+echo $$ > "$EMU_LOCK/pid"
+trap 'rm -rf "$EMU_LOCK"' EXIT
+if [ -n "$STAGE_ARGS" ]; then
+  # shellcheck disable=SC2086
+  "$(dirname "$0")/stage_sd.sh" $STAGE_ARGS
+fi
 
 AZ_DIR="$HOME/Library/Application Support/Azahar"
 CFG="$AZ_DIR/config/qt-config.ini"
