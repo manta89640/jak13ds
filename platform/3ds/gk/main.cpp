@@ -89,6 +89,12 @@ int main(int /*argc*/, char** /*argv*/) {
            mem.app_region_total / 1024, mem.app_region_used / 1024, mem.heap_size / 1024,
            mem.linear_size / 1024, mem.linear_free / 1024);
 
+  {
+    char probe[200];
+    ctr_hw_probe(probe, sizeof(probe));
+    lg::info("3DS hardware: {}", probe);
+  }
+  lg::info("3DS: share of core 1 (APT_SetAppCpuTimeLimit): {}%", ctr_core1_share());
   lg::info("3DS: system core (core 1) for the IOP/IO threads: {}",
            ctr_syscore_available() ? "yes (80%, experimental: use_syscore)" : "no, core 0");
   {

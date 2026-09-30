@@ -52,6 +52,17 @@ u64 g_unbalanced = 0;
 
 std::atomic<u64> g_thread_ticks[(int)Thread::COUNT];
 std::atomic<u32> g_thread_wakeups[(int)Thread::COUNT];
+
+// RPC waits (game thread only)
+constexpr int kRpcChannels = 8;
+u64 g_rpc_wait[kRpcChannels];
+u64 g_rpc_last_busy[kRpcChannels];
+
+// sampled per-section timing (3DS, no flag file)
+constexpr int kSectionSampleEvery = 15;  // report windows (about seconds)
+void (*g_sections_hook)(bool) = nullptr;
+bool g_sections_forced = false;  // flag file / environment: always on
+int g_windows = 0;
 }  // namespace
 
 bool g_sections_enabled = false;
@@ -86,6 +97,28 @@ void add_thread(Thread t, u64 dt, u32 wakeups) {
   g_thread_wakeups[(int)t].fetch_add(wakeups, std::memory_order_relaxed);
 }
 
+void set_sections_hook(void (*hook)(bool on)) {
+  g_sections_hook = hook;
+}
+
+void rpc_poll(int channel, bool busy) {
+  if (channel < 0 || channel >= kRpcChannels) {
+    return;
+  }
+  // polls further apart than 2 ms were not a wait loop (the game did other work in between)
+#ifdef __3DS__
+  constexpr u64 kMaxGap = 2 * 268112;  // ticks
+#else
+  constexpr u64 kMaxGap = 2 * 1000000;  // ns
+#endif
+  const u64 now = ticks();
+  u64& last = g_rpc_last_busy[channel];
+  if (last && now - last < kMaxGap) {
+    g_rpc_wait[channel] += now - last;
+  }
+  last = busy ? now : 0;
+}
+
 void init_sections() {
   static bool done = false;
   if (done) {
@@ -97,6 +130,7 @@ void init_sections() {
   if (f) {
     fclose(f);
     g_sections_enabled = true;
+    g_sections_forced = true;
   }
 #else
   const char* env = getenv("OPENGOAL_PERF_SECTIONS");
@@ -191,7 +225,8 @@ void frame_done() {
       *c = ' ';
     }
   }
-  lg::info("perf: {}", line);
+  lg::info("perf: {}{}", line,
+           g_sections_enabled && !g_sections_forced ? " (sampled section timing on: slower)" : "");
 
   // other threads on the game's core
   {
@@ -210,6 +245,21 @@ void frame_done() {
     for (auto& c : g_counters) {
       c = 0;
     }
+    // what the game waited for: the sound player's lock (IOP sound calls blocked by the mixer)
+    // and each RPC channel (the game polling a busy channel)
+    u64 lock_t = g_thread_ticks[(int)Thread::SOUND_LOCK_WAIT].exchange(0);
+    u32 lock_w = g_thread_wakeups[(int)Thread::SOUND_LOCK_WAIT].exchange(0);
+    std::string rpc;
+    for (int ch = 0; ch < kRpcChannels; ch++) {
+      if (g_rpc_wait[ch]) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), " #%d %.2f", ch, ticks_to_ms(g_rpc_wait[ch]) / frames);
+        rpc += buf;
+        g_rpc_wait[ch] = 0;
+      }
+    }
+    lg::info("perf waits (ms/frame): sound lock {:.2f} ({:.0f} waits/s); rpc busy:{}",
+             ticks_to_ms(lock_t) / frames, lock_w / secs, rpc.empty() ? " none" : rpc);
   }
 
   if (!g_sections.empty()) {
@@ -227,9 +277,12 @@ void frame_done() {
                ticks_to_ms(top[i]->ticks) / frames, top[i]->count / frames);
       sec += buf;
     }
-    lg::info("perf sections (ms/frame (calls/frame)): {}", sec);
-    lg::info("perf sections: {:.0f} timed sections per frame, {} unbalanced ends",
-             g_section_events / frames, g_unbalanced);
+    // (nothing timed in this window: sampled timing was off)
+    if (!top.empty()) {
+      lg::info("perf sections (ms/frame (calls/frame)): {}", sec);
+      lg::info("perf sections: {:.0f} timed sections per frame, {} unbalanced ends",
+               g_section_events / frames, g_unbalanced);
+    }
     for (auto& [k, v] : g_sections) {
       v.ticks = 0;
       v.count = 0;
@@ -241,6 +294,17 @@ void frame_done() {
   }
   g_frames = 0;
   g_window_start = now;
+
+  // sampled per-section timing: the next window is timed by section every kSectionSampleEvery
+  if (g_sections_hook && !g_sections_forced) {
+    g_windows++;
+    const bool want = g_windows % kSectionSampleEvery == 0;
+    if (want != g_sections_enabled) {
+      g_sections_enabled = want;
+      g_open_count = 0;
+      g_sections_hook(want);
+    }
+  }
 }
 
 }  // namespace kperf

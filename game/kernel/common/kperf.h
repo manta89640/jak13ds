@@ -31,7 +31,8 @@ u64 ticks();
 double ticks_to_ms(u64 t);
 
 //! Time used by other threads that share the game's core, added from those threads.
-enum class Thread { IOP = 0, SOUND = 1, COUNT = 2 };
+//! SOUND_LOCK_WAIT: time threads other than the mixer waited for the sound player's lock.
+enum class Thread { IOP = 0, SOUND = 1, SOUND_LOCK_WAIT = 2, COUNT = 3 };
 void add_thread(Thread t, u64 ticks, u32 wakeups);
 //! Values reported as they are (last value set, from any thread).
 enum class Gauge { SOUND_HANDLERS = 0, COUNT = 1 };
@@ -44,6 +45,10 @@ inline void count(Counter c, u64 n) {
   g_counters[(int)c] += n;
 }
 
+//! The game polled an RPC channel (RpcBusy): the time between busy polls that follow each other
+//! closely is time the game spent waiting for the IOP on that channel (game thread only).
+void rpc_poll(int channel, bool busy);
+
 //! Named sections from the game's with-profiler blocks (pc-prof). Inclusive time per name is
 //! reported once a second with the frame stats (top sections by ms per frame, with the number of
 //! times they ran per frame).
@@ -51,6 +56,9 @@ inline void count(Counter c, u64 n) {
 //! flag file sdmc:/3ds/jak1/perf_sections on the 3DS, OPENGOAL_PERF_SECTIONS=1 on PC.
 extern bool g_sections_enabled;
 void init_sections();
+//! 3DS: without the flag file, one report window in kSectionSampleEvery is timed by section (the
+//! hook turns the GOAL side's *pc-prof-on* on and off), so hardware logs always have a breakdown.
+void set_sections_hook(void (*hook)(bool on));
 void section_begin(const char* name);
 void section_end();
 

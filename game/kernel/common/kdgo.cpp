@@ -74,7 +74,9 @@ u64 RpcCall_wrapper(void* _args) {
  * Check if the given RPC is busy, by channel.
  */
 u32 RpcBusy(s32 channel) {
-  return sceSifCheckStatRpc(&cd[channel].rpcd);
+  const u32 busy = sceSifCheckStatRpc(&cd[channel].rpcd);
+  kperf::rpc_poll(channel, busy != 0);  // how long the game waits for the IOP (perf waits)
+  return busy;
 }
 
 /*!

@@ -41,6 +41,26 @@ Player::~Player() {
 static constexpr unsigned kMixRate = 48000;
 static constexpr unsigned kMixFrames = 1024;
 static constexpr unsigned kMixBuffers = 3;
+// The mixer takes mTickLock per chunk, not per buffer: a sound call waits for one chunk at most
+// (128 frames: 2.7 ms of audio, mixed in about that long on hardware with many sounds playing).
+static constexpr unsigned kMixChunk = 128;
+static_assert(kMixFrames % kMixChunk == 0);
+
+// the mixer thread (ctr_thread_current_id): its own waits for the lock aren't counted
+static std::atomic<unsigned> g_mixer_thread_id{0};
+
+void TickLock::lock() {
+  if (m_mutex.try_lock()) {
+    return;
+  }
+  m_waiters.fetch_add(1, std::memory_order_relaxed);
+  const u64 t0 = kperf::ticks();
+  m_mutex.lock();
+  m_waiters.fetch_sub(1, std::memory_order_relaxed);
+  if (ctr_thread_current_id() != g_mixer_thread_id.load(std::memory_order_relaxed)) {
+    kperf::add_thread(kperf::Thread::SOUND_LOCK_WAIT, kperf::ticks() - t0, 1);
+  }
+}
 
 void Player::InitCubeb() {
   mHandlerThreadStop = false;
@@ -48,13 +68,17 @@ void Player::InitCubeb() {
   int core = 1;
   if (ctr_sound_config(&core)) {
     if (ctr_audio_init(kMixRate, kMixFrames, kMixBuffers) == 0) {
-      int err = ctr_thread_create(&Player::MixerThreadEntry, this, 128 * 1024, CTR_PRIO_SOUND,
-                                  core, &mMixerThread);
+      // pinned: the mixer has the highest priority, so on the game's core (ctr_thread_create's
+      // fallback when the app got no share of core 1) it would take the CPU from the game, all of
+      // it once mixing falls behind (the game stops). No audio instead.
+      int err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, 128 * 1024,
+                                         CTR_PRIO_SOUND, core, &mMixerThread);
       if (err == 0) {
         g_output_active = true;
         lg::info("3DS sound: mixer thread on core {} (48 kHz software mix -> DSP)", core);
       } else {
-        lg::error("3DS sound: could not create the mixer thread ({}), no audio", err);
+        lg::error("3DS sound: no mixer thread on core {} ({}), no audio", core,
+                  err == -2 ? "the app got no share of core 1" : "thread not created");
         ctr_audio_exit();
       }
     } else {
@@ -87,12 +111,19 @@ void* Player::MixerThreadEntry(void* self) {
 
 void Player::MixerThread() {
   ctr_thread_install_crash_handler();
+  g_mixer_thread_id.store(ctr_thread_current_id(), std::memory_order_relaxed);
   u32 last_dropped = 0;
   while (!mHandlerThreadStop) {
     short* buf;
     while (!mHandlerThreadStop && (buf = ctr_audio_get_buffer()) != nullptr) {
       const u64 t_start = kperf::ticks();
-      Tick((s16Output*)buf, kMixFrames);
+      for (unsigned done = 0; done < kMixFrames; done += kMixChunk) {
+        Tick((s16Output*)buf + done, kMixChunk);
+        // let waiting sound calls have the lock (see TickLock), for up to 2 ms
+        for (int w = 0; w < 40 && mTickLock.contended(); w++) {
+          ctr_thread_sleep_us(50);
+        }
+      }
       ctr_audio_submit(buf);
       kperf::add_thread(kperf::Thread::SOUND, kperf::ticks() - t_start, 1);
       kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, (u32)mHandlers.size());

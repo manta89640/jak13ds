@@ -84,6 +84,7 @@ static struct {
   C3D_Mtx projection;
   uint8_t* vbuf;
   size_t vbuf_used;
+  size_t vbuf_flushed; /* vbuf bytes already flushed from the CPU cache (flush_vbuf) */
   TexSlot textures[MAX_TEXTURES];
   ctr_gpu_stats cur, last;
   int in_frame;
@@ -355,14 +356,27 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   g.last_state_valid = 0;
   use_program(PROG_BASIC);
   g.vbuf_used = 0;
+  g.vbuf_flushed = 0;
   memset(&g.cur, 0, sizeof(g.cur));
   g.in_frame = 1;
+}
+
+/* Immediate draws copy their vertices into g.vbuf. The GPU reads them only when the frame's GX
+ * queue runs (C3D_FrameEnd; C3D_FrameBegin stopped the queue, so command list splits wait in it
+ * until then), so one cache flush of what this frame wrote is enough. Each flush is an IPC to the
+ * GSP service: one per draw cost tens of microseconds each on hardware (free in Azahar). */
+static void flush_vbuf(void) {
+  if (g.vbuf_used > g.vbuf_flushed) {
+    GSPGPU_FlushDataCache(g.vbuf + g.vbuf_flushed, (u32)(g.vbuf_used - g.vbuf_flushed));
+    g.vbuf_flushed = g.vbuf_used;
+  }
 }
 
 void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
+  flush_vbuf();
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
   C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -680,8 +694,7 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
     return;
   }
   uint8_t* dst = g.vbuf + g.vbuf_used;
-  memcpy(dst, verts, bytes);
-  GSPGPU_FlushDataCache(dst, bytes);
+  memcpy(dst, verts, bytes); /* flushed once at the end of the frame (flush_vbuf) */
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
 
   check_cmdbuf();

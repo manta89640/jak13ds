@@ -59,6 +59,7 @@ void __system_allocateHeaps(void) {
 }
 
 static int s_console = 0;
+static volatile int s_console_dirty = 1; /* bottom screen console written since the last flush */
 static FILE* s_tee_file;
 /* bottom screen: status lines (perf stats) at the top, the log below */
 static PrintConsole s_stat_con;
@@ -152,7 +153,11 @@ int ctr_platform_init(int enable_console) {
   }
   int want_syscore = access("/3ds/jak1/use_syscore", F_OK) == 0;
   if (want_syscore || (s_sound && s_sound_core == 1)) {
-    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80)) ? 1 : 0;
+    /* (AI-assisted) 30% if 80% is refused; without any share, ctr_thread_create_pinned refuses
+     * core 1 (the mixer then stays off rather than taking the game's core) */
+    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80)) ? 80
+                  : R_SUCCEEDED(APT_SetAppCpuTimeLimit(30)) ? 30
+                                                             : 0;
   }
   s_syscore = (want_syscore && s_cpu_limit) ? 1 : 0;
   /* C-stick / ZL / ZR on New 3DS (and the Circle Pad Pro) */
@@ -174,8 +179,15 @@ int ctr_main_loop(void) {
   int running = aptMainLoop() ? 1 : 0;
   if (s_console) {
     if (s_gpu_active) {
-      /* citro3d swaps the screens; the console screen is single buffered, flush it only */
-      gfxFlushBuffers();
+      /* citro3d swaps the top screen; the console screen is single buffered: flush it only, and
+       * only after something was printed (a flush is a GSP IPC plus a cache clean, and this runs
+       * every 16 ms on the game's core) */
+      if (s_console_dirty) {
+        s_console_dirty = 0;
+        u16 w = 0, h = 0;
+        u8* fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &w, &h);
+        GSPGPU_FlushDataCache(fb, (u32)w * h * gspGetBytesPerPixel(gfxGetScreenFormat(GFX_BOTTOM)));
+      }
     } else {
       gfxFlushBuffers();
       gfxSwapBuffers();
@@ -306,6 +318,12 @@ void ctr_thread_set_priority(int prio) {
   svcSetThreadPriority(CUR_THREAD_HANDLE, prio);
 }
 
+unsigned int ctr_thread_current_id(void) {
+  u32 id = 0;
+  svcGetThreadId(&id, CUR_THREAD_HANDLE);
+  return id;
+}
+
 void ctr_thread_sleep_us(unsigned int us) {
   svcSleepThread((s64)us * 1000);
 }
@@ -378,6 +396,7 @@ static ssize_t tee_write_out(struct _reent* r, void* fd, const char* ptr, size_t
   tee_to_file(ptr, len);
   if (s_orig_out && s_orig_out->write_r) {
     rv = s_orig_out->write_r(r, fd, ptr, len);
+    s_console_dirty = 1;
   }
   tee_unlock();
   return rv;
@@ -389,6 +408,7 @@ static ssize_t tee_write_err(struct _reent* r, void* fd, const char* ptr, size_t
   tee_to_file(ptr, len);
   if (s_orig_err && s_orig_err->write_r) {
     rv = s_orig_err->write_r(r, fd, ptr, len);
+    s_console_dirty = 1;
   }
   tee_unlock();
   return rv;
@@ -466,6 +486,77 @@ static void console_write_raw(const char* text) {
   }
 }
 
+/* ---------------- hardware probe ---------------- */
+
+/* A chain of dependent adds: one cycle each on the ARM11, whatever the memory does. */
+static __attribute__((noinline)) u32 probe_add_chain(u32 iterations) {
+  u32 a = 0;
+  for (u32 i = 0; i < iterations; i++) {
+    __asm__ volatile(".rept 64\n\tadd %0, %0, #1\n\t.endr" : "+r"(a));
+  }
+  return a;
+}
+
+/* ns per load for a pointer chase through `bytes` of memory (a random cycle of 64-byte steps) */
+static double probe_chase_ns(u32* buf, u32 bytes, u32 loads) {
+  const u32 n = bytes / 64;
+  u32* order = (u32*)malloc(n * sizeof(u32));
+  if (!order || n < 2) {
+    free(order);
+    return 0.0;
+  }
+  for (u32 i = 0; i < n; i++) {
+    order[i] = i;
+  }
+  u32 seed = 12345;
+  for (u32 i = n - 1; i > 0; i--) {
+    seed = seed * 1664525u + 1013904223u;
+    u32 j = seed % (i + 1);
+    u32 t = order[i];
+    order[i] = order[j];
+    order[j] = t;
+  }
+  for (u32 i = 0; i < n; i++) {
+    buf[order[i] * 16] = order[(i + 1) % n] * 16;
+  }
+  free(order);
+  volatile u32 sink;
+  u32 p = 0;
+  for (u32 i = 0; i < 1000; i++) {
+    p = buf[p];
+  }
+  const u64 t0 = svcGetSystemTick();
+  for (u32 i = 0; i < loads; i++) {
+    p = buf[p];
+  }
+  const u64 t1 = svcGetSystemTick();
+  sink = p;
+  (void)sink;
+  return (double)(t1 - t0) * 1e9 / SYSCLOCK_ARM11 / loads;
+}
+
+void ctr_hw_probe(char* out, int size) {
+  const u32 iters = 100000; /* 6.4 M dependent adds + the loop, ~9 ms at 804 MHz */
+  const u64 t0 = svcGetSystemTick();
+  volatile u32 sink = probe_add_chain(iters);
+  const u64 t1 = svcGetSystemTick();
+  (void)sink;
+  /* the loop adds ~3 cycles per 64 adds (increment, compare, predicted branch) */
+  const double mhz = (double)iters * 67.0 * SYSCLOCK_ARM11 / (double)(t1 - t0) / 1e6;
+  u32* buf = (u32*)malloc(16u << 20);
+  double l1 = 0, l2 = 0, ram = 0;
+  if (buf) {
+    l1 = probe_chase_ns(buf, 8u << 10, 200000);
+    l2 = probe_chase_ns(buf, 512u << 10, 100000);
+    ram = probe_chase_ns(buf, 16u << 20, 50000);
+    free(buf);
+  }
+  snprintf(out, size,
+           "cpu ~%.0f MHz (804 = New 3DS speedup on); load latency 8 KB %.0f ns, 512 KB %.0f ns "
+           "(L2 on if well below 16 MB), 16 MB %.0f ns",
+           mhz, l1, l2, ram);
+}
+
 void ctr_console_status(const char* text) {
   if (!s_console || !s_orig_out) {
     return;
@@ -476,6 +567,7 @@ void ctr_console_status(const char* text) {
   console_write_raw(text);
   console_write_raw("\x1b[0m");
   consoleSelect(prev);
+  s_console_dirty = 1;
   tee_unlock();
 }
 
@@ -667,9 +759,16 @@ int ctr_syscore_available(void) {
   return s_syscore;
 }
 
-int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio, int core,
-                      void** handle) {
+int ctr_core1_share(void) {
+  return s_cpu_limit;
+}
+
+static int thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio, int core,
+                         int pinned, void** handle) {
   if (core == CTR_CORE_SYS && !s_cpu_limit) {
+    if (pinned) {
+      return -2;
+    }
     core = CTR_CORE_APP;
   }
   ThreadStart* start = (ThreadStart*)malloc(sizeof(ThreadStart));
@@ -679,7 +778,7 @@ int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, in
   start->fn = fn;
   start->arg = arg;
   Thread t = threadCreate(thread_trampoline, start, stack_size, prio, core, false);
-  if (!t && core != CTR_CORE_APP) {
+  if (!t && core != CTR_CORE_APP && !pinned) {
     t = threadCreate(thread_trampoline, start, stack_size, prio, CTR_CORE_APP, false);
   }
   if (!t) {
@@ -688,6 +787,16 @@ int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, in
   }
   *handle = t;
   return 0;
+}
+
+int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio, int core,
+                      void** handle) {
+  return thread_create(fn, arg, stack_size, prio, core, 0, handle);
+}
+
+int ctr_thread_create_pinned(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio,
+                             int core, void** handle) {
+  return thread_create(fn, arg, stack_size, prio, core, 1, handle);
 }
 
 void ctr_thread_join(void* handle) {

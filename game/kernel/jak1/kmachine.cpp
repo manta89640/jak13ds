@@ -609,6 +609,13 @@ void InitMachine_PCPort() {
 #endif
   intern_from_c("*pc-prof-on*")->value =
       prof_on ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+#ifdef __3DS__
+  // sampled section timing in hardware logs (kperf turns it on for one window now and then)
+  kperf::set_sections_hook([](bool on) {
+    intern_from_c("*pc-prof-on*")->value =
+        on ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+  });
+#endif
 }
 
 /*!
