@@ -73,19 +73,18 @@ title logo and the power cell jingle, make them from your copy of the game and p
 `platform/3ds/cia/local/` (ignored by git); `make_cia.sh` uses them when they are there
 (it prints which banner it used).
 
-1. Export with the decompiler: in `decompiler/config/jak1/jak1_config.jsonc` set `"rip_levels": true`,
-   `"save_texture_pngs": true`, `"rip_music": true` and `"rip_streamed_audio": true`, then
-   `task extract`.
-2. **Image** (`banner.png`, 256 x 128 PNG, transparent background works): the title level's
-   `.glb` in `decompiler_out/jak1/levels/` has the logo model (`*logo-sg*`, `goal_src/jak1/levels/title/title-obs.gc`).
-   Open it in Blender, frame the logo with a camera at 256 x 128 and render with a transparent film.
-   (Simpler: the logo's textures are PNGs in `decompiler_out/jak1/textures/`.)
-3. **Jingle** (`banner.wav`, 3 s at most): the power cell sting is in `decompiler_out/jak1/audio/music/`
-   or `audio/sfx/`. Trim and convert it:
-   `ffmpeg -i <file> -t 3 -af afade=t=out:st=2.5:d=0.5 -ac 2 -ar 44100 -sample_fmt s16 platform/3ds/cia/local/banner.wav`
-4. `platform/3ds/tools/make_cia.sh` and reinstall the CIA.
+1. Export with the decompiler: in `decompiler/config/jak1/jak1_config.jsonc` set `"rip_levels": true`
+   and `"rip_streamed_audio": true`, then `task extract`. This writes the title logo model
+   (`decompiler_out/jak1/levels/title/logo-english-lod0.glb`, textures embedded) and every sound
+   effect as a .wav (`decompiler_out/jak1/audio/sfx/<bank>/cell-prize.wav` is the power cell jingle).
+2. `python3 platform/3ds/tools/make_banner.py` (needs `python3 -m pip install numpy pillow`): renders
+   the logo at 256 x 128 with a transparent background (straight on, from the side its faces point
+   to) and cuts the jingle to 2.9 s with a fade-out, into `platform/3ds/cia/local/`. `--model` /
+   `--sound` take other files.
+3. `platform/3ds/tools/make_cia.sh` and reinstall the CIA.
 
-(AI-assisted: written without game files at hand; the exported file names may differ.)
+(AI-assisted: the script was tested on a synthetic model and sound; the paths are the ones the
+decompiler writes, checked in its source.)
 
 ### If the CIA stays on the launch screen
 
