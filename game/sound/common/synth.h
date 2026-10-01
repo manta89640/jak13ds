@@ -26,6 +26,11 @@ class Synth {
   }
 
   s16Output Tick();
+#ifdef __3DS__
+  // (AI-assisted) `samples` outputs at once, the same as calling Tick() that many times (nothing
+  // else changes the voices meanwhile): one voice at a time over the block.
+  void Tick(s16Output* out, int samples);
+#endif
   void AddVoice(std::shared_ptr<Voice> voice);
   void SetMasterVol(u32 volume);
 
