@@ -6,8 +6,8 @@
 #   run_my_emu.sh --app DIR --gk gk.3dsx --proj DIR --out DIR [--seconds N] [--pad FILE]
 #                 [--screenshots N] [--args "..."] [--gl] [--sound [CORE]]
 #
-#   --sound  audio output on (flag file sdmc:/3ds/jak1/sound; CORE = the mixer thread's core,
-#            default 2 on New 3DS, else 1). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
+#   --sound  audio output on (config.ini sound = on; CORE: sound_core = the mixer thread's core,
+#            default 0 on New 3DS, else 1). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
 #            Azahar's HLE DSP accepts any file (real hardware needs a real dump).
 #
 # DIR/Azahar.app and DIR/user/ (config/qt-config.ini with sdmc_directory=DIR/user/sdmc/).
@@ -50,18 +50,26 @@ mkdir -p "$DATA/out/jak1/iso" "$DATA/out/jak1/c3l"
 for f in "$PROJ"/out/jak1/iso/*; do cp -c "$f" "$DATA/out/jak1/iso/" 2>/dev/null || cp "$f" "$DATA/out/jak1/iso/"; done
 for f in "$PROJ"/out/jak1/c3l/*.c3l; do cp -c "$f" "$DATA/out/jak1/c3l/" 2>/dev/null || cp "$f" "$DATA/out/jak1/c3l/"; done
 cp "$GK" "$BASE/gk.3dsx"
-if [ "$HAVE_ARGS" = 1 ]; then echo "$ARGS" > "$BASE/args.txt"; else rm -f "$BASE/args.txt"; fi
-rm -f "$BASE/listener" "$BASE/use_syscore" "$BASE/perf_sections" "$BASE/single_core" "$BASE/sound"
+# the one settings file, made for this run: the --ini file (renderer settings) plus the options
+CONFIG="$BASE/config.ini"
+if [ -n "$INI" ]; then cp "$INI" "$CONFIG"; else : > "$CONFIG"; fi
+if [ "$HAVE_ARGS" = 1 ]; then echo "args = $ARGS" >> "$CONFIG"; fi
 if [ -n "$SOUND" ]; then
-  echo "$SOUND" > "$BASE/sound"
+  echo "sound = on" >> "$CONFIG"
+  if [[ "$SOUND" =~ ^[0-3]$ ]]; then echo "sound_core = $SOUND" >> "$CONFIG"; fi
   if [ ! -f "$SD/3ds/dspfirm.cdc" ]; then
     printf 'placeholder DSP component for Azahar HLE audio\n' > "$SD/3ds/dspfirm.cdc"
   fi
 fi
 rm -rf "$DATA/log" "$BASE/user"
-if [ -n "$PAD" ]; then cp "$PAD" "$BASE/pad_script.txt"; else rm -f "$BASE/pad_script.txt"; fi
-if [ -n "$INI" ]; then cp "$INI" "$BASE/render.ini"; else rm -f "$BASE/render.ini"; fi
-if [ "$SHOTS" != 0 ]; then echo "$SHOTS" > "$BASE/screenshots"; else rm -f "$BASE/screenshots"; fi
+if [ -n "$PAD" ]; then
+  cp "$PAD" "$BASE/pad_script.txt"
+  echo "pad_script = pad_script.txt" >> "$CONFIG"
+fi
+if [ "$SHOTS" != 0 ]; then echo "screenshots = $SHOTS" >> "$CONFIG"; fi
+# no other settings files
+rm -f "$BASE/args.txt" "$BASE/listener" "$BASE/use_syscore" "$BASE/perf_sections" "$BASE/single_core" \
+  "$BASE/sound" "$BASE/screenshots" "$BASE/debug_log" "$BASE/mips2c_native_off" "$BASE/render.ini" "$DATA/render.ini"
 mkdir -p "$(dirname "$AZ_LOG")"; : > "$AZ_LOG"
 
 # ---- run ----

@@ -39,10 +39,14 @@ CtrSettings load() {
   s.vram_textures = !s.emulator;
   const auto dir = file_util::get_jak_project_dir();
   fs::path path;
-  // (AI-assisted) config.ini: the one settings file (sound and system keys too, read by
-  // ctr_config_get); render.ini still works when there is no config.ini
-  for (const auto& p : {dir / "config.ini", dir.parent_path() / "config.ini", dir / "render.ini",
-                        dir.parent_path() / "render.ini"}) {
+  // (AI-assisted) config.ini, the one settings file (the sound and system keys in it are read by
+  // ctr_config_get): sdmc:/3ds/jak1/config.ini on the 3DS (the project dir's parent), the project
+  // dir on PC
+#ifdef __3DS__
+  for (const auto& p : {dir.parent_path() / "config.ini"}) {
+#else
+  for (const auto& p : {dir / "config.ini"}) {
+#endif
     if (fs::exists(p)) {
       path = p;
       break;
@@ -112,7 +116,9 @@ CtrSettings load() {
     } else if (key == "gpu_profile") {
       s.gpu_profile = parse_bool(v);
     } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
-               key == "mips2c_native_off" || key == "perf_sections") {
+               key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
+               key == "listener" || key == "screenshots" || key == "pad_script" ||
+               key == "debug_log") {
       // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp)
     } else {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);

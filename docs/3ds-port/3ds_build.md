@@ -149,13 +149,13 @@ A `.3dsx` runs inside another title's memory:
   Luma3DS lets the app handle them; otherwise Luma's exception screen appears (take a photo).
 - Logs: `sdmc:/3ds/jak1/data/log/stdout.log` (everything printed) and `gk.log` (debug level).
 - Old 3DS / Old 2DS: not enough memory (64 MB); the game says so and exits.
-- Optional flag files in `sdmc:/3ds/jak1/`: `args.txt` (game arguments, default `-boot
-  -cbackend`), `listener` (Wi-Fi REPL), `screenshots` (a number N: save the top screen every N
-  frames to `data/log`), `pad_script.txt` (scripted input, see below), `use_syscore`
-  (experimental: IOP / IO threads on core 1; hangs at boot in Azahar, untested on hardware),
-  `perf_sections` (per-section frame timing in the log, `stage_sd.sh --perf-sections`), `sound`
-  (audio output through the DSP; its content is the mixer thread's core, default 1;
-  `stage_sd.sh --sound [core]`, see "Sound" below).
+- All settings are in one file, `sdmc:/3ds/jak1/config.ini` (`config_ini.md`): renderer
+  settings, `args` (game arguments, default `-boot -cbackend`), `listener` (Wi-Fi REPL),
+  `screenshots` (N: save the top screen every N frames to `data/log`), `pad_script` (scripted
+  input, see below), `io_on_system_core` (experimental: IOP / IO threads on core 1; hangs at boot
+  in Azahar, untested on hardware), `perf_sections` (per-section frame timing in the log),
+  `sound` / `sound_core` (audio output through the DSP, see "Sound" below). `stage_sd.sh` options
+  set these keys.
 
 ### Automated gameplay test (scripted input)
 
@@ -165,7 +165,7 @@ in that state), `print SYM`, `pos *target*` (position in meters and state), `con
 (jumps to a checkpoint: `(start 'play (get-continue-by-name *game-info* NAME))`, for example
 `beach-start`), `crash` (tests the crash screen), `exit`.
 
-- 3DS: `sdmc:/3ds/jak1/pad_script.txt` (`stage_sd.sh --pad-script FILE`).
+- 3DS: `pad_script = FILE` in `config.ini` (`stage_sd.sh --pad-script FILE` copies it to `sdmc:/3ds/jak1/pad_script.txt`).
 - PC: `OPENGOAL_PAD_SCRIPT=FILE gk ...` (with `--null-gfx`, or `--ctr-gfx` to get frames).
 - `platform/3ds/tests/gameplay.pad`: title -> Start -> New Game (taps Cross, fine with an empty
   save) -> skips the intro cutscene (taps Triangle) -> waits for `target-stance` on Geyser Rock ->
@@ -196,7 +196,7 @@ Measured in Azahar with the gameplay script:
 - Everything but the renderer on core 0 (default): title 50+ fps, gameplay 12-15 fps.
 - IOP / listener / EE worker on core 2 (with the render thread): 1.4 fps (695 ms of logic per
   frame, the EE waits for the IOP). Not used.
-- IOP on core 1 (`APT_SetAppCpuTimeLimit(80)`, flag file `use_syscore`): boot hangs at the first
+- IOP on core 1 (`APT_SetAppCpuTimeLimit(80)`, `config.ini` `io_on_system_core = on`): boot hangs at the first
   IOP file load. Off by default.
 
 ### Controls
@@ -257,22 +257,22 @@ Face buttons by position, like the PS2 pad:
   `sdl_util`. The kernel only reaches them through `Display::GetMainDisplay()`, which is always
   null on the 3DS.
 - **Sound:** `snd::Player` without cubeb. The whole stack (overlord, RPCs, bank loading, 989snd
-  handlers, VAG streaming) runs as on PC. Audio output is opt-in with the flag file
-  `sdmc:/3ds/jak1/sound` (`platform/3ds/port/ctr_port.c`, `ctr_audio_*`): the 989snd software
+  handlers, VAG streaming) runs as on PC. Audio output is opt-in with `sound = on` in
+  `config.ini` (`platform/3ds/port/ctr_port.c`, `ctr_audio_*`): the 989snd software
   mixer (48 kHz stereo, PS2 SPU emulation, unchanged) runs on its own thread at `CTR_PRIO_SOUND`
-  on the core named in the file (default 1, the system core: the app gets 80% of it with
-  `APT_SetAppCpuTimeLimit` and may create one thread there, so cores 0 and 2 keep their time),
+  on the core `sound_core` names (default 0 on New 3DS, else 1; core 1 is the system core: the
+  app gets 80% of it with `APT_SetAppCpuTimeLimit` and may create one thread there),
   filling 3 buffers of 1024 frames (21 ms each) that one ndsp channel plays; the DSP resamples
   to its 32.7 kHz. It needs the DSP firmware `sdmc:/3ds/dspfirm.cdc` (real hardware: dump it
   once with the DSP1 homebrew; Azahar's HLE audio accepts any file, the scripts create a
-  placeholder). Without the flag file, or if the DSP can't start, a thread advances the 240 Hz
+  placeholder). Without `sound = on`, or if the DSP can't start, a thread advances the 240 Hz
   handler tick without synthesizing samples, voices are dropped as they start
   (`vagvoice.cpp`), and the VAG stream position for spooled cutscenes comes from the frame
   counter (`iso.cpp`, fake VAG clock) instead of the stream voice, which never moves then.
   `kperf` reports the mixer's time as `sound` in the "perf threads" line.
 - **Listener / DECI2:** `common/cross_sockets` compiles against libctru's BSD sockets.
   - `set_socket_timeout` does nothing; `SO_REUSEPORT` is skipped when it isn't defined.
-  - `gk` starts `soc:U` (1 MB of RAM) only if `sdmc:/3ds/jak1/listener` exists. Otherwise the
+  - `gk` starts `soc:U` (1 MB of RAM) only with `listener = on` in `config.ini`. Otherwise the
     DECI2 server fails to init and logs "REPL will not work", as on a PC with no network.
 - **Excluded:**
   - discord-rpc: replaced by `game/external/discord_rpc_null.cpp`.
@@ -286,8 +286,7 @@ Face buttons by position, like the PS2 pad:
 ```
 sdmc:/3ds/jak1/
   gk.3dsx                     the app (Homebrew Launcher lists sdmc:/3ds/**.3dsx)
-  args.txt                    optional: game args, whitespace separated (default: -boot)
-  listener                    optional, empty file: enable Wi-Fi REPL (soc:U, 1 MB RAM)
+  config.ini                  optional: all settings (docs/3ds-port/config_ini.md)
   data/                       = project path (file_util::get_jak_project_dir())
     out/jak1/iso/             everything the fake ISO serves, same as on PC:
                                 KERNEL.CGO GAME.CGO *.DGO, VAGDIR.AYB, VAGWAD.*, *.STR,
@@ -521,8 +520,8 @@ platform/3ds/tools/stage_sd.sh --proj ../p3ds --clean-logs --screenshots 120
 platform/3ds/tools/run_emu.sh --seconds 150
 ```
 
-- **Settings (`render.ini`):** read at startup from `sdmc:/3ds/jak1/render.ini` (on PC:
-  `<project>/render.ini`), `key = value` lines, `#` comments. The log prints the values in use.
+- **Settings (`config.ini`):** read at startup from `sdmc:/3ds/jak1/config.ini` (on PC:
+  `<project>/config.ini`), `key = value` lines, `#` comments. The log prints the values in use.
   `config_ini.md` has a complete example file and recommended settings.
 
   | key | default | meaning |
@@ -599,9 +598,9 @@ process pointer (s6) the original clobbers, stores in branch delay slots, delibe
   `OPENGOAL_MIPS2C_VERIFY_FULL_EVERY` (default 8) by saving, restoring and comparing all of GOAL
   memory. Mismatches are logged as `mips2c verify MISMATCH`, a summary line `mips2c verify:` every
   20 s. `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the checker).
-- `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions. On the 3DS: the flag file
-  `sdmc:/3ds/jak1/mips2c_native_off`, empty for all natives, or the names of the functions to
-  turn off, one per line (e.g. `sp-launch-particles-var`). stdout.log says which are off. A native
+- `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions. On the 3DS: `config.ini`
+  `mips2c_native_off = all`, or the names of the functions to turn off, separated by spaces or
+  commas (e.g. `sp-launch-particles-var`). stdout.log says which are off. A native
   that another native calls directly (`native_stub_slot`) still runs from there: turn its callers
   off too.
 - Native code must store to GOAL memory only through `gstore*` (verify mode logs them).

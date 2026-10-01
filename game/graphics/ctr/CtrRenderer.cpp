@@ -48,7 +48,7 @@ namespace {
 std::string g_shot_dir;
 int g_shot_every = 0;
 
-// render.ini gpu_profile: what each mode leaves out (bucket renderer names)
+// config.ini gpu_profile: what each mode leaves out (bucket renderer names)
 struct ProfileMode {
   const char* label;
   const char* skip[3];
@@ -465,7 +465,7 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
       m_buckets[bucket_id]->render(dma, m_rs);
     }
     m_bucket_ms[bucket_id] += ctr_gpu_time_ms() - tb;
-    ctr_gpu_submit_partial();  // render.ini overlap: the GPU starts on what's built so far
+    ctr_gpu_submit_partial();  // config.ini overlap: the GPU starts on what's built so far
     if (dma.current_tag_offset() != m_rs.next_bucket) {
       lg::error("[ctr] bucket {} ({}) did not end at the next bucket", bucket_id,
                 m_buckets[bucket_id]->name());

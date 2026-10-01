@@ -62,10 +62,10 @@ constexpr int kRpcChannels = 8;
 u64 g_rpc_wait[kRpcChannels];
 u64 g_rpc_last_busy[kRpcChannels];
 
-// sampled per-section timing (3DS, no flag file)
+// sampled per-section timing (3DS, perf_sections off)
 constexpr int kSectionSampleEvery = 15;  // report windows (about seconds)
 void (*g_sections_hook)(bool) = nullptr;
-bool g_sections_forced = false;  // flag file / environment: always on
+bool g_sections_forced = false;  // config.ini perf_sections / environment: always on
 int g_windows = 0;
 }  // namespace
 
@@ -130,11 +130,7 @@ void init_sections() {
   }
   done = true;
 #ifdef __3DS__
-  FILE* f = fopen("/3ds/jak1/perf_sections", "r");
-  if (f) {
-    fclose(f);
-  }
-  if (f || ctr_config_bool("perf_sections", 0)) {  // config.ini or the flag file
+  if (ctr_config_bool("perf_sections", 0)) {  // config.ini
     g_sections_enabled = true;
     g_sections_forced = true;
   }

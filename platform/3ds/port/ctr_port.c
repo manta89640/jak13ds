@@ -74,7 +74,7 @@ void ctr_port_set_gpu_active(int active) {
   s_gpu_active = active;
 }
 static int s_irrst = 0;
-static int s_syscore = 0;   /* IOP / IO threads on core 1 (use_syscore) */
+static int s_syscore = 0;   /* IOP / IO threads on core 1 (config.ini io_on_system_core) */
 static int s_cpu_limit = 0; /* the app got a share of core 1 (APT_SetAppCpuTimeLimit) */
 static int s_sound = 0;
 static int s_sound_core = 1; /* 2 on New 3DS: see ctr_platform_init */
@@ -131,15 +131,12 @@ static void config_trim(char* s) {
 }
 
 int ctr_config_get(const char* key, char* out, int size) {
-  static const char* const kFiles[] = {"sdmc:/3ds/jak1/data/config.ini", "sdmc:/3ds/jak1/config.ini",
-                                       "sdmc:/3ds/jak1/data/render.ini", "sdmc:/3ds/jak1/render.ini"};
-  for (int i = 0; i < 4; i++) {
-    FILE* f = fopen(kFiles[i], "r");
+  {
+    FILE* f = fopen("sdmc:/3ds/jak1/config.ini", "r");
     if (!f) {
-      continue;
+      return 0;
     }
-    /* the first file that exists is the settings file */
-    char line[256];
+    char line[512];
     int found = 0;
     while (!found && fgets(line, sizeof(line), f)) {
       char* c = strpbrk(line, "#;");
@@ -198,13 +195,13 @@ int ctr_platform_init(int enable_console) {
    * left to the game logic (EE thread). 80% of core 1; the system keeps the rest. */
   /* Experimental, off by default: in Azahar, boot hangs at the first IOP file load when the IOP
    * thread runs on core 1 (not investigated further; untested on hardware). Turned on by the file
-   * sdmc:/3ds/jak1/use_syscore. */
-  /* Audio output (flag file sdmc:/3ds/jak1/sound, content: the mixer's core). Default: core 2 on
-   * New 3DS, which is all the application's (it shares it with the render thread), else core 1.
+   * config.ini io_on_system_core = on. */
+  /* Audio output (config.ini: sound = on, sound_core = N). Default core: 0 on New 3DS (core 2
+   * runs the render thread), else core 1.
    * Core 1 is the system core: the system's services (GPU, SD card, DSP, input) run there, so a
    * busy mixer on it slows every service call of the game on real hardware, and the app only gets
    * a share of it (APT_SetAppCpuTimeLimit; the kernel allows one app thread there). */
-  /* (AI-assisted) config.ini: sound = on, sound_core = N (the flag file still works) */
+  /* (AI-assisted) config.ini: sound = on, sound_core = N */
   {
     char v[16];
     if (ctr_config_bool("sound", 0)) {
@@ -215,22 +212,7 @@ int ctr_platform_init(int enable_console) {
       }
     }
   }
-  if (!s_sound) {
-    FILE* f = fopen("/3ds/jak1/sound", "r");
-    if (f) {
-      s_sound = 1;
-      /* (AI-assisted) core 0 on New 3DS: core 2 runs the render thread, which limits the frame
-       * rate; the game thread on core 0 waits for it most of the frame */
-      s_sound_core = ctr_is_new3ds() ? 0 : 1;
-      int core = s_sound_core;
-      if (fscanf(f, "%d", &core) == 1 && core >= 0 && core <= 3) {
-        s_sound_core = core;
-      }
-      fclose(f);
-    }
-  }
-  int want_syscore = ctr_config_bool("io_on_system_core", 0) ||
-                     access("/3ds/jak1/use_syscore", F_OK) == 0;
+  int want_syscore = ctr_config_bool("io_on_system_core", 0);
   if (want_syscore || (s_sound && s_sound_core == 1)) {
     ctr_core1_enable();
   }

@@ -83,7 +83,7 @@ Next steps, by expected gain:
 
 On a real New 3DS the beach ran at ~10 fps with the GPU as the bottleneck (60-90 ms of GPU time
 per frame, depending on the view). Azahar doesn't model GPU timing, so this doesn't show up there.
-Lower draw distances (`render.ini`: 300 / 100) didn't help: the triangle count isn't the problem.
+Lower draw distances (`config.ini`: 300 / 100) didn't help: the triangle count isn't the problem.
 The cause is texture reads: level textures had no mip levels and were in linear memory (FCRAM),
 so every far away surface read its texture at full size and missed the GPU's small texture cache.
 
@@ -100,9 +100,9 @@ What changed (c3l v8, see c3l_format.md):
 - **Sprites:** indexed quads written straight into the vertex buffer, cheaper sin/cos.
 - **Sound:** the mixer mixes blocks of samples per voice instead of one sample at a time over all
   voices. It took 30-60% of the core it ran on at the beach; put it on a core without the render
-  thread (the number in the `sdmc:/3ds/jak1/sound` flag file).
+  thread (`sound_core` in `config.ini`).
 
-To see where the GPU time goes on hardware: `gpu_profile = 1` in `render.ini` leaves out one
+To see where the GPU time goes on hardware: `gpu_profile = 1` in `config.ini` leaves out one
 group of renderers at a time (level, merc + eyes, sprites, ocean, direct; 2.5 s each, then
 everything) and logs `[ctr] gpu profile: all X ms, level Y, ...`: the GPU time of a whole frame
 and what each group costs (the difference). The frame statistics also log draws, texture

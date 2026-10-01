@@ -3,8 +3,9 @@
 /*!
  * @file CtrSettings.h
  * (AI-assisted)
- * Quality / performance settings of the 3DS renderer, read once at startup from render.ini:
- * sdmc:/3ds/jak1/render.ini on the 3DS (next to gk.3dsx), <project>/render.ini on PC.
+ * Quality / performance settings of the 3DS renderer, read once at startup from config.ini:
+ * sdmc:/3ds/jak1/config.ini on the 3DS (next to gk.3dsx), <project>/config.ini on PC (the one
+ * settings file; docs/3ds-port/config_ini.md).
  * Format: "key = value" lines, '#' or ';' comments. See docs/3ds-port/3ds_build.md.
  */
 

@@ -12,19 +12,22 @@
 #   --gk     gk.3dsx to copy (default: build-3ds/gk.3dsx)
 #   --c3l    folder with the level backgrounds (default: <proj>/out/jak1/c3l if it exists;
 #            make them with: ctr_level_converter --all out/jak1/fr3 <dir>)
-#   --args   write args.txt (default: remove it, gk then uses "-boot -cbackend")
-#   --listener  create the "listener" flag file (Wi-Fi REPL)
+# All settings go in one file, sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). The
+# options below set keys in it; other lines stay. Without --config the card's config.ini is kept
+# and updated; with --config FILE it starts from that file. Old flag files are removed.
+#
+#   --config FILE  the config.ini to start from (--render-ini FILE: the same)
+#   --args   args = ... (gk's default: "-boot -cbackend")
+#   --listener  listener = on (Wi-Fi REPL)
 #   --clean-logs  delete data/log before the run
 #   --clean-user  delete user/ (settings, saves) before the run
-#   --screenshots N  gk saves a screenshot every N frames to data/log/shot_<frame>.bmp
-#   --pad-script FILE  scripted controller input (game/sce/pad_script.h), for automated tests
-#   --use-syscore  run the IOP / listener / worker threads on core 1 (experimental)
-#   --sound [CORE]  audio output (the "sound" flag file; CORE = the mixer thread's core, default: 2 on New 3DS, else 1).
+#   --screenshots N  screenshots = N: a screenshot every N frames to data/log/shot_<frame>.bmp
+#   --pad-script FILE  pad_script = pad_script.txt (copied): scripted controller input for tests
+#   --use-syscore  io_on_system_core = on: the IOP / listener / worker threads on core 1 (experimental)
+#   --sound [CORE]  sound = on (and sound_core = CORE; default: 0 on New 3DS, else 1).
 #            Needs sdmc:/3ds/dspfirm.cdc: a real dump on hardware (DSP1 homebrew), any file for
 #            Azahar's HLE audio (a placeholder is created on the emulator's SD card if missing).
-#   --perf-sections  per-section frame timing in the log (the perf_sections flag file)
-#   --render-ini FILE  renderer settings for this run (copied to data/render.ini, which takes
-#            precedence over sdmc:/3ds/jak1/render.ini; removed when the option is not given)
+#   --perf-sections  perf_sections = on: per-section frame timing in the log
 #
 # Files are copied with APFS clones (cp -c) when possible, so staging 1.3 GB is instant on macOS.
 set -euo pipefail
@@ -61,7 +64,7 @@ while [ $# -gt 0 ]; do
     --use-syscore) USE_SYSCORE=1; shift ;;
     --perf-sections) PERF_SECTIONS=1; shift ;;
     --sound) SOUND=auto; if [ $# -gt 1 ] && [[ "$2" =~ ^[0-3]$ ]]; then SOUND="$2"; shift; fi; shift ;;
-    --render-ini) RENDER_INI="$2"; shift 2 ;;
+    --render-ini|--config) RENDER_INI="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
 done
@@ -126,18 +129,38 @@ if [ -d "$C3L" ]; then
   echo "staged level backgrounds from $C3L"
 fi
 
-if [ "$HAVE_ARGS" = 1 ]; then
-  echo "$ARGS" > "$BASE/args.txt"
-else
-  rm -f "$BASE/args.txt"
-fi
-if [ "$LISTENER" = 1 ]; then touch "$BASE/listener"; else rm -f "$BASE/listener"; fi
 if [ "$CLEAN_LOGS" = 1 ]; then rm -rf "$DATA/log"; fi
 if [ "$CLEAN_USER" = 1 ]; then rm -rf "$BASE/user"; fi
-if [ "$USE_SYSCORE" = 1 ]; then touch "$BASE/use_syscore"; else rm -f "$BASE/use_syscore"; fi
-if [ "$PERF_SECTIONS" = 1 ]; then touch "$BASE/perf_sections"; else rm -f "$BASE/perf_sections"; fi
+
+# the one settings file
+CONFIG="$BASE/config.ini"
+TMP_CONFIG="$(mktemp)"
+if [ -n "$RENDER_INI" ]; then
+  cp "$RENDER_INI" "$TMP_CONFIG"
+elif [ -f "$CONFIG" ]; then
+  cp "$CONFIG" "$TMP_CONFIG"
+elif [ -f "$BASE/render.ini" ]; then
+  cp "$BASE/render.ini" "$TMP_CONFIG"  # the older name: carried over
+fi
+set_key() {  # set_key KEY VALUE: replace the key's line (or add it)
+  local tmp2
+  tmp2="$(mktemp)"
+  grep -v -E "^[[:space:]]*$1[[:space:]]*=" "$TMP_CONFIG" > "$tmp2" || true
+  echo "$1 = $2" >> "$tmp2"
+  mv "$tmp2" "$TMP_CONFIG"
+}
+if [ "$HAVE_ARGS" = 1 ]; then set_key args "$ARGS"; fi
+if [ "$LISTENER" = 1 ]; then set_key listener on; fi
+if [ "$USE_SYSCORE" = 1 ]; then set_key io_on_system_core on; fi
+if [ "$PERF_SECTIONS" = 1 ]; then set_key perf_sections on; fi
+if [ "$SHOTS" != 0 ]; then set_key screenshots "$SHOTS"; fi
+if [ -n "$PAD_SCRIPT" ]; then
+  cp "$PAD_SCRIPT" "$BASE/pad_script.txt"
+  set_key pad_script pad_script.txt
+fi
 if [ -n "$SOUND" ]; then
-  echo "$SOUND" > "$BASE/sound"
+  set_key sound on
+  if [ "$SOUND" != auto ]; then set_key sound_core "$SOUND"; fi
   if [ ! -f "$SD/3ds/dspfirm.cdc" ]; then
     if [ -z "${SD_GIVEN:-}" ]; then
       printf 'placeholder DSP component for Azahar HLE audio\n' > "$SD/3ds/dspfirm.cdc"
@@ -146,12 +169,12 @@ if [ -n "$SOUND" ]; then
       echo "warning: no $SD/3ds/dspfirm.cdc, the game will run without audio (dump it with the DSP1 homebrew)" >&2
     fi
   fi
-else
-  rm -f "$BASE/sound"
 fi
-rm -f "$BASE/single_core"
-if [ -n "$PAD_SCRIPT" ]; then cp "$PAD_SCRIPT" "$BASE/pad_script.txt"; else rm -f "$BASE/pad_script.txt"; fi
-if [ -n "$RENDER_INI" ]; then cp "$RENDER_INI" "$DATA/render.ini"; else rm -f "$DATA/render.ini"; fi
-if [ "$SHOTS" != 0 ]; then echo "$SHOTS" > "$BASE/screenshots"; else rm -f "$BASE/screenshots"; fi
+mv "$TMP_CONFIG" "$CONFIG"
+# no other settings files: the old flag files and render.ini copies are gone
+rm -f "$BASE/args.txt" "$BASE/listener" "$BASE/use_syscore" "$BASE/perf_sections" "$BASE/sound" \
+  "$BASE/single_core" "$BASE/screenshots" "$BASE/debug_log" "$BASE/mips2c_native_off" "$BASE/render.ini" \
+  "$DATA/render.ini"
+echo "settings: $CONFIG"
 
 echo "staged $n files + gk.3dsx in $BASE"
