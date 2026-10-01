@@ -470,6 +470,32 @@ bool CtrLevels::load_file(const fs::path& path,
       // blending, or drawn over what's there without writing depth (decals): keep the order
       out->draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
     }
+    // drawing order, made once (see sorted_draws)
+    out->draw_chunk.assign(out->draws.size(), 0);
+    for (u32 ci = 0; ci < out->chunks.size(); ci++) {
+      const auto& ch = out->chunks[ci];
+      for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+        out->draw_chunk[ch.first_draw + k] = ci;
+      }
+    }
+    std::vector<u64> sorted;
+    for (u32 ci = 0; ci < out->chunks.size(); ci++) {
+      const auto& ch = out->chunks[ci];
+      for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+        const u32 di = ch.first_draw + k;
+        if (out->draw_ordered[di]) {
+          out->ordered_draws.push_back(di);
+        } else {
+          // (draws are numbered in chunk order: di sorts like (chunk, draw))
+          sorted.push_back(((u64)out->draw_sort_keys[di] << 32) | di);
+        }
+      }
+    }
+    std::sort(sorted.begin(), sorted.end());
+    out->sorted_draws.reserve(sorted.size());
+    for (u64 e : sorted) {
+      out->sorted_draws.push_back((u32)e);
+    }
   }
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
@@ -973,6 +999,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // Jak 1 scissor adjust (tfrag3.vert: y *= 512 / 448)
   constexpr float kYScale = 512.f / 448.f;
   m_visible.clear();
+  m_visible_slot.assign(lev.chunks.size(), -1);
   for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
     const auto& ch = lev.chunks[ci];
     if (lev.meshes[ci] < 0 || !sphere_in_view(ch.bsphere, cam.planes)) {
@@ -1010,11 +1037,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       }
     }
-    if (m_visible.size() >= 4096 || ch.draw_count >= (1u << 20)) {
-      break;  // (the draw references below have 12 bits for the chunk)
-    }
     // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
     // The translation is done in double: world coordinates are large.
+    m_visible_slot[ci] = (int)m_visible.size();
     VisibleChunk& vc = m_visible.emplace_back();
     vc.chunk = (u32)ci;
     double d[3];
@@ -1041,33 +1066,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // The draws whose order doesn't matter (opaque, depth written) sorted by texture and state,
   // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
   // of their textures. Then the others (blending, decals) in their order, over the opaque ones.
-  m_sorted.clear();
-  m_ordered.clear();
-  for (u32 v = 0; v < m_visible.size(); v++) {
-    const auto& ch = lev.chunks[m_visible[v].chunk];
-    for (u32 k = 0; k < ch.draw_count; k++) {
-      const u32 di = ch.first_draw + k;
-      const u32 ref = (v << 20) | k;
-      if (lev.draw_ordered[di]) {
-        m_ordered.push_back(ref);
-      } else {
-        m_sorted.push_back(((u64)lev.draw_sort_keys[di] << 32) | ref);
-      }
+  // The order is made at load (sorted_draws, ordered_draws): only the visible chunks' draws.
+  auto draw = [&](u32 di) {
+    const int slot = m_visible_slot[lev.draw_chunk[di]];
+    if (slot < 0) {
+      return;
     }
-  }
-  std::sort(m_sorted.begin(), m_sorted.end());
-  auto draw_ref = [&](u32 ref) {
-    const VisibleChunk& vc = m_visible[ref >> 20];
-    const auto& ch = lev.chunks[vc.chunk];
-    const u32 di = ch.first_draw + (ref & 0xfffff);
+    const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
     ctr_gpu_draw_mesh(&lev.draw_states[di], vc.clip, lev.meshes[vc.chunk], dr.first_index,
                       dr.index_count);
   };
-  for (u64 e : m_sorted) {
-    draw_ref((u32)e);
+  for (u32 di : lev.sorted_draws) {
+    draw(di);
   }
-  for (u32 ref : m_ordered) {
-    draw_ref(ref);
+  for (u32 di : lev.ordered_draws) {
+    draw(di);
   }
 }
