@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -90,6 +91,62 @@ bool natives_disabled() {
     off = (v && v[0] == '0') ? 1 : 0;
   }
   return off == 1;
+#endif
+}
+
+#ifdef __3DS__
+/*!
+ * The flag file sdmc:/3ds/jak1/mips2c_native_off makes the 3DS run the mips2c versions instead of
+ * the natives, to check on hardware whether a native changes something. Empty: all of them.
+ * Otherwise the names of the functions to turn off, one per line. (A native that another native
+ * calls directly, see "native_stub_slot", still runs there unless its caller is off too.)
+ * Returns null without the flag file.
+ */
+const std::vector<std::string>* native_off_list() {
+  static bool read = false;
+  static bool exists = false;
+  static std::vector<std::string> names;
+  if (!read) {
+    read = true;
+    if (FILE* f = fopen("sdmc:/3ds/jak1/mips2c_native_off", "rb")) {
+      exists = true;
+      char line[256];
+      while (fgets(line, sizeof(line), f)) {
+        std::string name(line);
+        while (!name.empty() && (name.back() == '\n' || name.back() == '\r' ||
+                                 name.back() == ' ' || name.back() == '\t')) {
+          name.pop_back();
+        }
+        const size_t start = name.find_first_not_of(" \t");
+        if (start != std::string::npos) {
+          names.push_back(name.substr(start));
+        }
+      }
+      fclose(f);
+      if (names.empty()) {
+        lg::warn("mips2c: native functions off (flag file mips2c_native_off): mips2c versions");
+      } else {
+        for (const auto& n : names) {
+          lg::warn("mips2c: native {} off (flag file mips2c_native_off): mips2c version", n);
+        }
+      }
+    }
+  }
+  return exists ? &names : nullptr;
+}
+#endif
+
+//! The mips2c version of `name` runs instead of the native one
+bool native_off(const std::string& name) {
+#ifdef __3DS__
+  const auto* list = native_off_list();
+  if (!list) {
+    return false;
+  }
+  return list->empty() || std::find(list->begin(), list->end(), name) != list->end();
+#else
+  (void)name;
+  return natives_disabled();
 #endif
 }
 
@@ -482,7 +539,7 @@ u32 native_goalc_fn_id(const std::string& name,
                        u64 (*exec)(void*),
                        u32 stack_size,
                        const NativeImpl* impl) {
-  if (natives_disabled()) {
+  if (native_off(name)) {
     return 0;
   }
   NativeEntry* e;

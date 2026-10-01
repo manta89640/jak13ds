@@ -579,7 +579,11 @@ process pointer (s6) the original clobbers, stores in branch delay slots, delibe
   `OPENGOAL_MIPS2C_VERIFY_FULL_EVERY` (default 8) by saving, restoring and comparing all of GOAL
   memory. Mismatches are logged as `mips2c verify MISMATCH`, a summary line `mips2c verify:` every
   20 s. `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the checker).
-- `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions.
+- `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions. On the 3DS: the flag file
+  `sdmc:/3ds/jak1/mips2c_native_off`, empty for all natives, or the names of the functions to
+  turn off, one per line (e.g. `sp-launch-particles-var`). stdout.log says which are off. A native
+  that another native calls directly (`native_stub_slot`) still runs from there: turn its callers
+  off too.
 - Native code must store to GOAL memory only through `gstore*` (verify mode logs them).
 - Quadwords that the mips2c code moves with `lqc2`/`sqc2` (which assert 16-byte alignment) or
   `lq`/`sq` (which align down) should use `gload_q`/`gstore_q`: the compiler then moves them with
