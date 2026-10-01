@@ -61,6 +61,14 @@ fi
 mkdir -p "$BUILD_DIR"
 
 CIA_DIR="$ROOT/platform/3ds/cia"
+# (AI-assisted) a banner made from your own copy of the game (the title logo, the power cell jingle):
+# platform/3ds/cia/local/banner.png (256x128) and banner.wav (3 s at most). The folder is ignored
+# by git: game assets are never committed. See docs/3ds-port/3ds_build.md, "Custom HOME Menu banner".
+BANNER_PNG="$CIA_DIR/banner.png"
+BANNER_WAV="$CIA_DIR/banner.wav"
+[ -f "$CIA_DIR/local/banner.png" ] && BANNER_PNG="$CIA_DIR/local/banner.png"
+[ -f "$CIA_DIR/local/banner.wav" ] && BANNER_WAV="$CIA_DIR/local/banner.wav"
+echo "banner: $BANNER_PNG, $BANNER_WAV"
 BANNERTOOL="$(command -v bannertool || true)"
 [ -n "$BANNERTOOL" ] || BANNERTOOL="$HOME/devkitpro-3ds/tools/bin/bannertool"
 [ -x "$BANNERTOOL" ] || echo "bannertool not found: no banner (see the header of this script)" >&2
@@ -74,7 +82,7 @@ build_cia() {
   local out="$1" rsf="$2" short="$3" long="$4"
   local smdh="$SMDH" banner_args=()
   if [ -x "$BANNERTOOL" ]; then
-    "$BANNERTOOL" makebanner -i "$CIA_DIR/banner.png" -a "$CIA_DIR/banner.wav" \
+    "$BANNERTOOL" makebanner -i "$BANNER_PNG" -a "$BANNER_WAV" \
       -o "$BUILD_DIR/banner.bnr" > /dev/null
     smdh="$BUILD_DIR/$(basename "$out" .cia).smdh"
     "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p "OpenGOAL" -i "$CIA_DIR/icon.png" \
