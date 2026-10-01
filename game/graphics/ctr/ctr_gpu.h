@@ -198,6 +198,16 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
                               int palette_count, const float fade[4], int mesh, int first_index,
                               int index_count);
 
+/* The same with the matrix converted once (ctr_gpu_prepare_mesh_matrix) for many draws: the level
+ * renderer draws chunks interleaved (sorted by texture), so the conversion would be redone at
+ * every chunk change. */
+typedef struct {
+  float m[16];
+} ctr_mesh_matrix;
+void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
+void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                                int mesh, int first_index, int index_count);
+
 /* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)
  *   distance fog = (w * fog1.x - fog1.y) * fog1.z

@@ -177,6 +177,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   struct VisibleChunk {
     u32 chunk;
     float clip[16];
+    ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };
   std::vector<VisibleChunk> m_visible;
   std::vector<int> m_visible_slot;  // per chunk: index in m_visible, -1: not drawn

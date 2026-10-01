@@ -1061,6 +1061,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (int i = 0; i < 4; i++) {
       m[4 + i] *= kYScale;
     }
+    ctr_gpu_prepare_mesh_matrix(m, &vc.gpu);
   }
 
   // The draws whose order doesn't matter (opaque, depth written) sorted by texture and state,
@@ -1074,8 +1075,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
-    ctr_gpu_draw_mesh(&lev.draw_states[di], vc.clip, lev.meshes[vc.chunk], dr.first_index,
-                      dr.index_count);
+    ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk],
+                               dr.first_index, dr.index_count);
   };
   for (u32 di : lev.sorted_draws) {
     draw(di);
