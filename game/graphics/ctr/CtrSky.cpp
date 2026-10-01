@@ -85,6 +85,14 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs) {
     if (idx < 0) {
       continue;
     }
+    auto& out = m_rgba[idx];
+    const size_t n = (size_t)kSize[idx] * kSize[idx] * 4;
+    if (first) {
+      // the frame's blend starts from zero even when this source can't be read: the adds that
+      // follow would otherwise pile up over the frames (a saturated, technicolour sky)
+      out.assign(n, 0);
+      m_dirty[idx] = true;
+    }
     int w = 0, h = 0;
     const bool decoded = rs.vram->decode_for_cpu(tex0, &m_decode, &w, &h);
     GsTex0 t(tex0);
@@ -109,18 +117,12 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs) {
         c = (c & 0xffffffu) | (0x80u << 24);
       }
     }
-    auto& out = m_rgba[idx];
-    const size_t n = (size_t)w * h * 4;
-    out.resize(n);
+    if (out.size() != n) {
+      out.assign(n, 0);
+    }
     const u8* in = (const u8*)m_decode.data();
-    if (first) {
-      for (size_t i = 0; i < n; i++) {
-        out[i] = (u8)std::min<u32>(255, (in[i] * intensity) >> 7);
-      }
-    } else {
-      for (size_t i = 0; i < n; i++) {
-        out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
-      }
+    for (size_t i = 0; i < n; i++) {
+      out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
     }
     m_dirty[idx] = true;
     m_valid[idx] = true;
