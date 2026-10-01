@@ -53,8 +53,16 @@ std::vector<Image> make_mips(const Image& base, int levels, const MipOptions& op
  */
 void fill_transparent_colors(Image* img);
 
-/*! quality: 0 low, 1 medium, 2 high (rg_etc1) */
-void encode_level(const Image& img, Format fmt, int etc1_quality, std::vector<uint8_t>* out);
+/*!
+ * quality: 0 low, 1 medium, 2 high (rg_etc1). alpha_ref (1..255, 0: none): the alpha test reference
+ * of the draws using the texture; 4-bit alpha is rounded so that every texel passes or fails the
+ * test like its 8-bit alpha does (cut-out edges don't move).
+ */
+void encode_level(const Image& img,
+                  Format fmt,
+                  int etc1_quality,
+                  std::vector<uint8_t>* out,
+                  int alpha_ref = 0);
 
 /*! Decoders (for tests and previews): one level in the layout above -> Image. */
 Image decode_level(const uint8_t* data, int w, int h, Format fmt);
