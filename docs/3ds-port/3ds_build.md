@@ -452,15 +452,16 @@ platform/3ds/tools/run_emu.sh --seconds 150
 
 - **Settings (`render.ini`):** read at startup from `sdmc:/3ds/jak1/render.ini` (on PC:
   `<project>/render.ini`), `key = value` lines, `#` comments. The log prints the values in use.
+  `render_ini.md` has a complete example file and recommended settings.
 
   | key | default | meaning |
   |---|---|---|
-  | `draw_distance` | 300 | meters; level chunks further away are not drawn, fog hides the cut (0 = off) |
+  | `draw_distance` | 500 | meters; level chunks further away are not drawn, fog hides the cut (0 = off) |
   | `fog_start` | 0.6 | the extra fog starts at this fraction of the draw distance |
   | `fog` | on | the game's own distance fog |
-  | `lod_distance` | 120 | meters; near tfrag version up to here, coarse beyond (0 = always near) |
+  | `lod_distance` | 200 | meters; near tfrag version up to here, coarse beyond (0 = always near) |
   | `far_level_distance` | 40 | meters; a level whose bounds are further away (seen from a neighbouring level) is drawn with only its lowres tfrag, no tie (0 = off) |
-  | `detail_scale` | 1 | multiplies the draw distance of small and medium tie objects |
+  | `detail_scale` | 1 | multiplies the draw distance of small and medium tie objects and shrubs |
   | `merc` | on | draw merc models |
   | `sprites` | on | draw world sprites (particles); the HUD is always drawn |
   | `max_sprites` | 1000 | world sprites per frame |
