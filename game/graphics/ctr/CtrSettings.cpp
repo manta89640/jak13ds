@@ -90,6 +90,8 @@ CtrSettings load() {
       s.envmap = parse_bool(v);
     } else if (key == "sky") {
       s.sky = parse_bool(v);
+    } else if (key == "overlap") {
+      s.overlap = parse_bool(v);
     } else if (key == "max_sprites") {
       s.max_sprites = std::atoi(v.c_str());
     } else if (key == "rgba4_as_rgba8") {

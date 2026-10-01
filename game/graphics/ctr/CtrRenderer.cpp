@@ -435,6 +435,7 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
       m_buckets[bucket_id]->render(dma, m_rs);
     }
     m_bucket_ms[bucket_id] += ctr_gpu_time_ms() - tb;
+    ctr_gpu_submit_partial();  // render.ini overlap: the GPU starts on what's built so far
     if (dma.current_tag_offset() != m_rs.next_bucket) {
       lg::error("[ctr] bucket {} ({}) did not end at the next bucket", bucket_id,
                 m_buckets[bucket_id]->name());
@@ -506,6 +507,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
+  ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
   g_ctr = std::make_unique<CtrRenderer>();
   // Both load on the loader thread while the game boots. The title level (the Naughty Dog logo,
   // the title screen) is the first one the game wants; loaded only when the game has it, the logo
