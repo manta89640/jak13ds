@@ -364,6 +364,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // bones as 3x4 rows: camera = -(tmat[0] * x + tmat[1] * y + tmat[2] * z + tmat[3]),
   // with the model's quantization scale folded in
   float palette_rows[CTR_MAX_PALETTE * 12];
+  const c3l::MercDraw* rows_of = nullptr;  // the draw whose palette palette_rows holds
   for (const auto& draw : model->draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
@@ -382,7 +383,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         fade[c] = f[c] / 128.f;  // GS units: 0x80 = 1.0
       }
     }
-    for (int p = 0; p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
+    // the draws of a model with at most 24 bones share one palette: made once
+    const bool same_palette = rows_of && rows_of->palette_count == draw.palette_count &&
+                              !memcmp(rows_of->palette, draw.palette, draw.palette_count);
+    for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       const MercMat& m = bones[draw.palette[p]];
       float* rows = &palette_rows[12 * p];
       for (int r = 0; r < 3; r++) {
@@ -392,6 +396,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         rows[4 * r + 3] = -m.tmat[3][r];
       }
     }
+    rows_of = &draw;
     int tex = draw.texture < lev->textures.size() ? lev->textures[draw.texture] : -1;
     if (!envmap && draw.eye_id != 0xff && m_eyes) {
       const int eye = m_eyes->texture(draw.eye_id);
