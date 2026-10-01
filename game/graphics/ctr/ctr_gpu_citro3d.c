@@ -1360,10 +1360,13 @@ int ctr_gpu_copy_screen(void) {
 }
 
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
-  /* color buffer column = screen y from the bottom (240), row = screen x from the left (400);
-   * texture s along the columns (256), t along the rows (512), t = 0 at the first row */
+  /* color buffer column = screen y from the bottom (240), row = screen x from the left (400)
+   * (see write_screenshot); texture s along the columns (256), t along the rows (512). The GPU
+   * samples t = 0 from the LAST row in memory (as swizzle_rgba8), so memory row r is at
+   * t = 1 - r / 512: the copied screen is t = 1 (left) down to 112 / 512 (right); below that are
+   * rows the copy never writes (black). */
   *s = (y + 1.0f) * 0.5f * (240.0f / 256.0f);
-  *t = (x + 1.0f) * 0.5f * (400.0f / 512.0f);
+  *t = 1.0f - (x + 1.0f) * 0.5f * (400.0f / 512.0f);
 }
 
 /* ---------------- static meshes ---------------- */
