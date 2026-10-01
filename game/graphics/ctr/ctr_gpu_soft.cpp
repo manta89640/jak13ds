@@ -382,7 +382,7 @@ void ctr_gpu_frame_end(void) {
   }
 }
 
-void ctr_gpu_wait_vblank(void) {
+void ctr_gpu_wait_vblank(int /*min_vblanks*/) {
   using clock = std::chrono::steady_clock;
   constexpr auto kFrame = std::chrono::nanoseconds(1000000000LL / 60);
   auto now = clock::now();

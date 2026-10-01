@@ -54,6 +54,7 @@ merc = on                  # characters and objects
 sprites = on               # world particles; the HUD is always drawn
 max_sprites = 1000         # world particles per frame
 ocean = on                 # the ocean
+fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 60: up to 60
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color
 overlap = off              # on: the GPU starts drawing each part of a frame while the CPU builds the rest (experimental)
 pipeline = off             # on: the CPU builds the next frame while the GPU draws this one (experimental; works with overlap)

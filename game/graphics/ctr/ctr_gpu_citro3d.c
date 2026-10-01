@@ -767,15 +767,22 @@ void ctr_gpu_frame_end(void) {
   g.last = g.cur;
 }
 
-void ctr_gpu_wait_vblank(void) {
-  /* Like a swap with vsync: only wait if no vertical blank happened since the last call. A frame
-   * that took longer than 16.7 ms goes on screen at the next vblank anyway (citro3d swaps the
-   * screen buffers there), so waiting for another one only loses time. */
+void ctr_gpu_wait_vblank(int min_vblanks) {
+  /* Like a swap with vsync: wait until at least min_vblanks vertical blanks happened since the
+   * last call (1: at most 60 fps, 2: at most 30 fps). A frame that already took longer doesn't
+   * wait for another one (it goes on screen at the next vblank anyway). (AI-assisted) With 2 the
+   * game sees the same frame time every frame: steady 30 fps instead of jumping between 60 and
+   * 20. */
   static u32 last_count;
-  if (C3D_FrameCounter(0) == last_count) {
-    gspWaitForVBlank();
+  if (min_vblanks < 1) {
+    min_vblanks = 1;
   }
-  last_count = C3D_FrameCounter(0);
+  u32 now = C3D_FrameCounter(0);
+  while (now - last_count < (u32)min_vblanks) {
+    gspWaitForVBlank();
+    now = C3D_FrameCounter(0);
+  }
+  last_count = now;
 }
 
 /* ---------------- textures ---------------- */

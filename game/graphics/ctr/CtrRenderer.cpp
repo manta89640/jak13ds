@@ -572,7 +572,8 @@ void ctr_exit() {
 u32 ctr_vsync() {
   if (MasterExit == RuntimeExitStatus::RUNNING) {
     const double t0 = ctr_gpu_time_ms();
-    ctr_gpu_wait_vblank();
+    // config.ini fps_cap: 30 = two vblanks per frame at least, 60 = one
+    ctr_gpu_wait_vblank(ctr_settings().fps_cap <= 30 ? 2 : 1);
     g_ee.vsync_ms += ctr_gpu_time_ms() - t0;
   }
   g_frame_idx++;
