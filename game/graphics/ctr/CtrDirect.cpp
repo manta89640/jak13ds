@@ -437,6 +437,13 @@ void CtrDirect::update_draw_state() {
   m_state_dirty = false;
 }
 
+void CtrDirect::batch_mode(bool quads) {
+  if (m_quads != quads) {
+    flush();
+    m_quads = quads;
+  }
+}
+
 void CtrDirect::push_vertex(int idx) {
   const auto& b = m_build[idx];
   ctr_vertex v;
@@ -478,6 +485,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
     case GsPrim::Kind::TRI:
       if (m_build_idx == 3) {
         if (advance) {
+          batch_mode(false);
           push_vertex(0);
           push_vertex(1);
           push_vertex(2);
@@ -492,6 +500,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
       }
       m_strip_count++;
       if (m_strip_count >= 3 && advance) {
+        batch_mode(false);
         for (int i = 0; i < 3; i++) {
           push_vertex(i);
         }
@@ -501,6 +510,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
     case GsPrim::Kind::TRI_FAN:
       if (m_build_idx == 3) {
         if (advance) {
+          batch_mode(false);
           push_vertex(0);
           push_vertex(1);
           push_vertex(2);
@@ -528,15 +538,15 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
         memcpy(c1.rgba, c2.rgba, 4);
         memcpy(c3.rgba, c2.rgba, 4);
         memcpy(c4.rgba, c2.rgba, 4);
+        // a quad: c1, c4, c2, c3 around (triangles c1 c4 c3, c3 c4 c2)
+        batch_mode(true);
         m_build[0] = c1;
-        m_build[1] = c3;
+        m_build[1] = c4;
         m_build[2] = c2;
         push_vertex(0);
         push_vertex(1);
         push_vertex(2);
-        m_build[1] = c4;
-        push_vertex(2);
-        push_vertex(1);
+        m_build[0] = c3;
         push_vertex(0);
         m_stats.triangles += 2;
         m_build_idx = 0;
@@ -559,7 +569,8 @@ void CtrDirect::flush() {
     return;
   }
   static int dbg = 0;
-  if (getenv("CTR_DRAW_DEBUG") && (dbg++ % 97) == 0) {
+  static const bool debug = getenv("CTR_DRAW_DEBUG") != nullptr;
+  if (debug && (dbg++ % 97) == 0) {
     const auto& st = m_draw_state;
     lg::info("[ctr draw] n {} tex {} tcc {} decal {} blend {} atest {} aref {} ztest {} tex0 {:x} "
              "prim {:x} test {:x} alpha {:x}",
@@ -571,7 +582,11 @@ void CtrDirect::flush() {
                v.a);
     }
   }
-  ctr_gpu_draw(&m_draw_state, m_verts.data(), (int)m_verts.size());
+  if (m_quads) {
+    ctr_gpu_draw_quads(&m_draw_state, m_verts.data(), (int)m_verts.size() / 4);
+  } else {
+    ctr_gpu_draw(&m_draw_state, m_verts.data(), (int)m_verts.size());
+  }
   m_stats.flushes++;
   m_verts.clear();
 }

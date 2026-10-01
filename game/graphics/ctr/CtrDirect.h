@@ -93,6 +93,8 @@ class CtrDirect {
   ctr_draw_state m_draw_state;
   int m_tex_w = 1, m_tex_h = 1;
   std::vector<ctr_vertex> m_verts;
+  bool m_quads = false;  // m_verts holds quads (sprites, ctr_gpu_draw_quads), not triangles
+  void batch_mode(bool quads);
 
   Stats m_stats;
 };
