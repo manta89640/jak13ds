@@ -1362,7 +1362,16 @@
                 ;; final force to mercneric for ps
                 (when pc-force-mercneric
                   (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 1))
-                  (set! used-mercneric 1))) ;; end effect loop
+                  (set! used-mercneric 1))
+                ;; 3DS: no generic renderer. Effects that would use it (the death effect, ripple
+                ;; queries, envmap fallbacks) are drawn with merc instead of not at all.
+                (#when TARGET_3DS
+                  (when (nonzero? (-> *merc-bucket-info* effect effect-idx use-mercneric))
+                    (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 0))
+                    (set! (-> *merc-bucket-info* effect effect-idx ignore-alpha) (the-as uint 0))
+                    (set! used-merc 1)))) ;; end effect loop
+              (#when TARGET_3DS
+                (set! used-mercneric 0))
               ;; draw generic!
               ;; note: this doesn't do the fully draw, there's some other stuff in process-drawable.gc to actually execute.
               (when (nonzero? used-mercneric)
