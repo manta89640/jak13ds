@@ -1190,9 +1190,11 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
       }
     }
   } else {
+    /* untextured: the GS outputs the vertex color as it is (direct_basic.vert, tfrag3.frag and
+     * merc2.frag without texture), alpha 0x80 = 1. (merc: the skin shader outputs half) */
     C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
     C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-    C3D_TexEnvScale(env, C3D_RGB, mesh == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_2);
+    C3D_TexEnvScale(env, C3D_RGB, mesh == 2 ? GPU_TEVSCALE_2 : GPU_TEVSCALE_1);
     C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
   }
 

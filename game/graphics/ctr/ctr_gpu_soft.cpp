@@ -242,10 +242,7 @@ void shade_pixel(const ctr_draw_state& st,
       }
     }
   } else {
-    // untextured: vertex color 0x80 = full intensity
-    r *= 2.f;
-    g *= 2.f;
-    b *= 2.f;
+    // untextured: the GS outputs the vertex color as it is (see ctr_gpu_citro3d.c)
   }
   if (!test(st.atest, a, (float)st.aref)) {
     return;
