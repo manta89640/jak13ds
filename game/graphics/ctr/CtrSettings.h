@@ -42,6 +42,8 @@ struct CtrSettings {
   bool overlap = false;
   // CPU builds frame N+1 while the GPU draws frame N
   bool pipeline = false;
+  // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
+  int fps_cap = 30;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.

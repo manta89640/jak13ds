@@ -76,7 +76,8 @@ void ctr_gpu_exit(void);
 void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b);
 void ctr_gpu_frame_end(void);
 /* Wait for the next vertical blank (60 Hz pacing). */
-void ctr_gpu_wait_vblank(void);
+/* at most 60 / min_vblanks frames per second (render.ini / config.ini fps_cap) */
+void ctr_gpu_wait_vblank(int min_vblanks);
 
 /* Textures from linear RGBA8 data (w, h: powers of two, 8..1024). Returns a handle or -1. */
 int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba);
