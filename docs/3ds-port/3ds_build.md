@@ -406,7 +406,7 @@ PC it runs with `gk --ctr-gfx`.
   drawn so far (`ctr_gpu_copy_screen`: one GPU copy, only in frames with distort sprites).
 - **Fog:** the game's fog (like `tfrag3.vert`) plus fog towards the draw distance, computed in
   the level vertex shader and applied with a fog ramp texture in the second TEV stage. The
-  screen is cleared to the fog color (no sky renderer).
+  screen is cleared to the fog color, under the sky.
 - **Ocean** (`CtrOceanRenderer`, bucket `ocean-near`, after the level, merc and water): the
   PS2 ocean code (`draw-ocean`: VU1 DMA for the far/mid/transition/near ocean and a wave texture
   rendered every frame) cost about 12 ms per frame on the 3DS, so the small memory build skips it
@@ -426,7 +426,13 @@ PC it runs with `gk --ctr-gfx`.
     0.45 ms (texture shading + 2-4 tile draws, about 1-2k triangles in view).
   - Not done: the near ocean's wave geometry, the env map (sky reflection) pass, the far ocean
     (beyond the 4.6 km map, always in the fog at the default draw distance).
-- **Not drawn yet:** sky, shadows, envmap shine passes of tie and the ocean, debug lines,
+- **Sky** (`CtrSky`): the game blends the time of day sky and cloud textures (`make-sky-textures`,
+  the tfrag-trans/sky-blend buckets); `CtrSkyBlendRenderer` does that blend on the CPU like the
+  PC's `SkyBlendCPU`. The 3DS build runs `render-sky-3ds` instead of `render-sky-tng` (whose
+  polygon clipping cost ~1.5 ms per frame): it sends the camera, the cloud scroll and where the sky
+  polygons are, and `CtrSky` draws the same roof, cloud layers and horizon polygons in clip space
+  (`ctr_gpu_draw_clip`), clipped by the GPU.
+- **Not drawn yet:** shadows, envmap shine passes of tie and the ocean, debug lines,
   scissor.
 - **Memory:** a level's textures are one block of linear memory (a texture pool), copied to VRAM
   with one GPU copy when there is room: the level the camera is in first (`ctr_gpu_pool_*`, see
