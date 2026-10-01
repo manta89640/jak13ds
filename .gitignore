@@ -92,3 +92,6 @@ _new-all-types.gc
 # differential tests of native mips2c functions (test/mips2c_native/run.sh)
 /build-mips2c-test/
 /build-goalc/
+
+# (AI-assisted) HOME Menu banner made from your own game files (never committed)
+platform/3ds/cia/local/

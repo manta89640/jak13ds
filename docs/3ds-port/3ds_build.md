@@ -66,6 +66,27 @@ The CIA asks for the New 3DS 124 MB memory mode (`platform/3ds/cia/gk.rsf`: `Sys
 124MB`, 804 MHz, L2 cache). The game needs about 95 MB: 48 MB of PS2 memory, 12 MB of code, 24 MB
 of GPU memory, plus buffers.
 
+### Custom HOME Menu banner (title logo, power cell jingle)
+
+The banner in the repo is a placeholder: game assets are never committed. To use the game's own
+title logo and the power cell jingle, make them from your copy of the game and put them in
+`platform/3ds/cia/local/` (ignored by git); `make_cia.sh` uses them when they are there
+(it prints which banner it used).
+
+1. Export with the decompiler: in `decompiler/config/jak1/jak1_config.jsonc` set `"rip_levels": true`,
+   `"save_texture_pngs": true`, `"rip_music": true` and `"rip_streamed_audio": true`, then
+   `task extract`.
+2. **Image** (`banner.png`, 256 x 128 PNG, transparent background works): the title level's
+   `.glb` in `decompiler_out/jak1/levels/` has the logo model (`*logo-sg*`, `goal_src/jak1/levels/title/title-obs.gc`).
+   Open it in Blender, frame the logo with a camera at 256 x 128 and render with a transparent film.
+   (Simpler: the logo's textures are PNGs in `decompiler_out/jak1/textures/`.)
+3. **Jingle** (`banner.wav`, 3 s at most): the power cell sting is in `decompiler_out/jak1/audio/music/`
+   or `audio/sfx/`. Trim and convert it:
+   `ffmpeg -i <file> -t 3 -af afade=t=out:st=2.5:d=0.5 -ac 2 -ar 44100 -sample_fmt s16 platform/3ds/cia/local/banner.wav`
+4. `platform/3ds/tools/make_cia.sh` and reinstall the CIA.
+
+(AI-assisted: written without game files at hand; the exported file names may differ.)
+
 ### If the CIA stays on the launch screen
 
 Found on hardware: the CIA settings listed `0004013000001202` (pm, part of the FIRM, not a NAND
