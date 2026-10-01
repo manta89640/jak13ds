@@ -132,7 +132,7 @@ u32 collide_mesh_type() {
 
 void register_collide_mesh_tests() {
   auto setup = [] {
-    add_collide_fakes();
+    bind_collide_functions();
     collide_mesh_type();
   };
   add_test(

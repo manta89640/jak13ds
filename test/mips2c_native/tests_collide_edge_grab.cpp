@@ -18,7 +18,7 @@ namespace {
 constexpr u32 kWorkSize = 7808 + 2112;  // up to the end of the hold list
 
 void setup_edge() {
-  add_collide_fakes();
+  bind_collide_functions();
   collide_cache_type();
   // collide-edge-work: method 17 should-add-to-list? (this item edge), method 19
   // check-grab-for-collisions (this item info)

@@ -26,7 +26,7 @@ u32* vu0_buffer() {
 }
 
 void setup_cache_common() {
-  add_collide_fakes();
+  bind_collide_functions();
   collide_cache_type();
   bind_mips2c_symbol("collide-do-primitives");
   bind_mips2c_symbol("moving-sphere-triangle-intersect");

@@ -92,7 +92,7 @@ void register_collide_func_tests() {
             "moving-sphere-triangle-intersect",
             20000,
             [] {
-              add_collide_fakes();
+              bind_collide_functions();
               bind_mips2c_symbol("collide-do-primitives");
               bind_mips2c_symbol("moving-sphere-triangle-intersect");
             },
@@ -103,7 +103,7 @@ void register_collide_func_tests() {
             "collide-do-primitives",
             20000,
             [] {
-              add_collide_fakes();
+              bind_collide_functions();
               bind_mips2c_symbol("collide-do-primitives");
             },
             [](Case& c) {

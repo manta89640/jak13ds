@@ -86,6 +86,7 @@ void mesh_vertices(u32 mesh, u32 bone, u32 inv, u32 out) {
  */
 u64 mesh_sphere(const NativeArgs& args, bool method_12) {
   static const u32 closest_sym = sym_addr("closest-pt-in-triangle");
+  static const u32* closest_stub = native_stub_slot("closest-pt-in-triangle");
   const u32 mesh = (u32)args.a[0];
   u32 tri = (u32)args.a[1];
   const u32 result = (u32)args.a[2];
@@ -121,14 +122,18 @@ u64 mesh_sphere(const NativeArgs& args, bool method_12) {
     if (outside) {
       continue;
     }
-    // the triangle as the original's 64-bit register (the argument plus 96 per triangle)
-    const u64 tri64 = args.a[1] + (u64)(tri - (u32)args.a[1]);
-    const u64 call_args[8] = {closest,   args.a[3], tri64,     tri64 + 48,
-                              args.a[4], args.a[5], args.a[6], args.a[7]};
-    native_call_goal(gload<u32>(closest_sym), call_args, args);
-
     float c[4], sp[4], nrm[4];
-    gload_q(c, closest);
+    const u32 fn = gload<u32>(closest_sym);
+    if (fn == *closest_stub) {
+      closest_pt_in_triangle_h(c, sphere, tri, tri + 48);
+    } else {
+      // the triangle as the original's 64-bit register (the argument plus 96 per triangle)
+      const u64 tri64 = args.a[1] + (u64)(tri - (u32)args.a[1]);
+      const u64 call_args[8] = {closest,   args.a[3], tri64,     tri64 + 48,
+                                args.a[4], args.a[5], args.a[6], args.a[7]};
+      native_call_goal(fn, call_args, args);
+      gload_q(c, closest);
+    }
     gload_q(sp, sphere);
     gload_q(nrm, tri + 48);
     const u32 pat = gload<u32>(tri + 60);

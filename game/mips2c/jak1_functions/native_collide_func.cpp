@@ -1,8 +1,11 @@
 /*!
  * @file native_collide_func.cpp
  * (AI-assisted)
- * Native versions of the mips2c functions in collide_func.cpp. See game/mips2c/mips2c_native.h for
- * the rules (same float operations, grouped the same way, as the mips2c code).
+ * Native versions of the mips2c functions in collide_func.cpp, and of GOAL functions of
+ * collide-func.gc they call for every triangle (ray-sphere-intersect, ray-cylinder-intersect,
+ * moving-sphere-sphere-intersect: the same float operations as the C code goalc makes of them).
+ * See game/mips2c/mips2c_native.h for the rules (same float operations, grouped the same way, as
+ * the mips2c code).
  */
 
 #include <algorithm>
@@ -10,6 +13,7 @@
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
+#include "game/mips2c/mips2c_table.h"
 
 namespace Mips2C::jak1::native {
 
@@ -44,7 +48,251 @@ u32 sym_addr(const char* name) {
   return ::jak1::intern_from_c(name).offset;
 }
 
+constexpr float kMissF = -100000000.f;
+
+/*!
+ * pc-port-raw-ray-sphere-implementation (the GOAL function as goalc compiles it): a sphere of
+ * radius rad at the origin, the probe from o along u (lanes x, y, z). Returns the fraction of u to
+ * the sphere, 0 if o is inside, -100000000.0 if behind, missed or too far. The checks only use
+ * sign bits, so NaNs go where the GOAL code sends them.
+ */
+inline float raw_ray_sphere(float rad, const float o[4], const float u[4]) {
+  const float uu0 = u[0] * u[0];
+  const float uu1 = u[1] * u[1];
+  const float uu2 = u[2] * u[2];
+  const float rr = rad * rad;
+  const float oo0 = o[0] * o[0];
+  const float oo1 = o[1] * o[1];
+  const float oo2 = o[2] * o[2];
+  const float uo0 = u[0] * o[0];
+  const float uo1 = u[1] * o[1];
+  const float uo2 = u[2] * o[2];
+  float a = uu0 + uu1;
+  a = a + uu2;
+  float c = oo1 + oo0;
+  const float c2 = oo2 - rr;
+  c = c + c2;
+  float b = uo1 + uo0;
+  b = b + uo2;
+  if (sign_bit(c)) {
+    return 0.f;  // inside
+  }
+  if (a == 0.f || !sign_bit(b)) {
+    return kMissF;  // no direction, or moving away
+  }
+  const float bb = b * b;
+  const float ca = c * a;
+  const float disc = bb - ca;
+  if (sign_bit(disc)) {
+    return kMissF;
+  }
+  const float n = b + a;
+  const float nn = n * n;
+  const float fin = disc - nn;
+  if (sign_bit(n) && sign_bit(fin)) {
+    return kMissF;  // too far
+  }
+  const float q = 1.f / a;
+  const float inv = 1.f * q;
+  const float root = std::sqrt(disc);
+  const float root1 = 1.f * root;
+  float t = b + root1;
+  t = t * inv;
+  return 0.f - t;
+}
+
 }  // namespace
+
+/*!
+ * ray-sphere-intersect with the vectors loaded: the fraction of dir from origin to the sphere,
+ * 0 inside, -100000000.0 on a miss.
+ */
+float ray_sphere_intersect_v(const float origin[4],
+                             const float dir[4],
+                             const float center[4],
+                             float radius) {
+  const float o[4] = {origin[0] - center[0], origin[1] - center[1], origin[2] - center[2], 0.f};
+  return raw_ray_sphere(radius, o, dir);
+}
+
+/*!
+ * ray-cylinder-intersect with the vectors loaded: a cylinder of radius rad from cyl_origin along
+ * the unit vector axis, length len. On a hit returns the fraction of dir and stores the point on
+ * the axis in pt_out (also on some misses, like the GOAL code: after the hit is found to be
+ * on the cylinder's side of its start, before the check against its end).
+ */
+float ray_cylinder_intersect_v(const float origin[4],
+                               const float dir[4],
+                               const float cyl_origin[4],
+                               const float axis[4],
+                               float rad,
+                               float len,
+                               u32 pt_out) {
+  float v[3];
+  for (int i = 0; i < 3; i++) {
+    v[i] = origin[i] - cyl_origin[i];
+  }
+  const float va0 = v[0] * axis[0];
+  const float va1 = v[1] * axis[1];
+  const float va2 = v[2] * axis[2];
+  const float da0 = dir[0] * axis[0];
+  const float da1 = dir[1] * axis[1];
+  const float da2 = dir[2] * axis[2];
+  // distances along the axis of the start and of the end of the probe
+  float h = va1 + va0;
+  h = h + va2;
+  float dh = da1 + da0;
+  dh = dh + da2;
+  const float h_end = dh + h;
+  if (sign_bit(h) && sign_bit(h_end)) {
+    return kMissF;
+  }
+  const float h_over = h - len;
+  const float h_end_over = h_end - len;
+  if (!(sign_bit(h_over) || sign_bit(h_end_over))) {
+    return kMissF;
+  }
+  // the probe projected on the cylinder's base plane, against a sphere
+  float p[4], q[4];
+  for (int i = 0; i < 3; i++) {
+    const float ah = axis[i] * h;
+    p[i] = v[i] - ah;
+    const float adh = axis[i] * dh;
+    q[i] = dir[i] - adh;
+  }
+  p[3] = 0.f;
+  q[3] = 0.f;
+  const float t = raw_ray_sphere(rad, p, q);
+  if (sign_bit(t)) {
+    return kMissF;
+  }
+  const float dht = dh * t;
+  const float h_hit = h + dht;
+  if (sign_bit(h_hit)) {
+    return kMissF;
+  }
+  float pt[4];
+  for (int i = 0; i < 3; i++) {
+    const float ah = axis[i] * h_hit;
+    pt[i] = cyl_origin[i] + ah;
+  }
+  pt[3] = cyl_origin[3];
+  gstore_q(pt_out, pt);
+  const float h_hit_over = h_hit - len;
+  if (!sign_bit(h_hit_over)) {
+    return kMissF;
+  }
+  return t;
+}
+
+/*!
+ * (ray-sphere-intersect ray-origin ray-dir sph-origin radius) -> float
+ * The GOAL function, compiled to C by goalc on the 3DS, calls pc-port-raw-ray-sphere-implementation
+ * with the vectors on the stack.
+ */
+u64 ray_sphere_intersect_impl(const NativeArgs& args) {
+  float origin[4], dir[4], center[4];
+  gload_q(origin, (u32)args.a[0]);
+  gload_q(center, (u32)args.a[2]);
+  gload_q(dir, (u32)args.a[1]);
+  return f2gpr(ray_sphere_intersect_v(origin, dir, center, u2f((u32)args.a[3])));
+}
+
+/*!
+ * (ray-cylinder-intersect ray-origin ray-dir cyl-origin cyl-axis cyl-rad cyl-len pt-out) -> float
+ */
+u64 ray_cylinder_intersect_impl(const NativeArgs& args) {
+  float origin[4], dir[4], cyl_origin[4], axis[4];
+  gload_q(origin, (u32)args.a[0]);
+  gload_q(cyl_origin, (u32)args.a[2]);
+  gload_q(dir, (u32)args.a[1]);
+  gload_q(axis, (u32)args.a[3]);
+  return f2gpr(ray_cylinder_intersect_v(origin, dir, cyl_origin, axis, u2f((u32)args.a[4]),
+                                        u2f((u32)args.a[5]), (u32)args.a[6]));
+}
+
+/*!
+ * (moving-sphere-sphere-intersect sphere move other out-point) -> float
+ * ray-sphere-intersect of sphere's center along move against other, with the sum of the radii. On
+ * a hit (t >= 0, or NaN) stores the touching point in out-point: the center at t, plus the
+ * direction to other scaled to sphere's radius (vector-normalize! and vector+*! inlined).
+ */
+float moving_sphere_sphere_intersect_v(u32 sphere,
+                                       u32 move,
+                                       u32 other,
+                                       u32 out,
+                                       const NativeArgs& caller) {
+  static const u32 sphere_sym = sym_addr("ray-sphere-intersect");
+  static const u32* sphere_stub = native_stub_slot("ray-sphere-intersect");
+  const float r = gload<float>(sphere + 12) + gload<float>(other + 12);
+  const u32 fn = gload<u32>(sphere_sym);
+  float t;
+  if (fn == *sphere_stub) {
+    float origin[4], dir[4], center[4];
+    gload_q(origin, sphere);
+    gload_q(center, other);
+    gload_q(dir, move);
+    t = ray_sphere_intersect_v(origin, dir, center, r);
+  } else {
+    // redefined in GOAL
+    const u64 call_args[8] = {sphere, move, other, f2gpr(r), 0, 0, 0, 0};
+    t = u2f((u32)native_call_goal(fn, call_args, caller));
+  }
+  if (t < 0.f) {
+    return t;
+  }
+
+  // (vector-normalize! (vector-! (new-stack-vector0) other sphere) (-> sphere w))
+  float s[4], o[4];
+  gload_q(o, other);
+  gload_q(s, sphere);
+  float d[3];
+  for (int i = 0; i < 3; i++) {
+    d[i] = o[i] - s[i];
+  }
+  const float radius = gload<float>(sphere + 12);
+  const float d0 = d[0] * d[0];
+  const float d1 = d[1] * d[1];
+  const float d2 = d[2] * d[2];
+  float len2 = 1.f * d0;
+  len2 = len2 + 1.f * d1;
+  len2 = len2 + 1.f * d2;
+  const float len = 1.f * std::sqrt(len2);
+  float scale;
+  if (0.f == len) {
+    scale = u2f(0x7f7fffff ^ (f2u(radius) & 0x80000000) ^ (f2u(len) & 0x80000000));
+  } else {
+    scale = radius / len;
+  }
+  for (int i = 0; i < 3; i++) {
+    d[i] = d[i] * scale;
+  }
+
+  // (vector+*! out sphere move t)
+  float m[4], p[4];
+  gload_q(s, sphere);
+  gload_q(m, move);
+  for (int i = 0; i < 3; i++) {
+    const float mt = m[i] * t;
+    const float s1 = s[i] * 1.f;
+    p[i] = mt + s1;
+  }
+  p[3] = 1.f;
+  gstore_q(out, p);
+  // (vector+! out out normal)
+  gload_q(p, out);
+  for (int i = 0; i < 3; i++) {
+    p[i] = p[i] + d[i];
+  }
+  p[3] = 1.f;
+  gstore_q(out, p);
+  return t;
+}
+
+u64 moving_sphere_sphere_intersect_impl(const NativeArgs& args) {
+  return f2gpr(moving_sphere_sphere_intersect_v((u32)args.a[0], (u32)args.a[1], (u32)args.a[2],
+                                                (u32)args.a[3], args));
+}
 
 /*!
  * (collide-do-primitives pos move radius tri out-point) -> float
@@ -57,6 +305,8 @@ u32 sym_addr(const char* name) {
 u64 collide_do_primitives_impl(const NativeArgs& args) {
   static const u32 sphere_sym = sym_addr("ray-sphere-intersect");
   static const u32 cylinder_sym = sym_addr("ray-cylinder-intersect");
+  static const u32* sphere_stub = native_stub_slot("ray-sphere-intersect");
+  static const u32* cylinder_stub = native_stub_slot("ray-cylinder-intersect");
   const u64 tri = args.a[3];
   const u32 out = (u32)args.a[4];
   // the edge direction is passed by address
@@ -69,9 +319,19 @@ u64 collide_do_primitives_impl(const NativeArgs& args) {
 
   // corners
   for (int i = 0; i < 3; i++) {
-    const u64 call_args[8] = {args.a[0], args.a[1], tri + 16 * i, args.a[2],
-                              args.a[4], args.a[5], args.a[6],    args.a[7]};
-    const float t = u2f((u32)native_call_goal(gload<u32>(sphere_sym), call_args, args));
+    const u32 fn = gload<u32>(sphere_sym);
+    float t;
+    if (fn == *sphere_stub) {
+      float pos[4], move[4], corner[4];
+      gload_q(pos, (u32)args.a[0]);
+      gload_q(corner, (u32)tri + 16 * i);
+      gload_q(move, (u32)args.a[1]);
+      t = ray_sphere_intersect_v(pos, move, corner, u2f((u32)args.a[2]));
+    } else {
+      const u64 call_args[8] = {args.a[0], args.a[1], tri + 16 * i, args.a[2],
+                                args.a[4], args.a[5], args.a[6],    args.a[7]};
+      t = u2f((u32)native_call_goal(fn, call_args, args));
+    }
     // (the first hit is taken even if it's above 2.0)
     if (t < 0.f || (i > 0 && !(t < best))) {
       continue;
@@ -102,10 +362,20 @@ u64 collide_do_primitives_impl(const NativeArgs& args) {
     for (int k = 0; k < 4; k++) {
       d[k] = d[k] * q;
     }
-    gstore_bytes(dir, d, 16);
-    const u64 call_args[8] = {args.a[0], args.a[1],  tri + 16 * i, dir,
-                              args.a[2], f2gpr(len), args.a[4],    args.a[7]};
-    const float t = u2f((u32)native_call_goal(gload<u32>(cylinder_sym), call_args, args));
+    const u32 fn = gload<u32>(cylinder_sym);
+    float t;
+    if (fn == *cylinder_stub) {
+      float pos[4], move[4];
+      const float corner[4] = {va.x, va.y, va.z, va.w};
+      gload_q(pos, (u32)args.a[0]);
+      gload_q(move, (u32)args.a[1]);
+      t = ray_cylinder_intersect_v(pos, move, corner, d, u2f((u32)args.a[2]), len, out);
+    } else {
+      gstore_bytes(dir, d, 16);
+      const u64 call_args[8] = {args.a[0], args.a[1],  tri + 16 * i, dir,
+                                args.a[2], f2gpr(len), args.a[4],    args.a[7]};
+      t = u2f((u32)native_call_goal(fn, call_args, args));
+    }
     if (t < 0.f || !(t < best)) {
       continue;
     }
@@ -296,5 +566,33 @@ const NativeImpl collide_do_primitives = MIPS2C_NATIVE_IMPL(collide_do_primitive
 // scratch: collide-do-primitives', which it calls directly
 const NativeImpl moving_sphere_triangle_intersect =
     MIPS2C_NATIVE_IMPL(moving_sphere_triangle_intersect_impl, 0, 16);
+const NativeImpl ray_sphere_intersect = MIPS2C_NATIVE_IMPL(ray_sphere_intersect_impl, 0, 0);
+const NativeImpl ray_cylinder_intersect = MIPS2C_NATIVE_IMPL(ray_cylinder_intersect_impl, 0, 0);
+const NativeImpl moving_sphere_sphere_intersect =
+    MIPS2C_NATIVE_IMPL(moving_sphere_sphere_intersect_impl, 0, 0);
 
 }  // namespace Mips2C::jak1::native
+
+// GOAL functions replaced by their native version (def-mips2c in collide-func.gc). There is no
+// mips2c version: the execute function (used by the native GOAL backends) runs the native one.
+namespace Mips2C::jak1 {
+namespace ray_sphere_intersect {
+void link() {
+  gLinkedFunctionTable.reg("ray-sphere-intersect", native::ray_sphere_intersect.as_exec, 64,
+                           &native::ray_sphere_intersect);
+}
+}  // namespace ray_sphere_intersect
+namespace ray_cylinder_intersect {
+void link() {
+  gLinkedFunctionTable.reg("ray-cylinder-intersect", native::ray_cylinder_intersect.as_exec, 64,
+                           &native::ray_cylinder_intersect);
+}
+}  // namespace ray_cylinder_intersect
+namespace moving_sphere_sphere_intersect {
+void link() {
+  gLinkedFunctionTable.reg("moving-sphere-sphere-intersect",
+                           native::moving_sphere_sphere_intersect.as_exec, 64,
+                           &native::moving_sphere_sphere_intersect);
+}
+}  // namespace moving_sphere_sphere_intersect
+}  // namespace Mips2C::jak1

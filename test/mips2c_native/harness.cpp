@@ -63,6 +63,8 @@ struct Mips2cEntry {
   u32 stack_size;
   const Mips2C::NativeImpl* native;
   u32 stub;
+  //! the reference version is a GOAL function compiled to C (goalc_ref.cpp), run instead of exec
+  void* ref = nullptr;
 };
 std::map<std::string, Mips2cEntry> g_mips2c;
 std::unordered_map<u32, Mips2cEntry*> g_mips2c_by_stub;
@@ -108,7 +110,30 @@ u32& stub_slot(const std::string& name) {
   return *p;
 }
 
+//! room for the host stack frames of compiled GOAL code (in GOAL memory) and what it calls
+constexpr u32 kGoalcHostStack = 0x10000;
+
+u64 run_goalc(void* fn, const u64* args, u64 pp) {
+  const u32 sp = g_sp;
+  g_sp -= kGoalcHostStack;
+  if (g_sp < kStackBottom) {
+    throw AssertFailed("harness: GOAL stack overflow");
+  }
+  u64 v0;
+  try {
+    v0 = call_goalc(fn, args, pp, sp);
+  } catch (...) {
+    g_sp = sp;
+    throw;
+  }
+  g_sp = sp;
+  return v0;
+}
+
 u64 run_mips2c(Mips2cEntry& e, const u64* args, u64 pp) {
+  if (e.ref) {
+    return run_goalc(e.ref, args, pp);
+  }
   alignas(16) Mips2C::ExecutionContext ctx;
   memset((void*)&ctx, 0, sizeof(ctx));
   const int regs[8] = {Mips2C::a0, Mips2C::a1, Mips2C::a2, Mips2C::a3,
@@ -163,6 +188,15 @@ u64 dispatch(u32 f, const u64* args, u64 pp) {
   }
   auto it = g_fakes.find(f);
   if (it == g_fakes.end()) {
+    std::string name;
+    int arity;
+    void* host;
+    if (goalc_reference_at(f, &name, &arity, &host)) {
+      // compiled GOAL code bound to a symbol (not a native function's stub). Not logged: calls
+      // from compiled GOAL code to it don't come here, and which calls the native versions make
+      // through symbols (instead of inlining the callee) differs from the GOAL code.
+      return run_goalc(host, args, pp);
+    }
     throw AssertFailed(fmt::format("harness: call to unknown GOAL function 0x{:x}", f));
   }
   auto& fake = it->second;
@@ -242,7 +276,21 @@ u32 heap_left() {
 u32 add_goal_fn(const std::string& name, int arity, GoalFn fn) {
   const u32 addr = static_alloc(16, 16) + 4;
   g_fakes[addr] = FakeFn{name, arity, std::move(fn)};
+  write_trampoline(addr);
   return addr;
+}
+
+u32 alloc_static(u32 size, u32 align) {
+  return static_alloc(size, align);
+}
+
+void use_goalc_reference(const std::string& name) {
+  auto it = g_mips2c.find(name);
+  if (it == g_mips2c.end()) {
+    fprintf(stderr, "harness: function %s is not linked\n", name.c_str());
+    abort();
+  }
+  it->second.ref = goalc_reference(name);
 }
 
 u32 mips2c_stub(const std::string& name) {
@@ -277,6 +325,7 @@ void register_mips2c(const std::string& name,
   auto& e = g_mips2c[name];
   if (!e.stub) {
     e.stub = static_alloc(16, 16) + 4;
+    write_trampoline(e.stub);
   }
   e.name = name;
   e.exec = exec;
@@ -385,6 +434,31 @@ std::string describe_call(const CallRec& c) {
 
 void add_test(Test t) {
   tests().push_back(std::move(t));
+}
+
+void add_test_variant(const std::string& name,
+                      const std::string& new_name,
+                      std::function<void()> extra_setup,
+                      double case_fraction) {
+  for (const auto& t : tests()) {
+    if (t.name != name) {
+      continue;
+    }
+    Test v = t;
+    v.name = new_name;
+    v.cases = std::max(1, (int)(t.cases * case_fraction));
+    auto setup = t.setup;
+    v.setup = [setup, extra_setup] {
+      if (setup) {
+        setup();
+      }
+      extra_setup();
+    };
+    tests().push_back(std::move(v));
+    return;
+  }
+  fprintf(stderr, "harness: no test %s\n", name.c_str());
+  abort();
 }
 
 int run_tests(const RunOptions& opt) {

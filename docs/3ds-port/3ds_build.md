@@ -480,6 +480,14 @@ every platform:
 - particles: `sp-process-block-2d`, `sp-process-block-3d`, `sp-launch-particles-var`,
   `particle-adgif`
 - ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame)
+- GOAL functions the collision natives call for every triangle: `ray-sphere-intersect`,
+  `ray-cylinder-intersect`, `moving-sphere-sphere-intersect` (collide-func.gc) and
+  `closest-pt-in-triangle` (geometry.gc, with `vector-segment-distance-point!` inlined). They have
+  no mips2c version: in goal_src they are `def-mips2c`, with the GOAL code kept in a comment, and
+  they give the same results as the C code goalc makes of that GOAL code. The natives call them
+  directly while their symbols hold them, and through the symbol after a GOAL redefinition.
+  (A call from a native to compiled GOAL code went through `goalc_call_goal8` with 8 arguments,
+  the vectors on the stack and a second call to `pc-port-raw-ray-sphere-implementation`.)
 
 Still mips2c: the renderers' functions (bones, merc, generic, tie, tfrag, shadow, sky, ocean
 drawing, ripple, time-of-day colors, draw-string, textures) and `calc-animation-from-spr` (never
@@ -535,6 +543,12 @@ arguments the callee uses and the process pointer) and the VU0 random generator.
   mode: default NaN and flush-to-zero, which libctru sets for every thread (FPSCR 0x03000000).
   Without default NaN, GCC's fused `vmls` (non-fused on VFPv2, same results otherwise) gives NaNs
   the opposite sign than a `vmul` and `vsub`, so natives and mips2c could differ in NaN signs only.
+- GOAL functions with a native version (above) have no mips2c version: their reference is the C
+  code goalc makes of the GOAL function (`test/mips2c_native/goalc_ref/<module>.c`, taken from
+  `out/jak1/csrc` with the object file's constants by `goalc_ref/extract.py`), loaded into the
+  test's GOAL memory like the linker would and run on a stack in GOAL memory (`goalc_ref.cpp`).
+  The tests of the natives that call them run the compiled GOAL code on the mips2c side, and the
+  `(GOAL callees)` variants bind the symbols to it on both sides (a GOAL redefinition).
 - coverage: gcov line coverage of the tested mips2c functions (100% for all of them).
 - bench: ARM instructions per call of each version (their own code, not the GOAL functions they
   call), counted with qemu-arm.

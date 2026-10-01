@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # (AI-assisted)
 # ARM instructions per call of the mips2c and the native version of tested functions, counted
-# with qemu-arm on the arm build (run.sh bench). Only instructions in the code of the mips2c and
-# native object files count (not the harness, the fake GOAL functions or libc), so functions they
-# call directly or through mips2c are included, GOAL callees are not.
+# with qemu-arm on the arm build (run.sh bench). Only instructions in the code of the mips2c,
+# native and goalc reference object files count (not the harness, the fake GOAL functions or
+# libc), so functions they call directly or through mips2c are included, and so are the GOAL
+# functions compiled to C (goalc_ref/) the mips2c versions call where the natives have their own;
+# fake GOAL callees are not.
 #
 #   bench.py <arm binary> <link map> [--scale X] test-name...
 
@@ -13,7 +15,8 @@ import sys
 
 
 def code_ranges(map_file):
-    """[(start, end)] of every .text* input section of the native_*.o and m2c_*.o objects"""
+    """[(start, end)] of every .text* input section of the native_*.o, m2c_*.o and ref_*.o
+    objects (goalc_context.o is a ref_ object too, but only switches stacks)"""
     ranges = []
     lines = open(map_file).read().splitlines()
     for i, line in enumerate(lines):
@@ -24,7 +27,8 @@ def code_ranges(map_file):
         if not m:
             continue
         base = m.group(4).split("/")[-1]
-        if not (base.startswith("native_") or base.startswith("m2c_")):
+        if not (base.startswith("native_") or base.startswith("m2c_") or
+                (base.startswith("ref_") and base != "ref_goalc_context.o")):
             continue
         start, size = int(m.group(2), 16), int(m.group(3), 16)
         if size:

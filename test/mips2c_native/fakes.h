@@ -6,6 +6,8 @@
  * Fake GOAL functions and shared generators for the differential tests. The fakes don't have to
  * match the game's functions: both versions call the same fake. They are close enough to the
  * real ones that the results (hits, misses, stores) drive the tested code through its branches.
+ * GOAL functions that have a native version are not faked: their reference is the C code goalc
+ * makes of them (goalc_ref/).
  */
 
 #include <cmath>
@@ -41,30 +43,13 @@ inline u32 alloc_vec(const float v[4]) {
   return alloc_vec(v[0], v[1], v[2], v[3]);
 }
 
-//! ray-sphere-intersect (origin dir center radius): fraction of dir to the sphere, 0 inside,
-//! -100000000.0 on a miss
-inline float fake_ray_sphere(const float o_in[4], const float d[4], const float c[4], float r) {
-  float o[3] = {o_in[0] - c[0], o_in[1] - c[1], o_in[2] - c[2]};
-  const float dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
-  const float cc = o[0] * o[0] + o[1] * o[1] + o[2] * o[2] - r * r;
-  const float b = d[0] * o[0] + d[1] * o[1] + d[2] * o[2];
-  if (cc < 0) {
-    return 0.f;
-  }
-  if (dd == 0 || b >= 0) {
-    return -100000000.f;
-  }
-  const float disc = b * b - cc * dd;
-  if (disc < 0) {
-    return -100000000.f;
-  }
-  const float t = -(b + std::sqrt(disc)) / dd;
-  if (t > 1.f) {
-    return -100000000.f;
-  }
-  return t;
-}
-
-void add_collide_fakes();
+/*!
+ * Set the symbols of the GOAL collision functions with a native version (ray-sphere-intersect,
+ * ray-cylinder-intersect, moving-sphere-sphere-intersect, closest-pt-in-triangle). Their reference
+ * version is goalc's C code (goalc_ref/). With compiled_goal, the symbols hold that code instead of
+ * the native functions' stubs, like after a GOAL redefinition: natives then call them through the
+ * symbol (logged and compared like calls to fakes) instead of directly.
+ */
+void bind_collide_functions(bool compiled_goal = false);
 
 }  // namespace tests

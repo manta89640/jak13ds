@@ -80,6 +80,26 @@ build() {
       pids+=($!)
     fi
   done
+  # GOAL functions compiled to C (reference versions, see goalc_ref/goalc_ref.h): the flags of the
+  # 3DS build's GOAL modules (platform/3ds/cmake/cmodules.cmake), never contracted (the 3DS has no
+  # FMA), and unwind tables so the harness's exceptions can pass through them
+  local cc="${cxx/%g++/gcc}"
+  cc="${cc/%clang++/clang}"
+  for src in "$HERE"/goalc_ref/*.c "$ROOT/game/kernel/common/goalc_context.cpp"; do
+    local obj="$dir/ref_$(basename "${src%.*}").o"
+    objs+=("$obj")
+    if [[ ! -f "$obj" || "$src" -nt "$obj" || "$HERE/goalc_ref/goalc_ref.h" -nt "$obj" ||
+          "$ROOT/goalc/cbackend/goal_c_ops.h" -nt "$obj" ]]; then
+      if [[ "$src" == *.c ]]; then
+        "$cc" "${flags[@]}" -O2 -fno-strict-aliasing -fno-math-errno -ffp-contract=off -fexceptions \
+          -w -I"$ROOT/goalc/cbackend" -I"$ROOT/game/kernel/common" -I"$HERE/goalc_ref" \
+          -c "$src" -o "$obj" &
+      else
+        "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" -c "$src" -o "$obj" &
+      fi
+      pids+=($!)
+    fi
+  done
   local fail=0
   for p in "${pids[@]}"; do
     wait "$p" || fail=1

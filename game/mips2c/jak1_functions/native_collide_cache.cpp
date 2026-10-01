@@ -734,13 +734,19 @@ u64 method_30_collide_cache_impl(const NativeArgs& args) {
  */
 u64 method_10_collide_cache_prim_impl(const NativeArgs& args) {
   static const u32 mssi_sym = sym_addr("moving-sphere-sphere-intersect");
+  static const u32* mssi_stub = native_stub_slot("moving-sphere-sphere-intersect");
   const u32 prim = (u32)args.a[0];
   const u32 result = (u32)args.a[1];
   const u32 out_point = args.stack - 16;
-  const u64 call_args[8] = {args.a[2], args.a[3], args.a[0], out_point,
-                            args.a[4], args.a[5], args.a[6], args.a[7]};
-  const u64 v0 = native_call_goal(gload<u32>(mssi_sym), call_args, args);
-  const float t = u2f((u32)v0);
+  const u32 fn = gload<u32>(mssi_sym);
+  float t;
+  if (fn == *mssi_stub) {
+    t = moving_sphere_sphere_intersect_v((u32)args.a[2], (u32)args.a[3], prim, out_point, args);
+  } else {
+    const u64 call_args[8] = {args.a[2], args.a[3], args.a[0], out_point,
+                              args.a[4], args.a[5], args.a[6], args.a[7]};
+    t = u2f((u32)native_call_goal(fn, call_args, args));
+  }
   const float max_t = u2f((u32)args.a[4]);
   float pt[4], center[4];
   gload_q(pt, out_point);
@@ -881,6 +887,7 @@ u64 method_10_collide_puss_work_impl(const NativeArgs& args) {
  */
 u64 method_9_collide_puss_work_impl(const NativeArgs& args) {
   static const u32 closest_sym = sym_addr("closest-pt-in-triangle");
+  static const u32* closest_stub = native_stub_slot("closest-pt-in-triangle");
   const u32 work = (u32)args.a[0];
   const u32 prim = (u32)args.a[1];
   u32 tri = gload<u32>(prim + 32) + 4908 + ((u32)gload<u16>(prim + 40) << 6);
@@ -943,9 +950,14 @@ u64 method_9_collide_puss_work_impl(const NativeArgs& args) {
       if (out) {
         continue;
       }
-      const u64 call_args[8] = {work,      sphere,    tri,       work + 16u,
-                                args.a[4], args.a[5], args.a[6], args.a[7]};
-      native_call_goal(gload<u32>(closest_sym), call_args, args);
+      const u32 fn = gload<u32>(closest_sym);
+      if (fn == *closest_stub) {
+        closest_pt_in_triangle_v(work, sphere, tri, work + 16);
+      } else {
+        const u64 call_args[8] = {work,      sphere,    tri,       work + 16u,
+                                  args.a[4], args.a[5], args.a[6], args.a[7]};
+        native_call_goal(fn, call_args, args);
+      }
       float pt[4], sp[4];
       gload_q(pt, work);
       gload_q(sp, sphere);

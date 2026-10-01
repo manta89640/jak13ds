@@ -75,4 +75,6 @@ Next steps, by expected gain:
    hand-written replacements of GOAL functions: goalc's C output compiled for ARMv6K is already
    close to hand-written code for float work, e.g. decomp-frame's inner loop is ldrsh / vcvt /
    vmul / vmla per value and pc-port-raw-ray-sphere-implementation is 93 instructions, so native
-   versions of GOAL functions would gain much less than the mips2c ones did.)
+   versions of GOAL functions gain much less than the mips2c ones did. The exception is GOAL
+   functions the natives call for every triangle, where the call itself was the cost: the four
+   collision helpers in 3ds_build.md are native now and called directly.)

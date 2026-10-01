@@ -91,6 +91,20 @@ void bind_mips2c_symbol(const std::string& name);
 bool in_native_run();
 
 // ---------------------------------------------------------------------------
+// GOAL functions compiled to C by goalc (goalc_ref.cpp, goalc_ref/goalc_ref.h)
+// ---------------------------------------------------------------------------
+//! Load the fixture modules (once, before linking)
+void load_goalc_references();
+//! the host function of a GOAL function compiled to C
+void* goalc_reference(const std::string& name);
+//! Set the symbol of the same name to the compiled GOAL function (like the module's top level)
+void bind_goalc_reference(const std::string& name);
+//! The reference version of the registered native function `name` (which replaces a GOAL
+//! function) is its compiled GOAL code: tests compare the native version with that, and calls of
+//! the "mips2c version" from other functions run it.
+void use_goalc_reference(const std::string& name);
+
+// ---------------------------------------------------------------------------
 // memory helpers (GOAL addresses)
 // ---------------------------------------------------------------------------
 template <typename T>
@@ -175,6 +189,12 @@ struct Test {
 };
 
 void add_test(Test t);
+//! A copy of the registered test `name`, with extra setup after the test's and a fraction of its
+//! cases
+void add_test_variant(const std::string& name,
+                      const std::string& new_name,
+                      std::function<void()> extra_setup,
+                      double case_fraction = 1.0);
 
 struct RunOptions {
   std::string filter;
@@ -190,7 +210,17 @@ struct RunOptions {
 //! Runs the selected tests, returns the number that failed
 int run_tests(const RunOptions& opt);
 
+//! static (kept across cases) GOAL memory
+u32 alloc_static(u32 size, u32 align);
+
 // used by the runtime replacements in harness.cpp
+//! Call compiled GOAL code with the host stack at stack_top (GOAL address), unless it already is
+//! in GOAL memory
+u64 call_goalc(void* fn, const u64* args, u64 pp, u32 stack_top);
+//! Make the stub at fn_value callable from compiled GOAL code (it calls dispatch_call)
+void write_trampoline(u32 fn_value);
+//! Is value a compiled GOAL function (a function value bound by bind_goalc_reference)?
+bool goalc_reference_at(u32 value, std::string* name, int* arity, void** host);
 void register_mips2c(const std::string& name,
                      u64 (*exec)(void*),
                      u32 stack_size,

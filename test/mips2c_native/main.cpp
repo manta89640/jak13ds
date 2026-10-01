@@ -59,6 +59,10 @@ LINK(sp_process_block_2d)
 LINK(particle_adgif)
 LINK(sp_launch_particles_var)
 LINK(ocean_interp_wave)
+LINK(ray_sphere_intersect)
+LINK(ray_cylinder_intersect)
+LINK(moving_sphere_sphere_intersect)
+LINK(closest_pt_in_triangle)
 #undef LINK
 }  // namespace Mips2C::jak1
 
@@ -106,6 +110,7 @@ int main(int argc, char** argv) {
   memset(g_ee_main_mem, 0, harness::kMemSize);
   g_ee_main_mem_exec = g_ee_main_mem;
   harness::set_sym("*fake-scratchpad-data*", harness::kSpad);
+  harness::load_goalc_references();
 
   using namespace Mips2C::jak1;
   collide_do_primitives::link();
@@ -141,6 +146,21 @@ int main(int argc, char** argv) {
   particle_adgif::link();
   sp_launch_particles_var::link();
   ocean_interp_wave::link();
+  // GOAL functions with a native version: the reference is goalc's C code (goalc_ref/)
+  ray_sphere_intersect::link();
+  ray_cylinder_intersect::link();
+  moving_sphere_sphere_intersect::link();
+  closest_pt_in_triangle::link();
+  for (const char* name : {"ray-sphere-intersect", "ray-cylinder-intersect",
+                           "moving-sphere-sphere-intersect", "closest-pt-in-triangle"}) {
+    harness::use_goalc_reference(name);
+    harness::bind_mips2c_symbol(name);
+  }
+  // GOAL functions they call
+  for (const char* name : {"pc-port-raw-ray-sphere-implementation", "vector-normalize!",
+                           "vector-length", "vector+*!", "vector-segment-distance-point!"}) {
+    harness::bind_goalc_reference(name);
+  }
 
   tests::register_all();
   const int failed = harness::run_tests(opt);
