@@ -19,6 +19,14 @@ class Voice {
 
   Voice(AllocationType alloc = AllocationType::Managed) : mAlloc(alloc) {}
   s16Output Run();
+  // (AI-assisted) out[i] += Run() for i < n, stopping when the voice stops (as Synth::Tick does),
+  // with the same result; returns the samples run. The envelope steps are done in one go while
+  // they only advance a counter (most samples), which makes it several times cheaper.
+  // ratio: SPU ticks (48 kHz) per output sample, 16.16 fixed point. 0x10000 is Run() exactly;
+  // more mixes at a lower rate (the 3DS mixes at the DSP's 32728 Hz): the pitch counter moves
+  // that much further per output sample and the envelopes run that many ticks, so pitch and
+  // timing stay the same.
+  int RunBlock(s16Output* out, int n, u32 ratio = 0x10000);
 
   void KeyOn();
 
@@ -65,6 +73,8 @@ class Voice {
   }
 
   u32 GetNax() { return mNAX; }
+  // (AI-assisted) played a loop end block without repeat (the end of a stream)
+  bool Stopped() const { return mADSR.GetPhase() == ADSR::Phase::Stopped; }
 
   void SetSsa(u32 addr) { mSSA = addr; }
 
@@ -91,10 +101,19 @@ class Voice {
 
   void DecodeSamples();
   void UpdateBlockHeader();
+  // (AI-assisted) Run() with the pitch counter advanced by `step` and the envelopes by `ticks`
+  // SPU ticks; ahead: keep 16 decoded samples (more than one tick per sample can pop 6)
+  s16Output RunTicks(u32 step, u32 ticks, bool ahead);
+  u32 mTickFrac{0};  // (AI-assisted) RunBlock: SPU tick fraction carried between output samples
 
-  fifo<s16, 0x20> mDecodeBuf{};
+  // (AI-assisted) contiguous (linear_fifo): the interpolation reads Data()[0..3]
+  linear_fifo<s16, 0x20> mDecodeBuf{};
   s16 mDecodeHist1{0};
   s16 mDecodeHist2{0};
+  // (AI-assisted) the current block's shift and filter coefficients (UpdateBlockHeader)
+  u8 mDecShift{0};
+  s16 mDecCoef1{0};
+  s16 mDecCoef2{0};
   u32 mCounter{0};
 
   u16 mPitch{0};

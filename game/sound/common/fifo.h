@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: ISC
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 
@@ -38,4 +39,47 @@ class fifo {
   size_t capacity = Nm;
   size_t read = {};
   size_t write = {};
+};
+
+// (AI-assisted) A fifo whose contents are contiguous in memory: Data()[0 .. Size()) are the values
+// in order, so the voice interpolation reads its 4 samples with plain loads (no wrapping). Append()
+// moves the contents back to the start of the array when they would run past its end. At most Nm
+// values may be stored.
+template <typename Tp, size_t Nm>
+class linear_fifo {
+ public:
+  Tp Pop() { return array[read++]; }
+  void Push(Tp val) { *Append(1) = val; }
+  // n more values at the end (n <= Nm), written through the returned pointer
+  Tp* Append(size_t n) {
+    if (write + n > array.size()) {
+      std::copy(array.begin() + read, array.begin() + write, array.begin());
+      write -= read;
+      read = 0;
+    }
+    Tp* p = array.data() + write;
+    write += n;
+    return p;
+  }
+  Tp Peek(size_t offset) const { return array[read + offset]; }
+  const Tp* Data() const { return array.data() + read; }
+  void Skip(size_t n) { read += n; }
+  size_t Size() const { return write - read; }
+  // for loops that keep the positions in registers: Base()[ReadPos() .. WritePos()) are the
+  // values (Base() stays the same, Append() may change both positions)
+  const Tp* Base() const { return array.data(); }
+  size_t ReadPos() const { return read; }
+  size_t WritePos() const { return write; }
+  void SetReadPos(size_t pos) { read = pos; }
+
+  void Reset() {
+    array.fill(Tp{});
+    read = 0;
+    write = 0;
+  }
+
+ private:
+  std::array<Tp, 2 * Nm> array = {};
+  size_t read = 0;
+  size_t write = 0;
 };

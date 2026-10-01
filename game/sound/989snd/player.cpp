@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: ISC
 #include "player.h"
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 
@@ -35,12 +36,16 @@ Player::~Player() {
 }
 
 #ifdef __3DS__
-// The DSP resamples our 48 kHz stereo stream to its own rate. 1024 frames = 21.3 ms per buffer,
-// 3 buffers = 64 ms of latency at most; the mixer wakes at every DSP frame (~5 ms) and refills
-// whatever is done.
-static constexpr unsigned kMixRate = 48000;
-static constexpr unsigned kMixFrames = 1024;
+// (AI-assisted) The mix is made at the DSP's own output rate (32728 Hz): a 48 kHz mix was
+// resampled down to it anyway (nothing above 16 kHz ever reached the speakers), and mixing at it
+// is a third less work. The voices still run on SPU (48 kHz) time: the pitch counters and
+// envelopes advance 48000 / 32728 ticks per output sample (Voice::RunBlock's ratio), the sound
+// handlers tick every 200 SPU ticks (240 Hz). 768 frames = 23.5 ms per buffer, 3 buffers = 70 ms
+// of latency at most; the mixer wakes at every DSP frame (~5 ms) and refills whatever is done.
+static constexpr unsigned kMixRate = 32728;
+static constexpr unsigned kMixFrames = 768;
 static constexpr unsigned kMixBuffers = 3;
+static constexpr u32 kTickRatio = (u32)((48000ull * 65536 + kMixRate / 2) / kMixRate);
 // The mixer takes mTickLock per chunk, not per buffer: a sound call waits for one chunk at most
 // (128 frames: 2.7 ms of audio, mixed in about that long on hardware with many sounds playing).
 static constexpr unsigned kMixChunk = 128;
@@ -48,6 +53,8 @@ static_assert(kMixFrames % kMixChunk == 0);
 
 // the mixer thread (ctr_thread_current_id): its own waits for the lock aren't counted
 static std::atomic<unsigned> g_mixer_thread_id{0};
+// (AI-assisted) time in the handler ticks (sequencers, sound effect grains) vs the voice mixing
+static u64 g_handler_ticks = 0;
 
 void TickLock::lock() {
   if (m_mutex.try_lock()) {
@@ -81,7 +88,7 @@ void Player::InitCubeb() {
       }
       if (err == 0) {
         g_output_active = true;
-        lg::info("3DS sound: mixer thread on core {} (48 kHz software mix -> DSP)", core);
+        lg::info("3DS sound: mixer thread on core {} ({} Hz software mix -> DSP)", core, kMixRate);
       } else {
         lg::error("3DS sound: no mixer thread on core {} ({}), no audio", core,
                   err == -2 ? "the app got no share of core 1" : "thread not created");
@@ -119,20 +126,60 @@ void Player::MixerThread() {
   ctr_thread_install_crash_handler();
   g_mixer_thread_id.store(ctr_thread_current_id(), std::memory_order_relaxed);
   u32 last_dropped = 0;
+  // (AI-assisted) The mixing time (not the sleeps that let sound calls have the lock) is averaged
+  // over about a second as a share of the audio it makes; above kMaxShare it's logged. The mixer
+  // never holds back on purpose: audio must not break up (a guard that slept here made it stutter
+  // in Azahar). See the summary line every ~10 s.
+  constexpr double kBufferMs = 1000.0 * kMixFrames / kMixRate;
+  constexpr double kMaxShare = 0.85;
+  double share = 0.0;
+  double last_warn_ms = -1e9;
+  // a summary every ~10 s (480 buffers): mixing time, waits for sound calls, both in % of the
+  // audio made (above 100%: can't keep up)
+  double sum_mix_ms = 0.0, sum_wait_ms = 0.0;
+  int sum_buffers = 0;
   while (!mHandlerThreadStop) {
     short* buf;
     while (!mHandlerThreadStop && (buf = ctr_audio_get_buffer()) != nullptr) {
-      const u64 t_start = kperf::ticks();
+      u64 t_mix = 0, t_wait = 0;
       for (unsigned done = 0; done < kMixFrames; done += kMixChunk) {
+        const u64 t0 = kperf::ticks();
         Tick((s16Output*)buf + done, kMixChunk);
+        const u64 t1 = kperf::ticks();
+        t_mix += t1 - t0;
         // let waiting sound calls have the lock (see TickLock), for up to 2 ms
         for (int w = 0; w < 40 && mTickLock.contended(); w++) {
           ctr_thread_sleep_us(50);
         }
+        t_wait += kperf::ticks() - t1;
+      }
+      sum_mix_ms += kperf::ticks_to_ms(t_mix);
+      sum_wait_ms += kperf::ticks_to_ms(t_wait);
+      if (++sum_buffers == 480) {
+        const double handler_ms = kperf::ticks_to_ms(g_handler_ticks);
+        g_handler_ticks = 0;
+        const double real_ms = sum_buffers * kBufferMs;
+        lg::info("3DS sound: {:.0f}% of real time ({:.0f}% sound effect handlers, {:.0f}% voices), "
+                 "waiting for sound calls {:.0f}%, {} sounds, {} voices, {} DSP frames dropped so far",
+                 100.0 * sum_mix_ms / real_ms, 100.0 * handler_ms / real_ms,
+                 100.0 * (sum_mix_ms - handler_ms) / real_ms, 100.0 * sum_wait_ms / real_ms,
+                 mHandlers.size(), mSynth.VoiceCount(), ctr_audio_dropped_frames());
+        sum_mix_ms = sum_wait_ms = 0.0;
+        sum_buffers = 0;
       }
       ctr_audio_submit(buf);
-      kperf::add_thread(kperf::Thread::SOUND, kperf::ticks() - t_start, 1);
+      kperf::add_thread(kperf::Thread::SOUND, t_mix, 1);
       kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, (u32)mHandlers.size());
+      const double mix_ms = kperf::ticks_to_ms(t_mix);
+      share = share * 0.95 + 0.05 * (mix_ms / kBufferMs);
+      if (share > kMaxShare) {
+        const double now = kperf::ticks_to_ms(kperf::ticks());
+        if (now - last_warn_ms > 5000.0) {
+          lg::warn("3DS sound: mixer near its limit ({:.0f}% of real time, {} sounds, {} voices)",
+                   share * 100.0, mHandlers.size(), mSynth.VoiceCount());
+          last_warn_ms = now;
+        }
+      }
     }
     u32 dropped = ctr_audio_dropped_frames();
     if (dropped != last_dropped) {
@@ -246,10 +293,15 @@ void Player::Tick(s16Output* stream, int samples) {
   std::scoped_lock lock(mTickLock);
 #ifdef __3DS__
   // (AI-assisted) the same as below, but the synth mixes the samples between two handler ticks
-  // at once
-  static int htick3 = 200;
+  // at once, at kMixRate: spu = SPU ticks since the last handler tick, times kMixRate
+  static u64 spu = 200ull * kMixRate;
   for (int i = 0; i < samples;) {
-    if (htick3 == 200) {
+    if (spu >= 200ull * kMixRate) {
+      const u64 th = kperf::ticks();
+      struct HandlerTime {
+        u64 t0;
+        ~HandlerTime() { g_handler_ticks += kperf::ticks() - t0; }
+      } handler_time{th};
       mTick++;
       for (auto it = mHandlers.begin(); it != mHandlers.end();) {
         bool done = it->second->Tick();
@@ -260,11 +312,13 @@ void Player::Tick(s16Output* stream, int samples) {
           ++it;
         }
       }
-      htick3 = 0;
+      spu -= 200ull * kMixRate;
     }
-    const int n = std::min(samples - i, 200 - htick3);
-    mSynth.Tick(stream + i, n);
-    htick3 += n;
+    // output samples until the next handler tick
+    const u64 left = 200ull * kMixRate - spu;
+    const int n = (int)std::min<u64>((u64)(samples - i), (left + 47999) / 48000);
+    mSynth.Tick(stream + i, n, kTickRatio);
+    spu += (u64)n * 48000;
     i += n;
   }
   return;
