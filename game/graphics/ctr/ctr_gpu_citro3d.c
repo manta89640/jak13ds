@@ -61,15 +61,21 @@ typedef struct {
   int used;
   int pool;          /* -1: own memory, else the pool the texels are in */
   unsigned int offset; /* in the pool */
+  unsigned int bytes;  /* in the pool (all mip levels) */
   uint8_t levels;
 } TexSlot;
 
 typedef struct {
   int used;           /* 0 free, 1 used, 2 pending delete, 3 reserved (being filled) */
   int ready;          /* all texels written (ctr_gpu_pool_ready) */
-  uint8_t* linear;    /* the texels (always kept: moving out of VRAM is free) */
-  void* vram;         /* the VRAM copy the GPU reads, or NULL */
+  uint8_t* linear;    /* the pool's bytes [linear_off, bytes) in linear memory (NULL if none) */
+  void* vram;         /* the VRAM copy of [0, vram_bytes) the GPU reads, or NULL */
   unsigned int bytes;
+  /* (AI-assisted) VRAM residency: the first vram_bytes (whole textures) are in VRAM, maybe not all
+   * of the pool when VRAM is short. The part in VRAM isn't kept in linear memory (linear_off):
+   * leaving VRAM copies it back (pool_leave_vram). */
+  unsigned int vram_bytes;
+  unsigned int linear_off;
   int priority;
   int no_room_frame;  /* last frame it didn't fit in VRAM (don't try again every frame) */
 } TexPool;
@@ -279,7 +285,9 @@ static void process_pending_deletes(int hold) {
       if (p->vram) {
         vramFree(p->vram);
       }
-      linearFree(p->linear);
+      if (p->linear) {
+        linearFree(p->linear);
+      }
       memset(p, 0, sizeof(*p));
     }
   }
@@ -488,7 +496,9 @@ void ctr_gpu_exit(void) {
       if (g.pools[i].vram) {
         vramFree(g.pools[i].vram);
       }
-      linearFree(g.pools[i].linear);
+      if (g.pools[i].linear) {
+        linearFree(g.pools[i].linear);
+      }
       memset(&g.pools[i], 0, sizeof(g.pools[i]));
     }
   }
@@ -750,7 +760,7 @@ void ctr_gpu_frame_end(void) {
       g.cur.pool_bytes += p->bytes;
       if (p->vram) {
         g.cur.pools_in_vram++;
-        g.cur.pool_vram_bytes += p->bytes;
+        g.cur.pool_vram_bytes += p->vram_bytes;
       }
     }
   }
@@ -921,6 +931,7 @@ int ctr_gpu_pool_tex(int pool, unsigned int offset, int w, int h, int format, in
   }
   TexSlot* t = &g.textures[slot];
   TexPool* p = &g.pools[pool];
+  t->bytes = ctr_gpu_tex_bytes(w, h, format, levels);
   /* reads the pool's current place: set before the pool is ready (it stays in linear memory
    * until then) */
   tex_init_external(&t->tex, (p->vram ? (uint8_t*)p->vram : p->linear) + offset, w, h, format,
@@ -965,30 +976,80 @@ void ctr_gpu_pool_set_priority(int pool, int priority) {
   }
 }
 
-/* point the pool's textures at its linear memory or its VRAM copy */
+/* point the pool's textures at its VRAM copy (the ones in [0, vram_bytes)) or linear memory */
 static void pool_repoint(int pool) {
   TexPool* p = &g.pools[pool];
-  uint8_t* base = p->vram ? (uint8_t*)p->vram : p->linear;
   for (int i = 0; i < MAX_TEXTURES; i++) {
     TexSlot* t = &g.textures[i];
     if (t->used && t->pool == pool) {
-      t->tex.data = base + t->offset;
+      if (p->vram && t->offset + t->bytes <= p->vram_bytes) {
+        t->tex.data = (uint8_t*)p->vram + t->offset;
+      } else {
+        t->tex.data = p->linear + (t->offset - p->linear_off);
+      }
     }
   }
   g.bound_tex = NULL;
 }
 
-static void pool_leave_vram(int pool) {
+/* a linear buffer the GPU may still read (a queued copy, the frame in flight): freed at the next
+ * process_pending_deletes, after the GPU is done */
+static void defer_linear_free(void* mem) {
+  if (!mem) {
+    return;
+  }
+  if (g.pending_staging_count < MAX_STAGING) {
+    g.pending_staging[g.pending_staging_count++] = mem;
+  } else {
+    linearFree(mem);
+  }
+}
+
+/* (AI-assisted) The end of the pool after `part` bytes, without a straddling texture: textures in
+ * [0, result) are whole, the others start at result or later. */
+static unsigned int pool_split(int pool, unsigned int part) {
+  for (int changed = 1; changed;) {
+    changed = 0;
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+      const TexSlot* t = &g.textures[i];
+      if (t->used && t->pool == pool && t->offset < part && t->offset + t->bytes > part) {
+        part = t->offset;
+        changed = 1;
+      }
+    }
+  }
+  return part;
+}
+
+/* Returns 0 when it can't (no linear memory to copy the VRAM part back to): it stays then. */
+static int pool_leave_vram(int pool) {
   TexPool* p = &g.pools[pool];
   if (!p->vram) {
-    return;
+    return 1;
+  }
+  if (p->linear_off) {
+    /* the VRAM part isn't in linear memory: copy the whole pool back (the CPU reads VRAM) */
+    uint8_t* full = (uint8_t*)linearAlloc(p->bytes);
+    if (!full) {
+      return 0;
+    }
+    memcpy(full, p->vram, p->linear_off);
+    if (p->linear && p->bytes > p->linear_off) {
+      memcpy(full + p->linear_off, p->linear, p->bytes - p->linear_off);
+    }
+    GSPGPU_FlushDataCache(full, p->bytes);
+    defer_linear_free(p->linear);
+    p->linear = full;
+    p->linear_off = 0;
   }
   void* v = p->vram;
   p->vram = NULL;
+  p->vram_bytes = 0;
   pool_repoint(pool);
   /* at frame begin: the GPU finished the frames that read it, and this frame reads the linear
    * copy from now on */
   vramFree(v);
+  return 1;
 }
 
 /* At frame begin, before any draw: copy the pools that want to be in VRAM there, most wanted
@@ -998,13 +1059,14 @@ static void update_pool_residency(void) {
   if (!g_vram_textures) {
     for (int i = 0; i < MAX_POOLS; i++) {
       if (g.pools[i].used == 1 && g.pools[i].vram) {
-        pool_leave_vram(i);
+        (void)pool_leave_vram(i);
       }
     }
     return;
   }
   int copies = 0;
   int tried[MAX_POOLS] = {0};
+  int stuck[MAX_POOLS] = {0}; /* can't leave VRAM (no linear memory to go back to) */
   while (copies < POOL_COPIES_PER_FRAME) {
     int best = -1;
     ctr_linear_lock();
@@ -1031,7 +1093,7 @@ static void update_pool_residency(void) {
       int victim = -1;
       for (int i = 0; i < MAX_POOLS; i++) {
         const TexPool* q = &g.pools[i];
-        if (q->used == 1 && q->vram && q->priority < p->priority &&
+        if (q->used == 1 && q->vram && !stuck[i] && q->priority < p->priority &&
             (victim < 0 || q->priority < g.pools[victim].priority)) {
           victim = i;
         }
@@ -1039,17 +1101,60 @@ static void update_pool_residency(void) {
       if (victim < 0) {
         break;
       }
-      pool_leave_vram(victim);
+      if (!pool_leave_vram(victim)) {
+        stuck[victim] = 1;
+        continue;
+      }
       v = vramAlloc(p->bytes);
+    }
+    unsigned int part = p->bytes;
+    if (!v) {
+      /* (AI-assisted) not all of it: as much as fits in the VRAM that's left (whole textures from
+       * the start), so the GPU reads those fast and they leave linear memory */
+      const unsigned int kStep = 128 * 1024, kMinPart = 256 * 1024;
+      unsigned int want = (unsigned int)vramSpaceFree();
+      if (want > p->bytes) {
+        want = p->bytes;
+      }
+      want &= ~(kStep - 1);
+      while (want >= kMinPart && !(v = vramAlloc(want))) {
+        want -= kStep;
+      }
+      if (v) {
+        part = pool_split(best, want);
+        if (part < kMinPart) {
+          vramFree(v);
+          v = NULL;
+        }
+      }
     }
     ctr_linear_unlock();
     if (!v) {
       p->no_room_frame = g.frame_no;
       continue;
     }
-    /* one GPU copy of the whole pool (in a frame: queued, runs before the draws) */
-    sync_texture_copy((u32*)p->linear, 0, (u32*)v, 0, p->bytes, 8);
+    /* one GPU copy of the part (in a frame: queued, runs before the draws) */
+    uint8_t* old = p->linear;
+    sync_texture_copy((u32*)old, 0, (u32*)v, 0, part, 8);
     p->vram = v;
+    p->vram_bytes = part;
+    /* the VRAM part leaves linear memory: the rest (if any) gets a buffer of its own; the old one
+     * is freed once the copy has run */
+    ctr_linear_lock();
+    uint8_t* rest = NULL;
+    if (part < p->bytes) {
+      rest = (uint8_t*)linearAlloc(p->bytes - part);
+    }
+    if (part == p->bytes || rest) {
+      if (rest) {
+        memcpy(rest, old + part, p->bytes - part);
+        GSPGPU_FlushDataCache(rest, p->bytes - part);
+      }
+      p->linear = rest;
+      p->linear_off = part;
+      defer_linear_free(old);
+    }
+    ctr_linear_unlock();
     pool_repoint(best);
     copies++;
   }
