@@ -26,7 +26,9 @@
   (with-dma-buffer-add-bucket ((dma-buf (-> (current-frame) global-buf)) (bucket-id debug-no-zbuf)) ;; debug-no-zbuf is one of the last buckets
     ;; draw the two sprites
     (#cond
-      ((not PC_PORT)
+      ((or (not PC_PORT) TARGET_3DS)
+       ;; 3DS: the PS2's bars, across the whole width. (The PC's "native" branch below forces a
+       ;; 16:9 frame from the screen's aspect ratio: on the 3DS's 5:3 screen that's two slivers.)
        (draw-sprite2d-xy dma-buf 0 0 512 25 (new 'static 'rgba :a #x80))
        (draw-sprite2d-xy dma-buf 0 199 512 26 (new 'static 'rgba :a #x80)))
       (#t
