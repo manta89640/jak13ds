@@ -189,12 +189,14 @@ void closest_pt_in_triangle_h(float out[4], u32 point, u32 tri, u32 normal) {
   closest_pt_in_triangle_t([out](const float* r) { memcpy(out, r, 16); }, point, tri, normal);
 }
 
-u64 closest_pt_in_triangle_impl(const NativeArgs& args) {
+// inlined into its direct GOAL entry (native_as_goal), so the arguments stay in registers
+__attribute__((always_inline)) inline u64 closest_pt_in_triangle_impl(const NativeArgs& args) {
   closest_pt_in_triangle_v((u32)args.a[0], (u32)args.a[1], (u32)args.a[2], (u32)args.a[3]);
   return 0;
 }
 
-const NativeImpl closest_pt_in_triangle = MIPS2C_NATIVE_IMPL(closest_pt_in_triangle_impl, 0, 0);
+// GOAL code calls it directly too (MIPS2C_NATIVE_IMPL_GOAL)
+const NativeImpl closest_pt_in_triangle = MIPS2C_NATIVE_IMPL_GOAL(closest_pt_in_triangle_impl, 0);
 
 }  // namespace Mips2C::jak1::native
 

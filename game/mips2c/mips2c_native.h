@@ -16,6 +16,12 @@
  * and GOAL calls the native one. With OPENGOAL_MIPS2C_VERIFY=1 (C backend, not on the 3DS), every
  * call runs both on the same inputs and compares what they wrote to GOAL memory and v0
  * (mips2c_native.cpp). OPENGOAL_MIPS2C_NATIVE=0 (not on the 3DS) uses the mips2c versions.
+ * GOAL functions replaced by a native version (def-mips2c, no mips2c version) register the
+ * native's as_exec as their execute function.
+ *
+ * In C mode GOAL code calls a native through an adapter thunk (8 arguments copied, a perf section,
+ * scratch space on the stack). Small natives without scratch space that GOAL calls often use
+ * MIPS2C_NATIVE_IMPL_GOAL instead: GOAL calls their native_as_goal entry directly.
  *
  * Float results: the mips2c helpers do each VU0 op as one C++ expression per lane, e.g.
  * vmadd: `acc + a * b`, vmadda: `acc += a * b`. A compiler may fuse a multiply-add that is inside
@@ -28,6 +34,7 @@
 
 #include "common/common_types.h"
 
+#include "game/kernel/common/goal_c_abi.h"
 #include "game/mips2c/mips2c_private.h"
 
 namespace Mips2C {
@@ -50,6 +57,9 @@ enum NativeFlags : u32 {
   NATIVE_CALLS_GOAL = 2,
 };
 
+//! a function compiled GOAL code calls directly (goal_c_abi.h's goalc_fn8)
+using NativeGoalFn = u64 (*)(u64, u64, u64, u64, u64, u64, u64, u64);
+
 struct NativeImpl {
   NativeFn fn;
   //! the same function called with a mips2c ExecutionContext (for the native GOAL backends)
@@ -58,6 +68,9 @@ struct NativeImpl {
   //! bytes of GOAL memory the function needs below NativeArgs::stack (for vectors it passes by
   //! address to other functions, like the mips2c version's stack frame)
   u32 scratch;
+  //! optional: the same function with the arguments in registers, which C mode's GOAL code calls
+  //! without the adapter (for small functions without scratch space that GOAL code calls often)
+  NativeGoalFn goal = nullptr;
 };
 
 //! Native function F callable as a mips2c execute function.
@@ -74,6 +87,19 @@ u64 native_as_exec(void* ctxt) {
 #define MIPS2C_NATIVE_IMPL(fn, flags, scratch)          \
   ::Mips2C::NativeImpl {                                \
     &fn, &::Mips2C::native_as_exec<&fn>, flags, scratch \
+  }
+//! Native function F (no scratch space) callable directly by C mode's GOAL code
+template <NativeFn F>
+u64 native_as_goal(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+  const u64 args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+  return F(NativeArgs{args, goalc_pp, goalc_st, 0});
+}
+
+//! MIPS2C_NATIVE_IMPL for a function without scratch space that GOAL code calls directly in C
+//! mode (NativeImpl::goal)
+#define MIPS2C_NATIVE_IMPL_GOAL(fn, flags)                                        \
+  ::Mips2C::NativeImpl {                                                          \
+    &fn, &::Mips2C::native_as_exec<&fn>, flags, 0, &::Mips2C::native_as_goal<&fn> \
   }
 
 //! Call a GOAL function from native code (like ExecutionContext::jalr).

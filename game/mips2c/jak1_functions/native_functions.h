@@ -22,17 +22,6 @@ extern const NativeImpl ray_sphere_intersect;
 extern const NativeImpl ray_cylinder_intersect;
 extern const NativeImpl moving_sphere_sphere_intersect;
 extern const NativeImpl closest_pt_in_triangle;
-float ray_sphere_intersect_v(const float origin[4],
-                             const float dir[4],
-                             const float center[4],
-                             float radius);
-float ray_cylinder_intersect_v(const float origin[4],
-                               const float dir[4],
-                               const float cyl_origin[4],
-                               const float axis[4],
-                               float rad,
-                               float len,
-                               u32 pt_out);
 float moving_sphere_sphere_intersect_v(u32 sphere,
                                        u32 move,
                                        u32 other,
