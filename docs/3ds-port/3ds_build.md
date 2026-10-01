@@ -60,6 +60,28 @@ The CIA asks for the New 3DS 124 MB memory mode (`platform/3ds/cia/gk.rsf`: `Sys
 124MB`, 804 MHz, L2 cache). The game needs about 95 MB: 48 MB of PS2 memory, 12 MB of code, 24 MB
 of GPU memory, plus buffers.
 
+### If the CIA stays on the launch screen
+
+Look at `sdmc:/3ds/jak1/boot_cia.txt`: one line per boot step, the last one is where it stopped
+(`0 services` without `0 APT`: stuck in the HOME Menu handshake). The file is the first thing the
+game writes. If there is none at all, the title never ran the game's code: find out why with the
+boot test, a small app packaged with the same CIA settings as its own title:
+
+```sh
+make -C platform/3ds/hello                              # (source platform/3ds/toolchain/env.sh)
+platform/3ds/tools/make_cia.sh --boottest               # build-3ds/boottest.cia, 124 MB mode
+platform/3ds/tools/make_cia.sh --boottest --mem legacy  # build-3ds/boottest_legacy.cia
+platform/3ds/tools/make_cia.sh --mem legacy             # the game without the 124 MB mode
+```
+
+Install with FBI, start from the HOME Menu, then read `sdmc:/3ds/jak1/boottest.txt` (`0 started`,
+`1 APT`, `2 main reached`, `3 screens up: app memory ...`; the app also shows a pulsing top screen
+and its memory on the bottom screen):
+- the boot test starts but the game doesn't: something about the game's binary (its size, a crash
+  before the first boot step); the legacy game CIA tells whether the 124 MB mode matters for it.
+- the boot test doesn't start either, but its legacy version does: the 124 MB memory mode setting.
+- neither starts: the CIA settings or the install (check FBI's install result).
+
 ### Without installing: gk.3dsx
 
 A `.3dsx` runs inside another title's memory:
@@ -467,6 +489,7 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `max_sprites` | 1000 | world sprites per frame |
   | `ocean` | on | draw the ocean |
   | `envmap` | on | the envmap shine of merc models (power cells, precursor metal; c3l v9 files) |
+  | `sky` | on | the sky (time of day texture, clouds); off: the screen is cleared to the fog color |
   | `distort` | on | the sprite distorter (portals, heat haze); costs one screen copy in frames that have distort sprites |
   | `rgba4_as_rgba8` | auto | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. `auto`: on in the emulator, off on the 3DS |
   | `vram_textures` | auto | level texture pools in VRAM while there is room (the GPU reads VRAM much faster). `auto`: on on the 3DS, off in the emulator (Azahar draws VRAM textures as noise) |

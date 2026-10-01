@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <thread>
 
 #include "common/dma/dma.h"
@@ -23,6 +24,7 @@
 
 #ifdef __3DS__
 extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.c
+extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_port.c
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
@@ -637,6 +639,35 @@ void ctr_force_reload_level(const std::string&) {}
 void ctr_force_reload_common() {}
 void ctr_set_pmode_alp(float) {}
 }  // namespace
+
+// (AI-assisted) The game waits for this before a level starts (level-update-after-load, TARGET_3DS):
+// the level's .c3l is loaded, so the player doesn't start in a level with nothing drawn yet. Gives
+// up after kMaxWaitMs per level (then the level appears when its load is done, as before).
+bool ctr_level_ready(const char* name) {
+  constexpr double kMaxWaitMs = 20000.0;
+  if (!name || !g_ctr_ready) {
+    return true;
+  }
+  static std::map<std::string, double> waiting_since;
+  const std::string n(name);
+  if (g_ctr->levels().ready(n)) {
+    waiting_since.erase(n);
+    return true;
+  }
+#ifdef __3DS__
+  // the game polls this in a loop at boot: let the loader thread run if it shares the core
+  ctr_thread_sleep_us(1000);
+#endif
+  const double now = ctr_gpu_time_ms();
+  auto it = waiting_since.emplace(n, now).first;
+  if (now - it->second > kMaxWaitMs) {
+    lg::warn("[ctr] {}: .c3l still not loaded after {:.0f} s, starting the level anyway", n,
+             kMaxWaitMs / 1000.0);
+    waiting_since.erase(it);
+    return true;
+  }
+  return false;
+}
 
 // (AI-assisted) The overlord (IOP thread) started loading a level's DGO: start reading the
 // level's .c3l at the same time. The game only reports a level (set_levels) once its DGO is in,

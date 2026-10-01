@@ -35,6 +35,8 @@ struct CtrSettings {
   bool distort = true;
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
+  // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
+  bool sky = true;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
