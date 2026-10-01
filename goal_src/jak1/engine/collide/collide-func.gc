@@ -158,6 +158,14 @@
       (label cfg-7)
       (the-as float result))))
 
+;; og:preserve-this The 3DS port runs a native (C++) version of ray-sphere-intersect,
+;; ray-cylinder-intersect and moving-sphere-sphere-intersect: the collision natives call them for
+;; every triangle (game/mips2c/jak1_functions/native_collide_func.cpp). They give the same results
+;; as the GOAL code in the comments below, compiled by goalc (test/mips2c_native checks it). To
+;; change one in GOAL, replace its def-mips2c by the defun.
+(def-mips2c ray-sphere-intersect (function vector vector vector float float))
+
+#|
 (defun ray-sphere-intersect ((ray-origin vector) (ray-dir vector) (sph-origin vector) (radius float))
   "Intersect a ray and sphere. Will return 0 if you are in the sphere, -huge number if you don't hit it.
    Returns the length of the ray to the first intersection."
@@ -170,6 +178,7 @@
     (.lvf vf2 (&-> ray-dir quad))
     ;;(raw-ray-sphere-intersect radius)
     (pc-port-do-raw-ray-sphere-intersect radius vf1 vf2)))
+|#
 
 (defun ray-circle-intersect ((ray-origin vector) (ray-dir vector) (circle-origin vector) (radius float))
   "Intersect ray with circle. Circle is on the y plane and this throws out the y components
@@ -188,6 +197,9 @@
     ;;(raw-ray-sphere-intersect radius)
     (pc-port-do-raw-ray-sphere-intersect radius vf1 vf2)))
 
+(def-mips2c ray-cylinder-intersect (function vector vector vector vector float float vector float))
+
+#|
 (defun ray-cylinder-intersect ((ray-origin vector)
         (ray-dir vector)
         (cyl-origin vector)
@@ -253,6 +265,7 @@
     (set! v0-1 -100000000.0)
     (label cfg-7)
     v0-1))
+|#
 
 (defun ray-plane-intersect ((arg0 vector) (arg1 vector) (arg2 vector) (arg3 vector) (arg4 vector) (arg5 vector) (arg6 vector))
   "Unused."
@@ -318,6 +331,10 @@
 (def-mips2c moving-sphere-triangle-intersect (function vector vector float collide-cache-tri vector vector float))
 
 ;; moving-sphere-sphere-intersect (used in collide)
+;; (the native version inlines vector-normalize! and vector+*!)
+(def-mips2c moving-sphere-sphere-intersect (function vector vector vector vector float))
+
+#|
 (defun moving-sphere-sphere-intersect ((arg0 vector) (arg1 vector) (arg2 vector) (arg3 vector))
   (let ((f30-0 (ray-sphere-intersect arg0 arg1 arg2 (+ (-> arg0 w) (-> arg2 w)))))
     (when (>= f30-0 0.0)
@@ -325,5 +342,6 @@
         (vector+*! arg3 arg0 arg1 f30-0)
         (vector+! arg3 arg3 s3-1)))
     f30-0))
+|#
 
 ;; moving-sphere-moving-sphere-intersect (unused)

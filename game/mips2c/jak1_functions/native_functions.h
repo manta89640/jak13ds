@@ -17,6 +17,31 @@ extern const NativeImpl collide_do_primitives;
 extern const NativeImpl moving_sphere_triangle_intersect;
 u64 collide_do_primitives_impl(const NativeArgs& args);
 u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args);
+// GOAL functions of collide-func.gc and geometry.gc (native_collide_func.cpp, native_geometry.cpp)
+extern const NativeImpl ray_sphere_intersect;
+extern const NativeImpl ray_cylinder_intersect;
+extern const NativeImpl moving_sphere_sphere_intersect;
+extern const NativeImpl closest_pt_in_triangle;
+float ray_sphere_intersect_v(const float origin[4],
+                             const float dir[4],
+                             const float center[4],
+                             float radius);
+float ray_cylinder_intersect_v(const float origin[4],
+                               const float dir[4],
+                               const float cyl_origin[4],
+                               const float axis[4],
+                               float rad,
+                               float len,
+                               u32 pt_out);
+float moving_sphere_sphere_intersect_v(u32 sphere,
+                                       u32 move,
+                                       u32 other,
+                                       u32 out,
+                                       const NativeArgs& caller);
+//! closest-pt-in-triangle (stores to out in GOAL memory like the GOAL function)
+void closest_pt_in_triangle_v(u32 out, u32 point, u32 tri, u32 normal);
+//! closest-pt-in-triangle with the result in host memory (for an out that is the caller's scratch)
+void closest_pt_in_triangle_h(float out[4], u32 point, u32 tri, u32 normal);
 // native_collide_probe.cpp
 extern const NativeImpl collide_probe_node;
 extern const NativeImpl collide_probe_instance_tie;

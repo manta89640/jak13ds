@@ -195,6 +195,7 @@ set(RUNTIME_SOURCE
         mips2c/jak1_functions/native_collide_func.cpp
         mips2c/jak1_functions/native_collide_mesh.cpp
         mips2c/jak1_functions/native_collide_probe.cpp
+        mips2c/jak1_functions/native_geometry.cpp
         mips2c/jak1_functions/native_joint.cpp
         mips2c/jak1_functions/native_ocean.cpp
         mips2c/jak1_functions/native_sparticle.cpp
