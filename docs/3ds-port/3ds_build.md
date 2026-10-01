@@ -48,6 +48,12 @@ cp build-3ds/jak1.cia /Volumes/3DS/cias/              # any folder FBI can brows
 
 On the card: `3ds/jak1/gk.3dsx`, `3ds/jak1/data/out/jak1/iso/*` (~1.3 GB), `3ds/jak1/data/out/jak1/c3l/*`.
 
+**gk and the game files go together.** The GOAL code is compiled to C and linked into gk (the
+3dsx and the CIA); each object in the `.CGO` / `.DGO` files only carries the hash of its C module.
+After any GOAL change, copy gk (or reinstall the CIA) *and* `out/jak1/iso` from the same
+`build_cmodules.sh` run. A mismatch stops at boot with `goalc: could not find C module ... for
+object file ...`.
+
 ### Install and start (recommended: CIA)
 
 1. Put the SD card back, start FBI, open `cias/`, select `jak1.cia`, "Install CIA".

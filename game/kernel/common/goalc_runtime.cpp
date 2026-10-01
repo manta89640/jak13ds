@@ -392,7 +392,11 @@ u32 goalc_link_module_entry(const u8* link,
 
   const GoalCModule* mod = goalc_find_module(hash);
   if (!mod) {
-    ASSERT_MSG(false, fmt::format("goalc: could not find C module {:016x} for object file {}",
+    // (AI-assisted) the usual cause: the game files (out/jak1/iso) and the runtime come from
+    // different goalc runs (the C modules are linked into the runtime, e.g. gk.3dsx on the 3DS)
+    ASSERT_MSG(false, fmt::format("goalc: could not find C module {:016x} for object file {}. The "
+                                  "game files (out/jak1/iso: CGO/DGO) and this runtime are from "
+                                  "different builds: copy both from the same build.",
                                   hash, object_name));
   }
 
