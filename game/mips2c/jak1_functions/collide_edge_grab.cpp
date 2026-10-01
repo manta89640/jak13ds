@@ -1,6 +1,7 @@
 //--------------------------MIPS2C---------------------
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 namespace Mips2C::jak1 {
 namespace method_16_collide_edge_work {
@@ -189,7 +190,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.format = intern_from_c("format").c();
-  gLinkedFunctionTable.reg("(method 16 collide-edge-work)", execute, 128);
+  gLinkedFunctionTable.reg("(method 16 collide-edge-work)", execute, 128,
+                           &native::method_16_collide_edge_work);
 }
 
 } // namespace method_16_collide_edge_work
@@ -587,7 +589,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.format = intern_from_c("format").c();
-  gLinkedFunctionTable.reg("(method 15 collide-edge-work)", execute, 128);
+  gLinkedFunctionTable.reg("(method 15 collide-edge-work)", execute, 128,
+                           &native::method_15_collide_edge_work);
 }
 
 } // namespace method_15_collide_edge_work
@@ -681,7 +684,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 10 collide-edge-hold-list)", execute, 128);
+  gLinkedFunctionTable.reg("(method 10 collide-edge-hold-list)", execute, 128,
+                           &native::method_10_collide_edge_hold_list);
 }
 
 } // namespace method_10_collide_edge_hold_list
@@ -1004,7 +1008,8 @@ u64 execute(void* ctxt) {
 void link() {
   cache.collide_edge_hold_list = intern_from_c("collide-edge-hold-list").c();
   cache.collide_edge_work = intern_from_c("collide-edge-work").c();
-  gLinkedFunctionTable.reg("(method 18 collide-edge-work)", execute, 256);
+  gLinkedFunctionTable.reg("(method 18 collide-edge-work)", execute, 256,
+                           &native::method_18_collide_edge_work);
 }
 
 } // namespace method_18_collide_edge_work

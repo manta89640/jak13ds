@@ -517,6 +517,14 @@
     (.svf (&-> arg0 quad) vf4)
     arg0))
 
+;; og:preserve-this The 3DS port runs a native (C++) version of closest-pt-in-triangle: the
+;; collision natives call it for every triangle near a sphere
+;; (game/mips2c/jak1_functions/native_geometry.cpp, with vector-segment-distance-point! inlined).
+;; It gives the same results as the GOAL code in the comment below, compiled by goalc
+;; (test/mips2c_native checks it). To change it in GOAL, replace the def-mips2c by the defun.
+(def-mips2c closest-pt-in-triangle (function vector vector matrix vector none))
+
+#|
 (defun closest-pt-in-triangle ((arg0 vector) (arg1 vector) (arg2 matrix) (arg3 vector))
   "arg2 is the vertices of the triangle, arg3 is the normal, arg1 is the input point, arg0 is the output."
   ;; (declare (print-asm))
@@ -625,6 +633,7 @@
     (label cfg-24)
     0
     (none)))
+|#
 
 (defun point-in-triangle-cross ((arg0 vector) (arg1 vector) (arg2 vector) (arg3 vector) (arg4 vector))
   "Check if point is in the triangle using cross product check (so you have to get the order of points right)"

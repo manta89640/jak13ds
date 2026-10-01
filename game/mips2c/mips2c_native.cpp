@@ -99,8 +99,8 @@ u64 run_native(const NativeImpl* impl, u64* args) {
   u32 stack = 0;
   if (impl->scratch) {
     u8* buf = (u8*)__builtin_alloca(impl->scratch + 16);
-    stack = (u32)((((uintptr_t)buf + impl->scratch + 15) & ~uintptr_t(15)) -
-                  (uintptr_t)g_ee_main_mem);
+    stack =
+        (u32)((((uintptr_t)buf + impl->scratch + 15) & ~uintptr_t(15)) - (uintptr_t)g_ee_main_mem);
   }
   return impl->fn(NativeArgs{args, goalc_pp, goalc_st, stack});
 }
@@ -465,8 +465,7 @@ void iop_write_ee_mem_impl(void* dst, const void* src, u32 size) {
     std::lock_guard<std::mutex> lock(g_iop_mutex);
     memcpy(dst, src, size);
     if (g_iop_track) {
-      g_iop_writes.push_back(
-          {(u32)((u8*)dst - g_ee_main_mem), size, (u32)g_iop_bytes.size()});
+      g_iop_writes.push_back({(u32)((u8*)dst - g_ee_main_mem), size, (u32)g_iop_bytes.size()});
       g_iop_bytes.insert(g_iop_bytes.end(), (const u8*)src, (const u8*)src + size);
     }
     return;
@@ -539,6 +538,12 @@ const u32* native_stub_slot(const char* name) {
 }
 
 u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller) {
+  if (goalc_enabled()) {
+    // C mode (always on the 3DS): what ExecutionContext::jalr does, without filling an
+    // ExecutionContext for it to read back
+    ASSERT(fn);
+    return goalc_call_goal8(fn, args, caller.pp);
+  }
   ExecutionContext ctx;
   const int regs[8] = {a0, a1, a2, a3, t0, t1, t2, t3};
   for (int i = 0; i < 8; i++) {

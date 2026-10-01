@@ -2,6 +2,7 @@
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 // clang-format off
 namespace Mips2C::jak1 {
@@ -194,7 +195,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.closest_pt_in_triangle = intern_from_c("closest-pt-in-triangle").c();
-  gLinkedFunctionTable.reg("(method 12 collide-mesh)", execute, 256);
+  gLinkedFunctionTable.reg("(method 12 collide-mesh)", execute, 256,
+                           &native::method_12_collide_mesh);
 }
 
 } // namespace method_12_collide_mesh
@@ -370,7 +372,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.closest_pt_in_triangle = intern_from_c("closest-pt-in-triangle").c();
-  gLinkedFunctionTable.reg("(method 11 collide-mesh)", execute, 512);
+  gLinkedFunctionTable.reg("(method 11 collide-mesh)", execute, 512,
+                           &native::method_11_collide_mesh);
 }
 
 } // namespace method_11_collide_mesh
@@ -573,7 +576,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 14 collide-mesh)", execute, 128);
+  gLinkedFunctionTable.reg("(method 14 collide-mesh)", execute, 128,
+                           &native::method_14_collide_mesh);
 }
 
 } // namespace method_14_collide_mesh
@@ -881,7 +885,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 15 collide-mesh)", execute, 128);
+  gLinkedFunctionTable.reg("(method 15 collide-mesh)", execute, 128,
+                           &native::method_15_collide_mesh);
 }
 
 } // namespace method_15_collide_mesh
