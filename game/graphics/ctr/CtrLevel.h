@@ -52,16 +52,45 @@ struct CtrLevelData {
   // draw_chunk: the chunk of each draw.
   std::vector<u32> sorted_draws;
   std::vector<u32> ordered_draws;
+  // (AI-assisted) the opaque draws that may use the early depth test (CTR_STATE_EARLY_DEPTH),
+  // sorted like sorted_draws; drawn first, nearest chunks first (draw_level)
+  std::vector<u32> early_draws;
   std::vector<u32> draw_chunk;
+  // (AI-assisted) c3l v10 visibility runs (c3l::VisRun): all of them, the first of each chunk,
+  // and the range of each draw
+  std::vector<c3l::VisRun> vis_runs;
+  std::vector<u32> chunk_first_run;
+  std::vector<u32> draw_first_run;
+  std::vector<u16> draw_run_count;
   std::vector<int> textures;  // ctr_gpu handles
+  std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
   std::vector<int> meshes;    // one per chunk
   std::vector<c3l::MercBlercVertex> blerc_verts;
   std::vector<c3l::MercBlercTarget> blerc_targets;
   std::vector<u16> blerc_dests;
   u64 last_used_frame = 0;
+  // (AI-assisted) the frame the background was drawn: the game sends a level's camera with each
+  // of its tfrag trees (normal, trans, dirt, ice buckets); the first one draws all of it
+  u64 drawn_frame = ~0ull;
   float bbox_min[3] = {0, 0, 0}, bbox_max[3] = {0, 0, 0};  // tfrag + tie, game units
   bool has_lowres = false;  // chunks with lod_tier 3
+  // (AI-assisted) partial unload: a level only seen from a neighbouring one (far mode: only its
+  // far chunks are drawn) frees the meshes of its other chunks after a while (linear memory for
+  // the level the camera is in), and reads them again from its file when the camera comes back
+  // (CtrLevels::unload_detail / request_detail). Until then it is drawn in far mode.
+  std::string path;  // the .c3l file
+  u32 vertex_data_offset = 0, index_data_offset = 0;
+  std::vector<u32> mesh_index_first, mesh_index_end;  // per chunk: its index range in the file
+  bool detail_loaded = true;      // the meshes of all chunks are there
+  bool detail_requested = false;  // their reload is queued
+  u32 far_frames = 0;             // frames in a row beyond the unload distance
+  u64 detail_retry_frame = 0;     // after a failed reload (no memory): not before this frame
+  // (AI-assisted) last frame's decisions, for hysteresis (CtrTfragRenderer::draw_level): per chunk
+  // bits 0-1 detailed/coarse (1 near, 2 far, 0 not decided yet), bit 2 within its draw distance
+  std::vector<u8> chunk_state;
+  bool was_far = false;
+  u32 generation = 0;             // tells loads of the same level apart
 };
 
 /*! DrawMode (tfrag3 draw settings) to ctr_gpu state. */
@@ -97,6 +126,9 @@ class CtrLevels {
   /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
    * nothing to wait for (any thread). The game waits for this before a level starts. */
   bool ready(const std::string& name);
+  /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
+  void unload_detail(CtrLevelData& lev);
+  void request_detail(CtrLevelData& lev);
 
  private:
   enum class LoadResult { LOADED, MISSING, FAILED, CANCELLED };
@@ -106,6 +138,7 @@ class CtrLevels {
   bool cancelled() const { return m_cancel.load(std::memory_order_relaxed); }
   std::map<std::string, std::unique_ptr<CtrLevelData>> m_levels;
   std::map<std::string, bool> m_missing;
+  std::map<std::string, double> m_failed;  // (AI-assisted) when a load failed: retried later
   std::vector<std::string> m_pending_loads;
   std::vector<std::string> m_wanted;
   bool m_common_wanted = false;
@@ -117,18 +150,34 @@ class CtrLevels {
   void publish(const std::string& name, std::unique_ptr<CtrLevelData> lev, u64 frame);
 
   // ---- loader ----
+  // (AI-assisted) a chunk mesh to read again (partial unload)
+  struct DetailChunk {
+    u32 chunk;
+    u32 first_vertex, vertex_count;
+    u32 index_first, index_end;
+  };
   struct Job {
     std::string name;
     bool common = false;
     bool prefetch = false;
+    // detail reload (request_detail): only these chunks' meshes of the loaded level `generation`
+    bool detail = false;
+    u32 generation = 0;
+    std::string path;
+    u32 vertex_data_offset = 0, index_data_offset = 0;
+    std::vector<DetailChunk> chunks;
+    std::string key() const { return detail ? name + "#detail" : name; }  // in m_requested
   };
   struct Done {
     Job job;
     std::unique_ptr<CtrLevelData> lev;
     LoadResult result = LoadResult::FAILED;
+    std::vector<std::pair<u32, int>> meshes;  // detail reload: (chunk, mesh)
   };
   void request(const Job& job);  // render thread
   void run_job(const Job& job);  // loader thread (or inline without one)
+  void run_detail_job(const Job& job, Done* d);
+  std::atomic<u32> m_generation{0};
   void loader_main();
   static void* loader_entry(void* self);
   std::mutex m_lock;  // m_queue, m_done, m_loading, m_quit, m_prefetch_requests, m_levels_loaded
@@ -141,6 +190,7 @@ class CtrLevels {
   bool m_quit = false;
   std::vector<std::string> m_prefetch_requests;
   int m_levels_loaded = 0;  // m_levels + m_prefetched (a prefetch waits while it's 2 or more)
+  std::atomic<u64> m_render_frame{0};  // the render thread's frame (process_pending_loads)
   std::set<std::string> m_resident;  // names in m_levels + m_prefetched (a prefetch skips them)
   void* m_thread = nullptr;
   std::set<std::string> m_requested;  // queued, loading or done but not taken (under m_lock)
@@ -176,9 +226,15 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;
+  // (AI-assisted) the game's visibility string for the level being drawn (nullptr: none), and
+  // what it hid (statistics)
+  const u8* m_vis = nullptr;
+  u64 m_vis_chunks = 0, m_vis_tris = 0, m_vis_frames = 0;
   // this frame's visible chunks and draws (kept to avoid allocations)
   struct VisibleChunk {
     u32 chunk;
+    u8 band;    // (AI-assisted) distance band for the early depth order: 0 near .. 2 far
+    bool partly;  // (AI-assisted) some of its visibility runs are hidden: draw run by run
     float clip[16];
     ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };

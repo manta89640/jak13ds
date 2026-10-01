@@ -17,6 +17,8 @@
 
 #include "common/log/log.h"
 
+#include "fmt/format.h"
+
 #ifdef __3DS__
 extern "C" int ctr_config_bool(const char* key, int def);  // platform/3ds/port/ctr_port.c
 #endif
@@ -34,6 +36,7 @@ extern "C" unsigned long long svcGetSystemTick(void);
 namespace kperf {
 namespace {
 u64 g_totals[(int)Cat::COUNT] = {};
+u64 g_totals_frame[(int)Cat::COUNT] = {};  // (AI-assisted) this frame only (hitch_check)
 u64 g_frames = 0;
 u64 g_window_start = 0;
 
@@ -41,6 +44,7 @@ struct Section {
   std::string name;
   u64 ticks = 0;
   u64 count = 0;
+  u64 frame_ticks = 0;  // (AI-assisted) this frame only: the long frame dump (frame_done)
 };
 // keyed by the name pointer: with-profiler names are static GOAL strings
 std::unordered_map<const char*, Section> g_sections;
@@ -60,7 +64,15 @@ std::atomic<u32> g_thread_wakeups[(int)Thread::COUNT];
 // RPC waits (game thread only)
 constexpr int kRpcChannels = 8;
 u64 g_rpc_wait[kRpcChannels];
+u64 g_rpc_wait_frame[kRpcChannels];  // (AI-assisted) this frame only
 u64 g_rpc_last_busy[kRpcChannels];
+// (AI-assisted) long frames: the frame's own sections, RPC waits and IOP time are logged
+// ("[hitch]"), so a freeze names what it was. Section timing must be on (perf_sections = on).
+constexpr double kHitchMs = 100.0;
+u64 g_last_frame_us = 0;
+u64 g_frame_index = 0;
+std::atomic<u64> g_iop_ticks_total{0};
+u64 g_iop_ticks_mark = 0;
 
 // sampled per-section timing (3DS, perf_sections off)
 constexpr int kSectionSampleEvery = 15;  // report windows (about seconds)
@@ -97,6 +109,9 @@ void set_gauge(Gauge g, u32 value) {
 }
 
 void add_thread(Thread t, u64 dt, u32 wakeups) {
+  if (t == Thread::IOP) {
+    g_iop_ticks_total.fetch_add(dt, std::memory_order_relaxed);
+  }
   g_thread_ticks[(int)t].fetch_add(dt, std::memory_order_relaxed);
   g_thread_wakeups[(int)t].fetch_add(wakeups, std::memory_order_relaxed);
 }
@@ -119,6 +134,7 @@ void rpc_poll(int channel, bool busy) {
   u64& last = g_rpc_last_busy[channel];
   if (last && now - last < kMaxGap) {
     g_rpc_wait[channel] += now - last;
+    g_rpc_wait_frame[channel] += now - last;
   }
   last = busy ? now : 0;
 }
@@ -178,6 +194,7 @@ void section_end() {
     s.name = std::string(g_open_count, '.') + o.name;
   }
   s.ticks += now - o.start;
+  s.frame_ticks += now - o.start;
   s.count++;
   g_section_events++;
 }
@@ -190,10 +207,64 @@ u64 now_us() {
 
 void add(Cat cat, u64 us) {
   g_totals[(int)cat] += us;
+  g_totals_frame[(int)cat] += us;
+}
+
+// (AI-assisted) log what a long frame spent its time on
+void hitch_check(u64 now) {
+  const u64 last = g_last_frame_us;
+  g_last_frame_us = now;
+  g_frame_index++;
+  const u64 iop_total = g_iop_ticks_total.load(std::memory_order_relaxed);
+  const u64 iop_frame = iop_total - g_iop_ticks_mark;
+  g_iop_ticks_mark = iop_total;
+  const double ms = last ? (now - last) / 1000.0 : 0.0;
+  if (ms >= kHitchMs) {
+    std::string line = fmt::format(
+        "[hitch] frame {}: {:.0f} ms; game dispatch {:.0f} ms (render {:.0f}, vsync {:.0f}); iop "
+        "{:.0f} ms",
+        g_frame_index, ms, g_totals_frame[(int)Cat::DISPATCH] / 1000.0,
+        g_totals_frame[(int)Cat::RENDER] / 1000.0, g_totals_frame[(int)Cat::VSYNC] / 1000.0,
+        ticks_to_ms(iop_frame));
+    for (int ch = 0; ch < kRpcChannels; ch++) {
+      if (g_rpc_wait_frame[ch]) {
+        line += fmt::format("; waiting for rpc #{} {:.0f} ms", ch, ticks_to_ms(g_rpc_wait_frame[ch]));
+      }
+    }
+    if (g_sections_enabled) {
+      std::vector<const Section*> top;
+      for (auto& [k, v] : g_sections) {
+        if (v.frame_ticks) {
+          top.push_back(&v);
+        }
+      }
+      std::sort(top.begin(), top.end(),
+                [](auto* a, auto* b) { return a->frame_ticks > b->frame_ticks; });
+      line += "; sections:";
+      for (size_t i = 0; i < top.size() && i < 14; i++) {
+        line += fmt::format(" {} {:.1f}", top[i]->name, ticks_to_ms(top[i]->frame_ticks));
+      }
+    } else {
+      line += " (perf_sections = on in config.ini for the sections)";
+    }
+    lg::warn("{}", line);
+  }
+  for (auto& w : g_rpc_wait_frame) {
+    w = 0;
+  }
+  for (auto& t : g_totals_frame) {
+    t = 0;
+  }
+  if (g_sections_enabled) {
+    for (auto& [k, v] : g_sections) {
+      v.frame_ticks = 0;
+    }
+  }
 }
 
 void frame_done() {
   u64 now = now_us();
+  hitch_check(now);
   if (!g_window_start) {
     init_sections();
     g_window_start = now;

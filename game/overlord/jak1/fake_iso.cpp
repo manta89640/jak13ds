@@ -1,5 +1,7 @@
 #include "fake_iso.h"
 
+#include <chrono>
+
 #include "common/log/log.h"
 #include "common/util/Assert.h"
 #include "common/util/BinaryReader.h"
@@ -128,6 +130,9 @@ void FS_Close(LoadStackEntry* fd) {
 }
 
 void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) {
+  // (AI-assisted) slow SD card reads are logged: a freeze in the game can be the game waiting for
+  // one (with the [hitch] lines of kperf)
+  const auto t_start = std::chrono::steady_clock::now();
   int32_t real_size = len;
   if (len < 0) {
     // not sure what this is about...
@@ -163,6 +168,14 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
 
   fd->location += (len / SECTOR_SIZE);
   sReadInfo = fd;
+  {
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                t_start)
+                          .count();
+    if (ms >= 20.0) {
+      lg::warn("[io] read {} KB of {} in {:.0f} ms", real_size / 1024, fd->fr->name, ms);
+    }
+  }
 
   iop::iWakeupThread(thread_to_wake);
 }

@@ -8,6 +8,7 @@
 
 #include "kmachine.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -48,7 +49,15 @@
 #include "game/sce/sif_ee.h"
 #include "game/sce/stubs.h"
 
+#ifdef __3DS__
+extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
+#endif
+
 using namespace ee;
+
+#ifdef __3DS__
+bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
+#endif
 
 namespace jak1 {
 
@@ -571,8 +580,6 @@ void pc_set_levels(u32 l0, u32 l1) {
 }
 
 #ifdef __3DS__
-bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
-
 u64 pc_3ds_level_ready(u32 name) {
   return ctr_level_ready(Ptr<String>(name).c()->data())
              ? s7.offset + true_symbol_offset(g_game_version)
@@ -600,6 +607,23 @@ void InitMachine_PCPort() {
   // (AI-assisted) level-update-after-load waits for the 3DS renderer's .c3l of the level
   make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
 #endif
+  // (AI-assisted) config.ini merc_lod_scale: characters and objects switch to their lower detail
+  // models (all in the .c3l files) at this fraction of the game's distances (drawable.gc,
+  // TARGET_3DS). Set on every build: the small memory PC build runs the 3DS GOAL code too.
+  {
+    float lod_scale = 1.f;
+#ifdef __3DS__
+    lod_scale = 0.5f;
+    char v[32];
+    if (ctr_config_get("merc_lod_scale", v, sizeof(v))) {
+      lod_scale = std::clamp((float)atof(v), 0.05f, 1.f);
+    }
+    lg::info("merc LOD distances x{:.2f} (config.ini merc_lod_scale)", lod_scale);
+#endif
+    u32 bits;
+    memcpy(&bits, &lod_scale, 4);
+    intern_from_c("*pc-3ds-merc-lod-scale*")->value = bits;
+  }
 
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);
 

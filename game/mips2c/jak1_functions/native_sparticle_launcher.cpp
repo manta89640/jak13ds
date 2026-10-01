@@ -7,10 +7,18 @@
  */
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+
+#include "common/log/log.h"
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
+
+#ifdef __3DS__
+extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
+#endif
 
 namespace Mips2C::jak1::native {
 
@@ -109,6 +117,27 @@ namespace {
  * sparticle-birthinfo (sprite, anim, anim-speed, birth-func, joint-ppoint, num-to-birth, sound),
  * 128: the sparticle-launchinfo / sprite (x y z sx, flag matrix rot sy, r g b a).
  */
+/*!
+ * (AI-assisted) config.ini particle_density (0.1 .. 1; 0.7 on the 3DS, 1 elsewhere): the share of
+ * particles launched, for the 3DS GPU (every particle is a blended sprite: fill rate) and the
+ * game thread (fewer to simulate). An approximation of the effects, not the original's look.
+ */
+float particle_density() {
+  static float density = -1.f;
+  if (density < 0.f) {
+    density = 1.f;
+#ifdef __3DS__
+    density = 0.7f;
+    char v[32];
+    if (ctr_config_get("particle_density", v, sizeof(v))) {
+      density = std::clamp((float)atof(v), 0.1f, 1.f);
+    }
+    lg::info("particles: density {:.2f} (config.ini particle_density)", density);
+#endif
+  }
+  return density;
+}
+
 u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   static const u32 level_sym = sym_addr("*level*");
   static const u32 enable_sym = sym_addr("*sp-launcher-enable*");
@@ -177,7 +206,16 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   r[4] = st + 8;
   call(gload<u32>(init_fields_sym));
   gstore<u32>(sp + 12, (u32)v0);
-  const float births = gload<float>(sp + 116) * rate;
+  float births = gload<float>(sp + 116) * rate;
+  {
+    // (AI-assisted) particle_density: bursts and periodic emitters launch fewer particles. A
+    // launch of exactly one particle stays: a glow or a sparkle relaunched every frame would
+    // blink, and a single particle is all of its effect.
+    const float d = particle_density();
+    if (d < 1.f && std::abs(births - 1.f) > 1e-3f) {
+      births = births > 1.f ? std::max(1.f, births * d) : births * d;
+    }
+  }
   // the accumulator: the launch state's, or the launcher's
   const u32 accum_addr = state != st ? (u32)state + 24 : (u32)launcher;
   {

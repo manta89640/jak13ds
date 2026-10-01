@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <unordered_map>
 
 /*!
@@ -20,6 +21,7 @@
 #include "common/common_types.h"
 
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/ctr_gpu.h"
 
 class CtrVram;
 
@@ -40,6 +42,8 @@ class CtrSky {
   bool m_valid[2] = {false, false};
   int m_tex[2] = {-1, -1};
   std::vector<u32> m_decode;
+  std::vector<u8> m_premul;              // (AI-assisted) the clouds, rgb * alpha
+  std::vector<ctr_clip_vertex2> m_tris2;  // both cloud layers' vertices
   // decoded sources (TEXA fix applied), by tex0 ^ salt: decoding from the VRAM copy writes the
   // level's pending texture page upload first (the two levels alternate pages there every frame),
   // which cost 10-30 ms per frame on hardware. The sky textures don't change while a level is
@@ -57,13 +61,17 @@ class CtrSky {
   } m_stats;
 };
 
-/*! The tfrag-trans + sky blend buckets: the sky blend (tfrag trans comes from the .c3l files). */
+class CtrTfragRenderer;
+
+/*! The tfrag-trans + sky blend buckets: the sky blend, then the level's trans tfrag: the camera
+ * for the level background (drawn from the .c3l files) when the level has no normal tfrag tree. */
 class CtrSkyBlendRenderer : public CtrBucketRenderer {
  public:
-  CtrSkyBlendRenderer(std::string name, int id, CtrSky* sky)
-      : CtrBucketRenderer(std::move(name), id), m_sky(sky) {}
+  CtrSkyBlendRenderer(std::string name, int id, CtrSky* sky, std::unique_ptr<CtrTfragRenderer> tfrag);
+  ~CtrSkyBlendRenderer() override;
   void render(DmaFollower& dma, CtrRenderState& rs) override;
 
  private:
   CtrSky* m_sky;
+  std::unique_ptr<CtrTfragRenderer> m_tfrag;
 };

@@ -80,6 +80,11 @@ class CtrVram {
    * the CLUT a relocated texture was moved with (like get_texture).
    */
   bool decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h);
+  /*!
+   * (AI-assisted) The source data of the texture page upload that last wrote this block (nullptr if
+   * none): tells apart two textures at the same VRAM address (two levels' pages, CtrSky's cache).
+   */
+  const void* upload_source(u32 block) const;
 
   void clear_cache();
 

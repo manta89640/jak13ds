@@ -262,6 +262,7 @@ void shade_pixel(const ctr_draw_state& st,
     float o;
     switch (st.blend) {
       case CTR_BLEND_ALPHA:
+      case CTR_BLEND_OVER_CLEAR:
         o = src[i] * as + dst * (1.f - std::min(as, 1.f));
         break;
       case CTR_BLEND_ADD:
@@ -429,6 +430,36 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   }
   if (!out.empty()) {
     ctr_gpu_draw(state, out.data(), (int)out.size());
+  }
+}
+
+// (AI-assisted) the two cloud layers as two added passes (GS modulate with the constant color)
+void ctr_gpu_draw_clip2(const ctr_draw_state* state,
+                        uint32_t const0,
+                        uint32_t const1,
+                        const ctr_clip_vertex2* verts,
+                        int count) {
+  for (int layer = 0; layer < 2; layer++) {
+    const uint32_t c = layer ? const1 : const0;
+    std::vector<ctr_clip_vertex> out((size_t)count);
+    for (int i = 0; i < count; i++) {
+      const auto& v = verts[i];
+      auto& o = out[i];
+      o.x = v.x;
+      o.y = v.y;
+      o.z = v.z;
+      o.w = v.w;
+      o.s = layer ? v.s1 : v.s0;
+      o.t = layer ? v.t1 : v.t0;
+      o.r = (uint8_t)(c & 0xff);
+      o.g = (uint8_t)((c >> 8) & 0xff);
+      o.b = (uint8_t)((c >> 16) & 0xff);
+      o.a = v.a;
+    }
+    ctr_draw_state st = *state;
+    st.tcc = 0;
+    st.blend = CTR_BLEND_ADD;
+    ctr_gpu_draw_clip(&st, out.data(), count);
   }
 }
 
@@ -610,6 +641,8 @@ int ctr_gpu_mesh_create(const void* verts,
   return slot;
 }
 
+void ctr_gpu_free_pending_now(void) {}
+
 void ctr_gpu_mesh_delete(int mesh) {
   if (mesh >= 0 && mesh < (int)g_soft.meshes.size()) {
     g_soft.meshes[mesh] = SoftMesh();
@@ -753,7 +786,9 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
       tri[k].r = (uint8_t)std::clamp(rgba[0] * lit[0], 0.f, 255.f);
       tri[k].g = (uint8_t)std::clamp(rgba[1] * lit[1], 0.f, 255.f);
       tri[k].b = (uint8_t)std::clamp(rgba[2] * lit[2], 0.f, 255.f);
-      tri[k].a = rgba[3];
+      // (AI-assisted) alpha times the lights' alpha, as ctr_skin.v.pica (color-mult's alpha)
+      const float lit_a = lights[27] + l[0] * lights[15] + l[1] * lights[19] + l[2] * lights[23];
+      tri[k].a = (uint8_t)std::clamp(rgba[3] * lit_a, 0.f, 255.f);
     }
     if (!ok) {
       continue;
@@ -781,6 +816,16 @@ int ctr_gpu_rgba4_as_rgba8(void) {
 }
 
 void ctr_gpu_set_vram_textures(int) {}
+void ctr_gpu_set_color16(int) {}
+void ctr_gpu_set_early_depth(int) {}
+void ctr_gpu_set_proctex(int) {}
+void ctr_gpu_set_compact_textures(int) {}
+int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int /*flags*/) {
+  return ctr_gpu_tex_create(w, h, rgba);
+}
+int ctr_gpu_tex_radial(int) {
+  return 0;
+}
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_submit_partial(void) {}
 int ctr_gpu_set_pipeline(int) {

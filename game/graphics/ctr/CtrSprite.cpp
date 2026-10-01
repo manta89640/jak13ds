@@ -237,9 +237,10 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   skip_rest();
 
   if (rs.log_now) {
-    lg::debug("[ctr] sprite: {} 2d, {} hud, {} 3d sprites, {} distort, {} draws (last 300 frames)",
-              m_stats.sprites_2d, m_stats.sprites_hud, m_stats.sprites_3d, m_stats.distort,
-              m_stats.draws);
+    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort, {} draws "
+              "(last 300 frames)",
+              m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
+              m_stats.distort, m_stats.draws);
     m_stats = Stats();
   }
 }
@@ -388,15 +389,15 @@ bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
          adgif.size_bytes >= *count * sizeof(AdGif);
 }
 
-std::vector<ctr_vertex>& CtrSpriteRenderer::bucket_for(const ctr_draw_state& st) {
+CtrSpriteRenderer::Bucket& CtrSpriteRenderer::bucket_for(const ctr_draw_state& st) {
   if (m_last_bucket < m_bucket_count &&
       !memcmp(&m_buckets[m_last_bucket].state, &st, sizeof(st))) {
-    return m_buckets[m_last_bucket].verts;
+    return m_buckets[m_last_bucket];
   }
   for (size_t i = 0; i < m_bucket_count; i++) {
     if (!memcmp(&m_buckets[i].state, &st, sizeof(st))) {
       m_last_bucket = i;
-      return m_buckets[i].verts;
+      return m_buckets[i];
     }
   }
   if (m_bucket_count == m_buckets.size()) {
@@ -405,8 +406,9 @@ std::vector<ctr_vertex>& CtrSpriteRenderer::bucket_for(const ctr_draw_state& st)
   auto& b = m_buckets[m_bucket_count];
   b.state = st;
   b.verts.clear();  // keeps its capacity: no allocations once warmed up
+  b.clip.clear();
   m_last_bucket = m_bucket_count++;
-  return b.verts;
+  return b;
 }
 
 void CtrSpriteRenderer::flush() {
@@ -417,11 +419,16 @@ void CtrSpriteRenderer::flush() {
       ctr_gpu_draw_quads(&b.state, b.verts.data(), (int)(b.verts.size() / 4));
       m_stats.draws++;
     }
+    if (!b.clip.empty()) {
+      ctr_gpu_draw_clip(&b.state, b.clip.data(), (int)b.clip.size());
+      m_stats.draws++;
+    }
     b.verts.clear();
+    b.clip.clear();
   }
   m_bucket_count = 0;
   m_last_bucket = 0;
-  m_have_last_ad = false;  // m_last_verts pointed into a bucket
+  m_have_last_ad = false;  // m_last_bucket_ptr pointed into a bucket
 }
 
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
@@ -449,8 +456,15 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     float scale_y = sy * Q;
     float scale_x = sx * Q;
     float alpha_scale = std::min(scale_x * scale_y * m_inv_area, 1.f);
+    // (AI-assisted) a world sprite that ends up (nearly) transparent is skipped before any corner
+    // math: the game fades sprites out as they get small on screen, so these are mostly sub-pixel
+    // particles, and each one still cost a quad of blending on the 3DS GPU
+    if (mode != MODE_HUD && color_byte(v.rgba.w()) * alpha_scale < 2.f) {
+      continue;
+    }
 
     math::Vector4f corners[4];
+    ctr_clip_vertex clip[4];  // MODE_3D: the corners in clip space (sprite3_3d.vert's output)
     if (mode == MODE_3D) {
       // rotation from the quaternion in flag_rot_sy.xyz
       const float qx = v.flag_rot_sy.x(), qy = v.flag_rot_sy.y(), qz = v.flag_rot_sy.z();
@@ -465,7 +479,11 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       rot[0][2] = 2.f * (qx * qz - qy * qr);
       rot[1][2] = 2.f * (qy * qz + qx * qr);
       rot[2][2] = 1.f - 2.f * (qx * qx + qy * qy);
+      // (AI-assisted) Like sprite3_3d.vert: the GS screen position times w, in clip space, so the
+      // GPU clips a sprite that reaches behind the camera (projected on the CPU, such a corner was
+      // mirrored: the sprite popped away or stretched over the screen)
       bool ok = true;
+      int out_left = 0, out_right = 0, out_bottom = 0, out_top = 0, behind = 0;
       for (int k = 0; k < 4; k++) {
         const auto& off = m_xyz_array[k];
         math::Vector4f p = pos;
@@ -473,16 +491,28 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
           p[r] += rot[0][r] * off.x() * sx + rot[1][r] * off.y() + rot[2][r] * off.z() * sy;
         }
         math::Vector4f t = transform(m_camera, p) * -1.f;
-        if (t.w() == 0) {
+        const float w = t.w();
+        if (w == 0) {
           ok = false;
           break;
         }
-        const float q = m_pfog0 / t.w();
-        for (int r = 0; r < 3; r++) {
-          corners[k][r] = t[r] * q + m_hvdf_offset[r];
-        }
+        const float q = m_pfog0 / w;
+        const float gx = t.x() * q + m_hvdf_offset.x(), gy = t.y() * q + m_hvdf_offset.y(),
+                    gz = t.z() * q + m_hvdf_offset.z();
+        auto& c = clip[k];
+        c.x = (gx - 2048.f) * (1.f / 256.f) * w;
+        c.y = (2048.f - gy) * (1.f / 112.f) * w;
+        c.z = (gz * (1.f / 8388607.5f) - 1.f) * w;
+        c.w = w;
+        out_left += c.x < -c.w;
+        out_right += c.x > c.w;
+        out_bottom += c.y < -c.w;
+        out_top += c.y > c.w;
+        behind += c.w < 0;
       }
-      if (!ok) {
+      // all four corners beyond one side of the screen, or behind the camera: nothing to draw
+      if (!ok || out_left == 4 || out_right == 4 || out_bottom == 4 || out_top == 4 ||
+          behind == 4) {
         continue;
       }
       m_stats.sprites_3d++;
@@ -501,6 +531,17 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       } else {
         scale_y = std::clamp(scale_y, m_min_scale, m_max_scale);
         scale_x = std::clamp(scale_x, m_min_scale, m_max_scale);
+        // (AI-assisted) config.ini sprite_max_size: a particle or glow close to the camera covers
+        // a big part of the screen, and every covered pixel is blended (the 3DS GPU's fill rate):
+        // at most that fraction of the screen height (448 GS units) across
+        const float cap = ctr_settings().sprite_max_size * 224.f;
+        const float half = std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach;
+        if (cap > 0.f && half > cap) {
+          const float k = cap / half;
+          scale_x *= k;
+          scale_y *= k;
+          m_stats.capped++;
+        }
         m_stats.sprites_2d++;
       }
       if (mode == MODE_2D) {
@@ -524,7 +565,7 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       }
     }
 
-    {
+    if (mode != MODE_3D) {
       // bounding box against the visible GS area (about 1792..2304 x 1824..2272)
       float x0 = corners[0].x(), x1 = x0, y0 = corners[0].y(), y1 = y0;
       for (int k = 1; k < 4; k++) {
@@ -598,25 +639,49 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       st.zwrite = zwrite;
       st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
       st.aref = 38;
-      m_last_verts = &bucket_for(st);
+      // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
+      // its texture coordinates then go from -1 to 1 (see m_proc below)
+      if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {
+        st.flags |= CTR_STATE_PROCTEX;
+      }
+      m_last_bucket_ptr = &bucket_for(st);
     }
 
     // vertex k is corner k of a strip 0, 1, 3, 2 (Sprite3::do_block_common): the order of
     // ctr_gpu_draw_quads
-    auto& verts = *m_last_verts;
+    const u8 r = color_byte(v.rgba.x()), g = color_byte(v.rgba.y()), b = color_byte(v.rgba.z());
+    const u8 a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
+    // procedural texture (radial glow): texture coordinates centered on 0
+    const bool proc = (m_last_bucket_ptr->state.flags & CTR_STATE_PROCTEX) != 0;
+    const float st_mul = proc ? 2.f : 1.f, st_add = proc ? -1.f : 0.f;
+    if (mode == MODE_3D) {
+      // the triangles (0, 1, 3) and (3, 1, 2) of the strip, in clip space
+      for (int k = 0; k < 4; k++) {
+        clip[k].s = m_st_array[k].x() * st_mul + st_add;
+        clip[k].t = m_st_array[k].y() * st_mul + st_add;
+        clip[k].r = r;
+        clip[k].g = g;
+        clip[k].b = b;
+        clip[k].a = a;
+      }
+      auto& cv = m_last_bucket_ptr->clip;
+      for (int k : {0, 1, 3, 3, 1, 2}) {
+        cv.push_back(clip[k]);
+      }
+      continue;
+    }
+    auto& verts = m_last_bucket_ptr->verts;
     const size_t n = verts.size();
     verts.resize(n + 4);
     ctr_vertex* out = &verts[n];
-    const u8 r = color_byte(v.rgba.x()), g = color_byte(v.rgba.y()), b = color_byte(v.rgba.z());
-    const u8 a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
     constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
     for (int k = 0; k < 4; k++) {
       // GS screen -> ctr_gpu coordinates (see CtrDirect::handle_xyz)
       out[k].x = (corners[k].x() - 2048.f) * kInvX;
       out[k].y = (2048.f - corners[k].y()) * kInvY;
       out[k].z = std::clamp(corners[k].z() * kInvZ, 0.f, 1.f);
-      out[k].s = m_st_array[k].x();
-      out[k].t = m_st_array[k].y();
+      out[k].s = m_st_array[k].x() * st_mul + st_add;
+      out[k].t = m_st_array[k].y() * st_mul + st_add;
       out[k].r = r;
       out[k].g = g;
       out[k].b = b;

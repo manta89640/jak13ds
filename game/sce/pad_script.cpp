@@ -29,6 +29,7 @@ struct Entry {
   std::string wait_sym, wait_state;
   bool exit = false;
   bool crash = false;
+  bool save = false;
 };
 
 struct Script {
@@ -51,6 +52,7 @@ StateNameHook g_state_hook = nullptr;
 PositionHook g_position_hook = nullptr;
 ExitHook g_exit_hook = nullptr;
 ContinueHook g_continue_hook = nullptr;
+SaveHook g_save_hook = nullptr;
 
 // PadData::ButtonIndex
 int button_index(const std::string& name) {
@@ -116,6 +118,8 @@ void load() {
         ss >> e.wait_sym >> e.wait_state;
       } else if (item == "exit") {
         e.exit = true;
+      } else if (item == "save") {
+        e.save = true;
       } else if (item == "crash") {
         e.crash = true;
       } else if (item.size() > 3 && item[2] == '=') {
@@ -205,6 +209,12 @@ PadState next_frame() {
         g_continue_hook(name.c_str());
       }
     }
+    if (e.save) {
+      lg::info("[pad script] frame {}: save", frame);
+      if (g_save_hook) {
+        g_save_hook();
+      }
+    }
     if (!e.wait_sym.empty()) {
       lg::info("[pad script] frame {}: waiting for {} to be in {}", frame, e.wait_sym,
                e.wait_state);
@@ -237,6 +247,10 @@ void set_state_name_hook(StateNameHook hook) {
 
 void set_position_hook(PositionHook hook) {
   g_position_hook = hook;
+}
+
+void set_save_hook(SaveHook hook) {
+  g_save_hook = hook;
 }
 
 void set_continue_hook(ContinueHook hook) {

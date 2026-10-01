@@ -125,6 +125,14 @@
          (let ((packet (the-as dma-packet (-> dma-buf base))))
            (set! (-> packet dma) (new 'static 'dma-tag :id (dma-tag-id cnt) :qwc 128))
            (set! (-> packet vif0) (new 'static 'vif-tag))
+           ;; (AI-assisted) flags for the 3DS renderer (CtrTfragRenderer): 1 = set, 2 = all visible
+           ;; (no visibility data), 4 = the camera is only in this level's boxes (the string is the
+           ;; level's own, not computed from the neighbour's)
+           (#when TARGET_3DS
+             (set! (-> packet vif0)
+                   (the-as vif-tag (logior 1
+                                           (if (-> lev all-visible?) 2 0)
+                                           (if (and (-> lev inside-boxes?) (not (-> lev other inside-boxes?))) 4 0)))))
            (set! (-> packet vif1) (new 'static 'vif-tag :cmd (vif-cmd pc-port)))
            (set! (-> dma-buf base) (the pointer (&+ packet 16))))
          (quad-copy! (-> dma-buf base) (-> lev vis-bits) 128)

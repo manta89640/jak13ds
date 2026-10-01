@@ -27,6 +27,8 @@ using sceSdTransIntrHandler = int (*)(int, void*);
 
 u32 sceSdGetSwitch(u32 entry);
 u32 sceSdGetAddr(u32 entry);
+// (AI-assisted) port addition: the voice stopped (played a loop end block without repeat)
+bool sceSdVoiceStopped(u32 entry);
 void sceSdSetSwitch(u32 entry, u32 value);
 void sceSdSetAddr(u32 entry, u32 value);
 void sceSdSetParam(u32 entry, u32 value);

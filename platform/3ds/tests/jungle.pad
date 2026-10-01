@@ -1,0 +1,36 @@
+# (AI-assisted) jungle test: from the title screen straight to the jungle checkpoints
+# (jungle-start, jungle-tower), turning the camera and walking around (popping, black frames).
+# Use with screenshots. Format: game/sce/pad_script.h
+0 wait *target* target-title-wait
+300 continue jungle-start
+301 wait *target* target-continue
+302 wait *target* target-stance
+303 log jungle start
+303 pos *target*
+360 rx=255
+960 -
+1000 ly=0
+1300 ly=0 lx=40
+1500 ly=0
+1800 ly=0 lx=220
+2000 ly=0
+2300 -
+2301 pos *target*
+2350 rx=0
+2950 -
+3000 ly=0
+3400 -
+3401 pos *target*
+3450 continue jungle-tower
+3451 wait *target* target-continue
+3452 wait *target* target-stance
+3453 log jungle tower
+3453 pos *target*
+3510 rx=255
+4110 -
+4150 ly=0
+4450 ly=0 lx=40
+4700 -
+4701 pos *target*
+4750 log done
+4760 exit

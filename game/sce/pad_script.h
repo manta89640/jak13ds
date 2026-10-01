@@ -23,6 +23,7 @@
  *   log TEXT  write TEXT to the log
  *   continue NAME  (start 'play (get-continue-by-name *game-info* NAME)): jump to a checkpoint,
  *             for example "continue beach-start" (tests of other levels)
+ *   save      an autosave, as after a power cell (pad-script-auto-save, 3DS)
  *   exit      stop the runtime
  *   crash     fail an assert (to test the crash screen)
  * Buttons and sticks not mentioned are released / centered.
@@ -73,5 +74,9 @@ void set_continue_hook(ContinueHook hook);
 //! Called for "exit".
 using ExitHook = void (*)();
 void set_exit_hook(ExitHook hook);
+
+//! (AI-assisted) Called for "save": an autosave, as after a power cell (tests the save path).
+using SaveHook = void (*)();
+void set_save_hook(SaveHook hook);
 
 }  // namespace pad_script

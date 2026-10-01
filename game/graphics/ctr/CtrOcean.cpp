@@ -324,7 +324,9 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
     }
     float fog1[4] = {0.f, 1.f, 0.f, 0.f};
     const float pzw = std::abs(cam.perspective[2][3]);
-    if (draw_dist > 0 && pzw > 0) {
+    // (AI-assisted) no extra fog towards the draw distance where the far ocean ring takes over
+    // (below): the near ocean faded into the clear color (black at night) before the ring
+    if (draw_dist > 0 && pzw > 0 && (p.flags & 1)) {
       const float start = draw_dist * settings.fog_start;
       fog1[0] = 1.f / pzw;
       fog1[1] = start;
@@ -353,6 +355,72 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
   constexpr float kYScale = 512.f / 448.f;  // Jak 1 scissor adjust (tfrag3.vert)
   for (int i = 0; i < 4; i++) {
     m[4 + i] *= kYScale;
+  }
+
+  // (AI-assisted) The far ocean. On the PS2, rings of coarser ocean reach the horizon; the 3DS
+  // draws the near ocean only (up to the draw distance), and the gap to the horizon showed the
+  // clear color (black at night). An approximation: a flat ring in the ocean's far color, from
+  // inside the near ocean's edge out to 8 km (within a pixel of the horizon), a little below the
+  // water so the near ocean wins where both are. Depth tested: islands still cover it.
+  if (!(p.flags & 1)) {
+    const float r0 = draw_dist > 0 ? draw_dist * 0.8f : 400.f * 4096.f;
+    const float r1 = 8000.f * 4096.f;
+    const float y = p.start[1] - 0.25f * 4096.f;
+    auto color = [](float c) { return (u8)std::clamp(c, 0.f, 255.f); };
+    const u8 cr = color(p.far_color[0]), cg = color(p.far_color[1]), cb = color(p.far_color[2]);
+    // with the game's fog, the outer edge takes the fog color (GS units: half the register's)
+    u8 fr = cr, fg = cg, fb = cb;
+    if (settings.fog) {
+      fr = rs.fog_color[0] / 2;
+      fg = rs.fog_color[1] / 2;
+      fb = rs.fog_color[2] / 2;
+    }
+    auto vertex = [&](float angle, float radius, u8 r, u8 g, u8 b) {
+      // relative to the camera (the ring is centered on it)
+      const double v[3] = {radius * std::cos(angle), (double)y - cam.trans[1],
+                           radius * std::sin(angle)};
+      float c[4];
+      for (int k = 0; k < 4; k++) {
+        double t = R[0][k] * v[0] + R[1][k] * v[1] + R[2][k] * v[2];
+        if (k < 3) {
+          t += R[3][k];
+        }
+        c[k] = (float)-t;
+      }
+      ctr_clip_vertex o;
+      memset(&o, 0, sizeof(o));
+      o.x = c[0];
+      o.y = c[1] * (512.f / 448.f);  // Jak 1 scissor adjust, as the mesh matrix below
+      o.z = c[2];
+      o.w = c[3];
+      o.r = r;
+      o.g = g;
+      o.b = b;
+      o.a = 0x80;
+      return o;
+    };
+    constexpr int kSegments = 16;
+    ctr_clip_vertex ring[kSegments * 6];
+    int n = 0;
+    for (int i = 0; i < kSegments; i++) {
+      const float a0 = 6.2831853f * i / kSegments, a1 = 6.2831853f * (i + 1) / kSegments;
+      const ctr_clip_vertex p0 = vertex(a0, r0, cr, cg, cb), p1 = vertex(a1, r0, cr, cg, cb);
+      const ctr_clip_vertex q0 = vertex(a0, r1, fr, fg, fb), q1 = vertex(a1, r1, fr, fg, fb);
+      ring[n++] = p0;
+      ring[n++] = q0;
+      ring[n++] = q1;
+      ring[n++] = p0;
+      ring[n++] = q1;
+      ring[n++] = p1;
+    }
+    ctr_draw_state far;
+    memset(&far, 0, sizeof(far));
+    far.tex = -1;
+    far.blend = CTR_BLEND_OFF;
+    far.atest = CTR_TEST_ALWAYS;
+    far.ztest = CTR_TEST_GEQUAL;
+    far.zwrite = 1;
+    ctr_gpu_draw_clip(&far, ring, n);
   }
 
   ctr_draw_state st;

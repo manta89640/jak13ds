@@ -10,6 +10,10 @@
 (require "engine/collide/collide-shape.gc")
 (require "engine/gfx/generic/generic-merc.gc")
 
+;; (AI-assisted) set by the kernel from config.ini merc_lod_scale (kmachine.cpp InitMachine_PCPort)
+(#when TARGET_3DS
+  (define-extern *pc-3ds-merc-lod-scale* float))
+
 ;; DECOMP BEGINS
 
 (defun sphere-cull ((arg0 vector))
@@ -581,12 +585,20 @@
                                (and (-> *pc-settings* ps2-lod-dist?) (< (-> arg1 lod-set lod (-> arg1 lod-set max-lod) dist) cam-dist)))
                            (return #f)))
                         (else
-                         (while (and (< lod-to-use (-> arg1 lod-set max-lod)) (< (-> arg1 lod-set lod lod-to-use dist) cam-dist))
-                           (+! lod-to-use 1)))))
+                         ;; og:preserve-this (AI-assisted) 3DS: the lower detail models sooner, at
+                         ;; config.ini merc_lod_scale times the distances (the max-lod distance,
+                         ;; where objects are culled, isn't compared here)
+                         (let ((lod-dist-scale (#if TARGET_3DS *pc-3ds-merc-lod-scale* 1.0)))
+                           (while (and (< lod-to-use (-> arg1 lod-set max-lod))
+                                       (< (* lod-dist-scale (-> arg1 lod-set lod lod-to-use dist)) cam-dist))
+                             (+! lod-to-use 1))))))
                     ;; og:preserve-this lod hacks!
-                    (with-pc
-                      (if (not (-> *pc-settings* ps2-lod-dist?))
-                        (set! lod-to-use (minmax (-> *pc-settings* lod-force-actor) 0 (-> arg1 lod-set max-lod)))))
+                    ;; (AI-assisted) not on the 3DS: the models are always chosen by distance there
+                    ;; (a saved pc-settings with ps2-lod-dist? off forced the most detailed one)
+                    (#unless TARGET_3DS
+                      (with-pc
+                        (if (not (-> *pc-settings* ps2-lod-dist?))
+                          (set! lod-to-use (minmax (-> *pc-settings* lod-force-actor) 0 (-> arg1 lod-set max-lod))))))
                     ;; og:preserve-this lod hacks
                     (if (#if (not PC_PORT)
                           (and (< (-> arg1 lod-set lod lod-to-use dist) cam-dist) (< (-> arg1 force-lod) 0))
@@ -739,6 +751,30 @@
 (define *add-sphere* #f)
 
 (define *generic-effect-mode* 0)
+
+;; (AI-assisted) 3DS: no shadow volumes (shadow-execute-all is skipped below: too expensive). Jak
+;; gets a blob shadow instead, one of the game's fake shadows (a soft dark dot on the ground below
+;; him, smaller the higher he is, none above 12 m), so a jump shows where it will land. The sprite
+;; renderer draws it.
+(#when TARGET_3DS
+  (define-extern compute-and-draw-shadow (function vector vector vector vector float float none))
+  (defun draw-target-blob-shadow-3ds ()
+    (let ((tgt *target*))
+      (when (and tgt
+                 (nonzero? (-> tgt control))
+                 (not (logtest? (-> tgt draw status) (draw-status hidden))))
+        (let ((ground (new 'stack-no-clear 'vector))
+              (up (new 'stack-no-clear 'vector)))
+          (set! (-> ground quad) (-> tgt control shadow-pos quad))
+          (set-vector! up 0.0 1.0 0.0 0.0)
+          (compute-and-draw-shadow (-> tgt control trans)
+                                   ground
+                                   up
+                                   (the-as vector (meters 0.75))
+                                   (meters 12)
+                                   (the-as float 0)))))
+    0
+    (none)))
 
 (defun real-main-draw-hook ()
   "The main drawing function. This dispatches all renderers and is called directly from the display-loop
@@ -911,6 +947,8 @@
         (generic-merc-execute-all gp-9)) ;; mercneric conversion.
       (with-profiler "shadow"
         (shadow-execute-all gp-9 *shadow-queue*)))
+    (#when TARGET_3DS
+      (draw-target-blob-shadow-3ds))
     (with-profiler "eyes"
       (update-eyes)))
   ;; sprite draw

@@ -21,6 +21,7 @@
 #include "common/util/Timer.h"
 
 #include "game/graphics/ctr/ctr_gpu.h"
+#include "game/graphics/opengl_renderer/buckets.h"
 
 #ifdef __3DS__
 #include "platform/3ds/port/ctr_port.h"
@@ -94,6 +95,7 @@ void CtrLevels::loader_main() {
     while (it != m_queue.end() && it->prefetch && m_levels_loaded >= 2) {
       ++it;
     }
+
     if (it == m_queue.end()) {
       if (m_queue.empty()) {
         m_cv.wait(lk);
@@ -117,7 +119,14 @@ void CtrLevels::loader_main() {
 void CtrLevels::run_job(const Job& job) {
   Done d;
   d.job = job;
+  if (job.detail) {
+    run_detail_job(job, &d);
+    std::lock_guard<std::mutex> lk(m_lock);
+    m_done.push_back(std::move(d));
+    return;
+  }
   d.lev = std::make_unique<CtrLevelData>();
+  d.lev->generation = ++m_generation;
   d.result = load(job.name, d.lev.get());
   if (d.result != LoadResult::LOADED) {
     d.lev.reset();
@@ -129,13 +138,25 @@ void CtrLevels::run_job(const Job& job) {
 void CtrLevels::request(const Job& job) {
   {
     std::lock_guard<std::mutex> lk(m_lock);
-    if (m_requested.count(job.name) || (job.prefetch && m_resident.count(job.name))) {
+    if (m_requested.count(job.key()) || (job.prefetch && m_resident.count(job.name))) {
+      // (AI-assisted) the game wants a level whose prefetch is still queued: the prefetch would
+      // wait while two levels are loaded (one of them maybe a prefetch nobody wants any more)
+      if (!job.prefetch && !job.detail) {
+        for (auto& q : m_queue) {
+          if (q.name == job.name && q.prefetch && !q.detail) {
+            q.prefetch = false;
+          }
+        }
+        if (m_loading == job.name) {
+          m_loading_prefetch = false;
+        }
+      }
       return;
     }
     if (job.prefetch) {
       lg::info("[ctr] prefetching {}", job.name);
     }
-    m_requested.insert(job.name);
+    m_requested.insert(job.key());
     m_queue.push_back(job);
   }
   m_cv.notify_all();
@@ -235,6 +256,76 @@ class C3lReader {
 };
 }  // namespace
 
+// (AI-assisted) partial unload: read the chunk meshes of a loaded level again (loader thread). The
+// job has its own copy of what it needs: the level may be unloaded meanwhile.
+void CtrLevels::run_detail_job(const Job& job, Done* d) {
+  d->result = LoadResult::FAILED;
+  C3lReader f(job.path);
+  std::vector<u16> indices;
+  std::vector<c3l::Vertex> verts;
+  for (const auto& c : job.chunks) {
+    if (cancelled() || !f.ok()) {
+      break;
+    }
+    if (!f.read_array(job.index_data_offset + c.index_first * (u32)sizeof(u16),
+                      c.index_end - c.index_first, &indices) ||
+        !f.read_array(job.vertex_data_offset + c.first_vertex * (u32)sizeof(c3l::Vertex),
+                      c.vertex_count, &verts)) {
+      break;
+    }
+    const int mesh = ctr_gpu_mesh_create(verts.data(), c.vertex_count, indices.data(),
+                                         c.index_end - c.index_first);
+    if (mesh < 0) {
+      break;
+    }
+    d->meshes.emplace_back(c.chunk, mesh);
+  }
+  if (d->meshes.size() == job.chunks.size()) {
+    d->result = LoadResult::LOADED;
+  }
+}
+
+void CtrLevels::unload_detail(CtrLevelData& lev) {
+  const u32 keep = lev.has_lowres ? 3u : 2u;  // what far mode draws (CtrTfragRenderer)
+  int freed = 0;
+  for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
+    if (lev.chunks[ci].lod_tier != keep && lev.meshes[ci] >= 0) {
+      ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
+      lev.meshes[ci] = -1;
+      freed++;
+    }
+  }
+  lev.detail_loaded = false;
+  lev.far_frames = 0;
+  lg::info("[ctr] {}: only seen from far away, {} detail meshes freed", lev.name, freed);
+}
+
+void CtrLevels::request_detail(CtrLevelData& lev) {
+  Job job;
+  job.name = lev.name;
+  job.detail = true;
+  job.generation = lev.generation;
+  job.path = lev.path;
+  job.vertex_data_offset = lev.vertex_data_offset;
+  job.index_data_offset = lev.index_data_offset;
+  for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size() &&
+                      ci < lev.mesh_index_first.size();
+       ci++) {
+    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX) {
+      const auto& ch = lev.chunks[ci];
+      job.chunks.push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
+                            lev.mesh_index_end[ci]});
+    }
+  }
+  if (job.chunks.empty()) {
+    lev.detail_loaded = true;
+    return;
+  }
+  lev.detail_requested = true;
+  lg::info("[ctr] {}: camera coming back, reading {} detail meshes", lev.name, job.chunks.size());
+  request(job);
+}
+
 CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out) {
   auto path = file_util::get_jak_project_dir() / "out" / "jak1" / "c3l" / (name + ".c3l");
   if (!fs::exists(path)) {
@@ -276,6 +367,41 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   return LoadResult::LOADED;
 }
 
+namespace {
+// (AI-assisted) the smallest texel alpha of a texture's first mip level (0xff = 1.0), in the GPU
+// layout as stored in the pool: for the early depth test (an alpha test that never fails)
+int texture_min_alpha(const u8* data, int w, int h, int format) {
+  const int n = w * h;
+  int m = 255;
+  switch (format) {
+    case CTR_TEX_RGB565:
+    case CTR_TEX_ETC1:
+      return 255;
+    case CTR_TEX_RGBA4:
+      for (int i = 0; i < n; i++) {
+        m = std::min(m, (data[2 * i] & 0xf) * 17);  // u16, alpha in the low 4 bits
+      }
+      return m;
+    case CTR_TEX_ETC1A4:
+      // 4x4 blocks: 8 bytes of 4-bit alpha, then the ETC1 block
+      for (int b = 0; b < n / 16; b++) {
+        for (int k = 0; k < 8; k++) {
+          const u8 v = data[16 * b + k];
+          m = std::min({m, (v & 0xf) * 17, (v >> 4) * 17});
+        }
+      }
+      return m;
+    case CTR_TEX_RGBA8:
+      for (int i = 0; i < n; i++) {
+        m = std::min<int>(m, data[4 * i]);  // stored A, B, G, R
+      }
+      return m;
+    default:
+      return 0;
+  }
+}
+}  // namespace
+
 bool CtrLevels::load_file(const fs::path& path,
                           const std::string& name,
                           CtrLevelData* out,
@@ -296,14 +422,72 @@ bool CtrLevels::load_file(const fs::path& path,
   if (hdr.version < c3l::kVersion) {
     lg::warn("[ctr] {}: old C3L v{} file ({}): convert the levels again (ctr_level_converter --all)",
              path.string(), hdr.version,
-             hdr.version < 8 ? "no mip levels, 16-bit textures: slow on the 3DS"
-                             : "no envmap shine on models");
+             hdr.version < 8   ? "no mip levels, 16-bit textures: slow on the 3DS"
+             : hdr.version < 9 ? "no envmap shine on models"
+                               : "no visibility culling");
   }
   out->name = name;
   if (!f.read_array(hdr.chunks_offset, hdr.num_chunks, &out->chunks) ||
       !f.read_array(hdr.draw_data_offset, hdr.draw_data_size / sizeof(c3l::Draw), &out->draws)) {
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
+  }
+
+  // (AI-assisted) v10: the visibility runs, all chunks' in one block
+  out->chunk_first_run.assign(out->chunks.size(), 0);
+  out->draw_first_run.assign(out->draws.size(), 0);
+  out->draw_run_count.assign(out->draws.size(), 0);
+  if (hdr.version < 10) {
+    for (auto& ch : out->chunks) {
+      ch.vis_run_count = 0;
+    }
+  } else {
+    u32 lo = UINT32_MAX, hi = 0;
+    for (const auto& ch : out->chunks) {
+      if (ch.vis_run_count) {
+        lo = std::min<u32>(lo, ch.vis_runs_offset);
+        hi = std::max<u32>(hi, ch.vis_runs_offset + ch.vis_run_count * sizeof(c3l::VisRun));
+      }
+    }
+    if (lo < hi && !f.read_array(lo, (hi - lo) / sizeof(c3l::VisRun), &out->vis_runs)) {
+      lg::warn("[ctr] {}: bad visibility data, not used", path.string());
+      out->vis_runs.clear();
+    }
+    for (size_t ci = 0; ci < out->chunks.size(); ci++) {
+      auto& ch = out->chunks[ci];
+      if (!ch.vis_run_count) {
+        continue;
+      }
+      const u32 first = (ch.vis_runs_offset - lo) / sizeof(c3l::VisRun);
+      bool ok = !out->vis_runs.empty() && first + ch.vis_run_count <= out->vis_runs.size();
+      // each draw's runs follow each other and cover the draw
+      std::vector<u32> covered(ch.draw_count, 0);
+      for (u32 r = first; ok && r < first + ch.vis_run_count; r++) {
+        const auto& run = out->vis_runs[r];
+        ok = run.draw < ch.draw_count;
+        if (ok) {
+          const u32 di = ch.first_draw + run.draw;
+          if (!out->draw_run_count[di]) {
+            out->draw_first_run[di] = r;
+          }
+          ok = out->draw_first_run[di] + out->draw_run_count[di] == r;
+          out->draw_run_count[di]++;
+          covered[run.draw] += run.index_count;
+        }
+      }
+      for (u32 k = 0; ok && k < ch.draw_count; k++) {
+        ok = !out->draw_run_count[ch.first_draw + k] ||
+             covered[k] == out->draws[ch.first_draw + k].index_count;
+      }
+      if (!ok) {
+        for (u32 k = 0; k < ch.draw_count; k++) {
+          out->draw_run_count[ch.first_draw + k] = 0;
+        }
+        ch.vis_run_count = 0;
+        continue;
+      }
+      out->chunk_first_run[ci] = first;
+    }
   }
 
   std::vector<c3l::Texture> texs;
@@ -330,7 +514,7 @@ bool CtrLevels::load_file(const fs::path& path,
       auto& p = plan[i];
       const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
                         !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
-      if (!pow2 || t.format > c3l::TEX_ETC1A4 ||
+      if (!pow2 || t.format > c3l::TEX_RGBA8 ||
           (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
         continue;
       }
@@ -358,6 +542,7 @@ bool CtrLevels::load_file(const fs::path& path,
       p.offset = pool_bytes;
       pool_bytes += (ctr_gpu_tex_bytes(t.w, t.h, p.format, p.levels) + 127) & ~127u;
     }
+    out->tex_min_alpha.assign(texs.size(), 0);
     const int pool = pool_bytes ? ctr_gpu_pool_create(pool_bytes) : -1;
     if (pool_bytes && pool < 0) {
       lg::error("[ctr] {}: no memory for the textures ({} KB)", name, pool_bytes / 1024);
@@ -392,6 +577,7 @@ bool CtrLevels::load_file(const fs::path& path,
         }
         if (read_ok) {
           handle = ctr_gpu_pool_tex(pool, p.offset, t.w, t.h, p.format, p.levels);
+          out->tex_min_alpha[i] = texture_min_alpha(dst, t.w, t.h, p.format);
         }
       }
       out->textures.push_back(handle);
@@ -401,6 +587,9 @@ bool CtrLevels::load_file(const fs::path& path,
     }
   }
 
+  out->path = path.string();
+  out->vertex_data_offset = hdr.vertex_data_offset;
+  out->index_data_offset = hdr.index_data_offset;
   // all indices at once (~1 MB): reading them chunk by chunk between the vertex reads would seek
   // back and forth, and every seek throws away the read buffer
   std::vector<u16> indices;
@@ -421,8 +610,12 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     if (first == UINT32_MAX) {
       out->meshes.push_back(-1);
+      out->mesh_index_first.push_back(UINT32_MAX);
+      out->mesh_index_end.push_back(0);
       continue;
     }
+    out->mesh_index_first.push_back(first);
+    out->mesh_index_end.push_back(end);
     int mesh = -1;
     if (end <= indices.size() &&
         f.read_array(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
@@ -459,8 +652,18 @@ bool CtrLevels::load_file(const fs::path& path,
   for (auto& d : out->draws) {
     DrawMode mode;
     mode.as_int() = d.mode;
-    out->draw_states.push_back(ctr_state_from_draw_mode(
-        mode, d.texture < out->textures.size() ? out->textures[d.texture] : -1));
+    const bool textured = d.texture < out->textures.size();
+    ctr_draw_state st =
+        ctr_state_from_draw_mode(mode, textured ? out->textures[d.texture] : -1);
+    // (AI-assisted) opaque, depth written and tested like the early depth test, and the alpha
+    // test never fails (the texture's alpha is above its reference everywhere; vertex alpha 0x80):
+    // the early depth test may drop what's behind it before texturing
+    const int min_alpha = textured ? out->tex_min_alpha[d.texture] : 0;
+    if (st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL &&
+        (st.atest == CTR_TEST_ALWAYS || (textured && min_alpha >= std::min(255, st.aref * 2)))) {
+      st.flags |= CTR_STATE_EARLY_DEPTH;
+    }
+    out->draw_states.push_back(st);
   }
   // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
   // the state (numbered per level)
@@ -507,7 +710,12 @@ bool CtrLevels::load_file(const fs::path& path,
     std::sort(sorted.begin(), sorted.end());
     out->sorted_draws.reserve(sorted.size());
     for (u64 e : sorted) {
-      out->sorted_draws.push_back((u32)e);
+      const u32 di = (u32)e;
+      if (out->draw_states[di].flags & CTR_STATE_EARLY_DEPTH) {
+        out->early_draws.push_back(di);
+      } else {
+        out->sorted_draws.push_back(di);
+      }
     }
   }
   // merc models: one skinned mesh per model
@@ -584,6 +792,7 @@ bool CtrLevels::load_file(const fs::path& path,
 }
 
 void CtrLevels::process_pending_loads(u64 frame) {
+  m_render_frame.store(frame);
   for (const auto& name : m_pending_loads) {
     if (!m_levels.count(name) && !m_prefetched.count(name) && !m_missing.count(name)) {
       request({name, false, false});
@@ -611,13 +820,45 @@ void CtrLevels::process_pending_loads(u64 frame) {
     std::lock_guard<std::mutex> lk(m_lock);
     done.swap(m_done);
     for (auto& d : done) {
-      m_requested.erase(d.job.name);
+      m_requested.erase(d.job.key());
     }
   }
   bool levels_changed = false;
   const double now = ctr_gpu_time_ms();
   for (auto& d : done) {
     const std::string& name = d.job.name;
+    if (d.job.detail) {
+      // (AI-assisted) partial unload: the meshes read again, for the same load of the level
+      auto it = m_levels.find(name);
+      CtrLevelData* lev = it != m_levels.end() ? it->second.get() : nullptr;
+      if (lev && lev->generation != d.job.generation) {
+        lev = nullptr;
+      }
+      if (lev && d.result == LoadResult::LOADED) {
+        for (auto& [ci, mesh] : d.meshes) {
+          if (ci < lev->meshes.size() && lev->meshes[ci] < 0) {
+            lev->meshes[ci] = mesh;
+          } else {
+            ctr_gpu_mesh_delete(mesh);
+          }
+        }
+        lev->detail_loaded = true;
+        lg::info("[ctr] {}: detail meshes back ({})", name, d.meshes.size());
+      } else {
+        for (auto& [ci, mesh] : d.meshes) {
+          ctr_gpu_mesh_delete(mesh);
+        }
+        if (lev) {
+          // not every frame while the memory isn't there
+          lev->detail_retry_frame = frame + 300;
+          lg::warn("[ctr] {}: detail meshes could not be read again, retrying later", name);
+        }
+      }
+      if (lev) {
+        lev->detail_requested = false;
+      }
+      continue;
+    }
     if (d.job.common) {
       if (d.result == LoadResult::LOADED) {
         m_common = std::move(d.lev);
@@ -635,7 +876,8 @@ void CtrLevels::process_pending_loads(u64 frame) {
         m_missing[name] = true;
         break;
       case LoadResult::FAILED:
-        m_missing[name] = true;  // don't retry every frame
+        // (AI-assisted) not for good (a failed allocation or SD read): again in 10 s
+        m_failed[name] = now;
         break;
       case LoadResult::CANCELLED:
         break;
@@ -643,10 +885,12 @@ void CtrLevels::process_pending_loads(u64 frame) {
         if (m_levels.count(name) || m_prefetched.count(name)) {
           unload(*d.lev);  // loaded twice (asked for again while it loaded)
         } else if (std::find(m_wanted.begin(), m_wanted.end(), name) != m_wanted.end() ||
-                   !d.job.prefetch) {
+                   (!d.job.prefetch && m_wanted.empty())) {
           publish(name, std::move(d.lev), frame);
           levels_changed = true;
         } else {
+          // (AI-assisted) a prefetch, or a load the game no longer wants (it changed its level list
+          // while this one loaded): kept aside, dropped if nothing asks for it
           m_prefetched[name] = Prefetched{std::move(d.lev), now};
           levels_changed = true;
         }
@@ -731,7 +975,14 @@ CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
       update_level_count();
       return m_levels[name].get();
     }
-    // loading starts before the next frame (process_pending_loads)
+    // loading starts before the next frame (process_pending_loads); not right after a failed load
+    auto failed = m_failed.find(name);
+    if (failed != m_failed.end()) {
+      if (ctr_gpu_time_ms() - failed->second < 10000.0) {
+        return nullptr;
+      }
+      m_failed.erase(failed);
+    }
     if (!m_missing.count(name) &&
         std::find(m_pending_loads.begin(), m_pending_loads.end(), name) == m_pending_loads.end()) {
       m_pending_loads.push_back(name);
@@ -752,7 +1003,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
     };
     for (auto it = m_queue.begin(); it != m_queue.end();) {
       if (!it->common && !it->prefetch && !wanted(it->name)) {
-        m_requested.erase(it->name);
+        m_requested.erase(it->key());
         it = m_queue.erase(it);
       } else {
         ++it;
@@ -789,6 +1040,10 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
     }
   }
   if (changed) {
+    // (AI-assisted) give the unloaded levels' memory back now: the next level's load starts on
+    // the loader thread right away, and while the game waits for it no frame is drawn, so the
+    // deferred deletes waited (a level without textures or chunks for good, or a 20 s wait)
+    ctr_gpu_free_pending_now();
     update_level_count();
   }
   // Load the wanted levels before the next frame, not only when their background is drawn: a level
@@ -949,20 +1204,48 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
         dma.read_and_advance();
       }
     } else {
-      dma.read_and_advance();
+      auto t = dma.read_and_advance();
+      // (AI-assisted) the visibility strings of level 0 and 1, first in bucket tfrag-0
+      // (add-pc-port-background-data): 2048 bytes for an active level, else 16. vif0: flags from
+      // the 3DS game code (1 valid, 2 all visible: no real data, 4 the level's own data only)
+      if (m_id == (int)jak1::BucketId::TFRAG_LEVEL0 && rs.vis_packets < 2 &&
+          t.vifcode1().kind == VifCode::Kind::PC_PORT &&
+          (t.size_bytes == 2048 || t.size_bytes == 16)) {
+        const int li = rs.vis_packets++;
+        rs.vis_flags[li] = (u8)t.vif0();
+        bool any = false;
+        if (t.size_bytes == 2048) {
+          memcpy(rs.vis_bits[li], t.data, 2048);
+          for (int i = 0; i < 2048 && !any; i++) {
+            any = rs.vis_bits[li][i] != 0;
+          }
+        }
+        // all zero: just cleared by the game (while it loads the next string), not "nothing"
+        rs.vis_valid[li] = any && (rs.vis_flags[li] & 1) && !(rs.vis_flags[li] & 2);
+      }
     }
   }
   if (!have_data) {
     return;
   }
   CtrLevelData* lev = m_levels->get(pc_data.level_name, rs.frame_idx);
-  if (lev) {
+  // (AI-assisted) once per frame, from whichever of the level's tfrag buckets comes first: a level
+  // may have no normal tfrag tree (jungleb only has a trans one), and the .c3l holds all of its
+  // background (tfrag of every kind, tie, shrub)
+  if (lev && lev->drawn_frame != rs.frame_idx) {
+    lev->drawn_frame = rs.frame_idx;
     draw_level(*lev, pc_data.camera, rs);
   }
   if (rs.log_now && m_level_draws) {
     lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
               m_level_draws);
     m_far_levels = m_level_draws = 0;
+  }
+  if (rs.log_now && m_vis_frames) {
+    lg::info("[ctr] {}: visibility hid {:.0f} chunks and {:.0f} tris per frame ({} frames with data)",
+             m_name, (double)m_vis_chunks / m_vis_frames, (double)m_vis_tris / m_vis_frames,
+             m_vis_frames);
+    m_vis_chunks = m_vis_tris = m_vis_frames = 0;
   }
 }
 
@@ -986,10 +1269,46 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       d2 += o * o;
     }
     const float m = settings.far_level_distance * 4096.f;
-    far_level = d2 > m * m;
+    // (AI-assisted) +-10% hysteresis: a camera at the edge doesn't switch the level's ties and
+    // shrubs on and off every few frames
+    const float mf = m * (lev.was_far ? 0.9f : 1.1f);
+    far_level = d2 > mf * mf;
+    lev.was_far = far_level;
+    // (AI-assisted) partial unload (the user's idea): a level seen only from far away for a few
+    // seconds gives back the memory of the chunks far mode doesn't draw; read again when the camera
+    // is within 30 m of the far distance (freed beyond 60 m: no back and forth at one edge)
+    constexpr float kUnloadMeters = 60.f, kReloadMeters = 30.f;
+    constexpr u32 kUnloadFrames = 300;
+    const float unload_d = m + kUnloadMeters * 4096.f, reload_d = m + kReloadMeters * 4096.f;
+    if (lev.detail_loaded) {
+      lev.far_frames = d2 > unload_d * unload_d ? lev.far_frames + 1 : 0;
+      if (lev.far_frames > kUnloadFrames) {
+        m_levels->unload_detail(lev);
+      }
+    } else if (!lev.detail_requested && rs.frame_idx >= lev.detail_retry_frame &&
+               d2 < reload_d * reload_d) {
+      m_levels->request_detail(lev);
+    }
+    if (!lev.detail_loaded) {
+      far_level = true;  // until the meshes are back
+    }
   }
   m_far_levels += far_level;
   m_level_draws++;
+  // (AI-assisted) the game's visibility string for this level (bucket of level 1 or 0). Ties are
+  // hidden by it always; tfrag only when the string is the level's own: seen from another
+  // level's place the game picks the low resolution tfrag through these bits, which the 3DS
+  // picks by distance (far_level) instead, so the detailed tfrag would get holes.
+  const int li = (m_id == (int)jak1::BucketId::TFRAG_LEVEL1 ||
+                  m_id == (int)jak1::BucketId::TFRAG_TRANS1_AND_SKY_BLEND_LEVEL1 ||
+                  m_id == (int)jak1::BucketId::TFRAG_DIRT_LEVEL1 ||
+                  m_id == (int)jak1::BucketId::TFRAG_ICE_LEVEL1)
+                     ? 1
+                     : 0;
+  m_vis = settings.vis_culling && rs.vis_valid[li] && !lev.vis_runs.empty() ? rs.vis_bits[li]
+                                                                            : nullptr;
+  const bool vis_own = m_vis && (rs.vis_flags[li] & 4);
+  m_vis_frames += m_vis != nullptr;
   {
     float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
     if (settings.fog) {
@@ -1013,27 +1332,29 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   constexpr float kYScale = 512.f / 448.f;
   m_visible.clear();
   m_visible_slot.assign(lev.chunks.size(), -1);
+  if (lev.chunk_state.size() != lev.chunks.size()) {
+    lev.chunk_state.assign(lev.chunks.size(), 0);
+  }
   for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
     const auto& ch = lev.chunks[ci];
-    if (lev.meshes[ci] < 0 || !sphere_in_view(ch.bsphere, cam.planes)) {
-      continue;
-    }
-    if (far_level) {
-      // only the level's low resolution version (or the coarse one), no tie
-      if (ch.lod_tier != (lev.has_lowres ? 3u : 2u)) {
-        continue;
-      }
-    } else if (ch.lod_tier == 3) {
-      continue;
-    } else if (ch.lod_tier) {
+    // (AI-assisted) The detail and distance decisions get 10% hysteresis from last frame's, and
+    // are made for every chunk every frame (off screen too): with hard cutoffs, turning the camera
+    // around Jak or standing at a threshold made whole cells of objects pop in and out. The two
+    // versions of a cell share lod_center and see the same decisions: exactly one is drawn.
+    u8& state = lev.chunk_state[ci];
+    bool lod_ok = true;
+    if (!far_level && (ch.lod_tier == 1 || ch.lod_tier == 2)) {
       // detailed version up close, coarse version further away
+      const u8 last = state & 3;
+      const float f = last == 1 ? 1.1f : (last == 2 ? 0.9f : 1.f);
       const float dx = ch.lod_center[0] - cam.trans[0], dy = ch.lod_center[1] - cam.trans[1],
                   dz = ch.lod_center[2] - cam.trans[2];
-      const bool near = lod_dist <= 0 || dx * dx + dy * dy + dz * dz < lod_dist * lod_dist;
-      if (near != (ch.lod_tier == 1)) {
-        continue;
-      }
+      const float lim = lod_dist * f;
+      const bool near = lod_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim;
+      state = (u8)((state & ~3) | (near ? 1 : 2));
+      lod_ok = near == (ch.lod_tier == 1);
     }
+    bool dist_ok = true;
     {
       // draw distance; small objects only up close
       float max_dist = draw_dist;
@@ -1044,17 +1365,52 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (max_dist > 0) {
         const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                     dz = ch.bsphere[2] - cam.trans[2];
-        const float lim = max_dist + ch.bsphere[3];
-        if (dx * dx + dy * dy + dz * dz > lim * lim) {
-          continue;
-        }
+        const float lim = max_dist * ((state & 4) ? 1.1f : 1.f) + ch.bsphere[3];
+        dist_ok = dx * dx + dy * dy + dz * dz <= lim * lim;
+        state = (u8)(dist_ok ? (state | 4) : (state & ~4));
       }
+    }
+    if (lev.meshes[ci] < 0 || !dist_ok) {
+      continue;
+    }
+    if (far_level) {
+      // only the level's low resolution version (or the coarse one), no tie
+      if (ch.lod_tier != (lev.has_lowres ? 3u : 2u)) {
+        continue;
+      }
+    } else if (ch.lod_tier == 3 || !lod_ok) {
+      continue;
+    }
+    if (!sphere_in_view(ch.bsphere, cam.planes)) {
+      continue;
+    }
+    bool partly = false;
+    if (m_vis && ch.vis_run_count && (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3))) {
+      u32 shown = 0;
+      const u32 r0 = lev.chunk_first_run[ci];
+      for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
+        const u16 id = lev.vis_runs[r].vis;
+        shown += id == 0xffff || (m_vis[id >> 3] & (0x80 >> (id & 7)));
+      }
+      if (!shown) {
+        m_vis_chunks++;
+        continue;
+      }
+      partly = shown < ch.vis_run_count;
     }
     // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
     // The translation is done in double: world coordinates are large.
     m_visible_slot[ci] = (int)m_visible.size();
     VisibleChunk& vc = m_visible.emplace_back();
     vc.chunk = (u32)ci;
+    vc.partly = partly;
+    {
+      // (AI-assisted) distance band of the chunk's nearest point, for the early depth order
+      const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                  dz = ch.bsphere[2] - cam.trans[2];
+      const float near = std::sqrt(dx * dx + dy * dy + dz * dz) - ch.bsphere[3];
+      vc.band = near < 30.f * 4096.f ? 0 : (near < 100.f * 4096.f ? 1 : 2);
+    }
     double d[3];
     for (int i = 0; i < 3; i++) {
       d[i] = (double)ch.origin[i] - (double)cam.trans[i];
@@ -1088,9 +1444,68 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
-    ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk],
-                               dr.first_index, dr.index_count);
+    if (!vc.partly || !lev.draw_run_count[di]) {
+      ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk],
+                                 dr.first_index, dr.index_count);
+      return;
+    }
+    // (AI-assisted) only the visible runs; neighbouring ones in one draw, with small hidden runs
+    // between them drawn along (cheaper than another draw)
+    constexpr u32 kMaxGap = 48;
+    u32 idx = dr.first_index, start = 0, len = 0, gap = 0, drawn = 0;
+    bool open = false;
+    auto emit = [&]() {
+      ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], start, len);
+      drawn += len;
+      open = false;
+      gap = 0;
+    };
+    const u32 r0 = lev.draw_first_run[di];
+    for (u32 r = r0; r < r0 + lev.draw_run_count[di]; r++) {
+      const auto& run = lev.vis_runs[r];
+      const bool shown = run.vis == 0xffff || (m_vis[run.vis >> 3] & (0x80 >> (run.vis & 7)));
+      if (shown) {
+        if (!open) {
+          open = true;
+          start = idx;
+          len = 0;
+        } else {
+          len += gap;
+        }
+        gap = 0;
+        len += run.index_count;
+      } else if (open) {
+        gap += run.index_count;
+        if (gap > kMaxGap) {
+          emit();
+        }
+      }
+      idx += run.index_count;
+    }
+    if (open) {
+      emit();
+    }
+    m_vis_tris += (dr.index_count - drawn) / 3;
   };
+  // (AI-assisted) The opaque draws that may use the early depth test first, nearest chunks first
+  // (three distance bands, each sorted by texture): what's drawn near the camera covers the
+  // screen early, and the GPU drops the fragments behind it before texturing them. The alpha
+  // tested ones (foliage) after them: they can't use the early depth test, but behind the near
+  // ones their fragments still fail the depth test before blending and writing.
+  if (settings.early_depth) {
+    for (u8 band = 0; band < 3; band++) {
+      for (u32 di : lev.early_draws) {
+        const int slot = m_visible_slot[lev.draw_chunk[di]];
+        if (slot >= 0 && m_visible[slot].band == band) {
+          draw(di);
+        }
+      }
+    }
+  } else {
+    for (u32 di : lev.early_draws) {
+      draw(di);
+    }
+  }
   for (u32 di : lev.sorted_draws) {
     draw(di);
   }
