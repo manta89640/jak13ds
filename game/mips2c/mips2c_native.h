@@ -71,14 +71,17 @@ u64 native_as_exec(void* ctxt) {
   return F(NativeArgs{args, c->gprs[s6].du64[0], c->gprs[s7].du64[0], c->gprs[sp].du32[0]});
 }
 
-#define MIPS2C_NATIVE_IMPL(fn, flags, scratch) \
-  ::Mips2C::NativeImpl{&fn, &::Mips2C::native_as_exec<&fn>, flags, scratch}
+#define MIPS2C_NATIVE_IMPL(fn, flags, scratch)          \
+  ::Mips2C::NativeImpl {                                \
+    &fn, &::Mips2C::native_as_exec<&fn>, flags, scratch \
+  }
 
 //! Call a GOAL function from native code (like ExecutionContext::jalr).
 u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller);
 
 //! Where the GOAL address of the stub of a registered mips2c/native function is kept (0 until it
-//! is registered). The pointer stays valid; the address changes if the function is registered again.
+//! is registered). The pointer stays valid; the address changes if the function is registered
+//! again.
 const u32* native_stub_slot(const char* name);
 
 // ---------------------------------------------------------------------------
@@ -123,6 +126,71 @@ inline void gstore_bytes(u32 addr, const void* src, u32 size) {
   MIPS2C_NATIVE_LOG_STORE(addr, size);
   memcpy(g_ee_main_mem + addr, src, size);
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#define MIPS2C_ASSUME_ALIGNED(p, n) __builtin_assume_aligned((p), (n))
+#else
+#define MIPS2C_ASSUME_ALIGNED(p, n) (p)
+#endif
+
+//! A quadword that the mips2c code loads with lqc2 or lq (lqc2 requires 16-byte alignment, lq
+//! aligns down): the compiler can load it straight into registers. Only for such addresses.
+inline void gload_q(void* out, u32 addr) {
+  memcpy(out, MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + addr, 16), 16);
+}
+
+//! A quadword that the mips2c code stores with sqc2 or sq (16-byte aligned). Only for such
+//! addresses.
+inline void gstore_q(u32 addr, const void* src) {
+  MIPS2C_NATIVE_LOG_STORE(addr, 16);
+  memcpy(MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + addr, 16), src, 16);
+}
+
+//! lq then sq of a quadword (both addresses 16-byte aligned): ldm / stm on ARM.
+inline void gcopy_q(u32 dst, u32 src) {
+  MIPS2C_NATIVE_LOG_STORE(dst, 16);
+  memcpy(MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + dst, 16),
+         MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + src, 16), 16);
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+// The same for 4 floats or ints, one lane at a time: GCC turns a 16-byte copy into a local array
+// into ldm / stm through the stack, then loads the lanes from there; 4 typed loads go straight
+// into registers. may_alias: GOAL memory is accessed as all types.
+typedef float __attribute__((may_alias)) mips2c_alias_f32;
+typedef s32 __attribute__((may_alias)) mips2c_alias_s32;
+typedef u32 __attribute__((may_alias)) mips2c_alias_u32;
+
+template <typename T, typename A>
+inline void gload_q_lanes(T out[4], u32 addr) {
+  const A* src = (const A*)MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + addr, 16);
+  out[0] = src[0];
+  out[1] = src[1];
+  out[2] = src[2];
+  out[3] = src[3];
+}
+template <typename T, typename A>
+inline void gstore_q_lanes(u32 addr, const T in[4]) {
+  MIPS2C_NATIVE_LOG_STORE(addr, 16);
+  A* dst = (A*)MIPS2C_ASSUME_ALIGNED(g_ee_main_mem + addr, 16);
+  dst[0] = in[0];
+  dst[1] = in[1];
+  dst[2] = in[2];
+  dst[3] = in[3];
+}
+inline void gload_q(float out[4], u32 addr) {
+  gload_q_lanes<float, mips2c_alias_f32>(out, addr);
+}
+inline void gload_q(s32 out[4], u32 addr) {
+  gload_q_lanes<s32, mips2c_alias_s32>(out, addr);
+}
+inline void gload_q(u32 out[4], u32 addr) {
+  gload_q_lanes<u32, mips2c_alias_u32>(out, addr);
+}
+inline void gstore_q(u32 addr, const float in[4]) {
+  gstore_q_lanes<float, mips2c_alias_f32>(addr, in);
+}
+#endif
 
 //! a quadword as 4 floats (a VU0 register)
 struct Vec4f {

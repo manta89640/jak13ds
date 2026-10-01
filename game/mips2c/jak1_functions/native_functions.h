@@ -13,14 +13,72 @@ namespace Mips2C::jak1::native {
 // native_joint.cpp
 extern const NativeImpl cspace_parented_transformq_joint;
 // native_collide_func.cpp
+extern const NativeImpl collide_do_primitives;
 extern const NativeImpl moving_sphere_triangle_intersect;
+u64 collide_do_primitives_impl(const NativeArgs& args);
 u64 moving_sphere_triangle_intersect_impl(const NativeArgs& args);
+// GOAL functions of collide-func.gc and geometry.gc (native_collide_func.cpp, native_geometry.cpp)
+extern const NativeImpl ray_sphere_intersect;
+extern const NativeImpl ray_cylinder_intersect;
+extern const NativeImpl moving_sphere_sphere_intersect;
+extern const NativeImpl closest_pt_in_triangle;
+float ray_sphere_intersect_v(const float origin[4],
+                             const float dir[4],
+                             const float center[4],
+                             float radius);
+float ray_cylinder_intersect_v(const float origin[4],
+                               const float dir[4],
+                               const float cyl_origin[4],
+                               const float axis[4],
+                               float rad,
+                               float len,
+                               u32 pt_out);
+float moving_sphere_sphere_intersect_v(u32 sphere,
+                                       u32 move,
+                                       u32 other,
+                                       u32 out,
+                                       const NativeArgs& caller);
+//! closest-pt-in-triangle (stores to out in GOAL memory like the GOAL function)
+void closest_pt_in_triangle_v(u32 out, u32 point, u32 tri, u32 normal);
+//! closest-pt-in-triangle with the result in host memory (for an out that is the caller's scratch)
+void closest_pt_in_triangle_h(float out[4], u32 point, u32 tri, u32 normal);
+// native_collide_probe.cpp
+extern const NativeImpl collide_probe_node;
+extern const NativeImpl collide_probe_instance_tie;
+// native_collide_mesh.cpp
+extern const NativeImpl method_11_collide_mesh;
+extern const NativeImpl method_12_collide_mesh;
+extern const NativeImpl method_14_collide_mesh;
+extern const NativeImpl method_15_collide_mesh;
+u64 method_14_collide_mesh_impl(const NativeArgs& args);
+u64 method_15_collide_mesh_impl(const NativeArgs& args);
+// native_collide_edge_grab.cpp
+extern const NativeImpl method_15_collide_edge_work;
+extern const NativeImpl method_16_collide_edge_work;
+extern const NativeImpl method_18_collide_edge_work;
+extern const NativeImpl method_10_collide_edge_hold_list;
 // native_collide_cache.cpp
 extern const NativeImpl method_9_collide_cache_prim;
 extern const NativeImpl method_26_collide_cache;
 extern const NativeImpl method_27_collide_cache;
 extern const NativeImpl method_29_collide_cache;
 extern const NativeImpl method_32_collide_cache;
+extern const NativeImpl method_28_collide_cache;
+extern const NativeImpl method_30_collide_cache;
+extern const NativeImpl method_10_collide_cache_prim;
+extern const NativeImpl method_9_collide_puss_work;
+extern const NativeImpl method_10_collide_puss_work;
+extern const NativeImpl method_12_collide_shape_prim_mesh;
+extern const NativeImpl method_13_collide_shape_prim_mesh;
+extern const NativeImpl method_14_collide_shape_prim_mesh;
+extern const NativeImpl pc_upload_collide_frag;
 // native_sparticle.cpp
 extern const NativeImpl sp_process_block_2d;
+extern const NativeImpl sp_process_block_3d;
+// native_sparticle_launcher.cpp
+extern const NativeImpl particle_adgif;
+extern const NativeImpl sp_launch_particles_var;
+u64 particle_adgif_impl(const NativeArgs& args);
+// native_ocean.cpp
+extern const NativeImpl ocean_interp_wave;
 }  // namespace Mips2C::jak1::native

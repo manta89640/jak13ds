@@ -47,15 +47,18 @@ u64 cspace_parented_transformq_joint_impl(const NativeArgs& args) {
   const u32 pbone = gload<u32>(parent + 16);
   const u32 bone = gload<u32>(cspace + 16);
 
-  const Vec4f q = gload_vec(tq + 16);
-  const Vec4f trans = gload_vec(tq + 0);
-  const Vec4f scale = gload_vec(tq + 32);
+  Vec4f q, trans, scale;
+  gload_q(&q, tq + 16);
+  gload_q(&trans, tq + 0);
+  gload_q(&scale, tq + 32);
   const float psx = gload<float>(pbone + 64);
   const float psy = gload<float>(pbone + 68);
   float p[4][4];
-  memcpy(p, gptr(pbone), 64);
+  for (int i = 0; i < 4; i++) {
+    gload_q(p[i], pbone + 16 * i);
+  }
   // stored before the parent's scale z and w are read, like the original
-  gstore_vec(bone + 64, scale);
+  gstore_q(bone + 64, &scale);
   const float psz = gload<float>(pbone + 72);
   const u32 psw_bits = gload<u32>(pbone + 76);
 
@@ -64,9 +67,6 @@ u64 cspace_parented_transformq_joint_impl(const NativeArgs& args) {
   float r0[4] = {0.f + q.w, 0.f + q.z, 0.f - q.y, 1.f - 1.f};
   float r1[4] = {0.f - q.z, 0.f + q.w, 0.f + q.x, 1.f - 1.f};
   float r2[4] = {0.f + q.y, 0.f - q.x, 0.f + q.w, 1.f - 1.f};
-  const float inv_x = divs_accurate(1.f, psx);
-  const float inv_y = divs_accurate(1.f, psy);
-  const float inv_z = divs_accurate(1.f, psz);
   opm_sub(r0, q2);
   opm_sub(r1, q2);
   opm_sub(r2, q2);
@@ -81,6 +81,10 @@ u64 cspace_parented_transformq_joint_impl(const NativeArgs& args) {
   }
   if (psw_bits != 0) {
     // divide by the parent's scale. w: the high word of the sign-extended 1/scale.z (0 or NaN).
+    // (The original divides always; the quotients are only used here.)
+    const float inv_x = divs_accurate(1.f, psx);
+    const float inv_y = divs_accurate(1.f, psy);
+    const float inv_z = divs_accurate(1.f, psz);
     const float inv[4] = {inv_x, inv_y, inv_z, u2f((s32)f2u(inv_z) < 0 ? 0xffffffff : 0)};
     for (int i = 0; i < 4; i++) {
       r0[i] = r0[i] * inv[i];
@@ -95,7 +99,9 @@ u64 cspace_parented_transformq_joint_impl(const NativeArgs& args) {
   transform(out[1], p, r1);
   transform(out[2], p, r2);
   transform(out[3], p, t);
-  gstore_bytes(bone, out, 64);
+  for (int i = 0; i < 4; i++) {
+    gstore_q(bone + 16 * i, out[i]);
+  }
   return 0;
 }
 

@@ -254,7 +254,8 @@ end_of_function:
 void link() {
   cache.ray_cylinder_intersect = intern_from_c("ray-cylinder-intersect").c();
   cache.ray_sphere_intersect = intern_from_c("ray-sphere-intersect").c();
-  gLinkedFunctionTable.reg("collide-do-primitives", execute, 512);
+  gLinkedFunctionTable.reg("collide-do-primitives", execute, 512,
+                           &native::collide_do_primitives);
 }
 
 } // namespace collide_do_primitives

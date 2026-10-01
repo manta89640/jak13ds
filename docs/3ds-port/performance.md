@@ -55,17 +55,29 @@ game thread needs ~12.5 ms (sections off) and waits the rest at dma-sync.
 | target (physics 1.5, ja-post 1.0) | 2.5 |
 | particles (process-particles) | 1.9 |
 | draw-hook | 1.6 |
-| collision mips2c still not native: collide-probe-instance-tie 1.0, collide-probe-node 0.4, sp-launch-particles-var 0.5, ocean-interp-wave 0.3, ripple 0.2 | ~2.4 |
+| collision mips2c still not native: collide-probe-instance-tie 1.0, collide-probe-node 0.4, sp-launch-particles-var 0.5, ocean-interp-wave 0.3, ripple 0.2 (all native now except ripple, see below) | ~2.4 |
 | IOP 0.6, sound 0.02 | 0.6 |
 
 Next steps, by expected gain:
 1. Render thread (owner: renderer): sprites 10 ms and tfrag 7.6 ms decide the frame rate now.
 2. Load .c3l files on a separate thread (loading hitches of 100+ ms).
-3. Native versions of collide-probe-instance-tie, (method 28 collide-cache), collide-probe-node,
-   sp-launch-particles-var (~1.5-2 ms).
+3. Done, not measured in Azahar yet: every game-logic mips2c function has a native version now
+   (docs/3ds-port/3ds_build.md, "Native versions of hot mips2c functions", with a table of ARM
+   instructions per call), built with -O3. Against mips2c (qemu, test/mips2c_native/run.sh
+   bench): collide-probe-instance-tie 10x, collide-probe-node 8x, sp-launch-particles-var 2x,
+   ocean-interp-wave 5x, (method 28 collide-cache) 4x; and for the ones measured above, before ->
+   now: moving-sphere-triangle-intersect 2.0x -> 4.0x, (method 9 collide-cache-prim) 2.1x -> 4.0x,
+   cspace<- 4.7x -> 8.4x, sp-process-block-2d 2.5x -> 4.2x, collide-cache 32 / 26 / 27
+   6.3x / 3.3x / 2.9x -> 11.6x / 4.2x / 5.2x.
 4. target-real-post runs Jak's physics `time-ratio` times per frame (2 at 30-60 fps, 3 at 22 fps,
    4 below 15): faster frames make it cheaper by themselves.
-5. GOAL C code quality (u64 everywhere, owner: compiler): helps every row above.
+5. GOAL C code quality (u64 everywhere, owner: compiler): helps every row above. (Checked for
+   hand-written replacements of GOAL functions: goalc's C output compiled for ARMv6K is already
+   close to hand-written code for float work, e.g. decomp-frame's inner loop is ldrsh / vcvt /
+   vmul / vmla per value and pc-port-raw-ray-sphere-implementation is 93 instructions, so native
+   versions of GOAL functions gain much less than the mips2c ones did. The exception is GOAL
+   functions the natives call for every triangle, where the call itself was the cost: the four
+   collision helpers in 3ds_build.md are native now and called directly.)
 
 ## Real hardware: the GPU (Sentinel Beach, ~10 fps)
 
