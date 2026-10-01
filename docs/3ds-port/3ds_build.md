@@ -74,19 +74,35 @@ game writes. If there is none at all, the title never ran the game's code: find 
 boot test, a small app packaged with the same CIA settings as its own title:
 
 ```sh
-make -C platform/3ds/hello                              # (source platform/3ds/toolchain/env.sh)
-platform/3ds/tools/make_cia.sh --boottest               # build-3ds/boottest.cia, 124 MB mode
-platform/3ds/tools/make_cia.sh --boottest --mem legacy  # build-3ds/boottest_legacy.cia
-platform/3ds/tools/make_cia.sh --mem legacy             # the game without the 124 MB mode
+make -C platform/3ds/hello                    # (source platform/3ds/toolchain/env.sh)
+platform/3ds/tools/make_cia.sh --boottest     # four boot test titles in build-3ds/, see below
+platform/3ds/tools/make_cia.sh --mem legacy   # the game without the 124 MB mode (jak1_legacy.cia)
 ```
 
-Install with FBI, start from the HOME Menu, then read `sdmc:/3ds/jak1/boottest.txt` (`0 started`,
-`1 APT`, `2 main reached`, `3 screens up: app memory ...`; the app also shows a pulsing top screen
-and its memory on the bottom screen):
-- the boot test starts but the game doesn't: something about the game's binary (its size, a crash
-  before the first boot step); the legacy game CIA tells whether the 124 MB mode matters for it.
-- the boot test doesn't start either, but its legacy version does: the 124 MB memory mode setting.
-- neither starts: the CIA settings or the install (check FBI's install result).
+The boot test titles differ in one setting each (they install side by side):
+
+| CIA | title id | settings |
+|---|---|---|
+| `boottest_124.cia` | 000400000F7A1200 | the game's: 124 MB mode, 804 MHz, L2 cache |
+| `boottest_legacy.cia` | 000400000F7A1300 | without the 124 MB mode |
+| `boottest_plain.cia` | 000400000F7A1400 | like most homebrew CIAs (FBI): no 124 MB mode, 268 MHz, no L2 |
+| `boottest_nocompress.cia` | 000400000F7A1500 | the game's, code not compressed |
+
+Install all four with FBI and start each from the HOME Menu (wait ~20 s, then go back to the HOME
+Menu or hold POWER). Each appends lines with its title id to `sdmc:/boottest.txt` and
+`sdmc:/3ds/jak1/boottest.txt` (`0 started`, `1 APT`, `2 main reached`, `3 screens up: app memory
+...`) and, once it is up, shows a pulsing top screen and on the bottom screen its title id, the
+SD card results (`fsInit`, `sdmc`) and whether the files were written:
+- a title shows its screens but no file: the SD card access fails in installed titles (the bottom
+  screen has the error codes).
+- some variants start and others don't: the setting that differs is the cause.
+- none starts, not even `plain`: the packaging (makerom version: `make_cia.sh` prints it; v0.18.4
+  or later) or the install. FBI itself is a CIA built like `plain`.
+- the boot tests start but the game doesn't: something about the game's binary (its size, a crash
+  before the first boot step); `jak1_legacy.cia` tells whether the 124 MB mode matters for it.
+
+Also useful: a crash dump in `sdmc:/luma/dumps/arm11/`, and the Rosalina menu (L + Down + Select)
+while it hangs: "Process list" shows whether the title's process exists.
 
 ### Without installing: gk.3dsx
 
