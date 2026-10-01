@@ -34,18 +34,16 @@ s16Output Synth::Tick() {
 }
 
 #ifdef __3DS__
-void Synth::Tick(s16Output* out, int samples) {
+void Synth::Tick(s16Output* out, int samples, u32 ratio) {
   for (int i = 0; i < samples; i++) {
     out[i] = s16Output{};
   }
   mVoices.remove_if([](std::shared_ptr<Voice>& v) { return v->Dead(); });
   for (auto& v : mVoices) {
-    Voice* voice = v.get();
     // the same order of (saturating) additions per sample as Tick(); a voice that stops is
-    // skipped from then on, like there
-    for (int i = 0; i < samples && !voice->Stopped(); i++) {
-      out[i] += voice->Run();
-    }
+    // skipped from then on, like there. (AI-assisted) RunBlock: the same samples, with the
+    // envelope steps done in one go while they only advance a counter.
+    v->RunBlock(out, samples, ratio);
   }
   for (int i = 0; i < samples; i++) {
     out[i].left = ApplyVolume(out[i].left, mVolume.left.Get());
