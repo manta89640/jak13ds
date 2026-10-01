@@ -281,9 +281,10 @@ bool CtrLevels::load_file(const fs::path& path,
     return false;
   }
   if (hdr.version < c3l::kVersion) {
-    lg::warn("[ctr] {}: old C3L v{} file (no mip levels, 16-bit textures): convert the levels again "
-             "for faster drawing (ctr_level_converter --all)",
-             path.string(), hdr.version);
+    lg::warn("[ctr] {}: old C3L v{} file ({}): convert the levels again (ctr_level_converter --all)",
+             path.string(), hdr.version,
+             hdr.version < 8 ? "no mip levels, 16-bit textures: slow on the 3DS"
+                             : "no envmap shine on models");
   }
   out->name = name;
   if (!f.read_array(hdr.chunks_offset, hdr.num_chunks, &out->chunks) ||

@@ -182,6 +182,12 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
                           int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count);
 
+/* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space
+ * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, 1.0 = GS 0x80). */
+void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
+                              int palette_count, const float fade[4], int mesh, int first_index,
+                              int index_count);
+
 /* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)
  *   distance fog = (w * fog1.x - fog1.y) * fog1.z

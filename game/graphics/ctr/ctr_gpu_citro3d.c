@@ -26,6 +26,8 @@ extern const uint8_t ctr_mesh_shbin[];
 extern const size_t ctr_mesh_shbin_size;
 extern const uint8_t ctr_skin_shbin[];
 extern const size_t ctr_skin_shbin_size;
+extern const uint8_t ctr_skin_env_shbin[];
+extern const size_t ctr_skin_env_shbin_size;
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
@@ -78,7 +80,7 @@ typedef struct {
   int used; /* 0 free, 1 used, 2 pending delete */
 } MeshSlot;
 
-enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH, PROG_SKIN };
+enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH, PROG_SKIN, PROG_SKIN_ENV };
 
 static struct {
   int ready;
@@ -98,6 +100,9 @@ static struct {
   DVLB_s* skin_dvlb;
   shaderProgram_s skin_program;
   int uloc_skin_clip, uloc_skin_rows[3], uloc_skin_scales, uloc_skin_lights;
+  DVLB_s* env_dvlb; /* the envmap pass of skinned meshes (ctr_skin_env.v.pica) */
+  shaderProgram_s env_program;
+  int uloc_env_clip, uloc_env_rows[3], uloc_env_scales, uloc_env_fade;
   int cur_prog;
   ctr_draw_state last_state;
   int last_state_mesh;
@@ -295,8 +300,8 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);         /* texcoord */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_projection, &g.projection);
-  } else if (prog == PROG_SKIN) {
-    C3D_BindProgram(&g.skin_program);
+  } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV) {
+    C3D_BindProgram(prog == PROG_SKIN ? &g.skin_program : &g.env_program);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 3);         /* position */
     AttrInfo_AddLoader(attr, 1, GPU_UNSIGNED_BYTE, 3); /* bone indices */
@@ -304,8 +309,8 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 3, GPU_SHORT, 2);         /* texcoord * 1024 */
     AttrInfo_AddLoader(attr, 4, GPU_UNSIGNED_BYTE, 4); /* color */
     AttrInfo_AddLoader(attr, 5, GPU_BYTE, 3);          /* normal * 127 */
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_skin_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f,
-                  1.0f / 127.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, prog == PROG_SKIN ? g.uloc_skin_scales : g.uloc_env_scales,
+                  1.0f / 1024.0f, 1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
   } else {
     C3D_BindProgram(&g.mesh_program);
     g.last_state_valid = 0;
@@ -394,6 +399,15 @@ int ctr_gpu_init(void) {
   g.uloc_skin_rows[2] = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "row2");
   g.uloc_skin_scales = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "scales");
   g.uloc_skin_lights = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "lights");
+  g.env_dvlb = DVLB_ParseFile((u32*)ctr_skin_env_shbin, (u32)ctr_skin_env_shbin_size);
+  shaderProgramInit(&g.env_program);
+  shaderProgramSetVsh(&g.env_program, &g.env_dvlb->DVLE[0]);
+  g.uloc_env_clip = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "clip");
+  g.uloc_env_rows[0] = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "row0");
+  g.uloc_env_rows[1] = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "row1");
+  g.uloc_env_rows[2] = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "row2");
+  g.uloc_env_scales = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "scales");
+  g.uloc_env_fade = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "fade");
   g.cur_prog = PROG_NONE;
 
   g.vbuf = (uint8_t*)linearAlloc(VBUF_BYTES);
@@ -466,6 +480,8 @@ void ctr_gpu_exit(void) {
   DVLB_Free(g.mesh_dvlb);
   shaderProgramFree(&g.skin_program);
   DVLB_Free(g.skin_dvlb);
+  shaderProgramFree(&g.env_program);
+  DVLB_Free(g.env_dvlb);
   C3D_RenderTargetDelete(g.top);
   C3D_Fini();
   ctr_port_set_gpu_active(0);
@@ -1570,6 +1586,55 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
     memcpy(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
   }
   g.last_skin_valid = 1;
+  apply_state_tint(state, 2, 0xffffffffu);
+  C3D_BufInfo* buf = C3D_GetBufInfo();
+  BufInfo_Init(buf);
+  BufInfo_Add(buf, g.meshes[mesh].verts, 24, 6, 0x543210);
+  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
+                   g.meshes[mesh].indices + first_index);
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
+}
+
+void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
+                              int palette_count, const float fade[4], int mesh, int first_index,
+                              int index_count) {
+  if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
+      index_count < 3) {
+    return;
+  }
+  if (!cmd_room()) {
+    return;
+  }
+  /* (rare: envmapped effects only, so no upload caching like ctr_gpu_draw_skinned) */
+  use_program(PROG_SKIN_ENV);
+  C3D_Mtx m;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      float acc = 0.0f;
+      for (int k = 0; k < 4; k++) {
+        acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
+      }
+      m.r[r].c[3 - c] = acc;
+    }
+  }
+  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_env_clip, &m);
+  if (palette_count > CTR_MAX_PALETTE) {
+    palette_count = CTR_MAX_PALETTE;
+  }
+  for (int row = 0; row < 3; row++) {
+    C3D_FVec* dst = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_env_rows[row], palette_count);
+    for (int p = 0; p < palette_count; p++) {
+      const float* src = bones + 12 * p + 4 * row;
+      dst[p].x = src[0];
+      dst[p].y = src[1];
+      dst[p].z = src[2];
+      dst[p].w = src[3];
+    }
+  }
+  /* the texture stage multiplies merc colors by 4: half the fade gives texture * fade * 2 */
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_env_fade, fade[0] * 0.5f, fade[1] * 0.5f,
+                fade[2] * 0.5f, 0.5f);
   apply_state_tint(state, 2, 0xffffffffu);
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);

@@ -397,6 +397,17 @@ void ctr_gpu_wait_vblank(void) {
   std::this_thread::sleep_until(g_soft.next_vblank);
 }
 
+void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
+                              const float*,
+                              const float*,
+                              int,
+                              const float*,
+                              int,
+                              int,
+                              int) {
+  // (not in the PC software renderer: the envmap shine pass is GPU only)
+}
+
 int ctr_gpu_copy_screen(void) {
   static int handle = -1;
   if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||
