@@ -110,6 +110,9 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs) {
 }
 
 void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
+  if (!ctr_settings().sky) {
+    return;
+  }
   SkyPacket p;
   memcpy(&p, packet, sizeof(p));
   // the textures blended last frame (like the PS2: they sit in VRAM until this frame's sky)
