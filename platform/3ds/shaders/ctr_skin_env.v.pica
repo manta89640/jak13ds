@@ -1,0 +1,98 @@
+; (AI-assisted)
+; The envmap pass of skinned meshes (merc envmap effects: power cells, precursor metal). The same
+; skinning as ctr_skin.v.pica; the texture coordinates are emerc.vert's sphere map from the camera
+; space normal and position, the color is the effect's fade (texture stage: texture * color * 4).
+
+.fvec clip[4]
+.fvec row0[24]
+.fvec row1[24]
+.fvec row2[24]
+.fvec scales        ; x: texture coordinate scale (1/1024), y: 1/255, z: 1.0, w: normal scale (1/127)
+.fvec fade          ; the color: fade (1.0 = GS 0x80) / 2
+
+.constf consts(0.0, 0.5, 0.000001, 1.0)
+.constf consts2(-0.5, -0.5, 0.0, 0.0)
+.alias zero consts.xxxx
+.alias half consts.yyyy
+.alias tiny consts.zzzz
+.alias one consts.wwww
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias inidx v1
+.alias inwgt v2
+.alias intex v3
+.alias inclr v4
+.alias innrm v5
+
+.proc main
+  mov r0.xyz, inpos
+  mov r0.w, scales.zzzz
+  mul r2, scales.yyyy, inwgt
+  mul r1, scales.wwww, innrm
+
+  ; bones 0 and 1: position (r5) and normal (r6)
+  mova a0.xy, inidx.xy
+  dp4 r4.x, row0[a0.x], r0
+  dp4 r4.y, row1[a0.x], r0
+  dp4 r4.z, row2[a0.x], r0
+  mul r5.xyz, r2.xxxx, r4.xyz
+  dp3 r4.x, row0[a0.x], r1
+  dp3 r4.y, row1[a0.x], r1
+  dp3 r4.z, row2[a0.x], r1
+  mul r6.xyz, r2.xxxx, r4.xyz
+  dp4 r4.x, row0[a0.y], r0
+  dp4 r4.y, row1[a0.y], r0
+  dp4 r4.z, row2[a0.y], r0
+  mad r5.xyz, r2.yyyy, r4.xyz, r5.xyz
+  dp3 r4.x, row0[a0.y], r1
+  dp3 r4.y, row1[a0.y], r1
+  dp3 r4.z, row2[a0.y], r1
+  mad r6.xyz, r2.yyyy, r4.xyz, r6.xyz
+
+  ; bone 2
+  mova a0.x, inidx.zzzz
+  dp4 r4.x, row0[a0.x], r0
+  dp4 r4.y, row1[a0.x], r0
+  dp4 r4.z, row2[a0.x], r0
+  mad r5.xyz, r2.zzzz, r4.xyz, r5.xyz
+  dp3 r4.x, row0[a0.x], r1
+  dp3 r4.y, row1[a0.x], r1
+  dp3 r4.z, row2[a0.x], r1
+  mad r6.xyz, r2.zzzz, r4.xyz, r6.xyz
+  mov r5.w, scales.zzzz
+
+  dp4 outpos.x, clip[0], r5
+  dp4 outpos.y, clip[1], r5
+  dp4 outpos.z, clip[2], r5
+  dp4 outpos.w, clip[3], r5
+
+  ; emerc.vert: v = camera space position (r5, -X * p like vtx_pos there), n = the rotated normal
+  ; (-r6, normalized), m = (n.x, n.y, n.z - 1);
+  ; w = v + m * dot(v, m) / m.z, st = 0.5 - 0.5 * w.xy / |w|
+  mov r6.w, zero
+  dp3 r7.x, r6, r6
+  add r7.x, tiny, r7.x
+  rsq r7.x, r7.x
+  mul r8, -r6, r7.xxxx
+  add r8.z, -one, r8.z
+  mov r8.w, zero
+  dp3 r9.x, r5, r8
+  rcp r9.y, r8.z
+  mul r9.x, r9.x, r9.y
+  mad r10.xyz, r8.xyz, r9.xxx, r5.xyz
+  mov r10.w, zero
+  dp3 r11.x, r10, r10
+  add r11.x, tiny, r11.x
+  rsq r11.x, r11.x
+  mul r10, r10, r11.xxxx
+  mul r10, consts2, r10
+  add r10, half, r10
+  mov r10.zw, zero
+  mov outtc0, r10
+  mov outclr, fade
+  end
+.end

@@ -45,6 +45,7 @@ set(RUNTIME_SOURCE
         graphics/ctr/CtrOcean.cpp
         graphics/ctr/CtrSettings.cpp
         graphics/ctr/CtrSprite.cpp
+        graphics/ctr/CtrSky.cpp
         graphics/ctr/CtrRenderer.cpp
         graphics/ctr/CtrVram.cpp
         graphics/ctr/ctr_gpu_soft.cpp

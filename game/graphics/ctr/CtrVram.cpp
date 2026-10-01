@@ -414,6 +414,8 @@ u32 CtrVram::clut_color(u32 cbp, u32 cpsm, u32 entry) const {
 }
 
 namespace {
+// clut(cbp, cpsm, index) -> RGBA8: a template (inlined per texel), not a std::function
+template <typename Clut>
 bool decode_impl(const CtrVram* self,
                  const std::vector<u8>& vram,
                  u64 tex0,
@@ -421,7 +423,7 @@ bool decode_impl(const CtrVram* self,
                  int* w_out,
                  int* h_out,
                  Range* tex_range,
-                 std::function<u32(u32, u32, u32)> clut) {
+                 const Clut& clut) {
   (void)self;
   GsTex0 t(tex0);
   u32 tw = std::min(t.tw(), 10u);
@@ -534,14 +536,13 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
     flush_pending(t.cbp(), t.cbp() + 4);
   }
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
-  std::function<u32(u32, u32, u32)> clut;
-  if (reloc) {
-    clut = [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; };
-  } else {
-    clut = [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); };
-  }
   Range r;
-  return decode_impl(this, m_vram, tex0, out, w, h, &r, clut);
+  if (reloc) {
+    return decode_impl(this, m_vram, tex0, out, w, h, &r,
+                       [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; });
+  }
+  return decode_impl(this, m_vram, tex0, out, w, h, &r,
+                     [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
 }
 
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
@@ -597,13 +598,12 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
                         t.psm() == GsTex0::PSM::PSMT4HL;
   // textures moved by texture-relocate use the CLUT they had when they were moved
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
-  std::function<u32(u32, u32, u32)> clut;
-  if (reloc) {
-    clut = [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; };
-  } else {
-    clut = [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); };
-  }
-  if (!decode_impl(this, m_vram, key, &data, &w, &h, &tex_range, clut)) {
+  const bool decoded =
+      reloc ? decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+                          [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; })
+            : decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+                          [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
+  if (!decoded) {
     lg::warn("[ctr vram] unsupported texture format {} (tex0 {:x})", (int)t.psm(), tex0);
     return nullptr;
   }

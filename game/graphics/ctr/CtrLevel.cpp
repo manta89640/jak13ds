@@ -274,9 +274,17 @@ bool CtrLevels::load_file(const fs::path& path,
     return false;
   }
   *file_size = f.size();
-  if (memcmp(hdr.magic, c3l::kMagic, 4) || hdr.version != c3l::kVersion) {
-    lg::error("[ctr] {}: not a C3L v{} file", path.string(), c3l::kVersion);
+  if (memcmp(hdr.magic, c3l::kMagic, 4) || hdr.version < c3l::kMinVersion ||
+      hdr.version > c3l::kVersion) {
+    lg::error("[ctr] {}: not a C3L v{}..{} file (version {})", path.string(), c3l::kMinVersion,
+              c3l::kVersion, hdr.version);
     return false;
+  }
+  if (hdr.version < c3l::kVersion) {
+    lg::warn("[ctr] {}: old C3L v{} file ({}): convert the levels again (ctr_level_converter --all)",
+             path.string(), hdr.version,
+             hdr.version < 8 ? "no mip levels, 16-bit textures: slow on the 3DS"
+                             : "no envmap shine on models");
   }
   out->name = name;
   if (!f.read_array(hdr.chunks_offset, hdr.num_chunks, &out->chunks) ||
@@ -290,17 +298,94 @@ bool CtrLevels::load_file(const fs::path& path,
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
   }
-  std::vector<u8> texels;
-  for (auto& t : texs) {
-    if (cancelled()) {
-      return false;
+  // All textures (with their mip levels) in one pool: the renderer moves it to VRAM when there's
+  // room, with one GPU copy. The texels are read straight into it.
+  {
+    struct Plan {
+      bool ok = false;
+      bool expand = false;  // RGBA4 stored as RGBA8 (ctr_gpu_set_rgba4_as_rgba8)
+      int format = 0;       // ctr_tex_format
+      int levels = 1;
+      u32 file_bytes = 0;   // of the levels used, as stored in the file
+      u32 offset = 0;       // in the pool
+    };
+    std::vector<Plan> plan(texs.size());
+    const bool rgba4_as_rgba8 = ctr_gpu_rgba4_as_rgba8() != 0;
+    u32 pool_bytes = 0;
+    for (size_t i = 0; i < texs.size(); i++) {
+      const auto& t = texs[i];
+      auto& p = plan[i];
+      const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
+                        !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
+      if (!pow2 || t.format > c3l::TEX_ETC1A4 ||
+          (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
+        continue;
+      }
+      // the levels the data holds (and the GPU allows: at least 8 texels on the short side)
+      const int want = hdr.version >= 8 ? std::max<int>(1, t.levels) : 1;
+      int levels = 0;
+      u32 bytes = 0;
+      for (int l = 0; l < want; l++) {
+        const u32 w = t.w >> l, h = t.h >> l;
+        const u32 b = c3l::texture_level_bytes(w, h, t.format);
+        if (w < 8 || h < 8 || bytes + b > t.data_size) {
+          break;
+        }
+        bytes += b;
+        levels++;
+      }
+      if (!levels) {
+        continue;
+      }
+      p.ok = true;
+      p.levels = levels;
+      p.file_bytes = bytes;
+      p.expand = t.format == c3l::TEX_RGBA4 && rgba4_as_rgba8;
+      p.format = p.expand ? CTR_TEX_RGBA8 : (int)t.format;
+      p.offset = pool_bytes;
+      pool_bytes += (ctr_gpu_tex_bytes(t.w, t.h, p.format, p.levels) + 127) & ~127u;
     }
-    texels.resize(t.data_size);
-    int handle = -1;
-    if (f.read(t.data_offset, texels.data(), t.data_size)) {
-      handle = ctr_gpu_tex_create_tiled(t.w, t.h, t.format, texels.data(), t.data_size);
+    const int pool = pool_bytes ? ctr_gpu_pool_create(pool_bytes) : -1;
+    if (pool_bytes && pool < 0) {
+      lg::error("[ctr] {}: no memory for the textures ({} KB)", name, pool_bytes / 1024);
     }
-    out->textures.push_back(handle);
+    out->tex_pool = pool;
+    u8* base = pool >= 0 ? (u8*)ctr_gpu_pool_data(pool) : nullptr;
+    std::vector<u8> texels;
+    for (size_t i = 0; i < texs.size(); i++) {
+      if (cancelled()) {
+        return false;
+      }
+      const auto& t = texs[i];
+      const auto& p = plan[i];
+      int handle = -1;
+      if (p.ok && base) {
+        u8* dst = base + p.offset;
+        bool read_ok;
+        if (!p.expand) {
+          read_ok = f.read(t.data_offset, dst, p.file_bytes);
+        } else {
+          // RGBA4 -> RGBA8 (the same tiled order, all levels; GPU_RGBA8 is stored A, B, G, R)
+          texels.resize(p.file_bytes);
+          read_ok = f.read(t.data_offset, texels.data(), p.file_bytes);
+          const u32 n = p.file_bytes / 2;
+          for (u32 k = 0; read_ok && k < n; k++) {
+            const u16 v = (u16)(texels[2 * k] | (texels[2 * k + 1] << 8));
+            dst[4 * k + 0] = (u8)((v & 0xf) * 17);
+            dst[4 * k + 1] = (u8)(((v >> 4) & 0xf) * 17);
+            dst[4 * k + 2] = (u8)(((v >> 8) & 0xf) * 17);
+            dst[4 * k + 3] = (u8)(((v >> 12) & 0xf) * 17);
+          }
+        }
+        if (read_ok) {
+          handle = ctr_gpu_pool_tex(pool, p.offset, t.w, t.h, p.format, p.levels);
+        }
+      }
+      out->textures.push_back(handle);
+    }
+    if (pool >= 0) {
+      ctr_gpu_pool_ready(pool);
+    }
   }
 
   // all indices at once (~1 MB): reading them chunk by chunk between the vertex reads would seek
@@ -363,6 +448,54 @@ bool CtrLevels::load_file(const fs::path& path,
     mode.as_int() = d.mode;
     out->draw_states.push_back(ctr_state_from_draw_mode(
         mode, d.texture < out->textures.size() ? out->textures[d.texture] : -1));
+  }
+  // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
+  // the state (numbered per level)
+  {
+    std::vector<ctr_draw_state> states;
+    out->draw_sort_keys.resize(out->draws.size());
+    out->draw_ordered.resize(out->draws.size());
+    for (size_t di = 0; di < out->draws.size(); di++) {
+      ctr_draw_state st = out->draw_states[di];
+      const int tex = st.tex;
+      st.tex = 0;
+      u32 id = 0;
+      while (id < states.size() && memcmp(&states[id], &st, sizeof(st))) {
+        id++;
+      }
+      if (id == states.size()) {
+        states.push_back(st);
+      }
+      out->draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
+      // blending, or drawn over what's there without writing depth (decals): keep the order
+      out->draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
+    }
+    // drawing order, made once (see sorted_draws)
+    out->draw_chunk.assign(out->draws.size(), 0);
+    for (u32 ci = 0; ci < out->chunks.size(); ci++) {
+      const auto& ch = out->chunks[ci];
+      for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+        out->draw_chunk[ch.first_draw + k] = ci;
+      }
+    }
+    std::vector<u64> sorted;
+    for (u32 ci = 0; ci < out->chunks.size(); ci++) {
+      const auto& ch = out->chunks[ci];
+      for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+        const u32 di = ch.first_draw + k;
+        if (out->draw_ordered[di]) {
+          out->ordered_draws.push_back(di);
+        } else {
+          // (draws are numbered in chunk order: di sorts like (chunk, draw))
+          sorted.push_back(((u64)out->draw_sort_keys[di] << 32) | di);
+        }
+      }
+    }
+    std::sort(sorted.begin(), sorted.end());
+    out->sorted_draws.reserve(sorted.size());
+    for (u64 e : sorted) {
+      out->sorted_draws.push_back((u32)e);
+    }
   }
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
@@ -475,6 +608,8 @@ void CtrLevels::process_pending_loads(u64 frame) {
     if (d.job.common) {
       if (d.result == LoadResult::LOADED) {
         m_common = std::move(d.lev);
+        // Jak and the shared models: on screen all the time, and small
+        ctr_gpu_pool_set_priority(m_common->tex_pool, 3);
         rebuild_merc_index();
       } else {
         lg::warn("[ctr] no common models (out/jak1/c3l/GAME.c3l): Jak won't be drawn");
@@ -524,6 +659,10 @@ void CtrLevels::process_pending_loads(u64 frame) {
 void CtrLevels::unload(CtrLevelData& lev) {
   for (int t : lev.textures) {
     ctr_gpu_tex_delete(t);
+  }
+  if (lev.tex_pool >= 0) {
+    ctr_gpu_pool_delete(lev.tex_pool);  // after its textures (freed together, after the frame)
+    lev.tex_pool = -1;
   }
   for (int m : lev.meshes) {
     ctr_gpu_mesh_delete(m);
@@ -713,6 +852,8 @@ ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex) {
   memset(&st, 0, sizeof(st));
   st.tex = tex;
   st.tcc = 1;
+  // the texture color alone (tfrag3.vert, shrub.vert, merc2.frag: TEX0 decal bit)
+  st.decal = mode.get_decal();
   st.filter = mode.get_filt_enable();
   st.clamp_s = mode.get_clamp_s_enable();
   st.clamp_t = mode.get_clamp_t_enable();
@@ -853,9 +994,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
   }
+  // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
+  ctr_gpu_pool_set_priority(lev.tex_pool, far_level ? 1 : 2);
   // Jak 1 scissor adjust (tfrag3.vert: y *= 512 / 448)
   constexpr float kYScale = 512.f / 448.f;
-  int drawn = 0;
+  m_visible.clear();
+  m_visible_slot.assign(lev.chunks.size(), -1);
   for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
     const auto& ch = lev.chunks[ci];
     if (lev.meshes[ci] < 0 || !sphere_in_view(ch.bsphere, cam.planes)) {
@@ -895,11 +1039,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
     // The translation is done in double: world coordinates are large.
+    m_visible_slot[ci] = (int)m_visible.size();
+    VisibleChunk& vc = m_visible.emplace_back();
+    vc.chunk = (u32)ci;
     double d[3];
     for (int i = 0; i < 3; i++) {
       d[i] = (double)ch.origin[i] - (double)cam.trans[i];
     }
-    float m[16];
+    float* m = vc.clip;
     for (int c = 0; c < 4; c++) {
       double t = 0;
       for (int i = 0; i < 3; i++) {
@@ -914,12 +1061,27 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (int i = 0; i < 4; i++) {
       m[4 + i] *= kYScale;
     }
-    for (u32 di = ch.first_draw; di < ch.first_draw + ch.draw_count; di++) {
-      const auto& dr = lev.draws[di];
-      ctr_gpu_draw_mesh(&lev.draw_states[di], m, lev.meshes[ci], dr.first_index,
-                        dr.index_count);
-    }
-    drawn++;
+    ctr_gpu_prepare_mesh_matrix(m, &vc.gpu);
   }
-  (void)drawn;
+
+  // The draws whose order doesn't matter (opaque, depth written) sorted by texture and state,
+  // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
+  // of their textures. Then the others (blending, decals) in their order, over the opaque ones.
+  // The order is made at load (sorted_draws, ordered_draws): only the visible chunks' draws.
+  auto draw = [&](u32 di) {
+    const int slot = m_visible_slot[lev.draw_chunk[di]];
+    if (slot < 0) {
+      return;
+    }
+    const VisibleChunk& vc = m_visible[slot];
+    const auto& dr = lev.draws[di];
+    ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk],
+                               dr.first_index, dr.index_count);
+  };
+  for (u32 di : lev.sorted_draws) {
+    draw(di);
+  }
+  for (u32 di : lev.ordered_draws) {
+    draw(di);
+  }
 }

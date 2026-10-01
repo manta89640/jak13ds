@@ -42,11 +42,25 @@ struct SoftMesh {
   std::vector<uint16_t> indices;
 };
 
+struct SoftPool {
+  bool used = false;
+  std::vector<uint8_t> data;
+  // textures made from the pool: decoded when the pool is ready (the loader fills it first)
+  struct Pending {
+    int handle;
+    unsigned offset;
+    int w, h, format, levels;
+  };
+  std::vector<Pending> pending;
+};
+
 struct SoftState {
   std::vector<uint8_t> color;  // RGBA8, top row first
   std::vector<float> depth;
   std::vector<SoftTex> textures;
   std::vector<SoftMesh> meshes;
+  std::vector<SoftPool> pools;
+  int rgba4_as_rgba8 = 1;
   int frame = 0;
   std::string dump_dir;
   int dump_every = 0;
@@ -55,6 +69,102 @@ struct SoftState {
   std::chrono::steady_clock::time_point next_vblank;
   bool vblank_started = false;
 } g_soft;
+
+uint32_t morton8(uint32_t x, uint32_t y) {
+  return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
+         ((y & 4) << 3);
+}
+
+// One ETC1 texel (x, y in the 4x4 block, y = memory row) of a little-endian block (the GPU's).
+void etc1_texel(uint64_t raw, unsigned x, unsigned y, uint8_t out[3]) {
+  static const int kMod[8][2] = {{2, 8},   {5, 17},  {9, 29},   {13, 42},
+                                 {18, 60}, {24, 80}, {33, 106}, {47, 183}};
+  auto bits = [&](int pos, int n) { return (int)((raw >> pos) & ((1ull << n) - 1)); };
+  auto sbits3 = [&](int pos) {
+    int v = bits(pos, 3);
+    return v >= 4 ? v - 8 : v;
+  };
+  const int texel = 4 * x + y;
+  if (bits(32, 1)) {
+    std::swap(x, y);
+  }
+  int c[3];
+  if (bits(33, 1)) {
+    const int base[3] = {bits(59, 5), bits(51, 5), bits(43, 5)};
+    const int delta[3] = {sbits3(56), sbits3(48), sbits3(40)};
+    for (int i = 0; i < 3; i++) {
+      const int v = base[i] + (x >= 2 ? delta[i] : 0);
+      c[i] = (v << 3) | (v >> 2);
+    }
+  } else {
+    const int shift = x < 2 ? 4 : 0;
+    const int pos[3] = {56, 48, 40};
+    for (int i = 0; i < 3; i++) {
+      const int v = bits(pos[i] + shift, 4);
+      c[i] = (v << 4) | v;
+    }
+  }
+  const int table = x < 2 ? bits(37, 3) : bits(34, 3);
+  int m = kMod[table][(raw >> texel) & 1];
+  if ((raw >> (16 + texel)) & 1) {
+    m = -m;
+  }
+  for (int i = 0; i < 3; i++) {
+    out[i] = (uint8_t)std::clamp(c[i] + m, 0, 255);
+  }
+}
+
+// the first level of a tiled texture (ctr_tex_format) -> RGBA8, top row first
+std::vector<uint8_t> untile(const uint8_t* data, int w, int h, int format) {
+  std::vector<uint8_t> rgba(w * h * 4);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      const uint32_t ty = h - 1 - y;
+      uint8_t* p = &rgba[4 * (x + y * w)];
+      if (format == CTR_TEX_ETC1 || format == CTR_TEX_ETC1A4) {
+        const bool alpha = format == CTR_TEX_ETC1A4;
+        const uint32_t tile = (ty / 8) * (w / 8) + (x / 8);
+        const uint32_t sub = ((x & 7) / 4) + 2 * ((ty & 7) / 4);
+        const uint8_t* b = data + tile * (alpha ? 64 : 32) + sub * (alpha ? 16 : 8);
+        const unsigned fx = x & 3, fy = ty & 3;
+        uint64_t raw;
+        p[3] = 255;
+        if (alpha) {
+          memcpy(&raw, b, 8);
+          const int a = (int)((raw >> (4 * (4 * fx + fy))) & 0xf);
+          p[3] = (uint8_t)((a << 4) | a);
+          b += 8;
+        }
+        memcpy(&raw, b, 8);
+        etc1_texel(raw, fx, fy, p);
+        continue;
+      }
+      const uint32_t idx = ((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8(x & 7, ty & 7);
+      if (format == CTR_TEX_RGBA8) {
+        const uint8_t* t = data + 4 * idx;  // A, B, G, R
+        p[0] = t[3];
+        p[1] = t[2];
+        p[2] = t[1];
+        p[3] = t[0];
+        continue;
+      }
+      uint16_t v;
+      memcpy(&v, data + 2 * idx, 2);
+      if (format == CTR_TEX_RGB565) {
+        p[0] = ((v >> 11) & 31) << 3;
+        p[1] = ((v >> 5) & 63) << 2;
+        p[2] = (v & 31) << 3;
+        p[3] = 255;
+      } else {
+        p[0] = ((v >> 12) & 15) * 17;
+        p[1] = ((v >> 8) & 15) * 17;
+        p[2] = ((v >> 4) & 15) * 17;
+        p[3] = (v & 15) * 17;
+      }
+    }
+  }
+  return rgba;
+}
 
 bool test(uint8_t func, float a, float b) {
   switch (func) {
@@ -116,7 +226,9 @@ void shade_pixel(const ctr_draw_state& st,
       r = tc[0];
       g = tc[1];
       b = tc[2];
-      if (st.tcc) {
+      if (tex_alpha_full) {
+        a = tc[3] / 255.f * a;
+      } else if (st.tcc) {
         a = tc[3];
       }
     } else {
@@ -130,10 +242,7 @@ void shade_pixel(const ctr_draw_state& st,
       }
     }
   } else {
-    // untextured: vertex color 0x80 = full intensity
-    r *= 2.f;
-    g *= 2.f;
-    b *= 2.f;
+    // untextured: the GS outputs the vertex color as it is (see ctr_gpu_citro3d.c)
   }
   if (!test(st.atest, a, (float)st.aref)) {
     return;
@@ -285,6 +394,72 @@ void ctr_gpu_wait_vblank(void) {
   std::this_thread::sleep_until(g_soft.next_vblank);
 }
 
+void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
+                              const float*,
+                              const float*,
+                              int,
+                              const float*,
+                              int,
+                              int,
+                              int) {
+  // (not in the PC software renderer: the envmap shine pass is GPU only)
+}
+
+void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  // (no clipping here: triangles with a point behind the camera are left out; affine texturing)
+  std::vector<ctr_vertex> out;
+  for (int i = 0; i + 2 < count; i += 3) {
+    if (verts[i].w <= 0 || verts[i + 1].w <= 0 || verts[i + 2].w <= 0) {
+      continue;
+    }
+    for (int k = 0; k < 3; k++) {
+      const auto& v = verts[i + k];
+      ctr_vertex o;
+      o.x = v.x / v.w;
+      o.y = v.y / v.w;
+      o.z = (v.z / v.w + 1.f) * 0.5f;
+      o.s = v.s;
+      o.t = v.t;
+      o.r = v.r;
+      o.g = v.g;
+      o.b = v.b;
+      o.a = v.a;
+      out.push_back(o);
+    }
+  }
+  if (!out.empty()) {
+    ctr_gpu_draw(state, out.data(), (int)out.size());
+  }
+}
+
+void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
+  memcpy(out->m, clip, sizeof(out->m));
+}
+
+void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
+                                const ctr_mesh_matrix* matrix,
+                                int mesh,
+                                int first_index,
+                                int index_count) {
+  ctr_gpu_draw_mesh(state, matrix->m, mesh, first_index, index_count);
+}
+
+int ctr_gpu_copy_screen(void) {
+  static int handle = -1;
+  if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||
+      g_soft.textures[handle].w != kW) {
+    std::vector<uint8_t> empty(kW * kH * 4, 0);
+    handle = ctr_gpu_tex_create(kW, kH, empty.data());
+  }
+  g_soft.textures[handle].rgba = g_soft.color;
+  return handle;
+}
+
+void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
+  *s = (x + 1.f) * 0.5f;
+  *t = (1.f - y) * 0.5f;  // soft textures: top row first
+}
+
 int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
   int slot = -1;
   for (size_t i = 0; i < g_soft.textures.size(); i++) {
@@ -319,35 +494,99 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   }
 }
 
-int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int /*size*/) {
-  // untile to RGBA8 (see c3l::tiled_index)
-  std::vector<uint8_t> rgba(w * h * 4);
-  const uint16_t* texels = (const uint16_t*)data;
-  auto morton8 = [](uint32_t x, uint32_t y) {
-    return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
-           ((y & 4) << 3);
-  };
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      uint32_t ty = h - 1 - y;
-      uint32_t idx = ((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8(x & 7, ty & 7);
-      uint16_t v = texels[idx];
-      uint8_t* p = &rgba[4 * (x + y * w)];
-      if (format == 0) {
-        p[0] = ((v >> 11) & 31) << 3;
-        p[1] = ((v >> 5) & 63) << 2;
-        p[2] = (v & 31) << 3;
-        p[3] = 255;
-      } else {
-        p[0] = ((v >> 12) & 15) * 17;
-        p[1] = ((v >> 8) & 15) * 17;
-        p[2] = ((v >> 4) & 15) * 17;
-        p[3] = (v & 15) * 17;
-      }
-    }
+void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
+  g_soft.cur.draws++;
+  for (int q = 0; q < quad_count; q++) {
+    const ctr_vertex* v = verts + 4 * q;
+    const ctr_vertex t0[3] = {v[0], v[1], v[3]};
+    const ctr_vertex t1[3] = {v[3], v[1], v[2]};
+    raster_triangle(*state, t0);
+    raster_triangle(*state, t1);
+    g_soft.cur.triangles += 2;
   }
+}
+
+int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int /*size*/) {
+  auto rgba = untile((const uint8_t*)data, w, h, format);
   return ctr_gpu_tex_create(w, h, rgba.data());
 }
+
+int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
+  return ctr_gpu_tex_create(w, h, rgba);  // (the software renderer samples the first level)
+}
+
+void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
+  if (handle >= 0 && handle < (int)g_soft.textures.size() && g_soft.textures[handle].used) {
+    auto& t = g_soft.textures[handle];
+    t.rgba.assign(rgba, rgba + t.w * t.h * 4);
+  }
+}
+
+unsigned int ctr_gpu_tex_bytes(int w, int h, int format, int levels) {
+  const unsigned bits = format == CTR_TEX_ETC1     ? 4
+                        : format == CTR_TEX_ETC1A4 ? 8
+                        : format == CTR_TEX_RGBA8  ? 32
+                                                   : 16;
+  unsigned total = 0;
+  for (int l = 0; l < levels; l++) {
+    total += (unsigned)((w >> l) * (h >> l)) * bits / 8;
+  }
+  return total;
+}
+
+int ctr_gpu_pool_create(unsigned int bytes) {
+  for (size_t i = 0; i < g_soft.pools.size(); i++) {
+    if (!g_soft.pools[i].used) {
+      g_soft.pools[i].used = true;
+      g_soft.pools[i].data.assign(bytes, 0);
+      g_soft.pools[i].pending.clear();
+      return (int)i;
+    }
+  }
+  g_soft.pools.emplace_back();
+  g_soft.pools.back().used = true;
+  g_soft.pools.back().data.assign(bytes, 0);
+  return (int)g_soft.pools.size() - 1;
+}
+
+void* ctr_gpu_pool_data(int pool) {
+  if (pool < 0 || pool >= (int)g_soft.pools.size() || !g_soft.pools[pool].used) {
+    return nullptr;
+  }
+  return g_soft.pools[pool].data.data();
+}
+
+int ctr_gpu_pool_tex(int pool, unsigned int offset, int w, int h, int format, int levels) {
+  if (pool < 0 || pool >= (int)g_soft.pools.size() || !g_soft.pools[pool].used ||
+      offset + ctr_gpu_tex_bytes(w, h, format, levels) > g_soft.pools[pool].data.size()) {
+    return -1;
+  }
+  // a placeholder until the pool is ready
+  std::vector<uint8_t> blank(w * h * 4, 0);
+  const int handle = ctr_gpu_tex_create(w, h, blank.data());
+  g_soft.pools[pool].pending.push_back({handle, offset, w, h, format, levels});
+  return handle;
+}
+
+void ctr_gpu_pool_ready(int pool) {
+  if (pool < 0 || pool >= (int)g_soft.pools.size() || !g_soft.pools[pool].used) {
+    return;
+  }
+  auto& p = g_soft.pools[pool];
+  for (const auto& t : p.pending) {
+    auto rgba = untile(p.data.data() + t.offset, t.w, t.h, t.format);
+    ctr_gpu_tex_update(t.handle, rgba.data());
+  }
+  p.pending.clear();
+}
+
+void ctr_gpu_pool_delete(int pool) {
+  if (pool >= 0 && pool < (int)g_soft.pools.size()) {
+    g_soft.pools[pool] = SoftPool();
+  }
+}
+
+void ctr_gpu_pool_set_priority(int, int) {}
 
 int ctr_gpu_mesh_create(const void* verts,
                         int vertex_count,
@@ -534,9 +773,18 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out) {
 
 // the software backend has no fog
 void ctr_gpu_set_mesh_fog(const float*, const float*, uint8_t, uint8_t, uint8_t) {}
-void ctr_gpu_set_rgba4_as_rgba8(int) {}
+void ctr_gpu_set_rgba4_as_rgba8(int on) {
+  g_soft.rgba4_as_rgba8 = on;
+}
+int ctr_gpu_rgba4_as_rgba8(void) {
+  return g_soft.rgba4_as_rgba8;
+}
 
 void ctr_gpu_set_vram_textures(int) {}
+void ctr_gpu_set_mip_mode(int) {}
+int ctr_gpu_is_emulator(void) {
+  return 0;
+}
 
 double ctr_gpu_time_ms(void) {
   using namespace std::chrono;

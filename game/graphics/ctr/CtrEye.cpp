@@ -228,6 +228,21 @@ const CtrEyeRenderer::Source* CtrEyeRenderer::source(u64 tex0) {
   s.tex0 = tex0;
   s.ok = m_vram && m_vram->decode_for_cpu(tex0, &s.rgba, &s.w, &s.h) && s.w > 0 && s.h > 0 &&
          (int)s.rgba.size() >= s.w * s.h;
+  if (s.ok) {
+    // update-eyes draws with TEXA ta0 = ta1 = 0x80 (set-display-gs-state-offset): every 16-bit
+    // texel or 16-bit CLUT entry is opaque, whatever its A bit. CtrVram decodes with the game's
+    // usual TEXA (ta0 = 0: A bit clear = transparent), which made parts of eyes see-through.
+    GsTex0 t(tex0);
+    const bool indexed = t.psm() == GsTex0::PSM::PSMT8 || t.psm() == GsTex0::PSM::PSMT4 ||
+                         t.psm() == GsTex0::PSM::PSMT8H || t.psm() == GsTex0::PSM::PSMT4HH ||
+                         t.psm() == GsTex0::PSM::PSMT4HL;
+    const bool texels16 = t.psm() == GsTex0::PSM::PSMCT16 || t.psm() == GsTex0::PSM::PSMCT16S;
+    if (texels16 || (indexed && t.cpsm() != 0)) {
+      for (auto& c : s.rgba) {
+        c = (c & 0xffffffu) | (0x80u << 24);
+      }
+    }
+  }
   m_sources.push_back(std::move(s));
   return m_sources.back().ok ? &m_sources.back() : nullptr;
 }

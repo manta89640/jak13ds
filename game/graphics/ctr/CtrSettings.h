@@ -30,11 +30,28 @@ struct CtrSettings {
   bool merc = true;
   bool sprites = true;
   bool ocean = true;
+  // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
+  // with such particles costs one copy of the screen
+  bool distort = true;
+  // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
+  bool envmap = true;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
-  // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise
-  bool rgba4_as_rgba8 = true;
-  bool vram_textures = false;  // on: textures in VRAM while there is room (Azahar draws VRAM textures as noise)
+  // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
+  // Default (auto): on in the emulator, off on the 3DS.
+  bool rgba4_as_rgba8 = false;
+  // Level textures in VRAM while there is room (the GPU reads VRAM much faster than the main
+  // memory). Default (auto): on on the 3DS, off in the emulator (Azahar draws VRAM textures as
+  // noise).
+  bool vram_textures = true;
+  // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default), 2 trilinear
+  // (blends two levels: smoother, slower).
+  int mipmaps = 1;
+  // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
+  // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
+  bool gpu_profile = false;
+  // running in an emulator (Azahar / Citra), for the auto defaults above
+  bool emulator = false;
 
   std::string summary() const;
 };

@@ -843,6 +843,34 @@
     0
     (none)))
 
+;; 3DS: render-sky-tng's polygon clipping (mips2c) cost ~1.5 ms per frame. The 3DS renderer draws
+;; the same polygons itself (CtrSky, clipped by the GPU): send it the camera, the cloud texture
+;; scroll offsets and where the polygons are (8 qw, see SkyPacket in game/graphics/ctr/CtrSky.cpp).
+(#when TARGET_3DS
+  (defun render-sky-3ds ((arg0 time-of-day-context))
+    (with-dma-buffer-add-bucket ((buf (-> (current-frame) global-buf)) (bucket-id sky-draw))
+      (let ((pkt (the-as dma-packet (-> buf base))))
+        (set! (-> pkt dma) (new 'static 'dma-tag :id (dma-tag-id cnt) :qwc 8))
+        (set! (-> pkt vif0) (new 'static 'vif-tag))
+        (set! (-> pkt vif1) (new 'static 'vif-tag :cmd (vif-cmd pc-port)))
+        (let ((data (the-as (pointer uint128) (&+ pkt 16))))
+          (dotimes (i 4)
+            (set! (-> data i) (-> *math-camera* camera-temp vector i quad)))
+          (set! (-> data 4) (-> *math-camera* hvdf-off quad))
+          (set! (-> data 5) (-> *math-camera* hmge-scale quad))
+          (let ((u (the-as (pointer uint32) (&-> data 6))))
+            (set! (-> u 0) (if *sky-drawn* 1 0))
+            (set! (-> u 1) (if *cloud-drawn* 1 0))
+            (set! (-> u 2) (logior (-> *sky-tng-data* off-s-0) (shl (-> *sky-tng-data* off-t-0) 16)))
+            (set! (-> u 3) (logior (-> *sky-tng-data* off-s-1) (shl (-> *sky-tng-data* off-t-1) 16)))
+            (set! (-> u 4) (the-as uint sky-roof-polygons))
+            (set! (-> u 5) (the-as uint sky-cloud-polygons))
+            (set! (-> u 6) (the-as uint sky-base-polygons))
+            (set! (-> u 7) 0)))
+        (&+! (-> buf base) (* 16 9))))
+    0
+    (none)))
+
 (defun copy-sky-texture ((arg0 dma-buffer) (arg1 adgif-shader) (arg2 float))
   (let ((s5-0 (-> arg0 base)))
     (let ((v1-0 (the int (+ 0.5 (* 128.0 arg2))))

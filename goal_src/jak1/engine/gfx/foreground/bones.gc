@@ -1048,6 +1048,38 @@
 
 (define *ripple-force-generic* #f)
 
+;; 3DS: the death effect (enemies dissolving into sparks). On the PS2 / PC, generic merc draws the
+;; model for death-draw-overlap frames, then only launches the death particles: every frame from
+;; the vertices i = phase (mod death-vertex-skip) of each fragment, the phase going through
+;; 0..skip over the death timer, so every vertex launches one particle. There is no generic merc on
+;; the 3DS: launch the same number of particles per frame (vertices / timer) from random points on
+;; the skeleton's bones instead.
+(#when TARGET_3DS
+  (define-extern merc-death-spawn (function int vector vector none))
+  (defun merc-death-spawn-3ds ((dc draw-control))
+    (let ((pd (the process-drawable (-> dc process)))
+          (geom (-> dc lod-set lod (-> dc cur-lod) geo))
+          (verts 0)
+          (frames (the int (-> dc death-timer-org))))
+      (dotimes (i (the int (-> geom header effect-count)))
+        (+! verts (-> geom effect i dvert-count)))
+      (when (and (> frames 0) (nonzero? (-> pd node-list)) (> (-> pd node-list length) 1))
+        (let ((nodes (-> pd node-list))
+              (pos (new 'stack-no-clear 'vector))
+              (ppos (new 'stack-no-clear 'vector))
+              (zero (new 'stack 'vector)))
+          ;; as many as generic merc would launch this frame (rounded up), at most 32
+          (dotimes (k (min 32 (/ (+ verts frames -1) frames)))
+            (let ((cs (-> nodes data (+ 1 (rand-vu-int-count (+ (-> nodes length) -1))))))
+              (when (nonzero? (-> cs bone))
+                (vector<-cspace! pos cs)
+                ;; somewhere along the bone to its parent
+                (when (and (-> cs parent) (nonzero? (-> cs parent bone)))
+                  (vector<-cspace! ppos (-> cs parent))
+                  (vector-lerp! pos pos ppos (rand-vu)))
+                (merc-death-spawn (the int (-> dc death-effect)) pos zero)))))))
+    (none)))
+
 (defun draw-bones ((arg0 draw-control) (dma-buf dma-buffer) (arg2 float))
   "Main draw function for all bone-related renderers. Will set up merc, generic and shadow.
    and also add the bones to the calculation list."
@@ -1362,7 +1394,22 @@
                 ;; final force to mercneric for ps
                 (when pc-force-mercneric
                   (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 1))
-                  (set! used-mercneric 1))) ;; end effect loop
+                  (set! used-mercneric 1))
+                ;; 3DS: no generic renderer. Effects that would use it (the death effect, ripple
+                ;; queries, envmap fallbacks) are drawn with merc instead of not at all.
+                (#when TARGET_3DS
+                  (when (nonzero? (-> *merc-bucket-info* effect effect-idx use-mercneric))
+                    (set! (-> *merc-bucket-info* effect effect-idx use-mercneric) (the-as uint 0))
+                    (set! (-> *merc-bucket-info* effect effect-idx ignore-alpha) (the-as uint 0))
+                    (set! used-merc 1)))) ;; end effect loop
+              (#when TARGET_3DS
+                (set! used-mercneric 0)
+                ;; death effect: the model is only drawn for its first death-draw-overlap frames
+                ;; (display-triangles in draw-bones-generic-merc), then only the particles remain
+                (when (and (nonzero? (-> arg0 death-timer))
+                           (>= (the-as int (- (-> arg0 death-timer-org) (-> arg0 death-timer)))
+                               (the-as int (-> arg0 death-draw-overlap))))
+                  (set! used-merc 0)))
               ;; draw generic!
               ;; note: this doesn't do the fully draw, there's some other stuff in process-drawable.gc to actually execute.
               (when (nonzero? used-mercneric)
@@ -1397,6 +1444,8 @@
             ;; advance death timer.
             (when (nonzero? (-> arg0 death-timer))
               (when (not (paused?))
+                (#when TARGET_3DS
+                  (merc-death-spawn-3ds arg0))
                 (+! (-> arg0 death-timer) -1)
                 (if (>= (the-as uint 1) (-> arg0 death-timer)) (send-event (-> arg0 process) 'death-end arg0)))))
           (let ((v1-164 (logand (the-as int s2-0) 48)))

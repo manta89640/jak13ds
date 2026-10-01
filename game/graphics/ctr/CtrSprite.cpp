@@ -82,6 +82,33 @@ s32 as_int(float f) {
 u8 color_byte(float f) {
   return (u8)((int)f & 0xff);
 }
+
+// sin and cos of an angle in radians, to ~1e-5: sprite rotations don't need libm's (slow) ones
+void fast_sincos(float a, float* s, float* c) {
+  constexpr float kInvTwoPi = 0.159154943f, kTwoPi = 6.28318531f, kPi = 3.14159265f,
+                  kHalfPi = 1.57079633f;
+  a -= kTwoPi * std::floor(a * kInvTwoPi + 0.5f);  // [-pi, pi]
+  // cos(a) = sin(a + pi/2); both from sin on [-pi/2, pi/2]
+  auto sin_small = [](float x) {
+    const float x2 = x * x;
+    return x * (1.f + x2 * (-1.66666667e-1f +
+                            x2 * (8.33333333e-3f + x2 * (-1.98412698e-4f + x2 * 2.75573192e-6f))));
+  };
+  auto sin_any = [&](float x) {  // x in [-pi, pi]
+    if (x > kHalfPi) {
+      x = kPi - x;
+    } else if (x < -kHalfPi) {
+      x = -kPi - x;
+    }
+    return sin_small(x);
+  };
+  *s = sin_any(a);
+  float b = a + kHalfPi;
+  if (b > kPi) {
+    b -= kTwoPi;
+  }
+  *c = sin_any(b);
+}
 }  // namespace
 
 CtrSpriteRenderer::CtrSpriteRenderer(std::string name, int id, CtrVram* vram)
@@ -126,7 +153,10 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
 
-  skip_distorter(dma, rs);
+  // the distorter first (like Sprite3::render_jak1): it reads the screen as drawn so far
+  if (read_distorter(dma, rs) && ctr_settings().sprites && ctr_settings().distort) {
+    draw_distorter();
+  }
 
   // frame setup: direct data (3 qw), frame data, mscalf, base/offset
   auto direct_setup = dma.read_and_advance();
@@ -207,26 +237,136 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   skip_rest();
 
   if (rs.log_now) {
-    lg::debug("[ctr] sprite: {} 2d, {} hud, {} 3d sprites, {} draws (last 300 frames)",
-              m_stats.sprites_2d, m_stats.sprites_hud, m_stats.sprites_3d, m_stats.draws);
+    lg::debug("[ctr] sprite: {} 2d, {} hud, {} 3d sprites, {} distort, {} draws (last 300 frames)",
+              m_stats.sprites_2d, m_stats.sprites_hud, m_stats.sprites_3d, m_stats.distort,
+              m_stats.draws);
     m_stats = Stats();
   }
 }
 
-void CtrSpriteRenderer::skip_distorter(DmaFollower& dma, CtrRenderState& rs) {
-  // setup (direct, 7 qw), sine table aspect (PC), sine tables, then batches of sprite data, each
-  // ending with a mscalf (see Sprite3::distort_dma)
-  for (int i = 0; i < 3 && dma.current_tag_offset() != rs.next_bucket; i++) {
-    dma.read_and_advance();
+bool CtrSpriteRenderer::read_distorter(DmaFollower& dma, CtrRenderState& rs) {
+  // setup (direct, 7 qw), sine table aspect (PC, 1 qw), sine tables, then batches of sprite data,
+  // each ending with a mscalf (see Sprite3::distort_dma). Everything is read even when something
+  // doesn't look right (then nothing is drawn).
+  m_distort_count = 0;
+  bool ok = true;
+  auto more = [&]() { return dma.current_tag_offset() != rs.next_bucket; };
+  for (int i = 0; i < 3 && more(); i++) {
+    auto t = dma.read_and_advance();
+    if (i == 0) {
+      ok &= t.size_bytes == 7 * 16;
+    } else if (i == 2) {
+      if (t.size_bytes == (int)sizeof(DistortTables)) {
+        memcpy(&m_distort_tables, t.data, sizeof(DistortTables));
+      } else {
+        ok = false;
+      }
+    }
   }
+  if (m_distort_sprites.empty()) {
+    m_distort_sprites.resize(kMaxDistortSprites);
+  }
+  int idx = 0;
+  u32 total = 0;
   while (looks_like_distort_frame_data(dma)) {
     while (looks_like_distort_frame_data(dma)) {
-      dma.read_and_advance();
+      const u32 dest = dma.current_tag_vifcode1().immediate & 0x3ff;
+      auto t = dma.read_and_advance();
+      if (dest == 511) {
+        u32 n;
+        memcpy(&n, t.data, 4);
+        total += n;
+      } else {
+        const int n = t.size_bytes / (int)sizeof(DistortSprite);
+        const int fit = std::max(0, std::min(n, kMaxDistortSprites - idx));
+        memcpy(&m_distort_sprites[idx], t.data, fit * sizeof(DistortSprite));
+        idx += fit;
+      }
     }
     if (dma.current_tag_vifcode0().kind == VifCode::Kind::MSCALF) {
       dma.read_and_advance();
     }
   }
+  m_distort_count = ok ? std::min<int>(idx, (int)total) : 0;
+  return ok;
+}
+
+void CtrSpriteRenderer::draw_distorter() {
+  if (m_distort_count <= 0) {
+    return;
+  }
+  m_distort_verts.clear();
+  const auto& c = m_distort_tables.color;
+  const u8 r = (u8)std::min<u32>(c.x(), 255), g = (u8)std::min<u32>(c.y(), 255),
+           b = (u8)std::min<u32>(c.z(), 255), a = (u8)std::min<u32>(c.w(), 255);
+  constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
+  // GS position + the GS frame texture coordinates of the screen point to show -> vertex
+  auto vert = [&](const math::Vector3f& p, const math::Vector2f& st) {
+    ctr_vertex v;
+    v.x = (p.x() - 2048.f) * kInvX;
+    v.y = (2048.f - p.y()) * kInvY;
+    v.z = std::clamp(p.z() * kInvZ, 0.f, 1.f);
+    // the GS frame texture is 512 x 256 texels from (1792, 2048 - 112): screen x = 2s - 1, and
+    // the 224 visible rows are t * 256 from the top
+    ctr_gpu_screen_uv(st.x() * 2.f - 1.f, 1.f - st.y() * (256.f * kInvY), &v.s, &v.t);
+    v.r = r;
+    v.g = g;
+    v.b = b;
+    v.a = a;
+    return v;
+  };
+  ctr_vertex strip[5 * 11];
+  for (int i = 0; i < m_distort_count && i < 256; i++) {
+    const DistortSprite& sp = m_distort_sprites[i];
+    const u32 slices = sp.flag;
+    if (slices < 3 || slices > 11) {
+      continue;
+    }
+    int e = (int)m_distort_tables.ientry[slices - 3].x() - 352;
+    if (e < 0 || e + 2 * (int)slices + 2 > 128) {
+      continue;
+    }
+    // the triangle strip of the VU program (Sprite3::distort_setup): per slice two points on the
+    // inner circle (undistorted), two on the outer one (texture radius z), and the center
+    const ctr_vertex center = vert(sp.xyz, sp.st);
+    int n = 0;
+    for (u32 k = 0; k < slices; k++) {
+      const math::Vector3f v06 = m_distort_tables.entry[e].xyz();
+      const math::Vector2f v07 = m_distort_tables.entry[e + 1].xy();
+      const math::Vector3f v08 = m_distort_tables.entry[e + 2].xyz();
+      const math::Vector2f v09 = m_distort_tables.entry[e + 3].xy();
+      e += 2;
+      strip[n++] = vert(v06 * sp.rgba.x() + sp.xyz, v07 * sp.rgba.x() + sp.st);
+      strip[n++] = vert(v08 * sp.rgba.x() + sp.xyz, v09 * sp.rgba.x() + sp.st);
+      strip[n++] = vert(v06 * sp.rgba.y() + sp.xyz, v07 * sp.rgba.z() + sp.st);
+      strip[n++] = vert(v08 * sp.rgba.y() + sp.xyz, v09 * sp.rgba.z() + sp.st);
+      strip[n++] = center;
+    }
+    for (int k = 2; k < n; k++) {
+      m_distort_verts.push_back(strip[k - 2]);
+      m_distort_verts.push_back(strip[k - 1]);
+      m_distort_verts.push_back(strip[k]);
+    }
+    m_stats.distort++;
+  }
+  if (m_distort_verts.empty()) {
+    return;
+  }
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  st.tex = ctr_gpu_copy_screen();
+  if (st.tex < 0) {
+    return;
+  }
+  st.tcc = 0;     // the copy's alpha means nothing: alpha from the color (GS: RGB framebuffer)
+  st.filter = 1;  // tex1 mmag
+  st.clamp_s = st.clamp_t = 1;
+  st.blend = CTR_BLEND_ALPHA;
+  st.atest = CTR_TEST_ALWAYS;
+  st.ztest = CTR_TEST_GEQUAL;
+  st.zwrite = 0;
+  ctr_gpu_draw(&st, m_distort_verts.data(), (int)m_distort_verts.size());
+  m_stats.draws++;
 }
 
 bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
@@ -244,8 +384,8 @@ bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
     return false;
   }
   *program = run.vifcode1().immediate;
-  return vec.size_bytes >= (int)(*count * sizeof(VecData)) &&
-         adgif.size_bytes >= (int)(*count * sizeof(AdGif));
+  return vec.size_bytes >= *count * sizeof(VecData) &&
+         adgif.size_bytes >= *count * sizeof(AdGif);
 }
 
 std::vector<ctr_vertex>& CtrSpriteRenderer::bucket_for(const ctr_draw_state& st) {
@@ -273,7 +413,8 @@ void CtrSpriteRenderer::flush() {
   for (size_t i = 0; i < m_bucket_count; i++) {
     auto& b = m_buckets[i];
     if (!b.verts.empty()) {
-      ctr_gpu_draw(&b.state, b.verts.data(), (int)b.verts.size());
+      // 4 vertices per sprite (ctr_gpu_draw_quads makes the two triangles)
+      ctr_gpu_draw_quads(&b.state, b.verts.data(), (int)(b.verts.size() / 4));
       m_stats.draws++;
     }
     b.verts.clear();
@@ -371,8 +512,10 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         }
       }
       const float angle = v.flag_rot_sy.z() * m_deg_to_rad;
-      const float s = angle == 0.f ? 0.f : std::sin(angle);
-      const float c = angle == 0.f ? 1.f : std::cos(angle);
+      float s = 0.f, c = 1.f;
+      if (angle != 0.f) {
+        fast_sincos(angle, &s, &c);
+      }
       const math::Vector4f r12 = (m_basis_x * c - m_basis_y * s) * scale_x;
       const math::Vector4f r13 = (m_basis_x * s + m_basis_y * c) * scale_y;
       for (int k = 0; k < 4; k++) {
@@ -458,26 +601,26 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       m_last_verts = &bucket_for(st);
     }
 
-    ctr_vertex out[4];
-    for (int k = 0; k < 4; k++) {
-      // GS screen -> ctr_gpu coordinates (see CtrDirect::handle_xyz)
-      out[k].x = (corners[k].x() - 2048.f) / 256.f;
-      out[k].y = -(corners[k].y() - 2048.f) / 112.f;
-      out[k].z = std::clamp(corners[k].z() / 16777215.f, 0.f, 1.f);
-      out[k].s = m_st_array[k].x();
-      out[k].t = m_st_array[k].y();
-      out[k].r = color_byte(v.rgba.x());
-      out[k].g = color_byte(v.rgba.y());
-      out[k].b = color_byte(v.rgba.z());
-      out[k].a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
-    }
-    // vertex k is corner k of a strip 0, 1, 3, 2 (Sprite3::do_block_common)
-    static const int kTri[6] = {0, 1, 3, 3, 1, 2};
+    // vertex k is corner k of a strip 0, 1, 3, 2 (Sprite3::do_block_common): the order of
+    // ctr_gpu_draw_quads
     auto& verts = *m_last_verts;
     const size_t n = verts.size();
-    verts.resize(n + 6);
-    for (int k = 0; k < 6; k++) {
-      verts[n + k] = out[kTri[k]];
+    verts.resize(n + 4);
+    ctr_vertex* out = &verts[n];
+    const u8 r = color_byte(v.rgba.x()), g = color_byte(v.rgba.y()), b = color_byte(v.rgba.z());
+    const u8 a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
+    constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
+    for (int k = 0; k < 4; k++) {
+      // GS screen -> ctr_gpu coordinates (see CtrDirect::handle_xyz)
+      out[k].x = (corners[k].x() - 2048.f) * kInvX;
+      out[k].y = (2048.f - corners[k].y()) * kInvY;
+      out[k].z = std::clamp(corners[k].z() * kInvZ, 0.f, 1.f);
+      out[k].s = m_st_array[k].x();
+      out[k].t = m_st_array[k].y();
+      out[k].r = r;
+      out[k].g = g;
+      out[k].b = b;
+      out[k].a = a;
     }
   }
 }

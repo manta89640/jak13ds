@@ -43,7 +43,18 @@ struct CtrLevelData {
   std::vector<c3l::Chunk> chunks;
   std::vector<c3l::Draw> draws;
   std::vector<ctr_draw_state> draw_states;  // per draw
+  // per draw: sort key for the draws whose order doesn't matter (texture, then GPU state), and
+  // whether the order matters (blending, or no depth write: decals); see CtrTfragRenderer
+  std::vector<u32> draw_sort_keys;
+  std::vector<u8> draw_ordered;
+  // made at load: the draws in drawing order, so a frame needs no sort. sorted_draws: the draws
+  // whose order doesn't matter by (sort key, chunk, draw), then ordered_draws in chunk order.
+  // draw_chunk: the chunk of each draw.
+  std::vector<u32> sorted_draws;
+  std::vector<u32> ordered_draws;
+  std::vector<u32> draw_chunk;
   std::vector<int> textures;  // ctr_gpu handles
+  int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
   std::vector<int> meshes;    // one per chunk
   std::vector<c3l::MercBlercVertex> blerc_verts;
   std::vector<c3l::MercBlercTarget> blerc_targets;
@@ -162,4 +173,12 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;
+  // this frame's visible chunks and draws (kept to avoid allocations)
+  struct VisibleChunk {
+    u32 chunk;
+    float clip[16];
+    ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
+  };
+  std::vector<VisibleChunk> m_visible;
+  std::vector<int> m_visible_slot;  // per chunk: index in m_visible, -1: not drawn
 };

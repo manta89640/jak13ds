@@ -26,6 +26,7 @@ extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrSprite.h"
@@ -41,6 +42,23 @@ extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.
 namespace {
 std::string g_shot_dir;
 int g_shot_every = 0;
+
+// render.ini gpu_profile: what each mode leaves out (bucket renderer names)
+struct ProfileMode {
+  const char* label;
+  const char* skip[3];
+};
+const ProfileMode kProfileModes[] = {
+    {"all", {nullptr, nullptr, nullptr}},
+    {"level", {"l0-tfrag", "l1-tfrag", nullptr}},
+    {"merc", {"merc", "eyes", nullptr}},
+    {"sprites", {"sprite", nullptr, nullptr}},
+    {"ocean", {"ocean", nullptr, nullptr}},
+    {"direct", {"sky", "debug", "subtitle"}},
+};
+constexpr int kProfileModeCount = sizeof(kProfileModes) / sizeof(kProfileModes[0]);
+constexpr double kProfileModeMs = 2500.0;  // per mode
+constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
 }  // namespace
 
 namespace ctr_gfx {
@@ -95,7 +113,10 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   const int triangles_before = m_direct->stats().triangles;
   while (dma.current_tag_offset() != rs.next_bucket) {
     auto data = dma.read_and_advance();
-    if (data.size_bytes) {
+    if (m_sky && data.vifcode1().kind == VifCode::Kind::PC_PORT &&
+        data.size_bytes == CtrSky::kPacketBytes) {
+      m_sky->draw(data.data, rs);
+    } else if (data.size_bytes) {
       m_direct->render_vif(data.vif0(), data.vif1(), data.data, data.size_bytes);
     }
     if (dma.current_tag_offset() == rs.default_regs_buffer) {
@@ -161,13 +182,20 @@ CtrRenderer::CtrRenderer()
   // the ocean (after the level and merc, like the PS2's ocean-near)
   set(BucketId::OCEAN_NEAR,
       std::make_unique<CtrOceanRenderer>("ocean", (int)BucketId::OCEAN_NEAR));
-  // the background when there is no sky (the ND logo, interiors): a full screen gradient in the
-  // time of day's erase color. With a sky, the clear color (the fog color) stands in for it.
+  // the sky (CtrSky: render-sky-3ds's packet), or the background when there is no sky (the ND
+  // logo, interiors): a full screen gradient in the time of day's erase color. The sky textures
+  // are blended in the tfrag-trans/sky-blend buckets.
   {
     auto sky = std::make_unique<CtrDirectBucketRenderer>("sky", (int)BucketId::SKY_DRAW,
                                                          m_vram.get(), false);
     m_sky = sky.get();
+    m_sky_draw = std::make_unique<CtrSky>();
+    sky->set_sky(m_sky_draw.get());
     set(BucketId::SKY_DRAW, std::move(sky));
+    for (auto id : {BucketId::TFRAG_TRANS0_AND_SKY_BLEND_LEVEL0,
+                    BucketId::TFRAG_TRANS1_AND_SKY_BLEND_LEVEL1}) {
+      set(id, std::make_unique<CtrSkyBlendRenderer>("sky-blend", (int)id, m_sky_draw.get()));
+    }
   }
   set(BucketId::SPRITE,
       std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));
@@ -251,7 +279,14 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.gpu_ms += gs.gpu_ms;
   m_timing.gpu_draw_ms += gs.draw_ms;
   m_timing.splits += gs.cmd_splits;
+  m_timing.cmd_kb += gs.cmd_bytes / 1024.0;
+  m_timing.dropped += gs.dropped_draws;
+  m_timing.tex_binds += gs.tex_binds;
+  m_timing.draws += gs.draws;
   m_timing.frames++;
+  if (ctr_settings().gpu_profile) {
+    profile_frame(gs.draw_ms);
+  }
   if (m_rs.log_now) {
     const auto& vs = m_vram->stats();
     lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (written {}), relocates skipped "
@@ -264,10 +299,19 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       const double n = m_timing.frames;
       lg::info(
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
-          "(cpu total {:.2f}); gpu {:.2f} (draw {:.2f}); cmdbuf splits {:.1f}",
+          "(cpu total {:.2f}); gpu {:.2f} (draw {:.2f}); {:.0f} draws, {:.0f} texture binds, "
+          "{:.0f} KB commands{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n, m_timing.gpu_ms / n,
-          m_timing.gpu_draw_ms / n, m_timing.splits / n);
+          m_timing.gpu_draw_ms / n, m_timing.draws / n, m_timing.tex_binds / n,
+          m_timing.cmd_kb / n,
+          m_timing.dropped ? fmt::format(", {} draws DROPPED (command buffer full)",
+                                         m_timing.dropped)
+                           : std::string());
+      lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB, "
+               "VRAM free {} KB",
+               gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
+               gs.linear_free / 1024, gs.vram_free / 1024);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
@@ -313,6 +357,47 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
   }
 }
 
+bool CtrRenderer::profile_skips(const std::string& name) const {
+  for (const char* n : kProfileModes[m_profile_mode].skip) {
+    if (n && name == n) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void CtrRenderer::profile_frame(double gpu_draw_ms) {
+  const double now = ctr_gpu_time_ms();
+  if (m_profile_ms.empty()) {
+    m_profile_ms.assign(kProfileModeCount, -1.0);
+    m_profile_start = now;
+  }
+  // the GPU time of the frame before this one: not the first frames of a mode
+  if (++m_profile_frames > kProfileSettleFrames) {
+    m_profile_sum += gpu_draw_ms;
+    m_profile_count++;
+  }
+  if (now - m_profile_start < kProfileModeMs) {
+    return;
+  }
+  m_profile_ms[m_profile_mode] = m_profile_count ? m_profile_sum / m_profile_count : -1.0;
+  m_profile_mode = (m_profile_mode + 1) % kProfileModeCount;
+  m_profile_start = now;
+  m_profile_frames = 0;
+  m_profile_sum = 0;
+  m_profile_count = 0;
+  if (m_profile_mode == 0) {
+    // a whole cycle: how much GPU time each part takes (all - without it)
+    std::string line = fmt::format("[ctr] gpu profile: all {:.1f} ms", m_profile_ms[0]);
+    for (int i = 1; i < kProfileModeCount; i++) {
+      if (m_profile_ms[i] >= 0 && m_profile_ms[0] >= 0) {
+        line += fmt::format(", {} {:.1f}", kProfileModes[i].label, m_profile_ms[0] - m_profile_ms[i]);
+      }
+    }
+    lg::info("{}", line);
+  }
+}
+
 void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   // same structure as OpenGLRenderer::dispatch_buckets_jak1
   m_rs.buckets_base = dma.current_tag_offset() + 16;  // offset by 1 qw for the initial call
@@ -337,9 +422,16 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   if (m_bucket_ms.size() != m_buckets.size()) {
     m_bucket_ms.assign(m_buckets.size(), 0.0);
   }
+  const bool profiling = m_profile_mode > 0;
   for (size_t bucket_id = 0; bucket_id < m_buckets.size(); bucket_id++) {
     const double tb = ctr_gpu_time_ms();
-    m_buckets[bucket_id]->render(dma, m_rs);
+    if (profiling && profile_skips(m_buckets[bucket_id]->name())) {
+      while (dma.current_tag_offset() != m_rs.next_bucket) {
+        dma.read_and_advance();
+      }
+    } else {
+      m_buckets[bucket_id]->render(dma, m_rs);
+    }
     m_bucket_ms[bucket_id] += ctr_gpu_time_ms() - tb;
     if (dma.current_tag_offset() != m_rs.next_bucket) {
       lg::error("[ctr] bucket {} ({}) did not end at the next bucket", bucket_id,
@@ -411,6 +503,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
 #endif
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
+  ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   g_ctr = std::make_unique<CtrRenderer>();
   // Both load on the loader thread while the game boots. The title level (the Naughty Dog logo,
   // the title screen) is the first one the game wants; loaded only when the game has it, the logo
