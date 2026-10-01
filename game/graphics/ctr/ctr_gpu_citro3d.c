@@ -111,6 +111,8 @@ static struct {
   int last_skin_valid;
   float last_skin_clip[16];
   float last_skin_lights[28];
+  int last_skin_palette_count;
+  float last_skin_bones[CTR_MAX_PALETTE * 12];
   C3D_Mtx gl_to_pica;
   MeshSlot meshes[MAX_MESHES];
   int pending_mesh_delete[MAX_MESHES];
@@ -1492,15 +1494,22 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;
   }
-  for (int row = 0; row < 3; row++) {
-    C3D_FVec* dst = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_rows[row], palette_count);
-    for (int p = 0; p < palette_count; p++) {
-      const float* src = bones + 12 * p + 4 * row;
-      dst[p].x = src[0];
-      dst[p].y = src[1];
-      dst[p].z = src[2];
-      dst[p].w = src[3];
+  /* bones: the draws of a model with at most CTR_MAX_PALETTE bones all use the same palette */
+  const size_t bone_bytes = sizeof(float) * 12 * (size_t)palette_count;
+  if (!g.last_skin_valid || g.last_skin_palette_count != palette_count ||
+      memcmp(g.last_skin_bones, bones, bone_bytes)) {
+    for (int row = 0; row < 3; row++) {
+      C3D_FVec* dst = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_rows[row], palette_count);
+      for (int p = 0; p < palette_count; p++) {
+        const float* src = bones + 12 * p + 4 * row;
+        dst[p].x = src[0];
+        dst[p].y = src[1];
+        dst[p].z = src[2];
+        dst[p].w = src[3];
+      }
     }
+    g.last_skin_palette_count = palette_count;
+    memcpy(g.last_skin_bones, bones, bone_bytes);
   }
   if (!same_lights) {
     C3D_FVec* lv = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_lights, 7);
