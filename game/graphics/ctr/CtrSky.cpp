@@ -238,8 +238,11 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
       ctr_gpu_draw_clip(&st, tris.data(), (int)tris.size());
       m_stats.draws++;
     }
-    // below the horizon: 4 flat triangles in the erase color (giftag-base), in front of the sky
-    if (const SkyVertex* base = verts_at(p.base, 12)) {
+    // below the horizon: 4 flat triangles in the erase color (giftag-base), in front of the sky.
+    // (AI-assisted) Not drawn: on the PS2 the far ocean covers them; the 3DS ocean and level fade
+    // into the fog color by the draw distance and nothing covers this dark blue there (a dark band
+    // at the horizon). The frame is cleared to the fog color instead.
+    if (const SkyVertex* base = false ? verts_at(p.base, 12) : nullptr) {
       tris.clear();
       for (int i = 0; i < 12; i++) {
         tris.push_back(vert(base[i], 0.f, 0.f, 256.f, false));
