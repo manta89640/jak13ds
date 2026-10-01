@@ -115,6 +115,7 @@ class CtrRenderer {
 
  private:
   void dispatch_buckets_jak1(DmaFollower dma);
+  void draw_pmode_fade();
   std::unique_ptr<CtrVram> m_vram;
   std::unique_ptr<CtrLevels> m_levels;
   std::vector<std::unique_ptr<CtrBucketRenderer>> m_buckets;
