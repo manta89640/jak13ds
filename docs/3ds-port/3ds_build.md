@@ -68,6 +68,13 @@ of GPU memory, plus buffers.
 
 ### If the CIA stays on the launch screen
 
+Found on hardware: the CIA settings listed `0004013000001202` (pm, part of the FIRM, not a NAND
+title) as a dependency module. The system loads an app's dependencies when it starts it and kills
+the app when one fails, so every CIA (game and boot tests) stayed on the launch screen with no
+process in Rosalina's process list and no file written. Azahar doesn't load dependencies, so it ran
+them anyway. The dependency list is now buildtools' template.rsf's (the same as FBI's). If a CIA
+still doesn't start:
+
 Look at `sdmc:/3ds/jak1/boot_cia.txt`: one line per boot step, the last one is where it stopped
 (`0 services` without `0 APT`: stuck in the HOME Menu handshake). The file is the first thing the
 game writes. If there is none at all, the title never ran the game's code: find out why with the
