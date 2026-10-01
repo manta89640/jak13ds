@@ -139,6 +139,7 @@ static struct {
   int pending_staging_count;
   int vram_textures;
   int vram_copy_failures;
+  int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
   char screenshot_path[256];
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
@@ -413,6 +414,7 @@ int ctr_gpu_init(void) {
   for (int i = 0; i < MAX_TEXTURES; i++) {
     g.textures[i].pool = -1;
   }
+  g.screen_tex = -1;
   setup_projection();
   use_program(PROG_BASIC);
   C3D_CullFace(GPU_CULL_NONE);
@@ -1259,6 +1261,52 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
 
 static void apply_state(const ctr_draw_state* st, int mesh) {
   apply_state_tint(st, mesh, 0xffffffff);
+}
+
+/* ---------------- the screen as a texture ---------------- */
+
+int ctr_gpu_copy_screen(void) {
+  if (!g.ready || !g.in_frame) {
+    return -1;
+  }
+  if (g.screen_tex < 0) {
+    /* 256x512 RGBA8 in linear memory (512 KB, made once): the 240x400 color buffer fits, with the
+     * same tiled layout (see write_screenshot) */
+    const int slot = reserve_tex_slot();
+    if (slot < 0) {
+      return -1;
+    }
+    TexSlot* t = &g.textures[slot];
+    ctr_linear_lock();
+    const bool ok = C3D_TexInit(&t->tex, 256, 512, GPU_RGBA8);
+    ctr_linear_unlock();
+    if (!ok) {
+      release_tex_slot(slot);
+      return -1;
+    }
+    t->pool = -1;
+    t->levels = 1;
+    ctr_linear_lock();
+    t->used = 1;
+    ctr_linear_unlock();
+    g.screen_tex = slot;
+  }
+  /* One GX copy after the draws so far (C3D_SyncTextureCopy splits the command list, which flushes
+   * the framebuffer): 50 rows of 8x8 tiles, 30 tiles (7680 bytes) each in the color buffer, 32 in
+   * the texture (a 512 byte gap). In 16 byte units. */
+  C3D_SyncTextureCopy((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(7680 / 16, 0),
+                      (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(7680 / 16, 512 / 16),
+                      7680 * 50, 8);
+  /* the GPU's texture cache may hold the old texels */
+  g.bound_tex = NULL;
+  return g.screen_tex;
+}
+
+void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
+  /* color buffer column = screen y from the bottom (240), row = screen x from the left (400);
+   * texture s along the columns (256), t along the rows (512), t = 0 at the first row */
+  *s = (y + 1.0f) * 0.5f * (240.0f / 256.0f);
+  *t = (x + 1.0f) * 0.5f * (400.0f / 512.0f);
 }
 
 /* ---------------- static meshes ---------------- */

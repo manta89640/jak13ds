@@ -89,6 +89,14 @@ void ctr_gpu_tex_delete(int handle);
 
 /* Draw a triangle list. */
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count);
+/* The screen as a texture, for effects that read what is already drawn (the sprite distorter):
+ * copies the frame drawn so far into a texture (one GPU copy of the color buffer) and returns its
+ * handle, -1 if not available. Valid until the end of the frame; copy again after more draws.
+ * ctr_gpu_screen_uv: the texture coordinates of the screen point at ctr_gpu coordinates (x, y)
+ * (like ctr_vertex: x, y in [-1, 1], y up). Use it with tcc = 0 (the copy's alpha is meaningless). */
+int ctr_gpu_copy_screen(void);
+void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
+
 /* Draw quads: 4 vertices each, triangles (0, 1, 3) and (3, 1, 2) (a strip in the order 0 1 3 2).
  * A third fewer vertices than ctr_gpu_draw for sprites. */
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count);

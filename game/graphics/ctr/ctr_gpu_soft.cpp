@@ -397,6 +397,22 @@ void ctr_gpu_wait_vblank(void) {
   std::this_thread::sleep_until(g_soft.next_vblank);
 }
 
+int ctr_gpu_copy_screen(void) {
+  static int handle = -1;
+  if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||
+      g_soft.textures[handle].w != kW) {
+    std::vector<uint8_t> empty(kW * kH * 4, 0);
+    handle = ctr_gpu_tex_create(kW, kH, empty.data());
+  }
+  g_soft.textures[handle].rgba = g_soft.color;
+  return handle;
+}
+
+void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
+  *s = (x + 1.f) * 0.5f;
+  *t = (1.f - y) * 0.5f;  // soft textures: top row first
+}
+
 int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
   int slot = -1;
   for (size_t i = 0; i < g_soft.textures.size(); i++) {
