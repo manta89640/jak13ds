@@ -552,6 +552,20 @@ static void flush_vbuf(void) {
   }
 }
 
+/* (AI-assisted) C3D_SyncTextureCopy in a frame splits the command list with C3D_FrameSplit(0): that
+ * part of the command list is NOT flushed from the CPU cache. C3D_FrameEnd(0) used to flush the
+ * whole linear heap, which covered it; ctr_gpu_frame_end only flushes the last part
+ * (GX_CMDLIST_FLUSH), so the GPU could run stale command words of the earlier part (wrong blend
+ * and texture state, broken draws) in every frame with a copy (the distorter's screen copy, a
+ * texture pool moving to VRAM). Split here with the flush first; C3D_SyncTextureCopy's own split
+ * then has nothing left to send. */
+static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
+  if (g.in_frame) {
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+  }
+  C3D_SyncTextureCopy(in, indim, out, outdim, size, flags);
+}
+
 void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
@@ -888,7 +902,7 @@ static void update_pool_residency(void) {
       continue;
     }
     /* one GPU copy of the whole pool (in a frame: queued, runs before the draws) */
-    C3D_SyncTextureCopy((u32*)p->linear, 0, (u32*)v, 0, p->bytes, 8);
+    sync_texture_copy((u32*)p->linear, 0, (u32*)v, 0, p->bytes, 8);
     p->vram = v;
     pool_repoint(best);
     copies++;
@@ -925,7 +939,7 @@ static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
     return 1;
   }
   GSPGPU_FlushDataCache(buf, tex->size);
-  C3D_SyncTextureCopy((u32*)buf, 0, (u32*)tex->data, 0, tex->size, 8);
+  sync_texture_copy((u32*)buf, 0, (u32*)tex->data, 0, tex->size, 8);
   /* check that the copy landed (VRAM is readable by the CPU); if not, use linear memory */
   int ok = memcmp(tex->data, buf, tex->size) == 0;
   if (!ok) {
@@ -1351,7 +1365,7 @@ int ctr_gpu_copy_screen(void) {
   /* One GX copy after the draws so far (C3D_SyncTextureCopy splits the command list, which flushes
    * the framebuffer): 50 rows of 8x8 tiles, 30 tiles (7680 bytes) each in the color buffer, 32 in
    * the texture (a 512 byte gap). In 16 byte units. */
-  C3D_SyncTextureCopy((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(7680 / 16, 0),
+  sync_texture_copy((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(7680 / 16, 0),
                       (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(7680 / 16, 512 / 16),
                       7680 * 50, 8);
   /* the GPU's texture cache may hold the old texels */
