@@ -94,6 +94,9 @@ class CtrLevels {
   void process_pending_loads(u64 frame);
   /*! Levels the game wants (set_levels): others are unloaded. */
   void set_wanted(const std::vector<std::string>& names);
+  /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
+   * nothing to wait for (any thread). The game waits for this before a level starts. */
+  bool ready(const std::string& name);
 
  private:
   enum class LoadResult { LOADED, MISSING, FAILED, CANCELLED };
