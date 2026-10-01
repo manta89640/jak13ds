@@ -537,6 +537,9 @@ every platform:
   directly while their symbols hold them, and through the symbol after a GOAL redefinition.
   (A call from a native to compiled GOAL code went through `goalc_call_goal8` with 8 arguments,
   the vectors on the stack and a second call to `pc-port-raw-ray-sphere-implementation`.)
+- GOAL code calls these four and `cspace<-parented-transformq-joint!` (every joint, every frame)
+  without the adapter thunk the other natives go through (8 arguments copied, a perf section,
+  stack scratch space): `MIPS2C_NATIVE_IMPL_GOAL` registers a direct entry, `native_as_goal`.
 
 Still mips2c: the renderers' functions (bones, merc, generic, tie, tfrag, shadow, sky, ocean
 drawing, ripple, time-of-day colors, draw-string, textures) and `calc-animation-from-spr` (never
@@ -606,21 +609,23 @@ arguments the callee uses and the process pointer) and the VU0 random generator.
 
 ARM instructions per call on the tests' inputs (`run.sh bench`: the functions' own code, not the
 GOAL functions they call; ARMv6K, -O2 for mips2c and -O3 for the natives like the 3DS build).
-(`__pc-upload-collide-frag` is the same C++ in both.)
+(`__pc-upload-collide-frag` is the same C++ in both.) Rows marked * include the GOAL collision
+helpers that have native versions: goalc's C code on the mips2c side (the call itself not
+counted), the inlined natives on the native side. The four GOAL functions are against goalc's C.
 
 | function | mips2c | native | ratio |
 |---|---:|---:|---:|
-| `moving-sphere-triangle-intersect` | 1369 | 340 | 4.0x |
-| `collide-do-primitives` | 1171 | 522 | 2.2x |
-| `(method 9 collide-cache-prim)` | 20336 | 5063 | 4.0x |
+| `moving-sphere-triangle-intersect` * | 1992 | 533 | 3.7x |
+| `collide-do-primitives` * | 2213 | 911 | 2.4x |
+| `(method 9 collide-cache-prim)` * | 22709 | 5539 | 4.1x |
 | `(method 26 collide-cache)` | 11725 | 2772 | 4.2x |
 | `(method 29 collide-cache)` | 15952 | 2551 | 6.3x |
 | `(method 27 collide-cache)` | 27830 | 5337 | 5.2x |
 | `(method 32 collide-cache)` | 30038 | 2584 | 11.6x |
 | `(method 28 collide-cache)` | 11317 | 2636 | 4.3x |
 | `(method 30 collide-cache)` | 9413 | 581 | 16.2x |
-| `(method 10 collide-cache-prim)` | 1225 | 71 | 17.2x |
-| `(method 9 collide-puss-work)` | 10123 | 1884 | 5.4x |
+| `(method 10 collide-cache-prim)` * | 1877 | 227 | 8.3x |
+| `(method 9 collide-puss-work)` * | 12150 | 2714 | 4.5x |
 | `(method 10 collide-puss-work)` | 2587 | 126 | 20.5x |
 | `(method 12 collide-shape-prim-mesh)` | 17222 | 2341 | 7.4x |
 | `(method 13 collide-shape-prim-mesh)` | 19617 | 2598 | 7.6x |
@@ -628,8 +633,8 @@ GOAL functions they call; ARMv6K, -O2 for mips2c and -O3 for the natives like th
 | `cspace<-parented-transformq-joint!` | 2220 | 266 | 8.4x |
 | `collide-probe-node` | 3731 | 444 | 8.4x |
 | `collide-probe-instance-tie` | 4510 | 441 | 10.2x |
-| `(method 11 collide-mesh)` | 4282 | 914 | 4.7x |
-| `(method 12 collide-mesh)` | 2424 | 519 | 4.7x |
+| `(method 11 collide-mesh)` * | 7181 | 2356 | 3.0x |
+| `(method 12 collide-mesh)` * | 3850 | 1223 | 3.1x |
 | `(method 14 collide-mesh)` | 5804 | 1165 | 5.0x |
 | `(method 15 collide-mesh)` | 12513 | 2073 | 6.0x |
 | `(method 16 collide-edge-work)` | 7723 | 1066 | 7.2x |
@@ -641,3 +646,7 @@ GOAL functions they call; ARMv6K, -O2 for mips2c and -O3 for the natives like th
 | `ocean-interp-wave` | 60782 | 12192 | 5.0x |
 | `particle-adgif` | 803 | 342 | 2.3x |
 | `sp-launch-particles-var` | 2760 | 1297 | 2.1x |
+| `ray-sphere-intersect` (goalc) | 91 | 47 | 1.9x |
+| `ray-cylinder-intersect` (goalc) | 106 | 73 | 1.5x |
+| `moving-sphere-sphere-intersect` (goalc) | 257 | 174 | 1.5x |
+| `closest-pt-in-triangle` (goalc) | 200 | 175 | 1.1x |
