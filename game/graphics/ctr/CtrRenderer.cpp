@@ -41,6 +41,9 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/kernel/common/kscheme.h"
 #include "game/runtime.h"
 
+// (AI-assisted) PMODE alpha from the game thread (ctr_set_pmode_alp), 1 = no fade
+static std::atomic<float> g_pmode_alp{1.f};
+
 namespace {
 std::string g_shot_dir;
 int g_shot_every = 0;
@@ -267,6 +270,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     ctr_gpu_request_screenshot(path.c_str());
   }
   dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
+  draw_pmode_fade();
   const double t2 = ctr_gpu_time_ms();
   ctr_gpu_frame_end();
   const double t3 = ctr_gpu_time_ms();
@@ -395,6 +399,35 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
     }
     lg::info("{}", line);
   }
+}
+
+// (AI-assisted) The PS2 blends the frame with black by PMODE alpha (the PC renderer multiplies
+// the frame by it): the game's fades and blackouts, e.g. at boot before the logo and while a level
+// loads. Drawn last, a black screen-sized quad with alpha 1 - alp.
+void CtrRenderer::draw_pmode_fade() {
+  const float alp = std::clamp(g_pmode_alp.load(std::memory_order_relaxed), 0.f, 1.f);
+  if (alp >= 0.999f) {
+    return;
+  }
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  st.tex = -1;
+  st.blend = CTR_BLEND_ALPHA;
+  st.atest = CTR_TEST_ALWAYS;
+  st.ztest = CTR_TEST_ALWAYS;
+  st.zwrite = 0;
+  // untextured alpha: 0x80 = 1 (the texture stage doubles it)
+  const u8 a = (u8)std::min(128.f, (1.f - alp) * 128.f + 0.5f);
+  ctr_vertex v[6];
+  const float xy[6][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, -1}, {1, 1}, {-1, 1}};
+  for (int i = 0; i < 6; i++) {
+    memset(&v[i], 0, sizeof(v[i]));
+    v[i].x = xy[i][0];
+    v[i].y = xy[i][1];
+    v[i].z = 1.f;
+    v[i].a = a;
+  }
+  ctr_gpu_draw(&st, v, 6);
 }
 
 void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
@@ -640,7 +673,11 @@ void ctr_set_active_levels(const std::vector<std::string>&) {}
 void ctr_force_reload_all() {}
 void ctr_force_reload_level(const std::string&) {}
 void ctr_force_reload_common() {}
-void ctr_set_pmode_alp(float) {}
+// (AI-assisted) the PS2's PMODE alpha (screen fades and blackouts at boot and level loads): the
+// render thread darkens the frame with it (see CtrRenderer::render_frame)
+void ctr_set_pmode_alp(float alp) {
+  g_pmode_alp.store(alp, std::memory_order_relaxed);
+}
 }  // namespace
 
 // (AI-assisted) The game waits for this before a level starts (level-update-after-load, TARGET_3DS):
