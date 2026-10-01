@@ -53,10 +53,10 @@ void rpc_poll(int channel, bool busy);
 //! reported once a second with the frame stats (top sections by ms per frame, with the number of
 //! times they ran per frame).
 //! Off by default (the timing costs time too, see docs/3ds-port/performance.md): enabled by the
-//! flag file sdmc:/3ds/jak1/perf_sections on the 3DS, OPENGOAL_PERF_SECTIONS=1 on PC.
+//! config.ini perf_sections = on on the 3DS, OPENGOAL_PERF_SECTIONS=1 on PC.
 extern bool g_sections_enabled;
 void init_sections();
-//! 3DS: without the flag file, one report window in kSectionSampleEvery is timed by section (the
+//! 3DS: without perf_sections, one report window in kSectionSampleEvery is timed by section (the
 //! hook turns the GOAL side's *pc-prof-on* on and off), so hardware logs always have a breakdown.
 void set_sections_hook(void (*hook)(bool on));
 void section_begin(const char* name);

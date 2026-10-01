@@ -100,11 +100,11 @@ bool natives_disabled() {
 
 #ifdef __3DS__
 /*!
- * The flag file sdmc:/3ds/jak1/mips2c_native_off makes the 3DS run the mips2c versions instead of
+ * config.ini mips2c_native_off = all (or names) makes the 3DS run the mips2c versions instead of
  * the natives, to check on hardware whether a native changes something. Empty: all of them.
  * Otherwise the names of the functions to turn off, one per line. (A native that another native
  * calls directly, see "native_stub_slot", still runs there unless its caller is off too.)
- * Returns null without the flag file.
+ * Returns null when config.ini has no mips2c_native_off.
  */
 const std::vector<std::string>* native_off_list() {
   static bool read = false;
@@ -134,30 +134,13 @@ const std::vector<std::string>* native_off_list() {
         }
       }
     }
-#endif
-    if (FILE* f = exists ? nullptr : fopen("sdmc:/3ds/jak1/mips2c_native_off", "rb")) {
-      exists = true;
-      char line[256];
-      while (fgets(line, sizeof(line), f)) {
-        std::string name(line);
-        while (!name.empty() && (name.back() == '\n' || name.back() == '\r' ||
-                                 name.back() == ' ' || name.back() == '\t')) {
-          name.pop_back();
-        }
-        const size_t start = name.find_first_not_of(" \t");
-        if (start != std::string::npos) {
-          names.push_back(name.substr(start));
-        }
-      }
-      fclose(f);
-      if (names.empty()) {
-        lg::warn("mips2c: native functions off (flag file mips2c_native_off): mips2c versions");
-      } else {
-        for (const auto& n : names) {
-          lg::warn("mips2c: native {} off (flag file mips2c_native_off): mips2c version", n);
-        }
-      }
+    if (exists && names.empty()) {
+      lg::warn("mips2c: native functions off (config.ini mips2c_native_off): mips2c versions");
     }
+    for (const auto& n : names) {
+      lg::warn("mips2c: native {} off (config.ini mips2c_native_off): mips2c version", n);
+    }
+#endif
   }
   return exists ? &names : nullptr;
 }

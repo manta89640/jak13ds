@@ -5,8 +5,8 @@ setting has a default, so the file is optional: write only the lines you want to
 (`stdout.log`) prints the renderer settings in use: `[ctr] settings from ...: dist 500m lod 200m
 ...` (or `[ctr] no config.ini, default settings: ...`), and warns about unknown keys.
 
-An older `render.ini` is still read when there is no `config.ini` (rename it to keep using it),
-and the older flag files (`sound`, `use_syscore`, `mips2c_native_off`, `perf_sections`) still work.
+It is the only settings file: there are no flag files, and `render.ini` isn't read any more
+(rename yours to `config.ini`). `stage_sd.sh` options set keys in it and keep the other lines.
 
 ## Sound and system
 
@@ -16,11 +16,16 @@ sound_core = 0             # CPU core of the sound mixer: 0 (default on New 3DS)
 io_on_system_core = off    # on: the game's I/O threads on core 1 (the system core; experimental)
 mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names
 perf_sections = off        # on: per-section timing in the log (slower)
+args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)
+listener = off             # on: Wi-Fi REPL (goalc can connect; 1 MB of RAM)
+screenshots = 0            # N: save the top screen every N frames to data/log
+pad_script =               # FILE (relative to sdmc:/3ds/jak1): scripted controller input for tests
+debug_log = off            # on: debug lines in data/log/gk.log (slow: every line is an SD card write)
 ```
 
 ## Where it goes
 
-- 3DS: `sdmc:/3ds/jak1/config.ini` (or `sdmc:/3ds/jak1/data/config.ini`).
+- 3DS: `sdmc:/3ds/jak1/config.ini`.
 - PC (`gk --ctr-gfx`): `<project>/config.ini`.
 
 ## Format
@@ -31,7 +36,7 @@ perf_sections = off        # on: per-section timing in the log (slower)
 - `auto` (for `rgba4_as_rgba8` and `vram_textures`) keeps the automatic choice: what works in
   the emulator (Azahar) vs on a real 3DS. The game detects the emulator itself.
 
-## A complete render.ini
+## A complete config.ini (renderer part)
 
 Every setting with its default. Copy it, then change what you need.
 
@@ -80,15 +85,12 @@ gpu_profile = off          # every 2.5 s leaves out one group of renderers and l
   model the GPU's speed, so frame rates there say nothing about the GPU on hardware.
 - **Best looking:** `mipmaps = trilinear` (smoother far textures, a little slower).
 
-## Things outside render.ini
+## Things outside config.ini
 
 - **Level files:** the features above need levels converted with the current converter
   (`ctr_level_converter --all out/jak1/fr3 <sd>/out/jak1/c3l`, see `c3l_format.md`). Files from
   an older converter still load, with a warning in the log: v7 has no mip levels and 16-bit
   textures (slow on hardware), v8 has no envmap shine. Shrubs and the base pass of shiny
   objects also need a current conversion.
-- **Sound:** the flag file `sdmc:/3ds/jak1/sound` turns audio on; its content is the CPU core for
-  the mixer (default 1). Put the mixer on a core without the render thread (see
-  `3ds_build.md`, "Where the threads run").
 - **Sky and the death effect** need the game code built with the current `goal_src` (they are
   partly GOAL changes for the 3DS build).

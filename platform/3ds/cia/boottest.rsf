@@ -54,7 +54,7 @@ AccessControlInfo:
   # returns zeros). The .3dsx gets it from the Homebrew Launcher's own mapping.
   MemoryMapping:
     - 1f000000-1f5fffff:r
-  # DSP memory: ndsp (sound output, the sound flag file) reads and writes the DSP's shared memory
+  # DSP memory: ndsp (sound output, config.ini sound = on) reads and writes the DSP's shared memory
   # directly; without the mapping that's a data abort on hardware (the emulator doesn't check).
   IORegisterMapping:
     - 1ff00000-1ff7ffff

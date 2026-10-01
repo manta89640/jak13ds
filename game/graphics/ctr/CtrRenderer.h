@@ -126,7 +126,7 @@ class CtrRenderer {
   CtrDirectBucketRenderer* m_sky = nullptr;
   std::unique_ptr<class CtrSky> m_sky_draw;
 
-  // render.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
+  // config.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);
   bool profile_skips(const std::string& name) const;
   int m_profile_mode = 0;

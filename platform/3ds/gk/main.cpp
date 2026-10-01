@@ -6,13 +6,15 @@
  *
  * SD card layout: see docs/3ds-port/3ds_build.md
  *
- * Game arguments: read from sdmc:/3ds/jak1/args.txt (whitespace separated) if it exists,
- * otherwise "-boot -cbackend" (retail boot, no REPL, GOAL code compiled to C). "-debug" etc. work like on PC.
- * If sdmc:/3ds/jak1/listener exists, the soc:U socket service is started so the REPL (goalc)
- * can connect over Wi-Fi (costs 1 MB of RAM).
+ * Settings: sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). Here:
+ *   args = <game args> (default "-boot -cbackend": retail boot, no REPL, GOAL code compiled to C)
+ *   listener = on: the soc:U socket service, so the REPL (goalc) can connect over Wi-Fi (1 MB RAM)
+ *   screenshots = N: a screenshot every N frames to data/log
+ *   pad_script = FILE: scripted controller input for tests (relative to sdmc:/3ds/jak1)
  */
 
 #include <cstdio>
+#include <sstream>
 #include <cstdlib>
 #include <malloc.h>
 #include <fstream>
@@ -34,8 +36,9 @@
 namespace {
 std::vector<std::string> read_game_args() {
   std::vector<std::string> args;
-  std::ifstream f(std::string(OPENGOAL_3DS_SD_ROOT) + "/args.txt");
-  if (f.good()) {
+  char v[512];
+  if (ctr_config_get("args", v, sizeof(v))) {  // config.ini: args = ...
+    std::istringstream f(v);
     std::string a;
     while (f >> a) {
       args.push_back(a);
@@ -73,9 +76,9 @@ int main(int /*argc*/, char** /*argv*/) {
   //   data/log/gk.log      the lg log at debug level
   printf("[gk] project path %s\n", data_dir.string().c_str());
   lg::set_file("gk.log", false, false);
-  // Debug lines (thousands during level loads) only with the flag file debug_log: every flush is
-  // a write to the SD card, which is slow on hardware (the emulator doesn't notice).
-  const bool debug_log = fs::exists(fs::path(OPENGOAL_3DS_SD_ROOT) / "debug_log");
+  // Debug lines (thousands during level loads) only with debug_log = on in config.ini: every
+  // flush is a write to the SD card, which is slow on hardware (the emulator doesn't notice).
+  const bool debug_log = ctr_config_bool("debug_log", 0) != 0;
   lg::set_file_level(debug_log ? lg::level::debug : lg::level::info);
   lg::set_stdout_level(lg::level::info);
   lg::set_flush_level(debug_log ? lg::level::debug : lg::level::warn);
@@ -96,13 +99,13 @@ int main(int /*argc*/, char** /*argv*/) {
   }
   lg::info("3DS: share of core 1 (APT_SetAppCpuTimeLimit): {}%", ctr_core1_share());
   lg::info("3DS: system core (core 1) for the IOP/IO threads: {}",
-           ctr_syscore_available() ? "yes (80%, experimental: use_syscore)" : "no, core 0");
+           ctr_syscore_available() ? "yes (80%, experimental: io_on_system_core)" : "no, core 0");
   {
     int sound_core = 1;
     if (ctr_sound_config(&sound_core)) {
-      lg::info("3DS: sound on (flag file sound), mixer thread on core {}", sound_core);
+      lg::info("3DS: sound on (config.ini), mixer thread on core {}", sound_core);
     } else {
-      lg::info("3DS: sound off (no flag file sound)");
+      lg::info("3DS: sound off (config.ini: sound = on to turn it on)");
     }
   }
 
@@ -126,7 +129,8 @@ int main(int /*argc*/, char** /*argv*/) {
 
   {
     std::error_code ec;
-    if (fs::exists(fs::path(OPENGOAL_3DS_SD_ROOT) / "listener", ec)) {
+    (void)ec;
+    if (ctr_config_bool("listener", 0)) {
       int err = ctr_net_init(0x100000);
       lg::info("listener: soc:U init {}", err == 0 ? "ok" : "failed");
     }
@@ -138,22 +142,25 @@ int main(int /*argc*/, char** /*argv*/) {
   game_options.server_port = DECI2_PORT;
   Gfx::SetPreferredPipeline(GfxPipeline::Ctr);
   {
-    // sdmc:/3ds/jak1/screenshots (empty file): save a screenshot every 10 s to data/log
-    std::error_code ec;
-    auto flag = fs::path(OPENGOAL_3DS_SD_ROOT) / "screenshots";
-    if (fs::exists(flag, ec)) {
-      int every = 600;
-      std::ifstream f(flag.string());
-      f >> every;
-      ctr_gfx::set_screenshots((data_dir / "log").string(), every > 0 ? every : 600);
+    // config.ini: screenshots = N, a screenshot every N frames to data/log
+    char v[32];
+    if (ctr_config_get("screenshots", v, sizeof(v))) {
+      const int every = std::atoi(v);
+      if (every > 0) {
+        ctr_gfx::set_screenshots((data_dir / "log").string(), every);
+      }
     }
   }
 
   {
-    // sdmc:/3ds/jak1/pad_script.txt: scripted controller input for tests (game/sce/pad_script.h)
+    // config.ini: pad_script = FILE, scripted controller input for tests (game/sce/pad_script.h)
     std::error_code ec;
-    auto script = fs::path(OPENGOAL_3DS_SD_ROOT) / "pad_script.txt";
-    if (fs::exists(script, ec)) {
+    char v[256];
+    fs::path script;
+    if (ctr_config_get("pad_script", v, sizeof(v)) && v[0]) {
+      script = v[0] == '/' ? fs::path(v) : fs::path(OPENGOAL_3DS_SD_ROOT) / v;
+    }
+    if (!script.empty() && fs::exists(script, ec)) {
       setenv("OPENGOAL_PAD_SCRIPT", script.string().c_str(), 1);
       lg::info("pad script: {}", script.string());
     }

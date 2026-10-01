@@ -149,21 +149,21 @@ void ctr_gpu_pool_delete(int pool);
 void ctr_gpu_pool_set_priority(int pool, int priority);
 
 /* Store RGBA4 textures as RGBA8 (twice the memory): Azahar (OpenGL and Vulkan) renders RGBA4
- * textures as noise or a solid color (render.ini rgba4_as_rgba8, default: on in the emulator). */
+ * textures as noise or a solid color (config.ini rgba4_as_rgba8, default: on in the emulator). */
 void ctr_gpu_set_rgba4_as_rgba8(int on);
 int ctr_gpu_rgba4_as_rgba8(void);
-/* Texture pools in VRAM while there is room (render.ini vram_textures, default: off in the
+/* Texture pools in VRAM while there is room (config.ini vram_textures, default: off in the
  * emulator, which draws VRAM textures as noise). */
 void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
- * (trilinear, slower) (render.ini mipmaps). */
+ * (trilinear, slower) (config.ini mipmaps). */
 void ctr_gpu_set_mip_mode(int mode);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the
- * rest of the frame. Off: the GPU starts at the end of the frame (render.ini overlap). */
+ * rest of the frame. Off: the GPU starts at the end of the frame (config.ini overlap). */
 void ctr_gpu_set_overlap(int on);
 void ctr_gpu_submit_partial(void);
-/* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (render.ini pipeline).
+/* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
 int ctr_gpu_set_pipeline(int on);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
