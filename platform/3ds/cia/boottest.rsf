@@ -199,8 +199,13 @@ SystemControlInfo:
   SaveDataSize: 0KB
   RemasterVersion: 0
   StackSize: 0x40000
+  # Modules the system loads with the app, as in buildtools' template.rsf (used by FBI). Each one
+  # must be a title on the NAND: an entry that isn't (0004013000001202 is pm, part of the FIRM)
+  # makes the launch fail, and the title stays on the launch screen without a process (emulators
+  # don't load dependencies, so they run it anyway).
   Dependency:
     ac: 0x0004013000002402
+    #act: 0x0004013000003802
     am: 0x0004013000001502
     boss: 0x0004013000003402
     camera: 0x0004013000001602
@@ -221,11 +226,14 @@ SystemControlInfo:
     mic: 0x0004013000002002
     ndm: 0x0004013000002b02
     news: 0x0004013000003502
+    #nfc: 0x0004013000004002
     nim: 0x0004013000002c02
     nwm: 0x0004013000002d02
     pdn: 0x0004013000002102
     ps: 0x0004013000003102
     ptm: 0x0004013000002202
-    ssl: 0x0004013000002f02
+    #qtm: 0x0004013020004202
+    ro: 0x0004013000003702
+    socket: 0x0004013000002e02
     spi: 0x0004013000002302
-    pxi: 0x0004013000001202
+    ssl: 0x0004013000002f02
