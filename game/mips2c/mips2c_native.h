@@ -15,7 +15,8 @@
  *   gLinkedFunctionTable.reg(name, execute, stack_size, &kNative);
  * and GOAL calls the native one. With OPENGOAL_MIPS2C_VERIFY=1 (C backend, not on the 3DS), every
  * call runs both on the same inputs and compares what they wrote to GOAL memory and v0
- * (mips2c_native.cpp). OPENGOAL_MIPS2C_NATIVE=0 (not on the 3DS) uses the mips2c versions.
+ * (mips2c_native.cpp). OPENGOAL_MIPS2C_NATIVE=0 uses the mips2c versions (3DS: the flag file
+ * sdmc:/3ds/jak1/mips2c_native_off, see mips2c_native.cpp).
  * GOAL functions replaced by a native version (def-mips2c, no mips2c version) register the
  * native's as_exec as their execute function.
  *
