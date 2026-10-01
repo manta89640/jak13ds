@@ -66,3 +66,31 @@ Next steps, by expected gain:
 4. target-real-post runs Jak's physics `time-ratio` times per frame (2 at 30-60 fps, 3 at 22 fps,
    4 below 15): faster frames make it cheaper by themselves.
 5. GOAL C code quality (u64 everywhere, owner: compiler): helps every row above.
+
+## Real hardware: the GPU (Sentinel Beach, ~10 fps)
+
+On a real New 3DS the beach ran at ~10 fps with the GPU as the bottleneck (60-90 ms of GPU time
+per frame, depending on the view). Azahar doesn't model GPU timing, so this doesn't show up there.
+Lower draw distances (`render.ini`: 300 / 100) didn't help: the triangle count isn't the problem.
+The cause is texture reads: level textures had no mip levels and were in linear memory (FCRAM),
+so every far away surface read its texture at full size and missed the GPU's small texture cache.
+
+What changed (c3l v8, see c3l_format.md):
+
+- **ETC1 / ETC1A4 textures with mip levels** (converter defaults). A level's textures are 1/4 to
+  1/2 of their 16-bit size, and far surfaces read small mip levels.
+- **Level texture pools in VRAM:** all textures of a level are one linear block, copied to VRAM
+  with a single GPU copy at frame begin (`ctr_gpu_pool_*`). The level the camera is in has
+  priority; the other one's pool moves out if VRAM runs short.
+- **Fewer texture binds:** a bind always clears the texture cache. Level draws are sorted by
+  texture and state across chunks (opaque, depth written draws; blended ones keep their order),
+  and binds with the same texture and parameters are skipped.
+- **Sprites:** indexed quads written straight into the vertex buffer, cheaper sin/cos.
+- **Sound:** the mixer mixes blocks of samples per voice instead of one sample at a time over all
+  voices. It took 30-60% of the core it ran on at the beach; put it on a core without the render
+  thread (the number in the `sdmc:/3ds/jak1/sound` flag file).
+
+To see where the GPU time goes on hardware: `gpu_profile = 1` in `render.ini` draws only one group
+of renderers at a time (all, level, merc + eyes, sprites, ocean, direct; 2.5 s each) and logs
+`[ctr] gpu profile: ...` with the GPU time of each. The frame statistics also log draws, texture
+binds, command buffer KB and the texture pools in VRAM.
