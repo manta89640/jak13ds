@@ -715,7 +715,8 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
     if (has_alpha) {
       ctr_tex::fill_transparent_colors(&m);
     }
-    ctr_tex::encode_level(m, fmt, opt.etc1_quality, &out);
+    ctr_tex::encode_level(m, fmt, opt.etc1_quality, &out,
+                          mo.preserve_coverage ? mo.alpha_ref : 0);
   }
   if (psnr_out) {
     // quality of the first level (visible texels only)

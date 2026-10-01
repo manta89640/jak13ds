@@ -36,6 +36,20 @@ uint8_t from_bits(uint32_t v, uint32_t bits) {
   return (uint8_t)((v << (8 - bits)) | (v >> (2 * bits - 8)));
 }
 
+// 4-bit alpha, rounded to nearest but on the same side of an alpha test reference as the 8-bit value
+uint32_t alpha4(uint32_t a, int ref) {
+  uint32_t q = to_bits(a, 15);
+  if (ref > 0) {
+    const int e = from_bits(q, 4);
+    if ((int)a >= ref && e < ref && q < 15) {
+      q++;
+    } else if ((int)a < ref && e >= ref && q > 0) {
+      q--;
+    }
+  }
+  return q;
+}
+
 void etc1_init_once() {
   static std::once_flag flag;
   std::call_once(flag, [] { rg_etc1::pack_etc1_block_init(); });
@@ -179,7 +193,11 @@ void fill_transparent_colors(Image* img) {
   }
 }
 
-void encode_level(const Image& img, Format fmt, int etc1_quality, std::vector<uint8_t>* out) {
+void encode_level(const Image& img,
+                  Format fmt,
+                  int etc1_quality,
+                  std::vector<uint8_t>* out,
+                  int alpha_ref) {
   const int w = img.w, h = img.h;
   const size_t start = out->size();
   out->resize(start + level_bytes(w, h, fmt));
@@ -193,7 +211,7 @@ void encode_level(const Image& img, Format fmt, int etc1_quality, std::vector<ui
           uint16_t v;
           if (fmt == Format::RGBA4) {
             v = (uint16_t)((to_bits(p[0], 15) << 12) | (to_bits(p[1], 15) << 8) |
-                           (to_bits(p[2], 15) << 4) | to_bits(p[3], 15));
+                           (to_bits(p[2], 15) << 4) | alpha4(p[3], alpha_ref));
           } else {
             v = (uint16_t)((to_bits(p[0], 31) << 11) | (to_bits(p[1], 63) << 5) |
                            to_bits(p[2], 31));
@@ -227,7 +245,7 @@ void encode_level(const Image& img, Format fmt, int etc1_quality, std::vector<ui
                 // rg_etc1 wants the bytes R, G, B, A in memory
                 uint8_t b[4] = {p[0], p[1], p[2], 255};
                 memcpy(&px[y * 4 + x], b, 4);
-                alpha_bits |= (uint64_t)to_bits(p[3], 15) << (4 * (4 * x + y));
+                alpha_bits |= (uint64_t)alpha4(p[3], alpha_ref) << (4 * (4 * x + y));
               }
             }
             uint8_t blk[8];
