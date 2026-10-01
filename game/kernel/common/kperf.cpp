@@ -18,6 +18,10 @@
 #include "common/log/log.h"
 
 #ifdef __3DS__
+extern "C" int ctr_config_bool(const char* key, int def);  // platform/3ds/port/ctr_port.c
+#endif
+
+#ifdef __3DS__
 #include <malloc.h>
 
 #include "platform/3ds/port/ctr_port.h"
@@ -129,6 +133,8 @@ void init_sections() {
   FILE* f = fopen("/3ds/jak1/perf_sections", "r");
   if (f) {
     fclose(f);
+  }
+  if (f || ctr_config_bool("perf_sections", 0)) {  // config.ini or the flag file
     g_sections_enabled = true;
     g_sections_forced = true;
   }

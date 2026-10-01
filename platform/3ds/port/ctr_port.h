@@ -18,6 +18,12 @@ extern "C" {
 int ctr_platform_init(int enable_console);
 /* Append a line to sdmc:/3ds/jak1/boot.txt (boot progress, for hangs on hardware). */
 void ctr_boot_mark(const char* step);
+/* (AI-assisted) The one settings file: sdmc:/3ds/jak1/config.ini (or data/config.ini, then the
+ * older render.ini in the same places). "key = value" lines, # or ; comments. Copies the value of
+ * key into out (size bytes) and returns 1, or returns 0 when the key isn't there. Any thread. */
+int ctr_config_get(const char* key, char* out, int size);
+/* the value as a bool (on/true/yes/1, off/false/no/0), or def when the key isn't there */
+int ctr_config_bool(const char* key, int def);
 void ctr_platform_exit(void);
 
 /* Call regularly from the main thread. Returns 0 when the app should quit (HOME -> close,

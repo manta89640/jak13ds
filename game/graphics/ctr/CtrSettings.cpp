@@ -39,14 +39,17 @@ CtrSettings load() {
   s.vram_textures = !s.emulator;
   const auto dir = file_util::get_jak_project_dir();
   fs::path path;
-  for (const auto& p : {dir / "render.ini", dir.parent_path() / "render.ini"}) {
+  // (AI-assisted) config.ini: the one settings file (sound and system keys too, read by
+  // ctr_config_get); render.ini still works when there is no config.ini
+  for (const auto& p : {dir / "config.ini", dir.parent_path() / "config.ini", dir / "render.ini",
+                        dir.parent_path() / "render.ini"}) {
     if (fs::exists(p)) {
       path = p;
       break;
     }
   }
   if (path.empty()) {
-    lg::info("[ctr] no render.ini, default settings: {}", s.summary());
+    lg::info("[ctr] no config.ini, default settings: {}", s.summary());
     return s;
   }
   std::ifstream in(path.string());
@@ -108,6 +111,9 @@ CtrSettings load() {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
       s.gpu_profile = parse_bool(v);
+    } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
+               key == "mips2c_native_off" || key == "perf_sections") {
+      // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp)
     } else {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);
     }
