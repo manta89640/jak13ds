@@ -89,6 +89,16 @@ void ctr_gpu_tex_delete(int handle);
 
 /* Draw a triangle list. */
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count);
+/* A vertex in OpenGL-style clip space: x, y in [-w, w] cover the screen like ctr_vertex's [-1, 1],
+ * depth (z / w + 1) / 2, larger = closer, like ctr_vertex z. */
+typedef struct {
+  float x, y, z, w;
+  float s, t;  // like ctr_vertex (divided by w on the way: perspective correct)
+  uint8_t r, g, b, a;
+} ctr_clip_vertex;
+/* Draw a triangle list in clip space (the sky): the GPU clips it. State like ctr_gpu_draw. */
+void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count);
+
 /* The screen as a texture, for effects that read what is already drawn (the sprite distorter):
  * copies the frame drawn so far into a texture (one GPU copy of the color buffer) and returns its
  * handle, -1 if not available. Valid until the end of the frame; copy again after more draws.

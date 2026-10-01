@@ -9,6 +9,7 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrOcean.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSettings.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSprite.cpp
+  ${OG_ROOT}/game/graphics/ctr/CtrSky.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrRenderer.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrVram.cpp
 )
@@ -16,7 +17,7 @@ target_sources(og3ds_runtime PRIVATE
 find_program(PICASSO picasso HINTS ${DEVKITPRO}/tools/bin ${CTRULIB}/../tools/bin REQUIRED)
 
 set(OG3DS_SHADER_CS "")
-foreach(shader ctr_basic ctr_mesh ctr_skin ctr_skin_env)
+foreach(shader ctr_basic ctr_mesh ctr_skin ctr_skin_env ctr_clip)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
   set(csrc ${CMAKE_CURRENT_BINARY_DIR}/${shader}_shbin.c)

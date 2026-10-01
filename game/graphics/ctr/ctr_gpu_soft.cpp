@@ -408,6 +408,33 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
   // (not in the PC software renderer: the envmap shine pass is GPU only)
 }
 
+void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  // (no clipping here: triangles with a point behind the camera are left out; affine texturing)
+  std::vector<ctr_vertex> out;
+  for (int i = 0; i + 2 < count; i += 3) {
+    if (verts[i].w <= 0 || verts[i + 1].w <= 0 || verts[i + 2].w <= 0) {
+      continue;
+    }
+    for (int k = 0; k < 3; k++) {
+      const auto& v = verts[i + k];
+      ctr_vertex o;
+      o.x = v.x / v.w;
+      o.y = v.y / v.w;
+      o.z = (v.z / v.w + 1.f) * 0.5f;
+      o.s = v.s;
+      o.t = v.t;
+      o.r = v.r;
+      o.g = v.g;
+      o.b = v.b;
+      o.a = v.a;
+      out.push_back(o);
+    }
+  }
+  if (!out.empty()) {
+    ctr_gpu_draw(state, out.data(), (int)out.size());
+  }
+}
+
 int ctr_gpu_copy_screen(void) {
   static int handle = -1;
   if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||
