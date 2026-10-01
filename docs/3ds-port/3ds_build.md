@@ -426,7 +426,7 @@ PC it runs with `gk --ctr-gfx`.
     0.45 ms (texture shading + 2-4 tile draws, about 1-2k triangles in view).
   - Not done: the near ocean's wave geometry, the env map (sky reflection) pass, the far ocean
     (beyond the 4.6 km map, always in the fog at the default draw distance).
-- **Not drawn yet:** sky, shadows, envmap shine passes (tie, merc, ocean), debug lines,
+- **Not drawn yet:** sky, shadows, envmap shine passes of tie and the ocean, debug lines,
   scissor.
 - **Memory:** a level's textures are one block of linear memory (a texture pool), copied to VRAM
   with one GPU copy when there is room: the level the camera is in first (`ctr_gpu_pool_*`, see
@@ -459,6 +459,7 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `sprites` | on | draw world sprites (particles); the HUD is always drawn |
   | `max_sprites` | 1000 | world sprites per frame |
   | `ocean` | on | draw the ocean |
+  | `envmap` | on | the envmap shine of merc models (power cells, precursor metal; c3l v9 files) |
   | `distort` | on | the sprite distorter (portals, heat haze); costs one screen copy in frames that have distort sprites |
   | `rgba4_as_rgba8` | auto | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. `auto`: on in the emulator, off on the 3DS |
   | `vram_textures` | auto | level texture pools in VRAM while there is room (the GPU reads VRAM much faster). `auto`: on on the 3DS, off in the emulator (Azahar draws VRAM textures as noise) |

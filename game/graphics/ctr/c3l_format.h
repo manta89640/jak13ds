@@ -15,7 +15,7 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 8;
+constexpr uint32_t kVersion = 9;  // v9: merc envmap draws (MercDraw::eye_id kMercEnvmapDraw)
 // v7 files (16-bit textures without mip levels) still load
 constexpr uint32_t kMinVersion = 7;
 
@@ -166,8 +166,11 @@ struct MercDraw {
   uint32_t first_index;  // triangle list, into the merc index data
   uint32_t index_count;
   uint8_t palette[31];  // kMercPaletteSize used
-  uint8_t eye_id;       // 0xff: not an eye. Else the eye texture slot (CtrEyeRenderer) to use
+  uint8_t eye_id;       // 0xff: not an eye. kMercEnvmapDraw: the envmap pass of an envmapped
+                        // effect (after its normal draws). Else the eye texture slot
+                        // (CtrEyeRenderer) to use
 };
+constexpr uint8_t kMercEnvmapDraw = 0xfe;
 static_assert(sizeof(MercDraw) == 48);
 
 struct MercVertex {

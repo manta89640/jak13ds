@@ -59,7 +59,7 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 8 (7 still loads); char level_name[32]
+  char magic[4] = "C3LV"; u32 version = 9 (7 and 8 still load); char level_name[32]
   u32 num_textures, textures_offset
   u32 num_chunks, chunks_offset
   u32 vertex_data_offset, vertex_data_size      Vertex[]
@@ -145,7 +145,9 @@ MercDraw (48 bytes)
   u8  palette_count       bones used by this draw (<= 24)
   u32 first_index, index_count   triangle list, indices relative to the model's first_vertex
   u8  palette[31]         palette slot -> skeleton bone
-  u8  eye_id              0xff, or the eye texture slot that CtrEyeRenderer draws each frame
+  u8  eye_id              0xff; 0xfe (v9): the envmap pass of an envmapped effect, after its
+                          normal draws (same triangles, envmap texture and mode); else the eye
+                          texture slot that CtrEyeRenderer draws each frame
 
 MercVertex (24 bytes)
   s16 pos[3]; u8 bones[3] (palette slots); u8 weights[3] (sum 255); s16 st[2] (* 1024);
@@ -159,4 +161,7 @@ MercBlercTarget[] {float offset[3]; u32 weight}, u16 dests[] (model vertex indic
 - Draws are split so that each one uses at most 24 bones (the vertex shader's uniform space).
 - Blend shapes (faces): each frame the positions of the blend shape vertices are
   `base + sum(weight[target.weight] * target.offset)`, written to their `dest` vertices.
-- Models with more than 65535 vertices are skipped (logged). Envmap and ripple are not converted.
+- Envmapped effects (shiny: power cells, precursor metal) get envmap pass draws (v9). The runtime
+  draws them with `ctr_skin_env.v.pica` (emerc.vert's sphere map) and the effect's fade color from
+  the game, when it isn't 0 (the game fades the shine out with distance).
+- Models with more than 65535 vertices are skipped (logged). Ripple is not converted.

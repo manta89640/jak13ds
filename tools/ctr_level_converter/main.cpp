@@ -386,6 +386,7 @@ struct MercOut {
   std::vector<c3l::MercBlercTarget> blerc_targets;
   std::vector<u16> blerc_dests;
   int skipped_models = 0;
+  int envmap_draws = 0;
 };
 
 void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* out) {
@@ -442,6 +443,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           draw_list.push_back({&d, false});
         }
       }
+      const size_t effect_first_draw = out->draws.size();
       for (const auto& [dp, from_mod] : draw_list) {
         const auto& d = *dp;
         const std::vector<tfrag3::MercVertex>& vsrc = from_mod ? eff.mod.vertices : group.vertices;
@@ -572,6 +574,21 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
       }
       if (too_big) {
         break;
+      }
+      // envmapped effects (shiny: power cells, precursor metal): the envmap pass draws the same
+      // triangles again with the envmap texture and mode (emerc.vert / Merc2 envmap draws)
+      if (eff.has_envmap) {
+        const size_t effect_end = out->draws.size();
+        const u16 env_tex = cv.texture_id((s32)eff.envmap_texture);
+        cv.note_use(env_tex, eff.envmap_mode.as_int(), true);
+        for (size_t di = effect_first_draw; di < effect_end; di++) {
+          c3l::MercDraw ed = out->draws[di];
+          ed.mode = eff.envmap_mode.as_int();
+          ed.texture = env_tex;
+          ed.eye_id = c3l::kMercEnvmapDraw;
+          out->draws.push_back(ed);
+          out->envmap_draws++;
+        }
       }
       if (use_blerc) {
         // per vertex: int [target weight indices..., terminator, dest mod vertex],
@@ -1043,13 +1060,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
 
   lg::info(
       "{}: {} tfrag + {} tie + {} shrub trees ({} shrub tris) -> {} chunks, {} verts ({} KB), {} "
-      "tris, {} draws, {} textures ({} KB), {} merc models ({} verts, {} tris, {} draws), file {} "
+      "tris, {} draws, {} textures ({} KB), {} merc models ({} verts, {} tris, {} draws, {} envmap), file {} "
       "KB; tie: {} wind tris, {} small/medium-object tris; far tfrag: {} tris ({})",
       level.level_name, tfrag_trees, tie_trees, shrub_trees, cv.shrub_tris, chunks.size(),
       out_verts.size(),
       out_verts.size() * sizeof(c3l::Vertex) / 1024, out_indices.size() / 3, out_draws.size(),
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
-      merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024, cv.wind_tris, cv.small_tris,
+      merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, buf.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
   lg::info("{}: textures {} KB with mip levels (16-bit, no mips: {} KB): {} ETC1, {} ETC1A4, {} "
            "RGB565, {} RGBA4; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
