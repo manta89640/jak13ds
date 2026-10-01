@@ -435,6 +435,18 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   }
 }
 
+void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
+  memcpy(out->m, clip, sizeof(out->m));
+}
+
+void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
+                                const ctr_mesh_matrix* matrix,
+                                int mesh,
+                                int first_index,
+                                int index_count) {
+  ctr_gpu_draw_mesh(state, matrix->m, mesh, first_index, index_count);
+}
+
 int ctr_gpu_copy_screen(void) {
   static int handle = -1;
   if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||

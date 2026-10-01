@@ -1469,29 +1469,8 @@ void ctr_gpu_mesh_delete(int mesh) {
   ctr_linear_unlock();
 }
 
-void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
-                       int first_index, int index_count) {
-  if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
-      index_count < 3) {
-    return;
-  }
-  if (!cmd_room()) {
-    return;
-  }
-  use_program(PROG_MESH);
-  /* consecutive draws of a level chunk share the matrix and the vertex buffer */
-  if (g.last_mesh_valid && g.last_mesh == mesh && !memcmp(g.last_clip, clip, sizeof(g.last_clip))) {
-    apply_state(state, 1);
-    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
-                     g.meshes[mesh].indices + first_index);
-    g.cur.draws++;
-    g.cur.triangles += index_count / 3;
-    return;
-  }
-  g.last_mesh_valid = 1;
-  g.last_mesh = mesh;
-  memcpy(g.last_clip, clip, sizeof(g.last_clip));
-  /* final = gl_to_pica * clip */
+void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
+  /* final = gl_to_pica * clip, in C3D_Mtx layout (components reversed) */
   C3D_Mtx m;
   for (int r = 0; r < 4; r++) {
     for (int c = 0; c < 4; c++) {
@@ -1502,15 +1481,44 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
       m.r[r].c[3 - c] = acc;
     }
   }
-  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip, &m);
+  _Static_assert(sizeof(C3D_Mtx) == sizeof(ctr_mesh_matrix), "matrix layout");
+  memcpy(out, &m, sizeof(m));
+}
+
+void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                                int mesh, int first_index, int index_count) {
+  if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
+      index_count < 3) {
+    return;
+  }
+  if (!cmd_room()) {
+    return;
+  }
+  use_program(PROG_MESH);
+  /* consecutive draws of a level chunk share the matrix and the vertex buffer */
+  if (!g.last_mesh_valid || memcmp(g.last_clip, matrix->m, sizeof(g.last_clip))) {
+    memcpy(g.last_clip, matrix->m, sizeof(g.last_clip));
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip, (const C3D_Mtx*)matrix);
+  }
+  if (!g.last_mesh_valid || g.last_mesh != mesh) {
+    g.last_mesh = mesh;
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, g.meshes[mesh].verts, 16, 3, 0x210);
+  }
+  g.last_mesh_valid = 1;
   apply_state(state, 1);
-  C3D_BufInfo* buf = C3D_GetBufInfo();
-  BufInfo_Init(buf);
-  BufInfo_Add(buf, g.meshes[mesh].verts, 16, 3, 0x210);
   C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
                    g.meshes[mesh].indices + first_index);
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
+}
+
+void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
+                       int first_index, int index_count) {
+  ctr_mesh_matrix m;
+  ctr_gpu_prepare_mesh_matrix(clip, &m);
+  ctr_gpu_draw_mesh_prepared(state, &m, mesh, first_index, index_count);
 }
 
 /* ---------------- skinned meshes ---------------- */
