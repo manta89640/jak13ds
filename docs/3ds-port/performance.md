@@ -107,3 +107,17 @@ group of renderers at a time (level, merc + eyes, sprites, ocean, direct; 2.5 s 
 everything) and logs `[ctr] gpu profile: all X ms, level Y, ...`: the GPU time of a whole frame
 and what each group costs (the difference). The frame statistics also log draws, texture
 binds, command buffer KB and the texture pools in VRAM.
+
+### Render thread CPU (later)
+
+- Level draws: the drawing order (texture, state, chunk) is made when a level loads; a frame walks
+  it and skips chunks that aren't visible, instead of sorting the visible draws every frame.
+- Level chunk matrices are converted to the GPU's clip space once per visible chunk per frame;
+  the backend sets the matrix and the vertex buffer only when each one changes.
+- Merc: bone rows built once per palette (not per draw) and uploaded only when they change.
+- CtrDirect (text, menus): no float divisions per vertex.
+- Sound: the mixer mixes blocks per voice (see above).
+
+Not tried yet, needs hardware to check: the PICA's own fog unit (a depth LUT) instead of the fog
+ramp texture on the level's second texture stage (one texture fetch less per pixel, and fog on
+merc too).
