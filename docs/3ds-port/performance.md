@@ -90,7 +90,8 @@ What changed (c3l v8, see c3l_format.md):
   voices. It took 30-60% of the core it ran on at the beach; put it on a core without the render
   thread (the number in the `sdmc:/3ds/jak1/sound` flag file).
 
-To see where the GPU time goes on hardware: `gpu_profile = 1` in `render.ini` draws only one group
-of renderers at a time (all, level, merc + eyes, sprites, ocean, direct; 2.5 s each) and logs
-`[ctr] gpu profile: ...` with the GPU time of each. The frame statistics also log draws, texture
+To see where the GPU time goes on hardware: `gpu_profile = 1` in `render.ini` leaves out one
+group of renderers at a time (level, merc + eyes, sprites, ocean, direct; 2.5 s each, then
+everything) and logs `[ctr] gpu profile: all X ms, level Y, ...`: the GPU time of a whole frame
+and what each group costs (the difference). The frame statistics also log draws, texture
 binds, command buffer KB and the texture pools in VRAM.
