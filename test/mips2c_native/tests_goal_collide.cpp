@@ -180,7 +180,7 @@ void gen_closest_pt(Case& c) {
   for (int k = 0; k < 3; k++) {
     rand_point(c.g, v[k], center, size);
   }
-  switch (c.g.range(0, 10)) {
+  switch (c.g.range(0, 12)) {
     case 0:
       memcpy(v[1], v[0], 16);  // two equal vertices
       break;
@@ -192,6 +192,12 @@ void gen_closest_pt(Case& c) {
     case 2:
       memcpy(v[1], v[0], 16);  // a point
       memcpy(v[2], v[0], 16);
+      break;
+    case 3:
+    case 4:
+      // a huge coordinate: lengths overflow, distances are inf or NaN, which is where the order
+      // in which two edges are compared shows
+      v[c.g.range(0, 2)][c.g.range(0, 2)] = c.g.chance(0.5f) ? 3e19f : -3e19f;
       break;
     default:
       break;

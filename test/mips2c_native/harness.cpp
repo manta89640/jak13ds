@@ -161,6 +161,20 @@ u64 run_mips2c(Mips2cEntry& e, const u64* args, u64 pp) {
 }
 
 u64 run_native(Mips2cEntry& e, const u64* args, u64 pp) {
+  if (e.native->goal) {
+    // the entry GOAL code calls in C mode (no stack: scratch is 0)
+    const u64 saved_pp = goalc_pp;
+    goalc_pp = pp;
+    u64 v0;
+    try {
+      v0 = e.native->goal(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+    } catch (...) {
+      goalc_pp = saved_pp;
+      throw;
+    }
+    goalc_pp = saved_pp;
+    return v0;
+  }
   const u32 stack = g_sp;
   g_sp -= ((e.native->scratch + 15) & ~15u) + 64;
   if (g_sp < kStackBottom) {
@@ -422,6 +436,16 @@ Result run_one(Mode mode, Mips2cEntry& e, const u64* args) {
   return r;
 }
 
+//! seed of a test's cases from its name: FNV-1a, so 32 and 64-bit builds run the same cases
+//! (std::hash differs between them)
+u32 name_seed(const std::string& name) {
+  u32 h = 2166136261u;
+  for (unsigned char c : name) {
+    h = (h ^ c) * 16777619u;
+  }
+  return h;
+}
+
 std::string describe_call(const CallRec& c) {
   std::string s = c.fn + "(";
   for (size_t i = 0; i < c.args.size(); i++) {
@@ -504,7 +528,7 @@ int run_tests(const RunOptions& opt) {
     take(clean, *t);
 
     const int n = std::max(1, (int)(t->cases * opt.case_scale));
-    const u32 name_hash0 = (u32)std::hash<std::string>()(t->name);
+    const u32 name_hash0 = name_seed(t->name);
     if (!opt.bench.empty()) {
       // the same cases as the test, one version only, no snapshots
       const Mode mode = opt.bench == "native" ? Mode::NATIVE : Mode::MIPS2C;
@@ -529,7 +553,7 @@ int run_tests(const RunOptions& opt) {
     }
     int invalid = 0, fails = 0;
     u64 calls_seen = 0;
-    const u32 name_hash = (u32)std::hash<std::string>()(t->name);
+    const u32 name_hash = name_seed(t->name);
     for (int i = 0; i < n; i++) {
       if (opt.only_case >= 0 && i != opt.only_case) {
         continue;

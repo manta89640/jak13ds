@@ -83,8 +83,11 @@ build() {
   # GOAL functions compiled to C (reference versions, see goalc_ref/goalc_ref.h): the flags of the
   # 3DS build's GOAL modules (platform/3ds/cmake/cmodules.cmake), never contracted (the 3DS has no
   # FMA), and unwind tables so the harness's exceptions can pass through them
-  local cc="${cxx/%g++/gcc}"
-  cc="${cc/%clang++/clang}"
+  local cc="$cxx"
+  case "$cxx" in
+    *clang++) cc="${cxx%clang++}clang" ;;
+    *g++) cc="${cxx%g++}gcc" ;;
+  esac
   for src in "$HERE"/goalc_ref/*.c "$ROOT/game/kernel/common/goalc_context.cpp"; do
     local obj="$dir/ref_$(basename "${src%.*}").o"
     objs+=("$obj")

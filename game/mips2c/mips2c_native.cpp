@@ -504,6 +504,10 @@ u32 native_goalc_fn_id(const std::string& name,
     idx++;
   }
 #if MIPS2C_WRITE_LOG
+  if (impl->goal && !verify_enabled()) {
+    // called by GOAL code without the adapter (no perf section either: these are small)
+    return goalc_fn_id_for_host((void*)impl->goal);
+  }
   if (verify_enabled()) {
     static bool announced = false;
     if (!announced) {
@@ -520,6 +524,11 @@ u32 native_goalc_fn_id(const std::string& name,
       lg::warn("mips2c verify mode: native functions are checked against mips2c");
     }
     return goalc_fn_id_for_adapted(verify_adapter, (void*)impl->fn, idx);
+  }
+#else
+  if (impl->goal) {
+    // called by GOAL code without the adapter (no perf section either: these are small)
+    return goalc_fn_id_for_host((void*)impl->goal);
   }
 #endif
   return goalc_fn_id_for_adapted(native_adapter, (void*)impl->fn, idx);
