@@ -32,7 +32,7 @@ struct CtrSettings {
   bool ocean = true;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
-  bool distort = true;
+  bool distort = false;  // (AI-assisted) off: square sprites reported on hardware
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color

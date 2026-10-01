@@ -240,11 +240,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     m_rs.last_log_ms = t0;
   }
   memcpy(m_rs.fog_color, clear, 4);
-  // The sky's bucket drew the background gradient last frame: clear to black (the PS2's clear
-  // color). Else the fog color stands in for the sky.
-  if (m_sky && m_sky->drew()) {
-    clear[0] = clear[1] = clear[2] = 0;
-  }
+  // (AI-assisted) Always clear to the fog color, also when the sky draws: where nothing covers
+  // the screen near the horizon (past the ocean's far edge), black showed on hardware.
 #ifdef __3DS__
   if (m_rs.frame_idx == 1 || m_rs.frame_idx == 300) {
     ctr_boot_mark(m_rs.frame_idx == 1 ? "9 first game frame" : "10 300 game frames");
