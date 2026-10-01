@@ -40,7 +40,9 @@ inline void transform(float out[4], const float p[4][4], const float r[4]) {
  * divided out of the rotation rows when the parent bone's scale w is nonzero. Also copies the
  * transformq's scale into the bone.
  */
-u64 cspace_parented_transformq_joint_impl(const NativeArgs& args) {
+// inlined into its direct GOAL entry (native_as_goal), so the arguments stay in registers
+__attribute__((always_inline)) inline u64 cspace_parented_transformq_joint_impl(
+    const NativeArgs& args) {
   const u32 cspace = (u32)args.a[0];
   const u32 tq = (u32)args.a[1];
   const u32 parent = gload<u32>(cspace + 0);
@@ -107,7 +109,8 @@ u64 cspace_parented_transformq_joint_impl(const NativeArgs& args) {
 
 }  // namespace
 
+// GOAL code calls it directly (MIPS2C_NATIVE_IMPL_GOAL): do-joint-math! calls it for every joint
 const NativeImpl cspace_parented_transformq_joint =
-    MIPS2C_NATIVE_IMPL(cspace_parented_transformq_joint_impl, NATIVE_V0_UNDEFINED, 0);
+    MIPS2C_NATIVE_IMPL_GOAL(cspace_parented_transformq_joint_impl, NATIVE_V0_UNDEFINED);
 
 }  // namespace Mips2C::jak1::native
