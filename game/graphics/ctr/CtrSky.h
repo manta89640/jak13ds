@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_map>
+
 /*!
  * @file CtrSky.h
  * (AI-assisted)
@@ -25,7 +27,8 @@ class CtrSky {
  public:
   ~CtrSky();
   /*! The sky copies of make-sky-textures (pairs of 6 qw transfers). */
-  void blend(DmaFollower& dma, CtrRenderState& rs);
+  // salt: tells the blends of the two levels apart (their textures can share VRAM addresses)
+  void blend(DmaFollower& dma, CtrRenderState& rs, u64 salt);
   /*! render-sky-3ds's packet (8 qw, see there). */
   void draw(const u8* packet, CtrRenderState& rs);
   static constexpr int kPacketBytes = 8 * 16;
@@ -37,6 +40,17 @@ class CtrSky {
   bool m_valid[2] = {false, false};
   int m_tex[2] = {-1, -1};
   std::vector<u32> m_decode;
+  // decoded sources (TEXA fix applied), by tex0 ^ salt: decoding from the VRAM copy writes the
+  // level's pending texture page upload first (the two levels alternate pages there every frame),
+  // which cost 10-30 ms per frame on hardware. The sky textures don't change while a level is
+  // loaded: decode again only every kRedecodeFrames.
+  struct Source {
+    std::vector<u32> rgba;
+    int w = 0, h = 0;
+    bool ok = false;
+    u32 frame = 0;
+  };
+  std::unordered_map<u64, Source> m_sources;
   std::vector<u64> m_logged;  // source textures already logged
   struct Stats {
     int blends = 0, draws = 0;

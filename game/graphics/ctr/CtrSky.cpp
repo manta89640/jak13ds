@@ -62,7 +62,7 @@ CtrSky::~CtrSky() {
   }
 }
 
-void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs) {
+void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
   // SkyBlendCPU::do_sky_blends: each copy is an adgif (the source texture) and a sprite whose
   // color is the weight (0x80 = 1.0); the first one of a frame draws (no ABE), the others add.
   // The sprite's second corner tells sky (32 px) from clouds (64 px).
@@ -93,34 +93,43 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs) {
       out.assign(n, 0);
       m_dirty[idx] = true;
     }
-    int w = 0, h = 0;
-    const bool decoded = rs.vram->decode_for_cpu(tex0, &m_decode, &w, &h);
-    GsTex0 t(tex0);
-    if (std::find(m_logged.begin(), m_logged.end(), tex0) == m_logged.end() && m_logged.size() < 64) {
-      // once per source texture: what the blend reads (a wrong sky shows up here)
-      m_logged.push_back(tex0);
-      lg::info("[ctr] sky source {}: tex0 {:x} psm {} cpsm {} tbp {} cbp {} {}x{} {} first texel {:08x}",
-               idx ? "clouds" : "sky", tex0, (int)t.psm(), t.cpsm(), t.tbp0(), t.cbp(), w, h,
-               decoded ? "ok" : "NOT DECODED", decoded && !m_decode.empty() ? m_decode[0] : 0);
-    }
-    if (!decoded || w != kSize[idx] || h != kSize[idx]) {
-      continue;
-    }
-    // make-sky-textures draws with TEXA ta0 = ta1 = 0x80 (set-display-gs-state): 16-bit texels and
-    // 16-bit CLUT entries are opaque, whatever their A bit (CtrVram decodes with the usual TEXA)
-    const bool indexed = t.psm() == GsTex0::PSM::PSMT8 || t.psm() == GsTex0::PSM::PSMT4 ||
-                         t.psm() == GsTex0::PSM::PSMT8H || t.psm() == GsTex0::PSM::PSMT4HH ||
-                         t.psm() == GsTex0::PSM::PSMT4HL;
-    if (t.psm() == GsTex0::PSM::PSMCT16 || t.psm() == GsTex0::PSM::PSMCT16S ||
-        (indexed && t.cpsm() != 0)) {
-      for (auto& c : m_decode) {
-        c = (c & 0xffffffu) | (0x80u << 24);
+    constexpr u32 kRedecodeFrames = 300;
+    Source& src = m_sources[tex0 ^ (salt << 1)];
+    if (src.frame == 0 || (u32)rs.frame_idx - src.frame >= kRedecodeFrames) {
+      src.frame = (u32)rs.frame_idx | 1;
+      int w = 0, h = 0;
+      src.ok = rs.vram->decode_for_cpu(tex0, &src.rgba, &w, &h);
+      src.w = w;
+      src.h = h;
+      GsTex0 t(tex0);
+      if (std::find(m_logged.begin(), m_logged.end(), tex0) == m_logged.end() &&
+          m_logged.size() < 64) {
+        // once per source texture: what the blend reads (a wrong sky shows up here)
+        m_logged.push_back(tex0);
+        lg::info("[ctr] sky source {}: tex0 {:x} psm {} cpsm {} tbp {} cbp {} {}x{} {} first texel {:08x}",
+                 idx ? "clouds" : "sky", tex0, (int)t.psm(), t.cpsm(), t.tbp0(), t.cbp(), w, h,
+                 src.ok ? "ok" : "NOT DECODED", src.ok && !src.rgba.empty() ? src.rgba[0] : 0);
       }
+      // make-sky-textures draws with TEXA ta0 = ta1 = 0x80 (set-display-gs-state): 16-bit texels
+      // and 16-bit CLUT entries are opaque, whatever their A bit (CtrVram decodes with the usual
+      // TEXA)
+      const bool indexed = t.psm() == GsTex0::PSM::PSMT8 || t.psm() == GsTex0::PSM::PSMT4 ||
+                           t.psm() == GsTex0::PSM::PSMT8H || t.psm() == GsTex0::PSM::PSMT4HH ||
+                           t.psm() == GsTex0::PSM::PSMT4HL;
+      if (src.ok && (t.psm() == GsTex0::PSM::PSMCT16 || t.psm() == GsTex0::PSM::PSMCT16S ||
+                     (indexed && t.cpsm() != 0))) {
+        for (auto& c : src.rgba) {
+          c = (c & 0xffffffu) | (0x80u << 24);
+        }
+      }
+    }
+    if (!src.ok || src.w != kSize[idx] || src.h != kSize[idx]) {
+      continue;
     }
     if (out.size() != n) {
       out.assign(n, 0);
     }
-    const u8* in = (const u8*)m_decode.data();
+    const u8* in = (const u8*)src.rgba.data();
     for (size_t i = 0; i < n; i++) {
       out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
     }
@@ -259,7 +268,7 @@ void CtrSkyBlendRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (dma.current_tag_offset() != rs.next_bucket && dma.current_tag().kind != DmaTag::Kind::CALL &&
       dma.current_tag().qwc == 8) {
     dma.read_and_advance();  // set-display-gs-state
-    m_sky->blend(dma, rs);
+    m_sky->blend(dma, rs, (u64)(uintptr_t)this);
   }
   while (dma.current_tag_offset() != rs.next_bucket) {
     dma.read_and_advance();

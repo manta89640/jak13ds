@@ -18,7 +18,10 @@
  * regular heap gets the rest. Linear memory holds the renderer's vertex ring buffer, textures and
  * the loaded level backgrounds (two big levels can need ~20 MB). 32 MB leaves ~17 MB of the regular
  * heap free in the 124 MB mode (about 63 MB of it is used, mostly by the 48 MB of EE memory). */
-u32 __ctru_linear_heap_size = 32 << 20;
+/* (AI-assisted) 40 MB: the GPU reads level data only from linear memory or VRAM. With 32 MB,
+ * village1 + jungle (28 MB of .c3l) left 0 KB free and 92 textures/meshes missing; the heap used
+ * ~64-66 MB of its 81 MB on hardware. */
+u32 __ctru_linear_heap_size = 40 << 20;
 
 extern char* fake_heap_start;
 extern char* fake_heap_end;
@@ -149,7 +152,9 @@ int ctr_platform_init(int enable_console) {
     FILE* f = fopen("/3ds/jak1/sound", "r");
     if (f) {
       s_sound = 1;
-      s_sound_core = ctr_is_new3ds() ? 2 : 1;
+      /* (AI-assisted) core 0 on New 3DS: core 2 runs the render thread, which limits the frame
+       * rate; the game thread on core 0 waits for it most of the frame */
+      s_sound_core = ctr_is_new3ds() ? 0 : 1;
       int core = s_sound_core;
       if (fscanf(f, "%d", &core) == 1 && core >= 0 && core <= 3) {
         s_sound_core = core;
