@@ -396,6 +396,7 @@ void CtrDirect::update_draw_state() {
   memset(&st, 0, sizeof(st));
   st.tex = -1;
   m_tex_w = m_tex_h = 1;
+  m_uv_scale_s = m_uv_scale_t = 1.f / 16.f;
   if (m_prim.tme()) {
     const CtrTexture* tex = m_vram->get_texture(m_tex0);
     if (tex && tex->handle >= 0) {
@@ -408,6 +409,8 @@ void CtrDirect::update_draw_state() {
       st.clamp_t = ((m_clamp >> 2) & 3) != 0;
       m_tex_w = 1 << t.tw();
       m_tex_h = 1 << t.th();
+      m_uv_scale_s = 1.f / (16.f * m_tex_w);
+      m_uv_scale_t = 1.f / (16.f * m_tex_h);
     }
   }
   st.blend = m_prim.abe() ? map_blend(m_alpha) : CTR_BLEND_OFF;
@@ -468,15 +471,16 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
   float px = x / 16.f;
   float py = y / 16.f;
   b.x = (px - 2048.f) / 256.f;
-  b.y = -(py - 2048.f) / 112.f;
-  b.z = z / 16777215.f;
+  b.y = (2048.f - py) * (1.f / 112.f);
+  b.z = z * (1.f / 16777215.f);
   if (m_prim.fst()) {
-    b.s = (m_u / 16.f) / m_tex_w;
-    b.t = (m_v / 16.f) / m_tex_h;
+    b.s = m_u * m_uv_scale_s;
+    b.t = m_v * m_uv_scale_t;
   } else {
     float q = m_q == 0.f ? 1.f : m_q;
-    b.s = m_s / q;
-    b.t = m_t / q;
+    const float inv_q = 1.f / q;
+    b.s = m_s * inv_q;
+    b.t = m_t * inv_q;
   }
   memcpy(b.rgba, m_rgba, 4);
   m_build_idx++;
