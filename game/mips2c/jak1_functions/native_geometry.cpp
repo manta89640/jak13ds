@@ -174,7 +174,7 @@ void closest_pt_in_triangle_t(const Store& store, u32 point, u32 tri, u32 normal
       closer_of_two(store, point, tri, tri + 16, tri + 32);
       break;
     default:
-      closer_of_two(store, point, tri + 32, tri + 16, tri);
+      closer_of_two(store, point, tri + 32, tri, tri + 16);
       break;
   }
 }
