@@ -1365,8 +1365,11 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
    * samples t = 0 from the LAST row in memory (as swizzle_rgba8), so memory row r is at
    * t = 1 - r / 512: the copied screen is t = 1 (left) down to 112 / 512 (right); below that are
    * rows the copy never writes (black). */
-  *s = (y + 1.0f) * 0.5f * (240.0f / 256.0f);
-  *t = 1.0f - (x + 1.0f) * 0.5f * (400.0f / 512.0f);
+  /* (clamped half a texel inside the copy: distort sprites at the screen edges reach past it) */
+  const float cx = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+  const float cy = y < -1.0f ? -1.0f : (y > 1.0f ? 1.0f : y);
+  *s = 0.5f / 256.0f + (cy + 1.0f) * 0.5f * (239.0f / 256.0f);
+  *t = 1.0f - 0.5f / 512.0f - (cx + 1.0f) * 0.5f * (399.0f / 512.0f);
 }
 
 /* ---------------- static meshes ---------------- */
