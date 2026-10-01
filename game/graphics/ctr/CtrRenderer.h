@@ -79,9 +79,12 @@ class CtrDirectBucketRenderer : public CtrBucketRenderer {
   void render(DmaFollower& dma, CtrRenderState& rs) override;
   /*! The last render() drew something (for the sky bucket: there is no sky). */
   bool drew() const { return m_drew; }
+  /*! The sky bucket: render-sky-3ds's packet goes to the native sky. */
+  void set_sky(class CtrSky* sky) { m_sky = sky; }
 
  private:
   std::unique_ptr<CtrDirect> m_direct;
+  class CtrSky* m_sky = nullptr;
   bool m_drew = false;
 };
 
@@ -120,6 +123,7 @@ class CtrRenderer {
   std::vector<double> m_bucket_ms;
   std::vector<std::pair<int, class CtrMercRenderer*>> m_merc;
   CtrDirectBucketRenderer* m_sky = nullptr;
+  std::unique_ptr<class CtrSky> m_sky_draw;
 
   // render.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);

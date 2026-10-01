@@ -26,6 +26,7 @@ extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrSprite.h"
@@ -112,7 +113,10 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   const int triangles_before = m_direct->stats().triangles;
   while (dma.current_tag_offset() != rs.next_bucket) {
     auto data = dma.read_and_advance();
-    if (data.size_bytes) {
+    if (m_sky && data.vifcode1().kind == VifCode::Kind::PC_PORT &&
+        data.size_bytes == CtrSky::kPacketBytes) {
+      m_sky->draw(data.data, rs);
+    } else if (data.size_bytes) {
       m_direct->render_vif(data.vif0(), data.vif1(), data.data, data.size_bytes);
     }
     if (dma.current_tag_offset() == rs.default_regs_buffer) {
@@ -178,13 +182,20 @@ CtrRenderer::CtrRenderer()
   // the ocean (after the level and merc, like the PS2's ocean-near)
   set(BucketId::OCEAN_NEAR,
       std::make_unique<CtrOceanRenderer>("ocean", (int)BucketId::OCEAN_NEAR));
-  // the background when there is no sky (the ND logo, interiors): a full screen gradient in the
-  // time of day's erase color. With a sky, the clear color (the fog color) stands in for it.
+  // the sky (CtrSky: render-sky-3ds's packet), or the background when there is no sky (the ND
+  // logo, interiors): a full screen gradient in the time of day's erase color. The sky textures
+  // are blended in the tfrag-trans/sky-blend buckets.
   {
     auto sky = std::make_unique<CtrDirectBucketRenderer>("sky", (int)BucketId::SKY_DRAW,
                                                          m_vram.get(), false);
     m_sky = sky.get();
+    m_sky_draw = std::make_unique<CtrSky>();
+    sky->set_sky(m_sky_draw.get());
     set(BucketId::SKY_DRAW, std::move(sky));
+    for (auto id : {BucketId::TFRAG_TRANS0_AND_SKY_BLEND_LEVEL0,
+                    BucketId::TFRAG_TRANS1_AND_SKY_BLEND_LEVEL1}) {
+      set(id, std::make_unique<CtrSkyBlendRenderer>("sky-blend", (int)id, m_sky_draw.get()));
+    }
   }
   set(BucketId::SPRITE,
       std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));

@@ -28,6 +28,8 @@ extern const uint8_t ctr_skin_shbin[];
 extern const size_t ctr_skin_shbin_size;
 extern const uint8_t ctr_skin_env_shbin[];
 extern const size_t ctr_skin_env_shbin_size;
+extern const uint8_t ctr_clip_shbin[];
+extern const size_t ctr_clip_shbin_size;
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
@@ -80,7 +82,7 @@ typedef struct {
   int used; /* 0 free, 1 used, 2 pending delete */
 } MeshSlot;
 
-enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH, PROG_SKIN, PROG_SKIN_ENV };
+enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH, PROG_SKIN, PROG_SKIN_ENV, PROG_CLIP };
 
 static struct {
   int ready;
@@ -103,6 +105,9 @@ static struct {
   DVLB_s* env_dvlb; /* the envmap pass of skinned meshes (ctr_skin_env.v.pica) */
   shaderProgram_s env_program;
   int uloc_env_clip, uloc_env_rows[3], uloc_env_scales, uloc_env_fade;
+  DVLB_s* clip_dvlb; /* immediate draws in clip space (ctr_clip.v.pica) */
+  shaderProgram_s clip_program;
+  int uloc_clip_glpica;
   int cur_prog;
   ctr_draw_state last_state;
   int last_state_mesh;
@@ -300,6 +305,13 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);         /* texcoord */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_projection, &g.projection);
+  } else if (prog == PROG_CLIP) {
+    C3D_BindProgram(&g.clip_program);
+    g.last_state_valid = 0;
+    AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);         /* clip space position */
+    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);         /* texcoord */
+    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip_glpica, &g.gl_to_pica);
   } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV) {
     C3D_BindProgram(prog == PROG_SKIN ? &g.skin_program : &g.env_program);
     g.last_state_valid = 0;
@@ -408,6 +420,10 @@ int ctr_gpu_init(void) {
   g.uloc_env_rows[2] = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "row2");
   g.uloc_env_scales = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "scales");
   g.uloc_env_fade = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "fade");
+  g.clip_dvlb = DVLB_ParseFile((u32*)ctr_clip_shbin, (u32)ctr_clip_shbin_size);
+  shaderProgramInit(&g.clip_program);
+  shaderProgramSetVsh(&g.clip_program, &g.clip_dvlb->DVLE[0]);
+  g.uloc_clip_glpica = shaderInstanceGetUniformLocation(g.clip_program.vertexShader, "glpica");
   g.cur_prog = PROG_NONE;
 
   g.vbuf = (uint8_t*)linearAlloc(VBUF_BYTES);
@@ -482,6 +498,8 @@ void ctr_gpu_exit(void) {
   DVLB_Free(g.skin_dvlb);
   shaderProgramFree(&g.env_program);
   DVLB_Free(g.env_dvlb);
+  shaderProgramFree(&g.clip_program);
+  DVLB_Free(g.clip_dvlb);
   C3D_RenderTargetDelete(g.top);
   C3D_Fini();
   ctr_port_set_gpu_active(0);
@@ -1243,6 +1261,27 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
   BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
+  C3D_DrawArrays(GPU_TRIANGLES, 0, count);
+  g.cur.draws++;
+  g.cur.triangles += count / 3;
+}
+
+void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  if (!g.ready || !g.in_frame || count < 3) {
+    return;
+  }
+  size_t bytes = (size_t)count * sizeof(ctr_clip_vertex);
+  if (g.vbuf_used + bytes > VBUF_BYTES || !cmd_room()) {
+    return;
+  }
+  uint8_t* dst = g.vbuf + g.vbuf_used;
+  memcpy(dst, verts, bytes);
+  g.vbuf_used += (bytes + 15) & ~(size_t)15;
+  use_program(PROG_CLIP);
+  apply_state(state, 0);
+  C3D_BufInfo* buf = C3D_GetBufInfo();
+  BufInfo_Init(buf);
+  BufInfo_Add(buf, dst, sizeof(ctr_clip_vertex), 3, 0x210);
   C3D_DrawArrays(GPU_TRIANGLES, 0, count);
   g.cur.draws++;
   g.cur.triangles += count / 3;

@@ -824,9 +824,10 @@
       ;; we generate sky textures on the previous frame and they sit in vram (8160) until the next frame.
       ;; on the first frame after we request sky, we draw the textures, but they aren't ready until the next frame.
       (cond
-        ;; 3DS: the 3DS renderer has no sky renderer (it clears to the fog color), so the sky DMA
-        ;; (render-sky-tng, ~1.5 ms/frame there) is not generated.
-        ((and (-> *time-of-day-context* sky) *sky-drawn*) (#unless TARGET_3DS (render-sky-tng *time-of-day-context*)))
+        ;; 3DS: render-sky-tng (~1.5 ms/frame there) is replaced by render-sky-3ds: the 3DS renderer
+        ;; draws the sky polygons itself (CtrSky).
+        ((and (-> *time-of-day-context* sky) *sky-drawn*)
+         (#if TARGET_3DS (render-sky-3ds *time-of-day-context*) (render-sky-tng *time-of-day-context*)))
         (else
          ;; todo
          (with-dma-buffer-add-bucket ((dma-buf (-> (current-frame) global-buf)) (bucket-id sky-draw))
