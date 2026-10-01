@@ -1,14 +1,27 @@
-# render.ini: 3DS renderer settings
+# config.ini: 3DS settings (rendering, sound, system)
 
-(AI-assisted.) The 3DS renderer reads `render.ini` once at startup. Every setting has a default,
-so the file is optional: write only the lines you want to change. The log (`stdout.log`) prints
-the settings in use: `[ctr] settings from ...: dist 500m lod 200m ...` (or `[ctr] no render.ini,
-default settings: ...`), and warns about unknown keys.
+(AI-assisted.) One file holds all the 3DS settings: `config.ini`, read once at startup. Every
+setting has a default, so the file is optional: write only the lines you want to change. The log
+(`stdout.log`) prints the renderer settings in use: `[ctr] settings from ...: dist 500m lod 200m
+...` (or `[ctr] no config.ini, default settings: ...`), and warns about unknown keys.
+
+An older `render.ini` is still read when there is no `config.ini` (rename it to keep using it),
+and the older flag files (`sound`, `use_syscore`, `mips2c_native_off`, `perf_sections`) still work.
+
+## Sound and system
+
+```ini
+sound = on                 # sound output (off: silent; it costs CPU time)
+sound_core = 0             # CPU core of the sound mixer: 0 (default on New 3DS), 1, 2 (the render thread's)
+io_on_system_core = off    # on: the game's I/O threads on core 1 (the system core; experimental)
+mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names
+perf_sections = off        # on: per-section timing in the log (slower)
+```
 
 ## Where it goes
 
-- 3DS: `sdmc:/3ds/jak1/render.ini` (next to the game's data; the parent folder also works).
-- PC (`gk --ctr-gfx`): `<project>/render.ini`.
+- 3DS: `sdmc:/3ds/jak1/config.ini` (or `sdmc:/3ds/jak1/data/config.ini`).
+- PC (`gk --ctr-gfx`): `<project>/config.ini`.
 
 ## Format
 

@@ -31,6 +31,10 @@
 #include <vector>
 
 #include "common/goal_constants.h"
+
+#ifdef __3DS__
+extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
+#endif
 #include "common/log/log.h"
 
 #include "game/common/ee_mem_write.h"
@@ -108,7 +112,30 @@ const std::vector<std::string>* native_off_list() {
   static std::vector<std::string> names;
   if (!read) {
     read = true;
-    if (FILE* f = fopen("sdmc:/3ds/jak1/mips2c_native_off", "rb")) {
+#ifdef __3DS__
+    // (AI-assisted) config.ini: mips2c_native_off = all, or the names (spaces or commas between)
+    char v[256];
+    if (ctr_config_get("mips2c_native_off", v, sizeof(v))) {
+      std::string s(v);
+      if (s != "off" && s != "0" && s != "no" && s != "false") {
+        exists = true;
+        if (s != "all" && s != "on" && s != "1" && s != "yes" && s != "true") {
+          for (char& c : s) {
+            if (c == ',') {
+              c = ' ';
+            }
+          }
+          size_t i = 0;
+          while ((i = s.find_first_not_of(' ', i)) != std::string::npos) {
+            const size_t e = s.find(' ', i);
+            names.push_back(s.substr(i, e - i));
+            i = e;
+          }
+        }
+      }
+    }
+#endif
+    if (FILE* f = exists ? nullptr : fopen("sdmc:/3ds/jak1/mips2c_native_off", "rb")) {
       exists = true;
       char line[256];
       while (fgets(line, sizeof(line), f)) {

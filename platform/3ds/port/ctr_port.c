@@ -118,6 +118,62 @@ void ctr_boot_mark(const char* step) {
   }
 }
 
+static void config_trim(char* s) {
+  char* a = s;
+  while (*a == ' ' || *a == '\t') {
+    a++;
+  }
+  memmove(s, a, strlen(a) + 1);
+  size_t n = strlen(s);
+  while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) {
+    s[--n] = 0;
+  }
+}
+
+int ctr_config_get(const char* key, char* out, int size) {
+  static const char* const kFiles[] = {"sdmc:/3ds/jak1/data/config.ini", "sdmc:/3ds/jak1/config.ini",
+                                       "sdmc:/3ds/jak1/data/render.ini", "sdmc:/3ds/jak1/render.ini"};
+  for (int i = 0; i < 4; i++) {
+    FILE* f = fopen(kFiles[i], "r");
+    if (!f) {
+      continue;
+    }
+    /* the first file that exists is the settings file */
+    char line[256];
+    int found = 0;
+    while (!found && fgets(line, sizeof(line), f)) {
+      char* c = strpbrk(line, "#;");
+      if (c) {
+        *c = 0;
+      }
+      char* eq = strchr(line, '=');
+      if (!eq) {
+        continue;
+      }
+      *eq = 0;
+      config_trim(line);
+      if (strcmp(line, key) == 0) {
+        char* v = eq + 1;
+        config_trim(v);
+        snprintf(out, (size_t)size, "%s", v);
+        found = 1;
+      }
+    }
+    fclose(f);
+    return found;
+  }
+  return 0;
+}
+
+int ctr_config_bool(const char* key, int def) {
+  char v[32];
+  if (!ctr_config_get(key, v, sizeof(v))) {
+    return def;
+  }
+  return strcmp(v, "1") == 0 || strcmp(v, "on") == 0 || strcmp(v, "true") == 0 ||
+         strcmp(v, "yes") == 0;
+}
+
 int ctr_platform_init(int enable_console) {
   ctr_linear_lock(); /* creates the lock while there is one thread */
   ctr_linear_unlock();
@@ -148,7 +204,18 @@ int ctr_platform_init(int enable_console) {
    * Core 1 is the system core: the system's services (GPU, SD card, DSP, input) run there, so a
    * busy mixer on it slows every service call of the game on real hardware, and the app only gets
    * a share of it (APT_SetAppCpuTimeLimit; the kernel allows one app thread there). */
+  /* (AI-assisted) config.ini: sound = on, sound_core = N (the flag file still works) */
   {
+    char v[16];
+    if (ctr_config_bool("sound", 0)) {
+      s_sound = 1;
+      s_sound_core = ctr_is_new3ds() ? 0 : 1;
+      if (ctr_config_get("sound_core", v, sizeof(v)) && v[0] >= '0' && v[0] <= '3') {
+        s_sound_core = v[0] - '0';
+      }
+    }
+  }
+  if (!s_sound) {
     FILE* f = fopen("/3ds/jak1/sound", "r");
     if (f) {
       s_sound = 1;
@@ -162,7 +229,8 @@ int ctr_platform_init(int enable_console) {
       fclose(f);
     }
   }
-  int want_syscore = access("/3ds/jak1/use_syscore", F_OK) == 0;
+  int want_syscore = ctr_config_bool("io_on_system_core", 0) ||
+                     access("/3ds/jak1/use_syscore", F_OK) == 0;
   if (want_syscore || (s_sound && s_sound_core == 1)) {
     ctr_core1_enable();
   }
