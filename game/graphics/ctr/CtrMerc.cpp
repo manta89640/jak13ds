@@ -356,14 +356,37 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
   }
 
+  // envmap strength and color per effect (pc-merc-draw-request "fades", after the flags and the
+  // blend shape weights): 0 when the effect's envmap is off or faded out by distance
+  const u8* fades = input + 32 + ((flags.bitflags & 4) ? 4 * c3l::kMercBlercWeights : 0);
+  const int effect_count = flags.effect_count;
+
   // bones as 3x4 rows: camera = -(tmat[0] * x + tmat[1] * y + tmat[2] * z + tmat[3]),
   // with the model's quantization scale folded in
   float palette_rows[CTR_MAX_PALETTE * 12];
+  const c3l::MercDraw* rows_of = nullptr;  // the draw whose palette palette_rows holds
   for (const auto& draw : model->draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
     }
-    for (int p = 0; p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
+    const bool envmap = draw.eye_id == c3l::kMercEnvmapDraw;
+    float fade[4] = {0, 0, 0, 0};
+    if (envmap) {
+      if (draw.effect >= effect_count || !ctr_settings().envmap) {
+        continue;
+      }
+      const u8* f = fades + 4 * draw.effect;
+      if (!f[0] && !f[1] && !f[2]) {
+        continue;
+      }
+      for (int c = 0; c < 4; c++) {
+        fade[c] = f[c] / 128.f;  // GS units: 0x80 = 1.0
+      }
+    }
+    // the draws of a model with at most 24 bones share one palette: made once
+    const bool same_palette = rows_of && rows_of->palette_count == draw.palette_count &&
+                              !memcmp(rows_of->palette, draw.palette, draw.palette_count);
+    for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       const MercMat& m = bones[draw.palette[p]];
       float* rows = &palette_rows[12 * p];
       for (int r = 0; r < 3; r++) {
@@ -373,8 +396,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         rows[4 * r + 3] = -m.tmat[3][r];
       }
     }
+    rows_of = &draw;
     int tex = draw.texture < lev->textures.size() ? lev->textures[draw.texture] : -1;
-    if (draw.eye_id != 0xff && m_eyes) {
+    if (!envmap && draw.eye_id != 0xff && m_eyes) {
       const int eye = m_eyes->texture(draw.eye_id);
       if (eye >= 0) {
         tex = eye;
@@ -383,6 +407,14 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     DrawMode mode;
     mode.as_int() = draw.mode;
     ctr_draw_state st = ctr_state_from_draw_mode(mode, tex);
+    if (envmap) {
+      // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
+      st.atest = CTR_TEST_ALWAYS;
+      ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count, fade, model->mesh,
+                               draw.first_index, draw.index_count);
+      m_stats.draws++;
+      continue;
+    }
     // Alpha like merc2.frag, not like the draw mode's alpha test: only (nearly) transparent pixels
     // are dropped (alpha < 0.128), the rest is blended. The draw modes of hair, eyes and many
     // objects ask for alpha >= 0x26, which throws away most of a hair texture (see-through, noisy

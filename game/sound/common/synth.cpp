@@ -33,6 +33,28 @@ s16Output Synth::Tick() {
   return out;
 }
 
+#ifdef __3DS__
+void Synth::Tick(s16Output* out, int samples) {
+  for (int i = 0; i < samples; i++) {
+    out[i] = s16Output{};
+  }
+  mVoices.remove_if([](std::shared_ptr<Voice>& v) { return v->Dead(); });
+  for (auto& v : mVoices) {
+    Voice* voice = v.get();
+    // the same order of (saturating) additions per sample as Tick(); a voice that stops is
+    // skipped from then on, like there
+    for (int i = 0; i < samples && !voice->Stopped(); i++) {
+      out[i] += voice->Run();
+    }
+  }
+  for (int i = 0; i < samples; i++) {
+    out[i].left = ApplyVolume(out[i].left, mVolume.left.Get());
+    out[i].right = ApplyVolume(out[i].right, mVolume.right.Get());
+    mVolume.Run();
+  }
+}
+#endif
+
 void Synth::AddVoice(std::shared_ptr<Voice> voice) {
   mVoices.emplace_front(voice);
 }

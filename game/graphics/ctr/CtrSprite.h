@@ -6,7 +6,9 @@
  * Sprites for the 3DS renderer (Jak 1 sprite bucket): the 2D HUD (orb and cell counters,
  * icons), world space 2D sprites (particles, glows) and 3D sprites. Follows the DMA layout of
  * Sprite3::render_jak1 and the vertex math of sprite3_3d.vert, done on the CPU: each sprite
- * becomes two triangles for ctr_gpu_draw. Not done: the distorter (heat haze), the fake shadow.
+ * becomes a quad for ctr_gpu_draw_quads. The distorter (portals, heat haze: fans that warp what
+ * is behind them) reads a copy of the screen (ctr_gpu_copy_screen), like Sprite3_Distort. Not
+ * done: the fake shadow.
  */
 
 #include <memory>
@@ -30,7 +32,10 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
 
  private:
   enum Mode { MODE_2D = 1, MODE_HUD = 2, MODE_3D = 3 };
-  void skip_distorter(DmaFollower& dma, CtrRenderState& rs);
+  // reads the distorter's DMA (Sprite3::distort_dma; all of it, also when it doesn't look right:
+  // then false); draw_distorter draws it (Sprite3::distort_setup / distort_draw)
+  bool read_distorter(DmaFollower& dma, CtrRenderState& rs);
+  void draw_distorter();
   bool read_chunk(DmaFollower& dma, u32* count, u32* program);
   void draw_chunk(u32 count, Mode mode);
   void flush();
@@ -63,6 +68,29 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   float m_hud_matrix[16];
   math::Vector4f m_hud_hvdf[76];  // [0] = hvdf_offset, [1 + i] = user_hvdf[i]
 
+  // distorter (Sprite3.h: SpriteDistorterSineTables, SpriteDistortFrameData)
+  struct DistortTables {
+    math::Vector4f entry[128];
+    math::Vector<u32, 4> ientry[9];
+    u64 gif_tag[2];
+    math::Vector<u32, 4> color;
+  };
+  static_assert(sizeof(DistortTables) == 0x8b * 16);
+  struct DistortSprite {
+    math::Vector3f xyz;  // GS screen position
+    float num_255;
+    math::Vector2f st;   // the screen point it shows: GS frame texture (512 x 256) coordinates
+    float num_1;
+    u32 flag;            // slices (3..11)
+    math::Vector4f rgba;  // x: inner radius, y: outer radius, z: texture radius
+  };
+  static_assert(sizeof(DistortSprite) == 48);
+  static constexpr int kMaxDistortSprites = 1024;
+  DistortTables m_distort_tables;
+  std::vector<DistortSprite> m_distort_sprites;
+  int m_distort_count = 0;
+  std::vector<ctr_vertex> m_distort_verts;
+
   VecData m_vec[kSpritesPerChunk];
   AdGif m_adgif[kSpritesPerChunk];
 
@@ -87,6 +115,6 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   float m_corner_reach = 0;
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   struct Stats {
-    int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0;
+    int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0;
   } m_stats;
 };

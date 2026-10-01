@@ -244,6 +244,31 @@ void Player::state_callback([[maybe_unused]] cubeb_stream* stream,
 
 void Player::Tick(s16Output* stream, int samples) {
   std::scoped_lock lock(mTickLock);
+#ifdef __3DS__
+  // (AI-assisted) the same as below, but the synth mixes the samples between two handler ticks
+  // at once
+  static int htick3 = 200;
+  for (int i = 0; i < samples;) {
+    if (htick3 == 200) {
+      mTick++;
+      for (auto it = mHandlers.begin(); it != mHandlers.end();) {
+        bool done = it->second->Tick();
+        if (done) {
+          mHandleAllocator.FreeId(it->first);
+          it = mHandlers.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      htick3 = 0;
+    }
+    const int n = std::min(samples - i, 200 - htick3);
+    mSynth.Tick(stream + i, n);
+    htick3 += n;
+    i += n;
+  }
+  return;
+#endif
   static int htick = 200;
   static int stick = 48000;
   for (int i = 0; i < samples; i++) {

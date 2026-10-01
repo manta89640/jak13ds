@@ -79,9 +79,12 @@ class CtrDirectBucketRenderer : public CtrBucketRenderer {
   void render(DmaFollower& dma, CtrRenderState& rs) override;
   /*! The last render() drew something (for the sky bucket: there is no sky). */
   bool drew() const { return m_drew; }
+  /*! The sky bucket: render-sky-3ds's packet goes to the native sky. */
+  void set_sky(class CtrSky* sky) { m_sky = sky; }
 
  private:
   std::unique_ptr<CtrDirect> m_direct;
+  class CtrSky* m_sky = nullptr;
   bool m_drew = false;
 };
 
@@ -102,6 +105,10 @@ class CtrRenderer {
     double gpu_draw_ms = 0;
     int splits = 0;
     int frames = 0;
+    double cmd_kb = 0;
+    int dropped = 0;
+    int tex_binds = 0;
+    int draws = 0;
   };
   CtrVram& vram() { return *m_vram; }
   CtrLevels& levels() { return *m_levels; }
@@ -116,6 +123,17 @@ class CtrRenderer {
   std::vector<double> m_bucket_ms;
   std::vector<std::pair<int, class CtrMercRenderer*>> m_merc;
   CtrDirectBucketRenderer* m_sky = nullptr;
+  std::unique_ptr<class CtrSky> m_sky_draw;
+
+  // render.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
+  void profile_frame(double gpu_draw_ms);
+  bool profile_skips(const std::string& name) const;
+  int m_profile_mode = 0;
+  int m_profile_frames = 0;     // in this mode
+  double m_profile_start = 0;   // when this mode started (ms)
+  double m_profile_sum = 0;     // GPU draw time of the counted frames
+  int m_profile_count = 0;
+  std::vector<double> m_profile_ms;  // result per mode (-1: not measured yet)
 };
 
 extern const GfxRendererModule gRendererCtr;

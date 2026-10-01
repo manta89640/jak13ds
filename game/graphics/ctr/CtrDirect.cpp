@@ -396,6 +396,7 @@ void CtrDirect::update_draw_state() {
   memset(&st, 0, sizeof(st));
   st.tex = -1;
   m_tex_w = m_tex_h = 1;
+  m_uv_scale_s = m_uv_scale_t = 1.f / 16.f;
   if (m_prim.tme()) {
     const CtrTexture* tex = m_vram->get_texture(m_tex0);
     if (tex && tex->handle >= 0) {
@@ -408,6 +409,8 @@ void CtrDirect::update_draw_state() {
       st.clamp_t = ((m_clamp >> 2) & 3) != 0;
       m_tex_w = 1 << t.tw();
       m_tex_h = 1 << t.th();
+      m_uv_scale_s = 1.f / (16.f * m_tex_w);
+      m_uv_scale_t = 1.f / (16.f * m_tex_h);
     }
   }
   st.blend = m_prim.abe() ? map_blend(m_alpha) : CTR_BLEND_OFF;
@@ -437,6 +440,13 @@ void CtrDirect::update_draw_state() {
   m_state_dirty = false;
 }
 
+void CtrDirect::batch_mode(bool quads) {
+  if (m_quads != quads) {
+    flush();
+    m_quads = quads;
+  }
+}
+
 void CtrDirect::push_vertex(int idx) {
   const auto& b = m_build[idx];
   ctr_vertex v;
@@ -461,15 +471,16 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
   float px = x / 16.f;
   float py = y / 16.f;
   b.x = (px - 2048.f) / 256.f;
-  b.y = -(py - 2048.f) / 112.f;
-  b.z = z / 16777215.f;
+  b.y = (2048.f - py) * (1.f / 112.f);
+  b.z = z * (1.f / 16777215.f);
   if (m_prim.fst()) {
-    b.s = (m_u / 16.f) / m_tex_w;
-    b.t = (m_v / 16.f) / m_tex_h;
+    b.s = m_u * m_uv_scale_s;
+    b.t = m_v * m_uv_scale_t;
   } else {
     float q = m_q == 0.f ? 1.f : m_q;
-    b.s = m_s / q;
-    b.t = m_t / q;
+    const float inv_q = 1.f / q;
+    b.s = m_s * inv_q;
+    b.t = m_t * inv_q;
   }
   memcpy(b.rgba, m_rgba, 4);
   m_build_idx++;
@@ -478,6 +489,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
     case GsPrim::Kind::TRI:
       if (m_build_idx == 3) {
         if (advance) {
+          batch_mode(false);
           push_vertex(0);
           push_vertex(1);
           push_vertex(2);
@@ -492,6 +504,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
       }
       m_strip_count++;
       if (m_strip_count >= 3 && advance) {
+        batch_mode(false);
         for (int i = 0; i < 3; i++) {
           push_vertex(i);
         }
@@ -501,6 +514,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
     case GsPrim::Kind::TRI_FAN:
       if (m_build_idx == 3) {
         if (advance) {
+          batch_mode(false);
           push_vertex(0);
           push_vertex(1);
           push_vertex(2);
@@ -528,15 +542,15 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
         memcpy(c1.rgba, c2.rgba, 4);
         memcpy(c3.rgba, c2.rgba, 4);
         memcpy(c4.rgba, c2.rgba, 4);
+        // a quad: c1, c4, c2, c3 around (triangles c1 c4 c3, c3 c4 c2)
+        batch_mode(true);
         m_build[0] = c1;
-        m_build[1] = c3;
+        m_build[1] = c4;
         m_build[2] = c2;
         push_vertex(0);
         push_vertex(1);
         push_vertex(2);
-        m_build[1] = c4;
-        push_vertex(2);
-        push_vertex(1);
+        m_build[0] = c3;
         push_vertex(0);
         m_stats.triangles += 2;
         m_build_idx = 0;
@@ -559,7 +573,8 @@ void CtrDirect::flush() {
     return;
   }
   static int dbg = 0;
-  if (getenv("CTR_DRAW_DEBUG") && (dbg++ % 97) == 0) {
+  static const bool debug = getenv("CTR_DRAW_DEBUG") != nullptr;
+  if (debug && (dbg++ % 97) == 0) {
     const auto& st = m_draw_state;
     lg::info("[ctr draw] n {} tex {} tcc {} decal {} blend {} atest {} aref {} ztest {} tex0 {:x} "
              "prim {:x} test {:x} alpha {:x}",
@@ -571,7 +586,11 @@ void CtrDirect::flush() {
                v.a);
     }
   }
-  ctr_gpu_draw(&m_draw_state, m_verts.data(), (int)m_verts.size());
+  if (m_quads) {
+    ctr_gpu_draw_quads(&m_draw_state, m_verts.data(), (int)m_verts.size() / 4);
+  } else {
+    ctr_gpu_draw(&m_draw_state, m_verts.data(), (int)m_verts.size());
+  }
   m_stats.flushes++;
   m_verts.clear();
 }

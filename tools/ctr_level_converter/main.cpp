@@ -22,8 +22,10 @@
 #include "common/util/Serializer.h"
 #include "common/util/compress.h"
 
+#include "ctr_texture.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
+#include "third-party/BS_thread_pool.hpp"
 #include "third-party/CLI11.hpp"
 
 namespace {
@@ -42,8 +44,29 @@ struct Options {
   float medium_radius = 12.f;
   float medium_dist = 300.f;
   bool no_tie = false;
+  bool no_shrub = false;
+  // shrubs (grass, bushes, small plants): drawn up to this distance (meters), in chunks of this size
+  float shrub_dist = 100.f;
+  float shrub_cell = 50.f;
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
+  // Textures: ETC1 (opaque) / ETC1A4 (with alpha) instead of RGB565 / RGBA4: 1/4 and 1/2 of the
+  // memory, so a level's textures fit in VRAM. Textures of merc models (characters) stay 16-bit
+  // unless etc1_merc: faces and small details show ETC1's 4x4 blocks up close.
+  bool etc1 = true;
+  bool etc1_merc = false;
+  int etc1_quality = 1;  // 0 low, 1 medium, 2 high (slow)
+  // Mip levels: the GPU reads textures much faster when it can use a smaller version for surfaces
+  // further away (and they don't shimmer).
+  bool mips = true;
+  int threads = 0;  // texture encoding threads (0: all cores)
+};
+
+// how a texture is used by the level's draws
+struct TexUse {
+  bool merc = false;        // drawn by a merc model
+  bool alpha_test = false;  // drawn with an alpha test (cut-outs: keep their coverage in the mips)
+  int aref = 0x26;          // the alpha test reference (GS units, 0x80 = 1.0)
 };
 
 // A triangle soup vertex before chunking
@@ -56,7 +79,8 @@ struct SrcVertex {
 struct SrcTri {
   u32 v[3];         // into the global SrcVertex list
   u32 draw_key;     // index into draw_keys
-  u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist)
+  u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist),
+                    // 3: shrub (drawn up to shrub_dist)
   u32 tier = 0;     // c3l::Chunk::lod_tier
 };
 
@@ -79,6 +103,22 @@ struct Converter {
   // level texture index -> output texture index
   std::unordered_map<u32, u16> tex_map;
   std::vector<u32> tex_order;  // output index -> level texture index
+  std::vector<TexUse> tex_use;  // by output index
+
+  void note_use(u16 tex, u32 mode_bits, bool merc) {
+    if (tex == 0xffff || tex >= tex_use.size()) {
+      return;
+    }
+    DrawMode mode;
+    mode.as_int() = mode_bits;
+    auto& u = tex_use[tex];
+    u.merc |= merc;
+    if (mode.get_at_enable() && mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL &&
+        !u.alpha_test) {
+      u.alpha_test = true;
+      u.aref = mode.get_aref();
+    }
+  }
 
   u32 key_id(const DrawKey& k) {
     auto it = draw_key_ids.find(k);
@@ -101,6 +141,7 @@ struct Converter {
     }
     u16 id = tex_order.size();
     tex_order.push_back(tree_tex_id);
+    tex_use.emplace_back();
     tex_map[tree_tex_id] = id;
     return id;
   }
@@ -165,6 +206,7 @@ struct Converter {
     }
     for (auto& d : tree.draws) {
       DrawKey k{d.mode.as_int(), texture_id(d.tree_tex_id), 0};
+      note_use(k.texture, k.mode, false);
       u32 id = key_id(k);
       if (tree.use_strips) {
         add_strips(tree.unpacked.indices, d.unpacked.idx_of_first_idx_in_full_buffer,
@@ -222,6 +264,39 @@ struct Converter {
   size_t small_tris = 0;
   size_t wind_tris = 0;
 
+  size_t shrub_tris = 0;
+  void add_shrub_tree(tfrag3::ShrubTree& tree) {
+    tree.unpack();
+    const u32 base = verts.size();
+    for (const auto& v : tree.unpacked.vertices) {
+      SrcVertex sv;
+      sv.x = v.x;
+      sv.y = v.y;
+      sv.z = v.z;
+      // shrub.vert: texture coordinates in 1/4096, color = base color * time of day color * 4;
+      // our level shader does texture * color * 2 (GS units), like the tfrag colors
+      sv.s = v.s / 4096.f;
+      sv.t = v.t / 4096.f;
+      for (int c = 0; c < 3; c++) {
+        const int tod = tree.time_of_day_colors.read(v.color_index, opt.palette, c);
+        sv.rgba[c] = (u8)std::min(255, v.rgba_base[c] * tod * 2 / 255);
+      }
+      sv.rgba[3] = tree.time_of_day_colors.read(v.color_index, opt.palette, 3);
+      verts.push_back(sv);
+    }
+    for (const auto& d : tree.static_draws) {
+      const u16 tex = texture_id((s32)d.tree_tex_id);
+      note_use(tex, d.mode.as_int(), false);
+      const u32 key = key_id(DrawKey{d.mode.as_int(), tex, 2});
+      const size_t first_tri = tris.size();
+      add_strips(tree.indices, d.first_index_index, d.num_indices, base, key);
+      for (size_t i = first_tri; i < tris.size(); i++) {
+        tris[i].detail = 3;
+      }
+      shrub_tris += tris.size() - first_tri;
+    }
+  }
+
   void add_tie_tree(tfrag3::TieTree& tree) {
     tree.unpack();
     u32 base = verts.size();
@@ -238,14 +313,17 @@ struct Converter {
       verts.push_back(sv);
     }
     // static instances (already in world space), one vis group per instance
-    // categories: normal, trans, water, then envmap draws (not supported)
-    u32 last_draw = tree.category_draw_indices[(int)tfrag3::TieCategory::WATER + 1];
+    // categories: normal, trans, water, the base draws of envmapped ties (drawn like the others:
+    // same colors as tfrag3, see etie_base.vert), then the envmap shine draws (not supported)
+    u32 last_draw = tree.category_draw_indices[(int)tfrag3::TieCategory::WATER_ENVMAP + 1];
     if (last_draw == 0) {
       last_draw = tree.static_draws.size();
     }
     for (u32 di = 0; di < tree.static_draws.size() && di < last_draw; di++) {
       const auto& d = tree.static_draws[di];
-      u32 key = key_id(DrawKey{d.mode.as_int(), texture_id(d.tree_tex_id), 1});
+      const u16 tex = texture_id(d.tree_tex_id);
+      note_use(tex, d.mode.as_int(), false);
+      u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (auto& g : d.vis_groups) {
         size_t first_tri = tris.size();
@@ -256,7 +334,9 @@ struct Converter {
     }
     // instances moved by the wind (plants, trees): baked at rest with their instance matrix
     for (const auto& d : tree.instanced_wind_draws) {
-      u32 key = key_id(DrawKey{d.mode.as_int(), texture_id(d.tree_tex_id), 1});
+      const u16 tex = texture_id(d.tree_tex_id);
+      note_use(tex, d.mode.as_int(), false);
+      u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
       size_t idx = 0;
       for (const auto& g : d.instance_groups) {
         const auto& mat = tree.wind_instance_info.at(g.instance_idx).matrix;
@@ -306,6 +386,7 @@ struct MercOut {
   std::vector<c3l::MercBlercTarget> blerc_targets;
   std::vector<u16> blerc_dests;
   int skipped_models = 0;
+  int envmap_draws = 0;
 };
 
 void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* out) {
@@ -362,6 +443,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           draw_list.push_back({&d, false});
         }
       }
+      const size_t effect_first_draw = out->draws.size();
       for (const auto& [dp, from_mod] : draw_list) {
         const auto& d = *dp;
         const std::vector<tfrag3::MercVertex>& vsrc = from_mod ? eff.mod.vertices : group.vertices;
@@ -401,6 +483,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           c3l::MercDraw md{};
           md.mode = d.mode.as_int();
           md.texture = cv.texture_id(d.tree_tex_id);  // for eyes: the gray eye placeholder
+          cv.note_use(md.texture, md.mode, true);
           md.eye_id = d.eye_id;
           md.effect = ei;
           md.first_index = out->indices.size();
@@ -492,6 +575,21 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
       if (too_big) {
         break;
       }
+      // envmapped effects (shiny: power cells, precursor metal): the envmap pass draws the same
+      // triangles again with the envmap texture and mode (emerc.vert / Merc2 envmap draws)
+      if (eff.has_envmap) {
+        const size_t effect_end = out->draws.size();
+        const u16 env_tex = cv.texture_id((s32)eff.envmap_texture);
+        cv.note_use(env_tex, eff.envmap_mode.as_int(), true);
+        for (size_t di = effect_first_draw; di < effect_end; di++) {
+          c3l::MercDraw ed = out->draws[di];
+          ed.mode = eff.envmap_mode.as_int();
+          ed.texture = env_tex;
+          ed.eye_id = c3l::kMercEnvmapDraw;
+          out->draws.push_back(ed);
+          out->envmap_draws++;
+        }
+      }
       if (use_blerc) {
         // per vertex: int [target weight indices..., terminator, dest mod vertex],
         // float [base, target offsets...] (tfrag3::Blerc)
@@ -564,12 +662,31 @@ u32 next_pow2(u32 v) {
   return p;
 }
 
-std::vector<u8> convert_texture(const tfrag3::Texture& tex, int max_size, c3l::Texture* out_desc) {
+struct TexStats {
+  u64 bytes_16bit = 0;  // what the textures took as single level 16-bit textures (c3l v7)
+  u64 bytes = 0;
+  int etc1 = 0, etc1a4 = 0, rgb565 = 0, rgba4 = 0;
+  double psnr_sum = 0, psnr_min = 99;
+  int psnr_count = 0;
+};
+
+/*!
+ * One level texture -> the 3DS layout (see ctr_texture.h): power of two, at most max_tex, with mip
+ * levels, in ETC1 / ETC1A4 / RGB565 / RGBA4.
+ */
+std::vector<u8> convert_texture(const tfrag3::Texture& tex,
+                                const Options& opt,
+                                const TexUse& use,
+                                c3l::Texture* out_desc,
+                                double* psnr_out) {
   // source RGBA8888, PS2 alpha (0x80 = opaque)
   u32 sw = tex.w, sh = tex.h;
-  u32 dw = std::clamp<u32>(next_pow2(sw), 8, max_size);
-  u32 dh = std::clamp<u32>(next_pow2(sh), 8, max_size);
-  std::vector<u8> rgba(dw * dh * 4);
+  u32 dw = std::clamp<u32>(next_pow2(sw), 8, opt.max_tex);
+  u32 dh = std::clamp<u32>(next_pow2(sh), 8, opt.max_tex);
+  ctr_tex::Image img;
+  img.w = dw;
+  img.h = dh;
+  img.rgba.resize(dw * dh * 4);
   for (u32 y = 0; y < dh; y++) {
     for (u32 x = 0; x < dw; x++) {
       // box filter over the source pixels covered by this texel
@@ -586,35 +703,59 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex, int max_size, c3l::T
         }
       }
       for (int c = 0; c < 4; c++) {
-        rgba[4 * (x + y * dw) + c] = n ? acc[c] / n : 0;
+        img.rgba[4 * (x + y * dw) + c] = n ? acc[c] / n : 0;
       }
     }
   }
   bool has_alpha = false;
   for (u32 i = 0; i < dw * dh; i++) {
-    u32 a = std::min(255u, rgba[4 * i + 3] * 2u);
-    rgba[4 * i + 3] = a;
+    u32 a = std::min(255u, img.rgba[4 * i + 3] * 2u);
+    img.rgba[4 * i + 3] = a;
     if (a < 240) {
       has_alpha = true;
     }
   }
-  std::vector<u8> out(dw * dh * 2);
-  for (u32 y = 0; y < dh; y++) {
-    for (u32 x = 0; x < dw; x++) {
-      const u8* p = &rgba[4 * (x + y * dw)];
-      u16 v;
-      if (has_alpha) {
-        v = ((p[0] >> 4) << 12) | ((p[1] >> 4) << 8) | ((p[2] >> 4) << 4) | (p[3] >> 4);
-      } else {
-        v = ((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3);
-      }
-      u32 idx = c3l::tiled_index(x, y, dw, dh);
-      memcpy(&out[2 * idx], &v, 2);
+  const bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
+  ctr_tex::Format fmt;
+  if (has_alpha) {
+    fmt = etc1 ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::RGBA4;
+  } else {
+    fmt = etc1 ? ctr_tex::Format::ETC1 : ctr_tex::Format::RGB565;
+  }
+  const int levels = opt.mips ? ctr_tex::level_count(dw, dh, 16) : 1;
+  ctr_tex::MipOptions mo;
+  mo.preserve_coverage = has_alpha && use.alpha_test;
+  mo.alpha_ref = std::clamp(use.aref * 2, 1, 255);
+  auto mips = ctr_tex::make_mips(img, levels, mo);
+  std::vector<u8> out;
+  for (auto& m : mips) {
+    if (has_alpha) {
+      ctr_tex::fill_transparent_colors(&m);
     }
+    ctr_tex::encode_level(m, fmt, opt.etc1_quality, &out,
+                          mo.preserve_coverage ? mo.alpha_ref : 0);
+  }
+  if (psnr_out) {
+    // quality of the first level (visible texels only)
+    const auto dec = ctr_tex::decode_level(out.data(), dw, dh, fmt);
+    double se = 0;
+    size_t n = 0;
+    for (u32 i = 0; i < dw * dh; i++) {
+      if (mips[0].rgba[4 * i + 3] < 16) {
+        continue;
+      }
+      for (int c = 0; c < 3; c++) {
+        const double d = (double)mips[0].rgba[4 * i + c] - dec.rgba[4 * i + c];
+        se += d * d;
+        n++;
+      }
+    }
+    *psnr_out = (n == 0 || se == 0) ? 99.0 : 10.0 * std::log10(255.0 * 255.0 * n / se);
   }
   out_desc->w = dw;
   out_desc->h = dh;
-  out_desc->format = has_alpha ? c3l::TEX_RGBA4 : c3l::TEX_RGB565;
+  out_desc->format = (u8)fmt;
+  out_desc->levels = (u8)mips.size();
   return out;
 }
 
@@ -691,9 +832,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       tie_trees++;
     }
   }
+  int shrub_trees = 0;
+  if (!opt.no_shrub && !opt.merc_only) {
+    for (auto& tree : level.shrub_trees) {
+      cv.add_shrub_tree(tree);
+      shrub_trees++;
+    }
+  }
 
   // ---- chunking: grid cells by triangle centroid ----
-  const float cell = opt.cell_meters * 4096.f;
+  // shrubs are small and only drawn up close: smaller cells cull them better
+  auto cell_of_detail = [&](int detail) {
+    return (detail == 3 ? opt.shrub_cell : opt.cell_meters) * 4096.f;
+  };
   // (detail, cell) -> triangle indices
   std::map<std::tuple<int, int, int, int>, std::vector<u32>> cells;
   for (u32 i = 0; i < cv.tris.size(); i++) {
@@ -704,6 +855,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       cy += cv.verts[t.v[k]].y;
       cz += cv.verts[t.v[k]].z;
     }
+    const float cell = cell_of_detail((int)t.detail);
     auto key = std::make_tuple((int)(t.detail + 4 * t.tier), (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell));
     cells[key].push_back(i);
@@ -744,12 +896,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
 
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
+      const float cell = cell_of_detail(detail);
       ch.lod_tier = std::get<0>(key) / 4;
       ch.lod_center[0] = (std::get<1>(key) + 0.5f) * cell;
       ch.lod_center[1] = (std::get<2>(key) + 0.5f) * cell;
       ch.lod_center[2] = (std::get<3>(key) + 0.5f) * cell;
-      ch.max_dist = detail == 1 ? opt.detail_dist * 4096.f
-                                : (detail == 2 ? opt.medium_dist * 4096.f : 0.f);
+      ch.max_dist = detail == 1   ? opt.detail_dist * 4096.f
+                    : detail == 2 ? opt.medium_dist * 4096.f
+                    : detail == 3 ? opt.shrub_dist * 4096.f
+                                  : 0.f;
       float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
       for (u32 s : local_src) {
         const auto& v = cv.verts[s];
@@ -812,13 +967,45 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
     }
   }
 
-  // ---- textures ----
-  std::vector<c3l::Texture> tex_descs;
-  std::vector<std::vector<u8>> tex_datas;
-  for (u32 src : cv.tex_order) {
-    c3l::Texture d{};
-    tex_datas.push_back(convert_texture(level.textures.at(src), opt.max_tex, &d));
-    tex_descs.push_back(d);
+  // ---- textures (in parallel: ETC1 encoding is slow) ----
+  std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
+  std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
+  std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
+  {
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
+      for (size_t i = a; i < b; i++) {
+        tex_descs[i] = c3l::Texture{};
+        tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
+                                       &tex_descs[i], &tex_psnr[i]);
+      }
+    });
+    pool.wait_for_tasks();
+  }
+  TexStats tstats;
+  for (size_t i = 0; i < tex_descs.size(); i++) {
+    const auto& d = tex_descs[i];
+    tstats.bytes_16bit += (u64)d.w * d.h * 2;
+    tstats.bytes += tex_datas[i].size();
+    switch (d.format) {
+      case c3l::TEX_ETC1:
+        tstats.etc1++;
+        break;
+      case c3l::TEX_ETC1A4:
+        tstats.etc1a4++;
+        break;
+      case c3l::TEX_RGB565:
+        tstats.rgb565++;
+        break;
+      default:
+        tstats.rgba4++;
+        break;
+    }
+    if (d.format == c3l::TEX_ETC1 || d.format == c3l::TEX_ETC1A4) {
+      tstats.psnr_sum += tex_psnr[i];
+      tstats.psnr_min = std::min(tstats.psnr_min, tex_psnr[i]);
+      tstats.psnr_count++;
+    }
   }
 
   // ---- write ----
@@ -872,14 +1059,21 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   file_util::write_binary_file(out, buf.data(), buf.size());
 
   lg::info(
-      "{}: {} tfrag + {} tie trees -> {} chunks, {} verts ({} KB), {} tris, {} draws, {} textures "
-      "({} KB), {} merc models ({} verts, {} tris, {} draws), file {} KB; tie: {} wind tris, "
-      "{} small/medium-object tris; far tfrag: {} tris ({})",
-      level.level_name, tfrag_trees, tie_trees, chunks.size(), out_verts.size(),
+      "{}: {} tfrag + {} tie + {} shrub trees ({} shrub tris) -> {} chunks, {} verts ({} KB), {} "
+      "tris, {} draws, {} textures ({} KB), {} merc models ({} verts, {} tris, {} draws, {} envmap), file {} "
+      "KB; tie: {} wind tris, {} small/medium-object tris; far tfrag: {} tris ({})",
+      level.level_name, tfrag_trees, tie_trees, shrub_trees, cv.shrub_tris, chunks.size(),
+      out_verts.size(),
       out_verts.size() * sizeof(c3l::Vertex) / 1024, out_indices.size() / 3, out_draws.size(),
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
-      merc.indices.size() / 3, merc.draws.size(), buf.size() / 1024, cv.wind_tris, cv.small_tris,
+      merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, buf.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
+  lg::info("{}: textures {} KB with mip levels (16-bit, no mips: {} KB): {} ETC1, {} ETC1A4, {} "
+           "RGB565, {} RGBA4; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
+           level.level_name, tstats.bytes / 1024, tstats.bytes_16bit / 1024, tstats.etc1,
+           tstats.etc1a4, tstats.rgb565, tstats.rgba4,
+           tstats.psnr_count ? tstats.psnr_sum / tstats.psnr_count : 0.0,
+           tstats.psnr_count ? tstats.psnr_min : 0.0);
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
             cv.radius_hist[0], cv.radius_hist[1], cv.radius_hist[2], cv.radius_hist[3],
             cv.radius_hist[4], cv.radius_hist[5], cv.radius_hist[6], cv.radius_hist[7]);
@@ -909,9 +1103,20 @@ int main(int argc, char** argv) {
   app.add_option("--medium-radius", opt.medium_radius, "same for medium objects");
   app.add_option("--medium-dist", opt.medium_dist, "same for medium objects");
   app.add_flag("--no-tie", opt.no_tie, "leave out tie");
+  app.add_flag("--no-shrub", opt.no_shrub, "leave out shrubs (grass, bushes, small plants)");
+  app.add_option("--shrub-dist", opt.shrub_dist, "shrubs are drawn up to this distance (meters)");
+  app.add_option("--shrub-cell", opt.shrub_cell, "chunk grid size for shrubs in meters");
   app.add_flag("--no-merc", opt.no_merc, "leave out merc models");
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
+  bool no_etc1 = false, no_mips = false;
+  app.add_flag("--no-etc1", no_etc1, "16-bit textures (RGB565 / RGBA4) instead of ETC1 / ETC1A4");
+  app.add_flag("--etc1-merc", opt.etc1_merc, "ETC1 also for the textures of merc models");
+  app.add_option("--etc1-quality", opt.etc1_quality, "ETC1 encoder quality: 0 low, 1 medium, 2 high");
+  app.add_flag("--no-mips", no_mips, "no mip levels");
+  app.add_option("--threads", opt.threads, "texture encoding threads (0: all cores)");
   CLI11_PARSE(app, argc, argv);
+  opt.etc1 = !no_etc1;
+  opt.mips = !no_mips;
   lg::initialize();
 
   if (all) {
