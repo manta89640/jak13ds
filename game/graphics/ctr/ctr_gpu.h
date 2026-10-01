@@ -158,6 +158,11 @@ void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
  * (trilinear, slower) (render.ini mipmaps). */
 void ctr_gpu_set_mip_mode(int mode);
+/* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
+ * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the
+ * rest of the frame. Off: the GPU starts at the end of the frame (render.ini overlap). */
+void ctr_gpu_set_overlap(int on);
+void ctr_gpu_submit_partial(void);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
 int ctr_gpu_is_emulator(void);
 

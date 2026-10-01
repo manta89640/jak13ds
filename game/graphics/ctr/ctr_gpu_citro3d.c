@@ -509,6 +509,11 @@ void ctr_gpu_exit(void) {
 static void update_pool_residency(void);
 static int g_vram_textures;
 
+/* citro3d's GX queue is the first member of its (internal) context, __C3D_Context */
+extern gxCmdQueue_s __C3D_Context;
+static int s_overlap = 0;
+static unsigned s_partial_draws, s_partials;
+
 void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
@@ -537,6 +542,8 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   }
   g.vbuf_used = 0;
   g.vbuf_flushed = 0;
+  s_partial_draws = 0;
+  s_partials = 0;
   memset(&g.cur, 0, sizeof(g.cur));
   g.in_frame = 1;
 }
@@ -564,6 +571,29 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
   }
   C3D_SyncTextureCopy(in, indim, out, outdim, size, flags);
+}
+
+#define PARTIAL_MIN_DRAWS 24
+#define PARTIAL_MAX 6 /* citro3d's queue has 32 entries per frame */
+
+void ctr_gpu_set_overlap(int on) {
+  s_overlap = on;
+}
+
+/* (AI-assisted) The vertices are flushed and the command list split with its cache flush, then
+ * the queue runs: the GPU draws this part while the CPU builds the rest (C3D_FrameBegin stops
+ * the queue, citro3d only runs it at the frame end otherwise). Draw order is kept: the queue runs
+ * its entries in order, and the frame end adds the rest and the display transfer after them. */
+void ctr_gpu_submit_partial(void) {
+  if (!s_overlap || !g.ready || !g.in_frame || s_partials >= PARTIAL_MAX ||
+      g.cur.draws < s_partial_draws + PARTIAL_MIN_DRAWS) {
+    return;
+  }
+  flush_vbuf();
+  C3D_FrameSplit(GX_CMDLIST_FLUSH);
+  gxCmdQueueRun(&__C3D_Context);
+  s_partial_draws = g.cur.draws;
+  s_partials++;
 }
 
 void ctr_gpu_frame_end(void) {

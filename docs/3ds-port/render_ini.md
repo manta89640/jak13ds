@@ -37,6 +37,7 @@ sprites = on               # world particles; the HUD is always drawn
 max_sprites = 1000         # world particles per frame
 ocean = on                 # the ocean
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color
+overlap = off              # on: the GPU starts drawing each part of a frame while the CPU builds the rest (experimental)
 distort = on               # sprite distorter: warp gate portals, heat haze (one screen copy in frames that have them)
 envmap = on                # shine on power cells, precursor metal, ... (needs .c3l v9 files)
 
