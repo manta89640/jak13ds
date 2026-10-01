@@ -37,6 +37,7 @@ class CtrSky {
   bool m_valid[2] = {false, false};
   int m_tex[2] = {-1, -1};
   std::vector<u32> m_decode;
+  std::vector<u64> m_logged;  // source textures already logged
   struct Stats {
     int blends = 0, draws = 0;
   } m_stats;
