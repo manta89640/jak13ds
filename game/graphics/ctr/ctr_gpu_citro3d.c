@@ -248,15 +248,21 @@ static int reserve_mesh_slot(void) {
 
 /* textures deleted during a frame may still be read by the GPU: free them at the start of the
  * next frame, after C3D_FrameBegin(C3D_FRAME_SYNCDRAW) waited for the GPU */
-static void process_pending_deletes(void) {
+/* hold (render.ini pipeline): the GPU may still draw the frame before the one that asked for a
+ * delete, so a slot waits one more frame (2 -> 3 -> freed) */
+static void process_pending_deletes(int hold) {
   ctr_linear_lock();
   for (int i = 0; i < g.pending_staging_count; i++) {
     linearFree(g.pending_staging[i]);
   }
   g.pending_staging_count = 0;
+  int kept = 0;
   for (int i = 0; i < g.pending_delete_count; i++) {
     int h = g.pending_delete[i];
-    if (g.textures[h].used == 2) {
+    if (hold && g.textures[h].used == 2) {
+      g.textures[h].used = 3;
+      g.pending_delete[kept++] = h;
+    } else if (g.textures[h].used == 2 || g.textures[h].used == 3) {
       if (g.textures[h].pool < 0) {
         C3D_TexDelete(&g.textures[h].tex);
       }
@@ -264,10 +270,12 @@ static void process_pending_deletes(void) {
       g.textures[h].pool = -1;
     }
   }
-  g.pending_delete_count = 0;
+  g.pending_delete_count = kept;
   for (int i = 0; i < MAX_POOLS; i++) {
     TexPool* p = &g.pools[i];
-    if (p->used == 2) {
+    if (hold && p->used == 2) {
+      p->used = 3;
+    } else if (p->used == 2 || p->used == 3) {
       if (p->vram) {
         vramFree(p->vram);
       }
@@ -275,9 +283,13 @@ static void process_pending_deletes(void) {
       memset(p, 0, sizeof(*p));
     }
   }
+  kept = 0;
   for (int i = 0; i < g.pending_mesh_delete_count; i++) {
     MeshSlot* m = &g.meshes[g.pending_mesh_delete[i]];
-    if (m->used == 2) {
+    if (hold && m->used == 2) {
+      m->used = 3;
+      g.pending_mesh_delete[kept++] = g.pending_mesh_delete[i];
+    } else if (m->used == 2 || m->used == 3) {
       linearFree(m->verts);
       linearFree(m->indices);
       m->verts = NULL;
@@ -285,7 +297,7 @@ static void process_pending_deletes(void) {
       m->used = 0;
     }
   }
-  g.pending_mesh_delete_count = 0;
+  g.pending_mesh_delete_count = kept;
   ctr_linear_unlock();
 }
 
@@ -514,23 +526,52 @@ extern gxCmdQueue_s __C3D_Context;
 static int s_overlap = 0;
 static unsigned s_partial_draws, s_partials;
 
-void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
-  if (!g.ready) {
-    return;
+/* (AI-assisted) render.ini pipeline: the CPU builds frame N+1 while the GPU draws frame N.
+ * citro3d's C3D_FrameBegin waits for the GPU before a frame can be built (it reuses one command
+ * buffer). With the pipeline the frame is built into one of two command and vertex buffers of
+ * our own (citro3d's draw calls write wherever gpuCmdBuf points), the clear is queued at once
+ * (it runs after frame N on the GPU), and only ctr_gpu_frame_end waits (C3D_FrameBegin), then
+ * submits the frame with citro3d as usual. Deletes wait one more frame (process_pending_deletes).
+ * Not done while building: screenshots. Textures updated in place (sky, eyes) may show one frame
+ * early in frame N. */
+static void flush_vbuf(void);
+static int s_pipeline = 0;
+#define PIPE_CMD_BYTES (1024 * 1024)
+static u32* s_cmdbufs[2];
+static uint8_t* s_vbufs[2];
+static int s_k;
+
+int ctr_gpu_set_pipeline(int on) {
+  if (!g.ready || g.in_frame) {
+    return 0;
   }
-  C3D_FrameBegin(0); /* waits for the GPU; the game thread already paces to vblank */
-  g.cmd_base = gpuCmdBuf;
-  g.frame_no++;
-  process_pending_deletes();
-  /* before any draw: copies to VRAM are queued ahead of this frame's draws */
-  update_pool_residency();
-  if (g.screenshot_state == 2) {
-    write_screenshot();
-    g.screenshot_state = 0;
+  if (on && !s_cmdbufs[1]) {
+    ctr_linear_lock();
+    s_cmdbufs[0] = (u32*)linearAlloc(PIPE_CMD_BYTES);
+    s_cmdbufs[1] = (u32*)linearAlloc(PIPE_CMD_BYTES);
+    s_vbufs[1] = (uint8_t*)linearAlloc(VBUF_BYTES);
+    ctr_linear_unlock();
+    s_vbufs[0] = g.vbuf;
+    if (!s_cmdbufs[0] || !s_cmdbufs[1] || !s_vbufs[1]) {
+      ctr_linear_lock();
+      linearFree(s_cmdbufs[0]);
+      linearFree(s_cmdbufs[1]);
+      linearFree(s_vbufs[1]);
+      ctr_linear_unlock();
+      s_cmdbufs[0] = s_cmdbufs[1] = NULL;
+      s_vbufs[1] = NULL;
+      return 0;
+    }
   }
-  u32 clear = ((u32)r << 24) | ((u32)gr << 16) | ((u32)b << 8) | 0xff;
-  C3D_RenderTargetClear(g.top, C3D_CLEAR_ALL, clear, 0);
-  C3D_FrameDrawOn(g.top);
+  s_pipeline = on && s_cmdbufs[1];
+  if (!s_pipeline && s_vbufs[0]) {
+    g.vbuf = s_vbufs[0];
+  }
+  return s_pipeline;
+}
+
+/* the parts of the GPU state a frame starts from (both modes) */
+static void frame_state_reset(void) {
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
   g.bound_tex = NULL;
@@ -546,6 +587,62 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   s_partials = 0;
   memset(&g.cur, 0, sizeof(g.cur));
   g.in_frame = 1;
+}
+
+static void pipeline_frame_begin(u32 clear) {
+  s_k ^= 1;
+  GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
+  g.cmd_base = gpuCmdBuf;
+  g.vbuf = s_vbufs[s_k];
+  g.frame_no++;
+  /* copies to VRAM wait for the GPU first (citro3d's safe copy outside of a frame) */
+  update_pool_residency();
+  C3D_FrameBuf* fb = &g.top->frameBuf;
+  u32* color = (u32*)fb->colorBuf;
+  u32* depth = (u32*)fb->depthBuf;
+  const u32 px = (u32)fb->width * fb->height; /* RGBA8 and D24S8: 4 bytes each */
+  GX_MemoryFill(color, clear, color + px, GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH, depth, 0,
+                depth + px, GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH);
+  C3D_SetFrameBuf(fb);
+  C3D_SetViewport(0, 0, fb->width, fb->height);
+  frame_state_reset();
+}
+
+/* send what's built so far to the GPU (pipeline: our command buffer, citro3d isn't in a frame) */
+static void pipeline_submit(void) {
+  flush_vbuf();
+  GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+  GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+  u32* list;
+  u32 words;
+  GPUCMD_Split(&list, &words);
+  if (words) {
+    GX_ProcessCommandList(list, words * 4, GX_CMDLIST_FLUSH);
+  }
+}
+
+void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
+  if (!g.ready) {
+    return;
+  }
+  if (s_pipeline) {
+    pipeline_frame_begin(((u32)r << 24) | ((u32)gr << 16) | ((u32)b << 8) | 0xff);
+    return;
+  }
+  C3D_FrameBegin(0); /* waits for the GPU; the game thread already paces to vblank */
+  g.cmd_base = gpuCmdBuf;
+  g.frame_no++;
+  process_pending_deletes(0);
+  /* before any draw: copies to VRAM are queued ahead of this frame's draws */
+  update_pool_residency();
+  if (g.screenshot_state == 2) {
+    write_screenshot();
+    g.screenshot_state = 0;
+  }
+  u32 clear = ((u32)r << 24) | ((u32)gr << 16) | ((u32)b << 8) | 0xff;
+  C3D_RenderTargetClear(g.top, C3D_CLEAR_ALL, clear, 0);
+  C3D_FrameDrawOn(g.top);
+  frame_state_reset();
 }
 
 /* Immediate draws copy their vertices into g.vbuf. The GPU reads them only when the frame's GX
@@ -567,6 +664,11 @@ static void flush_vbuf(void) {
  * texture pool moving to VRAM). Split here with the flush first; C3D_SyncTextureCopy's own split
  * then has nothing left to send. */
 static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
+  if (g.in_frame && s_pipeline) {
+    pipeline_submit(); /* the draws before the copy, then the copy, in the GPU's queue */
+    GX_TextureCopy(in, indim, out, outdim, size, flags);
+    return;
+  }
   if (g.in_frame) {
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
   }
@@ -589,9 +691,13 @@ void ctr_gpu_submit_partial(void) {
       g.cur.draws < s_partial_draws + PARTIAL_MIN_DRAWS) {
     return;
   }
-  flush_vbuf();
-  C3D_FrameSplit(GX_CMDLIST_FLUSH);
-  gxCmdQueueRun(&__C3D_Context);
+  if (s_pipeline) {
+    pipeline_submit();
+  } else {
+    flush_vbuf();
+    C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    gxCmdQueueRun(&__C3D_Context);
+  }
   s_partial_draws = g.cur.draws;
   s_partials++;
 }
@@ -603,6 +709,16 @@ void ctr_gpu_frame_end(void) {
   flush_vbuf();
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
   g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
+  if (s_pipeline) {
+    /* wait for the previous frame (and this one's parts sent so far), then submit the rest of
+     * this frame from our buffer with citro3d (display transfer, buffer swap) */
+    u32* buf = gpuCmdBuf;
+    const u32 size = gpuCmdBufSize, offset = gpuCmdBufOffset;
+    C3D_FrameBegin(0);
+    process_pending_deletes(1);
+    GPUCMD_SetBuffer(buf, size, offset);
+    C3D_FrameDrawOn(g.top);
+  }
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
   C3D_FrameEnd(GX_CMDLIST_FLUSH);

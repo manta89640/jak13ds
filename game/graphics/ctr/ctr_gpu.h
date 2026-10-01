@@ -163,6 +163,9 @@ void ctr_gpu_set_mip_mode(int mode);
  * rest of the frame. Off: the GPU starts at the end of the frame (render.ini overlap). */
 void ctr_gpu_set_overlap(int on);
 void ctr_gpu_submit_partial(void);
+/* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (render.ini pipeline).
+ * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
+int ctr_gpu_set_pipeline(int on);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
 int ctr_gpu_is_emulator(void);
 

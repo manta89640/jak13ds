@@ -783,6 +783,9 @@ int ctr_gpu_rgba4_as_rgba8(void) {
 void ctr_gpu_set_vram_textures(int) {}
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_submit_partial(void) {}
+int ctr_gpu_set_pipeline(int) {
+  return 0;
+}
 void ctr_gpu_set_mip_mode(int) {}
 int ctr_gpu_is_emulator(void) {
   return 0;
