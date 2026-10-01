@@ -47,6 +47,12 @@ struct CtrLevelData {
   // whether the order matters (blending, or no depth write: decals); see CtrTfragRenderer
   std::vector<u32> draw_sort_keys;
   std::vector<u8> draw_ordered;
+  // made at load: the draws in drawing order, so a frame needs no sort. sorted_draws: the draws
+  // whose order doesn't matter by (sort key, chunk, draw), then ordered_draws in chunk order.
+  // draw_chunk: the chunk of each draw.
+  std::vector<u32> sorted_draws;
+  std::vector<u32> ordered_draws;
+  std::vector<u32> draw_chunk;
   std::vector<int> textures;  // ctr_gpu handles
   int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
   std::vector<int> meshes;    // one per chunk
@@ -173,6 +179,5 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     float clip[16];
   };
   std::vector<VisibleChunk> m_visible;
-  std::vector<u64> m_sorted;   // (sort key << 32) | (visible index << 20) | draw in chunk
-  std::vector<u32> m_ordered;  // (visible index << 20) | draw in chunk
+  std::vector<int> m_visible_slot;  // per chunk: index in m_visible, -1: not drawn
 };
