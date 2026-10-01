@@ -5,10 +5,14 @@
 #   platform/3ds/tools/make_cia.sh [--build-dir DIR] [--out FILE] [--boottest] [--mem 124|legacy]
 #
 # --boottest: package the small test app platform/3ds/hello (build it first: make -C
-#   platform/3ds/hello) with the game's CIA settings, as its own title ("Jak1 boot test",
-#   build-3ds/boottest.cia). It writes sdmc:/3ds/jak1/boottest.txt: whether the title started at
-#   all, passed the HOME Menu handshake, reached main and got the 124 MB mode. For when the game's
-#   CIA stays on the launch screen without writing boot_cia.txt.
+#   platform/3ds/hello) as four separate titles, each with one CIA setting changed, to find the
+#   setting that keeps a title from starting (the game's CIA stays on the launch screen):
+#     boottest_124.cia        the game's settings (124 MB mode, 804 MHz, L2 cache)
+#     boottest_legacy.cia     without the 124 MB mode
+#     boottest_plain.cia      like most homebrew CIAs (FBI): no 124 MB mode, 268 MHz, no L2 cache
+#     boottest_nocompress.cia the game's settings with the code not compressed
+#   Each one appends lines (with its title id) to sdmc:/boottest.txt and
+#   sdmc:/3ds/jak1/boottest.txt and shows the same on its bottom screen.
 # --mem legacy: without the New 3DS 124 MB memory mode (the game then says there isn't enough
 #   memory, but it shows whether that mode is what keeps the title from starting).
 #
@@ -38,16 +42,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$MEM" in 124|legacy) ;; *) echo "--mem: 124 or legacy" >&2; exit 1 ;; esac
-if [ -z "$OUT" ]; then
-  NAME=jak1
-  [ "$BOOTTEST" = 1 ] && NAME=boottest
-  [ "$MEM" = legacy ] && NAME="${NAME}_legacy"
-  OUT="$BUILD_DIR/$NAME.cia"
-fi
-
 MAKEROM="$(command -v makerom || true)"
 [ -n "$MAKEROM" ] || MAKEROM="$HOME/devkitpro-3ds/tools/bin/makerom"
 [ -x "$MAKEROM" ] || { echo "makerom not found (see the header of this script)" >&2; exit 1; }
+echo "makerom: $MAKEROM ($("$MAKEROM" 2>&1 | head -1 || true))"
 
 ELF="$BUILD_DIR/gk.elf"
 SMDH="$BUILD_DIR/gk.smdh"
@@ -61,32 +59,67 @@ fi
 [ -f "$ELF" ] || { echo "no $ELF (build gk first)" >&2; exit 1; }
 [ -f "$SMDH" ] || { echo "no $SMDH" >&2; exit 1; }
 mkdir -p "$BUILD_DIR"
-if [ "$MEM" = legacy ]; then
-  # the same settings without the 124 MB mode
-  sed -e 's/^\(  SystemModeExt *: *\).*/\1Legacy/' "$RSF" > "$BUILD_DIR/cia_legacy.rsf"
-  RSF="$BUILD_DIR/cia_legacy.rsf"
-fi
 
-# banner and icon
 CIA_DIR="$ROOT/platform/3ds/cia"
 BANNERTOOL="$(command -v bannertool || true)"
 [ -n "$BANNERTOOL" ] || BANNERTOOL="$HOME/devkitpro-3ds/tools/bin/bannertool"
-BANNER_ARGS=()
-if [ -x "$BANNERTOOL" ] && [ "$BOOTTEST" = 0 ]; then
-  "$BANNERTOOL" makebanner -i "$CIA_DIR/banner.png" -a "$CIA_DIR/banner.wav" \
-    -o "$BUILD_DIR/banner.bnr" > /dev/null
-  "$BANNERTOOL" makesmdh -s "Jak and Daxter" -l "The Precursor Legacy (OpenGOAL 3DS port)" \
-    -p "OpenGOAL" -i "$CIA_DIR/icon.png" -o "$BUILD_DIR/gk_cia.smdh" > /dev/null
-  SMDH="$BUILD_DIR/gk_cia.smdh"
-  BANNER_ARGS=(-banner "$BUILD_DIR/banner.bnr")
-else
-  echo "bannertool not found: no banner (see the header of this script)" >&2
-fi
+[ -x "$BANNERTOOL" ] || echo "bannertool not found: no banner (see the header of this script)" >&2
 
 # makerom wants a stripped elf
-STRIPPED="$BUILD_DIR/$(basename "$OUT" .cia)_cia.elf"
+STRIPPED="$BUILD_DIR/$(basename "$ELF" .elf)_cia.elf"
 "${DEVKITARM:-/opt/devkitpro/devkitARM}/bin/arm-none-eabi-strip" -o "$STRIPPED" "$ELF"
 
-"$MAKEROM" -f cia -o "$OUT" -elf "$STRIPPED" -rsf "$RSF" \
-  -icon "$SMDH" "${BANNER_ARGS[@]}" -exefslogo -target t -ver 0
-echo "cia: $OUT"
+# build_cia OUT RSF SHORT_TITLE LONG_TITLE
+build_cia() {
+  local out="$1" rsf="$2" short="$3" long="$4"
+  local smdh="$SMDH" banner_args=()
+  if [ -x "$BANNERTOOL" ]; then
+    "$BANNERTOOL" makebanner -i "$CIA_DIR/banner.png" -a "$CIA_DIR/banner.wav" \
+      -o "$BUILD_DIR/banner.bnr" > /dev/null
+    smdh="$BUILD_DIR/$(basename "$out" .cia).smdh"
+    "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p "OpenGOAL" -i "$CIA_DIR/icon.png" \
+      -o "$smdh" > /dev/null
+    banner_args=(-banner "$BUILD_DIR/banner.bnr")
+  fi
+  "$MAKEROM" -f cia -o "$out" -elf "$STRIPPED" -rsf "$rsf" \
+    -icon "$smdh" ${banner_args[@]+"${banner_args[@]}"} -exefslogo -target t -ver 0
+  echo "cia: $out"
+}
+
+# variant RSF: variant_rsf OUT_RSF UNIQUE_ID SED_EXPRESSIONS...
+variant_rsf() {
+  local out="$1" uid="$2"
+  shift 2
+  sed -e "s/^\(  UniqueId *: *\).*/\1$uid/" "$@" "$RSF" > "$out"
+}
+LEGACY=(-e 's/^\(  SystemModeExt *: *\).*/\1Legacy/')
+
+if [ "$BOOTTEST" = 1 ]; then
+  [ -z "$OUT" ] || echo "--out is ignored with --boottest" >&2
+  variant_rsf "$BUILD_DIR/bt_124.rsf" 0xF7A12
+  build_cia "$BUILD_DIR/boottest_124.cia" "$BUILD_DIR/bt_124.rsf" "Jak1 boot test 124" \
+    "CIA boot test: 124 MB, 804 MHz, L2"
+  variant_rsf "$BUILD_DIR/bt_legacy.rsf" 0xF7A13 "${LEGACY[@]}"
+  build_cia "$BUILD_DIR/boottest_legacy.cia" "$BUILD_DIR/bt_legacy.rsf" "Jak1 boot test legacy" \
+    "CIA boot test: legacy memory, 804 MHz, L2"
+  variant_rsf "$BUILD_DIR/bt_plain.rsf" 0xF7A14 "${LEGACY[@]}" \
+    -e 's/^\(  CpuSpeed *: *\).*/\1268MHz/' -e 's/^\(  EnableL2Cache *: *\).*/\1false/'
+  build_cia "$BUILD_DIR/boottest_plain.cia" "$BUILD_DIR/bt_plain.rsf" "Jak1 boot test plain" \
+    "CIA boot test: legacy memory, 268 MHz, no L2"
+  variant_rsf "$BUILD_DIR/bt_nocompress.rsf" 0xF7A15 \
+    -e 's/^\(  EnableCompress *: *\).*/\1false/'
+  build_cia "$BUILD_DIR/boottest_nocompress.cia" "$BUILD_DIR/bt_nocompress.rsf" \
+    "Jak1 boot test nocomp" "CIA boot test: 124 MB, code not compressed"
+  exit 0
+fi
+
+if [ -z "$OUT" ]; then
+  OUT="$BUILD_DIR/jak1.cia"
+  [ "$MEM" = legacy ] && OUT="$BUILD_DIR/jak1_legacy.cia"
+fi
+if [ "$MEM" = legacy ]; then
+  # the same settings without the 124 MB mode
+  sed "${LEGACY[@]}" "$RSF" > "$BUILD_DIR/cia_legacy.rsf"
+  RSF="$BUILD_DIR/cia_legacy.rsf"
+fi
+build_cia "$OUT" "$RSF" "Jak and Daxter" "The Precursor Legacy (OpenGOAL 3DS port)"
