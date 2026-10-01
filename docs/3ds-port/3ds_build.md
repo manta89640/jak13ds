@@ -60,6 +60,28 @@ The CIA asks for the New 3DS 124 MB memory mode (`platform/3ds/cia/gk.rsf`: `Sys
 124MB`, 804 MHz, L2 cache). The game needs about 95 MB: 48 MB of PS2 memory, 12 MB of code, 24 MB
 of GPU memory, plus buffers.
 
+### If the CIA stays on the launch screen
+
+Look at `sdmc:/3ds/jak1/boot_cia.txt`: one line per boot step, the last one is where it stopped
+(`0 services` without `0 APT`: stuck in the HOME Menu handshake). The file is the first thing the
+game writes. If there is none at all, the title never ran the game's code: find out why with the
+boot test, a small app packaged with the same CIA settings as its own title:
+
+```sh
+make -C platform/3ds/hello                              # (source platform/3ds/toolchain/env.sh)
+platform/3ds/tools/make_cia.sh --boottest               # build-3ds/boottest.cia, 124 MB mode
+platform/3ds/tools/make_cia.sh --boottest --mem legacy  # build-3ds/boottest_legacy.cia
+platform/3ds/tools/make_cia.sh --mem legacy             # the game without the 124 MB mode
+```
+
+Install with FBI, start from the HOME Menu, then read `sdmc:/3ds/jak1/boottest.txt` (`0 started`,
+`1 APT`, `2 main reached`, `3 screens up: app memory ...`; the app also shows a pulsing top screen
+and its memory on the bottom screen):
+- the boot test starts but the game doesn't: something about the game's binary (its size, a crash
+  before the first boot step); the legacy game CIA tells whether the 124 MB mode matters for it.
+- the boot test doesn't start either, but its legacy version does: the 124 MB memory mode setting.
+- neither starts: the CIA settings or the install (check FBI's install result).
+
 ### Without installing: gk.3dsx
 
 A `.3dsx` runs inside another title's memory:
