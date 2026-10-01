@@ -489,6 +489,7 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `max_sprites` | 1000 | world sprites per frame |
   | `ocean` | on | draw the ocean |
   | `envmap` | on | the envmap shine of merc models (power cells, precursor metal; c3l v9 files) |
+  | `sky` | on | the sky (time of day texture, clouds); off: the screen is cleared to the fog color |
   | `distort` | on | the sprite distorter (portals, heat haze); costs one screen copy in frames that have distort sprites |
   | `rgba4_as_rgba8` | auto | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. `auto`: on in the emulator, off on the 3DS |
   | `vram_textures` | auto | level texture pools in VRAM while there is room (the GPU reads VRAM much faster). `auto`: on on the 3DS, off in the emulator (Azahar draws VRAM textures as noise) |
