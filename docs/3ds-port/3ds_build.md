@@ -395,9 +395,15 @@ PC it runs with `gk --ctr-gfx`.
   - Chunks are frustum culled by bounding sphere.
   - Levels load on first use from `out/jak1/c3l/<name>.c3l` and unload through `set_levels`.
 - **Merc** (characters): `CtrMercRenderer`, models from the `.c3l` files (GAME.c3l has Jak and
-  the shared ones), GPU skinning with 24-bone palettes, one light approximation (tint).
+  the shared ones), GPU skinning with 24-bone palettes, lighting like `merc2.vert` (3 directional
+  lights + ambient) in the vertex shader, blend shapes (faces), eyes (`CtrEyeRenderer` composites
+  the game's eye sprites into textures). The 3DS has no generic renderer: `draw-bones` draws
+  effects that would use it with merc, and the death effect (dying enemies) hides the model after
+  its first frames and launches the death sparks from the skeleton (`merc-death-spawn-3ds`).
 - **Sprites and HUD:** `CtrSpriteRenderer` (bucket `sprite`): world 2D sprites, 3D sprites and
-  the HUD, the `sprite3_3d.vert` math on the CPU, grouped by GS state.
+  the HUD, the `sprite3_3d.vert` math on the CPU, grouped by GS state, drawn as indexed quads.
+  The sprite distorter (warp gate portals, heat haze) draws its fans with a copy of the screen
+  drawn so far (`ctr_gpu_copy_screen`: one GPU copy, only in frames with distort sprites).
 - **Fog:** the game's fog (like `tfrag3.vert`) plus fog towards the draw distance, computed in
   the level vertex shader and applied with a fog ramp texture in the second TEV stage. The
   screen is cleared to the fog color (no sky renderer).
@@ -420,12 +426,14 @@ PC it runs with `gk --ctr-gfx`.
     0.45 ms (texture shading + 2-4 tile draws, about 1-2k triangles in view).
   - Not done: the near ocean's wave geometry, the env map (sky reflection) pass, the far ocean
     (beyond the 4.6 km map, always in the fog at the default draw distance).
-- **Not drawn yet:** generic, shrub, sky, shadows, eyes, blend shapes, envmap, the sprite
-  distorter, debug lines, scissor.
-- **Memory:** textures go to VRAM first (through a linear staging buffer and a GX copy), then to
-  linear memory. Meshes and the 1.5 MB vertex ring are in linear memory (24 MB total). The frame
-  statistics in the log show what is left (`linear free`, `vram free`); a level that doesn't fit
-  logs `N textures/meshes could not be created`.
+- **Not drawn yet:** sky, shadows, envmap shine passes (tie, merc, ocean), debug lines,
+  scissor.
+- **Memory:** a level's textures are one block of linear memory (a texture pool), copied to VRAM
+  with one GPU copy when there is room: the level the camera is in first (`ctr_gpu_pool_*`, see
+  `performance.md`). Other textures (sprites, text, eyes, ocean) and meshes and the 1.5 MB vertex
+  ring are in linear memory (24 MB total). The frame statistics in the log show what is left
+  (`linear free`, `vram free`) and the pools in VRAM (`[ctr] textures:`); a level that doesn't
+  fit logs `N textures/meshes could not be created`.
 - **Screenshots:** `stage_sd.sh --screenshots N` makes gk save the top screen every N frames to
   `data/log/shot_<frame>.bmp`, read back from the GPU render target. `run_emu.sh` converts them
   to PNG in `build-3ds/emu-run/`.
@@ -451,7 +459,11 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `sprites` | on | draw world sprites (particles); the HUD is always drawn |
   | `max_sprites` | 1000 | world sprites per frame |
   | `ocean` | on | draw the ocean |
-  | `rgba4_as_rgba8` | on | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. Untested on hardware: off may work there and save memory |
+  | `distort` | on | the sprite distorter (portals, heat haze); costs one screen copy in frames that have distort sprites |
+  | `rgba4_as_rgba8` | auto | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. `auto`: on in the emulator, off on the 3DS |
+  | `vram_textures` | auto | level texture pools in VRAM while there is room (the GPU reads VRAM much faster). `auto`: on on the 3DS, off in the emulator (Azahar draws VRAM textures as noise) |
+  | `mipmaps` | on | mip levels of the level textures (c3l v8): `off`, `on` (nearest level), `trilinear` (blends two levels: smoother, slower) |
+  | `gpu_profile` | off | every 2.5 s one group of renderers (level, merc + eyes, sprites, ocean, direct) is left out and `[ctr] gpu profile:` logs what each costs the GPU. The picture flickers |
 
 - **Timing in the log:** every 300 frames or 5 seconds, `[ctr] render ms/frame` (render thread:
   waiting for the GPU, building commands, submitting; GPU time from citro3d), `[ctr] build
