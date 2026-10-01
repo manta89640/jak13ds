@@ -34,7 +34,7 @@ struct Options {
   int tfrag_geo = 1;  // 0 = most detailed, 2 = least (2 has large holes)
   int far_tfrag_geo = 2;  // coarse version for far away cells (-1: none)
   int tie_geo = 3;    // 0 = most detailed, 3 = least
-  int palette = 1;    // time of day palette to bake (0..7)
+  int palette = -1;   // time of day palette to bake (0..7; -1: auto_palette)
   int max_tex = 128;
   float cell_meters = 200.f;
   // tie instances smaller than detail_radius (bounding sphere radius, meters) are only drawn up
@@ -60,6 +60,8 @@ struct Options {
   // further away (and they don't shimmer).
   bool mips = true;
   int threads = 0;  // texture encoding threads (0: all cores)
+  // (AI-assisted) 32-bit textures (the title screen: the logo's colors exact, 16-bit shifted them)
+  bool full_color = false;
 };
 
 // how a texture is used by the level's draws
@@ -82,6 +84,7 @@ struct SrcTri {
   u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist),
                     // 3: shrub (drawn up to shrub_dist)
   u32 tier = 0;     // c3l::Chunk::lod_tier
+  u16 vis = 0xffff;  // (AI-assisted) drawable id in the level's visibility string (c3l::VisRun)
 };
 
 struct DrawKey {
@@ -146,6 +149,13 @@ struct Converter {
     return id;
   }
 
+  // (AI-assisted) the visibility id of the triangles being added (see c3l::VisRun): a BVH node's
+  // id in the level's visibility string, 0xffff = none
+  u16 cur_vis = 0xffff;
+  static u16 vis_id(const tfrag3::BVH& bvh, u32 node) {
+    return node < bvh.vis_nodes.size() ? bvh.vis_nodes[node].my_id : (u16)0xffff;
+  }
+
   // strips with UINT32_MAX restarts -> triangles
   void add_strips(const std::vector<u32>& indices,
                   size_t first,
@@ -160,6 +170,7 @@ struct Converter {
           continue;
         }
         tris.push_back(SrcTri{{vertex_base + a, vertex_base + b, vertex_base + c}, key});
+        tris.back().vis = cur_vis;
       }
       strip.clear();
     };
@@ -208,18 +219,24 @@ struct Converter {
       DrawKey k{d.mode.as_int(), texture_id(d.tree_tex_id), 0};
       note_use(k.texture, k.mode, false);
       u32 id = key_id(k);
-      if (tree.use_strips) {
-        add_strips(tree.unpacked.indices, d.unpacked.idx_of_first_idx_in_full_buffer,
-                   draw_index_count(d), base, id);
-      } else {
-        size_t first = d.unpacked.idx_of_first_idx_in_full_buffer;
-        size_t n = draw_index_count(d);
-        for (size_t i = first; i + 2 < first + n; i += 3) {
-          tris.push_back(SrcTri{{base + tree.unpacked.indices[i], base + tree.unpacked.indices[i + 1],
-                                 base + tree.unpacked.indices[i + 2]},
-                                id});
+      // (AI-assisted) group by group: each is one node of the tree's BVH (up to 8 tfragments)
+      size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
+      for (const auto& g : d.vis_groups) {
+        cur_vis = vis_id(tree.bvh, g.vis_idx_in_pc_bvh);
+        if (tree.use_strips) {
+          add_strips(tree.unpacked.indices, idx, g.num_inds, base, id);
+        } else {
+          for (size_t i = idx; i + 2 < idx + g.num_inds; i += 3) {
+            tris.push_back(SrcTri{{base + tree.unpacked.indices[i],
+                                   base + tree.unpacked.indices[i + 1],
+                                   base + tree.unpacked.indices[i + 2]},
+                                  id});
+            tris.back().vis = cur_vis;
+          }
         }
+        idx += g.num_inds;
       }
+      cur_vis = 0xffff;
     }
   }
 
@@ -327,10 +344,12 @@ struct Converter {
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (auto& g : d.vis_groups) {
         size_t first_tri = tris.size();
+        cur_vis = vis_id(tree.bvh, g.vis_idx_in_pc_bvh);  // (AI-assisted) up to 8 instances
         add_strips(tree.unpacked.indices, idx, g.num_inds, base, key);
         mark_small(first_tri);
         idx += g.num_inds;
       }
+      cur_vis = 0xffff;
     }
     // instances moved by the wind (plants, trees): baked at rest with their instance matrix
     for (const auto& d : tree.instanced_wind_draws) {
@@ -366,7 +385,9 @@ struct Converter {
           local.push_back(it->second);
         }
         size_t first_tri = tris.size();
+        cur_vis = vis_id(tree.bvh, g.vis_idx);  // (AI-assisted) the instance's BVH node
         add_strips(local, 0, local.size(), 0, key);
+        cur_vis = 0xffff;
         wind_tris += tris.size() - first_tri;
         mark_small(first_tri);
         idx += g.num;
@@ -717,7 +738,9 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
   }
   const bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
   ctr_tex::Format fmt;
-  if (has_alpha) {
+  if (opt.full_color) {
+    fmt = ctr_tex::Format::RGBA8;
+  } else if (has_alpha) {
     fmt = etc1 ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::RGBA4;
   } else {
     fmt = etc1 ? ctr_tex::Format::ETC1 : ctr_tex::Format::RGB565;
@@ -776,7 +799,32 @@ u32 append(std::vector<u8>& buf, const T* data, size_t count) {
   return off;
 }
 
-bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
+// (AI-assisted) The time of day palette to bake when none is given. Outdoor levels go through the
+// day (update-mood-palette): palette 1, a daytime one. The interiors' moods (mood.gc) always use
+// palette 0 at weight 1 and add the others only as lights or fades on top; their palette 1 can be
+// black (jungleb's tie: the whole level was drawn black).
+int auto_palette(const std::string& level) {
+  static const char* kFixedMood[] = {"jungleb", "maincave", "darkcave",
+                                     "robocave", "lavatube", "citadel"};
+  for (const char* n : kFixedMood) {
+    if (level == n) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
+  Options opt = opt_in;
+  if (opt.palette < 0) {
+    opt.palette = auto_palette(in.stem().string());
+  }
+  // (AI-assisted) the title screen's textures at their full size: the logo's "The Precursor
+  // Legacy" lettering (256x64) was cut to 128 wide and unreadable. The whole level is ~200 KB.
+  if (in.stem().string() == "title") {
+    opt.max_tex = std::max(opt.max_tex, 512);
+    opt.full_color = true;
+  }
   auto data = file_util::read_binary_file(in);
   auto decomp = compression::decompress_zstd(data.data(), data.size());
   Serializer ser(decomp.data(), decomp.size());
@@ -793,6 +841,35 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   }
   const bool two_tiers = opt.far_tfrag_geo >= 0 && opt.far_tfrag_geo != opt.tfrag_geo;
   cv.cur_tier = two_tiers ? 1 : 0;
+  {
+    // (AI-assisted) the kinds matter for the 3DS: the game sends the camera for a level's
+    // background with its normal tfrag tree only (see CtrTfragRenderer)
+    std::string kinds;
+    for (auto& tree : level.tfrag_trees[opt.tfrag_geo]) {
+      kinds += fmt::format("{}{} ({} draws)", kinds.empty() ? "" : ", ",
+                           tfrag3::tfrag_tree_names[(int)tree.kind], tree.draws.size());
+    }
+    lg::info("{}: tfrag trees: {}", in.stem().string(), kinds.empty() ? "none" : kinds);
+    // the baked time of day palette (--palette) against the others: average vertex brightness
+    auto palette_line = [&](const char* what, const tfrag3::PackedTimeOfDay& tod) {
+      std::string line;
+      for (int p = 0; p < 8; p++) {
+        double sum = 0;
+        for (u32 c = 0; c < tod.color_count; c++) {
+          sum += tod.read(c, p, 0) + tod.read(c, p, 1) + tod.read(c, p, 2);
+        }
+        line += fmt::format(" {}{:.0f}", p == opt.palette ? "*" : "",
+                            tod.color_count ? sum / (3.0 * tod.color_count) : 0.0);
+      }
+      lg::info("{}: {} time of day palettes (avg rgb, * = baked):{}", in.stem().string(), what, line);
+    };
+    for (auto& tree : level.tfrag_trees[opt.tfrag_geo]) {
+      palette_line(tfrag3::tfrag_tree_names[(int)tree.kind], tree.colors);
+    }
+    for (auto& tree : level.tie_trees[opt.tie_geo]) {
+      palette_line("tie", tree.colors);
+    }
+  }
   for (auto& tree : level.tfrag_trees[opt.tfrag_geo]) {
     if (opt.merc_only) {
       break;
@@ -865,11 +942,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   std::vector<c3l::Vertex> out_verts;
   std::vector<u16> out_indices;
   std::vector<c3l::Draw> out_draws;
+  // (AI-assisted) visibility runs of all chunks (c3l::VisRun), and each chunk's first one
+  std::vector<c3l::VisRun> out_runs;
+  std::vector<u32> chunk_first_run;
+  size_t vis_tris = 0;
 
   for (auto& [key, tri_ids] : cells) {
-    // sort by draw so each chunk has one draw per (mode, texture)
-    std::stable_sort(tri_ids.begin(), tri_ids.end(),
-                     [&](u32 a, u32 b) { return cv.tris[a].draw_key < cv.tris[b].draw_key; });
+    // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
+    // visibility id, so a draw's triangles of one drawable are one run (c3l::VisRun)
+    std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
+      const auto& ta = cv.tris[a];
+      const auto& tb = cv.tris[b];
+      return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
+    });
     size_t pos = 0;
     while (pos < tri_ids.size()) {
       // gather triangles until 65535 unique vertices
@@ -943,9 +1028,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       }
       ch.first_draw = out_draws.size();
       u32 cur_key = UINT32_MAX;
+      std::vector<c3l::VisRun> runs;
+      bool any_vis = false;
       for (size_t i = pos; i < end; i++) {
         const auto& t = cv.tris[tri_ids[i]];
-        if (t.draw_key != cur_key) {
+        const bool new_draw = t.draw_key != cur_key;
+        if (new_draw) {
           cur_key = t.draw_key;
           const auto& dk = cv.draw_keys[cur_key];
           c3l::Draw d{};
@@ -960,8 +1048,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
           out_indices.push_back(local.at(t.v[k]));
         }
         out_draws.back().index_count += 3;
+        if (new_draw || runs.back().vis != t.vis) {
+          runs.push_back(c3l::VisRun{(u16)(out_draws.size() - 1 - ch.first_draw), t.vis, 0});
+        }
+        runs.back().index_count += 3;
+        if (t.vis != 0xffff) {
+          any_vis = true;
+          vis_tris++;
+        }
       }
       ch.draw_count = out_draws.size() - ch.first_draw;
+      // the runs only if some can be hidden (the offset is made absolute at write)
+      chunk_first_run.push_back(any_vis ? (u32)out_runs.size() : 0);
+      ch.vis_run_count = any_vis ? (u32)runs.size() : 0;
+      if (any_vis) {
+        out_runs.insert(out_runs.end(), runs.begin(), runs.end());
+      }
       chunks.push_back(ch);
       pos = end;
     }
@@ -981,6 +1083,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
       }
     });
     pool.wait_for_tasks();
+  }
+  // (AI-assisted) textures made smaller than their original (max_tex): a blurry detail shows here
+  for (size_t i = 0; i < cv.tex_order.size(); i++) {
+    const auto& t = level.textures.at(cv.tex_order[i]);
+    if ((int)t.w > opt.max_tex || (int)t.h > opt.max_tex) {
+      lg::debug("{}: texture {} ({}) {}x{} reduced to at most {}{}", in.stem().string(),
+                t.debug_name, t.debug_tpage_name, t.w, t.h, opt.max_tex,
+                cv.tex_use[i].merc ? " (merc)" : "");
+    }
   }
   TexStats tstats;
   for (size_t i = 0; i < tex_descs.size(); i++) {
@@ -1015,6 +1126,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
   hdr.version = c3l::kVersion;
   strncpy(hdr.level_name, level.level_name.c_str(), sizeof(hdr.level_name) - 1);
   hdr.num_chunks = chunks.size();
+  // (AI-assisted) the visibility runs first: the chunks point at them
+  {
+    const u32 runs_offset = out_runs.empty() ? 0 : append(buf, out_runs.data(), out_runs.size());
+    for (size_t i = 0; i < chunks.size(); i++) {
+      chunks[i].vis_runs_offset =
+          chunks[i].vis_run_count ? runs_offset + chunk_first_run[i] * (u32)sizeof(c3l::VisRun)
+                                  : 0;
+    }
+  }
   hdr.chunks_offset = append(buf, chunks.data(), chunks.size());
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
   hdr.vertex_data_size = out_verts.size() * sizeof(c3l::Vertex);
@@ -1074,6 +1194,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt) {
            tstats.etc1a4, tstats.rgb565, tstats.rgba4,
            tstats.psnr_count ? tstats.psnr_sum / tstats.psnr_count : 0.0,
            tstats.psnr_count ? tstats.psnr_min : 0.0);
+  lg::info("{}: visibility: {} of {} tris in {} runs (hidden when the game's visibility data says)",
+           level.level_name, vis_tris, out_indices.size() / 3, out_runs.size());
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
             cv.radius_hist[0], cv.radius_hist[1], cv.radius_hist[2], cv.radius_hist[3],
             cv.radius_hist[4], cv.radius_hist[5], cv.radius_hist[6], cv.radius_hist[7]);
@@ -1093,7 +1215,8 @@ int main(int argc, char** argv) {
   app.add_option("--tie-geo", opt.tie_geo, "tie level of detail (0 = most detailed, 3)");
   app.add_option("--far-tfrag-geo", opt.far_tfrag_geo,
                  "tfrag level of detail for far away cells (-1: no far version)");
-  app.add_option("--palette", opt.palette, "time of day palette to bake (0-7)");
+  app.add_option("--palette", opt.palette,
+                 "time of day palette to bake (0-7; default: 0 for interiors, else 1)");
   app.add_option("--max-tex", opt.max_tex, "maximum texture size (power of two, <= 1024)");
   app.add_option("--cell", opt.cell_meters, "chunk grid size in meters");
   app.add_option("--detail-radius", opt.detail_radius,

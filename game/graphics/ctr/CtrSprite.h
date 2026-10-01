@@ -98,11 +98,15 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   struct Bucket {
     ctr_draw_state state;
     std::vector<ctr_vertex> verts;
+    // (AI-assisted) 3D sprites in clip space, 6 vertices each: the GPU clips them (a corner
+    // behind the camera mirrored on the CPU: eco beams popping, water rings stretched over the
+    // screen)
+    std::vector<ctr_clip_vertex> clip;
   };
   std::vector<Bucket> m_buckets;
   size_t m_bucket_count = 0;
   size_t m_last_bucket = 0;
-  std::vector<ctr_vertex>& bucket_for(const ctr_draw_state& st);
+  Bucket& bucket_for(const ctr_draw_state& st);
   // TEX0 -> texture lookups, per frame
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
@@ -111,10 +115,10 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   AdGif m_last_ad;
   bool m_have_last_ad = false;
   ctr_draw_state m_last_state;
-  std::vector<ctr_vertex>* m_last_verts = nullptr;
+  Bucket* m_last_bucket_ptr = nullptr;
   float m_corner_reach = 0;
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   struct Stats {
-    int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0;
+    int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
   } m_stats;
 };

@@ -540,7 +540,7 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `sky` | on | the sky (time of day texture, clouds); off: the screen is cleared to the fog color |
   | `distort` | off | the sprite distorter (portals, heat haze); costs one screen copy in frames that have distort sprites |
   | `rgba4_as_rgba8` | auto | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. `auto`: on in the emulator, off on the 3DS |
-  | `vram_textures` | auto | level texture pools in VRAM while there is room (the GPU reads VRAM much faster). `auto`: on on the 3DS, off in the emulator (Azahar draws VRAM textures as noise) |
+  | `vram_textures` | auto | level texture pools in VRAM while there is room (the GPU reads VRAM much faster). `auto`: on (also in the emulator since 2026-10-01: Azahar draws VRAM textures right; only RGBA4 was noise, and `rgba4_as_rgba8` handles that) |
   | `mipmaps` | on | mip levels of the level textures (c3l v8): `off`, `on` (nearest level), `trilinear` (blends two levels: smoother, slower) |
   | `gpu_profile` | off | every 2.5 s one group of renderers (level, merc + eyes, sprites, ocean, direct) is left out and `[ctr] gpu profile:` logs what each costs the GPU. The picture flickers |
 

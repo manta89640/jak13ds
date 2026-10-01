@@ -63,8 +63,17 @@ envmap = on                # shine on power cells, precursor metal, ... (needs .
 
 # ---- textures ----
 mipmaps = on               # off / on / trilinear: smaller texture versions for far surfaces (needs .c3l v8+)
-vram_textures = auto       # level textures in VRAM while there is room. auto: on on the 3DS, off in Azahar
+vram_textures = auto       # level textures in VRAM while there is room. auto: on (3DS and Azahar)
 rgba4_as_rgba8 = auto      # 16-bit textures with alpha stored as 32-bit. auto: on in Azahar, off on the 3DS
+
+# ---- 3DS hardware features (AI-assisted) ----
+color16 = off              # on: 16-bit (RGB565) color buffer and top screen (half the memory traffic per pixel); faint blended layers like waterfall mist vanish and gradients band
+early_depth = on           # the GPU's early depth test for opaque level / model draws (drawn nearest first): hidden pixels skip texturing. Turn off if blocks of geometry go missing on hardware
+compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats (L8, LA8, RGB565, RGBA5551, RGBA4), and in 384 KB of reserved VRAM with vram_textures
+proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read
+sprite_max_size = 0.5      # world particles and glows at most this fraction of the screen height across (0 = no limit)
+vis_culling = on           # the game's own visibility data hides level parts behind walls and hills (needs .c3l v10 files)
+merc_lod_scale = 0.5       # characters switch to their lower detail models at this fraction of the game's distances (0.05 .. 1)
 
 # ---- measuring ----
 gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers)
@@ -82,9 +91,19 @@ gpu_profile = off          # every 2.5 s leaves out one group of renderers and l
   Keep `mipmaps = on` and `vram_textures = auto`: without them the GPU reads full size textures
   from main memory, which was the main cause of low frame rates on hardware.
 - **Azahar (emulator):** no file needed; `auto` picks `rgba4_as_rgba8 = on` and
-  `vram_textures = off` there (Azahar draws RGBA4 and VRAM textures as noise). Azahar doesn't
+  `vram_textures = on` there too (Azahar draws RGBA4 textures as noise, VRAM textures are fine;
+  with VRAM off the emulator needed ~4 MB more linear memory than the 3DS and levels didn't fit). Azahar doesn't
   model the GPU's speed, so frame rates there say nothing about the GPU on hardware.
-- **Best looking:** `mipmaps = trilinear` (smoother far textures, a little slower).
+- **Best looking:** `mipmaps = trilinear` (smoother far textures, a little slower),
+  `sprite_max_size = 0`, `merc_lod_scale = 1`.
+- **3DS hardware features:** all on by default. The log line `[ctr] textures: ...` shows the
+  compact textures (and how many are in the reserved VRAM, how many are radial glows) and the
+  last frame's early depth and procedural texture draws; `[ctr] l0-tfrag: visibility hid ...`
+  shows what the game's visibility data hides. Compare `gpu` in `[ctr] render ms/frame` with a
+  feature on and off to see what it saves on hardware (Azahar doesn't model the GPU's speed).
+- **Hardware fog:** not used. The PICA200 fog unit looks fog up by depth, and the game's depth
+  (1 / distance, like the PS2) puts everything beyond about 32 m into the first of its 128 table
+  entries; the fog stays the per-vertex ramp texture.
 
 ## Things outside config.ini
 

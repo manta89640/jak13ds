@@ -41,6 +41,9 @@ enum ctr_blend {
   CTR_BLEND_FIX,         // Cs * fix + Cd * (1 - fix)
   CTR_BLEND_ADD_DST_A,   // Cs * Ad + Cd
   CTR_BLEND_ONE_ONE,     // Cs + Cd
+  // (AI-assisted) Cs * As + clear color * (1 - As), drawn opaque: alpha blending over a part of
+  // the screen that still holds the frame's clear color (the sky), without reading the framebuffer
+  CTR_BLEND_OVER_CLEAR,
 };
 
 enum ctr_test {
@@ -66,7 +69,18 @@ typedef struct {
   uint8_t aref;       // 0x80 = 1.0
   uint8_t ztest;      // enum ctr_test (CTR_TEST_ALWAYS = off)
   uint8_t zwrite;
+  uint8_t flags;      // CTR_STATE_* (0 = none)
 } ctr_draw_state;
+
+/* (AI-assisted) ctr_draw_state flags: what a draw allows the 3DS GPU to do differently */
+enum {
+  /* opaque, depth tested GEQUAL and written, never discarded by the alpha test (its texture's
+   * alpha passes): may use the early depth test (ctr_gpu_set_early_depth) */
+  CTR_STATE_EARLY_DEPTH = 1,
+  /* the texture is radial (ctr_gpu_tex_radial) and the texture coordinates go from -1 to 1 across
+   * it (center 0): drawn with the procedural texture unit instead of reading texels */
+  CTR_STATE_PROCTEX = 2,
+};
 
 /* Lifetime. ctr_gpu_init returns 0 on success. */
 int ctr_gpu_init(void);
@@ -87,6 +101,15 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba);
  * GPU finished the previous frame, and this frame's draws read the new texels. */
 void ctr_gpu_tex_update(int handle, const uint8_t* rgba);
 void ctr_gpu_tex_delete(int handle);
+/* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
+ * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
+ * on/off alpha -> RGBA5551, else RGBA4 (RGBA8 when rgba4_as_rgba8 or alpha above 0x80), and
+ * moved to a reserved part of VRAM when there's room (vram_textures). flags: CTR_TEX_CHECK_RADIAL
+ * also checks whether it is a radial gradient (glows: see CTR_STATE_PROCTEX). */
+enum { CTR_TEX_CHECK_RADIAL = 1 };
+int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags);
+/* 1 if the texture can be drawn with CTR_STATE_PROCTEX (radial, and config.ini proctex_glows). */
+int ctr_gpu_tex_radial(int handle);
 
 /* Draw a triangle list. */
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count);
@@ -99,6 +122,20 @@ typedef struct {
 } ctr_clip_vertex;
 /* Draw a triangle list in clip space (the sky): the GPU clips it. State like ctr_gpu_draw. */
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count);
+
+/* (AI-assisted) Two texture layers in one pass (the sky's two cloud layers): like
+ * ctr_gpu_draw_clip, with a second set of texture coordinates for the same texture on texture
+ * unit 1. Color added to the screen (state.blend is ignored: Cs + Cd):
+ *   (tex(st0).rgb * const0.rgb + tex(st1).rgb * const1.rgb) * vertex alpha
+ * (consts and vertex alpha in GS units: 0x80 = 1.0, R in the low byte of the consts; the
+ * texture's rgb already multiplied by its alpha). Depth and alpha tests off. */
+typedef struct {
+  float x, y, z, w;
+  float s0, t0, s1, t1;
+  uint8_t r, g, b, a;
+} ctr_clip_vertex2;
+void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t const1,
+                        const ctr_clip_vertex2* verts, int count);
 
 /* The screen as a texture, for effects that read what is already drawn (the sprite distorter):
  * copies the frame drawn so far into a texture (one GPU copy of the color buffer) and returns its
@@ -153,12 +190,20 @@ void ctr_gpu_pool_set_priority(int pool, int priority);
  * textures as noise or a solid color (config.ini rgba4_as_rgba8, default: on in the emulator). */
 void ctr_gpu_set_rgba4_as_rgba8(int on);
 int ctr_gpu_rgba4_as_rgba8(void);
-/* Texture pools in VRAM while there is room (config.ini vram_textures, default: off in the
+/* Texture pools in VRAM while there is room (config.ini vram_textures, default: on; was off in the
  * emulator, which draws VRAM textures as noise). */
 void ctr_gpu_set_vram_textures(int on);
 /* Mip levels: 0 = off (always the first level), 1 = nearest level (default), 2 = blend two levels
  * (trilinear, slower) (config.ini mipmaps). */
 void ctr_gpu_set_mip_mode(int mode);
+/* (AI-assisted) 3DS hardware features (config.ini). color16: a 16-bit (RGB565) color buffer and
+ * top screen, set before ctr_gpu_init. early_depth: the early depth test for draws with
+ * CTR_STATE_EARLY_DEPTH. proctex: radial textures drawn with the procedural texture unit.
+ * compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like ctr_gpu_tex_create). */
+void ctr_gpu_set_color16(int on);
+void ctr_gpu_set_early_depth(int on);
+void ctr_gpu_set_proctex(int on);
+void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the
  * rest of the frame. Off: the GPU starts at the end of the frame (config.ini overlap). */
@@ -174,6 +219,11 @@ int ctr_gpu_is_emulator(void);
 int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
                         int index_count);
 void ctr_gpu_mesh_delete(int mesh);
+/* (AI-assisted) Free the deleted textures, pools and meshes now instead of at the next frame
+ * begin, once the GPU has finished what it was given (a level was unloaded and the next one loads
+ * on another thread: with no frames drawn meanwhile its memory stayed taken). Only while no frame
+ * is being built (the render thread idle). */
+void ctr_gpu_free_pending_now(void);
 
 /* Draw part of a mesh. clip = row-major 4x4 matrix from (pos.x, pos.y, pos.z, 1) (quantized) to
  * OpenGL-style clip space (x, y in [-w, w] cover the screen, z in [-w, w], near = -w). */
@@ -247,6 +297,14 @@ typedef struct {
   unsigned int pool_bytes;      /* texture pools (all in linear memory; see ctr_gpu_pool_create) */
   unsigned int pool_vram_bytes; /* of which also in VRAM (the copy the GPU reads) */
   int pools, pools_in_vram;
+  /* (AI-assisted) ctr_gpu_tex_create_compact textures: how many, their bytes, how many of them
+   * are in the reserved VRAM, radial ones; draws with the early depth test / procedural texture */
+  int compact_textures;
+  unsigned int compact_bytes;
+  int compact_in_vram;
+  int radial_textures;
+  int early_depth_draws;
+  int proctex_draws;
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
 

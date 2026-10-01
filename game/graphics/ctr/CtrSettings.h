@@ -50,8 +50,8 @@ struct CtrSettings {
   // Default (auto): on in the emulator, off on the 3DS.
   bool rgba4_as_rgba8 = false;
   // Level textures in VRAM while there is room (the GPU reads VRAM much faster than the main
-  // memory). Default (auto): on on the 3DS, off in the emulator (Azahar draws VRAM textures as
-  // noise).
+  // memory). Default (auto): on, in the emulator too (it draws VRAM textures right; only RGBA4 is
+  // noise there, see rgba4_as_rgba8).
   bool vram_textures = true;
   // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default), 2 trilinear
   // (blends two levels: smoother, slower).
@@ -59,6 +59,23 @@ struct CtrSettings {
   // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
+  // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
+  // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
+  // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
+  // smoke) add less than one color step each and vanish, and gradients band.
+  bool color16 = false;
+  // the GPU's early depth test for opaque level draws, drawn front to back in distance bands
+  bool early_depth = true;
+  // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
+  // and in reserved VRAM (with vram_textures)
+  bool compact_textures = true;
+  // glows (radial gradient textures) from the procedural texture unit: no texels read
+  bool proctex_glows = true;
+  // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
+  float sprite_max_size = 0.5f;
+  // the game's own visibility data (which parts of a level can be seen from the camera's spot)
+  // hides level parts behind walls and hills (needs .c3l v10 files)
+  bool vis_culling = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above
   bool emulator = false;
 

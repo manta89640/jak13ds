@@ -11,6 +11,7 @@
 #include <functional>
 
 #include "common/dma/gs.h"
+#include "common/goal_constants.h"
 #include "common/log/log.h"
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
@@ -139,60 +140,83 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     m_tex_info[tex.dest[0]] = TexInfo{(u16)tex.w, (u16)tex.h, tex.psm, tex.width[0], tex.clutpsm,
                                       tex.clut_dest};
   }
-  bool segs[3] = {true, true, true};
+  // (AI-assisted) Like add-to-dma-buffer / upload-vram-pages (texture.gc): ONE 128 pixel wide
+  // PSMCT32 image from the first uploaded segment's data to its dest, in whole 4096 word chunks
+  // (32 rows), not one image per segment of exactly its size. The page layouts depend on that: the
+  // last rows of a segment share VRAM pages with CLUTs that the next segment's first words fill
+  // (village1-vis-alpha: the sky and cloud CLUT entries >= 160 stayed stale, a rainbow sky).
+  int first_seg = 0;
+  u32 words = 0;
   switch (mode) {
     case -1:
-      break;
-    case 2:
-      segs[0] = segs[1] = false;
+      words = page.size;
       break;
     case -2:
-      segs[2] = false;
+      words = page.segment[0].size + page.segment[1].size;
       break;
     case 0:
-      segs[1] = segs[2] = false;
+      words = page.segment[0].size;
+      break;
+    case 2:
+      first_seg = 2;
+      words = page.segment[2].size;
       break;
     default:
       lg::warn("[ctr vram] unsupported upload mode {}", mode);
       return;
   }
-  for (int i = 0; i < 3; i++) {
-    const auto& seg = page.segment[i];
-    if (!segs[i] || !seg.size || !seg.block_data_ptr) {
-      continue;
-    }
-    // The game uploads 128 pixel wide PSMCT32 images (upload-vram-data in texture.gc).
-    u32 rows = (seg.size + 127) / 128;
-    u32 dest_block = seg.dest / 64;
-    // skip the upload if this exact data is already there (sampled hash, pages are static)
-    const u8* src = ee_mem + seg.block_data_ptr;
-    u64 hash = seg.size;
-    for (u32 k = 0; k < 64; k++) {
-      u32 w;
-      memcpy(&w, src + 4 * ((u64)k * seg.size / 64), 4);
-      hash = hash * 1099511628211ull ^ w;
-    }
-    auto last = m_last_upload.find(dest_block);
-    if (last != m_last_upload.end() && last->second.src == src && last->second.words == seg.size &&
-        last->second.hash == hash) {
-      m_stats.uploads++;
-      continue;
-    }
-    // record it: drop pending uploads that this one completely overwrites
-    const u32 end_block = dest_block + (rows * 128 * 4 + kBlockBytes - 1) / kBlockBytes;
-    // Other uploads this one overwrites are no longer "already there": without this, a page
-    // that is uploaded again after another page covered its area (the common textures, e.g.
-    // the eye textures, after a level's pris page) was skipped and read back as garbage.
-    forget_uploads(dest_block, end_block);
-    m_last_upload[dest_block] = UploadRecord{src, seg.size, hash};
-    m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
-                                   [&](const PendingUpload& p) {
-                                     return p.dest_block >= dest_block && p.end_block <= end_block;
-                                   }),
-                    m_pending.end());
-    m_pending.push_back(PendingUpload{src, dest_block, end_block, seg.size});
-    m_stats.uploads++;
+  const auto& seg = page.segment[first_seg];
+  if (!words || !seg.block_data_ptr) {
+    return;
   }
+  words = (words + 4095) & ~4095u;
+  // the PS2 reads past the page's data to fill the last chunk: stay inside EE memory
+  if ((u64)seg.block_data_ptr + (u64)words * 4 > (u64)EE_MAIN_MEM_SIZE) {
+    if (seg.block_data_ptr >= (u32)EE_MAIN_MEM_SIZE) {
+      return;
+    }
+    words = ((u32)EE_MAIN_MEM_SIZE - seg.block_data_ptr) / 4 / 128 * 128;
+  }
+  const u32 dest_block = seg.dest / 64;
+  // skip the upload if this exact data is already there (sampled hash, pages are static)
+  const u8* src = ee_mem + seg.block_data_ptr;
+  u64 hash = words;
+  for (u32 k = 0; k < 64; k++) {
+    u32 w;
+    memcpy(&w, src + 4 * ((u64)k * words / 64), 4);
+    hash = hash * 1099511628211ull ^ w;
+  }
+  auto last = m_last_upload.find(dest_block);
+  if (last != m_last_upload.end() && last->second.src == src && last->second.words == words &&
+      last->second.hash == hash) {
+    m_stats.uploads++;
+    return;
+  }
+  // whole 32 row chunks of a 128 pixel wide image: a contiguous block range
+  const u32 end_block = dest_block + (words * 4 + kBlockBytes - 1) / kBlockBytes;
+  // Other uploads this one overwrites are no longer "already there": without this, a page
+  // that is uploaded again after another page covered its area (the common textures, e.g.
+  // the eye textures, after a level's pris page) was skipped and read back as garbage.
+  forget_uploads(dest_block, end_block);
+  m_last_upload[dest_block] = UploadRecord{src, words, hash};
+  // drop pending uploads that this one completely overwrites
+  m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
+                                 [&](const PendingUpload& p) {
+                                   return p.dest_block >= dest_block && p.end_block <= end_block;
+                                 }),
+                  m_pending.end());
+  m_pending.push_back(PendingUpload{src, dest_block, end_block, words});
+  m_stats.uploads++;
+}
+
+const void* CtrVram::upload_source(u32 block) const {
+  for (const auto& [b0, r] : m_last_upload) {
+    const u32 b1 = b0 + (r.words * 4 + kBlockBytes - 1) / kBlockBytes;
+    if (block >= b0 && block < b1) {
+      return r.src;
+    }
+  }
+  return nullptr;
 }
 
 void CtrVram::forget_uploads(u32 first_block, u32 end_block) {
@@ -623,7 +647,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   Entry e;
   e.tex.w = gw;
   e.tex.h = gh;
-  e.tex.handle = ctr_gpu_tex_create(gw, gh, (const uint8_t*)data.data());
+  // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
+  // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)
+  e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), CTR_TEX_CHECK_RADIAL);
   e.first_block = tex_range.lo / kBlockBytes;
   e.end_block = tex_range.hi / kBlockBytes + 1;
   if (has_clut && !reloc) {

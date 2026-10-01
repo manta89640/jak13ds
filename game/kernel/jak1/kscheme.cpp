@@ -1550,12 +1550,23 @@ void pad_script_continue(const char* name) {
 void pad_script_exit() {
   MasterExit = RuntimeExitStatus::EXIT;
 }
+
+//! (AI-assisted) "save" in a pad script: (pad-script-auto-save) (goal_src/jak1/pc/progress-pc.gc)
+void pad_script_save() {
+  auto sym = find_symbol_from_c("pad-script-auto-save");
+  if (!sym.offset || sym->value == s7.offset) {
+    lg::warn("[pad script] save: no pad-script-auto-save");
+    return;
+  }
+  call_goal_function_by_name("pad-script-auto-save");
+}
 }  // namespace
 
 s32 InitHeapAndSymbol() {
   pad_script::set_print_symbol_hook(pad_script_print_symbol);
   pad_script::set_exit_hook(pad_script_exit);
   pad_script::set_continue_hook(pad_script_continue);
+  pad_script::set_save_hook(pad_script_save);
   pad_script::set_state_name_hook(pad_script_state_name);
   pad_script::set_position_hook(pad_script_position);
   Timer heap_init_timer;

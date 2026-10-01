@@ -1341,6 +1341,19 @@ static s32 CheckVAGStreamProgress(VagCommand* vag) {
     return 1;
   }
 
+#ifdef __3DS__
+  // (AI-assisted) The voice stopped at the stream's last block (loop end, no repeat): the stream
+  // is over. The PC mixer keeps moving a stopped voice's position, so the end point below is
+  // found later; the 3DS mixer skips stopped voices, the position stayed short of the end point
+  // and the stream never ended (a power cell's victory animation, spooled with its sound, never
+  // finished: a softlock).
+  // Only with sound output (the real clock): without it the voice never plays, the stream runs on
+  // the fake clock, and a stopped voice means nothing.
+  if (gRealVAGClockRunning && !vag->paused && sceSdVoiceStopped(gVoice)) {
+    return 0;
+  }
+#endif
+
   if (vag->end_point != -1) {
     if ((s32)(gPlayPos & 0xFFFFFFF0) == vag->end_point) {
       return 0;

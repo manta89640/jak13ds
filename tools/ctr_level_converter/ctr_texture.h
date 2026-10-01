@@ -26,7 +26,7 @@ struct Image {
   const uint8_t* at(int x, int y) const { return &rgba[4 * (x + y * w)]; }
 };
 
-enum class Format : uint8_t { RGB565 = 0, RGBA4 = 1, ETC1 = 2, ETC1A4 = 3 };
+enum class Format : uint8_t { RGB565 = 0, RGBA4 = 1, ETC1 = 2, ETC1A4 = 3, RGBA8 = 4 };
 
 /*! Bytes of one level. */
 uint32_t level_bytes(int w, int h, Format fmt);

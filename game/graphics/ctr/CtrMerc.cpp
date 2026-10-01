@@ -276,7 +276,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   VuLights lights;
   memcpy(&lights, input, sizeof(lights));
   input += sizeof(VuLights);
-  input += 16;  // jak 1: uses-water
+  // (AI-assisted) jak 1: uses-water (Merc2's jak1_water_mode: blended, no depth writes; the
+  // jungle river and other water-anim models were drawn opaque)
+  u64 uses_water = 0;
+  memcpy(&uses_water, input, 8);
+  input += 16;
 
   // matrix slot string + GOAL addresses of the bone matrices
   static MercMat bones[128];
@@ -352,7 +356,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       for (int c = 0; c < 3; c++) {
         light_data[4 * i + c] = src[i][c];
       }
-      light_data[4 * i + 3] = 0.f;
+      // (AI-assisted) the colors' and the ambient's alpha (the shader multiplies the vertex alpha
+      // by it, like merc2.vert): color-mult's alpha, e.g. 0.75 for the jungle river's water
+      light_data[4 * i + 3] = i >= 3 ? src[i][3] : 0.f;
     }
   }
 
@@ -406,6 +412,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
     DrawMode mode;
     mode.as_int() = draw.mode;
+    if (uses_water) {
+      mode.set_ab(true);
+      mode.disable_depth_write();
+    }
     ctr_draw_state st = ctr_state_from_draw_mode(mode, tex);
     if (envmap) {
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
@@ -418,13 +428,22 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     // Alpha like merc2.frag, not like the draw mode's alpha test: only (nearly) transparent pixels
     // are dropped (alpha < 0.128), the rest is blended. The draw modes of hair, eyes and many
     // objects ask for alpha >= 0x26, which throws away most of a hair texture (see-through, noisy
-    // hair). Effects the game draws with ignore-alpha are opaque.
+    // hair). Effects the game draws with ignore-alpha keep all their pixels (merc2.frag skips the
+    // discard), but their blending is still the draw mode's, as on PC (AI-assisted: turning it
+    // off drew the jungle river's water opaque).
     if (flags.ignore_alpha_mask & (1ull << draw.effect)) {
       st.atest = CTR_TEST_ALWAYS;
-      st.blend = CTR_BLEND_OFF;
     } else {
       st.atest = CTR_TEST_GEQUAL;
       st.aref = 17;  // x2 in the GPU state: 34 / 255
+    }
+    // (AI-assisted) opaque parts whose texture passes the alpha test everywhere: the early depth
+    // test drops what's hidden behind the level before texturing (CtrTfragRenderer draws first)
+    if (st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL &&
+        draw.eye_id == 0xff &&
+        (st.atest == CTR_TEST_ALWAYS || (draw.texture < lev->tex_min_alpha.size() &&
+                                         lev->tex_min_alpha[draw.texture] >= st.aref * 2))) {
+      st.flags |= CTR_STATE_EARLY_DEPTH;
     }
     ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count, light_data, model->mesh,
                          draw.first_index, draw.index_count);

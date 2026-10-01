@@ -162,6 +162,14 @@ CtrRenderer::CtrRenderer()
                                                                  m_levels.get()));
   set(BucketId::TFRAG_LEVEL1, std::make_unique<CtrTfragRenderer>("l1-tfrag", (int)BucketId::TFRAG_LEVEL1,
                                                                  m_levels.get()));
+  // (AI-assisted) a level without a normal tfrag tree sends its camera only with its dirt, ice or
+  // trans tfrag (jungleb: trans only); the level is drawn once per frame, by the first of them
+  for (auto [id, name] : {std::pair{BucketId::TFRAG_DIRT_LEVEL0, "l0-tfrag-dirt"},
+                          std::pair{BucketId::TFRAG_DIRT_LEVEL1, "l1-tfrag-dirt"},
+                          std::pair{BucketId::TFRAG_ICE_LEVEL0, "l0-tfrag-ice"},
+                          std::pair{BucketId::TFRAG_ICE_LEVEL1, "l1-tfrag-ice"}}) {
+    set(id, std::make_unique<CtrTfragRenderer>(name, (int)id, m_levels.get()));
+  }
   // merc (characters, objects)
   for (auto id : {BucketId::MERC_TFRAG_TEX_LEVEL0, BucketId::MERC_TFRAG_TEX_LEVEL1,
                   BucketId::MERC_AFTER_ALPHA, BucketId::MERC_PRIS_LEVEL0, BucketId::MERC_PRIS_LEVEL1,
@@ -199,7 +207,9 @@ CtrRenderer::CtrRenderer()
     set(BucketId::SKY_DRAW, std::move(sky));
     for (auto id : {BucketId::TFRAG_TRANS0_AND_SKY_BLEND_LEVEL0,
                     BucketId::TFRAG_TRANS1_AND_SKY_BLEND_LEVEL1}) {
-      set(id, std::make_unique<CtrSkyBlendRenderer>("sky-blend", (int)id, m_sky_draw.get()));
+      set(id, std::make_unique<CtrSkyBlendRenderer>(
+                  "sky-blend", (int)id, m_sky_draw.get(),
+                  std::make_unique<CtrTfragRenderer>("tfrag-trans", (int)id, m_levels.get())));
     }
   }
   set(BucketId::SPRITE,
@@ -284,10 +294,18 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.splits += gs.cmd_splits;
   m_timing.cmd_kb += gs.cmd_bytes / 1024.0;
   m_timing.dropped += gs.dropped_draws;
+  // (AI-assisted) a pipelined frame that ran out of command buffer lost its last draws: the
+  // normal mode has the whole buffer for one frame
+  if (gs.dropped_draws && ctr_settings().pipeline && !m_pipeline_off) {
+    ctr_gpu_set_pipeline(0);
+    m_pipeline_off = true;
+    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off from now on",
+             gs.dropped_draws);
+  }
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
   m_timing.frames++;
-  if (ctr_settings().gpu_profile) {
+  if (ctr_settings().gpu_profile && !m_profile_done) {
     profile_frame(gs.draw_ms);
   }
   if (m_rs.log_now) {
@@ -312,9 +330,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                                          m_timing.dropped)
                            : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB, "
-               "VRAM free {} KB",
+               "VRAM free {} KB; {} compact textures {} KB ({} in reserved VRAM, {} radial); "
+               "last frame: {} early depth draws, {} proctex draws",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
-               gs.linear_free / 1024, gs.vram_free / 1024);
+               gs.linear_free / 1024, gs.vram_free / 1024, gs.compact_textures,
+               gs.compact_bytes / 1024, gs.compact_in_vram, gs.radial_textures,
+               gs.early_depth_draws, gs.proctex_draws);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
@@ -398,6 +419,13 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
       }
     }
     lg::info("{}", line);
+    // (AI-assisted) two whole cycles (30 s) measure it: then stop leaving renderers out. Left on
+    // in a config.ini by mistake, it made the level, models, ocean or sky vanish every 2.5 s for
+    // the whole game ("polygons loading and unloading").
+    if (++m_profile_cycles >= 2) {
+      m_profile_done = true;
+      lg::info("[ctr] gpu profile: done (config.ini gpu_profile = on), drawing everything again");
+    }
   }
 }
 
@@ -454,6 +482,9 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   if (m_bucket_ms.size() != m_buckets.size()) {
     m_bucket_ms.assign(m_buckets.size(), 0.0);
   }
+  // (AI-assisted) the visibility strings come with bucket tfrag-0 every frame
+  m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
+  m_rs.vis_packets = 0;
   const bool profiling = m_profile_mode > 0;
   for (size_t bucket_id = 0; bucket_id < m_buckets.size(); bucket_id++) {
     const double tb = ctr_gpu_time_ms();
@@ -527,6 +558,7 @@ void wait_render_idle() {
 }
 
 int ctr_init(GfxGlobalSettings& /*settings*/) {
+  ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
   if (ctr_gpu_init() != 0) {
     lg::error("[ctr] GPU init failed");
     return 1;
@@ -535,6 +567,10 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
 #endif
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
+  // (AI-assisted) before vram_textures: the reserved VRAM for compact textures is taken there
+  ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
+  ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
+  ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
@@ -689,7 +725,14 @@ bool ctr_level_ready(const char* name) {
   if (!name || !g_ctr_ready) {
     return true;
   }
-  static std::map<std::string, double> waiting_since;
+  // (AI-assisted) when the wait started and the last poll: the game drops levels that are still
+  // loading when its level list changes, which left the entry behind; a later load of that level
+  // then found an old start time and started without its background. A wait nobody polled for 2 s
+  // starts again.
+  struct Wait {
+    double since, last;
+  };
+  static std::map<std::string, Wait> waiting_since;
   const std::string n(name);
   if (g_ctr->levels().ready(n)) {
     waiting_since.erase(n);
@@ -700,8 +743,12 @@ bool ctr_level_ready(const char* name) {
   ctr_thread_sleep_us(1000);
 #endif
   const double now = ctr_gpu_time_ms();
-  auto it = waiting_since.emplace(n, now).first;
-  if (now - it->second > kMaxWaitMs) {
+  auto [it, inserted] = waiting_since.emplace(n, Wait{now, now});
+  if (!inserted && now - it->second.last > 2000.0) {
+    it->second.since = now;
+  }
+  it->second.last = now;
+  if (now - it->second.since > kMaxWaitMs) {
     lg::warn("[ctr] {}: .c3l still not loaded after {:.0f} s, starting the level anyway", n,
              kMaxWaitMs / 1000.0);
     waiting_since.erase(it);

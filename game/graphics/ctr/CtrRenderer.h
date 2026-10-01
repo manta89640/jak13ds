@@ -38,6 +38,13 @@ struct CtrRenderState {
   double last_log_ms = 0;
   u8 fog_color[4] = {0, 0, 0, 0};  // from the default GS registers (also the clear color)
   bool call_vif_callback = true;  // not from the render thread: it runs GOAL code
+  // (AI-assisted) the game's visibility strings of *level* level 0 and 1 this frame (bucket
+  // tfrag-0, add-pc-port-background-data): bit n (MSB first in each byte) = drawable n of the
+  // level can be seen from the camera's place
+  u8 vis_bits[2][2048];
+  u8 vis_flags[2] = {0, 0};  // from the 3DS game code: 1 valid, 2 all visible, 4 own data only
+  bool vis_valid[2] = {false, false};
+  int vis_packets = 0;
 };
 
 class CtrBucketRenderer {
@@ -135,6 +142,9 @@ class CtrRenderer {
   double m_profile_sum = 0;     // GPU draw time of the counted frames
   int m_profile_count = 0;
   std::vector<double> m_profile_ms;  // result per mode (-1: not measured yet)
+  int m_profile_cycles = 0;          // whole cycles logged
+  bool m_profile_done = false;       // (AI-assisted) after 2 cycles: everything drawn again
+  bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
 };
 
 extern const GfxRendererModule gRendererCtr;

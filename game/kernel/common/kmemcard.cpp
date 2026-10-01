@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "common/log/log.h"
 #include "common/util/Assert.h"
 #include "common/util/FileUtil.h"
 #include "common/util/Timer.h"
@@ -21,6 +22,12 @@
 
 #include "fmt/format.h"
 
+#ifdef __3DS__
+#include <atomic>
+
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 static constexpr bool memcard_debug = false;
 
 using McCallbackFunc = void (*)(s32);
@@ -29,6 +36,26 @@ McCallbackFunc callback;
 
 static s32 language;
 static MemoryCardOperation op;
+
+#ifdef __3DS__
+// (AI-assisted) Saving takes many SD card operations on the 3DS (reading the other save banks,
+// creating the folder, writing the file): done on the game thread it froze the game for up to
+// seconds at every autosave (each power cell). It runs on a worker thread instead; the game polls
+// the result (BUSY until it's done), as it does with a real memory card. Nothing else starts while
+// it runs (MC_save / MC_load refuse, the game tries again).
+static std::atomic<int> s_save_state{0};  // 0 idle, 1 running, 2 finished (MC_run joins it)
+static void* s_save_thread = nullptr;
+void pc_game_save_synch();
+static void* save_worker(void*) {
+  Timer t;
+  t.start();
+  pc_game_save_synch();
+  lg::info("[mc] save to slot {} done on the worker thread in {:.0f} ms: {}", op.param2, t.getMs(),
+           op.result == McStatusCode::OK ? "ok" : "FAILED");
+  s_save_state.store(2);
+  return nullptr;
+}
+#endif
 // instead of two memory cards we just simulate the 4 save files (8 banks).
 static MemoryCardFile mc_files[4];
 // keep track of latest file selected. this is only used in an auto-save mode thats not used
@@ -236,8 +263,14 @@ void pc_update_card() {
 void pc_game_save_synch() {
   Timer mc_timer;
   mc_timer.start();
+#ifdef __3DS__
+  // (AI-assisted) the slot table is current (read at boot, then kept by the saves themselves):
+  // reading every save bank again cost a long freeze per save, and marking the card dirty made the
+  // game thread read them all once more (MC_get_status)
+#else
   mc_card_dirty = true;
   pc_update_card();
+#endif
   auto path = mc_get_filename(g_game_version, 0);
   file_util::create_dir_if_needed_for_file(path.string());
 
@@ -471,6 +504,16 @@ void pc_game_load_synch() {
  *  - every now and then, recheck cards.
  */
 void MC_run() {
+#ifdef __3DS__
+  if (s_save_state.load() == 2) {
+    ctr_thread_join(s_save_thread);
+    s_save_thread = nullptr;
+    s_save_state.store(0);
+  }
+  if (s_save_state.load() != 0) {
+    return;  // the save worker is writing
+  }
+#endif
   // if we have an in-progress operation, it will have set a callback.
   if (callback) {
     s32 sony_cmd, sony_status;
@@ -513,6 +556,15 @@ void MC_run() {
   } else if (op.operation == MemoryCardOperationKind::SAVE) {
     // write game save.
     // there's no cards, keep in mind.
+#ifdef __3DS__
+    // low priority on core 2 (with the level loader): it mostly waits for the SD card
+    lg::info("[mc] save to slot {} (worker thread)", op.param2);
+    s_save_state.store(1);
+    if (ctr_thread_create(save_worker, nullptr, 64 * 1024, 0x3D, 2, &s_save_thread) == 0) {
+      return;
+    }
+    s_save_state.store(0);  // no thread: save here, as before
+#endif
     pc_game_save_synch();
     // allow some number of errors.
     op.retry_count--;
@@ -616,6 +668,9 @@ u64 MC_createfile(s32 /*param*/, Ptr<u8> /*data*/) {
 u64 MC_save(s32 card_idx, s32 file_idx, Ptr<u8> save_data, Ptr<u8> save_summary_data) {
   mc_print("requested save");
   u64 can_add = op.operation == MemoryCardOperationKind::NO_OP;
+#ifdef __3DS__
+  can_add = can_add && s_save_state.load() == 0;
+#endif
   if (can_add) {
     mc_print("setting op to save");
     op.operation = MemoryCardOperationKind::SAVE;
@@ -636,6 +691,9 @@ u64 MC_save(s32 card_idx, s32 file_idx, Ptr<u8> save_data, Ptr<u8> save_summary_
 u64 MC_load(s32 card_idx, s32 file_idx, Ptr<u8> data) {
   mc_print("requested load");
   u64 can_add = op.operation == MemoryCardOperationKind::NO_OP;
+#ifdef __3DS__
+  can_add = can_add && s_save_state.load() == 0;
+#endif
   if (can_add) {
     mc_print("setting op to load");
     op.operation = MemoryCardOperationKind::LOAD;
@@ -711,6 +769,10 @@ void MC_get_status(s32 /*slot*/, Ptr<mc_slot_info> info) {
   bool refresh = mc_card_dirty;
 #ifndef __3DS__
   refresh = refresh || mc_card_timer.getSeconds() > 1.0;
+#else
+  // (AI-assisted) only the first time (boot): not while the save worker writes, and saves keep the
+  // slot table current
+  refresh = refresh && s_save_state.load() == 0;
 #endif
   if (refresh) {
     pc_update_card();

@@ -1,0 +1,30 @@
+; (AI-assisted)
+; ctr_clip.v.pica with two sets of texture coordinates (ctr_gpu_draw_clip2: the sky's two cloud
+; layers in one pass, one texture on texture units 0 and 1).
+
+.fvec glpica[4]
+
+.constf consts(0.00392156862745098, 0.0, 0.0, 0.0)
+.alias inv255 consts.xxxx
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.alias inpos v0
+.alias intex0 v1
+.alias intex1 v2
+.alias inclr v3
+
+.proc main
+  dp4 outpos.x, glpica[0], inpos
+  dp4 outpos.y, glpica[1], inpos
+  dp4 outpos.z, glpica[2], inpos
+  dp4 outpos.w, glpica[3], inpos
+
+  mov outtc0, intex0
+  mov outtc1, intex1
+  mul outclr, inv255, inclr
+  end
+.end

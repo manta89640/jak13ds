@@ -15,7 +15,9 @@
 namespace c3l {
 
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
-constexpr uint32_t kVersion = 9;  // v9: merc envmap draws (MercDraw::eye_id kMercEnvmapDraw)
+// v9: merc envmap draws (MercDraw::eye_id kMercEnvmapDraw)
+// v10 (AI-assisted): visibility runs per chunk (Chunk::vis_runs_offset, VisRun)
+constexpr uint32_t kVersion = 10;
 // v7 files (16-bit textures without mip levels) still load
 constexpr uint32_t kMinVersion = 7;
 
@@ -24,6 +26,7 @@ enum TextureFormat : uint8_t {
   TEX_RGBA4 = 1,   // u16: r4 g4 b4 a4 (r in the high bits)
   TEX_ETC1 = 2,    // v8: ETC1, 4 bits per texel
   TEX_ETC1A4 = 3,  // v8: ETC1 + 4 bit alpha, 8 bits per texel
+  TEX_RGBA8 = 4,   // (AI-assisted) u32 stored a, b, g, r: full color (the title screen's logo)
 };
 
 struct Header {
@@ -90,9 +93,27 @@ struct Chunk {
   float lod_center[3];  // tiers 1 and 2: the detailed version is drawn when the camera is closer
                         // to this point than the LOD distance (the same point for both versions
                         // of a grid cell, so exactly one of them is drawn)
-  uint32_t pad[3];
+  // v10 (AI-assisted): the chunk's VisRun list (absolute offset; count 0: never hidden by the
+  // game's visibility data). Zero in older files.
+  uint32_t vis_runs_offset;
+  uint32_t vis_run_count;
+  uint32_t pad;
 };
 static_assert(sizeof(Chunk) == 80);
+
+/*!
+ * (AI-assisted) v10: the game's visibility data per piece of a draw. A chunk's draws are split in
+ * runs of indices from one drawable of the level (a tfrag node of up to 8 tfragments, a tie node
+ * of up to 8 instances), in draw order: draw `draw` of the chunk continues with index_count
+ * indices from drawable `vis`. The game sends a bit string per level each frame (bit n, MSB first
+ * in each byte: drawable n can be seen from the camera's place); hidden runs aren't drawn.
+ */
+struct VisRun {
+  uint16_t draw;         // the draw within the chunk (0 = Chunk::first_draw)
+  uint16_t vis;          // drawable id in the level's visibility string, 0xffff = always drawn
+  uint32_t index_count;  // the draw's next index_count indices
+};
+static_assert(sizeof(VisRun) == 8);
 
 struct Vertex {
   int16_t pos[3];  // quantized, see Chunk
@@ -123,6 +144,8 @@ inline uint32_t texture_level_bytes(uint32_t w, uint32_t h, uint8_t format) {
       return w * h / 2;
     case TEX_ETC1A4:
       return w * h;
+    case TEX_RGBA8:
+      return w * h * 4;
     default:
       return w * h * 2;
   }

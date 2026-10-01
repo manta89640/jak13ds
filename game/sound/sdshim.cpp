@@ -41,6 +41,11 @@ u32 sceSdGetAddr(u32 entry) {
   return voice->GetNax() << 1;
 }
 
+bool sceSdVoiceStopped(u32 entry) {
+  auto* voice = voice_from_entry((entry >> 1) & 0x1f);
+  return voice && voice->Stopped();
+}
+
 void sceSdSetSwitch(u32 entry, u32 value) {
   u32 reg = entry & ~0x3f;
   u8 voice = 0;

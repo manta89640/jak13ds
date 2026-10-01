@@ -13,6 +13,7 @@
 #include "common/dma/gs.h"
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -94,7 +95,20 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
       m_dirty[idx] = true;
     }
     constexpr u32 kRedecodeFrames = 300;
-    Source& src = m_sources[tex0 ^ (salt << 1)];
+    // (AI-assisted) keyed by the uploads the texels and the CLUT came from too: another level's
+    // page at the same VRAM address (same tex0) is a different texture
+    u64 key = tex0 ^ (salt << 1);
+    {
+      GsTex0 kt(tex0);
+      const u64 p0 = (u64)(uintptr_t)rs.vram->upload_source(kt.tbp0());
+      const u64 p1 = (u64)(uintptr_t)rs.vram->upload_source(kt.cbp());
+      key = (key ^ p0) * 1099511628211ull;
+      key = (key ^ p1) * 1099511628211ull;
+    }
+    if (m_sources.size() > 64 && !m_sources.count(key)) {
+      m_sources.clear();  // old levels' sources
+    }
+    Source& src = m_sources[key];
     if (src.frame == 0 || (u32)rs.frame_idx - src.frame >= kRedecodeFrames) {
       src.frame = (u32)rs.frame_idx | 1;
       int w = 0, h = 0;
@@ -150,10 +164,27 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
     if (!m_dirty[i]) {
       continue;
     }
+    const u8* texels = m_rgba[i].data();
+    if (i == 1) {
+      // (AI-assisted) the clouds' rgb multiplied by their alpha (0x80 = 1.0): both layers are
+      // then added in one pass (ctr_gpu_draw_clip2), which has no texture alpha of its own
+      m_premul.resize(m_rgba[1].size());
+      for (size_t k = 0; k + 3 < m_rgba[1].size(); k += 4) {
+        const u32 a = std::min<u32>(m_rgba[1][k + 3], 0x80);
+        m_premul[k] = (u8)((m_rgba[1][k] * a) >> 7);
+        m_premul[k + 1] = (u8)((m_rgba[1][k + 1] * a) >> 7);
+        m_premul[k + 2] = (u8)((m_rgba[1][k + 2] * a) >> 7);
+        m_premul[k + 3] = m_rgba[1][k + 3];
+      }
+      texels = m_premul.data();
+    }
     if (m_tex[i] < 0) {
-      m_tex[i] = ctr_gpu_tex_create(kSize[i], kSize[i], m_rgba[i].data());
+      // (AI-assisted) the clouds with mip levels: they repeat ~9 times towards the horizon while
+      // they scroll, and without mips that shimmered (flickering clouds); the sky is stretched
+      m_tex[i] = i == 1 ? ctr_gpu_tex_create_mipmapped(kSize[i], kSize[i], texels)
+                        : ctr_gpu_tex_create(kSize[i], kSize[i], texels);
     } else {
-      ctr_gpu_tex_update(m_tex[i], m_rgba[i].data());
+      ctr_gpu_tex_update(m_tex[i], texels);
     }
     m_dirty[i] = false;
   }
@@ -205,7 +236,9 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
       st.tcc = 1;
       st.filter = 1;
       st.clamp_s = st.clamp_t = 1;
-      st.blend = CTR_BLEND_ALPHA;
+      // (AI-assisted) alpha blended over the clear color: the screen holds nothing else there yet
+      // (the sky is drawn first), so the GPU computes it without reading the framebuffer
+      st.blend = CTR_BLEND_OVER_CLEAR;
       ctr_gpu_draw_clip(&st, tris.data(), (int)tris.size());
       m_stats.draws++;
     }
@@ -214,28 +247,41 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
     // two cloud layers of 9 quads, added (alpha b=2 d=1), the texture scrolling (set-tex-offset)
     const SkyVertex* clouds = verts_at(p.clouds, 72);
     if (clouds && m_valid[1] && m_tex[1] >= 0) {
-      tris.clear();
-      for (int layer = 0; layer < 2; layer++) {
-        const u32 off = layer ? p.off1 : p.off0;
-        const float so = (float)(off & 0xffff) / 65536.f, to = (float)(off >> 16) / 65536.f;
-        for (int q = 0; q < 9; q++) {
-          const SkyVertex* v = clouds + 36 * layer + 4 * q;
-          ctr_clip_vertex c[4];
-          for (int k = 0; k < 4; k++) {
-            c[k] = vert(v[k], so, to, 0.f, true);
-          }
-          // render-sky-quad: a fan 0 1 2 3
-          for (int k : {0, 1, 2, 0, 2, 3}) {
-            tris.push_back(c[k]);
-          }
+      // (AI-assisted) both layers in one pass, one texture on two texture units: the first
+      // layer's quads with the second layer's texture coordinates too (the layers are the same
+      // quads, the second one tilted by a few degrees; their colors are per layer, the alpha fade
+      // towards the horizon the same). Each layer was an added pass over most of the sky.
+      const float so0 = (float)(p.off0 & 0xffff) / 65536.f, to0 = (float)(p.off0 >> 16) / 65536.f;
+      const float so1 = (float)(p.off1 & 0xffff) / 65536.f, to1 = (float)(p.off1 >> 16) / 65536.f;
+      m_tris2.clear();
+      for (int q = 0; q < 9; q++) {
+        const SkyVertex* v0 = clouds + 4 * q;
+        const SkyVertex* v1 = clouds + 36 + 4 * q;
+        ctr_clip_vertex2 c[4];
+        for (int k = 0; k < 4; k++) {
+          const ctr_clip_vertex a = vert(v0[k], so0, to0, 0.f, true);
+          const ctr_clip_vertex b = vert(v1[k], so1, to1, 0.f, true);
+          c[k] = {a.x, a.y, a.z, a.w, a.s, a.t, b.s, b.t, 0x80, 0x80, 0x80, a.a};
+        }
+        // render-sky-quad: a fan 0 1 2 3
+        for (int k : {0, 1, 2, 0, 2, 3}) {
+          m_tris2.push_back(c[k]);
         }
       }
+      auto layer_color = [](const SkyVertex& v) {
+        u32 c = 0;
+        for (int j = 0; j < 3; j++) {
+          c |= (u32)std::clamp(v.col[j], 0.f, 255.f) << (8 * j);
+        }
+        return c;
+      };
       st.tex = m_tex[1];
       st.tcc = 1;
       st.filter = 1;
       st.clamp_s = st.clamp_t = 0;
-      st.blend = CTR_BLEND_ADD;
-      ctr_gpu_draw_clip(&st, tris.data(), (int)tris.size());
+      st.blend = CTR_BLEND_ONE_ONE;
+      ctr_gpu_draw_clip2(&st, layer_color(clouds[0]), layer_color(clouds[36]), m_tris2.data(),
+                         (int)m_tris2.size());
       m_stats.draws++;
     }
     // below the horizon: 4 flat triangles in the erase color (giftag-base), in front of the sky.
@@ -262,6 +308,14 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
   }
 }
 
+CtrSkyBlendRenderer::CtrSkyBlendRenderer(std::string name,
+                                         int id,
+                                         CtrSky* sky,
+                                         std::unique_ptr<CtrTfragRenderer> tfrag)
+    : CtrBucketRenderer(std::move(name), id), m_sky(sky), m_tfrag(std::move(tfrag)) {}
+
+CtrSkyBlendRenderer::~CtrSkyBlendRenderer() = default;
+
 void CtrSkyBlendRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   // SkyBlendHandler::render: jump, then the sky copies between the GS setup (8 qw) and the
   // restore (alpha 2 qw, GS 8 qw), then the tfrag trans part (drawn from the .c3l files)
@@ -272,6 +326,11 @@ void CtrSkyBlendRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
       dma.current_tag().qwc == 8) {
     dma.read_and_advance();  // set-display-gs-state
     m_sky->blend(dma, rs, (u64)(uintptr_t)this);
+  }
+  // (AI-assisted) the trans tfrag's camera: draws the level background if no normal tfrag bucket
+  // did this frame (CtrTfragRenderer draws a level once per frame)
+  if (m_tfrag) {
+    m_tfrag->render(dma, rs);
   }
   while (dma.current_tag_offset() != rs.next_bucket) {
     dma.read_and_advance();

@@ -103,6 +103,8 @@ uint32_t level_bytes(int w, int h, Format fmt) {
       return n / 2;
     case Format::ETC1A4:
       return n;
+    case Format::RGBA8:
+      return n * 4;
   }
   return 0;
 }
@@ -203,6 +205,20 @@ void encode_level(const Image& img,
   out->resize(start + level_bytes(w, h, fmt));
   uint8_t* dst = out->data() + start;
   switch (fmt) {
+    case Format::RGBA8:
+      // (AI-assisted) full color: the GPU's RGBA8 is stored a, b, g, r; alpha as the other
+      // formats keep it (PS2 scale, 0x80 = opaque, doubled on the GPU)
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          const uint8_t* p = img.at(x, y);
+          const uint32_t idx = tiled_texel(x, h - 1 - y, w);
+          dst[4 * idx + 0] = p[3];
+          dst[4 * idx + 1] = p[2];
+          dst[4 * idx + 2] = p[1];
+          dst[4 * idx + 3] = p[0];
+        }
+      }
+      break;
     case Format::RGB565:
     case Format::RGBA4:
       for (int y = 0; y < h; y++) {
@@ -274,6 +290,18 @@ Image decode_level(const uint8_t* data, int w, int h, Format fmt) {
   img.h = h;
   img.rgba.assign((size_t)w * h * 4, 0);
   switch (fmt) {
+    case Format::RGBA8:
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          const uint32_t idx = tiled_texel(x, h - 1 - y, w);
+          uint8_t* p = img.at(x, y);
+          p[0] = data[4 * idx + 3];
+          p[1] = data[4 * idx + 2];
+          p[2] = data[4 * idx + 1];
+          p[3] = data[4 * idx + 0];
+        }
+      }
+      break;
     case Format::RGB565:
     case Format::RGBA4:
       for (int y = 0; y < h; y++) {

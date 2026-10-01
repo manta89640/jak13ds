@@ -6,6 +6,7 @@
 
 #include "CtrSettings.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 
@@ -36,7 +37,10 @@ CtrSettings load() {
   // auto defaults: what the emulator draws correctly / what is fast on the 3DS
   s.emulator = ctr_gpu_is_emulator() != 0;
   s.rgba4_as_rgba8 = s.emulator;
-  s.vram_textures = !s.emulator;
+  // (AI-assisted) VRAM in the emulator too: it draws VRAM textures right (only RGBA4 is noise, and
+  // that is stored as RGBA8 there). Without it the emulator kept ~4 MB more in linear memory than
+  // the 3DS, and a level that fits on the 3DS didn't there (holes, with the pipeline).
+  s.vram_textures = true;
   const auto dir = file_util::get_jak_project_dir();
   fs::path path;
   // (AI-assisted) config.ini, the one settings file (the sound and system keys in it are read by
@@ -117,10 +121,22 @@ CtrSettings load() {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
       s.gpu_profile = parse_bool(v);
+    } else if (key == "color16") {
+      s.color16 = parse_bool(v);
+    } else if (key == "early_depth") {
+      s.early_depth = parse_bool(v);
+    } else if (key == "compact_textures") {
+      s.compact_textures = parse_bool(v);
+    } else if (key == "proctex_glows") {
+      s.proctex_glows = parse_bool(v);
+    } else if (key == "sprite_max_size") {
+      s.sprite_max_size = std::max(0.f, f);
+    } else if (key == "vis_culling") {
+      s.vis_culling = parse_bool(v);
     } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
-               key == "debug_log") {
+               key == "debug_log" || key == "particle_density" || key == "merc_lod_scale") {
       // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp)
     } else {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);
@@ -134,11 +150,15 @@ CtrSettings load() {
 std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) "
-      "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {}{}{}",
+      "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
+      "vis_culling {}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
       sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
-      mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), gpu_profile ? " gpu_profile" : "",
+      mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
+      early_depth ? "on" : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
+      sprite_max_size, vis_culling ? "on" : "off", gpu_profile ? " gpu_profile" : "",
       emulator ? " (emulator)" : "");
 }
 

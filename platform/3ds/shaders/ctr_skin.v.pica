@@ -10,7 +10,7 @@
 .fvec row2[24]
 .fvec scales        ; x: texture coordinate scale (1/1024), y: 1/255, z: 1.0, w: normal scale (1/127)
 .fvec lights[7]     ; 0-2: light direction rows (merc2.vert light_dir0/1/2), 3-5: light colors,
-                    ; 6: ambient
+                    ; 6: ambient (colors and ambient with their alpha)
 
 .constf consts(0.0, 0.5, 0.000001, 0.0)
 .alias zero consts.xxxx
@@ -87,10 +87,13 @@
   mad r9, r8.xxxx, lights[3], r9
   mad r9, r8.yyyy, lights[4], r9
   mad r9, r8.zzzz, lights[5], r9
+  mul r10, scales.yyyy, inclr
+  ; (AI-assisted) alpha like merc2.vert: the vertex alpha times the lights' alpha, which is the
+  ; draw's color-mult alpha (1 for most models; less: see-through, e.g. the jungle river's water
+  ; at 0.75, and fading models)
+  mul outclr.w, r10.wwww, r9.wwww
   ; half: the texture stage multiplies merc colors by 4, so lights brighter than 1 aren't clamped
   mul r9, half, r9
-  mul r10, scales.yyyy, inclr
   mul outclr.xyz, r10.xyz, r9.xyz
-  mov outclr.w, r10.w
   end
 .end

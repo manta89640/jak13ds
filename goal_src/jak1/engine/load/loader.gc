@@ -688,7 +688,15 @@
                      (if (= (-> self skel root-channel 0) (-> self skel channel)) (logior! (-> self skel status) (janim-status spool)))
                      (if (or (arg3 self)
                              (and (<= sv-72 0) (time-elapsed? (the-as time-frame sv-40) (seconds 4)))
-                             (and (< 300 sv-56) (<= sv-72 0)))
+                             (and (< 300 sv-56) (<= sv-72 0))
+                             ;; (AI-assisted) 3DS: the sound stream stopped advancing just short of
+                             ;; the animation's end for 3 s: finish (the stream's end was missed,
+                             ;; e.g. a power cell's victory waited forever: a softlock)
+                             (#if TARGET_3DS
+                                  (and (> sv-72 0)
+                                       (>= (the float sv-72) (- f28-0 512.0))
+                                       (time-elapsed? (the-as time-frame sv-40) (seconds 3)))
+                                  #f))
                        (goto cfg-88))
                      (spool-push *art-control* (-> arg0 name) spool-part self -20.0)
                      (if (< (+ spool-part 1) (-> arg0 parts))
