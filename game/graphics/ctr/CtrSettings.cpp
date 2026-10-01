@@ -84,6 +84,8 @@ CtrSettings load() {
       s.sprites = parse_bool(v);
     } else if (key == "ocean") {
       s.ocean = parse_bool(v);
+    } else if (key == "distort") {
+      s.distort = parse_bool(v);
     } else if (key == "max_sprites") {
       s.max_sprites = std::atoi(v.c_str());
     } else if (key == "rgba4_as_rgba8") {
@@ -110,10 +112,10 @@ CtrSettings load() {
 std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) "
-      "ocean {} rgba4_as_rgba8 {} vram_textures {} mipmaps {}{}{}",
+      "ocean {} distort {} rgba4_as_rgba8 {} vram_textures {} mipmaps {}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
-      rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
+      distort ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), gpu_profile ? " gpu_profile" : "",
       emulator ? " (emulator)" : "");
 }

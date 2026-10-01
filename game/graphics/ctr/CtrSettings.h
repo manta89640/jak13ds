@@ -30,6 +30,9 @@ struct CtrSettings {
   bool merc = true;
   bool sprites = true;
   bool ocean = true;
+  // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
+  // with such particles costs one copy of the screen
+  bool distort = true;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
