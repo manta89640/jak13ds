@@ -508,6 +508,10 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
+  if (ctr_settings().pipeline) {
+    lg::info("[ctr] pipeline (CPU builds the next frame while the GPU draws): {}",
+             ctr_gpu_set_pipeline(1) ? "on" : "FAILED (no linear memory), off");
+  }
   g_ctr = std::make_unique<CtrRenderer>();
   // Both load on the loader thread while the game boots. The title level (the Naughty Dog logo,
   // the title screen) is the first one the game wants; loaded only when the game has it, the logo

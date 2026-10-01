@@ -39,6 +39,8 @@ struct CtrSettings {
   bool sky = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
   bool overlap = false;
+  // CPU builds frame N+1 while the GPU draws frame N
+  bool pipeline = false;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
