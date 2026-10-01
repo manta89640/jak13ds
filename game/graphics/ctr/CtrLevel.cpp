@@ -141,6 +141,19 @@ void CtrLevels::request(const Job& job) {
   m_cv.notify_all();
 }
 
+bool CtrLevels::ready(const std::string& name) {
+  std::lock_guard<std::mutex> lk(m_lock);
+  if (m_resident.count(name)) {
+    return true;
+  }
+  for (const auto& d : m_done) {
+    if (d.job.name == name) {
+      return true;  // read (or failed); the render thread takes it at its next frame
+    }
+  }
+  return m_requested.count(name) == 0;  // queued or loading: wait
+}
+
 void CtrLevels::prefetch(const std::string& name) {
   request({name, false, true});
 }

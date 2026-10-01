@@ -11,13 +11,30 @@
    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) | \
    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-int main(void) {
-  // boot test for the CIA settings (platform/3ds/cia/boottest.rsf): proves main was reached
-  FILE* f = fopen("sdmc:/3ds/jak1/boottest.txt", "w");
+// Boot test for the CIA settings (make_cia.sh --boottest): sdmc:/3ds/jak1/boottest.txt gets a line
+// per step, like gk's boot_cia.txt. The first one is written before the HOME Menu handshake
+// (aptInit), as in gk (platform/3ds/port/ctr_port.c), so the file tells whether the title
+// started at all, stopped in the handshake, or reached main.
+static void mark(const char* mode, const char* step) {
+  FILE* f = fopen("sdmc:/3ds/jak1/boottest.txt", mode);
   if (f) {
-    fputs("main reached\n", f);
+    fprintf(f, "%s\n", step);
     fclose(f);
   }
+}
+
+void __appInit(void) {
+  srvInit();
+  fsInit();
+  archiveMountSdmc();
+  mark("w", "0 started: services, SD card");
+  aptInit();
+  mark("a", "1 APT (HOME Menu handshake)");
+  hidInit();
+}
+
+int main(void) {
+  mark("a", "2 main reached");
   gfxInitDefault();
   consoleInit(GFX_BOTTOM, NULL);
   C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -35,6 +52,12 @@ int main(void) {
   APT_CheckNew3DS(&is_new);
   printf("New 3DS: %s\n", is_new ? "yes" : "no");
   printf("\nPress START to exit.\n");
+  {
+    char line[128];
+    snprintf(line, sizeof(line), "3 screens up: app memory %lu KiB, New 3DS %s",
+             (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024), is_new ? "yes" : "no");
+    mark("a", line);
+  }
 
   u32 frame = 0;
   while (aptMainLoop()) {

@@ -435,6 +435,9 @@
      (set! (-> *level* loading-level) (-> *level* level-default))))
   this)
 
+(#when TARGET_3DS
+  (define-extern pc-3ds-level-ready? (function string symbol)))
+
 (defun level-update-after-load ((loaded-level level) (level-login-state login-state))
   "Run some small amount of logins.
    This will time itself and stop after some time.
@@ -572,6 +575,12 @@
         (set! loaded-level loaded-level)
         (goto cfg-78))))
   ;; done!
+  ;; 3DS: the renderer reads the level's background (.c3l) meanwhile (started with the DGO). Stay
+  ;; in login until it's in, so the player doesn't start in a level that isn't drawn yet. This is
+  ;; called again every frame (load-continue); the renderer gives up waiting after 20 s.
+  (#when TARGET_3DS
+    (when (not (pc-3ds-level-ready? (symbol->string (-> loaded-level name))))
+      (return loaded-level)))
   (set! (-> loaded-level nickname) (-> loaded-level bsp nickname))
   (if (nonzero? (-> loaded-level bsp nodes)) (set! *time-of-day-effects* #t) (set! *time-of-day-effects* #f))
   (let ((f0-0 (-> loaded-level bsp unk-data-4))

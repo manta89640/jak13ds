@@ -570,6 +570,16 @@ void pc_set_levels(u32 l0, u32 l1) {
   Gfx::GetCurrentRenderer()->set_levels(levels);
 }
 
+#ifdef __3DS__
+bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
+
+u64 pc_3ds_level_ready(u32 name) {
+  return ctr_level_ready(Ptr<String>(name).c()->data())
+             ? s7.offset + true_symbol_offset(g_game_version)
+             : s7.offset;
+}
+#endif
+
 void InitMachine_PCPort() {
   // PC Port added functions
   init_common_pc_port_functions(
@@ -586,6 +596,10 @@ void InitMachine_PCPort() {
   // Called from the game thread at each frame to tell the PC rendering code which levels to start
   // loading. The loader internally handles locking.
   make_function_symbol_from_c("__pc-set-levels", pc_set_levels);
+#ifdef __3DS__
+  // (AI-assisted) level-update-after-load waits for the 3DS renderer's .c3l of the level
+  make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
+#endif
 
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);
 

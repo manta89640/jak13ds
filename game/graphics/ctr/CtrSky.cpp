@@ -85,23 +85,44 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs) {
     if (idx < 0) {
       continue;
     }
+    auto& out = m_rgba[idx];
+    const size_t n = (size_t)kSize[idx] * kSize[idx] * 4;
+    if (first) {
+      // the frame's blend starts from zero even when this source can't be read: the adds that
+      // follow would otherwise pile up over the frames (a saturated, technicolour sky)
+      out.assign(n, 0);
+      m_dirty[idx] = true;
+    }
     int w = 0, h = 0;
-    if (!rs.vram->decode_for_cpu(tex0, &m_decode, &w, &h) || w != kSize[idx] ||
-        h != kSize[idx]) {
+    const bool decoded = rs.vram->decode_for_cpu(tex0, &m_decode, &w, &h);
+    GsTex0 t(tex0);
+    if (std::find(m_logged.begin(), m_logged.end(), tex0) == m_logged.end() && m_logged.size() < 64) {
+      // once per source texture: what the blend reads (a wrong sky shows up here)
+      m_logged.push_back(tex0);
+      lg::info("[ctr] sky source {}: tex0 {:x} psm {} cpsm {} tbp {} cbp {} {}x{} {} first texel {:08x}",
+               idx ? "clouds" : "sky", tex0, (int)t.psm(), t.cpsm(), t.tbp0(), t.cbp(), w, h,
+               decoded ? "ok" : "NOT DECODED", decoded && !m_decode.empty() ? m_decode[0] : 0);
+    }
+    if (!decoded || w != kSize[idx] || h != kSize[idx]) {
       continue;
     }
-    auto& out = m_rgba[idx];
-    const size_t n = (size_t)w * h * 4;
-    out.resize(n);
+    // make-sky-textures draws with TEXA ta0 = ta1 = 0x80 (set-display-gs-state): 16-bit texels and
+    // 16-bit CLUT entries are opaque, whatever their A bit (CtrVram decodes with the usual TEXA)
+    const bool indexed = t.psm() == GsTex0::PSM::PSMT8 || t.psm() == GsTex0::PSM::PSMT4 ||
+                         t.psm() == GsTex0::PSM::PSMT8H || t.psm() == GsTex0::PSM::PSMT4HH ||
+                         t.psm() == GsTex0::PSM::PSMT4HL;
+    if (t.psm() == GsTex0::PSM::PSMCT16 || t.psm() == GsTex0::PSM::PSMCT16S ||
+        (indexed && t.cpsm() != 0)) {
+      for (auto& c : m_decode) {
+        c = (c & 0xffffffu) | (0x80u << 24);
+      }
+    }
+    if (out.size() != n) {
+      out.assign(n, 0);
+    }
     const u8* in = (const u8*)m_decode.data();
-    if (first) {
-      for (size_t i = 0; i < n; i++) {
-        out[i] = (u8)std::min<u32>(255, (in[i] * intensity) >> 7);
-      }
-    } else {
-      for (size_t i = 0; i < n; i++) {
-        out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
-      }
+    for (size_t i = 0; i < n; i++) {
+      out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
     }
     m_dirty[idx] = true;
     m_valid[idx] = true;
@@ -110,6 +131,9 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs) {
 }
 
 void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
+  if (!ctr_settings().sky) {
+    return;
+  }
   SkyPacket p;
   memcpy(&p, packet, sizeof(p));
   // the textures blended last frame (like the PS2: they sit in VRAM until this frame's sky)
