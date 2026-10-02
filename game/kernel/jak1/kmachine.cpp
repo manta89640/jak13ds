@@ -421,7 +421,7 @@ int ShutdownMachine() {
  * Open a file-stream.  Name is a GOAL string. Mode is a GOAL symbol.  Use 'read for readonly
  * and anything else for write only.
  */
-u64 kopen(u64 fs, u64 name, u64 mode) {
+u64 kopen(u32 fs, u32 name, u32 mode) {
   auto file_stream = Ptr<FileStream>(fs).c();
   file_stream->mode = mode;
   file_stream->name = name;

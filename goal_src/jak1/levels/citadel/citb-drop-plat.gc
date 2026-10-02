@@ -278,7 +278,7 @@
                 (set! (-> self child-array data s1-0)
                       (ppointer->handle (when sv-48
                                           ((method-of-type drop-plat activate) (the-as drop-plat sv-48) self 'drop-plat (the-as pointer #x70004000))
-                                          ((the-as (function process function vector int int int none) run-function-in-process)
+                                          ((the-as (function process function object int int int none) run-function-in-process) ;; (AI-assisted) object: C backend ABI
                                            sv-48
                                            drop-plat-init-by-other
                                            gp-0

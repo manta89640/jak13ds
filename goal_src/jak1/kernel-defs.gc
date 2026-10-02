@@ -436,7 +436,9 @@
 
 (define-extern __pc-texture-relocate (function object object object none))
 
-(define-extern __pc-get-mips2c (function string function))
+;; (AI-assisted) the second argument is (__c-abi-wide-mask <type of the function>): which arguments
+;; GOAL compiled to C passes with their upper half (docs/3ds-port/c_backend.md). Ignored otherwise.
+(define-extern __pc-get-mips2c (function string int function))
 
 (define-extern __pc-set-levels (function string string none))
 

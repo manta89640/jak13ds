@@ -1,6 +1,8 @@
 #include <memory>
 #include <thread>
 
+#include "game/kernel/common/goalc_runtime.h"
+#include "goalc/compiler/CEmitter.h"
 #include "goalc/compiler/Compiler.h"
 #include "gtest/gtest.h"
 #include "test/goalc/framework/test_runner.h"
@@ -70,6 +72,34 @@ std::string send_code_and_get_multiple_responses(const std::string& code,
   return result;
 }
 }  // namespace
+
+// (AI-assisted) C backend ABI version 3 (docs/3ds-port/c_backend.md): the adapter of a kernel
+// function may only read the upper half of arguments that are wide in the function's GOAL type
+// (callers don't pass it for the others).
+TEST_F(Jak1KernelTest, CAbiKernelFunctionTypes) {
+  if (!Compiler::c_backend_from_env()) {
+    GTEST_SKIP() << "C backend only";
+  }
+  auto& compiler = shared_compiler->compiler;
+  int checked = 0;
+  std::string bad;
+  for (const auto& f : goalc_kernel_functions()) {
+    auto type = compiler.lookup_typespec(f.name);
+    if (!type || type->base_type() != "function" || type->arg_count() == 0) {
+      continue;
+    }
+    u32 n_args = std::min<u32>(8, type->arg_count() - 1);
+    u32 goal_wide = c_abi_wide_mask(&compiler.type_system(), *type);
+    u32 reads = f.wide_mask & ((1u << n_args) - 1);
+    if (reads & ~goal_wide) {
+      bad += fmt::format("{} {} reads 0x{:x}, wide 0x{:x}\n", f.name, type->print(), reads,
+                         goal_wide);
+    }
+    checked++;
+  }
+  EXPECT_TRUE(bad.empty()) << bad;
+  EXPECT_GT(checked, 50);
+}
 
 TEST_F(Jak1KernelTest, Basic) {
   shared_compiler->runner.c->run_test_from_string(

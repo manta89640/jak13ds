@@ -26,10 +26,10 @@ void goalc_kernel_set_symbols(u32 kernel_sp,
 
 // the primitives, exposed for testing. Arguments and return values are GOAL values.
 u64 goalc_k_return_to_kernel(u64 value);
-u64 goalc_k_reset_and_call(u64 thread, u64 func);
+u64 goalc_k_reset_and_call(u64 thread, u32 func);
 u64 goalc_k_thread_resume(u64 thread);
-u64 goalc_k_reset_stack_and_call(u64 stack_top, u64 func, u64 a0, u64 a1, u64 a2, u64 a3);
-u64 goalc_k_catch(u64 allocation, u64 type, u64 name, u64 func, u64 param_block);
+u64 goalc_k_reset_stack_and_call(u32 stack_top, u32 func, u64 a0, u64 a1, u64 a2, u64 a3);
+u64 goalc_k_catch(u32 allocation, u32 type, u32 name, u32 func, u32 param_block);
 u64 goalc_k_throw(u64 frame, u64 value);
 u64 goalc_k_thread_release(u64 thread);
 //! number of threads suspended right now (for tests and leak checks)

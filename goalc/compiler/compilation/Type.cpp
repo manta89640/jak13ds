@@ -5,6 +5,7 @@
 #include "common/util/math_util.h"
 #include "common/util/string_util.h"
 
+#include "goalc/compiler/CEmitter.h"
 #include "goalc/compiler/Compiler.h"
 #include "goalc/emitter/CallingConvention.h"
 
@@ -970,11 +971,37 @@ Val* Compiler::compile_addr_of(const goos::Object& form, const goos::Object& res
  * Compile the (the-as x y) form. Like a reinterpret cast.
  * Will always produce a alias (so setting the result of this affects the base).
  */
+/*!
+ * (AI-assisted) C backend, ABI version 3 (docs/3ds-port/c_backend.md): calling a function through a
+ * type where an argument is narrow (an address or a float) while the function's own type has a
+ * 64-bit value there loses the upper half of that argument. Type checks prevent this, but casts
+ * can do it: warn about casts between function types that do.
+ */
+void Compiler::check_c_abi_function_cast(const goos::Object& form,
+                                         const TypeSpec& from,
+                                         const TypeSpec& to) {
+  if (!m_c_backend || from.base_type() != "function" || to.base_type() != "function" ||
+      from.arg_count() < 2 || to.arg_count() < 2) {
+    return;
+  }
+  u32 from_wide = c_abi_wide_mask(&m_ts, from);
+  u32 to_wide = c_abi_wide_mask(&m_ts, to);
+  u32 n = std::min(from.arg_count(), to.arg_count()) - 1;
+  u32 lost = from_wide & ~to_wide & ((1u << std::min(n, 8u)) - 1);
+  if (lost) {
+    print_compiler_warning(
+        "C backend: a function of type {} called as {} gets arguments without their upper half "
+        "(mask 0x{:x}): {}\n",
+        from.print(), to.print(), lost, form.print());
+  }
+}
+
 Val* Compiler::compile_the_as(const goos::Object& form, const goos::Object& rest, Env* env) {
   auto args = get_va(form, rest);
   va_check(form, args, {{}, {}}, {});
   auto desired_ts = parse_typespec(args.unnamed.at(0), env);
   auto base = compile_error_guard(args.unnamed.at(1), env);
+  check_c_abi_function_cast(form, base->type(), desired_ts);
   auto result = env->function_env()->alloc_val<AliasVal>(desired_ts, base);
   if (base->settable()) {
     result->mark_as_settable();
@@ -992,6 +1019,7 @@ Val* Compiler::compile_the(const goos::Object& form, const goos::Object& rest, E
   va_check(form, args, {{}, {}}, {});
   auto desired_ts = parse_typespec(args.unnamed.at(0), env);
   auto base = compile_error_guard(args.unnamed.at(1), env);
+  check_c_abi_function_cast(form, base->type(), desired_ts);
 
   if (is_number(base->type())) {
     if (m_ts.tc(m_ts.make_typespec("binteger"), desired_ts)) {
@@ -1613,6 +1641,33 @@ Compiler::ConstPropResult Compiler::const_prop_size_of(const goos::Object& form,
                                                        const goos::Object& rest,
                                                        Env* /*env*/) {
   return {goos::Object::make_integer(get_size_for_size_of(form, rest)), false};
+}
+
+/*!
+ * (__c-abi-wide-mask <function typespec>): the arguments of a host function with this GOAL type
+ * that the C backend passes with their upper half (docs/3ds-port/c_backend.md, ABI version 3).
+ * Used to tell the runtime how to call mips2c functions.
+ */
+Val* Compiler::compile_c_abi_wide_mask(const goos::Object& form,
+                                       const goos::Object& rest,
+                                       Env* env) {
+  auto args = get_va(form, rest);
+  va_check(form, args, {{}}, {});
+  return compile_integer(c_abi_wide_mask(&m_ts, parse_typespec(args.unnamed.at(0), env)), env);
+}
+
+/*!
+ * (__c-abi-method-wide-mask <type> <method id>): like __c-abi-wide-mask, for a method.
+ */
+Val* Compiler::compile_c_abi_method_wide_mask(const goos::Object& form,
+                                              const goos::Object& rest,
+                                              Env* env) {
+  auto args = get_va(form, rest);
+  va_check(form, args, {goos::ObjectType::SYMBOL, goos::ObjectType::INTEGER}, {});
+  auto type_name = args.unnamed.at(0).as_symbol().name_ptr;
+  auto info = m_ts.lookup_method(type_name, (int)args.unnamed.at(1).as_int());
+  return compile_integer(c_abi_wide_mask(&m_ts, info.type.substitute_for_method_call(type_name)),
+                         env);
 }
 
 Val* Compiler::compile_psize_of(const goos::Object& form, const goos::Object& rest, Env* env) {

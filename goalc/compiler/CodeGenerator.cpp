@@ -179,7 +179,7 @@ std::vector<u8> CodeGenerator::run(const TypeSystem* ts) {
  * C backend: each function becomes an 8-byte stub in the object and a C function in the module.
  */
 std::vector<u8> CodeGenerator::run_c(const TypeSystem* ts) {
-  CModuleEmitter module(m_fe->name(), &m_gen, m_gen.version());
+  CModuleEmitter module(m_fe->name(), &m_gen, m_gen.version(), ts);
   for (size_t i = 0; i < m_fe->functions().size(); i++) {
     auto* env = m_fe->functions().at(i).get();
     auto f_rec = m_gen.get_existing_function_record(i);

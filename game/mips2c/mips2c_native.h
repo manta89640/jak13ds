@@ -58,8 +58,9 @@ enum NativeFlags : u32 {
   NATIVE_CALLS_GOAL = 2,
 };
 
-//! a function compiled GOAL code calls directly (goal_c_abi.h's goalc_fn8)
-using NativeGoalFn = u64 (*)(u64, u64, u64, u64, u64, u64, u64, u64);
+//! a function compiled GOAL code calls directly (goal_c_abi.h's goalc_fnx, without the upper
+//! halves: only used for functions whose arguments are all addresses or floats)
+using NativeGoalFn = u64 (*)(u32, u32, u32, u32, u32, u32, u32, u32);
 
 struct NativeImpl {
   NativeFn fn;
@@ -91,7 +92,7 @@ u64 native_as_exec(void* ctxt) {
   }
 //! Native function F (no scratch space) callable directly by C mode's GOAL code
 template <NativeFn F>
-u64 native_as_goal(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+u64 native_as_goal(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6, u32 a7) {
   const u64 args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
   return F(NativeArgs{args, goalc_pp, goalc_st, 0});
 }

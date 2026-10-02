@@ -1607,7 +1607,7 @@
               (let ((t9-4 enter-state)
                     (a0-4 'swim))
                 (set! (-> self next-state) target-flop-hit-ground)
-                ((the-as (function symbol object :behavior target) t9-4) a0-4)))))
+                ((the-as (function object object :behavior target) t9-4) a0-4))))) ;; (AI-assisted) enter-state takes objects (C backend ABI)
           (else (target-dangerous-event-handler proc argc message block)))))
   :enter
     (behavior ((arg0 float) (arg1 float) (arg2 float))

@@ -11,12 +11,13 @@
 #include "IR.h"
 
 #include "common/log/log.h"
+#include "common/type_system/TypeSystem.h"
 
 #include "fmt/format.h"
 
 namespace {
 // must match GOALC_ABI_VERSION in goal_c_ops.h
-constexpr int kCBackendAbiVersion = 2;
+constexpr int kCBackendAbiVersion = 3;
 
 // tokens are resolved after memory layout: \x01 <kind> <index> \x02
 constexpr char TOKEN_START = '\x01';
@@ -73,6 +74,50 @@ std::string c_string_literal(const std::string& in) {
   return out;
 }
 }  // namespace
+
+CArgClass c_arg_class(const TypeSystem* ts, const TypeSpec& t) {
+  // (AI-assisted) The class must be the same for a type and all of its children: a function value
+  // is only ever called through a function type whose argument types are the same as, or parents
+  // of, its own (TypeSystem::typecheck_and_throw), so the caller's class for a narrow argument is
+  // then always the callee's class (see docs/3ds-port/c_backend.md).
+  if (!ts) {
+    return CArgClass::WIDE;
+  }
+  const auto& base = t.base_type();
+  if (base == "_type_" || base == "_varargs_" || base == "none") {
+    return CArgClass::WIDE;
+  }
+  try {
+    if (ts->tc(TypeSpec("float"), t)) {
+      return CArgClass::FLOAT;
+    }
+    // GOAL addresses. Everything else (integers, object, binteger, enums, bitfields) is 64 bits.
+    for (const char* parent : {"structure", "pointer", "pair"}) {
+      if (ts->tc(TypeSpec(parent), t)) {
+        return CArgClass::PTR;
+      }
+    }
+  } catch (std::exception&) {
+    // unknown type
+  }
+  return CArgClass::WIDE;
+}
+
+u32 c_abi_wide_mask(const TypeSystem* ts, const TypeSpec& function_type) {
+  // (AI-assisted) a function type without argument types (plain `function`) or with _varargs_:
+  // treat every argument as wide.
+  if (function_type.arg_count() == 0 ||
+      (function_type.arg_count() >= 2 && function_type.get_arg(0).print() == "_varargs_")) {
+    return 0xff;
+  }
+  u32 mask = 0;
+  for (size_t i = 0; i + 1 < function_type.arg_count() && i < 8; i++) {
+    if (c_arg_class(ts, function_type.get_arg(i)) == CArgClass::WIDE) {
+      mask |= 1u << i;
+    }
+  }
+  return mask;
+}
 
 u64 c_backend_hash(const std::string& text) {
   u64 hash = 0xcbf29ce484222325ull;
@@ -144,6 +189,10 @@ void CFunctionEmitter::error(const std::string& msg) {
 
 GameVersion CFunctionEmitter::version() const {
   return m_module->version();
+}
+
+const TypeSystem* CFunctionEmitter::ts() const {
+  return m_module->ts();
 }
 
 std::string CFunctionEmitter::access(const RegVal* rv, bool for_write) {
@@ -310,6 +359,7 @@ void CFunctionEmitter::emit() {
   // behaviors). 128-bit parameters use their own argument register numbering, so the position in
   // this list is the argument index.
   std::vector<std::pair<int, int>> params;  // arg index, ireg
+  std::vector<CArgClass> param_class;       // by arg index
   int n_args = 0;
   if (!code.empty()) {
     if (auto* reset = dynamic_cast<IR_ValueReset*>(code.front().get())) {
@@ -332,6 +382,16 @@ void CFunctionEmitter::emit() {
           error(fmt::format("could not find argument register for {}", rv->print()));
         }
         params.emplace_back(n_args, rv->ireg().id);
+        param_class.push_back(c_arg_class(ts(), rv->type()));
+        // A method implemented for a type whose values are 64-bit (only object's relocate and
+        // mem-usage in Jak 1) is inherited by reference types, whose callers don't pass the upper
+        // half of `this` (their method type has _type_ = the reference type): read it as an
+        // address. (AI-assisted)
+        const auto& mt = m_env->method_function_type;
+        if (param_class.back() == CArgClass::WIDE && (size_t)n_args + 1 < mt.arg_count() &&
+            mt.get_arg(n_args).base_type() == "_type_") {
+          param_class.back() = CArgClass::PTR;
+        }
         n_args++;
       }
     }
@@ -373,10 +433,17 @@ void CFunctionEmitter::emit() {
     m_body.push_back(label(code.size()) + ":;");
   }
 
-  // signature
-  std::vector<std::string> arg_types(n_args, "u64");
+  // signature (ABI version 3): the low 32 bits of each GPR argument as a u32, 128-bit arguments as
+  // v128, then the upper 32 bits of the arguments 0..n_hi-1 as floats. Only WIDE arguments read
+  // theirs, the others are ignored (the caller may not pass them).
+  std::vector<std::string> arg_types(n_args, "u32");
+  int n_hi = 0;
   for (auto& [idx, id] : params) {
-    arg_types.at(idx) = is_128(m_vars.at(id).reg_class) ? "v128" : "u64";
+    if (is_128(m_vars.at(id).reg_class)) {
+      arg_types.at(idx) = "v128";
+    } else if (param_class.at(idx) == CArgClass::WIDE) {
+      n_hi = std::max(n_hi, idx + 1);
+    }
   }
   std::string text = fmt::format("// {}\n", escape_comment(m_env->name()));
   text += fmt::format("static {} gc_f{}(", ret_type_name(), m_f_idx);
@@ -385,6 +452,9 @@ void CFunctionEmitter::emit() {
       text += ", ";
     }
     text += fmt::format("{} a{}", arg_types.at(i), i);
+  }
+  for (int i = 0; i < n_hi; i++) {
+    text += fmt::format(", float h{}", i);
   }
   if (n_args == 0) {
     text += "void";
@@ -429,10 +499,23 @@ void CFunctionEmitter::emit() {
                         m_env->stack_slots_used_for_stack_vars());
   }
   for (auto& [idx, id] : params) {
-    text += fmt::format("  {} = a{};\n",
-                        var_expr(id, arg_types.at(idx) == "v128" ? RegClass::INT_128
-                                                                 : RegClass::GPR_64),
-                        idx);
+    if (arg_types.at(idx) == "v128") {
+      text += fmt::format("  {} = a{};\n", var_expr(id, RegClass::INT_128), idx);
+      continue;
+    }
+    std::string value;
+    switch (param_class.at(idx)) {
+      case CArgClass::PTR:
+        value = fmt::format("(u64)a{}", idx);
+        break;
+      case CArgClass::FLOAT:
+        value = fmt::format("(u64)(s64)(s32)a{}", idx);
+        break;
+      case CArgClass::WIDE:
+        value = fmt::format("gc_arg64(a{}, h{})", idx, idx);
+        break;
+    }
+    text += fmt::format("  {} = {};\n", var_expr(id, RegClass::GPR_64), value);
   }
 
   for (auto& l : m_body) {
@@ -456,8 +539,9 @@ void CFunctionEmitter::emit() {
 
 CModuleEmitter::CModuleEmitter(std::string obj_name,
                                emitter::ObjectGenerator* gen,
-                               GameVersion version)
-    : m_obj_name(std::move(obj_name)), m_gen(gen), m_version(version) {}
+                               GameVersion version,
+                               const TypeSystem* ts)
+    : m_obj_name(std::move(obj_name)), m_gen(gen), m_version(version), m_ts(ts) {}
 
 void CModuleEmitter::add_function(FunctionEnv* env, int f_idx, int seg) {
   function_seg[f_idx] = seg;

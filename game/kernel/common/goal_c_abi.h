@@ -64,16 +64,57 @@ static inline void* goalc_fn(uint64_t f) {
   return p;
 }
 
-// Calling convention for compiled GOAL functions:
-//   - Declared with their exact arity (0-8 params). GPR params are uint64_t, 128-bit params are
-//     goalc_v128 by value. Floats travel as bit patterns in uint64_t, like native GOAL.
-//   - Return uint64_t, or goalc_v128 when the function returns a 128-bit type.
+// Calling convention for compiled GOAL functions (ABI version 3, GOALC_ABI_VERSION in
+// goal_c_ops.h, docs/3ds-port/c_backend.md):
+//   - A function with n arguments is declared
+//       uint64_t f(uint32_t a0, ..., uint32_t a(n-1), float h0, ..., float h(k-1))
+//     (128-bit arguments are goalc_v128 by value instead of a uint32_t). a_i is the low half of
+//     argument i, h_i the bits of its upper half. On 32-bit ARM, four arguments fit in core
+//     registers instead of two, and the upper halves travel in VFP registers.
+//   - The callee only reads h_i for arguments whose type is "wide" (any 64-bit value: integers,
+//     object, enums...). Arguments whose type is a GOAL address (structure, basic, pointer, symbol,
+//     function, pair...) are rebuilt as the zero-extended low half, floats as the sign-extended low
+//     half (the bits of a float in a GPR). Callers pass h_i for the wide arguments of the function
+//     type they see, and anything for the others; GOAL's type checks guarantee that a function is
+//     only called through function types whose arguments are the same types or parents of its own,
+//     so an argument that the callee reads as wide is wide for the caller too.
+//   - Return uint64_t (all 64 bits, always), or goalc_v128 for 128-bit return types.
 //   - Callers cast goalc_fn(f) to the call-site signature. Arity mismatches are tolerated, as they
 //     are harmless with caller-cleaned argument passing (AAPCS, SysV, AAPCS64).
-// Functions the runtime exposes to GOAL (kernel functions, mips2c) must be callable as
-//   uint64_t (*)(uint64_t a0, ..., uint64_t a7)
+// The runtime calls GOAL with all 8 arguments wide (goalc_call8). Host functions exposed to GOAL
+// have the same signature (goalc_fnx); the runtime builds adapters for C++ functions.
+typedef uint64_t (*goalc_fnx)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                              uint32_t, float, float, float, float, float, float, float, float);
+//! the old all-uint64_t signature, used by some C++ functions exposed to GOAL (through adapters)
 typedef uint64_t (*goalc_fn8)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                               uint64_t);
+
+//! upper half of a 64-bit argument, as passed in h_i
+static inline float goalc_hi_bits(uint64_t v) {
+  uint32_t hi = (uint32_t)(v >> 32);
+  float f;
+  memcpy(&f, &hi, 4);
+  return f;
+}
+//! a 64-bit argument from its two halves
+static inline uint64_t goalc_arg64(uint32_t lo, float hi) {
+  uint32_t h;
+  memcpy(&h, &hi, 4);
+  return (uint64_t)lo | ((uint64_t)h << 32);
+}
+
+//! Check mode (modules built with -DGOALC_ABI_CHECK, goal_c_ops.h): report an argument that
+//! doesn't follow the ABI.
+void goalc_abi_check_failed(const char* file, int line, const char* what, uint64_t value);
+
+//! Call a GOAL function value (or host function exposed to GOAL) with 8 wide arguments.
+static inline uint64_t goalc_call8(uint64_t f, const uint64_t* a) {
+  goalc_fnx fn = (goalc_fnx)goalc_fn(f);
+  return fn((uint32_t)a[0], (uint32_t)a[1], (uint32_t)a[2], (uint32_t)a[3], (uint32_t)a[4],
+            (uint32_t)a[5], (uint32_t)a[6], (uint32_t)a[7], goalc_hi_bits(a[0]),
+            goalc_hi_bits(a[1]), goalc_hi_bits(a[2]), goalc_hi_bits(a[3]), goalc_hi_bits(a[4]),
+            goalc_hi_bits(a[5]), goalc_hi_bits(a[6]), goalc_hi_bits(a[7]));
+}
 
 // ---------------------------------------------------------------------------
 // Modules

@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -47,14 +48,36 @@ void goalc_set_foreign_stack(u8* bottom, u32 size);
 // Function ids
 // ---------------------------------------------------------------------------
 
-//! Adapter used to expose a host function whose signature is not goalc_fn8.
+//! Adapter used to expose a host function whose signature is not goalc_fnx (goal_c_abi.h).
 //! args points to the 8 GOAL arguments (a writable array on the host/GOAL stack).
 using goalc_adapter = u64 (*)(void* fn, u64 extra, u64* args);
 
-//! Get an id for a host function callable as goalc_fn8. The same function always gets the same id.
+//! (AI-assisted) ABI version 3: which arguments of a host function are "wide" (bit i: argument i).
+//! The adapter thunks rebuild those from both halves, and the others as their zero-extended low
+//! half: a caller only passes the upper half of arguments that are wide in the GOAL type it calls
+//! the function through (see goal_c_abi.h), so this must not have bits for arguments that are
+//! narrow (addresses, floats) in the function's GOAL type.
+constexpr u32 GOALC_ALL_WIDE = 0xff;
+
+//! Get an id for a host function with the goalc_fnx signature (it reads the arguments itself). The
+//! same function always gets the same id.
 u32 goalc_fn_id_for_host(void* fn);
-//! Get an id for a host function called through an adapter. Deduplicated on (adapter, fn, extra).
-u32 goalc_fn_id_for_adapted(goalc_adapter adapter, void* fn, u64 extra);
+//! Get an id for a host function with the goalc_fn8 signature (all arguments uint64_t).
+u32 goalc_fn_id_for_fn8(void* fn, u32 wide_mask);
+//! Get an id for a host function called through an adapter. Deduplicated on (adapter, fn, extra,
+//! wide_mask).
+u32 goalc_fn_id_for_adapted(goalc_adapter adapter, void* fn, u64 extra, u32 wide_mask);
+//! The id of the same adapted function with other wide arguments (id itself if it isn't adapted).
+u32 goalc_fn_id_remask(u32 id, u32 wide_mask);
+
+//! Kernel functions exported to GOAL by name, with the arguments their adapter reads as wide (for
+//! the test that checks them against their GOAL types: GoalcAbi in test/goalc).
+struct GoalcKernelFunctionInfo {
+  const char* name;
+  u32 wide_mask;
+};
+void goalc_note_kernel_function(const char* name, u32 wide_mask);
+const std::vector<GoalcKernelFunctionInfo>& goalc_kernel_functions();
 //! Allocate a contiguous range of ids for n host functions (used for modules).
 u32 goalc_alloc_fn_ids(void* const* fns, u32 n);
 //! Number of ids in use (including the reserved id 0).
@@ -67,9 +90,10 @@ void goalc_write_stub(u32 goal_addr, u32 id, u32 index);
 u64 goalc_adapter_arg3_pp(void* fn, u64 extra, u64* args);
 u64 goalc_adapter_stack_args(void* fn, u64 extra, u64* args);
 
-//! Host functions for the GOAL `nothing` and `zero-func` functions.
-u64 goalc_nothing_fn(u64 a0, u64, u64, u64, u64, u64, u64, u64);
-u64 goalc_zero_fn(u64, u64, u64, u64, u64, u64, u64, u64);
+//! Host functions for the GOAL `nothing` and `zero-func` functions (goalc_fnx, use
+//! goalc_fn_id_for_host).
+u64 goalc_nothing_fn(u32 a0);
+u64 goalc_zero_fn();
 
 // ---------------------------------------------------------------------------
 // Modules

@@ -42,16 +42,16 @@ void InitVideo();
  * Flush caches.  Does all the memory, regardless of what you specify
  */
 void CacheFlush(void* mem, int size);
-u64 CPadOpen(u64 cpad_info, s32 pad_number);
-u64 CPadGetData(u64 cpad_info);
+u64 CPadOpen(u32 cpad_info, s32 pad_number);
+u64 CPadGetData(u32 cpad_info);
 void InstallHandler(u32 handler_idx, u32 handler_func);
 void InstallDebugHandler();
-s32 klength(u64 fs);
-s32 kseek(u64 fs, s32 offset, s32 where);
-s32 kread(u64 fs, u64 buffer, s32 size);
-s32 kwrite(u64 fs, u64 buffer, s32 size);
+s32 klength(u32 fs);
+s32 kseek(u32 fs, s32 offset, s32 where);
+s32 kread(u32 fs, u32 buffer, s32 size);
+s32 kwrite(u32 fs, u32 buffer, s32 size);
 s32 kmkdir(u64 name);
-u64 kclose(u64 fs);
+u64 kclose(u32 fs);
 void dma_to_iop();
 u64 DecodeLanguage();
 u64 DecodeAspect();

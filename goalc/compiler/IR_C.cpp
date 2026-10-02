@@ -73,16 +73,56 @@ void IR_RegSet::do_codegen_c(CFunctionEmitter& e) {
 }
 
 void IR_FunctionCall::do_codegen_c(CFunctionEmitter& e) {
+  // ABI version 3 (docs/3ds-port/c_backend.md): the low 32 bits of every GPR argument as a u32,
+  // 128-bit arguments as v128, then the upper 32 bits of the arguments that are WIDE in the type
+  // the caller sees, as floats (positional: arguments before the last WIDE one that are narrow get
+  // an unspecified value).
+  std::vector<CArgClass> cls;
+  int n_hi = 0;
+  for (size_t i = 0; i < m_args.size(); i++) {
+    auto c = CArgClass::WIDE;
+    if (i < m_arg_view_types.size()) {
+      c = c_arg_class(e.ts(), m_arg_view_types[i]);
+    }
+    cls.push_back(c);
+    if (c == CArgClass::WIDE && !is_128(m_args[i]->ireg().reg_class)) {
+      n_hi = (int)i + 1;
+    }
+  }
   std::string sig;
   std::string args;
+  std::vector<std::string> reads;
   for (size_t i = 0; i < m_args.size(); i++) {
     if (i) {
       sig += ", ";
       args += ", ";
     }
-    bool wide = is_128(m_args[i]->ireg().reg_class);
-    sig += wide ? "v128" : "u64";
-    args += e.read(m_args[i]);
+    reads.push_back(e.read(m_args[i]));
+    if (is_128(m_args[i]->ireg().reg_class)) {
+      sig += "v128";
+      args += reads.back();
+    } else {
+      sig += "u32";
+      switch (cls[i]) {
+        case CArgClass::WIDE:
+          args += fmt::format("(u32){}", reads.back());
+          break;
+        case CArgClass::PTR:
+          args += fmt::format("(u32)GC_PA({})", reads.back());
+          break;
+        case CArgClass::FLOAT:
+          args += fmt::format("(u32)GC_FA({})", reads.back());
+          break;
+      }
+    }
+  }
+  for (int i = 0; i < n_hi; i++) {
+    sig += ", float";
+    if (cls[i] == CArgClass::WIDE && !is_128(m_args[i]->ireg().reg_class)) {
+      args += fmt::format(", gc_hi({})", reads[i]);
+    } else {
+      args += ", gc_anyf()";
+    }
   }
   if (m_args.empty()) {
     sig = "void";

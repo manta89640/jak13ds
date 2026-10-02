@@ -58,7 +58,7 @@ namespace {
 // Function table
 // ---------------------------------------------------------------------------
 
-u64 unlinked_function(u64, u64, u64, u64, u64, u64, u64, u64) {
+u64 unlinked_function() {
   lg::error("[goalc] called a GOAL function whose stub was never linked (function id 0)");
   goalc_break();
   return 0;
@@ -112,9 +112,10 @@ FnTable g_fn_table;
 // ---------------------------------------------------------------------------
 // Adapter thunks
 // ---------------------------------------------------------------------------
-// Host functions that are not callable as goalc_fn8 (arg3_is_pp kernel functions, stack-argument
-// kernel functions, mips2c functions) need a distinct goalc_fn8 entry point that knows which
-// function to call. There is no runtime code generation, so we use a fixed pool of thunks.
+// Host functions that don't have the goalc_fnx signature (all-u64 kernel functions, typed kernel
+// functions, arg3_is_pp kernel functions, stack-argument kernel functions, mips2c functions) need a
+// distinct goalc_fnx entry point that knows which function to call and which arguments are wide.
+// There is no runtime code generation, so we use a fixed pool of thunks.
 
 constexpr u32 kMaxThunks = 2048;
 
@@ -122,22 +123,74 @@ struct ThunkSlot {
   goalc_adapter adapter = nullptr;
   void* fn = nullptr;
   u64 extra = 0;
+  u32 wide_mask = 0;
   u32 id = 0;
 };
 
 ThunkSlot g_thunk_slots[kMaxThunks];
 u32 g_thunk_count = 0;
 
+// OPENGOAL_C_ABI_CHECK=1 (with modules built with -DGOALC_ABI_CHECK, see goal_c_ops.h): report
+// wide arguments of host functions that the caller passed without their upper half
+bool g_abi_check = false;
+constexpr u32 kAbiPoison = 0x7fbadbad;  // GC_ABI_POISON in goal_c_ops.h
+
+void check_thunk_arg(float hi, u32 lo, int i, const ThunkSlot& slot);
+
+inline u64 thunk_arg(u32 lo, float hi, u32 mask, int i, const ThunkSlot& slot) {
+  if (!((mask >> i) & 1)) {
+    return lo;
+  }
+  if (g_abi_check) {
+    check_thunk_arg(hi, lo, i, slot);
+  }
+  return goalc_arg64(lo, hi);
+}
+
 template <u32 I>
-u64 thunk(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
-  u64 args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+u64 thunk(u32 a0,
+          u32 a1,
+          u32 a2,
+          u32 a3,
+          u32 a4,
+          u32 a5,
+          u32 a6,
+          u32 a7,
+          float h0,
+          float h1,
+          float h2,
+          float h3,
+          float h4,
+          float h5,
+          float h6,
+          float h7) {
   const ThunkSlot& slot = g_thunk_slots[I];
+  const u32 m = slot.wide_mask;
+  u64 args[8] = {thunk_arg(a0, h0, m, 0, slot), thunk_arg(a1, h1, m, 1, slot),
+                 thunk_arg(a2, h2, m, 2, slot), thunk_arg(a3, h3, m, 3, slot),
+                 thunk_arg(a4, h4, m, 4, slot), thunk_arg(a5, h5, m, 5, slot),
+                 thunk_arg(a6, h6, m, 6, slot), thunk_arg(a7, h7, m, 7, slot)};
   return slot.adapter(slot.fn, slot.extra, args);
 }
 
 template <u32... Is>
-constexpr std::array<goalc_fn8, sizeof...(Is)> make_thunks(std::integer_sequence<u32, Is...>) {
+constexpr std::array<goalc_fnx, sizeof...(Is)> make_thunks(std::integer_sequence<u32, Is...>) {
   return {&thunk<Is>...};
+}
+
+void check_thunk_arg(float hi, u32 lo, int i, const ThunkSlot& slot) {
+  u32 bits;
+  memcpy(&bits, &hi, 4);
+  if (bits == kAbiPoison) {
+    char what[96];
+    snprintf(what, sizeof(what), "host function %p (adapter %p) wide argument %d", slot.fn,
+             (void*)slot.adapter, i);
+    goalc_abi_check_failed("thunk", 0, what, lo);
+  }
+}
+
+u64 adapter_fn8(void* fn, u64, u64* args) {
+  return ((goalc_fn8)fn)(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
 }
 
 const auto g_thunks = make_thunks(std::make_integer_sequence<u32, kMaxThunks>{});
@@ -182,9 +235,7 @@ struct PendingCall {
 
 u64 call_pending_entry(void* arg) {
   auto* call = (PendingCall*)arg;
-  auto fn = (goalc_fn8)goalc_fn(call->f);
-  return fn(call->args[0], call->args[1], call->args[2], call->args[3], call->args[4],
-            call->args[5], call->args[6], call->args[7]);
+  return goalc_call8(call->f, call->args);
 }
 
 }  // namespace
@@ -221,6 +272,17 @@ void goalc_break(void) {
  */
 __attribute__((weak)) void goalc_register_static_modules(void) {}
 
+void goalc_abi_check_failed(const char* file, int line, const char* what, uint64_t value) {
+  // (AI-assisted) see goal_c_ops.h. Report each place once.
+  static std::mutex mutex;
+  static std::unordered_map<std::string, int> seen;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto key = fmt::format("{}:{}: {}", file, line, what);
+  if (seen[key]++ == 0) {
+    lg::warn("[goalc abi check] {} (value #x{:x})", key, value);
+  }
+}
+
 void goalc_register_module(const GoalCModule* mod) {
   auto& reg = static_registry();
   auto it = reg.find(mod->hash);
@@ -254,6 +316,9 @@ void goalc_runtime_init(u8* mem, u32 st) {
   }
   g_thunk_count = 0;
   g_linked_modules.clear();
+  if (const char* check = getenv("OPENGOAL_C_ABI_CHECK")) {
+    g_abi_check = check[0] == '1';
+  }
   g_ee_thread_id = std::this_thread::get_id();
   goalc_register_static_modules();
 }
@@ -277,10 +342,12 @@ u32 goalc_fn_id_for_host(void* fn) {
   return id;
 }
 
-u32 goalc_fn_id_for_adapted(goalc_adapter adapter, void* fn, u64 extra) {
+u32 goalc_fn_id_for_adapted(goalc_adapter adapter, void* fn, u64 extra, u32 wide_mask) {
+  wide_mask &= GOALC_ALL_WIDE;
   for (u32 i = 0; i < g_thunk_count; i++) {
     auto& slot = g_thunk_slots[i];
-    if (slot.adapter == adapter && slot.fn == fn && slot.extra == extra) {
+    if (slot.adapter == adapter && slot.fn == fn && slot.extra == extra &&
+        slot.wide_mask == wide_mask) {
       return slot.id;
     }
   }
@@ -289,9 +356,42 @@ u32 goalc_fn_id_for_adapted(goalc_adapter adapter, void* fn, u64 extra) {
   slot.adapter = adapter;
   slot.fn = fn;
   slot.extra = extra;
+  slot.wide_mask = wide_mask;
   slot.id = g_fn_table.push((void*)g_thunks[g_thunk_count]);
   g_thunk_count++;
   return slot.id;
+}
+
+namespace {
+std::vector<GoalcKernelFunctionInfo> g_kernel_functions;
+}
+
+void goalc_note_kernel_function(const char* name, u32 wide_mask) {
+  for (auto& f : g_kernel_functions) {
+    if (!strcmp(f.name, name)) {
+      f.wide_mask = wide_mask;
+      return;
+    }
+  }
+  g_kernel_functions.push_back({name, wide_mask});
+}
+
+const std::vector<GoalcKernelFunctionInfo>& goalc_kernel_functions() {
+  return g_kernel_functions;
+}
+
+u32 goalc_fn_id_for_fn8(void* fn, u32 wide_mask) {
+  return goalc_fn_id_for_adapted(adapter_fn8, fn, 0, wide_mask);
+}
+
+u32 goalc_fn_id_remask(u32 id, u32 wide_mask) {
+  for (u32 i = 0; i < g_thunk_count; i++) {
+    const auto& slot = g_thunk_slots[i];
+    if (slot.id == id) {
+      return goalc_fn_id_for_adapted(slot.adapter, slot.fn, slot.extra, wide_mask);
+    }
+  }
+  return id;
 }
 
 u32 goalc_alloc_fn_ids(void* const* fns, u32 n) {
@@ -315,6 +415,7 @@ void goalc_write_stub(u32 goal_addr, u32 id, u32 index) {
 }
 
 u64 goalc_adapter_arg3_pp(void* fn, u64, u64* args) {
+  // fn is a goalc_fn8
   // the native stub moves pp into the fourth argument register and leaves the rest alone.
   return ((goalc_fn8)fn)(args[0], args[1], args[2], goalc_pp, args[4], args[5], args[6], args[7]);
 }
@@ -324,13 +425,13 @@ u64 goalc_adapter_stack_args(void* fn, u64, u64* args) {
   return ((u64(*)(u64*))fn)(args);
 }
 
-u64 goalc_nothing_fn(u64 a0, u64, u64, u64, u64, u64, u64, u64) {
+u64 goalc_nothing_fn(u32 a0) {
   // the native `nothing` is just a return, which leaves the first argument in the return register
-  // on arm64.
+  // on arm64 (only its low half here: the upper half is only passed for wide arguments).
   return a0;
 }
 
-u64 goalc_zero_fn(u64, u64, u64, u64, u64, u64, u64, u64) {
+u64 goalc_zero_fn() {
   return 0;
 }
 
@@ -476,7 +577,7 @@ u64 goalc_call_goal(u32 f, u64 a, u64 b, u64 c, u64 st) {
   goalc_pp = st;
   u64 result;
   if (goalc_on_goal_stack()) {
-    result = ((goalc_fn8)goalc_fn(f))(a, b, c, 0, 0, 0, 0, 0);
+    result = goalc_call8(f, args);
   } else {
     // called from plain C (for example during boot). Compiled code must run on a stack in GOAL
     // memory, so switch to the kernel stack.
@@ -506,8 +607,7 @@ u64 goalc_call_goal8(u32 f, const u64* args, u64 pp) {
   // mips2c code calling GOAL. mips2c runs on the GOAL stack already.
   u64 saved_pp = goalc_pp;
   goalc_pp = pp;
-  u64 result = ((goalc_fn8)goalc_fn(f))(args[0], args[1], args[2], args[3], args[4], args[5],
-                                         args[6], args[7]);
+  u64 result = goalc_call8(f, args);
   goalc_pp = saved_pp;
   return result;
 }

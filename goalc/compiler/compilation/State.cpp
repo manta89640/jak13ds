@@ -329,6 +329,10 @@ Val* Compiler::compile_go_hook(const goos::Object& form, const goos::Object& res
 
   // now we have to call the function.
   auto enter_state_func = compile_get_symbol_value(form, "enter-state", env);
+  // (AI-assisted) the C backend passes the arguments like for enter-state's own type (all object),
+  // not the state's argument types used for the type check below: enter-state reads them as 64-bit
+  // values (docs/3ds-port/c_backend.md, ABI version 3).
+  const TypeSpec enter_state_type = enter_state_func->type();
   enter_state_func->set_type(state_to_go_function(state->type(), TypeSpec("object")));
 
   std::vector<RegVal*> function_arguments;
@@ -338,5 +342,5 @@ Val* Compiler::compile_go_hook(const goos::Object& form, const goos::Object& res
 
   // typechecking here will make sure the go is possible.
   return compile_real_function_call(form, enter_state_func->to_gpr(form, env), function_arguments,
-                                    env);
+                                    env, "", &enter_state_type);
 }

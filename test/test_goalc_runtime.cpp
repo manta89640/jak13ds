@@ -132,9 +132,10 @@ struct FakeGoal {
 
   u32& w(u32 addr) { return *(u32*)(mem + addr); }
 
+  //! a GOAL function for a host function with the goalc_fn8 signature (all arguments wide)
   u32 make_function(void* host_fn) {
     u32 f = alloc(16) + 4;
-    goalc_write_stub(f, goalc_fn_id_for_host(host_fn), 0);
+    goalc_write_stub(f, goalc_fn_id_for_fn8(host_fn, GOALC_ALL_WIDE), 0);
     return f;
   }
 
@@ -460,30 +461,85 @@ u64 takes_array(u64* args) {
   return result;
 }
 
+u64 call8(u32 f, std::array<u64, 8> args) {
+  return goalc_call8(f, args.data());
+}
+
+// what compiled GOAL code does for a call where only the arguments in wide_mask are wide: the
+// upper halves of the others are not passed (here: garbage)
+u64 call_narrow(u64 f, u32 wide_mask, std::array<u64, 8> a) {
+  float h[8];
+  for (int i = 0; i < 8; i++) {
+    h[i] = goalc_hi_bits(((wide_mask >> i) & 1) ? a[i] : 0xdead0000beef0000ull);
+  }
+  return ((goalc_fnx)goalc_fn(f))((u32)a[0], (u32)a[1], (u32)a[2], (u32)a[3], (u32)a[4],
+                                  (u32)a[5], (u32)a[6], (u32)a[7], h[0], h[1], h[2], h[3], h[4],
+                                  h[5], h[6], h[7]);
+}
+
 TEST(GoalcRuntime, FunctionIds) {
   FakeGoal goal;
   u32 f = goal.make_function((void*)add8);
-  EXPECT_EQ(((goalc_fn8)goalc_fn(f))(1, 2, 3, 4, 5, 6, 7, 8), 36u);
+  EXPECT_EQ(call8(f, {1, 2, 3, 4, 5, 6, 7, 8}), 36u);
   // same host function, same id
-  EXPECT_EQ(goalc_fn_id_for_host((void*)add8), goalc_fn_id_for_host((void*)add8));
+  EXPECT_EQ(goalc_fn_id_for_host((void*)goalc_zero_fn), goalc_fn_id_for_host((void*)goalc_zero_fn));
+  EXPECT_EQ(goalc_fn_id_for_fn8((void*)add8, 3), goalc_fn_id_for_fn8((void*)add8, 3));
+  EXPECT_NE(goalc_fn_id_for_fn8((void*)add8, 3), goalc_fn_id_for_fn8((void*)add8, 1));
   // id 0 is reserved
-  EXPECT_NE(goalc_fn_id_for_host((void*)add8), 0u);
+  EXPECT_NE(goalc_fn_id_for_host((void*)goalc_zero_fn), 0u);
 
   goalc_pp = 1000;
-  u32 id_pp = goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, (void*)takes_pp, 0);
-  EXPECT_EQ(id_pp, goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, (void*)takes_pp, 0));
+  u32 id_pp = goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, (void*)takes_pp, 0, GOALC_ALL_WIDE);
+  EXPECT_EQ(id_pp,
+            goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, (void*)takes_pp, 0, GOALC_ALL_WIDE));
   u32 fpp = goal.alloc(16) + 4;
   goalc_write_stub(fpp, id_pp, 0);
-  EXPECT_EQ(((goalc_fn8)goalc_fn(fpp))(1, 2, 3, 99, 0, 0, 0, 0), 1006u);
+  EXPECT_EQ(call8(fpp, {1, 2, 3, 99, 0, 0, 0, 0}), 1006u);
 
-  u32 id_stack = goalc_fn_id_for_adapted(goalc_adapter_stack_args, (void*)takes_array, 0);
+  u32 id_stack =
+      goalc_fn_id_for_adapted(goalc_adapter_stack_args, (void*)takes_array, 0, GOALC_ALL_WIDE);
   EXPECT_NE(id_stack, id_pp);
   u32 fstack = goal.alloc(16) + 4;
   goalc_write_stub(fstack, id_stack, 0);
-  EXPECT_EQ(((goalc_fn8)goalc_fn(fstack))(1, 2, 3, 4, 5, 6, 7, 8), 12345678u);
+  EXPECT_EQ(call8(fstack, {1, 2, 3, 4, 5, 6, 7, 8}), 12345678u);
 
-  EXPECT_EQ(goalc_nothing_fn(5, 0, 0, 0, 0, 0, 0, 0), 5u);
-  EXPECT_EQ(goalc_zero_fn(5, 0, 0, 0, 0, 0, 0, 0), 0u);
+  EXPECT_EQ(goalc_nothing_fn(5), 5u);
+  EXPECT_EQ(goalc_zero_fn(), 0u);
+}
+
+// ABI version 3: the adapter thunks read the upper half of the wide arguments only
+u64 g_seen8[8];
+u64 records8(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
+  u64 a[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+  memcpy(g_seen8, a, sizeof(a));
+  return 0x123456789abcdef0ull;
+}
+
+TEST(GoalcRuntime, WideArguments) {
+  FakeGoal goal;
+  const std::array<u64, 8> args = {0x100000001ull, 2, 0xffffffff80000003ull, 4,
+                                   0x8000000000000005ull, 6, 7, 0x0000000800000008ull};
+  u32 f = goal.alloc(16) + 4;
+  goalc_write_stub(f, goalc_fn_id_for_fn8((void*)records8, 0b10010101), 0);
+  EXPECT_EQ(call_narrow(f, 0b10010101, args), 0x123456789abcdef0ull);
+  for (int i = 0; i < 8; i++) {
+    u64 expected = ((0b10010101 >> i) & 1) ? args[i] : (u32)args[i];
+    EXPECT_EQ(g_seen8[i], expected) << i;
+  }
+  // the same function with other wide arguments
+  u32 id = goalc_fn_id_remask(goalc_fn_id_for_fn8((void*)records8, 0b10010101), 0b100);
+  EXPECT_EQ(id, goalc_fn_id_for_fn8((void*)records8, 0b100));
+  goalc_write_stub(f, id, 0);
+  call_narrow(f, 0b100, args);
+  for (int i = 0; i < 8; i++) {
+    u64 expected = i == 2 ? args[i] : (u32)args[i];
+    EXPECT_EQ(g_seen8[i], expected) << i;
+  }
+  // a host function that isn't adapted keeps its id
+  u32 direct = goalc_fn_id_for_host((void*)goalc_nothing_fn);
+  EXPECT_EQ(goalc_fn_id_remask(direct, 0b1), direct);
+  goalc_write_stub(f, direct, 0);
+  EXPECT_EQ(call_narrow(f, 0, args), 0x00000001ull);
 }
 
 // typed adapters (kernel_function.h)
@@ -507,14 +563,22 @@ u64 takes_rpc_args(void* args) {
 }
 
 u64 call_kernel_function(KernelFunction kf, u64 extra, std::array<u64, 8> args) {
-  u32 id = kf.adapter ? goalc_fn_id_for_adapted(kf.adapter, kf.ptr, extra)
-                      : goalc_fn_id_for_host(kf.ptr);
-  return ((goalc_fn8)goalc_fn_table[id])(args[0], args[1], args[2], args[3], args[4], args[5],
-                                         args[6], args[7]);
+  // like make_function_from_c in C mode
+  u32 id = kf.direct && !extra ? goalc_fn_id_for_host(kf.ptr)
+           : kf.adapter        ? goalc_fn_id_for_adapted(kf.adapter, kf.ptr, extra, kf.wide_mask)
+                               : goalc_fn_id_for_fn8(kf.ptr, kf.wide_mask);
+  u32 f = g_goal->alloc(16) + 4;
+  goalc_write_stub(f, id, 0);
+  return call_narrow(f, kf.wide_mask, args);
+}
+
+u64 direct_fn(u32 a, s32 b) {
+  return (u64)a + (u64)(s64)b;
 }
 
 TEST(GoalcRuntime, TypedAdapters) {
   FakeGoal goal;
+  g_goal = &goal;
   // 32-bit arguments are truncated, 32-bit returns zero-extended
   EXPECT_EQ(call_kernel_function(returns_s32, 0, {0x1234567800000005ull, 0xffffffffffffffffull}),
             0xffffffffull);
@@ -534,22 +598,35 @@ TEST(GoalcRuntime, TypedAdapters) {
   call_kernel_function(takes_pp_typed, 1, {7, 0, 0, 12345});
   EXPECT_EQ(g_seen_u32, 107u);
   EXPECT_EQ(call_kernel_function(returns_u8, 0, {0x1ff}), 0xffu);
-  // 64-bit functions don't need an adapter
+  // 64-bit functions don't need an adapter (but a thunk that rebuilds the arguments)
   EXPECT_EQ(KernelFunction(add8).adapter, nullptr);
+  EXPECT_EQ(KernelFunction(add8).wide_mask, 0xffu);
+  EXPECT_FALSE(KernelFunction(add8).direct);
+  EXPECT_EQ(call_kernel_function(add8, 0, {1ull << 40, 2, 3, 4, 5, 6, 7, 8}), (1ull << 40) + 35);
   EXPECT_NE(KernelFunction(returns_s32).adapter, nullptr);
+  EXPECT_EQ(KernelFunction(returns_u8).wide_mask, 1u);
+  EXPECT_EQ(KernelFunction(returns_s32).wide_mask, 0u);
+  // functions with 32-bit integer arguments and a 64-bit return are called directly
+  EXPECT_TRUE(KernelFunction(direct_fn).direct);
+  EXPECT_FALSE(KernelFunction(returns_s32).direct);
+  EXPECT_EQ(call_kernel_function(direct_fn, 0, {0x500000005ull, 0xfffffffffffffffeull}), 3u);
   // stack argument functions get a pointer to the arguments
   KernelFunction rpc(takes_rpc_args);
   ASSERT_NE(rpc.stack_adapter, nullptr);
-  u32 id = goalc_fn_id_for_adapted(rpc.stack_adapter, rpc.ptr, 0);
-  EXPECT_EQ(((goalc_fn8)goalc_fn_table[id])(1, 2, 3, 4, 5, 6, 7, 8), 8u);
+  u32 id = goalc_fn_id_for_adapted(rpc.stack_adapter, rpc.ptr, 0, GOALC_ALL_WIDE);
+  u32 f = goal.alloc(16) + 4;
+  goalc_write_stub(f, id, 0);
+  EXPECT_EQ(call8(f, {1, 2, 3, 4, 5, 6, 7, 1ull << 33}), 1ull << 33);
+  g_goal = nullptr;
 }
 
 // a statically registered module
-u64 module_fn0(u64 a0, u64, u64, u64, u64, u64, u64, u64) {
-  return a0 + 1;
+// (ABI version 3: like a compiled function whose argument is an address)
+u64 module_fn0(u32 a0) {
+  return (u64)a0 + 1;
 }
-u64 module_fn1(u64 a0, u64, u64, u64, u64, u64, u64, u64) {
-  return a0 + 2;
+u64 module_fn1(u32 a0) {
+  return (u64)a0 + 2;
 }
 void* const g_module_funcs[2] = {(void*)module_fn0, (void*)module_fn1};
 const char* const g_module_syms[2] = {"foo", "bar"};
@@ -596,8 +673,8 @@ TEST(GoalcRuntime, LinkModule) {
   EXPECT_EQ(g_module_seg_base[2], 0x5000u);
   EXPECT_EQ(g_module_sym_offsets[0], 8);
   EXPECT_EQ(g_module_sym_offsets[1], -16);
-  EXPECT_EQ(((goalc_fn8)goalc_fn(seg + 4))(10, 0, 0, 0, 0, 0, 0, 0), 12u);   // func 1
-  EXPECT_EQ(((goalc_fn8)goalc_fn(seg + 20))(10, 0, 0, 0, 0, 0, 0, 0), 11u);  // func 0
+  EXPECT_EQ(call8(seg + 4, {10, 0, 0, 0, 0, 0, 0, 0}), 12u);   // func 1
+  EXPECT_EQ(call8(seg + 20, {10, 0, 0, 0, 0, 0, 0, 0}), 11u);  // func 0
 
   // linking again (same hash) reuses the ids
   u32 count = goalc_fn_count();
