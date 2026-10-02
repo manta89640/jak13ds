@@ -88,6 +88,10 @@ void link() {
 } // namespace Mips2C
 
 //--------------------------MIPS2C---------------------
+#include <algorithm>
+#include <cmath>
+
+#include "game/mips2c/mips2c_native.h"
 #include "game/mips2c/mips2c_private.h"
 
 namespace Mips2C::jak1 {
@@ -403,6 +407,127 @@ u64 execute(void* ctxt) {
   return c->gprs[v0].du64[0];
 }
 
+// (AI-assisted) Native version (see game/mips2c/mips2c_native.h): the mips2c version was the last
+// emulated function among the hot ones, 1.9 ms per frame on hardware in Misty (water and mud
+// ripples). Same operations, grouped the same way (one expression per VU op), so the same bits.
+namespace {
+inline u32 sym_value(const void* sym) {
+  u32 v;
+  memcpy(&v, sym, 4);
+  return v;
+}
+inline u32 goal_addr(const void* host) {
+  return (u32)((const u8*)host - g_ee_main_mem);
+}
+inline u64 float_arg(float f) {
+  s32 i;
+  memcpy(&i, &f, 4);
+  return (u64)(s64)i;  // mfc1 sign-extends
+}
+inline float float_ret(u64 v) {
+  const u32 i = (u32)v;
+  float f;
+  memcpy(&f, &i, 4);
+  return f;
+}
+}  // namespace
+
+u64 native_impl(const NativeArgs& args) {
+  const u32 gp = (u32)args.a[0];
+  auto call = [&](const void* sym, u64 a0, u64 a1) {
+    const u64 call_args[8] = {a0, a1, args.a[2], args.a[3], args.a[4], args.a[5], args.a[6],
+                              args.a[7]};
+    return native_call_goal(sym_value(sym), call_args, args);
+  };
+  const s32 count = gload<s32>(gp);
+  // once per ripple-wave-set: the waves' direction (from their x/z) and speed
+  if (gload<u32>(gp + 4) == (u32)args.st) {
+    for (s32 i = 0; i < count; i++) {
+      const u32 w = gp + 16 + 28 * (u32)i;
+      const s32 xi = gload<s16>(w + 8), zi = gload<s16>(w + 10);
+      const float angle = float_ret(call(cache.atan, float_arg((float)zi), float_arg((float)xi)));
+      const float f30 = 16.0f / std::sqrt((float)(s32)(xi * xi + zi * zi));
+      const float c = float_ret(call(cache.cos, float_arg(angle), 0));
+      gstore<float>(w + 16, c * (65536.0f / f30));
+      const float sn = float_ret(call(cache.sin, float_arg(angle), 0));
+      gstore<float>(w + 20, sn * (65536.0f / f30));
+      const u32 mode = gload<u32>(sym_value(cache.setting_control) + 80);
+      if (mode == goal_addr(cache.ntsc)) {
+        gstore<float>(w + 24, (0.016666668f * (-65536.0f / f30)) * gload<float>(w + 12));
+      } else if (mode == goal_addr(cache.pal)) {
+        gstore<float>(w + 24, (0.02f * (-65536.0f / f30)) * gload<float>(w + 12));
+      }
+    }
+    gstore<u32>(gp + 4, (u32)args.st + 8);  // #t
+  }
+  call(cache.ripple_update_waveform_offs, gp, 0);
+  const u32 spad = sym_value(cache.fake_scratchpad_data);
+  // 16 x 16 heights (floats) at spad: the sum of the waves
+  float h[256];
+  for (float& v : h) {
+    v = 0.0f;
+  }
+  for (s32 i = 0; i < count; i++) {
+    const u32 w = gp + 16 + 28 * (u32)i;
+    const float f0 = 16384.0f + 0.00390625f * gload<float>(w + 4);
+    const float f1 = 0.00390625f * gload<float>(w + 16);
+    const float f2 = 0.00390625f * gload<float>(w + 20);
+    const float amp = gload<float>(w);
+    float row = 0.0f;
+    for (int r = 0; r < 16; r++) {
+      float col = 0.0f;
+      for (int c = 0; c < 16; c++) {
+        float acc = f0 + 0.0f;            // vaddax acc, vf1, vf0
+        acc += f1 * col;                  // vmadda acc, vf2, vf5
+        const float ph = acc + f2 * row;  // vmadd vf7, vf3, vf6
+        const s32 pi = (s32)ph;           // vftoi0
+        const Vf q = gRippleVu0.lq((u16)pi & 255);
+        const float frac = ph - (float)pi;  // vitof0, vsub
+        const float a2 = 0.0f + q.x();      // vaddax acc, vf0, vf9
+        const float s = a2 + frac * q.y();  // vmaddy vf9, vf7, vf9
+        float& cell = h[r * 16 + c];
+        const float a3 = cell + 0.0f;  // vaddax acc, vf10, vf0
+        cell = a3 + s * amp;           // vmadd vf10, vf9, vf4
+        col = col + 1.0f;              // vaddw vf5, vf5, vf0
+      }
+      row = row + 1.0f;  // vaddw vf6, vf6, vf0
+    }
+  }
+  // the packed normals (bytes x, y, z, 128) after the heights
+  const float m0 = gload<float>(gp + 12);
+  const float m = std::max(0.0f, m0);  // vmaxx vf16, vf0, vf16 (and w = 0)
+  u32 packed[256];
+  for (int r = 0; r < 16; r++) {
+    for (int c = 0; c < 16; c++) {
+      const float cv = h[r * 16 + c];
+      const float right = h[r * 16 + (c == 15 ? 0 : c + 1)];
+      const float down = h[(r == 15 ? 0 : r + 1) * 16 + c];
+      float v[4];
+      v[0] = 0.0f + cv;  // vaddx vf11, vf0, vf11
+      v[1] = 0.0f + cv;
+      v[2] = 0.0f + cv;
+      v[3] = 1.0f + cv;
+      v[1] = v[1] - right;  // vsubx.y
+      v[2] = v[2] - down;   // vsubx.z
+      v[1] = v[1] * m;      // vmul.yzw
+      v[2] = v[2] * m;
+      v[3] = v[3] * 0.0f;
+      u32 out = 0;
+      for (int k = 0; k < 4; k++) {
+        float t = v[k] + 128.0f;                    // vaddx vf11, vf11, vf14
+        t = std::min(std::max(t, 0.0f), 255.0f);    // vmaxx, vminix
+        out |= ((u32)(s32)t & 255u) << (8 * k);     // vftoi0, ppach, ppacb
+      }
+      packed[r * 16 + c] = out;
+    }
+  }
+  gstore_bytes(spad, h, sizeof(h));
+  gstore_bytes(spad + 1024, packed, sizeof(packed));
+  return 0;
+}
+
+const NativeImpl kNative = MIPS2C_NATIVE_IMPL(native_impl, NATIVE_V0_UNDEFINED | NATIVE_CALLS_GOAL, 16);
+
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
   cache.setting_control = intern_from_c("*setting-control*").c();
@@ -412,7 +537,7 @@ void link() {
   cache.pal = intern_from_c("pal").c();
   cache.ripple_update_waveform_offs = intern_from_c("ripple-update-waveform-offs").c();
   cache.sin = intern_from_c("sin").c();
-  gLinkedFunctionTable.reg("ripple-create-wave-table", execute, 128);
+  gLinkedFunctionTable.reg("ripple-create-wave-table", execute, 128, &kNative);
 }
 
 } // namespace ripple_create_wave_table

@@ -160,11 +160,15 @@ class IR_FunctionCall : public IR {
                         emitter::IR_Record irec) override;
   void do_codegen_c(CFunctionEmitter& e) override;
   void add_constraints(std::vector<IRegConstraint>* constraints, int my_id) override;
+  //! C backend: the argument types of the function as seen by the caller (the type of the
+  //! function value, with _type_ substituted for method calls). Empty: unknown (all 64-bit).
+  void set_arg_view_types(std::vector<TypeSpec> types) { m_arg_view_types = std::move(types); }
 
  protected:
   const RegVal* m_func = nullptr;
   const RegVal* m_ret = nullptr;
   std::vector<RegVal*> m_args;
+  std::vector<TypeSpec> m_arg_view_types;
   std::vector<emitter::Register> m_arg_regs;
   std::optional<emitter::Register> m_ret_reg;
 };

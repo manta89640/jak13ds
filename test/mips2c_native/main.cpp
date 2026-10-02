@@ -27,6 +27,8 @@ namespace Mips2C::jak1 {
   extern void link(); \
   }
 LINK(collide_do_primitives)
+LINK(ripple_execute_init)
+LINK(ripple_create_wave_table)
 LINK(moving_sphere_triangle_intersect)
 LINK(collide_probe_node)
 LINK(collide_probe_instance_tie)
@@ -146,6 +148,8 @@ int main(int argc, char** argv) {
   particle_adgif::link();
   sp_launch_particles_var::link();
   ocean_interp_wave::link();
+  ripple_execute_init::link();
+  ripple_create_wave_table::link();
   // GOAL functions with a native version: the reference is goalc's C code (goalc_ref/)
   ray_sphere_intersect::link();
   ray_cylinder_intersect::link();

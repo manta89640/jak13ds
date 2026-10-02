@@ -17,6 +17,7 @@
 #include "common/util/Timer.h"
 
 #include "game/common/game_common_types.h"
+#include "game/graphics/pipelines/null.h"
 #include "game/kernel/common/klisten.h"
 #include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kprint.h"
@@ -154,6 +155,12 @@ void KernelCheckAndDispatch() {
       SendAck();
     }
 
+#ifndef __3DS__
+    // (AI-assisted) profiling with the null renderer: run frames back to back
+    if (null_gfx_no_sync()) {
+      continue;
+    }
+#endif
     if (time_ms < 4) {
       std::this_thread::sleep_for(std::chrono::microseconds(1000));
     }

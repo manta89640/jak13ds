@@ -7,6 +7,7 @@
 
 #include "harness.h"
 
+#include <unistd.h>
 #include <algorithm>
 #include <csignal>
 #include <cstdlib>

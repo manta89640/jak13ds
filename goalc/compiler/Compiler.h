@@ -280,11 +280,14 @@ class Compiler {
 
   TypeSpec parse_typespec(const goos::Object& src, Env* env);
   bool is_local_symbol(const goos::Object& obj, Env* env);
+  //! c_abi_view_type: for the C backend, the type of the function to use for the argument
+  //! passing if it isn't the type of `function` (see compile_go_hook)
   Val* compile_real_function_call(const goos::Object& form,
                                   RegVal* function,
                                   const std::vector<RegVal*>& args,
                                   Env* env,
-                                  const std::string& method_type_name = "");
+                                  const std::string& method_type_name = "",
+                                  const TypeSpec* c_abi_view_type = nullptr);
 
   s64 get_constant_integer_or_error(const goos::Object& in, Env* env);
   ValOrConstInt get_constant_integer_or_variable(const goos::Object& in, Env* env);
@@ -743,6 +746,14 @@ class Compiler {
   Val* compile_size_of(const goos::Object& form, const goos::Object& rest, Env* env);
   ConstPropResult const_prop_size_of(const goos::Object& form, const goos::Object& rest, Env* env);
   Val* compile_psize_of(const goos::Object& form, const goos::Object& rest, Env* env);
+  Val* compile_c_abi_wide_mask(const goos::Object& form, const goos::Object& rest, Env* env);
+  void check_c_abi_function_cast(const goos::Object& form,
+                                 const TypeSpec& from,
+                                 const TypeSpec& to);
+  Val* compile_c_abi_method_wide_mask(const goos::Object& form,
+                                      const goos::Object& rest,
+                                      Env* env);
+
   Val* compile_offset_of(const goos::Object& form, const goos::Object& rest, Env* env);
   Val* compile_current_method_id(const goos::Object& form, const goos::Object& rest, Env* env);
   Val* compile_current_method_type(const goos::Object& form, const goos::Object& rest, Env* env);

@@ -168,11 +168,23 @@
       (if (= a3-0 t0-0) (set! a3-0 0))))
   (the-as sparticle-cpuinfo #f))
 
+;; og:preserve-this (AI-assisted) 3DS: the block of particles being updated in place (see
+;; sp-process-block), from its first cpuinfo to past its last; 0 when no block is being updated
+(#when TARGET_3DS
+  (define *sp-block-lo* 0)
+  (define *sp-block-hi* 0))
+
 (defun sp-kill-particle ((arg0 sparticle-system) (arg1 sparticle-cpuinfo))
   "kill the given particle"
   (cond
     ;; modified to check the end of the spad too.
-    ((in-scratchpad? arg1) ;;(>= (the-as int arg1) #x70000000) ;; TODO PC port
+    ;; og:preserve-this (AI-assisted) 3DS: a particle of the block being updated in place counts as
+    ;; in the scratchpad, as on the PS2: its timer goes to 0 and the update frees it (freeing it
+    ;; here too would free it twice)
+    ((or (in-scratchpad? arg1)
+         (#if TARGET_3DS
+           (and (>= (the int arg1) *sp-block-lo*) (< (the int arg1) *sp-block-hi*))
+           #f)) ;;(>= (the-as int arg1) #x70000000) ;; TODO PC port
      ;; if in the sratchpad, just set the timer to 0.
      (set! (-> arg1 timer) 0)
      0)
@@ -253,27 +265,43 @@
 (defun sp-process-block ((arg0 sparticle-system) (arg1 int) (arg2 sprite-array-2d) (arg3 int))
   "update the given block of particles"
   (local-vars (sv-16 int) (sv-32 int) (sv-80 int) (sv-96 int))
-  (let ((s3-0 16)
-        (s2-0 (* 144 arg3))
-        (s5-0 (* 48 arg3)))
-    (set! sv-32 (* 80 arg3))
-    (let ((s1-0 (+ s3-0 s2-0)))
-      (set! sv-16 (+ s1-0 s5-0))
-      (sp-copy-to-spr s3-0 (the-as pointer (-> arg0 cpuinfo-table arg1)) s2-0)
-      (sp-copy-to-spr s1-0 (&+ (-> arg0 vecdata-table) (* 48 arg1)) s5-0)
-      (let ((t9-2 sp-copy-to-spr)
-            (a1-7 (-> arg0 adgifdata-table arg1)))
-        (t9-2 sv-16 (the-as pointer a1-7) sv-32))
-      ;; alternate to run without doing scratchpad (will change behavior of kill, but at least works for hud)
-      ; (set! sv-80 (the-as int (-> arg0 cpuinfo-table arg1)))
-      ; (set! sv-96 (the-as int (&+ (-> arg0 vecdata-table) (* 48 arg1))))
-      (set! sv-80 (+ (the int (scratchpad-start)) s3-0)) ;; spad
-      (set! sv-96 (+ (the int (scratchpad-start)) s1-0)) ;; spad
+  ;; og:preserve-this (AI-assisted) 3DS: the block is updated where it is. The PS2 copied it to the
+  ;; scratchpad and back (~16 KB in and ~11 KB out per 60 particles): with a fake scratchpad that
+  ;; was ~10% of the game thread in particle-heavy scenes (memmove). Same layout (the tables are
+  ;; inline arrays of 144 / 48 byte entries), and the update functions take the addresses. The
+  ;; difference: particles that a callback kills or launches in this block while it runs are no
+  ;; longer overwritten by the copy back.
+  (#if TARGET_3DS
+    (let ((info (the int (-> arg0 cpuinfo-table arg1)))
+          (vec (the int (&+ (-> arg0 vecdata-table) (* 48 arg1)))))
+      (set! *sp-block-lo* info)
+      (set! *sp-block-hi* (+ info (* 144 arg3)))
       (cond
-        ((-> arg0 is-3d) (sp-process-block-3d arg0 sv-80 sv-96 arg1 arg3 (paused?)))
-        (else (sp-process-block-2d arg0 sv-80 sv-96 arg1 arg3 (paused?))))
-      (sp-copy-from-spr s3-0 (the-as pointer (-> arg0 cpuinfo-table arg1)) s2-0)
-      (sp-copy-from-spr s1-0 (&+ (-> arg0 vecdata-table) (* 48 arg1)) s5-0)))
+        ((-> arg0 is-3d) (sp-process-block-3d arg0 info vec arg1 arg3 (paused?)))
+        (else (sp-process-block-2d arg0 info vec arg1 arg3 (paused?))))
+      (set! *sp-block-lo* 0)
+      (set! *sp-block-hi* 0))
+    (let ((s3-0 16)
+          (s2-0 (* 144 arg3))
+          (s5-0 (* 48 arg3)))
+      (set! sv-32 (* 80 arg3))
+      (let ((s1-0 (+ s3-0 s2-0)))
+        (set! sv-16 (+ s1-0 s5-0))
+        (sp-copy-to-spr s3-0 (the-as pointer (-> arg0 cpuinfo-table arg1)) s2-0)
+        (sp-copy-to-spr s1-0 (&+ (-> arg0 vecdata-table) (* 48 arg1)) s5-0)
+        (let ((t9-2 sp-copy-to-spr)
+              (a1-7 (-> arg0 adgifdata-table arg1)))
+          (t9-2 sv-16 (the-as pointer a1-7) sv-32))
+        ;; alternate to run without doing scratchpad (will change behavior of kill, but at least works for hud)
+        ; (set! sv-80 (the-as int (-> arg0 cpuinfo-table arg1)))
+        ; (set! sv-96 (the-as int (&+ (-> arg0 vecdata-table) (* 48 arg1))))
+        (set! sv-80 (+ (the int (scratchpad-start)) s3-0)) ;; spad
+        (set! sv-96 (+ (the int (scratchpad-start)) s1-0)) ;; spad
+        (cond
+          ((-> arg0 is-3d) (sp-process-block-3d arg0 sv-80 sv-96 arg1 arg3 (paused?)))
+          (else (sp-process-block-2d arg0 sv-80 sv-96 arg1 arg3 (paused?))))
+        (sp-copy-from-spr s3-0 (the-as pointer (-> arg0 cpuinfo-table arg1)) s2-0)
+        (sp-copy-from-spr s1-0 (&+ (-> arg0 vecdata-table) (* 48 arg1)) s5-0))))
   0
   (none))
 

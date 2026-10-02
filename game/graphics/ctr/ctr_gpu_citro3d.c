@@ -222,6 +222,9 @@ static struct {
 } g;
 
 static int g_color16 = 0;
+/* (AI-assisted) steady frame pacing, see pres_vblank */
+static int g_steady_pacing;
+static int pres_init(void);
 
 /* The previous frame is still in the render target's color buffer (VRAM, tiled RGBA8 or RGB565,
  * 240x400 rotated) at the start of the next frame, after the GPU finished it. Write it as a BMP. */
@@ -583,8 +586,11 @@ int ctr_gpu_init(void) {
   if (!g.top) {
     return -2;
   }
-  C3D_RenderTargetSetOutput(g.top, GFX_TOP, GFX_LEFT,
-                            g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
+  /* (AI-assisted) with steady pacing the frames go to our own screen buffers (pres_queue_frame) */
+  if (!g_steady_pacing || !pres_init()) {
+    C3D_RenderTargetSetOutput(g.top, GFX_TOP, GFX_LEFT,
+                              g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
+  }
 
   g.dvlb = DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size);
   shaderProgramInit(&g.program);
@@ -810,10 +816,307 @@ int ctr_gpu_set_pipeline(int on) {
   return s_pipeline;
 }
 
+/* ---------------- (AI-assisted) steady frame pacing (config.ini frame_pacing) ----------------
+ * citro3d shows a frame at the first vblank after the GPU finished it. The GPU time of a frame
+ * varies around the 33 ms of 30 fps, so frames stayed on screen for 1, 2 or 3 vblanks while the
+ * average was ~30 fps: choppy. Here each frame is transferred to one of our own screen buffers
+ * right after its draws (in the GPU queue, so the render target is free for the next frame), a
+ * texture copy after it writes the frame's number to a fence, and the vblank callback shows the
+ * frame at release + L vblanks (release: the vblank the game thread handed it over at). Frames
+ * then stay on screen exactly as long as the game time they cover. L goes up by one when a frame
+ * misses its vblank and back down after a long run of frames with time to spare. */
+/* frames in flight at latency L (2 vblanks per frame): L / 2 waiting, one being transferred, one
+ * requested, one on screen. 4 buffers were too few at L = 6: the render thread waited for a free
+ * one, which made frames late, which raised L (frames on screen for 5+ vblanks on hardware). */
+#define PRESENT_BUFS 6
+#define PRESENT_MAX_LATENCY 4
+#define PRESENT_Q 8
+static struct {
+  int on;
+  uint8_t* buf[PRESENT_BUFS];
+  u32* fence; /* the GPU writes the number of the last transferred frame here */
+  u32* ids;   /* 16 bytes per queue slot: the frame number the copy to the fence takes */
+  u32 stride, mode;
+  volatile u32 vblanks;      /* counted by the vblank callback */
+  volatile u32 next_release; /* set with each frame by the game thread (ctr_gpu_note_release) */
+  u32 cur_release;           /* the frame being built */
+  struct {
+    u32 id, target;
+    int buf;
+  } q[PRESENT_Q];
+  volatile u32 q_head, q_tail;            /* render thread writes q_tail, the callback q_head */
+  volatile int buf_state[PRESENT_BUFS];   /* 0 free, 1 queued, 2 requested, 3 on screen */
+  volatile int requested, shown, flip;
+  volatile u32 last_shown;
+  volatile u32 hist[5];                   /* frames on screen for 1, 2, 3, 4, 5+ vblanks */
+  volatile u32 late, dropped;
+  volatile int min_slack;                 /* vblanks to spare of the frames since the last check */
+  int latency;
+  u32 frames_since_change;
+  double buf_wait_ms; /* the render thread waiting for a free screen buffer */
+} s_pres;
+
+static void pres_vblank(void* unused) {
+  (void)unused;
+  const u32 v = ++s_pres.vblanks;
+  if (s_pres.requested >= 0) {
+    /* the buffer requested at the last vblank is on screen from this one */
+    if (s_pres.shown >= 0 && s_pres.shown != s_pres.requested) {
+      s_pres.buf_state[s_pres.shown] = 0;
+    }
+    s_pres.shown = s_pres.requested;
+    s_pres.buf_state[s_pres.shown] = 3;
+    s_pres.requested = -1;
+    if (s_pres.last_shown) {
+      const u32 d = v - s_pres.last_shown;
+      s_pres.hist[d >= 5 ? 4 : (d ? d - 1 : 0)]++;
+    }
+    s_pres.last_shown = v;
+  }
+  if (s_pres.q_head == s_pres.q_tail) {
+    return;
+  }
+  svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
+  const u32 done = *(volatile u32*)s_pres.fence;
+  int pick = -1;
+  while (s_pres.q_head != s_pres.q_tail) {
+    const u32 id = s_pres.q[s_pres.q_head % PRESENT_Q].id;
+    const u32 target = s_pres.q[s_pres.q_head % PRESENT_Q].target;
+    const int b = s_pres.q[s_pres.q_head % PRESENT_Q].buf;
+    if ((s32)(id - done) > 0) {
+      break; /* the GPU isn't done with it */
+    }
+    const s32 slack = (s32)(target - (v + 1));
+    if (slack > 0) {
+      if (slack < s_pres.min_slack) {
+        s_pres.min_slack = slack;
+      }
+      break; /* too early: its vblank comes later */
+    }
+    if (slack < 0 && slack >= -2) {
+      /* missed its vblank by one or two: the latency is too short. A frame later than that is a
+       * stall (a level load, a save), which more latency wouldn't have hidden. */
+      s_pres.late++;
+      s_pres.min_slack = -1;
+    } else if (slack < 0) {
+      s_pres.min_slack = -1;
+    } else if (s_pres.min_slack > 0) {
+      s_pres.min_slack = 0;
+    }
+    if (pick >= 0) {
+      s_pres.buf_state[pick] = 0; /* a newer frame is due too: skip this one */
+      s_pres.dropped++;
+    }
+    pick = b;
+    s_pres.q_head++;
+  }
+  if (pick >= 0) {
+    s_pres.flip ^= 1;
+    gspPresentBuffer(GFX_TOP, (unsigned)s_pres.flip, s_pres.buf[pick], s_pres.buf[pick],
+                     s_pres.stride, s_pres.mode);
+    s_pres.buf_state[pick] = 2;
+    s_pres.requested = pick;
+  }
+}
+
+static int g_steady_pacing = 1;
+
+void ctr_gpu_set_steady_pacing(int on) {
+  if (!g.ready) {
+    g_steady_pacing = on ? 1 : 0; /* chosen in ctr_gpu_init */
+  }
+}
+
+/* (AI-assisted) citro3d registers its own vblank callback again when the app comes back from the
+ * HOME Menu or sleep (C3Di_RenderQueueEnableVBlank), which replaces ours: then our counter stops,
+ * frames aren't shown and the game thread would wait forever. Called from the waits: a counter
+ * that hasn't moved for 50 ms gets our callback back. */
+static void pres_check_alive(void) {
+  static u32 last_v;
+  static u64 last_ms;
+  if (!s_pres.on) {
+    return;
+  }
+  const u32 v = s_pres.vblanks;
+  const u64 now = osGetTime();
+  if (v != last_v || last_ms == 0) {
+    last_v = v;
+    last_ms = now;
+    return;
+  }
+  if (now - last_ms > 50) {
+    gspSetEventCallback(GSPGPU_EVENT_VBlank0, pres_vblank, NULL, false);
+    last_ms = now;
+  }
+}
+
+/* the vblank counter the game thread paces with */
+static u32 vblank_count(void) {
+  return s_pres.on ? s_pres.vblanks : C3D_FrameCounter(0);
+}
+
+void ctr_gpu_note_release(void) {
+  s_pres.next_release = vblank_count();
+}
+
+static int pres_init(void) {
+  const GSPGPU_FramebufferFormat fmt = gfxGetScreenFormat(GFX_TOP);
+  const u32 bpp = gspGetBytesPerPixel(fmt);
+  const u32 bytes = 240 * 400 * bpp;
+  /* (AI-assisted) libctru's two top screen framebuffers (gfxInit, in linear memory) are never
+   * shown with this on, and each is 240x800 (room for the right eye or wide mode): four of our
+   * frames. Only the rest is allocated: 1.1 MB of linear memory less (with 6 buffers of its own,
+   * Azahar, where RGBA4 textures are stored as RGBA8, had no room left for misty's last models:
+   * no zoomer). gfxGetFramebuffer gives the back buffer; with double buffering off, the front. */
+  int borrowed = 0;
+  {
+    u8* fb[2];
+    fb[0] = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+    gfxSetDoubleBuffering(GFX_TOP, false);
+    fb[1] = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
+    gfxSetDoubleBuffering(GFX_TOP, true);
+    if (fb[0] && fb[1] && fb[0] != fb[1]) {
+      for (int k = 0; k < 2 && borrowed + 2 <= PRESENT_BUFS; k++) {
+        s_pres.buf[borrowed++] = fb[k];
+        s_pres.buf[borrowed++] = fb[k] + bytes;
+      }
+    }
+  }
+  ctr_linear_lock();
+  for (int i = borrowed; i < PRESENT_BUFS; i++) {
+    s_pres.buf[i] = (uint8_t*)linearAlloc(bytes);
+  }
+  s_pres.fence = (u32*)linearAlloc(64);
+  s_pres.ids = (u32*)linearAlloc(16 * PRESENT_Q);
+  ctr_linear_unlock();
+  int ok = s_pres.fence != NULL && s_pres.ids != NULL;
+  for (int i = 0; i < PRESENT_BUFS; i++) {
+    ok = ok && s_pres.buf[i];
+  }
+  if (!ok) {
+    ctr_linear_lock();
+    for (int i = 0; i < PRESENT_BUFS; i++) {
+      if (i >= borrowed) {
+        linearFree(s_pres.buf[i]);
+      }
+      s_pres.buf[i] = NULL;
+    }
+    linearFree(s_pres.fence);
+    linearFree(s_pres.ids);
+    s_pres.fence = NULL;
+    s_pres.ids = NULL;
+    ctr_linear_unlock();
+    return 0;
+  }
+  for (int i = 0; i < PRESENT_BUFS; i++) {
+    memset(s_pres.buf[i], 0, bytes);
+    GSPGPU_FlushDataCache(s_pres.buf[i], bytes);
+    s_pres.buf_state[i] = 0;
+  }
+  memset(s_pres.fence, 0, 64);
+  GSPGPU_FlushDataCache(s_pres.fence, 64);
+  memset(s_pres.ids, 0, 16 * PRESENT_Q);
+  s_pres.stride = 240 * bpp;
+  s_pres.mode = (u32)fmt | BIT(6) /* 2D */ | (1u << 8) /* in FCRAM */;
+  s_pres.requested = s_pres.shown = -1;
+  s_pres.q_head = s_pres.q_tail = 0;
+  s_pres.latency = 3;
+  s_pres.min_slack = 99;
+  s_pres.vblanks = C3D_FrameCounter(0);
+  s_pres.on = 1;
+  /* replaces citro3d's vblank counter (C3D_FrameCounter isn't used with this on) */
+  gspSetEventCallback(GSPGPU_EVENT_VBlank0, pres_vblank, NULL, false);
+  return 1;
+}
+
+/* after the frame's draws are in the GPU queue: its transfer to a free screen buffer, the
+ * fence, and the frame handed to the vblank callback */
+static void pres_queue_frame(void) {
+  int b = -1;
+  const u64 t0 = svcGetSystemTick();
+  for (int tries = 0; b < 0; tries++) {
+    if (s_pres.q_tail - s_pres.q_head < PRESENT_Q) {
+      for (int i = 0; i < PRESENT_BUFS; i++) {
+        if (s_pres.buf_state[i] == 0) {
+          b = i;
+          break;
+        }
+      }
+    }
+    if (b >= 0) {
+      break;
+    }
+    if (tries > 300) {
+      /* nothing is being shown (the app in the background?): drop the waiting frames */
+      s_pres.q_head = s_pres.q_tail;
+      for (int i = 0; i < PRESENT_BUFS; i++) {
+        if (s_pres.buf_state[i] == 1) {
+          s_pres.buf_state[i] = 0;
+        }
+      }
+      continue;
+    }
+    pres_check_alive();
+    svcSleepThread(1000000LL);
+  }
+  s_pres.buf_state[b] = 1;
+  s_pres.buf_wait_ms += (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0);
+  C3D_FrameSplit(GX_CMDLIST_FLUSH); /* the draws first */
+  GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400), (u32*)s_pres.buf[b],
+                     GX_BUFFER_DIM(240, 400),
+                     g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
+  /* the fence: a 16 byte texture copy of this frame's number, after the transfer. Not a memory
+   * fill: on hardware that unit only fills VRAM, and a fill of main memory never finished (the
+   * GPU queue stalled: black top screen, frozen game, sound still playing). Azahar fills any
+   * memory. */
+  {
+    u32* id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
+    id[0] = id[1] = id[2] = id[3] = g.frame_no;
+    GSPGPU_FlushDataCache(id, 16);
+    GX_TextureCopy(id, 0, s_pres.fence, 0, 16, 8 /* raw copy */);
+  }
+  /* the latency: up after a late frame, down after ~5 s with a vblank to spare every time */
+  s_pres.frames_since_change++;
+  if (s_pres.late) {
+    s_pres.late = 0;
+    if (s_pres.latency < PRESENT_MAX_LATENCY) {
+      s_pres.latency++;
+    }
+    s_pres.frames_since_change = 0;
+    s_pres.min_slack = 99;
+  } else if (s_pres.frames_since_change >= 150) {
+    if (s_pres.min_slack >= 1 && s_pres.min_slack != 99 && s_pres.latency > 2) {
+      s_pres.latency--;
+    }
+    s_pres.frames_since_change = 0;
+    s_pres.min_slack = 99;
+  }
+  const u32 t = s_pres.q_tail;
+  s_pres.q[t % PRESENT_Q].id = g.frame_no;
+  s_pres.q[t % PRESENT_Q].target = s_pres.cur_release + (u32)s_pres.latency;
+  s_pres.q[t % PRESENT_Q].buf = b;
+  __dsb();
+  s_pres.q_tail = t + 1;
+}
+
+void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
+                          double* buffer_wait_ms) {
+  *buffer_wait_ms = s_pres.buf_wait_ms;
+  s_pres.buf_wait_ms = 0;
+  for (int i = 0; i < 5; i++) {
+    hist[i] = s_pres.hist[i];
+    s_pres.hist[i] = 0;
+  }
+  *latency = s_pres.on ? s_pres.latency : -1;
+  *dropped = s_pres.dropped;
+  s_pres.dropped = 0;
+}
+
 static void migrate_small_textures(void);
 
 /* the parts of the GPU state a frame starts from (both modes) */
 static void frame_state_reset(void) {
+  s_pres.cur_release = s_pres.next_release;
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
   g.bound_tex = NULL;
@@ -1003,6 +1306,9 @@ void ctr_gpu_frame_end(void) {
     GPUCMD_SetBuffer(buf, size, offset);
     C3D_FrameDrawOn(g.top);
   }
+  if (s_pres.on) {
+    pres_queue_frame();
+  }
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
   C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -1061,14 +1367,19 @@ void ctr_gpu_wait_vblank(int min_vblanks) {
   if (min_vblanks < 1) {
     min_vblanks = 1;
   }
-  u32 now = C3D_FrameCounter(0);
-  if (!have_target || (s32)(now - target) > min_vblanks) {
+  u32 now = vblank_count();
+  /* (AI-assisted) with steady pacing a late frame moves the schedule instead of the next frame
+   * going a vblank early: frames are shown for as long as the game time they cover, and a
+   * 1 vblank frame after a 3 vblank one looked like a stutter */
+  const s32 slip = s_pres.on ? 0 : min_vblanks;
+  if (!have_target || (s32)(now - target) > slip) {
     target = now;
     have_target = 1;
   }
   while ((s32)(now - target) < 0) {
     gspWaitForVBlank();
-    now = C3D_FrameCounter(0);
+    pres_check_alive();
+    now = vblank_count();
   }
   target += (u32)min_vblanks;
 }

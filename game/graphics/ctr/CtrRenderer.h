@@ -136,6 +136,11 @@ class CtrRenderer {
   // config.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);
   bool profile_skips(const std::string& name) const;
+ public:
+  /*! (AI-assisted) The levels the game wants (game thread, render thread idle): for gpu_profile. */
+  void note_levels(const std::vector<std::string>& levels);
+
+ private:
   int m_profile_mode = 0;
   int m_profile_frames = 0;     // in this mode
   double m_profile_start = 0;   // when this mode started (ms)
@@ -143,7 +148,12 @@ class CtrRenderer {
   int m_profile_count = 0;
   std::vector<double> m_profile_ms;  // result per mode (-1: not measured yet)
   int m_profile_cycles = 0;          // whole cycles logged
-  bool m_profile_done = false;       // (AI-assisted) after 2 cycles: everything drawn again
+  // (AI-assisted) gpu_profile measures each level once, 10 s after it became the active level
+  // (two cycles, then everything is drawn again): not the boot and title screen
+  bool m_profile_active = false;
+  std::string m_profile_level;            // the active level (note_levels)
+  double m_profile_arm_ms = 0;            // when its measurement may start
+  std::vector<std::string> m_profiled;    // levels measured already
   bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
 };
 

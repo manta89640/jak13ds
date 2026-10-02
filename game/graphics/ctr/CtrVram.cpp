@@ -586,6 +586,40 @@ bool decode_impl(const CtrVram* self,
 }
 }  // namespace
 
+namespace {
+// (AI-assisted) The blocks from TBP0 that a texture may read. The textures sit in a buffer TBW x 64
+// pixels wide, in pages (8 x 4 blocks): a texture narrower than its buffer spans page rows that are
+// a whole buffer width apart, more than its own size. flush_pending writes only the upload chunks
+// in this range, so an estimate from the texture's size alone left parts of wide-buffer textures
+// unwritten (the zoomer HUD as a grey square, flickering water ripples).
+u32 texture_block_span(const GsTex0& t) {
+  const u32 w = 1u << t.tw(), h = 1u << t.th();
+  u32 page_w = 64, page_h = 32;  // PSMCT32 / 24 and the formats stored like it (8H, 4HH, 4HL)
+  switch ((u32)t.psm()) {
+    case (u32)GsTex0::PSM::PSMCT16:
+    case (u32)GsTex0::PSM::PSMCT16S:
+      page_h = 64;
+      break;
+    case (u32)GsTex0::PSM::PSMT8:
+      page_w = 128;
+      page_h = 64;
+      break;
+    case (u32)GsTex0::PSM::PSMT4:
+      page_w = 128;
+      page_h = 128;
+      break;
+    default:
+      break;
+  }
+  const u32 row_pages = (w + page_w - 1) / page_w;
+  const u32 stride_pages = std::max(row_pages, (t.tbw() * 64 + page_w - 1) / page_w);
+  const u32 page_rows = (h + page_h - 1) / page_h;
+  const u32 pages = (page_rows - 1) * stride_pages + row_pages;
+  const u32 by_size = w * h * 4 / kBlockBytes + 64;  // as if 32 bit, plus slack
+  return std::max(by_size, pages * 32 + 32);
+}
+}  // namespace
+
 bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
   const_cast<CtrVram*>(this)->flush_pending();
   Range r;
@@ -597,8 +631,7 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
   GsTex0 t(tex0);
   if (!m_pending.empty()) {
     // only the pending uploads this texture reads (as get_texture)
-    const u32 texels = (1u << t.tw()) * (1u << t.th());
-    const u32 blocks = texels * 4 / kBlockBytes + 64;
+    const u32 blocks = texture_block_span(t);
     flush_pending(t.tbp0(), t.tbp0() + blocks);
     flush_pending(t.cbp(), t.cbp() + 4);
   }
@@ -628,8 +661,7 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   if (!m_pending.empty()) {
     // write the pending uploads this texture (or its cached version) may read
     GsTex0 t(tex0);
-    const u32 texels = (1u << t.tw()) * (1u << t.th());
-    const u32 blocks = texels * 4 / kBlockBytes + 64;  // as if 32 bit, plus slack
+    const u32 blocks = texture_block_span(t);
     flush_pending(t.tbp0(), t.tbp0() + blocks);
     flush_pending(t.cbp(), t.cbp() + 4);
     it = m_cache.find(key);

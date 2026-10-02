@@ -55,6 +55,70 @@
       (.svf (&-> s5-0 vector 2 quad) vf5)
       s5-0)))
 
+;; og:preserve-this (AI-assisted) 3DS: joint-control-remap! for Daxter, with a cache. Every frame
+;; Daxter copies Jak's animation state and finds his own matching animation by name: a string format,
+;; a search of *sidekick-remap* and a linear string= search of his art group, per channel (~5% of the
+;; game thread). The result only depends on Jak's animation, Daxter's art group and, for the
+;; animations that have variants in *sidekick-remap*, the seed: those take the original path every
+;; frame, the others are cached. Some animations come from art groups of levels that unload: an
+;; entry also keeps the animation's name, and a hit must still be in Daxter's art group.
+(#when TARGET_3DS
+  (define *sidekick-remap-src* (new 'global 'boxed-array art-joint-anim 64))
+  (define *sidekick-remap-src-name* (new 'global 'boxed-array string 64))
+  (define *sidekick-remap-group* (new 'global 'boxed-array art-group 64))
+  (define *sidekick-remap-dst* (new 'global 'boxed-array art-joint-anim 64))
+  (define *sidekick-remap-next* 0)
+  (defun sidekick-remap-in-group? ((group art-group) (anim art-joint-anim))
+    (dotimes (i (-> group length))
+      (if (= (-> group data i) anim) (return #t)))
+    #f)
+  (defun sidekick-remap-cached! ((arg0 joint-control) (arg1 art-group) (arg2 art-group) (arg3 pair) (arg4 int))
+    "joint-control-remap! for Daxter, cached (see above)"
+    (let ((prefix-len (+ (length (-> arg2 name)) 1))
+          (result #t)
+          (fallback 2))
+      (while (and (< fallback (-> arg1 length)) (!= (-> arg1 data fallback type) art-joint-anim))
+        (+! fallback 1))
+      (dotimes (ch (-> arg0 active-channels))
+        (let ((chan (-> arg0 channel ch)))
+          (when (-> chan frame-group)
+            (let ((src (-> chan frame-group))
+                  (found (the-as art-joint-anim #f))
+                  (i 0))
+              (while (< i 64)
+                (when (and (= (-> *sidekick-remap-src* i) src)
+                           (= (-> *sidekick-remap-group* i) arg1)
+                           (= (-> *sidekick-remap-src-name* i) (-> src name)))
+                  (if (sidekick-remap-in-group? arg1 (-> *sidekick-remap-dst* i))
+                    (set! found (-> *sidekick-remap-dst* i)))
+                  (set! i 64))
+                (+! i 1))
+              (cond
+                (found (set! (-> chan frame-group) found))
+                (else
+                 (format (clear *temp-string*) "~S~G" "" (&+ (-> src name data) prefix-len))
+                 (let ((variants (if (null? arg3) #f (nassoc *temp-string* arg3))))
+                   (when variants
+                     (let* ((a0-9 variants)
+                            (k (mod arg4 (+ ((method-of-type (rtype-of a0-9) length) a0-9) -1))))
+                       (format (clear *temp-string*) "~S" (ref variants (+ k 1)))))
+                   (let ((dst (lookup-art arg1 *temp-string* art-joint-anim)))
+                     (cond
+                       (dst
+                        (set! (-> chan frame-group) (the-as art-joint-anim dst))
+                        (when (not variants)
+                          (let ((n *sidekick-remap-next*))
+                            (set! (-> *sidekick-remap-src* n) src)
+                            (set! (-> *sidekick-remap-src-name* n) (-> src name))
+                            (set! (-> *sidekick-remap-group* n) arg1)
+                            (set! (-> *sidekick-remap-dst* n) (the-as art-joint-anim dst))
+                            (set! *sidekick-remap-next* (logand (+ n 1) 63)))))
+                       (else
+                        (set! (-> chan frame-group) (the-as art-joint-anim (-> arg1 data fallback)))
+                        (set! (-> chan frame-num) 0.0)
+                        (set! result #f)))))))))))
+      result)))
+
 (defstate sidekick-clone (sidekick)
   :event
     (behavior ((proc process) (argc int) (message symbol) (block event-message-block))
@@ -99,12 +163,18 @@
           (set! (-> self anim-seed) (-> self parent-override 0 anim-seed))
           (set! (-> self draw status) (-> self parent-override 0 draw status))
           (joint-control-copy! (-> self skel) (-> self parent-override 0 skel))
-          (joint-control-remap! (-> self skel)
-                                (-> self draw art-group)
-                                (-> self parent-override 0 draw art-group)
-                                *sidekick-remap*
-                                (the-as int (-> self anim-seed))
-                                "")
+          (#if TARGET_3DS
+            (sidekick-remap-cached! (-> self skel)
+                                    (-> self draw art-group)
+                                    (-> self parent-override 0 draw art-group)
+                                    *sidekick-remap*
+                                    (the-as int (-> self anim-seed)))
+            (joint-control-remap! (-> self skel)
+                                  (-> self draw art-group)
+                                  (-> self parent-override 0 draw art-group)
+                                  *sidekick-remap*
+                                  (the-as int (-> self anim-seed))
+                                  ""))
           (let ((v1-22 (-> self parent-override 0 draw color-mult quad))) (set! (-> self draw color-mult quad) v1-22))
           (with-pc ;; duh!
             (when (pc-cheats? (-> *pc-settings* cheats) sidekick-blue)

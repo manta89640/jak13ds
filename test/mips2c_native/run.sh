@@ -37,7 +37,7 @@ done
 
 M2C="$ROOT/game/mips2c/jak1_functions"
 MIPS2C_SRCS=(collide_func collide_cache collide_probe collide_mesh collide_edge_grab joint sparticle
-             sparticle_launcher ocean_vu0)
+             sparticle_launcher ocean_vu0 ripple)
 HARNESS_SRCS=("$HERE"/*.cpp)
 NATIVE_SRCS=("$M2C"/native_*.cpp)
 
@@ -66,7 +66,7 @@ build() {
           "$ROOT/game/mips2c/mips2c_native.h" -nt "$obj" || "$M2C/native_functions.h" -nt "$obj" ]]; then
       local extra=()
       [[ "$(basename "$src")" == native_* ]] && extra=(${NATIVE_EXTRA_FLAGS--O3})
-      "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" "${extra[@]}" -c "$src" -o "$obj" &
+      "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" ${extra[@]+"${extra[@]}"} -c "$src" -o "$obj" &
       pids+=($!)
     fi
   done
@@ -104,7 +104,7 @@ build() {
     fi
   done
   local fail=0
-  for p in "${pids[@]}"; do
+  for p in ${pids[@]+"${pids[@]}"}; do
     wait "$p" || fail=1
   done
   [[ $fail -eq 0 ]] || { echo "build $cfg failed"; exit 1; }
@@ -117,28 +117,28 @@ for cfg in "${configs[@]}"; do
   case "$cfg" in
     host)
       build host g++ -O2 -g
-      "$OUT/host/mips2c-native-test" "${test_args[@]}" || status=1
+      "$OUT/host/mips2c-native-test" ${test_args[@]+"${test_args[@]}"} || status=1
       ;;
     fma)
       build fma clang++ -O2 -g -mfma -ffp-contract=on
-      "$OUT/fma/mips2c-native-test" "${test_args[@]}" || status=1
+      "$OUT/fma/mips2c-native-test" ${test_args[@]+"${test_args[@]}"} || status=1
       ;;
     arm)
       # like devkitARM: no PIE, no stack protector (the Ubuntu cross compiler enables both)
       LINK_EXTRA="-static -no-pie" build arm arm-linux-gnueabihf-g++ -O2 -g -marm -march=armv6k \
         -mfpu=vfp -mfloat-abi=hard -D__3DS__ -fno-pie -fno-stack-protector
-      qemu-arm "$OUT/arm/mips2c-native-test" "${test_args[@]}" || status=1
+      qemu-arm "$OUT/arm/mips2c-native-test" ${test_args[@]+"${test_args[@]}"} || status=1
       ;;
     bench)
       # ARM instructions per call, mips2c vs native (test args: [--scale X] test names)
       LINK_EXTRA="-static -no-pie -Wl,-Map=$OUT/bench/link.map" build bench arm-linux-gnueabihf-g++ \
         -O2 -g -marm -march=armv6k -mfpu=vfp -mfloat-abi=hard -D__3DS__ -fno-pie -fno-stack-protector
-      python3 "$HERE/bench.py" "$OUT/bench/mips2c-native-test" "$OUT/bench/link.map" "${test_args[@]}"
+      python3 "$HERE/bench.py" "$OUT/bench/mips2c-native-test" "$OUT/bench/link.map" ${test_args[@]+"${test_args[@]}"}
       ;;
     coverage)
       rm -f "$OUT/coverage"/*.gcda
       M2C_EXTRA_FLAGS="--coverage" LINK_EXTRA="--coverage" build coverage g++ -O0 -g
-      "$OUT/coverage/mips2c-native-test" "${test_args[@]}" || status=1
+      "$OUT/coverage/mips2c-native-test" ${test_args[@]+"${test_args[@]}"} || status=1
       python3 "$HERE/coverage_report.py" "$OUT/coverage" "$M2C" ${COVERAGE_LINES:+--lines}
       ;;
     *)

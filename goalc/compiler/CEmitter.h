@@ -26,6 +26,23 @@
 class FunctionEnv;
 class RegVal;
 class IR;
+class TypeSystem;
+class TypeSpec;
+
+/*!
+ * (AI-assisted) How a GPR argument is passed to a compiled GOAL function (ABI version 3, see
+ * docs/3ds-port/c_backend.md). Every argument passes its low 32 bits as a u32; WIDE arguments also
+ * pass their upper 32 bits (as the bits of a float, in the VFP/SIMD argument registers).
+ */
+enum class CArgClass {
+  WIDE,   //! any 64-bit value: the receiver uses lo | hi << 32
+  PTR,    //! the type is a GOAL address (structure, pointer, pair...): the value is zero-extended
+  FLOAT,  //! float: the value is sign-extended (like a float moved to a GPR)
+};
+//! the class of an argument of type t (unknown types are WIDE)
+CArgClass c_arg_class(const TypeSystem* ts, const TypeSpec& t);
+//! bit i set if argument i of a function type is WIDE (all set for `function` and _varargs_)
+u32 c_abi_wide_mask(const TypeSystem* ts, const TypeSpec& function_type);
 
 class CModuleEmitter;
 
@@ -59,6 +76,7 @@ class CFunctionEmitter {
   //! C label name for an IR index
   std::string label(int ir_idx);
   GameVersion version() const;
+  const TypeSystem* ts() const;
   [[noreturn]] void error(const std::string& msg);
 
   std::string ret_type_name() const { return m_ret_is_128 ? "v128" : "u64"; }
@@ -96,7 +114,10 @@ class CFunctionEmitter {
 
 class CModuleEmitter {
  public:
-  CModuleEmitter(std::string obj_name, emitter::ObjectGenerator* gen, GameVersion version);
+  CModuleEmitter(std::string obj_name,
+                 emitter::ObjectGenerator* gen,
+                 GameVersion version,
+                 const TypeSystem* ts);
   //! generate C for one function. Can be called before layout.
   void add_function(FunctionEnv* env, int f_idx, int seg);
   //! resolve layout tokens and build the complete source. Call after generate_data_v3.
@@ -107,6 +128,7 @@ class CModuleEmitter {
   std::string function_token(int f_idx);
   GameVersion version() const { return m_version; }
   emitter::ObjectGenerator* gen() { return m_gen; }
+  const TypeSystem* ts() const { return m_ts; }
 
   //! function definitions (C text), by function index
   std::map<int, std::string> function_text;
@@ -117,6 +139,7 @@ class CModuleEmitter {
   std::string m_obj_name;
   emitter::ObjectGenerator* m_gen = nullptr;
   GameVersion m_version;
+  const TypeSystem* m_ts = nullptr;
   std::vector<std::string> m_symbols;
   std::unordered_map<std::string, int> m_symbol_idx;
   std::vector<emitter::StaticRecord> m_static_tokens;

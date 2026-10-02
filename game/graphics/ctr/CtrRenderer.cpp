@@ -305,8 +305,22 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
   m_timing.frames++;
-  if (ctr_settings().gpu_profile && !m_profile_done) {
-    profile_frame(gs.draw_ms);
+  if (ctr_settings().gpu_profile) {
+    if (!m_profile_active && !m_profile_level.empty() && ctr_gpu_time_ms() >= m_profile_arm_ms &&
+        std::find(m_profiled.begin(), m_profiled.end(), m_profile_level) == m_profiled.end()) {
+      m_profile_active = true;
+      m_profile_ms.clear();
+      m_profile_mode = 0;
+      m_profile_frames = 0;
+      m_profile_sum = 0;
+      m_profile_count = 0;
+      m_profile_cycles = 0;
+      lg::info("[ctr] gpu profile: measuring {} for 30 s (parts of the picture vanish in turns)",
+               m_profile_level);
+    }
+    if (m_profile_active) {
+      profile_frame(gs.draw_ms);
+    }
   }
   if (m_rs.log_now) {
     const auto& vs = m_vram->stats();
@@ -390,6 +404,26 @@ bool CtrRenderer::profile_skips(const std::string& name) const {
   return false;
 }
 
+void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
+  // the first level that isn't the title screen is the one being played
+  std::string lev;
+  for (const auto& l : levels) {
+    if (!l.empty() && l != "title" && l != "none" && l != "#f") {
+      lev = l;
+      break;
+    }
+  }
+  if (lev != m_profile_level) {
+    if (m_profile_active) {
+      // a level change in the middle: stop (draw everything), measure the new one later
+      m_profile_active = false;
+      m_profile_mode = 0;
+    }
+    m_profile_level = lev;
+    m_profile_arm_ms = ctr_gpu_time_ms() + 10000.0;  // after the load and the level start
+  }
+}
+
 void CtrRenderer::profile_frame(double gpu_draw_ms) {
   const double now = ctr_gpu_time_ms();
   if (m_profile_ms.empty()) {
@@ -412,7 +446,8 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
   m_profile_count = 0;
   if (m_profile_mode == 0) {
     // a whole cycle: how much GPU time each part takes (all - without it)
-    std::string line = fmt::format("[ctr] gpu profile: all {:.1f} ms", m_profile_ms[0]);
+    std::string line =
+        fmt::format("[ctr] gpu profile {}: all {:.1f} ms", m_profile_level, m_profile_ms[0]);
     for (int i = 1; i < kProfileModeCount; i++) {
       if (m_profile_ms[i] >= 0 && m_profile_ms[0] >= 0) {
         line += fmt::format(", {} {:.1f}", kProfileModes[i].label, m_profile_ms[0] - m_profile_ms[i]);
@@ -423,8 +458,9 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
     // in a config.ini by mistake, it made the level, models, ocean or sky vanish every 2.5 s for
     // the whole game ("polygons loading and unloading").
     if (++m_profile_cycles >= 2) {
-      m_profile_done = true;
-      lg::info("[ctr] gpu profile: done (config.ini gpu_profile = on), drawing everything again");
+      m_profile_active = false;
+      m_profiled.push_back(m_profile_level);
+      lg::info("[ctr] gpu profile {}: done, drawing everything again", m_profile_level);
     }
   }
 }
@@ -559,6 +595,7 @@ void wait_render_idle() {
 
 int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
+  ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
   if (ctr_gpu_init() != 0) {
     lg::error("[ctr] GPU init failed");
     return 1;
@@ -642,6 +679,7 @@ void ctr_send_chain(const void* data, u32 offset) {
   g_upload_mark = g_upload_total;
   g_upload_count_mark = g_upload_count_total;
   g_ee.last_send = now;
+  ctr_gpu_note_release();
   if (g_async) {
     wait_render_idle();
     const double tp = ctr_gpu_time_ms();
@@ -667,6 +705,17 @@ void ctr_send_chain(const void* data, u32 offset) {
         g_ee.frames, g_ee.frame_ms / n, 1000.0 * n / g_ee.frame_ms, logic, g_ee.render_ms / n,
         g_ee.wait_render_ms / n, g_ee.vsync_ms / n, g_ee.upload_ms / n, g_ee.uploads / n,
         g_ee.relocates / n, g_ee.prepare_ms / n, g_ee.max_frame_ms);
+    // (AI-assisted) how long each frame stayed on screen (steady pacing: config.ini frame_pacing)
+    unsigned int hist[5];
+    int latency;
+    unsigned int dropped;
+    double buf_wait;
+    ctr_gpu_pacing_stats(hist, &latency, &dropped, &buf_wait);
+    if (latency >= 0) {
+      lg::info("[ctr] pacing: frames on screen for 1/2/3/4/5+ vblanks: {}/{}/{}/{}/{}, latency {} "
+               "vblanks, {} skipped, {:.0f} ms waiting for a screen buffer",
+               hist[0], hist[1], hist[2], hist[3], hist[4], latency, dropped, buf_wait);
+    }
     const double last = g_ee.last_send;
     g_ee = EeTiming();
     g_ee.last_send = last;
@@ -704,6 +753,7 @@ void ctr_set_levels(const std::vector<std::string>& levels) {
   if (g_ctr) {
     wait_render_idle();
     g_ctr->levels().set_wanted(levels);
+    g_ctr->note_levels(levels);
   }
 }
 void ctr_set_active_levels(const std::vector<std::string>&) {}

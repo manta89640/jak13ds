@@ -548,7 +548,8 @@ void iop_write_ee_mem_impl(void* dst, const void* src, u32 size) {
 u32 native_goalc_fn_id(const std::string& name,
                        u64 (*exec)(void*),
                        u32 stack_size,
-                       const NativeImpl* impl) {
+                       const NativeImpl* impl,
+                       u32 wide_mask) {
   if (native_off(name)) {
     return 0;
   }
@@ -571,8 +572,10 @@ u32 native_goalc_fn_id(const std::string& name,
     idx++;
   }
 #if MIPS2C_WRITE_LOG
-  if (impl->goal && !verify_enabled()) {
-    // called by GOAL code without the adapter (no perf section either: these are small)
+  if (impl->goal && !verify_enabled() && wide_mask == 0) {
+    // called by GOAL code without the adapter (no perf section either: these are small). The
+    // direct entry only reads the low halves of the arguments (goal_c_abi.h), so it's only used
+    // when GOAL code says no argument is wide.
     return goalc_fn_id_for_host((void*)impl->goal);
   }
   if (verify_enabled()) {
@@ -590,15 +593,17 @@ u32 native_goalc_fn_id(const std::string& name,
       atexit([] { print_summary(); });
       lg::warn("mips2c verify mode: native functions are checked against mips2c");
     }
-    return goalc_fn_id_for_adapted(verify_adapter, (void*)impl->fn, idx);
+    return goalc_fn_id_for_adapted(verify_adapter, (void*)impl->fn, idx, wide_mask);
   }
 #else
-  if (impl->goal) {
-    // called by GOAL code without the adapter (no perf section either: these are small)
+  if (impl->goal && wide_mask == 0) {
+    // called by GOAL code without the adapter (no perf section either: these are small). The
+    // direct entry only reads the low halves of the arguments (goal_c_abi.h), so it's only used
+    // when GOAL code says no argument is wide.
     return goalc_fn_id_for_host((void*)impl->goal);
   }
 #endif
-  return goalc_fn_id_for_adapted(native_adapter, (void*)impl->fn, idx);
+  return goalc_fn_id_for_adapted(native_adapter, (void*)impl->fn, idx, wide_mask);
 }
 
 u64 (*native_exec_for_backend(const NativeImpl* impl))(void*) {

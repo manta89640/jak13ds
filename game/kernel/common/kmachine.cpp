@@ -140,7 +140,7 @@ void CacheFlush(void* mem, int size) {
  * Set the new_pad flag to 1 and state to 0.
  * Prints an error if it fails to open.
  */
-u64 CPadOpen(u64 cpad_info, s32 pad_number) {
+u64 CPadOpen(u32 cpad_info, s32 pad_number) {
   auto cpad = Ptr<CPadInfo>(cpad_info).c();
   if (cpad->cpad_file == 0) {
     // not open, so we will open it
@@ -158,7 +158,7 @@ u64 CPadOpen(u64 cpad_info, s32 pad_number) {
 /*!
  * Not checked super carefully for jak 2, but looks the same
  */
-u64 CPadGetData(u64 cpad_info) {
+u64 CPadGetData(u32 cpad_info) {
   using namespace ee;
   auto cpad = Ptr<CPadInfo>(cpad_info).c();
   auto pad_state = scePadGetState(cpad->number, 0);
@@ -294,7 +294,7 @@ void InstallDebugHandler() {
 /*!
  * Get length of a file.
  */
-s32 klength(u64 fs) {
+s32 klength(u32 fs) {
   auto file_stream = Ptr<FileStream>(fs).c();
   if ((file_stream->flags ^ 1) & 1) {
     // first flag bit not set. This means no errors
@@ -313,7 +313,7 @@ s32 klength(u64 fs) {
 /*!
  * Seek a file stream.
  */
-s32 kseek(u64 fs, s32 offset, s32 where) {
+s32 kseek(u32 fs, s32 offset, s32 where) {
   s32 result = -1;
   auto file_stream = Ptr<FileStream>(fs).c();
   if ((file_stream->flags ^ 1) & 1) {
@@ -328,7 +328,7 @@ s32 kseek(u64 fs, s32 offset, s32 where) {
 /*!
  * Read from a file stream.
  */
-s32 kread(u64 fs, u64 buffer, s32 size) {
+s32 kread(u32 fs, u32 buffer, s32 size) {
   s32 result = -1;
   auto file_stream = Ptr<FileStream>(fs).c();
   if ((file_stream->flags ^ 1) & 1) {
@@ -343,7 +343,7 @@ s32 kread(u64 fs, u64 buffer, s32 size) {
 /*!
  * Write to a file stream.
  */
-s32 kwrite(u64 fs, u64 buffer, s32 size) {
+s32 kwrite(u32 fs, u32 buffer, s32 size) {
   s32 result = -1;
   auto file_stream = Ptr<FileStream>(fs).c();
   if ((file_stream->flags ^ 1) & 1) {
@@ -368,7 +368,7 @@ s32 kmkdir(u64 name) {
 /*!
  * Close a file stream.
  */
-u64 kclose(u64 fs) {
+u64 kclose(u32 fs) {
   auto file_stream = Ptr<FileStream>(fs).c();
   if ((file_stream->flags ^ 1) & 1) {
     ee::sceClose(file_stream->file);
@@ -523,8 +523,13 @@ void pc_texture_relocate(u32 dst, u32 src, u32 format) {
   }
 }
 
-u64 pc_get_mips2c(u32 name) {
+u64 pc_get_mips2c(u32 name, u64 c_abi_wide_mask) {
+  // (AI-assisted) c_abi_wide_mask: GOAL code compiled to C (Jak 1) passes the arguments that its
+  // type says are 64-bit values (see goal_c_abi.h). Other games pass one argument: not used then.
   const char* n = Ptr<String>(name).c()->data();
+  if (goalc_enabled()) {
+    return Mips2C::gLinkedFunctionTable.get(n, (u32)c_abi_wide_mask);
+  }
   return Mips2C::gLinkedFunctionTable.get(n);
 }
 

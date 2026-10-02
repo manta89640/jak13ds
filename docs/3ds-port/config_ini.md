@@ -12,7 +12,7 @@ It is the only settings file: there are no flag files, and `render.ini` isn't re
 
 ```ini
 sound = on                 # sound output (off: silent; it costs CPU time)
-sound_core = 0             # CPU core of the sound mixer: 0 (default on New 3DS), 1, 2 (the render thread's)
+sound_core = 2             # CPU core of the sound mixer: 2 (default on New 3DS: the render thread's core, which has room; core 0 runs the game logic), 0, 1
 io_on_system_core = off    # on: the game's I/O threads on core 1 (the system core; experimental)
 mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names
 perf_sections = off        # on: per-section timing in the log (slower)
@@ -55,6 +55,7 @@ sprites = on               # world particles; the HUD is always drawn
 max_sprites = 1000         # world particles per frame
 ocean = on                 # the ocean
 fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 60: up to 60
+frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color
 overlap = off              # on: the GPU starts drawing each part of a frame while the CPU builds the rest (experimental)
 pipeline = off             # on: the CPU builds the next frame while the GPU draws this one (experimental; works with overlap)

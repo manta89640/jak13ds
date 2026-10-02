@@ -23,12 +23,19 @@ class LinkedFunctionTable {
            u32 goal_stack_size,
            const NativeImpl* native = nullptr);
   u32 get(const std::string& name);
+  //! C mode (AI-assisted): get, and make the stub read the upper half of the arguments in
+  //! goalc_wide_mask only (the wide arguments of the function's GOAL type, see goal_c_abi.h)
+  u32 get(const std::string& name, u32 goalc_wide_mask);
 
  private:
   struct Func {
     u64 (*c_func)(void*);
     Ptr<u8> goal_trampoline;
+    u32 stack_size = 0;
+    const NativeImpl* native = nullptr;
   };
+  //! C mode: the function id GOAL calls for a function
+  u32 goalc_id(const std::string& name, const Func& f, u32 wide_mask);
   std::unordered_map<std::string, Func> m_executes;
 };
 

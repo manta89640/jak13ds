@@ -5,6 +5,8 @@
  * Common types shared between the compiler and the runtime for the listener connection.
  */
 
+#include <cstdlib>
+
 #include "common/common_types.h"
 
 /*!
@@ -59,6 +61,15 @@ struct ListenerMessageHeader {
 };
 
 constexpr int DECI2_PORT = 8112;  // TODO - is this a good choice?
+
+//! (AI-assisted) listener port of a game: DECI2_PORT - 1 + game version, or OPENGOAL_DECI2_PORT if
+//! set (to run several runtimes or test suites at the same time).
+inline int deci2_port_for_game(int game_version) {
+  if (const char* p = std::getenv("OPENGOAL_DECI2_PORT")) {
+    return std::atoi(p);
+  }
+  return DECI2_PORT - 1 + game_version;
+}
 
 constexpr int DEBUG_SERVER_PORT = 8128;
 

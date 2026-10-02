@@ -596,7 +596,8 @@ Val* Compiler::compile_real_function_call(const goos::Object& form,
                                           RegVal* function,
                                           const std::vector<RegVal*>& args,
                                           Env* env,
-                                          const std::string& method_type_name) {
+                                          const std::string& method_type_name,
+                                          const TypeSpec* c_abi_view_type) {
   auto fe = env->function_env();
   fe->require_aligned_stack();
   TypeSpec return_ts;
@@ -652,8 +653,22 @@ Val* Compiler::compile_real_function_call(const goos::Object& form,
   // todo, there's probably a more efficient way to do this.
   auto temp_function = fe->make_gpr(function->type());
   env->emit_ir<IR_RegSet>(form, temp_function, function);
-  env->emit_ir<IR_FunctionCall>(form, temp_function, return_reg, arg_outs, cc.arg_regs,
-                                cc.return_reg);
+  auto call = std::make_unique<IR_FunctionCall>(temp_function, return_reg, arg_outs, cc.arg_regs,
+                                                cc.return_reg);
+  if (m_c_backend && !is_varargs_function(function->type())) {
+    // (AI-assisted) the C backend passes arguments whose type is known to fit in 32 bits without
+    // their upper half (docs/3ds-port/c_backend.md, ABI version 3). It needs the argument types of
+    // the function as the caller sees it.
+    std::vector<TypeSpec> view_types;
+    const TypeSpec& view = c_abi_view_type ? *c_abi_view_type : function->type();
+    for (uint32_t i = 0; i < args.size() && i + 1 < view.arg_count(); i++) {
+      view_types.push_back(method_type_name.empty()
+                               ? view.get_arg(i)
+                               : view.get_arg(i).substitute_for_method_call(method_type_name));
+    }
+    call->set_arg_view_types(std::move(view_types));
+  }
+  env->emit(form, std::move(call));
 
   if (m_settings.emit_move_after_return) {
     auto result_reg = env->make_ireg(return_reg->type(), ret_reg_class);

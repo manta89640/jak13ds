@@ -99,6 +99,13 @@
 
 (def-mips2c __pc-upload-collide-frag (function object object object none))
 
+;; og:preserve-this (AI-assisted) 3DS: can a fragment add any triangle to this fill? (C++,
+;; native_collide_cache.cpp) #f only if the box of its vertices misses the query box: then
+;; uploading, unpacking and testing its triangles would add nothing. Mode 0: the cache's box
+;; (methods 26 and 28), 1: the line-sphere box of *collide-work* (method 27).
+(#when TARGET_3DS
+  (def-mips2c pc-collide-frag-may-hit? (function collide-cache collide-frag-mesh basic int symbol)))
+
 (defmethod fill-from-background ((obj collide-cache) (bsp-find-mesh-func (function bsp-header int collide-list none)) (import-mesh-func (function collide-cache object none)))
   "This terrible function fills the collide cache with background tris from a bounding box."
   (local-vars (a0-4 int) (a0-6 int))
@@ -127,14 +134,22 @@
     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
     ;; in classic ND style, this is double buffered.
     ;; we'll undo this.
-    (dotimes (i (-> *collide-list* num-items))
-      (let ((frag (-> *collide-list* items i)))
-        ;; to VU0 memory
-        (__pc-upload-collide-frag (-> frag mesh packed-data) (-> frag mesh vertex-data-qwc) (-> frag mesh vertex-count))
-        ;; from VU0 memory to scratchpad
-        (unpack-background-collide-mesh obj (-> frag mesh) (-> frag inst) 0)
-        ;; from scratchpad to collide-cache memory.
-        (import-mesh-func obj (-> frag mesh))))
+    (let ((frag-mode (cond
+                       ((or (= import-mesh-func (method-of-type collide-cache load-mesh-from-spad-in-box))
+                            (= import-mesh-func (method-of-type collide-cache collide-cache-method-28)))
+                        0)
+                       ((= import-mesh-func (method-of-type collide-cache collide-cache-method-27)) 1)
+                       (else 2))))
+      (dotimes (i (-> *collide-list* num-items))
+        (let ((frag (-> *collide-list* items i)))
+          ;; og:preserve-this (AI-assisted) 3DS: skip fragments that can't add a triangle
+          (when (#if TARGET_3DS (pc-collide-frag-may-hit? obj (-> frag mesh) (-> frag inst) frag-mode) #t)
+            ;; to VU0 memory
+            (__pc-upload-collide-frag (-> frag mesh packed-data) (-> frag mesh vertex-data-qwc) (-> frag mesh vertex-count))
+            ;; from VU0 memory to scratchpad
+            (unpack-background-collide-mesh obj (-> frag mesh) (-> frag inst) 0)
+            ;; from scratchpad to collide-cache memory.
+            (import-mesh-func obj (-> frag mesh))))))
     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
     ;; Fake it as a prim
     ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

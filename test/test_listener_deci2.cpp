@@ -15,11 +15,11 @@ TEST(Listener, ListenerCreation) {
 }
 
 TEST(Listener, DeciCreation) {
-  Deci2Server s(always_false, DECI2_PORT);
+  Deci2Server s(always_false, deci2_port_for_game(1));
 }
 
 TEST(Listener, DeciInit) {
-  Deci2Server s(always_false, DECI2_PORT);
+  Deci2Server s(always_false, deci2_port_for_game(1));
   EXPECT_TRUE(s.init_server());
 }
 
@@ -38,7 +38,7 @@ TEST(Listener, ListenToNothing) {
 }
 
 TEST(Listener, DeciCheckNoListener) {
-  Deci2Server s(always_false, DECI2_PORT);
+  Deci2Server s(always_false, deci2_port_for_game(1));
   EXPECT_TRUE(s.init_server());
   EXPECT_FALSE(s.is_client_connected());
   EXPECT_FALSE(s.is_client_connected());
@@ -46,7 +46,7 @@ TEST(Listener, DeciCheckNoListener) {
 }
 
 TEST(Listener, CheckConnectionStaysAlive) {
-  Deci2Server s(always_false, DECI2_PORT);
+  Deci2Server s(always_false, deci2_port_for_game(1));
   EXPECT_TRUE(s.init_server());
   EXPECT_FALSE(s.is_client_connected());
   Listener l;
@@ -65,7 +65,7 @@ TEST(Listener, CheckConnectionStaysAlive) {
 
 TEST(Listener, DeciThenListener) {
   for (int i = 0; i < 3; i++) {
-    Deci2Server s(always_false, DECI2_PORT);
+    Deci2Server s(always_false, deci2_port_for_game(1));
     EXPECT_TRUE(s.init_server());
     EXPECT_FALSE(s.is_client_connected());
     EXPECT_FALSE(s.is_client_connected());
@@ -85,7 +85,7 @@ TEST(Listener, DeciThenListener) {
 
 TEST(Listener, DeciThenListener2) {
   for (int i = 0; i < 3; i++) {
-    Deci2Server s(always_false, DECI2_PORT);
+    Deci2Server s(always_false, deci2_port_for_game(1));
     EXPECT_TRUE(s.init_server());
     EXPECT_FALSE(s.is_client_connected());
     EXPECT_FALSE(s.is_client_connected());
@@ -101,7 +101,7 @@ TEST(Listener, ListenerThenDeci) {
   for (int i = 0; i < 3; i++) {
     Listener l;
     EXPECT_FALSE(l.connect_to_target());
-    Deci2Server s(always_false, DECI2_PORT);
+    Deci2Server s(always_false, deci2_port_for_game(1));
     EXPECT_TRUE(s.init_server());
     EXPECT_FALSE(s.is_client_connected());
     bool connected = l.connect_to_target();

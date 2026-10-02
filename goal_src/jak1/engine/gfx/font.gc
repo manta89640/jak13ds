@@ -590,7 +590,7 @@
 
 ;; we have both GOAL and mips2c versions of this function
 
-(define draw-string (the (function string dma-buffer font-context float) (__pc-get-mips2c "draw-string")))
+(define draw-string (the (function string dma-buffer font-context float) (__pc-get-mips2c "draw-string" (__c-abi-wide-mask (function string dma-buffer font-context float)))))
 
 ;; for now, use the GOAL one. the mips2c one is super slow with the game compiled in debug mode.
 (defun draw-string ((str-in string) (context dma-buffer) (arg2 font-context))

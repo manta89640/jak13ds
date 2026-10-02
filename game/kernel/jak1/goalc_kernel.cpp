@@ -110,7 +110,7 @@ struct PendingCall {
 } g_pending;
 
 u64 call_goal_fn(u32 f, const u64* a) {
-  return ((goalc_fn8)goalc_fn(f))(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+  return goalc_call8(f, a);
 }
 
 [[noreturn]] void return_to_kernel(u64 value) {
@@ -238,17 +238,13 @@ void free_slot(SuspendedThread* slot) {
 
 //! Entry for reset-and-call: call the function, then return to the kernel with its result.
 u64 reset_and_call_entry(void*) {
-  u64 result = ((goalc_fn8)goalc_fn(g_pending.f))(
-      g_pending.args[0], g_pending.args[1], g_pending.args[2], g_pending.args[3],
-      g_pending.args[4], g_pending.args[5], g_pending.args[6], g_pending.args[7]);
+  u64 result = goalc_call8(g_pending.f, g_pending.args);
   return_to_kernel(result);
 }
 
 //! Entry for threads that end with return-from-thread-dead (set-to-run, enter-state).
 u64 dead_on_return_entry(void*) {
-  u64 result = ((goalc_fn8)goalc_fn(g_pending.f))(
-      g_pending.args[0], g_pending.args[1], g_pending.args[2], g_pending.args[3],
-      g_pending.args[4], g_pending.args[5], g_pending.args[6], g_pending.args[7]);
+  u64 result = goalc_call8(g_pending.f, g_pending.args);
   call_return_from_thread_dead(result);
 }
 
@@ -267,7 +263,7 @@ u64 goalc_k_return_to_kernel(u64 value) {
  * reset-and-call: run func on the thread's stack (from the top). When func returns (or anything
  * returns to the kernel), return here. pp, status and top-thread are set up by the GOAL caller.
  */
-u64 goalc_k_reset_and_call(u64 thread, u64 func) {
+u64 goalc_k_reset_and_call(u64 thread, u32 func) {
   KernelFrame kf;
   kf.prev = g_kernel_frame;
   g_kernel_frame = &kf;
@@ -409,7 +405,7 @@ u64 goalc_k_thread_resume(u64 thread_arg) {
  * enter-state's "reset the stack and jump to the state code": call func with 4 arguments at the
  * top of the given stack. When it returns, return-from-thread-dead is called. Never returns.
  */
-u64 goalc_k_reset_stack_and_call(u64 stack_top, u64 func, u64 a0, u64 a1, u64 a2, u64 a3) {
+u64 goalc_k_reset_stack_and_call(u32 stack_top, u32 func, u64 a0, u64 a1, u64 a2, u64 a3) {
   g_pending.f = (u32)func;
   memset(g_pending.args, 0, sizeof(g_pending.args));
   g_pending.args[0] = a0;
@@ -426,7 +422,7 @@ u64 goalc_k_reset_stack_and_call(u64 stack_top, u64 func, u64 a0, u64 a1, u64 a2
  * stack, and call func with the 6 parameters in param_block. A throw to this frame makes this
  * return the thrown value.
  */
-u64 goalc_k_catch(u64 allocation, u64 type, u64 name, u64 func, u64 param_block) {
+u64 goalc_k_catch(u32 allocation, u32 type, u32 name, u32 func, u32 param_block) {
   u32 frame = (u32)allocation + 4;
   word(frame + FRAME_TYPE) = (u32)type;
   word(frame + FRAME_NAME) = (u32)name;

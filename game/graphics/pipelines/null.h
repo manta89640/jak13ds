@@ -10,3 +10,8 @@
 #include "game/graphics/gfx.h"
 
 extern const GfxRendererModule gRendererNull;
+
+//! (AI-assisted) Profiling: OPENGOAL_NULL_GFX_NO_SYNC=<file>: while that file exists, vsync and the
+//! kernel loop do not wait (frames run back to back; the game sees a time ratio of 1). Checked
+//! every 64 calls. Host only.
+bool null_gfx_no_sync();

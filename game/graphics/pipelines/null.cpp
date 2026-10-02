@@ -7,6 +7,7 @@
 #include "null.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 #include "common/log/log.h"
@@ -57,7 +58,9 @@ u32 null_vsync() {
       g_null_state.next_frame = now;
     }
   }
-  if (MasterExit == RuntimeExitStatus::RUNNING) {
+  if (null_gfx_no_sync()) {
+    g_null_state.next_frame = now;  // pacing restarts from here when the file goes away
+  } else if (MasterExit == RuntimeExitStatus::RUNNING) {
     std::this_thread::sleep_until(g_null_state.next_frame);
   }
   g_null_state.frame_idx++;
@@ -79,6 +82,27 @@ void null_force_reload_common() {}
 void null_set_pmode_alp(float /*val*/) {}
 
 }  // namespace
+
+bool null_gfx_no_sync() {
+#ifdef __3DS__
+  return false;
+#else
+  static const char* path = getenv("OPENGOAL_NULL_GFX_NO_SYNC");
+  static thread_local u32 calls = 0;
+  static thread_local bool on = false;
+  if (!path) {
+    return false;
+  }
+  if ((calls++ & 63) == 0) {
+    FILE* f = fopen(path, "rb");
+    on = f != nullptr;
+    if (f) {
+      fclose(f);
+    }
+  }
+  return on;
+#endif
+}
 
 const GfxRendererModule gRendererNull = {
     null_init,                 // init

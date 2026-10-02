@@ -42,7 +42,7 @@ class Listener {
   void send_code(std::vector<uint8_t>& code, const std::optional<std::string>& load_name = {});
   void add_debugger(Debugger* debugger);
   bool most_recent_send_was_acked() const { return got_ack; }
-  void set_default_port(GameVersion v) { m_default_port = DECI2_PORT - 1 + (int)v; }
+  void set_default_port(GameVersion v) { m_default_port = deci2_port_for_game((int)v); }
   MemoryMap build_memory_map();
 
  private:
@@ -53,7 +53,7 @@ class Listener {
   bool wait_for_ack();
   void handle_output_message(const char* msg);
 
-  int m_default_port = DECI2_PORT;
+  int m_default_port = deci2_port_for_game(1);
   char* m_buffer = nullptr;             //! buffer for incoming messages
   bool m_connected = false;             //! do we think we are connected?
   bool receive_thread_running = false;  //! is the receive thread unjoined?

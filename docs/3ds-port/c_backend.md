@@ -212,7 +212,7 @@ Design:
 
 ### Typed kernel functions (ARM32)
 
-GOAL calls every function as `u64 f(u64 x8)`. On ARM32, a C function with `u32`/`s32`
+(Before ABI version 3, see below.) GOAL calls every function as `u64 f(u64 x8)`. On ARM32, a C function with `u32`/`s32`
 parameters, `float` parameters (hard-float: in VFP registers) or a 32-bit return can't be called
 that way. `game/kernel/common/kernel_function.h`: every registration site
 (`make_function_from_c`, `make_function_symbol_from_c`, `make_stack_arg_function_symbol_from_c`,
@@ -230,12 +230,84 @@ not all 64-bit integers get a generated adapter (called through the thunk pool):
 The same adapters run on the Mac in C mode, so the C-mode test suite covers them. Unit test:
 `GoalcRuntime.TypedAdapters`.
 
+### Argument passing (ABI version 3)
+
+(AI-assisted) With `u64` arguments, ARM32 passed only two arguments in registers (3-argument calls
+are 39% of the call sites). Now every compiled GOAL function is
+
+```c
+u64 f(u32 a0, ..., u32 a(n-1), float h0, ..., float h(k-1))   // 128-bit args stay v128
+```
+
+`a_i` is the low half of argument i (4 in core registers on ARM32), `h_i` the bits of its upper
+half (VFP registers). Each argument has a class from its type (`c_arg_class`, CEmitter.cpp):
+
+- PTR: subtypes of `structure`, `pointer`, `pair` (basic, symbol, type, function, string,
+  process...). A GOAL address: the callee uses the zero-extended low half.
+- FLOAT: subtypes of `float` (meters, degrees). The callee sign-extends the low half (what a float
+  moved to a GPR looks like).
+- WIDE: everything else (int, uint, object, binteger, enums, bitfields, time-frame, `_type_`,
+  varargs). The callee reads `lo | hi << 32`.
+
+Callers pass `h_i` for the WIDE arguments of the function type they see (`IR_FunctionCall` keeps
+the caller's view of the argument types) and an unspecified value (`gc_anyf`, no instructions) for
+narrow ones before the last WIDE one. Callees read `h_i` only for their WIDE parameters. Returns
+are unchanged (always the full `u64`).
+
+Why it's safe: GOAL type checks let a function value be called only through a function type whose
+argument types are the same as, or parents of, its own (`typecheck_and_throw` is covariant in the
+arguments). Every child of a PTR/FLOAT type is PTR/FLOAT, so a parameter the callee reads as WIDE
+is WIDE for every type-checked caller. The holes are:
+
+- casts of function values (`the-as`/`the`): goalc warns in C mode when a cast between known
+  function types makes a WIDE argument narrow (`check_c_abi_function_cast`); the three cases in
+  Jak 1 were fixed in goal_src. Casts from untyped values (`function`, fields typed `basic`) can't
+  be checked statically: use the check mode below.
+- `go` types `enter-state` with the state's argument types: the call uses enter-state's own type
+  for argument passing (`compile_go_hook`).
+- a method implemented on a WIDE type and inherited by reference types (Jak 1: `relocate` and
+  `mem-usage` of `object`): `this` (`_type_`) is read as PTR there.
+- assumption: values of PTR types are GOAL addresses (< 4 GB, hi = 0), and float-typed GPR values
+  are sign-extended. A pointer-typed value that holds something else (a 64-bit handle cast to a
+  pointer type) would lose its upper half when passed.
+
+Runtime side (`goal_c_abi.h`, `goalc_runtime.cpp`, `kernel_function.h`):
+
+- The runtime calls GOAL with `goalc_call8` (all 8 arguments WIDE).
+- Host functions callable directly: C functions with only `u32`/`s32` parameters and a 64-bit
+  return (`KernelFunction::direct`), `nothing`/`zero-func`, `goalc_suspend_entry`, and the
+  native mips2c `goal` entries when no argument is WIDE. Everything else goes through an adapter
+  thunk with a wide mask: bit i = rebuild argument i from both halves, otherwise zero-extend.
+  For kernel functions the mask comes from the C signature (`u64`/`s64` parameters);
+  `CAbiKernelFunctionTypes` (test/goalc/test_goal_kernel.cpp, C mode) checks every named kernel
+  function against its GOAL type (a C `u64` parameter must be WIDE in GOAL; it found 11 that
+  weren't, now `u32`). Stack-argument functions take an explicit mask
+  (`make_stack_arg_function_symbol_from_c`).
+- mips2c functions get their mask from GOAL: `(__pc-get-mips2c name (__c-abi-wide-mask type))`
+  (`def-mips2c`; `__c-abi-method-wide-mask` for `defmethod-mips2c`). Until then the stub reads all
+  arguments as WIDE (right for calls from C++/mips2c).
+
+Check mode (PC host only): build the modules with `-DGOALC_ABI_CHECK`
+(`OPENGOAL_C_BACKEND_CC="cc -DGOALC_ABI_CHECK"` and a fresh `out/<game>/cmod`) and run gk with
+`OPENGOAL_C_ABI_CHECK=1`. Narrow arguments pass a marker instead of an unspecified upper half, and
+`[goalc abi check]` warnings report WIDE parameters that got the marker (also from the thunks),
+pointer arguments with an upper half and floats that aren't sign-extended. Expected reports: WIDE
+parameters beyond the caller's argument count (`go` with fewer than 6 arguments,
+`run-function-in-process`, `set-to-run`), which are garbage like in the native backends.
+
+Measured (Jak 1, 518 modules, devkitARM -O2, instructions in the module objects): 1,490,480 ->
+1,377,293 (-7.6%; -7.7% without the inspect methods), `strd` to the stack 7,681 -> 713, `str` to
+the stack 93,372 -> 34,948.
+
+`OPENGOAL_DECI2_PORT` overrides the listener port of gk/goalc/goalc-test, to run tests while
+another gk holds the default port.
+
 ## Known later work
 
-- Performance: generated code uses `uint64_t` everywhere; narrowing to 32 bits where types allow
-  matters on ARM11. GOAL functions take `u64` arguments, so on ARM32 only the first two are
-  passed in registers (a third argument is two stack stores and a reload): 3-argument calls are
-  the most common kind (39% of the call sites in Jak 1).
+- Performance: function bodies still use `u64` for every GPR. Declaring locals whose types are all
+  PTR as `u32` measured another -2.5% (prototype), at the price of extending the "PTR values are
+  addresses" assumption from calls to every variable (with constants >= 2^32 excluded). Format
+  calls (debug code) pass every argument WIDE.
 
 ## Performance notes (ARM11)
 

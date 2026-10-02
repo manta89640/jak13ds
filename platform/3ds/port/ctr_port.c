@@ -196,8 +196,11 @@ int ctr_platform_init(int enable_console) {
   /* Experimental, off by default: in Azahar, boot hangs at the first IOP file load when the IOP
    * thread runs on core 1 (not investigated further; untested on hardware). Turned on by the file
    * config.ini io_on_system_core = on. */
-  /* Audio output (config.ini: sound = on, sound_core = N). Default core: 0 on New 3DS (core 2
-   * runs the render thread), else core 1.
+  /* Audio output (config.ini: sound = on, sound_core = N). Default core: 2 on New 3DS, else 1.
+   * (AI-assisted) 2026-10-02: core 2 again. It went to core 0 when the render thread on core 2 was
+   * the limit (~11 fps); now the game thread on core 0 is (logic 10-30 ms of 33) and the render
+   * thread has room (9-16 ms), and the mixer cost the game's core 2-7 ms per frame. Its priority
+   * (CTR_PRIO_SOUND) is above the render thread's, so audio isn't starved there.
    * Core 1 is the system core: the system's services (GPU, SD card, DSP, input) run there, so a
    * busy mixer on it slows every service call of the game on real hardware, and the app only gets
    * a share of it (APT_SetAppCpuTimeLimit; the kernel allows one app thread there). */
@@ -206,7 +209,7 @@ int ctr_platform_init(int enable_console) {
     char v[16];
     if (ctr_config_bool("sound", 0)) {
       s_sound = 1;
-      s_sound_core = ctr_is_new3ds() ? 0 : 1;
+      s_sound_core = ctr_is_new3ds() ? 2 : 1;
       if (ctr_config_get("sound_core", v, sizeof(v)) && v[0] >= '0' && v[0] <= '3') {
         s_sound_core = v[0] - '0';
       }

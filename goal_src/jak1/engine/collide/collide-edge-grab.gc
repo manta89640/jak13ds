@@ -532,7 +532,7 @@
   (set! *rotate-surface* v1-1)
   (set! (-> v1-1 mult-hook)
         (the-as (function surface surface surface int none)
-                (lambda ((arg0 surface) (arg1 object) (arg2 object) (arg3 int))
+                (lambda ((arg0 surface) (arg1 surface) (arg2 surface) (arg3 int)) ;; (AI-assisted) the hook type (C backend ABI)
                   (if (= arg3 1) (set! (-> arg0 fric) 151756.8)))))
   (set! (-> v1-1 touch-hook) nothing)
   (set! (-> v1-1 active-hook) nothing))

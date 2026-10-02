@@ -202,6 +202,17 @@ void ctr_gpu_set_mip_mode(int mode);
  * compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like ctr_gpu_tex_create). */
 void ctr_gpu_set_color16(int on);
 void ctr_gpu_set_early_depth(int on);
+/* (AI-assisted) config.ini frame_pacing: steady (1, set before ctr_gpu_init) shows every frame
+ * a fixed number of vblanks after the game thread handed it over, so frames stay on screen for as
+ * long as the game time they cover; fast (0): as soon as the GPU is done (citro3d). */
+void ctr_gpu_set_steady_pacing(int on);
+/* (AI-assisted) the game thread hands over a frame now (its release vblank, for steady pacing) */
+void ctr_gpu_note_release(void);
+/* (AI-assisted) since the last call: frames shown for 1, 2, 3, 4, 5+ vblanks, the presentation
+ * latency in vblanks (-1: steady pacing off), frames skipped and the render thread's total wait
+ * for a free screen buffer */
+void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
+                          double* buffer_wait_ms);
 void ctr_gpu_set_proctex(int on);
 void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a

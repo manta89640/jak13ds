@@ -69,6 +69,7 @@ namespace collide_probe_instance_tie { extern void link(); }
 namespace method_26_collide_cache { extern void link(); }
 namespace method_32_collide_cache { extern void link(); }
 namespace pc_upload_collide_frag { extern void link(); }
+namespace pc_collide_frag_may_hit { extern void link(); }  // (AI-assisted) 3DS
 namespace method_28_collide_cache { extern void link(); }
 namespace method_27_collide_cache { extern void link(); }
 namespace method_29_collide_cache { extern void link(); }
@@ -575,7 +576,8 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak1::method_15_collide_mesh::link, jak1::method_14_collide_mesh::link}},
      {"collide-cache",
       {jak1::method_26_collide_cache::link, jak1::method_32_collide_cache::link,
-       jak1::pc_upload_collide_frag::link, jak1::method_28_collide_cache::link,
+       jak1::pc_upload_collide_frag::link, jak1::pc_collide_frag_may_hit::link,
+       jak1::method_28_collide_cache::link,
        jak1::method_27_collide_cache::link, jak1::method_29_collide_cache::link,
        jak1::method_12_collide_shape_prim_mesh::link, jak1::method_14_collide_shape_prim_mesh::link,
        jak1::method_13_collide_shape_prim_mesh::link, jak1::method_30_collide_cache::link,
@@ -933,7 +935,8 @@ void mips2c_goalc_set_name(void* fn, const std::string& name);
 u32 native_goalc_fn_id(const std::string& name,
                        u64 (*exec)(void*),
                        u32 stack_size,
-                       const NativeImpl* impl);
+                       const NativeImpl* impl,
+                       u32 wide_mask);
 //! execute function for the native GOAL backends: the native version, or null (use mips2c)
 u64 (*native_exec_for_backend(const NativeImpl* impl))(void*);
 void native_set_stub_addr(const std::string& name, u32 addr);
@@ -942,7 +945,7 @@ void LinkedFunctionTable::reg(const std::string& name,
                               u64 (*exec)(void*),
                               u32 stack_size,
                               const NativeImpl* native) {
-  const auto& it = m_executes.insert({name, {exec, Ptr<u8>()}});
+  const auto& it = m_executes.insert({name, {exec, Ptr<u8>(), stack_size, native}});
   if (!it.second) {
     lg::error("MIPS2C Function {} is registered multiple times, ignoring later registrations.",
               name);
@@ -982,15 +985,10 @@ void LinkedFunctionTable::reg(const std::string& name,
 
   if (goalc_enabled()) {
     mips2c_goalc_set_name((void*)exec, name);
-    if (native) {
-      if (u32 id = native_goalc_fn_id(name, exec, stack_size, native)) {
-        goalc_write_stub(jump_to_asm.offset, id, 0xffffffff);
-        return;
-      }
-    }
-    // GOAL compiled to C: a function stub whose id calls the adapter above.
-    goalc_write_stub(jump_to_asm.offset,
-                     goalc_fn_id_for_adapted(mips2c_goalc_adapter, (void*)exec, stack_size),
+    // GOAL compiled to C: a function stub whose id calls the adapter above. Until GOAL code gets
+    // the function (get with a mask), all arguments are read as 64-bit values (right for calls
+    // from C++ and mips2c code).
+    goalc_write_stub(jump_to_asm.offset, goalc_id(name, it.first->second, GOALC_ALL_WIDE),
                      0xffffffff);
     return;
   }
@@ -1070,6 +1068,27 @@ void LinkedFunctionTable::reg(const std::string& name,
 
   // flush the executable view
   flush_icache_goal(jump_to_asm.offset, written);
+}
+
+u32 LinkedFunctionTable::goalc_id(const std::string& name, const Func& f, u32 wide_mask) {
+  if (f.native) {
+    if (u32 id = native_goalc_fn_id(name, f.c_func, f.stack_size, f.native, wide_mask)) {
+      return id;
+    }
+  }
+  return goalc_fn_id_for_adapted(mips2c_goalc_adapter, (void*)f.c_func, f.stack_size, wide_mask);
+}
+
+u32 LinkedFunctionTable::get(const std::string& name, u32 goalc_wide_mask) {
+  auto it = m_executes.find(name);
+  if (it == m_executes.end()) {
+    ASSERT_NOT_REACHED_MSG(fmt::format("mips2c function {} is unknown", name));
+  }
+  auto& f = it->second;
+  if (goalc_enabled()) {
+    goalc_write_stub(f.goal_trampoline.offset, goalc_id(name, f, goalc_wide_mask), 0xffffffff);
+  }
+  return f.goal_trampoline.offset;
 }
 
 u32 LinkedFunctionTable::get(const std::string& name) {

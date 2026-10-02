@@ -61,6 +61,8 @@ extern const NativeImpl method_12_collide_shape_prim_mesh;
 extern const NativeImpl method_13_collide_shape_prim_mesh;
 extern const NativeImpl method_14_collide_shape_prim_mesh;
 extern const NativeImpl pc_upload_collide_frag;
+// (AI-assisted) 3DS: pc-collide-frag-may-hit? (not a mips2c function: a test fill-from-background adds)
+extern const NativeImpl pc_collide_frag_may_hit;
 // native_sparticle.cpp
 extern const NativeImpl sp_process_block_2d;
 extern const NativeImpl sp_process_block_3d;

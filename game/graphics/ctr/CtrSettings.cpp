@@ -105,6 +105,8 @@ CtrSettings load() {
       s.overlap = parse_bool(v);
     } else if (key == "pipeline") {
       s.pipeline = parse_bool(v);
+    } else if (key == "frame_pacing") {
+      s.steady_pacing = v != "fast";
     } else if (key == "fps_cap") {
       s.fps_cap = std::atoi(v.c_str()) >= 60 ? 60 : 30;
     } else if (key == "max_sprites") {

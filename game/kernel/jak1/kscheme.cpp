@@ -547,13 +547,17 @@ Ptr<Function> make_goalc_function(u32 id) {
 Ptr<Function> make_function_from_c(KernelFunction kfunc, bool arg3_is_pp = false) {
   if (goalc_enabled()) {
     // see kernel_function.h
+    if (kfunc.direct && !arg3_is_pp) {
+      return make_goalc_function(goalc_fn_id_for_host(kfunc.ptr));
+    }
     if (kfunc.adapter) {
-      return make_goalc_function(
-          goalc_fn_id_for_adapted(kfunc.adapter, kfunc.ptr, arg3_is_pp ? 1 : 0));
+      return make_goalc_function(goalc_fn_id_for_adapted(kfunc.adapter, kfunc.ptr,
+                                                         arg3_is_pp ? 1 : 0, kfunc.wide_mask));
     }
     return make_goalc_function(
-        arg3_is_pp ? goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, kfunc.ptr, 0)
-                   : goalc_fn_id_for_host(kfunc.ptr));
+        arg3_is_pp
+            ? goalc_fn_id_for_adapted(goalc_adapter_arg3_pp, kfunc.ptr, 0, kfunc.wide_mask)
+            : goalc_fn_id_for_fn8(kfunc.ptr, kfunc.wide_mask));
   }
   [[maybe_unused]] void* func = kfunc.ptr;
 #if !GOALC_HAS_NATIVE_BACKEND
@@ -568,10 +572,12 @@ Ptr<Function> make_function_from_c(KernelFunction kfunc, bool arg3_is_pp = false
 #endif
 }
 
-Ptr<Function> make_stack_arg_function_from_c(KernelFunction kfunc) {
+Ptr<Function> make_stack_arg_function_from_c(KernelFunction kfunc,
+                                             u32 c_abi_wide_mask = GOALC_ALL_WIDE) {
   if (goalc_enabled()) {
     ASSERT_MSG(kfunc.stack_adapter, "stack argument functions must take a single pointer");
-    return make_goalc_function(goalc_fn_id_for_adapted(kfunc.stack_adapter, kfunc.ptr, 0));
+    return make_goalc_function(
+        goalc_fn_id_for_adapted(kfunc.stack_adapter, kfunc.ptr, 0, c_abi_wide_mask));
   }
   [[maybe_unused]] void* func = kfunc.ptr;
 #if !GOALC_HAS_NATIVE_BACKEND
@@ -591,7 +597,7 @@ Ptr<Function> make_stack_arg_function_from_c(KernelFunction kfunc) {
  */
 Ptr<Function> make_nothing_func() {
   if (goalc_enabled()) {
-    return make_goalc_function(goalc_fn_id_for_host((void*)goalc_nothing_fn));
+    return make_goalc_function(goalc_fn_id_for_host((void*)goalc_nothing_fn));  // goalc_fnx
   }
   auto mem = Ptr<u8>(alloc_heap_object(s7.offset + FIX_SYM_GLOBAL_HEAP,
                                        *(s7 + FIX_SYM_FUNCTION_TYPE), 0x14, UNKNOWN_PP));
@@ -628,6 +634,9 @@ Ptr<Function> make_function_symbol_from_c(const char* name, KernelFunction f) {
   auto sym = intern_from_c(name);
   auto func = make_function_from_c(f);
   sym->value = func.offset;
+  if (goalc_enabled()) {
+    goalc_note_kernel_function(name, f.direct ? 0 : f.wide_mask);
+  }
   return func;
 }
 
@@ -635,10 +644,15 @@ Ptr<Function> make_function_symbol_from_c(const char* name, KernelFunction f) {
  * Like make_function_symbol_from_c, but all 8 GOAL arguments are put into an array on the stack.
  * The address of this array is passed as the first and only argument to f.
  */
-Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name, KernelFunction f) {
+Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name,
+                                                    KernelFunction f,
+                                                    u32 c_abi_wide_mask) {
   auto sym = intern_from_c(name);
-  auto func = make_stack_arg_function_from_c(f);
+  auto func = make_stack_arg_function_from_c(f, c_abi_wide_mask);
   sym->value = func.offset;
+  if (goalc_enabled()) {
+    goalc_note_kernel_function(name, c_abi_wide_mask);
+  }
   return func;
 }
 
@@ -1828,7 +1842,8 @@ s32 InitHeapAndSymbol() {
   make_function_symbol_from_c("method-set!", method_set);
 
   // dgo
-  make_stack_arg_function_symbol_from_c("link", link_and_exec_wrapper);
+  // (function pointer pointer int kheap int pointer): only the ints are 64-bit values
+  make_stack_arg_function_symbol_from_c("link", link_and_exec_wrapper, 0b10100);
   make_function_symbol_from_c("dgo-load", load_and_link_dgo);
 
   // forward declare
@@ -1838,7 +1853,8 @@ s32 InitHeapAndSymbol() {
   make_raw_function_symbol_from_c("symlink3", 0);
 
   // game stuff
-  make_stack_arg_function_symbol_from_c("link-begin", link_begin);
+  // (function pointer (pointer uint8) int kheap link-flag int)
+  make_stack_arg_function_symbol_from_c("link-begin", link_begin, 0b10100);
   make_function_symbol_from_c("link-resume", link_resume);
   make_function_symbol_from_c("mc-run", MC_run);
   make_function_symbol_from_c("mc-format", MC_format);

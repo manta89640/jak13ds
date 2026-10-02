@@ -44,6 +44,9 @@ struct CtrSettings {
   bool pipeline = false;
   // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
   int fps_cap = 30;
+  // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game
+  // made it, so motion is even; fast shows it as soon as the GPU is done (lower latency, uneven)
+  bool steady_pacing = true;
   // world space sprites (particles) per frame; the HUD is always drawn
   int max_sprites = 1000;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.

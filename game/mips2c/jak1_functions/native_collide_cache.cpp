@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
@@ -308,12 +309,44 @@ inline bool outside_box(const Vec4i& a,
  * triangle: 0 starts a new strip, n > 0 adds vertex n - 1 as a strip (flipping the winding),
  * n < 0 adds vertex -n - 1 keeping the first vertex (a fan). One pat index byte per triangle.
  */
+#ifndef __3DS__
+//! (AI-assisted) OPENGOAL_FRAG_SKIP_VERIFY=1 (host): pc-collide-frag-may-hit? never skips, but
+//! remembers the mesh it would have skipped; add_mesh_tris then checks that it adds no triangle.
+struct FragSkipVerify {
+  bool on = false;
+  u32 predicted_mesh = 0;
+  u64 calls = 0, predicted = 0, mismatches = 0;
+};
+FragSkipVerify g_frag_skip_verify;
+#endif
+
 void add_mesh_tris(u32 cache,
                    u32 mesh,
                    const Vec4i& bmin,
                    const Vec4i& bmax,
                    u32 int_offset,
                    u64 st) {
+#ifndef __3DS__
+  struct VerifyAtEnd {
+    bool on = false;
+    u32 cache = 0, mesh = 0;
+    u32 before = 0;
+    ~VerifyAtEnd() {
+      if (on && gload<u32>(cache) != before) {
+        g_frag_skip_verify.mismatches++;
+        printf("frag skip verify MISMATCH: mesh #x%x added %d triangles\n", mesh,
+               (int)(gload<u32>(cache) - before));
+      }
+    }
+  } verify_at_end;
+  if (g_frag_skip_verify.on && g_frag_skip_verify.predicted_mesh == mesh) {
+    g_frag_skip_verify.predicted_mesh = 0;
+    verify_at_end.on = true;
+    verify_at_end.cache = cache;
+    verify_at_end.mesh = mesh;
+    verify_at_end.before = gload<u32>(cache);
+  }
+#endif
   const s64 max_tris = (s32)*max_tri_count;
   s64 num_tris = gload<u32>(cache);
   auto overflow = [&]() {
@@ -988,6 +1021,172 @@ u64 pc_upload_collide_frag_impl(const NativeArgs& args) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// (AI-assisted) 3DS: skipping collide fragments that can't add a triangle
+// ---------------------------------------------------------------------------
+// fill-from-background uploads, unpacks and transforms every fragment whose bounding sphere
+// touches the query, then methods 26-28 test the box of each triangle. Most fragments add nothing
+// (a ground probe of an enemy in Misty: ~15 fragments, ~0.3 triangles each).
+// pc-collide-frag-may-hit? first tests the box of the fragment's vertices, from the packed vertex
+// data. It only says no when, on one axis, every vertex is outside the query box: then the box of
+// every triangle is too, and the fill would add nothing (it would only leave other vertices in the
+// scratchpad).
+
+//! the float method 32 makes of the packed value u (offset as in method 32): monotonic in u
+inline float unpacked_coord(u32 u, float offset) {
+  return u2f(0x4d000000 + u) - offset;
+}
+
+//! The interval of out[i] = m[3][i] + m[0][i] * v[0] + m[1][i] * v[1] + m[2][i] * v[2]
+//! (transform_point) over v in [lo, hi], widened by more than transform_point's float rounding.
+inline void transform_interval(double olo[3],
+                               double ohi[3],
+                               const float m[4][4],
+                               const double lo[3],
+                               const double hi[3]) {
+  for (int i = 0; i < 3; i++) {
+    const double c = m[3][i];
+    double a = c, b = c, mag = std::fabs(c);
+    for (int j = 0; j < 3; j++) {
+      const double p = (double)m[j][i] * lo[j];
+      const double q = (double)m[j][i] * hi[j];
+      a += std::min(p, q);
+      b += std::max(p, q);
+      mag += std::max(std::fabs(p), std::fabs(q));
+    }
+    // 3 multiplies and 3 adds that round to float (2^-24 each): 2^-18 is more than 10x that
+    const double margin = mag * 0x1p-18 + 2.0;
+    olo[i] = a - margin;
+    ohi[i] = b + margin;
+  }
+}
+
+//! Can (s32) of a float in [lo, hi] be in [bmin, bmax]? ((s32) truncates: below bmin - 1 gives
+//! less than bmin, above bmax + 1 more than bmax.) NaN: yes.
+inline bool interval_may_hit(double lo, double hi, s32 bmin, s32 bmax) {
+  return !(hi < (double)bmin - 1.0 || lo > (double)bmax + 1.0);
+}
+
+/*!
+ * (pc-collide-frag-may-hit? cache mesh inst mode) -> symbol
+ * Can methods 26-28 add a triangle of mesh (a collide-frag-mesh, of instance inst or #f)?
+ * mode 0: the cache's collide-box4w (methods 26 and 28, world ints). mode 1: the box and matrix of
+ * *collide-work* (method 27, in the frame of method 29). Other modes: #t.
+ */
+u64 pc_collide_frag_may_hit_impl(const NativeArgs& args) {
+  const u64 yes = args.st + 8;  // #t
+  const u32 cache = (u32)args.a[0];
+  const u32 mesh = (u32)args.a[1];
+  const u32 inst = (u32)args.a[2];
+  const int mode = (int)args.a[3];
+  const int count = gload<u8>(mesh + 24);
+  if ((mode != 0 && mode != 1) || count == 0) {
+    return yes;
+  }
+
+  // min and max of the packed values on each axis (what __pc-upload-collide-frag unpacks)
+  const u16* data = (const u16*)gptr(gload<u32>(mesh));
+  u32 ulo[3] = {0xffff, 0xffff, 0xffff}, uhi[3] = {0, 0, 0};
+  for (int k = 0; k < count; k++) {
+    for (int i = 0; i < 3; i++) {
+      const u32 u = data[3 * k + i];
+      ulo[i] = std::min(ulo[i], u);
+      uhi[i] = std::max(uhi[i], u);
+    }
+  }
+  // the floats method 32 makes of them (the same operations)
+  s32 base_i[4];
+  gload_q(base_i, mesh + 12);
+  float flo[3], fhi[3];
+  for (int i = 0; i < 3; i++) {
+    const float offset = u2f(0x4d000000) - (float)base_i[i];
+    flo[i] = unpacked_coord(ulo[i], offset);
+    fhi[i] = unpacked_coord(uhi[i], offset);
+  }
+
+  bool may_hit = true;
+  const bool transformed = inst != (u32)args.st;
+  if (mode == 0 && !transformed) {
+    // exact: the ints are (s32) of these floats, also monotonic
+    const Vec4i bmin = gload<Vec4i>(cache + 60);
+    const Vec4i bmax = gload<Vec4i>(cache + 76);
+    for (int i = 0; i < 3; i++) {
+      if ((s32)fhi[i] < bmin.v[i] || (s32)flo[i] > bmax.v[i]) {
+        may_hit = false;
+      }
+    }
+  } else {
+    double wlo[3], whi[3];
+    for (int i = 0; i < 3; i++) {
+      wlo[i] = flo[i];
+      whi[i] = fhi[i];
+    }
+    if (transformed) {
+      // the instance's matrix, as method 32 makes it
+      const u32 xf = inst;
+      s32 trans_i[4], r0[4], r1[4], r2[4];
+      unpack_halves(trans_i, gload<u64>(xf + 52), 10);
+      unpack_halves(r0, gload<u64>(xf + 28), 16);
+      unpack_halves(r1, gload<u64>(xf + 36), 16);
+      unpack_halves(r2, gload<u64>(xf + 44), 16);
+      float trans_add[4];
+      gload_q(trans_add, xf + 12);
+      float m[4][4];
+      for (int i = 0; i < 4; i++) {
+        m[3][i] = (float)trans_i[i];
+        m[0][i] = ((float)r0[i]) * (1.f / 4096.f);
+        m[1][i] = ((float)r1[i]) * (1.f / 4096.f);
+        m[2][i] = ((float)r2[i]) * (1.f / 4096.f);
+      }
+      for (int i = 0; i < 3; i++) {
+        m[3][i] = m[3][i] + trans_add[i];
+      }
+      const double llo[3] = {wlo[0], wlo[1], wlo[2]}, lhi[3] = {whi[0], whi[1], whi[2]};
+      transform_interval(wlo, whi, m, llo, lhi);
+    }
+    Vec4i bmin, bmax;
+    if (mode == 0) {
+      bmin = gload<Vec4i>(cache + 60);
+      bmax = gload<Vec4i>(cache + 76);
+    } else {
+      // method 29: into the query's frame with the matrix in *collide-work*; the box is there too
+      static const u32 collide_work_sym = sym_addr("*collide-work*");
+      const u32 cw = gload<u32>(collide_work_sym);
+      float m[4][4];
+      for (int i = 0; i < 4; i++) {
+        gload_q(m[i], cw + 48 + 16 * i);
+      }
+      const double llo[3] = {wlo[0], wlo[1], wlo[2]}, lhi[3] = {whi[0], whi[1], whi[2]};
+      transform_interval(wlo, whi, m, llo, lhi);
+      bmin = gload<Vec4i>(cw + 16);
+      bmax = gload<Vec4i>(cw + 32);
+    }
+    for (int i = 0; i < 3; i++) {
+      if (!interval_may_hit(wlo[i], whi[i], bmin.v[i], bmax.v[i])) {
+        may_hit = false;
+      }
+    }
+  }
+
+#ifndef __3DS__
+  if (g_frag_skip_verify.on) {
+    auto& v = g_frag_skip_verify;
+    v.calls++;
+    v.predicted_mesh = may_hit ? 0 : mesh;
+    if (!may_hit) {
+      v.predicted++;
+    }
+    if ((v.calls & 0x3fff) == 0) {
+      printf("frag skip verify: %llu calls, %llu skips predicted (%.1f%%), %llu mismatches\n",
+             (unsigned long long)v.calls, (unsigned long long)v.predicted,
+             100.0 * (double)v.predicted / (double)v.calls, (unsigned long long)v.mismatches);
+    }
+    return yes;
+  }
+#endif
+  return may_hit ? yes : args.st;
+}
+
 }  // namespace
 
 // scratch: the two vectors, then moving-sphere-triangle-intersect's (called directly)
@@ -1015,5 +1214,19 @@ const NativeImpl method_13_collide_shape_prim_mesh =
 const NativeImpl method_14_collide_shape_prim_mesh =
     MIPS2C_NATIVE_IMPL(method_12_collide_shape_prim_mesh_impl, 0, 0);
 const NativeImpl pc_upload_collide_frag = MIPS2C_NATIVE_IMPL(pc_upload_collide_frag_impl, 0, 0);
+const NativeImpl pc_collide_frag_may_hit = MIPS2C_NATIVE_IMPL_GOAL(pc_collide_frag_may_hit_impl, 0);
 
 }  // namespace Mips2C::jak1::native
+
+namespace Mips2C::jak1::pc_collide_frag_may_hit {
+void link() {
+#ifndef __3DS__
+  {
+    const char* env = getenv("OPENGOAL_FRAG_SKIP_VERIFY");
+    native::g_frag_skip_verify.on = env && env[0] == '1';
+  }
+#endif
+  gLinkedFunctionTable.reg("pc-collide-frag-may-hit?", native::pc_collide_frag_may_hit.as_exec, 64,
+                           &native::pc_collide_frag_may_hit);
+}
+}  // namespace Mips2C::jak1::pc_collide_frag_may_hit

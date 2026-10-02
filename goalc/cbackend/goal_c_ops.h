@@ -38,7 +38,7 @@ _Static_assert(sizeof(v128) == 16, "v128 size");
 
 //! Changes whenever generated code and this header must be rebuilt together (the check is in
 //! every module, and the version is part of the module source, so of its hash).
-#define GOALC_ABI_VERSION 2
+#define GOALC_ABI_VERSION 3
 
 // ---------------------------------------------------------------------------
 // memory. GOAL addresses are 32 bits.
@@ -667,6 +667,71 @@ GC_INLINE v128 gc_pshuflw(v128 a, u32 c) {
 GC_INLINE v128 gc_pshufhw(v128 a, u32 c) {
   return gc_um(gc_pshufhw_u(gc_mu(a), c));
 }
+
+// ---------------------------------------------------------------------------
+// calls (ABI version 3, see goal_c_abi.h): u32 low halves, then the upper halves as floats
+// ---------------------------------------------------------------------------
+
+//! upper 32 bits of an argument, passed in a float register
+GC_INLINE float gc_hi(u64 v) {
+  return gc_bitsf((u32)(v >> 32));
+}
+
+#ifndef GOALC_ABI_CHECK
+//! the 64-bit value of an argument from its two halves
+GC_INLINE u64 gc_arg64(u32 lo, float hi) {
+  return (u64)lo | ((u64)gc_fbits(hi) << 32);
+}
+//! a float argument whose value doesn't matter (the upper half of a narrow argument that comes
+//! before a wide one): whatever is in a register, no instructions.
+GC_INLINE float gc_anyf(void) {
+  float f;
+#if defined(__arm__) && defined(__ARM_FP)
+  __asm__("" : "=t"(f));
+#elif defined(__aarch64__)
+  __asm__("" : "=w"(f));
+#elif defined(__x86_64__) || defined(__i386__)
+  __asm__("" : "=x"(f));
+#else
+  f = 0.f;
+#endif
+  return f;
+}
+//! an argument passed as a pointer (zero-extended by the callee) / a float (sign-extended)
+#define GC_PA(v) (v)
+#define GC_FA(v) (v)
+#else
+// Check mode, for debugging on a PC host only (compile the modules with -DGOALC_ABI_CHECK, see
+// docs/3ds-port/c_backend.md): reports arguments whose type says they are narrow but whose value
+// has an upper half that the callee would lose, and wide parameters whose caller didn't pass the
+// upper half (narrow arguments pass a marker instead of an unspecified value).
+void goalc_abi_check_failed(const char* file, int line, const char* what, uint64_t value);
+#define GC_ABI_POISON 0x7fbadbadu
+GC_INLINE u64 gc_arg64_chk(u32 lo, float hi, const char* file, int line) {
+  if (gc_fbits(hi) == GC_ABI_POISON) {
+    goalc_abi_check_failed(file, line, "wide parameter without its upper half", lo);
+  }
+  return (u64)lo | ((u64)gc_fbits(hi) << 32);
+}
+#define gc_arg64(lo, hi) gc_arg64_chk((lo), (hi), __FILE__, __LINE__)
+GC_INLINE float gc_anyf(void) {
+  return gc_bitsf(GC_ABI_POISON);
+}
+GC_INLINE u64 gc_chk_ptr(u64 v, const char* file, int line) {
+  if (v >> 32) {
+    goalc_abi_check_failed(file, line, "pointer argument with an upper half", v);
+  }
+  return v;
+}
+GC_INLINE u64 gc_chk_float(u64 v, const char* file, int line) {
+  if (v != (u64)(s64)(s32)(u32)v) {
+    goalc_abi_check_failed(file, line, "float argument that is not sign-extended", v);
+  }
+  return v;
+}
+#define GC_PA(v) gc_chk_ptr((v), __FILE__, __LINE__)
+#define GC_FA(v) gc_chk_float((v), __FILE__, __LINE__)
+#endif
 
 // ---------------------------------------------------------------------------
 // module support
