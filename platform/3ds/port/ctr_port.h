@@ -94,6 +94,11 @@ int ctr_core1_enable(void);
  * ctr_audio_init returns 0 on success, or a negative error (nothing was started). */
 int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs);
 void ctr_audio_exit(void);
+/* (AI-assisted) The app is closing (HOME Menu / power button): stop the output and release the
+ * DSP right away. Doesn't wait for the mixer thread or take locks; the process exits next. */
+void ctr_audio_close_for_exit(void);
+/* (AI-assisted) The system asked the app to close (aptShouldClose). */
+int ctr_closing(void);
 /* The next buffer to fill (`frames` * 2 s16 samples, interleaved L/R), or NULL if all are still
  * queued to the DSP. Buffers are returned in order; fill it, then ctr_audio_submit it. */
 short* ctr_audio_get_buffer(void);

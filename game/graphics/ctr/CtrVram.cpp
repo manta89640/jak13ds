@@ -94,6 +94,14 @@ CtrVram::CtrVram() {
       m_ct32_page_table[x + 64 * y] = psmct32_addr(x, y, 64);
     }
   }
+  // (AI-assisted) in PSMCT32 the texels 2k and 2k+1 of a row are next to each other: uploads
+  // copy pairs (checked here rather than assumed)
+  m_ct32_pairs = true;
+  for (u32 i = 0; i < 64 * 32; i += 2) {
+    if (m_ct32_page_table[i + 1] != m_ct32_page_table[i] + 4 || (m_ct32_page_table[i] & 7)) {
+      m_ct32_pairs = false;
+    }
+  }
 }
 
 CtrVram::~CtrVram() {
@@ -115,6 +123,13 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
     const u32 page_row = (y / 32) * pages_per_row;
     const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
     const u8* src_row = data + 4 * y * width;
+    if (m_ct32_pairs && width % 2 == 0) {
+      for (u32 x = 0; x < width; x += 2) {
+        u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
+        memcpy(m_vram.data() + addr, src_row + 4 * x, 8);
+      }
+      continue;
+    }
     for (u32 x = 0; x < width; x++) {
       u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
       memcpy(m_vram.data() + addr, src_row + 4 * x, 4);
@@ -254,15 +269,43 @@ void CtrVram::flush_pending() {
 }
 
 void CtrVram::flush_pending(u32 first_block, u32 end_block) {
-  // write the uploads that overlap the range, in order; keep the others pending
+  // write the uploads that overlap the range, in order; keep the others pending.
+  // (AI-assisted) Only the 32 row chunks of an upload that overlap the range are written (a 128
+  // pixel wide PSMCT32 image: each chunk is 4096 words at 64 consecutive blocks); its other chunks
+  // stay pending. A sprite needing one small texture used to write the whole page, every frame
+  // where two levels alternate their pages in the same VRAM (Misty: ~12% of the render thread).
   if (m_pending.empty()) {
     return;
   }
+  constexpr u32 kChunkWords = 4096;
+  constexpr u32 kChunkBlocks = kChunkWords * 4 / kBlockBytes;
+  auto piece = [](const PendingUpload& p, u32 c0, u32 c1) {
+    PendingUpload q;
+    q.src = p.src + (size_t)c0 * kChunkWords * 4;
+    q.dest_block = p.dest_block + c0 * kChunkBlocks;
+    q.words = std::min(p.words, c1 * kChunkWords) - c0 * kChunkWords;
+    q.end_block = q.dest_block + (q.words * 4 + kBlockBytes - 1) / kBlockBytes;
+    return q;
+  };
   std::vector<PendingUpload> keep;
   std::vector<PendingUpload> write;
   for (const auto& p : m_pending) {
     if (p.dest_block < end_block && first_block < p.end_block) {
-      write.push_back(p);
+      const u32 chunks = (p.words + kChunkWords - 1) / kChunkWords;
+      const u32 c0 = first_block > p.dest_block ? (first_block - p.dest_block) / kChunkBlocks : 0;
+      const u32 c1 =
+          std::min(chunks, (end_block - p.dest_block + kChunkBlocks - 1) / kChunkBlocks);
+      if (c0 >= c1) {
+        keep.push_back(p);
+        continue;
+      }
+      if (c0 > 0) {
+        keep.push_back(piece(p, 0, c0));
+      }
+      write.push_back(piece(p, c0, c1));
+      if (c1 < chunks) {
+        keep.push_back(piece(p, c1, chunks));
+      }
     } else {
       keep.push_back(p);
     }

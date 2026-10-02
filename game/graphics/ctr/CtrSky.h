@@ -38,6 +38,13 @@ class CtrSky {
  private:
   static constexpr int kSize[2] = {32, 64};  // sky, clouds
   std::vector<u8> m_rgba[2];
+  // (AI-assisted) this frame's blend is built here and replaces m_rgba only when it completed
+  // (every source read): a frame with a source that couldn't be read used to leave a black or
+  // partial texture for a frame (flickering clouds)
+  std::vector<u8> m_work[2];
+  bool m_work_started[2] = {false, false};
+  bool m_work_failed[2] = {false, false};
+  int m_work_sources[2] = {0, 0};
   bool m_dirty[2] = {false, false};
   bool m_valid[2] = {false, false};
   int m_tex[2] = {-1, -1};

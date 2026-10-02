@@ -1076,6 +1076,14 @@
       (let ((s0-0 (-> obj shadow-pos)))
         (set! (-> s0-0 quad) (-> obj trans quad))
         (set! sv-144 (new 'stack-no-clear 'collide-tri-result))
+        ;; og:preserve-this (AI-assisted) the misty ambush hack below doesn't probe a triangle, so
+        ;; nothing fills sv-144, but move-to-tri! copies its normal into local-normal (and its pat).
+        ;; The original reads stack garbage there. In the C backend (3DS) that garbage is huge or
+        ;; NaN: the next compute-acc-due-to-gravity turns it into a NaN velocity, the lurker's
+        ;; position becomes NaN (invisible, never dies) and the ambush can't end. Use flat ground.
+        (when s1-0
+          (set! (-> sv-144 normal quad) (-> obj dynam gravity-normal quad))
+          (set! (-> sv-144 pat) (new 'static 'pat-surface)))
         ;; move off the ground by the given height probe offset
         (+! (-> s0-0 y) sv-128)
         0.0

@@ -68,7 +68,7 @@ rgba4_as_rgba8 = auto      # 16-bit textures with alpha stored as 32-bit. auto: 
 
 # ---- 3DS hardware features (AI-assisted) ----
 color16 = off              # on: 16-bit (RGB565) color buffer and top screen (half the memory traffic per pixel); faint blended layers like waterfall mist vanish and gradients band
-early_depth = on           # the GPU's early depth test for opaque level / model draws (drawn nearest first): hidden pixels skip texturing. Turn off if blocks of geometry go missing on hardware
+early_depth = off          # the GPU's early depth test for opaque level / model draws (drawn nearest first): hidden pixels skip texturing. Off by default: on a New 3DS it leaves large blocks of the screen where the level never draws (Azahar ignores it)
 compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats (L8, LA8, RGB565, RGBA5551, RGBA4), and in 384 KB of reserved VRAM with vram_textures
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read
 sprite_max_size = 0.5      # world particles and glows at most this fraction of the screen height across (0 = no limit)
@@ -96,7 +96,7 @@ gpu_profile = off          # every 2.5 s leaves out one group of renderers and l
   model the GPU's speed, so frame rates there say nothing about the GPU on hardware.
 - **Best looking:** `mipmaps = trilinear` (smoother far textures, a little slower),
   `sprite_max_size = 0`, `merc_lod_scale = 1`.
-- **3DS hardware features:** all on by default. The log line `[ctr] textures: ...` shows the
+- **3DS hardware features:** all on by default except `early_depth` and `color16`. The log line `[ctr] textures: ...` shows the
   compact textures (and how many are in the reserved VRAM, how many are radial glows) and the
   last frame's early depth and procedural texture draws; `[ctr] l0-tfrag: visibility hid ...`
   shows what the game's visibility data hides. Compare `gpu` in `[ctr] render ms/frame` with a

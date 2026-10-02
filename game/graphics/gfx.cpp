@@ -10,6 +10,9 @@
 #include <thread>
 #include <functional>
 #include <utility>
+#ifdef __3DS__
+#include <unistd.h>  // _exit
+#endif
 
 #include "display.h"
 
@@ -21,6 +24,7 @@
 
 #include "game/common/file_paths.h"
 #include "game/kernel/common/kmachine.h"
+#include "game/kernel/common/kmemcard.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/runtime.h"
 #include "ctr/CtrRenderer.h"
@@ -131,6 +135,30 @@ u32 Init(GameVersion version) {
   return 0;
 }
 
+#ifdef __3DS__
+/*!
+ * (AI-assisted) The HOME Menu (or the power button) closes the app. The normal shutdown joins the
+ * game, IOP and render threads and runs the static destructors; with the app in the background
+ * (the GPU belongs to the HOME Menu) a thread waiting for the GPU or the DSP never finishes, the
+ * process never exits, and the HOME Menu shows "closing software" forever: it waits for the app
+ * to tell APT it closed, which libctru does at the very end of the exit (aptExit). So: let a save
+ * that is being written finish, release the DSP, and exit at once. _exit skips the destructors
+ * but still runs __appExit (aptExit: the close handshake); the kernel ends the other threads.
+ */
+static void close_for_home_menu() {
+  for (int i = 0; i < 500 && MC_save_in_progress(); i++) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (MC_save_in_progress()) {
+    lg::warn("3DS: closing while a save is still being written");
+  }
+  ctr_audio_close_for_exit();
+  lg::info("3DS: closing now");
+  lg::finish();
+  _exit(0);
+}
+#endif
+
 void Loop(std::function<bool()> f) {
   lg::info("GFX Loop");
   while (f()) {
@@ -147,6 +175,9 @@ void Loop(std::function<bool()> f) {
     if (!ctr_main_loop()) {
       lg::info("3DS: application close requested");
       MasterExit = RuntimeExitStatus::EXIT;
+      if (ctr_closing()) {
+        close_for_home_menu();
+      }
     }
 #endif
   }

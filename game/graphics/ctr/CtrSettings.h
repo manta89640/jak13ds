@@ -64,8 +64,10 @@ struct CtrSettings {
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
   // smoke) add less than one color step each and vanish, and gradients band.
   bool color16 = false;
-  // the GPU's early depth test for opaque level draws, drawn front to back in distance bands
-  bool early_depth = true;
+  // the GPU's early depth test for opaque level draws, drawn front to back in distance bands.
+  // (AI-assisted) Off by default: on a New 3DS it left large screen blocks where the level never
+  // drew (Azahar ignores the early depth test, so only hardware shows it).
+  bool early_depth = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;

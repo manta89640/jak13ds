@@ -55,6 +55,9 @@ static void* save_worker(void*) {
   s_save_state.store(2);
   return nullptr;
 }
+bool MC_save_in_progress() {
+  return s_save_state.load() == 1;
+}
 #endif
 // instead of two memory cards we just simulate the 4 save files (8 banks).
 static MemoryCardFile mc_files[4];

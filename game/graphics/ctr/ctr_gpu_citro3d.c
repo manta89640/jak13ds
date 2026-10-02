@@ -1618,7 +1618,7 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
 
 /* ---------------- (AI-assisted) 3DS hardware features: settings ---------------- */
 
-static int g_early_depth = 1;
+static int g_early_depth = 0; /* config.ini early_depth (off by default) */
 static int g_proctex = 1;
 static int g_compact = 1;
 

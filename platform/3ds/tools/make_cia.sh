@@ -68,7 +68,10 @@ BANNER_PNG="$CIA_DIR/banner.png"
 BANNER_WAV="$CIA_DIR/banner.wav"
 [ -f "$CIA_DIR/local/banner.png" ] && BANNER_PNG="$CIA_DIR/local/banner.png"
 [ -f "$CIA_DIR/local/banner.wav" ] && BANNER_WAV="$CIA_DIR/local/banner.wav"
-echo "banner: $BANNER_PNG, $BANNER_WAV"
+# (AI-assisted) and a HOME Menu icon from a picture of your choice (make_banner.py --icon)
+ICON_PNG="$CIA_DIR/icon.png"
+[ -f "$CIA_DIR/local/icon.png" ] && ICON_PNG="$CIA_DIR/local/icon.png"
+echo "banner: $BANNER_PNG, $BANNER_WAV; icon: $ICON_PNG"
 BANNERTOOL="$(command -v bannertool || true)"
 [ -n "$BANNERTOOL" ] || BANNERTOOL="$HOME/devkitpro-3ds/tools/bin/bannertool"
 [ -x "$BANNERTOOL" ] || echo "bannertool not found: no banner (see the header of this script)" >&2
@@ -85,7 +88,7 @@ build_cia() {
     "$BANNERTOOL" makebanner -i "$BANNER_PNG" -a "$BANNER_WAV" \
       -o "$BUILD_DIR/banner.bnr" > /dev/null
     smdh="$BUILD_DIR/$(basename "$out" .cia).smdh"
-    "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p "OpenGOAL" -i "$CIA_DIR/icon.png" \
+    "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p "OpenGOAL" -i "$ICON_PNG" \
       -o "$smdh" > /dev/null
     banner_args=(-banner "$BUILD_DIR/banner.bnr")
   fi

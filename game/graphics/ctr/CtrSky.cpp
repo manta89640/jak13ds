@@ -86,13 +86,21 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
     if (idx < 0) {
       continue;
     }
-    auto& out = m_rgba[idx];
+    // (AI-assisted) blended (and uploaded, with the clouds' mip levels) every 4th frame only: the
+    // time of day colors change over minutes, the clouds move by their texture offsets. It cost
+    // ~3 ms of the render thread per frame on the Misty zoomer course (Azahar).
+    if (m_valid[idx] && (rs.frame_idx & 3) != 0) {
+      continue;
+    }
+    auto& out = m_work[idx];
     const size_t n = (size_t)kSize[idx] * kSize[idx] * 4;
-    if (first) {
+    if (first || !m_work_started[idx]) {
       // the frame's blend starts from zero even when this source can't be read: the adds that
       // follow would otherwise pile up over the frames (a saturated, technicolour sky)
       out.assign(n, 0);
-      m_dirty[idx] = true;
+      m_work_started[idx] = true;
+      m_work_failed[idx] = false;
+      m_work_sources[idx] = 0;
     }
     constexpr u32 kRedecodeFrames = 300;
     // (AI-assisted) keyed by the uploads the texels and the CLUT came from too: another level's
@@ -138,6 +146,7 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
       }
     }
     if (!src.ok || src.w != kSize[idx] || src.h != kSize[idx]) {
+      m_work_failed[idx] = true;
       continue;
     }
     if (out.size() != n) {
@@ -147,8 +156,7 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
     for (size_t i = 0; i < n; i++) {
       out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
     }
-    m_dirty[idx] = true;
-    m_valid[idx] = true;
+    m_work_sources[idx]++;
     m_stats.blends++;
   }
 }
@@ -159,6 +167,15 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
   }
   SkyPacket p;
   memcpy(&p, packet, sizeof(p));
+  // (AI-assisted) last frame's blends: keep them if they completed, otherwise the last good ones
+  for (int i = 0; i < 2; i++) {
+    if (m_work_started[i] && !m_work_failed[i] && m_work_sources[i] > 0) {
+      m_rgba[i].swap(m_work[i]);
+      m_dirty[i] = true;
+      m_valid[i] = true;
+    }
+    m_work_started[i] = false;
+  }
   // the textures blended last frame (like the PS2: they sit in VRAM until this frame's sky)
   for (int i = 0; i < 2; i++) {
     if (!m_dirty[i]) {
@@ -207,6 +224,10 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
     ctr_clip_vertex o;
     o.x = (c[0] + (p.hvdf[0] - 2048.f) * w) / 256.f;
     o.y = -(c[1] + (p.hvdf[1] - 2048.f) * w) / 112.f;
+    // (AI-assisted) GS z 0 put the polygons exactly on the far clip plane (z = -w): rounding
+    // clipped random parts of the sky and clouds away from frame to frame (flicker). The sky has
+    // no depth test or write, so any depth inside the volume draws the same.
+    gs_z = std::max(gs_z, 65536.f);
     o.z = (2.f * gs_z / 16777215.f - 1.f) * w;
     o.w = w;
     const float q = v.stq[2] != 0.f ? v.stq[2] : 1.f;
@@ -243,7 +264,9 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
       m_stats.draws++;
     }
   }
-  if (p.cloud_drawn) {
+  // (AI-assisted) the clouds whenever the sky is drawn, from the last complete cloud texture
+  // (the game only blends them in frames it makes the sky textures)
+  if (p.cloud_drawn || p.sky_drawn) {
     // two cloud layers of 9 quads, added (alpha b=2 d=1), the texture scrolling (set-tex-offset)
     const SkyVertex* clouds = verts_at(p.clouds, 72);
     if (clouds && m_valid[1] && m_tex[1] >= 0) {
