@@ -606,6 +606,11 @@ void InitMachine_PCPort() {
 #ifdef __3DS__
   // (AI-assisted) level-update-after-load waits for the 3DS renderer's .c3l of the level
   make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
+#else
+  // (AI-assisted) host builds running the 3DS GOAL code (small memory): no .c3l to wait for
+  make_function_symbol_from_c("pc-3ds-level-ready?", +[](u32) -> u64 {
+    return s7.offset + true_symbol_offset(g_game_version);
+  });
 #endif
   // (AI-assisted) config.ini merc_lod_scale: characters and objects switch to their lower detail
   // models (all in the .c3l files) at this fraction of the game's distances (drawable.gc,
