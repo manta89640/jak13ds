@@ -283,6 +283,31 @@ battlecontroller-default-event-handler
   0
   (none))
 
+;; og:preserve-this (AI-assisted) 3DS safety net: the fight ends only when every creature it spawned
+;; is gone, so one that can't be reached anymore (a NaN position, or fallen through the world)
+;; would lock the player in the arena for good. Remove those (counted as killed).
+(#when TARGET_3DS
+  (defun battlecontroller-bad-coord? ((f float))
+    "NaN or infinite"
+    (= (logand #x7f800000 (the-as int f)) #x7f800000))
+  (defun battlecontroller-remove-lost-children ((this battlecontroller))
+    (let ((c (-> this child)))
+      (while c
+        (let ((p (the process-drawable (-> c 0)))
+              (next (-> c 0 brother)))
+          (when (and (type-type? (-> p type) process-drawable) (nonzero? (-> p root)))
+            (let ((v (-> p root trans)))
+              (when (or (battlecontroller-bad-coord? (-> v x))
+                        (battlecontroller-bad-coord? (-> v y))
+                        (battlecontroller-bad-coord? (-> v z))
+                        (< (-> v y) (- (-> this root trans y) (meters 100))))
+                (format 0 "battlecontroller: removed a lost ~A (~m ~m ~m)~%" (-> p name) (-> v x) (-> v y) (-> v z))
+                (+! (-> this die-count) 1)
+                (deactivate p))))
+          (set! c next))))
+    0
+    (none)))
+
 (defstate battlecontroller-active (battlecontroller)
   :virtual #t
   :event battlecontroller-default-event-handler
@@ -300,6 +325,8 @@ battlecontroller-default-event-handler
       (loop
         (when (time-elapsed? (-> self state-time) (seconds 0.1))
           (set-time! (-> self state-time))
+          (#when TARGET_3DS
+            (battlecontroller-remove-lost-children self))
           (let ((gp-0 0))
             (let ((v1-8 (-> self child))) (while v1-8 (+! gp-0 1) (set! v1-8 (-> v1-8 0 brother)) (nop!) (nop!)))
             (if (and (zero? gp-0) (= (-> self spawn-count) (-> self max-spawn-count))) (go-virtual battlecontroller-die))

@@ -759,6 +759,12 @@ void ctr_crash(const char* title, const char* detail) {
     fputs(msg, s_tee_file);
     fflush(s_tee_file);
   }
+  if (aptShouldClose()) {
+    /* (AI-assisted) the system is closing the app (HOME Menu): nobody sees the crash screen, and
+     * the HOME Menu waits until the app tells APT it closed, which _exit does (__appExit ->
+     * aptExit); svcExitProcess alone left it on "closing software" forever */
+    _exit(1);
+  }
   show_screen("\x1b[31m", "*** OpenGOAL crashed ***", title, detail, 1,
               "Logs: sdmc:/3ds/jak1/data/log/\nPlease report stdout.log and gk.log.\n"
               "\x1b[32mPress START to exit.\x1b[0m");
@@ -981,6 +987,23 @@ void ctr_audio_exit(void) {
   ctr_linear_unlock();
   s_audio_mem = NULL;
   s_audio_on = 0;
+}
+
+void ctr_audio_close_for_exit(void) {
+  if (!s_audio_on) {
+    return;
+  }
+  /* the mixer thread sees s_audio_on = 0 and stops queueing; its buffers stay allocated (the
+   * process exits next) */
+  s_audio_on = 0;
+  __dsb();
+  ndspSetCallback(NULL, NULL);
+  ndspChnWaveBufClear(0);
+  ndspExit();
+}
+
+int ctr_closing(void) {
+  return aptShouldClose() ? 1 : 0;
 }
 
 short* ctr_audio_get_buffer(void) {

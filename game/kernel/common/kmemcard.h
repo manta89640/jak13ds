@@ -138,6 +138,10 @@ struct mc_slot_info {
 
 void MC_set_language(s32 lang);
 void MC_run();
+#ifdef __3DS__
+//! (AI-assisted) the save worker thread is writing a save (the HOME Menu close waits for it)
+bool MC_save_in_progress();
+#endif
 u64 MC_format(s32 card_idx);
 u64 MC_unformat(s32 card_idx);
 u64 MC_createfile(s32 param, Ptr<u8> data);

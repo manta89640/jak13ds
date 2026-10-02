@@ -66,25 +66,26 @@ The CIA asks for the New 3DS 124 MB memory mode (`platform/3ds/cia/gk.rsf`: `Sys
 124MB`, 804 MHz, L2 cache). The game needs about 95 MB: 48 MB of PS2 memory, 12 MB of code, 24 MB
 of GPU memory, plus buffers.
 
-### Custom HOME Menu banner (title logo, power cell jingle)
+### Custom HOME Menu banner (title logo, power cell jingle, icon)
 
 The banner in the repo is a placeholder: game assets are never committed. To use the game's own
 title logo and the power cell jingle, make them from your copy of the game and put them in
-`platform/3ds/cia/local/` (ignored by git); `make_cia.sh` uses them when they are there
-(it prints which banner it used).
+`platform/3ds/cia/local/` (ignored by git); `make_cia.sh` and the `.3dsx` build use them when they
+are there (`make_cia.sh` prints which files it used).
 
-1. Export with the decompiler: in `decompiler/config/jak1/jak1_config.jsonc` set `"rip_levels": true`
-   and `"rip_streamed_audio": true`, then `task extract`. This writes the title logo model
-   (`decompiler_out/jak1/levels/title/logo-english-lod0.glb`, textures embedded) and every sound
-   effect as a .wav (`decompiler_out/jak1/audio/sfx/<bank>/cell-prize.wav` is the power cell jingle).
+1. Export with the decompiler: in `decompiler/config/jak1/jak1_config.jsonc` set `"rip_levels": true`,
+   `"save_texture_pngs": true` and `"rip_streamed_audio": true`, then `task extract`. This writes the
+   title logo model (`levels/title/logo-english-lod0.glb`), the "the Precursor Legacy" sprite
+   (`textures/title-vis-pris/precursor_legacy.png`) and every sound effect as a .wav
+   (`audio/sfx/COMMON/cell-prize.wav` is the power cell jingle) under `decompiler_out/`.
 2. `python3 platform/3ds/tools/make_banner.py` (needs `python3 -m pip install numpy pillow`): renders
-   the logo at 256 x 128 with a transparent background (straight on, from the side its faces point
-   to) and cuts the jingle to 2.9 s with a fade-out, into `platform/3ds/cia/local/`. `--model` /
-   `--sound` take other files.
+   the logo model (vertex colors, textures, envmap shine) with the subtitle sprite under it, 256 x 128
+   on a transparent background, and cuts the jingle to 2.9 s, into `platform/3ds/cia/local/`.
+   `--icon PICTURE --icon-crop x0,y0,x1,y1` also makes the 48 x 48 HOME Menu icon from a square of
+   any picture. `--model` / `--sound` take other files.
 3. `platform/3ds/tools/make_cia.sh` and reinstall the CIA.
 
-(AI-assisted: the script was tested on a synthetic model and sound; the paths are the ones the
-decompiler writes, checked in its source.)
+(AI-assisted)
 
 ### If the CIA stays on the launch screen
 
