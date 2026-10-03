@@ -61,6 +61,7 @@ LINK(sp_process_block_2d)
 LINK(particle_adgif)
 LINK(sp_launch_particles_var)
 LINK(ocean_interp_wave)
+LINK(ocean_generate_verts)
 LINK(ray_sphere_intersect)
 LINK(ray_cylinder_intersect)
 LINK(moving_sphere_sphere_intersect)
@@ -148,6 +149,7 @@ int main(int argc, char** argv) {
   particle_adgif::link();
   sp_launch_particles_var::link();
   ocean_interp_wave::link();
+  ocean_generate_verts::link();
   ripple_execute_init::link();
   ripple_create_wave_table::link();
   // GOAL functions with a native version: the reference is goalc's C code (goalc_ref/)

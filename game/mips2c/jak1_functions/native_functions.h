@@ -72,4 +72,5 @@ extern const NativeImpl sp_launch_particles_var;
 u64 particle_adgif_impl(const NativeArgs& args);
 // native_ocean.cpp
 extern const NativeImpl ocean_interp_wave;
+extern const NativeImpl ocean_generate_verts;
 }  // namespace Mips2C::jak1::native
