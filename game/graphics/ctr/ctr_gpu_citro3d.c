@@ -155,7 +155,7 @@ static struct {
   int uloc_clip;
   int uloc_scales;
   int uloc_fog0, uloc_fog1;
-  float fog0[4], fog1[4]; /* see ctr_gpu_set_mesh_fog */
+  float fog0[4], fog1[4]; /* see ctr_gpu_set_mesh_fog, mesh_fog_uniforms */
   C3D_Tex fog_tex;        /* 64x8: alpha ramp 0..1 along s, fog color */
   uint32_t fog_tex_rgb;
   int fog_tex_valid;
@@ -605,13 +605,13 @@ int ctr_gpu_init(void) {
   g.uloc_scales = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "scales");
   g.uloc_fog0 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog0");
   g.uloc_fog1 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog1");
-  /* no fog until ctr_gpu_set_mesh_fog */
-  g.fog0[0] = 0.0f;
-  g.fog0[1] = 255.0f;
-  g.fog0[2] = 255.0f;
-  g.fog0[3] = -1.0f / 255.0f;
+  /* no fog until ctr_gpu_set_mesh_fog (AI-assisted: the shader's form, see mesh_fog_uniforms) */
+  g.fog0[0] = -1.0f / 255.0f;
+  g.fog0[1] = 0.0f;
+  g.fog0[2] = -1.0f;
+  g.fog0[3] = 0.0f;
   g.fog1[0] = 0.0f;
-  g.fog1[1] = 1.0f;
+  g.fog1[1] = 0.0f;
   g.fog1[2] = 0.0f;
   g.fog1[3] = 0.0f;
   if (C3D_TexInit(&g.fog_tex, 64, 8, GPU_RGBA8)) {
@@ -3173,10 +3173,25 @@ void ctr_gpu_async_stop(void) {
 
 /* ---------------- fog for level meshes ---------------- */
 
+/* (AI-assisted) The game's fog values -> ctr_mesh.v.pica's: both fogs are affine in clip w
+ * (game fog 1 + fog0[3] * clamp(fog0[0] - w, fog0[1], fog0[2]), fog0[3] <= 0; draw distance fog
+ * (fog1[0] * w - fog1[1]) * fog1[2]), so the shader needs one mul and one add for both. */
+static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float out0[4],
+                              float out1[4]) {
+  const float k = fog0[3];
+  out0[0] = k; /* -(game fog) before its clamps = k * w - 1 - k * hvdf.w */
+  out0[1] = fog1[0] * fog1[2];
+  out0[2] = -1.0f - k * fog0[0];
+  out0[3] = -fog1[1] * fog1[2];
+  out1[0] = -(1.0f + k * fog0[1]); /* the clamps, as fog amounts */
+  out1[1] = 1.0f + k * fog0[2];
+  out1[2] = 0.0f;
+  out1[3] = 0.0f;
+}
+
 void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
-  memcpy(g.fog0, fog0, sizeof(g.fog0));
-  memcpy(g.fog1, fog1, sizeof(g.fog1));
+  mesh_fog_uniforms(fog0, fog1, g.fog0, g.fog1);
   if (g.cur_prog == PROG_MESH) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
