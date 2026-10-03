@@ -315,8 +315,10 @@ void Player::Tick(s16Output* stream, int samples) {
       spu -= 200ull * kMixRate;
     }
     // output samples until the next handler tick
-    const u64 left = 200ull * kMixRate - spu;
-    const int n = (int)std::min<u64>((u64)(samples - i), (left + 47999) / 48000);
+    // (AI-assisted) left <= 200 * kMixRate fits 32 bits: a 32-bit divide by a constant is a
+    // multiply, the 64-bit one a libgcc call (the ARM11 has no divide instruction)
+    const u32 left = (u32)(200ull * kMixRate - spu);
+    const int n = (int)std::min<u32>((u32)(samples - i), (left + 47999u) / 48000u);
     mSynth.Tick(stream + i, n, kTickRatio);
     spu += (u64)n * 48000;
     i += n;

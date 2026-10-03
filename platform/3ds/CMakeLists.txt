@@ -52,6 +52,9 @@ add_compile_options(
   -ffunction-sections -fdata-sections -mword-relocations
   -Wno-psabi
   -fno-strict-aliasing
+  # (AI-assisted) as for the GOAL modules: without it every sqrtf is VSQRT + VCMP + VMRS (which
+  # waits for the VFP pipeline to drain) + a branch to the libm call that sets errno
+  -fno-math-errno
   $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>
 )
 
@@ -233,7 +236,10 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/ctr_renderer.cmake)
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmodules.cmake)
 
-add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp ${OG3DS_REGISTRY_OBJ})
+# (AI-assisted) ctr_mem.S (memcpy/memmove/memset) and ctr_clock.cpp (steady_clock::now) are
+# objects of gk itself, not archive members, so they replace the libc.a / libstdc++.a versions
+add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp ${OG3DS_REGISTRY_OBJ}
+  ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem.S ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_clock.cpp)
 target_link_libraries(gk
   -Wl,--start-group
   og3ds_kernel og3ds_runtime og3ds_sound og3ds_common og3ds_fmt og3ds_libco og3ds_port

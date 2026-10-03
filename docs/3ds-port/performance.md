@@ -121,3 +121,14 @@ binds, command buffer KB and the texture pools in VRAM.
 Not tried yet, needs hardware to check: the PICA's own fog unit (a depth LUT) instead of the fog
 ramp texture on the level's second texture stage (one texture fetch less per pixel, and fog on
 merc too).
+
+### C library (all threads)
+
+- memcpy / memmove / memset (and the `__aeabi_` entry points): `platform/3ds/port/ctr_mem.S`
+  replaces newlib's generic C versions (no LDM/STM, a byte loop for any misaligned copy). 8-register
+  LDM/STM with PLD, a shift-merge path for misaligned sources, an LDM/STM path for copies under
+  64 B. Test: `platform/3ds/tests/memtest/build.sh`, run the 3dsx in a private emulator.
+- `-fno-math-errno` for all 3DS code (it was on the GOAL modules only): sqrtf is one VSQRT.
+- `std::chrono::steady_clock::now()` (`platform/3ds/port/ctr_clock.cpp`): the system tick to ns
+  with a multiply, not libctru's clock_gettime (two 64-bit divisions in libgcc; the ARM11 has no
+  divide instruction).
