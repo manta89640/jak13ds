@@ -226,11 +226,47 @@ static int g_color16 = 0;
 static int g_steady_pacing;
 static int pres_init(void);
 
+/* (AI-assisted) config.ini early_depth = block32: the render target in 32x32 block mode
+ * (GPUREG_FRAMEBUFFER_BLOCK32), which the early depth test seems to need (OpenLara's 3DS backend
+ * left it off for this: "block32 256x416 input -> 240x400 output"). Block mode needs dimensions
+ * that are multiples of 32: 256x416, the picture in columns 0..239 and rows 8..407 (the viewport
+ * is 8 rows in: the GPU stores y flipped, so the same rows either way). The display transfer
+ * untiles 32x32 blocks (flag bit 16) but only to an output that is a multiple of 32 too (3dbrew,
+ * GPU/External_Registers), so it goes to s_b32_scratch (256x416 linear), and a texture copy that
+ * skips the padding crops it into the 240x400 screen buffer. Needs steady pacing (our own screen
+ * buffers); without it, or without the memory, the target stays 240x400 and early depth off. */
+#define B32_W 256
+#define B32_H 416
+#define B32_ROW0 8
+#define GX_TRANSFER_BLOCK32 (1u << 16)
+static int g_block32 = 0;
+static int g_block32_failed = 0;
+static uint8_t* s_b32_scratch; /* 256x416 at 32 bits (16 with color16) */
+/* (AI-assisted) config.ini depth16: a 16-bit depth buffer (no stencil; nothing uses stencil) */
+static int g_depth16 = 0;
+
+/* render buffer rows the picture starts at (the viewport's y) */
+static int top_row0(void) {
+  return g_block32 ? B32_ROW0 : 0;
+}
+
+/* the viewport: the whole render target, or with block32 the 240x400 inside the padding */
+static void set_top_viewport(void) {
+  if (g_block32) {
+    C3D_SetViewport(0, B32_ROW0, 240, 400);
+  } else {
+    C3D_SetViewport(0, 0, g.top->frameBuf.width, g.top->frameBuf.height);
+  }
+}
+
 /* The previous frame is still in the render target's color buffer (VRAM, tiled RGBA8 or RGB565,
  * 240x400 rotated) at the start of the next frame, after the GPU finished it. Write it as a BMP. */
 static void write_screenshot(void) {
   const int fw = 240, fh = 400;  /* render buffer dimensions */
   const uint8_t* src = (const uint8_t*)g.top->frameBuf.colorBuf;
+  if (g_block32) {
+    return; /* (AI-assisted) the 32x32 block layout isn't decoded here */
+  }
   FILE* f = fopen(g.screenshot_path, "wb");
   if (!f) {
     return;
@@ -568,6 +604,54 @@ static void setup_projection(void) {
   g.gl_to_pica.r[3].w = 1.0f;
 }
 
+/* (AI-assisted) VRAM bank of a VRAM address: 0 = A (0x18000000..0x182FFFFF), 1 = B */
+static int vram_bank(const void* p) {
+  return osConvertVirtToPhys(p) >= 0x18300000u;
+}
+
+/* The top screen's render target: 240x400 (or block32's 256x416), RGBA8 / RGB565 color, D24S8
+ * (or depth16's D16) depth. citro3d puts the depth buffer in the other VRAM bank when it fits,
+ * else silently in the same one: then color and depth traffic share one bank. (AI-assisted) */
+static C3D_RenderTarget* create_top_target(void) {
+  const int w = g_block32 ? B32_W : 240, h = g_block32 ? B32_H : 400;
+  C3D_RenderTarget* t = C3D_RenderTargetCreate(w, h, g_color16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
+                                               g_depth16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
+  if (!t) {
+    return NULL;
+  }
+  C3D_FrameBuf* fb = &t->frameBuf;
+  if (g_block32) {
+    C3D_FrameBufAttrib(fb, (u16)w, (u16)h, true);
+  }
+  if (fb->depthBuf && vram_bank(fb->colorBuf) == vram_bank(fb->depthBuf)) {
+    void* d = vramAllocAt(C3D_CalcDepthBufSize(w, h, fb->depthFmt),
+                          vram_bank(fb->colorBuf) ? VRAM_ALLOC_A : VRAM_ALLOC_B);
+    if (d) {
+      vramFree(fb->depthBuf);
+      C3D_FrameBufDepth(fb, d, fb->depthFmt);
+    }
+  }
+  return t;
+}
+
+int ctr_gpu_describe_target(char* out, int size) {
+  if (!g.ready || size <= 0) {
+    return 0;
+  }
+  const C3D_FrameBuf* fb = &g.top->frameBuf;
+  const u32 c = osConvertVirtToPhys(fb->colorBuf), d = osConvertVirtToPhys(fb->depthBuf);
+  return snprintf(out, (size_t)size,
+                  "%dx%d%s, color %s at 0x%08lx (VRAM %c), depth %s at 0x%08lx (VRAM %c)%s%s",
+                  fb->width, fb->height, fb->block32 ? " block32" : "",
+                  g_color16 ? "RGB565" : "RGBA8", (unsigned long)c, vram_bank(fb->colorBuf) ? 'B' : 'A',
+                  fb->depthFmt == GPU_RB_DEPTH16 ? "D16" : "D24S8", (unsigned long)d,
+                  vram_bank(fb->depthBuf) ? 'B' : 'A',
+                  vram_bank(fb->colorBuf) == vram_bank(fb->depthBuf) ? " SAME BANK" : "",
+                  g_block32_failed ? "; early_depth = block32 FAILED (needs frame_pacing = steady "
+                                     "and 0.4 MB linear memory): 240x400, early depth off"
+                                   : "");
+}
+
 int ctr_gpu_init(void) {
   if (g.ready) {
     return 0;
@@ -581,13 +665,30 @@ int ctr_gpu_init(void) {
      * then adds fully); no dithering (gradients band slightly). */
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
   }
-  g.top = C3D_RenderTargetCreate(240, 400, g_color16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
-                                 GPU_RB_DEPTH24_STENCIL8);
+  g.top = create_top_target();
   if (!g.top) {
     return -2;
   }
   /* (AI-assisted) with steady pacing the frames go to our own screen buffers (pres_queue_frame) */
-  if (!g_steady_pacing || !pres_init()) {
+  const int pres_on = g_steady_pacing && pres_init();
+  if (g_block32) {
+    if (pres_on) {
+      ctr_linear_lock();
+      s_b32_scratch = (uint8_t*)linearAlloc(B32_W * B32_H * (g_color16 ? 2 : 4));
+      ctr_linear_unlock();
+    }
+    if (!s_b32_scratch) {
+      /* no block32 without our own screen buffers: the usual 240x400 target, early depth off */
+      C3D_RenderTargetDelete(g.top);
+      g_block32 = 0;
+      g_block32_failed = 1;
+      g.top = create_top_target();
+      if (!g.top) {
+        return -2;
+      }
+    }
+  }
+  if (!pres_on) {
     C3D_RenderTargetSetOutput(g.top, GFX_TOP, GFX_LEFT,
                               g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
   }
@@ -756,6 +857,12 @@ void ctr_gpu_exit(void) {
   shaderProgramFree(&g.clip_program);
   DVLB_Free(g.clip_dvlb);
   C3D_RenderTargetDelete(g.top);
+  if (s_b32_scratch) {
+    ctr_linear_lock();
+    linearFree(s_b32_scratch);
+    ctr_linear_unlock();
+    s_b32_scratch = NULL;
+  }
   C3D_Fini();
   ctr_port_set_gpu_active(0);
   g.ready = 0;
@@ -1062,9 +1169,22 @@ static void pres_queue_frame(void) {
   s_pres.buf_state[b] = 1;
   s_pres.buf_wait_ms += (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0);
   C3D_FrameSplit(GX_CMDLIST_FLUSH); /* the draws first */
-  GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400), (u32*)s_pres.buf[b],
-                     GX_BUFFER_DIM(240, 400),
-                     g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
+  if (g_block32) {
+    /* (AI-assisted) untile the 256x416 blocks into the scratch buffer, then copy rows 8..407,
+     * 240 pixels of each 256 (in 16 byte units: 720 + 48 bytes in RGB8, 480 + 32 in RGB565) */
+    const u32 bpp = g_color16 ? 2 : 3;
+    GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(B32_W, B32_H),
+                       (u32*)s_b32_scratch, GX_BUFFER_DIM(B32_W, B32_H),
+                       (g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS) |
+                           GX_TRANSFER_BLOCK32);
+    GX_TextureCopy((u32*)(s_b32_scratch + B32_ROW0 * B32_W * bpp),
+                   GX_BUFFER_DIM(240 * bpp / 16, (B32_W - 240) * bpp / 16), (u32*)s_pres.buf[b],
+                   GX_BUFFER_DIM(240 * bpp / 16, 0), 240 * 400 * bpp, 8 /* raw copy */);
+  } else {
+    GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400),
+                       (u32*)s_pres.buf[b], GX_BUFFER_DIM(240, 400),
+                       g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
+  }
   /* the fence: a 16 byte texture copy of this frame's number, after the transfer. Not a memory
    * fill: on hardware that unit only fills VRAM, and a fill of main memory never finished (the
    * GPU queue stalled: black top screen, frozen game, sound still playing). Azahar fills any
@@ -1128,6 +1248,20 @@ static void frame_state_reset(void) {
   }
   /* (AI-assisted) the early depth buffer starts as "far" like the depth buffer (cleared to 0;
    * larger = closer). citro3d clears it only after frames that drew; the first frame needs it. */
+  if (g_block32) {
+    /* (AI-assisted) citro3d binds the render target at the first draw, after this clear: set the
+     * block mode and the target's place and size first (as C3Di_FrameBufBind), so the early depth
+     * data is cleared for this target from the very first frame on */
+    const C3D_FrameBuf* fb = &g.top->frameBuf;
+    u32 param[3];
+    param[0] = osConvertVirtToPhys(fb->depthBuf) >> 3;
+    param[1] = osConvertVirtToPhys(fb->colorBuf) >> 3;
+    param[2] = 0x01000000 | (((u32)(fb->height - 1) & 0xFFF) << 12) | (fb->width & 0xFFF);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    GPUCMD_AddIncrementalWrites(GPUREG_DEPTHBUFFER_LOC, param, 3);
+    GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_BLOCK32, 1);
+  }
   GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, 0);
   GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
   C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
@@ -1169,13 +1303,15 @@ static void pipeline_frame_begin(u32 clear) {
   C3D_FrameBuf* fb = &g.top->frameBuf;
   u32* color = (u32*)fb->colorBuf;
   u32* depth = (u32*)fb->depthBuf;
-  const u32 px = (u32)fb->width * fb->height; /* D24S8: 4 bytes; color 4 (RGBA8) or 2 (RGB565) */
+  /* D24S8: 4 bytes (D16: 2); color 4 (RGBA8) or 2 (RGB565) */
+  const u32 px = (u32)fb->width * fb->height;
   u32* color_end = (u32*)((uint8_t*)color + px * (g_color16 ? 2 : 4));
   GX_MemoryFill(color, clear, color_end,
                 GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth, 0,
-                depth + px, GX_FILL_TRIGGER | GX_FILL_32BIT_DEPTH);
+                (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
+                GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
   C3D_SetFrameBuf(fb);
-  C3D_SetViewport(0, 0, fb->width, fb->height);
+  set_top_viewport();
   frame_state_reset();
 }
 
@@ -1214,6 +1350,9 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   }
   C3D_RenderTargetClear(g.top, C3D_CLEAR_ALL, color_fill_value(r, gr, b), 0);
   C3D_FrameDrawOn(g.top);
+  if (g_block32) {
+    set_top_viewport();
+  }
   frame_state_reset();
 }
 
@@ -1940,7 +2079,15 @@ void ctr_gpu_set_color16(int on) {
 }
 
 void ctr_gpu_set_early_depth(int on) {
-  g_early_depth = on ? 1 : 0;
+  /* (AI-assisted) not without the block32 target it was asked for (ctr_gpu_set_framebuffer) */
+  g_early_depth = on && !g_block32_failed ? 1 : 0;
+}
+
+void ctr_gpu_set_framebuffer(int block32, int depth16) {
+  if (!g.ready) {
+    g_block32 = block32 ? 1 : 0; /* the render target is made in ctr_gpu_init */
+    g_depth16 = depth16 ? 1 : 0;
+  }
 }
 
 void ctr_gpu_set_proctex(int on) {
@@ -2710,10 +2857,30 @@ int ctr_gpu_copy_screen(void) {
   /* One GX copy after the draws so far (C3D_SyncTextureCopy splits the command list, which flushes
    * the framebuffer): 50 rows of 8x8 tiles, 30 tiles (7680 bytes; 3840 in RGB565) each in the
    * color buffer, 32 in the texture (a 512 / 256 byte gap). In 16 byte units. */
-  const u32 row = g_color16 ? 3840 : 7680, gap = g_color16 ? 256 : 512;
-  sync_texture_copy((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(row / 16, 0),
-                    (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(row / 16, gap / 16),
-                    row * 50, 8);
+  if (g_block32) {
+    /* (AI-assisted) 32x32 blocks: untiled into the scratch buffer, then tiled again in 8x8 tiles
+     * into the texture (256 wide like the render target: the same rows, see ctr_gpu_screen_uv) */
+    if (s_pipeline) {
+      pipeline_submit();
+    } else {
+      flush_vbuf();
+      C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    }
+    const u32 fmt = g_color16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8;
+    GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(B32_W, B32_H),
+                       (u32*)s_b32_scratch, GX_BUFFER_DIM(B32_W, B32_H),
+                       GX_TRANSFER_IN_FORMAT(fmt) | GX_TRANSFER_OUT_FORMAT(fmt) |
+                           GX_TRANSFER_BLOCK32);
+    GX_DisplayTransfer((u32*)s_b32_scratch, GX_BUFFER_DIM(B32_W, B32_H),
+                       (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(B32_W, B32_H),
+                       GX_TRANSFER_IN_FORMAT(fmt) | GX_TRANSFER_OUT_FORMAT(fmt) |
+                           GX_TRANSFER_OUT_TILED(1));
+  } else {
+    const u32 row = g_color16 ? 3840 : 7680, gap = g_color16 ? 256 : 512;
+    sync_texture_copy((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(row / 16, 0),
+                      (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(row / 16, gap / 16),
+                      row * 50, 8);
+  }
   /* the GPU's texture cache may hold the old texels */
   g.bound_tex = NULL;
   return g.screen_tex;
@@ -2729,7 +2896,7 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
   const float cx = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
   const float cy = y < -1.0f ? -1.0f : (y > 1.0f ? 1.0f : y);
   *s = 0.5f / 256.0f + (cy + 1.0f) * 0.5f * (239.0f / 256.0f);
-  *t = 1.0f - 0.5f / 512.0f - (cx + 1.0f) * 0.5f * (399.0f / 512.0f);
+  *t = 1.0f - (0.5f + (float)top_row0()) / 512.0f - (cx + 1.0f) * 0.5f * (399.0f / 512.0f);
 }
 
 /* ---------------- static meshes ---------------- */
@@ -3227,4 +3394,74 @@ void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, u
     C3D_TexBind(1, &g.fog_tex); /* clears the texture cache: the GPU must not use the old texels */
   }
   g.last_state_valid = 0;
+}
+
+/* ---------------- (AI-assisted) the GPU's own counters (config.ini gpu_profile) ----------------
+ * Read through GSPGPU_ReadHWRegs / WriteHWRegs (offsets from 0x1EB00000: the GPU's external
+ * registers 0x1EF00000 are 0x400000). 3dbrew GPU/External_Registers "Hotspot Profiling": write the
+ * interval length - 1 (high 16 bits) and count (low; 0 = until the result FIFO is read) to 0x68,
+ * 1 to 0x64 to start; the FIFO at 0x6C gives four words of two 16-bit stage counts. GBATEK
+ * "GPU Memory Control/Status Registers": read-only traffic counters 0x70..0xBC. */
+#define HWREG_HOTSPOT_ENABLE 0x400064u
+#define HWREG_HOTSPOT_CONFIG 0x400068u
+#define HWREG_HOTSPOT_FIFO 0x40006Cu
+#define HWREG_TRAFFIC 0x400070u
+static int s_hw_refused;
+static u32 s_hw_traffic0[CTR_GPU_HW_TRAFFIC];
+static int s_hw_frame0;
+static double s_hw_t0;
+
+int ctr_gpu_hwprof_begin(void) {
+  if (s_hw_refused) {
+    return 1;
+  }
+  /* 65536 cycles per sample (0.24 ms at 268 MHz): 0xFFFF samples (the counters' limit) is 16 s */
+  const u32 config = 0xFFFFu << 16, off = 0, on = 1;
+  Result r = GSPGPU_WriteHWRegs(HWREG_HOTSPOT_ENABLE, &off, 4);
+  if (R_SUCCEEDED(r)) {
+    r = GSPGPU_WriteHWRegs(HWREG_HOTSPOT_CONFIG, &config, 4);
+  }
+  if (R_SUCCEEDED(r)) {
+    r = GSPGPU_ReadHWRegs(HWREG_TRAFFIC, s_hw_traffic0, sizeof(s_hw_traffic0));
+  }
+  if (R_SUCCEEDED(r)) {
+    r = GSPGPU_WriteHWRegs(HWREG_HOTSPOT_ENABLE, &on, 4);
+  }
+  if (R_FAILED(r)) {
+    s_hw_refused = 1;
+    return r ? (int)r : -1;
+  }
+  s_hw_frame0 = g.frame_no;
+  s_hw_t0 = ctr_gpu_time_ms();
+  return 0;
+}
+
+int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
+  memset(out, 0, sizeof(*out));
+  if (s_hw_refused) {
+    return 1;
+  }
+  u32 traffic[CTR_GPU_HW_TRAFFIC];
+  Result r = GSPGPU_ReadHWRegs(HWREG_TRAFFIC, traffic, sizeof(traffic));
+  /* the FIFO is one register: four reads of 4 bytes, not one of 16 */
+  for (int i = 0; i < 4 && R_SUCCEEDED(r); i++) {
+    u32 w = 0;
+    r = GSPGPU_ReadHWRegs(HWREG_HOTSPOT_FIFO, &w, 4);
+    out->stage[2 * i] = w & 0xFFFFu;
+    out->stage[2 * i + 1] = w >> 16;
+  }
+  const u32 off = 0;
+  if (R_SUCCEEDED(r)) {
+    r = GSPGPU_WriteHWRegs(HWREG_HOTSPOT_ENABLE, &off, 4);
+  }
+  if (R_FAILED(r)) {
+    s_hw_refused = 1;
+    return r ? (int)r : -1;
+  }
+  for (int i = 0; i < CTR_GPU_HW_TRAFFIC; i++) {
+    out->traffic[i] = traffic[i] - s_hw_traffic0[i];
+  }
+  out->frames = g.frame_no - s_hw_frame0;
+  out->ms = ctr_gpu_time_ms() - s_hw_t0;
+  return 0;
 }
