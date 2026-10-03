@@ -3,6 +3,7 @@
 //--------------------------MIPS2C---------------------
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak1/kscheme.h"
+#include "game/mips2c/jak1_functions/native_functions.h"
 using namespace jak1;
 namespace Mips2C::jak1 {
 ExecutionContext ocean_regs_vfs;
@@ -360,7 +361,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
   cache.draw_large_polygon_ocean = intern_from_c("draw-large-polygon-ocean").c();
-  gLinkedFunctionTable.reg("render-ocean-quad", execute, 256);
+  gLinkedFunctionTable.reg("render-ocean-quad", execute, 256, &native::render_ocean_quad);
 }
 
 } // namespace render_ocean_quad

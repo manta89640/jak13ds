@@ -1,10 +1,12 @@
 /*!
  * @file tests_ocean.cpp
  * (AI-assisted)
- * Tests for ocean_vu0.cpp: ocean-interp-wave, ocean-generate-verts.
+ * Tests for ocean_vu0.cpp: ocean-interp-wave, ocean-generate-verts; ocean.cpp: render-ocean-quad.
  */
 
 #include "fakes.h"
+
+#include "game/mips2c/jak1_functions/native_functions.h"
 
 namespace tests {
 
@@ -113,12 +115,65 @@ void gen_generate_verts(Case& c) {
   }
 }
 
+// (AI-assisted) (render-ocean-quad vertices dma-buf): the registers of init-ocean-far-regs (the
+// camera matrix, clip scale, hvdf offset, fog, giftag), random so that the quads land inside,
+// outside and across the clip planes (x, y = +-w, w = 0 for the far vertices)
+void gen_render_ocean_quad(Case& c) {
+  auto& g = c.g;
+  auto& vf = Mips2C::jak1::ocean_regs_vfs.vfs;
+  auto set = [&](int r, float x, float y, float z, float w) {
+    vf[r].f[0] = x;
+    vf[r].f[1] = y;
+    vf[r].f[2] = z;
+    vf[r].f[3] = w;
+  };
+  const bool easy = g.chance(0.2f);  // a camera that sees the whole quad
+  for (int r = 28; r <= 31; r++) {
+    set(r, g.f_edge(-1.f, 1.f), g.f_edge(-1.f, 1.f), g.f_edge(-1.f, 1.f), g.f_edge(-1.f, 1.f));
+  }
+  if (easy) {
+    set(31, 0.1f, 0.f, 0.f, 0.f);
+    set(30, 0.f, 0.1f, 0.f, 0.f);
+    set(29, 0.f, 0.f, 0.1f, 0.f);
+    set(28, 0.f, 0.f, 0.f, 1.f);
+  }
+  set(13, g.f(-1000.f, 1000.f), g.f(0.f, 100.f), g.f(100.f, 3071.f), g.f(0.f, 1.f));
+  set(14, g.f(0.2f, 2.f), g.f(0.2f, 2.f), g.f(0.2f, 2.f), g.f(0.2f, 2.f));
+  set(25, 2048.f, 2048.f, g.f(0.f, 1e7f), g.f(0.f, 300.f));
+  set(26, g.f(0.2f, 2.f), g.f(0.2f, 2.f), g.f(0.2f, 2.f), g.f(0.2f, 2.f));
+  if (g.chance(0.8f)) {
+    set(24, 0.f, 0.f, 0.f, 1.f);
+  } else {
+    set(24, g.f(-1.f, 1.f), g.f(-1.f, 1.f), g.f(-1.f, 1.f), g.f(-1.f, 1.f));
+  }
+  for (int i = 0; i < 4; i++) {
+    vf[27].du32[i] = g.u32_();
+  }
+  const u32 verts = alloc(4 * 48);
+  for (int v = 0; v < 4; v++) {
+    const float w = g.chance(0.5f) ? (float)(v >= 2) : g.f_edge(-1.f, 1.f);
+    st_vec(verts + 48 * v, g.f_edge(-3.f, 3.f), g.f_edge(-3.f, 3.f), g.f_edge(-3.f, 3.f), w);
+    st_vec(verts + 48 * v + 16, g.f(0.f, 16.f), g.f(0.f, 16.f), 1.f, 1.f);
+    st_vec(verts + 48 * v + 32, (float)g.range(0, 256), (float)g.range(0, 256),
+           (float)g.range(0, 256), (float)g.range(0, 129));
+  }
+  // dma-buffer: base at 4
+  const u32 buf = alloc(32);
+  st<u32>(buf + 4, alloc(16 + 48 * 16));
+  c.args[0] = verts;
+  c.args[1] = buf;
+  for (int i = 2; i < 8; i++) {
+    c.args[i] = g.u32_();
+  }
+}
+
 }  // namespace
 
 void register_ocean_tests() {
   add_test({"ocean-interp-wave", "ocean-interp-wave", 400, [] {}, gen_interp_wave, {}});
   add_test({"ocean-generate-verts", "ocean-generate-verts", 300, setup_generate_verts,
             gen_generate_verts, {}});
+  add_test({"render-ocean-quad", "render-ocean-quad", 3000, [] {}, gen_render_ocean_quad, {}});
 }
 
 }  // namespace tests

@@ -62,6 +62,8 @@ LINK(particle_adgif)
 LINK(sp_launch_particles_var)
 LINK(ocean_interp_wave)
 LINK(ocean_generate_verts)
+LINK(render_ocean_quad)
+LINK(draw_large_polygon_ocean)
 LINK(ray_sphere_intersect)
 LINK(ray_cylinder_intersect)
 LINK(moving_sphere_sphere_intersect)
@@ -150,6 +152,8 @@ int main(int argc, char** argv) {
   sp_launch_particles_var::link();
   ocean_interp_wave::link();
   ocean_generate_verts::link();
+  render_ocean_quad::link();
+  draw_large_polygon_ocean::link();
   ripple_execute_init::link();
   ripple_create_wave_table::link();
   // GOAL functions with a native version: the reference is goalc's C code (goalc_ref/)
@@ -157,6 +161,7 @@ int main(int argc, char** argv) {
   ray_cylinder_intersect::link();
   moving_sphere_sphere_intersect::link();
   closest_pt_in_triangle::link();
+#ifndef GOALC_REF_NONE  // (AI-assisted) (see run.sh: MIPS2C_TEST_NO_GOALC_REF)
   for (const char* name : {"ray-sphere-intersect", "ray-cylinder-intersect",
                            "moving-sphere-sphere-intersect", "closest-pt-in-triangle"}) {
     harness::use_goalc_reference(name);
@@ -167,6 +172,7 @@ int main(int argc, char** argv) {
                            "vector-length", "vector+*!", "vector-segment-distance-point!"}) {
     harness::bind_goalc_reference(name);
   }
+#endif
 
   tests::register_all();
   const int failed = harness::run_tests(opt);

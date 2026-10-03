@@ -6,6 +6,8 @@
  * mips2c code).
  */
 
+#include <algorithm>
+
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
 
@@ -188,10 +190,243 @@ u64 ocean_generate_verts_impl(const NativeArgs& args) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// render-ocean-quad (ocean.cpp), with draw-large-polygon-ocean and the polygon clippers
+// (clip-polygon-against-positive/negative-hyperplane, sky_tng.cpp)
+// ---------------------------------------------------------------------------------------------
+
+//! a polygon vertex as the mips2c code keeps it in the scratchpad: position, stq, color
+struct PolyVert {
+  float p[4], st[4], c[4];
+};
+static_assert(sizeof(PolyVert) == 48);
+
+inline void store_vert(u32 addr, const PolyVert& v) {
+  gstore_q(addr, v.p);
+  gstore_q(addr + 16, v.st);
+  gstore_q(addr + 32, v.c);
+}
+
+/*!
+ * clip-polygon-against-positive-hyperplane (neg false: inside when !(w < x)) or -negative-
+ * (neg true: inside when !(x < -w)), x = component comp of the position: the polygon in[0..n]
+ * (in[n] = in[0]) to out[0..count] (out[count] = out[0]), stored at out_addr like the mips2c
+ * version (48 bytes per vertex). Sutherland-Hodgman: an inside vertex is kept when its edge
+ * is processed; an edge crossing the plane adds prev + (next - prev) * fp / (fp - fn) (outside
+ * to inside) or next + (prev - next) * fn / (fn - fp) (inside to outside), f = a - x with
+ * a = w or -w (the mips2c's sub.s, div.s and vmaddx). *clipped: set when an edge crossed.
+ */
+int clip_polygon(const PolyVert* in, int n, PolyVert* out, u32 out_addr, int comp, bool neg,
+                 bool* clipped) {
+  int count = 0;
+  auto a_of = [neg](const PolyVert& v) {
+    float w = v.p[3];
+    if (neg) {
+      u32 u;
+      memcpy(&u, &w, 4);
+      u ^= 0x80000000u;  // neg.s
+      memcpy(&w, &u, 4);
+    }
+    return w;
+  };
+  auto outside = [neg](float a, float x) { return neg ? x < a : a < x; };
+  auto emit = [&](const PolyVert& v) {
+    out[count] = v;
+    store_vert(out_addr + 48 * count, v);
+    count++;
+  };
+  // from + (to - from) * t, the three quadwords
+  auto lerp = [&](const PolyVert& from, const PolyVert& to, float t) {
+    PolyVert r;
+    for (int i = 0; i < 4; i++) {
+      const float d = to.p[i] - from.p[i];
+      const float acc = from.p[i] * 1.f;  // (vmulaw, then vmaddx: one expression)
+      r.p[i] = acc + d * t;
+    }
+    for (int i = 0; i < 4; i++) {
+      const float d = to.st[i] - from.st[i];
+      const float acc = from.st[i] * 1.f;  // (vmulaw, then vmaddx: one expression)
+      r.st[i] = acc + d * t;
+    }
+    for (int i = 0; i < 4; i++) {
+      const float d = to.c[i] - from.c[i];
+      const float acc = from.c[i] * 1.f;  // (vmulaw, then vmaddx: one expression)
+      r.c[i] = acc + d * t;
+    }
+    return r;
+  };
+  const PolyVert* prev = &in[0];
+  float pa = a_of(*prev), px = prev->p[comp];
+  bool prev_out = outside(pa, px);
+  for (int e = 1; e <= n; e++) {
+    const PolyVert* next = &in[e];
+    const float na = a_of(*next), nx = next->p[comp];
+    const bool next_out = outside(na, nx);
+    if (!prev_out) {
+      emit(*prev);
+      if (next_out) {
+        const float fp = pa - px, fn = na - nx;
+        const float den = fn - fp;
+        emit(lerp(*next, *prev, fn / den));
+        *clipped = true;
+      }
+    } else if (!next_out) {
+      const float fp = pa - px, fn = na - nx;
+      const float den = fp - fn;
+      emit(lerp(*prev, *next, fp / den));
+      *clipped = true;
+    }
+    prev = next;
+    pa = na;
+    px = nx;
+    prev_out = next_out;
+  }
+  // the first vertex again at the end (when nothing is left: its slot onto itself)
+  if (count > 0) {
+    out[count] = out[0];
+    store_vert(out_addr + 48 * count, out[0]);
+  }
+  return count;
+}
+
+/*!
+ * (render-ocean-quad vertices dma-buf): one far ocean quad (4 ocean-vertex: position, stq,
+ * color), transformed by the camera matrix of init-ocean-far-regs (vf28..vf31, kept in
+ * ocean_regs_vfs), clipped in the scratchpad against x and y = +-w of the clip scaled position
+ * (vf14), then as a GIF packet (vf27 with nloop = vertices) of ST, RGBAQ, XYZF2: the GS
+ * position (* Q + vf25, z >= 0, the fog clamped to vf13.y..z), Q = vf13.x / w (not clipped:
+ * the original positions) or 1 / w of the clip scaled one times vf26 (clipped; stq + vf24).
+ * #t when something is drawn.
+ */
+u64 render_ocean_quad_impl(const NativeArgs& args) {
+  static const u32 spad_sym = sym_addr("*fake-scratchpad-data*");
+  const auto& vf = ocean_regs_vfs.vfs;
+  const u32 src = (u32)args.a[0];
+  const u32 dma = (u32)args.a[1];
+  const u32 spad = gload<u32>(spad_sym);
+  const u32 t4 = spad | 12288, t5 = spad | 14336;
+
+  // the 4 positions transformed (vf15..vf18), the polygon of clip scaled ones (* vf14)
+  float m[4][4], k14[4];
+  for (int i = 0; i < 4; i++) {
+    m[0][i] = vf[31].f[i];
+    m[1][i] = vf[30].f[i];
+    m[2][i] = vf[29].f[i];
+    m[3][i] = vf[28].f[i];
+    k14[i] = vf[14].f[i];
+  }
+  float pos[4][4];
+  PolyVert poly_a[16], poly_b[16];
+  for (int v = 0; v < 4; v++) {
+    float p[4];
+    gload_q(p, src + 48 * v);
+    for (int i = 0; i < 4; i++) {
+      float acc = m[0][i] * p[0];
+      acc += m[1][i] * p[1];
+      acc += m[2][i] * p[2];
+      pos[v][i] = acc + m[3][i] * p[3];
+    }
+    PolyVert& q = poly_a[v];
+    for (int i = 0; i < 4; i++) {
+      q.p[i] = pos[v][i] * k14[i];
+    }
+    gload_q(q.st, src + 48 * v + 16);
+    gload_q(q.c, src + 48 * v + 32);
+  }
+  poly_a[4] = poly_a[0];
+  // (the mips2c stores: stq and colors, then the positions)
+  for (int v = 0; v < 5; v++) {
+    gstore_q(t4 + 48 * v + 16, poly_a[v].st);
+    gstore_q(t4 + 48 * v + 32, poly_a[v].c);
+  }
+  for (int v : {0, 4, 1, 2, 3}) {
+    gstore_q(t4 + 48 * v, poly_a[v].p);
+  }
+
+  // draw-large-polygon-ocean
+  bool clipped = false;
+  int n = clip_polygon(poly_a, 4, poly_b, t5, 0, false, &clipped);
+  if (!n) {
+    return args.st;
+  }
+  n = clip_polygon(poly_b, n, poly_a, t4, 1, false, &clipped);
+  if (!n) {
+    return args.st;
+  }
+  n = clip_polygon(poly_a, n, poly_b, t5, 0, true, &clipped);
+  if (!n) {
+    return args.st;
+  }
+  n = clip_polygon(poly_b, n, poly_a, t4, 1, true, &clipped);
+  if (!n) {
+    return args.st;
+  }
+
+  u32 out = gload<u32>(dma + 4);
+  gstore_q(out, vf[27].f);
+  gstore<u32>(out, (u32)n);
+  out += 16;
+  const float fog_lo = vf[13].f[1], fog_hi = vf[13].f[2];
+  if (!clipped) {
+    // the original positions again (the 4 vertices and the first at the end)
+    gstore_q(t4, pos[0]);
+    gstore_q(t4 + 192, pos[0]);
+    gstore_q(t4 + 48, pos[1]);
+    gstore_q(t4 + 96, pos[2]);
+    gstore_q(t4 + 144, pos[3]);
+    for (int v = 0; v < 4; v++) {
+      memcpy(poly_a[v].p, pos[v], 16);
+    }
+  }
+  for (int v = 0; v < n; v++) {
+    const PolyVert& q = poly_a[v];
+    float p[4], st[4];
+    s32 col[4];
+    float qq;
+    if (clipped) {
+      qq = 1.f / q.p[3];
+      for (int i = 0; i < 4; i++) {
+        p[i] = q.p[i] * vf[26].f[i];
+        st[i] = q.st[i] + vf[24].f[i];
+      }
+    } else {
+      qq = vf[13].f[0] / q.p[3];
+      for (int i = 0; i < 4; i++) {
+        p[i] = q.p[i];
+        st[i] = q.st[i];
+      }
+    }
+    for (int i = 0; i < 4; i++) {
+      col[i] = (s32)q.c[i];
+    }
+    for (int i = 0; i < 3; i++) {
+      p[i] = p[i] * qq;
+    }
+    for (int i = 0; i < 4; i++) {
+      st[i] = st[i] * qq;
+      p[i] = p[i] + vf[25].f[i];
+    }
+    p[2] = std::max(p[2], 0.f);
+    p[3] = std::min(p[3], fog_hi);
+    p[3] = std::max(p[3], fog_lo);
+    s32 xyzf[4];
+    for (int i = 0; i < 4; i++) {
+      xyzf[i] = (s32)(p[i] * 16.f);
+    }
+    gstore_q(out, st);
+    gstore_q(out + 16, col);
+    gstore_q(out + 32, xyzf);
+    out += 48;
+  }
+  gstore<u32>(dma + 4, out);
+  return args.st + 8;
+}
+
 }  // namespace
 
 const NativeImpl ocean_interp_wave = MIPS2C_NATIVE_IMPL(ocean_interp_wave_impl, 0, 0);
 const NativeImpl ocean_generate_verts =
     MIPS2C_NATIVE_IMPL(ocean_generate_verts_impl, NATIVE_CALLS_GOAL, 0);
+const NativeImpl render_ocean_quad = MIPS2C_NATIVE_IMPL_GOAL(render_ocean_quad_impl, 0);
 
 }  // namespace Mips2C::jak1::native

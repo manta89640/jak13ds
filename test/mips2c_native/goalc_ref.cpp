@@ -39,9 +39,11 @@ void goalc_break(void) {
   throw std::runtime_error("goalc_break");
 }
 
+#ifndef GOALC_REF_NONE
 extern const GoalcRefModule goalc_ref_collide_func;
 extern const GoalcRefModule goalc_ref_geometry;
 extern const GoalcRefModule goalc_ref_vector;
+#endif
 }
 
 // referenced by goalc_context.cpp (the kernel's suspend), never called here
@@ -114,8 +116,15 @@ void load_goalc_references() {
   goalc_mem = g_ee_main_mem;
   goalc_st = kSymTable;
   goalc_pp = kProcess;
-  for (const GoalcRefModule* m :
-       {&goalc_ref_collide_func, &goalc_ref_geometry, &goalc_ref_vector}) {
+#ifdef GOALC_REF_NONE
+  // (AI-assisted) built without the fixtures (run.sh with MIPS2C_TEST_NO_GOALC_REF=1: they are
+  // for another GOALC_ABI_VERSION): the tests against GOAL references fail, the others run
+  const std::initializer_list<const GoalcRefModule*> modules = {};
+#else
+  const std::initializer_list<const GoalcRefModule*> modules = {
+      &goalc_ref_collide_func, &goalc_ref_geometry, &goalc_ref_vector};
+#endif
+  for (const GoalcRefModule* m : modules) {
     const u32 seg = alloc_static(m->seg0_size, 16);
     st_bytes(seg, m->seg0, m->seg0_size);
     m->seg_base[0] = seg;

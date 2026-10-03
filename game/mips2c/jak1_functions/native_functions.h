@@ -9,6 +9,11 @@
 
 #include "game/mips2c/mips2c_native.h"
 
+namespace Mips2C::jak1 {
+//! (AI-assisted) the VU0 registers init-ocean-far-regs sets for render-ocean-quad (ocean.cpp)
+extern ExecutionContext ocean_regs_vfs;
+}  // namespace Mips2C::jak1
+
 namespace Mips2C::jak1::native {
 // native_joint.cpp
 extern const NativeImpl cspace_parented_transformq_joint;
@@ -73,4 +78,5 @@ u64 particle_adgif_impl(const NativeArgs& args);
 // native_ocean.cpp
 extern const NativeImpl ocean_interp_wave;
 extern const NativeImpl ocean_generate_verts;
+extern const NativeImpl render_ocean_quad;  // (AI-assisted)
 }  // namespace Mips2C::jak1::native

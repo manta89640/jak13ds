@@ -37,7 +37,7 @@ done
 
 M2C="$ROOT/game/mips2c/jak1_functions"
 MIPS2C_SRCS=(collide_func collide_cache collide_probe collide_mesh collide_edge_grab joint sparticle
-             sparticle_launcher ocean_vu0 ripple)
+             sparticle_launcher ocean_vu0 ripple ocean sky_tng)
 HARNESS_SRCS=("$HERE"/*.cpp)
 NATIVE_SRCS=("$M2C"/native_*.cpp)
 
@@ -52,6 +52,7 @@ build() {
   local dir="$OUT/$cfg"
   mkdir -p "$dir"
   # rebuild everything when the flags change
+  [[ -n "${MIPS2C_TEST_NO_GOALC_REF:-}" ]] && flags+=(-DGOALC_REF_NONE)
   local want="$cxx ${flags[*]} | ${NATIVE_EXTRA_FLAGS--O3} | ${M2C_EXTRA_FLAGS:-} | ${LINK_EXTRA:-}"
   if [[ "$(cat "$dir/.flags" 2>/dev/null)" != "$want" ]]; then
     rm -f "$dir"/*.o
@@ -88,7 +89,11 @@ build() {
     *clang++) cc="${cxx%clang++}clang" ;;
     *g++) cc="${cxx%g++}gcc" ;;
   esac
-  for src in "$HERE"/goalc_ref/*.c "$ROOT/game/kernel/common/goalc_context.cpp"; do
+  # (AI-assisted) MIPS2C_TEST_NO_GOALC_REF=1: without the fixtures (when they are for another
+  # GOALC_ABI_VERSION and not regenerated yet; the tests against them fail)
+  local ref_srcs=("$HERE"/goalc_ref/*.c)
+  [[ -n "${MIPS2C_TEST_NO_GOALC_REF:-}" ]] && ref_srcs=()
+  for src in ${ref_srcs[@]+"${ref_srcs[@]}"} "$ROOT/game/kernel/common/goalc_context.cpp"; do
     local obj="$dir/ref_$(basename "${src%.*}").o"
     objs+=("$obj")
     if [[ ! -f "$obj" || "$src" -nt "$obj" || "$HERE/goalc_ref/goalc_ref.h" -nt "$obj" ||
