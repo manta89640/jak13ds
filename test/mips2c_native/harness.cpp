@@ -152,7 +152,10 @@ u64 run_mips2c(Mips2cEntry& e, const u64* args, u64 pp) {
   }
   u64 v0;
   try {
-    v0 = e.exec(&ctx);
+    // (AI-assisted) v0 from the context, like C mode's adapter (mips2c_goalc_adapter: the 3DS),
+    // not the execute function's return value: one that only returns it gives 0 or garbage there
+    e.exec(&ctx);
+    v0 = ctx.gprs[Mips2C::v0].du64[0];
   } catch (...) {
     g_sp = sp;
     throw;
@@ -536,7 +539,11 @@ int run_tests(const RunOptions& opt) {
   // setup of every selected test, then a snapshot of the clean state
   std::vector<Test*> selected;
   for (auto& t : tests()) {
-    if (opt.filter.empty() || t.name.find(opt.filter) != std::string::npos) {
+    // (AI-assisted) "=NAME": only the test named NAME (not its variants, "NAME (...)")
+    const bool match = opt.filter.empty() ||
+                       (opt.filter[0] == '=' ? t.name == opt.filter.substr(1)
+                                             : t.name.find(opt.filter) != std::string::npos);
+    if (match) {
       selected.push_back(&t);
     }
   }
@@ -560,11 +567,41 @@ int run_tests(const RunOptions& opt) {
       // the "native" run is the mips2c version again
       e.native = nullptr;
     }
+    // (AI-assisted) Test::native_callees: during this test, their "mips2c version" is their
+    // registered execute function (the native's as_exec), not their goalc reference
+    struct RefRestore {
+      std::vector<std::pair<Mips2cEntry*, void*>> saved;
+      ~RefRestore() {
+        for (auto& [entry, ref] : saved) {
+          entry->ref = ref;
+        }
+      }
+    } ref_restore;
+    for (const auto& name : t->native_callees) {
+      auto it = g_mips2c.find(name);
+      if (it == g_mips2c.end()) {
+        fprintf(stderr, "harness: function %s is not linked\n", name.c_str());
+        abort();
+      }
+      ref_restore.saved.push_back({&it->second, it->second.ref});
+      it->second.ref = nullptr;
+    }
 
     g_heap_top = kHeap;
     g_current_case = -1;
     if (t->setup) {
-      t->setup();
+      try {
+        t->setup();
+      } catch (const NoGoalcReference& ex) {
+#ifdef GOALC_REF_NONE
+        printf("%-40s  skipped: %s (MIPS2C_TEST_NO_GOALC_REF)\n", t->name.c_str(), ex.what());
+#else
+        printf("%-40s  %s\n", t->name.c_str(), ex.what());
+        total_fail++;
+#endif
+        e.native = saved_native;
+        continue;
+      }
     }
     Snapshot clean, before, after_m;
     take(clean, *t);
@@ -580,6 +617,7 @@ int run_tests(const RunOptions& opt) {
         g_heap_top = kHeap;
         Gen g(name_hash0 ^ (opt.seed * 0x9e3779b9u) ^ (u32)i * 0x85ebca6bu);
         Case c{g};
+        c.index = i;
         try {
           t->gen(c);
         } catch (const AssertFailed&) {
@@ -605,6 +643,7 @@ int run_tests(const RunOptions& opt) {
       g_heap_top = kHeap;
       Gen g(name_hash ^ (opt.seed * 0x9e3779b9u) ^ (u32)i * 0x85ebca6bu);
       Case c{g};
+      c.index = i;
       try {
         t->gen(c);
       } catch (const AssertFailed& ex) {

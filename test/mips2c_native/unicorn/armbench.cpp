@@ -5,7 +5,10 @@
  * case the differential test harness wrote with --dump (GOAL memory, arguments, symbols), built
  * with devkitARM and the 3DS build's flags, run under Unicorn (ARM1176, VFP in the 3DS's mode).
  * It stands in for run.sh arm and bench where qemu-arm and the arm-linux toolchain are missing
- * (macOS). Only the functions whose GOAL callees are faked below can run: shadow-execute.
+ * (macOS). Only the functions whose GOAL callees are faked below or linked here can run:
+ * shadow-execute, moving-sphere-triangle-intersect and collide-do-primitives (their callees are
+ * the functions linked here, called through their stubs like the harness does: the mips2c version
+ * in the mips2c run, through C mode's adapter, the native one in the native run).
  *
  * Memory (armbench.py maps it): the program at 0x100000, the C stack below 0x0e100000, the job at
  * 0x0f000000, GOAL memory at 0x10000000.
@@ -30,7 +33,8 @@ struct Job {
   u64 pp;
   u64 st;
   u32 stack_top;
-  u32 status;  // out: 1 done, 2 assert, 3 unknown GOAL call
+  u32 status;  // out: 1 done, 2 assert, 3 unknown GOAL call, 4 unknown function, 5 too many
+               // stub slots
   u64 v0;      // out
   char function[64];
   struct Sym {
@@ -82,16 +86,16 @@ Ptr<Symbol> intern_from_c(const char* name) {
 }  // namespace jak1
 
 //! the GOAL functions the tests fake (tests_shadow.cpp's)
-u64 goalc_call_goal8(u32 f, const u64* args, u64 pp) {
-  (void)args;
-  (void)pp;
+static bool call_fake(u32 f, u64* v0) {
   if (f == sym_value("flush-cache")) {
-    return 0;
+    *v0 = 0;
+    return true;
   }
   if (f == sym_value("camera-pos")) {
-    return sym_value("*shadow-test-camera*");
+    *v0 = sym_value("*shadow-test-camera*");
+    return true;
   }
-  fail(3);
+  return false;
 }
 
 namespace Mips2C {
@@ -127,11 +131,80 @@ u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller) {
   return goalc_call_goal8(fn, args, caller.pp);
 }
 
-const u32* native_stub_slot(const char*) {
-  static u32 zero = 0;
-  return &zero;
+/*!
+ * (AI-assisted) The harness binds the symbol of a function it calls through its stub to that stub
+ * (bind_mips2c_symbol): natives call such a function directly, as in the game.
+ */
+const u32* native_stub_slot(const char* name) {
+  static const char* names[32];
+  static u32 slots[32];
+  static u32 n = 0;
+  for (u32 i = 0; i < n; i++) {
+    if (!strcmp(names[i], name)) {
+      return &slots[i];
+    }
+  }
+  if (n == 32) {
+    fail(5);
+  }
+  names[n] = name;
+  slots[n] = sym_value(name);
+  return &slots[n++];
 }
+
+namespace {
+// the GOAL stack below the running function (like the harness's g_sp)
+u32 g_sp = 0;
+
+//! the mips2c version, v0 from the context like C mode's adapter (mips2c_goalc_adapter)
+u64 run_mips2c(const Entry& e, const u64* args, u64 pp) {
+  alignas(16) ExecutionContext ctx;
+  memset((void*)&ctx, 0, sizeof(ctx));
+  const int regs[8] = {a0, a1, a2, a3, t0, t1, t2, t3};
+  for (int i = 0; i < 8; i++) {
+    ctx.gprs[regs[i]].du64[0] = args[i];
+  }
+  ctx.gprs[s6].du64[0] = pp;
+  ctx.gprs[s7].du64[0] = JOB->st;
+  const u32 sp_ = g_sp;
+  ctx.gprs[sp].du64[0] = sp_;
+  g_sp -= ((e.stack + 15) & ~15u) + 64;
+  e.exec(&ctx);
+  g_sp = sp_;
+  return ctx.gprs[v0].du64[0];
+}
+
+u64 run_native(const Entry& e, const u64* args, u64 pp) {
+  if (e.native->goal) {
+    // the entry GOAL code calls in C mode (no scratch space)
+    goalc_pp = pp;
+    return e.native->goal(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]);
+  }
+  const u32 stack = g_sp;
+  g_sp -= ((e.native->scratch + 15) & ~15u) + 64;
+  const u64 r = e.native->fn(NativeArgs{args, pp, JOB->st, stack});
+  g_sp = stack;
+  return r;
+}
+}  // namespace
 }  // namespace Mips2C
+
+//! calls of GOAL functions: the fakes, or a linked function through its stub (the value of the
+//! symbol of the same name)
+u64 goalc_call_goal8(u32 f, const u64* args, u64 pp) {
+  u64 v0;
+  if (call_fake(f, &v0)) {
+    return v0;
+  }
+  for (u32 i = 0; i < Mips2C::g_num_entries; i++) {
+    const auto& e = Mips2C::g_entries[i];
+    if (sym_lookup(e.name) != 0x7f00 && sym_value(e.name) == f) {
+      return JOB->version == 1 && e.native ? Mips2C::run_native(e, args, pp)
+                                           : Mips2C::run_mips2c(e, args, pp);
+    }
+  }
+  fail(3);
+}
 
 namespace Mips2C::jak1 {
 #define LINK(ns)      \
@@ -153,6 +226,11 @@ LINK(shadow_add_facing_single_tris)
 LINK(shadow_add_single_edges)
 LINK(shadow_add_double_tris)
 LINK(shadow_add_double_edges)
+LINK(collide_do_primitives)
+LINK(moving_sphere_triangle_intersect)
+LINK(ray_sphere_intersect)
+LINK(ray_cylinder_intersect)
+LINK(moving_sphere_sphere_intersect)
 #undef LINK
 }  // namespace Mips2C::jak1
 
@@ -176,7 +254,15 @@ extern "C" void armbench_main() {
   shadow_add_single_edges::link();
   shadow_add_double_tris::link();
   shadow_add_double_edges::link();
+  // (AI-assisted) the native GOAL collision functions have no other version: their execute
+  // function is the native code (as in the game)
+  collide_do_primitives::link();
+  moving_sphere_triangle_intersect::link();
+  ray_sphere_intersect::link();
+  ray_cylinder_intersect::link();
+  moving_sphere_sphere_intersect::link();
   goalc_st = JOB->st;
+  goalc_pp = JOB->pp;
 
   const Mips2C::Entry* e = nullptr;
   for (u32 i = 0; i < Mips2C::g_num_entries; i++) {
@@ -187,22 +273,9 @@ extern "C" void armbench_main() {
   if (!e) {
     fail(4);
   }
-  if (JOB->version == 0) {
-    alignas(16) static Mips2C::ExecutionContext ctx;
-    memset((void*)&ctx, 0, sizeof(ctx));
-    const int regs[8] = {Mips2C::a0, Mips2C::a1, Mips2C::a2, Mips2C::a3,
-                         Mips2C::t0, Mips2C::t1, Mips2C::t2, Mips2C::t3};
-    for (int i = 0; i < 8; i++) {
-      ctx.gprs[regs[i]].du64[0] = JOB->args[i];
-    }
-    ctx.gprs[Mips2C::s6].du64[0] = JOB->pp;
-    ctx.gprs[Mips2C::s7].du64[0] = JOB->st;
-    ctx.gprs[Mips2C::sp].du64[0] = JOB->stack_top;
-    JOB->v0 = e->exec(&ctx);
-  } else {
-    JOB->v0 =
-        e->native->fn(Mips2C::NativeArgs{JOB->args, JOB->pp, JOB->st, JOB->stack_top});
-  }
+  Mips2C::g_sp = JOB->stack_top;
+  JOB->v0 = JOB->version == 0 ? Mips2C::run_mips2c(*e, JOB->args, JOB->pp)
+                              : Mips2C::run_native(*e, JOB->args, JOB->pp);
   JOB->status = 1;
 }
 

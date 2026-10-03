@@ -186,8 +186,9 @@ bool goalc_reference_at(u32 value, std::string* name, int* arity, void** host) {
 void* goalc_reference(const std::string& name) {
   auto it = g_ref_fns.find(name);
   if (it == g_ref_fns.end()) {
-    fprintf(stderr, "harness: no goalc reference for %s\n", name.c_str());
-    abort();
+    // (AI-assisted) e.g. a fixture left out (MIPS2C_TEST_NO_GOALC_REF): the runner skips a test
+    // whose setup needs it
+    throw NoGoalcReference("no goalc reference for " + name);
   }
   return it->second.host;
 }

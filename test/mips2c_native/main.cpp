@@ -7,6 +7,7 @@
  *                      [--bench mips2c|native] [--fpscr HEX] [--dump DIR]
  *
  * --self runs the mips2c version twice instead of mips2c against native (tests the harness).
+ * --filter =NAME runs only the test named NAME (a plain SUBSTR also selects its variants).
  *
  * (AI-assisted) On an arm64 host, --fpscr HEX sets FPCR the same way (its FZ and DN bits are the
  * FPSCR ones): --fpscr 0x03000000 is the 3DS's VFP mode (run.sh vfp).
