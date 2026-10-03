@@ -672,6 +672,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
                           ctr_settings().depth16 ? 1 : 0);
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_new_shaders(ctr_settings().new_shaders ? 1 : 0);
+  ctr_gpu_set_shader_modes(ctr_settings().shader_basic, ctr_settings().shader_mesh);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
   lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");

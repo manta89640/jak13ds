@@ -46,11 +46,26 @@ extern const uint8_t ctr_basic_old_shbin[];
 extern const size_t ctr_basic_old_shbin_size;
 extern const uint8_t ctr_mesh_old_shbin[];
 extern const size_t ctr_mesh_old_shbin_size;
+extern const uint8_t ctr_mesh_dph_shbin[];
+extern const size_t ctr_mesh_dph_shbin_size;
 extern const uint8_t ctr_skin_old_shbin[];
 extern const size_t ctr_skin_old_shbin_size;
 extern const uint8_t ctr_skin_env_old_shbin[];
 extern const size_t ctr_skin_env_old_shbin_size;
 static int s_new_shaders = 1;
+/* (AI-assisted) per shader overrides (config.ini shader_basic / shader_mesh), -1 = new_shaders.
+ * mesh: 0 Oct 2, 1 new, 2 Oct 2 with the new dph transform (hang bisect) */
+static int s_basic_mode = -1, s_mesh_mode = -1;
+void ctr_gpu_set_shader_modes(int basic, int mesh) {
+  s_basic_mode = basic;
+  s_mesh_mode = mesh;
+}
+static int basic_new(void) {
+  return s_basic_mode < 0 ? s_new_shaders : s_basic_mode;
+}
+static int mesh_mode(void) {
+  return s_mesh_mode < 0 ? s_new_shaders : s_mesh_mode;
+}
 void ctr_gpu_set_new_shaders(int on) {
   s_new_shaders = on;
 }
@@ -841,16 +856,20 @@ int ctr_gpu_init(void) {
   if (!s_new_shaders) {
     printf("[ctr] new_shaders = off: the Oct 2 vertex shaders (basic, mesh, skin, skin_env)\n");
   }
-  g.dvlb = s_new_shaders ? DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size)
+  printf("[ctr] shaders: basic %s, mesh %s, skin %s\n", basic_new() ? "new" : "old",
+         mesh_mode() == 1 ? "new" : (mesh_mode() == 2 ? "old+dph" : "old"), s_new_shaders ? "new" : "old");
+  g.dvlb = basic_new() ? DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size)
                          : DVLB_ParseFile((u32*)ctr_basic_old_shbin, (u32)ctr_basic_old_shbin_size);
   shaderProgramInit(&g.program);
   shaderProgramSetVsh(&g.program, &g.dvlb->DVLE[0]);
   C3D_BindProgram(&g.program);
   g.uloc_projection = shaderInstanceGetUniformLocation(g.program.vertexShader, "projection");
 
-  g.mesh_dvlb = s_new_shaders
+  g.mesh_dvlb = mesh_mode() == 1
                     ? DVLB_ParseFile((u32*)ctr_mesh_shbin, (u32)ctr_mesh_shbin_size)
-                    : DVLB_ParseFile((u32*)ctr_mesh_old_shbin, (u32)ctr_mesh_old_shbin_size);
+                    : (mesh_mode() == 2
+                           ? DVLB_ParseFile((u32*)ctr_mesh_dph_shbin, (u32)ctr_mesh_dph_shbin_size)
+                           : DVLB_ParseFile((u32*)ctr_mesh_old_shbin, (u32)ctr_mesh_old_shbin_size));
   shaderProgramInit(&g.mesh_program);
   shaderProgramSetVsh(&g.mesh_program, &g.mesh_dvlb->DVLE[0]);
   g.uloc_clip = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "clip");
@@ -868,7 +887,7 @@ int ctr_gpu_init(void) {
   g.fog1[3] = 0.0f;
   memcpy(g.mfog0, g.fog0, sizeof(g.mfog0));
   memcpy(g.mfog1, g.fog1, sizeof(g.mfog1));
-  if (!s_new_shaders) {
+  if (mesh_mode() != 1) {
     /* the Oct 2 shader's form: hvdf.w, fog min, fog max, -1/255; w scale, start, 1 / range */
     const float f0[4] = {0.0f, 255.0f, 255.0f, -1.0f / 255.0f}, f1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
     memcpy(g.mfog0, f0, sizeof(f0));
@@ -4566,8 +4585,8 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
 void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
   mesh_fog_uniforms(fog0, fog1, g.fog0, g.fog1);
-  memcpy(g.mfog0, s_new_shaders ? g.fog0 : fog0, sizeof(g.mfog0));
-  memcpy(g.mfog1, s_new_shaders ? g.fog1 : fog1, sizeof(g.mfog1));
+  memcpy(g.mfog0, mesh_mode() == 1 ? g.fog0 : fog0, sizeof(g.mfog0));
+  memcpy(g.mfog1, mesh_mode() == 1 ? g.fog1 : fog1, sizeof(g.mfog1));
   if (g.cur_prog == PROG_MESH) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.mfog0[0], g.mfog0[1], g.mfog0[2], g.mfog0[3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.mfog1[0], g.mfog1[1], g.mfog1[2], g.mfog1[3]);
