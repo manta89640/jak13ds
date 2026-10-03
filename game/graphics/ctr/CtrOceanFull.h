@@ -20,7 +20,7 @@
  *  - ocean-near bucket (after the level, depth tested, alpha blended): the near ocean's waves, the
  *    ocean-near VU program (OceanNear_PS2.cpp).
  * The VU programs' GS packets become one indexed triangle list per bucket, written straight to the
- * frame's vertex memory (ctr_gpu_ocean_reserve / draw, ctr_ocean.v.pica: the GS's S, T, Q
+ * frame's vertex memory (ctr_gpu_ocean_full_reserve / draw, ctr_ocean_full.v.pica: the GS's S, T, Q
  * perspective, the GS fog value). Only the textured pass is drawn: the PS2's env map pass (sky
  * reflection added through the destination alpha) is left out (the wave texture already has the
  * env map's shading).

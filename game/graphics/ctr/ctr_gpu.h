@@ -160,15 +160,15 @@ typedef struct {
   float x, y, z, q;
   float s, t, fog;
   uint8_t r, g, b, a;
-} ctr_ocean_vertex;
+} ctr_ocean_full_vertex;
 /* Room for up to max_verts vertices and max_indices u16 indices (a triangle list) in this frame's
- * vertex memory, written in place (no copy), then drawn with ctr_gpu_ocean_draw: one draw, nothing
+ * vertex memory, written in place (no copy), then drawn with ctr_gpu_ocean_full_draw: one draw, nothing
  * else drawn in between. Returns 0 when there is no room (then nothing is reserved). */
-int ctr_gpu_ocean_reserve(int max_verts, int max_indices, ctr_ocean_vertex** verts,
+int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_vertex** verts,
                           uint16_t** indices);
 /* Draw the first vert_count / index_count of the reservation (0 indices: just release it), with
  * the fog towards (fog_r, fog_g, fog_b) (the GS FOGCOL). */
-void ctr_gpu_ocean_draw(const ctr_draw_state* state, int vert_count, int index_count,
+void ctr_gpu_ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count,
                         uint8_t fog_r, uint8_t fog_g, uint8_t fog_b);
 
 /* ---------------- static meshes (level background, see c3l_format.h) ----------------

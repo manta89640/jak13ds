@@ -507,8 +507,8 @@ PC it runs with `gk --ctr-gfx`.
     renderer's own code: `OceanMid_PS2.cpp` / `OceanNear_PS2.cpp` are compiled a second time for
     `CtrOceanVu.h`'s classes (`OCEAN_VU_FOR_CTR`), whose xgkick hands the GS packets to
     `CtrOceanFull.cpp`. Their textured pass becomes one indexed triangle list per bucket, written
-    in place into the frame's vertex memory (`ctr_gpu_ocean_reserve` / `ctr_gpu_ocean_draw`,
-    `ctr_ocean.v.pica`: the GS's x, y, z, Q, S, T and fog; perspective correct texturing).
+    in place into the frame's vertex memory (`ctr_gpu_ocean_full_reserve` / `ctr_gpu_ocean_full_draw`,
+    `ctr_ocean_full.v.pica`: the GS's x, y, z, Q, S, T and fog; perspective correct texturing).
   - Left out: the env map passes (sky reflection added through the destination alpha).
   - Log: `[ctr] ocean full (<levels>): render thread N ms/frame (texture, far+mid, near)` once
     per set of levels. The game thread's cost is in the `ocean` section (kperf).

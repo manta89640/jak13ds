@@ -52,7 +52,7 @@ void drain(DmaFollower& dma, const CtrRenderState& rs) {
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------
-// GS packets -> ctr_gpu_ocean_draw
+// GS packets -> ctr_gpu_ocean_full_draw
 // ---------------------------------------------------------------------------------------------
 
 /*!
@@ -208,7 +208,7 @@ class CtrOceanBatch {
       return;
     }
     const int first = m_nv;
-    ctr_ocean_vertex* v = m_v + m_nv;
+    ctr_ocean_full_vertex* v = m_v + m_nv;
     u16* idx = m_i + m_ni;
     for (u32 i = 0; i < nloop; i++, v++) {
       const u8* p = data + 48 * i;
@@ -249,7 +249,7 @@ class CtrOceanBatch {
     flush();
     // the next chunk (smaller when the frame's vertex memory is short)
     for (int size = std::max(kChunkVerts, n); size >= n; size /= 4) {
-      if (ctr_gpu_ocean_reserve(size, 3 * size, &m_v, &m_i)) {
+      if (ctr_gpu_ocean_full_reserve(size, 3 * size, &m_v, &m_i)) {
         m_open = true;
         m_max_v = size;
         m_max_i = 3 * size;
@@ -267,7 +267,7 @@ class CtrOceanBatch {
       return;
     }
     m_open = false;
-    ctr_gpu_ocean_draw(&m_state, m_nv, m_ni, m_fog[0], m_fog[1], m_fog[2]);
+    ctr_gpu_ocean_full_draw(&m_state, m_nv, m_ni, m_fog[0], m_fog[1], m_fog[2]);
     if (m_ni >= 3) {
       draws++;
       triangles += m_ni / 3;
@@ -278,7 +278,7 @@ class CtrOceanBatch {
   ctr_draw_state m_state;
   u8 m_fog[3] = {0, 0, 0};
   bool m_open = false, m_failed = false;
-  ctr_ocean_vertex* m_v = nullptr;
+  ctr_ocean_full_vertex* m_v = nullptr;
   u16* m_i = nullptr;
   int m_nv = 0, m_ni = 0, m_max_v = 0, m_max_i = 0;
   u32 m_near_bucket = kTextured;  // CommonOceanRenderer::m_current_bucket (kept between kicks)
