@@ -28,6 +28,7 @@ struct Entry {
   std::vector<std::string> continues;
   std::string wait_sym, wait_state;
   bool exit = false;
+  bool handoff = false;
   bool crash = false;
   bool save = false;
 };
@@ -118,6 +119,8 @@ void load() {
         ss >> e.wait_sym >> e.wait_state;
       } else if (item == "exit") {
         e.exit = true;
+      } else if (item == "handoff") {
+        e.handoff = true;
       } else if (item == "save") {
         e.save = true;
       } else if (item == "crash") {
@@ -226,6 +229,12 @@ PadState next_frame() {
     }
     if (e.crash) {
       ASSERT_MSG(false, fmt::format("pad script crash test at frame {}", frame));
+    }
+    if (e.handoff) {
+      // (AI-assisted) the rest is played with the real controller
+      lg::info("[pad script] frame {}: handoff to the controller", frame);
+      g_script.enabled = false;
+      return PadState();
     }
     if (e.exit) {
       lg::info("[pad script] frame {}: exit", frame);

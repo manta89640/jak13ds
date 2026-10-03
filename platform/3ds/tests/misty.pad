@@ -1,0 +1,8 @@
+# (AI-assisted) from the title screen straight to the misty-start checkpoint, then the real
+# controller plays (handoff). Format: game/sce/pad_script.h
+0 wait *target* target-title-wait
+300 continue misty-start
+301 wait *target* target-continue
+302 wait *target* target-stance
+303 log misty start
+304 handoff

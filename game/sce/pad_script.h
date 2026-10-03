@@ -25,6 +25,7 @@
  *             for example "continue beach-start" (tests of other levels)
  *   save      an autosave, as after a power cell (pad-script-auto-save, 3DS)
  *   exit      stop the runtime
+ *   handoff   stop the script: the real controller plays from here
  *   crash     fail an assert (to test the crash screen)
  * Buttons and sticks not mentioned are released / centered.
  *
