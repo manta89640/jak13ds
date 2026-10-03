@@ -34,6 +34,7 @@
 #include "game/graphics/ctr/CtrOceanBatch.h"
 #include "game/graphics/ctr/CtrOceanFull.h"
 #include "game/graphics/ctr/CtrOceanVu.h"
+#include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -97,6 +98,11 @@ void ctr_gpu_tex_delete(int) {}
 double ctr_gpu_time_ms(void) {
   using namespace std::chrono;
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+// (AI-assisted) config.ini: the defaults, changed in main
+CtrSettings g_settings;
+const CtrSettings& ctr_settings() {
+  return g_settings;
 }
 bool CtrVram::decode_for_cpu(u64, std::vector<u32>* out, int* w, int* h) {
   *out = g_env;
@@ -737,6 +743,10 @@ int transition_test() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // (AI-assisted) as the 3DS draws, but the wave texture every frame and the near ocean's alpha
+  // as the program's (config.ini ocean_texture_rate, ocean_near_alpha): the same as emulated
+  g_settings.ocean_texture_rate = 1;
+  g_settings.ocean_near_alpha = 0.f;
   const int transition_errors = transition_test();
   if (argc < 2) {
     printf("(no dump file: ocean_replay ocean_dump.bin [iterations] replays one)\n%s\n",
@@ -809,7 +819,12 @@ int main(int argc, char** argv) {
 
   const double t_ref = time_frames(ref_ocean, vram, mid, near, iters);
   const double t_nat = time_frames(nat_ocean, vram, mid, near, iters);
-  printf("host ms/frame: reference %.3f, native %.3f\n", t_ref, t_nat);
+  // (AI-assisted) as the 3DS has it by default: the wave texture every 2nd frame
+  g_settings.ocean_texture_rate = 2;
+  CtrOceanFull nat2_ocean;
+  const double t_nat2 = time_frames(nat2_ocean, vram, mid, near, iters);
+  printf("host ms/frame: reference %.3f, native %.3f (wave texture every 2nd frame: %.3f)\n",
+         t_ref, t_nat, t_nat2);
   printf("%s\n", errors ? "FAIL" : "OK");
   return errors ? 1 : 0;
 }

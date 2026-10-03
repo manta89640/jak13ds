@@ -17,6 +17,7 @@
 
 #include "game/graphics/ctr/CtrOceanBatch.h"
 #include "game/graphics/ctr/CtrOceanVu.h"
+#include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -533,7 +534,15 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
 CtrOceanFull::CtrOceanFull()
     : m_mid(std::make_unique<CtrOceanMidVu>()),
       m_near(std::make_unique<CtrOceanNearVu>()),
-      m_batch(std::make_unique<CtrOceanBatch>()) {}
+      m_batch(std::make_unique<CtrOceanBatch>()) {
+  // (AI-assisted) config.ini ocean_texture_rate, ocean_near_alpha (CtrSettings.h)
+  const CtrSettings& s = ctr_settings();
+  m_tex_rate = std::clamp(s.ocean_texture_rate, 1, 8);
+  const int floor = (int)(std::clamp(s.ocean_near_alpha, 0.f, 1.f) * 128.f + 0.5f);
+  m_near->set_alpha_floor(floor);
+  lg::info("[ctr] ocean full: wave texture every {} frame(s), near ocean alpha at least {:.2f}",
+           m_tex_rate, floor / 128.0);
+}
 
 CtrOceanFull::~CtrOceanFull() {
   if (m_tex >= 0) {
@@ -559,7 +568,9 @@ void CtrOceanFull::note_levels(const std::vector<std::string>& levels) {
 
 /*!
  * Per frame: the frame's ms so far into the window's sums; once per level (set of levels), after
- * 150 frames with the ocean, one log line with the averages.
+ * 150 frames with the ocean, one log line with the averages. (AI-assisted) Whenever parts of the
+ * ocean weren't drawn (unexpected DMA, no vertex memory, refused transition pieces): a warning
+ * with the counts since the last one, at most every 300 frames.
  */
 void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
   if (rs.frame_idx == m_stat_frame) {
@@ -568,27 +579,51 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
   m_max_frame_ms = std::max(m_max_frame_ms, m_cur_frame_ms);
   m_cur_frame_ms = 0;
   m_stat_frame = rs.frame_idx;
+  if ((m_failed_unlogged || m_batch->dropped_unlogged || m_batch->rejected_unlogged) &&
+      (m_warn_frame == ~0ull || rs.frame_idx - m_warn_frame >= 300)) {
+    m_warn_frame = rs.frame_idx;
+    lg::warn("[ctr] ocean full ({}): parts not drawn since the last warning: {} buckets with "
+             "unexpected DMA, {} out of vertex memory, {} transition pieces refused",
+             g_levels, m_failed_unlogged, m_batch->dropped_unlogged, m_batch->rejected_unlogged);
+    m_failed_unlogged = m_batch->dropped_unlogged = m_batch->rejected_unlogged = 0;
+  }
   const u32 gen = g_levels_gen.load();
   if (gen != m_window_gen) {
     m_window_gen = gen;
-    m_frames = m_mid_runs = m_near_runs = m_failed = 0;
+    m_frames = m_mid_runs = m_near_runs = m_failed = m_tex_updates = 0;
     m_tex_ms = m_mid_ms = m_near_ms = m_max_frame_ms = 0;
     m_batch->vertices = m_batch->triangles = m_batch->draws = m_batch->dropped = 0;
+    m_batch->rejected = 0;
   }
   m_frames++;
   if (m_frames == 150 && m_logged_gen != gen) {
     m_logged_gen = gen;
     const double n = m_frames - 1;  // (this frame hasn't run yet)
     lg::info(
-        "[ctr] ocean full ({}): render thread {:.2f} ms/frame (texture {:.2f}, far+mid {:.2f}, "
-        "near {:.2f}; max {:.2f}), {:.0f} vertices, {:.0f} triangles, {:.1f} draws per frame; "
-        "mid in {:.0f}%, near in {:.0f}% of frames{}{}",
-        g_levels, (m_tex_ms + m_mid_ms + m_near_ms) / n, m_tex_ms / n, m_mid_ms / n,
-        m_near_ms / n, m_max_frame_ms, m_batch->vertices / n, m_batch->triangles / n,
-        m_batch->draws / n, 100.0 * m_mid_runs / n, 100.0 * m_near_runs / n,
+        "[ctr] ocean full ({}): render thread {:.2f} ms/frame (texture {:.2f} in {:.0f}% of "
+        "frames, far+mid {:.2f}, near {:.2f}; max {:.2f}), {:.0f} vertices, {:.0f} triangles, "
+        "{:.1f} draws per frame; mid in {:.0f}%, near in {:.0f}% of frames{}{}{}",
+        g_levels, (m_tex_ms + m_mid_ms + m_near_ms) / n, m_tex_ms / n,
+        100.0 * m_tex_updates / n, m_mid_ms / n, m_near_ms / n, m_max_frame_ms,
+        m_batch->vertices / n, m_batch->triangles / n, m_batch->draws / n,
+        100.0 * m_mid_runs / n, 100.0 * m_near_runs / n,
         m_failed ? fmt::format(", {} unexpected DMA", m_failed) : "",
-        m_batch->dropped ? fmt::format(", {} dropped (no vertex memory)", m_batch->dropped) : "");
+        m_batch->dropped ? fmt::format(", {} dropped (no vertex memory)", m_batch->dropped) : "",
+        m_batch->rejected ? fmt::format(", {} transition pieces refused", m_batch->rejected)
+                          : "");
   }
+}
+
+/*!
+ * (AI-assisted) config.ini ocean_texture_rate: the wave texture is made again every nth frame
+ * (the first time and after a pause right away). Between, the GPU keeps drawing the last one:
+ * ctr_gpu_tex_update writes the copy the frame on the GPU doesn't read (pipeline).
+ */
+bool CtrOceanFull::texture_due(const CtrRenderState& rs) const {
+  if (m_tex < 0 || m_tex_frame == ~0ull || rs.frame_idx < m_tex_frame) {
+    return true;
+  }
+  return rs.frame_idx - m_tex_frame >= (u64)m_tex_rate;
 }
 
 void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
@@ -607,11 +642,15 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
   TextureDma tex;
   if (!read_texture_dma(dma, &tex)) {
     m_failed++;
+    m_failed_unlogged++;
     drain(dma, rs);
     return;
   }
-  update_texture(tex, rs);
-  m_tex_frame = rs.frame_idx;
+  if (texture_due(rs)) {
+    update_texture(tex, rs);
+    m_tex_frame = rs.frame_idx;
+    m_tex_updates++;
+  }
   const double t1 = ctr_gpu_time_ms();
   m_tex_ms += t1 - t0;
 
@@ -636,6 +675,7 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
   m_batch->end();
   if (!ok) {
     m_failed++;
+    m_failed_unlogged++;
   }
   drain(dma, rs);
   const double dt = ctr_gpu_time_ms() - t1;
@@ -674,13 +714,15 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
   TextureDma tex;
   if (!read_texture_dma(dma, &tex)) {
     m_failed++;
+    m_failed_unlogged++;
     drain(dma, rs);
     return;
   }
-  if (m_tex_frame != rs.frame_idx) {
-    // (the mid-and-far bucket made it already: the same vertices and camera)
+  if (texture_due(rs)) {
+    // (not when the mid-and-far bucket made it this frame: the same vertices and camera)
     update_texture(tex, rs);
     m_tex_frame = rs.frame_idx;
+    m_tex_updates++;
   }
   const double t1 = ctr_gpu_time_ms();
   m_tex_ms += t1 - t0;
@@ -701,6 +743,7 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
   m_near_runs++;
   if (!ok) {
     m_failed++;
+    m_failed_unlogged++;
   }
   drain(dma, rs);
   if (!dump_near.empty() && ++g_dump.frames == 200) {

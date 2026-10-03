@@ -103,6 +103,10 @@ CtrSettings load() {
         s.ocean = parse_bool(v);
         s.ocean_mode = CtrSettings::OceanMode::Flat;
       }
+    } else if (key == "ocean_texture_rate") {
+      s.ocean_texture_rate = std::clamp(std::atoi(v.c_str()), 1, 8);  // (AI-assisted)
+    } else if (key == "ocean_near_alpha") {
+      s.ocean_near_alpha = std::clamp(f, 0.f, 1.f);  // (AI-assisted)
     } else if (key == "distort") {
       s.distort = parse_bool(v);
     } else if (key == "envmap") {

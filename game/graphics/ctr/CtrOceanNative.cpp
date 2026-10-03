@@ -348,6 +348,7 @@ void CtrOceanNearVu::native_patch() {
   const float alpha_k = vu[kNearAlpha].w();
   const float col_x = vu[kNearColor].x(), col_z = vu[kNearColor].z();
   const s32 col_max = (s32)vu[kNearColor].y();
+  const s32 alpha_floor = m_alpha_floor;
   const float step = vu[kNearStep].w(), cstep = vu[kNearStep].y();
 
   // call 39's interpolation: colors in[12] (top left), [13] (top right), [14], [15] (bottom)
@@ -393,6 +394,7 @@ void CtrOceanNearVu::native_patch() {
       cg = cg > col_max ? col_max : cg;
       cb = cb > col_max ? col_max : cb;
       ca = ca > col_max ? col_max : ca;
+      ca = ca < alpha_floor ? alpha_floor : ca;  // (AI-assisted) see set_alpha_floor
       put_color(o, cr, cg, cb, ca);
       s += step;
       for (int i = 0; i < 4; i++) {
