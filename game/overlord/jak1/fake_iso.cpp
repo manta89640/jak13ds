@@ -13,6 +13,11 @@
 #include "game/overlord/jak1/isocommon.h"
 #include "game/sound/sndshim.h"
 
+#ifdef __3DS__
+#include "game/overlord/common/compressed_iso_file.h"
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 namespace jak1 {
 IsoFs fake_iso;
 LoadStackEntry* FS_Open(FileRecord* fr, int32_t offset);
@@ -45,12 +50,37 @@ void fake_iso_init_globals() {
   sReadInfo = nullptr;
 }
 
-static FILE* open_fr(FileRecord* fr, s32 thread_to_wake) {
+#ifdef __3DS__
+static bool io_checksum() {
+  static const bool on = ctr_config_bool("io_checksum", 0);
+  return on;
+}
+#endif
+
+static FILE* open_fr(FileRecord* fr, LoadStackEntry* lse, s32 thread_to_wake) {
   const char* path = get_file_path(fr);
   FILE* fp = file_util::open_file(path, "rb");
   if (!fp) {
     lg::error("[OVERLORD] fake iso could not open the file \"{}\"", path);
   }
+#ifdef __3DS__
+  lse->cz = nullptr;
+  lse->io_bytes = 0;
+  lse->io_us = 0;
+  lse->io_reads = 0;
+  lse->crc = 0;
+  lse->crc_next = 0;
+  if (fp && is_file_compressed(fr)) {
+    auto* r = new iso_cz::Reader();
+    if (r->open(fp)) {
+      lse->cz = r;
+    } else {
+      lg::error("[OVERLORD] fake iso: \"{}\" is not a valid compressed file", path);
+      delete r;  // closes fp
+      fp = nullptr;
+    }
+  }
+#endif
 
   iop::iWakeupThread(thread_to_wake);
 
@@ -76,7 +106,7 @@ LoadStackEntry* FS_Open(FileRecord* fr, int32_t offset) {
         selected->location += offset;
       }
 
-      auto future = thpool.submit(open_fr, fr, iop::GetThreadId());
+      auto future = thpool.submit(open_fr, fr, selected, iop::GetThreadId());
       iop::SleepThread();
       selected->fp = future.get();
 
@@ -102,7 +132,7 @@ LoadStackEntry* FS_OpenWad(FileRecord* fr, int32_t offset) {
       selected->fr = fr;
       selected->location = offset;
 
-      auto future = thpool.submit(open_fr, fr, iop::GetThreadId());
+      auto future = thpool.submit(open_fr, fr, selected, iop::GetThreadId());
       iop::SleepThread();
       selected->fp = future.get();
 
@@ -121,12 +151,68 @@ LoadStackEntry* FS_OpenWad(FileRecord* fr, int32_t offset) {
 void FS_Close(LoadStackEntry* fd) {
   lg::debug("[OVERLORD] FS_Close {} @ {}/{}", fd->fr->name, fd->fr->location, fd->location);
 
+#ifdef __3DS__
+  // (AI-assisted) where the load time of a big file goes: card reads vs decoding
+  if (fd->io_bytes >= (1 << 20)) {
+    auto* r = (iso_cz::Reader*)fd->cz;
+    std::string crc;
+    if (io_checksum() && fd->crc_next != ~0u) {
+      crc = fmt::format(", crc32 {:08x} over {} B", fd->crc, fd->crc_next);
+      if (r && fd->crc_next == r->size()) {
+        crc += fd->crc == r->expected_crc32() ? " (ok)" : " (MISMATCH)";
+      }
+    }
+    const double s_total = fd->io_us / 1e6;
+    if (r) {
+      lg::info("[io] {}: {} B in {} reads, {:.0f} ms ({:.1f} MB/s); card {} B in {:.0f} ms "
+               "({:.1f} MB/s), decode {:.0f} ms ({:.1f} MB/s){}",
+               fd->fr->name, fd->io_bytes, fd->io_reads, s_total * 1e3,
+               fd->io_bytes / 1e6 / s_total, r->sd_bytes, r->sd_us / 1e3,
+               r->sd_bytes / (double)std::max<uint64_t>(r->sd_us, 1), r->decode_us / 1e3,
+               r->out_bytes / (double)std::max<uint64_t>(r->decode_us, 1), crc);
+    } else {
+      lg::info("[io] {}: {} B in {} reads, {:.0f} ms ({:.1f} MB/s), uncompressed{}", fd->fr->name,
+               fd->io_bytes, fd->io_reads, s_total * 1e3, fd->io_bytes / 1e6 / s_total, crc);
+    }
+  }
+  if (fd->cz) {
+    delete (iso_cz::Reader*)fd->cz;  // closes fp
+    fd->cz = nullptr;
+    fd->fp = nullptr;
+  }
+#endif
   // close the FD
   fd->fr = nullptr;
-  fclose(fd->fp);
+  if (fd->fp) {
+    fclose(fd->fp);
+  }
   if (fd == sReadInfo) {
     sReadInfo = nullptr;
   }
+}
+
+// returns the number of bytes read (0 past the end of the file)
+static int32_t fs_read_plain(LoadStackEntry* fd, void* buffer, int32_t real_size,
+                             u32 offset_into_file) {
+  fseek(fd->fp, 0, SEEK_END);
+  uint32_t file_len = ftell(fd->fp);
+  rewind(fd->fp);
+
+  if (offset_into_file < file_len) {
+    if (offset_into_file) {
+      fseek(fd->fp, offset_into_file, SEEK_SET);
+    }
+
+    if (offset_into_file + real_size > file_len) {
+      real_size = (file_len - offset_into_file);
+    }
+
+    if (fread(buffer, real_size, 1, fd->fp) != 1) {
+      ASSERT(false);
+    }
+    return real_size;
+  }
+  return 0;
 }
 
 void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) {
@@ -144,23 +230,31 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
   u32 offset_into_file = SECTOR_SIZE * fd->location;
 
   ASSERT(fd->fp);
-  fseek(fd->fp, 0, SEEK_END);
-  uint32_t file_len = ftell(fd->fp);
-  rewind(fd->fp);
-
-  if (offset_into_file < file_len) {
-    if (offset_into_file) {
-      fseek(fd->fp, offset_into_file, SEEK_SET);
-    }
-
-    if (offset_into_file + real_size > file_len) {
-      real_size = (file_len - offset_into_file);
-    }
-
-    if (fread(buffer, real_size, 1, fd->fp) != 1) {
-      ASSERT(false);
+#ifdef __3DS__
+  if (fd->cz) {
+    // (AI-assisted) compressed: decoded here, on the reader thread
+    const int64_t n = ((iso_cz::Reader*)fd->cz)->read(offset_into_file, buffer, real_size);
+    ASSERT_MSG(n >= 0, fmt::format("[OVERLORD] read error in compressed {}", fd->fr->name));
+    real_size = (int32_t)n;
+  } else {
+    real_size = fs_read_plain(fd, buffer, real_size, offset_into_file);
+  }
+#else
+  real_size = fs_read_plain(fd, buffer, real_size, offset_into_file);
+#endif
+#ifdef __3DS__
+  if (io_checksum() && fd->crc_next != ~0u) {
+    // (AI-assisted) debug: the CRC of what the game got, compared with the file's at FS_Close
+    if (real_size == 0) {
+      // past the end (the DGO loader asks for one more page)
+    } else if (offset_into_file == fd->crc_next) {
+      fd->crc = iso_cz::crc32_update(fd->crc, buffer, real_size);
+      fd->crc_next += real_size;
+    } else {
+      fd->crc_next = ~0u;
     }
   }
+#endif
 
   if (len < 0) {
     len = len + 0x7ff;
@@ -175,6 +269,11 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
     if (ms >= 20.0) {
       lg::warn("[io] read {} KB of {} in {:.0f} ms", real_size / 1024, fd->fr->name, ms);
     }
+#ifdef __3DS__
+    fd->io_us += (uint64_t)(ms * 1000.0);
+    fd->io_bytes += real_size;
+    fd->io_reads++;
+#endif
   }
 
   iop::iWakeupThread(thread_to_wake);

@@ -71,6 +71,21 @@ include_directories(
 # ---------------- third party ----------------
 add_library(og3ds_fmt STATIC ${OG_ROOT}/third-party/fmt/src/format.cc ${OG_ROOT}/third-party/fmt/src/os.cc)
 add_library(og3ds_libco STATIC ${OG_ROOT}/third-party/libco/libco.c)
+# (AI-assisted) decoders for the compressed game files (stage_sd.sh --compress): LZ4 and the
+# decompression half of zstd. -O3: they are the inner loops of a level load.
+add_library(og3ds_lz STATIC
+  ${OG_ROOT}/third-party/lz4/lz4.c
+  ${OG_ROOT}/third-party/zstd/lib/common/entropy_common.c
+  ${OG_ROOT}/third-party/zstd/lib/common/error_private.c
+  ${OG_ROOT}/third-party/zstd/lib/common/fse_decompress.c
+  ${OG_ROOT}/third-party/zstd/lib/common/xxhash.c
+  ${OG_ROOT}/third-party/zstd/lib/common/zstd_common.c
+  ${OG_ROOT}/third-party/zstd/lib/decompress/huf_decompress.c
+  ${OG_ROOT}/third-party/zstd/lib/decompress/zstd_ddict.c
+  ${OG_ROOT}/third-party/zstd/lib/decompress/zstd_decompress.c
+  ${OG_ROOT}/third-party/zstd/lib/decompress/zstd_decompress_block.c)
+# (gcc 15: zstd 1.5's xxhash.c mixes U32 (unsigned long here) and unsigned int pointers)
+target_compile_options(og3ds_lz PRIVATE -O3 -Wno-incompatible-pointer-types)
 
 # ---------------- common ----------------
 set(OG3DS_COMMON_SOURCES
@@ -178,6 +193,7 @@ set(OG3DS_RUNTIME_SOURCES
   graphics/display.cpp
   graphics/pipelines/null.cpp
   graphics/sceGraphicsInterface.cpp
+  overlord/common/compressed_iso_file.cpp
   overlord/common/dma.cpp
   overlord/common/fake_iso.cpp
   overlord/common/iso_api.cpp
@@ -242,7 +258,7 @@ add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp ${OG3DS_REGISTRY_OBJ}
   ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem.S ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_clock.cpp)
 target_link_libraries(gk
   -Wl,--start-group
-  og3ds_kernel og3ds_runtime og3ds_sound og3ds_common og3ds_fmt og3ds_libco og3ds_port
+  og3ds_kernel og3ds_runtime og3ds_sound og3ds_common og3ds_fmt og3ds_libco og3ds_lz og3ds_port
   ${OG3DS_GOAL_MODULES_LIB}
   -Wl,--end-group
   citro3d ctru m)

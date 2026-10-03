@@ -21,6 +21,7 @@ listener = off             # on: Wi-Fi REPL (goalc can connect; 1 MB of RAM)
 screenshots = 0            # N: save the top screen every N frames to data/log
 pad_script =               # FILE (relative to sdmc:/3ds/jak1): scripted controller input for tests
 debug_log = off            # on: debug lines in data/log/gk.log (slow: every line is an SD card write)
+io_checksum = off          # on: log the CRC-32 of the bytes the game read from each big file (debug; "(ok)" for checked .ogz files)
 ```
 
 ## Where it goes
