@@ -149,6 +149,14 @@ class CtrOceanBatch {
 
   // statistics
   int vertices = 0, triangles = 0, draws = 0, dropped = 0;
+  // (AI-assisted) transition pieces the native program refused (vertex count out of range), and
+  // both counts since the last warning in the log (CtrOceanFull::frame_stats)
+  int rejected = 0;
+  int dropped_unlogged = 0, rejected_unlogged = 0;
+  void reject() {
+    rejected++;
+    rejected_unlogged++;
+  }
 
  private:
   enum : u32 { kTextured = 0, kAlpha = 1, kEnvMap = 2 };
@@ -263,6 +271,7 @@ class CtrOceanBatch {
     }
     m_failed = true;  // no room this frame: the rest of the bucket isn't drawn
     dropped++;
+    dropped_unlogged++;
     return false;
   }
 
