@@ -38,7 +38,7 @@ _Static_assert(sizeof(v128) == 16, "v128 size");
 
 //! Changes whenever generated code and this header must be rebuilt together (the check is in
 //! every module, and the version is part of the module source, so of its hash).
-#define GOALC_ABI_VERSION 3
+#define GOALC_ABI_VERSION 4
 
 // ---------------------------------------------------------------------------
 // memory. GOAL addresses are 32 bits.
@@ -279,6 +279,18 @@ GC_INLINE u64 gc_sar(u64 a, u64 s) {
 //! float to int32, truncating and saturating like the EE (CVT.W.S) and the ARM64 backend.
 //! NaN gives 0 (the EE has no NaNs, ARM64 gives 0).
 GC_INLINE s32 gc_cvtt(float f) {
+#if defined(__arm__) && defined(__ARM_FP)
+  // (AI-assisted) VFP's round-towards-zero conversion already saturates and gives 0 for NaN.
+  // C leaves out of range conversions undefined, so use the instruction itself (the generic code
+  // below costs three compares, each waiting for the VFP pipeline to drain in VMRS).
+  if (!__builtin_constant_p(f)) {
+    float r;
+    __asm__("vcvt.s32.f32 %0, %1" : "=t"(r) : "t"(f));
+    s32 i;
+    memcpy(&i, &r, 4);
+    return i;
+  }
+#endif
   if (f != f) {
     return 0;
   }
@@ -302,6 +314,96 @@ GC_INLINE float gc_fmin(float a, float b) {
 }
 GC_INLINE float gc_fmax(float a, float b) {
   return a > b ? a : b;
+}
+
+// (AI-assisted) Float compares where one side is a constant (GOAL float constants are emitted as
+// C constants, so the compiler sees them) are done on the bits in integer registers, as the
+// VFP11 manual suggests: VCMP + VMRS stalls until every VFP instruction in flight has finished, and
+// a float loaded from memory can go straight to a core register. Exact for every non-NaN value
+// with flush-to-zero semantics (denormals compare like 0, as on the PS2 and in RunFast mode); NaN
+// doesn't exist on the PS2. Other compares stay float compares.
+enum { GC_FLT, GC_FGT, GC_FLE, GC_FGE, GC_FEQ, GC_FNE };
+//! the integer form handles this constant: zero, or a normal number (not denormal/inf/NaN)
+GC_INLINE int gc_fk(float c) {
+  u32 e = (gc_fbits(c) >> 23) & 0xff;
+  return __builtin_constant_p(c) && (c == 0.0f || (e != 0 && e != 255));
+}
+//! x op c on the bits xb of x and cb of a constant c accepted by gc_fk
+GC_INLINE int gc_fcmp_bits(u32 xb, u32 cb, int op) {
+  if ((cb << 1) == 0) {
+    // +-0: x < 0 iff negative with a non-zero exponent, x > 0 iff positive with one
+    switch (op) {
+      case GC_FLT:
+        return xb > 0x807fffffu;
+      case GC_FGE:
+        return xb <= 0x807fffffu;
+      case GC_FGT:
+        return (s32)xb > 0x7fffff;
+      case GC_FLE:
+        return (s32)xb <= 0x7fffff;
+      case GC_FEQ:
+        return (xb & 0x7f800000u) == 0;
+      default:
+        return (xb & 0x7f800000u) != 0;
+    }
+  }
+  if ((s32)cb > 0) {
+    // positive c: signed integer order (negative x, -0 and denormals are all below c)
+    switch (op) {
+      case GC_FLT:
+        return (s32)xb < (s32)cb;
+      case GC_FGE:
+        return (s32)xb >= (s32)cb;
+      case GC_FGT:
+        return (s32)xb > (s32)cb;
+      case GC_FLE:
+        return (s32)xb <= (s32)cb;
+      case GC_FEQ:
+        return xb == cb;
+      default:
+        return xb != cb;
+    }
+  }
+  // negative c: unsigned order of the bits is the order of the magnitudes, every x with the sign
+  // bit clear (and -0, -denormals) is above c
+  switch (op) {
+    case GC_FLT:
+      return xb > cb;
+    case GC_FGE:
+      return xb <= cb;
+    case GC_FGT:
+      return xb < cb;
+    case GC_FLE:
+      return xb >= cb;
+    case GC_FEQ:
+      return xb == cb;
+    default:
+      return xb != cb;
+  }
+}
+//! a op b (op is a constant)
+GC_INLINE int gc_fcmp(float a, float b, int op) {
+  static const int swapped[6] = {GC_FGT, GC_FLT, GC_FGE, GC_FLE, GC_FEQ, GC_FNE};
+  if (gc_fk(b)) {
+    return gc_fcmp_bits(gc_fbits(a), gc_fbits(b), op);
+  }
+  if (gc_fk(a)) {
+    return gc_fcmp_bits(gc_fbits(b), gc_fbits(a), swapped[op]);
+  }
+  switch (op) {
+    case GC_FLT:
+      return a < b;
+    case GC_FGT:
+      return a > b;
+    case GC_FLE:
+      return a <= b;
+    case GC_FGE:
+      return a >= b;
+    case GC_FEQ:
+      return a == b;
+    default:
+      return a != b;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -753,3 +855,31 @@ GC_INLINE void* gc_fn_(u8* gc_mb, u64 f) {
   return p;
 }
 #define gc_fn(f) gc_fn_(gc_mb, (f))
+
+// (AI-assisted) Guarded direct calls. The ARM11 never predicts branches to a register (BLX reg,
+// 5-7 cycles each), so a call of a global function whose usual target is known calls it directly
+// when the symbol still holds it: `ret = target(args)` if gc_fn(f) == target, else the indirect
+// call. Both calls use the call site's signature, so this is exactly the indirect call whichever
+// branch runs. Targets are found by name at link time:
+// - static builds with GCC (3DS): the module that defines a function in a symbol exports a weak
+//   alias gc_d_<symbol>, other modules reference it weakly (0 when nothing defines it). Calls go
+//   through the alias even inside the module: an alias that can be replaced at link time is never
+//   inlined or analyzed by IPA, which would assume the callee's own parameter list.
+// - clang (PC modules): calls inside the module go to the static function (LLVM doesn't inline or
+//   analyze a call whose type differs from the function's), others are never taken (gc_nofn).
+// - other compilers: never taken.
+#if defined(GOALC_STATIC) && defined(__GNUC__) && !defined(__clang__)
+#define GC_WEAK_TARGETS 1
+#endif
+//! the target of guards that can't match: no stub points to it
+static void gc_nofn(void) __attribute__((unused));
+static void gc_nofn(void) {}
+#define GC_GCALL(ret, target, f, fty, args)                \
+  do {                                                      \
+    void* gc_t_ = gc_fn(f);                                 \
+    if (__builtin_expect(gc_t_ == (void*)(target), 1)) {    \
+      ret = ((fty)(target))args;                            \
+    } else {                                                \
+      ret = ((fty)gc_t_)args;                               \
+    }                                                       \
+  } while (0)

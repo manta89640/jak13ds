@@ -375,6 +375,7 @@ std::vector<u8> Compiler::codegen_object_file(FileEnv* env) {
     auto debug_info = &m_debugger.get_debug_info_for_object(env->name());
     debug_info->clear();
     CodeGenerator gen(env, debug_info, m_version, m_instr_set, m_c_backend);
+    gen.set_c_no_guard_symbols(&m_c_runtime_functions);
     bool ok = true;
     auto result = gen.run(&m_ts);
     if (m_c_backend) {
@@ -404,6 +405,7 @@ bool Compiler::codegen_and_disassemble_object_file(FileEnv* env,
   auto debug_info = &m_debugger.get_debug_info_for_object(env->name());
   debug_info->clear();
   CodeGenerator gen(env, debug_info, m_version, m_instr_set, m_c_backend);
+  gen.set_c_no_guard_symbols(&m_c_runtime_functions);
   *data_out = gen.run(&m_ts);
   if (m_c_backend) {
     build_c_module(env->name(), gen.c_source(), gen.c_hash());

@@ -180,6 +180,7 @@ std::vector<u8> CodeGenerator::run(const TypeSystem* ts) {
  */
 std::vector<u8> CodeGenerator::run_c(const TypeSystem* ts) {
   CModuleEmitter module(m_fe->name(), &m_gen, m_gen.version(), ts);
+  module.no_guard_symbols = m_c_no_guard;
   for (size_t i = 0; i < m_fe->functions().size(); i++) {
     auto* env = m_fe->functions().at(i).get();
     auto f_rec = m_gen.get_existing_function_record(i);

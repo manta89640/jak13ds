@@ -5,6 +5,7 @@
 
 #include "CEmitter.h"
 
+#include <optional>
 #include <stdexcept>
 
 #include "Env.h"
@@ -17,7 +18,7 @@
 
 namespace {
 // must match GOALC_ABI_VERSION in goal_c_ops.h
-constexpr int kCBackendAbiVersion = 3;
+constexpr int kCBackendAbiVersion = 4;
 
 // tokens are resolved after memory layout: \x01 <kind> <index> \x02
 constexpr char TOKEN_START = '\x01';
@@ -224,6 +225,9 @@ std::string CFunctionEmitter::access(const RegVal* rv, bool for_write) {
       break;
   }
 
+  if (for_write) {
+    m_known.erase(rv->ireg().id);
+  }
   return var_expr(rv->ireg().id, want);
 }
 
@@ -275,7 +279,14 @@ void CFunctionEmitter::move(const RegVal* dst, const RegVal* src) {
   auto dc = dst->ireg().reg_class;
   auto sc = src->ireg().reg_class;
   auto s = read(src);
+  std::optional<Known> known;
+  if (auto it = m_known.find(src->ireg().id); it != m_known.end() && dc == sc) {
+    known = it->second;
+  }
   auto d = write(dst);
+  if (known && var(dst).special == Special::NONE && !var(dst).on_stack) {
+    m_known[dst->ireg().id] = *known;
+  }
   if (d == s) {
     m_pp_written = false;  // nothing changes
     return;
@@ -341,6 +352,33 @@ std::string CFunctionEmitter::stack_slot_addr(int slot) {
     error("bad stack slot");
   }
   return fmt::format("gc_goal_ptr(&gc_stack[{}])", slot);
+}
+
+void CFunctionEmitter::set_known_symbol(const RegVal* rv, const std::string& name) {
+  if (var(rv).special == Special::NONE && !var(rv).on_stack &&
+      rv->ireg().reg_class == RegClass::GPR_64) {
+    m_known[rv->ireg().id] = Known{name, -1};
+  }
+}
+
+void CFunctionEmitter::set_known_function(const RegVal* rv, int f_idx) {
+  if (var(rv).special == Special::NONE && !var(rv).on_stack &&
+      rv->ireg().reg_class == RegClass::GPR_64) {
+    m_known[rv->ireg().id] = Known{"", f_idx};
+  }
+}
+
+const std::string* CFunctionEmitter::known_symbol(const RegVal* rv) const {
+  auto it = m_known.find(rv->ireg().id);
+  if (it == m_known.end() || it->second.symbol.empty()) {
+    return nullptr;
+  }
+  return &it->second.symbol;
+}
+
+int CFunctionEmitter::known_function(const RegVal* rv) const {
+  auto it = m_known.find(rv->ireg().id);
+  return it == m_known.end() ? -1 : it->second.function;
 }
 
 std::string CFunctionEmitter::label(int ir_idx) {
@@ -426,6 +464,7 @@ void CFunctionEmitter::emit() {
   for (int i = 0; i < (int)code.size(); i++) {
     if (is_target.at(i)) {
       m_body.push_back(label(i) + ":;");
+      m_known.clear();  // other paths join here
     }
     code.at(i)->do_codegen_c(*this);
   }
@@ -574,6 +613,32 @@ int CModuleEmitter::symbol(const std::string& name) {
   return idx;
 }
 
+int CModuleEmitter::guard_target(const std::string& name) {
+  if (no_guard_symbols && no_guard_symbols->count(name)) {
+    return -1;
+  }
+  auto it = m_guard_idx.find(name);
+  if (it != m_guard_idx.end()) {
+    return it->second;
+  }
+  int idx = m_guard_symbols.size();
+  m_guard_symbols.push_back(name);
+  m_guard_idx[name] = idx;
+  return idx;
+}
+
+namespace {
+//! (AI-assisted) link name of the weak alias for the function stored in a GOAL symbol
+std::string guard_alias_name(const std::string& symbol) {
+  std::string out = "gc_d_";
+  for (char c : symbol) {
+    out.push_back(isalnum((unsigned char)c) ? c : '_');
+  }
+  out += fmt::format("_{:08x}", (u32)c_backend_hash(symbol));
+  return out;
+}
+}  // namespace
+
 std::string CModuleEmitter::static_token(const emitter::StaticRecord& rec) {
   int idx = m_static_tokens.size();
   m_static_tokens.push_back(rec);
@@ -608,6 +673,41 @@ std::string CModuleEmitter::finish(u64* hash_out) {
     out += "  0,\n";
   }
   out += "};\n\n";
+
+  // (AI-assisted) targets of guarded direct calls, see GC_GCALL in goal_c_ops.h
+  if (!m_guard_symbols.empty() || !m_defines.empty()) {
+    out += "#ifdef GC_WEAK_TARGETS\n";
+    for (auto& [name, f_idx] : m_defines) {
+      if (function_text.count(f_idx)) {
+        out += fmt::format("void {}(void) __attribute__((weak, alias(\"gc_f{}\")));\n",
+                           guard_alias_name(name), f_idx);
+      }
+    }
+    for (size_t i = 0; i < m_guard_symbols.size(); i++) {
+      const auto& name = m_guard_symbols[i];
+      auto alias = guard_alias_name(name);
+      if (!m_defines.count(name)) {
+        out += fmt::format("extern void {}(void) __attribute__((weak));\n", alias);
+      }
+      out += fmt::format("#define GC_T{} {}\n", i, alias);
+    }
+    out += "#else\n";
+    for (size_t i = 0; i < m_guard_symbols.size(); i++) {
+      auto it = m_defines.find(m_guard_symbols[i]);
+      if (it != m_defines.end() && function_text.count(it->second)) {
+        out += fmt::format("#ifdef __clang__\n#define GC_T{} gc_f{}\n#else\n#define GC_T{} gc_nofn\n#endif\n", i,
+                           it->second, i);
+      } else {
+        out += fmt::format("#define GC_T{} gc_nofn\n", i);
+      }
+    }
+    out += "#endif\n";
+    // the functions can be used before their definition
+    for (auto& [idx, text] : function_text) {
+      out += text.substr(text.find('\n') + 1, text.find('{') - text.find('\n') - 1) + ";\n";
+    }
+    out += "\n";
+  }
 
   // functions
   for (auto& [idx, text] : function_text) {
