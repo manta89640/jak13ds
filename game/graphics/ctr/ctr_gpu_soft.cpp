@@ -626,6 +626,16 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
   }
 }
 
+// (AI-assisted) triangle k: vertices k, k + 1, k + 2 (the joins between strips have no area)
+void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  g_soft.cur.draws++;
+  for (int k = 0; k + 2 < count; k++) {
+    const ctr_vertex t[3] = {verts[k], verts[k + 1], verts[k + 2]};
+    raster_triangle(*state, t);
+    g_soft.cur.triangles++;
+  }
+}
+
 int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int /*size*/) {
   auto rgba = untile((const uint8_t*)data, w, h, format);
   return ctr_gpu_tex_create(w, h, rgba.data());

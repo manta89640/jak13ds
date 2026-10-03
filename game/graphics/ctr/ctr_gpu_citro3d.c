@@ -3304,7 +3304,8 @@ static void raw_draw_elements(u32 index_pa, u32 count) {
   __C3D_Context.flags |= C3DiF_DrawUsed;
 }
 
-static void raw_draw_arrays(u32 count) {
+/* prim: GPU_TRIANGLES or (AI-assisted) GPU_TRIANGLE_STRIP (ctr_gpu_draw_strip), as C3D_DrawArrays */
+static void raw_draw_arrays(u32 count, u32 prim) {
   u32* p = raw_ptr();
   if (s_raw.vc_dirty) {
     p = raw_vc_clear(p);
@@ -3313,6 +3314,7 @@ static void raw_draw_arrays(u32 count) {
     p[i] = kRawArrays[i];
     p[i + 1] = kRawArrays[i + 1];
   }
+  p[0] = prim;
   p[6] = count;
   raw_end(p + 22);
   s_raw.vs_changed = 0;
@@ -3690,26 +3692,26 @@ static inline int use_raw(const ctr_draw_state* st) {
   return s_raw.on && !(st->flags & CTR_STATE_PROCTEX);
 }
 
-/* the immediate draws (triangle lists from g.vbuf): program, state, then the draw */
+/* the immediate draws (triangle lists or strips from g.vbuf): program, state, then the draw */
 static void draw_immediate(const ctr_draw_state* state, int prog, uint8_t* dst, u32 stride,
-                           int count) {
+                           int count, GPU_Primitive_t prim) {
   use_program(prog);
   if (use_raw(state)) {
     apply_state(state, 0, 1);
     raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
                       RAW_BUF_FLAGS1(stride, 3, 0));
     raw_sync();
-    raw_draw_arrays((u32)count);
+    raw_draw_arrays((u32)count, (u32)prim);
   } else {
     raw_vc_flush();
     apply_state(state, 0, 0);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
     BufInfo_Add(buf, dst, stride, 3, 0x210);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, count);
+    C3D_DrawArrays(prim, 0, count);
   }
   g.cur.draws++;
-  g.cur.triangles += count / 3;
+  g.cur.triangles += prim == GPU_TRIANGLE_STRIP ? count - 2 : count / 3;
 }
 
 /* (AI-assisted) room for bytes more in this frame's vertex buffer; a draw that doesn't fit is
@@ -3736,7 +3738,21 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes); /* flushed once at the end of the frame (flush_vbuf) */
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
-  draw_immediate(state, PROG_BASIC, dst, sizeof(ctr_vertex), count);
+  draw_immediate(state, PROG_BASIC, dst, sizeof(ctr_vertex), count, GPU_TRIANGLES);
+}
+
+void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  if (!g.ready || !g.in_frame || count < 3) {
+    return;
+  }
+  size_t bytes = (size_t)count * sizeof(ctr_vertex);
+  if (!vbuf_room(bytes) || !cmd_room()) {
+    return;
+  }
+  uint8_t* dst = g.vbuf + g.vbuf_used;
+  memcpy(dst, verts, bytes);
+  g.vbuf_used += (bytes + 15) & ~(size_t)15;
+  draw_immediate(state, PROG_BASIC, dst, sizeof(ctr_vertex), count, GPU_TRIANGLE_STRIP);
 }
 
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
@@ -3750,7 +3766,7 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes);
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
-  draw_immediate(state, PROG_CLIP, dst, sizeof(ctr_clip_vertex), count);
+  draw_immediate(state, PROG_CLIP, dst, sizeof(ctr_clip_vertex), count, GPU_TRIANGLES);
 }
 
 void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t const1,
@@ -3967,6 +3983,12 @@ int ctr_gpu_copy_screen(void) {
       release_tex_slot(slot);
       return -1;
     }
+    /* (AI-assisted) cleared and flushed once: the copy never writes columns 240-255 and rows
+     * 400-511 (black there instead of old memory: distort sprites at the screen edges sample
+     * it), and no dirty CPU cache line left from this memory's previous use can be written back
+     * over the GPU's copy later (hardware only: Azahar has no CPU cache) */
+    memset(t->tex.data, 0, t->tex.size);
+    cache_flush_now(t->tex.data, t->tex.size);
     t->pool = -1;
     t->levels = 1;
     ctr_linear_lock();
@@ -3983,6 +4005,7 @@ int ctr_gpu_copy_screen(void) {
     if (s_pipeline) {
       pipeline_submit();
     } else {
+      raw_vc_flush(); /* (AI-assisted) as sync_texture_copy: no post-vertex cache left open */
       flush_vbuf();
       C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }

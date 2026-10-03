@@ -589,8 +589,9 @@ platform/3ds/tools/run_emu.sh --seconds 150
   busiest frame), `[ctr] build ms/frame by renderer`, `[ctr] textures` (with the largest free
   linear block: a level's texture pool needs one piece), and every 300 frames or 5 seconds
   `[ctr] game thread ms/frame` (logic, waiting for the render thread, vsync, texture uploads, bone
-  snapshot) and `[ctr] pacing`. `gpu_counters` logs the GPU's own counters once per level
-  (`[ctr] gpu profile <level>: hw busy % ...`).
+  snapshot) and `[ctr] pacing`. A frame whose sprites took more than 3 ms logs `[ctr] sprite build`
+  (at most every 5 s) with its sprite, texture and VRAM counts; `gpu_counters` logs the GPU's own
+  counters once per level (`[ctr] gpu profile <level>: hw busy % ...`).
 - **Status in Azahar (New 3DS), old numbers from M4 phase 1:** the title screen shows village1 (tfrag + tie) and the PRESS
   START text.
   - About 1250 draws and 103k triangles per frame (the title camera sees nearly the whole level).
