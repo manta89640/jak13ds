@@ -463,7 +463,12 @@
                        (the uint (* (/ (-> *display* time-factor) 5.0) (-> *display* integral-frame-counter)))) ;; og:preserve-this changed for high fps
     (&+! (-> gp-0 base) 4096)
     (set! *ocean-verts* (the-as (inline-array vector) (-> gp-0 base)))
-    (ocean-generate-verts *ocean-verts* *ocean-heights*)
+    ;; 3DS (AI-assisted): the wave texture's vertices only when the ocean is drawn below. They cost
+    ;; ~0.4 ms of the game thread every frame, also in levels without an ocean (Fire Canyon).
+    (#if TARGET_3DS
+      (when (and *ocean-map* (not *ocean-off*) (logtest? *vu1-enable-user* (vu1-renderer-mask ocean)))
+        (ocean-generate-verts *ocean-verts* *ocean-heights*))
+      (ocean-generate-verts *ocean-verts* *ocean-heights*))
     (&+! (-> gp-0 base) #x8000))
   (when *ocean-map*
     (let* ((v1-12 (camera-pos))
