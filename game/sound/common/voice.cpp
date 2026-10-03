@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #if defined(__ARM_FEATURE_SIMD32) || defined(__ARM_FEATURE_SAT) || defined(__ARM_FEATURE_DSP)
 #include <arm_acle.h>
@@ -35,8 +36,9 @@ static constexpr std::array<std::array<s16, 2>, 8> adpcm_coefs = {{
     {0, 0},
 }};
 
-// (AI-assisted) ARM DSP instructions (the 3DS's ARM11 has them). test/snd_voice also builds the
-// code that uses them on the host, with these plain versions (SND_TEST_ARM_DSP), to test it.
+// (AI-assisted) The 3DS's code (SND_ARM_DSP) uses ARM DSP and SIMD instructions; elsewhere the
+// voice is plain C++. test/snd_voice also builds the 3DS's code on the host, with plain versions of
+// the instructions (SND_TEST_ARM_DSP), to test it.
 #if defined(SND_TEST_ARM_DSP)
 #define SND_ARM_DSP 1
 // SMLAWB: c + the top 32 bits of the 48-bit product of a and the bottom half of b
@@ -46,13 +48,42 @@ static inline s32 Smlawb(s32 a, s32 b, s32 c) {
 static inline s32 Ssat16(s32 v) {
   return std::clamp<s32>(v, INT16_MIN, INT16_MAX);
 }
-#elif defined(__ARM_FEATURE_DSP) && defined(__ARM_FEATURE_SAT)
+// QADD16: saturating additions of the bottom and top halves
+static inline u32 Qadd16(u32 a, u32 b) {
+  const s32 lo = std::clamp<s32>((s16)a + (s16)b, INT16_MIN, INT16_MAX);
+  const s32 hi = std::clamp<s32>((s16)(a >> 16) + (s16)(b >> 16), INT16_MIN, INT16_MAX);
+  return (u32)(u16)lo | ((u32)(u16)hi << 16);
+}
+// PKHBT, LSL #1: the bottom half of lo, the top half of hi << 1
+static inline u32 PkhbtLsl1(s32 lo, s32 hi) {
+  return ((u32)lo & 0xFFFFu) | (((u32)hi << 1) & 0xFFFF0000u);
+}
+#elif defined(__ARM_FEATURE_DSP) && defined(__ARM_FEATURE_SAT) && defined(__ARM_FEATURE_SIMD32)
 #define SND_ARM_DSP 1
 static inline s32 Smlawb(s32 a, s32 b, s32 c) {
   return __smlawb(a, b, c);
 }
 static inline s32 Ssat16(s32 v) {
   return __ssat(v, 16);
+}
+static inline u32 Qadd16(u32 a, u32 b) {
+  return (u32)__qadd16((int16x2_t)a, (int16x2_t)b);
+}
+static inline u32 PkhbtLsl1(s32 lo, s32 hi) {
+  u32 d;
+  asm("pkhbt %0, %1, %2, lsl #1" : "=r"(d) : "r"(lo), "r"(hi));  // (GCC doesn't select PKHBT)
+  return d;
+}
+#endif
+
+#if defined(SND_ARM_DSP)
+// (AI-assisted) the halves of a pair of s16 in a u32 (little-endian: the first at the bottom)
+static_assert(std::endian::native == std::endian::little);
+static inline s32 Lo16(u32 v) {
+  return (s16)v;
+}
+static inline s32 Hi16(u32 v) {
+  return (s32)v >> 16;
 }
 #endif
 
@@ -212,19 +243,16 @@ void Voice::KeyOff() {
   // fmt::print("Key Off\n");
 }
 
-// (AI-assisted) out += {left, right} with saturation, as s16Output::operator+= (one QADD16 on the
-// 3DS)
-static inline void MixInto(s16Output& out, s16 left, s16 right) {
-#if defined(__ARM_FEATURE_SIMD32)
-  int16x2_t cur;
+#if defined(SND_ARM_DSP)
+// (AI-assisted) out += {left, right} (the bottom and top halves of `add`) with saturation, as
+// s16Output::operator+= (one QADD16)
+static inline void MixInto(s16Output& out, u32 add) {
+  u32 cur;
   std::memcpy(&cur, &out, sizeof(cur));
-  const int16x2_t add = (int16x2_t)((u32)(u16)left | ((u32)(u16)right << 16));
-  cur = __qadd16(cur, add);
+  cur = Qadd16(cur, add);
   std::memcpy(&out, &cur, sizeof(cur));
-#else
-  out += s16Output{left, right};
-#endif
 }
+#endif
 
 int Voice::RunBlock(s16Output* out, int n, u32 ratio) {
   // (AI-assisted) compiled for each case: the 3DS mixes at fewer samples than SPU ticks (ahead),
@@ -253,6 +281,10 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
     DecodeBlock();  // (AI-assisted) after a key on: the first block
   }
   const s32 vol_l = mVolume.left.GetCurrent(), vol_r = mVolume.right.GetCurrent();
+#if defined(SND_ARM_DSP)
+  // (AI-assisted) the volumes as a pair: left at the bottom
+  const u32 vol = (u32)(u16)vol_l | ((u32)(u16)vol_r << 16);
+#endif
   // the decoded samples and the pitch counter, in registers. (AI-assisted) [wr, end): the samples
   // of the current block written ahead.
   const s16* const buf = mDecodeBuf.Base();
@@ -262,13 +294,13 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
   // interpolation (none when the sample is 0 whatever the voice plays), the pitch counter. False:
   // a loop end without repeat stopped the voice, Run() gives 0 for this sample (the ADSR level is 0
   // now) and the voice isn't run again.
-  auto run_sample = [&](s16Output& o, s32 level, bool silent) SND_ALWAYS_INLINE {
+  auto run_sample = [&](s16Output& o, s16 level, bool silent) SND_ALWAYS_INLINE {
     if (wr - rd < 16) {
       // (AI-assisted) DecodeSamples(), with more calls until 16 samples are buffered when ahead:
       // the samples are there already, only a block's last word does more
       do {
         wr += 4;
-        if (wr == end) {
+        if (wr == end) [[unlikely]] {
           mDecodeBuf.SetReadPos(rd);
           mDecodeBuf.SetWritePos(wr);
           if (!EndBlock()) {
@@ -281,13 +313,32 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
       } while (ahead && wr - rd < 16);
     }
     if (!silent) {
+#if defined(SND_ARM_DSP)
+      // (AI-assisted) the 4 samples and their coefficients loaded as pairs, multiplied half by
+      // half (SMULBB / SMULTT): the same products as one by one
+      u32 p01, p23, c01, c23;
+      std::memcpy(&p01, buf + rd, 4);
+      std::memcpy(&p23, buf + rd + 2, 4);
+      const s16* coef = interp_table[(counter >> 4) & 0xFF].data();
+      std::memcpy(&c01, coef, 4);
+      std::memcpy(&c23, coef + 2, 4);
+      // Run() wraps the sum to s16 after each term: the same as wrapping the total
+      const s32 sum = ((Lo16(p01) * Lo16(c01)) >> 15) + ((Hi16(p01) * Hi16(c01)) >> 15) +
+                      ((Lo16(p23) * Lo16(c23)) >> 15) + ((Hi16(p23) * Hi16(c23)) >> 15);
+      // the s16 sample is the bottom half of `sample` (SMULBB reads it); left and right as a
+      // pair, PKHBT: the bottom halves of left >> 15 and right >> 15
+      const s32 sample = (Lo16(sum) * level) >> 15;
+      MixInto(o, PkhbtLsl1((Lo16(sample) * Lo16(vol)) >> 15, Lo16(sample) * Hi16(vol)));
+#else
       const s16* p = buf + rd;
       const auto& coef = interp_table[(counter >> 4) & 0xFF];
       // Run() wraps the sum to s16 after each term: the same as wrapping the total
       const s32 sum = ((p[0] * coef[0]) >> 15) + ((p[1] * coef[1]) >> 15) +
                       ((p[2] * coef[2]) >> 15) + ((p[3] * coef[3]) >> 15);
       const s16 sample = static_cast<s16>((static_cast<s16>(sum) * level) >> 15);
-      MixInto(o, static_cast<s16>((sample * vol_l) >> 15), static_cast<s16>((sample * vol_r) >> 15));
+      o += s16Output{static_cast<s16>((sample * vol_l) >> 15),
+                     static_cast<s16>((sample * vol_r) >> 15)};
+#endif
     }
     counter += step;
     rd += counter >> 12;
@@ -299,7 +350,7 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
     // more SPU ticks. Output sample k (from 1) ends at tick (mTickFrac + k * ratio) >> 16: the
     // samples that end by then are made with this level and their ticks added in one go
     // (SkipQuiet).
-    const s32 level = mADSR.Level();
+    const s16 level = mADSR.Level();
     const u32 quiet = (u32)mADSR.QuietSamples();
     const bool silent = level == 0 || (vol_l == 0 && vol_r == 0);
     const u32 left = (u32)(n - i);
@@ -315,13 +366,18 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
     u32 done = 0;
     bool stopped = false;
     auto run_span = [&](bool silent_span) SND_ALWAYS_INLINE {
-      for (; done < run; done++) {
-        if (!run_sample(out[i + done], level, silent_span)) {
-          done++;
+      // (AI-assisted) the output pointer is the loop counter
+      s16Output* const first = out + i;
+      s16Output* o = first;
+      s16Output* const last = first + run;
+      for (; o != last; o++) {
+        if (!run_sample(*o, level, silent_span)) {
+          o++;
           stopped = true;
           break;
         }
       }
+      done = (u32)(o - first);
     };
     // (AI-assisted) a loop for each, without the check per sample
     if (silent) {
