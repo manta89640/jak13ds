@@ -15,13 +15,15 @@
  *    mip levels for both buckets, computed once per frame.
  *  - ocean-mid-and-far bucket (before the level, depth test off, depth written like the PC's
  *    flush_mid): the far ocean (GS packets, OceanMidAndFar::handle_ocean_far), then the mid ocean
- *    and the transition to the near ocean: the ocean-mid VU program, emulated by the PC's code
- *    (OceanMid_PS2.cpp, see CtrOceanVu.h).
+ *    and the transition to the near ocean: the ocean-mid VU program's drawing calls as native
+ *    code (CtrOceanNative.cpp; the PC's emulation, OceanMid_PS2.cpp via CtrOceanVu.h, for the
+ *    other calls and the host replay test).
  *  - ocean-near bucket (after the level, depth tested, alpha blended): the near ocean's waves, the
- *    ocean-near VU program (OceanNear_PS2.cpp).
- * The VU programs' GS packets become one indexed triangle list per bucket, written straight to the
- * frame's vertex memory (ctr_gpu_ocean_full_reserve / draw, ctr_ocean_full.v.pica: the GS's S, T, Q
- * perspective, the GS fog value). Only the textured pass is drawn: the PS2's env map pass (sky
+ *    ocean-near VU program's call 39 (CtrOceanNative.cpp; OceanNear_PS2.cpp for the rest).
+ * The GS packets become indexed triangle lists written straight to the frame's vertex memory
+ * (ctr_gpu_ocean_full_reserve / draw, ctr_ocean_full.v.pica: the GS's S, T, Q perspective, the GS
+ * fog value); the native programs' vertices are in clip space, unclipped (draw_clip,
+ * ctr_ocean_full_clip.v.pica: the GPU clips). Only the textured pass is drawn: the PS2's env map pass (sky
  * reflection added through the destination alpha) is left out (the wave texture already has the
  * env map's shading).
  *
