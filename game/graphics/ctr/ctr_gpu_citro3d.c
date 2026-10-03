@@ -69,6 +69,31 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 #define linearAlloc safe_linear_alloc
 #define vramAlloc safe_vram_alloc
 
+/* (AI-assisted) CPU data cache flushes for memory the GPU reads. GSPGPU_FlushDataCache is an IPC
+ * round trip to the GSP service on the system core, which then makes the kernel call; here the
+ * kernel call is made directly (svcFlushProcessDataCache: allowed in gk.rsf, like the
+ * svcInvalidateProcessDataCache the vblank callback uses), with GSP as the fallback if the kernel
+ * refuses it. Any thread. */
+static int s_svc_flush = 1;
+static void cache_flush_now(const void* addr, u32 size) {
+  if (!size) {
+    return;
+  }
+  if (s_svc_flush &&
+      R_SUCCEEDED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)addr, size))) {
+    return;
+  }
+  s_svc_flush = 0;
+  GSPGPU_FlushDataCache(addr, size);
+}
+/* a texture's texels (all levels; VRAM needs none), like C3D_TexFlush */
+static void tex_flush_now(const C3D_Tex* tex) {
+  const u32 a = (u32)tex->data;
+  if (!(a >= OS_VRAM_VADDR && a < OS_VRAM_VADDR + OS_VRAM_SIZE)) {
+    cache_flush_now(tex->data, C3D_TexCalcTotalSize(tex->size, tex->maxLevel));
+  }
+}
+
 /* (AI-assisted) n words (a multiple of 4) of a and b equal: newlib's memcmp takes ~11
  * instructions per word, this ~2 (the draws compare their matrices, bones and state) */
 typedef uint32_t __attribute__((may_alias)) alias_u32;
@@ -1157,7 +1182,7 @@ static void pres_queue_frame(void) {
   {
     u32* id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
     id[0] = id[1] = id[2] = id[3] = g.frame_no;
-    GSPGPU_FlushDataCache(id, 16);
+    cache_flush_now(id, 16);
     GX_TextureCopy(id, 0, s_pres.fence, 0, 16, 8 /* raw copy */);
   }
   /* the latency: up after a late frame, down after ~5 s with a vblank to spare every time */
@@ -1308,11 +1333,46 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
  * queue runs (C3D_FrameEnd; C3D_FrameBegin stopped the queue, so command list splits wait in it
  * until then), so one cache flush of what this frame wrote is enough. Each flush is an IPC to the
  * GSP service: one per draw cost tens of microseconds each on hardware (free in Azahar). */
+/* (AI-assisted) The render thread's flushes for this frame's GPU work (texture updates: sky,
+ * clouds, ocean, eyes; blend shape vertices; the fog ramp) wait here until the frame's commands
+ * go to the GPU (flush_vbuf, at every submission point), merged where the ranges touch. */
+#define DEFER_FLUSH_MAX 48
+static struct {
+  u32 start[DEFER_FLUSH_MAX], end[DEFER_FLUSH_MAX];
+  int n;
+} s_defer;
+
+static void cache_flush_frame(const void* addr, u32 size) {
+  if (!g.in_frame) {
+    cache_flush_now(addr, size);
+    return;
+  }
+  const u32 a = (u32)addr, e = a + size;
+  for (int i = 0; i < s_defer.n; i++) {
+    if (a <= s_defer.end[i] && e >= s_defer.start[i]) {
+      s_defer.start[i] = a < s_defer.start[i] ? a : s_defer.start[i];
+      s_defer.end[i] = e > s_defer.end[i] ? e : s_defer.end[i];
+      return;
+    }
+  }
+  if (s_defer.n == DEFER_FLUSH_MAX) {
+    cache_flush_now(addr, size);
+    return;
+  }
+  s_defer.start[s_defer.n] = a;
+  s_defer.end[s_defer.n] = e;
+  s_defer.n++;
+}
+
 static void flush_vbuf(void) {
   if (g.vbuf_used > g.vbuf_flushed) {
-    GSPGPU_FlushDataCache(g.vbuf + g.vbuf_flushed, (u32)(g.vbuf_used - g.vbuf_flushed));
+    cache_flush_frame(g.vbuf + g.vbuf_flushed, (u32)(g.vbuf_used - g.vbuf_flushed));
     g.vbuf_flushed = g.vbuf_used;
   }
+  for (int i = 0; i < s_defer.n; i++) {
+    cache_flush_now((const void*)s_defer.start[i], s_defer.end[i] - s_defer.start[i]);
+  }
+  s_defer.n = 0;
 }
 
 /* (AI-assisted) C3D_SyncTextureCopy in a frame splits the command list with C3D_FrameSplit(0): that
@@ -1659,7 +1719,7 @@ void ctr_gpu_pool_ready(int pool) {
     return;
   }
   TexPool* p = &g.pools[pool];
-  GSPGPU_FlushDataCache(p->linear, p->bytes);
+  cache_flush_now(p->linear, p->bytes);
   ctr_linear_lock();
   p->ready = 1;
   if (p->used == 3) {
@@ -1746,7 +1806,7 @@ static int pool_leave_vram(int pool) {
     if (p->linear && p->bytes > p->linear_off) {
       memcpy(full + p->linear_off, p->linear, p->bytes - p->linear_off);
     }
-    GSPGPU_FlushDataCache(full, p->bytes);
+    cache_flush_now(full, p->bytes);
     defer_linear_free(p->linear);
     p->linear = full;
     p->linear_off = 0;
@@ -1878,7 +1938,7 @@ static void update_pool_residency(void) {
     if (part == p->bytes || rest) {
       if (rest) {
         memcpy(rest, old + part, p->bytes - part);
-        GSPGPU_FlushDataCache(rest, p->bytes - part);
+        cache_flush_now(rest, p->bytes - part);
       }
       p->linear = rest;
       p->linear_off = part;
@@ -1916,10 +1976,10 @@ static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vra
 
 static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
   if (!on_vram) {
-    C3D_TexFlush(tex);
+    tex_flush_now(tex);
     return 1;
   }
-  GSPGPU_FlushDataCache(buf, tex->size);
+  cache_flush_now(buf, tex->size);
   sync_texture_copy((u32*)buf, 0, (u32*)tex->data, 0, tex->size, 8);
   /* check that the copy landed (VRAM is readable by the CPU); if not, use linear memory */
   int ok = memcmp(tex->data, buf, tex->size) == 0;
@@ -1936,7 +1996,7 @@ static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
     }
     ctr_linear_unlock();
     memcpy(tex->data, buf, tex->size);
-    C3D_TexFlush(tex);
+    tex_flush_now(tex);
   } else {
     g.vram_textures++;
   }
@@ -2010,7 +2070,7 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
   }
   swizzle_rgba8((uint8_t*)tex->data, w, h, rgba);
   C3D_TexGenerateMipmap(tex, GPU_TEXFACE_2D); /* 2x2 averages, on the tiled data */
-  C3D_TexFlush(tex);
+  tex_flush_now(tex);
   g.textures[slot].pool = -1;
   g.textures[slot].levels = (uint8_t)(tex->maxLevel + 1);
   g.textures[slot].used = 1;
@@ -2225,7 +2285,7 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
       }
     }
   }
-  C3D_TexFlush(tex);
+  tex_flush_now(tex);
   t->pool = -1;
   t->levels = 1;
   t->compact = 1;
@@ -2318,7 +2378,7 @@ static void migrate_small_textures(void) {
     memcpy(staging + pos, t->tex.data, C3D_TexCalcTotalSize(t->tex.size, t->tex.maxLevel));
     pos += sizes[j];
   }
-  GSPGPU_FlushDataCache(staging, total);
+  cache_flush_now(staging, total);
   sync_texture_copy((u32*)staging, 0, (u32*)(s_arena.base + off), 0, total, 8);
   pos = 0;
   for (int j = 0; j < npick; j++) {
@@ -2368,7 +2428,7 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
   if (tex->maxLevel > 0) {
     C3D_TexGenerateMipmap(tex, GPU_TEXFACE_2D);
   }
-  C3D_TexFlush(tex);
+  cache_flush_frame(tex->data, C3D_TexCalcTotalSize(tex->size, tex->maxLevel));
   /* bind again at the next use: that clears the GPU's texture cache (it may hold old texels) */
   if (g.bound_tex == tex) {
     g.bound_tex = NULL;
@@ -3316,8 +3376,8 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
   ctr_linear_unlock();
   memcpy(v, verts, vbytes);
   memcpy(ix, indices, ibytes);
-  GSPGPU_FlushDataCache(v, vbytes);
-  GSPGPU_FlushDataCache(ix, ibytes);
+  cache_flush_now(v, vbytes);
+  cache_flush_now(ix, ibytes);
   g.meshes[slot].verts = v;
   g.meshes[slot].indices = ix;
   g.meshes[slot].verts_pa = osConvertVirtToPhys(v);
@@ -3434,8 +3494,8 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   ctr_linear_unlock();
   memcpy(v, verts, vbytes);
   memcpy(ix, indices, ibytes);
-  GSPGPU_FlushDataCache(v, vbytes);
-  GSPGPU_FlushDataCache(ix, ibytes);
+  cache_flush_now(v, vbytes);
+  cache_flush_now(ix, ibytes);
   g.meshes[slot].verts = v;
   g.meshes[slot].indices = ix;
   g.meshes[slot].verts_pa = osConvertVirtToPhys(v);
@@ -3480,7 +3540,7 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
   if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || size <= 0) {
     return;
   }
-  GSPGPU_FlushDataCache((uint8_t*)g.meshes[mesh].verts + offset, (u32)size);
+  cache_flush_frame((uint8_t*)g.meshes[mesh].verts + offset, (u32)size);
 }
 
 /* (AI-assisted) clip (row-major, GL clip space) -> PICA clip space, in C3D_Mtx layout */
@@ -3803,7 +3863,7 @@ void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, u
       p[3] = r;
     }
   }
-  C3D_TexFlush(&g.fog_tex);
+  cache_flush_frame(g.fog_tex.data, C3D_TexCalcTotalSize(g.fog_tex.size, g.fog_tex.maxLevel));
   if (g.in_frame) {
     C3D_TexBind(1, &g.fog_tex); /* clears the texture cache: the GPU must not use the old texels */
   }
