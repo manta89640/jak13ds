@@ -17,6 +17,9 @@ extern ExecutionContext ocean_regs_vfs;
 namespace Mips2C::jak1::native {
 // native_joint.cpp
 extern const NativeImpl cspace_parented_transformq_joint;
+// native_anim.cpp (GOAL functions of joint.gc)
+extern const NativeImpl anim_decomp_request;
+extern const NativeImpl anim_finalize_frame;
 // native_collide_func.cpp
 extern const NativeImpl collide_do_primitives;
 extern const NativeImpl moving_sphere_triangle_intersect;

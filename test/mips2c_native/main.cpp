@@ -68,6 +68,8 @@ LINK(ray_sphere_intersect)
 LINK(ray_cylinder_intersect)
 LINK(moving_sphere_sphere_intersect)
 LINK(closest_pt_in_triangle)
+LINK(pc_anim_decomp_request)
+LINK(pc_anim_finalize_frame)
 #undef LINK
 }  // namespace Mips2C::jak1
 
@@ -173,6 +175,15 @@ int main(int argc, char** argv) {
     harness::bind_goalc_reference(name);
   }
 #endif
+  // (AI-assisted) natives of joint.gc: the references are the GOAL functions they replace
+  pc_anim_decomp_request::link();
+  pc_anim_finalize_frame::link();
+  harness::use_goalc_reference("pc-anim-decomp-request", "decomp-request");
+  harness::use_goalc_reference("pc-anim-finalize-frame", "finalize-joint-frame");
+  for (const char* name : {"add-scaled-matrix!", "decomp-fixed", "decomp-frame",
+                           "quaternion-normalize!"}) {
+    harness::bind_goalc_reference(name);
+  }
 
   tests::register_all();
   const int failed = harness::run_tests(opt);

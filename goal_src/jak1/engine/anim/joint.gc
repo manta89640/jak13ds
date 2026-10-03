@@ -355,7 +355,7 @@
           (&+! data16 2)))))
   (none))
 
-(defmethod process-request! ((this new-joint-decompressor-work) (request joint-decomp-request) (output-frame joint-anim-frame) (num-joints int))
+(defun decomp-request ((output-frame joint-anim-frame) (num-joints int) (request joint-decomp-request))
   "Decompress a single animation, adding to accumulator"
   ;; first, the fixed part
   (decomp-fixed output-frame num-joints (-> request jacc fixed) (-> request amount))
@@ -376,7 +376,8 @@
     (else))
   (none))
 
-(defmethod finalize-frame! ((this new-joint-decompressor-work) (output-frame joint-anim-frame) (num-joints int))
+(defun finalize-joint-frame ((output-frame joint-anim-frame) (num-joints int))
+  "Set the w of every transformq's trans and scale to 1 and normalize its quaternion."
   (when (<= num-joints 2)
     (return #f))
   (dotimes (tqi (- num-joints 2))
@@ -384,6 +385,30 @@
       (set! (-> tq trans w) 1.0)
       (set! (-> tq scale w) 1.0)
       (quaternion-normalize! (-> tq quat))))
+  #f)
+
+;; og:preserve-this (AI-assisted) The 3DS runs native (C++) versions of decomp-request and
+;; finalize-joint-frame (game/mips2c/jak1_functions/native_anim.cpp), unless config.ini
+;; anim_native = off (set by the kernel: kmachine.cpp InitMachine_PCPort). They give the same
+;; results as the GOAL functions above compiled by goalc (test/mips2c_native checks it); the native
+;; request does the fixed part and both frames in one pass over the joints.
+(def-mips2c pc-anim-decomp-request (function joint-anim-frame int joint-decomp-request none))
+
+(def-mips2c pc-anim-finalize-frame (function joint-anim-frame int none))
+
+(define-extern *pc-3ds-anim-native* symbol)
+
+(defmethod process-request! ((this new-joint-decompressor-work) (request joint-decomp-request) (output-frame joint-anim-frame) (num-joints int))
+  "Decompress a single animation, adding to accumulator"
+  (if *pc-3ds-anim-native*
+    (pc-anim-decomp-request output-frame num-joints request)
+    (decomp-request output-frame num-joints request))
+  (none))
+
+(defmethod finalize-frame! ((this new-joint-decompressor-work) (output-frame joint-anim-frame) (num-joints int))
+  (if *pc-3ds-anim-native*
+    (pc-anim-finalize-frame output-frame num-joints)
+    (finalize-joint-frame output-frame num-joints))
   (none))
 
 ;; DECOMP BEGINS

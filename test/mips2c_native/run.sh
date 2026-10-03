@@ -89,10 +89,18 @@ build() {
     *clang++) cc="${cxx%clang++}clang" ;;
     *g++) cc="${cxx%g++}gcc" ;;
   esac
-  # (AI-assisted) MIPS2C_TEST_NO_GOALC_REF=1: without the fixtures (when they are for another
-  # GOALC_ABI_VERSION and not regenerated yet; the tests against them fail)
+  # (AI-assisted) MIPS2C_TEST_NO_GOALC_REF=1: without the fixtures that are for another
+  # GOALC_ABI_VERSION and not regenerated yet (the tests against them fail)
   local ref_srcs=("$HERE"/goalc_ref/*.c)
-  [[ -n "${MIPS2C_TEST_NO_GOALC_REF:-}" ]] && ref_srcs=()
+  if [[ -n "${MIPS2C_TEST_NO_GOALC_REF:-}" ]]; then
+    # only the fixtures made for the current GOALC_ABI_VERSION
+    local abi
+    abi="$(sed -n 's/^#define GOALC_ABI_VERSION \([0-9]*\).*/\1/p' "$ROOT/goalc/cbackend/goal_c_ops.h")"
+    ref_srcs=()
+    for src in "$HERE"/goalc_ref/*.c; do
+      grep -q "GOALC_ABI_VERSION == $abi," "$src" && ref_srcs+=("$src")
+    done
+  fi
   for src in ${ref_srcs[@]+"${ref_srcs[@]}"} "$ROOT/game/kernel/common/goalc_context.cpp"; do
     local obj="$dir/ref_$(basename "${src%.*}").o"
     objs+=("$obj")

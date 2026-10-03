@@ -300,12 +300,16 @@ u32 alloc_static(u32 size, u32 align) {
 }
 
 void use_goalc_reference(const std::string& name) {
+  use_goalc_reference(name, name);
+}
+
+void use_goalc_reference(const std::string& name, const std::string& ref_name) {
   auto it = g_mips2c.find(name);
   if (it == g_mips2c.end()) {
     fprintf(stderr, "harness: function %s is not linked\n", name.c_str());
     abort();
   }
-  it->second.ref = goalc_reference(name);
+  it->second.ref = goalc_reference(ref_name);
 }
 
 u32 mips2c_stub(const std::string& name) {
