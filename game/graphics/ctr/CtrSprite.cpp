@@ -87,7 +87,13 @@ u8 color_byte(float f) {
 void fast_sincos(float a, float* s, float* c) {
   constexpr float kInvTwoPi = 0.159154943f, kTwoPi = 6.28318531f, kPi = 3.14159265f,
                   kHalfPi = 1.57079633f;
-  a -= kTwoPi * std::floor(a * kInvTwoPi + 0.5f);  // [-pi, pi]
+  // [-pi, pi]. (AI-assisted) floor without the libm call: (int) rounds towards 0
+  const float y = a * kInvTwoPi + 0.5f;
+  int n = (int)y;
+  if ((float)n > y) {
+    n--;
+  }
+  a -= kTwoPi * (float)n;
   // cos(a) = sin(a + pi/2); both from sin on [-pi/2, pi/2]
   auto sin_small = [](float x) {
     const float x2 = x * x;
@@ -189,6 +195,14 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
       xy = std::max({xy, std::abs(a.x()), std::abs(a.y())});
     }
     m_corner_reach = b * xy;
+  }
+  m_size_cap = ctr_settings().sprite_max_size * 224.f;
+  for (int k = 0; k < 4; k++) {
+    for (int p = 0; p < 2; p++) {
+      const float st_mul = p ? 2.f : 1.f, st_add = p ? -1.f : 0.f;
+      m_st_out[p][k][0] = m_st_array[k].x() * st_mul + st_add;
+      m_st_out[p][k][1] = m_st_array[k].y() * st_mul + st_add;
+    }
   }
   dma.read_and_advance();  // mscalf
   dma.read_and_advance();  // base / offset
@@ -463,7 +477,7 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       continue;
     }
 
-    math::Vector4f corners[4];
+    float corners[4][3];  // x, y, z
     ctr_clip_vertex clip[4];  // MODE_3D: the corners in clip space (sprite3_3d.vert's output)
     if (mode == MODE_3D) {
       // rotation from the quaternion in flag_rot_sy.xyz
@@ -534,7 +548,7 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         // (AI-assisted) config.ini sprite_max_size: a particle or glow close to the camera covers
         // a big part of the screen, and every covered pixel is blended (the 3DS GPU's fill rate):
         // at most that fraction of the screen height (448 GS units) across
-        const float cap = ctr_settings().sprite_max_size * 224.f;
+        const float cap = m_size_cap;
         const float half = std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach;
         if (cap > 0.f && half > cap) {
           const float k = cap / half;
@@ -557,22 +571,27 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       if (angle != 0.f) {
         fast_sincos(angle, &s, &c);
       }
-      const math::Vector4f r12 = (m_basis_x * c - m_basis_y * s) * scale_x;
-      const math::Vector4f r13 = (m_basis_x * s + m_basis_y * c) * scale_y;
+      float r12[3], r13[3];
+      for (int k = 0; k < 3; k++) {
+        r12[k] = (m_basis_x[k] * c - m_basis_y[k] * s) * scale_x;
+        r13[k] = (m_basis_x[k] * s + m_basis_y[k] * c) * scale_y;
+      }
       for (int k = 0; k < 4; k++) {
         const auto& xy = m_xy_array[(k + (flag & 15)) & 7];
-        corners[k] = base + r12 * xy.x() + r13 * xy.y();
+        for (int c = 0; c < 3; c++) {
+          corners[k][c] = base[c] + r12[c] * xy.x() + r13[c] * xy.y();
+        }
       }
     }
 
     if (mode != MODE_3D) {
       // bounding box against the visible GS area (about 1792..2304 x 1824..2272)
-      float x0 = corners[0].x(), x1 = x0, y0 = corners[0].y(), y1 = y0;
+      float x0 = corners[0][0], x1 = x0, y0 = corners[0][1], y1 = y0;
       for (int k = 1; k < 4; k++) {
-        x0 = std::min(x0, corners[k].x());
-        x1 = std::max(x1, corners[k].x());
-        y0 = std::min(y0, corners[k].y());
-        y1 = std::max(y1, corners[k].y());
+        x0 = std::min(x0, corners[k][0]);
+        x1 = std::max(x1, corners[k][0]);
+        y0 = std::min(y0, corners[k][1]);
+        y1 = std::max(y1, corners[k][1]);
       }
       if (x1 < 1792.f || x0 > 2304.f || y1 < 1824.f || y0 > 2272.f) {
         continue;
@@ -653,35 +672,35 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     const u8 a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
     // procedural texture (radial glow): texture coordinates centered on 0
     const bool proc = (m_last_bucket_ptr->state.flags & CTR_STATE_PROCTEX) != 0;
-    const float st_mul = proc ? 2.f : 1.f, st_add = proc ? -1.f : 0.f;
+    const float(*st_out)[2] = m_st_out[proc ? 1 : 0];
     if (mode == MODE_3D) {
       // the triangles (0, 1, 3) and (3, 1, 2) of the strip, in clip space
       for (int k = 0; k < 4; k++) {
-        clip[k].s = m_st_array[k].x() * st_mul + st_add;
-        clip[k].t = m_st_array[k].y() * st_mul + st_add;
+        clip[k].s = st_out[k][0];
+        clip[k].t = st_out[k][1];
         clip[k].r = r;
         clip[k].g = g;
         clip[k].b = b;
         clip[k].a = a;
       }
-      auto& cv = m_last_bucket_ptr->clip;
-      for (int k : {0, 1, 3, 3, 1, 2}) {
-        cv.push_back(clip[k]);
-      }
+      ctr_clip_vertex* cv = m_last_bucket_ptr->clip.grow(6);
+      cv[0] = clip[0];
+      cv[1] = clip[1];
+      cv[2] = clip[3];
+      cv[3] = clip[3];
+      cv[4] = clip[1];
+      cv[5] = clip[2];
       continue;
     }
-    auto& verts = m_last_bucket_ptr->verts;
-    const size_t n = verts.size();
-    verts.resize(n + 4);
-    ctr_vertex* out = &verts[n];
+    ctr_vertex* out = m_last_bucket_ptr->verts.grow(4);
     constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
     for (int k = 0; k < 4; k++) {
       // GS screen -> ctr_gpu coordinates (see CtrDirect::handle_xyz)
-      out[k].x = (corners[k].x() - 2048.f) * kInvX;
-      out[k].y = (2048.f - corners[k].y()) * kInvY;
-      out[k].z = std::clamp(corners[k].z() * kInvZ, 0.f, 1.f);
-      out[k].s = m_st_array[k].x() * st_mul + st_add;
-      out[k].t = m_st_array[k].y() * st_mul + st_add;
+      out[k].x = (corners[k][0] - 2048.f) * kInvX;
+      out[k].y = (2048.f - corners[k][1]) * kInvY;
+      out[k].z = std::clamp(corners[k][2] * kInvZ, 0.f, 1.f);
+      out[k].s = st_out[k][0];
+      out[k].t = st_out[k][1];
       out[k].r = r;
       out[k].g = g;
       out[k].b = b;

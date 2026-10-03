@@ -102,6 +102,18 @@ CtrVram::CtrVram() {
       m_ct32_pairs = false;
     }
   }
+  // (AI-assisted) and the texels x..x+3 (x % 4 = 0) of rows y and y + 1 (y even) are one 32 byte
+  // line: pairs of row y and y + 1 alternate. Uploads write whole lines from two rows.
+  m_ct32_lines = m_ct32_pairs;
+  for (u32 y = 0; y < 32; y += 2) {
+    for (u32 x = 0; x < 64; x += 4) {
+      const u32* t0 = &m_ct32_page_table[x + 64 * y];
+      const u32* t1 = t0 + 64;
+      if ((t0[0] & 31) || t1[0] != t0[0] + 8 || t0[2] != t0[0] + 16 || t1[2] != t0[0] + 24) {
+        m_ct32_lines = false;
+      }
+    }
+  }
 }
 
 CtrVram::~CtrVram() {
@@ -119,7 +131,29 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
   m_last_relocate.clear();  // a relocated texture may have been overwritten
   const u32 pages_per_row = std::max(1u, width / 64);
   const u32 base = dest_block * kBlockBytes;
-  for (u32 y = 0; y < height; y++) {
+  u32 y = 0;
+  const u32 page_rows = (height + 31) / 32;
+  if (m_ct32_lines && width % 64 == 0 && base + page_rows * pages_per_row * 8192 <= kVramBytes) {
+    // (AI-assisted) two rows at a time, one 32 byte VRAM line per 4 texels of each (see the
+    // constructor), as 64-bit pairs; the upload doesn't wrap around the end of VRAM
+    for (; y + 1 < height; y += 2) {
+      u8* row_dst = m_vram.data() + base + (y / 32) * pages_per_row * 8192;
+      const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
+      const u64* s0 = (const u64*)(data + 4 * y * width);
+      const u64* s1 = s0 + width / 2;
+      for (u32 page = 0; page < width / 64; page++, row_dst += 8192) {
+        for (u32 x = 0; x < 64; x += 4, s0 += 2, s1 += 2) {
+          u64* d = (u64*)(row_dst + ytab[x]);
+          const u64 a01 = s0[0], a23 = s0[1], b01 = s1[0], b23 = s1[1];
+          d[0] = a01;
+          d[1] = b01;
+          d[2] = a23;
+          d[3] = b23;
+        }
+      }
+    }
+  }
+  for (; y < height; y++) {
     const u32 page_row = (y / 32) * pages_per_row;
     const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
     const u8* src_row = data + 4 * y * width;
@@ -503,6 +537,21 @@ bool decode_impl(const CtrVram* self,
   u32 cpsm = t.cpsm();
   u32 csa = (tex0 >> 56) & 0x1f;
   out->resize(w * h);
+  // (AI-assisted) the CLUT entries the texture can use, read once instead of per texel: 256, or
+  // the 16 from CSA for 4 bit indices
+  u32 clut_tab[256];
+  {
+    const auto psm = t.psm();
+    const bool idx8 = psm == GsTex0::PSM::PSMT8 || psm == GsTex0::PSM::PSMT8H;
+    const bool idx4 = psm == GsTex0::PSM::PSMT4 || psm == GsTex0::PSM::PSMT4HH ||
+                      psm == GsTex0::PSM::PSMT4HL;
+    if (idx8 || idx4) {
+      const u32 first = idx4 ? csa * 16 : 0;
+      for (u32 e = 0; e < (idx4 ? 16u : 256u); e++) {
+        clut_tab[e] = clut(cbp, cpsm, first + e);
+      }
+    }
+  }
   auto rd32 = [&](u32 a) {
     tex_range->add(a);
     a &= kVramMask & ~3u;
@@ -543,7 +592,7 @@ bool decode_impl(const CtrVram* self,
           u32 a = psmt8_addr(x, y, width) + tbp * kBlockBytes;
           tex_range->add(a);
           a &= kVramMask;
-          (*out)[x + y * w] = clut(cbp, cpsm, vram[a]);
+          (*out)[x + y * w] = clut_tab[vram[a]];
         }
       }
       break;
@@ -555,7 +604,7 @@ bool decode_impl(const CtrVram* self,
           a &= kVramMask * 2 + 1;
           u8 b = vram[a / 2];
           u32 idx = (a & 1) ? (b >> 4) : (b & 0xf);
-          (*out)[x + y * w] = clut(cbp, cpsm, csa * 16 + idx);
+          (*out)[x + y * w] = clut_tab[idx];
         }
       }
       break;
@@ -569,11 +618,11 @@ bool decode_impl(const CtrVram* self,
           if (t.psm() == GsTex0::PSM::PSMT8H) {
             idx = v >> 24;
           } else if (t.psm() == GsTex0::PSM::PSMT4HH) {
-            idx = csa * 16 + (v >> 28);
+            idx = v >> 28;
           } else {
-            idx = csa * 16 + ((v >> 24) & 0xf);
+            idx = (v >> 24) & 0xf;
           }
-          (*out)[x + y * w] = clut(cbp, cpsm, idx);
+          (*out)[x + y * w] = clut_tab[idx];
         }
       }
       break;

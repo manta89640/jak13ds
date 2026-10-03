@@ -3,6 +3,9 @@
 ; palette of 24 (3 rows each), giving camera space; then one matrix to clip space.
 ; Lighting like the PC port's merc2.vert: the normal is rotated by the same bones (the 3x3 part of
 ; the rows), then three directional lights and ambient light the vertex color.
+; (AI-assisted) The bones' rows are blended by the weights first (9 mul/mad), then position and
+; normal go through the blended matrix once: the same result as blending the three transformed
+; positions and normals, in 36 instructions instead of 54.
 
 .fvec clip[4]
 .fvec row0[24]
@@ -12,10 +15,11 @@
 .fvec lights[7]     ; 0-2: light direction rows (merc2.vert light_dir0/1/2), 3-5: light colors,
                     ; 6: ambient (colors and ambient with their alpha)
 
-.constf consts(0.0, 0.5, 0.000001, 0.0)
+.constf consts(0.0, 0.5, 0.0, 0.0)
+; the vertex color's scale: 1/255, and half for rgb (the texture stage multiplies merc colors by 4,
+; so lights brighter than 1 aren't clamped)
+.constf clrscale(0.00196078431372549, 0.00196078431372549, 0.00196078431372549, 0.00392156862745098)
 .alias zero consts.xxxx
-.alias half consts.yyyy
-.alias tiny consts.zzzz
 
 .out outpos position
 .out outtc0 texcoord0
@@ -29,71 +33,53 @@
 .alias innrm v5
 
 .proc main
-  mov r0.xyz, inpos
-  mov r0.w, scales.zzzz
-  mul r2, scales.yyyy, inwgt
-  mul r1, scales.wwww, innrm
-
-  ; bones 0 and 1: position (r5) and normal (r6)
+  ; blended bone rows r1-r3 = sum of weight * the bone's rows
+  mul r0, scales.yyyy, inwgt
   mova a0.xy, inidx.xy
-  dp4 r4.x, row0[a0.x], r0
-  dp4 r4.y, row1[a0.x], r0
-  dp4 r4.z, row2[a0.x], r0
-  mul r5.xyz, r2.xxxx, r4.xyz
-  dp3 r4.x, row0[a0.x], r1
-  dp3 r4.y, row1[a0.x], r1
-  dp3 r4.z, row2[a0.x], r1
-  mul r6.xyz, r2.xxxx, r4.xyz
-  dp4 r4.x, row0[a0.y], r0
-  dp4 r4.y, row1[a0.y], r0
-  dp4 r4.z, row2[a0.y], r0
-  mad r5.xyz, r2.yyyy, r4.xyz, r5.xyz
-  dp3 r4.x, row0[a0.y], r1
-  dp3 r4.y, row1[a0.y], r1
-  dp3 r4.z, row2[a0.y], r1
-  mad r6.xyz, r2.yyyy, r4.xyz, r6.xyz
-
-  ; bone 2
+  mul r1, row0[a0.x], r0.xxxx
+  mul r2, row1[a0.x], r0.xxxx
+  mul r3, row2[a0.x], r0.xxxx
+  mad r1, r0.yyyy, row0[a0.y], r1
+  mad r2, r0.yyyy, row1[a0.y], r2
+  mad r3, r0.yyyy, row2[a0.y], r3
   mova a0.x, inidx.zzzz
-  dp4 r4.x, row0[a0.x], r0
-  dp4 r4.y, row1[a0.x], r0
-  dp4 r4.z, row2[a0.x], r0
-  mad r5.xyz, r2.zzzz, r4.xyz, r5.xyz
-  dp3 r4.x, row0[a0.x], r1
-  dp3 r4.y, row1[a0.x], r1
-  dp3 r4.z, row2[a0.x], r1
-  mad r6.xyz, r2.zzzz, r4.xyz, r6.xyz
-  mov r5.w, scales.zzzz
+  mad r1, r0.zzzz, row0[a0.x], r1
+  mad r2, r0.zzzz, row1[a0.x], r2
+  mad r3, r0.zzzz, row2[a0.x], r3
 
-  dp4 outpos.x, clip[0], r5
-  dp4 outpos.y, clip[1], r5
-  dp4 outpos.z, clip[2], r5
-  dp4 outpos.w, clip[3], r5
+  ; camera space position (r4; dph: w = 1), then clip space
+  dph r4.x, inpos, r1
+  dph r4.y, inpos, r2
+  dph r4.z, inpos, r3
+  dph outpos.x, r4, clip[0]
+  dph outpos.y, r4, clip[1]
+  dph outpos.z, r4, clip[2]
+  dph outpos.w, r4, clip[3]
 
   mul outtc0, scales.xxxx, intex
 
-  ; lighting. The rows are the negated bone matrices (see CtrMerc), so the rotated normal is -r6.
-  mov r6.w, zero
-  dp3 r7.x, r6, r6
-  add r7.x, tiny, r7.x
-  rsq r7.x, r7.x
-  mul r6, r6, r7.xxxx
-  ; (mad takes a uniform only as its middle operand)
-  mul r8, lights[0], -r6.xxxx
-  mad r8, -r6.yyyy, lights[1], r8
-  mad r8, -r6.zzzz, lights[2], r8
-  max r8, zero, r8
-  mov r9, lights[6]
-  mad r9, r8.xxxx, lights[3], r9
-  mad r9, r8.yyyy, lights[4], r9
-  mad r9, r8.zzzz, lights[5], r9
-  mul r10, scales.yyyy, inclr
+  ; lighting. The rows are the negated bone matrices (see CtrMerc), so the rotated normal is -r5.
+  ; r5 isn't normalized: the lights' sum is scaled by 1 / |r5| (r6.x) instead, the same as
+  ; max(0, dot(light, normal)) with the normalized normal. (|r5| = 0: rsq gives inf, and the
+  ; GPU's 0 * inf = 0 leaves the ambient light.)
+  dp3 r5.x, innrm, r1
+  dp3 r5.y, innrm, r2
+  dp3 r5.z, innrm, r3
+  dp3 r6.x, r5, r5
+  rsq r6.x, r6.x
+  ; (mad takes a uniform only as its middle or last operand)
+  mul r7, lights[0], -r5.xxxx
+  mad r7, -r5.yyyy, lights[1], r7
+  mad r7, -r5.zzzz, lights[2], r7
+  max r7, zero, r7
+  mul r8, lights[3], r7.xxxx
+  mad r8, r7.yyyy, lights[4], r8
+  mad r8, r7.zzzz, lights[5], r8
+  mad r8, r8, r6.xxxx, lights[6]
   ; (AI-assisted) alpha like merc2.vert: the vertex alpha times the lights' alpha, which is the
   ; draw's color-mult alpha (1 for most models; less: see-through, e.g. the jungle river's water
   ; at 0.75, and fading models)
-  mul outclr.w, r10.wwww, r9.wwww
-  ; half: the texture stage multiplies merc colors by 4, so lights brighter than 1 aren't clamped
-  mul r9, half, r9
-  mul outclr.xyz, r10.xyz, r9.xyz
+  mul r9, clrscale, inclr
+  mul outclr, r9, r8
   end
 .end

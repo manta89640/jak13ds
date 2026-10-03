@@ -4,11 +4,13 @@
 ; Also computes the fog amount (texcoord1.x, looked up in a fog color / alpha ramp texture):
 ; the game's fog like tfrag3.vert (255 - clamp(hvdf.w - w, fog_min, fog_max)) / 255, and an extra
 ; fog towards the draw distance, whichever is larger.
+; (AI-assisted) Both fogs are affine in clip w: fog0 holds their factors and offsets, fog1 the
+; game fog's clamps, made from the game's values by mesh_fog_uniforms (ctr_gpu_citro3d.c).
 
 .fvec clip[4]
 .fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255), z: 1.0
-.fvec fog0          ; x: hvdf.w, y: fog min, z: fog max, w: -1/255 (no game fog: 0, 255, 255)
-.fvec fog1          ; x: clip w -> game units, y: extra fog start, z: 1 / (end - start)
+.fvec fog0          ; -(game fog) = fog0.x * w + fog0.z, draw distance fog = fog0.y * w + fog0.w
+.fvec fog1          ; x: -(the game fog's upper clamp), y: the game fog's lower clamp
 
 .constf consts(1.0, 0.5, 0.0, 0.0)
 
@@ -22,29 +24,20 @@
 .alias inclr v2
 
 .proc main
-  mov r0.xyz, inpos
-  mov r0.w, scales.zzzz
+  ; dph: the position's pad (w) counts as 1
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  dph outpos.z, inpos, clip[2]
+  dph r1, inpos, clip[3]
+  mov outpos.w, r1
 
-  dp4 outpos.x, clip[0], r0
-  dp4 outpos.y, clip[1], r0
-  dp4 outpos.z, clip[2], r0
-  dp4 r1.x, clip[3], r0
-  mov outpos.w, r1.xxxx
-
-  ; game fog
-  add r2.x, fog0.xxxx, -r1.xxxx
-  max r2.x, fog0.yyyy, r2.xxxx
-  min r2.x, fog0.zzzz, r2.xxxx
-  mul r2.x, fog0.wwww, r2.xxxx
-  add r2.x, consts.xxxx, r2.xxxx
-  ; draw distance fog
-  mul r3.x, fog1.xxxx, r1.xxxx
-  add r3.x, -fog1.yyyy, r3.xxxx
-  mul r3.x, fog1.zzzz, r3.xxxx
-  max r2.x, r2.xxxx, r3.xxxx
-  mov r2.y, consts.yyyy
-  mov r2.zw, consts.zzzz
-  mov outtc1, r2
+  ; r2.x = -min(game fog, its upper clamp), r2.y = max(draw distance fog, game fog's lower clamp);
+  ; the fog is the larger of -r2.x and r2.y (the same as clamping the game fog, then the max)
+  mul r2.xy, fog0.xyxy, r1.xyxy
+  add r2.xy, fog0.zwzw, r2.xyxy
+  max r2.xy, fog1.xyxy, r2.xyxy
+  max outtc1.x, -r2.xxxx, r2.yyyy
+  mov outtc1.y, consts.yyyy
 
   mul outtc0, scales.xxxx, intex
   mul outclr, scales.yyyy, inclr

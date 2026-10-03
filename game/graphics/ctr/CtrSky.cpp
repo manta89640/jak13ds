@@ -15,6 +15,7 @@
 
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
+#include "game/graphics/ctr/CtrSimd.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -152,10 +153,8 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
     if (out.size() != n) {
       out.assign(n, 0);
     }
-    const u8* in = (const u8*)src.rgba.data();
-    for (size_t i = 0; i < n; i++) {
-      out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
-    }
+    // out[i] = min(255, out[i] + min(255, (in[i] * intensity) >> 7)), 4 bytes at a time
+    ctr_add_scaled_texels(out.data(), (const u8*)src.rgba.data(), n, intensity);
     m_work_sources[idx]++;
     m_stats.blends++;
   }
@@ -186,13 +185,7 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
       // (AI-assisted) the clouds' rgb multiplied by their alpha (0x80 = 1.0): both layers are
       // then added in one pass (ctr_gpu_draw_clip2), which has no texture alpha of its own
       m_premul.resize(m_rgba[1].size());
-      for (size_t k = 0; k + 3 < m_rgba[1].size(); k += 4) {
-        const u32 a = std::min<u32>(m_rgba[1][k + 3], 0x80);
-        m_premul[k] = (u8)((m_rgba[1][k] * a) >> 7);
-        m_premul[k + 1] = (u8)((m_rgba[1][k + 1] * a) >> 7);
-        m_premul[k + 2] = (u8)((m_rgba[1][k + 2] * a) >> 7);
-        m_premul[k + 3] = m_rgba[1][k + 3];
-      }
+      ctr_premultiply_texels(m_premul.data(), m_rgba[1].data(), m_rgba[1].size() / 4);
       texels = m_premul.data();
     }
     if (m_tex[i] < 0) {

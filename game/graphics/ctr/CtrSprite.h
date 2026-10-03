@@ -11,6 +11,8 @@
  * done: the fake shadow.
  */
 
+#include <algorithm>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -94,14 +96,38 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   VecData m_vec[kSpritesPerChunk];
   AdGif m_adgif[kSpritesPerChunk];
 
+  // (AI-assisted) a vertex array that grows without zeroing the new vertices (std::vector's
+  // resize does), which are written right after
+  template <typename T>
+  struct VertBuf {
+    std::unique_ptr<T[]> buf;
+    size_t n = 0, cap = 0;
+    T* grow(size_t k) {
+      if (n + k > cap) {
+        cap = std::max<size_t>(2 * cap, n + k + 64);
+        std::unique_ptr<T[]> bigger(new T[cap]);
+        if (n) {
+          memcpy(bigger.get(), buf.get(), n * sizeof(T));
+        }
+        buf = std::move(bigger);
+      }
+      T* p = buf.get() + n;
+      n += k;
+      return p;
+    }
+    T* data() { return buf.get(); }
+    size_t size() const { return n; }
+    bool empty() const { return n == 0; }
+    void clear() { n = 0; }
+  };
   // sprites are grouped by GS state for the whole group (like Sprite3's buckets), then drawn
   struct Bucket {
     ctr_draw_state state;
-    std::vector<ctr_vertex> verts;
+    VertBuf<ctr_vertex> verts;
     // (AI-assisted) 3D sprites in clip space, 6 vertices each: the GPU clips them (a corner
     // behind the camera mirrored on the CPU: eco beams popping, water rings stretched over the
     // screen)
-    std::vector<ctr_clip_vertex> clip;
+    VertBuf<ctr_clip_vertex> clip;
   };
   std::vector<Bucket> m_buckets;
   size_t m_bucket_count = 0;
@@ -117,6 +143,10 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   ctr_draw_state m_last_state;
   Bucket* m_last_bucket_ptr = nullptr;
   float m_corner_reach = 0;
+  // (AI-assisted) per frame: config.ini sprite_max_size in GS units, and the corners' texture
+  // coordinates ([1]: for the procedural texture, centered on 0)
+  float m_size_cap = 0;
+  float m_st_out[2][4][2] = {};
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
