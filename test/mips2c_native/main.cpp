@@ -4,9 +4,12 @@
  * Differential tests of native mips2c replacements against the mips2c versions (see harness.h).
  *
  *   mips2c-native-test [--filter SUBSTR] [--scale X] [--seed N] [--self] [--reports N] [--case N]
- *                      [--bench mips2c|native] [--fpscr HEX]
+ *                      [--bench mips2c|native] [--fpscr HEX] [--dump DIR]
  *
  * --self runs the mips2c version twice instead of mips2c against native (tests the harness).
+ *
+ * (AI-assisted) On an arm64 host, --fpscr HEX sets FPCR the same way (its FZ and DN bits are the
+ * FPSCR ones): --fpscr 0x03000000 is the 3DS's VFP mode (run.sh vfp).
  *
  * The ARM build (-D__3DS__) runs with the 3DS's VFP mode, which libctru sets for every thread:
  * default NaN and flush-to-zero, round to nearest (FPSCR 0x03000000). --fpscr HEX sets another.
@@ -70,6 +73,21 @@ LINK(moving_sphere_sphere_intersect)
 LINK(closest_pt_in_triangle)
 LINK(pc_anim_decomp_request)
 LINK(pc_anim_finalize_frame)
+LINK(shadow_execute)
+LINK(shadow_xform_verts)
+LINK(shadow_init_vars)
+LINK(shadow_calc_dual_verts)
+LINK(shadow_scissor_top)
+LINK(shadow_scissor_edges)
+LINK(shadow_find_facing_single_tris)
+LINK(shadow_find_single_edges)
+LINK(shadow_find_facing_double_tris)
+LINK(shadow_find_double_edges)
+LINK(shadow_add_verts)
+LINK(shadow_add_facing_single_tris)
+LINK(shadow_add_single_edges)
+LINK(shadow_add_double_tris)
+LINK(shadow_add_double_edges)
 #undef LINK
 }  // namespace Mips2C::jak1
 
@@ -81,6 +99,8 @@ int main(int argc, char** argv) {
   harness::RunOptions opt;
 #if defined(__arm__) && defined(__3DS__)
   u32 fpscr = 0x03000000;
+#elif defined(__aarch64__)
+  u64 fpscr = ~0ull;  // (AI-assisted) unchanged unless --fpscr
 #endif
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--filter") && i + 1 < argc) {
@@ -97,20 +117,26 @@ int main(int argc, char** argv) {
       opt.bench = argv[++i];
     } else if (!strcmp(argv[i], "--reports") && i + 1 < argc) {
       opt.max_reports = atoi(argv[++i]);
-#if defined(__arm__) && defined(__3DS__)
+    } else if (!strcmp(argv[i], "--dump") && i + 1 < argc) {
+      opt.dump_dir = argv[++i];
+#if (defined(__arm__) && defined(__3DS__)) || defined(__aarch64__)
     } else if (!strcmp(argv[i], "--fpscr") && i + 1 < argc) {
-      fpscr = (u32)strtoul(argv[++i], nullptr, 16);
+      fpscr = strtoul(argv[++i], nullptr, 16);
 #endif
     } else {
       fprintf(stderr,
               "usage: %s [--filter SUBSTR] [--scale X] [--seed N] [--self] [--reports N] "
-              "[--case N] [--bench mips2c|native] [--fpscr HEX]\n",
+              "[--case N] [--bench mips2c|native] [--fpscr HEX] [--dump DIR]\n",
               argv[0]);
       return 2;
     }
   }
 #if defined(__arm__) && defined(__3DS__)
   asm volatile("vmsr fpscr, %0" : : "r"(fpscr));
+#elif defined(__aarch64__)
+  if (fpscr != ~0ull) {
+    asm volatile("msr fpcr, %0" : : "r"(fpscr));
+  }
 #endif
 
   g_ee_main_mem = (u8*)aligned_alloc(64, harness::kMemSize);
@@ -158,6 +184,22 @@ int main(int argc, char** argv) {
   draw_large_polygon_ocean::link();
   ripple_execute_init::link();
   ripple_create_wave_table::link();
+  // (AI-assisted) shadow-execute calls the other 14 directly (their caches need their link)
+  shadow_execute::link();
+  shadow_xform_verts::link();
+  shadow_init_vars::link();
+  shadow_calc_dual_verts::link();
+  shadow_scissor_top::link();
+  shadow_scissor_edges::link();
+  shadow_find_facing_single_tris::link();
+  shadow_find_single_edges::link();
+  shadow_find_facing_double_tris::link();
+  shadow_find_double_edges::link();
+  shadow_add_verts::link();
+  shadow_add_facing_single_tris::link();
+  shadow_add_single_edges::link();
+  shadow_add_double_tris::link();
+  shadow_add_double_edges::link();
   // GOAL functions with a native version: the reference is goalc's C code (goalc_ref/)
   ray_sphere_intersect::link();
   ray_cylinder_intersect::link();

@@ -209,6 +209,9 @@ struct RunOptions {
   std::string bench;
   //! run only this case (-1: all)
   int only_case = -1;
+  //! (AI-assisted) write every case's input (GOAL memory, arguments, symbols) to this directory as
+  //! <test>.<case>.m2cd, for unicorn/armbench.py (the ARM runs where qemu-arm is missing)
+  std::string dump_dir;
 };
 //! Runs the selected tests, returns the number that failed
 int run_tests(const RunOptions& opt);

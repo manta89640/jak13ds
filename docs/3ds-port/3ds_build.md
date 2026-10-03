@@ -648,6 +648,12 @@ every platform:
   `particle-adgif`
 - ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame),
   `ocean-generate-verts` (the wave texture's vertices, only with `ocean = full`)
+- shadows: `shadow-execute` (the EE half of the shadow volumes, with the 14 functions it calls and
+  their VU0 microcode inlined; only with config.ini `shadows = full`, `native_shadow.cpp`). It
+  works on the scratchpad copy of each packet like the original (the groups of 4 triangles run
+  past the triangle tables in the real data too), and keeps two VU0 registers that
+  `shadow-scissor-edges` reads without setting them. In verify mode the mips2c version's
+  scratchpad copy (`spad_to_dma_blerc_chain`) is logged like a store, so it is compared too.
 - GOAL functions the collision natives call for every triangle: `ray-sphere-intersect`,
   `ray-cylinder-intersect`, `moving-sphere-sphere-intersect` (collide-func.gc) and
   `closest-pt-in-triangle` (geometry.gc, with `vector-segment-distance-point!` inlined). They have
@@ -660,9 +666,9 @@ every platform:
   without the adapter thunk the other natives go through (8 arguments copied, a perf section,
   stack scratch space): `MIPS2C_NATIVE_IMPL_GOAL` registers a direct entry, `native_as_goal`.
 
-Still mips2c: the renderers' functions (bones, merc, generic, tie, tfrag, shadow, sky, ocean
-drawing, ripple, time-of-day colors, draw-string, textures) and `calc-animation-from-spr` (never
-called: `*use-new-decompressor*` is #t).
+Still mips2c: the renderers' functions (bones, merc, generic, tie, tfrag, sky, ocean drawing,
+ripple, time-of-day colors, draw-string, textures) and `calc-animation-from-spr` (never called:
+`*use-new-decompressor*` is #t).
 
 They do the same float operations grouped the same way as the mips2c code, so results are
 bit-identical (clang fuses `a + b * c` within one expression on arm64; the 3DS has no FMA). They
@@ -724,11 +730,28 @@ arguments the callee uses and the process pointer) and the VU0 random generator.
   test's GOAL memory like the linker would and run on a stack in GOAL memory (`goalc_ref.cpp`).
   The tests of the natives that call them run the compiled GOAL code on the mips2c side, and the
   `(GOAL callees)` variants bind the symbols to it on both sides (a GOAL redefinition).
-- coverage: gcov line coverage of the tested mips2c functions (100% for all of them).
+- coverage: gcov line coverage of the tested mips2c functions (100% for all of them, except 8
+  lines of `shadow-add-verts` that no input reaches: a fourth single quadword copy after a loop
+  that only ends with fewer than 4 left).
 - bench: ARM instructions per call of each version (their own code, not the GOAL functions they
   call), counted with qemu-arm.
 - Test args: `--filter SUBSTR`, `--scale X` (cases), `--seed N`, `--case N`, `--reports N`,
-  `--self` (mips2c against mips2c: tests the harness).
+  `--self` (mips2c against mips2c: tests the harness), `--fpscr HEX` (arm, and FPCR on an arm64
+  host: `--fpscr 0x03000000` is the 3DS's VFP mode there too), `--dump DIR` (writes every case's
+  input for the runner below).
+- (AI-assisted) On macOS (arm64) there is no qemu-arm or arm-linux toolchain, and `fma` needs x86:
+  `host` there is Apple clang, which fuses `a + b * c` inside expressions like the `fma` config,
+  and `vfp` runs it in the 3DS's VFP mode (FPCR default NaN and flush to zero).
+  `test/mips2c_native/unicorn/run.sh [--scale X] [--seed N]` stands in for `arm` and `bench`:
+  it builds the mips2c and native versions with devkitARM and the 3DS build's flags (and the 3DS's
+  `ctr_mem.S` memcpy), runs them under Unicorn (ARM1176, FPSCR 0x03000000) on cases the host
+  build dumped (`--dump`, generated in the 3DS's VFP mode), compares v0 and GOAL memory, and counts
+  ARM instructions. Only `shadow-execute` (its GOAL callees are faked in `armbench.cpp`). Needs a
+  python3 with `unicorn` (`ARMBENCH_PYTHON`).
+- The shadow test's geos read garbage only in default NaN mode (`arm`, `--fpscr 0x03000000`):
+  without it, which of two NaNs an operation returns (and the sign of a NaN a fused
+  multiply-subtract negates) depends on how the compiler ordered the operands, so the bytes the
+  original reads past its tables (as vertices) would make the two versions differ in NaN bits only.
 
 ARM instructions per call on the tests' inputs (`run.sh bench`: the functions' own code, not the
 GOAL functions they call; ARMv6K, -O2 for mips2c and -O3 for the natives like the 3DS build).
@@ -773,3 +796,10 @@ counted), the inlined natives on the native side. The four GOAL functions are ag
 | `ray-cylinder-intersect` (goalc) | 106 | 73 | 1.5x |
 | `moving-sphere-sphere-intersect` (goalc) | 257 | 174 | 1.5x |
 | `closest-pt-in-triangle` (goalc) | 200 | 175 | 1.1x |
+| `shadow-execute` † | 186574 | 27713 | 6.7x |
+
+† (AI-assisted) `unicorn/run.sh` (devkitARM GCC 15.2 like the 3DS build, not qemu) on the
+tests' inputs: 0 to 6 packets per call, geos up to 256 vertices. On 40 calls from the gameplay
+test (dumped with a temporary hook; Jak's and Daxter's shadows, 1.23 per call): 238020 -> 32648
+(7.3x); with the 3DS's memcpy (the scratchpad copies) 240434 -> 35747 (6.7x), about 196k -> 29k
+instructions per caster.

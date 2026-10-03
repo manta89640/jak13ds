@@ -82,4 +82,6 @@ u64 particle_adgif_impl(const NativeArgs& args);
 extern const NativeImpl ocean_interp_wave;
 extern const NativeImpl ocean_generate_verts;
 extern const NativeImpl render_ocean_quad;  // (AI-assisted)
+// native_shadow.cpp (AI-assisted)
+extern const NativeImpl shadow_execute;
 }  // namespace Mips2C::jak1::native

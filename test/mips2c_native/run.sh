@@ -10,6 +10,8 @@
 #             arm64 does, so natives that group float operations differently from mips2c fail
 #   arm       ARMv6K + VFPv2 hard float, -D__3DS__ like the 3DS build (arm-linux-gnueabihf-g++,
 #             run with qemu-arm)
+#   vfp       (AI-assisted) arm64 hosts: the host build in the 3DS's VFP mode (FPCR default NaN
+#             and flush to zero); see also unicorn/run.sh where qemu-arm is missing
 #   coverage  g++ -O0 --coverage, then prints the mips2c line coverage of every tested function
 #   bench     the arm build, then ARM instructions per call of the mips2c and the native version
 #             (test args: [--scale X] test names), counted with qemu-arm
@@ -37,7 +39,7 @@ done
 
 M2C="$ROOT/game/mips2c/jak1_functions"
 MIPS2C_SRCS=(collide_func collide_cache collide_probe collide_mesh collide_edge_grab joint sparticle
-             sparticle_launcher ocean_vu0 ripple ocean sky_tng)
+             sparticle_launcher ocean_vu0 ripple ocean sky_tng shadow)
 HARNESS_SRCS=("$HERE"/*.cpp)
 NATIVE_SRCS=("$M2C"/native_*.cpp)
 
@@ -131,6 +133,10 @@ for cfg in "${configs[@]}"; do
     host)
       build host g++ -O2 -g
       "$OUT/host/mips2c-native-test" ${test_args[@]+"${test_args[@]}"} || status=1
+      ;;
+    vfp)
+      build host g++ -O2 -g
+      "$OUT/host/mips2c-native-test" --fpscr 0x03000000 ${test_args[@]+"${test_args[@]}"} || status=1
       ;;
     fma)
       build fma clang++ -O2 -g -mfma -ffp-contract=on

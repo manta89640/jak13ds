@@ -1800,11 +1800,48 @@ inline void load_vfs_from_tf_regs(const void* tf_regs_sym, ExecutionContext* c) 
   memcpy(&c->vfs[1], c_addr_of_vf1, 31 * 16);
 }
 
+#if MIPS2C_WRITE_LOG
+//! (AI-assisted) the number of bytes emulate_dma copies for the chain at tadr
+inline u32 emulate_dma_size(const u8* src, u32 tadr) {
+  u32 size = 0;
+  while (true) {
+    u64 tag_data;
+    memcpy(&tag_data, src + tadr, 8);
+    DmaTag tag(tag_data);
+    switch (tag.kind) {
+      case DmaTag::Kind::CNT:
+        size += (1 + tag.qwc) * 16;
+        tadr += 16 + tag.qwc * 16;
+        break;
+      case DmaTag::Kind::NEXT:
+        size += (1 + tag.qwc) * 16;
+        tadr = tag.addr;
+        break;
+      case DmaTag::Kind::REF:
+        size += 16 + tag.qwc * 16;
+        tadr += 16;
+        break;
+      case DmaTag::Kind::REFE:
+        return size + 16 + tag.qwc * 16;
+      default:
+        return size;
+    }
+  }
+}
+#endif
+
 inline void spad_to_dma_blerc_chain(void* spad_sym_addr, u32 sadr, u32 tadr) {
   u32 spad_addr_goal;
   memcpy(&spad_addr_goal, align4_ptr(spad_sym_addr), 4);
   void* spad_addr_c = g_ee_main_mem + spad_addr_goal;
   ASSERT(sadr < 0x4000);
+#if MIPS2C_WRITE_LOG
+  // (AI-assisted) verify mode: the copy is logged like a store (shadow-execute's native version
+  // makes the same copy), so it is compared, and put back before the native version runs
+  if (g_write_log_on) {
+    MIPS2C_LOG_STORE(spad_addr_goal + sadr, emulate_dma_size(g_ee_main_mem, tadr));
+  }
+#endif
   emulate_dma(g_ee_main_mem, spad_addr_c, tadr, sadr);
 }
 }  // namespace Mips2C

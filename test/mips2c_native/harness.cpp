@@ -451,6 +451,43 @@ u32 name_seed(const std::string& name) {
   return h;
 }
 
+/*!
+ * (AI-assisted) a case's input for unicorn/armbench.py: "M2CD", version 1, then u32: memory size,
+ * pp, st, stack bottom, stack top, symbol count; u64 args[8]; the symbols (u32 address, u32 name
+ * length, the name); GOAL memory.
+ */
+void dump_case(const std::string& dir, const std::string& test, int index, const u64* args) {
+  std::string name = test;
+  for (char& ch : name) {
+    if (ch == '/' || ch == ' ' || ch == '(' || ch == ')') {
+      ch = '_';
+    }
+  }
+  const std::string path = fmt::format("{}/{}.{}.m2cd", dir, name, index);
+  FILE* f = fopen(path.c_str(), "wb");
+  if (!f) {
+    fprintf(stderr, "harness: can't write %s\n", path.c_str());
+    abort();
+  }
+  auto u32_ = [&](u32 v) { fwrite(&v, 4, 1, f); };
+  fwrite("M2CD", 4, 1, f);
+  u32_(1);
+  u32_(kMemSize);
+  u32_(kProcess);
+  u32_(kSymTable);
+  u32_(kStackBottom);
+  u32_(kStackTop);
+  u32_((u32)g_symbols.size());
+  fwrite(args, 8, 8, f);
+  for (const auto& [sym_name, addr] : g_symbols) {
+    u32_(addr);
+    u32_((u32)sym_name.size());
+    fwrite(sym_name.data(), 1, sym_name.size(), f);
+  }
+  fwrite(g_ee_main_mem, 1, kMemSize, f);
+  fclose(f);
+}
+
 std::string describe_call(const CallRec& c) {
   std::string s = c.fn + "(";
   for (size_t i = 0; i < c.args.size(); i++) {
@@ -577,6 +614,9 @@ int run_tests(const RunOptions& opt) {
         continue;
       }
       take(before, *t);
+      if (!opt.dump_dir.empty()) {
+        dump_case(opt.dump_dir, t->name, i, c.args);
+      }
 
       Result rm = run_one(Mode::MIPS2C, e, c.args);
       if (rm.threw) {
