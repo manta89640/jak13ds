@@ -77,6 +77,9 @@ struct IopThread {
   u32 priority = 0;
   s32 thID = -1;
   s32 wakeupCount = 0;
+  // (AI-assisted) DelayThreadNotifiable / NotifyThread
+  bool wait_notifiable = false;  // in DelayThreadNotifiable: NotifyThread ends the delay
+  bool notified = false;         // NotifyThread came while the thread wasn't in it
 };
 
 struct Semaphore {
@@ -112,6 +115,7 @@ struct EventFlag {
 struct Messagebox {
   std::queue<void*> messages;
   IopThread* wait_thread = nullptr;
+  s32 notify_thread = -1;  // (AI-assisted) NotifyThread'd on every SendMbx (SetMbxNotifyThread)
 };
 
 class IOP_Kernel {
@@ -121,6 +125,13 @@ class IOP_Kernel {
   s32 ExitThread();
   void StartThread(s32 id);
   void DelayThread(u32 usec);
+  // (AI-assisted) Like DelayThread, but NotifyThread ends the delay early, and it returns at once
+  // if the thread was notified since its last call. For a thread that polls for work: it can
+  // wait longer without reacting later.
+  void DelayThreadNotifiable(u32 usec);
+  void NotifyThread(s32 id);
+  // (AI-assisted) NotifyThread(thid) on every message sent to this mailbox
+  void SetMbxNotifyThread(s32 mbx, s32 thid) { mbxs.at(mbx).notify_thread = thid; }
   void SleepThread();
   void WakeupThread(s32 id);
   void iWakeupThread(s32 id);

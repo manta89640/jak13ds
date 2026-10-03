@@ -1,6 +1,8 @@
 #include "fake_iso.h"
 
+#include <algorithm>
 #include <chrono>
+#include <span>
 
 #include "common/log/log.h"
 #include "common/util/Assert.h"
@@ -14,6 +16,12 @@
 #include "game/sound/sndshim.h"
 
 #ifdef __3DS__
+#include <malloc.h>
+
+#include <atomic>
+#include <deque>
+#include <mutex>
+
 #include "game/overlord/common/compressed_iso_file.h"
 #include "platform/3ds/port/ctr_port.h"
 #endif
@@ -30,8 +38,16 @@ uint32_t FS_LoadMusic(char* name, snd::BankHandle* bank_handle);
 void FS_Close(LoadStackEntry* fd);
 static LoadStackEntry sLoadStack[MAX_OPEN_FILES];  //! List of all files that are "open"
 static LoadStackEntry* sReadInfo;                  // LoadStackEntry for currently reading file
+#ifdef __3DS__
+namespace {
+void close_all_parked();
+}
+#endif
 
 void fake_iso_init_globals() {
+#ifdef __3DS__
+  close_all_parked();  // (AI-assisted) files kept open by a runtime that restarted
+#endif
   // init API struct
   fake_iso.init = fake_iso_FS_Init;
   fake_iso.find = FS_Find;
@@ -55,14 +71,138 @@ static bool io_checksum() {
   static const bool on = ctr_config_bool("io_checksum", 0);
   return on;
 }
+
+bool io_cache_on() {
+  static const bool on = ctr_config_bool("io_cache", 1);
+  return on;
+}
+
+u32 io_heap_free() {
+  // ctr_app_mem_free is the heap's size (the application region is committed at startup)
+  struct mallinfo mi = mallinfo();
+  const u32 heap = ctr_app_mem_free();
+  return heap > (u32)mi.uordblks ? heap - (u32)mi.uordblks : 0;
+}
+
+namespace {
+u32 now_ms() {
+  static const auto t0 = std::chrono::steady_clock::now();
+  return (u32)std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now() - t0)
+      .count();
+}
+
+// (AI-assisted) SD card use by streams (spool chunks, voice lines), for FS_StreamBusy
+std::atomic<int> sStreamReads{0};
+std::atomic<u32> sStreamLastMs{0};  // the last one (+1, 0: none yet)
+void stream_mark() {
+  sStreamLastMs.store(now_ms() + 1);
+}
+
+// (AI-assisted) Files closed by FS_Close stay open for the next load of the same file. A
+// spooled animation is loaded one chunk at a time and the voice stream file once per line of
+// dialogue, and every open cost several SD card requests (find, open, header, the close later)
+// on the reader thread, in the way of the stream itself. The least recently closed file goes
+// first; its close runs on a reader thread.
+struct ParkedFile {
+  FileRecord* fr = nullptr;
+  FILE* fp = nullptr;            // plain file (cz == nullptr)
+  iso_cz::Reader* cz = nullptr;  // compressed file: owns its FILE
+  uint32_t len = 0;              // length of the (original) file
+};
+constexpr int kParkedFiles = 6;
+// the two most recently closed files keep their last decoded block (the next chunk of a spool
+// starts in it); the others free it (up to 48 KB each)
+constexpr int kParkedKeepBlock = 2;
+std::mutex sParkedMutex;
+ParkedFile sParked[kParkedFiles];  // most recently closed first
+int sParkedCount = 0;
+
+void close_parked(ParkedFile p) {
+  if (p.cz) {
+    delete p.cz;  // closes its file
+  } else if (p.fp) {
+    fclose(p.fp);
+  }
+}
+
+bool take_parked(FileRecord* fr, ParkedFile* out) {
+  std::lock_guard<std::mutex> lock(sParkedMutex);
+  for (int i = 0; i < sParkedCount; i++) {
+    if (sParked[i].fr == fr) {
+      *out = sParked[i];
+      for (int j = i; j + 1 < sParkedCount; j++) {
+        sParked[j] = sParked[j + 1];
+      }
+      sParked[--sParkedCount] = ParkedFile();
+      return true;
+    }
+  }
+  return false;
+}
+
+void park(const ParkedFile& p) {
+  ParkedFile out;
+  {
+    std::lock_guard<std::mutex> lock(sParkedMutex);
+    if (sParkedCount == kParkedFiles) {
+      out = sParked[--sParkedCount];
+    }
+    for (int j = sParkedCount; j > 0; j--) {
+      sParked[j] = sParked[j - 1];
+    }
+    sParked[0] = p;
+    sParkedCount++;
+    if (sParkedCount > kParkedKeepBlock && sParked[kParkedKeepBlock].cz) {
+      sParked[kParkedKeepBlock].cz->release_buffers(false);
+    }
+  }
+  if (out.fr) {
+    thpool.push_task(close_parked, out);
+  }
+}
+
+void close_all_parked() {
+  std::lock_guard<std::mutex> lock(sParkedMutex);
+  for (int i = 0; i < sParkedCount; i++) {
+    close_parked(sParked[i]);
+    sParked[i] = ParkedFile();
+  }
+  sParkedCount = 0;
+}
+}  // namespace
+
+bool FS_StreamBusy(u32 quiet_ms) {
+  if (sStreamReads.load() > 0) {
+    return true;
+  }
+  const u32 last = sStreamLastMs.load();
+  return last && now_ms() + 1 - last < quiet_ms;
+}
+
+void FS_SetReadHint(LoadStackEntry* fd, uint32_t end, bool stream) {
+  if (!fd) {
+    return;
+  }
+  fd->read_end = end;
+  fd->stream = stream;
+  if (stream) {
+    stream_mark();
+  }
+  auto* r = (iso_cz::Reader*)fd->cz;
+  if (r && io_cache_on()) {
+    // card reads of up to 256 KB (a voice stream: 64 KB, it reads 24 KB at a time for as long as
+    // the line lasts), while the heap has room for the window (it replaces the 48 KB block
+    // buffer; the heap's level-load peak leaves ~3 MB)
+    const u32 ra = (stream && !end) ? (64u << 10) : (256u << 10);
+    r->set_read_ahead(io_heap_free() >= (2u << 20) ? ra : 0);
+    r->set_read_end(end);
+  }
+}
 #endif
 
 static FILE* open_fr(FileRecord* fr, LoadStackEntry* lse, s32 thread_to_wake) {
   const char* path = get_file_path(fr);
-  FILE* fp = file_util::open_file(path, "rb");
-  if (!fp) {
-    lg::error("[OVERLORD] fake iso could not open the file \"{}\"", path);
-  }
 #ifdef __3DS__
   lse->cz = nullptr;
   lse->io_bytes = 0;
@@ -71,15 +211,56 @@ static FILE* open_fr(FileRecord* fr, LoadStackEntry* lse, s32 thread_to_wake) {
   lse->crc = 0;
   lse->crc_start = 0;
   lse->crc_next = 0;
-  if (fp && is_file_compressed(fr)) {
-    auto* r = new iso_cz::Reader();
-    if (r->open(fp, path)) {
-      lse->cz = r;
-    } else {
-      lg::error("[OVERLORD] fake iso: \"{}\" is not a valid compressed file", path);
-      delete r;  // closes fp
-      fp = nullptr;
+  lse->file_len = 0;
+  lse->read_end = 0;
+  lse->stream = false;
+  lse->slow_reads = 0;
+  lse->slow_ms = 0;
+  lse->slow_max_ms = 0;
+  FILE* fp = nullptr;
+  ParkedFile p;
+  if (take_parked(fr, &p)) {
+    // (AI-assisted) still open from the last load of this file
+    fp = p.cz ? p.cz->file() : p.fp;
+    if (p.cz) {
+      p.cz->reset_stats();
     }
+  } else {
+    fp = file_util::open_file(path, "rb");
+    if (!fp) {
+      lg::error("[OVERLORD] fake iso could not open the file \"{}\"", path);
+    } else if (is_file_compressed(fr)) {
+      auto* r = new iso_cz::Reader();
+      if (r->open(fp, path)) {
+        p.cz = r;
+        p.len = r->size();
+      } else {
+        lg::error("[OVERLORD] fake iso: \"{}\" is not a valid compressed file", path);
+        delete r;  // closes fp
+        fp = nullptr;
+      }
+    } else {
+      // (AI-assisted) Reads are whole pages into the caller's buffer: unbuffered, each one is a
+      // single card read (newlib's 1 KB buffer split it in two). The length once, here: asking
+      // for it is a request to the SD card.
+      setvbuf(fp, nullptr, _IONBF, 0);
+      fseek(fp, 0, SEEK_END);
+      p.len = (uint32_t)ftell(fp);
+      fseek(fp, 0, SEEK_SET);
+    }
+  }
+  if (fp) {
+    lse->cz = p.cz;
+    lse->file_len = p.len;
+    // FS_GetLength's answer (the files don't change while the game runs)
+    if (fr->size != p.len) {
+      fr->size = p.len;
+    }
+  }
+#else
+  FILE* fp = file_util::open_file(path, "rb");
+  if (!fp) {
+    lg::error("[OVERLORD] fake iso could not open the file \"{}\"", path);
   }
 #endif
 
@@ -168,10 +349,11 @@ void FS_Close(LoadStackEntry* fd) {
     }
     const double s_total = fd->io_us / 1e6;
     if (r) {
-      lg::info("[io] {}: {} B in {} reads, {:.0f} ms ({:.1f} MB/s); card {} B in {:.0f} ms "
-               "({:.1f} MB/s), decode {:.0f} ms ({:.1f} MB/s, {} blocks, max {:.2f} ms){}",
+      lg::info("[io] {}: {} B in {} reads, {:.0f} ms ({:.1f} MB/s); card {} B in {} reads, "
+               "{:.0f} ms ({:.1f} MB/s), decode {:.0f} ms ({:.1f} MB/s, {} blocks, max {:.2f} "
+               "ms){}",
                fd->fr->name, fd->io_bytes, fd->io_reads, s_total * 1e3,
-               fd->io_bytes / 1e6 / s_total, r->sd_bytes, r->sd_us / 1e3,
+               fd->io_bytes / 1e6 / s_total, r->sd_bytes, r->sd_reads, r->sd_us / 1e3,
                r->sd_bytes / (double)std::max<uint64_t>(r->sd_us, 1), r->decode_us / 1e3,
                r->out_bytes / (double)std::max<uint64_t>(r->decode_us, 1), r->blocks,
                r->max_decode_us / 1e3, crc);
@@ -180,7 +362,24 @@ void FS_Close(LoadStackEntry* fd) {
                fd->io_bytes, fd->io_reads, s_total * 1e3, fd->io_bytes / 1e6 / s_total, crc);
     }
   }
-  if (fd->cz) {
+  if (fd->slow_reads) {
+    lg::warn("[io] {}: {} slow read(s) of 20 ms or more, {} ms in all, the slowest {} ms",
+             fd->fr->name, fd->slow_reads, fd->slow_ms, fd->slow_max_ms);
+  }
+  if (fd->fp && io_cache_on()) {
+    // (AI-assisted) kept open for the next load of this file
+    ParkedFile p;
+    p.fr = fd->fr;
+    p.cz = (iso_cz::Reader*)fd->cz;
+    p.fp = p.cz ? nullptr : fd->fp;
+    p.len = fd->file_len;
+    if (p.cz) {
+      p.cz->release_buffers(true);
+    }
+    park(p);
+    fd->cz = nullptr;
+    fd->fp = nullptr;
+  } else if (fd->cz) {
     delete (iso_cz::Reader*)fd->cz;  // closes fp
     fd->cz = nullptr;
     fd->fp = nullptr;
@@ -199,14 +398,23 @@ void FS_Close(LoadStackEntry* fd) {
 // returns the number of bytes read (0 past the end of the file)
 static int32_t fs_read_plain(LoadStackEntry* fd, void* buffer, int32_t real_size,
                              u32 offset_into_file) {
+#ifdef __3DS__
+  // (AI-assisted) the length found when the file was opened (asking is an SD card request)
+  const uint32_t file_len = fd->file_len;
+#else
   fseek(fd->fp, 0, SEEK_END);
   uint32_t file_len = ftell(fd->fp);
   rewind(fd->fp);
+#endif
 
   if (offset_into_file < file_len) {
+#ifdef __3DS__
+    fseek(fd->fp, offset_into_file, SEEK_SET);  // (no rewind above: always)
+#else
     if (offset_into_file) {
       fseek(fd->fp, offset_into_file, SEEK_SET);
     }
+#endif
 
     if (offset_into_file + real_size > file_len) {
       real_size = (file_len - offset_into_file);
@@ -224,6 +432,11 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
   // (AI-assisted) slow SD card reads are logged: a freeze in the game can be the game waiting for
   // one (with the [hitch] lines of kperf)
   const auto t_start = std::chrono::steady_clock::now();
+#ifdef __3DS__
+  if (fd->stream) {
+    sStreamReads++;
+  }
+#endif
   int32_t real_size = len;
   if (len < 0) {
     // not sure what this is about...
@@ -236,7 +449,19 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
 
   ASSERT(fd->fp);
 #ifdef __3DS__
-  if (fd->cz) {
+  if (fd->read_end) {
+    // (AI-assisted) only the sectors the load asked for: its last page read (and decoded) up to
+    // 48 KB past them, and the page the ISO thread reads ahead after the end is no read at all
+    const u32 end = (fd->read_end + SECTOR_SIZE - 1) / SECTOR_SIZE * SECTOR_SIZE;
+    if (offset_into_file >= end) {
+      real_size = 0;
+    } else if (offset_into_file + real_size > end) {
+      real_size = (int32_t)(end - offset_into_file);
+    }
+  }
+  if (real_size <= 0) {
+    real_size = 0;
+  } else if (fd->cz) {
     // (AI-assisted) compressed: decoded here, on the reader thread
     const int64_t n = ((iso_cz::Reader*)fd->cz)->read(offset_into_file, buffer, real_size);
     ASSERT_MSG(n >= 0, fmt::format("[OVERLORD] read error in compressed {}", fd->fr->name));
@@ -275,7 +500,22 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
                                                                 t_start)
                           .count();
     if (ms >= 20.0) {
+#ifdef __3DS__
+      // (AI-assisted) A line per slow read made many lines (an SD card write each) while the card
+      // was busy: at most one a second, and FS_Close sums them up per file.
+      fd->slow_reads++;
+      fd->slow_ms += (uint32_t)ms;
+      fd->slow_max_ms = std::max(fd->slow_max_ms, (uint32_t)ms);
+      static std::atomic<u32> s_last_warn{0};
+      const u32 now = now_ms() + 1;
+      const u32 last = s_last_warn.load();
+      if (!last || now - last >= 1000) {
+        s_last_warn.store(now);
+        lg::warn("[io] read {} KB of {} in {:.0f} ms", real_size / 1024, fd->fr->name, ms);
+      }
+#else
       lg::warn("[io] read {} KB of {} in {:.0f} ms", real_size / 1024, fd->fr->name, ms);
+#endif
     }
 #ifdef __3DS__
     fd->io_us += (uint64_t)(ms * 1000.0);
@@ -283,6 +523,12 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
     fd->io_reads++;
 #endif
   }
+#ifdef __3DS__
+  if (fd->stream) {
+    stream_mark();
+    sStreamReads--;
+  }
+#endif
 
   iop::iWakeupThread(thread_to_wake);
 }
@@ -380,11 +626,151 @@ uint32_t FS_LoadSoundBank(char* name, SoundBank* bank) {
   auto data = file_util::read_binary_file(fs::path(get_file_path(file)));
   parseSoundBank(BinaryReader(data), *bank);
 
-  snd::BankHandle handle = snd_BankLoadEx(get_file_path(file), offset, 0, 0);
+  // (AI-assisted) The 989snd bank follows the name list in the same file: load it from this copy
+  // instead of reading the whole file again (snd_BankLoadEx).
+  snd::BankHandle handle = 0;
+  if (data.size() > (size_t)offset) {
+    handle = snd_BankLoadFromMemory(std::span<u8>(data).subspan(offset));
+  }
   snd_ResolveBankXREFS();
   PrintBankInfo(bank);
   bank->bank_handle = handle;
 
   return 0;
 }
+
+#ifdef __3DS__
+namespace {
+// (AI-assisted) Sound bank and music loads (LOAD_SOUND_BANK / LOAD_MUSIC) on a reader thread.
+// On the ISO thread (FS_LoadSoundBank / FS_LoadMusic) they read the whole file in one go on the
+// IOP thread (a sound bank twice: the name list, then the 989snd bank), and every IOP service
+// waited for the SD card meanwhile: sound RPC replies, streams, other loads (~1 s at 2.5 fps
+// entering Fire Canyon; COMMON.SBK at boot). Here the file is read once, in pieces (the card
+// serves one request at a time: stream reads get their turn in between), the 989snd bank is
+// parsed on the reader thread too, and the ISO thread keeps serving until the bank is in. The
+// message goes back only then, as before.
+constexpr long kSoundLoadPiece = 128 * 1024;
+struct SoundLoad {
+  IsoMessage* msg = nullptr;  // the load running (nullptr: none)
+  std::string path;
+  long offset = 0;        // sound bank: where the 989snd bank starts (after the name list)
+  std::vector<u8> data;   // the whole file (empty: not found or not read)
+  snd::BankHandle handle = nullptr;
+  std::atomic<bool> done{false};
+};
+SoundLoad sSoundLoad;
+// loads waiting for the running one (the loader RPC waits for each, so this stays empty)
+std::deque<IsoMessage*> sSoundLoadQueue;
+
+void sound_load_job(SoundLoad* s) {
+  const auto t0 = std::chrono::steady_clock::now();
+  bool ok = false;
+  FILE* fp = file_util::open_file(s->path.c_str(), "rb");
+  if (fp) {
+    setvbuf(fp, nullptr, _IONBF, 0);
+    fseek(fp, 0, SEEK_END);
+    const long size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (size > 0) {
+      s->data.resize(size);
+      ok = true;
+      for (long pos = 0; ok && pos < size; pos += kSoundLoadPiece) {
+        ok = fread(s->data.data() + pos, std::min(kSoundLoadPiece, size - pos), 1, fp) == 1;
+      }
+    }
+    fclose(fp);
+  }
+  const double read_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  if (!ok) {
+    lg::error("[OVERLORD] fake iso could not read \"{}\"", s->path);
+    s->data.clear();
+  } else if ((long)s->data.size() > s->offset) {
+    s->handle = snd_BankLoadFromMemory(std::span<u8>(s->data).subspan(s->offset));
+  }
+  lg::info("[io] sound bank {}: {} KB read in {:.0f} ms, loaded in {:.0f} ms", s->path,
+           s->data.size() / 1024, read_ms,
+           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+               .count());
+  s->done.store(true);
+}
+
+void start_sound_load(IsoMessage* msg) {
+  SoundLoad& s = sSoundLoad;
+  s.msg = msg;
+  s.path.clear();
+  s.offset = 0;
+  s.data.clear();
+  s.handle = nullptr;
+  s.done.store(false);
+  char namebuf[16];
+  FileRecord* file = nullptr;
+  if (msg->cmd_id == LOAD_SOUND_BANK) {
+    auto* cmd = (SoundBankLoadCommand*)msg;
+    // sector size of sound name list (as FS_LoadSoundBank)
+    s.offset = cmd->bank->sound_count == 101 ? 1 * 2048 : 10 * 2048;
+    strcpy(namebuf, cmd->bank_name);
+    namebuf[8] = 0;
+    strcat(namebuf, ".sbk");
+    file = FS_Find(namebuf);
+    if (!file) {
+      file = FS_Find("empty1.sbk");
+    }
+  } else {
+    auto* cmd = (MusicLoadCommand*)msg;
+    strcpy(namebuf, cmd->music_name);
+    namebuf[8] = 0;
+    strcat(namebuf, ".mus");
+    file = FS_Find(namebuf);
+  }
+  if (!file) {
+    s.done.store(true);  // nothing loaded (as FS_LoadSoundBank / FS_LoadMusic)
+    return;
+  }
+  s.path = get_file_path(file);
+  thpool.push_task(sound_load_job, &s);
+}
+}  // namespace
+
+void FS_StartSoundLoad(IsoMessage* msg) {
+  if (sSoundLoad.msg) {
+    sSoundLoadQueue.push_back(msg);
+  } else {
+    start_sound_load(msg);
+  }
+}
+
+bool FS_SoundLoadPending() {
+  return sSoundLoad.msg != nullptr;
+}
+
+IsoMessage* FS_FinishSoundLoad() {
+  SoundLoad& s = sSoundLoad;
+  if (!s.msg || !s.done.load()) {
+    return nullptr;
+  }
+  IsoMessage* msg = s.msg;
+  if (!s.data.empty()) {
+    if (msg->cmd_id == LOAD_SOUND_BANK) {
+      auto* cmd = (SoundBankLoadCommand*)msg;
+      parseSoundBank(BinaryReader(s.data), *cmd->bank);
+      snd_ResolveBankXREFS();
+      PrintBankInfo(cmd->bank);
+      cmd->bank->bank_handle = s.handle;
+    } else {
+      auto* cmd = (MusicLoadCommand*)msg;
+      *cmd->music_handle = s.handle;
+      snd_ResolveBankXREFS();
+    }
+  }
+  std::vector<u8>().swap(s.data);  // free it
+  s.msg = nullptr;
+  if (!sSoundLoadQueue.empty()) {
+    IsoMessage* next = sSoundLoadQueue.front();
+    sSoundLoadQueue.pop_front();
+    start_sound_load(next);
+  }
+  return msg;
+}
+#endif
 }  // namespace jak1

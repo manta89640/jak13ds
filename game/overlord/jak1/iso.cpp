@@ -178,6 +178,11 @@ u32 InitISOFS(const char* fs_mode, const char* loading_screen) {
     printf("IOP: ======================================================================\n");
     return 1;
   }
+#ifdef __3DS__
+  // (AI-assisted) new commands and DGO continue / cancel messages end the ISO thread's idle wait
+  SetMbxNotifyThread(iso_mbx, iso_thread);
+  SetMbxNotifyThread(sync_mbx, iso_thread);
+#endif
 
   thread_param.attr = TH_C;
   thread_param.initPriority = 98;
@@ -344,6 +349,8 @@ void LoadDGO(RPC_Dgo_Cmd* cmd) {
 #ifdef __3DS__
   // (AI-assisted) the 3DS renderer reads the level's .c3l meanwhile (CtrRenderer.cpp)
   ::ctr_level_dgo_started(cmd->name);
+  // (AI-assisted) and the heap is at its fullest during a level load: no cached spool chunks
+  stream_chunk_cache_clear();
 #endif
 
   // cancel an in progress command and wait for it to end.
@@ -525,6 +532,14 @@ u32 ISOThread() {
             // if we ask for less than the full length, use the smaller value.
             load_single_cmd->length_to_copy = load_single_cmd->length;
           }
+#ifdef __3DS__
+          // (AI-assisted) the fake ISO reads (and reads ahead) no further than these bytes; a
+          // chunk of a spooled animation is a stream (the save worker waits for streams)
+          FS_SetReadHint(load_single_cmd->fd,
+                         load_single_cmd->fd->location * SECTOR_SIZE +
+                             (u32)load_single_cmd->length_to_copy,
+                         load_single_cmd->cmd_id == LOAD_TO_EE_OFFSET_CMD_ID);
+#endif
 
           // set status and callback function.
           load_single_cmd->status = CMD_STATUS_IN_PROGRESS;
@@ -554,6 +569,10 @@ u32 ISOThread() {
               SendMbx(iso_mbx, &sLoadDGO);
             }
           } else {
+#ifdef __3DS__
+            // (AI-assisted) the whole file, in big card reads (read-ahead)
+            FS_SetReadHint(load_dgo_cmd->fd, 0, false);
+#endif
             // init DGO state machine and register as the callback.
             load_dgo_cmd->status = CMD_STATUS_IN_PROGRESS;
             load_dgo_cmd->dgo_state = DgoState::Init;
@@ -571,6 +590,13 @@ u32 ISOThread() {
           //   break;
           // }
 
+#ifdef __3DS__
+          // (AI-assisted) read and loaded on a reader thread while this loop keeps serving
+          // streams and loads; the message goes back when the bank is in (FS_FinishSoundLoad
+          // below). No ISO buffer: the fake ISO never used it.
+          FS_StartSoundLoad(msg_from_mbx);
+          break;
+#endif
           auto buff = TryAllocateBuffer(BUFFER_PAGE_SIZE);
           if (!buff) {
             // no buffers, try again.
@@ -593,6 +619,11 @@ u32 ISOThread() {
           //   break;
           // }
 
+#ifdef __3DS__
+          // (AI-assisted) like LOAD_SOUND_BANK
+          FS_StartSoundLoad(msg_from_mbx);
+          break;
+#endif
           auto buff = TryAllocateBuffer(BUFFER_PAGE_SIZE);
           if (!buff) {
             // no buffers, try again.
@@ -625,6 +656,9 @@ u32 ISOThread() {
               // (without audio output the stream audio isn't read: see PLAY_VAG_STREAM)
               if (vag_cmd.vag && snd_HasOutput()) {
                 file = isofs->open_wad(vag_cmd.file, vag_cmd.vag->offset);
+#ifdef __3DS__
+                FS_SetReadHint(file, 0, true);  // (AI-assisted) a stream
+#endif
               }
               vag_cmd.fd = file;
               vag_cmd.status = -1;
@@ -678,6 +712,9 @@ u32 ISOThread() {
                 // stream runs on the fake clock like a VAG missing on PC (see VBlank_Handler).
                 if (vag_cmd.vag && snd_HasOutput()) {
                   vag_cmd.fd = isofs->open_wad(vag_cmd.file, vag_cmd.vag->offset);
+#ifdef __3DS__
+                  FS_SetReadHint(vag_cmd.fd, 0, true);  // (AI-assisted) a stream
+#endif
                 } else {
                   vag_cmd.fd = nullptr;
                 }
@@ -767,6 +804,13 @@ u32 ISOThread() {
       return 0;
     }
 
+#ifdef __3DS__
+    // (AI-assisted) sound bank / music loads finished on the reader thread: wake the loader
+    while (IsoMessage* loaded = FS_FinishSoundLoad()) {
+      ReturnMessage(loaded);
+    }
+#endif
+
     ////////////////////////////
     // Handle Sound
     ////////////////////////////
@@ -836,7 +880,14 @@ u32 ISOThread() {
 #ifdef __3DS__
       // (AI-assisted) On the 3DS every IOP wakeup takes time from the game's core: polling every
       // 100 us cost ~15% of it (5000+ dispatches a second). Reads in progress don't wait here.
-      DelayThread(1000);
+      // A message to iso_mbx or sync_mbx ends the wait (InitISOFS: SetMbxNotifyThread), so a new
+      // load or a DGO continue starts at once, and a message already waiting is taken at once.
+      // Queued commands, a playing stream and a sound bank load on the reader thread still poll
+      // every millisecond; with none of these there is nothing to poll for.
+      if (!MbxSize(iso_mbx)) {
+        DelayThreadNotifiable(
+            (in_progress_vag_command || !QueuesEmpty() || FS_SoundLoadPending()) ? 1000 : 100000);
+      }
 #else
       DelayThread(100);
 #endif
@@ -1144,6 +1195,12 @@ u32 CopyDataToEE(IsoMessage* _cmd, IsoBufferHeader* buffer_header) {
 
   DMA_SendToEE(buffer_header->get_data(), bytes_to_send, cmd->dest_addr);
   DMA_Sync();
+#ifdef __3DS__
+  if (cmd->capture) {
+    // (AI-assisted) a copy for the spool chunk cache (stream.cpp)
+    memcpy(cmd->capture + cmd->bytes_done, buffer_header->get_data(), bytes_to_send);
+  }
+#endif
 
   cmd->dest_addr += bytes_to_send;
   cmd->bytes_done += bytes_to_send;

@@ -6,7 +6,8 @@
 //       compress IN, then decode OUT.ogz with the game's reader (whole pages, sector-sized and
 //       odd reads) and compare with IN. Exit code 1 on any difference. zstd-adpcm is for the
 //       PS2 ADPCM voice streams (VAGWAD.*): headers and nibbles of the 16-byte frames apart.
-//   iso_pack --verify IN OUT.ogz       only the check
+//   iso_pack --verify IN OUT.ogz       only the check (--stats: also the number of card reads
+//                                      for the whole file, with and without read-ahead)
 //   iso_pack --dump OUT.ogz DECODED    decode a whole .ogz to a file
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,8 @@
 #include "third-party/zstd/lib/zstd.h"
 
 using namespace iso_cz;
+
+static bool g_stats = false;  // --stats: card reads with and without read-ahead
 
 static bool read_file(const char* path, std::vector<uint8_t>& out) {
   FILE* fp = fopen(path, "rb");
@@ -155,6 +158,44 @@ static bool verify(const std::vector<uint8_t>& in, const char* ogz_path) {
       return false;
     }
   }
+  // 3. read-ahead (the fake ISO on the 3DS): the whole file in 48 KB pages through a 256 KB
+  // window, then parts of it (spool chunks: from a sector, up to 255 KB, in pages that stop at
+  // the part's end) with the window ending there, on one reader whose buffers are freed between
+  // the parts (a file that stays open between loads), with and without its last decoded block
+  {
+    auto rd = open_reader();
+    rd->set_read_ahead(256 << 10);
+    for (uint32_t off = 0; off < size + 0xc000; off += 0xc000) {
+      if (!check(*rd, off, 0xc000)) {
+        return false;
+      }
+    }
+    for (int i = 0; i < 200 && size; i++) {
+      const uint32_t start = (rng() % size) & ~0x7ffu;
+      const uint32_t end = std::min<uint32_t>(start + 1 + rng() % 0x3fc00, size);
+      const uint32_t end_sectors = (end + 0x7ff) & ~0x7ffu;
+      rd->release_buffers(i & 1);
+      rd->set_read_ahead((i % 3) ? (256 << 10) : (64 << 10));
+      rd->set_read_end(end);
+      for (uint32_t off = start; off < end; off += 0xc000) {
+        if (!check(*rd, off, std::min<uint32_t>(0xc000, end_sectors - off))) {
+          return false;
+        }
+      }
+    }
+  }
+  if (g_stats) {
+    // card reads for the whole file in 48 KB pages: one block per read vs a 256 KB window
+    for (uint32_t ra : {0u, 256u << 10}) {
+      auto rd = open_reader();
+      rd->set_read_ahead(ra);
+      for (uint32_t off = 0; off < size; off += 0xc000) {
+        rd->read(off, buf.data(), 0xc000);
+      }
+      printf("%s: read-ahead %u KB: %u card reads, %llu bytes, %u blocks\n", ogz_path, ra >> 10,
+             rd->sd_reads, (unsigned long long)rd->sd_bytes, rd->blocks);
+    }
+  }
   return true;
 }
 
@@ -175,6 +216,8 @@ int main(int argc, char** argv) {
       bs = (uint32_t)strtoul(argv[++i], nullptr, 0);
     } else if (a == "--verify") {
       verify_only = true;
+    } else if (a == "--stats") {
+      g_stats = true;
     } else if (a == "--dump") {
       dump = true;
     } else {

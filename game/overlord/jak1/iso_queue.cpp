@@ -261,6 +261,18 @@ IsoMessage* GetMessage() {
 }
 
 /*!
+ * (AI-assisted) Is there no queued command at any priority?
+ */
+bool QueuesEmpty() {
+  for (const auto& p : gPriStack) {
+    if (p.n) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/*!
  * Execute callbacks and maintain buffers for finished reads in the priority stack
  */
 void ProcessMessageData() {

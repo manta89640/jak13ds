@@ -15,6 +15,7 @@ u32 QueueMessage(IsoMessage* cmd, int32_t priority, const char* name);
 void UnqueueMessage(IsoMessage* cmd);
 IsoMessage* GetMessage();
 void ProcessMessageData();
+bool QueuesEmpty();  // (AI-assisted) no queued command at any priority
 void ReturnMessage(IsoMessage* cmd);
 IsoBufferHeader* TryAllocateBuffer(uint32_t size);
 

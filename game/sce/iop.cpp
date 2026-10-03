@@ -175,6 +175,14 @@ void DelayThread(u32 usec) {
   iop->kernel.DelayThread(usec);
 }
 
+void DelayThreadNotifiable(u32 usec) {
+  iop->kernel.DelayThreadNotifiable(usec);
+}
+
+void SetMbxNotifyThread(s32 mbx, s32 thid) {
+  iop->kernel.SetMbxNotifyThread(mbx, thid);
+}
+
 void YieldThread() {
   iop->kernel.YieldThread();
 }
@@ -263,6 +271,10 @@ s32 WakeupThread(s32 thid) {
 
 s32 iWakeupThread(s32 thid) {
   iop->kernel.iWakeupThread(thid);
+#ifdef __3DS__
+  // (AI-assisted) run the IOP now (a fake ISO read finished), not at its next scheduled wakeup
+  iop->signal_run_iop();
+#endif
   return 0;
 }
 

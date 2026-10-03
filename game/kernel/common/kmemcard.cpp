@@ -46,11 +46,27 @@ static MemoryCardOperation op;
 static std::atomic<int> s_save_state{0};  // 0 idle, 1 running, 2 finished (MC_run joins it)
 static void* s_save_thread = nullptr;
 void pc_game_save_synch();
+namespace jak1 {
+bool FS_StreamBusy(u32 quiet_ms);  // game/overlord/jak1/fake_iso.cpp
+}
 static void* save_worker(void*) {
   Timer t;
   t.start();
+  // (AI-assisted) The SD card serves one request at a time, and a save is 100-300 ms of them
+  // (create, write, close). The autosave of a power cell starts with its victory animation and
+  // made the spool and its sound wait (a ~2 s "loader stall" at ~12 fps). It waits until no
+  // stream (spool chunk, voice line) has read for half a second, 5 s at most, and not at all
+  // when the app is closing (close_for_home_menu waits for the save: it must not be lost).
+  int held_ms = 0;
+  while (held_ms < 5000 && !ctr_closing() && jak1::FS_StreamBusy(500)) {
+    ctr_thread_sleep_us(20000);
+    held_ms += 20;
+  }
+  const double hold_ms = t.getMs();
   pc_game_save_synch();
-  lg::info("[mc] save to slot {} done on the worker thread in {:.0f} ms: {}", op.param2, t.getMs(),
+  lg::info("[mc] save to slot {} done on the worker thread in {:.0f} ms ({:.0f} ms of it waiting "
+           "for streams): {}",
+           op.param2, t.getMs(), held_ms ? hold_ms : 0.0,
            op.result == McStatusCode::OK ? "ok" : "FAILED");
   s_save_state.store(2);
   return nullptr;

@@ -340,7 +340,15 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
   iop.reset_allocator();
   ee::LIBRARY_sceSif_register(&iop);
   iop::LIBRARY_register(&iop);
+#ifdef __3DS__
+  // (AI-assisted) wake the IOP for its vblank handler: it doesn't poll every millisecond any more
+  Gfx::register_vsync_callback([&iop]() {
+    iop.kernel.signal_vblank();
+    iop.signal_run_iop();
+  });
+#else
   Gfx::register_vsync_callback([&iop]() { iop.kernel.signal_vblank(); });
+#endif
 
   if (version != GameVersion::Jak3 && version != GameVersion::JakX) {
     jak1::dma_init_globals();
@@ -412,6 +420,10 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
     auto p = scoped_prof("overlord-wait-for-init");
     while (complete == false) {
       iop.kernel.dispatch();
+#ifdef __3DS__
+      // (AI-assisted) this loop polls: let lower priority threads run (dispatch doesn't sleep)
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+#endif
     }
   }
 

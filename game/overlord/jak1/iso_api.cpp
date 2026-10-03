@@ -153,6 +153,9 @@ s32 LoadISOFileToIOP(FileRecord* file, void* addr, uint32_t length) {
   cmd.file_record = file;
   cmd.dest_addr = (u8*)addr;
   cmd.length = length;
+#ifdef __3DS__
+  cmd.capture = nullptr;
+#endif
   SendMbx(iso_mbx, &cmd);
   SleepThread();
 
@@ -175,6 +178,9 @@ s32 LoadISOFileToEE(FileRecord* file, uint32_t addr, uint32_t length) {
   cmd.file_record = file;
   cmd.dest_addr = (u8*)(u64)addr;
   cmd.length = length;
+#ifdef __3DS__
+  cmd.capture = nullptr;
+#endif
   SendMbx(iso_mbx, &cmd);
   SleepThread();
 
@@ -185,7 +191,19 @@ s32 LoadISOFileToEE(FileRecord* file, uint32_t addr, uint32_t length) {
   return cmd.length_to_copy;
 }
 
+#ifdef __3DS__
 s32 LoadISOFileChunkToEE(FileRecord* file, uint32_t dest_addr, uint32_t length, uint32_t offset) {
+  return LoadISOFileChunkToEE(file, dest_addr, length, offset, nullptr);
+}
+
+s32 LoadISOFileChunkToEE(FileRecord* file,
+                         uint32_t dest_addr,
+                         uint32_t length,
+                         uint32_t offset,
+                         u8* capture) {
+#else
+s32 LoadISOFileChunkToEE(FileRecord* file, uint32_t dest_addr, uint32_t length, uint32_t offset) {
+#endif
   lg::debug("[OVERLORD] LoadISOFileChunkToEE {} : {} offset {}", file->name, length, offset);
   IsoCommandLoadSingle cmd;
   cmd.cmd_id = LOAD_TO_EE_OFFSET_CMD_ID;
@@ -195,6 +213,9 @@ s32 LoadISOFileChunkToEE(FileRecord* file, uint32_t dest_addr, uint32_t length, 
   cmd.dest_addr = (u8*)(u64)dest_addr;
   cmd.length = length;
   cmd.offset = offset;
+#ifdef __3DS__
+  cmd.capture = capture;
+#endif
   SendMbx(iso_mbx, &cmd);
   SleepThread();
   if (cmd.status) {
