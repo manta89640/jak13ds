@@ -19,6 +19,11 @@
 (#when SKIP_OCEAN_DRAW
   (define-extern *pc-3ds-ocean-full* symbol))
 
+;; (AI-assisted) set by the kernel from config.ini shadows (kmachine.cpp InitMachine_PCPort):
+;; 'full (the shadow volumes, shadow-execute-all), 'blob (draw-target-blob-shadow-3ds) or 'off
+(#when TARGET_3DS
+  (define-extern *pc-3ds-shadows* symbol))
+
 ;; DECOMP BEGINS
 
 (defun sphere-cull ((arg0 vector))
@@ -757,7 +762,8 @@
 
 (define *generic-effect-mode* 0)
 
-;; (AI-assisted) 3DS: no shadow volumes (shadow-execute-all is skipped below: too expensive). Jak
+;; (AI-assisted) 3DS, config.ini shadows = blob (and full with depth16 = on, which has no stencil
+;; buffer for the shadow volumes): no shadow volumes (shadow-execute-all is skipped below). Jak
 ;; gets a blob shadow instead, one of the game's fake shadows (a soft dark dot on the ground below
 ;; him, smaller the higher he is, none above 12 m), so a jump shows where it will land. The sprite
 ;; renderer draws it.
@@ -947,17 +953,26 @@
   (let ((gp-9 (-> *display* frames (-> *display* on-screen) frame global-buf)))
     (with-profiler "bones"
       (bones-mtx-calc-execute)) ;; skinning matrix calculation
-    ;; 3DS: the 3DS renderer skips the generic and shadow buckets (it has no renderer for them),
-    ;; so the work that fills them is skipped too. Objects that would be drawn with generic merc
-    ;; and the shadows are not drawn either way. (Generic merc took ~9 ms/frame in the menus.)
-    ;; The eyes are drawn (CtrEyeRenderer).
+    ;; 3DS: the 3DS renderer skips the generic bucket (it has no renderer for it), so the work
+    ;; that fills it is skipped too. Objects that would be drawn with generic merc are not drawn
+    ;; either way. (Generic merc took ~9 ms/frame in the menus.) The eyes are drawn
+    ;; (CtrEyeRenderer).
     (#unless TARGET_3DS
       (with-profiler "gmerc"
         (generic-merc-execute-all gp-9)) ;; mercneric conversion.
       (with-profiler "shadow"
         (shadow-execute-all gp-9 *shadow-queue*)))
+    ;; (AI-assisted) 3DS: the shadows follow config.ini shadows (*pc-3ds-shadows*): full = the
+    ;; shadow volumes like on the PS2 (shadow-execute is native code there, the 3DS renderer
+    ;; draws the shadow bucket with the stencil buffer), blob = Jak's blob shadow, off = none.
+    ;; The objects' shadow packets are made by draw-bones-shadow either way.
     (#when TARGET_3DS
-      (draw-target-blob-shadow-3ds))
+      (case *pc-3ds-shadows*
+        (('full)
+         (with-profiler "shadow"
+           (shadow-execute-all gp-9 *shadow-queue*)))
+        (('blob)
+         (draw-target-blob-shadow-3ds))))
     (with-profiler "eyes"
       (update-eyes)))
   ;; sprite draw
