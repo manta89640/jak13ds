@@ -94,7 +94,15 @@ CtrSettings load() {
     } else if (key == "sprites") {
       s.sprites = parse_bool(v);
     } else if (key == "ocean") {
-      s.ocean = parse_bool(v);
+      if (v == "flat" || v == "waves" || v == "full") {
+        s.ocean = true;
+        s.ocean_mode = v == "full"    ? CtrSettings::OceanMode::Full
+                       : v == "waves" ? CtrSettings::OceanMode::Waves
+                                      : CtrSettings::OceanMode::Flat;
+      } else {
+        s.ocean = parse_bool(v);
+        s.ocean_mode = CtrSettings::OceanMode::Flat;
+      }
     } else if (key == "distort") {
       s.distort = parse_bool(v);
     } else if (key == "envmap") {
@@ -163,7 +171,7 @@ std::string CtrSettings::summary() const {
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
       "vis_culling {} raw_cmds {} vcache_reuse {}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
-      merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
+      merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",

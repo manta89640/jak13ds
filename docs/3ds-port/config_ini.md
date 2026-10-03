@@ -53,7 +53,7 @@ detail_scale = 1           # multiplies the draw distance of small and medium ob
 merc = on                  # characters and objects
 sprites = on               # world particles; the HUD is always drawn
 max_sprites = 1000         # world particles per frame
-ocean = on                 # the ocean
+ocean = on                 # the ocean: off, flat (= on, static grid), waves (+ waves near the camera), full (the PS2 ocean)
 fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 60: up to 60
 frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color

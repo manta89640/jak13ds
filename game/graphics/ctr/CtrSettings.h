@@ -31,6 +31,10 @@ struct CtrSettings {
   bool merc = true;
   bool sprites = true;
   bool ocean = true;
+  // (AI-assisted) config ocean = off | flat | waves | full (on = flat). flat: CtrOcean's static grid;
+  // waves: the grid plus real waves near the camera; full: the PS2 ocean (draw-ocean)
+  enum class OceanMode { Flat, Waves, Full };
+  OceanMode ocean_mode = OceanMode::Flat;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
   bool distort = false;  // (AI-assisted) off: square sprites reported on hardware
