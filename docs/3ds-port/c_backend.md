@@ -269,7 +269,12 @@ is WIDE for every type-checked caller. The holes are:
   `mem-usage` of `object`): `this` (`_type_`) is read as PTR there.
 - assumption: values of PTR types are GOAL addresses (< 4 GB, hi = 0), and float-typed GPR values
   are sign-extended. A pointer-typed value that holds something else (a 64-bit handle cast to a
-  pointer type) would lose its upper half when passed.
+  pointer type) loses its upper half when passed. goalc warns in C mode about casts of a `handle`
+  to a PTR type (`check_c_abi_handle_cast`). Jak 1 had two, both fixed in goal_src by typing the
+  parameter `handle`: `add-rider!` (the rider's handle was passed as a `process-drawable`, its pid
+  was lost, `handle->process` failed in `pull-riders!`, and no platform carried Jak: the Volcanic
+  Crater minecarts, every `plat`, ...) and the `target-final-door` state (a handle passed as a
+  `basic`).
 
 Runtime side (`goal_c_abi.h`, `goalc_runtime.cpp`, `kernel_function.h`):
 

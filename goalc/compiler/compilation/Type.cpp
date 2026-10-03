@@ -996,12 +996,35 @@ void Compiler::check_c_abi_function_cast(const goos::Object& form,
   }
 }
 
+/*!
+ * (AI-assisted) C backend, ABI version 3: an argument of an address type (structure, pointer, pair
+ * and their children) is passed as its low 32 bits. A handle cast to such a type loses its pid
+ * (the upper half) when it is passed to a function, so handle->process on it fails in the callee
+ * (Jak 1: add-rider! took the rider's handle as a process-drawable, and platforms with sticky
+ * riders never carried Jak). Warn about these casts; the fix is to give the parameter the type
+ * handle (or object).
+ */
+void Compiler::check_c_abi_handle_cast(const goos::Object& form,
+                                       const TypeSpec& from,
+                                       const TypeSpec& to) {
+  if (!m_c_backend || from.base_type() != "handle") {
+    return;
+  }
+  if (c_arg_class(&m_ts, to) == CArgClass::PTR) {
+    print_compiler_warning(
+        "C backend: a handle cast to {} loses its pid (upper half) when it is passed as an "
+        "argument: {}\n",
+        to.print(), form.print());
+  }
+}
+
 Val* Compiler::compile_the_as(const goos::Object& form, const goos::Object& rest, Env* env) {
   auto args = get_va(form, rest);
   va_check(form, args, {{}, {}}, {});
   auto desired_ts = parse_typespec(args.unnamed.at(0), env);
   auto base = compile_error_guard(args.unnamed.at(1), env);
   check_c_abi_function_cast(form, base->type(), desired_ts);
+  check_c_abi_handle_cast(form, base->type(), desired_ts);
   auto result = env->function_env()->alloc_val<AliasVal>(desired_ts, base);
   if (base->settable()) {
     result->mark_as_settable();
@@ -1020,6 +1043,7 @@ Val* Compiler::compile_the(const goos::Object& form, const goos::Object& rest, E
   auto desired_ts = parse_typespec(args.unnamed.at(0), env);
   auto base = compile_error_guard(args.unnamed.at(1), env);
   check_c_abi_function_cast(form, base->type(), desired_ts);
+  check_c_abi_handle_cast(form, base->type(), desired_ts);
 
   if (is_number(base->type())) {
     if (m_ts.tc(m_ts.make_typespec("binteger"), desired_ts)) {

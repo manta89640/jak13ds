@@ -11763,7 +11763,7 @@
   :flag-assert         #xb00000030
   (:methods
     (new (symbol type int) _type_) ;; 0
-    (add-rider! (_type_ process-drawable) collide-sticky-rider) ;; 9
+    (add-rider! (_type_ handle) collide-sticky-rider) ;; 9 (AI-assisted) a handle: C backend ABI
     (reset! (_type_) int) ;; 10
     )
   )
@@ -13006,7 +13006,7 @@
     (target-tube-start handle)
     (target-periscope handle)
     (target-fishing handle)
-    (target-final-door basic handle)
+    (target-final-door handle handle) ;; (AI-assisted) a handle: C backend ABI
     (target-play-anim string handle)
     target-edge-grab
     (target-pole-cycle handle)

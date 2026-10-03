@@ -754,6 +754,7 @@ class Compiler {
   void check_c_abi_function_cast(const goos::Object& form,
                                  const TypeSpec& from,
                                  const TypeSpec& to);
+  void check_c_abi_handle_cast(const goos::Object& form, const TypeSpec& from, const TypeSpec& to);
   Val* compile_c_abi_method_wide_mask(const goos::Object& form,
                                       const goos::Object& rest,
                                       Env* env);

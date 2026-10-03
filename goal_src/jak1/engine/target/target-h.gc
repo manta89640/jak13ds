@@ -64,7 +64,7 @@
    (target-edge-grab-jump float float)
    target-edge-grab-off
    (target-falling symbol)
-   (target-final-door basic handle)
+   (target-final-door handle handle) ;; (AI-assisted) handle, not basic: C backend ABI (final-door.gc)
    (target-fishing handle)
    (target-flop float float float)
    (target-flop-hit-ground symbol)
