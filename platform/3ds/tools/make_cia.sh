@@ -50,6 +50,10 @@ echo "makerom: $MAKEROM ($("$MAKEROM" 2>&1 | head -1 || true))"
 ELF="$BUILD_DIR/gk.elf"
 SMDH="$BUILD_DIR/gk.smdh"
 RSF="$ROOT/platform/3ds/cia/gk.rsf"
+# (AI-assisted) shader output rule proven on hardware (a shader that left output components
+# unwritten hung the real GPU, 2026-10-03)
+python3 "$ROOT/platform/3ds/tools/check_shaders.py" "$ROOT/platform/3ds/shaders" ||
+  { echo "make_cia: shader check failed (platform/3ds/tools/check_shaders.py)" >&2; exit 1; }
 if [ "$BOOTTEST" = 1 ]; then
   ELF="$ROOT/platform/3ds/hello/opengoal-hello.elf"
   SMDH="$ROOT/platform/3ds/hello/opengoal-hello.smdh"

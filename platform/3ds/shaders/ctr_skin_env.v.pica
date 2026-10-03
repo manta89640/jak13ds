@@ -66,7 +66,10 @@
   dp3 r10.x, r9, r9
   rsq r10.x, r10.x
   mul r10.x, half, r10.x
-  mad outtc0.xy, r9.xyyy, r10.xxxx, half
+  ; (AI-assisted) the whole output (zw = 0), see platform/3ds/tools/check_shaders.py
+  mov r11.zw, consts.xxxx
+  mad r11.xy, r9.xyyy, r10.xxxx, half
+  mov outtc0, r11
   mov outclr, fade
   end
 .end

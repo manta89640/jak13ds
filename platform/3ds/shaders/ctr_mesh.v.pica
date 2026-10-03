@@ -36,8 +36,12 @@
   mul r2.xy, fog0.xyxy, r1.xyxy
   add r2.xy, fog0.zwzw, r2.xyxy
   max r2.xy, fog1.xyxy, r2.xyxy
-  max outtc1.x, -r2.xxxx, r2.yyyy
-  mov outtc1.y, consts.yyyy
+  ; (AI-assisted) the whole output in a temporary (zw = 0): with zw never written this shader hung
+  ; the real GPU (2026-10-03, platform/3ds/tools/check_shaders.py)
+  mov r3.zw, consts.zzzz
+  max r3.x, -r2.xxxx, r2.yyyy
+  mov r3.y, consts.yyyy
+  mov outtc1, r3
 
   mul outtc0, scales.xxxx, intex
   mul outclr, scales.yyyy, inclr
