@@ -1,9 +1,5 @@
 #include "IOP_Kernel.h"
 
-#ifdef __3DS__
-#include "platform/3ds/port/ctr_port.h"
-#endif
-
 #include <cstring>
 
 #include "common/global_profiler/GlobalProfiler.h"
@@ -100,6 +96,48 @@ void IOP_Kernel::DelayThread(u32 usec) {
   _currentThread->resumeTime =
       time_point_cast<microseconds>(steady_clock::now()) + microseconds(usec);
   leaveThread();
+}
+
+/*!
+ * (AI-assisted) Like DelayThread, but NotifyThread ends the delay early. Returns at once if the
+ * thread was notified since it last waited here (the kernel is cooperative: between a thread
+ * checking for work and calling this, only a notification can tell it about new work).
+ */
+void IOP_Kernel::DelayThreadNotifiable(u32 usec) {
+  ASSERT(_currentThread);
+  if (_currentThread->notified) {
+    _currentThread->notified = false;
+    return;
+  }
+
+  _currentThread->state = IopThread::State::Wait;
+  _currentThread->waitType = IopThread::Wait::Delay;
+  _currentThread->resumeTime =
+      time_point_cast<microseconds>(steady_clock::now()) + microseconds(usec);
+  _currentThread->wait_notifiable = true;
+  leaveThread();
+  _currentThread->wait_notifiable = false;
+  // a notification between the end of the wait and now is for work the thread looks for next
+  _currentThread->notified = false;
+}
+
+/*!
+ * (AI-assisted) End a DelayThreadNotifiable now, or make the thread's next one return at once.
+ * Not for the running thread itself: it looks for its work anyway (and a thread that puts a
+ * message back into its own mailbox must not keep itself from waiting).
+ */
+void IOP_Kernel::NotifyThread(s32 id) {
+  auto& thread = threads.at(id);
+  if (&thread == _currentThread) {
+    return;
+  }
+  if (thread.state == IopThread::State::Wait && thread.waitType == IopThread::Wait::Delay &&
+      thread.wait_notifiable) {
+    thread.waitType = IopThread::Wait::None;
+    thread.state = IopThread::State::Ready;
+  } else {
+    thread.notified = true;
+  }
 }
 
 /*!
@@ -259,6 +297,9 @@ s32 IOP_Kernel::SendMbx(s32 mbx, void* value) {
     to_run->waitType = IopThread::Wait::None;
     to_run->state = IopThread::State::Ready;
   }
+  if (box.notify_thread > 0) {
+    NotifyThread(box.notify_thread);
+  }
   return 0;
 }
 
@@ -335,9 +376,11 @@ void IOP_Kernel::runThread(IopThread* thread) {
 ** Update wait states for delayed threads
 */
 void IOP_Kernel::updateDelay() {
+  // (AI-assisted) the clock once, not per thread (a 64-bit division on the 3DS)
+  const auto now = steady_clock::now();
   for (auto& t : threads) {
     if (t.waitType == IopThread::Wait::Delay) {
-      if (steady_clock::now() > t.resumeTime) {
+      if (now > t.resumeTime) {
         t.waitType = IopThread::Wait::None;
         t.state = IopThread::State::Ready;
       }
@@ -347,7 +390,14 @@ void IOP_Kernel::updateDelay() {
 
 std::optional<time_stamp> IOP_Kernel::nextWakeup() {
   bool found_ready = false;
+#ifdef __3DS__
+  // (AI-assisted) Everything that makes an IOP thread ready from outside signals the IOP (EE RPC
+  // calls, iWakeupThread, the vblank): with nothing scheduled, wake up once a frame, not 1000
+  // times a second (every wakeup takes time from the game's core).
+  time_stamp lowest = time_point_cast<microseconds>(steady_clock::now()) + microseconds(16000);
+#else
   time_stamp lowest = time_point_cast<microseconds>(steady_clock::now()) + microseconds(1000);
+#endif
 
   for (auto& t : threads) {
     if (t.waitType == IopThread::Wait::Delay) {
@@ -411,6 +461,14 @@ std::optional<time_stamp> IOP_Kernel::dispatch() {
   updateDelay();
   processWakeups();
 
+#ifdef __3DS__
+  // (AI-assisted) The vblank handler (stream clock and sound info for the EE) runs even when no
+  // thread is ready: the ISO thread doesn't poll every millisecond any more to make one ready.
+  if (vblank_handler != nullptr && vblank_recieved.exchange(false)) {
+    vblank_handler(nullptr);
+  }
+#endif
+
   // Run until all threads are idle
   IopThread* next = schedNext();
   if (next) {
@@ -434,8 +492,9 @@ std::optional<time_stamp> IOP_Kernel::dispatch() {
   // printf("[IOP Kernel] No runnable threads\n");
 #ifdef __3DS__
   kperf::add_thread(kperf::Thread::IOP, kperf::ticks() - t_start, 1);
-  // Some callers poll dispatch() in a loop (overlord init). Let lower priority threads run.
-  ctr_thread_sleep_us(100);
+  // (AI-assisted) No sleep here: the IOP waits in wait_run_iop, and only the overlord init loop
+  // polls dispatch() (runtime.cpp sleeps there). A sleep in every dispatch delayed every IOP
+  // reaction by 100 us.
 #endif
   return nextWakeup();
 }

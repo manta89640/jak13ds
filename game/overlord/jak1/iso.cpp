@@ -178,6 +178,11 @@ u32 InitISOFS(const char* fs_mode, const char* loading_screen) {
     printf("IOP: ======================================================================\n");
     return 1;
   }
+#ifdef __3DS__
+  // (AI-assisted) new commands and DGO continue / cancel messages end the ISO thread's idle wait
+  SetMbxNotifyThread(iso_mbx, iso_thread);
+  SetMbxNotifyThread(sync_mbx, iso_thread);
+#endif
 
   thread_param.attr = TH_C;
   thread_param.initPriority = 98;
@@ -875,7 +880,14 @@ u32 ISOThread() {
 #ifdef __3DS__
       // (AI-assisted) On the 3DS every IOP wakeup takes time from the game's core: polling every
       // 100 us cost ~15% of it (5000+ dispatches a second). Reads in progress don't wait here.
-      DelayThread(1000);
+      // A message to iso_mbx or sync_mbx ends the wait (InitISOFS: SetMbxNotifyThread), so a new
+      // load or a DGO continue starts at once, and a message already waiting is taken at once.
+      // Queued commands, a playing stream and a sound bank load on the reader thread still poll
+      // every millisecond; with none of these there is nothing to poll for.
+      if (!MbxSize(iso_mbx)) {
+        DelayThreadNotifiable(
+            (in_progress_vag_command || !QueuesEmpty() || FS_SoundLoadPending()) ? 1000 : 100000);
+      }
 #else
       DelayThread(100);
 #endif

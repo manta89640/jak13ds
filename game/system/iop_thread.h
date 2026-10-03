@@ -43,6 +43,7 @@ class IOP {
   std::mutex iop_mutex, run_cv_mutex;
   bool overlord_init_done = false;
   std::condition_variable iop_run_cv;
+  bool run_requested = false;  // (AI-assisted) signal_run_iop came (3DS), see wait_run_iop
 };
 
 #endif  // JAK1_IOP_THREAD_H

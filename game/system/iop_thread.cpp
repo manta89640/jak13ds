@@ -61,7 +61,15 @@ void IOP::wait_run_iop(
     std::chrono::time_point<std::chrono::steady_clock, std::chrono::microseconds> wakeup) {
   auto p = scoped_prof("krnlw");
   std::unique_lock<std::mutex> lk(run_cv_mutex);
+#ifdef __3DS__
+  // (AI-assisted) A signal that came while the IOP was running (not waiting yet) isn't lost: the
+  // IOP sleeps until its next scheduled wakeup only when nothing asked it to run meanwhile (that
+  // can be 16 ms now, IOP_Kernel::nextWakeup).
+  iop_run_cv.wait_until(lk, wakeup, [&] { return run_requested; });
+  run_requested = false;
+#else
   iop_run_cv.wait_until(lk, wakeup);
+#endif
 }
 
 void IOP::kill_from_ee() {
@@ -71,6 +79,9 @@ void IOP::kill_from_ee() {
 
 void IOP::signal_run_iop() {
   std::unique_lock<std::mutex> lk(run_cv_mutex);
+#ifdef __3DS__
+  run_requested = true;
+#endif
   iop_run_cv.notify_all();
 }
 

@@ -50,7 +50,14 @@ u32 LookMbx(s32 mbx) {
  * to do this.
  */
 void WaitMbx(s32 mbx) {
+#ifdef __3DS__
+  // (AI-assisted) Block until the message comes: the DGO RPC thread waits here while each object
+  // file is read, and every 100 us poll was an IOP wakeup on the game's core.
+  MsgPacket* msg = nullptr;
+  ReceiveMbx(&msg, mbx);
+#else
   while (!LookMbx(mbx)) {
     DelayThread(100);
   }
+#endif
 }

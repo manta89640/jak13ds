@@ -115,6 +115,9 @@ void CpuDisableIntr();
 void CpuEnableIntr();
 void SleepThread();
 void DelayThread(u32 usec);
+// (AI-assisted) see IOP_Kernel::DelayThreadNotifiable / SetMbxNotifyThread
+void DelayThreadNotifiable(u32 usec);
+void SetMbxNotifyThread(s32 mbx, s32 thid);
 void YieldThread();
 s32 CreateThread(ThreadParam* param);
 s32 ExitThread();
