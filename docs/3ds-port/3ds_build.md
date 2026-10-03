@@ -161,11 +161,34 @@ A `.3dsx` runs inside another title's memory:
 ### Screens and logs
 
 - Top screen: the game. Bottom screen: 3 lines of stats (fps, ms per frame for game logic,
-  rendering, waiting for vsync, heap use), then the log.
+  waiting for the render thread, rendering, waiting for vsync, idle; heap use), then the log.
 - On a crash (failed assert, CPU exception, GOAL `(break)`), the bottom screen shows what happened
   and the last log lines, and waits for START; then the app exits. CPU exceptions are shown only if
   Luma3DS lets the app handle them; otherwise Luma's exception screen appears (take a photo).
-- Logs: `sdmc:/3ds/jak1/data/log/stdout.log` (everything printed) and `gk.log` (debug level).
+- Logs: `sdmc:/3ds/jak1/data/log/stdout.log` (everything printed) and `gk.log` (the lg lines at
+  info level, debug with `debug_log = on`).
+- (AI-assisted) **Log writer** (`log_async = on`, the default): the threads that log only copy the
+  text into a 256 KB buffer; a writer thread (core 2, the lowest priority, so only when the render
+  thread and the mixer have nothing to do) writes it to both files about once a second (sooner at
+  16 KB, after an error line), one SD card write per file, and draws the bottom screen's log.
+  Before, every thread wrote and flushed its own lines on the SD card under one lock, and with the
+  IOP streaming a write blocked it for 100-400 ms: most of the long frames in hardware logs.
+  - The files are up to a second behind. A crash writes the rest before its screen comes up,
+    closing from the HOME Menu (and a normal exit) too; a hard power-off loses that second.
+  - If the writer had no time for 3 s (its core kept busy), the main thread writes the logs.
+  - A full buffer drops the oldest text: `[log] N bytes dropped` in both files says where.
+  - `[ctr] log writer thread on core N` at the top of stdout.log. `log_async = off`: each thread
+    writes its own lines, as before (the bottom screen's status lines are drawn without the
+    console's line flushes either way).
+  - Also on that thread: the GOAL file streams' writes (`pc-settings.gc` at every autosave; see
+    `game/sce/sif_ee.cpp`): a file is written in one go at close, and not at all when it holds the
+    same already. Files the game reads with them (the settings at boot) are read in one go at open.
+- (AI-assisted) Log volume: the `perf:`, `perf threads` and `perf waits` lines come every 5 s
+  (over the 5 s; the bottom screen still every second); one second in 60 is timed by section
+  (`perf sections`, unless `perf_sections = on`); `[hitch]` lines (frames of 100 ms or more) at
+  most one a second, the longest frame's, with `the longest of N long frames since frame F (T ms)`
+  when there were more. `perf:` has `wait` (the game waiting for the render thread in `sync-path`)
+  after `idle`; `logic` no longer includes it.
 - Old 3DS / Old 2DS: not enough memory (64 MB); the game says so and exits.
 - All settings are in one file, `sdmc:/3ds/jak1/config.ini` (`config_ini.md`): renderer
   settings, `args` (game arguments, default `-boot -cbackend`), `listener` (Wi-Fi REPL),
@@ -391,11 +414,12 @@ platform/3ds/tools/run_emu.sh --seconds 60 --gdb     # --gdb-script FILE for cus
   - Azahar's virtual SD card is `~/Library/Application Support/Azahar/sdmc` (`sdmc_directory` in
     `config/qt-config.ini`).
   - Its log is `~/Library/Application Support/Azahar/log/azahar_log.txt`.
-- **Logs:** gk writes these on the SD card, flushed line by line:
+- **Logs:** gk writes these on the SD card (the log writer thread, about once a second: the
+  last second of a run killed with SIGKILL can be missing):
   - `data/log/stdout.log`: everything printed, including GOAL output.
-  - `data/log/gk.log`: the lg log at debug level.
-  - Everything printed also goes to `svcOutputDebugString`, which shows up as `Debug.Emulated`
-    in Azahar's log.
+  - `data/log/gk.log`: the lg log at info level (debug with `debug_log = on`).
+  - Everything printed also goes to `svcOutputDebugString` right away, which shows up as
+    `Debug.Emulated` in Azahar's log.
   - `abort()` (asserts, `lg::die`) flushes the log and calls `svcBreak(PANIC)`. Azahar logs:
     "Emulated program broke execution! Reason: PANIC".
 - **Running without a visible terminal:**
