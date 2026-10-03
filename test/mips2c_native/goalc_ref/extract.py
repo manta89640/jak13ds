@@ -4,7 +4,9 @@
 Extracts GOAL functions compiled to C by goalc (--instruction-set c) into test fixtures: the
 reference versions of GOAL functions that have a native replacement (see goalc_ref.h).
 
-  extract.py CSRC_DIR OBJ_DIR OUT_DIR
+  extract.py CSRC_DIR OBJ_DIR OUT_DIR [MODULE...]
+
+With MODULE names, only those fixtures are written.
 
 CSRC_DIR / OBJ_DIR: out/jak1/csrc and out/jak1/obj of a project built with
   goalc --game jak1 --instruction-set c -c '(make-group "all-code")'
@@ -40,7 +42,20 @@ MODULES = {
         "vector-length",
         "vector-normalize!",
     ],
+    # (AI-assisted) GOALC_ABI_VERSION 4 (the others above are still version 2)
+    "joint": [
+        "add-scaled-matrix!",
+        "decomp-fixed",
+        "decomp-frame",
+        "decomp-request",
+        "finalize-joint-frame",
+    ],
+    "quaternion": [
+        "quaternion-normalize!",
+    ],
 }
+
+ABI_VERSION = 4
 
 
 def c_ident(name):
@@ -63,17 +78,20 @@ def segment0(obj_path):
 def functions(src):
     """gc_fN -> source text"""
     out = {}
-    for m in re.finditer(r"^static (?:u64|v128) gc_f(\d+)\(.*?^}\n", src, re.S | re.M):
+    for m in re.finditer(r"^static (?:u64|v128) gc_f(\d+)\([^;{]*\) \{\n.*?^}\n", src, re.S | re.M):
         out[int(m.group(1))] = m.group(0)
     return out
 
 
 def main():
-    if len(sys.argv) != 4:
+    if len(sys.argv) < 4:
         print(__doc__)
         sys.exit(2)
-    csrc, obj_dir, out_dir = sys.argv[1:]
+    csrc, obj_dir, out_dir = sys.argv[1:4]
+    only = sys.argv[4:]
     for mod, wanted in MODULES.items():
+        if only and mod not in only:
+            continue
         src = open(os.path.join(csrc, mod + ".c")).read()
         seg = segment0(os.path.join(obj_dir, mod + ".o"))
         names_m = re.search(r"static const char\* const gc_sym_names\[(\d+)\] = \{\n(.*?)\n\};", src,
@@ -96,7 +114,7 @@ def main():
             (tag,) = struct.unpack_from("<I", seg, off + 4)
             assert tag & 0x80000000, (mod, name, hex(tag))
             idx = tag & 0x7fffffff
-            arity = len(re.findall(r"u64 a\d+", funcs[idx].split("{", 1)[0]))
+            arity = len(re.findall(r"(?:u32|u64|v128) a\d+", funcs[idx].split("{", 1)[0]))
             entries.append((name, off, idx, arity))
             body.append(funcs[idx])
         lines = [
@@ -107,7 +125,12 @@ def main():
             '#include "goal_c_ops.h"',
             '#include "goalc_ref.h"',
             "",
-            '_Static_assert(GOALC_ABI_VERSION == 2, "regenerate the fixtures (extract.py)");',
+            f'_Static_assert(GOALC_ABI_VERSION == {ABI_VERSION}, "regenerate the fixtures (extract.py)");',
+            "",
+            # guarded direct calls (ABI 4) are never taken: every call goes through the symbol's
+            # value, which the harness points at the reference or a fake
+            *[f"#define GC_T{k} gc_nofn" for k in sorted(
+                {int(t) for b in body for t in re.findall(r"\bGC_T(\d+)\b", b)})],
             "",
             f"static int32_t gc_sym_offsets[{n_syms}];",
             "static uint32_t gc_seg_base[3];",

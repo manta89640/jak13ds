@@ -16,6 +16,7 @@ void register_ocean_tests();
 void register_ripple_tests();
 void register_sparticle_launcher_tests();
 void register_goal_collide_tests();
+void register_anim_tests();
 
 void register_all() {
   register_collide_func_tests();
@@ -29,5 +30,6 @@ void register_all() {
   register_ripple_tests();
   register_sparticle_launcher_tests();
   register_goal_collide_tests();
+  register_anim_tests();
 }
 }  // namespace tests

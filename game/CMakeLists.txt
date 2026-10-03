@@ -197,6 +197,7 @@ set(RUNTIME_SOURCE
         mips2c/jak1_functions/generic_merc.cpp
         mips2c/jak1_functions/generic_tie.cpp
         mips2c/jak1_functions/joint.cpp
+        mips2c/jak1_functions/native_anim.cpp
         mips2c/jak1_functions/native_collide_cache.cpp
         mips2c/jak1_functions/native_collide_edge_grab.cpp
         mips2c/jak1_functions/native_collide_func.cpp

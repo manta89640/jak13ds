@@ -103,6 +103,9 @@ void bind_goalc_reference(const std::string& name);
 //! function) is its compiled GOAL code: tests compare the native version with that, and calls of
 //! the "mips2c version" from other functions run it.
 void use_goalc_reference(const std::string& name);
+//! (AI-assisted) the same, with the compiled GOAL function `ref_name` as the reference (a native
+//! function registered under its own name, which GOAL calls instead of ref_name)
+void use_goalc_reference(const std::string& name, const std::string& ref_name);
 
 // ---------------------------------------------------------------------------
 // memory helpers (GOAL addresses)

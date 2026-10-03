@@ -44,6 +44,8 @@ extern const GoalcRefModule goalc_ref_collide_func;
 extern const GoalcRefModule goalc_ref_geometry;
 extern const GoalcRefModule goalc_ref_vector;
 #endif
+extern const GoalcRefModule goalc_ref_joint;
+extern const GoalcRefModule goalc_ref_quaternion;
 }
 
 // referenced by goalc_context.cpp (the kernel's suspend), never called here
@@ -68,14 +70,34 @@ constexpr int kMaxTrampolines = 512;
 u32 g_tramp_target[kMaxTrampolines];
 int g_tramp_count = 0;
 
+// (AI-assisted) the calling convention of GOALC_ABI_VERSION >= 3 (goal_c_abi.h): the low halves
+// of the arguments in a_i, the upper halves in h_i (garbage for arguments the caller doesn't pass
+// wide)
 template <int I>
-u64 trampoline(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6, u64 a7) {
-  const u64 args[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+u64 trampoline(u32 a0,
+               u32 a1,
+               u32 a2,
+               u32 a3,
+               u32 a4,
+               u32 a5,
+               u32 a6,
+               u32 a7,
+               float h0,
+               float h1,
+               float h2,
+               float h3,
+               float h4,
+               float h5,
+               float h6,
+               float h7) {
+  const u64 args[8] = {goalc_arg64(a0, h0), goalc_arg64(a1, h1), goalc_arg64(a2, h2),
+                       goalc_arg64(a3, h3), goalc_arg64(a4, h4), goalc_arg64(a5, h5),
+                       goalc_arg64(a6, h6), goalc_arg64(a7, h7)};
   return dispatch_call(g_tramp_target[I], args, goalc_pp);
 }
 
 template <int... Is>
-constexpr std::array<goalc_fn8, sizeof...(Is)> make_trampolines(std::integer_sequence<int, Is...>) {
+constexpr std::array<goalc_fnx, sizeof...(Is)> make_trampolines(std::integer_sequence<int, Is...>) {
   return {&trampoline<Is>...};
 }
 const auto g_trampolines = make_trampolines(std::make_integer_sequence<int, kMaxTrampolines>{});
@@ -89,8 +111,11 @@ struct RefCall {
 u64 ref_entry(void* p) {
   auto* c = (RefCall*)p;
   try {
-    return ((goalc_fn8)c->fn)(c->args[0], c->args[1], c->args[2], c->args[3], c->args[4],
-                              c->args[5], c->args[6], c->args[7]);
+    const u64* a = c->args;
+    return ((goalc_fnx)c->fn)((u32)a[0], (u32)a[1], (u32)a[2], (u32)a[3], (u32)a[4], (u32)a[5],
+                              (u32)a[6], (u32)a[7], goalc_hi_bits(a[0]), goalc_hi_bits(a[1]),
+                              goalc_hi_bits(a[2]), goalc_hi_bits(a[3]), goalc_hi_bits(a[4]),
+                              goalc_hi_bits(a[5]), goalc_hi_bits(a[6]), goalc_hi_bits(a[7]));
   } catch (...) {
     // can't unwind through goalc_call_on_stack
     c->error = std::current_exception();
@@ -117,12 +142,14 @@ void load_goalc_references() {
   goalc_st = kSymTable;
   goalc_pp = kProcess;
 #ifdef GOALC_REF_NONE
-  // (AI-assisted) built without the fixtures (run.sh with MIPS2C_TEST_NO_GOALC_REF=1: they are
-  // for another GOALC_ABI_VERSION): the tests against GOAL references fail, the others run
-  const std::initializer_list<const GoalcRefModule*> modules = {};
+  // (AI-assisted) built without the old fixtures (run.sh with MIPS2C_TEST_NO_GOALC_REF=1: they
+  // are for another GOALC_ABI_VERSION): the tests against them fail, the others run
+  const std::initializer_list<const GoalcRefModule*> modules = {&goalc_ref_joint,
+                                                                &goalc_ref_quaternion};
 #else
   const std::initializer_list<const GoalcRefModule*> modules = {
-      &goalc_ref_collide_func, &goalc_ref_geometry, &goalc_ref_vector};
+      &goalc_ref_collide_func, &goalc_ref_geometry, &goalc_ref_vector, &goalc_ref_joint,
+      &goalc_ref_quaternion};
 #endif
   for (const GoalcRefModule* m : modules) {
     const u32 seg = alloc_static(m->seg0_size, 16);

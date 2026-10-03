@@ -653,6 +653,19 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-anim-lod*")->value =
         anim_lod ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
   }
+  // (AI-assisted) config.ini anim_native (default on): the joint decompressor's requests and
+  // final normalize run as native code (joint.gc, game/mips2c/jak1_functions/native_anim.cpp).
+  // Off on other builds (the GOAL versions).
+  {
+    bool anim_native = false;
+#ifdef __3DS__
+    anim_native = ctr_config_bool("anim_native", 1);
+    lg::info("native animation decompressor {} (config.ini anim_native)",
+             anim_native ? "on" : "off");
+#endif
+    intern_from_c("*pc-3ds-anim-native*")->value =
+        anim_native ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+  }
 
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);
 
