@@ -315,8 +315,9 @@
 
 (define *print-login* #t)
 
-(defmethod load-continue ((this level))
-  "Continue loading a level from where we left off last time."
+(defun level-load-continue-step ((this level))
+  "Continue loading a level from where we left off last time: the original load-continue.
+   (AI-assisted) Returns #f if it had nothing to do (the next object isn't loaded yet)."
   ;; see if we are still linking some file
   (when (-> this linking)
     ;; do some more linking
@@ -331,34 +332,34 @@
          ;; finished loading the last object!
          (level-status-set! this 'loading-done)
          (level-status-set! this 'loaded))))
-    (return this))
+    (return #t))
   ;; otherwise, copy stuff that needs copying
   (when (-> *texture-relocate-later* memcpy)
     (relocate-later)
     (dgo-load-continue (the pointer (align64 (-> this heap current))))
-    (return this))
+    (return #t))
   ;; otherwise, check status
   (case (-> this status)
     (('loading)
      ;; we are still loading
      (let* ((last-obj #f)
             (a0-15 (dgo-load-get-next (& last-obj))))
-       (when a0-15
-         ;; something has finished loading!
-         (cond
-           ((not last-obj)
-            ;; not the last object. start linking
-            (cond
-              ((let ((linked (begin (profiler-start-event "ld-dgo-link") (dgo-load-link (the-as dgo-header a0-15) (-> this heap) *print-login* #f)))) (profiler-end-event) linked)
-               ;; linking finished (that was fast)
-               (if (not (-> *texture-relocate-later* memcpy)) (dgo-load-continue (the pointer (align64 (-> this heap current))))))
-              (else
-               ;; linking is not done, resume later.
-               (set! (-> this linking) #t))))
-           (else
-            ;; we're loading the last object now, which has different rules
-            (set! (-> this heap top) (-> this heap top-base))
-            (level-status-set! this 'loading-bt))))))
+       (if (not a0-15) (return #f))
+       ;; something has finished loading!
+       (cond
+         ((not last-obj)
+          ;; not the last object. start linking
+          (cond
+            ((let ((linked (begin (profiler-start-event "ld-dgo-link") (dgo-load-link (the-as dgo-header a0-15) (-> this heap) *print-login* #f)))) (profiler-end-event) linked)
+             ;; linking finished (that was fast)
+             (if (not (-> *texture-relocate-later* memcpy)) (dgo-load-continue (the pointer (align64 (-> this heap current))))))
+            (else
+             ;; linking is not done, resume later.
+             (set! (-> this linking) #t))))
+         (else
+          ;; we're loading the last object now, which has different rules
+          (set! (-> this heap top) (-> this heap top-base))
+          (level-status-set! this 'loading-bt)))))
     (('login)
      ;; run level login
      (with-profiler "ld-login"
@@ -372,6 +373,30 @@
           ;; will start login.
           (level-status-set! this 'loaded))
          (else (set! (-> this linking) #t))))))
+  #t)
+
+;; (AI-assisted) 3DS: time budget (__read-ee-timer ticks, 300 per microsecond) for load-continue
+;; in one frame, and how long it waits for the next object when there is nothing to link.
+(defconstant LOAD_CONTINUE_BUDGET (* 5 300000))
+(defconstant LOAD_CONTINUE_WAIT (* 300 500))
+
+(defmethod load-continue ((this level))
+  "Continue loading a level from where we left off last time."
+  (#if TARGET_3DS
+    ;; (AI-assisted) Keep going while the object files keep coming, up to a time budget. One step
+    ;; per frame (as on the PS2) made loading wait for the frame rate: village1's first 54
+    ;; objects took ~2.4 s for ~0.8 s of reading. The IOP loads the next object while one is
+    ;; linked and hands it over as soon as it's told to continue.
+    (let* ((start (__read-ee-timer))
+           (last-progress start))
+      (loop
+        (if (level-load-continue-step this) (set! last-progress (__read-ee-timer)))
+        (let ((now (__read-ee-timer)))
+          (if (or (not (or (= (-> this status) 'loading) (= (-> this status) 'loading-bt)))
+                  (>= (- now start) LOAD_CONTINUE_BUDGET)
+                  (>= (- now last-progress) LOAD_CONTINUE_WAIT))
+            (return this)))))
+    (level-load-continue-step this))
   this)
 
 (defmethod load-begin ((this level))
