@@ -77,9 +77,26 @@ class Reader {
   uint32_t size() const { return m_hdr.size; }
   uint32_t expected_crc32() const { return m_hdr.crc32; }
   const Header& header() const { return m_hdr; }
+  FILE* file() const { return m_fp; }
   // copy bytes [offset, offset + len) of the original file to dst (clamped to the file size).
   // Returns the number of bytes copied, or -1 on a read / decode error.
   int64_t read(uint32_t offset, void* dst, uint32_t len);
+
+  // Read-ahead: each card read takes up to `bytes` of whole compressed blocks (at least one
+  // block) into a window that the next blocks are decoded from. 0 (the default): one block per
+  // card read. On the 3DS every SD card request costs several ms of its own, so a DGO read in
+  // ~31 KB blocks ran at ~3 MB/s. The window is allocated at the first read (no window when that
+  // fails: one block per read, as without).
+  void set_read_ahead(uint32_t bytes);
+  // Read-ahead doesn't go past the block that holds byte end - 1 of the original file (0: the
+  // end of the file): a load of part of a file (a spool chunk) reads no more than that part.
+  void set_read_end(uint32_t end) { m_read_end = end; }
+  // Free the buffers, keeping the open file, its index and (keep_block) the last decoded block:
+  // for a file that stays open between loads (fake ISO). They are allocated again when needed.
+  // Also ends the read-ahead and the read end.
+  void release_buffers(bool keep_block);
+  // zero the totals below (a file kept open for the next load)
+  void reset_stats();
 
   // totals since open, for the load-time log
   uint64_t sd_bytes = 0;    // compressed bytes read from the card
@@ -88,9 +105,11 @@ class Reader {
   uint64_t decode_us = 0;   // time in the decoder
   uint32_t blocks = 0;        // blocks decoded
   uint64_t max_decode_us = 0;  // slowest block
+  uint32_t sd_reads = 0;      // card reads (fread calls)
 
  private:
   bool load_block(uint32_t block, uint8_t* dst);
+  bool window(uint32_t block, const uint8_t** src);
   bool read_at(uint32_t pos, void* dst, uint32_t len);
   FILE* m_fp = nullptr;
   Header m_hdr{};
@@ -101,6 +120,12 @@ class Reader {
   uint8_t* m_cache = nullptr;  // one decoded block, for reads that don't cover whole blocks
   int64_t m_cache_block = -1;
   uint8_t* m_hbuf = nullptr;   // codec 3: one block's frame headers
+  // read-ahead window: compressed bytes [m_ra_pos, m_ra_pos + m_ra_len) of the file
+  uint8_t* m_ra = nullptr;
+  uint32_t m_ra_cap = 0;  // 0: no read-ahead
+  uint32_t m_ra_pos = 0;
+  uint32_t m_ra_len = 0;
+  uint32_t m_read_end = 0;
 };
 
 }  // namespace iso_cz

@@ -93,6 +93,45 @@ Reader::~Reader() {
   free(m_cbuf);
   free(m_cache);
   free(m_hbuf);
+  free(m_ra);
+}
+
+void Reader::set_read_ahead(uint32_t bytes) {
+  // a window holds at least one whole block
+  const uint32_t cap = bytes < m_hdr.block_size ? 0 : bytes;
+  if (cap != m_ra_cap) {
+    free(m_ra);
+    m_ra = nullptr;
+    m_ra_len = 0;
+    m_ra_cap = cap;
+  }
+}
+
+void Reader::release_buffers(bool keep_block) {
+  free(m_cbuf);
+  m_cbuf = nullptr;
+  free(m_hbuf);
+  m_hbuf = nullptr;
+  free(m_ra);
+  m_ra = nullptr;
+  m_ra_len = 0;
+  m_ra_cap = 0;
+  m_read_end = 0;
+  if (!keep_block) {
+    free(m_cache);
+    m_cache = nullptr;
+    m_cache_block = -1;
+  }
+}
+
+void Reader::reset_stats() {
+  sd_bytes = 0;
+  out_bytes = 0;
+  sd_us = 0;
+  decode_us = 0;
+  blocks = 0;
+  max_decode_us = 0;
+  sd_reads = 0;
 }
 
 bool Reader::open(FILE* fp, const char* path) {
@@ -134,11 +173,8 @@ bool Reader::open(FILE* fp, const char* path) {
     }
   }
   m_offsets = m_index->data();
-  m_cbuf = (uint8_t*)malloc(m_hdr.block_size);
-  if (m_hdr.codec == CODEC_ZSTD_ADPCM) {
-    m_hbuf = (uint8_t*)malloc(m_hdr.block_size / 8 + 2);
-  }
-  return m_cbuf != nullptr && (m_hdr.codec != CODEC_ZSTD_ADPCM || m_hbuf);
+  // the block buffers are allocated when a read needs them (release_buffers)
+  return true;
 }
 
 bool Reader::read_at(uint32_t pos, void* dst, uint32_t len) {
@@ -151,7 +187,45 @@ bool Reader::read_at(uint32_t pos, void* dst, uint32_t len) {
   m_pos = ok ? pos + len : ~0u;
   sd_us += now_us() - t0;
   sd_bytes += len;
+  sd_reads++;
   return ok;
+}
+
+// The compressed bytes of `block` in the read-ahead window, read from the card (from this block
+// on) when the window doesn't hold them. *src = nullptr if there is no window (no memory for it).
+// False on a read error.
+bool Reader::window(uint32_t block, const uint8_t** src) {
+  *src = nullptr;
+  const uint32_t pos = m_offsets[block];
+  const uint32_t end = m_offsets[block + 1];
+  if (m_ra && pos >= m_ra_pos && end <= m_ra_pos + m_ra_len) {
+    *src = m_ra + (pos - m_ra_pos);
+    return true;
+  }
+  if (!m_ra) {
+    m_ra = (uint8_t*)malloc(m_ra_cap);
+    if (!m_ra) {
+      m_ra_cap = 0;  // one block per read from now on
+      return true;
+    }
+  }
+  // whole blocks from this one on, as many as fit (at least this one: the window holds a block)
+  uint32_t last = m_hdr.block_count;
+  if (m_read_end) {
+    last = std::min(last, (m_read_end - 1) / m_hdr.block_size + 1);
+  }
+  uint32_t next = block + 1;
+  while (next < last && m_offsets[next + 1] - pos <= m_ra_cap) {
+    next++;
+  }
+  m_ra_len = 0;
+  if (!read_at(pos, m_ra, m_offsets[next] - pos)) {
+    return false;
+  }
+  m_ra_pos = pos;
+  m_ra_len = m_offsets[next] - pos;
+  *src = m_ra;
+  return true;
 }
 
 // decode a whole block into dst (room for its full length)
@@ -159,28 +233,46 @@ bool Reader::load_block(uint32_t block, uint8_t* dst) {
   const uint32_t start = block * m_hdr.block_size;
   const uint32_t out_len = std::min(m_hdr.block_size, m_hdr.size - start);
   const uint32_t in_len = m_offsets[block + 1] - m_offsets[block];
+  const uint8_t* src = nullptr;
+  if (m_ra_cap && !window(block, &src)) {
+    return false;
+  }
   if (in_len == out_len) {
     // stored
+    if (src) {
+      memcpy(dst, src, out_len);
+      return true;
+    }
     return read_at(m_offsets[block], dst, out_len);
   }
-  if (!read_at(m_offsets[block], m_cbuf, in_len)) {
+  if (!src) {
+    if (!m_cbuf && !(m_cbuf = (uint8_t*)malloc(m_hdr.block_size))) {
+      return false;
+    }
+    if (!read_at(m_offsets[block], m_cbuf, in_len)) {
+      return false;
+    }
+    src = m_cbuf;
+  }
+  if (m_hdr.codec == CODEC_ZSTD_ADPCM && !m_hbuf &&
+      !(m_hbuf = (uint8_t*)malloc(m_hdr.block_size / 8 + 2))) {
     return false;
   }
   const uint64_t t0 = now_us();
   bool ok;
   if (m_hdr.codec == CODEC_LZ4) {
-    ok = LZ4_decompress_safe((const char*)m_cbuf, (char*)dst, (int)in_len, (int)out_len) ==
+    ok = LZ4_decompress_safe((const char*)src, (char*)dst, (int)in_len, (int)out_len) ==
          (int)out_len;
   } else if (m_hdr.codec == CODEC_ZSTD) {
-    ok = zstd_decode(dst, out_len, m_cbuf, in_len);
+    ok = zstd_decode(dst, out_len, src, in_len);
   } else {
     // ADPCM split: headers to m_hbuf, nibbles to the end of dst, then interleaved in place
     const uint32_t frames = out_len / 16;
     uint32_t hlen;
-    memcpy(&hlen, m_cbuf, 4);
+    memcpy(&hlen, src, 4);
     ok = in_len >= 4 && hlen <= in_len - 4 &&
-         zstd_decode(m_hbuf, 2 * frames, m_cbuf + 4, hlen) &&
-         zstd_decode(dst + 2 * frames, out_len - 2 * frames, m_cbuf + 4 + hlen, in_len - 4 - hlen);
+         zstd_decode(m_hbuf, 2 * frames, src + 4, hlen) &&
+         zstd_decode(dst + 2 * frames, out_len - 2 * frames, src + 4 + hlen, in_len - 4 - hlen);
     if (ok) {
       adpcm_join_in_place(dst, out_len, m_hbuf);
     }
