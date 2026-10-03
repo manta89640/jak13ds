@@ -22,6 +22,7 @@ screenshots = 0            # N: save the top screen every N frames to data/log
 pad_script =               # FILE (relative to sdmc:/3ds/jak1): scripted controller input for tests
 debug_log = off            # on: debug lines in data/log/gk.log (slow: every line is an SD card write)
 io_checksum = off          # on: log the CRC-32 of the bytes the game read from each big file (debug; "(ok)" for checked .ogz files; with it, every .ogz file gets an [io] line)
+io_cache = on              # off: no files kept open between loads, no read-ahead (big SD card reads), no cache of spool chunk 0 (the Oct 3 file reading)
 ```
 
 ## Where it goes

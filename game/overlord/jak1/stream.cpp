@@ -256,7 +256,8 @@ void* RPC_STR(unsigned int fno, void* _cmd, int y) {
           LoadISOFileChunkToEE(file_record, cmd->ee_addr, chunk_len,
                                sCacheJ1[cache_entry].header.sectors[cmd->chunk_id], capture);
       if (capture) {
-        if (loaded == (s32)chunk_len) {
+        // (not if a level load started meanwhile: LoadDGO emptied the cache for it)
+        if (loaded == (s32)chunk_len && sLoadDGO.cmd_id == 0) {
           chunk_cache_add(file_record, capture, chunk_len);
         } else {
           free(capture);
