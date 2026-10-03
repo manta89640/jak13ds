@@ -996,8 +996,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   auto cell_of_detail = [&](int detail) {
     return (detail == 3 ? opt.shrub_cell : opt.cell_meters) * 4096.f;
   };
-  // (detail, cell) -> triangle indices
-  std::map<std::tuple<int, int, int, int>, std::vector<u32>> cells;
+  // (detail, cell, kind) -> triangle indices. (AI-assisted) The kind (Draw::kind: tfrag, tie,
+  // shrub) keeps every chunk to one (Chunk::kind); with the default tiers it splits nothing.
+  using CellKey = std::tuple<int, int, int, int, int>;
+  std::map<CellKey, std::vector<u32>> cells;
   for (u32 i = 0; i < cv.tris.size(); i++) {
     const auto& t = cv.tris[i];
     float cx = 0, cy = 0, cz = 0;
@@ -1008,9 +1010,169 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     const float cell = cell_of_detail((int)t.detail);
     auto key = std::make_tuple((int)(t.detail + 4 * t.tier), (int)std::floor(cx / 3 / cell),
-                               (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell));
+                               (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell),
+                               (int)cv.draw_keys[t.draw_key].kind);
     cells[key].push_back(i);
   }
+
+  // (AI-assisted) The chunks' triangles and vertices first: their quantizing grids depend on each
+  // other (see below).
+  struct ChunkPlan {
+    CellKey key;
+    std::vector<u32> tris;               // triangle ids, in draw order
+    std::vector<u32> src;                // source vertices in local order
+    std::unordered_map<u32, u16> local;  // source vertex -> local index
+    double grid = 1;                     // quantizing step (game units), a power of two
+    double origin[3] = {0, 0, 0};        // a multiple of grid (and a float)
+    double old_step = 0;  // the step of the per-chunk bounding box grid used before (stats)
+  };
+  std::vector<ChunkPlan> plans;
+  for (auto& [key, tri_ids] : cells) {
+    // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
+    // visibility id, so a draw's triangles of one drawable are one run (c3l::VisRun)
+    std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
+      const auto& ta = cv.tris[a];
+      const auto& tb = cv.tris[b];
+      return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
+    });
+    size_t pos = 0;
+    while (pos < tri_ids.size()) {
+      // gather triangles until 65535 unique vertices
+      ChunkPlan cp;
+      cp.key = key;
+      size_t end = pos;
+      while (end < tri_ids.size()) {
+        const auto& t = cv.tris[tri_ids[end]];
+        int new_verts = 0;
+        for (int k = 0; k < 3; k++) {
+          new_verts += cp.local.count(t.v[k]) ? 0 : 1;
+        }
+        if (cp.src.size() + new_verts > 65535) {
+          break;
+        }
+        for (int k = 0; k < 3; k++) {
+          if (!cp.local.count(t.v[k])) {
+            cp.local[t.v[k]] = cp.src.size();
+            cp.src.push_back(t.v[k]);
+          }
+        }
+        end++;
+      }
+      cp.tris.assign(tri_ids.begin() + pos, tri_ids.begin() + end);
+      plans.push_back(std::move(cp));
+      pos = end;
+    }
+  }
+
+  // ---- (AI-assisted) quantizing grids ----
+  // A chunk's positions are on a grid of a power of two game units: the finest whose signed
+  // 16-bit range around the chunk's centre (a multiple of the grid) holds the chunk. A position
+  // that is in several chunks (a surface crossing a cell border, a cell split at 65535 vertices,
+  // the two tfrag tiers) is first put on the coarsest of their grids: a multiple of each one's
+  // own, so every chunk holding it reconstructs it exactly (origin + pos * scale) and surfaces
+  // stay closed. Before, each chunk had its own bounding box grid (minimum + 0..32767 steps of
+  // extent / 32767), the same vertex landed 3-9 mm apart in neighbouring chunks, and the
+  // background showed through the cracks.
+  struct PosKey {
+    u32 x, y, z;
+    bool operator==(const PosKey& o) const { return x == o.x && y == o.y && z == o.z; }
+  };
+  struct PosKeyHash {
+    size_t operator()(const PosKey& k) const {
+      return (size_t)k.x * 0x9E3779B97F4A7C15ull ^ (size_t)k.y * 0xC2B2AE3D27D4EB4Full ^
+             (size_t)k.z * 0x165667B19E3779F9ull;
+    }
+  };
+  auto pos_key = [&](u32 s) {
+    const auto& v = cv.verts[s];
+    auto bits = [](float f) {
+      u32 b;
+      f = f == 0.f ? 0.f : f;  // -0 and +0: one position
+      memcpy(&b, &f, 4);
+      return b;
+    };
+    return PosKey{bits(v.x), bits(v.y), bits(v.z)};
+  };
+  struct Snap {
+    double grid = 0;  // the coarsest grid of the chunks holding the position
+    u32 last = UINT32_MAX, chunks = 0;
+  };
+  std::unordered_map<PosKey, Snap, PosKeyHash> snaps;
+  auto on_grid = [](float p, double grid) { return std::round((double)p / grid) * grid; };
+  for (auto& cp : plans) {
+    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    for (u32 s : cp.src) {
+      const auto& v = cv.verts[s];
+      const float p[3] = {v.x, v.y, v.z};
+      for (int c = 0; c < 3; c++) {
+        mn[c] = std::min(mn[c], p[c]);
+        mx[c] = std::max(mx[c], p[c]);
+      }
+    }
+    const float extent = std::max({mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2], 1.f});
+    cp.old_step = extent / 32767.f;
+    // 65532 steps: room for the centre's rounding to the grid
+    cp.grid = std::exp2(std::ceil(std::log2(extent / 65532.0)));
+  }
+  int grid_rounds = 0;
+  for (bool changed = true; changed; grid_rounds++) {
+    changed = false;
+    snaps.clear();
+    for (u32 ci = 0; ci < plans.size(); ci++) {
+      for (u32 s : plans[ci].src) {
+        auto& sn = snaps[pos_key(s)];
+        sn.grid = std::max(sn.grid, plans[ci].grid);
+        if (sn.last != ci) {
+          sn.last = ci;
+          sn.chunks++;
+        }
+      }
+    }
+    // the origin: the centre of the snapped positions on the chunk's grid. A coarser snap can
+    // push a position out of the 16-bit range: then the chunk's grid doubles, and all again.
+    for (auto& cp : plans) {
+      double mn[3] = {1e300, 1e300, 1e300}, mx[3] = {-1e300, -1e300, -1e300};
+      for (u32 s : cp.src) {
+        const auto& v = cv.verts[s];
+        const double g = snaps.at(pos_key(s)).grid;
+        const double p[3] = {on_grid(v.x, g), on_grid(v.y, g), on_grid(v.z, g)};
+        for (int c = 0; c < 3; c++) {
+          mn[c] = std::min(mn[c], p[c]);
+          mx[c] = std::max(mx[c], p[c]);
+        }
+      }
+      bool fits = true;
+      for (int c = 0; c < 3; c++) {
+        // as a float (the file's): still a multiple of the grid (a float that isn't one is
+        // further than 2^24 grids from 0, where floats are multiples of 2 grids)
+        const double o = (double)(float)(std::round((mn[c] + mx[c]) * 0.5 / cp.grid) * cp.grid);
+        cp.origin[c] = o;
+        fits = fits && (mx[c] - o) / cp.grid <= 32767.0 && (mn[c] - o) / cp.grid >= -32768.0;
+      }
+      if (!fits) {
+        cp.grid *= 2;
+        changed = true;
+      }
+    }
+  }
+  // stats: steps before / after, positions in several chunks and how they reconstruct
+  struct QuantStats {
+    std::vector<double> old_steps, new_steps;
+    size_t coarser_chunks = 0;  // grid coarser than the old step (none expected)
+    size_t shared = 0;          // positions in more than one chunk
+    size_t shared_mismatch = 0;  // ... reconstructed differently by two of them (must be 0)
+    size_t snapped_coarser = 0;  // vertices on a coarser grid than their chunk's (shared)
+    double old_err = 0, new_err = 0;  // largest position error (game units)
+  } qs;
+  for (const auto& cp : plans) {
+    qs.old_steps.push_back(cp.old_step);
+    qs.new_steps.push_back(cp.grid);
+    qs.coarser_chunks += cp.grid > cp.old_step;
+  }
+  for (const auto& [k, sn] : snaps) {
+    qs.shared += sn.chunks > 1;
+  }
+  std::unordered_map<PosKey, std::array<double, 3>, PosKeyHash> shared_pos;
 
   std::vector<c3l::Chunk> chunks;
   std::vector<c3l::Vertex> out_verts;
@@ -1023,37 +1185,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   VcacheStats vc_before, vc_after;
   size_t welded_verts = 0;
 
-  for (auto& [key, tri_ids] : cells) {
-    // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
-    // visibility id, so a draw's triangles of one drawable are one run (c3l::VisRun)
-    std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
-      const auto& ta = cv.tris[a];
-      const auto& tb = cv.tris[b];
-      return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
-    });
-    size_t pos = 0;
-    while (pos < tri_ids.size()) {
-      // gather triangles until 65535 unique vertices
-      std::unordered_map<u32, u16> local;
-      std::vector<u32> local_src;
-      size_t end = pos;
-      while (end < tri_ids.size()) {
-        const auto& t = cv.tris[tri_ids[end]];
-        int new_verts = 0;
-        for (int k = 0; k < 3; k++) {
-          new_verts += local.count(t.v[k]) ? 0 : 1;
-        }
-        if (local_src.size() + new_verts > 65535) {
-          break;
-        }
-        for (int k = 0; k < 3; k++) {
-          if (!local.count(t.v[k])) {
-            local[t.v[k]] = local_src.size();
-            local_src.push_back(t.v[k]);
-          }
-        }
-        end++;
-      }
+  for (const auto& cp : plans) {
+    {
+      const auto& key = cp.key;
+      const auto& local = cp.local;
+      const auto& local_src = cp.src;
 
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
@@ -1066,36 +1202,63 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                     : detail == 2 ? opt.medium_dist * 4096.f
                     : detail == 3 ? opt.shrub_dist * 4096.f
                                   : 0.f;
-      float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-      for (u32 s : local_src) {
-        const auto& v = cv.verts[s];
-        float p[3] = {v.x, v.y, v.z};
+      // (AI-assisted) Draw::kind 0 tfrag, 1 tie, 2 shrub
+      ch.kind = (u32)std::get<4>(key) + c3l::CHUNK_KIND_TFRAG;
+      // (AI-assisted) the positions on their grid (see "quantizing grids"), the old quantizer's
+      // error for the stats
+      std::vector<std::array<double, 3>> snapped(local_src.size());
+      double mn[3] = {1e300, 1e300, 1e300}, mx[3] = {-1e300, -1e300, -1e300};
+      double omn[3] = {1e300, 1e300, 1e300};
+      for (size_t i = 0; i < local_src.size(); i++) {
+        const auto& v = cv.verts[local_src[i]];
+        const double g = snaps.at(pos_key(local_src[i])).grid;
+        const float p[3] = {v.x, v.y, v.z};
+        qs.snapped_coarser += g > cp.grid;
         for (int c = 0; c < 3; c++) {
-          mn[c] = std::min(mn[c], p[c]);
-          mx[c] = std::max(mx[c], p[c]);
+          snapped[i][c] = on_grid(p[c], g);
+          mn[c] = std::min(mn[c], snapped[i][c]);
+          mx[c] = std::max(mx[c], snapped[i][c]);
+          omn[c] = std::min(omn[c], (double)p[c]);
+          qs.new_err = std::max(qs.new_err, std::abs(snapped[i][c] - p[c]));
         }
       }
-      float extent = std::max({mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2], 1.f});
-      ch.scale = extent / 32767.f;
+      for (size_t i = 0; i < local_src.size(); i++) {
+        const auto& v = cv.verts[local_src[i]];
+        const float p[3] = {v.x, v.y, v.z};
+        const float old_scale = (float)cp.old_step;
+        for (int c = 0; c < 3; c++) {
+          const float o = (float)omn[c];
+          const int q = std::clamp((int)std::lround((p[c] - o) / old_scale), 0, 32767);
+          qs.old_err = std::max(qs.old_err, std::abs((double)o + q * (double)old_scale - p[c]));
+        }
+      }
+      ch.scale = (float)cp.grid;
       float rad = 0;
       for (int c = 0; c < 3; c++) {
-        ch.origin[c] = mn[c];
-        ch.bsphere[c] = (mn[c] + mx[c]) / 2;
+        ch.origin[c] = (float)cp.origin[c];
+        ch.bsphere[c] = (float)((mn[c] + mx[c]) / 2);
       }
-      for (u32 s : local_src) {
-        const auto& v = cv.verts[s];
-        float dx = v.x - ch.bsphere[0], dy = v.y - ch.bsphere[1], dz = v.z - ch.bsphere[2];
-        rad = std::max(rad, std::sqrt(dx * dx + dy * dy + dz * dz));
+      for (const auto& p : snapped) {
+        const double dx = p[0] - ch.bsphere[0], dy = p[1] - ch.bsphere[1], dz = p[2] - ch.bsphere[2];
+        rad = std::max(rad, (float)std::sqrt(dx * dx + dy * dy + dz * dz));
       }
       ch.bsphere[3] = rad;
       ch.first_vertex = out_verts.size();
       ch.vertex_count = local_src.size();
-      for (u32 s : local_src) {
-        const auto& v = cv.verts[s];
+      for (size_t i = 0; i < local_src.size(); i++) {
+        const auto& v = cv.verts[local_src[i]];
         c3l::Vertex o{};
-        float p[3] = {v.x, v.y, v.z};
+        std::array<double, 3> rec;
         for (int c = 0; c < 3; c++) {
-          o.pos[c] = (s16)std::clamp((int)std::lround((p[c] - ch.origin[c]) / ch.scale), 0, 32767);
+          // an integer in the signed 16-bit range (the grids were chosen so)
+          const double q = (snapped[i][c] - cp.origin[c]) / cp.grid;
+          o.pos[c] = (s16)std::clamp((long)std::lround(q), -32768l, 32767l);
+          // what the 3DS reconstructs, exactly: origin + pos * scale
+          rec[c] = (double)ch.origin[c] + (double)o.pos[c] * (double)ch.scale;
+        }
+        if (snaps.at(pos_key(local_src[i])).chunks > 1) {
+          auto [it, fresh] = shared_pos.emplace(pos_key(local_src[i]), rec);
+          qs.shared_mismatch += !fresh && it->second != rec;
         }
         o.st[0] = (s16)std::clamp((int)std::lround(v.s * 1024.f), -32768, 32767);
         o.st[1] = (s16)std::clamp((int)std::lround(v.t * 1024.f), -32768, 32767);
@@ -1106,8 +1269,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       u32 cur_key = UINT32_MAX;
       std::vector<c3l::VisRun> runs;
       bool any_vis = false;
-      for (size_t i = pos; i < end; i++) {
-        const auto& t = cv.tris[tri_ids[i]];
+      for (size_t i = 0; i < cp.tris.size(); i++) {
+        const auto& t = cv.tris[cp.tris[i]];
         const bool new_draw = t.draw_key != cur_key;
         if (new_draw) {
           cur_key = t.draw_key;
@@ -1211,8 +1374,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         out_runs.insert(out_runs.end(), runs.begin(), runs.end());
       }
       chunks.push_back(ch);
-      pos = end;
     }
+  }
+  if (qs.shared_mismatch) {
+    lg::error("{}: {} positions in several chunks reconstruct differently", in.stem().string(),
+              qs.shared_mismatch);
+    return false;
   }
 
   // ---- textures (in parallel: ETC1 encoding is slow) ----
@@ -1452,6 +1619,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                       : "");
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
+  }
+  if (!plans.empty()) {
+    // (AI-assisted) the quantizing grids against the old per-chunk bounding box steps
+    auto median = [](std::vector<double> v) {
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    lg::info("{}: quantizing: chunk steps (game units) median {:.3f} max {:.2f} -> powers of two "
+             "median {:g} max {:g} ({} chunks coarser, {} rounds); {} positions in several chunks, "
+             "all reconstructed identically: {} ({} differ), {} vertices on a coarser grid of "
+             "another chunk; largest position error {:.2f} -> {:.2f} units",
+             level.level_name, median(qs.old_steps),
+             *std::max_element(qs.old_steps.begin(), qs.old_steps.end()), median(qs.new_steps),
+             *std::max_element(qs.new_steps.begin(), qs.new_steps.end()), qs.coarser_chunks,
+             grid_rounds, qs.shared, qs.shared_mismatch == 0 ? "yes" : "NO", qs.shared_mismatch,
+             qs.snapped_coarser, qs.old_err, qs.new_err);
   }
   {
     // (AI-assisted) how well the ETC1 / ETC1A4 texels compress (64 KB pieces), for --etc1-rdo
