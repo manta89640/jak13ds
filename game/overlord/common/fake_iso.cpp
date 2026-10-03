@@ -176,6 +176,20 @@ FileRecord* FS_FindIN(const char* iso_name) {
   return nullptr;
 }
 
+#ifdef __3DS__
+FileRecord* FS_FindINQuiet(const char* iso_name) {
+  const uint32_t* buff = (const uint32_t*)iso_name;
+  for (uint32_t i = 0; i < fake_iso_entry_count; i++) {
+    const uint32_t* ref = (uint32_t*)sFiles[i].name;
+    if (ref[0] == buff[0] && ref[1] == buff[1] && ref[2] == buff[2]) {
+      return sFiles + i;
+    }
+  }
+  lg::debug("[FAKEISO] no file {}", iso_name);
+  return nullptr;
+}
+#endif
+
 /*!
  * Build a full file path for a FileRecord.
  */
@@ -188,7 +202,11 @@ const char* get_file_path(FileRecord* fr) {
  * Determine the length of a file. This isn't very fast, but nobody checks file sizes extremely
  * quickly. This is an ISO FS API Function
  */
+#ifdef __3DS__
+static uint32_t file_length(FileRecord* fr, s32 thread_to_wake) {
+#else
 uint32_t FS_GetLength(FileRecord* fr) {
+#endif
   const char* path = get_file_path(fr);
   file_util::assert_file_exists(path, "fake_iso FS_GetLength");
   FILE* fp = file_util::open_file(path, "rb");
@@ -200,6 +218,7 @@ uint32_t FS_GetLength(FileRecord* fr) {
     const bool ok = fread(&h, sizeof(h), 1, fp) == 1;
     fclose(fp);
     ASSERT_MSG(ok, fmt::format("[FAKEISO] bad compressed file {}", path));
+    iop::iWakeupThread(thread_to_wake);
     return h.size;
   }
 #endif
@@ -207,8 +226,27 @@ uint32_t FS_GetLength(FileRecord* fr) {
   uint32_t len = ftell(fp);
   rewind(fp);
   fclose(fp);
+#ifdef __3DS__
+  iop::iWakeupThread(thread_to_wake);
+#endif
   return len;
 }
+
+#ifdef __3DS__
+uint32_t FS_GetLength(FileRecord* fr) {
+  // (AI-assisted) The files don't change while the game runs: the length found by the first open
+  // of the file (the fake ISO's open) or call is kept. Every single-file load asked for it (stat,
+  // open, read, close: several SD card requests) on the IOP thread, where every IOP service waits
+  // for them. A length not known yet is found on a reader thread, like a read.
+  if (fr->size != 0xffffffff) {
+    return fr->size;
+  }
+  auto future = thpool.submit(file_length, fr, iop::GetThreadId());
+  iop::SleepThread();
+  fr->size = future.get();
+  return fr->size;
+}
+#endif
 
 bool is_file_compressed(FileRecord* fr) {
   ASSERT(fr->location < fake_iso_entry_count);

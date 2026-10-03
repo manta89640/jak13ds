@@ -1,5 +1,7 @@
 
 #pragma once
+#include <span>
+
 #include "common/common_types.h"
 
 #include "game/sound/989snd/plugin.h"
@@ -75,6 +77,9 @@ snd::BankHandle snd_BankLoadEx(const char* filepath,
                                s32 data_offset,
                                u32 spu_mem_loc,
                                u32 spu_mem_size);
+// (AI-assisted) Like snd_BankLoadEx, for a bank that is already in memory (the data from the
+// offset on). The data is copied. Any thread (the parse runs outside the player's lock).
+snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data);
 
 void snd_BankLoadFromIOPPartialEx_Start();
 void snd_BankLoadFromIOPPartialEx(const u8* data, u32 length, u32 spu_mem_loc, u32 spu_mem_size);

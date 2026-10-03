@@ -23,6 +23,10 @@ const char* get_file_path(FileRecord* fr);
 bool is_file_compressed(FileRecord* fr);
 FileRecord* FS_Find(const char* name);
 FileRecord* FS_FindIN(const char* iso_name);
+#ifdef __3DS__
+// (AI-assisted) FS_FindIN for a file that may not be there: no error line (an SD card write)
+FileRecord* FS_FindINQuiet(const char* iso_name);
+#endif
 uint32_t FS_GetLength(FileRecord* fr);
 void LoadMusicTweaks();
 extern u32 fake_iso_entry_count;

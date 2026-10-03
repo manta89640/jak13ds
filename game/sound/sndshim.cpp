@@ -242,6 +242,14 @@ snd::BankHandle snd_BankLoadEx(const char* filename,
   }
 }
 
+snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data) {
+  if (player) {
+    return player->LoadBank(data);
+  } else {
+    return 0;
+  }
+}
+
 namespace {
 bool started = false;
 std::vector<u8> sbk_data;

@@ -51,6 +51,12 @@ struct LoadStackEntry {
   uint32_t crc;       // io_checksum = on: CRC-32 of the bytes read, while they are sequential
   uint32_t crc_start;  // file offset of the first byte in crc
   uint32_t crc_next;  // file offset the next read must start at for crc to stay valid (~0: not)
+  uint32_t file_len;  // bytes, found when the file is opened (not asked for at every read)
+  uint32_t read_end;  // FS_SetReadHint: reads stop at this file offset (0: the end of the file)
+  bool stream;        // FS_SetReadHint: a spool chunk or a voice stream (FS_StreamBusy)
+  uint32_t slow_reads;   // reads of 20 ms or more, summed up at FS_Close
+  uint32_t slow_ms;      // their total time
+  uint32_t slow_max_ms;  // the slowest
 #endif
 };
 
@@ -117,6 +123,11 @@ struct IsoCommandLoadSingle : public IsoMessage {
   u32 offset;               // 0x38
   u8* dst_ptr;              // 0x3c
   s32 bytes_done;           // 0x40
+#ifdef __3DS__
+  // (AI-assisted) load to EE: also copy the bytes here (room for length_to_copy), for the spool
+  // chunk cache (stream.cpp). nullptr: no copy.
+  u8* capture;
+#endif
 };
 
 /*!

@@ -24,5 +24,13 @@ void UnpauseVAGStream();
 s32 LoadISOFileToIOP(FileRecord* file, void* addr, uint32_t length);
 s32 LoadISOFileToEE(FileRecord* file, uint32_t ee_addr, uint32_t length);
 s32 LoadISOFileChunkToEE(FileRecord* file, uint32_t dest_addr, uint32_t length, uint32_t offset);
+#ifdef __3DS__
+// (AI-assisted) and copy the loaded bytes to capture as well (room for length bytes)
+s32 LoadISOFileChunkToEE(FileRecord* file,
+                         uint32_t dest_addr,
+                         uint32_t length,
+                         uint32_t offset,
+                         u8* capture);
+#endif
 
 }  // namespace jak1
