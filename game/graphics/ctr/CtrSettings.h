@@ -82,8 +82,10 @@ struct CtrSettings {
   bool gpu_profile = false;
   // (AI-assisted) the GPU's own counters (busy % of each pipeline stage, memory traffic) over 10 s
   // of each level, logged once per level ([ctr] gpu profile <level>: hw busy ...); nothing is left
-  // out of the picture. Read through the GSP service (no extra system calls).
-  bool gpu_counters = true;
+  // out of the picture. Read through the GSP service (no extra system calls). (AI-assisted) Off by
+  // default: the hotspot profiler registers have never run on hardware (a GPU that stalls on its
+  // result FIFO would hang the game); turn on for a diagnostic run.
+  bool gpu_counters = false;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,

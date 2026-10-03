@@ -102,7 +102,7 @@ fast_clock = on            # steady_clock from the system tick without divides. 
 
 # ---- measuring ----
 gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers); also logs the GPU's own counters once per level (`[ctr] gpu profile <level>: hw busy % ...`: which pipeline stage is busy, and memory traffic per frame; zeros in Azahar)
-gpu_counters = on          # (AI-assisted) the GPU's own counters over 10 s of each level, 10 s after it started, with nothing left out of the picture: the same `[ctr] gpu profile <level>: hw busy % ...` line (read through the GSP service, no extra system calls). off: not measured
+gpu_counters = off         # (AI-assisted) the GPU's own counters over 10 s of each level, 10 s after it started, with nothing left out of the picture: the same `[ctr] gpu profile <level>: hw busy % ...` line (read through the GSP service, no extra system calls). Off by default: not yet run on hardware
 ```
 
 ## Recommended settings
