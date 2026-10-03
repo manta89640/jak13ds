@@ -32,6 +32,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrOceanFull.h"
+#include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/CtrSettings.h"
@@ -252,6 +253,16 @@ CtrRenderer::CtrRenderer()
       static_cast<CtrTextureUploadRenderer*>(m_buckets[(int)id].get())->set_eye_renderer(eyes.get());
     }
     set(BucketId::MERC_EYES_AFTER_PRIS, std::move(eyes));
+  }
+  // (AI-assisted) config.ini shadows = full: the game's shadow volumes (CtrShadow: stencil passes,
+  // after the level and most merc buckets, before the ocean whose stencil marks it leaves at 0).
+  // Else the bucket is skipped: with blob the game draws Jak's fake shadow instead.
+  if (ctr_settings().shadows == CtrSettings::ShadowMode::Full) {
+    if (ctr_gpu_has_stencil()) {
+      set(BucketId::SHADOW, std::make_unique<CtrShadowRenderer>("shadow", (int)BucketId::SHADOW));
+    } else {
+      lg::warn("[ctr] shadows = full needs the stencil buffer (not with depth16): not drawn");
+    }
   }
   // the ocean (after the level and merc, like the PS2's ocean-near)
   if (ctr_settings().ocean && ctr_settings().ocean_mode == CtrSettings::OceanMode::Full) {

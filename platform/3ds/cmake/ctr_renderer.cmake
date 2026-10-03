@@ -12,6 +12,7 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrOceanVuMid.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrOceanVuNear.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSettings.cpp
+  ${OG_ROOT}/game/graphics/ctr/CtrShadow.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSprite.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSky.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrRenderer.cpp
