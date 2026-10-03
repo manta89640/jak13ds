@@ -1889,6 +1889,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (!far_chunk(lev, ch)) {
         continue;
       }
+      // (AI-assisted) landmarks only within the LOD distance: a neighbouring level has no
+      // visibility data here, and its landmark ties are 57k-152k triangles (village2, lavatube)
+      if (ch.lod_tier == 0 && lod_dist > 0) {
+        const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                    dz = ch.bsphere[2] - cam.trans[2];
+        const float lim = lod_dist + ch.bsphere[3];
+        if (dx * dx + dy * dy + dz * dz > lim * lim) {
+          continue;
+        }
+      }
     } else if (ch.lod_tier == 3 || !lod_ok) {
       continue;
     }

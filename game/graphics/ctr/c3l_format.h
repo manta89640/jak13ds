@@ -106,9 +106,6 @@ static_assert(sizeof(Chunk) == 80);
 // (AI-assisted) Chunk::kind
 constexpr uint32_t CHUNK_KIND_UNKNOWN = 0, CHUNK_KIND_TFRAG = 1, CHUNK_KIND_TIE = 2, CHUNK_KIND_SHRUB = 3;
 
-// (AI-assisted) Chunk::kind
-constexpr uint32_t CHUNK_KIND_UNKNOWN = 0, CHUNK_KIND_TFRAG = 1, CHUNK_KIND_TIE = 2, CHUNK_KIND_SHRUB = 3;
-
 /*!
  * (AI-assisted) v10: the game's visibility data per piece of a draw. A chunk's draws are split in
  * runs of indices from one drawable of the level (a tfrag node of up to 8 tfragments, a tie node
