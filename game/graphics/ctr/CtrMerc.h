@@ -7,7 +7,9 @@
  * records as Merc2 (model name, lights, bone matrices, effect flags), finds the model in the
  * loaded .c3l files and draws it with GPU skinning (draws are pre-split by the converter so each
  * uses at most 24 bones). Not done: lighting (a per-model tint from the ambient + first light),
- * blend shapes, envmap, eyes, vertex modification (ripple), fog.
+ * blend shapes, envmap, eyes, fog.
+ * (AI-assisted) Vertices the game rewrites in its merc data (ripple water, texture scroll) are
+ * unpacked from it each frame like Merc2::model_mod_draws (apply_mod).
  */
 
 #include <vector>
@@ -35,6 +37,15 @@ class CtrMercRenderer : public CtrBucketRenderer {
   void apply_blerc(const struct CtrLevelData& lev,
                    const struct CtrMercModelData& model,
                    const float* weights);
+  /*! (AI-assisted) Copy the game's vertex data of the model's rewritten effects (c3l v12
+   * MercModEffect) to m_mod_bytes: per effect the unpacked vertex count, then per unpacked
+   * fragment its vertex count, position offsets and lump bytes. */
+  void gather_mod(const u8* ee_mem,
+                  const u8* effect_ptrs,
+                  int effect_count,
+                  const struct CtrMercModelData& model);
+  /*! (AI-assisted) Unpack what gather_mod copied (from m_mod_bytes[pos]) into the model's mesh. */
+  void apply_mod(const struct CtrMercModelData& model, size_t pos);
 
  public:
   /*! Game thread, before the frame is handed to the render thread: copy the bone matrices the
@@ -65,6 +76,29 @@ class CtrMercRenderer : public CtrBucketRenderer {
   Stats m_stats;
   std::vector<CtrMercMat> m_snap;
   size_t m_snap_pos = 0, m_snap_first = 0;
+  // (AI-assisted) rewritten vertices: gather_mod's copies, made with the bone snapshot (game
+  // thread) for the models (in DMA order: m_model_ordinal) that have them
+  struct ModSnap {
+    u32 ordinal;
+    size_t pos;  // in m_mod_bytes
+  };
+  std::vector<ModSnap> m_mod_snaps;
+  std::vector<u8> m_mod_bytes;
+  size_t m_mod_cursor = 0;
+  u32 m_model_ordinal = 0;
+  struct ModV {  // an unpacked vertex in MercVertex units
+    s16 pos[3];
+    s16 st[2];
+    s8 nrm[3];
+    u8 pad;
+  };
+  std::vector<ModV> m_mod_tmp;
+  // cost, logged once per level: render thread unpack, game thread copy
+  double m_mod_ms = 0, m_mod_gather_ms = 0;
+  u32 m_mod_frames = 0, m_mod_verts = 0, m_mod_effects = 0, m_mod_bad = 0;
+  bool m_mod_frame_counted = false;
+  std::string m_mod_logged_for;
+  std::string m_mod_last_model;
   bool m_snap_valid = false;
   bool m_snapshot_mode = false;
 };

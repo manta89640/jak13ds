@@ -432,6 +432,10 @@ struct MercOut {
   std::vector<c3l::MercBlercVertex> blerc_verts;
   std::vector<c3l::MercBlercTarget> blerc_targets;
   std::vector<u16> blerc_dests;
+  // (AI-assisted) v12: vertices the game rewrites (ripple, texture scroll)
+  std::vector<c3l::MercModEffect> mod_effects;
+  std::vector<c3l::MercModDest> mod_dests;
+  std::vector<u8> mod_masks;
   int skipped_models = 0;
   int envmap_draws = 0;
 };
@@ -460,12 +464,15 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
       }
     }
     // blend shapes move vertices away from the base pose: room for that
+    // (AI-assisted) and so do ripple waves (the game rewrites the positions, see use_mod)
     bool any_blerc = false;
     for (const auto& eff : model.effects) {
-      any_blerc |= !eff.mod.mod_draw.empty() && !eff.mod.blerc.int_data.empty();
+      any_blerc |= !eff.mod.mod_draw.empty();
     }
     mm.scale = max_abs * (any_blerc ? 1.5f : 1.f) / 32767.f;
     mm.blerc_first = out->blerc_verts.size();
+    const size_t mod_first = out->mod_effects.size(), mod_dest_first = out->mod_dests.size(),
+                 mod_mask_first = out->mod_masks.size();
 
     // model vertices: (source vertex, draw) -> local index
     std::vector<c3l::MercVertex> local_verts;
@@ -476,9 +483,14 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
       // (mod.vertices, drawn by mod_draw, the rest by fix_draw), and so do we, to know which of
       // our vertices a blend shape vertex writes to.
       const bool use_blerc = !eff.mod.mod_draw.empty() && !eff.mod.blerc.int_data.empty();
+      // (AI-assisted) v12: the same split for the vertices the game rewrites in its merc data
+      // (ripple, texture scroll), so we know which of our vertices each EE vertex goes to
+      const bool use_mod = !eff.mod.mod_draw.empty() && !use_blerc &&
+                           eff.mod.vertex_lump4_addr.size() == eff.mod.vertices.size() &&
+                           !eff.mod.fragment_mask.empty();
       std::unordered_map<u32, std::vector<u16>> mod_local;  // mod vertex -> model vertices
       std::vector<std::pair<const tfrag3::MercDraw*, bool>> draw_list;  // (draw, from mod.vertices)
-      if (use_blerc) {
+      if (use_blerc || use_mod) {
         for (const auto& d : eff.mod.fix_draw) {
           draw_list.push_back({&d, false});
         }
@@ -588,7 +600,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
                   break;
                 }
                 it = vmap.emplace(vi, (u16)local_verts.size()).first;
-                if (from_mod) {
+                if (from_mod) {  // (AI-assisted) blerc or use_mod
                   mod_local[vi].push_back((u16)local_verts.size());
                 }
                 local_verts.push_back(o);
@@ -637,6 +649,39 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           out->envmap_draws++;
         }
       }
+      if (use_mod) {
+        c3l::MercModEffect me{};
+        me.model = out->models.size();  // this model's index once pushed
+        me.effect = ei;
+        me.frag_count = eff.mod.fragment_mask.size();
+        me.first_mask = out->mod_masks.size();
+        for (u8 m : eff.mod.fragment_mask) {
+          out->mod_masks.push_back(m ? 1 : 0);
+        }
+        me.vidx_end = eff.mod.expect_vidx_end;
+        me.first_dest = out->mod_dests.size();
+        for (const auto& [mvi, locals] : mod_local) {
+          const u32 src = eff.mod.vertex_lump4_addr.at(mvi);
+          if (src >= me.vidx_end) {
+            continue;  // Merc2 keeps these at their base position too
+          }
+          for (u16 lv : locals) {
+            out->mod_dests.push_back({(u16)src, lv});
+          }
+        }
+        // in vertex order: the runtime writes the model's vertices front to back
+        std::sort(out->mod_dests.begin() + me.first_dest, out->mod_dests.end(),
+                  [](const c3l::MercModDest& a, const c3l::MercModDest& b) {
+                    return a.vertex < b.vertex;
+                  });
+        me.dest_count = out->mod_dests.size() - me.first_dest;
+        me.st_vif_add = model.st_vif_add;
+        me.st_magic = model.st_magic;
+        me.xyz_scale = model.xyz_scale;
+        if (me.dest_count) {
+          out->mod_effects.push_back(me);
+        }
+      }
       if (use_blerc) {
         // per vertex: int [target weight indices..., terminator, dest mod vertex],
         // float [base, target offsets...] (tfrag3::Blerc)
@@ -683,6 +728,9 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
       out->indices.resize(idx_start);
       out->draws.resize(mm.first_draw);
       out->blerc_verts.resize(mm.blerc_first);
+      out->mod_effects.resize(mod_first);
+      out->mod_dests.resize(mod_dest_first);
+      out->mod_masks.resize(mod_mask_first);
       out->skipped_models++;
       continue;
     }
@@ -1248,7 +1296,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   hdr.merc_index_size = merc.indices.size() * 2;
   hdr.merc_draw_offset = append(buf, merc.draws.data(), merc.draws.size());
   hdr.merc_draw_size = merc.draws.size() * sizeof(c3l::MercDraw);
-  if (!merc.blerc_verts.empty()) {
+  u32 merc_mod_offset = 0;
+  if (!merc.blerc_verts.empty() || !merc.mod_effects.empty()) {
     c3l::MercBlercHeader bh{};
     bh.num_vertices = merc.blerc_verts.size();
     bh.num_targets = merc.blerc_targets.size();
@@ -1260,6 +1309,23 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                (const u8*)(merc.blerc_targets.data() + merc.blerc_targets.size()));
     buf.insert(buf.end(), (const u8*)merc.blerc_dests.data(),
                (const u8*)(merc.blerc_dests.data() + merc.blerc_dests.size()));
+    if (!merc.mod_effects.empty()) {
+      // (AI-assisted) v12: the rewritten vertices, after the blend shapes (MercModHeader)
+      c3l::MercModHeader mh{};
+      mh.num_effects = merc.mod_effects.size();
+      mh.num_dests = merc.mod_dests.size();
+      mh.num_mask_bytes = merc.mod_masks.size();
+      align16(buf);
+      const u32 mod_offset = append(buf, &mh, 1);
+      merc_mod_offset = mod_offset;
+      buf.insert(buf.end(), (const u8*)merc.mod_effects.data(),
+                 (const u8*)(merc.mod_effects.data() + merc.mod_effects.size()));
+      buf.insert(buf.end(), (const u8*)merc.mod_dests.data(),
+                 (const u8*)(merc.mod_dests.data() + merc.mod_dests.size()));
+      buf.insert(buf.end(), merc.mod_masks.begin(), merc.mod_masks.end());
+      memcpy(buf.data() + hdr.merc_blerc_offset + offsetof(c3l::MercBlercHeader, mod_offset),
+             &mod_offset, 4);
+    }
     hdr.merc_blerc_size = buf.size() - hdr.merc_blerc_offset;
   }
   align16(buf);
@@ -1295,6 +1361,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     if (hdr.merc_blerc_offset) {
       starts.push_back({hdr.merc_blerc_offset, "merc blend shapes"});
+    }
+    if (merc_mod_offset) {
+      starts.push_back({merc_mod_offset, "merc rewritten vertices"});
     }
     std::stable_sort(starts.begin(), starts.end(),
                      [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -1364,6 +1433,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
       merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, file.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
+  if (!merc.mod_effects.empty()) {
+    lg::info("{}: {} merc effects with game-rewritten vertices ({} vertex writes)", level.level_name,
+             merc.mod_effects.size(), merc.mod_dests.size());
+  }
   lg::info("{}: textures {} KB with mip levels (16-bit, no mips: {} KB): {} ETC1, {} ETC1A4, {} "
            "RGB565, {} RGBA4; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
            level.level_name, tstats.bytes / 1024, tstats.bytes_16bit / 1024, tstats.etc1,

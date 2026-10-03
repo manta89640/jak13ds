@@ -12,6 +12,10 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(__ARM_FEATURE_SAT)
+#include <arm_acle.h>
+#endif
+
 #include "common/dma/dma.h"
 #include "common/log/log.h"
 
@@ -125,6 +129,8 @@ void CtrMercRenderer::hud_clip(float* out, float y_scale) const {
 
 void CtrMercRenderer::snapshot_bones(DmaFollower& dma, CtrRenderState& rs) {
   m_snap.clear();
+  m_mod_snaps.clear();
+  m_mod_bytes.clear();
   m_snapshot_mode = true;
   render(dma, rs);
   m_snapshot_mode = false;
@@ -133,6 +139,9 @@ void CtrMercRenderer::snapshot_bones(DmaFollower& dma, CtrRenderState& rs) {
 
 void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   m_snap_pos = 0;
+  m_model_ordinal = 0;
+  m_mod_cursor = 0;
+  m_mod_frame_counted = false;
   // same structure as Merc2::handle_all_dma, but without asserts: skip what we don't know
   if (dma.current_tag_offset() == rs.next_bucket) {
     return;
@@ -189,6 +198,24 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
+  // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
+  // them) after a few seconds of updates
+  if (m_mod_frames >= 150) {
+    const CtrLevelData* lev = nullptr;
+    m_levels->find_merc_model(m_mod_last_model, &lev);
+    const std::string level = lev ? lev->name : std::string("?");
+    if (level != m_mod_logged_for) {
+      m_mod_logged_for = level;
+      lg::info("[ctr] {}: merc vertex updates in {}: {:.1f} effects, {:.0f} vertices per frame, "
+               "{:.3f} ms/frame unpacking (render thread) + {:.3f} ms/frame copying (game "
+               "thread), {} bad",
+               m_name, level, (double)m_mod_effects / m_mod_frames,
+               (double)m_mod_verts / m_mod_frames, m_mod_ms / m_mod_frames,
+               m_mod_gather_ms / m_mod_frames, m_mod_bad);
+    }
+    m_mod_frames = m_mod_verts = m_mod_effects = m_mod_bad = 0;
+    m_mod_ms = m_mod_gather_ms = 0;
+  }
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws", m_name,
               m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.draws);
@@ -232,6 +259,204 @@ void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
   }
 }
 
+namespace {
+// (AI-assisted) lump byte -> MercVertex::normal: Merc2's float bits (0x47800000 + byte) - 65537
+// (= byte / 128 - 1), * 127 like the converter
+struct NormalLut {
+  s8 v[256];
+  NormalLut() {
+    for (int b = 0; b < 256; b++) {
+      v[b] = (s8)std::clamp((int)std::lround((b / 128.f - 1.f) * 127.f), -127, 127);
+    }
+  }
+};
+const NormalLut g_normal_lut;
+
+inline s16 sat16(s32 v) {
+#if defined(__ARM_FEATURE_SAT)
+  return (s16)__ssat(v, 16);
+#else
+  return (s16)std::clamp(v, -32768, 32767);
+#endif
+}
+
+void put_u32(std::vector<u8>& out, u32 v) {
+  const size_t at = out.size();
+  out.resize(at + 4);
+  memcpy(out.data() + at, &v, 4);
+}
+}  // namespace
+
+void CtrMercRenderer::gather_mod(const u8* ee_mem,
+                                 const u8* effect_ptrs,
+                                 int effect_count,
+                                 const CtrMercModelData& model) {
+  // like Merc2::model_mod_draws: walk the effect's fragments and their controls
+  for (const auto& e : model.mod) {
+    const size_t count_at = m_mod_bytes.size();
+    put_u32(m_mod_bytes, 0);
+    if (e.effect >= effect_count) {
+      continue;
+    }
+    u32 ea;
+    memcpy(&ea, effect_ptrs + 4 * e.effect, 4);
+    if (!ea) {
+      continue;
+    }
+    const u8* merc_effect = ee_mem + ea;
+    u16 frag_cnt;
+    memcpy(&frag_cnt, merc_effect + 18, 2);
+    if (frag_cnt < e.mask.size()) {
+      continue;  // not the model we think
+    }
+    u32 frag_goal, ctrl_goal;
+    memcpy(&frag_goal, merc_effect, 4);
+    memcpy(&ctrl_goal, merc_effect + 4, 4);
+    const u8* frag = ee_mem + frag_goal;
+    const u8* ctrl = ee_mem + ctrl_goal;
+    u32 total = 0;
+    for (size_t fi = 0; fi < e.mask.size(); fi++) {
+      if (e.mask[fi]) {
+        const u32 u4 = ((ctrl[0] + 3) / 4) * 16;
+        const u32 l4 = ((ctrl[1] + 3) / 4) * 16;
+        const u32 nv = l4 / 12;  // 3 words per vertex
+        put_u32(m_mod_bytes, nv);
+        const size_t at = m_mod_bytes.size();
+        m_mod_bytes.resize(at + 12 + ((12 * nv + 3) & ~3u));
+        memcpy(m_mod_bytes.data() + at, frag + frag[10] * 16, 12);  // position offsets
+        memcpy(m_mod_bytes.data() + at + 12, frag + u4, 12 * nv);
+        total += nv;
+      }
+      ctrl += 4 + 2 * ctrl[3];
+      frag += frag[11] * 16;
+    }
+    memcpy(m_mod_bytes.data() + count_at, &total, 4);
+  }
+}
+
+void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos) {
+  const double t0 = ctr_gpu_time_ms();
+  u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
+  if (!verts) {
+    return;
+  }
+  const u8* p = m_mod_bytes.data() + pos;
+  const u8* end = m_mod_bytes.data() + m_mod_bytes.size();
+  u32 lo = UINT32_MAX, hi = 0;
+  for (const auto& e : model.mod) {
+    if (p + 4 > end) {
+      return;
+    }
+    u32 total;
+    memcpy(&total, p, 4);
+    p += 4;
+    if (total != e.vidx_end) {
+      // not unpacked (or not the fragments we expect): the vertices stay as they are, and the
+      // rest of the copy can't be followed
+      m_mod_bad++;
+      if (total) {
+        return;
+      }
+      continue;
+    }
+    if (m_mod_tmp.size() < total) {
+      m_mod_tmp.resize(total);
+    }
+    ModV* out = m_mod_tmp.data();
+    const s16* st_lut = e.st_lut;
+    const s8* nrm_lut = g_normal_lut.v;
+    // position: (float bits (0x4b010000 + byte) + fragment offset) * xyz_scale (Merc2), in
+    // MercVertex units (/ model scale), rounded by adding 1.5 * 2^23: the float's low mantissa
+    // bits are then the integer (no float -> int conversion or compare in the loop)
+    const float k = e.pos_k;
+    constexpr float kRound = 12582912.f;
+    u32 done = 0;
+    while (done < total) {
+      u32 nv;
+      memcpy(&nv, p, 4);
+      float off[3];
+      memcpy(off, p + 4, 12);
+      const u8* v = p + 16;
+      p += 16 + ((12 * nv + 3) & ~3u);
+      if (nv > total - done) {
+        m_mod_bad++;
+        return;
+      }
+      for (u32 i = 0; i < nv; i++, v += 12, out++) {
+        // x, y, z as three independent chains (VFP11 latency)
+        const u32 bx = 0x4b010000u + v[3], by = 0x4b010000u + v[7], bz = 0x4b010000u + v[11];
+        float fx, fy, fz;
+        memcpy(&fx, &bx, 4);
+        memcpy(&fy, &by, 4);
+        memcpy(&fz, &bz, 4);
+        fx = (fx + off[0]) * k + kRound;
+        fy = (fy + off[1]) * k + kRound;
+        fz = (fz + off[2]) * k + kRound;
+        s32 ix, iy, iz;
+        memcpy(&ix, &fx, 4);
+        memcpy(&iy, &fy, 4);
+        memcpy(&iz, &fz, 4);
+        out->pos[0] = sat16(ix - 0x4b400000);
+        out->pos[1] = sat16(iy - 0x4b400000);
+        out->pos[2] = sat16(iz - 0x4b400000);
+        out->nrm[0] = nrm_lut[v[2]];
+        out->nrm[1] = nrm_lut[v[6]];
+        out->nrm[2] = nrm_lut[v[10]];
+        out->pad = 0;
+        out->st[0] = st_lut[v[8]];
+        out->st[1] = st_lut[v[9]];
+      }
+      done += nv;
+    }
+    // to the model's vertices (in vertex order)
+    const ModV* src = m_mod_tmp.data();
+    if (!model.mod_checked) {
+      // once per model: how far the game's vertices are from the file's (the same before the
+      // game changes them, but for rounding)
+      int dxz = 0, dy = 0, dst = 0, dn = 0;
+      for (const auto& d : e.dests) {
+        c3l::MercVertex fv;
+        memcpy(&fv, verts + sizeof(c3l::MercVertex) * d.vertex, sizeof(fv));
+        const ModV& s = src[d.src];
+        dxz = std::max({dxz, std::abs(fv.pos[0] - s.pos[0]), std::abs(fv.pos[2] - s.pos[2])});
+        dy = std::max(dy, std::abs(fv.pos[1] - s.pos[1]));
+        dst = std::max({dst, std::abs(fv.st[0] - s.st[0]), std::abs(fv.st[1] - s.st[1])});
+        for (int c = 0; c < 3; c++) {
+          dn = std::max(dn, std::abs(fv.normal[c] - s.nrm[c]));
+        }
+      }
+      lg::info("[ctr] merc vertex updates for {} effect {}: {} vertices -> {} model vertices; "
+               "largest difference to the file: x/z {}, y {} (scale {}), st {} (1/1024), "
+               "normal {} (1/127)",
+               model.name, e.effect, total, e.dests.size(), dxz, dy, model.scale, dst, dn);
+    }
+    for (const auto& d : e.dests) {
+      u8* dst = verts + sizeof(c3l::MercVertex) * d.vertex;
+      const ModV& s = src[d.src];
+      memcpy(dst, s.pos, 6);
+      memcpy(dst + 12, s.st, 4);
+      memcpy(dst + 20, s.nrm, 4);  // normal + pad
+    }
+    if (!e.dests.empty()) {
+      lo = std::min<u32>(lo, e.dests.front().vertex);
+      hi = std::max<u32>(hi, e.dests.back().vertex);
+    }
+    m_mod_effects++;
+    m_mod_verts += total;
+  }
+  if (lo <= hi) {
+    ctr_gpu_mesh_flush(model.mesh, (int)(lo * sizeof(c3l::MercVertex)),
+                       (int)((hi - lo + 1) * sizeof(c3l::MercVertex)));
+  }
+  model.mod_checked = true;
+  m_mod_last_model = model.name;
+  if (!m_mod_frame_counted) {
+    m_mod_frame_counted = true;
+    m_mod_frames++;
+  }
+  m_mod_ms += ctr_gpu_time_ms() - t0;
+}
+
 void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) {
   const u8* input = init.data;
   // The bone matrices are not in the DMA data (they're in game memory that the next frame's
@@ -252,8 +477,40 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         memcpy(&m, rs.ee_mem + addr, sizeof(MercMat));
         m_snap.push_back(m);
       }
+      // (AI-assisted) vertices the game rewrites (ripple, texture scroll): the game changes them
+      // during the next frame's logic, so they're copied now too. Only models with an effect
+      // that may have them (effect-bits: texture scroll 1, ripple 4) are looked up by name.
+      // Not only pc-merc-vtx-update models: water with a ripple query (the dark eco pools) was
+      // meant for generic merc and comes without it.
+      const u8* fl = sl + 128 + 16 * n;
+      PcMercFlags flags;
+      memcpy(&flags, fl, sizeof(flags));
+      const int ec = std::min<int>(flags.effect_count, 64);
+      const u8* ptrs = fl + 32 + ((flags.bitflags & 4) ? 4 * c3l::kMercBlercWeights : 0) +
+                       ((ec * 4 + 15) / 16) * 16;
+      bool maybe = flags.bitflags & 1;
+      for (int e = 0; e < ec && !maybe; e++) {
+        u32 ea;
+        memcpy(&ea, ptrs + 4 * e, 4);
+        maybe = ea && (rs.ee_mem[ea + 17] & 5);
+      }
+      if (maybe) {
+        const double t0 = ctr_gpu_time_ms();
+        char name[128];
+        memcpy(name, input, 128);
+        name[127] = 0;
+        const CtrLevelData* lev = nullptr;
+        const CtrMercModelData* model = m_levels->find_merc_model(name, &lev);
+        if (model && !model->mod.empty()) {
+          m_mod_snaps.push_back({m_model_ordinal, m_mod_bytes.size()});
+          gather_mod(rs.ee_mem, ptrs, ec, *model);
+        }
+        m_mod_gather_ms += ctr_gpu_time_ms() - t0;
+      }
+      m_model_ordinal++;
       return;
     }
+    m_model_ordinal++;
     m_snap_first = m_snap_pos;
     m_snap_pos += n;
   }
@@ -324,6 +581,27 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       apply_blerc(*lev, *model, weights);
       model->blerc_moved = uses_blerc;
+    }
+  }
+
+  // (AI-assisted) vertices the game rewrites: from the snapshot of this model (async), else
+  // straight from game memory (synchronous rendering: the game waits)
+  if (!model->mod.empty()) {
+    const u32 ordinal = m_model_ordinal - 1;
+    while (m_mod_cursor < m_mod_snaps.size() && m_mod_snaps[m_mod_cursor].ordinal < ordinal) {
+      m_mod_cursor++;
+    }
+    if (m_snap_valid) {
+      if (m_mod_cursor < m_mod_snaps.size() && m_mod_snaps[m_mod_cursor].ordinal == ordinal) {
+        apply_mod(*model, m_mod_snaps[m_mod_cursor].pos);
+      }
+    } else {
+      const int ec = std::min<int>(flags.effect_count, 64);
+      const u8* ptrs = input + 32 + ((flags.bitflags & 4) ? 4 * c3l::kMercBlercWeights : 0) +
+                       ((ec * 4 + 15) / 16) * 16;
+      m_mod_bytes.clear();
+      gather_mod(rs.ee_mem, ptrs, ec, *model);
+      apply_mod(*model, 0);
     }
   }
 

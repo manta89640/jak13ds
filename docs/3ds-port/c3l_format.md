@@ -100,7 +100,7 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 11 (7..10 still load); char level_name[32]
+  char magic[4] = "C3LV"; u32 version = 12 (7..11 still load; v12: merc rewritten vertices); char level_name[32]
   u32 num_textures, textures_offset
   u32 num_chunks, chunks_offset
   u32 vertex_data_offset, vertex_data_size      Vertex[]
@@ -194,9 +194,16 @@ MercVertex (24 bytes)
   s16 pos[3]; u8 bones[3] (palette slots); u8 weights[3] (sum 255); s16 st[2] (* 1024);
   u8 rgba[4]; s8 normal[3] (* 127, lighting); u8 pad
 
-Blend shapes: MercBlercHeader {u32 num_vertices, num_targets, num_dests, pad}, then
+Blend shapes: MercBlercHeader {u32 num_vertices, num_targets, num_dests, mod_offset}, then
 MercBlercVertex[] {float base[3]; u32 first_target; u16 target_count, dest_count; u32 first_dest},
 MercBlercTarget[] {float offset[3]; u32 weight}, u16 dests[] (model vertex indices).
+
+v12 rewritten vertices, at mod_offset (0: none; the blend shape counts may be 0):
+MercModHeader {u32 num_effects, num_dests, num_mask_bytes, pad}, then
+MercModEffect[] (48 bytes) {u32 model; u8 effect, pad; u16 frag_count; u32 first_mask; u32 vidx_end;
+  u32 first_dest, dest_count; u32 st_vif_add; float st_magic, xyz_scale; u32 pad[3]},
+MercModDest[] {u16 src (unpacked vertex), u16 vertex (model vertex)}, sorted by vertex,
+u8 masks[] (one per fragment: 1 = unpacked).
 ```
 
 - Draws are split so that each one uses at most 24 bones (the vertex shader's uniform space).
@@ -205,4 +212,14 @@ MercBlercTarget[] {float offset[3]; u32 weight}, u16 dests[] (model vertex indic
 - Envmapped effects (shiny: power cells, precursor metal) get envmap pass draws (v9). The runtime
   draws them with `ctr_skin_env.v.pica` (emerc.vert's sphere map) and the effect's fade color from
   the game, when it isn't 0 (the game fades the shine out with distance).
-- Models with more than 65535 vertices are skipped (logged). Ripple is not converted.
+- Models with more than 65535 vertices are skipped (logged).
+- (AI-assisted) v12: vertices the game rewrites in its own merc data every frame (ripple: water
+  waves such as the dark eco pools and the jungle river; texture scroll) come with the tfrag3
+  `mod` data that Merc2 uses: the effects are split into fix and mod draws like blend shapes, and
+  MercModEffect says which fragments to unpack (`fragment_mask`), how many vertices that gives
+  (`expect_vidx_end`) and which model vertices each unpacked vertex goes to
+  (`vertex_lump4_addr`). Each frame `CtrMercRenderer` copies the fragments' vertex bytes with the
+  bone snapshot (game thread) and unpacks positions, normals and texture coordinates into the
+  model's vertices on the render thread (`apply_mod`, the mesh's second vertex buffer with the
+  pipeline). The model's position scale gets the blend shapes' 1.5x room for the waves. v11 files
+  have none: those models stay at their base pose, as before.

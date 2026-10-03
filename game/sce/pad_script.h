@@ -24,6 +24,8 @@
  *   continue NAME  (start 'play (get-continue-by-name *game-info* NAME)): jump to a checkpoint,
  *             for example "continue beach-start" (tests of other levels)
  *   save      an autosave, as after a power cell (pad-script-auto-save, 3DS)
+ *   shot      (AI-assisted) a screenshot (PC OpenGL renderer: like F2, into the config
+ *             folder's screenshots; for reference pictures to compare the 3DS renderer with)
  *   exit      stop the runtime
  *   handoff   stop the script: the real controller plays from here
  *   crash     fail an assert (to test the crash screen)
@@ -79,5 +81,9 @@ void set_exit_hook(ExitHook hook);
 //! (AI-assisted) Called for "save": an autosave, as after a power cell (tests the save path).
 using SaveHook = void (*)();
 void set_save_hook(SaveHook hook);
+
+//! (AI-assisted) Called for "shot".
+using ShotHook = void (*)();
+void set_shot_hook(ShotHook hook);
 
 }  // namespace pad_script

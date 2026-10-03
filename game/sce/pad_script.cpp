@@ -31,6 +31,7 @@ struct Entry {
   bool handoff = false;
   bool crash = false;
   bool save = false;
+  bool shot = false;
 };
 
 struct Script {
@@ -54,6 +55,7 @@ PositionHook g_position_hook = nullptr;
 ExitHook g_exit_hook = nullptr;
 ContinueHook g_continue_hook = nullptr;
 SaveHook g_save_hook = nullptr;
+ShotHook g_shot_hook = nullptr;
 
 // PadData::ButtonIndex
 int button_index(const std::string& name) {
@@ -123,6 +125,8 @@ void load() {
         e.handoff = true;
       } else if (item == "save") {
         e.save = true;
+      } else if (item == "shot") {
+        e.shot = true;
       } else if (item == "crash") {
         e.crash = true;
       } else if (item.size() > 3 && item[2] == '=') {
@@ -218,6 +222,9 @@ PadState next_frame() {
         g_save_hook();
       }
     }
+    if (e.shot && g_shot_hook) {
+      g_shot_hook();
+    }
     if (!e.wait_sym.empty()) {
       lg::info("[pad script] frame {}: waiting for {} to be in {}", frame, e.wait_sym,
                e.wait_state);
@@ -260,6 +267,10 @@ void set_position_hook(PositionHook hook) {
 
 void set_save_hook(SaveHook hook) {
   g_save_hook = hook;
+}
+
+void set_shot_hook(ShotHook hook) {
+  g_shot_hook = hook;
 }
 
 void set_continue_hook(ContinueHook hook) {

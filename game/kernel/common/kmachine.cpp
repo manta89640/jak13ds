@@ -23,6 +23,7 @@
 #include "game/runtime.h"
 #include "game/sce/libcdvd_ee.h"
 #include "game/sce/libpad.h"
+#include "game/sce/pad_script.h"
 #include "game/sce/libscf.h"
 #include "game/sce/sif_ee.h"
 
@@ -1268,6 +1269,7 @@ void init_common_pc_port_functions(
   // debugging tools
   make_func_symbol_func("pc-filter-debug-string?", pc_filter_debug_string);
   make_func_symbol_func("pc-screen-shot", pc_screen_shot);
+  pad_script::set_shot_hook(pc_screen_shot);  // (AI-assisted) pad script "shot"
   make_func_symbol_func("pc-register-screen-shot-settings",
                         pc_register_screen_shot_settings);
 }

@@ -27,6 +27,16 @@
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
+/*! (AI-assisted) c3l v12: an effect whose vertices the game rewrites (c3l::MercModEffect). */
+struct CtrMercModEffect {
+  u8 effect = 0;
+  std::vector<u8> mask;  // per fragment: unpacked or skipped
+  u32 vidx_end = 0;
+  std::vector<c3l::MercModDest> dests;  // by model vertex
+  float pos_k = 1.f;     // xyz_scale / model scale: unpacked position -> MercVertex::pos
+  s16 st_lut[256] = {};  // lump byte -> MercVertex::st (* 1024)
+};
+
 struct CtrMercModelData {
   std::string name;
   int mesh = -1;
@@ -35,6 +45,8 @@ struct CtrMercModelData {
   // blend shapes (faces): CtrLevelData::blerc_verts[blerc_first, + blerc_count)
   u32 blerc_first = 0, blerc_count = 0;
   mutable bool blerc_moved = false;  // vertices not in the base pose (CtrMercRenderer)
+  std::vector<CtrMercModEffect> mod;  // (AI-assisted) v12, see CtrMercRenderer::apply_mod
+  mutable bool mod_checked = false;   // the first update was compared with the file's vertices
 };
 
 struct CtrLevelData {
