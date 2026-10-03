@@ -518,8 +518,55 @@
                (f1-14 (+ (square (- (-> a0-2 x) (-> v1-0 x))) (square (- (-> a0-2 z) (-> v1-0 z))))))
           (if (>= (square f0-0) f1-14) #t))))))
 
+;; 3DS port (AI-assisted): per-frame memo of nav-mesh queries that every enemy on a mesh repeats
+;; with the same point (chasing enemies all look up Jak's position). The queries are pure
+;; functions of the mesh and their arguments within a frame (find-poly-fast's own cache makes
+;; the same assumption), so a hit returns exactly what the query would have computed.
+(deftype nav-query-cache (structure)
+  ((mesh   nav-mesh 8)
+   (frame  int64 8)
+   (key    uint32 40) ;; per entry: x, y, z (bits), two float args (bits)
+   (result uint32 8)
+   (next   int32)))
+
+(define *nav-find-poly-cache* (new 'static 'nav-query-cache))
+
+(define *nav-in-mesh-cache* (new 'static 'nav-query-cache))
+
+(defun nav-query-cache-lookup ((c nav-query-cache) (mesh nav-mesh) (pt vector) (a float) (b float))
+  "Index of the entry for this query in this frame, or -1."
+  (let ((now (-> *display* integral-frame-counter))
+        (k (the-as (pointer uint32) pt)))
+    (dotimes (i 8)
+      (let ((o (* i 5)))
+        (if (and (= (-> c mesh i) mesh)
+                 (= (-> c frame i) now)
+                 (= (-> c key o) (-> k 0))
+                 (= (-> c key (+ o 1)) (-> k 1))
+                 (= (-> c key (+ o 2)) (-> k 2))
+                 (= (-> c key (+ o 3)) (the-as uint32 a))
+                 (= (-> c key (+ o 4)) (the-as uint32 b)))
+          (return i)))))
+  -1)
+
+(defun nav-query-cache-store ((c nav-query-cache) (mesh nav-mesh) (pt vector) (a float) (b float) (result uint))
+  (let* ((i (-> c next))
+         (o (* i 5))
+         (k (the-as (pointer uint32) pt)))
+    (set! (-> c next) (logand (+ i 1) 7))
+    (set! (-> c mesh i) mesh)
+    (set! (-> c frame i) (-> *display* integral-frame-counter))
+    (set! (-> c key o) (-> k 0))
+    (set! (-> c key (+ o 1)) (-> k 1))
+    (set! (-> c key (+ o 2)) (-> k 2))
+    (set! (-> c key (+ o 3)) (the-as uint32 a))
+    (set! (-> c key (+ o 4)) (the-as uint32 b))
+    (set! (-> c result i) result))
+  0)
+
 ;; ERROR: Failed load: (set! vf3 (l.vf a0-4)) at op 42
-(defmethod is-in-mesh? ((this nav-mesh) (arg0 vector) (arg1 float) (arg2 meters))
+;; 3DS port (AI-assisted): the original is-in-mesh? (a scan of every triangle), memoized below
+(defun nav-mesh-is-in-mesh-scan? ((this nav-mesh) (arg0 vector) (arg1 float) (arg2 meters))
   ;; og:preserve-this float -> int
   (local-vars (v1-10 int))
   (rlet ((vf1 :class vf)
@@ -576,6 +623,15 @@
                   (set! *debug-tests* (+ *debug-tests* 1))
                   (if (circle-triangle-intersection? arg0 arg1 s2-0) (return #t)))))))))
     #f))
+
+(defmethod is-in-mesh? ((this nav-mesh) (arg0 vector) (arg1 float) (arg2 meters))
+  ;; 3DS port (AI-assisted): enemies noticing Jak all test his shadow position against the same
+  ;; mesh every frame; scan once per mesh, point and radius per frame (nav-query-cache)
+  (let ((ci (nav-query-cache-lookup *nav-in-mesh-cache* this arg0 arg1 arg2)))
+    (if (>= ci 0) (return (nonzero? (-> *nav-in-mesh-cache* result ci)))))
+  (let ((r (nav-mesh-is-in-mesh-scan? this arg0 arg1 arg2)))
+    (nav-query-cache-store *nav-in-mesh-cache* this arg0 arg1 arg2 (if r (the-as uint 1) (the-as uint 0)))
+    r))
 
 (defmethod move-along-nav-ray! ((this nav-mesh) (arg0 nav-ray))
   (local-vars (a2-7 int) (a3-3 int))
@@ -788,6 +844,12 @@
       (set! s3-1 v1-1)
       (goto cfg-14)))
   (if arg2 (logclear! (-> arg2 0) (nav-control-flags navcf20)))
+  ;; 3DS port (AI-assisted): the full scan below (3 sqrt + 3 divides per triangle) runs once per
+  ;; mesh and point per frame
+  (let ((ci (nav-query-cache-lookup *nav-find-poly-cache* this arg0 arg1 0.0)))
+    (when (>= ci 0)
+      (set! s3-1 (the-as nav-poly (-> *nav-find-poly-cache* result ci)))
+      (goto cfg-14)))
   (let ((s2-0 (new 'stack-no-clear 'inline-array 'nav-vertex 3)))
     (set! s3-1 (the-as nav-poly #f))
     (let ((f30-0 10000000000000000000000000000000000000.0))
@@ -799,7 +861,18 @@
             (set! (-> s2-0 2 quad) (-> this vertex (-> s0-0 vertex 2) quad))
             (let ((f1-2 (- (-> arg0 y) (* 0.333333 (+ (-> s2-0 0 y) (-> s2-0 1 y) (-> s2-0 2 y))))))
               (when (>= arg1 (fabs f1-2))
-                (let ((f0-2 (point-triangle-distance-min arg0 f30-0 s2-0))) (when (< f0-2 f30-0) (set! f30-0 f0-2) (set! s3-1 s0-0))))))))))
+                ;; 3DS port (AI-assisted): point-triangle-distance-min only returns a value below
+                ;; f30-0 for a triangle closer than f30-0 in xz, and every point of the triangle is
+                ;; at least as far as its xz bounding box. Skip triangles whose box is farther
+                ;; (with a 0.1% margin for rounding), so the result is the same.
+                (let* ((fdx (fmax 0.0 (fmax (- (fmin (-> s2-0 0 x) (fmin (-> s2-0 1 x) (-> s2-0 2 x))) (-> arg0 x))
+                                            (- (-> arg0 x) (fmax (-> s2-0 0 x) (fmax (-> s2-0 1 x) (-> s2-0 2 x)))))))
+                       (fdz (fmax 0.0 (fmax (- (fmin (-> s2-0 0 z) (fmin (-> s2-0 1 z) (-> s2-0 2 z))) (-> arg0 z))
+                                            (- (-> arg0 z) (fmax (-> s2-0 0 z) (fmax (-> s2-0 1 z) (-> s2-0 2 z))))))))
+                  (when (>= (* 1.002 (square f30-0)) (+ (square fdx) (square fdz)))
+                    (let ((f0-2 (point-triangle-distance-min arg0 f30-0 s2-0)))
+                      (when (< f0-2 f30-0) (set! f30-0 f0-2) (set! s3-1 s0-0))))))))))))
+  (nav-query-cache-store *nav-find-poly-cache* this arg0 arg1 0.0 (the-as uint s3-1))
   (label cfg-14)
   s3-1)
 
