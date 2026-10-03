@@ -107,6 +107,9 @@ void ctr_audio_submit(short* buffer);
 void ctr_audio_wait(unsigned int us);
 /* Frames the DSP had to skip because the mixer was late (total since init). */
 unsigned int ctr_audio_dropped_frames(void);
+/* (AI-assisted) Buffers submitted after the DSP had played all the ones before them: the output
+ * ran dry, a gap in the sound (total since init). */
+unsigned int ctr_audio_late_buffers(void);
 
 /* Sound settings from config.ini (sound, sound_core): returns 1 if sound = on (audio output
  * on); *core = the core for the mixer thread (sound_core; default 0 on New 3DS, else 1). */
