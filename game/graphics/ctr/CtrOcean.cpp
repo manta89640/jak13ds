@@ -16,6 +16,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrOceanNear.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -47,6 +48,14 @@ constexpr float kSubSize = 98304.f;   // 24 m
 constexpr float kScale = 768.f;       // mesh quantization: 24 m = 128 steps, the map = 24576
 constexpr int kSubSteps = 128;
 constexpr int kTexSize = 32;          // one texel per wave height sample (3 m)
+// (AI-assisted) ocean = waves: the shimmer layer's repeat, direction and scroll speed (per ms),
+// the crests' brightening at the highest wave height (1.33 m), the near grid's camera height limit
+// (the PS2 draws its near ocean within 48 m of the water)
+constexpr float kShimmerLen = 37.f * 4096.f;
+constexpr float kShimmerCos = 0.825f, kShimmerSin = 0.565f;
+constexpr float kShimmerSpeedS = 0.00004f, kShimmerSpeedT = 0.000025f;
+constexpr float kCrest = 0.25f / (5456.f / ctr_ocean::kYUnit);
+constexpr float kNearMaxHeight = 48.f * 4096.f;
 
 // same as make_cam_mat in CtrLevel.cpp (make_new_cam_mat, background_common.cpp)
 std::array<math::Vector4f, 4> make_cam_mat(const math::Vector4f cam_T_w[4],
@@ -104,6 +113,13 @@ CtrOceanRenderer::~CtrOceanRenderer() {
   if (m_tex >= 0) {
     ctr_gpu_tex_delete(m_tex);
   }
+  if (m_shimmer >= 0) {
+    ctr_gpu_tex_delete(m_shimmer);
+  }
+}
+
+bool CtrOceanRenderer::waves() const {
+  return ctr_settings().ocean_mode == CtrSettings::OceanMode::Waves;
 }
 
 void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
@@ -132,6 +148,10 @@ void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
   update_texture(rs.ee_mem, p.heights);
+  m_near_index_count = 0;
+  if (waves()) {
+    build_near(rs.ee_mem, p);
+  }
   draw(p, rs);
   m_frames++;
   if (rs.log_now && m_frames) {
@@ -147,6 +167,11 @@ bool CtrOceanRenderer::build_mesh(const u8* ee, const Packet& p) {
     m_mesh = -1;
   }
   m_tiles.clear();
+  m_water.clear();
+  m_trough = 0;
+  m_near_frames = 0;
+  m_near_ms = 0;
+  m_near_logged = false;
   if (!valid_addr(p.colors, 52 * 49 * 4) || !valid_addr(p.mid_indices, 72) ||
       !valid_addr(p.trans_indices, kCells * kCells * 4) || !valid_addr(p.mid_masks, 8)) {
     lg::error("[ctr] ocean: bad map addresses {:x} {:x} {:x} {:x}", p.colors, p.mid_indices,
@@ -176,6 +201,8 @@ bool CtrOceanRenderer::build_mesh(const u8* ee, const Packet& p) {
 
   std::vector<c3l::Vertex> verts;
   std::vector<u16> indices;
+  // (AI-assisted) water per 24 m sub-cell, for the near grid (ocean = waves)
+  std::vector<u8> water(kGrid * kGrid, 0);
   std::vector<int> vmap((kGrid / kTiles + 1) * (kGrid / kTiles + 1));
   constexpr int kTileSub = kGrid / kTiles;  // 32 sub-cells per tile side
   int shore_cells = 0, cells = 0;
@@ -227,6 +254,11 @@ bool CtrOceanRenderer::build_mesh(const u8* ee, const Packet& p) {
           const s16 parent = read<s16>(ee, p.trans_indices + 4 * (u32)(cz * kCells + cx));
           const u64 sub_mask = parent >= 0 ? (mask_of(parent) & 0x0f0f0f0full) : 0;
           const int lx = c * kSub, lz = r * kSub;
+          for (int sr = 0; sr < kSub; sr++) {
+            for (int sc = 0; sc < kSub; sc++) {
+              water[(cz * kSub + sr) * kGrid + cx * kSub + sc] = !((sub_mask >> (8 * sr + sc)) & 1);
+            }
+          }
           if (sub_mask == 0) {
             // open water: 2 x 2 quads of 48 m
             for (int q = 0; q < 4; q++) {
@@ -263,6 +295,7 @@ bool CtrOceanRenderer::build_mesh(const u8* ee, const Packet& p) {
     return false;
   }
   m_mesh = ctr_gpu_mesh_create(verts.data(), (int)verts.size(), indices.data(), (int)indices.size());
+  m_water = std::move(water);
   lg::info("[ctr] ocean mesh: {} tiles, {} cells ({} shore), {} vertices, {} triangles{}",
            m_tiles.size(), cells, shore_cells, verts.size(), indices.size() / 3,
            m_mesh < 0 ? " (could not be created)" : "");
@@ -271,11 +304,12 @@ bool CtrOceanRenderer::build_mesh(const u8* ee, const Packet& p) {
 
 void CtrOceanRenderer::update_texture(const u8* ee, u32 heights) {
   constexpr int N = kTexSize;
-  float h[N * N];
-  if (valid_addr(heights, sizeof(h))) {
-    memcpy(h, ee + heights, sizeof(h));
+  float* h = m_heights;  // (AI-assisted) kept for the near grid
+  static_assert(sizeof(m_heights) == N * N * 4);
+  if (valid_addr(heights, sizeof(m_heights))) {
+    memcpy(h, ee + heights, sizeof(m_heights));
   } else {
-    memset(h, 0, sizeof(h));
+    memset(h, 0, sizeof(m_heights));
   }
   // Shade the wave heights (3 m apart) like a lit surface: brighter on the slopes facing the
   // light, darker on the others, a little brighter on the crests. The PS2 renders its ocean
@@ -309,6 +343,93 @@ void CtrOceanRenderer::update_texture(const u8* ee, u32 heights) {
   }
 }
 
+// (AI-assisted) ocean = waves: this frame's near grid (CtrOceanNear.h) into the GPU's per-frame
+// memory, the shimmer's clock and the deepest trough
+void CtrOceanRenderer::build_near(const u8* ee, const Packet& p) {
+  using namespace ctr_ocean;
+  const float* h = m_heights;
+  if (m_shimmer < 0) {
+    make_shimmer(h);
+  }
+  // the shimmer scrolls while the waves move (not in the pause menu)
+  const double now = ctr_gpu_time_ms();
+  if (h[0] != m_last_h[0] || h[517] != m_last_h[1]) {
+    m_time = std::fmod(m_time + (float)std::min(now - m_last_ms, 100.0), 1e6f);
+  }
+  m_last_ms = now;
+  m_last_h[0] = h[0];
+  m_last_h[1] = h[517];
+  if (!ctr_gpu_has_stencil()) {
+    for (int i = 0; i < kWaves * kWaves; i++) {
+      m_trough = std::max(m_trough, -h[i]);
+    }
+  }
+
+  const auto& cam = p.cam;
+  if (m_water.empty() || (p.flags & 1) || std::abs(cam.trans[1] - p.start[1]) > kNearMaxHeight) {
+    return;
+  }
+  const double t0 = ctr_gpu_time_ms();
+  // the camera's 24 m sub-cell in the middle of the grid
+  const float wx = (cam.trans[0] - p.start[0]) * (1.f / kWaveStep);
+  const float wz = (cam.trans[2] - p.start[2]) * (1.f / kWaveStep);
+  const int ox = ((int)std::floor(wx * 0.125f) - kBlocks / 2) * 8;
+  const int oz = ((int)std::floor(wz * 0.125f) - kBlocks / 2) * 8;
+  const int blocks = count_water_blocks(m_water.data(), ox, oz);
+  if (!blocks) {
+    return;
+  }
+  auto* verts = (Vertex*)ctr_gpu_stream_alloc(kVertexCount * (int)sizeof(Vertex));
+  auto* indices = (u32*)ctr_gpu_stream_alloc(blocks * kBlockIndices * 2);
+  if (!verts || !indices) {
+    return;
+  }
+  if (!m_have_fade) {
+    make_fade(m_fade);
+    m_have_fade = true;
+  }
+  s16 hq[kWaves * kWaves];
+  quantize_heights(h, hq);
+  build_vertices(hq, m_fade, (const u32*)(ee + p.colors), ox, oz, (int)((wx - ox) * kStep),
+                 (int)((wz - oz) * kStep), verts);
+  m_near_index_count = build_indices(m_water.data(), ox, oz, indices);
+  m_near_verts = verts;
+  m_near_indices = (const u16*)indices;
+  m_near_ox = ox;
+  m_near_oz = oz;
+
+  m_near_ms += ctr_gpu_time_ms() - t0;
+  if (!m_near_logged && ++m_near_frames == 60) {
+    m_near_logged = true;
+    lg::info("[ctr] ocean waves: near grid {} vertices, {} triangles (this frame), {:.3f} ms CPU "
+             "per frame (heights, vertices, indices; 60 frames)",
+             kVertexCount, m_near_index_count / 3, m_near_ms / 60);
+  }
+}
+
+// (AI-assisted) the shimmer layer: once, from the wave heights lit from another side, around a
+// neutral 0x80 (the combiner doubles it)
+void CtrOceanRenderer::make_shimmer(const float* h) {
+  constexpr int N = kTexSize;
+  constexpr float kInvStep = 1.f / (2.f * 12288.f);
+  constexpr float lx = -0.3f, lz = 0.6f;
+  std::vector<u8> texels(N * N * 4);
+  for (int z = 0; z < N; z++) {
+    const float* row = h + z * N;
+    const float* up = h + ((z + N - 1) & (N - 1)) * N;
+    const float* down = h + ((z + 1) & (N - 1)) * N;
+    for (int x = 0; x < N; x++) {
+      const float gx = (row[(x + 1) & (N - 1)] - row[(x + N - 1) & (N - 1)]) * kInvStep;
+      const float gz = (down[x] - up[x]) * kInvStep;
+      const float v = std::clamp(0.5f + 1.5f * (gx * lx + gz * lz), 0.25f, 0.75f);
+      u8* t = &texels[4 * (z * N + x)];
+      t[0] = t[1] = t[2] = (u8)(v * 255.f);
+      t[3] = 255;
+    }
+  }
+  m_shimmer = ctr_gpu_tex_create_mipmapped(N, N, texels.data());
+}
+
 void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
   const CtrSettings& settings = ctr_settings();
   const auto& cam = p.cam;
@@ -335,26 +456,97 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
   }
   // clip = -(R * (origin + q * scale - cam_trans)), see CtrTfragRenderer::draw_level
-  const double origin[3] = {p.start[0], p.start[1], p.start[2]};
-  double d[3];
-  for (int i = 0; i < 3; i++) {
-    d[i] = origin[i] - (double)cam.trans[i];
-  }
-  float m[16];
-  for (int c = 0; c < 4; c++) {
-    double t = 0;
+  auto make_clip = [&](const double origin[3], const float scale[3], float* m) {
+    double d[3];
     for (int i = 0; i < 3; i++) {
-      m[4 * c + i] = -R[i][c] * kScale;
-      t += (double)R[i][c] * d[i];
+      d[i] = origin[i] - (double)cam.trans[i];
     }
-    if (c < 3) {
-      t += R[3][c];
+    for (int c = 0; c < 4; c++) {
+      double t = 0;
+      for (int i = 0; i < 3; i++) {
+        m[4 * c + i] = -R[i][c] * scale[i];
+        t += (double)R[i][c] * d[i];
+      }
+      if (c < 3) {
+        t += R[3][c];
+      }
+      m[4 * c + 3] = (float)-t;
     }
-    m[4 * c + 3] = (float)-t;
-  }
-  constexpr float kYScale = 512.f / 448.f;  // Jak 1 scissor adjust (tfrag3.vert)
-  for (int i = 0; i < 4; i++) {
-    m[4 + i] *= kYScale;
+    constexpr float kYScale = 512.f / 448.f;  // Jak 1 scissor adjust (tfrag3.vert)
+    for (int i = 0; i < 4; i++) {
+      m[4 + i] *= kYScale;
+    }
+  };
+  // (AI-assisted) ocean = waves: without a stencil buffer, the far mesh and ring go below the
+  // deepest trough (else the near grid's troughs would show them)
+  const bool waves_on = waves() && m_shimmer >= 0;
+  const float drop = waves_on && !ctr_gpu_has_stencil() ? m_trough + 0.1f * 4096.f : 0.f;
+  const double origin[3] = {p.start[0], p.start[1] - drop, p.start[2]};
+  const float far_scale[3] = {kScale, kScale, kScale};
+  float m[16];
+  make_clip(origin, far_scale, m);
+
+  // (AI-assisted) ocean = waves: texture rows of ctr_gpu_ocean_draw for positions in steps of
+  // `unit` from (x0, z0) (game units from the start corner), reduced near the point (rx, rz)
+  auto ocean_rows = [&](ctr_ocean_draw& od, float unit, double x0, double z0, double rx,
+                        double rz) {
+    auto frac_at = [](double at_origin, double at_ref) { return at_origin - std::floor(at_ref); };
+    // the wave texture: one repeat per 96 m, texel centers on the wave heights
+    constexpr double kRepeat = 32.0 * 12288.0, kHalfTexel = 0.5 / 32.0;
+    const float k = (float)(unit / kRepeat);
+    const float r0[4] = {k, 0, 0,
+                         (float)frac_at(x0 / kRepeat - kHalfTexel, rx / kRepeat - kHalfTexel)};
+    const float r1[4] = {0, 0, k,
+                         (float)frac_at(z0 / kRepeat - kHalfTexel, rz / kRepeat - kHalfTexel)};
+    // the shimmer: rotated, its own repeat, scrolling
+    const float ks = unit / kShimmerLen;
+    const double ps = m_time * kShimmerSpeedS, pt = m_time * kShimmerSpeedT;
+    auto su = [&](double x, double z) {
+      return (kShimmerCos * x + kShimmerSin * z) / kShimmerLen + ps;
+    };
+    auto tu = [&](double x, double z) {
+      return (kShimmerCos * z - kShimmerSin * x) / kShimmerLen + pt;
+    };
+    const float r2[4] = {kShimmerCos * ks, 0, kShimmerSin * ks,
+                         (float)frac_at(su(x0, z0), su(rx, rz))};
+    const float r3[4] = {-kShimmerSin * ks, 0, kShimmerCos * ks,
+                         (float)frac_at(tu(x0, z0), tu(rx, rz))};
+    memcpy(od.tex[0], r0, sizeof(r0));
+    memcpy(od.tex[1], r1, sizeof(r1));
+    memcpy(od.tex[2], r2, sizeof(r2));
+    memcpy(od.tex[3], r3, sizeof(r3));
+    memset(od.crest, 0, sizeof(od.crest));
+  };
+
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  st.tex = m_tex;
+  st.tcc = 1;
+  st.filter = 1;
+  st.blend = CTR_BLEND_ALPHA;
+  st.atest = CTR_TEST_ALWAYS;
+  st.ztest = CTR_TEST_GEQUAL;
+  st.zwrite = 1;
+
+  // (AI-assisted) ocean = waves: the near grid first, marking its pixels in the stencil buffer
+  if (waves_on && m_near_index_count) {
+    using namespace ctr_ocean;
+    const double gx = m_near_ox * (double)kWaveStep, gz = m_near_oz * (double)kWaveStep;
+    const double near_origin[3] = {p.start[0] + gx, p.start[1], p.start[2] + gz};
+    const float near_scale[3] = {kXZUnit, kYUnit, kXZUnit};
+    float nm[16];
+    make_clip(near_origin, near_scale, nm);
+    ctr_ocean_draw od;
+    ctr_gpu_prepare_mesh_matrix(nm, &od.clip);
+    ocean_rows(od, kXZUnit, gx, gz, gx, gz);
+    for (int i = 0; i < 3; i++) {
+      od.crest[i] = kCrest / 255.f;
+    }
+    ctr_draw_state ns = st;
+    ns.flags = CTR_STATE_STENCIL_SET;
+    ctr_gpu_ocean_draw(&ns, m_shimmer, &od, -1, m_near_verts, m_near_indices, 0,
+                       m_near_index_count);
+    m_triangles += m_near_index_count / 3;
   }
 
   // (AI-assisted) The far ocean. On the PS2, rings of coarser ocean reach the horizon; the 3DS
@@ -365,7 +557,7 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
   if (!(p.flags & 1)) {
     const float r0 = draw_dist > 0 ? draw_dist * 0.8f : 400.f * 4096.f;
     const float r1 = 8000.f * 4096.f;
-    const float y = p.start[1] - 0.25f * 4096.f;
+    const float y = p.start[1] - 0.25f * 4096.f - drop;
     auto color = [](float c) { return (u8)std::clamp(c, 0.f, 255.f); };
     const u8 cr = color(p.far_color[0]), cg = color(p.far_color[1]), cb = color(p.far_color[2]);
     // with the game's fog, the outer edge takes the fog color (GS units: half the register's)
@@ -420,18 +612,15 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
     far.atest = CTR_TEST_ALWAYS;
     far.ztest = CTR_TEST_GEQUAL;
     far.zwrite = 1;
+    far.flags = waves_on ? CTR_STATE_STENCIL_OUT : 0;
     ctr_gpu_draw_clip(&far, ring, n);
   }
 
-  ctr_draw_state st;
-  memset(&st, 0, sizeof(st));
-  st.tex = m_tex;
-  st.tcc = 1;
-  st.filter = 1;
-  st.blend = CTR_BLEND_ALPHA;
-  st.atest = CTR_TEST_ALWAYS;
-  st.ztest = CTR_TEST_GEQUAL;
-  st.zwrite = 1;
+  ctr_ocean_draw fd;
+  if (waves_on) {
+    st.flags = CTR_STATE_STENCIL_OUT;
+    ctr_gpu_prepare_mesh_matrix(m, &fd.clip);
+  }
   for (const auto& tile : m_tiles) {
     const float s[4] = {tile.center[0] + p.start[0], p.start[1], tile.center[2] + p.start[2],
                         tile.radius};
@@ -445,8 +634,17 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
         continue;
       }
     }
-    ctr_gpu_draw_mesh(&st, m, m_mesh, (int)tile.first_index, (int)tile.index_count);
+    if (waves_on) {
+      ocean_rows(fd, kScale, 0, 0, tile.center[0], tile.center[2]);
+      ctr_gpu_ocean_draw(&st, m_shimmer, &fd, m_mesh, nullptr, nullptr, (int)tile.first_index,
+                         (int)tile.index_count);
+    } else {
+      ctr_gpu_draw_mesh(&st, m, m_mesh, (int)tile.first_index, (int)tile.index_count);
+    }
     m_tiles_drawn++;
     m_triangles += (int)tile.index_count / 3;
+  }
+  if (waves_on) {
+    ctr_gpu_ocean_end();
   }
 }

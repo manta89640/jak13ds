@@ -35,6 +35,8 @@ extern const uint8_t ctr_clip_shbin[];
 extern const size_t ctr_clip_shbin_size;
 extern const uint8_t ctr_clip2_shbin[];
 extern const size_t ctr_clip2_shbin_size;
+extern const uint8_t ctr_ocean_shbin[];
+extern const size_t ctr_ocean_shbin_size;
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
@@ -185,7 +187,16 @@ typedef struct {
   u32 verts_pa, indices_pa;
 } MeshSlot;
 
-enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH, PROG_SKIN, PROG_SKIN_ENV, PROG_CLIP, PROG_CLIP2 };
+enum {
+  PROG_NONE = 0,
+  PROG_BASIC,
+  PROG_MESH,
+  PROG_SKIN,
+  PROG_SKIN_ENV,
+  PROG_CLIP,
+  PROG_CLIP2,
+  PROG_OCEAN
+};
 
 static struct {
   int ready;
@@ -214,6 +225,12 @@ static struct {
   DVLB_s* clip2_dvlb; /* the same with two texture coordinates (ctr_clip2.v.pica: clouds) */
   shaderProgram_s clip2_program;
   int uloc_clip2_glpica;
+  /* (AI-assisted) the ocean with waves (ctr_ocean.v.pica, ctr_gpu_ocean_draw) */
+  DVLB_s* ocean_dvlb;
+  shaderProgram_s ocean_program;
+  int uloc_ocean_clip, uloc_ocean_tex, uloc_ocean_scales, uloc_ocean_fog0, uloc_ocean_fog1;
+  int ocean_tex2_bound; /* texture unit 2 holds the ocean's shimmer texture */
+  int ocean_stage2;     /* combiner stage 2 holds the ocean's fog stage */
   int cur_prog;
   /* (AI-assisted) the frame's clear color as a texture combiner constant (CTR_BLEND_OVER_CLEAR) */
   u32 clear_abgr;
@@ -284,7 +301,7 @@ static int pres_init(void);
 static int g_block32 = 0;
 static int g_block32_failed = 0;
 static uint8_t* s_b32_scratch; /* 256x416 at 32 bits (16 with color16) */
-/* (AI-assisted) config.ini depth16: a 16-bit depth buffer (no stencil; nothing uses stencil) */
+/* (AI-assisted) config.ini depth16: a 16-bit depth buffer (no stencil: only ocean = waves uses it) */
 static int g_depth16 = 0;
 
 /* render buffer rows the picture starts at (the viewport's y) */
@@ -600,6 +617,17 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);         /* texcoord 1 */
     AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip2_glpica, &g.gl_to_pica);
+  } else if (prog == PROG_OCEAN) {
+    /* (AI-assisted) the static mesh layout (texcoord unused by the shader) */
+    C3D_BindProgram(&g.ocean_program);
+    g.last_state_valid = 0;
+    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
+    AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord (unused) */
+    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_ocean_scales, 1.0f / 255.0f, 1.0f / 255.0f,
+                  1.0f / 255.0f, 1.0f / 255.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_ocean_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_ocean_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
   } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV) {
     C3D_BindProgram(prog == PROG_SKIN ? &g.skin_program : &g.env_program);
     g.last_state_valid = 0;
@@ -792,6 +820,17 @@ int ctr_gpu_init(void) {
   shaderProgramInit(&g.clip2_program);
   shaderProgramSetVsh(&g.clip2_program, &g.clip2_dvlb->DVLE[0]);
   g.uloc_clip2_glpica = shaderInstanceGetUniformLocation(g.clip2_program.vertexShader, "glpica");
+  g.ocean_dvlb = DVLB_ParseFile((u32*)ctr_ocean_shbin, (u32)ctr_ocean_shbin_size);
+  shaderProgramInit(&g.ocean_program);
+  shaderProgramSetVsh(&g.ocean_program, &g.ocean_dvlb->DVLE[0]);
+  {
+    shaderInstance_s* vs = g.ocean_program.vertexShader;
+    g.uloc_ocean_clip = shaderInstanceGetUniformLocation(vs, "clip");
+    g.uloc_ocean_tex = shaderInstanceGetUniformLocation(vs, "tex");
+    g.uloc_ocean_scales = shaderInstanceGetUniformLocation(vs, "scales");
+    g.uloc_ocean_fog0 = shaderInstanceGetUniformLocation(vs, "fog0");
+    g.uloc_ocean_fog1 = shaderInstanceGetUniformLocation(vs, "fog1");
+  }
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
    * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
@@ -891,6 +930,8 @@ void ctr_gpu_exit(void) {
   ctr_linear_unlock();
   shaderProgramFree(&g.clip2_program);
   DVLB_Free(g.clip2_dvlb);
+  shaderProgramFree(&g.ocean_program);
+  DVLB_Free(g.ocean_dvlb);
   shaderProgramFree(&g.program);
   DVLB_Free(g.dvlb);
   shaderProgramFree(&g.mesh_program);
@@ -982,6 +1023,7 @@ enum {
   C3DiF_Effect = BIT(4),
 };
 #define C3DiF_TexEnv(n) BIT(26 + (n))
+#define C3DiF_Tex(n) BIT(23 + (n))
 static int s_overlap = 0;
 static unsigned s_partial_draws, s_partials;
 
@@ -2984,7 +3026,23 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   C3D_TexEnv e1;
   C3D_TexEnv* env1 = &e1;
   C3D_TexEnvInit(env1);
-  if (mesh == 2) {
+  if (mesh == 3) {
+    /* (AI-assisted) the ocean (ctr_gpu_ocean_draw): rgb times the shimmer layer (texture unit 2,
+     * 0x80 = neutral), then the fog in stage 2 (as the meshes' stage 1) */
+    C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_TEXTURE2, 0);
+    C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
+    C3D_TexEnvScale(env1, C3D_RGB, GPU_TEVSCALE_2);
+    C3D_TexEnv e2;
+    C3D_TexEnvInit(&e2);
+    if (g.fog_tex_valid) {
+      C3D_TexEnvSrc(&e2, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
+      C3D_TexEnvOpRgb(&e2, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                      GPU_TEVOP_RGB_SRC_ALPHA);
+      C3D_TexEnvFunc(&e2, C3D_RGB, GPU_INTERPOLATE);
+    }
+    commit_texenv(2, &e2, raw);
+    g.ocean_stage2 = 1;
+  } else if (mesh == 2) {
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, 0);
     C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvColor(env1, tint);
@@ -3081,6 +3139,14 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   commit_texenv(1, env1, raw);
   commit_texenv(0, env, raw);
+  if (mesh != 3 && g.ocean_stage2) {
+    /* (AI-assisted) stage 2 back to pass-through after the ocean (the far ring between its
+     * draws) */
+    C3D_TexEnv e2;
+    C3D_TexEnvInit(&e2);
+    commit_texenv(2, &e2, raw);
+    g.ocean_stage2 = 0;
+  }
 
   /* (AI-assisted) the fragment operations, as citro3d's C3D_AlphaBlend / C3D_BlendingColor /
    * C3D_AlphaTest / C3D_DepthTest / C3D_EarlyDepthTest store them in its context */
@@ -3140,6 +3206,18 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   e.earlyDepth = early_depth_ok(st) != 0;
   e.earlyDepthFunc = GPU_EARLYDEPTH_GEQUAL;
   e.earlyDepthRef = 0;
+  /* (AI-assisted) the stencil marks (CTR_STATE_STENCIL_*): 1 where a STENCIL_SET draw passed the
+   * depth test, STENCIL_OUT draws where it isn't 1. Off: only the enable bit changes. */
+  if ((st->flags & CTR_STATE_STENCIL_SET) && !g_depth16) {
+    e.stencilMode = 1u | ((u32)GPU_ALWAYS << 4) | (0xFFu << 8) | (1u << 16) | (0xFFu << 24);
+    e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_KEEP << 4) |
+                  ((u32)GPU_STENCIL_REPLACE << 8);
+  } else if ((st->flags & CTR_STATE_STENCIL_OUT) && !g_depth16) {
+    e.stencilMode = 1u | ((u32)GPU_NOTEQUAL << 4) | (1u << 16) | (0xFFu << 24);
+    e.stencilOp = 0;
+  } else {
+    e.stencilMode &= ~1u;
+  }
   if (!raw) {
     if (memcmp(&e, &ctx->effect, sizeof(e))) {
       ctx->effect = e;
@@ -3152,6 +3230,12 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   u32* p = raw_ptr();
   if (e.alphaTest != c->alphaTest) {
     p = raw_w(p, GPUREG_FRAGOP_ALPHA_TEST, 0xF, e.alphaTest);
+  }
+  if (e.stencilMode != c->stencilMode) {
+    p = raw_w(p, GPUREG_STENCIL_TEST, 0xF, e.stencilMode);
+  }
+  if (e.stencilOp != c->stencilOp) {
+    p = raw_w(p, GPUREG_STENCIL_OP, 0xF, e.stencilOp);
   }
   if (e.depthTest != c->depthTest) {
     p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
@@ -3594,6 +3678,146 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
   ctr_gpu_draw_mesh_prepared(state, &m, mesh, first_index, index_count);
 }
 
+/* ---------------- (AI-assisted) the ocean (config ocean = waves) ---------------- */
+
+int ctr_gpu_has_stencil(void) {
+  return !g_depth16;
+}
+
+void* ctr_gpu_stream_alloc(int bytes) {
+  if (!g.ready || !g.in_frame || bytes <= 0) {
+    return NULL;
+  }
+  const size_t b = ((size_t)bytes + 15) & ~(size_t)15;
+  if (g.vbuf_used + b > VBUF_BYTES) {
+    return NULL;
+  }
+  uint8_t* p = g.vbuf + g.vbuf_used; /* flushed with the frame's other immediate vertices */
+  g.vbuf_used += b;
+  return p;
+}
+
+/* the shimmer texture on unit 2 (citro3d sends it at the next update), bound again only when it
+ * or its memory (pipeline copies) changed */
+static const C3D_Tex* s_ocean_tex2;
+static const void* s_ocean_tex2_data;
+static void ocean_bind_tex2(int handle) {
+  if (handle < 0 || handle >= MAX_TEXTURES || g.textures[handle].used != 1) {
+    return;
+  }
+  TexSlot* slot = &g.textures[handle];
+  C3D_Tex* tex = &slot->tex;
+  if (s_ocean_tex2 == tex && s_ocean_tex2_data == tex->data && g.ocean_tex2_bound) {
+    return;
+  }
+  u32 param = tex->param & ~(GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
+                             GPU_TEXTURE_WRAP_S(3) | GPU_TEXTURE_WRAP_T(3) |
+                             GPU_TEXTURE_MIP_FILTER(GPU_LINEAR));
+  param |= GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
+           GPU_TEXTURE_WRAP_S(GPU_REPEAT) | GPU_TEXTURE_WRAP_T(GPU_REPEAT);
+  u8 max_level = 0;
+  if (slot->levels > 1 && g_mip_mode > 0) {
+    max_level = (u8)(slot->levels - 1);
+    if (g_mip_mode == 2) {
+      param |= GPU_TEXTURE_MIP_FILTER(GPU_LINEAR);
+    }
+  }
+  tex->param = param;
+  tex->maxLevel = max_level;
+  C3D_TexBind(2, tex);
+  s_ocean_tex2 = tex;
+  s_ocean_tex2_data = tex->data;
+  g.ocean_tex2_bound = 1;
+  g.cur.tex_binds++;
+}
+
+void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
+                        const void* verts, const uint16_t* indices, int first_index,
+                        int index_count) {
+  if (!g.ready || !g.in_frame || index_count < 3) {
+    return;
+  }
+  u32 vpa, ipa;
+  const void* vva;
+  const uint16_t* iva;
+  if (mesh >= 0) {
+    if (mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+      return;
+    }
+    const MeshSlot* ms = &g.meshes[mesh];
+    vpa = ms->verts_pa;
+    vva = ms->verts;
+    ipa = ms->indices_pa;
+    iva = ms->indices;
+  } else {
+    if (!verts || !indices) {
+      return;
+    }
+    vva = verts;
+    iva = indices;
+    vpa = osConvertVirtToPhys(verts);
+    ipa = osConvertVirtToPhys(indices);
+  }
+  ipa += 2u * (u32)first_index;
+  iva += first_index;
+  if (!cmd_room()) {
+    return;
+  }
+  use_program(PROG_OCEAN);
+  ocean_bind_tex2(tex2);
+  if (use_raw(state)) {
+    apply_state(state, 3, 1);
+    raw_vertex_buffer(vpa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
+    raw_sync();
+    /* the matrix and the 5 rows (texture coordinates, crest) as float24, two bursts */
+    u32 rows[15];
+    for (int i = 0; i < 5; i++) {
+      const float* r = i < 4 ? d->tex[i] : d->crest;
+      const float v[4] = {r[3], r[2], r[1], r[0]};
+      raw_pack_f24(v, rows + 3 * i);
+    }
+    u32* p = raw_unif(raw_ptr(), g.uloc_ocean_clip, d->clip.f24, 12, 0);
+    p = raw_unif(p, g.uloc_ocean_tex, rows, 15, 0);
+    raw_end(p);
+    raw_draw_elements(ipa, (u32)index_count);
+  } else {
+    raw_vc_flush();
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_ocean_clip, (const C3D_Mtx*)d->clip.m);
+    for (int i = 0; i < 5; i++) {
+      const float* r = i < 4 ? d->tex[i] : d->crest;
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_ocean_tex + i, r[0], r[1], r[2], r[3]);
+    }
+    c3d_vertex_buffer(vpa, vva, 16, 3, 0x210);
+    apply_state(state, 3, 0);
+    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, iva);
+  }
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
+}
+
+void ctr_gpu_ocean_end(void) {
+  if (!g.ready || !g.in_frame) {
+    return;
+  }
+  C3Di_Context* ctx = &__C3D_Context;
+  if (g.ocean_tex2_bound) {
+    /* unit 2 off (C3D_TexBind can't take NULL for units 1-2) */
+    ctx->tex[2] = NULL;
+    ctx->flags |= C3DiF_Tex(2);
+    g.ocean_tex2_bound = 0;
+    s_ocean_tex2 = NULL;
+  }
+  C3D_TexEnv e;
+  C3D_TexEnvInit(&e);
+  commit_texenv(2, &e, s_raw.on);
+  g.ocean_stage2 = 0;
+  if (ctx->effect.stencilMode & 1) {
+    ctx->effect.stencilMode &= ~1u;
+    ctx->flags |= C3DiF_Effect;
+  }
+  g.last_state_valid = 0;
+}
+
 /* ---------------- skinned meshes ---------------- */
 
 int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
@@ -3965,6 +4189,12 @@ void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, u
   if (g.cur_prog == PROG_MESH) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
+    raw_note_unif();
+  } else if (g.cur_prog == PROG_OCEAN) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_ocean_fog0, g.fog0[0], g.fog0[1], g.fog0[2],
+                  g.fog0[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_ocean_fog1, g.fog1[0], g.fog1[1], g.fog1[2],
+                  g.fog1[3]);
     raw_note_unif();
   }
   uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)gr << 8) | b;

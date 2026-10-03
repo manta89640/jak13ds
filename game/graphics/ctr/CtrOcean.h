@@ -19,6 +19,14 @@
  *  - the texture (one repeat per 96 m, like the far ocean) is shaded from the 32x32 wave heights
  *    of the frame (the ones ocean-get-height uses), so the waves move like on the PS2.
  *  - fog like the level background (the game's fog + fog towards the draw distance).
+ *
+ * (AI-assisted) config ocean = waves adds (flat stays as above):
+ *  - a near grid around the camera displaced by the wave heights (CtrOceanNear.h), drawn first and
+ *    marking the stencil buffer; the far mesh and ring then skip the marked pixels (so the troughs
+ *    don't show the flat water), with the waves faded out at the grid's edge (no seam). Without a
+ *    stencil buffer (depth16) the far mesh is lowered below the deepest trough instead.
+ *  - a shimmer: a second, static wave texture scrolling in another direction (texture unit 2),
+ *    and crests brighter / troughs darker (ctr_ocean.v.pica).
  */
 
 #include <string>
@@ -40,6 +48,10 @@ class CtrOceanRenderer : public CtrBucketRenderer {
   bool build_mesh(const u8* ee, const Packet& p);
   void update_texture(const u8* ee, u32 heights);
   void draw(const Packet& p, const CtrRenderState& rs);
+  // (AI-assisted) ocean = waves
+  bool waves() const;
+  void build_near(const u8* ee, const Packet& p);
+  void make_shimmer(const float* h);
 
   struct Tile {
     u32 first_index = 0;
@@ -54,6 +66,25 @@ class CtrOceanRenderer : public CtrBucketRenderer {
   std::vector<Tile> m_tiles;
   int m_tex = -1;
   std::vector<u8> m_texels;
+  float m_heights[32 * 32];  // this frame's wave heights
   // statistics
   int m_frames = 0, m_tiles_drawn = 0, m_triangles = 0;
+
+  // (AI-assisted) ocean = waves: water per 24 m sub-cell (1 = water), the near grid of the frame
+  std::vector<u8> m_water;
+  u32 m_fade[256];
+  bool m_have_fade = false;
+  int m_shimmer = -1;
+  const void* m_near_verts = nullptr;
+  const u16* m_near_indices = nullptr;
+  int m_near_index_count = 0;
+  int m_near_ox = 0, m_near_oz = 0;
+  float m_trough = 0;          // deepest trough this level (game units, >= 0)
+  float m_time = 0;            // shimmer scroll time (ms), stops while the waves do
+  double m_last_ms = 0;
+  float m_last_h[2] = {0, 0};  // two wave heights of the last frame (paused when the same)
+  // the near grid's CPU time, logged once per level
+  int m_near_frames = 0;
+  double m_near_ms = 0;
+  bool m_near_logged = false;
 };

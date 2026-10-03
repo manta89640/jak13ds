@@ -80,7 +80,15 @@ enum {
   /* the texture is radial (ctr_gpu_tex_radial) and the texture coordinates go from -1 to 1 across
    * it (center 0): drawn with the procedural texture unit instead of reading texels */
   CTR_STATE_PROCTEX = 2,
+  /* (AI-assisted) the stencil buffer (only when ctr_gpu_has_stencil): STENCIL_SET marks the pixels
+   * the draw writes (where it passes the depth test), STENCIL_OUT draws only where none is marked.
+   * The marks are cleared with the depth buffer at the frame start. The ocean's near grid marks,
+   * its far mesh stays out (config ocean = waves). */
+  CTR_STATE_STENCIL_SET = 4,
+  CTR_STATE_STENCIL_OUT = 8,
 };
+/* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
+int ctr_gpu_has_stencil(void);
 
 /* Lifetime. ctr_gpu_init returns 0 on success. */
 int ctr_gpu_init(void);
@@ -309,6 +317,27 @@ typedef struct {
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
+
+/* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
+ * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
+ * platform/3ds/shaders/ctr_ocean.v.pica: texture coordinates from the position (rows below), the
+ * color brightened on crests (position y), fog like ctr_gpu_draw_mesh. Two textures:
+ *   rgb = tex(st0) * color * 2 * tex2(st1) * 2, then fog; alpha = tex.a * color.a * 2
+ * (tex2 on texture unit 2: a gray around 0x80 is neutral). ctr_gpu_ocean_end after the ocean's
+ * draws (texture unit 2 off, combiners as the other draws want them). */
+typedef struct {
+  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
+  float tex[4][4];      /* s0, t0, s1, t1 = dot(row.xyz, pos) + row.w */
+  float crest[4];       /* color factor = 1 + pos.y * crest (rgb; alpha: 0) */
+} ctr_ocean_draw;
+/* Memory for one frame's vertices / indices (16-byte aligned), read by the GPU during this frame:
+ * the immediate draws' buffer (one per frame in flight with the pipeline). NULL when full. */
+void* ctr_gpu_stream_alloc(int bytes);
+/* mesh >= 0: a range of a static mesh; else verts / indices from ctr_gpu_stream_alloc. */
+void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
+                        const void* verts, const uint16_t* indices, int first_index,
+                        int index_count);
+void ctr_gpu_ocean_end(void);
 
 /* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)

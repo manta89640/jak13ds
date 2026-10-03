@@ -69,6 +69,8 @@ struct SoftState {
   std::chrono::steady_clock::time_point next_vblank;
   bool vblank_started = false;
 } g_soft;
+// (AI-assisted) ctr_gpu_stream_alloc: the frame's vertices, until the next frame begins
+static std::vector<std::vector<uint8_t>> s_stream;
 
 uint32_t morton8(uint32_t x, uint32_t y) {
   return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
@@ -350,6 +352,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   }
   std::fill(g_soft.depth.begin(), g_soft.depth.end(), 0.f);
   g_soft.cur = ctr_gpu_stats{};
+  s_stream.clear();
 }
 
 void ctr_gpu_frame_end(void) {
@@ -700,6 +703,83 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     g_soft.cur.triangles++;
   }
 }
+
+// (AI-assisted) the ocean with waves: no stencil and no second texture layer here (the far mesh is
+// lowered instead, see CtrOcean)
+
+int ctr_gpu_has_stencil(void) {
+  return 0;
+}
+
+void* ctr_gpu_stream_alloc(int bytes) {
+  if (bytes <= 0) {
+    return nullptr;
+  }
+  s_stream.emplace_back((size_t)bytes);
+  return s_stream.back().data();
+}
+
+void ctr_gpu_ocean_draw(const ctr_draw_state* state,
+                        int,
+                        const ctr_ocean_draw* d,
+                        int mesh,
+                        const void* verts,
+                        const uint16_t* indices,
+                        int first_index,
+                        int index_count) {
+  const uint8_t* vbase = (const uint8_t*)verts;
+  const uint16_t* ibase = indices;
+  if (mesh >= 0) {
+    if (mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+      return;
+    }
+    vbase = g_soft.meshes[mesh].verts.data();
+    ibase = g_soft.meshes[mesh].indices.data();
+  }
+  if (!vbase || !ibase) {
+    return;
+  }
+  const float* clip = d->clip.m;  // row-major (the soft prepare keeps the GL matrix)
+  g_soft.cur.draws++;
+  for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
+    ctr_vertex tri[3];
+    bool ok = true;
+    for (int k = 0; k < 3; k++) {
+      const uint8_t* src = vbase + 16 * ibase[i + k];
+      int16_t pos[3];
+      memcpy(pos, src, 6);
+      const float in[3] = {(float)pos[0], (float)pos[1], (float)pos[2]};
+      float c[4];
+      for (int r = 0; r < 4; r++) {
+        c[r] = clip[4 * r] * in[0] + clip[4 * r + 1] * in[1] + clip[4 * r + 2] * in[2] +
+               clip[4 * r + 3];
+      }
+      if (c[3] < 1e-3f) {
+        ok = false;
+        break;
+      }
+      tri[k].x = c[0] / c[3];
+      tri[k].y = c[1] / c[3];
+      tri[k].z = (1.f + c[2] / c[3]) * 0.5f;
+      tri[k].s = d->tex[0][0] * in[0] + d->tex[0][1] * in[1] + d->tex[0][2] * in[2] + d->tex[0][3];
+      tri[k].t = d->tex[1][0] * in[0] + d->tex[1][1] * in[1] + d->tex[1][2] * in[2] + d->tex[1][3];
+      const float f = 1.f + d->crest[0] * 255.f * in[1];
+      auto ch = [&](uint8_t v) { return (uint8_t)std::clamp(v * f, 0.f, 255.f); };
+      tri[k].r = ch(src[12]);
+      tri[k].g = ch(src[13]);
+      tri[k].b = ch(src[14]);
+      tri[k].a = src[15];
+    }
+    if (!ok || (tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
+        (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
+      continue;
+    }
+    raster_triangle(*state, tri, true);
+    g_soft.cur.triangles++;
+  }
+}
+
+void ctr_gpu_ocean_end(void) {}
 
 int ctr_gpu_skinned_mesh_create(const void* verts,
                                 int vertex_count,

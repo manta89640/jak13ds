@@ -1,0 +1,51 @@
+; (AI-assisted)
+; Vertex shader for the ocean with config ocean = waves (CtrOcean, ctr_gpu_ocean_draw). Vertices in
+; the static mesh layout (c3l::Vertex, its texture coordinates unused): the position goes through
+; one matrix to clip space like ctr_mesh.v.pica. The texture coordinates of the wave texture (unit
+; 0) and of the shimmer layer (unit 2) come from the position (dph with a row each), so the near
+; grid and the far mesh line up. The color is brightened on crests and darkened in troughs (the
+; near grid's y is the wave height; the far mesh is flat). Fog as ctr_mesh.v.pica.
+; 18 instructions per vertex.
+
+.fvec clip[4]
+.fvec tex[5]        ; rows s0, t0, s1, t1 (dph with the position); tex[4]: crest factor (k, k, k, 0)
+.fvec scales        ; color scale (1/255) in xyzw
+.fvec fog0          ; as ctr_mesh.v.pica
+.fvec fog1
+
+.constf consts(1.0, 0.5, 0.0, 0.0)
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+.out outclr color
+
+.alias inpos v0
+.alias inclr v2
+
+.proc main
+  ; dph: the position's pad (w) counts as 1
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  dph outpos.z, inpos, clip[2]
+  dph r1, inpos, clip[3]
+  mov outpos.w, r1
+
+  mul r2.xy, fog0.xyxy, r1.xyxy
+  add r2.xy, fog0.zwzw, r2.xyxy
+  max r2.xy, fog1.xyxy, r2.xyxy
+  max outtc1.x, -r2.xxxx, r2.yyyy
+  mov outtc1.y, consts.yyyy
+
+  dph outtc0.x, inpos, tex[0]
+  dph outtc0.y, inpos, tex[1]
+  dph outtc2.x, inpos, tex[2]
+  dph outtc2.y, inpos, tex[3]
+
+  ; color * (1 + k * y) / 255 (alpha: / 255)
+  mul r3, tex[4], inpos.yyyy
+  add r3, scales, r3
+  mul outclr, r3, inclr
+  end
+.end
