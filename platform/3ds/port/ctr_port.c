@@ -959,7 +959,7 @@ int ctr_stdio_tee(const char* path) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
   if (s_log_on) {
-    printf("[ctr] log writer thread on core %d (config.ini log_async = off: no writer thread)\n",
+    printf("[ctr] log writer thread on core %d (config.ini log_async = off turns it off)\n",
            s_log_core);
   }
   return 0;
