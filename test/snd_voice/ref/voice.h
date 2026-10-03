@@ -1,0 +1,135 @@
+// Copyright: 2021 - 2024, Ziemas
+// SPDX-License-Identifier: ISC
+// (AI-assisted) Frozen copy of game/sound/common/voice.h at 446cce66e (before the block-wise
+// ADPCM decode), the reference of test/snd_voice/voice_exact.cpp. Only the namespace (snd_ref)
+// and the include paths differ.
+#pragma once
+#include "bitfield.h"
+#include "envelope.h"
+#include "fifo.h"
+#include "sound_types.h"
+
+#include "common/common_types.h"
+
+namespace snd_ref {
+
+class Voice {
+ public:
+  enum class AllocationType {
+    Managed,
+    Permanent,
+  };
+
+  Voice(AllocationType alloc = AllocationType::Managed) : mAlloc(alloc) {}
+  s16Output Run();
+  // (AI-assisted) out[i] += Run() for i < n, stopping when the voice stops (as Synth::Tick does),
+  // with the same result; returns the samples run. The envelope steps are done in one go while
+  // they only advance a counter (most samples), which makes it several times cheaper.
+  // ratio: SPU ticks (48 kHz) per output sample, 16.16 fixed point. 0x10000 is Run() exactly;
+  // more mixes at a lower rate (the 3DS mixes at the DSP's 32728 Hz): the pitch counter moves
+  // that much further per output sample and the envelopes run that many ticks, so pitch and
+  // timing stay the same.
+  int RunBlock(s16Output* out, int n, u32 ratio = 0x10000);
+
+  void KeyOn();
+
+  void KeyOff();
+
+  bool Dead() {
+    if (mAlloc == AllocationType::Permanent) {
+      return false;
+    }
+
+    return mADSR.GetPhase() == ADSR::Phase::Stopped;
+  }
+
+  bool Stopped() { return mADSR.GetPhase() == ADSR::Phase::Stopped; }
+
+  void SetPitch(u16 reg) {
+    // fmt::print("VOICE[{}] PITCH WRITE {:x}\n", m_channel, reg);
+    mPitch = reg;
+  }
+  void SetAsdr1(u16 reg) {
+    // fmt::print("VOICE[{}] ADSR1 WRITE {:x}\n", m_channel, reg);
+    mADSR.m_Reg.lo.set(reg);
+  }
+  void SetAsdr2(u16 reg) {
+    // fmt::print("VOICE[{}] ADSR2 WRITE {:x}\n", m_channel, reg);
+    mADSR.m_Reg.hi.set(reg);
+  }
+  void SetVolume(u16 left, u16 right) {
+    // fmt::print("VOICE[{}] VOLL WRITE {:x}\n", m_channel, left);
+    // fmt::print("VOICE[{}] VOLR WRITE {:x}\n", m_channel, right);
+    mVolume.left.Set(left);
+    mVolume.right.Set(right);
+  }
+
+  void SetVolumeL(u16 vol) { mVolume.left.Set(vol); }
+
+  void SetVolumeR(u16 vol) { mVolume.right.Set(vol); }
+
+  s16 GetEnvx() { return mADSR.Level(); }
+
+  void SetSample(u16* sample) {
+    mSample = sample;
+    mSSA = 0;
+  }
+
+  u32 GetNax() { return mNAX; }
+  // (AI-assisted) played a loop end block without repeat (the end of a stream)
+  bool Stopped() const { return mADSR.GetPhase() == ADSR::Phase::Stopped; }
+
+  void SetSsa(u32 addr) { mSSA = addr; }
+
+  void SetLsa(u32 addr) {
+    mLSA = addr;
+    mCustomLoop = true;
+  }
+
+  void Stop() { mADSR.Stop(); }
+
+ private:
+  union ADPCMHeader {
+    u16 bits;
+    bitfield<u16, bool, 10, 1> LoopStart;
+    bitfield<u16, bool, 9, 1> LoopRepeat;
+    bitfield<u16, bool, 8, 1> LoopEnd;
+    bitfield<u16, u8, 4, 3> Filter;
+    bitfield<u16, u8, 0, 4> Shift;
+  };
+
+  AllocationType mAlloc;
+  bool mNoise{false};
+  bool mENDX{false};
+
+  void DecodeSamples();
+  void UpdateBlockHeader();
+  // (AI-assisted) Run() with the pitch counter advanced by `step` and the envelopes by `ticks`
+  // SPU ticks; ahead: keep 16 decoded samples (more than one tick per sample can pop 6)
+  s16Output RunTicks(u32 step, u32 ticks, bool ahead);
+  u32 mTickFrac{0};  // (AI-assisted) RunBlock: SPU tick fraction carried between output samples
+
+  // (AI-assisted) contiguous (linear_fifo): the interpolation reads Data()[0..3]
+  linear_fifo<s16, 0x20> mDecodeBuf{};
+  s16 mDecodeHist1{0};
+  s16 mDecodeHist2{0};
+  // (AI-assisted) the current block's shift and filter coefficients (UpdateBlockHeader)
+  u8 mDecShift{0};
+  s16 mDecCoef1{0};
+  s16 mDecCoef2{0};
+  u32 mCounter{0};
+
+  u16 mPitch{0};
+
+  u16* mSample{nullptr};
+  u32 mSSA{0};
+  u32 mNAX{0};
+  u32 mLSA{0};
+  bool mCustomLoop{false};
+
+  ADPCMHeader mCurHeader{};
+
+  ADSR mADSR{};
+  VolumePair mVolume{};
+};
+}  // namespace snd_ref

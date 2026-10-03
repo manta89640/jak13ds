@@ -5,12 +5,22 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
-#if defined(__ARM_FEATURE_SIMD32) || defined(__ARM_FEATURE_SAT)
+#if defined(__ARM_FEATURE_SIMD32) || defined(__ARM_FEATURE_SAT) || defined(__ARM_FEATURE_DSP)
 #include <arm_acle.h>
 #endif
 
 namespace snd {
 #include "interp_table.inc"
+
+// (AI-assisted) for the per sample code in RunBlock (a lambda called from two places), and to keep
+// the once per block code out of it
+#if defined(__GNUC__) || defined(__clang__)
+#define SND_ALWAYS_INLINE __attribute__((always_inline))
+#define SND_NOINLINE __attribute__((noinline))
+#else
+#define SND_ALWAYS_INLINE
+#define SND_NOINLINE
+#endif
 
 // Integer math version of ps-adpcm coefs. (AI-assisted) The filter field has 3 bits: 5-7 (invalid)
 // as 0 instead of reading past the table.
@@ -25,6 +35,77 @@ static constexpr std::array<std::array<s16, 2>, 8> adpcm_coefs = {{
     {0, 0},
 }};
 
+// (AI-assisted) ARM DSP instructions (the 3DS's ARM11 has them). test/snd_voice also builds the
+// code that uses them on the host, with these plain versions (SND_TEST_ARM_DSP), to test it.
+#if defined(SND_TEST_ARM_DSP)
+#define SND_ARM_DSP 1
+// SMLAWB: c + the top 32 bits of the 48-bit product of a and the bottom half of b
+static inline s32 Smlawb(s32 a, s32 b, s32 c) {
+  return c + (s32)(((s64)a * (s16)b) >> 16);
+}
+static inline s32 Ssat16(s32 v) {
+  return std::clamp<s32>(v, INT16_MIN, INT16_MAX);
+}
+#elif defined(__ARM_FEATURE_DSP) && defined(__ARM_FEATURE_SAT)
+#define SND_ARM_DSP 1
+static inline s32 Smlawb(s32 a, s32 b, s32 c) {
+  return __smlawb(a, b, c);
+}
+static inline s32 Ssat16(s32 v) {
+  return __ssat(v, 16);
+}
+#endif
+
+// (AI-assisted) Decodes `count` ADPCM data words from src (4 samples each, the lowest nibble
+// first) into dst, with the block's shift and filter coefficients and the history in hist1 /
+// hist2. Each sample is
+//   clamp((nibble << 12 >> shift) + (coef1 * hist1 >> 6) + (coef2 * hist2 >> 6))
+// as the previous one-word-at-a-time loop computed it. Nibble k of a word w, << 12 >> shift, is
+// (s32)(w << (28 - 4k) & 0xF0000000) >> (16 + shift). On ARM a filter term and its addition are
+// one SMLAWB: (coef << 10) * hist >> 16 (the top 32 bits of the 48-bit product) is exactly
+// coef * hist >> 6.
+static inline void DecodeWords(s16* dst,
+                               const u16* src,
+                               u32 count,
+                               u32 shift,
+                               s32 coef1,
+                               s32 coef2,
+                               s32& hist1,
+                               s32& hist2) {
+  // TODO do the right thing for invalid shift/filter values
+  // (and the clamp: we do get overflow here otherwise, should we?)
+  const u32 sh = 16 + shift;
+#if defined(SND_ARM_DSP)
+  const s32 c1 = coef1 << 10, c2 = coef2 << 10;
+  auto sample = [&](s32 nibble, s32 h1, s32 h2) SND_ALWAYS_INLINE {
+    const s32 sum2 = Smlawb(c2, h2, nibble);
+    return Ssat16(Smlawb(c1, h1, sum2));
+  };
+#else
+  auto sample = [&](s32 nibble, s32 h1, s32 h2) SND_ALWAYS_INLINE {
+    return std::clamp<s32>(nibble + ((coef1 * h1) >> 6) + ((coef2 * h2) >> 6), INT16_MIN,
+                           INT16_MAX);
+  };
+#endif
+  s32 h1 = hist1, h2 = hist2;
+  for (u32 i = 0; i < count; i++) {
+    const u32 w = src[i];
+    const s32 s0 = sample((s32)(w << 28) >> sh, h1, h2);
+    const s32 s1 = sample((s32)((w << 24) & 0xF0000000u) >> sh, s0, h1);
+    const s32 s2 = sample((s32)((w << 20) & 0xF0000000u) >> sh, s1, s0);
+    const s32 s3 = sample((s32)((w << 16) & 0xF0000000u) >> sh, s2, s1);
+    dst[0] = static_cast<s16>(s0);
+    dst[1] = static_cast<s16>(s1);
+    dst[2] = static_cast<s16>(s2);
+    dst[3] = static_cast<s16>(s3);
+    dst += 4;
+    h2 = s2;
+    h1 = s3;
+  }
+  hist1 = h1;
+  hist2 = h2;
+}
+
 void Voice::DecodeSamples() {
   // This doesn't exactly match the real behaviour,
   // it seems to initially decode a bigger chunk
@@ -34,61 +115,66 @@ void Voice::DecodeSamples() {
     return;
   }
 
-  s16* dst = mDecodeBuf.Append(4);
   // Skip decoding for stopped voices.
   if (mADSR.GetPhase() == ADSR::Phase::Stopped) {
+    // (AI-assisted) zeros, also in place of samples written ahead: the voice stays silent until a
+    // key on starts it over
+    s16* dst = mDecodeBuf.Ahead() ? mDecodeBuf.AheadData() : mDecodeBuf.Reserve(4);
     dst[0] = dst[1] = dst[2] = dst[3] = 0;
-  } else {
-    u32 data = mSample[mNAX];
-    // (AI-assisted) the block's shift and filter as UpdateBlockHeader found them, the history in
-    // registers
-    const int shift = mDecShift;
-    const s32 coef1 = mDecCoef1, coef2 = mDecCoef2;
-    s32 hist1 = mDecodeHist1, hist2 = mDecodeHist2;
-    for (int i = 0; i < 4; i++) {
-      s32 sample = (s16)((data & 0xF) << 12);
-      sample >>= shift;
-
-      // TODO do the right thing for invalid shift/filter values
-      sample += (coef1 * hist1) >> 6;
-      sample += (coef2 * hist2) >> 6;
-
-      // We do get overflow here otherwise, should we?
-#if defined(__ARM_FEATURE_SAT)
-      sample = __ssat(sample, 16);  // (AI-assisted) the same clamp in one instruction
-#else
-      sample = std::clamp<s32>(sample, INT16_MIN, INT16_MAX);
-#endif
-
-      hist2 = hist1;
-      hist1 = sample;
-
-      dst[i] = static_cast<s16>(sample);
-      data >>= 4;
-    }
-    mDecodeHist1 = static_cast<s16>(hist1);
-    mDecodeHist2 = static_cast<s16>(hist2);
+  } else if (!mDecodeBuf.Ahead()) {
+    DecodeBlock();  // (AI-assisted) this word and the rest of its block
   }
+  mDecodeBuf.Commit(4);
 
   mNAX++;
 
   if ((mNAX & 0x7) == 0) {
-    if (mCurHeader.LoopEnd.get()) {
-      mNAX = mLSA;
-      mENDX = true;
-
-      if (!mCurHeader.LoopRepeat.get()) {
-        // Need to inhibit stopping here in noise is on
-        // seems to result in the right thing but would like to verify
-        if (!mNoise)
-          mADSR.Stop();
-      }
-    }
-
-    UpdateBlockHeader();
-
-    mNAX++;
+    NextBlock();
   }
+}
+
+// (AI-assisted) Writes the samples of the words mNAX .. the end of its block (the next multiple of
+// 8) ahead in mDecodeBuf: 4 * (8 - (mNAX & 7)) samples. mNAX & 7 is 0 only after a key on or loop
+// to an address 7 past a block start: then the header word is decoded as data first, as before.
+void Voice::DecodeBlock() {
+  const u32 count = 8 - (mNAX & 7);
+  s32 hist1 = mDecodeHist1, hist2 = mDecodeHist2;
+  DecodeWords(mDecodeBuf.Reserve(4 * count), mSample + mNAX, count, mDecShift, mDecCoef1, mDecCoef2,
+              hist1, hist2);
+  mDecodeHist1 = static_cast<s16>(hist1);
+  mDecodeHist2 = static_cast<s16>(hist2);
+  mBlockEnd = mNAX + count;
+}
+
+// The end of a block, after its last word: (AI-assisted) mNAX is a multiple of 8
+void Voice::NextBlock() {
+  if (mCurHeader.LoopEnd.get()) {
+    mNAX = mLSA;
+    mENDX = true;
+
+    if (!mCurHeader.LoopRepeat.get()) {
+      // Need to inhibit stopping here in noise is on
+      // seems to result in the right thing but would like to verify
+      if (!mNoise)
+        mADSR.Stop();
+    }
+  }
+
+  UpdateBlockHeader();
+
+  mNAX++;
+}
+
+// (AI-assisted) RunBlock's DecodeSamples() for the last word of a block written ahead: the block
+// end, then the next block written ahead. False: a loop end without repeat stopped the voice.
+SND_NOINLINE bool Voice::EndBlock() {
+  mNAX = mBlockEnd;
+  NextBlock();
+  if (Stopped()) {
+    return false;
+  }
+  DecodeBlock();
+  return true;
 }
 
 void Voice::UpdateBlockHeader() {
@@ -126,13 +212,6 @@ void Voice::KeyOff() {
   // fmt::print("Key Off\n");
 }
 
-// (AI-assisted) for the per sample code in RunBlock (a lambda called from two places)
-#if defined(__GNUC__) || defined(__clang__)
-#define SND_ALWAYS_INLINE __attribute__((always_inline))
-#else
-#define SND_ALWAYS_INLINE
-#endif
-
 // (AI-assisted) out += {left, right} with saturation, as s16Output::operator+= (one QADD16 on the
 // 3DS)
 static inline void MixInto(s16Output& out, s16 left, s16 right) {
@@ -148,7 +227,13 @@ static inline void MixInto(s16Output& out, s16 left, s16 right) {
 }
 
 int Voice::RunBlock(s16Output* out, int n, u32 ratio) {
-  const bool ahead = ratio > 0x10000;
+  // (AI-assisted) compiled for each case: the 3DS mixes at fewer samples than SPU ticks (ahead),
+  // and a constant leaves the per sample loop a register more
+  return ratio > 0x10000 ? RunBlockImpl<true>(out, n, ratio) : RunBlockImpl<false>(out, n, ratio);
+}
+
+template <bool ahead>
+int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
   // the pitch counter per output sample (Run(): min(pitch, 0x3FFF) per tick)
   const u32 step = ((u32)std::min<s32>(mPitch, 0x3FFF) * ratio + 0x8000) >> 16;
   int i = 0;
@@ -164,10 +249,14 @@ int Voice::RunBlock(s16Output* out, int n, u32 ratio) {
   if (Stopped()) {
     return 0;
   }
+  if (!mDecodeBuf.Ahead()) {
+    DecodeBlock();  // (AI-assisted) after a key on: the first block
+  }
   const s32 vol_l = mVolume.left.GetCurrent(), vol_r = mVolume.right.GetCurrent();
-  // the decoded samples and the pitch counter, in registers
+  // the decoded samples and the pitch counter, in registers. (AI-assisted) [wr, end): the samples
+  // of the current block written ahead.
   const s16* const buf = mDecodeBuf.Base();
-  size_t rd = mDecodeBuf.ReadPos(), wr = mDecodeBuf.WritePos();
+  size_t rd = mDecodeBuf.ReadPos(), wr = mDecodeBuf.WritePos(), end = mDecodeBuf.AheadPos();
   u32 counter = mCounter;
   // One output sample as Run() makes it, without the envelope and volume steps: decoding,
   // interpolation (none when the sample is 0 whatever the voice plays), the pitch counter. False:
@@ -175,16 +264,21 @@ int Voice::RunBlock(s16Output* out, int n, u32 ratio) {
   // now) and the voice isn't run again.
   auto run_sample = [&](s16Output& o, s32 level, bool silent) SND_ALWAYS_INLINE {
     if (wr - rd < 16) {
-      mDecodeBuf.SetReadPos(rd);
-      DecodeSamples();
-      while (ahead && mDecodeBuf.Size() < 16 && !Stopped()) {
-        DecodeSamples();
-      }
-      rd = mDecodeBuf.ReadPos();
-      wr = mDecodeBuf.WritePos();
-      if (Stopped()) {
-        return false;
-      }
+      // (AI-assisted) DecodeSamples(), with more calls until 16 samples are buffered when ahead:
+      // the samples are there already, only a block's last word does more
+      do {
+        wr += 4;
+        if (wr == end) {
+          mDecodeBuf.SetReadPos(rd);
+          mDecodeBuf.SetWritePos(wr);
+          if (!EndBlock()) {
+            return false;
+          }
+          rd = mDecodeBuf.ReadPos();
+          wr = mDecodeBuf.WritePos();
+          end = mDecodeBuf.AheadPos();
+        }
+      } while (ahead && wr - rd < 16);
     }
     if (!silent) {
       const s16* p = buf + rd;
@@ -220,12 +314,20 @@ int Voice::RunBlock(s16Output* out, int n, u32 ratio) {
     }
     u32 done = 0;
     bool stopped = false;
-    for (; done < run; done++) {
-      if (!run_sample(out[i + done], level, silent)) {
-        done++;
-        stopped = true;
-        break;
+    auto run_span = [&](bool silent_span) SND_ALWAYS_INLINE {
+      for (; done < run; done++) {
+        if (!run_sample(out[i + done], level, silent_span)) {
+          done++;
+          stopped = true;
+          break;
+        }
       }
+    };
+    // (AI-assisted) a loop for each, without the check per sample
+    if (silent) {
+      run_span(true);
+    } else {
+      run_span(false);
     }
     i += done;
     {
@@ -258,6 +360,12 @@ int Voice::RunBlock(s16Output* out, int n, u32 ratio) {
     }
   }
   mDecodeBuf.SetReadPos(rd);
+  mDecodeBuf.SetWritePos(wr);
+  if (end != wr) {
+    // (AI-assisted) the words not taken yet (otherwise the voice stopped at the block end, which
+    // set mNAX)
+    mNAX = mBlockEnd - (u32)(end - wr) / 4;
+  }
   mCounter = counter;
   return i;
 }
