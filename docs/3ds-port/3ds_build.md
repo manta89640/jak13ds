@@ -578,8 +578,18 @@ PC it runs with `gk --ctr-gfx`.
   polygon clipping cost ~1.5 ms per frame): it sends the camera, the cloud scroll and where the sky
   polygons are, and `CtrSky` draws the same roof, cloud layers and horizon polygons in clip space
   (`ctr_gpu_draw_clip`), clipped by the GPU.
-- **Not drawn yet:** shadows, envmap shine passes of tie and the ocean, debug lines,
-  scissor.
+- **Shadows** (`CtrShadow`, config.ini `shadows = full`, the default): the game runs
+  `shadow-execute-all` (native `shadow-execute`, see below) and the `shadow` bucket gets the PS2's
+  shadow volume DMA. `CtrShadowRenderer` decodes the VU1 program's input natively (every vertex
+  transformed once to clip space, each triangle sorted front / back with the VU1's own facing
+  test, no CPU clipping) and draws all casters with three draws: front faces stencil INCR, back
+  faces stencil DECR (depth test, no colour or depth writes), then one rectangle per caster with
+  stencil != 0 that multiplies the screen by the time of day shadow colour (like the PC's
+  `ShadowRenderer`) and zeroes the stencil again. `blob`: the old blob shadow under Jak only;
+  `depth16 = on` has no stencil and means `blob`. Test: `test/ctr_shadow/build.sh &&
+  /tmp/ctr_shadow_test` (native decoder against the emulated VU1 program, `Shadow_PS2.cpp`).
+  (AI-assisted)
+- **Not drawn yet:** envmap shine passes of tie and the ocean, debug lines, scissor.
 - **Memory:** a level's textures are one block of linear memory (a texture pool), copied to VRAM
   with one GPU copy when there is room: the level the camera is in first (`ctr_gpu_pool_*`, see
   `performance.md`). Other textures (sprites, text, eyes, ocean) and meshes and the 1.5 MB vertex
@@ -620,7 +630,7 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `rgba4_as_rgba8` | auto | store RGBA4 level and model textures as RGBA8 (twice their memory). Azahar (OpenGL and Vulkan) draws RGBA4 textures as noise or a solid color: crates, orbs, Jak's hair. `auto`: on in the emulator, off on the 3DS |
   | `vram_textures` | auto | level texture pools in VRAM while there is room (the GPU reads VRAM much faster). `auto`: on (also in the emulator since 2026-10-01: Azahar draws VRAM textures right; only RGBA4 was noise, and `rgba4_as_rgba8` handles that) |
   | `mipmaps` | on | mip levels of the level textures (c3l v8): `off`, `on` (nearest level), `trilinear` (blends two levels: smoother, slower) |
-  | `gpu_profile` | off | every 2.5 s one group of renderers (level, merc + eyes, sprites, ocean, direct) is left out and `[ctr] gpu profile:` logs what each costs the GPU. The picture flickers |
+  | `gpu_profile` | off | every 2.5 s one group of renderers (level, merc + eyes, sprites, ocean, direct, shadow) is left out and `[ctr] gpu profile:` logs what each costs the GPU. The picture flickers |
 
 - **Timing in the log:** every 15 seconds (AI-assisted; it was every 300 frames or 5 seconds),
   `[ctr] render ms/frame` (render thread: waiting for the GPU, building commands, submitting;
