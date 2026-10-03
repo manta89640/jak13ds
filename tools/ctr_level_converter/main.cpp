@@ -55,10 +55,20 @@ struct Options {
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
   // Textures: ETC1 (opaque) / ETC1A4 (with alpha) instead of RGB565 / RGBA4: 1/4 and 1/2 of the
-  // memory, so a level's textures fit in VRAM. Textures of merc models (characters) stay 16-bit
-  // unless etc1_merc: faces and small details show ETC1's 4x4 blocks up close.
+  // memory, so a level's textures fit in VRAM. Textures of merc models (characters): see below;
+  // etc1_merc: all ETC1 (faces and small details show ETC1's 4x4 blocks up close).
   bool etc1 = true;
   bool etc1_merc = false;
+  // (AI-assisted) unless etc1_merc: merc textures of etc1_merc_min texels and more on both sides
+  // become ETC1 / ETC1A4 when that is about as good as their 16-bit version (merc textures were
+  // 75-95% of the levels' texture memory). Measured on the full size level against the image:
+  // the PSNR is at least etc1_merc_psnr dB (about RGBA4's own error, the 16-bit format of the ones
+  // with alpha) or the 16-bit version's, and no 4x4 block has an RMS error above etc1_merc_block
+  // (0..255) or the 16-bit version's worst. Characters with face animation (effects with blend
+  // shapes) and eye placeholders stay 16-bit. etc1_merc_psnr 0: all stay 16-bit.
+  float etc1_merc_psnr = 34.f;
+  int etc1_merc_min = 64;
+  float etc1_merc_block = 16.f;
   int etc1_quality = 1;  // 0 low, 1 medium, 2 high (slow)
   // (AI-assisted) ETC1 rate-distortion optimisation strength (ctr_texture.h), 0: off
   float etc1_rdo = 10;
@@ -95,6 +105,9 @@ struct TexUse {
   bool merc = false;        // drawn by a merc model
   bool alpha_test = false;  // drawn with an alpha test (cut-outs: keep their coverage in the mips)
   int aref = 0x26;          // the alpha test reference (GS units, 0x80 = 1.0)
+  // (AI-assisted) merc uses that keep a texture 16-bit (Options::etc1_merc_psnr): an eye draw's
+  // placeholder, a draw of an effect with blend shapes (a face). envmap: an envmap pass's texture.
+  bool eye = false, face = false, envmap = false;
 };
 
 // A triangle soup vertex before chunking
@@ -149,6 +162,15 @@ struct Converter {
     }
   }
 
+  // (AI-assisted) see TexUse
+  void note_merc_kind(u16 tex, bool eye, bool face, bool envmap) {
+    if (tex < tex_use.size()) {
+      tex_use[tex].eye |= eye;
+      tex_use[tex].face |= face;
+      tex_use[tex].envmap |= envmap;
+    }
+  }
+
   u32 key_id(const DrawKey& k) {
     auto it = draw_key_ids.find(k);
     if (it != draw_key_ids.end()) {
@@ -160,6 +182,26 @@ struct Converter {
     return id;
   }
 
+  // (AI-assisted) Identical level textures (size and texels) are one output texture: the fr3 has
+  // a copy per merc model that uses one (citadel: pal-environment-front 90 times, its metal
+  // textures 20-30 times each; 937 textures for ~200 different ones).
+  struct TexContentHash {
+    size_t operator()(const tfrag3::Texture* t) const {
+      size_t h = (size_t)t->w * 0x9E3779B97F4A7C15ull ^ t->h;
+      for (u32 v : t->data) {
+        h = (h ^ v) * 0x100000001B3ull;
+      }
+      return h;
+    }
+  };
+  struct TexContentEq {
+    bool operator()(const tfrag3::Texture* a, const tfrag3::Texture* b) const {
+      return a->w == b->w && a->h == b->h && a->data == b->data;
+    }
+  };
+  std::unordered_map<const tfrag3::Texture*, u16, TexContentHash, TexContentEq> tex_by_content;
+  size_t tex_copies = 0;  // level textures that are a copy of an earlier one
+
   u16 texture_id(s32 tree_tex_id) {
     if (tree_tex_id < 0 || tree_tex_id >= (s32)level->textures.size()) {
       return 0xffff;  // animated / missing
@@ -168,10 +210,18 @@ struct Converter {
     if (it != tex_map.end()) {
       return it->second;
     }
+    const tfrag3::Texture* t = &level->textures[tree_tex_id];
+    auto cit = tex_by_content.find(t);
+    if (cit != tex_by_content.end()) {
+      tex_map[tree_tex_id] = cit->second;
+      tex_copies++;
+      return cit->second;
+    }
     u16 id = tex_order.size();
     tex_order.push_back(tree_tex_id);
     tex_use.emplace_back();
     tex_map[tree_tex_id] = id;
+    tex_by_content.emplace(t, id);
     return id;
   }
 
@@ -543,6 +593,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           md.mode = d.mode.as_int();
           md.texture = cv.texture_id(d.tree_tex_id);  // for eyes: the gray eye placeholder
           cv.note_use(md.texture, md.mode, true);
+          cv.note_merc_kind(md.texture, d.eye_id != 0xff, use_blerc, false);
           md.eye_id = d.eye_id;
           md.effect = ei;
           md.first_index = out->indices.size();
@@ -640,6 +691,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
         const size_t effect_end = out->draws.size();
         const u16 env_tex = cv.texture_id((s32)eff.envmap_texture);
         cv.note_use(env_tex, eff.envmap_mode.as_int(), true);
+        cv.note_merc_kind(env_tex, false, false, true);
         for (size_t di = effect_first_draw; di < effect_end; di++) {
           c3l::MercDraw ed = out->draws[di];
           ed.mode = eff.envmap_mode.as_int();
@@ -763,7 +815,56 @@ struct TexStats {
   int etc1 = 0, etc1a4 = 0, rgb565 = 0, rgba4 = 0;
   double psnr_sum = 0, psnr_min = 99;
   int psnr_count = 0;
+  // (AI-assisted) merc textures: all, ETC1 / ETC1A4 by the quality test, tested, kept 16-bit as
+  // faces or eyes (of the size to be tested), bytes before (all 16-bit) and after
+  int merc = 0, merc_etc1 = 0, merc_tested = 0, merc_face = 0;
+  u64 merc_bytes_16 = 0, merc_bytes = 0;
 };
+
+// (AI-assisted) the ETC1 quality test of a merc texture (Options::etc1_merc_psnr)
+struct MercGate {
+  bool tested = false, etc1 = false;
+  // against the image: PSNR (dB) and the worst 4x4 block's RMS error, of ETC1 and 16-bit
+  double psnr = 0, worst_block = 0, psnr_16 = 0, worst_block_16 = 0;
+  u32 bytes_16 = 0;  // the 16-bit version's size (with mips)
+};
+
+/*!
+ * (AI-assisted) A decoded level against the image it was encoded from: PSNR and the largest RMS
+ * error of a 4x4 block, over the color of the texels that can be seen (alpha >= 16)
+ */
+void compare_level(const ctr_tex::Image& ref,
+                   const ctr_tex::Image& dec,
+                   double* psnr,
+                   double* worst_block) {
+  double se = 0;
+  size_t n = 0;
+  *worst_block = 0;
+  for (int by = 0; by < ref.h; by += 4) {
+    for (int bx = 0; bx < ref.w; bx += 4) {
+      double bse = 0;
+      int bn = 0;
+      for (int y = by; y < by + 4 && y < ref.h; y++) {
+        for (int x = bx; x < bx + 4 && x < ref.w; x++) {
+          if (ref.at(x, y)[3] < 16) {
+            continue;
+          }
+          for (int c = 0; c < 3; c++) {
+            const double d = (double)ref.at(x, y)[c] - dec.at(x, y)[c];
+            bse += d * d;
+            bn++;
+          }
+        }
+      }
+      se += bse;
+      n += bn;
+      if (bn) {
+        *worst_block = std::max(*worst_block, std::sqrt(bse / bn));
+      }
+    }
+  }
+  *psnr = (n == 0 || se == 0) ? 99.0 : 10.0 * std::log10(255.0 * 255.0 * n / se);
+}
 
 /*!
  * One level texture -> the 3DS layout (see ctr_texture.h): power of two, at most max_tex, with mip
@@ -773,7 +874,8 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
                                 const Options& opt,
                                 const TexUse& use,
                                 c3l::Texture* out_desc,
-                                double* psnr_out) {
+                                double* psnr_out,
+                                MercGate* gate) {
   // source RGBA8888, PS2 alpha (0x80 = opaque)
   u32 sw = tex.w, sh = tex.h;
   u32 dw = std::clamp<u32>(next_pow2(sw), 8, opt.max_tex);
@@ -810,27 +912,53 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
       has_alpha = true;
     }
   }
-  const bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
-  ctr_tex::Format fmt;
-  if (opt.full_color) {
-    fmt = ctr_tex::Format::RGBA8;
-  } else if (has_alpha) {
-    fmt = etc1 ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::RGBA4;
-  } else {
-    fmt = etc1 ? ctr_tex::Format::ETC1 : ctr_tex::Format::RGB565;
-  }
+  bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
+  const ctr_tex::Format fmt16 = has_alpha ? ctr_tex::Format::RGBA4 : ctr_tex::Format::RGB565;
+  const ctr_tex::Format fmt_etc = has_alpha ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::ETC1;
   const int levels = opt.mips ? ctr_tex::level_count(dw, dh, 16) : 1;
   ctr_tex::MipOptions mo;
   mo.preserve_coverage = has_alpha && use.alpha_test;
   mo.alpha_ref = std::clamp(use.aref * 2, 1, 255);
   auto mips = ctr_tex::make_mips(img, levels, mo);
-  std::vector<u8> out;
-  for (auto& m : mips) {
-    if (has_alpha) {
+  if (has_alpha) {
+    for (auto& m : mips) {
       ctr_tex::fill_transparent_colors(&m);
     }
-    ctr_tex::encode_level(m, fmt, opt.etc1_quality, &out,
-                          mo.preserve_coverage ? mo.alpha_ref : 0, opt.etc1_rdo);
+  }
+  const int aref = mo.preserve_coverage ? mo.alpha_ref : 0;
+  std::vector<u8> out;
+  // (AI-assisted) a merc texture: ETC1 if it is about as close to the image as the 16-bit
+  // version (Options::etc1_merc_psnr). The full size level is encoded both ways and compared with
+  // the image; the kept one starts the output.
+  if (!etc1 && opt.etc1 && use.merc && !opt.full_color && opt.etc1_merc_psnr > 0 && gate) {
+    for (const auto& m : mips) {
+      gate->bytes_16 += ctr_tex::level_bytes(m.w, m.h, fmt16);
+    }
+    if (!use.face && !use.eye && (int)dw >= opt.etc1_merc_min && (int)dh >= opt.etc1_merc_min) {
+      std::vector<u8> e, s;
+      ctr_tex::encode_level(mips[0], fmt_etc, opt.etc1_quality, &e, aref, opt.etc1_rdo);
+      ctr_tex::encode_level(mips[0], fmt16, opt.etc1_quality, &s, aref);
+      compare_level(mips[0], ctr_tex::decode_level(e.data(), dw, dh, fmt_etc), &gate->psnr,
+                    &gate->worst_block);
+      compare_level(mips[0], ctr_tex::decode_level(s.data(), dw, dh, fmt16), &gate->psnr_16,
+                    &gate->worst_block_16);
+      gate->tested = true;
+      // RGB565 is close to the image (~48 dB): ETC1 must reach etc1_merc_psnr. RGBA4 is ~34 dB
+      // (4-bit color bands): ETC1A4 is often closer than it, and passes when it is.
+      gate->etc1 = etc1 =
+          (gate->psnr >= opt.etc1_merc_psnr || gate->psnr >= gate->psnr_16) &&
+          gate->worst_block <= std::max<double>(opt.etc1_merc_block, gate->worst_block_16);
+      out = etc1 ? std::move(e) : std::move(s);
+    }
+  }
+  ctr_tex::Format fmt;
+  if (opt.full_color) {
+    fmt = ctr_tex::Format::RGBA8;
+  } else {
+    fmt = etc1 ? fmt_etc : fmt16;
+  }
+  for (size_t l = out.empty() ? 0 : 1; l < mips.size(); l++) {
+    ctr_tex::encode_level(mips[l], fmt, opt.etc1_quality, &out, aref, opt.etc1_rdo);
   }
   if (psnr_out) {
     // quality of the first level (visible texels only)
@@ -1239,7 +1367,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         ch.bsphere[c] = (float)((mn[c] + mx[c]) / 2);
       }
       for (const auto& p : snapped) {
-        const double dx = p[0] - ch.bsphere[0], dy = p[1] - ch.bsphere[1], dz = p[2] - ch.bsphere[2];
+        const double dx = p[0] - ch.bsphere[0], dy = p[1] - ch.bsphere[1],
+                     dz = p[2] - ch.bsphere[2];
         rad = std::max(rad, (float)std::sqrt(dx * dx + dy * dy + dz * dz));
       }
       ch.bsphere[3] = rad;
@@ -1386,13 +1515,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
   std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
   std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
+  std::vector<MercGate> tex_gate(cv.tex_order.size());
   {
     BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
     pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
       for (size_t i = a; i < b; i++) {
         tex_descs[i] = c3l::Texture{};
         tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
-                                       &tex_descs[i], &tex_psnr[i]);
+                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
       }
     });
     pool.wait_for_tasks();
@@ -1429,6 +1559,28 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tstats.psnr_sum += tex_psnr[i];
       tstats.psnr_min = std::min(tstats.psnr_min, tex_psnr[i]);
       tstats.psnr_count++;
+    }
+    // (AI-assisted) merc textures and their ETC1 quality test
+    const auto& u = cv.tex_use[i];
+    const auto& g = tex_gate[i];
+    if (u.merc && g.bytes_16) {
+      const auto& t = level.textures.at(cv.tex_order[i]);
+      const bool sized = d.w >= opt.etc1_merc_min && d.h >= opt.etc1_merc_min;
+      tstats.merc++;
+      tstats.merc_etc1 += g.etc1;
+      tstats.merc_tested += g.tested;
+      tstats.merc_face += sized && (u.face || u.eye);
+      tstats.merc_bytes_16 += g.bytes_16;
+      tstats.merc_bytes += tex_datas[i].size();
+      lg::debug("{}: merc texture {} ({}) {}x{}{}{}{}{}: {}", in.stem().string(), t.debug_name,
+                t.debug_tpage_name, d.w, d.h,
+                d.format == c3l::TEX_ETC1A4 || d.format == c3l::TEX_RGBA4 ? " alpha" : "",
+                u.face ? " face" : "", u.eye ? " eye" : "", u.envmap ? " envmap" : "",
+                g.tested ? fmt::format("ETC1 {:.1f} dB, worst block {:.1f}; 16-bit {:.1f} dB, "
+                                       "{:.1f} -> {}",
+                                       g.psnr, g.worst_block, g.psnr_16, g.worst_block_16,
+                                       g.etc1 ? "ETC1" : "16-bit")
+                         : "16-bit");
     }
   }
 
@@ -1610,6 +1762,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
            tstats.etc1a4, tstats.rgb565, tstats.rgba4,
            tstats.psnr_count ? tstats.psnr_sum / tstats.psnr_count : 0.0,
            tstats.psnr_count ? tstats.psnr_min : 0.0);
+  if (cv.tex_copies) {
+    lg::info("{}: {} textures used were copies of others: drawn with the one copy",
+             level.level_name, cv.tex_copies);
+  }
+  if (tstats.merc) {
+    lg::info("{}: merc textures: {}, {} of {}x{} and up: {} faces / eyes kept 16-bit, {} "
+             "tested, {} ETC1 (PSNR >= {:g} dB or the 16-bit's, blocks <= {:g} or the "
+             "16-bit's): {} KB -> {} KB",
+             level.level_name, tstats.merc, tstats.merc_tested + tstats.merc_face,
+             opt.etc1_merc_min, opt.etc1_merc_min, tstats.merc_face, tstats.merc_tested,
+             tstats.merc_etc1, opt.etc1_merc_psnr, opt.etc1_merc_block,
+             tstats.merc_bytes_16 / 1024, tstats.merc_bytes / 1024);
+  }
   lg::info("{}: post-vertex cache: vertices shaded per triangle (FIFO 8 / 16) {:.3f} / {:.3f}{}",
            level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
            vc_before.shaded16 / std::max<u64>(vc_before.tris, 1),
@@ -1698,7 +1863,16 @@ int main(int argc, char** argv) {
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
   bool no_etc1 = false, no_mips = false;
   app.add_flag("--no-etc1", no_etc1, "16-bit textures (RGB565 / RGBA4) instead of ETC1 / ETC1A4");
-  app.add_flag("--etc1-merc", opt.etc1_merc, "ETC1 also for the textures of merc models");
+  app.add_flag("--etc1-merc", opt.etc1_merc,
+               "ETC1 for all textures of merc models (no quality test, faces too)");
+  app.add_option("--etc1-merc-psnr", opt.etc1_merc_psnr,
+                 "merc textures: ETC1 when its PSNR against the image is at least this or the "
+                 "16-bit version's (dB; 0: merc textures stay 16-bit)");
+  app.add_option("--etc1-merc-block", opt.etc1_merc_block,
+                 "... and no 4x4 block has an RMS error above this or the 16-bit version's worst "
+                 "(0..255)");
+  app.add_option("--etc1-merc-min", opt.etc1_merc_min,
+                 "... for merc textures at least this many texels wide and high");
   app.add_option("--etc1-quality", opt.etc1_quality, "ETC1 encoder quality: 0 low, 1 medium, 2 high");
   app.add_flag("--no-mips", no_mips, "no mip levels");
   app.add_option("--etc1-rdo", opt.etc1_rdo,
