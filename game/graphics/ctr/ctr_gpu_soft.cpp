@@ -708,10 +708,7 @@ void ctr_gpu_pool_delete(int pool) {
 
 void ctr_gpu_pool_set_priority(int, int) {}
 
-int ctr_gpu_mesh_create(const void* verts,
-                        int vertex_count,
-                        const uint16_t* indices,
-                        int index_count) {
+int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices) {
   int slot = -1;
   for (size_t i = 0; i < g_soft.meshes.size(); i++) {
     if (!g_soft.meshes[i].used) {
@@ -724,9 +721,34 @@ int ctr_gpu_mesh_create(const void* verts,
     g_soft.meshes.emplace_back();
   }
   auto& m = g_soft.meshes[slot];
-  m.used = true;
-  m.verts.assign((const uint8_t*)verts, (const uint8_t*)verts + vertex_count * 16);
-  m.indices.assign(indices, indices + index_count);
+  m.used = true;  // (AI-assisted) reserved; drawn once filled (the loader runs between frames)
+  m.verts.resize((size_t)vertex_count * 16);
+  m.indices.resize(index_count);
+  *verts = m.verts.data();
+  *indices = m.indices.data();
+  return slot;
+}
+
+int ctr_gpu_mesh_end(int mesh, int ok) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size()) {
+    return -1;
+  }
+  if (!ok) {
+    g_soft.meshes[mesh] = SoftMesh();
+    return -1;
+  }
+  return mesh;
+}
+
+int ctr_gpu_mesh_create(const void* verts,
+                        int vertex_count,
+                        const uint16_t* indices,
+                        int index_count) {
+  void* v;
+  uint16_t* ix;
+  const int slot = ctr_gpu_mesh_begin(vertex_count, index_count, &v, &ix);
+  memcpy(v, verts, (size_t)vertex_count * 16);
+  memcpy(ix, indices, (size_t)index_count * 2);
   return slot;
 }
 

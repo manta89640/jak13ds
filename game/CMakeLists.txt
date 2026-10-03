@@ -52,6 +52,8 @@ set(RUNTIME_SOURCE
         graphics/ctr/CtrSky.cpp
         graphics/ctr/CtrRenderer.cpp
         graphics/ctr/CtrVram.cpp
+        graphics/ctr/c3l_reader.cpp
+        ../third-party/lz4/lz4.c
         graphics/ctr/ctr_gpu_soft.cpp
         graphics/jak2_texture_remap.cpp
         graphics/jak3_texture_remap.cpp

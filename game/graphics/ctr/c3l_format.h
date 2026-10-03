@@ -17,7 +17,8 @@ namespace c3l {
 constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v9: merc envmap draws (MercDraw::eye_id kMercEnvmapDraw)
 // v10 (AI-assisted): visibility runs per chunk (Chunk::vis_runs_offset, VisRun)
-constexpr uint32_t kVersion = 10;
+// v11 (AI-assisted): compressed blocks (BlockDir after the header); the layout is otherwise v10's
+constexpr uint32_t kVersion = 11;
 // v7 files (16-bit textures without mip levels) still load
 constexpr uint32_t kMinVersion = 7;
 
@@ -131,6 +132,38 @@ struct Draw {
   uint32_t index_count;
 };
 static_assert(sizeof(Draw) == 16);
+
+/*!
+ * (AI-assisted) v11: compression. The file is the v10 layout (the "raw image": every offset in the
+ * header, chunks, textures... is an offset in it) cut into blocks, each compressed on its own, so
+ * that any piece can be read without the rest: the 128-byte header (raw, version 11), then a
+ * BlockDir and its Block[num_blocks], then the packed blocks one after the other. The blocks cover
+ * the raw image from byte 128 to raw_size in order. The converter starts a block at the start of
+ * every piece the runtime reads (a texture with its mips, a chunk's vertices, ...) so most reads
+ * decode whole blocks straight into their destination (linear memory). See c3l_reader.h.
+ */
+constexpr char kBlockMagic[4] = {'C', '3', 'L', 'Z'};
+enum BlockCodec : uint32_t {
+  CODEC_STORED = 0,  // the raw bytes
+  CODEC_LZ4 = 1,     // an LZ4 block (lz4.h LZ4_decompress_safe, no frame)
+  CODEC_ZSTD = 2,    // a zstd frame (with its content size)
+};
+struct BlockDir {
+  char magic[4];          // kBlockMagic
+  uint32_t raw_size;      // of the raw image
+  uint32_t num_blocks;    // Block[] follows
+  uint32_t max_block;     // largest Block::raw_size
+};
+static_assert(sizeof(BlockDir) == 16);
+struct Block {
+  uint32_t raw_offset;   // in the raw image
+  uint32_t raw_size;
+  uint32_t file_offset;  // of the packed bytes
+  uint32_t packed;       // packed size (bits 0-27) | codec << 28
+  uint32_t packed_size() const { return packed & 0x0fffffff; }
+  uint32_t codec() const { return packed >> 28; }
+};
+static_assert(sizeof(Block) == 16);
 
 inline uint32_t morton8(uint32_t x, uint32_t y) {
   return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |

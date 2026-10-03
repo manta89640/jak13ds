@@ -16,7 +16,28 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrSky.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrRenderer.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrVram.cpp
+  ${OG_ROOT}/game/graphics/ctr/c3l_reader.cpp
 )
+
+# (AI-assisted) the decoders for compressed .c3l files (v11): LZ4 and zstd (decompression only)
+set(OG3DS_ZSTD ${OG_ROOT}/third-party/zstd/lib)
+add_library(og3ds_unpack STATIC
+  ${OG_ROOT}/third-party/lz4/lz4.c
+  ${OG3DS_ZSTD}/common/debug.c
+  ${OG3DS_ZSTD}/common/entropy_common.c
+  ${OG3DS_ZSTD}/common/error_private.c
+  ${OG3DS_ZSTD}/common/fse_decompress.c
+  ${OG3DS_ZSTD}/common/xxhash.c
+  ${OG3DS_ZSTD}/common/zstd_common.c
+  ${OG3DS_ZSTD}/decompress/huf_decompress.c
+  ${OG3DS_ZSTD}/decompress/zstd_ddict.c
+  ${OG3DS_ZSTD}/decompress/zstd_decompress.c
+  ${OG3DS_ZSTD}/decompress/zstd_decompress_block.c
+)
+target_compile_definitions(og3ds_unpack PRIVATE ZSTD_LEGACY_SUPPORT=0 ZSTD_STRIP_ERROR_STRINGS)
+# zstd 1.5.0 xxhash.c: u32 vs uint32_t pointers (an error since gcc 14)
+target_compile_options(og3ds_unpack PRIVATE -Wno-incompatible-pointer-types)
+target_link_libraries(og3ds_runtime og3ds_unpack)
 
 find_program(PICASSO picasso HINTS ${DEVKITPRO}/tools/bin ${CTRULIB}/../tools/bin REQUIRED)
 
