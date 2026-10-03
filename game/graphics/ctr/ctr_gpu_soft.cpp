@@ -57,6 +57,10 @@ struct SoftPool {
 struct SoftState {
   std::vector<uint8_t> color;  // RGBA8, top row first
   std::vector<float> depth;
+  // (AI-assisted) the stencil part of the 3DS's D24S8 depth buffer (CTR_STATE_STENCIL_*), cleared
+  // with the depth at frame begin; none with config.ini depth16 (ctr_gpu_has_stencil)
+  std::vector<uint8_t> stencil;
+  int depth16 = 0;
   std::vector<SoftTex> textures;
   std::vector<SoftMesh> meshes;
   std::vector<SoftPool> pools;
@@ -250,11 +254,36 @@ void shade_pixel(const ctr_draw_state& st,
     return;
   }
   int idx = px + py * kW;
-  if (!test(st.ztest, z, g_soft.depth[idx])) {
+  // (AI-assisted) the stencil test and operations, as ctr_gpu_citro3d.c sets them
+  uint8_t* sten = g_soft.depth16 ? nullptr : &g_soft.stencil[idx];
+  if (sten && (st.flags & CTR_STATE_STENCIL_OUT) && *sten == 1) {
     return;
+  }
+  if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR) && *sten == 0) {
+    return;
+  }
+  if (!test(st.ztest, z, g_soft.depth[idx])) {
+    if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR)) {
+      *sten = 0;
+    }
+    return;
+  }
+  if (sten) {
+    if (st.flags & CTR_STATE_STENCIL_SET) {
+      *sten = 1;
+    } else if (st.flags & CTR_STATE_STENCIL_INCR) {
+      *sten = (uint8_t)std::min(255, *sten + 1);
+    } else if (st.flags & CTR_STATE_STENCIL_DECR) {
+      *sten = (uint8_t)std::max(0, *sten - 1);
+    } else if (st.flags & CTR_STATE_STENCIL_CLEAR) {
+      *sten = 0;
+    }
   }
   if (st.zwrite) {
     g_soft.depth[idx] = z;
+  }
+  if (st.flags & CTR_STATE_NO_COLOR) {
+    return;
   }
   uint8_t* d = &g_soft.color[4 * idx];
   float as = std::min(a / 128.f, 2.f);
@@ -282,6 +311,9 @@ void shade_pixel(const ctr_draw_state& st,
         break;
       case CTR_BLEND_ONE_ONE:
         o = src[i] + dst;
+        break;
+      case CTR_BLEND_MUL:  // (AI-assisted) the shadows' darkening: Cs (0xff = 1) * Cd
+        o = src[i] * dst / 255.f;
         break;
       default:
         o = src[i];
@@ -335,6 +367,7 @@ extern "C" {
 int ctr_gpu_init(void) {
   g_soft.color.assign(kW * kH * 4, 0);
   g_soft.depth.assign(kW * kH, 0.f);
+  g_soft.stencil.assign(kW * kH, 0);
   g_soft.textures.clear();
   return 0;
 }
@@ -351,6 +384,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
     g_soft.color[4 * i + 3] = 255;
   }
   std::fill(g_soft.depth.begin(), g_soft.depth.end(), 0.f);
+  std::fill(g_soft.stencil.begin(), g_soft.stencil.end(), 0);
   g_soft.cur = ctr_gpu_stats{};
   s_stream.clear();
 }
@@ -433,6 +467,121 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   }
   if (!out.empty()) {
     ctr_gpu_draw(state, out.data(), (int)out.size());
+  }
+}
+
+// (AI-assisted) indexed clip space draws (the shadow volumes, ctr_gpu_clip_reserve): clipped
+// against the near and far planes (-w <= z <= w, so w > 0) like the GPU; x, y by the screen
+namespace {
+std::vector<ctr_clip_vertex> g_clip_verts;
+std::vector<uint16_t> g_clip_indices;
+bool g_clip_open = false;
+
+void clip_draw_triangle(const ctr_draw_state& st, const ctr_clip_vertex* const tri[3]) {
+  struct V {
+    float c[10];  // x y z w s t r g b a
+  };
+  V poly[8], tmp[8];
+  int n = 3;
+  for (int k = 0; k < 3; k++) {
+    const ctr_clip_vertex& v = *tri[k];
+    poly[k] = V{{v.x, v.y, v.z, v.w, v.s, v.t, (float)v.r, (float)v.g, (float)v.b, (float)v.a}};
+  }
+  for (int plane = 0; plane < 2; plane++) {
+    auto dist = [&](const V& v) { return plane == 0 ? v.c[3] - v.c[2] : v.c[3] + v.c[2]; };
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+      const V& a = poly[i];
+      const V& b = poly[(i + 1) % n];
+      const float da = dist(a), db = dist(b);
+      if (da >= 0) {
+        tmp[m++] = a;
+      }
+      if ((da >= 0) != (db >= 0)) {
+        const float t = da / (da - db);
+        V v;
+        for (int j = 0; j < 10; j++) {
+          v.c[j] = a.c[j] + (b.c[j] - a.c[j]) * t;
+        }
+        tmp[m++] = v;
+      }
+    }
+    n = m;
+    if (n < 3) {
+      return;
+    }
+    for (int i = 0; i < n; i++) {
+      poly[i] = tmp[i];
+    }
+  }
+  ctr_vertex out[8];
+  for (int i = 0; i < n; i++) {
+    const float w = poly[i].c[3];
+    if (!(w > 0)) {
+      return;
+    }
+    out[i].x = poly[i].c[0] / w;
+    out[i].y = poly[i].c[1] / w;
+    out[i].z = (poly[i].c[2] / w + 1.f) * 0.5f;
+    out[i].s = poly[i].c[4];
+    out[i].t = poly[i].c[5];
+    out[i].r = (uint8_t)std::clamp(poly[i].c[6], 0.f, 255.f);
+    out[i].g = (uint8_t)std::clamp(poly[i].c[7], 0.f, 255.f);
+    out[i].b = (uint8_t)std::clamp(poly[i].c[8], 0.f, 255.f);
+    out[i].a = (uint8_t)std::clamp(poly[i].c[9], 0.f, 255.f);
+  }
+  for (int i = 1; i + 1 < n; i++) {
+    const ctr_vertex t[3] = {out[0], out[i], out[i + 1]};
+    raster_triangle(st, t);
+  }
+}
+}  // namespace
+
+int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts,
+                         uint16_t** indices) {
+  if (g_clip_open || max_verts <= 0 || max_verts > 65536 || max_indices <= 0) {
+    return 0;
+  }
+  g_clip_verts.resize(max_verts);
+  g_clip_indices.resize(max_indices);
+  *verts = g_clip_verts.data();
+  *indices = g_clip_indices.data();
+  g_clip_open = true;
+  return 1;
+}
+
+void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
+                              int n, int vert_count, int index_count) {
+  if (!g_clip_open) {
+    return;
+  }
+  g_clip_open = false;
+  if (vert_count > (int)g_clip_verts.size() || index_count > (int)g_clip_indices.size()) {
+    return;
+  }
+  for (int i = 0; i < n; i++) {
+    if (first[i] < 0 || count[i] < 0 || first[i] + count[i] > index_count) {
+      return;
+    }
+  }
+  for (int i = 0; i < n; i++) {
+    if (count[i] < 3) {
+      continue;
+    }
+    g_soft.cur.draws++;
+    for (int k = first[i]; k + 2 < first[i] + count[i]; k += 3) {
+      const ctr_clip_vertex* tri[3];
+      bool ok = true;
+      for (int j = 0; j < 3; j++) {
+        const int vi = g_clip_indices[k + j];
+        ok &= vi < vert_count;
+        tri[j] = &g_clip_verts[ok ? vi : 0];
+      }
+      if (ok) {
+        clip_draw_triangle(states[i], tri);
+        g_soft.cur.triangles++;
+      }
+    }
   }
 }
 
@@ -821,11 +970,11 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
   }
 }
 
-// (AI-assisted) the ocean with waves: no stencil and no second texture layer here (the far mesh is
-// lowered instead, see CtrOcean)
+// (AI-assisted) the ocean with waves: no second texture layer here. The stencil buffer (its marks,
+// the shadow volumes) as on the 3DS: none with config.ini depth16.
 
 int ctr_gpu_has_stencil(void) {
-  return 0;
+  return !g_soft.depth16;
 }
 
 void* ctr_gpu_stream_alloc(int bytes) {
@@ -1016,7 +1165,9 @@ int ctr_gpu_rgba4_as_rgba8(void) {
 void ctr_gpu_set_vram_textures(int) {}
 void ctr_gpu_set_color16(int) {}
 void ctr_gpu_set_early_depth(int) {}
-void ctr_gpu_set_framebuffer(int, int) {}
+void ctr_gpu_set_framebuffer(int, int depth16) {
+  g_soft.depth16 = depth16 ? 1 : 0;  // (AI-assisted) no stencil, like the 3DS's D16 buffer
+}
 int ctr_gpu_describe_target(char*, int) {
   return 0;
 }
