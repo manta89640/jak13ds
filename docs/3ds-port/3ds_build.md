@@ -563,8 +563,10 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `fog_start` | 0.6 | the extra fog starts at this fraction of the draw distance |
   | `fog` | on | the game's own distance fog |
   | `lod_distance` | 200 | meters; near tfrag version up to here, coarse beyond (0 = always near) |
-  | `far_level_distance` | 40 | meters; a level whose bounds are further away (seen from a neighbouring level) is drawn with only its lowres tfrag, no tie (0 = off) |
+  | `far_level_distance` | 80 | meters; a level whose bounds are further away (seen from a neighbouring level) is drawn with only its lowres tfrag, no tie but (AI-assisted, c3l files with chunk kinds) the ties without a distance limit (0 = off) |
   | `detail_scale` | 1 | multiplies the draw distance of small and medium tie objects and shrubs |
+  | `shrub_distance` | 50 | (AI-assisted) meters; shrubs up to here (0 = the converter's 100 m); c3l files with chunk kinds |
+  | `tie_distance_scale` | 1.5 | (AI-assisted) multiplies the converter's distance of small and medium ties; c3l files with chunk kinds |
   | `merc` | on | draw merc models |
   | `sprites` | on | draw world sprites (particles); the HUD is always drawn |
   | `max_sprites` | 1000 | world sprites per frame |
