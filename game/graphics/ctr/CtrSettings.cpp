@@ -201,7 +201,7 @@ CtrSettings load() {
 
 std::string CtrSettings::summary() const {
   return fmt::format(
-      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {}m tie x{} fog {} "
+      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
@@ -209,9 +209,9 @@ std::string CtrSettings::summary() const {
       "fast_clock {}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
-      auto_detail ? fmt::format("{:.0f}-{:.0f} (auto, GPU under {:.0f} ms)", shrub_distance,
+      auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms)", shrub_distance,
                                 std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms)
-                  : fmt::format("{:.0f}", shrub_distance),
+                  : fmt::format("{:.0f}m", shrub_distance),
       auto_detail ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
                                 std::max(tie_distance_scale, tie_distance_scale_max))
                   : fmt::format("{:.1f}", tie_distance_scale),
