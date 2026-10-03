@@ -56,3 +56,11 @@ third-party/draco:
     - "PR #3723 (https://github.com/open-goal/jak-project/pull/3723)"
 third-party/json.hpp
   git: https://github.com/nlohmann/json/blob/eba0a92bfb1abf242f30e894b96ba11c9f4048c7/single_include/nlohmann/json.hpp
+third-party/lz4:
+  git: https://github.com/lz4/lz4/tree/v1.10.0
+  modifications:
+    - "(AI-assisted) only lib/lz4.c, lz4.h, lz4hc.c, lz4hc.h and LICENSE (3DS c3l level files)"
+third-party/meshoptimizer:
+  sha: 4c203430ca565cb59a468a91922c76c208169536
+  modifications:
+    - "(AI-assisted) only src/ and LICENSE.md (ctr_level_converter vertex cache optimisation)"
