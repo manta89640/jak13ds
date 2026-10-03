@@ -62,6 +62,10 @@ if [ "$BOOTTEST" = 1 ]; then
 fi
 [ -f "$ELF" ] || { echo "no $ELF (build gk first)" >&2; exit 1; }
 [ -f "$SMDH" ] || { echo "no $SMDH" >&2; exit 1; }
+# (AI-assisted) every system call in the ELF must be in the RSF's SystemCallAccess list: on
+# hardware a missing one raises an exception (2026-10-03), Azahar ignores the list
+python3 "$ROOT/platform/3ds/tools/check_svc.py" "$ELF" "$RSF" ||
+  { echo "make_cia: svc check failed (platform/3ds/tools/check_svc.py)" >&2; exit 1; }
 mkdir -p "$BUILD_DIR"
 
 CIA_DIR="$ROOT/platform/3ds/cia"
