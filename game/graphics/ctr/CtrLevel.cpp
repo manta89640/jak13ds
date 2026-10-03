@@ -37,6 +37,59 @@ namespace {
 constexpr int kLoaderPrio = 0x3C;
 // a prefetched level nothing asked for is dropped after this long
 constexpr double kPrefetchKeepMs = 60000.0;
+// (AI-assisted) a job that ran out of memory waits at most this long for the render thread to make
+// room (CtrLevels::make_room)
+constexpr int kRoomWaitMs = 1000;
+// (AI-assisted) how long a level ready() said yes to stays parked for the game to report it
+constexpr double kPromiseMs = 3000.0;
+// (AI-assisted) incomplete levels: checked every kRepairCheckFrames frames, made again when the
+// last frame's free linear memory covers the missing parts plus kRepairMargin; after a repair that
+// left parts out not before kRepairRetryFrames, twice that after each one in a row that made
+// nothing (up to 16x)
+constexpr u64 kRepairCheckFrames = 30, kRepairRetryFrames = 300;
+constexpr u32 kRepairMargin = 256 * 1024;
+
+// (AI-assisted) what far mode draws (a level seen from a neighbouring one): its low resolution
+// tfrag (or the coarse one) and, in c3l files with chunk kinds, its ties without a distance limit
+// (landmarks: houses, towers, rocks), which popped in at far_level_distance
+bool far_chunk(const CtrLevelData& lev, const c3l::Chunk& ch) {
+  return ch.lod_tier == (lev.has_lowres ? 3u : 2u) ||
+         (ch.lod_tier == 0 && ch.kind == c3l::CHUNK_KIND_TIE && ch.max_dist <= 0.f);
+}
+
+// (AI-assisted) the parts of a loaded level that should be there and aren't (no memory when it
+// loaded): chunk meshes (only the ones far mode draws while its detail is unloaded), merc model
+// meshes, the texture pool. Returns how many, and the linear memory they take.
+int missing_parts(const CtrLevelData& lev, u32* bytes) {
+  int n = 0;
+  u32 b = 0;
+  for (size_t ci = 0;
+       ci < lev.chunks.size() && ci < lev.meshes.size() && ci < lev.mesh_index_first.size();
+       ci++) {
+    const auto& ch = lev.chunks[ci];
+    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX &&
+        (lev.detail_loaded || far_chunk(lev, ch))) {
+      n++;
+      b += ch.vertex_count * (u32)sizeof(c3l::Vertex) +
+           (lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) * (u32)sizeof(u16);
+    }
+  }
+  for (const auto& m : lev.merc_models) {
+    if (m.mesh < 0 && m.index_end > m.index_first) {
+      n++;
+      b += m.vertex_count * (u32)sizeof(c3l::MercVertex) +
+           (m.index_end - m.index_first) * (u32)sizeof(u16);
+    }
+  }
+  if (lev.tex_pool < 0 && lev.tex_pool_bytes) {
+    n++;
+    b += lev.tex_pool_bytes;
+  }
+  *bytes = b;
+  return n;
+}
+
+void build_draw_order(CtrLevelData* out);  // (AI-assisted) below
 }  // namespace
 
 CtrLevels::CtrLevels() {
@@ -67,6 +120,7 @@ CtrLevels::~CtrLevels() {
     if (d.lev) {
       unload(*d.lev);
     }
+    delete_parts(d);
   }
   for (auto& [name, p] : m_prefetched) {
     unload(*p.lev);
@@ -87,13 +141,42 @@ void* CtrLevels::loader_entry(void* self) {
   return nullptr;
 }
 
+// (AI-assisted) under m_lock: a parked level is kept while it's the one whose DGO the game loads,
+// or ready() just told the game it's there (it reports it at the end of that frame)
+bool CtrLevels::parked_matters(const std::string& name, double now) const {
+  if (name == m_dgo_level) {
+    return true;
+  }
+  auto it = m_promised.find(name);
+  return it != m_promised.end() && now - it->second < kPromiseMs;
+}
+
+// (AI-assisted) under m_lock
+bool CtrLevels::can_start(const Job& job) const {
+  if (job.common) {
+    return true;
+  }
+  // a parked prefetch the game gave up on (it loads another level's DGO now) is unloaded at the
+  // render thread's next frame (housekeeping): its memory first
+  const double now = ctr_gpu_time_ms();
+  int parked = 0;
+  for (const auto& n : m_parked) {
+    if (!parked_matters(n, now)) {
+      return false;
+    }
+    parked++;
+  }
+  // a prefetch waits while two levels that matter are loaded (the game has two level slots, so
+  // the level it replaces is still in memory)
+  return !job.prefetch || m_levels_count + parked < 2;
+}
+
 void CtrLevels::loader_main() {
   std::unique_lock<std::mutex> lk(m_lock);
   while (!m_quit) {
-    // the first job that can run: a prefetch waits while two levels are loaded (the game has two
-    // level slots, so the level it replaces is still in memory)
+    // the first job that can run
     auto it = m_queue.begin();
-    while (it != m_queue.end() && it->prefetch && m_levels_loaded >= 2) {
+    while (it != m_queue.end() && !can_start(*it)) {
       ++it;
     }
 
@@ -120,8 +203,9 @@ void CtrLevels::loader_main() {
 void CtrLevels::run_job(const Job& job) {
   Done d;
   d.job = job;
-  if (job.detail) {
-    run_detail_job(job, &d);
+  m_room_tried = false;
+  if (job.parts()) {
+    run_parts_job(job, &d);
     std::lock_guard<std::mutex> lk(m_lock);
     m_done.push_back(std::move(d));
     return;
@@ -142,9 +226,9 @@ void CtrLevels::request(const Job& job) {
     if (m_requested.count(job.key()) || (job.prefetch && m_resident.count(job.name))) {
       // (AI-assisted) the game wants a level whose prefetch is still queued: the prefetch would
       // wait while two levels are loaded (one of them maybe a prefetch nobody wants any more)
-      if (!job.prefetch && !job.detail) {
+      if (!job.prefetch && !job.parts()) {
         for (auto& q : m_queue) {
-          if (q.name == job.name && q.prefetch && !q.detail) {
+          if (q.name == job.name && q.prefetch) {
             q.prefetch = false;
           }
         }
@@ -166,10 +250,12 @@ void CtrLevels::request(const Job& job) {
 bool CtrLevels::ready(const std::string& name) {
   std::lock_guard<std::mutex> lk(m_lock);
   if (m_resident.count(name)) {
+    m_promised[name] = ctr_gpu_time_ms();  // (AI-assisted) kept for the game (parked_matters)
     return true;
   }
   for (const auto& d : m_done) {
-    if (d.job.name == name) {
+    if (d.job.name == name && !d.job.parts()) {
+      m_promised[name] = ctr_gpu_time_ms();
       return true;  // read (or failed); the render thread takes it at its next frame
     }
   }
@@ -177,22 +263,121 @@ bool CtrLevels::ready(const std::string& name) {
 }
 
 void CtrLevels::prefetch(const std::string& name) {
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    // (AI-assisted) The game loads one level at a time: a prefetch of another level that is still
+    // queued or loading is one it gave up on (Jak died in Fire Canyon while village2 loaded, and
+    // village1 waited behind it). A parked one is unloaded by the render thread (housekeeping).
+    if (m_dgo_level != name) {
+      for (auto it = m_queue.begin(); it != m_queue.end();) {
+        if (it->prefetch && it->name != name) {
+          lg::info("[ctr] prefetch of {} cancelled (the game loads {} now)", it->name, name);
+          m_requested.erase(it->key());
+          it = m_queue.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      if (!m_loading.empty() && m_loading_prefetch && m_loading != name) {
+        m_cancel = true;
+      }
+    }
+    m_dgo_level = name;
+  }
   request({name, false, true});
 }
 
 void CtrLevels::update_level_count() {
   {
     std::lock_guard<std::mutex> lk(m_lock);
-    m_levels_loaded = (int)(m_levels.size() + m_prefetched.size());
+    m_levels_count = (int)m_levels.size();
+    m_parked.clear();
     m_resident.clear();
     for (auto& [name, lev] : m_levels) {
       m_resident.insert(name);
     }
     for (auto& [name, p] : m_prefetched) {
       m_resident.insert(name);
+      m_parked.insert(name);
     }
   }
   m_cv.notify_all();
+}
+
+bool CtrLevels::housekeeping(bool room) {
+  // parked prefetches are never wanted (set_wanted takes them): kept while they matter
+  std::vector<std::string> drop;
+  std::string dgo;
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    dgo = m_dgo_level;
+    room |= m_room_wanted;
+    m_room_wanted = false;
+    const double now = ctr_gpu_time_ms();
+    for (const auto& [name, p] : m_prefetched) {
+      if (!parked_matters(name, now)) {
+        drop.push_back(name);
+      }
+    }
+  }
+  for (const auto& name : drop) {
+    lg::info("[ctr] dropping prefetched {} (the game loads {} now)", name, dgo);
+    unload(*m_prefetched[name].lev);
+    m_prefetched.erase(name);
+  }
+  const bool dropped = !drop.empty();
+  if (dropped || room) {
+    // before the loader goes on (it may be waiting for this memory)
+    ctr_gpu_free_pending_now();
+  }
+  if (dropped) {
+    update_level_count();
+  }
+  if (room) {
+    {
+      std::lock_guard<std::mutex> lk(m_lock);
+      m_room_serial++;
+    }
+    m_cv.notify_all();
+  }
+  return dropped;
+}
+
+bool CtrLevels::needs_service() {
+  std::lock_guard<std::mutex> lk(m_lock);
+  if (m_room_wanted) {
+    return true;
+  }
+  const double now = ctr_gpu_time_ms();
+  for (const auto& n : m_parked) {
+    if (!parked_matters(n, now)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void CtrLevels::service() {
+  housekeeping(false);
+}
+
+bool CtrLevels::make_room(const std::string& name, const char* what) {
+  if (m_room_tried || cancelled()) {
+    return false;
+  }
+  m_room_tried = true;
+  lg::warn("[ctr] {}: no memory for {}, making room and trying again", name, what);
+  if (!m_thread) {
+    housekeeping(true);  // the loads run on the render thread (outside of a frame)
+    return true;
+  }
+  std::unique_lock<std::mutex> lk(m_lock);
+  const u32 serial = m_room_serial;
+  m_room_wanted = true;
+  // at the render thread's next frame (or the game thread's service)
+  m_cv.wait_for(lk, std::chrono::milliseconds(kRoomWaitMs),
+                [&] { return m_room_serial != serial || m_quit || cancelled(); });
+  return !m_quit && !cancelled();
 }
 
 void CtrLevels::publish(const std::string& name, std::unique_ptr<CtrLevelData> lev, u64 frame) {
@@ -209,42 +394,192 @@ struct C3lReader : c3l::Reader {
 };
 }  // namespace
 
-// (AI-assisted) partial unload: read the chunk meshes of a loaded level again (loader thread). The
-// job has its own copy of what it needs: the level may be unloaded meanwhile.
-void CtrLevels::run_detail_job(const Job& job, Done* d) {
+// (AI-assisted) Partial unload / repair: make meshes of a loaded level again (loader thread): chunk
+// meshes, and for a repair merc model meshes and the texture pool. The job has its own copy of
+// what it needs: the level may be unloaded meanwhile. The indices of all its chunks are read at
+// once, then the vertices in file order: chunk by chunk, every switch between the two threw the
+// reader's window away (beach: 36 MB read from the SD card for 4.7 MB of meshes, 11 s on
+// hardware; this way ~3 MB). Stops at the first mesh there's no memory for.
+void CtrLevels::run_parts_job(const Job& job, Done* d) {
   d->result = LoadResult::FAILED;
   C3lReader f(job.path);
-  for (const auto& c : job.chunks) {
-    if (cancelled() || !f.ok()) {
-      break;
+  bool ok = f.ok();
+  if (ok && !job.chunks.empty()) {
+    u32 lo = UINT32_MAX, hi = 0;
+    for (const auto& c : job.chunks) {
+      lo = std::min(lo, c.index_first);
+      hi = std::max(hi, c.index_end);
     }
-    // (AI-assisted) the vertices are read (decoded) straight into GPU memory
-    void* vdst;
-    u16* idst;
-    int mesh = ctr_gpu_mesh_begin(c.vertex_count, c.index_end - c.index_first, &vdst, &idst);
-    if (mesh < 0) {
-      break;
+    std::vector<u16> indices;
+    ok = f.read_array(job.index_data_offset + lo * (u32)sizeof(u16), hi - lo, &indices);
+    for (const auto& c : job.chunks) {
+      if (!ok || cancelled()) {
+        break;
+      }
+      // the vertices are read (decoded) straight into GPU memory
+      void* vdst;
+      u16* idst;
+      const u32 count = c.index_end - c.index_first;
+      int mesh = ctr_gpu_mesh_begin(c.vertex_count, count, &vdst, &idst);
+      if (mesh < 0 && make_room(job.name, "meshes")) {
+        mesh = ctr_gpu_mesh_begin(c.vertex_count, count, &vdst, &idst);
+      }
+      if (mesh >= 0) {
+        memcpy(idst, indices.data() + (c.index_first - lo), count * sizeof(u16));
+        mesh = ctr_gpu_mesh_end(
+            mesh, f.read(job.vertex_data_offset + c.first_vertex * (u32)sizeof(c3l::Vertex), vdst,
+                         c.vertex_count * sizeof(c3l::Vertex)));
+      }
+      ok = mesh >= 0;
+      if (ok) {
+        d->meshes.emplace_back(c.chunk, mesh);
+      }
     }
-    mesh = ctr_gpu_mesh_end(
-        mesh, f.read(job.index_data_offset + c.index_first * (u32)sizeof(u16), idst,
-                     (c.index_end - c.index_first) * sizeof(u16)) &&
-                  f.read(job.vertex_data_offset + c.first_vertex * (u32)sizeof(c3l::Vertex),
-                         vdst, c.vertex_count * sizeof(c3l::Vertex)));
-    if (mesh < 0) {
-      break;
-    }
-    d->meshes.emplace_back(c.chunk, mesh);
   }
-  if (d->meshes.size() == job.chunks.size()) {
+  if (ok && !job.merc.empty()) {
+    u32 lo = UINT32_MAX, hi = 0;
+    for (const auto& m : job.merc) {
+      lo = std::min(lo, m.index_first);
+      hi = std::max(hi, m.index_end);
+    }
+    std::vector<u16> indices;
+    std::vector<c3l::MercVertex> verts;
+    ok = f.read_array(job.merc_index_offset + lo * (u32)sizeof(u16), hi - lo, &indices);
+    for (const auto& m : job.merc) {
+      if (!ok || cancelled()) {
+        break;
+      }
+      ok = f.read_array(job.merc_vertex_offset + m.file_vertex * (u32)sizeof(c3l::MercVertex),
+                        m.vertex_count, &verts);
+      int mesh = -1;
+      if (ok) {
+        const u16* ix = indices.data() + (m.index_first - lo);
+        const int count = (int)(m.index_end - m.index_first);
+        mesh = ctr_gpu_skinned_mesh_create(verts.data(), m.vertex_count, ix, count);
+        if (mesh < 0 && make_room(job.name, "models")) {
+          mesh = ctr_gpu_skinned_mesh_create(verts.data(), m.vertex_count, ix, count);
+        }
+      }
+      ok = mesh >= 0;
+      if (ok) {
+        d->merc_meshes.emplace_back(m.model, mesh);
+      }
+    }
+  }
+  if (ok && job.textures && !cancelled()) {
+    c3l::Header hdr;
+    std::vector<c3l::Texture> texs;
+    std::vector<c3l::Draw> draws;
+    if (f.read(0, &hdr, sizeof(hdr)) && f.read_array(hdr.textures_offset, hdr.num_textures, &texs) &&
+        f.read_array(hdr.draw_data_offset, hdr.draw_data_size / sizeof(c3l::Draw), &draws) &&
+        !load_textures(f, hdr, texs, draws, job.name, &d->tex)) {
+      delete_textures(&d->tex);  // cancelled: not all texels are there
+    }
+  }
+  if (d->meshes.size() == job.chunks.size() && d->merc_meshes.size() == job.merc.size() &&
+      (!job.textures || d->tex.pool >= 0)) {
     d->result = LoadResult::LOADED;
   }
 }
 
+void CtrLevels::delete_textures(TexLoad* t) {
+  for (int h : t->handles) {
+    ctr_gpu_tex_delete(h);
+  }
+  if (t->pool >= 0) {
+    ctr_gpu_pool_delete(t->pool);  // after its textures
+  }
+  *t = TexLoad();
+}
+
+void CtrLevels::delete_parts(Done& d) {
+  for (auto& [ci, mesh] : d.meshes) {
+    ctr_gpu_mesh_delete(mesh);
+  }
+  for (auto& [mi, mesh] : d.merc_meshes) {
+    ctr_gpu_mesh_delete(mesh);
+  }
+  d.meshes.clear();
+  d.merc_meshes.clear();
+  delete_textures(&d.tex);
+}
+
+// (AI-assisted) render thread: what a detail reload / repair made, for the same load of the level
+// (else deleted). A detail reload counts only if it made everything (the level is drawn in far
+// mode until then), a repair keeps what it made.
+void CtrLevels::take_parts(Done& d, u64 frame) {
+  const std::string& name = d.job.name;
+  auto it = m_levels.find(name);
+  CtrLevelData* lev = it != m_levels.end() && it->second->generation == d.job.generation
+                          ? it->second.get()
+                          : nullptr;
+  if (lev) {
+    (d.job.detail ? lev->detail_requested : lev->repair_requested) = false;
+  }
+  if (!lev || (d.job.detail && d.result != LoadResult::LOADED)) {
+    delete_parts(d);
+    if (lev) {
+      // not every frame while the memory isn't there
+      lev->detail_retry_frame = frame + 300;
+      lg::warn("[ctr] {}: detail meshes could not be read again, retrying later", name);
+    }
+    return;
+  }
+  int made = 0;
+  for (auto& [ci, mesh] : d.meshes) {
+    if (ci < lev->meshes.size() && lev->meshes[ci] < 0) {
+      lev->meshes[ci] = mesh;
+      made++;
+    } else {
+      ctr_gpu_mesh_delete(mesh);
+    }
+  }
+  d.meshes.clear();
+  for (auto& [mi, mesh] : d.merc_meshes) {
+    if (mi < lev->merc_models.size() && lev->merc_models[mi].mesh < 0) {
+      auto& md = lev->merc_models[mi];
+      md.mesh = mesh;
+      md.blerc_moved = false;  // a new mesh: the file's vertices
+      md.mod_checked = false;
+      made++;
+    } else {
+      ctr_gpu_mesh_delete(mesh);
+    }
+  }
+  d.merc_meshes.clear();
+  if (d.tex.pool >= 0 && lev->tex_pool < 0) {
+    lev->tex_pool = d.tex.pool;
+    lev->textures = std::move(d.tex.handles);
+    lev->tex_min_alpha = std::move(d.tex.min_alpha);
+    d.tex = TexLoad();
+    build_draw_order(lev);  // the draws' GPU states hold the texture handles
+    made++;
+  }
+  delete_parts(d);
+  if (d.job.detail) {
+    lev->detail_loaded = true;
+    lg::info("[ctr] {}: detail meshes back ({})", name, made);
+  }
+  if (lev->incomplete) {
+    u32 bytes = 0;
+    const int left = missing_parts(*lev, &bytes);
+    lev->incomplete = left > 0;
+    if (d.job.repair) {
+      lg::info("[ctr] {}: {} missing parts made again{}", name, made,
+               left ? fmt::format(", {} still missing ({} KB)", left, bytes / 1024) : "");
+      lev->repair_failures = made ? 0 : (u8)std::min(lev->repair_failures + 1, 4);
+      if (left) {
+        lev->repair_retry_frame = frame + (kRepairRetryFrames << lev->repair_failures);
+      }
+    }
+  }
+}
+
 void CtrLevels::unload_detail(CtrLevelData& lev) {
-  const u32 keep = lev.has_lowres ? 3u : 2u;  // what far mode draws (CtrTfragRenderer)
   int freed = 0;
   for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
-    if (lev.chunks[ci].lod_tier != keep && lev.meshes[ci] >= 0) {
+    // (AI-assisted) what far mode draws stays (far_chunk)
+    if (!far_chunk(lev, lev.chunks[ci]) && lev.meshes[ci] >= 0) {
       ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
       lev.meshes[ci] = -1;
       freed++;
@@ -255,7 +590,30 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
   lg::info("[ctr] {}: only seen from far away, {} detail meshes freed", lev.name, freed);
 }
 
+// (AI-assisted) the chunks without a mesh (missing_only: the ones missing_parts counts), in file
+// order (one pass over the vertex data)
+void CtrLevels::collect_chunks(const CtrLevelData& lev,
+                               bool missing_only,
+                               std::vector<DetailChunk>* out) {
+  for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size() &&
+                      ci < lev.mesh_index_first.size();
+       ci++) {
+    const auto& ch = lev.chunks[ci];
+    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX &&
+        (!missing_only || lev.detail_loaded || far_chunk(lev, ch))) {
+      out->push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
+                      lev.mesh_index_end[ci]});
+    }
+  }
+  std::sort(out->begin(), out->end(), [](const DetailChunk& a, const DetailChunk& b) {
+    return a.first_vertex < b.first_vertex;
+  });
+}
+
 void CtrLevels::request_detail(CtrLevelData& lev) {
+  if (lev.repair_requested) {
+    return;  // (AI-assisted) after it
+  }
   Job job;
   job.name = lev.name;
   job.detail = true;
@@ -263,21 +621,38 @@ void CtrLevels::request_detail(CtrLevelData& lev) {
   job.path = lev.path;
   job.vertex_data_offset = lev.vertex_data_offset;
   job.index_data_offset = lev.index_data_offset;
-  for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size() &&
-                      ci < lev.mesh_index_first.size();
-       ci++) {
-    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX) {
-      const auto& ch = lev.chunks[ci];
-      job.chunks.push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
-                            lev.mesh_index_end[ci]});
-    }
-  }
+  collect_chunks(lev, false, &job.chunks);
   if (job.chunks.empty()) {
     lev.detail_loaded = true;
     return;
   }
   lev.detail_requested = true;
   lg::info("[ctr] {}: camera coming back, reading {} detail meshes", lev.name, job.chunks.size());
+  request(job);
+}
+
+void CtrLevels::request_repair(CtrLevelData& lev) {
+  Job job;
+  job.name = lev.name;
+  job.repair = true;
+  job.generation = lev.generation;
+  job.path = lev.path;
+  job.vertex_data_offset = lev.vertex_data_offset;
+  job.index_data_offset = lev.index_data_offset;
+  job.merc_vertex_offset = lev.merc_vertex_offset;
+  job.merc_index_offset = lev.merc_index_offset;
+  collect_chunks(lev, true, &job.chunks);
+  for (size_t mi = 0; mi < lev.merc_models.size(); mi++) {
+    const auto& m = lev.merc_models[mi];
+    if (m.mesh < 0 && m.index_end > m.index_first) {
+      job.merc.push_back({(u32)mi, m.file_vertex, m.vertex_count, m.index_first, m.index_end});
+    }
+  }
+  std::sort(job.merc.begin(), job.merc.end(), [](const RepairMerc& a, const RepairMerc& b) {
+    return a.file_vertex < b.file_vertex;
+  });
+  job.textures = lev.tex_pool < 0 && lev.tex_pool_bytes > 0;
+  lev.repair_requested = true;
   request(job);
 }
 
@@ -313,13 +688,23 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   for (auto& m : out->merc_models) {
     failed += m.mesh < 0;
   }
-  lg::info("[ctr] loaded {} ({} chunks, {} merc models, {} textures, {} KB) in {:.0f} ms{}", name,
-           out->chunks.size(), out->merc_models.size(), out->textures.size(), file_size / 1024,
-           timer.getMs(),
-           decode_ms > 0 ? fmt::format(" (decompressing {:.0f} ms)", decode_ms) : "");
+  lg::info(
+      "[ctr] loaded {} ({} chunks, {} merc models, {} textures: {} KB, background {} KB first; {} "
+      "KB) in {:.0f} ms{}",
+      name, out->chunks.size(), out->merc_models.size(), out->textures.size(),
+      out->tex_pool_bytes / 1024, out->tex_background_bytes / 1024, file_size / 1024,
+      timer.getMs(), decode_ms > 0 ? fmt::format(" (decompressing {:.0f} ms)", decode_ms) : "");
   if (failed) {
     lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
               failed);
+  }
+  // (AI-assisted) made again when the memory is there (process_pending_loads)
+  u32 missing_bytes = 0;
+  const int missing = missing_parts(*out, &missing_bytes);
+  out->incomplete = missing > 0;
+  if (missing) {
+    lg::warn("[ctr] {}: {} parts ({} KB) left out, made again when memory frees", name, missing,
+             missing_bytes / 1024);
   }
   return LoadResult::LOADED;
 }
@@ -357,7 +742,209 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
       return 0;
   }
 }
+
+// GPU state per draw, so drawing doesn't decode the draw modes every frame, and the drawing order.
+// (AI-assisted) At load, and again when the textures are made later (a repair: the states hold the
+// texture handles).
+void build_draw_order(CtrLevelData* out) {
+  out->draw_states.clear();
+  out->draw_sort_keys.clear();
+  out->draw_ordered.clear();
+  out->draw_chunk.clear();
+  out->sorted_draws.clear();
+  out->ordered_draws.clear();
+  out->early_draws.clear();
+  out->draw_states.reserve(out->draws.size());
+  for (auto& d : out->draws) {
+    DrawMode mode;
+    mode.as_int() = d.mode;
+    const bool textured = d.texture < out->textures.size();
+    ctr_draw_state st =
+        ctr_state_from_draw_mode(mode, textured ? out->textures[d.texture] : -1);
+    // (AI-assisted) opaque, depth written and tested like the early depth test, and the alpha
+    // test never fails (the texture's alpha is above its reference everywhere; vertex alpha 0x80):
+    // the early depth test may drop what's behind it before texturing
+    const int min_alpha = textured ? out->tex_min_alpha[d.texture] : 0;
+    if (st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL &&
+        (st.atest == CTR_TEST_ALWAYS || (textured && min_alpha >= std::min(255, st.aref * 2)))) {
+      st.flags |= CTR_STATE_EARLY_DEPTH;
+    }
+    out->draw_states.push_back(st);
+  }
+  // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
+  // the state (numbered per level)
+  std::vector<ctr_draw_state> states;
+  out->draw_sort_keys.resize(out->draws.size());
+  out->draw_ordered.resize(out->draws.size());
+  for (size_t di = 0; di < out->draws.size(); di++) {
+    ctr_draw_state st = out->draw_states[di];
+    const int tex = st.tex;
+    st.tex = 0;
+    u32 id = 0;
+    while (id < states.size() && memcmp(&states[id], &st, sizeof(st))) {
+      id++;
+    }
+    if (id == states.size()) {
+      states.push_back(st);
+    }
+    out->draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
+    // blending, or drawn over what's there without writing depth (decals): keep the order
+    out->draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
+  }
+  // drawing order, made once (see sorted_draws)
+  out->draw_chunk.assign(out->draws.size(), 0);
+  for (u32 ci = 0; ci < out->chunks.size(); ci++) {
+    const auto& ch = out->chunks[ci];
+    for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+      out->draw_chunk[ch.first_draw + k] = ci;
+    }
+  }
+  std::vector<u64> sorted;
+  for (u32 ci = 0; ci < out->chunks.size(); ci++) {
+    const auto& ch = out->chunks[ci];
+    for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+      const u32 di = ch.first_draw + k;
+      if (out->draw_ordered[di]) {
+        out->ordered_draws.push_back(di);
+      } else {
+        // (draws are numbered in chunk order: di sorts like (chunk, draw))
+        sorted.push_back(((u64)out->draw_sort_keys[di] << 32) | di);
+      }
+    }
+  }
+  std::sort(sorted.begin(), sorted.end());
+  out->sorted_draws.reserve(sorted.size());
+  for (u64 e : sorted) {
+    const u32 di = (u32)e;
+    if (out->draw_states[di].flags & CTR_STATE_EARLY_DEPTH) {
+      out->early_draws.push_back(di);
+    } else {
+      out->sorted_draws.push_back(di);
+    }
+  }
+}
 }  // namespace
+
+// All textures (with their mip levels) in one pool: the renderer moves it to VRAM when there's
+// room, with one GPU copy. The texels are read straight into it. (AI-assisted) When VRAM is short
+// only the pool's start goes there (~2.6 MB): the textures of the background (tfrag, tie, shrub)
+// come first, then the ones only merc models (characters) use, which were 75-95% of a level's
+// pool and came first in the file. They are read in file order all the same.
+bool CtrLevels::load_textures(c3l::Reader& f,
+                              const c3l::Header& hdr,
+                              const std::vector<c3l::Texture>& texs,
+                              const std::vector<c3l::Draw>& draws,
+                              const std::string& name,
+                              TexLoad* out) {
+  struct Plan {
+    bool ok = false;
+    bool expand = false;  // RGBA4 stored as RGBA8 (ctr_gpu_set_rgba4_as_rgba8)
+    int format = 0;       // ctr_tex_format
+    int levels = 1;
+    u32 file_bytes = 0;   // of the levels used, as stored in the file
+    u32 offset = 0;       // in the pool
+  };
+  std::vector<Plan> plan(texs.size());
+  const bool rgba4_as_rgba8 = ctr_gpu_rgba4_as_rgba8() != 0;
+  for (size_t i = 0; i < texs.size(); i++) {
+    const auto& t = texs[i];
+    auto& p = plan[i];
+    const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
+                      !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
+    if (!pow2 || t.format > c3l::TEX_RGBA8 || (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
+      continue;
+    }
+    // the levels the data holds (and the GPU allows: at least 8 texels on the short side)
+    const int want = hdr.version >= 8 ? std::max<int>(1, t.levels) : 1;
+    int levels = 0;
+    u32 bytes = 0;
+    for (int l = 0; l < want; l++) {
+      const u32 w = t.w >> l, h = t.h >> l;
+      const u32 b = c3l::texture_level_bytes(w, h, t.format);
+      if (w < 8 || h < 8 || bytes + b > t.data_size) {
+        break;
+      }
+      bytes += b;
+      levels++;
+    }
+    if (!levels) {
+      continue;
+    }
+    p.ok = true;
+    p.levels = levels;
+    p.file_bytes = bytes;
+    p.expand = t.format == c3l::TEX_RGBA4 && rgba4_as_rgba8;
+    p.format = p.expand ? CTR_TEX_RGBA8 : (int)t.format;
+  }
+  // (AI-assisted) the places in the pool: the background's textures first
+  std::vector<u8> background(texs.size(), 0);
+  for (const auto& d : draws) {
+    if (d.texture < texs.size()) {
+      background[d.texture] = 1;
+    }
+  }
+  u32 pool_bytes = 0;
+  for (int pass = 0; pass < 2; pass++) {
+    for (size_t i = 0; i < texs.size(); i++) {
+      auto& p = plan[i];
+      if (p.ok && background[i] == (pass == 0)) {
+        p.offset = pool_bytes;
+        pool_bytes += (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
+      }
+    }
+    if (pass == 0) {
+      out->background_bytes = pool_bytes;
+    }
+  }
+  out->pool_bytes = pool_bytes;
+  out->handles.assign(texs.size(), -1);
+  out->min_alpha.assign(texs.size(), 0);
+  int pool = pool_bytes ? ctr_gpu_pool_create(pool_bytes) : -1;
+  if (pool_bytes && pool < 0 && make_room(name, "the textures")) {
+    pool = ctr_gpu_pool_create(pool_bytes);
+  }
+  if (pool_bytes && pool < 0) {
+    lg::error("[ctr] {}: no memory for the textures ({} KB)", name, pool_bytes / 1024);
+  }
+  out->pool = pool;
+  u8* base = pool >= 0 ? (u8*)ctr_gpu_pool_data(pool) : nullptr;
+  std::vector<u8> texels;
+  for (size_t i = 0; i < texs.size(); i++) {
+    if (cancelled()) {
+      return false;
+    }
+    const auto& t = texs[i];
+    const auto& p = plan[i];
+    if (!p.ok || !base) {
+      continue;
+    }
+    u8* dst = base + p.offset;
+    bool read_ok;
+    if (!p.expand) {
+      read_ok = f.read(t.data_offset, dst, p.file_bytes);
+    } else {
+      // RGBA4 -> RGBA8 (the same tiled order, all levels; GPU_RGBA8 is stored A, B, G, R)
+      texels.resize(p.file_bytes);
+      read_ok = f.read(t.data_offset, texels.data(), p.file_bytes);
+      const u32 n = p.file_bytes / 2;
+      for (u32 k = 0; read_ok && k < n; k++) {
+        const u16 v = (u16)(texels[2 * k] | (texels[2 * k + 1] << 8));
+        dst[4 * k + 0] = (u8)((v & 0xf) * 17);
+        dst[4 * k + 1] = (u8)(((v >> 4) & 0xf) * 17);
+        dst[4 * k + 2] = (u8)(((v >> 8) & 0xf) * 17);
+        dst[4 * k + 3] = (u8)(((v >> 12) & 0xf) * 17);
+      }
+    }
+    if (read_ok) {
+      out->handles[i] = ctr_gpu_pool_tex(pool, p.offset, t.w, t.h, p.format, p.levels);
+      out->min_alpha[i] = (u8)texture_min_alpha(dst, t.w, t.h, p.format);
+    }
+  }
+  if (pool >= 0) {
+    ctr_gpu_pool_ready(pool);
+  }
+  return true;
+}
 
 bool CtrLevels::load_file(const fs::path& path,
                           const std::string& name,
@@ -460,101 +1047,25 @@ bool CtrLevels::load_file(const fs::path& path,
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
   }
-  // All textures (with their mip levels) in one pool: the renderer moves it to VRAM when there's
-  // room, with one GPU copy. The texels are read straight into it.
   {
-    struct Plan {
-      bool ok = false;
-      bool expand = false;  // RGBA4 stored as RGBA8 (ctr_gpu_set_rgba4_as_rgba8)
-      int format = 0;       // ctr_tex_format
-      int levels = 1;
-      u32 file_bytes = 0;   // of the levels used, as stored in the file
-      u32 offset = 0;       // in the pool
-    };
-    std::vector<Plan> plan(texs.size());
-    const bool rgba4_as_rgba8 = ctr_gpu_rgba4_as_rgba8() != 0;
-    u32 pool_bytes = 0;
-    for (size_t i = 0; i < texs.size(); i++) {
-      const auto& t = texs[i];
-      auto& p = plan[i];
-      const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
-                        !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
-      if (!pow2 || t.format > c3l::TEX_RGBA8 ||
-          (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
-        continue;
-      }
-      // the levels the data holds (and the GPU allows: at least 8 texels on the short side)
-      const int want = hdr.version >= 8 ? std::max<int>(1, t.levels) : 1;
-      int levels = 0;
-      u32 bytes = 0;
-      for (int l = 0; l < want; l++) {
-        const u32 w = t.w >> l, h = t.h >> l;
-        const u32 b = c3l::texture_level_bytes(w, h, t.format);
-        if (w < 8 || h < 8 || bytes + b > t.data_size) {
-          break;
-        }
-        bytes += b;
-        levels++;
-      }
-      if (!levels) {
-        continue;
-      }
-      p.ok = true;
-      p.levels = levels;
-      p.file_bytes = bytes;
-      p.expand = t.format == c3l::TEX_RGBA4 && rgba4_as_rgba8;
-      p.format = p.expand ? CTR_TEX_RGBA8 : (int)t.format;
-      p.offset = pool_bytes;
-      pool_bytes += (ctr_gpu_tex_bytes(t.w, t.h, p.format, p.levels) + 127) & ~127u;
-    }
-    out->tex_min_alpha.assign(texs.size(), 0);
-    const int pool = pool_bytes ? ctr_gpu_pool_create(pool_bytes) : -1;
-    if (pool_bytes && pool < 0) {
-      lg::error("[ctr] {}: no memory for the textures ({} KB)", name, pool_bytes / 1024);
-    }
-    out->tex_pool = pool;
-    u8* base = pool >= 0 ? (u8*)ctr_gpu_pool_data(pool) : nullptr;
-    std::vector<u8> texels;
-    for (size_t i = 0; i < texs.size(); i++) {
-      if (cancelled()) {
-        return false;
-      }
-      const auto& t = texs[i];
-      const auto& p = plan[i];
-      int handle = -1;
-      if (p.ok && base) {
-        u8* dst = base + p.offset;
-        bool read_ok;
-        if (!p.expand) {
-          read_ok = f.read(t.data_offset, dst, p.file_bytes);
-        } else {
-          // RGBA4 -> RGBA8 (the same tiled order, all levels; GPU_RGBA8 is stored A, B, G, R)
-          texels.resize(p.file_bytes);
-          read_ok = f.read(t.data_offset, texels.data(), p.file_bytes);
-          const u32 n = p.file_bytes / 2;
-          for (u32 k = 0; read_ok && k < n; k++) {
-            const u16 v = (u16)(texels[2 * k] | (texels[2 * k + 1] << 8));
-            dst[4 * k + 0] = (u8)((v & 0xf) * 17);
-            dst[4 * k + 1] = (u8)(((v >> 4) & 0xf) * 17);
-            dst[4 * k + 2] = (u8)(((v >> 8) & 0xf) * 17);
-            dst[4 * k + 3] = (u8)(((v >> 12) & 0xf) * 17);
-          }
-        }
-        if (read_ok) {
-          handle = ctr_gpu_pool_tex(pool, p.offset, t.w, t.h, p.format, p.levels);
-          out->tex_min_alpha[i] = texture_min_alpha(dst, t.w, t.h, p.format);
-        }
-      }
-      out->textures.push_back(handle);
-    }
-    if (pool >= 0) {
-      ctr_gpu_pool_ready(pool);
+    TexLoad tl;
+    const bool ok = load_textures(f, hdr, texs, out->draws, name, &tl);
+    // in the level also when cancelled: unloaded with it
+    out->tex_pool = tl.pool;
+    out->tex_pool_bytes = tl.pool_bytes;
+    out->tex_background_bytes = tl.background_bytes;
+    out->textures = std::move(tl.handles);
+    out->tex_min_alpha = std::move(tl.min_alpha);
+    if (!ok) {
+      return false;
     }
   }
 
   out->path = path.string();
   out->vertex_data_offset = hdr.vertex_data_offset;
   out->index_data_offset = hdr.index_data_offset;
+  out->merc_vertex_offset = hdr.merc_vertex_offset;
+  out->merc_index_offset = hdr.merc_index_offset;
   // all indices at once (~1 MB): reading them chunk by chunk between the vertex reads would seek
   // back and forth, and every seek throws away the read buffer
   std::vector<u16> indices;
@@ -584,8 +1095,13 @@ bool CtrLevels::load_file(const fs::path& path,
     int mesh = -1;
     void* vdst;
     u16* idst;
-    if (end <= indices.size() &&
-        (mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst)) >= 0) {
+    if (end <= indices.size()) {
+      mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
+      if (mesh < 0 && make_room(name, "meshes")) {
+        mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
+      }
+    }
+    if (mesh >= 0) {
       memcpy(idst, indices.data() + first, (end - first) * sizeof(u16));
       mesh = ctr_gpu_mesh_end(
           mesh, f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex), vdst,
@@ -615,77 +1131,7 @@ bool CtrLevels::load_file(const fs::path& path,
       first = false;
     }
   }
-  // GPU state per draw, so drawing doesn't decode the draw modes every frame
-  out->draw_states.reserve(out->draws.size());
-  for (auto& d : out->draws) {
-    DrawMode mode;
-    mode.as_int() = d.mode;
-    const bool textured = d.texture < out->textures.size();
-    ctr_draw_state st =
-        ctr_state_from_draw_mode(mode, textured ? out->textures[d.texture] : -1);
-    // (AI-assisted) opaque, depth written and tested like the early depth test, and the alpha
-    // test never fails (the texture's alpha is above its reference everywhere; vertex alpha 0x80):
-    // the early depth test may drop what's behind it before texturing
-    const int min_alpha = textured ? out->tex_min_alpha[d.texture] : 0;
-    if (st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL &&
-        (st.atest == CTR_TEST_ALWAYS || (textured && min_alpha >= std::min(255, st.aref * 2)))) {
-      st.flags |= CTR_STATE_EARLY_DEPTH;
-    }
-    out->draw_states.push_back(st);
-  }
-  // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
-  // the state (numbered per level)
-  {
-    std::vector<ctr_draw_state> states;
-    out->draw_sort_keys.resize(out->draws.size());
-    out->draw_ordered.resize(out->draws.size());
-    for (size_t di = 0; di < out->draws.size(); di++) {
-      ctr_draw_state st = out->draw_states[di];
-      const int tex = st.tex;
-      st.tex = 0;
-      u32 id = 0;
-      while (id < states.size() && memcmp(&states[id], &st, sizeof(st))) {
-        id++;
-      }
-      if (id == states.size()) {
-        states.push_back(st);
-      }
-      out->draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
-      // blending, or drawn over what's there without writing depth (decals): keep the order
-      out->draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
-    }
-    // drawing order, made once (see sorted_draws)
-    out->draw_chunk.assign(out->draws.size(), 0);
-    for (u32 ci = 0; ci < out->chunks.size(); ci++) {
-      const auto& ch = out->chunks[ci];
-      for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
-        out->draw_chunk[ch.first_draw + k] = ci;
-      }
-    }
-    std::vector<u64> sorted;
-    for (u32 ci = 0; ci < out->chunks.size(); ci++) {
-      const auto& ch = out->chunks[ci];
-      for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
-        const u32 di = ch.first_draw + k;
-        if (out->draw_ordered[di]) {
-          out->ordered_draws.push_back(di);
-        } else {
-          // (draws are numbered in chunk order: di sorts like (chunk, draw))
-          sorted.push_back(((u64)out->draw_sort_keys[di] << 32) | di);
-        }
-      }
-    }
-    std::sort(sorted.begin(), sorted.end());
-    out->sorted_draws.reserve(sorted.size());
-    for (u64 e : sorted) {
-      const u32 di = (u32)e;
-      if (out->draw_states[di].flags & CTR_STATE_EARLY_DEPTH) {
-        out->early_draws.push_back(di);
-      } else {
-        out->sorted_draws.push_back(di);
-      }
-    }
-  }
+  build_draw_order(out);
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -793,11 +1239,20 @@ bool CtrLevels::load_file(const fs::path& path,
       for (auto& d : md.draws) {
         d.first_index -= first;
       }
-      if (end <= mindices.size() &&
-          f.read_array(hdr.merc_vertex_offset + m.first_vertex * sizeof(c3l::MercVertex),
-                       m.vertex_count, &mverts)) {
-        md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count,
-                                              mindices.data() + first, end - first);
+      if (end <= mindices.size()) {
+        md.file_vertex = m.first_vertex;
+        md.vertex_count = m.vertex_count;
+        md.index_first = first;
+        md.index_end = end;
+        if (f.read_array(hdr.merc_vertex_offset + m.first_vertex * sizeof(c3l::MercVertex),
+                         m.vertex_count, &mverts)) {
+          md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count,
+                                                mindices.data() + first, end - first);
+          if (md.mesh < 0 && make_room(name, "the models")) {
+            md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count,
+                                                  mindices.data() + first, end - first);
+          }
+        }
       }
       out->merc_models.push_back(std::move(md));
     }
@@ -807,6 +1262,8 @@ bool CtrLevels::load_file(const fs::path& path,
 
 void CtrLevels::process_pending_loads(u64 frame) {
   m_render_frame.store(frame);
+  // (AI-assisted) parked prefetches the game gave up on, room for the loader
+  housekeeping(false);
   for (const auto& name : m_pending_loads) {
     if (!m_levels.count(name) && !m_prefetched.count(name) && !m_missing.count(name)) {
       request({name, false, false});
@@ -838,39 +1295,13 @@ void CtrLevels::process_pending_loads(u64 frame) {
     }
   }
   bool levels_changed = false;
+  bool unloaded = false;
   const double now = ctr_gpu_time_ms();
   for (auto& d : done) {
     const std::string& name = d.job.name;
-    if (d.job.detail) {
-      // (AI-assisted) partial unload: the meshes read again, for the same load of the level
-      auto it = m_levels.find(name);
-      CtrLevelData* lev = it != m_levels.end() ? it->second.get() : nullptr;
-      if (lev && lev->generation != d.job.generation) {
-        lev = nullptr;
-      }
-      if (lev && d.result == LoadResult::LOADED) {
-        for (auto& [ci, mesh] : d.meshes) {
-          if (ci < lev->meshes.size() && lev->meshes[ci] < 0) {
-            lev->meshes[ci] = mesh;
-          } else {
-            ctr_gpu_mesh_delete(mesh);
-          }
-        }
-        lev->detail_loaded = true;
-        lg::info("[ctr] {}: detail meshes back ({})", name, d.meshes.size());
-      } else {
-        for (auto& [ci, mesh] : d.meshes) {
-          ctr_gpu_mesh_delete(mesh);
-        }
-        if (lev) {
-          // not every frame while the memory isn't there
-          lev->detail_retry_frame = frame + 300;
-          lg::warn("[ctr] {}: detail meshes could not be read again, retrying later", name);
-        }
-      }
-      if (lev) {
-        lev->detail_requested = false;
-      }
+    if (d.job.parts()) {
+      // (AI-assisted) partial unload / repair: the meshes made again
+      take_parts(d, frame);
       continue;
     }
     if (d.job.common) {
@@ -895,20 +1326,33 @@ void CtrLevels::process_pending_loads(u64 frame) {
         break;
       case LoadResult::CANCELLED:
         break;
-      case LoadResult::LOADED:
+      case LoadResult::LOADED: {
+        bool keep;
+        {
+          std::lock_guard<std::mutex> lk(m_lock);
+          keep = parked_matters(name, now);
+        }
         if (m_levels.count(name) || m_prefetched.count(name)) {
           unload(*d.lev);  // loaded twice (asked for again while it loaded)
         } else if (std::find(m_wanted.begin(), m_wanted.end(), name) != m_wanted.end() ||
                    (!d.job.prefetch && m_wanted.empty())) {
           publish(name, std::move(d.lev), frame);
           levels_changed = true;
-        } else {
+        } else if (keep) {
           // (AI-assisted) a prefetch, or a load the game no longer wants (it changed its level list
-          // while this one loaded): kept aside, dropped if nothing asks for it
+          // while this one loaded), of the level whose DGO the game loads: kept aside, dropped if
+          // nothing asks for it
           m_prefetched[name] = Prefetched{std::move(d.lev), now};
           levels_changed = true;
+        } else {
+          // (AI-assisted) the game gave up on it (it loads another level now): its memory is for
+          // that one
+          lg::info("[ctr] {} loaded but no longer wanted, unloading", name);
+          unload(*d.lev);
+          unloaded = true;
         }
         break;
+      }
     }
   }
   // prefetched levels nothing asked for
@@ -918,12 +1362,45 @@ void CtrLevels::process_pending_loads(u64 frame) {
       unload(*it->second.lev);
       it = m_prefetched.erase(it);
       levels_changed = true;
+      unloaded = true;
     } else {
       ++it;
     }
   }
+  if (unloaded) {
+    ctr_gpu_free_pending_now();  // (AI-assisted) before the loader goes on
+  }
   if (levels_changed) {
     update_level_count();
+  }
+  // (AI-assisted) levels that loaded with parts left out (no memory then): made again once the last
+  // frame's free linear memory covers them (another level was unloaded, or this one's textures
+  // moved to VRAM), but not while a level loads (the game waits for that one: its memory first)
+  if (frame % kRepairCheckFrames == 0) {
+    bool level_loading = false;
+    {
+      std::lock_guard<std::mutex> lk(m_lock);
+      for (const auto& key : m_requested) {
+        level_loading |= key.find('#') == std::string::npos;  // not a detail reload / repair
+      }
+    }
+    ctr_gpu_stats st;
+    ctr_gpu_get_stats(&st);
+    for (auto& [name, lev] : m_levels) {
+      if (level_loading || !lev->incomplete || lev->repair_requested || lev->detail_requested ||
+          frame < lev->repair_retry_frame) {
+        continue;
+      }
+      u32 bytes = 0;
+      const int n = missing_parts(*lev, &bytes);
+      if (!n) {
+        lev->incomplete = false;  // unloaded meanwhile (partial unload)
+      } else if (st.linear_free >= bytes + kRepairMargin) {
+        lg::info("[ctr] {}: making {} missing parts again ({} KB, {} KB free)", name, n,
+                 bytes / 1024, st.linear_free / 1024);
+        request_repair(*lev);
+      }
+    }
   }
 }
 
@@ -1009,7 +1486,8 @@ CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
 
 void CtrLevels::set_wanted(const std::vector<std::string>& names) {
   m_wanted = names;
-  // stop loads of levels that are no longer wanted (prefetches are for levels to come: kept)
+  // stop loads of levels that are no longer wanted (prefetches are for levels to come: kept; the
+  // ones the game gave up on are dropped by prefetch / housekeeping)
   {
     std::lock_guard<std::mutex> lk(m_lock);
     auto wanted = [&](const std::string& n) {
@@ -1026,7 +1504,10 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
     if (!m_loading.empty() && !m_loading_prefetch && m_loading != "GAME" && !wanted(m_loading)) {
       m_cancel = true;
     }
+    // (AI-assisted) the levels ready() said yes to are in the list now, or the game dropped them
+    m_promised.clear();
   }
+  m_cv.notify_all();  // (AI-assisted) a job waiting for room (make_room) sees the cancel
   bool changed = false;
   // prefetched levels the game now wants
   for (auto& n : names) {
@@ -1060,6 +1541,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
     ctr_gpu_free_pending_now();
     update_level_count();
   }
+  housekeeping(false);  // (AI-assisted) the render thread is idle: as at its next frame
   // Load the wanted levels before the next frame, not only when their background is drawn: a level
   // can be loaded just for its models. The intro loads the "intro" level (Gol and Maia) next to
   // misty with display mode special, so it never draws a background and was never loaded.
@@ -1125,6 +1607,20 @@ std::array<math::Vector4f, 4> make_cam_mat(const math::Vector4f cam_T_w[4],
 bool sphere_in_view(const float* s, const math::Vector4f* planes) {
   math::Vector4f acc = planes[0] * s[0] + planes[1] * s[1] + planes[2] * s[2] - planes[3];
   return acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3];
+}
+
+// (AI-assisted) a chunk's draw distance limit (game units, 0: none): the converter's (small and
+// medium objects) times detail_scale. With chunk kinds (newer c3l files): shrubs up to
+// shrub_distance (GPU-bound levels had 200-300k shrub triangles within the converter's 100 m),
+// ties times tie_distance_scale (most ties stopped at 100 m: pop-in).
+float chunk_max_dist(const c3l::Chunk& ch, const CtrSettings& s) {
+  if (ch.kind == c3l::CHUNK_KIND_SHRUB && s.shrub_distance > 0) {
+    return s.shrub_distance * 4096.f * s.detail_scale;
+  }
+  if (ch.kind == c3l::CHUNK_KIND_TIE) {
+    return ch.max_dist * s.tie_distance_scale * s.detail_scale;
+  }
+  return ch.max_dist * s.detail_scale;
 }
 
 }  // namespace
@@ -1372,8 +1868,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     {
       // draw distance; small objects only up close
       float max_dist = draw_dist;
-      if (ch.max_dist > 0) {
-        const float d = ch.max_dist * settings.detail_scale;
+      const float d = chunk_max_dist(ch, settings);
+      if (d > 0) {
         max_dist = max_dist > 0 ? std::min(max_dist, d) : d;
       }
       if (max_dist > 0) {
@@ -1388,8 +1884,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       continue;
     }
     if (far_level) {
-      // only the level's low resolution version (or the coarse one), no tie
-      if (ch.lod_tier != (lev.has_lowres ? 3u : 2u)) {
+      // only the level's low resolution version (or the coarse one), no tie but (AI-assisted) the
+      // landmarks (far_chunk)
+      if (!far_chunk(lev, ch)) {
         continue;
       }
     } else if (ch.lod_tier == 3 || !lod_ok) {

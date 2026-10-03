@@ -23,10 +23,17 @@ struct CtrSettings {
   // detailed). Needs .c3l files with both versions (ctr_level_converter --far-lod).
   float lod_distance = 200.f;
   // a level whose bounds are further than this from the camera (seen from a neighbouring level)
-  // is drawn with only its low resolution tfrag, no tie (meters, 0 = off)
-  float far_level_distance = 40.f;
+  // is drawn with only its low resolution tfrag, no tie (meters, 0 = off). (AI-assisted) 80 (was
+  // 40): ties popped in at 40 m; c3l files with chunk kinds also keep the ties without a distance
+  // limit (landmarks) in that mode
+  float far_level_distance = 80.f;
   // multiplies the draw distance of small and medium objects (set by the converter)
   float detail_scale = 1.f;
+  // (AI-assisted) c3l files with chunk kinds (c3l::Chunk::kind; older files: detail_scale only):
+  // shrubs up to this distance (meters, times detail_scale; 0 = the converter's, 100 m), and the
+  // converter's distances of small and medium ties (100 / 300 m) times this
+  float shrub_distance = 50.f;
+  float tie_distance_scale = 1.5f;
   // renderers
   bool merc = true;
   bool sprites = true;
