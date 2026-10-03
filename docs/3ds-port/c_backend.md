@@ -268,13 +268,40 @@ is WIDE for every type-checked caller. The holes are:
 - a method implemented on a WIDE type and inherited by reference types (Jak 1: `relocate` and
   `mem-usage` of `object`): `this` (`_type_`) is read as PTR there.
 - assumption: values of PTR types are GOAL addresses (< 4 GB, hi = 0), and float-typed GPR values
-  are sign-extended. A pointer-typed value that holds something else (a 64-bit handle cast to a
-  pointer type) loses its upper half when passed. goalc warns in C mode about casts of a `handle`
-  to a PTR type (`check_c_abi_handle_cast`). Jak 1 had two, both fixed in goal_src by typing the
-  parameter `handle`: `add-rider!` (the rider's handle was passed as a `process-drawable`, its pid
-  was lost, `handle->process` failed in `pull-riders!`, and no platform carried Jak: the Volcanic
-  Crater minecarts, every `plat`, ...) and the `target-final-door` state (a handle passed as a
-  `basic`).
+  are sign-extended. A PTR- or FLOAT-typed value that holds something else (a 64-bit value cast to
+  the type to get past the type checker) loses its upper half when passed. Returns are always the
+  full `u64`, so only arguments are affected. goalc warns in C mode (`check_c_abi_narrowing_cast`)
+  about:
+  1. a value of a named 64-bit integer type (handle, time-frame, seconds, binteger, 64-bit enums and
+     bitfields), directly or through other casts (`(the-as foo (the-as uint64 h))`), cast to a PTR
+     or FLOAT type, anywhere (argument, variable, return value);
+  2. a PTR- or FLOAT-typed parameter cast to a named 64-bit integer type: the callee half of the same
+     mistake, for callers that need no cast (`process-spawn`, `go` and other untyped paths).
+
+  Jak 1 had two cases, both halves each, fixed in goal_src by typing the parameter `handle`:
+  `add-rider!` (the rider's handle was passed as a `process-drawable`, its pid was lost,
+  `handle->process` failed in `pull-riders!`, and no platform carried Jak: the Volcanic Crater
+  minecarts, every `plat`, ...) and the `target-final-door` state (a handle passed as a `basic`).
+
+  The plain integer types (int, uint, int64, uint64, integer, sinteger, uinteger) are not checked:
+  GOAL code keeps addresses, float bits and untyped 64-bit slots in them. An audit of every such
+  cast in Jak 1 (6,420 reports, Oct 2026: 3,535 casts, 2,694 of them direct call arguments, and 191
+  parameter casts) found only 32-bit values:
+  - constants (2,591): null (2,018), `#x70004000` (457), float bit patterns, small integers; the
+    one negative constant is stored into a float field (`puffer`), the same on every backend;
+  - address arithmetic and float bit tricks (~590): `(+ ... (scratchpad-object int))`, `&-`,
+    `align64`, `(logior #x3f800000 ...)` random floats, `get-vm-ptr`;
+  - event-message-block params (248, plus ~20 variables holding them): the sender's pointers,
+    symbols and floats (a handle in a param is read as `handle`, which is WIDE);
+  - other variables and fields (~115): decompiler temporaries holding pointers, connection params,
+    sparticle userdata (floats, process pointers), a thread register (a function), floats as ints
+    (debug menu; a FLOAT argument keeps any signed 32-bit integer), `gnawer-method-28` returning a
+    bit as a symbol (returns are 64 bits), unused state arguments (`double-lurker`), and the never
+    written `launch` fields of target's `control-info` (dead code);
+  - parameter casts: pointer parameters cast to int/uint for address arithmetic, and a texture page
+    pointer put in a 64-bit DMA slot.
+
+  Not checked: values of type `object` (every downcast would be reported).
 
 Runtime side (`goal_c_abi.h`, `goalc_runtime.cpp`, `kernel_function.h`):
 
