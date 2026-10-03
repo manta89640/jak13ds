@@ -14,6 +14,11 @@
 (#when TARGET_3DS
   (define-extern *pc-3ds-merc-lod-scale* float))
 
+;; (AI-assisted) set by the kernel from config.ini ocean (kmachine.cpp InitMachine_PCPort):
+;; #t for ocean = full (the PS2 ocean, draw-ocean), else #f (draw-ocean-3ds)
+(#when SKIP_OCEAN_DRAW
+  (define-extern *pc-3ds-ocean-full* symbol))
+
 ;; DECOMP BEGINS
 
 (defun sphere-cull ((arg0 vector))
@@ -897,7 +902,11 @@
     (#unless SKIP_OCEAN_DRAW
       (draw-ocean)) ;; far, mid, near, transition, and texture.
     (#when SKIP_OCEAN_DRAW
-      (draw-ocean-3ds)) ;; 3DS: only the parameters, the 3DS renderer draws the ocean
+      ;; 3DS: only the parameters, the 3DS renderer draws the ocean; (AI-assisted) config.ini
+      ;; ocean = full: the PS2 ocean's DMA, drawn by CtrOceanFull
+      (if *pc-3ds-ocean-full*
+        (draw-ocean)
+        (draw-ocean-3ds)))
     )
   (add-ee-profile-frame 'draw :b #xff :a #x80)
   ;; reset MERC

@@ -35,6 +35,8 @@ extern const uint8_t ctr_clip_shbin[];
 extern const size_t ctr_clip_shbin_size;
 extern const uint8_t ctr_clip2_shbin[];
 extern const size_t ctr_clip2_shbin_size;
+extern const uint8_t ctr_ocean_shbin[];
+extern const size_t ctr_ocean_shbin_size;
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
@@ -185,7 +187,16 @@ typedef struct {
   u32 verts_pa, indices_pa;
 } MeshSlot;
 
-enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH, PROG_SKIN, PROG_SKIN_ENV, PROG_CLIP, PROG_CLIP2 };
+enum {
+  PROG_NONE = 0,
+  PROG_BASIC,
+  PROG_MESH,
+  PROG_SKIN,
+  PROG_SKIN_ENV,
+  PROG_CLIP,
+  PROG_CLIP2,
+  PROG_OCEAN, /* (AI-assisted) ctr_gpu_ocean_draw (ctr_ocean.v.pica) */
+};
 
 static struct {
   int ready;
@@ -214,6 +225,14 @@ static struct {
   DVLB_s* clip2_dvlb; /* the same with two texture coordinates (ctr_clip2.v.pica: clouds) */
   shaderProgram_s clip2_program;
   int uloc_clip2_glpica;
+  DVLB_s* ocean_dvlb; /* (AI-assisted) the PS2 ocean's GS vertices (ctr_ocean.v.pica) */
+  shaderProgram_s ocean_program;
+  int uloc_ocean_gs;
+  C3D_Mtx ocean_gs; /* GS screen units (x, y 12.4, z 24 bits) -> PICA clip space at w = 1 */
+  /* the open ctr_gpu_ocean_reserve: vertices and indices at these g.vbuf offsets */
+  int ocean_open;
+  size_t ocean_voff, ocean_ioff;
+  int ocean_max_verts, ocean_max_indices;
   int cur_prog;
   /* (AI-assisted) the frame's clear color as a texture combiner constant (CTR_BLEND_OVER_CLEAR) */
   u32 clear_abgr;
@@ -600,6 +619,14 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 2, GPU_FLOAT, 2);         /* texcoord 1 */
     AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip2_glpica, &g.gl_to_pica);
+  } else if (prog == PROG_OCEAN) {
+    /* (AI-assisted) 32 bytes: GS x, y, z, q; s, t (times q), fog amount; color */
+    C3D_BindProgram(&g.ocean_program);
+    g.last_state_valid = 0;
+    AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);         /* x, y, z, q */
+    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 3);         /* s, t, fog */
+    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_ocean_gs, &g.ocean_gs);
   } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV) {
     C3D_BindProgram(prog == PROG_SKIN ? &g.skin_program : &g.env_program);
     g.last_state_valid = 0;
@@ -647,6 +674,17 @@ static void setup_projection(void) {
   g.gl_to_pica.r[3].y = 0.0f;
   g.gl_to_pica.r[3].z = 0.0f;
   g.gl_to_pica.r[3].w = 1.0f;
+
+  /* (AI-assisted) the ocean's GS vertices -> g.projection's space like CtrDirect: x = (X / 16 -
+   * 2048) / 256, y = (2048 - Y / 16) / 112 (Jak 1's 512 x 224 field), z = Z / (2^24 - 1) */
+  C3D_Mtx gs_to_ctr;
+  Mtx_Identity(&gs_to_ctr);
+  gs_to_ctr.r[0].x = 1.0f / 4096.0f;
+  gs_to_ctr.r[0].w = -8.0f;
+  gs_to_ctr.r[1].y = -1.0f / 1792.0f;
+  gs_to_ctr.r[1].w = 2048.0f / 112.0f;
+  gs_to_ctr.r[2].z = 1.0f / 16777215.0f;
+  Mtx_Multiply(&g.ocean_gs, &g.projection, &gs_to_ctr);
 }
 
 /* (AI-assisted) VRAM bank of a VRAM address: 0 = A (0x18000000..0x182FFFFF), 1 = B */
@@ -792,6 +830,10 @@ int ctr_gpu_init(void) {
   shaderProgramInit(&g.clip2_program);
   shaderProgramSetVsh(&g.clip2_program, &g.clip2_dvlb->DVLE[0]);
   g.uloc_clip2_glpica = shaderInstanceGetUniformLocation(g.clip2_program.vertexShader, "glpica");
+  g.ocean_dvlb = DVLB_ParseFile((u32*)ctr_ocean_shbin, (u32)ctr_ocean_shbin_size);
+  shaderProgramInit(&g.ocean_program);
+  shaderProgramSetVsh(&g.ocean_program, &g.ocean_dvlb->DVLE[0]);
+  g.uloc_ocean_gs = shaderInstanceGetUniformLocation(g.ocean_program.vertexShader, "gs");
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
    * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
@@ -891,6 +933,8 @@ void ctr_gpu_exit(void) {
   ctr_linear_unlock();
   shaderProgramFree(&g.clip2_program);
   DVLB_Free(g.clip2_dvlb);
+  shaderProgramFree(&g.ocean_program);
+  DVLB_Free(g.ocean_dvlb);
   shaderProgramFree(&g.program);
   DVLB_Free(g.dvlb);
   shaderProgramFree(&g.mesh_program);
@@ -1352,6 +1396,7 @@ static void frame_state_reset(void) {
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
   g.bound_tex = NULL;
+  g.ocean_open = 0; /* (AI-assisted) a ctr_gpu_ocean_reserve never drawn */
   use_program(PROG_BASIC);
   /* the fog ramp stays on texture unit 1 for the whole frame (binding a texture clears the GPU's
    * texture cache: once per frame, not at every level draw) */
@@ -3352,6 +3397,73 @@ static void apply_state(const ctr_draw_state* st, int mesh, int raw) {
   apply_state_tint(st, mesh, 0xffffffff, raw);
 }
 
+/* ---------------- (AI-assisted) the PS2 ocean (ctr_gpu_ocean_reserve / draw) ---------------- */
+
+static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b);
+
+int ctr_gpu_ocean_reserve(int max_verts, int max_indices, ctr_ocean_vertex** verts,
+                          uint16_t** indices) {
+  _Static_assert(sizeof(ctr_ocean_vertex) == 32, "ctr_ocean.v.pica's vertex layout");
+  if (!g.ready || !g.in_frame || g.ocean_open || max_verts <= 0 || max_indices <= 0) {
+    return 0;
+  }
+  const size_t vbytes = ((size_t)max_verts * sizeof(ctr_ocean_vertex) + 15) & ~(size_t)15;
+  const size_t ibytes = ((size_t)max_indices * 2 + 15) & ~(size_t)15;
+  if (g.vbuf_used + vbytes + ibytes > VBUF_BYTES) {
+    return 0;
+  }
+  g.ocean_voff = g.vbuf_used;
+  g.ocean_ioff = g.vbuf_used + vbytes;
+  g.ocean_max_verts = max_verts;
+  g.ocean_max_indices = max_indices;
+  g.ocean_open = 1;
+  *verts = (ctr_ocean_vertex*)(g.vbuf + g.ocean_voff);
+  *indices = (uint16_t*)(g.vbuf + g.ocean_ioff);
+  return 1;
+}
+
+void ctr_gpu_ocean_draw(const ctr_draw_state* state, int vert_count, int index_count,
+                        uint8_t fog_r, uint8_t fog_g, uint8_t fog_b) {
+  if (!g.ocean_open) {
+    return;
+  }
+  g.ocean_open = 0;
+  if (vert_count > g.ocean_max_verts || index_count > g.ocean_max_indices) {
+    return; /* (the caller wrote past the reservation) */
+  }
+  if (!g.in_frame || vert_count < 3 || index_count < 3) {
+    return; /* nothing taken from g.vbuf */
+  }
+  /* the indices right after the vertices used: the rest of the reservation stays free */
+  const size_t voff = g.ocean_voff;
+  const size_t ioff = voff + (((size_t)vert_count * sizeof(ctr_ocean_vertex) + 15) & ~(size_t)15);
+  if (ioff != g.ocean_ioff) {
+    memmove(g.vbuf + ioff, g.vbuf + g.ocean_ioff, (size_t)index_count * 2);
+  }
+  g.vbuf_used = ioff + (((size_t)index_count * 2 + 15) & ~(size_t)15);
+  if (!cmd_room()) {
+    return;
+  }
+  fog_ramp_color(fog_r, fog_g, fog_b);
+  use_program(PROG_OCEAN);
+  /* mesh = 1: the level meshes' combiners (texture alpha 0xff = 1, fog from texcoord1) */
+  if (use_raw(state)) {
+    apply_state(state, 1, 1);
+    raw_vertex_buffer(raw_vbuf_pa(voff), 0x210, RAW_BUF_FLAGS1(sizeof(ctr_ocean_vertex), 3, 0));
+    raw_sync();
+    raw_draw_elements(raw_vbuf_pa(ioff), (u32)index_count);
+  } else {
+    raw_vc_flush();
+    apply_state(state, 1, 0);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, g.vbuf + voff, sizeof(ctr_ocean_vertex), 3, 0x210);
+    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, g.vbuf + ioff);
+  }
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
+}
+
 /* ---------------- the screen as a texture ---------------- */
 
 int ctr_gpu_copy_screen(void) {
@@ -3967,6 +4079,12 @@ void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, u
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
     raw_note_unif();
   }
+  fog_ramp_color(r, gr, b);
+}
+
+/* (AI-assisted) the fog ramp texture's color (the ramp part of ctr_gpu_set_mesh_fog, also used by
+ * ctr_gpu_ocean_draw) */
+static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b) {
   uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)gr << 8) | b;
   if (!g.fog_tex_valid || rgb == g.fog_tex_rgb) {
     return;

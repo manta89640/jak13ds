@@ -1,5 +1,10 @@
 #pragma once
 
+#ifdef OCEAN_VU_FOR_CTR
+// (AI-assisted) the 3DS renderer compiles OceanMid_PS2.cpp for its own class (CtrOceanVu.h)
+#include "game/graphics/ctr/CtrOceanVu.h"
+#else
+
 #include "game/common/vu.h"
 #include "game/graphics/opengl_renderer/BucketRenderer.h"
 #include "game/graphics/opengl_renderer/DirectRenderer.h"
@@ -190,3 +195,5 @@ class OceanMid {
     Vu() : vf00(0, 0, 0, 1) {}
   } vu;
 };
+
+#endif  // OCEAN_VU_FOR_CTR

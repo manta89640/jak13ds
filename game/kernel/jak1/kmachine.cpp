@@ -629,6 +629,17 @@ void InitMachine_PCPort() {
     memcpy(&bits, &lod_scale, 4);
     intern_from_c("*pc-3ds-merc-lod-scale*")->value = bits;
   }
+  // (AI-assisted) config.ini ocean = full: the game builds the PS2 ocean's DMA (draw-ocean) for
+  // CtrOceanFull instead of draw-ocean-3ds's packet for CtrOcean (drawable.gc, SKIP_OCEAN_DRAW)
+  {
+    bool ocean_full = false;
+#ifdef __3DS__
+    char v[32];
+    ocean_full = ctr_config_get("ocean", v, sizeof(v)) && std::string(v) == "full";
+#endif
+    intern_from_c("*pc-3ds-ocean-full*")->value =
+        ocean_full ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+  }
 
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);
 

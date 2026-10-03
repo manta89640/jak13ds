@@ -1,0 +1,37 @@
+; (AI-assisted)
+; Vertex shader for the PS2 ocean (ctr_gpu_ocean_draw, CtrOceanFull: config.ini ocean = full).
+; The input is what the ocean's VU1 programs send the GS: screen x, y (12.4 fixed point) and the
+; 24-bit depth as floats, the GS Q (1 / w) and S, T (texture coordinates times Q). gs maps the
+; screen position to PICA clip space at w = 1; times w = 1 / Q it is a clip space position whose
+; w lets the GPU interpolate the texture coordinates S / Q, T / Q with perspective, like the GS.
+; The fog amount (texcoord1.x, looked up in the fog ramp texture like ctr_mesh.v.pica's) comes
+; with the vertex.
+
+.fvec gs[4]
+
+.constf consts(0.00392156862745098, 0.5, 0.0, 0.0)
+.alias inv255 consts.xxxx
+.alias half consts.yyyy
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.alias inpos v0  ; x, y, z, q (dph: w = 1)
+.alias intex v1  ; s, t (times q), fog amount
+.alias inclr v2
+
+.proc main
+  dph r0.x, inpos, gs[0]
+  dph r0.y, inpos, gs[1]
+  dph r0.z, inpos, gs[2]
+  dph r0.w, inpos, gs[3]
+  rcp r1.x, inpos.w
+  mul outpos, r0, r1.xxxx
+  mul outtc0.xy, intex.xyyy, r1.xxxx
+  mov outtc1.x, intex.zzzz
+  mov outtc1.y, half
+  mul outclr, inv255, inclr
+  end
+.end
