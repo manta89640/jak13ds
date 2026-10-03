@@ -710,12 +710,17 @@ u32 syncv_timed(u32 mode) {
   kperf::Scope perf_scope(kperf::Cat::VSYNC);
   return sceGsSyncV(mode);
 }
+// (AI-assisted) the game waiting for the 3DS render thread ("wait" in the perf lines, not logic)
+u32 sync_path_timed(u32 mode, u32 timeout) {
+  kperf::Scope perf_scope(kperf::Cat::WAIT);
+  return sceGsSyncPath(mode, timeout);
+}
 }  // namespace
 
 void InitMachineScheme() {
   make_function_symbol_from_c("put-display-env", PutDisplayEnv);       // used in drawable
   make_function_symbol_from_c("syncv", syncv_timed);                    // used in drawable
-  make_function_symbol_from_c("sync-path", sceGsSyncPath);             // used
+  make_function_symbol_from_c("sync-path", sync_path_timed);           // used
   make_function_symbol_from_c("reset-path", sceGsResetPath);           // used in dma
   make_function_symbol_from_c("reset-graph", sceGsResetGraph);         // used
   make_function_symbol_from_c("dma-sync", sceDmaSync);                 // used
