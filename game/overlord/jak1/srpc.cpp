@@ -1,5 +1,6 @@
 #include "srpc.h"
 
+#include <algorithm>
 #include <chrono>
 
 #include <cstdio>
@@ -402,7 +403,13 @@ void* RPC_Loader(unsigned int /*fno*/, void* data, int size) {
           if (gMusic) {
             gMusicFadeDir = -1;
             while (gMusicFade) {
+#ifdef __3DS__
+              // (AI-assisted) the fade moves once a game frame (VBlank_Handler): no need to
+              // wake up the IOP every millisecond to look
+              DelayThread(10000);
+#else
               DelayThread(1000);
+#endif
             }
             snd_UnloadBank(gMusic);
             snd_ResolveBankXREFS();
@@ -420,7 +427,13 @@ void* RPC_Loader(unsigned int /*fno*/, void* data, int size) {
           if (gMusic) {
             gMusicFadeDir = -1;
             while (gMusicFade) {
+#ifdef __3DS__
+              // (AI-assisted) the fade moves once a game frame (VBlank_Handler): no need to
+              // wake up the IOP every millisecond to look
+              DelayThread(10000);
+#else
               DelayThread(1000);
+#endif
             }
             snd_UnloadBank(gMusic);
             snd_ResolveBankXREFS();
@@ -449,14 +462,38 @@ s32 VBlank_Handler(void*) {
   if (!gSoundEnable)
     return 1;
 
+#ifdef __3DS__
+  // (AI-assisted) This handler runs once per game frame (30 fps or less), not at 60 Hz, so the
+  // music fades took twice as long or more (the fade-out is 128 steps: 4.3 s at 30 fps, longer
+  // while a level loads). A music load waits for the fade-out in the loader RPC (LOAD_MUSIC), and
+  // a sound bank load the game asks for meanwhile stalls the game until it's done ("STALL:
+  // waiting for IOP on RPC port #1"). Steps by real time, 60 a second as on the PS2.
+  s32 fade_steps = 1;
+  {
+    static u64 last_us = 0;
+    static u64 rest = 0;
+    const u64 now_us = (u64)std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch())
+                           .count();
+    if (last_us) {
+      rest += (now_us - last_us) * 60;
+      fade_steps = (s32)std::min<u64>(rest / 1000000, 128);
+      rest %= 1000000;
+    }
+    last_us = now_us;
+  }
+#else
+  constexpr s32 fade_steps = 1;
+#endif
+
   if (gMusicFadeDir > 0) {
-    gMusicFade += (0x10000 / 64);
+    gMusicFade += fade_steps * (0x10000 / 64);
     if (gMusicFade > 0x10000 || (gMusicFadeHack & 1)) {
       gMusicFade = 0x10000;
       gMusicFadeDir = 0;
     }
   } else if (gMusicFadeDir < 0) {
-    gMusicFade -= (0x10000 / 128);
+    gMusicFade -= fade_steps * (0x10000 / 128);
     if (gMusicFade < 0 || (gMusicFadeHack & 2)) {
       gMusicFade = 0;
       gMusicFadeDir = 0;
