@@ -782,6 +782,51 @@ int garbage_test() {
   return failures;
 }
 
+// more objects than the frame's budget: the ones that don't fit are left out whole (vertices and
+// triangles taken back out), the others drawn, every index valid
+int budget_test() {
+  int failures = 0;
+  const Camera cam = make_camera(64.f, false);
+  const float ex[3] = {0, -2.f * 4096, 0};
+  const int counts[4] = {120, 60, 20, 20};
+  std::vector<Object> objs;
+  for (int i = 0; i < 40; i++) {
+    const float c[3] = {rnd(-8192, 8192), rnd(-4096, 0), rnd(8 * 4096.f, 30 * 4096.f)};
+    objs.push_back(make_object(c, 2048, ex, 118, counts));
+  }
+  Dma dma;
+  add_init(dma, cam);
+  for (const auto& o : objs) {
+    add_object(dma, o);
+  }
+  const u8 rgb[3] = {0x40, 0x40, 0x40};
+  add_end(dma, rgb);
+  static std::vector<ctr_clip_vertex> verts(CtrShadowVolumes::kMaxVerts);
+  static std::vector<u16> front(CtrShadowVolumes::kMaxIndices), back(CtrShadowVolumes::kMaxIndices);
+  CtrShadowVolumes vol;
+  vol.begin(verts.data(), CtrShadowVolumes::kMaxVerts, front.data(), back.data(),
+            CtrShadowVolumes::kMaxIndices);
+  for (const auto& t : dma.transfers()) {
+    vol.transfer(t);
+  }
+  vol.end();
+  const auto& st = vol.stats();
+  // every kept object has all of its 236 vertices
+  failures += st.objects + st.dropped_objects != 40 || st.dropped_objects == 0 ||
+              vol.vert_count() != 236 * st.objects;
+  failures += vol.front_count() + vol.back_count() > CtrShadowVolumes::kMaxIndices;
+  for (int i = 0; i < vol.front_count(); i++) {
+    failures += front[i] >= vol.vert_count();
+  }
+  for (int i = 0; i < vol.back_count(); i++) {
+    failures += back[i] >= vol.vert_count();
+  }
+  printf("budget: %d objects drawn, %d left out, %d vertices, %d + %d triangles: %d failures\n",
+         st.objects, st.dropped_objects, vol.vert_count(), vol.front_count() / 3,
+         vol.back_count() / 3, failures);
+  return failures;
+}
+
 // time of the decoder for a frame like Geyser Rock's: Jak (~100 vertices, 80 facing triangles,
 // 40 silhouette edges) and two smaller objects
 void timing() {
@@ -881,6 +926,7 @@ int main() {
     tot.failures++;
   }
   tot.failures += garbage_test();
+  tot.failures += budget_test();
   timing();
   printf("%s (%d failures)\n", tot.failures ? "FAILED" : "OK", tot.failures);
   return tot.failures ? 1 : 0;

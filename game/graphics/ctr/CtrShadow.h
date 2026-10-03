@@ -54,10 +54,11 @@
  */
 class CtrShadowVolumes {
  public:
-  // budgets per frame (all objects): the GPU vertex memory taken for a moment is
-  // kMaxVerts * 28 + kMaxIndices * 2 bytes (~80 KB); what's used stays (Jak: ~10 KB)
-  static constexpr int kMaxVerts = 2048;
-  static constexpr int kMaxIndices = 3 * 4096;
+  // budgets per frame (all objects, ~16 the size of Jak's: 236 vertices, ~400 triangles): the GPU
+  // vertex memory taken for a moment is kMaxVerts * 28 + kMaxIndices * 2 bytes (~160 KB, before
+  // the sprites fill the buffer); what's used stays (Jak: ~9 KB)
+  static constexpr int kMaxVerts = 4096;
+  static constexpr int kMaxIndices = 3 * 8192;
   // screen rectangles of the darkening pass, one per object (more objects: the last one grows)
   static constexpr int kMaxRects = 16;
 
