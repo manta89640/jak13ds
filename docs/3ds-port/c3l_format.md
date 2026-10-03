@@ -33,6 +33,12 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--etc1-quality N` | 1 | ETC1 encoder: 0 fast, 1 medium, 2 high (slow). |
 | `--no-mips` | off | no mip levels. |
 | `--threads N` | 0 | texture encoding threads (0: all cores). |
+| `--etc1-rdo L` | 10 | (v11) ETC1 rate-distortion optimisation strength (lambda), 0: off. See "Compression". |
+| `--compress M` | auto | (v11) block compression: `auto` (per block, the fastest to load by the cost model), `lz4`, `zstd`, `none`. |
+| `--sd-mbps`, `--lz4-mbps`, `--zstd-mbps` | 5.5, 100, 16 | the cost model: New 3DS SD read speed and decode speeds (MB/s). |
+| `--block-kb N` | 64 | largest compressed block (raw KB). |
+| `--no-vcache` | off | keep the triangle and vertex order (no vertex welding, no meshoptimizer). |
+| `--no-verify` | off | don't read every written file back with the runtime's reader to compare it. |
 
 What goes in:
 
@@ -53,13 +59,48 @@ What goes in:
 Sizes (defaults): village1 148k triangles (tfrag 42k near + 12k far + 2k lowres, tie 94k),
 345 chunks, 419 textures, file 8.7 MB. misty 11.2 MB, citadel 18.5 MB (876 textures).
 
+## Compression (v11)
+
+(AI-assisted.) Level files are read from the SD card (about 5 MB/s on the New 3DS: misty, 16 MB
+uncompressed, loaded in 3.1 s), so they are compressed. A v11 file is the v10 layout (the "raw
+image"; every offset in it stays an offset in the raw image) cut into blocks of up to 64 KB, each
+packed on its own: the 128-byte header (raw), then `BlockDir {"C3LZ", raw_size, num_blocks,
+max_block}` and `Block {raw_offset, raw_size, file_offset, packed_size | codec << 28}[]`, then the
+packed blocks. Codecs: 0 stored, 1 LZ4 block (`LZ4_decompress_safe`), 2 zstd frame.
+`game/graphics/ctr/c3l_reader.cpp` reads any offset range: it reads packed bytes in 128 KB windows
+and decodes block by block as they come in, a block the read covers completely straight into the
+destination (texture pool, mesh vertex buffers: linear memory, `ctr_gpu_mesh_begin`), a partly
+covered one through a one-block cache. The converter starts a block at every piece the loader
+reads (each texture, each chunk's vertices and index range, each merc model's vertices) unless the
+block is still under 16 KB, and never lets a block span two sections. v7..v10 files still load.
+
+The codec is picked per block by a cost model, the load time on the New 3DS:
+`packed / sd_mbps + raw / decode_mbps`. The decode speeds come from instruction counts of the
+devkitARM -O2 armv6k decoders (lz4 1.10, zstd 1.5.0) on misty's blocks, run under unicorn:
+LZ4 5.1 instructions per output byte, zstd 33.5, at an assumed 1.5 cycles per instruction and
+804 MHz: about 100 and 16 MB/s. zstd packs 10-15 % of the raw size smaller than LZ4 HC, which at
+5.5 MB/s saves less time than its decode costs, except for index data (LZ4 69 %, zstd 36 %): with
+the defaults, indices are mostly zstd, everything else LZ4. The converter logs, per section, the
+LZ4 and zstd ratios and what it chose.
+
+`--etc1-rdo`: ETC1 blocks are chosen for compression as well as quality. For each block the
+encoder's best block competes with copies of the 64 blocks written before it and with their
+colors under new selectors; the one with the lowest squared error + lambda * (estimated LZ bits)
+wins. lambda 10: ETC1 texels of misty LZ4 81 % -> 75 %, PSNR 37.3 -> 36.8 dB.
+
+Vertex order: within each chunk identical vertices (after quantizing) are merged (the PS2 strips
+share none), the triangles of each visibility run of a draw without blending that writes depth are
+put in vertex cache order (meshoptimizer `optimizeVertexCache`; blended draws and decals keep their
+order), then the vertices in first-use order (`optimizeVertexFetchRemap`). The GPU's post-vertex
+cache is cleared before every draw. Misty: 1.55 -> 1.27 vertices shaded per triangle (FIFO 16).
+
 ## Layout
 
 Little endian. All offsets are from the start of the file. Every section is 16-byte aligned.
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 9 (7 and 8 still load); char level_name[32]
+  char magic[4] = "C3LV"; u32 version = 11 (7..10 still load); char level_name[32]
   u32 num_textures, textures_offset
   u32 num_chunks, chunks_offset
   u32 vertex_data_offset, vertex_data_size      Vertex[]

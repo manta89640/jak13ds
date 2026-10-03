@@ -294,6 +294,12 @@ int ctr_gpu_is_emulator(void);
 int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
                         int index_count);
 void ctr_gpu_mesh_delete(int mesh);
+/* (AI-assisted) The same, filled in place (a level loader decodes its vertices straight into GPU
+ * memory): begin returns a handle (or -1) and the buffers to write vertex_count * 16 bytes and
+ * index_count indices to; end makes it drawable (ok) or frees it (!ok) and returns the handle or
+ * -1. Not drawn or deleted between the two. */
+int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices);
+int ctr_gpu_mesh_end(int mesh, int ok);
 /* (AI-assisted) Free the deleted textures, pools and meshes now instead of at the next frame
  * begin, once the GPU has finished what it was given (a level was unloaded and the next one loads
  * on another thread: with no frames drawn meanwhile its memory stayed taken). Only while no frame

@@ -189,6 +189,8 @@ typedef struct {
   int alt_frame;
   /* (AI-assisted) physical addresses of verts and indices (the raw draws) */
   u32 verts_pa, indices_pa;
+  /* (AI-assisted) the buffer sizes between ctr_gpu_mesh_begin and _end */
+  u32 fill_vbytes, fill_ibytes;
 } MeshSlot;
 
 enum {
@@ -3741,8 +3743,8 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
   return slot;
 }
 
-int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
-                        int index_count) {
+/* (AI-assisted) begin/end: the slot stays reserved (used = 3) while the loader fills it */
+int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices) {
   if (!g.ready) {
     return -1;
   }
@@ -3767,16 +3769,48 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
     return -1;
   }
   ctr_linear_unlock();
-  memcpy(v, verts, vbytes);
-  memcpy(ix, indices, ibytes);
-  cache_flush_now(v, vbytes);
-  cache_flush_now(ix, ibytes);
   g.meshes[slot].verts = v;
   g.meshes[slot].indices = ix;
-  g.meshes[slot].verts_pa = osConvertVirtToPhys(v);
-  g.meshes[slot].indices_pa = osConvertVirtToPhys(ix);
-  g.meshes[slot].used = 1;
+  g.meshes[slot].fill_vbytes = (u32)vbytes;
+  g.meshes[slot].fill_ibytes = (u32)ibytes;
+  *verts = v;
+  *indices = ix;
   return slot;
+}
+
+int ctr_gpu_mesh_end(int mesh, int ok) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 3) {
+    return -1;
+  }
+  if (!ok) {
+    ctr_linear_lock();
+    linearFree(g.meshes[mesh].verts);
+    linearFree(g.meshes[mesh].indices);
+    g.meshes[mesh].verts = NULL;
+    g.meshes[mesh].indices = NULL;
+    g.meshes[mesh].used = 0;
+    ctr_linear_unlock();
+    return -1;
+  }
+  cache_flush_now(g.meshes[mesh].verts, g.meshes[mesh].fill_vbytes);
+  cache_flush_now(g.meshes[mesh].indices, g.meshes[mesh].fill_ibytes);
+  g.meshes[mesh].verts_pa = osConvertVirtToPhys(g.meshes[mesh].verts);
+  g.meshes[mesh].indices_pa = osConvertVirtToPhys(g.meshes[mesh].indices);
+  g.meshes[mesh].used = 1;
+  return mesh;
+}
+
+int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* indices,
+                        int index_count) {
+  void* v;
+  uint16_t* ix;
+  const int mesh = ctr_gpu_mesh_begin(vertex_count, index_count, &v, &ix);
+  if (mesh < 0) {
+    return -1;
+  }
+  memcpy(v, verts, (size_t)vertex_count * 16);
+  memcpy(ix, indices, (size_t)index_count * 2);
+  return ctr_gpu_mesh_end(mesh, 1);
 }
 
 void ctr_gpu_mesh_delete(int mesh) {

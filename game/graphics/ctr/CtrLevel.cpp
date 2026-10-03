@@ -20,6 +20,7 @@
 #include "common/util/FileUtil.h"
 #include "common/util/Timer.h"
 
+#include "game/graphics/ctr/c3l_reader.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
 
@@ -201,58 +202,10 @@ void CtrLevels::publish(const std::string& name, std::unique_ptr<CtrLevelData> l
 }
 
 namespace {
-/*!
- * Reads the pieces of a .c3l file as they are needed. A level file is ~10 MB: reading it in one
- * piece needs a free block of memory that big, which the 3DS heap often doesn't have by the time
- * a level loads (std::bad_alloc, and the level has no background).
- */
-class C3lReader {
- public:
-  explicit C3lReader(const fs::path& path) : m_f(fopen(path.string().c_str(), "rb")) {
-    if (m_f) {
-      setvbuf(m_f, nullptr, _IOFBF, 64 * 1024);
-      fseek(m_f, 0, SEEK_END);
-      m_size = ftell(m_f);
-      fseek(m_f, 0, SEEK_SET);
-    }
-  }
-  ~C3lReader() {
-    if (m_f) {
-      fclose(m_f);
-    }
-  }
-  bool ok() const { return m_f && !m_error; }
-  long size() const { return m_size; }
-  bool read(u32 offset, void* dst, size_t bytes) {
-    if (!ok() || (long)offset + (long)bytes > m_size) {
-      m_error = true;
-      return false;
-    }
-    if (bytes == 0) {
-      return true;
-    }
-    if (m_pos != (long)offset && fseek(m_f, offset, SEEK_SET) != 0) {
-      m_error = true;
-      return false;
-    }
-    if (fread(dst, 1, bytes, m_f) != bytes) {
-      m_error = true;
-      return false;
-    }
-    m_pos = (long)offset + (long)bytes;
-    return true;
-  }
-  template <typename T>
-  bool read_array(u32 offset, size_t count, std::vector<T>* out) {
-    out->resize(count);
-    return read(offset, out->data(), count * sizeof(T));
-  }
-
- private:
-  FILE* m_f;
-  long m_size = 0;
-  long m_pos = 0;
-  bool m_error = false;
+// (AI-assisted) the pieces of a .c3l file, as they are needed (v11: decompressed): c3l_reader.h
+struct C3lReader : c3l::Reader {
+  explicit C3lReader(const fs::path& path) : c3l::Reader(path.string().c_str()) {}
+  long size() const { return file_size(); }
 };
 }  // namespace
 
@@ -261,20 +214,22 @@ class C3lReader {
 void CtrLevels::run_detail_job(const Job& job, Done* d) {
   d->result = LoadResult::FAILED;
   C3lReader f(job.path);
-  std::vector<u16> indices;
-  std::vector<c3l::Vertex> verts;
   for (const auto& c : job.chunks) {
     if (cancelled() || !f.ok()) {
       break;
     }
-    if (!f.read_array(job.index_data_offset + c.index_first * (u32)sizeof(u16),
-                      c.index_end - c.index_first, &indices) ||
-        !f.read_array(job.vertex_data_offset + c.first_vertex * (u32)sizeof(c3l::Vertex),
-                      c.vertex_count, &verts)) {
+    // (AI-assisted) the vertices are read (decoded) straight into GPU memory
+    void* vdst;
+    u16* idst;
+    int mesh = ctr_gpu_mesh_begin(c.vertex_count, c.index_end - c.index_first, &vdst, &idst);
+    if (mesh < 0) {
       break;
     }
-    const int mesh = ctr_gpu_mesh_create(verts.data(), c.vertex_count, indices.data(),
-                                         c.index_end - c.index_first);
+    mesh = ctr_gpu_mesh_end(
+        mesh, f.read(job.index_data_offset + c.index_first * (u32)sizeof(u16), idst,
+                     (c.index_end - c.index_first) * sizeof(u16)) &&
+                  f.read(job.vertex_data_offset + c.first_vertex * (u32)sizeof(c3l::Vertex),
+                         vdst, c.vertex_count * sizeof(c3l::Vertex)));
     if (mesh < 0) {
       break;
     }
@@ -334,8 +289,9 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   Timer timer;
   bool ok = false;
   long file_size = 0;
+  double decode_ms = 0;
   try {
-    ok = load_file(path, name, out, &file_size);
+    ok = load_file(path, name, out, &file_size, &decode_ms);
   } catch (std::exception& e) {
     lg::error("[ctr] failed to load {}: {}", path.string(), e.what());
   }
@@ -357,9 +313,10 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   for (auto& m : out->merc_models) {
     failed += m.mesh < 0;
   }
-  lg::info("[ctr] loaded {} ({} chunks, {} merc models, {} textures, {} KB) in {:.0f} ms", name,
+  lg::info("[ctr] loaded {} ({} chunks, {} merc models, {} textures, {} KB) in {:.0f} ms{}", name,
            out->chunks.size(), out->merc_models.size(), out->textures.size(), file_size / 1024,
-           timer.getMs());
+           timer.getMs(),
+           decode_ms > 0 ? fmt::format(" (decompressing {:.0f} ms)", decode_ms) : "");
   if (failed) {
     lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
               failed);
@@ -405,8 +362,15 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
 bool CtrLevels::load_file(const fs::path& path,
                           const std::string& name,
                           CtrLevelData* out,
-                          long* file_size) {
+                          long* file_size,
+                          double* decode_ms) {
   C3lReader f(path);
+  // (AI-assisted) the decode time, however the load ends
+  struct DecodeTime {
+    const C3lReader& f;
+    double* ms;
+    ~DecodeTime() { *ms = f.decode_ms; }
+  } decode_time{f, decode_ms};
   c3l::Header hdr;
   if (!f.read(0, &hdr, sizeof(hdr))) {
     lg::error("[ctr] failed to read {}", path.string());
@@ -419,7 +383,8 @@ bool CtrLevels::load_file(const fs::path& path,
               c3l::kVersion, hdr.version);
     return false;
   }
-  if (hdr.version < c3l::kVersion) {
+  // (AI-assisted) v10 files are only uncompressed (slower to read): no warning
+  if (hdr.version < 10) {
     lg::warn("[ctr] {}: old C3L v{} file ({}): convert the levels again (ctr_level_converter --all)",
              path.string(), hdr.version,
              hdr.version < 8   ? "no mip levels, 16-bit textures: slow on the 3DS"
@@ -597,7 +562,6 @@ bool CtrLevels::load_file(const fs::path& path,
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
   }
-  std::vector<c3l::Vertex> verts;
   for (auto& ch : out->chunks) {
     if (cancelled()) {
       return false;
@@ -616,12 +580,16 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     out->mesh_index_first.push_back(first);
     out->mesh_index_end.push_back(end);
+    // (AI-assisted) the vertices are read (decoded) straight into GPU memory
     int mesh = -1;
+    void* vdst;
+    u16* idst;
     if (end <= indices.size() &&
-        f.read_array(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
-                     ch.vertex_count, &verts)) {
-      mesh = ctr_gpu_mesh_create(verts.data(), ch.vertex_count, indices.data() + first,
-                                 end - first);
+        (mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst)) >= 0) {
+      memcpy(idst, indices.data() + first, (end - first) * sizeof(u16));
+      mesh = ctr_gpu_mesh_end(
+          mesh, f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex), vdst,
+                       ch.vertex_count * sizeof(c3l::Vertex)));
     }
     out->meshes.push_back(mesh);
     // make the draws relative to the mesh's index buffer

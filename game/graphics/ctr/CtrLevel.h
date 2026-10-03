@@ -133,7 +133,12 @@ class CtrLevels {
  private:
   enum class LoadResult { LOADED, MISSING, FAILED, CANCELLED };
   LoadResult load(const std::string& name, CtrLevelData* out);
-  bool load_file(const fs::path& path, const std::string& name, CtrLevelData* out, long* file_size);
+  // (AI-assisted) decode: time spent decompressing (c3l v11), 0 for older files
+  bool load_file(const fs::path& path,
+                 const std::string& name,
+                 CtrLevelData* out,
+                 long* file_size,
+                 double* decode_ms);
   void unload(CtrLevelData& lev);
   bool cancelled() const { return m_cancel.load(std::memory_order_relaxed); }
   std::map<std::string, std::unique_ptr<CtrLevelData>> m_levels;

@@ -22,11 +22,15 @@
 #include "common/util/Serializer.h"
 #include "common/util/compress.h"
 
+#include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "third-party/BS_thread_pool.hpp"
 #include "third-party/CLI11.hpp"
+#include "third-party/lz4/lz4hc.h"
+#include "third-party/meshoptimizer/meshoptimizer.h"
+#include "third-party/zstd/lib/zstd.h"
 
 namespace {
 
@@ -56,12 +60,34 @@ struct Options {
   bool etc1 = true;
   bool etc1_merc = false;
   int etc1_quality = 1;  // 0 low, 1 medium, 2 high (slow)
+  // (AI-assisted) ETC1 rate-distortion optimisation strength (ctr_texture.h), 0: off
+  float etc1_rdo = 10;
   // Mip levels: the GPU reads textures much faster when it can use a smaller version for surfaces
   // further away (and they don't shimmer).
   bool mips = true;
   int threads = 0;  // texture encoding threads (0: all cores)
   // (AI-assisted) 32-bit textures (the title screen: the logo's colors exact, 16-bit shifted them)
   bool full_color = false;
+  // (AI-assisted) v11 block compression (c3l_pack.h), and reading every file back to check it
+  c3l_pack::Options pack;
+  bool verify = true;
+  // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
+  // runs, for draws whose triangle order doesn't matter), vertices in first-use order
+  bool vcache = true;
+};
+
+// (AI-assisted) post-vertex cache statistics (the GPU's cache is cleared before each draw):
+// vertices shaded per triangle, for a FIFO cache of 8 and 16 entries
+struct VcacheStats {
+  double shaded8 = 0, shaded16 = 0;
+  u64 tris = 0;
+  void add(const u16* idx, size_t count, size_t vertex_count) {
+    std::vector<unsigned int> v(idx, idx + count);
+    shaded8 += meshopt_analyzeVertexCache(v.data(), count, vertex_count, 8, 0, 0).vertices_transformed;
+    shaded16 +=
+        meshopt_analyzeVertexCache(v.data(), count, vertex_count, 16, 0, 0).vertices_transformed;
+    tris += count / 3;
+  }
 };
 
 // how a texture is used by the level's draws
@@ -756,7 +782,7 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
       ctr_tex::fill_transparent_colors(&m);
     }
     ctr_tex::encode_level(m, fmt, opt.etc1_quality, &out,
-                          mo.preserve_coverage ? mo.alpha_ref : 0);
+                          mo.preserve_coverage ? mo.alpha_ref : 0, opt.etc1_rdo);
   }
   if (psnr_out) {
     // quality of the first level (visible texels only)
@@ -946,6 +972,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::VisRun> out_runs;
   std::vector<u32> chunk_first_run;
   size_t vis_tris = 0;
+  VcacheStats vc_before, vc_after;
+  size_t welded_verts = 0;
 
   for (auto& [key, tri_ids] : cells) {
     // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
@@ -1058,6 +1086,76 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
       }
       ch.draw_count = out_draws.size() - ch.first_draw;
+      // (AI-assisted) vertex cache order (meshoptimizer). Only inside a visibility run (the runs
+      // are drawn on their own) of a draw without blending that writes depth (blended draws and
+      // decals keep the original triangle order). Then the chunk's vertices in first-use order.
+      for (u32 di = ch.first_draw; di < ch.first_draw + ch.draw_count; di++) {
+        vc_before.add(&out_indices[out_draws[di].first_index], out_draws[di].index_count,
+                      ch.vertex_count);
+      }
+      if (!out_draws.empty() && ch.draw_count && opt.vcache) {
+        // the same vertex (after quantizing) from different strips: one vertex, so the cache can
+        // reuse it across strips (the PS2 strips share none)
+        const u32 i0 = out_draws[ch.first_draw].first_index;
+        const u32 i1 = out_draws.back().first_index + out_draws.back().index_count;
+        std::unordered_map<std::string, u16> seen;
+        std::vector<u16> weld(ch.vertex_count);
+        u32 kept = 0;
+        for (u32 v = 0; v < ch.vertex_count; v++) {
+          const auto& vx = out_verts[ch.first_vertex + v];
+          auto [it, fresh] =
+              seen.emplace(std::string((const char*)&vx, sizeof(vx)), (u16)kept);
+          if (fresh) {
+            out_verts[ch.first_vertex + kept++] = vx;
+          }
+          weld[v] = it->second;
+        }
+        for (u32 i = i0; i < i1; i++) {
+          out_indices[i] = weld[out_indices[i]];
+        }
+        welded_verts += ch.vertex_count - kept;
+        out_verts.resize(ch.first_vertex + kept);
+        ch.vertex_count = kept;
+      }
+      if (!out_draws.empty() && ch.draw_count) {
+        const u32 nv = ch.vertex_count;
+        u32 ri = 0;
+        for (u32 di = ch.first_draw; di < ch.first_draw + ch.draw_count; di++) {
+          const auto& d = out_draws[di];
+          DrawMode mode;
+          mode.as_int() = d.mode;
+          const bool any_order = !mode.get_ab_enable() && mode.get_depth_write_enable();
+          u32 idx = d.first_index;
+          for (; ri < runs.size() && runs[ri].draw == di - ch.first_draw; ri++) {
+            const u32 n = runs[ri].index_count;
+            if (any_order && opt.vcache) {
+              std::vector<unsigned int> in(&out_indices[idx], &out_indices[idx] + n), o(n);
+              meshopt_optimizeVertexCache(o.data(), in.data(), n, nv);
+              std::copy(o.begin(), o.end(), &out_indices[idx]);
+            }
+            idx += n;
+          }
+          vc_after.add(&out_indices[d.first_index], d.index_count, nv);
+        }
+        if (opt.vcache) {
+          const u32 i0 = out_draws[ch.first_draw].first_index;
+          const u32 i1 = out_draws.back().first_index + out_draws.back().index_count;
+          std::vector<unsigned int> idx(&out_indices[i0], &out_indices[i0] + (i1 - i0)), remap(nv);
+          if (meshopt_optimizeVertexFetchRemap(remap.data(), idx.data(), idx.size(), nv) != nv) {
+            for (u32 v = 0; v < nv; v++) {
+              remap[v] = v;  // unused vertices (never: every vertex comes from a triangle)
+            }
+          }
+          std::vector<c3l::Vertex> moved(nv);
+          for (u32 v = 0; v < nv; v++) {
+            moved[remap[v]] = out_verts[ch.first_vertex + v];
+          }
+          std::copy(moved.begin(), moved.end(), out_verts.begin() + ch.first_vertex);
+          for (u32 i = i0; i < i1; i++) {
+            out_indices[i] = (u16)remap[out_indices[i]];
+          }
+        }
+      }
       // the runs only if some can be hidden (the offset is made absolute at write)
       chunk_first_run.push_back(any_vis ? (u32)out_runs.size() : 0);
       ch.vis_run_count = any_vis ? (u32)runs.size() : 0;
@@ -1176,7 +1274,85 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   hdr.textures_offset = append(buf, tex_descs.data(), tex_descs.size());
   align16(buf);
   memcpy(buf.data(), &hdr, sizeof(hdr));
-  file_util::write_binary_file(out, buf.data(), buf.size());
+
+  // (AI-assisted) v11: compressed blocks. Sections (and the padding after them) are packed
+  // separately; inside them a block starts where the runtime starts reading a piece.
+  std::vector<c3l_pack::Section> sections;
+  {
+    std::vector<std::pair<u32, std::string>> starts = {
+        {hdr.chunks_offset, "chunks"},
+        {hdr.vertex_data_offset, "vertices"},
+        {hdr.index_data_offset, "indices"},
+        {hdr.draw_data_offset, "draws"},
+        {hdr.merc_models_offset, "merc models"},
+        {hdr.merc_vertex_offset, "merc vertices"},
+        {hdr.merc_index_offset, "merc indices"},
+        {hdr.merc_draw_offset, "merc draws"},
+        {hdr.texture_data_offset, "textures"},
+        {hdr.textures_offset, "texture table"}};
+    if (!out_runs.empty()) {
+      starts.push_back({(u32)sizeof(c3l::Header), "vis runs"});
+    }
+    if (hdr.merc_blerc_offset) {
+      starts.push_back({hdr.merc_blerc_offset, "merc blend shapes"});
+    }
+    std::stable_sort(starts.begin(), starts.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < starts.size(); i++) {
+      const u32 end = i + 1 < starts.size() ? starts[i + 1].first : (u32)buf.size();
+      if (end > starts[i].first) {
+        sections.push_back({starts[i].second, starts[i].first, end});
+      }
+    }
+  }
+  std::vector<u32> cuts;
+  for (const auto& t : tex_descs) {
+    cuts.push_back(t.data_offset);
+  }
+  for (const auto& ch : chunks) {
+    cuts.push_back(hdr.vertex_data_offset + ch.first_vertex * (u32)sizeof(c3l::Vertex));
+    u32 first = UINT32_MAX;
+    for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+      first = std::min(first, out_draws[d].first_index);
+    }
+    if (first != UINT32_MAX) {
+      cuts.push_back(hdr.index_data_offset + first * 2);
+    }
+  }
+  for (const auto& m : merc.models) {
+    cuts.push_back(hdr.merc_vertex_offset + m.first_vertex * (u32)sizeof(c3l::MercVertex));
+  }
+  std::vector<c3l_pack::SectionStats> pstats;
+  const auto file = c3l_pack::pack(buf, sections, cuts, opt.pack, &pstats);
+  file_util::write_binary_file(out, file.data(), file.size());
+  if (opt.verify && !c3l_pack::verify(out.string(), buf, cuts)) {
+    return false;
+  }
+  {
+    u64 raw = 0, lz4 = 0, zstd = 0, packed = 0;
+    double ms = 0, raw_ms = 0;
+    for (const auto& st : pstats) {
+      if (!st.raw) {
+        continue;
+      }
+      raw += st.raw;
+      lz4 += st.lz4;
+      zstd += st.zstd;
+      packed += st.packed;
+      ms += st.load_ms;
+      lg::info("{}: c3l {:>17}: {:>6} KB, lz4 {:5.1f}%, zstd {:5.1f}% -> {:5.1f}% (blocks: {} stored, "
+               "{} lz4, {} zstd)",
+               level.level_name, st.name, st.raw / 1024, 100.0 * st.lz4 / st.raw,
+               100.0 * st.zstd / st.raw, 100.0 * st.packed / st.raw, st.blocks[0], st.blocks[1],
+               st.blocks[2]);
+    }
+    raw_ms = raw / (opt.pack.sd_mbps * 1048.576);
+    lg::info("{}: c3l {} KB -> {} KB ({:.1f}%; all lz4 {:.1f}%, all zstd {:.1f}%), modeled 3DS load "
+             "{:.0f} ms (uncompressed {:.0f} ms){}",
+             level.level_name, raw / 1024, file.size() / 1024, 100.0 * file.size() / buf.size(),
+             100.0 * lz4 / std::max<u64>(raw, 1), 100.0 * zstd / std::max<u64>(raw, 1), ms, raw_ms,
+             opt.verify ? ", read back OK" : "");
+  }
 
   lg::info(
       "{}: {} tfrag + {} tie + {} shrub trees ({} shrub tris) -> {} chunks, {} verts ({} KB), {} "
@@ -1186,7 +1362,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       out_verts.size(),
       out_verts.size() * sizeof(c3l::Vertex) / 1024, out_indices.size() / 3, out_draws.size(),
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
-      merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, buf.size() / 1024, cv.wind_tris, cv.small_tris,
+      merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, file.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
   lg::info("{}: textures {} KB with mip levels (16-bit, no mips: {} KB): {} ETC1, {} ETC1A4, {} "
            "RGB565, {} RGBA4; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
@@ -1194,6 +1370,39 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
            tstats.etc1a4, tstats.rgb565, tstats.rgba4,
            tstats.psnr_count ? tstats.psnr_sum / tstats.psnr_count : 0.0,
            tstats.psnr_count ? tstats.psnr_min : 0.0);
+  lg::info("{}: post-vertex cache: vertices shaded per triangle (FIFO 8 / 16) {:.3f} / {:.3f}{}",
+           level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
+           vc_before.shaded16 / std::max<u64>(vc_before.tris, 1),
+           opt.vcache ? fmt::format(" -> {:.3f} / {:.3f} (meshoptimizer)",
+                                    vc_after.shaded8 / std::max<u64>(vc_after.tris, 1),
+                                    vc_after.shaded16 / std::max<u64>(vc_after.tris, 1))
+                      : "");
+  if (opt.vcache) {
+    lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
+  }
+  {
+    // (AI-assisted) how well the ETC1 / ETC1A4 texels compress (64 KB pieces), for --etc1-rdo
+    std::vector<u8> etc;
+    for (size_t i = 0; i < tex_descs.size(); i++) {
+      if (tex_descs[i].format == c3l::TEX_ETC1 || tex_descs[i].format == c3l::TEX_ETC1A4) {
+        etc.insert(etc.end(), tex_datas[i].begin(), tex_datas[i].end());
+      }
+    }
+    size_t l = 0, z = 0;
+    std::vector<u8> tmp(LZ4_compressBound(64 * 1024) + ZSTD_compressBound(64 * 1024));
+    for (size_t a = 0; a < etc.size(); a += 64 * 1024) {
+      const int n = (int)std::min<size_t>(64 * 1024, etc.size() - a);
+      l += LZ4_compress_HC((const char*)etc.data() + a, (char*)tmp.data(), n, (int)tmp.size(), 12);
+      z += ZSTD_compress(tmp.data(), tmp.size(), etc.data() + a, n, 19);
+    }
+    const auto rdo = ctr_tex::rdo_stats();
+    lg::info("{}: ETC1 texels {} KB: lz4 {:.1f}%, zstd {:.1f}%{}", level.level_name,
+             etc.size() / 1024, 100.0 * l / std::max<size_t>(etc.size(), 1),
+             100.0 * z / std::max<size_t>(etc.size(), 1),
+             opt.etc1_rdo > 0 ? fmt::format(" (RDO so far: {} of {} blocks copied, {} reuse colors)",
+                                            rdo.copies, rdo.blocks, rdo.reused)
+                              : "");
+  }
   lg::info("{}: visibility: {} of {} tris in {} runs (hidden when the game's visibility data says)",
            level.level_name, vis_tris, out_indices.size() / 3, out_runs.size());
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
@@ -1236,8 +1445,39 @@ int main(int argc, char** argv) {
   app.add_flag("--etc1-merc", opt.etc1_merc, "ETC1 also for the textures of merc models");
   app.add_option("--etc1-quality", opt.etc1_quality, "ETC1 encoder quality: 0 low, 1 medium, 2 high");
   app.add_flag("--no-mips", no_mips, "no mip levels");
+  app.add_option("--etc1-rdo", opt.etc1_rdo,
+                 "ETC1 rate-distortion optimisation for compression (lambda; 0: off)");
   app.add_option("--threads", opt.threads, "texture encoding threads (0: all cores)");
+  // (AI-assisted) v11 compression
+  std::string compress = "auto";
+  app.add_option("--compress", compress,
+                 "block compression: auto (per block, the fastest to load on the 3DS), lz4, zstd, "
+                 "none");
+  app.add_option("--sd-mbps", opt.pack.sd_mbps, "cost model: 3DS SD card read speed (MB/s)");
+  app.add_option("--lz4-mbps", opt.pack.lz4_mbps, "cost model: 3DS LZ4 decode speed (MB/s)");
+  app.add_option("--zstd-mbps", opt.pack.zstd_mbps, "cost model: 3DS zstd decode speed (MB/s)");
+  u32 block_kb = 64;
+  app.add_option("--block-kb", block_kb, "largest compressed block (KB, raw)");
+  bool no_vcache = false;
+  app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
+  bool no_verify = false;
+  app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
   CLI11_PARSE(app, argc, argv);
+  opt.verify = !no_verify;
+  opt.vcache = !no_vcache;
+  opt.pack.threads = opt.threads;
+  opt.pack.max_block = std::max<u32>(block_kb, 1) * 1024;
+  opt.pack.min_block = std::min(opt.pack.min_block, opt.pack.max_block);
+  if (compress == "none") {
+    opt.pack.mode = c3l_pack::Mode::NONE;
+  } else if (compress == "lz4") {
+    opt.pack.mode = c3l_pack::Mode::LZ4;
+  } else if (compress == "zstd") {
+    opt.pack.mode = c3l_pack::Mode::ZSTD;
+  } else if (compress != "auto") {
+    fmt::print(stderr, "--compress: auto, lz4, zstd or none\n");
+    return 1;
+  }
   opt.etc1 = !no_etc1;
   opt.mips = !no_mips;
   lg::initialize();

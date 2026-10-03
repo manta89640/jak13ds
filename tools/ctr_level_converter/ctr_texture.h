@@ -57,12 +57,23 @@ void fill_transparent_colors(Image* img);
  * quality: 0 low, 1 medium, 2 high (rg_etc1). alpha_ref (1..255, 0: none): the alpha test reference
  * of the draws using the texture; 4-bit alpha is rounded so that every texel passes or fails the
  * test like its 8-bit alpha does (cut-out edges don't move).
+ * (AI-assisted) etc1_rdo > 0: rate-distortion optimisation of the ETC1 blocks for LZ compression
+ * (the c3l blocks): a block may instead be a copy of one of the blocks just before it, or reuse
+ * one's colors with its own selectors, when that costs less than etc1_rdo * (bits saved) in
+ * squared error (summed over the block's 16 texels and 3 channels). 0: off.
  */
 void encode_level(const Image& img,
                   Format fmt,
                   int etc1_quality,
                   std::vector<uint8_t>* out,
-                  int alpha_ref = 0);
+                  int alpha_ref = 0,
+                  float etc1_rdo = 0);
+
+/*! (AI-assisted) RDO statistics (all threads): blocks, exact copies, reused colors. */
+struct RdoStats {
+  uint64_t blocks = 0, copies = 0, reused = 0;
+};
+RdoStats rdo_stats();
 
 /*! Decoders (for tests and previews): one level in the layout above -> Image. */
 Image decode_level(const uint8_t* data, int w, int h, Format fmt);

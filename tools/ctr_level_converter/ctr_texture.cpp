@@ -7,6 +7,8 @@
 #include "ctr_texture.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -91,7 +93,76 @@ void scale_alpha_to_coverage(Image* img, double target, int ref) {
   }
 }
 
+// ---- (AI-assisted) ETC1 RDO ----
+std::atomic<uint64_t> g_rdo_blocks{0}, g_rdo_copies{0}, g_rdo_reused{0};
+
+// squared error of a standard (big-endian) ETC1 block against the source texels (row-major
+// RGBA), weighted per texel (16 = 1.0)
+uint32_t etc1_error(const uint8_t blk[8], const unsigned int src[16], const uint8_t w[16]) {
+  unsigned int dec[16];
+  rg_etc1::unpack_etc1_block(blk, dec, false);
+  uint32_t e = 0;
+  for (int i = 0; i < 16; i++) {
+    const uint8_t* a = (const uint8_t*)&src[i];
+    const uint8_t* b = (const uint8_t*)&dec[i];
+    uint32_t pe = 0;
+    for (int c = 0; c < 3; c++) {
+      const int d = (int)a[c] - (int)b[c];
+      pe += (uint32_t)(d * d);
+    }
+    e += pe * w[i];
+  }
+  return e >> 4;
+}
+
+// the block's colors (base colors, tables, diff and flip bits: bytes 0-3) with the best selectors
+// for these texels
+void etc1_reselect(const uint8_t colors[8], const unsigned int src[16], uint8_t out[8]) {
+  unsigned int pal[4][16];
+  for (int code = 0; code < 4; code++) {
+    uint8_t b[8];
+    memcpy(b, colors, 4);
+    const uint8_t msb = (code >> 1) ? 0xff : 0, lsb = (code & 1) ? 0xff : 0;
+    b[4] = b[5] = msb;
+    b[6] = b[7] = lsb;
+    rg_etc1::unpack_etc1_block(b, pal[code], false);
+  }
+  uint32_t msb_bits = 0, lsb_bits = 0;
+  for (int y = 0; y < 4; y++) {
+    for (int x = 0; x < 4; x++) {
+      const int i = y * 4 + x;
+      const uint8_t* a = (const uint8_t*)&src[i];
+      int best = 0;
+      uint32_t best_e = UINT32_MAX;
+      for (int code = 0; code < 4; code++) {
+        const uint8_t* p = (const uint8_t*)&pal[code][i];
+        uint32_t e = 0;
+        for (int c = 0; c < 3; c++) {
+          const int d = (int)a[c] - (int)p[c];
+          e += (uint32_t)(d * d);
+        }
+        if (e < best_e) {
+          best_e = e;
+          best = code;
+        }
+      }
+      const int bit = x * 4 + y;
+      msb_bits |= (uint32_t)(best >> 1) << bit;
+      lsb_bits |= (uint32_t)(best & 1) << bit;
+    }
+  }
+  memcpy(out, colors, 4);
+  out[4] = (uint8_t)(msb_bits >> 8);
+  out[5] = (uint8_t)msb_bits;
+  out[6] = (uint8_t)(lsb_bits >> 8);
+  out[7] = (uint8_t)lsb_bits;
+}
+
 }  // namespace
+
+RdoStats rdo_stats() {
+  return {g_rdo_blocks.load(), g_rdo_copies.load(), g_rdo_reused.load()};
+}
 
 uint32_t level_bytes(int w, int h, Format fmt) {
   const uint32_t n = (uint32_t)w * (uint32_t)h;
@@ -199,7 +270,8 @@ void encode_level(const Image& img,
                   Format fmt,
                   int etc1_quality,
                   std::vector<uint8_t>* out,
-                  int alpha_ref) {
+                  int alpha_ref,
+                  float etc1_rdo) {
   const int w = img.w, h = img.h;
   const size_t start = out->size();
   out->resize(start + level_bytes(w, h, fmt));
@@ -248,6 +320,9 @@ void encode_level(const Image& img,
       params.m_dithering = false;
       const bool alpha = fmt == Format::ETC1A4;
       uint8_t* o = dst;
+      // (AI-assisted) RDO: the last blocks written (standard byte order), newest last
+      constexpr int kHistory = 64;
+      std::vector<std::array<uint8_t, 8>> history;
       for (int ty = 0; ty < h / 8; ty++) {
         for (int tx = 0; tx < w / 8; tx++) {
           for (int sub = 0; sub < 4; sub++) {
@@ -266,6 +341,59 @@ void encode_level(const Image& img,
             }
             uint8_t blk[8];
             rg_etc1::pack_etc1_block(blk, px, params);
+            if (etc1_rdo > 0) {
+              // (AI-assisted) rate-distortion: J = squared error + lambda * bits. Bits (LZ4-ish
+              // estimates): a new block 64, a copy of the previous block 8 (a match goes on), of
+              // an older one 24 (a match), the colors of one with new selectors 48 (a 4-byte
+              // match and 4 literal bytes). Transparent texels count 1/16 of opaque ones.
+              uint8_t w[16];
+              for (int y = 0; y < 4; y++) {
+                for (int x = 0; x < 4; x++) {
+                  const uint8_t* p = img.at(bx + x, h - 1 - (bym + y));
+                  w[y * 4 + x] = alpha ? (uint8_t)(1 + (p[3] * 15 + 127) / 255) : 16;
+                }
+              }
+              const double lambda = etc1_rdo;
+              double best_j = etc1_error(blk, px, w) + lambda * 64;
+              uint8_t best[8];
+              memcpy(best, blk, 8);
+              int kind = 0;
+              for (int k = (int)history.size() - 1; k >= 0; k--) {
+                const auto& hb = history[k];
+                const bool newest = k == (int)history.size() - 1;
+                bool dup = false;  // an identical newer one was tried already (cheaper)
+                for (int j = k + 1; j < (int)history.size() && !dup; j++) {
+                  dup = history[j] == hb;
+                }
+                if (dup) {
+                  continue;
+                }
+                const double jc = etc1_error(hb.data(), px, w) + lambda * (newest ? 8 : 24);
+                if (jc < best_j) {
+                  best_j = jc;
+                  memcpy(best, hb.data(), 8);
+                  kind = 1;
+                }
+                uint8_t rs[8];
+                etc1_reselect(hb.data(), px, rs);
+                const double jr = etc1_error(rs, px, w) + lambda * 48;
+                if (jr < best_j) {
+                  best_j = jr;
+                  memcpy(best, rs, 8);
+                  kind = 2;
+                }
+              }
+              memcpy(blk, best, 8);
+              g_rdo_blocks++;
+              g_rdo_copies += kind == 1;
+              g_rdo_reused += kind == 2;
+              std::array<uint8_t, 8> hb;
+              memcpy(hb.data(), blk, 8);
+              history.push_back(hb);
+              if ((int)history.size() > kHistory) {
+                history.erase(history.begin());
+              }
+            }
             if (alpha) {
               for (int i = 0; i < 8; i++) {
                 o[i] = (uint8_t)(alpha_bits >> (8 * i));
