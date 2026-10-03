@@ -687,13 +687,29 @@ process pointer (s6) the original clobbers, stores in branch delay slots, delibe
   version on the same inputs and compares v0 and every byte stored (logged stores); functions
   with GOAL callbacks (`sp-process-block-2d`) are checked on one call in
   `OPENGOAL_MIPS2C_VERIFY_FULL_EVERY` (default 8) by saving, restoring and comparing all of GOAL
-  memory. Mismatches are logged as `mips2c verify MISMATCH`, a summary line `mips2c verify:` every
-  20 s. `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the checker).
+  memory. Mismatches are logged as `mips2c verify MISMATCH` (the first
+  `OPENGOAL_MIPS2C_VERIFY_REPORTS` of each function, default 10), a summary line `mips2c verify:`
+  every 20 s. `OPENGOAL_MIPS2C_VERIFY_INPUTS=name[,name...]` adds the 64 bytes at every argument
+  that is a GOAL address, as before the call, to those functions' MISMATCH lines (to replay them in
+  the differential tests). `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the
+  checker).
+- (AI-assisted) The natives without a mips2c version (the four GOAL collision functions above,
+  `pc-collide-frag-may-hit?`, `pc-anim-decomp-request`, `pc-anim-finalize-frame`: registered with
+  their own `as_exec` as the execute function) are not checked (the log says so once each). When
+  the mips2c side calls one, it runs native and its stores count as the mips2c side's. Their
+  `as_exec` puts v0 in the context like a mips2c function: C mode's adapter
+  (`mips2c_goalc_adapter`) returns the context's v0. (Before, `as_exec` only returned it, so mips2c
+  code calling these got 0 in verify mode, which reported mismatches in 43% of the
+  `moving-sphere-triangle-intersect` calls, in `(method 9 collide-cache-prim)` and
+  `(method 9 collide-puss-work)` that call it or closest-pt-in-triangle, and on every
+  `pc-collide-frag-may-hit?` call. The natives were right: bit-identical on those inputs on the
+  host and under Unicorn in the 3DS's float mode.)
 - `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions. On the 3DS: `config.ini`
   `mips2c_native_off = all`, or the names of the functions to turn off, separated by spaces or
   commas (e.g. `sp-launch-particles-var`). stdout.log says which are off. A native
   that another native calls directly (`native_stub_slot`) still runs from there: turn its callers
-  off too.
+  off too. The natives without a mips2c version stay on (before, turning one off made it return
+  garbage in C mode).
 - Native code must store to GOAL memory only through `gstore*` (verify mode logs them).
 - Quadwords that the mips2c code moves with `lqc2`/`sqc2` (which assert 16-byte alignment) or
   `lq`/`sq` (which align down) should use `gload_q`/`gstore_q`: the compiler then moves them with
