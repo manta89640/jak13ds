@@ -30,8 +30,19 @@ class CtrOceanMidVu {
   //! The ocean-mid DMA of the ocean-mid-and-far bucket (OceanMid::run, Jak 1), up to its end tag.
   //! false: not what was expected (the caller skips the rest of the bucket).
   bool run(DmaFollower& dma, CtrOceanBatch* batch);
+  //! the native programs (default) or the emulated VU programs (for the host replay test)
+  void set_native(bool on) { m_native = on; }
 
  private:
+  // (AI-assisted) the native programs (CtrOceanNative.cpp): the textured pass of call 46 / 73 (a
+  // mid ocean tile) and call 107 / 275 (the transition to the near ocean: quads / a fan), as
+  // clip-space triangles (the GPU clips, so the VU's clipping and env map pass are left out)
+  bool native_ready();
+  void native_tile();
+  void native_transition(bool fan);
+  bool m_native = true;
+  int m_native_ok = -1;  // the constants' index table checked this frame: -1 not yet, 0 bad, 1 ok
+
   void run_call0();
   void run_call0_vu2c();
   void run_call41_vu2c();

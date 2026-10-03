@@ -458,12 +458,8 @@ int ctr_gpu_ocean_full_reserve(int max_verts,
   return 1;
 }
 
-void ctr_gpu_ocean_full_draw(const ctr_draw_state* state,
-                        int vert_count,
-                        int index_count,
-                        uint8_t,
-                        uint8_t,
-                        uint8_t) {
+namespace {
+void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count, bool clip) {
   if (!g_ocean_full_open) {
     return;
   }
@@ -474,14 +470,26 @@ void ctr_gpu_ocean_full_draw(const ctr_draw_state* state,
   std::vector<ctr_vertex> out;
   out.reserve(index_count);
   for (int i = 0; i + 2 < index_count; i += 3) {
+    if (clip) {
+      // clip space (ctr_gpu_ocean_full_draw_clip): no clipper here, triangles behind the camera
+      // are left out
+      bool behind = false;
+      for (int k = 0; k < 3; k++) {
+        behind |= !(g_ocean_full_verts[g_ocean_full_indices[i + k]].q > 0);
+      }
+      if (behind) {
+        continue;
+      }
+    }
     for (int k = 0; k < 3; k++) {
       const auto& v = g_ocean_full_verts[g_ocean_full_indices[i + k]];
       ctr_vertex o;
-      o.x = (v.x / 16.f - 2048.f) / 256.f;
-      o.y = (2048.f - v.y / 16.f) / 112.f;
-      o.z = v.z / 16777215.f;
-      o.s = v.s / v.q;
-      o.t = v.t / v.q;
+      const float w = clip ? v.q : 1.f;  // screen position = (x, y, z) / w
+      o.x = (v.x / w / 16.f - 2048.f) / 256.f;
+      o.y = (2048.f - v.y / w / 16.f) / 112.f;
+      o.z = v.z / w / 16777215.f;
+      o.s = clip ? v.s : v.s / v.q;
+      o.t = clip ? v.t : v.t / v.q;
       o.r = v.r;
       o.g = v.g;
       o.b = v.b;
@@ -492,6 +500,25 @@ void ctr_gpu_ocean_full_draw(const ctr_draw_state* state,
   if (!out.empty()) {
     ctr_gpu_draw(state, out.data(), (int)out.size());
   }
+}
+}  // namespace
+
+void ctr_gpu_ocean_full_draw(const ctr_draw_state* state,
+                             int vert_count,
+                             int index_count,
+                             uint8_t,
+                             uint8_t,
+                             uint8_t) {
+  ocean_full_draw(state, vert_count, index_count, false);
+}
+
+void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state,
+                                  int vert_count,
+                                  int index_count,
+                                  uint8_t,
+                                  uint8_t,
+                                  uint8_t) {
+  ocean_full_draw(state, vert_count, index_count, true);
 }
 
 // (AI-assisted) the two cloud layers as two added passes (GS modulate with the constant color)

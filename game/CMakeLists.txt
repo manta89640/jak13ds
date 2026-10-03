@@ -44,6 +44,7 @@ set(RUNTIME_SOURCE
         graphics/ctr/CtrEye.cpp
         graphics/ctr/CtrOcean.cpp
         graphics/ctr/CtrOceanFull.cpp
+        graphics/ctr/CtrOceanNative.cpp
         graphics/ctr/CtrOceanVuMid.cpp
         graphics/ctr/CtrOceanVuNear.cpp
         graphics/ctr/CtrSettings.cpp

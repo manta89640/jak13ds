@@ -8,12 +8,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 #include "common/dma/dma.h"
 #include "common/dma/gs.h"
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrOceanBatch.h"
 #include "game/graphics/ctr/CtrOceanVu.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -25,18 +27,7 @@ std::string g_levels;  // written while the render thread is idle (ctr_set_level
 
 constexpr int kTexSize = 64;   // the wave texture (the PS2's is 128: 32 x 32 quads of 4 x 4)
 constexpr int kGrid = 32;      // wave vertices per side (the 33rd row / column repeats the first)
-constexpr int kChunkVerts = 4096;  // vertices per reservation (one draw)
 
-//! GS fog value F -> fog amount (255 - F) / 255 (CommonOceanRenderer: fog = 255 - F)
-struct FogTable {
-  float amount[256];
-  FogTable() {
-    for (int i = 0; i < 256; i++) {
-      amount[i] = (255 - i) / 255.f;
-    }
-  }
-};
-const FogTable kFog;
 
 bool is_vu_end_tag(const DmaTag& tag, const VifCode& v0, const VifCode& v1) {
   return tag.qwc == 2 && tag.kind == DmaTag::Kind::CNT && v0.kind == VifCode::Kind::NOP &&
@@ -49,240 +40,64 @@ void drain(DmaFollower& dma, const CtrRenderState& rs) {
   }
 }
 
-}  // namespace
-
-// ---------------------------------------------------------------------------------------------
-// GS packets -> ctr_gpu_ocean_full_draw
-// ---------------------------------------------------------------------------------------------
-
 /*!
- * The GS packets the ocean's VU programs (and the far ocean) send, as one indexed triangle list
- * written into the frame's vertex memory (CommonOceanRenderer, without its OpenGL buffers). Only
- * the textured pass is kept: the near ocean's alpha and env map passes and the mid ocean's env map
- * pass are skipped while reading (their vertices aren't converted).
+ * Debug: with the flag file sdmc:/3ds/jak1/ocean_dump, the 200th frame with both ocean buckets
+ * (and its env map) goes to sdmc:/3ds/jak1/ocean_dump.bin, for the host replay test
+ * (test/ctr_ocean). Format: per bucket "OCNB", u32 near, u32 transfers, then per transfer u32 qwc,
+ * u64 vif codes, the data; then "OCNE", u32 w, h, the env map's RGBA8 texels.
  */
-class CtrOceanBatch {
- public:
-  void begin(const ctr_draw_state& st, const u8 fog[3]) {
-    m_state = st;
-    memcpy(m_fog, fog, 3);
-    m_failed = false;
-  }
-  void end() { flush(); }
-
-  //! xgkick of the ocean-near program (CommonOceanRenderer::kick_from_near)
-  void kick_near(const u8* data, u32 bytes) {
-    u32 offset = 0;
-    for (int tags = 0; tags < 64 && offset + 16 <= bytes; tags++) {
-      GifTag tag(data + offset);
-      offset += 16;
-      const u32 nloop = tag.nloop();
-      if (tag.nreg() == 3) {
-        if (offset + 48 * nloop > bytes) {
-          return;
-        }
-        if (m_near_bucket == kTextured) {
-          prim(data + offset, nloop, GsPrim(tag.prim()).kind() != GsPrim::Kind::TRI_STRIP);
-        }
-        offset += 48 * nloop;
-      } else if (tag.nreg() == 1) {
-        if (offset + 16 * nloop > bytes) {
-          return;
-        }
-        near_adgif(data + offset, nloop);
-        offset += 16 * nloop;
-      } else {
-        return;
-      }
-      if (tag.eop()) {
-        return;
+struct OceanDump {
+  int state = -1;  // -1 unknown, 0 off, 1 armed, 2 done
+  int frames = 0;
+  std::vector<u8> mid;  // this frame's mid-and-far bucket
+  bool armed() {
+    if (state < 0) {
+      FILE* flag = fopen("sdmc:/3ds/jak1/ocean_dump", "rb");
+      state = flag ? 1 : 0;
+      if (flag) {
+        fclose(flag);
       }
     }
+    return state == 1;
   }
-
-  //! xgkick of the ocean-mid program (CommonOceanRenderer::kick_from_mid): drawn without
-  //! blending = the textured pass; with = the env map pass
-  void kick_mid(const u8* data, u32 bytes) {
-    u32 offset = 0;
-    for (int tags = 0; tags < 64 && offset + 16 <= bytes; tags++) {
-      GifTag tag(data + offset);
-      offset += 16;
-      if (tag.flg() != GifTag::Format::PACKED) {
-        return;
-      }
-      const u32 nloop = tag.nloop();
-      if (tag.nreg() == 1) {
-        offset += 16 * nloop;  // the adgif: the env map texture (not drawn)
-      } else if (tag.nreg() == 3) {
-        if (offset + 48 * nloop > bytes) {
-          return;
-        }
-        const GsPrim prim_reg(tag.prim());
-        if (!prim_reg.abe()) {
-          prim(data + offset, nloop, prim_reg.kind() != GsPrim::Kind::TRI_STRIP);
-        }
-        offset += 48 * nloop;
-      } else {
-        return;
-      }
-      if (tag.eop()) {
-        return;
-      }
+  static void put(std::vector<u8>& out, const void* p, size_t n) {
+    out.insert(out.end(), (const u8*)p, (const u8*)p + n);
+  }
+  static void bucket(std::vector<u8>& out, DmaFollower dma, const CtrRenderState& rs, u32 near) {
+    std::vector<DmaTransfer> list;
+    while (dma.current_tag_offset() != rs.next_bucket) {
+      list.push_back(dma.read_and_advance());
+    }
+    const u32 n = list.size();
+    put(out, "OCNB", 4);
+    put(out, &near, 4);
+    put(out, &n, 4);
+    for (auto& t : list) {
+      const u32 qwc = t.size_bytes / 16;
+      put(out, &qwc, 4);
+      put(out, &t.transferred_tag, 8);
+      put(out, t.data, t.size_bytes);
     }
   }
-
-  //! the far ocean: GIF packets of draw-large-polygon-ocean (fans of ST, RGBAQ, XYZF2) after the
-  //! A+D register setup of ocean-init-buffer
-  void far_gif(const u8* data, u32 bytes) {
-    u32 offset = 0;
-    while (offset + 16 <= bytes) {
-      GifTag tag(data + offset);
-      offset += 16;
-      const u32 nloop = tag.nloop();
-      const u32 nreg = tag.nreg() ? tag.nreg() : 16;
-      if (tag.flg() != GifTag::Format::PACKED) {
-        return;  // (not in this bucket)
-      }
-      if (nreg == 3 && tag.pre()) {
-        if (offset + 48 * nloop > bytes) {
-          return;
-        }
-        prim(data + offset, nloop, GsPrim(tag.prim()).kind() != GsPrim::Kind::TRI_STRIP);
-      }
-      offset += 16 * nreg * nloop;
-    }
-  }
-
-  // statistics
-  int vertices = 0, triangles = 0, draws = 0, dropped = 0;
-
- private:
-  enum : u32 { kTextured = 0, kAlpha = 1, kEnvMap = 2 };
-
-  //! CommonOceanRenderer::handle_near_adgif: which of the 3 passes the next packets are
-  void near_adgif(const u8* data, u32 count) {
-    for (u32 i = 0; i < count; i++) {
-      u64 value;
-      memcpy(&value, data + 16 * i, 8);
-      const auto addr = (GsRegisterAddress)data[16 * i + 8];
-      switch (addr) {
-        case GsRegisterAddress::CLAMP_1:
-          if (value & 0b001) {
-            m_near_bucket = kEnvMap;
-          }
-          break;
-        case GsRegisterAddress::TEX0_1:
-          if (!GsTex0(value).tcc()) {
-            m_near_bucket = kTextured;
-          }
-          break;
-        case GsRegisterAddress::ALPHA_1: {
-          GsAlpha reg(value);
-          if (reg.a_mode() == GsAlpha::BlendMode::SOURCE &&
-              reg.b_mode() == GsAlpha::BlendMode::ZERO_OR_FIXED &&
-              reg.c_mode() == GsAlpha::BlendMode::DEST &&
-              reg.d_mode() == GsAlpha::BlendMode::DEST) {
-            m_near_bucket = kEnvMap;
-          }
-        } break;
-        case GsRegisterAddress::FRAME_1:
-          if (value >> 32) {
-            m_near_bucket = kAlpha;
-          }
-          break;
-        default:
-          break;
-      }
-    }
-  }
-
-  /*!
-   * nloop vertices of ST, RGBAQ, XYZF2 (packed): a strip or a fan. Like the GS, a vertex with the
-   * ADC bit set joins the primitive without drawing a triangle.
-   */
-  void prim(const u8* data, u32 nloop, bool fan) {
-    if (m_failed || nloop < 3) {
+  void write(const std::vector<u8>& near, const std::vector<u32>& env, int w, int h) {
+    state = 2;
+    FILE* f = fopen("sdmc:/3ds/jak1/ocean_dump.bin", "wb");
+    if (!f) {
       return;
     }
-    if (!room((int)nloop)) {
-      return;
-    }
-    const int first = m_nv;
-    ctr_ocean_full_vertex* v = m_v + m_nv;
-    u16* idx = m_i + m_ni;
-    for (u32 i = 0; i < nloop; i++, v++) {
-      const u8* p = data + 48 * i;
-      u32 w[12];
-      memcpy(w, p, 48);
-      // ST (with Q): floats; Q > 0 for the GPU's 1 / Q (a far vertex near the horizon has a tiny
-      // Q): as integers, so no float compare (positive floats order like their bits)
-      memcpy(&v->s, &w[0], 8);
-      const u32 q_bits = (s32)w[2] < 0x2B8CBCCC ? 0x2B8CBCCCu : w[2];  // 1e-12
-      memcpy(&v->q, &q_bits, 4);
-      v->r = (u8)w[4];
-      v->g = (u8)w[5];
-      v->b = (u8)w[6];
-      v->a = (u8)w[7];
-      // XYZF2: x, y 12.4 in the low halves of words 8 and 9, z bits 4..27 of word 10, F bits
-      // 4..11 of word 11, ADC bit 15 of word 11
-      v->x = (float)(w[8] & 0xffff);
-      v->y = (float)(w[9] & 0xffff);
-      v->z = (float)((w[10] >> 4) & 0xffffff);
-      v->fog = kFog.amount[(w[11] >> 4) & 0xff];
-      if (i >= 2 && !(w[11] & 0x8000)) {
-        const int k = first + (int)i;
-        idx[0] = (u16)(fan ? first : k - 2);
-        idx[1] = (u16)(k - 1);
-        idx[2] = (u16)k;
-        idx += 3;
-      }
-    }
-    m_nv += (int)nloop;
-    m_ni = (int)(idx - m_i);
-    vertices += (int)nloop;
+    fwrite(mid.data(), 1, mid.size(), f);
+    fwrite(near.data(), 1, near.size(), f);
+    fwrite("OCNE", 1, 4, f);
+    fwrite(&w, 4, 1, f);
+    fwrite(&h, 4, 1, f);
+    fwrite(env.data(), 4, (size_t)w * h, f);
+    fclose(f);
+    lg::info("[ctr] ocean full: wrote sdmc:/3ds/jak1/ocean_dump.bin");
   }
-
-  bool room(int n) {
-    if (m_open && m_nv + n <= m_max_v && m_ni + 3 * n <= m_max_i) {
-      return true;
-    }
-    flush();
-    // the next chunk (smaller when the frame's vertex memory is short)
-    for (int size = std::max(kChunkVerts, n); size >= n; size /= 4) {
-      if (ctr_gpu_ocean_full_reserve(size, 3 * size, &m_v, &m_i)) {
-        m_open = true;
-        m_max_v = size;
-        m_max_i = 3 * size;
-        m_nv = m_ni = 0;
-        return true;
-      }
-    }
-    m_failed = true;  // no room this frame: the rest of the bucket isn't drawn
-    dropped++;
-    return false;
-  }
-
-  void flush() {
-    if (!m_open) {
-      return;
-    }
-    m_open = false;
-    ctr_gpu_ocean_full_draw(&m_state, m_nv, m_ni, m_fog[0], m_fog[1], m_fog[2]);
-    if (m_ni >= 3) {
-      draws++;
-      triangles += m_ni / 3;
-    }
-    m_nv = m_ni = 0;
-  }
-
-  ctr_draw_state m_state;
-  u8 m_fog[3] = {0, 0, 0};
-  bool m_open = false, m_failed = false;
-  ctr_ocean_full_vertex* m_v = nullptr;
-  u16* m_i = nullptr;
-  int m_nv = 0, m_ni = 0, m_max_v = 0, m_max_i = 0;
-  u32 m_near_bucket = kTextured;  // CommonOceanRenderer::m_current_bucket (kept between kicks)
 };
+OceanDump g_dump;
+
+}  // namespace
 
 // ---------------------------------------------------------------------------------------------
 // the VU programs' DMA (OceanMid::run, OceanNear::render_jak1), without the asserts
@@ -324,6 +139,7 @@ bool CtrOceanMidVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
     }
     memcpy(&m_constants, constants.data, sizeof(Constants));
     memcpy(m_vu_data + Vu1Data::CONSTANTS, &m_constants, sizeof(Constants));
+    m_native_ok = -1;
   }
   {
     auto call0 = dma.read_and_advance();
@@ -374,18 +190,19 @@ bool CtrOceanMidVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
       }
     } else if (v0.kind == VifCode::Kind::STCYCL && v0.immediate == 0x404 &&
                v1.kind == VifCode::Kind::MSCALF) {
+      const bool native = m_native && native_ready();
       switch (v1.immediate) {
         case 46:
-          run_call46_vu2c();
+          native ? native_tile() : run_call46_vu2c();
           break;
         case 73:
-          run_call73_vu2c();
+          native ? native_tile() : run_call73_vu2c();
           break;
         case 107:
-          run_call107_vu2c();
+          native ? native_transition(false) : run_call107_vu2c();
           break;
         case 275:
-          run_call275_vu2c();
+          native ? native_transition(true) : run_call275_vu2c();
           break;
         default:
           return false;
@@ -696,6 +513,10 @@ CtrOceanFull::~CtrOceanFull() {
   }
 }
 
+void CtrOceanFull::set_native(bool on) {
+  m_mid->set_native(on);
+}
+
 void CtrOceanFull::note_levels(const std::vector<std::string>& levels) {
   std::string s;
   for (const auto& l : levels) {
@@ -743,6 +564,10 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
 
 void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
   frame_stats(rs);
+  if (g_dump.armed()) {
+    g_dump.mid.clear();
+    OceanDump::bucket(g_dump.mid, dma, rs, 0);
+  }
   const double t0 = ctr_gpu_time_ms();
   // OceanMidAndFar::render_jak1: the bucket's first transfer, then a CALL if the game drew none
   dma.read_and_advance();
@@ -806,6 +631,10 @@ void CtrOceanFull::read_far(DmaFollower& dma) {
 
 void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
   frame_stats(rs);
+  std::vector<u8> dump_near;
+  if (g_dump.armed()) {
+    OceanDump::bucket(dump_near, dma, rs, 1);
+  }
   const double t0 = ctr_gpu_time_ms();
   // OceanNear::render_jak1
   dma.read_and_advance();
@@ -845,6 +674,10 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
     m_failed++;
   }
   drain(dma, rs);
+  if (!dump_near.empty() && ++g_dump.frames == 200) {
+    g_dump.write(dump_near, m_env_ok ? m_env : std::vector<u32>(1, 0xff808080u),
+                 m_env_ok ? m_env_w : 1, m_env_ok ? m_env_h : 1);
+  }
   const double dt = ctr_gpu_time_ms() - t1;
   m_near_ms += dt;
   m_cur_frame_ms += ctr_gpu_time_ms() - t0;

@@ -1,0 +1,33 @@
+; (AI-assisted)
+; Vertex shader for the PS2 ocean's natively computed parts (ctr_gpu_ocean_full_draw_clip,
+; CtrOceanFull: config.ini ocean = full). Like ctr_ocean_full.v.pica, but the CPU didn't divide by
+; w: the input is W * (GS x, GS y, GS z, 1) (12.4 fixed point x, y, 24-bit depth, W > 0 in front
+; of the camera), so gs maps it straight to PICA clip space and the GPU clips the triangles. S, T
+; are the texture coordinates (not times Q); the GPU interpolates them with perspective.
+
+.fvec gs[4]
+
+.constf consts(0.00392156862745098, 0.5, 0.0, 0.0)
+.alias inv255 consts.xxxx
+.alias half consts.yyyy
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outclr color
+
+.alias inpos v0  ; W * (x, y, z, 1)
+.alias intex v1  ; s, t, fog amount
+.alias inclr v2
+
+.proc main
+  dp4 outpos.x, gs[0], inpos
+  dp4 outpos.y, gs[1], inpos
+  dp4 outpos.z, gs[2], inpos
+  dp4 outpos.w, gs[3], inpos
+  mov outtc0.xy, intex.xyyy
+  mov outtc1.x, intex.zzzz
+  mov outtc1.y, half
+  mul outclr, inv255, inclr
+  end
+.end

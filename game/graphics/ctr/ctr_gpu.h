@@ -178,6 +178,11 @@ int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_ve
  * the fog towards (fog_r, fog_g, fog_b) (the GS FOGCOL). */
 void ctr_gpu_ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count,
                         uint8_t fog_r, uint8_t fog_g, uint8_t fog_b);
+/* (AI-assisted) Like ctr_gpu_ocean_full_draw, for vertices in clip space (CtrOceanFull's native
+ * ocean programs, which don't divide by w or clip): (x, y, z, q) = W * (GS x, GS y, GS z, 1) for a
+ * W > 0 in front of the camera (the GPU clips), s, t = the texture coordinates (not times Q). */
+void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state, int vert_count, int index_count,
+                                  uint8_t fog_r, uint8_t fog_g, uint8_t fog_b);
 
 /* ---------------- static meshes (level background, see c3l_format.h) ----------------
  * Vertex layout = c3l::Vertex (16 bytes): s16 pos[3], s16 pad, s16 st[2] (* 1024), u8 rgba[4]

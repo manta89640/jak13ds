@@ -48,6 +48,8 @@ class CtrOceanFull {
   void render_near(DmaFollower& dma, CtrRenderState& rs);
   //! the game's levels changed (ctr_set_levels, render thread idle): log again for these
   static void note_levels(const std::vector<std::string>& levels);
+  //! the native ocean programs (default) or the emulated VU programs (host replay test)
+  void set_native(bool on);
 
  private:
   struct TextureDma;
