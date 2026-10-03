@@ -280,6 +280,8 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
 typedef struct {
   float m[16];
   uint32_t f24[12]; /* (AI-assisted) m as float24 uniform words (3DS raw draws) */
+  uint32_t id;      /* (AI-assisted) new for every prepare: draws compare it, not m (so a
+                     * prepared matrix must not be changed, only prepared again) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,

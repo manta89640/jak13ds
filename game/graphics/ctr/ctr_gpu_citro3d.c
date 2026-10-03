@@ -224,7 +224,7 @@ static struct {
   int last_state_valid;
   /* last ctr_gpu_draw_mesh: mesh and matrix (invalidated by any other program use) */
   int last_mesh_valid;
-  float last_clip[16];
+  uint32_t last_clip_id; /* (AI-assisted) ctr_mesh_matrix::id of the clip uniform */
   /* last ctr_gpu_draw_skinned: its matrix and lights (a model's draws share them) */
   int last_skin_valid;
   float last_skin_clip[16];
@@ -3416,6 +3416,8 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
   for (int r = 0; r < 4; r++) {
     raw_pack_f24(out->m + 4 * r, out->f24 + 3 * r);
   }
+  static uint32_t s_next_id;
+  out->id = ++s_next_id ? s_next_id : ++s_next_id; /* never 0 */
 }
 
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
@@ -3435,8 +3437,8 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     apply_state(state, 1, 1);
     raw_vertex_buffer(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
     raw_sync();
-    if (!g.last_mesh_valid || !words_equal(g.last_clip, matrix->m, 16)) {
-      memcpy(g.last_clip, matrix->m, sizeof(g.last_clip));
+    if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+      g.last_clip_id = matrix->id;
       raw_end(raw_unif(raw_ptr(), g.uloc_clip, matrix->f24, 12, 0));
       g.last_mesh_valid = 1;
     }
@@ -3444,8 +3446,8 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   } else {
     raw_vc_flush();
     /* consecutive draws of a level chunk share the matrix and the vertex buffer */
-    if (!g.last_mesh_valid || !words_equal(g.last_clip, matrix->m, 16)) {
-      memcpy(g.last_clip, matrix->m, sizeof(g.last_clip));
+    if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+      g.last_clip_id = matrix->id;
       C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip, (const C3D_Mtx*)matrix->m);
     }
     g.last_mesh_valid = 1;
