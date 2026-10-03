@@ -18,7 +18,9 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v9: merc envmap draws (MercDraw::eye_id kMercEnvmapDraw)
 // v10 (AI-assisted): visibility runs per chunk (Chunk::vis_runs_offset, VisRun)
 // v11 (AI-assisted): compressed blocks (BlockDir after the header); the layout is otherwise v10's
-constexpr uint32_t kVersion = 11;
+// v12 (AI-assisted): merc vertices the game rewrites (ripple water, texture scroll), see
+// MercModHeader; otherwise v11
+constexpr uint32_t kVersion = 12;
 // v7 files (16-bit textures without mip levels) still load
 constexpr uint32_t kMinVersion = 7;
 
@@ -250,7 +252,8 @@ static_assert(sizeof(MercVertex) == 24);
 constexpr int kMercBlercWeights = 40;
 
 struct MercBlercHeader {
-  uint32_t num_vertices, num_targets, num_dests, pad;
+  uint32_t num_vertices, num_targets, num_dests;
+  uint32_t mod_offset;  // v12 (AI-assisted): absolute offset of the MercModHeader, 0: none (v11: 0)
 };
 static_assert(sizeof(MercBlercHeader) == 16);
 
@@ -268,5 +271,43 @@ struct MercBlercTarget {
   uint32_t weight;  // index into the weights
 };
 static_assert(sizeof(MercBlercTarget) == 16);
+
+/*!
+ * (AI-assisted) v12: vertices the game rewrites in its own merc data every frame (ripple: water
+ * waves, texture scroll: flowing water). The PC renderer (Merc2::model_mod_draws) unpacks them
+ * from the game's merc fragments when the game asks (pc-merc-vtx-update); so does CtrMercRenderer.
+ * Per effect with such vertices: walking the effect's first frag_count fragments, the fragments
+ * whose mask byte is set are unpacked one after the other (vertex numbers 0 .. vidx_end), and
+ * unpacked vertex dest.src goes to model vertex dest.vertex (position, normal, texture
+ * coordinates). Section: MercModHeader, MercModEffect[], MercModDest[], mask bytes.
+ */
+struct MercModHeader {
+  uint32_t num_effects, num_dests, num_mask_bytes, pad;
+};
+static_assert(sizeof(MercModHeader) == 16);
+
+struct MercModEffect {
+  uint32_t model;  // index into MercModel[]
+  uint8_t effect;
+  uint8_t pad0;
+  uint16_t frag_count;  // mask bytes (tfrag3 fragment_mask)
+  uint32_t first_mask;
+  uint32_t vidx_end;  // unpacked vertices (tfrag3 expect_vidx_end)
+  uint32_t first_dest;
+  uint32_t dest_count;
+  // the model's unpack constants (tfrag3::MercModel): position = (lump byte as the VIF's
+  // 0x4b010000 row add + fragment offset) * xyz_scale, st = (st_vif_add row add) + st_magic
+  uint32_t st_vif_add;
+  float st_magic;
+  float xyz_scale;
+  uint32_t pad1[3];
+};
+static_assert(sizeof(MercModEffect) == 48);
+
+struct MercModDest {
+  uint16_t src;     // unpacked vertex
+  uint16_t vertex;  // model vertex
+};
+static_assert(sizeof(MercModDest) == 4);
 
 }  // namespace c3l

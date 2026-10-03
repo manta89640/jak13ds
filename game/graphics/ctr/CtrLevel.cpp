@@ -699,8 +699,12 @@ bool CtrLevels::load_file(const fs::path& path,
       return false;
     }
     // blend shapes
+    c3l::MercModHeader mh{};
+    std::vector<c3l::MercModEffect> mod_effects;
+    std::vector<c3l::MercModDest> mod_dests;
+    std::vector<u8> mod_masks;
     if (hdr.merc_blerc_offset && hdr.merc_blerc_size >= sizeof(c3l::MercBlercHeader)) {
-      c3l::MercBlercHeader bh;
+      c3l::MercBlercHeader bh{};
       u32 off = hdr.merc_blerc_offset;
       if (f.read(off, &bh, sizeof(bh))) {
         off += sizeof(bh);
@@ -718,15 +722,57 @@ bool CtrLevels::load_file(const fs::path& path,
         out->blerc_targets.clear();
         out->blerc_dests.clear();
       }
+      // (AI-assisted) v12: vertices the game rewrites (ripple water, texture scroll)
+      if (hdr.version >= 12 && bh.mod_offset) {
+        u32 off = bh.mod_offset;
+        bool ok = f.read(off, &mh, sizeof(mh));
+        off += sizeof(mh);
+        ok = ok && f.read_array(off, mh.num_effects, &mod_effects);
+        off += mh.num_effects * sizeof(c3l::MercModEffect);
+        ok = ok && f.read_array(off, mh.num_dests, &mod_dests);
+        off += mh.num_dests * sizeof(c3l::MercModDest);
+        ok = ok && f.read_array(off, mh.num_mask_bytes, &mod_masks);
+        if (!ok) {
+          lg::warn("[ctr] {}: bad merc vertex rewrite data", path.string());
+          mod_effects.clear();
+        }
+      }
     }
     std::vector<c3l::MercVertex> mverts;
-    for (auto& m : models) {
+    for (u32 mi = 0; mi < models.size(); mi++) {
+      const auto& m = models[mi];
       if (cancelled()) {
         return false;
       }
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
+      for (const auto& me : mod_effects) {
+        if (me.model != mi || (u64)me.first_mask + me.frag_count > mod_masks.size() ||
+            (u64)me.first_dest + me.dest_count > mod_dests.size() || m.scale <= 0.f) {
+          continue;
+        }
+        auto& e = md.mod.emplace_back();
+        e.effect = me.effect;
+        e.mask.assign(mod_masks.begin() + me.first_mask,
+                      mod_masks.begin() + me.first_mask + me.frag_count);
+        e.vidx_end = me.vidx_end;
+        for (u32 k = 0; k < me.dest_count; k++) {
+          const auto& d = mod_dests[me.first_dest + k];
+          if (d.vertex < m.vertex_count && d.src < me.vidx_end) {
+            e.dests.push_back(d);
+          }
+        }
+        e.pos_k = me.xyz_scale / m.scale;
+        // Merc2::model_mod_draws: st = float bits (st_vif_add + byte) + st_magic
+        for (u32 b = 0; b < 256; b++) {
+          const u32 bits = me.st_vif_add + b;
+          float st;
+          memcpy(&st, &bits, 4);
+          st += me.st_magic;
+          e.st_lut[b] = (s16)std::clamp((int)std::lround(st * 1024.f), -32768, 32767);
+        }
+      }
       if (m.blerc_first + m.blerc_count <= out->blerc_verts.size()) {
         md.blerc_first = m.blerc_first;
         md.blerc_count = m.blerc_count;
