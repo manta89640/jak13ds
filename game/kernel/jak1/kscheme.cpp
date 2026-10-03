@@ -1561,6 +1561,24 @@ void pad_script_continue(const char* name) {
             g_ee_main_mem);
 }
 
+//! (AI-assisted) "teleport TYPE JOINT DY" / "jpos TYPE JOINT" in a pad script:
+//! (pad-script-teleport TYPE JOINT DY) / (pad-script-jpos TYPE JOINT), goal_src/jak1/pc/progress-pc.gc
+void pad_script_joint(const char* type_name, int joint, float dy, bool teleport) {
+  const char* fn_name = teleport ? "pad-script-teleport" : "pad-script-jpos";
+  auto fn = find_symbol_from_c(fn_name);
+  auto type = find_symbol_from_c(type_name);
+  if (!fn.offset || fn->value == s7.offset || !type.offset || type->value == s7.offset) {
+    lg::warn("[pad script] {}: no {} or no type {}", teleport ? "teleport" : "jpos", fn_name,
+             type_name);
+    return;
+  }
+  u32 dy_bits;
+  const float dy_units = dy * 4096.f;
+  memcpy(&dy_bits, &dy_units, 4);
+  call_goal(Ptr<Function>(fn->value), type->value, (u64)(s64)joint, dy_bits, s7.offset,
+            g_ee_main_mem);
+}
+
 void pad_script_exit() {
   MasterExit = RuntimeExitStatus::EXIT;
 }
@@ -1580,6 +1598,7 @@ s32 InitHeapAndSymbol() {
   pad_script::set_print_symbol_hook(pad_script_print_symbol);
   pad_script::set_exit_hook(pad_script_exit);
   pad_script::set_continue_hook(pad_script_continue);
+  pad_script::set_joint_hook(pad_script_joint);
   pad_script::set_save_hook(pad_script_save);
   pad_script::set_state_name_hook(pad_script_state_name);
   pad_script::set_position_hook(pad_script_position);

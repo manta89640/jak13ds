@@ -6,6 +6,7 @@
 
 #include "null.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
@@ -46,7 +47,18 @@ void null_exit() {}
  * Gfx::vsync fires the vblank callback (IOP) before calling this.
  */
 u32 null_vsync() {
-  constexpr auto kFrame = std::chrono::nanoseconds(1000000000LL / 60);
+  // (AI-assisted) OPENGOAL_NULL_GFX_FPS=30 (host): pace at 30 Hz like the 3DS's fps cap, so the
+  // game runs with a time ratio of 2 (tests of frame rate dependent behaviour)
+  static const auto kFrame = [] {
+    int fps = 60;
+#ifndef __3DS__
+    if (const char* e = getenv("OPENGOAL_NULL_GFX_FPS")) {
+      fps = std::max(1, std::min(60, atoi(e)));
+      lg::info("Null renderer: {} Hz vsync pacing (OPENGOAL_NULL_GFX_FPS)", fps);
+    }
+#endif
+    return std::chrono::nanoseconds(1000000000LL / fps);
+  }();
   const auto now = clock_type::now();
   if (!g_null_state.started) {
     g_null_state.started = true;
