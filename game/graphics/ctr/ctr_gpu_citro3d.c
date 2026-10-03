@@ -3224,15 +3224,18 @@ static inline u32* raw_unif(u32* p, int loc, const u32* data, u32 words, int f32
   return raw_n(p, GPUREG_VSH_FLOATUNIFORM_DATA, data, words, 0);
 }
 
-/* the f24 encoding of libctru's f32tof24 (truncated mantissa), packed 3 words per vector in the
- * order the GPU takes float24 uniforms */
+/* the f24 encoding of libctru's f32tof24, packed 3 words per vector in the order the GPU takes
+ * float24 uniforms. (AI-assisted) The mantissa is rounded to nearest, not truncated as f32tof24
+ * does: truncating every chunk's matrix translation left sub-pixel gaps between neighbouring level
+ * chunks up close (the converter's chunk grids are watertight otherwise). */
 static inline u32 raw_f24(float f) {
   union {
     float f;
     u32 i;
   } u = {f};
-  const u32 sign = u.i >> 31, mant = (u.i & 0x7fffff) >> 7;
-  const s32 e = (s32)((u.i >> 23) & 0xff) - 127 + 63;
+  const u32 m23 = (u.i & 0x7fffff) + 0x40; /* a carry out of the mantissa raises the exponent */
+  const u32 sign = u.i >> 31, mant = (m23 >> 7) & 0xffff;
+  const s32 e = (s32)((u.i >> 23) & 0xff) - 127 + 63 + (s32)(m23 >> 23);
   if (e < 0 || !((u.i >> 23) & 0xff)) {
     return sign << 23;
   }
