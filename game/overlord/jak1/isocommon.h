@@ -42,6 +42,15 @@ struct LoadStackEntry {
   FileRecord* fr;
   uint32_t location;  // sectors.
   FILE* fp;
+#ifdef __3DS__
+  // (AI-assisted) a compressed file (iso_cz::Reader, which owns fp), and load-time statistics
+  void* cz;
+  uint64_t io_bytes;  // bytes given to the game
+  uint64_t io_us;     // time in fs_read
+  uint32_t io_reads;
+  uint32_t crc;       // io_checksum = on: CRC-32 of the bytes read, while they are sequential
+  uint32_t crc_next;  // file offset the next read must start at for crc to stay valid (~0: not)
+#endif
 };
 
 /*!

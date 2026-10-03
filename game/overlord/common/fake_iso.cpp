@@ -33,6 +33,7 @@
 #include <future>
 #include <thread>
 
+#include "game/overlord/common/compressed_iso_file.h"
 #include "platform/3ds/port/ctr_port.h"
 #endif
 
@@ -46,6 +47,7 @@ BS::thread_pool thpool(4);
 struct FakeIsoEntry {
   char iso_name[16];
   std::string full_path;
+  bool compressed;  // (AI-assisted) full_path is <iso_name>.ogz (compressed_iso_file.h)
 };
 
 FakeIsoEntry fake_iso_entries[MAX_ISO_FILES];  //! List of all known files
@@ -95,13 +97,38 @@ int fake_iso_FS_Init() {
       ASSERT(fake_iso_entry_count < MAX_ISO_FILES);
       FakeIsoEntry* e = &fake_iso_entries[fake_iso_entry_count];
       std::string file_name = f.path().filename().string();
-      ASSERT(file_name.length() < 16);  // should be 8.3.
-      ASSERT_MSG(f.exists(),            // should only happen if the file is a symlink, afaik
+      std::string iso_name = file_name;
+      bool compressed = false;
+#ifdef __3DS__
+      // (AI-assisted) X.ogz is the compressed X (stage_sd.sh --compress), and wins over X
+      const size_t sl = strlen(iso_cz::kSuffix);
+      if (iso_name.size() > sl && iso_name.compare(iso_name.size() - sl, sl, iso_cz::kSuffix) == 0) {
+        iso_name.resize(iso_name.size() - sl);
+        compressed = true;
+      }
+      {
+        u32 dup = 0;
+        while (dup < fake_iso_entry_count && strcmp(fake_iso_entries[dup].iso_name, iso_name.c_str()))
+          dup++;
+        if (dup < fake_iso_entry_count) {
+          if (!compressed) {
+            continue;  // the .ogz came first
+          }
+          e = &fake_iso_entries[dup];  // replace X by X.ogz
+        }
+      }
+#endif
+      ASSERT(iso_name.length() < 16);  // should be 8.3.
+      ASSERT_MSG(f.exists(),           // should only happen if the file is a symlink, afaik
                  fmt::format("[FAKEISO] couldn't find {} -- broken symlink?", file_name));
-      strcpy(e->iso_name, file_name.c_str());
+      const bool is_new = e == &fake_iso_entries[fake_iso_entry_count];
+      strcpy(e->iso_name, iso_name.c_str());
+      e->compressed = compressed;
       e->full_path = fmt::format("{}/out/{}/iso/{}", file_util::get_jak_project_dir().string(),
                                  game_version_names[g_game_version], file_name);
-      fake_iso_entry_count++;
+      if (is_new) {
+        fake_iso_entry_count++;
+      }
     }
   }
 
@@ -166,11 +193,26 @@ uint32_t FS_GetLength(FileRecord* fr) {
   file_util::assert_file_exists(path, "fake_iso FS_GetLength");
   FILE* fp = file_util::open_file(path, "rb");
   ASSERT(fp);
+#ifdef __3DS__
+  // (AI-assisted) the length of the original file: in the .ogz header
+  if (is_file_compressed(fr)) {
+    iso_cz::Header h;
+    const bool ok = fread(&h, sizeof(h), 1, fp) == 1;
+    fclose(fp);
+    ASSERT_MSG(ok, fmt::format("[FAKEISO] bad compressed file {}", path));
+    return h.size;
+  }
+#endif
   fseek(fp, 0, SEEK_END);
   uint32_t len = ftell(fp);
   rewind(fp);
   fclose(fp);
   return len;
+}
+
+bool is_file_compressed(FileRecord* fr) {
+  ASSERT(fr->location < fake_iso_entry_count);
+  return fake_iso_entries[fr->location].compressed;
 }
 
 void LoadMusicTweaks() {

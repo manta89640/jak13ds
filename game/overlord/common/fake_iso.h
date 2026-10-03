@@ -18,6 +18,9 @@
 void fake_iso_init_globals();
 int fake_iso_FS_Init();
 const char* get_file_path(FileRecord* fr);
+// (AI-assisted) get_file_path is a block-compressed .ogz (compressed_iso_file.h): only the fake
+// ISO's own reads decode it
+bool is_file_compressed(FileRecord* fr);
 FileRecord* FS_Find(const char* name);
 FileRecord* FS_FindIN(const char* iso_name);
 uint32_t FS_GetLength(FileRecord* fr);

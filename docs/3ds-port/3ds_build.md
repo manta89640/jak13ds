@@ -48,6 +48,18 @@ cp build-3ds/jak1.cia /Volumes/3DS/cias/              # any folder FBI can brows
 
 On the card: `3ds/jak1/gk.3dsx`, `3ds/jak1/data/out/jak1/iso/*` (~1.3 GB), `3ds/jak1/data/out/jak1/c3l/*`.
 
+**Compressed game files** (AI-assisted, optional): `stage_sd.sh --compress` (LZ4, the default) or
+`--compress zstd` stores the DGO, CGO, VIS, TXT and STR files as `X.ogz`, compressed in 48 KB
+blocks (`game/overlord/common/compressed_iso_file.h`). The game decodes them on its file reader
+thread, block by block into the read buffers, and reads `X` where there is no `X.ogz`. Sound banks
+(SBK, MUS) and the VAGWAD audio streams stay as they are. `--compress-types "DGO CGO"` picks the
+types; `--compress-cache DIR` is where the `.ogz` files are kept (default `build-3ds/iso-ogz-<codec>`,
+remade when the source file is newer). Every file is checked with the game's own decoder after
+compressing (`build-host-tools/iso_pack`). LZ4: 336 MB -> 195 MB; zstd: -> 159 MB, but its
+decoding is ~9x slower than LZ4's (Azahar), which costs more than the smaller reads save. The log
+line `[io] MIS DGO: ... card ... MB/s, decode ... MB/s` at the end of each big file shows where its
+load time went.
+
 **gk and the game files go together.** The GOAL code is compiled to C and linked into gk (the
 3dsx and the CIA); each object in the `.CGO` / `.DGO` files only carries the hash of its C module.
 After any GOAL change, copy gk (or reinstall the CIA) *and* `out/jak1/iso` from the same

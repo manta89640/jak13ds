@@ -153,8 +153,10 @@ CtrSettings load() {
     } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
-               key == "debug_log" || key == "particle_density" || key == "merc_lod_scale") {
-      // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp)
+               key == "debug_log" || key == "particle_density" || key == "merc_lod_scale" ||
+               key == "io_checksum") {
+      // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,
+      // overlord/jak1/fake_iso.cpp)
     } else {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);
     }
