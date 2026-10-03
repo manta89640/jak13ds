@@ -2609,6 +2609,51 @@ static void migrate_small_textures(void) {
   g.bound_tex = NULL;
 }
 
+/* (AI-assisted) C3D_TexGenerateMipmap for an RGBA8 texture in linear memory, the same tiled walk
+ * (levels down to 8 x 8), each texel the average of its 2 x 2 by ARMv6 byte-wise halving adds
+ * (UHADD8: three per texel instead of citro3d's loop per channel; rounded down twice, so at most
+ * 1 below citro3d's value) */
+static inline u32 avg4_rgba8(u32 a, u32 b, u32 c, u32 d) {
+  u32 ab, cd, r;
+  __asm__("uhadd8 %0, %1, %2" : "=r"(ab) : "r"(a), "r"(b));
+  __asm__("uhadd8 %0, %1, %2" : "=r"(cd) : "r"(c), "r"(d));
+  __asm__("uhadd8 %0, %1, %2" : "=r"(r) : "r"(ab), "r"(cd));
+  return r;
+}
+
+static void tex_mipmaps_rgba8(C3D_Tex* tex) {
+  u8* src = (u8*)tex->data;
+  u32 level_size = tex->size;
+  u32 w = tex->width, h = tex->height;
+  for (int level = 0; level < tex->maxLevel; level++) {
+    u8* dst = src + level_size;
+    const u32 dw = w / 2, dh = h / 2;
+    const u32 src_stride = w / 8, dst_stride = dw / 8;
+    for (u32 j = 0; j < dh / 8; j++) {
+      for (u32 i = 0; i < dst_stride; i++) {
+        /* (8 x 8 tiles of 256 bytes; the 4 source tiles' Morton order quadrants) */
+        u32* d = (u32*)(dst + 256 * (i + j * dst_stride));
+        const u32* q[4] = {
+            (const u32*)(src + 256 * (2 * i + 2 * j * src_stride)),
+            (const u32*)(src + 256 * (2 * i + 1 + 2 * j * src_stride)),
+            (const u32*)(src + 256 * (2 * i + (2 * j + 1) * src_stride)),
+            (const u32*)(src + 256 * (2 * i + 1 + (2 * j + 1) * src_stride)),
+        };
+        for (int k = 0; k < 4; k++) {
+          const u32* a = q[k];
+          for (int n = 0; n < 16; n++, a += 4) {
+            *d++ = avg4_rgba8(a[0], a[1], a[2], a[3]);
+          }
+        }
+      }
+    }
+    src = dst;
+    level_size >>= 2;
+    w = dw;
+    h = dh;
+  }
+}
+
 void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
   if (handle < 0 || handle >= MAX_TEXTURES || g.textures[handle].used != 1 ||
       g.textures[handle].pool >= 0) {
@@ -2642,7 +2687,7 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
   }
   swizzle_rgba8((uint8_t*)tex->data, tex->width, tex->height, rgba);
   if (tex->maxLevel > 0) {
-    C3D_TexGenerateMipmap(tex, GPU_TEXFACE_2D);
+    tex_mipmaps_rgba8(tex); /* (AI-assisted) (RGBA8 checked above) */
   }
   cache_flush_frame(tex->data, C3D_TexCalcTotalSize(tex->size, tex->maxLevel));
   /* bind again at the next use: that clears the GPU's texture cache (it may hold old texels) */

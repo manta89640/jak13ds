@@ -393,6 +393,45 @@ bool CtrOceanFull::update_env(u64 tex0, CtrRenderState& rs) {
   return m_env_ok;
 }
 
+namespace {
+//! a row of the wave texture's across samples (update_texture)
+struct TexAcross {
+  s32 s[kTexSize], t[kTexSize];  // env map texel coordinates (8 fraction bits), times 4
+  u32 rb[kTexSize];              // red | blue << 16, times 4
+  u32 g[kTexSize];               // green, times 4
+};
+
+inline u32 sat8(s32 v) {
+  return v < 0 ? 0 : (v > 255 ? 255 : (u32)v);  // (usat)
+}
+
+/*!
+ * One texel row: rows a and b of the across samples weighted WA : 4 - WA (16x the value), the env
+ * map texel at the clamped coordinates times the color, (tex * color) >> 7 at most 255 (GS
+ * modulate). ENV64: a 64 x 64 env map (shifts; the clamps are usat).
+ */
+template <int WA, bool ENV64>
+void texel_row(const TexAcross& a, const TexAcross& b, u32* out, const u32* env, int ew, int eh) {
+  constexpr int WB = 4 - WA;
+  const s32 smax = ENV64 ? 63 : ew - 1, tmax = ENV64 ? 63 : eh - 1;
+  for (int x = 0; x < kTexSize; x++) {
+    s32 tx = (WA * a.s[x] + WB * b.s[x]) >> 12;
+    s32 ty = (WA * a.t[x] + WB * b.t[x]) >> 12;
+    tx = tx < 0 ? 0 : (tx > smax ? smax : tx);  // clamp to the edge
+    ty = ty < 0 ? 0 : (ty > tmax ? tmax : ty);
+    const u32 e = env[ENV64 ? (ty << 6) + tx : ty * ew + tx];
+    const u32 crb = ((WA * a.rb[x] + WB * b.rb[x]) >> 4) & 0x00ff00ffu;
+    const u32 cg = (WA * a.g[x] + WB * b.g[x]) >> 4;
+    const u32 erb = e & 0x00ff00ffu;
+    const u32 r = sat8(((s32)(s16)erb * (s32)(s16)crb) >> 7);  // (smulbb)
+    const u32 bl = sat8(((s32)erb >> 16) * ((s32)crb >> 16) >> 7);  // (smultt)
+    const u32 g = sat8((s32)(((e >> 8) & 0xff) * cg) >> 7);
+    // alpha 0xff: the PS2's texture alpha only weights the env map pass (left out)
+    out[x] = r | (g << 8) | (bl << 16) | 0xff000000u;
+  }
+}
+}  // namespace
+
 /*!
  * The wave texture: run_L3_PC's math for the 33 x 33 vertices, then 64 x 64 texels between them
  * (texel centers at 1/4 and 3/4 of the PS2's 4 x 4 texel quads: weights 3:1), each the env map
@@ -444,50 +483,39 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
     verts[r][kGrid] = verts[r][0];
   }
 
-  // across: 64 samples per vertex row (3a + b, a + 3b: 4x)
-  static V across[kGrid + 1][kTexSize];
+  // across: 64 samples per vertex row (3a + b, a + 3b: 4x); red and blue in the 16 bit halves
+  // of one word (at most 1020, then 4080 after the down weights: no carries between them)
+  static TexAcross across[kGrid + 1];
   for (int r = 0; r <= kGrid; r++) {
+    TexAcross& o = across[r];
     for (int c = 0; c < kGrid; c++) {
       const V& a = verts[r][c];
       const V& b = verts[r][c + 1];
-      V& o0 = across[r][2 * c];
-      V& o1 = across[r][2 * c + 1];
-      o0.s = 3 * a.s + b.s;
-      o1.s = a.s + 3 * b.s;
-      o0.t = 3 * a.t + b.t;
-      o1.t = a.t + 3 * b.t;
-      o0.r = 3 * a.r + b.r;
-      o1.r = a.r + 3 * b.r;
-      o0.g = 3 * a.g + b.g;
-      o1.g = a.g + 3 * b.g;
-      o0.b = 3 * a.b + b.b;
-      o1.b = a.b + 3 * b.b;
+      const u32 arb = (u32)a.r | (u32)a.b << 16, brb = (u32)b.r | (u32)b.b << 16;
+      o.s[2 * c] = 3 * a.s + b.s;
+      o.s[2 * c + 1] = a.s + 3 * b.s;
+      o.t[2 * c] = 3 * a.t + b.t;
+      o.t[2 * c + 1] = a.t + 3 * b.t;
+      o.rb[2 * c] = 3 * arb + brb;
+      o.rb[2 * c + 1] = arb + 3 * brb;
+      o.g[2 * c] = 3 * a.g + b.g;
+      o.g[2 * c + 1] = a.g + 3 * b.g;
     }
   }
 
-  // down, the env map lookup and the GS modulate ((tex * color) >> 7, at most 255)
+  // down, the env map lookup and the GS modulate
   m_texels.resize(kTexSize * kTexSize);
   u32* out = m_texels.data();
-  const u32 umax_s = (u32)ew - 1, umax_t = (u32)eh - 1;
-  for (int y = 0; y < kTexSize; y++) {
-    const V* a = across[y >> 1];
-    const V* b = across[(y >> 1) + 1];
-    const s32 wa = (y & 1) ? 1 : 3, wb = 4 - wa;
-    for (int x = 0; x < kTexSize; x++) {
-      // 16x the value; s, t with 8 fraction bits
-      s32 tx = (wa * a[x].s + wb * b[x].s) >> 12;
-      s32 ty = (wa * a[x].t + wb * b[x].t) >> 12;
-      tx = (u32)tx > umax_s ? (tx < 0 ? 0 : (s32)umax_s) : tx;  // clamp to the edge
-      ty = (u32)ty > umax_t ? (ty < 0 ? 0 : (s32)umax_t) : ty;
-      const u32 e = env[ty * ew + tx];
-      const u32 cr = (u32)(wa * a[x].r + wb * b[x].r) >> 4;
-      const u32 cg = (u32)(wa * a[x].g + wb * b[x].g) >> 4;
-      const u32 cb = (u32)(wa * a[x].b + wb * b[x].b) >> 4;
-      const u32 r = std::min<u32>(((e & 0xff) * cr) >> 7, 255);
-      const u32 g = std::min<u32>((((e >> 8) & 0xff) * cg) >> 7, 255);
-      const u32 bl = std::min<u32>((((e >> 16) & 0xff) * cb) >> 7, 255);
-      // alpha 0xff: the PS2's texture alpha only weights the env map pass (left out)
-      *out++ = r | (g << 8) | (bl << 16) | 0xff000000u;
+  const bool env64 = ew == 64 && eh == 64;  // (the env map: shifts and saturations)
+  for (int y = 0; y < kTexSize; y++, out += kTexSize) {
+    const TexAcross& a = across[y >> 1];
+    const TexAcross& b = across[(y >> 1) + 1];
+    if (env64) {
+      (y & 1) ? texel_row<1, true>(a, b, out, env, ew, eh)
+              : texel_row<3, true>(a, b, out, env, ew, eh);
+    } else {
+      (y & 1) ? texel_row<1, false>(a, b, out, env, ew, eh)
+              : texel_row<3, false>(a, b, out, env, ew, eh);
     }
   }
   const u8* bytes = (const u8*)m_texels.data();  // RGBA in memory (little endian)
