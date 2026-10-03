@@ -56,6 +56,8 @@ sprites = on               # world particles; the HUD is always drawn
 max_sprites = 1000         # world particles per frame
 ocean = on                 # the ocean: off, flat (= on, static grid), waves (+ waves near the camera), full (the PS2 ocean: the game builds its DMA, more CPU on both threads, see 3ds_build.md)
                            # (AI-assisted) waves: a 3 m grid out to ~45 m around the camera moves with the game's own wave heights (what boats and floating things ride), crests brighter, plus a second scrolling wave texture over all of the ocean. ~0.1 ms render thread CPU, a few hundred microseconds of GPU. Log line: [ctr] ocean waves. With depth16 (no stencil) the flat ocean beyond is lowered by the deepest trough
+ocean_texture_rate = 2     # (AI-assisted) ocean = full: the wave texture is made every nth frame (1 = every frame, up to 8); it costs the render thread 1-1.7 ms each time. Log line: [ctr] ocean full (... texture ... in N% of frames)
+ocean_near_alpha = 0.6     # (AI-assisted) ocean = full: the near ocean is at least this opaque (0..1). The PS2 / PC draw it at 0.5 within 12 m of the camera (1 from 24 m) and add a sky reflection pass the 3DS leaves out; 0.6 makes up for that pass's average brightening at the beach (0.5 = exactly the PS2's textured pass, see CtrOceanFull.h)
 fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 60: up to 60
 frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color
