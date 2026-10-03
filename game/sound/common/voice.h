@@ -99,17 +99,33 @@ class Voice {
   bool mNoise{false};
   bool mENDX{false};
 
+  // (AI-assisted) The decoder: DecodeSamples() moves 4 samples (one ADPCM data word, mNAX) into
+  // mDecodeBuf when it holds fewer than 16, then NextBlock() at the end of a block. The words are
+  // decoded a whole block at a time (DecodeBlock(): the rest of the block, written ahead in
+  // mDecodeBuf), so a block's data is read when the decoder starts it. The game never changes the
+  // block being played: a stream refills the other half of its buffer.
   void DecodeSamples();
+  void DecodeBlock();
+  void NextBlock();
+  bool EndBlock();
   void UpdateBlockHeader();
   // (AI-assisted) Run() with the pitch counter advanced by `step` and the envelopes by `ticks`
   // SPU ticks; ahead: keep 16 decoded samples (more than one tick per sample can pop 6)
   s16Output RunTicks(u32 step, u32 ticks, bool ahead);
+  // (AI-assisted) RunBlock() for ratio > 0x10000 (ahead) or not
+  template <bool ahead>
+  int RunBlockImpl(s16Output* out, int n, u32 ratio);
   u32 mTickFrac{0};  // (AI-assisted) RunBlock: SPU tick fraction carried between output samples
 
-  // (AI-assisted) contiguous (linear_fifo): the interpolation reads Data()[0..3]
-  linear_fifo<s16, 0x20> mDecodeBuf{};
+  // (AI-assisted) contiguous (linear_fifo): the interpolation reads Data()[0..3]. Up to 19 samples
+  // when a block (up to 8 words, 32 samples) is written ahead.
+  linear_fifo<s16, 0x40> mDecodeBuf{};
+  // (AI-assisted) the decoder's history at the end of the samples written ahead
   s16 mDecodeHist1{0};
   s16 mDecodeHist2{0};
+  // (AI-assisted) mNAX after the last word written ahead: while there are words written ahead,
+  // mNAX = mBlockEnd - mDecodeBuf.Ahead() / 4 (RunBlock moves only the positions, then sets mNAX)
+  u32 mBlockEnd{0};
   // (AI-assisted) the current block's shift and filter coefficients (UpdateBlockHeader)
   u8 mDecShift{0};
   s16 mDecCoef1{0};

@@ -919,6 +919,8 @@ static ndspWaveBuf s_audio_wbuf[AUDIO_MAX_BUFS];
 static unsigned int s_audio_frames = 0;
 static unsigned int s_audio_nbufs = 0;
 static unsigned int s_audio_next = 0; /* the next buffer to hand out (round robin) */
+/* (AI-assisted) buffers queued after the DSP had played everything before them (a gap) */
+static unsigned int s_audio_late = 0;
 static LightEvent s_audio_event;
 
 static void audio_frame_callback(void* data) {
@@ -977,6 +979,7 @@ int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
   s_audio_frames = frames;
   s_audio_nbufs = nbufs;
   s_audio_next = 0;
+  s_audio_late = 0;
   LightEvent_Init(&s_audio_event, RESET_ONESHOT);
   ndspSetCallback(audio_frame_callback, NULL);
   s_audio_on = 1;
@@ -1037,6 +1040,14 @@ void ctr_audio_submit(short* buffer) {
     return;
   }
   DSP_FlushDataCache(buffer, (size_t)s_audio_frames * 2 * sizeof(short));
+  /* (AI-assisted) Late: the buffer queued before this one, the last the DSP had, is done already,
+   * so the channel ran dry and this one was due before it came (a gap in the sound). The DSP's
+   * dropped frames (ndspGetDroppedFrames) don't count this. At most a DSP frame (~5 ms) of a gap
+   * goes unseen: the status is updated once per frame. */
+  const ndspWaveBuf* prev = &s_audio_wbuf[(s_audio_next + s_audio_nbufs - 1) % s_audio_nbufs];
+  if (prev->status == NDSP_WBUF_DONE) {
+    s_audio_late++;
+  }
   ndspChnWaveBufAdd(0, wb);
   s_audio_next = (s_audio_next + 1) % s_audio_nbufs;
 }
@@ -1051,4 +1062,8 @@ void ctr_audio_wait(unsigned int us) {
 
 unsigned int ctr_audio_dropped_frames(void) {
   return s_audio_on ? ndspGetDroppedFrames() : 0;
+}
+
+unsigned int ctr_audio_late_buffers(void) {
+  return s_audio_late;
 }
