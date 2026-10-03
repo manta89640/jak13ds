@@ -79,6 +79,16 @@ s32 as_int(float f) {
   return r;
 }
 
+// (AI-assisted) all ten words of two sprites' AdGif data equal (newlib's memcmp took ~11
+// instructions per word, for every sprite)
+template <typename AdGif>
+bool same_adgif(const AdGif& a, const AdGif& b) {
+  return ((a.tex0_data ^ b.tex0_data) | (a.tex0_addr ^ b.tex0_addr) | (a.tex1_data ^ b.tex1_data) |
+          (a.tex1_addr ^ b.tex1_addr) | (a.mip_data ^ b.mip_data) | (a.mip_addr ^ b.mip_addr) |
+          (a.clamp_data ^ b.clamp_data) | (a.clamp_addr ^ b.clamp_addr) |
+          (a.alpha_data ^ b.alpha_data) | (a.alpha_addr ^ b.alpha_addr)) == 0;
+}
+
 u8 color_byte(float f) {
   return (u8)((int)f & 0xff);
 }
@@ -141,7 +151,58 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     skip_rest();  // the sprite renderer didn't run
     return;
   }
+  // (AI-assisted) this frame's counts, for the slow frame line at the end
+  const double t_start = ctr_gpu_time_ms();
+  const Stats stats0 = m_stats;
+  const CtrVram::Stats vram0 = m_vram->stats();
+  m_distort_ms = 0;
+  build_sprites(dma, rs);
+  log_slow_frame(rs, ctr_gpu_time_ms() - t_start, stats0, vram0);
+}
 
+void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
+                                       double ms,
+                                       const Stats& s0,
+                                       const CtrVram::Stats& v0) {
+  // (AI-assisted) a frame whose sprites took long: what it had (counters at info level, at most
+  // one line per 5 s; the frames in between are counted)
+  const CtrVram::Stats& v = m_vram->stats();
+  const int frame_uploads = v.uploads - m_vram_uploads_mark;
+  m_vram_uploads_mark = v.uploads;
+  if (ms > 3.0) {
+    m_slow_frames++;
+    const double now = ctr_gpu_time_ms();
+    if (now - m_last_slow_log >= 5000.0) {
+      m_last_slow_log = now;
+      const Stats& s = m_stats;
+      lg::info(
+          "[ctr] sprite build {:.1f} ms (distort {:.1f} ms; {} frames over 3 ms since the last "
+          "line): {} 2d ({} made smaller), {} hud, {} 3d, {} distort sprites, {} draws; "
+          "textures {} decoded, {} revived, {} cached lookups; VRAM chunks {} written, {} already "
+          "there; {} page uploads this frame",
+          ms, m_distort_ms, m_slow_frames, s.sprites_2d - s0.sprites_2d, s.capped - s0.capped,
+          s.sprites_hud - s0.sprites_hud, s.sprites_3d - s0.sprites_3d, s.distort - s0.distort,
+          s.draws - s0.draws, v.decoded - v0.decoded, v.revived - v0.revived,
+          v.cached - v0.cached, v.chunks_written - v0.chunks_written,
+          v.chunks_skipped - v0.chunks_skipped, frame_uploads);
+      m_slow_frames = 0;
+    }
+  }
+  if (rs.log_now) {
+    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort, {} draws "
+              "(since the last stats)",
+              m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
+              m_stats.distort, m_stats.draws);
+    m_stats = Stats();
+  }
+}
+
+void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
+  auto skip_rest = [&]() {
+    while (dma.current_tag_offset() != rs.next_bucket) {
+      dma.read_and_advance();
+    }
+  };
   m_last_tex = -1;  // textures may have changed since the last frame
   m_last_tex_valid = false;
   m_have_last_ad = false;
@@ -161,7 +222,9 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
 
   // the distorter first (like Sprite3::render_jak1): it reads the screen as drawn so far
   if (read_distorter(dma, rs) && ctr_settings().sprites && ctr_settings().distort) {
+    const double td = ctr_gpu_time_ms();
     draw_distorter();
+    m_distort_ms = ctr_gpu_time_ms() - td;
   }
 
   // frame setup: direct data (3 qw), frame data, mscalf, base/offset
@@ -249,14 +312,6 @@ void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   flush();
   skip_rest();
-
-  if (rs.log_now) {
-    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort, {} draws "
-              "(last 300 frames)",
-              m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
-              m_stats.distort, m_stats.draws);
-    m_stats = Stats();
-  }
 }
 
 bool CtrSpriteRenderer::read_distorter(DmaFollower& dma, CtrRenderState& rs) {
@@ -331,6 +386,11 @@ void CtrSpriteRenderer::draw_distorter() {
     return v;
   };
   ctr_vertex strip[5 * 11];
+  // (AI-assisted) each fan is a triangle strip (the VU program's): all of them go in one strip
+  // draw, joined by repeating the last vertex of one and the first of the next (the triangles in
+  // between have no area). As a triangle list it was 3 (n - 2) vertices per fan instead of n + 2:
+  // up to 256 x 159 vertices (~1 MB of the frame's vertex buffer, and the GPU's vertex work)
+  m_distort_verts.reserve(256 * (5 * 11 + 2));
   for (int i = 0; i < m_distort_count && i < 256; i++) {
     const DistortSprite& sp = m_distort_sprites[i];
     const u32 slices = sp.flag;
@@ -357,11 +417,12 @@ void CtrSpriteRenderer::draw_distorter() {
       strip[n++] = vert(v08 * sp.rgba.y() + sp.xyz, v09 * sp.rgba.z() + sp.st);
       strip[n++] = center;
     }
-    for (int k = 2; k < n; k++) {
-      m_distort_verts.push_back(strip[k - 2]);
-      m_distort_verts.push_back(strip[k - 1]);
-      m_distort_verts.push_back(strip[k]);
+    if (!m_distort_verts.empty()) {
+      const ctr_vertex last = m_distort_verts.back();
+      m_distort_verts.push_back(last);
+      m_distort_verts.push_back(strip[0]);
     }
+    m_distort_verts.insert(m_distort_verts.end(), strip, strip + n);
     m_stats.distort++;
   }
   if (m_distort_verts.empty()) {
@@ -380,7 +441,7 @@ void CtrSpriteRenderer::draw_distorter() {
   st.atest = CTR_TEST_ALWAYS;
   st.ztest = CTR_TEST_GEQUAL;
   st.zwrite = 0;
-  ctr_gpu_draw(&st, m_distort_verts.data(), (int)m_distort_verts.size());
+  ctr_gpu_draw_strip(&st, m_distort_verts.data(), (int)m_distort_verts.size());
   m_stats.draws++;
 }
 
@@ -446,6 +507,13 @@ void CtrSpriteRenderer::flush() {
 }
 
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
+  constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
+  // (AI-assisted) MODE_3D: a corner's GS position is t * (pfog0 / w) + hvdf, and its clip space
+  // position that times w, so the division cancels: c = t * k + w * o (see the corner loop)
+  const float k3x = m_pfog0 * (1.f / 256.f), o3x = (m_hvdf_offset.x() - 2048.f) * (1.f / 256.f);
+  const float k3y = -m_pfog0 * (1.f / 112.f), o3y = (2048.f - m_hvdf_offset.y()) * (1.f / 112.f);
+  const float k3z = m_pfog0 * (1.f / 8388607.5f),
+              o3z = m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
   for (u32 i = 0; i < count; i++) {
     if (mode != MODE_HUD) {
       if (m_world_left <= 0) {
@@ -510,13 +578,12 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
           ok = false;
           break;
         }
-        const float q = m_pfog0 / w;
-        const float gx = t.x() * q + m_hvdf_offset.x(), gy = t.y() * q + m_hvdf_offset.y(),
-                    gz = t.z() * q + m_hvdf_offset.z();
+        // GS x = t.x * pfog0 / w + hvdf.x; clip x = (GS x - 2048) / 256 * w (y, z alike): no
+        // divide per corner (AI-assisted)
         auto& c = clip[k];
-        c.x = (gx - 2048.f) * (1.f / 256.f) * w;
-        c.y = (2048.f - gy) * (1.f / 112.f) * w;
-        c.z = (gz * (1.f / 8388607.5f) - 1.f) * w;
+        c.x = t.x() * k3x + w * o3x;
+        c.y = t.y() * k3y + w * o3y;
+        c.z = t.z() * k3z + w * o3z;
         c.w = w;
         out_left += c.x < -c.w;
         out_right += c.x > c.w;
@@ -571,21 +638,27 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       if (angle != 0.f) {
         fast_sincos(angle, &s, &c);
       }
-      float r12[3], r13[3];
-      for (int k = 0; k < 3; k++) {
-        r12[k] = (m_basis_x[k] * c - m_basis_y[k] * s) * scale_x;
-        r13[k] = (m_basis_x[k] * s + m_basis_y[k] * c) * scale_y;
-      }
+      // (AI-assisted) the two axes and the center straight in ctr_gpu coordinates: the GS screen
+      // mapping (CtrDirect::handle_xyz) folded in once instead of per corner
+      const float ax = (m_basis_x[0] * c - m_basis_y[0] * s) * scale_x * kInvX;
+      const float ay = (m_basis_x[1] * c - m_basis_y[1] * s) * scale_x * -kInvY;
+      const float az = (m_basis_x[2] * c - m_basis_y[2] * s) * scale_x * kInvZ;
+      const float bx = (m_basis_x[0] * s + m_basis_y[0] * c) * scale_y * kInvX;
+      const float by = (m_basis_x[1] * s + m_basis_y[1] * c) * scale_y * -kInvY;
+      const float bz = (m_basis_x[2] * s + m_basis_y[2] * c) * scale_y * kInvZ;
+      const float cx = (base.x() - 2048.f) * kInvX, cy = (2048.f - base.y()) * kInvY,
+                  cz = base.z() * kInvZ;
       for (int k = 0; k < 4; k++) {
         const auto& xy = m_xy_array[(k + (flag & 15)) & 7];
-        for (int c = 0; c < 3; c++) {
-          corners[k][c] = base[c] + r12[c] * xy.x() + r13[c] * xy.y();
-        }
+        corners[k][0] = cx + ax * xy.x() + bx * xy.y();
+        corners[k][1] = cy + ay * xy.x() + by * xy.y();
+        corners[k][2] = cz + az * xy.x() + bz * xy.y();
       }
     }
 
     if (mode != MODE_3D) {
-      // bounding box against the visible GS area (about 1792..2304 x 1824..2272)
+      // bounding box against the visible GS area (about 1792..2304 x 1824..2272: x -1..1,
+      // y -2..2 in ctr_gpu coordinates)
       float x0 = corners[0][0], x1 = x0, y0 = corners[0][1], y1 = y0;
       for (int k = 1; k < 4; k++) {
         x0 = std::min(x0, corners[k][0]);
@@ -593,13 +666,13 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         y0 = std::min(y0, corners[k][1]);
         y1 = std::max(y1, corners[k][1]);
       }
-      if (x1 < 1792.f || x0 > 2304.f || y1 < 1824.f || y0 > 2272.f) {
+      if (x1 < -1.f || x0 > 1.f || y1 < -2.f || y0 > 2.f) {
         continue;
       }
     }
     // Resolve GS state only for sprites that survived the screen bounds test.
     // Texture lookup can decode/upload a texture, and offscreen sprites never use it.
-    if (!m_have_last_ad || memcmp(&ad, &m_last_ad, sizeof(AdGif)) != 0) {
+    if (!m_have_last_ad || !same_adgif(ad, m_last_ad)) {
       m_last_ad = ad;
       m_have_last_ad = true;
       ctr_draw_state& st = m_last_state;
@@ -693,12 +766,11 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       continue;
     }
     ctr_vertex* out = m_last_bucket_ptr->verts.grow(4);
-    constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
     for (int k = 0; k < 4; k++) {
-      // GS screen -> ctr_gpu coordinates (see CtrDirect::handle_xyz)
-      out[k].x = (corners[k][0] - 2048.f) * kInvX;
-      out[k].y = (2048.f - corners[k][1]) * kInvY;
-      out[k].z = std::clamp(corners[k][2] * kInvZ, 0.f, 1.f);
+      // (already in ctr_gpu coordinates)
+      out[k].x = corners[k][0];
+      out[k].y = corners[k][1];
+      out[k].z = std::clamp(corners[k][2], 0.f, 1.f);
       out[k].s = st_out[k][0];
       out[k].t = st_out[k][1];
       out[k].r = r;

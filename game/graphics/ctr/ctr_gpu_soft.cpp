@@ -626,6 +626,16 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
   }
 }
 
+// (AI-assisted) triangle k: vertices k, k + 1, k + 2 (the joins between strips have no area)
+void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  g_soft.cur.draws++;
+  for (int k = 0; k + 2 < count; k++) {
+    const ctr_vertex t[3] = {verts[k], verts[k + 1], verts[k + 2]};
+    raster_triangle(*state, t);
+    g_soft.cur.triangles++;
+  }
+}
+
 int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int /*size*/) {
   auto rgba = untile((const uint8_t*)data, w, h, format);
   return ctr_gpu_tex_create(w, h, rgba.data());
@@ -1020,14 +1030,17 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
 void ctr_gpu_set_steady_pacing(int) {}
 void ctr_gpu_note_release(void) {}
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
-                          double* buffer_wait_ms) {
+                          double* buffer_wait_ms, unsigned int* just_in_time, int* floor) {
   *buffer_wait_ms = 0;
   for (int i = 0; i < 5; i++) {
     hist[i] = 0;
   }
   *latency = -1;
   *dropped = 0;
+  *just_in_time = 0;
+  *floor = 0;
 }
+void ctr_gpu_want_detailed_stats(void) {}
 void ctr_gpu_set_proctex(int) {}
 void ctr_gpu_set_compact_textures(int) {}
 int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int /*flags*/) {

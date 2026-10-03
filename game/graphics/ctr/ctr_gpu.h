@@ -156,6 +156,10 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
 /* Draw quads: 4 vertices each, triangles (0, 1, 3) and (3, 1, 2) (a strip in the order 0 1 3 2).
  * A third fewer vertices than ctr_gpu_draw for sprites. */
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count);
+/* (AI-assisted) Draw a triangle strip: count vertices, count - 2 triangles (k - 2, k - 1, k).
+ * Several strips go in one draw joined by repeating the last vertex of one and the first of the
+ * next (the triangles in between have no area). State like ctr_gpu_draw. */
+void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count);
 
 /* (AI-assisted) The PS2 ocean (CtrOceanFull, config.ini ocean = full): vertices as the ocean's VU1
  * programs send them to the GS. x, y: screen position in GS units (12.4 fixed point, the screen
@@ -268,9 +272,10 @@ void ctr_gpu_set_steady_pacing(int on);
 void ctr_gpu_note_release(void);
 /* (AI-assisted) since the last call: frames shown for 1, 2, 3, 4, 5+ vblanks, the presentation
  * latency in vblanks (-1: steady pacing off), frames skipped and the render thread's total wait
- * for a free screen buffer */
+ * for a free screen buffer; just_in_time: frames the GPU finished in the vblank before their own
+ * (no vblank to spare), floor: the latency it doesn't go below for now (a frame was late there) */
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
-                          double* buffer_wait_ms);
+                          double* buffer_wait_ms, unsigned int* just_in_time, int* floor);
 void ctr_gpu_set_proctex(int on);
 void ctr_gpu_set_compact_textures(int on);
 /* (AI-assisted) Overlap: hand the draws so far to the GPU in the middle of a frame (after a
@@ -425,8 +430,25 @@ typedef struct {
   int radial_textures;
   int early_depth_draws;
   int proctex_draws;
+  /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
+   * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
+   * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =
+   * steady, whose fence marks a frame done): done(N) - max(first work handed over(N), done(N-1)) */
+  float gpu_wait_ms;
+  float gpu_busy_ms;
+  int gpu_busy_frames;
+  unsigned int vbuf_used; /* (AI-assisted) immediate vertex buffer bytes this frame (of vbuf_size) */
+  unsigned int vbuf_size;
+  int vbuf_dropped;       /* draws dropped: the vertex buffer was full */
+  /* (AI-assisted) filled only in the frame after ctr_gpu_want_detailed_stats (it scans all texture
+   * slots and probes the linear heap): textures, tex_bytes, compact_*, radial_textures,
+   * linear_free, vram_free and linear_largest (the largest block linearAlloc can give) */
+  int detailed;
+  unsigned int linear_largest;
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
+/* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
+void ctr_gpu_want_detailed_stats(void);
 
 /* Monotonic time in milliseconds. */
 double ctr_gpu_time_ms(void);

@@ -20,6 +20,7 @@
 #include "common/math/Vector.h"
 
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 class CtrDirect;
@@ -91,7 +92,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   DistortTables m_distort_tables;
   std::vector<DistortSprite> m_distort_sprites;
   int m_distort_count = 0;
-  std::vector<ctr_vertex> m_distort_verts;
+  std::vector<ctr_vertex> m_distort_verts;  // (AI-assisted) one triangle strip (ctr_gpu_draw_strip)
 
   VecData m_vec[kSpritesPerChunk];
   AdGif m_adgif[kSpritesPerChunk];
@@ -151,4 +152,11 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
   } m_stats;
+  // (AI-assisted) a frame that took more than 3 ms logs its counts (render)
+  void build_sprites(DmaFollower& dma, CtrRenderState& rs);
+  void log_slow_frame(CtrRenderState& rs, double ms, const Stats& s0, const CtrVram::Stats& v0);
+  double m_distort_ms = 0;
+  double m_last_slow_log = -1e9;
+  int m_slow_frames = 0;  // since the last slow frame line
+  int m_vram_uploads_mark = 0;  // CtrVram page uploads at the end of the last sprite build
 };

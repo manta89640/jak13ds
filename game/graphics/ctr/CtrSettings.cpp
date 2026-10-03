@@ -139,6 +139,8 @@ CtrSettings load() {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
       s.gpu_profile = parse_bool(v);
+    } else if (key == "gpu_counters") {
+      s.gpu_counters = parse_bool(v);
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
@@ -196,7 +198,7 @@ std::string CtrSettings::summary() const {
       "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
-      "fast_clock {}{}{}{}",
+      "fast_clock {}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale, shrub_distance,
       tie_distance_scale, fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
@@ -206,7 +208,8 @@ std::string CtrSettings::summary() const {
       sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
-      depth16 ? " depth16" : "", emulator ? " (emulator)" : "");
+      gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",
+      emulator ? " (emulator)" : "");
 }
 
 const CtrSettings& ctr_settings() {
