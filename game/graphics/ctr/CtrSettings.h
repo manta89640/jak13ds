@@ -71,6 +71,12 @@ struct CtrSettings {
   // (AI-assisted) Off by default: on a New 3DS it left large screen blocks where the level never
   // drew (Azahar ignores the early depth test, so only hardware shows it).
   bool early_depth = false;
+  // (AI-assisted) early_depth = block32: with the render target in 32x32 block mode (256x416,
+  // cropped to the screen), which the early depth test seems to need. Hardware only (off).
+  bool early_depth_block32 = false;
+  // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil (stencil is unused): half the
+  // depth traffic, but 256x coarser depth (z-fighting far away). Off by default.
+  bool depth16 = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)
   bool compact_textures = true;

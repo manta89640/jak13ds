@@ -64,6 +64,61 @@ const ProfileMode kProfileModes[] = {
 constexpr int kProfileModeCount = sizeof(kProfileModes) / sizeof(kProfileModes[0]);
 constexpr double kProfileModeMs = 2500.0;  // per mode
 constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
+
+// (AI-assisted) gpu_profile: the GPU's own counters over the first "all" window of a level's
+// profile (ctr_gpu_hwprof_begin / end), one log line. Azahar likely reads zeros.
+bool g_hw_measuring = false;
+bool g_hw_refusal_logged = false;
+
+void hw_profile_begin() {
+  const int r = ctr_gpu_hwprof_begin();
+  g_hw_measuring = r == 0;
+  if (r != 0 && !g_hw_refusal_logged) {
+    g_hw_refusal_logged = true;
+    lg::warn("[ctr] gpu profile: GPU counters unavailable (GSP result {:#x}), not measured",
+             (u32)r);
+  }
+}
+
+void hw_profile_end(const std::string& level) {
+  if (!g_hw_measuring) {
+    return;
+  }
+  g_hw_measuring = false;
+  ctr_gpu_hwprof hw;
+  const int r = ctr_gpu_hwprof_end(&hw);
+  if (r != 0) {
+    if (!g_hw_refusal_logged) {
+      g_hw_refusal_logged = true;
+      lg::warn("[ctr] gpu profile: GPU counters unavailable (GSP result {:#x})", (u32)r);
+    }
+    return;
+  }
+  static const char* const kStages[8] = {"arrays", "vsh",   "setup", "raster",
+                                         "tex",    "light", "comb",  "fb"};
+  u32 samples = 0;
+  for (u32 n : hw.stage) {
+    samples += n;
+  }
+  std::string line = fmt::format(
+      "[ctr] gpu profile {}: hw busy % of {} samples ({} expected, {} frames):", level, samples,
+      (int)(hw.ms * 268111.856 / 65536.0), hw.frames);
+  for (int i = 0; i < 8; i++) {
+    line += fmt::format(" {} {:.1f}", kStages[i], samples ? 100.0 * hw.stage[i] / samples : 0.0);
+  }
+  // 0x10400070 + 4 * i (GBATEK), assumed bytes: memcopy-r should be ~0.37 MB/frame (the display
+  // transfer reads the 240x400 RGBA8 buffer) if so
+  static const char* const kTraffic[CTR_GPU_HW_TRAFFIC] = {
+      "main-r",  "main-w",   "vramA-r",   "vramA-w",   "vramB-r", "vramB-w", "arrays",
+      "tex",     "depth-r",  "depth-w",   "color-r",   "color-w", "lcd-top", "lcd-bot",
+      "memcopy-r", "memcopy-w", "fill0-w", "fill1-w", "cpu-vram-r", "cpu-vram-w"};
+  line += "; MB/frame:";
+  const double div = 1048576.0 * std::max(1, hw.frames);
+  for (int i = 0; i < CTR_GPU_HW_TRAFFIC; i++) {
+    line += fmt::format(" {} {:.2f}", kTraffic[i], hw.traffic[i] / div);
+  }
+  lg::info("{}", line);
+}
 }  // namespace
 
 namespace ctr_gfx {
@@ -429,6 +484,7 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
   if (m_profile_ms.empty()) {
     m_profile_ms.assign(kProfileModeCount, -1.0);
     m_profile_start = now;
+    hw_profile_begin();
   }
   // the GPU time of the frame before this one: not the first frames of a mode
   if (++m_profile_frames > kProfileSettleFrames) {
@@ -439,6 +495,9 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
     return;
   }
   m_profile_ms[m_profile_mode] = m_profile_count ? m_profile_sum / m_profile_count : -1.0;
+  if (m_profile_mode == 0 && m_profile_cycles == 0) {
+    hw_profile_end(m_profile_level);  // the first window with everything drawn
+  }
   m_profile_mode = (m_profile_mode + 1) % kProfileModeCount;
   m_profile_start = now;
   m_profile_frames = 0;
@@ -596,9 +655,17 @@ void wait_render_idle() {
 int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
+  ctr_gpu_set_framebuffer(ctr_settings().early_depth_block32 ? 1 : 0,
+                          ctr_settings().depth16 ? 1 : 0);
   if (ctr_gpu_init() != 0) {
     lg::error("[ctr] GPU init failed");
     return 1;
+  }
+  {
+    char target[256];
+    if (ctr_gpu_describe_target(target, sizeof(target)) > 0) {
+      lg::info("[ctr] top render target: {}", target);
+    }
   }
 #ifdef __3DS__
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");

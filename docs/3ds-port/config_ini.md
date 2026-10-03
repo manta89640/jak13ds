@@ -70,6 +70,8 @@ rgba4_as_rgba8 = auto      # 16-bit textures with alpha stored as 32-bit. auto: 
 # ---- 3DS hardware features (AI-assisted) ----
 color16 = off              # on: 16-bit (RGB565) color buffer and top screen (half the memory traffic per pixel); faint blended layers like waterfall mist vanish and gradients band
 early_depth = off          # the GPU's early depth test for opaque level / model draws (drawn nearest first): hidden pixels skip texturing. Off by default: on a New 3DS it leaves large blocks of the screen where the level never draws (Azahar ignores it)
+                           # block32: early depth with the render target in 32x32 block mode (256x416, cropped to the screen by an extra texture copy; needs frame_pacing = steady and 0.4 MB linear memory, else the usual target with early depth off). Hardware only: Azahar doesn't emulate early depth or block mode. Screenshots are skipped in this mode
+depth16 = off              # on: 16-bit depth buffer instead of 24-bit + stencil (stencil is unused): half the depth buffer traffic and 192 KB more VRAM for textures, but the game's depth is 1 / distance, so 16 bits leave ~6 cm steps at 30 m and ~0.6 m at 100 m: far geometry may z-fight
 compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats (L8, LA8, RGB565, RGBA5551, RGBA4), and in 384 KB of reserved VRAM with vram_textures
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read
 sprite_max_size = 0.5      # world particles and glows at most this fraction of the screen height across (0 = no limit)
@@ -77,7 +79,7 @@ vis_culling = on           # the game's own visibility data hides level parts be
 merc_lod_scale = 0.5       # characters switch to their lower detail models at this fraction of the game's distances (0.05 .. 1)
 
 # ---- measuring ----
-gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers)
+gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers); also logs the GPU's own counters once per level (`[ctr] gpu profile <level>: hw busy % ...`: which pipeline stage is busy, and memory traffic per frame; zeros in Azahar)
 ```
 
 ## Recommended settings

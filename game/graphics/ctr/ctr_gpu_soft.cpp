@@ -818,6 +818,17 @@ int ctr_gpu_rgba4_as_rgba8(void) {
 void ctr_gpu_set_vram_textures(int) {}
 void ctr_gpu_set_color16(int) {}
 void ctr_gpu_set_early_depth(int) {}
+void ctr_gpu_set_framebuffer(int, int) {}
+int ctr_gpu_describe_target(char*, int) {
+  return 0;
+}
+int ctr_gpu_hwprof_begin(void) {
+  return 1;
+}
+int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
+  memset(out, 0, sizeof(*out));
+  return 1;
+}
 void ctr_gpu_set_steady_pacing(int) {}
 void ctr_gpu_note_release(void) {}
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,

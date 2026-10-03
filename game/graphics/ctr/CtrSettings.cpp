@@ -126,7 +126,10 @@ CtrSettings load() {
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
-      s.early_depth = parse_bool(v);
+      s.early_depth_block32 = v == "block32";
+      s.early_depth = s.early_depth_block32 || parse_bool(v);
+    } else if (key == "depth16") {
+      s.depth16 = parse_bool(v);
     } else if (key == "compact_textures") {
       s.compact_textures = parse_bool(v);
     } else if (key == "proctex_glows") {
@@ -154,14 +157,14 @@ std::string CtrSettings::summary() const {
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
-      "vis_culling {}{}{}",
+      "vis_culling {}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
       sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
-      early_depth ? "on" : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
+      early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, vis_culling ? "on" : "off", gpu_profile ? " gpu_profile" : "",
-      emulator ? " (emulator)" : "");
+      depth16 ? " depth16" : "", emulator ? " (emulator)" : "");
 }
 
 const CtrSettings& ctr_settings() {
