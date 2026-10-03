@@ -190,6 +190,40 @@
       0))
   0)
 
+;; og:preserve-this (AI-assisted) 3DS animation LOD (config.ini anim_lod, set by the kernel:
+;; kmachine.cpp InitMachine_PCPort). The joint math of an actor that was not drawn last frame and
+;; is far from both the camera and Jak runs on one frame in 4 only (staggered by pid), so its
+;; joints are at most 3 frames old. Everything else in its frame still runs: its code, its post
+;; (eval-joint-control, anim effects, collision update-transforms!), sounds.
+;; Never skipped: Jak and his children (Daxter), cutscenes (movie), actors with a prebind or
+;; postbind joint callback (those compute things the logic uses, e.g. mistycannon's launch
+;; origin; process-taskable's look-at), and anything within ANIM_LOD_DIST of the camera or of Jak
+;; (plus its bounding radius), so collision prims attached to joints are always current where Jak
+;; can touch them.
+;; When such an actor comes into view, the draw that sets was-drawn uses the pose and origin from
+;; its last update (at most 3 frames old, from far away); the next frame updates it again.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-anim-lod* symbol)
+  (defconstant ANIM_LOD_DIST (meters 30))
+  (define *anim-lod-frame* 0)
+  (defun anim-lod-skip? ((pd process-drawable))
+    "Skip this frame's joint math for pd (see above)?"
+    (let ((dc (-> pd draw)))
+      (and *pc-3ds-anim-lod*
+           (nonzero? (logand (+ *anim-lod-frame* (-> pd pid)) 3))
+           (not (logtest? (-> dc status) (draw-status was-drawn)))
+           *target*
+           (!= pd *target*)
+           (!= (ppointer->process (-> pd parent)) *target*)
+           (nonzero? (-> pd skel))
+           (not (-> pd skel prebind-function))
+           (not (-> pd skel postbind-function))
+           (not (logtest? (-> *kernel-context* prevent-from-run) (process-mask movie)))
+           (let* ((r (+ (-> dc bounds w) ANIM_LOD_DIST))
+                  (r2 (* r r)))
+             (and (< r2 (vector-vector-distance-squared (-> dc origin) (-> *math-camera* trans)))
+                  (< r2 (vector-vector-distance-squared (-> dc origin) (-> *target* control trans)))))))))
+
 (defun execute-math-engine ()
   (#when PC_PORT
     (with-dma-buffer-add-bucket ((debug-buf (-> (current-frame) global-buf)) (bucket-id debug-no-zbuf))
@@ -201,8 +235,12 @@
                         (font-color default)
                         (font-flags shadow kerning)))))
   (let ((gp-0 *matrix-engine*))
+    (#when TARGET_3DS
+      (+! *anim-lod-frame* 1))
     (countdown (s5-0 (-> gp-0 length))
-      (let ((a0-1 (handle->process (-> gp-0 s5-0)))) (if a0-1 (do-joint-math! (the-as process-drawable a0-1)))))
+      (let ((a0-1 (handle->process (-> gp-0 s5-0))))
+        (if (and a0-1 (#if TARGET_3DS (not (anim-lod-skip? (the-as process-drawable a0-1))) #t))
+          (do-joint-math! (the-as process-drawable a0-1)))))
     (set! (-> gp-0 length) 0))
   0
   0)

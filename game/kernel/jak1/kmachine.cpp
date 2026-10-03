@@ -51,6 +51,7 @@
 
 #ifdef __3DS__
 extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
+extern "C" int ctr_config_bool(const char* key, int def);              // platform/3ds/port
 #endif
 
 using namespace ee;
@@ -639,6 +640,18 @@ void InitMachine_PCPort() {
 #endif
     intern_from_c("*pc-3ds-ocean-full*")->value =
         ocean_full ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+  }
+  // (AI-assisted) config.ini anim_lod (default on): the joint math of actors that weren't drawn
+  // and are far from the camera and Jak runs every 4th frame (process-drawable.gc
+  // anim-lod-skip?). Off on other builds.
+  {
+    bool anim_lod = false;
+#ifdef __3DS__
+    anim_lod = ctr_config_bool("anim_lod", 1);
+    lg::info("animation LOD {} (config.ini anim_lod)", anim_lod ? "on" : "off");
+#endif
+    intern_from_c("*pc-3ds-anim-lod*")->value =
+        anim_lod ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
   }
 
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);
