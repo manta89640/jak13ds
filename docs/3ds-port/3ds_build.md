@@ -697,13 +697,29 @@ process pointer (s6) the original clobbers, stores in branch delay slots, delibe
   version on the same inputs and compares v0 and every byte stored (logged stores); functions
   with GOAL callbacks (`sp-process-block-2d`) are checked on one call in
   `OPENGOAL_MIPS2C_VERIFY_FULL_EVERY` (default 8) by saving, restoring and comparing all of GOAL
-  memory. Mismatches are logged as `mips2c verify MISMATCH`, a summary line `mips2c verify:` every
-  20 s. `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the checker).
+  memory. Mismatches are logged as `mips2c verify MISMATCH` (the first
+  `OPENGOAL_MIPS2C_VERIFY_REPORTS` of each function, default 10), a summary line `mips2c verify:`
+  every 20 s. `OPENGOAL_MIPS2C_VERIFY_INPUTS=name[,name...]` adds the 64 bytes at every argument
+  that is a GOAL address, as before the call, to those functions' MISMATCH lines (to replay them in
+  the differential tests). `OPENGOAL_MIPS2C_VERIFY_SELF=1` compares mips2c with itself (tests the
+  checker).
+- (AI-assisted) The natives without a mips2c version (the four GOAL collision functions above,
+  `pc-collide-frag-may-hit?`, `pc-anim-decomp-request`, `pc-anim-finalize-frame`: registered with
+  their own `as_exec` as the execute function) are not checked (the log says so once each). When
+  the mips2c side calls one, it runs native and its stores count as the mips2c side's. Their
+  `as_exec` puts v0 in the context like a mips2c function: C mode's adapter
+  (`mips2c_goalc_adapter`) returns the context's v0. (Before, `as_exec` only returned it, so mips2c
+  code calling these got 0 in verify mode, which reported mismatches in 43% of the
+  `moving-sphere-triangle-intersect` calls, in `(method 9 collide-cache-prim)` and
+  `(method 9 collide-puss-work)` that call it or closest-pt-in-triangle, and on every
+  `pc-collide-frag-may-hit?` call. The natives were right: bit-identical on those inputs on the
+  host and under Unicorn in the 3DS's float mode.)
 - `OPENGOAL_MIPS2C_NATIVE=0` (host): use the mips2c versions. On the 3DS: `config.ini`
   `mips2c_native_off = all`, or the names of the functions to turn off, separated by spaces or
   commas (e.g. `sp-launch-particles-var`). stdout.log says which are off. A native
   that another native calls directly (`native_stub_slot`) still runs from there: turn its callers
-  off too.
+  off too. The natives without a mips2c version stay on (before, turning one off made it return
+  garbage in C mode).
 - Native code must store to GOAL memory only through `gstore*` (verify mode logs them).
 - Quadwords that the mips2c code moves with `lqc2`/`sqc2` (which assert 16-byte alignment) or
   `lq`/`sq` (which align down) should use `gload_q`/`gstore_q`: the compiler then moves them with
@@ -748,12 +764,21 @@ arguments the callee uses and the process pointer) and the VU0 random generator.
   test's GOAL memory like the linker would and run on a stack in GOAL memory (`goalc_ref.cpp`).
   The tests of the natives that call them run the compiled GOAL code on the mips2c side, and the
   `(GOAL callees)` variants bind the symbols to it on both sides (a GOAL redefinition).
+  (AI-assisted) The fixtures of collide-func, geometry and vector are for GOALC_ABI_VERSION 2 (now
+  4) and don't build: `MIPS2C_TEST_NO_GOALC_REF=1 run.sh host` leaves them out, the native
+  functions are then their own reference (as in the game), and the tests that need them (the
+  `(GOAL callees)` variants) are skipped.
+- (AI-assisted) The mips2c side's v0 is the context's, as C mode's adapter returns it (not what the
+  execute function returns). `moving-sphere-triangle-intersect (game inputs)`: 35 inputs from the
+  game, with ray-sphere-intersect and ray-cylinder-intersect native on the mips2c side too
+  (`Test::native_callees`, as in the game); they fail without v0 in `native_as_exec`'s context.
 - coverage: gcov line coverage of the tested mips2c functions (100% for all of them, except 8
   lines of `shadow-add-verts` that no input reaches: a fourth single quadword copy after a loop
   that only ends with fewer than 4 left).
 - bench: ARM instructions per call of each version (their own code, not the GOAL functions they
   call), counted with qemu-arm.
-- Test args: `--filter SUBSTR`, `--scale X` (cases), `--seed N`, `--case N`, `--reports N`,
+- Test args: `--filter SUBSTR` (or `=NAME`: that test only, not its variants), `--scale X` (cases),
+  `--seed N`, `--case N`, `--reports N`,
   `--self` (mips2c against mips2c: tests the harness), `--fpscr HEX` (arm, and FPCR on an arm64
   host: `--fpscr 0x03000000` is the 3DS's VFP mode there too), `--dump DIR` (writes every case's
   input for the runner below).
@@ -764,8 +789,11 @@ arguments the callee uses and the process pointer) and the VU0 random generator.
   it builds the mips2c and native versions with devkitARM and the 3DS build's flags (and the 3DS's
   `ctr_mem.S` memcpy), runs them under Unicorn (ARM1176, FPSCR 0x03000000) on cases the host
   build dumped (`--dump`, generated in the 3DS's VFP mode), compares v0 and GOAL memory, and counts
-  ARM instructions. Only `shadow-execute` (its GOAL callees are faked in `armbench.cpp`). Needs a
-  python3 with `unicorn` (`ARMBENCH_PYTHON`).
+  ARM instructions. Only `shadow-execute` (its GOAL callees are faked in `armbench.cpp`),
+  `moving-sphere-triangle-intersect` (also the game's inputs) and `collide-do-primitives` (their
+  callees are linked: the mips2c version on the mips2c side, through C mode's adapter, the native
+  GOAL collision functions on both). Needs a python3 with `unicorn` (`ARMBENCH_PYTHON`) and the
+  `host` build.
 - The shadow test's geos read garbage only in default NaN mode (`arm`, `--fpscr 0x03000000`):
   without it, which of two NaNs an operation returns (and the sign of a NaN a fused
   multiply-subtract negates) depends on how the compiler ordered the operands, so the bytes the

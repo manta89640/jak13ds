@@ -6,7 +6,8 @@
  *
  * Verify mode (C backend, host builds): every top-level call of a function with a native version
  *   1. runs the mips2c version with every store to GOAL memory logged (address, size, old bytes);
- *      mips2c functions it calls run their mips2c version too,
+ *      mips2c functions it calls run their mips2c version too (natives without a mips2c version,
+ *      GOAL functions replaced by native code, run native, their stores logged with these),
  *   2. saves the bytes it wrote and v0, then puts the old bytes back,
  *   3. runs the native version on the same arguments, its stores logged too (gstore*); native
  *      functions it calls run native too,
@@ -17,6 +18,8 @@
  * Functions that call GOAL code (NATIVE_CALLS_GOAL) are checked on one call in
  * OPENGOAL_MIPS2C_VERIFY_FULL_EVERY (default 8) instead, by saving, restoring and comparing all of
  * GOAL memory (see verify_call_full). The other calls run the native version only.
+ * Natives without a mips2c version (registered with their as_exec as the execute function) are not
+ * checked: there is nothing to check them against.
  */
 
 #include "mips2c_native.h"
@@ -63,7 +66,10 @@ struct NativeEntry {
   u64 full_checks = 0;
   u64 bytes_compared = 0;
   u64 mismatches = 0;
-  u64 seen = 0;  // calls, including the ones not checked (NATIVE_CALLS_GOAL)
+  u64 seen = 0;     // calls, including the ones not checked (NATIVE_CALLS_GOAL)
+  u64 reports = 0;  // MISMATCH lines printed
+  //! OPENGOAL_MIPS2C_VERIFY_INPUTS lists it: its MISMATCH lines show the arguments' data
+  bool log_inputs = false;
 };
 
 std::vector<NativeEntry*> g_entries;
@@ -199,7 +205,6 @@ std::vector<LogEntry> g_native_log;  // stores of the native version (old_offset
 std::vector<std::pair<u32, u32>> g_mips2c_ranges;  // merged [start, end) of g_log
 u64 g_total_calls = 0;
 u64 g_total_mismatches = 0;
-u64 g_reports = 0;
 
 // the stack below the caller is scratch space for both versions
 constexpr u32 kStackScratch = 256 * 1024;
@@ -262,14 +267,50 @@ std::string describe_bytes(const u8* p, u32 n) {
   return s;
 }
 
+// OPENGOAL_MIPS2C_VERIFY_REPORTS=N: MISMATCH lines printed per function (default 10)
+u64 g_reports_per_fn = 10;
+// OPENGOAL_MIPS2C_VERIFY_INPUTS=name[,name...]: the MISMATCH lines of these functions also show the
+// 64 bytes at every argument that is a GOAL address, as they were before the call (to replay the
+// call in test/mips2c_native)
+std::string g_inputs_names;
+// those bytes, for the call being checked
+std::string g_inputs;
+
+bool listed(const std::string& list, const std::string& name) {
+  size_t i = 0;
+  while (i <= list.size()) {
+    const size_t e = std::min(list.find(',', i), list.size());
+    if (list.compare(i, e - i, name) == 0 && e - i == name.size()) {
+      return true;
+    }
+    i = e + 1;
+  }
+  return false;
+}
+
+std::string describe_inputs(const u64* args) {
+  std::string s = " inputs:";
+  for (int i = 0; i < 8; i++) {
+    if (args[i] < 0x10000 || args[i] > (u64)EE_MAIN_MEM_SIZE - 64) {
+      continue;
+    }
+    s += fmt::format(" a{}@{:x}=", i, args[i]);
+    for (u32 k = 0; k < 64; k++) {
+      s += fmt::format("{:02x}", g_ee_main_mem[args[i] + k]);
+    }
+  }
+  return s;
+}
+
 void report(NativeEntry* e, const u64* args, const std::string& what) {
   e->mismatches++;
   g_total_mismatches++;
-  if (g_reports++ < 40) {
+  if (e->reports++ < g_reports_per_fn) {
     lg::error(
-        "mips2c verify MISMATCH in {} (call {}), args {:x} {:x} {:x} {:x} {:x} {:x} {:x} {:x}: {}",
+        "mips2c verify MISMATCH in {} (call {}), args {:x} {:x} {:x} {:x} {:x} {:x} {:x} {:x}: "
+        "{}{}",
         e->name, e->calls, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-        what);
+        what, e->log_inputs ? g_inputs : "");
   }
 }
 
@@ -294,14 +335,19 @@ u64 verify_call(NativeEntry* e, u64* args_in) {
 
   e->calls++;
   g_total_calls++;
+  if (e->log_inputs) {
+    g_inputs = describe_inputs(args);
+  }
 
   // 1. mips2c, with the stores logged
   g_log.clear();
   g_log_bytes.clear();
   g_write_log_on = true;
+  g_native_log_on = true;  // natives without a mips2c version that it calls (native_log_record)
   g_state = VerifyState::IN_MIPS2C;
   const u64 v0_mips2c = mips2c_goalc_adapter((void*)e->exec, e->stack_size, args);
   g_state = VerifyState::NONE;
+  g_native_log_on = false;
   g_write_log_on = false;
 
   // 2. save what it wrote, put the old bytes back
@@ -416,6 +462,9 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
   const u32 end = EE_MAIN_MEM_SIZE;
   e->calls++;
   g_total_calls++;
+  if (e->log_inputs) {
+    g_inputs = describe_inputs(args);
+  }
   if (!g_snap_before) {
     g_snap_before = (u8*)malloc(EE_MAIN_MEM_SIZE);
     g_snap_after = (u8*)malloc(EE_MAIN_MEM_SIZE);
@@ -522,6 +571,12 @@ void write_log_record(u32 addr, u32 size) {
 }
 
 void native_log_record(u32 addr, u32 size) {
+  if (g_state == VerifyState::IN_MIPS2C) {
+    // (AI-assisted) a native function without a mips2c version that the mips2c version called:
+    // its stores are the mips2c version's (put back before the native run, compared after it)
+    write_log_record(addr, size);
+    return;
+  }
   g_native_log.push_back({addr, size, 0});
 }
 #endif
@@ -550,7 +605,11 @@ u32 native_goalc_fn_id(const std::string& name,
                        u32 stack_size,
                        const NativeImpl* impl,
                        u32 wide_mask) {
-  if (native_off(name)) {
+  // (AI-assisted) A GOAL function replaced by native code (def-mips2c, registered with the
+  // native's as_exec) has no mips2c version: it can't be turned off (the "mips2c version" would be
+  // the same code through another entry), and verify mode has nothing to check it against.
+  const bool no_mips2c = exec == impl->as_exec;
+  if (!no_mips2c && native_off(name)) {
     return 0;
   }
   NativeEntry* e;
@@ -563,6 +622,11 @@ u32 native_goalc_fn_id(const std::string& name,
     e->perf_name = "m2c:" + name;
     g_entries_by_name[name] = e;
     g_entries.push_back(e);
+#if MIPS2C_WRITE_LOG
+    if (no_mips2c && verify_enabled()) {
+      lg::info("mips2c verify: {} has no mips2c version, not checked", name);
+    }
+#endif
   }
   e->exec = exec;
   e->stack_size = stack_size;
@@ -572,13 +636,7 @@ u32 native_goalc_fn_id(const std::string& name,
     idx++;
   }
 #if MIPS2C_WRITE_LOG
-  if (impl->goal && !verify_enabled() && wide_mask == 0) {
-    // called by GOAL code without the adapter (no perf section either: these are small). The
-    // direct entry only reads the low halves of the arguments (goal_c_abi.h), so it's only used
-    // when GOAL code says no argument is wide.
-    return goalc_fn_id_for_host((void*)impl->goal);
-  }
-  if (verify_enabled()) {
+  if (verify_enabled() && !no_mips2c) {
     static bool announced = false;
     if (!announced) {
       announced = true;
@@ -590,19 +648,25 @@ u32 native_goalc_fn_id(const std::string& name,
       if (const char* f = getenv("OPENGOAL_MIPS2C_VERIFY_FULL_EVERY")) {
         g_full_every = strtoull(f, nullptr, 10);
       }
+      if (const char* r = getenv("OPENGOAL_MIPS2C_VERIFY_REPORTS")) {
+        g_reports_per_fn = strtoull(r, nullptr, 10);
+      }
+      if (const char* n = getenv("OPENGOAL_MIPS2C_VERIFY_INPUTS")) {
+        g_inputs_names = n;
+      }
       atexit([] { print_summary(); });
       lg::warn("mips2c verify mode: native functions are checked against mips2c");
     }
+    e->log_inputs = listed(g_inputs_names, name);
     return goalc_fn_id_for_adapted(verify_adapter, (void*)impl->fn, idx, wide_mask);
   }
-#else
+#endif
   if (impl->goal && wide_mask == 0) {
     // called by GOAL code without the adapter (no perf section either: these are small). The
     // direct entry only reads the low halves of the arguments (goal_c_abi.h), so it's only used
     // when GOAL code says no argument is wide.
     return goalc_fn_id_for_host((void*)impl->goal);
   }
-#endif
   return goalc_fn_id_for_adapted(native_adapter, (void*)impl->fn, idx, wide_mask);
 }
 

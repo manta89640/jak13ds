@@ -18,7 +18,8 @@
  * (mips2c_native.cpp). OPENGOAL_MIPS2C_NATIVE=0 uses the mips2c versions (3DS: config.ini
  * mips2c_native_off, see mips2c_native.cpp).
  * GOAL functions replaced by a native version (def-mips2c, no mips2c version) register the
- * native's as_exec as their execute function.
+ * native's as_exec as their execute function. (AI-assisted) Verify mode doesn't check them and
+ * they can't be turned off: there is no other version.
  *
  * In C mode GOAL code calls a native through an adapter thunk (8 arguments copied, a perf section,
  * scratch space on the stack). Small natives without scratch space that GOAL calls often use
@@ -83,7 +84,12 @@ u64 native_as_exec(void* ctxt) {
                        c->gprs[a3].du64[0], c->gprs[t0].du64[0], c->gprs[t1].du64[0],
                        c->gprs[t2].du64[0], c->gprs[t3].du64[0]};
   // the trampoline's fake GOAL stack (goal_stack_size bytes) is below sp
-  return F(NativeArgs{args, c->gprs[s6].du64[0], c->gprs[s7].du64[0], c->gprs[sp].du32[0]});
+  const u64 result =
+      F(NativeArgs{args, c->gprs[s6].du64[0], c->gprs[s7].du64[0], c->gprs[sp].du32[0]});
+  // (AI-assisted) v0 in the context too, like a mips2c function: C mode's adapter
+  // (mips2c_goalc_adapter) returns the context's v0, not what the execute function returns
+  c->gprs[v0].du64[0] = result;
+  return result;
 }
 
 #define MIPS2C_NATIVE_IMPL(fn, flags, scratch)          \

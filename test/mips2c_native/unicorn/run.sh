@@ -9,9 +9,12 @@
 #
 #   test/mips2c_native/unicorn/run.sh [--scale X] [--seed N]
 #
-# Needs devkitARM (DEVKITARM, default /opt/devkitpro/devkitARM) and python3 with unicorn
-# (ARMBENCH_PYTHON: a python3 that has it). Only shadow-execute: its GOAL callees are faked in
-# armbench.cpp.
+# Needs devkitARM (DEVKITARM, default /opt/devkitpro/devkitARM), python3 with unicorn
+# (ARMBENCH_PYTHON: a python3 that has it) and the host build of the tests (run.sh host), which
+# writes the cases. The tests whose GOAL callees armbench.cpp fakes or links: shadow-execute,
+# moving-sphere-triangle-intersect (also on the game's inputs) and collide-do-primitives (their
+# GOAL callees, ray-sphere-intersect and ray-cylinder-intersect, are native code on both sides, as
+# in the game).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -43,6 +46,8 @@ FLAGS=(-fno-threadsafe-statics
 M2C="$ROOT/game/mips2c/jak1_functions"
 "$CXX" "${FLAGS[@]}" -O2 -c "$M2C/shadow.cpp" -o "$dir/m2c_shadow.o" &
 "$CXX" "${FLAGS[@]}" -O3 -c "$M2C/native_shadow.cpp" -o "$dir/native_shadow.o" &
+"$CXX" "${FLAGS[@]}" -O2 -c "$M2C/collide_func.cpp" -o "$dir/m2c_collide_func.o" &
+"$CXX" "${FLAGS[@]}" -O3 -c "$M2C/native_collide_func.cpp" -o "$dir/native_collide_func.o" &
 "$CXX" "${FLAGS[@]}" -O2 -c "$HERE/armbench.cpp" -o "$dir/armbench.o" &
 # the 3DS's memcpy / memset (platform/3ds/port/ctr_mem.S), not newlib's
 "$DKA/bin/arm-none-eabi-gcc" -march=armv6k -mfloat-abi=hard -c "$ROOT/platform/3ds/port/ctr_mem.S" \
@@ -52,11 +57,24 @@ M2C="$ROOT/game/mips2c/jak1_functions"
 wait
 "$CXX" "${FLAGS[@]}" -T "$HERE/armbench.ld" -nostartfiles -specs=nosys.specs \
   -Wl,-Map="$dir/armbench.map" -Wl,--gc-sections "$dir/armbench.o" "$dir/m2c_shadow.o" \
-  "$dir/native_shadow.o" "$dir/ctr_mem.o" "$dir/ctr_mem_c.o" -o "$dir/armbench.elf"
+  "$dir/native_shadow.o" "$dir/m2c_collide_func.o" "$dir/native_collide_func.o" "$dir/ctr_mem.o" \
+  "$dir/ctr_mem_c.o" -o "$dir/armbench.elf"
 
-# the cases: the harness's generator in the 3DS's VFP mode (default NaN: the garbage cases too)
-rm -rf "$dir/cases"
-mkdir -p "$dir/cases"
-"$OUT/host/mips2c-native-test" --filter shadow-execute --scale "$scale" --seed "$seed" \
-  --fpscr 0x03000000 --dump "$dir/cases" > /dev/null
-"$PY" "$HERE/armbench.py" "$dir/armbench.elf" "$dir/armbench.map" "$dir/cases" shadow-execute
+# the cases of one test (exactly that one, not its variants): the harness's generator in the 3DS's
+# VFP mode (default NaN: the garbage cases too); then both versions on ARM
+status=0
+run_test() {
+  local test="$1" fn="$2" sc="$3"
+  local cases="$dir/cases/${test//[^A-Za-z0-9]/_}"
+  rm -rf "$cases"
+  mkdir -p "$cases"
+  "$OUT/host/mips2c-native-test" --filter "=$test" --scale "$sc" --seed "$seed" \
+    --fpscr 0x03000000 --dump "$cases" > /dev/null || true
+  echo "--- $test"
+  "$PY" "$HERE/armbench.py" "$dir/armbench.elf" "$dir/armbench.map" "$cases" "$fn" || status=1
+}
+run_test shadow-execute shadow-execute "$scale"
+run_test moving-sphere-triangle-intersect moving-sphere-triangle-intersect "$scale"
+run_test "moving-sphere-triangle-intersect (game inputs)" moving-sphere-triangle-intersect 1
+run_test collide-do-primitives collide-do-primitives "$scale"
+exit $status

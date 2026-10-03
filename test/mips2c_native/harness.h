@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <functional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -93,6 +94,11 @@ bool in_native_run();
 // ---------------------------------------------------------------------------
 // GOAL functions compiled to C by goalc (goalc_ref.cpp, goalc_ref/goalc_ref.h)
 // ---------------------------------------------------------------------------
+//! (AI-assisted) thrown by goalc_reference for a function without a fixture: a test whose setup
+//! needs it is skipped when the fixtures are left out (MIPS2C_TEST_NO_GOALC_REF), fails otherwise
+struct NoGoalcReference : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 //! Load the fixture modules (once, before linking)
 void load_goalc_references();
 //! the host function of a GOAL function compiled to C
@@ -177,6 +183,7 @@ struct Gen {
 struct Case {
   Gen& g;
   u64 args[8] = {};
+  int index = 0;  //! (AI-assisted) the case number
 };
 
 struct Test {
@@ -189,6 +196,11 @@ struct Test {
   std::function<void(Case&)> gen;
   //! host memory the functions write (compared like GOAL memory), optional
   std::vector<std::pair<void*, size_t>> host_state;
+  //! (AI-assisted) natives without a mips2c version (GOAL functions replaced by native code) whose
+  //! "mips2c version" is their native code during this test, as in the game, instead of their
+  //! goalc reference: calls to it from the mips2c side go through C mode's adapter (v0 read from
+  //! the context), like mips2c code calling them on the 3DS
+  std::vector<std::string> native_callees = {};
 };
 
 void add_test(Test t);
@@ -200,7 +212,7 @@ void add_test_variant(const std::string& name,
                       double case_fraction = 1.0);
 
 struct RunOptions {
-  std::string filter;
+  std::string filter;  //! tests whose name contains it, or "=NAME": the test named NAME
   double case_scale = 1.0;
   u32 seed = 1;
   bool self_check = false;  //! the second run is the mips2c version again (checks the harness)
