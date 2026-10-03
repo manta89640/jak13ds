@@ -18,6 +18,7 @@
  * call 0 (236, 317) and the per call uploads (the double buffer at xtop).
  */
 
+#include <cmath>
 #include <cstring>
 
 #include "game/graphics/ctr/CtrOceanBatch.h"
@@ -56,9 +57,9 @@ struct ClipXform {
   float fog_k, fog_add;   // 16 * (W * fog.x + hvdf.w)
   s32 fog_min, fog_max;   // ftoi4 of fog.y, fog.z
 
-  ClipXform(const Vf* m, const Vf* vu) {
-    const float inv_q = vu[kHmge].w();  // 1 / fog.x
-    const Vf& hv = vu[kHvdf];
+  //! m: the tile matrix; the program's hmge scale, hvdf offset and fog constants
+  ClipXform(const Vf* m, const Vf& hmge, const Vf& hv, const Vf& fogc) {
+    const float inv_q = hmge.w();  // 1 / fog.x
     for (int j = 0; j < 4; j++) {
       const float w = m[j].w() * inv_q;
       col[j][0] = 16.f * (m[j].x() + hv.x() * w);
@@ -66,10 +67,10 @@ struct ClipXform {
       col[j][2] = m[j].z() + hv.z() * w;
       col[j][3] = w;
     }
-    fog_k = 16.f * vu[kFogConst].x();
+    fog_k = 16.f * fogc.x();
     fog_add = 16.f * hv.w();
-    fog_min = (s32)(16.f * vu[kFogConst].y());
-    fog_max = (s32)(16.f * vu[kFogConst].z());
+    fog_min = (s32)(16.f * fogc.y());
+    fog_max = (s32)(16.f * fogc.z());
   }
 
   //! fog amount of a vertex with this clip-space w
@@ -111,7 +112,7 @@ bool CtrOceanMidVu::native_ready() {
 void CtrOceanMidVu::native_tile() {
   const u16 base = xtop();
   const Vf* in = m_vu_data + base;
-  const ClipXform xf(in + 4, m_vu_data);
+  const ClipXform xf(in + 4, m_vu_data[kHmge], m_vu_data[kHvdf], m_vu_data[kFogConst]);
 
   // the rows' masks in the order the program draws them (vi07 = 7 .. 0)
   u8 mask[8];
@@ -205,7 +206,7 @@ void CtrOceanMidVu::native_transition(bool fan) {
   if (!m_batch->reserve_clip(n, 3 * tris, &v, &idx, &first)) {
     return;
   }
-  const ClipXform xf(in + 4, m_vu_data);
+  const ClipXform xf(in + 4, m_vu_data[kHmge], m_vu_data[kHvdf], m_vu_data[kFogConst]);
   const Vf* corner = m_vu_data + kCorners;
   for (int i = 0; i < n; i++) {
     const Vf& w = in[17 + i];
@@ -262,4 +263,163 @@ void CtrOceanMidVu::native_transition(bool fan) {
     }
   }
   m_batch->commit(n, (int)(out - idx));
+}
+
+// ---------------------------------------------------------------------------------------------
+// ocean-near (OceanNear_PS2.cpp)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+// ocean-near VU memory
+constexpr int kNearHeights = 32;  // the 32 x 32 wave heights (absolute addresses)
+constexpr int kNearGrid = 290;    // 9 x 9 (x, -, z, 1), 3 quadwords apart, made by call 0
+constexpr int kNearHmge = 951, kNearHvdf = 953, kNearFog = 954, kNearFade = 955, kNearAlpha = 956,
+              kNearStep = 957, kNearColor = 958, kNearIndex = 983;
+
+//! min / max of non-negative floats, as integers (no float compare and vmrs)
+inline float min_pos(float a, float b) {
+  s32 x, y;
+  memcpy(&x, &a, 4);
+  memcpy(&y, &b, 4);
+  return x < y ? a : b;
+}
+inline float max_pos(float a, float b) {
+  s32 x, y;
+  memcpy(&x, &a, 4);
+  memcpy(&y, &b, 4);
+  return x > y ? a : b;
+}
+}  // namespace
+
+/*!
+ * call 39 (OceanNear::run_call39_vu2c with L15): one near ocean patch, 8 x 8 squares of a 9 x 9
+ * grid with the wave heights, the textured pass (the alpha and env map passes aren't drawn on the
+ * 3DS). Per vertex, like L15: the distance d to the camera (the camera matrix in[0..3]) fades the
+ * wave out: f = min(d * fade.w, 1), the height times 1 - f; then f = max(f, fade.x) makes the
+ * alpha f * alpha.w and scales the color by color.z - f * color.x (each at most color.y). Colors
+ * and texture coordinates are interpolated across the patch like call 39 (the same float adds).
+ * Masks and rows like the mid tiles: in[8] rows 0..3, in[9] rows 4..7.
+ */
+void CtrOceanNearVu::native_patch() {
+  const u16 base = xtop();
+  const Vf* in = m_vu_data + base;
+  const Vf* vu = m_vu_data;
+
+  u8 mask[8];
+  int rows = 0;
+  for (int k = 0; k < 8; k++) {
+    mask[k] = (u8)lane(in[8 + k / 4], k % 4);
+    rows += mask[k] != 0xff;
+  }
+  if (!rows) {
+    return;
+  }
+  ctr_ocean_full_vertex* v;
+  u16* idx;
+  int first;
+  if (!m_batch->reserve_clip(81, 6 * 8 * rows, &v, &idx, &first)) {
+    return;
+  }
+  const ClipXform xf(in + 4, vu[kNearHmge], vu[kNearHvdf], vu[kNearFog]);
+
+  // heights: rows 0..7 from in[10].x / .y (the 9th column), row 8 from .z / .w
+  float h[9][9];
+  for (int r = 0; r < 9; r++) {
+    const int a = (r < 8 ? lane(in[10], 0) + 8 * r : lane(in[10], 2)) & 0x3ff;
+    const int b = (r < 8 ? lane(in[10], 1) + 8 * r : lane(in[10], 3)) & 0x3ff;
+    const Vf* q = vu + kNearHeights;
+    for (int c = 0; c < 4; c++) {
+      h[r][c] = q[a].data[c];
+      h[r][4 + c] = q[a + 1].data[c];
+    }
+    h[r][8] = q[b].x();
+  }
+
+  const Vf& cam0 = in[0];
+  const Vf& cam1 = in[1];
+  const Vf& cam2 = in[2];
+  const Vf& cam3 = in[3];
+  const float fade_k = vu[kNearFade].w(), fade_min = vu[kNearFade].x();
+  const float alpha_k = vu[kNearAlpha].w();
+  const float col_x = vu[kNearColor].x(), col_z = vu[kNearColor].z();
+  const s32 col_max = (s32)vu[kNearColor].y();
+  const float step = vu[kNearStep].w(), cstep = vu[kNearStep].y();
+
+  // call 39's interpolation: colors in[12] (top left), [13] (top right), [14], [15] (bottom)
+  Vf left = in[12], right = in[13];
+  Vf dleft, dright;
+  for (int i = 0; i < 4; i++) {
+    dleft.data[i] = (in[14].data[i] - in[12].data[i]) * cstep;
+    dright.data[i] = (in[15].data[i] - in[13].data[i]) * cstep;
+  }
+  float t = in[11].y();
+
+  ctr_ocean_full_vertex* o = v;
+  for (int r = 0; r < 9; r++) {
+    float col[4], dcol[4];
+    for (int i = 0; i < 4; i++) {
+      dcol[i] = (right.data[i] - left.data[i]) * cstep;
+      col[i] = left.data[i];
+    }
+    float s = in[11].x();
+    for (int c = 0; c < 9; c++, o++) {
+      const Vf& g = vu[kNearGrid + 27 * r + 3 * c];
+      const float x = g.x(), y = h[r][c], z = g.z();
+      // the camera distance (L15: eleng of the camera matrix times the vertex)
+      const float vx = ((cam0.x() * x + cam1.x() * y) + cam2.x() * z) + cam3.x();
+      const float vy = ((cam0.y() * x + cam1.y() * y) + cam2.y() * z) + cam3.y();
+      const float vz = ((cam0.z() * x + cam1.z() * y) + cam2.z() * z) + cam3.z();
+      const float d = std::sqrt(vx * vx + vy * vy + vz * vz);
+      const float f0 = min_pos(d * fade_k, 1.f);
+      const float hy = y * (1.f - f0);
+      const float f = max_pos(f0, fade_min);
+      o->x = xf.col[0][0] * x + xf.col[1][0] * hy + xf.col[2][0] * z + xf.col[3][0];
+      o->y = xf.col[0][1] * x + xf.col[1][1] * hy + xf.col[2][1] * z + xf.col[3][1];
+      o->z = xf.col[0][2] * x + xf.col[1][2] * hy + xf.col[2][2] * z + xf.col[3][2];
+      o->q = xf.col[0][3] * x + xf.col[1][3] * hy + xf.col[2][3] * z + xf.col[3][3];
+      o->s = s;
+      o->t = t;
+      o->fog = xf.fog(o->q);
+      // (ftoi0 after the min = the min after ftoi0: both monotonic)
+      const float k = col_z - f * col_x;
+      s32 cr = (s32)(col[0] * k), cg = (s32)(col[1] * k), cb = (s32)(col[2] * k),
+          ca = (s32)(f * alpha_k);
+      cr = cr > col_max ? col_max : cr;
+      cg = cg > col_max ? col_max : cg;
+      cb = cb > col_max ? col_max : cb;
+      ca = ca > col_max ? col_max : ca;
+      put_color(o, cr, cg, cb, ca);
+      s += step;
+      for (int i = 0; i < 4; i++) {
+        col[i] += dcol[i];
+      }
+    }
+    for (int i = 0; i < 4; i++) {
+      left.data[i] += dleft.data[i];
+      right.data[i] += dright.data[i];
+    }
+    t += step;
+  }
+
+  u16* out = idx;
+  for (int k = 0; k < 8; k++) {
+    if (mask[k] == 0xff) {
+      continue;
+    }
+    const int top = first + 9 * k;
+    for (int c = 0; c < 8; c++) {
+      if (mask[k] & (1 << c)) {
+        continue;
+      }
+      const u16 t0 = (u16)(top + c), b0 = (u16)(top + c + 9);
+      out[0] = t0;
+      out[1] = b0;
+      out[2] = (u16)(t0 + 1);
+      out[3] = b0;
+      out[4] = (u16)(t0 + 1);
+      out[5] = (u16)(b0 + 1);
+      out += 6;
+    }
+  }
+  m_batch->commit(81, (int)(out - idx));
 }

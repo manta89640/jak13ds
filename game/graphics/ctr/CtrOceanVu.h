@@ -204,8 +204,14 @@ class CtrOceanNearVu {
   //! The ocean-near DMA after the ocean texture (OceanNear::render_jak1), up to its end tag.
   //! false: not what was expected (the caller skips the rest of the bucket).
   bool run(DmaFollower& dma, CtrOceanBatch* batch);
+  //! the native program (default) or the emulated VU program (for the host replay test)
+  void set_native(bool on) { m_native = on; }
 
  private:
+  // (AI-assisted) the native program (CtrOceanNative.cpp): call 39's textured pass, in clip space
+  void native_patch();
+  bool m_native = true;
+
   void run_call0_vu2c();
   void run_call0_vu2c_jak2();
   void run_call39_vu2c();

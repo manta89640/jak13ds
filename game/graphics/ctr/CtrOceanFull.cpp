@@ -277,7 +277,7 @@ bool CtrOceanNearVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
           run_call0_vu2c();
           break;
         case 39:
-          run_call39_vu2c();
+          m_native ? native_patch() : run_call39_vu2c();
           break;
         default:
           return false;
@@ -515,6 +515,7 @@ CtrOceanFull::~CtrOceanFull() {
 
 void CtrOceanFull::set_native(bool on) {
   m_mid->set_native(on);
+  m_near->set_native(on);
 }
 
 void CtrOceanFull::note_levels(const std::vector<std::string>& levels) {

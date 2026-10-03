@@ -493,6 +493,29 @@ int main(int argc, char** argv) {
   int errors = compare(ref, nat, 0) + compare(ref, nat, 1);
   printf("wave texture: %s\n", tex_same ? "same" : "DIFFERENT");
   errors += !tex_same;
+  // the wave texture (64 x 64 RGBA8, as uploaded) to a file / against an earlier version's file
+  if (const char* out = getenv("OCEAN_TEX_OUT")) {
+    FILE* f = fopen(out, "wb");
+    fwrite(g_tex.data(), 1, g_tex.size(), f);
+    fclose(f);
+  }
+  if (const char* in = getenv("OCEAN_TEX_REF")) {
+    std::vector<u8> old(g_tex.size());
+    FILE* f = fopen(in, "rb");
+    const bool ok = f && fread(old.data(), 1, old.size(), f) == old.size();
+    if (f) {
+      fclose(f);
+    }
+    int diff = 0, worst = 0;
+    for (size_t i = 0; ok && i < old.size(); i++) {
+      const int d = std::abs((int)old[i] - (int)g_tex[i]);
+      diff += d != 0;
+      worst = std::max(worst, d);
+    }
+    printf("wave texture vs %s: %s, %d bytes differ (at most by %d)\n", in,
+           ok ? "read" : "NOT READ", diff, worst);
+    errors += !ok || diff;
+  }
 
   const double t_ref = time_frames(ref_ocean, vram, mid, near, iters);
   const double t_nat = time_frames(nat_ocean, vram, mid, near, iters);
