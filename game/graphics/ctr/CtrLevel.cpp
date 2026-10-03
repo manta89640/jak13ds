@@ -1609,21 +1609,42 @@ bool sphere_in_view(const float* s, const math::Vector4f* planes) {
   return acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3];
 }
 
+// (AI-assisted) auto_detail: how far between the near (0) and the far (1) shrub / tie distances
+// (render thread: set by CtrRenderer from the GPU time, read here)
+float g_detail_t = 0.25f;
+
 // (AI-assisted) a chunk's draw distance limit (game units, 0: none): the converter's (small and
 // medium objects) times detail_scale. With chunk kinds (newer c3l files): shrubs up to
 // shrub_distance (GPU-bound levels had 200-300k shrub triangles within the converter's 100 m),
-// ties times tie_distance_scale (most ties stopped at 100 m: pop-in).
+// ties times tie_distance_scale (most ties stopped at 100 m: pop-in); with auto_detail both move
+// toward their _max values as far as the GPU time allows.
 float chunk_max_dist(const c3l::Chunk& ch, const CtrSettings& s) {
   if (ch.kind == c3l::CHUNK_KIND_SHRUB && s.shrub_distance > 0) {
-    return s.shrub_distance * 4096.f * s.detail_scale;
+    float d = s.shrub_distance;
+    if (s.auto_detail) {
+      d += (std::max(s.shrub_distance_max, d) - d) * g_detail_t;
+    }
+    return d * 4096.f * s.detail_scale;
   }
   if (ch.kind == c3l::CHUNK_KIND_TIE) {
-    return ch.max_dist * s.tie_distance_scale * s.detail_scale;
+    float k = s.tie_distance_scale;
+    if (s.auto_detail) {
+      k += (std::max(s.tie_distance_scale_max, k) - k) * g_detail_t;
+    }
+    return ch.max_dist * k * s.detail_scale;
   }
   return ch.max_dist * s.detail_scale;
 }
 
 }  // namespace
+
+void ctr_level_set_detail(float t) {
+  g_detail_t = std::clamp(t, 0.f, 1.f);
+}
+
+float ctr_level_detail() {
+  return g_detail_t;
+}
 
 ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex) {
   ctr_draw_state st;

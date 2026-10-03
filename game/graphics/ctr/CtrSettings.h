@@ -34,6 +34,14 @@ struct CtrSettings {
   // converter's distances of small and medium ties (100 / 300 m) times this
   float shrub_distance = 50.f;
   float tie_distance_scale = 1.5f;
+  // (AI-assisted) auto_detail: those two grow toward shrub_distance_max / tie_distance_scale_max
+  // while the GPU has time to spare (its time per frame under auto_detail_gpu_ms) and go back
+  // when it hasn't, so the distances are as far as each place allows (Precursor Basin has room,
+  // Rock Village hardly any). Needs frame_pacing = steady (the GPU time comes from its fence).
+  bool auto_detail = true;
+  float shrub_distance_max = 120.f;
+  float tie_distance_scale_max = 3.f;
+  float auto_detail_gpu_ms = 27.f;
   // renderers
   bool merc = true;
   bool sprites = true;

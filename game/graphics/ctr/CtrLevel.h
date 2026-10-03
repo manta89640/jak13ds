@@ -319,6 +319,11 @@ struct CtrBackgroundCamera {
 static_assert(sizeof(CtrBackgroundCamera) == 16 * 23);
 
 /*! TFRAG_LEVEL0/1 buckets: draws the whole level background (tfrag + tie) from the .c3l. */
+/*! (AI-assisted) config.ini auto_detail: where the shrub / tie distances are between their near
+ * (0) and far (1) values (render thread). */
+void ctr_level_set_detail(float t);
+float ctr_level_detail();
+
 class CtrTfragRenderer : public CtrBucketRenderer {
  public:
   CtrTfragRenderer(std::string name, int id, CtrLevels* levels);

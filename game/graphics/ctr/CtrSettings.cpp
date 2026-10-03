@@ -93,6 +93,14 @@ CtrSettings load() {
       s.shrub_distance = std::max(0.f, f);
     } else if (key == "tie_distance_scale") {
       s.tie_distance_scale = std::max(0.f, f);
+    } else if (key == "auto_detail") {
+      s.auto_detail = parse_bool(v);
+    } else if (key == "shrub_distance_max") {
+      s.shrub_distance_max = std::max(0.f, f);
+    } else if (key == "tie_distance_scale_max") {
+      s.tie_distance_scale_max = std::max(0.f, f);
+    } else if (key == "auto_detail_gpu_ms") {
+      s.auto_detail_gpu_ms = std::clamp(f, 10.f, 33.f);
     } else if (key == "merc") {
       s.merc = parse_bool(v);
     } else if (key == "sprites") {
@@ -193,14 +201,21 @@ CtrSettings load() {
 
 std::string CtrSettings::summary() const {
   return fmt::format(
-      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {:.0f}m tie x{:.1f} fog {} "
+      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {}m tie x{} fog {} "
       "merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
-      draw_distance, lod_distance, far_level_distance, detail_scale, shrub_distance,
-      tie_distance_scale, fog ? "on" : "off",
+      draw_distance, lod_distance, far_level_distance, detail_scale,
+      // (AI-assisted) with auto_detail: the range the distances move in
+      auto_detail ? fmt::format("{:.0f}-{:.0f} (auto, GPU under {:.0f} ms)", shrub_distance,
+                                std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms)
+                  : fmt::format("{:.0f}", shrub_distance),
+      auto_detail ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
+                                std::max(tie_distance_scale, tie_distance_scale_max))
+                  : fmt::format("{:.1f}", tie_distance_scale),
+      fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",

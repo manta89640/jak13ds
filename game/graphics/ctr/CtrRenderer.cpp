@@ -391,6 +391,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.vbuf_size = gs.vbuf_size;
   m_timing.vbuf_dropped += gs.vbuf_dropped;
   m_timing.frames++;
+  if (ctr_settings().auto_detail) {
+    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1);
+  }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
   }
@@ -481,6 +484,16 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         }
       }
       lg::info("[ctr] build ms/frame by renderer:{}", by_name);
+      if (ctr_settings().auto_detail) {
+        const auto& s = ctr_settings();
+        const float t = m_auto.t;
+        lg::info("[ctr] auto detail {:.2f}: shrubs {:.0f} m, ties x{:.2f} ({} steps up, {} down)", t,
+                 s.shrub_distance + (std::max(s.shrub_distance_max, s.shrub_distance) - s.shrub_distance) * t,
+                 s.tie_distance_scale +
+                     (std::max(s.tie_distance_scale_max, s.tie_distance_scale) - s.tie_distance_scale) * t,
+                 m_auto.ups, m_auto.downs);
+        m_auto.ups = m_auto.downs = 0;
+      }
     }
     m_timing = Timing();
   }
@@ -554,6 +567,41 @@ void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
     m_profile_level = lev;
     m_profile_arm_ms = ctr_gpu_time_ms() + 10000.0;  // after the load and the level start
   }
+}
+
+// (AI-assisted) config.ini auto_detail. Every 15 frames: a GPU over the target time on average,
+// or one frame near the 33 ms budget (target + 4 ms), pulls the shrub / tie distances in by a
+// tenth of their range; time to spare (average 4 ms under the target, no frame over it) pushes
+// them out by 4% of it. Out slowly, in fast: a frame that misses its vblank costs more than a
+// shrub that appears a little later. The render thread's own build time counts too.
+void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms) {
+  if (!gpu_busy_frames) {
+    return;  // no GPU time this frame (frame_pacing = fast): distances stay where they are
+  }
+  m_auto.busy_ms += gpu_busy_ms;
+  m_auto.busy_frames += gpu_busy_frames;
+  m_auto.busy_max = std::max(m_auto.busy_max, (double)gpu_busy_ms / gpu_busy_frames);
+  m_auto.build_max = std::max(m_auto.build_max, build_ms);
+  if (++m_auto.frames < 15) {
+    return;
+  }
+  const double target = ctr_settings().auto_detail_gpu_ms;
+  const double avg = m_auto.busy_ms / m_auto.busy_frames;
+  float t = m_auto.t;
+  if (avg > target || m_auto.busy_max > target + 4.0 || m_auto.build_max > target) {
+    t -= 0.1f;
+    m_auto.downs++;
+  } else if (avg < target - 4.0 && m_auto.busy_max < target && m_auto.build_max < target - 8.0) {
+    t += 0.04f;
+    m_auto.ups++;
+  }
+  t = std::clamp(t, 0.f, 1.f);
+  if (t != m_auto.t) {
+    m_auto.t = t;
+    ctr_level_set_detail(t);
+  }
+  m_auto.busy_ms = m_auto.busy_max = m_auto.build_max = 0;
+  m_auto.busy_frames = m_auto.frames = 0;
 }
 
 void CtrRenderer::profile_frame(double gpu_draw_ms) {

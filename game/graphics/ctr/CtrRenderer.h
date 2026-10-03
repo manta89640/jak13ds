@@ -143,6 +143,14 @@ class CtrRenderer {
 
   // config.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);
+  // (AI-assisted) config.ini auto_detail: shrub / tie distances from the GPU time per frame
+  void auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms);
+  struct AutoDetail {
+    float t = 0.25f;  // ctr_level_set_detail
+    double busy_ms = 0, busy_max = 0, build_max = 0;
+    int busy_frames = 0, frames = 0;
+    int ups = 0, downs = 0;  // steps since the last log
+  } m_auto;
   bool profile_skips(const std::string& name) const;
  public:
   /*! (AI-assisted) The levels the game wants (game thread, render thread idle): for gpu_profile. */

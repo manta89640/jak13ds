@@ -53,6 +53,10 @@ far_level_distance = 80    # meters; a level seen from a neighbouring one is dra
 detail_scale = 1           # multiplies the draw distance of small and medium objects and shrubs (all of them, also with the two keys below)
 shrub_distance = 50        # (AI-assisted) meters; shrubs (grass, bushes, flowers) up to here (0 = the converter's 100 m). They are most of the GPU's work in village2, rolling, ogre and swamp (200-300k triangles within 100 m)
 tie_distance_scale = 1.5   # (AI-assisted) multiplies the converter's draw distance of small and medium objects (ties: 100 m and 300 m); the big ones have no limit
+auto_detail = on           # (AI-assisted) shrub / tie distances follow the GPU's time per frame: from the two values above (the near end) toward the two below while the GPU has time to spare, back when a frame gets close to the 33 ms budget. Needs frame_pacing = steady. Log: "[ctr] auto detail T: shrubs N m, ties xK" every 15 s
+shrub_distance_max = 120   # (AI-assisted) the far end for shrubs with auto_detail
+tie_distance_scale_max = 3 # (AI-assisted) the far end for small and medium objects with auto_detail
+auto_detail_gpu_ms = 27    # (AI-assisted) the GPU time per frame auto_detail stays under (10-33)
                            # shrub_distance, tie_distance_scale and the far mode ties need .c3l files with chunk kinds (the current converter); with older files only detail_scale applies
 
 # ---- what is drawn ----
