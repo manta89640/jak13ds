@@ -55,10 +55,20 @@ struct Options {
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
   // Textures: ETC1 (opaque) / ETC1A4 (with alpha) instead of RGB565 / RGBA4: 1/4 and 1/2 of the
-  // memory, so a level's textures fit in VRAM. Textures of merc models (characters) stay 16-bit
-  // unless etc1_merc: faces and small details show ETC1's 4x4 blocks up close.
+  // memory, so a level's textures fit in VRAM. Textures of merc models (characters): see below;
+  // etc1_merc: all ETC1 (faces and small details show ETC1's 4x4 blocks up close).
   bool etc1 = true;
   bool etc1_merc = false;
+  // (AI-assisted) unless etc1_merc: merc textures of etc1_merc_min texels and more on both sides
+  // become ETC1 / ETC1A4 when that is about as good as their 16-bit version (merc textures were
+  // 75-95% of the levels' texture memory). Measured on the full size level against the image:
+  // the PSNR is at least etc1_merc_psnr dB (about RGBA4's own error, the 16-bit format of the ones
+  // with alpha) or the 16-bit version's, and no 4x4 block has an RMS error above etc1_merc_block
+  // (0..255) or the 16-bit version's worst. Characters with face animation (effects with blend
+  // shapes) and eye placeholders stay 16-bit. etc1_merc_psnr 0: all stay 16-bit.
+  float etc1_merc_psnr = 34.f;
+  int etc1_merc_min = 64;
+  float etc1_merc_block = 16.f;
   int etc1_quality = 1;  // 0 low, 1 medium, 2 high (slow)
   // (AI-assisted) ETC1 rate-distortion optimisation strength (ctr_texture.h), 0: off
   float etc1_rdo = 10;
@@ -95,6 +105,9 @@ struct TexUse {
   bool merc = false;        // drawn by a merc model
   bool alpha_test = false;  // drawn with an alpha test (cut-outs: keep their coverage in the mips)
   int aref = 0x26;          // the alpha test reference (GS units, 0x80 = 1.0)
+  // (AI-assisted) merc uses that keep a texture 16-bit (Options::etc1_merc_psnr): an eye draw's
+  // placeholder, a draw of an effect with blend shapes (a face). envmap: an envmap pass's texture.
+  bool eye = false, face = false, envmap = false;
 };
 
 // A triangle soup vertex before chunking
@@ -149,6 +162,15 @@ struct Converter {
     }
   }
 
+  // (AI-assisted) see TexUse
+  void note_merc_kind(u16 tex, bool eye, bool face, bool envmap) {
+    if (tex < tex_use.size()) {
+      tex_use[tex].eye |= eye;
+      tex_use[tex].face |= face;
+      tex_use[tex].envmap |= envmap;
+    }
+  }
+
   u32 key_id(const DrawKey& k) {
     auto it = draw_key_ids.find(k);
     if (it != draw_key_ids.end()) {
@@ -160,6 +182,26 @@ struct Converter {
     return id;
   }
 
+  // (AI-assisted) Identical level textures (size and texels) are one output texture: the fr3 has
+  // a copy per merc model that uses one (citadel: pal-environment-front 90 times, its metal
+  // textures 20-30 times each; 937 textures for ~200 different ones).
+  struct TexContentHash {
+    size_t operator()(const tfrag3::Texture* t) const {
+      size_t h = (size_t)t->w * 0x9E3779B97F4A7C15ull ^ t->h;
+      for (u32 v : t->data) {
+        h = (h ^ v) * 0x100000001B3ull;
+      }
+      return h;
+    }
+  };
+  struct TexContentEq {
+    bool operator()(const tfrag3::Texture* a, const tfrag3::Texture* b) const {
+      return a->w == b->w && a->h == b->h && a->data == b->data;
+    }
+  };
+  std::unordered_map<const tfrag3::Texture*, u16, TexContentHash, TexContentEq> tex_by_content;
+  size_t tex_copies = 0;  // level textures that are a copy of an earlier one
+
   u16 texture_id(s32 tree_tex_id) {
     if (tree_tex_id < 0 || tree_tex_id >= (s32)level->textures.size()) {
       return 0xffff;  // animated / missing
@@ -168,10 +210,18 @@ struct Converter {
     if (it != tex_map.end()) {
       return it->second;
     }
+    const tfrag3::Texture* t = &level->textures[tree_tex_id];
+    auto cit = tex_by_content.find(t);
+    if (cit != tex_by_content.end()) {
+      tex_map[tree_tex_id] = cit->second;
+      tex_copies++;
+      return cit->second;
+    }
     u16 id = tex_order.size();
     tex_order.push_back(tree_tex_id);
     tex_use.emplace_back();
     tex_map[tree_tex_id] = id;
+    tex_by_content.emplace(t, id);
     return id;
   }
 
@@ -543,6 +593,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
           md.mode = d.mode.as_int();
           md.texture = cv.texture_id(d.tree_tex_id);  // for eyes: the gray eye placeholder
           cv.note_use(md.texture, md.mode, true);
+          cv.note_merc_kind(md.texture, d.eye_id != 0xff, use_blerc, false);
           md.eye_id = d.eye_id;
           md.effect = ei;
           md.first_index = out->indices.size();
@@ -640,6 +691,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
         const size_t effect_end = out->draws.size();
         const u16 env_tex = cv.texture_id((s32)eff.envmap_texture);
         cv.note_use(env_tex, eff.envmap_mode.as_int(), true);
+        cv.note_merc_kind(env_tex, false, false, true);
         for (size_t di = effect_first_draw; di < effect_end; di++) {
           c3l::MercDraw ed = out->draws[di];
           ed.mode = eff.envmap_mode.as_int();
@@ -763,7 +815,56 @@ struct TexStats {
   int etc1 = 0, etc1a4 = 0, rgb565 = 0, rgba4 = 0;
   double psnr_sum = 0, psnr_min = 99;
   int psnr_count = 0;
+  // (AI-assisted) merc textures: all, ETC1 / ETC1A4 by the quality test, tested, kept 16-bit as
+  // faces or eyes (of the size to be tested), bytes before (all 16-bit) and after
+  int merc = 0, merc_etc1 = 0, merc_tested = 0, merc_face = 0;
+  u64 merc_bytes_16 = 0, merc_bytes = 0;
 };
+
+// (AI-assisted) the ETC1 quality test of a merc texture (Options::etc1_merc_psnr)
+struct MercGate {
+  bool tested = false, etc1 = false;
+  // against the image: PSNR (dB) and the worst 4x4 block's RMS error, of ETC1 and 16-bit
+  double psnr = 0, worst_block = 0, psnr_16 = 0, worst_block_16 = 0;
+  u32 bytes_16 = 0;  // the 16-bit version's size (with mips)
+};
+
+/*!
+ * (AI-assisted) A decoded level against the image it was encoded from: PSNR and the largest RMS
+ * error of a 4x4 block, over the color of the texels that can be seen (alpha >= 16)
+ */
+void compare_level(const ctr_tex::Image& ref,
+                   const ctr_tex::Image& dec,
+                   double* psnr,
+                   double* worst_block) {
+  double se = 0;
+  size_t n = 0;
+  *worst_block = 0;
+  for (int by = 0; by < ref.h; by += 4) {
+    for (int bx = 0; bx < ref.w; bx += 4) {
+      double bse = 0;
+      int bn = 0;
+      for (int y = by; y < by + 4 && y < ref.h; y++) {
+        for (int x = bx; x < bx + 4 && x < ref.w; x++) {
+          if (ref.at(x, y)[3] < 16) {
+            continue;
+          }
+          for (int c = 0; c < 3; c++) {
+            const double d = (double)ref.at(x, y)[c] - dec.at(x, y)[c];
+            bse += d * d;
+            bn++;
+          }
+        }
+      }
+      se += bse;
+      n += bn;
+      if (bn) {
+        *worst_block = std::max(*worst_block, std::sqrt(bse / bn));
+      }
+    }
+  }
+  *psnr = (n == 0 || se == 0) ? 99.0 : 10.0 * std::log10(255.0 * 255.0 * n / se);
+}
 
 /*!
  * One level texture -> the 3DS layout (see ctr_texture.h): power of two, at most max_tex, with mip
@@ -773,7 +874,8 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
                                 const Options& opt,
                                 const TexUse& use,
                                 c3l::Texture* out_desc,
-                                double* psnr_out) {
+                                double* psnr_out,
+                                MercGate* gate) {
   // source RGBA8888, PS2 alpha (0x80 = opaque)
   u32 sw = tex.w, sh = tex.h;
   u32 dw = std::clamp<u32>(next_pow2(sw), 8, opt.max_tex);
@@ -810,27 +912,53 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
       has_alpha = true;
     }
   }
-  const bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
-  ctr_tex::Format fmt;
-  if (opt.full_color) {
-    fmt = ctr_tex::Format::RGBA8;
-  } else if (has_alpha) {
-    fmt = etc1 ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::RGBA4;
-  } else {
-    fmt = etc1 ? ctr_tex::Format::ETC1 : ctr_tex::Format::RGB565;
-  }
+  bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
+  const ctr_tex::Format fmt16 = has_alpha ? ctr_tex::Format::RGBA4 : ctr_tex::Format::RGB565;
+  const ctr_tex::Format fmt_etc = has_alpha ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::ETC1;
   const int levels = opt.mips ? ctr_tex::level_count(dw, dh, 16) : 1;
   ctr_tex::MipOptions mo;
   mo.preserve_coverage = has_alpha && use.alpha_test;
   mo.alpha_ref = std::clamp(use.aref * 2, 1, 255);
   auto mips = ctr_tex::make_mips(img, levels, mo);
-  std::vector<u8> out;
-  for (auto& m : mips) {
-    if (has_alpha) {
+  if (has_alpha) {
+    for (auto& m : mips) {
       ctr_tex::fill_transparent_colors(&m);
     }
-    ctr_tex::encode_level(m, fmt, opt.etc1_quality, &out,
-                          mo.preserve_coverage ? mo.alpha_ref : 0, opt.etc1_rdo);
+  }
+  const int aref = mo.preserve_coverage ? mo.alpha_ref : 0;
+  std::vector<u8> out;
+  // (AI-assisted) a merc texture: ETC1 if it is about as close to the image as the 16-bit
+  // version (Options::etc1_merc_psnr). The full size level is encoded both ways and compared with
+  // the image; the kept one starts the output.
+  if (!etc1 && opt.etc1 && use.merc && !opt.full_color && opt.etc1_merc_psnr > 0 && gate) {
+    for (const auto& m : mips) {
+      gate->bytes_16 += ctr_tex::level_bytes(m.w, m.h, fmt16);
+    }
+    if (!use.face && !use.eye && (int)dw >= opt.etc1_merc_min && (int)dh >= opt.etc1_merc_min) {
+      std::vector<u8> e, s;
+      ctr_tex::encode_level(mips[0], fmt_etc, opt.etc1_quality, &e, aref, opt.etc1_rdo);
+      ctr_tex::encode_level(mips[0], fmt16, opt.etc1_quality, &s, aref);
+      compare_level(mips[0], ctr_tex::decode_level(e.data(), dw, dh, fmt_etc), &gate->psnr,
+                    &gate->worst_block);
+      compare_level(mips[0], ctr_tex::decode_level(s.data(), dw, dh, fmt16), &gate->psnr_16,
+                    &gate->worst_block_16);
+      gate->tested = true;
+      // RGB565 is close to the image (~48 dB): ETC1 must reach etc1_merc_psnr. RGBA4 is ~34 dB
+      // (4-bit color bands): ETC1A4 is often closer than it, and passes when it is.
+      gate->etc1 = etc1 =
+          (gate->psnr >= opt.etc1_merc_psnr || gate->psnr >= gate->psnr_16) &&
+          gate->worst_block <= std::max<double>(opt.etc1_merc_block, gate->worst_block_16);
+      out = etc1 ? std::move(e) : std::move(s);
+    }
+  }
+  ctr_tex::Format fmt;
+  if (opt.full_color) {
+    fmt = ctr_tex::Format::RGBA8;
+  } else {
+    fmt = etc1 ? fmt_etc : fmt16;
+  }
+  for (size_t l = out.empty() ? 0 : 1; l < mips.size(); l++) {
+    ctr_tex::encode_level(mips[l], fmt, opt.etc1_quality, &out, aref, opt.etc1_rdo);
   }
   if (psnr_out) {
     // quality of the first level (visible texels only)
@@ -996,8 +1124,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   auto cell_of_detail = [&](int detail) {
     return (detail == 3 ? opt.shrub_cell : opt.cell_meters) * 4096.f;
   };
-  // (detail, cell) -> triangle indices
-  std::map<std::tuple<int, int, int, int>, std::vector<u32>> cells;
+  // (detail, cell, kind) -> triangle indices. (AI-assisted) The kind (Draw::kind: tfrag, tie,
+  // shrub) keeps every chunk to one (Chunk::kind); with the default tiers it splits nothing.
+  using CellKey = std::tuple<int, int, int, int, int>;
+  std::map<CellKey, std::vector<u32>> cells;
   for (u32 i = 0; i < cv.tris.size(); i++) {
     const auto& t = cv.tris[i];
     float cx = 0, cy = 0, cz = 0;
@@ -1008,9 +1138,169 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     const float cell = cell_of_detail((int)t.detail);
     auto key = std::make_tuple((int)(t.detail + 4 * t.tier), (int)std::floor(cx / 3 / cell),
-                               (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell));
+                               (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell),
+                               (int)cv.draw_keys[t.draw_key].kind);
     cells[key].push_back(i);
   }
+
+  // (AI-assisted) The chunks' triangles and vertices first: their quantizing grids depend on each
+  // other (see below).
+  struct ChunkPlan {
+    CellKey key;
+    std::vector<u32> tris;               // triangle ids, in draw order
+    std::vector<u32> src;                // source vertices in local order
+    std::unordered_map<u32, u16> local;  // source vertex -> local index
+    double grid = 1;                     // quantizing step (game units), a power of two
+    double origin[3] = {0, 0, 0};        // a multiple of grid (and a float)
+    double old_step = 0;  // the step of the per-chunk bounding box grid used before (stats)
+  };
+  std::vector<ChunkPlan> plans;
+  for (auto& [key, tri_ids] : cells) {
+    // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
+    // visibility id, so a draw's triangles of one drawable are one run (c3l::VisRun)
+    std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
+      const auto& ta = cv.tris[a];
+      const auto& tb = cv.tris[b];
+      return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
+    });
+    size_t pos = 0;
+    while (pos < tri_ids.size()) {
+      // gather triangles until 65535 unique vertices
+      ChunkPlan cp;
+      cp.key = key;
+      size_t end = pos;
+      while (end < tri_ids.size()) {
+        const auto& t = cv.tris[tri_ids[end]];
+        int new_verts = 0;
+        for (int k = 0; k < 3; k++) {
+          new_verts += cp.local.count(t.v[k]) ? 0 : 1;
+        }
+        if (cp.src.size() + new_verts > 65535) {
+          break;
+        }
+        for (int k = 0; k < 3; k++) {
+          if (!cp.local.count(t.v[k])) {
+            cp.local[t.v[k]] = cp.src.size();
+            cp.src.push_back(t.v[k]);
+          }
+        }
+        end++;
+      }
+      cp.tris.assign(tri_ids.begin() + pos, tri_ids.begin() + end);
+      plans.push_back(std::move(cp));
+      pos = end;
+    }
+  }
+
+  // ---- (AI-assisted) quantizing grids ----
+  // A chunk's positions are on a grid of a power of two game units: the finest whose signed
+  // 16-bit range around the chunk's centre (a multiple of the grid) holds the chunk. A position
+  // that is in several chunks (a surface crossing a cell border, a cell split at 65535 vertices,
+  // the two tfrag tiers) is first put on the coarsest of their grids: a multiple of each one's
+  // own, so every chunk holding it reconstructs it exactly (origin + pos * scale) and surfaces
+  // stay closed. Before, each chunk had its own bounding box grid (minimum + 0..32767 steps of
+  // extent / 32767), the same vertex landed 3-9 mm apart in neighbouring chunks, and the
+  // background showed through the cracks.
+  struct PosKey {
+    u32 x, y, z;
+    bool operator==(const PosKey& o) const { return x == o.x && y == o.y && z == o.z; }
+  };
+  struct PosKeyHash {
+    size_t operator()(const PosKey& k) const {
+      return (size_t)k.x * 0x9E3779B97F4A7C15ull ^ (size_t)k.y * 0xC2B2AE3D27D4EB4Full ^
+             (size_t)k.z * 0x165667B19E3779F9ull;
+    }
+  };
+  auto pos_key = [&](u32 s) {
+    const auto& v = cv.verts[s];
+    auto bits = [](float f) {
+      u32 b;
+      f = f == 0.f ? 0.f : f;  // -0 and +0: one position
+      memcpy(&b, &f, 4);
+      return b;
+    };
+    return PosKey{bits(v.x), bits(v.y), bits(v.z)};
+  };
+  struct Snap {
+    double grid = 0;  // the coarsest grid of the chunks holding the position
+    u32 last = UINT32_MAX, chunks = 0;
+  };
+  std::unordered_map<PosKey, Snap, PosKeyHash> snaps;
+  auto on_grid = [](float p, double grid) { return std::round((double)p / grid) * grid; };
+  for (auto& cp : plans) {
+    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    for (u32 s : cp.src) {
+      const auto& v = cv.verts[s];
+      const float p[3] = {v.x, v.y, v.z};
+      for (int c = 0; c < 3; c++) {
+        mn[c] = std::min(mn[c], p[c]);
+        mx[c] = std::max(mx[c], p[c]);
+      }
+    }
+    const float extent = std::max({mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2], 1.f});
+    cp.old_step = extent / 32767.f;
+    // 65532 steps: room for the centre's rounding to the grid
+    cp.grid = std::exp2(std::ceil(std::log2(extent / 65532.0)));
+  }
+  int grid_rounds = 0;
+  for (bool changed = true; changed; grid_rounds++) {
+    changed = false;
+    snaps.clear();
+    for (u32 ci = 0; ci < plans.size(); ci++) {
+      for (u32 s : plans[ci].src) {
+        auto& sn = snaps[pos_key(s)];
+        sn.grid = std::max(sn.grid, plans[ci].grid);
+        if (sn.last != ci) {
+          sn.last = ci;
+          sn.chunks++;
+        }
+      }
+    }
+    // the origin: the centre of the snapped positions on the chunk's grid. A coarser snap can
+    // push a position out of the 16-bit range: then the chunk's grid doubles, and all again.
+    for (auto& cp : plans) {
+      double mn[3] = {1e300, 1e300, 1e300}, mx[3] = {-1e300, -1e300, -1e300};
+      for (u32 s : cp.src) {
+        const auto& v = cv.verts[s];
+        const double g = snaps.at(pos_key(s)).grid;
+        const double p[3] = {on_grid(v.x, g), on_grid(v.y, g), on_grid(v.z, g)};
+        for (int c = 0; c < 3; c++) {
+          mn[c] = std::min(mn[c], p[c]);
+          mx[c] = std::max(mx[c], p[c]);
+        }
+      }
+      bool fits = true;
+      for (int c = 0; c < 3; c++) {
+        // as a float (the file's): still a multiple of the grid (a float that isn't one is
+        // further than 2^24 grids from 0, where floats are multiples of 2 grids)
+        const double o = (double)(float)(std::round((mn[c] + mx[c]) * 0.5 / cp.grid) * cp.grid);
+        cp.origin[c] = o;
+        fits = fits && (mx[c] - o) / cp.grid <= 32767.0 && (mn[c] - o) / cp.grid >= -32768.0;
+      }
+      if (!fits) {
+        cp.grid *= 2;
+        changed = true;
+      }
+    }
+  }
+  // stats: steps before / after, positions in several chunks and how they reconstruct
+  struct QuantStats {
+    std::vector<double> old_steps, new_steps;
+    size_t coarser_chunks = 0;  // grid coarser than the old step (none expected)
+    size_t shared = 0;          // positions in more than one chunk
+    size_t shared_mismatch = 0;  // ... reconstructed differently by two of them (must be 0)
+    size_t snapped_coarser = 0;  // vertices on a coarser grid than their chunk's (shared)
+    double old_err = 0, new_err = 0;  // largest position error (game units)
+  } qs;
+  for (const auto& cp : plans) {
+    qs.old_steps.push_back(cp.old_step);
+    qs.new_steps.push_back(cp.grid);
+    qs.coarser_chunks += cp.grid > cp.old_step;
+  }
+  for (const auto& [k, sn] : snaps) {
+    qs.shared += sn.chunks > 1;
+  }
+  std::unordered_map<PosKey, std::array<double, 3>, PosKeyHash> shared_pos;
 
   std::vector<c3l::Chunk> chunks;
   std::vector<c3l::Vertex> out_verts;
@@ -1023,37 +1313,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   VcacheStats vc_before, vc_after;
   size_t welded_verts = 0;
 
-  for (auto& [key, tri_ids] : cells) {
-    // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
-    // visibility id, so a draw's triangles of one drawable are one run (c3l::VisRun)
-    std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
-      const auto& ta = cv.tris[a];
-      const auto& tb = cv.tris[b];
-      return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
-    });
-    size_t pos = 0;
-    while (pos < tri_ids.size()) {
-      // gather triangles until 65535 unique vertices
-      std::unordered_map<u32, u16> local;
-      std::vector<u32> local_src;
-      size_t end = pos;
-      while (end < tri_ids.size()) {
-        const auto& t = cv.tris[tri_ids[end]];
-        int new_verts = 0;
-        for (int k = 0; k < 3; k++) {
-          new_verts += local.count(t.v[k]) ? 0 : 1;
-        }
-        if (local_src.size() + new_verts > 65535) {
-          break;
-        }
-        for (int k = 0; k < 3; k++) {
-          if (!local.count(t.v[k])) {
-            local[t.v[k]] = local_src.size();
-            local_src.push_back(t.v[k]);
-          }
-        }
-        end++;
-      }
+  for (const auto& cp : plans) {
+    {
+      const auto& key = cp.key;
+      const auto& local = cp.local;
+      const auto& local_src = cp.src;
 
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
@@ -1066,36 +1330,64 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                     : detail == 2 ? opt.medium_dist * 4096.f
                     : detail == 3 ? opt.shrub_dist * 4096.f
                                   : 0.f;
-      float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-      for (u32 s : local_src) {
-        const auto& v = cv.verts[s];
-        float p[3] = {v.x, v.y, v.z};
+      // (AI-assisted) Draw::kind 0 tfrag, 1 tie, 2 shrub
+      ch.kind = (u32)std::get<4>(key) + c3l::CHUNK_KIND_TFRAG;
+      // (AI-assisted) the positions on their grid (see "quantizing grids"), the old quantizer's
+      // error for the stats
+      std::vector<std::array<double, 3>> snapped(local_src.size());
+      double mn[3] = {1e300, 1e300, 1e300}, mx[3] = {-1e300, -1e300, -1e300};
+      double omn[3] = {1e300, 1e300, 1e300};
+      for (size_t i = 0; i < local_src.size(); i++) {
+        const auto& v = cv.verts[local_src[i]];
+        const double g = snaps.at(pos_key(local_src[i])).grid;
+        const float p[3] = {v.x, v.y, v.z};
+        qs.snapped_coarser += g > cp.grid;
         for (int c = 0; c < 3; c++) {
-          mn[c] = std::min(mn[c], p[c]);
-          mx[c] = std::max(mx[c], p[c]);
+          snapped[i][c] = on_grid(p[c], g);
+          mn[c] = std::min(mn[c], snapped[i][c]);
+          mx[c] = std::max(mx[c], snapped[i][c]);
+          omn[c] = std::min(omn[c], (double)p[c]);
+          qs.new_err = std::max(qs.new_err, std::abs(snapped[i][c] - p[c]));
         }
       }
-      float extent = std::max({mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2], 1.f});
-      ch.scale = extent / 32767.f;
+      for (size_t i = 0; i < local_src.size(); i++) {
+        const auto& v = cv.verts[local_src[i]];
+        const float p[3] = {v.x, v.y, v.z};
+        const float old_scale = (float)cp.old_step;
+        for (int c = 0; c < 3; c++) {
+          const float o = (float)omn[c];
+          const int q = std::clamp((int)std::lround((p[c] - o) / old_scale), 0, 32767);
+          qs.old_err = std::max(qs.old_err, std::abs((double)o + q * (double)old_scale - p[c]));
+        }
+      }
+      ch.scale = (float)cp.grid;
       float rad = 0;
       for (int c = 0; c < 3; c++) {
-        ch.origin[c] = mn[c];
-        ch.bsphere[c] = (mn[c] + mx[c]) / 2;
+        ch.origin[c] = (float)cp.origin[c];
+        ch.bsphere[c] = (float)((mn[c] + mx[c]) / 2);
       }
-      for (u32 s : local_src) {
-        const auto& v = cv.verts[s];
-        float dx = v.x - ch.bsphere[0], dy = v.y - ch.bsphere[1], dz = v.z - ch.bsphere[2];
-        rad = std::max(rad, std::sqrt(dx * dx + dy * dy + dz * dz));
+      for (const auto& p : snapped) {
+        const double dx = p[0] - ch.bsphere[0], dy = p[1] - ch.bsphere[1],
+                     dz = p[2] - ch.bsphere[2];
+        rad = std::max(rad, (float)std::sqrt(dx * dx + dy * dy + dz * dz));
       }
       ch.bsphere[3] = rad;
       ch.first_vertex = out_verts.size();
       ch.vertex_count = local_src.size();
-      for (u32 s : local_src) {
-        const auto& v = cv.verts[s];
+      for (size_t i = 0; i < local_src.size(); i++) {
+        const auto& v = cv.verts[local_src[i]];
         c3l::Vertex o{};
-        float p[3] = {v.x, v.y, v.z};
+        std::array<double, 3> rec;
         for (int c = 0; c < 3; c++) {
-          o.pos[c] = (s16)std::clamp((int)std::lround((p[c] - ch.origin[c]) / ch.scale), 0, 32767);
+          // an integer in the signed 16-bit range (the grids were chosen so)
+          const double q = (snapped[i][c] - cp.origin[c]) / cp.grid;
+          o.pos[c] = (s16)std::clamp((long)std::lround(q), -32768l, 32767l);
+          // what the 3DS reconstructs, exactly: origin + pos * scale
+          rec[c] = (double)ch.origin[c] + (double)o.pos[c] * (double)ch.scale;
+        }
+        if (snaps.at(pos_key(local_src[i])).chunks > 1) {
+          auto [it, fresh] = shared_pos.emplace(pos_key(local_src[i]), rec);
+          qs.shared_mismatch += !fresh && it->second != rec;
         }
         o.st[0] = (s16)std::clamp((int)std::lround(v.s * 1024.f), -32768, 32767);
         o.st[1] = (s16)std::clamp((int)std::lround(v.t * 1024.f), -32768, 32767);
@@ -1106,8 +1398,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       u32 cur_key = UINT32_MAX;
       std::vector<c3l::VisRun> runs;
       bool any_vis = false;
-      for (size_t i = pos; i < end; i++) {
-        const auto& t = cv.tris[tri_ids[i]];
+      for (size_t i = 0; i < cp.tris.size(); i++) {
+        const auto& t = cv.tris[cp.tris[i]];
         const bool new_draw = t.draw_key != cur_key;
         if (new_draw) {
           cur_key = t.draw_key;
@@ -1211,21 +1503,26 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         out_runs.insert(out_runs.end(), runs.begin(), runs.end());
       }
       chunks.push_back(ch);
-      pos = end;
     }
+  }
+  if (qs.shared_mismatch) {
+    lg::error("{}: {} positions in several chunks reconstruct differently", in.stem().string(),
+              qs.shared_mismatch);
+    return false;
   }
 
   // ---- textures (in parallel: ETC1 encoding is slow) ----
   std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
   std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
   std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
+  std::vector<MercGate> tex_gate(cv.tex_order.size());
   {
     BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
     pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
       for (size_t i = a; i < b; i++) {
         tex_descs[i] = c3l::Texture{};
         tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
-                                       &tex_descs[i], &tex_psnr[i]);
+                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
       }
     });
     pool.wait_for_tasks();
@@ -1262,6 +1559,28 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tstats.psnr_sum += tex_psnr[i];
       tstats.psnr_min = std::min(tstats.psnr_min, tex_psnr[i]);
       tstats.psnr_count++;
+    }
+    // (AI-assisted) merc textures and their ETC1 quality test
+    const auto& u = cv.tex_use[i];
+    const auto& g = tex_gate[i];
+    if (u.merc && g.bytes_16) {
+      const auto& t = level.textures.at(cv.tex_order[i]);
+      const bool sized = d.w >= opt.etc1_merc_min && d.h >= opt.etc1_merc_min;
+      tstats.merc++;
+      tstats.merc_etc1 += g.etc1;
+      tstats.merc_tested += g.tested;
+      tstats.merc_face += sized && (u.face || u.eye);
+      tstats.merc_bytes_16 += g.bytes_16;
+      tstats.merc_bytes += tex_datas[i].size();
+      lg::debug("{}: merc texture {} ({}) {}x{}{}{}{}{}: {}", in.stem().string(), t.debug_name,
+                t.debug_tpage_name, d.w, d.h,
+                d.format == c3l::TEX_ETC1A4 || d.format == c3l::TEX_RGBA4 ? " alpha" : "",
+                u.face ? " face" : "", u.eye ? " eye" : "", u.envmap ? " envmap" : "",
+                g.tested ? fmt::format("ETC1 {:.1f} dB, worst block {:.1f}; 16-bit {:.1f} dB, "
+                                       "{:.1f} -> {}",
+                                       g.psnr, g.worst_block, g.psnr_16, g.worst_block_16,
+                                       g.etc1 ? "ETC1" : "16-bit")
+                         : "16-bit");
     }
   }
 
@@ -1443,6 +1762,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
            tstats.etc1a4, tstats.rgb565, tstats.rgba4,
            tstats.psnr_count ? tstats.psnr_sum / tstats.psnr_count : 0.0,
            tstats.psnr_count ? tstats.psnr_min : 0.0);
+  if (cv.tex_copies) {
+    lg::info("{}: {} textures used were copies of others: drawn with the one copy",
+             level.level_name, cv.tex_copies);
+  }
+  if (tstats.merc) {
+    lg::info("{}: merc textures: {}, {} of {}x{} and up: {} faces / eyes kept 16-bit, {} "
+             "tested, {} ETC1 (PSNR >= {:g} dB or the 16-bit's, blocks <= {:g} or the "
+             "16-bit's): {} KB -> {} KB",
+             level.level_name, tstats.merc, tstats.merc_tested + tstats.merc_face,
+             opt.etc1_merc_min, opt.etc1_merc_min, tstats.merc_face, tstats.merc_tested,
+             tstats.merc_etc1, opt.etc1_merc_psnr, opt.etc1_merc_block,
+             tstats.merc_bytes_16 / 1024, tstats.merc_bytes / 1024);
+  }
   lg::info("{}: post-vertex cache: vertices shaded per triangle (FIFO 8 / 16) {:.3f} / {:.3f}{}",
            level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
            vc_before.shaded16 / std::max<u64>(vc_before.tris, 1),
@@ -1452,6 +1784,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                       : "");
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
+  }
+  if (!plans.empty()) {
+    // (AI-assisted) the quantizing grids against the old per-chunk bounding box steps
+    auto median = [](std::vector<double> v) {
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    lg::info("{}: quantizing: chunk steps (game units) median {:.3f} max {:.2f} -> powers of two "
+             "median {:g} max {:g} ({} chunks coarser, {} rounds); {} positions in several chunks, "
+             "all reconstructed identically: {} ({} differ), {} vertices on a coarser grid of "
+             "another chunk; largest position error {:.2f} -> {:.2f} units",
+             level.level_name, median(qs.old_steps),
+             *std::max_element(qs.old_steps.begin(), qs.old_steps.end()), median(qs.new_steps),
+             *std::max_element(qs.new_steps.begin(), qs.new_steps.end()), qs.coarser_chunks,
+             grid_rounds, qs.shared, qs.shared_mismatch == 0 ? "yes" : "NO", qs.shared_mismatch,
+             qs.snapped_coarser, qs.old_err, qs.new_err);
   }
   {
     // (AI-assisted) how well the ETC1 / ETC1A4 texels compress (64 KB pieces), for --etc1-rdo
@@ -1515,7 +1863,16 @@ int main(int argc, char** argv) {
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
   bool no_etc1 = false, no_mips = false;
   app.add_flag("--no-etc1", no_etc1, "16-bit textures (RGB565 / RGBA4) instead of ETC1 / ETC1A4");
-  app.add_flag("--etc1-merc", opt.etc1_merc, "ETC1 also for the textures of merc models");
+  app.add_flag("--etc1-merc", opt.etc1_merc,
+               "ETC1 for all textures of merc models (no quality test, faces too)");
+  app.add_option("--etc1-merc-psnr", opt.etc1_merc_psnr,
+                 "merc textures: ETC1 when its PSNR against the image is at least this or the "
+                 "16-bit version's (dB; 0: merc textures stay 16-bit)");
+  app.add_option("--etc1-merc-block", opt.etc1_merc_block,
+                 "... and no 4x4 block has an RMS error above this or the 16-bit version's worst "
+                 "(0..255)");
+  app.add_option("--etc1-merc-min", opt.etc1_merc_min,
+                 "... for merc textures at least this many texels wide and high");
   app.add_option("--etc1-quality", opt.etc1_quality, "ETC1 encoder quality: 0 low, 1 medium, 2 high");
   app.add_flag("--no-mips", no_mips, "no mip levels");
   app.add_option("--etc1-rdo", opt.etc1_rdo,

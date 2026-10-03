@@ -29,7 +29,10 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--no-tie`, `--no-shrub`, `--no-merc` | off | leave tie / shrubs / merc models out. |
 | `--merc-only` | off | only merc models (used for the common GAME.fr3 with `--all`). |
 | `--no-etc1` | off | 16-bit textures (RGB565 / RGBA4444) instead of ETC1 / ETC1A4. |
-| `--etc1-merc` | off | ETC1 also for the textures of merc models (they stay 16-bit by default). |
+| `--etc1-merc` | off | ETC1 for all textures of merc models, without the quality test (faces too). |
+| `--etc1-merc-psnr DB` | 34 | (AI-assisted) merc textures become ETC1 / ETC1A4 when they pass the quality test (see "Formats"); 0: they stay 16-bit. |
+| `--etc1-merc-block E` | 16 | ... and no 4x4 block has an RMS error above E (0..255) or the 16-bit version's worst. |
+| `--etc1-merc-min N` | 64 | ... for merc textures at least N texels wide and high (smaller ones stay 16-bit). |
 | `--etc1-quality N` | 1 | ETC1 encoder: 0 fast, 1 medium, 2 high (slow). |
 | `--no-mips` | off | no mip levels. |
 | `--threads N` | 0 | texture encoding threads (0: all cores). |
@@ -56,8 +59,9 @@ What goes in:
 - Merc models (characters, objects), see "Merc" below.
 - Not converted: hfrag, animated textures (those draws become untextured).
 
-Sizes (defaults): village1 148k triangles (tfrag 42k near + 12k far + 2k lowres, tie 94k),
-345 chunks, 419 textures, file 8.7 MB. misty 11.2 MB, citadel 18.5 MB (876 textures).
+Sizes (defaults, AI-assisted, Oct 3): village1 254k triangles in 626 chunks, 296 textures
+(1.2 MB), file 4.9 MB; misty 5.1 MB, citadel 4.2 MB (241 textures, 1.4 MB; before textures were
+shared, 1017 and 17.6 MB). All 26 files 98 MB (textures 21 MB).
 
 ## Compression (v11)
 
@@ -115,16 +119,19 @@ Header (128 bytes)
 
 Chunk (80 bytes)
   float bsphere[4]        world-space bounding sphere (x, y, z, r) for frustum culling
-  float origin[3], scale  world = origin + pos * scale  (game units: 4096 = 1 m)
+  float origin[3], scale  world = origin + pos * scale  (game units: 4096 = 1 m), see "Positions"
   u32 first_vertex, vertex_count   (<= 65536, so indices fit in u16)
   u32 first_draw, draw_count
   float max_dist          not drawn further than this from the camera (0 = no limit)
   u32 lod_tier            0 always (tie), 1 near tfrag, 2 far tfrag, 3 lowres tfrag
   float lod_center[3]     tiers 1/2: the grid cell center used to pick one of the two
-  u32 pad[3]
+  u32 vis_runs_offset, vis_run_count   (v10) the chunk's VisRun list
+  u32 kind                (AI-assisted) what the chunk holds: 1 tfrag, 2 tie, 3 shrub
+                          (CHUNK_KIND_*; 0 = unknown, in files written before it; no version
+                          change). A chunk holds one kind only.
 
 Vertex (16 bytes)
-  s16 pos[3]              quantized position, 0..32767 over the chunk's bounding box
+  s16 pos[3]              quantized position (see "Positions")
   s16 pad
   s16 st[2]               texture coordinates * 1024
   u8  rgba[4]             baked time of day color, GS units (0x80 = 1.0)
@@ -144,6 +151,21 @@ Texture (16 bytes)
   u32 data_offset, data_size
 ```
 
+- **Positions:** (AI-assisted) `scale` is a power of two (game units) and `origin` a multiple of
+  it near the chunk's centre; `pos` uses the signed range -32768..32767. The converter gives each
+  chunk the finest power of two that holds it, and puts a position that is in several chunks
+  (a surface crossing a cell border, a cell split at 65535 vertices, the two tfrag tiers) on the
+  coarsest of their grids first. That grid is a multiple of each chunk's own, so every chunk
+  reconstructs the position exactly the same and surfaces stay closed across chunks (checked at
+  conversion; the log's `quantizing:` line). Files from before Oct 3 2026 quantized each chunk on
+  its own bounding box grid (`pos` 0..32767 from the minimum, scale = extent / 32767): a vertex
+  shared by two chunks landed 3-9 mm apart in each, and the background showed through the cracks.
+  No chunk's step is coarser than with the old grid (typically 6.3 -> 4 units, 1 mm). The 3DS
+  still adds float24 rounding: the runtime folds origin and scale into each chunk's clip matrix,
+  truncated to float24 on upload. Simulated for firecanyon's and village1's shared vertices, two
+  chunks put them on screen within 0.1 px (median; at most 0.85) with the camera 1 m away,
+  0.03 px (at most 0.2) at 3 m and 0.01 px at 10 m, against 0.7 / 0.25 / 0.07 px before; what is
+  left are sub-pixel differences up close.
 - **Texel layout:** the 3DS GPU layout, ready to copy into a `C3D_Tex`. The image is split into
   8x8 tiles, stored in rows of tiles, with Morton order inside each tile. The bottom row of the
   image comes first, because the GPU samples t = 0 from there. `c3l::tiled_index()` gives the
@@ -159,8 +181,20 @@ Texture (16 bytes)
 - **Formats:** ETC1 (4 bits per texel) for opaque textures, ETC1A4 (8 bits) when any texel is
   transparent: 1/4 and 1/2 of the 16-bit sizes, so the textures of a level fit in VRAM. The
   runtime copies all textures of a level into one linear memory block and from there to VRAM (see
-  `ctr_gpu_pool_create`). Merc textures stay 16-bit unless `--etc1-merc` (faces show ETC1's 4x4
-  blocks up close). The converter logs the ETC1 PSNR per level file.
+  `ctr_gpu_pool_create`). The converter logs the ETC1 PSNR per level file.
+  (AI-assisted) Merc textures (characters, objects) of 64x64 and up are ETC1 / ETC1A4 when that
+  is about as good as their 16-bit version, measured on the full size level against the image:
+  a PSNR of at least 34 dB (about RGBA4's own error) or at least the 16-bit version's, and no 4x4
+  block with an RMS error above 16 or the 16-bit version's worst. RGB565 is close to the image
+  (~48 dB), so opaque ones need the 34 dB; RGBA4's 4-bit colors band (~34.5 dB), and ETC1A4 is the
+  closer one for most textures with alpha. The others stay 16-bit, and so do the textures of
+  characters with face animation (effects with blend shapes: the sages, the farmer, Jak...) and
+  the eye placeholders. Oct 3 2026, all levels: 695 merc textures tested, 526 ETC1 (16-bit
+  equivalent 22.3 MB -> 13.5 MB). The log lists every merc texture with its numbers.
+- **Shared textures:** (AI-assisted) the fr3 has a copy of a texture for each merc model that
+  uses it (citadel: 1017 textures, 776 of them copies; pal-environment-front 90 times). Identical
+  textures (size and texels) are written once and the draws share it: citadel's textures 17.6 MB
+  -> 2.1 MB (1.4 MB with the merc ETC1 above), all levels 82 MB -> 21 MB.
 - **Texture colors:** textures come from the fr3 as RGBA8888 with PS2 alpha (0x80 = opaque).
   Alpha is doubled when converting, so 0xff = opaque.
 - **Vertex colors:** vertex colors keep GS units. The renderer applies the same `* 2` that the PC
