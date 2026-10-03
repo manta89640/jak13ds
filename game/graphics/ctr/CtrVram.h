@@ -114,6 +114,7 @@ class CtrVram {
   };
   std::vector<PendingUpload> m_pending;
   bool m_ct32_pairs = false;  // (AI-assisted) see the constructor
+  bool m_ct32_lines = false;
   u32 read32(u32 byte_addr) const;
   u32 clut_color(u32 cbp, u32 cpsm, u32 entry) const;
 
