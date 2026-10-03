@@ -673,6 +673,8 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_new_shaders(ctr_settings().new_shaders ? 1 : 0);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
+  ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
+  lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");
   if (ctr_gpu_init() != 0) {
     lg::error("[ctr] GPU init failed");
     return 1;

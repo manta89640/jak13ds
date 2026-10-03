@@ -1041,6 +1041,7 @@ void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_set_vcache_reuse(int) {}
 void ctr_gpu_set_new_shaders(int) {}
 void ctr_gpu_set_asm_tex(int) {}
+void ctr_gpu_set_defer_flush(int) {}
 int ctr_gpu_asm_tex(void) {
   return 1;
 }

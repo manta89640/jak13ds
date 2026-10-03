@@ -1633,8 +1633,13 @@ static struct {
   int n;
 } s_defer;
 
+static int g_defer_flush = 1;
+void ctr_gpu_set_defer_flush(int on) {
+  g_defer_flush = on;
+}
+
 static void cache_flush_frame(const void* addr, u32 size) {
-  if (!g.in_frame) {
+  if (!g.in_frame || !g_defer_flush) {
     cache_flush_now(addr, size);
     return;
   }

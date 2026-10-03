@@ -86,6 +86,7 @@ anim_native = on           # (AI-assisted) the animation decompressor's per-join
 
 # ---- hardware hang bisect (AI-assisted, 2026-10-03): off = the Oct 2 behaviour of each Oct 3 optimisation ----
 new_shaders = on           # the shorter vertex shaders (DPH/MADI/rsq, repacked mesh fog uniforms). off: the Oct 2 ctr_basic / ctr_mesh / ctr_skin / ctr_skin_env (ctr_*_old.v.pica) with the old fog uniforms. ocean = waves always uses the new ocean shader
+defer_flush = on           # (hang bisect) the render thread's cache flushes held until the frame goes to the GPU. off: each right away, as on Oct 2
 asm_tex = on               # texture tiling in 4x2 groups (LDM/STM for RGBA8), 64-bit PSMCT32 VRAM uploads, SIMD sky blend / cloud premultiply. off: the Oct 2 per texel / per byte loops
 asm_mem = on               # ctr_mem.S memcpy / memmove / memset (LDM/STM). off: plain C byte / word loops (ctr_mem_c.c; also used before config.ini is read)
 fast_clock = on            # steady_clock from the system tick without divides. off: clock_gettime(CLOCK_MONOTONIC), as libstdc++

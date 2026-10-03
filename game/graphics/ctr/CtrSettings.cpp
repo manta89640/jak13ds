@@ -154,6 +154,8 @@ CtrSettings load() {
       s.new_shaders = parse_bool(v);
     } else if (key == "asm_tex") {
       s.asm_tex = parse_bool(v);
+    } else if (key == "defer_flush") {
+      s.defer_flush = parse_bool(v);
     } else if (key == "asm_mem") {
       s.asm_mem = parse_bool(v);
     } else if (key == "fast_clock") {

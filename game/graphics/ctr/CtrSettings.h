@@ -105,6 +105,9 @@ struct CtrSettings {
   // clock_gettime)
   bool new_shaders = true;
   bool asm_tex = true;
+  // (AI-assisted) defer_flush: the render thread's cache flushes held until the frame is submitted
+  // (e165bc719); off: each one right away, as on Oct 2
+  bool defer_flush = true;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above
