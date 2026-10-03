@@ -3,10 +3,11 @@
 /*!
  * @file kperf.h
  * (AI-assisted)
- * Frame timing for the 3DS port: where the time of a game frame goes, reported once a second
- * (log, and the bottom screen on the 3DS).
- *   logic  = kernel dispatch (GOAL code + C kernel) minus render and vsync. With the 3DS render
- *            thread this includes the game waiting for the render thread (sync-path).
+ * Frame timing for the 3DS port: where the time of a game frame goes. The bottom screen (3DS) shows
+ * every second; the log gets the "perf" lines every 5 s on the 3DS (each second elsewhere), over
+ * the whole 5 s. (AI-assisted)
+ *   logic  = kernel dispatch (GOAL code + C kernel) minus render, vsync and wait
+ *   wait   = the game waiting for the 3DS render thread in sync-path (the "dma-sync" section)
  *   render = the renderer's send_chain (drawing the DMA chain)
  *   vsync  = waiting in syncv for the vertical blank
  *   idle   = time outside the kernel dispatch (listener, sleeps)
@@ -19,7 +20,8 @@
 
 namespace kperf {
 
-enum class Cat { DISPATCH = 0, RENDER = 1, VSYNC = 2, COUNT = 3 };
+// (AI-assisted) WAIT: sync-path (kernel/jak1/kmachine.cpp)
+enum class Cat { DISPATCH = 0, RENDER = 1, VSYNC = 2, WAIT = 3, COUNT = 4 };
 
 void add(Cat cat, u64 us);
 //! Call once per kernel dispatch (the game's frame). Prints the stats once a second.
@@ -50,13 +52,13 @@ inline void count(Counter c, u64 n) {
 void rpc_poll(int channel, bool busy);
 
 //! Named sections from the game's with-profiler blocks (pc-prof). Inclusive time per name is
-//! reported once a second with the frame stats (top sections by ms per frame, with the number of
+//! reported with the frame stats in the log (top sections by ms per frame, with the number of
 //! times they ran per frame).
 //! Off by default (the timing costs time too, see docs/3ds-port/performance.md): enabled by the
 //! config.ini perf_sections = on on the 3DS, OPENGOAL_PERF_SECTIONS=1 on PC.
 extern bool g_sections_enabled;
 void init_sections();
-//! 3DS: without perf_sections, one report window in kSectionSampleEvery is timed by section (the
+//! 3DS: without perf_sections, one second in kSectionSampleEvery (60) is timed by section (the
 //! hook turns the GOAL side's *pc-prof-on* on and off), so hardware logs always have a breakdown.
 void set_sections_hook(void (*hook)(bool on));
 void section_begin(const char* name);

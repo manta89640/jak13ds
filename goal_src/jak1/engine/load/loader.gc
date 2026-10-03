@@ -665,10 +665,14 @@
             (cond
               (arg1 (when (!= (ja-group) arg1) (ja-channel-set! 1) (ja :group! arg1 :num! min)))
               (else (ja-channel-set! 0)))
+            ;; (AI-assisted) 3DS: the stall line once per stall, not every frame of it
+            (#when TARGET_3DS
+              (format #t "WARNING: ---------------------> loader stall on art ~S ~D~%" (-> arg0 name) spool-part))
             (while (!= (file-status *art-control* (-> arg0 name) spool-part) 'active)
               (if (arg3 self) (goto cfg-88))
               (spool-push *art-control* (-> arg0 name) spool-part self -20.0)
-              (format #t "WARNING: ---------------------> loader stall on art ~S ~D~%" (-> arg0 name) spool-part)
+              (#unless TARGET_3DS
+                (format #t "WARNING: ---------------------> loader stall on art ~S ~D~%" (-> arg0 name) spool-part))
               (suspend)
               (if arg1 (ja :num! (loop!)))))
           (spool-push *art-control* (-> arg0 name) spool-part self -20.0)

@@ -15,6 +15,15 @@
 #include "common/util/FileUtil.h"
 #include "common/util/string_util.h"
 
+#ifdef __3DS__
+// (AI-assisted) the log writer thread (ctr_log_write): log lines are queued in memory and written
+// to the SD card by that thread, never by the thread that logs
+#include <cstring>
+#include <ctime>
+
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 namespace lg {
 struct Logger {
   Logger() = default;
@@ -43,7 +52,61 @@ const fmt::color log_colors[] = {
     fmt::color::gray, fmt::color::turquoise, fmt::color::light_green, fmt::color::yellow,
     fmt::color::red,  fmt::color::hot_pink,  fmt::color::hot_pink};
 
+#ifdef __3DS__
+bool enabled(level log_level) {
+  return log_level >= level::die || log_level >= gLogger.stdout_log_level ||
+         (gLogger.fp && log_level >= gLogger.file_log_level);
+}
+
+// (AI-assisted) 3DS with the log writer thread: the same lines, queued (no SD card access here)
+static void queue_message(level log_level, LogTime& now, const char* message) {
+  int outputs = 0;
+  if (gLogger.fp && log_level >= gLogger.file_log_level) {
+    outputs |= CTR_LOG_FILE;
+  }
+  if (log_level >= gLogger.stdout_log_level ||
+      (log_level == level::die && gLogger.stdout_log_level == level::off_unless_die)) {
+    outputs |= CTR_LOG_STDOUT;
+  }
+  if (outputs) {
+    char date_time_buffer[32];
+    struct tm tm_now;
+    localtime_r(&now.tim, &tm_now);
+    strftime(date_time_buffer, sizeof(date_time_buffer), "%M:%S", &tm_now);
+    const std::string line =
+        fmt::format("[{}] [{}] {}\n", date_time_buffer, log_level_names[int(log_level)], message);
+    const int urgent = log_level >= level::error;
+    if ((outputs & CTR_LOG_STDOUT) && !gLogger.disable_colors) {
+      // colored for stdout, plain for the file
+      const std::string colored =
+          fmt::format("[{}] [{}] {}\n", date_time_buffer,
+                      fmt::format(fg(log_colors[int(log_level)]), "{}",
+                                  log_level_names[int(log_level)]),
+                      message);
+      ctr_log_write(outputs & CTR_LOG_FILE, line.data(), (unsigned)line.size(), urgent);
+      ctr_log_write(CTR_LOG_STDOUT, colored.data(), (unsigned)colored.size(), urgent);
+    } else {
+      ctr_log_write(outputs, line.data(), (unsigned)line.size(), urgent);
+    }
+  }
+  if (log_level == level::die) {
+    abort();  // the crash screen writes out the log first
+  }
+}
+
+static int print_outputs() {
+  return (gLogger.fp ? CTR_LOG_FILE : 0) |
+         (gLogger.stdout_log_level < lg::level::off_unless_die ? CTR_LOG_STDOUT : 0);
+}
+#endif
+
 void log_message(level log_level, LogTime& now, const char* message) {
+#ifdef __3DS__
+  if (ctr_log_async()) {
+    queue_message(log_level, now, message);
+    return;
+  }
+#endif
 #ifdef __linux__
   char date_time_buffer[128];
   time_t now_seconds = now.tv.tv_sec;
@@ -95,6 +158,12 @@ void log_message(level log_level, LogTime& now, const char* message) {
 }
 
 void log_print(const char* message) {
+#ifdef __3DS__
+  if (ctr_log_async()) {
+    ctr_log_write(print_outputs(), message, (unsigned)strlen(message), 0);
+    return;
+  }
+#endif
   {
     // We always immediately flush prints because since it has no associated level
     // it could be anything from a fatal error to a useless debug log.
@@ -115,6 +184,23 @@ void log_print(const char* message) {
 }
 
 void log_vprintf(const char* format, va_list arg_list) {
+#ifdef __3DS__
+  if (ctr_log_async()) {
+    char buffer[1024];
+    va_list arg_list_2;
+    va_copy(arg_list_2, arg_list);
+    const int n = vsnprintf(buffer, sizeof(buffer), format, arg_list);
+    if (n >= (int)sizeof(buffer)) {
+      std::string big((size_t)n + 1, '\0');
+      vsnprintf(big.data(), big.size(), format, arg_list_2);
+      ctr_log_write(print_outputs(), big.data(), (unsigned)n, 0);
+    } else if (n > 0) {
+      ctr_log_write(print_outputs(), buffer, (unsigned)n, 0);
+    }
+    va_end(arg_list_2);
+    return;
+  }
+#endif
   {
     // We always immediately flush prints because since it has no associated level
     // it could be anything from a fatal error to a useless debug log.
@@ -190,6 +276,9 @@ void set_file(const std::string& filename,
     gLogger.fp = file_util::open_file(complete_filename.c_str(), "w");
   }
   ASSERT(gLogger.fp);
+#ifdef __3DS__
+  ctr_log_set_file(gLogger.fp);  // (AI-assisted) written by the log writer thread
+#endif
 }
 
 void set_flush_level(level log_level) {
@@ -253,6 +342,12 @@ void initialize() {
 }
 
 void finish() {
+#ifdef __3DS__
+  // (AI-assisted) what the log writer still holds, and its queued background file writes (game
+  // settings), are written now: this runs right before the app exits
+  ctr_log_sync();
+  ctr_log_set_file(nullptr);
+#endif
   {
     std::lock_guard<std::mutex> lock(gLogger.mutex);
     if (gLogger.fp) {

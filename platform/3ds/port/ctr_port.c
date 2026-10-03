@@ -4,6 +4,7 @@
  */
 
 #include "ctr_port.h"
+#include "ctr_logring.h"
 
 #include <3ds.h>
 #include <malloc.h>
@@ -79,6 +80,9 @@ static int s_cpu_limit = 0; /* the app got a share of core 1 (APT_SetAppCpuTimeL
 static int s_sound = 0;
 static int s_sound_core = 1; /* 2 on New 3DS: see ctr_platform_init */
 static u32* s_soc_buffer = NULL;
+/* (AI-assisted) the log writer (below) */
+static void log_stop(void);
+static void log_watchdog(void);
 
 /* Boot progress on the SD card: on hardware a hang before the first frame shows nothing but the
  * launch screen; this file tells how far the boot got. sdmc:/3ds/jak1/boot.txt when started from
@@ -192,8 +196,10 @@ int ctr_platform_init(int enable_console) {
   if (enable_console) {
     consoleInit(GFX_BOTTOM, &s_stat_con);
     consoleInit(GFX_BOTTOM, &s_log_con);
-    consoleSetWindow(&s_stat_con, 0, 0, 40, STATUS_LINES);
-    consoleSetWindow(&s_log_con, 0, STATUS_LINES, 40, 30 - STATUS_LINES);
+    /* (AI-assisted) window coordinates start at 1 (0 was taken as 1: the log's first row was the
+     * status area's last one) */
+    consoleSetWindow(&s_stat_con, 1, 1, 40, STATUS_LINES);
+    consoleSetWindow(&s_log_con, 1, STATUS_LINES + 1, 40, 30 - STATUS_LINES);
     consoleSelect(&s_log_con);
     s_console = 1;
   }
@@ -234,6 +240,7 @@ int ctr_platform_init(int enable_console) {
 }
 
 void ctr_platform_exit(void) {
+  log_stop();
   ctr_net_exit();
   if (s_irrst) {
     irrstExit();
@@ -244,6 +251,7 @@ void ctr_platform_exit(void) {
 
 int ctr_main_loop(void) {
   int running = aptMainLoop() ? 1 : 0;
+  log_watchdog();
   if (s_console) {
     if (s_gpu_active) {
       /* citro3d swaps the top screen; the console screen is single buffered: flush it only, and
@@ -425,8 +433,11 @@ void abort(void) {
 static devoptab_t s_tee_out, s_tee_err;
 static const devoptab_t* s_orig_out = NULL;
 static const devoptab_t* s_orig_err = NULL;
+/* the console (bottom screen); without the log writer also stdout.log and the crash tail */
 static LightLock s_tee_lock;
 static int s_tee_lock_init = 0;
+static volatile int s_crashing = 0;
+static void console_write_raw(const char* text);
 
 /* the last output, for the crash screen */
 #define TAIL_SIZE 4096
@@ -472,7 +483,416 @@ static void tee_to_file(const char* ptr, size_t len) {
   }
 }
 
+/* ---------------- log writer ---------------- */
+/* (AI-assisted) config.ini log_async = on (default). Everything logged (lg lines, GOAL output,
+ * printf) is copied into a ring buffer (ctr_logring.h); the writer thread writes it to gk.log and
+ * stdout.log about once a second (sooner at 16 KB, after an error line, for a background job) and
+ * draws the bottom screen's log. Before, every line was written to the SD card (and drawn) by the
+ * thread that logged it, under one lock: while the IOP streams from the card a write blocks for
+ * 100-400 ms on hardware, which caused most of the long frames in the hardware logs.
+ * Core 2 at the lowest priority (0x3F): the 3DS scheduler never runs it while the render thread
+ * (0x2F) or the mixer (0x2E) can run, so it only gets core 2's idle time (the render thread waits
+ * for the game and the GPU for much of every frame), and it spends most of its time blocked in FS
+ * calls anyway. On core 0 the game thread, which spins while it waits for the IOP (RpcSync), would
+ * starve it for seconds at boot and in level loads; core 1 needs APT's CPU time share. The ring's
+ * lock is held for index updates and one record's memcpy only (the writer copies out without it),
+ * so a preempted writer can't hold up a thread that logs. If the writer hasn't had a round for 3 s
+ * all the same (core 2 kept busy), the main thread writes the logs (log_watchdog). Crashes and
+ * exits write what is left from their own thread (ctr_crash, ctr_log_sync). */
+#define LOG_RING_BYTES (256u << 10)
+#define LOG_OUT_BYTES (16u << 10) /* per file and batch: >= LOGRING_MAX_RECORD + a dropped line */
+#define LOG_WAKE_BYTES (16u << 10)
+#define LOG_INTERVAL_MS 1000u
+#define LOG_STARVED_MS 3000u
+
+static int s_log_on = 0;           /* the writer thread runs */
+static logring s_log_ring;
+static LightLock s_log_lock;       /* s_log_ring, the jobs, the status text */
+static RecursiveLock s_drain_lock; /* writing the files, the console text, the crash tail */
+static LightEvent s_log_event;
+static void* s_log_thread = NULL;
+static int s_log_core = 2;
+static unsigned int s_log_thread_id = 0;
+static volatile int s_log_quit = 0;
+static volatile int s_log_urgent = 0;
+static volatile u32 s_log_alive_ms = 0; /* the writer's last round */
+static u32 s_log_written_ms = 0;        /* the ring was last written out */
+static FILE* s_gk_file = NULL;          /* the lg log (gk.log), see lg::set_file */
+static char s_out_gk[LOG_OUT_BYTES], s_out_so[LOG_OUT_BYTES];
+
+typedef struct {
+  void (*fn)(void*);
+  void* arg;
+} BgJob;
+#define BG_JOBS 16
+static BgJob s_jobs[BG_JOBS];
+static unsigned s_jobs_first = 0, s_jobs_count = 0;
+
+/* The bottom screen's log window as text: the writer draws it row by row, padded to the width, so
+ * the libctru console never scrolls (a scroll moves ~130 KB of framebuffer) and never sees a
+ * newline (it flushes the framebuffers through GSP at every one). Guarded by s_drain_lock. */
+#define CON_COLS 40
+#define CON_ROWS (30 - STATUS_LINES)
+static char s_con_text[CON_ROWS][CON_COLS];
+static unsigned char s_con_len[CON_ROWS];
+static int s_con_first = 0, s_con_count = 1; /* rows in use, oldest first; text goes to the last */
+static int s_con_esc = 0;                    /* in an escape sequence (colors are left out) */
+static volatile int s_con_changed = 0;
+static volatile int s_con_paused = 0; /* ctr_message_wait's screen is up */
+static char s_status_text[160];       /* ctr_console_status, drawn by the writer */
+static volatile int s_status_dirty = 0;
+
+static u32 log_now_ms(void) {
+  return (u32)(svcGetSystemTick() / (SYSCLOCK_ARM11 / 1000));
+}
+
+static int drain_lock_timed(unsigned ms) {
+  for (unsigned i = 0;; i++) {
+    if (RecursiveLock_TryLock(&s_drain_lock) == 0) {
+      return 1;
+    }
+    if (i >= ms) {
+      return 0;
+    }
+    svcSleepThread(1000 * 1000LL);
+  }
+}
+
+/* the ring's lock; when crashing, not forever (the thread that crashed may hold it) */
+static int log_ring_lock(int crash) {
+  if (!crash) {
+    LightLock_Lock(&s_log_lock);
+    return 1;
+  }
+  for (int i = 0; i < 200; i++) {
+    if (LightLock_TryLock(&s_log_lock) == 0) {
+      return 1;
+    }
+    svcSleepThread(1000 * 1000LL);
+  }
+  return 0;
+}
+
+static void con_newline(void) {
+  if (s_con_count < CON_ROWS) {
+    s_con_count++;
+  } else {
+    s_con_first = (s_con_first + 1) % CON_ROWS;
+  }
+  s_con_len[(s_con_first + s_con_count - 1) % CON_ROWS] = 0;
+}
+
+static void con_putc(char c) {
+  int row = (s_con_first + s_con_count - 1) % CON_ROWS;
+  if (s_con_len[row] >= CON_COLS) {
+    con_newline();
+    row = (s_con_first + s_con_count - 1) % CON_ROWS;
+  }
+  s_con_text[row][s_con_len[row]++] = c;
+}
+
+/* stdout text -> the rows, wrapped like the libctru console does it (tabs of 3) */
+static void con_feed(const char* p, unsigned n) {
+  for (unsigned i = 0; i < n; i++) {
+    const unsigned char c = (unsigned char)p[i];
+    if (s_con_esc == 1) {
+      s_con_esc = c == '[' ? 2 : 0;
+    } else if (s_con_esc == 2) {
+      s_con_esc = c >= 0x40 && c <= 0x7e ? 0 : 2;
+    } else if (c == 0x1b) {
+      s_con_esc = 1;
+    } else if (c == '\n') {
+      con_newline();
+    } else if (c == '\t') {
+      do {
+        con_putc(' ');
+      } while (s_con_len[(s_con_first + s_con_count - 1) % CON_ROWS] % 3);
+    } else if (c >= 32 && c < 127) {
+      con_putc((char)c);
+    }
+  }
+  s_con_changed = 1;
+}
+
+/* one row of a console window (y from 1), padded with spaces: no newline, so no scrolling */
+static void con_draw_row(PrintConsole* con, int y, const char* text, int len) {
+  char line[CON_COLS];
+  if (len > CON_COLS) {
+    len = CON_COLS;
+  }
+  memcpy(line, text, (size_t)len);
+  memset(line + len, ' ', (size_t)(CON_COLS - len));
+  con->cursorX = 1;
+  con->cursorY = y;
+  s_orig_out->write_r(_REENT, NULL, line, CON_COLS);
+}
+
+/* the status lines (at most STATUS_LINES, separated by '\n'), cyan; console lock held */
+static void status_render(const char* text) {
+  PrintConsole* prev = consoleSelect(&s_stat_con);
+  console_write_raw("\x1b[36m");
+  const char* p = text;
+  for (int y = 1; y <= STATUS_LINES; y++) {
+    const char* e = p ? strchr(p, '\n') : NULL;
+    const int len = p ? (e ? (int)(e - p) : (int)strlen(p)) : 0;
+    con_draw_row(&s_stat_con, y, p ? p : "", len);
+    p = e ? e + 1 : NULL;
+  }
+  console_write_raw("\x1b[0m");
+  consoleSelect(prev);
+}
+
+/* draw what changed (s_drain_lock held) */
+static void console_update(void) {
+  if (!s_console || !s_orig_out || !s_orig_out->write_r || s_crashing || s_con_paused) {
+    return;
+  }
+  char status[sizeof(s_status_text)];
+  int have_status = 0;
+  LightLock_Lock(&s_log_lock);
+  if (s_status_dirty) {
+    memcpy(status, s_status_text, sizeof(status));
+    s_status_dirty = 0;
+    have_status = 1;
+  }
+  LightLock_Unlock(&s_log_lock);
+  if (!have_status && !s_con_changed) {
+    return;
+  }
+  tee_lock();
+  if (!s_crashing && !s_con_paused) {
+    if (s_con_changed) {
+      s_con_changed = 0;
+      PrintConsole* prev = consoleSelect(&s_log_con);
+      for (int r = 0; r < CON_ROWS; r++) {
+        const int row = (s_con_first + r) % CON_ROWS;
+        con_draw_row(&s_log_con, r + 1, s_con_text[row], r < s_con_count ? s_con_len[row] : 0);
+      }
+      consoleSelect(prev);
+    }
+    if (have_status) {
+      status_render(status);
+    }
+    s_console_dirty = 1; /* ctr_main_loop flushes the framebuffer */
+  }
+  tee_unlock();
+}
+
+/* Write what the ring holds to the files (s_drain_lock held). crash: nothing for the console, and
+ * returns 0 if the ring's lock stays taken. */
+static int log_drain(int crash) {
+  for (;;) {
+    if (!log_ring_lock(crash)) {
+      return 0;
+    }
+    unsigned dropped = 0;
+    const unsigned avail = logring_read_begin(&s_log_ring, &dropped);
+    LightLock_Unlock(&s_log_lock);
+    logring_out outs[2] = {{s_out_gk, LOG_OUT_BYTES, 0}, {s_out_so, LOG_OUT_BYTES, 0}};
+    if (dropped) {
+      outs[0].len = logring_dropped_line(s_out_gk, LOG_OUT_BYTES, dropped);
+      memcpy(s_out_so, s_out_gk, outs[0].len);
+      outs[1].len = outs[0].len;
+    }
+    const unsigned consumed = logring_take(&s_log_ring, avail, outs, 2);
+    if (!log_ring_lock(crash)) {
+      return 0;
+    }
+    logring_read_end(&s_log_ring, consumed);
+    LightLock_Unlock(&s_log_lock);
+    if (outs[0].len && s_gk_file) {
+      fwrite(s_out_gk, 1, outs[0].len, s_gk_file);
+    }
+    if (outs[1].len) {
+      if (s_tee_file) {
+        fwrite(s_out_so, 1, outs[1].len, s_tee_file);
+      }
+      tail_append(s_out_so, outs[1].len);
+      if (!crash) {
+        con_feed(s_out_so, outs[1].len);
+      }
+    }
+    if (consumed >= avail) {
+      return 1;
+    }
+  }
+}
+
+/* the queued background jobs, oldest first (s_drain_lock held) */
+static void run_jobs(void) {
+  for (;;) {
+    LightLock_Lock(&s_log_lock);
+    if (!s_jobs_count) {
+      LightLock_Unlock(&s_log_lock);
+      return;
+    }
+    const BgJob job = s_jobs[s_jobs_first];
+    s_jobs_first = (s_jobs_first + 1) % BG_JOBS;
+    s_jobs_count--;
+    LightLock_Unlock(&s_log_lock);
+    job.fn(job.arg);
+  }
+}
+
+static void* log_writer_main(void* arg) {
+  (void)arg;
+  ctr_thread_install_crash_handler();
+  s_log_thread_id = ctr_thread_current_id();
+  for (;;) {
+    LightEvent_WaitTimeout(&s_log_event, (s64)LOG_INTERVAL_MS * 1000000LL);
+    const int quit = s_log_quit;
+    RecursiveLock_Lock(&s_drain_lock);
+    const u32 now = log_now_ms();
+    /* woken early by the status line or a job: the files only once a second */
+    if (quit || s_log_urgent || now - s_log_written_ms >= LOG_INTERVAL_MS - 100 ||
+        s_log_ring.used >= LOG_WAKE_BYTES) {
+      s_log_urgent = 0;
+      log_drain(0);
+      s_log_written_ms = now;
+    }
+    run_jobs();
+    console_update();
+    s_log_alive_ms = now;
+    RecursiveLock_Unlock(&s_drain_lock);
+    if (quit) {
+      return NULL;
+    }
+  }
+}
+
+static int log_start(void) {
+  void* mem = malloc(LOG_RING_BYTES);
+  if (!mem) {
+    return 0;
+  }
+  logring_init(&s_log_ring, mem, LOG_RING_BYTES);
+  LightLock_Init(&s_log_lock);
+  RecursiveLock_Init(&s_drain_lock);
+  LightEvent_Init(&s_log_event, RESET_ONESHOT);
+  s_log_alive_ms = s_log_written_ms = log_now_ms();
+  s_log_on = 1;
+  /* core 2 (New 3DS), else core 0 */
+  s_log_core = 2;
+  if (ctr_thread_create_pinned(log_writer_main, NULL, 64 * 1024, CTR_PRIO_LOG, 2,
+                               &s_log_thread) != 0) {
+    s_log_core = CTR_CORE_APP;
+    if (ctr_thread_create(log_writer_main, NULL, 64 * 1024, CTR_PRIO_LOG, CTR_CORE_APP,
+                          &s_log_thread) != 0) {
+      s_log_on = 0;
+      free(mem);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* ctr_platform_exit: the writer's last round, then what came after it */
+static void log_stop(void) {
+  if (!s_log_on) {
+    return;
+  }
+  s_log_quit = 1;
+  LightEvent_Signal(&s_log_event);
+  ctr_thread_join(s_log_thread);
+  RecursiveLock_Lock(&s_drain_lock);
+  log_drain(0);
+  run_jobs();
+  s_log_on = 0;
+  RecursiveLock_Unlock(&s_drain_lock);
+}
+
+/* main thread (ctr_main_loop, every 16 ms): the writer had no round for LOG_STARVED_MS (its core
+ * busy all the time, or the writer stuck in a write): write the logs from here instead */
+static void log_watchdog(void) {
+  if (!s_log_on || s_crashing || log_now_ms() - s_log_alive_ms < LOG_STARVED_MS) {
+    return;
+  }
+  if (RecursiveLock_TryLock(&s_drain_lock) != 0) {
+    return; /* the writer is in a write */
+  }
+  log_drain(0);
+  run_jobs();
+  console_update();
+  s_log_alive_ms = s_log_written_ms = log_now_ms();
+  RecursiveLock_Unlock(&s_drain_lock);
+}
+
+int ctr_log_async(void) {
+  return s_log_on;
+}
+
+void ctr_log_write(int outputs, const char* text, unsigned int len, int urgent) {
+  outputs &= CTR_LOG_FILE | CTR_LOG_STDOUT;
+  if (!len || !outputs || !s_log_on) {
+    return;
+  }
+  if (outputs & CTR_LOG_STDOUT) {
+    /* also to the debugger / emulator log (Azahar: Debug.Emulated); without one it returns */
+    svcOutputDebugString(text, (s32)len);
+  }
+  LightLock_Lock(&s_log_lock);
+  const unsigned before = s_log_ring.used;
+  logring_put(&s_log_ring, (unsigned)outputs, text, len);
+  const unsigned after = s_log_ring.used;
+  LightLock_Unlock(&s_log_lock);
+  if (urgent) {
+    s_log_urgent = 1;
+    LightEvent_Signal(&s_log_event);
+  } else if (before < LOG_WAKE_BYTES && after >= LOG_WAKE_BYTES) {
+    LightEvent_Signal(&s_log_event);
+  }
+}
+
+void ctr_log_set_file(void* file) {
+  if (!s_log_on) {
+    return; /* lg writes the file itself */
+  }
+  RecursiveLock_Lock(&s_drain_lock);
+  if (file) {
+    setvbuf((FILE*)file, NULL, _IONBF, 0); /* whole batches: one SD write each */
+  }
+  s_gk_file = (FILE*)file;
+  RecursiveLock_Unlock(&s_drain_lock);
+}
+
+void ctr_log_sync(void) {
+  if (!s_log_on) {
+    if (s_tee_file) {
+      fflush(s_tee_file);
+    }
+    return;
+  }
+  /* the writer may be in the middle of a write (0.4 s at worst on hardware) */
+  if (!drain_lock_timed(5000)) {
+    return;
+  }
+  log_drain(0);
+  run_jobs();
+  s_log_written_ms = log_now_ms();
+  RecursiveLock_Unlock(&s_drain_lock);
+}
+
+int ctr_bg_run(void (*fn)(void*), void* arg) {
+  if (s_log_on && !s_log_quit) {
+    LightLock_Lock(&s_log_lock);
+    if (s_jobs_count < BG_JOBS) {
+      s_jobs[(s_jobs_first + s_jobs_count) % BG_JOBS] = (BgJob){fn, arg};
+      s_jobs_count++;
+      LightLock_Unlock(&s_log_lock);
+      LightEvent_Signal(&s_log_event);
+      return 1;
+    }
+    LightLock_Unlock(&s_log_lock);
+  }
+  fn(arg);
+  return 0;
+}
+
 static ssize_t tee_write_out(struct _reent* r, void* fd, const char* ptr, size_t len) {
+  if (s_log_on) {
+    ctr_log_write(CTR_LOG_STDOUT, ptr, (unsigned int)len, 0);
+    return (ssize_t)len;
+  }
   ssize_t rv = (ssize_t)len;
   tee_lock();
   tee_to_file(ptr, len);
@@ -485,6 +905,10 @@ static ssize_t tee_write_out(struct _reent* r, void* fd, const char* ptr, size_t
 }
 
 static ssize_t tee_write_err(struct _reent* r, void* fd, const char* ptr, size_t len) {
+  if (s_log_on) {
+    ctr_log_write(CTR_LOG_STDOUT, ptr, (unsigned int)len, 0);
+    return (ssize_t)len;
+  }
   ssize_t rv = (ssize_t)len;
   tee_lock();
   tee_to_file(ptr, len);
@@ -508,6 +932,13 @@ int ctr_stdio_tee(const char* path) {
     LightLock_Init(&s_tee_lock);
     s_tee_lock_init = 1;
   }
+  /* (AI-assisted) the log writer (config.ini log_async = off: each thread writes its own lines) */
+  if (ctr_config_bool("log_async", 1)) {
+    setvbuf(s_tee_file, NULL, _IONBF, 0); /* the writer writes whole batches */
+    if (!log_start()) {
+      setvbuf(s_tee_file, NULL, _IOFBF, BUFSIZ);
+    }
+  }
   s_orig_out = devoptab_list[STD_OUT];
   s_orig_err = devoptab_list[STD_ERR];
   memset(&s_tee_out, 0, sizeof(s_tee_out));
@@ -527,6 +958,10 @@ int ctr_stdio_tee(const char* path) {
   /* line buffering on stdout so the file sees lines promptly */
   setvbuf(stdout, NULL, _IOLBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
+  if (s_log_on) {
+    printf("[ctr] log writer thread on core %d (config.ini log_async = off turns it off)\n",
+           s_log_core);
+  }
   return 0;
 }
 
@@ -643,17 +1078,20 @@ void ctr_console_status(const char* text) {
   if (!s_console || !s_orig_out) {
     return;
   }
+  if (s_log_on) {
+    /* (AI-assisted) the log writer draws it */
+    LightLock_Lock(&s_log_lock);
+    snprintf(s_status_text, sizeof(s_status_text), "%s", text);
+    s_status_dirty = 1;
+    LightLock_Unlock(&s_log_lock);
+    LightEvent_Signal(&s_log_event);
+    return;
+  }
   tee_lock();
-  PrintConsole* prev = consoleSelect(&s_stat_con);
-  console_write_raw("\x1b[2J\x1b[36m");
-  console_write_raw(text);
-  console_write_raw("\x1b[0m");
-  consoleSelect(prev);
+  status_render(text);
   s_console_dirty = 1;
   tee_unlock();
 }
-
-static volatile int s_crashing = 0;
 
 static void screen_refresh(void) {
   gfxFlushBuffers();
@@ -755,6 +1193,16 @@ void ctr_crash(const char* title, const char* detail) {
   char msg[512];
   int len = snprintf(msg, sizeof(msg), "\n*** CRASH: %s\n%s\n", title, detail ? detail : "");
   svcOutputDebugString(msg, len);
+  /* (AI-assisted) the log writer: write out everything logged before the crash, from here. Not if
+   * the writer itself crashed, and only once it is between two writes (its lock then stays taken,
+   * so it stops); the thread that crashed may hold the ring's lock: log_drain gives up then. */
+  int files = 1;
+  if (s_log_on) {
+    files = ctr_thread_current_id() != s_log_thread_id && drain_lock_timed(2000);
+    if (files) {
+      log_drain(1);
+    }
+  }
   /* don't wait forever for a lock held by a thread that crashed in the middle of a print */
   int locked = 0;
   if (s_tee_lock_init) {
@@ -765,7 +1213,7 @@ void ctr_crash(const char* title, const char* detail) {
       }
     }
   }
-  if (s_tee_file) {
+  if (files && s_tee_file) {
     fputs(msg, s_tee_file);
     fflush(s_tee_file);
   }
@@ -773,11 +1221,17 @@ void ctr_crash(const char* title, const char* detail) {
     /* (AI-assisted) the system is closing the app (HOME Menu): nobody sees the crash screen, and
      * the HOME Menu waits until the app tells APT it closed, which _exit does (__appExit ->
      * aptExit); svcExitProcess alone left it on "closing software" forever */
+    if (s_log_on && files) {
+      run_jobs(); /* a background file write (settings) */
+    }
     _exit(1);
   }
   show_screen("\x1b[31m", "*** OpenGOAL crashed ***", title, detail, 1,
               "Logs: sdmc:/3ds/jak1/data/log/\nPlease report stdout.log and gk.log.\n"
               "\x1b[32mPress START to exit.\x1b[0m");
+  if (s_log_on && files) {
+    run_jobs(); /* (AI-assisted) a background file write (settings), with the screen up */
+  }
   wait_for_button();
   svcExitProcess();
   for (;;) {
@@ -785,15 +1239,19 @@ void ctr_crash(const char* title, const char* detail) {
 }
 
 void ctr_message_wait(const char* title, const char* text) {
+  s_con_paused = 1; /* (AI-assisted) the log writer leaves the screen alone */
   tee_lock();
   show_screen("\x1b[33m", "*** OpenGOAL ***", title, text, 0,
               "\x1b[32mPress START to continue.\x1b[0m");
   tee_unlock();
   wait_for_button();
   tee_lock();
-  consoleSetWindow(&s_log_con, 0, STATUS_LINES, 40, 30 - STATUS_LINES);
+  consoleSetWindow(&s_log_con, 1, STATUS_LINES + 1, 40, 30 - STATUS_LINES);
   console_write_raw("\x1b[2J");
+  s_con_changed = 1; /* drawn again by the writer */
+  s_status_dirty = 1;
   tee_unlock();
+  s_con_paused = 0;
 }
 
 /* ---------------- CPU exceptions ---------------- */

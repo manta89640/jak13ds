@@ -427,7 +427,10 @@ u64 kopen(u32 fs, u32 name, u32 mode) {
   file_stream->mode = mode;
   file_stream->name = name;
   file_stream->flags = 0;
+#ifndef __3DS__
+  // (AI-assisted) 3DS: not there (the settings parser opens files at boot and at every autosave)
   lg::print("****** CALL TO kopen() ******\n");
+#endif
   // sprintf(buffer, "host:%s", Ptr<String>(name)->data());
   if (!strcmp(info(Ptr<Symbol>(mode))->str->data(), "read")) {
     file_stream->file = sceOpen(Ptr<String>(name)->data(), SCE_RDONLY);
@@ -710,12 +713,17 @@ u32 syncv_timed(u32 mode) {
   kperf::Scope perf_scope(kperf::Cat::VSYNC);
   return sceGsSyncV(mode);
 }
+// (AI-assisted) the game waiting for the 3DS render thread ("wait" in the perf lines, not logic)
+u32 sync_path_timed(u32 mode, u32 timeout) {
+  kperf::Scope perf_scope(kperf::Cat::WAIT);
+  return sceGsSyncPath(mode, timeout);
+}
 }  // namespace
 
 void InitMachineScheme() {
   make_function_symbol_from_c("put-display-env", PutDisplayEnv);       // used in drawable
   make_function_symbol_from_c("syncv", syncv_timed);                    // used in drawable
-  make_function_symbol_from_c("sync-path", sceGsSyncPath);             // used
+  make_function_symbol_from_c("sync-path", sync_path_timed);           // used
   make_function_symbol_from_c("reset-path", sceGsResetPath);           // used in dma
   make_function_symbol_from_c("reset-graph", sceGsResetGraph);         // used
   make_function_symbol_from_c("dma-sync", sceDmaSync);                 // used

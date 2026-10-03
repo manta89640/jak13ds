@@ -19,6 +19,10 @@ platform/3ds/tools/perf_report.py build-3ds/perf/stdout.log      # --perf-sectio
   for the render thread), the renderer's game-thread split (`logic` without waits + `wait render
   thread`), render thread time per bucket renderer, the time the IOP and sound threads take from
   the game's core, and with `--perf-sections` every section (inclusive ms/frame and calls/frame).
+- (AI-assisted, 2026-10-03) The 3DS writes kperf's lines every 5 s now (over the 5 s), and its
+  `logic` leaves out the wait in `sync-path` (the game waiting for the render thread), which comes
+  after `idle` as `wait`: logic numbers from before this are higher by that wait. A window's first
+  line (skipped by `perf_report.py`) now covers up to 5 s; its "N s" count is in lines.
 - Variance: within a window the per-second `logic` has a standard deviation of 0.2-0.7 ms; the
   same build and scene in two runs differed by ~1 ms (2%).
 - Sections cost time: 3.6 us per timed section on the C side (logged at startup) plus the GOAL
