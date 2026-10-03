@@ -19,6 +19,12 @@
  * VRAM area every frame, but those renderers take their textures from the .c3l files. An upload
  * is only recorded (and replaces a pending upload to the same area); it is written to the VRAM
  * copy when something reads VRAM that it overlaps.
+ *
+ * (AI-assisted) What VRAM holds is tracked per 16 KB chunk (the game's upload unit): a chunk
+ * written whole by a page upload has an id from its source (address in EE memory and a sampled
+ * hash of the bytes copied), anything else a new number. A chunk upload whose id is already there isn't
+ * written again, and a cached texture is valid while the ids of the chunks it was decoded from
+ * are unchanged: no VRAM re-hashing, no cache scans when VRAM is written.
  */
 
 #include <cstdint>
@@ -60,7 +66,8 @@ class CtrVram {
   void relocate(u32 dest_block, u32 src_block, u32 dest_psm);
 
   /*!
-   * Emulate a PSMCT32 image transfer (BITBLTBUF with DBW = width / 64) at block address dest.
+   * Emulate a PSMCT32 image transfer (BITBLTBUF with DBW = width / 64) at block address dest
+   * (written right away).
    */
   void upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
 
@@ -89,42 +96,63 @@ class CtrVram {
   void clear_cache();
 
   struct Stats {
-    int uploads = 0;
-    int uploads_changed = 0;
+    int uploads = 0;          // texture page uploads
+    int uploads_changed = 0;  // writes to the VRAM copy
     int decoded = 0;
     int cached = 0;
     int relocates_skipped = 0;
     int revived = 0;
+    int chunks_written = 0;  // (AI-assisted) 16 KB chunks of page uploads written to the VRAM copy
+    int chunks_skipped = 0;  // (AI-assisted) and not written: the same data was there already
   };
   const Stats& stats() const { return m_stats; }
 
  private:
-  void invalidate_blocks(u32 first_block, u32 end_block);
-  void write_upload(const u8* src, u32 dest_block, u32 words);
-  // write the pending uploads (all, or only those overlapping the given block ranges)
-  void flush_pending();
-  void flush_pending(u32 first_block, u32 end_block);
-  std::unordered_map<u64, u64> m_last_relocate;  // (dest, psm) -> signature of the source
-  bool pending_overlaps(u32 first_block, u32 end_block) const;
   struct PendingUpload {
     const u8* src;
     u32 dest_block;
     u32 end_block;
     u32 words;
   };
+  static PendingUpload piece(const PendingUpload& p, u32 c0, u32 c1);
+  void write_upload(const u8* src, u32 dest_block, u32 words);
+  void write_rows(const u8* src, u32 dest_block, u32 words);
+  void write_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
+  // write the pending uploads (all, or only those overlapping the given block ranges)
+  void flush_pending();
+  void flush_pending(u32 first_block, u32 end_block);
+  // (AI-assisted) drop the chunks of pending uploads that [first_block, end_block) overwrites
+  void trim_pending(u32 first_block, u32 end_block);
+  struct RelocateRecord {
+    u64 sig;                     // source, CLUT and destination format
+    u32 first_block, end_block;  // what it wrote
+  };
+  std::unordered_map<u64, RelocateRecord> m_last_relocate;  // by (dest, psm)
+  bool pending_overlaps(u32 first_block, u32 end_block) const;
   std::vector<PendingUpload> m_pending;
+  std::vector<PendingUpload> m_keep, m_write;  // (AI-assisted) scratch: no allocations per flush
   bool m_ct32_pairs = false;  // (AI-assisted) see the constructor
   bool m_ct32_lines = false;
   u32 read32(u32 byte_addr) const;
   u32 clut_color(u32 cbp, u32 cpsm, u32 entry) const;
 
   std::vector<u8> m_vram;
+  // (AI-assisted) per 16 KB chunk: what it holds (see the top of this file). Page chunks have odd
+  // ids, all others even ones from m_next_unique_id.
+  static constexpr u32 kChunkCount = 256;
+  u64 m_chunk_id[kChunkCount] = {};
+  u64 m_next_unique_id = 2;
+  void mark_unique(u32 first_block, u32 end_block);
+  // after a write: the counters, and relocations over it must be redone
+  void note_write(u32 first_block, u32 end_block);
+  u64 mix_chunk_ids(u64 h, u32 first_block, u32 end_block) const;
   struct Entry {
     CtrTexture tex;
     u32 first_block, end_block;  // VRAM range the texture (and its CLUT) was read from
     u32 clut_first, clut_end;
-    u64 hash = 0;  // of the VRAM it was decoded from (content_hash)
+    u64 sig = 0;  // (AI-assisted) the ids of the chunks it was decoded from (entry_sig)
   };
+  u64 entry_sig(const Entry& e) const;
   std::unordered_map<u64, Entry> m_cache;
   // (AI-assisted) A direct-mapped cache in front of m_cache, for the textures drawn every frame:
   // the hash table's lookup takes the bucket modulo (a library divide on the ARM11, ~tens of
@@ -142,6 +170,11 @@ class CtrVram {
   // invalidated textures, kept (with their GPU texture) in case the same data comes back
   std::unordered_map<u64, Entry> m_stale;
   void clear_stale();
+  void keep_stale(u64 key, const Entry& e);
+  // (AI-assisted) entries are checked when they are looked up: once the cache has grown this far,
+  // the ones whose VRAM changed move to m_stale (bounded), so they don't keep GPU memory
+  size_t m_sweep_at = 256;
+  void sweep_outdated();
 
   // last upload per destination block: the game re-uploads the same pages every frame
   struct UploadRecord {
@@ -155,13 +188,16 @@ class CtrVram {
   std::vector<u32> m_ct32_page_table;  // byte offset in a PSMCT32 page, by x + 64 * y
 
   struct TexInfo {
-    u16 w, h;
-    u8 psm;
-    u8 width;  // in 64 pixel units
-    u16 clutpsm;
-    u16 clutdest;
+    u16 w = 0, h = 0;  // 0: no texture starts at this block
+    u8 psm = 0;
+    u8 width = 0;  // in 64 pixel units
+    u16 clutpsm = 0;
+    u16 clutdest = 0;
   };
-  std::unordered_map<u32, TexInfo> m_tex_info;  // by mip 0 block address
+  // by mip 0 block address. (AI-assisted) An array (160 KB): every changed page upload writes the
+  // entries of all its textures, which a hash map made a large part of the "tex" buckets' time
+  std::vector<TexInfo> m_tex_info;
+  void note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7_ptr);
 
   struct Relocation {
     u32 psm;
@@ -169,6 +205,5 @@ class CtrVram {
   };
   std::unordered_map<u32, std::vector<Relocation>> m_relocations;  // by dest block
   const Relocation* find_relocation(u32 block, u32 psm) const;
-  u64 content_hash(const Entry& e, const Relocation* reloc) const;
   Stats m_stats;
 };

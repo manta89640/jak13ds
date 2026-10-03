@@ -22,6 +22,34 @@ namespace {
 constexpr u32 kVramBytes = 4 * 1024 * 1024;
 constexpr u32 kVramMask = kVramBytes - 1;
 constexpr u32 kBlockBytes = 256;
+constexpr u32 kBlocks = kVramBytes / kBlockBytes;
+// (AI-assisted) the game's unit of texture uploads (upload-vram-pages in texture.gc): 4096 words,
+// 32 rows of a 128 pixel wide PSMCT32 image, 64 blocks
+constexpr u32 kChunkWords = 4096;
+constexpr u32 kChunkBlocks = kChunkWords * 4 / kBlockBytes;
+constexpr u32 kChunks = kBlocks / kChunkBlocks;
+
+// the blocks a 128 pixel wide PSMCT32 upload of `words` writes: whole chunks (the rows of a partial
+// chunk still spread over all of its pages' blocks)
+u32 upload_end_block(u32 dest_block, u32 words) {
+  return dest_block + (words + kChunkWords - 1) / kChunkWords * kChunkBlocks;
+}
+
+// (AI-assisted) the id of a whole chunk of a page upload (odd; see CtrVram.h): where its data comes
+// from in EE memory and a sampled hash of it (32 words, one per 512 bytes), taken when it is
+// written: a pending upload copies the bytes there at that time, not when it was recorded
+u64 page_chunk_id(const u8* chunk_src) {
+  u64 h = (u64)(uintptr_t)chunk_src * 0x9E3779B97F4A7C15ull;
+  for (u32 k = 0; k < 32; k++) {
+    u32 w;
+    memcpy(&w, chunk_src + 512 * k + 4 * (k & 7), 4);
+    h = (h ^ w) * 1099511628211ull;
+  }
+  h ^= h >> 29;
+  h *= 0xBF58476D1CE4E5B9ull;
+  h ^= h >> 32;
+  return h | 1;
+}
 
 // GOAL texture-page layout (see game/graphics/texture/TexturePool.h, kept GL-free here).
 struct GoalTexturePageSeg {
@@ -86,7 +114,9 @@ struct Range {
 }  // namespace
 
 CtrVram::CtrVram() {
+  static_assert(kChunks == kChunkCount);
   m_vram.resize(kVramBytes);
+  m_tex_info.resize(kBlocks);
   // a PSMCT32 page is 64 x 32 pixels (8 KB)
   m_ct32_page_table.resize(64 * 32);
   for (u32 y = 0; y < 32; y++) {
@@ -127,8 +157,48 @@ u32 CtrVram::read32(u32 byte_addr) const {
 }
 
 void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
+  write_ct32(data, dest_block, width, height);
+  // (AI-assisted) whole pages (a page row's blocks are spread over the page)
+  const u32 end = dest_block + (height + 31) / 32 * std::max(1u, width / 64) * 32;
+  mark_unique(dest_block, end);
+  note_write(dest_block, end);
+}
+
+void CtrVram::mark_unique(u32 first_block, u32 end_block) {
+  if (end_block <= first_block) {
+    return;
+  }
+  const u32 c0 = first_block / kChunkBlocks, c1 = (end_block - 1) / kChunkBlocks;
+  for (u32 c = c0; c <= c1 && c < c0 + kChunks; c++) {
+    m_chunk_id[c % kChunks] = m_next_unique_id;
+    m_next_unique_id += 2;
+  }
+}
+
+void CtrVram::note_write(u32 first_block, u32 end_block) {
   m_stats.uploads_changed++;
-  m_last_relocate.clear();  // a relocated texture may have been overwritten
+  // a texture relocated there has to be relocated again (relocate() skips unchanged ones)
+  for (auto it = m_last_relocate.begin(); it != m_last_relocate.end();) {
+    if (it->second.first_block < end_block && first_block < it->second.end_block) {
+      it = m_last_relocate.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+u64 CtrVram::mix_chunk_ids(u64 h, u32 first_block, u32 end_block) const {
+  if (end_block <= first_block) {
+    return h;
+  }
+  const u32 c0 = first_block / kChunkBlocks, c1 = (end_block - 1) / kChunkBlocks;
+  for (u32 c = c0; c <= c1 && c < c0 + kChunks; c++) {
+    h = (h ^ m_chunk_id[c % kChunks]) * 1099511628211ull;
+  }
+  return h;
+}
+
+void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
   const u32 pages_per_row = std::max(1u, width / 64);
   const u32 base = dest_block * kBlockBytes;
   u32 y = 0;
@@ -171,16 +241,10 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
       memcpy(m_vram.data() + addr, src_row + 4 * x, 4);
     }
   }
-  u32 first = dest_block;
-  u32 end = dest_block + (width * height * 4 + kBlockBytes - 1) / kBlockBytes;
-  invalidate_blocks(first, end);
 }
 
-void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr) {
-  GoalTexturePageHeader page;
-  memcpy(&page, tpage, sizeof(page));
-  // remember the textures' formats by address, for relocate()
-  for (int i = 0; i < page.length && i < 1024; i++) {
+void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7_ptr) {
+  for (s32 i = 0; i < count && i < 1024; i++) {
     u32 ptr;
     memcpy(&ptr, tpage + sizeof(GoalTexturePageHeader) + 4 * i, 4);
     if (!ptr || ptr == s7_ptr) {
@@ -188,9 +252,16 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     }
     GoalTexture tex;
     memcpy(&tex, ee_mem + ptr, sizeof(tex));
-    m_tex_info[tex.dest[0]] = TexInfo{(u16)tex.w, (u16)tex.h, tex.psm, tex.width[0], tex.clutpsm,
-                                      tex.clut_dest};
+    if (tex.dest[0] < kBlocks) {
+      m_tex_info[tex.dest[0]] = TexInfo{(u16)tex.w, (u16)tex.h, tex.psm, tex.width[0],
+                                        tex.clutpsm, tex.clut_dest};
+    }
   }
+}
+
+void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr) {
+  GoalTexturePageHeader page;
+  memcpy(&page, tpage, sizeof(page));
   // (AI-assisted) Like add-to-dma-buffer / upload-vram-pages (texture.gc): ONE 128 pixel wide
   // PSMCT32 image from the first uploaded segment's data to its dest, in whole 4096 word chunks
   // (32 rows), not one image per segment of exactly its size. The page layouts depend on that: the
@@ -243,27 +314,26 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     m_stats.uploads++;
     return;
   }
+  // remember the textures' formats by address, for relocate(). (AI-assisted) After the same-data
+  // check: a page uploaded again unchanged has them there already (another page uploaded over it
+  // in between fails the check)
+  note_tex_info(tpage, page.length, ee_mem, s7_ptr);
   // whole 32 row chunks of a 128 pixel wide image: a contiguous block range
-  const u32 end_block = dest_block + (words * 4 + kBlockBytes - 1) / kBlockBytes;
+  const u32 end_block = upload_end_block(dest_block, words);
   // Other uploads this one overwrites are no longer "already there": without this, a page
   // that is uploaded again after another page covered its area (the common textures, e.g.
   // the eye textures, after a level's pris page) was skipped and read back as garbage.
   forget_uploads(dest_block, end_block);
   m_last_upload[dest_block] = UploadRecord{src, words, hash};
-  // drop pending uploads that this one completely overwrites
-  m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
-                                 [&](const PendingUpload& p) {
-                                   return p.dest_block >= dest_block && p.end_block <= end_block;
-                                 }),
-                  m_pending.end());
+  // drop the pending uploads (or chunks of them) that this one completely overwrites
+  trim_pending(dest_block, end_block);
   m_pending.push_back(PendingUpload{src, dest_block, end_block, words});
   m_stats.uploads++;
 }
 
 const void* CtrVram::upload_source(u32 block) const {
   for (const auto& [b0, r] : m_last_upload) {
-    const u32 b1 = b0 + (r.words * 4 + kBlockBytes - 1) / kBlockBytes;
-    if (block >= b0 && block < b1) {
+    if (block >= b0 && block < upload_end_block(b0, r.words)) {
       return r.src;
     }
   }
@@ -272,8 +342,7 @@ const void* CtrVram::upload_source(u32 block) const {
 
 void CtrVram::forget_uploads(u32 first_block, u32 end_block) {
   for (auto it = m_last_upload.begin(); it != m_last_upload.end();) {
-    const u32 rows = (it->second.words + 127) / 128;
-    const u32 b0 = it->first, b1 = b0 + (rows * 128 * 4 + kBlockBytes - 1) / kBlockBytes;
+    const u32 b0 = it->first, b1 = upload_end_block(b0, it->second.words);
     if (b0 < end_block && first_block < b1) {
       it = m_last_upload.erase(it);
     } else {
@@ -283,23 +352,98 @@ void CtrVram::forget_uploads(u32 first_block, u32 end_block) {
 }
 
 void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words) {
+  // (AI-assisted) chunk by chunk: a whole chunk whose data is in the VRAM copy already (the same
+  // source; the game uploads its pages to the same VRAM every frame) isn't written again
+  for (u32 done = 0; done < words; done += kChunkWords) {
+    const u32 n = std::min(kChunkWords, words - done);
+    const u32 block = dest_block + done / (kBlockBytes / 4);
+    const u8* s = src + (size_t)done * 4;
+    const u32 end = upload_end_block(block, n);
+    if (n == kChunkWords && block % kChunkBlocks == 0 && block < kBlocks) {
+      const u64 id = page_chunk_id(s);
+      u64& cur = m_chunk_id[block / kChunkBlocks];
+      if (cur == id) {
+        m_stats.chunks_skipped++;
+        continue;
+      }
+      write_rows(s, block, n);
+      cur = id;
+    } else {
+      write_rows(s, block, n);
+      mark_unique(block, end);
+    }
+    m_stats.chunks_written++;
+    note_write(block, end);
+  }
+}
+
+void CtrVram::write_rows(const u8* src, u32 dest_block, u32 words) {
   // The game uploads 128 pixel wide PSMCT32 images (upload-vram-data in texture.gc).
   const u32 rows = (words + 127) / 128;
   if (words % 128) {
     // partial last row: copy through a padded buffer
     std::vector<u32> tmp(rows * 128, 0);
     memcpy(tmp.data(), src, words * 4);
-    upload_ct32((const u8*)tmp.data(), dest_block, 128, rows);
+    write_ct32((const u8*)tmp.data(), dest_block, 128, rows);
   } else {
-    upload_ct32(src, dest_block, 128, rows);
+    write_ct32(src, dest_block, 128, rows);
   }
+}
+
+CtrVram::PendingUpload CtrVram::piece(const PendingUpload& p, u32 c0, u32 c1) {
+  PendingUpload q;
+  q.src = p.src + (size_t)c0 * kChunkWords * 4;
+  q.dest_block = p.dest_block + c0 * kChunkBlocks;
+  q.words = std::min(p.words, c1 * kChunkWords) - c0 * kChunkWords;
+  q.end_block = upload_end_block(q.dest_block, q.words);
+  return q;
+}
+
+void CtrVram::trim_pending(u32 first_block, u32 end_block) {
+  // (AI-assisted) Not only whole pending uploads that this one covers: their chunks it covers too
+  // (pieces of whole chunks stay). Every frame the game uploads the levels' tfrag, pris, shrub,
+  // alpha and water pages and a common page to the same VRAM, and only the last one is read: the
+  // chunks the others had there were written for nothing when a texture read them.
+  bool any = false;
+  for (const auto& p : m_pending) {
+    any |= p.dest_block < end_block && first_block < p.end_block;
+  }
+  if (!any) {
+    return;
+  }
+  m_keep.clear();
+  for (const auto& p : m_pending) {
+    if (!(p.dest_block < end_block && first_block < p.end_block)) {
+      m_keep.push_back(p);
+      continue;
+    }
+    // chunk k of p: blocks [dest + 64k, min(dest + 64(k + 1), end)). Covered: [ca, cb)
+    const u32 chunks = (p.words + kChunkWords - 1) / kChunkWords;
+    const u32 ca = first_block > p.dest_block
+                       ? (first_block - p.dest_block + kChunkBlocks - 1) / kChunkBlocks
+                       : 0;
+    const u32 cb = end_block >= p.end_block ? chunks
+                                            : std::min(chunks, (end_block - p.dest_block) /
+                                                                   kChunkBlocks);
+    if (ca >= cb) {
+      m_keep.push_back(p);
+      continue;
+    }
+    if (ca > 0) {
+      m_keep.push_back(piece(p, 0, ca));
+    }
+    if (cb < chunks) {
+      m_keep.push_back(piece(p, cb, chunks));
+    }
+  }
+  m_pending.swap(m_keep);
 }
 
 void CtrVram::flush_pending() {
   // in order: later uploads may overlap earlier ones
-  std::vector<PendingUpload> pending;
-  pending.swap(m_pending);
-  for (const auto& p : pending) {
+  m_write.clear();
+  m_write.swap(m_pending);
+  for (const auto& p : m_write) {
     write_upload(p.src, p.dest_block, p.words);
   }
 }
@@ -310,21 +454,11 @@ void CtrVram::flush_pending(u32 first_block, u32 end_block) {
   // pixel wide PSMCT32 image: each chunk is 4096 words at 64 consecutive blocks); its other chunks
   // stay pending. A sprite needing one small texture used to write the whole page, every frame
   // where two levels alternate their pages in the same VRAM (Misty: ~12% of the render thread).
-  if (m_pending.empty()) {
+  if (!pending_overlaps(first_block, end_block)) {
     return;
   }
-  constexpr u32 kChunkWords = 4096;
-  constexpr u32 kChunkBlocks = kChunkWords * 4 / kBlockBytes;
-  auto piece = [](const PendingUpload& p, u32 c0, u32 c1) {
-    PendingUpload q;
-    q.src = p.src + (size_t)c0 * kChunkWords * 4;
-    q.dest_block = p.dest_block + c0 * kChunkBlocks;
-    q.words = std::min(p.words, c1 * kChunkWords) - c0 * kChunkWords;
-    q.end_block = q.dest_block + (q.words * 4 + kBlockBytes - 1) / kBlockBytes;
-    return q;
-  };
-  std::vector<PendingUpload> keep;
-  std::vector<PendingUpload> write;
+  m_keep.clear();
+  m_write.clear();
   for (const auto& p : m_pending) {
     if (p.dest_block < end_block && first_block < p.end_block) {
       const u32 chunks = (p.words + kChunkWords - 1) / kChunkWords;
@@ -332,25 +466,25 @@ void CtrVram::flush_pending(u32 first_block, u32 end_block) {
       const u32 c1 =
           std::min(chunks, (end_block - p.dest_block + kChunkBlocks - 1) / kChunkBlocks);
       if (c0 >= c1) {
-        keep.push_back(p);
+        m_keep.push_back(p);
         continue;
       }
       if (c0 > 0) {
-        keep.push_back(piece(p, 0, c0));
+        m_keep.push_back(piece(p, 0, c0));
       }
-      write.push_back(piece(p, c0, c1));
+      m_write.push_back(piece(p, c0, c1));
       if (c1 < chunks) {
-        keep.push_back(piece(p, c1, chunks));
+        m_keep.push_back(piece(p, c1, chunks));
       }
     } else {
-      keep.push_back(p);
+      m_keep.push_back(p);
     }
   }
-  if (write.empty()) {
+  if (m_write.empty()) {
     return;
   }
-  m_pending.swap(keep);
-  for (const auto& p : write) {
+  m_pending.swap(m_keep);
+  for (const auto& p : m_write) {
     write_upload(p.src, p.dest_block, p.words);
   }
 }
@@ -373,12 +507,11 @@ bool is_indexed(u32 psm) {
 }  // namespace
 
 void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
-  auto it = m_tex_info.find(src_block);
-  if (it == m_tex_info.end()) {
+  const TexInfo info = src_block < kBlocks ? m_tex_info[src_block] : TexInfo{};
+  if (!info.w) {
     lg::warn("[ctr vram] relocate from unknown texture at {}", src_block);
     return;
   }
-  const TexInfo info = it->second;
   if (!is_indexed(info.psm) || !is_indexed(dest_psm)) {
     lg::warn("[ctr vram] relocate {} -> {} not supported", info.psm, dest_psm);
     return;
@@ -390,32 +523,23 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
   const u32 src_blocks = ((u32)info.w * info.h * bits / 8 + 8191) / 8192 * 32;
   flush_pending(src_block, src_block + src_blocks);
   flush_pending(info.clutdest, info.clutdest + 4);
-  // the game relocates the font every frame: skip if the source and CLUT didn't change
+  // the game relocates the font every frame: skip if the source and CLUT didn't change (and
+  // nothing was written over the result: note_write). (AI-assisted) By the ids of their chunks,
+  // not a hash of their bytes (~64 KB, every frame)
   u64 sig = ((u64)src_block << 40) ^ ((u64)dest_psm << 32) ^ info.clutdest;
-  {
-    const u32 base = (src_block * kBlockBytes) & kVramMask;
-    const u32 bytes = std::min(src_blocks * kBlockBytes, kVramBytes - base);
-    for (u32 o = 0; o + 8 <= bytes; o += 8) {
-      u64 v;
-      memcpy(&v, m_vram.data() + base + o, 8);
-      sig = (sig ^ v) * 1099511628211ull;
-    }
-    const u32 cbase = (info.clutdest * kBlockBytes) & kVramMask;
-    for (u32 o = 0; o + 8 <= 4 * kBlockBytes && cbase + o + 8 <= kVramBytes; o += 8) {
-      u64 v;
-      memcpy(&v, m_vram.data() + cbase + o, 8);
-      sig = (sig ^ v) * 1099511628211ull;
-    }
-  }
+  sig = mix_chunk_ids(sig, src_block, src_block + src_blocks);
+  sig = mix_chunk_ids(sig, info.clutdest, info.clutdest + 4);
   const u64 reloc_key = ((u64)dest_block << 8) | (dest_psm & 0xff);
   auto last = m_last_relocate.find(reloc_key);
-  if (last != m_last_relocate.end() && last->second == sig) {
+  if (last != m_last_relocate.end() && last->second.sig == sig) {
     m_stats.relocates_skipped++;
     return;
   }
-  m_last_relocate[reloc_key] = sig;
   const u32 width = std::max<u32>(1, info.width) * 64;
   Range range;
+  // (AI-assisted) whether any byte changed: relocating the same again leaves the chunks' ids (and
+  // the textures decoded from them) as they are
+  bool changed = false;
   for (u32 y = 0; y < info.h; y++) {
     for (u32 x = 0; x < info.w; x++) {
       // read the index in the source format
@@ -443,11 +567,14 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
           u32 a = (psmt4_addr_half_byte(x, y, width) + dest_block * kBlockBytes * 2) &
                   (kVramMask * 2 + 1);
           u8& b = m_vram[a / 2];
-          b = (a & 1) ? ((b & 0x0f) | (idx << 4)) : ((b & 0xf0) | (idx & 0xf));
+          const u8 nb = (a & 1) ? ((b & 0x0f) | (idx << 4)) : ((b & 0xf0) | (idx & 0xf));
+          changed |= nb != b;
+          b = nb;
           range.add(a / 2);
         } break;
         case GsTex0::PSM::PSMT8: {
           u32 a = (psmt8_addr(x, y, width) + dest_block * kBlockBytes) & kVramMask;
+          changed |= m_vram[a] != (u8)idx;
           m_vram[a] = idx;
           range.add(a);
         } break;
@@ -455,6 +582,7 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
           u32 a = (psmct32_addr(x, y, width) + dest_block * kBlockBytes) & kVramMask & ~3u;
           u32 v;
           memcpy(&v, m_vram.data() + a, 4);
+          const u32 old = v;
           if (dest_psm == (u32)GsTex0::PSM::PSMT8H) {
             v = (v & 0x00ffffff) | (idx << 24);
           } else if (dest_psm == (u32)GsTex0::PSM::PSMT4HH) {
@@ -462,6 +590,7 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
           } else {
             v = (v & 0xf0ffffff) | ((idx & 0xf) << 24);
           }
+          changed |= v != old;
           memcpy(m_vram.data() + a, &v, 4);
           range.add(a);
         } break;
@@ -478,13 +607,28 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     reloc.clut.push_back(clut_color(info.clutdest, info.clutpsm, e));
   }
   auto& list = m_relocations[dest_block];
+  const Relocation* before = nullptr;
+  for (const auto& r : list) {
+    if (r.psm == dest_psm) {
+      before = &r;
+    }
+  }
+  // (AI-assisted) a new CLUT changes the textures there as much as new indices
+  changed |= !before || before->clut != reloc.clut;
   list.erase(std::remove_if(list.begin(), list.end(),
                             [&](const Relocation& r) { return r.psm == dest_psm; }),
              list.end());
   list.push_back(std::move(reloc));
+  RelocateRecord rec{sig, 0, 0};
   if (range.hi >= range.lo) {
-    invalidate_blocks(range.lo / kBlockBytes, range.hi / kBlockBytes + 1);
+    rec.first_block = range.lo / kBlockBytes;
+    rec.end_block = range.hi / kBlockBytes + 1;
+    if (changed) {
+      mark_unique(rec.first_block, rec.end_block);
+      note_write(rec.first_block, rec.end_block);  // (before this relocation's record is kept)
+    }
   }
+  m_last_relocate[reloc_key] = rec;
 }
 
 const CtrVram::Relocation* CtrVram::find_relocation(u32 block, u32 psm) const {
@@ -717,53 +861,62 @@ CtrVram::Entry* CtrVram::find_cached(u64 key) {
   return &it->second;
 }
 
+u64 CtrVram::entry_sig(const Entry& e) const {
+  return mix_chunk_ids(mix_chunk_ids(1469598103934665603ull, e.first_block, e.end_block),
+                       e.clut_first, e.clut_end);
+}
+
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // the parts of TEX0 that select the texture data (not TCC / TFX / CLUT load control)
   constexpr u64 kKeyMask = ~((0b111ull << 34) | (0b111ull << 61));
   u64 key = tex0 & kKeyMask;
-  const Entry* cached = find_cached(key);
-  if (cached) {
-    const auto& e = *cached;
-    if (m_pending.empty() || (!pending_overlaps(e.first_block, e.end_block) &&
-                              !pending_overlaps(e.clut_first, e.clut_end))) {
-      m_stats.cached++;
-      return &cached->tex;
-    }
+  Entry* cached = find_cached(key);
+  // (AI-assisted) valid while nothing pending is over it and its chunks hold what it was decoded
+  // from (entry_sig: a few chunk ids, not the texture's bytes)
+  if (cached &&
+      (m_pending.empty() || (!pending_overlaps(cached->first_block, cached->end_block) &&
+                             !pending_overlaps(cached->clut_first, cached->clut_end))) &&
+      entry_sig(*cached) == cached->sig) {
+    m_stats.cached++;
+    return &cached->tex;
   }
+  GsTex0 t(tex0);
   if (!m_pending.empty()) {
     // write the pending uploads this texture (or its cached version) may read
-    GsTex0 t(tex0);
     const u32 blocks = texture_block_span(t);
     flush_pending(t.tbp0(), t.tbp0() + blocks);
     flush_pending(t.cbp(), t.cbp() + 4);
-    cached = find_cached(key);
-    if (cached) {
-      m_stats.cached++;
-      return &cached->tex;
-    }
+  }
+  if (cached && entry_sig(*cached) == cached->sig) {
+    m_stats.cached++;  // the uploads written were the data already there
+    return &cached->tex;
   }
 
   // same VRAM contents as a texture decoded before (the game re-uploads pages every frame,
   // alternating pages in the same VRAM): reuse it instead of decoding again
   auto stale = m_stale.find(key);
   if (stale != m_stale.end()) {
-    Entry e = stale->second;
-    m_stale.erase(stale);
-    if (content_hash(e, find_relocation(GsTex0(tex0).tbp0(), (u32)GsTex0(tex0).psm())) ==
-        e.hash) {
+    if (entry_sig(stale->second) == stale->second.sig) {
       m_stats.revived++;
-      auto res = m_cache.emplace(key, e);
-      return &res.first->second.tex;
+      if (cached) {
+        std::swap(*cached, stale->second);  // the outdated one waits there in turn
+        return &cached->tex;
+      }
+      Entry* e = &m_cache.emplace(key, stale->second).first->second;
+      m_stale.erase(stale);
+      return &e->tex;
     }
-    if (e.tex.handle >= 0) {
-      ctr_gpu_tex_delete(e.tex.handle);
+    if (!cached) {
+      if (stale->second.tex.handle >= 0) {
+        ctr_gpu_tex_delete(stale->second.tex.handle);
+      }
+      m_stale.erase(stale);
     }
   }
 
   std::vector<u32> data;
   int w = 0, h = 0;
   Range tex_range;
-  GsTex0 t(tex0);
   const bool has_clut = t.psm() == GsTex0::PSM::PSMT8 || t.psm() == GsTex0::PSM::PSMT4 ||
                         t.psm() == GsTex0::PSM::PSMT8H || t.psm() == GsTex0::PSM::PSMT4HH ||
                         t.psm() == GsTex0::PSM::PSMT4HL;
@@ -805,33 +958,47 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   } else {
     e.clut_first = e.clut_end = 0;
   }
-  e.hash = content_hash(e, reloc);
+  // (AI-assisted) a texture relocated with a new CLUT: relocate() gives its chunks new ids
+  e.sig = entry_sig(e);
   m_stats.decoded++;
+  if (cached) {
+    keep_stale(key, *cached);  // the outdated version: the same data often comes back
+    *cached = e;
+    return &cached->tex;
+  }
+  if (m_cache.size() >= m_sweep_at) {
+    sweep_outdated();
+  }
   auto res = m_cache.emplace(key, e);
   return &res.first->second.tex;
 }
 
-void CtrVram::invalidate_blocks(u32 first_block, u32 end_block) {
+void CtrVram::keep_stale(u64 key, const Entry& e) {
   if (m_stale.size() > 256) {
     clear_stale();  // bound the GPU memory of kept textures
   }
+  auto it = m_stale.find(key);
+  if (it == m_stale.end()) {
+    m_stale.emplace(key, e);
+    return;
+  }
+  if (it->second.tex.handle >= 0) {
+    ctr_gpu_tex_delete(it->second.tex.handle);
+  }
+  it->second = e;
+}
+
+void CtrVram::sweep_outdated() {
   for (auto it = m_cache.begin(); it != m_cache.end();) {
-    const auto& e = it->second;
-    bool hit = (e.first_block < end_block && first_block < e.end_block) ||
-               (e.clut_first < end_block && first_block < e.clut_end);
-    if (hit) {
-      // keep it: the same data often comes back (see get_texture)
-      auto old = m_stale.find(it->first);
-      if (old != m_stale.end() && old->second.tex.handle >= 0) {
-        ctr_gpu_tex_delete(old->second.tex.handle);
-      }
-      m_stale[it->first] = e;
+    if (entry_sig(it->second) != it->second.sig) {
+      keep_stale(it->first, it->second);
       it = m_cache.erase(it);
-      m_cache_gen++;  // (AI-assisted) the front cache may point at it
     } else {
       ++it;
     }
   }
+  m_cache_gen++;  // (AI-assisted) the front cache may point at erased entries
+  m_sweep_at = std::max<size_t>(256, m_cache.size() + 128);
 }
 
 void CtrVram::clear_cache() {
@@ -852,25 +1019,4 @@ void CtrVram::clear_stale() {
     }
   }
   m_stale.clear();
-}
-
-u64 CtrVram::content_hash(const Entry& e, const Relocation* reloc) const {
-  u64 h = 1469598103934665603ull;
-  auto add_range = [&](u32 first, u32 end) {
-    const u32 lo = std::min(first * kBlockBytes, kVramBytes);
-    const u32 hi = std::min(end * kBlockBytes, kVramBytes);
-    for (u32 o = lo; o + 8 <= hi; o += 8) {
-      u64 v;
-      memcpy(&v, m_vram.data() + o, 8);
-      h = (h ^ v) * 1099511628211ull;
-    }
-  };
-  add_range(e.first_block, e.end_block);
-  add_range(e.clut_first, e.clut_end);
-  if (reloc) {
-    for (u32 c : reloc->clut) {
-      h = (h ^ c) * 1099511628211ull;
-    }
-  }
-  return h;
 }
