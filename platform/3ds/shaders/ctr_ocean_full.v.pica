@@ -29,9 +29,15 @@
   dph r0.w, inpos, gs[3]
   rcp r1.x, inpos.w
   mul outpos, r0, r1.xxxx
-  mul outtc0.xy, intex.xyyy, r1.xxxx
-  mov outtc1.x, intex.zzzz
-  mov outtc1.y, half
+  ; (AI-assisted) outputs built whole in temporaries and written once (zw = 0): partial output
+  ; writes are the suspect in the new ctr_mesh.v.pica's hardware GPU hang (2026-10-03)
+  mov r2.zw, consts.zzzz
+  mul r2.xy, intex.xyyy, r1.xxxx
+  mov outtc0, r2
+  mov r3.zw, consts.zzzz
+  mov r3.x, intex.zzzz
+  mov r3.y, half
+  mov outtc1, r3
   mul outclr, inv255, inclr
   end
 .end

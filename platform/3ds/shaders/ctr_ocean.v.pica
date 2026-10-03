@@ -35,13 +35,22 @@
   mul r2.xy, fog0.xyxy, r1.xyxy
   add r2.xy, fog0.zwzw, r2.xyxy
   max r2.xy, fog1.xyxy, r2.xyxy
-  max outtc1.x, -r2.xxxx, r2.yyyy
-  mov outtc1.y, consts.yyyy
+  ; (AI-assisted) each output is built whole in a temporary and written once (zw = 0), like the
+  ; shaders that run on hardware: the new ctr_mesh.v.pica, which wrote outputs in parts, hung the
+  ; real GPU (hardware bisect, 2026-10-03)
+  mov r4.zw, consts.zzzz
+  max r4.x, -r2.xxxx, r2.yyyy
+  mov r4.y, consts.yyyy
+  mov outtc1, r4
 
-  dph outtc0.x, inpos, tex[0]
-  dph outtc0.y, inpos, tex[1]
-  dph outtc2.x, inpos, tex[2]
-  dph outtc2.y, inpos, tex[3]
+  mov r5.zw, consts.zzzz
+  dph r5.x, inpos, tex[0]
+  dph r5.y, inpos, tex[1]
+  mov outtc0, r5
+  mov r6.zw, consts.zzzz
+  dph r6.x, inpos, tex[2]
+  dph r6.y, inpos, tex[3]
+  mov outtc2, r6
 
   ; color * (1 + k * y) / 255 (alpha: / 255)
   mul r3, tex[4], inpos.yyyy

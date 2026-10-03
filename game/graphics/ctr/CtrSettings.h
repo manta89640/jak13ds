@@ -103,13 +103,15 @@ struct CtrSettings {
   // (off: the old per texel loops); asm_mem: ctr_mem.S memcpy/memmove/memset (off: byte/word C
   // loops; read by platform/3ds/port at boot); fast_clock: steady_clock without divides (off:
   // clock_gettime)
-  bool new_shaders = true;
+  // (AI-assisted) off by default: the new ctr_mesh hung the real GPU (hardware bisect 2026-10-03);
+  // the new ctr_basic passed on hardware (shader_basic = new below), the skin ones are untested
+  bool new_shaders = false;
   bool asm_tex = true;
   // (AI-assisted) defer_flush: the render thread's cache flushes held until the frame is submitted
   // (e165bc719); off: each one right away, as on Oct 2
   bool defer_flush = true;
   // (AI-assisted) hang bisect: shader_basic old|new, shader_mesh old|new|dph (-1: new_shaders)
-  int shader_basic = -1, shader_mesh = -1;
+  int shader_basic = 1, shader_mesh = -1;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above
