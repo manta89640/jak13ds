@@ -100,9 +100,11 @@ struct Chunk {
   // game's visibility data). Zero in older files.
   uint32_t vis_runs_offset;
   uint32_t vis_run_count;
-  uint32_t pad;
+  uint32_t kind;  // (AI-assisted) what the chunk holds: CHUNK_KIND_* (0 in older files: unknown)
 };
 static_assert(sizeof(Chunk) == 80);
+// (AI-assisted) Chunk::kind
+constexpr uint32_t CHUNK_KIND_UNKNOWN = 0, CHUNK_KIND_TFRAG = 1, CHUNK_KIND_TIE = 2, CHUNK_KIND_SHRUB = 3;
 
 /*!
  * (AI-assisted) v10: the game's visibility data per piece of a draw. A chunk's draws are split in
