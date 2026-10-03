@@ -1,6 +1,23 @@
 #include "OceanMid.h"
 
 namespace {
+#ifdef OCEAN_VU_FOR_CTR
+// (AI-assisted) 3DS (CtrOceanVu.h): the same tests on the floats' bits, without float compares
+// (each costs a vmrs on the ARM11): bits(|val|) is a non-negative int; x > |val| <=> bits(x) >
+// bits(|val|) and x < -|val| <=> bits(-x) > bits(|val|) as signed ints (NaN aside)
+u32 clip(const Vf& vector, float val, u32 old_clip) {
+  s32 p, v[3];
+  memcpy(&p, &val, 4);
+  memcpy(v, vector.data, 12);
+  p &= 0x7fffffff;
+  constexpr s32 kSign = (s32)0x80000000;
+  u32 result = old_clip << 6;
+  result |= (u32)(v[0] > p) | ((u32)((v[0] ^ kSign) > p) << 1) | ((u32)(v[1] > p) << 2) |
+            ((u32)((v[1] ^ kSign) > p) << 3) | ((u32)(v[2] > p) << 4) |
+            ((u32)((v[2] ^ kSign) > p) << 5);
+  return result & 0xffffff;  // only 24 bits
+}
+#else
 u32 clip(const Vf& vector, float val, u32 old_clip) {
   u32 result = (old_clip << 6);
   float plus = std::abs(val);
@@ -28,6 +45,7 @@ u32 clip(const Vf& vector, float val, u32 old_clip) {
   }
   return result & 0xffffff;  // only 24 bits
 }
+#endif
 void fcand(u16& dest, u32 imm, u32 cf) {
   // dest = (cf & imm) ? 1 : 0;
   if ((cf & 0xFFFFFF) & (imm & 0xFFFFFF))

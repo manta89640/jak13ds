@@ -639,7 +639,7 @@ void link() {
   cache.vector = intern_from_c("vector*!").c();
   cache.vu_lights_light_group = intern_from_c("vu-lights<-light-group!").c();
   cache.ocean_generate_verts_vector = intern_from_c("*ocean-generate-verts-vector*").c();
-  gLinkedFunctionTable.reg("ocean-generate-verts", execute, 128);
+  gLinkedFunctionTable.reg("ocean-generate-verts", execute, 128, &native::ocean_generate_verts);
 }
 
 } // namespace ocean_generate_verts

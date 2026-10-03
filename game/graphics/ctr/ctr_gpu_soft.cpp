@@ -436,6 +436,64 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   }
 }
 
+// (AI-assisted) the PS2 ocean (CtrOceanFull): to screen space, affine texturing, no fog
+namespace {
+std::vector<ctr_ocean_full_vertex> g_ocean_full_verts;
+std::vector<uint16_t> g_ocean_full_indices;
+bool g_ocean_full_open = false;
+}  // namespace
+
+int ctr_gpu_ocean_full_reserve(int max_verts,
+                          int max_indices,
+                          ctr_ocean_full_vertex** verts,
+                          uint16_t** indices) {
+  if (g_ocean_full_open || max_verts <= 0 || max_indices <= 0) {
+    return 0;
+  }
+  g_ocean_full_verts.resize(max_verts);
+  g_ocean_full_indices.resize(max_indices);
+  *verts = g_ocean_full_verts.data();
+  *indices = g_ocean_full_indices.data();
+  g_ocean_full_open = true;
+  return 1;
+}
+
+void ctr_gpu_ocean_full_draw(const ctr_draw_state* state,
+                        int vert_count,
+                        int index_count,
+                        uint8_t,
+                        uint8_t,
+                        uint8_t) {
+  if (!g_ocean_full_open) {
+    return;
+  }
+  g_ocean_full_open = false;
+  if (vert_count > (int)g_ocean_full_verts.size() || index_count > (int)g_ocean_full_indices.size()) {
+    return;
+  }
+  std::vector<ctr_vertex> out;
+  out.reserve(index_count);
+  for (int i = 0; i + 2 < index_count; i += 3) {
+    for (int k = 0; k < 3; k++) {
+      const auto& v = g_ocean_full_verts[g_ocean_full_indices[i + k]];
+      ctr_vertex o;
+      o.x = (v.x / 16.f - 2048.f) / 256.f;
+      o.y = (2048.f - v.y / 16.f) / 112.f;
+      o.z = v.z / 16777215.f;
+      o.s = v.s / v.q;
+      o.t = v.t / v.q;
+      o.r = v.r;
+      o.g = v.g;
+      o.b = v.b;
+      o.a = v.a;
+      out.push_back(o);
+    }
+  }
+  if (!out.empty()) {
+    ctr_gpu_draw(state, out.data(), (int)out.size());
+  }
+}
+
 // (AI-assisted) the two cloud layers as two added passes (GS modulate with the constant color)
 void ctr_gpu_draw_clip2(const ctr_draw_state* state,
                         uint32_t const0,

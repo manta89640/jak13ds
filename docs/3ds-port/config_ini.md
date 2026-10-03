@@ -53,7 +53,7 @@ detail_scale = 1           # multiplies the draw distance of small and medium ob
 merc = on                  # characters and objects
 sprites = on               # world particles; the HUD is always drawn
 max_sprites = 1000         # world particles per frame
-ocean = on                 # the ocean: off, flat (= on, static grid), waves (+ waves near the camera), full (the PS2 ocean)
+ocean = on                 # the ocean: off, flat (= on, static grid), waves (+ waves near the camera), full (the PS2 ocean: the game builds its DMA, more CPU on both threads, see 3ds_build.md)
                            # (AI-assisted) waves: a 3 m grid out to ~45 m around the camera moves with the game's own wave heights (what boats and floating things ride), crests brighter, plus a second scrolling wave texture over all of the ocean. ~0.1 ms render thread CPU, a few hundred microseconds of GPU. Log line: [ctr] ocean waves. With depth16 (no stencil) the flat ocean beyond is lowered by the deepest trough
 fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 60: up to 60
 frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing

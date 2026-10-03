@@ -497,6 +497,21 @@ PC it runs with `gk --ctr-gfx`.
     0.45 ms (texture shading + 2-4 tile draws, about 1-2k triangles in view).
   - Not done: the near ocean's wave geometry, the env map (sky reflection) pass, the far ocean
     (beyond the 4.6 km map, always in the fog at the default draw distance).
+- **Ocean, config.ini `ocean = full`** (AI-assisted; `CtrOceanFull`, buckets `ocean-mid-and-far`
+  and `ocean-near`): the PS2 ocean. The kernel sets `*pc-3ds-ocean-full*` from config.ini and
+  `drawable.gc` runs `draw-ocean` instead of `draw-ocean-3ds`, so the game builds the PS2's DMA.
+  - The wave texture: the ocean-texture VU program's math on the CPU for the 33x33 vertices of
+    `*ocean-verts*` (`ocean-generate-verts`, native), the env map texture (environment-ocean-
+    alphamod, decoded from `CtrVram`) looked up per texel: 64x64 with mip levels, once per frame.
+  - The far ocean (GS packets) and the ocean-mid / ocean-near VU1 programs, emulated by the PC
+    renderer's own code: `OceanMid_PS2.cpp` / `OceanNear_PS2.cpp` are compiled a second time for
+    `CtrOceanVu.h`'s classes (`OCEAN_VU_FOR_CTR`), whose xgkick hands the GS packets to
+    `CtrOceanFull.cpp`. Their textured pass becomes one indexed triangle list per bucket, written
+    in place into the frame's vertex memory (`ctr_gpu_ocean_full_reserve` / `ctr_gpu_ocean_full_draw`,
+    `ctr_ocean_full.v.pica`: the GS's x, y, z, Q, S, T and fog; perspective correct texturing).
+  - Left out: the env map passes (sky reflection added through the destination alpha).
+  - Log: `[ctr] ocean full (<levels>): render thread N ms/frame (texture, far+mid, near)` once
+    per set of levels. The game thread's cost is in the `ocean` section (kperf).
 - **Sky** (`CtrSky`): the game blends the time of day sky and cloud textures (`make-sky-textures`,
   the tfrag-trans/sky-blend buckets); `CtrSkyBlendRenderer` does that blend on the CPU like the
   PC's `SkyBlendCPU`. The 3DS build runs `render-sky-3ds` instead of `render-sky-tng` (whose
@@ -571,7 +586,8 @@ every platform:
 - animation: `cspace<-parented-transformq-joint!`
 - particles: `sp-process-block-2d`, `sp-process-block-3d`, `sp-launch-particles-var`,
   `particle-adgif`
-- ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame)
+- ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame),
+  `ocean-generate-verts` (the wave texture's vertices, only with `ocean = full`)
 - GOAL functions the collision natives call for every triangle: `ray-sphere-intersect`,
   `ray-cylinder-intersect`, `moving-sphere-sphere-intersect` (collide-func.gc) and
   `closest-pt-in-triangle` (geometry.gc, with `vector-segment-distance-point!` inlined). They have

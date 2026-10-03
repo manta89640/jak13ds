@@ -1,5 +1,10 @@
 #pragma once
 
+#ifdef OCEAN_VU_FOR_CTR
+// (AI-assisted) the 3DS renderer compiles OceanNear_PS2.cpp for its own class (CtrOceanVu.h)
+#include "game/graphics/ctr/CtrOceanVu.h"
+#else
+
 #include "game/common/vu.h"
 #include "game/graphics/opengl_renderer/BucketRenderer.h"
 #include "game/graphics/opengl_renderer/ocean/CommonOceanRenderer.h"
@@ -134,3 +139,5 @@ class OceanNear : public BucketRenderer {
 
   } vu;
 };
+
+#endif  // OCEAN_VU_FOR_CTR

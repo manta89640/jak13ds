@@ -157,6 +157,28 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
  * A third fewer vertices than ctr_gpu_draw for sprites. */
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count);
 
+/* (AI-assisted) The PS2 ocean (CtrOceanFull, config.ini ocean = full): vertices as the ocean's VU1
+ * programs send them to the GS. x, y: screen position in GS units (12.4 fixed point, the screen
+ * centered at 2048 * 16; Jak 1's 512 x 224 field like CtrDirect), z: GS depth (24 bits, larger =
+ * closer), q: the GS Q (1 / w, > 0); s, t: the GS S, T (texture coordinates times q: the GPU
+ * divides them per pixel, perspective correct like the GS); fog: the amount of fog color, 0..1
+ * (the GS's (255 - F) / 255); rgba: GS vertex color. 32 bytes. Colors like ctr_gpu_draw_mesh:
+ * textured rgb = tex.rgb * v.rgb / 128, a = tex.a (0xff = 1) * v.a / 128, then the fog. */
+typedef struct {
+  float x, y, z, q;
+  float s, t, fog;
+  uint8_t r, g, b, a;
+} ctr_ocean_full_vertex;
+/* Room for up to max_verts vertices and max_indices u16 indices (a triangle list) in this frame's
+ * vertex memory, written in place (no copy), then drawn with ctr_gpu_ocean_full_draw: one draw, nothing
+ * else drawn in between. Returns 0 when there is no room (then nothing is reserved). */
+int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_vertex** verts,
+                          uint16_t** indices);
+/* Draw the first vert_count / index_count of the reservation (0 indices: just release it), with
+ * the fog towards (fog_r, fog_g, fog_b) (the GS FOGCOL). */
+void ctr_gpu_ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count,
+                        uint8_t fog_r, uint8_t fog_g, uint8_t fog_b);
+
 /* ---------------- static meshes (level background, see c3l_format.h) ----------------
  * Vertex layout = c3l::Vertex (16 bytes): s16 pos[3], s16 pad, s16 st[2] (* 1024), u8 rgba[4]
  * (GS units). Textured draws: rgb = tex.rgb * v.rgb / 128, a = tex.a (0xff = 1) * v.a / 128.
