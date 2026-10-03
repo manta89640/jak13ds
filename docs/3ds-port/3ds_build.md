@@ -519,16 +519,22 @@ PC it runs with `gk --ctr-gfx`.
   `drawable.gc` runs `draw-ocean` instead of `draw-ocean-3ds`, so the game builds the PS2's DMA.
   - The wave texture: the ocean-texture VU program's math on the CPU for the 33x33 vertices of
     `*ocean-verts*` (`ocean-generate-verts`, native), the env map texture (environment-ocean-
-    alphamod, decoded from `CtrVram`) looked up per texel: 64x64 with mip levels, once per frame.
+    alphamod, decoded from `CtrVram`) looked up per texel: 64x64 with mip levels, every
+    `ocean_texture_rate` frames (2). The game skips `ocean-generate-verts` when no ocean is drawn.
   - The far ocean (GS packets) and the ocean-mid / ocean-near VU1 programs, emulated by the PC
     renderer's own code: `OceanMid_PS2.cpp` / `OceanNear_PS2.cpp` are compiled a second time for
     `CtrOceanVu.h`'s classes (`OCEAN_VU_FOR_CTR`), whose xgkick hands the GS packets to
     `CtrOceanFull.cpp`. Their textured pass becomes one indexed triangle list per bucket, written
     in place into the frame's vertex memory (`ctr_gpu_ocean_full_reserve` / `ctr_gpu_ocean_full_draw`,
     `ctr_ocean_full.v.pica`: the GS's x, y, z, Q, S, T and fog; perspective correct texturing).
-  - Left out: the env map passes (sky reflection added through the destination alpha).
+  - Left out: the env map passes (sky reflection added through the destination alpha); the near
+    ocean is at least `ocean_near_alpha` (0.6) opaque instead.
   - Log: `[ctr] ocean full (<levels>): render thread N ms/frame (texture, far+mid, near)` once
-    per set of levels. The game thread's cost is in the `ocean` section (kperf).
+    per set of levels, and a warning (at most every 300 frames) when parts were not drawn
+    (unexpected DMA, no vertex memory, refused transition pieces). The game thread's cost is in
+    the `ocean` section (kperf).
+  - Test: `test/ctr_ocean/build.sh && /tmp/ocean_replay [ocean_dump.bin]`: every transition table
+    the game sends (7 to 18 vertices) native against emulated, and a dumped frame if given.
 - **Sky** (`CtrSky`): the game blends the time of day sky and cloud textures (`make-sky-textures`,
   the tfrag-trans/sky-blend buckets); `CtrSkyBlendRenderer` does that blend on the CPU like the
   PC's `SkyBlendCPU`. The 3DS build runs `render-sky-3ds` instead of `render-sky-tng` (whose

@@ -6,25 +6,35 @@
  * run through CtrOceanFull with the emulated VU programs (the reference) and with the native ones,
  * with the GPU calls captured. Compares the triangles in screen space and times both.
  *
- *   test/ctr_ocean/build.sh && /tmp/ocean_replay ocean_dump.bin [iterations]
+ *   test/ctr_ocean/build.sh && /tmp/ocean_replay [ocean_dump.bin [iterations]]
  *
  * Exit status 0 when the native triangles match: every native triangle that the VU program would
  * draw whole (all vertices inside its guard band) is one of its triangles (position within 1/8
  * pixel, color, fog, texture coordinates up to whole repeats), and every reference triangle is
  * covered (equal to a native one, or a piece the VU clipped out of one).
+ *
+ * (AI-assisted) Without a dump file too: the transition pieces (transition_test) of every table the
+ * game sends to the ocean-mid program's calls 107 / 275 (7, 10, 11 and 18 vertices, read from
+ * goal_src/jak1/engine/gfx/ocean/ocean-trans-tables.gc), seen whole by a made-up camera: the
+ * native triangles must be the emulated program's, one for one.
  */
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "common/dma/dma_chain_read.h"
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrOceanBatch.h"
 #include "game/graphics/ctr/CtrOceanFull.h"
+#include "game/graphics/ctr/CtrOceanVu.h"
+#include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -88,6 +98,11 @@ void ctr_gpu_tex_delete(int) {}
 double ctr_gpu_time_ms(void) {
   using namespace std::chrono;
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+// (AI-assisted) config.ini: the defaults, changed in main
+CtrSettings g_settings;
+const CtrSettings& ctr_settings() {
+  return g_settings;
 }
 bool CtrVram::decode_for_cpu(u64, std::vector<u32>* out, int* w, int* h) {
   *out = g_env;
@@ -448,10 +463,295 @@ double time_frames(CtrOceanFull& ocean, CtrVram& vram, const Bucket& mid, const 
 }
 }  // namespace
 
+// ---------------------------------------------------------------------------------------------
+// (AI-assisted) the transition pieces, without a dump: the ocean-mid program's calls 107 (a strip
+// of quads) and 275 (a fan) with the game's tables, native against emulated
+// ---------------------------------------------------------------------------------------------
+
+#ifndef CTR_OCEAN_REPO
+#define CTR_OCEAN_REPO "."
+#endif
+
+namespace {
+
+// ocean-mid-setup-constants as a beach frame had them (an ocean_dump.bin): hmge, inv-hmge, hvdf,
+// fog, constants, constants2, drw-fan, env-fan, the drawing adgif, drw-strip-0 / 1, the env map
+// adgif, env-strip, env-color, index-table, pos0..3 (VU addresses 733..768)
+const u32 kMidConstants[36 * 4] = {
+    0x3a800000, 0x3b124925, 0xb400209f, 0xc1b8fb4c, 0x44800000, 0x43e00000, 0xcaffbed3,
+    0xbd312455, 0x45000000, 0x45000000, 0x4affbf9b, 0x43850923, 0xbd312455, 0x42424bbb,
+    0x437f0000, 0x45400000, 0x3f000000, 0x3f000000, 0x00000000, 0x48c00000, 0x3f000000,
+    0x3f000000, 0x3f800000, 0x00000000, 0x00008004, 0x301ec000, 0x00000412, 0x00000000,
+    0x00008004, 0x302ec000, 0x00000412, 0x00000000, 0x00000005, 0x10000000, 0x0000000e,
+    0x00000000, 0xdc009fe0, 0x00000005, 0x00000006, 0x00000000, 0x00080178, 0x00000eed,
+    0x00000014, 0x00000000, 0x120060e0, 0x00613006, 0x00000034, 0x00000000, 0x00000000,
+    0x00000000, 0x00000008, 0x00000000, 0x13506134, 0x00613606, 0x00000036, 0x00000000,
+    0x00000012, 0x301e4000, 0x00000412, 0x00000000, 0x00008012, 0x301e4000, 0x00000412,
+    0x00000000, 0x00000005, 0x10000000, 0x0000000e, 0x00000000, 0x9930a72a, 0x2004e745,
+    0x00000006, 0x00000000, 0x00000120, 0x00000000, 0x00000014, 0x00000000, 0x00000000,
+    0x00000000, 0x00000034, 0x00000000, 0x00000005, 0x00000000, 0x00000008, 0x00000000,
+    0x00000058, 0x00000000, 0x00000042, 0x00000000, 0x00008012, 0x302e4000, 0x00000412,
+    0x00000000, 0x42069d60, 0x42069d60, 0x429afb57, 0x43000000, 0x0000003f, 0x00000054,
+    0x00000042, 0x00000000, 0x00000036, 0x00000048, 0x00000039, 0x00000000, 0x0000002d,
+    0x0000003c, 0x00000030, 0x00000000, 0x00000024, 0x00000030, 0x00000027, 0x00000000,
+    0x0000001b, 0x00000024, 0x0000001e, 0x00000000, 0x00000012, 0x00000018, 0x00000015,
+    0x00000000, 0x00000009, 0x0000000c, 0x0000000c, 0x00000000, 0x00000000, 0x00000000,
+    0x00000003, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3f800000, 0x48c00000,
+    0x00000000, 0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0x48c00000, 0x3f800000,
+    0x48c00000, 0x00000000, 0x48c00000, 0x3f800000,
+};
+
+//! (define <name> (new 'static 'array float <n> ...)) of a GOAL source: the n floats
+std::vector<float> goal_float_table(const std::string& src, const std::string& name) {
+  size_t at = src.find("(define " + name + "\n");
+  if (at == std::string::npos) {
+    return {};
+  }
+  at = src.find("'array", at);
+  at = at == std::string::npos ? at : src.find("float", at);
+  if (at == std::string::npos) {
+    return {};
+  }
+  const char* p = src.c_str() + at + 5;
+  char* end;
+  const long n = strtol(p, &end, 10);
+  std::vector<float> out;
+  for (long i = 0; i < n; i++) {
+    p = end;
+    out.push_back(strtof(p, &end));
+    if (end == p) {
+      return {};
+    }
+  }
+  return out;
+}
+
+//! a DMA chain of CNT tags (the data after each tag), ended by the VU end tag and an END tag
+struct Chain {
+  std::vector<u8> mem;
+  void add(u32 qwc, u32 vif0, u32 vif1, const void* data = nullptr) {
+    const u64 tag = (u64)qwc | (1ull << 28);  // CNT
+    const size_t at = mem.size();
+    mem.resize(at + 16 + 16 * qwc, 0);
+    memcpy(&mem[at], &tag, 8);
+    memcpy(&mem[at + 8], &vif0, 4);
+    memcpy(&mem[at + 12], &vif1, 4);
+    if (qwc && data) {
+      memcpy(&mem[at + 16], data, 16 * qwc);
+    }
+  }
+  void unpack(u32 addr, u32 qwc, const void* data) {
+    add(qwc, 0x01000404, (0x6cu << 24) | (qwc << 16) | addr, data);  // STCYCL 0x404, UNPACK_V4_32
+  }
+  void call(u32 addr) { add(0, 0x01000404, (0x15u << 24) | addr); }   // MSCALF
+  void flush(u32 addr) { add(0, (0x15u << 24) | addr, 0x13u << 24); }  // MSCALF, FLUSHA
+  void finish() {
+    add(2, 0, (0x50u << 24) | 2);  // NOP, DIRECT: the end of the ocean's VU DMA
+    add(0, 0, 0);
+    const u64 end = 7ull << 28;
+    memcpy(&mem[mem.size() - 16], &end, 8);
+  }
+};
+
+struct Piece {
+  const char* table;  // symbol in ocean-trans-tables.gc
+  int n;              // vertices (the game's for this table)
+  bool fan;           // call 275 (#t in ocean-trans-add-upload-table) or 107
+  u32 mask;           // 107: quads left out
+  int strip = 0;      // *ocean-trans-strip-array*: which of its 4 strips (10 vertices each)
+  bool vu_too = true; // the emulated program as the reference (false: native checks only)
+};
+
+//! the clip-space vertex matrices of a 24 m square at the origin (the corners at 765..768), seen
+//! from 25 m away, 50 degrees down (ocean-mid-add-matrices: the camera matrix with the square's
+//! corner as translation, then times the perspective of the beach frame's math-camera)
+void piece_matrices(float out[8][4]) {
+  const double pitch = 50.0 * M_PI / 180.0, dist = 25.0 * 4096.0;
+  const double f[3] = {0, -std::sin(pitch), std::cos(pitch)};  // forward
+  const double r[3] = {1, 0, 0};                                 // right (r x u = f)
+  const double u[3] = {0, std::cos(pitch), std::sin(pitch)};
+  const double center[3] = {49152, 0, 49152};
+  double cam[3];
+  for (int i = 0; i < 3; i++) {
+    cam[i] = center[i] - dist * f[i];
+  }
+  const double* axis[3] = {r, u, f};
+  double m[4][4] = {};
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+      m[i][j] = axis[j][i];  // world (row vector) to camera
+      m[3][j] -= cam[i] * axis[j][i];
+    }
+  }
+  m[3][3] = 1;
+  // math-camera perspective (d 1024, f 4.04e7 units; the beach frame's)
+  const double p[4][4] = {{-0.3200988, 0, 0, 0},
+                          {0, -0.2334052, 0, 0},
+                          {0, 0, -8184.2678, -4.2233925e-05},
+                          {0, 0, 16760956.0, 0}};
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < 4; j++) {
+      double mp = 0;
+      for (int k = 0; k < 4; k++) {
+        mp += m[i][k] * p[k][j];
+      }
+      out[i][j] = (float)m[i][j];
+      out[4 + i][j] = (float)mp;
+    }
+  }
+}
+
+//! one piece through a fresh ocean-mid program: its triangles; false: the program refused the DMA
+bool run_piece(const Piece& pc, const std::vector<float>& table, bool native, std::vector<Tri>* out,
+               bool* indices_ok) {
+  Chain c;
+  c.add(0, 0x03000000, 0x02000000 | 0x76);  // BASE 0, OFFSET 0x76
+  c.unpack(0x2dd, 36, kMidConstants);
+  c.call(0);
+  c.flush(41);
+  c.flush(43);
+  // ocean-trans-add-constants: the corners of a 24 m square
+  const float corners[4][4] = {
+      {0, 0, 0, 1}, {98304, 0, 0, 1}, {0, 0, 98304, 1}, {98304, 0, 98304, 1}};
+  c.unpack(0x2fd, 4, corners);
+  float mats[8][4];
+  piece_matrices(mats);
+  c.unpack(0x8000, 8, mats);
+  // n and the mask, the texture coordinates and colors of the corners (ocean-trans-st-table
+  // weighted for a quarter of a mid square, a beach frame's ocean colors)
+  u32 head[9][4] = {};
+  head[0][0] = (u32)pc.n;
+  head[0][1] = pc.mask;
+  const float st_col[8][4] = {{0.25f, 0.5f, 1, 0}, {0.5f, 0.5f, 1, 0}, {0.25f, 0.75f, 1, 0},
+                              {0.5f, 0.75f, 1, 0}, {32, 76, 83, 128},   {30, 72, 79, 128},
+                              {32, 76, 84, 128},   {32, 75, 81, 128}};
+  memcpy(head[1], st_col, sizeof(st_col));
+  c.unpack(0x8008, 9, head);
+  c.unpack(0x8011, (u32)pc.n, table.data() + 40 * pc.strip);
+  c.call(pc.fan ? 275 : 107);
+  c.flush(41);
+  c.finish();
+
+  auto vu = std::make_unique<CtrOceanMidVu>();
+  vu->set_native(native);
+  CtrOceanBatch batch;
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  const u8 fog[3] = {0, 0, 0};
+  g_draws.clear();
+  g_bucket = 0;
+  batch.begin(st, fog);
+  DmaFollower dma(c.mem.data(), 0);
+  const bool ok = vu->run(dma, &batch);
+  batch.end();
+  *indices_ok = true;
+  for (auto& d : g_draws) {
+    for (u16 i : d.idx) {
+      *indices_ok &= i < d.v.size();
+    }
+  }
+  *out = triangles(g_draws);
+  return ok;
+}
+
+int transition_test() {
+  const std::string path =
+      std::string(CTR_OCEAN_REPO) + "/goal_src/jak1/engine/gfx/ocean/ocean-trans-tables.gc";
+  std::ifstream in(path);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  const std::string src = ss.str();
+  // the tables and calls of ocean-trans-add-upload (the near ocean's seams), ocean-mid-add-upload-*
+  // (the mid ocean's seams) and ocean-trans-add-upload-strip
+  const Piece pieces[] = {
+      {"*ocean-trans-up-table*", 11, true, 0},
+      {"*ocean-trans-down-table*", 11, true, 0},
+      {"*ocean-trans-left-table*", 11, true, 0},
+      {"*ocean-trans-right-table*", 11, true, 0},
+      {"*ocean-trans-up-left-table*", 18, false, 0},
+      {"*ocean-trans-down-left-table*", 18, true, 0},
+      {"*ocean-trans-up-right-table*", 18, true, 0},
+      {"*ocean-trans-down-right-table*", 18, false, 0},
+      {"*ocean-trans-down-right-table*", 18, false, 0x0155},  // (every other quad left out)
+      {"*ocean-left-table*", 7, true, 0},
+      {"*ocean-down-right-table*", 10, false, 0},
+      {"*ocean-down-left-table*", 10, true, 0},
+      {"*ocean-trans-strip-array*", 10, false, 0x5, 1},
+      {"*ocean-trans-strip-array*", 10, false, 0xa, 3},
+      // not sent by the game: a strip of an odd count (only whole quads), native only
+      {"*ocean-trans-up-table*", 11, false, 0, 0, false},
+  };
+  int errors = 0;
+  for (const auto& pc : pieces) {
+    const auto table = goal_float_table(src, pc.table);
+    if ((int)table.size() < 4 * pc.n + 40 * pc.strip) {
+      printf("transition %s: table not read from %s\n", pc.table, path.c_str());
+      errors++;
+      continue;
+    }
+    int quads = 0;
+    for (int q = 0; q < (pc.n - 2) / 2; q++) {
+      quads += q >= 16 || !(pc.mask & (1u << q));
+    }
+    const int expect = pc.fan ? pc.n - 2 : 2 * quads;
+    std::vector<Tri> ref, nat;
+    bool ref_idx = true, nat_idx = true;
+    const bool nat_ok = run_piece(pc, table, true, &nat, &nat_idx);
+    const bool ref_ok = !pc.vu_too || run_piece(pc, table, false, &ref, &ref_idx);
+    // every native triangle one of the emulated ones; the emulated ones left over drew nothing (a
+    // fan's last triangle has its first vertex again: less than a pixel)
+    int matched = 0, attr = 0, clipped = 0, ref_extra = 0;
+    std::string why;
+    for (auto& t : nat) {
+      clipped += vu_would_clip(t);
+    }
+    std::vector<bool> used(ref.size(), false);
+    for (auto& b : nat) {
+      for (size_t i = 0; i < ref.size(); i++) {
+        int perm[3];
+        if (used[i] || !match(b, ref[i], perm)) {
+          continue;
+        }
+        Tri rp = ref[i];
+        for (int k = 0; k < 3; k++) {
+          rp.v[k] = ref[i].v[perm[k]];
+        }
+        const int id[3] = {0, 1, 2};
+        attr += !same_attributes(rp, b, id, &why);
+        used[i] = true;
+        matched++;
+        break;
+      }
+    }
+    for (size_t i = 0; i < ref.size(); i++) {
+      ref_extra += !used[i] && area(ref[i]) >= 256;  // (area in 1/16 pixels squared)
+    }
+    const bool pass = nat_ok && ref_ok && nat_idx && (int)nat.size() == expect && !clipped &&
+                      (!pc.vu_too || (matched == (int)nat.size() && !ref_extra && !attr));
+    printf("transition %-32s n %2d %s mask %04x: native %2zu triangles%s, emulated %2zu, "
+           "matched %2d, expected %2d%s%s%s%s %s\n",
+           pc.table, pc.n, pc.fan ? "fan  " : "strip", pc.mask, nat.size(),
+           nat_idx ? "" : " (INDEX OUT OF RANGE)", ref.size(), matched, expect,
+           ref_extra ? fmt::format(" ({} emulated not drawn)", ref_extra).c_str() : "",
+           clipped ? " (the VU would clip: camera?)" : "",
+           attr ? fmt::format(", {} attribute errors ({})", attr, why).c_str() : "",
+           nat_ok && ref_ok ? "" : " (DMA refused)", pass ? "ok" : "FAIL");
+    errors += !pass;
+  }
+  return errors;
+}
+}  // namespace
+
 int main(int argc, char** argv) {
+  // (AI-assisted) as the 3DS draws, but the wave texture every frame and the near ocean's alpha
+  // as the program's (config.ini ocean_texture_rate, ocean_near_alpha): the same as emulated
+  g_settings.ocean_texture_rate = 1;
+  g_settings.ocean_near_alpha = 0.f;
+  const int transition_errors = transition_test();
   if (argc < 2) {
-    printf("usage: ocean_replay ocean_dump.bin [iterations]\n");
-    return 2;
+    printf("(no dump file: ocean_replay ocean_dump.bin [iterations] replays one)\n%s\n",
+           transition_errors ? "FAIL" : "OK");
+    return transition_errors ? 1 : 0;
   }
   Bucket mid, near;
   if (!load(argv[1], &mid, &near)) {
@@ -490,7 +790,7 @@ int main(int argc, char** argv) {
   const auto nat = triangles(g_draws);
   const bool tex_same = ref_tex == g_tex;
 
-  int errors = compare(ref, nat, 0) + compare(ref, nat, 1);
+  int errors = compare(ref, nat, 0) + compare(ref, nat, 1) + transition_errors;
   printf("wave texture: %s\n", tex_same ? "same" : "DIFFERENT");
   errors += !tex_same;
   // the wave texture (64 x 64 RGBA8, as uploaded) to a file / against an earlier version's file
@@ -519,7 +819,12 @@ int main(int argc, char** argv) {
 
   const double t_ref = time_frames(ref_ocean, vram, mid, near, iters);
   const double t_nat = time_frames(nat_ocean, vram, mid, near, iters);
-  printf("host ms/frame: reference %.3f, native %.3f\n", t_ref, t_nat);
+  // (AI-assisted) as the 3DS has it by default: the wave texture every 2nd frame
+  g_settings.ocean_texture_rate = 2;
+  CtrOceanFull nat2_ocean;
+  const double t_nat2 = time_frames(nat2_ocean, vram, mid, near, iters);
+  printf("host ms/frame: reference %.3f, native %.3f (wave texture every 2nd frame: %.3f)\n",
+         t_ref, t_nat, t_nat2);
   printf("%s\n", errors ? "FAIL" : "OK");
   return errors ? 1 : 0;
 }

@@ -35,6 +35,13 @@ struct CtrSettings {
   // waves: the grid plus real waves near the camera; full: the PS2 ocean (draw-ocean)
   enum class OceanMode { Flat, Waves, Full };
   OceanMode ocean_mode = OceanMode::Flat;
+  // (AI-assisted) ocean = full: the wave texture is made every nth frame (1 = every frame; the
+  // render thread's 1-1.7 ms for it, half as often by default)
+  int ocean_texture_rate = 2;
+  // (AI-assisted) ocean = full: the near ocean's alpha is at least this (0..1; the PS2's is 0.5
+  // within 12 m of the camera, 1 from 24 m on). It stands in for the sky reflection pass the 3DS
+  // leaves out; 0.5 = the textured pass as on the PS2 and PC.
+  float ocean_near_alpha = 0.6f;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
   bool distort = false;  // (AI-assisted) off: square sprites reported on hardware

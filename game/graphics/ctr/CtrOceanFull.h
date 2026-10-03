@@ -12,7 +12,8 @@
  *    vertices of *ocean-verts* (color, and the env map lookup from the wave normals), then 64x64
  *    texels (the PS2's 128x128 of 4x4 texel quads at half the resolution), each the env map
  *    texel at the interpolated lookup times the interpolated color (GS modulate). One texture with
- *    mip levels for both buckets, computed once per frame.
+ *    mip levels for both buckets, computed at most once per frame ((AI-assisted) every
+ *    config.ini ocean_texture_rate frames: 2 by default).
  *  - ocean-mid-and-far bucket (before the level, depth test off, depth written like the PC's
  *    flush_mid): the far ocean (GS packets, OceanMidAndFar::handle_ocean_far), then the mid ocean
  *    and the transition to the near ocean: the ocean-mid VU program's drawing calls as native
@@ -25,9 +26,11 @@
  * fog value); the native programs' vertices are in clip space, unclipped (draw_clip,
  * ctr_ocean_full_clip.v.pica: the GPU clips). Only the textured pass is drawn: the PS2's env map pass (sky
  * reflection added through the destination alpha) is left out (the wave texture already has the
- * env map's shading).
+ * env map's shading). (AI-assisted) The near ocean's alpha has a floor instead (config.ini
+ * ocean_near_alpha, CtrOceanNearVu::set_alpha_floor): the reflection made it less see-through.
  *
- * Log: "[ctr] ocean full:" once per level (set of levels), the render thread's ms per frame.
+ * Log: "[ctr] ocean full:" once per level (set of levels), the render thread's ms per frame;
+ * (AI-assisted) a warning when parts weren't drawn (at most every 300 frames, see frame_stats).
  */
 
 #include <memory>
@@ -60,6 +63,7 @@ class CtrOceanFull {
   bool update_env(u64 tex0, CtrRenderState& rs);
   void read_far(DmaFollower& dma);
   void frame_stats(const CtrRenderState& rs);
+  bool texture_due(const CtrRenderState& rs) const;
 
   std::unique_ptr<CtrOceanMidVu> m_mid;
   std::unique_ptr<CtrOceanNearVu> m_near;
@@ -67,7 +71,8 @@ class CtrOceanFull {
 
   // the wave texture
   int m_tex = -1;
-  u64 m_tex_frame = ~0ull;
+  u64 m_tex_frame = ~0ull;  // the frame it was last made in
+  int m_tex_rate = 1;       // (AI-assisted) config.ini ocean_texture_rate
   std::vector<u32> m_texels;
   // the env map texture it is made from (decoded from CtrVram)
   u64 m_env_key = 0;
@@ -81,8 +86,11 @@ class CtrOceanFull {
   u64 m_stat_frame = ~0ull;
   int m_frames = 0;
   double m_tex_ms = 0, m_mid_ms = 0, m_near_ms = 0, m_max_frame_ms = 0, m_cur_frame_ms = 0;
-  int m_mid_runs = 0, m_near_runs = 0, m_failed = 0;
+  int m_mid_runs = 0, m_near_runs = 0, m_failed = 0, m_tex_updates = 0;
   u32 m_window_gen = 0, m_logged_gen = ~0u;
+  // (AI-assisted) the warning about parts not drawn (frame_stats)
+  int m_failed_unlogged = 0;
+  u64 m_warn_frame = ~0ull;
 };
 
 /*! The two ocean buckets (ocean-mid-and-far, ocean-near), sharing one CtrOceanFull. */

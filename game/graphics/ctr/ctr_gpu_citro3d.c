@@ -4602,36 +4602,86 @@ void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, u
 }
 
 /* (AI-assisted) the fog ramp texture's color (the ramp part of ctr_gpu_set_mesh_fog, also used by
- * ctr_gpu_ocean_full_draw) */
+ * ctr_gpu_ocean_full_draw). A new color goes into a copy of the texture that no draw the GPU may
+ * still do reads: not one bound in this frame (the draws before keep their color; with overlap
+ * the GPU is already on them) nor in the frame before (the pipeline: still on the GPU). Before,
+ * a second change in a frame wrote over the copy of the first, so every draw of that frame got
+ * the last color. A copy that has the color already is bound as it is. */
+#define FOG_RAMP_COPIES 4
+static struct {
+  void* data;     /* NULL: not made yet */
+  uint32_t rgb;   /* its color (0xffffffff: not written) */
+  int last_frame; /* the last frame that may read it (the current copy: the current frame) */
+} s_fog_ramp[FOG_RAMP_COPIES];
+static int s_fog_ramp_cur = -1; /* the copy in g.fog_tex.data */
+static int s_fog_ramp_full_logged;
+
 static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b) {
   uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)gr << 8) | b;
   if (!g.fog_tex_valid || rgb == g.fog_tex_rgb) {
     return;
   }
-  /* the GPU may still read the old texture from the previous frame: that frame is finished
-   * when this is called (after C3D_FrameBegin), so writing it here is safe. (AI-assisted) Not with
-   * the pipeline (the frame before is still on the GPU): write a second copy then, swapped once
-   * per frame. */
-  g.fog_tex_rgb = rgb;
-  if (s_pipeline) {
-    static void* fog_alt = NULL;
-    static int fog_alt_frame = -1;
-    const u32 total = C3D_TexCalcTotalSize(g.fog_tex.size, g.fog_tex.maxLevel);
-    if (!fog_alt) {
-      ctr_linear_lock();
-      fog_alt = linearAlloc(total);
-      ctr_linear_unlock();
-      if (fog_alt) {
-        memcpy(fog_alt, g.fog_tex.data, total);
-      }
+  if (s_fog_ramp_cur < 0) {
+    s_fog_ramp[0].data = g.fog_tex.data; /* (C3D_TexInit's) */
+    s_fog_ramp[0].rgb = 0xffffffffu;
+    s_fog_ramp[0].last_frame = g.frame_no;
+    for (int i = 1; i < FOG_RAMP_COPIES; i++) {
+      s_fog_ramp[i].data = NULL;
+      s_fog_ramp[i].rgb = 0xffffffffu;
+      s_fog_ramp[i].last_frame = -1000;
     }
-    if (fog_alt && fog_alt_frame != g.frame_no) {
-      void* t = g.fog_tex.data;
-      g.fog_tex.data = fog_alt;
-      fog_alt = t;
-      fog_alt_frame = g.frame_no;
+    s_fog_ramp_cur = 0;
+  }
+  const u32 total = C3D_TexCalcTotalSize(g.fog_tex.size, g.fog_tex.maxLevel);
+  int pick = -1;
+  for (int i = 0; i < FOG_RAMP_COPIES && pick < 0; i++) {
+    if (s_fog_ramp[i].data && s_fog_ramp[i].rgb == rgb) {
+      pick = i;
     }
   }
+  int write = 0;
+  for (int i = 0; i < FOG_RAMP_COPIES && pick < 0; i++) {
+    if (i != s_fog_ramp_cur && s_fog_ramp[i].data && s_fog_ramp[i].last_frame < g.frame_no - 1) {
+      pick = i;
+      write = 1;
+    }
+  }
+  for (int i = 0; i < FOG_RAMP_COPIES && pick < 0; i++) {
+    if (!s_fog_ramp[i].data) {
+      ctr_linear_lock();
+      s_fog_ramp[i].data = linearAlloc(total);
+      ctr_linear_unlock();
+      if (s_fog_ramp[i].data) {
+        pick = i;
+        write = 1;
+      }
+      break;
+    }
+  }
+  if (pick < 0) {
+    /* every copy is read by a draw in flight (more than 3 colors in two frames, or no linear
+     * memory): this draw keeps the current color */
+    if (!s_fog_ramp_full_logged) {
+      s_fog_ramp_full_logged = 1;
+      printf("[ctr] fog ramp: no free copy for color %06lx, kept %06lx\n", (unsigned long)rgb,
+             (unsigned long)g.fog_tex_rgb);
+    }
+    return;
+  }
+  /* the copy given up was read by this frame's draws so far */
+  s_fog_ramp[s_fog_ramp_cur].last_frame = g.frame_no;
+  s_fog_ramp[pick].last_frame = g.frame_no;
+  s_fog_ramp_cur = pick;
+  g.fog_tex.data = s_fog_ramp[pick].data;
+  g.fog_tex_rgb = rgb;
+  if (!write) {
+    if (g.in_frame) {
+      C3D_TexBind(1, &g.fog_tex);
+    }
+    g.last_state_valid = 0;
+    return;
+  }
+  s_fog_ramp[pick].rgb = rgb;
   uint8_t* dst = (uint8_t*)g.fog_tex.data;
   for (int y = 0; y < 8; y++) {
     for (int x = 0; x < 64; x++) {

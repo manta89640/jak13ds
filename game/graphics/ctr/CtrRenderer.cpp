@@ -301,7 +301,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_rs.vram = m_vram.get();
   // No sky renderer yet: clear to the fog color from the default GS registers (the same place
   // OpenGLRenderer reads it), which is close to the sky color at the horizon.
-  u8 clear[4] = {0, 0, 0, 0};
+  // (AI-assisted) The last frame's when they can't be read: black would fog everything to black.
+  u8 clear[4];
+  memcpy(clear, m_rs.fog_color, 4);
   {
     DmaFollower peek(ee_mem, chain_offset);
     if (peek.current_tag().kind == DmaTag::Kind::CALL) {

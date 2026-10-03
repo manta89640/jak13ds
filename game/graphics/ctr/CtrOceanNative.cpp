@@ -187,19 +187,29 @@ void CtrOceanMidVu::native_tile() {
 /*!
  * call 107 / 275 (OceanMid::run_call107_vu2c / run_call275_vu2c, L45 / L43): the transition
  * between a mid ocean square and the near ocean. Its n vertices (8.x) are weights of the
- * square's corners (17 + i), for the position (765..768: 96 m squares), the texture coordinates
- * (9..12) and the color (13..16). 107: a strip of quads (vertices 2i, 2i + 1, 2i + 3, 2i + 2;
- * mask 8.y: bit i leaves quad i out); 275: one polygon (a fan from vertex 0).
+ * square's corners (17 + i), for the position (765..768: 96 m squares, 24 m ones for the near
+ * ocean's seams), the texture coordinates (9..12) and the color (13..16). 107: a strip of quads
+ * (vertices 2i, 2i + 1, 2i + 3, 2i + 2; mask 8.y: bit i leaves quad i out); 275: one polygon (a
+ * fan from vertex 0).
  */
 void CtrOceanMidVu::native_transition(bool fan) {
   const u16 base = xtop();
   const Vf* in = m_vu_data + base;
   const int n = in[8].x_as_u16();
   const u32 quad_mask = in[8].y_as_u16();
-  if (n < 4 || n > 16) {
-    return;  // (the tables have 7 or 10)
+  // (AI-assisted) the tables have 7, 10 (ocean-mid.gc), 11 or 18 vertices (ocean-transition.gc:
+  // the near ocean's seams, 18 for a corner between two of its sides); the only limit is the
+  // VU's input buffer (17 + n quadwords). A limit of 16 dropped the 18 vertex corners: a 24 m
+  // square the mid tile had left out for the near ocean stayed empty (the sea floor or the
+  // clear color showed: "a black square").
+  if (n < 4 || 17 + n > VU1_INPUT_BUFFER_OFFSET) {
+    m_batch->reject();
+    return;
   }
-  const int tris = fan ? n - 2 : 2 * ((n - 2) / 2);  // (n >= 4: at least one quad)
+  // (AI-assisted) a strip draws the quads whose 4 vertices exist: (n - 2) / 2 (the program's
+  // loop draws one more for an odd n, from a vertex the call didn't send; no table has one)
+  const int quads = (n - 2) / 2;
+  const int tris = fan ? n - 2 : 2 * quads;
   ctr_ocean_full_vertex* v;
   u16* idx;
   int first;
@@ -243,11 +253,9 @@ void CtrOceanMidVu::native_transition(bool fan) {
       out += 3;
     }
   } else {
-    // (the program's loop: (n - 2) / 2 quads, at least one)
-    int left = n - 2;
-    for (int q = 0;; q++) {
-      left -= 2;
-      if (!(quad_mask & (1u << q))) {
+    // (the mask is 16 bits: the program's bit, doubled each quad, is 0 from the 17th on)
+    for (int q = 0; q < quads; q++) {
+      if (q >= 16 || !(quad_mask & (1u << q))) {
         const u16 a = (u16)(first + 2 * q);
         out[0] = a;
         out[1] = (u16)(a + 1);
@@ -256,9 +264,6 @@ void CtrOceanMidVu::native_transition(bool fan) {
         out[4] = (u16)(a + 3);
         out[5] = (u16)(a + 2);
         out += 6;
-      }
-      if (left <= 0) {
-        break;
       }
     }
   }
@@ -343,6 +348,7 @@ void CtrOceanNearVu::native_patch() {
   const float alpha_k = vu[kNearAlpha].w();
   const float col_x = vu[kNearColor].x(), col_z = vu[kNearColor].z();
   const s32 col_max = (s32)vu[kNearColor].y();
+  const s32 alpha_floor = m_alpha_floor;
   const float step = vu[kNearStep].w(), cstep = vu[kNearStep].y();
 
   // call 39's interpolation: colors in[12] (top left), [13] (top right), [14], [15] (bottom)
@@ -388,6 +394,7 @@ void CtrOceanNearVu::native_patch() {
       cg = cg > col_max ? col_max : cg;
       cb = cb > col_max ? col_max : cb;
       ca = ca > col_max ? col_max : ca;
+      ca = ca < alpha_floor ? alpha_floor : ca;  // (AI-assisted) see set_alpha_floor
       put_color(o, cr, cg, cb, ca);
       s += step;
       for (int i = 0; i < 4; i++) {
