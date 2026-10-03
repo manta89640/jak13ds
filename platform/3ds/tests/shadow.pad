@@ -1,0 +1,92 @@
+# (AI-assisted) shadow volumes test (config.ini shadows = full): title -> new game -> skip the intro
+# -> Jak standing on Geyser Rock (his shadow under him), a walk and a jump (the shadow stays on the
+# ground and shrinks), then village1 by the hut in daylight; with --screenshots / --ctr-dump.
+# frames are game frames; 'wait' stops the clock until a state is reached (game/sce/pad_script.h)
+0 wait *target* target-title-wait
+60 start
+66 -
+150 x
+156 -
+190 x
+196 -
+230 x
+236 -
+270 x
+276 -
+310 x
+316 -
+350 x
+356 -
+390 x
+396 -
+430 x
+436 -
+470 x
+476 -
+510 x
+516 -
+550 x
+556 -
+590 x
+596 -
+630 x
+636 -
+670 x
+676 -
+710 x
+716 -
+750 x
+756 -
+790 x
+796 -
+860 triangle
+866 -
+920 triangle
+926 -
+980 triangle
+986 -
+1040 triangle
+1046 -
+1100 triangle
+1106 -
+1160 triangle
+1166 -
+1220 triangle
+1226 -
+1280 triangle
+1286 -
+1340 triangle
+1346 -
+1400 triangle
+1406 -
+1460 triangle
+1466 -
+1520 triangle
+1526 -
+1580 triangle
+1586 -
+1640 triangle
+1646 -
+1700 triangle
+1706 -
+1760 triangle
+1766 -
+3000 wait *target* target-stance
+3060 log shadow: standing
+3060 pos *target*
+3240 ly=0
+3300 ly=0 x
+3306 ly=0
+3330 ly=0 pos *target*
+3340 ly=0 log shadow: in the air
+3380 -
+3440 pos *target*
+3500 log shadow: village1
+3500 continue village1-hut
+3510 wait *target* target-stance
+3600 pos *target*
+3780 lx=0
+3840 -
+3900 pos *target*
+3960 log shadow: done
+3961 exit

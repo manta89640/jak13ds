@@ -32,6 +32,16 @@ bool parse_bool(const std::string& v) {
   return v == "1" || v == "true" || v == "on" || v == "yes";
 }
 
+// (AI-assisted) settings that depend on others
+void apply_rules(CtrSettings& s) {
+  // the shadow volumes need the stencil buffer, which the 16-bit depth buffer doesn't have
+  // (kmachine.cpp's choice of what the game builds follows the same rule)
+  if (s.shadows == CtrSettings::ShadowMode::Full && s.depth16) {
+    s.shadows = CtrSettings::ShadowMode::Blob;
+    s.shadows_full_wanted = true;
+  }
+}
+
 CtrSettings load() {
   CtrSettings s;
   // auto defaults: what the emulator draws correctly / what is fast on the 3DS
@@ -57,6 +67,7 @@ CtrSettings load() {
     }
   }
   if (path.empty()) {
+    apply_rules(s);
     lg::info("[ctr] no config.ini, default settings: {}", s.summary());
     return s;
   }
@@ -123,6 +134,17 @@ CtrSettings load() {
       s.distort = parse_bool(v);
     } else if (key == "envmap") {
       s.envmap = parse_bool(v);
+    } else if (key == "shadows") {
+      // (AI-assisted) full | blob | off (on = full)
+      if (v == "full" || parse_bool(v)) {
+        s.shadows = CtrSettings::ShadowMode::Full;
+      } else if (v == "blob") {
+        s.shadows = CtrSettings::ShadowMode::Blob;
+      } else if (v == "off" || v == "0" || v == "false" || v == "no") {
+        s.shadows = CtrSettings::ShadowMode::Off;
+      } else {
+        lg::warn("[ctr] {}:{}: shadows = {}: expected full, blob or off", path.string(), n, v);
+      }
     } else if (key == "sky") {
       s.sky = parse_bool(v);
     } else if (key == "overlap") {
@@ -194,6 +216,7 @@ CtrSettings load() {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);
     }
   }
+  apply_rules(s);
   lg::info("[ctr] settings from {}: {}", path.string(), s.summary());
   return s;
 }
@@ -203,7 +226,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "ocean {} sky {} distort {} envmap {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
@@ -217,7 +240,13 @@ std::string CtrSettings::summary() const {
                   : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
-      sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
+      sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off",
+      // (AI-assisted) with depth16, full falls back to blob (no stencil)
+      shadows == ShadowMode::Full   ? "full"
+      : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"
+                                                           : "blob")
+                                    : "off",
+      rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",

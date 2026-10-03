@@ -32,6 +32,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrOceanFull.h"
+#include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/CtrSettings.h"
@@ -61,6 +62,7 @@ const ProfileMode kProfileModes[] = {
     {"sprites", {"sprite", nullptr, nullptr}},
     {"ocean", {"ocean", nullptr, nullptr}},
     {"direct", {"sky", "debug", "subtitle"}},
+    {"shadow", {"shadow", nullptr, nullptr}},  // (AI-assisted) shadows = full
 };
 constexpr int kProfileModeCount = sizeof(kProfileModes) / sizeof(kProfileModes[0]);
 constexpr double kProfileModeMs = 2500.0;  // per mode
@@ -253,6 +255,16 @@ CtrRenderer::CtrRenderer()
     }
     set(BucketId::MERC_EYES_AFTER_PRIS, std::move(eyes));
   }
+  // (AI-assisted) config.ini shadows = full: the game's shadow volumes (CtrShadow: stencil passes,
+  // after the level and most merc buckets, before the ocean whose stencil marks it leaves at 0).
+  // Else the bucket is skipped: with blob the game draws Jak's fake shadow instead.
+  if (ctr_settings().shadows == CtrSettings::ShadowMode::Full) {
+    if (ctr_gpu_has_stencil()) {
+      set(BucketId::SHADOW, std::make_unique<CtrShadowRenderer>("shadow", (int)BucketId::SHADOW));
+    } else {
+      lg::warn("[ctr] shadows = full needs the stencil buffer (not with depth16): not drawn");
+    }
+  }
   // the ocean (after the level and merc, like the PS2's ocean-near)
   if (ctr_settings().ocean && ctr_settings().ocean_mode == CtrSettings::OceanMode::Full) {
     // (AI-assisted) config.ini ocean = full: the PS2 ocean's DMA (draw-ocean), both buckets
@@ -407,8 +419,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       m_profile_sum = 0;
       m_profile_count = 0;
       m_profile_cycles = 0;
-      lg::info("[ctr] gpu profile: measuring {} for 30 s (parts of the picture vanish in turns)",
-               m_profile_level);
+      lg::info("[ctr] gpu profile: measuring {} for {:.0f} s (parts of the picture vanish in turns)",
+               m_profile_level, 2 * kProfileModeCount * kProfileModeMs / 1000.0);
     }
     if (m_profile_active) {
       // (AI-assisted) the fence's GPU time when there is one (citro3d's misses most of a
@@ -638,7 +650,7 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
       }
     }
     lg::info("{}", line);
-    // (AI-assisted) two whole cycles (30 s) measure it: then stop leaving renderers out. Left on
+    // (AI-assisted) two whole cycles (35 s) measure it: then stop leaving renderers out. Left on
     // in a config.ini by mistake, it made the level, models, ocean or sky vanish every 2.5 s for
     // the whole game ("polygons loading and unloading").
     if (++m_profile_cycles >= 2) {

@@ -74,6 +74,9 @@ overlap = off              # on: the GPU starts drawing each part of a frame whi
 pipeline = off             # on: the CPU builds the next frame while the GPU draws this one (experimental; works with overlap)
 distort = off              # sprite distorter: warp gate portals, heat haze (one screen copy in frames that have them)
 envmap = on                # shine on power cells, precursor metal, ... (needs .c3l v9 files)
+shadows = full             # (AI-assisted) full (= on): the game's shadows of Jak, enemies and objects (the PS2's shadow volumes: the game runs shadow-execute-all, the renderer draws the volumes into the stencil buffer and darkens what they cover, like the PC port). blob: only a dark spot under Jak (the game's fake shadow, as before; no volumes, nothing on the game thread). off: none
+                           # cost of full: the game thread computes each shadow-casting object's volume (shadow-execute); the render thread turns them into GPU triangles (~65-70 ARM instructions per triangle and per vertex: Jak, ~400 triangles and ~240 vertices, takes a few hundredths of a millisecond) and draws three passes for all of them together: the volumes' faces twice (stencil only, no color: their screen area), then one rectangle per object over its shadow. Log line (debug): [ctr] shadow: N objects ..., and "shadow" in [ctr] build ms/frame by renderer
+                           # full needs the stencil buffer: with depth16 = on it is blob (the log's settings line says so). The z-pass method of the PS2 and PC: with the camera inside a shadow volume (rare: the volumes reach from the object down to just below the ground) part of that shadow is missing
 
 # ---- textures ----
 mipmaps = on               # off / on / trilinear: smaller texture versions for far surfaces (needs .c3l v8+)
@@ -84,7 +87,7 @@ rgba4_as_rgba8 = auto      # 16-bit textures with alpha stored as 32-bit. auto: 
 color16 = off              # on: 16-bit (RGB565) color buffer and top screen (half the memory traffic per pixel); faint blended layers like waterfall mist vanish and gradients band
 early_depth = off          # the GPU's early depth test for opaque level / model draws (drawn nearest first): hidden pixels skip texturing. Off by default: on a New 3DS it leaves large blocks of the screen where the level never draws (Azahar ignores it)
                            # block32: early depth with the render target in 32x32 block mode (256x416, cropped to the screen by an extra texture copy; needs frame_pacing = steady and 0.4 MB linear memory, else the usual target with early depth off). Hardware only: Azahar doesn't emulate early depth or block mode. Screenshots are skipped in this mode
-depth16 = off              # on: 16-bit depth buffer instead of 24-bit + stencil (stencil is only used by ocean = waves): half the depth buffer traffic and 192 KB more VRAM for textures, but the game's depth is 1 / distance, so 16 bits leave ~6 cm steps at 30 m and ~0.6 m at 100 m: far geometry may z-fight
+depth16 = off              # on: 16-bit depth buffer instead of 24-bit + stencil (the stencil is used by ocean = waves and shadows = full, which becomes blob): half the depth buffer traffic and 192 KB more VRAM for textures, but the game's depth is 1 / distance, so 16 bits leave ~6 cm steps at 30 m and ~0.6 m at 100 m: far geometry may z-fight
 compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats (L8, LA8, RGB565, RGBA5551, RGBA4), and in 384 KB of reserved VRAM with vram_textures
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read
 sprite_max_size = 0.5      # world particles and glows at most this fraction of the screen height across (0 = no limit)

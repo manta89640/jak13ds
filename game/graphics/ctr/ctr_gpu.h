@@ -44,6 +44,8 @@ enum ctr_blend {
   // (AI-assisted) Cs * As + clear color * (1 - As), drawn opaque: alpha blending over a part of
   // the screen that still holds the frame's clear color (the sky), without reading the framebuffer
   CTR_BLEND_OVER_CLEAR,
+  // (AI-assisted) Cs * Cd (rgb, Cs 0..1: 0xff = 1), the destination alpha kept: darkens (shadows)
+  CTR_BLEND_MUL,
 };
 
 enum ctr_test {
@@ -86,6 +88,15 @@ enum {
    * its far mesh stays out (config ocean = waves). */
   CTR_STATE_STENCIL_SET = 4,
   CTR_STATE_STENCIL_OUT = 8,
+  /* (AI-assisted) shadow volumes (CtrShadow, only when ctr_gpu_has_stencil): STENCIL_INCR / DECR
+   * add / subtract 1 (saturating at 255 / 0) where the draw passes the depth test; STENCIL_CLEAR
+   * draws only where the stencil isn't 0 and sets it back to 0 there (the depth test always
+   * passes: set ztest ALWAYS, zwrite 0); NO_COLOR writes no color (the stencil passes). None of
+   * them may use the early depth test. */
+  CTR_STATE_STENCIL_INCR = 16,
+  CTR_STATE_STENCIL_DECR = 32,
+  CTR_STATE_STENCIL_CLEAR = 64,
+  CTR_STATE_NO_COLOR = 128,
 };
 /* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
 int ctr_gpu_has_stencil(void);
@@ -130,6 +141,17 @@ typedef struct {
 } ctr_clip_vertex;
 /* Draw a triangle list in clip space (the sky): the GPU clips it. State like ctr_gpu_draw. */
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count);
+/* (AI-assisted) Indexed triangle lists of ctr_clip_vertex (like ctr_gpu_draw_clip: the GPU clips),
+ * written in place into this frame's vertex memory: ctr_gpu_clip_reserve gives room for max_verts
+ * vertices and max_indices u16 indices (0 when there is none: nothing reserved). Then
+ * ctr_gpu_clip_draw_ranges draws the n index ranges [first[i], first[i] + count[i]) (of the first
+ * index_count indices, which index the first vert_count vertices), each with its own state, all of
+ * them or none (the shadow volumes' passes leave the stencil at 0 only together), and gives back
+ * the rest of the room (n = 0: all of it). Nothing else may be drawn between the two calls. */
+int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts,
+                         uint16_t** indices);
+void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
+                              int n, int vert_count, int index_count);
 
 /* (AI-assisted) Two texture layers in one pass (the sky's two cloud layers): like
  * ctr_gpu_draw_clip, with a second set of texture coordinates for the same texture on texture

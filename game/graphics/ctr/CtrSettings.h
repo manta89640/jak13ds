@@ -62,6 +62,13 @@ struct CtrSettings {
   bool distort = false;  // (AI-assisted) off: square sprites reported on hardware
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
+  // (AI-assisted) config shadows = full | blob | off (on = full). full: the game's shadow volumes
+  // (Jak, enemies, objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil
+  // buffer); blob: a dark spot under Jak only (the game's fake shadow, no volumes); off: none.
+  // full needs the stencil buffer: with depth16 it is blob (the game applies the same rule).
+  enum class ShadowMode { Off, Blob, Full };
+  ShadowMode shadows = ShadowMode::Full;
+  bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
@@ -106,8 +113,9 @@ struct CtrSettings {
   // (AI-assisted) early_depth = block32: with the render target in 32x32 block mode (256x416,
   // cropped to the screen), which the early depth test seems to need. Hardware only (off).
   bool early_depth_block32 = false;
-  // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil (stencil is unused): half the
-  // depth traffic, but 256x coarser depth (z-fighting far away). Off by default.
+  // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
+  // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
+  // ocean = waves marks are left out). Off by default.
   bool depth16 = false;
   // sprite and HUD textures in the smallest 3DS format that holds them (8 / 16 bits per texel),
   // and in reserved VRAM (with vram_textures)

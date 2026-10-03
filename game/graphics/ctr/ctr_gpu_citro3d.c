@@ -1164,6 +1164,7 @@ static unsigned s_partial_draws, s_partials;
 static void flush_vbuf(void);
 static void raw_vc_flush(void);
 static void raw_frame_reset(void);
+static void clip_reserve_reset(void);
 static int s_pipeline = 0;
 /* (AI-assisted) 1 MB each: the busiest jungle frames on hardware use ~450 KB of commands; a frame
  * that still runs out of room switches the pipeline off (CtrRenderer::render_frame) instead of
@@ -1639,6 +1640,7 @@ static void frame_state_reset(void) {
   g.last_state_valid = 0;
   g.bound_tex = NULL;
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
+  clip_reserve_reset();  /* (AI-assisted) and a ctr_gpu_clip_reserve */
   use_program(PROG_BASIC);
   /* the fog ramp stays on texture unit 1 for the whole frame (binding a texture clears the GPU's
    * texture cache: once per frame, not at every level draw) */
@@ -3582,6 +3584,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   C3Di_Effect e = ctx->effect;
   GPU_BLENDEQUATION eq = GPU_BLEND_ADD;
   GPU_BLENDFACTOR src = GPU_ONE, dst = GPU_ZERO;
+  GPU_BLENDFACTOR src_a = GPU_ONE, dst_a = GPU_ZERO;
   switch (st->blend) {
     case CTR_BLEND_ALPHA:
       src = GPU_SRC_ALPHA;
@@ -3609,11 +3612,17 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     case CTR_BLEND_ONE_ONE:
       dst = GPU_ONE;
       break;
+    case CTR_BLEND_MUL:
+      /* (AI-assisted) the shadows' darkening (CtrShadow): rgb = Cs * Cd, alpha = Ad */
+      src = GPU_DST_COLOR;
+      src_a = GPU_ZERO;
+      dst_a = GPU_ONE;
+      break;
     default:
       break;
   }
   e.alphaBlend = (u32)eq | ((u32)GPU_BLEND_ADD << 8) | ((u32)src << 16) | ((u32)dst << 20) |
-                 ((u32)GPU_ONE << 24) | ((u32)GPU_ZERO << 28);
+                 ((u32)src_a << 24) | ((u32)dst_a << 28);
   e.fragOpMode = (e.fragOpMode & ~0xFF00u) | 0x0100u;
   if (st->atest == CTR_TEST_ALWAYS) {
     e.alphaTest = (u32)GPU_ALWAYS << 4;
@@ -3621,11 +3630,23 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     int ref = st->aref * 2;
     e.alphaTest = 1u | (((u32)map_test(st->atest) & 7) << 4) | ((u32)(ref > 255 ? 255 : ref) << 8);
   }
-  if (st->ztest == CTR_TEST_ALWAYS && !st->zwrite) {
-    e.depthTest = ((u32)GPU_ALWAYS << 4) | ((u32)GPU_WRITE_COLOR << 8);
+  /* (AI-assisted) the shadow volume passes (CTR_STATE_STENCIL_INCR / DECR / CLEAR): the depth test
+   * stays enabled (CLEAR: function ALWAYS) so the stencil's depth-pass operation is the one that
+   * runs, and writes are controlled by the write mask only (clearing the enable bit doesn't stop
+   * depth writes on the hardware): no color for NO_COLOR, no alpha for CTR_BLEND_MUL */
+  const int shadow_pass =
+      (st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR | CTR_STATE_STENCIL_CLEAR)) &&
+      !g_depth16;
+  u32 wmask = st->zwrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR;
+  if (st->flags & CTR_STATE_NO_COLOR) {
+    wmask &= ~(u32)GPU_WRITE_COLOR;
+  } else if (st->blend == CTR_BLEND_MUL) {
+    wmask &= ~(u32)GPU_WRITE_ALPHA;
+  }
+  if (st->ztest == CTR_TEST_ALWAYS && !st->zwrite && !shadow_pass) {
+    e.depthTest = ((u32)GPU_ALWAYS << 4) | (wmask << 8);
   } else {
-    e.depthTest = 1u | (((u32)map_test(st->ztest) & 7) << 4) |
-                  ((u32)(st->zwrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR) << 8);
+    e.depthTest = 1u | (((u32)map_test(st->ztest) & 7) << 4) | (wmask << 8);
   }
   /* (AI-assisted) config.ini early_depth: fragments behind what opaque draws already covered are
    * dropped before texturing. Only for draws that write depth with the same test and that nothing
@@ -3643,6 +3664,21 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   } else if ((st->flags & CTR_STATE_STENCIL_OUT) && !g_depth16) {
     e.stencilMode = 1u | ((u32)GPU_NOTEQUAL << 4) | (1u << 16) | (0xFFu << 24);
     e.stencilOp = 0;
+  } else if ((st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR)) && !g_depth16) {
+    /* (AI-assisted) shadow volumes: + / - 1 where the face passes the depth test, saturating like
+     * the PC renderer's GL_INCR / GL_DECR (all front faces are drawn before the back faces, so a
+     * pixel ends at max(0, front - back): where the near plane cut a front face away, no shadow
+     * instead of a dark streak) */
+    e.stencilMode = 1u | ((u32)GPU_ALWAYS << 4) | (0xFFu << 8) | (0xFFu << 24);
+    e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_KEEP << 4) |
+                  ((u32)((st->flags & CTR_STATE_STENCIL_INCR) ? GPU_STENCIL_INCR : GPU_STENCIL_DECR)
+                   << 8);
+  } else if ((st->flags & CTR_STATE_STENCIL_CLEAR) && !g_depth16) {
+    /* (AI-assisted) where the stencil isn't 0; set to 0 there (the depth test always passes; the
+     * depth-fail operation zeroes too, should it run) */
+    e.stencilMode = 1u | ((u32)GPU_NOTEQUAL << 4) | (0xFFu << 8) | (0xFFu << 24);
+    e.stencilOp = (u32)GPU_STENCIL_KEEP | ((u32)GPU_STENCIL_ZERO << 4) |
+                  ((u32)GPU_STENCIL_ZERO << 8);
   } else {
     e.stencilMode &= ~1u;
   }
@@ -3962,6 +3998,112 @@ void ctr_gpu_ocean_full_draw(const ctr_draw_state* state, int vert_count, int in
 void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state, int vert_count, int index_count,
                                   uint8_t fog_r, uint8_t fog_g, uint8_t fog_b) {
   ocean_full_draw(state, vert_count, index_count, fog_r, fog_g, fog_b, PROG_OCEAN_FULL_CLIP);
+}
+
+/* ---------------- (AI-assisted) indexed clip space draws (the shadow volumes) ----------------
+ * ctr_gpu_clip_reserve / ctr_gpu_clip_draw_ranges: the ctr_clip_vertex layout and PROG_CLIP of
+ * ctr_gpu_draw_clip (the sky's, hardware proven), indexed like the ocean's reserved draws. */
+
+/* the open reservation: vertices and indices at these g.vbuf offsets */
+static struct {
+  int open;
+  size_t voff, ioff;
+  int max_verts, max_indices;
+} s_clipres;
+
+static void clip_reserve_reset(void) {
+  s_clipres.open = 0; /* a reservation never drawn (frame begin) */
+}
+
+int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts,
+                         uint16_t** indices) {
+  if (!g.ready || !g.in_frame || s_clipres.open || g.ocean_full_open || max_verts <= 0 ||
+      max_verts > 65536 || max_indices <= 0) {
+    return 0;
+  }
+  const size_t vbytes = ((size_t)max_verts * sizeof(ctr_clip_vertex) + 15) & ~(size_t)15;
+  const size_t ibytes = ((size_t)max_indices * 2 + 15) & ~(size_t)15;
+  if (g.vbuf_used + vbytes + ibytes > VBUF_BYTES) {
+    g.cur.vbuf_dropped++;
+    return 0;
+  }
+  s_clipres.voff = g.vbuf_used;
+  s_clipres.ioff = g.vbuf_used + vbytes; /* indices above the vertices (and the buffer base) */
+  s_clipres.max_verts = max_verts;
+  s_clipres.max_indices = max_indices;
+  s_clipres.open = 1;
+  *verts = (ctr_clip_vertex*)(g.vbuf + s_clipres.voff);
+  *indices = (uint16_t*)(g.vbuf + s_clipres.ioff);
+  return 1;
+}
+
+void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
+                              int n, int vert_count, int index_count) {
+  if (!s_clipres.open) {
+    return;
+  }
+  s_clipres.open = 0;
+  if (!g.in_frame || vert_count < 3 || vert_count > s_clipres.max_verts || index_count < 3 ||
+      index_count > s_clipres.max_indices) {
+    return; /* nothing kept */
+  }
+  int draws = 0;
+  for (int i = 0; i < n; i++) {
+    if (first[i] < 0 || count[i] < 0 || first[i] + count[i] > index_count) {
+      return; /* (a range outside what was written: none of them) */
+    }
+    draws += count[i] >= 3;
+  }
+  if (!draws) {
+    return;
+  }
+  /* the indices right after the vertices used: the rest of the room goes back */
+  const size_t voff = s_clipres.voff;
+  const size_t ioff = voff + (((size_t)vert_count * sizeof(ctr_clip_vertex) + 15) & ~(size_t)15);
+  if (ioff != s_clipres.ioff) {
+    memmove(g.vbuf + ioff, g.vbuf + s_clipres.ioff, (size_t)index_count * 2);
+  }
+  g.vbuf_used = ioff + (((size_t)index_count * 2 + 15) & ~(size_t)15);
+  /* all of the draws or none: room for each one's commands (cmd_room's test, times draws) */
+  if (gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + (u32)draws * CMD_DRAW_WORDS) {
+    g.cur.dropped_draws += draws;
+    return;
+  }
+  use_program(PROG_CLIP);
+  int stencil = 0;
+  for (int i = 0; i < n; i++) {
+    if (count[i] < 3) {
+      continue;
+    }
+    const ctr_draw_state* st = &states[i];
+    const u32 nidx = (u32)(count[i] - count[i] % 3);
+    const size_t at = ioff + 2u * (size_t)first[i];
+    stencil |= st->flags & (CTR_STATE_STENCIL_INCR | CTR_STATE_STENCIL_DECR |
+                            CTR_STATE_STENCIL_CLEAR);
+    if (use_raw(st)) {
+      apply_state(st, 0, 1);
+      raw_vertex_buffer(raw_vbuf_pa(voff), 0x210, RAW_BUF_FLAGS1(sizeof(ctr_clip_vertex), 3, 0));
+      raw_sync();
+      raw_draw_elements(raw_vbuf_pa(at), nidx);
+    } else {
+      raw_vc_flush();
+      apply_state(st, 0, 0);
+      c3d_vertex_buffer(raw_vbuf_pa(voff), g.vbuf + voff, sizeof(ctr_clip_vertex), 3, 0x210);
+      C3D_DrawElements(GPU_TRIANGLES, (int)nidx, C3D_UNSIGNED_SHORT, g.vbuf + at);
+    }
+    g.cur.draws++;
+    g.cur.triangles += (int)nidx / 3;
+  }
+  if (stencil) {
+    /* the stencil test off again (citro3d sends the effect at the next draw), for draws that
+     * don't set the fragment operations themselves (the clouds), like ctr_gpu_ocean_end */
+    C3Di_Context* ctx = &__C3D_Context;
+    if (ctx->effect.stencilMode & 1) {
+      ctx->effect.stencilMode &= ~1u;
+      ctx->flags |= C3DiF_Effect;
+    }
+    g.last_state_valid = 0;
+  }
 }
 
 /* ---------------- the screen as a texture ---------------- */
