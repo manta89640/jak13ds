@@ -991,6 +991,10 @@
     (behavior ()
       (set! (-> self control mod-surface) *grab-mods*)
       (set! (-> self neck flex-blend) 0.0)
+      ;; 3DS (AI-assisted): a dark eco crate hit in the same frame as the grab left the hit's
+      ;; being-attacked / dying set for good on the zoomer (see target-grab)
+      (#when TARGET_3DS
+        (logclear! (-> self state-flags) (state-flags being-attacked dying)))
       (logior! (-> self state-flags) (state-flags invulnerable grabbed))
       (set! (-> self racer stick-off) #t))
   :exit

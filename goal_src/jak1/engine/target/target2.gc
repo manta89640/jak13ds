@@ -490,6 +490,13 @@
     (behavior ()
       (set! (-> self control mod-surface) *grab-mods*)
       (set! (-> self neck flex-blend) 0.0)
+      ;; 3DS (AI-assisted): a grab that replaced a hit or a death before it started (both sent in
+      ;; the same frame: the later go wins, the first state's enter and exit never run) left that
+      ;; hit's being-attacked / dying set, so Jak was never hurt again and couldn't collect
+      ;; anything (the Precursor Basin flying lurkers' power cell with a dark eco crate hit in the
+      ;; same frame). That hit never happened: clear them. The other grab states do the same.
+      (#when TARGET_3DS
+        (logclear! (-> self state-flags) (state-flags being-attacked dying)))
       (logior! (-> self state-flags) (state-flags invulnerable grabbed))
       (set! (-> self control unknown-uint20) (the-as uint 'stance)))
   :exit
@@ -1739,6 +1746,8 @@
                       (the-as float 40960.0)
                       #f
                       (-> self control root-prim collide-with))
+      (#when TARGET_3DS ;; (AI-assisted) a replaced hit: see target-grab
+        (logclear! (-> self state-flags) (state-flags being-attacked dying)))
       (logior! (-> self state-flags) (state-flags grabbed))
       (set! (-> self neck flex-blend) 0.0))
   :exit
@@ -1770,6 +1779,8 @@
       (set! (-> self control unknown-vector102 quad) (-> self control trans quad))
       (set! (-> self control unknown-uint20) (the-as uint #t))
       (quaternion-copy! (the-as quaternion (-> self control unknown-vector103)) (-> self control quat))
+      (#when TARGET_3DS ;; (AI-assisted) a replaced hit: see target-grab
+        (logclear! (-> self state-flags) (state-flags being-attacked dying)))
       (logior! (-> self state-flags) (state-flags grabbed))
       (vector-reset! (-> self control transv))
       (set! (-> self neck flex-blend) 0.0)

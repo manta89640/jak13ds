@@ -21,9 +21,17 @@
       (set! (-> *camera-other-root* quad) (-> *math-camera* trans quad))
       (set-time! (-> self state-time))
       (loop
+        ;; 3DS (AI-assisted): the grab above fails while Jak is being hit (the zoomer's hit state
+        ;; ignores it): try again each frame, as the Mountain Pass flying lurkers do
+        (#when TARGET_3DS
+          (if (and *target* (not (logtest? (-> *target* state-flags) (state-flags grabbed))))
+            (process-grab? *target*)))
         (*! arg2 (- 1.0 (* 0.05 (-> *display* time-adjust-ratio)))) ;; og:preserve-this changed for high fps
         (when (and (< (fabs arg2) 13.653334) (time-elapsed? (-> self state-time) (seconds 1.5)))
-          (if *target* (process-release? *target*))
+          ;; 3DS (AI-assisted): only a Jak this cell grabbed. A release when the grab never took
+          ;; sent 'end-mode to the zoomer, which means "get off" (at the power cell)
+          (if (and *target* (#if TARGET_3DS (logtest? (-> *target* state-flags) (state-flags grabbed)) #t))
+            (process-release? *target*))
           (go-virtual wait))
         (set! arg1 (+ arg1 (/ (* arg2 (seconds-per-frame)) (path-distance (-> self path)))))
         (cond
