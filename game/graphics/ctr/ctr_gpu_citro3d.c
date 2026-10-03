@@ -41,6 +41,35 @@ extern const uint8_t ctr_ocean_full_shbin[];
 extern const size_t ctr_ocean_full_shbin_size;
 extern const uint8_t ctr_ocean_full_clip_shbin[];
 extern const size_t ctr_ocean_full_clip_shbin_size;
+/* (AI-assisted) the Oct 2 shaders (config.ini new_shaders = off: hardware hang bisect) */
+extern const uint8_t ctr_basic_old_shbin[];
+extern const size_t ctr_basic_old_shbin_size;
+extern const uint8_t ctr_mesh_old_shbin[];
+extern const size_t ctr_mesh_old_shbin_size;
+extern const uint8_t ctr_skin_old_shbin[];
+extern const size_t ctr_skin_old_shbin_size;
+extern const uint8_t ctr_skin_env_old_shbin[];
+extern const size_t ctr_skin_env_old_shbin_size;
+static int s_new_shaders = 1;
+void ctr_gpu_set_new_shaders(int on) {
+  s_new_shaders = on;
+}
+void ctr_thread_install_crash_handler(void); /* platform/3ds/port */
+
+/* (AI-assisted) hardware hang bisect: where the render thread is (ctr_gpu_diag_stage) and how
+ * many frames it finished, logged once per second for the first 60 s by a watchdog thread */
+static const char* volatile s_diag_stage = "not started";
+static volatile u32 s_diag_frames;
+static volatile Thread s_diag_render_thread;
+void ctr_gpu_diag_stage(const char* stage) {
+  s_diag_stage = stage;
+}
+/* the GPU code's own markers: render thread only (the loader thread makes textures too) */
+static inline void diag_rt(const char* stage) {
+  if (!s_diag_render_thread || threadGetCurrent() == s_diag_render_thread) {
+    s_diag_stage = stage;
+  }
+}
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
@@ -212,6 +241,9 @@ static struct {
   int uloc_scales;
   int uloc_fog0, uloc_fog1;
   float fog0[4], fog1[4]; /* see ctr_gpu_set_mesh_fog, mesh_fog_uniforms */
+  /* (AI-assisted) the mesh program's fog uniforms: fog0/fog1 with the new shaders, the game's
+   * values unchanged with the Oct 2 ones (new_shaders = off; the ocean shader keeps fog0/fog1) */
+  float mfog0[4], mfog1[4];
   C3D_Tex fog_tex;        /* 64x8: alpha ramp 0..1 along s, fog color */
   uint32_t fog_tex_rgb;
   int fog_tex_valid;
@@ -675,8 +707,8 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord * 1024 */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f, 0.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.mfog0[0], g.mfog0[1], g.mfog0[2], g.mfog0[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.mfog1[0], g.mfog1[1], g.mfog1[2], g.mfog1[3]);
   }
   g.cur_prog = prog;
 }
@@ -806,13 +838,19 @@ int ctr_gpu_init(void) {
                               g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
   }
 
-  g.dvlb = DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size);
+  if (!s_new_shaders) {
+    printf("[ctr] new_shaders = off: the Oct 2 vertex shaders (basic, mesh, skin, skin_env)\n");
+  }
+  g.dvlb = s_new_shaders ? DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size)
+                         : DVLB_ParseFile((u32*)ctr_basic_old_shbin, (u32)ctr_basic_old_shbin_size);
   shaderProgramInit(&g.program);
   shaderProgramSetVsh(&g.program, &g.dvlb->DVLE[0]);
   C3D_BindProgram(&g.program);
   g.uloc_projection = shaderInstanceGetUniformLocation(g.program.vertexShader, "projection");
 
-  g.mesh_dvlb = DVLB_ParseFile((u32*)ctr_mesh_shbin, (u32)ctr_mesh_shbin_size);
+  g.mesh_dvlb = s_new_shaders
+                    ? DVLB_ParseFile((u32*)ctr_mesh_shbin, (u32)ctr_mesh_shbin_size)
+                    : DVLB_ParseFile((u32*)ctr_mesh_old_shbin, (u32)ctr_mesh_old_shbin_size);
   shaderProgramInit(&g.mesh_program);
   shaderProgramSetVsh(&g.mesh_program, &g.mesh_dvlb->DVLE[0]);
   g.uloc_clip = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "clip");
@@ -828,13 +866,23 @@ int ctr_gpu_init(void) {
   g.fog1[1] = 0.0f;
   g.fog1[2] = 0.0f;
   g.fog1[3] = 0.0f;
+  memcpy(g.mfog0, g.fog0, sizeof(g.mfog0));
+  memcpy(g.mfog1, g.fog1, sizeof(g.mfog1));
+  if (!s_new_shaders) {
+    /* the Oct 2 shader's form: hvdf.w, fog min, fog max, -1/255; w scale, start, 1 / range */
+    const float f0[4] = {0.0f, 255.0f, 255.0f, -1.0f / 255.0f}, f1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+    memcpy(g.mfog0, f0, sizeof(f0));
+    memcpy(g.mfog1, f1, sizeof(f1));
+  }
   if (C3D_TexInit(&g.fog_tex, 64, 8, GPU_RGBA8)) {
     C3D_TexSetFilter(&g.fog_tex, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&g.fog_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     g.fog_tex_valid = 1;
     g.fog_tex_rgb = 0xffffffff; /* force the first fill */
   }
-  g.skin_dvlb = DVLB_ParseFile((u32*)ctr_skin_shbin, (u32)ctr_skin_shbin_size);
+  g.skin_dvlb = s_new_shaders
+                    ? DVLB_ParseFile((u32*)ctr_skin_shbin, (u32)ctr_skin_shbin_size)
+                    : DVLB_ParseFile((u32*)ctr_skin_old_shbin, (u32)ctr_skin_old_shbin_size);
   shaderProgramInit(&g.skin_program);
   shaderProgramSetVsh(&g.skin_program, &g.skin_dvlb->DVLE[0]);
   g.uloc_skin_clip = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "clip");
@@ -843,7 +891,10 @@ int ctr_gpu_init(void) {
   g.uloc_skin_rows[2] = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "row2");
   g.uloc_skin_scales = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "scales");
   g.uloc_skin_lights = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "lights");
-  g.env_dvlb = DVLB_ParseFile((u32*)ctr_skin_env_shbin, (u32)ctr_skin_env_shbin_size);
+  g.env_dvlb =
+      s_new_shaders
+          ? DVLB_ParseFile((u32*)ctr_skin_env_shbin, (u32)ctr_skin_env_shbin_size)
+          : DVLB_ParseFile((u32*)ctr_skin_env_old_shbin, (u32)ctr_skin_env_old_shbin_size);
   shaderProgramInit(&g.env_program);
   shaderProgramSetVsh(&g.env_program, &g.env_dvlb->DVLE[0]);
   g.uloc_env_clip = shaderInstanceGetUniformLocation(g.env_program.vertexShader, "clip");
@@ -1548,7 +1599,9 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     pipeline_frame_begin(color_fill_value(r, gr, b));
     return;
   }
+  diag_rt("frame_begin: C3D_FrameBegin (wait for GPU)");
   C3D_FrameBegin(0); /* waits for the GPU; the game thread already paces to vblank */
+  diag_rt("frame_begin: deletes, VRAM pool copies");
   g.cmd_base = gpuCmdBuf;
   g.frame_no++;
   process_pending_deletes(0);
@@ -1564,6 +1617,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     set_top_viewport();
   }
   frame_state_reset();
+  diag_rt("draw build");
 }
 
 /* Immediate draws copy their vertices into g.vbuf. The GPU reads them only when the frame's GX
@@ -1679,6 +1733,7 @@ void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
+  diag_rt("frame_end: flush");
   raw_vc_flush();
   flush_vbuf();
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
@@ -1694,11 +1749,14 @@ void ctr_gpu_frame_end(void) {
     C3D_FrameDrawOn(g.top);
   }
   if (s_pres.on) {
+    diag_rt("frame_end: present queue (wait for a free screen buffer)");
     pres_queue_frame();
   }
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
+  diag_rt("frame_end: C3D_FrameEnd (submit)");
   C3D_FrameEnd(GX_CMDLIST_FLUSH);
+  diag_rt("frame_end: stats");
   g.in_frame = 0;
   if (g.screenshot_state == 1) {
     g.screenshot_state = 2;
@@ -2211,8 +2269,11 @@ static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
     tex_flush_now(tex);
     return 1;
   }
+  const char* const prev_stage = s_diag_stage;
+  diag_rt("texture upload: copy to VRAM");
   cache_flush_now(buf, tex->size);
   sync_texture_copy((u32*)buf, 0, (u32*)tex->data, 0, tex->size, 8);
+  diag_rt(prev_stage);
   /* check that the copy landed (VRAM is readable by the CPU); if not, use linear memory */
   int ok = memcmp(tex->data, buf, tex->size) == 0;
   if (!ok) {
@@ -2240,8 +2301,43 @@ static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
 
 /* linear RGBA8 (top row first) -> the GPU's tiled RGBA8 (A, B, G, R; bottom row first): 8x8 tiles
  * in rows, morton order inside a tile (CtrTexConv.h) */
+/* (AI-assisted) config.ini asm_tex = off (hardware hang bisect): the Oct 2 per texel loops, byte
+ * loads and stores only (no LDM/STM tiling) */
+static int s_asm_tex = 1;
+void ctr_gpu_set_asm_tex(int on) {
+  s_asm_tex = on;
+}
+int ctr_gpu_asm_tex(void) {
+  return s_asm_tex;
+}
+static inline u32 morton8(u32 x, u32 y) {
+  return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
+         ((y & 4) << 3);
+}
+/* the texel at image (x, y) (y = 0 at the top) in the tiled layout */
+static inline u32 tiled_texel(int x, int y, int w, int h) {
+  const int ty = h - 1 - y;
+  return (u32)((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8((u32)x & 7, (u32)ty & 7);
+}
+
 __attribute__((noinline)) static void swizzle_rgba8(uint8_t* dst, int w, int h,
                                                     const uint8_t* rgba) {
+  if (!s_asm_tex) {
+    const int tiles_x = w / 8;
+    for (int y = 0; y < h; y++) {
+      const int ty = h - 1 - y;
+      const uint8_t* p = rgba + 4 * y * w;
+      for (int x = 0; x < w; x++, p += 4) {
+        u32 tile = (u32)((ty / 8) * tiles_x + (x / 8));
+        u32 off = (tile * 64 + morton8(x & 7, ty & 7)) * 4;
+        dst[off + 0] = p[3];
+        dst[off + 1] = p[2];
+        dst[off + 2] = p[1];
+        dst[off + 3] = p[0];
+      }
+    }
+    return;
+  }
   ctr_tile_texels(dst, w, h, rgba, CTR_CONV_RGBA8);
 }
 
@@ -2496,7 +2592,40 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
       conv = CTR_CONV_RGBA4;
       break;
   }
-  ctr_tile_texels(tex->data, w, h, rgba, conv);
+  if (s_asm_tex) {
+    ctr_tile_texels(tex->data, w, h, rgba, conv);
+  } else {
+    /* (AI-assisted) asm_tex = off: the Oct 2 per texel loop */
+    uint8_t* d8 = (uint8_t*)tex->data;
+    uint16_t* d16 = (uint16_t*)tex->data;
+    for (int y = 0; y < h; y++) {
+      const uint8_t* p = rgba + 4 * y * w;
+      for (int x = 0; x < w; x++, p += 4) {
+        const u32 o = tiled_texel(x, y, w, h);
+        const u32 a2 = p[3] >= 0x80 ? 255u : (u32)p[3] * 2u;
+        switch (fmt) {
+          case GPU_L8:
+            d8[o] = p[1];
+            break;
+          case GPU_LA8:
+            d8[2 * o] = (uint8_t)a2;
+            d8[2 * o + 1] = p[1];
+            break;
+          case GPU_RGB565:
+            d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
+            break;
+          case GPU_RGBA5551:
+            d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 3) << 6) | ((p[2] >> 3) << 1) |
+                                (p[3] ? 1 : 0));
+            break;
+          default: /* GPU_RGBA4 */
+            d16[o] = (uint16_t)(((p[0] >> 4) << 12) | ((p[1] >> 4) << 8) |
+                                ((p[2] >> 4) << 4) | (a2 >> 4));
+            break;
+        }
+      }
+    }
+  }
   tex_flush_now(tex);
   t->pool = -1;
   t->levels = 1;
@@ -3711,7 +3840,18 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
     if (n > w * h) {
       n = w * h;
     }
-    ctr_rgba4_to_rgba8((uint32_t*)dst, (const uint8_t*)data, n); /* byte k = nibble k * 17 */
+    if (s_asm_tex) {
+      ctr_rgba4_to_rgba8((uint32_t*)dst, (const uint8_t*)data, n); /* byte k = nibble k * 17 */
+    } else {
+      const uint8_t* src = (const uint8_t*)data; /* (AI-assisted) asm_tex = off: bytes */
+      for (int i = 0; i < n; i++) {
+        const uint16_t v = (uint16_t)(src[2 * i] | (src[2 * i + 1] << 8));
+        dst[4 * i + 0] = (uint8_t)((v & 0xf) * 17);
+        dst[4 * i + 1] = (uint8_t)(((v >> 4) & 0xf) * 17);
+        dst[4 * i + 2] = (uint8_t)(((v >> 8) & 0xf) * 17);
+        dst[4 * i + 3] = (uint8_t)(((v >> 12) & 0xf) * 17);
+      }
+    }
     if (!tex_commit(tex, dst, on_vram)) {
       release_tex_slot(slot);
       return -1;
@@ -4311,12 +4451,18 @@ static struct {
 
 static void render_thread_main(void* unused) {
   (void)unused;
+  /* (AI-assisted) a crash here was silent (black top screen, the game waiting forever) */
+  ctr_thread_install_crash_handler();
+  s_diag_render_thread = threadGetCurrent();
   for (;;) {
+    s_diag_stage = "idle (waiting for the game's frame)";
     LightEvent_Wait(&as.start);
     if (as.quit) {
       break;
     }
+    s_diag_stage = "job start";
     as.fn(as.arg);
+    s_diag_frames++;
     LightEvent_Signal(&as.idle);
   }
   LightEvent_Signal(&as.idle);
@@ -4345,6 +4491,26 @@ int ctr_gpu_async_start(ctr_gpu_job_fn fn, void* arg) {
   }
   as.running = 1;
   return 1;
+}
+
+static void diag_thread_main(void* unused) {
+  (void)unused;
+  u32 last = 0;
+  for (int i = 1; i <= 60; i++) {
+    svcSleepThread(1000000000LL);
+    const u32 f = s_diag_frames;
+    printf("[ctr] render alive %ds: frame %lu, last stage %s%s\n", i, (unsigned long)f,
+           s_diag_stage, f == last ? " (no frame in the last second)" : "");
+    last = f;
+  }
+}
+
+void ctr_gpu_diag_start(void) {
+  /* core 0 at a high priority: it sleeps nearly all the time, and must run while the render
+   * thread (core 2) or the game thread spins */
+  if (!threadCreate(diag_thread_main, NULL, 16 * 1024, 0x18, 0, true)) {
+    printf("[ctr] render watchdog thread not started\n");
+  }
 }
 
 void ctr_gpu_async_submit(void) {
@@ -4395,9 +4561,11 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
 void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
   mesh_fog_uniforms(fog0, fog1, g.fog0, g.fog1);
+  memcpy(g.mfog0, s_new_shaders ? g.fog0 : fog0, sizeof(g.mfog0));
+  memcpy(g.mfog1, s_new_shaders ? g.fog1 : fog1, sizeof(g.mfog1));
   if (g.cur_prog == PROG_MESH) {
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.mfog0[0], g.mfog0[1], g.mfog0[2], g.mfog0[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.mfog1[0], g.mfog1[1], g.mfog1[2], g.mfog1[3]);
     raw_note_unif();
   } else if (g.cur_prog == PROG_OCEAN) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_ocean_fog0, g.fog0[0], g.fog0[1], g.fog0[2],

@@ -327,6 +327,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #endif
   {
     const double tl = ctr_gpu_time_ms();
+    ctr_gpu_diag_stage("level loads (process_pending_loads)");
     m_levels->process_pending_loads(m_rs.frame_idx);
     const double load_ms = ctr_gpu_time_ms() - tl;
     if (load_ms >= 20.0) {
@@ -345,9 +346,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     ctr_gpu_request_screenshot(path.c_str());
   }
   dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
+  ctr_gpu_diag_stage("pmode fade");
   draw_pmode_fade();
   const double t2 = ctr_gpu_time_ms();
   ctr_gpu_frame_end();
+  ctr_gpu_diag_stage("after frame_end: stats, logs");
   const double t3 = ctr_gpu_time_ms();
   ctr_gpu_stats gs;
   ctr_gpu_get_stats(&gs);
@@ -667,6 +670,9 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
   ctr_gpu_set_framebuffer(ctr_settings().early_depth_block32 ? 1 : 0,
                           ctr_settings().depth16 ? 1 : 0);
+  // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
+  ctr_gpu_set_new_shaders(ctr_settings().new_shaders ? 1 : 0);
+  ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   if (ctr_gpu_init() != 0) {
     lg::error("[ctr] GPU init failed");
     return 1;
@@ -701,6 +707,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   g_ctr->levels().load_common();
   g_ctr->levels().prefetch("title");
   g_async = ctr_gpu_async_start(render_job, nullptr) != 0;
+  ctr_gpu_diag_start();
   g_ctr_ready = true;
   g_ctr->set_async(g_async);
   lg::info("[ctr] renderer ready ({})",

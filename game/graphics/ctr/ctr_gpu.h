@@ -283,6 +283,17 @@ void ctr_gpu_set_overlap(int on);
  * can change at any time. */
 void ctr_gpu_set_raw_cmds(int on);
 void ctr_gpu_set_vcache_reuse(int on);
+/* (AI-assisted) hardware hang bisect (config.ini new_shaders / asm_tex, CtrSettings.h).
+ * new_shaders 0: the Oct 2 vertex shaders and their uniform conventions; before ctr_gpu_init.
+ * asm_tex 0: the old per texel texture tiling loops (no LDM/STM, no 64-bit stores). */
+void ctr_gpu_set_new_shaders(int on);
+void ctr_gpu_set_asm_tex(int on);
+int ctr_gpu_asm_tex(void);
+/* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
+ * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start), so a hang shows the
+ * stage it stopped in */
+void ctr_gpu_diag_stage(const char* stage);
+void ctr_gpu_diag_start(void);
 void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */

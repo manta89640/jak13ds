@@ -51,6 +51,8 @@ std::vector<std::string> read_game_args() {
 }
 }  // namespace
 
+extern "C" int ctr_mem_asm, ctr_fast_clock;  // (AI-assisted) port/ctr_mem_c.c, ctr_clock.cpp
+
 int main(int /*argc*/, char** /*argv*/) {
   ctr_platform_init(1);
   const fs::path data_dir = fs::path(OPENGOAL_3DS_SD_ROOT) / "data";
@@ -65,6 +67,11 @@ int main(int /*argc*/, char** /*argv*/) {
          versions::GOAL_VERSION_MINOR, mem.model, mem.is_hbl ? "Homebrew Launcher" : "direct");
   printf("memory: app %u MB, heap %u MB, linear %u MB\n", mem.app_region_total >> 20,
          mem.heap_size >> 20, mem.linear_size >> 20);
+  {
+    // (AI-assisted) hardware hang bisect switches read by ctr_platform_init
+    printf("[ctr] diag: asm_mem %s, fast_clock %s\n", ctr_mem_asm ? "on" : "off",
+           ctr_fast_clock ? "on" : "off");
+  }
 
   if (!file_util::setup_project_path(data_dir)) {
     printf("could not use %s\n", data_dir.string().c_str());

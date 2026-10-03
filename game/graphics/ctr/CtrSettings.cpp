@@ -150,6 +150,14 @@ CtrSettings load() {
       s.raw_cmds = parse_bool(v);
     } else if (key == "vcache_reuse") {
       s.vcache_reuse = parse_bool(v);
+    } else if (key == "new_shaders") {
+      s.new_shaders = parse_bool(v);
+    } else if (key == "asm_tex") {
+      s.asm_tex = parse_bool(v);
+    } else if (key == "asm_mem") {
+      s.asm_mem = parse_bool(v);
+    } else if (key == "fast_clock") {
+      s.fast_clock = parse_bool(v);
     } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
@@ -171,14 +179,16 @@ std::string CtrSettings::summary() const {
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
-      "vis_culling {} raw_cmds {} vcache_reuse {}{}{}{}",
+      "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
+      "fast_clock {}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
-      vcache_reuse ? "on" : "off", gpu_profile ? " gpu_profile" : "",
+      vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
+      asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
       depth16 ? " depth16" : "", emulator ? " (emulator)" : "");
 }
 

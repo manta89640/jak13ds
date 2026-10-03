@@ -133,7 +133,9 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
   const u32 base = dest_block * kBlockBytes;
   u32 y = 0;
   const u32 page_rows = (height + 31) / 32;
-  if (m_ct32_lines && width % 64 == 0 && base + page_rows * pages_per_row * 8192 <= kVramBytes) {
+  // (AI-assisted) asm_tex = off (hardware hang bisect): the per pair loop only, no 64-bit stores
+  if (ctr_gpu_asm_tex() && m_ct32_lines && width % 64 == 0 &&
+      base + page_rows * pages_per_row * 8192 <= kVramBytes) {
     // (AI-assisted) two rows at a time, one 32 byte VRAM line per 4 texels of each (see the
     // constructor), as 64-bit pairs; the upload doesn't wrap around the end of VRAM
     for (; y + 1 < height; y += 2) {

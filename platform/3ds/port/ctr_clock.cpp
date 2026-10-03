@@ -25,7 +25,18 @@ constexpr u32 kNsPerTickFrac = 0xbad34aefu;
 static_assert(SYSCLOCK_ARM11 == 268111856, "update the tick to ns factor");
 }  // namespace
 
+// (AI-assisted) config.ini fast_clock = off (hardware hang bisect): libstdc++'s own way,
+// clock_gettime(CLOCK_MONOTONIC). Set by ctr_platform_init; 0 (clock_gettime) until then.
+extern "C" int ctr_fast_clock;
+int ctr_fast_clock = 0;
+
 std::chrono::steady_clock::time_point std::chrono::steady_clock::now() noexcept {
+  if (!ctr_fast_clock) {
+    timespec tp;
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    return time_point(duration(std::chrono::seconds(tp.tv_sec) +
+                               std::chrono::nanoseconds(tp.tv_nsec)));
+  }
   const u64 t = svcGetSystemTick();
   const u32 lo = (u32)t, hi = (u32)(t >> 32);
   const u64 ns = (u64)hi * (((u64)kNsPerTickInt << 32) | kNsPerTickFrac) +

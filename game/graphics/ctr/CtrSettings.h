@@ -97,6 +97,16 @@ struct CtrSettings {
   // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
   // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
   bool vcache_reuse = false;
+  // (AI-assisted) hardware hang bisect switches (Oct 3 optimisations; off = the Oct 2 behaviour):
+  // new_shaders: the shorter vertex shaders (off: the Oct 2 ctr_basic/mesh/skin/skin_env);
+  // asm_tex: the 4x2 group / LDM-STM texture tiling, 64-bit PSMCT32 uploads and SIMD sky loops
+  // (off: the old per texel loops); asm_mem: ctr_mem.S memcpy/memmove/memset (off: byte/word C
+  // loops; read by platform/3ds/port at boot); fast_clock: steady_clock without divides (off:
+  // clock_gettime)
+  bool new_shaders = true;
+  bool asm_tex = true;
+  bool asm_mem = true;
+  bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above
   bool emulator = false;
 

@@ -177,6 +177,13 @@ int ctr_platform_init(int enable_console) {
   /* paths without a device name ("/3ds/jak1/...") then refer to the SD card, and
    * std::filesystem treats them as absolute ("sdmc:/..." would be a relative path to it) */
   ctr_boot_mark("2 main");
+  /* (AI-assisted) hardware hang bisect (config.ini, default on): ctr_mem.S's memcpy / memmove /
+   * memset (off: ctr_mem_c.c's loops, also used until here) and ctr_clock.cpp's steady_clock */
+  {
+    extern int ctr_mem_asm, ctr_fast_clock;
+    ctr_mem_asm = ctr_config_bool("asm_mem", 1);
+    ctr_fast_clock = ctr_config_bool("fast_clock", 1);
+  }
   chdir("sdmc:/");
   osSetSpeedupEnable(true); /* 804 MHz + L2 cache on New 3DS, no-op otherwise */
   ctr_boot_mark("3 speedup");

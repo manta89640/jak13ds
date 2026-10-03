@@ -20,6 +20,12 @@
 #include "game/graphics/ctr/ctr_gpu.h"
 
 namespace {
+bool settings_asm_tex() {
+  return ctr_settings().asm_tex;
+}
+}  // namespace
+
+namespace {
 
 // render-sky-3ds's packet (goal_src/jak1/engine/gfx/sky/sky-tng.gc)
 struct SkyPacket {
@@ -154,7 +160,15 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
       out.assign(n, 0);
     }
     // out[i] = min(255, out[i] + min(255, (in[i] * intensity) >> 7)), 4 bytes at a time
-    ctr_add_scaled_texels(out.data(), (const u8*)src.rgba.data(), n, intensity);
+    if (settings_asm_tex()) {
+      ctr_add_scaled_texels(out.data(), (const u8*)src.rgba.data(), n, intensity);
+    } else {
+      // (AI-assisted) asm_tex = off (hardware hang bisect): the Oct 2 byte loop
+      const u8* in = (const u8*)src.rgba.data();
+      for (size_t i = 0; i < n; i++) {
+        out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
+      }
+    }
     m_work_sources[idx]++;
     m_stats.blends++;
   }
@@ -185,7 +199,17 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
       // (AI-assisted) the clouds' rgb multiplied by their alpha (0x80 = 1.0): both layers are
       // then added in one pass (ctr_gpu_draw_clip2), which has no texture alpha of its own
       m_premul.resize(m_rgba[1].size());
-      ctr_premultiply_texels(m_premul.data(), m_rgba[1].data(), m_rgba[1].size() / 4);
+      if (settings_asm_tex()) {
+        ctr_premultiply_texels(m_premul.data(), m_rgba[1].data(), m_rgba[1].size() / 4);
+      } else {
+        for (size_t k = 0; k + 3 < m_rgba[1].size(); k += 4) {  // (AI-assisted) asm_tex = off
+          const u32 a = std::min<u32>(m_rgba[1][k + 3], 0x80);
+          m_premul[k] = (u8)((m_rgba[1][k] * a) >> 7);
+          m_premul[k + 1] = (u8)((m_rgba[1][k + 1] * a) >> 7);
+          m_premul[k + 2] = (u8)((m_rgba[1][k + 2] * a) >> 7);
+          m_premul[k + 3] = m_rgba[1][k + 3];
+        }
+      }
       texels = m_premul.data();
     }
     if (m_tex[i] < 0) {

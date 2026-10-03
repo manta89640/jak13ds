@@ -255,7 +255,11 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmodules.cmake)
 # (AI-assisted) ctr_mem.S (memcpy/memmove/memset) and ctr_clock.cpp (steady_clock::now) are
 # objects of gk itself, not archive members, so they replace the libc.a / libstdc++.a versions
 add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp ${OG3DS_REGISTRY_OBJ}
-  ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem.S ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_clock.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem.S ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_clock.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem_c.c)
+# (AI-assisted) asm_mem = off's C loops must stay loops (not calls back into memcpy / memset)
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem_c.c PROPERTIES
+  COMPILE_OPTIONS "-ffreestanding;-fno-builtin;-fno-tree-loop-distribute-patterns")
 target_link_libraries(gk
   -Wl,--start-group
   og3ds_kernel og3ds_runtime og3ds_sound og3ds_common og3ds_fmt og3ds_libco og3ds_lz og3ds_port

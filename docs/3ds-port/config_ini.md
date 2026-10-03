@@ -84,6 +84,12 @@ merc_lod_scale = 0.5       # characters switch to their lower detail models at t
 anim_lod = on              # (AI-assisted) actors that weren't drawn last frame and are more than 30 m (plus their size) from both the camera and Jak update their skeleton every 4th frame only. Never Jak, Daxter, cutscenes or actors with joint callbacks. off: every frame, like the PS2
 anim_native = on           # (AI-assisted) the animation decompressor's per-joint work (decompress, normalize) in native code instead of the GOAL code; same results. off: the GOAL versions, to compare
 
+# ---- hardware hang bisect (AI-assisted, 2026-10-03): off = the Oct 2 behaviour of each Oct 3 optimisation ----
+new_shaders = on           # the shorter vertex shaders (DPH/MADI/rsq, repacked mesh fog uniforms). off: the Oct 2 ctr_basic / ctr_mesh / ctr_skin / ctr_skin_env (ctr_*_old.v.pica) with the old fog uniforms. ocean = waves always uses the new ocean shader
+asm_tex = on               # texture tiling in 4x2 groups (LDM/STM for RGBA8), 64-bit PSMCT32 VRAM uploads, SIMD sky blend / cloud premultiply. off: the Oct 2 per texel / per byte loops
+asm_mem = on               # ctr_mem.S memcpy / memmove / memset (LDM/STM). off: plain C byte / word loops (ctr_mem_c.c; also used before config.ini is read)
+fast_clock = on            # steady_clock from the system tick without divides. off: clock_gettime(CLOCK_MONOTONIC), as libstdc++
+
 # ---- measuring ----
 gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers); also logs the GPU's own counters once per level (`[ctr] gpu profile <level>: hw busy % ...`: which pipeline stage is busy, and memory traffic per frame; zeros in Azahar)
 ```

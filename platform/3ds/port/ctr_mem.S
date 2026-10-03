@@ -67,6 +67,11 @@ memcpy:
 __aeabi_memcpy:
 __aeabi_memcpy4:
 __aeabi_memcpy8:
+    /* (AI-assisted) config.ini asm_mem = off: the C loops of ctr_mem_c.c (hang bisect) */
+    ldr     ip, .Lmem_flag_cpy
+    ldr     ip, [ip]
+    cmp     ip, #0
+    beq     ctr_mem_c_memcpy
 .Lmemcpy:
     orr     ip, r0, r1
     cmp     r2, #64
@@ -240,6 +245,8 @@ __aeabi_memcpy8:
     strbcs  r4, [r0], #1
     strbmi  r5, [r0]
     pop     {r0, r4-r9, pc}
+.Lmem_flag_cpy:
+    .word   ctr_mem_asm
     .size memcpy, . - memcpy
     .size __aeabi_memcpy, . - __aeabi_memcpy
     .size __aeabi_memcpy4, . - __aeabi_memcpy4
@@ -255,6 +262,10 @@ memmove:
 __aeabi_memmove:
 __aeabi_memmove4:
 __aeabi_memmove8:
+    ldr     ip, .Lmem_flag_move
+    ldr     ip, [ip]
+    cmp     ip, #0
+    beq     ctr_mem_c_memmove
     subs    ip, r0, r1
     bxeq    lr
     cmp     ip, r2
@@ -344,6 +355,8 @@ __aeabi_memmove8:
     strbcs  r5, [r3, #-1]!
     strbmi  r6, [r3, #-1]
     pop     {r4-r10, pc}
+.Lmem_flag_move:
+    .word   ctr_mem_asm
     .size memmove, . - memmove
     .size __aeabi_memmove, . - __aeabi_memmove
     .size __aeabi_memmove4, . - __aeabi_memmove4
@@ -372,6 +385,10 @@ memset:
     orr     r1, r1, r1, lsl #8
     orr     r1, r1, r1, lsl #16
 .Lfill:                             /* r1 = the byte repeated 4 times */
+    ldr     ip, .Lmem_flag_set
+    ldr     ip, [ip]
+    cmp     ip, #0
+    beq     ctr_mem_c_memset        /* (r0, r1's low byte, r2): memset's arguments */
     mov     r3, r0
     cmp     r2, #4
     blo     .Lfill_lt4
@@ -439,6 +456,8 @@ memset:
     strbne  r1, [r3]
     pop     {r4-r9}
     bx      lr
+.Lmem_flag_set:
+    .word   ctr_mem_asm
     .size memset, . - memset
     .size __aeabi_memset, . - __aeabi_memset
     .size __aeabi_memset4, . - __aeabi_memset4

@@ -1039,6 +1039,13 @@ int ctr_gpu_tex_radial(int) {
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_set_vcache_reuse(int) {}
+void ctr_gpu_set_new_shaders(int) {}
+void ctr_gpu_set_asm_tex(int) {}
+int ctr_gpu_asm_tex(void) {
+  return 1;
+}
+void ctr_gpu_diag_stage(const char*) {}
+void ctr_gpu_diag_start(void) {}
 void ctr_gpu_submit_partial(void) {}
 int ctr_gpu_set_pipeline(int) {
   return 0;
