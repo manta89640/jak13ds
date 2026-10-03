@@ -2,9 +2,10 @@
 // .ogz format (game/overlord/common/compressed_iso_file.h), and check that the game's decoder
 // gives back the same bytes. Built and run by stage_sd.sh --compress.
 //
-//   iso_pack [--codec lz4|zstd] [--level N] [--block-size N] IN OUT.ogz
+//   iso_pack [--codec lz4|zstd|zstd-adpcm] [--level N] [--block-size N] IN OUT.ogz
 //       compress IN, then decode OUT.ogz with the game's reader (whole pages, sector-sized and
-//       odd reads) and compare with IN. Exit code 1 on any difference.
+//       odd reads) and compare with IN. Exit code 1 on any difference. zstd-adpcm is for the
+//       PS2 ADPCM voice streams (VAGWAD.*): headers and nibbles of the 16-byte frames apart.
 //   iso_pack --verify IN OUT.ogz       only the check
 //   iso_pack --dump OUT.ogz DECODED    decode a whole .ogz to a file
 #include <cstdio>
@@ -46,9 +47,9 @@ static bool compress(const std::vector<uint8_t>& in, const char* out_path, Codec
   h.crc32 = crc32_update(0, in.data(), in.size());
   std::vector<uint32_t> offsets(h.block_count + 1);
   std::vector<uint8_t> blocks;
-  const size_t cap = std::max<size_t>(LZ4_compressBound(bs), ZSTD_compressBound(bs));
+  const size_t cap = std::max<size_t>(LZ4_compressBound(bs), 2 * ZSTD_compressBound(bs) + 4);
   std::vector<uint8_t> tmp(cap);
-  ZSTD_CCtx* cctx = codec == CODEC_ZSTD ? ZSTD_createCCtx() : nullptr;
+  ZSTD_CCtx* cctx = codec != CODEC_LZ4 ? ZSTD_createCCtx() : nullptr;
   uint32_t pos = kHeaderSize + (h.block_count + 1) * 4;
   for (uint32_t b = 0; b < h.block_count; b++) {
     const uint8_t* src = in.data() + (size_t)b * bs;
@@ -56,6 +57,22 @@ static bool compress(const std::vector<uint8_t>& in, const char* out_path, Codec
     size_t c;
     if (codec == CODEC_LZ4) {
       c = LZ4_compress_HC((const char*)src, (char*)tmp.data(), (int)n, (int)cap, level);
+    } else if (codec == CODEC_ZSTD_ADPCM) {
+      // u32 header stream size, zstd(headers), zstd(nibbles)
+      const uint32_t hn = 2 * (n / 16);
+      std::vector<uint8_t> split(n);
+      adpcm_split(src, n, split.data(), split.data() + hn);
+      const size_t h = ZSTD_compressCCtx(cctx, tmp.data() + 4, cap - 4, split.data(), hn, level);
+      size_t r = ZSTD_isError(h) ? h
+                                 : ZSTD_compressCCtx(cctx, tmp.data() + 4 + h, cap - 4 - h,
+                                                     split.data() + hn, n - hn, level);
+      if (ZSTD_isError(h) || ZSTD_isError(r)) {
+        c = 0;
+      } else {
+        const uint32_t h32 = (uint32_t)h;
+        memcpy(tmp.data(), &h32, 4);
+        c = 4 + h + r;
+      }
     } else {
       c = ZSTD_compressCCtx(cctx, tmp.data(), cap, src, n, level);
       if (ZSTD_isError(c)) {
@@ -151,7 +168,7 @@ int main(int argc, char** argv) {
     std::string a = argv[i];
     if (a == "--codec" && i + 1 < argc) {
       std::string c = argv[++i];
-      codec = c == "zstd" ? CODEC_ZSTD : CODEC_LZ4;
+      codec = c == "zstd" ? CODEC_ZSTD : c == "zstd-adpcm" ? CODEC_ZSTD_ADPCM : CODEC_LZ4;
     } else if (a == "--level" && i + 1 < argc) {
       level = atoi(argv[++i]);
     } else if (a == "--block-size" && i + 1 < argc) {
@@ -165,7 +182,7 @@ int main(int argc, char** argv) {
     }
   }
   if (pos.size() != 2) {
-    fprintf(stderr, "usage: iso_pack [--codec lz4|zstd] [--level N] [--block-size N] IN OUT.ogz\n");
+    fprintf(stderr, "usage: iso_pack [--codec lz4|zstd|zstd-adpcm] [--level N] [--block-size N] IN OUT.ogz\n");
     return 2;
   }
   if (dump) {

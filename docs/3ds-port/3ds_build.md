@@ -60,6 +60,11 @@ decoding is ~9x slower than LZ4's (Azahar), which costs more than the smaller re
 line `[io] MIS DGO: ... card ... MB/s, decode ... MB/s` at the end of each big file shows where its
 load time went.
 
+`--compress-vag` (with or without `--compress`) also stores the six `VAGWAD.*` voice files
+(1044 MB) as `.ogz` with codec 3: the PS2 ADPCM frames' 2 header bytes and 14 nibble bytes go to
+two zstd streams per 16 KB block (695 MB in all, 0.666). 16 KB keeps a block's decode at ~2-3 ms
+(Azahar), so a 24 KB voice read stays ~15 ms. All six languages stay on the card.
+
 **gk and the game files go together.** The GOAL code is compiled to C and linked into gk (the
 3dsx and the CIA); each object in the `.CGO` / `.DGO` files only carries the hash of its C module.
 After any GOAL change, copy gk (or reinstall the CIA) *and* `out/jak1/iso` from the same

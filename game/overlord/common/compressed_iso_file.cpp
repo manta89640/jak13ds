@@ -5,6 +5,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
 
 #include "third-party/lz4/lz4.h"
 #include "third-party/zstd/lib/zstd.h"
@@ -26,6 +29,25 @@ struct CrcTable {
 };
 constexpr CrcTable kCrcTable{};
 
+// one zstd decoder for every file (~95 KB, kept: no big malloc / free per voice line)
+std::mutex g_zstd_mutex;
+ZSTD_DCtx* g_dctx = nullptr;
+
+bool zstd_decode(void* dst, uint32_t dst_len, const void* src, uint32_t src_len) {
+  std::lock_guard<std::mutex> lock(g_zstd_mutex);
+  if (!g_dctx) {
+    g_dctx = ZSTD_createDCtx();
+    if (!g_dctx) {
+      return false;
+    }
+  }
+  return ZSTD_decompressDCtx(g_dctx, dst, dst_len, src, src_len) == dst_len;
+}
+
+// block indexes by path
+std::mutex g_index_mutex;
+std::map<std::string, std::shared_ptr<const std::vector<uint32_t>>> g_index_cache;
+
 uint64_t now_us() {
   return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -42,41 +64,81 @@ uint32_t crc32_update(uint32_t crc, const void* data, size_t size) {
   return ~crc;
 }
 
+void adpcm_split(const uint8_t* data, uint32_t n, uint8_t* headers, uint8_t* rest) {
+  const uint32_t frames = n / 16;
+  for (uint32_t i = 0; i < frames; i++) {
+    headers[2 * i] = data[16 * i];
+    headers[2 * i + 1] = data[16 * i + 1];
+    memcpy(rest + 14 * i, data + 16 * i + 2, 14);
+  }
+  memcpy(rest + 14 * frames, data + 16 * frames, n - 16 * frames);
+}
+
+void adpcm_join_in_place(uint8_t* data, uint32_t n, const uint8_t* headers) {
+  // frame i's nibbles move down from 2 * frames + 14 * i to 16 * i + 2: never past a later
+  // frame's nibbles, which start at or after 16 * (i + 1); the tail is already in place
+  const uint32_t frames = n / 16;
+  const uint8_t* rest = data + 2 * frames;
+  for (uint32_t i = 0; i < frames; i++) {
+    memmove(data + 16 * i + 2, rest + 14 * i, 14);
+    data[16 * i] = headers[2 * i];
+    data[16 * i + 1] = headers[2 * i + 1];
+  }
+}
+
 Reader::~Reader() {
   if (m_fp) {
     fclose(m_fp);
   }
   free(m_cbuf);
   free(m_cache);
-  if (m_dctx) {
-    ZSTD_freeDCtx((ZSTD_DCtx*)m_dctx);
-  }
+  free(m_hbuf);
 }
 
-bool Reader::open(FILE* fp) {
+bool Reader::open(FILE* fp, const char* path) {
   m_fp = fp;
   // one fread per block, straight from the card (newlib's 1 KB buffer would split each one)
   setvbuf(m_fp, nullptr, _IONBF, 0);
   m_pos = ~0u;
   if (!read_at(0, &m_hdr, sizeof(m_hdr)) || memcmp(m_hdr.magic, kMagic, 4) != 0 ||
-      m_hdr.version != kVersion || (m_hdr.codec != CODEC_LZ4 && m_hdr.codec != CODEC_ZSTD) ||
+      m_hdr.version != kVersion ||
+      (m_hdr.codec != CODEC_LZ4 && m_hdr.codec != CODEC_ZSTD && m_hdr.codec != CODEC_ZSTD_ADPCM) ||
       m_hdr.block_size == 0 || m_hdr.block_size > (1u << 20) ||
       m_hdr.block_count != (uint32_t)(((uint64_t)m_hdr.size + m_hdr.block_size - 1) /
                                       m_hdr.block_size)) {
     return false;
   }
-  m_offsets.resize(m_hdr.block_count + 1);
-  if (!read_at(kHeaderSize, m_offsets.data(), (m_hdr.block_count + 1) * 4)) {
-    return false;
-  }
-  for (uint32_t i = 0; i < m_hdr.block_count; i++) {
-    const uint32_t n = m_offsets[i + 1] - m_offsets[i];
-    if (m_offsets[i + 1] < m_offsets[i] || n > m_hdr.block_size) {
-      return false;
+  const std::string key = path ? std::string(path) : std::string();
+  if (path) {
+    std::lock_guard<std::mutex> lock(g_index_mutex);
+    auto it = g_index_cache.find(key);
+    if (it != g_index_cache.end() && it->second->size() == m_hdr.block_count + 1) {
+      m_index = it->second;
     }
   }
+  if (!m_index) {
+    auto index = std::make_shared<std::vector<uint32_t>>(m_hdr.block_count + 1);
+    if (!read_at(kHeaderSize, index->data(), (m_hdr.block_count + 1) * 4)) {
+      return false;
+    }
+    for (uint32_t i = 0; i < m_hdr.block_count; i++) {
+      const uint32_t n = (*index)[i + 1] - (*index)[i];
+      if ((*index)[i + 1] < (*index)[i] || n > m_hdr.block_size) {
+        return false;
+      }
+    }
+    m_index = index;
+    if (path) {
+      std::lock_guard<std::mutex> lock(g_index_mutex);
+      g_index_cache[key] = m_index;
+    }
+  }
+  m_offsets = m_index->data();
   m_cbuf = (uint8_t*)malloc(m_hdr.block_size);
-  return m_cbuf != nullptr;
+  if (m_hdr.codec == CODEC_ZSTD_ADPCM) {
+    m_hbuf = (uint8_t*)malloc(m_hdr.block_size / 8 + 2);
+  }
+  return m_cbuf != nullptr && (m_hdr.codec != CODEC_ZSTD_ADPCM || m_hbuf);
 }
 
 bool Reader::read_at(uint32_t pos, void* dst, uint32_t len) {
@@ -109,13 +171,24 @@ bool Reader::load_block(uint32_t block, uint8_t* dst) {
   if (m_hdr.codec == CODEC_LZ4) {
     ok = LZ4_decompress_safe((const char*)m_cbuf, (char*)dst, (int)in_len, (int)out_len) ==
          (int)out_len;
+  } else if (m_hdr.codec == CODEC_ZSTD) {
+    ok = zstd_decode(dst, out_len, m_cbuf, in_len);
   } else {
-    if (!m_dctx) {
-      m_dctx = ZSTD_createDCtx();
+    // ADPCM split: headers to m_hbuf, nibbles to the end of dst, then interleaved in place
+    const uint32_t frames = out_len / 16;
+    uint32_t hlen;
+    memcpy(&hlen, m_cbuf, 4);
+    ok = in_len >= 4 && hlen <= in_len - 4 &&
+         zstd_decode(m_hbuf, 2 * frames, m_cbuf + 4, hlen) &&
+         zstd_decode(dst + 2 * frames, out_len - 2 * frames, m_cbuf + 4 + hlen, in_len - 4 - hlen);
+    if (ok) {
+      adpcm_join_in_place(dst, out_len, m_hbuf);
     }
-    ok = m_dctx && ZSTD_decompressDCtx((ZSTD_DCtx*)m_dctx, dst, out_len, m_cbuf, in_len) == out_len;
   }
-  decode_us += now_us() - t0;
+  const uint64_t dt = now_us() - t0;
+  decode_us += dt;
+  max_decode_us = std::max(max_decode_us, dt);
+  blocks++;
   return ok;
 }
 

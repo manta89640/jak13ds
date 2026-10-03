@@ -49,6 +49,7 @@ struct LoadStackEntry {
   uint64_t io_us;     // time in fs_read
   uint32_t io_reads;
   uint32_t crc;       // io_checksum = on: CRC-32 of the bytes read, while they are sequential
+  uint32_t crc_start;  // file offset of the first byte in crc
   uint32_t crc_next;  // file offset the next read must start at for crc to stay valid (~0: not)
 #endif
 };

@@ -69,10 +69,11 @@ static FILE* open_fr(FileRecord* fr, LoadStackEntry* lse, s32 thread_to_wake) {
   lse->io_us = 0;
   lse->io_reads = 0;
   lse->crc = 0;
+  lse->crc_start = 0;
   lse->crc_next = 0;
   if (fp && is_file_compressed(fr)) {
     auto* r = new iso_cz::Reader();
-    if (r->open(fp)) {
+    if (r->open(fp, path)) {
       lse->cz = r;
     } else {
       lg::error("[OVERLORD] fake iso: \"{}\" is not a valid compressed file", path);
@@ -153,23 +154,27 @@ void FS_Close(LoadStackEntry* fd) {
 
 #ifdef __3DS__
   // (AI-assisted) where the load time of a big file goes: card reads vs decoding
-  if (fd->io_bytes >= (1 << 20)) {
+  // (compressed files from 256 KB, or all of them with io_checksum = on: the voice lines)
+  if (fd->io_bytes >= (fd->cz ? (io_checksum() ? 1u : (256u << 10)) : (1u << 20))) {
     auto* r = (iso_cz::Reader*)fd->cz;
     std::string crc;
     if (io_checksum() && fd->crc_next != ~0u) {
-      crc = fmt::format(", crc32 {:08x} over {} B", fd->crc, fd->crc_next);
-      if (r && fd->crc_next == r->size()) {
+      crc = fmt::format(", crc32 {:08x} over {} B", fd->crc, fd->crc_next - fd->crc_start);
+      if (fd->crc_start) {
+        crc += fmt::format(" from {}", fd->crc_start);
+      } else if (r && fd->crc_next == r->size()) {
         crc += fd->crc == r->expected_crc32() ? " (ok)" : " (MISMATCH)";
       }
     }
     const double s_total = fd->io_us / 1e6;
     if (r) {
       lg::info("[io] {}: {} B in {} reads, {:.0f} ms ({:.1f} MB/s); card {} B in {:.0f} ms "
-               "({:.1f} MB/s), decode {:.0f} ms ({:.1f} MB/s){}",
+               "({:.1f} MB/s), decode {:.0f} ms ({:.1f} MB/s, {} blocks, max {:.2f} ms){}",
                fd->fr->name, fd->io_bytes, fd->io_reads, s_total * 1e3,
                fd->io_bytes / 1e6 / s_total, r->sd_bytes, r->sd_us / 1e3,
                r->sd_bytes / (double)std::max<uint64_t>(r->sd_us, 1), r->decode_us / 1e3,
-               r->out_bytes / (double)std::max<uint64_t>(r->decode_us, 1), crc);
+               r->out_bytes / (double)std::max<uint64_t>(r->decode_us, 1), r->blocks,
+               r->max_decode_us / 1e3, crc);
     } else {
       lg::info("[io] {}: {} B in {} reads, {:.0f} ms ({:.1f} MB/s), uncompressed{}", fd->fr->name,
                fd->io_bytes, fd->io_reads, s_total * 1e3, fd->io_bytes / 1e6 / s_total, crc);
@@ -247,7 +252,10 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
     // (AI-assisted) debug: the CRC of what the game got, compared with the file's at FS_Close
     if (real_size == 0) {
       // past the end (the DGO loader asks for one more page)
-    } else if (offset_into_file == fd->crc_next) {
+    } else if (fd->io_reads == 0 || offset_into_file == fd->crc_next) {
+      if (fd->io_reads == 0) {
+        fd->crc_start = fd->crc_next = offset_into_file;  // a WAD is read from its entry on
+      }
       fd->crc = iso_cz::crc32_update(fd->crc, buffer, real_size);
       fd->crc_next += real_size;
     } else {

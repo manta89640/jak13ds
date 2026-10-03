@@ -16,11 +16,18 @@
  *     bytes, stored as is when that is its full (uncompressed) length
  *   blocks
  *
+ * Codec 3 (zstd + ADPCM split, for the VAGWAD voice streams): the file is PS2 ADPCM, 16-byte
+ * frames of 2 header bytes (shift/filter, flags) + 14 bytes of sample nibbles. A block is stored
+ * as u32 n, then a zstd frame (n bytes) of all its frames' header bytes, then a zstd frame of all
+ * their nibble bytes (+ the block's bytes past its last whole frame): each stream compresses much
+ * better alone (~0.67 of the original vs 0.72 for plain zstd).
+ *
  * The decoder is shared by the game (fake_iso) and the host tool (platform/3ds/tools/iso_pack.cpp).
  */
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <vector>
 
 namespace iso_cz {
@@ -30,7 +37,13 @@ constexpr const char* kSuffix = ".ogz";
 constexpr uint8_t kVersion = 1;
 constexpr uint32_t kHeaderSize = 32;
 
-enum Codec : uint8_t { CODEC_LZ4 = 1, CODEC_ZSTD = 2 };
+enum Codec : uint8_t { CODEC_LZ4 = 1, CODEC_ZSTD = 2, CODEC_ZSTD_ADPCM = 3 };
+
+// ADPCM frame split (codec 3): frames = n / 16
+// split: headers[2 * frames], rest[n - 2 * frames] <- data[n]
+void adpcm_split(const uint8_t* data, uint32_t n, uint8_t* headers, uint8_t* rest);
+// join in place: data[2 * frames ...] holds rest, headers elsewhere -> data[n]
+void adpcm_join_in_place(uint8_t* data, uint32_t n, const uint8_t* headers);
 
 struct Header {
   char magic[4];
@@ -58,7 +71,9 @@ class Reader {
  public:
   ~Reader();
   // takes ownership of fp (positioned anywhere). False (and fp closed) if it isn't a valid .ogz.
-  bool open(FILE* fp);
+  // With a path, the block index is kept for the next open of the same file (the voice WAD is
+  // opened for every line of dialogue).
+  bool open(FILE* fp, const char* path = nullptr);
   uint32_t size() const { return m_hdr.size; }
   uint32_t expected_crc32() const { return m_hdr.crc32; }
   const Header& header() const { return m_hdr; }
@@ -71,18 +86,21 @@ class Reader {
   uint64_t out_bytes = 0;   // decoded bytes given out
   uint64_t sd_us = 0;       // time in fread
   uint64_t decode_us = 0;   // time in the decoder
+  uint32_t blocks = 0;        // blocks decoded
+  uint64_t max_decode_us = 0;  // slowest block
 
  private:
   bool load_block(uint32_t block, uint8_t* dst);
   bool read_at(uint32_t pos, void* dst, uint32_t len);
   FILE* m_fp = nullptr;
   Header m_hdr{};
-  std::vector<uint32_t> m_offsets;
+  std::shared_ptr<const std::vector<uint32_t>> m_index;
+  const uint32_t* m_offsets = nullptr;
   uint32_t m_pos = 0;          // file position of m_fp
   uint8_t* m_cbuf = nullptr;   // one compressed block
   uint8_t* m_cache = nullptr;  // one decoded block, for reads that don't cover whole blocks
   int64_t m_cache_block = -1;
-  void* m_dctx = nullptr;      // zstd
+  uint8_t* m_hbuf = nullptr;   // codec 3: one block's frame headers
 };
 
 }  // namespace iso_cz

@@ -35,6 +35,8 @@
 #            in --compress-cache (default build-3ds/iso-ogz-<codec>) until its source changes.
 #   --compress-types "DGO CGO ..."  extensions to compress (default: DGO CGO VIS TXT STR).
 #            Never SBK/MUS (the sound loader reads those itself) or the VAGWAD audio streams.
+#   --compress-vag  also the VAGWAD.* voice streams (all languages), as zstd + ADPCM frame split
+#            in 16 KB blocks (~0.67 of the size; works with or without --compress)
 #   --compress-cache DIR
 #   --io-checksum  io_checksum = on: log the CRC-32 of each big file the game read (debug)
 #
@@ -60,6 +62,7 @@ RENDER_INI=""
 COMPRESS=""
 COMPRESS_TYPES="DGO CGO VIS TXT STR"
 COMPRESS_CACHE=""
+COMPRESS_VAG=0
 IO_CHECKSUM=0
 
 while [ $# -gt 0 ]; do
@@ -81,6 +84,7 @@ while [ $# -gt 0 ]; do
     --compress) COMPRESS=lz4; if [ $# -gt 1 ] && [[ "$2" =~ ^(lz4|zstd)$ ]]; then COMPRESS="$2"; shift; fi; shift ;;
     --compress-types) COMPRESS_TYPES="$2"; shift 2 ;;
     --compress-cache) COMPRESS_CACHE="$2"; shift 2 ;;
+    --compress-vag) COMPRESS_VAG=1; shift ;;
     --io-checksum) IO_CHECKSUM=1; shift ;;
     *) echo "unknown option $1" >&2; exit 1 ;;
   esac
@@ -125,14 +129,18 @@ copy() {  # src dst: APFS clone if possible
 }
 
 # (AI-assisted) --compress: X.ogz for the chosen types, made by iso_pack (built here) into the cache
-compressed_type() {  # file name -> 0 if its extension is in COMPRESS_TYPES
+file_codec() {  # file name -> the iso_pack codec to store it with, or nothing
   local ext="${1##*.}" t
   ext="$(echo "$ext" | tr '[:lower:]' '[:upper:]')"
-  case "$ext" in SBK|MUS|ENG|FRE|GER|ITA|JAP|SPA|AYB) return 1 ;; esac
-  for t in $COMPRESS_TYPES; do [ "$ext" = "$t" ] && return 0; done
-  return 1
+  case "$1" in
+    VAGWAD.*) [ "$COMPRESS_VAG" = 1 ] && echo zstd-adpcm; return ;;
+  esac
+  [ -n "$COMPRESS" ] || return
+  case "$ext" in SBK|MUS|AYB) return ;; esac
+  for t in $COMPRESS_TYPES; do [ "$ext" = "$t" ] && echo "$COMPRESS" && return; done
 }
-if [ -n "$COMPRESS" ]; then
+compressed_type() { [ -n "$(file_codec "$1")" ]; }
+if [ -n "$COMPRESS" ] || [ "$COMPRESS_VAG" = 1 ]; then
   PACK_DIR="$ROOT/build-host-tools"
   PACK="$PACK_DIR/iso_pack"
   PACK_SRC=("$ROOT/platform/3ds/tools/iso_pack.cpp" "$ROOT/game/overlord/common/compressed_iso_file.cpp"
@@ -142,27 +150,27 @@ if [ -n "$COMPRESS" ]; then
   for f in "${PACK_SRC[@]}"; do [ "$f" -nt "$PACK" ] && need=1; done
   if [ "$need" = 1 ]; then
     echo "building $PACK"
-    mkdir -p "$PACK_DIR/obj"
+    rm -rf "$PACK_DIR/obj"; mkdir -p "$PACK_DIR/obj"
     for f in "$ROOT"/third-party/lz4/lz4.c "$ROOT"/third-party/lz4/lz4hc.c \
              "$ROOT"/third-party/zstd/lib/common/*.c "$ROOT"/third-party/zstd/lib/compress/*.c \
              "$ROOT"/third-party/zstd/lib/decompress/*.c; do echo "$f"; done |
       xargs -P 8 -I{} sh -c 'o="$1/obj/$(basename "$(dirname "$2")")_$(basename "$2").o"; cc -O2 -c "$2" -o "$o"' _ "$PACK_DIR" {}
     c++ -O2 -std=c++17 -I"$ROOT" "${PACK_SRC[0]}" "${PACK_SRC[1]}" "$PACK_DIR"/obj/*.o -o "$PACK"
   fi
-  [ -n "$COMPRESS_CACHE" ] || COMPRESS_CACHE="$ROOT/build-3ds/iso-ogz-$COMPRESS"
+  [ -n "$COMPRESS_CACHE" ] || COMPRESS_CACHE="$ROOT/build-3ds/iso-ogz-${COMPRESS:-vag}"
   mkdir -p "$COMPRESS_CACHE"
   todo=()
   for f in "$ISO"/*; do
     b="$(basename "$f")"
     compressed_type "$b" || continue
     o="$COMPRESS_CACHE/$b.ogz"
-    if [ ! -f "$o" ] || [ "$f" -nt "$o" ]; then todo+=("$f"); fi
+    if [ ! -f "$o" ] || [ "$f" -nt "$o" ]; then todo+=("$(file_codec "$b") $f"); fi
   done
   if [ ${#todo[@]} -gt 0 ]; then
-    echo "compressing ${#todo[@]} files ($COMPRESS) into $COMPRESS_CACHE"
+    echo "compressing ${#todo[@]} files into $COMPRESS_CACHE"
     printf '%s\n' "${todo[@]}" |
-      xargs -P 8 -I{} sh -c 'b="$(basename "$3")"; "$1" --codec "$2" "$3" "$4/$b.ogz.tmp" && mv "$4/$b.ogz.tmp" "$4/$b.ogz" || { echo "iso_pack failed on $3" >&2; exit 255; }' \
-        _ "$PACK" "$COMPRESS" {} "$COMPRESS_CACHE"
+      xargs -P 8 -I{} sh -c 'c="${2%% *}"; f="${2#* }"; b="$(basename "$f")"; bs=0xc000; [ "$c" = zstd-adpcm ] && bs=0x4000; "$1" --codec "$c" --block-size $bs "$f" "$3/$b.ogz.tmp" && mv "$3/$b.ogz.tmp" "$3/$b.ogz" || { echo "iso_pack failed on $f" >&2; exit 255; }' \
+        _ "$PACK" {} "$COMPRESS_CACHE"
   fi
 fi
 
@@ -174,7 +182,7 @@ bytes_in=0
 bytes_out=0
 for f in "$ISO"/*; do
   b="$(basename "$f")"
-  if [ -n "$COMPRESS" ] && compressed_type "$b"; then
+  if compressed_type "$b"; then
     copy "$COMPRESS_CACHE/$b.ogz" "$DATA/out/jak1/iso/"
     bytes_in=$((bytes_in + $(stat -f %z "$f")))
     bytes_out=$((bytes_out + $(stat -f %z "$COMPRESS_CACHE/$b.ogz")))
@@ -183,8 +191,10 @@ for f in "$ISO"/*; do
   fi
   n=$((n + 1))
 done
-if [ -n "$COMPRESS" ]; then
-  echo "compressed ($COMPRESS): $bytes_in -> $bytes_out bytes ($COMPRESS_TYPES)"
+if [ -n "$COMPRESS" ] || [ "$COMPRESS_VAG" = 1 ]; then
+  what="${COMPRESS:+$COMPRESS: $COMPRESS_TYPES}"
+  if [ "$COMPRESS_VAG" = 1 ]; then what="${what:+$what, }zstd-adpcm: VAGWAD"; fi
+  echo "compressed: $bytes_in -> $bytes_out bytes ($what)"
 fi
 
 copy "$GK" "$BASE/gk.3dsx"
