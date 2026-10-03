@@ -192,9 +192,10 @@ void FS_SetReadHint(LoadStackEntry* fd, uint32_t end, bool stream) {
   auto* r = (iso_cz::Reader*)fd->cz;
   if (r && io_cache_on()) {
     // card reads of up to 256 KB (a voice stream: 64 KB, it reads 24 KB at a time for as long as
-    // the line lasts), while the heap has room for the window
+    // the line lasts), while the heap has room for the window (it replaces the 48 KB block
+    // buffer; the heap's level-load peak leaves ~3 MB)
     const u32 ra = (stream && !end) ? (64u << 10) : (256u << 10);
-    r->set_read_ahead(io_heap_free() >= (6u << 20) ? ra : 0);
+    r->set_read_ahead(io_heap_free() >= (2u << 20) ? ra : 0);
     r->set_read_end(end);
   }
 }
