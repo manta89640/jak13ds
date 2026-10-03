@@ -49,9 +49,30 @@ void ctr_pad_read(ctr_pad_state* out);
 int ctr_net_init(unsigned int buffer_size);
 void ctr_net_exit(void);
 
-/* Copy everything written to stdout/stderr (console) into a file as well, flushed at every
- * newline, so logs survive a crash and can be read from the SD card. Returns 0 on success. */
+/* Copy everything written to stdout/stderr (console) into a file as well, so logs can be read from
+ * the SD card. Also starts the log writer (below). Returns 0 on success. */
 int ctr_stdio_tee(const char* path);
+
+/* (AI-assisted) Asynchronous logging (config.ini log_async = on, the default; see
+ * docs/3ds-port/3ds_build.md "Screens and logs"): log text is copied into a memory buffer, and a
+ * writer thread (core 2, lowest priority) writes it to the SD card about once a second and draws
+ * the bottom screen, so the threads that log never wait for the card. Started by ctr_stdio_tee;
+ * crashes and ctr_log_sync write out what is left. */
+enum { CTR_LOG_FILE = 1, CTR_LOG_STDOUT = 2 }; /* gk.log; stdout.log and the bottom screen */
+/* 1 while the writer thread runs (lg then queues its lines with ctr_log_write) */
+int ctr_log_async(void);
+/* Queue text for `outputs`. Never waits for the SD card: when the buffer is full, the oldest text
+ * is dropped (and counted in the log). urgent: write it out soon (errors). */
+void ctr_log_write(int outputs, const char* text, unsigned int len, int urgent);
+/* The lg log file (a FILE*: gk.log) that CTR_LOG_FILE text goes to; NULL: none. */
+void ctr_log_set_file(void* file);
+/* Write out everything queued and run the queued background jobs, on the calling thread (exit,
+ * closing from the HOME Menu). Waits up to 5 s for a write in progress. */
+void ctr_log_sync(void);
+/* Run fn(arg) on the log writer thread, after the jobs queued before it (background file writes):
+ * returns 1. Without the writer (or with 16 jobs waiting) fn runs right away on the calling thread
+ * and it returns 0. Queued jobs also run in ctr_log_sync and when the app crashes. */
+int ctr_bg_run(void (*fn)(void*), void* arg);
 
 /* Thread priorities (0x18 = highest for apps, 0x3F = lowest). The 3DS scheduler never time-slices
  * threads of the same priority, so a thread that polls (the EE, the IOP kernel) must run at a
@@ -64,6 +85,7 @@ enum {
   CTR_PRIO_DECI = 0x35,     /* listener */
   CTR_PRIO_WORKER = 0x36,   /* EE background worker */
   CTR_PRIO_EE = 0x3A,       /* the game (polls on RPC / DMA) */
+  CTR_PRIO_LOG = 0x3F,      /* (AI-assisted) log writer: only runs when its core has nothing else */
 };
 /* Cores. Old 3DS: 0 (application), 1 (system core, a share of it with APT_SetAppCpuTimeLimit).
  * New 3DS: also 2 (fully available to the application) and 3. Threads can't move between cores

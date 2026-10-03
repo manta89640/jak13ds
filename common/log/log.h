@@ -39,6 +39,11 @@ namespace internal {
 void log_message(level log_level, LogTime& now, const char* message);
 void log_print(const char* message);
 void log_vprintf(const char* format, va_list arg_list);
+#ifdef __3DS__
+// (AI-assisted) whether a line at this level goes anywhere: debug lines (thousands in a level
+// load) aren't formatted when nothing would print them
+bool enabled(level log_level);
+#endif
 }  // namespace internal
 
 void set_file(const std::string& filename,
@@ -55,6 +60,11 @@ void finish();
 
 template <typename... Args>
 void log(level log_level, const std::string& format, Args&&... args) {
+#ifdef __3DS__
+  if (!internal::enabled(log_level)) {
+    return;
+  }
+#endif
   LogTime now;
 #ifdef __linux__
   gettimeofday(&now.tv, nullptr);

@@ -20,7 +20,8 @@ args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)
 listener = off             # on: Wi-Fi REPL (goalc can connect; 1 MB of RAM)
 screenshots = 0            # N: save the top screen every N frames to data/log
 pad_script =               # FILE (relative to sdmc:/3ds/jak1): scripted controller input for tests
-debug_log = off            # on: debug lines in data/log/gk.log (slow: every line is an SD card write)
+debug_log = off            # on: debug lines in data/log/gk.log (thousands in a level load; with log_async = off every line is an SD card write)
+log_async = on             # (AI-assisted) the log writer thread writes the logs about once a second (3ds_build.md "Screens and logs"); off: every thread writes its own lines, as before
 io_checksum = off          # on: log the CRC-32 of the bytes the game read from each big file (debug; "(ok)" for checked .ogz files; with it, every .ogz file gets an [io] line)
 ```
 

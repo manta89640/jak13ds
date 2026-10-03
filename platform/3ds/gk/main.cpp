@@ -77,14 +77,15 @@ int main(int /*argc*/, char** /*argv*/) {
     printf("could not use %s\n", data_dir.string().c_str());
   }
 
-  // logs on the SD card, flushed line by line so they survive crashes (read them after an
-  // emulator run: platform/3ds/tools/run_emu.sh):
+  // logs on the SD card (read them after an emulator run: platform/3ds/tools/run_emu.sh):
   //   data/log/stdout.log  everything printed to the console (GOAL output, lg at info+)
-  //   data/log/gk.log      the lg log at debug level
+  //   data/log/gk.log      the lg log at info level (debug with debug_log = on)
+  // (AI-assisted) Written by the log writer thread about once a second (ctr_stdio_tee, config.ini
+  // log_async; crashes and exits write the rest), so no thread that logs waits for the SD card.
   printf("[gk] project path %s\n", data_dir.string().c_str());
   lg::set_file("gk.log", false, false);
-  // Debug lines (thousands during level loads) only with debug_log = on in config.ini: every
-  // flush is a write to the SD card, which is slow on hardware (the emulator doesn't notice).
+  // Debug lines (thousands during level loads) only with debug_log = on in config.ini: they fill
+  // the SD card writes (and, with log_async = off, each flush is a slow write on hardware).
   const bool debug_log = ctr_config_bool("debug_log", 0) != 0;
   lg::set_file_level(debug_log ? lg::level::debug : lg::level::info);
   lg::set_stdout_level(lg::level::info);
