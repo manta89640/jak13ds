@@ -456,6 +456,8 @@ static struct {
   u32 free_len[ARENA_MAX_FREE];
   int nfree;
 } s_arena;
+/* (AI-assisted) a compact texture may be waiting to move there (migrate_small_textures) */
+static int s_small_waiting;
 
 static u32 arena_round(u32 bytes) {
   return (bytes + ARENA_ALIGN - 1) & ~(u32)(ARENA_ALIGN - 1);
@@ -1165,8 +1167,13 @@ static void raw_frame_reset(void);
 static int s_pipeline = 0;
 /* (AI-assisted) 1 MB each: the busiest jungle frames on hardware use ~450 KB of commands; a frame
  * that still runs out of room switches the pipeline off (CtrRenderer::render_frame) instead of
- * losing its last draws every frame. 2 MB each cost the linear memory a level needs. */
+ * losing its last draws every frame. 2 MB each cost the linear memory a level needs.
+ * (AI-assisted) They are the two halves of citro3d's own command buffer (C3D_Init's
+ * CMDBUF_BYTES), which citro3d only writes in frames without the pipeline: 2 MB of linear memory
+ * less. Its C3D_FrameBegin in ctr_gpu_frame_end only points gpuCmdBuf there for a moment. */
 #define PIPE_CMD_BYTES (1024 * 1024)
+_Static_assert(2 * PIPE_CMD_BYTES <= CMDBUF_BYTES, "the pipeline's buffers are halves of citro3d's");
+static void defer_linear_free(void* mem);
 static u32* s_cmdbufs[2];
 static uint8_t* s_vbufs[2];
 static int s_k;
@@ -1175,27 +1182,30 @@ int ctr_gpu_set_pipeline(int on) {
   if (!g.ready || g.in_frame) {
     return 0;
   }
-  if (on && !s_cmdbufs[1]) {
-    ctr_linear_lock();
-    s_cmdbufs[0] = (u32*)linearAlloc(PIPE_CMD_BYTES);
-    s_cmdbufs[1] = (u32*)linearAlloc(PIPE_CMD_BYTES);
-    s_vbufs[1] = (uint8_t*)linearAlloc(VBUF_BYTES);
-    ctr_linear_unlock();
-    s_vbufs[0] = g.vbuf;
-    if (!s_cmdbufs[0] || !s_cmdbufs[1] || !s_vbufs[1]) {
+  if (on && !s_pipeline) {
+    if (!s_vbufs[1]) {
       ctr_linear_lock();
-      linearFree(s_cmdbufs[0]);
-      linearFree(s_cmdbufs[1]);
-      linearFree(s_vbufs[1]);
+      s_vbufs[1] = (uint8_t*)linearAlloc(VBUF_BYTES);
       ctr_linear_unlock();
-      s_cmdbufs[0] = s_cmdbufs[1] = NULL;
-      s_vbufs[1] = NULL;
-      return 0;
+      if (!s_vbufs[1]) {
+        return 0;
+      }
     }
-  }
-  s_pipeline = on && s_cmdbufs[1];
-  if (!s_pipeline && s_vbufs[0]) {
+    s_vbufs[0] = g.vbuf;
+    s_cmdbufs[0] = __C3D_Context.cmdBuf;
+    s_cmdbufs[1] = __C3D_Context.cmdBuf + PIPE_CMD_BYTES / 4;
+    /* the frames before were citro3d's: the GPU may still read their commands from the start of
+     * the buffer the pipeline writes into next */
+    gxCmdQueueWait(&__C3D_Context.gxQueue, -1);
+    s_pipeline = 1;
+  } else if (!on && s_pipeline) {
+    /* (AI-assisted) citro3d has its buffer back: its next C3D_FrameBegin waits for the GPU before
+     * writing to it. The second vertex buffer goes once the GPU is done with the frame that used
+     * it (the next frame begin) */
+    s_pipeline = 0;
     g.vbuf = s_vbufs[0];
+    defer_linear_free(s_vbufs[1]);
+    s_vbufs[1] = NULL;
   }
   return s_pipeline;
 }
@@ -1227,6 +1237,7 @@ static struct {
   struct {
     u32 id, target;
     int buf;
+    volatile int seen; /* (AI-assisted) the callback saw it done (its slack is counted) */
   } q[PRESENT_Q];
   volatile u32 q_head, q_tail;            /* render thread writes q_tail, the callback q_head */
   volatile int buf_state[PRESENT_BUFS];   /* 0 free, 1 queued, 2 requested, 3 on screen */
@@ -1235,10 +1246,91 @@ static struct {
   volatile u32 hist[5];                   /* frames on screen for 1, 2, 3, 4, 5+ vblanks */
   volatile u32 late, dropped;
   volatile int min_slack;                 /* vblanks to spare of the frames since the last check */
+  /* (AI-assisted) frames first seen done in the vblank before their own (no vblank to spare):
+   * a running count; jit_window / jit_stats: where the window and the stats started */
+  volatile u32 just_in_time;
+  u32 jit_window, jit_stats;
+  int floor;          /* (AI-assisted) the latency doesn't go below this for floor_windows more */
+  int floor_windows;  /* windows (a late frame was at floor - 1) */
   int latency;
   u32 frames_since_change;
   double buf_wait_ms; /* the render thread waiting for a free screen buffer */
 } s_pres;
+
+/* (AI-assisted) GPU time per frame that works with the pipeline. C3D_GetDrawingTime only times
+ * from C3D_FrameEnd, and with work handed over in the middle of a frame (pipeline, overlap, the
+ * distorter's screen copy, VRAM copies) most of the frame ran before that (it read 1-3 ms in
+ * GPU-bound scenes). Here the GSP event thread notes when each frame's steady pacing fence landed
+ * (its texture copy ends with a PPF event), and the render thread when it handed the frame's first
+ * work over: GPU time(N) = done(N) - max(first(N), done(N - 1)). */
+#define GT_RING 16
+static struct {
+  volatile u32 done_id;            /* the newest frame number the fence holds */
+  volatile u64 done_tick[GT_RING]; /* when it landed, by frame number */
+  u64 first_tick[GT_RING];         /* render thread: the frame's first work handed to the GPU */
+  u32 first_id[GT_RING];
+  u32 reported; /* frames up to this one are counted (gt_collect) */
+} s_gt;
+
+/* GSP event thread (core 0, high priority): kept tiny */
+static void gt_ppf(void* unused) {
+  (void)unused;
+  svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
+  const u32 id = *(volatile u32*)s_pres.fence, last = s_gt.done_id;
+  if (id == last) {
+    return;
+  }
+  const u64 now = svcGetSystemTick();
+  /* fences that landed since the last event: done by now */
+  u32 n = (s32)(id - last) > 0 && id - last < GT_RING ? last + 1 : id;
+  for (;; n++) {
+    s_gt.done_tick[n % GT_RING] = now;
+    if (n == id) {
+      break;
+    }
+  }
+  __dmb();
+  s_gt.done_id = id;
+}
+
+/* render thread: the frame's first GPU work is handed over now (if not already) */
+static void gt_note_first(void) {
+  const u32 n = (u32)g.frame_no;
+  if (s_gt.first_id[n % GT_RING] != n) {
+    s_gt.first_tick[n % GT_RING] = svcGetSystemTick();
+    s_gt.first_id[n % GT_RING] = n;
+  }
+}
+
+/* render thread, at the frame end: the GPU time of the frames whose fence landed since the last
+ * call, into g.cur */
+static void gt_collect(void) {
+  const u32 done = s_gt.done_id;
+  __dmb();
+  if ((s32)(done - s_gt.reported) <= 0) {
+    return;
+  }
+  u32 n = s_gt.reported + 1;
+  if (done - n >= GT_RING) {
+    n = done - (GT_RING - 1);
+  }
+  for (; (s32)(done - n) >= 0; n++) {
+    if (s_gt.first_id[n % GT_RING] != n) {
+      continue; /* not noted (a frame before steady pacing started) */
+    }
+    const u64 end = s_gt.done_tick[n % GT_RING];
+    u64 start = s_gt.first_tick[n % GT_RING];
+    const u64 prev = s_gt.done_tick[(n - 1) % GT_RING]; /* (older than start if not N - 1's) */
+    if (prev > start && prev <= end) {
+      start = prev;
+    }
+    if (end > start) {
+      g.cur.gpu_busy_ms += (float)((double)(end - start) / (SYSCLOCK_ARM11 / 1000.0));
+      g.cur.gpu_busy_frames++;
+    }
+  }
+  s_gt.reported = done;
+}
 
 static void pres_vblank(void* unused) {
   (void)unused;
@@ -1264,17 +1356,27 @@ static void pres_vblank(void* unused) {
   const u32 done = *(volatile u32*)s_pres.fence;
   int pick = -1;
   while (s_pres.q_head != s_pres.q_tail) {
-    const u32 id = s_pres.q[s_pres.q_head % PRESENT_Q].id;
-    const u32 target = s_pres.q[s_pres.q_head % PRESENT_Q].target;
-    const int b = s_pres.q[s_pres.q_head % PRESENT_Q].buf;
+    const u32 qi = s_pres.q_head % PRESENT_Q;
+    const u32 id = s_pres.q[qi].id;
+    const u32 target = s_pres.q[qi].target;
+    const int b = s_pres.q[qi].buf;
     if ((s32)(id - done) > 0) {
       break; /* the GPU isn't done with it */
     }
     const s32 slack = (s32)(target - (v + 1));
-    if (slack > 0) {
-      if (slack < s_pres.min_slack) {
+    /* (AI-assisted) The vblanks a frame had to spare: its slack when it is first seen done. It
+     * used to be lowered to 0 when the frame was shown, which every frame on time is, so the
+     * latency could only go up (it stayed at 4 for whole sessions on hardware). */
+    if (!s_pres.q[qi].seen) {
+      s_pres.q[qi].seen = 1;
+      if (slack == 0) {
+        s_pres.just_in_time++;
+      }
+      if (slack >= 0 && slack < s_pres.min_slack) {
         s_pres.min_slack = slack;
       }
+    }
+    if (slack > 0) {
       break; /* too early: its vblank comes later */
     }
     if (slack < 0 && slack >= -2) {
@@ -1284,8 +1386,6 @@ static void pres_vblank(void* unused) {
       s_pres.min_slack = -1;
     } else if (slack < 0) {
       s_pres.min_slack = -1;
-    } else if (s_pres.min_slack > 0) {
-      s_pres.min_slack = 0;
     }
     if (pick >= 0) {
       s_pres.buf_state[pick] = 0; /* a newer frame is due too: skip this one */
@@ -1405,11 +1505,15 @@ static int pres_init(void) {
   s_pres.requested = s_pres.shown = -1;
   s_pres.q_head = s_pres.q_tail = 0;
   s_pres.latency = 3;
+  s_pres.floor = 2;
   s_pres.min_slack = 99;
   s_pres.vblanks = C3D_FrameCounter(0);
   s_pres.on = 1;
   /* replaces citro3d's vblank counter (C3D_FrameCounter isn't used with this on) */
   gspSetEventCallback(GSPGPU_EVENT_VBlank0, pres_vblank, NULL, false);
+  /* (AI-assisted) GPU time per frame from the fence (gt_ppf); nothing else uses this event's
+   * callback (citro3d's queue gets the event before it) */
+  gspSetEventCallback(GSPGPU_EVENT_PPF, gt_ppf, NULL, false);
   return 1;
 }
 
@@ -1472,32 +1576,44 @@ static void pres_queue_frame(void) {
     cache_flush_now(id, 16);
     GX_TextureCopy(id, 0, s_pres.fence, 0, 16, 8 /* raw copy */);
   }
-  /* the latency: up after a late frame, down after ~5 s with a vblank to spare every time */
+  /* the latency: up after a late frame. (AI-assisted) Down after a window of 150 frames (~5 s)
+   * without a late frame and with at most 2 that had no vblank to spare, but for ~30 s not below
+   * the latency that made a frame late (the floor): stepping down into a scene that needs the
+   * latency would make a late frame (a stutter) every window */
   s_pres.frames_since_change++;
   if (s_pres.late) {
     s_pres.late = 0;
     if (s_pres.latency < PRESENT_MAX_LATENCY) {
       s_pres.latency++;
     }
+    s_pres.floor = s_pres.latency;
+    s_pres.floor_windows = 6;
     s_pres.frames_since_change = 0;
+    s_pres.jit_window = s_pres.just_in_time;
     s_pres.min_slack = 99;
   } else if (s_pres.frames_since_change >= 150) {
-    if (s_pres.min_slack >= 1 && s_pres.min_slack != 99 && s_pres.latency > 2) {
+    const u32 jit = s_pres.just_in_time - s_pres.jit_window;
+    if (s_pres.floor_windows > 0 && --s_pres.floor_windows == 0) {
+      s_pres.floor = 2;
+    }
+    if (jit <= 2 && s_pres.latency > 2 && s_pres.latency > s_pres.floor) {
       s_pres.latency--;
     }
     s_pres.frames_since_change = 0;
+    s_pres.jit_window = s_pres.just_in_time;
     s_pres.min_slack = 99;
   }
   const u32 t = s_pres.q_tail;
   s_pres.q[t % PRESENT_Q].id = g.frame_no;
   s_pres.q[t % PRESENT_Q].target = s_pres.cur_release + (u32)s_pres.latency;
   s_pres.q[t % PRESENT_Q].buf = b;
+  s_pres.q[t % PRESENT_Q].seen = 0;
   __dsb();
   s_pres.q_tail = t + 1;
 }
 
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
-                          double* buffer_wait_ms) {
+                          double* buffer_wait_ms, unsigned int* just_in_time, int* floor) {
   *buffer_wait_ms = s_pres.buf_wait_ms;
   s_pres.buf_wait_ms = 0;
   for (int i = 0; i < 5; i++) {
@@ -1507,6 +1623,10 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
   *latency = s_pres.on ? s_pres.latency : -1;
   *dropped = s_pres.dropped;
   s_pres.dropped = 0;
+  const u32 jit = s_pres.just_in_time;
+  *just_in_time = jit - s_pres.jit_stats;
+  s_pres.jit_stats = jit;
+  *floor = s_pres.floor;
 }
 
 static void migrate_small_textures(void);
@@ -1577,6 +1697,7 @@ static void pipeline_frame_begin(u32 clear) {
   g.cmd_base = gpuCmdBuf;
   g.vbuf = s_vbufs[s_k];
   g.frame_no++;
+  gt_note_first(); /* (AI-assisted) the clear below starts the GPU on this frame */
   /* copies to VRAM wait for the GPU first (citro3d's safe copy outside of a frame) */
   update_pool_residency();
   C3D_FrameBuf* fb = &g.top->frameBuf;
@@ -1619,7 +1740,9 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     return;
   }
   diag_rt("frame_begin: C3D_FrameBegin (wait for GPU)");
+  const u64 wait0 = svcGetSystemTick();
   C3D_FrameBegin(0); /* waits for the GPU; the game thread already paces to vblank */
+  const float wait_ms = (float)((double)(svcGetSystemTick() - wait0) / (SYSCLOCK_ARM11 / 1000.0));
   diag_rt("frame_begin: deletes, VRAM pool copies");
   g.cmd_base = gpuCmdBuf;
   g.frame_no++;
@@ -1636,6 +1759,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     set_top_viewport();
   }
   frame_state_reset();
+  g.cur.gpu_wait_ms = wait_ms; /* (AI-assisted) (after the reset of g.cur) */
   diag_rt("draw build");
 }
 
@@ -1747,10 +1871,38 @@ void ctr_gpu_submit_partial(void) {
     raw_vc_flush();
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    gt_note_first(); /* (AI-assisted) the queue (stopped since C3D_FrameBegin) starts here */
     gxCmdQueueRun(&__C3D_Context.gxQueue);
   }
   s_partial_draws = g.cur.draws;
   s_partials++;
+}
+
+/* (AI-assisted) ctr_gpu_want_detailed_stats: the next frame end fills the detailed counts */
+static int s_detail = 0;
+void ctr_gpu_want_detailed_stats(void) {
+  s_detail = 1;
+}
+
+/* (AI-assisted) The largest block linearAlloc can give now: the free total can be split in pieces
+ * too small for a level's texture pool (chunk meshes take two allocations each). Allocation probes
+ * (~10, binary search in 64 KB steps) under the lock, once per log line. safe_linear_alloc keeps
+ * LINEAR_RESERVE free, so it reads at most the free total minus that. */
+static unsigned int linear_largest_block(void) {
+  ctr_linear_lock();
+  u32 lo = 0, hi = (u32)linearSpaceFree();
+  while (hi - lo > 64 * 1024) {
+    const u32 mid = (lo + (hi - lo) / 2) & ~0xFFFu;
+    void* p = linearAlloc(mid);
+    if (p) {
+      linearFree(p);
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  ctr_linear_unlock();
+  return lo;
 }
 
 void ctr_gpu_frame_end(void) {
@@ -1767,7 +1919,10 @@ void ctr_gpu_frame_end(void) {
      * this frame from our buffer with citro3d (display transfer, buffer swap) */
     u32* buf = gpuCmdBuf;
     const u32 size = gpuCmdBufSize, offset = gpuCmdBufOffset;
+    const u64 wait0 = svcGetSystemTick();
     C3D_FrameBegin(0);
+    g.cur.gpu_wait_ms =
+        (float)((double)(svcGetSystemTick() - wait0) / (SYSCLOCK_ARM11 / 1000.0));
     process_pending_deletes(1);
     GPUCMD_SetBuffer(buf, size, offset);
     C3D_FrameDrawOn(g.top);
@@ -1779,34 +1934,45 @@ void ctr_gpu_frame_end(void) {
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
   diag_rt("frame_end: C3D_FrameEnd (submit)");
+  gt_note_first(); /* (AI-assisted) without the pipeline the queue starts here (or at a partial) */
   C3D_FrameEnd(GX_CMDLIST_FLUSH);
   diag_rt("frame_end: stats");
   g.in_frame = 0;
   if (g.screenshot_state == 1) {
     g.screenshot_state = 2;
   }
-  int count = 0;
-  unsigned bytes = 0;
-  for (int i = 0; i < MAX_TEXTURES; i++) {
-    const TexSlot* t = &g.textures[i];
-    if (t->used) {
-      count++;
-      bytes += t->tex.size;
-      if (t->compact) {
-        g.cur.compact_textures++;
-        g.cur.compact_bytes += t->tex.size;
-        g.cur.compact_in_vram += t->arena_off >= 0;
-        g.cur.radial_textures += t->radial >= 0;
+  gt_collect();
+  g.cur.vbuf_used = (unsigned int)g.vbuf_used;
+  g.cur.vbuf_size = VBUF_BYTES;
+  /* (AI-assisted) The counts over all 2048 texture slots and the free memory (the allocators walk
+   * their free lists) only when they are logged (ctr_gpu_want_detailed_stats), not every frame */
+  if (s_detail) {
+    s_detail = 0;
+    g.cur.detailed = 1;
+    int count = 0;
+    unsigned bytes = 0;
+    for (int i = 0; i < MAX_TEXTURES; i++) {
+      const TexSlot* t = &g.textures[i];
+      if (t->used) {
+        count++;
+        bytes += t->tex.size;
+        if (t->compact) {
+          g.cur.compact_textures++;
+          g.cur.compact_bytes += t->tex.size;
+          g.cur.compact_in_vram += t->arena_off >= 0;
+          g.cur.radial_textures += t->radial >= 0;
+        }
       }
     }
+    g.cur.textures = count;
+    g.cur.tex_bytes = bytes;
+    g.cur.linear_free = (unsigned int)linearSpaceFree();
+    g.cur.vram_free = (unsigned int)vramSpaceFree();
+    g.cur.linear_largest = linear_largest_block();
   }
-  g.cur.textures = count;
-  g.cur.tex_bytes = bytes;
   /* times of the last frame the GPU finished (the one before this) */
   g.cur.gpu_ms = C3D_GetProcessingTime();
   g.cur.draw_ms = C3D_GetDrawingTime();
-  g.cur.linear_free = (unsigned int)linearSpaceFree();
-  g.cur.vram_free = (unsigned int)vramSpaceFree();
   g.cur.vram_textures = g.vram_textures;
   g.cur.vram_copy_failures = g.vram_copy_failures;
   for (int i = 0; i < MAX_POOLS; i++) {
@@ -2658,6 +2824,7 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
   t->radial = -1;
   t->arena_off = -1;
   t->want_vram = s_arena.base != NULL;
+  s_small_waiting |= t->want_vram;
   if ((flags & CTR_TEX_CHECK_RADIAL) && gray && !opaque) {
     u32 lut[RADIAL_LUT];
     int k = 0;
@@ -2691,7 +2858,9 @@ int ctr_gpu_tex_radial(int handle) {
 #define SMALL_BATCH_BYTES (64 * 1024)
 #define SMALL_BATCH_MAX 32
 static void migrate_small_textures(void) {
-  if (!s_arena.base) {
+  /* (AI-assisted) s_small_waiting: a compact texture may wait (set when one is made); the scan of
+   * all 2048 slots ran every frame */
+  if (!s_arena.base || !s_small_waiting) {
     return;
   }
   static int scan = 0;
@@ -2721,6 +2890,7 @@ static void migrate_small_textures(void) {
   }
   scan = (scan + k) % MAX_TEXTURES;
   if (!npick) {
+    s_small_waiting = 0; /* all slots looked at: none waits */
     return;
   }
   const int off = arena_alloc(total);
@@ -3542,13 +3712,22 @@ static void draw_immediate(const ctr_draw_state* state, int prog, uint8_t* dst, 
   g.cur.triangles += count / 3;
 }
 
+/* (AI-assisted) room for bytes more in this frame's vertex buffer; a draw that doesn't fit is
+ * dropped (the buffer is reset every frame) and counted */
+static int vbuf_room(size_t bytes) {
+  if (g.vbuf_used + bytes > VBUF_BYTES) {
+    g.cur.vbuf_dropped++;
+    return 0;
+  }
+  return 1;
+}
+
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
   if (!g.ready || !g.in_frame || count < 3) {
     return;
   }
   size_t bytes = (size_t)count * sizeof(ctr_vertex);
-  if (g.vbuf_used + bytes > VBUF_BYTES) {
-    /* out of vertex space this frame: drop the draw (the buffer is reset every frame) */
+  if (!vbuf_room(bytes)) {
     return;
   }
   if (!cmd_room()) {
@@ -3565,7 +3744,7 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
     return;
   }
   size_t bytes = (size_t)count * sizeof(ctr_clip_vertex);
-  if (g.vbuf_used + bytes > VBUF_BYTES || !cmd_room()) {
+  if (!vbuf_room(bytes) || !cmd_room()) {
     return;
   }
   uint8_t* dst = g.vbuf + g.vbuf_used;
@@ -3581,7 +3760,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
     return;
   }
   size_t bytes = (size_t)count * sizeof(ctr_clip_vertex2);
-  if (g.vbuf_used + bytes > VBUF_BYTES || !cmd_room()) {
+  if (!vbuf_room(bytes) || !cmd_room()) {
     return;
   }
   uint8_t* dst = g.vbuf + g.vbuf_used;
@@ -3653,7 +3832,7 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
   while (quad_count > 0) {
     const int n = quad_count > QUAD_MAX ? QUAD_MAX : quad_count;
     const size_t bytes = (size_t)n * 4 * sizeof(ctr_vertex);
-    if (g.vbuf_used + bytes > VBUF_BYTES || !cmd_room()) {
+    if (!vbuf_room(bytes) || !cmd_room()) {
       return;
     }
     uint8_t* dst = g.vbuf + g.vbuf_used;

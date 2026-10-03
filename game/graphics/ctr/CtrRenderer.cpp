@@ -65,6 +65,11 @@ const ProfileMode kProfileModes[] = {
 constexpr int kProfileModeCount = sizeof(kProfileModes) / sizeof(kProfileModes[0]);
 constexpr double kProfileModeMs = 2500.0;  // per mode
 constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
+// (AI-assisted) the render thread's statistics: one burst of lines this often
+constexpr double kStatsPeriodMs = 15000.0;
+// (AI-assisted) config.ini gpu_counters: how long each level's GPU counters run (the hotspot
+// sampler's 16-bit counts hold ~16 s at 268 MHz)
+constexpr double kHwCountersMs = 10000.0;
 
 // (AI-assisted) gpu_profile: the GPU's own counters over the first "all" window of a level's
 // profile (ctr_gpu_hwprof_begin / end), one log line. Azahar likely reads zeros.
@@ -313,9 +318,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
   }
   const double t0 = ctr_gpu_time_ms();
-  m_rs.log_now = m_rs.frame_idx % 300 == 0 || t0 - m_rs.last_log_ms > 5000.0;
+  // (AI-assisted) one burst every 15 s: it was every 300 frames or 5 s, two conditions that
+  // fired close together (double bursts, which stalled the render thread while logging was
+  // synchronous)
+  m_rs.log_now = m_rs.last_log_ms == 0 || t0 - m_rs.last_log_ms >= kStatsPeriodMs;
   if (m_rs.log_now) {
     m_rs.last_log_ms = t0;
+    ctr_gpu_want_detailed_stats();  // texture slots and free memory: only for these lines
   }
   memcpy(m_rs.fog_color, clear, 4);
   // (AI-assisted) Always clear to the fog color, also when the sky draws: where nothing covers
@@ -372,7 +381,17 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
+  m_timing.gpu_wait_ms += gs.gpu_wait_ms;
+  m_timing.gpu_busy_ms += gs.gpu_busy_ms;
+  m_timing.gpu_busy_frames += gs.gpu_busy_frames;
+  m_timing.triangles += gs.triangles;
+  m_timing.vbuf_peak = std::max(m_timing.vbuf_peak, gs.vbuf_used);
+  m_timing.vbuf_size = gs.vbuf_size;
+  m_timing.vbuf_dropped += gs.vbuf_dropped;
   m_timing.frames++;
+  if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
+    hw_counters_frame();
+  }
   if (ctr_settings().gpu_profile) {
     if (!m_profile_active && !m_profile_level.empty() && ctr_gpu_time_ms() >= m_profile_arm_ms &&
         std::find(m_profiled.begin(), m_profiled.end(), m_profile_level) == m_profiled.end()) {
@@ -387,37 +406,54 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                m_profile_level);
     }
     if (m_profile_active) {
-      profile_frame(gs.draw_ms);
+      // (AI-assisted) the fence's GPU time when there is one (citro3d's misses most of a
+      // pipelined frame)
+      profile_frame(gs.gpu_busy_frames ? gs.gpu_busy_ms / gs.gpu_busy_frames : gs.draw_ms);
     }
   }
   if (m_rs.log_now) {
     const auto& vs = m_vram->stats();
-    lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (written {}), relocates skipped "
-             "{}, textures decoded {} (reused {}), gpu textures {} ({} KB), linear free {} KB, vram free {} KB ({} vram textures, {} failed copies)",
-             m_rs.frame_idx, gs.draws, gs.triangles, vs.uploads, vs.uploads_changed,
-             vs.relocates_skipped, vs.decoded, vs.revived, gs.textures, gs.tex_bytes / 1024,
-             gs.linear_free / 1024, gs.vram_free / 1024, gs.vram_textures,
-             gs.vram_copy_failures);
+    lg::debug("[ctr] frame {}: {} draws {} tris, vram uploads {} (written {}, chunks {} written, {} "
+              "already there), relocates skipped {}, textures decoded {} (reused {}), gpu "
+              "textures {} ({} KB), linear free {} KB, vram free {} KB ({} vram textures, {} "
+              "failed copies)",
+              m_rs.frame_idx, gs.draws, gs.triangles, vs.uploads, vs.uploads_changed,
+              vs.chunks_written, vs.chunks_skipped, vs.relocates_skipped, vs.decoded, vs.revived,
+              gs.textures, gs.tex_bytes / 1024, gs.linear_free / 1024, gs.vram_free / 1024,
+              gs.vram_textures, gs.vram_copy_failures);
     if (m_timing.frames) {
       const double n = m_timing.frames;
+      // (AI-assisted) gpu-wait: in C3D_FrameBegin (part of wait-gpu, or of submit with the
+      // pipeline); busy: the GPU's time per frame from the steady pacing fence (the "draw" time
+      // misses what was handed over in the middle of a frame)
+      const std::string busy =
+          m_timing.gpu_busy_frames
+              ? fmt::format("{:.2f} ({} frames)", m_timing.gpu_busy_ms / m_timing.gpu_busy_frames,
+                            m_timing.gpu_busy_frames)
+              : std::string("n/a (needs frame_pacing = steady)");
       lg::info(
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
-          "(cpu total {:.2f}); gpu {:.2f} (draw {:.2f}); {:.0f} draws, {:.0f} texture binds, "
-          "{:.0f} KB commands{}",
+          "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
+          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands; vertex buffer peak "
+          "{} of {} KB{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
-          (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n, m_timing.gpu_ms / n,
-          m_timing.gpu_draw_ms / n, m_timing.draws / n, m_timing.tex_binds / n,
-          m_timing.cmd_kb / n,
+          (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
+          m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
+          m_timing.triangles / n, m_timing.draws / n, m_timing.tex_binds / n,
+          m_timing.cmd_kb / n, m_timing.vbuf_peak / 1024, m_timing.vbuf_size / 1024,
+          m_timing.vbuf_dropped
+              ? fmt::format(", {} draws DROPPED (vertex buffer full)", m_timing.vbuf_dropped)
+              : std::string(),
           m_timing.dropped ? fmt::format(", {} draws DROPPED (command buffer full)",
                                          m_timing.dropped)
                            : std::string());
-      lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB, "
-               "VRAM free {} KB; {} compact textures {} KB ({} in reserved VRAM, {} radial); "
-               "last frame: {} early depth draws, {} proctex draws",
+      lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
+               "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
-               gs.linear_free / 1024, gs.vram_free / 1024, gs.compact_textures,
-               gs.compact_bytes / 1024, gs.compact_in_vram, gs.radial_textures,
-               gs.early_depth_draws, gs.proctex_draws);
+               gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
+               gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
+               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
@@ -460,6 +496,32 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
     rs.next_bucket = base + 16 * (id + 1);
     DmaFollower dma(ee_mem, base + 16 * id);
     merc->snapshot_bones(dma, rs);
+  }
+}
+
+void CtrRenderer::hw_counters_frame() {
+  // (AI-assisted) The GPU's own counters (ctr_gpu_hwprof_*: busy % of each pipeline stage, memory
+  // traffic; read and written through the GSP service) over kHwCountersMs of each level, from when
+  // gpu_profile would start (10 s after the level became the active one). Nothing is left out of
+  // the picture. A level change in the middle logs what was measured so far.
+  const double now = ctr_gpu_time_ms();
+  if (m_hw_active) {
+    if (m_profile_level != m_hw_level || now - m_hw_start_ms >= kHwCountersMs) {
+      hw_profile_end(m_hw_level);
+      m_hw_active = false;
+      m_hw_done.push_back(m_hw_level);
+    }
+    return;
+  }
+  if (!m_profile_level.empty() && now >= m_profile_arm_ms &&
+      std::find(m_hw_done.begin(), m_hw_done.end(), m_profile_level) == m_hw_done.end()) {
+    hw_profile_begin();
+    m_hw_level = m_profile_level;
+    m_hw_start_ms = now;
+    m_hw_active = g_hw_measuring;
+    if (!m_hw_active) {
+      m_hw_done.push_back(m_hw_level);  // the GSP refused (logged once)
+    }
   }
 }
 
@@ -799,11 +861,15 @@ void ctr_send_chain(const void* data, u32 offset) {
     int latency;
     unsigned int dropped;
     double buf_wait;
-    ctr_gpu_pacing_stats(hist, &latency, &dropped, &buf_wait);
+    unsigned int just_in_time;
+    int floor;
+    ctr_gpu_pacing_stats(hist, &latency, &dropped, &buf_wait, &just_in_time, &floor);
     if (latency >= 0) {
       lg::info("[ctr] pacing: frames on screen for 1/2/3/4/5+ vblanks: {}/{}/{}/{}/{}, latency {} "
-               "vblanks, {} skipped, {:.0f} ms waiting for a screen buffer",
-               hist[0], hist[1], hist[2], hist[3], hist[4], latency, dropped, buf_wait);
+               "vblanks (not below {} for now), {} frames done just in time, {} skipped, {:.0f} "
+               "ms waiting for a screen buffer",
+               hist[0], hist[1], hist[2], hist[3], hist[4], latency, floor, just_in_time, dropped,
+               buf_wait);
     }
     const double last = g_ee.last_send;
     g_ee = EeTiming();

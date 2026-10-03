@@ -57,7 +57,7 @@ max_sprites = 1000         # world particles per frame
 ocean = on                 # the ocean: off, flat (= on, static grid), waves (+ waves near the camera), full (the PS2 ocean: the game builds its DMA, more CPU on both threads, see 3ds_build.md)
                            # (AI-assisted) waves: a 3 m grid out to ~45 m around the camera moves with the game's own wave heights (what boats and floating things ride), crests brighter, plus a second scrolling wave texture over all of the ocean. ~0.1 ms render thread CPU, a few hundred microseconds of GPU. Log line: [ctr] ocean waves. With depth16 (no stencil) the flat ocean beyond is lowered by the deepest trough
 fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 60: up to 60
-frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing
+frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing. (AI-assisted) The latency (2-4 vblanks) goes up after a late frame and down after ~5 s without one and with at most 2 frames done just in time, but for ~30 s not below the latency a frame was late at
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color
 overlap = off              # on: the GPU starts drawing each part of a frame while the CPU builds the rest (experimental)
 pipeline = off             # on: the CPU builds the next frame while the GPU draws this one (experimental; works with overlap)
@@ -95,6 +95,7 @@ fast_clock = on            # steady_clock from the system tick without divides. 
 
 # ---- measuring ----
 gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers); also logs the GPU's own counters once per level (`[ctr] gpu profile <level>: hw busy % ...`: which pipeline stage is busy, and memory traffic per frame; zeros in Azahar)
+gpu_counters = on          # (AI-assisted) the GPU's own counters over 10 s of each level, 10 s after it started, with nothing left out of the picture: the same `[ctr] gpu profile <level>: hw busy % ...` line (read through the GSP service, no extra system calls). off: not measured
 ```
 
 ## Recommended settings

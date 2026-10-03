@@ -34,7 +34,7 @@ struct CtrRenderState {
   u32 default_regs_buffer = 0;
   CtrVram* vram = nullptr;
   u64 frame_idx = 0;
-  bool log_now = false;  // print statistics this frame (every 300 frames or 5 seconds)
+  bool log_now = false;  // print statistics this frame ((AI-assisted) every 15 seconds)
   double last_log_ms = 0;
   u8 fog_color[4] = {0, 0, 0, 0};  // from the default GS registers (also the clear color)
   bool call_vif_callback = true;  // not from the render thread: it runs GOAL code
@@ -116,6 +116,14 @@ class CtrRenderer {
     int dropped = 0;
     int tex_binds = 0;
     int draws = 0;
+    // (AI-assisted) see ctr_gpu_stats: waiting for the GPU in C3D_FrameBegin, the GPU time of the
+    // frames measured by the steady pacing fence, triangles, the vertex buffer's busiest frame
+    double gpu_wait_ms = 0;
+    double gpu_busy_ms = 0;
+    int gpu_busy_frames = 0;
+    double triangles = 0;
+    unsigned int vbuf_peak = 0, vbuf_size = 0;
+    int vbuf_dropped = 0;
   };
   CtrVram& vram() { return *m_vram; }
   CtrLevels& levels() { return *m_levels; }
@@ -155,6 +163,13 @@ class CtrRenderer {
   double m_profile_arm_ms = 0;            // when its measurement may start
   std::vector<std::string> m_profiled;    // levels measured already
   bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
+  // (AI-assisted) config.ini gpu_counters: the GPU's own counters over 10 s of each level, with
+  // everything drawn (gpu_profile measures them in its own way)
+  void hw_counters_frame();
+  bool m_hw_active = false;
+  std::string m_hw_level;
+  double m_hw_start_ms = 0;
+  std::vector<std::string> m_hw_done;
 };
 
 extern const GfxRendererModule gRendererCtr;

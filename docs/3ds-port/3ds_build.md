@@ -48,6 +48,11 @@ cp build-3ds/jak1.cia /Volumes/3DS/cias/              # any folder FBI can brows
 
 On the card: `3ds/jak1/gk.3dsx`, `3ds/jak1/data/out/jak1/iso/*` (~1.3 GB), `3ds/jak1/data/out/jak1/c3l/*`.
 
+`make_cia.sh` refuses to package a build that only a real 3DS would reject (AI-assisted): vertex
+shaders that leave output components unwritten (`check_shaders.py`), and system calls missing from
+the RSF's `SystemCallAccess` list (`check_svc.py`: the `svc` numbers in the ELF's disassembly; on
+hardware such a call raises an exception, Azahar ignores the list).
+
 **Compressed game files** (AI-assisted, optional): `stage_sd.sh --compress` (LZ4, the default) or
 `--compress zstd` stores the DGO, CGO, VIS, TXT and STR files as `X.ogz`, compressed in 48 KB
 blocks (`game/overlord/common/compressed_iso_file.h`). The game decodes them on its file reader
@@ -577,10 +582,15 @@ platform/3ds/tools/run_emu.sh --seconds 150
   | `mipmaps` | on | mip levels of the level textures (c3l v8): `off`, `on` (nearest level), `trilinear` (blends two levels: smoother, slower) |
   | `gpu_profile` | off | every 2.5 s one group of renderers (level, merc + eyes, sprites, ocean, direct) is left out and `[ctr] gpu profile:` logs what each costs the GPU. The picture flickers |
 
-- **Timing in the log:** every 300 frames or 5 seconds, `[ctr] render ms/frame` (render thread:
-  waiting for the GPU, building commands, submitting; GPU time from citro3d), `[ctr] build
-  ms/frame by renderer`, and `[ctr] game thread ms/frame` (logic, waiting for the render thread,
-  vsync, texture uploads, bone snapshot).
+- **Timing in the log:** every 15 seconds (AI-assisted; it was every 300 frames or 5 seconds),
+  `[ctr] render ms/frame` (render thread: waiting for the GPU, building commands, submitting;
+  `gpu-wait`: the wait in C3D_FrameBegin; `busy`: the GPU's time per frame from the steady pacing
+  fence, right with `pipeline = on`, unlike citro3d's `draw`; triangles; the vertex buffer's
+  busiest frame), `[ctr] build ms/frame by renderer`, `[ctr] textures` (with the largest free
+  linear block: a level's texture pool needs one piece), and every 300 frames or 5 seconds
+  `[ctr] game thread ms/frame` (logic, waiting for the render thread, vsync, texture uploads, bone
+  snapshot) and `[ctr] pacing`. `gpu_counters` logs the GPU's own counters once per level
+  (`[ctr] gpu profile <level>: hw busy % ...`).
 - **Status in Azahar (New 3DS), old numbers from M4 phase 1:** the title screen shows village1 (tfrag + tie) and the PRESS
   START text.
   - About 1250 draws and 103k triangles per frame (the title camera sees nearly the whole level).

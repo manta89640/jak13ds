@@ -1020,14 +1020,17 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
 void ctr_gpu_set_steady_pacing(int) {}
 void ctr_gpu_note_release(void) {}
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
-                          double* buffer_wait_ms) {
+                          double* buffer_wait_ms, unsigned int* just_in_time, int* floor) {
   *buffer_wait_ms = 0;
   for (int i = 0; i < 5; i++) {
     hist[i] = 0;
   }
   *latency = -1;
   *dropped = 0;
+  *just_in_time = 0;
+  *floor = 0;
 }
+void ctr_gpu_want_detailed_stats(void) {}
 void ctr_gpu_set_proctex(int) {}
 void ctr_gpu_set_compact_textures(int) {}
 int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int /*flags*/) {
