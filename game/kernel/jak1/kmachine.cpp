@@ -427,7 +427,10 @@ u64 kopen(u32 fs, u32 name, u32 mode) {
   file_stream->mode = mode;
   file_stream->name = name;
   file_stream->flags = 0;
+#ifndef __3DS__
+  // (AI-assisted) 3DS: not there (the settings parser opens files at boot and at every autosave)
   lg::print("****** CALL TO kopen() ******\n");
+#endif
   // sprintf(buffer, "host:%s", Ptr<String>(name)->data());
   if (!strcmp(info(Ptr<Symbol>(mode))->str->data(), "read")) {
     file_stream->file = sceOpen(Ptr<String>(name)->data(), SCE_RDONLY);
