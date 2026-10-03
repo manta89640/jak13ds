@@ -47,8 +47,11 @@ draw_distance = 500        # meters; level chunks further away are not drawn (0 
 fog_start = 0.6            # the extra fog towards draw_distance starts at this fraction of it
 fog = on                   # the game's own distance fog
 lod_distance = 200         # meters; detailed tfrag up to here, the coarse version beyond (0 = always detailed)
-far_level_distance = 40    # meters; a level seen from a neighbouring one is drawn with only its low resolution version (0 = off)
-detail_scale = 1           # multiplies the draw distance of small and medium objects and shrubs
+far_level_distance = 80    # meters; a level seen from a neighbouring one is drawn with only its low resolution version (0 = off). (AI-assisted) Was 40: its objects popped in at 40 m. With chunk kinds (see below) it also keeps its ties without a distance limit (houses, towers, big rocks) in that mode
+detail_scale = 1           # multiplies the draw distance of small and medium objects and shrubs (all of them, also with the two keys below)
+shrub_distance = 50        # (AI-assisted) meters; shrubs (grass, bushes, flowers) up to here (0 = the converter's 100 m). They are most of the GPU's work in village2, rolling, ogre and swamp (200-300k triangles within 100 m)
+tie_distance_scale = 1.5   # (AI-assisted) multiplies the converter's draw distance of small and medium objects (ties: 100 m and 300 m); the big ones have no limit
+                           # shrub_distance, tie_distance_scale and the far mode ties need .c3l files with chunk kinds (the current converter); with older files only detail_scale applies
 
 # ---- what is drawn ----
 merc = on                  # characters and objects
@@ -104,8 +107,8 @@ gpu_profile = off          # every 2.5 s leaves out one group of renderers and l
 - **Real New 3DS (default):** no file needed. If the frame rate is low, run once with
   `gpu_profile = on` and look for `[ctr] gpu profile: all X ms, level Y, merc Z, sprites ...` in
   the log: it shows which group costs the GPU the most. Then:
-  - level expensive: lower `draw_distance` (e.g. 300) and `lod_distance` (e.g. 120), or
-    `detail_scale = 0.7`;
+  - level expensive: lower `shrub_distance` (e.g. 35), `draw_distance` (e.g. 300) and
+    `lod_distance` (e.g. 120), or `detail_scale = 0.7`;
   - sprites expensive: `max_sprites = 500`;
   - turn off `distort` or `envmap` to see what they cost.
   Keep `mipmaps = on` and `vram_textures = auto`: without them the GPU reads full size textures
@@ -115,7 +118,8 @@ gpu_profile = off          # every 2.5 s leaves out one group of renderers and l
   with VRAM off the emulator needed ~4 MB more linear memory than the 3DS and levels didn't fit). Azahar doesn't
   model the GPU's speed, so frame rates there say nothing about the GPU on hardware.
 - **Best looking:** `mipmaps = trilinear` (smoother far textures, a little slower),
-  `sprite_max_size = 0`, `merc_lod_scale = 1`.
+  `sprite_max_size = 0`, `merc_lod_scale = 1`, `shrub_distance = 0` (shrubs to 100 m: slower in
+  village2 and rolling).
 - **3DS hardware features:** all on by default except `early_depth` and `color16`. The log line `[ctr] textures: ...` shows the
   compact textures (and how many are in the reserved VRAM, how many are radial glows) and the
   last frame's early depth and procedural texture draws; `[ctr] l0-tfrag: visibility hid ...`

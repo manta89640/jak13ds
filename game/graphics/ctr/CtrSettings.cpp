@@ -89,6 +89,10 @@ CtrSettings load() {
       s.far_level_distance = f;
     } else if (key == "detail_scale") {
       s.detail_scale = f;
+    } else if (key == "shrub_distance") {
+      s.shrub_distance = std::max(0.f, f);
+    } else if (key == "tie_distance_scale") {
+      s.tie_distance_scale = std::max(0.f, f);
     } else if (key == "merc") {
       s.merc = parse_bool(v);
     } else if (key == "sprites") {
@@ -186,12 +190,14 @@ CtrSettings load() {
 
 std::string CtrSettings::summary() const {
   return fmt::format(
-      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) "
+      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {:.0f}m tie x{:.1f} fog {} "
+      "merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}",
-      draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
+      draw_distance, lod_distance, far_level_distance, detail_scale, shrub_distance,
+      tie_distance_scale, fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",

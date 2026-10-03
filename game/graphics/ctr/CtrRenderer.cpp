@@ -876,6 +876,13 @@ bool ctr_level_ready(const char* name) {
   };
   static std::map<std::string, Wait> waiting_since;
   const std::string n(name);
+  // (AI-assisted) a parked prefetch the game gave up on holds memory (the loader waits for it to
+  // go), or the loader ran out of memory: the render thread sees to it at its next frame, but the
+  // game may wait here without drawing frames (both level slots empty: it loads in a loop)
+  if (g_ctr->levels().needs_service()) {
+    wait_render_idle();
+    g_ctr->levels().service();
+  }
   if (g_ctr->levels().ready(n)) {
     waiting_since.erase(n);
     return true;

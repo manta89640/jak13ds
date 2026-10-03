@@ -103,6 +103,8 @@ struct Chunk {
   uint32_t kind;  // (AI-assisted) what the chunk holds: CHUNK_KIND_* (0 in older files: unknown)
 };
 static_assert(sizeof(Chunk) == 80);
+// (AI-assisted) Chunk::kind
+constexpr uint32_t CHUNK_KIND_UNKNOWN = 0, CHUNK_KIND_TFRAG = 1, CHUNK_KIND_TIE = 2, CHUNK_KIND_SHRUB = 3;
 
 // (AI-assisted) Chunk::kind
 constexpr uint32_t CHUNK_KIND_UNKNOWN = 0, CHUNK_KIND_TFRAG = 1, CHUNK_KIND_TIE = 2, CHUNK_KIND_SHRUB = 3;
