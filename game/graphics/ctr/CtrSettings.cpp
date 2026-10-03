@@ -138,6 +138,10 @@ CtrSettings load() {
       s.sprite_max_size = std::max(0.f, f);
     } else if (key == "vis_culling") {
       s.vis_culling = parse_bool(v);
+    } else if (key == "raw_cmds") {
+      s.raw_cmds = parse_bool(v);
+    } else if (key == "vcache_reuse") {
+      s.vcache_reuse = parse_bool(v);
     } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
@@ -157,13 +161,14 @@ std::string CtrSettings::summary() const {
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} fog {} merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} envmap {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
-      "vis_culling {}{}{}{}",
+      "vis_culling {} raw_cmds {} vcache_reuse {}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale, fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, ocean ? "on" : "off",
       sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off", rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
-      sprite_max_size, vis_culling ? "on" : "off", gpu_profile ? " gpu_profile" : "",
+      sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
+      vcache_reuse ? "on" : "off", gpu_profile ? " gpu_profile" : "",
       depth16 ? " depth16" : "", emulator ? " (emulator)" : "");
 }
 

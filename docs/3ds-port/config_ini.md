@@ -76,6 +76,8 @@ compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read
 sprite_max_size = 0.5      # world particles and glows at most this fraction of the screen height across (0 = no limit)
 vis_culling = on           # the game's own visibility data hides level parts behind walls and hills (needs .c3l v10 files)
+raw_cmds = on              # (AI-assisted) draws write their GPU commands themselves instead of through citro3d: less render thread CPU per draw, ~40% fewer command words. off: the citro3d path, for comparing
+vcache_reuse = off         # (AI-assisted) with raw_cmds: a draw with the same vertices and matrices as the one before keeps the GPU's post-vertex cache (a few command words less). Try on hardware: wrong or jumping vertices on models mean it has to stay off
 merc_lod_scale = 0.5       # characters switch to their lower detail models at this fraction of the game's distances (0.05 .. 1)
 
 # ---- measuring ----
