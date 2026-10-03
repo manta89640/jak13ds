@@ -76,21 +76,15 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 #define linearAlloc safe_linear_alloc
 #define vramAlloc safe_vram_alloc
 
-/* (AI-assisted) CPU data cache flushes for memory the GPU reads. GSPGPU_FlushDataCache is an IPC
- * round trip to the GSP service on the system core, which then makes the kernel call; here the
- * kernel call is made directly (svcFlushProcessDataCache: allowed in gk.rsf, like the
- * svcInvalidateProcessDataCache the vblank callback uses), with GSP as the fallback if the kernel
- * refuses it. Any thread. */
-static int s_svc_flush = 1;
+/* (AI-assisted) CPU data cache flushes for memory the GPU reads, through the GSP service. Not
+ * svcFlushProcessDataCache directly: it isn't in gk.rsf's SystemCallAccess, and on hardware a
+ * system call the exheader doesn't allow raises an exception instead of returning an error (the
+ * render thread died at its first flush: black top screen, the game hung after a few seconds).
+ * Azahar doesn't check the list. Any thread. */
 static void cache_flush_now(const void* addr, u32 size) {
   if (!size) {
     return;
   }
-  if (s_svc_flush &&
-      R_SUCCEEDED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)addr, size))) {
-    return;
-  }
-  s_svc_flush = 0;
   GSPGPU_FlushDataCache(addr, size);
 }
 /* a texture's texels (all levels; VRAM needs none), like C3D_TexFlush */
