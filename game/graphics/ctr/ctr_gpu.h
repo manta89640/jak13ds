@@ -219,6 +219,12 @@ void ctr_gpu_set_compact_textures(int on);
  * renderer bucket, when enough draws piled up), so the GPU draws them while the CPU builds the
  * rest of the frame. Off: the GPU starts at the end of the frame (config.ini overlap). */
 void ctr_gpu_set_overlap(int on);
+/* (AI-assisted) config.ini raw_cmds: the draws write their GPU commands themselves instead of
+ * through citro3d (much less CPU per draw, fewer command words). vcache_reuse: consecutive draws
+ * of the same vertices and matrices keep the GPU's post-vertex cache (only with raw_cmds). Both
+ * can change at any time. */
+void ctr_gpu_set_raw_cmds(int on);
+void ctr_gpu_set_vcache_reuse(int on);
 void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
@@ -273,6 +279,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
  * every chunk change. */
 typedef struct {
   float m[16];
+  uint32_t f24[12]; /* (AI-assisted) m as float24 uniform words (3DS raw draws) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,

@@ -81,6 +81,12 @@ struct CtrSettings {
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;
+  // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
+  // per draw on the render thread, fewer command words)
+  bool raw_cmds = true;
+  // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
+  // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
+  bool vcache_reuse = false;
   // running in an emulator (Azahar / Citra), for the auto defaults above
   bool emulator = false;
 

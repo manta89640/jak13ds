@@ -838,6 +838,8 @@ int ctr_gpu_tex_radial(int) {
   return 0;
 }
 void ctr_gpu_set_overlap(int) {}
+void ctr_gpu_set_raw_cmds(int) {}
+void ctr_gpu_set_vcache_reuse(int) {}
 void ctr_gpu_submit_partial(void) {}
 int ctr_gpu_set_pipeline(int) {
   return 0;

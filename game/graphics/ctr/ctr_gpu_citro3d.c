@@ -17,6 +17,7 @@
 #include <3ds.h>
 #include <citro3d.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -67,6 +68,20 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 }
 #define linearAlloc safe_linear_alloc
 #define vramAlloc safe_vram_alloc
+
+/* (AI-assisted) n words (a multiple of 4) of a and b equal: newlib's memcmp takes ~11
+ * instructions per word, this ~2 (the draws compare their matrices, bones and state) */
+typedef uint32_t __attribute__((may_alias)) alias_u32;
+static inline int words_equal(const void* a, const void* b, unsigned n) {
+  const alias_u32* x = (const alias_u32*)a;
+  const alias_u32* y = (const alias_u32*)b;
+  for (unsigned i = 0; i < n; i += 4) {
+    if ((x[i] ^ y[i]) | (x[i + 1] ^ y[i + 1]) | (x[i + 2] ^ y[i + 2]) | (x[i + 3] ^ y[i + 3])) {
+      return 0;
+    }
+  }
+  return 1;
+}
 
 #define DISPLAY_TRANSFER_FLAGS                                                              \
   (GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |        \
@@ -140,6 +155,8 @@ typedef struct {
   void* verts_alt;
   uint32_t vbytes;
   int alt_frame;
+  /* (AI-assisted) physical addresses of verts and indices (the raw draws) */
+  u32 verts_pa, indices_pa;
 } MeshSlot;
 
 enum { PROG_NONE = 0, PROG_BASIC, PROG_MESH, PROG_SKIN, PROG_SKIN_ENV, PROG_CLIP, PROG_CLIP2 };
@@ -182,7 +199,6 @@ static struct {
   int last_state_valid;
   /* last ctr_gpu_draw_mesh: mesh and matrix (invalidated by any other program use) */
   int last_mesh_valid;
-  int last_mesh;
   float last_clip[16];
   /* last ctr_gpu_draw_skinned: its matrix and lights (a model's draws share them) */
   int last_skin_valid;
@@ -488,11 +504,14 @@ static void process_pending_deletes(int hold) {
   ctr_linear_unlock();
 }
 
+static void raw_note_unif(void);
+
 /* Programs have different vertex layouts and uniforms: switch both together. */
 static void use_program(int prog) {
   if (g.cur_prog == prog) {
     return;
   }
+  raw_note_unif(); /* (AI-assisted) citro3d sends the program and uniforms at the next draw */
   g.last_mesh_valid = 0;
   g.last_skin_valid = 0;
   C3D_AttrInfo* attr = C3D_GetAttrInfo();
@@ -764,8 +783,72 @@ void ctr_gpu_exit(void) {
 static void update_pool_residency(void);
 static int g_vram_textures;
 
-/* citro3d's GX queue is the first member of its (internal) context, __C3D_Context */
-extern gxCmdQueue_s __C3D_Context;
+/* (AI-assisted) citro3d's internal context (source/internal.h of the citro3d that libcitro3d.a is
+ * built from: ~/devkitpro-3ds/src/citro3d). The raw command path below keeps it in step with the
+ * GPU (see "raw GPU commands"). The asserts check the layout against the library: its
+ * C3Di_UpdateContext reads flags at 0x20, lightEnv at 0x10c, texEnvBuf at 0x19c, fogLut at 0x1a8,
+ * and nm -S gives __C3D_Context 0x2d0 bytes. */
+typedef struct {
+  u32 fragOpMode;
+  u32 fragOpShadow;
+  u32 zScale, zOffset;
+  GPU_CULLMODE cullMode;
+  bool zBuffer, earlyDepth;
+  GPU_EARLYDEPTHFUNC earlyDepthFunc;
+  u32 earlyDepthRef;
+  u32 alphaTest;
+  u32 stencilMode, stencilOp;
+  u32 depthTest;
+  u32 blendClr;
+  u32 alphaBlend;
+  GPU_LOGICOP clrLogicOp;
+} C3Di_Effect;
+typedef struct {
+  gxCmdQueue_s gxQueue;
+  u32* cmdBuf;
+  size_t cmdBufSize;
+  float cmdBufUsage;
+  u32 flags;
+  shaderProgram_s* program;
+  C3D_AttrInfo attrInfo;
+  C3D_BufInfo bufInfo;
+  C3Di_Effect effect;
+  C3D_LightEnv* lightEnv;
+  u32 texConfig;
+  u32 texShadow;
+  C3D_Tex* tex[3];
+  C3D_TexEnv texEnv[6];
+  u32 texEnvBuf, texEnvBufClr;
+  u32 fogClr;
+  C3D_FogLut* fogLut;
+  u16 gasAttn, gasAccMax;
+  u32 gasLightXY, gasLightZ, gasLightZColor;
+  u32 gasDeltaZ : 24;
+  u32 gasFlags : 8;
+  C3D_GasLut* gasLut;
+  C3D_ProcTex* procTex;
+  C3D_ProcTexLut* procTexLut[3];
+  C3D_ProcTexColorLut* procTexColorLut;
+  C3D_FrameBuf fb;
+  u32 viewport[5];
+  u32 scissor[3];
+  u16 fixedAttribDirty, fixedAttribEverDirty;
+  C3D_FVec fixedAttribs[12];
+} C3Di_Context;
+_Static_assert(sizeof(C3Di_Context) == 0x2d0, "citro3d context layout");
+_Static_assert(offsetof(C3Di_Context, flags) == 0x20, "citro3d context layout");
+_Static_assert(offsetof(C3Di_Context, lightEnv) == 0x10c, "citro3d context layout");
+_Static_assert(offsetof(C3Di_Context, texEnvBuf) == 0x19c, "citro3d context layout");
+_Static_assert(offsetof(C3Di_Context, fogLut) == 0x1a8, "citro3d context layout");
+extern C3Di_Context __C3D_Context;
+void C3Di_UpdateContext(void); /* citro3d: sends what's dirty (as its draws do first) */
+enum {
+  C3DiF_Active = BIT(0),
+  C3DiF_DrawUsed = BIT(1),
+  C3DiF_BufInfo = BIT(3),
+  C3DiF_Effect = BIT(4),
+};
+#define C3DiF_TexEnv(n) BIT(26 + (n))
 static int s_overlap = 0;
 static unsigned s_partial_draws, s_partials;
 
@@ -778,6 +861,8 @@ static unsigned s_partial_draws, s_partials;
  * Not done while building: screenshots. Textures updated in place (sky, eyes) may show one frame
  * early in frame N. */
 static void flush_vbuf(void);
+static void raw_vc_flush(void);
+static void raw_frame_reset(void);
 static int s_pipeline = 0;
 /* (AI-assisted) 1 MB each: the busiest jungle frames on hardware use ~450 KB of commands; a frame
  * that still runs out of room switches the pipeline off (CtrRenderer::render_frame) instead of
@@ -1117,6 +1202,7 @@ static void migrate_small_textures(void);
 /* the parts of the GPU state a frame starts from (both modes) */
 static void frame_state_reset(void) {
   s_pres.cur_release = s_pres.next_release;
+  raw_frame_reset();
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
   g.bound_tex = NULL;
@@ -1154,7 +1240,7 @@ static void pipeline_frame_begin(u32 clear) {
   if (g.screenshot_state == 2) {
     /* (AI-assisted) the frame to save is complete once the GPU has nothing queued (this frame's
      * clear isn't queued yet): wait for it, only in frames that take a screenshot */
-    if (gxCmdQueueWait(&__C3D_Context, 1000000000LL)) {
+    if (gxCmdQueueWait(&__C3D_Context.gxQueue, 1000000000LL)) {
       write_screenshot();
     }
     g.screenshot_state = 0;
@@ -1181,6 +1267,7 @@ static void pipeline_frame_begin(u32 clear) {
 
 /* send what's built so far to the GPU (pipeline: our command buffer, citro3d isn't in a frame) */
 static void pipeline_submit(void) {
+  raw_vc_flush();
   flush_vbuf();
   GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
   GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
@@ -1244,6 +1331,7 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
   if (g.in_frame) {
     /* (AI-assisted) with overlap the queue may already be running (ctr_gpu_submit_partial): the
      * draws before the copy start right away, so their vertices must be out of the CPU cache */
+    raw_vc_flush();
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
   }
@@ -1259,7 +1347,7 @@ void ctr_gpu_free_pending_now(void) {
   }
   /* the GX queue holds the last frames' command lists and display transfers; with a timeout in
    * case it isn't running (then the deletes wait for the next frame begin, as before) */
-  if (!gxCmdQueueWait(&__C3D_Context, 200000000LL)) {
+  if (!gxCmdQueueWait(&__C3D_Context.gxQueue, 200000000LL)) {
     return;
   }
   process_pending_deletes(0);
@@ -1281,9 +1369,10 @@ void ctr_gpu_submit_partial(void) {
   if (s_pipeline) {
     pipeline_submit();
   } else {
+    raw_vc_flush();
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
-    gxCmdQueueRun(&__C3D_Context);
+    gxCmdQueueRun(&__C3D_Context.gxQueue);
   }
   s_partial_draws = g.cur.draws;
   s_partials++;
@@ -1293,6 +1382,7 @@ void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
+  raw_vc_flush();
   flush_vbuf();
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
   g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
@@ -2321,7 +2411,298 @@ static GPU_TESTFUNC map_test(uint8_t t) {
   return GPU_ALWAYS;
 }
 
-static void apply_state(const ctr_draw_state* st, int mesh);
+/* ---------------- (AI-assisted) raw GPU commands for the hot draws ----------------
+ * citro3d spends ~2000 ARM instructions on every draw before the draw itself: C3Di_UpdateContext
+ * scans the 96 float uniform dirty flags of the vertex and of the geometry shader
+ * (C3D_UpdateUniforms, ~660 instructions each even when nothing is dirty), and each register
+ * write is a call to GPUCMD_Add (~45 instructions). With config.ini raw_cmds the draws (level
+ * meshes, merc, sprites, sky, HUD) write their command words into the command buffer themselves:
+ * state only where it changed, uniforms in one burst, the draw from a fixed template.
+ *
+ * Invariant (citro3d is never wrong about the GPU): citro3d's context always describes the GPU's
+ * state, as far as citro3d tracks it.
+ *  - A raw write of texture combiner stages 0-1, the fragment operations (C3D_Effect), texture
+ *    unit 0 or attribute buffer 0 stores the same value in the context, without a dirty flag.
+ *  - Everything citro3d still has to send (dirty flags, uniforms set with C3D_FVUnif*: noted in
+ *    s_raw.unif_pending) is sent with C3Di_UpdateContext before a raw draw's uniforms and the draw
+ *    (raw_sync). citro3d sends whole groups from its context, which already holds the raw values.
+ *  - Raw state compares against the context (what the GPU has, or gets at the next sync), so it
+ *    is right after citro3d's own draws (clouds, envmap, glows) as well.
+ * After the HOME Menu citro3d sends everything again (APTHOOK_ONRESTORE), but not the uniforms
+ * written raw (matrices, bones, lights): those caches are dropped then (s_raw.apt_epoch).
+ * The post-vertex cache: citro3d clears it after every draw. Raw draws do the same, unless
+ * config.ini vcache_reuse: then a draw with the same vertex buffer and uniforms as the draw before
+ * keeps it (the cache holds vertex shader outputs by index), and it's cleared before any other
+ * draw, command list split or the frame end (raw_vc_flush). */
+static struct {
+  int on;           /* config.ini raw_cmds */
+  int vcache_reuse; /* config.ini vcache_reuse */
+  int unif_pending; /* citro3d has uniforms to send (C3D_FVUnif* since its last update) */
+  volatile u32 apt_epoch;
+  u32 seen_epoch;
+  int hooked;
+  aptHookCookie cookie;
+  int vc_dirty;   /* a raw draw left vertices in the post-vertex cache */
+  int vs_changed; /* vertex buffer, uniforms or program changed since the last draw */
+  const void* vbuf_va; /* g.vbuf and its physical address */
+  u32 vbuf_pa;
+  u32 quad_pa;    /* physical address of g.quad_indices */
+} s_raw = {.on = 1};
+
+#define RAW_BUF_BASE 0x18000000u /* citro3d's attribute buffer base (BufInfo_Init) */
+#define RAW_HDR(reg, mask) ((u32)(reg) | ((u32)(mask) << 16))
+
+static void raw_apt_hook(APT_HookType type, void* param) {
+  (void)param;
+  if (type == APTHOOK_ONRESTORE) {
+    s_raw.apt_epoch++;
+  }
+}
+
+void ctr_gpu_set_raw_cmds(int on) {
+  if (on && !s_raw.hooked) {
+    aptHook(&s_raw.cookie, raw_apt_hook, NULL);
+    s_raw.hooked = 1;
+  }
+  s_raw.on = on ? 1 : 0;
+}
+
+void ctr_gpu_set_vcache_reuse(int on) {
+  s_raw.vcache_reuse = on ? 1 : 0;
+}
+
+static inline u32* raw_ptr(void) {
+  return gpuCmdBuf + gpuCmdBufOffset;
+}
+static inline void raw_end(u32* p) {
+  gpuCmdBufOffset = (u32)(p - gpuCmdBuf);
+}
+/* one register (mask: the bytes written) */
+static inline u32* raw_w(u32* p, u32 reg, u32 mask, u32 v) {
+  p[0] = v;
+  p[1] = RAW_HDR(reg, mask);
+  return p + 2;
+}
+/* n >= 1 values: consecutive registers from reg (seq) or all to reg (a data port) */
+static inline u32* raw_n(u32* p, u32 reg, const u32* v, u32 n, int seq) {
+  p[0] = v[0];
+  p[1] = RAW_HDR(reg, 0xF) | ((n - 1) << 20) | (seq ? BIT(31) : 0);
+  for (u32 i = 1; i < n; i++) {
+    p[1 + i] = v[i];
+  }
+  p += n + 1;
+  if (!(n & 1)) {
+    *p++ = 0; /* commands start at 8 byte boundaries */
+  }
+  return p;
+}
+
+/* the post-vertex cache clear (and citro3d's two writes after it) */
+static inline u32* raw_vc_clear(u32* p) {
+  p = raw_w(p, GPUREG_VTX_FUNC, 0xF, 1);
+  p = raw_w(p, GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+  p = raw_w(p, GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
+  s_raw.vc_dirty = 0;
+  return p;
+}
+/* before anything that isn't a raw indexed draw: a cache left by vcache_reuse is cleared */
+static void raw_vc_flush(void) {
+  if (s_raw.vc_dirty) {
+    raw_end(raw_vc_clear(raw_ptr()));
+  }
+}
+
+static void raw_note_unif(void) {
+  s_raw.unif_pending = 1;
+}
+
+/* a frame starts with citro3d's state (frame_state_reset) and an empty post-vertex cache */
+static void raw_frame_reset(void) {
+  s_raw.vc_dirty = 0;
+  s_raw.vs_changed = 1;
+  s_raw.unif_pending = 1;
+}
+
+/* what the raw draws compare against is gone (the HOME Menu used the GPU) */
+static void raw_check_epoch(void) {
+  if (s_raw.apt_epoch != s_raw.seen_epoch) {
+    s_raw.seen_epoch = s_raw.apt_epoch;
+    g.last_mesh_valid = 0;
+    g.last_skin_valid = 0;
+    s_raw.vs_changed = 1;
+  }
+}
+
+/* before a raw draw's uniforms and the draw: citro3d sends what it has pending */
+static inline void raw_sync(void) {
+  raw_check_epoch();
+  if (s_raw.unif_pending || (__C3D_Context.flags & ~(u32)(C3DiF_Active | C3DiF_DrawUsed))) {
+    C3Di_UpdateContext();
+    s_raw.unif_pending = 0;
+    s_raw.vs_changed = 1;
+  }
+}
+
+/* attribute buffer 0 (the only one the draws use) at physical address pa */
+static void raw_vertex_buffer(u32 pa, u32 flags0, u32 flags1) {
+  C3D_BufInfo* b = &__C3D_Context.bufInfo;
+  const u32 off = pa - RAW_BUF_BASE;
+  C3D_BufCfg* c = &b->buffers[0];
+  if (b->bufCount != 1 || b->base_paddr != RAW_BUF_BASE) {
+    /* not citro3d's single buffer layout yet: citro3d sends all of it (raw_sync) */
+    BufInfo_Init(b);
+    b->bufCount = 1;
+    c->offset = off;
+    c->flags[0] = flags0;
+    c->flags[1] = flags1;
+    __C3D_Context.flags |= C3DiF_BufInfo;
+    s_raw.vs_changed = 1;
+    return;
+  }
+  if (c->flags[0] != flags0 || c->flags[1] != flags1) {
+    const u32 v[3] = {off, flags0, flags1};
+    raw_end(raw_n(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET, v, 3, 1));
+  } else if (c->offset != off) {
+    raw_end(raw_w(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET, 0xF, off));
+  } else {
+    return;
+  }
+  c->offset = off;
+  c->flags[0] = flags0;
+  c->flags[1] = flags1;
+  s_raw.vs_changed = 1;
+}
+/* attribute buffer 0 config of each program's vertex layout: permutation, stride, attributes */
+#define RAW_BUF_FLAGS1(stride, attribs, perm_hi) \
+  ((u32)(perm_hi) | ((u32)(stride) << 16) | ((u32)(attribs) << 28))
+
+/* float uniforms from loc: f32 values (4 per vector, in C3D_FVec order w z y x) or float24 words
+ * (3 per vector), one config write and one burst to the data port */
+static inline u32* raw_unif(u32* p, int loc, const u32* data, u32 words, int f32) {
+  p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)loc | (f32 ? BIT(31) : 0));
+  s_raw.vs_changed = 1;
+  return raw_n(p, GPUREG_VSH_FLOATUNIFORM_DATA, data, words, 0);
+}
+
+/* the f24 encoding of libctru's f32tof24 (truncated mantissa), packed 3 words per vector in the
+ * order the GPU takes float24 uniforms */
+static inline u32 raw_f24(float f) {
+  union {
+    float f;
+    u32 i;
+  } u = {f};
+  const u32 sign = u.i >> 31, mant = (u.i & 0x7fffff) >> 7;
+  const s32 e = (s32)((u.i >> 23) & 0xff) - 127 + 63;
+  if (e < 0 || !((u.i >> 23) & 0xff)) {
+    return sign << 23;
+  }
+  if (e > 0x7f) {
+    return (sign << 23) | (0x7fu << 16);
+  }
+  return (sign << 23) | ((u32)e << 16) | mant;
+}
+/* v: C3D_FVec order (w, z, y, x) */
+static void raw_pack_f24(const float* v, u32* out) {
+  const u32 w = raw_f24(v[0]), z = raw_f24(v[1]), y = raw_f24(v[2]), x = raw_f24(v[3]);
+  out[0] = (w << 8) | (z >> 16);
+  out[1] = (z << 16) | (y >> 8);
+  out[2] = (y << 24) | x;
+}
+
+/* The draws: C3D_DrawElements / C3D_DrawArrays' command words (without their context update).
+ * Indexed: the index buffer offset and count go in words 4 and 6. */
+static const u32 kRawElements[24] = {
+    GPU_GEOMETRY_PRIM, RAW_HDR(GPUREG_PRIMITIVE_CONFIG, 0x2),
+    1,                 RAW_HDR(GPUREG_RESTART_PRIMITIVE, 0xF),
+    0,                 RAW_HDR(GPUREG_INDEXBUFFER_CONFIG, 0xF),
+    0,                 RAW_HDR(GPUREG_NUMVERTICES, 0xF),
+    0,                 RAW_HDR(GPUREG_VERTEX_OFFSET, 0xF),
+    0x100,             RAW_HDR(GPUREG_GEOSTAGE_CONFIG, 0x2),
+    0x100,             RAW_HDR(GPUREG_GEOSTAGE_CONFIG2, 0x2),
+    0,                 RAW_HDR(GPUREG_START_DRAW_FUNC0, 0x1),
+    1,                 RAW_HDR(GPUREG_DRAWELEMENTS, 0xF),
+    1,                 RAW_HDR(GPUREG_START_DRAW_FUNC0, 0x1),
+    0,                 RAW_HDR(GPUREG_GEOSTAGE_CONFIG, 0x2),
+    0,                 RAW_HDR(GPUREG_GEOSTAGE_CONFIG2, 0x2),
+};
+static const u32 kRawArrays[22] = {
+    GPU_TRIANGLES, RAW_HDR(GPUREG_PRIMITIVE_CONFIG, 0x2),
+    1,             RAW_HDR(GPUREG_RESTART_PRIMITIVE, 0xF),
+    0x80000000u,   RAW_HDR(GPUREG_INDEXBUFFER_CONFIG, 0xF),
+    0,             RAW_HDR(GPUREG_NUMVERTICES, 0xF),
+    0,             RAW_HDR(GPUREG_VERTEX_OFFSET, 0xF),
+    1,             RAW_HDR(GPUREG_GEOSTAGE_CONFIG2, 0x1),
+    0,             RAW_HDR(GPUREG_START_DRAW_FUNC0, 0x1),
+    1,             RAW_HDR(GPUREG_DRAWARRAYS, 0xF),
+    1,             RAW_HDR(GPUREG_START_DRAW_FUNC0, 0x1),
+    0,             RAW_HDR(GPUREG_GEOSTAGE_CONFIG2, 0x1),
+    1,             RAW_HDR(GPUREG_VTX_FUNC, 0xF),
+};
+
+/* an indexed triangle list: index_pa = physical address of the first u16 index */
+static void raw_draw_elements(u32 index_pa, u32 count) {
+  u32* p = raw_ptr();
+  if (s_raw.vc_dirty && s_raw.vs_changed) {
+    p = raw_vc_clear(p);
+  }
+  for (int i = 0; i < 24; i += 4) { /* (4 words per ldm / stm) */
+    p[i] = kRawElements[i];
+    p[i + 1] = kRawElements[i + 1];
+    p[i + 2] = kRawElements[i + 2];
+    p[i + 3] = kRawElements[i + 3];
+  }
+  p[4] = (index_pa - RAW_BUF_BASE) | BIT(31); /* u16 indices */
+  p[6] = count;
+  p += 24;
+  if (s_raw.vcache_reuse) {
+    s_raw.vc_dirty = 1;
+  } else {
+    p = raw_vc_clear(p);
+  }
+  raw_end(p);
+  s_raw.vs_changed = 0;
+  __C3D_Context.flags |= C3DiF_DrawUsed;
+}
+
+static void raw_draw_arrays(u32 count) {
+  u32* p = raw_ptr();
+  if (s_raw.vc_dirty) {
+    p = raw_vc_clear(p);
+  }
+  for (int i = 0; i < 22; i += 2) {
+    p[i] = kRawArrays[i];
+    p[i + 1] = kRawArrays[i + 1];
+  }
+  p[6] = count;
+  raw_end(p + 22);
+  s_raw.vs_changed = 0;
+  __C3D_Context.flags |= C3DiF_DrawUsed;
+}
+
+/* the immediate draws' vertices: physical address of g.vbuf + off */
+static inline u32 raw_vbuf_pa(size_t off) {
+  if (s_raw.vbuf_va != g.vbuf) {
+    s_raw.vbuf_va = g.vbuf;
+    s_raw.vbuf_pa = osConvertVirtToPhys(g.vbuf);
+  }
+  return s_raw.vbuf_pa + (u32)off;
+}
+
+/* (AI-assisted) the same through citro3d (its draws): only marked for sending when it changed */
+static void c3d_vertex_buffer(u32 pa, const void* va, u32 stride, int attribs, u64 perm) {
+  const C3D_BufInfo* b = &__C3D_Context.bufInfo;
+  const C3D_BufCfg* c = &b->buffers[0];
+  if (b->bufCount == 1 && b->base_paddr == RAW_BUF_BASE && c->offset == pa - RAW_BUF_BASE &&
+      c->flags[0] == (u32)perm && c->flags[1] == RAW_BUF_FLAGS1(stride, attribs, perm >> 32)) {
+    return;
+  }
+  C3D_BufInfo* buf = C3D_GetBufInfo();
+  BufInfo_Init(buf);
+  BufInfo_Add(buf, va, stride, attribs, perm);
+}
+
+static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw);
+static void apply_state(const ctr_draw_state* st, int mesh, int raw);
 
 /* The GPU command buffer is fixed size, and a frame's commands must all fit (libctru panics when
  * it overflows; splitting the frame doesn't make room: the buffer only restarts at the next
@@ -2336,7 +2717,7 @@ static int cmd_room(void) {
 
 /* Texture unit 0: only bound again (which clears the GPU's texture cache) when the texture, its
  * memory (pools move to VRAM) or its parameters change. */
-static void bind_texture(TexSlot* slot, const ctr_draw_state* st) {
+static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
   C3D_Tex* tex = &slot->tex;
   const GPU_TEXTURE_FILTER_PARAM f = st->filter ? GPU_LINEAR : GPU_NEAREST;
   u32 param = tex->param & ~(GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
@@ -2359,7 +2740,24 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st) {
   }
   tex->param = param;
   tex->maxLevel = max_level;
-  C3D_TexBind(0, tex);
+  if (raw) {
+    /* (AI-assisted) what C3Di_SetTex and citro3d's texture unit update write: the unit's
+     * registers, the unit on, then its cache cleared; the context gets the texture (invariant) */
+    C3Di_Context* ctx = &__C3D_Context;
+    const u32 regs[5] = {tex->border, tex->dim, tex->param, tex->lodParam,
+                         osConvertVirtToPhys(tex->data) >> 3};
+    u32* p = raw_n(raw_ptr(), GPUREG_TEXUNIT0_BORDER_COLOR, regs, 5, 1);
+    p = raw_w(p, GPUREG_TEXUNIT0_TYPE, 0xF, tex->fmt);
+    ctx->tex[0] = tex;
+    if (!(ctx->texConfig & 1)) {
+      ctx->texConfig |= 1;
+      p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0xB, ctx->texConfig);
+    }
+    p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
+    raw_end(p);
+  } else {
+    C3D_TexBind(0, tex);
+  }
   g.bound_tex = tex;
   g.bound_data = tex->data;
   g.bound_param = param;
@@ -2371,14 +2769,36 @@ static int early_depth_ok(const ctr_draw_state* st) {
          st->zwrite && st->blend == CTR_BLEND_OFF;
 }
 
-/* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage) */
-static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) {
+/* (AI-assisted) texture combiner stage id (0 or 1) as env: in the context, and to the GPU raw or
+ * through citro3d (dirty flag) when it changed */
+static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
+  C3Di_Context* ctx = &__C3D_Context;
+  const alias_u32* a = (const alias_u32*)&ctx->texEnv[id];
+  const alias_u32* b = (const alias_u32*)env;
+  _Static_assert(sizeof(*env) == 20, "C3D_TexEnv compared as 5 words");
+  if (!((a[0] ^ b[0]) | (a[1] ^ b[1]) | (a[2] ^ b[2]) | (a[3] ^ b[3]) | (a[4] ^ b[4]))) {
+    return;
+  }
+  ctx->texEnv[id] = *env;
+  if (raw) {
+    raw_end(raw_n(raw_ptr(), GPUREG_TEXENV0_SOURCE + 8 * (u32)id, (const u32*)env,
+                  sizeof(*env) / 4, 1));
+  } else {
+    ctx->flags |= C3DiF_TexEnv(id);
+  }
+}
+
+/* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
+ * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
+ * citro3d's context right. */
+static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw) {
   if (st->flags) {
     g.cur.early_depth_draws += early_depth_ok(st);
     g.cur.proctex_draws += (st->flags & CTR_STATE_PROCTEX) != 0;
   }
+  _Static_assert(sizeof(*st) == 16, "ctr_draw_state compared as 4 words");
   if (g.last_state_valid && g.last_state_mesh == mesh && g.last_tint == tint &&
-      !memcmp(&g.last_state, st, sizeof(*st))) {
+      words_equal(&g.last_state, st, 4)) {
     return;
   }
   g.last_state = *st;
@@ -2386,7 +2806,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
   g.last_tint = tint;
   g.last_state_valid = 1;
   /* stage 1: lighting tint for skinned meshes, pass-through otherwise */
-  C3D_TexEnv* env1 = C3D_GetTexEnv(1);
+  C3D_TexEnv e1;
+  C3D_TexEnv* env1 = &e1;
   C3D_TexEnvInit(env1);
   if (mesh == 2) {
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, 0);
@@ -2410,7 +2831,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
     C3D_TexEnvFunc(env1, C3D_Alpha, GPU_REPLACE);
     C3D_TexEnvColor(env1, g.clear_abgr);
   }
-  C3D_TexEnv* env = C3D_GetTexEnv(0);
+  C3D_TexEnv e0;
+  C3D_TexEnv* env = &e0;
   C3D_TexEnvInit(env);
   int textured = st->tex >= 0 && st->tex < MAX_TEXTURES && g.textures[st->tex].used == 1;
   TexSlot* slot = textured ? &g.textures[st->tex] : NULL;
@@ -2437,7 +2859,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
   }
   if (textured) {
     if (!proc) {
-      bind_texture(slot, st);
+      bind_texture(slot, st, raw);
     }
     if (mesh) {
       /* level meshes / merc: texture alpha 0xff = 1, vertex color 0x80 = 1 (merc: the skin shader
@@ -2482,54 +2904,130 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint) 
     C3D_TexEnvScale(env, C3D_RGB, mesh == 2 ? GPU_TEVSCALE_2 : GPU_TEVSCALE_1);
     C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
   }
+  commit_texenv(1, env1, raw);
+  commit_texenv(0, env, raw);
 
+  /* (AI-assisted) the fragment operations, as citro3d's C3D_AlphaBlend / C3D_BlendingColor /
+   * C3D_AlphaTest / C3D_DepthTest / C3D_EarlyDepthTest store them in its context */
+  C3Di_Context* ctx = &__C3D_Context;
+  C3Di_Effect e = ctx->effect;
+  GPU_BLENDEQUATION eq = GPU_BLEND_ADD;
+  GPU_BLENDFACTOR src = GPU_ONE, dst = GPU_ZERO;
   switch (st->blend) {
     case CTR_BLEND_ALPHA:
-      C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE,
-                     GPU_ZERO);
+      src = GPU_SRC_ALPHA;
+      dst = GPU_ONE_MINUS_SRC_ALPHA;
       break;
     case CTR_BLEND_ADD:
-      C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ONE, GPU_ZERO);
+      src = GPU_SRC_ALPHA;
+      dst = GPU_ONE;
       break;
     case CTR_BLEND_SUB:
-      C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ONE,
-                     GPU_ZERO);
+      eq = GPU_BLEND_REVERSE_SUBTRACT;
+      src = GPU_SRC_ALPHA;
+      dst = GPU_ONE;
       break;
     case CTR_BLEND_FIX: {
       u32 fa = st->fix >= 0x80 ? 255 : st->fix * 2;
-      C3D_BlendingColor(fa << 24);
-      C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_CONSTANT_ALPHA,
-                     GPU_ONE_MINUS_CONSTANT_ALPHA, GPU_ONE, GPU_ZERO);
+      e.blendClr = fa << 24;
+      src = GPU_CONSTANT_ALPHA;
+      dst = GPU_ONE_MINUS_CONSTANT_ALPHA;
     } break;
     case CTR_BLEND_ADD_DST_A:
-      C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_DST_ALPHA, GPU_ONE, GPU_ONE, GPU_ZERO);
+      src = GPU_DST_ALPHA;
+      dst = GPU_ONE;
       break;
     case CTR_BLEND_ONE_ONE:
-      C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE, GPU_ONE, GPU_ZERO);
+      dst = GPU_ONE;
       break;
     default:
-      C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
       break;
   }
-
+  e.alphaBlend = (u32)eq | ((u32)GPU_BLEND_ADD << 8) | ((u32)src << 16) | ((u32)dst << 20) |
+                 ((u32)GPU_ONE << 24) | ((u32)GPU_ZERO << 28);
+  e.fragOpMode = (e.fragOpMode & ~0xFF00u) | 0x0100u;
   if (st->atest == CTR_TEST_ALWAYS) {
-    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    e.alphaTest = (u32)GPU_ALWAYS << 4;
   } else {
     int ref = st->aref * 2;
-    C3D_AlphaTest(true, map_test(st->atest), ref > 255 ? 255 : ref);
+    e.alphaTest = 1u | (((u32)map_test(st->atest) & 7) << 4) | ((u32)(ref > 255 ? 255 : ref) << 8);
   }
-
   if (st->ztest == CTR_TEST_ALWAYS && !st->zwrite) {
-    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    e.depthTest = ((u32)GPU_ALWAYS << 4) | ((u32)GPU_WRITE_COLOR << 8);
   } else {
-    C3D_DepthTest(true, map_test(st->ztest),
-                  st->zwrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
+    e.depthTest = 1u | (((u32)map_test(st->ztest) & 7) << 4) |
+                  ((u32)(st->zwrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR) << 8);
   }
   /* (AI-assisted) config.ini early_depth: fragments behind what opaque draws already covered are
    * dropped before texturing. Only for draws that write depth with the same test and that nothing
    * discards later (no blending, an alpha test that never fails): the hardware's early depth
    * data can't know about fragments dropped after it. */
-  C3D_EarlyDepthTest(early_depth_ok(st), GPU_EARLYDEPTH_GEQUAL, 0);
+  e.earlyDepth = early_depth_ok(st) != 0;
+  e.earlyDepthFunc = GPU_EARLYDEPTH_GEQUAL;
+  e.earlyDepthRef = 0;
+  if (!raw) {
+    if (memcmp(&e, &ctx->effect, sizeof(e))) {
+      ctx->effect = e;
+      ctx->flags |= C3DiF_Effect;
+    }
+    return;
+  }
+  /* raw: the registers C3Di_EffectBind writes for the fields that changed */
+  C3Di_Effect* c = &ctx->effect;
+  u32* p = raw_ptr();
+  if (e.alphaTest != c->alphaTest) {
+    p = raw_w(p, GPUREG_FRAGOP_ALPHA_TEST, 0xF, e.alphaTest);
+  }
+  if (e.depthTest != c->depthTest) {
+    p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
+              (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
+    p = raw_w(p, GPUREG_DEPTH_COLOR_MASK, 0xF, e.depthTest);
+  }
+  if (e.blendClr != c->blendClr) {
+    p = raw_w(p, GPUREG_BLEND_COLOR, 0xF, e.blendClr);
+  }
+  if (e.alphaBlend != c->alphaBlend) {
+    p = raw_w(p, GPUREG_BLEND_FUNC, 0xF, e.alphaBlend);
+  }
+  if (e.fragOpMode != c->fragOpMode) {
+    p = raw_w(p, GPUREG_COLOR_OPERATION, 0x7, e.fragOpMode);
+  }
+  if (e.earlyDepth != c->earlyDepth || e.earlyDepthFunc != c->earlyDepthFunc ||
+      e.earlyDepthRef != c->earlyDepthRef) {
+    p = raw_w(p, GPUREG_EARLYDEPTH_TEST1, 0x1, e.earlyDepth ? 1 : 0);
+    p = raw_w(p, GPUREG_EARLYDEPTH_TEST2, 0xF, e.earlyDepth ? 1 : 0);
+    p = raw_w(p, GPUREG_EARLYDEPTH_FUNC, 0x1, e.earlyDepthFunc);
+    p = raw_w(p, GPUREG_EARLYDEPTH_DATA, 0x7, e.earlyDepthRef);
+  }
+  raw_end(p);
+  *c = e;
+}
+
+/* (AI-assisted) the raw path takes every draw but the glows (procedural texture unit: citro3d) */
+static inline int use_raw(const ctr_draw_state* st) {
+  return s_raw.on && !(st->flags & CTR_STATE_PROCTEX);
+}
+
+/* the immediate draws (triangle lists from g.vbuf): program, state, then the draw */
+static void draw_immediate(const ctr_draw_state* state, int prog, uint8_t* dst, u32 stride,
+                           int count) {
+  use_program(prog);
+  if (use_raw(state)) {
+    apply_state(state, 0, 1);
+    raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
+                      RAW_BUF_FLAGS1(stride, 3, 0));
+    raw_sync();
+    raw_draw_arrays((u32)count);
+  } else {
+    raw_vc_flush();
+    apply_state(state, 0, 0);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, dst, stride, 3, 0x210);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, count);
+  }
+  g.cur.draws++;
+  g.cur.triangles += count / 3;
 }
 
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
@@ -2547,15 +3045,7 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes); /* flushed once at the end of the frame (flush_vbuf) */
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
-
-  use_program(PROG_BASIC);
-  apply_state(state, 0);
-  C3D_BufInfo* buf = C3D_GetBufInfo();
-  BufInfo_Init(buf);
-  BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
-  C3D_DrawArrays(GPU_TRIANGLES, 0, count);
-  g.cur.draws++;
-  g.cur.triangles += count / 3;
+  draw_immediate(state, PROG_BASIC, dst, sizeof(ctr_vertex), count);
 }
 
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
@@ -2569,14 +3059,7 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes);
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
-  use_program(PROG_CLIP);
-  apply_state(state, 0);
-  C3D_BufInfo* buf = C3D_GetBufInfo();
-  BufInfo_Init(buf);
-  BufInfo_Add(buf, dst, sizeof(ctr_clip_vertex), 3, 0x210);
-  C3D_DrawArrays(GPU_TRIANGLES, 0, count);
-  g.cur.draws++;
-  g.cur.triangles += count / 3;
+  draw_immediate(state, PROG_CLIP, dst, sizeof(ctr_clip_vertex), count);
 }
 
 void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t const1,
@@ -2592,6 +3075,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes);
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
+  raw_vc_flush();
   use_program(PROG_CLIP2);
   /* the texture on units 0 and 1 (binding unit 1 clears the texture cache like any bind) */
   TexSlot* slot = &g.textures[state->tex];
@@ -2599,7 +3083,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
     C3D_ProcTexBind(0, NULL);
     g.proc_radial = -1;
   }
-  bind_texture(slot, state);
+  bind_texture(slot, state, 0);
   C3D_TexBind(1, &slot->tex);
   /* rgb = (tex0 * const0 + tex1 * const1) * vertex alpha (GS units: x2 each); the color is
    * added. The constants doubled here keep 8 bits of precision in the first stages. */
@@ -2639,8 +3123,11 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   C3D_DrawArrays(GPU_TRIANGLES, 0, count);
   g.cur.draws++;
   g.cur.triangles += count / 3;
-  /* back to what the other draws expect: stage 2 passes through, unit 1 has the fog ramp */
-  C3D_TexEnvInit(e2);
+  /* back to what the other draws expect: stage 2 passes through, unit 1 has the fog ramp.
+   * (AI-assisted) Through C3D_GetTexEnv: initializing the stage citro3d had just sent (e2) only
+   * changed its context, so the GPU kept the clouds' stage 2 for every draw after the sky (rgb
+   * times twice the vertex alpha: darker particles), and citro3d's context was wrong about it. */
+  C3D_TexEnvInit(C3D_GetTexEnv(2));
   if (g.fog_tex_valid) {
     C3D_TexBind(1, &g.fog_tex);
   }
@@ -2661,12 +3148,24 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
     memcpy(dst, verts, bytes);
     g.vbuf_used += (bytes + 15) & ~(size_t)15;
     use_program(PROG_BASIC);
-    apply_state(state, 0);
-    C3D_BufInfo* buf = C3D_GetBufInfo();
-    BufInfo_Init(buf);
-    BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
-    /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
-    C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
+    if (use_raw(state)) {
+      apply_state(state, 0, 1);
+      raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
+                        RAW_BUF_FLAGS1(sizeof(ctr_vertex), 3, 0));
+      raw_sync();
+      if (!s_raw.quad_pa) {
+        s_raw.quad_pa = osConvertVirtToPhys(g.quad_indices);
+      }
+      raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
+    } else {
+      raw_vc_flush();
+      apply_state(state, 0, 0);
+      C3D_BufInfo* buf = C3D_GetBufInfo();
+      BufInfo_Init(buf);
+      BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
+      /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
+      C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
+    }
     g.cur.draws++;
     g.cur.triangles += n * 2;
     verts += 4 * n;
@@ -2674,8 +3173,8 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
   }
 }
 
-static void apply_state(const ctr_draw_state* st, int mesh) {
-  apply_state_tint(st, mesh, 0xffffffff);
+static void apply_state(const ctr_draw_state* st, int mesh, int raw) {
+  apply_state_tint(st, mesh, 0xffffffff, raw);
 }
 
 /* ---------------- the screen as a texture ---------------- */
@@ -2821,6 +3320,8 @@ int ctr_gpu_mesh_create(const void* verts, int vertex_count, const uint16_t* ind
   GSPGPU_FlushDataCache(ix, ibytes);
   g.meshes[slot].verts = v;
   g.meshes[slot].indices = ix;
+  g.meshes[slot].verts_pa = osConvertVirtToPhys(v);
+  g.meshes[slot].indices_pa = osConvertVirtToPhys(ix);
   g.meshes[slot].used = 1;
   return slot;
 }
@@ -2849,8 +3350,12 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
       m.r[r].c[3 - c] = acc;
     }
   }
-  _Static_assert(sizeof(C3D_Mtx) == sizeof(ctr_mesh_matrix), "matrix layout");
-  memcpy(out, &m, sizeof(m));
+  _Static_assert(sizeof(C3D_Mtx) == offsetof(ctr_mesh_matrix, f24), "matrix layout");
+  memcpy(out->m, &m, sizeof(m));
+  /* (AI-assisted) and as float24 uniform words for the raw draws (12 words instead of 16) */
+  for (int r = 0; r < 4; r++) {
+    raw_pack_f24(out->m + 4 * r, out->f24 + 3 * r);
+  }
 }
 
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
@@ -2863,21 +3368,31 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     return;
   }
   use_program(PROG_MESH);
-  /* consecutive draws of a level chunk share the matrix and the vertex buffer */
-  if (!g.last_mesh_valid || memcmp(g.last_clip, matrix->m, sizeof(g.last_clip))) {
-    memcpy(g.last_clip, matrix->m, sizeof(g.last_clip));
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip, (const C3D_Mtx*)matrix);
+  const MeshSlot* ms = &g.meshes[mesh];
+  if (use_raw(state)) {
+    /* (AI-assisted) raw: state, vertex buffer, then (after citro3d's pending updates) the matrix
+     * as float24 and the draw */
+    apply_state(state, 1, 1);
+    raw_vertex_buffer(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
+    raw_sync();
+    if (!g.last_mesh_valid || !words_equal(g.last_clip, matrix->m, 16)) {
+      memcpy(g.last_clip, matrix->m, sizeof(g.last_clip));
+      raw_end(raw_unif(raw_ptr(), g.uloc_clip, matrix->f24, 12, 0));
+      g.last_mesh_valid = 1;
+    }
+    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  } else {
+    raw_vc_flush();
+    /* consecutive draws of a level chunk share the matrix and the vertex buffer */
+    if (!g.last_mesh_valid || !words_equal(g.last_clip, matrix->m, 16)) {
+      memcpy(g.last_clip, matrix->m, sizeof(g.last_clip));
+      C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_clip, (const C3D_Mtx*)matrix->m);
+    }
+    g.last_mesh_valid = 1;
+    c3d_vertex_buffer(ms->verts_pa, ms->verts, 16, 3, 0x210);
+    apply_state(state, 1, 0);
+    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
   }
-  if (!g.last_mesh_valid || g.last_mesh != mesh) {
-    g.last_mesh = mesh;
-    C3D_BufInfo* buf = C3D_GetBufInfo();
-    BufInfo_Init(buf);
-    BufInfo_Add(buf, g.meshes[mesh].verts, 16, 3, 0x210);
-  }
-  g.last_mesh_valid = 1;
-  apply_state(state, 1);
-  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
-                   g.meshes[mesh].indices + first_index);
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
 }
@@ -2923,6 +3438,8 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   GSPGPU_FlushDataCache(ix, ibytes);
   g.meshes[slot].verts = v;
   g.meshes[slot].indices = ix;
+  g.meshes[slot].verts_pa = osConvertVirtToPhys(v);
+  g.meshes[slot].indices_pa = osConvertVirtToPhys(ix);
   g.meshes[slot].verts_alt = NULL;
   g.meshes[slot].vbytes = (uint32_t)vbytes;
   g.meshes[slot].alt_frame = -1;
@@ -2951,6 +3468,7 @@ void* ctr_gpu_mesh_vertices(int mesh) {
       void* t = m->verts;
       m->verts = m->verts_alt;
       m->verts_alt = t;
+      m->verts_pa = osConvertVirtToPhys(m->verts);
       m->alt_frame = g.frame_no;
       g.last_mesh_valid = 0;
     }
@@ -2965,6 +3483,54 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
   GSPGPU_FlushDataCache((uint8_t*)g.meshes[mesh].verts + offset, (u32)size);
 }
 
+/* (AI-assisted) clip (row-major, GL clip space) -> PICA clip space, in C3D_Mtx layout */
+static void skin_clip_matrix(const float clip[16], C3D_Mtx* m) {
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      float acc = 0.0f;
+      for (int k = 0; k < 4; k++) {
+        acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
+      }
+      m->r[r].c[3 - c] = acc;
+    }
+  }
+}
+
+/* (AI-assisted) the bone rows as raw f32 uniform bursts: row r of each 3x4 bone matrix in
+ * uniform array row<r>, in C3D_FVec order (w z y x), written straight into the command buffer */
+static void raw_skin_rows(const int* locs, const float* bones, int palette_count) {
+  u32* p = raw_ptr();
+  const u32 n = 4u * (u32)palette_count;
+  for (int row = 0; row < 3; row++) {
+    p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)locs[row] | BIT(31));
+    /* the burst: first value, header, the rest, padding (see raw_n) */
+    u32* d = p;
+    const float* src = bones + 4 * row;
+    for (int b = 0; b < palette_count; b++, src += 12) {
+      u32* q = d + (b ? 4 * b + 1 : 0);
+      const u32* s = (const u32*)src;
+      if (b == 0) {
+        q[0] = s[3];
+        q[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
+        q[2] = s[2];
+        q[3] = s[1];
+        q[4] = s[0];
+      } else {
+        q[0] = s[3];
+        q[1] = s[2];
+        q[2] = s[1];
+        q[3] = s[0];
+      }
+    }
+    p += n + 1;
+    if (!(n & 1)) {
+      *p++ = 0;
+    }
+  }
+  raw_end(p);
+  s_raw.vs_changed = 1;
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count) {
@@ -2972,26 +3538,31 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       index_count < 3) {
     return;
   }
-  if (!cmd_room()) {
+  /* (AI-assisted) room for the bone rows too (3 x 24 vectors) */
+  if (!cmd_room() || gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS + 320) {
     return;
   }
   use_program(PROG_SKIN);
+  const MeshSlot* ms = &g.meshes[mesh];
+  const int raw = use_raw(state);
+  if (raw) {
+    apply_state_tint(state, 2, 0xffffffffu, 1);
+    raw_vertex_buffer(ms->verts_pa, 0x543210, RAW_BUF_FLAGS1(24, 6, 0));
+    raw_sync();
+  } else {
+    raw_vc_flush();
+  }
   /* matrix and lights: uploaded when they change (the draws of a model share them) */
-  const int same_clip = g.last_skin_valid && !memcmp(g.last_skin_clip, clip, sizeof(g.last_skin_clip));
-  const int same_lights =
-      g.last_skin_valid && !memcmp(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
+  const int same_clip = g.last_skin_valid && words_equal(g.last_skin_clip, clip, 16);
+  const int same_lights = g.last_skin_valid && words_equal(g.last_skin_lights, lights, 28);
   if (!same_clip) {
     C3D_Mtx m;
-    for (int r = 0; r < 4; r++) {
-      for (int c = 0; c < 4; c++) {
-        float acc = 0.0f;
-        for (int k = 0; k < 4; k++) {
-          acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
-        }
-        m.r[r].c[3 - c] = acc;
-      }
+    skin_clip_matrix(clip, &m);
+    if (raw) {
+      raw_end(raw_unif(raw_ptr(), g.uloc_skin_clip, (const u32*)&m, 16, 1));
+    } else {
+      C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_skin_clip, &m);
     }
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_skin_clip, &m);
     memcpy(g.last_skin_clip, clip, sizeof(g.last_skin_clip));
   }
   if (palette_count > CTR_MAX_PALETTE) {
@@ -3000,37 +3571,55 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   /* bones: the draws of a model with at most CTR_MAX_PALETTE bones all use the same palette */
   const size_t bone_bytes = sizeof(float) * 12 * (size_t)palette_count;
   if (!g.last_skin_valid || g.last_skin_palette_count != palette_count ||
-      memcmp(g.last_skin_bones, bones, bone_bytes)) {
-    for (int row = 0; row < 3; row++) {
-      C3D_FVec* dst = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_rows[row], palette_count);
-      for (int p = 0; p < palette_count; p++) {
-        const float* src = bones + 12 * p + 4 * row;
-        dst[p].x = src[0];
-        dst[p].y = src[1];
-        dst[p].z = src[2];
-        dst[p].w = src[3];
+      !words_equal(g.last_skin_bones, bones, 12u * (unsigned)palette_count)) {
+    if (raw && palette_count > 0) {
+      raw_skin_rows(g.uloc_skin_rows, bones, palette_count);
+    } else {
+      for (int row = 0; row < 3; row++) {
+        C3D_FVec* dst =
+            C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_rows[row], palette_count);
+        for (int p = 0; p < palette_count; p++) {
+          const float* src = bones + 12 * p + 4 * row;
+          dst[p].x = src[0];
+          dst[p].y = src[1];
+          dst[p].z = src[2];
+          dst[p].w = src[3];
+        }
       }
     }
     g.last_skin_palette_count = palette_count;
     memcpy(g.last_skin_bones, bones, bone_bytes);
   }
   if (!same_lights) {
-    C3D_FVec* lv = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_lights, 7);
-    for (int i = 0; i < 7; i++) {
-      lv[i].x = lights[4 * i];
-      lv[i].y = lights[4 * i + 1];
-      lv[i].z = lights[4 * i + 2];
-      lv[i].w = lights[4 * i + 3];
+    if (raw) {
+      u32 lv[28];
+      const u32* l = (const u32*)lights;
+      for (int i = 0; i < 7; i++) {
+        lv[4 * i] = l[4 * i + 3];
+        lv[4 * i + 1] = l[4 * i + 2];
+        lv[4 * i + 2] = l[4 * i + 1];
+        lv[4 * i + 3] = l[4 * i];
+      }
+      raw_end(raw_unif(raw_ptr(), g.uloc_skin_lights, lv, 28, 1));
+    } else {
+      C3D_FVec* lv = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.uloc_skin_lights, 7);
+      for (int i = 0; i < 7; i++) {
+        lv[i].x = lights[4 * i];
+        lv[i].y = lights[4 * i + 1];
+        lv[i].z = lights[4 * i + 2];
+        lv[i].w = lights[4 * i + 3];
+      }
     }
     memcpy(g.last_skin_lights, lights, sizeof(g.last_skin_lights));
   }
   g.last_skin_valid = 1;
-  apply_state_tint(state, 2, 0xffffffffu);
-  C3D_BufInfo* buf = C3D_GetBufInfo();
-  BufInfo_Init(buf);
-  BufInfo_Add(buf, g.meshes[mesh].verts, 24, 6, 0x543210);
-  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
-                   g.meshes[mesh].indices + first_index);
+  if (raw) {
+    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  } else {
+    apply_state_tint(state, 2, 0xffffffffu, 0);
+    c3d_vertex_buffer(ms->verts_pa, ms->verts, 24, 6, 0x543210);
+    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
+  }
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
 }
@@ -3046,17 +3635,10 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     return;
   }
   /* (rare: envmapped effects only, so no upload caching like ctr_gpu_draw_skinned) */
+  raw_vc_flush();
   use_program(PROG_SKIN_ENV);
   C3D_Mtx m;
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 4; c++) {
-      float acc = 0.0f;
-      for (int k = 0; k < 4; k++) {
-        acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
-      }
-      m.r[r].c[3 - c] = acc;
-    }
-  }
+  skin_clip_matrix(clip, &m);
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.uloc_env_clip, &m);
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;
@@ -3074,10 +3656,8 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
   /* the texture stage multiplies merc colors by 4: half the fade gives texture * fade * 2 */
   C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_env_fade, fade[0] * 0.5f, fade[1] * 0.5f,
                 fade[2] * 0.5f, 0.5f);
-  apply_state_tint(state, 2, 0xffffffffu);
-  C3D_BufInfo* buf = C3D_GetBufInfo();
-  BufInfo_Init(buf);
-  BufInfo_Add(buf, g.meshes[mesh].verts, 24, 6, 0x543210);
+  apply_state_tint(state, 2, 0xffffffffu, 0);
+  c3d_vertex_buffer(g.meshes[mesh].verts_pa, g.meshes[mesh].verts, 24, 6, 0x543210);
   C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
                    g.meshes[mesh].indices + first_index);
   g.cur.draws++;
@@ -3180,6 +3760,7 @@ void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, u
   if (g.cur_prog == PROG_MESH) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
+    raw_note_unif();
   }
   uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)gr << 8) | b;
   if (!g.fog_tex_valid || rgb == g.fog_tex_rgb) {
