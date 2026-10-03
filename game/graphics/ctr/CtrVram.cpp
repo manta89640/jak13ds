@@ -643,26 +643,29 @@ namespace {
 // unwritten (the zoomer HUD as a grey square, flickering water ripples).
 u32 texture_block_span(const GsTex0& t) {
   const u32 w = 1u << t.tw(), h = 1u << t.th();
-  u32 page_w = 64, page_h = 32;  // PSMCT32 / 24 and the formats stored like it (8H, 4HH, 4HL)
+  // page size as shifts (the divides were library calls on the ARM11, on every texture lookup
+  // with uploads pending)
+  u32 page_w_log2 = 6, page_h_log2 = 5;  // PSMCT32 / 24 and those stored like it (8H, 4HH, 4HL)
   switch ((u32)t.psm()) {
     case (u32)GsTex0::PSM::PSMCT16:
     case (u32)GsTex0::PSM::PSMCT16S:
-      page_h = 64;
+      page_h_log2 = 6;
       break;
     case (u32)GsTex0::PSM::PSMT8:
-      page_w = 128;
-      page_h = 64;
+      page_w_log2 = 7;
+      page_h_log2 = 6;
       break;
     case (u32)GsTex0::PSM::PSMT4:
-      page_w = 128;
-      page_h = 128;
+      page_w_log2 = 7;
+      page_h_log2 = 7;
       break;
     default:
       break;
   }
-  const u32 row_pages = (w + page_w - 1) / page_w;
-  const u32 stride_pages = std::max(row_pages, (t.tbw() * 64 + page_w - 1) / page_w);
-  const u32 page_rows = (h + page_h - 1) / page_h;
+  const u32 page_w = 1u << page_w_log2, page_h = 1u << page_h_log2;
+  const u32 row_pages = (w + page_w - 1) >> page_w_log2;
+  const u32 stride_pages = std::max(row_pages, (t.tbw() * 64 + page_w - 1) >> page_w_log2);
+  const u32 page_rows = (h + page_h - 1) >> page_h_log2;
   const u32 pages = (page_rows - 1) * stride_pages + row_pages;
   const u32 by_size = w * h * 4 / kBlockBytes + 64;  // as if 32 bit, plus slack
   return std::max(by_size, pages * 32 + 32);
@@ -694,17 +697,35 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
 }
 
+CtrVram::Entry* CtrVram::find_cached(u64 key) {
+  // (AI-assisted) multiplicative hash of the folded key: the top bits pick the slot
+  const u32 folded = (u32)key ^ (u32)(key >> 32);
+  FrontSlot& slot = m_front[(folded * 0x9e3779b1u) >> (32 - kFrontSlotsLog2)];
+  if (slot.gen == m_cache_gen && slot.key == key) {
+    return slot.entry;
+  }
+  auto it = m_cache.find(key);
+  if (it == m_cache.end()) {
+    return nullptr;
+  }
+  // (unordered_map nodes don't move on insert: the pointer is good until the entry is erased)
+  slot.key = key;
+  slot.entry = &it->second;
+  slot.gen = m_cache_gen;
+  return &it->second;
+}
+
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // the parts of TEX0 that select the texture data (not TCC / TFX / CLUT load control)
   constexpr u64 kKeyMask = ~((0b111ull << 34) | (0b111ull << 61));
   u64 key = tex0 & kKeyMask;
-  auto it = m_cache.find(key);
-  if (it != m_cache.end()) {
-    const auto& e = it->second;
+  const Entry* cached = find_cached(key);
+  if (cached) {
+    const auto& e = *cached;
     if (m_pending.empty() || (!pending_overlaps(e.first_block, e.end_block) &&
                               !pending_overlaps(e.clut_first, e.clut_end))) {
       m_stats.cached++;
-      return &it->second.tex;
+      return &cached->tex;
     }
   }
   if (!m_pending.empty()) {
@@ -713,10 +734,10 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     const u32 blocks = texture_block_span(t);
     flush_pending(t.tbp0(), t.tbp0() + blocks);
     flush_pending(t.cbp(), t.cbp() + 4);
-    it = m_cache.find(key);
-    if (it != m_cache.end()) {
+    cached = find_cached(key);
+    if (cached) {
       m_stats.cached++;
-      return &it->second.tex;
+      return &cached->tex;
     }
   }
 
@@ -804,6 +825,7 @@ void CtrVram::invalidate_blocks(u32 first_block, u32 end_block) {
       }
       m_stale[it->first] = e;
       it = m_cache.erase(it);
+      m_cache_gen++;  // (AI-assisted) the front cache may point at it
     } else {
       ++it;
     }
@@ -817,6 +839,7 @@ void CtrVram::clear_cache() {
     }
   }
   m_cache.clear();
+  m_cache_gen++;
   clear_stale();
 }
 

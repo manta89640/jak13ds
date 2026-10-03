@@ -126,6 +126,19 @@ class CtrVram {
     u64 hash = 0;  // of the VRAM it was decoded from (content_hash)
   };
   std::unordered_map<u64, Entry> m_cache;
+  // (AI-assisted) A direct-mapped cache in front of m_cache, for the textures drawn every frame:
+  // the hash table's lookup takes the bucket modulo (a library divide on the ARM11, ~tens of
+  // cycles) per lookup and per node it passes. Slots are valid while gen == m_cache_gen, which
+  // changes whenever an m_cache entry is erased.
+  struct FrontSlot {
+    u64 key = 0;
+    Entry* entry = nullptr;
+    u32 gen = 0;
+  };
+  static constexpr int kFrontSlotsLog2 = 6;
+  FrontSlot m_front[1 << kFrontSlotsLog2];
+  u32 m_cache_gen = 1;
+  Entry* find_cached(u64 key);
   // invalidated textures, kept (with their GPU texture) in case the same data comes back
   std::unordered_map<u64, Entry> m_stale;
   void clear_stale();

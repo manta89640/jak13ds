@@ -13,6 +13,7 @@
  */
 
 #include "game/graphics/ctr/ctr_gpu.h"
+#include "game/graphics/ctr/CtrTexConv.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -1675,11 +1676,6 @@ void ctr_gpu_wait_vblank(int min_vblanks) {
 
 /* ---------------- textures ---------------- */
 
-static inline u32 morton8(u32 x, u32 y) {
-  return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
-         ((y & 4) << 3);
-}
-
 /* Settings (render.ini, see CtrSettings). */
 static int g_rgba4_as_rgba8 = 1;
 
@@ -2145,24 +2141,11 @@ static int tex_commit(C3D_Tex* tex, void* buf, int on_vram) {
   return 1;
 }
 
-/* linear RGBA8 (top row first) -> the GPU's tiled RGBA8 (A, B, G, R; bottom row first) */
-static void swizzle_rgba8(uint8_t* dst, int w, int h, const uint8_t* rgba) {
-  /* tiled: 8x8 tiles in rows, morton order inside a tile */
-  const int tiles_x = w / 8;
-  for (int y = 0; y < h; y++) {
-    /* the GPU samples t = 0 from the last row in memory: store the image bottom row first */
-    const int ty = h - 1 - y;
-    const uint8_t* p = rgba + 4 * y * w;
-    for (int x = 0; x < w; x++, p += 4) {
-      u32 tile = (u32)((ty / 8) * tiles_x + (x / 8));
-      u32 off = (tile * 64 + morton8(x & 7, ty & 7)) * 4;
-      /* GPU_RGBA8 is stored as A, B, G, R */
-      dst[off + 0] = p[3];
-      dst[off + 1] = p[2];
-      dst[off + 2] = p[1];
-      dst[off + 3] = p[0];
-    }
-  }
+/* linear RGBA8 (top row first) -> the GPU's tiled RGBA8 (A, B, G, R; bottom row first): 8x8 tiles
+ * in rows, morton order inside a tile (CtrTexConv.h) */
+__attribute__((noinline)) static void swizzle_rgba8(uint8_t* dst, int w, int h,
+                                                    const uint8_t* rgba) {
+  ctr_tile_texels(dst, w, h, rgba, CTR_CONV_RGBA8);
 }
 
 int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
@@ -2249,12 +2232,6 @@ void ctr_gpu_set_compact_textures(int on) {
 }
 
 /* ---------------- (AI-assisted) compact textures ---------------- */
-
-/* the texel at image (x, y) (y = 0 at the top) in the tiled layout (see swizzle_rgba8) */
-static inline u32 tiled_texel(int x, int y, int w, int h) {
-  const int ty = h - 1 - y;
-  return (u32)((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8((u32)x & 7, (u32)ty & 7);
-}
 
 /* Is a gray texture a radial gradient around its center (glows, light halos)? Its texels must be
  * within a small error of the average at their distance from the center (distances past the edge
@@ -2403,35 +2380,26 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
     release_tex_slot(slot);
     return -1;
   }
-  uint8_t* d8 = (uint8_t*)tex->data;
-  uint16_t* d16 = (uint16_t*)tex->data;
-  for (int y = 0; y < h; y++) {
-    const uint8_t* p = rgba + 4 * y * w;
-    for (int x = 0; x < w; x++, p += 4) {
-      const u32 o = tiled_texel(x, y, w, h);
-      const u32 a2 = p[3] >= 0x80 ? 255u : (u32)p[3] * 2u; /* GS alpha doubled: 0xff = 1.0 */
-      switch (fmt) {
-        case GPU_L8:
-          d8[o] = p[1];
-          break;
-        case GPU_LA8:
-          d8[2 * o] = (uint8_t)a2; /* stored A, L */
-          d8[2 * o + 1] = p[1];
-          break;
-        case GPU_RGB565:
-          d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
-          break;
-        case GPU_RGBA5551:
-          d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 3) << 6) | ((p[2] >> 3) << 1) |
-                              (p[3] ? 1 : 0));
-          break;
-        default: /* GPU_RGBA4 */
-          d16[o] = (uint16_t)(((p[0] >> 4) << 12) | ((p[1] >> 4) << 8) | ((p[2] >> 4) << 4) |
-                              (a2 >> 4));
-          break;
-      }
-    }
+  /* (AI-assisted) 4x2 texel groups straight into the tiled layout (CtrTexConv.h) */
+  int conv;
+  switch (fmt) {
+    case GPU_L8:
+      conv = CTR_CONV_L8;
+      break;
+    case GPU_LA8:
+      conv = CTR_CONV_LA8;
+      break;
+    case GPU_RGB565:
+      conv = CTR_CONV_RGB565;
+      break;
+    case GPU_RGBA5551:
+      conv = CTR_CONV_RGBA5551;
+      break;
+    default:
+      conv = CTR_CONV_RGBA4;
+      break;
   }
+  ctr_tile_texels(tex->data, w, h, rgba, conv);
   tex_flush_now(tex);
   t->pool = -1;
   t->levels = 1;
@@ -3478,18 +3446,11 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
       release_tex_slot(slot);
       return -1;
     }
-    const uint16_t* src = (const uint16_t*)data;
     int n = size / 2;
     if (n > w * h) {
       n = w * h;
     }
-    for (int i = 0; i < n; i++) {
-      const uint16_t v = src[i];
-      dst[4 * i + 0] = (uint8_t)((v & 0xf) * 17);
-      dst[4 * i + 1] = (uint8_t)(((v >> 4) & 0xf) * 17);
-      dst[4 * i + 2] = (uint8_t)(((v >> 8) & 0xf) * 17);
-      dst[4 * i + 3] = (uint8_t)(((v >> 12) & 0xf) * 17);
-    }
+    ctr_rgba4_to_rgba8((uint32_t*)dst, (const uint8_t*)data, n); /* byte k = nibble k * 17 */
     if (!tex_commit(tex, dst, on_vram)) {
       release_tex_slot(slot);
       return -1;
