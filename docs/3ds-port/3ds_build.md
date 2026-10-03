@@ -209,16 +209,24 @@ A `.3dsx` runs inside another title's memory:
 buttons and sticks per game frame, `wait *target* <state>` (stops the script's clock until Jak is
 in that state), `print SYM`, `pos *target*` (position in meters and state), `continue NAME`
 (jumps to a checkpoint: `(start 'play (get-continue-by-name *game-info* NAME))`, for example
-`beach-start`), `crash` (tests the crash screen), `exit`.
+`beach-start`), `teleport TYPE JOINT DY` (puts Jak on the first surface below a point DY meters
+above a joint of the nearest process of that type, for tests of moving platforms), `jpos TYPE
+JOINT` (logs that joint, the process's rider count and Jak), `crash` (tests the crash screen),
+`exit`.
 
 - 3DS: `pad_script = FILE` in `config.ini` (`stage_sd.sh --pad-script FILE` copies it to `sdmc:/3ds/jak1/pad_script.txt`).
 - PC: `OPENGOAL_PAD_SCRIPT=FILE gk ...` (with `--null-gfx`, or `--ctr-gfx` to get frames).
+  `OPENGOAL_NULL_GFX_FPS=30` paces the null renderer at 30 Hz like the 3DS's frame rate cap, so
+  the game runs with time ratio 2 as on the 3DS.
 - `platform/3ds/tests/gameplay.pad`: title -> Start -> New Game (taps Cross, fine with an empty
   save) -> skips the intro cutscene (taps Triangle) -> waits for `target-stance` on Geyser Rock ->
   walks forward, jumps while walking, jumps, punches, spin kicks, crouches, walks left and right,
   logging Jak's position and state after each step.
 - `platform/3ds/tests/ocean.pad`: the title screen (village1), Geyser Rock, then the checkpoints
   `village1-hut` and `beach-start`, turning the camera around at each (use with `--screenshots`).
+- `platform/3ds/tests/minecart.pad`: Jak on a Volcanic Crater minecart (`village3-warp`), logging
+  the cart, its rider count and Jak for a lap of the rail: riding works when Jak stays ~1.2 m above
+  the cart's joint with `riders 1`.
 
 ```sh
 platform/3ds/tools/run_emu.sh --seconds 900 --out build-3ds/emu-game \

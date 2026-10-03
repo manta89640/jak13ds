@@ -26,6 +26,13 @@ struct Entry {
   std::vector<std::string> logs;
   std::vector<std::string> positions;
   std::vector<std::string> continues;
+  struct Joint {
+    std::string type;
+    int joint = 0;
+    float dy = 0;
+    bool teleport = false;
+  };
+  std::vector<Joint> joints;  // (AI-assisted) teleport / jpos
   std::string wait_sym, wait_state;
   bool exit = false;
   bool handoff = false;
@@ -56,6 +63,7 @@ ExitHook g_exit_hook = nullptr;
 ContinueHook g_continue_hook = nullptr;
 SaveHook g_save_hook = nullptr;
 ShotHook g_shot_hook = nullptr;
+JointHook g_joint_hook = nullptr;
 
 // PadData::ButtonIndex
 int button_index(const std::string& name) {
@@ -117,6 +125,14 @@ void load() {
         std::string name;
         ss >> name;
         e.continues.push_back(name);
+      } else if (item == "teleport" || item == "jpos") {
+        Entry::Joint j;
+        j.teleport = item == "teleport";
+        ss >> j.type >> j.joint;
+        if (j.teleport) {
+          ss >> j.dy;
+        }
+        e.joints.push_back(j);
       } else if (item == "wait") {
         ss >> e.wait_sym >> e.wait_state;
       } else if (item == "exit") {
@@ -210,6 +226,13 @@ PadState next_frame() {
         lg::info("[pad script] frame {}: {} has no position", frame, p);
       }
     }
+    for (auto& j : e.joints) {
+      lg::info("[pad script] frame {}: {} {} {}", frame, j.teleport ? "teleport" : "jpos", j.type,
+               j.joint);
+      if (g_joint_hook) {
+        g_joint_hook(j.type.c_str(), j.joint, j.dy, j.teleport);
+      }
+    }
     for (auto& name : e.continues) {
       lg::info("[pad script] frame {}: continue {}", frame, name);
       if (g_continue_hook) {
@@ -271,6 +294,10 @@ void set_save_hook(SaveHook hook) {
 
 void set_shot_hook(ShotHook hook) {
   g_shot_hook = hook;
+}
+
+void set_joint_hook(JointHook hook) {
+  g_joint_hook = hook;
 }
 
 void set_continue_hook(ContinueHook hook) {

@@ -115,7 +115,7 @@
    (rider            collide-sticky-rider 1 :inline))
   (:methods
    (new (symbol type int) _type_)
-   (add-rider! (_type_ process-drawable) collide-sticky-rider)
+   (add-rider! (_type_ handle) collide-sticky-rider) ;; (AI-assisted) handle, not process-drawable: C backend ABI
    (reset! (_type_) int)))
 
 (defmethod reset! ((this collide-sticky-rider-group))

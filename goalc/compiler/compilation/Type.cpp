@@ -996,12 +996,95 @@ void Compiler::check_c_abi_function_cast(const goos::Object& form,
   }
 }
 
+namespace {
+/*!
+ * (AI-assisted) The plain integer types: int, uint, int64, uint64 and their abstract parents.
+ */
+bool c_abi_plain_int(const TypeSpec& t) {
+  const auto& b = t.base_type();
+  return b == "int" || b == "uint" || b == "int64" || b == "uint64" || b == "integer" ||
+         b == "sinteger" || b == "uinteger";
+}
+}  // namespace
+
+/*!
+ * (AI-assisted) A named 64-bit integer type: an integer type of 8 bytes that isn't a plain one
+ * (handle, time-frame, seconds, binteger, 64-bit enums and bitfields). Its values can have a
+ * meaningful upper half.
+ */
+bool Compiler::c_abi_is_named_wide_int(const TypeSpec& t) {
+  if (t.arg_count() != 0 || c_abi_plain_int(t)) {
+    return false;
+  }
+  try {
+    return m_ts.tc(TypeSpec("integer"), t) && m_ts.lookup_type(t)->get_load_size() == 8;
+  } catch (std::exception&) {
+    return false;
+  }
+}
+
+/*!
+ * (AI-assisted) C backend, ABI version 3 (docs/3ds-port/c_backend.md): an argument whose type is an
+ * address (structure, pointer, pair and their children) or a float is passed as its low 32 bits,
+ * so a 64-bit value that is cast to such a type to get past the type checker loses its upper half
+ * at the next call, while the native backends pass the whole register. Warns about
+ * 1. a value of a named 64-bit integer type (directly or through other casts, as in
+ *    (the-as foo (the-as uint64 h))) cast to an address or float type, and
+ * 2. a parameter of an address or float type cast to a named 64-bit integer type: the callee half
+ *    of the same mistake (callers that go through process-spawn, go or other untyped paths don't
+ *    need a cast). Jak 1 had both halves in add-rider! and target-final-door (handles).
+ * The plain integer types are not checked: GOAL code keeps addresses (constants, address
+ * arithmetic), float bits and untyped 64-bit slots (event-message-block params, sparticle userdata,
+ * thread registers) in them. An audit of all such casts in Jak 1 found only 32-bit values there
+ * (see c_backend.md).
+ */
+void Compiler::check_c_abi_narrowing_cast(const goos::Object& form,
+                                          Val* value,
+                                          const TypeSpec& to,
+                                          Env* env) {
+  if (!m_c_backend) {
+    return;
+  }
+  if (c_arg_class(&m_ts, to) != CArgClass::WIDE) {
+    for (Val* v = value; v;) {
+      if (c_abi_is_named_wide_int(v->type())) {
+        print_compiler_warning(
+            "C backend: a {} cast to {} loses its upper half when it is passed as an argument: "
+            "{}\n",
+            v->type().print(), to.print(), form.print());
+        break;
+      }
+      auto* alias = dynamic_cast<AliasVal*>(v);
+      if (!alias || c_arg_class(&m_ts, v->type()) != CArgClass::WIDE) {
+        break;  // an inner cast to a narrow type was checked by itself
+      }
+      v = alias->base;
+    }
+  } else if (c_abi_is_named_wide_int(to)) {
+    Val* v = value;
+    while (auto* alias = dynamic_cast<AliasVal*>(v)) {
+      v = alias->base;
+    }
+    if (auto* fe = env->function_env()) {
+      for (const auto& [sym, reg] : fe->params) {
+        if (reg == v && c_arg_class(&m_ts, reg->type()) != CArgClass::WIDE) {
+          print_compiler_warning(
+              "C backend: parameter {} of type {} is cast to {}, but it was passed without its "
+              "upper half: {}\n",
+              sym.name_ptr, reg->type().print(), to.print(), form.print());
+        }
+      }
+    }
+  }
+}
+
 Val* Compiler::compile_the_as(const goos::Object& form, const goos::Object& rest, Env* env) {
   auto args = get_va(form, rest);
   va_check(form, args, {{}, {}}, {});
   auto desired_ts = parse_typespec(args.unnamed.at(0), env);
   auto base = compile_error_guard(args.unnamed.at(1), env);
   check_c_abi_function_cast(form, base->type(), desired_ts);
+  check_c_abi_narrowing_cast(form, base, desired_ts, env);
   auto result = env->function_env()->alloc_val<AliasVal>(desired_ts, base);
   if (base->settable()) {
     result->mark_as_settable();
@@ -1042,6 +1125,7 @@ Val* Compiler::compile_the(const goos::Object& form, const goos::Object& rest, E
     }
   }
 
+  check_c_abi_narrowing_cast(form, base, desired_ts, env);
   auto result = env->function_env()->alloc_val<AliasVal>(desired_ts, base);
   if (base->settable()) {
     result->mark_as_settable();

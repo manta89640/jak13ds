@@ -23,6 +23,14 @@
  *   log TEXT  write TEXT to the log
  *   continue NAME  (start 'play (get-continue-by-name *game-info* NAME)): jump to a checkpoint,
  *             for example "continue beach-start" (tests of other levels)
+ *   teleport TYPE JOINT DY  (AI-assisted, tests of moving platforms) put Jak, at rest, on the
+ *             first surface below the point DY meters above joint JOINT (node-list index) of the
+ *             process-drawable of type TYPE whose joint is nearest to him, for example
+ *             "teleport minecartsteel 4 2" (onto the load of a Volcanic Crater minecart,
+ *             platform/3ds/tests/minecart.pad). goal_src/jak1/pc/progress-pc.gc pad-script-teleport.
+ *   jpos TYPE JOINT  (AI-assisted) log where that joint (of the nearest such process) and Jak
+ *             are, in meters, Jak's state, and how many riders the process found in its last
+ *             detect-riders! (-1: not a platform) (pad-script-jpos)
  *   save      an autosave, as after a power cell (pad-script-auto-save, 3DS)
  *   shot      (AI-assisted) a screenshot (PC OpenGL renderer: like F2, into the config
  *             folder's screenshots; for reference pictures to compare the 3DS renderer with)
@@ -81,6 +89,10 @@ void set_exit_hook(ExitHook hook);
 //! (AI-assisted) Called for "save": an autosave, as after a power cell (tests the save path).
 using SaveHook = void (*)();
 void set_save_hook(SaveHook hook);
+
+//! (AI-assisted) Called for "teleport" (teleport true) and "jpos" (teleport false).
+using JointHook = void (*)(const char* type, int joint, float dy, bool teleport);
+void set_joint_hook(JointHook hook);
 
 //! (AI-assisted) Called for "shot".
 using ShotHook = void (*)();

@@ -754,6 +754,11 @@ class Compiler {
   void check_c_abi_function_cast(const goos::Object& form,
                                  const TypeSpec& from,
                                  const TypeSpec& to);
+  bool c_abi_is_named_wide_int(const TypeSpec& t);
+  void check_c_abi_narrowing_cast(const goos::Object& form,
+                                  Val* value,
+                                  const TypeSpec& to,
+                                  Env* env);
   Val* compile_c_abi_method_wide_mask(const goos::Object& form,
                                       const goos::Object& rest,
                                       Env* env);

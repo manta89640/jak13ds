@@ -63,6 +63,78 @@
   (auto-save-command 'save 0 0 *default-pool*)
   0)
 
+;; (AI-assisted) pad scripts (game/sce/pad_script.h "teleport" / "jpos", tests of moving
+;; platforms): the process-drawable of type tp whose joint (node-list index) is nearest to Jak.
+(define *pad-script-joint-type* (the-as type #f))
+
+(define *pad-script-joint-index* 0)
+
+(define *pad-script-joint-best* (the-as process-drawable #f))
+
+(define *pad-script-joint-dist* 0.0)
+
+(defun pad-script-nearest-joint ((tp type) (joint int) (pos vector))
+  "The process-drawable of type tp whose joint is nearest to Jak (#f if none), the joint's
+   position in pos."
+  (set! *pad-script-joint-type* tp)
+  (set! *pad-script-joint-index* joint)
+  (set! *pad-script-joint-best* #f)
+  (set! *pad-script-joint-dist* -1.0)
+  (when *target*
+    (iterate-process-tree *active-pool*
+                          (lambda ((p process-drawable))
+                            (when (and (= (-> p type) *pad-script-joint-type*)
+                                       (nonzero? (-> p node-list))
+                                       (< *pad-script-joint-index* (-> p node-list length)))
+                              (let ((d (vector-vector-distance (vector<-cspace! (new 'stack-no-clear 'vector)
+                                                                                (-> p node-list data *pad-script-joint-index*))
+                                                               (-> *target* control trans))))
+                                (when (or (< *pad-script-joint-dist* 0.0) (< d *pad-script-joint-dist*))
+                                  (set! *pad-script-joint-dist* d)
+                                  (set! *pad-script-joint-best* p))))
+                            (none))
+                          *null-kernel-context*))
+  (let ((pd *pad-script-joint-best*))
+    (if pd
+      (vector<-cspace! pos (-> pd node-list data joint))
+      (format 0 "[pad script] no ~A with joint ~D~%" tp joint))
+    pd))
+
+(defun pad-script-jpos ((tp type) (joint int))
+  "jpos: log where that joint and Jak are (meters)."
+  (let* ((pos (new 'stack-no-clear 'vector))
+         (pd (pad-script-nearest-joint tp joint pos)))
+    (when pd
+      (format 0 "[pad script] ~A pid ~D joint ~D at (~,,3M, ~,,3M, ~,,3M), " (-> pd type) (-> pd pid) joint (-> pos x) (-> pos y) (-> pos z))
+      ;; riders: how many riders the platform found in its last detect-riders! (-1: not a platform)
+      (let ((riders (if (and (nonzero? (-> pd root))
+                             (type-type? (-> pd root type) collide-shape)
+                             (nonzero? (-> (the-as collide-shape (-> pd root)) riders))
+                             (-> (the-as collide-shape (-> pd root)) riders))
+                      (-> (the-as collide-shape (-> pd root)) riders num-riders)
+                      -1)))
+        (format 0 "riders ~D, Jak at (~,,3M, ~,,3M, ~,,3M) ~A~%"
+                riders
+                (-> *target* control trans x)
+                (-> *target* control trans y)
+                (-> *target* control trans z)
+                (-> *target* state name)))))
+  0)
+
+(defun pad-script-teleport ((tp type) (joint int) (dy float))
+  "teleport: put Jak on the first surface below the point dy above that joint, at rest."
+  (let* ((pos (new 'stack-no-clear 'vector))
+         (pd (pad-script-nearest-joint tp joint pos)))
+    (when pd
+      (let ((cs (-> *target* control)))
+        (+! (-> pos y) dy)
+        (move-to-point! cs pos)
+        (vector-reset! (-> cs transv))
+        (move-to-ground cs 0.0 (meters 20) #t (-> cs root-prim collide-with))
+        (format 0 "[pad script] teleport Jak to (~,,3M, ~,,3M, ~,,3M), " (-> cs trans x) (-> cs trans y) (-> cs trans z))
+        (format 0 "below ~A pid ~D joint ~D + ~,,3M~%" (-> pd type) (-> pd pid) joint dy))))
+  0)
+
 (defun progress-fast-save-and-start-speedrun ((category speedrun-category))
   "saves to first slot, updates last-slot-saved for cursor, then starts speedrun"
   (set! (-> *progress-state* last-slot-saved) 0)

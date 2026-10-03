@@ -434,7 +434,7 @@
        (('fishing) (go target-fishing (process->handle (the-as process (-> arg3 param 1)))))
        (('final-door)
         (go target-final-door
-            (the-as basic (process->handle (the-as process (-> arg3 param 1))))
+            (process->handle (the-as process (-> arg3 param 1))) ;; (AI-assisted) no cast to basic: C backend ABI
             (process->handle (the-as process (-> arg3 param 2)))))))
     (('play-anim) (go target-play-anim (the-as string (-> arg3 param 0)) (the-as handle arg1)))
     (('clone-anim) (go target-clone-anim (process->handle (the-as process (-> arg3 param 0)))))
