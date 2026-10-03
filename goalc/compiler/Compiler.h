@@ -128,6 +128,10 @@ class Compiler {
   GameVersion m_version;
   emitter::InstructionSet m_instr_set;
   bool m_c_backend = false;
+  //! (AI-assisted) C backend: symbols that don't hold a function of a compiled module: declared
+  //! in kernel-defs.gc (functions of the C++ runtime) or defined to something other than a
+  //! lambda, and not defined by a lambda since. Their calls are not guarded direct calls.
+  std::unordered_set<std::string> m_c_runtime_functions;
   //! write the C module for an object and build it as a shared library for the runtime to load
   void build_c_module(const std::string& obj_name, const std::string& source, u64 hash);
   TypeSystem m_ts;

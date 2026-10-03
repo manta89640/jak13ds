@@ -7,6 +7,9 @@
 
 #pragma once
 
+#include <string>
+#include <unordered_set>
+
 #include "Env.h"
 
 #include "common/versions/versions.h"
@@ -28,6 +31,8 @@ class CodeGenerator {
   const std::string& c_source() const { return m_c_source; }
   u64 c_hash() const { return m_c_hash; }
   emitter::ObjectGeneratorStats get_obj_stats() const { return m_gen.get_stats(); }
+  //! C backend: calls of these symbols are never guarded direct calls (runtime functions)
+  void set_c_no_guard_symbols(const std::unordered_set<std::string>* s) { m_c_no_guard = s; }
 
  private:
   void do_function(FunctionEnv* env, int f_idx);
@@ -41,4 +46,5 @@ class CodeGenerator {
   bool m_c_backend = false;
   std::string m_c_source;
   u64 m_c_hash = 0;
+  const std::unordered_set<std::string>* m_c_no_guard = nullptr;
 };

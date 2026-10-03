@@ -37,6 +37,7 @@ Val* Compiler::compile_define(const goos::Object& form, const goos::Object& rest
   auto as_lambda = dynamic_cast<LambdaVal*>(compiled_val);
   auto in_gpr = compiled_val->to_gpr(form, fe);
   if (as_lambda) {
+    m_c_runtime_functions.erase(symbol_string(sym));
     // there are two cases in which we save a function body that is passed to a define:
     // 1. It generated code [so went through the compiler] and the allow_inline flag is set.
     // 2. It didn't generate code [so explicitly with :inline-only lambdas]
@@ -88,6 +89,9 @@ Val* Compiler::compile_define(const goos::Object& form, const goos::Object& rest
   }
 
   if (!as_lambda) {
+    // (AI-assisted) C backend: not a function of a compiled module (for example
+    // `(define format _format)` or a mips2c function), don't guard calls of it.
+    m_c_runtime_functions.insert(symbol_string(sym));
     // Don't double-add functions as globals
     m_symbol_info.add_global(symbol_string(sym), in_gpr->type().base_type(), form, docstring);
   }
@@ -135,6 +139,13 @@ Val* Compiler::compile_define_extern(const goos::Object& form, const goos::Objec
 
   m_symbol_types.set(sym.as_symbol(), new_type);
   m_symbol_info.add_fwd_dec(symbol_string(sym), form);
+  // (AI-assisted) C backend: functions of the C++ runtime are declared in kernel-defs.gc
+  if (new_type.base_type() == "function") {
+    auto info = m_goos.reader.db.try_get_short_info(form);
+    if (info && info->filename.find("kernel-defs.gc") != std::string::npos) {
+      m_c_runtime_functions.insert(symbol_string(sym));
+    }
+  }
   return get_none();
 }
 

@@ -14,6 +14,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/common_types.h"
@@ -81,6 +82,18 @@ class CFunctionEmitter {
 
   std::string ret_type_name() const { return m_ret_is_128 ? "v128" : "u64"; }
 
+  // (AI-assisted) what a register is known to hold, for guarded direct calls (see GC_GCALL in
+  // goal_c_ops.h). Only a hint: forgotten on every other write and at every label.
+  //! rv now holds the value of the global symbol `name`
+  void set_known_symbol(const RegVal* rv, const std::string& name);
+  //! rv now holds the address of function f_idx of this object
+  void set_known_function(const RegVal* rv, int f_idx);
+  //! the symbol whose value rv holds, or nullptr
+  const std::string* known_symbol(const RegVal* rv) const;
+  //! the function of this object whose address rv holds, or -1
+  int known_function(const RegVal* rv) const;
+  CModuleEmitter* module() { return m_module; }
+
  private:
   enum class Special { NONE, PP, ST, OFF, SP };
   struct VarInfo {
@@ -110,6 +123,11 @@ class CFunctionEmitter {
   //! the statement being built writes the process register
   bool m_pp_written = false;
   bool m_uses_own_seg = false;
+  struct Known {
+    std::string symbol;
+    int function = -1;
+  };
+  std::unordered_map<int, Known> m_known;
 };
 
 class CModuleEmitter {
@@ -135,6 +153,15 @@ class CModuleEmitter {
   //! seg of each function, by function index
   std::map<int, int> function_seg;
 
+  // (AI-assisted) guarded direct calls (GC_GCALL in goal_c_ops.h)
+  //! symbols whose calls are never guarded (functions provided by the runtime), or nullptr
+  const std::unordered_set<std::string>* no_guard_symbols = nullptr;
+  //! index of the call target macro (GC_T<index>) for calls of the function in symbol `name`, or
+  //! -1 when such calls aren't guarded
+  int guard_target(const std::string& name);
+  //! this object stores function f_idx in the symbol `name`
+  void note_define(const std::string& name, int f_idx) { m_defines[name] = f_idx; }
+
  private:
   std::string m_obj_name;
   emitter::ObjectGenerator* m_gen = nullptr;
@@ -144,6 +171,9 @@ class CModuleEmitter {
   std::unordered_map<std::string, int> m_symbol_idx;
   std::vector<emitter::StaticRecord> m_static_tokens;
   std::vector<int> m_function_tokens;
+  std::vector<std::string> m_guard_symbols;
+  std::unordered_map<std::string, int> m_guard_idx;
+  std::map<std::string, int> m_defines;
 };
 
 //! 64-bit FNV-1a, used for module hashes.

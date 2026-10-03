@@ -302,6 +302,46 @@ the stack 93,372 -> 34,948.
 `OPENGOAL_DECI2_PORT` overrides the listener port of gk/goalc/goalc-test, to run tests while
 another gk holds the default port.
 
+### Guarded direct calls and float compares (ABI version 4)
+
+(AI-assisted) The ARM11 never predicts a branch to a register (`blx reg`: 5-7 cycles), and every
+GOAL call was one. The calling convention is the same as version 3; version 4 changes the code
+shape (and needs the matching `goal_c_ops.h`):
+
+- A call of the value of a global symbol is `GC_GCALL(ret, GC_Tk, f, type, (args))`: if the host
+  function in f's stub is the expected target, it is called directly (`bl`), otherwise through the
+  pointer as before. Both calls use the call site's signature, so the result is the same whichever
+  branch runs: a stale or wrong expectation only costs time, and symbols can still be redefined at
+  any time. The fallback stays out of line.
+- Targets (`goal_c_ops.h`, `CModuleEmitter::finish`): a module that stores one of its functions in
+  a symbol (`define`/`defun`, found by following the registers in `CFunctionEmitter`) exports the
+  weak alias `gc_d_<symbol>_<hash>`; callers reference it weakly, so it is 0 (never taken) when
+  nothing defines it. Only static GCC builds (`GC_WEAK_TARGETS`, the 3DS) use aliases. Calls inside
+  a module go through the alias too: a weak alias can be replaced at link time, so GCC never
+  inlines it or applies IPA results that assume the callee's own parameter list (inlining a call
+  whose signature differs would map the float halves positionally, which isn't the ABI). With
+  clang (PC `.so` modules) calls inside a module use the static function (LLVM doesn't inline or
+  analyze calls whose type differs from the function's), other calls are never taken (`gc_nofn`).
+- Not guarded: functions of the C++ runtime (symbols declared in `kernel-defs.gc`, e.g.
+  `_format`, `method-set!`), symbols last defined to something that isn't a lambda (`(define
+  format _format)`, mips2c functions), and method calls (the target depends on the object's type).
+- Float constants are C constants (`gc_bitsf(0x...)`) instead of loads from static data, and float
+  compares are `gc_fcmp(a, b, op)`: when one side is a constant (zero or a normal number), the
+  compare is done on the bits in integer registers (signed order for positive constants, unsigned
+  reversed order for negative ones, exponent tests for zero). VCMP + VMRS waits until every VFP
+  instruction in flight has finished; a float loaded from memory now goes straight to a core
+  register. Exact for every non-NaN value with flush-to-zero semantics (denormals compare like 0,
+  as on the PS2 and in RunFast mode).
+- `gc_cvtt` (float to int) uses `vcvt.s32.f32` on ARM, which already saturates and gives 0 for NaN,
+  instead of three compares.
+
+Measured (Jak 1, 518 modules, devkitARM -O2, module objects): instructions 1,377,731 -> 1,417,153
+(+2.9%; the float changes alone are -6.9%, the guards add ~+10% on top, mostly the out-of-line
+fallbacks), `vcmp`/`vmrs` 11,682/11,722 -> 1,780/1,782, direct `bl` 103 -> 22,367 (23,340 guarded
+sites; the static `blx reg` count stays ~55k because each guarded site keeps its fallback). The
+hot path of a guarded call is `cmp` + a predicted `bne` + `bl` (the expected address is a literal,
+often hoisted out of loops). Not measured on hardware yet.
+
 ## Known later work
 
 - Performance: function bodies still use `u64` for every GPR. Declaring locals whose types are all

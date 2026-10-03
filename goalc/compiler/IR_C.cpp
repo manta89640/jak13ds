@@ -6,6 +6,7 @@
 #include "CEmitter.h"
 #include "Env.h"
 #include "IR.h"
+#include "StaticObject.h"
 
 #include "common/symbols.h"
 
@@ -62,10 +63,18 @@ void IR_LoadSymbolPointer::do_codegen_c(CFunctionEmitter& e) {
 void IR_SetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
   e.line(fmt::format("gc_st_u32(gc_stl, GC_SYMOFF({}), {});", e.symbol(m_dest->name()),
                      e.read(m_src)));
+  // (AI-assisted) a function of this object stored in a global: the target of guarded calls
+  int f_idx = e.known_function(m_src);
+  if (f_idx >= 0) {
+    e.module()->note_define(m_dest->name(), f_idx);
+  }
 }
 
 void IR_GetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, sym_value_load(e, m_src->name(), m_sext));
+  if (!m_sext) {
+    e.set_known_symbol(m_dest, m_src->name());
+  }
 }
 
 void IR_RegSet::do_codegen_c(CFunctionEmitter& e) {
@@ -128,8 +137,19 @@ void IR_FunctionCall::do_codegen_c(CFunctionEmitter& e) {
     sig = "void";
   }
   bool ret_wide = is_128(m_ret->ireg().reg_class);
-  e.line(fmt::format("{} = (({} (*)({}))gc_fn({}))({});", e.write(m_ret),
-                     ret_wide ? "v128" : "u64", sig, e.read(m_func), args));
+  // (AI-assisted) calling the value of a global symbol: call its usual function directly when the
+  // symbol still holds it (GC_GCALL in goal_c_ops.h).
+  const std::string* sym = e.known_symbol(m_func);
+  int guard = sym ? e.module()->guard_target(*sym) : -1;
+  auto f = e.read(m_func);
+  auto ret = e.write(m_ret);
+  if (guard >= 0) {
+    e.line(fmt::format("GC_GCALL({}, GC_T{}, {}, {} (*)({}), ({}));", ret, guard, f,
+                       ret_wide ? "v128" : "u64", sig, args));
+  } else {
+    e.line(fmt::format("{} = (({} (*)({}))gc_fn({}))({});", ret, ret_wide ? "v128" : "u64", sig,
+                       f, args));
+  }
   e.after_call();
 }
 
@@ -142,8 +162,16 @@ void IR_StaticVarAddr::do_codegen_c(CFunctionEmitter& e) {
 }
 
 void IR_StaticVarLoad::do_codegen_c(CFunctionEmitter& e) {
-  auto [base, off] = e.static_access(m_src->rec, 0);
   auto c = m_dest->ireg().reg_class;
+  if (auto* sf = dynamic_cast<const StaticFloat*>(m_src); sf && c == RegClass::FLOAT) {
+    // (AI-assisted) a float constant: let the C compiler see the value (compares against
+    // constants become integer compares, see gc_fcmp). The static data is never written.
+    u32 bits;
+    memcpy(&bits, &sf->value, 4);
+    e.line(fmt::format("{} = gc_bitsf(0x{:x}u);", e.write(m_dest), bits));
+    return;
+  }
+  auto [base, off] = e.static_access(m_src->rec, 0);
   if (c == RegClass::FLOAT) {
     e.line(fmt::format("{} = gc_ld_f32({}, {});", e.write(m_dest), base, off));
   } else if (c == RegClass::VECTOR_FLOAT) {
@@ -155,6 +183,7 @@ void IR_StaticVarLoad::do_codegen_c(CFunctionEmitter& e) {
 
 void IR_FunctionAddr::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, e.function_addr(m_src->idx_in_file));
+  e.set_known_function(m_dest, m_src->idx_in_file);
 }
 
 void IR_IntegerMath::do_codegen_c(CFunctionEmitter& e) {
@@ -284,7 +313,29 @@ void IR_ConditionalBranch::do_codegen_c(CFunctionEmitter& e) {
   auto b = e.read(condition.b);
   std::string cond;
   if (condition.is_float) {
-    cond = fmt::format("{} {} {}", a, op, b);
+    // (AI-assisted) integer compares when one side is a constant, see gc_fcmp in goal_c_ops.h
+    const char* kind = nullptr;
+    switch (condition.kind) {
+      case ConditionKind::EQUAL:
+        kind = "GC_FEQ";
+        break;
+      case ConditionKind::NOT_EQUAL:
+        kind = "GC_FNE";
+        break;
+      case ConditionKind::LEQ:
+        kind = "GC_FLE";
+        break;
+      case ConditionKind::GEQ:
+        kind = "GC_FGE";
+        break;
+      case ConditionKind::LT:
+        kind = "GC_FLT";
+        break;
+      default:
+        kind = "GC_FGT";
+        break;
+    }
+    cond = fmt::format("gc_fcmp({}, {}, {})", a, b, kind);
   } else if (condition.is_signed) {
     cond = fmt::format("(s64){} {} (s64){}", a, op, b);
   } else {
