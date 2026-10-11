@@ -121,6 +121,7 @@ class CtrRenderer {
     double gpu_wait_ms = 0;
     double gpu_busy_ms = 0;
     int gpu_busy_frames = 0;
+    double gpu_active_ms = 0;  // (AI-assisted) from each frame's command list on
     double triangles = 0;
     unsigned int vbuf_peak = 0, vbuf_size = 0;
     int vbuf_dropped = 0;

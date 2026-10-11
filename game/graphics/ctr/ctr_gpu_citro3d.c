@@ -1284,6 +1284,10 @@ static struct {
   volatile u64 done_tick[GT_RING]; /* when it landed, by frame number */
   u64 first_tick[GT_RING];         /* render thread: the frame's first work handed to the GPU */
   u32 first_id[GT_RING];
+  /* (AI-assisted) render thread: the frame's first command list handed to the GPU (pipeline: at
+   * the frame end or a partial submit; gpu_active_ms) */
+  u64 submit_tick[GT_RING];
+  u32 submit_id[GT_RING];
   u32 reported; /* frames up to this one are counted (gt_collect) */
 } s_gt;
 
@@ -1317,6 +1321,15 @@ static void gt_note_first(void) {
   }
 }
 
+/* (AI-assisted) render thread: the frame's first command list is handed over now (if not already) */
+static void gt_note_submit(void) {
+  const u32 n = (u32)g.frame_no;
+  if (s_gt.submit_id[n % GT_RING] != n) {
+    s_gt.submit_tick[n % GT_RING] = svcGetSystemTick();
+    s_gt.submit_id[n % GT_RING] = n;
+  }
+}
+
 /* render thread, at the frame end: the GPU time of the frames whose fence landed since the last
  * call, into g.cur */
 static void gt_collect(void) {
@@ -1342,6 +1355,17 @@ static void gt_collect(void) {
     if (end > start) {
       g.cur.gpu_busy_ms += (float)((double)(end - start) / (SYSCLOCK_ARM11 / 1000.0));
       g.cur.gpu_busy_frames++;
+      /* (AI-assisted) from the frame's command list on (not its clear at the frame begin) */
+      u64 sub = s_gt.submit_id[n % GT_RING] == n ? s_gt.submit_tick[n % GT_RING] : start;
+      if (sub < start) {
+        sub = start;
+      }
+      if (prev > sub && prev <= end) {
+        sub = prev;
+      }
+      if (end > sub) {
+        g.cur.gpu_active_ms += (float)((double)(end - sub) / (SYSCLOCK_ARM11 / 1000.0));
+      }
     }
   }
   s_gt.reported = done;
@@ -1646,6 +1670,89 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 
 static void migrate_small_textures(void);
 
+/* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
+ * The pipeline's frame end used to wait for the GX queue to empty (C3D_FrameBegin: frame N - 1 and
+ * the parts of N already sent), stop it, and only then hand N's command list over with
+ * GX_CMDLIST_FLUSH: the GSP cleans the whole list (130-260 KB) from the CPU cache before the GPU
+ * starts on it, while the GPU sits idle. 1 (clean): the list is closed and cleaned before the
+ * wait, and handed over without the flush. 2 (on): the queue keeps running and the list is queued
+ * behind frame N - 1; the next frame begin waits for frame N - 1 (whose command and vertex buffers
+ * it reuses) with the steady pacing fence instead. libctru's queue only empties its entry list
+ * (gxCmdQueueClear, a panic while it runs) when it is idle, and holds 32 entries: an idle queue
+ * is emptied before new entries, a full running one waited for (overlap2_room). */
+static int s_overlap2 = 1;
+static u32 s_buf_frame[2]; /* mode 2: the frame drawn from s_cmdbufs / s_vbufs [k] (0: none) */
+static int s_end_mode2;    /* the last pipelined frame end was mode 2 (deletes at the begin) */
+static float s_begin_wait_ms;
+static u32* s_fin_list;    /* the frame's closed command list (pipeline_close_list) */
+static u32 s_fin_words;
+
+void ctr_gpu_set_frame_overlap2(int mode) {
+  s_overlap2 = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+}
+
+/* mode 2 needs the fence (frame_pacing = steady) */
+static int overlap2_on(void) {
+  return s_overlap2 == 2 && s_pres.on;
+}
+
+/* before adding n entries to the GX queue (mode 2) */
+static void overlap2_room(int n) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  const int idle = gxCmdQueueWait(q, 0);
+  if (idle || q->numEntries + n >= q->maxEntries) {
+    if (!idle) {
+      gxCmdQueueWait(q, -1);
+    }
+    gxCmdQueueStop(q);
+    gxCmdQueueClear(q);
+  }
+  gxCmdQueueRun(q); /* active (an added entry starts it); no-op while it runs */
+}
+
+/* mode 2: until frame id is done (its fence landed: its draws, transfer and everything before);
+ * returns the milliseconds waited */
+static float overlap2_wait_frame(u32 id) {
+  if (!id) {
+    return 0.0f;
+  }
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  const u64 t0 = svcGetSystemTick();
+  for (;;) {
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
+    if ((s32)(*(volatile u32*)s_pres.fence - id) >= 0) {
+      break;
+    }
+    if (gxCmdQueueWait(q, 0)) {
+      if (q->lastEntry >= q->numEntries) {
+        break; /* nothing left to run (the queue was emptied after the frame finished) */
+      }
+      gxCmdQueueRun(q);
+    }
+    gspWaitForAnyEvent();
+  }
+  return (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
+}
+
+/* modes 1 and 2: the rest of the frame's command list closed as C3Di_SplitFrame does (the
+ * framebuffer flush and the early depth clear after its draws) and cleaned from the CPU cache:
+ * s_fin_list, s_fin_words (0: nothing left) */
+static void pipeline_close_list(void) {
+  s_fin_list = NULL;
+  s_fin_words = 0;
+  if (!gpuCmdBufOffset) {
+    return;
+  }
+  if (__C3D_Context.flags & C3DiF_DrawUsed) {
+    __C3D_Context.flags &= ~(u32)C3DiF_DrawUsed;
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+  }
+  GPUCMD_Split(&s_fin_list, &s_fin_words);
+  cache_flush_now(s_fin_list, s_fin_words * 4);
+}
+
 /* the parts of the GPU state a frame starts from (both modes) */
 static void frame_state_reset(void) {
   s_pres.cur_release = s_pres.next_release;
@@ -1711,6 +1818,17 @@ static void pipeline_frame_begin(u32 clear) {
     g.screenshot_state = 0;
   }
   s_k ^= 1;
+  s_begin_wait_ms = 0.0f;
+  if (overlap2_on()) {
+    /* (AI-assisted) frame_overlap2 = on: the frame before the last one drew from these buffers;
+     * then the deletes (as the frame end does in the other modes; not twice after one of those) */
+    s_begin_wait_ms = overlap2_wait_frame(s_buf_frame[s_k]);
+    s_buf_frame[s_k] = 0;
+    if (s_end_mode2) {
+      process_pending_deletes(1);
+    }
+    overlap2_room(8);
+  }
   GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
   g.cmd_base = gpuCmdBuf;
   g.vbuf = s_vbufs[s_k];
@@ -1731,6 +1849,7 @@ static void pipeline_frame_begin(u32 clear) {
   C3D_SetFrameBuf(fb);
   set_top_viewport();
   frame_state_reset();
+  g.cur.gpu_wait_ms = s_begin_wait_ms; /* (AI-assisted) frame_overlap2 = on (after the reset) */
 }
 
 /* send what's built so far to the GPU (pipeline: our command buffer, citro3d isn't in a frame) */
@@ -1742,7 +1861,11 @@ static void pipeline_submit(void) {
   u32* list;
   u32 words;
   GPUCMD_Split(&list, &words);
+  if (overlap2_on()) {
+    overlap2_room(4); /* (AI-assisted) this list and a copy or two after it */
+  }
   if (words) {
+    gt_note_submit();
     GX_ProcessCommandList(list, words * 4, GX_CMDLIST_FLUSH);
   }
 }
@@ -1890,6 +2013,7 @@ void ctr_gpu_submit_partial(void) {
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
     gt_note_first(); /* (AI-assisted) the queue (stopped since C3D_FrameBegin) starts here */
+    gt_note_submit();
     gxCmdQueueRun(&__C3D_Context.gxQueue);
   }
   s_partial_draws = g.cur.draws;
@@ -1932,7 +2056,21 @@ void ctr_gpu_frame_end(void) {
   flush_vbuf();
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
   g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
-  if (s_pipeline) {
+  /* (AI-assisted) frame_overlap2: 0 the old frame end, 1 the list cleaned before the wait, 2 no
+   * wait (the list queued behind the frame the GPU draws) */
+  const int ov2 = s_pipeline ? (overlap2_on() ? 2 : (s_overlap2 ? 1 : 0)) : 0;
+  if (ov2) {
+    pipeline_close_list();
+  }
+  if (ov2 == 2) {
+    overlap2_room(5); /* the list, the transfer(s) and the fence */
+    if (s_fin_words) {
+      gt_note_submit();
+      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, 0);
+    }
+    s_buf_frame[s_k] = (u32)g.frame_no;
+    s_end_mode2 = 1;
+  } else if (s_pipeline) {
     /* wait for the previous frame (and this one's parts sent so far), then submit the rest of
      * this frame from our buffer with citro3d (display transfer, buffer swap) */
     u32* buf = gpuCmdBuf;
@@ -1944,6 +2082,12 @@ void ctr_gpu_frame_end(void) {
     process_pending_deletes(1);
     GPUCMD_SetBuffer(buf, size, offset);
     C3D_FrameDrawOn(g.top);
+    gt_note_submit();
+    if (ov2 == 1 && s_fin_words) {
+      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, 0); /* cleaned before the wait */
+    }
+    s_buf_frame[s_k] = 0;
+    s_end_mode2 = 0;
   }
   if (s_pres.on) {
     diag_rt("frame_end: present queue (wait for a free screen buffer)");
@@ -1953,7 +2097,10 @@ void ctr_gpu_frame_end(void) {
    * linear heap (C3D_FrameEnd's default) */
   diag_rt("frame_end: C3D_FrameEnd (submit)");
   gt_note_first(); /* (AI-assisted) without the pipeline the queue starts here (or at a partial) */
-  C3D_FrameEnd(GX_CMDLIST_FLUSH);
+  gt_note_submit();
+  if (ov2 != 2) {
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);
+  }
   diag_rt("frame_end: stats");
   g.in_frame = 0;
   if (g.screenshot_state == 1) {

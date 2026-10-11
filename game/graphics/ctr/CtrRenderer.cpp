@@ -130,6 +130,14 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.merc_gen_lod; }},
     {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
      [](const CtrSettings& s) { return s.clouds; }},
+    // (AI-assisted) gpu-b's keys (Oct 11). frame_overlap2: the config's mode (on; clean when the
+    // config says off) or off (the old frame end)
+    {"frame_overlap2",
+     [](CtrSettings& s, bool on) {
+       static const int kConfigMode = s.frame_overlap2 > 0 ? s.frame_overlap2 : 1;
+       s.frame_overlap2 = on ? kConfigMode : 0;
+     },
+     [](const CtrSettings& s) { return s.frame_overlap2 > 0; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -430,6 +438,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   // (AI-assisted) cull_ties (gpu_profile = ab may switch it between frames)
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
+  // (AI-assisted) frame_overlap2 (gpu_profile = ab may switch it between frames)
+  ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -473,6 +483,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.gpu_wait_ms += gs.gpu_wait_ms;
   m_timing.gpu_busy_ms += gs.gpu_busy_ms;
   m_timing.gpu_busy_frames += gs.gpu_busy_frames;
+  m_timing.gpu_active_ms += gs.gpu_active_ms;
   m_timing.triangles += gs.triangles;
   m_timing.vbuf_peak = std::max(m_timing.vbuf_peak, gs.vbuf_used);
   m_timing.vbuf_size = gs.vbuf_size;
@@ -523,8 +534,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       // misses what was handed over in the middle of a frame)
       const std::string busy =
           m_timing.gpu_busy_frames
-              ? fmt::format("{:.2f} ({} frames)", m_timing.gpu_busy_ms / m_timing.gpu_busy_frames,
-                            m_timing.gpu_busy_frames)
+              ? fmt::format("{:.2f} ({} frames; active {:.2f})",
+                            m_timing.gpu_busy_ms / m_timing.gpu_busy_frames,
+                            m_timing.gpu_busy_frames,
+                            m_timing.gpu_active_ms / m_timing.gpu_busy_frames)
               : std::string("n/a (needs frame_pacing = steady)");
       lg::info(
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "

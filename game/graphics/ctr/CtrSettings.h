@@ -98,6 +98,11 @@ struct CtrSettings {
   bool overlap = false;
   // CPU builds frame N+1 while the GPU draws frame N
   bool pipeline = false;
+  // (AI-assisted) config frame_overlap2 = off | clean | on (with the pipeline; ctr_gpu.h
+  // ctr_gpu_set_frame_overlap2): 0 the old frame end; 1 (clean, default) the frame's command list
+  // cleaned from the CPU cache before waiting for the GPU, handed over without the GSP's flush;
+  // 2 (on) the list queued behind the frame the GPU is drawing, no wait at the frame end
+  int frame_overlap2 = 1;
   // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
   int fps_cap = 30;
   // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game

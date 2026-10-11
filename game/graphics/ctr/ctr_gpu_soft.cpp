@@ -1438,6 +1438,7 @@ void ctr_gpu_submit_partial(void) {}
 int ctr_gpu_set_pipeline(int) {
   return 0;
 }
+void ctr_gpu_set_frame_overlap2(int) {}  // (AI-assisted) no GPU queue here
 void ctr_gpu_set_mip_mode(int) {}
 int ctr_gpu_is_emulator(void) {
   return 0;

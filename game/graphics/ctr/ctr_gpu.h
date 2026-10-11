@@ -349,6 +349,13 @@ void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
 int ctr_gpu_set_pipeline(int on);
+/* (AI-assisted) config.ini frame_overlap2 (with the pipeline): 0 off = the frame end waits for
+ * the GPU, then hands the frame's command list over with a cache flush (the old way); 1 clean =
+ * the list is cleaned from the CPU cache before that wait and handed over without the flush (the
+ * GPU's idle gap between two frames is shorter); 2 on = no wait at the frame end: the list is
+ * queued behind the frame the GPU is drawing (the next frame begin waits for the frame before
+ * that instead, whose buffers it reuses). 2 needs frame_pacing = steady (else 1). Any time. */
+void ctr_gpu_set_frame_overlap2(int mode);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
 int ctr_gpu_is_emulator(void);
 
@@ -486,6 +493,10 @@ typedef struct {
   float gpu_wait_ms;
   float gpu_busy_ms;
   int gpu_busy_frames;
+  /* (AI-assisted) the same frames from the moment their command list was handed to the GPU
+   * (pipeline: the frame end, not the frame begin): done(N) - max(list submitted(N), done(N - 1)).
+   * busy counts the CPU's build time of a pipelined frame too; this doesn't */
+  float gpu_active_ms;
   unsigned int vbuf_used; /* (AI-assisted) immediate vertex buffer bytes this frame (of vbuf_size) */
   unsigned int vbuf_size;
   int vbuf_dropped;       /* draws dropped: the vertex buffer was full */
