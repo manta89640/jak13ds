@@ -132,8 +132,9 @@ struct CtrSettings {
   // level sooner, blurrier, fewer texels read); 0 = none
   float mip_bias = 0.f;
   // (AI-assisted) merc bone rows uploaded as float24 instead of float32 (a quarter fewer uniform
-  // words; the GPU computes in float24 either way)
-  bool skin_rows_f24 = false;
+  // words; the GPU computes in float24 either way). On: Jak and Daxter identical in Azahar, the
+  // float24 uniform path (raw_unif, raw_pack_f24) already draws the level meshes on hardware
+  bool skin_rows_f24 = true;
   // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
