@@ -15,7 +15,10 @@
 .alias intex v1
 .alias inclr v2
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_basic
+.proc main_ctr_basic
   ; (AI-assisted) dph: the position with w = 1, no mov needed
   dph outpos.x, inpos, projection[0]
   dph outpos.y, inpos, projection[1]

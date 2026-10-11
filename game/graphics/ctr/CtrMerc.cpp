@@ -225,9 +225,11 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
-              "{} draws, {} envmap batches, {} draws sorted by texture",
+              "{} draws, {} envmap batches, {} draws sorted by texture, {} with back faces culled "
+              "({} not: mirroring bone)",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
-              m_stats.draws, m_stats.env_batches, m_stats.sorted_draws);
+              m_stats.draws, m_stats.env_batches, m_stats.sorted_draws, m_stats.culled,
+              m_stats.mirrored);
     m_stats = Stats();
   }
 }
@@ -718,6 +720,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // with the model's quantization scale folded in
   float palette_rows[CTR_MAX_PALETTE * 12];
   const c3l::MercDraw* rows_of = nullptr;  // the draw whose palette palette_rows holds
+  // (AI-assisted) cull_merc: a bone of the palette mirrors (its matrix' determinant isn't positive):
+  // that draw's winding is flipped on screen, so it isn't culled. Not for HUD models (their own
+  // projection)
+  const bool cull_merc = ctr_settings().cull_merc && !(flags.bitflags & 8);
+  bool palette_mirrors = false;
   // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
   // there yet)
   // merc_tex_sort: not for models whose vertices change per instance (blend shapes, rewritten
@@ -771,9 +778,21 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (!same_palette) {
       q_rows = ~0u;
     }
+    if (!same_palette) {
+      palette_mirrors = false;
+    }
     for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       const MercMat& m = bones[draw.palette[p]];
       float* rows = &palette_rows[12 * p];
+      if (cull_merc) {
+        const math::Vector4f& a = m.tmat[0];
+        const math::Vector4f& b = m.tmat[1];
+        const math::Vector4f& c = m.tmat[2];
+        const float det = a.x() * (b.y() * c.z() - b.z() * c.y()) -
+                          a.y() * (b.x() * c.z() - b.z() * c.x()) +
+                          a.z() * (b.x() * c.y() - b.y() * c.x());
+        palette_mirrors = palette_mirrors || !(det > 0.f);
+      }
       for (int r = 0; r < 3; r++) {
         rows[4 * r + 0] = -m.tmat[0][r] * model->scale;
         rows[4 * r + 1] = -m.tmat[1][r] * model->scale;
@@ -796,6 +815,17 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       mode.disable_depth_write();
     }
     ctr_draw_state st = ctr_state_from_draw_mode(mode, tex);
+    // (AI-assisted) cull_merc: draws the converter marked (closed enough, wound like the vertex
+    // normals: c3l::kMercDrawCullBack) lose their back faces
+    if (cull_merc && (draw.palette[c3l::kMercDrawFlagsByte] & c3l::kMercDrawCullBack)) {
+      if (palette_mirrors) {
+        m_stats.mirrored++;
+      } else {
+        st.tcc |= CTR_TCC_CULL_BACK;
+        st.tcc |= CTR_TCC_CULL_OWN;
+        m_stats.culled++;
+      }
+    }
     if (envmap) {
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;

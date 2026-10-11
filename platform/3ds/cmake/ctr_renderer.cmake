@@ -44,7 +44,8 @@ find_program(PICASSO picasso HINTS ${DEVKITPRO}/tools/bin ${CTRULIB}/../tools/bi
 
 set(OG3DS_SHADER_CS "")
 foreach(shader ctr_basic ctr_mesh ctr_skin ctr_skin_env ctr_clip ctr_clip2 ctr_ocean ctr_ocean_full ctr_ocean_full_clip
-    ctr_basic_old ctr_mesh_old ctr_mesh_dph ctr_skin_old ctr_skin_env_old ctr_bench_sep)
+    ctr_basic_old ctr_mesh_old ctr_mesh_dph ctr_skin_old ctr_skin_env_old ctr_bench_sep
+    ctr_mesh_old_fa ctr_mesh_fa)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
   set(csrc ${CMAKE_CURRENT_BINARY_DIR}/${shader}_shbin.c)
@@ -57,6 +58,31 @@ foreach(shader ctr_basic ctr_mesh ctr_skin ctr_skin_env ctr_clip ctr_clip2 ctr_o
     COMMENT "Assembling ${shader}.v.pica"
     VERBATIM)
   list(APPEND OG3DS_SHADER_CS ${csrc})
+endforeach()
+
+# (AI-assisted) config.ini shader_groups: the programs in two shared DVLBs (one entry point per
+# file, in this order: ctr_gpu_citro3d.c's kGroupE / kGroupF), so switching between programs of one
+# group uploads no shader code and keeps the uniforms the others don't use (picasso gives every
+# uniform name its own registers in a shbin: 96 vectors for all of a group's)
+set(OG3DS_GROUP_E ctr_basic ctr_basic_old ctr_mesh ctr_mesh_old ctr_mesh_fa ctr_mesh_old_fa ctr_skin
+    ctr_skin_old ctr_clip ctr_clip2)
+set(OG3DS_GROUP_F ctr_skin_env ctr_skin_env_old ctr_ocean ctr_ocean_full ctr_ocean_full_clip)
+foreach(group e f)
+  string(TOUPPER ${group} GROUP)
+  set(group_srcs "")
+  foreach(shader ${OG3DS_GROUP_${GROUP}})
+    list(APPEND group_srcs ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
+  endforeach()
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ctr_group_${group}_shbin.c
+    COMMAND ${PICASSO} -o ${CMAKE_CURRENT_BINARY_DIR}/ctr_group_${group}.shbin ${group_srcs}
+    COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_BINARY_DIR}/ctr_group_${group}.shbin
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/ctr_group_${group}_shbin.c -DNAME=ctr_group_${group}_shbin
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+    DEPENDS ${group_srcs} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+    COMMENT "Assembling shader group ${group}"
+    VERBATIM)
+  list(APPEND OG3DS_SHADER_CS ${CMAKE_CURRENT_BINARY_DIR}/ctr_group_${group}_shbin.c)
 endforeach()
 
 # (AI-assisted) config.ini pica_bench: one DVLB with an entry point per source file (picasso

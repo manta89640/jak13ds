@@ -221,11 +221,36 @@ struct CtrSettings {
   // fog stage (texture combiner pass-through, texture unit 1 off). Off until priced on hardware
   // (gpu_profile ab): switching the unit per draw may cost more than the ramp lookups
   bool fog_stage_skip = false;
+  // (AI-assisted) fog_alpha: level draws whose vertex alpha is 0x80 (~99.5%) get the fog amount in
+  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_fa) and mix in the fog color as a
+  // combiner constant: no fog ramp texture lookups, one vertex output less. The rest keep the
+  // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
+  // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
+  // shadows never read it). Both off until priced on hardware (gpu_profile ab): new shader
+  // programs / register writes that haven't run on a real 3DS yet.
+  // (AI-assisted) levels converted with ctr_level_converter --vista-flat hold an untextured copy of
+  // the vista tier (each texture's average color in the vertex colors, one draw per cell): on uses
+  // it instead of the textured one (Snowy fort: 60 -> 22 vista draws, host). Read at level load
+  // (not switchable while running)
+  bool vista_untextured = false;
+  bool fog_alpha = false;
+  bool tex1_gating = false;
+  // (AI-assisted) the vertex programs from two shared shbins (group E: basic, mesh, skin, clip,
+  // clip2 and their variants; F: skin_env, ocean, ocean_full, ocean_full_clip) instead of one each:
+  // citro3d uploads no shader code at a switch inside a group, and uniforms another program of the
+  // group doesn't use aren't written again. Off until priced on hardware (gpu_profile ab; pica_bench
+  // B2.prog_entry times the switch): shared-DVLB entry points never ran in the game on a real 3DS
+  bool shader_groups = false;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
   bool cull_ties = true;
   bool cull_flip = false;
+  // (AI-assisted) back faces of merc draws the converter marked (c3l kMercDrawCullBack: wound like
+  // their vertex normals, at most 2% of their triangles at an open edge, opaque) are culled, with
+  // cull_ties' winding (flip). Not HUD models, not draws whose palette has a mirroring bone. Needs
+  // levels converted with the current ctr_level_converter (older files: no marks)
+  bool cull_merc = false;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;

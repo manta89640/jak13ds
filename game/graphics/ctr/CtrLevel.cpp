@@ -853,6 +853,11 @@ void build_draw_order(CtrLevelData* out) {
     if (d.kind & c3l::kDrawCullBack) {
       st.tcc |= CTR_TCC_CULL_BACK;
     }
+    // (AI-assisted) fog_alpha: the vertex alpha is 0x80 everywhere in this draw
+    const size_t di = out->draw_states.size();
+    if (di < out->draw_alpha80.size() && out->draw_alpha80[di]) {
+      st.tcc |= CTR_TCC_ALPHA80;
+    }
     // (AI-assisted) opaque, depth written and tested like the early depth test, and the alpha
     // test never fails (the texture's alpha is above its reference everywhere; vertex alpha 0x80):
     // the early depth test may drop what's behind it before texturing
@@ -1084,6 +1089,47 @@ bool CtrLevels::load_file(const fs::path& path,
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
   }
+  {
+    // (AI-assisted) config vista_untextured: a file with both vista tiers (textured CHUNK_KIND_VISTA,
+    // then untextured CHUNK_KIND_VISTA_FLAT, the last chunks: nothing refers to them by index)
+    // keeps the configured one as CHUNK_KIND_VISTA; the other's meshes are never made
+    size_t first_vista = out->chunks.size(), flat = 0;
+    for (size_t ci = 0; ci < out->chunks.size(); ci++) {
+      const u32 k = out->chunks[ci].kind;
+      if ((k == c3l::CHUNK_KIND_VISTA || k == c3l::CHUNK_KIND_VISTA_FLAT) && first_vista > ci) {
+        first_vista = ci;
+      }
+      flat += k == c3l::CHUNK_KIND_VISTA_FLAT;
+    }
+    bool tail = flat > 0;
+    for (size_t ci = first_vista; ci < out->chunks.size() && tail; ci++) {
+      tail = out->chunks[ci].kind == c3l::CHUNK_KIND_VISTA ||
+             out->chunks[ci].kind == c3l::CHUNK_KIND_VISTA_FLAT;
+    }
+    if (tail) {
+      const bool want_flat = ctr_settings().vista_untextured;
+      std::vector<c3l::Chunk> kept(out->chunks.begin(), out->chunks.begin() + first_vista);
+      for (size_t ci = first_vista; ci < out->chunks.size(); ci++) {
+        c3l::Chunk ch = out->chunks[ci];
+        if ((ch.kind == c3l::CHUNK_KIND_VISTA_FLAT) == want_flat) {
+          ch.kind = c3l::CHUNK_KIND_VISTA;
+          kept.push_back(ch);
+        }
+      }
+      lg::info("[ctr] {}: {} vista tier ({} of {} vista chunks)", name,
+               want_flat ? "untextured" : "textured", kept.size() - first_vista,
+               out->chunks.size() - first_vista);
+      out->chunks = std::move(kept);
+    } else {
+      for (auto& ch : out->chunks) {
+        if (ch.kind == c3l::CHUNK_KIND_VISTA_FLAT) {
+          ch.kind = c3l::CHUNK_KIND_UNKNOWN;  // (not where expected: never drawn)
+          ch.draw_count = 0;
+          ch.vis_run_count = 0;
+        }
+      }
+    }
+  }
 
   // (AI-assisted) v10: the visibility runs, all chunks' in one block
   out->chunk_first_run.assign(out->chunks.size(), 0);
@@ -1247,6 +1293,28 @@ bool CtrLevels::load_file(const fs::path& path,
                                   vdst, ch.vertex_count * sizeof(c3l::Vertex));
       if (read_ok && !out->run_spheres.empty()) {
         make_run_spheres(out, (u32)out->meshes.size(), (const c3l::Vertex*)vdst, idst, first, end);
+      }
+      if (read_ok) {
+        // (AI-assisted) fog_alpha (CTR_TCC_ALPHA80): which draws have vertex alpha 0x80 everywhere.
+        // The chunk's vertices first (nearly always all 0x80), the draws' indices only if not
+        const c3l::Vertex* vv = (const c3l::Vertex*)vdst;
+        bool all = true;
+        for (u32 v = 0; v < ch.vertex_count && all; v++) {
+          all = vv[v].rgba[3] == 0x80;
+        }
+        out->draw_alpha80.resize(out->draws.size(), 0);
+        for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+          bool ok = all;
+          if (!ok) {
+            ok = true;
+            const auto& dr = out->draws[d];
+            for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
+              const u16 ix = indices[i];
+              ok = ix < ch.vertex_count && vv[ix].rgba[3] == 0x80;
+            }
+          }
+          out->draw_alpha80[d] = ok ? 1 : 0;
+        }
       }
       mesh = ctr_gpu_mesh_end(mesh, read_ok);
     }

@@ -61,6 +61,9 @@ struct CtrLevelData {
   std::vector<c3l::Chunk> chunks;
   std::vector<c3l::Draw> draws;
   std::vector<ctr_draw_state> draw_states;  // per draw
+  // (AI-assisted) per draw: every vertex it uses has alpha 0x80 (CTR_TCC_ALPHA80, fog_alpha), from
+  // the vertices read at load (0 for chunks made later: the fog ramp path, which is always right)
+  std::vector<u8> draw_alpha80;
   // per draw: sort key for the draws whose order doesn't matter (texture, then GPU state), and
   // whether the order matters (blending, or no depth write: decals); see CtrTfragRenderer
   std::vector<u32> draw_sort_keys;

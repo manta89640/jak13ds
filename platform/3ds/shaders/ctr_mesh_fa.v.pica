@@ -1,0 +1,45 @@
+; (AI-assisted)
+; config.ini fog_alpha with shader_mesh = new: ctr_mesh.v.pica with the fog amount in the color's
+; alpha instead of texcoord1 (see ctr_mesh_old_fa.v.pica for how the combiner uses it). Same
+; uniforms (names, order, values) as ctr_mesh.v.pica. The amount is >= 0 (the game fog's lower
+; clamp is, see mesh_fog_uniforms) and clamped to 1 here (the fog ramp texture clamps at its edge).
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[4]
+.fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255), z: 1.0
+.fvec fog0          ; -(game fog) = fog0.x * w + fog0.z, draw distance fog = fog0.y * w + fog0.w
+.fvec fog1          ; x: -(the game fog's upper clamp), y: the game fog's lower clamp
+
+.constf consts(1.0, 0.5, 0.0, 0.0)
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_mesh_fa
+.proc main_ctr_mesh_fa
+  ; dph: the position's pad (w) counts as 1
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  dph outpos.z, inpos, clip[2]
+  dph r1, inpos, clip[3]
+  mov outpos.w, r1
+
+  ; r2.x = -min(game fog, its upper clamp), r2.y = max(draw distance fog, game fog's lower clamp);
+  ; the fog is the larger of -r2.x and r2.y (the same as clamping the game fog, then the max)
+  mul r2.xy, fog0.xyxy, r1.xyxy
+  add r2.xy, fog0.zwzw, r2.xyxy
+  max r2.xy, fog1.xyxy, r2.xyxy
+  max r3.x, -r2.xxxx, r2.yyyy
+
+  mul outtc0, scales.xxxx, intex
+  mul outclr.xyz, scales.yyyy, inclr
+  min outclr.w, consts.xxxx, r3.xxxx
+  end
+.end

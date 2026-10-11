@@ -1124,6 +1124,7 @@ void ctr_gpu_mesh_delete(int mesh) {
 // (AI-assisted) cull_ties (ctr_gpu_set_cull_flip)
 static int g_soft_cull_flip = 0;
 static int g_soft_cull_enable = 0;
+static int g_soft_fog_alpha = 0;  // (AI-assisted) fog_alpha: only the program choice (statistics)
 
 void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                        const float clip[16],
@@ -1131,7 +1132,8 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                        int first_index,
                        int index_count) {
   sky_hook(state);
-  softstats::prog(1);
+  // (AI-assisted) fog_alpha: the 3DS backend's second mesh program (9) for CTR_TCC_ALPHA80 draws
+  softstats::prog(g_soft_fog_alpha && state && (state->tcc & CTR_TCC_ALPHA80) ? 9 : 1);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
     return;
   }
@@ -1382,6 +1384,15 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
     if (!ok) {
       continue;
     }
+    // (AI-assisted) cull_merc (CTR_TCC_CULL_OWN), the level meshes' winding test
+    if (state && (state->tcc & CTR_TCC_CULL_BACK) &&
+        (g_soft_cull_enable || (state->tcc & CTR_TCC_CULL_OWN))) {
+      const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
+                      (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+      if (g_soft_cull_flip ? a > 0 : a < 0) {
+        continue;
+      }
+    }
     raster_triangle(*state, tri, true);
     g_soft.cur.triangles++;
     softstats::cur->tris++;
@@ -1399,6 +1410,19 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out) {
 // the software backend has no fog
 void ctr_gpu_set_mesh_fog(const float*, const float*, uint8_t, uint8_t, uint8_t) {}
 void ctr_gpu_set_mesh_nofog(int) {}  // (AI-assisted) fog_stage_skip: no fog stage here either
+// (AI-assisted) fog_alpha, tex1_gating: no fog and one texture unit here
+void ctr_gpu_set_fog_alpha(int on) {
+  g_soft_fog_alpha = on;
+}
+void ctr_gpu_set_tex1_gating(int) {}
+// (AI-assisted) shader_groups: one program set here (statistics count program switches as before)
+void ctr_gpu_set_shader_groups(int) {}
+int ctr_gpu_shader_groups_ready(void) {
+  return 1;
+}
+int ctr_gpu_fog_alpha_ready(void) {
+  return 1;
+}
 // (AI-assisted) cull_ties: back faces of CTR_TCC_CULL_BACK draws (counter-clockwise front faces
 // on screen, x right / y up; flip: the other way)
 void ctr_gpu_set_cull(int enable, int flip) {

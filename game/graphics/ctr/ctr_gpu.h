@@ -104,6 +104,27 @@ enum {
  * outside). ctr_gpu_cull_reset: culling off again (after the level draws; draws that don't go
  * through the state code keep the GPU's last face culling setting). */
 enum { CTR_TCC_CULL_BACK = 2 };
+/* (AI-assisted) with CTR_TCC_CULL_BACK: culled whatever ctr_gpu_set_cull's enable says (the caller
+ * decided: merc draws with config cull_merc), with its winding (flip) */
+enum { CTR_TCC_CULL_OWN = 8 };
+/* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws: every vertex the draw uses has alpha
+ * 0x80, so with ctr_gpu_set_fog_alpha the mesh shader may put the fog amount in the color's alpha
+ * (the texture combiner then takes the constant 0x80 for the vertex alpha). CtrLevel sets it at
+ * load from the chunk's vertices. */
+enum { CTR_TCC_ALPHA80 = 4 };
+/* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
+ * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
+ * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
+ * (mesh shader old or new, not dph). */
+void ctr_gpu_set_fog_alpha(int on);
+/* (AI-assisted) config.ini shader_groups (each frame after ctr_gpu_frame_begin; gpu_profile = ab
+ * switches it): the vertex programs from two shared shbins (fewer code uploads and uniform
+ * writes) instead of one shbin each. ctr_gpu_shader_groups_ready: they loaded (not with
+ * shader_mesh = dph). */
+void ctr_gpu_set_shader_groups(int on);
+int ctr_gpu_shader_groups_ready(void);
+void ctr_gpu_set_tex1_gating(int on);
+int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
 void ctr_gpu_cull_reset(void);
 /* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
@@ -528,7 +549,12 @@ typedef struct {
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
   int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
   int cbread_switches;     /* (AI-assisted) cb_read_opaque: COLORBUFFER_READ changes */
-  int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
+  int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
+                      * tex1_gating) */
+  int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
+  /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
+   * uniform vectors written at the switches (shader_groups keeps some) */
+  int prog_switches, prog_uploads, prog_unif_vectors;
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =

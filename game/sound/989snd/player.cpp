@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: ISC
 #include "player.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -235,6 +238,9 @@ void Player::InitCubeb() {
 #endif
 
   cubeb_init(&mCtx, "OpenGOAL", nullptr);
+  if (const char* e = getenv("OPENGOAL_NO_SOUND"); e && e[0] && e[0] != '0') {
+    lg::info("[sound] OPENGOAL_NO_SOUND: the output is silence");  // (AI-assisted)
+  }
 
   cubeb_stream_params outparam = {};
   outparam.channels = 2;
@@ -286,6 +292,15 @@ long Player::sound_callback([[maybe_unused]] cubeb_stream* stream,
                             void* output_buffer,
                             long nframes) {
   ((Player*)user)->Tick((s16Output*)output_buffer, nframes);
+  // (AI-assisted) OPENGOAL_NO_SOUND=1: the sound engine runs as usual (same timing), but the
+  // output is silence (automated test runs on a PC whose speakers are in use)
+  static const bool silent = [] {
+    const char* e = getenv("OPENGOAL_NO_SOUND");
+    return e && e[0] && e[0] != '0';
+  }();
+  if (silent) {
+    memset(output_buffer, 0, (size_t)nframes * sizeof(s16Output));
+  }
   return nframes;
 }
 

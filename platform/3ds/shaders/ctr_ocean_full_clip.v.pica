@@ -20,7 +20,10 @@
 .alias intex v1  ; s, t, fog amount
 .alias inclr v2
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_ocean_full_clip
+.proc main_ctr_ocean_full_clip
   dp4 outpos.x, gs[0], inpos
   dp4 outpos.y, gs[1], inpos
   dp4 outpos.z, gs[2], inpos

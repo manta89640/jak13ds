@@ -9,7 +9,7 @@
 
 .fvec clip[4]
 .fvec tex[5]        ; rows s0, t0, s1, t1 (dph with the position); tex[4]: crest factor (k, k, k, 0)
-.fvec scales        ; color scale (1/255) in xyzw
+.fvec oscales        ; color scale (1/255) in xyzw
 .fvec fog0          ; as ctr_mesh.v.pica
 .fvec fog1
 
@@ -24,7 +24,10 @@
 .alias inpos v0
 .alias inclr v2
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_ocean
+.proc main_ctr_ocean
   ; dph: the position's pad (w) counts as 1
   dph outpos.x, inpos, clip[0]
   dph outpos.y, inpos, clip[1]
@@ -54,7 +57,7 @@
 
   ; color * (1 + k * y) / 255 (alpha: / 255)
   mul r3, tex[4], inpos.yyyy
-  add r3, scales, r3
+  add r3, oscales, r3
   mul outclr, r3, inclr
   end
 .end

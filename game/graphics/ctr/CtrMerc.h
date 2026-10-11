@@ -62,6 +62,8 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int env_batches = 0;  // (AI-assisted) envmap_batch: queues drawn
     int sorted_draws = 0;  // (AI-assisted) merc_tex_sort: draws drawn from the queue
     int gen_lod = 0;       // (AI-assisted) merc_gen_lod: models drawn with the generated LOD
+    int culled = 0;        // (AI-assisted) cull_merc: draws drawn with back face culling
+    int mirrored = 0;      // (AI-assisted) ... marked ones not culled: a bone mirrors
   };
 
  private:
