@@ -4247,8 +4247,25 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   C3D_TexEnvScale(e2, C3D_RGB, GPU_TEVSCALE_2);
   C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE, GPU_ONE, GPU_ZERO);
   C3D_AlphaTest(false, GPU_ALWAYS, 0);
-  C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-  C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
+  if (state->ztest == CTR_TEST_ALWAYS) {
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+  } else {
+    /* (AI-assisted) sky_last: depth tested like the roof (fragment depth 0 with
+     * ctr_gpu_set_depth_far: only where no opaque draw wrote depth) */
+    C3D_DepthTest(true, map_test(state->ztest), GPU_WRITE_COLOR);
+  }
+  if (g_depth_far) {
+    __C3D_Context.effect.zScale = 0;
+    __C3D_Context.effect.zOffset = 0;
+  } else if (s_zdef_valid) {
+    __C3D_Context.effect.zScale = s_zscale0;
+    __C3D_Context.effect.zOffset = s_zoffset0;
+  }
+  /* (AI-assisted) early_depth = sky: the clouds too; else off, with the configured function and
+   * clear value (the defaults GEQUAL, 0 as before: EARLYDEPTH_DATA is the clear value) */
+  const int early = g_early_sky && g_depth_far && state->ztest == CTR_TEST_GEQUAL;
+  C3D_EarlyDepthTest(early != 0, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
+  g.cur.early_depth_draws += early;
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
   BufInfo_Add(buf, dst, sizeof(ctr_clip_vertex2), 4, 0x3210);
