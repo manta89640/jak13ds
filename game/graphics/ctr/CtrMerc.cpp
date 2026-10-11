@@ -197,6 +197,7 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (m_snapshot_mode) {
     return;
   }
+  flush_env();
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
   // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
   // them) after a few seconds of updates
@@ -217,10 +218,30 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_mod_ms = m_mod_gather_ms = 0;
   }
   if (rs.log_now && m_stats.models) {
-    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws", m_name,
-              m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.draws);
+    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws, {} envmap batches",
+              m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.draws,
+              m_stats.env_batches);
     m_stats = Stats();
   }
+}
+
+u32 CtrMercRenderer::queue_floats(const float* src, int n) {
+  const u32 at = (u32)m_qdata.size();
+  m_qdata.insert(m_qdata.end(), src, src + n);
+  return at;
+}
+
+void CtrMercRenderer::flush_env() {
+  if (!m_q_env.empty()) {
+    const float* d = m_qdata.data();
+    for (const auto& q : m_q_env) {
+      ctr_gpu_draw_skinned_env(&q.st, d + q.clip, d + q.rows, q.palette_count, q.fade, q.mesh,
+                               q.first_index, q.index_count);
+    }
+    m_stats.env_batches++;
+    m_q_env.clear();
+  }
+  m_qdata.clear();
 }
 
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
@@ -658,6 +679,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // with the model's quantization scale folded in
   float palette_rows[CTR_MAX_PALETTE * 12];
   const c3l::MercDraw* rows_of = nullptr;  // the draw whose palette palette_rows holds
+  // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
+  // there yet)
+  const bool env_batch = ctr_settings().envmap_batch;
+  u32 q_clip = ~0u, q_rows = ~0u;
   for (const auto& draw : model->draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
@@ -679,6 +704,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     // the draws of a model with at most 24 bones share one palette: made once
     const bool same_palette = rows_of && rows_of->palette_count == draw.palette_count &&
                               !memcmp(rows_of->palette, draw.palette, draw.palette_count);
+    if (!same_palette) {
+      q_rows = ~0u;
+    }
     for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       const MercMat& m = bones[draw.palette[p]];
       float* rows = &palette_rows[12 * p];
@@ -707,8 +735,28 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (envmap) {
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;
-      ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count, fade, model->mesh,
-                               draw.first_index, draw.index_count);
+      if (env_batch) {
+        if (q_clip == ~0u) {
+          q_clip = queue_floats(clip, 16);
+        }
+        if (q_rows == ~0u) {
+          q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
+        }
+        QueuedDraw q;
+        q.st = st;
+        q.clip = q_clip;
+        q.rows = q_rows;
+        q.lights = 0;
+        q.palette_count = draw.palette_count;
+        memcpy(q.fade, fade, sizeof(fade));
+        q.mesh = model->mesh;
+        q.first_index = (int)draw.first_index;
+        q.index_count = (int)draw.index_count;
+        m_q_env.push_back(q);
+      } else {
+        ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count, fade, model->mesh,
+                                 draw.first_index, draw.index_count);
+      }
       m_stats.draws++;
       continue;
     }
@@ -731,6 +779,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         (st.atest == CTR_TEST_ALWAYS || (draw.texture < lev->tex_min_alpha.size() &&
                                          lev->tex_min_alpha[draw.texture] >= st.aref * 2))) {
       st.flags |= CTR_STATE_EARLY_DEPTH;
+    }
+    // (AI-assisted) envmap_batch: the queued shine before a draw that blends or doesn't write
+    // depth (it would change what the shine adds to, or be covered by it)
+    if (!m_q_env.empty() &&
+        (st.blend != CTR_BLEND_OFF || !st.zwrite || st.ztest != CTR_TEST_GEQUAL)) {
+      flush_env();
+      q_clip = q_rows = ~0u;
     }
     ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count, light_data, model->mesh,
                          draw.first_index, draw.index_count);

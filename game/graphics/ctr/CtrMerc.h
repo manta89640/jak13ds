@@ -17,6 +17,7 @@
 #include "common/math/Vector.h"
 
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/ctr_gpu.h"
 
 class CtrLevels;
 
@@ -57,12 +58,31 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int missing = 0;
     int draws = 0;
     int bad_bones = 0;
+    int env_batches = 0;  // (AI-assisted) envmap_batch: queues drawn
   };
 
  private:
   void handle_setup(const DmaTransfer& setup);
   void handle_model(const DmaTransfer& init, CtrRenderState& rs);
   void hud_clip(float* out, float y_scale) const;
+
+  // (AI-assisted) config envmap_batch: the envmap draws of the bucket are queued and drawn
+  // together (one skin -> env -> skin program switch pair, and the skin draws keep their uniforms)
+  // at its end, or before a draw that would see them differently: one that blends or doesn't
+  // write depth (the shine adds Cs * Ad after the base it shines on, which the depth test of the
+  // base passes; an opaque draw in front hides it the same way before or after)
+  struct QueuedDraw {
+    ctr_draw_state st;
+    u32 clip, rows, lights;  // offsets in m_qdata
+    int palette_count;
+    float fade[4];
+    int mesh;
+    int first_index, index_count;
+  };
+  std::vector<float> m_qdata;
+  std::vector<QueuedDraw> m_q_env;
+  u32 queue_floats(const float* src, int n);
+  void flush_env();
 
   CtrLevels* m_levels;
   const class CtrEyeRenderer* m_eyes = nullptr;

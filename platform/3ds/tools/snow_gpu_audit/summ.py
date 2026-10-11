@@ -13,13 +13,13 @@ while i<len(txt):
             else:
                 d={}; k=1
                 while k<len(t)-1:
-                    if t[k] in('draws','tris','px','atest','zpass','blend','invis','proc','texchg','stchg','progsw'): d[t[k]]=float(t[k+1]); k+=2
+                    if t[k] in('draws','tris','px','atest','zpass','blend','invis','proc','texchg','stchg','progsw','copyrows','unif'): d[t[k]]=float(t[k+1]); k+=2
                     else: k+=1
                 b[t[0]]=d
             j+=1
         blocks[view].append(b); i=j; continue
     i+=1
-keys=['draws','tris','px','zpass','blend','invis','texchg','progsw']
+keys=['draws','tris','px','zpass','blend','invis','texchg','progsw','copyrows','unif']
 for v,bl in blocks.items():
     if v=='end': continue
     use=bl[-3:-1] if len(bl)>3 else bl[-2:]

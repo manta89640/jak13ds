@@ -83,6 +83,8 @@ struct B {
   double draws = 0, tris = 0, px = 0, px_atest = 0, px_z = 0, px_blend = 0, px_invis = 0,
          px_proc = 0, tex_changes = 0, state_changes = 0, area_bbox = 0, prog_switches = 0;
   double copy_rows = 0;  // (AI-assisted) screen copy: 8-column tile rows (50 = the whole screen)
+  double unif = 0;       // (AI-assisted) skin / env vertex uniforms uploaded (vectors), as the
+                         // 3DS backend caches them
 };
 std::map<std::string, B> acc;
 B* cur = &acc["(none)"];
@@ -467,6 +469,7 @@ void ctr_gpu_frame_end(void) {
       line += fmt::format("\n  {:<14} draws {:6.1f} tris {:8.0f} px {:8.0f} ({:5.2f} scr) atest {:8.0f} zpass {:8.0f} blend {:8.0f} invis {:8.0f} proc {:7.0f} texchg {:5.1f} stchg {:5.1f} progsw {:4.1f}",
           name, b.draws / n, b.tris / n, b.px / n, b.px / n / 96000.0, b.px_atest / n, b.px_z / n, b.px_blend / n, b.px_invis / n, b.px_proc / n, b.tex_changes / n, b.state_changes / n, b.prog_switches / n);
       if (b.copy_rows) line += fmt::format(" copyrows {:5.1f}", b.copy_rows / n);
+      if (b.unif) line += fmt::format(" unif {:6.0f}", b.unif / n);
       tot.draws += b.draws; tot.tris += b.tris; tot.px += b.px; tot.px_blend += b.px_blend; tot.px_invis += b.px_invis; tot.px_z += b.px_z; tot.prog_switches += b.prog_switches; tot.tex_changes += b.tex_changes;
     }
     line += fmt::format("\n  {:<14} draws {:6.1f} tris {:8.0f} px {:8.0f} ({:5.2f} scr) zpass {:8.0f} blend {:8.0f} invis {:8.0f} texchg {:5.1f} progsw {:4.1f}", "TOTAL", tot.draws / n, tot.tris / n, tot.px / n, tot.px / n / 96000.0, tot.px_z / n, tot.px_blend / n, tot.px_invis / n, tot.tex_changes / n, tot.prog_switches / n);
@@ -544,12 +547,14 @@ void ctr_gpu_wait_vblank(int /*min_vblanks*/) {
 void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
                               const float*,
                               const float*,
-                              int,
+                              int palette_count_env,
                               const float*,
                               int,
                               int,
                               int index_count_env) {
   softstats::prog(3);
+  // (AI-assisted) ctr_gpu_citro3d.c uploads the env program's matrix, bones and fade every draw
+  if (softstats::enabled()) softstats::cur->unif += 4 + 3 * std::min(palette_count_env, 24) + 1;
   // (not in the PC software renderer: the envmap shine pass is GPU only)
   // (AI-assisted) snow-gpu-audit: counted (draws, triangles) under "<bucket>-envmap"
   if (softstats::enabled()) {
@@ -1248,6 +1253,23 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           int mesh,
                           int first_index,
                           int index_count) {
+  // (AI-assisted) the uniforms ctr_gpu_citro3d.c uploads: what changed since the last skin draw,
+  // everything after a program switch
+  if (softstats::enabled()) {
+    static std::vector<float> last_clip, last_bones, last_lights;
+    const bool fresh = softstats::cur_prog != 2;
+    const int pc = std::min(palette_count, 24);
+    auto changed = [&](std::vector<float>& last, const float* v, size_t n) {
+      if (fresh || last.size() != n || memcmp(last.data(), v, n * 4)) {
+        last.assign(v, v + n);
+        return true;
+      }
+      return false;
+    };
+    softstats::cur->unif += (changed(last_clip, clip, 16) ? 4 : 0) +
+                            (changed(last_bones, bones, 12 * (size_t)pc) ? 3 * pc : 0) +
+                            (changed(last_lights, lights, 28) ? 7 : 0);
+  }
   softstats::prog(2);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
     return;

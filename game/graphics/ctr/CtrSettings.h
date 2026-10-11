@@ -62,6 +62,9 @@ struct CtrSettings {
   bool distort = false;  // (AI-assisted) off: square sprites reported on hardware
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
+  // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
+  // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
+  bool envmap_batch = true;
   // (AI-assisted) config distort_copy = rows | full. rows: the distorter's screen copy covers only
   // the 8-pixel columns of tile rows its sprites read, the copy texture goes to VRAM when there is
   // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).
