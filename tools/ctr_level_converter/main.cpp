@@ -108,6 +108,10 @@ struct Options {
   // vista_sloppy_error meters of error
   float vista_ratio = 0.25f;
   float vista_sloppy_error = 10.f;
+  // (AI-assisted) also an untextured copy of the vista tier (c3l::CHUNK_KIND_VISTA_FLAT): each
+  // texture's average color (alpha weighted) baked into the vertex colors, one draw per cell and
+  // mode; config vista_untextured picks it at load
+  bool vista_flat = false;
   // (AI-assisted) merc back face culling marks (c3l::kMercDrawCullBack, config cull_merc), see
   // mark_merc_cull: at least merc_cull_agree of a draw's triangles agree clearly with their vertex
   // normals (each corner's normal within acos(merc_cull_cos) of the face's side), at most
@@ -1854,7 +1858,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   make_plans(cells);
   // (AI-assisted) the vista tier (Options::vista): copies of the far content, in large cells
   const size_t normal_plans = plans.size();
-  size_t vista_src_tris = 0, vista_tris = 0;
+  size_t vista_src_tris = 0, vista_tris = 0, vista_flat_tris = 0;
   if (opt.vista && !opt.merc_only) {
     bool has_lowres = false;
     for (const auto& cp : plans) {
@@ -1862,6 +1866,35 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     const float vcell = opt.vista_cell * 4096.f;
     std::map<CellKey, std::vector<u32>> vcells;
+    // (AI-assisted) vista_flat: the untextured copies' cells, and the textures' average colors
+    // (alpha weighted, 0..255; untextured: 128 = the vertex color unchanged)
+    std::map<CellKey, std::vector<u32>> fcells;
+    std::map<u16, std::array<float, 3>> tex_avg;
+    auto avg_color = [&](u16 tex) {
+      auto it = tex_avg.find(tex);
+      if (it != tex_avg.end()) {
+        return it->second;
+      }
+      std::array<float, 3> c = {128.f, 128.f, 128.f};
+      if (tex != 0xffff) {
+        const auto& t = cv.level->textures.at(cv.tex_order.at(tex));
+        double sum[3] = {0, 0, 0}, w = 0, plain[3] = {0, 0, 0};
+        for (u32 p : t.data) {
+          const double a = (p >> 24) & 0xff;
+          for (int k = 0; k < 3; k++) {
+            const double v = (p >> (8 * k)) & 0xff;
+            sum[k] += v * a;
+            plain[k] += v;
+          }
+          w += a;
+        }
+        for (int k = 0; k < 3; k++) {
+          c[k] = (float)(w > 0 ? sum[k] / w : (t.data.empty() ? 128.0 : plain[k] / t.data.size()));
+        }
+      }
+      tex_avg[tex] = c;
+      return c;
+    };
     for (size_t pi = 0; pi < normal_plans && pi < 0xffff; pi++) {
       const auto& cp = plans[pi];
       const int tier = std::get<0>(cp.key) / 4, detail = std::get<0>(cp.key) % 4;
@@ -1938,7 +1971,18 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           }
         }
         // new vertices (their quantizing grid is the vista cell's alone)
-        std::unordered_map<u32, u32> made;
+        std::unordered_map<u32, u32> made, made_flat;
+        // (AI-assisted) vista_flat: the copies' draw key (untextured, the draw mode without its
+        // texture parts: clamp, filter, tcc, alpha test) and color
+        const DrawKey src_key = cv.draw_keys[cv.tris[ids[0]].draw_key];
+        constexpr u32 kTextureModeBits = 0x00E7FFE0;  // bits 5-18, 21-23
+        const u32 flat_key =
+            opt.vista_flat
+                ? cv.key_id(DrawKey{src_key.mode & ~kTextureModeBits, 0xffff,
+                                    (u16)(c3l::CHUNK_KIND_VISTA_FLAT - c3l::CHUNK_KIND_TFRAG)})
+                : 0;
+        const std::array<float, 3> flat_rgb =
+            opt.vista_flat ? avg_color(src_key.texture) : std::array<float, 3>{128.f, 128.f, 128.f};
         for (size_t i = 0; i + 2 < out_idx.size(); i += 3) {
           SrcTri nt = cv.tris[ids[0]];
           for (int k = 0; k < 3; k++) {
@@ -1959,10 +2003,37 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
               .push_back((u32)cv.tris.size());
           cv.tris.push_back(nt);
           vista_tris++;
+          if (opt.vista_flat) {
+            // (AI-assisted) the untextured copy: textured output = texture * vertex / 128
+            SrcTri ft = nt;
+            for (int k = 0; k < 3; k++) {
+              const u32 r = out_idx[i + k];
+              auto [it, fresh] = made_flat.emplace(r, (u32)cv.verts.size());
+              if (fresh) {
+                SrcVertex v = cv.verts[rep_src[r]];
+                for (int c = 0; c < 3; c++) {
+                  v.rgba[c] = (u8)std::clamp((int)std::lround(v.rgba[c] * flat_rgb[c] / 128.f), 0,
+                                             255);
+                }
+                cv.verts.push_back(v);
+                vista_vertex.resize(cv.verts.size(), 0);
+                vista_vertex.back() = 1;
+              }
+              ft.v[k] = it->second;
+            }
+            ft.draw_key = flat_key;
+            fcells[std::make_tuple((int)(4 * c3l::kVistaTier), std::get<0>(gk), 0,
+                                   std::get<1>(gk),
+                                   (int)(c3l::CHUNK_KIND_VISTA_FLAT - c3l::CHUNK_KIND_TFRAG))]
+                .push_back((u32)cv.tris.size());
+            cv.tris.push_back(ft);
+            vista_flat_tris++;
+          }
         }
       }
     }
     make_plans(vcells);
+    make_plans(fcells);  // (AI-assisted) after the textured vista: the end of the chunk list
   }
 
   // ---- (AI-assisted) quantizing grids ----
@@ -2625,6 +2696,18 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              100.0 * vista_tris / std::max<size_t>(vista_src_tris, 1), opt.vista_error,
              100.0 * opt.vista_ratio, opt.vista_sloppy_error, vchunks,
              opt.vista_cell, vdraws);
+    if (opt.vista_flat) {
+      // (AI-assisted)
+      size_t fchunks = 0, fdraws = 0;
+      for (const auto& ch : chunks) {
+        if (ch.kind == c3l::CHUNK_KIND_VISTA_FLAT) {
+          fchunks++;
+          fdraws += ch.draw_count;
+        }
+      }
+      lg::info("{}: untextured vista tier: {} triangles, {} chunks, {} draws", level.level_name,
+               vista_flat_tris, fchunks, fdraws);
+    }
   }
   if (opt.tie_winding) {
     lg::info("{}: tie winding: {} of {} cullable tie triangles on closed surfaces, marked for back "
@@ -2710,6 +2793,9 @@ int main(int argc, char** argv) {
   app.add_flag("--no-tie-winding", no_tie_winding,
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
+  app.add_flag("--vista-flat", opt.vista_flat,
+               "also an untextured vista tier (average texture colors in the vertex colors, one "
+               "draw per cell and mode; config vista_untextured)");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
   app.add_option("--merc-cull-agree", opt.merc_cull_agree,
                  "merc back face culling marks: share of a draw's triangles agreeing with their "

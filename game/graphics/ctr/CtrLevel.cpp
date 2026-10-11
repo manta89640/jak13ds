@@ -1036,6 +1036,47 @@ bool CtrLevels::load_file(const fs::path& path,
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
   }
+  {
+    // (AI-assisted) config vista_untextured: a file with both vista tiers (textured CHUNK_KIND_VISTA,
+    // then untextured CHUNK_KIND_VISTA_FLAT, the last chunks: nothing refers to them by index)
+    // keeps the configured one as CHUNK_KIND_VISTA; the other's meshes are never made
+    size_t first_vista = out->chunks.size(), flat = 0;
+    for (size_t ci = 0; ci < out->chunks.size(); ci++) {
+      const u32 k = out->chunks[ci].kind;
+      if ((k == c3l::CHUNK_KIND_VISTA || k == c3l::CHUNK_KIND_VISTA_FLAT) && first_vista > ci) {
+        first_vista = ci;
+      }
+      flat += k == c3l::CHUNK_KIND_VISTA_FLAT;
+    }
+    bool tail = flat > 0;
+    for (size_t ci = first_vista; ci < out->chunks.size() && tail; ci++) {
+      tail = out->chunks[ci].kind == c3l::CHUNK_KIND_VISTA ||
+             out->chunks[ci].kind == c3l::CHUNK_KIND_VISTA_FLAT;
+    }
+    if (tail) {
+      const bool want_flat = ctr_settings().vista_untextured;
+      std::vector<c3l::Chunk> kept(out->chunks.begin(), out->chunks.begin() + first_vista);
+      for (size_t ci = first_vista; ci < out->chunks.size(); ci++) {
+        c3l::Chunk ch = out->chunks[ci];
+        if ((ch.kind == c3l::CHUNK_KIND_VISTA_FLAT) == want_flat) {
+          ch.kind = c3l::CHUNK_KIND_VISTA;
+          kept.push_back(ch);
+        }
+      }
+      lg::info("[ctr] {}: {} vista tier ({} of {} vista chunks)", name,
+               want_flat ? "untextured" : "textured", kept.size() - first_vista,
+               out->chunks.size() - first_vista);
+      out->chunks = std::move(kept);
+    } else {
+      for (auto& ch : out->chunks) {
+        if (ch.kind == c3l::CHUNK_KIND_VISTA_FLAT) {
+          ch.kind = c3l::CHUNK_KIND_UNKNOWN;  // (not where expected: never drawn)
+          ch.draw_count = 0;
+          ch.vis_run_count = 0;
+        }
+      }
+    }
+  }
 
   // (AI-assisted) v10: the visibility runs, all chunks' in one block
   out->chunk_first_run.assign(out->chunks.size(), 0);

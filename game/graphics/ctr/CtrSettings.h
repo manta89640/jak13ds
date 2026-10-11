@@ -199,6 +199,11 @@ struct CtrSettings {
   // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
   // shadows never read it). Both off until priced on hardware (gpu_profile ab): new shader
   // programs / register writes that haven't run on a real 3DS yet.
+  // (AI-assisted) levels converted with ctr_level_converter --vista-flat hold an untextured copy of
+  // the vista tier (each texture's average color in the vertex colors, one draw per cell): on uses
+  // it instead of the textured one (Snowy fort: 60 -> 22 vista draws, host). Read at level load
+  // (not switchable while running)
+  bool vista_untextured = false;
   bool fog_alpha = false;
   bool tex1_gating = false;
   // (AI-assisted) the vertex programs from two shared shbins (group E: basic, mesh, skin, clip,

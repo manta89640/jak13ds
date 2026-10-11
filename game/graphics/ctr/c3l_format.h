@@ -116,6 +116,13 @@ constexpr uint32_t CHUNK_KIND_UNKNOWN = 0, CHUNK_KIND_TFRAG = 1, CHUNK_KIND_TIE 
 // run's triangles were copied from: a run stands in for its source chunk where that one isn't drawn
 // because of its distance (beyond the draw distance, up to the vista distance).
 constexpr uint32_t CHUNK_KIND_VISTA = 4;
+// (AI-assisted) The vista tier untextured (ctr_level_converter --vista-flat): the same far content
+// with each texture's average color baked into the vertex colors and no texture, one draw per cell
+// and mode (draws untextured, alpha test dropped). After the CHUNK_KIND_VISTA chunks, at the end of
+// the chunk list. The runtime keeps one of the two sets (config vista_untextured) and drops the
+// other at load. No layout change (an older runtime would draw these as ordinary chunks: use them
+// with a current runtime).
+constexpr uint32_t CHUNK_KIND_VISTA_FLAT = 5;
 constexpr uint32_t kVistaTier = 4;
 
 /*!
