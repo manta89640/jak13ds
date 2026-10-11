@@ -21,6 +21,17 @@ int ctr_gpu_perflog_start(void);
 int ctr_gpu_perflog_line(char* out, int size, int frames, double draw_ms_sum, double busy_ms_sum,
                          int busy_frames);
 
+/* config.ini pica_bench: the GPU microbenchmark (`[bench] ...` lines in gk.log and
+ * data/log/bench.txt; platform/3ds/tools/bench_report.py). Call on the thread that owns the GPU,
+ * after ctr_gpu_init and before anything else draws (the render thread not started). ~20-60 s.
+ * Returns 0, or 1 when it stopped because the GPU didn't finish a test (then the GPU is hung and
+ * the game won't draw either). */
+int ctr_gpu_bench_run(void);
+/* ctr_gpu_citro3d.c: the GPU layer takes citro3d back after the bench (its program bound again,
+ * citro3d's state as the game set it up and all of it marked for sending, the raw draws' caches
+ * dropped as after the HOME Menu) */
+void ctr_gpu_bench_restore(void);
+
 #ifdef __cplusplus
 }
 #endif

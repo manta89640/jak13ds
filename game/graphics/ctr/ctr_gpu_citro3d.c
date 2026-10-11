@@ -13,6 +13,7 @@
  */
 
 #include "game/graphics/ctr/ctr_gpu.h"
+#include "game/graphics/ctr/ctr_gpu_bench.h"
 #include "game/graphics/ctr/CtrTexConv.h"
 
 #include <3ds.h>
@@ -5158,4 +5159,32 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   out->ms = ctr_gpu_time_ms() - s_hw_t0;
   out->stage_ms = s_hw_stage_ms;
   return 0;
+}
+
+void C3Di_DirtyUniforms(GPU_SHADER_TYPE type); /* citro3d (source/internal.h) */
+
+/* (AI-assisted) config.ini pica_bench (ctr_gpu_bench.c) used citro3d with programs, textures and
+ * state of its own: take it back before the bench frees them (ctr_gpu_bench.h) */
+void ctr_gpu_bench_restore(void) {
+  for (int i = 0; i < 3; i++) {
+    C3D_TexBind(i, NULL);
+  }
+  for (int i = 0; i < 6; i++) {
+    C3D_TexEnvInit(C3D_GetTexEnv(i)); /* citro3d's default: what the GPU layer starts from */
+  }
+  C3D_CullFace(GPU_CULL_NONE);
+  C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
+  C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+  g.cur_prog = PROG_NONE;
+  use_program(PROG_BASIC);
+  /* everything sent again at the next draw, as citro3d does after the HOME Menu */
+  __C3D_Context.flags |= BIT(2) | BIT(3) | BIT(4) | BIT(5) | BIT(6) | BIT(7) | BIT(8) | BIT(9) |
+                         BIT(10) | BIT(11) | BIT(12) | (7u << 23) | (0x3Fu << 26);
+  C3Di_DirtyUniforms(GPU_VERTEX_SHADER);
+  s_raw.apt_epoch++;
+  g.last_state_valid = 0;
+  g.last_mesh_valid = 0;
+  g.last_skin_valid = 0;
+  g.bound_tex = NULL;
+  g.proc_radial = -1;
 }

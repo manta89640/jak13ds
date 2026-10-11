@@ -828,6 +828,13 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   }
 #ifdef __3DS__
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
+  if (ctr_settings().pica_bench) {
+    // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
+    lg::info("[ctr] pica_bench: GPU microbenchmark before the game starts");
+    ctr_boot_mark("8b pica_bench (a hang here: see data/log/bench.txt)");
+    const int stopped = ctr_gpu_bench_run();
+    lg::info("[ctr] pica_bench: {}", stopped ? "STOPPED (the GPU didn't finish a test)" : "done");
+  }
 #endif
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   // (AI-assisted) before vram_textures: the reserved VRAM for compact textures is taken there

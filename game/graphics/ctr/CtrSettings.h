@@ -105,6 +105,10 @@ struct CtrSettings {
   // transfers (PPF) and memory fills (PSC) took per frame, against the fence's busy time
   // ([ctr] gpu perflog, once per stats window). One GSP request per window; hardware only.
   bool gpu_perflog = false;
+  // (AI-assisted) a GPU microbenchmark at boot, before the game starts (~20-60 s; `[bench]` lines
+  // in gk.log and data/log/bench.txt, platform/3ds/tools/bench_report.py). Its last tests use
+  // shaders never run on hardware: a hang there names the test in bench.txt. Hardware only.
+  bool pica_bench = false;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
