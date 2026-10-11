@@ -210,6 +210,9 @@
   (defconstant ANIM_LOD_DIST (meters 30))
   (define *anim-lod-frame* 0)
   (define *anim-lod-skipped* (new 'global 'boxed-array handle MATRIX_ENGINE_AMOUNT))
+  ;; (AI-assisted) new boxed-array sets length = the allocated count (like *matrix-engine*,
+  ;; engines.gc): start empty, or the first frame replays MATRIX_ENGINE_AMOUNT garbage handles
+  (set! (-> *anim-lod-skipped* length) 0)
   (defun anim-lod-queued? ((arr (array handle)) (h handle))
     "Is h in this frame's matrix engine queue?"
     (dotimes (i (-> arr length))
