@@ -17,6 +17,7 @@ io_on_system_core = off    # on: the game's I/O threads on core 1 (the system co
 mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names
 collide_frag_cache = on    # (AI-assisted) pc-collide-frag-may-hit? keeps each collide mesh's vertex box; off: scans the vertices every call
 collide_native = on        # (AI-assisted) the drawable-tree walks of collide-with-box / fill-from-foreground-using-box in C++; off: the GOAL code
+bones_native = on          # (AI-assisted) the skinning matrices (new-bones-mtx-calc-asm) in C++ / VFP assembly; off: the GOAL code (also off with mips2c_native_off = all or a list naming pc-new-bones-mtx-calc)
 perf_sections = off        # on: per-section timing in the log (slower)
 args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)
 listener = off             # on: Wi-Fi REPL (goalc can connect; 1 MB of RAM)
@@ -26,6 +27,7 @@ debug_log = off            # on: debug lines in data/log/gk.log (thousands in a 
 log_async = on             # (AI-assisted) the log writer thread writes the logs about once a second (3ds_build.md "Screens and logs"); off: every thread writes its own lines, as before
 io_checksum = off          # on: log the CRC-32 of the bytes the game read from each big file (debug; "(ok)" for checked .ogz files; with it, every .ogz file gets an [io] line)
 io_cache = on              # off: no files kept open between loads, no read-ahead (big SD card reads), no cache of spool chunk 0 (the Oct 3 file reading)
+c3l_read_buffer = 256      # (AI-assisted) KB per read from a level's .c3l file (16..1024; unbuffered, through two windows: index and vertex data; each chunk's indices go straight into its index buffer); 0: the old reads through a 64 KB stdio buffer, with all of a level's indices (1-3 MB) in one piece of the heap
 ```
 
 ## Where it goes

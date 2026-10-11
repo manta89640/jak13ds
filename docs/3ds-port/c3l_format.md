@@ -82,6 +82,11 @@ destination (texture pool, mesh vertex buffers: linear memory, `ctr_gpu_mesh_beg
 covered one through a one-block cache. The converter starts a block at every piece the loader
 reads (each texture, each chunk's vertices and index range, each merc model's vertices) unless the
 block is still under 16 KB, and never lets a block span two sections. v7..v10 files still load.
+(AI-assisted) The 3DS loader uses the reader's window mode (`config.ini c3l_read_buffer`, default
+256 KB): the file is opened unbuffered and every read from it is one request of a whole window (or
+one exact read of a bigger piece), into one of two windows (the one used longest ago is replaced),
+stored blocks and uncompressed files included. Each chunk's indices are then read straight into
+its index buffer between its vertex reads, each section keeping its own window.
 
 The codec is picked per block by a cost model, the load time on the New 3DS:
 `packed / sd_mbps + raw / decode_mbps`. The decode speeds come from instruction counts of the

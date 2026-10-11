@@ -5,7 +5,10 @@
 # (except the stack area), and prints the ARM instructions per call of each (their own code, and
 # with the 3DS's memcpy / memmove / memset, ctr_mem.S, which the copies of both versions call).
 #
-#   armbench.py <armbench.elf> <armbench.map> <case dir> <function>
+#   armbench.py <armbench.elf> <armbench.map> <case dir> <function> [--no-v0]
+#
+# (AI-assisted) --no-v0: v0 isn't compared (natives of GOAL functions that return a flag the GOAL
+# function doesn't)
 
 import glob
 import os
@@ -152,6 +155,7 @@ def run(segs, entry, done, case, function, version, own, libc):
 
 def main():
     elf, map_file, case_dir, function = sys.argv[1:5]
+    check_v0 = "--no-v0" not in sys.argv[5:]
     segs, entry, syms = load_elf(elf)
     done = syms["armbench_done"][0]
     m2c = code_ranges(map_file, ["m2c_"])
@@ -169,16 +173,16 @@ def main():
             continue
         sn, vn, mn, cn = run(segs, entry, done, case, function, 1, nat, libc)
         lo, hi = case["stack_bottom"], case["stack_top"]
-        same = sn == 1 and vm == vn and mm[:lo] == mn[:lo] and mm[hi:] == mn[hi:]
+        same = sn == 1 and (vm == vn or not check_v0) and mm[:lo] == mn[:lo] and mm[hi:] == mn[hi:]
         if same:
             ok += 1
         else:
             bad += 1
             if bad <= 3:
                 what = (f"status {sn}" if sn != 1 else
-                        (f"v0 {vm:x} {vn:x}" if vm != vn else "memory"))
+                        (f"v0 {vm:x} {vn:x}" if vm != vn and check_v0 else "memory"))
                 print(f"  MISMATCH {os.path.basename(path)}: {what}")
-                if sn == 1 and vm == vn:
+                if sn == 1 and (vm == vn or not check_v0):
                     for a in range(0, len(mm), 16):
                         if lo <= a < hi:
                             continue

@@ -1198,7 +1198,13 @@ bool ctr_level_ready(const char* name) {
     g_ctr->levels().service();
   }
   if (g_ctr->levels().ready(n)) {
-    waiting_since.erase(n);
+    // (AI-assisted) how long the game waited for the .c3l after its DGO was in
+    auto w = waiting_since.find(n);
+    if (w != waiting_since.end()) {
+      lg::info("[ctr] {}: the game waited {:.0f} ms for its .c3l", n,
+               ctr_gpu_time_ms() - w->second.since);
+      waiting_since.erase(w);
+    }
     return true;
   }
 #ifdef __3DS__

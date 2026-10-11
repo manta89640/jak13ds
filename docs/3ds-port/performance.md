@@ -215,3 +215,64 @@ It takes the last session and prints one table per group:
   MB/frame: ...`: the stage shares over the window's first 10 s (the 16-bit sample counts restart
   after 16 s) and the traffic per frame over the whole window (assumed bytes until the bench's B1
   calibration says otherwise).
+
+## Level loads that stop the game (AI-assisted, Oct 11)
+
+When both level slots are empty (a save load, a teleport / continue to another area), the game
+loads the first level in a loop inside one frame (`load-state` `update!`: "Waiting for level to
+load", as on the PS2) and draws nothing until it is in: the 2-2.5 s `[hitch]` lines with
+`waiting for rpc #3` (the DGO channel). The second level loads in the background as usual. What
+the loop waits for, in the order it happens:
+
+1. the DGO from the SD card (IOP thread): `waiting for rpc #3` in the hitch line;
+2. linking each object as it comes in (`link-begin` / `link-resume`, ~15-30 ms per level) and the
+   level's login (`ld-login`, ~20-40 ms);
+3. the level's `.c3l` (renderer data; the loader thread on core 2 starts it with the DGO):
+   `[ctr] NAME: the game waited N ms for its .c3l`.
+
+The log has a line for each: `[load] NAME loaded while the game waited: N ms` (the whole stop),
+and `[ctr] loaded NAME ... reading N ms in M reads of K KB; linear free F KB`.
+
+Emulator (emu-load, raw DGOs, Oct 11 batch): lavatube 2527 ms = DGO 2203 + .c3l wait 268 + link
+and login ~50; maincave 2548 (DGO 2036, .c3l 451); village3 2447 (2175, 210); sunken 2053 (1971,
+0). Hardware (user log, save load into Snowy): 2346 ms with 1196 ms of DGO; the .c3l took 2201 ms
+(DGO 1149 ms): on hardware the `.c3l` is the long pole (~2.4 MB/s overall, decompressing 197 ms), slower than
+the DGO (which reads 227 KB per SD card request, against the `.c3l`'s 64 KB stdio refills, each
+seek starting a new one).
+
+Changes:
+- `.c3l` files are read unbuffered, 256 KB per request, through two windows (index and vertex data
+  in turns) and two decoded-block caches: ~45 % fewer SD card requests for the same bytes (snow 64
+  -> 35, maincave 73 -> 35, ogre 80 -> 41; host replay of the loader's reads). Each chunk's indices
+  go straight into its index buffer: no 1.8-3 MB `std::vector` of all of a level's indices on the
+  heap at the level-load peak (maincave's 2.5 MB failed once with `bad_alloc` in a test with a
+  bigger stdio buffer; the level then had no background). `config.ini c3l_read_buffer` (KB; 0: the
+  old reads).
+- The emulator models the SD card per byte, so it shows no gain there (reading time within run to
+  run noise); the request overhead is a hardware cost: check the `reading N ms` part of the
+  `[ctr] loaded` lines in the next hardware log.
+
+Not changed: the loop itself. `target-continue` waits for its levels to be active, so the loop
+could end after the DGO and let the frames run, but the frames would take core 2 time from the
+`.c3l` loader (the long pole on hardware) for a black screen.
+
+### Linear memory with two levels (vista tier, c3l v13)
+
+`platform/3ds/tests/level_pairs.pad` loads the tightest pairs (emulator, Oct 11 batch levels; the
+emulator stores RGBA4 textures as RGBA8, so hardware has more left). Linear free memory with both
+levels in, from the `[ctr] textures` line in the pair's window:
+
+| pair | linear free | largest block |
+|---|---|---|
+| lavatube + citadel | 13603 KB | 13436 KB |
+| finalboss + citadel | 17969 KB | 13580 KB |
+| maincave + robocave | 14073 KB | 13904 KB |
+| maincave + darkcave | 18364 KB | 14092 KB |
+| sunken + sunkenb | 21789 KB | 21656 KB |
+| village3 + ogre | 9769 KB | 9612 KB |
+| snow + village3 | 14089 KB | 9848 KB |
+
+No `could not be created` and no parts left out: the vista tier (15-690 KB per level) fits
+everywhere, nothing to switch off. (The Oct 3 estimate of -4.5 MB for lavatube + citadel predates
+ETC1 merc textures.) The tighter memory at a level load is the C heap (~3 MB free at the peak), see
+"Level loads that stop the game".

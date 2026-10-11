@@ -1160,8 +1160,13 @@
               (let ((s3-0 (level-get-for-use *level* (the-as symbol (-> this want s4-1 name)) 'loaded)))
                 (when (and s5-1 (-> this want s4-1 display?))
                   (format 0 "Waiting for level to load~%")
-                  (while (or (= (-> s3-0 status) 'loading) (= (-> s3-0 status) 'loading-bt) (= (-> s3-0 status) 'login))
-                    (load-continue s3-0))))))))))
+                  ;; og:preserve-this (AI-assisted) 3DS: how long the game stood still for it (no frames)
+                  (let ((wait-start (#if TARGET_3DS (__read-ee-timer) 0)))
+                    (while (or (= (-> s3-0 status) 'loading) (= (-> s3-0 status) 'loading-bt) (= (-> s3-0 status) 'login))
+                      (load-continue s3-0))
+                    (#when TARGET_3DS
+                      (format 0 "[load] ~A loaded while the game waited: ~D ms~%"
+                              (-> s3-0 name) (/ (- (__read-ee-timer) wait-start) 300000))))))))))))
   (dotimes (s5-2 2)
     (when (-> this want s5-2 name)
       (dotimes (s4-2 3)

@@ -53,6 +53,11 @@ MODULES = {
     "quaternion": [
         "quaternion-normalize!",
     ],
+    # (AI-assisted) the reference of pc-new-bones-mtx-calc (native_bones.cpp): bones.gc compiled
+    # without the native's guard (the guard's call is the only difference)
+    "bones": [
+        "new-bones-mtx-calc-asm",
+    ],
 }
 
 ABI_VERSION = 4
