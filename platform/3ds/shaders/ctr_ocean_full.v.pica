@@ -22,7 +22,10 @@
 .alias intex v1  ; s, t (times q), fog amount
 .alias inclr v2
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_ocean_full
+.proc main_ctr_ocean_full
   dph r0.x, inpos, gs[0]
   dph r0.y, inpos, gs[1]
   dph r0.z, inpos, gs[2]

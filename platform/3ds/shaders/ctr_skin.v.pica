@@ -32,7 +32,10 @@
 .alias inclr v4
 .alias innrm v5
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_skin
+.proc main_ctr_skin
   ; blended bone rows r1-r3 = sum of weight * the bone's rows
   mul r0, scales.yyyy, inwgt
   mova a0.xy, inidx.xy

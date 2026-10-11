@@ -29,7 +29,10 @@
 .alias inclr v4
 .alias innrm v5
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_skin_env_old
+.proc main_ctr_skin_env_old
   mov r0.xyz, inpos
   mov r0.w, scales.zzzz
   mul r2, scales.yyyy, inwgt

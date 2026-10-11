@@ -821,7 +821,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       if (palette_mirrors) {
         m_stats.mirrored++;
       } else {
-        st.tcc |= CTR_TCC_CULL_BACK | CTR_TCC_CULL_OWN;
+        st.tcc |= CTR_TCC_CULL_BACK;
+        st.tcc |= CTR_TCC_CULL_OWN;
         m_stats.culled++;
       }
     }

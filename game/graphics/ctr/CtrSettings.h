@@ -201,6 +201,12 @@ struct CtrSettings {
   // programs / register writes that haven't run on a real 3DS yet.
   bool fog_alpha = false;
   bool tex1_gating = false;
+  // (AI-assisted) the vertex programs from two shared shbins (group E: basic, mesh, skin, clip,
+  // clip2 and their variants; F: skin_env, ocean, ocean_full, ocean_full_clip) instead of one each:
+  // citro3d uploads no shader code at a switch inside a group, and uniforms another program of the
+  // group doesn't use aren't written again. Off until priced on hardware (gpu_profile ab; pica_bench
+  // B2.prog_entry times the switch): shared-DVLB entry points never ran in the game on a real 3DS
+  bool shader_groups = false;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)

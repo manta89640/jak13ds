@@ -24,7 +24,10 @@
 .alias intex v1
 .alias inclr v2
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_mesh_old_fa
+.proc main_ctr_mesh_old_fa
   mov r0.xyz, inpos
   mov r0.w, scales.zzzz
 

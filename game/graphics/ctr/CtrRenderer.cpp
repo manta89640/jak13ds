@@ -139,6 +139,8 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.tex1_gating; }},
     {"cull_merc", [](CtrSettings& s, bool on) { s.cull_merc = on; },
      [](const CtrSettings& s) { return s.cull_merc; }},
+    {"shader_groups", [](CtrSettings& s, bool on) { s.shader_groups = on; },
+     [](const CtrSettings& s) { return s.shader_groups; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -469,6 +471,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) fog_alpha, tex1_gating (gpu_profile = ab may switch them between frames too)
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
+  ctr_gpu_set_shader_groups(ctr_settings().shader_groups ? 1 : 0);  // (AI-assisted)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -597,12 +600,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                            : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches)",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
                gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws,
-               gs.fog_alpha_draws, gs.unit1_toggles);
+               gs.fog_alpha_draws, gs.unit1_toggles, gs.prog_switches, gs.prog_uploads,
+               gs.prog_unif_vectors);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;

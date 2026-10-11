@@ -117,6 +117,12 @@ enum { CTR_TCC_ALPHA80 = 4 };
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
  * (mesh shader old or new, not dph). */
 void ctr_gpu_set_fog_alpha(int on);
+/* (AI-assisted) config.ini shader_groups (each frame after ctr_gpu_frame_begin; gpu_profile = ab
+ * switches it): the vertex programs from two shared shbins (fewer code uploads and uniform
+ * writes) instead of one shbin each. ctr_gpu_shader_groups_ready: they loaded (not with
+ * shader_mesh = dph). */
+void ctr_gpu_set_shader_groups(int on);
+int ctr_gpu_shader_groups_ready(void);
 void ctr_gpu_set_tex1_gating(int on);
 int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
@@ -496,6 +502,9 @@ typedef struct {
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
                       * tex1_gating) */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
+  /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
+   * uniform vectors written at the switches (shader_groups keeps some) */
+  int prog_switches, prog_uploads, prog_unif_vectors;
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =

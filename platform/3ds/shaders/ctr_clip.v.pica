@@ -16,7 +16,10 @@
 .alias intex v1
 .alias inclr v2
 
-.proc main
+; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
+; others (shared procedures need distinct names)
+.entry main_ctr_clip
+.proc main_ctr_clip
   dp4 outpos.x, glpica[0], inpos
   dp4 outpos.y, glpica[1], inpos
   dp4 outpos.z, glpica[2], inpos

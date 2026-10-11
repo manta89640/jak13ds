@@ -1382,6 +1382,11 @@ void ctr_gpu_set_fog_alpha(int on) {
   g_soft_fog_alpha = on;
 }
 void ctr_gpu_set_tex1_gating(int) {}
+// (AI-assisted) shader_groups: one program set here (statistics count program switches as before)
+void ctr_gpu_set_shader_groups(int) {}
+int ctr_gpu_shader_groups_ready(void) {
+  return 1;
+}
 int ctr_gpu_fog_alpha_ready(void) {
   return 1;
 }
