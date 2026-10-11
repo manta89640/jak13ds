@@ -1,10 +1,19 @@
 /*!
  * @file tests_ripple.cpp
  * (AI-assisted)
- * Tests for ripple.cpp: ripple-create-wave-table (the water ripples' height and normal table).
+ * Tests for ripple.cpp: ripple-create-wave-table (the water ripples' height and normal table) and
+ * ripple-execute-init (the VU0 sine table it reads).
  */
 
 #include "fakes.h"
+
+namespace Mips2C::jak1 {
+void* ripple_vu0_table();
+namespace ripple_execute_init {
+void ripple_execute_init_invalidate();
+u64 native_impl(const NativeArgs&);
+}  // namespace ripple_execute_init
+}  // namespace Mips2C::jak1
 
 namespace tests {
 
@@ -79,11 +88,44 @@ void gen_create_wave_table(Case& c) {
   }
 }
 
+// (AI-assisted) (ripple-execute-init): the table from *cos-poly-vec*. The native fills it only when
+// the polynomial changed. Every case starts from the test's first table, so the native's memo is
+// reset here; half of the cases first run the native on the same polynomial (the previous frame),
+// so that the call checked is the one that keeps the table.
+void gen_execute_init(Case& c) {
+  auto& g = c.g;
+  const u32 poly = alloc(16);
+  for (int i = 0; i < 4; i++) {
+    st<float>(poly + 4 * i, g.f_edge(-2.f, 2.f));
+  }
+  if (g.chance(0.3f)) {  // the game's
+    st<u32>(poly + 0, 0xbefffd62);
+    st<u32>(poly + 4, 0x3d2a7a28);
+    st<u32>(poly + 8, 0xbab2bc31);
+    st<u32>(poly + 12, 0x37a933eb);
+  }
+  set_sym("*cos-poly-vec*", poly);
+  Mips2C::jak1::ripple_execute_init::ripple_execute_init_invalidate();
+  if (g.chance(0.5f)) {
+    const u64 none[8] = {};
+    Mips2C::jak1::ripple_execute_init::native_impl(Mips2C::NativeArgs{none, 0, 0, 0});
+  }
+  for (int i = 0; i < 8; i++) {
+    c.args[i] = g.u32_();
+  }
+}
+
 }  // namespace
 
 void register_ripple_tests() {
   add_test({"ripple-create-wave-table", "ripple-create-wave-table", 1500, setup_ripple,
             gen_create_wave_table, {}});
+  add_test({"ripple-execute-init",
+            "ripple-execute-init",
+            300,
+            [] {},
+            gen_execute_init,
+            {{Mips2C::jak1::ripple_vu0_table(), 256 * 16}}});
 }
 
 }  // namespace tests

@@ -703,7 +703,18 @@ int run_tests(const RunOptions& opt) {
       if (why.empty()) {
         for (size_t h = 0; h < t->host_state.size(); h++) {
           if (memcmp(after_m.host[h].data(), t->host_state[h].first, t->host_state[h].second)) {
-            why = fmt::format("host state {} differs", h);
+            // (AI-assisted) the first differing word
+            const u8* want = after_m.host[h].data();
+            const u8* got = (const u8*)t->host_state[h].first;
+            size_t w = 0;
+            while (w + 4 <= t->host_state[h].second && !memcmp(want + w, got + w, 4)) {
+              w += 4;
+            }
+            u32 a = 0, b = 0;
+            memcpy(&a, want + w, std::min<size_t>(4, t->host_state[h].second - w));
+            memcpy(&b, got + w, std::min<size_t>(4, t->host_state[h].second - w));
+            why = fmt::format("host state {} differs at byte {}: mips2c {:08x} native {:08x}", h, w,
+                              a, b);
             break;
           }
         }

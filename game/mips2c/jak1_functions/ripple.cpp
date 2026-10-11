@@ -1,6 +1,7 @@
 
 //--------------------------MIPS2C---------------------
 #include "game/kernel/jak1/kscheme.h"
+#include "game/mips2c/mips2c_native.h"
 #include "game/mips2c/mips2c_private.h"
 using namespace jak1;
 namespace Mips2C::jak1 {
@@ -16,6 +17,11 @@ struct RippleVu0 {
     return data_mem[addr];
   }
 } gRippleVu0;
+
+//! (AI-assisted) the VU0 sine table (256 quadwords), for the differential tests
+void* ripple_vu0_table() {
+  return gRippleVu0.data_mem;
+}
 
 namespace ripple_execute_init {
 struct Cache {
@@ -79,9 +85,85 @@ u64 execute(void* ctxt) {
   return c->gprs[v0].du64[0];
 }
 
+// (AI-assisted) Native version (see game/mips2c/mips2c_native.h). The table only depends on
+// *cos-poly-vec* (a constant), but ripple-execute calls this every frame (0.18 ms per frame on
+// hardware): the native fills it again only when the polynomial's 16 bytes change (or after
+// ripple_execute_init_invalidate). Only ripple-create-wave-table reads the table (lanes x and y).
+// The same VU0 operations lane by lane, one expression per op, so the same bits. Lanes y, z and w
+// of vf6 / vf9 hold the upper halves of a GPR (qmtc2 after mfc1): zero here, as in a cleared
+// context (verify mode); lanes x and y of the table don't depend on them.
+namespace {
+u8 g_key[16];
+bool g_valid = false;
+}  // namespace
+
+void ripple_execute_init_invalidate() {
+  g_valid = false;
+}
+
+u64 native_impl(const NativeArgs&) {
+  const u32 poly_addr = gload<u32>((u32)((const u8*)cache.cos_poly_vec - g_ee_main_mem));
+  u8 key[16];
+  memcpy(key, gptr(poly_addr), 16);
+  if (g_valid && !memcmp(key, g_key, 16)) {
+    return 0;
+  }
+  float c[4];  // vf7
+  memcpy(c, key, 16);
+  const float d = 0.024543691f;
+  const float vf0[4] = {0.f, 0.f, 0.f, 1.f};
+  float v5[4] = {d, 0.f, 0.f, 0.f};   // vf5 (= vf6)
+  float v9[4] = {1.f, 0.f, 0.f, 0.f};  // vf9
+  for (int i = 0; i < 128; i++) {
+    float v1[4], v2[4], v3[4], v4[4], v8[4], v10[4], acc[4];
+    for (int k = 0; k < 4; k++) {
+      v1[k] = v5[k] * v5[k];  // vmul vf1, vf5, vf5
+    }
+    for (int k = 0; k < 4; k++) {
+      acc[k] = vf0[k] + vf0[3];  // vaddaw acc, vf0, vf0
+    }
+    v5[0] = v5[0] + d;      // vadd.x vf5, vf5, vf6
+    v9[1] = vf0[1] - v9[0];  // vsubx.y vf9, vf0, vf9
+    for (int k = 0; k < 4; k++) {
+      v2[k] = v1[k] * v1[k];  // vmul vf2, vf1, vf1
+    }
+    for (int k = 0; k < 4; k++) {
+      acc[k] += v1[k] * c[0];  // vmaddax acc, vf1, vf7
+    }
+    for (int k = 0; k < 4; k++) {
+      v3[k] = v2[k] * v1[k];  // vmul vf3, vf2, vf1
+    }
+    for (int k = 0; k < 4; k++) {
+      acc[k] += v2[k] * c[1];  // vmadday acc, vf2, vf7
+    }
+    for (int k = 0; k < 4; k++) {
+      v4[k] = v2[k] * v2[k];  // vmul vf4, vf2, vf2
+    }
+    for (int k = 0; k < 4; k++) {
+      acc[k] += v3[k] * c[2];  // vmaddaz acc, vf3, vf7
+    }
+    for (int k = 0; k < 4; k++) {
+      v8[k] = acc[k] + v4[k] * c[3];  // vmaddw vf8, vf4, vf7
+    }
+    v9[1] = v9[1] + v8[0];  // vaddx.y vf9, vf9, vf8
+    for (int k = 0; k < 4; k++) {
+      v10[k] = vf0[k] - v9[k];  // vsub vf10, vf0, vf9
+    }
+    memcpy(gRippleVu0.data_mem[i].data, v9, 16);        // vsqi vf9, vi1
+    memcpy(gRippleVu0.data_mem[128 + i].data, v10, 16);  // vsqi vf10, vi2
+    memcpy(v9, v8, 16);                                  // vmove vf9, vf8
+  }
+  memcpy(g_key, key, 16);
+  g_valid = true;
+  return 0;
+}
+
+const NativeImpl kNative = MIPS2C_NATIVE_IMPL_GOAL(native_impl, 0);
+
 void link() {
   cache.cos_poly_vec = intern_from_c("*cos-poly-vec*").c();
-  gLinkedFunctionTable.reg("ripple-execute-init", execute, 32);
+  g_valid = false;  // (AI-assisted) a new symbol table (or a new *cos-poly-vec*): fill again
+  gLinkedFunctionTable.reg("ripple-execute-init", execute, 32, &kNative);
 }
 
 } // namespace ripple_execute_init
