@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -84,6 +85,9 @@ struct Options {
   // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
   // runs, for draws whose triangle order doesn't matter), vertices in first-use order
   bool vcache = true;
+  // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
+  // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
+  bool tie_winding = true;
   // (AI-assisted) v13 vista tier (c3l::CHUNK_KIND_VISTA): the far content (low resolution tfrag,
   // ties without a distance limit, the coarse tfrag of levels without low resolution tfrag)
   // copied into cells of vista_cell meters, the ties and coarse tfrag simplified to vista_error
@@ -257,6 +261,11 @@ struct Converter {
         if (a == b || b == c || a == c) {
           continue;
         }
+        // (AI-assisted) every second triangle of a strip has the opposite vertex order: flipped,
+        // all of the strip's triangles face the same way (tie_winding)
+        if (opt.tie_winding && ((i - 2) & 1)) {
+          std::swap(a, b);
+        }
         tris.push_back(SrcTri{{vertex_base + a, vertex_base + b, vertex_base + c}, key});
         tris.back().vis = cur_vis;
       }
@@ -402,7 +411,213 @@ struct Converter {
     }
   }
 
+  // (AI-assisted) tie_winding: back face culling of closed tie surfaces.
+  // Can a triangle of this draw key be culled: no blending, and the alpha test (if any) never
+  // fails on its texture (a cut-out card shows its back through the holes)
+  std::unordered_map<u32, bool> cullable_key;
+  bool key_cullable(u32 key) {
+    auto it = cullable_key.find(key);
+    if (it != cullable_key.end()) {
+      return it->second;
+    }
+    const auto& dk = draw_keys[key];
+    DrawMode mode;
+    mode.as_int() = dk.mode;
+    bool ok = !mode.get_ab_enable() && mode.get_depth_write_enable();
+    if (ok && mode.get_at_enable() && mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL &&
+        dk.texture != 0xffff) {
+      const auto& t = level->textures.at(tex_order.at(dk.texture));
+      for (u32 p : t.data) {
+        if (((p >> 24) & 0xff) < mode.get_aref()) {
+          ok = false;
+          break;
+        }
+      }
+    }
+    cullable_key[key] = ok;
+    return ok;
+  }
+  // statistics: tie triangles looked at, marked for culling
+  size_t orient_tris = 0, orient_culled = 0, orient_flipped = 0;
+  /*!
+   * (AI-assisted) The tie triangles [first, end): per visibility group (up to 8 instances), the
+   * cullable triangles welded by position into surfaces (edges shared by exactly two triangles),
+   * each surface oriented consistently from one of its triangles (the PS2 strips start either
+   * way). A surface that is closed enough (at most 10% open edges, no edge with three or more
+   * triangles, no contradiction) and has a clear inside (signed volume at least half of its
+   * unsigned volume) gets its triangles turned to face outward and marked: their back faces can't
+   * be seen from outside, and from inside they are the backs of the walls.
+   */
+  void orient_ties(size_t first, size_t end) {
+    std::map<u16, std::vector<u32>> groups;
+    for (size_t i = first; i < end; i++) {
+      if (key_cullable(tris[i].draw_key)) {
+        groups[tris[i].vis].push_back((u32)i);
+      }
+    }
+    struct PK {
+      float x, y, z;
+      bool operator==(const PK& o) const { return x == o.x && y == o.y && z == o.z; }
+    };
+    struct PKH {
+      size_t operator()(const PK& k) const {
+        u32 a, b, c;
+        memcpy(&a, &k.x, 4);
+        memcpy(&b, &k.y, 4);
+        memcpy(&c, &k.z, 4);
+        return (size_t)a * 0x9E3779B97F4A7C15ull ^ (size_t)b * 0xC2B2AE3D27D4EB4Full ^ c;
+      }
+    };
+    for (auto& [vis, ids] : groups) {
+      orient_tris += ids.size();
+      // welded corners
+      std::unordered_map<PK, u32, PKH> weld;
+      std::vector<std::array<u32, 3>> w(ids.size());
+      std::vector<std::array<float, 3>> pos;
+      for (size_t k = 0; k < ids.size(); k++) {
+        for (int c = 0; c < 3; c++) {
+          const auto& v = verts[tris[ids[k]].v[c]];
+          // welded on a 8 unit (2 mm) grid: strips of one surface don't always repeat a corner
+          // bit for bit
+          auto q = [](float f) { return std::round(f / 8.f); };
+          auto [it, fresh] = weld.emplace(PK{q(v.x) + 0.f, q(v.y) + 0.f, q(v.z) + 0.f},
+                                          (u32)pos.size());
+          if (fresh) {
+            pos.push_back({v.x, v.y, v.z});
+          }
+          w[k][c] = it->second;
+        }
+      }
+      // edges: (lo, hi) -> triangles and whether they run lo -> hi
+      std::unordered_map<u64, std::vector<std::pair<u32, bool>>> edges;
+      for (size_t k = 0; k < ids.size(); k++) {
+        for (int c = 0; c < 3; c++) {
+          const u32 a = w[k][c], b = w[k][(c + 1) % 3];
+          if (a == b) {
+            continue;
+          }
+          const u64 key = ((u64)std::min(a, b) << 32) | std::max(a, b);
+          edges[key].push_back({(u32)k, a < b});
+        }
+      }
+      std::vector<std::vector<u64>> tri_edges(ids.size());
+      for (auto& [key, list] : edges) {
+        for (auto& [t, dir] : list) {
+          tri_edges[t].push_back(key);
+        }
+      }
+      std::vector<int> comp(ids.size(), -1);
+      std::vector<u8> flip(ids.size(), 0);
+      for (size_t seed = 0; seed < ids.size(); seed++) {
+        if (comp[seed] >= 0) {
+          continue;
+        }
+        const int cid = (int)seed;
+        std::vector<u32> members{(u32)seed}, stack{(u32)seed};
+        comp[seed] = cid;
+        bool bad = false;
+        size_t open = 0, total = 0;
+        float open_top = -1e30f;  // the highest corner of an open edge
+        std::set<u64> seen;
+        while (!stack.empty()) {
+          const u32 t = stack.back();
+          stack.pop_back();
+          for (u64 key : tri_edges[t]) {
+            if (!seen.insert(key).second) {
+              continue;
+            }
+            const auto& list = edges[key];
+            total++;
+            if (list.size() == 1) {
+              open++;
+              open_top = std::max({open_top, pos[(u32)(key >> 32)][1], pos[(u32)key][1]});
+              continue;
+            }
+            if (list.size() > 2) {
+              bad = true;
+              continue;
+            }
+            const auto [t1, d1] = list[0];
+            const auto [t2, d2] = list[1];
+            const u32 other = t1 == t ? t2 : t1;
+            // consistent: the two run the edge in opposite directions
+            const u8 want = (u8)(flip[t] ^ (d1 == d2 ? 1 : 0));
+            if (comp[other] < 0) {
+              comp[other] = cid;
+              flip[other] = want;
+              members.push_back(other);
+              stack.push_back(other);
+            } else if (comp[other] == cid && flip[other] != want) {
+              bad = true;
+            }
+          }
+        }
+        // open edges allowed only at the bottom (on the ground: a rock or a house standing on the
+        // terrain), up to half of the edges
+        float ymin = 1e30f, ymax = -1e30f;
+        for (u32 t : members) {
+          for (int c = 0; c < 3; c++) {
+            ymin = std::min(ymin, pos[w[t][c]][1]);
+            ymax = std::max(ymax, pos[w[t][c]][1]);
+          }
+        }
+        const bool open_ok = open * 10 <= total ||
+                             (open * 2 <= total &&
+                              open_top <= ymin + 0.15f * (ymax - ymin) + 0.5f * 4096.f);
+        if (bad || members.size() < 8 || !open_ok) {
+          continue;
+        }
+        // signed and unsigned volume around the surface's centroid
+        double cen[3] = {0, 0, 0};
+        for (u32 t : members) {
+          for (int c = 0; c < 3; c++) {
+            for (int k = 0; k < 3; k++) {
+              cen[k] += pos[w[t][c]][k];
+            }
+          }
+        }
+        for (double& c : cen) {
+          c /= 3.0 * members.size();
+        }
+        double vs = 0, va = 0;
+        for (u32 t : members) {
+          double p[3][3];
+          for (int c = 0; c < 3; c++) {
+            for (int k = 0; k < 3; k++) {
+              p[c][k] = pos[w[t][c]][k] - cen[k];
+            }
+          }
+          if (flip[t]) {
+            for (int k = 0; k < 3; k++) {
+              std::swap(p[1][k], p[2][k]);
+            }
+          }
+          const double v = p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1]) -
+                           p[0][1] * (p[1][0] * p[2][2] - p[1][2] * p[2][0]) +
+                           p[0][2] * (p[1][0] * p[2][1] - p[1][1] * p[2][0]);
+          vs += v;
+          va += std::abs(v);
+        }
+        if (va <= 0 || std::abs(vs) < 0.5 * va) {
+          continue;
+        }
+        const u8 inward = vs < 0 ? 1 : 0;
+        for (u32 t : members) {
+          auto& tri = tris[ids[t]];
+          if (flip[t] ^ inward) {
+            std::swap(tri.v[1], tri.v[2]);
+            orient_flipped++;
+          }
+          const auto dk = draw_keys[tri.draw_key];
+          tri.draw_key = key_id(DrawKey{dk.mode, dk.texture, (u16)(dk.kind | c3l::kDrawCullBack)});
+          orient_culled++;
+        }
+      }
+    }
+  }
+
   void add_tie_tree(tfrag3::TieTree& tree) {
+    const size_t tree_first_tri = tris.size();
     tree.unpack();
     u32 base = verts.size();
     for (auto& v : tree.unpacked.vertices) {
@@ -480,6 +695,9 @@ struct Converter {
         mark_small(first_tri);
         idx += g.num;
       }
+    }
+    if (opt.tie_winding) {
+      orient_ties(tree_first_tri, tris.size());  // (AI-assisted)
     }
   }
 };
@@ -1151,7 +1369,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     const float cell = cell_of_detail((int)t.detail);
     auto key = std::make_tuple((int)(t.detail + 4 * t.tier), (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell),
-                               (int)cv.draw_keys[t.draw_key].kind);
+                               (int)(cv.draw_keys[t.draw_key].kind & 0xff));
     cells[key].push_back(i);
   }
 
@@ -1974,6 +2192,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              100.0 * opt.vista_ratio, opt.vista_sloppy_error, vchunks,
              opt.vista_cell, vdraws);
   }
+  if (opt.tie_winding) {
+    lg::info("{}: tie winding: {} of {} cullable tie triangles on closed surfaces, marked for back "
+             "face culling ({} turned to face outward)",
+             level.level_name, cv.orient_culled, cv.orient_tris, cv.orient_flipped);
+  }
   lg::info("{}: visibility: {} of {} tris in {} runs (hidden when the game's visibility data says)",
            level.level_name, vis_tris, out_indices.size() / 3, out_runs.size());
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
@@ -2042,7 +2265,9 @@ int main(int argc, char** argv) {
   app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
   bool no_verify = false;
   app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
-  bool no_vista = false;
+  bool no_tie_winding = false, no_vista = false;
+  app.add_flag("--no-tie-winding", no_tie_winding,
+               "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
   app.add_option("--vista-error", opt.vista_error,
@@ -2054,6 +2279,7 @@ int main(int argc, char** argv) {
   CLI11_PARSE(app, argc, argv);
   opt.verify = !no_verify;
   opt.vcache = !no_vcache;
+  opt.tie_winding = !no_tie_winding;
   opt.vista = !no_vista;
   opt.pack.threads = opt.threads;
   opt.pack.max_block = std::max<u32>(block_kb, 1) * 1024;

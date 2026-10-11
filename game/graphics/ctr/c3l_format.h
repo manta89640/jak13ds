@@ -20,8 +20,8 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v11 (AI-assisted): compressed blocks (BlockDir after the header); the layout is otherwise v10's
 // v12 (AI-assisted): merc vertices the game rewrites (ripple water, texture scroll), see
 // MercModHeader; otherwise v11
-// v13 (AI-assisted): the vista tier (CHUNK_KIND_VISTA chunks, lod_tier 4); otherwise v12. Readers
-// detect it by its values, not by the version.
+// v13 (AI-assisted): the vista tier (CHUNK_KIND_VISTA chunks, lod_tier 4) and Draw::kind
+// kDrawCullBack; otherwise v12. Readers detect both by their values, not by the version.
 constexpr uint32_t kVersion = 13;
 // v7 files (16-bit textures without mip levels) still load
 constexpr uint32_t kMinVersion = 7;
@@ -141,11 +141,14 @@ static_assert(sizeof(Vertex) == 16);
 struct Draw {
   uint32_t mode;        // tfrag3 DrawMode bits (common/dma/gs.h)
   uint16_t texture;     // index into the textures, 0xffff = untextured
-  uint16_t kind;        // 0 = tfrag, 1 = tie, 2 = shrub
+  uint16_t kind;        // 0 = tfrag, 1 = tie, 2 = shrub; (AI-assisted) v13: | kDrawCullBack
   uint32_t first_index;  // index into the index data (u16), triangle list
   uint32_t index_count;
 };
 static_assert(sizeof(Draw) == 16);
+// (AI-assisted) v13 Draw::kind flag: the draw's triangles are closed, consistently wound surfaces
+// (front faces counter-clockwise seen from outside, right-handed world): back faces may be culled
+constexpr uint16_t kDrawCullBack = 0x100;
 
 /*!
  * (AI-assisted) v11: compression. The file is the v10 layout (the "raw image": every offset in the

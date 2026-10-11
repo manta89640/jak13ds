@@ -803,6 +803,11 @@ void build_draw_order(CtrLevelData* out) {
     const bool textured = d.texture < out->textures.size();
     ctr_draw_state st =
         ctr_state_from_draw_mode(mode, textured ? out->textures[d.texture] : -1);
+    // (AI-assisted) cull_ties: c3l v13 draws of closed, consistently wound tie surfaces
+    // (whether they are culled is decided per frame: ctr_gpu_set_cull)
+    if (d.kind & c3l::kDrawCullBack) {
+      st.tcc |= CTR_TCC_CULL_BACK;
+    }
     // (AI-assisted) opaque, depth written and tested like the early depth test, and the alpha
     // test never fails (the texture's alpha is above its reference everywhere; vertex alpha 0x80):
     // the early depth test may drop what's behind it before texturing
@@ -2400,4 +2405,5 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     draw(di);
   }
   ctr_gpu_set_mesh_nofog(0);
+  ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
 }

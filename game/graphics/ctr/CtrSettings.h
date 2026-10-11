@@ -149,6 +149,11 @@ struct CtrSettings {
   // fog stage (texture combiner pass-through, texture unit 1 off). Off until priced on hardware
   // (gpu_profile ab): switching the unit per draw may cost more than the ramp lookups
   bool fog_stage_skip = false;
+  // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
+  // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
+  // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
+  bool cull_ties = true;
+  bool cull_flip = false;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;

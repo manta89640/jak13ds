@@ -358,6 +358,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
   }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
+  // (AI-assisted) cull_ties
+  ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__

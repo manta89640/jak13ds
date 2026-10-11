@@ -1073,6 +1073,10 @@ void ctr_gpu_mesh_delete(int mesh) {
   }
 }
 
+// (AI-assisted) cull_ties (ctr_gpu_set_cull_flip)
+static int g_soft_cull_flip = 0;
+static int g_soft_cull_enable = 0;
+
 void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                        const float clip[16],
                        int mesh,
@@ -1115,6 +1119,14 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     }
     if (!ok) {
       continue;
+    }
+    // (AI-assisted) cull_ties
+    if (state && (state->tcc & CTR_TCC_CULL_BACK) && g_soft_cull_enable) {
+      const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
+                      (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+      if (g_soft_cull_flip ? a > 0 : a < 0) {
+        continue;
+      }
     }
     // behind the far plane / outside z
     if ((tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
@@ -1319,6 +1331,13 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out) {
 // the software backend has no fog
 void ctr_gpu_set_mesh_fog(const float*, const float*, uint8_t, uint8_t, uint8_t) {}
 void ctr_gpu_set_mesh_nofog(int) {}  // (AI-assisted) fog_stage_skip: no fog stage here either
+// (AI-assisted) cull_ties: back faces of CTR_TCC_CULL_BACK draws (counter-clockwise front faces
+// on screen, x right / y up; flip: the other way)
+void ctr_gpu_set_cull(int enable, int flip) {
+  g_soft_cull_enable = enable ? 1 : 0;
+  g_soft_cull_flip = flip ? 1 : 0;
+}
+void ctr_gpu_cull_reset(void) {}
 void ctr_gpu_set_rgba4_as_rgba8(int on) {
   g_soft.rgba4_as_rgba8 = on;
 }

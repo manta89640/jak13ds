@@ -2593,6 +2593,22 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
 /* ---------------- (AI-assisted) 3DS hardware features: settings ---------------- */
 
 static int g_early_depth = 0; /* config.ini early_depth (off by default) */
+/* (AI-assisted) cull_ties: which PICA mode culls the c3l back faces (see ctr_gpu_set_cull_flip) */
+static int g_cull_flip = 0;
+static int g_cull_enable = 0;
+
+void ctr_gpu_set_cull(int enable, int flip) {
+  g_cull_enable = enable ? 1 : 0;
+  g_cull_flip = flip ? 1 : 0;
+}
+
+void ctr_gpu_cull_reset(void) {
+  C3Di_Context* ctx = &__C3D_Context;
+  if (ctx->effect.cullMode != GPU_CULL_NONE) {
+    C3D_CullFace(GPU_CULL_NONE); /* sent with citro3d's next update (or the next raw state) */
+    g.last_state_valid = 0;
+  }
+}
 static int g_proctex = 1;
 static int g_compact = 1;
 
@@ -3672,6 +3688,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
    * discards later (no blending, an alpha test that never fails): the hardware's early depth
    * data can't know about fragments dropped after it. */
   e.earlyDepth = early_depth_ok(st) != 0;
+  /* (AI-assisted) cull_ties: back faces of closed tie surfaces (CTR_TCC_CULL_BACK) */
+  e.cullMode = (st->tcc & CTR_TCC_CULL_BACK) && g_cull_enable
+                   ? (g_cull_flip ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW)
+                   : GPU_CULL_NONE;
   e.earlyDepthFunc = GPU_EARLYDEPTH_GEQUAL;
   e.earlyDepthRef = 0;
   /* (AI-assisted) the stencil marks (CTR_STATE_STENCIL_*): 1 where a STENCIL_SET draw passed the
@@ -3733,6 +3753,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   if (e.fragOpMode != c->fragOpMode) {
     p = raw_w(p, GPUREG_COLOR_OPERATION, 0x7, e.fragOpMode);
+  }
+  if (e.cullMode != c->cullMode) {
+    p = raw_w(p, GPUREG_FACECULLING_CONFIG, 0xF, (u32)e.cullMode & 3);
   }
   if (e.earlyDepth != c->earlyDepth || e.earlyDepthFunc != c->earlyDepthFunc ||
       e.earlyDepthRef != c->earlyDepthRef) {

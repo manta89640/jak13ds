@@ -61,7 +61,7 @@ enum ctr_test {
 
 typedef struct {
   int tex;            // texture handle, or -1 for untextured
-  uint8_t tcc;        // use texture alpha
+  uint8_t tcc;        // use texture alpha (bit 0); (AI-assisted) bit 1: CTR_TCC_CULL_BACK
   uint8_t decal;      // decal instead of modulate
   uint8_t filter;     // bilinear
   uint8_t clamp_s, clamp_t;
@@ -98,6 +98,14 @@ enum {
   CTR_STATE_STENCIL_CLEAR = 64,
   CTR_STATE_NO_COLOR = 128,
 };
+/* (AI-assisted) ctr_draw_state::tcc bit: back faces of this level mesh draw may be culled (c3l v13
+ * kDrawCullBack). ctr_gpu_set_cull (each frame, config cull_ties): whether they are, and which
+ * screen winding is "back" (flip 0: the c3l convention, counter-clockwise front faces seen from
+ * outside). ctr_gpu_cull_reset: culling off again (after the level draws; draws that don't go
+ * through the state code keep the GPU's last face culling setting). */
+enum { CTR_TCC_CULL_BACK = 2 };
+void ctr_gpu_set_cull(int enable, int flip);
+void ctr_gpu_cull_reset(void);
 /* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
 int ctr_gpu_has_stencil(void);
 
