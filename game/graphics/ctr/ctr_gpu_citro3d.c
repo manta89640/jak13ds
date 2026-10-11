@@ -3770,8 +3770,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
    * discards later (no blending, an alpha test that never fails): the hardware's early depth
    * data can't know about fragments dropped after it. */
   e.earlyDepth = early_depth_ok(st) != 0;
-  /* (AI-assisted) cull_ties: back faces of closed tie surfaces (CTR_TCC_CULL_BACK) */
-  e.cullMode = (st->tcc & CTR_TCC_CULL_BACK) && g_cull_enable
+  /* (AI-assisted) cull_ties: back faces of closed tie surfaces (CTR_TCC_CULL_BACK); cull_merc:
+   * merc draws the caller marked (CTR_TCC_CULL_OWN) */
+  e.cullMode = (st->tcc & CTR_TCC_CULL_BACK) && (g_cull_enable || (st->tcc & CTR_TCC_CULL_OWN))
                    ? (g_cull_flip ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW)
                    : GPU_CULL_NONE;
   e.earlyDepthFunc = GPU_EARLYDEPTH_GEQUAL;

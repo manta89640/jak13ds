@@ -206,6 +206,11 @@ struct CtrSettings {
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
   bool cull_ties = true;
   bool cull_flip = false;
+  // (AI-assisted) back faces of merc draws the converter marked (c3l kMercDrawCullBack: wound like
+  // their vertex normals, at most 2% of their triangles at an open edge, opaque) are culled, with
+  // cull_ties' winding (flip). Not HUD models, not draws whose palette has a mirroring bone. Needs
+  // levels converted with the current ctr_level_converter (older files: no marks)
+  bool cull_merc = false;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;

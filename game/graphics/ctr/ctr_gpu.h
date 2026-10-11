@@ -104,6 +104,9 @@ enum {
  * outside). ctr_gpu_cull_reset: culling off again (after the level draws; draws that don't go
  * through the state code keep the GPU's last face culling setting). */
 enum { CTR_TCC_CULL_BACK = 2 };
+/* (AI-assisted) with CTR_TCC_CULL_BACK: culled whatever ctr_gpu_set_cull's enable says (the caller
+ * decided: merc draws with config cull_merc), with its winding (flip) */
+enum { CTR_TCC_CULL_OWN = 8 };
 /* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws: every vertex the draw uses has alpha
  * 0x80, so with ctr_gpu_set_fog_alpha the mesh shader may put the fog amount in the color's alpha
  * (the texture combiner then takes the constant 0x80 for the vertex alpha). CtrLevel sets it at

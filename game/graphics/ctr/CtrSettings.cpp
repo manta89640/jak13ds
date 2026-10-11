@@ -229,6 +229,8 @@ CtrSettings load() {
       // (AI-assisted) on | off | flip (on, with the other winding)
       s.cull_flip = v == "flip";
       s.cull_ties = s.cull_flip || parse_bool(v);
+    } else if (key == "cull_merc") {
+      s.cull_merc = parse_bool(v);  // (AI-assisted)
     } else if (key == "raw_cmds") {
       s.raw_cmds = parse_bool(v);
     } else if (key == "vcache_reuse") {
@@ -273,7 +275,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} ({}) "
       "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
-      "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} cull_ties {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} cull_ties {} cull_merc {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
@@ -298,7 +300,7 @@ std::string CtrSettings::summary() const {
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
-      vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", raw_cmds ? "on" : "off",
+      vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
       gpu_counters ? " gpu_counters" : "",

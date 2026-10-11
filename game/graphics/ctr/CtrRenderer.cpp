@@ -137,6 +137,8 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.fog_alpha; }},
     {"tex1_gating", [](CtrSettings& s, bool on) { s.tex1_gating = on; },
      [](const CtrSettings& s) { return s.tex1_gating; }},
+    {"cull_merc", [](CtrSettings& s, bool on) { s.cull_merc = on; },
+     [](const CtrSettings& s) { return s.cull_merc; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;

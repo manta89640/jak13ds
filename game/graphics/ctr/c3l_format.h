@@ -246,6 +246,12 @@ struct MercDraw {
                         // (CtrEyeRenderer) to use
 };
 constexpr uint8_t kMercEnvmapDraw = 0xfe;
+// (AI-assisted) MercDraw::palette[kMercDrawFlagsByte] (an unused palette byte: zero in files from
+// older converters): kMercDrawCullBack = the draw's triangles lie on closed surfaces of the model
+// and face outward (the same winding as kDrawCullBack, agreeing with the vertex normals): their
+// back faces may be culled (config cull_merc). No layout change; detected by the value.
+constexpr int kMercDrawFlagsByte = 30;
+constexpr uint8_t kMercDrawCullBack = 0x01;
 // (AI-assisted) a model named <name> + this is <name>'s generated low LOD (same vertices: same
 // first_vertex and vertex_count; draws and indices of its own, ctr_level_converter --gen-lod). No
 // layout change: older readers load it as one more model, which nothing asks for.

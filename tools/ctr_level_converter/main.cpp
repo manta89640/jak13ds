@@ -108,6 +108,13 @@ struct Options {
   // vista_sloppy_error meters of error
   float vista_ratio = 0.25f;
   float vista_sloppy_error = 10.f;
+  // (AI-assisted) merc back face culling marks (c3l::kMercDrawCullBack, config cull_merc), see
+  // mark_merc_cull: at least merc_cull_agree of a draw's triangles agree clearly with their vertex
+  // normals (each corner's normal within acos(merc_cull_cos) of the face's side), at most
+  // merc_cull_open of them have an open edge. merc_cull_agree 0: no marks
+  float merc_cull_agree = 0.99f;
+  float merc_cull_cos = 0.2f;
+  float merc_cull_open = 0.02f;
 };
 
 // (AI-assisted) post-vertex cache statistics (the GPU's cache is cleared before each draw):
@@ -728,6 +735,12 @@ struct MercOut {
   int skipped_models = 0;
   int envmap_draws = 0;
   int gen_lod_models = 0;  // (AI-assisted)
+  // (AI-assisted) merc_cull statistics: triangles of the drawn (not envmap) draws, and of those
+  // marked kMercDrawCullBack; draws marked; triangles turned to face outward
+  size_t cull_tris = 0, cull_marked_tris = 0, cull_marked_draws = 0, cull_draws = 0,
+         cull_flipped = 0;
+  // why draws weren't marked (blended / cut-out texture, open edges (sheets), normals)
+  size_t cull_no_mode = 0, cull_no_surface = 0, cull_no_normals = 0;
 };
 
 /*!
@@ -915,6 +928,8 @@ bool gen_merc_lod(const c3l::MercModel& mm,
     }
     d.first_index = nr.first;
     d.index_count = nr.second;
+    // (AI-assisted) simplified triangles: wound consistently, not necessarily outward: no culling
+    d.palette[c3l::kMercDrawFlagsByte] &= (u8)~c3l::kMercDrawCullBack;
     gdraws.push_back(d);
   }
   if (!before || after * 10 > before * 9) {
@@ -936,6 +951,159 @@ bool gen_merc_lod(const c3l::MercModel& mm,
            before / 3, after / 3, 100.0 * after / before);
   out->gen_lod_models++;
   return true;
+}
+
+/*!
+ * (AI-assisted) Back face culling marks of a model's draws (Options::merc_cull_agree): the merc
+ * strips became triangles without the strips' alternating winding, so a triangle's winding says
+ * nothing yet; the vertex normals say which side is the outside. A triangle is clear when all
+ * three corners' normals are on one side of it (cos >= merc_cull_cos); it is turned to face that
+ * side. A draw is marked c3l::kMercDrawCullBack when it is opaque and depth written with a texture
+ * whose alpha never fails the runtime's alpha test (a cut-out shows its back through the holes),
+ * at least merc_cull_agree of its triangles are clear, and at most merc_cull_open of them have an
+ * open edge (the model's draws welded by position: an edge of only one triangle). That last test
+ * keeps single sheets (capes, cloth hems, flags, leaves: seen from both sides on the PS2, which
+ * doesn't cull) and the parts around holes unculled. Envmap draws repeat a draw's triangles and
+ * take its mark. Was a closed surface test like the ties' (orient_ties) first: merc models are
+ * rarely watertight (2% of Jak's and 13% of Snowy's merc triangles passed).
+ */
+void mark_merc_cull(const c3l::MercModel& mm,
+                    const std::vector<c3l::MercVertex>& verts,
+                    Converter& cv,
+                    MercOut* out) {
+  (void)mm;
+  const Options& opt = cv.opt;
+  const size_t d0 = mm.first_draw, d1 = out->draws.size();
+  if (opt.merc_cull_agree <= 0.f || d1 <= d0) {
+    return;
+  }
+  // texture alpha against the runtime's merc alpha test (CtrMercRenderer: GS alpha < 17 dropped)
+  auto tex_ok = [&](u16 tex) {
+    if (tex == 0xffff) {
+      return true;
+    }
+    const auto& t = cv.level->textures.at(cv.tex_order.at(tex));
+    for (u32 p : t.data) {
+      if (((p >> 24) & 0xff) < 17) {
+        return false;
+      }
+    }
+    return true;
+  };
+  std::map<u16, bool> tex_cache;
+  // welded edges of all the model's (non-envmap) draws: open = used by one triangle
+  std::map<std::array<s16, 3>, u32> weld;
+  auto corner = [&](u32 index_pos) {
+    const auto& v = verts.at(out->indices[index_pos]);
+    return weld.emplace(std::array<s16, 3>{v.pos[0], v.pos[1], v.pos[2]}, (u32)weld.size())
+        .first->second;
+  };
+  std::unordered_map<u64, u32> edge_use;
+  auto edge_key = [](u32 a, u32 b) { return ((u64)std::min(a, b) << 32) | std::max(a, b); };
+  for (size_t di = d0; di < d1; di++) {
+    const auto& d = out->draws[di];
+    if (d.eye_id == c3l::kMercEnvmapDraw) {
+      continue;
+    }
+    for (u32 i = d.first_index; i + 2 < d.first_index + d.index_count; i += 3) {
+      const u32 c[3] = {corner(i), corner(i + 1), corner(i + 2)};
+      for (int e = 0; e < 3; e++) {
+        if (c[e] != c[(e + 1) % 3]) {
+          edge_use[edge_key(c[e], c[(e + 1) % 3])]++;
+        }
+      }
+    }
+  }
+  std::map<std::pair<u32, u32>, size_t> range_draw;  // a non-envmap draw by its index range
+  for (size_t di = d0; di < d1; di++) {
+    auto& d = out->draws[di];
+    if (d.eye_id == c3l::kMercEnvmapDraw) {
+      continue;
+    }
+    range_draw.emplace(std::make_pair(d.first_index, d.index_count), di);
+    const size_t n = d.index_count / 3;
+    out->cull_draws++;
+    out->cull_tris += n;
+    DrawMode mode;
+    mode.as_int() = d.mode;
+    auto it = tex_cache.find(d.texture);
+    if (it == tex_cache.end()) {
+      it = tex_cache.emplace(d.texture, tex_ok(d.texture)).first;
+    }
+    if (mode.get_ab_enable() || !mode.get_depth_write_enable() || !it->second || !n) {
+      out->cull_no_mode++;
+      continue;
+    }
+    size_t clear = 0, open = 0;
+    std::vector<u8> turn(n, 0);
+    for (size_t t = 0; t < n; t++) {
+      const u32 i = d.first_index + 3 * (u32)t;
+      const u32 c[3] = {corner(i), corner(i + 1), corner(i + 2)};
+      bool has_open = false;
+      for (int e = 0; e < 3; e++) {
+        has_open |= c[e] != c[(e + 1) % 3] && edge_use[edge_key(c[e], c[(e + 1) % 3])] == 1;
+      }
+      open += has_open;
+      double p[3][3], vn[3][3];
+      for (int k = 0; k < 3; k++) {
+        const auto& v = verts.at(out->indices[i + k]);
+        for (int q = 0; q < 3; q++) {
+          p[k][q] = v.pos[q];
+          vn[k][q] = v.normal[q];
+        }
+      }
+      const double e1[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+      const double e2[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+      const double fn[3] = {e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                            e1[0] * e2[1] - e1[1] * e2[0]};
+      const double fl = std::sqrt(fn[0] * fn[0] + fn[1] * fn[1] + fn[2] * fn[2]);
+      int front = 0, back = 0;
+      double sum = 0;
+      for (int k = 0; k < 3; k++) {
+        const double vl =
+            std::sqrt(vn[k][0] * vn[k][0] + vn[k][1] * vn[k][1] + vn[k][2] * vn[k][2]);
+        const double cs =
+            fl > 0 && vl > 0
+                ? (fn[0] * vn[k][0] + fn[1] * vn[k][1] + fn[2] * vn[k][2]) / (fl * vl)
+                : 0.0;
+        sum += cs;
+        front += cs >= opt.merc_cull_cos;
+        back += cs <= -opt.merc_cull_cos;
+      }
+      clear += front == 3 || back == 3;
+      turn[t] = sum < 0;  // (not clear: the corners' majority)
+    }
+    if ((double)open > opt.merc_cull_open * (double)n) {
+      out->cull_no_surface++;
+      continue;
+    }
+    if ((double)clear < opt.merc_cull_agree * (double)n) {
+      out->cull_no_normals++;
+      continue;
+    }
+    for (size_t t = 0; t < n; t++) {
+      if (turn[t]) {
+        const u32 i = d.first_index + 3 * (u32)t;
+        std::swap(out->indices[i + 1], out->indices[i + 2]);
+        out->cull_flipped++;
+      }
+    }
+    d.palette[c3l::kMercDrawFlagsByte] |= c3l::kMercDrawCullBack;
+    out->cull_marked_draws++;
+    out->cull_marked_tris += n;
+  }
+  // the envmap passes share their draw's (turned) indices: and its mark
+  for (size_t di = d0; di < d1; di++) {
+    auto& d = out->draws[di];
+    if (d.eye_id != c3l::kMercEnvmapDraw) {
+      continue;
+    }
+    auto it = range_draw.find({d.first_index, d.index_count});
+    if (it != range_draw.end()) {
+      d.palette[c3l::kMercDrawFlagsByte] =
+          out->draws[it->second].palette[c3l::kMercDrawFlagsByte];
+    }
+  }
 }
 
 void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* out) {
@@ -1245,6 +1413,7 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     mm.blerc_count = out->blerc_verts.size() - mm.blerc_first;
     mm.vertex_count = local_verts.size();
     mm.draw_count = out->draws.size() - mm.first_draw;
+    mark_merc_cull(mm, local_verts, cv, out);  // (AI-assisted) before the generated LOD copies
     out->verts.insert(out->verts.end(), local_verts.begin(), local_verts.end());
     out->models.push_back(mm);
     // (AI-assisted) a generated low LOD for "<base>-lod0" without lower LODs (not with blend
@@ -2360,6 +2529,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
       merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, file.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
+  if (merc.cull_draws) {
+    // (AI-assisted) merc back face culling marks (mark_merc_cull)
+    lg::info("{}: merc culling: {} of {} draws marked ({} of {} triangles, {:.0f}%; {} turned to "
+             "face outward); not marked: {} blended / cut-out, {} with open edges (sheets), {} "
+             "unclear normals",
+             level.level_name, merc.cull_marked_draws, merc.cull_draws, merc.cull_marked_tris,
+             merc.cull_tris, 100.0 * merc.cull_marked_tris / std::max<size_t>(merc.cull_tris, 1),
+             merc.cull_flipped, merc.cull_no_mode, merc.cull_no_surface, merc.cull_no_normals);
+  }
   if (!merc.mod_effects.empty()) {
     lg::info("{}: {} merc effects with game-rewritten vertices ({} vertex writes)", level.level_name,
              merc.mod_effects.size(), merc.mod_dests.size());
@@ -2533,6 +2711,13 @@ int main(int argc, char** argv) {
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
+  app.add_option("--merc-cull-agree", opt.merc_cull_agree,
+                 "merc back face culling marks: share of a draw's triangles agreeing with their "
+                 "vertex normals (0: no marks)");
+  app.add_option("--merc-cull-cos", opt.merc_cull_cos,
+                 "merc culling: a corner's normal agrees when cos(angle to the face's side) >= this");
+  app.add_option("--merc-cull-open", opt.merc_cull_open,
+                 "merc culling: share of a draw's triangles that may have an open edge");
   app.add_option("--vista-error", opt.vista_error,
                  "vista tier: simplification error of ties and coarse tfrag (meters, 0: none)");
   app.add_option("--vista-ratio", opt.vista_ratio,

@@ -33,6 +33,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--vista-error M`, `--vista-ratio R`, `--vista-sloppy-error M` | 3, 0.25, 10 | vista ties / coarse tfrag: simplified (topology kept) to the error, then (sloppy) towards the ratio of the triangles within the second error |
 | `--merc-only` | off | only merc models (used for the common GAME.fr3 with `--all`). |
 | `--gen-lod R`, `--gen-lod-error E`, `--gen-lod-lock-border` | 0.3, 0.02, off | (AI-assisted) merc models with only `-lod0` in the level (not Jak / Daxter, no blend shapes or rewritten vertices): a simplified copy named `<model>~genlod` (`c3l::kMercGenLodSuffix`) with the model's own vertices (same `first_vertex` / `vertex_count`) and draws of its own, aiming at R of the triangles with an error under E of the model's size (meshoptimizer; all draws together, so their seams move alike; eye draws kept, vertices at the eyes locked). No layout change: older runtimes load it as a model nobody asks for. `--gen-lod 0`: none. |
+| `--merc-cull-agree R`, `--merc-cull-cos C`, `--merc-cull-open O` | 0.99, 0.2, 0.02 | (AI-assisted) merc back face culling marks (`kMercDrawCullBack` in `palette[30]`, config `cull_merc`): an opaque, depth written draw whose texture never fails the runtime's alpha test is marked when at least R of its triangles have all three corners' normals on one side (cos >= C; each is turned to face that side) and at most O of them have an open edge (the model's draws welded by position: single sheets and holes stay unculled). Envmap passes take their draw's mark; generated LODs never have it. `--merc-cull-agree 0`: no marks. |
 | `--no-etc1` | off | 16-bit textures (RGB565 / RGBA4444) instead of ETC1 / ETC1A4. |
 | `--etc1-merc` | off | ETC1 for all textures of merc models, without the quality test (faces too). |
 | `--etc1-merc-psnr DB` | 34 | (AI-assisted) merc textures become ETC1 / ETC1A4 when they pass the quality test (see "Formats"); 0: they stay 16-bit. |
@@ -224,7 +225,9 @@ MercDraw (48 bytes)
   u8  effect              merc effect index (the game can disable effects)
   u8  palette_count       bones used by this draw (<= 24)
   u32 first_index, index_count   triangle list, indices relative to the model's first_vertex
-  u8  palette[31]         palette slot -> skeleton bone
+  u8  palette[31]         palette slot -> skeleton bone (24 used). (AI-assisted) palette[30]:
+                          flags, 0 from older converters: 0x01 kMercDrawCullBack (back faces may
+                          be culled: wound like the vertex normals, see --merc-cull-agree)
   u8  eye_id              0xff; 0xfe (v9): the envmap pass of an envmapped effect, after its
                           normal draws (same triangles, envmap texture and mode); else the eye
                           texture slot that CtrEyeRenderer draws each frame

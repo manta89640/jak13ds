@@ -1351,6 +1351,15 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
     if (!ok) {
       continue;
     }
+    // (AI-assisted) cull_merc (CTR_TCC_CULL_OWN), the level meshes' winding test
+    if (state && (state->tcc & CTR_TCC_CULL_BACK) &&
+        (g_soft_cull_enable || (state->tcc & CTR_TCC_CULL_OWN))) {
+      const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
+                      (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+      if (g_soft_cull_flip ? a > 0 : a < 0) {
+        continue;
+      }
+    }
     raster_triangle(*state, tri, true);
     g_soft.cur.triangles++;
     softstats::cur->tris++;
