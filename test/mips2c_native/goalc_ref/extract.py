@@ -42,7 +42,8 @@ MODULES = {
         "vector-length",
         "vector-normalize!",
     ],
-    # (AI-assisted) GOALC_ABI_VERSION 4 (the others above are still version 2)
+    # (AI-assisted) all fixtures: GOALC_ABI_VERSION 5 (regenerated Oct 11 with the defuns of
+    # collide-func.gc and geometry.gc put back and bones.gc without the native's guard)
     "joint": [
         "add-scaled-matrix!",
         "decomp-fixed",
@@ -60,7 +61,7 @@ MODULES = {
     ],
 }
 
-ABI_VERSION = 4
+ABI_VERSION = 5
 
 
 def c_ident(name):
