@@ -25,6 +25,7 @@
 #ifdef __3DS__
 extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.c
 extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_port.c
+#include "game/graphics/ctr/ctr_gpu_bench.h"  // (AI-assisted) gpu_perflog, pica_bench
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
@@ -137,8 +138,9 @@ constexpr double kProfileModeMs = 2500.0;  // per mode
 constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
 // (AI-assisted) the render thread's statistics: one burst of lines this often (config.ini
 // stats_period, seconds)
-// (AI-assisted) config.ini gpu_counters: how long each level's GPU counters run (the hotspot
-// sampler's 16-bit counts hold ~16 s at 268 MHz)
+// (AI-assisted) config.ini gpu_counters: the counters cover every stats window; the hotspot
+// sampler's 16-bit counts restart after ~16 s at 268 MHz, so its stage samples stop after this
+// long into the window (the traffic counters cover all of it)
 constexpr double kHwCountersMs = 10000.0;
 
 // (AI-assisted) gpu_profile: the GPU's own counters over the first "all" window of a level's
@@ -178,12 +180,12 @@ void hw_profile_end(const std::string& level) {
   }
   std::string line = fmt::format(
       "[ctr] gpu profile {}: hw busy % of {} samples ({} expected, {} frames):", level, samples,
-      (int)(hw.ms * 268111.856 / 65536.0), hw.frames);
+      (int)(hw.stage_ms * 268111.856 / 65536.0), hw.frames);
   for (int i = 0; i < 8; i++) {
     line += fmt::format(" {} {:.1f}", kStages[i], samples ? 100.0 * hw.stage[i] / samples : 0.0);
   }
   // 0x10400070 + 4 * i (GBATEK), assumed bytes: memcopy-r should be ~0.37 MB/frame (the display
-  // transfer reads the 240x400 RGBA8 buffer) if so
+  // transfer reads the 240x400 RGBA8 buffer) if so (pica_bench B1.cal logs the real unit)
   static const char* const kTraffic[CTR_GPU_HW_TRAFFIC] = {
       "main-r",  "main-w",   "vramA-r",   "vramA-w",   "vramB-r", "vramB-w", "arrays",
       "tex",     "depth-r",  "depth-w",   "color-r",   "color-w", "lcd-top", "lcd-bot",
@@ -572,6 +574,15 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         }
       }
       lg::info("[ctr] build ms/frame by renderer:{}", by_name);
+#ifdef __3DS__
+      if (ctr_settings().gpu_perflog) {
+        char pl[512];
+        if (ctr_gpu_perflog_line(pl, sizeof(pl), m_timing.frames, m_timing.gpu_draw_ms,
+                                 m_timing.gpu_busy_ms, m_timing.gpu_busy_frames) > 0) {
+          lg::info("{}", pl);
+        }
+      }
+#endif
       if (ctr_settings().auto_detail) {
         const auto& s = ctr_settings();
         const float t = m_auto.t;
@@ -604,28 +615,33 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
 
 void CtrRenderer::hw_counters_frame() {
   // (AI-assisted) The GPU's own counters (ctr_gpu_hwprof_*: busy % of each pipeline stage, memory
-  // traffic; read and written through the GSP service) over kHwCountersMs of each level, from when
-  // gpu_profile would start (10 s after the level became the active one). Nothing is left out of
-  // the picture. A level change in the middle logs what was measured so far.
+  // traffic; read and written through the GSP service) over every stats window: one line per
+  // window, logged with the window's other lines (m_rs.log_now), labelled with the level. The
+  // stage samples stop kHwCountersMs into the window (16-bit counts); nothing is left out of the
+  // picture. A refusal by the GSP is logged once and ends it.
+  if (g_hw_refusal_logged) {
+    return;
+  }
   const double now = ctr_gpu_time_ms();
-  if (m_hw_active) {
-    if (m_profile_level != m_hw_level || now - m_hw_start_ms >= kHwCountersMs) {
-      hw_profile_end(m_hw_level);
-      m_hw_active = false;
-      m_hw_done.push_back(m_hw_level);
+  if (m_hw_active && !m_rs.log_now && now - m_hw_start_ms >= kHwCountersMs && !m_hw_stages_done) {
+    m_hw_stages_done = true;
+    if (ctr_gpu_hwprof_stop_stages() != 0) {
+      g_hw_refusal_logged = true;
+      g_hw_measuring = m_hw_active = false;
+      lg::warn("[ctr] gpu counters: the GSP refused the hotspot read, counters off");
     }
     return;
   }
-  if (!m_profile_level.empty() && now >= m_profile_arm_ms &&
-      std::find(m_hw_done.begin(), m_hw_done.end(), m_profile_level) == m_hw_done.end()) {
-    hw_profile_begin();
-    m_hw_level = m_profile_level;
-    m_hw_start_ms = now;
-    m_hw_active = g_hw_measuring;
-    if (!m_hw_active) {
-      m_hw_done.push_back(m_hw_level);  // the GSP refused (logged once)
-    }
+  if (!m_rs.log_now) {
+    return;
   }
+  if (m_hw_active) {
+    hw_profile_end(fmt::format("window {}", m_profile_level.empty() ? "-" : m_profile_level));
+  }
+  hw_profile_begin();
+  m_hw_active = g_hw_measuring;
+  m_hw_start_ms = now;
+  m_hw_stages_done = false;
 }
 
 bool CtrRenderer::profile_skips(const std::string& name) const {
@@ -954,6 +970,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_new_shaders(ctr_settings().new_shaders ? 1 : 0);
   ctr_gpu_set_shader_modes(ctr_settings().shader_basic, ctr_settings().shader_mesh);
+  ctr_gpu_set_shader_skin(ctr_settings().shader_skin);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
   lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");
@@ -969,6 +986,13 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   }
 #ifdef __3DS__
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
+  if (ctr_settings().pica_bench) {
+    // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
+    lg::info("[ctr] pica_bench: GPU microbenchmark before the game starts");
+    ctr_boot_mark("8b pica_bench (a hang here: see data/log/bench.txt)");
+    const int stopped = ctr_gpu_bench_run();
+    lg::info("[ctr] pica_bench: {}", stopped ? "STOPPED (the GPU didn't finish a test)" : "done");
+  }
 #endif
   ctr_gpu_set_rgba4_as_rgba8(ctr_settings().rgba4_as_rgba8 ? 1 : 0);
   // (AI-assisted) before vram_textures: the reserved VRAM for compact textures is taken there
@@ -980,6 +1004,13 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
   ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);
+#ifdef __3DS__
+  if (ctr_settings().gpu_perflog) {
+    // (AI-assisted) the GSP's performance log, read once per stats window (render_frame)
+    const int r = ctr_gpu_perflog_start();
+    lg::info("[ctr] gpu perflog: {}", r == 0 ? "on" : fmt::format("refused ({:#x})", (u32)r));
+  }
+#endif
   if (ctr_settings().pipeline) {
     lg::info("[ctr] pipeline (CPU builds the next frame while the GPU draws): {}",
              ctr_gpu_set_pipeline(1) ? "on" : "FAILED (no linear memory), off");

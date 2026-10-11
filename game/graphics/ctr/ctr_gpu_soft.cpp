@@ -1392,6 +1392,9 @@ int ctr_gpu_describe_target(char*, int) {
 int ctr_gpu_hwprof_begin(void) {
   return 1;
 }
+int ctr_gpu_hwprof_stop_stages(void) {
+  return 1;
+}
 int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   memset(out, 0, sizeof(*out));
   return 1;
@@ -1425,6 +1428,7 @@ void ctr_gpu_set_new_shaders(int) {}
 void ctr_gpu_set_asm_tex(int) {}
 void ctr_gpu_set_defer_flush(int) {}
 void ctr_gpu_set_shader_modes(int, int) {}
+void ctr_gpu_set_shader_skin(int) {}
 int ctr_gpu_asm_tex(void) {
   return 1;
 }

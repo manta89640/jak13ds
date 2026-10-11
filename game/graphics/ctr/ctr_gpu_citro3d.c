@@ -13,6 +13,7 @@
  */
 
 #include "game/graphics/ctr/ctr_gpu.h"
+#include "game/graphics/ctr/ctr_gpu_bench.h"
 #include "game/graphics/ctr/CtrTexConv.h"
 
 #include <3ds.h>
@@ -65,6 +66,14 @@ static int basic_new(void) {
 }
 static int mesh_mode(void) {
   return s_mesh_mode < 0 ? s_new_shaders : s_mesh_mode;
+}
+/* (AI-assisted) config.ini shader_skin (ctr_skin and ctr_skin_env), -1 = new_shaders */
+static int s_skin_mode = -1;
+void ctr_gpu_set_shader_skin(int skin) {
+  s_skin_mode = skin;
+}
+static int skin_new(void) {
+  return s_skin_mode < 0 ? s_new_shaders : s_skin_mode;
 }
 void ctr_gpu_set_new_shaders(int on) {
   s_new_shaders = on;
@@ -864,7 +873,7 @@ int ctr_gpu_init(void) {
     printf("[ctr] new_shaders = off: the Oct 2 vertex shaders (basic, mesh, skin, skin_env)\n");
   }
   printf("[ctr] shaders: basic %s, mesh %s, skin %s\n", basic_new() ? "new" : "old",
-         mesh_mode() == 1 ? "new" : (mesh_mode() == 2 ? "old+dph" : "old"), s_new_shaders ? "new" : "old");
+         mesh_mode() == 1 ? "new" : (mesh_mode() == 2 ? "old+dph" : "old"), skin_new() ? "new" : "old");
   g.dvlb = basic_new() ? DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size)
                          : DVLB_ParseFile((u32*)ctr_basic_old_shbin, (u32)ctr_basic_old_shbin_size);
   shaderProgramInit(&g.program);
@@ -906,7 +915,7 @@ int ctr_gpu_init(void) {
     g.fog_tex_valid = 1;
     g.fog_tex_rgb = 0xffffffff; /* force the first fill */
   }
-  g.skin_dvlb = s_new_shaders
+  g.skin_dvlb = skin_new()
                     ? DVLB_ParseFile((u32*)ctr_skin_shbin, (u32)ctr_skin_shbin_size)
                     : DVLB_ParseFile((u32*)ctr_skin_old_shbin, (u32)ctr_skin_old_shbin_size);
   shaderProgramInit(&g.skin_program);
@@ -918,7 +927,7 @@ int ctr_gpu_init(void) {
   g.uloc_skin_scales = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "scales");
   g.uloc_skin_lights = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "lights");
   g.env_dvlb =
-      s_new_shaders
+      skin_new()
           ? DVLB_ParseFile((u32*)ctr_skin_env_shbin, (u32)ctr_skin_env_shbin_size)
           : DVLB_ParseFile((u32*)ctr_skin_env_old_shbin, (u32)ctr_skin_env_old_shbin_size);
   shaderProgramInit(&g.env_program);
@@ -5139,10 +5148,17 @@ static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b) {
 
 /* ---------------- (AI-assisted) the GPU's own counters (config.ini gpu_profile) ----------------
  * Read through GSPGPU_ReadHWRegs / WriteHWRegs (offsets from 0x1EB00000: the GPU's external
- * registers 0x1EF00000 are 0x400000). 3dbrew GPU/External_Registers "Hotspot Profiling": write the
- * interval length - 1 (high 16 bits) and count (low; 0 = until the result FIFO is read) to 0x68,
- * 1 to 0x64 to start; the FIFO at 0x6C gives four words of two 16-bit stage counts. GBATEK
- * "GPU Memory Control/Status Registers": read-only traffic counters 0x70..0xBC. */
+ * registers 0x1EF00000 are 0x400000; the GSP accepts offsets below 0x420000 and up to 0x80 bytes,
+ * and does the accesses itself, so gk.rsf needs no IO mapping for them). 3dbrew
+ * GPU/External_Registers "Hotspot Profiling": 0x68 = interval length - 1 (high 16 bits) and
+ * interval count (low; 0 = until the result FIFO is read, and the 16-bit counts restart once more
+ * than 0xFFFF intervals went by), 1 to 0x64 starts it; the FIFO at 0x6C gives four words of two
+ * 16-bit stage counts, and reading it ends a count-0 measurement. Each interval adds 1 to one
+ * stage: the sum is the interval count. GBATEK "GPU Memory Control/Status Registers": read-only
+ * traffic counters 0x70..0xBC (20 words, 80 bytes). Reviewed 2026-10-11 against both: offsets,
+ * sizes and the FIFO's four 4-byte reads are right; the window has to stay under 16 s (65535
+ * intervals of 65536 cycles), so CtrRenderer stops the sampling after 10 s
+ * (ctr_gpu_hwprof_stop_stages) while the traffic counters cover the whole window. */
 #define HWREG_HOTSPOT_ENABLE 0x400064u
 #define HWREG_HOTSPOT_CONFIG 0x400068u
 #define HWREG_HOTSPOT_FIFO 0x40006Cu
@@ -5151,12 +5167,16 @@ static int s_hw_refused;
 static u32 s_hw_traffic0[CTR_GPU_HW_TRAFFIC];
 static int s_hw_frame0;
 static double s_hw_t0;
+static int s_hw_stages_done; /* stop_stages read them: s_hw_stage, s_hw_stage_ms */
+static unsigned int s_hw_stage[8];
+static double s_hw_stage_ms;
 
 int ctr_gpu_hwprof_begin(void) {
   if (s_hw_refused) {
     return 1;
   }
-  /* 65536 cycles per sample (0.24 ms at 268 MHz): 0xFFFF samples (the counters' limit) is 16 s */
+  /* 65536 cycles per interval (0.24 ms at 268 MHz), count 0: until the FIFO is read (16 s at
+   * most, see above) */
   const u32 config = 0xFFFFu << 16, off = 0, on = 1;
   Result r = GSPGPU_WriteHWRegs(HWREG_HOTSPOT_ENABLE, &off, 4);
   if (R_SUCCEEDED(r)) {
@@ -5174,6 +5194,40 @@ int ctr_gpu_hwprof_begin(void) {
   }
   s_hw_frame0 = g.frame_no;
   s_hw_t0 = ctr_gpu_time_ms();
+  s_hw_stages_done = 0;
+  return 0;
+}
+
+/* the FIFO: four reads of 4 bytes (it is one register), then the unit off */
+static Result hw_read_stages(unsigned int stage[8]) {
+  Result r = 0;
+  for (int i = 0; i < 4 && R_SUCCEEDED(r); i++) {
+    u32 w = 0;
+    r = GSPGPU_ReadHWRegs(HWREG_HOTSPOT_FIFO, &w, 4);
+    stage[2 * i] = w & 0xFFFFu;
+    stage[2 * i + 1] = w >> 16;
+  }
+  const u32 off = 0;
+  if (R_SUCCEEDED(r)) {
+    r = GSPGPU_WriteHWRegs(HWREG_HOTSPOT_ENABLE, &off, 4);
+  }
+  return r;
+}
+
+int ctr_gpu_hwprof_stop_stages(void) {
+  if (s_hw_refused) {
+    return 1;
+  }
+  if (s_hw_stages_done) {
+    return 0;
+  }
+  const Result r = hw_read_stages(s_hw_stage);
+  if (R_FAILED(r)) {
+    s_hw_refused = 1;
+    return r ? (int)r : -1;
+  }
+  s_hw_stage_ms = ctr_gpu_time_ms() - s_hw_t0;
+  s_hw_stages_done = 1;
   return 0;
 }
 
@@ -5184,25 +5238,49 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   }
   u32 traffic[CTR_GPU_HW_TRAFFIC];
   Result r = GSPGPU_ReadHWRegs(HWREG_TRAFFIC, traffic, sizeof(traffic));
-  /* the FIFO is one register: four reads of 4 bytes, not one of 16 */
-  for (int i = 0; i < 4 && R_SUCCEEDED(r); i++) {
-    u32 w = 0;
-    r = GSPGPU_ReadHWRegs(HWREG_HOTSPOT_FIFO, &w, 4);
-    out->stage[2 * i] = w & 0xFFFFu;
-    out->stage[2 * i + 1] = w >> 16;
-  }
-  const u32 off = 0;
-  if (R_SUCCEEDED(r)) {
-    r = GSPGPU_WriteHWRegs(HWREG_HOTSPOT_ENABLE, &off, 4);
+  if (R_SUCCEEDED(r) && !s_hw_stages_done) {
+    r = hw_read_stages(s_hw_stage);
+    s_hw_stage_ms = ctr_gpu_time_ms() - s_hw_t0;
   }
   if (R_FAILED(r)) {
     s_hw_refused = 1;
     return r ? (int)r : -1;
   }
+  s_hw_stages_done = 0;
+  memcpy(out->stage, s_hw_stage, sizeof(out->stage));
   for (int i = 0; i < CTR_GPU_HW_TRAFFIC; i++) {
     out->traffic[i] = traffic[i] - s_hw_traffic0[i];
   }
   out->frames = g.frame_no - s_hw_frame0;
   out->ms = ctr_gpu_time_ms() - s_hw_t0;
+  out->stage_ms = s_hw_stage_ms;
   return 0;
+}
+
+void C3Di_DirtyUniforms(GPU_SHADER_TYPE type); /* citro3d (source/internal.h) */
+
+/* (AI-assisted) config.ini pica_bench (ctr_gpu_bench.c) used citro3d with programs, textures and
+ * state of its own: take it back before the bench frees them (ctr_gpu_bench.h) */
+void ctr_gpu_bench_restore(void) {
+  for (int i = 0; i < 3; i++) {
+    C3D_TexBind(i, NULL);
+  }
+  for (int i = 0; i < 6; i++) {
+    C3D_TexEnvInit(C3D_GetTexEnv(i)); /* citro3d's default: what the GPU layer starts from */
+  }
+  C3D_CullFace(GPU_CULL_NONE);
+  C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
+  C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+  g.cur_prog = PROG_NONE;
+  use_program(PROG_BASIC);
+  /* everything sent again at the next draw, as citro3d does after the HOME Menu */
+  __C3D_Context.flags |= BIT(2) | BIT(3) | BIT(4) | BIT(5) | BIT(6) | BIT(7) | BIT(8) | BIT(9) |
+                         BIT(10) | BIT(11) | BIT(12) | (7u << 23) | (0x3Fu << 26);
+  C3Di_DirtyUniforms(GPU_VERTEX_SHADER);
+  s_raw.apt_epoch++;
+  g.last_state_valid = 0;
+  g.last_mesh_valid = 0;
+  g.last_skin_valid = 0;
+  g.bound_tex = NULL;
+  g.proc_radial = -1;
 }

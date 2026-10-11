@@ -44,7 +44,7 @@ find_program(PICASSO picasso HINTS ${DEVKITPRO}/tools/bin ${CTRULIB}/../tools/bi
 
 set(OG3DS_SHADER_CS "")
 foreach(shader ctr_basic ctr_mesh ctr_skin ctr_skin_env ctr_clip ctr_clip2 ctr_ocean ctr_ocean_full ctr_ocean_full_clip
-    ctr_basic_old ctr_mesh_old ctr_mesh_dph ctr_skin_old ctr_skin_env_old)
+    ctr_basic_old ctr_mesh_old ctr_mesh_dph ctr_skin_old ctr_skin_env_old ctr_bench_sep)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
   set(csrc ${CMAKE_CURRENT_BINARY_DIR}/${shader}_shbin.c)
@@ -59,8 +59,28 @@ foreach(shader ctr_basic ctr_mesh ctr_skin ctr_skin_env ctr_clip ctr_clip2 ctr_o
   list(APPEND OG3DS_SHADER_CS ${csrc})
 endforeach()
 
+# (AI-assisted) config.ini pica_bench: one DVLB with an entry point per source file (picasso
+# links them into one shbin with shared code), for the shader cost and program switch tests
+set(OG3DS_BENCH_SHADERS ctr_bench_v7 ctr_bench_v7b ctr_bench_v14 ctr_bench_v21 ctr_bench_v35
+    ctr_bench_v53 ctr_bench_o3 ctr_bench_o4)
+set(bench_srcs "")
+foreach(shader ${OG3DS_BENCH_SHADERS})
+  list(APPEND bench_srcs ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
+endforeach()
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ctr_bench_shbin.c
+  COMMAND ${PICASSO} -o ${CMAKE_CURRENT_BINARY_DIR}/ctr_bench.shbin ${bench_srcs}
+  COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_BINARY_DIR}/ctr_bench.shbin
+          -DOUT=${CMAKE_CURRENT_BINARY_DIR}/ctr_bench_shbin.c -DNAME=ctr_bench_shbin
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+  DEPENDS ${bench_srcs} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bin2c.cmake
+  COMMENT "Assembling the pica_bench shaders"
+  VERBATIM)
+list(APPEND OG3DS_SHADER_CS ${CMAKE_CURRENT_BINARY_DIR}/ctr_bench_shbin.c)
+
 target_sources(og3ds_port PRIVATE
   ${OG_ROOT}/game/graphics/ctr/ctr_gpu_citro3d.c
+  ${OG_ROOT}/game/graphics/ctr/ctr_gpu_bench.c
   ${OG3DS_SHADER_CS}
 )
 target_include_directories(og3ds_port PRIVATE ${OG_ROOT})

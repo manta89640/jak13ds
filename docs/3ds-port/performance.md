@@ -136,3 +136,82 @@ merc too).
 - `std::chrono::steady_clock::now()` (`platform/3ds/port/ctr_clock.cpp`): the system tick to ns
   with a multiply, not libctru's clock_gettime (two 64-bit divisions in libgcc; the ARM11 has no
   divide instruction).
+
+## GPU timing in one session (AI-assisted)
+
+Three config.ini switches give the GPU numbers no public source has (cycle costs per draw, per
+vertex, per pixel; what the hotspot and traffic counters mean). All are off by default, change
+nothing when off, use GSP requests and citro3d only (no new system calls or IO mappings), and only
+mean something on hardware: Azahar returns zeros or garbage for the counters and the performance
+log. Turn all three on for one playtest:
+
+```
+pica_bench = on      # the microbenchmark at boot, before the game starts
+gpu_perflog = on     # GSP performance log, one line per 15 s stats window
+gpu_counters = on    # hotspot stage samples + traffic counters, one line per stats window
+```
+
+Then play as usual for a few minutes (the two per-window switches cost one GSP request each per
+window), and bring back `sdmc:/3ds/jak1/data/log/gk.log` and `bench.txt` from the same folder.
+Set `pica_bench = off` afterwards: it runs at every boot.
+
+**The bench** (`game/graphics/ctr/ctr_gpu_bench.c`) runs after the GPU starts and before the game
+loads (13 s in Azahar, an estimated 20-60 s on a New 3DS; the bottom screen shows the test it is
+on). Each test builds its command list once and queues it 3-8 times back to back, then logs one
+`[bench] <test> key=value ...` line to gk.log and bench.txt. The order goes from safe to risky:
+B1 floor, B2 per draw, B4 vertex cache, cull check, B5 attributes, B6 fill, B7 setup, B8 early
+depth on the usual 240x400 target; then register settings the game never used on hardware
+(COLORBUFFER_READ = 0, POST_VERTEX_CACHE_NUM 0x4 / 0x84, the 256x416 block32 target and its
+display transfer); then the bench's own vertex shaders (program switches, B3) and the game's
+unproven new `ctr_mesh` and `ctr_skin` (`shader_mesh = new`, `shader_skin = new`). Before each
+test a `start <test>` line is appended to bench.txt and the file closed, so if the GPU hangs (the
+game never starts; power off) the last `start` line names the culprit. A queue that doesn't finish
+in 3 s stops the bench with a `[bench] HANG` line and the game won't draw either.
+
+Read it with:
+
+```
+python3 platform/3ds/tools/bench_report.py gk.log bench.txt
+```
+
+It takes the last session and prints one table per group:
+
+- **gpu**: the command lists' GPU time per repetition, from the GSP performance log's P3D total
+  (falls back to `wall`, citro3d's queue timer, which also covers fills and transfers). The unit of
+  the performance log is calibrated from the vblank interval (`upm` = raw units per ms in the
+  header: ~1000 means microseconds as libctru says, ~1000000 nanoseconds).
+- **per item**: B2 us/draw (and the difference to `B2.nostate`: what each state change adds), B3/B5
+  ns/vertex (3 per culled triangle; the B3 line ends with a fit: ns per vertex per shader
+  instruction), B4 ns/index per reuse distance k (k0 = no reuse; the knee is the cache size,
+  per POST_VERTEX_CACHE_NUM value), B6 Mpixel/s and ns/pixel, B7 ns/triangle.
+- **hs**: the three busiest hotspot stages (arrays, vsh, setup, raster, tex, light, comb, fb) and
+  `(samples/expected)`: the sampler takes one stage per 8192 GPU cycles; B1.idle* shows where an
+  idle GPU's samples go (subtract that share from short tests).
+- **traffic**: the biggest traffic counters, in KB per repetition once B1 calibrated them (B1.clear
+  writes 384000 bytes per fill unit, B1.transfer reads 384000 and writes 288000): the calibration
+  line shows bytes per count for each.
+- **B8** lines are pixel counts of a readback of the color buffer: `a` the near or small quad
+  (red), `b` the full screen quad (green), `c` the clear color (blue), with `cbox`, the bounding box
+  of the clear color left over, and the expected counts. `c2`: a 4x4 near quad at an unaligned spot,
+  then a full screen quad between the depths with early depth on: clear color left = pixels the
+  early depth test rejected wrongly, `cbox` = the granularity of the early depth data (the "black
+  squares"). `c3.<func>.d<0|ff>`: each EARLYDEPTH_FUNC against a clear value of 0 and 0xFFFFFF.
+  `c4a/b/c`: does a draw with depth write off / failing the alpha test / early depth off still
+  update the early depth data? `c5a`: is the early depth data kept between two frames without
+  EARLYDEPTH_CLEAR (GBATEK: it is separate storage, a depth buffer fill doesn't touch it)?
+  `B8.*.ref` locates the 4x4 quad in the readback (rows are flipped: y = height - 1 - row).
+- `B6.cbread0.probe bg_ok=1`: with COLORBUFFER_READ = 0 the cleared background next to an opaque
+  quad survived (then an opaque pass may skip color reads).
+
+**The per-window lines** in gk.log:
+
+- `[ctr] gpu perflog: N frames in T ms; raw GSP units per frame: p3d .. ppf .. psc0 .. psc1 ..;
+  vblank0 last ..; ms/frame: p3d .. ppf .. psc .., c3d draw .., fence busy .. -> bubble ..`:
+  bubble = busy - (p3d + ppf + max(psc0, psc1)) is the time the GPU sat idle inside a frame's
+  busy span (waiting for the CPU between command list parts, queue gaps). Compare p3d with the
+  draw count and triangle count of the `render ms/frame` line next to it, using the bench's per
+  draw and per vertex costs.
+- `[ctr] gpu profile window <level>: hw busy % of N samples (M expected, F frames): ...;
+  MB/frame: ...`: the stage shares over the window's first 10 s (the 16-bit sample counts restart
+  after 16 s) and the traffic per frame over the whole window (assumed bytes until the bench's B1
+  calibration says otherwise).

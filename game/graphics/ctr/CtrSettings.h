@@ -133,6 +133,14 @@ struct CtrSettings {
   // (AI-assisted) seconds between the render thread's statistics bursts (frame times, triangles,
   // draws, culling); shorter for measuring fixed views (more SD card writes)
   float stats_period = 15.f;
+  // (AI-assisted) the GSP's performance log: how long the GPU's command lists (P3D), display
+  // transfers (PPF) and memory fills (PSC) took per frame, against the fence's busy time
+  // ([ctr] gpu perflog, once per stats window). One GSP request per window; hardware only.
+  bool gpu_perflog = false;
+  // (AI-assisted) a GPU microbenchmark at boot, before the game starts (~20-60 s; `[bench]` lines
+  // in gk.log and data/log/bench.txt, platform/3ds/tools/bench_report.py). Its last tests use
+  // shaders never run on hardware: a hang there names the test in bench.txt. Hardware only.
+  bool pica_bench = false;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
@@ -210,6 +218,10 @@ struct CtrSettings {
   bool defer_flush = true;
   // (AI-assisted) hang bisect: shader_basic old|new, shader_mesh old|new|dph (-1: new_shaders)
   int shader_basic = 1, shader_mesh = -1;
+  // (AI-assisted) shader_skin old|new: ctr_skin and ctr_skin_env (-1: new_shaders). The new ones
+  // pass platform/3ds/tools/check_shaders.py but never ran on hardware (pica_bench B3.skin_new
+  // runs the new ctr_skin once)
+  int shader_skin = -1;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above

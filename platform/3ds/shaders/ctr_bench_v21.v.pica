@@ -1,0 +1,38 @@
+; (AI-assisted)
+; config.ini pica_bench (game/graphics/ctr/ctr_gpu_bench.c): 21 instructions (13 dependent ALU ops on the color)
+; One DVLB with several entry points (ctr_bench.shbin); every configured output component is written exactly
+; once, whole registers only (platform/3ds/tools/check_shaders.py). Input: v0 position (w = 1),
+; v1 texture coordinates, v2 color (0..255).
+
+.fvec bproj[4]
+.fvec bscales      ; x: texcoord scale, y: color scale (1/255)
+.constf bk_ctr_bench_v21(1.0, 0.0, 0.0, 0.0)
+
+.out opos position
+.out otc0 texcoord0
+.out oclr color
+
+.entry ctr_bench_v21
+.proc ctr_bench_v21
+  dp4 opos.x, bproj[0], v0
+  dp4 opos.y, bproj[1], v0
+  dp4 opos.z, bproj[2], v0
+  dp4 opos.w, bproj[3], v0
+  mul otc0, bscales.xxxx, v1
+  mul r0, bscales.yyyy, v2
+  mul r0, bk_ctr_bench_v21.xxxx, r0
+  add r0, bk_ctr_bench_v21.yyyy, r0
+  mul r0, bk_ctr_bench_v21.xxxx, r0
+  add r0, bk_ctr_bench_v21.yyyy, r0
+  mul r0, bk_ctr_bench_v21.xxxx, r0
+  add r0, bk_ctr_bench_v21.yyyy, r0
+  mul r0, bk_ctr_bench_v21.xxxx, r0
+  add r0, bk_ctr_bench_v21.yyyy, r0
+  mul r0, bk_ctr_bench_v21.xxxx, r0
+  add r0, bk_ctr_bench_v21.yyyy, r0
+  mul r0, bk_ctr_bench_v21.xxxx, r0
+  add r0, bk_ctr_bench_v21.yyyy, r0
+  mul r0, bk_ctr_bench_v21.xxxx, r0
+  mov oclr, r0
+  end
+.end

@@ -188,6 +188,10 @@ CtrSettings load() {
       s.gpu_counters = parse_bool(v);
     } else if (key == "stats_period") {
       s.stats_period = std::clamp(f, 1.f, 600.f);  // (AI-assisted)
+    } else if (key == "gpu_perflog") {
+      s.gpu_perflog = parse_bool(v);  // (AI-assisted)
+    } else if (key == "pica_bench") {
+      s.pica_bench = parse_bool(v);  // (AI-assisted)
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
@@ -235,6 +239,8 @@ CtrSettings load() {
       s.shader_basic = v == "new" ? 1 : (v == "old" ? 0 : -1);
     } else if (key == "shader_mesh") {
       s.shader_mesh = v == "new" ? 1 : (v == "dph" ? 2 : (v == "old" ? 0 : -1));
+    } else if (key == "shader_skin") {
+      s.shader_skin = v == "new" ? 1 : (v == "old" ? 0 : -1);  // (AI-assisted)
     } else if (key == "asm_mem") {
       s.asm_mem = parse_bool(v);
     } else if (key == "fast_clock") {
@@ -264,7 +270,7 @@ std::string CtrSettings::summary() const {
       "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
       "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} cull_ties {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
-      "fast_clock {}{}{}{}{}",
+      "fast_clock {}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
       auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms)", shrub_distance,
@@ -291,7 +297,9 @@ std::string CtrSettings::summary() const {
       vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
-      gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",
+      gpu_counters ? " gpu_counters" : "",
+      gpu_perflog ? " gpu_perflog" : "", pica_bench ? " pica_bench" : "",
+      depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");
 }
 
