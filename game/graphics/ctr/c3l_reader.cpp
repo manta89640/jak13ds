@@ -16,11 +16,15 @@
 
 namespace c3l {
 
-Reader::Reader(const char* path) : m_f(fopen(path, "rb")) {
+Reader::Reader(const char* path, size_t window) : m_f(fopen(path, "rb")), m_window_cap(window) {
   if (!m_f) {
     return;
   }
-  setvbuf(m_f, nullptr, _IOFBF, 64 * 1024);
+  if (m_window_cap) {
+    setvbuf(m_f, nullptr, _IONBF, 0);  // (AI-assisted) window mode: one request per read
+  } else {
+    setvbuf(m_f, nullptr, _IOFBF, 64 * 1024);
+  }
   fseek(m_f, 0, SEEK_END);
   m_file_size = ftell(m_f);
   fseek(m_f, 0, SEEK_SET);
@@ -77,6 +81,7 @@ bool Reader::file_read(long offset, void* dst, size_t bytes) {
   if (bytes == 0) {
     return true;
   }
+  Timer t;  // (AI-assisted) read_ms
   if (m_pos != offset && fseek(m_f, offset, SEEK_SET) != 0) {
     m_error = true;
     return false;
@@ -87,6 +92,68 @@ bool Reader::file_read(long offset, void* dst, size_t bytes) {
   }
   m_pos = offset + (long)bytes;
   file_bytes_read += bytes;
+  read_ms += t.getMs();
+  file_reads++;
+  return true;
+}
+
+const uint8_t* Reader::in_window(long offset, size_t bytes) {
+  for (auto& w : m_windows) {
+    if (w.size && offset >= w.offset && offset + (long)bytes <= w.offset + (long)w.size) {
+      w.used = ++m_window_uses;
+      return w.buf.data() + (offset - w.offset);
+    }
+  }
+  return nullptr;
+}
+
+const uint8_t* Reader::load_window(long offset, size_t want) {
+  Window* w = &m_windows[0];
+  if (m_window_cap) {
+    // the window this read continues (the nearest one before it: the same stream of reads, now
+    // past its end), else the one used longest ago
+    Window* behind = nullptr;
+    for (auto& c : m_windows) {
+      if (c.size && c.offset <= offset && (!behind || c.offset > behind->offset)) {
+        behind = &c;
+      }
+    }
+    w = behind ? behind : (m_windows[1].used < m_windows[0].used ? &m_windows[1] : &m_windows[0]);
+  }
+  if (w->buf.size() < want) {
+    w->buf.resize(want);
+  }
+  w->size = 0;
+  if (!file_read(offset, w->buf.data(), want)) {
+    return nullptr;
+  }
+  w->offset = offset;
+  w->size = want;
+  w->used = ++m_window_uses;
+  return w->buf.data();
+}
+
+bool Reader::raw_read(long offset, void* dst, size_t bytes) {
+  if (!m_window_cap) {
+    return file_read(offset, dst, bytes);
+  }
+  if (const uint8_t* p = in_window(offset, bytes)) {
+    memcpy(dst, p, bytes);
+    return true;
+  }
+  if (bytes >= m_window_cap) {
+    return file_read(offset, dst, bytes);  // one exact read
+  }
+  if (offset < 0 || offset + (long)bytes > m_file_size) {
+    m_error = true;
+    return false;
+  }
+  const uint8_t* p =
+      load_window(offset, std::min<size_t>(m_window_cap, (size_t)(m_file_size - offset)));
+  if (!p) {
+    return false;
+  }
+  memcpy(dst, p, bytes);
   return true;
 }
 
@@ -132,22 +199,25 @@ const uint8_t* Reader::packed_bytes(size_t bi) {
   const Block& b = m_blocks[bi];
   const long start = (long)b.file_offset;
   const size_t size = b.packed_size();
-  if (start >= m_window_offset && start + (long)size <= m_window_offset + (long)m_window_size) {
-    return m_window.data() + (start - m_window_offset);
+  if (const uint8_t* p = in_window(start, size)) {
+    return p;
   }
   // a new window from this block on: as many of the following blocks as fit
-  size_t want = std::max<size_t>(size, kWindow);
+  size_t want = std::max<size_t>(size, m_window_cap ? m_window_cap : kWindow);
   want = std::min<size_t>(want, (size_t)(m_file_size - start));
-  if (m_window.size() < want) {
-    m_window.resize(want);
+  if (m_window_cap) {
+    // (AI-assisted) whole blocks only: a block cut at the window's end was read again with the next
+    size_t whole = size;
+    for (size_t j = bi + 1; j < m_blocks.size(); j++) {
+      const Block& n = m_blocks[j];
+      if ((long)n.file_offset != start + (long)whole || whole + n.packed_size() > want) {
+        break;
+      }
+      whole += n.packed_size();
+    }
+    want = whole;
   }
-  m_window_size = 0;
-  if (!file_read(start, m_window.data(), want)) {
-    return nullptr;
-  }
-  m_window_offset = start;
-  m_window_size = want;
-  return m_window.data();
+  return load_window(start, want);
 }
 
 bool Reader::read_block(size_t bi, uint32_t offset, uint8_t* dst, size_t bytes) {
@@ -156,32 +226,47 @@ bool Reader::read_block(size_t bi, uint32_t offset, uint8_t* dst, size_t bytes) 
   if (b.codec() == CODEC_STORED) {
     // straight from the file (or the window, if it's there already)
     const long start = (long)b.file_offset + (long)(offset - b.raw_offset);
-    if (start >= m_window_offset && start + (long)bytes <= m_window_offset + (long)m_window_size) {
-      memcpy(dst, m_window.data() + (start - m_window_offset), bytes);
+    if (const uint8_t* p = in_window(start, bytes)) {
+      memcpy(dst, p, bytes);
       return true;
     }
-    return file_read(start, dst, bytes);
+    return raw_read(start, dst, bytes);  // (AI-assisted) window mode: through the windows
   }
   if (!whole && m_cache_block == (long)bi) {
     memcpy(dst, m_cache.data() + (offset - b.raw_offset), bytes);
+    m_cache2_newer = false;
+    return true;
+  }
+  if (!whole && m_window_cap && m_cache2_block == (long)bi) {
+    memcpy(dst, m_cache2.data() + (offset - b.raw_offset), bytes);
+    m_cache2_newer = true;
     return true;
   }
   const uint8_t* src = packed_bytes(bi);
   if (!src) {
     return false;
   }
-  uint8_t* out = whole ? dst : m_cache.data();
+  // (AI-assisted) window mode: into the cache used longest ago
+  const bool second = !whole && m_window_cap && !m_cache2_newer;
+  if (second && m_cache2.size() < m_cache.size()) {
+    m_cache2.resize(m_cache.size());
+  }
+  std::vector<uint8_t>& cache = second ? m_cache2 : m_cache;
+  long& cache_block = second ? m_cache2_block : m_cache_block;
+  uint8_t* out = whole ? dst : cache.data();
   Timer t;
   const bool ok = decode_block(b.codec(), src, b.packed_size(), out, b.raw_size, &m_zstd);
   decode_ms += t.getMs();
   if (!ok) {
     m_error = true;
     m_cache_block = -1;
+    m_cache2_block = -1;
     return false;
   }
   if (!whole) {
-    m_cache_block = (long)bi;
-    memcpy(dst, m_cache.data() + (offset - b.raw_offset), bytes);
+    cache_block = (long)bi;
+    m_cache2_newer = second;
+    memcpy(dst, cache.data() + (offset - b.raw_offset), bytes);
   }
   return true;
 }
@@ -195,7 +280,7 @@ bool Reader::read(uint32_t offset, void* dst_v, size_t bytes) {
     return true;
   }
   if (m_blocks.empty()) {
-    return file_read((long)offset, dst_v, bytes);
+    return raw_read((long)offset, dst_v, bytes);
   }
   uint8_t* dst = (uint8_t*)dst_v;
   const uint32_t end = offset + (uint32_t)bytes;

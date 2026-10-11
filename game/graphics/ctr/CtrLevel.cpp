@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/dma/dma.h"
@@ -25,7 +26,9 @@
 #include "game/graphics/opengl_renderer/buckets.h"
 
 #ifdef __3DS__
+#include "game/overlord/jak1/fake_iso.h"  // (AI-assisted) io_heap_free
 #include "platform/3ds/port/ctr_port.h"
+extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 #endif
 
 // ---------------------------------------------------------------------------
@@ -388,9 +391,40 @@ void CtrLevels::publish(const std::string& name, std::unique_ptr<CtrLevelData> l
 }
 
 namespace {
+// (AI-assisted) Each read from a .c3l file reads this much (one SD card request, unbuffered, into
+// the reader's window): config.ini c3l_read_buffer (KB, 16..1024; default 256; 0: the old reads,
+// through a 64 KB stdio buffer that started again after every seek). The DGO's reads take 256 KB.
+size_t c3l_read_window() {
+  static long kb = -1;
+  if (kb < 0) {
+    kb = 256;
+#ifdef __3DS__
+    char v[16];
+    if (ctr_config_get("c3l_read_buffer", v, sizeof(v))) {
+      const long n = strtol(v, nullptr, 10);
+      kb = n <= 0 ? 0 : std::clamp<long>(n, 16, 1024);
+    }
+#endif
+    if (kb) {
+      lg::info("[ctr] .c3l files read {} KB at a time (config.ini c3l_read_buffer)", kb);
+    } else {
+      lg::info("[ctr] .c3l files read through a 64 KB stdio buffer (config.ini c3l_read_buffer = 0)");
+    }
+  }
+  size_t bytes = (size_t)kb * 1024;
+#ifdef __3DS__
+  // the heap's level-load peak leaves ~3 MB (the DGO's read-ahead window is there too): at most
+  // the old reads' 128 KB window when it's low
+  if (bytes > 128 * 1024 && jak1::io_heap_free() < (2u << 20)) {
+    bytes = 128 * 1024;
+  }
+#endif
+  return bytes;
+}
+
 // (AI-assisted) the pieces of a .c3l file, as they are needed (v11: decompressed): c3l_reader.h
 struct C3lReader : c3l::Reader {
-  explicit C3lReader(const fs::path& path) : c3l::Reader(path.string().c_str()) {}
+  explicit C3lReader(const fs::path& path) : c3l::Reader(path.string().c_str(), c3l_read_window()) {}
   long size() const { return file_size(); }
 };
 }  // namespace
@@ -689,12 +723,19 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   for (auto& m : out->merc_models) {
     failed += m.mesh < 0;
   }
+  // (AI-assisted) where the time went (file reads, decompressing, the rest: building meshes and
+  // textures, waiting for the core) and the linear memory left with this level in
+  std::string mem;
+#ifdef __3DS__
+  mem = fmt::format("; linear free {} KB", linearSpaceFree() / 1024);
+#endif
   lg::info(
       "[ctr] loaded {} ({} chunks, {} merc models, {} textures: {} KB, background {} KB first; {} "
-      "KB) in {:.0f} ms{}",
+      "KB) in {:.0f} ms{}; reading {:.0f} ms in {} reads of {} KB{}",
       name, out->chunks.size(), out->merc_models.size(), out->textures.size(),
       out->tex_pool_bytes / 1024, out->tex_background_bytes / 1024, file_size / 1024,
-      timer.getMs(), decode_ms > 0 ? fmt::format(" (decompressing {:.0f} ms)", decode_ms) : "");
+      timer.getMs(), decode_ms > 0 ? fmt::format(" (decompressing {:.0f} ms)", decode_ms) : "",
+      m_last_read_ms, m_last_reads, m_last_read_bytes / 1024, mem);
   if (failed) {
     lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
               failed);
@@ -747,10 +788,14 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
 // (AI-assisted) run_culling: the bounding spheres of chunk ci's runs from its vertices (as read
 // from the file) and the file's indices (the draws' first_index still into all of them). The
 // center of the run's bounding box and half its diagonal, in the chunk's quantized units.
+// (AI-assisted) indices: the file's indices [idx_first, idx_end) (the chunk's), indices[0] is index
+// idx_first
 void make_run_spheres(CtrLevelData* out,
                       u32 ci,
                       const c3l::Vertex* verts,
-                      const std::vector<u16>& indices) {
+                      const u16* indices,
+                      u32 idx_first,
+                      u32 idx_end) {
   const auto& ch = out->chunks[ci];
   for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
     const u32 di = ch.first_draw + k;
@@ -759,9 +804,9 @@ void make_run_spheres(CtrLevelData* out,
          r++) {
       const u32 n = out->vis_runs[r].index_count;
       int mn[3] = {32767, 32767, 32767}, mx[3] = {-32768, -32768, -32768};
-      bool ok = n > 0 && idx + n <= indices.size();
+      bool ok = n > 0 && idx >= idx_first && idx + n <= idx_end;
       for (u32 i = idx; ok && i < idx + n; i++) {
-        const u16 v = indices[i];
+        const u16 v = indices[i - idx_first];
         ok = v < ch.vertex_count;
         for (int c = 0; ok && c < 3; c++) {
           mn[c] = std::min<int>(mn[c], verts[v].pos[c]);
@@ -1003,8 +1048,16 @@ bool CtrLevels::load_file(const fs::path& path,
   struct DecodeTime {
     const C3lReader& f;
     double* ms;
-    ~DecodeTime() { *ms = f.decode_ms; }
-  } decode_time{f, decode_ms};
+    double* read_ms;
+    u32* reads;
+    u64* read_bytes;
+    ~DecodeTime() {
+      *ms = f.decode_ms;
+      *read_ms = f.read_ms;  // (AI-assisted)
+      *reads = f.file_reads;
+      *read_bytes = f.file_bytes_read;
+    }
+  } decode_time{f, decode_ms, &m_last_read_ms, &m_last_reads, &m_last_read_bytes};
   c3l::Header hdr;
   if (!f.read(0, &hdr, sizeof(hdr))) {
     lg::error("[ctr] failed to read {}", path.string());
@@ -1142,10 +1195,15 @@ bool CtrLevels::load_file(const fs::path& path,
   out->index_data_offset = hdr.index_data_offset;
   out->merc_vertex_offset = hdr.merc_vertex_offset;
   out->merc_index_offset = hdr.merc_index_offset;
-  // all indices at once (~1 MB): reading them chunk by chunk between the vertex reads would seek
-  // back and forth, and every seek throws away the read buffer
+  // all indices at once (1-3 MB): reading them chunk by chunk between the vertex reads would seek
+  // back and forth, and every seek throws away the read buffer. (AI-assisted) The reader's window
+  // mode keeps a window for each (c3l_read_buffer): then every chunk's indices are read straight
+  // into its index buffer, without the 1-3 MB piece of the heap (at the level-load peak the heap
+  // has ~3 MB: maincave's 2.5 MB once failed with bad_alloc and the level had no background).
+  const bool chunk_indices = f.window_mode();
+  const u32 index_total = hdr.index_data_size / sizeof(u16);
   std::vector<u16> indices;
-  if (!f.read_array(hdr.index_data_offset, hdr.index_data_size / sizeof(u16), &indices)) {
+  if (!chunk_indices && !f.read_array(hdr.index_data_offset, index_total, &indices)) {
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
   }
@@ -1171,18 +1229,24 @@ bool CtrLevels::load_file(const fs::path& path,
     int mesh = -1;
     void* vdst;
     u16* idst;
-    if (end <= indices.size()) {
+    if (end <= index_total) {
       mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
       if (mesh < 0 && make_room(name, "meshes")) {
         mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
       }
     }
     if (mesh >= 0) {
-      memcpy(idst, indices.data() + first, (end - first) * sizeof(u16));
-      const bool read_ok = f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
+      bool read_ok = true;
+      if (chunk_indices) {
+        read_ok = f.read(hdr.index_data_offset + first * (u32)sizeof(u16), idst,
+                         (end - first) * sizeof(u16));
+      } else {
+        memcpy(idst, indices.data() + first, (end - first) * sizeof(u16));
+      }
+      read_ok = read_ok && f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
                                   vdst, ch.vertex_count * sizeof(c3l::Vertex));
       if (read_ok && !out->run_spheres.empty()) {
-        make_run_spheres(out, (u32)out->meshes.size(), (const c3l::Vertex*)vdst, indices);
+        make_run_spheres(out, (u32)out->meshes.size(), (const c3l::Vertex*)vdst, idst, first, end);
       }
       mesh = ctr_gpu_mesh_end(mesh, read_ok);
     }

@@ -291,6 +291,10 @@ class CtrLevels {
   // returns true (try the allocation again).
   bool make_room(const std::string& name, const char* what);
   bool m_room_tried = false;  // by the loader's job (one at a time)
+  // (AI-assisted) the last load_file's file reads (ms, count): for the "loaded" log line
+  double m_last_read_ms = 0;
+  u32 m_last_reads = 0;
+  u64 m_last_read_bytes = 0;
   // under m_lock: the loader asks for room / the number of times the render thread made it
   bool m_room_wanted = false;
   u32 m_room_serial = 0;
