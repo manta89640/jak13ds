@@ -56,6 +56,8 @@ extern const size_t ctr_skin_env_old_shbin_size;
 /* (AI-assisted) config.ini fog_alpha: the mesh shaders with the fog amount in the color's alpha */
 extern const uint8_t ctr_mesh_old_fa_shbin[];
 extern const size_t ctr_mesh_old_fa_shbin_size;
+extern const uint8_t ctr_mesh_fa_shbin[];
+extern const size_t ctr_mesh_fa_shbin_size;
 static int s_new_shaders = 1;
 /* (AI-assisted) per shader overrides (config.ini shader_basic / shader_mesh), -1 = new_shaders.
  * mesh: 0 Oct 2, 1 new, 2 Oct 2 with the new dph transform (hang bisect) */
@@ -904,9 +906,12 @@ int ctr_gpu_init(void) {
   g.uloc_fog0 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog0");
   g.uloc_fog1 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog1");
   /* (AI-assisted) fog_alpha: its program has the mesh program's uniforms at the same places (the
-   * draws upload them by g.uloc_*); the Oct 2 form (mesh old), not with the dph bisect mode */
+   * draws upload them by g.uloc_*): ctr_mesh_old_fa for mesh old, ctr_mesh_fa for mesh new; none
+   * for the dph bisect mode */
   if (mesh_mode() == 0) {
     g.mesh_fa_dvlb = DVLB_ParseFile((u32*)ctr_mesh_old_fa_shbin, (u32)ctr_mesh_old_fa_shbin_size);
+  } else if (mesh_mode() == 1) {
+    g.mesh_fa_dvlb = DVLB_ParseFile((u32*)ctr_mesh_fa_shbin, (u32)ctr_mesh_fa_shbin_size);
   }
   if (g.mesh_fa_dvlb) {
     shaderProgramInit(&g.mesh_fa_program);
@@ -5106,6 +5111,9 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
   out0[3] = -fog1[1] * fog1[2];
   out1[0] = -(1.0f + k * fog0[1]); /* the clamps, as fog amounts */
   out1[1] = 1.0f + k * fog0[2];
+  /* (AI-assisted) the fog is at least the lower clamp: kept >= 0 (ctr_mesh_fa only clamps at 1;
+   * the fog ramp gave 0 for anything below) */
+  out1[1] = out1[1] < 0.0f ? 0.0f : out1[1];
   out1[2] = 0.0f;
   out1[3] = 0.0f;
 }
