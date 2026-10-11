@@ -1677,11 +1677,6 @@ std::array<math::Vector4f, 4> make_cam_mat(const math::Vector4f cam_T_w[4],
   return result;
 }
 
-bool sphere_in_view(const float* s, const math::Vector4f* planes) {
-  math::Vector4f acc = planes[0] * s[0] + planes[1] * s[1] + planes[2] * s[2] - planes[3];
-  return acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3];
-}
-
 // (AI-assisted) auto_detail: how far between the near (0) and the far (1) shrub / tie distances
 // (render thread: set by CtrRenderer from the GPU time, read here)
 float g_detail_t = 0.25f;
@@ -1846,10 +1841,10 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_far_levels = m_level_draws = 0;
   }
   if (rs.log_now && m_vis_frames) {
-    lg::info("[ctr] {}: visibility hid {:.0f} chunks, {:.0f} tris of partly drawn chunks hidden (visibility and view) per frame ({} frames with data)",
+    lg::info("[ctr] {}: visibility hid {:.0f} chunks, {:.0f} tris of partly drawn chunks hidden (visibility and view) per frame ({} frames with data, {} of them the level's own)",
              m_name, (double)m_vis_chunks / m_vis_frames, (double)m_vis_tris / m_vis_frames,
-             m_vis_frames);
-    m_vis_chunks = m_vis_tris = m_vis_frames = 0;
+             m_vis_frames, m_vis_own_frames);
+    m_vis_chunks = m_vis_tris = m_vis_frames = m_vis_own_frames = 0;
   }
   if (rs.log_now && m_cull_frames) {
     lg::info("[ctr] {}: run culling tested {:.0f} runs, hid {:.0f} chunks and {:.0f} tris per level "
@@ -1919,7 +1914,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   m_vis = settings.vis_culling && rs.vis_valid[li] && !lev.vis_runs.empty() ? rs.vis_bits[li]
                                                                             : nullptr;
   const bool vis_own = m_vis && (rs.vis_flags[li] & 4);
+  // (AI-assisted) neighbour_vis: the string of a level the camera isn't in (computed from the
+  // other level's data): the PS2 and PC draw its tfrag, low resolution tfrag included, by the bits
+  const bool vis_nb = settings.neighbour_vis && m_vis && !vis_own;
   m_vis_frames += m_vis != nullptr;
+  m_vis_own_frames += vis_own;
   {
     float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
     if (settings.fog) {
@@ -2006,7 +2005,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           continue;
         }
       }
-    } else if (ch.lod_tier == 3 || !lod_ok) {
+    } else if (ch.lod_tier == 3) {
+      // (AI-assisted) neighbour_vis: the low resolution tfrag in near mode where a neighbour's
+      // string says (chunks with visibility runs)
+      if (!(vis_nb && ch.vis_run_count)) {
+        continue;
+      }
+    } else if (!lod_ok) {
       continue;
     }
     // (AI-assisted) the view test: the chunk's sphere against the four planes; one that crosses a
@@ -2029,8 +2034,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const bool straddles = cross != 0;
     bool partly = false;
-    const bool vis_test =
-        m_vis && ch.vis_run_count && (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3));
+    // (AI-assisted) ties always; tfrag with the level's own string (not its low resolution
+    // version), or every tier with a neighbour's (neighbour_vis)
+    const bool vis_test = m_vis && ch.vis_run_count &&
+                          (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3) ||
+                           (vis_nb && ch.lod_tier <= 3));
     if (vis_test || straddles) {
       // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
       u32 shown = 0, view_hidden = 0, view_tris = 0;

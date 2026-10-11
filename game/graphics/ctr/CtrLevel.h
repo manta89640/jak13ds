@@ -348,7 +348,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) the game's visibility string for the level being drawn (nullptr: none), and
   // what it hid (statistics)
   const u8* m_vis = nullptr;
-  u64 m_vis_chunks = 0, m_vis_tris = 0, m_vis_frames = 0;
+  u64 m_vis_chunks = 0, m_vis_tris = 0, m_vis_frames = 0, m_vis_own_frames = 0;
   // (AI-assisted) run_culling: per run of the level being drawn, shown this frame (filled for the
   // chunks tested run by run); statistics: runs tested, triangles and chunks the view test hid
   std::vector<u8> m_run_shown;

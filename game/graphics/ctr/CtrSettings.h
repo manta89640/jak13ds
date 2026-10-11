@@ -134,6 +134,10 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
+  // (AI-assisted) a neighbouring level's visibility string (the camera is in the other level): its
+  // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
+  // PS2 and PC do (else only its ties used the bits)
+  bool neighbour_vis = true;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
