@@ -68,7 +68,7 @@ struct CtrSettings {
   // (AI-assisted) a merc bucket's opaque draws of models drawn more than once (crates, yetis, ...)
   // drawn draw by draw across the instances: one texture bind per draw of the model instead of
   // per instance, but the bones are uploaded for each draw then
-  bool merc_tex_sort = false;
+  bool merc_tex_sort = true;  // (AI-assisted) on: Snowy host stats -7..-45% merc texture binds
   // (AI-assisted) models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
   // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
   // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod
