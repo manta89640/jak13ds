@@ -287,6 +287,13 @@ void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
  * change, don't clear it unless a pool was filled or moved since the last clear; the first bind
  * of a frame and every other texture's bind still clear). Any time. */
 void ctr_gpu_set_tex_cache_clear(int mode);
+/* (AI-assisted) config.ini mip_bias: the LOD bias of mipmapped textures (levels, + = a smaller
+ * level sooner: blurrier, fewer texels read), -4..4 in 1/256 steps. 0 = none. Any time. */
+void ctr_gpu_set_mip_bias(float bias);
+/* (AI-assisted) config.ini skin_rows_f24: merc bone rows uploaded as float24 (3 words per vector,
+ * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
+ * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
+void ctr_gpu_set_skin_rows_f24(int on);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
  * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
  * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */

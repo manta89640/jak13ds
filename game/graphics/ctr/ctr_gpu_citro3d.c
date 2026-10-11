@@ -1680,6 +1680,21 @@ void ctr_gpu_set_tex_cache_clear(int mode) {
   s_tex_clear_mode = mode ? 1 : 0;
 }
 
+/* (AI-assisted) config.ini mip_bias: GPUREG_TEXUNITn_LOD bits 0-12 (fixed 1.4.8) of mipmapped
+ * textures, as C3D_TexSetLodBias */
+static u16 s_lod_bias = 0;
+void ctr_gpu_set_mip_bias(float bias) {
+  int b = (int)(bias * 256.0f);
+  b = b < -0x1000 ? -0x1000 : (b > 0xFFF ? 0xFFF : b);
+  s_lod_bias = (u16)(b & 0x1FFF);
+}
+
+/* (AI-assisted) config.ini skin_rows_f24 */
+static int s_skin_f24 = 0;
+void ctr_gpu_set_skin_rows_f24(int on) {
+  s_skin_f24 = on ? 1 : 0;
+}
+
 /* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
  * The pipeline's frame end used to wait for the GX queue to empty (C3D_FrameBegin: frame N - 1 and
  * the parts of N already sent), stop it, and only then hand N's command list over with
@@ -3668,12 +3683,15 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       param |= GPU_TEXTURE_MIP_FILTER(GPU_LINEAR);
     }
   }
+  /* (AI-assisted) mip_bias: only with mip levels (0 = what every texture has) */
+  const u16 lod_bias = max_level ? s_lod_bias : 0;
   if (g.bound_tex == tex && g.bound_data == tex->data && g.bound_param == param &&
-      tex->maxLevel == max_level) {
+      tex->maxLevel == max_level && tex->lodBias == lod_bias) {
     return;
   }
   tex->param = param;
   tex->maxLevel = max_level;
+  tex->lodBias = lod_bias;
   if (raw) {
     /* (AI-assisted) what C3Di_SetTex and citro3d's texture unit update write: the unit's
      * registers, the unit on, then its cache cleared; the context gets the texture (invariant) */
@@ -5049,6 +5067,34 @@ static void raw_skin_rows(const int* locs, const float* bones, int palette_count
   s_raw.vs_changed = 1;
 }
 
+/* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24) */
+static void raw_skin_rows_f24(const int* locs, const float* bones, int palette_count) {
+  u32* p = raw_ptr();
+  const u32 n = 3u * (u32)palette_count;
+  for (int row = 0; row < 3; row++) {
+    p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)locs[row]); /* bit 31 clear: f24 */
+    /* the burst: first word, header, the rest, padding (see raw_n) */
+    u32* d = p;
+    const float* src = bones + 4 * row;
+    for (int b = 0; b < palette_count; b++, src += 12) {
+      const float v[4] = {src[3], src[2], src[1], src[0]}; /* C3D_FVec order: w z y x */
+      u32 w3[3];
+      raw_pack_f24(v, w3);
+      for (u32 i = 0; i < 3; i++) {
+        const u32 k = 3u * (u32)b + i;
+        d[k ? k + 1 : 0] = w3[i];
+      }
+    }
+    d[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
+    p += n + 1;
+    if (!(n & 1)) {
+      *p++ = 0;
+    }
+  }
+  raw_end(p);
+  s_raw.vs_changed = 1;
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count) {
@@ -5091,7 +5137,9 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   const size_t bone_bytes = sizeof(float) * 12 * (size_t)palette_count;
   if (!g.last_skin_valid || g.last_skin_palette_count != palette_count ||
       !words_equal(g.last_skin_bones, bones, 12u * (unsigned)palette_count)) {
-    if (raw && palette_count > 0) {
+    if (raw && palette_count > 0 && s_skin_f24) {
+      raw_skin_rows_f24(g.uloc_skin_rows, bones, palette_count);
+    } else if (raw && palette_count > 0) {
       raw_skin_rows(g.uloc_skin_rows, bones, palette_count);
     } else {
       for (int row = 0; row < 3; row++) {

@@ -1418,6 +1418,8 @@ void ctr_gpu_set_color16(int) {}
 void ctr_gpu_set_early_depth(int) {}
 void ctr_gpu_set_early_depth_params(int, int, unsigned int) {}  // (AI-assisted) no early test
 void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
+void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips
+void ctr_gpu_set_skin_rows_f24(int) {}      // (AI-assisted) no uniform formats here
 void ctr_gpu_set_framebuffer(int, int depth16) {
   g_soft.depth16 = depth16 ? 1 : 0;  // (AI-assisted) no stencil, like the 3DS's D16 buffer
 }

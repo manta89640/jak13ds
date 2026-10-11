@@ -144,6 +144,15 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.skip_clear; }},
     {"tex_cache_clear", [](CtrSettings& s, bool on) { s.tex_cache_uploads = on; },
      [](const CtrSettings& s) { return s.tex_cache_uploads; }},
+    // mip_bias: the config's bias (on; +1 when the config says 0) or 0 (off)
+    {"mip_bias",
+     [](CtrSettings& s, bool on) {
+       static const float kConfigBias = s.mip_bias != 0.f ? s.mip_bias : 1.f;
+       s.mip_bias = on ? kConfigBias : 0.f;
+     },
+     [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
+    {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
+     [](const CtrSettings& s) { return s.skin_rows_f24; }},
     // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
     // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
     {"early_depth",
@@ -502,6 +511,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) early_depth (ab: the config's mode or off)
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_tex_cache_clear(ctr_settings().tex_cache_uploads ? 1 : 0);  // (AI-assisted)
+  ctr_gpu_set_mip_bias(ctr_settings().mip_bias);                          // (AI-assisted)
+  ctr_gpu_set_skin_rows_f24(ctr_settings().skin_rows_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_early_depth_params(
       ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
       ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
