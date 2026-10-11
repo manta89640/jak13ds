@@ -93,6 +93,8 @@ depth16 = off              # on: 16-bit depth buffer instead of 24-bit + stencil
 compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats (L8, LA8, RGB565, RGBA5551, RGBA4), and in 384 KB of reserved VRAM with vram_textures
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read
 sprite_max_size = 0.5      # world particles and glows at most this fraction of the screen height across (0 = no limit)
+sprite_min_alpha = 6       # (AI-assisted) world particles bigger than ~20 pixels (half size) are left out below this alpha (the game's 0..128: 6 = under 5% opaque): faint mist and smoke that adds a few color steps but blends a big area. 2: the old rule (only sprites under 2, any size). Log line (debug): [ctr] sprite: ... faint big ones left out
+sprite_alpha_discard = on  # (AI-assisted) blended world particles drop their fully transparent pixels (alpha test greater than 0; only the blend modes where alpha 0 adds nothing), so those pixels cost no framebuffer read and write. Same picture. off: no alpha test, as before
 vis_culling = on           # the game's own visibility data hides level parts behind walls and hills (needs .c3l v10 files)
 raw_cmds = on              # (AI-assisted) draws write their GPU commands themselves instead of through citro3d: less render thread CPU per draw, ~40% fewer command words. off: the citro3d path, for comparing
 vcache_reuse = off         # (AI-assisted) with raw_cmds: a draw with the same vertices and matrices as the one before keeps the GPU's post-vertex cache (a few command words less). Try on hardware: wrong or jumping vertices on models mean it has to stay off

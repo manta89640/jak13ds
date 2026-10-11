@@ -188,6 +188,10 @@ CtrSettings load() {
       s.proctex_glows = parse_bool(v);
     } else if (key == "sprite_max_size") {
       s.sprite_max_size = std::max(0.f, f);
+    } else if (key == "sprite_min_alpha") {
+      s.sprite_min_alpha = std::clamp(std::atoi(v.c_str()), 2, 64);  // (AI-assisted)
+    } else if (key == "sprite_alpha_discard") {
+      s.sprite_alpha_discard = parse_bool(v);  // (AI-assisted)
     } else if (key == "vis_culling") {
       s.vis_culling = parse_bool(v);
     } else if (key == "raw_cmds") {
@@ -231,7 +235,7 @@ std::string CtrSettings::summary() const {
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} distort_copy {} envmap {} shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
-      "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
+      "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
@@ -255,7 +259,8 @@ std::string CtrSettings::summary() const {
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
-      sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
+      sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
+      vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
       gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",

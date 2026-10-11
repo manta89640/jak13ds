@@ -147,11 +147,16 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // (AI-assisted) per frame: config.ini sprite_max_size in GS units, and the corners' texture
   // coordinates ([1]: for the procedural texture, centered on 0)
   float m_size_cap = 0;
+  // (AI-assisted) config sprite_min_alpha (GS alpha, 128 = opaque) for sprites with a half size
+  // over kBigHalfGs GS units: 20 pixels at the screen's 240 / 448 pixels per GS unit
+  float m_min_alpha_big = 2.f;
+  static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
   float m_st_out[2][4][2] = {};
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
     int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels
+    int faint = 0;          // (AI-assisted) sprite_min_alpha: big faint ones left out
   } m_stats;
   // (AI-assisted) a frame that took more than 3 ms logs its counts (render)
   void build_sprites(DmaFollower& dma, CtrRenderState& rs);

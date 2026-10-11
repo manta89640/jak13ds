@@ -190,9 +190,9 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
   }
   if (rs.log_now) {
     lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort ({} under "
-              "8 px left out), {} draws (since the last stats)",
+              "8 px left out), {} faint big ones left out, {} draws (since the last stats)",
               m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
-              m_stats.distort, m_stats.distort_small, m_stats.draws);
+              m_stats.distort, m_stats.distort_small, m_stats.faint, m_stats.draws);
     m_stats = Stats();
   }
 }
@@ -263,6 +263,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     m_corner_reach = b * xy;
   }
   m_size_cap = ctr_settings().sprite_max_size * 224.f;
+  m_min_alpha_big = (float)ctr_settings().sprite_min_alpha;
   for (int k = 0; k < 4; k++) {
     for (int p = 0; p < 2; p++) {
       const float st_mul = p ? 2.f : 1.f, st_add = p ? -1.f : 0.f;
@@ -584,8 +585,19 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     // (AI-assisted) a world sprite that ends up (nearly) transparent is skipped before any corner
     // math: the game fades sprites out as they get small on screen, so these are mostly sub-pixel
     // particles, and each one still cost a quad of blending on the 3DS GPU
-    if (mode != MODE_HUD && color_byte(v.rgba.w()) * alpha_scale < 2.f) {
-      continue;
+    if (mode != MODE_HUD) {
+      const float a = color_byte(v.rgba.w()) * alpha_scale;
+      if (a < 2.f) {
+        continue;
+      }
+      // (AI-assisted) config sprite_min_alpha: a faint sprite with a half size over kBigHalfGs
+      // (~20 pixels) is skipped below that alpha too (128 = opaque): mist and smoke layers that
+      // add a few color steps each but blend a big area
+      if (a < m_min_alpha_big &&
+          std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach > kBigHalfGs) {
+        m_stats.faint++;
+        continue;
+      }
     }
 
     float corners[4][3];  // x, y, z
@@ -774,6 +786,15 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       st.zwrite = zwrite;
       st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
       st.aref = 38;
+      // (AI-assisted) config sprite_alpha_discard: fragments with alpha 0 skip the blending (no
+      // framebuffer read and write) where alpha 0 adds nothing: Cs * As (+ or -) Cd. Not for the
+      // blend modes that use a fixed factor or the destination's alpha.
+      if (!zwrite && mode != MODE_HUD && ctr_settings().sprite_alpha_discard &&
+          (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
+           st.blend == CTR_BLEND_SUB)) {
+        st.atest = CTR_TEST_GREATER;
+        st.aref = 0;
+      }
       // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
       // its texture coordinates then go from -1 to 1 (see m_proc below)
       if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {

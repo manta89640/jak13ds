@@ -132,6 +132,12 @@ struct CtrSettings {
   bool proctex_glows = true;
   // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
   float sprite_max_size = 0.5f;
+  // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
+  // (the game's 0..128; all sprites are left out below 2, the old rule for every size)
+  int sprite_min_alpha = 6;
+  // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
+  // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
+  bool sprite_alpha_discard = true;
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;
