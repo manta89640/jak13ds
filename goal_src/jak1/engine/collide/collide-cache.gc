@@ -786,6 +786,11 @@
 
 ;; for an unknown reason, the goal compiler went insane on this function
 
+;; og:preserve-this (AI-assisted) 3DS: fill-from-foreground-using-box in C++ (native_collide_cache.cpp,
+;; the same results). #f when it is off (config.ini collide_native = off): the GOAL code runs.
+(#when TARGET_3DS
+  (def-mips2c pc-fill-from-foreground-using-box (function collide-cache symbol)))
+
 (defmethod fill-from-foreground-using-box ((obj collide-cache))
   (local-vars
     (zero uint128)
@@ -823,6 +828,8 @@
     (a3-6 uint128)
     (a3-7 uint128)
     (f31-0 none))
+  (#when TARGET_3DS
+    (if (pc-fill-from-foreground-using-box obj) (return 0)))
   (rlet ((vf1 :class vf)
          (vf2 :class vf)
          (vf3 :class vf)

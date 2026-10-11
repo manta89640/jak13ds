@@ -70,6 +70,7 @@ namespace method_26_collide_cache { extern void link(); }
 namespace method_32_collide_cache { extern void link(); }
 namespace pc_upload_collide_frag { extern void link(); }
 namespace pc_collide_frag_may_hit { extern void link(); }  // (AI-assisted) 3DS
+namespace pc_bsp_collide_with_box { extern void link(); }  // (AI-assisted) 3DS
 namespace method_28_collide_cache { extern void link(); }
 namespace method_27_collide_cache { extern void link(); }
 namespace method_29_collide_cache { extern void link(); }
@@ -576,6 +577,8 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
      {"collide-mesh",
       {jak1::method_12_collide_mesh::link, jak1::method_11_collide_mesh::link,
        jak1::method_15_collide_mesh::link, jak1::method_14_collide_mesh::link}},
+     // (AI-assisted) bsp.gc is loaded before collide-cache.gc
+     {"bsp", {jak1::pc_bsp_collide_with_box::link}},
      {"collide-cache",
       {jak1::method_26_collide_cache::link, jak1::method_32_collide_cache::link,
        jak1::pc_upload_collide_frag::link, jak1::pc_collide_frag_may_hit::link,
