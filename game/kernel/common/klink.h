@@ -59,6 +59,11 @@ uint32_t arm64_other_seg_mov32_link_v3(Ptr<uint8_t> link, ObjectFileHeader* ofh,
 /*!
  * Stores the state of the linker. Used for multi-threaded linking, so it can be suspended.
  */
+//! (AI-assisted) incremented by every link (link_control::jak1_jak2_begin): caches of level data in
+//! native code (pc-collide-frag-may-hit?'s vertex boxes) are stale after a new object file was
+//! linked into memory that may have held other data.
+extern u32 g_link_generation;
+
 struct link_control {
   Ptr<uint8_t> m_object_data;  //! points to the start of the object file
   Ptr<uint8_t> m_entry;        //! points to first code to execute

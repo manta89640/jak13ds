@@ -22,3 +22,6 @@ void bind_collide_functions(bool compiled_goal) {
 }
 
 }  // namespace tests
+
+// (AI-assisted) game/kernel/common/klink.cpp (pc-collide-frag-may-hit?'s vertex box cache)
+u32 g_link_generation = 0;

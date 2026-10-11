@@ -13,7 +13,12 @@
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
 
+#ifdef __3DS__
+extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
+#endif
+
 extern const u32* max_tri_count;  // collide_cache.cpp
+extern u32 g_link_generation;      // (AI-assisted) game/kernel/common/klink.h
 
 namespace Mips2C::jak1 {
 const u32* collide_vu0_buffer();                // collide_cache.cpp
@@ -1067,6 +1072,113 @@ inline bool interval_may_hit(double lo, double hi, s32 bmin, s32 bmax) {
   return !(hi < (double)bmin - 1.0 || lo > (double)bmax + 1.0);
 }
 
+//! min and max of the packed values on each axis of count vertices at data
+inline void scan_vertex_box(const u16* data, int count, u32 ulo[3], u32 uhi[3]) {
+  for (int i = 0; i < 3; i++) {
+    ulo[i] = 0xffff;
+    uhi[i] = 0;
+  }
+  for (int k = 0; k < count; k++) {
+    for (int i = 0; i < 3; i++) {
+      const u32 u = data[3 * k + i];
+      ulo[i] = std::min(ulo[i], u);
+      uhi[i] = std::max(uhi[i], u);
+    }
+  }
+}
+
+/*!
+ * (AI-assisted) The vertex boxes of the meshes, cached: the packed vertices of a collide-frag-mesh
+ * never change, but scanning them was most of the cost of each call (0.30 ms per frame for 56-127
+ * calls on New 3DS hardware in Snowy Mountain). Direct-mapped by mesh address. An entry is only
+ * used for the same mesh, vertex data address and count, and the same g_link_generation (a level
+ * that was loaded since could have put another mesh at that address). The cached values are the
+ * scan's, so results are the same.
+ * config.ini collide_frag_cache = off (3DS) or OPENGOAL_FRAG_CACHE=0 (host): scan every time.
+ * OPENGOAL_FRAG_CACHE_VERIFY=1 (host): scan every time and compare with the cache.
+ */
+struct FragBoxCache {
+  struct Entry {
+    u32 mesh = 0, data = 0, gen = 0;
+    u16 count = 0;
+    u16 lo[3] = {}, hi[3] = {};
+  };
+  static constexpr u32 kSize = 1024;
+  Entry e[kSize];
+  int on = -1;  // -1: not read yet
+  bool verify = false;
+  u64 hits = 0, misses = 0, mismatches = 0;
+};
+FragBoxCache g_frag_box_cache;
+
+bool frag_box_cache_on() {
+  auto& c = g_frag_box_cache;
+  if (c.on < 0) {
+    c.on = 1;
+#ifdef __3DS__
+    char v[16];
+    if (ctr_config_get("collide_frag_cache", v, sizeof(v)) &&
+        (!strcmp(v, "off") || !strcmp(v, "0") || !strcmp(v, "no") || !strcmp(v, "false"))) {
+      c.on = 0;
+    }
+#else
+    const char* env = getenv("OPENGOAL_FRAG_CACHE");
+    if (env && env[0] == '0') {
+      c.on = 0;
+    }
+    const char* venv = getenv("OPENGOAL_FRAG_CACHE_VERIFY");
+    c.verify = venv && venv[0] == '1';
+#endif
+    if (!c.on) {
+      printf("[collide] pc-collide-frag-may-hit? vertex box cache off\n");
+    }
+  }
+  return c.on == 1;
+}
+
+void frag_vertex_box(u32 mesh, int count, u32 ulo[3], u32 uhi[3]) {
+  const u32 data_addr = gload<u32>(mesh);
+  const u16* data = (const u16*)gptr(data_addr);
+  if (!frag_box_cache_on()) {
+    scan_vertex_box(data, count, ulo, uhi);
+    return;
+  }
+  auto& c = g_frag_box_cache;
+  auto& e = c.e[(mesh >> 4) & (FragBoxCache::kSize - 1)];
+  if (e.mesh == mesh && e.data == data_addr && e.count == (u16)count &&
+      e.gen == g_link_generation) {
+    for (int i = 0; i < 3; i++) {
+      ulo[i] = e.lo[i];
+      uhi[i] = e.hi[i];
+    }
+    c.hits++;
+    if (c.verify) {
+      u32 vlo[3], vhi[3];
+      scan_vertex_box(data, count, vlo, vhi);
+      if (memcmp(vlo, ulo, sizeof(vlo)) || memcmp(vhi, uhi, sizeof(vhi))) {
+        c.mismatches++;
+        printf("frag box cache MISMATCH: mesh #x%x\n", mesh);
+      }
+      if ((c.hits & 0xfff) == 0) {
+        printf("frag box cache verify: %llu hits, %llu misses, %llu mismatches\n",
+               (unsigned long long)c.hits, (unsigned long long)c.misses,
+               (unsigned long long)c.mismatches);
+      }
+    }
+    return;
+  }
+  c.misses++;
+  scan_vertex_box(data, count, ulo, uhi);
+  e.mesh = mesh;
+  e.data = data_addr;
+  e.gen = g_link_generation;
+  e.count = (u16)count;
+  for (int i = 0; i < 3; i++) {
+    e.lo[i] = (u16)ulo[i];
+    e.hi[i] = (u16)uhi[i];
+  }
+}
+
 /*!
  * (pc-collide-frag-may-hit? cache mesh inst mode) -> symbol
  * Can methods 26-28 add a triangle of mesh (a collide-frag-mesh, of instance inst or #f)?
@@ -1085,15 +1197,8 @@ u64 pc_collide_frag_may_hit_impl(const NativeArgs& args) {
   }
 
   // min and max of the packed values on each axis (what __pc-upload-collide-frag unpacks)
-  const u16* data = (const u16*)gptr(gload<u32>(mesh));
-  u32 ulo[3] = {0xffff, 0xffff, 0xffff}, uhi[3] = {0, 0, 0};
-  for (int k = 0; k < count; k++) {
-    for (int i = 0; i < 3; i++) {
-      const u32 u = data[3 * k + i];
-      ulo[i] = std::min(ulo[i], u);
-      uhi[i] = std::max(uhi[i], u);
-    }
-  }
+  u32 ulo[3], uhi[3];
+  frag_vertex_box(mesh, count, ulo, uhi);
   // the floats method 32 makes of them (the same operations)
   s32 base_i[4];
   gload_q(base_i, mesh + 12);
