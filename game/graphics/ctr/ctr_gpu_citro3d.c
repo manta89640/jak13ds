@@ -3763,7 +3763,7 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
  * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
  * citro3d's context right. */
 static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw) {
-  if (st->flags) {
+  if (st->flags || g_depth_far) { /* (AI-assisted) the sky's draws (early_depth = sky) too */
     g.cur.early_depth_draws += early_depth_ok(st);
     g.cur.proctex_draws += (st->flags & CTR_STATE_PROCTEX) != 0;
   }
