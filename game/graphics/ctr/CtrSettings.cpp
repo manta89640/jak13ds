@@ -40,6 +40,10 @@ void apply_rules(CtrSettings& s) {
     s.shadows = CtrSettings::ShadowMode::Blob;
     s.shadows_full_wanted = true;
   }
+  // (AI-assisted) early_depth = sky / sky32: the early test is for the sky drawn last
+  if (s.early_depth_sky) {
+    s.sky_last = true;
+  }
 }
 
 CtrSettings load() {
@@ -161,10 +165,17 @@ CtrSettings load() {
       s.sky = parse_bool(v);
     } else if (key == "clouds") {
       s.clouds = parse_bool(v);  // (AI-assisted)
+    } else if (key == "sky_last") {
+      s.sky_last = parse_bool(v);  // (AI-assisted)
+    } else if (key == "skip_clear") {
+      s.skip_clear = parse_bool(v);  // (AI-assisted)
     } else if (key == "overlap") {
       s.overlap = parse_bool(v);
     } else if (key == "pipeline") {
       s.pipeline = parse_bool(v);
+    } else if (key == "frame_overlap2") {
+      // (AI-assisted) off | clean | on
+      s.frame_overlap2 = v == "on" || v == "2" ? 2 : (v == "clean" || v == "1" ? 1 : 0);
     } else if (key == "frame_pacing") {
       s.steady_pacing = v != "fast";
     } else if (key == "fps_cap") {
@@ -179,6 +190,10 @@ CtrSettings load() {
       if (v != "auto") {
         s.vram_textures = parse_bool(v);
       }
+    } else if (key == "mip_bias") {
+      s.mip_bias = std::clamp(f, -4.f, 4.f);  // (AI-assisted)
+    } else if (key == "skin_rows_f24") {
+      s.skin_rows_f24 = parse_bool(v);  // (AI-assisted)
     } else if (key == "mipmaps") {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
@@ -195,8 +210,17 @@ CtrSettings load() {
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
-      s.early_depth_block32 = v == "block32";
-      s.early_depth = s.early_depth_block32 || parse_bool(v);
+      // (AI-assisted) off | on | block32 | sky | sky32
+      s.early_depth_block32 = v == "block32" || v == "sky32";
+      s.early_depth_sky = v == "sky" || v == "sky32";
+      s.early_depth = v == "block32" || (!s.early_depth_sky && parse_bool(v));
+    } else if (key == "early_depth_func") {
+      // (AI-assisted) the early test's function: ge (default) | gt | le | lt
+      s.early_depth_func = v == "gt" ? 1 : (v == "le" ? 2 : (v == "lt" ? 3 : 0));
+    } else if (key == "early_depth_clear") {
+      // (AI-assisted) the early depth data's clear value: 0 (default) | max | a number (24 bits)
+      s.early_depth_clear =
+          v == "max" ? 0xFFFFFFu : (unsigned int)(std::strtoul(v.c_str(), nullptr, 0) & 0xFFFFFFu);
     } else if (key == "depth16") {
       s.depth16 = parse_bool(v);
     } else if (key == "compact_textures") {
@@ -229,6 +253,10 @@ CtrSettings load() {
       s.raw_cmds = parse_bool(v);
     } else if (key == "vcache_reuse") {
       s.vcache_reuse = parse_bool(v);
+    } else if (key == "cb_read_opaque") {
+      s.cb_read_opaque = parse_bool(v);  // (AI-assisted)
+    } else if (key == "tex_cache_clear") {
+      s.tex_cache_uploads = v == "uploads";  // (AI-assisted) always | uploads
     } else if (key == "new_shaders") {
       s.new_shaders = parse_bool(v);
     } else if (key == "asm_tex") {
@@ -270,9 +298,9 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
-      "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
-      "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} cull_ties {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} "
+      "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
+      "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} cull_ties {} raw_cmds {} vcache_reuse {} tex_cache_clear {} cb_read_opaque {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
@@ -283,8 +311,10 @@ std::string CtrSettings::summary() const {
                                 std::max(tie_distance_scale, tie_distance_scale_max))
                   : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
-      merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
-      sky ? "on" : "off", clouds ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
+      merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
+      frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
+      sky ? "on" : "off", clouds ? "on" : "off", sky_last ? "on" : "off",
+      skip_clear ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
       merc_gen_lod ? "on" : "off", merc_lod_scale,
       // (AI-assisted) with depth16, full falls back to blob (no stencil)
@@ -294,11 +324,22 @@ std::string CtrSettings::summary() const {
                                     : "off",
       shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
-      mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
-      early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
+      mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
+      skin_rows_f24 ? "on" : "off", color16 ? "on" : "off",
+      early_depth ? (early_depth_block32 ? "block32" : "on")
+                  : (early_depth_sky ? (early_depth_block32 ? "sky32" : "sky") : "off"),
+      early_depth_func || early_depth_clear
+          ? fmt::format(" (func {} clear {:#x})",
+                        early_depth_func == 1 ? "gt"
+                                              : (early_depth_func == 2 ? "le"
+                                                                       : (early_depth_func == 3 ? "lt" : "ge")),
+                        early_depth_clear)
+          : std::string(),
+      compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
       vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", raw_cmds ? "on" : "off",
-      vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
+      vcache_reuse ? "on" : "off", tex_cache_uploads ? "uploads" : "always",
+      cb_read_opaque ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
       gpu_counters ? " gpu_counters" : "",
       gpu_perflog ? " gpu_perflog" : "", pica_bench ? " pica_bench" : "",

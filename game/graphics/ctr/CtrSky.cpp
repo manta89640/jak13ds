@@ -258,7 +258,8 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
   };
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
-  st.ztest = CTR_TEST_ALWAYS;
+  // (AI-assisted) sky_last: after the opaque geometry, only where it left the cleared depth
+  st.ztest = m_depth_tested ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
   st.zwrite = 0;
   st.atest = CTR_TEST_ALWAYS;
   std::vector<ctr_clip_vertex> tris;
@@ -348,6 +349,59 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
     lg::debug("[ctr] sky: {} texture blends, {} draws", m_stats.blends, m_stats.draws);
     m_stats = Stats();
   }
+}
+
+// (AI-assisted) skip_clear: the roof's 4 triangles (as draw() makes them) in screen space, all
+// in front of the camera, contain a grid of points over the screen (a little beyond its edges)
+bool CtrSky::roof_covers_screen(const u8* packet, const CtrRenderState& rs) const {
+  if (!ctr_settings().sky) {
+    return false;
+  }
+  SkyPacket p;
+  memcpy(&p, packet, sizeof(p));
+  if (!p.sky_drawn || !m_valid[0] || m_tex[0] < 0 || !p.roof ||
+      p.roof + 12ull * sizeof(SkyVertex) > 128ull * 1024 * 1024) {
+    return false;
+  }
+  const SkyVertex* roof = (const SkyVertex*)(rs.ee_mem + p.roof);
+  const float hw = p.hmge[3] != 0.f ? p.hmge[3] : 1.f;
+  float sx[12], sy[12];
+  for (int i = 0; i < 12; i++) {
+    float c[4];
+    for (int j = 0; j < 4; j++) {
+      c[j] = p.camera[0][j] * roof[i].pos[0] + p.camera[1][j] * roof[i].pos[1] +
+             p.camera[2][j] * roof[i].pos[2];
+    }
+    const float w = c[3] * hw;
+    if (!(w > 1e-3f)) {
+      return false;  // behind the camera: clipped, its screen shape isn't simple
+    }
+    sx[i] = (c[0] + (p.hvdf[0] - 2048.f) * w) / 256.f / w;
+    sy[i] = -(c[1] + (p.hvdf[1] - 2048.f) * w) / 112.f / w;
+  }
+  constexpr int kNx = 25, kNy = 15;
+  constexpr float kMargin = 1.02f;
+  for (int gy = 0; gy < kNy; gy++) {
+    for (int gx = 0; gx < kNx; gx++) {
+      const float x = kMargin * (2.f * gx / (kNx - 1) - 1.f);
+      const float y = kMargin * (2.f * gy / (kNy - 1) - 1.f);
+      bool in = false;
+      for (int t = 0; t < 4 && !in; t++) {
+        const float* ax = &sx[3 * t];
+        const float* ay = &sy[3 * t];
+        float d[3];
+        for (int e = 0; e < 3; e++) {
+          const int n = (e + 1) % 3;
+          d[e] = (ax[n] - ax[e]) * (y - ay[e]) - (ay[n] - ay[e]) * (x - ax[e]);
+        }
+        in = (d[0] > 0 && d[1] > 0 && d[2] > 0) || (d[0] < 0 && d[1] < 0 && d[2] < 0);
+      }
+      if (!in) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 CtrSkyBlendRenderer::CtrSkyBlendRenderer(std::string name,

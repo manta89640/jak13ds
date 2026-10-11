@@ -94,10 +94,23 @@ struct CtrSettings {
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
   bool clouds = true;
+  // (AI-assisted) the sky drawn after the opaque level and models (before the first draw that
+  // needs what's behind it), only where they left the cleared depth: its pixels behind them are
+  // dropped by the depth test (before blending and writing; with the early depth test, before
+  // texturing). Same picture
+  bool sky_last = false;
+  // (AI-assisted) frames whose opaque sky roof covers the whole screen (looking up) clear only the
+  // depth buffer, not the color. Same picture
+  bool skip_clear = false;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
   bool overlap = false;
   // CPU builds frame N+1 while the GPU draws frame N
   bool pipeline = false;
+  // (AI-assisted) config frame_overlap2 = off | clean | on (with the pipeline; ctr_gpu.h
+  // ctr_gpu_set_frame_overlap2): 0 the old frame end; 1 (clean, default) the frame's command list
+  // cleaned from the CPU cache before waiting for the GPU, handed over without the GSP's flush;
+  // 2 (on) the list queued behind the frame the GPU is drawing, no wait at the frame end
+  int frame_overlap2 = 1;
   // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
   int fps_cap = 30;
   // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game
@@ -115,6 +128,13 @@ struct CtrSettings {
   // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default), 2 trilinear
   // (blends two levels: smoother, slower).
   int mipmaps = 1;
+  // (AI-assisted) the LOD bias of mipmapped level / model textures (+0.5, +1: the next smaller
+  // level sooner, blurrier, fewer texels read); 0 = none
+  float mip_bias = 0.f;
+  // (AI-assisted) merc bone rows uploaded as float24 instead of float32 (a quarter fewer uniform
+  // words; the GPU computes in float24 either way). On: Jak and Daxter identical in Azahar, the
+  // float24 uniform path (raw_unif, raw_pack_f24) already draws the level meshes on hardware
+  bool skin_rows_f24 = true;
   // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
@@ -153,6 +173,15 @@ struct CtrSettings {
   // (AI-assisted) early_depth = block32: with the render target in 32x32 block mode (256x416,
   // cropped to the screen), which the early depth test seems to need. Hardware only (off).
   bool early_depth_block32 = false;
+  // (AI-assisted) early_depth = sky (sky32: with the block32 target): the early depth test only
+  // for the sky, drawn last (sky_last forced on) at depth 0: its fragments behind what the opaque
+  // draws covered are dropped before texturing. With on / block32 and sky_last the sky uses it too
+  bool early_depth_sky = false;
+  // (AI-assisted) early_depth_func = ge | gt | le | lt: the early test's function (the normal
+  // depth test stays >=); early_depth_clear = the early depth data's clear value (0 = far, max =
+  // 0xFFFFFF, or a number). pica_bench B8.*.c3 shows which pair passes everything after a clear
+  int early_depth_func = 0;
+  unsigned int early_depth_clear = 0;
   // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
   // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
   // ocean = waves marks are left out). Off by default.
@@ -203,6 +232,13 @@ struct CtrSettings {
   // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
   // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
   bool vcache_reuse = false;
+  // (AI-assisted) tex_cache_clear = always | uploads: always (default) clears the GPU's texture
+  // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it for level pool
+  // textures (static texels) unless a pool was filled or moved since the last clear
+  bool tex_cache_uploads = false;
+  // (AI-assisted) cb_read_opaque: the GPU doesn't read the color buffer for draws that overwrite
+  // it whole (opaque); unknown on hardware (GBATEK), pica_bench B6.cbread0.probe decides. Off
+  bool cb_read_opaque = false;
   // (AI-assisted) hardware hang bisect switches (Oct 3 optimisations; off = the Oct 2 behaviour):
   // new_shaders: the shorter vertex shaders (off: the Oct 2 ctr_basic/mesh/skin/skin_env);
   // asm_tex: the 4x2 group / LDM-STM texture tiling, 64-bit PSMCT32 uploads and SIMD sky loops

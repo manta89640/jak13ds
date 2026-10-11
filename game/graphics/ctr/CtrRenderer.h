@@ -90,9 +90,13 @@ class CtrDirectBucketRenderer : public CtrBucketRenderer {
   void set_sky(class CtrSky* sky) { m_sky = sky; }
 
  private:
+  // (AI-assisted) sky_last: the sky packet, drawn by the GPU code's sky hook (ctr_gpu_set_sky_hook)
+  static void deferred_sky(void* self);
   std::unique_ptr<CtrDirect> m_direct;
   class CtrSky* m_sky = nullptr;
   bool m_drew = false;
+  u8 m_deferred[128];
+  CtrRenderState* m_deferred_rs = nullptr;
 };
 
 class CtrRenderer {
@@ -121,6 +125,8 @@ class CtrRenderer {
     double gpu_wait_ms = 0;
     double gpu_busy_ms = 0;
     int gpu_busy_frames = 0;
+    double gpu_active_ms = 0;  // (AI-assisted) from each frame's command list on
+    int color_clears_skipped = 0;  // (AI-assisted) skip_clear
     double triangles = 0;
     unsigned int vbuf_peak = 0, vbuf_size = 0;
     int vbuf_dropped = 0;

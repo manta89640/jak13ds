@@ -1284,6 +1284,10 @@ static struct {
   volatile u64 done_tick[GT_RING]; /* when it landed, by frame number */
   u64 first_tick[GT_RING];         /* render thread: the frame's first work handed to the GPU */
   u32 first_id[GT_RING];
+  /* (AI-assisted) render thread: the frame's first command list handed to the GPU (pipeline: at
+   * the frame end or a partial submit; gpu_active_ms) */
+  u64 submit_tick[GT_RING];
+  u32 submit_id[GT_RING];
   u32 reported; /* frames up to this one are counted (gt_collect) */
 } s_gt;
 
@@ -1317,6 +1321,15 @@ static void gt_note_first(void) {
   }
 }
 
+/* (AI-assisted) render thread: the frame's first command list is handed over now (if not already) */
+static void gt_note_submit(void) {
+  const u32 n = (u32)g.frame_no;
+  if (s_gt.submit_id[n % GT_RING] != n) {
+    s_gt.submit_tick[n % GT_RING] = svcGetSystemTick();
+    s_gt.submit_id[n % GT_RING] = n;
+  }
+}
+
 /* render thread, at the frame end: the GPU time of the frames whose fence landed since the last
  * call, into g.cur */
 static void gt_collect(void) {
@@ -1342,6 +1355,17 @@ static void gt_collect(void) {
     if (end > start) {
       g.cur.gpu_busy_ms += (float)((double)(end - start) / (SYSCLOCK_ARM11 / 1000.0));
       g.cur.gpu_busy_frames++;
+      /* (AI-assisted) from the frame's command list on (not its clear at the frame begin) */
+      u64 sub = s_gt.submit_id[n % GT_RING] == n ? s_gt.submit_tick[n % GT_RING] : start;
+      if (sub < start) {
+        sub = start;
+      }
+      if (prev > sub && prev <= end) {
+        sub = prev;
+      }
+      if (end > sub) {
+        g.cur.gpu_active_ms += (float)((double)(end - sub) / (SYSCLOCK_ARM11 / 1000.0));
+      }
     }
   }
   s_gt.reported = done;
@@ -1646,6 +1670,188 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 
 static void migrate_small_textures(void);
 
+/* (AI-assisted) config.ini tex_cache_clear (ctr_gpu_set_tex_cache_clear): 1 = uploads. The GPU's
+ * texture cache holds texels by address; a level pool's texels only change when the pool is
+ * filled (ctr_gpu_pool_ready) or moved (pool_repoint), so its binds skip the cache clear unless
+ * one of those (or a new frame) came since the last clear (s_tex_dirty). */
+static int s_tex_clear_mode = 0;
+static volatile int s_tex_dirty = 1;
+void ctr_gpu_set_tex_cache_clear(int mode) {
+  s_tex_clear_mode = mode ? 1 : 0;
+}
+
+/* (AI-assisted) config.ini mip_bias: GPUREG_TEXUNITn_LOD bits 0-12 (fixed 1.4.8) of mipmapped
+ * textures, as C3D_TexSetLodBias */
+static u16 s_lod_bias = 0;
+void ctr_gpu_set_mip_bias(float bias) {
+  int b = (int)(bias * 256.0f);
+  b = b < -0x1000 ? -0x1000 : (b > 0xFFF ? 0xFFF : b);
+  s_lod_bias = (u16)(b & 0x1FFF);
+}
+
+/* (AI-assisted) config.ini cb_read_opaque: what the GPU's COLORBUFFER_READ holds (-1: unknown;
+ * a framebuffer bind, at the first draw of each frame, sets it to 0xF) */
+static int g_cb_read_opaque = 0;
+static int s_cbread = -1;
+void ctr_gpu_set_cb_read_opaque(int on) {
+  g_cb_read_opaque = on ? 1 : 0;
+}
+
+/* (AI-assisted) config.ini skin_rows_f24 */
+static int s_skin_f24 = 0;
+void ctr_gpu_set_skin_rows_f24(int on) {
+  s_skin_f24 = on ? 1 : 0;
+}
+
+/* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
+ * The pipeline's frame end used to wait for the GX queue to empty (C3D_FrameBegin: frame N - 1 and
+ * the parts of N already sent), stop it, and only then hand N's command list over with
+ * GX_CMDLIST_FLUSH: the GSP cleans the whole list (130-260 KB) from the CPU cache before the GPU
+ * starts on it, while the GPU sits idle. 1 (clean): the list is closed and cleaned before the
+ * wait, and handed over without the flush. 2 (on): the queue keeps running and the list is queued
+ * behind frame N - 1; the next frame begin waits for frame N - 1 (whose command and vertex buffers
+ * it reuses) with the steady pacing fence instead. libctru's queue only empties its entry list
+ * (gxCmdQueueClear, a panic while it runs) when it is idle, and holds 32 entries: an idle queue
+ * is emptied before new entries, a full running one waited for (overlap2_room). */
+static int s_overlap2 = 1;
+static u32 s_buf_frame[2]; /* mode 2: the frame drawn from s_cmdbufs / s_vbufs [k] (0: none) */
+static int s_end_mode2;    /* the last pipelined frame end was mode 2 (deletes at the begin) */
+static float s_begin_wait_ms;
+static u32* s_fin_list;    /* the frame's closed command list (pipeline_close_list) */
+static u32 s_fin_words;
+
+void ctr_gpu_set_frame_overlap2(int mode) {
+  s_overlap2 = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+}
+
+/* mode 2 needs the fence (frame_pacing = steady) */
+static int overlap2_on(void) {
+  return s_overlap2 == 2 && s_pres.on;
+}
+
+/* before adding n entries to the GX queue (mode 2) */
+static void overlap2_room(int n) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  const int idle = gxCmdQueueWait(q, 0);
+  if (idle || q->numEntries + n >= q->maxEntries) {
+    if (!idle) {
+      gxCmdQueueWait(q, -1);
+    }
+    gxCmdQueueStop(q);
+    gxCmdQueueClear(q);
+  }
+  gxCmdQueueRun(q); /* active (an added entry starts it); no-op while it runs */
+}
+
+/* mode 2: until frame id is done (its fence landed: its draws, transfer and everything before);
+ * returns the milliseconds waited */
+static float overlap2_wait_frame(u32 id) {
+  if (!id) {
+    return 0.0f;
+  }
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  const u64 t0 = svcGetSystemTick();
+  for (;;) {
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
+    if ((s32)(*(volatile u32*)s_pres.fence - id) >= 0) {
+      break;
+    }
+    if (gxCmdQueueWait(q, 0)) {
+      if (q->lastEntry >= q->numEntries) {
+        break; /* nothing left to run (the queue was emptied after the frame finished) */
+      }
+      gxCmdQueueRun(q);
+    }
+    gspWaitForAnyEvent();
+  }
+  return (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
+}
+
+/* modes 1 and 2: the rest of the frame's command list closed as C3Di_SplitFrame does (the
+ * framebuffer flush and the early depth clear after its draws) and cleaned from the CPU cache:
+ * s_fin_list, s_fin_words (0: nothing left) */
+static void pipeline_close_list(void) {
+  s_fin_list = NULL;
+  s_fin_words = 0;
+  if (!gpuCmdBufOffset) {
+    return;
+  }
+  if (__C3D_Context.flags & C3DiF_DrawUsed) {
+    __C3D_Context.flags &= ~(u32)C3DiF_DrawUsed;
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+    GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+  }
+  GPUCMD_Split(&s_fin_list, &s_fin_words);
+  cache_flush_now(s_fin_list, s_fin_words * 4);
+}
+
+/* ---------------- (AI-assisted) config.ini sky_last / skip_clear ----------------
+ * The renderer hands the sky over as a hook (ctr_gpu_set_sky_hook) instead of drawing it first;
+ * it runs right before the first draw that needs what is behind it (SKY_HOOK), so every blended
+ * pixel still blends over the sky, and the sky draws itself with depth 0 (ctr_gpu_set_depth_far)
+ * only where no opaque draw has written depth. Off (no hook set): nothing changes. */
+/* (AI-assisted) ctr_gpu_set_early_depth_params: the sky's draws too; the early test's function
+ * and the early depth data's clear value (defaults: the old GEQUAL and 0) */
+static int g_early_sky = 0;
+static int g_early_func = GPU_EARLYDEPTH_GEQUAL;
+static u32 g_early_clear = 0;
+static ctr_gpu_hook_fn s_sky_hook;
+static void* s_sky_hook_arg;
+static int g_depth_far;       /* ctr_gpu_set_depth_far */
+static int s_zdef_valid;      /* the depth map's own scale and offset below were read */
+static u32 s_zscale0, s_zoffset0;
+static int s_skip_color_clear; /* ctr_gpu_set_skip_color_clear, for the next frame begin */
+
+void ctr_gpu_set_sky_hook(ctr_gpu_hook_fn fn, void* arg) {
+  s_sky_hook = fn;
+  s_sky_hook_arg = arg;
+}
+
+void ctr_gpu_run_sky_hook(void) {
+  const ctr_gpu_hook_fn fn = s_sky_hook;
+  if (fn) {
+    s_sky_hook = NULL; /* once (its own draws mustn't call it again) */
+    fn(s_sky_hook_arg);
+  }
+}
+
+/* the sky may wait for a draw with this state: opaque, writing depth (so the sky's depth test
+ * leaves its pixels alone), no stencil or no-color pass */
+static inline int keeps_sky(const ctr_draw_state* st) {
+  return st->blend == CTR_BLEND_OFF && st->zwrite &&
+         !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX));
+}
+#define SKY_HOOK(st)                    \
+  do {                                  \
+    if (s_sky_hook && !keeps_sky(st)) { \
+      ctr_gpu_run_sky_hook();           \
+    }                                   \
+  } while (0)
+#define SKY_HOOK_ANY()        \
+  do {                        \
+    if (s_sky_hook) {         \
+      ctr_gpu_run_sky_hook(); \
+    }                         \
+  } while (0)
+
+void ctr_gpu_set_depth_far(int on) {
+  on = on ? 1 : 0;
+  if (on != g_depth_far) {
+    if (!s_zdef_valid) {
+      s_zscale0 = __C3D_Context.effect.zScale;
+      s_zoffset0 = __C3D_Context.effect.zOffset;
+      s_zdef_valid = 1;
+    }
+    g_depth_far = on;
+    g.last_state_valid = 0;
+  }
+}
+
+void ctr_gpu_set_skip_color_clear(int on) {
+  s_skip_color_clear = on ? 1 : 0;
+}
+
 /* the parts of the GPU state a frame starts from (both modes) */
 static void frame_state_reset(void) {
   s_pres.cur_release = s_pres.next_release;
@@ -1653,6 +1859,8 @@ static void frame_state_reset(void) {
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
   g.bound_tex = NULL;
+  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads: the frame's first bind clears */
+  s_cbread = -1;   /* (AI-assisted) cb_read_opaque: the frame's framebuffer bind sets 0xF */
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
   g.mesh_nofog = 0;      /* (AI-assisted) and unit 1 on again with the ramp (bound below) */
   g.unit1_off = 0;
@@ -1679,9 +1887,13 @@ static void frame_state_reset(void) {
     GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
     GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_BLOCK32, 1);
   }
-  GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, 0);
+  /* (AI-assisted) GBATEK: EARLYDEPTH_DATA is the clear value of the early depth data (its own
+   * storage, not the depth buffer), EARLYDEPTH_CLEAR fills it (also at the end of every citro3d
+   * split): the config's value (early_depth_clear, default 0 = far), and the context keeps it so
+   * every later clear uses the same */
+  GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
   GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
-  C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
+  C3D_EarlyDepthTest(false, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
   C3D_ProcTexBind(0, NULL);
   g.proc_radial = -1;
   g.vbuf_used = 0;
@@ -1711,6 +1923,17 @@ static void pipeline_frame_begin(u32 clear) {
     g.screenshot_state = 0;
   }
   s_k ^= 1;
+  s_begin_wait_ms = 0.0f;
+  if (overlap2_on()) {
+    /* (AI-assisted) frame_overlap2 = on: the frame before the last one drew from these buffers;
+     * then the deletes (as the frame end does in the other modes; not twice after one of those) */
+    s_begin_wait_ms = overlap2_wait_frame(s_buf_frame[s_k]);
+    s_buf_frame[s_k] = 0;
+    if (s_end_mode2) {
+      process_pending_deletes(1);
+    }
+    overlap2_room(8);
+  }
   GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
   g.cmd_base = gpuCmdBuf;
   g.vbuf = s_vbufs[s_k];
@@ -1724,13 +1947,22 @@ static void pipeline_frame_begin(u32 clear) {
   /* D24S8: 4 bytes (D16: 2); color 4 (RGBA8) or 2 (RGB565) */
   const u32 px = (u32)fb->width * fb->height;
   u32* color_end = (u32*)((uint8_t*)color + px * (g_color16 ? 2 : 4));
-  GX_MemoryFill(color, clear, color_end,
-                GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth, 0,
-                (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
-                GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
+  if (s_skip_color_clear) {
+    /* (AI-assisted) skip_clear: the depth only (VRAM) */
+    GX_MemoryFill(depth, 0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
+                  GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), NULL,
+                  0, NULL, 0);
+  } else {
+    GX_MemoryFill(color, clear, color_end,
+                  GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth,
+                  0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
+                  GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
+  }
   C3D_SetFrameBuf(fb);
   set_top_viewport();
   frame_state_reset();
+  g.cur.color_clear_skipped = s_skip_color_clear;
+  g.cur.gpu_wait_ms = s_begin_wait_ms; /* (AI-assisted) frame_overlap2 = on (after the reset) */
 }
 
 /* send what's built so far to the GPU (pipeline: our command buffer, citro3d isn't in a frame) */
@@ -1742,7 +1974,11 @@ static void pipeline_submit(void) {
   u32* list;
   u32 words;
   GPUCMD_Split(&list, &words);
+  if (overlap2_on()) {
+    overlap2_room(4); /* (AI-assisted) this list and a copy or two after it */
+  }
   if (words) {
+    gt_note_submit();
     GX_ProcessCommandList(list, words * 4, GX_CMDLIST_FLUSH);
   }
 }
@@ -1753,6 +1989,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   }
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
+  s_sky_hook = NULL; /* (AI-assisted) sky_last: a hook left from a frame that didn't end */
   if (s_pipeline) {
     pipeline_frame_begin(color_fill_value(r, gr, b));
     return;
@@ -1771,12 +2008,15 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     write_screenshot();
     g.screenshot_state = 0;
   }
-  C3D_RenderTargetClear(g.top, C3D_CLEAR_ALL, color_fill_value(r, gr, b), 0);
+  /* (AI-assisted) skip_clear: the depth only */
+  C3D_RenderTargetClear(g.top, s_skip_color_clear ? C3D_CLEAR_DEPTH : C3D_CLEAR_ALL,
+                        color_fill_value(r, gr, b), 0);
   C3D_FrameDrawOn(g.top);
   if (g_block32) {
     set_top_viewport();
   }
   frame_state_reset();
+  g.cur.color_clear_skipped = s_skip_color_clear;
   g.cur.gpu_wait_ms = wait_ms; /* (AI-assisted) (after the reset of g.cur) */
   diag_rt("draw build");
 }
@@ -1890,6 +2130,7 @@ void ctr_gpu_submit_partial(void) {
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
     gt_note_first(); /* (AI-assisted) the queue (stopped since C3D_FrameBegin) starts here */
+    gt_note_submit();
     gxCmdQueueRun(&__C3D_Context.gxQueue);
   }
   s_partial_draws = g.cur.draws;
@@ -1927,12 +2168,27 @@ void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
+  ctr_gpu_run_sky_hook(); /* (AI-assisted) sky_last: still pending (nothing blended came) */
   diag_rt("frame_end: flush");
   raw_vc_flush();
   flush_vbuf();
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
   g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
-  if (s_pipeline) {
+  /* (AI-assisted) frame_overlap2: 0 the old frame end, 1 the list cleaned before the wait, 2 no
+   * wait (the list queued behind the frame the GPU draws) */
+  const int ov2 = s_pipeline ? (overlap2_on() ? 2 : (s_overlap2 ? 1 : 0)) : 0;
+  if (ov2) {
+    pipeline_close_list();
+  }
+  if (ov2 == 2) {
+    overlap2_room(5); /* the list, the transfer(s) and the fence */
+    if (s_fin_words) {
+      gt_note_submit();
+      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, 0);
+    }
+    s_buf_frame[s_k] = (u32)g.frame_no;
+    s_end_mode2 = 1;
+  } else if (s_pipeline) {
     /* wait for the previous frame (and this one's parts sent so far), then submit the rest of
      * this frame from our buffer with citro3d (display transfer, buffer swap) */
     u32* buf = gpuCmdBuf;
@@ -1944,6 +2200,12 @@ void ctr_gpu_frame_end(void) {
     process_pending_deletes(1);
     GPUCMD_SetBuffer(buf, size, offset);
     C3D_FrameDrawOn(g.top);
+    gt_note_submit();
+    if (ov2 == 1 && s_fin_words) {
+      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, 0); /* cleaned before the wait */
+    }
+    s_buf_frame[s_k] = 0;
+    s_end_mode2 = 0;
   }
   if (s_pres.on) {
     diag_rt("frame_end: present queue (wait for a free screen buffer)");
@@ -1953,7 +2215,10 @@ void ctr_gpu_frame_end(void) {
    * linear heap (C3D_FrameEnd's default) */
   diag_rt("frame_end: C3D_FrameEnd (submit)");
   gt_note_first(); /* (AI-assisted) without the pipeline the queue starts here (or at a partial) */
-  C3D_FrameEnd(GX_CMDLIST_FLUSH);
+  gt_note_submit();
+  if (ov2 != 2) {
+    C3D_FrameEnd(GX_CMDLIST_FLUSH);
+  }
   diag_rt("frame_end: stats");
   g.in_frame = 0;
   if (g.screenshot_state == 1) {
@@ -2217,6 +2482,7 @@ void ctr_gpu_pool_ready(int pool) {
     return;
   }
   TexPool* p = &g.pools[pool];
+  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads (loader thread: a flag) */
   cache_flush_now(p->linear, p->bytes);
   ctr_linear_lock();
   p->ready = 1;
@@ -2257,6 +2523,7 @@ static void pool_repoint(int pool) {
     }
   }
   g.bound_tex = NULL;
+  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads */
 }
 
 /* a linear buffer the GPU may still read (a queued copy, the frame in flight): freed at the next
@@ -2631,6 +2898,18 @@ void ctr_gpu_set_color16(int on) {
 void ctr_gpu_set_early_depth(int on) {
   /* (AI-assisted) not without the block32 target it was asked for (ctr_gpu_set_framebuffer) */
   g_early_depth = on && !g_block32_failed ? 1 : 0;
+}
+
+void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
+  const int s = sky && !g_block32_failed ? 1 : 0;
+  const int f = func & 3;
+  const u32 c = clear & 0xFFFFFFu;
+  if (s != g_early_sky || f != g_early_func || c != g_early_clear) {
+    g_early_sky = s;
+    g_early_func = f;
+    g_early_clear = c;
+    g.last_state_valid = 0;
+  }
 }
 
 void ctr_gpu_set_framebuffer(int block32, int depth16) {
@@ -3413,12 +3692,15 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       param |= GPU_TEXTURE_MIP_FILTER(GPU_LINEAR);
     }
   }
+  /* (AI-assisted) mip_bias: only with mip levels (0 = what every texture has) */
+  const u16 lod_bias = max_level ? s_lod_bias : 0;
   if (g.bound_tex == tex && g.bound_data == tex->data && g.bound_param == param &&
-      tex->maxLevel == max_level) {
+      tex->maxLevel == max_level && tex->lodBias == lod_bias) {
     return;
   }
   tex->param = param;
   tex->maxLevel = max_level;
+  tex->lodBias = lod_bias;
   if (raw) {
     /* (AI-assisted) what C3Di_SetTex and citro3d's texture unit update write: the unit's
      * registers, the unit on, then its cache cleared; the context gets the texture (invariant) */
@@ -3432,7 +3714,14 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       ctx->texConfig |= 1;
       p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0xB, ctx->texConfig);
     }
-    p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
+    /* (AI-assisted) tex_cache_clear = uploads: a level pool texture's texels are what the cache
+     * may hold for its addresses unless a pool was filled or moved since the last clear */
+    if (!s_tex_clear_mode || slot->pool < 0 || s_tex_dirty) {
+      s_tex_dirty = 0;
+      p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
+    } else {
+      g.cur.tex_clears_skipped++;
+    }
     raw_end(p);
   } else {
     C3D_TexBind(0, tex);
@@ -3444,8 +3733,11 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
 }
 
 static int early_depth_ok(const ctr_draw_state* st) {
-  return g_early_depth && (st->flags & CTR_STATE_EARLY_DEPTH) && st->ztest == CTR_TEST_GEQUAL &&
-         st->zwrite && st->blend == CTR_BLEND_OFF;
+  return (g_early_depth && (st->flags & CTR_STATE_EARLY_DEPTH) && st->ztest == CTR_TEST_GEQUAL &&
+          st->zwrite && st->blend == CTR_BLEND_OFF) ||
+         /* (AI-assisted) early_depth = sky / sky32 (and on / block32 with sky_last): the sky at
+          * depth 0 after the opaque geometry, dropped early where it covered a block */
+         (g_early_sky && g_depth_far && st->ztest == CTR_TEST_GEQUAL);
 }
 
 /* (AI-assisted) texture combiner stage id (0 or 1) as env: in the context, and to the GPU raw or
@@ -3471,7 +3763,7 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
  * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
  * citro3d's context right. */
 static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw) {
-  if (st->flags) {
+  if (st->flags || g_depth_far) { /* (AI-assisted) the sky's draws (early_depth = sky) too */
     g.cur.early_depth_draws += early_depth_ok(st);
     g.cur.proctex_draws += (st->flags & CTR_STATE_PROCTEX) != 0;
   }
@@ -3698,12 +3990,20 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
    * discards later (no blending, an alpha test that never fails): the hardware's early depth
    * data can't know about fragments dropped after it. */
   e.earlyDepth = early_depth_ok(st) != 0;
+  /* (AI-assisted) sky_last: depth 0 for the sky's draws (ctr_gpu_set_depth_far) */
+  if (g_depth_far) {
+    e.zScale = 0;
+    e.zOffset = 0;
+  } else if (s_zdef_valid) {
+    e.zScale = s_zscale0;
+    e.zOffset = s_zoffset0;
+  }
   /* (AI-assisted) cull_ties: back faces of closed tie surfaces (CTR_TCC_CULL_BACK) */
   e.cullMode = (st->tcc & CTR_TCC_CULL_BACK) && g_cull_enable
                    ? (g_cull_flip ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW)
                    : GPU_CULL_NONE;
-  e.earlyDepthFunc = GPU_EARLYDEPTH_GEQUAL;
-  e.earlyDepthRef = 0;
+  e.earlyDepthFunc = (GPU_EARLYDEPTHFUNC)g_early_func; /* (AI-assisted) defaults: GEQUAL, 0 */
+  e.earlyDepthRef = g_early_clear;
   /* (AI-assisted) the stencil marks (CTR_STATE_STENCIL_*): 1 where a STENCIL_SET draw passed the
    * depth test, STENCIL_OUT draws where it isn't 1. Off: only the enable bit changes. */
   if ((st->flags & CTR_STATE_STENCIL_SET) && !g_depth16) {
@@ -3730,6 +4030,32 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
                   ((u32)GPU_STENCIL_ZERO << 8);
   } else {
     e.stencilMode &= ~1u;
+  }
+  /* (AI-assisted) cb_read_opaque: no color buffer reads for draws whose result doesn't depend on
+   * it (CTR_BLEND_OVER_CLEAR blends with a constant); a flush before each switch, as pica_bench's
+   * B6 tests do. A framebuffer bind still pending (C3DiF_FrameBuf) writes 0xF after this: then
+   * the next draw decides again. */
+  if (g_cb_read_opaque) {
+    const int want = ((st->blend == CTR_BLEND_OFF || st->blend == CTR_BLEND_OVER_CLEAR) &&
+                      !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX)))
+                         ? 0
+                         : 0xF;
+    if (want != s_cbread) {
+      if (raw) {
+        u32* q = raw_w(raw_ptr(), GPUREG_FRAMEBUFFER_FLUSH, 0xF, 1);
+        raw_end(raw_w(q, GPUREG_COLORBUFFER_READ, 0xF, (u32)want));
+      } else {
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+        GPUCMD_AddWrite(GPUREG_COLORBUFFER_READ, (u32)want);
+      }
+      g.cur.cbread_switches++;
+    }
+    s_cbread = (ctx->flags & (1u << 5)) ? 0xF : want; /* C3DiF_FrameBuf */
+  } else if (s_cbread == 0) {
+    /* switched off while reads were off: back to citro3d's 0xF */
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    GPUCMD_AddWrite(GPUREG_COLORBUFFER_READ, 0xF);
+    s_cbread = 0xF;
   }
   if (!raw) {
     if (memcmp(&e, &ctx->effect, sizeof(e))) {
@@ -3766,6 +4092,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   if (e.cullMode != c->cullMode) {
     p = raw_w(p, GPUREG_FACECULLING_CONFIG, 0xF, (u32)e.cullMode & 3);
+  }
+  if (e.zScale != c->zScale || e.zOffset != c->zOffset) {
+    const u32 zm[2] = {e.zScale, e.zOffset}; /* (AI-assisted) sky_last */
+    p = raw_n(p, GPUREG_DEPTHMAP_SCALE, zm, 2, 1);
   }
   if (e.earlyDepth != c->earlyDepth || e.earlyDepthFunc != c->earlyDepthFunc ||
       e.earlyDepthRef != c->earlyDepthRef) {
@@ -3816,6 +4146,7 @@ static int vbuf_room(size_t bytes) {
 }
 
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3) {
     return;
   }
@@ -3833,6 +4164,7 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
 }
 
 void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3) {
     return;
   }
@@ -3847,6 +4179,7 @@ void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, in
 }
 
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3) {
     return;
   }
@@ -3862,6 +4195,7 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
 
 void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t const1,
                         const ctr_clip_vertex2* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3 || state->tex < 0 || state->tex >= MAX_TEXTURES ||
       g.textures[state->tex].used != 1) {
     return;
@@ -3913,8 +4247,25 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   C3D_TexEnvScale(e2, C3D_RGB, GPU_TEVSCALE_2);
   C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE, GPU_ONE, GPU_ZERO);
   C3D_AlphaTest(false, GPU_ALWAYS, 0);
-  C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-  C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
+  if (state->ztest == CTR_TEST_ALWAYS) {
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+  } else {
+    /* (AI-assisted) sky_last: depth tested like the roof (fragment depth 0 with
+     * ctr_gpu_set_depth_far: only where no opaque draw wrote depth) */
+    C3D_DepthTest(true, map_test(state->ztest), GPU_WRITE_COLOR);
+  }
+  if (g_depth_far) {
+    __C3D_Context.effect.zScale = 0;
+    __C3D_Context.effect.zOffset = 0;
+  } else if (s_zdef_valid) {
+    __C3D_Context.effect.zScale = s_zscale0;
+    __C3D_Context.effect.zOffset = s_zoffset0;
+  }
+  /* (AI-assisted) early_depth = sky: the clouds too; else off, with the configured function and
+   * clear value (the defaults GEQUAL, 0 as before: EARLYDEPTH_DATA is the clear value) */
+  const int early = g_early_sky && g_depth_far && state->ztest == CTR_TEST_GEQUAL;
+  C3D_EarlyDepthTest(early != 0, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
+  g.cur.early_depth_draws += early;
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
   BufInfo_Add(buf, dst, sizeof(ctr_clip_vertex2), 4, 0x3210);
@@ -3933,6 +4284,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
 }
 
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame) {
     return;
   }
@@ -3981,6 +4333,7 @@ static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b);
 
 int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_vertex** verts,
                           uint16_t** indices) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: before the reservation */
   _Static_assert(sizeof(ctr_ocean_full_vertex) == 32, "ctr_ocean_full.v.pica's vertex layout");
   if (!g.ready || !g.in_frame || g.ocean_full_open || max_verts <= 0 || max_indices <= 0) {
     return 0;
@@ -4069,6 +4422,7 @@ static void clip_reserve_reset(void) {
 
 int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts,
                          uint16_t** indices) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: before the reservation */
   if (!g.ready || !g.in_frame || s_clipres.open || g.ocean_full_open || max_verts <= 0 ||
       max_verts > 65536 || max_indices <= 0) {
     return 0;
@@ -4171,6 +4525,7 @@ int ctr_gpu_copy_screen_part(float x0, float x1) {
 }
 
 static int copy_screen(float x0, float x1, int part) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
   if (!g.ready || !g.in_frame) {
     return -1;
   }
@@ -4444,6 +4799,7 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
 
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;
@@ -4551,6 +4907,7 @@ static void ocean_bind_tex2(int handle) {
 void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
                         const void* verts, const uint16_t* indices, int first_index,
                         int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || index_count < 3) {
     return;
   }
@@ -4762,9 +5119,38 @@ static void raw_skin_rows(const int* locs, const float* bones, int palette_count
   s_raw.vs_changed = 1;
 }
 
+/* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24) */
+static void raw_skin_rows_f24(const int* locs, const float* bones, int palette_count) {
+  u32* p = raw_ptr();
+  const u32 n = 3u * (u32)palette_count;
+  for (int row = 0; row < 3; row++) {
+    p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)locs[row]); /* bit 31 clear: f24 */
+    /* the burst: first word, header, the rest, padding (see raw_n) */
+    u32* d = p;
+    const float* src = bones + 4 * row;
+    for (int b = 0; b < palette_count; b++, src += 12) {
+      const float v[4] = {src[3], src[2], src[1], src[0]}; /* C3D_FVec order: w z y x */
+      u32 w3[3];
+      raw_pack_f24(v, w3);
+      for (u32 i = 0; i < 3; i++) {
+        const u32 k = 3u * (u32)b + i;
+        d[k ? k + 1 : 0] = w3[i];
+      }
+    }
+    d[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
+    p += n + 1;
+    if (!(n & 1)) {
+      *p++ = 0;
+    }
+  }
+  raw_end(p);
+  s_raw.vs_changed = 1;
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;
@@ -4803,7 +5189,9 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   const size_t bone_bytes = sizeof(float) * 12 * (size_t)palette_count;
   if (!g.last_skin_valid || g.last_skin_palette_count != palette_count ||
       !words_equal(g.last_skin_bones, bones, 12u * (unsigned)palette_count)) {
-    if (raw && palette_count > 0) {
+    if (raw && palette_count > 0 && s_skin_f24) {
+      raw_skin_rows_f24(g.uloc_skin_rows, bones, palette_count);
+    } else if (raw && palette_count > 0) {
       raw_skin_rows(g.uloc_skin_rows, bones, palette_count);
     } else {
       for (int row = 0; row < 3; row++) {
@@ -4858,6 +5246,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
                               int palette_count, const float fade[4], int mesh, int first_index,
                               int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;

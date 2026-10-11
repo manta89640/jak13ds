@@ -276,6 +276,30 @@ void ctr_gpu_set_mip_mode(int mode);
  * compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like ctr_gpu_tex_create). */
 void ctr_gpu_set_color16(int on);
 void ctr_gpu_set_early_depth(int on);
+/* (AI-assisted) config.ini early_depth modes (pica_bench B8 decides): sky = the sky's draws
+ * (sky_last: depth 0, after the opaque geometry) use the early depth test too; func = the early
+ * test's function (GPU_EARLYDEPTHFUNC: 0 >=, 1 >, 2 <=, 3 <; the depth test stays >=); clear =
+ * the early depth data's clear value (GPUREG_EARLYDEPTH_DATA, 24 bits; every early depth clear
+ * uses it). Defaults 0, 0, 0 = the old state. Any time. */
+void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
+/* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
+ * texture cache, as citro3d does), 1 uploads (binds of level pool textures, whose texels don't
+ * change, don't clear it unless a pool was filled or moved since the last clear; the first bind
+ * of a frame and every other texture's bind still clear). Any time. */
+void ctr_gpu_set_tex_cache_clear(int mode);
+/* (AI-assisted) config.ini mip_bias: the LOD bias of mipmapped textures (levels, + = a smaller
+ * level sooner: blurrier, fewer texels read), -4..4 in 1/256 steps. 0 = none. Any time. */
+void ctr_gpu_set_mip_bias(float bias);
+/* (AI-assisted) config.ini skin_rows_f24: merc bone rows uploaded as float24 (3 words per vector,
+ * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
+ * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
+void ctr_gpu_set_skin_rows_f24(int on);
+/* (AI-assisted) config.ini cb_read_opaque: GPUREG_COLORBUFFER_READ = 0 for draws whose color
+ * doesn't depend on the framebuffer (no blending reading it, all four channels written), 0xF
+ * again for the others (a framebuffer flush before each switch). citro3d sets read = write =
+ * the color mask. GBATEK: what read disable does is unknown; pica_bench B6.cbread0.probe bg_ok
+ * says whether pixels of a partly covered block survive. Any time. */
+void ctr_gpu_set_cb_read_opaque(int on);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
  * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
  * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */
@@ -349,6 +373,29 @@ void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
 int ctr_gpu_set_pipeline(int on);
+/* (AI-assisted) config.ini sky_last. ctr_gpu_set_sky_hook: fn(arg) is called once, right before
+ * the first draw of this frame that needs what is behind it on screen: blending, no depth write,
+ * stencil or no-color draws, a screen copy, a clip / ocean reservation (only opaque depth-writing
+ * draws let it wait), or at ctr_gpu_run_sky_hook / the frame end, whichever comes first. The
+ * renderer draws the sky there (after the opaque level and models). fn = NULL: none. The frame
+ * begin drops a hook still set. */
+typedef void (*ctr_gpu_hook_fn)(void* arg);
+void ctr_gpu_set_sky_hook(ctr_gpu_hook_fn fn, void* arg);
+void ctr_gpu_run_sky_hook(void);
+/* (AI-assisted) draws from now on get fragment depth 0 (the farthest: the cleared depth) instead
+ * of their own (the depth map's scale 0, offset 0): with ztest GEQUAL they draw only where nothing
+ * has drawn yet (the sky after the opaque geometry) */
+void ctr_gpu_set_depth_far(int on);
+/* (AI-assisted) config.ini skip_clear: the next frame begin clears only the depth buffer (the
+ * renderer knows every pixel's color gets drawn: the opaque sky roof covers the screen) */
+void ctr_gpu_set_skip_color_clear(int on);
+/* (AI-assisted) config.ini frame_overlap2 (with the pipeline): 0 off = the frame end waits for
+ * the GPU, then hands the frame's command list over with a cache flush (the old way); 1 clean =
+ * the list is cleaned from the CPU cache before that wait and handed over without the flush (the
+ * GPU's idle gap between two frames is shorter); 2 on = no wait at the frame end: the list is
+ * queued behind the frame the GPU is drawing (the next frame begin waits for the frame before
+ * that instead, whose buffers it reuses). 2 needs frame_pacing = steady (else 1). Any time. */
+void ctr_gpu_set_frame_overlap2(int mode);
 /* 1 when running in an emulator (Azahar / Citra: svcGetSystemInfo 0x20000). */
 int ctr_gpu_is_emulator(void);
 
@@ -478,6 +525,9 @@ typedef struct {
   int early_depth_draws;
   int proctex_draws;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
+  int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
+  int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
+  int cbread_switches;     /* (AI-assisted) cb_read_opaque: COLORBUFFER_READ changes */
   int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
@@ -486,6 +536,10 @@ typedef struct {
   float gpu_wait_ms;
   float gpu_busy_ms;
   int gpu_busy_frames;
+  /* (AI-assisted) the same frames from the moment their command list was handed to the GPU
+   * (pipeline: the frame end, not the frame begin): done(N) - max(list submitted(N), done(N - 1)).
+   * busy counts the CPU's build time of a pipelined frame too; this doesn't */
+  float gpu_active_ms;
   unsigned int vbuf_used; /* (AI-assisted) immediate vertex buffer bytes this frame (of vbuf_size) */
   unsigned int vbuf_size;
   int vbuf_dropped;       /* draws dropped: the vertex buffer was full */
@@ -499,6 +553,8 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out);
 #ifndef __3DS__
 /* (AI-assisted) snow-gpu-audit: the renderer the next draws belong to (soft backend statistics) */
 void ctr_gpu_soft_bucket(const char* name);
+/* (AI-assisted) the name the draws are counted under now */
+const char* ctr_gpu_soft_bucket_name(void);
 #endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);
