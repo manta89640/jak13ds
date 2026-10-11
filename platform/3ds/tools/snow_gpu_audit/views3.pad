@@ -1,0 +1,36 @@
+# (AI-assisted) snow-gpu-audit fixed views, 200 frames each
+0 wait *target* target-title-wait
+300 continue snow-start
+301 wait *target* target-continue
+302 wait *target* target-stance
+303 log view snow-start
+500 continue snow-flut-flut
+501 wait *target* target-continue
+502 wait *target* target-stance
+503 log view snow-flut-flut
+700 continue snow-by-ice-lake
+701 wait *target* target-continue
+702 wait *target* target-stance
+703 log view snow-by-ice-lake
+900 continue snow-outside-cave
+901 wait *target* target-continue
+902 wait *target* target-stance
+903 log view snow-outside-cave
+1100 continue snow-outside-fort
+1101 wait *target* target-continue
+1102 wait *target* target-stance
+1103 log view snow-outside-fort
+1300 continue snow-pass-to-fort
+1301 wait *target* target-continue
+1302 wait *target* target-stance
+1303 log view snow-pass-to-fort
+1500 continue snow-across-from-flut
+1501 wait *target* target-continue
+1502 wait *target* target-stance
+1503 log view snow-across-from-flut
+1700 continue snow-fort
+1701 wait *target* target-continue
+1702 wait *target* target-stance
+1703 log view snow-fort
+1900 log view end
+1901 exit
