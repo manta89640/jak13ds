@@ -168,7 +168,8 @@ CtrSettings load() {
     } else if (key == "mipmaps") {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
-      s.gpu_profile = parse_bool(v);
+      s.gpu_profile_ab = v == "ab";  // (AI-assisted)
+      s.gpu_profile = !s.gpu_profile_ab && parse_bool(v);
     } else if (key == "gpu_counters") {
       s.gpu_counters = parse_bool(v);
     } else if (key == "stats_period") {
@@ -267,14 +268,24 @@ std::string CtrSettings::summary() const {
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
-      asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
+      asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
       gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");
 }
 
-const CtrSettings& ctr_settings() {
-  static const CtrSettings s = load();
+namespace {
+CtrSettings& settings_instance() {
+  static CtrSettings s = load();
   return s;
+}
+}  // namespace
+
+const CtrSettings& ctr_settings() {
+  return settings_instance();
+}
+
+CtrSettings& ctr_settings_ab() {
+  return settings_instance();
 }
 
 namespace ctr_gfx {
