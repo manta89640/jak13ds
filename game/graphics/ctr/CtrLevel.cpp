@@ -54,7 +54,8 @@ constexpr u32 kRepairMargin = 256 * 1024;
 // (landmarks: houses, towers, rocks), which popped in at far_level_distance
 bool far_chunk(const CtrLevelData& lev, const c3l::Chunk& ch) {
   return ch.lod_tier == (lev.has_lowres ? 3u : 2u) ||
-         (ch.lod_tier == 0 && ch.kind == c3l::CHUNK_KIND_TIE && ch.max_dist <= 0.f);
+         (ch.lod_tier == 0 && ch.kind == c3l::CHUNK_KIND_TIE && ch.max_dist <= 0.f) ||
+         ch.kind == c3l::CHUNK_KIND_VISTA;  // (AI-assisted) v13 vista tier: far scenery
 }
 
 // (AI-assisted) the parts of a loaded level that should be there and aren't (no memory when it
@@ -1193,6 +1194,10 @@ bool CtrLevels::load_file(const fs::path& path,
       if (ch.lod_tier == 3) {
         out->has_lowres = true;
       }
+      if (ch.kind == c3l::CHUNK_KIND_VISTA) {
+        out->has_vista = true;  // (AI-assisted)
+        continue;               // not in the level's bounds (far scenery)
+      }
       if (ch.lod_tier > 1) {
         continue;
       }
@@ -1991,6 +1996,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       fog1_vista[0] = 1.f / pzw;
       fog1_vista[1] = start;
       fog1_vista[2] = 1.f / std::max(vista_dist - start, 1.f);
+      // (AI-assisted) a level with a vista tier continues past the draw distance: one haze for
+      // all of it, from fog_start * draw_distance to vista_distance (else a ring of solid fog
+      // color at the draw distance, then the vista unfogged)
+      if (lev.has_vista && draw_dist > 0 && draw_dist < vista_dist) {
+        fog1_vista[1] = draw_dist * settings.fog_start;
+        fog1_vista[2] = 1.f / std::max(vista_dist - fog1_vista[1], 1.f);
+        memcpy(fog1, fog1_vista, sizeof(fog1));
+      }
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
   }
@@ -2009,8 +2022,158 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (lev.chunk_state.size() != lev.chunks.size()) {
     lev.chunk_state.assign(lev.chunks.size(), 0);
   }
+  // (AI-assisted) a chunk that is to be drawn (mode and distance decided): the view test (the
+  // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
+  // runs tested against those planes on their own), the visibility bits or (vista tier) the
+  // source chunks, then its matrix. vista: drawn in the vista pass.
+  auto emit_chunk = [&](size_t ci, bool vista_chunk) {
+    const auto& ch = lev.chunks[ci];
+    const bool vista_tier = ch.kind == c3l::CHUNK_KIND_VISTA;
+      // (AI-assisted) the view test: the chunk's sphere against the four planes; a chunk that crosses
+      // planes (run_culling) has its runs tested against those planes on their own
+      u32 cross = 0;  // planes the chunk's sphere crosses
+      {
+        const float* s = ch.bsphere;
+        const math::Vector4f acc =
+            cam.planes[0] * s[0] + cam.planes[1] * s[1] + cam.planes[2] * s[2] - cam.planes[3];
+        if (!(acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3])) {
+          return;
+        }
+        if (run_culling && lev.chunk_run_count[ci]) {
+          for (int i = 0; i < 4; i++) {
+            cross |= acc[i] < s[3] ? 1u << i : 0u;
+          }
+        }
+      }
+      const bool straddles = cross != 0;
+      bool partly = false;
+      // (AI-assisted) ties always; tfrag with the level's own string (not its low resolution
+      // version), or every tier with a neighbour's (neighbour_vis)
+      const bool vis_test = !vista_tier && m_vis && ch.vis_run_count &&
+                            (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3) ||
+                             (vis_nb && ch.lod_tier <= 3));
+      if (vis_test || straddles || vista_tier) {
+        // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
+        u32 shown = 0, view_hidden = 0, view_tris = 0;
+        const u32 r0 = lev.chunk_first_run[ci];
+        const u32 nr =
+            vis_test || vista_tier ? ch.vis_run_count : lev.chunk_run_count[ci];
+        // the crossed planes: distance of the chunk's origin, and its change per quantized unit
+        float po[4], pk[4][3];
+        int np = 0;
+        if (straddles) {
+          for (int i = 0; i < 4; i++) {
+            if (cross & (1u << i)) {
+              po[np] = cam.planes[0][i] * ch.origin[0] + cam.planes[1][i] * ch.origin[1] +
+                       cam.planes[2][i] * ch.origin[2] - cam.planes[3][i];
+              for (int c = 0; c < 3; c++) {
+                pk[np][c] = cam.planes[c][i] * ch.scale;
+              }
+              np++;
+            }
+          }
+          m_cull_runs += nr;
+        }
+        const float scale = ch.scale;
+        for (u32 r = r0; r < r0 + nr; r++) {
+          bool s = true;
+          if (vis_test) {
+            const u16 id = lev.vis_runs[r].vis;
+            s = id == 0xffff || (m_vis[id >> 3] & (0x80 >> (id & 7)));
+          } else if (vista_tier) {
+            // (AI-assisted) a vista run stands in for its source chunk where that one isn't drawn
+            const u16 src = lev.vis_runs[r].vis;
+            s = src < m_vista_src.size() && m_vista_src[src];
+          }
+          if (s && straddles) {
+            const auto& rs = lev.run_spheres[r];
+            if (rs.r != 0xffff) {
+              const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
+              for (int i = 0; i < np && s; i++) {
+                s = po[i] + pk[i][0] * x + pk[i][1] * y + pk[i][2] * z > rad;
+              }
+              if (!s) {
+                view_hidden++;
+                view_tris += lev.vis_runs[r].index_count / 3;
+              }
+            }
+          }
+          m_run_shown[r] = s;
+          shown += s;
+        }
+        m_cull_tris += view_tris;
+        if (!shown) {
+          if (view_hidden) {
+            m_cull_chunks++;
+          } else if (!vista_tier) {
+            m_vis_chunks++;
+          }
+          return;
+        }
+        partly = shown < nr;
+      }
+      // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
+      // The translation is done in double: world coordinates are large.
+      m_visible_slot[ci] = (int)m_visible.size();
+      VisibleChunk& vc = m_visible.emplace_back();
+      vc.chunk = (u32)ci;
+      vc.partly = partly;
+      vc.vista = vista_chunk;
+      {
+        // (AI-assisted) distance band of the chunk's nearest point, for the early depth order
+        const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                    dz = ch.bsphere[2] - cam.trans[2];
+        const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float near = dist - ch.bsphere[3];
+        vc.band = near < 30.f * 4096.f ? 0 : (near < 100.f * 4096.f ? 1 : 2);
+        // (AI-assisted) fog_stage_skip: both fogs ~0 at the chunk's farthest point (its depth is at
+        // most its distance; w = depth * pzw), the same formulas as the mesh shader
+        vc.nofog = false;
+        if (fog_skip && !vista_chunk) {
+          const float far_d = dist + ch.bsphere[3];
+          const float g = 1.f + fog0[3] * std::clamp(fog0[0] - far_d * pzw, fog0[1], fog0[2]);
+          const float dd = (far_d - fog1[1]) * fog1[2];
+          vc.nofog = g <= kNoFog && dd <= kNoFog;
+        }
+      }
+      double d[3];
+      for (int i = 0; i < 3; i++) {
+        d[i] = (double)ch.origin[i] - (double)cam.trans[i];
+      }
+      float* m = vc.clip;
+      for (int c = 0; c < 4; c++) {
+        double t = 0;
+        for (int i = 0; i < 3; i++) {
+          m[4 * c + i] = -R[i][c] * ch.scale;
+          t += (double)R[i][c] * d[i];
+        }
+        if (c < 3) {
+          t += R[3][c];
+        }
+        m[4 * c + 3] = (float)-t;
+      }
+      for (int i = 0; i < 4; i++) {
+        m[4 + i] *= kYScale;
+      }
+      ctr_gpu_prepare_mesh_matrix(m, &vc.gpu);
+  };
+  m_vista_src.assign(lev.has_vista ? lev.chunks.size() : 0, 0);
+  // (AI-assisted) vista tier: a chunk not drawn because of its distance, within vista_distance
+  auto vista_source = [&](size_t ci) {
+    if (!lev.has_vista) {
+      return;
+    }
+    const auto& ch = lev.chunks[ci];
+    const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                dz = ch.bsphere[2] - cam.trans[2];
+    const float lim = vista_dist + ch.bsphere[3];
+    m_vista_src[ci] = vista_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim;
+  };
   for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
     const auto& ch = lev.chunks[ci];
+    if (ch.kind == c3l::CHUNK_KIND_VISTA) {
+      continue;  // (AI-assisted) after the others (their decisions pick its runs)
+    }
     // (AI-assisted) The detail and distance decisions get 10% hysteresis from last frame's, and
     // are made for every chunk every frame (off screen too): with hard cutoffs, turning the camera
     // around Jak or standing at a threshold made whole cells of objects pop in and out. The two
@@ -2047,6 +2210,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
     if (lev.meshes[ci] < 0 || !dist_ok) {
+      if (!dist_ok && ch.lod_tier != 3) {
+        vista_source(ci);
+      }
       continue;
     }
     if (far_level) {
@@ -2062,6 +2228,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                     dz = ch.bsphere[2] - cam.trans[2];
         const float lim = lod_dist + ch.bsphere[3];
         if (dx * dx + dy * dy + dz * dz > lim * lim) {
+          vista_source(ci);
           continue;
         }
       }
@@ -2092,130 +2259,27 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         continue;
       }
     }
-    // (AI-assisted) the view test: the chunk's sphere against the four planes; one that crosses a
-    // plane (run_culling) has its runs tested on their own
-    // (AI-assisted) the view test: the chunk's sphere against the four planes; a chunk that crosses
-    // planes (run_culling) has its runs tested against those planes on their own
-    u32 cross = 0;  // planes the chunk's sphere crosses
-    {
-      const float* s = ch.bsphere;
-      const math::Vector4f acc =
-          cam.planes[0] * s[0] + cam.planes[1] * s[1] + cam.planes[2] * s[2] - cam.planes[3];
-      if (!(acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3])) {
+    if (lev.has_vista && ch.lod_tier == 3) {
+      // (AI-assisted) drawn through its copies in the vista tier (merged into large cells)
+      m_vista_src[ci] = 1;
+      continue;
+    }
+    emit_chunk(ci, vista_chunk);
+  }
+  // (AI-assisted) the vista tier: where its source chunks aren't drawn, up to vista_distance
+  if (lev.has_vista && vista_dist > 0) {
+    for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+      const auto& ch = lev.chunks[ci];
+      if (ch.kind != c3l::CHUNK_KIND_VISTA || lev.meshes[ci] < 0 || !ch.vis_run_count) {
         continue;
       }
-      if (run_culling && lev.chunk_run_count[ci]) {
-        for (int i = 0; i < 4; i++) {
-          cross |= acc[i] < s[3] ? 1u << i : 0u;
-        }
-      }
-    }
-    const bool straddles = cross != 0;
-    bool partly = false;
-    // (AI-assisted) ties always; tfrag with the level's own string (not its low resolution
-    // version), or every tier with a neighbour's (neighbour_vis)
-    const bool vis_test = m_vis && ch.vis_run_count &&
-                          (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3) ||
-                           (vis_nb && ch.lod_tier <= 3));
-    if (vis_test || straddles) {
-      // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
-      u32 shown = 0, view_hidden = 0, view_tris = 0;
-      const u32 r0 = lev.chunk_first_run[ci];
-      const u32 nr = vis_test ? ch.vis_run_count : lev.chunk_run_count[ci];
-      // the crossed planes: distance of the chunk's origin, and its change per quantized unit
-      float po[4], pk[4][3];
-      int np = 0;
-      if (straddles) {
-        for (int i = 0; i < 4; i++) {
-          if (cross & (1u << i)) {
-            po[np] = cam.planes[0][i] * ch.origin[0] + cam.planes[1][i] * ch.origin[1] +
-                     cam.planes[2][i] * ch.origin[2] - cam.planes[3][i];
-            for (int c = 0; c < 3; c++) {
-              pk[np][c] = cam.planes[c][i] * ch.scale;
-            }
-            np++;
-          }
-        }
-        m_cull_runs += nr;
-      }
-      const float scale = ch.scale;
-      for (u32 r = r0; r < r0 + nr; r++) {
-        bool s = true;
-        if (vis_test) {
-          const u16 id = lev.vis_runs[r].vis;
-          s = id == 0xffff || (m_vis[id >> 3] & (0x80 >> (id & 7)));
-        }
-        if (s && straddles) {
-          const auto& rs = lev.run_spheres[r];
-          if (rs.r != 0xffff) {
-            const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
-            for (int i = 0; i < np && s; i++) {
-              s = po[i] + pk[i][0] * x + pk[i][1] * y + pk[i][2] * z > rad;
-            }
-            if (!s) {
-              view_hidden++;
-              view_tris += lev.vis_runs[r].index_count / 3;
-            }
-          }
-        }
-        m_run_shown[r] = s;
-        shown += s;
-      }
-      m_cull_tris += view_tris;
-      if (!shown) {
-        if (view_hidden) {
-          m_cull_chunks++;
-        } else {
-          m_vis_chunks++;
-        }
-        continue;
-      }
-      partly = shown < nr;
-    }
-    // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
-    // The translation is done in double: world coordinates are large.
-    m_visible_slot[ci] = (int)m_visible.size();
-    VisibleChunk& vc = m_visible.emplace_back();
-    vc.chunk = (u32)ci;
-    vc.partly = partly;
-    vc.vista = vista_chunk;
-    {
-      // (AI-assisted) distance band of the chunk's nearest point, for the early depth order
       const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                   dz = ch.bsphere[2] - cam.trans[2];
-      const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-      const float near = dist - ch.bsphere[3];
-      vc.band = near < 30.f * 4096.f ? 0 : (near < 100.f * 4096.f ? 1 : 2);
-      // (AI-assisted) fog_stage_skip: both fogs ~0 at the chunk's farthest point (its depth is at
-      // most its distance; w = depth * pzw), the same formulas as the mesh shader
-      vc.nofog = false;
-      if (fog_skip && !vista_chunk) {
-        const float far_d = dist + ch.bsphere[3];
-        const float g = 1.f + fog0[3] * std::clamp(fog0[0] - far_d * pzw, fog0[1], fog0[2]);
-        const float dd = (far_d - fog1[1]) * fog1[2];
-        vc.nofog = g <= kNoFog && dd <= kNoFog;
+      const float lim = vista_dist + ch.bsphere[3];
+      if (dx * dx + dy * dy + dz * dz < lim * lim) {
+        emit_chunk(ci, true);
       }
     }
-    double d[3];
-    for (int i = 0; i < 3; i++) {
-      d[i] = (double)ch.origin[i] - (double)cam.trans[i];
-    }
-    float* m = vc.clip;
-    for (int c = 0; c < 4; c++) {
-      double t = 0;
-      for (int i = 0; i < 3; i++) {
-        m[4 * c + i] = -R[i][c] * ch.scale;
-        t += (double)R[i][c] * d[i];
-      }
-      if (c < 3) {
-        t += R[3][c];
-      }
-      m[4 * c + 3] = (float)-t;
-    }
-    for (int i = 0; i < 4; i++) {
-      m[4 + i] *= kYScale;
-    }
-    ctr_gpu_prepare_mesh_matrix(m, &vc.gpu);
   }
 
   // The draws whose order doesn't matter (opaque, depth written) sorted by texture and state,
@@ -2248,7 +2312,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     // (AI-assisted) only the visible runs; neighbouring ones in one draw, with small hidden runs
     // between them drawn along (cheaper than another draw)
-    constexpr u32 kMaxGap = 48;
+    // (not in the vista tier: a hidden vista run is a copy of what the main pass draws)
+    const u32 kMaxGap = lev.chunks[vc.chunk].kind == c3l::CHUNK_KIND_VISTA ? 0 : 48;
     u32 idx = dr.first_index, start = 0, len = 0, gap = 0, drawn = 0;
     bool open = false;
     auto emit = [&]() {

@@ -27,6 +27,9 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--medium-radius M`, `--medium-dist M` | 12, 300 | same for medium tie instances |
 | `--shrub-dist M`, `--shrub-cell M` | 100, 50 | shrubs are drawn up to the distance, in chunks of the cell size |
 | `--no-tie`, `--no-shrub`, `--no-merc` | off | leave tie / shrubs / merc models out. |
+| `--no-vista` | off | (AI-assisted, v13) no vista tier. By default the far content (low resolution tfrag; ties without a distance limit; the coarse tfrag of levels without low resolution tfrag) is copied into `CHUNK_KIND_VISTA` chunks (lod_tier 4) of `--vista-cell` meters, one draw per texture and mode, each run's `vis` = its source chunk |
+| `--vista-cell M` | 1500 | vista tier cell size |
+| `--vista-error M`, `--vista-ratio R`, `--vista-sloppy-error M` | 3, 0.25, 10 | vista ties / coarse tfrag: simplified (topology kept) to the error, then (sloppy) towards the ratio of the triangles within the second error |
 | `--merc-only` | off | only merc models (used for the common GAME.fr3 with `--all`). |
 | `--no-etc1` | off | 16-bit textures (RGB565 / RGBA4444) instead of ETC1 / ETC1A4. |
 | `--etc1-merc` | off | ETC1 for all textures of merc models, without the quality test (faces too). |

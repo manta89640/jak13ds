@@ -107,6 +107,7 @@ struct CtrLevelData {
   // where the level's low resolution tfrag isn't drawn in near mode (config lowres_vista)
   float detail_min[3] = {0, 0, 0}, detail_max[3] = {0, 0, 0};
   bool has_detail = false;
+  bool has_vista = false;  // (AI-assisted) c3l v13 vista tier chunks (CHUNK_KIND_VISTA)
   // (AI-assisted) partial unload: a level only seen from a neighbouring one (far mode: only its
   // far chunks are drawn) frees the meshes of its other chunks after a while (linear memory for
   // the level the camera is in), and reads them again from its file when the camera comes back
@@ -368,6 +369,9 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
   u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;
   std::vector<const CtrLevelData*> m_loaded;
+  // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
+  // of its distance)
+  std::vector<u8> m_vista_src;
   // this frame's visible chunks and draws (kept to avoid allocations)
   struct VisibleChunk {
     u32 chunk;

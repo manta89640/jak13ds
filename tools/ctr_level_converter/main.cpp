@@ -84,6 +84,17 @@ struct Options {
   // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
   // runs, for draws whose triangle order doesn't matter), vertices in first-use order
   bool vcache = true;
+  // (AI-assisted) v13 vista tier (c3l::CHUNK_KIND_VISTA): the far content (low resolution tfrag,
+  // ties without a distance limit, the coarse tfrag of levels without low resolution tfrag)
+  // copied into cells of vista_cell meters, the ties and coarse tfrag simplified to vista_error
+  // meters (meshoptimizer, topology kept)
+  bool vista = true;
+  float vista_cell = 1500.f;
+  float vista_error = 3.f;
+  // then (sloppy: may join or drop small parts) down to vista_ratio of the triangles, with at most
+  // vista_sloppy_error meters of error
+  float vista_ratio = 0.25f;
+  float vista_sloppy_error = 10.f;
 };
 
 // (AI-assisted) post-vertex cache statistics (the GPU's cache is cleared before each draw):
@@ -124,6 +135,7 @@ struct SrcTri {
                     // 3: shrub (drawn up to shrub_dist)
   u32 tier = 0;     // c3l::Chunk::lod_tier
   u16 vis = 0xffff;  // (AI-assisted) drawable id in the level's visibility string (c3l::VisRun)
+                     // (vista tier: the source chunk)
 };
 
 struct DrawKey {
@@ -1155,41 +1167,159 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     double old_step = 0;  // the step of the per-chunk bounding box grid used before (stats)
   };
   std::vector<ChunkPlan> plans;
-  for (auto& [key, tri_ids] : cells) {
-    // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
-    // visibility id, so a draw's triangles of one drawable are one run (c3l::VisRun)
-    std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
-      const auto& ta = cv.tris[a];
-      const auto& tb = cv.tris[b];
-      return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
-    });
-    size_t pos = 0;
-    while (pos < tri_ids.size()) {
-      // gather triangles until 65535 unique vertices
-      ChunkPlan cp;
-      cp.key = key;
-      size_t end = pos;
-      while (end < tri_ids.size()) {
-        const auto& t = cv.tris[tri_ids[end]];
-        int new_verts = 0;
-        for (int k = 0; k < 3; k++) {
-          new_verts += cp.local.count(t.v[k]) ? 0 : 1;
+  // (AI-assisted) per vertex: a vista copy (its own quantizing grids, see PosKey)
+  std::vector<u8> vista_vertex(cv.verts.size(), 0);
+  // (AI-assisted) a cell's triangles -> plans of at most 65535 vertices
+  auto make_plans = [&](std::map<CellKey, std::vector<u32>>& cell_map) {
+    for (auto& [key, tri_ids] : cell_map) {
+      // sort by draw so each chunk has one draw per (mode, texture); (AI-assisted) then by
+      // visibility id, so a draw's triangles of one drawable are one run (c3l::VisRun)
+      std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
+        const auto& ta = cv.tris[a];
+        const auto& tb = cv.tris[b];
+        return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
+      });
+      size_t pos = 0;
+      while (pos < tri_ids.size()) {
+        // gather triangles until 65535 unique vertices
+        ChunkPlan cp;
+        cp.key = key;
+        size_t end = pos;
+        while (end < tri_ids.size()) {
+          const auto& t = cv.tris[tri_ids[end]];
+          int new_verts = 0;
+          for (int k = 0; k < 3; k++) {
+            new_verts += cp.local.count(t.v[k]) ? 0 : 1;
+          }
+          if (cp.src.size() + new_verts > 65535) {
+            break;
+          }
+          for (int k = 0; k < 3; k++) {
+            if (!cp.local.count(t.v[k])) {
+              cp.local[t.v[k]] = cp.src.size();
+              cp.src.push_back(t.v[k]);
+            }
+          }
+          end++;
         }
-        if (cp.src.size() + new_verts > 65535) {
-          break;
-        }
+        cp.tris.assign(tri_ids.begin() + pos, tri_ids.begin() + end);
+        plans.push_back(std::move(cp));
+        pos = end;
+      }
+    }
+  };
+  make_plans(cells);
+  // (AI-assisted) the vista tier (Options::vista): copies of the far content, in large cells
+  const size_t normal_plans = plans.size();
+  size_t vista_src_tris = 0, vista_tris = 0;
+  if (opt.vista && !opt.merc_only) {
+    bool has_lowres = false;
+    for (const auto& cp : plans) {
+      has_lowres |= std::get<0>(cp.key) / 4 == 3;
+    }
+    const float vcell = opt.vista_cell * 4096.f;
+    std::map<CellKey, std::vector<u32>> vcells;
+    for (size_t pi = 0; pi < normal_plans && pi < 0xffff; pi++) {
+      const auto& cp = plans[pi];
+      const int tier = std::get<0>(cp.key) / 4, detail = std::get<0>(cp.key) % 4;
+      const int kind = std::get<4>(cp.key);  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
+      const bool lowres = tier == 3;
+      const bool landmark = tier == 0 && kind == 1 && detail == 0;
+      const bool coarse = tier == 2 && kind == 0 && !has_lowres;
+      if (!lowres && !landmark && !coarse) {
+        continue;
+      }
+      // by vista cell and draw: simplified on their own (each copy stays one source chunk's)
+      std::map<std::tuple<int, int, u32>, std::vector<u32>> groups;
+      for (u32 t : cp.tris) {
+        const auto& tr = cv.tris[t];
+        float cx = 0, cz = 0;
         for (int k = 0; k < 3; k++) {
-          if (!cp.local.count(t.v[k])) {
-            cp.local[t.v[k]] = cp.src.size();
-            cp.src.push_back(t.v[k]);
+          cx += cv.verts[tr.v[k]].x / 3;
+          cz += cv.verts[tr.v[k]].z / 3;
+        }
+        groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell), tr.draw_key}].push_back(t);
+      }
+      for (auto& [gk, ids] : groups) {
+        vista_src_tris += ids.size();
+        // welded by position (the representative's texture coordinates and color are kept)
+        std::unordered_map<u64, u32> weld;
+        std::vector<float> pos;
+        std::vector<u32> rep_src, idx;
+        auto key_of = [](const SrcVertex& v) {
+          u32 a, b, c;
+          memcpy(&a, &v.x, 4);
+          memcpy(&b, &v.y, 4);
+          memcpy(&c, &v.z, 4);
+          return ((u64)a * 0x9E3779B97F4A7C15ull) ^ ((u64)b * 0xC2B2AE3D27D4EB4Full) ^ c;
+        };
+        for (u32 t : ids) {
+          for (int k = 0; k < 3; k++) {
+            const u32 vi = cv.tris[t].v[k];
+            const auto& v = cv.verts[vi];
+            auto [it, fresh] = weld.emplace(key_of(v), (u32)rep_src.size());
+            if (fresh) {
+              rep_src.push_back(vi);
+              pos.insert(pos.end(), {v.x, v.y, v.z});
+            }
+            idx.push_back(it->second);
           }
         }
-        end++;
+        std::vector<u32> out_idx = idx;
+        if (!lowres && opt.vista_error > 0 && idx.size() > 3) {
+          out_idx.resize(idx.size());
+          const size_t n = meshopt_simplify(out_idx.data(), idx.data(), idx.size(), pos.data(),
+                                            rep_src.size(), 12, 0, opt.vista_error * 4096.f,
+                                            meshopt_SimplifyErrorAbsolute, nullptr);
+          out_idx.resize(n);
+          const size_t want = (size_t)(idx.size() * opt.vista_ratio) / 3 * 3;
+          if (n > want && want >= 3 && opt.vista_sloppy_error > 0) {
+            float ext = 1.f;
+            for (int c = 0; c < 3; c++) {
+              float lo = 1e30f, hi = -1e30f;
+              for (size_t v = 0; v < rep_src.size(); v++) {
+                lo = std::min(lo, pos[3 * v + c]);
+                hi = std::max(hi, pos[3 * v + c]);
+              }
+              ext = std::max(ext, hi - lo);
+            }
+            std::vector<u32> sl(n);
+            const size_t m =
+                meshopt_simplifySloppy(sl.data(), out_idx.data(), n, pos.data(), rep_src.size(), 12,
+                                       nullptr, want, opt.vista_sloppy_error * 4096.f / ext,
+                                       nullptr);
+            if (m >= 3) {
+              sl.resize(m);
+              out_idx = sl;
+            }
+          }
+        }
+        // new vertices (their quantizing grid is the vista cell's alone)
+        std::unordered_map<u32, u32> made;
+        for (size_t i = 0; i + 2 < out_idx.size(); i += 3) {
+          SrcTri nt = cv.tris[ids[0]];
+          for (int k = 0; k < 3; k++) {
+            const u32 r = out_idx[i + k];
+            auto [it, fresh] = made.emplace(r, (u32)cv.verts.size());
+            if (fresh) {
+              cv.verts.push_back(cv.verts[rep_src[r]]);
+              vista_vertex.resize(cv.verts.size(), 0);
+              vista_vertex.back() = 1;
+            }
+            nt.v[k] = it->second;
+          }
+          nt.detail = 0;
+          nt.tier = c3l::kVistaTier;
+          nt.vis = (u16)pi;  // the source chunk
+          vcells[std::make_tuple((int)(4 * c3l::kVistaTier), std::get<0>(gk), 0, std::get<1>(gk),
+                                 (int)(c3l::CHUNK_KIND_VISTA - c3l::CHUNK_KIND_TFRAG))]
+              .push_back((u32)cv.tris.size());
+          cv.tris.push_back(nt);
+          vista_tris++;
+        }
       }
-      cp.tris.assign(tri_ids.begin() + pos, tri_ids.begin() + end);
-      plans.push_back(std::move(cp));
-      pos = end;
     }
+    make_plans(vcells);
   }
 
   // ---- (AI-assisted) quantizing grids ----
@@ -1203,12 +1333,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // background showed through the cracks.
   struct PosKey {
     u32 x, y, z;
-    bool operator==(const PosKey& o) const { return x == o.x && y == o.y && z == o.z; }
+    u32 vista;  // (AI-assisted) vista copies don't share grids with the chunks they copy
+    bool operator==(const PosKey& o) const {
+      return x == o.x && y == o.y && z == o.z && vista == o.vista;
+    }
   };
   struct PosKeyHash {
     size_t operator()(const PosKey& k) const {
       return (size_t)k.x * 0x9E3779B97F4A7C15ull ^ (size_t)k.y * 0xC2B2AE3D27D4EB4Full ^
-             (size_t)k.z * 0x165667B19E3779F9ull;
+             (size_t)k.z * 0x165667B19E3779F9ull ^ k.vista;
     }
   };
   auto pos_key = [&](u32 s) {
@@ -1219,7 +1352,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       memcpy(&b, &f, 4);
       return b;
     };
-    return PosKey{bits(v.x), bits(v.y), bits(v.z)};
+    return PosKey{bits(v.x), bits(v.y), bits(v.z), s < vista_vertex.size() ? vista_vertex[s] : 0u};
   };
   struct Snap {
     double grid = 0;  // the coarsest grid of the chunks holding the position
@@ -1321,8 +1454,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
 
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
-      const float cell = cell_of_detail(detail);
       ch.lod_tier = std::get<0>(key) / 4;
+      const float cell =
+          ch.lod_tier == c3l::kVistaTier ? opt.vista_cell * 4096.f : cell_of_detail(detail);
       ch.lod_center[0] = (std::get<1>(key) + 0.5f) * cell;
       ch.lod_center[1] = (std::get<2>(key) + 0.5f) * cell;
       ch.lod_center[2] = (std::get<3>(key) + 0.5f) * cell;
@@ -1824,6 +1958,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                                             rdo.copies, rdo.blocks, rdo.reused)
                               : "");
   }
+  if (opt.vista) {
+    size_t vchunks = 0, vdraws = 0;
+    for (const auto& ch : chunks) {
+      if (ch.kind == c3l::CHUNK_KIND_VISTA) {
+        vchunks++;
+        vdraws += ch.draw_count;
+      }
+    }
+    lg::info("{}: vista tier: {} far triangles (low resolution tfrag, ties without a distance "
+             "limit, coarse tfrag without low resolution tfrag) -> {} ({:.0f}%; simplified to {:g} m, "
+             "then to {:.0f}% within {:g} m), {} chunks of {:g} m, {} draws",
+             level.level_name, vista_src_tris, vista_tris,
+             100.0 * vista_tris / std::max<size_t>(vista_src_tris, 1), opt.vista_error,
+             100.0 * opt.vista_ratio, opt.vista_sloppy_error, vchunks,
+             opt.vista_cell, vdraws);
+  }
   lg::info("{}: visibility: {} of {} tris in {} runs (hidden when the game's visibility data says)",
            level.level_name, vis_tris, out_indices.size() / 3, out_runs.size());
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
@@ -1892,9 +2042,19 @@ int main(int argc, char** argv) {
   app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
   bool no_verify = false;
   app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
+  bool no_vista = false;
+  app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
+  app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
+  app.add_option("--vista-error", opt.vista_error,
+                 "vista tier: simplification error of ties and coarse tfrag (meters, 0: none)");
+  app.add_option("--vista-ratio", opt.vista_ratio,
+                 "vista tier: then down to this fraction of the triangles (sloppy)");
+  app.add_option("--vista-sloppy-error", opt.vista_sloppy_error,
+                 "vista tier: ... with at most this error (meters, 0: no sloppy step)");
   CLI11_PARSE(app, argc, argv);
   opt.verify = !no_verify;
   opt.vcache = !no_vcache;
+  opt.vista = !no_vista;
   opt.pack.threads = opt.threads;
   opt.pack.max_block = std::max<u32>(block_kb, 1) * 1024;
   opt.pack.min_block = std::min(opt.pack.min_block, opt.pack.max_block);
