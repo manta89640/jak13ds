@@ -65,6 +65,13 @@ inline bool sphere_outside(const float s[4], const ProbeWork& w) {
   return box_outside(mn, mx, w);
 }
 
+//! (AI-assisted) capacity of a collide-list (collide-cache-h.gc: items 256). The original adds
+//! entries without checking; a query box with NaN or huge coordinates (an enemy whose position
+//! went NaN) overlaps thousands of fragments and the list ran over the global heap behind
+//! *collide-list* (engine code stubs, types), which crashed later anywhere. Extra entries are
+//! dropped (the cache only has room for a fraction of 256 fragments' triangles anyway).
+constexpr u32 kCollideListMax = 256;
+
 //! the probe stack on the scratchpad
 struct ProbeStack {
   u32 base;
@@ -135,10 +142,12 @@ u64 collide_probe_node_impl(const NativeArgs& args) {
       });
     } else {
       visit_nodes(nodes, count, 32, w, [&](u32 n) {
-        gstore<u32>(item, gload<u32>(n + 4));
-        gstore<u32>(item + 4, false_sym);
-        item += 16;
-        num++;
+        if (num < kCollideListMax) {
+          gstore<u32>(item, gload<u32>(n + 4));
+          gstore<u32>(item + 4, false_sym);
+          item += 16;
+          num++;
+        }
       });
     }
   }
@@ -233,7 +242,7 @@ void probe_instance(u32 inst, u32 list, const ProbeWork& w) {
       mx[i] = (s32)(p + rad);
       mn[i] = (s32)(p - rad);
     }
-    if (!box_outside(mn, mx, w)) {
+    if (!box_outside(mn, mx, w) && num < kCollideListMax) {
       gstore<u32>(item + 4, inst);
       gstore<u32>(item, gload<u32>(frag + 4));
       item += 16;
