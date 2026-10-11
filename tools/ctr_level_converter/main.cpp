@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -54,6 +55,15 @@ struct Options {
   float shrub_cell = 50.f;
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
+  // (AI-assisted) merc models whose skeleton group has only lod0 (no -lod1 / -lod2 model in the
+  // level, e.g. the yeti): a simplified copy named <model> + c3l::kMercGenLodSuffix, with the
+  // same vertices and ~gen_lod_ratio of the triangles (meshopt_simplify per draw, the draws'
+  // borders kept), drawn by CtrMercRenderer far away (config merc_gen_lod). 0: none
+  float gen_lod_ratio = 0.3f;
+  float gen_lod_error = 0.02f;  // largest error, relative to the model's size
+  // the model's open edges (holes, cards) stay where they are. Off by default: with the draws
+  // simplified together the only open edges are the model's own, which move along themselves
+  bool gen_lod_lock_border = false;
   // Textures: ETC1 (opaque) / ETC1A4 (with alpha) instead of RGB565 / RGBA4: 1/4 and 1/2 of the
   // memory, so a level's textures fit in VRAM. Textures of merc models (characters): see below;
   // etc1_merc: all ETC1 (faces and small details show ETC1's 4x4 blocks up close).
@@ -488,9 +498,226 @@ struct MercOut {
   std::vector<u8> mod_masks;
   int skipped_models = 0;
   int envmap_draws = 0;
+  int gen_lod_models = 0;  // (AI-assisted)
 };
 
+/*!
+ * (AI-assisted) The simplified copy of a merc model that has only lod0 (see Options::gen_lod_ratio):
+ * a model entry named <name> + kMercGenLodSuffix with the model's own vertices (first_vertex,
+ * vertex_count) and draws of its own, appended after the model. Each draw's triangles are
+ * simplified on their own with their open edges locked (the palette splits and texture seams are
+ * borders: nothing moves there, no cracks), so every vertex keeps its draw's palette. Eye draws
+ * keep their triangles; the envmap draws use their base draw's simplified triangles. The runtime
+ * (CtrLevel) loads both into one mesh; an older runtime loads the copy as a model nobody draws.
+ */
+/*!
+ * (AI-assisted) The merc strips become triangles without the strip's alternating winding (merc
+ * draws aren't culled), so neighbours often wind opposite ways, and the simplifier takes every such
+ * shared edge for a border it may not move. Turned consistently here, neighbour by neighbour across
+ * the edges they share (by position), which the draw doesn't care about.
+ */
+void orient_triangles(std::vector<unsigned int>& tri, const std::vector<c3l::MercVertex>& verts) {
+  const size_t nt = tri.size() / 3;
+  std::map<std::array<s16, 3>, u32> pos_id;
+  std::vector<u32> p(tri.size());
+  for (size_t i = 0; i < tri.size(); i++) {
+    const auto& v = verts[tri[i]];
+    p[i] = pos_id.emplace(std::array<s16, 3>{v.pos[0], v.pos[1], v.pos[2]}, (u32)pos_id.size())
+               .first->second;
+  }
+  std::map<std::pair<u32, u32>, std::vector<u32>> by_edge;  // undirected edge -> triangles
+  for (u32 t = 0; t < nt; t++) {
+    for (int e = 0; e < 3; e++) {
+      const u32 a = p[3 * t + e], b = p[3 * t + (e + 1) % 3];
+      by_edge[{std::min(a, b), std::max(a, b)}].push_back(t);
+    }
+  }
+  // does triangle t have the directed edge a -> b
+  auto has_dir = [&](u32 t, u32 a, u32 b) {
+    for (int e = 0; e < 3; e++) {
+      if (p[3 * t + e] == a && p[3 * t + (e + 1) % 3] == b) {
+        return true;
+      }
+    }
+    return false;
+  };
+  std::vector<u8> seen(nt, 0);
+  std::vector<u32> stack;
+  for (u32 s = 0; s < nt; s++) {
+    if (seen[s]) {
+      continue;
+    }
+    seen[s] = 1;
+    stack.push_back(s);
+    while (!stack.empty()) {
+      const u32 t = stack.back();
+      stack.pop_back();
+      for (int e = 0; e < 3; e++) {
+        const u32 a = p[3 * t + e], b = p[3 * t + (e + 1) % 3];
+        for (u32 n : by_edge[{std::min(a, b), std::max(a, b)}]) {
+          if (seen[n]) {
+            continue;
+          }
+          seen[n] = 1;
+          if (has_dir(n, a, b)) {  // same direction: n is wound the other way
+            std::swap(tri[3 * n + 1], tri[3 * n + 2]);
+            std::swap(p[3 * n + 1], p[3 * n + 2]);
+          }
+          stack.push_back(n);
+        }
+      }
+    }
+  }
+}
+
+bool gen_merc_lod(const c3l::MercModel& mm,
+                  const std::vector<c3l::MercVertex>& verts,
+                  const Options& opt,
+                  MercOut* out,
+                  c3l::MercModel* gen) {
+  const size_t first_draw = mm.first_draw, end_draw = out->draws.size();
+  const size_t first_new_index = out->indices.size();
+  std::vector<float> pos(verts.size() * 3);
+  for (size_t i = 0; i < verts.size(); i++) {
+    for (int c = 0; c < 3; c++) {
+      pos[3 * i + c] = verts[i].pos[c] * mm.scale;
+    }
+  }
+  // the triangle ranges of the model's draws (the envmap draws repeat their base draw's): the
+  // ones simplified together, and the eye draws (kept)
+  std::map<std::pair<u32, u32>, int> range_id;
+  std::vector<std::pair<u32, u32>> ranges;
+  std::vector<u8> range_eye;
+  for (size_t di = first_draw; di < end_draw; di++) {
+    const auto& d = out->draws[di];
+    const auto key = std::make_pair(d.first_index, d.index_count);
+    if (range_id.emplace(key, (int)ranges.size()).second) {
+      ranges.push_back(key);
+      range_eye.push_back(0);
+    }
+    range_eye[range_id[key]] |= d.eye_id != 0xff && d.eye_id != c3l::kMercEnvmapDraw;
+  }
+  // each vertex belongs to one range (the converter gives every palette split its own vertices):
+  // its bone indices only mean something there
+  std::vector<int> owner(verts.size(), -1);
+  for (size_t r = 0; r < ranges.size(); r++) {
+    for (u32 i = ranges[r].first; i < ranges[r].first + ranges[r].second; i++) {
+      owner[out->indices[i]] = (int)r;
+    }
+  }
+  // the merc fragments repeat their vertices: the same vertex (every attribute, same range) under
+  // several indices leaves the triangles as separate pieces whose edges the simplifier must keep.
+  // Each index goes to the first such vertex (the pieces join up)
+  std::vector<u32> weld(verts.size());
+  {
+    std::unordered_map<std::string, u32> first;
+    for (size_t i = 0; i < verts.size(); i++) {
+      std::string k((const char*)&verts[i], sizeof(c3l::MercVertex));
+      k.append((const char*)&owner[i], sizeof(int));
+      weld[i] = first.emplace(k, (u32)i).first->second;
+    }
+  }
+  // all ranges but the eyes' simplified together: where two draws meet (same positions, other
+  // vertices) the simplifier sees a seam and moves both sides alike, so no cracks open there, and
+  // a triangle keeps the vertices of its own range. Vertices at an eye's position stay.
+  std::vector<unsigned int> in, res;
+  std::set<std::array<s16, 3>> eye_pos;
+  size_t before = 0;
+  for (size_t r = 0; r < ranges.size(); r++) {
+    for (u32 i = ranges[r].first; i < ranges[r].first + ranges[r].second; i++) {
+      const auto& v = verts[out->indices[i]];
+      if (range_eye[r]) {
+        eye_pos.insert({v.pos[0], v.pos[1], v.pos[2]});
+      } else {
+        in.push_back(weld[out->indices[i]]);
+      }
+    }
+    before += range_eye[r] ? 0 : ranges[r].second;
+  }
+  if (in.size() < 3 * 16) {
+    return false;
+  }
+  std::vector<u8> lock(verts.size(), 0);
+  for (size_t i = 0; i < verts.size(); i++) {
+    lock[i] = eye_pos.count({verts[i].pos[0], verts[i].pos[1], verts[i].pos[2]}) != 0;
+  }
+  orient_triangles(in, verts);
+  const size_t target = std::max<size_t>((size_t)(in.size() / 3 * opt.gen_lod_ratio) * 3, 3);
+  res.resize(in.size());
+  size_t n = meshopt_simplifyWithAttributes(res.data(), in.data(), in.size(), pos.data(),
+                                            verts.size(), 3 * sizeof(float), nullptr, 0, nullptr,
+                                            0, lock.data(), target, opt.gen_lod_error,
+                                            opt.gen_lod_lock_border ? meshopt_SimplifyLockBorder : 0,
+                                            nullptr);
+  res.resize(n);
+  // back to the ranges, each in vertex cache order
+  std::vector<std::vector<unsigned int>> per_range(ranges.size());
+  size_t after = 0;
+  for (size_t t = 0; t + 2 < res.size(); t += 3) {
+    const int r = owner[res[t]];
+    if (r < 0 || owner[res[t + 1]] != r || owner[res[t + 2]] != r) {
+      lg::warn("merc model {}: generated low LOD mixes draws, left out", mm.name);
+      return false;
+    }
+    per_range[r].insert(per_range[r].end(), res.begin() + t, res.begin() + t + 3);
+    after += 3;
+  }
+  std::vector<std::pair<u32, u32>> new_range(ranges.size());
+  for (size_t r = 0; r < ranges.size(); r++) {
+    std::vector<unsigned int> tri;
+    if (range_eye[r]) {
+      tri.assign(out->indices.begin() + ranges[r].first,
+                 out->indices.begin() + ranges[r].first + ranges[r].second);
+    } else if (!per_range[r].empty()) {
+      tri.resize(per_range[r].size());
+      meshopt_optimizeVertexCache(tri.data(), per_range[r].data(), tri.size(), verts.size());
+    }
+    new_range[r] = {(u32)out->indices.size(), (u32)tri.size()};
+    for (unsigned int v : tri) {
+      out->indices.push_back((u16)v);
+    }
+  }
+  std::vector<c3l::MercDraw> gdraws;
+  for (size_t di = first_draw; di < end_draw; di++) {
+    c3l::MercDraw d = out->draws[di];
+    const auto& nr = new_range[range_id[{d.first_index, d.index_count}]];
+    if (!nr.second) {
+      continue;  // (all its triangles gone)
+    }
+    d.first_index = nr.first;
+    d.index_count = nr.second;
+    gdraws.push_back(d);
+  }
+  if (!before || after * 10 > before * 9) {
+    // less than 10% fewer triangles: not worth a second set of draws
+    lg::debug("merc model {}: no low LOD, {} -> {} triangles", mm.name, before / 3, after / 3);
+    out->indices.resize(first_new_index);
+    return false;
+  }
+  *gen = mm;
+  const std::string name = std::string(mm.name) + c3l::kMercGenLodSuffix;
+  memset(gen->name, 0, sizeof(gen->name));
+  strncpy(gen->name, name.c_str(), sizeof(gen->name) - 1);
+  gen->first_draw = out->draws.size();
+  gen->draw_count = gdraws.size();
+  gen->blerc_first = out->blerc_verts.size();
+  gen->blerc_count = 0;
+  out->draws.insert(out->draws.end(), gdraws.begin(), gdraws.end());
+  lg::info("merc model {}: generated low LOD {}, {} -> {} triangles ({:.0f}%)", mm.name, gen->name,
+           before / 3, after / 3, 100.0 * after / before);
+  out->gen_lod_models++;
+  return true;
+}
+
 void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* out) {
+  // (AI-assisted) skeleton groups with lower LODs: "<base>-lodN" with N > 0 in this level
+  std::unordered_map<std::string, bool> has_lower;
+  for (const auto& model : group.models) {
+    const auto p = model.name.rfind("-lod");
+    if (p != std::string::npos && p + 4 < model.name.size()) {
+      has_lower[model.name.substr(0, p)] |= model.name.substr(p + 4) != "0";
+    }
+  }
   for (const auto& model : group.models) {
     c3l::MercModel mm{};
     strncpy(mm.name, model.name.c_str(), sizeof(mm.name) - 1);
@@ -791,6 +1018,20 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     mm.draw_count = out->draws.size() - mm.first_draw;
     out->verts.insert(out->verts.end(), local_verts.begin(), local_verts.end());
     out->models.push_back(mm);
+    // (AI-assisted) a generated low LOD for "<base>-lod0" without lower LODs (not with blend
+    // shapes or rewritten vertices: those move per frame)
+    // (not Jak and Daxter: always close and in view, their look stays the PS2's)
+    const auto p = model.name.rfind("-lod0");
+    if (cv.opt.gen_lod_ratio > 0.f && p != std::string::npos && p + 5 == model.name.size() &&
+        model.name.rfind("eichar-", 0) != 0 && model.name.rfind("sidekick-", 0) != 0 &&
+        !has_lower[model.name.substr(0, p)] && !mm.blerc_count &&
+        out->mod_effects.size() == mod_first) {
+      c3l::MercModel gen;
+      lg::debug("merc model {}: only lod0, generating a low LOD", model.name);
+      if (gen_merc_lod(mm, local_verts, cv.opt, out, &gen)) {
+        out->models.push_back(gen);
+      }
+    }
   }
 }
 
@@ -1861,6 +2102,13 @@ int main(int argc, char** argv) {
   app.add_option("--shrub-cell", opt.shrub_cell, "chunk grid size for shrubs in meters");
   app.add_flag("--no-merc", opt.no_merc, "leave out merc models");
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
+  app.add_option("--gen-lod", opt.gen_lod_ratio,
+                 "merc models with only lod0: a low LOD with this fraction of the triangles (0: "
+                 "none)");
+  app.add_option("--gen-lod-error", opt.gen_lod_error,
+                 "largest error of the generated low LOD, relative to the model's size");
+  app.add_flag("--gen-lod-lock-border", opt.gen_lod_lock_border,
+               "the generated low LOD keeps the model's open edges in place");
   bool no_etc1 = false, no_mips = false;
   app.add_flag("--no-etc1", no_etc1, "16-bit textures (RGB565 / RGBA4) instead of ETC1 / ETC1A4");
   app.add_flag("--etc1-merc", opt.etc1_merc,

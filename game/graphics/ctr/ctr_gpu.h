@@ -173,6 +173,11 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
  * ctr_gpu_screen_uv: the texture coordinates of the screen point at ctr_gpu coordinates (x, y)
  * (like ctr_vertex: x, y in [-1, 1], y up). Use it with tcc = 0 (the copy's alpha is meaningless). */
 int ctr_gpu_copy_screen(void);
+/* (AI-assisted) config distort_copy = rows: copies only the screen columns x0..x1 (ctr_gpu x, -1
+ * left .. 1 right; the color buffer's tile rows are 8 screen columns each) with a texel of margin
+ * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
+ * keep what an earlier copy left: only read the screen in x0..x1. */
+int ctr_gpu_copy_screen_part(float x0, float x1);
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
 
 /* Draw quads: 4 vertices each, triangles (0, 1, 3) and (3, 1, 2) (a strip in the order 0 1 3 2).
@@ -469,6 +474,10 @@ typedef struct {
   unsigned int linear_largest;
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
+#ifndef __3DS__
+/* (AI-assisted) snow-gpu-audit: the renderer the next draws belong to (soft backend statistics) */
+void ctr_gpu_soft_bucket(const char* name);
+#endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);
 

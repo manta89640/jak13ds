@@ -189,10 +189,10 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
     }
   }
   if (rs.log_now) {
-    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort, {} draws "
-              "(since the last stats)",
+    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort ({} under "
+              "8 px left out), {} faint big ones left out, {} draws (since the last stats)",
               m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
-              m_stats.distort, m_stats.draws);
+              m_stats.distort, m_stats.distort_small, m_stats.faint, m_stats.draws);
     m_stats = Stats();
   }
 }
@@ -223,6 +223,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   // the distorter first (like Sprite3::render_jak1): it reads the screen as drawn so far
   if (read_distorter(dma, rs) && ctr_settings().sprites && ctr_settings().distort) {
     const double td = ctr_gpu_time_ms();
+#ifndef __3DS__
+    ctr_gpu_soft_bucket("sprite-distort");
+#endif
     draw_distorter();
     m_distort_ms = ctr_gpu_time_ms() - td;
   }
@@ -260,6 +263,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     m_corner_reach = b * xy;
   }
   m_size_cap = ctr_settings().sprite_max_size * 224.f;
+  m_min_alpha_big = (float)ctr_settings().sprite_min_alpha;
   for (int k = 0; k < 4; k++) {
     for (int p = 0; p < 2; p++) {
       const float st_mul = p ? 2.f : 1.f, st_add = p ? -1.f : 0.f;
@@ -289,6 +293,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     draw_chunk(count, program == kProgSprites2dGrp0 ? MODE_2D : MODE_3D);
   }
 
+#ifndef __3DS__
+  ctr_gpu_soft_bucket("sprite-world");
+#endif
   flush();
   // fake shadow (nop + flushe)
   if (dma.current_tag_offset() != rs.next_bucket) {
@@ -310,6 +317,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
       }
     }
   }
+#ifndef __3DS__
+  ctr_gpu_soft_bucket("sprite-hud");
+#endif
   flush();
   skip_rest();
 }
@@ -386,6 +396,13 @@ void CtrSpriteRenderer::draw_distorter() {
     return v;
   };
   ctr_vertex strip[5 * 11];
+  // (AI-assisted) distort_copy = rows: the screen columns the kept sprites read (x of the GS frame
+  // texture coordinates), and sprites under kMinDistortPx on screen left out: their warp moves
+  // pixels by a fraction of their size, nothing to see under 8 pixels
+  const bool rows = ctr_settings().distort_copy_rows;
+  constexpr float kMinDistortPx = 8.f;
+  float read_x0 = 1.f, read_x1 = -1.f;
+  int small = 0;
   // (AI-assisted) each fan is a triangle strip (the VU program's): all of them go in one strip
   // draw, joined by repeating the last vertex of one and the first of the next (the triangles in
   // between have no area). As a triangle list it was 3 (n - 2) vertices per fan instead of n + 2:
@@ -417,6 +434,32 @@ void CtrSpriteRenderer::draw_distorter() {
       strip[n++] = vert(v08 * sp.rgba.y() + sp.xyz, v09 * sp.rgba.z() + sp.st);
       strip[n++] = center;
     }
+    if (rows) {
+      float px0 = strip[0].x, px1 = px0, py0 = strip[0].y, py1 = py0;
+      float sx0 = sp.st.x(), sx1 = sx0;
+      int e2 = (int)m_distort_tables.ientry[slices - 3].x() - 352;
+      for (int k = 0; k < n; k++) {
+        px0 = std::min(px0, strip[k].x);
+        px1 = std::max(px1, strip[k].x);
+        py0 = std::min(py0, strip[k].y);
+        py1 = std::max(py1, strip[k].y);
+      }
+      // the screen columns read: x of the texture coordinates of the strip's vertices
+      for (u32 k = 0; k < slices; k++, e2 += 2) {
+        const float a = m_distort_tables.entry[e2 + 1].x(), b = m_distort_tables.entry[e2 + 3].x();
+        for (float o : {a * sp.rgba.x(), b * sp.rgba.x(), a * sp.rgba.z(), b * sp.rgba.z()}) {
+          sx0 = std::min(sx0, sp.st.x() + o);
+          sx1 = std::max(sx1, sp.st.x() + o);
+        }
+      }
+      // ctr_gpu x spans 400 pixels over 2, y 240 over 2
+      if (std::max((px1 - px0) * 200.f, (py1 - py0) * 120.f) < kMinDistortPx) {
+        small++;
+        continue;
+      }
+      read_x0 = std::min(read_x0, sx0 * 2.f - 1.f);
+      read_x1 = std::max(read_x1, sx1 * 2.f - 1.f);
+    }
     if (!m_distort_verts.empty()) {
       const ctr_vertex last = m_distort_verts.back();
       m_distort_verts.push_back(last);
@@ -425,12 +468,13 @@ void CtrSpriteRenderer::draw_distorter() {
     m_distort_verts.insert(m_distort_verts.end(), strip, strip + n);
     m_stats.distort++;
   }
+  m_stats.distort_small += small;
   if (m_distort_verts.empty()) {
     return;
   }
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
-  st.tex = ctr_gpu_copy_screen();
+  st.tex = rows ? ctr_gpu_copy_screen_part(read_x0, read_x1) : ctr_gpu_copy_screen();
   if (st.tex < 0) {
     return;
   }
@@ -541,8 +585,19 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     // (AI-assisted) a world sprite that ends up (nearly) transparent is skipped before any corner
     // math: the game fades sprites out as they get small on screen, so these are mostly sub-pixel
     // particles, and each one still cost a quad of blending on the 3DS GPU
-    if (mode != MODE_HUD && color_byte(v.rgba.w()) * alpha_scale < 2.f) {
-      continue;
+    if (mode != MODE_HUD) {
+      const float a = color_byte(v.rgba.w()) * alpha_scale;
+      if (a < 2.f) {
+        continue;
+      }
+      // (AI-assisted) config sprite_min_alpha: a faint sprite with a half size over kBigHalfGs
+      // (~20 pixels) is skipped below that alpha too (128 = opaque): mist and smoke layers that
+      // add a few color steps each but blend a big area
+      if (a < m_min_alpha_big &&
+          std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach > kBigHalfGs) {
+        m_stats.faint++;
+        continue;
+      }
     }
 
     float corners[4][3];  // x, y, z
@@ -702,8 +757,8 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
               amin = std::min(amin, c >> 24);
               amax = std::max(amax, c >> 24);
             }
-            lg::info("[sprite dump {}] tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
-                     dumped.size(), ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
+            lg::info("[sprite dump {}] handle {} tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
+                     dumped.size(), st.tex, ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
                      ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
             try {
               file_util::write_rgba_png(
@@ -731,6 +786,15 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       st.zwrite = zwrite;
       st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
       st.aref = 38;
+      // (AI-assisted) config sprite_alpha_discard: fragments with alpha 0 skip the blending (no
+      // framebuffer read and write) where alpha 0 adds nothing: Cs * As (+ or -) Cd. Not for the
+      // blend modes that use a fixed factor or the destination's alpha.
+      if (!zwrite && mode != MODE_HUD && ctr_settings().sprite_alpha_discard &&
+          (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
+           st.blend == CTR_BLEND_SUB)) {
+        st.atest = CTR_TEST_GREATER;
+        st.aref = 0;
+      }
       // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
       // its texture coordinates then go from -1 to 1 (see m_proc below)
       if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {

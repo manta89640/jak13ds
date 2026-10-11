@@ -38,6 +38,7 @@
 #include "game/common/vu.h"
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/opengl_renderer/BucketRenderer.h"  // (vu_ref/: no OpenGL)
+#include "game/graphics/ctr/CtrSettings.h"
 
 // the emulated program's entry points are private members of the PC class
 #define private public
@@ -52,6 +53,11 @@ int ctr_gpu_clip_reserve(int, int, ctr_clip_vertex**, uint16_t**) {
   return 0;
 }
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state*, const int*, const int*, int, int, int) {}
+// (AI-assisted) the renderer reads shadow_casters (the test drives the decoder directly)
+const CtrSettings& ctr_settings() {
+  static const CtrSettings s;
+  return s;
+}
 namespace lg::internal {
 void log_message(level, LogTime&, const char* message) {
   printf("%s\n", message);

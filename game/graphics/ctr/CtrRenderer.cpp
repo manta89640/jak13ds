@@ -370,6 +370,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
   ctr_gpu_diag_stage("pmode fade");
+#ifndef __3DS__
+  ctr_gpu_soft_bucket("pmode-fade");
+#endif
   draw_pmode_fade();
   const double t2 = ctr_gpu_time_ms();
   ctr_gpu_frame_end();
@@ -725,6 +728,9 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
         dma.read_and_advance();
       }
     } else {
+#ifndef __3DS__
+      ctr_gpu_soft_bucket(m_buckets[bucket_id]->name().c_str());
+#endif
       m_buckets[bucket_id]->render(dma, m_rs);
     }
     m_bucket_ms[bucket_id] += ctr_gpu_time_ms() - tb;

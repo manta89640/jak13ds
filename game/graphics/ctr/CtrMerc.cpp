@@ -197,6 +197,13 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (m_snapshot_mode) {
     return;
   }
+  flush_queues();
+  // (AI-assisted) merc_gen_lod: forget instances not drawn for 10 s
+  if (++m_frame % 300 == 0) {
+    for (auto it = m_gen_lod.begin(); it != m_gen_lod.end();) {
+      it = m_frame - it->second.frame > 300 ? m_gen_lod.erase(it) : std::next(it);
+    }
+  }
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
   // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
   // them) after a few seconds of updates
@@ -217,10 +224,63 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_mod_ms = m_mod_gather_ms = 0;
   }
   if (rs.log_now && m_stats.models) {
-    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws", m_name,
-              m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.draws);
+    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
+              "{} draws, {} envmap batches, {} draws sorted by texture",
+              m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
+              m_stats.draws, m_stats.env_batches, m_stats.sorted_draws);
     m_stats = Stats();
   }
+}
+
+u32 CtrMercRenderer::queue_floats(const float* src, int n) {
+  const u32 at = (u32)m_qdata.size();
+  m_qdata.insert(m_qdata.end(), src, src + n);
+  return at;
+}
+
+void CtrMercRenderer::flush_env() {
+  if (!m_q_env.empty()) {
+    const float* d = m_qdata.data();
+    for (const auto& q : m_q_env) {
+      ctr_gpu_draw_skinned_env(&q.st, d + q.clip, d + q.rows, q.palette_count, q.fade, q.mesh,
+                               q.first_index, q.index_count);
+    }
+    m_stats.env_batches++;
+    m_q_env.clear();
+  }
+}
+
+void CtrMercRenderer::flush_opaque() {
+  if (m_q_opaque.empty()) {
+    return;
+  }
+  const u32 n = (u32)m_q_opaque.size();
+  m_q_order.resize(n);
+  for (u32 i = 0; i < n; i++) {
+    m_q_order[i] = i;
+  }
+  // by model (in the order they came), then draw; stable: the instances in the order they came
+  std::stable_sort(m_q_order.begin(), m_q_order.end(), [&](u32 a, u32 b) {
+    const auto& qa = m_q_opaque[a];
+    const auto& qb = m_q_opaque[b];
+    return qa.model_rank != qb.model_rank ? qa.model_rank < qb.model_rank
+                                          : qa.draw_index < qb.draw_index;
+  });
+  const float* d = m_qdata.data();
+  for (u32 i : m_q_order) {
+    const auto& q = m_q_opaque[i];
+    ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count, d + q.lights, q.mesh,
+                         q.first_index, q.index_count);
+  }
+  m_stats.sorted_draws += (int)n;
+  m_q_opaque.clear();
+  m_q_models.clear();
+}
+
+void CtrMercRenderer::flush_queues() {
+  flush_opaque();  // (the bases before their shine)
+  flush_env();
+  m_qdata.clear();
 }
 
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
@@ -522,6 +582,15 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   name[127] = 0;
   input += 128;
 
+#ifndef __3DS__
+  {
+    // (AI-assisted) snow-gpu-audit: statistics per model (env CTR_SOFT_MERC_MODELS)
+    static const bool per_model = getenv("CTR_SOFT_MERC_MODELS") != nullptr;
+    if (per_model) {
+      ctr_gpu_soft_bucket((std::string("m:") + name).c_str());
+    }
+  }
+#endif
   const CtrLevelData* lev = nullptr;
   const CtrMercModelData* model = m_levels->find_merc_model(name, &lev);
   m_stats.models++;
@@ -649,7 +718,36 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // with the model's quantization scale folded in
   float palette_rows[CTR_MAX_PALETTE * 12];
   const c3l::MercDraw* rows_of = nullptr;  // the draw whose palette palette_rows holds
-  for (const auto& draw : model->draws) {
+  // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
+  // there yet)
+  // merc_tex_sort: not for models whose vertices change per instance (blend shapes, rewritten
+  // vertices: one mesh); their shine is queued too then (its base may be in the queue)
+  const bool tex_sort = ctr_settings().merc_tex_sort && !model->blerc_count && model->mod.empty();
+  const bool env_batch = ctr_settings().envmap_batch || tex_sort;
+  u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
+  u32 model_rank = ~0u;
+  // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
+  // (the yeti) when its first bone is further from the camera than max(25 m, 12.5 x the model's
+  // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
+  // address of its bone matrices)
+  const std::vector<c3l::MercDraw>* draws = &model->draws;
+  if (!model->gen_draws.empty() && ctr_settings().merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
+      slots[0] < 128) {
+    u32 key;
+    memcpy(&key, &matrix_array[0], 4);
+    const math::Vector4f& t = bones[slots[0]].tmat[3];
+    const float d = std::sqrt(t.x() * t.x() + t.y() * t.y() + t.z() * t.z()) * (1.f / 4096.f);
+    const float size_m = model->scale * 32767.f * (1.f / 4096.f);
+    const float at = std::max(25.f, 12.5f * size_m) * ctr_settings().merc_lod_scale;
+    auto& g = m_gen_lod[key];
+    g.frame = m_frame;
+    g.low = g.low ? d > 0.9f * at : d > 1.1f * at;
+    if (g.low) {
+      draws = &model->gen_draws;
+      m_stats.gen_lod++;
+    }
+  }
+  for (const auto& draw : *draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
     }
@@ -670,6 +768,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     // the draws of a model with at most 24 bones share one palette: made once
     const bool same_palette = rows_of && rows_of->palette_count == draw.palette_count &&
                               !memcmp(rows_of->palette, draw.palette, draw.palette_count);
+    if (!same_palette) {
+      q_rows = ~0u;
+    }
     for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       const MercMat& m = bones[draw.palette[p]];
       float* rows = &palette_rows[12 * p];
@@ -698,8 +799,28 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (envmap) {
       // emerc.frag: texture * fade * 2, no alpha test, the envmap mode's blending (adds a shine)
       st.atest = CTR_TEST_ALWAYS;
-      ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count, fade, model->mesh,
-                               draw.first_index, draw.index_count);
+      if (env_batch) {
+        if (q_clip == ~0u) {
+          q_clip = queue_floats(clip, 16);
+        }
+        if (q_rows == ~0u) {
+          q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
+        }
+        QueuedDraw q;
+        q.st = st;
+        q.clip = q_clip;
+        q.rows = q_rows;
+        q.lights = 0;
+        q.palette_count = draw.palette_count;
+        memcpy(q.fade, fade, sizeof(fade));
+        q.mesh = model->mesh;
+        q.first_index = (int)draw.first_index;
+        q.index_count = (int)draw.index_count;
+        m_q_env.push_back(q);
+      } else {
+        ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count, fade, model->mesh,
+                                 draw.first_index, draw.index_count);
+      }
       m_stats.draws++;
       continue;
     }
@@ -722,6 +843,48 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         (st.atest == CTR_TEST_ALWAYS || (draw.texture < lev->tex_min_alpha.size() &&
                                          lev->tex_min_alpha[draw.texture] >= st.aref * 2))) {
       st.flags |= CTR_STATE_EARLY_DEPTH;
+    }
+    const bool opaque = st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL;
+    if (tex_sort && opaque && draw.eye_id == 0xff) {
+      if (q_clip == ~0u) {
+        q_clip = queue_floats(clip, 16);
+      }
+      if (q_rows == ~0u) {
+        q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
+      }
+      if (q_lights == ~0u) {
+        q_lights = queue_floats(light_data, 28);
+      }
+      if (model_rank == ~0u) {
+        auto it = std::find(m_q_models.begin(), m_q_models.end(), (const void*)draws);
+        model_rank = (u32)(it - m_q_models.begin());
+        if (it == m_q_models.end()) {
+          m_q_models.push_back(draws);
+        }
+      }
+      QueuedDraw q;
+      q.st = st;
+      q.clip = q_clip;
+      q.rows = q_rows;
+      q.lights = q_lights;
+      q.palette_count = draw.palette_count;
+      memset(q.fade, 0, sizeof(q.fade));
+      q.mesh = model->mesh;
+      q.first_index = (int)draw.first_index;
+      q.index_count = (int)draw.index_count;
+      q.model_rank = model_rank;
+      q.draw_index = (u32)(&draw - draws->data());
+      m_q_opaque.push_back(q);
+      m_stats.draws++;
+      continue;
+    }
+    // (AI-assisted) envmap_batch / merc_tex_sort: the queues before a draw that blends or doesn't
+    // write depth (it would change what the shine adds to, or be covered by it), and before any
+    // draw of a sorted model that isn't queued (an eye: after its face, as in the model)
+    if ((!m_q_env.empty() || !m_q_opaque.empty()) && (!opaque || tex_sort)) {
+      flush_queues();
+      q_clip = q_rows = q_lights = ~0u;
+      model_rank = ~0u;
     }
     ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count, light_data, model->mesh,
                          draw.first_index, draw.index_count);

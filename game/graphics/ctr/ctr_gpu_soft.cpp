@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <map>
 
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
@@ -75,6 +76,58 @@ struct SoftState {
 } g_soft;
 // (AI-assisted) ctr_gpu_stream_alloc: the frame's vertices, until the next frame begins
 static std::vector<std::vector<uint8_t>> s_stream;
+
+// ---- (AI-assisted) snow-gpu-audit: per-bucket draw/fill statistics (env CTR_SOFT_STATS=N) ----
+namespace softstats {
+struct B {
+  double draws = 0, tris = 0, px = 0, px_atest = 0, px_z = 0, px_blend = 0, px_invis = 0,
+         px_proc = 0, tex_changes = 0, state_changes = 0, area_bbox = 0, prog_switches = 0;
+  double copy_rows = 0;  // (AI-assisted) screen copy: 8-column tile rows (50 = the whole screen)
+  double unif = 0;       // (AI-assisted) skin / env vertex uniforms uploaded (vectors), as the
+                         // 3DS backend caches them
+};
+std::map<std::string, B> acc;
+B* cur = &acc["(none)"];
+std::string cur_name = "(none)";
+int frames = 0;
+int every = -1;
+std::vector<uint32_t> od;  // fragments per pixel over the window
+ctr_draw_state last_st{};
+bool last_valid = false;
+int last_tex = -2;
+std::map<std::pair<std::string, int>, std::pair<double, double>> tex_px;
+int cur_prog = -1;
+std::pair<double, double>* cur_tp = nullptr;
+void prog(int p) {
+  if (p != cur_prog) {
+    cur->prog_switches++;
+    cur_prog = p;
+  }
+}  // (bucket, tex): px, draws
+int enabled() {
+  if (every < 0) {
+    const char* e = getenv("CTR_SOFT_STATS");
+    every = e ? atoi(e) : 0;
+    od.assign(400 * 240, 0);
+  }
+  return every;
+}
+void draw(const ctr_draw_state& st) {
+  if (!enabled()) return;
+  cur->draws++;
+  cur_tp = &tex_px[{cur_name, st.tex}];
+  cur_tp->second++;
+  if (!last_valid || memcmp(&st, &last_st, sizeof(st))) cur->state_changes++;
+  if (st.tex != last_tex) cur->tex_changes++;
+  last_tex = st.tex;
+  last_st = st;
+  last_valid = true;
+}
+}  // namespace softstats
+extern "C" void ctr_gpu_soft_bucket(const char* name) {
+  softstats::cur_name = name;
+  softstats::cur = &softstats::acc[name];
+}
 
 uint32_t morton8(uint32_t x, uint32_t y) {
   return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) |
@@ -250,9 +303,21 @@ void shade_pixel(const ctr_draw_state& st,
   } else {
     // untextured: the GS outputs the vertex color as it is (see ctr_gpu_citro3d.c)
   }
+  const bool ss_on = softstats::enabled() != 0;
+  if (ss_on) {
+    softstats::cur->px++;
+    softstats::od[px + py * kW]++;
+    if (st.flags & CTR_STATE_PROCTEX) softstats::cur->px_proc++;
+    if ((st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
+         st.blend == CTR_BLEND_OVER_CLEAR) && a < 2.f) {
+      softstats::cur->px_invis++;
+    }
+    if (softstats::cur_tp) softstats::cur_tp->first++;
+  }
   if (!test(st.atest, a, (float)st.aref)) {
     return;
   }
+  if (ss_on) softstats::cur->px_atest++;
   int idx = px + py * kW;
   // (AI-assisted) the stencil test and operations, as ctr_gpu_citro3d.c sets them
   uint8_t* sten = g_soft.depth16 ? nullptr : &g_soft.stencil[idx];
@@ -278,6 +343,10 @@ void shade_pixel(const ctr_draw_state& st,
     } else if (st.flags & CTR_STATE_STENCIL_CLEAR) {
       *sten = 0;
     }
+  }
+  if (ss_on) {
+    softstats::cur->px_z++;
+    if (st.blend != CTR_BLEND_OFF) softstats::cur->px_blend++;
   }
   if (st.zwrite) {
     g_soft.depth[idx] = z;
@@ -391,6 +460,49 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
 
 void ctr_gpu_frame_end(void) {
   g_soft.frame++;
+  if (softstats::enabled() && ++softstats::frames >= softstats::every) {
+    const double n = softstats::frames;
+    std::string line = fmt::format("[softstats] frame {} ({} frames, per frame):", g_soft.frame, softstats::frames);
+    softstats::B tot;
+    for (auto& [name, b] : softstats::acc) {
+      if (!b.draws && !b.px) continue;
+      line += fmt::format("\n  {:<14} draws {:6.1f} tris {:8.0f} px {:8.0f} ({:5.2f} scr) atest {:8.0f} zpass {:8.0f} blend {:8.0f} invis {:8.0f} proc {:7.0f} texchg {:5.1f} stchg {:5.1f} progsw {:4.1f}",
+          name, b.draws / n, b.tris / n, b.px / n, b.px / n / 96000.0, b.px_atest / n, b.px_z / n, b.px_blend / n, b.px_invis / n, b.px_proc / n, b.tex_changes / n, b.state_changes / n, b.prog_switches / n);
+      if (b.copy_rows) line += fmt::format(" copyrows {:5.1f}", b.copy_rows / n);
+      if (b.unif) line += fmt::format(" unif {:6.0f}", b.unif / n);
+      tot.draws += b.draws; tot.tris += b.tris; tot.px += b.px; tot.px_blend += b.px_blend; tot.px_invis += b.px_invis; tot.px_z += b.px_z; tot.prog_switches += b.prog_switches; tot.tex_changes += b.tex_changes;
+    }
+    line += fmt::format("\n  {:<14} draws {:6.1f} tris {:8.0f} px {:8.0f} ({:5.2f} scr) zpass {:8.0f} blend {:8.0f} invis {:8.0f} texchg {:5.1f} progsw {:4.1f}", "TOTAL", tot.draws / n, tot.tris / n, tot.px / n, tot.px / n / 96000.0, tot.px_z / n, tot.px_blend / n, tot.px_invis / n, tot.tex_changes / n, tot.prog_switches / n);
+    // the textures with the most fragments in sprite / merc buckets
+    std::vector<std::pair<double, std::pair<std::string, int>>> top;
+    for (auto& [k, v] : softstats::tex_px) top.push_back({v.first, k});
+    std::sort(top.rbegin(), top.rend());
+    line += "\n  top textures by fragments:";
+    for (size_t i = 0; i < top.size() && i < 14; i++) {
+      const int t = top[i].second.second;
+      int w = 0, h = 0;
+      if (t >= 0 && t < (int)g_soft.textures.size()) { w = g_soft.textures[t].w; h = g_soft.textures[t].h; }
+      line += fmt::format(" [{} tex{} {}x{}: {:.0f}]", top[i].second.first, t, w, h, top[i].first / n);
+    }
+    lg::info("{}", line);
+    if (!g_soft.dump_dir.empty()) {
+      std::vector<uint8_t> img(400 * 240 * 4);
+      for (int i = 0; i < 400 * 240; i++) {
+        const double o = softstats::od[i] / n;
+        const uint8_t v = (uint8_t)std::min(255.0, o * 32.0);  // 8 layers = white
+        img[4 * i] = v; img[4 * i + 1] = o >= 4 ? 0 : v; img[4 * i + 2] = o >= 8 ? 0 : v; img[4 * i + 3] = 255;
+      }
+      file_util::write_rgba_png(fs::path(g_soft.dump_dir) / fmt::format("od_{:05d}.png", g_soft.frame), img.data(), 400, 240);
+    }
+    softstats::acc.clear();
+    softstats::tex_px.clear();
+    softstats::cur_tp = nullptr;
+    softstats::cur = &softstats::acc[softstats::cur_name];
+    std::fill(softstats::od.begin(), softstats::od.end(), 0);
+    softstats::frames = 0;
+  }
+  softstats::last_valid = false;
+  softstats::last_tex = -2;
   int tex_count = 0;
   unsigned bytes = 0;
   for (auto& t : g_soft.textures) {
@@ -435,15 +547,43 @@ void ctr_gpu_wait_vblank(int /*min_vblanks*/) {
 void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
                               const float*,
                               const float*,
-                              int,
+                              int palette_count_env,
                               const float*,
                               int,
                               int,
-                              int) {
+                              int index_count_env) {
+  softstats::prog(3);
+  // (AI-assisted) ctr_gpu_citro3d.c uploads the env program's matrix, bones and fade every draw
+  if (softstats::enabled()) softstats::cur->unif += 4 + 3 * std::min(palette_count_env, 24) + 1;
   // (not in the PC software renderer: the envmap shine pass is GPU only)
+  // (AI-assisted) snow-gpu-audit: counted (draws, triangles) under "<bucket>-envmap"
+  if (softstats::enabled()) {
+    std::string keep = softstats::cur_name;
+    ctr_gpu_soft_bucket((keep + "-envmap").c_str());
+    softstats::cur->draws++;
+    softstats::cur->tris += index_count_env / 3;
+    ctr_gpu_soft_bucket(keep.c_str());
+  }
 }
 
+namespace {
+void clip_draw_triangle(const ctr_draw_state& st, const ctr_clip_vertex* const tri[3]);
+}
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  softstats::prog(4);
+  // (AI-assisted) snow-gpu-audit: clipped against near/far like the GPU (the sky reaches behind
+  // the camera: dropping those triangles undercounted its fill)
+  if (getenv("CTR_SOFT_STATS")) {
+    g_soft.cur.draws++;
+    softstats::draw(*state);
+    for (int i = 0; i + 2 < count; i += 3) {
+      const ctr_clip_vertex* tri[3] = {&verts[i], &verts[i + 1], &verts[i + 2]};
+      clip_draw_triangle(*state, tri);
+      g_soft.cur.triangles++;
+      softstats::cur->tris++;
+    }
+    return;
+  }
   // (no clipping here: triangles with a point behind the camera are left out; affine texturing)
   std::vector<ctr_vertex> out;
   for (int i = 0; i + 2 < count; i += 3) {
@@ -552,6 +692,7 @@ int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts
 
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
                               int n, int vert_count, int index_count) {
+  softstats::prog(4);
   if (!g_clip_open) {
     return;
   }
@@ -569,6 +710,7 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
       continue;
     }
     g_soft.cur.draws++;
+    softstats::draw(states[i]);
     for (int k = first[i]; k + 2 < first[i] + count[i]; k += 3) {
       const ctr_clip_vertex* tri[3];
       bool ok = true;
@@ -580,6 +722,7 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
       if (ok) {
         clip_draw_triangle(states[i], tri);
         g_soft.cur.triangles++;
+        softstats::cur->tris++;
       }
     }
   }
@@ -658,6 +801,7 @@ void ctr_gpu_ocean_full_draw(const ctr_draw_state* state,
                              uint8_t,
                              uint8_t,
                              uint8_t) {
+  softstats::prog(6);
   ocean_full_draw(state, vert_count, index_count, false);
 }
 
@@ -667,6 +811,7 @@ void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state,
                                   uint8_t,
                                   uint8_t,
                                   uint8_t) {
+  softstats::prog(7);
   ocean_full_draw(state, vert_count, index_count, true);
 }
 
@@ -676,6 +821,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state,
                         uint32_t const1,
                         const ctr_clip_vertex2* verts,
                         int count) {
+  softstats::prog(5);
   for (int layer = 0; layer < 2; layer++) {
     const uint32_t c = layer ? const1 : const0;
     std::vector<ctr_clip_vertex> out((size_t)count);
@@ -696,7 +842,13 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state,
     ctr_draw_state st = *state;
     st.tcc = 0;
     st.blend = CTR_BLEND_ADD;
-    ctr_gpu_draw_clip(&st, out.data(), count);
+    {
+      const double sw = softstats::cur->prog_switches, dr = softstats::cur->draws;
+      ctr_gpu_draw_clip(&st, out.data(), count);
+      softstats::cur->prog_switches = sw;
+      softstats::cur->draws = dr + (layer ? 0 : 1);
+      softstats::cur_prog = 5;
+    }
   }
 }
 
@@ -713,7 +865,18 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
   ctr_gpu_draw_mesh(state, matrix->m, mesh, first_index, index_count);
 }
 
+int ctr_gpu_copy_screen_part(float x0, float x1) {
+  // (AI-assisted) the whole screen as well (no tiles here); counted like ctr_gpu_citro3d.c's rows
+  const auto clampf = [](float v) { return std::clamp(v, -1.f, 1.f); };
+  const int p0 = std::clamp((int)((clampf(x0) + 1.f) * 0.5f * 399.f) - 1, 0, 399);
+  const int p1 = std::max(p0, std::clamp((int)((clampf(x1) + 1.f) * 0.5f * 399.f) + 2, 0, 399));
+  const int h = ctr_gpu_copy_screen();
+  if (softstats::enabled()) softstats::cur->copy_rows += (p1 >> 3) - (p0 >> 3) + 1 - 50;
+  return h;
+}
+
 int ctr_gpu_copy_screen(void) {
+  if (softstats::enabled()) softstats::cur->copy_rows += 50;
   static int handle = -1;
   if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||
       g_soft.textures[handle].w != kW) {
@@ -756,15 +919,20 @@ void ctr_gpu_tex_delete(int handle) {
 }
 
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  softstats::prog(0);
   g_soft.cur.draws++;
+  if (state) softstats::draw(*state);
   for (int i = 0; i + 2 < count; i += 3) {
     raster_triangle(*state, verts + i);
     g_soft.cur.triangles++;
+    softstats::cur->tris++;
   }
 }
 
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
+  softstats::prog(0);
   g_soft.cur.draws++;
+  if (state) softstats::draw(*state);
   for (int q = 0; q < quad_count; q++) {
     const ctr_vertex* v = verts + 4 * q;
     const ctr_vertex t0[3] = {v[0], v[1], v[3]};
@@ -772,16 +940,20 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
     raster_triangle(*state, t0);
     raster_triangle(*state, t1);
     g_soft.cur.triangles += 2;
+    softstats::cur->tris += 2;
   }
 }
 
 // (AI-assisted) triangle k: vertices k, k + 1, k + 2 (the joins between strips have no area)
 void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  softstats::prog(0);
   g_soft.cur.draws++;
+  if (state) softstats::draw(*state);
   for (int k = 0; k + 2 < count; k++) {
     const ctr_vertex t[3] = {verts[k], verts[k + 1], verts[k + 2]};
     raster_triangle(*state, t);
     g_soft.cur.triangles++;
+    softstats::cur->tris++;
   }
 }
 
@@ -924,11 +1096,13 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                        int mesh,
                        int first_index,
                        int index_count) {
+  softstats::prog(1);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
     return;
   }
   const auto& m = g_soft.meshes[mesh];
   g_soft.cur.draws++;
+  if (state) softstats::draw(*state);
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     bool ok = true;
@@ -967,6 +1141,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     }
     raster_triangle(*state, tri, true);
     g_soft.cur.triangles++;
+    softstats::cur->tris++;
   }
 }
 
@@ -993,6 +1168,7 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
                         const uint16_t* indices,
                         int first_index,
                         int index_count) {
+  softstats::prog(8);
   const uint8_t* vbase = (const uint8_t*)verts;
   const uint16_t* ibase = indices;
   if (mesh >= 0) {
@@ -1007,6 +1183,7 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
   }
   const float* clip = d->clip.m;  // row-major (the soft prepare keeps the GL matrix)
   g_soft.cur.draws++;
+  if (state) softstats::draw(*state);
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     bool ok = true;
@@ -1042,6 +1219,7 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
     }
     raster_triangle(*state, tri, true);
     g_soft.cur.triangles++;
+    softstats::cur->tris++;
   }
 }
 
@@ -1075,11 +1253,30 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           int mesh,
                           int first_index,
                           int index_count) {
+  // (AI-assisted) the uniforms ctr_gpu_citro3d.c uploads: what changed since the last skin draw,
+  // everything after a program switch
+  if (softstats::enabled()) {
+    static std::vector<float> last_clip, last_bones, last_lights;
+    const bool fresh = softstats::cur_prog != 2;
+    const int pc = std::min(palette_count, 24);
+    auto changed = [&](std::vector<float>& last, const float* v, size_t n) {
+      if (fresh || last.size() != n || memcmp(last.data(), v, n * 4)) {
+        last.assign(v, v + n);
+        return true;
+      }
+      return false;
+    };
+    softstats::cur->unif += (changed(last_clip, clip, 16) ? 4 : 0) +
+                            (changed(last_bones, bones, 12 * (size_t)pc) ? 3 * pc : 0) +
+                            (changed(last_lights, lights, 28) ? 7 : 0);
+  }
+  softstats::prog(2);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
     return;
   }
   const auto& m = g_soft.meshes[mesh];
   g_soft.cur.draws++;
+  if (state) softstats::draw(*state);
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     bool ok = true;
@@ -1142,6 +1339,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
     }
     raster_triangle(*state, tri, true);
     g_soft.cur.triangles++;
+    softstats::cur->tris++;
   }
 }
 

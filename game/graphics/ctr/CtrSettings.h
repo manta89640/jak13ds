@@ -62,6 +62,24 @@ struct CtrSettings {
   bool distort = false;  // (AI-assisted) off: square sprites reported on hardware
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
+  // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
+  // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
+  bool envmap_batch = true;
+  // (AI-assisted) a merc bucket's opaque draws of models drawn more than once (crates, yetis, ...)
+  // drawn draw by draw across the instances: one texture bind per draw of the model instead of
+  // per instance, but the bones are uploaded for each draw then
+  bool merc_tex_sort = true;  // (AI-assisted) on: Snowy host stats -7..-45% merc texture binds
+  // (AI-assisted) models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
+  // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
+  // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod
+  bool merc_gen_lod = true;
+  // config merc_lod_scale (also read by kmachine.cpp for the game's own LOD distances)
+  float merc_lod_scale = 0.5f;
+  // (AI-assisted) config distort_copy = rows | full. rows: the distorter's screen copy covers only
+  // the 8-pixel columns of tile rows its sprites read, the copy texture goes to VRAM when there is
+  // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).
+  // full: every frame with distort sprites copies the whole screen into linear memory (as before)
+  bool distort_copy_rows = true;
   // (AI-assisted) config shadows = full | blob | off (on = full). full: the game's shadow volumes
   // (Jak, enemies, objects; the game runs shadow-execute-all, CtrShadow draws them with the stencil
   // buffer); blob: a dark spot under Jak only (the game's fake shadow, no volumes); off: none.
@@ -69,8 +87,13 @@ struct CtrSettings {
   enum class ShadowMode { Off, Blob, Full };
   ShadowMode shadows = ShadowMode::Full;
   bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
+  // (AI-assisted) shadows = full: at most this many objects' shadows per frame, the ones that look
+  // biggest from the camera (bounding sphere over distance: Jak's normally is one); 0 = all
+  int shadow_casters = 6;
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
+  // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
+  bool clouds = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
   bool overlap = false;
   // CPU builds frame N+1 while the GPU draws frame N
@@ -124,6 +147,12 @@ struct CtrSettings {
   bool proctex_glows = true;
   // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
   float sprite_max_size = 0.5f;
+  // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
+  // (the game's 0..128; all sprites are left out below 2, the old rule for every size)
+  int sprite_min_alpha = 6;
+  // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
+  // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
+  bool sprite_alpha_discard = true;
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;

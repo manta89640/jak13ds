@@ -12,11 +12,13 @@
  * unpacked from it each frame like Merc2::model_mod_draws (apply_mod).
  */
 
+#include <unordered_map>
 #include <vector>
 
 #include "common/math/Vector.h"
 
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/ctr_gpu.h"
 
 class CtrLevels;
 
@@ -57,12 +59,52 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int missing = 0;
     int draws = 0;
     int bad_bones = 0;
+    int env_batches = 0;  // (AI-assisted) envmap_batch: queues drawn
+    int sorted_draws = 0;  // (AI-assisted) merc_tex_sort: draws drawn from the queue
+    int gen_lod = 0;       // (AI-assisted) merc_gen_lod: models drawn with the generated LOD
   };
 
  private:
   void handle_setup(const DmaTransfer& setup);
   void handle_model(const DmaTransfer& init, CtrRenderState& rs);
   void hud_clip(float* out, float y_scale) const;
+
+  // (AI-assisted) config envmap_batch: the envmap draws of the bucket are queued and drawn
+  // together (one skin -> env -> skin program switch pair, and the skin draws keep their uniforms)
+  // at its end, or before a draw that would see them differently: one that blends or doesn't
+  // write depth (the shine adds Cs * Ad after the base it shines on, which the depth test of the
+  // base passes; an opaque draw in front hides it the same way before or after)
+  struct QueuedDraw {
+    ctr_draw_state st;
+    u32 clip, rows, lights;  // offsets in m_qdata
+    int palette_count;
+    float fade[4];
+    int mesh;
+    int first_index, index_count;
+    u32 model_rank, draw_index;  // merc_tex_sort: the order they're drawn in
+  };
+  std::vector<float> m_qdata;
+  std::vector<QueuedDraw> m_q_env;
+  u32 queue_floats(const float* src, int n);
+  void flush_env();
+  // (AI-assisted) config merc_tex_sort: the opaque depth-writing draws of models without blend
+  // shapes or rewritten vertices are queued too and drawn draw by draw across the instances of a
+  // model (draw 0 of every yeti, then draw 1, ...: each instance keeps its own draw order), so a
+  // texture is bound once for all of them. Flushed before a draw that blends or doesn't write
+  // depth, before the queued shine.
+  std::vector<QueuedDraw> m_q_opaque;
+  std::vector<u32> m_q_order;
+  std::vector<const void*> m_q_models;  // model rank -> model
+  void flush_opaque();
+  void flush_queues();
+  // (AI-assisted) merc_gen_lod: per instance (the address of its bone matrices) whether it is
+  // drawn with the generated low LOD, and the frame it was last seen
+  struct GenLodState {
+    bool low = false;
+    u32 frame = 0;
+  };
+  std::unordered_map<u32, GenLodState> m_gen_lod;
+  u32 m_frame = 0;
 
   CtrLevels* m_levels;
   const class CtrEyeRenderer* m_eyes = nullptr;

@@ -134,6 +134,16 @@ CtrSettings load() {
       s.distort = parse_bool(v);
     } else if (key == "envmap") {
       s.envmap = parse_bool(v);
+    } else if (key == "merc_gen_lod") {
+      s.merc_gen_lod = parse_bool(v);  // (AI-assisted)
+    } else if (key == "merc_lod_scale") {
+      s.merc_lod_scale = std::clamp(f, 0.05f, 1.f);  // (AI-assisted) (kmachine.cpp reads it too)
+    } else if (key == "merc_tex_sort") {
+      s.merc_tex_sort = parse_bool(v);  // (AI-assisted)
+    } else if (key == "envmap_batch") {
+      s.envmap_batch = parse_bool(v);  // (AI-assisted)
+    } else if (key == "distort_copy") {
+      s.distort_copy_rows = v != "full";  // (AI-assisted) rows | full
     } else if (key == "shadows") {
       // (AI-assisted) full | blob | off (on = full)
       if (v == "full" || parse_bool(v)) {
@@ -145,8 +155,12 @@ CtrSettings load() {
       } else {
         lg::warn("[ctr] {}:{}: shadows = {}: expected full, blob or off", path.string(), n, v);
       }
+    } else if (key == "shadow_casters") {
+      s.shadow_casters = std::clamp(std::atoi(v.c_str()), 0, 64);  // (AI-assisted)
     } else if (key == "sky") {
       s.sky = parse_bool(v);
+    } else if (key == "clouds") {
+      s.clouds = parse_bool(v);  // (AI-assisted)
     } else if (key == "overlap") {
       s.overlap = parse_bool(v);
     } else if (key == "pipeline") {
@@ -184,6 +198,10 @@ CtrSettings load() {
       s.proctex_glows = parse_bool(v);
     } else if (key == "sprite_max_size") {
       s.sprite_max_size = std::max(0.f, f);
+    } else if (key == "sprite_min_alpha") {
+      s.sprite_min_alpha = std::clamp(std::atoi(v.c_str()), 2, 64);  // (AI-assisted)
+    } else if (key == "sprite_alpha_discard") {
+      s.sprite_alpha_discard = parse_bool(v);  // (AI-assisted)
     } else if (key == "vis_culling") {
       s.vis_culling = parse_bool(v);
     } else if (key == "raw_cmds") {
@@ -207,7 +225,7 @@ CtrSettings load() {
     } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
-               key == "debug_log" || key == "particle_density" || key == "merc_lod_scale" ||
+               key == "debug_log" || key == "particle_density" ||
                key == "io_checksum" || key == "anim_lod" || key == "anim_native" ||
                key == "io_cache" || key == "log_async") {
       // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,
@@ -226,8 +244,8 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "ocean {} sky {} distort {} envmap {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
-      "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
+      "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
@@ -240,16 +258,20 @@ std::string CtrSettings::summary() const {
                   : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
-      sky ? "on" : "off", distort ? "on" : "off", envmap ? "on" : "off",
+      sky ? "on" : "off", clouds ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
+      envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
+      merc_gen_lod ? "on" : "off", merc_lod_scale,
       // (AI-assisted) with depth16, full falls back to blob (no stencil)
       shadows == ShadowMode::Full   ? "full"
       : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"
                                                            : "blob")
                                     : "off",
+      shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
-      sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
+      sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
+      vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
       gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",
