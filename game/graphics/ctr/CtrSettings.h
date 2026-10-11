@@ -166,6 +166,15 @@ struct CtrSettings {
   // (AI-assisted) early_depth = block32: with the render target in 32x32 block mode (256x416,
   // cropped to the screen), which the early depth test seems to need. Hardware only (off).
   bool early_depth_block32 = false;
+  // (AI-assisted) early_depth = sky (sky32: with the block32 target): the early depth test only
+  // for the sky, drawn last (sky_last forced on) at depth 0: its fragments behind what the opaque
+  // draws covered are dropped before texturing. With on / block32 and sky_last the sky uses it too
+  bool early_depth_sky = false;
+  // (AI-assisted) early_depth_func = ge | gt | le | lt: the early test's function (the normal
+  // depth test stays >=); early_depth_clear = the early depth data's clear value (0 = far, max =
+  // 0xFFFFFF, or a number). pica_bench B8.*.c3 shows which pair passes everything after a clear
+  int early_depth_func = 0;
+  unsigned int early_depth_clear = 0;
   // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
   // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
   // ocean = waves marks are left out). Off by default.

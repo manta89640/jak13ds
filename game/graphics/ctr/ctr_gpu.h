@@ -276,6 +276,12 @@ void ctr_gpu_set_mip_mode(int mode);
  * compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like ctr_gpu_tex_create). */
 void ctr_gpu_set_color16(int on);
 void ctr_gpu_set_early_depth(int on);
+/* (AI-assisted) config.ini early_depth modes (pica_bench B8 decides): sky = the sky's draws
+ * (sky_last: depth 0, after the opaque geometry) use the early depth test too; func = the early
+ * test's function (GPU_EARLYDEPTHFUNC: 0 >=, 1 >, 2 <=, 3 <; the depth test stays >=); clear =
+ * the early depth data's clear value (GPUREG_EARLYDEPTH_DATA, 24 bits; every early depth clear
+ * uses it). Defaults 0, 0, 0 = the old state. Any time. */
+void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
  * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
  * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */

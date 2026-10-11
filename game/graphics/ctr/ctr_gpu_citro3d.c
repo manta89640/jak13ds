@@ -1758,6 +1758,11 @@ static void pipeline_close_list(void) {
  * it runs right before the first draw that needs what is behind it (SKY_HOOK), so every blended
  * pixel still blends over the sky, and the sky draws itself with depth 0 (ctr_gpu_set_depth_far)
  * only where no opaque draw has written depth. Off (no hook set): nothing changes. */
+/* (AI-assisted) ctr_gpu_set_early_depth_params: the sky's draws too; the early test's function
+ * and the early depth data's clear value (defaults: the old GEQUAL and 0) */
+static int g_early_sky = 0;
+static int g_early_func = GPU_EARLYDEPTH_GEQUAL;
+static u32 g_early_clear = 0;
 static ctr_gpu_hook_fn s_sky_hook;
 static void* s_sky_hook_arg;
 static int g_depth_far;       /* ctr_gpu_set_depth_far */
@@ -1847,9 +1852,13 @@ static void frame_state_reset(void) {
     GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
     GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_BLOCK32, 1);
   }
-  GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, 0);
+  /* (AI-assisted) GBATEK: EARLYDEPTH_DATA is the clear value of the early depth data (its own
+   * storage, not the depth buffer), EARLYDEPTH_CLEAR fills it (also at the end of every citro3d
+   * split): the config's value (early_depth_clear, default 0 = far), and the context keeps it so
+   * every later clear uses the same */
+  GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
   GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
-  C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
+  C3D_EarlyDepthTest(false, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
   C3D_ProcTexBind(0, NULL);
   g.proc_radial = -1;
   g.vbuf_used = 0;
@@ -2854,6 +2863,18 @@ void ctr_gpu_set_early_depth(int on) {
   g_early_depth = on && !g_block32_failed ? 1 : 0;
 }
 
+void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
+  const int s = sky && !g_block32_failed ? 1 : 0;
+  const int f = func & 3;
+  const u32 c = clear & 0xFFFFFFu;
+  if (s != g_early_sky || f != g_early_func || c != g_early_clear) {
+    g_early_sky = s;
+    g_early_func = f;
+    g_early_clear = c;
+    g.last_state_valid = 0;
+  }
+}
+
 void ctr_gpu_set_framebuffer(int block32, int depth16) {
   if (!g.ready) {
     g_block32 = block32 ? 1 : 0; /* the render target is made in ctr_gpu_init */
@@ -3665,8 +3686,11 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
 }
 
 static int early_depth_ok(const ctr_draw_state* st) {
-  return g_early_depth && (st->flags & CTR_STATE_EARLY_DEPTH) && st->ztest == CTR_TEST_GEQUAL &&
-         st->zwrite && st->blend == CTR_BLEND_OFF;
+  return (g_early_depth && (st->flags & CTR_STATE_EARLY_DEPTH) && st->ztest == CTR_TEST_GEQUAL &&
+          st->zwrite && st->blend == CTR_BLEND_OFF) ||
+         /* (AI-assisted) early_depth = sky / sky32 (and on / block32 with sky_last): the sky at
+          * depth 0 after the opaque geometry, dropped early where it covered a block */
+         (g_early_sky && g_depth_far && st->ztest == CTR_TEST_GEQUAL);
 }
 
 /* (AI-assisted) texture combiner stage id (0 or 1) as env: in the context, and to the GPU raw or
@@ -3931,8 +3955,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   e.cullMode = (st->tcc & CTR_TCC_CULL_BACK) && g_cull_enable
                    ? (g_cull_flip ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW)
                    : GPU_CULL_NONE;
-  e.earlyDepthFunc = GPU_EARLYDEPTH_GEQUAL;
-  e.earlyDepthRef = 0;
+  e.earlyDepthFunc = (GPU_EARLYDEPTHFUNC)g_early_func; /* (AI-assisted) defaults: GEQUAL, 0 */
+  e.earlyDepthRef = g_early_clear;
   /* (AI-assisted) the stencil marks (CTR_STATE_STENCIL_*): 1 where a STENCIL_SET draw passed the
    * depth test, STENCIL_OUT draws where it isn't 1. Off: only the enable bit changes. */
   if ((st->flags & CTR_STATE_STENCIL_SET) && !g_depth16) {

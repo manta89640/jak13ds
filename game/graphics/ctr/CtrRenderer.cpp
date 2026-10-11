@@ -142,6 +142,15 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.sky_last; }},
     {"skip_clear", [](CtrSettings& s, bool on) { s.skip_clear = on; },
      [](const CtrSettings& s) { return s.skip_clear; }},
+    // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
+    // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
+    {"early_depth",
+     [](CtrSettings& s, bool on) {
+       static const bool kOpaque = s.early_depth, kSky = s.early_depth_sky;
+       s.early_depth = on && kOpaque;
+       s.early_depth_sky = on && kSky;
+     },
+     [](const CtrSettings& s) { return s.early_depth || s.early_depth_sky; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -488,6 +497,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
   // (AI-assisted) frame_overlap2 (gpu_profile = ab may switch it between frames)
   ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2);
+  // (AI-assisted) early_depth (ab: the config's mode or off)
+  ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
+  ctr_gpu_set_early_depth_params(
+      ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
+      ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
