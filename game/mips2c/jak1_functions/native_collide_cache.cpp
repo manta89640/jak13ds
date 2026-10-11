@@ -1400,8 +1400,9 @@ struct BoxWalk {
   u32 isbi;             // instance-sphere-box-intersect?
 };
 
-inline u32 type_of_sym(const char* name) {
-  return gload<u32>(sym_addr(name));
+//! the value of a symbol whose address was looked up once (sym_addr hashes the name)
+inline u32 sym_value(u32 sym) {
+  return gload<u32>(sym);
 }
 
 //! collide-cache-using-box-test: is the bounding sphere at addr within the query's sphere?
@@ -1505,16 +1506,26 @@ void bsp_box_walk(const NativeArgs& args) {
   w.bmin = gload<Vec4i>(cw + 16);
   w.bmax = gload<Vec4i>(cw + 32);
   w.list = (u32)args.a[2];
-  w.t_draw_node = type_of_sym("draw-node");
-  w.t_ia_node = type_of_sym("drawable-inline-array-node");
-  w.t_tree_cfrag = type_of_sym("drawable-tree-collide-fragment");
-  w.t_ia_cfrag = type_of_sym("drawable-inline-array-collide-fragment");
-  w.t_cfrag = type_of_sym("collide-fragment");
-  w.t_tree_tie = type_of_sym("drawable-tree-instance-tie");
-  w.t_ia_tie = type_of_sym("drawable-inline-array-instance-tie");
-  w.t_tie = type_of_sym("instance-tie");
-  w.drawable_method = gload<u32>(type_of_sym("drawable") + 60);
-  w.isbi = gload<u32>(sym_addr("instance-sphere-box-intersect?"));
+  static const u32 s_draw_node = sym_addr("draw-node");
+  static const u32 s_ia_node = sym_addr("drawable-inline-array-node");
+  static const u32 s_tree_cfrag = sym_addr("drawable-tree-collide-fragment");
+  static const u32 s_ia_cfrag = sym_addr("drawable-inline-array-collide-fragment");
+  static const u32 s_cfrag = sym_addr("collide-fragment");
+  static const u32 s_tree_tie = sym_addr("drawable-tree-instance-tie");
+  static const u32 s_ia_tie = sym_addr("drawable-inline-array-instance-tie");
+  static const u32 s_tie = sym_addr("instance-tie");
+  static const u32 s_drawable = sym_addr("drawable");
+  static const u32 s_isbi = sym_addr("instance-sphere-box-intersect?");
+  w.t_draw_node = sym_value(s_draw_node);
+  w.t_ia_node = sym_value(s_ia_node);
+  w.t_tree_cfrag = sym_value(s_tree_cfrag);
+  w.t_ia_cfrag = sym_value(s_ia_cfrag);
+  w.t_cfrag = sym_value(s_cfrag);
+  w.t_tree_tie = sym_value(s_tree_tie);
+  w.t_ia_tie = sym_value(s_ia_tie);
+  w.t_tie = sym_value(s_tie);
+  w.drawable_method = gload<u32>(sym_value(s_drawable) + 60);
+  w.isbi = sym_value(s_isbi);
   const u32 trees = gload<u32>((u32)args.a[0] + 36);
   for (s64 i = 0; i < gload<s16>(trees + 2); i++) {
     const u32 tree = gload<u32>(trees + 28 + 4 * (u32)i);
@@ -1675,8 +1686,10 @@ void fg_box_fill(const NativeArgs& args) {
   f.collide_with = gload<u64>(f.cache + 92);
   f.bmin = gload<Vec4i>(f.cache + 60);
   f.bmax = gload<Vec4i>(f.cache + 76);
-  f.t_sphere = type_of_sym("collide-shape-prim-sphere");
-  f.t_group = type_of_sym("collide-shape-prim-group");
+  static const u32 s_sphere = sym_addr("collide-shape-prim-sphere");
+  static const u32 s_group = sym_addr("collide-shape-prim-group");
+  f.t_sphere = sym_value(s_sphere);
+  f.t_group = sym_value(s_group);
   if (f.collide_with & 16) {
     fg_box_walk_list(f, player_sym);
   }
