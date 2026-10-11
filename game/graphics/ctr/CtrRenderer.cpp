@@ -70,8 +70,9 @@ constexpr double kProfileModeMs = 2500.0;  // per mode
 constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
 // (AI-assisted) the render thread's statistics: one burst of lines this often
 constexpr double kStatsPeriodMs = 15000.0;
-// (AI-assisted) config.ini gpu_counters: how long each level's GPU counters run (the hotspot
-// sampler's 16-bit counts hold ~16 s at 268 MHz)
+// (AI-assisted) config.ini gpu_counters: the counters cover every stats window; the hotspot
+// sampler's 16-bit counts restart after ~16 s at 268 MHz, so its stage samples stop after this
+// long into the window (the traffic counters cover all of it)
 constexpr double kHwCountersMs = 10000.0;
 
 // (AI-assisted) gpu_profile: the GPU's own counters over the first "all" window of a level's
@@ -111,12 +112,12 @@ void hw_profile_end(const std::string& level) {
   }
   std::string line = fmt::format(
       "[ctr] gpu profile {}: hw busy % of {} samples ({} expected, {} frames):", level, samples,
-      (int)(hw.ms * 268111.856 / 65536.0), hw.frames);
+      (int)(hw.stage_ms * 268111.856 / 65536.0), hw.frames);
   for (int i = 0; i < 8; i++) {
     line += fmt::format(" {} {:.1f}", kStages[i], samples ? 100.0 * hw.stage[i] / samples : 0.0);
   }
   // 0x10400070 + 4 * i (GBATEK), assumed bytes: memcopy-r should be ~0.37 MB/frame (the display
-  // transfer reads the 240x400 RGBA8 buffer) if so
+  // transfer reads the 240x400 RGBA8 buffer) if so (pica_bench B1.cal logs the real unit)
   static const char* const kTraffic[CTR_GPU_HW_TRAFFIC] = {
       "main-r",  "main-w",   "vramA-r",   "vramA-w",   "vramB-r", "vramB-w", "arrays",
       "tex",     "depth-r",  "depth-w",   "color-r",   "color-w", "lcd-top", "lcd-bot",
@@ -538,28 +539,33 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
 
 void CtrRenderer::hw_counters_frame() {
   // (AI-assisted) The GPU's own counters (ctr_gpu_hwprof_*: busy % of each pipeline stage, memory
-  // traffic; read and written through the GSP service) over kHwCountersMs of each level, from when
-  // gpu_profile would start (10 s after the level became the active one). Nothing is left out of
-  // the picture. A level change in the middle logs what was measured so far.
+  // traffic; read and written through the GSP service) over every stats window: one line per
+  // window, logged with the window's other lines (m_rs.log_now), labelled with the level. The
+  // stage samples stop kHwCountersMs into the window (16-bit counts); nothing is left out of the
+  // picture. A refusal by the GSP is logged once and ends it.
+  if (g_hw_refusal_logged) {
+    return;
+  }
   const double now = ctr_gpu_time_ms();
-  if (m_hw_active) {
-    if (m_profile_level != m_hw_level || now - m_hw_start_ms >= kHwCountersMs) {
-      hw_profile_end(m_hw_level);
-      m_hw_active = false;
-      m_hw_done.push_back(m_hw_level);
+  if (m_hw_active && !m_rs.log_now && now - m_hw_start_ms >= kHwCountersMs && !m_hw_stages_done) {
+    m_hw_stages_done = true;
+    if (ctr_gpu_hwprof_stop_stages() != 0) {
+      g_hw_refusal_logged = true;
+      g_hw_measuring = m_hw_active = false;
+      lg::warn("[ctr] gpu counters: the GSP refused the hotspot read, counters off");
     }
     return;
   }
-  if (!m_profile_level.empty() && now >= m_profile_arm_ms &&
-      std::find(m_hw_done.begin(), m_hw_done.end(), m_profile_level) == m_hw_done.end()) {
-    hw_profile_begin();
-    m_hw_level = m_profile_level;
-    m_hw_start_ms = now;
-    m_hw_active = g_hw_measuring;
-    if (!m_hw_active) {
-      m_hw_done.push_back(m_hw_level);  // the GSP refused (logged once)
-    }
+  if (!m_rs.log_now) {
+    return;
   }
+  if (m_hw_active) {
+    hw_profile_end(fmt::format("window {}", m_profile_level.empty() ? "-" : m_profile_level));
+  }
+  hw_profile_begin();
+  m_hw_active = g_hw_measuring;
+  m_hw_start_ms = now;
+  m_hw_stages_done = false;
 }
 
 bool CtrRenderer::profile_skips(const std::string& name) const {

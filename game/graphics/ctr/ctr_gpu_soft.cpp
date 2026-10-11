@@ -1174,6 +1174,9 @@ int ctr_gpu_describe_target(char*, int) {
 int ctr_gpu_hwprof_begin(void) {
   return 1;
 }
+int ctr_gpu_hwprof_stop_stages(void) {
+  return 1;
+}
 int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   memset(out, 0, sizeof(*out));
   return 1;

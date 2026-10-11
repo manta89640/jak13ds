@@ -254,7 +254,7 @@ std::string CtrSettings::summary() const {
       sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
-      gpu_counters ? "" : " gpu_counters off",
+      gpu_counters ? " gpu_counters" : "",
       gpu_perflog ? " gpu_perflog" : "", depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");
 }

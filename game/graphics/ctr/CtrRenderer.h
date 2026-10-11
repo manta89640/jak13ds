@@ -171,13 +171,12 @@ class CtrRenderer {
   double m_profile_arm_ms = 0;            // when its measurement may start
   std::vector<std::string> m_profiled;    // levels measured already
   bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
-  // (AI-assisted) config.ini gpu_counters: the GPU's own counters over 10 s of each level, with
+  // (AI-assisted) config.ini gpu_counters: the GPU's own counters over every stats window, with
   // everything drawn (gpu_profile measures them in its own way)
   void hw_counters_frame();
   bool m_hw_active = false;
-  std::string m_hw_level;
+  bool m_hw_stages_done = false;  // (AI-assisted) the stage samples of this window were read
   double m_hw_start_ms = 0;
-  std::vector<std::string> m_hw_done;
 };
 
 extern const GfxRendererModule gRendererCtr;

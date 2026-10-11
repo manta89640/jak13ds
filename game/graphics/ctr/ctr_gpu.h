@@ -270,12 +270,14 @@ void ctr_gpu_set_framebuffer(int block32, int depth16);
 /* (AI-assisted) one line about the top render target (size, formats, VRAM addresses and banks)
  * for the log; returns its length (0 before ctr_gpu_init) */
 int ctr_gpu_describe_target(char* out, int size);
-/* (AI-assisted) The GPU's own counters (config.ini gpu_profile), read through the GSP service:
- * the hotspot sampler (which of 8 pipeline stages is busy, sampled every 65536 GPU cycles) and the
- * memory traffic counters at 0x10400070.. (VRAM A/B, main memory, vertex arrays, texture cache
- * misses, depth / color buffer reads and writes, LCD, display transfer, memory fill; assumed to
- * count bytes). begin returns 0, or the GSP's error (then never again: it returns 1). end fills
- * the counts since begin; returns 0, or the GSP's error. */
+/* (AI-assisted) The GPU's own counters (config.ini gpu_profile, gpu_counters), read through the
+ * GSP service: the hotspot sampler (which of 8 pipeline stages is busy, sampled every 65536 GPU
+ * cycles; its 16-bit counts restart after 65535 samples = 16 s) and the memory traffic counters
+ * at 0x10400070.. (VRAM A/B, main memory, vertex arrays, texture cache misses, depth / color
+ * buffer reads and writes, LCD, display transfer, memory fill; the unit is undocumented: the
+ * pica_bench B1 lines calibrate it). begin returns 0, or the GSP's error (then never again: it
+ * returns 1). stop_stages ends the sampling early (reads its result; the traffic goes on): keep
+ * the stage window under 16 s. end fills the counts since begin; returns 0, or the GSP's error. */
 #define CTR_GPU_HW_TRAFFIC 20
 typedef struct {
   unsigned int stage[8]; /* samples: arrays, vertex shader, primitive setup, rasterizer, texture
@@ -283,8 +285,10 @@ typedef struct {
   unsigned int traffic[CTR_GPU_HW_TRAFFIC]; /* counter deltas, 0x10400070 + 4 * i */
   int frames;                               /* frames begun since begin */
   double ms;
+  double stage_ms; /* the stage samples' window (stop_stages, else ms) */
 } ctr_gpu_hwprof;
 int ctr_gpu_hwprof_begin(void);
+int ctr_gpu_hwprof_stop_stages(void);
 int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out);
 /* (AI-assisted) config.ini frame_pacing: steady (1, set before ctr_gpu_init) shows every frame
  * a fixed number of vblanks after the game thread handed it over, so frames stay on screen for as
