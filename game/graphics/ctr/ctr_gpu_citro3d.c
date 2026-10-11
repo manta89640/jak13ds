@@ -1670,6 +1670,16 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 
 static void migrate_small_textures(void);
 
+/* (AI-assisted) config.ini tex_cache_clear (ctr_gpu_set_tex_cache_clear): 1 = uploads. The GPU's
+ * texture cache holds texels by address; a level pool's texels only change when the pool is
+ * filled (ctr_gpu_pool_ready) or moved (pool_repoint), so its binds skip the cache clear unless
+ * one of those (or a new frame) came since the last clear (s_tex_dirty). */
+static int s_tex_clear_mode = 0;
+static volatile int s_tex_dirty = 1;
+void ctr_gpu_set_tex_cache_clear(int mode) {
+  s_tex_clear_mode = mode ? 1 : 0;
+}
+
 /* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
  * The pipeline's frame end used to wait for the GX queue to empty (C3D_FrameBegin: frame N - 1 and
  * the parts of N already sent), stop it, and only then hand N's command list over with
@@ -1826,6 +1836,7 @@ static void frame_state_reset(void) {
   g.cur_prog = PROG_NONE;
   g.last_state_valid = 0;
   g.bound_tex = NULL;
+  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads: the frame's first bind clears */
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
   g.mesh_nofog = 0;      /* (AI-assisted) and unit 1 on again with the ramp (bound below) */
   g.unit1_off = 0;
@@ -2447,6 +2458,7 @@ void ctr_gpu_pool_ready(int pool) {
     return;
   }
   TexPool* p = &g.pools[pool];
+  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads (loader thread: a flag) */
   cache_flush_now(p->linear, p->bytes);
   ctr_linear_lock();
   p->ready = 1;
@@ -2487,6 +2499,7 @@ static void pool_repoint(int pool) {
     }
   }
   g.bound_tex = NULL;
+  s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads */
 }
 
 /* a linear buffer the GPU may still read (a queued copy, the frame in flight): freed at the next
@@ -3674,7 +3687,14 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       ctx->texConfig |= 1;
       p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0xB, ctx->texConfig);
     }
-    p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
+    /* (AI-assisted) tex_cache_clear = uploads: a level pool texture's texels are what the cache
+     * may hold for its addresses unless a pool was filled or moved since the last clear */
+    if (!s_tex_clear_mode || slot->pool < 0 || s_tex_dirty) {
+      s_tex_dirty = 0;
+      p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
+    } else {
+      g.cur.tex_clears_skipped++;
+    }
     raw_end(p);
   } else {
     C3D_TexBind(0, tex);

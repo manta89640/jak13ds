@@ -282,6 +282,11 @@ void ctr_gpu_set_early_depth(int on);
  * the early depth data's clear value (GPUREG_EARLYDEPTH_DATA, 24 bits; every early depth clear
  * uses it). Defaults 0, 0, 0 = the old state. Any time. */
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
+/* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
+ * texture cache, as citro3d does), 1 uploads (binds of level pool textures, whose texels don't
+ * change, don't clear it unless a pool was filled or moved since the last clear; the first bind
+ * of a frame and every other texture's bind still clear). Any time. */
+void ctr_gpu_set_tex_cache_clear(int mode);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
  * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
  * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */
@@ -508,6 +513,7 @@ typedef struct {
   int proctex_draws;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
+  int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
   int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the

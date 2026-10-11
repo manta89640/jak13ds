@@ -142,6 +142,8 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.sky_last; }},
     {"skip_clear", [](CtrSettings& s, bool on) { s.skip_clear = on; },
      [](const CtrSettings& s) { return s.skip_clear; }},
+    {"tex_cache_clear", [](CtrSettings& s, bool on) { s.tex_cache_uploads = on; },
+     [](const CtrSettings& s) { return s.tex_cache_uploads; }},
     // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
     // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
     {"early_depth",
@@ -499,6 +501,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_frame_overlap2(ctr_settings().frame_overlap2);
   // (AI-assisted) early_depth (ab: the config's mode or off)
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
+  ctr_gpu_set_tex_cache_clear(ctr_settings().tex_cache_uploads ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_early_depth_params(
       ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
       ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
@@ -624,11 +627,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches)",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches), {} texture binds without the cache clear",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws, gs.unit1_toggles);
+               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws, gs.unit1_toggles, gs.tex_clears_skipped);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
