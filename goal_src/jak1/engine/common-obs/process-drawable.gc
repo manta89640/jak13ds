@@ -202,10 +202,19 @@
 ;; can touch them.
 ;; When such an actor comes into view, the draw that sets was-drawn uses the pose and origin from
 ;; its last update (at most 3 frames old, from far away); the next frame updates it again.
+;; An actor that asks for its joint math once and then sleeps (a pose set before sleep-code: the
+;; pressed snow-bumper, buttons, switches) never asks again, so a skipped request is remembered
+;; (*anim-lod-skipped*) and done on the next frame if the actor didn't ask again by then.
 (#when TARGET_3DS
   (define-extern *pc-3ds-anim-lod* symbol)
   (defconstant ANIM_LOD_DIST (meters 30))
   (define *anim-lod-frame* 0)
+  (define *anim-lod-skipped* (new 'global 'boxed-array handle MATRIX_ENGINE_AMOUNT))
+  (defun anim-lod-queued? ((arr (array handle)) (h handle))
+    "Is h in this frame's matrix engine queue?"
+    (dotimes (i (-> arr length))
+      (if (= (-> arr i) h) (return #t)))
+    #f)
   (defun anim-lod-skip? ((pd process-drawable))
     "Skip this frame's joint math for pd (see above)?"
     (let ((dc (-> pd draw)))
@@ -236,11 +245,26 @@
                         (font-flags shadow kerning)))))
   (let ((gp-0 *matrix-engine*))
     (#when TARGET_3DS
-      (+! *anim-lod-frame* 1))
+      (+! *anim-lod-frame* 1)
+      ;; (AI-assisted) last frame's skipped requests of actors that didn't ask again (see above)
+      (let ((skipped *anim-lod-skipped*))
+        (dotimes (i (-> skipped length))
+          (let ((h (-> skipped i)))
+            (when (not (anim-lod-queued? gp-0 h))
+              (let ((proc (handle->process h)))
+                (if proc (do-joint-math! (the-as process-drawable proc)))))))
+        (set! (-> skipped length) 0)))
     (countdown (s5-0 (-> gp-0 length))
       (let ((a0-1 (handle->process (-> gp-0 s5-0))))
-        (if (and a0-1 (#if TARGET_3DS (not (anim-lod-skip? (the-as process-drawable a0-1))) #t))
-          (do-joint-math! (the-as process-drawable a0-1)))))
+        (#if TARGET_3DS
+          (when a0-1
+            (cond
+              ((anim-lod-skip? (the-as process-drawable a0-1))
+               (let ((skipped *anim-lod-skipped*))
+                 (set! (-> skipped (-> skipped length)) (-> gp-0 s5-0))
+                 (+! (-> skipped length) 1)))
+              (else (do-joint-math! (the-as process-drawable a0-1)))))
+          (if a0-1 (do-joint-math! (the-as process-drawable a0-1))))))
     (set! (-> gp-0 length) 0))
   0
   0)

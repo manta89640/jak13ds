@@ -68,6 +68,8 @@ if [ -n "$PAD" ]; then
 fi
 if [ "$SHOTS" != 0 ]; then echo "screenshots = $SHOTS" >> "$CONFIG"; fi
 # no other settings files
+# the game appends to its logs: start each run with empty ones
+rm -f "$LOGDIR/stdout.log" "$LOGDIR/gk.log" "$LOGDIR/stdout.old.log" "$LOGDIR/gk.old.log"
 rm -f "$BASE/args.txt" "$BASE/listener" "$BASE/use_syscore" "$BASE/perf_sections" "$BASE/single_core" \
   "$BASE/sound" "$BASE/screenshots" "$BASE/debug_log" "$BASE/mips2c_native_off" "$BASE/render.ini" "$DATA/render.ini"
 mkdir -p "$(dirname "$AZ_LOG")"; : > "$AZ_LOG"

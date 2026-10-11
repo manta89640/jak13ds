@@ -924,7 +924,7 @@ int ctr_stdio_tee(const char* path) {
   if (s_tee_file) {
     return 0;
   }
-  s_tee_file = fopen(path, "w");
+  s_tee_file = fopen(path, "a"); /* (AI-assisted) appended: earlier sessions stay (gk main.cpp) */
   if (!s_tee_file) {
     return -1;
   }
@@ -1227,7 +1227,8 @@ void ctr_crash(const char* title, const char* detail) {
     _exit(1);
   }
   show_screen("\x1b[31m", "*** OpenGOAL crashed ***", title, detail, 1,
-              "Logs: sdmc:/3ds/jak1/data/log/\nPlease report stdout.log and gk.log.\n"
+              "Logs: sdmc:/3ds/jak1/data/log/\nPlease report stdout.log and gk.log\n"
+              "(this session is at their end).\n"
               "\x1b[32mPress START to exit.\x1b[0m");
   if (s_log_on && files) {
     run_jobs(); /* (AI-assisted) a background file write (settings), with the screen up */

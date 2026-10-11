@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <sstream>
 #include <cstdlib>
+#include <ctime>
 #include <malloc.h>
 #include <fstream>
 #include <string>
@@ -34,6 +35,31 @@
 #include "platform/3ds/port/ctr_port.h"
 
 namespace {
+// (AI-assisted) The logs are appended to, so the sessions before a crash and restart are kept. A
+// log over this size is renamed to <name>.old.log at startup (replacing the older one).
+constexpr std::uintmax_t kLogKeepBytes = 4u << 20;
+
+void retire_big_log(const fs::path& path) {
+  std::error_code ec;
+  const auto size = fs::file_size(path, ec);
+  if (ec || size < kLogKeepBytes) {
+    return;
+  }
+  fs::path old = path;
+  old.replace_extension(".old.log");
+  fs::remove(old, ec);
+  fs::rename(path, old, ec);
+}
+
+std::string session_stamp() {
+  char buf[40] = "?";
+  const std::time_t t = std::time(nullptr);
+  if (const std::tm* tm = std::localtime(&t)) {
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm);
+  }
+  return buf;
+}
+
 std::vector<std::string> read_game_args() {
   std::vector<std::string> args;
   char v[512];
@@ -59,8 +85,11 @@ int main(int /*argc*/, char** /*argv*/) {
   {
     std::error_code ec;
     fs::create_directories(data_dir / "log", ec);
+    retire_big_log(data_dir / "log" / "stdout.log");
+    retire_big_log(data_dir / "log" / "gk.log");
     ctr_stdio_tee((data_dir / "log" / "stdout.log").string().c_str());
   }
+  printf("\n===== new session %s =====\n", session_stamp().c_str());
   ctr_mem_info mem;
   ctr_get_mem_info(&mem);
   printf("OpenGOAL %d.%d for 3DS (%s, %s)\n", versions::GOAL_VERSION_MAJOR,
@@ -83,7 +112,7 @@ int main(int /*argc*/, char** /*argv*/) {
   // (AI-assisted) Written by the log writer thread about once a second (ctr_stdio_tee, config.ini
   // log_async; crashes and exits write the rest), so no thread that logs waits for the SD card.
   printf("[gk] project path %s\n", data_dir.string().c_str());
-  lg::set_file("gk.log", false, false);
+  lg::set_file("gk.log", false, true);  // appended (see retire_big_log)
   // Debug lines (thousands during level loads) only with debug_log = on in config.ini: they fill
   // the SD card writes (and, with log_async = off, each flush is a slow write on hardware).
   const bool debug_log = ctr_config_bool("debug_log", 0) != 0;
@@ -92,6 +121,7 @@ int main(int /*argc*/, char** /*argv*/) {
   lg::set_flush_level(debug_log ? lg::level::debug : lg::level::warn);
   lg::disable_ansi_colors();
   lg::initialize();
+  lg::info("===== new session {} =====", session_stamp());
   lg::info("3DS: {} ({}), started as {}", mem.model, mem.is_new3ds ? "New" : "Old",
            mem.is_hbl ? "a 3dsx from the Homebrew Launcher" : "a title (CIA, or an emulator)");
   ctr_boot_mark("6 logs");
