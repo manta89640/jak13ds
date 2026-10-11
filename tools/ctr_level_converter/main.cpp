@@ -1246,8 +1246,24 @@ int auto_palette(const std::string& level) {
   return 1;
 }
 
+// (AI-assisted) Interiors (caves, the sunken city, the citadel): no far views, so no vista tier
+// (it would only take linear memory, 50-400 KB per level)
+bool is_interior(const std::string& level) {
+  static const char* kInterior[] = {"jungleb", "maincave", "darkcave", "robocave",
+                                    "sunken",  "sunkenb",  "citadel"};
+  for (const char* n : kInterior) {
+    if (level == n) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Options opt = opt_in;
+  if (is_interior(in.stem().string())) {
+    opt.vista = false;
+  }
   if (opt.palette < 0) {
     opt.palette = auto_palette(in.stem().string());
   }
