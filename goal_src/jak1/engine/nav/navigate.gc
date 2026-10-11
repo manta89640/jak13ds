@@ -10,7 +10,12 @@
 ;; it's not clear yet why the enemies have NaN positions, but nothing else seems to go wrong if we
 ;; ignore them here. It's possible this happens as enemies are spawned/despawned by the visibility system.
 (defmacro is-nan? (flt)
-  `(and (< 0.0 ,flt) (< ,flt 0.0)))
+  ;; og:preserve-this (AI-assisted) test the bits: exponent all ones and a nonzero mantissa. The
+  ;; original form, (and (< 0.0 x) (< x 0.0)), relies on how the x86 backend compiles float
+  ;; compares (an unordered compare counts as "below" both ways); in the C backend (3DS) a compare
+  ;; with NaN is false, so it never found a NaN.
+  `(let ((is-nan-bits (the-as int ,flt)))
+     (and (= (logand is-nan-bits #x7f800000) #x7f800000) (nonzero? (logand is-nan-bits #x7fffff)))))
 
 ;; DECOMP BEGINS
 
