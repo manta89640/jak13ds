@@ -192,6 +192,8 @@ int main(int argc, char** argv) {
   if (ctr_gfx) {
     Gfx::SetPreferredPipeline(GfxPipeline::Ctr);
     ctr_gfx::set_soft_frame_dump(ctr_dump_dir, ctr_dump_every);
+    // (AI-assisted) the pad script's named screenshots ("shot NAME") go there too
+    ctr_gfx::set_screenshots(ctr_dump_dir, 0);
   }
   game_options.game_version = game_name_to_version(game_name);
   game_options.server_port =

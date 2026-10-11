@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <thread>
 
 #include "common/dma/dma.h"
@@ -43,6 +44,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/runtime.h"
+#include "game/sce/pad_script.h"
 
 // (AI-assisted) PMODE alpha from the game thread (ctr_set_pmode_alp), 1 = no fade
 static std::atomic<float> g_pmode_alp{1.f};
@@ -130,6 +132,11 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.merc_gen_lod; }},
     {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
      [](const CtrSettings& s) { return s.clouds; }},
+    // (AI-assisted) gpu-a's keys (Oct 11): level fog in the vertex alpha, texture unit 1 gating
+    {"fog_alpha", [](CtrSettings& s, bool on) { s.fog_alpha = on; },
+     [](const CtrSettings& s) { return s.fog_alpha; }},
+    {"tex1_gating", [](CtrSettings& s, bool on) { s.tex1_gating = on; },
+     [](const CtrSettings& s) { return s.tex1_gating; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -196,6 +203,33 @@ void hw_profile_end(const std::string& level) {
     line += fmt::format(" {} {:.2f}", kTraffic[i], hw.traffic[i] / div);
   }
   lg::info("{}", line);
+}
+
+// (AI-assisted) pad script "set KEY VALUE": a kAbSwitches key (or fog) from the game thread, read by
+// the renderers from the next frame on (like gpu_profile = ab's switching)
+bool pad_set(const char* key, const char* value) {
+  const std::string v = value;
+  const bool on = v == "on" || v == "1" || v == "true" || v == "yes";
+  CtrSettings& s = ctr_settings_ab();
+  if (!strcmp(key, "fog")) {
+    s.fog = on;
+    return true;
+  }
+  for (const auto& sw : kAbSwitches) {
+    if (!strcmp(key, sw.key)) {
+      sw.set(s, on);
+      return true;
+    }
+  }
+  return false;
+}
+
+// (AI-assisted) pad script "shot NAME": taken by the render thread at its next frame
+std::mutex g_pad_shot_mutex;
+std::string g_pad_shot;
+void pad_shot(const char* name) {
+  std::lock_guard<std::mutex> lock(g_pad_shot_mutex);
+  g_pad_shot = name;
 }
 }  // namespace
 
@@ -430,6 +464,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   // (AI-assisted) cull_ties (gpu_profile = ab may switch it between frames)
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
+  // (AI-assisted) fog_alpha, tex1_gating (gpu_profile = ab may switch them between frames too)
+  ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
+  ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -439,6 +476,20 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #endif
     std::string path = fmt::format("{}/shot_{:06d}.{}", g_shot_dir, m_rs.frame_idx, ext);
     ctr_gpu_request_screenshot(path.c_str());
+  }
+  {
+    // (AI-assisted) a named screenshot asked for by the pad script (the screenshot folder: config
+    // screenshots = N on the 3DS, --ctr-dump on PC)
+    std::lock_guard<std::mutex> lock(g_pad_shot_mutex);
+    if (!g_pad_shot.empty() && !g_shot_dir.empty()) {
+#ifdef __3DS__
+      const char* ext = "bmp";
+#else
+      const char* ext = "png";
+#endif
+      ctr_gpu_request_screenshot(fmt::format("{}/{}.{}", g_shot_dir, g_pad_shot, ext).c_str());
+    }
+    g_pad_shot.clear();
   }
   dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
   ctr_gpu_diag_stage("pmode fade");
@@ -544,11 +595,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                            : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches)",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches)",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws, gs.unit1_toggles);
+               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws,
+               gs.fog_alpha_draws, gs.unit1_toggles);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
@@ -1016,6 +1068,9 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
              ctr_gpu_set_pipeline(1) ? "on" : "FAILED (no linear memory), off");
   }
   g_ctr = std::make_unique<CtrRenderer>();
+  // (AI-assisted) pad script "set" / "shot NAME" (tests: A/B pictures of one view)
+  pad_script::set_set_hook(pad_set);
+  pad_script::set_named_shot_hook(pad_shot);
   // Both load on the loader thread while the game boots. The title level (the Naughty Dog logo,
   // the title screen) is the first one the game wants; loaded only when the game has it, the logo
   // started after a ~1.5 s stall on hardware.

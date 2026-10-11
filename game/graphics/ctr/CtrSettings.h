@@ -192,6 +192,15 @@ struct CtrSettings {
   // fog stage (texture combiner pass-through, texture unit 1 off). Off until priced on hardware
   // (gpu_profile ab): switching the unit per draw may cost more than the ramp lookups
   bool fog_stage_skip = false;
+  // (AI-assisted) fog_alpha: level draws whose vertex alpha is 0x80 (~99.5%) get the fog amount in
+  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_fa) and mix in the fog color as a
+  // combiner constant: no fog ramp texture lookups, one vertex output less. The rest keep the
+  // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
+  // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
+  // shadows never read it). Both off until priced on hardware (gpu_profile ab): new shader
+  // programs / register writes that haven't run on a real 3DS yet.
+  bool fog_alpha = false;
+  bool tex1_gating = false;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)

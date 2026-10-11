@@ -808,6 +808,11 @@ void build_draw_order(CtrLevelData* out) {
     if (d.kind & c3l::kDrawCullBack) {
       st.tcc |= CTR_TCC_CULL_BACK;
     }
+    // (AI-assisted) fog_alpha: the vertex alpha is 0x80 everywhere in this draw
+    const size_t di = out->draw_states.size();
+    if (di < out->draw_alpha80.size() && out->draw_alpha80[di]) {
+      st.tcc |= CTR_TCC_ALPHA80;
+    }
     // (AI-assisted) opaque, depth written and tested like the early depth test, and the alpha
     // test never fails (the texture's alpha is above its reference everywhere; vertex alpha 0x80):
     // the early depth test may drop what's behind it before texturing
@@ -1183,6 +1188,28 @@ bool CtrLevels::load_file(const fs::path& path,
                                   vdst, ch.vertex_count * sizeof(c3l::Vertex));
       if (read_ok && !out->run_spheres.empty()) {
         make_run_spheres(out, (u32)out->meshes.size(), (const c3l::Vertex*)vdst, indices);
+      }
+      if (read_ok) {
+        // (AI-assisted) fog_alpha (CTR_TCC_ALPHA80): which draws have vertex alpha 0x80 everywhere.
+        // The chunk's vertices first (nearly always all 0x80), the draws' indices only if not
+        const c3l::Vertex* vv = (const c3l::Vertex*)vdst;
+        bool all = true;
+        for (u32 v = 0; v < ch.vertex_count && all; v++) {
+          all = vv[v].rgba[3] == 0x80;
+        }
+        out->draw_alpha80.resize(out->draws.size(), 0);
+        for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+          bool ok = all;
+          if (!ok) {
+            ok = true;
+            const auto& dr = out->draws[d];
+            for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
+              const u16 ix = indices[i];
+              ok = ix < ch.vertex_count && vv[ix].rgba[3] == 0x80;
+            }
+          }
+          out->draw_alpha80[d] = ok ? 1 : 0;
+        }
       }
       mesh = ctr_gpu_mesh_end(mesh, read_ok);
     }

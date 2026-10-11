@@ -53,6 +53,9 @@ extern const uint8_t ctr_skin_old_shbin[];
 extern const size_t ctr_skin_old_shbin_size;
 extern const uint8_t ctr_skin_env_old_shbin[];
 extern const size_t ctr_skin_env_old_shbin_size;
+/* (AI-assisted) config.ini fog_alpha: the mesh shaders with the fog amount in the color's alpha */
+extern const uint8_t ctr_mesh_old_fa_shbin[];
+extern const size_t ctr_mesh_old_fa_shbin_size;
 static int s_new_shaders = 1;
 /* (AI-assisted) per shader overrides (config.ini shader_basic / shader_mesh), -1 = new_shaders.
  * mesh: 0 Oct 2, 1 new, 2 Oct 2 with the new dph transform (hang bisect) */
@@ -251,6 +254,7 @@ enum {
   PROG_OCEAN,
   PROG_OCEAN_FULL, /* (AI-assisted) ctr_gpu_ocean_full_draw (ctr_ocean_full.v.pica) */
   PROG_OCEAN_FULL_CLIP, /* (AI-assisted) ctr_gpu_ocean_full_draw_clip (ctr_ocean_full_clip.v.pica) */
+  PROG_MESH_FA, /* (AI-assisted) fog_alpha: level meshes with the fog in the color's alpha */
 };
 
 static struct {
@@ -261,6 +265,12 @@ static struct {
   int uloc_projection;
   DVLB_s* mesh_dvlb;
   shaderProgram_s mesh_program;
+  /* (AI-assisted) config.ini fog_alpha: the mesh program with the fog amount in the color's alpha
+   * (same uniforms at the same places); fa_ok: loaded and usable */
+  DVLB_s* mesh_fa_dvlb;
+  shaderProgram_s mesh_fa_program;
+  int fa_ok;
+  u32 fog_abgr; /* the fog color as a combiner constant (fog_alpha's stage 1), R in the low byte */
   int uloc_clip;
   int uloc_scales;
   int uloc_fog0, uloc_fog1;
@@ -732,7 +742,8 @@ static void use_program(int prog) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, prog == PROG_SKIN ? g.uloc_skin_scales : g.uloc_env_scales,
                   1.0f / 1024.0f, 1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
   } else {
-    C3D_BindProgram(&g.mesh_program);
+    /* PROG_MESH, (AI-assisted) or PROG_MESH_FA: the same vertex layout and uniforms */
+    C3D_BindProgram(prog == PROG_MESH_FA ? &g.mesh_fa_program : &g.mesh_program);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
     AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord * 1024 */
@@ -892,6 +903,22 @@ int ctr_gpu_init(void) {
   g.uloc_scales = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "scales");
   g.uloc_fog0 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog0");
   g.uloc_fog1 = shaderInstanceGetUniformLocation(g.mesh_program.vertexShader, "fog1");
+  /* (AI-assisted) fog_alpha: its program has the mesh program's uniforms at the same places (the
+   * draws upload them by g.uloc_*); the Oct 2 form (mesh old), not with the dph bisect mode */
+  if (mesh_mode() == 0) {
+    g.mesh_fa_dvlb = DVLB_ParseFile((u32*)ctr_mesh_old_fa_shbin, (u32)ctr_mesh_old_fa_shbin_size);
+  }
+  if (g.mesh_fa_dvlb) {
+    shaderProgramInit(&g.mesh_fa_program);
+    shaderProgramSetVsh(&g.mesh_fa_program, &g.mesh_fa_dvlb->DVLE[0]);
+    shaderInstance_s* fa = g.mesh_fa_program.vertexShader;
+    g.fa_ok = shaderInstanceGetUniformLocation(fa, "clip") == g.uloc_clip &&
+              shaderInstanceGetUniformLocation(fa, "scales") == g.uloc_scales &&
+              shaderInstanceGetUniformLocation(fa, "fog0") == g.uloc_fog0 &&
+              shaderInstanceGetUniformLocation(fa, "fog1") == g.uloc_fog1;
+  }
+  printf("[ctr] fog_alpha program: %s\n",
+         g.fa_ok ? "ready" : (g.mesh_fa_dvlb ? "uniforms don't match, off" : "none for this mesh shader, off"));
   /* no fog until ctr_gpu_set_mesh_fog (AI-assisted: the shader's form, see mesh_fog_uniforms) */
   g.fog0[0] = -1.0f / 255.0f;
   g.fog0[1] = 0.0f;
@@ -1076,6 +1103,12 @@ void ctr_gpu_exit(void) {
   DVLB_Free(g.dvlb);
   shaderProgramFree(&g.mesh_program);
   DVLB_Free(g.mesh_dvlb);
+  if (g.mesh_fa_dvlb) {
+    shaderProgramFree(&g.mesh_fa_program);
+    DVLB_Free(g.mesh_fa_dvlb);
+    g.mesh_fa_dvlb = NULL;
+    g.fa_ok = 0;
+  }
   shaderProgramFree(&g.skin_program);
   DVLB_Free(g.skin_dvlb);
   shaderProgramFree(&g.env_program);
@@ -2606,6 +2639,9 @@ static int g_early_depth = 0; /* config.ini early_depth (off by default) */
 /* (AI-assisted) cull_ties: which PICA mode culls the c3l back faces (see ctr_gpu_set_cull_flip) */
 static int g_cull_flip = 0;
 static int g_cull_enable = 0;
+/* (AI-assisted) config.ini fog_alpha, tex1_gating (set each frame: gpu_profile = ab switches them) */
+static int g_fog_alpha = 0;
+static int g_tex1_gating = 0;
 
 void ctr_gpu_set_cull(int enable, int flip) {
   g_cull_enable = enable ? 1 : 0;
@@ -3468,6 +3504,9 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
 }
 
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
+ * (AI-assisted) 3 = the ocean (ctr_gpu_ocean_draw), 4 = level mesh without the fog stage
+ * (fog_stage_skip), 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
+ * alpha is 0x80, the constant 0x80 stands in for it).
  * raw: written as raw commands (see "raw GPU commands"), else through citro3d. Both keep
  * citro3d's context right. */
 static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw) {
@@ -3515,6 +3554,14 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
                     GPU_TEVOP_RGB_SRC_ALPHA);
     C3D_TexEnvFunc(env1, C3D_RGB, GPU_INTERPOLATE);
+  } else if (mesh == 5) {
+    /* (AI-assisted) fog_alpha: rgb = mix(previous, fog color, fog amount) with the amount from the
+     * vertex shader's color alpha and the fog color as this stage's constant */
+    C3D_TexEnvSrc(env1, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_PRIMARY_COLOR);
+    C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(env1, C3D_RGB, GPU_INTERPOLATE);
+    C3D_TexEnvColor(env1, g.fog_abgr);
   } else if (mesh == 0 && st->blend == CTR_BLEND_OVER_CLEAR) {
     /* (AI-assisted) alpha blending over the clear color, computed here: rgb = mix(clear color,
      * previous, previous alpha), opaque (no framebuffer read) */
@@ -3569,6 +3616,11 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
         C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
         C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_1);
       }
+      if (mesh == 5) {
+        /* (AI-assisted) fog_alpha: the vertex alpha (0x80) as this stage's constant */
+        C3D_TexEnvSrc(env, C3D_Alpha, tsrc, GPU_CONSTANT, 0);
+        C3D_TexEnvColor(env, 0x80000000u);
+      }
     } else if (st->decal) {
       C3D_TexEnvSrc(env, C3D_RGB, tsrc, 0, 0);
       C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
@@ -3598,21 +3650,36 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
     C3D_TexEnvScale(env, C3D_RGB, mesh == 2 ? GPU_TEVSCALE_2 : GPU_TEVSCALE_1);
     C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+    if (mesh == 5) {
+      C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, 0, 0); /* (AI-assisted) fog_alpha, as above */
+      C3D_TexEnvColor(env, 0x80000000u);
+    }
   }
   commit_texenv(1, env1, raw);
   commit_texenv(0, env, raw);
-  /* (AI-assisted) fog_stage_skip (mesh 4): texture unit 1, the fog ramp, off while nothing reads it
-   * (raw draws: the unit enable bits only, no cache clear); on again for every other draw */
-  if (raw && g.fog_tex_valid && ((mesh == 4) != g.unit1_off)) {
+  /* (AI-assisted) fog_stage_skip (mesh 4), and with tex1_gating every draw whose combiner doesn't
+   * read texture unit 1 (only the fog ramp stages of mesh 1 and 3 do): unit 1 off while nothing
+   * reads it (raw draws: the unit enable bits only, no cache clear; the ramp's texels stay valid,
+   * a new color binds it again through citro3d), on again for the draws that read it. The context's
+   * texConfig is what the GPU has (or gets: citro3d recomputes it from its bound textures when a
+   * bind is pending, which only turns unit 1 on). */
+  if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
-    g.unit1_off = mesh == 4;
-    if (g.unit1_off) {
-      tctx->texConfig &= ~BIT(1);
-    } else {
-      tctx->texConfig |= BIT(1);
+    const int need1 = mesh == 1 || mesh == 3;
+    const int want_off = g_tex1_gating ? !need1 : mesh == 4;
+    const int is_off = !(tctx->texConfig & BIT(1));
+    if (raw && want_off != is_off) {
+      if (want_off) {
+        tctx->texConfig &= ~BIT(1);
+      } else {
+        tctx->texConfig |= BIT(1);
+      }
+      raw_end(raw_w(raw_ptr(), GPUREG_TEXUNIT_CONFIG, 0xB, tctx->texConfig & ~BIT(16)));
+      g.cur.unit1_toggles++;
+    } else if (!raw && need1 && is_off) {
+      tctx->flags |= C3DiF_Tex(1); /* citro3d binds it again (unit on, cache cleared) */
     }
-    raw_end(raw_w(raw_ptr(), GPUREG_TEXUNIT_CONFIG, 0xB, tctx->texConfig & ~BIT(16)));
-    g.cur.unit1_toggles++;
+    g.unit1_off = want_off;
   }
   if (mesh != 3 && g.ocean_stage2) {
     /* (AI-assisted) stage 2 back to pass-through after the ocean (the far ring between its
@@ -4451,11 +4518,16 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   if (!cmd_room()) {
     return;
   }
-  use_program(PROG_MESH);
+  /* (AI-assisted) fog_alpha: draws whose vertex alpha is 0x80 everywhere (CTR_TCC_ALPHA80) take
+   * the fog in the color's alpha (mesh 5, no fog ramp and texcoord1); the fog stage's cost is the
+   * same with no fog (fog_stage_skip is for the ramp's texture unit) */
+  const int fa = g_fog_alpha && g.fa_ok && (state->tcc & CTR_TCC_ALPHA80);
+  use_program(fa ? PROG_MESH_FA : PROG_MESH);
   const MeshSlot* ms = &g.meshes[mesh];
   /* (AI-assisted) fog_stage_skip: mesh 4 = a level mesh without the fog stage */
-  const int mesh_mode = g.mesh_nofog ? 4 : 1;
-  g.cur.nofog_draws += g.mesh_nofog;
+  const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
+  g.cur.nofog_draws += g.mesh_nofog && !fa;
+  g.cur.fog_alpha_draws += fa;
   if (use_raw(state)) {
     /* (AI-assisted) raw: state, vertex buffer, then (after citro3d's pending updates) the matrix
      * as float24 and the draw */
@@ -4486,6 +4558,18 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
 
 void ctr_gpu_set_mesh_nofog(int on) {
   g.mesh_nofog = on ? 1 : 0;
+}
+
+void ctr_gpu_set_fog_alpha(int on) {
+  g_fog_alpha = on ? 1 : 0;
+}
+
+void ctr_gpu_set_tex1_gating(int on) {
+  g_tex1_gating = on ? 1 : 0;
+}
+
+int ctr_gpu_fog_alpha_ready(void) {
+  return g.fa_ok;
 }
 
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,
@@ -5026,12 +5110,19 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
   out1[3] = 0.0f;
 }
 
-void ctr_gpu_set_mesh_fog(const float fog0[4], const float fog1[4], uint8_t r, uint8_t gr,
+void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
+  /* (AI-assisted) the game fog's clamps kept in 0..255: its amount stays in 0..1 (fog_alpha's
+   * shaders only clamp at 1; the fog ramp gave the same for amounts outside 0..1) */
+  float fog0[4];
+  memcpy(fog0, fog0_in, sizeof(fog0));
+  for (int i = 1; i <= 2; i++) {
+    fog0[i] = fog0[i] < 0.0f ? 0.0f : (fog0[i] > 255.0f ? 255.0f : fog0[i]);
+  }
   mesh_fog_uniforms(fog0, fog1, g.fog0, g.fog1);
   memcpy(g.mfog0, mesh_mode() == 1 ? g.fog0 : fog0, sizeof(g.mfog0));
   memcpy(g.mfog1, mesh_mode() == 1 ? g.fog1 : fog1, sizeof(g.mfog1));
-  if (g.cur_prog == PROG_MESH) {
+  if (g.cur_prog == PROG_MESH || g.cur_prog == PROG_MESH_FA) {
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog0, g.mfog0[0], g.mfog0[1], g.mfog0[2], g.mfog0[3]);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.uloc_fog1, g.mfog1[0], g.mfog1[1], g.mfog1[2], g.mfog1[3]);
     raw_note_unif();
@@ -5062,6 +5153,12 @@ static int s_fog_ramp_full_logged;
 
 static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b) {
   uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)gr << 8) | b;
+  /* (AI-assisted) fog_alpha's fog color: a combiner constant (no texture to rewrite or bind) */
+  const u32 abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
+  if (abgr != g.fog_abgr) {
+    g.fog_abgr = abgr;
+    g.last_state_valid = 0;
+  }
   if (!g.fog_tex_valid || rgb == g.fog_tex_rgb) {
     return;
   }

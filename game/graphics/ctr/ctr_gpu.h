@@ -104,6 +104,18 @@ enum {
  * outside). ctr_gpu_cull_reset: culling off again (after the level draws; draws that don't go
  * through the state code keep the GPU's last face culling setting). */
 enum { CTR_TCC_CULL_BACK = 2 };
+/* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws: every vertex the draw uses has alpha
+ * 0x80, so with ctr_gpu_set_fog_alpha the mesh shader may put the fog amount in the color's alpha
+ * (the texture combiner then takes the constant 0x80 for the vertex alpha). CtrLevel sets it at
+ * load from the chunk's vertices. */
+enum { CTR_TCC_ALPHA80 = 4 };
+/* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
+ * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
+ * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
+ * (mesh shader old or new, not dph). */
+void ctr_gpu_set_fog_alpha(int on);
+void ctr_gpu_set_tex1_gating(int on);
+int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
 void ctr_gpu_cull_reset(void);
 /* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
@@ -478,7 +490,9 @@ typedef struct {
   int early_depth_draws;
   int proctex_draws;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
-  int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
+  int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
+                      * tex1_gating) */
+  int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =

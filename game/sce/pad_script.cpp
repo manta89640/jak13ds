@@ -39,6 +39,8 @@ struct Entry {
   bool crash = false;
   bool save = false;
   bool shot = false;
+  std::string shot_name;  // (AI-assisted) "shot NAME" (renderer hook with a name)
+  std::vector<std::pair<std::string, std::string>> sets;  // (AI-assisted) "set KEY VALUE"
 };
 
 struct Script {
@@ -63,6 +65,8 @@ ExitHook g_exit_hook = nullptr;
 ContinueHook g_continue_hook = nullptr;
 SaveHook g_save_hook = nullptr;
 ShotHook g_shot_hook = nullptr;
+NamedShotHook g_named_shot_hook = nullptr;  // (AI-assisted)
+SetHook g_set_hook = nullptr;              // (AI-assisted)
 JointHook g_joint_hook = nullptr;
 
 // PadData::ButtonIndex
@@ -143,6 +147,20 @@ void load() {
         e.save = true;
       } else if (item == "shot") {
         e.shot = true;
+        // (AI-assisted) an optional name (a word that isn't a button or axis)
+        std::streampos at = ss.tellg();
+        std::string name;
+        if (ss >> name && button_index(name) < 0 && name != "-" &&
+            !(name.size() > 3 && name[2] == '=')) {
+          e.shot_name = name;
+        } else {
+          ss.clear();
+          ss.seekg(at);
+        }
+      } else if (item == "set") {
+        std::string key, value;  // (AI-assisted)
+        ss >> key >> value;
+        e.sets.push_back({key, value});
       } else if (item == "crash") {
         e.crash = true;
       } else if (item.size() > 3 && item[2] == '=') {
@@ -245,7 +263,18 @@ PadState next_frame() {
         g_save_hook();
       }
     }
-    if (e.shot && g_shot_hook) {
+    for (auto& [key, value] : e.sets) {
+      lg::info("[pad script] frame {}: set {} {}", frame, key, value);
+      if (!g_set_hook || !g_set_hook(key.c_str(), value.c_str())) {
+        lg::warn("[pad script] frame {}: set {}: unknown setting", frame, key);
+      }
+    }
+    if (e.shot && g_named_shot_hook) {
+      // (AI-assisted) the renderer's own screenshot (the 3DS renderer: ctr_gpu_request_screenshot)
+      const std::string name = e.shot_name.empty() ? fmt::format("shot_f{}", frame) : e.shot_name;
+      lg::info("[pad script] frame {}: shot {}", frame, name);
+      g_named_shot_hook(name.c_str());
+    } else if (e.shot && g_shot_hook) {
       g_shot_hook();
     }
     if (!e.wait_sym.empty()) {
@@ -294,6 +323,14 @@ void set_save_hook(SaveHook hook) {
 
 void set_shot_hook(ShotHook hook) {
   g_shot_hook = hook;
+}
+
+void set_named_shot_hook(NamedShotHook hook) {
+  g_named_shot_hook = hook;
+}
+
+void set_set_hook(SetHook hook) {
+  g_set_hook = hook;
 }
 
 void set_joint_hook(JointHook hook) {

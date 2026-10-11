@@ -1,0 +1,53 @@
+; (AI-assisted)
+; config.ini fog_alpha: ctr_mesh_old.v.pica (the Oct 2 mesh shader, the default) with the fog
+; amount in the color's alpha instead of texcoord1. Level draws whose vertex alpha is 0x80
+; everywhere (CTR_TCC_ALPHA80, ~99.5% of them) use it: the texture combiner takes the fog amount
+; from the primary color's alpha (stage 1: mix(previous, fog color constant, alpha)) and the
+; constant 0x80 for the vertex alpha (stage 0), so neither the fog ramp texture (texture unit 1)
+; nor a texcoord1 output is needed. Same uniforms (names, order, values) as ctr_mesh_old.v.pica.
+; The amount is the ramp's input clamped to 1 (the ramp texture clamps at its edge; it is >= 0:
+; ctr_gpu_set_mesh_fog keeps the game's fog clamps in 0..255). Every output component is written
+; exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[4]
+.fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255), z: 1.0
+.fvec fog0          ; x: hvdf.w, y: fog min, z: fog max, w: -1/255 (no game fog: 0, 255, 255)
+.fvec fog1          ; x: clip w -> game units, y: extra fog start, z: 1 / (end - start)
+
+.constf consts(1.0, 0.5, 0.0, 0.0)
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+
+.proc main
+  mov r0.xyz, inpos
+  mov r0.w, scales.zzzz
+
+  dp4 outpos.x, clip[0], r0
+  dp4 outpos.y, clip[1], r0
+  dp4 outpos.z, clip[2], r0
+  dp4 r1.x, clip[3], r0
+  mov outpos.w, r1.xxxx
+
+  ; game fog
+  add r2.x, fog0.xxxx, -r1.xxxx
+  max r2.x, fog0.yyyy, r2.xxxx
+  min r2.x, fog0.zzzz, r2.xxxx
+  mul r2.x, fog0.wwww, r2.xxxx
+  add r2.x, consts.xxxx, r2.xxxx
+  ; draw distance fog
+  mul r3.x, fog1.xxxx, r1.xxxx
+  add r3.x, -fog1.yyyy, r3.xxxx
+  mul r3.x, fog1.zzzz, r3.xxxx
+  max r2.x, r2.xxxx, r3.xxxx
+
+  mul outtc0, scales.xxxx, intex
+  mul outclr.xyz, scales.yyyy, inclr
+  min outclr.w, consts.xxxx, r2.xxxx
+  end
+.end

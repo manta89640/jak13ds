@@ -32,8 +32,12 @@
  *             are, in meters, Jak's state, and how many riders the process found in its last
  *             detect-riders! (-1: not a platform) (pad-script-jpos)
  *   save      an autosave, as after a power cell (pad-script-auto-save, 3DS)
- *   shot      (AI-assisted) a screenshot (PC OpenGL renderer: like F2, into the config
- *             folder's screenshots; for reference pictures to compare the 3DS renderer with)
+ *   shot [NAME]  (AI-assisted) a screenshot (PC OpenGL renderer: like F2, into the config
+ *             folder's screenshots; for reference pictures to compare the 3DS renderer with). The
+ *             3DS renderer: NAME.bmp (3DS) / NAME.png (--ctr-gfx) in its screenshot folder
+ *             (config.ini screenshots = N / --ctr-dump).
+ *   set KEY VALUE  (AI-assisted) the 3DS renderer: switch a gpu_profile = ab key (or fog) on/off
+ *             from here on, e.g. "set fog_alpha on" (A/B pictures of one view)
  *   exit      stop the runtime
  *   handoff   stop the script: the real controller plays from here
  *   crash     fail an assert (to test the crash screen)
@@ -97,5 +101,15 @@ void set_joint_hook(JointHook hook);
 //! (AI-assisted) Called for "shot".
 using ShotHook = void (*)();
 void set_shot_hook(ShotHook hook);
+
+//! (AI-assisted) Called for "shot [NAME]" instead of the hook above when set (the 3DS renderer:
+//! a screenshot named NAME, default shot_f<frame>).
+using NamedShotHook = void (*)(const char* name);
+void set_named_shot_hook(NamedShotHook hook);
+
+//! (AI-assisted) Called for "set KEY VALUE" (the 3DS renderer: a gpu_profile = ab switch or fog
+//! changed mid-run, for A/B screenshots of one view). Returns false for an unknown key.
+using SetHook = bool (*)(const char* key, const char* value);
+void set_set_hook(SetHook hook);
 
 }  // namespace pad_script
