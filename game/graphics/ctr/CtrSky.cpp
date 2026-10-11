@@ -286,7 +286,9 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
   if (p.cloud_drawn || p.sky_drawn) {
     // two cloud layers of 9 quads, added (alpha b=2 d=1), the texture scrolling (set-tex-offset)
     const SkyVertex* clouds = verts_at(p.clouds, 72);
-    if (clouds && m_valid[1] && m_tex[1] >= 0) {
+    // (AI-assisted) config clouds = off: the sky without its cloud pass (an added layer over the
+    // sky's part of the screen)
+    if (clouds && m_valid[1] && m_tex[1] >= 0 && ctr_settings().clouds) {
       // (AI-assisted) both layers in one pass, one texture on two texture units: the first
       // layer's quads with the second layer's texture coordinates too (the layers are the same
       // quads, the second one tilted by a few degrees; their colors are per layer, the alpha fade

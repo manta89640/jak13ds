@@ -151,6 +151,8 @@ CtrSettings load() {
       s.shadow_casters = std::clamp(std::atoi(v.c_str()), 0, 64);  // (AI-assisted)
     } else if (key == "sky") {
       s.sky = parse_bool(v);
+    } else if (key == "clouds") {
+      s.clouds = parse_bool(v);  // (AI-assisted)
     } else if (key == "overlap") {
       s.overlap = parse_bool(v);
     } else if (key == "pipeline") {
@@ -234,7 +236,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "ocean {} sky {} distort {} distort_copy {} envmap {} shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
@@ -248,7 +250,7 @@ std::string CtrSettings::summary() const {
                   : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
-      sky ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
+      sky ? "on" : "off", clouds ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
       envmap ? "on" : "off",
       // (AI-assisted) with depth16, full falls back to blob (no stencil)
       shadows == ShadowMode::Full   ? "full"

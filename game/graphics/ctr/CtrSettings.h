@@ -79,6 +79,8 @@ struct CtrSettings {
   int shadow_casters = 6;
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
+  // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
+  bool clouds = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
   bool overlap = false;
   // CPU builds frame N+1 while the GPU draws frame N

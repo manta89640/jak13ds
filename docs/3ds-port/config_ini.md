@@ -70,6 +70,7 @@ ocean_near_alpha = 0.6     # (AI-assisted) ocean = full: the near ocean is at le
 fps_cap = 30               # 30 (default): steady 30 fps (2 vblanks per frame); 60: up to 60
 frame_pacing = steady      # steady (default): every frame stays on screen as long as the game time it covers (even motion, ~1 frame more latency); fast: shown as soon as the GPU is done (uneven at ~30 fps). Log line: [ctr] pacing. (AI-assisted) The latency (2-4 vblanks) goes up after a late frame and down after ~5 s without one and with at most 2 frames done just in time, but for ~30 s not below the latency a frame was late at
 sky = on                   # the sky (time of day texture, clouds); off: cleared to the fog color
+clouds = on                # (AI-assisted) the clouds over the sky; off: the sky without them (one added pass less over the sky's part of the screen)
 overlap = off              # on: the GPU starts drawing each part of a frame while the CPU builds the rest (experimental)
 pipeline = off             # on: the CPU builds the next frame while the GPU draws this one (experimental; works with overlap)
 distort = off              # sprite distorter: warp gate portals, heat haze (one screen copy in frames that have them)
