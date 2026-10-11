@@ -189,10 +189,10 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
     }
   }
   if (rs.log_now) {
-    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort, {} draws "
-              "(since the last stats)",
+    lg::debug("[ctr] sprite: {} 2d ({} made smaller), {} hud, {} 3d sprites, {} distort ({} under "
+              "8 px left out), {} draws (since the last stats)",
               m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
-              m_stats.distort, m_stats.draws);
+              m_stats.distort, m_stats.distort_small, m_stats.draws);
     m_stats = Stats();
   }
 }
@@ -395,6 +395,13 @@ void CtrSpriteRenderer::draw_distorter() {
     return v;
   };
   ctr_vertex strip[5 * 11];
+  // (AI-assisted) distort_copy = rows: the screen columns the kept sprites read (x of the GS frame
+  // texture coordinates), and sprites under kMinDistortPx on screen left out: their warp moves
+  // pixels by a fraction of their size, nothing to see under 8 pixels
+  const bool rows = ctr_settings().distort_copy_rows;
+  constexpr float kMinDistortPx = 8.f;
+  float read_x0 = 1.f, read_x1 = -1.f;
+  int small = 0;
   // (AI-assisted) each fan is a triangle strip (the VU program's): all of them go in one strip
   // draw, joined by repeating the last vertex of one and the first of the next (the triangles in
   // between have no area). As a triangle list it was 3 (n - 2) vertices per fan instead of n + 2:
@@ -426,6 +433,32 @@ void CtrSpriteRenderer::draw_distorter() {
       strip[n++] = vert(v08 * sp.rgba.y() + sp.xyz, v09 * sp.rgba.z() + sp.st);
       strip[n++] = center;
     }
+    if (rows) {
+      float px0 = strip[0].x, px1 = px0, py0 = strip[0].y, py1 = py0;
+      float sx0 = sp.st.x(), sx1 = sx0;
+      int e2 = (int)m_distort_tables.ientry[slices - 3].x() - 352;
+      for (int k = 0; k < n; k++) {
+        px0 = std::min(px0, strip[k].x);
+        px1 = std::max(px1, strip[k].x);
+        py0 = std::min(py0, strip[k].y);
+        py1 = std::max(py1, strip[k].y);
+      }
+      // the screen columns read: x of the texture coordinates of the strip's vertices
+      for (u32 k = 0; k < slices; k++, e2 += 2) {
+        const float a = m_distort_tables.entry[e2 + 1].x(), b = m_distort_tables.entry[e2 + 3].x();
+        for (float o : {a * sp.rgba.x(), b * sp.rgba.x(), a * sp.rgba.z(), b * sp.rgba.z()}) {
+          sx0 = std::min(sx0, sp.st.x() + o);
+          sx1 = std::max(sx1, sp.st.x() + o);
+        }
+      }
+      // ctr_gpu x spans 400 pixels over 2, y 240 over 2
+      if (std::max((px1 - px0) * 200.f, (py1 - py0) * 120.f) < kMinDistortPx) {
+        small++;
+        continue;
+      }
+      read_x0 = std::min(read_x0, sx0 * 2.f - 1.f);
+      read_x1 = std::max(read_x1, sx1 * 2.f - 1.f);
+    }
     if (!m_distort_verts.empty()) {
       const ctr_vertex last = m_distort_verts.back();
       m_distort_verts.push_back(last);
@@ -434,12 +467,13 @@ void CtrSpriteRenderer::draw_distorter() {
     m_distort_verts.insert(m_distort_verts.end(), strip, strip + n);
     m_stats.distort++;
   }
+  m_stats.distort_small += small;
   if (m_distort_verts.empty()) {
     return;
   }
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
-  st.tex = ctr_gpu_copy_screen();
+  st.tex = rows ? ctr_gpu_copy_screen_part(read_x0, read_x1) : ctr_gpu_copy_screen();
   if (st.tex < 0) {
     return;
   }

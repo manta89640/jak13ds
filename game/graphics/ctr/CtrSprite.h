@@ -151,6 +151,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
+    int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels
   } m_stats;
   // (AI-assisted) a frame that took more than 3 ms logs its counts (render)
   void build_sprites(DmaFollower& dma, CtrRenderState& rs);

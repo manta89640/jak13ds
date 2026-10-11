@@ -336,6 +336,7 @@ static struct {
   int vram_textures;
   int vram_copy_failures;
   int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
+  int screen_tex_vram; /* (AI-assisted) it is in VRAM (distort_copy = rows) */
   char screenshot_path[256];
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
@@ -4108,7 +4109,17 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
 
 /* ---------------- the screen as a texture ---------------- */
 
+static int copy_screen(float x0, float x1, int part);
+
 int ctr_gpu_copy_screen(void) {
+  return copy_screen(-1.0f, 1.0f, 0);
+}
+
+int ctr_gpu_copy_screen_part(float x0, float x1) {
+  return copy_screen(x0, x1, 1);
+}
+
+static int copy_screen(float x0, float x1, int part) {
   if (!g.ready || !g.in_frame) {
     return -1;
   }
@@ -4120,9 +4131,15 @@ int ctr_gpu_copy_screen(void) {
       return -1;
     }
     TexSlot* t = &g.textures[slot];
+    const GPU_TEXCOLOR fmt = g_color16 ? GPU_RGB565 : GPU_RGBA8;
+    const u32 bytes = 256u * 512u * (g_color16 ? 2u : 4u);
     ctr_linear_lock();
-    const bool ok = linear_room_for_tex(256, 512, 0) &&
-                    C3D_TexInit(&t->tex, 256, 512, g_color16 ? GPU_RGB565 : GPU_RGBA8);
+    /* (AI-assisted) distort_copy = rows: in VRAM if there's room now (the copy and the distort
+     * draws then stay in VRAM), leaving the reserve free (C3D_TexInitVRAM calls libctru's
+     * vramAlloc, not safe_vram_alloc). Not with block32 (its copy goes through the scratch). */
+    bool in_vram = part && !g_block32 && (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
+                   C3D_TexInitVRAM(&t->tex, 256, 512, fmt);
+    const bool ok = in_vram || (linear_room_for_tex(256, 512, 0) && C3D_TexInit(&t->tex, 256, 512, fmt));
     ctr_linear_unlock();
     if (!ok) {
       release_tex_slot(slot);
@@ -4131,9 +4148,15 @@ int ctr_gpu_copy_screen(void) {
     /* (AI-assisted) cleared and flushed once: the copy never writes columns 240-255 and rows
      * 400-511 (black there instead of old memory: distort sprites at the screen edges sample
      * it), and no dirty CPU cache line left from this memory's previous use can be written back
-     * over the GPU's copy later (hardware only: Azahar has no CPU cache) */
-    memset(t->tex.data, 0, t->tex.size);
-    cache_flush_now(t->tex.data, t->tex.size);
+     * over the GPU's copy later (hardware only: Azahar has no CPU cache). In VRAM: not touched
+     * by the CPU (the GPU's copies only); ctr_gpu_screen_uv keeps the sampling half a texel
+     * inside the copied 240x400, so what the rest holds is never read. */
+    if (!in_vram) {
+      memset(t->tex.data, 0, t->tex.size);
+      cache_flush_now(t->tex.data, t->tex.size);
+    }
+    g.screen_tex_vram = in_vram;
+    printf("[ctr] distorter screen copy: texture in %s\n", in_vram ? "VRAM" : "linear memory");
     t->pool = -1;
     t->levels = 1;
     ctr_linear_lock();
@@ -4165,9 +4188,25 @@ int ctr_gpu_copy_screen(void) {
                            GX_TRANSFER_OUT_TILED(1));
   } else {
     const u32 row = g_color16 ? 3840 : 7680, gap = g_color16 ? 256 : 512;
-    sync_texture_copy((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(row / 16, 0),
-                      (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(row / 16, gap / 16),
-                      row * 50, 8);
+    /* (AI-assisted) distort_copy = rows: tile row k holds screen columns 8k..8k+7 (the color
+     * buffer is 240 wide, x along its rows); a texel of margin each side for the filter */
+    int r0 = 0, r1 = 49;
+    if (part) {
+      const float c0 = x0 < -1.0f ? -1.0f : (x0 > 1.0f ? 1.0f : x0);
+      const float c1 = x1 < -1.0f ? -1.0f : (x1 > 1.0f ? 1.0f : x1);
+      int p0 = (int)((c0 + 1.0f) * 0.5f * 399.0f) - 1, p1 = (int)((c1 + 1.0f) * 0.5f * 399.0f) + 2;
+      p0 = p0 < 0 ? 0 : (p0 > 399 ? 399 : p0);
+      p1 = p1 < 0 ? 0 : (p1 > 399 ? 399 : p1);
+      if (p1 < p0) {
+        p1 = p0;
+      }
+      r0 = p0 >> 3;
+      r1 = p1 >> 3;
+    }
+    sync_texture_copy((u32*)((u8*)g.top->frameBuf.colorBuf + (u32)r0 * row),
+                      GX_BUFFER_DIM(row / 16, 0),
+                      (u32*)((u8*)g.textures[g.screen_tex].tex.data + (u32)r0 * (row + gap)),
+                      GX_BUFFER_DIM(row / 16, gap / 16), row * (u32)(r1 - r0 + 1), 8);
   }
   /* the GPU's texture cache may hold the old texels */
   g.bound_tex = NULL;
