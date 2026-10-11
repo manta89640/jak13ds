@@ -323,6 +323,9 @@ void ctr_gpu_set_asm_tex(int on);
 void ctr_gpu_set_defer_flush(int on);
 /* (AI-assisted) config.ini shader_basic / shader_mesh (hang bisect), -1 = follow new_shaders */
 void ctr_gpu_set_shader_modes(int basic, int mesh);
+/* (AI-assisted) config.ini shader_skin: 1 new, 0 the Oct 2 ctr_skin / ctr_skin_env (the same
+ * uniforms), -1 = new_shaders; before ctr_gpu_init */
+void ctr_gpu_set_shader_skin(int skin);
 int ctr_gpu_asm_tex(void);
 /* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
  * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start), so a hang shows the

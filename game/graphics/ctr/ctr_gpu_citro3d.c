@@ -67,6 +67,14 @@ static int basic_new(void) {
 static int mesh_mode(void) {
   return s_mesh_mode < 0 ? s_new_shaders : s_mesh_mode;
 }
+/* (AI-assisted) config.ini shader_skin (ctr_skin and ctr_skin_env), -1 = new_shaders */
+static int s_skin_mode = -1;
+void ctr_gpu_set_shader_skin(int skin) {
+  s_skin_mode = skin;
+}
+static int skin_new(void) {
+  return s_skin_mode < 0 ? s_new_shaders : s_skin_mode;
+}
 void ctr_gpu_set_new_shaders(int on) {
   s_new_shaders = on;
 }
@@ -860,7 +868,7 @@ int ctr_gpu_init(void) {
     printf("[ctr] new_shaders = off: the Oct 2 vertex shaders (basic, mesh, skin, skin_env)\n");
   }
   printf("[ctr] shaders: basic %s, mesh %s, skin %s\n", basic_new() ? "new" : "old",
-         mesh_mode() == 1 ? "new" : (mesh_mode() == 2 ? "old+dph" : "old"), s_new_shaders ? "new" : "old");
+         mesh_mode() == 1 ? "new" : (mesh_mode() == 2 ? "old+dph" : "old"), skin_new() ? "new" : "old");
   g.dvlb = basic_new() ? DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size)
                          : DVLB_ParseFile((u32*)ctr_basic_old_shbin, (u32)ctr_basic_old_shbin_size);
   shaderProgramInit(&g.program);
@@ -902,7 +910,7 @@ int ctr_gpu_init(void) {
     g.fog_tex_valid = 1;
     g.fog_tex_rgb = 0xffffffff; /* force the first fill */
   }
-  g.skin_dvlb = s_new_shaders
+  g.skin_dvlb = skin_new()
                     ? DVLB_ParseFile((u32*)ctr_skin_shbin, (u32)ctr_skin_shbin_size)
                     : DVLB_ParseFile((u32*)ctr_skin_old_shbin, (u32)ctr_skin_old_shbin_size);
   shaderProgramInit(&g.skin_program);
@@ -914,7 +922,7 @@ int ctr_gpu_init(void) {
   g.uloc_skin_scales = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "scales");
   g.uloc_skin_lights = shaderInstanceGetUniformLocation(g.skin_program.vertexShader, "lights");
   g.env_dvlb =
-      s_new_shaders
+      skin_new()
           ? DVLB_ParseFile((u32*)ctr_skin_env_shbin, (u32)ctr_skin_env_shbin_size)
           : DVLB_ParseFile((u32*)ctr_skin_env_old_shbin, (u32)ctr_skin_env_old_shbin_size);
   shaderProgramInit(&g.env_program);

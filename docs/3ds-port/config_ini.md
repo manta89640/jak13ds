@@ -102,6 +102,7 @@ anim_native = on           # (AI-assisted) the animation decompressor's per-join
 new_shaders = off          # (off: the new ctr_mesh hangs the real GPU) the shorter vertex shaders (DPH/MADI/rsq, repacked mesh fog uniforms). off: the Oct 2 ctr_basic / ctr_mesh / ctr_skin / ctr_skin_env (ctr_*_old.v.pica) with the old fog uniforms. ocean = waves always uses the new ocean shader
 shader_basic = new         # new: the 7 instruction ctr_basic (verified on hardware). old: the Oct 2 one
 shader_mesh =              # old | new | dph (Oct 2 shader + dph transform); empty: follows new_shaders. new hangs the real GPU
+shader_skin =              # (AI-assisted) old | new: ctr_skin and ctr_skin_env; empty: follows new_shaders. new passes check_shaders.py (each output component written exactly once) but never ran on hardware; pica_bench's B3.skin_new runs it once
 defer_flush = on           # (hang bisect) the render thread's cache flushes held until the frame goes to the GPU. off: each right away, as on Oct 2
 asm_tex = on               # texture tiling in 4x2 groups (LDM/STM for RGBA8), 64-bit PSMCT32 VRAM uploads, SIMD sky blend / cloud premultiply. off: the Oct 2 per texel / per byte loops
 asm_mem = on               # ctr_mem.S memcpy / memmove / memset (LDM/STM). off: plain C byte / word loops (ctr_mem_c.c; also used before config.ini is read)

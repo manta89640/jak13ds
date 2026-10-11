@@ -204,6 +204,8 @@ CtrSettings load() {
       s.shader_basic = v == "new" ? 1 : (v == "old" ? 0 : -1);
     } else if (key == "shader_mesh") {
       s.shader_mesh = v == "new" ? 1 : (v == "dph" ? 2 : (v == "old" ? 0 : -1));
+    } else if (key == "shader_skin") {
+      s.shader_skin = v == "new" ? 1 : (v == "old" ? 0 : -1);  // (AI-assisted)
     } else if (key == "asm_mem") {
       s.asm_mem = parse_bool(v);
     } else if (key == "fast_clock") {

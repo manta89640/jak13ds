@@ -1210,6 +1210,7 @@ void ctr_gpu_set_new_shaders(int) {}
 void ctr_gpu_set_asm_tex(int) {}
 void ctr_gpu_set_defer_flush(int) {}
 void ctr_gpu_set_shader_modes(int, int) {}
+void ctr_gpu_set_shader_skin(int) {}
 int ctr_gpu_asm_tex(void) {
   return 1;
 }

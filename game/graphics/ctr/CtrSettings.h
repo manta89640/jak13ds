@@ -156,6 +156,10 @@ struct CtrSettings {
   bool defer_flush = true;
   // (AI-assisted) hang bisect: shader_basic old|new, shader_mesh old|new|dph (-1: new_shaders)
   int shader_basic = 1, shader_mesh = -1;
+  // (AI-assisted) shader_skin old|new: ctr_skin and ctr_skin_env (-1: new_shaders). The new ones
+  // pass platform/3ds/tools/check_shaders.py but never ran on hardware (pica_bench B3.skin_new
+  // runs the new ctr_skin once)
+  int shader_skin = -1;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above
