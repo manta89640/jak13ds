@@ -216,7 +216,7 @@ __attribute__((always_inline)) inline u64 ray_cylinder_intersect_impl(const Nati
 /*!
  * (moving-sphere-sphere-intersect sphere move other out-point) -> float
  * ray-sphere-intersect of sphere's center along move against other, with the sum of the radii. On
- * a hit (t >= 0, or NaN) stores the touching point in out-point: the center at t, plus the
+ * a hit (t >= 0; not NaN) stores the touching point in out-point: the center at t, plus the
  * direction to other scaled to sphere's radius (vector-normalize! and vector+*! inlined).
  */
 float moving_sphere_sphere_intersect_v(u32 sphere,
@@ -240,7 +240,10 @@ float moving_sphere_sphere_intersect_v(u32 sphere,
     const u64 call_args[8] = {sphere, move, other, f2gpr(r), 0, 0, 0, 0};
     t = u2f((u32)native_call_goal(fn, call_args, caller));
   }
-  if (t < 0.f) {
+  // (AI-assisted) (when (>= t 0.0) ...) as goalc compares with a constant (gc_fcmp_k, GOALC ABI 5):
+  // false for a negative t with a nonzero exponent and, like the x86 backend, for a NaN of either
+  // sign (no out-point then)
+  if (f2u(t) > 0x807fffffu || (s32)f2u(t) > (s32)0x7f800000u) {
     return t;
   }
 

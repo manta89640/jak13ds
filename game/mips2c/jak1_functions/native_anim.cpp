@@ -52,9 +52,11 @@ inline float s16f(const u8* m, u32 addr) {
   return (float)(s32)ld<s16>(m, addr);
 }
 
-//! x < 0.0 as goalc compares with a constant (gc_fcmp_bits): negative with a nonzero exponent
+//! x < 0.0 as goalc compares with a constant (gc_fcmp_k, GOALC_ABI_VERSION 5): negative with a
+//! nonzero exponent, or (AI-assisted) a NaN of either sign, like the x86 backend's compare
 inline bool below_zero(float x) {
-  return f2u(x) > 0x807fffffu;
+  const u32 b = f2u(x);
+  return b > 0x807fffffu || (s32)b > (s32)0x7f800000u;
 }
 
 //! the data streams of one part (fixed part or frame) of the animation
