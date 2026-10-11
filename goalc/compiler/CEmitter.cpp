@@ -18,7 +18,7 @@
 
 namespace {
 // must match GOALC_ABI_VERSION in goal_c_ops.h
-constexpr int kCBackendAbiVersion = 4;
+constexpr int kCBackendAbiVersion = 5;
 
 // tokens are resolved after memory layout: \x01 <kind> <index> \x02
 constexpr char TOKEN_START = '\x01';
@@ -536,6 +536,9 @@ void CFunctionEmitter::emit() {
   if (m_env->stack_slots_used_for_stack_vars() > 0) {
     text += fmt::format("  u64 gc_stack[{}] __attribute__((aligned(16)));\n",
                         m_env->stack_slots_used_for_stack_vars());
+    // (AI-assisted) GC_STACK_INIT: nothing, unless a debug build of the modules asks for a fill
+    // pattern (goal_c_ops.h), to find reads of stack-no-clear memory before it is written
+    text += "  GC_STACK_INIT(gc_stack);\n";
   }
   for (auto& [idx, id] : params) {
     if (arg_types.at(idx) == "v128") {

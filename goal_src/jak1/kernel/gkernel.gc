@@ -2256,7 +2256,13 @@
   ;; if we got the scratchpad stack, move to the fake scratchpad.
   (#when PC_PORT
     (when (= stack-top *scratch-memory-top*)
-      (set! stack-top (&+ *fake-scratchpad-stack* (* 32 1024)))))
+      ;; og:preserve-this (AI-assisted) C backend (3DS, C-mode PC hosts): compiled C frames are bigger
+      ;; than native ones (up to ~4x for the collision code on ARM32), and PC hosts dlopen module
+      ;; .so files on this stack while a level links (~20 kB). Natively the stack starts at +32 kB
+      ;; and reaches the scratchpad data (+0..16 kB) after 16 kB; in C mode it starts at the top of
+      ;; the 64 kB window the allocation guarantees (+32..64 kB is otherwise unused). The temporary
+      ;; trans threads at stack-top - PROCESS_STACK_SIZE move out of the scratchpad data as well.
+      (set! stack-top (&+ *fake-scratchpad-stack* (#if (eq? INSTRUCTION_SET 'c) (* 64 1024) (* 32 1024))))))
   ;; inherit mask (minus stuff like sleep)
   (set! (-> this mask) (logand (-> dest mask) PROCESS_CLEAR_MASK))
   (set! (-> this status) 'ready)

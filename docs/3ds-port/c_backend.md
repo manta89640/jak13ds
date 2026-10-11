@@ -69,6 +69,14 @@ modifies the other copy's static data, and reads freed memory after the second l
 A fix would give each linked copy its own segment bases (for example, one module instance per
 link, with the bases passed through the stub).
 
+(AI-assisted, Oct 2026) Not reachable in Jak 1: no level DGO shares an object with GAME.CGO, and
+the objects that several level DGOs share (racer/target-racer: fic lav mis ogr rol; flutflut: sno
+swa; oracle/villagep-obs: vi1 vi2 vi3 cit; battlecontroller: mis swa cit; blocking-plane,
+launcherdoor, snow-bunny, firecanyon-obs, babak-with-cannon, mistycannon, static-screen) are only
+in levels that are never neighbours (two-level load slots). Not checked: whether a warp-gate
+transition between villages (vi1/vi2/vi3 share oracle and villagep-obs) can keep the old village
+loaded while the new one links.
+
 ## Runtime duties
 
 - Own `goalc_mem`, `goalc_st`, `goalc_pp`, `goalc_fn_table`, `goalc_get_sp`, `goalc_break`,
@@ -373,6 +381,51 @@ fallbacks), `vcmp`/`vmrs` 11,682/11,722 -> 1,780/1,782, direct `bl` 103 -> 22,36
 sites; the static `blx reg` count stays ~55k because each guarded site keeps its fallback). The
 hot path of a guarded call is `cmp` + a predicted `bne` + `bl` (the expected address is a literal,
 often hoisted out of loops). Not measured on hardware yet.
+
+### NaN compares like x86, stack fill hook (ABI version 5)
+
+(AI-assisted, Oct 2026 audit of semantic differences between the x86 backend and C.)
+
+- Float compares with a NaN on either side give what the x86 backend gives: `<`, `<=` and `=` are
+  true, `>`, `>=` and `!=` are false. x86 compiles a float compare as `comiss` + an unsigned jump,
+  and an unordered `comiss` sets ZF = PF = CF = 1; every condition and its inversion agree, so the
+  result doesn't depend on how the compiler arranged the branch. C compares are IEEE (all false
+  except `!=`), and the integer form for constants gave sign-dependent results. GOAL code depends on
+  the x86 behaviour, on purpose (`is-nan?` was `(and (< 0.0 x) (< x 0.0))`, true only on x86: the
+  Snowy Mountain heap corruption) or by accident (any `(if (< x limit) ...)` that a NaN reaches
+  takes the same branch as on the PC port). `gc_fcmp` implements it: general compares are written
+  so that GCC folds the unordered case into the condition (`!(a >= b)` is `lt` after `vcmp` on ARM),
+  compares with a constant test one range of the other side's bits, plus a NaN test where x86
+  includes the NaNs in a set of the other sign (`(< x 0.0)`: two compares). Exhaustively tested
+  against a model of the x86 rules (2 x 10^8 cases, both operand orders, special values). Cost:
+  +11,975 ARM instructions over the 518 modules (+0.8%).
+- Float to int conversion keeps the PS2/ARM64 behaviour (saturating, NaN gives 0), not x86's
+  `0x80000000` for every out of range value: no Jak 1 code depends on the x86 value, and a NaN or
+  infinite index then stays in range more often.
+- `GC_STACK_INIT(gc_stack)` at the start of every function with stack variables: nothing by
+  default. Build the modules with `-DGOALC_STACK_POISON` (fill with `0xff`: NaN floats, -1
+  integers, faulting pointers) to find code that reads `stack-no-clear` memory before writing it
+  (natively it holds whatever the stack held, which differs between x86 and C, see the Misty lurker
+  normal), or `-DGOALC_STACK_ZERO`. Host: `OPENGOAL_C_BACKEND_CC="cc -DGOALC_STACK_POISON"` and an
+  empty `out/jak1/cmod`.
+- Process stacks on the fake scratchpad: most processes (and their trans hooks) run on the
+  "scratchpad stack", which the PC port starts at `*fake-scratchpad-stack*` + 32 kB, growing down
+  towards the scratchpad data at + 0..16 kB; the temporary cpu-thread of a trans hook is stored at
+  stack-top - 24 kB, inside that data. In C mode the stack top is + 64 kB instead (`activate`,
+  gkernel.gc): the 128 kB allocation aligned to 64 kB always contains it and nothing else uses
+  + 32..64 kB (checked on the host: untouched over 300,000 process runs and level loads), so
+  stacks and temporary threads are 16..32 kB clear of the scratchpad data, at no memory cost.
+  Why: C frames on ARM32 are bigger than native ones (collide-cache functions up to 1.4 kB, 4x
+  the host's), and on PC hosts the module `.so` files are `dlopen`ed while a level links, inside
+  the display process: dyld then uses ~20 kB of the GOAL stack (27 kB deep in total), which ran
+  into the scratchpad data with the native layout. Measured on the host in gameplay (level
+  sweeps): game processes use up to ~5 kB of stack, display ~3.5 kB, the dram stack ~5.4 kB
+  (sidekick, target).
+- Checked and identical to x86: integer division and modulo (division by zero gives 0 instead of
+  a trap), shift counts (masked to 6 bits), 32-bit multiply sign extension, 128-bit lane ops,
+  register class moves, `minss`/`maxss` NaN operand order. Memory: 64-bit accesses compile to
+  unaligned-safe `ldr` pairs; 128-bit accesses are 16-byte aligned on x86 (`movaps`), so VLDR's
+  word alignment holds.
 
 ## Known later work
 
