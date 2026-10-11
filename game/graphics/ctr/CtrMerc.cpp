@@ -197,7 +197,7 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (m_snapshot_mode) {
     return;
   }
-  flush_env();
+  flush_queues();
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
   // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
   // them) after a few seconds of updates
@@ -218,9 +218,10 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_mod_ms = m_mod_gather_ms = 0;
   }
   if (rs.log_now && m_stats.models) {
-    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws, {} envmap batches",
+    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws, {} envmap batches, "
+              "{} draws sorted by texture",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.draws,
-              m_stats.env_batches);
+              m_stats.env_batches, m_stats.sorted_draws);
     m_stats = Stats();
   }
 }
@@ -241,6 +242,38 @@ void CtrMercRenderer::flush_env() {
     m_stats.env_batches++;
     m_q_env.clear();
   }
+}
+
+void CtrMercRenderer::flush_opaque() {
+  if (m_q_opaque.empty()) {
+    return;
+  }
+  const u32 n = (u32)m_q_opaque.size();
+  m_q_order.resize(n);
+  for (u32 i = 0; i < n; i++) {
+    m_q_order[i] = i;
+  }
+  // by model (in the order they came), then draw; stable: the instances in the order they came
+  std::stable_sort(m_q_order.begin(), m_q_order.end(), [&](u32 a, u32 b) {
+    const auto& qa = m_q_opaque[a];
+    const auto& qb = m_q_opaque[b];
+    return qa.model_rank != qb.model_rank ? qa.model_rank < qb.model_rank
+                                          : qa.draw_index < qb.draw_index;
+  });
+  const float* d = m_qdata.data();
+  for (u32 i : m_q_order) {
+    const auto& q = m_q_opaque[i];
+    ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count, d + q.lights, q.mesh,
+                         q.first_index, q.index_count);
+  }
+  m_stats.sorted_draws += (int)n;
+  m_q_opaque.clear();
+  m_q_models.clear();
+}
+
+void CtrMercRenderer::flush_queues() {
+  flush_opaque();  // (the bases before their shine)
+  flush_env();
   m_qdata.clear();
 }
 
@@ -681,8 +714,12 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const c3l::MercDraw* rows_of = nullptr;  // the draw whose palette palette_rows holds
   // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
   // there yet)
-  const bool env_batch = ctr_settings().envmap_batch;
-  u32 q_clip = ~0u, q_rows = ~0u;
+  // merc_tex_sort: not for models whose vertices change per instance (blend shapes, rewritten
+  // vertices: one mesh); their shine is queued too then (its base may be in the queue)
+  const bool tex_sort = ctr_settings().merc_tex_sort && !model->blerc_count && model->mod.empty();
+  const bool env_batch = ctr_settings().envmap_batch || tex_sort;
+  u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
+  u32 model_rank = ~0u;
   for (const auto& draw : model->draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
@@ -780,12 +817,47 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
                                          lev->tex_min_alpha[draw.texture] >= st.aref * 2))) {
       st.flags |= CTR_STATE_EARLY_DEPTH;
     }
-    // (AI-assisted) envmap_batch: the queued shine before a draw that blends or doesn't write
-    // depth (it would change what the shine adds to, or be covered by it)
-    if (!m_q_env.empty() &&
-        (st.blend != CTR_BLEND_OFF || !st.zwrite || st.ztest != CTR_TEST_GEQUAL)) {
-      flush_env();
-      q_clip = q_rows = ~0u;
+    const bool opaque = st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL;
+    if (tex_sort && opaque && draw.eye_id == 0xff) {
+      if (q_clip == ~0u) {
+        q_clip = queue_floats(clip, 16);
+      }
+      if (q_rows == ~0u) {
+        q_rows = queue_floats(palette_rows, 12 * std::min<int>(draw.palette_count, CTR_MAX_PALETTE));
+      }
+      if (q_lights == ~0u) {
+        q_lights = queue_floats(light_data, 28);
+      }
+      if (model_rank == ~0u) {
+        auto it = std::find(m_q_models.begin(), m_q_models.end(), (const void*)model);
+        model_rank = (u32)(it - m_q_models.begin());
+        if (it == m_q_models.end()) {
+          m_q_models.push_back(model);
+        }
+      }
+      QueuedDraw q;
+      q.st = st;
+      q.clip = q_clip;
+      q.rows = q_rows;
+      q.lights = q_lights;
+      q.palette_count = draw.palette_count;
+      memset(q.fade, 0, sizeof(q.fade));
+      q.mesh = model->mesh;
+      q.first_index = (int)draw.first_index;
+      q.index_count = (int)draw.index_count;
+      q.model_rank = model_rank;
+      q.draw_index = (u32)(&draw - model->draws.data());
+      m_q_opaque.push_back(q);
+      m_stats.draws++;
+      continue;
+    }
+    // (AI-assisted) envmap_batch / merc_tex_sort: the queues before a draw that blends or doesn't
+    // write depth (it would change what the shine adds to, or be covered by it), and before any
+    // draw of a sorted model that isn't queued (an eye: after its face, as in the model)
+    if ((!m_q_env.empty() || !m_q_opaque.empty()) && (!opaque || tex_sort)) {
+      flush_queues();
+      q_clip = q_rows = q_lights = ~0u;
+      model_rank = ~0u;
     }
     ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count, light_data, model->mesh,
                          draw.first_index, draw.index_count);

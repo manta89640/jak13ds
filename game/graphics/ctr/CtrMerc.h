@@ -59,6 +59,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int draws = 0;
     int bad_bones = 0;
     int env_batches = 0;  // (AI-assisted) envmap_batch: queues drawn
+    int sorted_draws = 0;  // (AI-assisted) merc_tex_sort: draws drawn from the queue
   };
 
  private:
@@ -78,11 +79,22 @@ class CtrMercRenderer : public CtrBucketRenderer {
     float fade[4];
     int mesh;
     int first_index, index_count;
+    u32 model_rank, draw_index;  // merc_tex_sort: the order they're drawn in
   };
   std::vector<float> m_qdata;
   std::vector<QueuedDraw> m_q_env;
   u32 queue_floats(const float* src, int n);
   void flush_env();
+  // (AI-assisted) config merc_tex_sort: the opaque depth-writing draws of models without blend
+  // shapes or rewritten vertices are queued too and drawn draw by draw across the instances of a
+  // model (draw 0 of every yeti, then draw 1, ...: each instance keeps its own draw order), so a
+  // texture is bound once for all of them. Flushed before a draw that blends or doesn't write
+  // depth, before the queued shine.
+  std::vector<QueuedDraw> m_q_opaque;
+  std::vector<u32> m_q_order;
+  std::vector<const void*> m_q_models;  // model rank -> model
+  void flush_opaque();
+  void flush_queues();
 
   CtrLevels* m_levels;
   const class CtrEyeRenderer* m_eyes = nullptr;

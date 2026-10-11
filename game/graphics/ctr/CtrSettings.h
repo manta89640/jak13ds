@@ -65,6 +65,10 @@ struct CtrSettings {
   // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
   // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
   bool envmap_batch = true;
+  // (AI-assisted) a merc bucket's opaque draws of models drawn more than once (crates, yetis, ...)
+  // drawn draw by draw across the instances: one texture bind per draw of the model instead of
+  // per instance, but the bones are uploaded for each draw then
+  bool merc_tex_sort = false;
   // (AI-assisted) config distort_copy = rows | full. rows: the distorter's screen copy covers only
   // the 8-pixel columns of tile rows its sprites read, the copy texture goes to VRAM when there is
   // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).
