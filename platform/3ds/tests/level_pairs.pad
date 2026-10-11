@@ -1,0 +1,45 @@
+# (AI-assisted) linear memory with the tightest level pairs loaded (c3l v13 vista tier), and the
+# teleport loads that stop the game. Read the [ctr] textures lines (linear free) between "pair" and
+# "pair-end", the [ctr] loaded lines and [load] lines. ~6 min in the emulator; config sound = off
+# (or the instance muted) unless load timing with sound matters.
+0 wait *target* target-title-wait
+300 continue lavatube-end
+301 wait *target* target-continue
+302 wait *target* target-stance
+303 log pair lavatube+citadel
+900 shot
+1200 log pair-end lavatube+citadel
+1201 continue finalboss-start
+1202 wait *target* target-continue
+1203 wait *target* target-stance
+1204 log pair finalboss+citadel
+1800 shot
+2100 log pair-end finalboss+citadel
+2101 continue robocave-start
+2102 wait *target* target-continue
+2103 wait *target* target-stance
+2104 log pair maincave+robocave
+3000 log pair-end maincave+robocave
+3001 continue darkcave-start
+3002 wait *target* target-continue
+3003 wait *target* target-stance
+3004 log pair maincave+darkcave
+3900 log pair-end maincave+darkcave
+3901 continue sunkenb-start
+3902 wait *target* target-continue
+3903 wait *target* target-stance
+3904 log pair sunken+sunkenb
+4800 log pair-end sunken+sunkenb
+4801 continue ogre-end
+4802 wait *target* target-continue
+4803 wait *target* target-stance
+4804 log pair village3+ogre
+5400 shot
+5700 log pair-end village3+ogre
+5701 continue snow-fort
+5702 wait *target* target-continue
+5703 wait *target* target-stance
+5704 log pair snow+village3
+6300 shot
+6600 log pair-end snow+village3
+6601 exit

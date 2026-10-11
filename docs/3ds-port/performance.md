@@ -255,3 +255,24 @@ Changes:
 Not changed: the loop itself. `target-continue` waits for its levels to be active, so the loop
 could end after the DGO and let the frames run, but the frames would take core 2 time from the
 `.c3l` loader (the long pole on hardware) for a black screen.
+
+### Linear memory with two levels (vista tier, c3l v13)
+
+`platform/3ds/tests/level_pairs.pad` loads the tightest pairs (emulator, Oct 11 batch levels; the
+emulator stores RGBA4 textures as RGBA8, so hardware has more left). Linear free memory with both
+levels in, from the `[ctr] textures` line in the pair's window:
+
+| pair | linear free | largest block |
+|---|---|---|
+| lavatube + citadel | 13603 KB | 13436 KB |
+| finalboss + citadel | 17969 KB | 13580 KB |
+| maincave + robocave | 14073 KB | 13904 KB |
+| maincave + darkcave | 18364 KB | 14092 KB |
+| sunken + sunkenb | 21789 KB | 21656 KB |
+| village3 + ogre | 9769 KB | 9612 KB |
+| snow + village3 | 14089 KB | 9848 KB |
+
+No `could not be created` and no parts left out: the vista tier (15-690 KB per level) fits
+everywhere, nothing to switch off. (The Oct 3 estimate of -4.5 MB for lavatube + citadel predates
+ETC1 merc textures.) The tighter memory at a level load is the C heap (~3 MB free at the peak), see
+"Level loads that stop the game".
