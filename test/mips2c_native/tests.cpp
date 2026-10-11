@@ -18,6 +18,7 @@ void register_sparticle_launcher_tests();
 void register_goal_collide_tests();
 void register_anim_tests();
 void register_shadow_tests();
+void register_bones_tests();  // (AI-assisted)
 
 void register_all() {
   register_collide_func_tests();
@@ -33,5 +34,6 @@ void register_all() {
   register_goal_collide_tests();
   register_anim_tests();
   register_shadow_tests();
+  register_bones_tests();
 }
 }  // namespace tests

@@ -9,12 +9,15 @@
  * shadow-execute, moving-sphere-triangle-intersect and collide-do-primitives (their callees are
  * the functions linked here, called through their stubs like the harness does: the mips2c version
  * in the mips2c run, through C mode's adapter, the native one in the native run).
+ * (AI-assisted) pc-new-bones-mtx-calc: its "mips2c" run is the GOAL function it replaces as goalc
+ * compiled it (goalc_ref/bones.c, built for ARM like the game's C modules).
  *
  * Memory (armbench.py maps it): the program at 0x100000, the C stack below 0x0e100000, the job at
  * 0x0f000000, GOAL memory at 0x10000000.
  */
 
 #include "game/kernel/jak1/kscheme.h"
+#include "test/mips2c_native/goalc_ref/goalc_ref.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
 #include "game/mips2c/mips2c_native.h"
 #include "game/mips2c/mips2c_table.h"
@@ -24,6 +27,16 @@ u8* g_ee_main_mem_exec = (u8*)0x10000000;
 bool g_goalc_enabled = true;
 uint64_t goalc_pp = 0;
 uint64_t goalc_st = 0;
+// (AI-assisted) the runtime state goalc's C code (the goalc references) uses
+extern "C" {
+uint8_t* goalc_mem = (uint8_t*)0x10000000;
+void** goalc_fn_table = nullptr;
+extern const GoalcRefModule goalc_ref_bones;
+}
+// natives read config.ini on the 3DS (none here: their defaults)
+extern "C" int ctr_config_get(const char*, char*, int) {
+  return 0;
+}
 
 //! filled by armbench.py, results written back
 struct Job {
@@ -231,6 +244,7 @@ LINK(moving_sphere_triangle_intersect)
 LINK(ray_sphere_intersect)
 LINK(ray_cylinder_intersect)
 LINK(moving_sphere_sphere_intersect)
+LINK(pc_new_bones_mtx_calc)
 #undef LINK
 }  // namespace Mips2C::jak1
 
@@ -261,6 +275,7 @@ extern "C" void armbench_main() {
   ray_sphere_intersect::link();
   ray_cylinder_intersect::link();
   moving_sphere_sphere_intersect::link();
+  pc_new_bones_mtx_calc::link();
   goalc_st = JOB->st;
   goalc_pp = JOB->pp;
 
@@ -274,6 +289,25 @@ extern "C" void armbench_main() {
     fail(4);
   }
   Mips2C::g_sp = JOB->stack_top;
+  // (AI-assisted) a GOAL function with a native version: the goalc reference, in its module's
+  // segment as the harness loaded it (the symbol's value is the function's stub in it)
+  if (JOB->version == 0 && !strcmp(JOB->function, "pc-new-bones-mtx-calc")) {
+    const GoalcRefModule& m = goalc_ref_bones;
+    m.seg_base[0] = sym_value(m.funcs[0].name) - m.funcs[0].value;
+    for (u32 k = 0; k < m.n_syms; k++) {
+      m.sym_offsets[k] = (s32)(sym_lookup(m.sym_names[k]) - (u32)JOB->st);
+    }
+    const u64* a = JOB->args;
+    goalc_pp = JOB->pp;
+    JOB->v0 = ((goalc_fnx)m.funcs[0].fn)((u32)a[0], (u32)a[1], (u32)a[2], (u32)a[3], (u32)a[4],
+                                         (u32)a[5], (u32)a[6], (u32)a[7], goalc_hi_bits(a[0]),
+                                         goalc_hi_bits(a[1]), goalc_hi_bits(a[2]),
+                                         goalc_hi_bits(a[3]), goalc_hi_bits(a[4]),
+                                         goalc_hi_bits(a[5]), goalc_hi_bits(a[6]),
+                                         goalc_hi_bits(a[7]));
+    JOB->status = 1;
+    return;
+  }
   JOB->v0 = JOB->version == 0 ? Mips2C::run_mips2c(*e, JOB->args, JOB->pp)
                               : Mips2C::run_native(*e, JOB->args, JOB->pp);
   JOB->status = 1;

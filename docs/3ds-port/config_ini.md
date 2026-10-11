@@ -17,6 +17,7 @@ io_on_system_core = off    # on: the game's I/O threads on core 1 (the system co
 mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names
 collide_frag_cache = on    # (AI-assisted) pc-collide-frag-may-hit? keeps each collide mesh's vertex box; off: scans the vertices every call
 collide_native = on        # (AI-assisted) the drawable-tree walks of collide-with-box / fill-from-foreground-using-box in C++; off: the GOAL code
+bones_native = on          # (AI-assisted) the skinning matrices (new-bones-mtx-calc-asm) in C++ / VFP assembly; off: the GOAL code (also off with mips2c_native_off = all or a list naming pc-new-bones-mtx-calc)
 perf_sections = off        # on: per-section timing in the log (slower)
 args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)
 listener = off             # on: Wi-Fi REPL (goalc can connect; 1 MB of RAM)

@@ -74,6 +74,7 @@ LINK(moving_sphere_sphere_intersect)
 LINK(closest_pt_in_triangle)
 LINK(pc_anim_decomp_request)
 LINK(pc_anim_finalize_frame)
+LINK(pc_new_bones_mtx_calc)
 LINK(shadow_execute)
 LINK(shadow_xform_verts)
 LINK(shadow_init_vars)
@@ -227,6 +228,11 @@ int main(int argc, char** argv) {
                            "quaternion-normalize!"}) {
     harness::bind_goalc_reference(name);
   }
+  // (AI-assisted) native of bones.gc: the reference is the GOAL loop it replaces (the symbol bound
+  // too: unicorn/armbench.cpp finds the reference's segment from it)
+  pc_new_bones_mtx_calc::link();
+  harness::use_goalc_reference("pc-new-bones-mtx-calc", "new-bones-mtx-calc-asm");
+  harness::bind_goalc_reference("new-bones-mtx-calc-asm");
 
   tests::register_all();
   const int failed = harness::run_tests(opt);

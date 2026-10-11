@@ -697,8 +697,20 @@ every platform:
   #f: `config.ini collide_native = off` (host `OPENGOAL_COLLIDE_NATIVE=0`).
   `OPENGOAL_COLLIDE_NATIVE_VERIFY=1` (host) runs the GOAL version first on every call and compares
   what both wrote (the collide-cache object, `*collide-list*`).
+- (AI-assisted, Oct 11) `pc-new-bones-mtx-calc` (`native_bones.cpp`): the loop of the GOAL
+  function `new-bones-mtx-calc-asm` (every merc model's skinning matrices, every frame; 0.27 ms per
+  frame in Snowy Mountain on hardware). On the 3DS one VFP assembly block per bone keeps both
+  matrices in the 32 single registers (GCC's C++ spills half of them) and interleaves independent
+  lanes for the 8-cycle multiply-add latency; VMLA / VNMLS round like the separate operations, so
+  the results are bit-identical. Other hosts run the C++ version. ARM instructions per call (20
+  bones): goalc's C 8486, native 5388 (1.6x; ~265 per bone against ~420). The GOAL function calls
+  it first (`#when TARGET_3DS` in bones.gc) and runs its own loop when it returns #f:
+  `config.ini bones_native = off` (host `OPENGOAL_BONES_NATIVE=0`). Tested against the goalc C of
+  the GOAL function (`test/mips2c_native` `pc-new-bones-mtx-calc`; `goalc_ref/bones.c`, made by
+  `extract.py ... bones` from the C of bones.gc without the guard; `unicorn/run.sh --only
+  pc-new-bones-mtx-calc` on ARM in the 3DS's VFP mode).
 
-Still mips2c: the renderers' functions (bones, merc, generic, tie, tfrag, sky, ocean drawing,
+Still mips2c: the renderers' functions (bones-mtx-calc (never called: `*use-new-bones*` is #t), merc, generic, tie, tfrag, sky, ocean drawing,
 ripple-apply-wave-table, ripple-matrix-scale, time-of-day colors, draw-string, textures) and
 `calc-animation-from-spr` (never called: `*use-new-decompressor*` is #t).
 

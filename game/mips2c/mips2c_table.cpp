@@ -71,6 +71,7 @@ namespace method_32_collide_cache { extern void link(); }
 namespace pc_upload_collide_frag { extern void link(); }
 namespace pc_collide_frag_may_hit { extern void link(); }  // (AI-assisted) 3DS
 namespace pc_bsp_collide_with_box { extern void link(); }  // (AI-assisted) 3DS
+namespace pc_new_bones_mtx_calc { extern void link(); }  // (AI-assisted) 3DS
 namespace method_28_collide_cache { extern void link(); }
 namespace method_27_collide_cache { extern void link(); }
 namespace method_29_collide_cache { extern void link(); }
@@ -596,7 +597,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak1::pc_anim_decomp_request::link, jak1::pc_anim_finalize_frame::link}},
      {"bones",
       {jak1::bones_mtx_calc::link, jak1::draw_bones_merc::link,
-       jak1::draw_bones_check_longest_edge_asm::link}},
+       jak1::draw_bones_check_longest_edge_asm::link, jak1::pc_new_bones_mtx_calc::link}},
      {"merc-blend-shape",
       {jak1::blerc_execute::link, jak1::setup_blerc_chains_for_one_fragment::link}},
      {"generic-merc",
