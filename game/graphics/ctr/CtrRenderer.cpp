@@ -153,6 +153,13 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
     {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
      [](const CtrSettings& s) { return s.skin_rows_f24; }},
+    // cb_read_opaque: only when the config turns it on (unknown hardware semantics: GBATEK)
+    {"cb_read_opaque",
+     [](CtrSettings& s, bool on) {
+       static const bool kConfig = s.cb_read_opaque;
+       s.cb_read_opaque = on && kConfig;
+     },
+     [](const CtrSettings& s) { return s.cb_read_opaque; }},
     // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
     // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
     {"early_depth",
@@ -513,6 +520,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_tex_cache_clear(ctr_settings().tex_cache_uploads ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_mip_bias(ctr_settings().mip_bias);                          // (AI-assisted)
   ctr_gpu_set_skin_rows_f24(ctr_settings().skin_rows_f24 ? 1 : 0);         // (AI-assisted)
+  ctr_gpu_set_cb_read_opaque(ctr_settings().cb_read_opaque ? 1 : 0);       // (AI-assisted)
   ctr_gpu_set_early_depth_params(
       ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
       ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
@@ -638,11 +646,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches), {} texture binds without the cache clear",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches), {} texture binds without the cache clear, {} color buffer read switches",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws, gs.unit1_toggles, gs.tex_clears_skipped);
+               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws, gs.unit1_toggles, gs.tex_clears_skipped, gs.cbread_switches);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;

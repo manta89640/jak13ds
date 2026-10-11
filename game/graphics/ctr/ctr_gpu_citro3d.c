@@ -1689,6 +1689,14 @@ void ctr_gpu_set_mip_bias(float bias) {
   s_lod_bias = (u16)(b & 0x1FFF);
 }
 
+/* (AI-assisted) config.ini cb_read_opaque: what the GPU's COLORBUFFER_READ holds (-1: unknown;
+ * a framebuffer bind, at the first draw of each frame, sets it to 0xF) */
+static int g_cb_read_opaque = 0;
+static int s_cbread = -1;
+void ctr_gpu_set_cb_read_opaque(int on) {
+  g_cb_read_opaque = on ? 1 : 0;
+}
+
 /* (AI-assisted) config.ini skin_rows_f24 */
 static int s_skin_f24 = 0;
 void ctr_gpu_set_skin_rows_f24(int on) {
@@ -1852,6 +1860,7 @@ static void frame_state_reset(void) {
   g.last_state_valid = 0;
   g.bound_tex = NULL;
   s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads: the frame's first bind clears */
+  s_cbread = -1;   /* (AI-assisted) cb_read_opaque: the frame's framebuffer bind sets 0xF */
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
   g.mesh_nofog = 0;      /* (AI-assisted) and unit 1 on again with the ramp (bound below) */
   g.unit1_off = 0;
@@ -4021,6 +4030,32 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
                   ((u32)GPU_STENCIL_ZERO << 8);
   } else {
     e.stencilMode &= ~1u;
+  }
+  /* (AI-assisted) cb_read_opaque: no color buffer reads for draws whose result doesn't depend on
+   * it (CTR_BLEND_OVER_CLEAR blends with a constant); a flush before each switch, as pica_bench's
+   * B6 tests do. A framebuffer bind still pending (C3DiF_FrameBuf) writes 0xF after this: then
+   * the next draw decides again. */
+  if (g_cb_read_opaque) {
+    const int want = ((st->blend == CTR_BLEND_OFF || st->blend == CTR_BLEND_OVER_CLEAR) &&
+                      !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX)))
+                         ? 0
+                         : 0xF;
+    if (want != s_cbread) {
+      if (raw) {
+        u32* q = raw_w(raw_ptr(), GPUREG_FRAMEBUFFER_FLUSH, 0xF, 1);
+        raw_end(raw_w(q, GPUREG_COLORBUFFER_READ, 0xF, (u32)want));
+      } else {
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+        GPUCMD_AddWrite(GPUREG_COLORBUFFER_READ, (u32)want);
+      }
+      g.cur.cbread_switches++;
+    }
+    s_cbread = (ctx->flags & (1u << 5)) ? 0xF : want; /* C3DiF_FrameBuf */
+  } else if (s_cbread == 0) {
+    /* switched off while reads were off: back to citro3d's 0xF */
+    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+    GPUCMD_AddWrite(GPUREG_COLORBUFFER_READ, 0xF);
+    s_cbread = 0xF;
   }
   if (!raw) {
     if (memcmp(&e, &ctx->effect, sizeof(e))) {

@@ -294,6 +294,12 @@ void ctr_gpu_set_mip_bias(float bias);
  * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
  * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
 void ctr_gpu_set_skin_rows_f24(int on);
+/* (AI-assisted) config.ini cb_read_opaque: GPUREG_COLORBUFFER_READ = 0 for draws whose color
+ * doesn't depend on the framebuffer (no blending reading it, all four channels written), 0xF
+ * again for the others (a framebuffer flush before each switch). citro3d sets read = write =
+ * the color mask. GBATEK: what read disable does is unknown; pica_bench B6.cbread0.probe bg_ok
+ * says whether pixels of a partly covered block survive. Any time. */
+void ctr_gpu_set_cb_read_opaque(int on);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
  * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
  * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */
@@ -521,6 +527,7 @@ typedef struct {
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
   int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
+  int cbread_switches;     /* (AI-assisted) cb_read_opaque: COLORBUFFER_READ changes */
   int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the

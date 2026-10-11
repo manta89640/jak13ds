@@ -235,6 +235,9 @@ struct CtrSettings {
   // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it for level pool
   // textures (static texels) unless a pool was filled or moved since the last clear
   bool tex_cache_uploads = false;
+  // (AI-assisted) cb_read_opaque: the GPU doesn't read the color buffer for draws that overwrite
+  // it whole (opaque); unknown on hardware (GBATEK), pica_bench B6.cbread0.probe decides. Off
+  bool cb_read_opaque = false;
   // (AI-assisted) hardware hang bisect switches (Oct 3 optimisations; off = the Oct 2 behaviour):
   // new_shaders: the shorter vertex shaders (off: the Oct 2 ctr_basic/mesh/skin/skin_env);
   // asm_tex: the 4x2 group / LDM-STM texture tiling, 64-bit PSMCT32 uploads and SIMD sky loops
