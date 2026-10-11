@@ -92,6 +92,7 @@ compact_textures = on      # sprite, HUD and font textures in 8 / 16-bit formats
 proctex_glows = on         # glows (round gradient textures) from the procedural texture unit: no texels read
 sprite_max_size = 0.5      # world particles and glows at most this fraction of the screen height across (0 = no limit)
 vis_culling = on           # the game's own visibility data hides level parts behind walls and hills (needs .c3l v10 files)
+run_culling = on           # (AI-assisted) a level chunk (200 m cell) that crosses the edge of the view has its pieces tested on their own (the visibility runs: up to 8 tfragments or tie instances; chunks without them in pieces of ~96 triangles), so only what is on screen is sent to the GPU. Bounding spheres made at load (8 bytes per piece, ~30-50 KB per level). Log line: [ctr] l0-tfrag: run culling tested N runs, hid ... per level draw
 raw_cmds = on              # (AI-assisted) draws write their GPU commands themselves instead of through citro3d: less render thread CPU per draw, ~40% fewer command words. off: the citro3d path, for comparing
 vcache_reuse = off         # (AI-assisted) with raw_cmds: a draw with the same vertices and matrices as the one before keeps the GPU's post-vertex cache (a few command words less). Try on hardware: wrong or jumping vertices on models mean it has to stay off
 merc_lod_scale = 0.5       # characters switch to their lower detail models at this fraction of the game's distances (0.05 .. 1)
@@ -109,6 +110,7 @@ fast_clock = on            # steady_clock from the system tick without divides. 
 
 # ---- measuring ----
 gpu_profile = off          # every 2.5 s leaves out one group of renderers and logs what each costs the GPU (flickers); also logs the GPU's own counters once per level (`[ctr] gpu profile <level>: hw busy % ...`: which pipeline stage is busy, and memory traffic per frame; zeros in Azahar)
+stats_period = 15          # (AI-assisted) seconds between the render thread's statistics lines ([ctr] render ms/frame ... triangles, draws; culling); 5 for measuring fixed views
 gpu_counters = off         # (AI-assisted) the GPU's own counters over 10 s of each level, 10 s after it started, with nothing left out of the picture: the same `[ctr] gpu profile <level>: hw busy % ...` line (read through the GSP service, no extra system calls). Off by default: not yet run on hardware
 ```
 

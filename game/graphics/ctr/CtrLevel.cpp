@@ -743,6 +743,47 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
   }
 }
 
+// (AI-assisted) run_culling: the bounding spheres of chunk ci's runs from its vertices (as read
+// from the file) and the file's indices (the draws' first_index still into all of them). The
+// center of the run's bounding box and half its diagonal, in the chunk's quantized units.
+void make_run_spheres(CtrLevelData* out,
+                      u32 ci,
+                      const c3l::Vertex* verts,
+                      const std::vector<u16>& indices) {
+  const auto& ch = out->chunks[ci];
+  for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+    const u32 di = ch.first_draw + k;
+    u32 idx = out->draws[di].first_index;
+    for (u32 r = out->draw_first_run[di]; r < out->draw_first_run[di] + out->draw_run_count[di];
+         r++) {
+      const u32 n = out->vis_runs[r].index_count;
+      int mn[3] = {32767, 32767, 32767}, mx[3] = {-32768, -32768, -32768};
+      bool ok = n > 0 && idx + n <= indices.size();
+      for (u32 i = idx; ok && i < idx + n; i++) {
+        const u16 v = indices[i];
+        ok = v < ch.vertex_count;
+        for (int c = 0; ok && c < 3; c++) {
+          mn[c] = std::min<int>(mn[c], verts[v].pos[c]);
+          mx[c] = std::max<int>(mx[c], verts[v].pos[c]);
+        }
+      }
+      idx += n;
+      if (!ok) {
+        continue;  // stays unknown: never hidden
+      }
+      auto& s = out->run_spheres[r];
+      float d2 = 0;
+      for (int c = 0; c < 3; c++) {
+        s.c[c] = (s16)((mn[c] + mx[c]) >> 1);
+        // the larger half of the extent (the center is rounded down)
+        const float h = (float)std::max(s.c[c] - mn[c], mx[c] - s.c[c]);
+        d2 += h * h;
+      }
+      s.r = (u16)std::min(65534.f, std::ceil(std::sqrt(d2)) + 1.f);
+    }
+  }
+}
+
 // GPU state per draw, so drawing doesn't decode the draw modes every frame, and the drawing order.
 // (AI-assisted) At load, and again when the textures are made later (a repair: the states hold the
 // texture handles).
@@ -1041,6 +1082,35 @@ bool CtrLevels::load_file(const fs::path& path,
       out->chunk_first_run[ci] = first;
     }
   }
+  // (AI-assisted) run_culling: runs for the chunks without visibility runs (their draws in pieces
+  // of kCullRunIndices, never hidden by the visibility data), so the view test can drop the parts
+  // of a chunk that are off screen; then every chunk's runs and their spheres (made with the
+  // meshes below)
+  out->chunk_run_count.assign(out->chunks.size(), 0);
+  if (ctr_settings().run_culling) {
+    constexpr u32 kCullRunIndices = 96 * 3;
+    for (size_t ci = 0; ci < out->chunks.size(); ci++) {
+      const auto& ch = out->chunks[ci];
+      if (ch.vis_run_count) {
+        out->chunk_run_count[ci] = ch.vis_run_count;
+        continue;
+      }
+      const u32 first = (u32)out->vis_runs.size();
+      for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
+        const u32 di = ch.first_draw + k;
+        // every draw is covered (a chunk whose runs are all hidden isn't drawn)
+        const u32 n = out->draws[di].index_count;
+        out->draw_first_run[di] = (u32)out->vis_runs.size();
+        for (u32 i = 0; i < n; i += kCullRunIndices) {
+          out->vis_runs.push_back(c3l::VisRun{(u16)k, 0xffff, std::min(kCullRunIndices, n - i)});
+          out->draw_run_count[di]++;
+        }
+      }
+      out->chunk_first_run[ci] = first;
+      out->chunk_run_count[ci] = (u32)out->vis_runs.size() - first;
+    }
+    out->run_spheres.assign(out->vis_runs.size(), CtrLevelData::RunSphere{{0, 0, 0}, 0xffff});
+  }
 
   std::vector<c3l::Texture> texs;
   if (!f.read_array(hdr.textures_offset, hdr.num_textures, &texs)) {
@@ -1103,9 +1173,12 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     if (mesh >= 0) {
       memcpy(idst, indices.data() + first, (end - first) * sizeof(u16));
-      mesh = ctr_gpu_mesh_end(
-          mesh, f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex), vdst,
-                       ch.vertex_count * sizeof(c3l::Vertex)));
+      const bool read_ok = f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
+                                  vdst, ch.vertex_count * sizeof(c3l::Vertex));
+      if (read_ok && !out->run_spheres.empty()) {
+        make_run_spheres(out, (u32)out->meshes.size(), (const c3l::Vertex*)vdst, indices);
+      }
+      mesh = ctr_gpu_mesh_end(mesh, read_ok);
     }
     out->meshes.push_back(mesh);
     // make the draws relative to the mesh's index buffer
@@ -1773,10 +1846,17 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_far_levels = m_level_draws = 0;
   }
   if (rs.log_now && m_vis_frames) {
-    lg::info("[ctr] {}: visibility hid {:.0f} chunks and {:.0f} tris per frame ({} frames with data)",
+    lg::info("[ctr] {}: visibility hid {:.0f} chunks, {:.0f} tris of partly drawn chunks hidden (visibility and view) per frame ({} frames with data)",
              m_name, (double)m_vis_chunks / m_vis_frames, (double)m_vis_tris / m_vis_frames,
              m_vis_frames);
     m_vis_chunks = m_vis_tris = m_vis_frames = 0;
+  }
+  if (rs.log_now && m_cull_frames) {
+    lg::info("[ctr] {}: run culling tested {:.0f} runs, hid {:.0f} chunks and {:.0f} tris per level "
+             "draw ({} level draws)",
+             m_name, (double)m_cull_runs / m_cull_frames, (double)m_cull_chunks / m_cull_frames,
+             (double)m_cull_tris / m_cull_frames, m_cull_frames);
+    m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
 }
 
@@ -1863,6 +1943,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   constexpr float kYScale = 512.f / 448.f;
   m_visible.clear();
   m_visible_slot.assign(lev.chunks.size(), -1);
+  // (AI-assisted) run_culling (needs the spheres made at load)
+  const bool run_culling = settings.run_culling && !lev.run_spheres.empty();
+  m_cull_frames += run_culling;
+  if (m_run_shown.size() < lev.vis_runs.size()) {
+    m_run_shown.resize(lev.vis_runs.size());
+  }
   if (lev.chunk_state.size() != lev.chunks.size()) {
     lev.chunk_state.assign(lev.chunks.size(), 0);
   }
@@ -1923,22 +2009,82 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     } else if (ch.lod_tier == 3 || !lod_ok) {
       continue;
     }
-    if (!sphere_in_view(ch.bsphere, cam.planes)) {
-      continue;
-    }
-    bool partly = false;
-    if (m_vis && ch.vis_run_count && (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3))) {
-      u32 shown = 0;
-      const u32 r0 = lev.chunk_first_run[ci];
-      for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
-        const u16 id = lev.vis_runs[r].vis;
-        shown += id == 0xffff || (m_vis[id >> 3] & (0x80 >> (id & 7)));
-      }
-      if (!shown) {
-        m_vis_chunks++;
+    // (AI-assisted) the view test: the chunk's sphere against the four planes; one that crosses a
+    // plane (run_culling) has its runs tested on their own
+    // (AI-assisted) the view test: the chunk's sphere against the four planes; a chunk that crosses
+    // planes (run_culling) has its runs tested against those planes on their own
+    u32 cross = 0;  // planes the chunk's sphere crosses
+    {
+      const float* s = ch.bsphere;
+      const math::Vector4f acc =
+          cam.planes[0] * s[0] + cam.planes[1] * s[1] + cam.planes[2] * s[2] - cam.planes[3];
+      if (!(acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3])) {
         continue;
       }
-      partly = shown < ch.vis_run_count;
+      if (run_culling && lev.chunk_run_count[ci]) {
+        for (int i = 0; i < 4; i++) {
+          cross |= acc[i] < s[3] ? 1u << i : 0u;
+        }
+      }
+    }
+    const bool straddles = cross != 0;
+    bool partly = false;
+    const bool vis_test =
+        m_vis && ch.vis_run_count && (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3));
+    if (vis_test || straddles) {
+      // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
+      u32 shown = 0, view_hidden = 0, view_tris = 0;
+      const u32 r0 = lev.chunk_first_run[ci];
+      const u32 nr = vis_test ? ch.vis_run_count : lev.chunk_run_count[ci];
+      // the crossed planes: distance of the chunk's origin, and its change per quantized unit
+      float po[4], pk[4][3];
+      int np = 0;
+      if (straddles) {
+        for (int i = 0; i < 4; i++) {
+          if (cross & (1u << i)) {
+            po[np] = cam.planes[0][i] * ch.origin[0] + cam.planes[1][i] * ch.origin[1] +
+                     cam.planes[2][i] * ch.origin[2] - cam.planes[3][i];
+            for (int c = 0; c < 3; c++) {
+              pk[np][c] = cam.planes[c][i] * ch.scale;
+            }
+            np++;
+          }
+        }
+        m_cull_runs += nr;
+      }
+      const float scale = ch.scale;
+      for (u32 r = r0; r < r0 + nr; r++) {
+        bool s = true;
+        if (vis_test) {
+          const u16 id = lev.vis_runs[r].vis;
+          s = id == 0xffff || (m_vis[id >> 3] & (0x80 >> (id & 7)));
+        }
+        if (s && straddles) {
+          const auto& rs = lev.run_spheres[r];
+          if (rs.r != 0xffff) {
+            const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
+            for (int i = 0; i < np && s; i++) {
+              s = po[i] + pk[i][0] * x + pk[i][1] * y + pk[i][2] * z > rad;
+            }
+            if (!s) {
+              view_hidden++;
+              view_tris += lev.vis_runs[r].index_count / 3;
+            }
+          }
+        }
+        m_run_shown[r] = s;
+        shown += s;
+      }
+      m_cull_tris += view_tris;
+      if (!shown) {
+        if (view_hidden) {
+          m_cull_chunks++;
+        } else {
+          m_vis_chunks++;
+        }
+        continue;
+      }
+      partly = shown < nr;
     }
     // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
     // The translation is done in double: world coordinates are large.
@@ -2013,7 +2159,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const u32 r0 = lev.draw_first_run[di];
     for (u32 r = r0; r < r0 + lev.draw_run_count[di]; r++) {
       const auto& run = lev.vis_runs[r];
-      const bool shown = run.vis == 0xffff || (m_vis[run.vis >> 3] & (0x80 >> (run.vis & 7)));
+      const bool shown = m_run_shown[r];  // (AI-assisted) visibility bit and view test
       if (shown) {
         if (!open) {
           open = true;

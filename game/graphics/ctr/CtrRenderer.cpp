@@ -67,8 +67,8 @@ const ProfileMode kProfileModes[] = {
 constexpr int kProfileModeCount = sizeof(kProfileModes) / sizeof(kProfileModes[0]);
 constexpr double kProfileModeMs = 2500.0;  // per mode
 constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
-// (AI-assisted) the render thread's statistics: one burst of lines this often
-constexpr double kStatsPeriodMs = 15000.0;
+// (AI-assisted) the render thread's statistics: one burst of lines this often (config.ini
+// stats_period, seconds)
 // (AI-assisted) config.ini gpu_counters: how long each level's GPU counters run (the hotspot
 // sampler's 16-bit counts hold ~16 s at 268 MHz)
 constexpr double kHwCountersMs = 10000.0;
@@ -335,7 +335,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) one burst every 15 s: it was every 300 frames or 5 s, two conditions that
   // fired close together (double bursts, which stalled the render thread while logging was
   // synchronous)
-  m_rs.log_now = m_rs.last_log_ms == 0 || t0 - m_rs.last_log_ms >= kStatsPeriodMs;
+  m_rs.log_now = m_rs.last_log_ms == 0 || t0 - m_rs.last_log_ms >= ctr_settings().stats_period * 1000.0;
   if (m_rs.log_now) {
     m_rs.last_log_ms = t0;
     ctr_gpu_want_detailed_stats();  // texture slots and free memory: only for these lines

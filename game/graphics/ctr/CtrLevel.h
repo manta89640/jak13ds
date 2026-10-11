@@ -77,6 +77,17 @@ struct CtrLevelData {
   std::vector<u32> chunk_first_run;
   std::vector<u32> draw_first_run;
   std::vector<u16> draw_run_count;
+  // (AI-assisted) config.ini run_culling: each run's bounding sphere, made at load from the
+  // chunk's vertices, in the chunk's quantized units (world = origin + c * scale, radius r *
+  // scale); r = 0xffff: unknown (the mesh wasn't made at load), never hidden. Chunks without
+  // visibility runs get runs made at load for this (their draws in pieces, vis 0xffff).
+  // chunk_run_count: all of a chunk's runs (Chunk::vis_run_count: only the file's).
+  struct RunSphere {
+    s16 c[3];
+    u16 r;
+  };
+  std::vector<RunSphere> run_spheres;
+  std::vector<u32> chunk_run_count;
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
@@ -338,6 +349,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // what it hid (statistics)
   const u8* m_vis = nullptr;
   u64 m_vis_chunks = 0, m_vis_tris = 0, m_vis_frames = 0;
+  // (AI-assisted) run_culling: per run of the level being drawn, shown this frame (filled for the
+  // chunks tested run by run); statistics: runs tested, triangles and chunks the view test hid
+  std::vector<u8> m_run_shown;
+  u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
   // this frame's visible chunks and draws (kept to avoid allocations)
   struct VisibleChunk {
     u32 chunk;

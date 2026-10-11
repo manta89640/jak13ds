@@ -101,6 +101,9 @@ struct CtrSettings {
   // default: the hotspot profiler registers have never run on hardware (a GPU that stalls on its
   // result FIFO would hang the game); turn on for a diagnostic run.
   bool gpu_counters = false;
+  // (AI-assisted) seconds between the render thread's statistics bursts (frame times, triangles,
+  // draws, culling); shorter for measuring fixed views (more SD card writes)
+  float stats_period = 15.f;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
@@ -127,6 +130,10 @@ struct CtrSettings {
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;
+  // (AI-assisted) a level chunk crossing the edge of the view has its pieces (visibility runs, or
+  // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
+  // screen are drawn (bounding spheres made at load, 8 bytes per piece)
+  bool run_culling = true;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
