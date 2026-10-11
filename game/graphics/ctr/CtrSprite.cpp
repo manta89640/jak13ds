@@ -223,6 +223,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   // the distorter first (like Sprite3::render_jak1): it reads the screen as drawn so far
   if (read_distorter(dma, rs) && ctr_settings().sprites && ctr_settings().distort) {
     const double td = ctr_gpu_time_ms();
+#ifndef __3DS__
+    ctr_gpu_soft_bucket("sprite-distort");
+#endif
     draw_distorter();
     m_distort_ms = ctr_gpu_time_ms() - td;
   }
@@ -289,6 +292,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     draw_chunk(count, program == kProgSprites2dGrp0 ? MODE_2D : MODE_3D);
   }
 
+#ifndef __3DS__
+  ctr_gpu_soft_bucket("sprite-world");
+#endif
   flush();
   // fake shadow (nop + flushe)
   if (dma.current_tag_offset() != rs.next_bucket) {
@@ -310,6 +316,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
       }
     }
   }
+#ifndef __3DS__
+  ctr_gpu_soft_bucket("sprite-hud");
+#endif
   flush();
   skip_rest();
 }
@@ -702,8 +711,8 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
               amin = std::min(amin, c >> 24);
               amax = std::max(amax, c >> 24);
             }
-            lg::info("[sprite dump {}] tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
-                     dumped.size(), ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
+            lg::info("[sprite dump {}] handle {} tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
+                     dumped.size(), st.tex, ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
                      ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
             try {
               file_util::write_rgba_png(

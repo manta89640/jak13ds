@@ -522,6 +522,15 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   name[127] = 0;
   input += 128;
 
+#ifndef __3DS__
+  {
+    // (AI-assisted) snow-gpu-audit: statistics per model (env CTR_SOFT_MERC_MODELS)
+    static const bool per_model = getenv("CTR_SOFT_MERC_MODELS") != nullptr;
+    if (per_model) {
+      ctr_gpu_soft_bucket((std::string("m:") + name).c_str());
+    }
+  }
+#endif
   const CtrLevelData* lev = nullptr;
   const CtrMercModelData* model = m_levels->find_merc_model(name, &lev);
   m_stats.models++;

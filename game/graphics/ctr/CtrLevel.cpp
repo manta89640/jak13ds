@@ -1986,6 +1986,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
+#ifndef __3DS__
+    {
+      // (AI-assisted) snow-gpu-audit: statistics per chunk kind and LOD tier
+      static const char* kKind[4] = {"?", "tfrag", "tie", "shrub"};
+      const auto& chs = lev.chunks[vc.chunk];
+      ctr_gpu_soft_bucket(fmt::format("{}/{}{}", m_name.substr(0, 2), kKind[chs.kind & 3], chs.lod_tier).c_str());
+    }
+#endif
     if (!vc.partly || !lev.draw_run_count[di]) {
       ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk],
                                  dr.first_index, dr.index_count);

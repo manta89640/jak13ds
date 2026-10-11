@@ -469,6 +469,10 @@ typedef struct {
   unsigned int linear_largest;
 } ctr_gpu_stats;
 void ctr_gpu_get_stats(ctr_gpu_stats* out);
+#ifndef __3DS__
+/* (AI-assisted) snow-gpu-audit: the renderer the next draws belong to (soft backend statistics) */
+void ctr_gpu_soft_bucket(const char* name);
+#endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);
 
