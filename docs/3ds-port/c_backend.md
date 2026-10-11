@@ -69,6 +69,14 @@ modifies the other copy's static data, and reads freed memory after the second l
 A fix would give each linked copy its own segment bases (for example, one module instance per
 link, with the bases passed through the stub).
 
+(AI-assisted, Oct 2026) Not reachable in Jak 1: no level DGO shares an object with GAME.CGO, and
+the objects that several level DGOs share (racer/target-racer: fic lav mis ogr rol; flutflut: sno
+swa; oracle/villagep-obs: vi1 vi2 vi3 cit; battlecontroller: mis swa cit; blocking-plane,
+launcherdoor, snow-bunny, firecanyon-obs, babak-with-cannon, mistycannon, static-screen) are only
+in levels that are never neighbours (two-level load slots). Not checked: whether a warp-gate
+transition between villages (vi1/vi2/vi3 share oracle and villagep-obs) can keep the old village
+loaded while the new one links.
+
 ## Runtime duties
 
 - Own `goalc_mem`, `goalc_st`, `goalc_pp`, `goalc_fn_table`, `goalc_get_sp`, `goalc_break`,
@@ -400,6 +408,19 @@ often hoisted out of loops). Not measured on hardware yet.
   (natively it holds whatever the stack held, which differs between x86 and C, see the Misty lurker
   normal), or `-DGOALC_STACK_ZERO`. Host: `OPENGOAL_C_BACKEND_CC="cc -DGOALC_STACK_POISON"` and an
   empty `out/jak1/cmod`.
+- Process stacks on the fake scratchpad: most processes (and their trans hooks) run on the
+  "scratchpad stack", which the PC port starts at `*fake-scratchpad-stack*` + 32 kB, growing down
+  towards the scratchpad data at + 0..16 kB; the temporary cpu-thread of a trans hook is stored at
+  stack-top - 24 kB, inside that data. In C mode the stack top is + 64 kB instead (`activate`,
+  gkernel.gc): the 128 kB allocation aligned to 64 kB always contains it and nothing else uses
+  + 32..64 kB (checked on the host: untouched over 300,000 process runs and level loads), so
+  stacks and temporary threads are 16..32 kB clear of the scratchpad data, at no memory cost.
+  Why: C frames on ARM32 are bigger than native ones (collide-cache functions up to 1.4 kB, 4x
+  the host's), and on PC hosts the module `.so` files are `dlopen`ed while a level links, inside
+  the display process: dyld then uses ~20 kB of the GOAL stack (27 kB deep in total), which ran
+  into the scratchpad data with the native layout. Measured on the host in gameplay (level
+  sweeps): game processes use up to ~5 kB of stack, display ~3.5 kB, the dram stack ~5.4 kB
+  (sidekick, target).
 - Checked and identical to x86: integer division and modulo (division by zero gives 0 instead of
   a trap), shift counts (masked to 6 bits), 32-bit multiply sign extension, 128-bit lane ops,
   register class moves, `minss`/`maxss` NaN operand order. Memory: 64-bit accesses compile to
