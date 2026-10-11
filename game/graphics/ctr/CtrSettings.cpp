@@ -147,6 +147,8 @@ CtrSettings load() {
       } else {
         lg::warn("[ctr] {}:{}: shadows = {}: expected full, blob or off", path.string(), n, v);
       }
+    } else if (key == "shadow_casters") {
+      s.shadow_casters = std::clamp(std::atoi(v.c_str()), 0, 64);  // (AI-assisted)
     } else if (key == "sky") {
       s.sky = parse_bool(v);
     } else if (key == "overlap") {
@@ -228,7 +230,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "ocean {} sky {} distort {} distort_copy {} envmap {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "ocean {} sky {} distort {} distort_copy {} envmap {} shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
@@ -249,6 +251,7 @@ std::string CtrSettings::summary() const {
       : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"
                                                            : "blob")
                                     : "off",
+      shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",

@@ -7,10 +7,13 @@
 #include "CtrShadow.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "common/dma/dma.h"
 #include "common/log/log.h"
+
+#include "game/graphics/ctr/CtrSettings.h"
 
 namespace {
 // VU1 data memory (shadow-vu1.gc, Shadow_PS2.cpp), in quadwords
@@ -156,6 +159,9 @@ void CtrShadowVolumes::begin(ctr_clip_vertex* verts, int vert_cap, u16* front, u
   m_ntop = m_ndual = 0;
   m_have_clip = false;
   m_stats = Stats();
+  m_keep = nullptr;
+  m_keep_n = 0;
+  m_obj_index = 0;
 }
 
 void CtrShadowVolumes::set_output(ctr_clip_vertex* verts, u16* front) {
@@ -166,6 +172,35 @@ void CtrShadowVolumes::set_output(ctr_clip_vertex* verts, u16* front) {
 bool CtrShadowVolumes::starts_object(const DmaTransfer& t) {
   const VifCode v1 = t.vifcode1();
   return v1.kind == VifCode::Kind::UNPACK_V4_32 && VifCodeUnpack(v1).addr_qw == kVuTop;
+}
+
+float CtrShadowVolumes::object_score(const DmaTransfer& t) {
+  const VifCode v1 = t.vifcode1();
+  const int num = std::min(v1.num ? (int)v1.num : 256, kTableSize);
+  if (t.size_bytes < (u32)num * 16 || num <= 0) {
+    return 0.f;
+  }
+  // the vertex table is in camera space (game units, 4096 per meter)
+  float lo[3] = {kMaxCamera, kMaxCamera, kMaxCamera}, hi[3] = {-kMaxCamera, -kMaxCamera, -kMaxCamera};
+  const float* v = (const float*)t.data;
+  for (int i = 0; i < num; i++, v += 4) {
+    for (int c = 0; c < 3; c++) {
+      if (!(v[c] < kMaxCamera && v[c] > -kMaxCamera)) {
+        return 0.f;  // (NaN too) the object is left out later anyway
+      }
+      lo[c] = std::min(lo[c], v[c]);
+      hi[c] = std::max(hi[c], v[c]);
+    }
+  }
+  float r2 = 0.f, d2 = 0.f;
+  for (int c = 0; c < 3; c++) {
+    const float h = 0.5f * (hi[c] - lo[c]), m = 0.5f * (hi[c] + lo[c]);
+    r2 += h * h;
+    d2 += m * m;
+  }
+  const float r = std::sqrt(r2);
+  // (half a meter as the nearest distance: anything closer is as big as it gets)
+  return (r + 1.f) / std::max(std::sqrt(d2) - r, 2048.f);
 }
 
 void CtrShadowVolumes::make_clip_matrix() {
@@ -372,6 +407,12 @@ void CtrShadowVolumes::transfer(const DmaTransfer& t) {
       m_ndual = 0;
       m_obj_open = true;
       m_obj_transformed = m_obj_dropped = m_obj_any = false;
+      // (AI-assisted) shadow_casters: not one of the biggest on screen
+      const int k = m_obj_index++;
+      if (m_keep && k < m_keep_n && !m_keep[k]) {
+        m_obj_dropped = true;
+        m_stats.capped++;
+      }
     } else if (up.addr_qw == kVuDual) {
       if (m_obj_open && !m_obj_transformed) {
         m_dual = data;
@@ -474,6 +515,33 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
               CtrShadowVolumes::kMaxIndices);
   m_reserved = false;
   bool no_room = false;
+  // (AI-assisted) config shadow_casters: only the N objects that look biggest from the camera
+  // (nearest / largest); a first pass over the bucket's DMA scores each object's vertex table
+  const int cap = ctr_settings().shadow_casters;
+  if (cap > 0) {
+    m_scores.clear();
+    DmaFollower scan = dma;
+    while (scan.current_tag_offset() != rs.next_bucket) {
+      const auto t = scan.read_and_advance();
+      if (CtrShadowVolumes::starts_object(t)) {
+        m_scores.push_back(CtrShadowVolumes::object_score(t));
+      }
+    }
+    const int n = (int)m_scores.size();
+    if (n > cap) {
+      m_order.resize(n);
+      for (int i = 0; i < n; i++) {
+        m_order[i] = i;
+      }
+      std::nth_element(m_order.begin(), m_order.begin() + (cap - 1), m_order.end(),
+                       [&](int a, int b) { return m_scores[a] > m_scores[b]; });
+      m_keep.assign(n, 0);
+      for (int i = 0; i < cap; i++) {
+        m_keep[m_order[i]] = 1;
+      }
+      m_vol.set_keep(m_keep.data(), n);
+    }
+  }
   while (dma.current_tag_offset() != rs.next_bucket) {
     const auto t = dma.read_and_advance();
     if (!m_reserved && !no_room && CtrShadowVolumes::starts_object(t)) {
@@ -500,9 +568,10 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now) {
     const auto& st = m_vol.stats();
-    lg::debug("[ctr] shadow: {} objects ({} left out), {} vertices, {} front + {} back triangles, "
-              "{} rectangles{}; {} bad entries, {} bad packets, {} without camera",
-              st.objects, st.dropped_objects, m_vol.vert_count(), m_vol.front_count() / 3,
+    lg::debug("[ctr] shadow: {} objects ({} left out, {} over shadow_casters), {} vertices, {} "
+              "front + {} back triangles, {} rectangles{}; {} bad entries, {} bad packets, {} "
+              "without camera",
+              st.objects, st.dropped_objects, st.capped, m_vol.vert_count(), m_vol.front_count() / 3,
               m_vol.back_count() / 3, m_vol.rect_count(),
               m_vol.full_screen() ? " (full screen)" : "", st.bad_entries, st.bad_packets,
               st.no_camera);

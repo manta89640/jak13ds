@@ -74,6 +74,9 @@ struct CtrSettings {
   enum class ShadowMode { Off, Blob, Full };
   ShadowMode shadows = ShadowMode::Full;
   bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
+  // (AI-assisted) shadows = full: at most this many objects' shadows per frame, the ones that look
+  // biggest from the camera (bounding sphere over distance: Jak's normally is one); 0 = all
+  int shadow_casters = 6;
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
