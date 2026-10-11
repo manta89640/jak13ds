@@ -101,6 +101,10 @@ struct CtrSettings {
   // default: the hotspot profiler registers have never run on hardware (a GPU that stalls on its
   // result FIFO would hang the game); turn on for a diagnostic run.
   bool gpu_counters = false;
+  // (AI-assisted) the GSP's performance log: how long the GPU's command lists (P3D), display
+  // transfers (PPF) and memory fills (PSC) took per frame, against the fence's busy time
+  // ([ctr] gpu perflog, once per stats window). One GSP request per window; hardware only.
+  bool gpu_perflog = false;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,

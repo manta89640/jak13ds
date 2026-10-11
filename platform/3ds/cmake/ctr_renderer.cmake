@@ -61,6 +61,7 @@ endforeach()
 
 target_sources(og3ds_port PRIVATE
   ${OG_ROOT}/game/graphics/ctr/ctr_gpu_citro3d.c
+  ${OG_ROOT}/game/graphics/ctr/ctr_gpu_bench.c
   ${OG3DS_SHADER_CS}
 )
 target_include_directories(og3ds_port PRIVATE ${OG_ROOT})

@@ -25,6 +25,7 @@
 #ifdef __3DS__
 extern "C" void ctr_boot_mark(const char* step);  // platform/3ds/port/ctr_port.c
 extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_port.c
+#include "game/graphics/ctr/ctr_gpu_bench.h"  // (AI-assisted) gpu_perflog, pica_bench
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
@@ -496,6 +497,15 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         }
       }
       lg::info("[ctr] build ms/frame by renderer:{}", by_name);
+#ifdef __3DS__
+      if (ctr_settings().gpu_perflog) {
+        char pl[512];
+        if (ctr_gpu_perflog_line(pl, sizeof(pl), m_timing.frames, m_timing.gpu_draw_ms,
+                                 m_timing.gpu_busy_ms, m_timing.gpu_busy_frames) > 0) {
+          lg::info("{}", pl);
+        }
+      }
+#endif
       if (ctr_settings().auto_detail) {
         const auto& s = ctr_settings();
         const float t = m_auto.t;
@@ -823,6 +833,13 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
   ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);
+#ifdef __3DS__
+  if (ctr_settings().gpu_perflog) {
+    // (AI-assisted) the GSP's performance log, read once per stats window (render_frame)
+    const int r = ctr_gpu_perflog_start();
+    lg::info("[ctr] gpu perflog: {}", r == 0 ? "on" : fmt::format("refused ({:#x})", (u32)r));
+  }
+#endif
   if (ctr_settings().pipeline) {
     lg::info("[ctr] pipeline (CPU builds the next frame while the GPU draws): {}",
              ctr_gpu_set_pipeline(1) ? "on" : "FAILED (no linear memory), off");

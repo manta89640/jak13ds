@@ -171,6 +171,8 @@ CtrSettings load() {
       s.gpu_profile = parse_bool(v);
     } else if (key == "gpu_counters") {
       s.gpu_counters = parse_bool(v);
+    } else if (key == "gpu_perflog") {
+      s.gpu_perflog = parse_bool(v);  // (AI-assisted)
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
@@ -229,7 +231,7 @@ std::string CtrSettings::summary() const {
       "ocean {} sky {} distort {} envmap {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
-      "fast_clock {}{}{}{}{}",
+      "fast_clock {}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
       auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms)", shrub_distance,
@@ -252,7 +254,8 @@ std::string CtrSettings::summary() const {
       sprite_max_size, vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
-      gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",
+      gpu_counters ? "" : " gpu_counters off",
+      gpu_perflog ? " gpu_perflog" : "", depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");
 }
 
