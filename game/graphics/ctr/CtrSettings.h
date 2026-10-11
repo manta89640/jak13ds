@@ -69,6 +69,12 @@ struct CtrSettings {
   // drawn draw by draw across the instances: one texture bind per draw of the model instead of
   // per instance, but the bones are uploaded for each draw then
   bool merc_tex_sort = false;
+  // (AI-assisted) models with only lod0 (the yeti, ...) switch to the converter's generated low LOD
+  // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
+  // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod
+  bool merc_gen_lod = true;
+  // config merc_lod_scale (also read by kmachine.cpp for the game's own LOD distances)
+  float merc_lod_scale = 0.5f;
   // (AI-assisted) config distort_copy = rows | full. rows: the distorter's screen copy covers only
   // the 8-pixel columns of tile rows its sprites read, the copy texture goes to VRAM when there is
   // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).

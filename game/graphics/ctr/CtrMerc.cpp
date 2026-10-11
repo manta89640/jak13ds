@@ -198,6 +198,12 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
   flush_queues();
+  // (AI-assisted) merc_gen_lod: forget instances not drawn for 10 s
+  if (++m_frame % 300 == 0) {
+    for (auto it = m_gen_lod.begin(); it != m_gen_lod.end();) {
+      it = m_frame - it->second.frame > 300 ? m_gen_lod.erase(it) : std::next(it);
+    }
+  }
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
   // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
   // them) after a few seconds of updates
@@ -218,10 +224,10 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_mod_ms = m_mod_gather_ms = 0;
   }
   if (rs.log_now && m_stats.models) {
-    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones), {} draws, {} envmap batches, "
-              "{} draws sorted by texture",
-              m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.draws,
-              m_stats.env_batches, m_stats.sorted_draws);
+    lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
+              "{} draws, {} envmap batches, {} draws sorted by texture",
+              m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
+              m_stats.draws, m_stats.env_batches, m_stats.sorted_draws);
     m_stats = Stats();
   }
 }
@@ -720,7 +726,28 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const bool env_batch = ctr_settings().envmap_batch || tex_sort;
   u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
   u32 model_rank = ~0u;
-  for (const auto& draw : model->draws) {
+  // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
+  // (the yeti) when its first bone is further from the camera than max(25 m, 12.5 x the model's
+  // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
+  // address of its bone matrices)
+  const std::vector<c3l::MercDraw>* draws = &model->draws;
+  if (!model->gen_draws.empty() && ctr_settings().merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
+      slots[0] < 128) {
+    u32 key;
+    memcpy(&key, &matrix_array[0], 4);
+    const math::Vector4f& t = bones[slots[0]].tmat[3];
+    const float d = std::sqrt(t.x() * t.x() + t.y() * t.y() + t.z() * t.z()) * (1.f / 4096.f);
+    const float size_m = model->scale * 32767.f * (1.f / 4096.f);
+    const float at = std::max(25.f, 12.5f * size_m) * ctr_settings().merc_lod_scale;
+    auto& g = m_gen_lod[key];
+    g.frame = m_frame;
+    g.low = g.low ? d > 0.9f * at : d > 1.1f * at;
+    if (g.low) {
+      draws = &model->gen_draws;
+      m_stats.gen_lod++;
+    }
+  }
+  for (const auto& draw : *draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
     }
@@ -829,10 +856,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         q_lights = queue_floats(light_data, 28);
       }
       if (model_rank == ~0u) {
-        auto it = std::find(m_q_models.begin(), m_q_models.end(), (const void*)model);
+        auto it = std::find(m_q_models.begin(), m_q_models.end(), (const void*)draws);
         model_rank = (u32)(it - m_q_models.begin());
         if (it == m_q_models.end()) {
-          m_q_models.push_back(model);
+          m_q_models.push_back(draws);
         }
       }
       QueuedDraw q;
@@ -846,7 +873,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       q.first_index = (int)draw.first_index;
       q.index_count = (int)draw.index_count;
       q.model_rank = model_rank;
-      q.draw_index = (u32)(&draw - model->draws.data());
+      q.draw_index = (u32)(&draw - draws->data());
       m_q_opaque.push_back(q);
       m_stats.draws++;
       continue;

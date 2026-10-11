@@ -231,6 +231,10 @@ struct MercDraw {
                         // (CtrEyeRenderer) to use
 };
 constexpr uint8_t kMercEnvmapDraw = 0xfe;
+// (AI-assisted) a model named <name> + this is <name>'s generated low LOD (same vertices: same
+// first_vertex and vertex_count; draws and indices of its own, ctr_level_converter --gen-lod). No
+// layout change: older readers load it as one more model, which nothing asks for.
+constexpr char kMercGenLodSuffix[] = "~genlod";
 static_assert(sizeof(MercDraw) == 48);
 
 struct MercVertex {

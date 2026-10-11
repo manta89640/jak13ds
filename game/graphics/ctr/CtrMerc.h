@@ -12,6 +12,7 @@
  * unpacked from it each frame like Merc2::model_mod_draws (apply_mod).
  */
 
+#include <unordered_map>
 #include <vector>
 
 #include "common/math/Vector.h"
@@ -60,6 +61,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int bad_bones = 0;
     int env_batches = 0;  // (AI-assisted) envmap_batch: queues drawn
     int sorted_draws = 0;  // (AI-assisted) merc_tex_sort: draws drawn from the queue
+    int gen_lod = 0;       // (AI-assisted) merc_gen_lod: models drawn with the generated LOD
   };
 
  private:
@@ -95,6 +97,14 @@ class CtrMercRenderer : public CtrBucketRenderer {
   std::vector<const void*> m_q_models;  // model rank -> model
   void flush_opaque();
   void flush_queues();
+  // (AI-assisted) merc_gen_lod: per instance (the address of its bone matrices) whether it is
+  // drawn with the generated low LOD, and the frame it was last seen
+  struct GenLodState {
+    bool low = false;
+    u32 frame = 0;
+  };
+  std::unordered_map<u32, GenLodState> m_gen_lod;
+  u32 m_frame = 0;
 
   CtrLevels* m_levels;
   const class CtrEyeRenderer* m_eyes = nullptr;

@@ -134,6 +134,10 @@ CtrSettings load() {
       s.distort = parse_bool(v);
     } else if (key == "envmap") {
       s.envmap = parse_bool(v);
+    } else if (key == "merc_gen_lod") {
+      s.merc_gen_lod = parse_bool(v);  // (AI-assisted)
+    } else if (key == "merc_lod_scale") {
+      s.merc_lod_scale = std::clamp(f, 0.05f, 1.f);  // (AI-assisted) (kmachine.cpp reads it too)
     } else if (key == "merc_tex_sort") {
       s.merc_tex_sort = parse_bool(v);  // (AI-assisted)
     } else if (key == "envmap_batch") {
@@ -221,7 +225,7 @@ CtrSettings load() {
     } else if (key == "sound" || key == "sound_core" || key == "io_on_system_core" ||
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
-               key == "debug_log" || key == "particle_density" || key == "merc_lod_scale" ||
+               key == "debug_log" || key == "particle_density" ||
                key == "io_checksum" || key == "anim_lod" || key == "anim_native" ||
                key == "io_cache" || key == "log_async") {
       // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,
@@ -240,7 +244,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
       "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
@@ -256,6 +260,7 @@ std::string CtrSettings::summary() const {
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
       sky ? "on" : "off", clouds ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
+      merc_gen_lod ? "on" : "off", merc_lod_scale,
       // (AI-assisted) with depth16, full falls back to blob (no stencil)
       shadows == ShadowMode::Full   ? "full"
       : shadows == ShadowMode::Blob ? (shadows_full_wanted ? "blob (full needs the stencil: depth16)"

@@ -1185,6 +1185,17 @@ bool CtrLevels::load_file(const fs::path& path,
       }
     }
     std::vector<c3l::MercVertex> mverts;
+    // (AI-assisted) generated low LODs (c3l::kMercGenLodSuffix): the model they belong to (same
+    // vertices) gets their draws as gen_draws, in one mesh with its own
+    std::unordered_map<std::string, u32> gen_of;
+    const size_t gen_suffix_len = strlen(c3l::kMercGenLodSuffix);
+    for (u32 mi = 0; mi < models.size(); mi++) {
+      const std::string n(models[mi].name, strnlen(models[mi].name, sizeof(models[mi].name)));
+      if (n.size() > gen_suffix_len &&
+          n.compare(n.size() - gen_suffix_len, gen_suffix_len, c3l::kMercGenLodSuffix) == 0) {
+        gen_of[n.substr(0, n.size() - gen_suffix_len)] = mi;
+      }
+    }
     for (u32 mi = 0; mi < models.size(); mi++) {
       const auto& m = models[mi];
       if (cancelled()) {
@@ -1193,6 +1204,9 @@ bool CtrLevels::load_file(const fs::path& path,
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
+      if (!gen_of.empty() && md.name.find(c3l::kMercGenLodSuffix) != std::string::npos) {
+        continue;  // (drawn as its model's gen_draws)
+      }
       for (const auto& me : mod_effects) {
         if (me.model != mi || (u64)me.first_mask + me.frag_count > mod_masks.size() ||
             (u64)me.first_dest + me.dest_count > mod_dests.size() || m.scale <= 0.f) {
@@ -1231,13 +1245,28 @@ bool CtrLevels::load_file(const fs::path& path,
       if (md.draws.empty()) {
         continue;
       }
-      u32 first = UINT32_MAX, end = 0;
-      for (auto& d : md.draws) {
-        first = std::min<u32>(first, d.first_index);
-        end = std::max<u32>(end, d.first_index + d.index_count);
+      {
+        auto git = gen_of.find(md.name);
+        if (git != gen_of.end()) {
+          const auto& g = models[git->second];
+          if (g.first_vertex == m.first_vertex && g.vertex_count == m.vertex_count &&
+              g.first_draw + g.draw_count <= mdraws.size()) {
+            md.gen_draws.assign(mdraws.begin() + g.first_draw,
+                                mdraws.begin() + g.first_draw + g.draw_count);
+          }
+        }
       }
-      for (auto& d : md.draws) {
-        d.first_index -= first;
+      u32 first = UINT32_MAX, end = 0;
+      for (const auto* ds : {&md.draws, &md.gen_draws}) {
+        for (const auto& d : *ds) {
+          first = std::min<u32>(first, d.first_index);
+          end = std::max<u32>(end, d.first_index + d.index_count);
+        }
+      }
+      for (auto* ds : {&md.draws, &md.gen_draws}) {
+        for (auto& d : *ds) {
+          d.first_index -= first;
+        }
       }
       if (end <= mindices.size()) {
         md.file_vertex = m.first_vertex;
