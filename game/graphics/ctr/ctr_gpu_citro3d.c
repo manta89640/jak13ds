@@ -280,6 +280,10 @@ static struct {
   int uloc_ocean_clip, uloc_ocean_tex, uloc_ocean_scales, uloc_ocean_fog0, uloc_ocean_fog1;
   int ocean_tex2_bound; /* texture unit 2 holds the ocean's shimmer texture */
   int ocean_stage2;     /* combiner stage 2 holds the ocean's fog stage */
+  /* (AI-assisted) fog_stage_skip: level draws without the fog stage (ctr_gpu_set_mesh_nofog), and
+   * texture unit 1 (the fog ramp) switched off for them (raw draws) */
+  int mesh_nofog;
+  int unit1_off;
   DVLB_s* ocean_full_dvlb; /* (AI-assisted) the PS2 ocean's GS vertices (ctr_ocean_full.v.pica) */
   shaderProgram_s ocean_full_program;
   int uloc_ocean_full_gs;
@@ -1640,6 +1644,8 @@ static void frame_state_reset(void) {
   g.last_state_valid = 0;
   g.bound_tex = NULL;
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
+  g.mesh_nofog = 0;      /* (AI-assisted) and unit 1 on again with the ramp (bound below) */
+  g.unit1_off = 0;
   clip_reserve_reset();  /* (AI-assisted) and a ctr_gpu_clip_reserve */
   use_program(PROG_BASIC);
   /* the fog ramp stays on texture unit 1 for the whole frame (binding a texture clears the GPU's
@@ -3569,6 +3575,19 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   commit_texenv(1, env1, raw);
   commit_texenv(0, env, raw);
+  /* (AI-assisted) fog_stage_skip (mesh 4): texture unit 1, the fog ramp, off while nothing reads it
+   * (raw draws: the unit enable bits only, no cache clear); on again for every other draw */
+  if (raw && g.fog_tex_valid && ((mesh == 4) != g.unit1_off)) {
+    C3Di_Context* tctx = &__C3D_Context;
+    g.unit1_off = mesh == 4;
+    if (g.unit1_off) {
+      tctx->texConfig &= ~BIT(1);
+    } else {
+      tctx->texConfig |= BIT(1);
+    }
+    raw_end(raw_w(raw_ptr(), GPUREG_TEXUNIT_CONFIG, 0xB, tctx->texConfig & ~BIT(16)));
+    g.cur.unit1_toggles++;
+  }
   if (mesh != 3 && g.ocean_stage2) {
     /* (AI-assisted) stage 2 back to pass-through after the ocean (the far ring between its
      * draws) */
@@ -4363,10 +4382,13 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   }
   use_program(PROG_MESH);
   const MeshSlot* ms = &g.meshes[mesh];
+  /* (AI-assisted) fog_stage_skip: mesh 4 = a level mesh without the fog stage */
+  const int mesh_mode = g.mesh_nofog ? 4 : 1;
+  g.cur.nofog_draws += g.mesh_nofog;
   if (use_raw(state)) {
     /* (AI-assisted) raw: state, vertex buffer, then (after citro3d's pending updates) the matrix
      * as float24 and the draw */
-    apply_state(state, 1, 1);
+    apply_state(state, mesh_mode, 1);
     raw_vertex_buffer(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
     raw_sync();
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
@@ -4384,11 +4406,15 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     }
     g.last_mesh_valid = 1;
     c3d_vertex_buffer(ms->verts_pa, ms->verts, 16, 3, 0x210);
-    apply_state(state, 1, 0);
+    apply_state(state, mesh_mode, 0);
     C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
   }
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
+}
+
+void ctr_gpu_set_mesh_nofog(int on) {
+  g.mesh_nofog = on ? 1 : 0;
 }
 
 void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int mesh,

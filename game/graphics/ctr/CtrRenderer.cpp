@@ -469,11 +469,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                            : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches)",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws);
+               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws, gs.unit1_toggles);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;

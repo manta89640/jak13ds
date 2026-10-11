@@ -145,6 +145,10 @@ struct CtrSettings {
   bool lowres_vista = true;
   // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here
   float vista_distance = 3000.f;
+  // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
+  // fog stage (texture combiner pass-through, texture unit 1 off). Off until priced on hardware
+  // (gpu_profile ab): switching the unit per draw may cost more than the ramp lookups
+  bool fog_stage_skip = false;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;

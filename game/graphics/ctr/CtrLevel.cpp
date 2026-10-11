@@ -1965,6 +1965,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const float vista_dist = settings.vista_distance * 4096.f;
   constexpr float kDetailMargin = 50.f * 4096.f;
   m_levels->loaded(&m_loaded);
+  // (AI-assisted) fog_stage_skip
+  const bool fog_skip = settings.fog_stage_skip;
+  const float pzw = std::abs(cam.perspective[2][3]);
+  constexpr float kNoFog = 0.5f / 255.f;
   float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
   float fog1[4] = {0.f, 1.f, 0.f, 0.f};
   float fog1_vista[4] = {0.f, 1.f, 0.f, 0.f};
@@ -1974,7 +1978,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       fog0[1] = cam.fog.y();
       fog0[2] = cam.fog.z();
     }
-    const float pzw = std::abs(cam.perspective[2][3]);
     if (draw_dist > 0 && pzw > 0) {
       const float start = draw_dist * settings.fog_start;
       fog1[0] = 1.f / pzw;
@@ -2180,8 +2183,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // (AI-assisted) distance band of the chunk's nearest point, for the early depth order
       const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                   dz = ch.bsphere[2] - cam.trans[2];
-      const float near = std::sqrt(dx * dx + dy * dy + dz * dz) - ch.bsphere[3];
+      const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+      const float near = dist - ch.bsphere[3];
       vc.band = near < 30.f * 4096.f ? 0 : (near < 100.f * 4096.f ? 1 : 2);
+      // (AI-assisted) fog_stage_skip: both fogs ~0 at the chunk's farthest point (its depth is at
+      // most its distance; w = depth * pzw), the same formulas as the mesh shader
+      vc.nofog = false;
+      if (fog_skip && !vista_chunk) {
+        const float far_d = dist + ch.bsphere[3];
+        const float g = 1.f + fog0[3] * std::clamp(fog0[0] - far_d * pzw, fog0[1], fog0[2]);
+        const float dd = (far_d - fog1[1]) * fog1[2];
+        vc.nofog = g <= kNoFog && dd <= kNoFog;
+      }
     }
     double d[3];
     for (int i = 0; i < 3; i++) {
@@ -2218,6 +2231,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
+    ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
 #ifndef __3DS__
     {
       // (AI-assisted) snow-gpu-audit: statistics per chunk kind and LOD tier
@@ -2320,4 +2334,5 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   for (u32 di : lev.ordered_draws) {
     draw(di);
   }
+  ctr_gpu_set_mesh_nofog(0);
 }

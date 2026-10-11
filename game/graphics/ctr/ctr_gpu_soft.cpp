@@ -1318,6 +1318,7 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out) {
 
 // the software backend has no fog
 void ctr_gpu_set_mesh_fog(const float*, const float*, uint8_t, uint8_t, uint8_t) {}
+void ctr_gpu_set_mesh_nofog(int) {}  // (AI-assisted) fog_stage_skip: no fog stage here either
 void ctr_gpu_set_rgba4_as_rgba8(int on) {
   g_soft.rgba4_as_rgba8 = on;
 }

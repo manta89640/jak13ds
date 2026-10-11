@@ -390,6 +390,11 @@ typedef struct {
                      * prepared matrix must not be changed, only prepared again) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
+/* (AI-assisted) config.ini fog_stage_skip: the next ctr_gpu_draw_mesh(_prepared) draws are entirely
+ * in front of where both fogs start: their combiner stage passes the color through instead of
+ * mixing in the fog ramp, and (raw draws) texture unit 1, the ramp, is off for them (its cache is
+ * kept). on: 1. Reset at each frame begin. */
+void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
 
@@ -452,6 +457,8 @@ typedef struct {
   int radial_textures;
   int early_depth_draws;
   int proctex_draws;
+  int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
+  int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =
