@@ -34,6 +34,12 @@ class CtrSky {
   /*! render-sky-3ds's packet (8 qw, see there). */
   void draw(const u8* packet, CtrRenderState& rs);
   static constexpr int kPacketBytes = 8 * 16;
+  /*! (AI-assisted) sky_last: the sky's draws depth tested (GEQUAL; the renderer sets
+   * ctr_gpu_set_depth_far around them), drawn after the opaque level and models */
+  void set_depth_tested(bool on) { m_depth_tested = on; }
+  /*! (AI-assisted) skip_clear: this packet's opaque roof (drawn with the last complete sky
+   * texture) covers the whole screen, so no pixel keeps the frame's clear color */
+  bool roof_covers_screen(const u8* packet, const CtrRenderState& rs) const;
 
  private:
   static constexpr int kSize[2] = {32, 64};  // sky, clouds
@@ -47,6 +53,7 @@ class CtrSky {
   int m_work_sources[2] = {0, 0};
   bool m_dirty[2] = {false, false};
   bool m_valid[2] = {false, false};
+  bool m_depth_tested = false;  // (AI-assisted) sky_last
   int m_tex[2] = {-1, -1};
   std::vector<u32> m_decode;
   std::vector<u8> m_premul;              // (AI-assisted) the clouds, rgb * alpha

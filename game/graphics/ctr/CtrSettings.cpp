@@ -161,6 +161,10 @@ CtrSettings load() {
       s.sky = parse_bool(v);
     } else if (key == "clouds") {
       s.clouds = parse_bool(v);  // (AI-assisted)
+    } else if (key == "sky_last") {
+      s.sky_last = parse_bool(v);  // (AI-assisted)
+    } else if (key == "skip_clear") {
+      s.skip_clear = parse_bool(v);  // (AI-assisted)
     } else if (key == "overlap") {
       s.overlap = parse_bool(v);
     } else if (key == "pipeline") {
@@ -270,7 +274,7 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
       "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} cull_ties {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}{}{}",
@@ -285,7 +289,8 @@ std::string CtrSettings::summary() const {
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
       frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),
-      sky ? "on" : "off", clouds ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
+      sky ? "on" : "off", clouds ? "on" : "off", sky_last ? "on" : "off",
+      skip_clear ? "on" : "off", distort ? "on" : "off", distort_copy_rows ? "rows" : "full",
       envmap ? "on" : "off", envmap_batch ? "on" : "off", merc_tex_sort ? "on" : "off",
       merc_gen_lod ? "on" : "off", merc_lod_scale,
       // (AI-assisted) with depth16, full falls back to blob (no stencil)

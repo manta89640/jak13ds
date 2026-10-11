@@ -349,6 +349,22 @@ void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
 int ctr_gpu_set_pipeline(int on);
+/* (AI-assisted) config.ini sky_last. ctr_gpu_set_sky_hook: fn(arg) is called once, right before
+ * the first draw of this frame that needs what is behind it on screen: blending, no depth write,
+ * stencil or no-color draws, a screen copy, a clip / ocean reservation (only opaque depth-writing
+ * draws let it wait), or at ctr_gpu_run_sky_hook / the frame end, whichever comes first. The
+ * renderer draws the sky there (after the opaque level and models). fn = NULL: none. The frame
+ * begin drops a hook still set. */
+typedef void (*ctr_gpu_hook_fn)(void* arg);
+void ctr_gpu_set_sky_hook(ctr_gpu_hook_fn fn, void* arg);
+void ctr_gpu_run_sky_hook(void);
+/* (AI-assisted) draws from now on get fragment depth 0 (the farthest: the cleared depth) instead
+ * of their own (the depth map's scale 0, offset 0): with ztest GEQUAL they draw only where nothing
+ * has drawn yet (the sky after the opaque geometry) */
+void ctr_gpu_set_depth_far(int on);
+/* (AI-assisted) config.ini skip_clear: the next frame begin clears only the depth buffer (the
+ * renderer knows every pixel's color gets drawn: the opaque sky roof covers the screen) */
+void ctr_gpu_set_skip_color_clear(int on);
 /* (AI-assisted) config.ini frame_overlap2 (with the pipeline): 0 off = the frame end waits for
  * the GPU, then hands the frame's command list over with a cache flush (the old way); 1 clean =
  * the list is cleaned from the CPU cache before that wait and handed over without the flush (the
@@ -485,6 +501,7 @@ typedef struct {
   int early_depth_draws;
   int proctex_draws;
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
+  int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
   int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
@@ -510,6 +527,8 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out);
 #ifndef __3DS__
 /* (AI-assisted) snow-gpu-audit: the renderer the next draws belong to (soft backend statistics) */
 void ctr_gpu_soft_bucket(const char* name);
+/* (AI-assisted) the name the draws are counted under now */
+const char* ctr_gpu_soft_bucket_name(void);
 #endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);

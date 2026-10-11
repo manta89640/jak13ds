@@ -138,6 +138,10 @@ const AbSwitch kAbSwitches[] = {
        s.frame_overlap2 = on ? kConfigMode : 0;
      },
      [](const CtrSettings& s) { return s.frame_overlap2 > 0; }},
+    {"sky_last", [](CtrSettings& s, bool on) { s.sky_last = on; },
+     [](const CtrSettings& s) { return s.sky_last; }},
+    {"skip_clear", [](CtrSettings& s, bool on) { s.skip_clear = on; },
+     [](const CtrSettings& s) { return s.skip_clear; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -261,7 +265,16 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     auto data = dma.read_and_advance();
     if (m_sky && data.vifcode1().kind == VifCode::Kind::PC_PORT &&
         data.size_bytes == CtrSky::kPacketBytes) {
-      m_sky->draw(data.data, rs);
+      if (ctr_settings().sky_last) {
+        // (AI-assisted) sky_last: drawn after the opaque level and models, before the first draw
+        // that needs what's behind it (ctr_gpu_set_sky_hook), depth tested against them
+        static_assert(sizeof(m_deferred) == CtrSky::kPacketBytes);
+        memcpy(m_deferred, data.data, sizeof(m_deferred));
+        m_deferred_rs = &rs;
+        ctr_gpu_set_sky_hook(&CtrDirectBucketRenderer::deferred_sky, this);
+      } else {
+        m_sky->draw(data.data, rs);
+      }
     } else if (data.size_bytes) {
       m_direct->render_vif(data.vif0(), data.vif1(), data.data, data.size_bytes);
     }
@@ -278,6 +291,22 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
              st.triangles, st.flushes, st.skipped_prims);
     m_direct->clear_stats();
   }
+}
+
+void CtrDirectBucketRenderer::deferred_sky(void* arg) {
+  auto* self = static_cast<CtrDirectBucketRenderer*>(arg);
+#ifndef __3DS__
+  const std::string keep = ctr_gpu_soft_bucket_name();
+  ctr_gpu_soft_bucket("sky");
+#endif
+  self->m_sky->set_depth_tested(true);
+  ctr_gpu_set_depth_far(1);
+  self->m_sky->draw(self->m_deferred, *self->m_deferred_rs);
+  ctr_gpu_set_depth_far(0);
+  self->m_sky->set_depth_tested(false);
+#ifndef __3DS__
+  ctr_gpu_soft_bucket(keep.c_str());
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +464,25 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       lg::info("[ctr] render thread frame {}: {:.0f} ms in level loads", m_rs.frame_idx, load_ms);
     }
   }
+  // (AI-assisted) skip_clear: only the depth is cleared when this frame's opaque sky roof covers
+  // the whole screen (looking up): every pixel's color is drawn over
+  {
+    bool covered = false;
+    if (ctr_settings().skip_clear && m_sky_draw && ctr_settings().sky) {
+      const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
+      const u32 id = (u32)jak1::BucketId::SKY_DRAW;
+      DmaFollower dma(ee_mem, base + 16 * id);
+      for (int k = 0; k < 64 && dma.current_tag_offset() != base + 16 * (id + 1); k++) {
+        auto data = dma.read_and_advance();
+        if (data.vifcode1().kind == VifCode::Kind::PC_PORT &&
+            data.size_bytes == CtrSky::kPacketBytes) {
+          covered = m_sky_draw->roof_covers_screen(data.data, m_rs);
+          break;
+        }
+      }
+    }
+    ctr_gpu_set_skip_color_clear(covered ? 1 : 0);
+  }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
   // (AI-assisted) cull_ties (gpu_profile = ab may switch it between frames)
   ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
@@ -484,6 +532,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.gpu_busy_ms += gs.gpu_busy_ms;
   m_timing.gpu_busy_frames += gs.gpu_busy_frames;
   m_timing.gpu_active_ms += gs.gpu_active_ms;
+  m_timing.color_clears_skipped += gs.color_clear_skipped;
   m_timing.triangles += gs.triangles;
   m_timing.vbuf_peak = std::max(m_timing.vbuf_peak, gs.vbuf_used);
   m_timing.vbuf_size = gs.vbuf_size;
@@ -543,7 +592,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
           "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands; vertex buffer peak "
-          "{} of {} KB{}{}",
+          "{} of {} KB{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
@@ -554,7 +603,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string(),
           m_timing.dropped ? fmt::format(", {} draws DROPPED (command buffer full)",
                                          m_timing.dropped)
-                           : std::string());
+                           : std::string(),
+          m_timing.color_clears_skipped
+              ? fmt::format(", {} frames without the color clear (skip_clear)",
+                            m_timing.color_clears_skipped)
+              : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
                "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches)",
@@ -899,6 +952,11 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   m_rs.vis_packets = 0;
   const bool profiling = m_profile_mode > 0;
   for (size_t bucket_id = 0; bucket_id < m_buckets.size(); bucket_id++) {
+    if (bucket_id >= (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0) {
+      // (AI-assisted) sky_last: at the latest before the translucent buckets (and the sky blend
+      // in tfrag-trans, which starts this frame's sky textures)
+      ctr_gpu_run_sky_hook();
+    }
     const double tb = ctr_gpu_time_ms();
     // (AI-assisted) shadows switched off by gpu_profile = ab: the shadow bucket left out
     const bool ab_skip = ctr_settings().shadows != CtrSettings::ShadowMode::Full &&

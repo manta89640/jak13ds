@@ -1753,6 +1753,67 @@ static void pipeline_close_list(void) {
   cache_flush_now(s_fin_list, s_fin_words * 4);
 }
 
+/* ---------------- (AI-assisted) config.ini sky_last / skip_clear ----------------
+ * The renderer hands the sky over as a hook (ctr_gpu_set_sky_hook) instead of drawing it first;
+ * it runs right before the first draw that needs what is behind it (SKY_HOOK), so every blended
+ * pixel still blends over the sky, and the sky draws itself with depth 0 (ctr_gpu_set_depth_far)
+ * only where no opaque draw has written depth. Off (no hook set): nothing changes. */
+static ctr_gpu_hook_fn s_sky_hook;
+static void* s_sky_hook_arg;
+static int g_depth_far;       /* ctr_gpu_set_depth_far */
+static int s_zdef_valid;      /* the depth map's own scale and offset below were read */
+static u32 s_zscale0, s_zoffset0;
+static int s_skip_color_clear; /* ctr_gpu_set_skip_color_clear, for the next frame begin */
+
+void ctr_gpu_set_sky_hook(ctr_gpu_hook_fn fn, void* arg) {
+  s_sky_hook = fn;
+  s_sky_hook_arg = arg;
+}
+
+void ctr_gpu_run_sky_hook(void) {
+  const ctr_gpu_hook_fn fn = s_sky_hook;
+  if (fn) {
+    s_sky_hook = NULL; /* once (its own draws mustn't call it again) */
+    fn(s_sky_hook_arg);
+  }
+}
+
+/* the sky may wait for a draw with this state: opaque, writing depth (so the sky's depth test
+ * leaves its pixels alone), no stencil or no-color pass */
+static inline int keeps_sky(const ctr_draw_state* st) {
+  return st->blend == CTR_BLEND_OFF && st->zwrite &&
+         !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX));
+}
+#define SKY_HOOK(st)                    \
+  do {                                  \
+    if (s_sky_hook && !keeps_sky(st)) { \
+      ctr_gpu_run_sky_hook();           \
+    }                                   \
+  } while (0)
+#define SKY_HOOK_ANY()        \
+  do {                        \
+    if (s_sky_hook) {         \
+      ctr_gpu_run_sky_hook(); \
+    }                         \
+  } while (0)
+
+void ctr_gpu_set_depth_far(int on) {
+  on = on ? 1 : 0;
+  if (on != g_depth_far) {
+    if (!s_zdef_valid) {
+      s_zscale0 = __C3D_Context.effect.zScale;
+      s_zoffset0 = __C3D_Context.effect.zOffset;
+      s_zdef_valid = 1;
+    }
+    g_depth_far = on;
+    g.last_state_valid = 0;
+  }
+}
+
+void ctr_gpu_set_skip_color_clear(int on) {
+  s_skip_color_clear = on ? 1 : 0;
+}
+
 /* the parts of the GPU state a frame starts from (both modes) */
 static void frame_state_reset(void) {
   s_pres.cur_release = s_pres.next_release;
@@ -1842,13 +1903,21 @@ static void pipeline_frame_begin(u32 clear) {
   /* D24S8: 4 bytes (D16: 2); color 4 (RGBA8) or 2 (RGB565) */
   const u32 px = (u32)fb->width * fb->height;
   u32* color_end = (u32*)((uint8_t*)color + px * (g_color16 ? 2 : 4));
-  GX_MemoryFill(color, clear, color_end,
-                GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth, 0,
-                (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
-                GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
+  if (s_skip_color_clear) {
+    /* (AI-assisted) skip_clear: the depth only (VRAM) */
+    GX_MemoryFill(depth, 0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
+                  GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), NULL,
+                  0, NULL, 0);
+  } else {
+    GX_MemoryFill(color, clear, color_end,
+                  GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth,
+                  0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
+                  GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
+  }
   C3D_SetFrameBuf(fb);
   set_top_viewport();
   frame_state_reset();
+  g.cur.color_clear_skipped = s_skip_color_clear;
   g.cur.gpu_wait_ms = s_begin_wait_ms; /* (AI-assisted) frame_overlap2 = on (after the reset) */
 }
 
@@ -1876,6 +1945,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   }
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
+  s_sky_hook = NULL; /* (AI-assisted) sky_last: a hook left from a frame that didn't end */
   if (s_pipeline) {
     pipeline_frame_begin(color_fill_value(r, gr, b));
     return;
@@ -1894,12 +1964,15 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     write_screenshot();
     g.screenshot_state = 0;
   }
-  C3D_RenderTargetClear(g.top, C3D_CLEAR_ALL, color_fill_value(r, gr, b), 0);
+  /* (AI-assisted) skip_clear: the depth only */
+  C3D_RenderTargetClear(g.top, s_skip_color_clear ? C3D_CLEAR_DEPTH : C3D_CLEAR_ALL,
+                        color_fill_value(r, gr, b), 0);
   C3D_FrameDrawOn(g.top);
   if (g_block32) {
     set_top_viewport();
   }
   frame_state_reset();
+  g.cur.color_clear_skipped = s_skip_color_clear;
   g.cur.gpu_wait_ms = wait_ms; /* (AI-assisted) (after the reset of g.cur) */
   diag_rt("draw build");
 }
@@ -2051,6 +2124,7 @@ void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
+  ctr_gpu_run_sky_hook(); /* (AI-assisted) sky_last: still pending (nothing blended came) */
   diag_rt("frame_end: flush");
   raw_vc_flush();
   flush_vbuf();
@@ -3845,6 +3919,14 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
    * discards later (no blending, an alpha test that never fails): the hardware's early depth
    * data can't know about fragments dropped after it. */
   e.earlyDepth = early_depth_ok(st) != 0;
+  /* (AI-assisted) sky_last: depth 0 for the sky's draws (ctr_gpu_set_depth_far) */
+  if (g_depth_far) {
+    e.zScale = 0;
+    e.zOffset = 0;
+  } else if (s_zdef_valid) {
+    e.zScale = s_zscale0;
+    e.zOffset = s_zoffset0;
+  }
   /* (AI-assisted) cull_ties: back faces of closed tie surfaces (CTR_TCC_CULL_BACK) */
   e.cullMode = (st->tcc & CTR_TCC_CULL_BACK) && g_cull_enable
                    ? (g_cull_flip ? GPU_CULL_FRONT_CCW : GPU_CULL_BACK_CCW)
@@ -3914,6 +3996,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   if (e.cullMode != c->cullMode) {
     p = raw_w(p, GPUREG_FACECULLING_CONFIG, 0xF, (u32)e.cullMode & 3);
   }
+  if (e.zScale != c->zScale || e.zOffset != c->zOffset) {
+    const u32 zm[2] = {e.zScale, e.zOffset}; /* (AI-assisted) sky_last */
+    p = raw_n(p, GPUREG_DEPTHMAP_SCALE, zm, 2, 1);
+  }
   if (e.earlyDepth != c->earlyDepth || e.earlyDepthFunc != c->earlyDepthFunc ||
       e.earlyDepthRef != c->earlyDepthRef) {
     p = raw_w(p, GPUREG_EARLYDEPTH_TEST1, 0x1, e.earlyDepth ? 1 : 0);
@@ -3963,6 +4049,7 @@ static int vbuf_room(size_t bytes) {
 }
 
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3) {
     return;
   }
@@ -3980,6 +4067,7 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
 }
 
 void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3) {
     return;
   }
@@ -3994,6 +4082,7 @@ void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, in
 }
 
 void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3) {
     return;
   }
@@ -4009,6 +4098,7 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
 
 void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t const1,
                         const ctr_clip_vertex2* verts, int count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || count < 3 || state->tex < 0 || state->tex >= MAX_TEXTURES ||
       g.textures[state->tex].used != 1) {
     return;
@@ -4080,6 +4170,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
 }
 
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame) {
     return;
   }
@@ -4128,6 +4219,7 @@ static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b);
 
 int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_vertex** verts,
                           uint16_t** indices) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: before the reservation */
   _Static_assert(sizeof(ctr_ocean_full_vertex) == 32, "ctr_ocean_full.v.pica's vertex layout");
   if (!g.ready || !g.in_frame || g.ocean_full_open || max_verts <= 0 || max_indices <= 0) {
     return 0;
@@ -4216,6 +4308,7 @@ static void clip_reserve_reset(void) {
 
 int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts,
                          uint16_t** indices) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: before the reservation */
   if (!g.ready || !g.in_frame || s_clipres.open || g.ocean_full_open || max_verts <= 0 ||
       max_verts > 65536 || max_indices <= 0) {
     return 0;
@@ -4318,6 +4411,7 @@ int ctr_gpu_copy_screen_part(float x0, float x1) {
 }
 
 static int copy_screen(float x0, float x1, int part) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
   if (!g.ready || !g.in_frame) {
     return -1;
   }
@@ -4591,6 +4685,7 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
 
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;
@@ -4698,6 +4793,7 @@ static void ocean_bind_tex2(int handle) {
 void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
                         const void* verts, const uint16_t* indices, int first_index,
                         int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || index_count < 3) {
     return;
   }
@@ -4912,6 +5008,7 @@ static void raw_skin_rows(const int* locs, const float* bones, int palette_count
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const float lights[28], int mesh, int first_index,
                           int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;
@@ -5005,6 +5102,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
                               int palette_count, const float fade[4], int mesh, int first_index,
                               int index_count) {
+  SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
     return;
