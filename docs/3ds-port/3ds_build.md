@@ -684,9 +684,23 @@ every platform:
   without the adapter thunk the other natives go through (8 arguments copied, a perf section,
   stack scratch space): `MIPS2C_NATIVE_IMPL_GOAL` registers a direct entry, `native_as_goal`.
 
+- (AI-assisted, Oct 11) `ripple-execute-init`: the VU0 sine table, now only rebuilt when
+  `*cos-poly-vec*` changes (it was rebuilt every frame: 0.18 ms on hardware).
+- (AI-assisted, Oct 11) `pc-collide-frag-may-hit?` keeps each mesh's vertex box in a cache keyed
+  by mesh, vertex data, count and `g_link_generation` (incremented by every link, klink.h);
+  `config.ini collide_frag_cache = off` (host `OPENGOAL_FRAG_CACHE=0`) scans every call,
+  `OPENGOAL_FRAG_CACHE_VERIFY=1` (host) scans and compares.
+- (AI-assisted, Oct 11) The box fills' GOAL walks, in C++ (`native_collide_cache.cpp`):
+  `pc-bsp-collide-with-box` (the drawable-tree walk of `(method collide-with-box bsp-header)`) and
+  `pc-fill-from-foreground-using-box` (the four collide-shape lists). The GOAL methods call them
+  first (`#when TARGET_3DS` in bsp.gc and collide-cache.gc) and run their own code when they return
+  #f: `config.ini collide_native = off` (host `OPENGOAL_COLLIDE_NATIVE=0`).
+  `OPENGOAL_COLLIDE_NATIVE_VERIFY=1` (host) runs the GOAL version first on every call and compares
+  what both wrote (the collide-cache object, `*collide-list*`).
+
 Still mips2c: the renderers' functions (bones, merc, generic, tie, tfrag, sky, ocean drawing,
-ripple, time-of-day colors, draw-string, textures) and `calc-animation-from-spr` (never called:
-`*use-new-decompressor*` is #t).
+ripple-apply-wave-table, ripple-matrix-scale, time-of-day colors, draw-string, textures) and
+`calc-animation-from-spr` (never called: `*use-new-decompressor*` is #t).
 
 They do the same float operations grouped the same way as the mips2c code, so results are
 bit-identical (clang fuses `a + b * c` within one expression on arm64; the 3DS has no FMA). They

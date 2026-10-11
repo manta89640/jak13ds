@@ -60,6 +60,8 @@ void klink_init_globals() {
   gfunc_774.offset = 0;
 }
 
+u32 g_link_generation = 0;
+
 /*!
  * Initialize the link control.
  * TODO: this hasn't been carefully checked for jak 2 differences.
@@ -69,6 +71,7 @@ void link_control::jak1_jak2_begin(Ptr<uint8_t> object_file,
                                    int32_t size,
                                    Ptr<kheapinfo> heap,
                                    uint32_t flags) {
+  g_link_generation++;  // (AI-assisted) see klink.h
   if (is_opengoal_object(object_file.c())) {
     // save data from call to begin
     m_object_data = object_file;

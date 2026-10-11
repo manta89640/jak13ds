@@ -356,9 +356,17 @@
 ;; Collision
 ;;;;;;;;;;;;;;;
 
+;; og:preserve-this (AI-assisted) 3DS: the box walk of the drawable trees in C++
+;; (native_collide_cache.cpp, the same results). #f when it is off (config.ini collide_native = off):
+;; the GOAL methods run.
+(#when TARGET_3DS
+  (def-mips2c pc-bsp-collide-with-box (function bsp-header int collide-list symbol)))
+
 (defmethod collide-with-box ((this bsp-header) (arg0 int) (arg1 collide-list))
   "Top level collision with a box function. I think the arg0 length doesn't really matter here."
   (+! (-> *collide-stats* calls) 1)
+  (#when TARGET_3DS
+    (if (pc-bsp-collide-with-box this arg0 arg1) (return 0)))
   (let ((s4-0 (-> this drawable-trees)))
     (dotimes (s3-0 (-> s4-0 length))
       (collide-with-box (-> s4-0 trees s3-0) arg0 arg1)))
