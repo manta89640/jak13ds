@@ -38,7 +38,7 @@ _Static_assert(sizeof(v128) == 16, "v128 size");
 
 //! Changes whenever generated code and this header must be rebuilt together (the check is in
 //! every module, and the version is part of the module source, so of its hash).
-#define GOALC_ABI_VERSION 4
+#define GOALC_ABI_VERSION 5
 
 // ---------------------------------------------------------------------------
 // memory. GOAL addresses are 32 bits.
@@ -154,6 +154,19 @@ GC_INLINE void gc_st_v128_(u8* gc_mb, u64 b, s32 o, v128 v) {
 #define gc_st_u64(...) gc_st_u64_(gc_mb, __VA_ARGS__)
 #define gc_st_f32(...) gc_st_f32_(gc_mb, __VA_ARGS__)
 #define gc_st_v128(...) gc_st_v128_(gc_mb, __VA_ARGS__)
+
+//! (AI-assisted) Start of a function's stack variables (gc_stack). Like the native backends, the
+//! memory of `stack-no-clear` variables holds whatever the stack held before, and code that reads
+//! a field before writing it gets different garbage in C than on x86 (Misty, Oct 2026: a collide
+//! result's normal). For finding such reads, compile the modules with -DGOALC_STACK_POISON (every
+//! byte 0xff: floats are NaN, integers -1, pointers fault) or -DGOALC_STACK_ZERO.
+#if defined(GOALC_STACK_POISON)
+#define GC_STACK_INIT(s) memset((s), 0xff, sizeof(s))
+#elif defined(GOALC_STACK_ZERO)
+#define GC_STACK_INIT(s) memset((s), 0, sizeof(s))
+#else
+#define GC_STACK_INIT(s) ((void)0)
+#endif
 
 //! GOAL address of a host pointer (only valid for pointers into GOAL memory, like the stack).
 //! The empty asm makes the pointer escape: otherwise, on 32-bit hosts, the compiler can see that
@@ -320,89 +333,138 @@ GC_INLINE float gc_fmax(float a, float b) {
 // C constants, so the compiler sees them) are done on the bits in integer registers, as the
 // VFP11 manual suggests: VCMP + VMRS stalls until every VFP instruction in flight has finished, and
 // a float loaded from memory can go straight to a core register. Exact for every non-NaN value
-// with flush-to-zero semantics (denormals compare like 0, as on the PS2 and in RunFast mode); NaN
-// doesn't exist on the PS2. Other compares stay float compares.
+// with flush-to-zero semantics (denormals compare like 0, as on the PS2 and in RunFast mode). Other
+// compares stay float compares. NaN: see below.
 enum { GC_FLT, GC_FGT, GC_FLE, GC_FGE, GC_FEQ, GC_FNE };
 //! the integer form handles this constant: zero, or a normal number (not denormal/inf/NaN)
 GC_INLINE int gc_fk(float c) {
   u32 e = (gc_fbits(c) >> 23) & 0xff;
   return __builtin_constant_p(c) && (c == 0.0f || (e != 0 && e != 255));
 }
-//! x op c on the bits xb of x and cb of a constant c accepted by gc_fk
-GC_INLINE int gc_fcmp_bits(u32 xb, u32 cb, int op) {
+// (AI-assisted) NaN: compares give what the x86 backend gives, not what C gives. The x86 backend
+// compiles a float compare as COMISS + an unsigned jcc (jb/jbe/je/ja/jae/jne), and an unordered
+// COMISS sets ZF = PF = CF = 1, so with a NaN on either side a < b, a <= b and a = b are true and
+// a > b, a >= b and a != b are false, whichever way the compiler inverts the branch. GOAL code
+// relies on it (Snowy crash, Oct 2026: is-nan? was (and (< 0.0 x) (< x 0.0)), which is only ever
+// true on x86, so the NaN guard did nothing in C). Matching x86 makes every such idiom, written
+// on purpose or not, behave like on the PC port. (The PS2 has no NaN.)
+//! result of `a op b` when a or b is NaN, like the x86 backend
+GC_INLINE int gc_fnanres(int op) {
+  return op == GC_FLT || op == GC_FLE || op == GC_FEQ;
+}
+//! float bits are a NaN
+GC_INLINE int gc_bnan(u32 b) {
+  return (b << 1) > 0xff000000u;
+}
+//! lo <= x <= hi (unsigned)
+GC_INLINE int gc_bin(u32 x, u32 lo, u32 hi) {
+  return x - lo <= hi - lo;
+}
+//! x op c on the bits xb of x and cb of a constant c accepted by gc_fk; nr is the result when x
+//! is NaN. Each compare is written as a set S of bit patterns without NaNs (a range, or zero and
+//! the denormals): x op c is either "x in S" or "x not in S and not NaN", so with the right nr it
+//! costs one range check, otherwise a NaN check more.
+GC_INLINE int gc_fcmp_k(u32 xb, u32 cb, int op, int nr) {
+  int in_s, s_is_true;
   if ((cb << 1) == 0) {
-    // +-0: x < 0 iff negative with a non-zero exponent, x > 0 iff positive with one
+    switch (op) {
+      case GC_FGT:
+      case GC_FLE:
+        in_s = gc_bin(xb, 0x00800000u, 0x7f800000u);  // x > 0
+        s_is_true = op == GC_FGT;
+        break;
+      case GC_FLT:
+      case GC_FGE:
+        in_s = gc_bin(xb, 0x80800000u, 0xff800000u);  // x < 0
+        s_is_true = op == GC_FLT;
+        break;
+      default:
+        // x = 0 (or denormal), and with NaN as one range of xb << 1
+        if ((op == GC_FEQ) == nr) {
+          const int eq_or_nan = (xb << 1) - 0xff000001u <= 0x01fffffeu;
+          return op == GC_FEQ ? eq_or_nan : !eq_or_nan;
+        }
+        in_s = (xb << 1) < 0x01000000u;
+        s_is_true = op == GC_FEQ;
+        break;
+    }
+  } else if ((s32)cb > 0) {
+    switch (op) {
+      case GC_FGE:
+      case GC_FLT:
+        in_s = gc_bin(xb, cb, 0x7f800000u);  // x >= c
+        s_is_true = op == GC_FGE;
+        break;
+      case GC_FGT:
+      case GC_FLE:
+        in_s = gc_bin(xb, cb + 1, 0x7f800000u);  // x > c
+        s_is_true = op == GC_FGT;
+        break;
+      default:
+        in_s = xb == cb;
+        s_is_true = op == GC_FEQ;
+        break;
+    }
+  } else {
+    // negative c: the magnitude order is the unsigned order of the bits
     switch (op) {
       case GC_FLT:
-        return xb > 0x807fffffu;
       case GC_FGE:
-        return xb <= 0x807fffffu;
-      case GC_FGT:
-        return (s32)xb > 0x7fffff;
+        in_s = gc_bin(xb, cb + 1, 0xff800000u);  // x < c
+        s_is_true = op == GC_FLT;
+        break;
       case GC_FLE:
-        return (s32)xb <= 0x7fffff;
-      case GC_FEQ:
-        return (xb & 0x7f800000u) == 0;
+      case GC_FGT:
+        in_s = gc_bin(xb, cb, 0xff800000u);  // x <= c
+        s_is_true = op == GC_FLE;
+        break;
       default:
-        return (xb & 0x7f800000u) != 0;
+        in_s = xb == cb;
+        s_is_true = op == GC_FEQ;
+        break;
     }
   }
-  if ((s32)cb > 0) {
-    // positive c: signed integer order (negative x, -0 and denormals are all below c)
-    switch (op) {
-      case GC_FLT:
-        return (s32)xb < (s32)cb;
-      case GC_FGE:
-        return (s32)xb >= (s32)cb;
-      case GC_FGT:
-        return (s32)xb > (s32)cb;
-      case GC_FLE:
-        return (s32)xb <= (s32)cb;
-      case GC_FEQ:
-        return xb == cb;
-      default:
-        return xb != cb;
-    }
+  if (nr != s_is_true) {
+    return s_is_true ? in_s : !in_s;
   }
-  // negative c: unsigned order of the bits is the order of the magnitudes, every x with the sign
-  // bit clear (and -0, -denormals) is above c
-  switch (op) {
-    case GC_FLT:
-      return xb > cb;
-    case GC_FGE:
-      return xb <= cb;
-    case GC_FGT:
-      return xb < cb;
-    case GC_FLE:
-      return xb >= cb;
-    case GC_FEQ:
-      return xb == cb;
-    default:
-      return xb != cb;
+  // S or NaN: S always ends at +inf or -inf (or is {c} / zero), so S + NaN is S extended to the end
+  // of its sign plus the NaNs of the other sign: two compares
+  int s_or_nan;
+  if (op == GC_FEQ || op == GC_FNE) {
+    s_or_nan = in_s | gc_bnan(xb);
+  } else if ((s32)cb > 0 || ((cb << 1) == 0 && (op == GC_FGT || op == GC_FLE))) {
+    // S = [lo, +inf]: [lo, 0x7fffffff] or a negative NaN
+    const u32 lo = (cb << 1) == 0 ? 0x00800000u : ((op == GC_FGE || op == GC_FLT) ? cb : cb + 1);
+    s_or_nan = ((s32)xb >= (s32)lo) | (xb > 0xff800000u);
+  } else {
+    // S = [lo, -inf]: [lo, 0xffffffff] or a positive NaN
+    const u32 lo = (cb << 1) == 0 ? 0x80800000u : ((op == GC_FLE || op == GC_FGT) ? cb : cb + 1);
+    s_or_nan = (xb >= lo) | ((s32)xb > (s32)0x7f800000u);
   }
+  return s_is_true ? s_or_nan : !s_or_nan;
 }
 //! a op b (op is a constant)
 GC_INLINE int gc_fcmp(float a, float b, int op) {
   static const int swapped[6] = {GC_FGT, GC_FLT, GC_FGE, GC_FLE, GC_FEQ, GC_FNE};
   if (gc_fk(b)) {
-    return gc_fcmp_bits(gc_fbits(a), gc_fbits(b), op);
+    return gc_fcmp_k(gc_fbits(a), gc_fbits(b), op, gc_fnanres(op));
   }
   if (gc_fk(a)) {
-    return gc_fcmp_bits(gc_fbits(b), gc_fbits(a), swapped[op]);
+    return gc_fcmp_k(gc_fbits(b), gc_fbits(a), swapped[op], gc_fnanres(op));
   }
   switch (op) {
     case GC_FLT:
-      return a < b;
+      return !(a >= b);
     case GC_FGT:
       return a > b;
     case GC_FLE:
-      return a <= b;
+      return !(a > b);
     case GC_FGE:
       return a >= b;
     case GC_FEQ:
-      return a == b;
+      return !__builtin_islessgreater(a, b);
     default:
-      return a != b;
+      return __builtin_islessgreater(a, b);
   }
 }
 
