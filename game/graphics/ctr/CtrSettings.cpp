@@ -192,6 +192,10 @@ CtrSettings load() {
       s.run_culling = parse_bool(v);  // (AI-assisted)
     } else if (key == "neighbour_vis") {
       s.neighbour_vis = parse_bool(v);  // (AI-assisted)
+    } else if (key == "lowres_vista") {
+      s.lowres_vista = parse_bool(v);  // (AI-assisted)
+    } else if (key == "vista_distance") {
+      s.vista_distance = std::max(0.f, f);  // (AI-assisted)
     } else if (key == "raw_cmds") {
       s.raw_cmds = parse_bool(v);
     } else if (key == "vcache_reuse") {
@@ -234,7 +238,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} ({}) "
       "ocean {} sky {} distort {} envmap {} shadows {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} "
-      "vis_culling {} run_culling {} neighbour_vis {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
@@ -255,7 +259,7 @@ std::string CtrSettings::summary() const {
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
-      sprite_max_size, vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", raw_cmds ? "on" : "off",
+      sprite_max_size, vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
       gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",

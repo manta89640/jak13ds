@@ -103,6 +103,10 @@ struct CtrLevelData {
   u64 drawn_frame = ~0ull;
   float bbox_min[3] = {0, 0, 0}, bbox_max[3] = {0, 0, 0};  // tfrag + tie, game units
   bool has_lowres = false;  // chunks with lod_tier 3
+  // (AI-assisted) the bounds of the detailed tfrag (tier 1, or tier 0 tfrag in single tier files):
+  // where the level's low resolution tfrag isn't drawn in near mode (config lowres_vista)
+  float detail_min[3] = {0, 0, 0}, detail_max[3] = {0, 0, 0};
+  bool has_detail = false;
   // (AI-assisted) partial unload: a level only seen from a neighbouring one (far mode: only its
   // far chunks are drawn) frees the meshes of its other chunks after a while (linear memory for
   // the level the camera is in), and reads them again from its file when the camera comes back
@@ -168,6 +172,13 @@ class CtrLevels {
   /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
    * nothing to wait for (any thread). The game waits for this before a level starts. */
   bool ready(const std::string& name);
+  /*! (AI-assisted) The levels being drawn (render thread). */
+  void loaded(std::vector<const CtrLevelData*>* out) const {
+    out->clear();
+    for (const auto& [name, lev] : m_levels) {
+      out->push_back(lev.get());
+    }
+  }
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
@@ -353,11 +364,16 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // chunks tested run by run); statistics: runs tested, triangles and chunks the view test hid
   std::vector<u8> m_run_shown;
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
+  // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
+  // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
+  u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;
+  std::vector<const CtrLevelData*> m_loaded;
   // this frame's visible chunks and draws (kept to avoid allocations)
   struct VisibleChunk {
     u32 chunk;
     u8 band;    // (AI-assisted) distance band for the early depth order: 0 near .. 2 far
     bool partly;  // (AI-assisted) some of its visibility runs are hidden: draw run by run
+    bool vista;   // (AI-assisted) far scenery: drawn first, with the vista fog (lowres_vista)
     float clip[16];
     ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };

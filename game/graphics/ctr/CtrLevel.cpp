@@ -1203,6 +1203,24 @@ bool CtrLevels::load_file(const fs::path& path,
       }
       first = false;
     }
+    // (AI-assisted) the detailed tfrag's bounds (lowres_vista): tier 1, or the tier 0 tfrag of
+    // files with one tier
+    bool any_tier1 = false;
+    for (auto& ch : out->chunks) {
+      any_tier1 |= ch.lod_tier == 1;
+    }
+    for (auto& ch : out->chunks) {
+      const bool tfrag = ch.kind == c3l::CHUNK_KIND_TFRAG || ch.kind == c3l::CHUNK_KIND_UNKNOWN;
+      if (!(any_tier1 ? ch.lod_tier == 1 : (ch.lod_tier == 0 && tfrag))) {
+        continue;
+      }
+      for (int c = 0; c < 3; c++) {
+        const float lo = ch.bsphere[c] - ch.bsphere[3], hi = ch.bsphere[c] + ch.bsphere[3];
+        out->detail_min[c] = out->has_detail ? std::min(out->detail_min[c], lo) : lo;
+        out->detail_max[c] = out->has_detail ? std::max(out->detail_max[c], hi) : hi;
+      }
+      out->has_detail = true;
+    }
   }
   build_draw_order(out);
   // merc models: one skinned mesh per model
@@ -1677,6 +1695,20 @@ std::array<math::Vector4f, 4> make_cam_mat(const math::Vector4f cam_T_w[4],
   return result;
 }
 
+// (AI-assisted) lowres_vista: a sphere entirely outside a level's detailed area grown by margin
+bool outside_detail(const CtrLevelData& l, const float* s, float margin) {
+  if (!l.has_detail) {
+    return true;
+  }
+  float d2 = 0;
+  for (int c = 0; c < 3; c++) {
+    const float lo = l.detail_min[c] - margin, hi = l.detail_max[c] + margin;
+    const float o = s[c] < lo ? lo - s[c] : (s[c] > hi ? s[c] - hi : 0.f);
+    d2 += o * o;
+  }
+  return d2 > s[3] * s[3];
+}
+
 // (AI-assisted) auto_detail: how far between the near (0) and the far (1) shrub / tie distances
 // (render thread: set by CtrRenderer from the GPU time, read here)
 float g_detail_t = 0.25f;
@@ -1853,6 +1885,14 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
              (double)m_cull_tris / m_cull_frames, m_cull_frames);
     m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
+  if (rs.log_now && m_vista_frames) {
+    lg::info("[ctr] {}: vista {:.1f} chunks {:.0f} tris, low resolution chunks in near mode {:.1f} "
+             "per level draw ({} level draws)",
+             m_name, (double)m_vista_chunks / m_vista_frames,
+             (double)m_vista_tris / m_vista_frames, (double)m_lowres_near / m_vista_frames,
+             m_vista_frames);
+    m_vista_chunks = m_vista_tris = m_lowres_near = m_vista_frames = 0;
+  }
 }
 
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
@@ -1919,20 +1959,35 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const bool vis_nb = settings.neighbour_vis && m_vis && !vis_own;
   m_vis_frames += m_vis != nullptr;
   m_vis_own_frames += vis_own;
+  // (AI-assisted) lowres_vista: the low resolution tfrag as far scenery (vista fog, out to
+  // vista_distance); in near mode where no loaded level's detailed tfrag is (+ kDetailMargin)
+  const bool lowres_vista = settings.lowres_vista;
+  const float vista_dist = settings.vista_distance * 4096.f;
+  constexpr float kDetailMargin = 50.f * 4096.f;
+  m_levels->loaded(&m_loaded);
+  float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
+  float fog1[4] = {0.f, 1.f, 0.f, 0.f};
+  float fog1_vista[4] = {0.f, 1.f, 0.f, 0.f};
   {
-    float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
     if (settings.fog) {
       fog0[0] = cam.hvdf_off.w();
       fog0[1] = cam.fog.y();
       fog0[2] = cam.fog.z();
     }
-    float fog1[4] = {0.f, 1.f, 0.f, 0.f};
     const float pzw = std::abs(cam.perspective[2][3]);
     if (draw_dist > 0 && pzw > 0) {
       const float start = draw_dist * settings.fog_start;
       fog1[0] = 1.f / pzw;
       fog1[1] = start;
       fog1[2] = 1.f / std::max(draw_dist - start, 1.f);
+    }
+    // (AI-assisted) the vista's haze: from draw_distance (or a third of vista_distance) to
+    // vista_distance
+    if (vista_dist > 0 && pzw > 0) {
+      const float start = draw_dist > 0 && draw_dist < vista_dist ? draw_dist : vista_dist / 3.f;
+      fog1_vista[0] = 1.f / pzw;
+      fog1_vista[1] = start;
+      fog1_vista[2] = 1.f / std::max(vista_dist - start, 1.f);
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
   }
@@ -1971,9 +2026,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lod_ok = near == (ch.lod_tier == 1);
     }
     bool dist_ok = true;
+    // (AI-assisted) lowres_vista: the low resolution tfrag is far scenery (vista_distance)
+    const bool vista_chunk = lowres_vista && ch.lod_tier == 3;
     {
       // draw distance; small objects only up close
-      float max_dist = draw_dist;
+      float max_dist = vista_chunk ? vista_dist : draw_dist;
       const float d = chunk_max_dist(ch, settings);
       if (d > 0) {
         max_dist = max_dist > 0 ? std::min(max_dist, d) : d;
@@ -2006,13 +2063,31 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       }
     } else if (ch.lod_tier == 3) {
-      // (AI-assisted) neighbour_vis: the low resolution tfrag in near mode where a neighbour's
-      // string says (chunks with visibility runs)
-      if (!(vis_nb && ch.vis_run_count)) {
+      // (AI-assisted) the low resolution tfrag in near mode: where a neighbour's string says
+      // (neighbour_vis, chunks with visibility runs), else as vista outside the detailed areas
+      bool want = vis_nb && ch.vis_run_count;
+      if (!want && lowres_vista) {
+        want = true;
+        for (const CtrLevelData* l : m_loaded) {
+          want = want && outside_detail(*l, ch.bsphere, kDetailMargin);
+        }
+      }
+      if (!want) {
         continue;
       }
+      m_lowres_near++;
     } else if (!lod_ok) {
       continue;
+    }
+    // (AI-assisted) lowres_vista: in far mode too, not over another loaded level's detailed tfrag
+    if (vista_chunk && far_level) {
+      bool over = false;
+      for (const CtrLevelData* l : m_loaded) {
+        over = over || (l != &lev && !outside_detail(*l, ch.bsphere, kDetailMargin));
+      }
+      if (over) {
+        continue;
+      }
     }
     // (AI-assisted) the view test: the chunk's sphere against the four planes; one that crosses a
     // plane (run_culling) has its runs tested on their own
@@ -2100,6 +2175,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     VisibleChunk& vc = m_visible.emplace_back();
     vc.chunk = (u32)ci;
     vc.partly = partly;
+    vc.vista = vista_chunk;
     {
       // (AI-assisted) distance band of the chunk's nearest point, for the early depth order
       const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
@@ -2133,9 +2209,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
   // of their textures. Then the others (blending, decals) in their order, over the opaque ones.
   // The order is made at load (sorted_draws, ordered_draws): only the visible chunks' draws.
+  bool vista_pass = false;  // (AI-assisted) the pass drawing: the vista chunks or the others
+  u64 vista_indices = 0;    // (AI-assisted) drawn by the vista pass (statistics)
   auto draw = [&](u32 di) {
     const int slot = m_visible_slot[lev.draw_chunk[di]];
-    if (slot < 0) {
+    if (slot < 0 || m_visible[slot].vista != vista_pass) {
       return;
     }
     const VisibleChunk& vc = m_visible[slot];
@@ -2151,6 +2229,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     if (!vc.partly || !lev.draw_run_count[di]) {
       ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk],
                                  dr.first_index, dr.index_count);
+      vista_indices += vista_pass ? dr.index_count : 0;
       return;
     }
     // (AI-assisted) only the visible runs; neighbouring ones in one draw, with small hidden runs
@@ -2161,6 +2240,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     auto emit = [&]() {
       ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], start, len);
       drawn += len;
+      vista_indices += vista_pass ? len : 0;
       open = false;
       gap = 0;
     };
@@ -2196,6 +2276,30 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // screen early, and the GPU drops the fragments behind it before texturing them. The alpha
   // tested ones (foliage) after them: they can't use the early depth test, but behind the near
   // ones their fragments still fail the depth test before blending and writing.
+  // (AI-assisted) the vista first (its own fog: a haze instead of the draw distance fog), then the
+  // level's fog again for the rest (and for the renderers after it: the ocean reads it)
+  u32 vista_chunks = 0;
+  for (const auto& vc : m_visible) {
+    vista_chunks += vc.vista;
+  }
+  if (vista_chunks) {
+    ctr_gpu_set_mesh_fog(fog0, fog1_vista, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
+    vista_pass = true;
+    for (u32 di : lev.early_draws) {
+      draw(di);
+    }
+    for (u32 di : lev.sorted_draws) {
+      draw(di);
+    }
+    for (u32 di : lev.ordered_draws) {
+      draw(di);
+    }
+    vista_pass = false;
+    ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
+    m_vista_chunks += vista_chunks;
+    m_vista_tris += vista_indices / 3;
+  }
+  m_vista_frames++;
   if (settings.early_depth) {
     for (u8 band = 0; band < 3; band++) {
       for (u32 di : lev.early_draws) {

@@ -138,6 +138,13 @@ struct CtrSettings {
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)
   bool neighbour_vis = true;
+  // (AI-assisted) the levels' low resolution tfrag (the game's far scenery) as vista: also in near
+  // mode, outside the loaded levels' detailed areas (+50 m), out to vista_distance, with a haze
+  // towards the fog color from draw_distance on instead of the draw distance fog (that one is
+  // solid fog color from draw_distance on). Off: only in far mode, within draw_distance.
+  bool lowres_vista = true;
+  // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here
+  float vista_distance = 3000.f;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
