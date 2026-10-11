@@ -118,12 +118,21 @@ struct CtrSettings {
   // Measure what each renderer costs the GPU: every few seconds one of them is left out for a
   // moment and the GPU time without it is logged ([ctr] gpu profile). The picture flickers.
   bool gpu_profile = false;
+  // (AI-assisted) gpu_profile = ab: instead, the switches of the A/B table (CtrRenderer.cpp
+  // kAbSwitches: run_culling, cull_ties, vista, fog_stage_skip, shadows, envmap, distort, and the
+  // snow-gpu-impl keys distort_copy, shadow_casters, sprite_*, envmap_batch, merc_*, clouds) are
+  // turned on and off in turns, in windows of ~1.5 s, and the GPU busy time of each setting is
+  // logged per level ([ctr] gpu ab). Nothing vanishes for good; the picture changes slightly.
+  bool gpu_profile_ab = false;
   // (AI-assisted) the GPU's own counters (busy % of each pipeline stage, memory traffic) over 10 s
   // of each level, logged once per level ([ctr] gpu profile <level>: hw busy ...); nothing is left
   // out of the picture. Read through the GSP service (no extra system calls). (AI-assisted) Off by
   // default: the hotspot profiler registers have never run on hardware (a GPU that stalls on its
   // result FIFO would hang the game); turn on for a diagnostic run.
   bool gpu_counters = false;
+  // (AI-assisted) seconds between the render thread's statistics bursts (frame times, triangles,
+  // draws, culling); shorter for measuring fixed views (more SD card writes)
+  float stats_period = 15.f;
   // (AI-assisted) 3DS hardware features (docs/3ds-port/config_ini.md):
   // 16-bit (RGB565) color buffer and top screen: half the memory traffic of every pixel drawn,
   // blended and cleared. Off by default: without dithering, faint blended layers (waterfall mist,
@@ -156,6 +165,30 @@ struct CtrSettings {
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;
+  // (AI-assisted) a level chunk crossing the edge of the view has its pieces (visibility runs, or
+  // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
+  // screen are drawn (bounding spheres made at load, 8 bytes per piece)
+  bool run_culling = true;
+  // (AI-assisted) a neighbouring level's visibility string (the camera is in the other level): its
+  // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
+  // PS2 and PC do (else only its ties used the bits)
+  bool neighbour_vis = true;
+  // (AI-assisted) the levels' low resolution tfrag (the game's far scenery) as vista: also in near
+  // mode, outside the loaded levels' detailed areas (+50 m), out to vista_distance, with a haze
+  // towards the fog color from draw_distance on instead of the draw distance fog (that one is
+  // solid fog color from draw_distance on). Off: only in far mode, within draw_distance.
+  bool lowres_vista = true;
+  // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here
+  float vista_distance = 3000.f;
+  // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
+  // fog stage (texture combiner pass-through, texture unit 1 off). Off until priced on hardware
+  // (gpu_profile ab): switching the unit per draw may cost more than the ramp lookups
+  bool fog_stage_skip = false;
+  // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
+  // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
+  // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
+  bool cull_ties = true;
+  bool cull_flip = false;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
@@ -187,6 +220,9 @@ struct CtrSettings {
 
 /*! The settings (loaded on first use). */
 const CtrSettings& ctr_settings();
+/*! (AI-assisted) The same, changeable: only for gpu_profile = ab (render thread, between frames;
+ * the switches it changes are read by the renderers each frame). */
+CtrSettings& ctr_settings_ab();
 
 namespace ctr_gfx {
 /*! One line describing the renderer settings, for status displays. */

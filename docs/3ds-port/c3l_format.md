@@ -27,6 +27,10 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--medium-radius M`, `--medium-dist M` | 12, 300 | same for medium tie instances |
 | `--shrub-dist M`, `--shrub-cell M` | 100, 50 | shrubs are drawn up to the distance, in chunks of the cell size |
 | `--no-tie`, `--no-shrub`, `--no-merc` | off | leave tie / shrubs / merc models out. |
+| `--no-tie-winding` | off | (AI-assisted, v13) keep the strips' triangle order. By default every second strip triangle is flipped (consistent winding), and closed tie surfaces are oriented outward and their draws marked `kDrawCullBack` (config `cull_ties`). |
+| `--no-vista` | off | (AI-assisted, v13) no vista tier. By default the far content (low resolution tfrag; ties without a distance limit; the coarse tfrag of levels without low resolution tfrag) is copied into `CHUNK_KIND_VISTA` chunks (lod_tier 4) of `--vista-cell` meters, one draw per texture and mode, each run's `vis` = its source chunk. Never for the interiors (jungleb, maincave, darkcave, robocave, sunken, sunkenb, citadel) |
+| `--vista-cell M` | 1500 | vista tier cell size |
+| `--vista-error M`, `--vista-ratio R`, `--vista-sloppy-error M` | 3, 0.25, 10 | vista ties / coarse tfrag: simplified (topology kept) to the error, then (sloppy) towards the ratio of the triangles within the second error |
 | `--merc-only` | off | only merc models (used for the common GAME.fr3 with `--all`). |
 | `--gen-lod R`, `--gen-lod-error E`, `--gen-lod-lock-border` | 0.3, 0.02, off | (AI-assisted) merc models with only `-lod0` in the level (not Jak / Daxter, no blend shapes or rewritten vertices): a simplified copy named `<model>~genlod` (`c3l::kMercGenLodSuffix`) with the model's own vertices (same `first_vertex` / `vertex_count`) and draws of its own, aiming at R of the triangles with an error under E of the model's size (meshoptimizer; all draws together, so their seams move alike; eye draws kept, vertices at the eyes locked). No layout change: older runtimes load it as a model nobody asks for. `--gen-lod 0`: none. |
 | `--no-etc1` | off | 16-bit textures (RGB565 / RGBA4444) instead of ETC1 / ETC1A4. |

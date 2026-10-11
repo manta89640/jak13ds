@@ -61,7 +61,7 @@ enum ctr_test {
 
 typedef struct {
   int tex;            // texture handle, or -1 for untextured
-  uint8_t tcc;        // use texture alpha
+  uint8_t tcc;        // use texture alpha (bit 0); (AI-assisted) bit 1: CTR_TCC_CULL_BACK
   uint8_t decal;      // decal instead of modulate
   uint8_t filter;     // bilinear
   uint8_t clamp_s, clamp_t;
@@ -98,6 +98,14 @@ enum {
   CTR_STATE_STENCIL_CLEAR = 64,
   CTR_STATE_NO_COLOR = 128,
 };
+/* (AI-assisted) ctr_draw_state::tcc bit: back faces of this level mesh draw may be culled (c3l v13
+ * kDrawCullBack). ctr_gpu_set_cull (each frame, config cull_ties): whether they are, and which
+ * screen winding is "back" (flip 0: the c3l convention, counter-clockwise front faces seen from
+ * outside). ctr_gpu_cull_reset: culling off again (after the level draws; draws that don't go
+ * through the state code keep the GPU's last face culling setting). */
+enum { CTR_TCC_CULL_BACK = 2 };
+void ctr_gpu_set_cull(int enable, int flip);
+void ctr_gpu_cull_reset(void);
 /* (AI-assisted) 1 if the depth buffer has a stencil part (not config.ini depth16) */
 int ctr_gpu_has_stencil(void);
 
@@ -395,6 +403,11 @@ typedef struct {
                      * prepared matrix must not be changed, only prepared again) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
+/* (AI-assisted) config.ini fog_stage_skip: the next ctr_gpu_draw_mesh(_prepared) draws are entirely
+ * in front of where both fogs start: their combiner stage passes the color through instead of
+ * mixing in the fog ramp, and (raw draws) texture unit 1, the ramp, is off for them (its cache is
+ * kept). on: 1. Reset at each frame begin. */
+void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
 
@@ -457,6 +470,8 @@ typedef struct {
   int radial_textures;
   int early_depth_draws;
   int proctex_draws;
+  int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
+  int unit1_toggles; /* (AI-assisted) ... and texture unit 1 switched off or on for them */
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =

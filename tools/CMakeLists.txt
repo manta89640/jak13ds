@@ -30,7 +30,8 @@ set(CTR_LEVEL_CONVERTER_THIRD_PARTY
         ${CMAKE_SOURCE_DIR}/third-party/meshoptimizer/indexanalyzer.cpp
         ${CMAKE_SOURCE_DIR}/third-party/meshoptimizer/simplifier.cpp
         ${CMAKE_SOURCE_DIR}/third-party/meshoptimizer/vcacheoptimizer.cpp
-        ${CMAKE_SOURCE_DIR}/third-party/meshoptimizer/vfetchoptimizer.cpp)
+        ${CMAKE_SOURCE_DIR}/third-party/meshoptimizer/vfetchoptimizer.cpp
+        ${CMAKE_SOURCE_DIR}/third-party/meshoptimizer/simplifier.cpp)
 add_executable(ctr_level_converter
         ctr_level_converter/main.cpp
         ctr_level_converter/ctr_texture.cpp

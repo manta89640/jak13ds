@@ -182,9 +182,12 @@ CtrSettings load() {
     } else if (key == "mipmaps") {
       s.mipmaps = v == "off" || v == "0" ? 0 : (v == "trilinear" || v == "2" ? 2 : 1);
     } else if (key == "gpu_profile") {
-      s.gpu_profile = parse_bool(v);
+      s.gpu_profile_ab = v == "ab";  // (AI-assisted)
+      s.gpu_profile = !s.gpu_profile_ab && parse_bool(v);
     } else if (key == "gpu_counters") {
       s.gpu_counters = parse_bool(v);
+    } else if (key == "stats_period") {
+      s.stats_period = std::clamp(f, 1.f, 600.f);  // (AI-assisted)
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
@@ -204,6 +207,20 @@ CtrSettings load() {
       s.sprite_alpha_discard = parse_bool(v);  // (AI-assisted)
     } else if (key == "vis_culling") {
       s.vis_culling = parse_bool(v);
+    } else if (key == "run_culling") {
+      s.run_culling = parse_bool(v);  // (AI-assisted)
+    } else if (key == "neighbour_vis") {
+      s.neighbour_vis = parse_bool(v);  // (AI-assisted)
+    } else if (key == "lowres_vista") {
+      s.lowres_vista = parse_bool(v);  // (AI-assisted)
+    } else if (key == "vista_distance") {
+      s.vista_distance = std::max(0.f, f);  // (AI-assisted)
+    } else if (key == "fog_stage_skip") {
+      s.fog_stage_skip = parse_bool(v);  // (AI-assisted)
+    } else if (key == "cull_ties") {
+      // (AI-assisted) on | off | flip (on, with the other winding)
+      s.cull_flip = v == "flip";
+      s.cull_ties = s.cull_flip || parse_bool(v);
     } else if (key == "raw_cmds") {
       s.raw_cmds = parse_bool(v);
     } else if (key == "vcache_reuse") {
@@ -246,7 +263,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} ({}) "
       "ocean {} sky {} clouds {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} "
       "color16 {} early_depth {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
-      "vis_culling {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} cull_ties {} raw_cmds {} vcache_reuse {} new_shaders {} asm_tex {} asm_mem {} "
       "fast_clock {}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
@@ -271,16 +288,26 @@ std::string CtrSettings::summary() const {
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on") : "off", compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
-      vis_culling ? "on" : "off", raw_cmds ? "on" : "off",
+      vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
-      asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : "",
+      asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
       gpu_counters ? "" : " gpu_counters off", depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");
 }
 
-const CtrSettings& ctr_settings() {
-  static const CtrSettings s = load();
+namespace {
+CtrSettings& settings_instance() {
+  static CtrSettings s = load();
   return s;
+}
+}  // namespace
+
+const CtrSettings& ctr_settings() {
+  return settings_instance();
+}
+
+CtrSettings& ctr_settings_ab() {
+  return settings_instance();
 }
 
 namespace ctr_gfx {

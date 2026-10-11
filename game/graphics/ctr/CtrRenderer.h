@@ -152,6 +152,23 @@ class CtrRenderer {
     int ups = 0, downs = 0;  // steps since the last log
   } m_auto;
   bool profile_skips(const std::string& name) const;
+  // (AI-assisted) gpu_profile = ab: the A/B windows (kAbSwitches in CtrRenderer.cpp)
+  void ab_frame(float gpu_busy_ms, int gpu_busy_frames, int triangles, int draws);
+  struct AbStats {
+    double busy[2] = {0, 0};  // summed GPU busy ms per frame, switch off / on
+    double tris[2] = {0, 0}, draws[2] = {0, 0};
+    int frames[2] = {0, 0}, windows[2] = {0, 0};
+  };
+  struct AbState {
+    bool init = false;
+    std::vector<bool> config;  // each switch's config.ini value (restored when stopping)
+    std::vector<AbStats> stats;
+    size_t window = 0;         // switch * 2 + (on ? 1 : 0), in a cycle (see ab_frame)
+    int cycle = 0;
+    double window_start = 0;
+    int window_frames = 0;
+    std::string level;
+  } m_ab;
  public:
   /*! (AI-assisted) The levels the game wants (game thread, render thread idle): for gpu_profile. */
   void note_levels(const std::vector<std::string>& levels);

@@ -65,10 +65,78 @@ const ProfileMode kProfileModes[] = {
     {"shadow", {"shadow", nullptr, nullptr}},  // (AI-assisted) shadows = full
 };
 constexpr int kProfileModeCount = sizeof(kProfileModes) / sizeof(kProfileModes[0]);
+
+// (AI-assisted) config.ini gpu_profile = ab: the switches that are turned on and off in turns.
+// Add a row to price another setting: its config.ini key (the log's label), how to set it, and
+// how to read it (its config.ini value is the starting point and is restored at the end). The
+// setting must be read by the renderers each frame (not only at load or init).
+struct AbSwitch {
+  const char* key;
+  void (*set)(CtrSettings& s, bool on);
+  bool (*get)(const CtrSettings& s);
+};
+const AbSwitch kAbSwitches[] = {
+    {"run_culling", [](CtrSettings& s, bool on) { s.run_culling = on; },
+     [](const CtrSettings& s) { return s.run_culling; }},
+    {"cull_ties", [](CtrSettings& s, bool on) { s.cull_ties = on; },
+     [](const CtrSettings& s) { return s.cull_ties; }},
+    // the far scenery: lowres_vista and the vista tier (vista_distance 0: none)
+    {"vista",
+     [](CtrSettings& s, bool on) {
+       static const float kConfigDistance = s.vista_distance > 0 ? s.vista_distance : 3000.f;
+       s.lowres_vista = on;
+       s.vista_distance = on ? kConfigDistance : 0.f;
+     },
+     [](const CtrSettings& s) { return s.lowres_vista && s.vista_distance > 0; }},
+    {"fog_stage_skip", [](CtrSettings& s, bool on) { s.fog_stage_skip = on; },
+     [](const CtrSettings& s) { return s.fog_stage_skip; }},
+    // the shadow volumes' draws (shadows = full: the shadow bucket; off: left out, the game still
+    // computes them)
+    {"shadows",
+     [](CtrSettings& s, bool on) {
+       s.shadows = on ? CtrSettings::ShadowMode::Full : CtrSettings::ShadowMode::Blob;
+     },
+     [](const CtrSettings& s) { return s.shadows == CtrSettings::ShadowMode::Full; }},
+    {"envmap", [](CtrSettings& s, bool on) { s.envmap = on; },
+     [](const CtrSettings& s) { return s.envmap; }},
+    {"distort", [](CtrSettings& s, bool on) { s.distort = on; },
+     [](const CtrSettings& s) { return s.distort; }},
+    // (AI-assisted) snow-gpu-impl's keys (merged Oct 11). off = the old behaviour of each one.
+    // distort_copy: rows (on) or the whole screen (off)
+    {"distort_copy", [](CtrSettings& s, bool on) { s.distort_copy_rows = on; },
+     [](const CtrSettings& s) { return s.distort_copy_rows; }},
+    // shadow_casters: the config's cap (on; 6 when the config says all) or every caster (off)
+    {"shadow_casters",
+     [](CtrSettings& s, bool on) {
+       static const int kConfigCap = s.shadow_casters > 0 ? s.shadow_casters : 6;
+       s.shadow_casters = on ? kConfigCap : 0;
+     },
+     [](const CtrSettings& s) { return s.shadow_casters > 0; }},
+    // sprite_min_alpha: the config's value for big sprites (on; 6 when it is 2) or 2 (off)
+    {"sprite_min_alpha",
+     [](CtrSettings& s, bool on) {
+       static const int kConfigAlpha = s.sprite_min_alpha > 2 ? s.sprite_min_alpha : 6;
+       s.sprite_min_alpha = on ? kConfigAlpha : 2;
+     },
+     [](const CtrSettings& s) { return s.sprite_min_alpha > 2; }},
+    {"sprite_alpha_discard", [](CtrSettings& s, bool on) { s.sprite_alpha_discard = on; },
+     [](const CtrSettings& s) { return s.sprite_alpha_discard; }},
+    {"envmap_batch", [](CtrSettings& s, bool on) { s.envmap_batch = on; },
+     [](const CtrSettings& s) { return s.envmap_batch; }},
+    {"merc_tex_sort", [](CtrSettings& s, bool on) { s.merc_tex_sort = on; },
+     [](const CtrSettings& s) { return s.merc_tex_sort; }},
+    {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },
+     [](const CtrSettings& s) { return s.merc_gen_lod; }},
+    {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
+     [](const CtrSettings& s) { return s.clouds; }},
+};
+constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
+constexpr double kAbWindowMs = 1500.0;
+constexpr int kAbSettleFrames = 4;  // the GPU busy times lag the frame (pipeline)
 constexpr double kProfileModeMs = 2500.0;  // per mode
 constexpr int kProfileSettleFrames = 3;    // GPU times lag the frame: skip the first ones
-// (AI-assisted) the render thread's statistics: one burst of lines this often
-constexpr double kStatsPeriodMs = 15000.0;
+// (AI-assisted) the render thread's statistics: one burst of lines this often (config.ini
+// stats_period, seconds)
 // (AI-assisted) config.ini gpu_counters: how long each level's GPU counters run (the hotspot
 // sampler's 16-bit counts hold ~16 s at 268 MHz)
 constexpr double kHwCountersMs = 10000.0;
@@ -335,7 +403,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) one burst every 15 s: it was every 300 frames or 5 s, two conditions that
   // fired close together (double bursts, which stalled the render thread while logging was
   // synchronous)
-  m_rs.log_now = m_rs.last_log_ms == 0 || t0 - m_rs.last_log_ms >= kStatsPeriodMs;
+  m_rs.log_now = m_rs.last_log_ms == 0 || t0 - m_rs.last_log_ms >= ctr_settings().stats_period * 1000.0;
   if (m_rs.log_now) {
     m_rs.last_log_ms = t0;
     ctr_gpu_want_detailed_stats();  // texture slots and free memory: only for these lines
@@ -358,6 +426,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
   }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
+  // (AI-assisted) cull_ties (gpu_profile = ab may switch it between frames)
+  ctr_gpu_set_cull(ctr_settings().cull_ties ? 1 : 0, ctr_settings().cull_flip ? 1 : 0);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -411,6 +481,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
+  }
+  if (ctr_settings().gpu_profile_ab) {
+    ab_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, gs.triangles, gs.draws);
   }
   if (ctr_settings().gpu_profile) {
     if (!m_profile_active && !m_profile_level.empty() && ctr_gpu_time_ms() >= m_profile_arm_ms &&
@@ -469,11 +542,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                            : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage ({} texture unit 1 switches)",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws);
+               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws, gs.unit1_toggles);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
@@ -619,6 +692,81 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, doub
   m_auto.busy_frames = m_auto.frames = 0;
 }
 
+// (AI-assisted) config.ini gpu_profile = ab. A cycle has two windows per switch of kAbSwitches
+// (~1.5 s each): the switch on, then off (every other cycle off, then on, so a slow change of the
+// view doesn't favour one side); the other switches keep their config.ini values. The first
+// frames of a window aren't counted (the GPU times lag). After every cycle one line per switch:
+// the mean GPU busy time per frame with it on and off since the level started, and triangles /
+// draws. Per level (the sums restart at a level change); runs as long as the setting is there.
+void CtrRenderer::ab_frame(float gpu_busy_ms, int gpu_busy_frames, int triangles, int draws) {
+  CtrSettings& s = ctr_settings_ab();
+  const double now = ctr_gpu_time_ms();
+  if (!m_ab.init) {
+    m_ab.init = true;
+    for (const auto& sw : kAbSwitches) {
+      m_ab.config.push_back(sw.get(s));
+    }
+    m_ab.stats.assign(kAbSwitchCount, AbStats());
+    m_ab.window = 0;
+    m_ab.window_start = now;
+    lg::info("[ctr] gpu ab: {} switches, {:.1f} s windows (gpu_profile = ab)", kAbSwitchCount,
+             kAbWindowMs / 1000.0);
+  }
+  if (m_profile_level != m_ab.level) {
+    // a new level: its own sums; config values while it loads
+    m_ab.level = m_profile_level;
+    m_ab.stats.assign(kAbSwitchCount, AbStats());
+    m_ab.cycle = 0;
+    m_ab.window = 0;
+    m_ab.window_frames = 0;
+    m_ab.window_start = m_profile_arm_ms;  // ~10 s after the level started
+  }
+  const size_t sw = m_ab.window / 2;
+  const bool first_half = m_ab.window % 2 == 0;
+  const bool on = (m_ab.cycle % 2 == 0) == first_half;
+  if (now < m_ab.window_start) {
+    for (size_t i = 0; i < kAbSwitchCount; i++) {
+      kAbSwitches[i].set(s, m_ab.config[i]);
+    }
+    return;
+  }
+  // this window's settings (for the next frame)
+  for (size_t i = 0; i < kAbSwitchCount; i++) {
+    kAbSwitches[i].set(s, i == sw ? on : m_ab.config[i]);
+  }
+  if (gpu_busy_frames && ++m_ab.window_frames > kAbSettleFrames) {
+    auto& st = m_ab.stats[sw];
+    st.busy[on] += gpu_busy_ms / gpu_busy_frames;
+    st.tris[on] += triangles;
+    st.draws[on] += draws;
+    st.frames[on]++;
+  }
+  if (now - m_ab.window_start < kAbWindowMs) {
+    return;
+  }
+  m_ab.stats[sw].windows[on]++;
+  m_ab.window_start = now;
+  m_ab.window_frames = 0;
+  if (++m_ab.window < 2 * kAbSwitchCount) {
+    return;
+  }
+  m_ab.window = 0;
+  m_ab.cycle++;
+  for (size_t i = 0; i < kAbSwitchCount; i++) {
+    const auto& st = m_ab.stats[i];
+    if (!st.frames[0] || !st.frames[1]) {
+      continue;
+    }
+    const double b1 = st.busy[1] / st.frames[1], b0 = st.busy[0] / st.frames[0];
+    lg::info("[ctr] gpu ab {} cycle {}: {} on {:.2f} ms, off {:.2f} ms (on - off {:+.2f} ms; "
+             "{:.0f} / {:.0f} triangles, {:.0f} / {:.0f} draws; {}+{} windows, config {})",
+             m_ab.level, m_ab.cycle, kAbSwitches[i].key, b1, b0, b1 - b0,
+             st.tris[1] / st.frames[1], st.tris[0] / st.frames[0], st.draws[1] / st.frames[1],
+             st.draws[0] / st.frames[0], st.windows[1], st.windows[0],
+             m_ab.config[i] ? "on" : "off");
+  }
+}
+
 void CtrRenderer::profile_frame(double gpu_draw_ms) {
   const double now = ctr_gpu_time_ms();
   if (m_profile_ms.empty()) {
@@ -723,7 +871,10 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   const bool profiling = m_profile_mode > 0;
   for (size_t bucket_id = 0; bucket_id < m_buckets.size(); bucket_id++) {
     const double tb = ctr_gpu_time_ms();
-    if (profiling && profile_skips(m_buckets[bucket_id]->name())) {
+    // (AI-assisted) shadows switched off by gpu_profile = ab: the shadow bucket left out
+    const bool ab_skip = ctr_settings().shadows != CtrSettings::ShadowMode::Full &&
+                         m_buckets[bucket_id]->name() == "shadow";
+    if ((profiling && profile_skips(m_buckets[bucket_id]->name())) || ab_skip) {
       while (dma.current_tag_offset() != m_rs.next_bucket) {
         dma.read_and_advance();
       }

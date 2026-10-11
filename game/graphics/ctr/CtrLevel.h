@@ -80,6 +80,17 @@ struct CtrLevelData {
   std::vector<u32> chunk_first_run;
   std::vector<u32> draw_first_run;
   std::vector<u16> draw_run_count;
+  // (AI-assisted) config.ini run_culling: each run's bounding sphere, made at load from the
+  // chunk's vertices, in the chunk's quantized units (world = origin + c * scale, radius r *
+  // scale); r = 0xffff: unknown (the mesh wasn't made at load), never hidden. Chunks without
+  // visibility runs get runs made at load for this (their draws in pieces, vis 0xffff).
+  // chunk_run_count: all of a chunk's runs (Chunk::vis_run_count: only the file's).
+  struct RunSphere {
+    s16 c[3];
+    u16 r;
+  };
+  std::vector<RunSphere> run_spheres;
+  std::vector<u32> chunk_run_count;
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
@@ -95,6 +106,11 @@ struct CtrLevelData {
   u64 drawn_frame = ~0ull;
   float bbox_min[3] = {0, 0, 0}, bbox_max[3] = {0, 0, 0};  // tfrag + tie, game units
   bool has_lowres = false;  // chunks with lod_tier 3
+  // (AI-assisted) the bounds of the detailed tfrag (tier 1, or tier 0 tfrag in single tier files):
+  // where the level's low resolution tfrag isn't drawn in near mode (config lowres_vista)
+  float detail_min[3] = {0, 0, 0}, detail_max[3] = {0, 0, 0};
+  bool has_detail = false;
+  bool has_vista = false;  // (AI-assisted) c3l v13 vista tier chunks (CHUNK_KIND_VISTA)
   // (AI-assisted) partial unload: a level only seen from a neighbouring one (far mode: only its
   // far chunks are drawn) frees the meshes of its other chunks after a while (linear memory for
   // the level the camera is in), and reads them again from its file when the camera comes back
@@ -160,6 +176,13 @@ class CtrLevels {
   /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
    * nothing to wait for (any thread). The game waits for this before a level starts. */
   bool ready(const std::string& name);
+  /*! (AI-assisted) The levels being drawn (render thread). */
+  void loaded(std::vector<const CtrLevelData*>* out) const {
+    out->clear();
+    for (const auto& [name, lev] : m_levels) {
+      out->push_back(lev.get());
+    }
+  }
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
@@ -340,12 +363,25 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) the game's visibility string for the level being drawn (nullptr: none), and
   // what it hid (statistics)
   const u8* m_vis = nullptr;
-  u64 m_vis_chunks = 0, m_vis_tris = 0, m_vis_frames = 0;
+  u64 m_vis_chunks = 0, m_vis_tris = 0, m_vis_frames = 0, m_vis_own_frames = 0;
+  // (AI-assisted) run_culling: per run of the level being drawn, shown this frame (filled for the
+  // chunks tested run by run); statistics: runs tested, triangles and chunks the view test hid
+  std::vector<u8> m_run_shown;
+  u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
+  // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
+  // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
+  u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;
+  std::vector<const CtrLevelData*> m_loaded;
+  // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
+  // of its distance)
+  std::vector<u8> m_vista_src;
   // this frame's visible chunks and draws (kept to avoid allocations)
   struct VisibleChunk {
     u32 chunk;
     u8 band;    // (AI-assisted) distance band for the early depth order: 0 near .. 2 far
     bool partly;  // (AI-assisted) some of its visibility runs are hidden: draw run by run
+    bool vista;   // (AI-assisted) far scenery: drawn first, with the vista fog (lowres_vista)
+    bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
     float clip[16];
     ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };
