@@ -711,6 +711,53 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
   }
 
+  // (AI-assisted) HUD models are scaled unevenly (the orb icon: x and z 0.0076, y -0.011). The skin
+  // shaders turn the normals with the bone rows themselves (M n), right for evenly scaled bones; the
+  // game's normal matrix (the inverse transpose, which Merc2 and generic use) differs from it by
+  // D = (M M^T)^-1. For HUD models, D goes into the rows and its inverse into the clip matrix:
+  // the same positions, normals D M n = M^-T n, for the lighting and the envmap's texture
+  // coordinates. (The envmap's view vector gets D too: small next to the normal's change, HUD
+  // models being far along z from the HUD's origin.)
+  float hud_d[9];
+  bool hud_nfix = false;
+  float hud_fixed_clip[16];
+  if ((flags.bitflags & 8) && i > 0 && slots[0] < 128) {
+    const MercMat& m0 = bones[slots[0]];
+    double g[3][3];
+    for (int r = 0; r < 3; r++) {
+      for (int t = 0; t < 3; t++) {
+        g[r][t] = 0;
+        for (int c = 0; c < 3; c++) {
+          g[r][t] += (double)m0.tmat[c][r] * m0.tmat[c][t];
+        }
+      }
+    }
+    const double det = g[0][0] * (g[1][1] * g[2][2] - g[1][2] * g[2][1]) -
+                       g[0][1] * (g[1][0] * g[2][2] - g[1][2] * g[2][0]) +
+                       g[0][2] * (g[1][0] * g[2][1] - g[1][1] * g[2][0]);
+    if (std::abs(det) > 1e-30) {
+      double d[3][3];
+      for (int r = 0; r < 3; r++) {
+        for (int t = 0; t < 3; t++) {
+          const int r1 = (t + 1) % 3, r2 = (t + 2) % 3, c1 = (r + 1) % 3, c2 = (r + 2) % 3;
+          d[r][t] = (g[r1][c1] * g[r2][c2] - g[r1][c2] * g[r2][c1]) / det;
+        }
+      }
+      // scaled to about 1 (only its direction matters for the normals): D / k, D^-1 = k G
+      const double k = (d[0][0] + d[1][1] + d[2][2]) / 3.0;
+      float e[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+      for (int r = 0; r < 3; r++) {
+        for (int t = 0; t < 3; t++) {
+          hud_d[3 * r + t] = (float)(d[r][t] / k);
+          e[4 * r + t] = (float)(g[r][t] * k);
+        }
+      }
+      mul44(hud_fixed_clip, clip, e);
+      clip = hud_fixed_clip;
+      hud_nfix = true;
+    }
+  }
+
   // envmap strength and color per effect (pc-merc-draw-request "fades", after the flags and the
   // blend shape weights): 0 when the effect's envmap is off or faded out by distance
   const u8* fades = input + 32 + ((flags.bitflags & 4) ? 4 * c3l::kMercBlercWeights : 0);
@@ -802,6 +849,19 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         rows[4 * r + 1] = -m.tmat[1][r] * model->scale;
         rows[4 * r + 2] = -m.tmat[2][r] * model->scale;
         rows[4 * r + 3] = -m.tmat[3][r];
+      }
+    }
+    if (hud_nfix && !same_palette) {
+      for (int p = 0; p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
+        float* rows = &palette_rows[12 * p];
+        float o[12];
+        for (int r = 0; r < 3; r++) {
+          for (int c = 0; c < 4; c++) {
+            o[4 * r + c] = hud_d[3 * r] * rows[c] + hud_d[3 * r + 1] * rows[4 + c] +
+                           hud_d[3 * r + 2] * rows[8 + c];
+          }
+        }
+        memcpy(rows, o, sizeof(o));
       }
     }
     rows_of = &draw;
