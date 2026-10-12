@@ -189,6 +189,9 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.cmd_dedup_draw; }},
     {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
      [](const CtrSettings& s) { return s.skin_clip_f24; }},
+    // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
+    {"opaque_alpha", [](CtrSettings& s, bool on) { s.opaque_alpha = on; },
+     [](const CtrSettings& s) { return s.opaque_alpha; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;

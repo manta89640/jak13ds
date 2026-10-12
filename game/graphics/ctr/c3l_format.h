@@ -27,7 +27,11 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v14 (AI-assisted): a shrub chunk's max_dist is its shrubs' PS2 distance (the converter groups
 // shrubs by prototype distance class: the middle of the PS2 fade, from the prototype's dists);
 // before, every shrub chunk had the converter's --shrub-dist. Otherwise v13.
-constexpr uint32_t kVersion = 14;
+// v15 (AI-assisted): draw optimisations (ctr_level_converter --vcache-fifo, --opaque-alpha):
+// Draw::kind kDrawAlphaTestDropped and kDrawBlendDropped (the alpha test / blending the converter
+// proved can't change a pixel was taken out of Draw::mode). Otherwise v14. Readers detect them by
+// their bits.
+constexpr uint32_t kVersion = 15;
 // (AI-assisted) the first version whose shrub chunks carry their PS2 distance
 constexpr uint32_t kShrubPs2DistVersion = 14;
 // v7 files (16-bit textures without mip levels) still load
@@ -163,6 +167,16 @@ static_assert(sizeof(Draw) == 16);
 // (AI-assisted) v13 Draw::kind flag: the draw's triangles are closed, consistently wound surfaces
 // (front faces counter-clockwise seen from outside, right-handed world): back faces may be culled
 constexpr uint16_t kDrawCullBack = 0x100;
+// (AI-assisted) v15 Draw::kind flags (see kVersion).
+// kDrawBlendDropped: the draw mode had alpha blending (Cs * As + Cd * (1 - As)), but every texel of
+// every mip level of the texture has alpha 1.0 (or it's untextured) and every vertex alpha is
+// >= 0x80: As = 1 everywhere, the blending leaves Cs. The ab bit was cleared; the draw keeps its
+// place among the blended draws (the runtime keeps its order). config opaque_alpha = off: blended.
+constexpr uint16_t kDrawBlendDropped = 0x400;
+// kDrawAlphaTestDropped: the draw mode's alpha test (GEQUAL, reference: the mode's aref field) can
+// never fail for these triangles (alpha 1.0 everywhere, as above): its enable bit was cleared
+// (draws of the same texture and state may have been merged). config opaque_alpha = off: tested.
+constexpr uint16_t kDrawAlphaTestDropped = 0x800;
 
 /*!
  * (AI-assisted) v11: compression. The file is the v10 layout (the "raw image": every offset in the

@@ -917,7 +917,9 @@ void build_draw_order(CtrLevelData* out) {
   out->sorted_draws.clear();
   out->ordered_draws.clear();
   out->early_draws.clear();
+  out->alpha_swap.clear();
   out->draw_states.reserve(out->draws.size());
+  out->opaque_alpha_applied = ctr_settings().opaque_alpha;
   for (auto& d : out->draws) {
     DrawMode mode;
     mode.as_int() = d.mode;
@@ -938,9 +940,30 @@ void build_draw_order(CtrLevelData* out) {
     // test never fails (the texture's alpha is above its reference everywhere; vertex alpha 0x80):
     // the early depth test may drop what's behind it before texturing
     const int min_alpha = textured ? out->tex_min_alpha[d.texture] : 0;
-    if (st.blend == CTR_BLEND_OFF && st.zwrite && st.ztest == CTR_TEST_GEQUAL &&
-        (st.atest == CTR_TEST_ALWAYS || (textured && min_alpha >= std::min(255, st.aref * 2)))) {
-      st.flags |= CTR_STATE_EARLY_DEPTH;
+    // (AI-assisted) c3l v15: the alpha test / blending the converter took out (alpha 1.0 in every
+    // texel and vertex of the draw: they can't change a pixel); config opaque_alpha = off puts
+    // them back (as the draw mode had them: GEQUAL with the mode's aref; Cs * As + Cd * (1 - As))
+    ctr_draw_state with = st;
+    if (d.kind & c3l::kDrawAlphaTestDropped) {
+      with.atest = CTR_TEST_GEQUAL;
+      with.aref = mode.get_aref();
+    }
+    if (d.kind & c3l::kDrawBlendDropped) {
+      with.blend = CTR_BLEND_ALPHA;
+    }
+    auto early = [&](ctr_draw_state& s) {
+      if (s.blend == CTR_BLEND_OFF && s.zwrite && s.ztest == CTR_TEST_GEQUAL &&
+          (s.atest == CTR_TEST_ALWAYS || (textured && min_alpha >= std::min(255, s.aref * 2)))) {
+        s.flags |= CTR_STATE_EARLY_DEPTH;
+      }
+    };
+    early(st);
+    early(with);
+    if (d.kind & (c3l::kDrawAlphaTestDropped | c3l::kDrawBlendDropped)) {
+      out->alpha_swap.push_back({(u32)di, with});
+      if (!ctr_settings().opaque_alpha) {
+        std::swap(st, out->alpha_swap.back().second);
+      }
     }
     out->draw_states.push_back(st);
   }
@@ -962,8 +985,11 @@ void build_draw_order(CtrLevelData* out) {
       states.push_back(st);
     }
     draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
-    // blending, or drawn over what's there without writing depth (decals): keep the order
-    draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
+    // blending, or drawn over what's there without writing depth (decals): keep the order.
+    // (AI-assisted) v15 kDrawBlendDropped draws keep their place too (moving them before the
+    // blended draws drawn ahead of them could change what those pixels show)
+    draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite ||
+                       (out->draws[di].kind & c3l::kDrawBlendDropped);
   }
   // drawing order, made once (see sorted_draws)
   out->draw_chunk.assign(out->draws.size(), 0);
@@ -2338,6 +2364,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
+  }
+  // (AI-assisted) config opaque_alpha (gpu_profile = ab switches it): the v15 draws' alpha tests /
+  // blending back, or out again
+  if (lev.opaque_alpha_applied != settings.opaque_alpha) {
+    lev.opaque_alpha_applied = settings.opaque_alpha;
+    for (auto& [di, alt] : lev.alpha_swap) {
+      std::swap(lev.draw_states[di], alt);
+    }
   }
   // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
   ctr_gpu_pool_set_priority(lev.tex_pool, far_level ? 1 : 2);

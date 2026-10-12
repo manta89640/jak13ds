@@ -50,6 +50,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--block-kb N` | 64 | largest compressed block (raw KB). |
 | `--no-vcache` | off | keep the triangle and vertex order (no vertex welding, no meshoptimizer). |
 | `--vcache-fifo N` | -1 | (AI-assisted, v15) the triangle order inside each visibility run of an opaque draw, for the post-vertex cache (see "Vertex order"): N > 0 for a first-in first-out cache of N entries; -1 (default) per run the best of the orders for 4 and 12 entries and meshoptimizer's, by the vertices a FIFO of 4 + 8 + 16 entries shades; 0 the v14 order (meshoptimizer, without the coplanar rule). |
+| `--no-opaque-alpha` | off | (AI-assisted, v15) keep alpha tests and blending that can't change a pixel (see "Draw optimisations"). |
 | `--no-verify` | off | don't read every written file back with the runtime's reader to compare it. |
 
 What goes in:
@@ -132,13 +133,37 @@ v15: village1 1.411 / 1.258 / 1.245 / 1.241 -> 1.346 / 1.268 / 1.249 / 1.243 (1.
 1.201 / 1.197 -> 1.354 / 1.222 / 1.207 / 1.199 (1.186): -4% for a 4 entry cache, within 1% of the
 v14 order for 8 and more (both near the bound there). The converter logs these per level.
 
+## Draw optimisations (v15)
+
+(AI-assisted) `Draw::kind` flags (c3l_format.h), each one pixel for pixel the draw it replaces:
+
+- **Opaque alpha** (`kDrawAlphaTestDropped`, `kDrawBlendDropped`; config `opaque_alpha`): a draw
+  with an alpha test (GEQUAL) or alpha blending (Cs * As + Cd * (1 - As)) whose texture has alpha
+  1.0 in every texel of every mip level as the GPU reads it (ETC1, RGB565, or every 4-bit alpha
+  0xF) and whose every vertex alpha is >= 0x80 (the combiner's tex.a * v.a * 2 saturates at 1;
+  fog_alpha puts the constant 0x80 there) gets alpha 1.0 everywhere: the test passes, the
+  blending leaves Cs. The bit is cleared from `mode` (the alpha test's aref stays in the mode for
+  `opaque_alpha = off`, which puts the test back). Alpha tested draws of one texture and state then
+  merge with the opaque ones of that texture in a chunk where those also have alpha 1.0. Not done
+  where a draw's triangles overlap another draw's of the same texture in one plane (the runtime
+  sorts opaque draws by texture, then state: the state change would reorder them). Blended ones
+  keep their place among the blended draws (`kDrawBlendDropped` draws stay in `ordered_draws`):
+  moved to the opaque draws they would be drawn before blended draws that were drawn under them.
+  Formats: a texture whose alpha is 1.0 everywhere is already ETC1 / RGB565 (every texel >= 240
+  at conversion counts as opaque), so nothing to gain there. All levels: 1094 alpha tested draws
+  (per level and state) lose the test (village1 85, Snowy 71, village3 119; 18 kept for overlaps),
+  28 merges;
+  no level has a blended draw with alpha 1.0 everywhere (the ones with an opaque texture have
+  vertex alpha below 0x80, and the other way round).
+
 ## Layout
 
 Little endian. All offsets are from the start of the file. Every section is 16-byte aligned.
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 12 (7..11 still load; v12: merc rewritten vertices); char level_name[32]
+  char magic[4] = "C3LV"; u32 version = 15 (7..14 still load; v12: merc rewritten vertices; v13: vista
+  tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"); char level_name[32]
   u32 num_textures, textures_offset
   u32 num_chunks, chunks_offset
   u32 vertex_data_offset, vertex_data_size      Vertex[]
@@ -176,7 +201,8 @@ Draw (16 bytes)
   u32 mode                tfrag3 DrawMode bits (common/dma/gs.h): blend, alpha test, clamp,
                           depth write, ...
   u16 texture             texture index, 0xffff = untextured
-  u16 kind                0 = tfrag, 1 = tie, 2 = shrub
+  u16 kind                0 = tfrag, 1 = tie, 2 = shrub (low byte); flags: 0x100 kDrawCullBack (v13),
+                          0x400 kDrawBlendDropped, 0x800 kDrawAlphaTestDropped (v15)
   u32 first_index, index_count   triangle list; indices are relative to the chunk's first_vertex
 
 Texture (16 bytes)

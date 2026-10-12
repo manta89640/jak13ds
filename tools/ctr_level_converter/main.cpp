@@ -105,6 +105,11 @@ struct Options {
   // order has to be kept), by the vertices shaded with 4 + 8 + 16 entries (the cache's size is
   // unknown). 0: the v14 order (meshoptimizer, without the coplanar rule)
   int vcache_fifo = -1;
+  // (AI-assisted) v15 opaque alpha (c3l::kDrawAlphaTestDropped, kDrawBlendDropped): the alpha test
+  // or alpha blending of draws whose texture alpha is 1.0 in every texel of every level and whose
+  // vertex alpha is >= 0x80 is taken out (it can't change a pixel); then draws of the same texture
+  // and state merge
+  bool opaque_alpha = true;
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
@@ -188,6 +193,9 @@ struct SrcTri {
   u32 sclass = 0;   // (AI-assisted) shrubs: distance class (kShrubClassMeters), 0: shrub_dist
   u16 vis = 0xffff;  // (AI-assisted) drawable id in the level's visibility string (c3l::VisRun)
                      // (vista tier: the source chunk)
+  // (AI-assisted) v15: the draw key before the draw optimisations (the vista tier copies with it;
+  // UINT32_MAX: draw_key)
+  u32 orig_key = UINT32_MAX;
 };
 
 struct DrawKey {
@@ -268,6 +276,18 @@ struct Converter {
       tex_use[tex].face |= face;
       tex_use[tex].envmap |= envmap;
     }
+  }
+
+  // (AI-assisted) v15: where a key's triangles go in a chunk's draw order (make_plans): a key made
+  // by the draw optimisations takes the place of the first key merged into it, so the chunks keep
+  // their layout (which keys end up in which chunk split, the quantizing grids)
+  std::vector<u32> key_rank;
+  u32 rank_of(u32 k) const { return k < key_rank.size() ? key_rank[k] : k; }
+  void rank_merge(u32 to, u32 from) {
+    while (key_rank.size() < draw_keys.size()) {
+      key_rank.push_back((u32)key_rank.size());
+    }
+    key_rank[to] = std::min(key_rank[to], rank_of(from));
   }
 
   u32 key_id(const DrawKey& k) {
@@ -1748,6 +1768,199 @@ bool is_interior(const std::string& level) {
   return false;
 }
 
+// (AI-assisted) every texel of every level of the texture has alpha 1.0 (as the GPU reads it)
+bool texture_alpha_full(const c3l::Texture& d, const std::vector<u8>& data) {
+  if (d.format == c3l::TEX_ETC1 || d.format == c3l::TEX_RGB565) {
+    return true;
+  }
+  u32 off = 0;
+  for (int l = 0; l < std::max<int>(1, d.levels); l++) {
+    const int w = d.w >> l, h = d.h >> l;
+    const auto img = ctr_tex::decode_level(data.data() + off, w, h, (ctr_tex::Format)d.format);
+    for (int i = 0; i < w * h; i++) {
+      if (img.rgba[4 * i + 3] != 255) {
+        return false;
+      }
+    }
+    off += c3l::texture_level_bytes(w, h, d.format);
+  }
+  return true;
+}
+
+// (AI-assisted) v15 draw optimisations (Options::opaque_alpha), on the triangles
+// before chunking. Statistics for the log.
+struct DrawOptStats {
+  size_t keys_at = 0, tris_at = 0, keys_blend = 0, tris_blend = 0, merged_keys = 0;
+  size_t at_candidates = 0, blend_candidates = 0, blocked_coplanar = 0;
+  size_t coplanar_pairs = 0, cross_key_pairs = 0;
+};
+
+void optimize_draws(Converter& cv,
+                    const Options& opt,
+                    std::vector<c3l::Texture>& tex_descs,
+                    std::vector<std::vector<u8>>& tex_datas,
+                    std::vector<TexUse>& /*tex_use: the atlases*/,
+                    DrawOptStats* st) {
+  const size_t nk = cv.draw_keys.size();
+  auto mode_of = [&](u32 k) {
+    DrawMode m;
+    m.as_int() = cv.draw_keys[k].mode;
+    return m;
+  };
+  auto any_order = [&](u32 k) {
+    const DrawMode m = mode_of(k);
+    return !m.get_ab_enable() && m.get_depth_write_enable();
+  };
+  // textures with alpha 1.0 in every texel of every level (as the GPU reads them)
+  std::vector<int> full(tex_descs.size(), -1);
+  auto tex_full = [&](u16 t) {
+    if (t == 0xffff) {
+      return true;
+    }
+    if (t >= tex_descs.size()) {
+      return false;
+    }
+    if (full[t] < 0) {
+      full[t] = texture_alpha_full(tex_descs[t], tex_datas[t]);
+    }
+    return full[t] == 1;
+  };
+  // per key: triangles, vertex alpha >= 0x80 everywhere
+  std::vector<size_t> key_tris(nk, 0);
+  std::vector<u8> key_va(nk, 1);
+  for (const auto& t : cv.tris) {
+    key_tris[t.draw_key]++;
+    for (u32 v : t.v) {
+      if (cv.verts[v].rgba[3] < 0x80) {
+        key_va[t.draw_key] = 0;
+      }
+    }
+  }
+  // coplanar overlaps between different keys (opaque ones: their order is the runtime's sort, by
+  // texture, then state): a key whose triangles overlap another key's of the same texture keeps its
+  // state (the sort among the texture's draws would change)
+  std::vector<u8> key_blocked(nk, 0);
+  {
+    std::vector<c3l_opt::Tri> wt;
+    std::vector<u32> ids;
+    for (u32 i = 0; i < cv.tris.size(); i++) {
+      const auto& t = cv.tris[i];
+      if (!any_order(t.draw_key)) {
+        continue;
+      }
+      c3l_opt::Tri w;
+      for (int k = 0; k < 3; k++) {
+        const auto& v = cv.verts[t.v[k]];
+        w[k] = {v.x, v.y, v.z};
+      }
+      wt.push_back(w);
+      ids.push_back(i);
+    }
+    const auto pairs = c3l_opt::coplanar_pairs(wt, {}, c3l_opt::CoplanarOptions{});
+    st->coplanar_pairs = pairs.size();
+    for (auto [a, b] : pairs) {
+      const auto& ta = cv.tris[ids[a]];
+      const auto& tb = cv.tris[ids[b]];
+      // the near and coarse tfrag versions of a cell are never drawn together
+      if (ta.tier != tb.tier && ta.tier && tb.tier && ta.tier + tb.tier == 3) {
+        continue;
+      }
+      if (ta.draw_key == tb.draw_key) {
+        continue;
+      }
+      st->cross_key_pairs++;
+      const auto& ka = cv.draw_keys[ta.draw_key];
+      const auto& kb = cv.draw_keys[tb.draw_key];
+      if (ka.texture == kb.texture) {
+        key_blocked[ta.draw_key] = key_blocked[tb.draw_key] = 1;
+      }
+    }
+  }
+  std::vector<u32> remap(nk);
+  for (u32 k = 0; k < nk; k++) {
+    remap[k] = k;
+  }
+  if (opt.opaque_alpha) {
+    constexpr u32 kAtBits = 0xFF00 | (3u << 16) | (1u << 18) | (3u << 21);
+    // groups of opaque keys that differ only in their alpha test: the ones whose alpha is 1.0
+    // everywhere become one key without the test (the largest aref kept for config opaque_alpha
+    // = off); blended ones (alpha blending of Cs * As + Cd * (1 - As)) lose the blending in place
+    std::map<std::tuple<u32, u16, u16>, std::vector<u32>> groups;
+    for (u32 k = 0; k < nk; k++) {
+      if (!key_tris[k]) {
+        continue;
+      }
+      const auto dk = cv.draw_keys[k];
+      const DrawMode m = mode_of(k);
+      const bool alpha1 = tex_full(dk.texture) && key_va[k];
+      const bool at = m.get_at_enable() && m.get_alpha_test() == DrawMode::AlphaTest::GEQUAL;
+      const bool blend =
+          m.get_ab_enable() && m.get_alpha_blend() == DrawMode::AlphaBlend::SRC_DST_SRC_DST;
+      st->at_candidates += at && alpha1;
+      st->blend_candidates += blend && alpha1;
+      if (!alpha1) {
+        continue;
+      }
+      if (blend) {
+        // in place: the same key number (the chunk's draw order: the blended draws keep theirs)
+        DrawMode nm = m;
+        nm.disable_ab();
+        u16 kind = (u16)(dk.kind | c3l::kDrawBlendDropped);
+        if (at) {
+          nm.disable_at();
+          kind |= c3l::kDrawAlphaTestDropped;
+        }
+        cv.draw_key_ids.erase(dk);
+        cv.draw_keys[k] = DrawKey{nm.as_int(), dk.texture, kind};
+        cv.draw_key_ids.emplace(cv.draw_keys[k], k);
+        st->keys_blend++;
+        st->tris_blend += key_tris[k];
+        continue;
+      }
+      if (!any_order(k) || key_blocked[k] || (m.get_at_enable() && !at)) {
+        st->blocked_coplanar += at && key_blocked[k];
+        continue;
+      }
+      groups[{dk.mode & ~kAtBits, dk.texture, dk.kind}].push_back(k);
+    }
+    for (auto& [g, keys] : groups) {
+      int aref = -1;
+      for (u32 k : keys) {
+        const DrawMode m = mode_of(k);
+        if (m.get_at_enable()) {
+          aref = std::max<int>(aref, m.get_aref());
+        }
+      }
+      if (aref < 0) {
+        continue;  // no alpha test among them
+      }
+      DrawMode nm;
+      nm.as_int() = std::get<0>(g);
+      nm.set_aref((u8)aref);
+      nm.set_alpha_test(DrawMode::AlphaTest::GEQUAL);
+      const u32 to = cv.key_id(DrawKey{nm.as_int(), std::get<1>(g),
+                                       (u16)(std::get<2>(g) | c3l::kDrawAlphaTestDropped)});
+      for (u32 k : keys) {
+        remap[k] = to;
+        if (mode_of(k).get_at_enable()) {
+          st->keys_at++;
+          st->tris_at += key_tris[k];
+        }
+      }
+      st->merged_keys += keys.size() - 1;
+    }
+    for (auto& t : cv.tris) {
+      if (remap[t.draw_key] != t.draw_key) {
+        if (t.orig_key == UINT32_MAX) {
+          t.orig_key = t.draw_key;  // the vista tier copies with the key from before
+        }
+        cv.rank_merge(remap[t.draw_key], t.draw_key);
+        t.draw_key = remap[t.draw_key];
+      }
+    }
+  }
+}
+
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Options opt = opt_in;
   if (is_interior(in.stem().string())) {
@@ -1854,6 +2067,30 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
 
+  // ---- textures (in parallel: ETC1 encoding is slow) ----
+  // (AI-assisted) before the chunks: the v15 draw optimisations look at the encoded texels
+  std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
+  std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
+  std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
+  std::vector<MercGate> tex_gate(cv.tex_order.size());
+  {
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
+      for (size_t i = a; i < b; i++) {
+        tex_descs[i] = c3l::Texture{};
+        tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
+                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
+      }
+    });
+    pool.wait_for_tasks();
+  }
+  // (AI-assisted) v15 draw optimisations: alpha tests / blending that can't change a pixel
+  DrawOptStats dstats;
+  if (!opt.merc_only) {
+    optimize_draws(cv, opt, tex_descs, tex_datas, cv.tex_use, &dstats);
+    tex_psnr.resize(tex_descs.size(), 99.0);
+    tex_gate.resize(tex_descs.size());
+  }
   // ---- chunking: grid cells by triangle centroid ----
   // shrubs are small and only drawn up close: smaller cells cull them better
   auto cell_of_detail = [&](int detail) {
@@ -1902,6 +2139,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
         const auto& ta = cv.tris[a];
         const auto& tb = cv.tris[b];
+        // (AI-assisted) v15: by key rank (Converter::key_rank), then key
+        const u32 ra = cv.rank_of(ta.draw_key), rb = cv.rank_of(tb.draw_key);
+        if (ra != rb) {
+          return ra < rb;
+        }
         return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
       });
       size_t pos = 0;
@@ -1992,7 +2234,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           cx += cv.verts[tr.v[k]].x / 3;
           cz += cv.verts[tr.v[k]].z / 3;
         }
-        groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell), tr.draw_key}].push_back(t);
+        // (AI-assisted) v15: with the draw key from before the draw optimisations (the same
+        // copies as before them)
+        groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell),
+                tr.orig_key == UINT32_MAX ? tr.draw_key : tr.orig_key}]
+            .push_back(t);
       }
       for (auto& [gk, ids] : groups) {
         vista_src_tris += ids.size();
@@ -2052,7 +2298,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         std::unordered_map<u32, u32> made, made_flat;
         // (AI-assisted) vista_flat: the copies' draw key (untextured, the draw mode without its
         // texture parts: clamp, filter, tcc, alpha test) and color
-        const DrawKey src_key = cv.draw_keys[cv.tris[ids[0]].draw_key];
+        const u32 src_key_id = cv.tris[ids[0]].orig_key == UINT32_MAX ? cv.tris[ids[0]].draw_key
+                                                                         : cv.tris[ids[0]].orig_key;
+        const DrawKey src_key = cv.draw_keys[src_key_id];
         constexpr u32 kTextureModeBits = 0x00E7FFE0;  // bits 5-18, 21-23
         const u32 flat_key =
             opt.vista_flat
@@ -2063,6 +2311,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             opt.vista_flat ? avg_color(src_key.texture) : std::array<float, 3>{128.f, 128.f, 128.f};
         for (size_t i = 0; i + 2 < out_idx.size(); i += 3) {
           SrcTri nt = cv.tris[ids[0]];
+          nt.draw_key = src_key_id;  // (AI-assisted) the key from before the optimisations
+          nt.orig_key = UINT32_MAX;
           for (int k = 0; k < 3; k++) {
             const u32 r = out_idx[i + k];
             auto [it, fresh] = made.emplace(r, (u32)cv.verts.size());
@@ -2504,22 +2754,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     return false;
   }
 
-  // ---- textures (in parallel: ETC1 encoding is slow) ----
-  std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
-  std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
-  std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
-  std::vector<MercGate> tex_gate(cv.tex_order.size());
-  {
-    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
-    pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
-      for (size_t i = a; i < b; i++) {
-        tex_descs[i] = c3l::Texture{};
-        tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
-                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
-      }
-    });
-    pool.wait_for_tasks();
-  }
   // (AI-assisted) textures made smaller than their original (max_tex): a blurry detail shows here
   for (size_t i = 0; i < cv.tex_order.size(); i++) {
     const auto& t = level.textures.at(cv.tex_order[i]);
@@ -2882,6 +3116,16 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              "face culling ({} turned to face outward)",
              level.level_name, cv.orient_culled, cv.orient_tris, cv.orient_flipped);
   }
+  if (!opt.merc_only) {
+    // (AI-assisted) v15 draw optimisations
+    lg::info("{}: opaque alpha: {} draws ({} triangles) lose their alpha test, {} blended ones ({} "
+             "triangles) their blending (texture alpha 1.0 in every level, vertex alpha >= 0x80; "
+             "of {} alpha tested, {} blended such draws: {} kept for coplanar overlaps with other "
+             "draws of their texture); {} draws merged into others",
+             level.level_name, dstats.keys_at, dstats.tris_at, dstats.keys_blend, dstats.tris_blend,
+             dstats.at_candidates, dstats.blend_candidates, dstats.blocked_coplanar,
+             dstats.merged_keys);
+  }
   lg::info("{}: visibility: {} of {} tris in {} runs (hidden when the game's visibility data says)",
            level.level_name, vis_tris, out_indices.size() / 3, out_runs.size());
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
@@ -2960,6 +3204,9 @@ int main(int argc, char** argv) {
   app.add_option("--vcache-fifo", opt.vcache_fifo,
                  "(AI-assisted) triangle order for a FIFO post-vertex cache of N entries, coplanar "
                  "overlaps kept in order (0: the v14 meshoptimizer order)");
+  bool no_opaque_alpha = false;
+  app.add_flag("--no-opaque-alpha", no_opaque_alpha,
+               "(AI-assisted) keep alpha tests / blending that can't change a pixel (v15)");
   bool no_verify = false;
   app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
   bool no_tie_winding = false, no_vista = false;
@@ -2986,6 +3233,7 @@ int main(int argc, char** argv) {
   CLI11_PARSE(app, argc, argv);
   opt.verify = !no_verify;
   opt.vcache = !no_vcache;
+  opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
   opt.vista = !no_vista;
   opt.pack.threads = opt.threads;
