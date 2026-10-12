@@ -51,6 +51,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--no-vcache` | off | keep the triangle and vertex order (no vertex welding, no meshoptimizer). |
 | `--vcache-fifo N` | -1 | (AI-assisted, v15) the triangle order inside each visibility run of an opaque draw, for the post-vertex cache (see "Vertex order"): N > 0 for a first-in first-out cache of N entries; -1 (default) per run the best of the orders for 4 and 12 entries and meshoptimizer's, by the vertices a FIFO of 4 + 8 + 16 entries shades; 0 the v14 order (meshoptimizer, without the coplanar rule). |
 | `--no-opaque-alpha` | off | (AI-assisted, v15) keep alpha tests and blending that can't change a pixel (see "Draw optimisations"). |
+| `--no-atlas`, `--atlas-max N`, `--atlas-kb-per-bind K` | off, 32, 2 | (AI-assisted, v15) texture atlases (see "Draw optimisations"): textures up to N texels a side; an atlas only when the memory it adds is at most K KB per texture bind it saves. |
 | `--no-verify` | off | don't read every written file back with the runtime's reader to compare it. |
 
 What goes in:
@@ -135,7 +136,8 @@ v14 order for 8 and more (both near the bound there). The converter logs these p
 
 ## Draw optimisations (v15)
 
-(AI-assisted) `Draw::kind` flags (c3l_format.h), each one pixel for pixel the draw it replaces:
+(AI-assisted) `Draw::kind` flags (c3l_format.h), each one pixel for pixel the draw it replaces
+(except the atlas gutters, below):
 
 - **Opaque alpha** (`kDrawAlphaTestDropped`, `kDrawBlendDropped`; config `opaque_alpha`): a draw
   with an alpha test (GEQUAL) or alpha blending (Cs * As + Cd * (1 - As)) whose texture has alpha
@@ -155,6 +157,29 @@ v14 order for 8 and more (both near the bound there). The converter logs these p
   28 merges;
   no level has a blended draw with alpha 1.0 everywhere (the ones with an opaque texture have
   vertex alpha below 0x80, and the other way round).
+- **Atlases** (`kDrawAtlasUV`): small textures (`--atlas-max`) whose every level draw is opaque
+  (any order), each triangle within one copy of the texture (clamped axes: coordinates 0..1;
+  repeating axes: after a whole number shift of the triangle, which a repeating texture doesn't
+  see), one clamp mode per axis, and no coplanar overlap with another draw (the sort by texture
+  would change), are packed per format and mip level count into atlases (shelves, the smallest
+  power of two that holds them; at most 256 << (levels - 1) a side). A cell's position is a multiple
+  of 4 << (levels - 1) texels, so every level's 4x4 blocks are the texture's own, copied; between
+  cells (and at the edges) a gap of the same size: at each level a gutter of 2 << (levels - 1 -
+  level) texels around each cell holds what the texture's own addressing reads beyond its edge
+  (repeat: the other side, clamp: the edge texel), encoded again (ETC1: approximately; at the
+  smallest level a gutter shares a 4x4 block with the neighbour's). The texture coordinates are in
+  1/32768 (`c3l::kAtlasUVScale`): 32768 / atlas side units per atlas texel, at most 256 << (levels -
+  1) a side, so `kx * (cell x + (st - shift) * w / 1024)` is a whole number: the exact texel
+  position of the cell's own coordinates (st in 1/1024). The level of detail is the same (the
+  derivatives scale with the atlas, the size the other way). The vertices of an atlased triangle
+  are copies (one per shift a vertex needs). The vista tier's copies keep the original texture
+  (welded by position there), as do merc models: those textures stay in the file; the others get
+  no texels (`data_size` 0: the runtime makes no texture). An atlas is made only when the memory it
+  adds (atlas - the textures it replaces + 16 bytes per vertex copy) is at most `--atlas-kb-per-bind`
+  KB per texture bind it saves. Draws of a chunk with the same state merge. The level textures are
+  mostly 128 x 128 and repeat across their triangles (tfrag, walls), so few fit: all levels 11
+  atlases of 40 textures, 5776 triangles (village1 2 atlases, 14 textures, 1006 triangles; Snowy
+  none; village3 1, 4).
 
 ## Layout
 
@@ -202,7 +227,7 @@ Draw (16 bytes)
                           depth write, ...
   u16 texture             texture index, 0xffff = untextured
   u16 kind                0 = tfrag, 1 = tie, 2 = shrub (low byte); flags: 0x100 kDrawCullBack (v13),
-                          0x400 kDrawBlendDropped, 0x800 kDrawAlphaTestDropped (v15)
+                          0x200 kDrawAtlasUV, 0x400 kDrawBlendDropped, 0x800 kDrawAlphaTestDropped (v15)
   u32 first_index, index_count   triangle list; indices are relative to the chunk's first_vertex
 
 Texture (16 bytes)

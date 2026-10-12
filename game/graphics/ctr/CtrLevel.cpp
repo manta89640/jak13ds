@@ -795,6 +795,7 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   for (int t : out->textures) {
     failed += t < 0;
   }
+  failed -= std::min<int>(failed, (int)out->tex_empty);  // (AI-assisted) v15: none to make
   for (size_t i = 0; i < out->meshes.size(); i++) {
     failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0;
   }
@@ -931,6 +932,10 @@ void build_draw_order(CtrLevelData* out) {
     if (d.kind & c3l::kDrawCullBack) {
       st.tcc |= CTR_TCC_CULL_BACK;
     }
+    // (AI-assisted) c3l v15: an atlas's texture coordinates (1/32768)
+    if (d.kind & c3l::kDrawAtlasUV) {
+      st.tcc |= CTR_TCC_ST_ATLAS;
+    }
     // (AI-assisted) fog_alpha: the vertex alpha is 0x80 everywhere in this draw
     const size_t di = out->draw_states.size();
     if (di < out->draw_alpha80.size() && out->draw_alpha80[di]) {
@@ -1052,6 +1057,10 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
                       !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
     if (!pow2 || t.format > c3l::TEX_RGBA8 || (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
+      continue;
+    }
+    if (t.data_size == 0 && hdr.version >= c3l::kAtlasVersion) {
+      out->empty++;  // (AI-assisted) v15: moved into an atlas, nothing draws it
       continue;
     }
     // the levels the data holds (and the GPU allows: at least 8 texels on the short side)
@@ -1348,6 +1357,7 @@ bool CtrLevels::load_file(const fs::path& path,
     out->tex_pool = tl.pool;
     out->tex_pool_bytes = tl.pool_bytes;
     out->tex_background_bytes = tl.background_bytes;
+    out->tex_empty = tl.empty;
     out->textures = std::move(tl.handles);
     out->tex_min_alpha = std::move(tl.min_alpha);
     if (!ok) {

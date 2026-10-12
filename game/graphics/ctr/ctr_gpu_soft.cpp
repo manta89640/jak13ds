@@ -1158,6 +1158,8 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
   const auto& m = g_soft.meshes[mesh];
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  // (AI-assisted) c3l v15 atlas draws: texture coordinates in 1/32768
+  const float st_scale = state && (state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     bool ok = true;
@@ -1179,8 +1181,8 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
-      tri[k].s = st[0] / 1024.f;
-      tri[k].t = st[1] / 1024.f;
+      tri[k].s = st[0] * st_scale;
+      tri[k].t = st[1] * st_scale;
       tri[k].r = src[12];
       tri[k].g = src[13];
       tri[k].b = src[14];

@@ -99,6 +99,7 @@ struct CtrLevelData {
   std::vector<u32> chunk_run_count;
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
+  u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
   int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
   u32 tex_pool_bytes = 0;     // (AI-assisted) its size (0: no textures)
   u32 tex_background_bytes = 0;  // (AI-assisted) its start: the background's textures (VRAM first)
@@ -287,6 +288,7 @@ class CtrLevels {
     u32 background_bytes = 0;  // the pool's start: the background's textures
     std::vector<int> handles;
     std::vector<u8> min_alpha;
+    u32 empty = 0;  // (AI-assisted) c3l v15: textures without texels (all in atlases): no handle
   };
   struct Done {
     Job job;

@@ -27,10 +27,10 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v14 (AI-assisted): a shrub chunk's max_dist is its shrubs' PS2 distance (the converter groups
 // shrubs by prototype distance class: the middle of the PS2 fade, from the prototype's dists);
 // before, every shrub chunk had the converter's --shrub-dist. Otherwise v13.
-// v15 (AI-assisted): draw optimisations (ctr_level_converter --vcache-fifo, --opaque-alpha):
-// Draw::kind kDrawAlphaTestDropped and kDrawBlendDropped (the alpha test / blending the converter
-// proved can't change a pixel was taken out of Draw::mode). Otherwise v14. Readers detect them by
-// their bits.
+// v15 (AI-assisted): draw optimisations (ctr_level_converter --vcache-fifo, --atlas, --opaque-alpha):
+// Draw::kind kDrawAtlasUV (texture coordinates in 1/kAtlasUVScale, the draw's texture an atlas),
+// kDrawAlphaTestDropped and kDrawBlendDropped (the alpha test / blending the converter proved can't
+// change a pixel was taken out of Draw::mode). Otherwise v14. Readers detect them by their bits.
 constexpr uint32_t kVersion = 15;
 // (AI-assisted) the first version whose shrub chunks carry their PS2 distance
 constexpr uint32_t kShrubPs2DistVersion = 14;
@@ -168,6 +168,10 @@ static_assert(sizeof(Draw) == 16);
 // (front faces counter-clockwise seen from outside, right-handed world): back faces may be culled
 constexpr uint16_t kDrawCullBack = 0x100;
 // (AI-assisted) v15 Draw::kind flags (see kVersion).
+// kDrawAtlasUV: the texture is an atlas of small textures and the texture coordinates are in units
+// of 1 / kAtlasUVScale (not 1 / 1024): the cells are small parts of it.
+constexpr uint16_t kDrawAtlasUV = 0x200;
+constexpr float kAtlasUVScale = 32768.f;
 // kDrawBlendDropped: the draw mode had alpha blending (Cs * As + Cd * (1 - As)), but every texel of
 // every mip level of the texture has alpha 1.0 (or it's untextured) and every vertex alpha is
 // >= 0x80: As = 1 everywhere, the blending leaves Cs. The ab bit was cleared; the draw keeps its
@@ -177,6 +181,7 @@ constexpr uint16_t kDrawBlendDropped = 0x400;
 // never fail for these triangles (alpha 1.0 everywhere, as above): its enable bit was cleared
 // (draws of the same texture and state may have been merged). config opaque_alpha = off: tested.
 constexpr uint16_t kDrawAlphaTestDropped = 0x800;
+constexpr uint32_t kAtlasVersion = 15;
 
 /*!
  * (AI-assisted) v11: compression. The file is the v10 layout (the "raw image": every offset in the

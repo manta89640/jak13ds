@@ -7,7 +7,9 @@
  * docs/3ds-port/c3l_format.md "Draw optimisations"):
  *  - coplanar overlaps: triangles whose drawing order decides which one a pixel shows (equal
  *    depth: the GPU's GEQUAL depth test lets the later one win), so the order between them stays;
- *  - the post-vertex cache order of a draw's triangles, keeping those orders (--vcache-fifo).
+ *  - the post-vertex cache order of a draw's triangles, keeping those orders (--vcache-fifo);
+ *  - texture atlases (--atlas): small textures of opaque draws packed into one texture with
+ *    gutters, so draws of a chunk with the same state merge and share one bind.
  */
 
 #include <array>
@@ -47,6 +49,39 @@ std::vector<uint32_t> vcache_order(const std::vector<uint32_t>& indices,
                                    uint32_t vertex_count,
                                    int fifo,
                                    const std::vector<std::vector<uint32_t>>& before);
+
+/*!
+ * A texture in an atlas: its encoded levels (the 3DS layout, ctr_texture.h), size, and where its
+ * first level goes (texels; multiples of 4 << (levels - 1), so every level's blocks line up), and
+ * how its draws address it (clamped or repeating, per axis: what its gutters hold).
+ */
+struct AtlasCell {
+  const uint8_t* data = nullptr;
+  int w = 0, h = 0;
+  int x = 0, y = 0;
+  bool clamp_s = false, clamp_t = false;
+};
+struct AtlasStats {
+  // gutter texels against what the texture's own addressing would read there (decoded, rgba)
+  uint64_t gutter_texels = 0;
+  double gutter_sq = 0;
+  int gutter_max = 0;
+  bool cells_exact = true;  // every cell's texels decoded from the atlas = the texture's own
+};
+/*!
+ * The atlas texture (aw x ah, `levels` levels, format: ctr_tex::Format) with the cells: each cell's
+ * blocks copied as they are (the same texels at every level), the gutters around them (half the
+ * gap between cells: 2 << (levels - 1 - level) texels each side) filled with what the texture's
+ * own addressing reads beyond its edge (repeat: the other side; clamp: the edge texel), encoded
+ * (ETC1: approximately; the blocks a gutter shares with another cell's).
+ */
+std::vector<uint8_t> build_atlas(int aw,
+                                 int ah,
+                                 int format,
+                                 int levels,
+                                 const std::vector<AtlasCell>& cells,
+                                 int etc1_quality,
+                                 AtlasStats* stats);
 
 /*! Vertices shaded for these indices with a FIFO cache of `fifo` entries cleared at the start. */
 uint64_t fifo_misses(const uint32_t* indices, size_t count, int fifo);

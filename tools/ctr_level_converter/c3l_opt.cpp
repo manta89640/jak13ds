@@ -5,8 +5,12 @@
 
 #include "c3l_opt.h"
 
+#include "ctr_texture.h"
+#include "game/graphics/ctr/c3l_format.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <unordered_map>
 
 namespace c3l_opt {
@@ -377,6 +381,114 @@ std::vector<uint32_t> vcache_order(const std::vector<uint32_t>& in_indices,
     }
   }
   return order;
+}
+
+namespace {
+// byte offset of 4x4 block (bx, bym) (bym: block rows from the bottom of the image) of a w wide
+// ETC1 / ETC1A4 level (ctr_texture.h: 8x8 tiles of four blocks, rows of tiles bottom first)
+size_t block_offset(int bx, int bym, int w, int block_bytes) {
+  return ((size_t)((bym >> 1) * (w / 8) + (bx >> 1)) * 4 + (bx & 1) + 2 * (bym & 1)) *
+         (size_t)block_bytes;
+}
+}  // namespace
+
+std::vector<uint8_t> build_atlas(int aw,
+                                 int ah,
+                                 int format,
+                                 int levels,
+                                 const std::vector<AtlasCell>& cells,
+                                 int etc1_quality,
+                                 AtlasStats* stats) {
+  const auto fmt = (ctr_tex::Format)format;
+  const bool etc = fmt == ctr_tex::Format::ETC1 || fmt == ctr_tex::Format::ETC1A4;
+  const int block_bytes = fmt == ctr_tex::Format::ETC1A4 ? 16 : 8;
+  std::vector<uint8_t> out;
+  for (int l = 0; l < levels; l++) {
+    const int lw = aw >> l, lh = ah >> l;
+    const int g = (2 << (levels - 1)) >> l;  // gutter texels on each side of a cell
+    ctr_tex::Image img;
+    img.w = lw;
+    img.h = lh;
+    img.rgba.assign((size_t)lw * lh * 4, 0);
+    // what each gutter texel should be, for the statistics
+    std::vector<int> want_cell((size_t)lw * lh, -1);
+    std::vector<ctr_tex::Image> dec(cells.size());
+    for (size_t ci = 0; ci < cells.size(); ci++) {
+      const auto& c = cells[ci];
+      const int cw = c.w >> l, ch = c.h >> l, cx = c.x >> l, cy = c.y >> l;
+      uint32_t off = 0;
+      for (int k = 0; k < l; k++) {
+        off += c3l::texture_level_bytes(c.w >> k, c.h >> k, (uint8_t)format);
+      }
+      dec[ci] = ctr_tex::decode_level(c.data + off, cw, ch, fmt);
+      for (int y = -g; y < ch + g; y++) {
+        for (int x = -g; x < cw + g; x++) {
+          const int ax = cx + x, ay = cy + y;
+          if (ax < 0 || ay < 0 || ax >= lw || ay >= lh) {
+            continue;
+          }
+          const int sx = c.clamp_s ? std::clamp(x, 0, cw - 1) : ((x % cw) + cw) % cw;
+          const int sy = c.clamp_t ? std::clamp(y, 0, ch - 1) : ((y % ch) + ch) % ch;
+          memcpy(img.at(ax, ay), dec[ci].at(sx, sy), 4);
+          want_cell[(size_t)ay * lw + ax] = (int)ci;
+        }
+      }
+    }
+    std::vector<uint8_t> level;
+    ctr_tex::encode_level(img, fmt, etc1_quality, &level, 0, 0);
+    if (etc) {
+      // the cells' own blocks, as they are
+      for (size_t ci = 0; ci < cells.size(); ci++) {
+        const auto& c = cells[ci];
+        const int cw = c.w >> l, ch = c.h >> l, cx = c.x >> l, cy = c.y >> l;
+        uint32_t off = 0;
+        for (int k = 0; k < l; k++) {
+          off += c3l::texture_level_bytes(c.w >> k, c.h >> k, (uint8_t)format);
+        }
+        const int base_bym = (lh - cy - ch) / 4;
+        for (int bym = 0; bym < ch / 4; bym++) {
+          for (int bx = 0; bx < cw / 4; bx++) {
+            memcpy(level.data() + block_offset(cx / 4 + bx, base_bym + bym, lw, block_bytes),
+                   c.data + off + block_offset(bx, bym, cw, block_bytes), (size_t)block_bytes);
+          }
+        }
+      }
+    }
+    if (stats) {
+      const auto got = ctr_tex::decode_level(level.data(), lw, lh, fmt);
+      for (size_t ci = 0; ci < cells.size(); ci++) {
+        const auto& c = cells[ci];
+        const int cw = c.w >> l, ch = c.h >> l, cx = c.x >> l, cy = c.y >> l;
+        for (int y = 0; y < ch; y++) {
+          for (int x = 0; x < cw; x++) {
+            stats->cells_exact =
+                stats->cells_exact && !memcmp(got.at(cx + x, cy + y), dec[ci].at(x, y), 4);
+          }
+        }
+      }
+      for (int y = 0; y < lh; y++) {
+        for (int x = 0; x < lw; x++) {
+          const int ci = want_cell[(size_t)y * lw + x];
+          if (ci < 0) {
+            continue;
+          }
+          const auto& c = cells[ci];
+          const int cw = c.w >> l, ch = c.h >> l, cx = c.x >> l, cy = c.y >> l;
+          if (x >= cx && x < cx + cw && y >= cy && y < cy + ch) {
+            continue;
+          }
+          for (int k = 0; k < 4; k++) {
+            const int d = (int)got.at(x, y)[k] - (int)img.at(x, y)[k];
+            stats->gutter_sq += (double)d * d;
+            stats->gutter_max = std::max(stats->gutter_max, std::abs(d));
+          }
+          stats->gutter_texels++;
+        }
+      }
+    }
+    out.insert(out.end(), level.begin(), level.end());
+  }
+  return out;
 }
 
 }  // namespace c3l_opt
