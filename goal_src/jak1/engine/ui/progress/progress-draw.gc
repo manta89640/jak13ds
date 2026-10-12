@@ -989,7 +989,25 @@
   0
   (none))
 
+;; og:preserve-this (AI-assisted) 3DS: the progress menu's PS2 button icons
+(#when TARGET_3DS
+  (define-extern pc-3ds-button-texture (function int int int none))
+  (defun pc-3ds-button-icons ()
+    "Tell the 3DS renderer where the icons headhud-button-01..04 (cross, square, triangle, circle) are
+     in VRAM: it draws the 3DS buttons there (game/graphics/ctr/CtrButtonArt.h)."
+    (when *pc-3ds-button-art*
+      (let ((page (-> *texture-page-dir* entries (-> headhud-button-01-Hud page) page)))
+        (when page
+          (dotimes (i 4)
+            (let ((idx (+ (-> headhud-button-01-Hud index) i)))
+              (when (< idx (-> page length))
+                (let ((tex (-> page data idx)))
+                  (if tex (pc-3ds-button-texture i (the int (-> tex dest 0)) (the int (-> tex psm)))))))))))
+    (none)))
+
 (defmethod draw-progress ((this progress))
+  (#when TARGET_3DS
+    (pc-3ds-button-icons))
   (let ((f30-0 (+ -409.0 (-> this particles 2 init-pos x) (* 0.8 (the float (-> this left-x-offset)))))
         (s5-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 0 (-> this transition-offset))))
     (let ((f28-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 1.0 (-> this transition-percentage-invert))))

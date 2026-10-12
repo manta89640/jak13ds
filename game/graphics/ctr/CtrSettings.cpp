@@ -304,7 +304,8 @@ CtrSettings load() {
                key == "io_checksum" || key == "anim_lod" || key == "anim_native" ||
                key == "io_cache" || key == "log_async" || key == "collide_native" ||
                key == "collide_frag_cache" || key == "bones_native" ||
-               key == "c3l_read_buffer") {
+               key == "c3l_read_buffer" || key == "text_scale" || key == "text_min_height" ||
+               key == "button_art") {
       // not the renderer's (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,
       // overlord/jak1/fake_iso.cpp, kernel/jak1/kmachine.cpp, common/log/log.cpp,
       // (AI-assisted) native_collide_cache.cpp, native_bones.cpp, CtrLevel.cpp)

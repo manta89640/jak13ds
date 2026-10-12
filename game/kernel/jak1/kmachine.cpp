@@ -19,6 +19,7 @@
 #include "common/util/string_util.h"
 
 #include "game/external/discord_jak1.h"
+#include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/display.h"
 #include "game/graphics/gfx.h"
 #include "game/graphics/sceGraphicsInterface.h"
@@ -705,6 +706,60 @@ void InitMachine_PCPort() {
     }
 #endif
     intern_from_c("*pc-3ds-shadows*")->value = intern_from_c(shadows.c_str()).offset;
+  }
+
+  // (AI-assisted) 3DS text size (text.gc, subtitle.gc, font.gc; TARGET_3DS): config.ini text_scale
+  // (all game text x this, default 1) and text_min_height (the smallest capital letter height, in
+  // pixels of the 400x240 top screen, default 9; 0 = the PS2's sizes). Host runs of the 3DS GOAL
+  // code: OPENGOAL_TEXT_SCALE / OPENGOAL_TEXT_MIN_HEIGHT (same defaults).
+  {
+    float text_scale = 1.f, text_min = 9.f;
+#ifdef __3DS__
+    char v[32];
+    if (ctr_config_get("text_scale", v, sizeof(v))) {
+      text_scale = (float)atof(v);
+    }
+    if (ctr_config_get("text_min_height", v, sizeof(v))) {
+      text_min = (float)atof(v);
+    }
+#else
+    if (const char* e = getenv("OPENGOAL_TEXT_SCALE")) {
+      text_scale = (float)atof(e);
+    }
+    if (const char* e = getenv("OPENGOAL_TEXT_MIN_HEIGHT")) {
+      text_min = (float)atof(e);
+    }
+#endif
+    text_scale = std::clamp(text_scale, 0.5f, 2.f);
+    text_min = std::clamp(text_min, 0.f, 16.f);
+    lg::info("text x{:.2f}, capitals at least {:.1f} px (config.ini text_scale, text_min_height)",
+             text_scale, text_min);
+    u32 bits;
+    memcpy(&bits, &text_scale, 4);
+    intern_from_c("*pc-3ds-text-scale*")->value = bits;
+    memcpy(&bits, &text_min, 4);
+    intern_from_c("*pc-3ds-text-min-height*")->value = bits;
+  }
+  // (AI-assisted) 3DS button symbols (game/graphics/ctr/CtrButtonArt.h): config.ini button_art
+  // (default on); the progress menu tells where its PS2 button icons are (progress-draw.gc).
+  {
+    bool button_art = true;
+#ifdef __3DS__
+    button_art = ctr_config_bool("button_art", 1);
+#else
+    if (const char* e = getenv("OPENGOAL_BUTTON_ART")) {
+      button_art = atoi(e) != 0;
+    }
+#endif
+    ctr_button_art::set_enabled(button_art);
+    intern_from_c("*pc-3ds-button-art*")->value =
+        button_art ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+    lg::info("3DS button symbols {} (config.ini button_art)", button_art ? "on" : "off");
+    make_function_symbol_from_c(
+        "pc-3ds-button-texture", +[](u32 button, u32 tbp0, u32 psm) -> u64 {
+          ctr_button_art::register_texture((int)button, tbp0, psm);
+          return 0;
+        });
   }
 
   make_function_symbol_from_c("pc-discord-rpc-update", update_discord_rpc);

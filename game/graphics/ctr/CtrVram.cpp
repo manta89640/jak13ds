@@ -16,6 +16,7 @@
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
 
+#include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 namespace {
@@ -870,6 +871,12 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // the parts of TEX0 that select the texture data (not TCC / TFX / CLUT load control)
   constexpr u64 kKeyMask = ~((0b111ull << 34) | (0b111ull << 61));
   u64 key = tex0 & kKeyMask;
+  // (AI-assisted) the 3DS button art (CtrButtonArt.h) changed where it goes: decode the textures
+  // it may draw on again
+  if (m_art_gen != ctr_button_art::generation()) {
+    m_art_gen = ctr_button_art::generation();
+    drop_art_textures();
+  }
   Entry* cached = find_cached(key);
   // (AI-assisted) valid while nothing pending is over it and its chunks hold what it was decoded
   // from (entry_sig: a few chunk ids, not the texture's bytes)
@@ -931,6 +938,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     lg::warn("[ctr vram] unsupported texture format {} (tex0 {:x})", (int)t.psm(), tex0);
     return nullptr;
   }
+
+  // (AI-assisted) the PS2 button symbols of the font and the progress menu -> 3DS buttons
+  ctr_button_art::patch(tex0, data.data(), w, h);
 
   // the 3DS needs at least 8x8: repeat pixels (normalized coordinates stay the same)
   int gw = std::max(w, 8), gh = std::max(h, 8);
@@ -999,6 +1009,22 @@ void CtrVram::sweep_outdated() {
   }
   m_cache_gen++;  // (AI-assisted) the front cache may point at erased entries
   m_sweep_at = std::max<size_t>(256, m_cache.size() + 128);
+}
+
+void CtrVram::drop_art_textures() {
+  for (auto* map : {&m_cache, &m_stale}) {
+    for (auto it = map->begin(); it != map->end();) {
+      if (ctr_button_art::may_patch(it->first)) {
+        if (it->second.tex.handle >= 0) {
+          ctr_gpu_tex_delete(it->second.tex.handle);
+        }
+        it = map->erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  m_cache_gen++;  // the front cache may point at erased entries
 }
 
 void CtrVram::clear_cache() {
