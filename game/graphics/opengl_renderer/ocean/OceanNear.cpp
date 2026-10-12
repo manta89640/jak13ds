@@ -63,6 +63,19 @@ void OceanNear::render_jak1(DmaFollower& dma,
     ASSERT(dma.current_tag_offset() == render_state->next_bucket);
     return;
   }
+  {
+    // (AI-assisted) the 3DS game's ocean DMA (TARGET_3DS GOAL, run with the OpenGL renderer as a
+    // visual reference): a bucket without the ocean texture program is skipped, not asserted on
+    DmaFollower peek = dma;
+    peek.read_and_advance();
+    auto vif = peek.read_and_advance();
+    if (vif.size_bytes != 0 || vif.vifcode0().kind != VifCode::Kind::BASE) {
+      while (dma.current_tag_offset() != render_state->next_bucket) {
+        dma.read_and_advance();
+      }
+      return;
+    }
+  }
 
   {
     auto p = prof.make_scoped_child("texture");
