@@ -413,6 +413,10 @@ static struct {
   int pending_delete_count;
   void* pending_staging[MAX_STAGING]; /* linear buffers of queued VRAM texture copies */
   int pending_staging_count;
+  /* (AI-assisted) frame_overlap2 = on: the staging buffers of the frame before (its copies may
+   * still be queued behind the frame the GPU draws), freed one frame begin later */
+  void* held_staging[MAX_STAGING];
+  int held_staging_count;
   int vram_textures;
   int vram_copy_failures;
   int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
@@ -667,10 +671,25 @@ static int reserve_mesh_slot(void) {
 /* hold (render.ini pipeline): the GPU may still draw the frame before the one that asked for a
  * delete, so a slot waits one more frame (2 -> 4 -> freed). Not 3: that is a slot or pool the
  * loader thread is still filling (the pool loop looks at every pool, not a delete list). */
+/* (AI-assisted) hold 2 (frame_overlap2 = on, at the frame begin after waiting for frame N - 2
+ * only): the staging buffers wait one more frame too. Their copies were queued while frame N - 1
+ * was built (its frame begin's pool and small texture moves, the frame's own copies), behind frame
+ * N - 2's draws, so they may not have run yet: freed then, a buffer could be reallocated and
+ * rewritten before its copy reads it (garbage texels in VRAM). The other modes wait for everything
+ * queued so far before they get here. */
 static void process_pending_deletes(int hold) {
   ctr_linear_lock();
-  for (int i = 0; i < g.pending_staging_count; i++) {
-    linearFree(g.pending_staging[i]);
+  for (int i = 0; i < g.held_staging_count; i++) {
+    linearFree(g.held_staging[i]);
+  }
+  g.held_staging_count = 0;
+  if (hold == 2) {
+    memcpy(g.held_staging, g.pending_staging, sizeof(void*) * (size_t)g.pending_staging_count);
+    g.held_staging_count = g.pending_staging_count;
+  } else {
+    for (int i = 0; i < g.pending_staging_count; i++) {
+      linearFree(g.pending_staging[i]);
+    }
   }
   g.pending_staging_count = 0;
   int kept = 0;
@@ -2321,7 +2340,7 @@ static void pipeline_frame_begin(u32 clear) {
     s_begin_wait_ms = overlap2_wait_frame(s_buf_frame[s_k]);
     s_buf_frame[s_k] = 0;
     if (s_end_mode2) {
-      process_pending_deletes(1);
+      process_pending_deletes(2);
     }
     overlap2_room(8);
   }
@@ -2962,6 +2981,9 @@ static void defer_linear_free(void* mem) {
   if (g.pending_staging_count < MAX_STAGING) {
     g.pending_staging[g.pending_staging_count++] = mem;
   } else {
+    /* (AI-assisted) no room in the list: freed once a running GX queue (the pipeline's) has run
+     * what is queued (a stopped queue returns at once, as before) */
+    gxCmdQueueWait(&__C3D_Context.gxQueue, -1);
     linearFree(mem);
   }
 }
@@ -5879,13 +5901,32 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
       index_count < 3) {
     return;
   }
-  if (!cmd_room()) {
+  /* (AI-assisted) room for the bone rows too (3 x 24 vectors), as ctr_gpu_draw_skinned */
+  if (!cmd_room() || gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS + 320) {
     return;
   }
-  raw_vc_flush();
   use_program(PROG_SKIN_ENV);
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;
+  }
+  /* (AI-assisted) The shine pass tests its depth GEQUAL against its own base pass (no depth write),
+   * so its positions must be the same bits as ctr_gpu_draw_skinned's: the same program arithmetic
+   * (the skin and skin_env programs compute the position alike) on the same uniform values. The
+   * clip matrix and bones therefore go to the GPU exactly as the base pass sends them: raw, as
+   * float24 from raw_f24 with skin_clip_f24 / skin_rows_f24, else as f32. They used to go through
+   * citro3d as f32 always, which the GPU converts to float24 itself, while the base pass's were
+   * rounded by raw_f24: two conversions that disagree in the last bit moved the shine a few hundred
+   * depth units in front of or behind the model, and the whole shine of a model passed or failed
+   * the depth test frame by frame (the title logo flickering between shiny and dull with
+   * skin_clip_f24 / skin_rows_f24 on, in Azahar too). */
+  const MeshSlot* ms = &g.meshes[mesh];
+  const int raw = use_raw(state);
+  if (raw) {
+    apply_state_tint(state, 2, 0xffffffffu, 1);
+    raw_vertex_buffer(ms->verts_pa, 0x543210, RAW_BUF_FLAGS1(24, 6, 0));
+    raw_sync();
+  } else {
+    raw_vc_flush();
   }
   /* (AI-assisted) cmd_dedup: the shine draws come one after another (envmap_batch), all with the
    * camera's matrix and each model's draws with the same bones: each uploaded again only when it
@@ -5897,22 +5938,38 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     C3D_Mtx m;
     skin_clip_matrix(clip, &m);
     skin_opt_scale(&m);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_env_clip, &m);
+    if (raw && s_skin_clip_f24) {
+      u32 c24[12];
+      for (int r = 0; r < 4; r++) {
+        raw_pack_f24(m.r[r].c, c24 + 3 * r);
+      }
+      raw_end(raw_unif(raw_ptr(), g.ps->uloc_env_clip, c24, 12, 0));
+    } else if (raw) {
+      raw_end(raw_unif(raw_ptr(), g.ps->uloc_env_clip, (const u32*)&m, 16, 1));
+    } else {
+      C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_env_clip, &m);
+    }
     memcpy(g.last_env_clip, clip, sizeof(g.last_env_clip));
   }
   if (dd && g.last_env_palette_count == palette_count &&
       words_equal(g.last_env_bones, bones, 12u * (unsigned)palette_count)) {
     g.cur.cmd_dedup_words += (u32)(12 * palette_count) + 6;
   } else {
-    for (int row = 0; row < 3; row++) {
-      C3D_FVec* dst =
-          C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.ps->uloc_env_rows[row], palette_count);
-      for (int p = 0; p < palette_count; p++) {
-        const float* src = bones + 12 * p + 4 * row;
-        dst[p].x = src[0];
-        dst[p].y = src[1];
-        dst[p].z = src[2];
-        dst[p].w = src[3];
+    if (raw && palette_count > 0 && s_skin_f24) {
+      raw_skin_rows_f24(g.ps->uloc_env_rows, bones, palette_count);
+    } else if (raw && palette_count > 0) {
+      raw_skin_rows(g.ps->uloc_env_rows, bones, palette_count);
+    } else {
+      for (int row = 0; row < 3; row++) {
+        C3D_FVec* dst =
+            C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.ps->uloc_env_rows[row], palette_count);
+        for (int p = 0; p < palette_count; p++) {
+          const float* src = bones + 12 * p + 4 * row;
+          dst[p].x = src[0];
+          dst[p].y = src[1];
+          dst[p].z = src[2];
+          dst[p].w = src[3];
+        }
       }
     }
     memcpy(g.last_env_bones, bones, sizeof(float) * 12 * (size_t)palette_count);
@@ -5922,15 +5979,24 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
   if (dd && words_equal(g.last_env_fade, fade, 3)) {
     g.cur.cmd_dedup_words += 6;
   } else {
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_env_fade, fade[0] * 0.5f, fade[1] * 0.5f,
-                  fade[2] * 0.5f, 0.5f);
+    if (raw) {
+      /* (C3D_FVec order: w, z, y, x) */
+      const float fv[4] = {0.5f, fade[2] * 0.5f, fade[1] * 0.5f, fade[0] * 0.5f};
+      raw_end(raw_unif(raw_ptr(), g.ps->uloc_env_fade, (const u32*)fv, 4, 1));
+    } else {
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_env_fade, fade[0] * 0.5f, fade[1] * 0.5f,
+                    fade[2] * 0.5f, 0.5f);
+    }
     memcpy(g.last_env_fade, fade, sizeof(g.last_env_fade));
   }
   g.env_valid = 1;
-  apply_state_tint(state, 2, 0xffffffffu, 0);
-  c3d_vertex_buffer(g.meshes[mesh].verts_pa, g.meshes[mesh].verts, 24, 6, 0x543210);
-  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT,
-                   g.meshes[mesh].indices + first_index);
+  if (raw) {
+    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+  } else {
+    apply_state_tint(state, 2, 0xffffffffu, 0);
+    c3d_vertex_buffer(ms->verts_pa, ms->verts, 24, 6, 0x543210);
+    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
+  }
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
 }
