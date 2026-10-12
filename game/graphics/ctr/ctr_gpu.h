@@ -151,7 +151,8 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba);
 void ctr_gpu_tex_delete(int handle);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
- * on/off alpha -> RGBA5551, else RGBA4 (RGBA8 when rgba4_as_rgba8 or alpha above 0x80), and
+ * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create; (AI-assisted) not RGBA4: soft
+ * colored glows banded), and
  * moved to a reserved part of VRAM when there's room (vram_textures). flags: CTR_TEX_CHECK_RADIAL
  * also checks whether it is a radial gradient (glows: see CTR_STATE_PROCTEX). */
 enum { CTR_TEX_CHECK_RADIAL = 1 };
