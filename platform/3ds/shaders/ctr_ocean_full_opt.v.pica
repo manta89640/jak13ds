@@ -1,0 +1,33 @@
+; (AI-assisted)
+; config.ini shader_opt: ctr_ocean_full.v.pica in 9 instructions (14) and 3 output registers (4):
+; texcoord1 (the fog amount, s and t) shares texcoord0's register (.zw; the fog ramp's rows are the
+; same, see ctr_mesh_opt.v.pica), written straight from the input. Same uniforms.
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec gs[4]
+
+.constf consts(0.00392156862745098, 0.0, 0.0, 0.0)
+.alias inv255 consts.xxxx
+
+.out outpos position
+.out outtc texcoord0.xy
+.out - texcoord1 outtc.zw
+.out outclr color
+
+.alias inpos v0  ; x, y, z, q (dph: w = 1)
+.alias intex v1  ; s, t (times q), fog amount
+.alias inclr v2
+
+.entry main_ctr_ocean_full_opt
+.proc main_ctr_ocean_full_opt
+  rcp r1.x, inpos.w
+  dph r0.x, inpos, gs[0]
+  dph r0.y, inpos, gs[1]
+  dph r0.z, inpos, gs[2]
+  dph r0.w, inpos, gs[3]
+  mul outtc.xy, intex.xyyy, r1.xxxx
+  mov outtc.zw, intex.zzzz
+  mul outpos, r0, r1.xxxx
+  mul outclr, inv255, inclr
+  end
+.end

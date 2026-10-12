@@ -1,0 +1,75 @@
+; (AI-assisted)
+; config.ini shader_opt: ctr_skin.v.pica in 33 instructions (35; the hardware default, the Oct 2
+; ctr_skin_old, has 53). Same inputs, outputs and uniform names; two uniforms carry factors the
+; shader no longer applies (ctr_gpu_draw_skinned makes them when g.ps->opt):
+;  - the weights are used as they come (0..255, no mul by 1/255): the blended bone rows are 255
+;    times too long, so the camera space position is too; clip has its x, y, z columns divided by
+;    255 to undo that (the translation column stays). The normal is normalized anyway (rsq).
+;  - lights[3..6] (light colors, ambient) are premultiplied by the color scale (1/510 rgb, 1/255
+;    alpha): the vertex color goes in unscaled (one mul less).
+; Every output component is written exactly once; the two MOVAs are apart.
+
+.fvec clip[4]
+.fvec row0[24]
+.fvec row1[24]
+.fvec row2[24]
+.fvec scales        ; x: texture coordinate scale (1/1024)
+.fvec lights[7]     ; 0-2: light direction rows, 3-5: light colors, 6: ambient (3-6 times the
+                    ; color scale)
+
+.constf consts(0.0, 0.0, 0.0, 0.0)
+.alias zero consts.xxxx
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias inidx v1
+.alias inwgt v2
+.alias intex v3
+.alias inclr v4
+.alias innrm v5
+
+.entry main_ctr_skin_opt
+.proc main_ctr_skin_opt
+  ; blended bone rows r1-r3 = sum of weight * the bone's rows (weights 0..255)
+  mova a0.xy, inidx.xy
+  mul r1, row0[a0.x], inwgt.xxxx
+  mul r2, row1[a0.x], inwgt.xxxx
+  mul r3, row2[a0.x], inwgt.xxxx
+  mad r1, inwgt.yyyy, row0[a0.y], r1
+  mad r2, inwgt.yyyy, row1[a0.y], r2
+  mad r3, inwgt.yyyy, row2[a0.y], r3
+  mova a0.x, inidx.zzzz
+  mad r1, inwgt.zzzz, row0[a0.x], r1
+  mad r2, inwgt.zzzz, row1[a0.x], r2
+  mad r3, inwgt.zzzz, row2[a0.x], r3
+
+  ; camera space position r4 (x 255; dph: w = 1) and the rotated normal r5, interleaved
+  dph r4.x, inpos, r1
+  dp3 r5.x, innrm, r1
+  dph r4.y, inpos, r2
+  dp3 r5.y, innrm, r2
+  dph r4.z, inpos, r3
+  dp3 r5.z, innrm, r3
+  dph outpos.x, r4, clip[0]
+  dp3 r6.x, r5, r5
+  dph outpos.y, r4, clip[1]
+  ; lighting: the rows are the negated bone matrices (see CtrMerc), so the normal is -r5; the
+  ; lights' sum is scaled by 1 / |r5| (r6.x) instead of normalizing (as ctr_skin.v.pica)
+  mul r7, lights[0], -r5.xxxx
+  dph outpos.z, r4, clip[2]
+  rsq r6.x, r6.x
+  mad r7, -r5.yyyy, lights[1], r7
+  dph outpos.w, r4, clip[3]
+  mad r7, -r5.zzzz, lights[2], r7
+  mul outtc0, scales.xxxx, intex
+  max r7, zero, r7
+  mul r8, lights[3], r7.xxxx
+  mad r8, r7.yyyy, lights[4], r8
+  mad r8, r7.zzzz, lights[5], r8
+  mad r8, r8, r6.xxxx, lights[6]
+  mul outclr, inclr, r8
+  end
+.end

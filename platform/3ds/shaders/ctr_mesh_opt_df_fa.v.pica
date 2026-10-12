@@ -1,0 +1,35 @@
+; (AI-assisted)
+; config.ini shader_opt with fog_alpha and the game's fog off: ctr_mesh_opt_fa.v.pica with only the
+; draw distance fog, 8 instructions (ctr_mesh_opt_fa 10, ctr_mesh_fa 12, ctr_mesh_old_fa 19). The
+; amount is clamped at 0 (the GPU takes the absolute value of vertex colors: a negative amount
+; would fog the near geometry); above 1 the GPU saturates it (see ctr_mesh_opt_fa.v.pica).
+; Same uniforms at the same places as ctr_mesh_opt.v.pica (fog1 unused).
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[6]       ; as ctr_mesh_opt.v.pica (clip[5] unused here, and not uploaded)
+.fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255)
+.fvec fog1          ; unused (the same uniforms as ctr_mesh_opt.v.pica)
+
+.constf consts(0.0, 0.0, 0.0, 0.0)
+.alias zero consts.xxxx
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+
+.entry main_ctr_mesh_opt_df_fa
+.proc main_ctr_mesh_opt_df_fa
+  dph r0.x, inpos, clip[4]
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  dph outpos.z, inpos, clip[2]
+  max outclr.w, zero, r0.xxxx
+  dph outpos.w, inpos, clip[3]
+  mul outclr.xyz, scales.yyyy, inclr
+  mul outtc0, scales.xxxx, intex
+  end
+.end

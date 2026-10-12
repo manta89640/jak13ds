@@ -159,6 +159,10 @@ extern const uint8_t ctr_mesh_shbin[];
 extern const size_t ctr_mesh_shbin_size;
 extern const uint8_t ctr_skin_shbin[];
 extern const size_t ctr_skin_shbin_size;
+extern const uint8_t ctr_mesh_opt_shbin[];
+extern const size_t ctr_mesh_opt_shbin_size;
+extern const uint8_t ctr_skin_opt_shbin[];
+extern const size_t ctr_skin_opt_shbin_size;
 extern const uint8_t ctr_bench_shbin[];
 extern const size_t ctr_bench_shbin_size;
 extern const uint8_t ctr_bench_sep_shbin[];
@@ -234,6 +238,8 @@ typedef struct {
   shaderProgram_s prog;
   int ok;
 } Prog;
+/* the bench DVLB's entry points (platform/3ds/cmake/ctr_renderer.cmake OG3DS_BENCH_SHADERS) */
+#define BENCH_ENTRIES 9
 
 static struct {
   int dead;      /* the GPU didn't finish: nothing more is run */
@@ -254,8 +260,9 @@ static struct {
   C3D_Tex tex[6]; /* RGBA8, RGB565, ETC1 at 256x256; the same with all mip levels */
   int tex_ok[6];
   Prog basic, clip2, mesh, skin, bench, sep;
-  shaderProgram_s bench_entry[8]; /* the bench DVLB's entry points (shared code) */
-  int bench_entry_ok[8];
+  Prog mesh_opt, skin_opt; /* (AI-assisted) config.ini shader_opt's */
+  shaderProgram_s bench_entry[BENCH_ENTRIES]; /* the bench DVLB's entry points (shared code) */
+  int bench_entry_ok[BENCH_ENTRIES];
   C3D_Mtx m_px, m_geo;
   float upm;     /* raw perflog units per ms (from the vblank interval) */
   u32 vblank_raw; /* the vblank interval in raw units */
@@ -1624,37 +1631,45 @@ static void b3_entry(const char* id, int entry) {
   put_meas(id, BIG_TRIS, 3, &m, "");
 }
 
-/* the game's new ctr_mesh (shader_mesh = new) on the same triangles */
-static void b3_mesh_new(void) {
-  if (B.dead || !B.mesh.ok) {
+/* the game's new ctr_mesh (shader_mesh = new) on the same triangles; (AI-assisted) opt: its
+ * shader_opt version ctr_mesh_opt (the fog rows clip[4], clip[5] zero: no fog, as fog0/fog1 here) */
+static void b3_mesh(const char* id, Prog* prog, int opt) {
+  if (B.dead || !prog->ok) {
     return;
   }
-  bench_start("B3.mesh_new");
+  bench_start(id);
   fb_begin(B.t0);
   plain_state();
   C3D_CullFace((GPU_CULLMODE)B.cull_mode);
-  shaderProgram_s* p = &B.mesh.prog;
+  shaderProgram_s* p = &prog->prog;
   C3D_BindProgram(p);
   attrs(L_SHORT);
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, uloc(p, "clip"), &B.m_geo);
   C3D_FVUnifSet(GPU_VERTEX_SHADER, uloc(p, "scales"), 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f, 0.0f);
-  C3D_FVUnifSet(GPU_VERTEX_SHADER, uloc(p, "fog0"), -1.0f / 255.0f, 0.0f, -1.0f, 0.0f);
+  if (opt) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, uloc(p, "clip") + 4, 0.0f, 0.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, uloc(p, "clip") + 5, 0.0f, 0.0f, 0.0f, -1.0f);
+  } else {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, uloc(p, "fog0"), -1.0f / 255.0f, 0.0f, -1.0f, 0.0f);
+  }
   C3D_FVUnifSet(GPU_VERTEX_SHADER, uloc(p, "fog1"), 0.0f, 0.0f, 0.0f, 0.0f);
   vbuf(B.cull_s, L_SHORT);
   draw_big();
   Meas m;
   run_list(3, &m);
-  put_meas("B3.mesh_new", BIG_TRIS, 3, &m, "");
+  put_meas(id, BIG_TRIS, 3, &m, "");
 }
 
-/* the game's new ctr_skin (shader_skin = new): one bone (the identity) per vertex */
-static void b3_skin_new(void) {
-  if (B.dead || !B.skin.ok) {
+/* the game's new ctr_skin (shader_skin = new): one bone (the identity) per vertex; (AI-assisted)
+ * opt: its shader_opt version ctr_skin_opt (weights unscaled: the clip matrix's x, y, z columns
+ * / 255 give the same triangles) */
+static void b3_skin(const char* id, Prog* prog, int opt) {
+  if (B.dead || !prog->ok) {
     return;
   }
   VtxSkin* v = (VtxSkin*)lin_alloc(CULL_VERTS * sizeof(VtxSkin));
   if (!v) {
-    bench_emit("[bench] B3.skin_new skipped=no_memory");
+    bench_emitf("[bench] %s skipped=no_memory", id);
     return;
   }
   for (int i = 0; i < CULL_VERTS; i++) {
@@ -1667,14 +1682,22 @@ static void b3_skin_new(void) {
     v[i].nz = 127;
   }
   GSPGPU_FlushDataCache(v, CULL_VERTS * sizeof(VtxSkin));
-  bench_start("B3.skin_new");
+  bench_start(id);
   fb_begin(B.t0);
   plain_state();
   C3D_CullFace((GPU_CULLMODE)B.cull_mode);
-  shaderProgram_s* p = &B.skin.prog;
+  shaderProgram_s* p = &prog->prog;
   C3D_BindProgram(p);
   attrs(L_SKIN);
-  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, uloc(p, "clip"), &B.m_geo);
+  C3D_Mtx geo = B.m_geo;
+  if (opt) {
+    for (int r = 0; r < 4; r++) {
+      for (int c = 1; c < 4; c++) {
+        geo.r[r].c[c] *= 1.0f / 255.0f;
+      }
+    }
+  }
+  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, uloc(p, "clip"), &geo);
   const int r0 = uloc(p, "row0"), r1 = uloc(p, "row1"), r2 = uloc(p, "row2");
   C3D_FVUnifSet(GPU_VERTEX_SHADER, r0, 1.0f, 0.0f, 0.0f, 0.0f);
   C3D_FVUnifSet(GPU_VERTEX_SHADER, r1, 0.0f, 1.0f, 0.0f, 0.0f);
@@ -1689,7 +1712,7 @@ static void b3_skin_new(void) {
   draw_big();
   Meas m;
   run_list(3, &m);
-  put_meas("B3.skin_new", BIG_TRIS, 3, &m, "");
+  put_meas(id, BIG_TRIS, 3, &m, "");
   lin_free(v);
 }
 
@@ -1759,9 +1782,11 @@ static int setup(void) {
   prog_load(&B.clip2, ctr_clip2_shbin, ctr_clip2_shbin_size, 0);
   prog_load(&B.mesh, ctr_mesh_shbin, ctr_mesh_shbin_size, 0);
   prog_load(&B.skin, ctr_skin_shbin, ctr_skin_shbin_size, 0);
+  prog_load(&B.mesh_opt, ctr_mesh_opt_shbin, ctr_mesh_opt_shbin_size, 0);
+  prog_load(&B.skin_opt, ctr_skin_opt_shbin, ctr_skin_opt_shbin_size, 0);
   prog_load(&B.sep, ctr_bench_sep_shbin, ctr_bench_sep_shbin_size, 0);
   if (prog_load(&B.bench, ctr_bench_shbin, ctr_bench_shbin_size, 0)) {
-    for (int i = 0; i < 8 && i < (int)B.bench.dvlb->numDVLE; i++) {
+    for (int i = 0; i < BENCH_ENTRIES && i < (int)B.bench.dvlb->numDVLE; i++) {
       shaderProgramInit(&B.bench_entry[i]);
       B.bench_entry_ok[i] = shaderProgramSetVsh(&B.bench_entry[i], &B.bench.dvlb->DVLE[i]) == 0;
     }
@@ -1779,7 +1804,7 @@ static int setup(void) {
 
 static void teardown(void) {
   ctr_gpu_bench_restore(); /* the game's program and state; nothing points at ours any more */
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < BENCH_ENTRIES; i++) {
     if (B.bench_entry_ok[i]) {
       shaderProgramFree(&B.bench_entry[i]);
     }
@@ -1788,6 +1813,8 @@ static void teardown(void) {
   prog_free(&B.clip2);
   prog_free(&B.mesh);
   prog_free(&B.skin);
+  prog_free(&B.mesh_opt);
+  prog_free(&B.skin_opt);
   prog_free(&B.sep);
   prog_free(&B.bench);
   ctr_linear_lock();
@@ -1838,12 +1865,12 @@ int ctr_gpu_bench_run(void) {
   const int ok = setup();
   bench_emitf("[bench] begin v=1 new3ds=%d emulator=%d perflog=%d upm=%.1f vblank_raw=%lu hw=%d "
               "hs_interval=%u setup=%d t1=%d t2=%d textures=%d%d%d%d%d%d programs=basic%d,clip2%d,mesh%d,"
-              "skin%d,bench%d,sep%d",
+              "skin%d,bench%d,sep%d,mesh_opt%d,skin_opt%d",
               is_new ? 1 : 0, ctr_gpu_is_emulator(), B.pl_ok, B.upm, (unsigned long)B.vblank_raw,
               B.hw_ok, HS_INTERVAL, ok,
               B.t1 != NULL, B.t2 != NULL, B.tex_ok[0], B.tex_ok[1], B.tex_ok[2], B.tex_ok[3],
               B.tex_ok[4], B.tex_ok[5], B.basic.ok, B.clip2.ok, B.mesh.ok, B.skin.ok,
-              B.bench.ok, B.sep.ok);
+              B.bench.ok, B.sep.ok, B.mesh_opt.ok, B.skin_opt.ok);
   if (ok) {
     b1();
     b2(B2_NOSTATE, "B2.nostate");
@@ -1875,15 +1902,21 @@ int ctr_gpu_bench_run(void) {
     ctr_log_sync();
     b2(B2_PROG_ENTRY, "B2.prog_entry");
     b2(B2_PROG_SEP, "B2.prog_sep");
-    static const char* const ids[8] = {"B3.v7", "B3.v7b", "B3.v14", "B3.v21",
-                                       "B3.v35", "B3.v53", "B3.o3", "B3.o4"};
+    static const char* const ids[BENCH_ENTRIES] = {"B3.v7",  "B3.v7b", "B3.v14",
+                                                   "B3.v21", "B3.v35", "B3.v53",
+                                                   "B3.o3",  "B3.o4",  "B3.o3p"};
     for (int i = 0; i < 8; i++) {
       if (i != 1) {
         b3_entry(ids[i], i);
       }
     }
-    b3_mesh_new();
-    b3_skin_new();
+    b3_mesh("B3.mesh_new", &B.mesh, 0);
+    b3_skin("B3.skin_new", &B.skin, 0);
+    /* (AI-assisted) config.ini shader_opt's programs, the packed output register (o3p) before
+     * the program that packs texcoord1 that way */
+    b3_skin("B3.skin_opt", &B.skin_opt, 1);
+    b3_entry(ids[8], 8);
+    b3_mesh("B3.mesh_opt", &B.mesh_opt, 1);
   }
   const double secs = (double)(svcGetSystemTick() - B.start_tick) / SYSCLOCK_ARM11;
   bench_emitf("[bench] end tests=%d seconds=%.1f stopped=%d", B.tests, secs, B.dead);

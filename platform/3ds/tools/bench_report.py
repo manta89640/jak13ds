@@ -180,12 +180,14 @@ def report(s):
                     base = per
         elif prefix == "B3.":
             pts = []
+            b3 = {}
             for t in names:
                 if t == "B3.cullcheck":
                     kv, rest = tests[t]
                     print(f"  {t:26s} {rest}")
                     continue
                 per = row(t, "ns/vertex", 1e6 / 3.0)
+                b3[t] = per
                 m = re.match(r"B3\.v(\d+)$", t)
                 if m and per is not None:
                     pts.append((int(m.group(1)), per))
@@ -198,6 +200,29 @@ def report(s):
                     slope = sum((x - mx) * (y - my) for x, y in pts) / sxx
                     print(f"  -> {slope:.3f} ns per vertex per shader instruction, "
                           f"{my - slope * mx:.2f} ns per vertex at 0 instructions (fit of B3.v*)")
+                    b3["slope"] = slope
+            # (AI-assisted) config.ini shader_opt's lines: the opt programs against the new ones
+            # (both measured) and against the hardware default (the Oct 2 old programs, 21 / 53
+            # instructions: estimated from the fit's slope)
+            def ratio(a, b):
+                return f"{100.0 * (b3[a] / b3[b] - 1.0):+.1f}%" if b3.get(a) and b3.get(b) else "?"
+            if "B3.o3p" in b3:
+                o3, o4, o3p = b3.get("B3.o3"), b3.get("B3.o4"), b3.get("B3.o3p")
+                if o3 and o4 and o3p is not None:
+                    per_reg = abs(o3p - o3) < abs(o3p - o4)
+                    print(f"  -> packed output register: o3p {o3p:.2f} vs o3 {o3:.2f} / o4 "
+                          f"{o4:.2f} ns/vertex: the setup costs per output "
+                          f"{'register (packing texcoord1 helps)' if per_reg else 'semantic (packing changes nothing)'}")
+            for opt, new, old_instr, opt_instr in (("B3.mesh_opt", "B3.mesh_new", 21, 10),
+                                                  ("B3.skin_opt", "B3.skin_new", 53, 33)):
+                if opt in b3:
+                    est = ""
+                    if b3.get("slope") is not None and b3.get(opt):
+                        old_est = b3[opt] + b3["slope"] * (old_instr - opt_instr)
+                        est = (f"; the hardware default (old, {old_instr} instructions) is "
+                               f"~{old_est:.2f} ns/vertex by the fit: "
+                               f"{100.0 * (b3[opt] / old_est - 1.0):+.1f}%")
+                    print(f"  -> shader_opt {opt[3:]}: {ratio(opt, new)} against {new[3:]}{est}")
         elif prefix == "B4.":
             for t in names:
                 if t == "B4.cachenum":
