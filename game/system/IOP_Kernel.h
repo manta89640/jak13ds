@@ -59,13 +59,27 @@ struct IopThread {
       : name(std::move(n)), function(f), priority(pri), thID(ID) {
 #ifdef __3DS__
     // 3 MB per IOP thread is 30 MB on the 3DS. The overlord threads need far less.
-    thread = co_create(0x80000, functionWrapper);
+    // (AI-assisted) The stack is filled with a pattern: IOP_Kernel::check_stacks logs how deep
+    // each thread went (the stacks are in the malloc heap, which the level loads are short of).
+    // Measured in Azahar (boot, 5 level loads, continues): at most 2.8 KB (ISOThread).
+    thread = co_create(kStackSize, functionWrapper);
+    fill_stack();
 #else
     thread = co_create(0x300000, functionWrapper);
 #endif
   }
 
   ~IopThread() { co_delete(thread); }
+#ifdef __3DS__
+  // (AI-assisted) was 512 KB each: 4.5 MB of the heap for 9 threads using under 3 KB each
+  static constexpr u32 kStackSize = 64 * 1024;
+  // (AI-assisted) libco's context is at the start of the block, the stack grows down from its end
+  static constexpr u32 kStackContextBytes = 256;
+  static constexpr u32 kStackPattern = 0x57ac57acu;
+  void fill_stack();
+  u32 stack_used() const;  // the deepest the stack went so far (bytes)
+  u32 stack_logged = 0;
+#endif
 
   static void functionWrapper();
   std::string name;
@@ -236,6 +250,10 @@ class IOP_Kernel {
   void leaveThread();
   void updateDelay();
   void processWakeups();
+#ifdef __3DS__
+  void check_stacks();
+  time_stamp m_stack_check_time{};
+#endif
 
   IopThread* schedNext();
   std::optional<time_stamp> nextWakeup();

@@ -250,6 +250,14 @@ snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data) {
   }
 }
 
+snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data, std::unique_ptr<u8[]> owner) {
+  if (player) {
+    return player->LoadBank(data, std::move(owner));
+  } else {
+    return 0;
+  }
+}
+
 namespace {
 bool started = false;
 std::vector<u8> sbk_data;

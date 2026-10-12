@@ -405,3 +405,60 @@ No `could not be created` and no parts left out: the vista tier (15-690 KB per l
 everywhere, nothing to switch off. (The Oct 3 estimate of -4.5 MB for lavatube + citadel predates
 ETC1 merc textures.) The tighter memory at a level load is the C heap (~3 MB free at the peak), see
 "Level loads that stop the game".
+
+### The malloc heap (AI-assisted, Oct 12)
+
+On the New 3DS the newlib heap is 72.8 MB; the EE memory takes 48 MB of it. In the Oct 12 hardware
+session, loads of `maincave.c3l` and `lavatube.c3l` failed with `bad_alloc`. Lava Tube's background
+then came ~40 s late, and later the game stopped with `abort` in Spider Cave: the `LOAD_MUSIC` for
+maincave ran out of memory on a thread-pool thread (`sound_load_job`), and an exception there is
+`std::terminate`. A trace build (`cmake -DOG3DS_HEAP_TRACE=ON`, `platform/3ds/port/ctr_heap.cpp`)
+logs who holds the heap at every `.c3l` load (`[heaptrace]`; map the addresses with
+`arm-none-eabi-addr2line -e gk.elf`).
+
+What held the ~17 MB outside the EE memory (Azahar, lavatube + village3):
+
+| what | KB |
+|---|---|
+| IOP thread stacks (libco, 9 x 512 KB; the deepest used 2.8 KB) | 4608 |
+| `CtrVram` (the GS memory) | 4096 |
+| libctru thread stacks (14 threads) | 1305 |
+| sound banks (the samples) | ~1760 |
+| level data of the two levels (`CtrLevelData`) | ~1600 |
+| RAMDISK (VIS files) | 811 |
+| renderer buffers (sprites, merc, sky...), log ring, allocations under 2 KB | ~2600 |
+
+Each level load also took a few big blocks for a moment: the reader's two 256 KB windows, all of
+a level's merc indices (up to 250 KB), and, for a sound bank, the file plus a copy of its samples
+(2 x 550 KB for music). Each load also left the free memory in smaller pieces.
+
+Changes:
+- IOP thread stacks are 64 KB each. `[iop] thread stacks used` logs how deep they went (a warning
+  past half).
+- The `.c3l` reader's windows, block caches and zstd decoder are made once at startup and kept
+  (`c3l::Reader::Buffers`, ~640 KB). Merc indices are read per model. Detail reloads and repairs
+  read each chunk's indices straight into its index buffer.
+- A sound bank keeps the buffer its file was read into: one block of the file's size, not two.
+- Failures don't stop the game. A sound bank load waits and tries again (every 500 ms, up to
+  20 s). A failed `.c3l` load (also a detail reload or repair) fails the job, and
+  `retry_failed_loads` loads the level again when the heap's largest free block has grown by
+  256 KB (checked every 30 frames, at least 1 s after the failure), or after 10 s. Before, it
+  waited until the level's background was drawn.
+- Every failed malloc logs one line (at most one a second, from the `--wrap=malloc` wrapper):
+  `[heap] N bytes (malloc) failed: free ... KB (... in the arena, ... never used), largest free
+  block ... KB, in use ... KB of ... KB; called from <addresses>`. The largest block comes from
+  walking newlib's free lists, not from test allocations.
+- Host test hook: `OPENGOAL_CTR_FAIL_LOAD=NAME[:S]` fails NAME's `.c3l` loads for S seconds.
+
+The same pad script in Azahar (village1, maincave + village3, lavatube + village3,
+village3 + ogre, maincave + village3 again):
+
+| after the load of | in use before / after (KB) | free before / after | largest free block before / after |
+|---|---|---|---|
+| village3 (with maincave) | 65416 / 62097 | 7619 / 10930 | 5347 / 10476 |
+| lavatube (with village3) | 66250 / 62824 | 6785 / 10203 | 3871 / 9365 |
+| ogre (with village3) | 66106 / 62767 | 6929 / 10260 | 3399 / 9610 |
+| maincave again | 66184 / 62856 | 6851 / 10171 | 2890 / 8963 |
+
+The cost: reading merc indices per model adds 1 SD card request and ~250 KB per level (maincave
+36 -> 37 requests).

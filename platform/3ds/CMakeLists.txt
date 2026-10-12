@@ -256,7 +256,18 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/cmodules.cmake)
 # objects of gk itself, not archive members, so they replace the libc.a / libstdc++.a versions
 add_executable(gk ${CMAKE_CURRENT_SOURCE_DIR}/gk/main.cpp ${OG3DS_REGISTRY_OBJ}
   ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem.S ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_clock.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem_c.c)
+  ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem_c.c ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_heap.cpp)
+# (AI-assisted) every malloc / calloc / realloc / memalign / free goes through ctr_heap.cpp: a log
+# line for each failed allocation (free heap, largest free block, caller). OG3DS_HEAP_TRACE=ON
+# (measurement builds): it also keeps the call stacks of the live allocations of 2 KB or more.
+option(OG3DS_HEAP_TRACE "trace live malloc allocations (measurement builds)" OFF)
+if(OG3DS_HEAP_TRACE)
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_heap.cpp PROPERTIES
+    COMPILE_DEFINITIONS OG3DS_HEAP_TRACE=1)
+  target_compile_definitions(gk PRIVATE OG3DS_HEAP_TRACE=1)
+endif()
+target_link_options(gk PRIVATE
+  -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=memalign -Wl,--wrap=free)
 # (AI-assisted) asm_mem = off's C loops must stay loops (not calls back into memcpy / memset)
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_mem_c.c PROPERTIES
   COMPILE_OPTIONS "-ffreestanding;-fno-builtin;-fno-tree-loop-distribute-patterns")

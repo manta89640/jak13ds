@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 #include "common/dma/dma.h"
 #include "common/dma/gs.h"
@@ -27,6 +28,7 @@
 
 #ifdef __3DS__
 #include "game/overlord/jak1/fake_iso.h"  // (AI-assisted) io_heap_free
+#include "platform/3ds/port/ctr_heap.h"
 #include "platform/3ds/port/ctr_port.h"
 extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 #endif
@@ -51,6 +53,12 @@ constexpr double kPromiseMs = 3000.0;
 // nothing (up to 16x)
 constexpr u64 kRepairCheckFrames = 30, kRepairRetryFrames = 300;
 constexpr u32 kRepairMargin = 256 * 1024;
+// (AI-assisted) a failed load (out of heap memory) of a level the game wants: tried again after
+// kFailedRetryMs, or after kFailedRetryMinMs once the heap's largest free block is
+// kFailedRetryGrowth bigger than when it failed (checked every kRepairCheckFrames frames). It
+// waited for the level to be drawn (Lava Tube's background came ~40 s late on hardware).
+constexpr double kFailedRetryMs = 10000.0, kFailedRetryMinMs = 1000.0;
+constexpr u32 kFailedRetryGrowth = 256 * 1024;
 
 // (AI-assisted) what far mode draws (a level seen from a neighbouring one): its low resolution
 // tfrag (or the coarse one) and, in c3l files with chunk kinds, its ties without a distance limit
@@ -94,9 +102,15 @@ int missing_parts(const CtrLevelData& lev, u32* bytes) {
 }
 
 void build_draw_order(CtrLevelData* out);  // (AI-assisted) below
+size_t c3l_read_window();                  // (AI-assisted) below
+// (AI-assisted) the converter's largest block (c3l v11+ BlockDir::max_block); a file with bigger
+// ones gets bigger caches when it's read
+constexpr size_t kC3lMaxBlock = 64 * 1024;
 }  // namespace
 
 CtrLevels::CtrLevels() {
+  // (AI-assisted) the reader's memory for all loads, while the heap is still in one piece
+  m_read_bufs.reserve(c3l_read_window(), kC3lMaxBlock);
 #ifdef __3DS__
   // core 2 on New 3DS (ctr_thread_create falls back to core 0 without it)
   if (ctr_thread_create(&CtrLevels::loader_entry, this, 64 * 1024, kLoaderPrio, 2, &m_thread) !=
@@ -208,18 +222,34 @@ void CtrLevels::run_job(const Job& job) {
   Done d;
   d.job = job;
   m_room_tried = false;
-  if (job.parts()) {
-    run_parts_job(job, &d);
-    std::lock_guard<std::mutex> lk(m_lock);
-    m_done.push_back(std::move(d));
-    return;
+  // (AI-assisted) an allocation that fails (bad_alloc) fails the job: the loader thread goes on
+  // (an exception out of it is std::terminate); the render thread tries again later
+  try {
+    if (job.parts()) {
+      run_parts_job(job, &d);
+    } else {
+      d.lev = std::make_unique<CtrLevelData>();
+      d.lev->generation = ++m_generation;
+      d.result = load(job.name, d.lev.get());
+    }
+  } catch (std::exception& e) {
+    lg::error("[ctr] {}: {} failed: {}", job.name,
+              job.parts() ? "reading meshes again" : "loading", e.what());
+    if (d.lev) {
+      unload(*d.lev);
+    }
+    d.result = LoadResult::FAILED;
   }
-  d.lev = std::make_unique<CtrLevelData>();
-  d.lev->generation = ++m_generation;
-  d.result = load(job.name, d.lev.get());
-  if (d.result != LoadResult::LOADED) {
+  if (!job.parts() && d.result != LoadResult::LOADED) {
     d.lev.reset();
   }
+#ifdef __3DS__
+  if (d.result == LoadResult::FAILED) {
+    CtrHeapStats st;
+    ctr_heap_stats(&st);
+    d.heap_largest = st.largest;
+  }
+#endif
   std::lock_guard<std::mutex> lk(m_lock);
   m_done.push_back(std::move(d));
 }
@@ -424,7 +454,8 @@ size_t c3l_read_window() {
 
 // (AI-assisted) the pieces of a .c3l file, as they are needed (v11: decompressed): c3l_reader.h
 struct C3lReader : c3l::Reader {
-  explicit C3lReader(const fs::path& path) : c3l::Reader(path.string().c_str(), c3l_read_window()) {}
+  C3lReader(const fs::path& path, c3l::Reader::Buffers* buffers)
+      : c3l::Reader(path.string().c_str(), c3l_read_window(), buffers) {}
   long size() const { return file_size(); }
 };
 }  // namespace
@@ -437,7 +468,7 @@ struct C3lReader : c3l::Reader {
 // hardware; this way ~3 MB). Stops at the first mesh there's no memory for.
 void CtrLevels::run_parts_job(const Job& job, Done* d) {
   d->result = LoadResult::FAILED;
-  C3lReader f(job.path);
+  C3lReader f(job.path, &m_read_bufs);
   bool ok = f.ok();
   if (ok && !job.chunks.empty()) {
     u32 lo = UINT32_MAX, hi = 0;
@@ -445,8 +476,14 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       lo = std::min(lo, c.index_first);
       hi = std::max(hi, c.index_end);
     }
+    // (AI-assisted) window mode (the default): each chunk's indices straight into its index
+    // buffer, like load_file (the reader keeps a window for the indices and one for the vertices),
+    // not all of them in one piece of the heap first (up to ~2 MB)
+    const bool chunk_indices = f.window_mode();
     std::vector<u16> indices;
-    ok = f.read_array(job.index_data_offset + lo * (u32)sizeof(u16), hi - lo, &indices);
+    if (!chunk_indices) {
+      ok = f.read_array(job.index_data_offset + lo * (u32)sizeof(u16), hi - lo, &indices);
+    }
     for (const auto& c : job.chunks) {
       if (!ok || cancelled()) {
         break;
@@ -460,10 +497,17 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
         mesh = ctr_gpu_mesh_begin(c.vertex_count, count, &vdst, &idst);
       }
       if (mesh >= 0) {
-        memcpy(idst, indices.data() + (c.index_first - lo), count * sizeof(u16));
+        bool read_ok = true;
+        if (chunk_indices) {
+          read_ok = f.read(job.index_data_offset + c.index_first * (u32)sizeof(u16), idst,
+                           count * sizeof(u16));
+        } else {
+          memcpy(idst, indices.data() + (c.index_first - lo), count * sizeof(u16));
+        }
         mesh = ctr_gpu_mesh_end(
-            mesh, f.read(job.vertex_data_offset + c.first_vertex * (u32)sizeof(c3l::Vertex), vdst,
-                         c.vertex_count * sizeof(c3l::Vertex)));
+            mesh, read_ok && f.read(job.vertex_data_offset +
+                                        c.first_vertex * (u32)sizeof(c3l::Vertex),
+                                    vdst, c.vertex_count * sizeof(c3l::Vertex)));
       }
       ok = mesh >= 0;
       if (ok) {
@@ -472,23 +516,20 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
     }
   }
   if (ok && !job.merc.empty()) {
-    u32 lo = UINT32_MAX, hi = 0;
-    for (const auto& m : job.merc) {
-      lo = std::min(lo, m.index_first);
-      hi = std::max(hi, m.index_end);
-    }
+    // (AI-assisted) each model's indices with its vertices (as load_file)
     std::vector<u16> indices;
     std::vector<c3l::MercVertex> verts;
-    ok = f.read_array(job.merc_index_offset + lo * (u32)sizeof(u16), hi - lo, &indices);
     for (const auto& m : job.merc) {
       if (!ok || cancelled()) {
         break;
       }
       ok = f.read_array(job.merc_vertex_offset + m.file_vertex * (u32)sizeof(c3l::MercVertex),
-                        m.vertex_count, &verts);
+                        m.vertex_count, &verts) &&
+           f.read_array(job.merc_index_offset + m.index_first * (u32)sizeof(u16),
+                        m.index_end - m.index_first, &indices);
       int mesh = -1;
       if (ok) {
-        const u16* ix = indices.data() + (m.index_first - lo);
+        const u16* ix = indices.data();
         const int count = (int)(m.index_end - m.index_first);
         mesh = ctr_gpu_skinned_mesh_create(verts.data(), m.vertex_count, ix, count);
         if (mesh < 0 && make_room(job.name, "models")) {
@@ -700,11 +741,45 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   bool ok = false;
   long file_size = 0;
   double decode_ms = 0;
+#ifdef __3DS__
+  ctr_heap_trace_dump(("before " + name).c_str());  // (AI-assisted) trace builds only
+#endif
   try {
+#ifndef __3DS__
+    // (AI-assisted) test hook (host): OPENGOAL_CTR_FAIL_LOAD=NAME[:S] fails NAME's loads for S
+    // seconds (default 0: only the first) from its first load on, as if the heap ran out (the
+    // retry path)
+    if (const char* fail = getenv("OPENGOAL_CTR_FAIL_LOAD")) {
+      static double s_first_ms = -1;
+      const char* colon = strchr(fail, ':');
+      const std::string fail_name = colon ? std::string(fail, colon - fail) : std::string(fail);
+      if (name == fail_name) {
+        const double now = ctr_gpu_time_ms();
+        if (s_first_ms < 0) {
+          s_first_ms = now;
+          throw std::bad_alloc();
+        }
+        if (colon && now - s_first_ms < atof(colon + 1) * 1000.0) {
+          throw std::bad_alloc();
+        }
+      }
+    }
+#endif
     ok = load_file(path, name, out, &file_size, &decode_ms);
   } catch (std::exception& e) {
-    lg::error("[ctr] failed to load {}: {}", path.string(), e.what());
+    std::string heap;
+#ifdef __3DS__
+    CtrHeapStats st;
+    ctr_heap_stats(&st);
+    heap = fmt::format(" (heap: {} KB free, largest free block {} KB)", st.free / 1024,
+                       st.largest / 1024);
+#endif
+    lg::error("[ctr] failed to load {}: {}{}; trying again when memory frees", path.string(),
+              e.what(), heap);
   }
+#ifdef __3DS__
+  ctr_heap_trace_dump(((ok ? "after " : "failed ") + name).c_str());
+#endif
   if (!ok) {
     unload(*out);
     if (cancelled()) {
@@ -835,8 +910,6 @@ void make_run_spheres(CtrLevelData* out,
 // texture handles).
 void build_draw_order(CtrLevelData* out) {
   out->draw_states.clear();
-  out->draw_sort_keys.clear();
-  out->draw_ordered.clear();
   out->draw_chunk.clear();
   out->sorted_draws.clear();
   out->ordered_draws.clear();
@@ -871,8 +944,9 @@ void build_draw_order(CtrLevelData* out) {
   // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
   // the state (numbered per level)
   std::vector<ctr_draw_state> states;
-  out->draw_sort_keys.resize(out->draws.size());
-  out->draw_ordered.resize(out->draws.size());
+  // (AI-assisted) only needed here: not kept in the level (10-35 KB of the heap per level)
+  std::vector<u32> draw_sort_keys(out->draws.size());
+  std::vector<u8> draw_ordered(out->draws.size());
   for (size_t di = 0; di < out->draws.size(); di++) {
     ctr_draw_state st = out->draw_states[di];
     const int tex = st.tex;
@@ -884,9 +958,9 @@ void build_draw_order(CtrLevelData* out) {
     if (id == states.size()) {
       states.push_back(st);
     }
-    out->draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
+    draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
     // blending, or drawn over what's there without writing depth (decals): keep the order
-    out->draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
+    draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
   }
   // drawing order, made once (see sorted_draws)
   out->draw_chunk.assign(out->draws.size(), 0);
@@ -901,11 +975,11 @@ void build_draw_order(CtrLevelData* out) {
     const auto& ch = out->chunks[ci];
     for (u32 k = 0; k < ch.draw_count && ch.first_draw + k < out->draws.size(); k++) {
       const u32 di = ch.first_draw + k;
-      if (out->draw_ordered[di]) {
+      if (draw_ordered[di]) {
         out->ordered_draws.push_back(di);
       } else {
         // (draws are numbered in chunk order: di sorts like (chunk, draw))
-        sorted.push_back(((u64)out->draw_sort_keys[di] << 32) | di);
+        sorted.push_back(((u64)draw_sort_keys[di] << 32) | di);
       }
     }
   }
@@ -1048,7 +1122,7 @@ bool CtrLevels::load_file(const fs::path& path,
                           CtrLevelData* out,
                           long* file_size,
                           double* decode_ms) {
-  C3lReader f(path);
+  C3lReader f(path, &m_read_bufs);
   // (AI-assisted) the decode time, however the load ends
   struct DecodeTime {
     const C3lReader& f;
@@ -1109,7 +1183,9 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     if (tail) {
       const bool want_flat = ctr_settings().vista_untextured;
-      std::vector<c3l::Chunk> kept(out->chunks.begin(), out->chunks.begin() + first_vista);
+      std::vector<c3l::Chunk> kept;
+      kept.reserve(out->chunks.size());  // (AI-assisted) one piece of the heap, not a few
+      kept.assign(out->chunks.begin(), out->chunks.begin() + first_vista);
       for (size_t ci = first_vista; ci < out->chunks.size(); ci++) {
         c3l::Chunk ch = out->chunks[ci];
         if ((ch.kind == c3l::CHUNK_KIND_VISTA_FLAT) == want_flat) {
@@ -1195,6 +1271,19 @@ bool CtrLevels::load_file(const fs::path& path,
   out->chunk_run_count.assign(out->chunks.size(), 0);
   if (ctr_settings().run_culling) {
     constexpr u32 kCullRunIndices = 96 * 3;
+    {
+      // (AI-assisted) the runs added below, so vis_runs is made once (not grown by doubling)
+      size_t runs = out->vis_runs.size();
+      for (const auto& ch : out->chunks) {
+        for (u32 k = 0; !ch.vis_run_count && k < ch.draw_count &&
+                        ch.first_draw + k < out->draws.size();
+             k++) {
+          runs += (out->draws[ch.first_draw + k].index_count + kCullRunIndices - 1) /
+                  kCullRunIndices;
+        }
+      }
+      out->vis_runs.reserve(runs);
+    }
     for (size_t ci = 0; ci < out->chunks.size(); ci++) {
       const auto& ch = out->chunks[ci];
       if (ch.vis_run_count) {
@@ -1254,6 +1343,9 @@ bool CtrLevels::load_file(const fs::path& path,
     lg::error("[ctr] {}: truncated file", path.string());
     return false;
   }
+  out->meshes.reserve(out->chunks.size());  // (AI-assisted)
+  out->mesh_index_first.reserve(out->chunks.size());
+  out->mesh_index_end.reserve(out->chunks.size());
   for (auto& ch : out->chunks) {
     if (cancelled()) {
       return false;
@@ -1372,11 +1464,13 @@ bool CtrLevels::load_file(const fs::path& path,
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
     std::vector<c3l::MercDraw> mdraws;
+    // (AI-assisted) each model's indices are read with its vertices (the reader keeps a window for
+    // each), not all of the level's at once (up to 250 KB of the heap in one piece)
+    const u32 mindex_total = hdr.merc_index_size / sizeof(u16);
     std::vector<u16> mindices;
     if (!f.read_array(hdr.merc_models_offset, hdr.num_merc_models, &models) ||
         !f.read_array(hdr.merc_draw_offset, hdr.merc_draw_size / sizeof(c3l::MercDraw),
-                      &mdraws) ||
-        !f.read_array(hdr.merc_index_offset, hdr.merc_index_size / sizeof(u16), &mindices)) {
+                      &mdraws)) {
       lg::error("[ctr] {}: truncated file", path.string());
       return false;
     }
@@ -1432,6 +1526,7 @@ bool CtrLevels::load_file(const fs::path& path,
         gen_of[n.substr(0, n.size() - gen_suffix_len)] = mi;
       }
     }
+    out->merc_models.reserve(models.size());  // (AI-assisted) no copies while it grows
     for (u32 mi = 0; mi < models.size(); mi++) {
       const auto& m = models[mi];
       if (cancelled()) {
@@ -1504,18 +1599,20 @@ bool CtrLevels::load_file(const fs::path& path,
           d.first_index -= first;
         }
       }
-      if (end <= mindices.size()) {
+      if (end <= mindex_total) {
         md.file_vertex = m.first_vertex;
         md.vertex_count = m.vertex_count;
         md.index_first = first;
         md.index_end = end;
         if (f.read_array(hdr.merc_vertex_offset + m.first_vertex * sizeof(c3l::MercVertex),
-                         m.vertex_count, &mverts)) {
-          md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count,
-                                                mindices.data() + first, end - first);
+                         m.vertex_count, &mverts) &&
+            f.read_array(hdr.merc_index_offset + first * (u32)sizeof(u16), end - first,
+                         &mindices)) {
+          md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
+                                                end - first);
           if (md.mesh < 0 && make_room(name, "the models")) {
-            md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count,
-                                                  mindices.data() + first, end - first);
+            md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
+                                                  end - first);
           }
         }
       }
@@ -1529,6 +1626,7 @@ void CtrLevels::process_pending_loads(u64 frame) {
   m_render_frame.store(frame);
   // (AI-assisted) parked prefetches the game gave up on, room for the loader
   housekeeping(false);
+  retry_failed_loads(frame);
   for (const auto& name : m_pending_loads) {
     if (!m_levels.count(name) && !m_prefetched.count(name) && !m_missing.count(name)) {
       request({name, false, false});
@@ -1586,8 +1684,9 @@ void CtrLevels::process_pending_loads(u64 frame) {
         m_missing[name] = true;
         break;
       case LoadResult::FAILED:
-        // (AI-assisted) not for good (a failed allocation or SD read): again in 10 s
-        m_failed[name] = now;
+        // (AI-assisted) not for good (a failed allocation or SD read): again when the heap's
+        // largest free block grew, or in 10 s (retry_failed_loads, get)
+        m_failed[name] = FailedLoad{now, d.heap_largest};
         break;
       case LoadResult::CANCELLED:
         break;
@@ -1669,6 +1768,50 @@ void CtrLevels::process_pending_loads(u64 frame) {
   }
 }
 
+void CtrLevels::retry_failed_loads(u64 frame) {
+  if (m_failed.empty() || frame % kRepairCheckFrames != 0) {
+    return;
+  }
+  const double now = ctr_gpu_time_ms();
+  u32 largest = 0;
+  bool have_largest = false;
+  for (auto it = m_failed.begin(); it != m_failed.end();) {
+    const std::string& name = it->first;
+    const double since = now - it->second.ms;
+    const bool wanted = it->second.drawn ||
+                        std::find(m_wanted.begin(), m_wanted.end(), name) != m_wanted.end();
+    if (!wanted || m_levels.count(name) || m_prefetched.count(name) || since < kFailedRetryMinMs) {
+      ++it;
+      continue;
+    }
+    bool retry = since >= kFailedRetryMs;
+#ifdef __3DS__
+    if (!retry) {
+      if (!have_largest) {
+        CtrHeapStats st;
+        ctr_heap_stats(&st);
+        largest = st.largest;
+        have_largest = true;
+      }
+      retry = largest >= it->second.largest + kFailedRetryGrowth;
+    }
+#endif
+    if (!retry) {
+      ++it;
+      continue;
+    }
+    lg::info("[ctr] {}: loading again ({:.1f} s after it failed{})", name, since / 1000.0,
+             have_largest ? fmt::format("; largest free heap block {} KB, was {} KB",
+                                        largest / 1024, it->second.largest / 1024)
+                          : "");
+    if (std::find(m_pending_loads.begin(), m_pending_loads.end(), name) == m_pending_loads.end()) {
+      m_pending_loads.push_back(name);
+    }
+    it = m_failed.erase(it);
+  }
+  (void)largest;
+}
+
 void CtrLevels::unload(CtrLevelData& lev) {
   for (int t : lev.textures) {
     ctr_gpu_tex_delete(t);
@@ -1709,7 +1852,7 @@ void CtrLevels::rebuild_merc_index() {
   }
 }
 
-const CtrMercModelData* CtrLevels::find_merc_model(const std::string& name,
+const CtrMercModelData* CtrLevels::find_merc_model(std::string_view name,
                                                    const CtrLevelData** lev) {
   auto it = m_merc_index.find(name);
   if (it == m_merc_index.end()) {
@@ -1734,10 +1877,8 @@ CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
     // loading starts before the next frame (process_pending_loads); not right after a failed load
     auto failed = m_failed.find(name);
     if (failed != m_failed.end()) {
-      if (ctr_gpu_time_ms() - failed->second < 10000.0) {
-        return nullptr;
-      }
-      m_failed.erase(failed);
+      failed->second.drawn = true;  // (AI-assisted) loaded again by retry_failed_loads
+      return nullptr;
     }
     if (!m_missing.count(name) &&
         std::find(m_pending_loads.begin(), m_pending_loads.end(), name) == m_pending_loads.end()) {
@@ -1810,8 +1951,10 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
   // Load the wanted levels before the next frame, not only when their background is drawn: a level
   // can be loaded just for its models. The intro loads the "intro" level (Gol and Maia) next to
   // misty with display mode special, so it never draws a background and was never loaded.
+  // (AI-assisted) A level whose load failed is loaded again by retry_failed_loads (when the heap
+  // has room for it, at most a second after the levels unloaded here made it).
   for (auto& n : names) {
-    if (n.empty() || m_levels.count(n) || m_missing.count(n) ||
+    if (n.empty() || m_levels.count(n) || m_missing.count(n) || m_failed.count(n) ||
         std::find(m_pending_loads.begin(), m_pending_loads.end(), n) != m_pending_loads.end()) {
       continue;
     }

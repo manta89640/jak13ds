@@ -46,7 +46,11 @@ class SFXBlock : public SoundBank {
   std::map<std::string, u32> Names;
   std::unique_ptr<u8[]> SampleData;
 
-  static SFXBlock* ReadBlock(std::span<u8> bank_data, std::span<u8> samples);
+  // (AI-assisted) owner: the buffer `samples` is in. If given, the block keeps it (SampleData)
+  // and uses the samples where they are, instead of a copy.
+  static SFXBlock* ReadBlock(std::span<u8> bank_data,
+                             std::span<u8> samples,
+                             std::unique_ptr<u8[]>* owner = nullptr);
 
   std::optional<std::unique_ptr<SoundHandler>> MakeHandler(VoiceManager& vm,
                                                            u32 sound_id,

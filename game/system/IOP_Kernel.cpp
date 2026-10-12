@@ -1,6 +1,8 @@
 #include "IOP_Kernel.h"
 
+#include <algorithm>
 #include <cstring>
+#include <string>
 
 #include "common/global_profiler/GlobalProfiler.h"
 #include "common/log/log.h"
@@ -29,6 +31,72 @@ void IopThread::functionWrapper() {
     iop::ExitThread();
   }
 }
+
+#ifdef __3DS__
+void IopThread::fill_stack() {
+  if (thread) {
+    u32* w = (u32*)((u8*)thread + kStackContextBytes);
+    const u32 n = (kStackSize - kStackContextBytes) / 4;
+    for (u32 i = 0; i < n; i++) {
+      w[i] = kStackPattern;
+    }
+  }
+}
+
+u32 IopThread::stack_used() const {
+  if (!thread) {
+    return 0;
+  }
+  const u32* w = (const u32*)((const u8*)thread + kStackContextBytes);
+  const u32 n = (kStackSize - kStackContextBytes) / 4;
+  u32 i = 0;
+  while (i < n && w[i] == kStackPattern) {
+    i++;
+  }
+  return (n - i) * 4;
+}
+
+// (AI-assisted) every 10 s: one line with every thread's stack use, the first time and when one
+// went 4 KB deeper than last logged (a warning past half of the stack)
+void IOP_Kernel::check_stacks() {
+  const auto now = time_point_cast<microseconds>(steady_clock::now());
+  if (now - m_stack_check_time < seconds(10)) {
+    return;
+  }
+  m_stack_check_time = now;
+  bool grew = false, deep = false;
+  u32 used[64];
+  const size_t n = std::min<size_t>(threads.size(), 64);
+  for (size_t i = 0; i < n; i++) {
+    auto& t = threads[i];
+    if (!t.function) {
+      used[i] = 0;  // the null thread never runs
+      continue;
+    }
+    used[i] = t.stack_used();
+    grew |= !t.stack_logged || used[i] >= t.stack_logged + 4 * 1024;
+    deep |= used[i] > IopThread::kStackSize / 2;
+  }
+  if (!grew) {
+    return;
+  }
+  std::string line;
+  for (size_t i = 0; i < n; i++) {
+    auto& t = threads[i];
+    if (!t.function) {
+      continue;
+    }
+    t.stack_logged = std::max<u32>(used[i], 1);
+    line += fmt::format(" {} {:.1f}", t.name, used[i] / 1024.0);
+  }
+  if (deep) {
+    lg::warn("[iop] thread stacks used (KB of {} KB, over half!):{}", IopThread::kStackSize / 1024,
+             line);
+  } else {
+    lg::info("[iop] thread stacks used (KB of {} KB):{}", IopThread::kStackSize / 1024, line);
+  }
+}
+#endif
 
 IOP_Kernel::IOP_Kernel() {
   // this ugly hack
@@ -491,6 +559,7 @@ std::optional<time_stamp> IOP_Kernel::dispatch() {
 
   // printf("[IOP Kernel] No runnable threads\n");
 #ifdef __3DS__
+  check_stacks();
   kperf::add_thread(kperf::Thread::IOP, kperf::ticks() - t_start, 1);
   // (AI-assisted) No sleep here: the IOP waits in wait_run_iop, and only the overlord init loop
   // polls dispatch() (runtime.cpp sleeps there). A sleep in every dispatch delayed every IOP

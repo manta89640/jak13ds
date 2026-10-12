@@ -16,7 +16,37 @@
 
 namespace c3l {
 
-Reader::Reader(const char* path, size_t window) : m_f(fopen(path, "rb")), m_window_cap(window) {
+Reader::Buffers::~Buffers() {
+  free_zstd_ctx(zstd);
+}
+
+void Reader::Buffers::reserve(size_t window_size, size_t max_block) {
+  const size_t w = window_size ? window_size : kWindow;
+  for (auto& b : window) {
+    if (b.size() < w) {
+      b.resize(w);
+    }
+    if (!window_size) {
+      break;  // (stdio mode: one window)
+    }
+  }
+  for (auto& c : cache) {
+    if (c.size() < max_block) {
+      c.resize(max_block);
+    }
+    if (!window_size) {
+      break;
+    }
+  }
+}
+
+Reader::Reader(const char* path, size_t window, Buffers* buffers)
+    : m_f(fopen(path, "rb")), m_window_cap(window) {
+  if (buffers) {
+    m_bufs = buffers;
+  }
+  m_windows[0].buf = &m_bufs->window[0];
+  m_windows[1].buf = &m_bufs->window[1];
   if (!m_f) {
     return;
   }
@@ -63,14 +93,16 @@ Reader::Reader(const char* path, size_t window) : m_f(fopen(path, "rb")), m_wind
     m_error = true;
   }
   m_raw_size = dir.raw_size;
-  m_cache.resize(dir.max_block);
+  m_max_block = dir.max_block;
+  if (m_bufs->cache[0].size() < dir.max_block) {
+    m_bufs->cache[0].resize(dir.max_block);
+  }
 }
 
 Reader::~Reader() {
   if (m_f) {
     fclose(m_f);
   }
-  free_zstd_ctx(m_zstd);
 }
 
 bool Reader::file_read(long offset, void* dst, size_t bytes) {
@@ -101,7 +133,7 @@ const uint8_t* Reader::in_window(long offset, size_t bytes) {
   for (auto& w : m_windows) {
     if (w.size && offset >= w.offset && offset + (long)bytes <= w.offset + (long)w.size) {
       w.used = ++m_window_uses;
-      return w.buf.data() + (offset - w.offset);
+      return w.buf->data() + (offset - w.offset);
     }
   }
   return nullptr;
@@ -120,17 +152,17 @@ const uint8_t* Reader::load_window(long offset, size_t want) {
     }
     w = behind ? behind : (m_windows[1].used < m_windows[0].used ? &m_windows[1] : &m_windows[0]);
   }
-  if (w->buf.size() < want) {
-    w->buf.resize(want);
+  if (w->buf->size() < want) {
+    w->buf->resize(want);
   }
   w->size = 0;
-  if (!file_read(offset, w->buf.data(), want)) {
+  if (!file_read(offset, w->buf->data(), want)) {
     return nullptr;
   }
   w->offset = offset;
   w->size = want;
   w->used = ++m_window_uses;
-  return w->buf.data();
+  return w->buf->data();
 }
 
 bool Reader::raw_read(long offset, void* dst, size_t bytes) {
@@ -232,13 +264,15 @@ bool Reader::read_block(size_t bi, uint32_t offset, uint8_t* dst, size_t bytes) 
     }
     return raw_read(start, dst, bytes);  // (AI-assisted) window mode: through the windows
   }
+  std::vector<uint8_t>& cache0 = m_bufs->cache[0];
+  std::vector<uint8_t>& cache1 = m_bufs->cache[1];
   if (!whole && m_cache_block == (long)bi) {
-    memcpy(dst, m_cache.data() + (offset - b.raw_offset), bytes);
+    memcpy(dst, cache0.data() + (offset - b.raw_offset), bytes);
     m_cache2_newer = false;
     return true;
   }
   if (!whole && m_window_cap && m_cache2_block == (long)bi) {
-    memcpy(dst, m_cache2.data() + (offset - b.raw_offset), bytes);
+    memcpy(dst, cache1.data() + (offset - b.raw_offset), bytes);
     m_cache2_newer = true;
     return true;
   }
@@ -248,14 +282,14 @@ bool Reader::read_block(size_t bi, uint32_t offset, uint8_t* dst, size_t bytes) 
   }
   // (AI-assisted) window mode: into the cache used longest ago
   const bool second = !whole && m_window_cap && !m_cache2_newer;
-  if (second && m_cache2.size() < m_cache.size()) {
-    m_cache2.resize(m_cache.size());
+  if (second && cache1.size() < m_max_block) {
+    cache1.resize(m_max_block);
   }
-  std::vector<uint8_t>& cache = second ? m_cache2 : m_cache;
+  std::vector<uint8_t>& cache = second ? cache1 : cache0;
   long& cache_block = second ? m_cache2_block : m_cache_block;
   uint8_t* out = whole ? dst : cache.data();
   Timer t;
-  const bool ok = decode_block(b.codec(), src, b.packed_size(), out, b.raw_size, &m_zstd);
+  const bool ok = decode_block(b.codec(), src, b.packed_size(), out, b.raw_size, &m_bufs->zstd);
   decode_ms += t.getMs();
   if (!ok) {
     m_error = true;

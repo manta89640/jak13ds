@@ -261,12 +261,18 @@ void CtrMercRenderer::flush_opaque() {
   for (u32 i = 0; i < n; i++) {
     m_q_order[i] = i;
   }
-  // by model (in the order they came), then draw; stable: the instances in the order they came
-  std::stable_sort(m_q_order.begin(), m_q_order.end(), [&](u32 a, u32 b) {
+  // by model (in the order they came), then draw, then the instances in the order they came (the
+  // queue index: the order std::stable_sort gave, without its buffer from the heap every frame)
+  std::sort(m_q_order.begin(), m_q_order.end(), [&](u32 a, u32 b) {
     const auto& qa = m_q_opaque[a];
     const auto& qb = m_q_opaque[b];
-    return qa.model_rank != qb.model_rank ? qa.model_rank < qb.model_rank
-                                          : qa.draw_index < qb.draw_index;
+    if (qa.model_rank != qb.model_rank) {
+      return qa.model_rank < qb.model_rank;
+    }
+    if (qa.draw_index != qb.draw_index) {
+      return qa.draw_index < qb.draw_index;
+    }
+    return a < b;
   });
   const float* d = m_qdata.data();
   for (u32 i : m_q_order) {

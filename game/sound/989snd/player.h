@@ -57,6 +57,8 @@ class Player {
   // player& operator=(player&& other) noexcept = default;
 
   BankHandle LoadBank(std::span<u8> bank);
+  // (AI-assisted) bank is in owner's buffer, which the bank keeps (Loader::ParseBank)
+  BankHandle LoadBank(std::span<u8> bank, std::unique_ptr<u8[]> owner);
 
   u32 PlaySound(BankHandle bank, u32 sound, s32 vol, s32 pan, s32 pm, s32 pb);
   u32 PlaySoundByName(BankHandle bank,

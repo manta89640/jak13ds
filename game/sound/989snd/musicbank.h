@@ -62,9 +62,11 @@ class MusicBank : public SoundBank {
   std::unique_ptr<u8[]> SeqData;
   std::variant<Midi, MultiMidi> MidiData;
 
+  // (AI-assisted) owner: as SFXBlock::ReadBlock
   static MusicBank* ReadBank(std::span<u8> bank_data,
                              std::span<u8> samples,
-                             std::span<u8> midi_data);
+                             std::span<u8> midi_data,
+                             std::unique_ptr<u8[]>* owner = nullptr);
 
   std::optional<std::unique_ptr<SoundHandler>> MakeHandler(VoiceManager& vm,
                                                            u32 sound_id,
