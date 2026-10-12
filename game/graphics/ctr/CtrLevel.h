@@ -66,10 +66,8 @@ struct CtrLevelData {
   // (AI-assisted) per draw: every vertex it uses has alpha 0x80 (CTR_TCC_ALPHA80, fog_alpha), from
   // the vertices read at load (0 for chunks made later: the fog ramp path, which is always right)
   std::vector<u8> draw_alpha80;
-  // (AI-assisted) c3l v15 kDrawAlphaTestDropped / kDrawBlendDropped draws, and the state config
-  // opaque_alpha = off gives them back (the alpha test / blending): draw_level swaps
-  // draw_states[di] with it when the setting differs from opaque_alpha_applied (gpu_profile = ab)
-  std::vector<std::pair<u32, ctr_draw_state>> alpha_swap;
+  // (AI-assisted) config opaque_alpha as the c3l v15 kDrawAlphaTestDropped / kDrawBlendDropped draws'
+  // states have it (draw_level changes them when the setting changes: gpu_profile = ab)
   bool opaque_alpha_applied = true;
   // made at load: the draws in drawing order, so a frame needs no sort. sorted_draws: the draws
   // whose order doesn't matter by (sort key, chunk, draw), then ordered_draws in chunk order.
