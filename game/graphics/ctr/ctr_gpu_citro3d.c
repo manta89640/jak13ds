@@ -107,6 +107,7 @@ void ctr_gpu_set_new_shaders(int on) {
   s_new_shaders = on;
 }
 void ctr_thread_install_crash_handler(void); /* platform/3ds/port */
+static void gl_to_pica_check(void); /* (AI-assisted) */
 
 /* (AI-assisted) hardware hang bisect: where the render thread is (ctr_gpu_diag_stage) and how
  * many frames it finished, logged once per second for the first 60 s by a watchdog thread */
@@ -327,7 +328,7 @@ static struct {
   DVLB_s* opt_dvlb[OPT_DVLBS]; /* (AI-assisted) set 2's own shbins (shader_opt) */
   /* (AI-assisted) shader_groups: the group whose uniforms are in the GPU's registers (0: none or
    * unknown), and which of them are valid there (GRP_U_*); skin_bl_valid: the skin program's bones
-   * and lights (last_skin_bones / _lights) are in its registers */
+   * and lights (last_skin_bones_id / last_skin_lights) are in its registers */
   int grp_cur;
   u32 grp_valid;
   int skin_bl_valid;
@@ -338,6 +339,12 @@ static struct {
   DVLB_s* mesh_fa_dvlb;
   u32 fog_abgr; /* the fog color as a combiner constant (fog_alpha's stage 1), R in the low byte */
   float fog0[4], fog1[4]; /* see ctr_gpu_set_mesh_fog, mesh_fog_uniforms */
+  /* (AI-assisted) changes with fog0 (never 0): ctr_mesh_matrix::fog_gen; and the inputs of the
+   * last ctr_gpu_set_mesh_fog that changed the uniforms (fog_in_valid: there was one) */
+  uint32_t fog_gen;
+  int fog_in_valid, fog_in_mode;
+  const void* fog_in_ps;
+  float fog_in0[4], fog_in1[4];
   int fog_df; /* (AI-assisted) the game fog is a constant 0: only the draw distance fog is left */
   /* (AI-assisted) the mesh program's fog uniforms: fog0/fog1 with the new shaders, the game's
    * values unchanged with the Oct 2 ones (new_shaders = off; the ocean shader keeps fog0/fog1) */
@@ -381,14 +388,14 @@ static struct {
   float last_skin_clip[16];
   float last_skin_lights[28];
   int last_skin_palette_count;
-  float last_skin_bones[CTR_MAX_PALETTE * 12];
+  uint32_t last_skin_bones_id; /* (AI-assisted) the palette's bones_id (0: none) */
   /* (AI-assisted) cmd_dedup: the last ctr_gpu_draw_skinned_env's matrix and bones (env_valid: still
    * in the env program's registers) */
   int env_valid;
   int last_env_palette_count;
   float last_env_clip[16];
   float last_env_fade[3];
-  float last_env_bones[CTR_MAX_PALETTE * 12];
+  uint32_t last_env_bones_id; /* (AI-assisted) as last_skin_bones_id */
   C3D_Mtx gl_to_pica;
   MeshSlot meshes[MAX_MESHES];
   int pending_mesh_delete[MAX_MESHES];
@@ -1003,6 +1010,7 @@ static void setup_projection(void) {
   g.gl_to_pica.r[3].y = 0.0f;
   g.gl_to_pica.r[3].z = 0.0f;
   g.gl_to_pica.r[3].w = 1.0f;
+  gl_to_pica_check();
 
   /* (AI-assisted) the ocean's GS vertices -> g.projection's space like CtrDirect: x = (X / 16 -
    * 2048) / 256, y = (2048 - Y / 16) / 112 (Jak 1's 512 x 224 field), z = Z / (2^24 - 1) */
@@ -1324,6 +1332,8 @@ int ctr_gpu_init(void) {
   g.fog1[3] = 0.0f;
   memcpy(g.mfog0, g.fog0, sizeof(g.mfog0));
   memcpy(g.mfog1, g.fog1, sizeof(g.mfog1));
+  g.fog_gen = 1; /* (AI-assisted) */
+  g.fog_in_valid = 0;
   if (mesh_mode() != 1) {
     /* the Oct 2 shader's form: hvdf.w, fog min, fog max, -1/255; w scale, start, 1 / range */
     const float f0[4] = {0.0f, 255.0f, 255.0f, -1.0f / 255.0f}, f1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
@@ -2112,6 +2122,9 @@ void ctr_gpu_set_skin_clip_f24(int on) {
 }
 void ctr_gpu_set_skin_rows_f24(int on) {
   s_skin_f24 = on ? 1 : 0;
+}
+int ctr_gpu_skin_rows_f24_on(void) {
+  return s_skin_f24;
 }
 
 /* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
@@ -4848,11 +4861,45 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   g.last_state_valid = 0;
 }
 
+/* (AI-assisted) the vertices of the last ctr_gpu_draw_quads in g.vbuf (ctr_gpu_draw_quads_again):
+ * its first quad's offset, the quads written (one run: n quads are 64 n bytes, no padding between
+ * its batches) and the frame */
+static size_t s_lastq_off;
+static int s_lastq_quads, s_lastq_frame = -1;
+
+/* the draw of n <= QUAD_MAX quads whose vertices are at dst in g.vbuf */
+static void draw_quads_at(const ctr_draw_state* state, uint8_t* dst, int n) {
+  use_program(PROG_BASIC);
+  if (use_raw(state)) {
+    apply_state(state, 0, 1);
+    raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
+                      RAW_BUF_FLAGS1(sizeof(ctr_vertex), 3, 0));
+    raw_sync();
+    if (!s_raw.quad_pa) {
+      s_raw.quad_pa = osConvertVirtToPhys(g.quad_indices);
+    }
+    raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
+  } else {
+    raw_vc_flush();
+    apply_state(state, 0, 0);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
+    /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
+    C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
+  }
+  g.cur.draws++;
+  g.cur.triangles += n * 2;
+}
+
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
   SKY_HOOK(state);
+  s_lastq_quads = 0;
   if (!g.ready || !g.in_frame) {
     return;
   }
+  s_lastq_off = g.vbuf_used;
+  s_lastq_frame = g.frame_no;
   while (quad_count > 0) {
     const int n = quad_count > QUAD_MAX ? QUAD_MAX : quad_count;
     const size_t bytes = (size_t)n * 4 * sizeof(ctr_vertex);
@@ -4862,29 +4909,27 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
     uint8_t* dst = g.vbuf + g.vbuf_used;
     memcpy(dst, verts, bytes);
     g.vbuf_used += (bytes + 15) & ~(size_t)15;
-    use_program(PROG_BASIC);
-    if (use_raw(state)) {
-      apply_state(state, 0, 1);
-      raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
-                        RAW_BUF_FLAGS1(sizeof(ctr_vertex), 3, 0));
-      raw_sync();
-      if (!s_raw.quad_pa) {
-        s_raw.quad_pa = osConvertVirtToPhys(g.quad_indices);
-      }
-      raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
-    } else {
-      raw_vc_flush();
-      apply_state(state, 0, 0);
-      C3D_BufInfo* buf = C3D_GetBufInfo();
-      BufInfo_Init(buf);
-      BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
-      /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
-      C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
-    }
-    g.cur.draws++;
-    g.cur.triangles += n * 2;
+    s_lastq_quads += n;
+    draw_quads_at(state, dst, n);
     verts += 4 * n;
     quad_count -= n;
+  }
+}
+
+void ctr_gpu_draw_quads_again(const ctr_draw_state* state) {
+  SKY_HOOK(state);
+  if (!g.ready || !g.in_frame || s_lastq_frame != g.frame_no) {
+    return;
+  }
+  uint8_t* dst = g.vbuf + s_lastq_off;
+  for (int left = s_lastq_quads; left > 0;) {
+    const int n = left > QUAD_MAX ? QUAD_MAX : left;
+    if (!cmd_room()) {
+      return;
+    }
+    draw_quads_at(state, dst, n);
+    dst += (size_t)n * 4 * sizeof(ctr_vertex);
+    left -= n;
   }
 }
 
@@ -5079,7 +5124,24 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
 
 /* ---------------- the screen as a texture ---------------- */
 
-static int copy_screen(float x0, float x1, int part);
+static int copy_screen_body(float x0, float x1, int part);
+
+/* (AI-assisted) measurement only: the CPU time of the screen copies (the command list sent so
+ * far, the copy queued or, without the pipeline, waited for), ctr_gpu_take_screen_copy_ms */
+static u64 s_copy_ticks;
+double ctr_gpu_take_screen_copy_ms(void) {
+  const double ms = (double)s_copy_ticks / (SYSCLOCK_ARM11 / 1000.0);
+  s_copy_ticks = 0;
+  return ms;
+}
+
+static int copy_screen(float x0, float x1, int part) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
+  const u64 t0 = svcGetSystemTick();
+  const int tex = copy_screen_body(x0, x1, part);
+  s_copy_ticks += svcGetSystemTick() - t0;
+  return tex;
+}
 
 int ctr_gpu_copy_screen(void) {
   return copy_screen(-1.0f, 1.0f, 0);
@@ -5089,8 +5151,7 @@ int ctr_gpu_copy_screen_part(float x0, float x1) {
   return copy_screen(x0, x1, 1);
 }
 
-static int copy_screen(float x0, float x1, int part) {
-  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
+static int copy_screen_body(float x0, float x1, int part) {
   if (!g.ready || !g.in_frame) {
     return -1;
   }
@@ -5340,18 +5401,57 @@ void ctr_gpu_mesh_delete(int mesh) {
   ctr_linear_unlock();
 }
 
-void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
-  /* final = gl_to_pica * clip, in C3D_Mtx layout (components reversed) */
-  C3D_Mtx m;
+/* (AI-assisted) gl_to_pica * clip (clip row-major), in C3D_Mtx layout (components reversed): the
+ * level chunks' and merc models' matrices. The generic product sums from +0.0f in k order; with
+ * the fixed g.gl_to_pica (rows (0 1 0 0), (-1 0 0 0), (0 0 -1/2 -1/2), (0 0 0 1); zeros of either
+ * sign) each element is one or two of clip's with the same rounding: a zero product leaves a
+ * nonzero sum as it is and the +0.0f sum at +0 (so the 0.0f + stays: it makes a -0 element +0, and
+ * float24 has a sign bit), x * 1 and x * -1 are exact, and the two products of row 2 are added in
+ * the same order (VFPv2's VMLA rounds the product and the sum separately: no fused add). Clip
+ * matrices with an infinity or NaN take the generic product (0 * inf is NaN there). */
+static int s_gl_to_pica_fixed;
+static void gl_to_pica_check(void) {
+  static const float k[4][4] = {{0, 1, 0, 0}, {-1, 0, 0, 0}, {0, 0, -0.5f, -0.5f}, {0, 0, 0, 1}};
+  int ok = 1;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      ok &= g.gl_to_pica.r[r].c[3 - c] == k[r][c]; /* (== : -0 and +0 alike) */
+    }
+  }
+  s_gl_to_pica_fixed = ok;
+  printf("[ctr] gl_to_pica: %s\n", ok ? "the fixed form" : "not the fixed form: generic products");
+}
+static void gl_to_pica_mul(const float clip[16], C3D_Mtx* m) {
+  u32 nonfinite = 0;
+  for (int i = 0; i < 16; i++) {
+    u32 w;
+    memcpy(&w, &clip[i], 4);
+    nonfinite |= (w & 0x7f800000u) == 0x7f800000u;
+  }
+  if (s_gl_to_pica_fixed && !nonfinite) {
+    for (int c = 0; c < 4; c++) {
+      m->r[0].c[3 - c] = 0.0f + clip[4 + c];
+      m->r[1].c[3 - c] = 0.0f - clip[c];
+      m->r[2].c[3 - c] = (0.0f + -0.5f * clip[8 + c]) + -0.5f * clip[12 + c];
+      m->r[3].c[3 - c] = 0.0f + clip[12 + c];
+    }
+    return;
+  }
   for (int r = 0; r < 4; r++) {
     for (int c = 0; c < 4; c++) {
       float acc = 0.0f;
       for (int k = 0; k < 4; k++) {
         acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
       }
-      m.r[r].c[3 - c] = acc;
+      m->r[r].c[3 - c] = acc;
     }
   }
+}
+
+void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
+  /* final = gl_to_pica * clip, in C3D_Mtx layout (components reversed) */
+  C3D_Mtx m;
+  gl_to_pica_mul(clip, &m);
   _Static_assert(sizeof(C3D_Mtx) == offsetof(ctr_mesh_matrix, f24), "matrix layout");
   memcpy(out->m, &m, sizeof(m));
   /* (AI-assisted) and as float24 uniform words for the raw draws (12 words instead of 16) */
@@ -5360,6 +5460,7 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
   }
   static uint32_t s_next_id;
   out->id = ++s_next_id ? s_next_id : ++s_next_id; /* never 0 */
+  out->fog_gen = 0;
 }
 
 /* (AI-assisted) shader_opt (ctr_mesh_opt.v.pica): the fog rows clip[4], clip[5] of a matrix (C3D_Mtx
@@ -5407,14 +5508,18 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
       g.last_clip_id = matrix->id;
       if (g.ps->opt) {
         /* (AI-assisted) shader_opt: the matrix and its fog rows in one burst (the draw distance
-         * fog's only with the game fog off: the df programs don't read the other) */
-        u32 v[18];
-        memcpy(v, matrix->f24, sizeof(matrix->f24));
-        float rows[8];
-        mesh_fog_rows(matrix->m, rows);
-        raw_pack_f24(rows, v + 12);
-        raw_pack_f24(rows + 4, v + 15);
-        raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, v, df ? 15 : 18, 0));
+         * fog's only with the game fog off: the df programs don't read the other). The rows are
+         * made once per matrix and fog (fog_gen): a chunk's matrix is uploaded again at every
+         * switch between chunks (the draws are sorted by texture) */
+        ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
+        if (mm->fog_gen != g.fog_gen) {
+          float rows[8];
+          mesh_fog_rows(matrix->m, rows);
+          raw_pack_f24(rows, mm->f24 + 12);
+          raw_pack_f24(rows + 4, mm->f24 + 15);
+          mm->fog_gen = g.fog_gen;
+        }
+        raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, df ? 15 : 18, 0));
       } else {
         raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 12, 0));
       }
@@ -5688,15 +5793,7 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
 
 /* (AI-assisted) clip (row-major, GL clip space) -> PICA clip space, in C3D_Mtx layout */
 static void skin_clip_matrix(const float clip[16], C3D_Mtx* m) {
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 4; c++) {
-      float acc = 0.0f;
-      for (int k = 0; k < 4; k++) {
-        acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
-      }
-      m->r[r].c[3 - c] = acc;
-    }
-  }
+  gl_to_pica_mul(clip, m);
 }
 
 /* (AI-assisted) shader_opt (ctr_skin_opt / ctr_skin_env_opt.v.pica): the weights go in unscaled
@@ -5748,25 +5845,19 @@ static void raw_skin_rows(const int* locs, const float* bones, int palette_count
   s_raw.vs_changed = 1;
 }
 
-/* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24) */
-static void raw_skin_rows_f24(const int* locs, const float* bones, int palette_count) {
+/* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24),
+ * from the words ctr_gpu_pack_skin_rows_f24 made: per row one config write and one burst (first
+ * word, header, the rest, padding: see raw_n). The skin and shine programs' bursts differ only in
+ * the config word (locs). */
+static void raw_skin_rows_f24(const int* locs, const u32* words, int palette_count) {
   u32* p = raw_ptr();
   const u32 n = 3u * (u32)palette_count;
   for (int row = 0; row < 3; row++) {
     p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)locs[row]); /* bit 31 clear: f24 */
-    /* the burst: first word, header, the rest, padding (see raw_n) */
-    u32* d = p;
-    const float* src = bones + 4 * row;
-    for (int b = 0; b < palette_count; b++, src += 12) {
-      const float v[4] = {src[3], src[2], src[1], src[0]}; /* C3D_FVec order: w z y x */
-      u32 w3[3];
-      raw_pack_f24(v, w3);
-      for (u32 i = 0; i < 3; i++) {
-        const u32 k = 3u * (u32)b + i;
-        d[k ? k + 1 : 0] = w3[i];
-      }
-    }
-    d[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
+    const u32* src = words + n * (u32)row;
+    p[0] = src[0];
+    p[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
+    memcpy(p + 2, src + 1, 4u * (n - 1));
     p += n + 1;
     if (!(n & 1)) {
       *p++ = 0;
@@ -5776,9 +5867,29 @@ static void raw_skin_rows_f24(const int* locs, const float* bones, int palette_c
   s_raw.vs_changed = 1;
 }
 
+void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out) {
+  for (int row = 0; row < 3; row++) {
+    const float* src = bones + 4 * row;
+    for (int b = 0; b < palette_count; b++, src += 12, out += 3) {
+      const float v[4] = {src[3], src[2], src[1], src[0]}; /* C3D_FVec order: w z y x */
+      raw_pack_f24(v, out);
+    }
+  }
+}
+
+/* (AI-assisted) the bones as skin_rows_f24 words: the caller's, else made here */
+static const u32* skin_rows_words(const float* bones, const uint32_t* bones_f24, int palette_count,
+                                  u32* tmp) {
+  if (bones_f24) {
+    return bones_f24;
+  }
+  ctr_gpu_pack_skin_rows_f24(bones, palette_count, tmp);
+  return tmp;
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
-                          int palette_count, const float lights[28], int mesh, int first_index,
-                          int index_count) {
+                          int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                          const float lights[28], int mesh, int first_index, int index_count) {
   SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
@@ -5824,12 +5935,15 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;
   }
-  /* bones: the draws of a model with at most CTR_MAX_PALETTE bones all use the same palette */
-  const size_t bone_bytes = sizeof(float) * 12 * (size_t)palette_count;
-  if (!g.skin_bl_valid || g.last_skin_palette_count != palette_count ||
-      !words_equal(g.last_skin_bones, bones, 12u * (unsigned)palette_count)) {
+  /* bones: the draws of a model with at most CTR_MAX_PALETTE bones all use the same palette.
+   * (AI-assisted) Compared by the caller's palette number (bones_id), not by the 288 words: a
+   * palette is never changed under its number */
+  if (!g.skin_bl_valid || g.last_skin_palette_count != palette_count || !bones_id ||
+      g.last_skin_bones_id != bones_id) {
     if (raw && palette_count > 0 && s_skin_f24) {
-      raw_skin_rows_f24(g.ps->uloc_skin_rows, bones, palette_count);
+      u32 tmp[9 * CTR_MAX_PALETTE];
+      raw_skin_rows_f24(g.ps->uloc_skin_rows,
+                        skin_rows_words(bones, bones_f24, palette_count, tmp), palette_count);
     } else if (raw && palette_count > 0) {
       raw_skin_rows(g.ps->uloc_skin_rows, bones, palette_count);
     } else {
@@ -5846,7 +5960,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       }
     }
     g.last_skin_palette_count = palette_count;
-    memcpy(g.last_skin_bones, bones, bone_bytes);
+    g.last_skin_bones_id = bones_id;
   }
   if (!same_lights) {
     /* (AI-assisted) shader_opt: the light colors and ambient times the vertex color scale */
@@ -5904,8 +6018,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
 }
 
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
-                              int palette_count, const float fade[4], int mesh, int first_index,
-                              int index_count) {
+                              int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                              const float fade[4], int mesh, int first_index, int index_count) {
   SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
@@ -5961,12 +6075,14 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     }
     memcpy(g.last_env_clip, clip, sizeof(g.last_env_clip));
   }
-  if (dd && g.last_env_palette_count == palette_count &&
-      words_equal(g.last_env_bones, bones, 12u * (unsigned)palette_count)) {
+  if (dd && g.last_env_palette_count == palette_count && bones_id &&
+      g.last_env_bones_id == bones_id) {
     g.cur.cmd_dedup_words += (u32)(12 * palette_count) + 6;
   } else {
     if (raw && palette_count > 0 && s_skin_f24) {
-      raw_skin_rows_f24(g.ps->uloc_env_rows, bones, palette_count);
+      u32 tmp[9 * CTR_MAX_PALETTE];
+      raw_skin_rows_f24(g.ps->uloc_env_rows,
+                        skin_rows_words(bones, bones_f24, palette_count, tmp), palette_count);
     } else if (raw && palette_count > 0) {
       raw_skin_rows(g.ps->uloc_env_rows, bones, palette_count);
     } else {
@@ -5982,7 +6098,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
         }
       }
     }
-    memcpy(g.last_env_bones, bones, sizeof(float) * 12 * (size_t)palette_count);
+    g.last_env_bones_id = bones_id;
     g.last_env_palette_count = palette_count;
   }
   /* the texture stage multiplies merc colors by 4: half the fade gives texture * fade * 2 */
@@ -6147,6 +6263,21 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
 
 void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
+  /* (AI-assisted) the same inputs as the last call that set the uniforms (the level renderers of
+   * one level, each frame): its values are in the registers (or go in at the next use of their
+   * program, use_program), so only the ramp color, which ctr_gpu_ocean_full_draw also sets. No
+   * new matrix upload for the fog rows, no uniform update. */
+  if (g.fog_in_valid && g.fog_in_ps == (const void*)g.ps && g.fog_in_mode == mesh_mode() &&
+      words_equal(g.fog_in0, fog0_in, 4) && words_equal(g.fog_in1, fog1, 4)) {
+    fog_ramp_color(r, gr, b);
+    return;
+  }
+  g.fog_in_valid = 1;
+  g.fog_in_ps = g.ps;
+  g.fog_in_mode = mesh_mode();
+  memcpy(g.fog_in0, fog0_in, sizeof(g.fog_in0));
+  memcpy(g.fog_in1, fog1, sizeof(g.fog_in1));
+  g.fog_gen = g.fog_gen + 1 ? g.fog_gen + 1 : 1;
   /* (AI-assisted) the game fog's clamps kept in 0..255: its amount stays in 0..1 (fog_alpha's
    * shaders only clamp at 1; the fog ramp gave the same for amounts outside 0..1) */
   float fog0[4];

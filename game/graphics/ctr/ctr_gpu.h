@@ -215,11 +215,17 @@ int ctr_gpu_copy_screen(void);
  * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
  * keep what an earlier copy left: only read the screen in x0..x1. */
 int ctr_gpu_copy_screen_part(float x0, float x1);
+/* (AI-assisted) measurement: the CPU time spent in the screen copies since the last call (ms; the
+ * draws so far sent to the GPU, then the copy), part of the distorter's build time */
+double ctr_gpu_take_screen_copy_ms(void);
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
 
 /* Draw quads: 4 vertices each, triangles (0, 1, 3) and (3, 1, 2) (a strip in the order 0 1 3 2).
  * A third fewer vertices than ctr_gpu_draw for sprites. */
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count);
+/* (AI-assisted) The quads of the last ctr_gpu_draw_quads again with another state (their vertices
+ * stay where that call put them: no second copy), right after it. */
+void ctr_gpu_draw_quads_again(const ctr_draw_state* state);
 /* (AI-assisted) Draw a triangle strip: count vertices, count - 2 triangles (k - 2, k - 1, k).
  * Several strips go in one draw joined by repeating the last vertex of one and the first of the
  * next (the triangles in between have no area). State like ctr_gpu_draw. */
@@ -407,7 +413,8 @@ void ctr_gpu_set_shader_modes(int basic, int mesh);
 void ctr_gpu_set_shader_skin(int skin);
 int ctr_gpu_asm_tex(void);
 /* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
- * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start), so a hang shows the
+ * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start: config.ini
+ * render_watchdog), so a hang shows the
  * stage it stopped in */
 void ctr_gpu_diag_stage(const char* stage);
 void ctr_gpu_diag_start(void);
@@ -478,26 +485,39 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size);
  * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.
  * tint: multiplies the final color (lighting approximation), 0..1. */
 /* lights: 7 vec4 like merc2.vert: light direction rows 0-2 (light_dir0/1/2), light colors 0-2,
- * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal). */
+ * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal).
+ * (AI-assisted) bones_id: a number new for every palette the caller makes (never reused for other
+ * contents while it may still be the last one drawn), so draws compare it instead of the bones; 0:
+ * unknown, uploaded at every draw. bones_f24: NULL, or the bones as ctr_gpu_pack_skin_rows_f24
+ * made them (used with skin_rows_f24 instead of converting them again). */
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
-                          int palette_count, const float lights[28], int mesh, int first_index,
-                          int index_count);
+                          int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                          const float lights[28], int mesh, int first_index, int index_count);
+/* (AI-assisted) skin_rows_f24 is on (the draws take bones_f24), and the float24 words of a palette
+ * for them: 9 words per bone, row by row (row r of bone b at out[3 * (r * palette_count + b)]),
+ * palette_count <= CTR_MAX_PALETTE. */
+int ctr_gpu_skin_rows_f24_on(void);
+void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out);
 
 /* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space
  * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, GS value / 255 as
  * in Merc2, so 0x80 = texture x 1). */
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
-                              int palette_count, const float fade[4], int mesh, int first_index,
-                              int index_count);
+                              int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                              const float fade[4], int mesh, int first_index, int index_count);
 
 /* The same with the matrix converted once (ctr_gpu_prepare_mesh_matrix) for many draws: the level
  * renderer draws chunks interleaved (sorted by texture), so the conversion would be redone at
  * every chunk change. */
 typedef struct {
   float m[16];
-  uint32_t f24[12]; /* (AI-assisted) m as float24 uniform words (3DS raw draws) */
+  /* (AI-assisted) m as float24 uniform words (3DS raw draws), then shader_opt's two fog rows: 6
+   * words the draws make at the first upload with the fog of fog_gen (a cache in the matrix: a
+   * prepared matrix is never in const memory) */
+  uint32_t f24[18];
   uint32_t id;      /* (AI-assisted) new for every prepare: draws compare it, not m (so a
                      * prepared matrix must not be changed, only prepared again) */
+  uint32_t fog_gen; /* (AI-assisted) the fog f24[12..17] were made with (0: not made) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 /* (AI-assisted) config.ini fog_stage_skip: the next ctr_gpu_draw_mesh(_prepared) draws are entirely

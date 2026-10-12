@@ -205,6 +205,8 @@ CtrSettings load() {
       s.gpu_profile = !s.gpu_profile_ab && parse_bool(v);
     } else if (key == "gpu_counters") {
       s.gpu_counters = parse_bool(v);
+    } else if (key == "render_watchdog") {
+      s.render_watchdog = parse_bool(v);  // (AI-assisted)
     } else if (key == "stats_period") {
       s.stats_period = std::clamp(f, 1.f, 600.f);  // (AI-assisted)
     } else if (key == "gpu_perflog") {

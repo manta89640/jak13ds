@@ -418,6 +418,7 @@ void CtrLevels::publish(const std::string& name, std::unique_ptr<CtrLevelData> l
   lev->last_used_frame = frame;
   m_levels[name] = std::move(lev);
   rebuild_merc_index();
+  bump_set_generation();  // (AI-assisted)
 }
 
 namespace {
@@ -591,6 +592,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
                           : nullptr;
   if (lev) {
     (d.job.detail ? lev->detail_requested : lev->repair_requested) = false;
+    bump_set_generation();  // (AI-assisted)
   }
   if (!lev || (d.job.detail && d.result != LoadResult::LOADED)) {
     delete_parts(d);
@@ -652,6 +654,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
 }
 
 void CtrLevels::unload_detail(CtrLevelData& lev) {
+  bump_set_generation();  // (AI-assisted)
   int freed = 0;
   for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
     // (AI-assisted) what far mode draws stays (far_chunk)
@@ -1813,6 +1816,7 @@ void CtrLevels::retry_failed_loads(u64 frame) {
 }
 
 void CtrLevels::unload(CtrLevelData& lev) {
+  bump_set_generation();  // (AI-assisted)
   for (int t : lev.textures) {
     ctr_gpu_tex_delete(t);
   }
@@ -1935,6 +1939,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       unload(*it->second);
       it = m_levels.erase(it);
       rebuild_merc_index();
+      bump_set_generation();  // (AI-assisted)
       changed = true;
     } else {
       ++it;
@@ -2290,8 +2295,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const float vista_dist = settings.vista_distance * 4096.f;
   constexpr float kDetailMargin = 50.f * 4096.f;
   m_levels->loaded(&m_loaded);
+  // (AI-assisted) lowres_vista: outside_detail's answers, per chunk, for this set of loaded levels
+  if (lev.outside_gen != m_levels->set_generation() ||
+      lev.outside_cache.size() != lev.chunks.size()) {
+    lev.outside_gen = m_levels->set_generation();
+    lev.outside_cache.assign(lev.chunks.size(), 0);
+  }
   // (AI-assisted) fog_stage_skip
   const bool fog_skip = settings.fog_stage_skip;
+  const bool early_depth = settings.early_depth;  // (AI-assisted) the band order below
   const float pzw = std::abs(cam.perspective[2][3]);
   constexpr float kNoFog = 0.5f / 255.f;
   float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
@@ -2439,7 +2451,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       vc.chunk = (u32)ci;
       vc.partly = partly;
       vc.vista = vista_chunk;
-      {
+      vc.band = 0;
+      vc.nofog = false;
+      // (AI-assisted) only read with early_depth (band) or fog_stage_skip (nofog)
+      if (early_depth || (fog_skip && !vista_chunk)) {
         // (AI-assisted) distance band of the chunk's nearest point, for the early depth order
         const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                     dz = ch.bsphere[2] - cam.trans[2];
@@ -2448,7 +2463,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         vc.band = near < 30.f * 4096.f ? 0 : (near < 100.f * 4096.f ? 1 : 2);
         // (AI-assisted) fog_stage_skip: both fogs ~0 at the chunk's farthest point (its depth is at
         // most its distance; w = depth * pzw), the same formulas as the mesh shader
-        vc.nofog = false;
         if (fog_skip && !vista_chunk) {
           const float far_d = dist + ch.bsphere[3];
           const float g = 1.f + fog0[3] * std::clamp(fog0[0] - far_d * pzw, fog0[1], fog0[2]);
@@ -2557,10 +2571,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // (neighbour_vis, chunks with visibility runs), else as vista outside the detailed areas
       bool want = vis_nb && ch.vis_run_count;
       if (!want && lowres_vista) {
-        want = true;
-        for (const CtrLevelData* l : m_loaded) {
-          want = want && outside_detail(*l, ch.bsphere, kDetailMargin);
+        u8& oc = lev.outside_cache[ci];
+        if (!(oc & 1)) {
+          bool all = true;
+          for (const CtrLevelData* l : m_loaded) {
+            all = all && outside_detail(*l, ch.bsphere, kDetailMargin);
+          }
+          oc |= 1 | (all ? 2 : 0);
         }
+        want = oc & 2;
       }
       if (!want) {
         continue;
@@ -2571,11 +2590,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     // (AI-assisted) lowres_vista: in far mode too, not over another loaded level's detailed tfrag
     if (vista_chunk && far_level) {
-      bool over = false;
-      for (const CtrLevelData* l : m_loaded) {
-        over = over || (l != &lev && !outside_detail(*l, ch.bsphere, kDetailMargin));
+      u8& oc = lev.outside_cache[ci];
+      if (!(oc & 4)) {
+        bool over = false;
+        for (const CtrLevelData* l : m_loaded) {
+          over = over || (l != &lev && !outside_detail(*l, ch.bsphere, kDetailMargin));
+        }
+        oc |= 4 | (over ? 8 : 0);
       }
-      if (over) {
+      if (oc & 8) {
         continue;
       }
     }
@@ -2681,16 +2704,27 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   for (const auto& vc : m_visible) {
     vista_chunks += vc.vista;
   }
+  // the main pass's draw lists: the level's, or (vista chunks) what of them the split left
+  const std::vector<u32>* main_lists[3] = {&lev.early_draws, &lev.sorted_draws, &lev.ordered_draws};
   if (vista_chunks) {
+    // (AI-assisted) one walk over the three lists instead of one per pass: the vista chunks' draws
+    // (in list order: early, sorted, ordered, as the vista pass drew them) and the other visible
+    // ones per list (in their order: the main pass draws them as it drew the whole lists)
+    m_vista_draws.clear();
+    for (int li = 0; li < 3; li++) {
+      std::vector<u32>& main = m_main_draws[li];
+      main.clear();
+      for (u32 di : *main_lists[li]) {
+        const int slot = m_visible_slot[lev.draw_chunk[di]];
+        if (slot >= 0) {
+          (m_visible[slot].vista ? m_vista_draws : main).push_back(di);
+        }
+      }
+      main_lists[li] = &main;
+    }
     ctr_gpu_set_mesh_fog(fog0, fog1_vista, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
     vista_pass = true;
-    for (u32 di : lev.early_draws) {
-      draw(di);
-    }
-    for (u32 di : lev.sorted_draws) {
-      draw(di);
-    }
-    for (u32 di : lev.ordered_draws) {
+    for (u32 di : m_vista_draws) {
       draw(di);
     }
     vista_pass = false;
@@ -2699,9 +2733,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_vista_tris += vista_indices / 3;
   }
   m_vista_frames++;
-  if (settings.early_depth) {
+  if (early_depth) {
     for (u8 band = 0; band < 3; band++) {
-      for (u32 di : lev.early_draws) {
+      for (u32 di : *main_lists[0]) {
         const int slot = m_visible_slot[lev.draw_chunk[di]];
         if (slot >= 0 && m_visible[slot].band == band) {
           draw(di);
@@ -2709,14 +2743,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
   } else {
-    for (u32 di : lev.early_draws) {
+    for (u32 di : *main_lists[0]) {
       draw(di);
     }
   }
-  for (u32 di : lev.sorted_draws) {
+  for (u32 di : *main_lists[1]) {
     draw(di);
   }
-  for (u32 di : lev.ordered_draws) {
+  for (u32 di : *main_lists[2]) {
     draw(di);
   }
   ctr_gpu_set_mesh_nofog(0);

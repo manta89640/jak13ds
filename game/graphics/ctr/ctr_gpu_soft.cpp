@@ -569,6 +569,8 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
                               const float*,
                               const float*,
                               int palette_count_env,
+                              const uint32_t*,
+                              uint32_t,
                               const float*,
                               int,
                               int,
@@ -914,6 +916,10 @@ int ctr_gpu_copy_screen(void) {
   return handle;
 }
 
+double ctr_gpu_take_screen_copy_ms(void) {
+  return 0;  // (AI-assisted) (no command lists here)
+}
+
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
   *s = (x + 1.f) * 0.5f;
   *t = (1.f - y) * 0.5f;  // soft textures: top row first
@@ -957,7 +963,19 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   }
 }
 
+// (AI-assisted) ctr_gpu_draw_quads_again: the last call's quads (the caller keeps them)
+static const ctr_vertex* s_lastq_verts;
+static int s_lastq_count;
+
+void ctr_gpu_draw_quads_again(const ctr_draw_state* state) {
+  if (s_lastq_verts) {
+    ctr_gpu_draw_quads(state, s_lastq_verts, s_lastq_count);
+  }
+}
+
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
+  s_lastq_verts = verts;
+  s_lastq_count = quad_count;
   sky_hook(state);
   softstats::prog(0);
   g_soft.cur.draws++;
@@ -1295,6 +1313,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           const float clip[16],
                           const float* bones,
                           int palette_count,
+                          const uint32_t*,
+                          uint32_t,
                           const float lights[28],
                           int mesh,
                           int first_index,
@@ -1448,6 +1468,11 @@ void ctr_gpu_set_early_depth_params(int, int, unsigned int) {}  // (AI-assisted)
 void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
 void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips
 void ctr_gpu_set_skin_rows_f24(int) {}
+// (AI-assisted) no float24 uniforms here: the draws never get the words
+int ctr_gpu_skin_rows_f24_on(void) {
+  return 0;
+}
+void ctr_gpu_pack_skin_rows_f24(const float*, int, uint32_t*) {}
 void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
 void ctr_gpu_set_cb_read_opaque(int) {}     // (AI-assisted) no color buffer cache here
 void ctr_gpu_set_framebuffer(int, int depth16) {
