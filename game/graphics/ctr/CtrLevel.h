@@ -447,6 +447,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     u32 chunk;
     u8 band;    // (AI-assisted) distance band for the early depth order: 0 near .. 2 far
     bool partly;  // (AI-assisted) some of its visibility runs are hidden: draw run by run
+    bool runs_valid;  // (AI-assisted) m_run_shown holds its runs' flags (impostors)
     bool vista;   // (AI-assisted) far scenery: drawn first, with the vista fog (lowres_vista)
     bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
     float clip[16];

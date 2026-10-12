@@ -280,6 +280,20 @@ struct CtrSettings {
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
+  // (AI-assisted) impostors (CtrImpostor): far tie objects (each visibility group, up to 8
+  // instances: trees, rocks, houses) whose nearest point is beyond impostor_distance (meters) and
+  // that cover at most 128x128 pixels are drawn into a texture at screen resolution and shown as
+  // a card (a 4x4 grid at the group's depth) in their place, until the picture could be off by
+  // impostor_error pixels (camera moved) or they come nearer: then drawn again. At most
+  // impostor_budget triangles are drawn into impostors per frame (the rest stay geometry that
+  // frame). impostor_atlas: the texture's
+  // size in KB (linear memory, 256 | 512 | 1024). Off: at Sentinel Beach's start a card still
+  // covers a stone arch that stands among the rocks it was made from (host, Oct 12)
+  bool impostors = false;
+  float impostor_distance = 120.f;
+  float impostor_error = 1.f;
+  int impostor_budget = 6000;
+  int impostor_atlas = 512;
   bool cull_ties = true;
   bool cull_flip = false;
   // (AI-assisted) back faces of merc draws the converter marked (c3l kMercDrawCullBack: wound like

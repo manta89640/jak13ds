@@ -2923,6 +2923,7 @@ void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
+  ctr_gpu_rt_end(); /* (AI-assisted) impostors: a render to texture left open */
   ctr_gpu_run_sky_hook(); /* (AI-assisted) sky_last: still pending (nothing blended came) */
   diag_rt("frame_end: flush");
   raw_vc_flush();
@@ -5571,6 +5572,191 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
   *t = 1.0f - (0.5f + (float)top_row0()) / 512.0f - (cx + 1.0f) * 0.5f * (399.0f / 512.0f);
 }
 
+/* ---------------- (AI-assisted) render to texture (impostors, CtrImpostor) ----------------
+ * The texture is an RGBA8 C3D_Tex in linear memory (VRAM stays for the level texture pools) and
+ * is also the color buffer: the GPU's render targets use the textures' tiled layout (8x8 tiles,
+ * Morton order inside). Its logical pixels are laid out like the top screen's (the color buffer
+ * is 240 wide, the screen's x along its rows): logical x = buffer row, logical y = buffer column,
+ * so the draws keep the screen's clip transform and only the viewport changes. A tile is drawn
+ * with the framebuffer moved to its band of rows (the band's start at a multiple of 16 rows), so
+ * the D16 depth buffer needs only max_tile_w rows. The switch goes through citro3d's context
+ * (C3D_SetFrameBuf: at the next update citro3d flushes the framebuffer the draws used and binds
+ * the new one), which keeps the raw draws' invariant (citro3d's context describes the GPU). */
+#define MAX_RT 4
+static struct {
+  int tex1; /* texture slot + 1 (0: free) */
+  int lw, lh, max_w;
+  void* depth;   /* D16, max_w rows x lh columns */
+  u32 dead_frame; /* ctr_gpu_rt_delete: the depth buffer is freed 3 frames later */
+} s_rt[MAX_RT];
+static struct {
+  int active;
+  C3D_FrameBuf fb;
+  ctr_gpu_hook_fn hook;
+  void* hook_arg;
+  int early, early_sky;
+} s_rtc;
+
+static void rt_reap(void) {
+  for (int i = 0; i < MAX_RT; i++) {
+    if (!s_rt[i].tex1 && s_rt[i].depth && (u32)g.frame_no - s_rt[i].dead_frame > 3) {
+      ctr_linear_lock();
+      linearFree(s_rt[i].depth);
+      ctr_linear_unlock();
+      s_rt[i].depth = NULL;
+    }
+  }
+}
+
+int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
+  rt_reap();
+  if (!g.ready || lw < 16 || lh < 16 || lw > 1024 || lh > 1024 || (lw & (lw - 1)) ||
+      (lh & (lh - 1)) || max_tile_w < 16 || (max_tile_w & 15) || max_tile_w > lw) {
+    return -1;
+  }
+  int i = 0;
+  while (i < MAX_RT && (s_rt[i].tex1 || s_rt[i].depth)) {
+    i++;
+  }
+  if (i == MAX_RT) {
+    return -1;
+  }
+  const int slot = reserve_tex_slot();
+  if (slot < 0) {
+    return -1;
+  }
+  TexSlot* t = &g.textures[slot];
+  ctr_linear_lock();
+  /* the texture: lh wide (buffer columns), lw high (buffer rows) */
+  int ok = linear_room_for_tex(lh, lw, 0) && C3D_TexInit(&t->tex, (u16)lh, (u16)lw, GPU_RGBA8);
+  void* depth = ok ? linearAlloc((size_t)max_tile_w * (size_t)lh * 2u) : NULL;
+  if (ok && !depth) {
+    C3D_TexDelete(&t->tex);
+    ok = 0;
+  }
+  ctr_linear_unlock();
+  if (!ok) {
+    release_tex_slot(slot);
+    return -1;
+  }
+  /* no texel or dirty cache line from the memory's last use (the GPU writes it from now on) */
+  memset(t->tex.data, 0, t->tex.size);
+  cache_flush_now(t->tex.data, t->tex.size);
+  t->pool = -1;
+  t->levels = 1;
+  ctr_linear_lock();
+  t->used = 1;
+  ctr_linear_unlock();
+  s_rt[i].tex1 = slot + 1;
+  s_rt[i].lw = lw;
+  s_rt[i].lh = lh;
+  s_rt[i].max_w = max_tile_w;
+  s_rt[i].depth = depth;
+  printf("[ctr] render to texture: %dx%d RGBA8 + D16 %dx%d in linear memory (%u KB)\n", lw, lh,
+         max_tile_w, lh, (unsigned)((t->tex.size + (u32)max_tile_w * (u32)lh * 2u) / 1024u));
+  return slot;
+}
+
+static int rt_find(int tex) {
+  for (int i = 0; tex >= 0 && i < MAX_RT; i++) {
+    if (s_rt[i].tex1 == tex + 1) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+void ctr_gpu_rt_delete(int tex) {
+  const int i = rt_find(tex);
+  if (i < 0) {
+    return;
+  }
+  if (s_rtc.active) {
+    ctr_gpu_rt_end();
+  }
+  ctr_gpu_tex_delete(tex);
+  s_rt[i].tex1 = 0;
+  s_rt[i].dead_frame = (u32)g.frame_no;
+}
+
+int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h) {
+  const int i = rt_find(tex);
+  if (i < 0 || !g.ready || !g.in_frame || g.textures[tex].used != 1) {
+    return 0;
+  }
+  const int rows = (w + 7) & ~7;
+  if (x < 0 || y < 0 || w < 1 || h < 1 || (x & 15) || rows > s_rt[i].max_w || x + rows > s_rt[i].lw ||
+      y + h > s_rt[i].lh) {
+    return 0;
+  }
+  raw_vc_flush();
+  if (!s_rtc.active) {
+    /* a pending sky_last hook waits for the screen (it never draws into the tile) */
+    s_rtc.hook = s_sky_hook;
+    s_rtc.hook_arg = s_sky_hook_arg;
+    s_sky_hook = NULL;
+    s_rtc.early = g_early_depth;
+    s_rtc.early_sky = g_early_sky;
+    g_early_depth = 0;
+    g_early_sky = 0;
+  }
+  C3D_Tex* t = &g.textures[tex].tex;
+  C3D_FrameBuf* fb = &s_rtc.fb;
+  memset(fb, 0, sizeof(*fb));
+  C3D_FrameBufAttrib(fb, (u16)s_rt[i].lh, (u16)rows, false);
+  C3D_FrameBufColor(fb, (u8*)t->data + (size_t)x * (size_t)s_rt[i].lh * 4u, GPU_RB_RGBA8);
+  C3D_FrameBufDepth(fb, s_rt[i].depth, GPU_RB_DEPTH16);
+  C3D_SetFrameBuf(fb);
+  C3D_SetViewport((u32)y, 0, (u32)h, (u32)w);
+  C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)y, 0, (u32)(y + h), (u32)w);
+  s_cbread = -1;
+  s_rtc.active = 1;
+  return 1;
+}
+
+void ctr_gpu_rt_end(void) {
+  if (!s_rtc.active) {
+    return;
+  }
+  raw_vc_flush();
+  C3D_SetFrameBuf(&g.top->frameBuf);
+  set_top_viewport();
+  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+  s_sky_hook = s_rtc.hook;
+  s_sky_hook_arg = s_rtc.hook_arg;
+  g_early_depth = s_rtc.early;
+  g_early_sky = s_rtc.early_sky;
+  s_cbread = -1;
+  /* the texture cache may hold the tile's old texels: the next bind clears it */
+  g.bound_tex = NULL;
+  s_tex_dirty = 1;
+  s_rtc.active = 0;
+}
+
+void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t) {
+  const int i = rt_find(tex);
+  if (i < 0) {
+    *s = *t = 0.0f;
+    return;
+  }
+  /* logical y = buffer column (s), logical x = buffer row r, sampled at t = 1 - r / rows (the GPU
+   * samples t = 0 from the last row in memory, see ctr_gpu_screen_uv) */
+  *s = ly / (float)s_rt[i].lh;
+  *t = 1.0f - lx / (float)s_rt[i].lw;
+}
+
+int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
+                      int* index_count) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || !g.meshes[mesh].fill_vbytes) {
+    return 0;
+  }
+  *verts = g.meshes[mesh].verts;
+  *vertex_count = (int)(g.meshes[mesh].fill_vbytes / 16u);
+  *indices = g.meshes[mesh].indices;
+  *index_count = (int)(g.meshes[mesh].fill_ibytes / 2u);
+  return 1;
+}
+
 /* ---------------- static meshes ---------------- */
 
 /* Also called from the level loader thread: always in linear memory (see tex_alloc). */
@@ -5872,6 +6058,67 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     c3d_vertex_buffer(ms->verts_pa, ms->verts, 16, 3, 0x210);
     apply_state(state, mesh_mode, 0);
     C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
+  }
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
+}
+
+/* (AI-assisted) impostors: like ctr_gpu_draw_mesh_prepared, with this frame's vertices and indices
+ * (ctr_gpu_stream_alloc; c3l::Vertex layout) instead of a mesh's */
+void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                              const void* verts, const uint16_t* indices, int index_count) {
+  SKY_HOOK(state);
+  if (!g.ready || !g.in_frame || !verts || !indices || index_count < 3) {
+    return;
+  }
+  if (!cmd_room()) {
+    return;
+  }
+  const int fa = g_fog_alpha && g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80);
+  const int df = g.ps->df_ok && g.fog_df;
+  use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
+  const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
+  g.cur.nofog_draws += g.mesh_nofog && !fa;
+  g.cur.fog_alpha_draws += fa;
+  const u32 vpa = osConvertVirtToPhys(verts), ipa = osConvertVirtToPhys(indices);
+  if (use_raw(state)) {
+    apply_state(state, mesh_mode, 1);
+    raw_vertex_buffer(vpa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
+    raw_sync();
+    if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+      g.last_clip_id = matrix->id;
+      if (g.ps->opt) {
+        ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
+        if (mm->fog_gen != g.fog_gen) {
+          float rows[8];
+          mesh_fog_rows(matrix->m, rows);
+          raw_pack_f24(rows, mm->f24 + 12);
+          raw_pack_f24(rows + 4, mm->f24 + 15);
+          mm->fog_gen = g.fog_gen;
+        }
+        raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, df ? 15 : 18, 0));
+      } else {
+        raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 12, 0));
+      }
+      g.last_mesh_valid = 1;
+    }
+    raw_draw_elements(ipa, (u32)index_count);
+  } else {
+    raw_vc_flush();
+    if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+      g.last_clip_id = matrix->id;
+      C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
+      if (g.ps->opt) {
+        float r[8];
+        mesh_fog_rows(matrix->m, r);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 4, r[3], r[2], r[1], r[0]);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 5, r[7], r[6], r[5], r[4]);
+      }
+    }
+    g.last_mesh_valid = 1;
+    c3d_vertex_buffer(vpa, verts, 16, 3, 0x210);
+    apply_state(state, mesh_mode, 0);
+    C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, indices);
   }
   g.cur.draws++;
   g.cur.triangles += index_count / 3;

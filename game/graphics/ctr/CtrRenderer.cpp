@@ -133,6 +133,9 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.merc_tex_sort; }},
     {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },
      [](const CtrSettings& s) { return s.merc_gen_lod; }},
+    // (AI-assisted) gpu-imp: far tie groups as cards (CtrImpostor)
+    {"impostors", [](CtrSettings& s, bool on) { s.impostors = on; },
+     [](const CtrSettings& s) { return s.impostors; }},
     {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
      [](const CtrSettings& s) { return s.clouds; }},
     // (AI-assisted) gpu-b's keys (Oct 11). frame_overlap2: the config's mode (on; clean when the
