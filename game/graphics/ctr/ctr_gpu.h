@@ -478,17 +478,26 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size);
  * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.
  * tint: multiplies the final color (lighting approximation), 0..1. */
 /* lights: 7 vec4 like merc2.vert: light direction rows 0-2 (light_dir0/1/2), light colors 0-2,
- * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal). */
+ * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal).
+ * (AI-assisted) bones_id: a number new for every palette the caller makes (never reused for other
+ * contents while it may still be the last one drawn), so draws compare it instead of the bones; 0:
+ * unknown, uploaded at every draw. bones_f24: NULL, or the bones as ctr_gpu_pack_skin_rows_f24
+ * made them (used with skin_rows_f24 instead of converting them again). */
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
-                          int palette_count, const float lights[28], int mesh, int first_index,
-                          int index_count);
+                          int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                          const float lights[28], int mesh, int first_index, int index_count);
+/* (AI-assisted) skin_rows_f24 is on (the draws take bones_f24), and the float24 words of a palette
+ * for them: 9 words per bone, row by row (row r of bone b at out[3 * (r * palette_count + b)]),
+ * palette_count <= CTR_MAX_PALETTE. */
+int ctr_gpu_skin_rows_f24_on(void);
+void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out);
 
 /* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space
  * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, GS value / 255 as
  * in Merc2, so 0x80 = texture x 1). */
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
-                              int palette_count, const float fade[4], int mesh, int first_index,
-                              int index_count);
+                              int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                              const float fade[4], int mesh, int first_index, int index_count);
 
 /* The same with the matrix converted once (ctr_gpu_prepare_mesh_matrix) for many draws: the level
  * renderer draws chunks interleaved (sorted by texture), so the conversion would be redone at

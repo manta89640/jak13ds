@@ -327,7 +327,7 @@ static struct {
   DVLB_s* opt_dvlb[OPT_DVLBS]; /* (AI-assisted) set 2's own shbins (shader_opt) */
   /* (AI-assisted) shader_groups: the group whose uniforms are in the GPU's registers (0: none or
    * unknown), and which of them are valid there (GRP_U_*); skin_bl_valid: the skin program's bones
-   * and lights (last_skin_bones / _lights) are in its registers */
+   * and lights (last_skin_bones_id / last_skin_lights) are in its registers */
   int grp_cur;
   u32 grp_valid;
   int skin_bl_valid;
@@ -381,14 +381,14 @@ static struct {
   float last_skin_clip[16];
   float last_skin_lights[28];
   int last_skin_palette_count;
-  float last_skin_bones[CTR_MAX_PALETTE * 12];
+  uint32_t last_skin_bones_id; /* (AI-assisted) the palette's bones_id (0: none) */
   /* (AI-assisted) cmd_dedup: the last ctr_gpu_draw_skinned_env's matrix and bones (env_valid: still
    * in the env program's registers) */
   int env_valid;
   int last_env_palette_count;
   float last_env_clip[16];
   float last_env_fade[3];
-  float last_env_bones[CTR_MAX_PALETTE * 12];
+  uint32_t last_env_bones_id; /* (AI-assisted) as last_skin_bones_id */
   C3D_Mtx gl_to_pica;
   MeshSlot meshes[MAX_MESHES];
   int pending_mesh_delete[MAX_MESHES];
@@ -2112,6 +2112,9 @@ void ctr_gpu_set_skin_clip_f24(int on) {
 }
 void ctr_gpu_set_skin_rows_f24(int on) {
   s_skin_f24 = on ? 1 : 0;
+}
+int ctr_gpu_skin_rows_f24_on(void) {
+  return s_skin_f24;
 }
 
 /* ---------------- (AI-assisted) config.ini frame_overlap2 (with the pipeline) ----------------
@@ -5748,25 +5751,19 @@ static void raw_skin_rows(const int* locs, const float* bones, int palette_count
   s_raw.vs_changed = 1;
 }
 
-/* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24) */
-static void raw_skin_rows_f24(const int* locs, const float* bones, int palette_count) {
+/* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24),
+ * from the words ctr_gpu_pack_skin_rows_f24 made: per row one config write and one burst (first
+ * word, header, the rest, padding: see raw_n). The skin and shine programs' bursts differ only in
+ * the config word (locs). */
+static void raw_skin_rows_f24(const int* locs, const u32* words, int palette_count) {
   u32* p = raw_ptr();
   const u32 n = 3u * (u32)palette_count;
   for (int row = 0; row < 3; row++) {
     p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)locs[row]); /* bit 31 clear: f24 */
-    /* the burst: first word, header, the rest, padding (see raw_n) */
-    u32* d = p;
-    const float* src = bones + 4 * row;
-    for (int b = 0; b < palette_count; b++, src += 12) {
-      const float v[4] = {src[3], src[2], src[1], src[0]}; /* C3D_FVec order: w z y x */
-      u32 w3[3];
-      raw_pack_f24(v, w3);
-      for (u32 i = 0; i < 3; i++) {
-        const u32 k = 3u * (u32)b + i;
-        d[k ? k + 1 : 0] = w3[i];
-      }
-    }
-    d[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
+    const u32* src = words + n * (u32)row;
+    p[0] = src[0];
+    p[1] = RAW_HDR(GPUREG_VSH_FLOATUNIFORM_DATA, 0xF) | ((n - 1) << 20);
+    memcpy(p + 2, src + 1, 4u * (n - 1));
     p += n + 1;
     if (!(n & 1)) {
       *p++ = 0;
@@ -5776,9 +5773,29 @@ static void raw_skin_rows_f24(const int* locs, const float* bones, int palette_c
   s_raw.vs_changed = 1;
 }
 
+void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out) {
+  for (int row = 0; row < 3; row++) {
+    const float* src = bones + 4 * row;
+    for (int b = 0; b < palette_count; b++, src += 12, out += 3) {
+      const float v[4] = {src[3], src[2], src[1], src[0]}; /* C3D_FVec order: w z y x */
+      raw_pack_f24(v, out);
+    }
+  }
+}
+
+/* (AI-assisted) the bones as skin_rows_f24 words: the caller's, else made here */
+static const u32* skin_rows_words(const float* bones, const uint32_t* bones_f24, int palette_count,
+                                  u32* tmp) {
+  if (bones_f24) {
+    return bones_f24;
+  }
+  ctr_gpu_pack_skin_rows_f24(bones, palette_count, tmp);
+  return tmp;
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
-                          int palette_count, const float lights[28], int mesh, int first_index,
-                          int index_count) {
+                          int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                          const float lights[28], int mesh, int first_index, int index_count) {
   SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
@@ -5824,12 +5841,15 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;
   }
-  /* bones: the draws of a model with at most CTR_MAX_PALETTE bones all use the same palette */
-  const size_t bone_bytes = sizeof(float) * 12 * (size_t)palette_count;
-  if (!g.skin_bl_valid || g.last_skin_palette_count != palette_count ||
-      !words_equal(g.last_skin_bones, bones, 12u * (unsigned)palette_count)) {
+  /* bones: the draws of a model with at most CTR_MAX_PALETTE bones all use the same palette.
+   * (AI-assisted) Compared by the caller's palette number (bones_id), not by the 288 words: a
+   * palette is never changed under its number */
+  if (!g.skin_bl_valid || g.last_skin_palette_count != palette_count || !bones_id ||
+      g.last_skin_bones_id != bones_id) {
     if (raw && palette_count > 0 && s_skin_f24) {
-      raw_skin_rows_f24(g.ps->uloc_skin_rows, bones, palette_count);
+      u32 tmp[9 * CTR_MAX_PALETTE];
+      raw_skin_rows_f24(g.ps->uloc_skin_rows,
+                        skin_rows_words(bones, bones_f24, palette_count, tmp), palette_count);
     } else if (raw && palette_count > 0) {
       raw_skin_rows(g.ps->uloc_skin_rows, bones, palette_count);
     } else {
@@ -5846,7 +5866,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       }
     }
     g.last_skin_palette_count = palette_count;
-    memcpy(g.last_skin_bones, bones, bone_bytes);
+    g.last_skin_bones_id = bones_id;
   }
   if (!same_lights) {
     /* (AI-assisted) shader_opt: the light colors and ambient times the vertex color scale */
@@ -5904,8 +5924,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
 }
 
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
-                              int palette_count, const float fade[4], int mesh, int first_index,
-                              int index_count) {
+                              int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                              const float fade[4], int mesh, int first_index, int index_count) {
   SKY_HOOK(state);
   if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
       index_count < 3) {
@@ -5961,12 +5981,14 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     }
     memcpy(g.last_env_clip, clip, sizeof(g.last_env_clip));
   }
-  if (dd && g.last_env_palette_count == palette_count &&
-      words_equal(g.last_env_bones, bones, 12u * (unsigned)palette_count)) {
+  if (dd && g.last_env_palette_count == palette_count && bones_id &&
+      g.last_env_bones_id == bones_id) {
     g.cur.cmd_dedup_words += (u32)(12 * palette_count) + 6;
   } else {
     if (raw && palette_count > 0 && s_skin_f24) {
-      raw_skin_rows_f24(g.ps->uloc_env_rows, bones, palette_count);
+      u32 tmp[9 * CTR_MAX_PALETTE];
+      raw_skin_rows_f24(g.ps->uloc_env_rows,
+                        skin_rows_words(bones, bones_f24, palette_count, tmp), palette_count);
     } else if (raw && palette_count > 0) {
       raw_skin_rows(g.ps->uloc_env_rows, bones, palette_count);
     } else {
@@ -5982,7 +6004,7 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
         }
       }
     }
-    memcpy(g.last_env_bones, bones, sizeof(float) * 12 * (size_t)palette_count);
+    g.last_env_bones_id = bones_id;
     g.last_env_palette_count = palette_count;
   }
   /* the texture stage multiplies merc colors by 4: half the fade gives texture * fade * 2 */

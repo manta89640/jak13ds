@@ -80,6 +80,8 @@ class CtrMercRenderer : public CtrBucketRenderer {
   struct QueuedDraw {
     ctr_draw_state st;
     u32 clip, rows, lights;  // offsets in m_qdata
+    u32 rows_f24;            // (AI-assisted) offset in m_qf24 (~0u: none)
+    u32 bones_id;            // (AI-assisted) the palette's number (ctr_gpu_draw_skinned)
     int palette_count;
     float fade[4];
     int mesh;
@@ -87,6 +89,8 @@ class CtrMercRenderer : public CtrBucketRenderer {
     u32 model_rank, draw_index;  // merc_tex_sort: the order they're drawn in
   };
   std::vector<float> m_qdata;
+  // (AI-assisted) the queued palettes as skin_rows_f24 words (ctr_gpu_pack_skin_rows_f24)
+  std::vector<uint32_t> m_qf24;
   std::vector<QueuedDraw> m_q_env;
   u32 queue_floats(const float* src, int n);
   void flush_env();

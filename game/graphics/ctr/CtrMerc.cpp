@@ -50,6 +50,14 @@ struct PcMercFlags {
   u8 bitflags;
 };
 
+// (AI-assisted) a new number for each bone palette made (all merc renderers: the GPU keeps the last
+// one drawn), never 0. The GPU compares these instead of the bones: a palette's rows are never
+// changed under its number.
+u32 next_palette_id() {
+  static u32 s_id;
+  return ++s_id ? s_id : ++s_id;
+}
+
 bool tag_is_nothing_next(const DmaFollower& dma) {
   return dma.current_tag().kind == DmaTag::Kind::NEXT && dma.current_tag().qwc == 0 &&
          dma.current_tag_vif0() == 0 && dma.current_tag_vif1() == 0;
@@ -244,8 +252,9 @@ void CtrMercRenderer::flush_env() {
   if (!m_q_env.empty()) {
     const float* d = m_qdata.data();
     for (const auto& q : m_q_env) {
-      ctr_gpu_draw_skinned_env(&q.st, d + q.clip, d + q.rows, q.palette_count, q.fade, q.mesh,
-                               q.first_index, q.index_count);
+      ctr_gpu_draw_skinned_env(&q.st, d + q.clip, d + q.rows, q.palette_count,
+                               q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24,
+                               q.bones_id, q.fade, q.mesh, q.first_index, q.index_count);
     }
     m_stats.env_batches++;
     m_q_env.clear();
@@ -277,8 +286,9 @@ void CtrMercRenderer::flush_opaque() {
   const float* d = m_qdata.data();
   for (u32 i : m_q_order) {
     const auto& q = m_q_opaque[i];
-    ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count, d + q.lights, q.mesh,
-                         q.first_index, q.index_count);
+    ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count,
+                         q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24, q.bones_id,
+                         d + q.lights, q.mesh, q.first_index, q.index_count);
   }
   m_stats.sorted_draws += (int)n;
   m_q_opaque.clear();
@@ -289,6 +299,7 @@ void CtrMercRenderer::flush_queues() {
   flush_opaque();  // (the bases before their shine)
   flush_env();
   m_qdata.clear();
+  m_qf24.clear();
 }
 
 void CtrMercRenderer::apply_blerc(const CtrLevelData& lev,
@@ -788,6 +799,36 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const bool env_batch = ctr_settings().envmap_batch || tex_sort;
   u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
   u32 model_rank = ~0u;
+  // (AI-assisted) the palette's number for the GPU (new with every palette made) and its float24
+  // words for skin_rows_f24, made once per palette (not at every upload: the shine pass and the
+  // texture sorted draws upload a palette again after other models' palettes)
+  u32 palette_id = 0;
+  const bool rows_f24 = ctr_gpu_skin_rows_f24_on() != 0;
+  uint32_t palette_f24[9 * CTR_MAX_PALETTE];
+  bool palette_f24_made = false;
+  u32 q_f24 = ~0u;
+  auto direct_f24 = [&](int count) -> const uint32_t* {
+    if (!rows_f24) {
+      return nullptr;
+    }
+    if (!palette_f24_made) {
+      ctr_gpu_pack_skin_rows_f24(palette_rows, std::min<int>(count, CTR_MAX_PALETTE), palette_f24);
+      palette_f24_made = true;
+    }
+    return palette_f24;
+  };
+  auto queue_f24 = [&](int count) -> u32 {
+    if (!rows_f24) {
+      return ~0u;
+    }
+    if (q_f24 == ~0u) {
+      const uint32_t* w = direct_f24(count);
+      const int n = 9 * std::min<int>(count, CTR_MAX_PALETTE);
+      q_f24 = (u32)m_qf24.size();
+      m_qf24.insert(m_qf24.end(), w, w + n);
+    }
+    return q_f24;
+  };
   // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
   // (the yeti) when its first bone is further from the camera than max(25 m, 12.5 x the model's
   // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
@@ -843,6 +884,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
                               !memcmp(rows_of->palette, draw.palette, draw.palette_count);
     if (!same_palette) {
       q_rows = ~0u;
+      q_f24 = ~0u;
+      palette_id = next_palette_id();
+      palette_f24_made = false;
     }
     if (!same_palette) {
       palette_mirrors = false;
@@ -932,6 +976,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         q.st = st;
         q.clip = q_clip;
         q.rows = q_rows;
+        q.rows_f24 = queue_f24(draw.palette_count);
+        q.bones_id = palette_id;
         q.lights = 0;
         q.palette_count = draw.palette_count;
         memcpy(q.fade, fade, sizeof(fade));
@@ -940,7 +986,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         q.index_count = (int)draw.index_count;
         m_q_env.push_back(q);
       } else {
-        ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count, fade, model->mesh,
+        ctr_gpu_draw_skinned_env(&st, clip, palette_rows, draw.palette_count,
+                                 direct_f24(draw.palette_count), palette_id, fade, model->mesh,
                                  draw.first_index, draw.index_count);
       }
       m_stats.draws++;
@@ -988,6 +1035,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       q.st = st;
       q.clip = q_clip;
       q.rows = q_rows;
+      q.rows_f24 = queue_f24(draw.palette_count);
+      q.bones_id = palette_id;
       q.lights = q_lights;
       q.palette_count = draw.palette_count;
       memset(q.fade, 0, sizeof(q.fade));
@@ -1005,10 +1054,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     // draw of a sorted model that isn't queued (an eye: after its face, as in the model)
     if ((!m_q_env.empty() || !m_q_opaque.empty()) && (!opaque || tex_sort)) {
       flush_queues();
-      q_clip = q_rows = q_lights = ~0u;
+      q_clip = q_rows = q_lights = q_f24 = ~0u;
       model_rank = ~0u;
     }
-    ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count, light_data, model->mesh,
+    ctr_gpu_draw_skinned(&st, clip, palette_rows, draw.palette_count,
+                         direct_f24(draw.palette_count), palette_id, light_data, model->mesh,
                          draw.first_index, draw.index_count);
     m_stats.draws++;
   }

@@ -569,6 +569,8 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state*,
                               const float*,
                               const float*,
                               int palette_count_env,
+                              const uint32_t*,
+                              uint32_t,
                               const float*,
                               int,
                               int,
@@ -1295,6 +1297,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           const float clip[16],
                           const float* bones,
                           int palette_count,
+                          const uint32_t*,
+                          uint32_t,
                           const float lights[28],
                           int mesh,
                           int first_index,
@@ -1448,6 +1452,11 @@ void ctr_gpu_set_early_depth_params(int, int, unsigned int) {}  // (AI-assisted)
 void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
 void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips
 void ctr_gpu_set_skin_rows_f24(int) {}
+// (AI-assisted) no float24 uniforms here: the draws never get the words
+int ctr_gpu_skin_rows_f24_on(void) {
+  return 0;
+}
+void ctr_gpu_pack_skin_rows_f24(const float*, int, uint32_t*) {}
 void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
 void ctr_gpu_set_cb_read_opaque(int) {}     // (AI-assisted) no color buffer cache here
 void ctr_gpu_set_framebuffer(int, int depth16) {
