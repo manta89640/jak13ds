@@ -1,0 +1,60 @@
+# (AI-assisted) text survey: the progress screens by number ("progress N"), after a save (slot details). progress 13 (saving) stops the script clock: last
+0 wait *target* target-title-wait
+100 continue village1-hut
+101 wait *target* target-continue
+102 wait *target* target-stance
+140 tasks 0 30
+150 save
+300 progress 7
+360 shot p07_no_space
+380 progress 8
+440 shot p08_not_inserted
+460 progress 9
+520 shot p09_not_formatted
+540 progress 16
+600 shot p16_load_details
+620 progress 10
+680 shot p10_format
+700 progress 11
+760 shot p11_data_exists
+780 progress 19
+840 shot p19_insert
+860 progress 21
+920 shot p21_error_saving
+940 progress 22
+1000 shot p22_removed
+1020 progress 23
+1080 shot p23_no_data
+1100 progress 26
+1160 shot p26_auto_save_error
+1180 progress 29
+1240 shot p29_auto_save
+1260 progress 32
+1320 shot p32_no_disc
+1340 progress 33
+1400 shot p33_bad_disc
+1420 progress 34
+1480 shot p34_quit
+1500 progress 60
+1560 shot p60_disable_auto_save
+1580 progress 61
+1640 shot p61_auto_save_disabled
+1660 progress 64
+1720 shot p64_speedrun
+1740 progress 65
+1800 shot p65_speedrun_il
+1820 progress 66
+1880 shot p66_speedrun_cat
+1900 progress 51
+1960 shot p51_secrets
+1980 progress 53
+2040 shot p53_cheats
+2060 progress 55
+2120 shot p55_music
+2140 progress 63
+2200 shot p63_checkpoints
+2220 progress 18
+2280 shot p18_save_title
+2300 progress 13
+2360 shot p13_saving
+2420 exit

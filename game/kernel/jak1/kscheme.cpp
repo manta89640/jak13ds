@@ -1619,6 +1619,16 @@ void pad_script_tasks(int first, int last) {
     }
   }
 }
+
+//! (AI-assisted) "progress N" in a pad script: (pad-script-progress N) (goal_src/jak1/pc/progress-pc.gc)
+void pad_script_progress(int screen) {
+  auto fn = find_symbol_from_c("pad-script-progress");
+  if (!fn.offset || fn->value == s7.offset) {
+    lg::warn("[pad script] progress: no pad-script-progress");
+    return;
+  }
+  call_goal(Ptr<Function>(fn->value), (u64)(s64)screen, 0, 0, s7.offset, g_ee_main_mem);
+}
 }  // namespace
 
 s32 InitHeapAndSymbol() {
@@ -1628,6 +1638,7 @@ s32 InitHeapAndSymbol() {
   pad_script::set_joint_hook(pad_script_joint);
   pad_script::set_save_hook(pad_script_save);
   pad_script::set_tasks_hook(pad_script_tasks);
+  pad_script::set_progress_hook(pad_script_progress);
   pad_script::set_state_name_hook(pad_script_state_name);
   pad_script::set_position_hook(pad_script_position);
   Timer heap_init_timer;

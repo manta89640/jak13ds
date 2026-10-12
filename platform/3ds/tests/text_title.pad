@@ -1,0 +1,35 @@
+# (AI-assisted) text survey: title flow (new game slots, load game with no saves), secrets, music player, cheats; host: --ctr-gfx --ctr-dump DIR
+0 wait *target* target-title-wait
+300 start
+306 -
+360 x
+366 -
+430 shot t_newgame_slots
+440 triangle
+446 -
+500 shot t_back_title
+510 down
+516 -
+530 x
+536 -
+600 shot t_loadgame_nodata
+610 triangle
+616 -
+670 down
+676 -
+690 down
+696 -
+710 x
+716 -
+770 shot t_secrets
+780 x
+786 -
+850 shot t_music_player
+860 triangle
+866 -
+910 down
+916 -
+930 x
+936 -
+1000 shot t_cheats
+1010 exit

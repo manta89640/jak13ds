@@ -411,7 +411,9 @@
                         (!= (-> this option-index) s1-0)
                         (-> this in-transition)))
                 (set-scale! arg0 0.5)
-                (+! (-> arg0 origin y) 16.0)
+                ;; og:preserve-this (AI-assisted) 3DS: counts 1 higher and the totals under them 2
+                ;; lower (the same slot height): at the 3DS text size they overlapped
+                (+! (-> arg0 origin y) (#if TARGET_3DS 15.0 16.0))
                 (set! (-> arg0 flags) (font-flags shadow kerning middle large))
                 (set! (-> arg0 origin x) (the float (- -73 (-> this left-x-offset))))
                 (set-width! arg0 350)
@@ -434,7 +436,7 @@
                   (format (clear *temp-string*) "~D%" (the int (-> s3-3 file s1-0 completion-percentage)))
                   (s0-5 *temp-string* arg0 #f s4-1 22))
                 (set-scale! arg0 0.5)
-                (+! (-> arg0 origin y) 9.0)
+                (+! (-> arg0 origin y) (#if TARGET_3DS 11.0 9.0))
                 ;; og:preserve-this add 'middle' flag when custom-aspect to snap totals with counts
                 (if (-> *pc-settings* use-vis?)
                   (set! (-> arg0 flags) (font-flags shadow kerning large))
@@ -457,7 +459,7 @@
                 (let ((s0-8 print-game-text))
                   (format (clear *temp-string*) "/~D" (-> this total-nb-of-buzzers))
                   (s0-8 *temp-string* arg0 #f s4-1 22))
-                (+! (-> arg0 origin y) 15.0))
+                (+! (-> arg0 origin y) (#if TARGET_3DS 14.0 15.0)))
                (else
                 (+! (-> arg0 origin y) 18.0)
                 (set! (-> arg0 origin x) (the float (- 28 (-> this left-x-offset))))

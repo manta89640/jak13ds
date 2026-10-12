@@ -35,6 +35,10 @@
  *   tasks A B (AI-assisted) close every stage of game-tasks A..B (close-specific-task!, as if
  *             they were done: the progress menu's power cell pages then show those cells
  *             collected) and set *cheat-mode* to #t (the menu opens every level's page)
+ *   progress N (AI-assisted) open the progress menu at progress-screen N, or switch the open one
+ *             to it (pad-script-progress, goal_src/jak1/pc/progress-pc.gc; progress-h.gc has the
+ *             numbers: 23 memcard-no-data, 7 memcard-no-space, 29 auto-save, 55 music-player ...),
+ *             for pictures of screens a test can't reach otherwise
  *   shot [NAME]  (AI-assisted) a screenshot (PC OpenGL renderer: like F2, into the config
  *             folder's screenshots; for reference pictures to compare the 3DS renderer with). The
  *             3DS renderer: NAME.bmp (3DS) / NAME.png (--ctr-gfx) in its screenshot folder
@@ -104,6 +108,10 @@ void set_joint_hook(JointHook hook);
 //! (AI-assisted) Called for "tasks A B".
 using TasksHook = void (*)(int first, int last);
 void set_tasks_hook(TasksHook hook);
+
+//! (AI-assisted) Called for "progress N".
+using ProgressHook = void (*)(int screen);
+void set_progress_hook(ProgressHook hook);
 
 //! (AI-assisted) The name of the last "shot" given to the hook below ("" before the first one).
 const char* last_shot_name();

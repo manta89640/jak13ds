@@ -63,6 +63,15 @@
   (auto-save-command 'save 0 0 *default-pool*)
   0)
 
+;; (AI-assisted) "progress N" in a pad script (game/sce/pad_script.h): open the progress menu at
+;; screen N, or switch the open menu to it, for pictures of screens a test can't otherwise reach
+(defun pad-script-progress ((screen int))
+  (cond
+    (*progress-process* (set! (-> *progress-process* 0 next-display-state) (the-as progress-screen screen)))
+    (else
+     (activate-progress *dproc* (the-as progress-screen screen))))
+  0)
+
 ;; (AI-assisted) pad scripts (game/sce/pad_script.h "teleport" / "jpos", tests of moving
 ;; platforms): the process-drawable of type tp whose joint (node-list index) is nearest to Jak.
 (define *pad-script-joint-type* (the-as type #f))
@@ -3075,9 +3084,25 @@
   0
   (none))
 
+;; og:preserve-this (AI-assisted) 3DS: menu row spacing for the 3DS text size
+(#when TARGET_3DS
+  (defun pc-3ds-row-spacing ((center int) (spacing int) (scale float) (rows int))
+    "The spacing of rows of text drawn at scale (large font) around center: spacing times as much
+     as the 3DS text size enlarges the text, at most what keeps the rows between 12 and 212."
+    (let ((k (/ (pc-3ds-text-scale scale (font-flags large)) scale)))
+      (if (or (>= 1.0 k) (>= 1 rows))
+        spacing
+        (let ((room (the int (/ (* 2.0 (fmin (- (the float center) 12.0) (- 212.0 (the float center)))) (the float rows)))))
+          (max spacing (min (the int (+ 0.5 (* k (the float spacing)))) room)))))))
+
 (defmethod draw-options ((obj progress) (arg0 int) (arg1 int) (arg2 float))
   "common logic for drawing options menus."
   (let ((options (-> *options-remap* (-> obj display-state))))
+    ;; og:preserve-this (AI-assisted) 3DS: rows as much further apart as the text grows at the 3DS
+    ;; text size (font-h.gc pc-3ds-text-scale), as far as the rows stay on the screen
+    (#when TARGET_3DS
+      (when (and options (< 0 arg1) (< 0.0 arg2))
+        (set! arg1 (pc-3ds-row-spacing arg0 arg1 arg2 (min (length options) (1- PROGRESS_PC_PAGE_HEIGHT))))))
     (when options
       ;; this menu has options to draw omg
       (let* ((line-amt (if (> (length options) PROGRESS_PC_PAGE_HEIGHT) (1- PROGRESS_PC_PAGE_HEIGHT) (length options)))
@@ -3643,7 +3668,11 @@
               (progress-screen memcard-formatting)
               (progress-screen memcard-creating))
              (draw-notice-screen self))
-            (((progress-screen save-game-title)) (draw-notice-screen self) (draw-options self 169 15 0.6))
+            ;; og:preserve-this (AI-assisted) 3DS: the two rows under the save slots further apart and a
+            ;; little higher (the 3DS text size made them touch; font-h.gc pc-3ds-text-scale)
+            (((progress-screen save-game-title))
+             (draw-notice-screen self)
+             (#if TARGET_3DS (draw-options self 163 17 0.6) (draw-options self 169 15 0.6)))
             (else (format 0 "PROGRESS - You forgot to add a `progress-screen` case to draw options!")))
           (when stats?
             (let* ((v1-98 (cond
