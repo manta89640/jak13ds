@@ -844,3 +844,66 @@
 (define-extern draw-string (function string dma-buffer font-context float))
 
 (define-extern draw-string-xy (function string dma-buffer int int font-color font-flags float))
+
+;; og:preserve-this (AI-assisted) 3DS port: text size on the 400x240 top screen.
+;; The PS2's text was made for 448 lines; on the 3DS the smallest text (the small font, menu
+;; captions at 0.5 of the large font) had capitals of 5 to 7 pixels. config.ini text_scale (all
+;; game text x this) and text_min_height (the smallest capital height in pixels) set the size
+;; (game/kernel/jak1/kmachine.cpp). print-game-text (text.gc), print-game-subtitle (subtitle.gc)
+;; and draw-string-xy (font.gc) draw with pc-3ds-text-scale's scale.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-text-scale* float)
+  (define-extern *pc-3ds-text-min-height* float)
+  (define-extern *pc-3ds-button-art* symbol)
+  (define-extern get-string-length (function string font-context float))
+  ;; capital height in pixels at scale 1: the large font's capitals are 25 of its 32 texel rows,
+  ;; drawn 16 lines tall (16 x 240 / 224 pixels); the small font is half as tall
+  (defconstant PC_3DS_CAP_PX_LARGE 13.4)
+  (defconstant PC_3DS_CAP_PX_SMALL 6.7)
+  ;; #t while print-game-text measures with its own (already adjusted) scale
+  (define *pc-3ds-text-scale-off* #f)
+  (defun pc-3ds-text-scale ((scale float) (flags font-flags))
+    "The scale for text the game draws with this scale and font: text_scale times it, and at least
+     the one that makes its capitals text_min_height pixels tall."
+    (if *pc-3ds-text-scale-off*
+      scale
+      (let ((cap (if (logtest? flags (font-flags large)) PC_3DS_CAP_PX_LARGE PC_3DS_CAP_PX_SMALL)))
+        (fmax (* scale *pc-3ds-text-scale*) (/ *pc-3ds-text-min-height* cap)))))
+  (defun pc-3ds-text-k ((scale float) (ctxt font-context))
+    "How many times its size print-game-text draws the text of this context with scale."
+    (/ scale (fmax 0.1 (-> ctxt scale))))
+  (defun pc-3ds-text-width ((ctxt font-context) (k float))
+    "The width of the text box of a context for text k times its size: centered text gets a box k
+     times as wide around the same center (the same lines as on the PS2), kept 16 units (12 pixels)
+     inside the screen (0 .. 512); other text keeps its width (and wraps more)."
+    (let ((w0 (-> ctxt width)))
+      (if (and (< 1.0 k) (logtest? (-> ctxt flags) (font-flags middle)))
+        (let* ((c (+ (-> ctxt origin x) (* 0.5 w0)))
+               (half (fmin (* 0.5 w0 k) (fmin (- c 16.0) (- 496.0 c)))))
+          (fmax w0 (* 2.0 half)))
+        w0)))
+  (defun pc-3ds-draw-line ((str string) (buf dma-buffer) (ctxt font-context))
+    "draw-string for a line of print-game-text: a left-aligned line that would end less than 16
+     units from the screen's right edge moves left (not closer than 16 units to the left edge)."
+    (if (logtest? (-> ctxt flags) (font-flags middle right))
+      (draw-string str buf ctxt)
+      (let* ((x (-> ctxt origin x))
+             (over (- (+ x (* (get-string-length str ctxt) (-> *video-parms* relative-x-scale))) 496.0))
+             (width 0.0))
+        (if (< 0.0 over) (set! (-> ctxt origin x) (fmax (fmin x 16.0) (- x over))))
+        (set! width (draw-string str buf ctxt))
+        (set! (-> ctxt origin x) x)
+        width)))
+  (defun pc-3ds-text-height ((top float) (height float) (k float))
+    "The height of a text box for text k times its size: text that grows needs more lines than its
+     box has, they may go below it (k^2 of its height: lines k times taller and about k times more
+     of them), down to 6 lines above the bottom of the screen, instead of being left out."
+    (if (< 1.0 k)
+      (fmax height (fmin (* height k k) (- 218.0 top)))
+      height))
+  ;; the PS2 button glyphs' symbol colors (24 pad-square .. 27 pad-x) are white: the 3DS
+  ;; renderer draws the 3DS buttons in their own colors there (game/graphics/ctr/CtrButtonArt.h)
+  (when *pc-3ds-button-art*
+    (dotimes (i 4)
+      (dotimes (j 4)
+        (set! (-> *font-work* color-table (+ i 24) color j) (the-as rgba #x80808080))))))

@@ -30,6 +30,39 @@ io_cache = on              # off: no files kept open between loads, no read-ahea
 c3l_read_buffer = 256      # (AI-assisted) KB per read from a level's .c3l file (16..1024; unbuffered, through two windows: index and vertex data; each chunk's indices go straight into its index buffer); 0: the old reads through a 64 KB stdio buffer, with all of a level's indices (1-3 MB) in one piece of the heap
 ```
 
+## Text and button symbols
+
+(AI-assisted.) The game's text was made for the PS2's 448 lines. On the 400x240 top screen its
+smallest text (the small font, menu captions and subtitles at half the large font's size) had
+capital letters only 5 to 7 pixels tall.
+
+```ini
+text_scale = 1             # all game text x this (0.5 .. 2)
+text_min_height = 9        # the smallest capital letter height, in pixels of the top screen (0 .. 16; 0 = the PS2's sizes). Text drawn smaller is drawn this big
+button_art = on            # the PS2 button symbols in the text and the progress menu are drawn as the New 3DS buttons (A red, B yellow, X blue, Y green; by position: circle = A, cross = B, triangle = X, square = Y); off: the PS2 symbols
+```
+
+- The size applies to all of the game's text: menus, hints, the talk prompts, subtitles, the HUD
+  and progress menu numbers (`print-game-text`, `print-game-subtitle`, `draw-string-xy`;
+  `pc-3ds-text-scale` in `goal_src/jak1/engine/gfx/font-h.gc`). Text keeps its place: it grows
+  from where the game puts it (to the right of left-aligned text, around centered text). Text
+  that grows wraps within the width of its box and may take lines below it (down to just above
+  the bottom of the screen), so nothing is left out.
+- On the PC (`gk --ctr-gfx`, small memory build) the same values come from
+  `OPENGOAL_TEXT_SCALE`, `OPENGOAL_TEXT_MIN_HEIGHT` and `OPENGOAL_BUTTON_ART`.
+- The button symbols are drawn when the textures are read from the game's VRAM, the game files
+  stay as they are (`game/graphics/ctr/CtrButtonArt.h`). Memory: the two font textures that hold
+  the symbols are kept at 32 bits per texel instead of 16 (colors), +256 KB of texture memory for
+  the large font (256x512) and +64 KB for the small one (128x256); the progress menu's four icons
+  (64x64) were 32-bit already. Drawing the symbols takes a few ms once, when the font is first
+  read (`[ctr] 3DS button symbols drawn into the ... font in N ms`).
+- The 3DS build's wording (`game/assets/jak1/game_text_3ds.gp`, used by `goal_src/jak1/game.gp`
+  when goalc runs with `OPENGOAL_SMALL_MEMORY=1`): the memory card and disc messages say SD card
+  and game files, in the seven original languages. The options menus have no graphic options
+  (window, resolution, V-sync, aspect ratio, MSAA, frame rate, the PS2 options: this file sets
+  the renderer), no input options (keyboard, mouse, controller choice and binds; the camera
+  options are in the game options) and no Discord option (`progress-pc.gc`, TARGET_3DS).
+
 ## Where it goes
 
 - 3DS: `sdmc:/3ds/jak1/config.ini`.

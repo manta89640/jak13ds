@@ -1573,13 +1573,47 @@
     (.mov v0-0 vf23)
     v0-0))
 
+(#when TARGET_3DS
+  (defun pc-3ds-draw-string-scaled ((str string) (buf dma-buffer) (ctxt font-context) (scale float))
+    "(AI-assisted) 3DS: draw-string, scale times as big around the context's origin (the same
+     scaling as print-game-text and draw-string-xy-scaled)."
+    (let ((orig-mat-x-scale (-> *font-default-matrix* vector 0 x))
+          (orig-mat-y-scale (-> *font-default-matrix* vector 1 y))
+          (orig-x-scale (-> *video-parms* relative-x-scale))
+          (orig-y-scale (-> *video-parms* relative-y-scale))
+          (orig-x-recip (-> *video-parms* relative-x-scale-reciprical))
+          (orig-y-recip (-> *video-parms* relative-y-scale-reciprical))
+          (width 0.0))
+      (*! (-> *font-default-matrix* vector 0 x) scale)
+      (*! (-> *font-default-matrix* vector 1 y) scale)
+      (*! (-> *video-parms* relative-x-scale) scale)
+      (*! (-> *video-parms* relative-y-scale) scale)
+      (set! (-> *video-parms* relative-x-scale-reciprical) (/ 1.0 (-> *video-parms* relative-x-scale)))
+      (set! (-> *video-parms* relative-y-scale-reciprical) (/ 1.0 (-> *video-parms* relative-y-scale)))
+      (set! width (draw-string str buf ctxt))
+      (set! (-> *font-default-matrix* vector 0 x) orig-mat-x-scale)
+      (set! (-> *font-default-matrix* vector 1 y) orig-mat-y-scale)
+      (set! (-> *video-parms* relative-x-scale) orig-x-scale)
+      (set! (-> *video-parms* relative-y-scale) orig-y-scale)
+      (set! (-> *video-parms* relative-x-scale-reciprical) orig-x-recip)
+      (set! (-> *video-parms* relative-y-scale-reciprical) orig-y-recip)
+      width)))
+
 (defun draw-string-xy ((str string) (buf dma-buffer) (x int) (y int) (color font-color) (flags font-flags))
   "Draw a string at the given xy location."
-  (let ((context (new 'stack 'font-context *font-default-matrix* x y 0.0 color flags))) (draw-string str buf context)))
+  (let ((context (new 'stack 'font-context *font-default-matrix* x y 0.0 color flags)))
+    ;; og:preserve-this (AI-assisted) 3DS: the text size for the top screen (font-h.gc)
+    (#if TARGET_3DS
+      (let ((scale (pc-3ds-text-scale 1.0 flags)))
+        (if (= scale 1.0) (draw-string str buf context) (pc-3ds-draw-string-scaled str buf context scale)))
+      (draw-string str buf context))))
 
 ;; Added for PC port
 (defun draw-string-xy-scaled ((str string) (buf dma-buffer) (x int) (y int) (color font-color) (flags font-flags) (scale float))
   "Draw a string at the given xy location, with the given scale."
+  ;; og:preserve-this (AI-assisted) 3DS: the text size for the top screen (font-h.gc)
+  (#when TARGET_3DS
+    (set! scale (pc-3ds-text-scale scale flags)))
   (let* ((font-ctxt (new 'stack 'font-context *font-default-matrix* x y 0.0 color flags))
          (scaled-width (* (-> font-ctxt width) scale))
          (scaled-height (* (-> font-ctxt height) scale))

@@ -1969,7 +1969,12 @@
     (set! *PC-CELL-X-ADJUST* (pc-sprite-adjust-cell-x (-> *pc-settings* aspect-ratio)))
     (set! *PC-CELL-TEXT-X-ADJUST* (pc-sprite-adjust-cell-text-x (-> *pc-settings* aspect-ratio)))
     (set! *PC-BUZZER-TEXT-X-ADJUST* (pc-sprite-adjust-buzzer-text-x (-> *pc-settings* aspect-ratio)))
-    (set! *PC-OPTIONS-TEXT-X-ADJUST* (pc-sprite-adjust-options-text-x (-> *pc-settings* aspect-ratio))))
+    (set! *PC-OPTIONS-TEXT-X-ADJUST* (pc-sprite-adjust-options-text-x (-> *pc-settings* aspect-ratio)))
+    ;; og:preserve-this (AI-assisted) 3DS: the circle icon and its OPTIONS label further left, room
+    ;; for the label at the 3DS text size (font-h.gc pc-3ds-text-scale)
+    (#when TARGET_3DS
+      (-! *PC-CIRCLE-X-ADJUST* 14.0)
+      (-! *PC-OPTIONS-TEXT-X-ADJUST* 14.0)))
   (when (= video-mode 'pal)
     (set! (-> this icons 5 scale-y) (* 1.15 (-> this icons 5 scale-y)))
     (set! (-> this icons 4 scale-x) (* 1.05 (-> this icons 4 scale-x)))
@@ -1979,6 +1984,9 @@
   (none))
 
 (defmethod draw-progress ((this progress))
+  ;; og:preserve-this (AI-assisted) 3DS: the 3DS buttons for the PS2 icons (progress-draw.gc)
+  (#when TARGET_3DS
+    (pc-3ds-button-icons))
   (let ((f30-0 (+ -409.0 (-> this particles 2 init-pos x) (* 0.8 (the float (-> this left-x-offset)))))
         (s5-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 0 (-> this transition-offset))))
     (let ((f28-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 1.0 (-> this transition-percentage-invert))))
@@ -2116,6 +2124,35 @@
   0
   (none))
 
+;; og:preserve-this (AI-assisted) 3DS: the options menus without the PC's: no graphic options
+;; (window, resolution, display, V-sync, aspect ratio, MSAA, frame rate, the PS2 options: config.ini
+;; sets the 3DS renderer), no input options (keyboard, mouse, controller choice and binds: the 3DS's
+;; buttons; its camera options stay, straight from the game options) and no Discord. The menus share
+;; the PC menus' options (their value-to-modify included).
+(#when TARGET_3DS
+  (define *main-options-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (define *options-title-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (define *game-options-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (define *misc-options-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (defun pc-3ds-options ((dst (array game-option)) (src (array game-option)))
+    "dst = src without the options the 3DS doesn't have (input options: its camera options)."
+    (let ((n 0))
+      (dotimes (i (min (-> src length) (-> dst allocated-length)))
+        (let ((o (-> src i)))
+          (case (-> o name)
+            (((text-id graphic-options) (text-id discord-rpc)) #f)
+            (((text-id input-options)) (set! (-> dst n) (-> *input-options* 0)) (+! n 1))
+            (else (set! (-> dst n) o) (+! n 1)))))
+      (set! (-> dst length) n))
+    dst)
+  (defun pc-3ds-options-menus ()
+    (set! (-> *options-remap* (progress-screen settings))
+          (pc-3ds-options *main-options-3ds* (-> *options-remap* (progress-screen settings))))
+    (set! (-> *options-remap* (progress-screen settings-title)) (pc-3ds-options *options-title-3ds* *options*))
+    (set! (-> *options-remap* (progress-screen game-settings)) (pc-3ds-options *game-options-3ds* *game-options-pc*))
+    (set! (-> *options-remap* (progress-screen misc-options)) (pc-3ds-options *misc-options-3ds* *misc-options*))
+    (none)))
+
 (defun init-game-options ((obj progress))
   "Set the options for all of the menus."
   ;; start off by making them all invalid
@@ -2188,6 +2225,8 @@
   (set! (-> *options-remap* (progress-screen speedrun-options)) *speedrun-options*)
   (set! (-> *options-remap* (progress-screen speedrun-il-options)) *speedrun-il-options*)
   (set! (-> *options-remap* (progress-screen speedrun-cat-ext-options)) *speedrun-cat-ext-options*)
+  (#when TARGET_3DS
+    (pc-3ds-options-menus))
   ;; set default params
   (set! (-> *progress-state* aspect-ratio-choice) (get-aspect-ratio))
   (set! (-> *progress-state* video-mode-choice) (get-video-mode))
