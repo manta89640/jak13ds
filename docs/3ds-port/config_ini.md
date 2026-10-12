@@ -61,6 +61,8 @@ auto_detail = on           # (AI-assisted) shrub / tie distances follow the GPU'
 shrub_distance_max = 120   # (AI-assisted) the far end for shrubs with auto_detail
 tie_distance_scale_max = 3 # (AI-assisted) the far end for small and medium objects with auto_detail
 auto_detail_gpu_ms = 27    # (AI-assisted) the GPU time per frame auto_detail stays under (10-33)
+shrub_scale = 0.8          # (AI-assisted) .c3l v14 files (current converter): each shrub is drawn up to its prototype's PS2 distance (the middle of the PS2's fade-out: the Snowy fort wall ropes 155 m, rope ties 90 m, grass 70 m, flowers 50 m; big bushes the PS2 shows as billboards 70 m) times this, times detail_scale. shrub_distance / shrub_distance_max only apply to older files. Log: [ctr] auto detail T: shrubs N m (v14 files: xK), ...
+shrub_scale_max = 1        # (AI-assisted) the far end for v14 shrubs with auto_detail (1 = the PS2's distances)
                            # shrub_distance, tie_distance_scale and the far mode ties need .c3l files with chunk kinds (the current converter); with older files only detail_scale applies
 
 # ---- what is drawn ----
@@ -126,7 +128,7 @@ raw_cmds = on              # (AI-assisted) draws write their GPU commands themse
 vcache_reuse = off         # (AI-assisted) with raw_cmds: a draw with the same vertices and matrices as the one before keeps the GPU's post-vertex cache (a few command words less). Try on hardware: wrong or jumping vertices on models mean it has to stay off
 tex_cache_clear = always   # (AI-assisted) always (default): every texture bind clears the GPU's texture cache (TEXUNIT_CONFIG bit 16, as citro3d does; ~300 per frame). uploads: binds of level pool textures (texels that never change) skip the clear unless a pool was filled or moved to VRAM since the last one; the first bind of each frame and binds of all other textures (sky, clouds, eyes, HUD, the screen copy) still clear. Hardware only (Azahar has no texture cache): wrong texels would show as stale patches of another texture; pica_bench B2.rebind vs B2.rebind_clr prices the clear. Log: [ctr] textures: ... N texture binds without the cache clear. In gpu_profile = ab
 cb_read_opaque = off       # (AI-assisted) GPUREG_COLORBUFFER_READ = 0 for draws whose color doesn't depend on the framebuffer (opaque, and the sky's blend over the clear color; not with stencil or no-color passes), 0xF again for blended ones, with a framebuffer flush before each switch (citro3d always reads: read = write = the color mask). GBATEK: unknown what read disable does. Use only if pica_bench's B6.cbread0.probe line says bg_ok=1 (the pixels next to a partly covered 8x8 block survive) and B6.cbread0 is faster than B6.untex. In gpu_profile = ab only when on in the config. Log: [ctr] textures: ... N color buffer read switches
-merc_lod_scale = 0.5       # characters switch to their lower detail models at this fraction of the game's distances (0.05 .. 1)
+merc_lod_scale = 1         # characters switch to their lower detail models at this fraction of the game's distances (0.05 .. 1). (AI-assisted) 1 = the PS2's (crates, orbs, lurkers: lod0 to 20 m, lod1 to 40 m from the camera, which is ~13 m behind Jak). Below ~0.7 the objects right next to Jak show their low detail models
 merc_gen_lod = on          # (AI-assisted) models that come with only one detail level (the yeti, flut flut and its platforms, snow ball, spatula, ...) switch to a simplified copy the converter made (same vertices, ~30-65% of the triangles; ctr_level_converter --gen-lod) beyond max(25 m, 12.5 x the model's size) x merc_lod_scale, back 20% nearer (no flicker at the edge). Not Jak, Daxter or models with face animation / rewritten vertices. Needs .c3l files from the current converter (older ones: no effect). Log line (debug): [ctr] merc: ... N with the generated low LOD
 anim_lod = on              # (AI-assisted) actors that weren't drawn last frame and are more than 30 m (plus their size) from both the camera and Jak update their skeleton every 4th frame only. Never Jak, Daxter, cutscenes or actors with joint callbacks. off: every frame, like the PS2
 anim_native = on           # (AI-assisted) the animation decompressor's per-joint work (decompress, normalize) in native code instead of the GOAL code; same results. off: the GOAL versions, to compare
@@ -155,7 +157,7 @@ pica_bench = off           # (AI-assisted) a GPU microbenchmark at boot, before 
 - **Real New 3DS (default):** no file needed. If the frame rate is low, run once with
   `gpu_profile = on` and look for `[ctr] gpu profile: all X ms, level Y, merc Z, sprites ...` in
   the log: it shows which group costs the GPU the most. Then:
-  - level expensive: lower `shrub_distance` (e.g. 35), `draw_distance` (e.g. 300) and
+  - level expensive: lower `shrub_scale` (e.g. 0.6; older levels: `shrub_distance`, e.g. 35), `draw_distance` (e.g. 300) and
     `lod_distance` (e.g. 120), or `detail_scale = 0.7`;
   - sprites expensive: `max_sprites = 500`;
   - turn off `distort` or `envmap` to see what they cost.
@@ -166,8 +168,8 @@ pica_bench = off           # (AI-assisted) a GPU microbenchmark at boot, before 
   with VRAM off the emulator needed ~4 MB more linear memory than the 3DS and levels didn't fit). Azahar doesn't
   model the GPU's speed, so frame rates there say nothing about the GPU on hardware.
 - **Best looking:** `mipmaps = trilinear` (smoother far textures, a little slower),
-  `sprite_max_size = 0`, `merc_lod_scale = 1`, `shrub_distance = 0` (shrubs to 100 m: slower in
-  village2 and rolling).
+  `sprite_max_size = 0`, `shrub_scale = 1` (v14 levels; older ones: `shrub_distance = 0`,
+  shrubs to 100 m: slower in village2 and rolling).
 - **3DS hardware features:** all on by default except `early_depth` and `color16`. The log line `[ctr] textures: ...` shows the
   compact textures (and how many are in the reserved VRAM, how many are radial glows) and the
   last frame's early depth and procedural texture draws; `[ctr] l0-tfrag: visibility hid ...`

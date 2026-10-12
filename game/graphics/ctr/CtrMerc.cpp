@@ -752,6 +752,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (g.low) {
       draws = &model->gen_draws;
       m_stats.gen_lod++;
+#ifndef __3DS__
+      // (AI-assisted) per model statistics: the generated low LOD on its own line
+      static const bool per_model = getenv("CTR_SOFT_MERC_MODELS") != nullptr;
+      if (per_model) {
+        ctr_gpu_soft_bucket((std::string("m:") + name + c3l::kMercGenLodSuffix).c_str());
+      }
+#endif
     }
   }
   for (const auto& draw : *draws) {

@@ -114,6 +114,8 @@ struct CtrLevelData {
   float detail_min[3] = {0, 0, 0}, detail_max[3] = {0, 0, 0};
   bool has_detail = false;
   bool has_vista = false;  // (AI-assisted) c3l v13 vista tier chunks (CHUNK_KIND_VISTA)
+  // (AI-assisted) c3l v14: the shrub chunks' max_dist is their shrubs' PS2 distance
+  bool shrub_ps2_dist = false;
   // (AI-assisted) partial unload: a level only seen from a neighbouring one (far mode: only its
   // far chunks are drawn) frees the meshes of its other chunks after a while (linear memory for
   // the level the camera is in), and reads them again from its file when the camera comes back

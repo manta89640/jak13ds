@@ -622,12 +622,20 @@ void InitMachine_PCPort() {
   {
     float lod_scale = 1.f;
 #ifdef __3DS__
-    lod_scale = 0.5f;
+    // (AI-assisted) default 1: the PS2's distances (was 0.5: with the camera ~13 m behind Jak,
+    // crates and orbs next to him were drawn with their low detail models)
+    lod_scale = 1.f;
     char v[32];
     if (ctr_config_get("merc_lod_scale", v, sizeof(v))) {
       lod_scale = std::clamp((float)atof(v), 0.05f, 1.f);
     }
     lg::info("merc LOD distances x{:.2f} (config.ini merc_lod_scale)", lod_scale);
+#else
+    // (AI-assisted) host runs of the 3DS GOAL code (soft GPU tests): OPENGOAL_MERC_LOD_SCALE
+    if (const char* e = getenv("OPENGOAL_MERC_LOD_SCALE")) {
+      lod_scale = std::clamp((float)atof(e), 0.05f, 1.f);
+      lg::info("merc LOD distances x{:.2f} (OPENGOAL_MERC_LOD_SCALE)", lod_scale);
+    }
 #endif
     u32 bits;
     memcpy(&bits, &lod_scale, 4);

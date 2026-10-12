@@ -41,6 +41,12 @@ struct CtrSettings {
   bool auto_detail = true;
   float shrub_distance_max = 120.f;
   float tie_distance_scale_max = 3.f;
+  // (AI-assisted) .c3l v14 (c3l::kShrubPs2DistVersion): each shrub is drawn up to its prototype's
+  // PS2 distance (the middle of its PS2 fade: the fort wall ropes 155 m, grass 60-75 m) times
+  // shrub_scale (growing toward shrub_scale_max with auto_detail), times detail_scale.
+  // shrub_distance / shrub_distance_max are for older files.
+  float shrub_scale = 0.8f;
+  float shrub_scale_max = 1.f;
   float auto_detail_gpu_ms = 27.f;
   // renderers
   bool merc = true;
@@ -73,8 +79,9 @@ struct CtrSettings {
   // (c3l::kMercGenLodSuffix: same vertices, ~40-60% of the triangles) beyond max(25 m, 12.5 x the
   // model's size) x merc_lod_scale. Needs .c3l files from a converter with --gen-lod
   bool merc_gen_lod = true;
-  // config merc_lod_scale (also read by kmachine.cpp for the game's own LOD distances)
-  float merc_lod_scale = 0.5f;
+  // config merc_lod_scale (also read by kmachine.cpp for the game's own LOD distances).
+  // (AI-assisted) default 1 (the PS2's distances; was 0.5)
+  float merc_lod_scale = 1.f;
   // (AI-assisted) config distort_copy = rows | full. rows: the distorter's screen copy covers only
   // the 8-pixel columns of tile rows its sprites read, the copy texture goes to VRAM when there is
   // room, and distort sprites under 8 pixels are left out (no copy at all when none is left).

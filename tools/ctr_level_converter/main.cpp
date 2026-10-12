@@ -53,6 +53,10 @@ struct Options {
   // shrubs (grass, bushes, small plants): drawn up to this distance (meters), in chunks of this size
   float shrub_dist = 100.f;
   float shrub_cell = 50.f;
+  // (AI-assisted) v14: each shrub prototype is drawn up to its PS2 distance (shrub_ps2_dists.inc:
+  // the middle of its PS2 fade, (x + w) / 2), shrubs grouped into chunks by distance class
+  // (kShrubClassMeters); off: all up to shrub_dist (v13)
+  bool shrub_ps2_dist = true;
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
   // (AI-assisted) merc models whose skeleton group has only lod0 (no -lod1 / -lod2 model in the
@@ -158,6 +162,7 @@ struct SrcTri {
   u32 detail = 0;   // 1, 2: part of a small/medium object (drawn up to detail/medium_dist),
                     // 3: shrub (drawn up to shrub_dist)
   u32 tier = 0;     // c3l::Chunk::lod_tier
+  u32 sclass = 0;   // (AI-assisted) shrubs: distance class (kShrubClassMeters), 0: shrub_dist
   u16 vis = 0xffff;  // (AI-assisted) drawable id in the level's visibility string (c3l::VisRun)
                      // (vista tier: the source chunk)
 };
@@ -170,6 +175,41 @@ struct DrawKey {
     return std::tie(mode, texture, kind) < std::tie(o.mode, o.texture, o.kind);
   }
 };
+
+// (AI-assisted) the PS2 shrub distances, see shrub_ps2_dists.inc
+struct ShrubPs2Dist {
+  const char* level;
+  const char* proto;
+  float x, w;  // meters: full detail up to x, fading out (or a billboard) up to w
+};
+const ShrubPs2Dist kShrubPs2Dists[] = {
+#include "shrub_ps2_dists.inc"
+};
+// shrub distance classes (meters, index = SrcTri::sclass; 0 unused): a chunk holds one class
+constexpr float kShrubClassMeters[] = {0.f, 35.f, 50.f, 70.f, 90.f, 120.f, 160.f, 400.f};
+constexpr int kShrubClasses = sizeof(kShrubClassMeters) / sizeof(kShrubClassMeters[0]);
+// prototypes the PS2 draws as billboards beyond w (big bushes, w = 10 m): no billboards here, the
+// whole shrub up to this distance (v13's shrub distance plus its cells' margin)
+constexpr float kShrubBillboardMeters = 70.f;
+
+// distance class of a shrub prototype of a level (0: not in the table)
+int shrub_class(const std::string& level, const std::string& proto, float* meters) {
+  for (const auto& e : kShrubPs2Dists) {
+    if (level == e.level && proto == e.proto) {
+      const float d = e.w <= e.x ? kShrubBillboardMeters : 0.5f * (e.x + e.w);
+      int best = 1;
+      for (int c = 2; c < kShrubClasses; c++) {
+        if (std::abs(std::log(kShrubClassMeters[c] / d)) <
+            std::abs(std::log(kShrubClassMeters[best] / d))) {
+          best = c;
+        }
+      }
+      *meters = d;
+      return best;
+    }
+  }
+  return 0;
+}
 
 struct Converter {
   Options opt;
@@ -399,6 +439,7 @@ struct Converter {
   size_t wind_tris = 0;
 
   size_t shrub_tris = 0;
+  size_t shrub_class_tris[kShrubClasses] = {};  // (AI-assisted)
   void add_shrub_tree(tfrag3::ShrubTree& tree) {
     tree.unpack();
     const u32 base = verts.size();
@@ -424,9 +465,21 @@ struct Converter {
       const u32 key = key_id(DrawKey{d.mode.as_int(), tex, 2});
       const size_t first_tri = tris.size();
       add_strips(tree.indices, d.first_index_index, d.num_indices, base, key);
+      // (AI-assisted) shrub_ps2_dist: the prototype's distance class
+      int sclass = 0;
+      if (opt.shrub_ps2_dist && d.proto_idx < tree.proto_names.size()) {
+        float m = 0;
+        sclass = shrub_class(level->level_name, tree.proto_names[d.proto_idx], &m);
+        if (!sclass) {
+          lg::warn("{}: shrub {} has no PS2 distance, drawn up to {} m", level->level_name,
+                   tree.proto_names[d.proto_idx], opt.shrub_dist);
+        }
+      }
       for (size_t i = first_tri; i < tris.size(); i++) {
         tris[i].detail = 3;
+        tris[i].sclass = sclass;
       }
+      shrub_class_tris[sclass] += tris.size() - first_tri;
       shrub_tris += tris.size() - first_tri;
     }
   }
@@ -1796,7 +1849,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       cz += cv.verts[t.v[k]].z;
     }
     const float cell = cell_of_detail((int)t.detail);
-    auto key = std::make_tuple((int)(t.detail + 4 * t.tier), (int)std::floor(cx / 3 / cell),
+    // (AI-assisted) detail + 4 * tier + 64 * shrub distance class
+    auto key = std::make_tuple((int)(t.detail + 4 * t.tier + 64 * t.sclass),
+                               (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell),
                                (int)(cv.draw_keys[t.draw_key].kind & 0xff));
     cells[key].push_back(i);
@@ -1862,7 +1917,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   if (opt.vista && !opt.merc_only) {
     bool has_lowres = false;
     for (const auto& cp : plans) {
-      has_lowres |= std::get<0>(cp.key) / 4 == 3;
+      has_lowres |= std::get<0>(cp.key) / 4 % 16 == 3;
     }
     const float vcell = opt.vista_cell * 4096.f;
     std::map<CellKey, std::vector<u32>> vcells;
@@ -1897,7 +1952,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     };
     for (size_t pi = 0; pi < normal_plans && pi < 0xffff; pi++) {
       const auto& cp = plans[pi];
-      const int tier = std::get<0>(cp.key) / 4, detail = std::get<0>(cp.key) % 4;
+      const int tier = std::get<0>(cp.key) / 4 % 16, detail = std::get<0>(cp.key) % 4;
       const int kind = std::get<4>(cp.key);  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
       const bool lowres = tier == 3;
       const bool landmark = tier == 0 && kind == 1 && detail == 0;
@@ -2168,7 +2223,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
 
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
-      ch.lod_tier = std::get<0>(key) / 4;
+      ch.lod_tier = std::get<0>(key) / 4 % 16;
+      const int sclass = std::get<0>(key) / 64;  // (AI-assisted)
       const float cell =
           ch.lod_tier == c3l::kVistaTier ? opt.vista_cell * 4096.f : cell_of_detail(detail);
       ch.lod_center[0] = (std::get<1>(key) + 0.5f) * cell;
@@ -2176,7 +2232,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       ch.lod_center[2] = (std::get<3>(key) + 0.5f) * cell;
       ch.max_dist = detail == 1   ? opt.detail_dist * 4096.f
                     : detail == 2 ? opt.medium_dist * 4096.f
-                    : detail == 3 ? opt.shrub_dist * 4096.f
+                    : detail == 3 ? (sclass ? kShrubClassMeters[sclass] : opt.shrub_dist) * 4096.f
                                   : 0.f;
       // (AI-assisted) Draw::kind 0 tfrag, 1 tie, 2 shrub
       ch.kind = (u32)std::get<4>(key) + c3l::CHUNK_KIND_TFRAG;
@@ -2436,7 +2492,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<u8> buf(sizeof(c3l::Header));
   c3l::Header hdr{};
   memcpy(hdr.magic, c3l::kMagic, 4);
-  hdr.version = c3l::kVersion;
+  // (AI-assisted) --shrub-one-dist: v13 (the shrub chunks don't carry PS2 distances)
+  hdr.version = opt.shrub_ps2_dist ? c3l::kVersion : c3l::kShrubPs2DistVersion - 1;
   strncpy(hdr.level_name, level.level_name.c_str(), sizeof(hdr.level_name) - 1);
   hdr.num_chunks = chunks.size();
   // (AI-assisted) the visibility runs first: the chunks point at them
@@ -2600,6 +2657,18 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
       merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, file.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
+  if (cv.shrub_tris && opt.shrub_ps2_dist) {
+    // (AI-assisted) shrub triangles by distance class
+    std::string cl;
+    for (int c = 0; c < kShrubClasses; c++) {
+      if (cv.shrub_class_tris[c]) {
+        cl += fmt::format(" {}: {}", c ? fmt::format("{} m", kShrubClassMeters[c])
+                                       : fmt::format("{} m (no PS2 distance)", opt.shrub_dist),
+                          cv.shrub_class_tris[c]);
+      }
+    }
+    lg::info("{}: shrub triangles by PS2 distance class:{}", level.level_name, cl);
+  }
   if (merc.cull_draws) {
     // (AI-assisted) merc back face culling marks (mark_merc_cull)
     lg::info("{}: merc culling: {} of {} draws marked ({} of {} triangles, {:.0f}%; {} turned to "
@@ -2749,6 +2818,8 @@ int main(int argc, char** argv) {
   app.add_flag("--no-shrub", opt.no_shrub, "leave out shrubs (grass, bushes, small plants)");
   app.add_option("--shrub-dist", opt.shrub_dist, "shrubs are drawn up to this distance (meters)");
   app.add_option("--shrub-cell", opt.shrub_cell, "chunk grid size for shrubs in meters");
+  app.add_flag("!--shrub-one-dist", opt.shrub_ps2_dist,
+               "(AI-assisted) all shrubs up to --shrub-dist (v13), not each up to its PS2 distance");
   app.add_flag("--no-merc", opt.no_merc, "leave out merc models");
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
   app.add_option("--gen-lod", opt.gen_lod_ratio,

@@ -1084,6 +1084,7 @@ bool CtrLevels::load_file(const fs::path& path,
                                : "no visibility culling");
   }
   out->name = name;
+  out->shrub_ps2_dist = hdr.version >= c3l::kShrubPs2DistVersion;  // (AI-assisted)
   if (!f.read_array(hdr.chunks_offset, hdr.num_chunks, &out->chunks) ||
       !f.read_array(hdr.draw_data_offset, hdr.draw_data_size / sizeof(c3l::Draw), &out->draws)) {
     lg::error("[ctr] {}: truncated file", path.string());
@@ -1308,8 +1309,10 @@ bool CtrLevels::load_file(const fs::path& path,
           if (!ok) {
             ok = true;
             const auto& dr = out->draws[d];
+            // (AI-assisted) the chunk's own copy (idst holds [first, end)): `indices` is empty in
+            // the reader's window mode (chunk_indices), the default
             for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
-              const u16 ix = indices[i];
+              const u16 ix = idst[i - first];
               ok = ix < ch.vertex_count && vv[ix].rgba[3] == 0x80;
             }
           }
@@ -1889,7 +1892,15 @@ float g_detail_t = 0.25f;
 // shrub_distance (GPU-bound levels had 200-300k shrub triangles within the converter's 100 m),
 // ties times tie_distance_scale (most ties stopped at 100 m: pop-in); with auto_detail both move
 // toward their _max values as far as the GPU time allows.
-float chunk_max_dist(const c3l::Chunk& ch, const CtrSettings& s) {
+float chunk_max_dist(const c3l::Chunk& ch, const CtrSettings& s, bool shrub_ps2_dist) {
+  if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2_dist) {
+    // (AI-assisted) c3l v14: the PS2 distance of the chunk's shrubs (their prototypes' class)
+    float k = s.shrub_scale;
+    if (s.auto_detail) {
+      k += (std::max(s.shrub_scale_max, k) - k) * g_detail_t;
+    }
+    return ch.max_dist * k * s.detail_scale;
+  }
   if (ch.kind == c3l::CHUNK_KIND_SHRUB && s.shrub_distance > 0) {
     float d = s.shrub_distance;
     if (s.auto_detail) {
@@ -2363,7 +2374,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     {
       // draw distance; small objects only up close
       float max_dist = vista_chunk ? vista_dist : draw_dist;
-      const float d = chunk_max_dist(ch, settings);
+      const float d = chunk_max_dist(ch, settings, lev.shrub_ps2_dist);
       if (d > 0) {
         max_dist = max_dist > 0 ? std::min(max_dist, d) : d;
       }

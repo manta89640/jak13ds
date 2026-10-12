@@ -26,6 +26,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--detail-radius M`, `--detail-dist M` | 4, 100 | tie instances smaller than the radius only drawn up to the distance |
 | `--medium-radius M`, `--medium-dist M` | 12, 300 | same for medium tie instances |
 | `--shrub-dist M`, `--shrub-cell M` | 100, 50 | shrubs are drawn up to the distance, in chunks of the cell size |
+| `--shrub-one-dist` | off | (AI-assisted) v13 shrubs: all up to `--shrub-dist`. By default (v14) each shrub prototype gets a distance class from its PS2 distances (`tools/ctr_level_converter/shrub_ps2_dists.inc`, from the levels' prototype-bucket-shrub dists: full detail up to x, fading or a billboard up to w): the class nearest (x + w) / 2 of 35, 50, 70, 90, 120, 160, 400 m (70 m for the bushes the PS2 shows as billboards beyond w), shrubs of a cell split into one chunk per class, the class in the chunk's `max_dist` (config `shrub_scale`). Prototypes not in the table: `--shrub-dist`, with a warning |
 | `--no-tie`, `--no-shrub`, `--no-merc` | off | leave tie / shrubs / merc models out. |
 | `--no-tie-winding` | off | (AI-assisted, v13) keep the strips' triangle order. By default every second strip triangle is flipped (consistent winding), and closed tie surfaces are oriented outward and their draws marked `kDrawCullBack` (config `cull_ties`). |
 | `--no-vista` | off | (AI-assisted, v13) no vista tier. By default the far content (low resolution tfrag; ties without a distance limit; the coarse tfrag of levels without low resolution tfrag) is copied into `CHUNK_KIND_VISTA` chunks (lod_tier 4) of `--vista-cell` meters, one draw per texture and mode, each run's `vis` = its source chunk. Never for the interiors (jungleb, maincave, darkcave, robocave, sunken, sunkenb, citadel) |
@@ -61,7 +62,8 @@ What goes in:
   envmapped ties; not the envmap shine passes), with instances already in world space. Small and
   medium instances go to their own chunks with a draw distance.
 - Wind tie (palm trees, plants), baked at rest with their instance matrix.
-- Shrubs (grass, bushes, small plants), in `--shrub-cell` chunks drawn up to `--shrub-dist`.
+- Shrubs (grass, bushes, small plants, ropes), in `--shrub-cell` chunks drawn up to their PS2
+  distance class (v14, see `--shrub-one-dist`) or `--shrub-dist`.
   Their vertex colors are the base color times the time of day color (shrub.vert).
 - Merc models (characters, objects), see "Merc" below.
 - Not converted: hfrag, animated textures (those draws become untextured).
@@ -134,7 +136,9 @@ Chunk (80 bytes)
   float origin[3], scale  world = origin + pos * scale  (game units: 4096 = 1 m), see "Positions"
   u32 first_vertex, vertex_count   (<= 65536, so indices fit in u16)
   u32 first_draw, draw_count
-  float max_dist          not drawn further than this from the camera (0 = no limit)
+  float max_dist          not drawn further than this from the camera (0 = no limit). (AI-assisted)
+                          v14 shrub chunks: their shrubs' PS2 distance class (times config
+                          shrub_scale); before v14 every shrub chunk had --shrub-dist
   u32 lod_tier            0 always (tie), 1 near tfrag, 2 far tfrag, 3 lowres tfrag
   float lod_center[3]     tiers 1/2: the grid cell center used to pick one of the two
   u32 vis_runs_offset, vis_run_count   (v10) the chunk's VisRun list
