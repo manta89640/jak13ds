@@ -250,9 +250,10 @@ struct CtrSettings {
   bool shader_groups = false;
   // (AI-assisted) shader_opt: the shorter vertex programs (platform/3ds/shaders/ctr_*_opt.v.pica:
   // level meshes 21 -> 10 instructions and 4 -> 3 output registers, merc 53 -> 33, merc shine
-  // 56 -> 33, PS2 ocean 14 -> 9 and 12 -> 6). Same picture in Azahar. Off until priced and proven
-  // on hardware: pica_bench B3.mesh_opt / B3.skin_opt (and B3.o3p for the packed output register)
-  bool shader_opt = false;
+  // 56 -> 33, PS2 ocean 14 -> 9 and 12 -> 6). Same picture in Azahar. On (the user's decision,
+  // Oct 12: "we will keep the optimised shaders on"); pica_bench B3.mesh_opt / B3.skin_opt price
+  // it. It wins over shader_groups when both are on (the opt programs aren't in the groups)
+  bool shader_opt = true;
   // (AI-assisted) cmd_dedup: register writes that would give a register the value it already has
   // are left out of the command list (texture unit 0's type at a texture change). The same
   // registers, the same picture; on. cmd_dedup_draw: the raw draws' PRIMITIVE_CONFIG mode and

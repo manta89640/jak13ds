@@ -126,7 +126,7 @@ int ctr_gpu_shader_groups_ready(void);
 /* (AI-assisted) config.ini shader_opt (each frame after ctr_gpu_frame_begin; gpu_profile = ab
  * switches it): the shorter ctr_*_opt.v.pica programs for level meshes, merc and the PS2 ocean
  * (fewer instructions per vertex, fog rows folded into the mesh matrix, texcoord1 packed into
- * texcoord0's output register). shader_groups wins when both are on. ctr_gpu_shader_opt_ready:
+ * texcoord0's output register). It wins over shader_groups when both are on. ctr_gpu_shader_opt_ready:
  * they loaded. */
 void ctr_gpu_set_shader_opt(int on);
 int ctr_gpu_shader_opt_ready(void);

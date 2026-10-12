@@ -925,10 +925,10 @@ static void use_program(int prog) {
  * for the rest of the frame. Every cache of what the GPU has is dropped with a change. */
 static int s_want_groups, s_want_opt;
 static void prog_set_select(void) {
-  /* (AI-assisted) shader_groups wins over shader_opt (the opt programs aren't in the groups: group
-   * E has no uniform room left for the mesh fog rows) */
-  ProgSet* want = s_want_groups && s_ps[1].ok ? &s_ps[1]
-                  : (s_want_opt && s_ps[2].ok ? &s_ps[2] : &s_ps[0]);
+  /* (AI-assisted) shader_opt wins over shader_groups (the opt programs aren't in the groups: group
+   * E has no uniform room left for the mesh fog rows; shader_opt is the default since Oct 12) */
+  ProgSet* want = s_want_opt && s_ps[2].ok ? &s_ps[2]
+                  : (s_want_groups && s_ps[1].ok ? &s_ps[1] : &s_ps[0]);
   if (!g.ready || want == g.ps) {
     return;
   }
