@@ -27,6 +27,7 @@
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/c3l_reader.h"
+#include "game/graphics/ctr/c3v_format.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 /*! (AI-assisted) c3l v12: an effect whose vertices the game rewrites (c3l::MercModEffect). */
@@ -143,7 +144,30 @@ struct CtrLevelData {
   std::vector<u8> chunk_state;
   bool was_far = false;
   u32 generation = 0;             // tells loads of the same level apart
+  // (AI-assisted) config fine_vis: the level's .c3v sidecar (c3v_format.h), read at load when it
+  // matches the .c3l (nullptr: none, or another conversion's)
+  struct FineVis {
+    c3v::Header hdr{};
+    std::vector<c3v::CellRun> cells;
+    std::vector<u32> sets;              // hdr.num_sets * hdr.set_words
+    std::vector<u32> chunk_first_unit;  // per covered chunk (hdr.num_chunks), and the end
+    std::vector<u8> chunk_runs;  // per covered chunk: its runs (chunk_first_run...) are its units
+    // the set of the camera's cell (-1: none), and per covered chunk what that set hides: 0
+    // nothing, 1 all of it, 2 some of its units (CtrTfragRenderer::draw_level)
+    int set = -1;
+    std::vector<u8> chunk_hidden;
+    u32 bytes() const {
+      return (u32)(cells.size() * sizeof(c3v::CellRun) + sets.size() * 4 +
+                   chunk_first_unit.size() * 4 + chunk_runs.size() + chunk_hidden.size());
+    }
+  };
+  std::unique_ptr<FineVis> fine;
 };
+
+/*! (AI-assisted) host --ctr-gfx with env CTR_FINE_VIS_CHECK: the level pieces fine_vis hid this
+ * frame are drawn again against the finished frame's depth, counting their pixels that would have
+ * been seen (a culling error), and logged (log_now: the totals). Before ctr_gpu_frame_end. */
+void ctr_level_fine_vis_check(u64 frame, bool log_now);
 
 /*! DrawMode (tfrag3 draw settings) to ctr_gpu state. */
 ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex);
@@ -399,6 +423,13 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // chunks tested run by run); statistics: runs tested, triangles and chunks the view test hid
   std::vector<u8> m_run_shown;
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
+  // (AI-assisted) fine_vis: the level's set this frame (nullptr: none); statistics: chunks and
+  // triangles it hid (that the other tests drew), level draws with a set / with a .c3v
+  const CtrLevelData::FineVis* m_fine = nullptr;
+  u64 m_fine_chunks = 0, m_fine_tris = 0, m_fine_frames = 0, m_fine_levels = 0;
+  // (AI-assisted) host --ctr-gfx, env CTR_FINE_VIS_CHECK: the runs fine_vis hid this level draw
+  // (chunk, run; run ~0u: all of the chunk), checked against the frame's depth at its end
+  std::vector<std::pair<u32, u32>> m_fine_hidden;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
   // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
   u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;

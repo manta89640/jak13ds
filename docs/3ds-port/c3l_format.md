@@ -275,3 +275,51 @@ u8 masks[] (one per fragment: 1 = unpacked).
   model's vertices on the render thread (`apply_mod`, the mesh's second vertex buffer with the
   pipeline). The model's position scale gets the blend shapes' 1.5x room for the waves. v11 files
   have none: those models stay at their base pose, as before.
+
+## Fine visibility (.c3v)
+
+(AI-assisted.) A sidecar per level, `<level>.c3v` next to `<level>.c3l`, layout in
+`game/graphics/ctr/c3v_format.h`, read by `CtrLevels` with config `fine_vis = on`. It is not part
+of the .c3l: it is made from the finished .c3l by `ctr_vis_builder` and keyed to it by a
+fingerprint of the chunk, draw and visibility run tables (`c3v::fine_vis_level_hash`: chunk bounds,
+quantization, vertex and draw counts, LOD fields, kinds, draw index counts, runs; not textures,
+draw modes or the index order within a run). A .c3l converted again with other tables makes the
+runtime ignore its old .c3v (warning `<level>.c3v not used: made from another conversion`) and draw
+the level as without one, until the tool is run again.
+
+```sh
+build/tools/ctr_vis_builder --all out/jak1/c3l          # every level: <level>.c3v next to each .c3l
+build/tools/ctr_vis_builder out/jak1/c3l/maincave.c3l   # one level
+```
+
+After a reconvert of the .c3l files (any converter change), run `--all` again on the new folder.
+Levels where it finds nothing to do (no units, floors or occluders) get no file (an old one is
+removed). Time: ~5 min per level on 11 cores at the defaults (all cores; `--threads`).
+
+Units: the chunks before the vista chunks (vista tiers are never hidden by it); a chunk's units are
+its visibility runs, or (chunks without) its draws in pieces of 288 indices: the pieces run_culling
+makes at load. Cells: `--cell` meters (4), where the camera can be: within `--above` (14) / `--below`
+(2) meters of a roughly horizontal tfrag / tie surface, `--spread` (2) cells sideways; or with
+`--camera <files>` (lines `level x y z`, meters) only around recorded camera positions
+(`--cam-radius 6`, `--cam-up 3`, `--cam-down 3`). Samples: each cell's corners and center; every
+point of a cell is within eps = 0.56 cell of one.
+
+Occlusion (conservative, CPU): from each sample, the level's opaque tfrag (drawn opaque, depth
+tested and written, no alpha test that can fail, no distance limit, not back face culled; detailed
+tier only within 160 m of its lod_center, coarse only beyond 240 m: what lod_distance 200 draws for
+certain) within 400 m into a cube of 64x64 depth maps, in four layers (the nearest occluder beyond
+1.5, 4, 8, 16 eps). Ties, shrubs, merc (doors, platforms), blended and alpha tested geometry never
+hide anything. A camera moved by up to eps sees at most asin(eps / d) around a direction at depth d:
+a pixel hides only what is further than the largest depth within asin(eps / dmin) of it (dmin: the
+nearest depth there, iterated), +2% + 0.25 m; a window with an empty direction hides nothing. A
+unit is hidden from a sample when every pixel its box (then each of its triangles' boxes) covers
+hides it; a cell's set is what any of its samples may see. Neighbouring cells with similar sets are
+merged until the sets fit `--budget-kb` (128). The one case this can't see: a hole in a far wall
+right behind a near object, seen by none of the cell's 9 samples.
+
+Runtime: the cell of the camera's own position (cam.trans), each frame; no cell (cutscene cameras
+outside the cells, warps), far mode, an incomplete load, draw_distance < 400 m + 2 eps or
+lod_distance outside 178..218 m: nothing more hidden. Host check: `CTR_FINE_VIS_CHECK=1` with
+`--ctr-gfx` draws what fine_vis hid again at the end of each frame against its depth and counts the
+pixels that would have been seen (log `[ctr] fine_vis check:`; any pixel is a culling error);
+`CTR_FINE_VIS_ORACLE=1` reports how many drawn triangles were in runs with no pixel seen.
