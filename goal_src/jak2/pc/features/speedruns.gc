@@ -614,3 +614,33 @@
   ;; render menu / handle inputs
   (update-menu! (the-as popup-menu (ppointer->process (-> this popup-menu))))
   (none))
+
+(defun pad-script-continue ((name string))
+  "(AI-assisted) The pad script's 'continue NAME' (game/sce/pad_script.h, tests only): a new game
+   at that continue point, from anywhere, including the title screen. The game state is the
+   speedrun mode's act 2 start (city-oracle-level0-training and ruins-enemy-resolution closed), so
+   Haven City has its mid-game crowds and traffic. The pad script calls this while the game reads
+   the pads, so the work is done by a process on the next frame."
+  (process-spawn-function process
+    (lambda ((cont-name string))
+      (suspend)
+      (format 0 "pad-script-continue: ~A~%" cont-name)
+      (kill-by-name "title-control" *active-pool*)
+      (set! (-> *game-info* mode) 'debug)
+      (initialize! *game-info* 'game (the game-save #f) (the string #f))
+      (set! (-> *game-info* mode) 'play)
+      (task-close! "city-oracle-level0-training")
+      (task-close! "ruins-enemy-resolution")
+      (format 0 "pad-script-continue: start ~A~%" (get-continue-by-name *game-info* cont-name))
+      (start 'play (get-continue-by-name *game-info* cont-name))
+      (set-master-mode 'game)
+      ;; the title level is still loaded until the continue's levels replace it, and its entity
+      ;; spawns a new title-control, which puts Jak back in target-title. Keep killing it.
+      (dotimes (i 1200)
+        (kill-by-name "title-control" *active-pool*)
+        (suspend))
+      (format 0 "pad-script-continue: done ~A~%" *target*)
+      (none))
+    name
+    :from *pc-dead-pool* :to *pc-pool*)
+  0)
