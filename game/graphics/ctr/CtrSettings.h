@@ -224,6 +224,11 @@ struct CtrSettings {
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)
   bool neighbour_vis = true;
+  // (AI-assisted) the levels' finer precomputed visibility (<level>.c3v next to the .c3l, made by
+  // ctr_vis_builder): per cell of the camera's space, the level pieces that may be seen from there;
+  // the others aren't drawn (static tfrag / tie / shrub only; merc as before). A level without the
+  // file, or a camera outside the cells, draws as without it
+  bool fine_vis = true;
   // (AI-assisted) the levels' low resolution tfrag (the game's far scenery) as vista: also in near
   // mode, outside the loaded levels' detailed areas (+50 m), out to vista_distance, with a haze
   // towards the fog color from draw_distance on instead of the draw distance fog (that one is

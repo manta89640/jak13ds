@@ -665,6 +665,12 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out);
 void ctr_gpu_soft_bucket(const char* name);
 /* (AI-assisted) the name the draws are counted under now */
 const char* ctr_gpu_soft_bucket_name(void);
+/* (AI-assisted) occlusion query (CTR_FINE_VIS_CHECK): between begin and end, draws write nothing
+ * and count their fragments that pass the alpha, stencil and depth tests (count: so far); the
+ * frame's statistics leave them out */
+void ctr_gpu_soft_query_begin(void);
+long ctr_gpu_soft_query_count(void);
+void ctr_gpu_soft_query_end(void);
 #endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);

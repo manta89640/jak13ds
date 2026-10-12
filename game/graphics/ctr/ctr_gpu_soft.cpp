@@ -279,6 +279,11 @@ void sky_hook(const ctr_draw_state* st) {
   }
 }
 
+// (AI-assisted) ctr_gpu_soft_query_begin: count the fragments that pass, write nothing
+bool s_query = false;
+long s_query_px = 0;
+ctr_gpu_stats s_query_saved{};
+
 void shade_pixel(const ctr_draw_state& st,
                  int px,
                  int py,
@@ -321,7 +326,7 @@ void shade_pixel(const ctr_draw_state& st,
   } else {
     // untextured: the GS outputs the vertex color as it is (see ctr_gpu_citro3d.c)
   }
-  const bool ss_on = softstats::enabled() != 0;
+  const bool ss_on = softstats::enabled() != 0 && !s_query;
   if (ss_on) {
     softstats::cur->px++;
     softstats::od[px + py * kW]++;
@@ -346,9 +351,13 @@ void shade_pixel(const ctr_draw_state& st,
     return;
   }
   if (!test(st.ztest, z, g_soft.depth[idx])) {
-    if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR)) {
+    if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR) && !s_query) {
       *sten = 0;
     }
+    return;
+  }
+  if (s_query) {
+    s_query_px++;  // (AI-assisted) occlusion query: counted, nothing written
     return;
   }
   if (sten) {
@@ -1575,6 +1584,21 @@ void ctr_gpu_set_depth_far(int on) {
 void ctr_gpu_set_skip_color_clear(int on) {
   s_skip_color_clear = on != 0;
 }
+void ctr_gpu_soft_query_begin(void) {
+  s_query = true;
+  s_query_px = 0;
+  s_query_saved = g_soft.cur;
+}
+
+long ctr_gpu_soft_query_count(void) {
+  return s_query_px;
+}
+
+void ctr_gpu_soft_query_end(void) {
+  s_query = false;
+  g_soft.cur = s_query_saved;
+}
+
 const char* ctr_gpu_soft_bucket_name(void) {
   return softstats::cur_name.c_str();
 }

@@ -81,6 +81,9 @@ struct AbSwitch {
 const AbSwitch kAbSwitches[] = {
     {"run_culling", [](CtrSettings& s, bool on) { s.run_culling = on; },
      [](const CtrSettings& s) { return s.run_culling; }},
+    // (AI-assisted) the finer precomputed visibility (.c3v files; loaded with fine_vis on)
+    {"fine_vis", [](CtrSettings& s, bool on) { s.fine_vis = on; },
+     [](const CtrSettings& s) { return s.fine_vis; }},
     {"cull_ties", [](CtrSettings& s, bool on) { s.cull_ties = on; },
      [](const CtrSettings& s) { return s.cull_ties; }},
     // the far scenery: lowres_vista and the vista tier (vista_distance 0: none)
@@ -625,6 +628,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #endif
   ctr_gpu_phase(CTR_PH_HUD);  // (AI-assisted, gpu-rt) gpu_breakdown: the fade with the HUD
   draw_pmode_fade();
+  ctr_level_fine_vis_check(m_rs.frame_idx, m_rs.log_now);  // (AI-assisted) host check only
   const double t2 = ctr_gpu_time_ms();
   ctr_gpu_frame_end();
   ctr_gpu_diag_stage("after frame_end: stats, logs");
