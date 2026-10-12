@@ -768,8 +768,12 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       if (!f[0] && !f[1] && !f[2]) {
         continue;
       }
+      // (AI-assisted) as Merc2: fade / 255, which emerc.frag doubles (texture * fade * 2), so the
+      // game's 0x80 adds the envmap texture once (GS modulate: texture * 0x80 / 128). This was
+      // fade / 128, a shine twice as bright as on PC/PS2 (the HUD orb and power cell icons, whose
+      // envmap fade draw-bones-hud-merc sets to 0x80, and every envmapped model in the world).
       for (int c = 0; c < 4; c++) {
-        fade[c] = f[c] / 128.f;  // GS units: 0x80 = 1.0
+        fade[c] = f[c] / 255.f;
       }
     }
     // the draws of a model with at most 24 bones share one palette: made once

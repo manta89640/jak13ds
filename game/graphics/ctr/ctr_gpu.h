@@ -463,7 +463,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
                           int index_count);
 
 /* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space
- * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, 1.0 = GS 0x80). */
+ * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, GS value / 255 as
+ * in Merc2, so 0x80 = texture x 1). */
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
                               int palette_count, const float fade[4], int mesh, int first_index,
                               int index_count);
