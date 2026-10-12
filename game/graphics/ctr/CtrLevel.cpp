@@ -8,6 +8,7 @@
 #include "CtrLevel.h"
 
 #include "game/graphics/ctr/CtrSettings.h"
+#include "game/graphics/ctr/CtrImpostor.h"
 
 #include <algorithm>
 #include <array>
@@ -2215,6 +2216,9 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
              (double)m_cull_tris / m_cull_frames, m_cull_frames);
     m_cull_runs = m_cull_tris = m_cull_chunks = m_cull_frames = 0;
   }
+  if (rs.log_now) {
+    ctr_impostors().log_stats();  // (AI-assisted)
+  }
   if (rs.log_now && m_vista_frames) {
     lg::info("[ctr] {}: vista {:.1f} chunks {:.0f} tris, low resolution chunks in near mode {:.1f} "
              "per level draw ({} level draws)",
@@ -2379,6 +2383,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       const bool straddles = cross != 0;
       bool partly = false;
+      bool runs_valid = false;  // (AI-assisted) m_run_shown holds this chunk's runs (impostors)
       // (AI-assisted) ties always; tfrag with the level's own string (not its low resolution
       // version), or every tier with a neighbour's (neighbour_vis)
       const bool vis_test = !vista_tier && m_vis && ch.vis_run_count &&
@@ -2434,6 +2439,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           shown += s;
         }
         m_cull_tris += view_tris;
+        runs_valid = true;
         if (!shown) {
           if (view_hidden) {
             m_cull_chunks++;
@@ -2450,6 +2456,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       VisibleChunk& vc = m_visible.emplace_back();
       vc.chunk = (u32)ci;
       vc.partly = partly;
+      vc.runs_valid = runs_valid;
       vc.vista = vista_chunk;
       vc.band = 0;
       vc.nofog = false;
@@ -2625,6 +2632,30 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   }
 
+  // (AI-assisted) impostors: far tie groups shown as cards (their runs hidden here), the new
+  // pictures of them drawn now (CtrImpostor.h)
+  CtrImpostors& impostors = ctr_impostors();
+  {
+    CtrImpostors::Camera ic;
+    ic.R = R;
+    ic.trans = cam.trans;
+    ic.y_scale = kYScale;
+    ic.fog0 = fog0;
+    ic.fog1 = fog1;
+    for (int c = 0; c < 3; c++) {
+      ic.fog_rgb[c] = rs.fog_color[c];
+    }
+    impostors.begin_level(lev, ic, rs.frame_idx);
+    if (impostors.active()) {
+      for (auto& vc : m_visible) {
+        if (!vc.vista) {
+          impostors.chunk(vc.chunk, vc.clip, vc.runs_valid, m_run_shown.data(), &vc.partly);
+        }
+      }
+      impostors.finish_chunks();
+    }
+  }
+
   // The draws whose order doesn't matter (opaque, depth written) sorted by texture and state,
   // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
   // of their textures. Then the others (blending, decals) in their order, over the opaque ones.
@@ -2750,6 +2781,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   for (u32 di : *main_lists[1]) {
     draw(di);
   }
+  impostors.draw_cards();  // (AI-assisted) opaque: before the blended draws
   for (u32 di : *main_lists[2]) {
     draw(di);
   }

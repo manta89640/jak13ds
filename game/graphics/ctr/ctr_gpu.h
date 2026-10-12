@@ -215,6 +215,28 @@ int ctr_gpu_copy_screen(void);
  * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
  * keep what an earlier copy left: only read the screen in x0..x1. */
 int ctr_gpu_copy_screen_part(float x0, float x1);
+/* (AI-assisted) Render to texture (impostors, CtrImpostor): an RGBA8 texture the GPU draws into,
+ * in linear memory (never VRAM: the level texture pools keep it), and a D16 depth buffer for
+ * tiles of up to max_tile_w x 256 pixels. "Logical" pixels: lw along ctr x (left to right), lh
+ * along ctr y (bottom to top), lw and lh powers of two, lh 256 at most. Returns a texture handle
+ * (draw it with filter 0, clamped, like any other) or -1; deleted with ctr_gpu_rt_delete.
+ * ctr_gpu_rt_begin: the draws from now on (any kind except screen copies and reservations) go to
+ * the tile x..x+w, y..y+h of it: their clip / ctr coordinates [-1, 1] cover the tile as they
+ * cover the screen (x: tile left to right, y: bottom to top); x a multiple of 16, w + (x & 15)
+ * <= max_tile_w; the tile is NOT cleared (draw over all of it first: alpha 0 for empty texels,
+ * depth 0 with ztest ALWAYS). No early depth test and no sky hook in between (both resume after).
+ * Another ctr_gpu_rt_begin may follow (the next tile) without an end in between.
+ * ctr_gpu_rt_end: the screen again. Only inside a frame. ctr_gpu_rt_uv: the texture coordinates
+ * (ctr_vertex s, t) of logical point (lx, ly) of the texture (pixel edges at integers). */
+int ctr_gpu_rt_create(int lw, int lh, int max_tile_w);
+void ctr_gpu_rt_delete(int tex);
+int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h);
+void ctr_gpu_rt_end(void);
+void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t);
+/* (AI-assisted) a static mesh's vertices and indices as made (ctr_gpu_mesh_create / _end), to
+ * read on the CPU (the impostors' bounding boxes); 0 if there is none */
+int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
+                      int* index_count);
 /* (AI-assisted) measurement: the CPU time spent in the screen copies since the last call (ms; the
  * draws so far sent to the GPU, then the copy), part of the distorter's build time */
 double ctr_gpu_take_screen_copy_ms(void);
@@ -527,6 +549,10 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
+/* (AI-assisted) impostor cards (CtrImpostor): the same with this frame's vertices (c3l::Vertex)
+ * and u16 indices from ctr_gpu_stream_alloc instead of a mesh's */
+void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                              const void* verts, const uint16_t* indices, int index_count);
 
 /* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
  * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
@@ -622,6 +648,8 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out);
 #ifndef __3DS__
 /* (AI-assisted) snow-gpu-audit: the renderer the next draws belong to (soft backend statistics) */
 void ctr_gpu_soft_bucket(const char* name);
+/* (AI-assisted) debugging: a texture's texels as a PNG (soft backend only) */
+void ctr_gpu_soft_dump_tex(int tex, const char* path);
 /* (AI-assisted) the name the draws are counted under now */
 const char* ctr_gpu_soft_bucket_name(void);
 #endif

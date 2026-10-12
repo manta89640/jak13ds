@@ -77,6 +77,24 @@ struct SoftState {
 // (AI-assisted) ctr_gpu_stream_alloc: the frame's vertices, until the next frame begins
 static std::vector<std::vector<uint8_t>> s_stream;
 
+// (AI-assisted) where draws go: the screen, or a tile of a render to texture (ctr_gpu_rt_begin)
+struct SoftTarget {
+  uint8_t* color = nullptr;  // RGBA8, top row first
+  float* depth = nullptr;
+  uint8_t* stencil = nullptr;  // none in a tile (D16)
+  int stride = kW;
+  int x0 = 0, y0 = 0, x1 = kW, y1 = kH;  // scissor, buffer pixels (rows from the top)
+  float ox = 200.f, sx = 200.f, oy = 120.f, sy = 120.f;  // pixel = (ox + sx * x, oy - sy * y)
+  bool rt = false;
+};
+SoftTarget s_target;
+struct SoftRt {
+  int tex = -1;
+  int lw = 0, lh = 0;
+  std::vector<float> depth;
+};
+std::vector<SoftRt> s_rts;
+
 // ---- (AI-assisted) snow-gpu-audit: per-bucket draw/fill statistics (env CTR_SOFT_STATS=N) ----
 namespace softstats {
 struct B {
@@ -274,7 +292,7 @@ bool keeps_sky(const ctr_draw_state* st) {
          !(st->flags & ~(CTR_STATE_EARLY_DEPTH | CTR_STATE_PROCTEX));
 }
 void sky_hook(const ctr_draw_state* st) {
-  if (s_sky_hook && (!st || !keeps_sky(st))) {
+  if (s_sky_hook && !s_target.rt && (!st || !keeps_sky(st))) {
     ctr_gpu_run_sky_hook();
   }
 }
@@ -324,7 +342,7 @@ void shade_pixel(const ctr_draw_state& st,
   const bool ss_on = softstats::enabled() != 0;
   if (ss_on) {
     softstats::cur->px++;
-    softstats::od[px + py * kW]++;
+    if (!s_target.rt) softstats::od[px + py * kW]++;
     if (st.flags & CTR_STATE_PROCTEX) softstats::cur->px_proc++;
     if ((st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
          st.blend == CTR_BLEND_OVER_CLEAR) && a < 2.f) {
@@ -336,16 +354,16 @@ void shade_pixel(const ctr_draw_state& st,
     return;
   }
   if (ss_on) softstats::cur->px_atest++;
-  int idx = px + py * kW;
+  int idx = px + py * s_target.stride;
   // (AI-assisted) the stencil test and operations, as ctr_gpu_citro3d.c sets them
-  uint8_t* sten = g_soft.depth16 ? nullptr : &g_soft.stencil[idx];
+  uint8_t* sten = g_soft.depth16 || !s_target.stencil ? nullptr : &s_target.stencil[idx];
   if (sten && (st.flags & CTR_STATE_STENCIL_OUT) && *sten == 1) {
     return;
   }
   if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR) && *sten == 0) {
     return;
   }
-  if (!test(st.ztest, z, g_soft.depth[idx])) {
+  if (!test(st.ztest, z, s_target.depth[idx])) {
     if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR)) {
       *sten = 0;
     }
@@ -367,12 +385,12 @@ void shade_pixel(const ctr_draw_state& st,
     if (st.blend != CTR_BLEND_OFF) softstats::cur->px_blend++;
   }
   if (st.zwrite) {
-    g_soft.depth[idx] = z;
+    s_target.depth[idx] = z;
   }
   if (st.flags & CTR_STATE_NO_COLOR) {
     return;
   }
-  uint8_t* d = &g_soft.color[4 * idx];
+  uint8_t* d = &s_target.color[4 * idx];
   float as = std::min(a / 128.f, 2.f);
   float src[3] = {std::min(r, 255.f), std::min(g, 255.f), std::min(b, 255.f)};
   for (int i = 0; i < 3; i++) {
@@ -409,7 +427,8 @@ void shade_pixel(const ctr_draw_state& st,
     d[i] = (uint8_t)std::clamp(o, 0.f, 255.f);
   }
   if (st.blend == CTR_BLEND_OFF) {
-    d[3] = (uint8_t)std::clamp(a, 0.f, 255.f);
+    // (AI-assisted) a render to texture keeps alpha as the 3DS color buffer does (0xff = 1.0)
+    d[3] = (uint8_t)std::clamp(s_target.rt ? 2.f * a : a, 0.f, 255.f);
   }
 }
 
@@ -417,17 +436,17 @@ void raster_triangle(const ctr_draw_state& st, const ctr_vertex* v, bool tex_alp
   // to screen: x in [-1, 1] -> [40, 360], y in [-1, 1] -> [240, 0]
   float sx[3], sy[3];
   for (int i = 0; i < 3; i++) {
-    sx[i] = 200.f + v[i].x * 200.f;  // x in [-1, 1]: the whole 400 pixel width (5:3)
-    sy[i] = 120.f - v[i].y * 120.f;
+    sx[i] = s_target.ox + v[i].x * s_target.sx;  // x in [-1, 1]: the whole 400 pixel width (5:3)
+    sy[i] = s_target.oy - v[i].y * s_target.sy;
   }
   float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
   if (std::abs(area) < 1e-6f) {
     return;
   }
-  int x0 = std::max(0, (int)std::floor(std::min({sx[0], sx[1], sx[2]})));
-  int x1 = std::min(kW - 1, (int)std::ceil(std::max({sx[0], sx[1], sx[2]})));
-  int y0 = std::max(0, (int)std::floor(std::min({sy[0], sy[1], sy[2]})));
-  int y1 = std::min(kH - 1, (int)std::ceil(std::max({sy[0], sy[1], sy[2]})));
+  int x0 = std::max(s_target.x0, (int)std::floor(std::min({sx[0], sx[1], sx[2]})));
+  int x1 = std::min(s_target.x1 - 1, (int)std::ceil(std::max({sx[0], sx[1], sx[2]})));
+  int y0 = std::max(s_target.y0, (int)std::floor(std::min({sy[0], sy[1], sy[2]})));
+  int y1 = std::min(s_target.y1 - 1, (int)std::ceil(std::max({sy[0], sy[1], sy[2]})));
   for (int py = y0; py <= y1; py++) {
     for (int px = x0; px <= x1; px++) {
       float fx = px + 0.5f, fy = py + 0.5f;
@@ -456,6 +475,10 @@ int ctr_gpu_init(void) {
   g_soft.depth.assign(kW * kH, 0.f);
   g_soft.stencil.assign(kW * kH, 0);
   g_soft.textures.clear();
+  s_target = SoftTarget{};
+  s_target.color = g_soft.color.data();
+  s_target.depth = g_soft.depth.data();
+  s_target.stencil = g_soft.stencil.data();
   return 0;
 }
 
@@ -479,6 +502,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void ctr_gpu_frame_end(void) {
+  ctr_gpu_rt_end();  // (AI-assisted) impostors: a render to texture left open
   ctr_gpu_run_sky_hook();
   g_soft.frame++;
   if (softstats::enabled() && ++softstats::frames >= softstats::every) {
@@ -893,6 +917,18 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
   ctr_gpu_draw_mesh(state, matrix->m, mesh, first_index, index_count);
 }
 
+static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const uint8_t* verts,
+                           const uint16_t* indices, int first_index, int index_count);
+
+void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                              const void* verts, const uint16_t* indices, int index_count) {
+  sky_hook(state);
+  softstats::prog(1);
+  if (verts && indices) {
+    soft_mesh_tris(state, matrix->m, (const uint8_t*)verts, indices, 0, index_count);
+  }
+}
+
 int ctr_gpu_copy_screen_part(float x0, float x1) {
   // (AI-assisted) the whole screen as well (no tiles here); counted like ctr_gpu_citro3d.c's rows
   const auto clampf = [](float v) { return std::clamp(v, -1.f, 1.f); };
@@ -949,6 +985,124 @@ void ctr_gpu_tex_delete(int handle) {
   if (handle >= 0 && handle < (int)g_soft.textures.size()) {
     g_soft.textures[handle] = SoftTex();
   }
+}
+
+// (AI-assisted) render to texture (impostors): as ctr_gpu_citro3d.c, with the texture's image
+// in its own layout (lw x lh, top row first: logical y from the bottom)
+int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
+  if (lw < 16 || lh < 16 || lw > 1024 || lh > 1024 || (lw & (lw - 1)) || (lh & (lh - 1)) ||
+      max_tile_w < 16 || (max_tile_w & 15) || max_tile_w > lw) {
+    return -1;
+  }
+  std::vector<uint8_t> empty((size_t)lw * lh * 4, 0);
+  const int tex = ctr_gpu_tex_create(lw, lh, empty.data());
+  if (tex < 0) {
+    return -1;
+  }
+  SoftRt r;
+  r.tex = tex;
+  r.lw = lw;
+  r.lh = lh;
+  r.depth.assign((size_t)lw * lh, 0.f);
+  s_rts.push_back(std::move(r));
+  lg::info("[ctr] render to texture: {}x{} RGBA8 + D16 {}x{} ({} KB)", lw, lh, max_tile_w, lh,
+           (lw * lh * 4 + max_tile_w * lh * 2) / 1024);
+  return tex;
+}
+
+static SoftRt* soft_rt(int tex) {
+  for (auto& r : s_rts) {
+    if (r.tex == tex && tex >= 0) {
+      return &r;
+    }
+  }
+  return nullptr;
+}
+
+void ctr_gpu_rt_end(void) {
+  if (!s_target.rt) {
+    return;
+  }
+  s_target = SoftTarget{};
+  s_target.color = g_soft.color.data();
+  s_target.depth = g_soft.depth.data();
+  s_target.stencil = g_soft.stencil.data();
+}
+
+void ctr_gpu_rt_delete(int tex) {
+  for (size_t i = 0; i < s_rts.size(); i++) {
+    if (s_rts[i].tex == tex) {
+      ctr_gpu_rt_end();
+      ctr_gpu_tex_delete(tex);
+      s_rts.erase(s_rts.begin() + i);
+      return;
+    }
+  }
+}
+
+int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h) {
+  SoftRt* r = soft_rt(tex);
+  if (!r || x < 0 || y < 0 || w < 1 || h < 1 || (x & 15) || x + w > r->lw ||
+      y + h > r->lh || tex >= (int)g_soft.textures.size() || !g_soft.textures[tex].used) {
+    return 0;
+  }
+  s_target = SoftTarget{};
+  s_target.color = g_soft.textures[tex].rgba.data();
+  s_target.depth = r->depth.data();
+  s_target.stencil = nullptr;
+  s_target.stride = r->lw;
+  s_target.x0 = x;
+  s_target.x1 = x + w;
+  s_target.y0 = r->lh - y - h;
+  s_target.y1 = r->lh - y;
+  s_target.ox = x + 0.5f * w;
+  s_target.sx = 0.5f * w;
+  s_target.oy = r->lh - y - 0.5f * h;
+  s_target.sy = 0.5f * h;
+  s_target.rt = true;
+  return 1;
+}
+
+void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t) {
+  SoftRt* r = soft_rt(tex);
+  if (!r) {
+    *s = *t = 0.f;
+    return;
+  }
+  *s = lx / r->lw;
+  *t = 1.f - ly / r->lh;
+}
+
+// (AI-assisted) debugging: a texture's texels as a PNG (alpha forced to 255 where it isn't 0)
+void ctr_gpu_soft_dump_tex(int tex, const char* path) {
+  if (tex < 0 || tex >= (int)g_soft.textures.size() || !g_soft.textures[tex].used) {
+    return;
+  }
+  const auto& t = g_soft.textures[tex];
+  std::vector<uint8_t> out = t.rgba;
+  for (size_t i = 0; i < out.size(); i += 4) {
+    if (!out[i + 3]) {
+      out[i] = 255;
+      out[i + 1] = 0;
+      out[i + 2] = 255;
+    }
+    out[i + 3] = 255;
+  }
+  file_util::write_rgba_png(path, out.data(), t.w, t.h);
+}
+
+int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
+                      int* index_count) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+      g_soft.meshes[mesh].stride != 16) {
+    return 0;
+  }
+  const auto& m = g_soft.meshes[mesh];
+  *verts = m.verts.data();
+  *vertex_count = (int)(m.verts.size() / 16);
+  *indices = m.indices.data();
+  *index_count = (int)m.indices.size();
+  return 1;
 }
 
 void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int count) {
@@ -1156,13 +1310,19 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     return;
   }
   const auto& m = g_soft.meshes[mesh];
+  soft_mesh_tris(state, clip, m.verts.data(), m.indices.data(), first_index, index_count);
+}
+
+// (AI-assisted) the triangles of ctr_gpu_draw_mesh / ctr_gpu_draw_mesh_stream
+static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const uint8_t* verts,
+                           const uint16_t* indices, int first_index, int index_count) {
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     bool ok = true;
     for (int k = 0; k < 3; k++) {
-      const uint8_t* src = &m.verts[16 * m.indices[i + k]];
+      const uint8_t* src = &verts[16 * indices[i + k]];
       int16_t pos[3], st[2];
       memcpy(pos, src, 6);
       memcpy(st, src + 8, 4);
