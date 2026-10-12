@@ -916,6 +916,10 @@ int ctr_gpu_copy_screen(void) {
   return handle;
 }
 
+double ctr_gpu_take_screen_copy_ms(void) {
+  return 0;  // (AI-assisted) (no command lists here)
+}
+
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
   *s = (x + 1.f) * 0.5f;
   *t = (1.f - y) * 0.5f;  // soft textures: top row first

@@ -752,6 +752,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           by_name += fmt::format(" {} {:.2f}", e.first, e.second / n);
         }
       }
+      // (AI-assisted) of that, the screen copies' (the distorter's: the command list sent so far,
+      // then the copy)
+      const double copy_ms = ctr_gpu_take_screen_copy_ms();
+      if (copy_ms / n >= 0.005) {
+        by_name += fmt::format(" (screen copies {:.2f})", copy_ms / n);
+      }
       lg::info("[ctr] build ms/frame by renderer:{}", by_name);
 #ifdef __3DS__
       if (ctr_settings().gpu_perflog) {

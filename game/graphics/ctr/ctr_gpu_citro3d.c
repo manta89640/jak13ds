@@ -5124,7 +5124,24 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
 
 /* ---------------- the screen as a texture ---------------- */
 
-static int copy_screen(float x0, float x1, int part);
+static int copy_screen_body(float x0, float x1, int part);
+
+/* (AI-assisted) measurement only: the CPU time of the screen copies (the command list sent so
+ * far, the copy queued or, without the pipeline, waited for), ctr_gpu_take_screen_copy_ms */
+static u64 s_copy_ticks;
+double ctr_gpu_take_screen_copy_ms(void) {
+  const double ms = (double)s_copy_ticks / (SYSCLOCK_ARM11 / 1000.0);
+  s_copy_ticks = 0;
+  return ms;
+}
+
+static int copy_screen(float x0, float x1, int part) {
+  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
+  const u64 t0 = svcGetSystemTick();
+  const int tex = copy_screen_body(x0, x1, part);
+  s_copy_ticks += svcGetSystemTick() - t0;
+  return tex;
+}
 
 int ctr_gpu_copy_screen(void) {
   return copy_screen(-1.0f, 1.0f, 0);
@@ -5134,8 +5151,7 @@ int ctr_gpu_copy_screen_part(float x0, float x1) {
   return copy_screen(x0, x1, 1);
 }
 
-static int copy_screen(float x0, float x1, int part) {
-  SKY_HOOK_ANY(); /* (AI-assisted) sky_last: the copy shows what's drawn so far */
+static int copy_screen_body(float x0, float x1, int part) {
   if (!g.ready || !g.in_frame) {
     return -1;
   }

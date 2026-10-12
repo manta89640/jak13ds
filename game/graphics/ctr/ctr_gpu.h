@@ -215,6 +215,9 @@ int ctr_gpu_copy_screen(void);
  * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
  * keep what an earlier copy left: only read the screen in x0..x1. */
 int ctr_gpu_copy_screen_part(float x0, float x1);
+/* (AI-assisted) measurement: the CPU time spent in the screen copies since the last call (ms; the
+ * draws so far sent to the GPU, then the copy), part of the distorter's build time */
+double ctr_gpu_take_screen_copy_ms(void);
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
 
 /* Draw quads: 4 vertices each, triangles (0, 1, 3) and (3, 1, 2) (a strip in the order 0 1 3 2).
