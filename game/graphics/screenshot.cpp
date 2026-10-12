@@ -1,5 +1,7 @@
 #include "game/graphics/screenshot.h"
 
+#include "game/sce/pad_script.h"
+
 /*!
  * @file screenshot.cpp
  * This file contains a basic interface for the screen shot system to make it easier to share with
@@ -16,5 +18,9 @@ void register_screen_shot_settings(ScreenShotSettings* settings) {
 }
 
 const char* get_screen_shot_name() {
+  // (AI-assisted) a pad script's "shot NAME" (game/sce/pad_script.h)
+  if (pad_script::active() && *pad_script::last_shot_name()) {
+    return pad_script::last_shot_name();
+  }
   return g_screen_shot_settings->name;
 }
