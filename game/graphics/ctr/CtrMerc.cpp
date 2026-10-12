@@ -41,7 +41,46 @@ struct VuLights {
 static_assert(sizeof(VuLights) == 7 * 16);
 
 using MercMat = CtrMercMat;
-static_assert(sizeof(MercMat) == 7 * 16);
+static_assert(sizeof(MercMat) == 4 * 16);
+
+// (AI-assisted) The bone table handle_model reads a model's palettes from: per slot the matrix the
+// game last sent for it, a pointer into the bone snapshot (m_snap) or game memory instead of a
+// copy. Shared by all merc renderers, like the copies were (one static table), so a palette naming
+// a slot its model didn't send still reads the matrix an earlier model left there (Merc2 does the
+// same with its own leftovers; "a draw uses bone N, which the game didn't send" in the log).
+// What the slots point at is kept (copied) at the end of each render(): the snapshot and game
+// memory change before the next frame. Slots 128-255 (no slot string sets them) read zeros.
+struct BoneTable {
+  const MercMat* slot[256];
+  MercMat kept[128];  // zeros at first (as the copies' static table)
+  MercMat zero;
+  u64 touched[2] = {0, 0};
+  BoneTable() {
+    memset(kept, 0, sizeof(kept));
+    memset(&zero, 0, sizeof(zero));
+    for (int i = 0; i < 256; i++) {
+      slot[i] = i < 128 ? &kept[i] : &zero;
+    }
+  }
+  void set(int s, const MercMat* m) {
+    slot[s] = m;
+    touched[s >> 6] |= 1ull << (s & 63);
+  }
+  // copy what the slots set since the last keep() point at
+  void keep() {
+    for (int h = 0; h < 2; h++) {
+      for (u64 t = touched[h]; t; t &= t - 1) {
+        const int s = 64 * h + __builtin_ctzll(t);
+        if (slot[s] != &kept[s]) {
+          memcpy(&kept[s], slot[s], sizeof(MercMat));
+          slot[s] = &kept[s];
+        }
+      }
+      touched[h] = 0;
+    }
+  }
+};
+BoneTable g_bones;
 
 struct PcMercFlags {
   u64 enable_mask;
@@ -205,6 +244,7 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (m_snapshot_mode) {
     return;
   }
+  g_bones.keep();  // (AI-assisted) the snapshot and game memory change before the next frame
   flush_queues();
   // (AI-assisted) merc_gen_lod: forget instances not drawn for 10 s
   if (++m_frame % 300 == 0) {
@@ -552,9 +592,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       for (int b = 0; b < n; b++) {
         u32 addr;
         memcpy(&addr, &ma[b * 4], 4);
-        MercMat m;
-        memcpy(&m, rs.ee_mem + addr, sizeof(MercMat));
-        m_snap.push_back(m);
+        MercMat& m = m_snap.emplace_back();
+        memcpy(&m, rs.ee_mem + addr, sizeof(MercMat));  // (AI-assisted) tmat only
       }
       // (AI-assisted) vertices the game rewrites (ripple, texture scroll): the game changes them
       // during the next frame's logic, so they're copied now too. Only models with an effect
@@ -628,7 +667,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   input += 16;
 
   // matrix slot string + GOAL addresses of the bone matrices
-  static MercMat bones[128];
+  const MercMat* const* bones = g_bones.slot;  // (AI-assisted) see BoneTable
   const u8* slots = input;
   const u32* matrix_array = (const u32*)(input + 128);
   u64 sent[2] = {0, 0};  // (AI-assisted) the bones the game sent for this model
@@ -642,9 +681,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (slots[i] < 128) {
       sent[slots[i] >> 6] |= 1ull << (slots[i] & 63);
       if (m_snap_valid && m_snap_first + i < m_snap.size()) {
-        bones[slots[i]] = m_snap[m_snap_first + i];
+        g_bones.set(slots[i], &m_snap[m_snap_first + i]);
+      } else if (!(addr & 3)) {
+        g_bones.set(slots[i], (const MercMat*)(rs.ee_mem + addr));
       } else {
-        memcpy(&bones[slots[i]], rs.ee_mem + addr, sizeof(MercMat));
+        // (AI-assisted) not a float's alignment: copied, as before
+        memcpy(&g_bones.kept[slots[i]], rs.ee_mem + addr, sizeof(MercMat));
+        g_bones.set(slots[i], &g_bones.kept[slots[i]]);
       }
     }
   }
@@ -701,7 +744,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (slots[b] >= 128) {
       continue;
     }
-    const MercMat& m = bones[slots[b]];
+    const MercMat& m = *bones[slots[b]];
     for (int r = 0; r < 4; r++) {
       for (int c = 0; c < 3; c++) {
         const float v = m.tmat[r][c];
@@ -741,7 +784,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   bool hud_nfix = false;
   float hud_fixed_clip[16];
   if ((flags.bitflags & 8) && i > 0 && slots[0] < 128) {
-    const MercMat& m0 = bones[slots[0]];
+    const MercMat& m0 = *bones[slots[0]];
     double g[3][3];
     for (int r = 0; r < 3; r++) {
       for (int t = 0; t < 3; t++) {
@@ -838,7 +881,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       slots[0] < 128) {
     u32 key;
     memcpy(&key, &matrix_array[0], 4);
-    const math::Vector4f& t = bones[slots[0]].tmat[3];
+    const math::Vector4f& t = bones[slots[0]]->tmat[3];
     const float d = std::sqrt(t.x() * t.x() + t.y() * t.y() + t.z() * t.z()) * (1.f / 4096.f);
     const float size_m = model->scale * 32767.f * (1.f / 4096.f);
     const float at = std::max(25.f, 12.5f * size_m) * ctr_settings().merc_lod_scale;
@@ -905,7 +948,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
                    model->name, bi, i);
         }
       }
-      const MercMat& m = bones[bi];
+      const MercMat& m = *bones[bi];
       float* rows = &palette_rows[12 * p];
       if (cull_merc) {
         const math::Vector4f& a = m.tmat[0];

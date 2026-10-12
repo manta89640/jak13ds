@@ -22,9 +22,10 @@
 
 class CtrLevels;
 
+// (AI-assisted) a bone matrix: the transform part of the game's (tmat, 64 of its 112 bytes; the
+// normal matrix nmat[3] after it is never read: the skin shaders turn normals with tmat's rows)
 struct CtrMercMat {
   math::Vector4f tmat[4];
-  math::Vector4f nmat[3];
 };
 
 class CtrMercRenderer : public CtrBucketRenderer {
