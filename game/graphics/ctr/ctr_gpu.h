@@ -123,6 +123,13 @@ void ctr_gpu_set_fog_alpha(int on);
  * shader_mesh = dph). */
 void ctr_gpu_set_shader_groups(int on);
 int ctr_gpu_shader_groups_ready(void);
+/* (AI-assisted) config.ini shader_opt (each frame after ctr_gpu_frame_begin; gpu_profile = ab
+ * switches it): the shorter ctr_*_opt.v.pica programs for level meshes, merc and the PS2 ocean
+ * (fewer instructions per vertex, fog rows folded into the mesh matrix, texcoord1 packed into
+ * texcoord0's output register). shader_groups wins when both are on. ctr_gpu_shader_opt_ready:
+ * they loaded. */
+void ctr_gpu_set_shader_opt(int on);
+int ctr_gpu_shader_opt_ready(void);
 void ctr_gpu_set_tex1_gating(int on);
 int ctr_gpu_fog_alpha_ready(void);
 void ctr_gpu_set_cull(int enable, int flip);
@@ -316,6 +323,10 @@ void ctr_gpu_set_mip_bias(float bias);
  * rounded to nearest; the GPU computes in float24 anyway) instead of float32 (4 words): 216
  * instead of 288 data words per 24-bone palette. Raw draws only. Any time. */
 void ctr_gpu_set_skin_rows_f24(int on);
+/* (AI-assisted) config.ini skin_clip_f24: each merc model's clip matrix (12 instead of 16 words)
+ * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
+ * converts f32 its own way): edge pixels of models can flip. Each frame. */
+void ctr_gpu_set_skin_clip_f24(int on);
 /* (AI-assisted) config.ini cb_read_opaque: GPUREG_COLORBUFFER_READ = 0 for draws whose color
  * doesn't depend on the framebuffer (no blending reading it, all four channels written), 0xF
  * again for the others (a framebuffer flush before each switch). citro3d sets read = write =
@@ -373,6 +384,15 @@ void ctr_gpu_set_overlap(int on);
  * can change at any time. */
 void ctr_gpu_set_raw_cmds(int on);
 void ctr_gpu_set_vcache_reuse(int on);
+/* (AI-assisted) config.ini cmd_dedup (on: register writes that give a register the value it has
+ * are left out: texture unit 0's type) and cmd_dedup_draw (the raw draws' PRIMITIVE_CONFIG mode
+ * and VERTEX_OFFSET writes too). Each frame (gpu_profile = ab switches them). */
+void ctr_gpu_set_cmd_dedup(int on, int draw);
+/* (AI-assisted) config.ini cmd_dump: write a frame's GPU command list every 20 s (diagnostic,
+ * platform/3ds/tools/cmd_report.py) */
+void ctr_gpu_set_cmd_dump(int on);
+/* (AI-assisted) the next finished frame's command list too (pad script "set cmd_dump on") */
+void ctr_gpu_cmd_dump_next(void);
 /* (AI-assisted) hardware hang bisect (config.ini new_shaders / asm_tex, CtrSettings.h).
  * new_shaders 0: the Oct 2 vertex shaders and their uniform conventions; before ctr_gpu_init.
  * asm_tex 0: the old per texel texture tiling loops (no LDM/STM, no 64-bit stores). */
@@ -554,6 +574,7 @@ typedef struct {
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
                       * tex1_gating) */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
+  unsigned int cmd_dedup_words; /* (AI-assisted) command words cmd_dedup(_draw) left out */
   /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
    * uniform vectors written at the switches (shader_groups keeps some) */
   int prog_switches, prog_uploads, prog_unif_vectors;

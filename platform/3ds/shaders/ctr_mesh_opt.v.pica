@@ -1,0 +1,44 @@
+; (AI-assisted)
+; config.ini shader_opt: ctr_mesh.v.pica in 10 instructions and 3 output registers (14 and 4;
+; the hardware default, the Oct 2 ctr_mesh_old: 21 and 4).
+;  - The fogs are affine in clip w, and w is affine in the position (dph with clip[3]), so both fog
+;    terms are dph with a row of their own: clip[4] = fog0.y * clip[3] + (0, 0, 0, fog0.w) (the
+;    draw distance fog) and clip[5] = fog0.x * clip[3] + (0, 0, 0, fog0.z) (-(game fog)), made on
+;    the CPU whenever the matrix or the fog changes (ctr_gpu_draw_mesh_prepared, mesh_fog_rows: the
+;    matrix upload is 6 vectors instead of 4). No mov of clip w into a temporary, no mul + add.
+;  - texcoord1 (the fog amount) shares texcoord0's output register (.zw): one output register less
+;    for the rasterizer setup. Its t is the fog amount too (was 0.5): the fog ramp texture's 8 rows
+;    are the same (fog_ramp_color), so the lookup is the same.
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py). Dependent
+; instructions are spaced apart (no public PICA latency figures; costs nothing).
+
+.fvec clip[6]       ; 0-3: position -> clip space; 4: draw distance fog row; 5: -(game fog) row
+.fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255)
+.fvec fog1          ; x: -(the game fog's upper clamp), y: the game fog's lower clamp
+
+.out outpos position
+.out outtc texcoord0.xy
+.out - texcoord1 outtc.zw
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+
+.entry main_ctr_mesh_opt
+.proc main_ctr_mesh_opt
+  ; r0.x = -(game fog), r0.y = draw distance fog (dph: the position's pad (w) counts as 1)
+  dph r0.x, inpos, clip[5]
+  dph r0.y, inpos, clip[4]
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  ; r0.x = -min(game fog, its upper clamp), r0.y = max(draw distance fog, its lower clamp)
+  max r0.xy, fog1.xyxy, r0.xyxy
+  dph outpos.z, inpos, clip[2]
+  mul outtc.xy, scales.xxxx, intex.xyyy
+  ; the fog: the larger of -r0.x and r0.y, as texcoord1 s and t
+  max outtc.zw, -r0.xxxx, r0.yyyy
+  dph outpos.w, inpos, clip[3]
+  mul outclr, scales.yyyy, inclr
+  end
+.end

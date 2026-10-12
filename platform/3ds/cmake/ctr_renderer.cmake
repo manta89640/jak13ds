@@ -45,7 +45,8 @@ find_program(PICASSO picasso HINTS ${DEVKITPRO}/tools/bin ${CTRULIB}/../tools/bi
 set(OG3DS_SHADER_CS "")
 foreach(shader ctr_basic ctr_mesh ctr_skin ctr_skin_env ctr_clip ctr_clip2 ctr_ocean ctr_ocean_full ctr_ocean_full_clip
     ctr_basic_old ctr_mesh_old ctr_mesh_dph ctr_skin_old ctr_skin_env_old ctr_bench_sep
-    ctr_mesh_old_fa ctr_mesh_fa)
+    ctr_mesh_old_fa ctr_mesh_fa ctr_mesh_opt ctr_mesh_opt_fa ctr_skin_opt ctr_skin_env_opt
+    ctr_ocean_full_opt ctr_ocean_full_clip_opt ctr_mesh_opt_df ctr_mesh_opt_df_fa)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
   set(csrc ${CMAKE_CURRENT_BINARY_DIR}/${shader}_shbin.c)
@@ -88,7 +89,7 @@ endforeach()
 # (AI-assisted) config.ini pica_bench: one DVLB with an entry point per source file (picasso
 # links them into one shbin with shared code), for the shader cost and program switch tests
 set(OG3DS_BENCH_SHADERS ctr_bench_v7 ctr_bench_v7b ctr_bench_v14 ctr_bench_v21 ctr_bench_v35
-    ctr_bench_v53 ctr_bench_o3 ctr_bench_o4)
+    ctr_bench_v53 ctr_bench_o3 ctr_bench_o4 ctr_bench_o3p)
 set(bench_srcs "")
 foreach(shader ${OG3DS_BENCH_SHADERS})
   list(APPEND bench_srcs ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)

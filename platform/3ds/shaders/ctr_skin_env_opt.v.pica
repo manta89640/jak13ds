@@ -1,0 +1,71 @@
+; (AI-assisted)
+; config.ini shader_opt: ctr_skin_env.v.pica in 33 instructions (35; the hardware default, the Oct 2
+; ctr_skin_env_old, has 56). The weights as they come and clip's x, y, z columns divided by 255, as
+; ctr_skin_opt.v.pica: the sphere map is the same for a camera space position 255 times as long
+; (w' is linear in it, st only uses w'.xy / |w'|). texcoord0 is written in two parts (.xy, .zw)
+; instead of through a temporary. Same uniforms otherwise (fade).
+; Every output component is written exactly once; the two MOVAs are apart.
+
+.fvec clip[4]
+.fvec row0[24]
+.fvec row1[24]
+.fvec row2[24]
+.fvec scales        ; unused here (the same uniforms as ctr_skin_env.v.pica)
+.fvec fade          ; the color: fade (1.0 = GS 0x80) / 2
+
+.constf consts(0.0, 0.5, 0.0, 0.0)
+.constf negz(0.0, 0.0, -1.0, 0.0)
+.alias zero consts.xxxx
+.alias half consts.yyyy
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias inidx v1
+.alias inwgt v2
+.alias intex v3
+.alias inclr v4
+.alias innrm v5
+
+.entry main_ctr_skin_env_opt
+.proc main_ctr_skin_env_opt
+  mova a0.xy, inidx.xy
+  mul r1, row0[a0.x], inwgt.xxxx
+  mul r2, row1[a0.x], inwgt.xxxx
+  mul r3, row2[a0.x], inwgt.xxxx
+  mad r1, inwgt.yyyy, row0[a0.y], r1
+  mad r2, inwgt.yyyy, row1[a0.y], r2
+  mad r3, inwgt.yyyy, row2[a0.y], r3
+  mova a0.x, inidx.zzzz
+  mad r1, inwgt.zzzz, row0[a0.x], r1
+  mad r2, inwgt.zzzz, row1[a0.x], r2
+  mad r3, inwgt.zzzz, row2[a0.x], r3
+
+  dph r4.x, inpos, r1
+  dp3 r5.x, innrm, r1
+  dph r4.y, inpos, r2
+  dp3 r5.y, innrm, r2
+  dph r4.z, inpos, r3
+  dp3 r5.z, innrm, r3
+  dph outpos.x, r4, clip[0]
+  dp3 r6.x, r5, r5
+  dph outpos.y, r4, clip[1]
+  dph outpos.z, r4, clip[2]
+  rsq r6.x, r6.x
+  dph outpos.w, r4, clip[3]
+  ; emerc.vert's sphere map, as ctr_skin_env.v.pica: m = (n.x, n.y, n.z - 1) with n = -r5 / |r5|,
+  ; w' = m.z * v + m * dot(v, m), st = 0.5 + 0.5 * w'.xy / |w'|
+  mad r7, -r5, r6.xxxx, negz
+  mov outclr, fade
+  dp3 r8.x, r4, r7
+  mul r9, r7.zzzz, r4
+  mad r9, r7, r8.xxxx, r9
+  mov outtc0.zw, zero
+  dp3 r10.x, r9, r9
+  rsq r10.x, r10.x
+  mul r10.x, half, r10.x
+  mad outtc0.xy, r9.xyyy, r10.xxxx, half
+  end
+.end

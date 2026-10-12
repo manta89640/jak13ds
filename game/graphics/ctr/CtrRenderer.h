@@ -117,6 +117,7 @@ class CtrRenderer {
     int splits = 0;
     int frames = 0;
     double cmd_kb = 0;
+    double dedup_kb = 0;  // (AI-assisted) command words cmd_dedup left out
     int dropped = 0;
     int tex_binds = 0;
     int draws = 0;

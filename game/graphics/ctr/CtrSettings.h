@@ -248,6 +248,22 @@ struct CtrSettings {
   // group doesn't use aren't written again. Off until priced on hardware (gpu_profile ab; pica_bench
   // B2.prog_entry times the switch): shared-DVLB entry points never ran in the game on a real 3DS
   bool shader_groups = false;
+  // (AI-assisted) shader_opt: the shorter vertex programs (platform/3ds/shaders/ctr_*_opt.v.pica:
+  // level meshes 21 -> 10 instructions and 4 -> 3 output registers, merc 53 -> 33, merc shine
+  // 56 -> 33, PS2 ocean 14 -> 9 and 12 -> 6). Same picture in Azahar. Off until priced and proven
+  // on hardware: pica_bench B3.mesh_opt / B3.skin_opt (and B3.o3p for the packed output register)
+  bool shader_opt = false;
+  // (AI-assisted) cmd_dedup: register writes that would give a register the value it already has
+  // are left out of the command list (texture unit 0's type at a texture change). The same
+  // registers, the same picture; on. cmd_dedup_draw: the raw draws' PRIMITIVE_CONFIG mode and
+  // VERTEX_OFFSET writes too (4 of their ~30 words; citro3d writes them before every draw): off
+  // until hardware ran it (pica_bench B2 prices a command word; gpu_profile = ab)
+  bool cmd_dedup = true;
+  bool cmd_dedup_draw = false;
+  // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
+  // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until
+  // priced (pica_bench B2.unif_f24 vs B2.unif_f32, the same line as skin_rows_f24)
+  bool skin_clip_f24 = false;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
@@ -264,6 +280,9 @@ struct CtrSettings {
   // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
   // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
   bool vcache_reuse = false;
+  // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
+  // (platform/3ds/tools/cmd_report.py); diagnostic, off
+  bool cmd_dump = false;
   // (AI-assisted) tex_cache_clear = always | uploads: always (default) clears the GPU's texture
   // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it for level pool
   // textures (static texels) unless a pool was filled or moved since the last clear

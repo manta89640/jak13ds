@@ -216,6 +216,135 @@ It takes the last session and prints one table per group:
   after 16 s) and the traffic per frame over the whole window (assumed bytes until the bench's B1
   calibration says otherwise).
 
+## Vertex programs and the command stream (AI-assisted, Oct 12)
+
+Branch shader-opt. What the PICA200 does per vertex and per draw, what changed, and which
+pica_bench line decides each default. Nothing here ran on hardware yet; the new programs are off
+by default, the pure command dedup is on.
+
+### What is known about the vertex units (public sources)
+
+Well sourced (register docs, libctru/citro3d/picasso code, emulator code, vendor slides):
+
+- 3 vertex processors plus the geometry shader unit, which runs as a 4th vertex unit when no
+  geometry shader is used (3dbrew Hardware; GBATEK "Shader Registers": "three shader units at
+  once (or all four units, when not using the geometry shader)"; libctru writes
+  GPUREG_VSH_COM_MODE = 0 to "ensure all 4 units are correctly initialized"). Each is a 24-bit
+  4-way SIMD unit (DMP, HPG 2011 slides). 268 MHz. Vertex code memory: 512 instructions.
+- One instruction reads at most one float uniform: only SRC1 is 7 bits wide (SRC2 of the inverted
+  forms DPHI/SGEI/SLTI, SRC2 of MAD, SRC3 of MADI); relative addressing only on that operand
+  (3dbrew GPU/Shader_Instruction_Set, picasso Manual). Two *different* input registers in one
+  instruction give wrong results (picasso errata; picasso refuses it). MAD's operand descriptors
+  must be in the first 32 slots (picasso does that).
+- The output map: OUTMAP_TOTAL (1-7 output registers), OUTMAP_Oi per component semantics,
+  OUTATTR_CLOCK bits per semantic (position.z, color, texcoord0/1/2, texcoord0.w,
+  normquat/view; GBATEK: "controls the clock supply"); libctru derives all of it from picasso's
+  .out table (DVLE_GenerateOutmap), so an unused semantic is already not clocked. Two semantics
+  can share one output register (picasso ".out - texcoord1 outtc.zw").
+- The hardware takes the absolute value of vertex colors and saturates them to 1 before
+  interpolation (Azahar src/video_core/pica/output_vertex.cpp).
+- Post-vertex cache: GPUREG_POST_VERTEX_CACHE_NUM (0x22D) "usually 0x4 or 0x84"; cleared with
+  GPUREG_VTX_FUNC (citro3d after every draw).
+- citro3d's two dummy PRIMITIVE_CONFIG writes after that clear came with "Fix some cases of GPU
+  freezing when changing programs" (citro3d 46117ec9): kept everywhere.
+
+Not found anywhere: instruction latencies, dual issue, cycles per instruction, the cost of
+RCP/RSQ, how vertices are spread over the units, whether fewer output registers or attributes
+are cheaper, the vertex cache size. pica_bench (B2-B5) measures these on the console. Vendor
+figures: 15.3 M polygons/s at 200 MHz (DMP via 4Gamer 2010), 40 Mtri/s at 100 MHz (DMP, EG 2008)
+are peak numbers, speculative for this use.
+
+### shader_opt: the shorter programs
+
+Instructions per vertex (including `end`), output registers; the hardware default is the Oct 2
+"old" set (new_shaders = off). `shader_stats.py build-3ds/*.shbin` prints this table.
+
+| program | default (old) | new | shader_opt | how |
+|---|---|---|---|---|
+| level mesh, game fog on | 22 / 4 regs | 15 / 4 | `ctr_mesh_opt` 11 / 3 | fog factors as two extra matrix rows (dph), texcoord1 in texcoord0's .zw |
+| level mesh, fog = off | 22 / 4 | 15 / 4 | `ctr_mesh_opt_df` 8 / 3 | only the draw distance fog: one dph straight into the output |
+| level mesh, fog_alpha | 20 / 3 | 13 / 3 | `ctr_mesh_opt_fa` 11, `_df_fa` 9 | no clamp at 1 (the GPU saturates colors) |
+| merc | 54 / 3 | 36 / 3 | `ctr_skin_opt` 34 / 3 | weights unscaled (clip x, y, z columns / 255), color scale in the light colors |
+| merc shine | 57 / 3 | 36 / 3 | `ctr_skin_env_opt` 34 / 3 | the same; texcoord0 written in two parts |
+| PS2 ocean | 15 / 4 | - | `ctr_ocean_full_opt` 10 / 3 | texcoord1 packed |
+| PS2 ocean, clipped | 13 / 4 | - | `ctr_ocean_full_clip_opt` 7 / 3 | one mov with the swizzle xyzz |
+
+The program code is shorter too: every switch between per-program shbins uploads it (mesh old
+22 code words + 15 operand descriptors, mesh_opt_df 8 + 7; merc 54 + 20 against 34 + 14).
+basic, clip and clip2 (6-7 instructions, sprites, HUD and sky) have nothing left to take out.
+
+Per frame in Azahar (paused frames, fog off; indices drawn, an upper bound for the vertices
+shaded, the post-vertex cache lowers it): Snowy start 237k mesh indices, 46k merc, 5k shine:
+21 x 237k + 53 x 46k + 56 x 5k = 7.7 M vertex instructions with the default programs, 3.4 M with
+shader_opt (-57%). The cost of an instruction on the console is B3's fit.
+
+Same picture: in Azahar, paused frames with shader_opt off and on are the same pixels at Snowy
+start and fort, Sandover (fog on and off, fog_alpha on), Fire Canyon, Jak and Daxter up close
+(only the progress menu's animated icons and falling snow differ), except merc shine highlights:
+ctr_skin_env_opt has the new ctr_skin_env's sphere map formula (no reciprocal), whose rounding
+moves a highlight by a pixel here and there (~35 pixels on a shiny object at Snowy's fort).
+With skin_clip_f24 on as well, a few dozen edge pixels of merc models flip (rounding). The mesh fog rows
+and the packed texcoord1 (the fog ramp's 8 rows are the same, so t = the amount looks the same as
+t = 0.5) give the same lookups.
+
+Hardware risks: picasso and check_shaders.py pass (each output component written once, the MOVAs
+apart, no flow control). Unproven on the console: MAD with a relative uniform operand (also in
+the new ctr_skin), two semantics in one output register (B3.o3p), an input register as MAD's
+first operand.
+
+**Decided by pica_bench** (bench_report.py prints the verdict lines under B3):
+
+- `B3.mesh_opt`, `B3.skin_opt`: they run at all (a hang stops the bench at them: the last `start`
+  line in bench.txt) and their ns/vertex against `B3.mesh_new` / `B3.skin_new`; the report also
+  estimates the old programs from the B3.v* fit (ns per vertex per instruction). On if they
+  finish and are faster.
+- `B3.o3p` against `B3.o3` / `B3.o4`: whether an output register costs (o3p ~ o3: packing pays)
+  or a semantic (o3p ~ o4: packing changes nothing; harmless either way).
+- `gpu_profile = ab` (shader_opt is in kAbSwitches) for the frame-level GPU time.
+
+### The command stream per draw
+
+`cmd_dump = on` (or the pad script's `set cmd_dump on`) writes a frame's command list;
+`cmd_report.py --shbin-dir build-3ds cmd_*.bin` splits it by register group and draw kind and
+lists writes that change nothing. Snowy start (paused, 748 draws): 46.4k words (181 KB) per
+frame, 49% draw template (24 words per raw draw + 6 for the post-vertex cache clear), 36% float
+uniforms (mesh matrices 16 words, merc bones 3 x (2 + 3 x palette) per model), 2% program code.
+Words per draw: level mesh ~44, merc ~110, merc shine ~150 (citro3d path), sprites ~125.
+
+| words per frame (paused) | everything new off | cmd_dedup (default) | + cmd_dedup_draw | + shader_opt |
+|---|---|---|---|---|
+| Snowy start | 46410 | 45850 (-1.2%) | 43014 (-7.3%) | 43448 (-6.4%) |
+| Snowy fort | 36402 | 35474 (-2.5%) | 33582 (-7.7%) | 33694 (-7.4%) |
+| Sandover | 40152 | 39536 (-1.5%) | 36984 (-7.9%) | 37490 (-6.6%) |
+| Fire Canyon | 27028 | 26442 (-2.2%) | 24850 (-8.1%) | 25266 (-6.5%) |
+
+(shader_opt adds 2 words per mesh matrix upload for the fog row, 6 with the game fog on, and
+saves program code words.) The "everything new off" column already had the merc clip matrix and
+lights as float24 (skin_clip_f24, ~11 words per model; off by default now).
+
+- `cmd_dedup = on` (default): texture unit 0's type only when the format changes (~150-200 writes
+  per frame), the merc shine pass's matrix, bones and fade only when they changed since the last
+  shine draw (envmap_batch draws them one after another). Pure dedup: the registers end up the
+  same.
+- `cmd_dedup_draw = off`: the raw draws leave out PRIMITIVE_CONFIG's mode and VERTEX_OFFSET when
+  the GPU has those values (4 words per draw; tracked across citro3d draws, the HOME Menu and the
+  bench). Off until hardware ran it: citro3d writes them before every draw. Decided by
+  `B2.nostate` (us per draw) and the per word price `(B2.unif_f32 - B2.unif_f24)` per word: 4
+  words x draws per frame.
+- `skin_clip_f24 = off`: the same price (B2.unif_f24 vs B2.unif_f32), and it is not
+  bit-identical.
+- Left alone: the dummy PRIMITIVE_CONFIG writes, RESTART_PRIMITIVE, GEOSTAGE_CONFIG toggles and
+  START_DRAW_FUNC0 around each draw (hazard related or actions, not redundant).
+- B4 (post-vertex cache) and B5 (attribute formats) don't change these keys: the level mesh is
+  already 16 bytes (short4 + short2 + ubyte4), merc 24; B5.byte vs B5.short says whether a byte
+  position format (a converter change) would pay, B4 whether vcache_reuse / a bigger
+  POST_VERTEX_CACHE_NUM would.
+
+Leads not done: a one-bone merc program for draws whose vertices all have one bone (about 20
+instructions instead of 33; needs per-draw program switches, so shader_groups-style shared code
+first); folding the shine pass into the base draw (two texture units); a shared shbin for the opt
+programs (group E has no uniform room left for the fog rows).
+
 ## Level loads that stop the game (AI-assisted, Oct 11)
 
 When both level slots are empty (a save load, a teleport / continue to another area), the game

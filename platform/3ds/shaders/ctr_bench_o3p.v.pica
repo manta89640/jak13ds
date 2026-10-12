@@ -1,0 +1,28 @@
+; (AI-assisted)
+; config.ini pica_bench (game/graphics/ctr/ctr_gpu_bench.c): ctr_bench_o4 with texcoord1 packed into
+; texcoord0's output register (.zw): the same 8 instructions and the same 4 output semantics (and
+; output clock bits) as o4, but 3 output registers like o3. B3.o3p against B3.o3 / B3.o4 tells
+; whether the rasterizer setup costs per output register (o3p ~ o3) or per semantic (o3p ~ o4):
+; the shader_opt programs (ctr_mesh_opt, ctr_ocean_full_opt) pack texcoord1 this way.
+; Every configured output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec bproj[4]
+.fvec bscales      ; x: texcoord scale, y: color scale (1/255)
+.constf bk_ctr_bench_o3p(1.0, 0.0, 0.0, 0.0)
+
+.out opos position
+.out otc texcoord0.xy
+.out - texcoord1 otc.zw
+.out oclr color
+
+.entry ctr_bench_o3p
+.proc ctr_bench_o3p
+  dp4 opos.x, bproj[0], v0
+  dp4 opos.y, bproj[1], v0
+  dp4 opos.z, bproj[2], v0
+  dp4 opos.w, bproj[3], v0
+  mul otc.xy, bscales.xxxx, v1.xyyy
+  mov otc.zw, v1.xyxy
+  mul oclr, bscales.yyyy, v2
+  end
+.end

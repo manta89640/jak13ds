@@ -1,0 +1,35 @@
+; (AI-assisted)
+; config.ini shader_opt with fog_alpha: ctr_mesh_fa.v.pica in 10 instructions (12; the hardware default ctr_mesh_old_fa: 19): the fog rows of
+; ctr_mesh_opt.v.pica (same uniforms at the same places), and no clamp of the amount at 1: the GPU
+; takes the absolute value of each vertex color component and saturates it to 1 before
+; interpolating (Azahar src/video_core/pica/output_vertex.cpp: "The hardware takes the absolute and
+; saturates vertex colors, *before* doing interpolation"), and the amount is >= 0 (the lower clamp
+; is, mesh_fog_uniforms).
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[6]       ; as ctr_mesh_opt.v.pica
+.fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255)
+.fvec fog1          ; x: -(the game fog's upper clamp), y: the game fog's lower clamp
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+
+.entry main_ctr_mesh_opt_fa
+.proc main_ctr_mesh_opt_fa
+  dph r0.x, inpos, clip[5]
+  dph r0.y, inpos, clip[4]
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  max r0.xy, fog1.xyxy, r0.xyxy
+  dph outpos.z, inpos, clip[2]
+  mul outclr.xyz, scales.yyyy, inclr
+  max outclr.w, -r0.xxxx, r0.yyyy
+  dph outpos.w, inpos, clip[3]
+  mul outtc0, scales.xxxx, intex
+  end
+.end

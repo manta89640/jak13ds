@@ -1,0 +1,35 @@
+; (AI-assisted)
+; config.ini shader_opt with the game's fog off (config.ini fog = off, the play config): only the
+; draw distance fog is left, so ctr_mesh_opt.v.pica's fog is one dph: 7 instructions (ctr_mesh_opt
+; 10, ctr_mesh 14, the hardware default ctr_mesh_old 21). ctr_gpu_draw_mesh_prepared picks it when
+; the game fog is a constant 0 (mesh_fog_uniforms: clamps that are equal and give no fog); the
+; amount isn't clamped at 0 here: below 0 (in front of where the fog starts) the fog ramp texture
+; clamps to its first texel, which is no fog, as the max with the lower clamp (0) gave before.
+; Same uniforms at the same places as ctr_mesh_opt.v.pica (fog1 unused).
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[6]       ; as ctr_mesh_opt.v.pica (clip[5] unused here, and not uploaded)
+.fvec scales        ; x: texture coordinate scale (1/1024), y: color scale (1/255)
+.fvec fog1          ; unused (the same uniforms as ctr_mesh_opt.v.pica)
+
+.out outpos position
+.out outtc texcoord0.xy
+.out - texcoord1 outtc.zw
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+
+.entry main_ctr_mesh_opt_df
+.proc main_ctr_mesh_opt_df
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  dph outpos.z, inpos, clip[2]
+  dph outpos.w, inpos, clip[3]
+  ; the draw distance fog as texcoord1 s and t
+  dph outtc.zw, inpos, clip[4]
+  mul outtc.xy, scales.xxxx, intex.xyyy
+  mul outclr, scales.yyyy, inclr
+  end
+.end

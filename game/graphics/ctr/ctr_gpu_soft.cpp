@@ -1420,6 +1420,10 @@ void ctr_gpu_set_shader_groups(int) {}
 int ctr_gpu_shader_groups_ready(void) {
   return 1;
 }
+void ctr_gpu_set_shader_opt(int) {}  // (AI-assisted) the vertex math is the same here
+int ctr_gpu_shader_opt_ready(void) {
+  return 1;
+}
 int ctr_gpu_fog_alpha_ready(void) {
   return 1;
 }
@@ -1443,7 +1447,8 @@ void ctr_gpu_set_early_depth(int) {}
 void ctr_gpu_set_early_depth_params(int, int, unsigned int) {}  // (AI-assisted) no early test
 void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
 void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips
-void ctr_gpu_set_skin_rows_f24(int) {}      // (AI-assisted) no uniform formats here
+void ctr_gpu_set_skin_rows_f24(int) {}
+void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
 void ctr_gpu_set_cb_read_opaque(int) {}     // (AI-assisted) no color buffer cache here
 void ctr_gpu_set_framebuffer(int, int depth16) {
   g_soft.depth16 = depth16 ? 1 : 0;  // (AI-assisted) no stencil, like the 3DS's D16 buffer
@@ -1486,6 +1491,9 @@ int ctr_gpu_tex_radial(int) {
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_set_vcache_reuse(int) {}
+void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
+void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
+void ctr_gpu_cmd_dump_next(void) {}
 void ctr_gpu_set_new_shaders(int) {}
 void ctr_gpu_set_asm_tex(int) {}
 void ctr_gpu_set_defer_flush(int) {}

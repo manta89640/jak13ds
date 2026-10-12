@@ -180,6 +180,15 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.cull_merc; }},
     {"shader_groups", [](CtrSettings& s, bool on) { s.shader_groups = on; },
      [](const CtrSettings& s) { return s.shader_groups; }},
+    // (AI-assisted) shader-opt's keys (Oct 12): the shorter vertex programs
+    {"shader_opt", [](CtrSettings& s, bool on) { s.shader_opt = on; },
+     [](const CtrSettings& s) { return s.shader_opt; }},
+    {"cmd_dedup", [](CtrSettings& s, bool on) { s.cmd_dedup = on; },
+     [](const CtrSettings& s) { return s.cmd_dedup; }},
+    {"cmd_dedup_draw", [](CtrSettings& s, bool on) { s.cmd_dedup_draw = on; },
+     [](const CtrSettings& s) { return s.cmd_dedup_draw; }},
+    {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
+     [](const CtrSettings& s) { return s.skin_clip_f24; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -256,6 +265,10 @@ bool pad_set(const char* key, const char* value) {
   CtrSettings& s = ctr_settings_ab();
   if (!strcmp(key, "fog")) {
     s.fog = on;
+    return true;
+  }
+  if (!strcmp(key, "cmd_dump")) {
+    ctr_gpu_cmd_dump_next();  // (AI-assisted) "set cmd_dump on": the next frame's command list
     return true;
   }
   for (const auto& sw : kAbSwitches) {
@@ -558,6 +571,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_tex_cache_clear(ctr_settings().tex_cache_uploads ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_mip_bias(ctr_settings().mip_bias);                          // (AI-assisted)
   ctr_gpu_set_skin_rows_f24(ctr_settings().skin_rows_f24 ? 1 : 0);         // (AI-assisted)
+  ctr_gpu_set_skin_clip_f24(ctr_settings().skin_clip_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_cb_read_opaque(ctr_settings().cb_read_opaque ? 1 : 0);       // (AI-assisted)
   ctr_gpu_set_early_depth_params(
       ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
@@ -566,6 +580,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
   ctr_gpu_set_shader_groups(ctr_settings().shader_groups ? 1 : 0);  // (AI-assisted)
+  ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
+  ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
+                        ctr_settings().cmd_dedup_draw ? 1 : 0);
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -609,6 +626,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.gpu_draw_ms += gs.draw_ms;
   m_timing.splits += gs.cmd_splits;
   m_timing.cmd_kb += gs.cmd_bytes / 1024.0;
+  m_timing.dedup_kb += gs.cmd_dedup_words * 4 / 1024.0;
   m_timing.dropped += gs.dropped_draws;
   // (AI-assisted) a pipelined frame that ran out of command buffer lost its last draws: the
   // normal mode has the whole buffer for one frame
@@ -683,13 +701,14 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       lg::info(
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
-          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands; vertex buffer peak "
-          "{} of {} KB{}{}{}",
+          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands ({:.1f} KB left out by "
+          "cmd_dedup); vertex buffer peak {} of {} KB{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
           m_timing.triangles / n, m_timing.draws / n, m_timing.tex_binds / n,
-          m_timing.cmd_kb / n, m_timing.vbuf_peak / 1024, m_timing.vbuf_size / 1024,
+          m_timing.cmd_kb / n, m_timing.dedup_kb / n, m_timing.vbuf_peak / 1024,
+          m_timing.vbuf_size / 1024,
           m_timing.vbuf_dropped
               ? fmt::format(", {} draws DROPPED (vertex buffer full)", m_timing.vbuf_dropped)
               : std::string(),
@@ -1170,6 +1189,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
   ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);
+  ctr_gpu_set_cmd_dump(ctr_settings().cmd_dump ? 1 : 0);  // (AI-assisted)
 #ifdef __3DS__
   if (ctr_settings().gpu_perflog) {
     // (AI-assisted) the GSP's performance log, read once per stats window (render_frame)

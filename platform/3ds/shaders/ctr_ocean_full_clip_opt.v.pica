@@ -1,0 +1,30 @@
+; (AI-assisted)
+; config.ini shader_opt: ctr_ocean_full_clip.v.pica in 6 instructions (12) and 3 output registers
+; (4): texcoord0 (s, t) and texcoord1 (the fog amount as s and t) in one register, one mov with the
+; swizzle xyzz. Same uniforms.
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec gs[4]
+
+.constf consts(0.00392156862745098, 0.0, 0.0, 0.0)
+.alias inv255 consts.xxxx
+
+.out outpos position
+.out outtc texcoord0.xy
+.out - texcoord1 outtc.zw
+.out outclr color
+
+.alias inpos v0  ; W * (x, y, z, 1)
+.alias intex v1  ; s, t, fog amount
+.alias inclr v2
+
+.entry main_ctr_ocean_full_clip_opt
+.proc main_ctr_ocean_full_clip_opt
+  dp4 outpos.x, gs[0], inpos
+  dp4 outpos.y, gs[1], inpos
+  dp4 outpos.z, gs[2], inpos
+  dp4 outpos.w, gs[3], inpos
+  mov outtc, intex.xyzz
+  mul outclr, inv255, inclr
+  end
+.end
