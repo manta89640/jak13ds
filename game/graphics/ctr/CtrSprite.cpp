@@ -545,7 +545,7 @@ void CtrSpriteRenderer::flush(bool hud) {
         ctr_draw_state faint = b.state;
         faint.atest = CTR_TEST_LESS;
         faint.zwrite = 0;
-        ctr_gpu_draw_quads(&faint, b.verts.data(), (int)(b.verts.size() / 4));
+        ctr_gpu_draw_quads_again(&faint);  // (AI-assisted) the same vertices, not copied again
         m_stats.draws++;
       }
     }

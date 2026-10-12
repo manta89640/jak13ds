@@ -4851,11 +4851,45 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   g.last_state_valid = 0;
 }
 
+/* (AI-assisted) the vertices of the last ctr_gpu_draw_quads in g.vbuf (ctr_gpu_draw_quads_again):
+ * its first quad's offset, the quads written (one run: n quads are 64 n bytes, no padding between
+ * its batches) and the frame */
+static size_t s_lastq_off;
+static int s_lastq_quads, s_lastq_frame = -1;
+
+/* the draw of n <= QUAD_MAX quads whose vertices are at dst in g.vbuf */
+static void draw_quads_at(const ctr_draw_state* state, uint8_t* dst, int n) {
+  use_program(PROG_BASIC);
+  if (use_raw(state)) {
+    apply_state(state, 0, 1);
+    raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
+                      RAW_BUF_FLAGS1(sizeof(ctr_vertex), 3, 0));
+    raw_sync();
+    if (!s_raw.quad_pa) {
+      s_raw.quad_pa = osConvertVirtToPhys(g.quad_indices);
+    }
+    raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
+  } else {
+    raw_vc_flush();
+    apply_state(state, 0, 0);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
+    /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
+    C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
+  }
+  g.cur.draws++;
+  g.cur.triangles += n * 2;
+}
+
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
   SKY_HOOK(state);
+  s_lastq_quads = 0;
   if (!g.ready || !g.in_frame) {
     return;
   }
+  s_lastq_off = g.vbuf_used;
+  s_lastq_frame = g.frame_no;
   while (quad_count > 0) {
     const int n = quad_count > QUAD_MAX ? QUAD_MAX : quad_count;
     const size_t bytes = (size_t)n * 4 * sizeof(ctr_vertex);
@@ -4865,29 +4899,27 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
     uint8_t* dst = g.vbuf + g.vbuf_used;
     memcpy(dst, verts, bytes);
     g.vbuf_used += (bytes + 15) & ~(size_t)15;
-    use_program(PROG_BASIC);
-    if (use_raw(state)) {
-      apply_state(state, 0, 1);
-      raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
-                        RAW_BUF_FLAGS1(sizeof(ctr_vertex), 3, 0));
-      raw_sync();
-      if (!s_raw.quad_pa) {
-        s_raw.quad_pa = osConvertVirtToPhys(g.quad_indices);
-      }
-      raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
-    } else {
-      raw_vc_flush();
-      apply_state(state, 0, 0);
-      C3D_BufInfo* buf = C3D_GetBufInfo();
-      BufInfo_Init(buf);
-      BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
-      /* indices are relative to the buffer: 0 1 3 3 1 2, + 4 per quad */
-      C3D_DrawElements(GPU_TRIANGLES, n * 6, C3D_UNSIGNED_SHORT, g.quad_indices);
-    }
-    g.cur.draws++;
-    g.cur.triangles += n * 2;
+    s_lastq_quads += n;
+    draw_quads_at(state, dst, n);
     verts += 4 * n;
     quad_count -= n;
+  }
+}
+
+void ctr_gpu_draw_quads_again(const ctr_draw_state* state) {
+  SKY_HOOK(state);
+  if (!g.ready || !g.in_frame || s_lastq_frame != g.frame_no) {
+    return;
+  }
+  uint8_t* dst = g.vbuf + s_lastq_off;
+  for (int left = s_lastq_quads; left > 0;) {
+    const int n = left > QUAD_MAX ? QUAD_MAX : left;
+    if (!cmd_room()) {
+      return;
+    }
+    draw_quads_at(state, dst, n);
+    dst += (size_t)n * 4 * sizeof(ctr_vertex);
+    left -= n;
   }
 }
 

@@ -959,7 +959,19 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   }
 }
 
+// (AI-assisted) ctr_gpu_draw_quads_again: the last call's quads (the caller keeps them)
+static const ctr_vertex* s_lastq_verts;
+static int s_lastq_count;
+
+void ctr_gpu_draw_quads_again(const ctr_draw_state* state) {
+  if (s_lastq_verts) {
+    ctr_gpu_draw_quads(state, s_lastq_verts, s_lastq_count);
+  }
+}
+
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count) {
+  s_lastq_verts = verts;
+  s_lastq_count = quad_count;
   sky_hook(state);
   softstats::prog(0);
   g_soft.cur.draws++;

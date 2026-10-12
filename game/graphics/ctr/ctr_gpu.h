@@ -220,6 +220,9 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
 /* Draw quads: 4 vertices each, triangles (0, 1, 3) and (3, 1, 2) (a strip in the order 0 1 3 2).
  * A third fewer vertices than ctr_gpu_draw for sprites. */
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count);
+/* (AI-assisted) The quads of the last ctr_gpu_draw_quads again with another state (their vertices
+ * stay where that call put them: no second copy), right after it. */
+void ctr_gpu_draw_quads_again(const ctr_draw_state* state);
 /* (AI-assisted) Draw a triangle strip: count vertices, count - 2 triangles (k - 2, k - 1, k).
  * Several strips go in one draw joined by repeating the last vertex of one and the first of the
  * next (the triangles in between have no area). State like ctr_gpu_draw. */
