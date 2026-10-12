@@ -189,6 +189,16 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.cmd_dedup_draw; }},
     {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
      [](const CtrSettings& s) { return s.skin_clip_f24; }},
+    // (AI-assisted, gpu-rt) static_cmdlists: the config's mode (on; on when the config says off)
+    // or off; ocean_tex_half
+    {"static_cmdlists",
+     [](CtrSettings& s, bool on) {
+       static const int kConfigMode = s.static_cmdlists > 0 ? s.static_cmdlists : 1;
+       s.static_cmdlists = on ? kConfigMode : 0;
+     },
+     [](const CtrSettings& s) { return s.static_cmdlists > 0; }},
+    {"ocean_tex_half", [](CtrSettings& s, bool on) { s.ocean_tex_half = on; },
+     [](const CtrSettings& s) { return s.ocean_tex_half; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
