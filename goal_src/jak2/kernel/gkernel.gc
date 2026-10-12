@@ -217,6 +217,12 @@
     (set! (-> v0-0 name) name)
     (set! (-> v0-0 process) parent-process)
     (set! (-> v0-0 sp) stack-top)
+    ;; C backend (AI-assisted): the runtime finds a suspended thread's saved state through pc and
+    ;; rreg 0. The memory may hold an old thread (a relocated process leaves a copy behind), so
+    ;; clear them.
+    (#when (eq? INSTRUCTION_SET 'c)
+      (set! (-> v0-0 pc) (the pointer 0))
+      (set! (-> v0-0 rreg 0) 0))
     (set! (-> v0-0 stack-top) stack-top)
     (set! (-> v0-0 previous) (-> parent-process top-thread))
     (set! (-> parent-process top-thread) v0-0)
@@ -441,6 +447,15 @@
 ;; to get back to the kernel, we use this global symbol.
 (define-extern *kernel-sp* pointer)
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defun return-from-thread ()
+    "Context switch to the saved kernel context now.
+    C backend version (AI-assisted): return to the innermost kernel context (thread-resume or
+    reset-and-call)."
+    (__goalc-return-to-kernel 0)
+    (none)))
+ (#t
 (defun return-from-thread ()
   "Context switch to the saved kernel context now.
   This is intended to be jumped to with the ret instruction (return trampoline)
@@ -499,8 +514,18 @@
      (.ret)
      )
     ))
-  )
+  )))
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defun return-from-thread-dead ()
+    "Like return from thread, but we clean up our process with deactivate first.
+    C backend version: the runtime calls this when a main thread function returns."
+    (rlet ((pp :reg r13 :type process))
+      (deactivate pp))
+    (__goalc-return-to-kernel 0)
+    (none)))
+ (#t
 (defun return-from-thread-dead ()
   "Like return from thread, but we clean up our process with deactivate first.
   The return register is not preserved here, instead we return the value of deactivate"
@@ -560,7 +585,7 @@
      (.ret)
      )
     ))
-  )
+  )))
 
 (defmacro abandon-thread ()
   ;; abandon this one too.
@@ -571,6 +596,9 @@
   ;; temporary, but if this turns out to be false, we will need to change this.
   ;; keep #cond inside the quasiquote so it remains in the macro expansion
   `(#cond
+    ((eq? INSTRUCTION_SET 'c)
+     ;; there is no return address to replace in C, just go back to the kernel.
+     (return-from-thread))
     ((eq? INSTRUCTION_SET 'arm64)
      ;; branch to return-from-thread through the executable alias
      (rlet ((temp)
@@ -586,6 +614,19 @@
        (.push temp)
        (.ret)))))
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defun reset-and-call ((this thread) (func function))
+    "Make the given thread the top thread, reset the stack, and call the function.
+    When the function returns (or something returns to the kernel), this returns.
+    Will NOT deactivate on return, so this is intended for temporary threads.
+    C backend version."
+    (rlet ((pp :reg r13 :type process))
+      (set! pp (-> this process))
+      (set! (-> pp status) 'running)
+      (set! (-> pp top-thread) (the cpu-thread this)))
+    (__goalc-reset-and-call this func)))
+ (#t
 (defun reset-and-call ((this thread) (func function))
   "Make the given thread the top thread, reset the stack, and call the function.
   Sets up a return trampoline so when the function returns it will return to the
@@ -677,8 +718,17 @@
      (.jr func)
      )
     ))
-  )
+  )))
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defmethod thread-suspend ((unused cpu-thread))
+    "Suspend the thread and return to the kernel.
+    C backend version: the thread is in pp. The runtime saves the context and the stack, and this
+    returns once the thread is resumed."
+    (__goalc-thread-suspend)
+    (none)))
+ (#t
 (defmethod thread-suspend ((unused cpu-thread))
   "Suspend the thread and return to the kernel."
 
@@ -877,8 +927,18 @@
      )
     ))
   (none)
-  )
+  )))
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defmethod thread-resume ((thread-to-resume cpu-thread))
+    "Resume a suspended thread. Call this from the kernel only.
+     This is also used to start a thread initialized with set-to-run.
+     C backend version: restores the stack and the saved context, or calls the pc function
+     (set-to-run-bootstrap) on a fresh stack."
+    (__goalc-thread-resume thread-to-resume)
+    (none)))
+ (#t
 (defmethod thread-resume ((thread-to-resume cpu-thread))
   "Resume a suspended thread. Call this from the kernel only.
    This is also used to start a thread initialized with set-to-run.
@@ -1097,7 +1157,7 @@
      )
     ))
   (none)
-  )
+  )))
 ;; decomp deviation
 
 
@@ -2055,6 +2115,14 @@
 ;; The catch frames are managed per process (you can't throw to a frame outside your process)
 ;; But otherwise it is fully dynamic.
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defmethod new catch-frame ((allocation symbol) (type-to-make type) (name symbol) (func function) (param-block (pointer uint64)))
+    "Run func in a catch frame with the given 8 parameters.
+    C backend version: the frame is pushed/popped by the runtime, which also keeps the context
+    to throw to. Only the first six parameters are used, like the native version."
+    (__goalc-catch allocation type-to-make name func param-block)))
+ (#t
 (defmethod new catch-frame ((allocation symbol) (type-to-make type) (name symbol) (func function) (param-block (pointer uint64)))
   "Run func in a catch frame with the given 8 parameters.
   The return value is the result of the function.
@@ -2241,8 +2309,16 @@
        )
      )
     ))
-  )
+  )))
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defun throw-dispatch ((this catch-frame) value)
+    "Throw the given value to the catch frame.
+    C backend version: pops frames through this one and resumes the catch."
+    (__goalc-throw this value)
+    (none)))
+ (#t
 (defun throw-dispatch ((this catch-frame) value)
   "Throw the given value to the catch frame.
   Only can throw a 64-bit value. The original could throw 128 bits."
@@ -2380,7 +2456,7 @@
      (.ret)
      )
     ))
-  )
+  )))
 
 (defun throw ((name symbol) value)
   "Dynamic throw."
@@ -2557,7 +2633,7 @@
   ;; if we got the scratchpad stack, move to the fake scratchpad.
   (#when PC_PORT
     (when (= arg2 *scratch-memory-top*)
-      (set! arg2 (&+ *fake-scratchpad-stack* (* 32 1024)))
+      (set! arg2 (&+ *fake-scratchpad-stack* (#if (eq? INSTRUCTION_SET 'c) (* 64 1024) (* 32 1024))))
       )
     )
   (set! (-> this mask) (logclear (-> arg0 mask) (process-mask sleep sleep-code process-tree heap-shrunk)))
@@ -2670,6 +2746,24 @@
     )
   )
 
+(#cond
+ ((eq? INSTRUCTION_SET 'c)
+  (defun set-to-run-bootstrap ()
+    "C backend version: thread-resume calls this on a fresh stack, with pp set to the process
+     and the thread as its top thread. Calls the function with the arguments from the saved
+     registers, and deactivates when it returns, like the native return trampoline."
+    (rlet ((pp :reg r13 :type process))
+      (let ((thread (the cpu-thread (-> pp top-thread))))
+        ((the-super-u64-fucntion (-> thread rreg 0))
+         (-> thread rreg 1)
+         (-> thread rreg 2)
+         (-> thread rreg 3)
+         (-> thread rreg 4)
+         (-> thread rreg 5)
+         (-> thread rreg 6))))
+    (return-from-thread-dead)
+    (none)))
+ (#t
 (defun set-to-run-bootstrap ()
   "This function is a clever hack.
    To reset a thread to running a new function, we stash the arguments as saved registers.
@@ -2743,13 +2837,16 @@
      (.add a5 a5)
      )
     ))
-  )
+  )))
 ;; decomp deviation
 
 (defun set-to-run ((thread cpu-thread) (func function) a0 a1 a2 a3 a4 a5)
   "Set the given thread to call the given function with the given arguments next time it resumes.
   Only for main threads.
   Once the function returns, the process deactivates."
+  ;; C backend: if the thread is suspended, it won't be resumed where it was
+  (#when (eq? INSTRUCTION_SET 'c)
+    (__goalc-thread-release thread))
   (let ((proc (-> thread process)))
     (set! (-> proc status) 'waiting-to-run)
 
@@ -2796,6 +2893,10 @@
   (with-pp
     ;; only if we're not already dead
     (when (!= (-> this status) 'dead)
+      ;; C backend: free the saved stack of the main thread, if it's suspended
+      (#when (eq? INSTRUCTION_SET 'c)
+        (if (-> this main-thread)
+            (__goalc-thread-release (-> this main-thread))))
       ;; set our next-state to dead. We'll run the exit function of the current state, and it can look at this
       ;; to tell that process is being killed.
       (set! (-> this next-state) dead-state)

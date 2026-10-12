@@ -17,6 +17,7 @@
 #include "game/graphics/jak2_texture_remap.h"
 #include "game/kernel/common/Symbol4.h"
 #include "game/kernel/common/fileio.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kboot.h"
 #include "game/kernel/common/kdgo.h"
 #include "game/kernel/common/kdsnetm.h"
@@ -64,8 +65,18 @@ void InitParms(int argc, const char* const* argv) {
     MasterDebug = 0;
   }
 
+  // (AI-assisted) Run GOAL code compiled to C (docs/3ds-port/c_backend.md). Same environment
+  // variable as the compiler uses, or -cbackend.
+  const char* c_backend_env = getenv("OPENGOAL_C_BACKEND");
+  goalc_set_enabled(c_backend_env && strcmp(c_backend_env, "1") == 0);
+
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
+
+    // Code compiled with the C backend (goalc --instruction-set c)
+    if (arg == "-cbackend") {
+      goalc_set_enabled(true);
+    }
     // DVD Settings
     // ----------------------------
 
@@ -541,77 +552,77 @@ void InitMachine_PCPort() {
       },
       make_string_from_c);
 
-  make_function_symbol_from_c("__pc-set-levels", (void*)kmachine_extras::pc_set_levels);
+  make_function_symbol_from_c("__pc-set-levels", kmachine_extras::pc_set_levels);
   make_function_symbol_from_c("__pc-set-active-levels",
-                              (void*)kmachine_extras::pc_set_active_levels);
-  make_function_symbol_from_c("__pc-get-tex-remap", (void*)lookup_jak2_texture_dest_offset);
+                              kmachine_extras::pc_set_active_levels);
+  make_function_symbol_from_c("__pc-get-tex-remap", lookup_jak2_texture_dest_offset);
   make_function_symbol_from_c("pc-init-autosplitter-struct",
-                              (void*)kmachine_extras::init_autosplit_struct);
+                              kmachine_extras::init_autosplit_struct);
 
   // discord rich presence
-  make_function_symbol_from_c("pc-discord-rpc-update", (void*)kmachine_extras::update_discord_rpc);
+  make_function_symbol_from_c("pc-discord-rpc-update", kmachine_extras::update_discord_rpc);
 
   // debugging tools
-  make_function_symbol_from_c("alloc-vagdir-names", (void*)kmachine_extras::alloc_vagdir_names);
+  make_function_symbol_from_c("alloc-vagdir-names", kmachine_extras::alloc_vagdir_names);
 
   // external RPCs
   make_function_symbol_from_c("pc-fetch-external-speedrun-times",
-                              (void*)kmachine_extras::pc_fetch_external_speedrun_times);
+                              kmachine_extras::pc_fetch_external_speedrun_times);
   make_function_symbol_from_c("pc-fetch-external-race-times",
-                              (void*)kmachine_extras::pc_fetch_external_race_times);
+                              kmachine_extras::pc_fetch_external_race_times);
   make_function_symbol_from_c("pc-fetch-external-highscores",
-                              (void*)kmachine_extras::pc_fetch_external_highscores);
+                              kmachine_extras::pc_fetch_external_highscores);
   make_function_symbol_from_c("pc-get-external-speedrun-time",
-                              (void*)kmachine_extras::pc_get_external_speedrun_time);
+                              kmachine_extras::pc_get_external_speedrun_time);
   make_function_symbol_from_c("pc-get-external-race-time",
-                              (void*)kmachine_extras::pc_get_external_race_time);
+                              kmachine_extras::pc_get_external_race_time);
   make_function_symbol_from_c("pc-get-external-highscore",
-                              (void*)kmachine_extras::pc_get_external_highscore);
+                              kmachine_extras::pc_get_external_highscore);
   make_function_symbol_from_c("pc-get-num-external-speedrun-times",
-                              (void*)kmachine_extras::pc_get_num_external_speedrun_times);
+                              kmachine_extras::pc_get_num_external_speedrun_times);
   make_function_symbol_from_c("pc-get-num-external-race-times",
-                              (void*)kmachine_extras::pc_get_num_external_race_times);
+                              kmachine_extras::pc_get_num_external_race_times);
   make_function_symbol_from_c("pc-get-num-external-highscores",
-                              (void*)kmachine_extras::pc_get_num_external_highscores);
+                              kmachine_extras::pc_get_num_external_highscores);
 
   // speedrunning stuff
   make_function_symbol_from_c("pc-sr-mode-get-practice-entries-amount",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entries_amount);
+                              kmachine_extras::pc_sr_mode_get_practice_entries_amount);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-name",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_name);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_name);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-continue-point",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_continue_point);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_continue_point);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-history-success",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_history_success);
+      kmachine_extras::pc_sr_mode_get_practice_entry_history_success);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-history-attempts",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_history_attempts);
+      kmachine_extras::pc_sr_mode_get_practice_entry_history_attempts);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-session-success",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_session_success);
+      kmachine_extras::pc_sr_mode_get_practice_entry_session_success);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-session-attempts",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_session_attempts);
+      kmachine_extras::pc_sr_mode_get_practice_entry_session_attempts);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-avg-time",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_avg_time);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_avg_time);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-fastest-time",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_fastest_time);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_fastest_time);
   make_function_symbol_from_c("pc-sr-mode-record-practice-entry-attempt!",
-                              (void*)kmachine_extras::pc_sr_mode_record_practice_entry_attempt);
+                              kmachine_extras::pc_sr_mode_record_practice_entry_attempt);
   make_function_symbol_from_c("pc-sr-mode-init-practice-info!",
-                              (void*)kmachine_extras::pc_sr_mode_init_practice_info);
+                              kmachine_extras::pc_sr_mode_init_practice_info);
   make_function_symbol_from_c("pc-sr-mode-get-custom-category-amount",
-                              (void*)kmachine_extras::pc_sr_mode_get_custom_category_amount);
+                              kmachine_extras::pc_sr_mode_get_custom_category_amount);
   make_function_symbol_from_c("pc-sr-mode-get-custom-category-name",
-                              (void*)kmachine_extras::pc_sr_mode_get_custom_category_name);
+                              kmachine_extras::pc_sr_mode_get_custom_category_name);
   make_function_symbol_from_c(
       "pc-sr-mode-get-custom-category-continue-point",
-      (void*)kmachine_extras::pc_sr_mode_get_custom_category_continue_point);
+      kmachine_extras::pc_sr_mode_get_custom_category_continue_point);
   make_function_symbol_from_c("pc-sr-mode-init-custom-category-info!",
-                              (void*)kmachine_extras::pc_sr_mode_init_custom_category_info);
+                              kmachine_extras::pc_sr_mode_init_custom_category_info);
   make_function_symbol_from_c("pc-sr-mode-dump-new-custom-category",
-                              (void*)kmachine_extras::pc_sr_mode_dump_new_custom_category);
+                              kmachine_extras::pc_sr_mode_dump_new_custom_category);
 
   // setup string constants
   auto user_dir_path = file_util::get_user_config_dir();
@@ -653,37 +664,37 @@ u32 sceGsSyncPath(u32 mode, u32 timeout) {
 void aybabtu() {}
 
 void InitMachineScheme() {
-  make_function_symbol_from_c("put-display-env", (void*)PutDisplayEnv);
-  make_function_symbol_from_c("syncv", (void*)sceGsSyncV);
-  make_function_symbol_from_c("sync-path", (void*)sceGsSyncPath);
-  make_function_symbol_from_c("reset-path", (void*)ee::sceGsResetPath);
-  make_function_symbol_from_c("reset-graph", (void*)sceGsResetGraph);
-  make_function_symbol_from_c("dma-sync", (void*)sceDmaSync);
-  make_function_symbol_from_c("gs-put-imr", (void*)sceGsPutIMR);
-  make_function_symbol_from_c("gs-get-imr", (void*)sceGsGetIMR);
-  make_function_symbol_from_c("gs-store-image", (void*)sceGsExecStoreImage);
-  make_function_symbol_from_c("flush-cache", (void*)FlushCache);
-  make_function_symbol_from_c("cpad-open", (void*)CPadOpen);
-  make_function_symbol_from_c("cpad-get-data", (void*)CPadGetData);
-  make_function_symbol_from_c("mouse-get-data", (void*)MouseGetData);
-  make_function_symbol_from_c("install-handler", (void*)InstallHandler);
-  make_function_symbol_from_c("install-debug-handler", (void*)InstallDebugHandler);
-  make_function_symbol_from_c("file-stream-open", (void*)kopen);
-  make_function_symbol_from_c("file-stream-close", (void*)kclose);
-  make_function_symbol_from_c("file-stream-length", (void*)klength);
-  make_function_symbol_from_c("file-stream-seek", (void*)kseek);
-  make_function_symbol_from_c("file-stream-read", (void*)kread);
-  make_function_symbol_from_c("file-stream-write", (void*)kwrite);
-  make_function_symbol_from_c("scf-get-language", (void*)DecodeLanguage);
-  make_function_symbol_from_c("scf-get-time", (void*)DecodeTime);
-  make_function_symbol_from_c("scf-get-aspect", (void*)DecodeAspect);
-  make_function_symbol_from_c("scf-get-volume", (void*)DecodeVolume);
-  make_function_symbol_from_c("scf-get-territory", (void*)DecodeTerritory);
-  make_function_symbol_from_c("scf-get-timeout", (void*)DecodeTimeout);
-  make_function_symbol_from_c("scf-get-inactive-timeout", (void*)DecodeInactiveTimeout);
-  make_function_symbol_from_c("dma-to-iop", (void*)dma_to_iop);
-  make_function_symbol_from_c("kernel-shutdown", (void*)KernelShutdown);
-  make_function_symbol_from_c("aybabtu", (void*)aybabtu);  // was nothing function
+  make_function_symbol_from_c("put-display-env", PutDisplayEnv);
+  make_function_symbol_from_c("syncv", sceGsSyncV);
+  make_function_symbol_from_c("sync-path", sceGsSyncPath);
+  make_function_symbol_from_c("reset-path", ee::sceGsResetPath);
+  make_function_symbol_from_c("reset-graph", sceGsResetGraph);
+  make_function_symbol_from_c("dma-sync", sceDmaSync);
+  make_function_symbol_from_c("gs-put-imr", sceGsPutIMR);
+  make_function_symbol_from_c("gs-get-imr", sceGsGetIMR);
+  make_function_symbol_from_c("gs-store-image", sceGsExecStoreImage);
+  make_function_symbol_from_c("flush-cache", FlushCache);
+  make_function_symbol_from_c("cpad-open", CPadOpen);
+  make_function_symbol_from_c("cpad-get-data", CPadGetData);
+  make_function_symbol_from_c("mouse-get-data", MouseGetData);
+  make_function_symbol_from_c("install-handler", InstallHandler);
+  make_function_symbol_from_c("install-debug-handler", InstallDebugHandler);
+  make_function_symbol_from_c("file-stream-open", kopen);
+  make_function_symbol_from_c("file-stream-close", kclose);
+  make_function_symbol_from_c("file-stream-length", klength);
+  make_function_symbol_from_c("file-stream-seek", kseek);
+  make_function_symbol_from_c("file-stream-read", kread);
+  make_function_symbol_from_c("file-stream-write", kwrite);
+  make_function_symbol_from_c("scf-get-language", DecodeLanguage);
+  make_function_symbol_from_c("scf-get-time", DecodeTime);
+  make_function_symbol_from_c("scf-get-aspect", DecodeAspect);
+  make_function_symbol_from_c("scf-get-volume", DecodeVolume);
+  make_function_symbol_from_c("scf-get-territory", DecodeTerritory);
+  make_function_symbol_from_c("scf-get-timeout", DecodeTimeout);
+  make_function_symbol_from_c("scf-get-inactive-timeout", DecodeInactiveTimeout);
+  make_function_symbol_from_c("dma-to-iop", dma_to_iop);
+  make_function_symbol_from_c("kernel-shutdown", KernelShutdown);
+  make_function_symbol_from_c("aybabtu", aybabtu);  // was nothing function
 
   InitMachine_PCPort();
 

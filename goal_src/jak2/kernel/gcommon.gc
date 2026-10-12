@@ -20,6 +20,11 @@
 (defglobalconstant BIG_MEMORY #t)
 (defglobalconstant PC_BIG_MEMORY (and PC_PORT BIG_MEMORY))
 
+;; 3DS port (AI-assisted): the shared goal_src/jak1/pc files test these. Jak 2 has no small
+;; memory (3DS) layout yet, so both are off.
+(defglobalconstant SMALL_MEMORY #f)
+(defglobalconstant TARGET_3DS #f)
+
 ;; redirects access to EE memory mapped registers through get-vm-ptr to valid addresses that
 ;; are monitored in the runtime for debugging.
 (defglobalconstant USE_VM #t)

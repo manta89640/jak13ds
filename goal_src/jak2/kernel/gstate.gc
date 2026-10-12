@@ -433,6 +433,12 @@ It type checks the arguments for the entry function.
          ;; - make sure that when this code returns, we do a deactivate
          ;; - reset the stack to the top, so we can't just call the code.
          (#cond
+          ((eq? INSTRUCTION_SET 'c)
+           ;; (AI-assisted) the runtime resets the stack, calls the code and deactivates when it
+           ;; returns.
+           (__goalc-reset-stack-and-call (-> pp main-thread stack-top) (-> new-state code) arg0 arg1 arg2 arg3)
+           #f ;; can't get here
+           )
           ((eq? INSTRUCTION_SET 'arm64)
            (rlet ((func)
                   (sp :reg sp :type uint)

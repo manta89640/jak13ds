@@ -4,6 +4,7 @@
 #include "game/kernel/common/Ptr.h"
 #include "game/kernel/common/Symbol4.h"
 #include "game/kernel/common/kmalloc.h"
+#include "game/kernel/common/kernel_function.h"
 #include "game/kernel/common/kscheme.h"
 
 namespace jak2 {
@@ -50,8 +51,12 @@ u64 make_debug_string_from_c(const char* c_str);
 u64 new_pair(u32 heap, u32 type, u32 car, u32 cdr);
 u64 inspect_object(u32 obj);
 u64 print_object(u32 obj);
-Ptr<Function> make_function_symbol_from_c(const char* name, void* f);
-Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name, void* f);
+Ptr<Function> make_function_symbol_from_c(const char* name, ::KernelFunction f);
+//! c_abi_wide_mask: C mode, the arguments that are 64-bit values in the GOAL type of the function
+//! (see goal_c_abi.h). Other arguments reach f zero-extended.
+Ptr<Function> make_stack_arg_function_symbol_from_c(const char* name,
+                                                    ::KernelFunction f,
+                                                    u32 c_abi_wide_mask = 0xff);
 int InitHeapAndSymbol();
 u64 load(u32 file_name_in, u32 heap_in);
 u64 loadb(u32 file_name_in, u32 heap_in, u32 param3);

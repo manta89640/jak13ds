@@ -9,7 +9,13 @@
 
 #include "common/common_types.h"
 
+#include "game/kernel/common/goalc_runtime.h"
+
 namespace jak1 {
+
+//! (AI-assisted) another game's thread-suspend (Jak 2 sets it in its goalc_kernel_init). The
+//! assembly entry calls goalc_suspend_impl, which forwards here when it is set.
+extern u64 (*g_goalc_suspend_impl_other)(goalc_ctx* caller_ctx);
 
 //! Value of the thread pc field of a thread suspended in C mode.
 constexpr u32 GOALC_SUSPENDED_PC = 0xc0de5000;

@@ -139,6 +139,7 @@ set(RUNTIME_SOURCE
         kernel/common/ksound.cpp
         kernel/jak1/fileio.cpp
         kernel/jak1/goalc_kernel.cpp
+        kernel/jak2/goalc_kernel.cpp
         kernel/jak1/kboot.cpp
         kernel/jak1/kdgo.cpp
         kernel/jak1/klink.cpp
