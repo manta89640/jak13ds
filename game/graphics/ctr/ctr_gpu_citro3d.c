@@ -2075,10 +2075,11 @@ void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* drop
 
 static void migrate_small_textures(void);
 
-/* (AI-assisted) config.ini tex_cache_clear (ctr_gpu_set_tex_cache_clear): 1 = uploads. The GPU's
- * texture cache holds texels by address; a level pool's texels only change when the pool is
- * filled (ctr_gpu_pool_ready) or moved (pool_repoint), so its binds skip the cache clear unless
- * one of those (or a new frame) came since the last clear (s_tex_dirty). */
+/* (AI-assisted) config.ini tex_cache_clear (ctr_gpu_set_tex_cache_clear): 1 = uploads. A bind
+ * that keeps unit 0's level pool texture (only its filter, wrap or mip settings change) skips the
+ * cache clear unless a pool was filled (ctr_gpu_pool_ready) or moved (pool_repoint) or a new frame
+ * began since the last clear (s_tex_dirty). Every switch to another texture clears (see
+ * bind_texture). */
 static int s_tex_clear_mode = 0;
 static volatile int s_tex_dirty = 1;
 void ctr_gpu_set_tex_cache_clear(int mode) {
@@ -4211,6 +4212,9 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       tex->maxLevel == max_level && tex->lodBias == lod_bias) {
     return;
   }
+  /* (AI-assisted) the same texels as the unit has (only the filter, wrap or mip settings change):
+   * tex_cache_clear = uploads may keep the cache */
+  const int same_texels = g.bound_tex == tex && g.bound_data == tex->data;
   tex->param = param;
   tex->maxLevel = max_level;
   tex->lodBias = lod_bias;
@@ -4237,9 +4241,15 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
       ctx->texConfig |= 1;
       p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0xB, ctx->texConfig);
     }
-    /* (AI-assisted) tex_cache_clear = uploads: a level pool texture's texels are what the cache
-     * may hold for its addresses unless a pool was filled or moved since the last clear */
-    if (!s_tex_clear_mode || slot->pool < 0 || s_tex_dirty) {
+    /* (AI-assisted) tex_cache_clear = uploads: the clear is left out only when the unit keeps
+     * its texture (a level pool's, no pool filled or moved since the last clear) and just its
+     * sampling settings change. It used to be left out at every switch between level pool
+     * textures, on the idea that the cache holds texels by address (never checked). The suspected
+     * cause of the red patches on the Volcanic Crater minecarts on hardware (oct12b, the first
+     * build with uploads; Azahar has no texture cache): the carts' body is one 8x8 texture (128
+     * bytes, less than a texture unit's 256-byte L1 cache) in a level of red lava textures, as if
+     * the cache kept the previous texture's texels. citro3d clears at every texture change too. */
+    if (!s_tex_clear_mode || slot->pool < 0 || s_tex_dirty || !same_texels) {
       s_tex_dirty = 0;
       p = raw_w(p, GPUREG_TEXUNIT_CONFIG, 0x4, BIT(16));
     } else {

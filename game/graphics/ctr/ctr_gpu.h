@@ -312,9 +312,9 @@ void ctr_gpu_set_early_depth(int on);
  * uses it). Defaults 0, 0, 0 = the old state. Any time. */
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
 /* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
- * texture cache, as citro3d does), 1 uploads (binds of level pool textures, whose texels don't
- * change, don't clear it unless a pool was filled or moved since the last clear; the first bind
- * of a frame and every other texture's bind still clear). Any time. */
+ * texture cache, as citro3d does), 1 uploads (a bind that keeps a level pool texture and only
+ * changes its sampling settings doesn't clear it unless a pool was filled or moved since the last
+ * clear; every switch to another texture and the first bind of a frame clear). Any time. */
 void ctr_gpu_set_tex_cache_clear(int mode);
 /* (AI-assisted) config.ini mip_bias: the LOD bias of mipmapped textures (levels, + = a smaller
  * level sooner: blurrier, fewer texels read), -4..4 in 1/256 steps. 0 = none. Any time. */
