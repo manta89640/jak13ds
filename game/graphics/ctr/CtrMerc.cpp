@@ -226,10 +226,10 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
               "{} draws, {} envmap batches, {} draws sorted by texture, {} with back faces culled "
-              "({} not: mirroring bone)",
+              "({} not: mirroring bone), {} palette bones not sent",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
               m_stats.draws, m_stats.env_batches, m_stats.sorted_draws, m_stats.culled,
-              m_stats.mirrored);
+              m_stats.mirrored, m_stats.unsent_bones);
     m_stats = Stats();
   }
 }
@@ -614,6 +614,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   static MercMat bones[128];
   const u8* slots = input;
   const u32* matrix_array = (const u32*)(input + 128);
+  u64 sent[2] = {0, 0};  // (AI-assisted) the bones the game sent for this model
   int i;
   for (i = 0; i < 128; i++) {
     if (slots[i] == 0xff) {
@@ -622,6 +623,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     u32 addr;
     memcpy(&addr, &matrix_array[i * 4], 4);
     if (slots[i] < 128) {
+      sent[slots[i] >> 6] |= 1ull << (slots[i] & 63);
       if (m_snap_valid && m_snap_first + i < m_snap.size()) {
         bones[slots[i]] = m_snap[m_snap_first + i];
       } else {
@@ -840,7 +842,20 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       palette_mirrors = false;
     }
     for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
-      const MercMat& m = bones[draw.palette[p]];
+      // (AI-assisted) a bone the game didn't send this frame: the table still has the matrix of
+      // an earlier model (Merc2 reads its own leftover the same way). Counted, logged once per
+      // model: it would put that part of the model somewhere else
+      const u8 bi = draw.palette[p];
+      if (bi < 128 && !(sent[bi >> 6] & (1ull << (bi & 63)))) {
+        m_stats.unsent_bones++;
+        if (std::find(m_unsent_bone_logged.begin(), m_unsent_bone_logged.end(), model->name) ==
+            m_unsent_bone_logged.end()) {
+          m_unsent_bone_logged.push_back(model->name);
+          lg::info("[ctr] merc {}: a draw uses bone {}, which the game didn't send ({} sent)",
+                   model->name, bi, i);
+        }
+      }
+      const MercMat& m = bones[bi];
       float* rows = &palette_rows[12 * p];
       if (cull_merc) {
         const math::Vector4f& a = m.tmat[0];
