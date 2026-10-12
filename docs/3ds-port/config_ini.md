@@ -39,7 +39,7 @@ capital letters only 5 to 7 pixels tall.
 ```ini
 text_scale = 1             # all game text x this (0.5 .. 2)
 text_min_height = 9        # the smallest capital letter height, in pixels of the top screen (0 .. 16; 0 = the PS2's sizes). Text drawn smaller is drawn this big
-button_art = on            # the PS2 button symbols in the text and the progress menu are drawn as the New 3DS buttons (A red, B yellow, X blue, Y green; by position: circle = A, cross = B, triangle = X, square = Y); off: the PS2 symbols
+button_art = off           # (off by default since Oct 12: the PS2 symbols) on: the PS2 button symbols in the text and the progress menu are drawn as the New 3DS buttons (A red, B yellow, X blue, Y green; by position: circle = A, cross = B, triangle = X, square = Y); off: the PS2 symbols
 ```
 
 - The size applies to all of the game's text: menus, hints, the talk prompts, subtitles, the HUD

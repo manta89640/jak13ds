@@ -743,9 +743,9 @@ void InitMachine_PCPort() {
   // (AI-assisted) 3DS button symbols (game/graphics/ctr/CtrButtonArt.h): config.ini button_art
   // (default on); the progress menu tells where its PS2 button icons are (progress-draw.gc).
   {
-    bool button_art = true;
+    bool button_art = false;  // (AI-assisted) off since Oct 12: the user prefers the PS2 symbols for now
 #ifdef __3DS__
-    button_art = ctr_config_bool("button_art", 1);
+    button_art = ctr_config_bool("button_art", 0);
 #else
     if (const char* e = getenv("OPENGOAL_BUTTON_ART")) {
       button_art = atoi(e) != 0;
