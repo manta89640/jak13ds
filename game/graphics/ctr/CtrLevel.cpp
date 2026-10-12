@@ -418,6 +418,7 @@ void CtrLevels::publish(const std::string& name, std::unique_ptr<CtrLevelData> l
   lev->last_used_frame = frame;
   m_levels[name] = std::move(lev);
   rebuild_merc_index();
+  bump_set_generation();  // (AI-assisted)
 }
 
 namespace {
@@ -591,6 +592,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
                           : nullptr;
   if (lev) {
     (d.job.detail ? lev->detail_requested : lev->repair_requested) = false;
+    bump_set_generation();  // (AI-assisted)
   }
   if (!lev || (d.job.detail && d.result != LoadResult::LOADED)) {
     delete_parts(d);
@@ -652,6 +654,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
 }
 
 void CtrLevels::unload_detail(CtrLevelData& lev) {
+  bump_set_generation();  // (AI-assisted)
   int freed = 0;
   for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
     // (AI-assisted) what far mode draws stays (far_chunk)
@@ -1813,6 +1816,7 @@ void CtrLevels::retry_failed_loads(u64 frame) {
 }
 
 void CtrLevels::unload(CtrLevelData& lev) {
+  bump_set_generation();  // (AI-assisted)
   for (int t : lev.textures) {
     ctr_gpu_tex_delete(t);
   }
@@ -1935,6 +1939,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       unload(*it->second);
       it = m_levels.erase(it);
       rebuild_merc_index();
+      bump_set_generation();  // (AI-assisted)
       changed = true;
     } else {
       ++it;
@@ -2290,6 +2295,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const float vista_dist = settings.vista_distance * 4096.f;
   constexpr float kDetailMargin = 50.f * 4096.f;
   m_levels->loaded(&m_loaded);
+  // (AI-assisted) lowres_vista: outside_detail's answers, per chunk, for this set of loaded levels
+  if (lev.outside_gen != m_levels->set_generation() ||
+      lev.outside_cache.size() != lev.chunks.size()) {
+    lev.outside_gen = m_levels->set_generation();
+    lev.outside_cache.assign(lev.chunks.size(), 0);
+  }
   // (AI-assisted) fog_stage_skip
   const bool fog_skip = settings.fog_stage_skip;
   const float pzw = std::abs(cam.perspective[2][3]);
@@ -2557,10 +2568,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // (neighbour_vis, chunks with visibility runs), else as vista outside the detailed areas
       bool want = vis_nb && ch.vis_run_count;
       if (!want && lowres_vista) {
-        want = true;
-        for (const CtrLevelData* l : m_loaded) {
-          want = want && outside_detail(*l, ch.bsphere, kDetailMargin);
+        u8& oc = lev.outside_cache[ci];
+        if (!(oc & 1)) {
+          bool all = true;
+          for (const CtrLevelData* l : m_loaded) {
+            all = all && outside_detail(*l, ch.bsphere, kDetailMargin);
+          }
+          oc |= 1 | (all ? 2 : 0);
         }
+        want = oc & 2;
       }
       if (!want) {
         continue;
@@ -2571,11 +2587,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     // (AI-assisted) lowres_vista: in far mode too, not over another loaded level's detailed tfrag
     if (vista_chunk && far_level) {
-      bool over = false;
-      for (const CtrLevelData* l : m_loaded) {
-        over = over || (l != &lev && !outside_detail(*l, ch.bsphere, kDetailMargin));
+      u8& oc = lev.outside_cache[ci];
+      if (!(oc & 4)) {
+        bool over = false;
+        for (const CtrLevelData* l : m_loaded) {
+          over = over || (l != &lev && !outside_detail(*l, ch.bsphere, kDetailMargin));
+        }
+        oc |= 4 | (over ? 8 : 0);
       }
-      if (over) {
+      if (oc & 8) {
         continue;
       }
     }

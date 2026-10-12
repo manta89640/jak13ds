@@ -111,6 +111,11 @@ struct CtrLevelData {
   // where the level's low resolution tfrag isn't drawn in near mode (config lowres_vista)
   float detail_min[3] = {0, 0, 0}, detail_max[3] = {0, 0, 0};
   bool has_detail = false;
+  // (AI-assisted) lowres_vista, per chunk: whether its sphere is outside the detailed areas of all
+  // loaded levels (bit 1) / inside another loaded level's (bit 3), bits 0 / 2: worked out. Valid
+  // for the set of loaded levels of CtrLevels::set_generation() == outside_gen (not the camera)
+  std::vector<u8> outside_cache;
+  u32 outside_gen = 0;
   bool has_vista = false;  // (AI-assisted) c3l v13 vista tier chunks (CHUNK_KIND_VISTA)
   // (AI-assisted) c3l v14: the shrub chunks' max_dist is their shrubs' PS2 distance
   bool shrub_ps2_dist = false;
@@ -187,6 +192,9 @@ class CtrLevels {
       out->push_back(lev.get());
     }
   }
+  /*! (AI-assisted) Changes whenever the loaded levels (loaded()) change: a publish or unload, also
+   * a partial unload and a reload / repair of parts (never 0). */
+  u32 set_generation() const { return m_set_gen; }
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
@@ -228,6 +236,8 @@ class CtrLevels {
   // merc model name -> (level, model index); rebuilt when levels change
   std::map<std::string, std::pair<CtrLevelData*, int>, std::less<>> m_merc_index;
   void rebuild_merc_index();
+  u32 m_set_gen = 1;  // (AI-assisted) set_generation
+  void bump_set_generation() { m_set_gen = m_set_gen + 1 ? m_set_gen + 1 : 1; }
   // a level that loaded (or was prefetched) and is taken into m_levels
   void publish(const std::string& name, std::unique_ptr<CtrLevelData> lev, u64 frame);
 
