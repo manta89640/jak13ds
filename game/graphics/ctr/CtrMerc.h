@@ -64,6 +64,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int gen_lod = 0;       // (AI-assisted) merc_gen_lod: models drawn with the generated LOD
     int culled = 0;        // (AI-assisted) cull_merc: draws drawn with back face culling
     int mirrored = 0;      // (AI-assisted) ... marked ones not culled: a bone mirrors
+    int unsent_bones = 0;  // (AI-assisted) draws using a bone the game didn't send
   };
 
  private:
@@ -142,6 +143,9 @@ class CtrMercRenderer : public CtrBucketRenderer {
   u32 m_mod_frames = 0, m_mod_verts = 0, m_mod_effects = 0, m_mod_bad = 0;
   bool m_mod_frame_counted = false;
   std::string m_mod_logged_for;
+  // (AI-assisted) models already logged for a draw whose palette names a bone the game didn't
+  // send this frame (it reads the previous model's matrix left in the bone table)
+  std::vector<std::string> m_unsent_bone_logged;
   std::string m_mod_last_model;
   bool m_snap_valid = false;
   bool m_snapshot_mode = false;

@@ -285,8 +285,9 @@ struct CtrSettings {
   // (platform/3ds/tools/cmd_report.py); diagnostic, off
   bool cmd_dump = false;
   // (AI-assisted) tex_cache_clear = always | uploads: always (default) clears the GPU's texture
-  // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it for level pool
-  // textures (static texels) unless a pool was filled or moved since the last clear
+  // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it only for binds
+  // that keep a level pool texture and change its sampling settings (switches between level pool
+  // textures skipped it too until the minecart red patches, see bind_texture)
   bool tex_cache_uploads = false;
   // (AI-assisted) cb_read_opaque: the GPU doesn't read the color buffer for draws that overwrite
   // it whole (opaque); unknown on hardware (GBATEK), pica_bench B6.cbread0.probe decides. Off
