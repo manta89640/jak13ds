@@ -2303,6 +2303,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted) fog_stage_skip
   const bool fog_skip = settings.fog_stage_skip;
+  const bool early_depth = settings.early_depth;  // (AI-assisted) the band order below
   const float pzw = std::abs(cam.perspective[2][3]);
   constexpr float kNoFog = 0.5f / 255.f;
   float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
@@ -2450,7 +2451,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       vc.chunk = (u32)ci;
       vc.partly = partly;
       vc.vista = vista_chunk;
-      {
+      vc.band = 0;
+      vc.nofog = false;
+      // (AI-assisted) only read with early_depth (band) or fog_stage_skip (nofog)
+      if (early_depth || (fog_skip && !vista_chunk)) {
         // (AI-assisted) distance band of the chunk's nearest point, for the early depth order
         const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                     dz = ch.bsphere[2] - cam.trans[2];
@@ -2459,7 +2463,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         vc.band = near < 30.f * 4096.f ? 0 : (near < 100.f * 4096.f ? 1 : 2);
         // (AI-assisted) fog_stage_skip: both fogs ~0 at the chunk's farthest point (its depth is at
         // most its distance; w = depth * pzw), the same formulas as the mesh shader
-        vc.nofog = false;
         if (fog_skip && !vista_chunk) {
           const float far_d = dist + ch.bsphere[3];
           const float g = 1.f + fog0[3] * std::clamp(fog0[0] - far_d * pzw, fog0[1], fog0[2]);
@@ -2730,7 +2733,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_vista_tris += vista_indices / 3;
   }
   m_vista_frames++;
-  if (settings.early_depth) {
+  if (early_depth) {
     for (u8 band = 0; band < 3; band++) {
       for (u32 di : *main_lists[0]) {
         const int slot = m_visible_slot[lev.draw_chunk[di]];
