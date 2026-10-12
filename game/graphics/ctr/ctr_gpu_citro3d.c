@@ -3302,10 +3302,11 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
     fmt = GPU_RGB565;
   } else if (binary) {
     fmt = GPU_RGBA5551;
-  } else if (g_rgba4_as_rgba8) {
-    return ctr_gpu_tex_create(w, h, rgba); /* Azahar draws RGBA4 as noise */
   } else {
-    fmt = GPU_RGBA4;
+    /* (AI-assisted) colored with soft alpha (glows, flares, the HUD orb's halo): kept at 8 bits per
+     * channel, as on PC. RGBA4 (16 levels, truncated) turned their smooth falloff into rings and
+     * dimmed them, on hardware only (Azahar draws RGBA4 as noise, so it already got RGBA8). */
+    return ctr_gpu_tex_create(w, h, rgba);
   }
   const int slot = reserve_tex_slot();
   if (slot < 0) {

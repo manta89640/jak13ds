@@ -151,7 +151,8 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba);
 void ctr_gpu_tex_delete(int handle);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
- * on/off alpha -> RGBA5551, else RGBA4 (RGBA8 when rgba4_as_rgba8 or alpha above 0x80), and
+ * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create; (AI-assisted) not RGBA4: soft
+ * colored glows banded), and
  * moved to a reserved part of VRAM when there's room (vram_textures). flags: CTR_TEX_CHECK_RADIAL
  * also checks whether it is a radial gradient (glows: see CTR_STATE_PROCTEX). */
 enum { CTR_TEX_CHECK_RADIAL = 1 };
@@ -463,7 +464,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
                           int index_count);
 
 /* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space
- * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, 1.0 = GS 0x80). */
+ * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, GS value / 255 as
+ * in Merc2, so 0x80 = texture x 1). */
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
                               int palette_count, const float fade[4], int mesh, int first_index,
                               int index_count);
