@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <span>
 
 #include "common/log/log.h"
@@ -21,6 +22,7 @@
 #include <atomic>
 #include <deque>
 #include <mutex>
+#include <thread>
 
 #include "game/overlord/common/compressed_iso_file.h"
 #include "platform/3ds/port/ctr_port.h"
@@ -654,7 +656,12 @@ struct SoundLoad {
   IsoMessage* msg = nullptr;  // the load running (nullptr: none)
   std::string path;
   long offset = 0;        // sound bank: where the 989snd bank starts (after the name list)
-  std::vector<u8> data;   // the whole file (empty: not found or not read)
+  // (AI-assisted) the file's bytes before `offset` (the sound bank's name list). The rest is read
+  // into a buffer the 989snd bank keeps (its samples aren't copied).
+  std::vector<u8> data;
+  bool ok = false;  // (AI-assisted) read and parsed
+  long size = 0;    // the file's
+  double read_ms = 0;
   snd::BankHandle handle = nullptr;
   std::atomic<bool> done{false};
 };
@@ -662,36 +669,88 @@ SoundLoad sSoundLoad;
 // loads waiting for the running one (the loader RPC waits for each, so this stays empty)
 std::deque<IsoMessage*> sSoundLoadQueue;
 
-void sound_load_job(SoundLoad* s) {
-  const auto t0 = std::chrono::steady_clock::now();
+// (AI-assisted) a load that runs out of heap memory (bad_alloc: an exception out of a thread pool
+// task is std::terminate, the Spider Cave crash on hardware) waits and tries again, up to
+// kSoundLoadRetries times; then the bank stays out (no sound from it) and the game goes on
+constexpr int kSoundLoadRetries = 40;
+constexpr int kSoundLoadRetryMs = 500;
+
+// one try: whether the file was read (the bank may still have failed to parse: handle)
+bool sound_load_try(SoundLoad* s) {
+  s->data.clear();
+  s->handle = nullptr;
+  s->size = 0;
   bool ok = false;
   FILE* fp = file_util::open_file(s->path.c_str(), "rb");
-  if (fp) {
+  if (!fp) {
+    return false;
+  }
+  try {
     setvbuf(fp, nullptr, _IONBF, 0);
     fseek(fp, 0, SEEK_END);
     const long size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
     if (size > 0) {
-      s->data.resize(size);
+      std::unique_ptr<u8[]> buf(new u8[size]);
+      const auto t0 = std::chrono::steady_clock::now();
       ok = true;
       for (long pos = 0; ok && pos < size; pos += kSoundLoadPiece) {
-        ok = fread(s->data.data() + pos, std::min(kSoundLoadPiece, size - pos), 1, fp) == 1;
+        ok = fread(buf.get() + pos, std::min(kSoundLoadPiece, size - pos), 1, fp) == 1;
+      }
+      s->read_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                       .count();
+      if (ok) {
+        s->size = size;
+        s->data.assign(buf.get(), buf.get() + std::min(size, s->offset));
+        if (size > s->offset) {
+          s->handle = snd_BankLoadFromMemory(
+              std::span<u8>(buf.get() + s->offset, (size_t)(size - s->offset)), std::move(buf));
+        }
       }
     }
+  } catch (...) {
     fclose(fp);
+    s->data.clear();
+    s->handle = nullptr;
+    throw;
   }
-  const double read_ms =
+  fclose(fp);
+  return ok;
+}
+
+void sound_load_job(SoundLoad* s) {
+  const auto t0 = std::chrono::steady_clock::now();
+  bool ok = false;
+  for (int attempt = 0;; attempt++) {
+    try {
+      ok = sound_load_try(s);
+      if (attempt) {
+        lg::info("[io] sound bank {}: loaded after {} tries", s->path, attempt + 1);
+      }
+      break;
+    } catch (std::exception& e) {
+      if (attempt == kSoundLoadRetries) {
+        lg::error("[io] sound bank {}: {}, given up after {} tries (no sound from it)", s->path,
+                  e.what(), attempt + 1);
+        break;
+      }
+      if (attempt == 0) {
+        lg::warn("[io] sound bank {}: {}, trying again every {} ms", s->path, e.what(),
+                 kSoundLoadRetryMs);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(kSoundLoadRetryMs));
+    }
+  }
+  const double ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   if (!ok) {
     lg::error("[OVERLORD] fake iso could not read \"{}\"", s->path);
     s->data.clear();
-  } else if ((long)s->data.size() > s->offset) {
-    s->handle = snd_BankLoadFromMemory(std::span<u8>(s->data).subspan(s->offset));
+    s->handle = nullptr;
   }
+  s->ok = ok;
   lg::info("[io] sound bank {}: {} KB read in {:.0f} ms, loaded in {:.0f} ms", s->path,
-           s->data.size() / 1024, read_ms,
-           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-               .count());
+           s->size / 1024, s->read_ms, ms);
   s->done.store(true);
 }
 
@@ -701,6 +760,9 @@ void start_sound_load(IsoMessage* msg) {
   s.path.clear();
   s.offset = 0;
   s.data.clear();
+  s.ok = false;
+  s.size = 0;
+  s.read_ms = 0;
   s.handle = nullptr;
   s.done.store(false);
   char namebuf[16];
@@ -750,7 +812,7 @@ IsoMessage* FS_FinishSoundLoad() {
     return nullptr;
   }
   IsoMessage* msg = s.msg;
-  if (!s.data.empty()) {
+  if (s.ok) {
     if (msg->cmd_id == LOAD_SOUND_BANK) {
       auto* cmd = (SoundBankLoadCommand*)msg;
       parseSoundBank(BinaryReader(s.data), *cmd->bank);
