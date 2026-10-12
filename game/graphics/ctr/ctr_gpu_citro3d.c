@@ -432,6 +432,17 @@ static struct {
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
 
+/* (AI-assisted, gpu-rt) config.ini static_cmdlists: a stretch of level mesh draws being recorded
+ * (ctr_gpu_draw_mesh_calls): its matrix uploads (slots: word offset from p0, then call | words <<
+ * 24), and anything that makes the stretch unfit to copy again (bad: a citro3d draw; citro3d
+ * updates and sky hook runs are counted) */
+static struct {
+  int on, bad, call, n, max;
+  u32* p0;
+  u32* slots;
+} s_rec;
+static u32 s_ctx_updates, s_hook_runs;
+
 static int g_color16 = 0;
 /* (AI-assisted) steady frame pacing, see pres_vblank */
 static int g_steady_pacing;
@@ -1786,6 +1797,273 @@ static void gt_collect(void) {
   s_gt.reported = done;
 }
 
+/* ---------------- (AI-assisted, gpu-rt) config.ini gpu_breakdown ----------------
+ * Where the GPU's time per frame goes, measured on the console. Every 4th frame (pipeline only)
+ * each part of the frame is a queue entry of its own that runs alone: the render thread waits for
+ * the GPU to be idle, hands the part over and waits for its GSP event (P3D for a command list,
+ * PSC0 / PSC1 for the clear's two fills, PPF for the screen copy and the transfer + fence copies);
+ * the time is from the submission to the event's tick on the GSP event thread, so it includes the
+ * GSP's dispatch (measured each frame with an almost empty list: "overhead"). The command list is
+ * split where the phase changes (ctr_gpu_phase: per bucket from the renderer, the sky hook, the
+ * screen copy here); each split adds a framebuffer flush (as the pipeline's partial submits). The
+ * GPU and the CPU then take turns in those frames: slower while on (a profiling mode). */
+static const char* const kPhaseNames[CTR_GPU_PHASES] = {
+    "other", "clear", "sky", "level", "merc", "trans", "shadow", "ocean",
+    "sprite", "distort", "hud", "transfer"};
+enum { BD_P3D, BD_PSC0, BD_PSC1, BD_PPF, BD_EVENTS };
+#define BD_EVERY 4
+static struct {
+  int on, hooked;
+  int frame; /* this frame is measured */
+  int phase; /* what the commands being built belong to */
+  volatile u32 n[BD_EVENTS];
+  volatile u64 t[BD_EVENTS];
+  u32* probe; /* 4 words in linear memory: a framebuffer flush and the end (overhead) */
+  double ms[CTR_GPU_PHASES];
+  u32 lists[CTR_GPU_PHASES];
+  double overhead_ms;
+  u32 overhead_n, frames, timeouts, psc1_seen;
+  u64 xfer_t0;
+  u32 xfer_n0;
+} s_bd;
+
+static void gt_ppf(void* unused);
+static void bd_event(int k) {
+  s_bd.t[k] = svcGetSystemTick();
+  __dmb();
+  s_bd.n[k]++;
+}
+static void bd_p3d(void* u) {
+  (void)u;
+  bd_event(BD_P3D);
+}
+static void bd_psc0(void* u) {
+  (void)u;
+  bd_event(BD_PSC0);
+}
+static void bd_psc1(void* u) {
+  (void)u;
+  bd_event(BD_PSC1);
+}
+static void bd_ppf(void* u) {
+  bd_event(BD_PPF);
+  if (s_pres.on) {
+    gt_ppf(u); /* the steady pacing fence's callback (this event's only other user) */
+  }
+}
+
+static inline double ticks_ms(u64 t) {
+  return (double)t / (SYSCLOCK_ARM11 / 1000.0);
+}
+
+void ctr_gpu_set_gpu_breakdown(int on) {
+  s_bd.on = on ? 1 : 0;
+  if (!s_bd.on || s_bd.hooked || !g.ready) {
+    return;
+  }
+  ctr_linear_lock();
+  s_bd.probe = (u32*)linearAlloc(16);
+  ctr_linear_unlock();
+  if (!s_bd.probe) {
+    s_bd.on = 0;
+    printf("[ctr] gpu_breakdown: no linear memory, off\n");
+    return;
+  }
+  s_bd.probe[0] = 1;
+  s_bd.probe[1] = GPUREG_FRAMEBUFFER_FLUSH | (0xFu << 16);
+  s_bd.probe[2] = 0x12345678;
+  s_bd.probe[3] = GPUREG_FINALIZE | (0xFu << 16);
+  cache_flush_now(s_bd.probe, 16);
+  gspSetEventCallback(GSPGPU_EVENT_P3D, bd_p3d, NULL, false);
+  gspSetEventCallback(GSPGPU_EVENT_PSC0, bd_psc0, NULL, false);
+  gspSetEventCallback(GSPGPU_EVENT_PSC1, bd_psc1, NULL, false);
+  gspSetEventCallback(GSPGPU_EVENT_PPF, bd_ppf, NULL, false);
+  s_bd.hooked = 1;
+  printf("[ctr] gpu_breakdown: on (every %dth frame; the GPU runs each part alone)\n", BD_EVERY);
+}
+
+/* the GX queue idle (everything handed over is done), emptied and running */
+static void bd_idle(void) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  if (!gxCmdQueueWait(q, SYSCLOCK_ARM11)) {
+    s_bd.timeouts++;
+    return;
+  }
+  gxCmdQueueStop(q);
+  gxCmdQueueClear(q);
+  gxCmdQueueRun(q);
+}
+
+/* the tick of the want-th event k since n0 (the queue is waited for first); now if it never came
+ * within 50 ms */
+static u64 bd_wait(int k, u32 n0, u32 want) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  if (!gxCmdQueueWait(q, SYSCLOCK_ARM11)) {
+    s_bd.timeouts++;
+  }
+  const u64 t0 = svcGetSystemTick();
+  while ((u32)(s_bd.n[k] - n0) < want) {
+    if (svcGetSystemTick() - t0 > SYSCLOCK_ARM11 / 20) {
+      s_bd.timeouts++;
+      return svcGetSystemTick();
+    }
+    svcSleepThread(20000);
+  }
+  __dmb();
+  return s_bd.t[k];
+}
+
+/* one command list alone on the GPU, timed for phase */
+static void bd_list(u32* list, u32 words, int phase) {
+  bd_idle();
+  cache_flush_now(list, words * 4);
+  const u32 n0 = s_bd.n[BD_P3D];
+  const u64 t0 = svcGetSystemTick();
+  GX_ProcessCommandList(list, words * 4, 0);
+  const u64 t1 = bd_wait(BD_P3D, n0, 1);
+  s_bd.ms[phase] += ticks_ms(t1 - t0);
+  s_bd.lists[phase]++;
+}
+
+/* the commands built since the last split, as a part of the current phase */
+static void bd_part(void) {
+  raw_vc_flush();
+  if (!gpuCmdBufOffset) {
+    return;
+  }
+  flush_vbuf();
+  GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+  GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+  u32* list;
+  u32 words;
+  GPUCMD_Split(&list, &words);
+  if (words) {
+    gt_note_submit();
+    bd_list(list, words, s_bd.phase);
+  }
+}
+
+void ctr_gpu_phase(int phase) {
+  if (phase < 0 || phase >= CTR_GPU_PHASES) {
+    phase = CTR_PH_OTHER;
+  }
+  if (s_bd.frame && phase != s_bd.phase && g.in_frame) {
+    bd_part();
+  }
+  s_bd.phase = phase;
+}
+
+/* frame begin (pipeline): is this frame measured; then the previous frame finished */
+static void bd_frame_begin(void) {
+  s_bd.frame = s_bd.on && s_bd.hooked && s_pipeline && (g.frame_no % BD_EVERY) == 0;
+  s_bd.phase = CTR_PH_OTHER;
+  if (s_bd.frame) {
+    bd_idle();
+  }
+}
+
+/* the frame's clear (one or two fills), alone: bd_clear_begin before its GX_MemoryFill, then
+ * bd_clear_end (two: both fill units) */
+static u32 s_bd_c0, s_bd_c1;
+static u64 s_bd_ct;
+static void bd_clear_begin(void) {
+  bd_idle();
+  s_bd_c0 = s_bd.n[BD_PSC0];
+  s_bd_c1 = s_bd.n[BD_PSC1];
+  s_bd_ct = svcGetSystemTick();
+}
+static void bd_clear_end(int two) {
+  u64 t1 = bd_wait(BD_PSC0, s_bd_c0, 1);
+  if (two) {
+    /* the second fill unit's event: libctru's queue only waits for PSC0, and Azahar sends no
+     * PSC1 for a two-buffer fill. Up to 2 ms more (the fills run side by side) */
+    const u64 w0 = svcGetSystemTick();
+    while (s_bd.n[BD_PSC1] == s_bd_c1 && svcGetSystemTick() - w0 < SYSCLOCK_ARM11 / 500) {
+      svcSleepThread(20000);
+    }
+    __dmb();
+    if (s_bd.n[BD_PSC1] != s_bd_c1) {
+      t1 = s_bd.t[BD_PSC1] > t1 ? s_bd.t[BD_PSC1] : t1;
+      s_bd.psc1_seen++;
+    }
+  }
+  s_bd.ms[CTR_PH_CLEAR] += ticks_ms(t1 - s_bd_ct);
+  s_bd.lists[CTR_PH_CLEAR]++;
+  /* the dispatch cost of a list that does nothing */
+  bd_idle();
+  const u32 p0 = s_bd.n[BD_P3D];
+  const u64 t3 = svcGetSystemTick();
+  GX_ProcessCommandList(s_bd.probe, 16, 0);
+  s_bd.overhead_ms += ticks_ms(bd_wait(BD_P3D, p0, 1) - t3);
+  s_bd.overhead_n++;
+}
+
+/* a texture copy in the frame (the distorter's screen copy, a pool moving to VRAM), alone */
+static void bd_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
+  bd_part(); /* the draws before it */
+  bd_idle();
+  const u32 n0 = s_bd.n[BD_PPF];
+  const u64 t0 = svcGetSystemTick();
+  GX_TextureCopy(in, indim, out, outdim, size, flags);
+  s_bd.ms[CTR_PH_DISTORT] += ticks_ms(bd_wait(BD_PPF, n0, 1) - t0);
+  s_bd.lists[CTR_PH_DISTORT]++;
+}
+
+/* frame end: before the transfer is queued (its PPF events from here on) / when it starts */
+static void bd_transfer_mark(void) {
+  s_bd.xfer_t0 = svcGetSystemTick();
+  s_bd.xfer_n0 = s_bd.n[BD_PPF];
+}
+static void bd_frame_end(int ppf_events) {
+  if (!s_bd.frame) {
+    return;
+  }
+  s_bd.ms[CTR_PH_TRANSFER] += ticks_ms(bd_wait(BD_PPF, s_bd.xfer_n0, (u32)ppf_events) - s_bd.xfer_t0);
+  s_bd.lists[CTR_PH_TRANSFER]++;
+  s_bd.frames++;
+  s_bd.frame = 0;
+}
+
+int ctr_gpu_breakdown_line(char* out, int size, const char* label) {
+  if (!s_bd.on) {
+    return 0;
+  }
+  if (!s_bd.frames) {
+    return snprintf(out, size, "[ctr] gpu breakdown %s: nothing measured (needs pipeline = on)",
+                    label);
+  }
+  const double n = s_bd.frames;
+  double sum = 0;
+  int len = snprintf(out, size,
+                     "[ctr] gpu breakdown %s over %u frames (every %dth frame, each part alone on "
+                     "the GPU: the game runs slower while gpu_breakdown is on); GPU ms per frame "
+                     "(lists per frame):",
+                     label, s_bd.frames, BD_EVERY);
+  for (int i = 0; i < CTR_GPU_PHASES && len < size; i++) {
+    sum += s_bd.ms[i];
+    len += snprintf(out + len, size - len, " %s %.2f (%.1f)", kPhaseNames[i], s_bd.ms[i] / n,
+                    s_bd.lists[i] / n);
+  }
+  u32 lists = 0;
+  for (int i = 0; i < CTR_GPU_PHASES; i++) {
+    lists += s_bd.lists[i];
+  }
+  const double ovh = s_bd.overhead_n ? s_bd.overhead_ms / s_bd.overhead_n : 0.0;
+  if (len < size) {
+    len += snprintf(out + len, size - len,
+                    "; sum %.2f; overhead %.3f ms per list (an empty list's submit to its event, "
+                    "included above: %.2f ms per frame); clear: second fill unit's event in %u of "
+                    "%u frames%s",
+                    sum / n, ovh, ovh * lists / n, s_bd.psc1_seen, s_bd.frames,
+                    s_bd.timeouts ? "; TIMEOUTS (an event didn't come in 50 ms)" : "");
+  }
+  memset(s_bd.ms, 0, sizeof(s_bd.ms));
+  memset(s_bd.lists, 0, sizeof(s_bd.lists));
+  s_bd.overhead_ms = 0;
+  s_bd.overhead_n = s_bd.frames = s_bd.timeouts = s_bd.psc1_seen = 0;
+  return len;
+}
+
 static void pres_vblank(void* unused) {
   (void)unused;
   const u32 v = ++s_pres.vblanks;
@@ -2003,6 +2281,9 @@ static void pres_queue_frame(void) {
   }
   s_pres.buf_state[b] = 1;
   s_pres.buf_wait_ms += (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0);
+  if (s_bd.frame) {
+    bd_transfer_mark(); /* (AI-assisted, gpu-rt) frame_overlap2 = on: the queue runs */
+  }
   C3D_FrameSplit(GX_CMDLIST_FLUSH); /* the draws first */
   if (g_block32) {
     /* (AI-assisted) untile the 256x416 blocks into the scratch buffer, then copy rows 8..407,
@@ -2236,7 +2517,11 @@ void ctr_gpu_run_sky_hook(void) {
   const ctr_gpu_hook_fn fn = s_sky_hook;
   if (fn) {
     s_sky_hook = NULL; /* once (its own draws mustn't call it again) */
+    s_hook_runs++;     /* (AI-assisted, gpu-rt) static_cmdlists */
+    const int phase = s_bd.phase; /* (AI-assisted, gpu-rt) gpu_breakdown: the sky's own part */
+    ctr_gpu_phase(CTR_PH_SKY);
     fn(s_sky_hook_arg);
+    ctr_gpu_phase(phase);
   }
 }
 
@@ -2362,9 +2647,13 @@ static void pipeline_frame_begin(u32 clear) {
   g.cmd_base = gpuCmdBuf;
   g.vbuf = s_vbufs[s_k];
   g.frame_no++;
+  bd_frame_begin(); /* (AI-assisted, gpu-rt) gpu_breakdown: the frame before is done first */
   gt_note_first(); /* (AI-assisted) the clear below starts the GPU on this frame */
   /* copies to VRAM wait for the GPU first (citro3d's safe copy outside of a frame) */
   update_pool_residency();
+  if (s_bd.frame) {
+    bd_clear_begin();
+  }
   C3D_FrameBuf* fb = &g.top->frameBuf;
   u32* color = (u32*)fb->colorBuf;
   u32* depth = (u32*)fb->depthBuf;
@@ -2381,6 +2670,9 @@ static void pipeline_frame_begin(u32 clear) {
                   GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth,
                   0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
                   GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
+  }
+  if (s_bd.frame) {
+    bd_clear_end(!s_skip_color_clear);
   }
   C3D_SetFrameBuf(fb);
   set_top_viewport();
@@ -2505,6 +2797,10 @@ static void flush_vbuf(void) {
  * then has nothing left to send. */
 static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
   if (g.in_frame && s_pipeline) {
+    if (s_bd.frame) {
+      bd_copy(in, indim, out, outdim, size, flags); /* (AI-assisted, gpu-rt) gpu_breakdown */
+      return;
+    }
     pipeline_submit(); /* the draws before the copy, then the copy, in the GPU's queue */
     GX_TextureCopy(in, indim, out, outdim, size, flags);
     return;
@@ -2631,9 +2927,18 @@ void ctr_gpu_frame_end(void) {
   diag_rt("frame_end: flush");
   raw_vc_flush();
   flush_vbuf();
+  const int bd = s_bd.frame;
+  if (bd) {
+    /* (AI-assisted, gpu-rt) gpu_breakdown: the rest of the frame's commands alone (the frame
+     * end below then has no list left to hand over) */
+    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
+    bd_part();
+  }
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
-  g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
-  cmd_dump_frame();
+  if (!bd) {
+    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
+    cmd_dump_frame();
+  }
   /* (AI-assisted) frame_overlap2: 0 the old frame end, 1 the list cleaned before the wait, 2 no
    * wait (the list queued behind the frame the GPU draws) */
   const int ov2 = s_pipeline ? (overlap2_on() ? 2 : (s_overlap2 ? 1 : 0)) : 0;
@@ -2676,8 +2981,15 @@ void ctr_gpu_frame_end(void) {
   diag_rt("frame_end: C3D_FrameEnd (submit)");
   gt_note_first(); /* (AI-assisted) without the pipeline the queue starts here (or at a partial) */
   gt_note_submit();
+  if (bd && (ov2 != 2 || !s_pres.on)) {
+    bd_transfer_mark(); /* (AI-assisted, gpu-rt) the queue (stopped) runs the transfer from here */
+  }
   if (ov2 != 2) {
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
+  }
+  if (bd) {
+    /* (AI-assisted, gpu-rt) the transfer and the fence (steady pacing), block32's crop copy */
+    bd_frame_end(s_pres.on ? (g_block32 ? 3 : 2) : 1);
   }
   diag_rt("frame_end: stats");
   g.in_frame = 0;
@@ -3997,6 +4309,7 @@ static void raw_check_epoch(void) {
 static inline void raw_sync(void) {
   raw_check_epoch();
   if (s_raw.unif_pending || (__C3D_Context.flags & ~(u32)(C3DiF_Active | C3DiF_DrawUsed))) {
+    s_ctx_updates++; /* (AI-assisted, gpu-rt) static_cmdlists: citro3d wrote words */
     C3Di_UpdateContext();
     s_raw.unif_pending = 0;
     s_raw.vs_changed = 1;
@@ -5519,14 +5832,30 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
           raw_pack_f24(rows + 4, mm->f24 + 15);
           mm->fog_gen = g.fog_gen;
         }
+        if (s_rec.on && s_rec.n < s_rec.max) {
+          /* (AI-assisted, gpu-rt) static_cmdlists: where this upload goes when copied again */
+          s_rec.slots[2 * s_rec.n] = (u32)(raw_ptr() - s_rec.p0);
+          s_rec.slots[2 * s_rec.n + 1] = (u32)s_rec.call | ((u32)(df ? 15 : 18) << 24);
+          s_rec.n++;
+        } else if (s_rec.on) {
+          s_rec.bad = 1;
+        }
         raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, df ? 15 : 18, 0));
       } else {
+        if (s_rec.on && s_rec.n < s_rec.max) {
+          s_rec.slots[2 * s_rec.n] = (u32)(raw_ptr() - s_rec.p0);
+          s_rec.slots[2 * s_rec.n + 1] = (u32)s_rec.call | (12u << 24);
+          s_rec.n++;
+        } else if (s_rec.on) {
+          s_rec.bad = 1;
+        }
         raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 12, 0));
       }
       g.last_mesh_valid = 1;
     }
     raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
   } else {
+    s_rec.bad = 1; /* (AI-assisted, gpu-rt) static_cmdlists: citro3d's draw (not while on) */
     raw_vc_flush();
     /* consecutive draws of a level chunk share the matrix and the vertex buffer */
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
@@ -5569,6 +5898,678 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
   ctr_mesh_matrix m;
   ctr_gpu_prepare_mesh_matrix(clip, &m);
   ctr_gpu_draw_mesh_prepared(state, &m, mesh, first_index, index_count);
+}
+
+/* ---------------- (AI-assisted, gpu-rt) config.ini static_cmdlists ----------------
+ * The level renderer's draws of a frame are mostly the same as the frame before's: the same
+ * draws in the same order, with only the chunk matrices new (the camera moved). Their raw command
+ * words (state changes, vertex buffer, matrix uploads, draw templates) are then the same except
+ * the matrices' uniform data. ctr_gpu_draw_mesh_calls takes a pass's draws in one list and splits
+ * it into stretches of draws that run one program with nothing but raw words between them (a
+ * draw that switches the program, runs the sky hook (sky_last), goes through citro3d or draws
+ * nothing is drawn as usual and starts a new stretch). A stretch drawn alike in two frames in a
+ * row is recorded: its words, where each matrix upload is, the GPU state the trackers (g, s_raw,
+ * citro3d's context) had before and after, the settings, and the statistics it adds. While a later
+ * frame's stretch has the same draws (state, texture memory, mesh buffers, counts, which draws
+ * share a matrix), the same state before and the same settings, its words are copied in, each
+ * matrix upload written again with this frame's matrix (and fog rows), and the trackers set to the
+ * state after it: exactly what drawing it one by one writes (static_cmdlists = compare checks every
+ * copy against that and counts mismatches).
+ * The copies come from one block of linear memory (CL_ARENA_BYTES, taken when the setting is first
+ * on: no fragmentation of what level loads need), filled from the start again (every recording
+ * dropped) when it is full. The GPU reads the frame's command buffer as always: nothing in the
+ * block has a GPU lifetime (a pipelined frame, frame_overlap2, level unloads change nothing).
+ * GPUREG_CMDBUF_JUMP / ADDR (3dbrew: "kick" registers; buffers 16-byte aligned) could run the block
+ * without the copy, but their call / return use isn't documented and a list the GPU doesn't finish
+ * hangs the console: left for a pica_bench test. */
+#define CL_ARENA_BYTES (512u * 1024u)
+#define CL_MAX_SEGS 8
+typedef struct {
+  ctr_draw_state last_state;
+  int last_state_mesh;
+  uint32_t last_tint;
+  int last_state_valid;
+  const C3D_Tex* bound_tex;
+  const void* bound_data;
+  u32 bound_param;
+  int cur_prog;
+  const void* ps;
+  int last_mesh_valid;
+  int unit1_off, ocean_stage2, proc_radial, grp_cur;
+  u32 grp_valid;
+  int env_valid, last_skin_valid, skin_bl_valid;
+  C3Di_Effect effect;
+  C3D_TexEnv tex_env[3];
+  C3D_Tex* tex0;
+  u32 tex_config;
+  C3D_BufInfo buf;
+  u32 ctx_flags;
+  const void* program;
+  int prim, voff0;
+  const C3D_Tex* tex0_ctx;
+  u32 tex0_fmt;
+  int vc_dirty, vs_changed, unif_pending;
+  int tex_dirty, cbread;
+  /* the texture unit 0 binding is one no draw of the stretch uses (a texture with its own memory:
+   * sky, ocean, eyes; its texels may swap copies every frame): bound_* are 1 / 1 / 0 here, and
+   * (out) the stretch didn't bind: the binding before it stays */
+  int bound_other;
+} ClTrack;
+typedef struct {
+  int fog_alpha, tex1_gating, dedup, dedup_draw, vcache_reuse, mip_mode, tex_clear_mode;
+  int early_depth, early_sky, depth_far, early_func, cull_enable, cull_flip, cb_read_opaque;
+  int depth16, fog_tex_valid, fog_df, zdef_valid, proctex;
+  u32 lod_bias, early_clear, fog_abgr, zscale0, zoffset0;
+  const void* ps;
+} ClSet;
+typedef struct {
+  ctr_draw_state st;
+  u32 tex_data, tex_dim, tex_fmt;
+  u32 vpa, ipa, count, flags; /* flags: nofog | the matrix of the draw before (uploaded) << 1 */
+  u32 pad;
+} ClCall;
+_Static_assert(sizeof(ClCall) == 48, "ClCall compared as 12 words");
+#define CL_STATS(X)                                                                       \
+  X(draws) X(triangles) X(tex_binds) X(early_depth_draws) X(proctex_draws) X(nofog_draws) \
+  X(tex_clears_skipped) X(cbread_switches) X(unit1_toggles) X(fog_alpha_draws)            \
+  X(cmd_dedup_words)
+enum {
+#define CL_ENUM(f) CL_S_##f,
+  CL_STATS(CL_ENUM) CL_S_COUNT
+#undef CL_ENUM
+};
+typedef struct {
+  int valid;
+  u32 gen;       /* the arena's generation it was recorded in */
+  u32 last_hash; /* the stretch as the last frame drew it (two alike: record) */
+  int ncalls, nslots, nwords, last_up;
+  ClCall* calls;
+  u32* slots;
+  u32* words;
+  u32 bytes;
+  ClTrack in, out;
+  ClSet set;
+  int stats[CL_S_COUNT];
+} ClSeg;
+struct ctr_cmd_cache {
+  ClSeg seg[CL_MAX_SEGS];
+};
+static struct {
+  int mode;
+  uint8_t* arena;
+  u32 used, gen;
+  u32* scratch; /* compare mode: the copied words; recording: the slots */
+  u32 scratch_words;
+  /* statistics since the last line */
+  u32 segs, replays, records, unlike, normal_calls, replay_calls, words, slots, resets, compares,
+      mismatches, frame0;
+  int logged_mismatches, logged_why;
+  u32 why[5]; /* not alike: arena restarted, draw count, settings, state before, the draws */
+  const C3D_Tex* bound0_tex;
+  const void* bound0_data;
+  u32 bound0_param;
+} s_cl = {.mode = 1};
+
+void ctr_gpu_set_static_cmdlists(int mode) {
+  s_cl.mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+  if (s_cl.mode && !s_cl.arena && g.ready) {
+    ctr_linear_lock();
+    s_cl.arena = (uint8_t*)linearAlloc(CL_ARENA_BYTES);
+    ctr_linear_unlock();
+    if (!s_cl.arena) {
+      printf("[ctr] static_cmdlists: no linear memory for its %u KB, off\n", CL_ARENA_BYTES / 1024);
+    }
+  }
+  if (!s_cl.arena) {
+    s_cl.mode = 0;
+  }
+}
+
+static u32* cl_scratch(u32 words) {
+  if (s_cl.scratch_words < words) {
+    free(s_cl.scratch);
+    s_cl.scratch_words = words < 4096 ? 4096 : words;
+    s_cl.scratch = (u32*)malloc(s_cl.scratch_words * 4);
+    if (!s_cl.scratch) {
+      s_cl.scratch_words = 0;
+    }
+  }
+  return s_cl.scratch;
+}
+
+static void cl_track_save(ClTrack* t) {
+  memset(t, 0, sizeof(*t));
+  const C3Di_Context* ctx = &__C3D_Context;
+  t->last_state = g.last_state;
+  t->last_state_mesh = g.last_state_mesh;
+  t->last_tint = g.last_tint;
+  t->last_state_valid = g.last_state_valid;
+  t->bound_tex = g.bound_tex;
+  t->bound_data = g.bound_data;
+  t->bound_param = g.bound_param;
+  t->cur_prog = g.cur_prog;
+  t->ps = g.ps;
+  t->last_mesh_valid = g.last_mesh_valid;
+  t->unit1_off = g.unit1_off;
+  t->ocean_stage2 = g.ocean_stage2;
+  t->proc_radial = g.proc_radial;
+  t->grp_cur = g.grp_cur;
+  t->grp_valid = g.grp_valid;
+  t->env_valid = g.env_valid;
+  t->last_skin_valid = g.last_skin_valid;
+  t->skin_bl_valid = g.skin_bl_valid;
+  memcpy(&t->effect, &ctx->effect, sizeof(t->effect));
+  memcpy(t->tex_env, ctx->texEnv, sizeof(t->tex_env));
+  t->tex0 = ctx->tex[0];
+  t->tex_config = ctx->texConfig;
+  memcpy(&t->buf, &ctx->bufInfo, sizeof(t->buf));
+  t->ctx_flags = ctx->flags;
+  t->program = ctx->program;
+  t->prim = s_raw.prim;
+  t->voff0 = s_raw.voff0;
+  t->tex0_ctx = s_raw.tex0_ctx;
+  t->tex0_fmt = s_raw.tex0_fmt;
+  t->vc_dirty = s_raw.vc_dirty;
+  t->vs_changed = s_raw.vs_changed;
+  t->unif_pending = s_raw.unif_pending;
+  t->tex_dirty = s_tex_dirty;
+  t->cbread = s_cbread;
+  /* (the level draws only bind pool textures: cl_plain) */
+  if (g.bound_tex && ((const TexSlot*)g.bound_tex)->pool < 0) {
+    t->bound_tex = (const C3D_Tex*)1;
+    t->bound_data = (const void*)1;
+    t->bound_param = 0;
+    t->bound_other = 1;
+  }
+}
+
+static void cl_track_load(const ClTrack* t) {
+  C3Di_Context* ctx = &__C3D_Context;
+  g.last_state = t->last_state;
+  g.last_state_mesh = t->last_state_mesh;
+  g.last_tint = t->last_tint;
+  g.last_state_valid = t->last_state_valid;
+  if (!t->bound_other) {
+    g.bound_tex = t->bound_tex;
+    g.bound_data = t->bound_data;
+    g.bound_param = t->bound_param;
+  }
+  g.cur_prog = t->cur_prog;
+  g.last_mesh_valid = t->last_mesh_valid;
+  g.unit1_off = t->unit1_off;
+  g.ocean_stage2 = t->ocean_stage2;
+  g.proc_radial = t->proc_radial;
+  g.grp_cur = t->grp_cur;
+  g.grp_valid = t->grp_valid;
+  g.env_valid = t->env_valid;
+  g.last_skin_valid = t->last_skin_valid;
+  g.skin_bl_valid = t->skin_bl_valid;
+  memcpy(&ctx->effect, &t->effect, sizeof(t->effect));
+  memcpy(ctx->texEnv, t->tex_env, sizeof(t->tex_env));
+  ctx->tex[0] = t->tex0;
+  ctx->texConfig = t->tex_config;
+  memcpy(&ctx->bufInfo, &t->buf, sizeof(t->buf));
+  ctx->flags = t->ctx_flags;
+  s_raw.prim = t->prim;
+  s_raw.voff0 = t->voff0;
+  s_raw.tex0_ctx = t->tex0_ctx;
+  s_raw.tex0_fmt = t->tex0_fmt;
+  s_raw.vc_dirty = t->vc_dirty;
+  s_raw.vs_changed = t->vs_changed;
+  s_raw.unif_pending = t->unif_pending;
+  s_tex_dirty = t->tex_dirty;
+  s_cbread = t->cbread;
+}
+
+static void cl_set_save(ClSet* t) {
+  memset(t, 0, sizeof(*t));
+  t->fog_alpha = g_fog_alpha;
+  t->tex1_gating = g_tex1_gating;
+  t->dedup = s_raw.dedup;
+  t->dedup_draw = s_raw.dedup_draw;
+  t->vcache_reuse = s_raw.vcache_reuse;
+  t->mip_mode = g_mip_mode;
+  t->tex_clear_mode = s_tex_clear_mode;
+  t->early_depth = g_early_depth;
+  t->early_sky = g_early_sky;
+  t->depth_far = g_depth_far;
+  t->early_func = g_early_func;
+  t->cull_enable = g_cull_enable;
+  t->cull_flip = g_cull_flip;
+  t->cb_read_opaque = g_cb_read_opaque;
+  t->depth16 = g_depth16;
+  t->fog_tex_valid = g.fog_tex_valid;
+  t->fog_df = g.fog_df;
+  t->zdef_valid = s_zdef_valid;
+  t->proctex = g_proctex;
+  t->lod_bias = s_lod_bias;
+  t->early_clear = g_early_clear;
+  t->fog_abgr = g.fog_abgr;
+  t->zscale0 = s_zscale0;
+  t->zoffset0 = s_zoffset0;
+  t->ps = g.ps;
+}
+
+static inline void cl_stats(int* out) {
+#define CL_GET(f) out[CL_S_##f] = (int)g.cur.f;
+  CL_STATS(CL_GET)
+#undef CL_GET
+}
+
+/* the program the draw takes (as ctr_gpu_draw_mesh_prepared) */
+static int cl_prog(const ctr_mesh_call* c) {
+  const int fa = g_fog_alpha && g.ps->fa_ok && (c->state->tcc & CTR_TCC_ALPHA80);
+  const int df = g.ps->df_ok && g.fog_df;
+  return fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH);
+}
+/* a draw that writes raw words only (inside a stretch) */
+static int cl_plain(const ctr_mesh_call* c) {
+  const int t = c->state->tex;
+  return c->index_count >= 3 && c->mesh >= 0 && c->mesh < MAX_MESHES &&
+         g.meshes[c->mesh].used == 1 && use_raw(c->state) &&
+         (t < 0 || t >= MAX_TEXTURES || g.textures[t].used != 1 || g.textures[t].pool >= 0);
+}
+
+static void cl_rec_call(const ctr_mesh_call* c, const ctr_mesh_call* prev, ClCall* r) {
+  memset(r, 0, sizeof(*r));
+  r->st = *c->state;
+  const int t = c->state->tex;
+  if (t >= 0 && t < MAX_TEXTURES && g.textures[t].used == 1) {
+    const TexSlot* ts = &g.textures[t];
+    r->tex_data = (u32)ts->tex.data;
+    r->tex_dim = ts->tex.dim;
+    r->tex_fmt = (u32)ts->tex.fmt | ((u32)ts->levels << 8) | ((u32)(ts->radial >= 0) << 16) |
+                 ((u32)ts->pool << 20);
+  }
+  const MeshSlot* ms = &g.meshes[c->mesh];
+  r->vpa = ms->verts_pa;
+  r->ipa = ms->indices_pa + 2u * (u32)c->first_index;
+  r->count = (u32)c->index_count;
+  const int same = prev ? prev->matrix == c->matrix
+                        : (g.last_mesh_valid && g.last_clip_id == c->matrix->id);
+  r->flags = (c->nofog ? 1u : 0u) | (same ? 2u : 0u);
+}
+
+static inline u32 cl_hash(u32 h, const void* p, u32 bytes) {
+  const alias_u32* w = (const alias_u32*)p;
+  for (u32 i = 0; i < bytes / 4; i++) {
+    h = (h ^ w[i]) * 16777619u;
+  }
+  return h;
+}
+
+static void cl_draw(const ctr_mesh_call* c, int a, int b) {
+  for (int i = a; i < b; i++) {
+    g.mesh_nofog = c[i].nofog ? 1 : 0;
+    ctr_gpu_draw_mesh_prepared(c[i].state, c[i].matrix, c[i].mesh, c[i].first_index,
+                               c[i].index_count);
+  }
+}
+
+/* the stretch's words at p, its matrices this frame's */
+static void cl_replay(const ClSeg* sg, const ctr_mesh_call* c, int a, int b) {
+  u32* p = raw_ptr();
+  memcpy(p, sg->words, (size_t)sg->nwords * 4);
+  for (int k = 0; k < sg->nslots; k++) {
+    ctr_mesh_matrix* m = (ctr_mesh_matrix*)c[a + (int)(sg->slots[2 * k + 1] & 0xFFFFFF)].matrix;
+    const u32 words = sg->slots[2 * k + 1] >> 24;
+    if (words > 12 && m->fog_gen != g.fog_gen) {
+      float rows[8];
+      mesh_fog_rows(m->m, rows);
+      raw_pack_f24(rows, m->f24 + 12);
+      raw_pack_f24(rows + 4, m->f24 + 15);
+      m->fog_gen = g.fog_gen;
+    }
+    raw_unif(p + sg->slots[2 * k], g.ps->uloc_clip, m->f24, words, 0);
+  }
+  raw_end(p + sg->nwords);
+  const int dirty_now = s_tex_dirty;
+  cl_track_load(&sg->out);
+  if (dirty_now && !sg->in.tex_dirty) {
+    s_tex_dirty = 1; /* set by the loader thread meanwhile: the next bind clears */
+  }
+  if (sg->last_up >= 0) {
+    g.last_clip_id = c[a + sg->last_up].matrix->id;
+  }
+#define CL_ADD(f) g.cur.f += sg->stats[CL_S_##f];
+  CL_STATS(CL_ADD)
+#undef CL_ADD
+  g.mesh_nofog = c[b - 1].nofog ? 1 : 0;
+  __C3D_Context.flags |= C3DiF_DrawUsed;
+  s_cl.replays++;
+  s_cl.replay_calls += (u32)(b - a);
+  s_cl.words += (u32)sg->nwords;
+  s_cl.slots += (u32)sg->nslots;
+}
+
+/* the arena's room for a recording, from the start again (all recordings dropped) when full */
+static uint8_t* cl_alloc(u32 bytes) {
+  bytes = (bytes + 15) & ~15u;
+  if (bytes > CL_ARENA_BYTES / 2) {
+    return NULL;
+  }
+  if (s_cl.used + bytes > CL_ARENA_BYTES) {
+    s_cl.used = 0;
+    s_cl.gen++;
+    s_cl.resets++;
+  }
+  uint8_t* p = s_cl.arena + s_cl.used;
+  s_cl.used += bytes;
+  return p;
+}
+
+/* draws c[a..b) one by one, recorded into sg if they qualify */
+static void cl_record(ClSeg* sg, const ctr_mesh_call* c, int a, int b, const ClTrack* in,
+                      const ClSet* set) {
+  const int n = b - a;
+  u32* slots = cl_scratch((u32)(2 * n));
+  if (!slots) {
+    cl_draw(c, a, b);
+    return;
+  }
+  ClCall first;
+  cl_rec_call(&c[a], NULL, &first);
+  int st0[CL_S_COUNT];
+  cl_stats(st0);
+  const int dropped0 = g.cur.dropped_draws, prog0 = g.cur.prog_switches;
+  const u32 upd0 = s_ctx_updates, hook0 = s_hook_runs;
+  u32* const buf0 = gpuCmdBuf;
+  u32* const p0 = raw_ptr();
+  s_rec.on = 1;
+  s_rec.bad = 0;
+  s_rec.n = 0;
+  s_rec.max = n;
+  s_rec.p0 = p0;
+  s_rec.slots = slots;
+  for (int i = a; i < b; i++) {
+    s_rec.call = i - a;
+    g.mesh_nofog = c[i].nofog ? 1 : 0;
+    ctr_gpu_draw_mesh_prepared(c[i].state, c[i].matrix, c[i].mesh, c[i].first_index,
+                               c[i].index_count);
+  }
+  s_rec.on = 0;
+  if (s_rec.bad || upd0 != s_ctx_updates || hook0 != s_hook_runs || gpuCmdBuf != buf0 ||
+      g.cur.dropped_draws != dropped0 || g.cur.prog_switches != prog0 || raw_ptr() <= p0) {
+    sg->valid = 0;
+    return;
+  }
+  const int nwords = (int)(raw_ptr() - p0);
+  const u32 bytes = (u32)n * sizeof(ClCall) + (u32)s_rec.n * 8u + (u32)nwords * 4u;
+  uint8_t* mem = cl_alloc(bytes);
+  if (!mem) {
+    sg->valid = 0;
+    return;
+  }
+  sg->calls = (ClCall*)mem;
+  sg->slots = (u32*)(mem + (size_t)n * sizeof(ClCall));
+  sg->words = sg->slots + 2 * s_rec.n;
+  sg->calls[0] = first;
+  for (int i = a + 1; i < b; i++) {
+    cl_rec_call(&c[i], &c[i - 1], &sg->calls[i - a]);
+  }
+  memcpy(sg->slots, slots, (size_t)s_rec.n * 8);
+  memcpy(sg->words, p0, (size_t)nwords * 4);
+  sg->ncalls = n;
+  sg->nslots = s_rec.n;
+  sg->nwords = nwords;
+  sg->last_up = s_rec.n ? (int)(slots[2 * (s_rec.n - 1) + 1] & 0xFFFFFF) : -1;
+  sg->bytes = bytes;
+  sg->in = *in;
+  sg->set = *set;
+  cl_track_save(&sg->out);
+  int st1[CL_S_COUNT];
+  cl_stats(st1);
+  for (int k = 0; k < CL_S_COUNT; k++) {
+    sg->stats[k] = st1[k] - st0[k];
+  }
+  sg->gen = s_cl.gen;
+  sg->valid = 1;
+  s_cl.records++;
+}
+
+/* compare mode: the copy just made at p0 against drawing the stretch one by one; the latter's
+ * words and state stay */
+static void cl_compare(const ClSeg* sg, const ctr_mesh_call* c, int a, int b, u32* p0,
+                       const ClTrack* in, const ctr_gpu_stats* stats0, u32 clip0) {
+  const u32 nw = (u32)(raw_ptr() - p0);
+  u32* copy = cl_scratch(nw);
+  if (!copy) {
+    return;
+  }
+  memcpy(copy, p0, (size_t)nw * 4);
+  ClTrack tr;
+  cl_track_save(&tr);
+  int sr[CL_S_COUNT];
+  cl_stats(sr);
+  const u32 clip_r = g.last_clip_id;
+  /* back to the state before the copy, then the per-frame path */
+  cl_track_load(in);
+  g.bound_tex = s_cl.bound0_tex;
+  g.bound_data = s_cl.bound0_data;
+  g.bound_param = s_cl.bound0_param;
+  g.cur = *stats0;
+  g.last_clip_id = clip0;
+  raw_end(p0);
+  cl_draw(c, a, b);
+  const u32 nn = (u32)(raw_ptr() - p0);
+  ClTrack tn;
+  cl_track_save(&tn);
+  int sn[CL_S_COUNT];
+  cl_stats(sn);
+  s_cl.compares++;
+  int first = -1;
+  for (u32 i = 0; i < nw && i < nn; i++) {
+    if (copy[i] != p0[i]) {
+      first = (int)i;
+      break;
+    }
+  }
+  /* the loader thread may have set the texture cache flag meanwhile (not a difference) */
+  tn.tex_dirty = tr.tex_dirty;
+  const int words_ok = nw == nn && first < 0;
+  const int track_ok = !memcmp(&tr, &tn, sizeof(tr)) && clip_r == g.last_clip_id;
+  const int stats_ok = !memcmp(sr, sn, sizeof(sr));
+  if (!words_ok || !track_ok || !stats_ok) {
+    s_cl.mismatches++;
+    if (s_cl.logged_mismatches < 8) {
+      s_cl.logged_mismatches++;
+      printf("[ctr] static_cmdlists compare: MISMATCH frame %d, %d draws: words %lu copied / %lu "
+             "drawn (first difference at word %d: %08lx / %08lx), state %s, statistics %s\n",
+             g.frame_no, b - a, (unsigned long)nw, (unsigned long)nn, first,
+             first >= 0 ? (unsigned long)copy[first] : 0ul,
+             first >= 0 ? (unsigned long)p0[first] : 0ul, track_ok ? "same" : "DIFFERS",
+             stats_ok ? "same" : "DIFFER");
+    }
+  }
+  (void)sg;
+}
+
+static void cl_segment(ClSeg* sg, const ctr_mesh_call* c, int a, int b) {
+  s_cl.segs++;
+  ClSet set;
+  cl_set_save(&set);
+  ClTrack in;
+  cl_track_save(&in);
+  const int n = b - a;
+  int match = sg->valid && sg->gen == s_cl.gen && sg->ncalls == n &&
+              s_raw.apt_epoch == s_raw.seen_epoch && !memcmp(&sg->set, &set, sizeof(set)) &&
+              !memcmp(&sg->in, &in, sizeof(in));
+  /* the hash of the stretch as drawn now (only made once it differs from the recording: while
+   * it matches, it is the recording's) */
+  u32 h = 0;
+  int hashed = !match;
+  if (hashed) {
+    h = cl_hash(cl_hash(2166136261u, &set, sizeof(set)), &in, sizeof(in));
+  }
+  for (int i = a; i < b; i++) {
+    ClCall r;
+    cl_rec_call(&c[i], i > a ? &c[i - 1] : NULL, &r);
+    if (match && !words_equal(&r, &sg->calls[i - a], sizeof(r) / 4)) {
+      match = 0;
+      hashed = 1;
+      h = cl_hash(cl_hash(2166136261u, &set, sizeof(set)), &in, sizeof(in));
+      h = cl_hash(h, sg->calls, (u32)(i - a) * sizeof(ClCall));
+      if (s_cl.logged_why < 12 && sg->valid && sg->gen == s_cl.gen) {
+        s_cl.logged_why++;
+        const u32* x = (const u32*)&sg->calls[i - a];
+        const u32* y = (const u32*)&r;
+        for (u32 w = 0; w < 12; w++) {
+          if (x[w] != y[w]) {
+            printf("[ctr] static_cmdlists: draw %d of %d differs at word %lu (%08lx / %08lx)\n",
+                   i - a, n, (unsigned long)w, (unsigned long)x[w], (unsigned long)y[w]);
+            break;
+          }
+        }
+      }
+    }
+    if (hashed) {
+      h = cl_hash(h, &r, sizeof(r));
+    }
+  }
+  if (match) {
+    h = sg->last_hash; /* (the recording's: unchanged since) */
+  }
+  if (match && gpuCmdBufSize - gpuCmdBufOffset >=
+                   (u32)sg->nwords + CMD_RESERVE_WORDS + CMD_DRAW_WORDS) {
+    u32* const p0 = raw_ptr();
+    const ctr_gpu_stats stats0 = g.cur;
+    const u32 clip0 = g.last_clip_id;
+    s_cl.bound0_tex = g.bound_tex; /* (compare mode puts them back with the state before) */
+    s_cl.bound0_data = g.bound_data;
+    s_cl.bound0_param = g.bound_param;
+    cl_replay(sg, c, a, b);
+    if (s_cl.mode == 2) {
+      cl_compare(sg, c, a, b, p0, &in, &stats0, clip0);
+    }
+    sg->last_hash = h;
+    return;
+  }
+  if (sg->valid) {
+    s_cl.unlike++;
+    /* what differed (the log line's "not alike" split) */
+    if (sg->gen != s_cl.gen) {
+      s_cl.why[0]++;
+    } else if (sg->ncalls != n) {
+      s_cl.why[1]++;
+    } else if (memcmp(&sg->set, &set, sizeof(set))) {
+      s_cl.why[2]++;
+    } else if (memcmp(&sg->in, &in, sizeof(in))) {
+      s_cl.why[3]++;
+      if (s_cl.logged_why < 6) {
+        s_cl.logged_why++;
+        const u32* a = (const u32*)&sg->in;
+        const u32* b2 = (const u32*)&in;
+        for (u32 w = 0; w < sizeof(in) / 4; w++) {
+          if (a[w] != b2[w]) {
+            printf("[ctr] static_cmdlists: state before differs at byte %lu (%08lx / %08lx)\n",
+                   (unsigned long)(w * 4), (unsigned long)a[w], (unsigned long)b2[w]);
+            break;
+          }
+        }
+      }
+    } else {
+      s_cl.why[4]++;
+    }
+  }
+  if (s_raw.apt_epoch == s_raw.seen_epoch && h == sg->last_hash) {
+    cl_record(sg, c, a, b, &in, &set);
+  } else {
+    sg->valid = 0;
+    cl_draw(c, a, b);
+  }
+  s_cl.normal_calls += (u32)n;
+  sg->last_hash = h;
+}
+
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** cache) {
+  if (!g.ready || !g.in_frame || n <= 0) {
+    return;
+  }
+  if (!s_cl.mode || !s_raw.on || !cache) {
+    cl_draw(calls, 0, n);
+    return;
+  }
+  if (!*cache) {
+    *cache = (ctr_cmd_cache*)calloc(1, sizeof(ctr_cmd_cache));
+    if (!*cache) {
+      cl_draw(calls, 0, n);
+      return;
+    }
+  }
+  ctr_cmd_cache* cc = *cache;
+  int seg = 0, start = -1, prev_prog = -1, prev_plain = 0;
+  for (int i = 0; i <= n; i++) {
+    int head = 1, prog = -1, plain = 0;
+    if (i < n) {
+      plain = cl_plain(&calls[i]);
+      prog = plain ? cl_prog(&calls[i]) : -1;
+      head = i == 0 || !plain || !prev_plain || prog != prev_prog ||
+             (s_sky_hook && !keeps_sky(calls[i].state));
+    }
+    if (head && start >= 0) {
+      if (seg < CL_MAX_SEGS) {
+        cl_segment(&cc->seg[seg], calls, start, i);
+      } else {
+        cl_draw(calls, start, i);
+      }
+      seg++;
+      start = -1;
+    }
+    if (i == n) {
+      break;
+    }
+    if (head) {
+      cl_draw(calls, i, i + 1);
+      s_cl.normal_calls++;
+    } else if (start < 0) {
+      start = i;
+    }
+    prev_prog = prog;
+    prev_plain = plain;
+  }
+}
+
+void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache) {
+  if (cache && *cache) {
+    free(*cache); /* (the recordings are in the arena) */
+    *cache = NULL;
+  }
+}
+
+int ctr_gpu_cmdlist_line(char* out, int size) {
+  if (!s_cl.mode && !s_cl.segs) {
+    return 0;
+  }
+  const u32 frames = (u32)g.frame_no - s_cl.frame0;
+  if (!frames) {
+    return 0;
+  }
+  const double f = frames;
+  const int len = snprintf(
+      out, size,
+      "[ctr] static_cmdlists %s: per frame %.1f stretches, %.1f copied (%.0f draws, %.1f KB of "
+      "command words, %.0f matrices written), %.1f draws drawn one by one, %.2f recorded, %.2f "
+      "not alike; arena %u of %u KB in linear memory (%u restarts)%s",
+      s_cl.mode == 2 ? "compare" : (s_cl.mode ? "on" : "off"), s_cl.segs / f, s_cl.replays / f,
+      s_cl.replay_calls / f, s_cl.words * 4.0 / 1024.0 / f, s_cl.slots / f, s_cl.normal_calls / f,
+      s_cl.records / f, s_cl.unlike / f, s_cl.used / 1024, CL_ARENA_BYTES / 1024, s_cl.resets,
+      s_cl.mode == 2 ? "" : "");
+  int l = len;
+  if (l < size && s_cl.unlike) {
+    l += snprintf(out + l, size - l,
+                  "; not alike: %u arena restarted, %u draw count, %u settings, %u state before, "
+                  "%u the draws",
+                  s_cl.why[0], s_cl.why[1], s_cl.why[2], s_cl.why[3], s_cl.why[4]);
+  }
+  memset(s_cl.why, 0, sizeof(s_cl.why));
+  if (s_cl.mode == 2 && l < size) {
+    l += snprintf(out + l, size - l, "; compare: %u copies checked, %u MISMATCHED", s_cl.compares,
+                  s_cl.mismatches);
+  }
+  s_cl.segs = s_cl.replays = s_cl.records = s_cl.unlike = s_cl.normal_calls = s_cl.replay_calls =
+      s_cl.words = s_cl.slots = s_cl.resets = s_cl.compares = s_cl.mismatches = 0;
+  s_cl.frame0 = (u32)g.frame_no;
+  return l;
 }
 
 /* ---------------- (AI-assisted) the ocean (config ocean = waves) ---------------- */

@@ -384,10 +384,15 @@ float ctr_level_detail();
 class CtrTfragRenderer : public CtrBucketRenderer {
  public:
   CtrTfragRenderer(std::string name, int id, CtrLevels* levels);
+  ~CtrTfragRenderer() override;
   void render(DmaFollower& dma, CtrRenderState& rs) override;
 
  private:
   void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
+  void flush_calls(int pass);
+  // (AI-assisted, gpu-rt) static_cmdlists: a pass's draws, and each pass's command cache
+  std::vector<ctr_mesh_call> m_calls;
+  ctr_cmd_cache* m_cmd_cache[2] = {nullptr, nullptr};
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;

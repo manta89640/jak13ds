@@ -277,6 +277,13 @@ CtrSettings load() {
       s.raw_cmds = parse_bool(v);
     } else if (key == "vcache_reuse") {
       s.vcache_reuse = parse_bool(v);
+    } else if (key == "static_cmdlists") {
+      // (AI-assisted, gpu-rt) on | off | compare
+      s.static_cmdlists = v == "compare" ? 2 : (parse_bool(v) ? 1 : 0);
+    } else if (key == "gpu_breakdown") {
+      s.gpu_breakdown = parse_bool(v);  // (AI-assisted, gpu-rt)
+    } else if (key == "ocean_tex_half") {
+      s.ocean_tex_half = parse_bool(v);  // (AI-assisted, gpu-rt)
     } else if (key == "cmd_dump") {
       s.cmd_dump = parse_bool(v);  // (AI-assisted)
     } else if (key == "cb_read_opaque") {
@@ -328,7 +335,7 @@ std::string CtrSettings::summary() const {
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
       "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
       "vis_culling {} run_culling {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_groups {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} raw_cmds {} vcache_reuse {} tex_cache_clear {} cb_read_opaque {} new_shaders {} asm_tex {} asm_mem {} "
-      "fast_clock {}{}{}{}{}{}{}",
+      "static_cmdlists {} ocean_tex_half {} fast_clock {}{}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
       auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms)", shrub_distance,
@@ -370,9 +377,12 @@ std::string CtrSettings::summary() const {
       vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", vista_untextured ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", shader_groups ? "on" : "off", shader_opt ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off", raw_cmds ? "on" : "off",
       vcache_reuse ? "on" : "off", tex_cache_uploads ? "uploads" : "always",
       cb_read_opaque ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
-      asm_mem ? "on" : "off", fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
+      asm_mem ? "on" : "off",
+      static_cmdlists == 2 ? "compare" : (static_cmdlists ? "on" : "off"), ocean_tex_half ? "on" : "off",
+      fast_clock ? "on" : "off", gpu_profile ? " gpu_profile" : (gpu_profile_ab ? " gpu_profile ab" : ""),
       gpu_counters ? " gpu_counters" : "",
       gpu_perflog ? " gpu_perflog" : "", pica_bench ? " pica_bench" : "",
+      gpu_breakdown ? " gpu_breakdown" : "",
       depth16 ? " depth16" : "",
       emulator ? " (emulator)" : "");
 }

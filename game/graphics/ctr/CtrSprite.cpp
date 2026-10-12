@@ -320,6 +320,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
 #ifndef __3DS__
   ctr_gpu_soft_bucket("sprite-hud");
 #endif
+  ctr_gpu_phase(CTR_PH_HUD);  // (AI-assisted, gpu-rt) gpu_breakdown
   flush(true);
   skip_rest();
 }

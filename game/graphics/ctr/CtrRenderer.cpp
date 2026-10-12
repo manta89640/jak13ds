@@ -189,6 +189,16 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.cmd_dedup_draw; }},
     {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
      [](const CtrSettings& s) { return s.skin_clip_f24; }},
+    // (AI-assisted, gpu-rt) static_cmdlists: the config's mode (on; on when the config says off)
+    // or off; ocean_tex_half
+    {"static_cmdlists",
+     [](CtrSettings& s, bool on) {
+       static const int kConfigMode = s.static_cmdlists > 0 ? s.static_cmdlists : 1;
+       s.static_cmdlists = on ? kConfigMode : 0;
+     },
+     [](const CtrSettings& s) { return s.static_cmdlists > 0; }},
+    {"ocean_tex_half", [](CtrSettings& s, bool on) { s.ocean_tex_half = on; },
+     [](const CtrSettings& s) { return s.ocean_tex_half; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -583,6 +593,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
+  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);  // (AI-assisted, gpu-rt)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -612,6 +623,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #ifndef __3DS__
   ctr_gpu_soft_bucket("pmode-fade");
 #endif
+  ctr_gpu_phase(CTR_PH_HUD);  // (AI-assisted, gpu-rt) gpu_breakdown: the fade with the HUD
   draw_pmode_fade();
   const double t2 = ctr_gpu_time_ms();
   ctr_gpu_frame_end();
@@ -759,6 +771,17 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         by_name += fmt::format(" (screen copies {:.2f})", copy_ms / n);
       }
       lg::info("[ctr] build ms/frame by renderer:{}", by_name);
+      {
+        // (AI-assisted, gpu-rt) gpu_breakdown, static_cmdlists
+        char line[1024];
+        if (ctr_gpu_breakdown_line(line, sizeof(line),
+                                    m_profile_level.empty() ? "-" : m_profile_level.c_str()) > 0) {
+          lg::info("{}", line);
+        }
+        if (ctr_gpu_cmdlist_line(line, sizeof(line)) > 0) {
+          lg::info("{}", line);
+        }
+      }
 #ifdef __3DS__
       if (ctr_settings().gpu_perflog) {
         char pl[512];
@@ -1071,7 +1094,28 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
   const bool profiling = m_profile_mode > 0;
+  if (m_bucket_phase.size() != m_buckets.size()) {
+    // (AI-assisted, gpu-rt) gpu_breakdown: the GPU phase of each bucket renderer (-1: keeps the
+    // phase before it, no draws of its own)
+    m_bucket_phase.assign(m_buckets.size(), -1);
+    for (size_t i = 0; i < m_buckets.size(); i++) {
+      const std::string& n = m_buckets[i]->name();
+      m_bucket_phase[i] =
+          n == "sky"                                                     ? CTR_PH_SKY
+          : n.find("tfrag") != std::string::npos && n != "tfrag-trans"   ? CTR_PH_LEVEL
+          : n == "merc" || n == "eyes"                                   ? CTR_PH_MERC
+          : n == "sky-blend" || n == "tfrag-trans"                       ? CTR_PH_TRANS
+          : n == "shadow"                                                ? CTR_PH_SHADOW
+          : n == "ocean"                                                 ? CTR_PH_OCEAN
+          : n == "sprite"                                                ? CTR_PH_SPRITE
+          : n == "debug" || n == "debug-no-zbuf" || n == "subtitle"      ? CTR_PH_HUD
+                                                                         : -1;
+    }
+  }
   for (size_t bucket_id = 0; bucket_id < m_buckets.size(); bucket_id++) {
+    if (m_bucket_phase[bucket_id] >= 0) {
+      ctr_gpu_phase(m_bucket_phase[bucket_id]);  // (AI-assisted, gpu-rt) gpu_breakdown
+    }
     if (bucket_id >= (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0) {
       // (AI-assisted) sky_last: at the latest before the translucent buckets (and the sky blend
       // in tfrag-trans, which starts this frame's sky textures)
@@ -1196,6 +1240,9 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
   ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);
   ctr_gpu_set_cmd_dump(ctr_settings().cmd_dump ? 1 : 0);  // (AI-assisted)
+  ctr_gpu_set_gpu_breakdown(ctr_settings().gpu_breakdown ? 1 : 0);  // (AI-assisted, gpu-rt)
+  // (AI-assisted, gpu-rt) its linear memory block now, before levels load
+  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);
 #ifdef __3DS__
   if (ctr_settings().gpu_perflog) {
     // (AI-assisted) the GSP's performance log, read once per stats window (render_frame)

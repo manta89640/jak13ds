@@ -288,6 +288,21 @@ struct CtrSettings {
   // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
   // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
   bool vcache_reuse = false;
+  // (AI-assisted, gpu-rt) static_cmdlists: the level meshes' raw command words of a stretch of
+  // draws (same program, no citro3d update) are kept after two frames drew them alike and copied
+  // in again while the draws, the GPU state before them and the settings stay the same; only the
+  // chunk matrices are written anew. Same words (static_cmdlists = compare checks every replay
+  // against the per-frame path and logs mismatches). 0 off, 1 on, 2 compare
+  int static_cmdlists = 1;
+  // (AI-assisted, gpu-rt) gpu_breakdown: every 4th frame the GPU runs each part of the frame alone
+  // (clear, sky, level, merc, translucent, shadows, ocean, sprites, distort copy, HUD, transfer)
+  // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower
+  // while on. Profiling only, off; needs pipeline = on
+  bool gpu_breakdown = false;
+  // (AI-assisted, gpu-rt) ocean_tex_half: the flat / waves ocean's shading texture is made every
+  // second frame (the heights still every frame for the near grid); ocean = full has
+  // ocean_texture_rate
+  bool ocean_tex_half = true;
   // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
   // (platform/3ds/tools/cmd_report.py); diagnostic, off
   bool cmd_dump = false;

@@ -144,6 +144,7 @@ class CtrRenderer {
   CtrRenderState m_rs;
   Timing m_timing;
   std::vector<double> m_bucket_ms;
+  std::vector<int> m_bucket_phase;  // (AI-assisted, gpu-rt) gpu_breakdown (ctr_gpu_phase)
   std::vector<std::pair<int, class CtrMercRenderer*>> m_merc;
   CtrDirectBucketRenderer* m_sky = nullptr;
   std::unique_ptr<class CtrSky> m_sky_draw;

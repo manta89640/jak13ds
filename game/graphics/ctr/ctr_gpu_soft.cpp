@@ -1518,6 +1518,29 @@ void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_set_vcache_reuse(int) {}
 void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
 void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
+// (AI-assisted, gpu-rt) static_cmdlists: no command words here, the draws one by one
+void ctr_gpu_set_static_cmdlists(int) {}
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache**) {
+  for (int i = 0; i < n; i++) {
+    ctr_gpu_set_mesh_nofog(calls[i].nofog);
+    ctr_gpu_draw_mesh_prepared(calls[i].state, calls[i].matrix, calls[i].mesh,
+                               calls[i].first_index, calls[i].index_count);
+  }
+}
+void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache) {
+  if (cache) {
+    *cache = nullptr;
+  }
+}
+int ctr_gpu_cmdlist_line(char*, int) {
+  return 0;
+}
+// (AI-assisted, gpu-rt) gpu_breakdown: no GPU to time here
+void ctr_gpu_set_gpu_breakdown(int) {}
+void ctr_gpu_phase(int) {}
+int ctr_gpu_breakdown_line(char*, int, const char*) {
+  return 0;
+}
 void ctr_gpu_cmd_dump_next(void) {}
 void ctr_gpu_set_new_shaders(int) {}
 void ctr_gpu_set_asm_tex(int) {}

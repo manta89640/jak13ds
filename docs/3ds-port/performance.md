@@ -462,3 +462,74 @@ village3 + ogre, maincave + village3 again):
 
 The cost: reading merc indices per model adds 1 SD card request and ~250 KB per level (maincave
 36 -> 37 requests).
+
+## The GPU's fixed cost, static command lists, half-rate updates (AI-assisted, Oct 12, gpu-rt)
+
+**gpu_breakdown = on** (profiling, off by default; config_ini.md). The hardware logs fit GPU busy
+≈ 10.6 ms + 0.13 ms per 1k triangles; nothing said what the 10.6 ms is. Every 4th frame (pipeline
+on) each part of the frame is its own GX queue entry that runs alone: clear (the two memory fills),
+sky (the sky_last hook or the sky bucket), level, merc (+ eyes), trans (tfrag-trans / sky-blend),
+shadow, ocean, sprite, distort (the in-frame texture copies), hud (sprite HUD group, debug,
+subtitle, the PMODE fade), transfer (display transfer + the steady pacing fence copy, block32's
+crop copy), other (the frame start before the first bucket). Each part is timed from its submit to
+its GSP event, taken on the GSP event thread (P3D for a command list, PSC0 / PSC1 for the fills,
+PPF for copies and transfers); an almost empty list (a framebuffer flush and the end) is timed the
+same way every measured frame: the per-list submit overhead, included in every part. The split
+adds a framebuffer flush per part (as the pipeline's partial submits). The CPU waits for each part,
+so the game runs slower while it is on. `bench_report.py gk.log` prints the table per level and,
+over the windows, each part as fixed + per 1k triangles (the triangles of the `render ms/frame`
+line of the same window): what's left of the 10.6 ms at 0 triangles, by part.
+
+Azahar (no GPU time; checks that every event comes): village1 + beach, 37 frames per 15 s window:
+every part's list completes, no timeouts; the second fill unit's PSC1 event never comes there (the
+clear waits 2 ms for it at most, then takes PSC0's tick; the line counts the frames that had it).
+The hardware bench must say: the fixed parts (clear, transfer, overhead x lists, sky) against the
+10.6 ms, and whether PSC1 comes.
+
+**static_cmdlists = on** (default). The level renderer hands each pass (vista, main) to
+`ctr_gpu_draw_mesh_calls` as one list. It is cut into stretches of raw draws with one program (a
+draw that switches the program, runs the sky_last hook, binds a texture that isn't a level pool's,
+goes through citro3d or draws nothing is drawn as usual and starts a new stretch). A stretch drawn
+alike in two frames in a row is recorded: its words, where its matrix uploads are, the trackers'
+state before and after (g, s_raw, the citro3d context's effect / texenv / texture unit 0 / buffer
+config / flags), the settings that change words (fog_alpha, tex1_gating, cmd_dedup*, mip settings,
+early depth, cull, cb_read_opaque, sky_last depth, fog color, program set ...), and the statistics
+it adds. A later stretch whose draws (state, texture address / size / format, mesh buffer
+addresses, index range, nofog, which draws share a matrix), state before and settings are the
+same is copied in, each matrix upload written with this frame's matrix (and shader_opt fog rows),
+and the trackers set to the recorded state after. The GPU reads the frame's command buffer as
+always (copy, not GPUREG_CMDBUF_JUMP: 3dbrew only names the "kick" registers and says buffers are
+16-byte aligned; a call / return use is undocumented and a list the GPU never finishes hangs the
+console; it would save the copy, ~0.1 ms). So no GPU lifetimes: pipeline, frame_overlap2, level
+unloads and detail / vis changes only make stretches differ (then they are drawn and recorded
+again). Recordings live in one 512 KB block of linear memory taken at boot (no fragmentation of
+what level loads need), filled from the start again when full; the heap holds ~8 KB per pass cache
+(~4 in use with two levels) and a 16 KB scratch buffer.
+
+`static_cmdlists = compare` copies and then draws every stretch the per-frame way and compares the
+words, the state after and the statistics: Azahar, village1 idle / turning and walking / the
+Snowy fort, two level loads: 0 mismatches in 6396 copies checked (two runs; the second after the stretches stopped keying on a sky / ocean texture left bound before them).
+
+Azahar, render thread (5 s windows, the same views, copies vs. `set static_cmdlists off`):
+
+| view | draws copied | l1/l0-tfrag build ms | render build ms | command KB |
+|---|---|---|---|---|
+| village1 idle | 532 of ~551 per frame | 3.97 vs 4.36 | 10.41 vs 10.75 | 156 both |
+| Snowy fort idle | 259 of ~266 | 2.86 vs 2.98 | 10.81 vs 10.90 | 148 / 147 |
+| village1 turning, walking | ~0 | (no saving; checking costs a little) | | |
+
+The level renderers' build time is mostly culling, not the command words: the copies save ~0.1-0.4
+ms per frame of the render thread when the view holds still, nothing on the GPU (same words).
+
+**Half-rate updates.** `ocean_tex_half = on` (default): the flat / waves ocean's 32x32 shading
+texture every second frame (the heights every frame: the near grid moves with them); host
+screenshots at the beach with it on and off look the same. Not done, and why:
+- the sky: its time of day blend and the cloud texture are already made every 4th frame
+  (CtrSky::blend); its draw depends on the camera, so a reused picture would slide against the
+  level when turning, and a camera-independent sky texture redrawn every frame costs a full screen
+  pass, more than the clouds' pass it would save.
+- shadow volumes: the game sends them in camera space, so last frame's volume is wrong as soon as
+  the camera moves, and the stencil is cleared every frame, so a volume left out leaves its shadow
+  out (flicker at 15 Hz); the render thread's part of making them is ~0.2 ms in all.
+- the eyes are composited only when their sprites change; ocean = full has ocean_texture_rate = 2;
+  envmap shine has no per-frame texture.

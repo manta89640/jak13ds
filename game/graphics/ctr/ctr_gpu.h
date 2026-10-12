@@ -394,6 +394,29 @@ void ctr_gpu_set_vcache_reuse(int on);
  * are left out: texture unit 0's type) and cmd_dedup_draw (the raw draws' PRIMITIVE_CONFIG mode
  * and VERTEX_OFFSET writes too). Each frame (gpu_profile = ab switches them). */
 void ctr_gpu_set_cmd_dedup(int on, int draw);
+/* (AI-assisted, gpu-rt) config.ini gpu_breakdown (profiling, off): every 4th frame (pipeline on) each
+ * part of the frame goes to the GPU alone and is waited for, timed from its submission to its GSP
+ * event (P3D, PSC, PPF): the phases below. ctr_gpu_phase: the commands built from now on belong to
+ * that phase (the renderer calls it per bucket; the backend for the sky hook, the screen copy and
+ * the transfer itself). ctr_gpu_breakdown_line: the window's line, 0 when nothing was measured. */
+enum {
+  CTR_PH_OTHER,
+  CTR_PH_CLEAR,
+  CTR_PH_SKY,
+  CTR_PH_LEVEL,
+  CTR_PH_MERC,
+  CTR_PH_TRANS,
+  CTR_PH_SHADOW,
+  CTR_PH_OCEAN,
+  CTR_PH_SPRITE,
+  CTR_PH_DISTORT,
+  CTR_PH_HUD,
+  CTR_PH_TRANSFER,
+  CTR_GPU_PHASES
+};
+void ctr_gpu_set_gpu_breakdown(int on);
+void ctr_gpu_phase(int phase);
+int ctr_gpu_breakdown_line(char* out, int size, const char* label);
 /* (AI-assisted) config.ini cmd_dump: write a frame's GPU command list every 20 s (diagnostic,
  * platform/3ds/tools/cmd_report.py) */
 void ctr_gpu_set_cmd_dump(int on);
@@ -527,6 +550,24 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
+/* (AI-assisted, gpu-rt) config.ini static_cmdlists. The level renderer hands a pass's draws over in
+ * one list (in drawing order; nofog as ctr_gpu_set_mesh_nofog for that draw). The 3DS backend keeps
+ * the raw command words of each stretch of draws with one program (after two frames drew it alike)
+ * in linear memory and copies them in again while the draws, the GPU state before them and the
+ * settings are the same, writing only the chunk matrices anew: the same words as drawing them one
+ * by one. *cache: the pass's (NULL at first; ctr_gpu_cmd_cache_free). mode 0 off, 1 on, 2 compare
+ * (every copy checked against the per-frame path, mismatches counted in the log line). */
+typedef struct {
+  const ctr_draw_state* state;
+  const ctr_mesh_matrix* matrix;
+  int mesh, first_index, index_count, nofog;
+} ctr_mesh_call;
+typedef struct ctr_cmd_cache ctr_cmd_cache;
+void ctr_gpu_set_static_cmdlists(int mode);
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** cache);
+void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache);
+/* the statistics line since the last call ([ctr] static_cmdlists ...); 0: nothing to say */
+int ctr_gpu_cmdlist_line(char* out, int size);
 
 /* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
  * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
