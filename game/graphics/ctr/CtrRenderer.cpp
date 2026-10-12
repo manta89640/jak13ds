@@ -583,6 +583,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
+  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);  // (AI-assisted, gpu-rt)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -765,6 +766,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         char line[1024];
         if (ctr_gpu_breakdown_line(line, sizeof(line),
                                     m_profile_level.empty() ? "-" : m_profile_level.c_str()) > 0) {
+          lg::info("{}", line);
+        }
+        if (ctr_gpu_cmdlist_line(line, sizeof(line)) > 0) {
           lg::info("{}", line);
         }
       }
@@ -1227,6 +1231,8 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);
   ctr_gpu_set_cmd_dump(ctr_settings().cmd_dump ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_gpu_breakdown(ctr_settings().gpu_breakdown ? 1 : 0);  // (AI-assisted, gpu-rt)
+  // (AI-assisted, gpu-rt) its linear memory block now, before levels load
+  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);
 #ifdef __3DS__
   if (ctr_settings().gpu_perflog) {
     // (AI-assisted) the GSP's performance log, read once per stats window (render_frame)

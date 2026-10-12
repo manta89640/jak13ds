@@ -277,6 +277,9 @@ CtrSettings load() {
       s.raw_cmds = parse_bool(v);
     } else if (key == "vcache_reuse") {
       s.vcache_reuse = parse_bool(v);
+    } else if (key == "static_cmdlists") {
+      // (AI-assisted, gpu-rt) on | off | compare
+      s.static_cmdlists = v == "compare" ? 2 : (parse_bool(v) ? 1 : 0);
     } else if (key == "gpu_breakdown") {
       s.gpu_breakdown = parse_bool(v);  // (AI-assisted, gpu-rt)
     } else if (key == "cmd_dump") {

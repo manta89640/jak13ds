@@ -2225,6 +2225,21 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
 }
 
+// (AI-assisted, gpu-rt) static_cmdlists: the pass's draws collected by draw_level, to the backend
+// with the pass's command cache (0: the main pass, 1: the vista pass)
+void CtrTfragRenderer::flush_calls(int pass) {
+  if (!m_calls.empty()) {
+    ctr_gpu_draw_mesh_calls(m_calls.data(), (int)m_calls.size(), &m_cmd_cache[pass]);
+  }
+  m_calls.clear();
+}
+
+CtrTfragRenderer::~CtrTfragRenderer() {
+  for (auto*& c : m_cmd_cache) {
+    ctr_gpu_cmd_cache_free(&c);
+  }
+}
+
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrBackgroundCamera& cam,
                                   const CtrRenderState& rs) {
@@ -2638,7 +2653,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
+#ifdef __3DS__
+    // (AI-assisted, gpu-rt) static_cmdlists: the pass's draws go to the backend in one list
+    auto submit = [&](u32 first, u32 count) {
+      m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
+                         (int)count, vc.nofog ? 1 : 0});
+    };
+#else
     ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
+    auto submit = [&](u32 first, u32 count) {
+      ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], first,
+                                 count);
+    };
+#endif
 #ifndef __3DS__
     {
       // (AI-assisted) snow-gpu-audit: statistics per chunk kind and LOD tier
@@ -2648,8 +2675,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
 #endif
     if (!vc.partly || !lev.draw_run_count[di]) {
-      ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk],
-                                 dr.first_index, dr.index_count);
+      submit(dr.first_index, dr.index_count);
       vista_indices += vista_pass ? dr.index_count : 0;
       return;
     }
@@ -2660,7 +2686,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     u32 idx = dr.first_index, start = 0, len = 0, gap = 0, drawn = 0;
     bool open = false;
     auto emit = [&]() {
-      ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], start, len);
+      submit(start, len);
       drawn += len;
       vista_indices += vista_pass ? len : 0;
       open = false;
@@ -2724,15 +2750,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     ctr_gpu_set_mesh_fog(fog0, fog1_vista, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
     vista_pass = true;
+    m_calls.clear();
     for (u32 di : m_vista_draws) {
       draw(di);
     }
+    flush_calls(1);  // (AI-assisted, gpu-rt) static_cmdlists: the vista pass's
     vista_pass = false;
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
     m_vista_chunks += vista_chunks;
     m_vista_tris += vista_indices / 3;
   }
   m_vista_frames++;
+  m_calls.clear();
   if (early_depth) {
     for (u8 band = 0; band < 3; band++) {
       for (u32 di : *main_lists[0]) {
@@ -2753,6 +2782,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   for (u32 di : *main_lists[2]) {
     draw(di);
   }
+  flush_calls(0);  // (AI-assisted, gpu-rt) static_cmdlists: the main pass's
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
 }

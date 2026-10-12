@@ -550,6 +550,24 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
+/* (AI-assisted, gpu-rt) config.ini static_cmdlists. The level renderer hands a pass's draws over in
+ * one list (in drawing order; nofog as ctr_gpu_set_mesh_nofog for that draw). The 3DS backend keeps
+ * the raw command words of each stretch of draws with one program (after two frames drew it alike)
+ * in linear memory and copies them in again while the draws, the GPU state before them and the
+ * settings are the same, writing only the chunk matrices anew: the same words as drawing them one
+ * by one. *cache: the pass's (NULL at first; ctr_gpu_cmd_cache_free). mode 0 off, 1 on, 2 compare
+ * (every copy checked against the per-frame path, mismatches counted in the log line). */
+typedef struct {
+  const ctr_draw_state* state;
+  const ctr_mesh_matrix* matrix;
+  int mesh, first_index, index_count, nofog;
+} ctr_mesh_call;
+typedef struct ctr_cmd_cache ctr_cmd_cache;
+void ctr_gpu_set_static_cmdlists(int mode);
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** cache);
+void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache);
+/* the statistics line since the last call ([ctr] static_cmdlists ...); 0: nothing to say */
+int ctr_gpu_cmdlist_line(char* out, int size);
 
 /* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
  * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
