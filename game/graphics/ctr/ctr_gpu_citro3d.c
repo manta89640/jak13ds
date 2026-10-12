@@ -1786,6 +1786,273 @@ static void gt_collect(void) {
   s_gt.reported = done;
 }
 
+/* ---------------- (AI-assisted, gpu-rt) config.ini gpu_breakdown ----------------
+ * Where the GPU's time per frame goes, measured on the console. Every 4th frame (pipeline only)
+ * each part of the frame is a queue entry of its own that runs alone: the render thread waits for
+ * the GPU to be idle, hands the part over and waits for its GSP event (P3D for a command list,
+ * PSC0 / PSC1 for the clear's two fills, PPF for the screen copy and the transfer + fence copies);
+ * the time is from the submission to the event's tick on the GSP event thread, so it includes the
+ * GSP's dispatch (measured each frame with an almost empty list: "overhead"). The command list is
+ * split where the phase changes (ctr_gpu_phase: per bucket from the renderer, the sky hook, the
+ * screen copy here); each split adds a framebuffer flush (as the pipeline's partial submits). The
+ * GPU and the CPU then take turns in those frames: slower while on (a profiling mode). */
+static const char* const kPhaseNames[CTR_GPU_PHASES] = {
+    "other", "clear", "sky", "level", "merc", "trans", "shadow", "ocean",
+    "sprite", "distort", "hud", "transfer"};
+enum { BD_P3D, BD_PSC0, BD_PSC1, BD_PPF, BD_EVENTS };
+#define BD_EVERY 4
+static struct {
+  int on, hooked;
+  int frame; /* this frame is measured */
+  int phase; /* what the commands being built belong to */
+  volatile u32 n[BD_EVENTS];
+  volatile u64 t[BD_EVENTS];
+  u32* probe; /* 4 words in linear memory: a framebuffer flush and the end (overhead) */
+  double ms[CTR_GPU_PHASES];
+  u32 lists[CTR_GPU_PHASES];
+  double overhead_ms;
+  u32 overhead_n, frames, timeouts, psc1_seen;
+  u64 xfer_t0;
+  u32 xfer_n0;
+} s_bd;
+
+static void gt_ppf(void* unused);
+static void bd_event(int k) {
+  s_bd.t[k] = svcGetSystemTick();
+  __dmb();
+  s_bd.n[k]++;
+}
+static void bd_p3d(void* u) {
+  (void)u;
+  bd_event(BD_P3D);
+}
+static void bd_psc0(void* u) {
+  (void)u;
+  bd_event(BD_PSC0);
+}
+static void bd_psc1(void* u) {
+  (void)u;
+  bd_event(BD_PSC1);
+}
+static void bd_ppf(void* u) {
+  bd_event(BD_PPF);
+  if (s_pres.on) {
+    gt_ppf(u); /* the steady pacing fence's callback (this event's only other user) */
+  }
+}
+
+static inline double ticks_ms(u64 t) {
+  return (double)t / (SYSCLOCK_ARM11 / 1000.0);
+}
+
+void ctr_gpu_set_gpu_breakdown(int on) {
+  s_bd.on = on ? 1 : 0;
+  if (!s_bd.on || s_bd.hooked || !g.ready) {
+    return;
+  }
+  ctr_linear_lock();
+  s_bd.probe = (u32*)linearAlloc(16);
+  ctr_linear_unlock();
+  if (!s_bd.probe) {
+    s_bd.on = 0;
+    printf("[ctr] gpu_breakdown: no linear memory, off\n");
+    return;
+  }
+  s_bd.probe[0] = 1;
+  s_bd.probe[1] = GPUREG_FRAMEBUFFER_FLUSH | (0xFu << 16);
+  s_bd.probe[2] = 0x12345678;
+  s_bd.probe[3] = GPUREG_FINALIZE | (0xFu << 16);
+  cache_flush_now(s_bd.probe, 16);
+  gspSetEventCallback(GSPGPU_EVENT_P3D, bd_p3d, NULL, false);
+  gspSetEventCallback(GSPGPU_EVENT_PSC0, bd_psc0, NULL, false);
+  gspSetEventCallback(GSPGPU_EVENT_PSC1, bd_psc1, NULL, false);
+  gspSetEventCallback(GSPGPU_EVENT_PPF, bd_ppf, NULL, false);
+  s_bd.hooked = 1;
+  printf("[ctr] gpu_breakdown: on (every %dth frame; the GPU runs each part alone)\n", BD_EVERY);
+}
+
+/* the GX queue idle (everything handed over is done), emptied and running */
+static void bd_idle(void) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  if (!gxCmdQueueWait(q, SYSCLOCK_ARM11)) {
+    s_bd.timeouts++;
+    return;
+  }
+  gxCmdQueueStop(q);
+  gxCmdQueueClear(q);
+  gxCmdQueueRun(q);
+}
+
+/* the tick of the want-th event k since n0 (the queue is waited for first); now if it never came
+ * within 50 ms */
+static u64 bd_wait(int k, u32 n0, u32 want) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  if (!gxCmdQueueWait(q, SYSCLOCK_ARM11)) {
+    s_bd.timeouts++;
+  }
+  const u64 t0 = svcGetSystemTick();
+  while ((u32)(s_bd.n[k] - n0) < want) {
+    if (svcGetSystemTick() - t0 > SYSCLOCK_ARM11 / 20) {
+      s_bd.timeouts++;
+      return svcGetSystemTick();
+    }
+    svcSleepThread(20000);
+  }
+  __dmb();
+  return s_bd.t[k];
+}
+
+/* one command list alone on the GPU, timed for phase */
+static void bd_list(u32* list, u32 words, int phase) {
+  bd_idle();
+  cache_flush_now(list, words * 4);
+  const u32 n0 = s_bd.n[BD_P3D];
+  const u64 t0 = svcGetSystemTick();
+  GX_ProcessCommandList(list, words * 4, 0);
+  const u64 t1 = bd_wait(BD_P3D, n0, 1);
+  s_bd.ms[phase] += ticks_ms(t1 - t0);
+  s_bd.lists[phase]++;
+}
+
+/* the commands built since the last split, as a part of the current phase */
+static void bd_part(void) {
+  raw_vc_flush();
+  if (!gpuCmdBufOffset) {
+    return;
+  }
+  flush_vbuf();
+  GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+  GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+  u32* list;
+  u32 words;
+  GPUCMD_Split(&list, &words);
+  if (words) {
+    gt_note_submit();
+    bd_list(list, words, s_bd.phase);
+  }
+}
+
+void ctr_gpu_phase(int phase) {
+  if (phase < 0 || phase >= CTR_GPU_PHASES) {
+    phase = CTR_PH_OTHER;
+  }
+  if (s_bd.frame && phase != s_bd.phase && g.in_frame) {
+    bd_part();
+  }
+  s_bd.phase = phase;
+}
+
+/* frame begin (pipeline): is this frame measured; then the previous frame finished */
+static void bd_frame_begin(void) {
+  s_bd.frame = s_bd.on && s_bd.hooked && s_pipeline && (g.frame_no % BD_EVERY) == 0;
+  s_bd.phase = CTR_PH_OTHER;
+  if (s_bd.frame) {
+    bd_idle();
+  }
+}
+
+/* the frame's clear (one or two fills), alone: bd_clear_begin before its GX_MemoryFill, then
+ * bd_clear_end (two: both fill units) */
+static u32 s_bd_c0, s_bd_c1;
+static u64 s_bd_ct;
+static void bd_clear_begin(void) {
+  bd_idle();
+  s_bd_c0 = s_bd.n[BD_PSC0];
+  s_bd_c1 = s_bd.n[BD_PSC1];
+  s_bd_ct = svcGetSystemTick();
+}
+static void bd_clear_end(int two) {
+  u64 t1 = bd_wait(BD_PSC0, s_bd_c0, 1);
+  if (two) {
+    /* the second fill unit's event: libctru's queue only waits for PSC0, and Azahar sends no
+     * PSC1 for a two-buffer fill. Up to 2 ms more (the fills run side by side) */
+    const u64 w0 = svcGetSystemTick();
+    while (s_bd.n[BD_PSC1] == s_bd_c1 && svcGetSystemTick() - w0 < SYSCLOCK_ARM11 / 500) {
+      svcSleepThread(20000);
+    }
+    __dmb();
+    if (s_bd.n[BD_PSC1] != s_bd_c1) {
+      t1 = s_bd.t[BD_PSC1] > t1 ? s_bd.t[BD_PSC1] : t1;
+      s_bd.psc1_seen++;
+    }
+  }
+  s_bd.ms[CTR_PH_CLEAR] += ticks_ms(t1 - s_bd_ct);
+  s_bd.lists[CTR_PH_CLEAR]++;
+  /* the dispatch cost of a list that does nothing */
+  bd_idle();
+  const u32 p0 = s_bd.n[BD_P3D];
+  const u64 t3 = svcGetSystemTick();
+  GX_ProcessCommandList(s_bd.probe, 16, 0);
+  s_bd.overhead_ms += ticks_ms(bd_wait(BD_P3D, p0, 1) - t3);
+  s_bd.overhead_n++;
+}
+
+/* a texture copy in the frame (the distorter's screen copy, a pool moving to VRAM), alone */
+static void bd_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
+  bd_part(); /* the draws before it */
+  bd_idle();
+  const u32 n0 = s_bd.n[BD_PPF];
+  const u64 t0 = svcGetSystemTick();
+  GX_TextureCopy(in, indim, out, outdim, size, flags);
+  s_bd.ms[CTR_PH_DISTORT] += ticks_ms(bd_wait(BD_PPF, n0, 1) - t0);
+  s_bd.lists[CTR_PH_DISTORT]++;
+}
+
+/* frame end: before the transfer is queued (its PPF events from here on) / when it starts */
+static void bd_transfer_mark(void) {
+  s_bd.xfer_t0 = svcGetSystemTick();
+  s_bd.xfer_n0 = s_bd.n[BD_PPF];
+}
+static void bd_frame_end(int ppf_events) {
+  if (!s_bd.frame) {
+    return;
+  }
+  s_bd.ms[CTR_PH_TRANSFER] += ticks_ms(bd_wait(BD_PPF, s_bd.xfer_n0, (u32)ppf_events) - s_bd.xfer_t0);
+  s_bd.lists[CTR_PH_TRANSFER]++;
+  s_bd.frames++;
+  s_bd.frame = 0;
+}
+
+int ctr_gpu_breakdown_line(char* out, int size, const char* label) {
+  if (!s_bd.on) {
+    return 0;
+  }
+  if (!s_bd.frames) {
+    return snprintf(out, size, "[ctr] gpu breakdown %s: nothing measured (needs pipeline = on)",
+                    label);
+  }
+  const double n = s_bd.frames;
+  double sum = 0;
+  int len = snprintf(out, size,
+                     "[ctr] gpu breakdown %s over %u frames (every %dth frame, each part alone on "
+                     "the GPU: the game runs slower while gpu_breakdown is on); GPU ms per frame "
+                     "(lists per frame):",
+                     label, s_bd.frames, BD_EVERY);
+  for (int i = 0; i < CTR_GPU_PHASES && len < size; i++) {
+    sum += s_bd.ms[i];
+    len += snprintf(out + len, size - len, " %s %.2f (%.1f)", kPhaseNames[i], s_bd.ms[i] / n,
+                    s_bd.lists[i] / n);
+  }
+  u32 lists = 0;
+  for (int i = 0; i < CTR_GPU_PHASES; i++) {
+    lists += s_bd.lists[i];
+  }
+  const double ovh = s_bd.overhead_n ? s_bd.overhead_ms / s_bd.overhead_n : 0.0;
+  if (len < size) {
+    len += snprintf(out + len, size - len,
+                    "; sum %.2f; overhead %.3f ms per list (an empty list's submit to its event, "
+                    "included above: %.2f ms per frame); clear: second fill unit's event in %u of "
+                    "%u frames%s",
+                    sum / n, ovh, ovh * lists / n, s_bd.psc1_seen, s_bd.frames,
+                    s_bd.timeouts ? "; TIMEOUTS (an event didn't come in 50 ms)" : "");
+  }
+  memset(s_bd.ms, 0, sizeof(s_bd.ms));
+  memset(s_bd.lists, 0, sizeof(s_bd.lists));
+  s_bd.overhead_ms = 0;
+  s_bd.overhead_n = s_bd.frames = s_bd.timeouts = s_bd.psc1_seen = 0;
+  return len;
+}
+
 static void pres_vblank(void* unused) {
   (void)unused;
   const u32 v = ++s_pres.vblanks;
@@ -2003,6 +2270,9 @@ static void pres_queue_frame(void) {
   }
   s_pres.buf_state[b] = 1;
   s_pres.buf_wait_ms += (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0);
+  if (s_bd.frame) {
+    bd_transfer_mark(); /* (AI-assisted, gpu-rt) frame_overlap2 = on: the queue runs */
+  }
   C3D_FrameSplit(GX_CMDLIST_FLUSH); /* the draws first */
   if (g_block32) {
     /* (AI-assisted) untile the 256x416 blocks into the scratch buffer, then copy rows 8..407,
@@ -2236,7 +2506,10 @@ void ctr_gpu_run_sky_hook(void) {
   const ctr_gpu_hook_fn fn = s_sky_hook;
   if (fn) {
     s_sky_hook = NULL; /* once (its own draws mustn't call it again) */
+    const int phase = s_bd.phase; /* (AI-assisted, gpu-rt) gpu_breakdown: the sky's own part */
+    ctr_gpu_phase(CTR_PH_SKY);
     fn(s_sky_hook_arg);
+    ctr_gpu_phase(phase);
   }
 }
 
@@ -2362,9 +2635,13 @@ static void pipeline_frame_begin(u32 clear) {
   g.cmd_base = gpuCmdBuf;
   g.vbuf = s_vbufs[s_k];
   g.frame_no++;
+  bd_frame_begin(); /* (AI-assisted, gpu-rt) gpu_breakdown: the frame before is done first */
   gt_note_first(); /* (AI-assisted) the clear below starts the GPU on this frame */
   /* copies to VRAM wait for the GPU first (citro3d's safe copy outside of a frame) */
   update_pool_residency();
+  if (s_bd.frame) {
+    bd_clear_begin();
+  }
   C3D_FrameBuf* fb = &g.top->frameBuf;
   u32* color = (u32*)fb->colorBuf;
   u32* depth = (u32*)fb->depthBuf;
@@ -2381,6 +2658,9 @@ static void pipeline_frame_begin(u32 clear) {
                   GX_FILL_TRIGGER | (g_color16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH), depth,
                   0, (u32*)((uint8_t*)depth + px * (g_depth16 ? 2 : 4)),
                   GX_FILL_TRIGGER | (g_depth16 ? GX_FILL_16BIT_DEPTH : GX_FILL_32BIT_DEPTH));
+  }
+  if (s_bd.frame) {
+    bd_clear_end(!s_skip_color_clear);
   }
   C3D_SetFrameBuf(fb);
   set_top_viewport();
@@ -2505,6 +2785,10 @@ static void flush_vbuf(void) {
  * then has nothing left to send. */
 static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
   if (g.in_frame && s_pipeline) {
+    if (s_bd.frame) {
+      bd_copy(in, indim, out, outdim, size, flags); /* (AI-assisted, gpu-rt) gpu_breakdown */
+      return;
+    }
     pipeline_submit(); /* the draws before the copy, then the copy, in the GPU's queue */
     GX_TextureCopy(in, indim, out, outdim, size, flags);
     return;
@@ -2631,9 +2915,18 @@ void ctr_gpu_frame_end(void) {
   diag_rt("frame_end: flush");
   raw_vc_flush();
   flush_vbuf();
+  const int bd = s_bd.frame;
+  if (bd) {
+    /* (AI-assisted, gpu-rt) gpu_breakdown: the rest of the frame's commands alone (the frame
+     * end below then has no list left to hand over) */
+    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
+    bd_part();
+  }
   /* the command words of the whole frame (splits move gpuCmdBuf on; C3D_FrameBegin restarts it) */
-  g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
-  cmd_dump_frame();
+  if (!bd) {
+    g.cur.cmd_bytes = (unsigned int)((gpuCmdBuf + gpuCmdBufOffset - g.cmd_base) * 4);
+    cmd_dump_frame();
+  }
   /* (AI-assisted) frame_overlap2: 0 the old frame end, 1 the list cleaned before the wait, 2 no
    * wait (the list queued behind the frame the GPU draws) */
   const int ov2 = s_pipeline ? (overlap2_on() ? 2 : (s_overlap2 ? 1 : 0)) : 0;
@@ -2676,8 +2969,15 @@ void ctr_gpu_frame_end(void) {
   diag_rt("frame_end: C3D_FrameEnd (submit)");
   gt_note_first(); /* (AI-assisted) without the pipeline the queue starts here (or at a partial) */
   gt_note_submit();
+  if (bd && (ov2 != 2 || !s_pres.on)) {
+    bd_transfer_mark(); /* (AI-assisted, gpu-rt) the queue (stopped) runs the transfer from here */
+  }
   if (ov2 != 2) {
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
+  }
+  if (bd) {
+    /* (AI-assisted, gpu-rt) the transfer and the fence (steady pacing), block32's crop copy */
+    bd_frame_end(s_pres.on ? (g_block32 ? 3 : 2) : 1);
   }
   diag_rt("frame_end: stats");
   g.in_frame = 0;

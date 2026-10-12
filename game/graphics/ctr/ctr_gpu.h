@@ -394,6 +394,29 @@ void ctr_gpu_set_vcache_reuse(int on);
  * are left out: texture unit 0's type) and cmd_dedup_draw (the raw draws' PRIMITIVE_CONFIG mode
  * and VERTEX_OFFSET writes too). Each frame (gpu_profile = ab switches them). */
 void ctr_gpu_set_cmd_dedup(int on, int draw);
+/* (AI-assisted, gpu-rt) config.ini gpu_breakdown (profiling, off): every 4th frame (pipeline on) each
+ * part of the frame goes to the GPU alone and is waited for, timed from its submission to its GSP
+ * event (P3D, PSC, PPF): the phases below. ctr_gpu_phase: the commands built from now on belong to
+ * that phase (the renderer calls it per bucket; the backend for the sky hook, the screen copy and
+ * the transfer itself). ctr_gpu_breakdown_line: the window's line, 0 when nothing was measured. */
+enum {
+  CTR_PH_OTHER,
+  CTR_PH_CLEAR,
+  CTR_PH_SKY,
+  CTR_PH_LEVEL,
+  CTR_PH_MERC,
+  CTR_PH_TRANS,
+  CTR_PH_SHADOW,
+  CTR_PH_OCEAN,
+  CTR_PH_SPRITE,
+  CTR_PH_DISTORT,
+  CTR_PH_HUD,
+  CTR_PH_TRANSFER,
+  CTR_GPU_PHASES
+};
+void ctr_gpu_set_gpu_breakdown(int on);
+void ctr_gpu_phase(int phase);
+int ctr_gpu_breakdown_line(char* out, int size, const char* label);
 /* (AI-assisted) config.ini cmd_dump: write a frame's GPU command list every 20 s (diagnostic,
  * platform/3ds/tools/cmd_report.py) */
 void ctr_gpu_set_cmd_dump(int on);

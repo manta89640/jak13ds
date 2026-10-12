@@ -1518,6 +1518,12 @@ void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_set_vcache_reuse(int) {}
 void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
 void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
+// (AI-assisted, gpu-rt) gpu_breakdown: no GPU to time here
+void ctr_gpu_set_gpu_breakdown(int) {}
+void ctr_gpu_phase(int) {}
+int ctr_gpu_breakdown_line(char*, int, const char*) {
+  return 0;
+}
 void ctr_gpu_cmd_dump_next(void) {}
 void ctr_gpu_set_new_shaders(int) {}
 void ctr_gpu_set_asm_tex(int) {}

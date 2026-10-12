@@ -285,6 +285,11 @@ struct CtrSettings {
   // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
   // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
   bool vcache_reuse = false;
+  // (AI-assisted, gpu-rt) gpu_breakdown: every 4th frame the GPU runs each part of the frame alone
+  // (clear, sky, level, merc, translucent, shadows, ocean, sprites, distort copy, HUD, transfer)
+  // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower
+  // while on. Profiling only, off; needs pipeline = on
+  bool gpu_breakdown = false;
   // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
   // (platform/3ds/tools/cmd_report.py); diagnostic, off
   bool cmd_dump = false;
