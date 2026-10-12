@@ -244,7 +244,15 @@ Well sourced (register docs, libctru/citro3d/picasso code, emulator code, vendor
 - The hardware takes the absolute value of vertex colors and saturates them to 1 before
   interpolation (Azahar src/video_core/pica/output_vertex.cpp).
 - Post-vertex cache: GPUREG_POST_VERTEX_CACHE_NUM (0x22D) "usually 0x4 or 0x84"; cleared with
-  GPUREG_VTX_FUNC (citro3d after every draw).
+  GPUREG_VTX_FUNC (citro3d after every draw). (AI-assisted, Oct 12) Nothing public gives its
+  size or replacement policy (3dbrew and GBATEK list only the register; citro3d never writes it;
+  copetti's 3DS article: the vertex processors' outputs go to a "Sync Control" block of 384 bytes,
+  32 96-bit vectors, i.e. ~10 vertices of 3 output registers, which may or may not be it). Azahar
+  has a 32-entry cache of its own design (an emulator speed-up, not a model). The level draws are
+  indexed triangle lists, the cache cold at every draw: c3l v15 orders each run's triangles for
+  a FIFO of 4 to 16 entries (c3l_format.md "Vertex order"); pica_bench B4 (B4.cdef.kN: N vertices
+  each used twice in a row of 2N indices) shows the real size: the time per index jumps where N
+  passes the number of entries (then the second use misses too).
 - citro3d's two dummy PRIMITIVE_CONFIG writes after that clear came with "Fix some cases of GPU
   freezing when changing programs" (citro3d 46117ec9): kept everywhere.
 

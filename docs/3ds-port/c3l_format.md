@@ -49,6 +49,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--sd-mbps`, `--lz4-mbps`, `--zstd-mbps` | 5.5, 100, 16 | the cost model: New 3DS SD read speed and decode speeds (MB/s). |
 | `--block-kb N` | 64 | largest compressed block (raw KB). |
 | `--no-vcache` | off | keep the triangle and vertex order (no vertex welding, no meshoptimizer). |
+| `--vcache-fifo N` | -1 | (AI-assisted, v15) the triangle order inside each visibility run of an opaque draw, for the post-vertex cache (see "Vertex order"): N > 0 for a first-in first-out cache of N entries; -1 (default) per run the best of the orders for 4 and 12 entries and meshoptimizer's, by the vertices a FIFO of 4 + 8 + 16 entries shades; 0 the v14 order (meshoptimizer, without the coplanar rule). |
 | `--no-verify` | off | don't read every written file back with the runtime's reader to compare it. |
 
 What goes in:
@@ -108,9 +109,28 @@ wins. lambda 10: ETC1 texels of misty LZ4 81 % -> 75 %, PSNR 37.3 -> 36.8 dB.
 
 Vertex order: within each chunk identical vertices (after quantizing) are merged (the PS2 strips
 share none), the triangles of each visibility run of a draw without blending that writes depth are
-put in vertex cache order (meshoptimizer `optimizeVertexCache`; blended draws and decals keep their
-order), then the vertices in first-use order (`optimizeVertexFetchRemap`). The GPU's post-vertex
-cache is cleared before every draw. Misty: 1.55 -> 1.27 vertices shaded per triangle (FIFO 16).
+put in vertex cache order (blended draws and decals keep their order), then the vertices in
+first-use order (`optimizeVertexFetchRemap`). The GPU's post-vertex cache is cleared before every
+draw (citro3d, and the raw draws unless `vcache_reuse`), and the runs of a draw may be drawn on
+their own, so each run starts with an empty cache. The draws are indexed triangle lists (no strips:
+the PICA200 has no restart index, and a list keeps every triangle's own corner order).
+Misty: 1.55 -> 1.27 vertices shaded per triangle (FIFO 16).
+
+(AI-assisted) v15 (`--vcache-fifo`): the cache's size and policy aren't documented
+(GPUREG_POST_VERTEX_CACHE_NUM 0x22D, "usually 0x4 or 0x84": 3dbrew, GBATEK; citro3d never writes
+it; pica_bench B4 measures it). So each run gets the best of three orders by the vertices a
+first-in first-out cache of 4, 8 and 16 entries shades together: `c3l_opt::vcache_order` (a
+greedy, Forsyth-style order scored on a simulated FIFO: fewest misses, then the oldest entries'
+vertices, then vertices with few triangles left) for 4 and for 12 entries, and meshoptimizer's
+(only where no order has to be kept). Triangles of a run that lie in one plane (within 1 mm, ~1
+degree) and overlap there keep their order (`c3l_opt::coplanar_pairs`; with the GEQUAL depth test
+the later of two equal-depth fragments wins): v14's meshoptimizer order didn't keep it (village1:
+1207 such pairs in reordered runs, 852 of them the same three corners; Snowy 2092, village3 1884).
+Vertices shaded per triangle, FIFO 4 / 8 / 16 / 32 (each vertex once: the least possible), v14 ->
+v15: village1 1.411 / 1.258 / 1.245 / 1.241 -> 1.346 / 1.268 / 1.249 / 1.243 (1.236), Snowy
+1.410 / 1.253 / 1.233 / 1.227 -> 1.358 / 1.266 / 1.241 / 1.232 (1.218), village3 1.403 / 1.215 /
+1.201 / 1.197 -> 1.354 / 1.222 / 1.207 / 1.199 (1.186): -4% for a 4 entry cache, within 1% of the
+v14 order for 8 and more (both near the bound there). The converter logs these per level.
 
 ## Layout
 

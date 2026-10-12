@@ -36,6 +36,7 @@ add_executable(ctr_level_converter
         ctr_level_converter/main.cpp
         ctr_level_converter/ctr_texture.cpp
         ctr_level_converter/c3l_pack.cpp
+        ctr_level_converter/c3l_opt.cpp
         ${CMAKE_SOURCE_DIR}/game/graphics/ctr/c3l_reader.cpp
         ${CTR_LEVEL_CONVERTER_THIRD_PARTY})
 # third-party code: not our warnings

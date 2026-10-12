@@ -23,6 +23,7 @@
 #include "common/util/Serializer.h"
 #include "common/util/compress.h"
 
+#include "c3l_opt.h"
 #include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "fmt/format.h"
@@ -98,6 +99,12 @@ struct Options {
   // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
   // runs, for draws whose triangle order doesn't matter), vertices in first-use order
   bool vcache = true;
+  // (AI-assisted) v15: the triangle order for a first-in first-out post-vertex cache of this many
+  // entries (c3l_opt::vcache_order), coplanar overlapping triangles kept in their order. -1 (the
+  // default): per run the best of the orders for 4 and 12 entries and meshoptimizer's (where no
+  // order has to be kept), by the vertices shaded with 4 + 8 + 16 entries (the cache's size is
+  // unknown). 0: the v14 order (meshoptimizer, without the coplanar rule)
+  int vcache_fifo = -1;
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
@@ -129,13 +136,29 @@ struct Options {
 // vertices shaded per triangle, for a FIFO cache of 8 and 16 entries
 struct VcacheStats {
   double shaded8 = 0, shaded16 = 0;
+  // (AI-assisted) a plain FIFO of 4, 8, 16 and 32 entries (c3l_opt::fifo_misses)
+  u64 fifo[4] = {0, 0, 0, 0};
   u64 tris = 0;
+  u64 unique = 0;  // (AI-assisted) vertices used: the least any order shades
   void add(const u16* idx, size_t count, size_t vertex_count) {
     std::vector<unsigned int> v(idx, idx + count);
+    {
+      std::vector<unsigned int> u(v);
+      std::sort(u.begin(), u.end());
+      unique += std::unique(u.begin(), u.end()) - u.begin();
+    }
     shaded8 += meshopt_analyzeVertexCache(v.data(), count, vertex_count, 8, 0, 0).vertices_transformed;
     shaded16 +=
         meshopt_analyzeVertexCache(v.data(), count, vertex_count, 16, 0, 0).vertices_transformed;
+    for (int k = 0; k < 4; k++) {
+      fifo[k] += c3l_opt::fifo_misses(v.data(), count, 4 << k);
+    }
     tris += count / 3;
+  }
+  std::string fifo_line() const {
+    const double t = (double)std::max<u64>(tris, 1);
+    return fmt::format("{:.3f} / {:.3f} / {:.3f} / {:.3f} (each vertex once: {:.3f})", fifo[0] / t,
+                       fifo[1] / t, fifo[2] / t, fifo[3] / t, unique / t);
   }
 };
 
@@ -2213,6 +2236,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<u32> chunk_first_run;
   size_t vis_tris = 0;
   VcacheStats vc_before, vc_after;
+  size_t vc_kept_pairs = 0;  // (AI-assisted) coplanar overlaps kept in order by vcache_order
   size_t welded_verts = 0;
 
   for (const auto& cp : plans) {
@@ -2372,10 +2396,75 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           u32 idx = d.first_index;
           for (; ri < runs.size() && runs[ri].draw == di - ch.first_draw; ri++) {
             const u32 n = runs[ri].index_count;
-            if (any_order && opt.vcache) {
+            if (any_order && opt.vcache && opt.vcache_fifo == 0) {
               std::vector<unsigned int> in(&out_indices[idx], &out_indices[idx] + n), o(n);
               meshopt_optimizeVertexCache(o.data(), in.data(), n, nv);
               std::copy(o.begin(), o.end(), &out_indices[idx]);
+            } else if (any_order && opt.vcache && n > 3) {
+              // (AI-assisted) v15: for a FIFO cache; triangles that lie on top of each other in one
+              // plane keep their order (with the depth test's GEQUAL the later one wins)
+              std::vector<u32> in(&out_indices[idx], &out_indices[idx] + n);
+              std::vector<c3l_opt::Tri> wt(n / 3);
+              for (u32 t = 0; t < n / 3; t++) {
+                for (int k = 0; k < 3; k++) {
+                  const auto& v = out_verts[ch.first_vertex + in[3 * t + k]];
+                  for (int c = 0; c < 3; c++) {
+                    wt[t][k][c] = ch.origin[c] + v.pos[c] * ch.scale;
+                  }
+                }
+              }
+              const auto pairs = c3l_opt::coplanar_pairs(wt, {}, c3l_opt::CoplanarOptions{});
+              std::vector<std::vector<u32>> before;
+              if (!pairs.empty()) {
+                before.resize(n / 3);
+                for (auto [a, b] : pairs) {
+                  before[b].push_back(a);
+                }
+                vc_kept_pairs += pairs.size();
+              }
+              std::vector<u32> best;
+              if (opt.vcache_fifo > 0) {
+                const auto order = c3l_opt::vcache_order(in, nv, opt.vcache_fifo, before);
+                best.resize(n);
+                for (u32 t = 0; t < n / 3; t++) {
+                  for (int k = 0; k < 3; k++) {
+                    best[3 * t + k] = in[3 * order[t] + k];
+                  }
+                }
+              } else {
+                auto cost = [](const std::vector<u32>& v) {
+                  return c3l_opt::fifo_misses(v.data(), v.size(), 4) +
+                         c3l_opt::fifo_misses(v.data(), v.size(), 8) +
+                         c3l_opt::fifo_misses(v.data(), v.size(), 16);
+                };
+                u64 best_cost = UINT64_MAX;
+                for (int fifo : {4, 12}) {
+                  const auto order = c3l_opt::vcache_order(in, nv, fifo, before);
+                  std::vector<u32> o(n);
+                  for (u32 t = 0; t < n / 3; t++) {
+                    for (int k = 0; k < 3; k++) {
+                      o[3 * t + k] = in[3 * order[t] + k];
+                    }
+                  }
+                  const u64 c = cost(o);
+                  if (c < best_cost) {
+                    best_cost = c;
+                    best = std::move(o);
+                  }
+                }
+                if (pairs.empty()) {
+                  std::vector<u32> o(n);
+                  meshopt_optimizeVertexCache(o.data(), in.data(), n, nv);
+                  const u64 c = cost(o);
+                  if (c < best_cost) {
+                    best_cost = c;
+                    best = std::move(o);
+                  }
+                }
+              }
+              for (u32 i = 0; i < n; i++) {
+                out_indices[idx + i] = (u16)best[i];
+              }
             }
             idx += n;
           }
@@ -2701,12 +2790,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              tstats.merc_etc1, opt.etc1_merc_psnr, opt.etc1_merc_block,
              tstats.merc_bytes_16 / 1024, tstats.merc_bytes / 1024);
   }
-  lg::info("{}: post-vertex cache: vertices shaded per triangle (FIFO 8 / 16) {:.3f} / {:.3f}{}",
+  lg::info("{}: post-vertex cache: vertices shaded per triangle (meshoptimizer's model 8 / 16) "
+           "{:.3f} / {:.3f}{}; FIFO 4 / 8 / 16 / 32: {}{}",
            level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
            vc_before.shaded16 / std::max<u64>(vc_before.tris, 1),
-           opt.vcache ? fmt::format(" -> {:.3f} / {:.3f} (meshoptimizer)",
+           opt.vcache ? fmt::format(" -> {:.3f} / {:.3f}",
                                     vc_after.shaded8 / std::max<u64>(vc_after.tris, 1),
                                     vc_after.shaded16 / std::max<u64>(vc_after.tris, 1))
+                      : "",
+           vc_before.fifo_line(),
+           opt.vcache ? fmt::format(" -> {} ({}; {} coplanar overlaps kept in order)",
+                                    vc_after.fifo_line(),
+                                    opt.vcache_fifo > 0
+                                        ? fmt::format("FIFO {} order", opt.vcache_fifo)
+                                    : opt.vcache_fifo < 0 ? std::string("best of FIFO 4 / 12 / meshoptimizer orders")
+                                        : std::string("meshoptimizer"),
+                                    vc_kept_pairs)
                       : "");
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
@@ -2858,6 +2957,9 @@ int main(int argc, char** argv) {
   app.add_option("--block-kb", block_kb, "largest compressed block (KB, raw)");
   bool no_vcache = false;
   app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
+  app.add_option("--vcache-fifo", opt.vcache_fifo,
+                 "(AI-assisted) triangle order for a FIFO post-vertex cache of N entries, coplanar "
+                 "overlaps kept in order (0: the v14 meshoptimizer order)");
   bool no_verify = false;
   app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
   bool no_tie_winding = false, no_vista = false;
