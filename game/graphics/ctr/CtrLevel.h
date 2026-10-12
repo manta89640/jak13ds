@@ -408,4 +408,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   };
   std::vector<VisibleChunk> m_visible;
   std::vector<int> m_visible_slot;  // per chunk: index in m_visible, -1: not drawn
+  // (AI-assisted) with vista chunks: the visible draws of early_draws, sorted_draws and
+  // ordered_draws split in one walk, in list order: the vista pass's, and the main pass's lists
+  std::vector<u32> m_vista_draws, m_main_draws[3];
 };

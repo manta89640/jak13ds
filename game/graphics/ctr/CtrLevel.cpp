@@ -2681,16 +2681,27 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   for (const auto& vc : m_visible) {
     vista_chunks += vc.vista;
   }
+  // the main pass's draw lists: the level's, or (vista chunks) what of them the split left
+  const std::vector<u32>* main_lists[3] = {&lev.early_draws, &lev.sorted_draws, &lev.ordered_draws};
   if (vista_chunks) {
+    // (AI-assisted) one walk over the three lists instead of one per pass: the vista chunks' draws
+    // (in list order: early, sorted, ordered, as the vista pass drew them) and the other visible
+    // ones per list (in their order: the main pass draws them as it drew the whole lists)
+    m_vista_draws.clear();
+    for (int li = 0; li < 3; li++) {
+      std::vector<u32>& main = m_main_draws[li];
+      main.clear();
+      for (u32 di : *main_lists[li]) {
+        const int slot = m_visible_slot[lev.draw_chunk[di]];
+        if (slot >= 0) {
+          (m_visible[slot].vista ? m_vista_draws : main).push_back(di);
+        }
+      }
+      main_lists[li] = &main;
+    }
     ctr_gpu_set_mesh_fog(fog0, fog1_vista, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
     vista_pass = true;
-    for (u32 di : lev.early_draws) {
-      draw(di);
-    }
-    for (u32 di : lev.sorted_draws) {
-      draw(di);
-    }
-    for (u32 di : lev.ordered_draws) {
+    for (u32 di : m_vista_draws) {
       draw(di);
     }
     vista_pass = false;
@@ -2701,7 +2712,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   m_vista_frames++;
   if (settings.early_depth) {
     for (u8 band = 0; band < 3; band++) {
-      for (u32 di : lev.early_draws) {
+      for (u32 di : *main_lists[0]) {
         const int slot = m_visible_slot[lev.draw_chunk[di]];
         if (slot >= 0 && m_visible[slot].band == band) {
           draw(di);
@@ -2709,14 +2720,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
   } else {
-    for (u32 di : lev.early_draws) {
+    for (u32 di : *main_lists[0]) {
       draw(di);
     }
   }
-  for (u32 di : lev.sorted_draws) {
+  for (u32 di : *main_lists[1]) {
     draw(di);
   }
-  for (u32 di : lev.ordered_draws) {
+  for (u32 di : *main_lists[2]) {
     draw(di);
   }
   ctr_gpu_set_mesh_nofog(0);
