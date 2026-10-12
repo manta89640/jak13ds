@@ -413,6 +413,10 @@ static struct {
   int pending_delete_count;
   void* pending_staging[MAX_STAGING]; /* linear buffers of queued VRAM texture copies */
   int pending_staging_count;
+  /* (AI-assisted) frame_overlap2 = on: the staging buffers of the frame before (its copies may
+   * still be queued behind the frame the GPU draws), freed one frame begin later */
+  void* held_staging[MAX_STAGING];
+  int held_staging_count;
   int vram_textures;
   int vram_copy_failures;
   int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
@@ -667,10 +671,25 @@ static int reserve_mesh_slot(void) {
 /* hold (render.ini pipeline): the GPU may still draw the frame before the one that asked for a
  * delete, so a slot waits one more frame (2 -> 4 -> freed). Not 3: that is a slot or pool the
  * loader thread is still filling (the pool loop looks at every pool, not a delete list). */
+/* (AI-assisted) hold 2 (frame_overlap2 = on, at the frame begin after waiting for frame N - 2
+ * only): the staging buffers wait one more frame too. Their copies were queued while frame N - 1
+ * was built (its frame begin's pool and small texture moves, the frame's own copies), behind frame
+ * N - 2's draws, so they may not have run yet: freed then, a buffer could be reallocated and
+ * rewritten before its copy reads it (garbage texels in VRAM). The other modes wait for everything
+ * queued so far before they get here. */
 static void process_pending_deletes(int hold) {
   ctr_linear_lock();
-  for (int i = 0; i < g.pending_staging_count; i++) {
-    linearFree(g.pending_staging[i]);
+  for (int i = 0; i < g.held_staging_count; i++) {
+    linearFree(g.held_staging[i]);
+  }
+  g.held_staging_count = 0;
+  if (hold == 2) {
+    memcpy(g.held_staging, g.pending_staging, sizeof(void*) * (size_t)g.pending_staging_count);
+    g.held_staging_count = g.pending_staging_count;
+  } else {
+    for (int i = 0; i < g.pending_staging_count; i++) {
+      linearFree(g.pending_staging[i]);
+    }
   }
   g.pending_staging_count = 0;
   int kept = 0;
@@ -2321,7 +2340,7 @@ static void pipeline_frame_begin(u32 clear) {
     s_begin_wait_ms = overlap2_wait_frame(s_buf_frame[s_k]);
     s_buf_frame[s_k] = 0;
     if (s_end_mode2) {
-      process_pending_deletes(1);
+      process_pending_deletes(2);
     }
     overlap2_room(8);
   }
@@ -2962,6 +2981,9 @@ static void defer_linear_free(void* mem) {
   if (g.pending_staging_count < MAX_STAGING) {
     g.pending_staging[g.pending_staging_count++] = mem;
   } else {
+    /* (AI-assisted) no room in the list: freed once a running GX queue (the pipeline's) has run
+     * what is queued (a stopped queue returns at once, as before) */
+    gxCmdQueueWait(&__C3D_Context.gxQueue, -1);
     linearFree(mem);
   }
 }
