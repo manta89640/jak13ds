@@ -507,9 +507,13 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
  * every chunk change. */
 typedef struct {
   float m[16];
-  uint32_t f24[12]; /* (AI-assisted) m as float24 uniform words (3DS raw draws) */
+  /* (AI-assisted) m as float24 uniform words (3DS raw draws), then shader_opt's two fog rows: 6
+   * words the draws make at the first upload with the fog of fog_gen (a cache in the matrix: a
+   * prepared matrix is never in const memory) */
+  uint32_t f24[18];
   uint32_t id;      /* (AI-assisted) new for every prepare: draws compare it, not m (so a
                      * prepared matrix must not be changed, only prepared again) */
+  uint32_t fog_gen; /* (AI-assisted) the fog f24[12..17] were made with (0: not made) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 /* (AI-assisted) config.ini fog_stage_skip: the next ctr_gpu_draw_mesh(_prepared) draws are entirely

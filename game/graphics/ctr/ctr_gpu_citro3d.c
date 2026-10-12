@@ -339,6 +339,12 @@ static struct {
   DVLB_s* mesh_fa_dvlb;
   u32 fog_abgr; /* the fog color as a combiner constant (fog_alpha's stage 1), R in the low byte */
   float fog0[4], fog1[4]; /* see ctr_gpu_set_mesh_fog, mesh_fog_uniforms */
+  /* (AI-assisted) changes with fog0 (never 0): ctr_mesh_matrix::fog_gen; and the inputs of the
+   * last ctr_gpu_set_mesh_fog that changed the uniforms (fog_in_valid: there was one) */
+  uint32_t fog_gen;
+  int fog_in_valid, fog_in_mode;
+  const void* fog_in_ps;
+  float fog_in0[4], fog_in1[4];
   int fog_df; /* (AI-assisted) the game fog is a constant 0: only the draw distance fog is left */
   /* (AI-assisted) the mesh program's fog uniforms: fog0/fog1 with the new shaders, the game's
    * values unchanged with the Oct 2 ones (new_shaders = off; the ocean shader keeps fog0/fog1) */
@@ -1326,6 +1332,8 @@ int ctr_gpu_init(void) {
   g.fog1[3] = 0.0f;
   memcpy(g.mfog0, g.fog0, sizeof(g.mfog0));
   memcpy(g.mfog1, g.fog1, sizeof(g.mfog1));
+  g.fog_gen = 1; /* (AI-assisted) */
+  g.fog_in_valid = 0;
   if (mesh_mode() != 1) {
     /* the Oct 2 shader's form: hvdf.w, fog min, fog max, -1/255; w scale, start, 1 / range */
     const float f0[4] = {0.0f, 255.0f, 255.0f, -1.0f / 255.0f}, f1[4] = {0.0f, 1.0f, 0.0f, 0.0f};
@@ -5436,6 +5444,7 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
   }
   static uint32_t s_next_id;
   out->id = ++s_next_id ? s_next_id : ++s_next_id; /* never 0 */
+  out->fog_gen = 0;
 }
 
 /* (AI-assisted) shader_opt (ctr_mesh_opt.v.pica): the fog rows clip[4], clip[5] of a matrix (C3D_Mtx
@@ -5483,14 +5492,18 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
       g.last_clip_id = matrix->id;
       if (g.ps->opt) {
         /* (AI-assisted) shader_opt: the matrix and its fog rows in one burst (the draw distance
-         * fog's only with the game fog off: the df programs don't read the other) */
-        u32 v[18];
-        memcpy(v, matrix->f24, sizeof(matrix->f24));
-        float rows[8];
-        mesh_fog_rows(matrix->m, rows);
-        raw_pack_f24(rows, v + 12);
-        raw_pack_f24(rows + 4, v + 15);
-        raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, v, df ? 15 : 18, 0));
+         * fog's only with the game fog off: the df programs don't read the other). The rows are
+         * made once per matrix and fog (fog_gen): a chunk's matrix is uploaded again at every
+         * switch between chunks (the draws are sorted by texture) */
+        ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
+        if (mm->fog_gen != g.fog_gen) {
+          float rows[8];
+          mesh_fog_rows(matrix->m, rows);
+          raw_pack_f24(rows, mm->f24 + 12);
+          raw_pack_f24(rows + 4, mm->f24 + 15);
+          mm->fog_gen = g.fog_gen;
+        }
+        raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, df ? 15 : 18, 0));
       } else {
         raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 12, 0));
       }
@@ -6234,6 +6247,21 @@ static void mesh_fog_uniforms(const float fog0[4], const float fog1[4], float ou
 
 void ctr_gpu_set_mesh_fog(const float fog0_in[4], const float fog1[4], uint8_t r, uint8_t gr,
                           uint8_t b) {
+  /* (AI-assisted) the same inputs as the last call that set the uniforms (the level renderers of
+   * one level, each frame): its values are in the registers (or go in at the next use of their
+   * program, use_program), so only the ramp color, which ctr_gpu_ocean_full_draw also sets. No
+   * new matrix upload for the fog rows, no uniform update. */
+  if (g.fog_in_valid && g.fog_in_ps == (const void*)g.ps && g.fog_in_mode == mesh_mode() &&
+      words_equal(g.fog_in0, fog0_in, 4) && words_equal(g.fog_in1, fog1, 4)) {
+    fog_ramp_color(r, gr, b);
+    return;
+  }
+  g.fog_in_valid = 1;
+  g.fog_in_ps = g.ps;
+  g.fog_in_mode = mesh_mode();
+  memcpy(g.fog_in0, fog0_in, sizeof(g.fog_in0));
+  memcpy(g.fog_in1, fog1, sizeof(g.fog_in1));
+  g.fog_gen = g.fog_gen + 1 ? g.fog_gen + 1 : 1;
   /* (AI-assisted) the game fog's clamps kept in 0..255: its amount stays in 0..1 (fog_alpha's
    * shaders only clamp at 1; the fog ramp gave the same for amounts outside 0..1) */
   float fog0[4];
