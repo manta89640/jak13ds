@@ -32,6 +32,9 @@
  *             are, in meters, Jak's state, and how many riders the process found in its last
  *             detect-riders! (-1: not a platform) (pad-script-jpos)
  *   save      an autosave, as after a power cell (pad-script-auto-save, 3DS)
+ *   tasks A B (AI-assisted) close every stage of game-tasks A..B (close-specific-task!, as if
+ *             they were done: the progress menu's power cell pages then show those cells
+ *             collected) and set *cheat-mode* to #t (the menu opens every level's page)
  *   shot [NAME]  (AI-assisted) a screenshot (PC OpenGL renderer: like F2, into the config
  *             folder's screenshots; for reference pictures to compare the 3DS renderer with). The
  *             3DS renderer: NAME.bmp (3DS) / NAME.png (--ctr-gfx) in its screenshot folder
@@ -97,6 +100,13 @@ void set_save_hook(SaveHook hook);
 //! (AI-assisted) Called for "teleport" (teleport true) and "jpos" (teleport false).
 using JointHook = void (*)(const char* type, int joint, float dy, bool teleport);
 void set_joint_hook(JointHook hook);
+
+//! (AI-assisted) Called for "tasks A B".
+using TasksHook = void (*)(int first, int last);
+void set_tasks_hook(TasksHook hook);
+
+//! (AI-assisted) The name of the last "shot" given to the hook below ("" before the first one).
+const char* last_shot_name();
 
 //! (AI-assisted) Called for "shot".
 using ShotHook = void (*)();

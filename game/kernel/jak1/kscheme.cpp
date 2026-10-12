@@ -1592,6 +1592,33 @@ void pad_script_save() {
   }
   call_goal_function_by_name("pad-script-auto-save");
 }
+
+//! (AI-assisted) "tasks A B" in a pad script: every stage of game-tasks A..B closed with
+//! (close-specific-task! TASK STATUS), and *cheat-mode* #t (the progress menu then opens every
+//! level's page): progress-menu pictures with collected power cells, without a save file
+void pad_script_tasks(int first, int last) {
+  auto fn = find_symbol_from_c("close-specific-task!");
+  auto status_fn = find_symbol_from_c("get-task-status");
+  auto cheat = find_symbol_from_c("*cheat-mode*");
+  if (!fn.offset || fn->value == s7.offset || !status_fn.offset || status_fn->value == s7.offset ||
+      !cheat.offset) {
+    lg::warn("[pad script] tasks: no close-specific-task! / get-task-status / *cheat-mode*");
+    return;
+  }
+  cheat->value = (s7 + FIX_SYM_TRUE).offset;
+  for (int t = std::max(first, 1); t <= last && t < 256; t++) {
+    // close the task's available stage until there is none (get-task-status: invalid). Only
+    // statuses the task has: close-specific-task!'s error message for others crashed in format.
+    for (int k = 0; k < 8; k++) {
+      const u64 status =
+          call_goal(Ptr<Function>(status_fn->value), (u64)t, 0, 0, s7.offset, g_ee_main_mem);
+      if (status == 0 || status > 7) {
+        break;
+      }
+      call_goal(Ptr<Function>(fn->value), (u64)t, status, 0, s7.offset, g_ee_main_mem);
+    }
+  }
+}
 }  // namespace
 
 s32 InitHeapAndSymbol() {
@@ -1600,6 +1627,7 @@ s32 InitHeapAndSymbol() {
   pad_script::set_continue_hook(pad_script_continue);
   pad_script::set_joint_hook(pad_script_joint);
   pad_script::set_save_hook(pad_script_save);
+  pad_script::set_tasks_hook(pad_script_tasks);
   pad_script::set_state_name_hook(pad_script_state_name);
   pad_script::set_position_hook(pad_script_position);
   Timer heap_init_timer;
