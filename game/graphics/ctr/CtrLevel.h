@@ -15,6 +15,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/common_types.h"
@@ -25,6 +26,7 @@
 
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/c3l_format.h"
+#include "game/graphics/ctr/c3l_reader.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 /*! (AI-assisted) c3l v12: an effect whose vertices the game rewrites (c3l::MercModEffect). */
@@ -64,10 +66,6 @@ struct CtrLevelData {
   // (AI-assisted) per draw: every vertex it uses has alpha 0x80 (CTR_TCC_ALPHA80, fog_alpha), from
   // the vertices read at load (0 for chunks made later: the fog ramp path, which is always right)
   std::vector<u8> draw_alpha80;
-  // per draw: sort key for the draws whose order doesn't matter (texture, then GPU state), and
-  // whether the order matters (blending, or no depth write: decals); see CtrTfragRenderer
-  std::vector<u32> draw_sort_keys;
-  std::vector<u8> draw_ordered;
   // made at load: the draws in drawing order, so a frame needs no sort. sorted_draws: the draws
   // whose order doesn't matter by (sort key, chunk, draw), then ordered_draws in chunk order.
   // draw_chunk: the chunk of each draw.
@@ -170,7 +168,8 @@ class CtrLevels {
    * one), the one of this level after a minute if nothing asks for it. */
   void prefetch(const std::string& name);
   /*! Find a merc model in the loaded levels. Returns the level too (for its textures). */
-  const CtrMercModelData* find_merc_model(const std::string& name, const CtrLevelData** lev);
+  // (AI-assisted) a string_view: no std::string made for each lookup (~50 per frame)
+  const CtrMercModelData* find_merc_model(std::string_view name, const CtrLevelData** lev);
   /*! Get a level, starting its load if needed. nullptr while it loads, or if there is no .c3l. */
   CtrLevelData* get(const std::string& name, u64 frame);
   /*! Start the loads get()/set_wanted asked for and take the finished ones (render thread, outside
@@ -212,13 +211,22 @@ class CtrLevels {
   bool cancelled() const { return m_cancel.load(std::memory_order_relaxed); }
   std::map<std::string, std::unique_ptr<CtrLevelData>> m_levels;
   std::map<std::string, bool> m_missing;
-  std::map<std::string, double> m_failed;  // (AI-assisted) when a load failed: retried later
+  // (AI-assisted) a load that failed (out of memory, a bad SD read): retried later, sooner when the
+  // heap's largest free block grew since (3DS)
+  struct FailedLoad {
+    double ms = 0;     // when
+    u32 largest = 0;   // the largest free heap block then (3DS; 0: not known)
+    bool drawn = false;  // get() was asked for it since
+  };
+  std::map<std::string, FailedLoad> m_failed;
+  // (AI-assisted) render thread: wanted levels whose load failed, loaded again when memory frees
+  void retry_failed_loads(u64 frame);
   std::vector<std::string> m_pending_loads;
   std::vector<std::string> m_wanted;
   bool m_common_wanted = false;
   std::unique_ptr<CtrLevelData> m_common;
   // merc model name -> (level, model index); rebuilt when levels change
-  std::map<std::string, std::pair<CtrLevelData*, int>> m_merc_index;
+  std::map<std::string, std::pair<CtrLevelData*, int>, std::less<>> m_merc_index;
   void rebuild_merc_index();
   // a level that loaded (or was prefetched) and is taken into m_levels
   void publish(const std::string& name, std::unique_ptr<CtrLevelData> lev, u64 frame);
@@ -272,6 +280,7 @@ class CtrLevels {
     std::vector<std::pair<u32, int>> meshes;       // detail reload, repair: (chunk, mesh)
     std::vector<std::pair<u32, int>> merc_meshes;  // repair: (merc model, mesh)
     TexLoad tex;                                   // repair: the texture pool
+    u32 heap_largest = 0;  // (AI-assisted) FAILED: the largest free heap block then (3DS)
   };
   void request(const Job& job);  // render thread
   void run_job(const Job& job);  // loader thread (or inline without one)
@@ -296,6 +305,9 @@ class CtrLevels {
   // returns true (try the allocation again).
   bool make_room(const std::string& name, const char* what);
   bool m_room_tried = false;  // by the loader's job (one at a time)
+  // (AI-assisted) the .c3l reader's windows and block caches, kept for all loads (one at a time):
+  // made at startup, while the heap is in one piece
+  c3l::Reader::Buffers m_read_bufs;
   // (AI-assisted) the last load_file's file reads (ms, count): for the "loaded" log line
   double m_last_read_ms = 0;
   u32 m_last_reads = 0;
