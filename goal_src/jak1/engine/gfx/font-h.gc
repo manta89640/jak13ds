@@ -874,13 +874,14 @@
     (/ scale (fmax 0.1 (-> ctxt scale))))
   (defun pc-3ds-text-width ((ctxt font-context) (k float))
     "The width of the text box of a context for text k times its size: centered text gets a box k
-     times as wide around the same center (the same lines as on the PS2), kept 16 units (12 pixels)
-     inside the screen (0 .. 512); other text keeps its width (and wraps more)."
+     times as wide around the same center (the same lines as on the PS2), but no wider than what
+     stays 16 units (12 pixels) inside the screen (0 .. 512), narrower than the game's box if that
+     one already went past the screen's edge; other text keeps its width (and wraps more)."
     (let ((w0 (-> ctxt width)))
-      (if (and (< 1.0 k) (logtest? (-> ctxt flags) (font-flags middle)))
+      (if (logtest? (-> ctxt flags) (font-flags middle))
         (let* ((c (+ (-> ctxt origin x) (* 0.5 w0)))
-               (half (fmin (* 0.5 w0 k) (fmin (- c 16.0) (- 496.0 c)))))
-          (fmax w0 (* 2.0 half)))
+               (half (fmin (* 0.5 w0 (fmax 1.0 k)) (fmin (- c 16.0) (- 496.0 c)))))
+          (fmax 32.0 (* 2.0 half)))
         w0)))
   (defun pc-3ds-draw-line ((str string) (buf dma-buffer) (ctxt font-context))
     "draw-string for a line of print-game-text: a left-aligned line that would end less than 16
