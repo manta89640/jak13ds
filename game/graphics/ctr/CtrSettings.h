@@ -96,7 +96,8 @@ struct CtrSettings {
   bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
   // (AI-assisted) shadows = full: at most this many objects' shadows per frame, the ones that look
   // biggest from the camera (bounding sphere over distance: Jak's normally is one); 0 = all
-  int shadow_casters = 6;
+  // (AI-assisted) default 0 since Oct 12 (all casters, like the PS2); 6 was the 30 fps era cut
+  int shadow_casters = 0;
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
@@ -124,7 +125,9 @@ struct CtrSettings {
   // made it, so motion is even; fast shows it as soon as the GPU is done (lower latency, uneven)
   bool steady_pacing = true;
   // world space sprites (particles) per frame; the HUD is always drawn
-  int max_sprites = 1000;
+  // (AI-assisted) default 2176 since Oct 12: the game's own particle capacity (1920 2d + 256 3d,
+  // sparticle.gc), so nothing the PS2 draws is left out; 1000 was the 30 fps era cut
+  int max_sprites = 2176;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
   // Default (auto): on in the emulator, off on the 3DS.
   bool rgba4_as_rgba8 = false;
@@ -203,10 +206,10 @@ struct CtrSettings {
   // glows (radial gradient textures) from the procedural texture unit: no texels read
   bool proctex_glows = true;
   // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
-  float sprite_max_size = 0.5f;
+  float sprite_max_size = 0.f;  // (AI-assisted) 0 since Oct 12, as the PS2 (0.5 was the 30 fps cut)
   // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
   // (the game's 0..128; all sprites are left out below 2, the old rule for every size)
-  int sprite_min_alpha = 6;
+  int sprite_min_alpha = 2;  // (AI-assisted) 2 since Oct 12: the old rule only (6 was the 30 fps cut)
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
