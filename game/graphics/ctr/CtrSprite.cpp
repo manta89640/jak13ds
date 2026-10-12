@@ -558,6 +558,12 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
   const float k3y = -m_pfog0 * (1.f / 112.f), o3y = (2048.f - m_hvdf_offset.y()) * (1.f / 112.f);
   const float k3z = m_pfog0 * (1.f / 8388607.5f),
               o3z = m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
+  // (AI-assisted) each chunk starts clamped (Sprite3: m_current_mode = m_default_mode, whose
+  // clamp bits are set); the cached state of the last adgif holds the clamp mode it was made with
+  if (!m_clamp_s || !m_clamp_t) {
+    m_clamp_s = m_clamp_t = true;
+    m_have_last_ad = false;
+  }
   for (u32 i = 0; i < count; i++) {
     if (mode != MODE_HUD) {
       if (m_world_left <= 0) {
@@ -775,9 +781,16 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
         zwrite = !GsZbuf(ad.clamp_data).zmsk();
       } else {
-        st.clamp_s = (ad.clamp_data & 0b001) != 0;
-        st.clamp_t = (ad.clamp_data & 0b100) != 0;
+        m_clamp_s = (ad.clamp_data & 0b001) != 0;
+        m_clamp_t = (ad.clamp_data & 0b100) != 0;
       }
+      // (AI-assisted) a sprite whose adgif sets ZBUF_1 instead of CLAMP_1 keeps the clamp mode
+      // in effect, as Sprite3::do_block_common's m_current_mode: clamped at the start of each
+      // chunk (its default mode). Repeat there let the bilinear filter blend in the texture's
+      // opposite edge: a 1 pixel dark line along the inner edges of the progress menu's side
+      // panels while they zoom in and out (texels several pixels wide).
+      st.clamp_s = m_clamp_s;
+      st.clamp_t = m_clamp_t;
       st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
       st.fix = GsAlpha(ad.alpha_data).fix();
       // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with

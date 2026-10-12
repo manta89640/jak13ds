@@ -141,6 +141,9 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // state of the previous sprite (same adgif: same state and bucket)
   AdGif m_last_ad;
   bool m_have_last_ad = false;
+  // (AI-assisted) the clamp mode in effect (CLAMP_1 of the last adgif that set it, this chunk)
+  bool m_clamp_s = true;
+  bool m_clamp_t = true;
   ctr_draw_state m_last_state;
   Bucket* m_last_bucket_ptr = nullptr;
   float m_corner_reach = 0;
