@@ -282,6 +282,8 @@ CtrSettings load() {
       s.static_cmdlists = v == "compare" ? 2 : (parse_bool(v) ? 1 : 0);
     } else if (key == "gpu_breakdown") {
       s.gpu_breakdown = parse_bool(v);  // (AI-assisted, gpu-rt)
+    } else if (key == "ocean_tex_half") {
+      s.ocean_tex_half = parse_bool(v);  // (AI-assisted, gpu-rt)
     } else if (key == "cmd_dump") {
       s.cmd_dump = parse_bool(v);  // (AI-assisted)
     } else if (key == "cb_read_opaque") {

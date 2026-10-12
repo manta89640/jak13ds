@@ -296,6 +296,10 @@ struct CtrSettings {
   // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower
   // while on. Profiling only, off; needs pipeline = on
   bool gpu_breakdown = false;
+  // (AI-assisted, gpu-rt) ocean_tex_half: the flat / waves ocean's shading texture is made every
+  // second frame (the heights still every frame for the near grid); ocean = full has
+  // ocean_texture_rate
+  bool ocean_tex_half = true;
   // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
   // (platform/3ds/tools/cmd_report.py); diagnostic, off
   bool cmd_dump = false;

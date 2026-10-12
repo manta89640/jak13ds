@@ -147,7 +147,10 @@ void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (m_mesh < 0) {
     return;
   }
-  update_texture(rs.ee_mem, p.heights);
+  // (AI-assisted, gpu-rt) ocean_tex_half: the shading every second frame (the heights every frame:
+  // the near grid of ocean = waves moves with them)
+  update_texture(rs.ee_mem, p.heights,
+                 !ctr_settings().ocean_tex_half || m_tex < 0 || (rs.frame_idx & 1) == 0);
   m_near_index_count = 0;
   if (waves()) {
     build_near(rs.ee_mem, p);
@@ -302,7 +305,7 @@ bool CtrOceanRenderer::build_mesh(const u8* ee, const Packet& p) {
   return m_mesh >= 0;
 }
 
-void CtrOceanRenderer::update_texture(const u8* ee, u32 heights) {
+void CtrOceanRenderer::update_texture(const u8* ee, u32 heights, bool shade) {
   constexpr int N = kTexSize;
   float* h = m_heights;  // (AI-assisted) kept for the near grid
   static_assert(sizeof(m_heights) == N * N * 4);
@@ -310,6 +313,9 @@ void CtrOceanRenderer::update_texture(const u8* ee, u32 heights) {
     memcpy(h, ee + heights, sizeof(m_heights));
   } else {
     memset(h, 0, sizeof(m_heights));
+  }
+  if (!shade) {
+    return;  // (AI-assisted, gpu-rt) ocean_tex_half: the GPU keeps last frame's texture
   }
   // Shade the wave heights (3 m apart) like a lit surface: brighter on the slopes facing the
   // light, darker on the others, a little brighter on the crests. The PS2 renders its ocean

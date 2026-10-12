@@ -46,7 +46,7 @@ class CtrOceanRenderer : public CtrBucketRenderer {
 
  private:
   bool build_mesh(const u8* ee, const Packet& p);
-  void update_texture(const u8* ee, u32 heights);
+  void update_texture(const u8* ee, u32 heights, bool shade);
   void draw(const Packet& p, const CtrRenderState& rs);
   // (AI-assisted) ocean = waves
   bool waves() const;
