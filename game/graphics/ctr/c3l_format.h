@@ -24,7 +24,12 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // kDrawCullBack; otherwise v12. Readers detect both by their values, not by the version.
 // v13 files may also hold generated merc LODs (<model>~genlod, kMercGenLodSuffix): no layout
 // change, older readers see an extra model (merged Oct 11, AI-assisted).
-constexpr uint32_t kVersion = 13;
+// v14 (AI-assisted): a shrub chunk's max_dist is its shrubs' PS2 distance (the converter groups
+// shrubs by prototype distance class: the middle of the PS2 fade, from the prototype's dists);
+// before, every shrub chunk had the converter's --shrub-dist. Otherwise v13.
+constexpr uint32_t kVersion = 14;
+// (AI-assisted) the first version whose shrub chunks carry their PS2 distance
+constexpr uint32_t kShrubPs2DistVersion = 14;
 // v7 files (16-bit textures without mip levels) still load
 constexpr uint32_t kMinVersion = 7;
 

@@ -110,6 +110,10 @@ CtrSettings load() {
       s.tie_distance_scale = std::max(0.f, f);
     } else if (key == "auto_detail") {
       s.auto_detail = parse_bool(v);
+    } else if (key == "shrub_scale") {
+      s.shrub_scale = std::max(0.f, f);  // (AI-assisted)
+    } else if (key == "shrub_scale_max") {
+      s.shrub_scale_max = std::max(0.f, f);  // (AI-assisted)
     } else if (key == "shrub_distance_max") {
       s.shrub_distance_max = std::max(0.f, f);
     } else if (key == "tie_distance_scale_max") {
@@ -306,7 +310,7 @@ CtrSettings load() {
 
 std::string CtrSettings::summary() const {
   return fmt::format(
-      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} tie x{} fog {} "
+      "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} "
       "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
@@ -317,6 +321,9 @@ std::string CtrSettings::summary() const {
       auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms)", shrub_distance,
                                 std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms)
                   : fmt::format("{:.0f}m", shrub_distance),
+      auto_detail && shrub_scale_max > shrub_scale
+          ? fmt::format("{:.2f}-{:.2f}", shrub_scale, shrub_scale_max)
+          : fmt::format("{:.2f}", shrub_scale),
       auto_detail ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
                                 std::max(tie_distance_scale, tie_distance_scale_max))
                   : fmt::format("{:.1f}", tie_distance_scale),

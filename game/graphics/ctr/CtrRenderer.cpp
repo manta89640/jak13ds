@@ -746,8 +746,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       if (ctr_settings().auto_detail) {
         const auto& s = ctr_settings();
         const float t = m_auto.t;
-        lg::info("[ctr] auto detail {:.2f}: shrubs {:.0f} m, ties x{:.2f} ({} steps up, {} down)", t,
+        lg::info("[ctr] auto detail {:.2f}: shrubs {:.0f} m (v14 files: x{:.2f}), ties x{:.2f} ({} steps up, {} down)", t,
                  s.shrub_distance + (std::max(s.shrub_distance_max, s.shrub_distance) - s.shrub_distance) * t,
+                 s.shrub_scale + (std::max(s.shrub_scale_max, s.shrub_scale) - s.shrub_scale) * t,
                  s.tie_distance_scale +
                      (std::max(s.tie_distance_scale_max, s.tie_distance_scale) - s.tie_distance_scale) * t,
                  m_auto.ups, m_auto.downs);
