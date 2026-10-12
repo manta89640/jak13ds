@@ -107,6 +107,7 @@ void ctr_gpu_set_new_shaders(int on) {
   s_new_shaders = on;
 }
 void ctr_thread_install_crash_handler(void); /* platform/3ds/port */
+static void gl_to_pica_check(void); /* (AI-assisted) */
 
 /* (AI-assisted) hardware hang bisect: where the render thread is (ctr_gpu_diag_stage) and how
  * many frames it finished, logged once per second for the first 60 s by a watchdog thread */
@@ -1003,6 +1004,7 @@ static void setup_projection(void) {
   g.gl_to_pica.r[3].y = 0.0f;
   g.gl_to_pica.r[3].z = 0.0f;
   g.gl_to_pica.r[3].w = 1.0f;
+  gl_to_pica_check();
 
   /* (AI-assisted) the ocean's GS vertices -> g.projection's space like CtrDirect: x = (X / 16 -
    * 2048) / 256, y = (2048 - Y / 16) / 112 (Jak 1's 512 x 224 field), z = Z / (2^24 - 1) */
@@ -5375,18 +5377,57 @@ void ctr_gpu_mesh_delete(int mesh) {
   ctr_linear_unlock();
 }
 
-void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
-  /* final = gl_to_pica * clip, in C3D_Mtx layout (components reversed) */
-  C3D_Mtx m;
+/* (AI-assisted) gl_to_pica * clip (clip row-major), in C3D_Mtx layout (components reversed): the
+ * level chunks' and merc models' matrices. The generic product sums from +0.0f in k order; with
+ * the fixed g.gl_to_pica (rows (0 1 0 0), (-1 0 0 0), (0 0 -1/2 -1/2), (0 0 0 1); zeros of either
+ * sign) each element is one or two of clip's with the same rounding: a zero product leaves a
+ * nonzero sum as it is and the +0.0f sum at +0 (so the 0.0f + stays: it makes a -0 element +0, and
+ * float24 has a sign bit), x * 1 and x * -1 are exact, and the two products of row 2 are added in
+ * the same order (VFPv2's VMLA rounds the product and the sum separately: no fused add). Clip
+ * matrices with an infinity or NaN take the generic product (0 * inf is NaN there). */
+static int s_gl_to_pica_fixed;
+static void gl_to_pica_check(void) {
+  static const float k[4][4] = {{0, 1, 0, 0}, {-1, 0, 0, 0}, {0, 0, -0.5f, -0.5f}, {0, 0, 0, 1}};
+  int ok = 1;
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 4; c++) {
+      ok &= g.gl_to_pica.r[r].c[3 - c] == k[r][c]; /* (== : -0 and +0 alike) */
+    }
+  }
+  s_gl_to_pica_fixed = ok;
+  printf("[ctr] gl_to_pica: %s\n", ok ? "the fixed form" : "not the fixed form: generic products");
+}
+static void gl_to_pica_mul(const float clip[16], C3D_Mtx* m) {
+  u32 nonfinite = 0;
+  for (int i = 0; i < 16; i++) {
+    u32 w;
+    memcpy(&w, &clip[i], 4);
+    nonfinite |= (w & 0x7f800000u) == 0x7f800000u;
+  }
+  if (s_gl_to_pica_fixed && !nonfinite) {
+    for (int c = 0; c < 4; c++) {
+      m->r[0].c[3 - c] = 0.0f + clip[4 + c];
+      m->r[1].c[3 - c] = 0.0f - clip[c];
+      m->r[2].c[3 - c] = (0.0f + -0.5f * clip[8 + c]) + -0.5f * clip[12 + c];
+      m->r[3].c[3 - c] = 0.0f + clip[12 + c];
+    }
+    return;
+  }
   for (int r = 0; r < 4; r++) {
     for (int c = 0; c < 4; c++) {
       float acc = 0.0f;
       for (int k = 0; k < 4; k++) {
         acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
       }
-      m.r[r].c[3 - c] = acc;
+      m->r[r].c[3 - c] = acc;
     }
   }
+}
+
+void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out) {
+  /* final = gl_to_pica * clip, in C3D_Mtx layout (components reversed) */
+  C3D_Mtx m;
+  gl_to_pica_mul(clip, &m);
   _Static_assert(sizeof(C3D_Mtx) == offsetof(ctr_mesh_matrix, f24), "matrix layout");
   memcpy(out->m, &m, sizeof(m));
   /* (AI-assisted) and as float24 uniform words for the raw draws (12 words instead of 16) */
@@ -5723,15 +5764,7 @@ void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
 
 /* (AI-assisted) clip (row-major, GL clip space) -> PICA clip space, in C3D_Mtx layout */
 static void skin_clip_matrix(const float clip[16], C3D_Mtx* m) {
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 4; c++) {
-      float acc = 0.0f;
-      for (int k = 0; k < 4; k++) {
-        acc += g.gl_to_pica.r[r].c[3 - k] * clip[4 * k + c];
-      }
-      m->r[r].c[3 - c] = acc;
-    }
-  }
+  gl_to_pica_mul(clip, m);
 }
 
 /* (AI-assisted) shader_opt (ctr_skin_opt / ctr_skin_env_opt.v.pica): the weights go in unscaled
