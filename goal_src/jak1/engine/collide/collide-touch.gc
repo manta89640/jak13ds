@@ -7,6 +7,52 @@
 (require "engine/collide/collide-shape-h.gc")
 (require "engine/collide/collide-mesh-h.gc")
 
+;; og:preserve-this (AI-assisted) The touching-list overflow message (get-shapes-entry below) is
+;; printed once per overflow episode, then a count. An overflow is normal game behaviour (PS2 and PC
+;; too): with blue eco, Jak's 18 m touch-tracker overlaps every orb of the Snowy fort's orb caches
+;; and fills the 32 shape pairs, every frame while the eco lasts. Printing every failure was up to
+;; ~7 lines per frame, each one an SD card write on the 3DS (1515 lines in one hardware log). What
+;; the game does is unchanged: the pair is still dropped, as on PS2/PC.
+(define *touching-list-overflow-active* #f) ;; an overflow episode is going on
+(define *touching-list-overflow-this-frame* #f) ;; get-shapes-entry failed this frame
+(define *touching-list-overflow-count* 0) ;; failures not reported yet
+(define *touching-list-overflow-frames* 0) ;; frames since the last report of this episode
+
+(defun touching-list-overflow-failed ()
+  "get-shapes-entry failed: report the first failure of an episode, count the others."
+  (set! *touching-list-overflow-this-frame* #t)
+  (cond
+    (*touching-list-overflow-active* (+! *touching-list-overflow-count* 1))
+    (else
+     (set! *touching-list-overflow-active* #t)
+     (set! *touching-list-overflow-count* 0)
+     (set! *touching-list-overflow-frames* 0)
+     (format 0 "ERROR: touching-list::get-shapes-entry() failed!~%")))
+  0)
+
+(defun touching-list-overflow-frame-end ()
+  "Once per frame (free-all-prim-nodes): when an episode ends, or every 300 frames of one, print how
+   many more failures there were."
+  (when *touching-list-overflow-active*
+    (+! *touching-list-overflow-frames* 1)
+    (let ((ended (not *touching-list-overflow-this-frame*)))
+      (when (or ended (>= *touching-list-overflow-frames* 300))
+        (when (nonzero? *touching-list-overflow-count*)
+          (if ended
+            (format 0
+                    "ERROR: touching-list::get-shapes-entry() failed ~D more times in ~D frames~%"
+                    *touching-list-overflow-count*
+                    *touching-list-overflow-frames*)
+            (format 0
+                    "ERROR: touching-list::get-shapes-entry() failed ~D more times in ~D frames (still failing)~%"
+                    *touching-list-overflow-count*
+                    *touching-list-overflow-frames*)))
+        (set! *touching-list-overflow-count* 0)
+        (set! *touching-list-overflow-frames* 0)
+        (if ended (set! *touching-list-overflow-active* #f)))))
+  (set! *touching-list-overflow-this-frame* #f)
+  0)
+
 ;; DECOMP BEGINS
 
 ;;;;;;;;;;;;;;;;;;;;;
@@ -85,6 +131,8 @@
     (countdown (s4-0 (-> this num-touching-shapes))
       (free-touching-prims-list s5-0)
       (&+! s5-0 16)))
+  ;; og:preserve-this (AI-assisted) the overflow report, see touching-list-overflow-failed
+  (touching-list-overflow-frame-end)
   (set! (-> this num-touching-shapes) 0)
   (set! (-> this resolve-u) 0)
   0
@@ -116,7 +164,8 @@
          ;; need to add a new one
          (when (>= (-> this num-touching-shapes) TOUCHING_LIST_LENGTH)
            ;; but there's no room!
-           (format 0 "ERROR: touching-list::get-shapes-entry() failed!~%")
+           ;; og:preserve-this (AI-assisted) printed once per overflow episode, see above
+           (touching-list-overflow-failed)
            (return (the-as touching-shapes-entry #f)))
          ;; enough room, increase the size
          (+! (-> this num-touching-shapes) 1))))
