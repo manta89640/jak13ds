@@ -410,7 +410,8 @@ void ctr_gpu_set_shader_modes(int basic, int mesh);
 void ctr_gpu_set_shader_skin(int skin);
 int ctr_gpu_asm_tex(void);
 /* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
- * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start), so a hang shows the
+ * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start: config.ini
+ * render_watchdog), so a hang shows the
  * stage it stopped in */
 void ctr_gpu_diag_stage(const char* stage);
 void ctr_gpu_diag_start(void);

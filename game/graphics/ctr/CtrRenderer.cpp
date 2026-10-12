@@ -1211,7 +1211,9 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   g_ctr->levels().load_common();
   g_ctr->levels().prefetch("title");
   g_async = ctr_gpu_async_start(render_job, nullptr) != 0;
-  ctr_gpu_diag_start();
+  if (ctr_settings().render_watchdog) {
+    ctr_gpu_diag_start();  // (AI-assisted) config.ini render_watchdog
+  }
   g_ctr_ready = true;
   g_ctr->set_async(g_async);
   lg::info("[ctr] renderer ready ({})",

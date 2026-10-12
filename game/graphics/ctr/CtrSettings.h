@@ -157,6 +157,10 @@ struct CtrSettings {
   // default: the hotspot profiler registers have never run on hardware (a GPU that stalls on its
   // result FIFO would hang the game); turn on for a diagnostic run.
   bool gpu_counters = false;
+  // (AI-assisted) render_watchdog: a thread (core 0, 16 KB stack) that logs once per second for the
+  // first 60 s whether the render thread still finishes frames and its last stage (for hangs at
+  // boot). Off by default: ~60 log lines and the stack for nothing in a normal session
+  bool render_watchdog = false;
   // (AI-assisted) seconds between the render thread's statistics bursts (frame times, triangles,
   // draws, culling); shorter for measuring fixed views (more SD card writes)
   float stats_period = 15.f;
