@@ -320,7 +320,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
 #ifndef __3DS__
   ctr_gpu_soft_bucket("sprite-hud");
 #endif
-  flush();
+  flush(true);
   skip_rest();
 }
 
@@ -530,13 +530,24 @@ CtrSpriteRenderer::Bucket& CtrSpriteRenderer::bucket_for(const ctr_draw_state& s
   return b;
 }
 
-void CtrSpriteRenderer::flush() {
+void CtrSpriteRenderer::flush(bool hud) {
   for (size_t i = 0; i < m_bucket_count; i++) {
     auto& b = m_buckets[i];
     if (!b.verts.empty()) {
       // 4 vertices per sprite (ctr_gpu_draw_quads makes the two triangles)
       ctr_gpu_draw_quads(&b.state, b.verts.data(), (int)(b.verts.size() / 4));
       m_stats.draws++;
+      // (AI-assisted) GS alpha fail FB_ONLY: a fragment under the alpha reference still draws,
+      // only without its depth write. Sprite3 draws HUD buckets a second time for those
+      // (AFAIL_NO_DEPTH_WRITE); without it the faint parts of HUD particles were dropped: the
+      // progress menu's power cells of tasks not yet found (alpha 42) didn't show at all
+      if (hud && b.state.zwrite && b.state.atest == CTR_TEST_GEQUAL) {
+        ctr_draw_state faint = b.state;
+        faint.atest = CTR_TEST_LESS;
+        faint.zwrite = 0;
+        ctr_gpu_draw_quads(&faint, b.verts.data(), (int)(b.verts.size() / 4));
+        m_stats.draws++;
+      }
     }
     if (!b.clip.empty()) {
       ctr_gpu_draw_clip(&b.state, b.clip.data(), (int)b.clip.size());
@@ -548,6 +559,91 @@ void CtrSpriteRenderer::flush() {
   m_bucket_count = 0;
   m_last_bucket = 0;
   m_have_last_ad = false;  // m_last_bucket_ptr pointed into a bucket
+}
+
+void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
+  if (!m_have_last_ad || !same_adgif(ad, m_last_ad)) {
+    m_last_ad = ad;
+    m_have_last_ad = true;
+    ctr_draw_state& st = m_last_state;
+    memset(&st, 0, sizeof(st));
+    GsTex0 tex0(ad.tex0_data);
+    if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
+      const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
+      m_last_tex0 = ad.tex0_data;
+      m_last_tex = tex ? tex->handle : -1;
+      m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
+    }
+    st.tex = m_last_tex;
+    st.tcc = tex0.tcc();
+#ifndef __3DS__
+    {
+      // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
+      static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
+      static std::vector<u64> dumped;
+      if (dump_dir && dumped.size() < 200 &&
+          std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
+        dumped.push_back(ad.tex0_data);
+        std::vector<u32> rgba;
+        int w = 0, h = 0;
+        if (m_vram->decode_for_cpu(ad.tex0_data, &rgba, &w, &h) && w > 0 && h > 0) {
+          u32 amin = 255, amax = 0;
+          for (u32 c : rgba) {
+            amin = std::min(amin, c >> 24);
+            amax = std::max(amax, c >> 24);
+          }
+          lg::info("[sprite dump {}] handle {} tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
+                   dumped.size(), st.tex, ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
+                   ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
+          try {
+            file_util::write_rgba_png(
+                fs::path(dump_dir) / fmt::format("sprite_{:02d}.png", dumped.size()),
+                rgba.data(), w, h);
+          } catch (std::exception&) {
+          }
+        }
+      }
+    }
+#endif
+    st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
+    bool zwrite = false;
+    if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
+      zwrite = !GsZbuf(ad.clamp_data).zmsk();
+    } else {
+      m_clamp_s = (ad.clamp_data & 0b001) != 0;
+      m_clamp_t = (ad.clamp_data & 0b100) != 0;
+    }
+    // (AI-assisted) a sprite whose adgif sets ZBUF_1 instead of CLAMP_1 keeps the clamp mode
+    // in effect, as Sprite3::do_block_common's m_current_mode: clamped at the start of each
+    // chunk (its default mode). Repeat there let the bilinear filter blend in the texture's
+    // opposite edge: a 1 pixel dark line along the inner edges of the progress menu's side
+    // panels while they zoom in and out (texels several pixels wide).
+    st.clamp_s = m_clamp_s;
+    st.clamp_t = m_clamp_t;
+    st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
+    st.fix = GsAlpha(ad.alpha_data).fix();
+    // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with
+    // FB_ONLY (only matters for depth writes)
+    st.ztest = CTR_TEST_GEQUAL;
+    st.zwrite = zwrite;
+    st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
+    st.aref = 38;
+    // (AI-assisted) config sprite_alpha_discard: fragments with alpha 0 skip the blending (no
+    // framebuffer read and write) where alpha 0 adds nothing: Cs * As (+ or -) Cd. Not for the
+    // blend modes that use a fixed factor or the destination's alpha.
+    if (!zwrite && mode != MODE_HUD && ctr_settings().sprite_alpha_discard &&
+        (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
+         st.blend == CTR_BLEND_SUB)) {
+      st.atest = CTR_TEST_GREATER;
+      st.aref = 0;
+    }
+    // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
+    // its texture coordinates then go from -1 to 1 (see m_proc below)
+    if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {
+      st.flags |= CTR_STATE_PROCTEX;
+    }
+    m_last_bucket_ptr = &bucket_for(st);
+  }
 }
 
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
@@ -573,6 +669,17 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     }
     const VecData& v = m_vec[i];
     const AdGif& ad = m_adgif[i];
+    // (AI-assisted) HUD sprites: the draw state, so the order of the buckets, before a sprite can
+    // be left out, as Sprite3 (which buckets every HUD sprite, off screen or not). The buckets are
+    // drawn in the order of their first sprite: when the first power cell of a progress menu page
+    // was a task not done yet (its orbiting sparkles and its glow parked off screen), its core
+    // came first and every cell's additive glow was drawn after the cores. Their depths are 2e-6
+    // apart (GS: 33 units), the same value in the GPU's 24-bit floats on hardware, so the glow
+    // passed the depth test over the cores: cores behind a glow too bright. In the game's order
+    // (sparkles, glow, core) the core is drawn last and its depth is never below the glow's.
+    if (mode == MODE_HUD) {
+      resolve_state(ad, mode);
+    }
 
     // sprite3_3d.vert
     const math::Vector4f pos(v.xyz_sx.x(), v.xyz_sx.y(), v.xyz_sx.z(), 1.f);
@@ -733,88 +840,8 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     }
     // Resolve GS state only for sprites that survived the screen bounds test.
     // Texture lookup can decode/upload a texture, and offscreen sprites never use it.
-    if (!m_have_last_ad || !same_adgif(ad, m_last_ad)) {
-      m_last_ad = ad;
-      m_have_last_ad = true;
-      ctr_draw_state& st = m_last_state;
-      memset(&st, 0, sizeof(st));
-      GsTex0 tex0(ad.tex0_data);
-      if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
-        const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
-        m_last_tex0 = ad.tex0_data;
-        m_last_tex = tex ? tex->handle : -1;
-        m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
-      }
-      st.tex = m_last_tex;
-      st.tcc = tex0.tcc();
-#ifndef __3DS__
-      {
-        // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
-        static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
-        static std::vector<u64> dumped;
-        if (dump_dir && dumped.size() < 200 &&
-            std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
-          dumped.push_back(ad.tex0_data);
-          std::vector<u32> rgba;
-          int w = 0, h = 0;
-          if (m_vram->decode_for_cpu(ad.tex0_data, &rgba, &w, &h) && w > 0 && h > 0) {
-            u32 amin = 255, amax = 0;
-            for (u32 c : rgba) {
-              amin = std::min(amin, c >> 24);
-              amax = std::max(amax, c >> 24);
-            }
-            lg::info("[sprite dump {}] handle {} tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
-                     dumped.size(), st.tex, ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
-                     ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
-            try {
-              file_util::write_rgba_png(
-                  fs::path(dump_dir) / fmt::format("sprite_{:02d}.png", dumped.size()),
-                  rgba.data(), w, h);
-            } catch (std::exception&) {
-            }
-          }
-        }
-      }
-#endif
-      st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
-      bool zwrite = false;
-      if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
-        zwrite = !GsZbuf(ad.clamp_data).zmsk();
-      } else {
-        m_clamp_s = (ad.clamp_data & 0b001) != 0;
-        m_clamp_t = (ad.clamp_data & 0b100) != 0;
-      }
-      // (AI-assisted) a sprite whose adgif sets ZBUF_1 instead of CLAMP_1 keeps the clamp mode
-      // in effect, as Sprite3::do_block_common's m_current_mode: clamped at the start of each
-      // chunk (its default mode). Repeat there let the bilinear filter blend in the texture's
-      // opposite edge: a 1 pixel dark line along the inner edges of the progress menu's side
-      // panels while they zoom in and out (texels several pixels wide).
-      st.clamp_s = m_clamp_s;
-      st.clamp_t = m_clamp_t;
-      st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
-      st.fix = GsAlpha(ad.alpha_data).fix();
-      // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with
-      // FB_ONLY (only matters for depth writes)
-      st.ztest = CTR_TEST_GEQUAL;
-      st.zwrite = zwrite;
-      st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
-      st.aref = 38;
-      // (AI-assisted) config sprite_alpha_discard: fragments with alpha 0 skip the blending (no
-      // framebuffer read and write) where alpha 0 adds nothing: Cs * As (+ or -) Cd. Not for the
-      // blend modes that use a fixed factor or the destination's alpha.
-      if (!zwrite && mode != MODE_HUD && ctr_settings().sprite_alpha_discard &&
-          (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
-           st.blend == CTR_BLEND_SUB)) {
-        st.atest = CTR_TEST_GREATER;
-        st.aref = 0;
-      }
-      // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
-      // its texture coordinates then go from -1 to 1 (see m_proc below)
-      if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {
-        st.flags |= CTR_STATE_PROCTEX;
-      }
-      m_last_bucket_ptr = &bucket_for(st);
-    }
+    // (AI-assisted) HUD sprites did it before any test (see the top of the loop).
+    resolve_state(ad, mode);
 
     // vertex k is corner k of a strip 0, 1, 3, 2 (Sprite3::do_block_common): the order of
     // ctr_gpu_draw_quads

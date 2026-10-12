@@ -41,7 +41,9 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   void draw_distorter();
   bool read_chunk(DmaFollower& dma, u32* count, u32* program);
   void draw_chunk(u32 count, Mode mode);
-  void flush();
+  // draws the buckets. hud: as Sprite3's HUD flush, a sprite that writes depth with the alpha test
+  // (FB_ONLY) is drawn a second time for the fragments that fail it, without depth writes
+  void flush(bool hud = false);
 
   struct VecData {
     math::Vector4f xyz_sx;
@@ -134,6 +136,9 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   size_t m_bucket_count = 0;
   size_t m_last_bucket = 0;
   Bucket& bucket_for(const ctr_draw_state& st);
+  // the draw state and bucket of a sprite's adgif (m_last_state, m_last_bucket_ptr); nothing to
+  // do for the same adgif as the last one
+  void resolve_state(const AdGif& ad, Mode mode);
   // TEX0 -> texture lookups, per frame
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
