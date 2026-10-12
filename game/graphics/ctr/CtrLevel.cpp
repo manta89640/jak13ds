@@ -1308,8 +1308,10 @@ bool CtrLevels::load_file(const fs::path& path,
           if (!ok) {
             ok = true;
             const auto& dr = out->draws[d];
+            // (AI-assisted) the chunk's own copy (idst holds [first, end)): `indices` is empty in
+            // the reader's window mode (chunk_indices), the default
             for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
-              const u16 ix = indices[i];
+              const u16 ix = idst[i - first];
               ok = ix < ch.vertex_count && vv[ix].rgba[3] == 0x80;
             }
           }
