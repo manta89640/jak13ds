@@ -112,6 +112,9 @@ enum { CTR_TCC_CULL_OWN = 8 };
  * (the texture combiner then takes the constant 0x80 for the vertex alpha). CtrLevel sets it at
  * load from the chunk's vertices. */
 enum { CTR_TCC_ALPHA80 = 4 };
+/* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws (c3l v15 kDrawAtlasUV): the vertices'
+ * texture coordinates are in 1/32768 (c3l::kAtlasUVScale: a texture atlas's cells), not 1/1024 */
+enum { CTR_TCC_ST_ATLAS = 16 };
 /* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
  * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded

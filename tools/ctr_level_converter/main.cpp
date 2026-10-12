@@ -23,6 +23,7 @@
 #include "common/util/Serializer.h"
 #include "common/util/compress.h"
 
+#include "c3l_opt.h"
 #include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "fmt/format.h"
@@ -98,6 +99,26 @@ struct Options {
   // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
   // runs, for draws whose triangle order doesn't matter), vertices in first-use order
   bool vcache = true;
+  // (AI-assisted) v15: the triangle order for a first-in first-out post-vertex cache of this many
+  // entries (c3l_opt::vcache_order), coplanar overlapping triangles kept in their order. -1 (the
+  // default): per run the best of the orders for 4 and 12 entries and meshoptimizer's (where no
+  // order has to be kept), by the vertices shaded with 4 + 8 + 16 entries (the cache's size is
+  // unknown). 0: the v14 order (meshoptimizer, without the coplanar rule)
+  int vcache_fifo = -1;
+  // (AI-assisted) v15 texture atlases (c3l::kDrawAtlasUV): the small textures (at most atlas_max
+  // texels on each side) whose every level draw is opaque and has each triangle within one copy of
+  // the texture go into atlases with gutters (one per format and level count, up to 256 x 256), so
+  // a chunk's draws of the same state merge and the level binds fewer textures
+  bool atlas = true;
+  int atlas_max = 32;
+  // an atlas is made only if the memory it adds (atlas - its textures) is at most this many KB per
+  // texture bind it saves (cells - 1)
+  float atlas_kb_per_bind = 2.f;
+  // (AI-assisted) v15 opaque alpha (c3l::kDrawAlphaTestDropped, kDrawBlendDropped): the alpha test
+  // or alpha blending of draws whose texture alpha is 1.0 in every texel of every level and whose
+  // vertex alpha is >= 0x80 is taken out (it can't change a pixel); then draws of the same texture
+  // and state merge
+  bool opaque_alpha = true;
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
@@ -129,13 +150,29 @@ struct Options {
 // vertices shaded per triangle, for a FIFO cache of 8 and 16 entries
 struct VcacheStats {
   double shaded8 = 0, shaded16 = 0;
+  // (AI-assisted) a plain FIFO of 4, 8, 16 and 32 entries (c3l_opt::fifo_misses)
+  u64 fifo[4] = {0, 0, 0, 0};
   u64 tris = 0;
+  u64 unique = 0;  // (AI-assisted) vertices used: the least any order shades
   void add(const u16* idx, size_t count, size_t vertex_count) {
     std::vector<unsigned int> v(idx, idx + count);
+    {
+      std::vector<unsigned int> u(v);
+      std::sort(u.begin(), u.end());
+      unique += std::unique(u.begin(), u.end()) - u.begin();
+    }
     shaded8 += meshopt_analyzeVertexCache(v.data(), count, vertex_count, 8, 0, 0).vertices_transformed;
     shaded16 +=
         meshopt_analyzeVertexCache(v.data(), count, vertex_count, 16, 0, 0).vertices_transformed;
+    for (int k = 0; k < 4; k++) {
+      fifo[k] += c3l_opt::fifo_misses(v.data(), count, 4 << k);
+    }
     tris += count / 3;
+  }
+  std::string fifo_line() const {
+    const double t = (double)std::max<u64>(tris, 1);
+    return fmt::format("{:.3f} / {:.3f} / {:.3f} / {:.3f} (each vertex once: {:.3f})", fifo[0] / t,
+                       fifo[1] / t, fifo[2] / t, fifo[3] / t, unique / t);
   }
 };
 
@@ -154,6 +191,10 @@ struct SrcVertex {
   float x, y, z;
   float s, t;
   u8 rgba[4];
+  // (AI-assisted) v15 atlas copies (Options::atlas): the vertex this one copies (UINT32_MAX: not a
+  // copy) and its texture coordinates in the atlas (1/32768, c3l::kDrawAtlasUV)
+  u32 orig = UINT32_MAX;
+  s16 ast[2] = {0, 0};
 };
 
 struct SrcTri {
@@ -165,6 +206,9 @@ struct SrcTri {
   u32 sclass = 0;   // (AI-assisted) shrubs: distance class (kShrubClassMeters), 0: shrub_dist
   u16 vis = 0xffff;  // (AI-assisted) drawable id in the level's visibility string (c3l::VisRun)
                      // (vista tier: the source chunk)
+  // (AI-assisted) v15: the draw key before the atlas (the vista tier copies with it; UINT32_MAX:
+  // draw_key)
+  u32 orig_key = UINT32_MAX;
 };
 
 struct DrawKey {
@@ -245,6 +289,18 @@ struct Converter {
       tex_use[tex].face |= face;
       tex_use[tex].envmap |= envmap;
     }
+  }
+
+  // (AI-assisted) v15: where a key's triangles go in a chunk's draw order (make_plans): a key made
+  // by the draw optimisations takes the place of the first key merged into it, so the chunks keep
+  // their layout (which keys end up in which chunk split, the quantizing grids)
+  std::vector<u32> key_rank;
+  u32 rank_of(u32 k) const { return k < key_rank.size() ? key_rank[k] : k; }
+  void rank_merge(u32 to, u32 from) {
+    while (key_rank.size() < draw_keys.size()) {
+      key_rank.push_back((u32)key_rank.size());
+    }
+    key_rank[to] = std::min(key_rank[to], rank_of(from));
   }
 
   u32 key_id(const DrawKey& k) {
@@ -1725,6 +1781,534 @@ bool is_interior(const std::string& level) {
   return false;
 }
 
+// (AI-assisted) every texel of every level of the texture has alpha 1.0 (as the GPU reads it)
+bool texture_alpha_full(const c3l::Texture& d, const std::vector<u8>& data) {
+  if (d.format == c3l::TEX_ETC1 || d.format == c3l::TEX_RGB565) {
+    return true;
+  }
+  u32 off = 0;
+  for (int l = 0; l < std::max<int>(1, d.levels); l++) {
+    const int w = d.w >> l, h = d.h >> l;
+    const auto img = ctr_tex::decode_level(data.data() + off, w, h, (ctr_tex::Format)d.format);
+    for (int i = 0; i < w * h; i++) {
+      if (img.rgba[4 * i + 3] != 255) {
+        return false;
+      }
+    }
+    off += c3l::texture_level_bytes(w, h, d.format);
+  }
+  return true;
+}
+
+// (AI-assisted) bytes of a texture with `levels` mip levels
+u64 ctr_gpu_level_bytes(int w, int h, int format, int levels) {
+  u64 b = 0;
+  for (int l = 0; l < levels; l++) {
+    b += c3l::texture_level_bytes(w >> l, h >> l, (u8)format);
+  }
+  return b;
+}
+
+// (AI-assisted) v15 draw optimisations (Options::opaque_alpha, Options::atlas), on the triangles
+// before chunking. Statistics for the log.
+struct DrawOptStats {
+  size_t keys_at = 0, tris_at = 0, keys_blend = 0, tris_blend = 0, merged_keys = 0;
+  size_t at_candidates = 0, blend_candidates = 0, blocked_coplanar = 0;
+  size_t coplanar_pairs = 0, cross_key_pairs = 0;
+  int atlases = 0, atlas_cells = 0, atlas_textures_fit = 0, atlas_blocked_coplanar = 0;
+  int atlas_elsewhere = 0, atlas_costly = 0;
+  size_t atlas_tris = 0, atlas_verts = 0;
+  u64 atlas_bytes = 0;
+  std::vector<u16> atlased;  // textures moved into atlases (output indices)
+  c3l_opt::AtlasStats ast;
+};
+
+void optimize_draws(Converter& cv,
+                    const Options& opt,
+                    std::vector<c3l::Texture>& tex_descs,
+                    std::vector<std::vector<u8>>& tex_datas,
+                    std::vector<TexUse>& tex_use,
+                    DrawOptStats* st) {
+  const size_t nk = cv.draw_keys.size();
+  auto mode_of = [&](u32 k) {
+    DrawMode m;
+    m.as_int() = cv.draw_keys[k].mode;
+    return m;
+  };
+  auto any_order = [&](u32 k) {
+    const DrawMode m = mode_of(k);
+    return !m.get_ab_enable() && m.get_depth_write_enable();
+  };
+  // textures with alpha 1.0 in every texel of every level (as the GPU reads them)
+  std::vector<int> full(tex_descs.size(), -1);
+  auto tex_full = [&](u16 t) {
+    if (t == 0xffff) {
+      return true;
+    }
+    if (t >= tex_descs.size()) {
+      return false;
+    }
+    if (full[t] < 0) {
+      full[t] = texture_alpha_full(tex_descs[t], tex_datas[t]);
+    }
+    return full[t] == 1;
+  };
+  // per key: triangles, vertex alpha >= 0x80 everywhere
+  std::vector<size_t> key_tris(nk, 0);
+  std::vector<u8> key_va(nk, 1);
+  for (const auto& t : cv.tris) {
+    key_tris[t.draw_key]++;
+    for (u32 v : t.v) {
+      if (cv.verts[v].rgba[3] < 0x80) {
+        key_va[t.draw_key] = 0;
+      }
+    }
+  }
+  // coplanar overlaps between different keys (opaque ones: their order is the runtime's sort, by
+  // texture, then state): a key whose triangles overlap another key's of the same texture keeps its
+  // state (the sort among the texture's draws would change); a texture with any such overlap stays
+  // out of the atlases (the sort by texture would change)
+  std::vector<u8> key_blocked(nk, 0), tex_blocked(tex_descs.size(), 0);
+  {
+    std::vector<c3l_opt::Tri> wt;
+    std::vector<u32> ids;
+    for (u32 i = 0; i < cv.tris.size(); i++) {
+      const auto& t = cv.tris[i];
+      if (!any_order(t.draw_key)) {
+        continue;
+      }
+      c3l_opt::Tri w;
+      for (int k = 0; k < 3; k++) {
+        const auto& v = cv.verts[t.v[k]];
+        w[k] = {v.x, v.y, v.z};
+      }
+      wt.push_back(w);
+      ids.push_back(i);
+    }
+    const auto pairs = c3l_opt::coplanar_pairs(wt, {}, c3l_opt::CoplanarOptions{});
+    st->coplanar_pairs = pairs.size();
+    for (auto [a, b] : pairs) {
+      const auto& ta = cv.tris[ids[a]];
+      const auto& tb = cv.tris[ids[b]];
+      // the near and coarse tfrag versions of a cell are never drawn together
+      if (ta.tier != tb.tier && ta.tier && tb.tier && ta.tier + tb.tier == 3) {
+        continue;
+      }
+      if (ta.draw_key == tb.draw_key) {
+        continue;
+      }
+      st->cross_key_pairs++;
+      const auto& ka = cv.draw_keys[ta.draw_key];
+      const auto& kb = cv.draw_keys[tb.draw_key];
+      if (ka.texture == kb.texture) {
+        key_blocked[ta.draw_key] = key_blocked[tb.draw_key] = 1;
+      }
+      for (u16 t : {ka.texture, kb.texture}) {
+        if (t < tex_blocked.size()) {
+          tex_blocked[t] = 1;
+        }
+      }
+    }
+  }
+  std::vector<u32> remap(nk);
+  for (u32 k = 0; k < nk; k++) {
+    remap[k] = k;
+  }
+  if (opt.opaque_alpha) {
+    constexpr u32 kAtBits = 0xFF00 | (3u << 16) | (1u << 18) | (3u << 21);
+    // groups of opaque keys that differ only in their alpha test: the ones whose alpha is 1.0
+    // everywhere become one key without the test (the largest aref kept for config opaque_alpha
+    // = off); blended ones (alpha blending of Cs * As + Cd * (1 - As)) lose the blending in place
+    std::map<std::tuple<u32, u16, u16>, std::vector<u32>> groups;
+    for (u32 k = 0; k < nk; k++) {
+      if (!key_tris[k]) {
+        continue;
+      }
+      const auto dk = cv.draw_keys[k];
+      const DrawMode m = mode_of(k);
+      const bool alpha1 = tex_full(dk.texture) && key_va[k];
+      const bool at = m.get_at_enable() && m.get_alpha_test() == DrawMode::AlphaTest::GEQUAL;
+      const bool blend =
+          m.get_ab_enable() && m.get_alpha_blend() == DrawMode::AlphaBlend::SRC_DST_SRC_DST;
+      st->at_candidates += at && alpha1;
+      st->blend_candidates += blend && alpha1;
+      if (!alpha1) {
+        continue;
+      }
+      if (blend) {
+        // in place: the same key number (the chunk's draw order: the blended draws keep theirs)
+        DrawMode nm = m;
+        nm.disable_ab();
+        u16 kind = (u16)(dk.kind | c3l::kDrawBlendDropped);
+        if (at) {
+          nm.disable_at();
+          kind |= c3l::kDrawAlphaTestDropped;
+        }
+        cv.draw_key_ids.erase(dk);
+        cv.draw_keys[k] = DrawKey{nm.as_int(), dk.texture, kind};
+        cv.draw_key_ids.emplace(cv.draw_keys[k], k);
+        st->keys_blend++;
+        st->tris_blend += key_tris[k];
+        continue;
+      }
+      if (!any_order(k) || key_blocked[k] || (m.get_at_enable() && !at)) {
+        st->blocked_coplanar += at && key_blocked[k];
+        continue;
+      }
+      groups[{dk.mode & ~kAtBits, dk.texture, dk.kind}].push_back(k);
+    }
+    for (auto& [g, keys] : groups) {
+      int aref = -1;
+      for (u32 k : keys) {
+        const DrawMode m = mode_of(k);
+        if (m.get_at_enable()) {
+          aref = std::max<int>(aref, m.get_aref());
+        }
+      }
+      if (aref < 0) {
+        continue;  // no alpha test among them
+      }
+      DrawMode nm;
+      nm.as_int() = std::get<0>(g);
+      nm.set_aref((u8)aref);
+      nm.set_alpha_test(DrawMode::AlphaTest::GEQUAL);
+      const u32 to = cv.key_id(DrawKey{nm.as_int(), std::get<1>(g),
+                                       (u16)(std::get<2>(g) | c3l::kDrawAlphaTestDropped)});
+      for (u32 k : keys) {
+        remap[k] = to;
+        if (mode_of(k).get_at_enable()) {
+          st->keys_at++;
+          st->tris_at += key_tris[k];
+        }
+      }
+      st->merged_keys += keys.size() - 1;
+    }
+    for (auto& t : cv.tris) {
+      if (remap[t.draw_key] != t.draw_key) {
+        if (t.orig_key == UINT32_MAX) {
+          t.orig_key = t.draw_key;  // the vista tier copies with the key from before
+        }
+        cv.rank_merge(remap[t.draw_key], t.draw_key);
+        t.draw_key = remap[t.draw_key];
+      }
+    }
+  }
+  if (!opt.atlas) {
+    return;
+  }
+  // ---- atlases ----
+  // the textures that fit: every key using it is opaque (any order) and each triangle is within
+  // one copy of the texture (clamped axes: 0..1; repeating ones: after a whole number shift), one
+  // clamp mode per axis
+  const size_t nk2 = cv.draw_keys.size();
+  std::vector<u8> key_used(nk2, 0);
+  for (const auto& t : cv.tris) {
+    key_used[t.draw_key] = 1;
+  }
+  struct TexFit {
+    bool used = false, ok = true;
+    int clamp_s = -1, clamp_t = -1;
+  };
+  std::vector<TexFit> fit(tex_descs.size());
+  for (u32 k = 0; k < nk2; k++) {
+    const auto& dk = cv.draw_keys[k];
+    if (!key_used[k] || dk.texture >= fit.size()) {
+      continue;
+    }
+    auto& f = fit[dk.texture];
+    f.used = true;
+    const DrawMode m = mode_of(k);
+    const int cs = m.get_clamp_s_enable(), ct = m.get_clamp_t_enable();
+    if (!any_order(k) || (f.clamp_s >= 0 && f.clamp_s != cs) || (f.clamp_t >= 0 && f.clamp_t != ct)) {
+      f.ok = false;
+    }
+    f.clamp_s = cs;
+    f.clamp_t = ct;
+  }
+  auto st_of = [](float v) { return (int)std::lround(v * 1024.f); };
+  // per triangle: its whole number shift (in 1024ths), or none
+  auto tri_shift = [&](const SrcTri& t, int* su, int* sv) {
+    const auto& f = fit[cv.draw_keys[t.draw_key].texture];
+    for (int ax = 0; ax < 2; ax++) {
+      int lo = INT32_MAX, hi = INT32_MIN;
+      for (u32 v : t.v) {
+        const int q = st_of(ax ? cv.verts[v].t : cv.verts[v].s);
+        lo = std::min(lo, q);
+        hi = std::max(hi, q);
+      }
+      const bool clamp = ax ? f.clamp_t : f.clamp_s;
+      int base = 0;
+      if (clamp) {
+        if (lo < 0 || hi > 1024) {
+          return false;
+        }
+      } else {
+        base = (int)std::floor(lo / 1024.0) * 1024;
+        if (hi - base > 1024) {
+          return false;
+        }
+      }
+      (ax ? *sv : *su) = base;
+    }
+    return true;
+  };
+  for (const auto& t : cv.tris) {
+    const u16 tex = cv.draw_keys[t.draw_key].texture;
+    if (tex < fit.size() && fit[tex].ok) {
+      int su, sv;
+      if (!tri_shift(t, &su, &sv)) {
+        fit[tex].ok = false;
+      }
+    }
+  }
+  // vertices an atlas would add per texture: a vertex whose triangles need different whole
+  // number shifts gets a copy for each
+  std::vector<u32> extra_verts(tex_descs.size(), 0);
+  {
+    std::set<std::tuple<u16, u32, int, int>> with;
+    std::set<std::pair<u16, u32>> plain;
+    for (const auto& t : cv.tris) {
+      const u16 tex = cv.draw_keys[t.draw_key].texture;
+      if (tex >= fit.size() || !fit[tex].ok) {
+        continue;
+      }
+      int su = 0, sv = 0;
+      tri_shift(t, &su, &sv);
+      for (u32 v : t.v) {
+        with.insert({tex, v, su, sv});
+        plain.insert({tex, v});
+      }
+    }
+    for (const auto& w : with) {
+      extra_verts[std::get<0>(w)]++;
+    }
+    for (const auto& p0 : plain) {
+      extra_verts[p0.first]--;
+    }
+  }
+  // textures the vista tier will draw (its copies keep the original texture: they are welded by
+  // position, and the atlas copies' shifted coordinates would mix there) or merc models draw: they
+  // stay in the file next to their atlas copy (counted in the atlas's cost)
+  std::vector<u8> elsewhere(tex_descs.size(), 0);
+  {
+    bool has_lowres = false;
+    for (const auto& t : cv.tris) {
+      has_lowres |= t.tier == 3;
+    }
+    for (const auto& t : cv.tris) {
+      const auto& dk = cv.draw_keys[t.draw_key];
+      const int kind = dk.kind & 0xff;
+      const bool vista = opt.vista && (t.tier == 3 || (t.tier == 0 && kind == 1 && t.detail == 0) ||
+                                       (t.tier == 2 && kind == 0 && !has_lowres));
+      if (vista && dk.texture < elsewhere.size()) {
+        elsewhere[dk.texture] = 1;
+      }
+    }
+    for (u16 t = 0; t < tex_use.size() && t < elsewhere.size(); t++) {
+      elsewhere[t] |= tex_use[t].merc;
+    }
+  }
+  // by format and levels
+  std::map<std::pair<int, int>, std::vector<u16>> groups;
+  for (u16 t = 0; t < fit.size(); t++) {
+    const auto& d = tex_descs[t];
+    if (!fit[t].used || !fit[t].ok || d.w > opt.atlas_max || d.h > opt.atlas_max ||
+        d.format == c3l::TEX_RGBA8) {
+      continue;
+    }
+    st->atlas_textures_fit++;
+    st->atlas_elsewhere += elsewhere[t];
+    if (tex_blocked[t]) {
+      st->atlas_blocked_coplanar++;
+      continue;
+    }
+    groups[{d.format, std::max<int>(1, d.levels)}].push_back(t);
+  }
+  // shelf packing into the smallest power of two atlases (by bytes) that hold them, at most
+  // 256 << (levels - 1) on a side: 1/32768 texture coordinates then land exactly on the cells'
+  // own 1/1024 ones (32768 / atlas side units per atlas texel, a multiple of 1024 / the cells'
+  // shortest side 8 << (levels - 1))
+  struct Cell {
+    u16 tex;
+    int atlas, x, y;
+  };
+  std::vector<int> cell_of(tex_descs.size(), -1);
+  std::vector<Cell> cells;
+  struct Atlas {
+    int format, levels, w = 0, h = 0;
+    u16 tex;  // output index
+  };
+  std::vector<Atlas> atlases;
+  // place list[from..] into w x h: how many fit (in order), and where
+  auto pack = [&](const std::vector<u16>& list, size_t from, int w, int h, int sp,
+                  std::vector<std::pair<int, int>>* pos) {
+    pos->clear();
+    int x = sp, y = sp, shelf_h = 0;
+    for (size_t j = from; j < list.size(); j++) {
+      const auto& d = tex_descs[list[j]];
+      if (x + d.w + sp > w) {
+        x = sp;
+        y += shelf_h + sp;
+        shelf_h = 0;
+      }
+      if (y + d.h + sp > h || x + d.w + sp > w) {
+        break;
+      }
+      pos->push_back({x, y});
+      x += d.w + sp;
+      shelf_h = std::max<int>(shelf_h, d.h);
+    }
+    return pos->size();
+  };
+  for (auto& [g, list] : groups) {
+    if (list.size() < 2) {
+      continue;
+    }
+    const int levels = g.second;
+    const int sp = 4 << (levels - 1);  // the gap between cells (and the margin)
+    const int max_side = std::min(1024, 256 << (levels - 1));
+    std::stable_sort(list.begin(), list.end(), [&](u16 a, u16 b) {
+      return std::make_pair(tex_descs[a].h, tex_descs[a].w) >
+             std::make_pair(tex_descs[b].h, tex_descs[b].w);
+    });
+    size_t i = 0;
+    while (i + 1 < list.size()) {
+      // the smallest atlas that holds the rest; if none does, the largest one (as many as fit)
+      int best_w = 0, best_h = 0;
+      size_t best_n = 0;
+      u64 best_area = UINT64_MAX;
+      std::vector<std::pair<int, int>> pos;
+      for (int w = 16; w <= max_side; w *= 2) {
+        for (int h = 16; h <= max_side; h *= 2) {
+          const size_t n = pack(list, i, w, h, sp, &pos);
+          const u64 area = (u64)w * h;
+          if (n == list.size() - i ? (best_n < n || area < best_area) : (n > best_n && best_n < list.size() - i)) {
+            if (n == list.size() - i || n > best_n) {
+              best_n = n;
+              best_w = w;
+              best_h = h;
+              best_area = area;
+            }
+          }
+        }
+      }
+      if (best_n < 2) {
+        break;
+      }
+      {
+        // worth it: the memory it adds (texels, and the vertex copies) per bind it saves at most
+        // atlas_kb_per_bind
+        // the textures the atlas replaces (not the vista's or merc's), less the vertex copies
+        double saved = 0;
+        for (size_t k = 0; k < best_n; k++) {
+          saved += elsewhere[list[i + k]] ? 0.0 : (double)tex_datas[list[i + k]].size();
+          saved -= 16.0 * extra_verts[list[i + k]];
+        }
+        const u64 atlas_bytes = ctr_gpu_level_bytes(best_w, best_h, g.first, levels);
+        if ((double)atlas_bytes - saved > opt.atlas_kb_per_bind * 1024.0 * (double)(best_n - 1)) {
+          st->atlas_costly += (int)best_n;
+          i += best_n;
+          continue;
+        }
+      }
+      pack(list, i, best_w, best_h, sp, &pos);
+      Atlas a;
+      a.format = g.first;
+      a.levels = levels;
+      a.w = best_w;
+      a.h = best_h;
+      a.tex = (u16)tex_descs.size();
+      std::vector<c3l_opt::AtlasCell> ac;
+      for (size_t k = 0; k < best_n; k++) {
+        const u16 t = list[i + k];
+        Cell c{t, (int)atlases.size(), pos[k].first, pos[k].second};
+        cell_of[t] = (int)cells.size();
+        cells.push_back(c);
+        c3l_opt::AtlasCell x0;
+        x0.data = tex_datas[t].data();
+        x0.w = tex_descs[t].w;
+        x0.h = tex_descs[t].h;
+        x0.x = c.x;
+        x0.y = c.y;
+        x0.clamp_s = fit[t].clamp_s == 1;
+        x0.clamp_t = fit[t].clamp_t == 1;
+        ac.push_back(x0);
+        st->atlased.push_back(t);
+      }
+      i += best_n;
+      c3l::Texture desc{};
+      desc.w = (u16)a.w;
+      desc.h = (u16)a.h;
+      desc.format = (u8)a.format;
+      desc.levels = (u8)a.levels;
+      tex_datas.push_back(
+          c3l_opt::build_atlas(a.w, a.h, a.format, a.levels, ac, opt.etc1_quality, &st->ast));
+      tex_descs.push_back(desc);
+      tex_use.emplace_back();
+      st->atlas_bytes += tex_datas.back().size();
+      {
+        u64 cb = 0;
+        std::string sizes;
+        for (size_t k = 0; k < best_n; k++) {
+          cb += tex_datas[list[i - best_n + k]].size();
+          sizes += fmt::format(" {}x{}", tex_descs[list[i - best_n + k]].w,
+                               tex_descs[list[i - best_n + k]].h);
+        }
+        lg::debug("atlas {}x{} format {} levels {}: {} cells ({} bytes) -> {} bytes:{}", a.w, a.h,
+                  a.format, a.levels, best_n, cb, tex_datas.back().size(), sizes);
+      }
+      atlases.push_back(a);
+      st->atlases++;
+      st->atlas_cells += (int)best_n;
+    }
+  }
+  if (cells.empty()) {
+    return;
+  }
+  // the triangles: the atlas's key, copies of their vertices with the atlas texture coordinates
+  std::map<std::tuple<u32, int, int, int>, u32> copies;  // (vertex, cell, shift s, shift t)
+  std::vector<u32> atlas_key(nk2, UINT32_MAX);
+  for (auto& t : cv.tris) {
+    const auto& dk = cv.draw_keys[t.draw_key];
+    if (dk.texture >= cell_of.size() || cell_of[dk.texture] < 0) {
+      continue;
+    }
+    const int ci = cell_of[dk.texture];
+    const Cell& c = cells[ci];
+    const Atlas& a = atlases[c.atlas];
+    const auto& d = tex_descs[c.tex];
+    int su = 0, sv = 0;
+    tri_shift(t, &su, &sv);
+    if (atlas_key[t.draw_key] == UINT32_MAX) {
+      atlas_key[t.draw_key] =
+          cv.key_id(DrawKey{dk.mode, a.tex, (u16)(dk.kind | c3l::kDrawAtlasUV)});
+    }
+    const u32 from = t.draw_key;
+    if (t.orig_key == UINT32_MAX) {
+      t.orig_key = t.draw_key;
+    }
+    t.draw_key = atlas_key[from];
+    cv.rank_merge(t.draw_key, from);
+    // 1/32768 units per atlas texel: kx = 32768 / atlas width; a cell texel is 1024 / w of its
+    // coordinates: st_atlas = kx * (x + (st - shift) * w / 1024), exact (kx * w / 1024 is whole)
+    const int kx = (int)c3l::kAtlasUVScale / a.w, ky = (int)c3l::kAtlasUVScale / a.h;
+    for (u32& vi : t.v) {
+      auto [it, fresh] = copies.emplace(std::make_tuple(vi, ci, su, sv), (u32)cv.verts.size());
+      if (fresh) {
+        SrcVertex v = cv.verts[vi];
+        v.orig = vi;
+        const int s0 = st_of(v.s) - su, t0 = st_of(v.t) - sv;
+        v.ast[0] = (s16)(kx * c.x + s0 * (kx * d.w / 1024));
+        v.ast[1] = (s16)(ky * c.y + t0 * (ky * d.h / 1024));
+        cv.verts.push_back(v);
+        st->atlas_verts++;
+      }
+      vi = it->second;
+    }
+    st->atlas_tris++;
+  }
+}
+
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Options opt = opt_in;
   if (is_interior(in.stem().string())) {
@@ -1831,6 +2415,30 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
 
+  // ---- textures (in parallel: ETC1 encoding is slow) ----
+  // (AI-assisted) before the chunks: the v15 draw optimisations look at the encoded texels
+  std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
+  std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
+  std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
+  std::vector<MercGate> tex_gate(cv.tex_order.size());
+  {
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
+      for (size_t i = a; i < b; i++) {
+        tex_descs[i] = c3l::Texture{};
+        tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
+                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
+      }
+    });
+    pool.wait_for_tasks();
+  }
+  // (AI-assisted) v15 draw optimisations: alpha tests / blending that can't change a pixel, atlases
+  DrawOptStats dstats;
+  if (!opt.merc_only) {
+    optimize_draws(cv, opt, tex_descs, tex_datas, cv.tex_use, &dstats);
+    tex_psnr.resize(tex_descs.size(), 99.0);
+    tex_gate.resize(tex_descs.size());
+  }
   // ---- chunking: grid cells by triangle centroid ----
   // shrubs are small and only drawn up close: smaller cells cull them better
   auto cell_of_detail = [&](int detail) {
@@ -1879,6 +2487,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
         const auto& ta = cv.tris[a];
         const auto& tb = cv.tris[b];
+        // (AI-assisted) v15: by key rank (Converter::key_rank), then key
+        const u32 ra = cv.rank_of(ta.draw_key), rb = cv.rank_of(tb.draw_key);
+        if (ra != rb) {
+          return ra < rb;
+        }
         return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
       });
       size_t pos = 0;
@@ -1969,7 +2582,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           cx += cv.verts[tr.v[k]].x / 3;
           cz += cv.verts[tr.v[k]].z / 3;
         }
-        groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell), tr.draw_key}].push_back(t);
+        // (AI-assisted) v15: with the draw key and vertices from before the atlas (welded by
+        // position below: the atlas copies' shifted texture coordinates would mix)
+        groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell),
+                tr.orig_key == UINT32_MAX ? tr.draw_key : tr.orig_key}]
+            .push_back(t);
       }
       for (auto& [gk, ids] : groups) {
         vista_src_tris += ids.size();
@@ -1986,7 +2603,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         };
         for (u32 t : ids) {
           for (int k = 0; k < 3; k++) {
-            const u32 vi = cv.tris[t].v[k];
+            u32 vi = cv.tris[t].v[k];
+            if (cv.verts[vi].orig != UINT32_MAX) {
+              vi = cv.verts[vi].orig;  // (AI-assisted) not the atlas copy
+            }
             const auto& v = cv.verts[vi];
             auto [it, fresh] = weld.emplace(key_of(v), (u32)rep_src.size());
             if (fresh) {
@@ -2029,7 +2649,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         std::unordered_map<u32, u32> made, made_flat;
         // (AI-assisted) vista_flat: the copies' draw key (untextured, the draw mode without its
         // texture parts: clamp, filter, tcc, alpha test) and color
-        const DrawKey src_key = cv.draw_keys[cv.tris[ids[0]].draw_key];
+        const u32 src_key_id = cv.tris[ids[0]].orig_key == UINT32_MAX ? cv.tris[ids[0]].draw_key
+                                                                         : cv.tris[ids[0]].orig_key;
+        const DrawKey src_key = cv.draw_keys[src_key_id];
         constexpr u32 kTextureModeBits = 0x00E7FFE0;  // bits 5-18, 21-23
         const u32 flat_key =
             opt.vista_flat
@@ -2040,6 +2662,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             opt.vista_flat ? avg_color(src_key.texture) : std::array<float, 3>{128.f, 128.f, 128.f};
         for (size_t i = 0; i + 2 < out_idx.size(); i += 3) {
           SrcTri nt = cv.tris[ids[0]];
+          nt.draw_key = src_key_id;  // (AI-assisted) not the atlas's
+          nt.orig_key = UINT32_MAX;
           for (int k = 0; k < 3; k++) {
             const u32 r = out_idx[i + k];
             auto [it, fresh] = made.emplace(r, (u32)cv.verts.size());
@@ -2213,6 +2837,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<u32> chunk_first_run;
   size_t vis_tris = 0;
   VcacheStats vc_before, vc_after;
+  size_t vc_kept_pairs = 0;  // (AI-assisted) coplanar overlaps kept in order by vcache_order
   size_t welded_verts = 0;
 
   for (const auto& cp : plans) {
@@ -2295,6 +2920,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         o.st[0] = (s16)std::clamp((int)std::lround(v.s * 1024.f), -32768, 32767);
         o.st[1] = (s16)std::clamp((int)std::lround(v.t * 1024.f), -32768, 32767);
+        if (v.orig != UINT32_MAX) {
+          // (AI-assisted) an atlas copy: the atlas texture coordinates (c3l::kDrawAtlasUV)
+          o.st[0] = v.ast[0];
+          o.st[1] = v.ast[1];
+        }
         memcpy(o.rgba, v.rgba, 4);
         out_verts.push_back(o);
       }
@@ -2372,10 +3002,75 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           u32 idx = d.first_index;
           for (; ri < runs.size() && runs[ri].draw == di - ch.first_draw; ri++) {
             const u32 n = runs[ri].index_count;
-            if (any_order && opt.vcache) {
+            if (any_order && opt.vcache && opt.vcache_fifo == 0) {
               std::vector<unsigned int> in(&out_indices[idx], &out_indices[idx] + n), o(n);
               meshopt_optimizeVertexCache(o.data(), in.data(), n, nv);
               std::copy(o.begin(), o.end(), &out_indices[idx]);
+            } else if (any_order && opt.vcache && n > 3) {
+              // (AI-assisted) v15: for a FIFO cache; triangles that lie on top of each other in one
+              // plane keep their order (with the depth test's GEQUAL the later one wins)
+              std::vector<u32> in(&out_indices[idx], &out_indices[idx] + n);
+              std::vector<c3l_opt::Tri> wt(n / 3);
+              for (u32 t = 0; t < n / 3; t++) {
+                for (int k = 0; k < 3; k++) {
+                  const auto& v = out_verts[ch.first_vertex + in[3 * t + k]];
+                  for (int c = 0; c < 3; c++) {
+                    wt[t][k][c] = ch.origin[c] + v.pos[c] * ch.scale;
+                  }
+                }
+              }
+              const auto pairs = c3l_opt::coplanar_pairs(wt, {}, c3l_opt::CoplanarOptions{});
+              std::vector<std::vector<u32>> before;
+              if (!pairs.empty()) {
+                before.resize(n / 3);
+                for (auto [a, b] : pairs) {
+                  before[b].push_back(a);
+                }
+                vc_kept_pairs += pairs.size();
+              }
+              std::vector<u32> best;
+              if (opt.vcache_fifo > 0) {
+                const auto order = c3l_opt::vcache_order(in, nv, opt.vcache_fifo, before);
+                best.resize(n);
+                for (u32 t = 0; t < n / 3; t++) {
+                  for (int k = 0; k < 3; k++) {
+                    best[3 * t + k] = in[3 * order[t] + k];
+                  }
+                }
+              } else {
+                auto cost = [](const std::vector<u32>& v) {
+                  return c3l_opt::fifo_misses(v.data(), v.size(), 4) +
+                         c3l_opt::fifo_misses(v.data(), v.size(), 8) +
+                         c3l_opt::fifo_misses(v.data(), v.size(), 16);
+                };
+                u64 best_cost = UINT64_MAX;
+                for (int fifo : {4, 12}) {
+                  const auto order = c3l_opt::vcache_order(in, nv, fifo, before);
+                  std::vector<u32> o(n);
+                  for (u32 t = 0; t < n / 3; t++) {
+                    for (int k = 0; k < 3; k++) {
+                      o[3 * t + k] = in[3 * order[t] + k];
+                    }
+                  }
+                  const u64 c = cost(o);
+                  if (c < best_cost) {
+                    best_cost = c;
+                    best = std::move(o);
+                  }
+                }
+                if (pairs.empty()) {
+                  std::vector<u32> o(n);
+                  meshopt_optimizeVertexCache(o.data(), in.data(), n, nv);
+                  const u64 c = cost(o);
+                  if (c < best_cost) {
+                    best_cost = c;
+                    best = std::move(o);
+                  }
+                }
+              }
+              for (u32 i = 0; i < n; i++) {
+                out_indices[idx + i] = (u16)best[i];
+              }
             }
             idx += n;
           }
@@ -2415,22 +3110,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     return false;
   }
 
-  // ---- textures (in parallel: ETC1 encoding is slow) ----
-  std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
-  std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
-  std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
-  std::vector<MercGate> tex_gate(cv.tex_order.size());
-  {
-    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
-    pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
-      for (size_t i = a; i < b; i++) {
-        tex_descs[i] = c3l::Texture{};
-        tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
-                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
-      }
-    });
-    pool.wait_for_tasks();
-  }
   // (AI-assisted) textures made smaller than their original (max_tex): a blurry detail shows here
   for (size_t i = 0; i < cv.tex_order.size(); i++) {
     const auto& t = level.textures.at(cv.tex_order[i]);
@@ -2488,6 +3167,30 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
 
+  // (AI-assisted) v15: textures that went into atlases and nothing draws any more (the vista tier
+  // and merc models keep theirs): no texels (the runtime makes no texture of them)
+  size_t atlas_dropped = 0;
+  u64 atlas_dropped_bytes = 0;
+  if (!dstats.atlased.empty()) {
+    std::vector<u8> drawn(tex_descs.size(), 0);
+    for (const auto& d : out_draws) {
+      if (d.texture < drawn.size()) {
+        drawn[d.texture] = 1;
+      }
+    }
+    for (const auto& d : merc.draws) {
+      if (d.texture < drawn.size()) {
+        drawn[d.texture] = 1;
+      }
+    }
+    for (u16 t : dstats.atlased) {
+      if (!drawn[t]) {
+        atlas_dropped++;
+        atlas_dropped_bytes += tex_datas[t].size();
+        tex_datas[t].clear();
+      }
+    }
+  }
   // ---- write ----
   std::vector<u8> buf(sizeof(c3l::Header));
   c3l::Header hdr{};
@@ -2701,12 +3404,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              tstats.merc_etc1, opt.etc1_merc_psnr, opt.etc1_merc_block,
              tstats.merc_bytes_16 / 1024, tstats.merc_bytes / 1024);
   }
-  lg::info("{}: post-vertex cache: vertices shaded per triangle (FIFO 8 / 16) {:.3f} / {:.3f}{}",
+  lg::info("{}: post-vertex cache: vertices shaded per triangle (meshoptimizer's model 8 / 16) "
+           "{:.3f} / {:.3f}{}; FIFO 4 / 8 / 16 / 32: {}{}",
            level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
            vc_before.shaded16 / std::max<u64>(vc_before.tris, 1),
-           opt.vcache ? fmt::format(" -> {:.3f} / {:.3f} (meshoptimizer)",
+           opt.vcache ? fmt::format(" -> {:.3f} / {:.3f}",
                                     vc_after.shaded8 / std::max<u64>(vc_after.tris, 1),
                                     vc_after.shaded16 / std::max<u64>(vc_after.tris, 1))
+                      : "",
+           vc_before.fifo_line(),
+           opt.vcache ? fmt::format(" -> {} ({}; {} coplanar overlaps kept in order)",
+                                    vc_after.fifo_line(),
+                                    opt.vcache_fifo > 0
+                                        ? fmt::format("FIFO {} order", opt.vcache_fifo)
+                                    : opt.vcache_fifo < 0 ? std::string("best of FIFO 4 / 12 / meshoptimizer orders")
+                                        : std::string("meshoptimizer"),
+                                    vc_kept_pairs)
                       : "");
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
@@ -2783,6 +3496,30 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              "face culling ({} turned to face outward)",
              level.level_name, cv.orient_culled, cv.orient_tris, cv.orient_flipped);
   }
+  if (!opt.merc_only) {
+    // (AI-assisted) v15 draw optimisations
+    lg::info("{}: opaque alpha: {} draws ({} triangles) lose their alpha test, {} blended ones ({} "
+             "triangles) their blending (texture alpha 1.0 in every level, vertex alpha >= 0x80; "
+             "of {} alpha tested, {} blended such draws: {} kept for coplanar overlaps with other "
+             "draws of their texture); {} draws merged into others",
+             level.level_name, dstats.keys_at, dstats.tris_at, dstats.keys_blend, dstats.tris_blend,
+             dstats.at_candidates, dstats.blend_candidates, dstats.blocked_coplanar,
+             dstats.merged_keys);
+    lg::info("{}: atlases: {} of {} textures that fit ({} left out: coplanar overlaps with other "
+             "draws; {} also drawn by the vista tier or merc; {} too costly) in {} atlases ({} KB), {} "
+             "triangles, {} vertex copies; {} textures no longer "
+             "drawn ({} KB); gutters vs the textures' own edges: RMS {:.2f}, max {} (of {} texels), "
+             "cells exact: {}; coplanar overlaps of different draws: {} (of {})",
+             level.level_name, dstats.atlas_cells, dstats.atlas_textures_fit,
+             dstats.atlas_blocked_coplanar, dstats.atlas_elsewhere, dstats.atlas_costly,
+             dstats.atlases, dstats.atlas_bytes / 1024,
+             dstats.atlas_tris, dstats.atlas_verts, atlas_dropped, atlas_dropped_bytes / 1024,
+             dstats.ast.gutter_texels
+                 ? std::sqrt(dstats.ast.gutter_sq / (4.0 * dstats.ast.gutter_texels))
+                 : 0.0,
+             dstats.ast.gutter_max, dstats.ast.gutter_texels, dstats.ast.cells_exact ? "yes" : "NO",
+             dstats.cross_key_pairs, dstats.coplanar_pairs);
+  }
   lg::info("{}: visibility: {} of {} tris in {} runs (hidden when the game's visibility data says)",
            level.level_name, vis_tris, out_indices.size() / 3, out_runs.size());
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
@@ -2858,6 +3595,18 @@ int main(int argc, char** argv) {
   app.add_option("--block-kb", block_kb, "largest compressed block (KB, raw)");
   bool no_vcache = false;
   app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
+  app.add_option("--vcache-fifo", opt.vcache_fifo,
+                 "(AI-assisted) triangle order for a FIFO post-vertex cache of N entries, coplanar "
+                 "overlaps kept in order (0: the v14 meshoptimizer order)");
+  bool no_atlas = false, no_opaque_alpha = false;
+  app.add_flag("--no-atlas", no_atlas, "(AI-assisted) no texture atlases (v15)");
+  app.add_option("--atlas-max", opt.atlas_max,
+                 "(AI-assisted) textures up to this size (texels per side) may go into atlases");
+  app.add_option("--atlas-kb-per-bind", opt.atlas_kb_per_bind,
+                 "(AI-assisted) make an atlas only if it adds at most this many KB per texture bind "
+                 "it saves");
+  app.add_flag("--no-opaque-alpha", no_opaque_alpha,
+               "(AI-assisted) keep alpha tests / blending that can't change a pixel (v15)");
   bool no_verify = false;
   app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
   bool no_tie_winding = false, no_vista = false;
@@ -2884,6 +3633,8 @@ int main(int argc, char** argv) {
   CLI11_PARSE(app, argc, argv);
   opt.verify = !no_verify;
   opt.vcache = !no_vcache;
+  opt.atlas = !no_atlas;
+  opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
   opt.vista = !no_vista;
   opt.pack.threads = opt.threads;

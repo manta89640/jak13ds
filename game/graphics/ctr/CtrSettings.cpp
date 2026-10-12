@@ -297,6 +297,8 @@ CtrSettings load() {
       s.gpu_breakdown = parse_bool(v);  // (AI-assisted, gpu-rt)
     } else if (key == "ocean_tex_half") {
       s.ocean_tex_half = parse_bool(v);  // (AI-assisted, gpu-rt)
+    } else if (key == "opaque_alpha") {
+      s.opaque_alpha = parse_bool(v);  // (AI-assisted)
     } else if (key == "cmd_dump") {
       s.cmd_dump = parse_bool(v);  // (AI-assisted)
     } else if (key == "cb_read_opaque") {
@@ -347,7 +349,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} ({}) "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
       "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
-      "vis_culling {} run_culling {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_groups {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} impostors {} raw_cmds {} vcache_reuse {} tex_cache_clear {} cb_read_opaque {} new_shaders {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_groups {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} impostors {} raw_cmds {} vcache_reuse {} opaque_alpha {} tex_cache_clear {} cb_read_opaque {} new_shaders {} asm_tex {} asm_mem {} "
       "static_cmdlists {} ocean_tex_half {} fast_clock {}{}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
@@ -392,7 +394,8 @@ std::string CtrSettings::summary() const {
                               impostor_error, impostor_budget, impostor_atlas)
                 : std::string("off"),
       raw_cmds ? "on" : "off",
-      vcache_reuse ? "on" : "off", tex_cache_uploads ? "uploads" : "always",
+      vcache_reuse ? "on" : "off", opaque_alpha ? "on" : "off",
+      tex_cache_uploads ? "uploads" : "always",
       cb_read_opaque ? "on" : "off", new_shaders ? "on" : "off", asm_tex ? "on" : "off",
       asm_mem ? "on" : "off",
       static_cmdlists == 2 ? "compare" : (static_cmdlists ? "on" : "off"), ocean_tex_half ? "on" : "off",

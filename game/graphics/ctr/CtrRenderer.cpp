@@ -205,6 +205,9 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.static_cmdlists > 0; }},
     {"ocean_tex_half", [](CtrSettings& s, bool on) { s.ocean_tex_half = on; },
      [](const CtrSettings& s) { return s.ocean_tex_half; }},
+    // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
+    {"opaque_alpha", [](CtrSettings& s, bool on) { s.opaque_alpha = on; },
+     [](const CtrSettings& s) { return s.opaque_alpha; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;

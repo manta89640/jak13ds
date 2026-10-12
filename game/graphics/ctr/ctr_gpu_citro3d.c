@@ -382,6 +382,7 @@ static struct {
   int last_state_valid;
   /* last ctr_gpu_draw_mesh: mesh and matrix (invalidated by any other program use) */
   int last_mesh_valid;
+  int mesh_st_atlas; /* (AI-assisted) scales.x is 1/32768 (c3l v15 atlas draws), not 1/1024 */
   uint32_t last_clip_id; /* (AI-assisted) ctr_mesh_matrix::id of the clip uniform */
   /* last ctr_gpu_draw_skinned: its matrix and lights (a model's draws share them) */
   int last_skin_valid;
@@ -935,6 +936,8 @@ static void use_program(int prog) {
                     1.0f / 127.0f);
       set |= GRP_U_SCALES;
     }
+    g.mesh_st_atlas = 0; /* (AI-assisted) scales.x is 1/1024 (an atlas draw's 1/32768 is never
+                          * left in group E's register: GRP_U_SCALES is dropped then) */
     if (g.ps->opt) {
       /* (AI-assisted) shader_opt: the fog clamps (new_shaders' form); the fog factors are in the
        * matrix's fog rows (mesh_fog_rows) */
@@ -5992,6 +5995,18 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   /* (AI-assisted) shader_opt with the game fog off: the programs with only the draw distance fog */
   const int df = g.ps->df_ok && g.fog_df;
   use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
+  /* (AI-assisted) c3l v15 atlas draws (CTR_TCC_ST_ATLAS): texture coordinates in 1/32768. The
+   * draws are sorted by texture, so an atlas's draws come one after another: two writes per run */
+  {
+    const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
+    if (atlas != g.mesh_st_atlas) {
+      g.mesh_st_atlas = atlas;
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_scales, atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f,
+                    1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
+      raw_note_unif();
+      g.grp_valid &= ~(u32)GRP_U_SCALES; /* skin shares the register in group E */
+    }
+  }
   const MeshSlot* ms = &g.meshes[mesh];
   /* (AI-assisted) fog_stage_skip: mesh 4 = a level mesh without the fog stage */
   const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);

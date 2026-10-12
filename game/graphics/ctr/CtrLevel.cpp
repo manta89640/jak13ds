@@ -796,6 +796,7 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   for (int t : out->textures) {
     failed += t < 0;
   }
+  failed -= std::min<int>(failed, (int)out->tex_empty);  // (AI-assisted) v15: none to make
   for (size_t i = 0; i < out->meshes.size(); i++) {
     failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0;
   }
@@ -991,6 +992,31 @@ void make_run_spheres(CtrLevelData* out,
 // GPU state per draw, so drawing doesn't decode the draw modes every frame, and the drawing order.
 // (AI-assisted) At load, and again when the textures are made later (a repair: the states hold the
 // texture handles).
+// (AI-assisted) c3l v15 kDrawAlphaTestDropped / kDrawBlendDropped draws (alpha 1.0 in every texel
+// and vertex: the alpha test / blending can't change a pixel): on, as the converter left them (no
+// test, no blending); off, the test / blending back as the draw mode had them (GEQUAL with the
+// mode's aref; Cs * As + Cd * (1 - As)). Other draws: unchanged.
+void set_opaque_alpha(ctr_draw_state* st, const c3l::Draw& d, bool on, int min_alpha) {
+  if (!(d.kind & (c3l::kDrawAlphaTestDropped | c3l::kDrawBlendDropped))) {
+    return;
+  }
+  DrawMode mode;
+  mode.as_int() = d.mode;
+  if (d.kind & c3l::kDrawAlphaTestDropped) {
+    st->atest = on ? CTR_TEST_ALWAYS : CTR_TEST_GEQUAL;
+    st->aref = on ? 0 : mode.get_aref();
+  }
+  if (d.kind & c3l::kDrawBlendDropped) {
+    st->blend = on ? CTR_BLEND_OFF : CTR_BLEND_ALPHA;
+  }
+  // the early depth test as build_draw_order decides it (the texture's alpha passes any test)
+  st->flags &= ~CTR_STATE_EARLY_DEPTH;
+  if (st->blend == CTR_BLEND_OFF && st->zwrite && st->ztest == CTR_TEST_GEQUAL &&
+      (st->atest == CTR_TEST_ALWAYS || min_alpha >= std::min(255, st->aref * 2))) {
+    st->flags |= CTR_STATE_EARLY_DEPTH;
+  }
+}
+
 void build_draw_order(CtrLevelData* out) {
   out->draw_states.clear();
   out->draw_chunk.clear();
@@ -998,6 +1024,7 @@ void build_draw_order(CtrLevelData* out) {
   out->ordered_draws.clear();
   out->early_draws.clear();
   out->draw_states.reserve(out->draws.size());
+  out->opaque_alpha_applied = ctr_settings().opaque_alpha;
   for (auto& d : out->draws) {
     DrawMode mode;
     mode.as_int() = d.mode;
@@ -1008,6 +1035,10 @@ void build_draw_order(CtrLevelData* out) {
     // (whether they are culled is decided per frame: ctr_gpu_set_cull)
     if (d.kind & c3l::kDrawCullBack) {
       st.tcc |= CTR_TCC_CULL_BACK;
+    }
+    // (AI-assisted) c3l v15: an atlas's texture coordinates (1/32768)
+    if (d.kind & c3l::kDrawAtlasUV) {
+      st.tcc |= CTR_TCC_ST_ATLAS;
     }
     // (AI-assisted) fog_alpha: the vertex alpha is 0x80 everywhere in this draw
     const size_t di = out->draw_states.size();
@@ -1022,6 +1053,9 @@ void build_draw_order(CtrLevelData* out) {
         (st.atest == CTR_TEST_ALWAYS || (textured && min_alpha >= std::min(255, st.aref * 2)))) {
       st.flags |= CTR_STATE_EARLY_DEPTH;
     }
+    // (AI-assisted) c3l v15: the alpha test / blending the converter took out, back with
+    // config opaque_alpha = off
+    set_opaque_alpha(&st, d, ctr_settings().opaque_alpha, min_alpha);
     out->draw_states.push_back(st);
   }
   // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
@@ -1042,8 +1076,11 @@ void build_draw_order(CtrLevelData* out) {
       states.push_back(st);
     }
     draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
-    // blending, or drawn over what's there without writing depth (decals): keep the order
-    draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite;
+    // blending, or drawn over what's there without writing depth (decals): keep the order.
+    // (AI-assisted) v15 kDrawBlendDropped draws keep their place too (moving them before the
+    // blended draws drawn ahead of them could change what those pixels show)
+    draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite ||
+                       (out->draws[di].kind & c3l::kDrawBlendDropped);
   }
   // drawing order, made once (see sorted_draws)
   out->draw_chunk.assign(out->draws.size(), 0);
@@ -1106,6 +1143,10 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
                       !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
     if (!pow2 || t.format > c3l::TEX_RGBA8 || (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
+      continue;
+    }
+    if (t.data_size == 0 && hdr.version >= c3l::kAtlasVersion) {
+      out->empty++;  // (AI-assisted) v15: moved into an atlas, nothing draws it
       continue;
     }
     // the levels the data holds (and the GPU allows: at least 8 texels on the short side)
@@ -1407,6 +1448,7 @@ bool CtrLevels::load_file(const fs::path& path,
     out->tex_pool = tl.pool;
     out->tex_pool_bytes = tl.pool_bytes;
     out->tex_background_bytes = tl.background_bytes;
+    out->tex_empty = tl.empty;
     out->textures = std::move(tl.handles);
     out->tex_min_alpha = std::move(tl.min_alpha);
     if (!ok) {
@@ -2644,6 +2686,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
+  }
+  // (AI-assisted) config opaque_alpha (gpu_profile = ab switches it): the v15 draws' alpha tests /
+  // blending back, or out again
+  if (lev.opaque_alpha_applied != settings.opaque_alpha) {
+    lev.opaque_alpha_applied = settings.opaque_alpha;
+    for (size_t di = 0; di < lev.draws.size() && di < lev.draw_states.size(); di++) {
+      const auto& d = lev.draws[di];
+      set_opaque_alpha(&lev.draw_states[di], d, settings.opaque_alpha,
+                       d.texture < lev.tex_min_alpha.size() ? lev.tex_min_alpha[d.texture] : 255);
+    }
   }
   // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
   ctr_gpu_pool_set_priority(lev.tex_pool, far_level ? 1 : 2);

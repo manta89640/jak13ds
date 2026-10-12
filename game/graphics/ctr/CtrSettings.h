@@ -322,6 +322,11 @@ struct CtrSettings {
   // second frame (the heights still every frame for the near grid); ocean = full has
   // ocean_texture_rate
   bool ocean_tex_half = true;
+  // (AI-assisted) c3l v15 opaque alpha: the alpha tests / blending ctr_level_converter took out of
+  // level draws whose texture alpha is 1.0 in every texel of every mip level and whose vertex alpha
+  // is >= 0x80 (kDrawAlphaTestDropped / kDrawBlendDropped: they can't change a pixel) stay out; off
+  // puts them back. Each frame (gpu_profile = ab). Older files: no such draws
+  bool opaque_alpha = true;
   // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
   // (platform/3ds/tools/cmd_report.py); diagnostic, off
   bool cmd_dump = false;
