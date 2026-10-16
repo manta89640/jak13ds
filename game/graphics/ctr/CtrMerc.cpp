@@ -20,6 +20,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrEye.h"
+#include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -855,7 +856,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       return nullptr;
     }
     if (!palette_f24_made) {
-      ctr_gpu_pack_skin_rows_f24(palette_rows, std::min<int>(count, CTR_MAX_PALETTE), palette_f24);
+      // (AI-assisted) ctr_gpu_pack_skin_rows_f24's words in fewer instructions (CtrMicro.h)
+      ctr_micro::pack_skin_rows_f24(palette_rows, std::min<int>(count, CTR_MAX_PALETTE), palette_f24);
       palette_f24_made = true;
     }
     return palette_f24;
