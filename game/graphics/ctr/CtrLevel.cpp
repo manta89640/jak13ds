@@ -608,6 +608,9 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
   for (auto& [ci, mesh] : d.meshes) {
     if (ci < lev->meshes.size() && lev->meshes[ci] < 0) {
       lev->meshes[ci] = mesh;
+      if (lev->tod && ci < lev->tod->chunk_mesh.size()) {
+        lev->tod->chunk_mesh[ci] = -1;  // (AI-assisted) the file's colors: recolored when drawn
+      }
       made++;
     } else {
       ctr_gpu_mesh_delete(mesh);
@@ -662,6 +665,9 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
     if (!far_chunk(lev, lev.chunks[ci]) && lev.meshes[ci] >= 0) {
       ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
       lev.meshes[ci] = -1;
+      if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
+        lev.tod->chunk_mesh[ci] = -1;  // (AI-assisted) (a mesh made later may get this one's id)
+      }
       freed++;
     }
   }
@@ -899,14 +905,15 @@ void tod_weights(const CtrBackgroundCamera& cam, u8 w[8][3]) {
 }
 
 // Blends the level's colors with the game's weights when they moved: all colors when a day palette's
-// weight moved by 2/64 or more, or by 1/64 after kTodMinFrames (the day goes on slowly: 1/64 every
-// ~40 frames); else only the light colors when a light palette's
+// weight moved by 2/64 or more and kTodMinFrames went by since the last such blend (the day moves
+// 1/64 every ~40 frames; the title screen's attract mode runs the day ~20x as fast), or at once by
+// kTodJump or more (the clock set, a teleport); else only the light colors when a light palette's
 // weight moved (the lamps flicker every frame). Chunks are recolored as they are drawn
-// (tod_recolor): all of a chunk's vertices after a blend of all colors, else its light vertices.
-constexpr u64 kTodMinFrames = 60;
-// vertices recolored per level draw after a blend of all colors (chunks not recolored yet since
-// their mesh was made: always; the first chunk of a draw: always)
-constexpr u32 kTodBudget = 24000;
+// (tod_recolor): kTodBudget vertices per level draw after a blend of all colors (a chunk in pieces
+// over frames), the light vertices after a blend of the light colors.
+constexpr u64 kTodMinFrames = 30;
+constexpr int kTodJump = 8;
+constexpr u32 kTodBudget = 8000;
 
 void tod_blend(CtrLevelData::Tod& t, u32 color) {
   const u8* src = t.colors.data() + (size_t)color * t.palette_count * 3;
@@ -937,8 +944,8 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
       }
     }
   }
-  const bool all = !t.blended_valid || day_diff >= 2 ||
-                   (day_diff == 1 && frame >= t.blend_frame + kTodMinFrames);
+  const bool all = !t.blended_valid || day_diff >= kTodJump ||
+                   (day_diff >= 2 && frame >= t.blend_frame + kTodMinFrames);
   if (!all && !light_diff) {
     return 0;
   }
@@ -957,6 +964,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   t.blended_valid = true;
   t.blend_frame = frame;
   t.gen = t.gen + 1 == CtrLevelData::Tod::kChunkNone ? 1 : t.gen + 1;
+  std::fill(t.chunk_pos.begin(), t.chunk_pos.end(), 0u);  // (chunks part done start again)
   for (u32 c = 0; c < t.color_count; c++) {
     tod_blend(t, c);
   }
@@ -996,47 +1004,62 @@ inline void tod_set_rgb(c3l::Vertex& v, u32 rgb) {
   memcpy(v.rgba, &rgb, 4);
 }
 
-// All of n vertices' colors from the blend; lights: the ones with a light color (if not null).
-// Returns the vertices with a time of day color.
-u32 tod_color_vertices(const CtrLevelData::Tod& t, c3l::Vertex* v, int n, std::vector<u16>* lights) {
+// Vertices [first, end)'s colors from the blend. Returns the vertices with a time of day color.
+u32 tod_color_vertices(const CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end) {
   u32 colored = 0;
-  const u32 nc = t.color_count;
-  for (int i = 0; i < n; i++) {
-    const u32 idx = (u16)v[i].pad;
+  for (int i = first; i < end; i++) {
     u32 rgb;
-    if (!tod_vertex_rgb(t, idx, &rgb)) {
-      continue;
+    if (tod_vertex_rgb(t, (u16)v[i].pad, &rgb)) {
+      tod_set_rgb(v[i], rgb);
+      colored++;
     }
-    tod_set_rgb(v[i], rgb);
-    colored++;
-    if (lights) {
-      const u32 c = idx < nc ? idx : t.muls[idx - nc].color;
-      if (std::binary_search(t.light_colors.begin(), t.light_colors.end(), (u16)c)) {
-        lights->push_back((u16)i);
-      }
-    }
-  }
-  if (lights) {
-    lights->shrink_to_fit();
   }
   return colored;
 }
 
+// The vertices with a light color (the chunk's list for the light blends), and whether any vertex
+// has a time of day color.
+bool tod_scan(const CtrLevelData::Tod& t, const c3l::Vertex* v, int n, std::vector<u16>* lights) {
+  bool any = false;
+  const u32 nc = t.color_count, nm = (u32)t.muls.size();
+  for (int i = 0; i < n; i++) {
+    const u32 idx = (u16)v[i].pad;
+    if (idx >= nc + nm) {
+      continue;
+    }
+    any = true;
+    const u32 c = idx < nc ? idx : t.muls[idx - nc].color;
+    if (t.light_mask && std::binary_search(t.light_colors.begin(), t.light_colors.end(), (u16)c)) {
+      lights->push_back((u16)i);
+    }
+  }
+  lights->shrink_to_fit();
+  return any;
+}
 
-// The chunk's vertex colors from the blends, rewritten in its mesh (the alpha stays): all of them
-// for a mesh not recolored yet (the file's colors: made again by a detail / repair load) or after
-// a blend of all colors, within *budget vertices (the first chunk of a draw always; the rest the
-// next frames); else its light vertices after a blend of the light colors. Returns the vertices
-// looked at; *ms the time.
+
+// The chunk's vertex colors from the blends, rewritten in its mesh (the alpha stays; a frame the GPU
+// still draws may see part of it): after a blend of all colors (or for a mesh made again, with the
+// file's colors) all of them, kTodBudget vertices per level draw (a big chunk over frames, from
+// where it stopped); else its light vertices after a blend of the light colors. Returns the
+// vertices written; *ms the time.
 u32 tod_recolor(CtrLevelData& lev, size_t ci, u32* budget, double* ms) {
   auto& t = *lev.tod;
   const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
-  if (mesh < 0 || ci >= t.chunk_gen.size() || !t.blended_valid) {
+  if (mesh < 0 || ci >= t.chunk_gen.size() || !t.blended_valid ||
+      t.chunk_gen[ci] == CtrLevelData::Tod::kChunkNone) {
     return 0;
   }
-  const bool fresh = t.chunk_mesh[ci] != mesh;
-  if (!fresh && (t.chunk_gen[ci] == CtrLevelData::Tod::kChunkNone ||
-                 (t.chunk_gen[ci] == t.gen && t.chunk_light_gen[ci] == t.light_gen))) {
+  if (t.chunk_mesh[ci] != mesh) {
+    t.chunk_mesh[ci] = mesh;
+    t.chunk_gen[ci] = CtrLevelData::Tod::kChunkUnset;
+    t.chunk_pos[ci] = 0;
+  }
+  const bool all = t.chunk_gen[ci] != t.gen;
+  if (!all && t.chunk_light_gen[ci] == t.light_gen) {
+    return 0;
+  }
+  if (all && !*budget) {
     return 0;
   }
   int n = 0;
@@ -1044,12 +1067,8 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, u32* budget, double* ms) {
   if (!v || n <= 0) {
     return 0;
   }
-  const bool all = fresh || t.chunk_gen[ci] != t.gen;
-  if (all && *budget < (u32)n && *budget < kTodBudget) {
-    return 0;
-  }
   const double t0 = ctr_gpu_time_ms();
-  u32 looked = 0;
+  u32 written = 0;
   if (!all) {
     // the light vertices only
     auto it = t.chunk_lights.find((u32)ci);
@@ -1063,33 +1082,27 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, u32* budget, double* ms) {
       }
       ctr_gpu_mesh_flush(mesh, lv.front() * (int)sizeof(c3l::Vertex),
                          (lv.back() + 1 - lv.front()) * (int)sizeof(c3l::Vertex));
-      looked = (u32)lv.size();
+      written = (u32)lv.size();
     }
     t.chunk_light_gen[ci] = t.light_gen;
-    *ms += ctr_gpu_time_ms() - t0;
-    return looked;
+  } else {
+    const int first = (int)std::min<u32>(t.chunk_pos[ci], (u32)n);
+    const int end = (int)std::min<u32>((u32)n, first + *budget);
+    tod_color_vertices(t, v, first, end);
+    ctr_gpu_mesh_flush(mesh, first * (int)sizeof(c3l::Vertex),
+                       (end - first) * (int)sizeof(c3l::Vertex));
+    written = (u32)(end - first);
+    *budget -= std::min(*budget, written);
+    if (end >= n) {
+      t.chunk_gen[ci] = t.gen;
+      t.chunk_light_gen[ci] = t.light_gen;
+      t.chunk_pos[ci] = 0;
+    } else {
+      t.chunk_pos[ci] = (u32)end;
+    }
   }
-  // (the light vertices are found at the first recolor of a chunk: the vertices never change)
-  std::vector<u16>* lights = nullptr;
-  if (fresh && t.light_mask && !t.chunk_lights.count((u32)ci)) {
-    lights = &t.chunk_lights[(u32)ci];
-  }
-  const u32 colored = tod_color_vertices(t, v, n, lights);
-  if (lights && lights->empty()) {
-    t.chunk_lights.erase((u32)ci);
-  }
-  t.chunk_mesh[ci] = mesh;
-  if (!colored) {
-    t.chunk_gen[ci] = CtrLevelData::Tod::kChunkNone;
-    *ms += ctr_gpu_time_ms() - t0;
-    return 0;
-  }
-  ctr_gpu_mesh_flush(mesh, 0, n * (int)sizeof(c3l::Vertex));
-  t.chunk_gen[ci] = t.gen;
-  t.chunk_light_gen[ci] = t.light_gen;
-  *budget -= std::min(*budget, (u32)n);
   *ms += ctr_gpu_time_ms() - t0;
-  return (u32)n;
+  return written;
 }
 
 // (AI-assisted) c3l v16 time of day: the file's table into lev->tod, the palettes no color uses
@@ -1182,6 +1195,7 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   t->blended.assign(nc, 0);
   t->chunk_gen.assign(lev->chunks.size(), CtrLevelData::Tod::kChunkUnset);
   t->chunk_light_gen.assign(lev->chunks.size(), CtrLevelData::Tod::kChunkUnset);
+  t->chunk_pos.assign(lev->chunks.size(), 0);
   t->chunk_mesh.assign(lev->chunks.size(), -1);
   // the weights the level was last drawn with, else the last level's with the same day palettes:
   // the meshes are colored as they are read (CtrLevels::load_file), not all at the level's first
@@ -1895,24 +1909,31 @@ bool CtrLevels::load_file(const fs::path& path,
           out->draw_alpha80[d] = ok ? 1 : 0;
         }
       }
-      // (AI-assisted) c3l v16: the time of day colors (load_tod's start weights)
-      int tod_colored = -1;
-      if (read_ok && out->tod && out->tod->blended_valid) {
+      // (AI-assisted) c3l v16: the chunk's light vertices, and its time of day colors (load_tod's
+      // start weights) when there are some
+      int tod_state = -1;  // 0: no time of day colors, 1: colored, 2: not yet
+      if (read_ok && out->tod) {
         auto& t = *out->tod;
         std::vector<u16> lights;
-        tod_colored = (int)tod_color_vertices(t, (c3l::Vertex*)vdst, (int)ch.vertex_count,
-                                              t.light_mask ? &lights : nullptr);
+        const auto* vv = (c3l::Vertex*)vdst;
+        tod_state = tod_scan(t, vv, (int)ch.vertex_count, &lights) ? 2 : 0;
         if (!lights.empty()) {
           t.chunk_lights[(u32)out->meshes.size()] = std::move(lights);
         }
+        if (tod_state == 2 && t.blended_valid) {
+          tod_color_vertices(t, (c3l::Vertex*)vdst, 0, (int)ch.vertex_count);
+          tod_state = 1;
+        }
       }
       mesh = ctr_gpu_mesh_end(mesh, read_ok);
-      if (mesh >= 0 && tod_colored >= 0) {
+      if (mesh >= 0 && tod_state >= 0) {
         auto& t = *out->tod;
         const size_t ci = out->meshes.size();
         t.chunk_mesh[ci] = mesh;
-        t.chunk_gen[ci] = tod_colored ? t.gen : CtrLevelData::Tod::kChunkNone;
-        t.chunk_light_gen[ci] = t.light_gen;
+        t.chunk_gen[ci] = tod_state == 0   ? CtrLevelData::Tod::kChunkNone
+                          : tod_state == 1 ? t.gen
+                                           : CtrLevelData::Tod::kChunkUnset;
+        t.chunk_light_gen[ci] = tod_state == 1 ? t.light_gen : CtrLevelData::Tod::kChunkUnset;
       }
     }
     out->meshes.push_back(mesh);

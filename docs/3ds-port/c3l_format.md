@@ -17,10 +17,11 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 
 | option | default | meaning |
 |---|---|---|
-| `--tfrag-geo N` | 1 | tfrag level of detail near the camera. 0 is the most detailed, 2 the least (2 has holes). |
+| `--tfrag-geo N` | 0 | tfrag level of detail near the camera. 0 is the most detailed, 2 the least (2 has holes). (AI-assisted) 0 since v16, as the PS2 near the camera: 1 cut Volcanic Crater's yellow pools into polygons (village3 +1.1% triangles, +50 KB of vertices). |
 | `--far-tfrag-geo N` | 2 | tfrag level of detail for far away cells (-1: no far version). |
 | `--tie-geo N` | 3 | tie level of detail. 0 is the most detailed, 3 the least. |
-| `--palette N` | 1 | time of day palette baked into the vertex colors (0..7). |
+| `--palette N` | 1 | time of day palette baked into the vertex colors (0..7): what a v16 runtime shows until its first blend, and older runtimes always. |
+| `--no-tod` | off | (AI-assisted, v16) no time of day table: the vertex colors stay the baked palette. See "Time of day". |
 | `--max-tex N` | 128 | maximum texture size. Larger textures are box-filtered down. |
 | `--cell M` | 200 | chunk grid size in meters. Triangles go to the cell of their centroid. |
 | `--detail-radius M`, `--detail-dist M` | 4, 100 | tie instances smaller than the radius only drawn up to the distance |
@@ -187,8 +188,10 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 15 (7..14 still load; v12: merc rewritten vertices; v13: vista
-  tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"); char level_name[32]
+  char magic[4] = "C3LV"; u32 version = 16 (7..15 still load; v12: merc rewritten vertices; v13: vista
+  tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"; v16: time
+  of day); char level_name[16]; (AI-assisted, v16) u32 tod_offset, tod_color_count, tod_mul_count, pad
+  (the end of the 32 byte level name before: zero)
   u32 num_textures, textures_offset
   u32 num_chunks, chunks_offset
   u32 vertex_data_offset, vertex_data_size      Vertex[]
@@ -218,9 +221,13 @@ Chunk (80 bytes)
 
 Vertex (16 bytes)
   s16 pos[3]              quantized position (see "Positions")
-  s16 pad
+  u16 tod                 (v16) time of day color: < tod_color_count a TodColor, then the TodMuls,
+                          0xffff none (before v16: 0, "pad")
   s16 st[2]               texture coordinates * 1024
   u8  rgba[4]             baked time of day color, GS units (0x80 = 1.0)
+
+TodColor (24 bytes, v16)  u8 rgb[8][3]: the color in each of the game's 8 palettes, GS units
+TodMul (6 bytes, v16)     u16 color (TodColor); u8 mul[3] (128 = 1.0); u8 pad
 
 Draw (16 bytes)
   u32 mode                tfrag3 DrawMode bits (common/dma/gs.h): blend, alpha test, clamp,
@@ -286,6 +293,45 @@ Texture (16 bytes)
   Alpha is doubled when converting, so 0xff = opaque.
 - **Vertex colors:** vertex colors keep GS units. The renderer applies the same `* 2` that the PC
   tfrag shader does.
+
+## Time of day (v16)
+
+(AI-assisted.) The PS2 and the PC light the level background with 8 palettes per vertex color,
+blended every frame with weights from the level's mood (time of day: 2-3 of the day's palettes at
+a time; lights: lamps and lava glow, which the game moves every frame). Before v16 the converter
+baked one palette (`--palette`, daytime), so night, dusk and dawn were drawn lit like day (and noon
+darker than the PC: village1's ground 81 instead of 183).
+
+v16 keeps each vertex's color in the 8 palettes: `TodColor`s for the tfrag, tie and shrub time
+of day colors (each once per level), and `TodMul`s for a color times a vertex color (shrubs: their
+base color, shrub.vert's `base * tod * 4`; the untextured vista: its texture's average color).
+Vertex::tod indexes them. Sizes (TodColor + TodMul): village1 10673 + 10567 (312 KB), jungle
+9357 + 40645 (457 KB, the largest; shrubs), village3 7238 + 8902 (221 KB); all levels 5.9 MB of
+the files.
+
+The runtime (`CtrLevel.cpp`: `load_tod`, `tod_update`, `tod_recolor`) keeps the palettes some
+color uses (village3: 7 of 8), and per color its blend: per channel `min(255, sum(w * c) >> 6)`
+with the game's weights from the background camera's itimes (64 = 1.0), as the PC's
+`interp_time_of_day_slow`. It rewrites the chunks' vertex colors in place in their meshes (the
+alpha stays; a frame the GPU still draws may see part of the change):
+
+- all colors are blended again when a day palette's weight moves by 2/64, or by 1/64 after 60
+  frames (the day moves 1/64 every ~40 frames); then every chunk is recolored as it is drawn, up
+  to 24000 vertices per level draw (the first chunk of a draw always; the rest the next frames);
+- "light" palettes (used by a quarter of the colors or fewer: village1's lamps, palette 5) move
+  every frame: only their colors are blended again, and only the vertices with one of them are
+  rewritten (per chunk a list made at its first recolor);
+- a level's meshes are colored as they are read when weights are known for it (the weights it was
+  last drawn with, or the last level's with the same day palettes); else they show the baked
+  palette until drawn.
+
+Heap: the colors (palettes used x 3 bytes), the TodMuls, 4 bytes per color for the blend and the
+chunk lists (village1 363 KB, jungle 497 KB). On the 3DS a level whose table would leave less
+than 3 MB of heap free keeps its baked palette (`[ctr] <level>: no heap for the time of day
+colors`). Log: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at
+load, `[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...)`
+with the stats. Host: env `CTR_TOD_LOG=1` logs the weights every 30 frames; the pad script command
+`tod H` sets the game's clock (pictures at a time of day).
 
 ## Merc
 

@@ -179,8 +179,8 @@ struct CtrLevelData {
     std::vector<c3l::TodMul> muls;
     std::vector<u32> blended;  // color_count: r | g << 8 | b << 16
     // "light" palettes: used by few colors (the lamps, the lava glow: the game moves their weights
-    // every frame); their colors, and per chunk its vertices with one of those (made at the chunk's
-    // first recolor), are blended / recolored on their own when only those weights move
+    // every frame); their colors, and per chunk its vertices with one of those (found at
+    // load), are blended / recolored on their own when only those weights move
     u32 light_mask = 0;  // palette bits
     std::vector<u16> light_colors;
     std::unordered_map<u32, std::vector<u16>> chunk_lights;
@@ -193,6 +193,7 @@ struct CtrLevelData {
     // day colors), and that mesh (a mesh made again has the file's colors)
     static constexpr u32 kChunkUnset = 0, kChunkNone = 0xffffffffu;
     std::vector<u32> chunk_gen, chunk_light_gen;
+    std::vector<u32> chunk_pos;  // a recolor done in part: where it goes on
     std::vector<int> chunk_mesh;
     u32 bytes() const {
       u32 lights = 0;
@@ -200,7 +201,7 @@ struct CtrLevelData {
         lights += (u32)v.size() * 2 + 32;
       }
       return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + blended.size() * 4 +
-                   light_colors.size() * 2 + chunk_gen.size() * 12) +
+                   light_colors.size() * 2 + chunk_gen.size() * 16) +
              lights;
     }
   };
