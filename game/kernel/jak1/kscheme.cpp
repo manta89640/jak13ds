@@ -1684,6 +1684,8 @@ u32 pad_script_nearest(const char* type_name, float* pos) {
 //!                             or #N: its type's method N (a virtual state); next-state +
 //!                             enter-state with pp = the process, like go-process
 //!   pevent TYPE MSG ARGS...   (send-event the-nearest-process-of-TYPE 'MSG ARGS...), from #f
+//!   artctl                    log the spooled animation buffers and the IOP's stream clock
+//!   heap                      log the GOAL global heap's free space
 void pad_script_call(const std::string& fn, const std::vector<std::string>& args) {
   if (!goalc_enabled()) {
     lg::warn("[pad script] call: C mode only");
@@ -1702,6 +1704,13 @@ void pad_script_call(const std::string& fn, const std::vector<std::string>& args
     }
     *Ptr<u32>((u32)addr) = (u32)pad_script_arg(args[2]);
     lg::info("[pad script] poke32 {:#x} = {:#x}", addr, *Ptr<u32>((u32)addr));
+    return;
+  }
+  if (fn == "heap") {
+    // the GOAL global heap: free bytes between the bottom and top allocations
+    lg::info("[pad script] heap global: {} KB free (current {:#x}, top {:#x})",
+             (kglobalheap->top.offset - kglobalheap->current.offset) / 1024,
+             kglobalheap->current.offset, kglobalheap->top.offset);
     return;
   }
   if (fn == "artctl") {
