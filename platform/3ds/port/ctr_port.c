@@ -6,6 +6,8 @@
 #include "ctr_port.h"
 #include "ctr_logring.h"
 
+#include "game/graphics/ctr/ctr_config_presets.h"
+
 #include <3ds.h>
 #include <malloc.h>
 #include <stdio.h>
@@ -75,7 +77,6 @@ void ctr_port_set_gpu_active(int active) {
   s_gpu_active = active;
 }
 static int s_irrst = 0;
-static int s_syscore = 0;   /* IOP / IO threads on core 1 (config.ini io_on_system_core) */
 static int s_cpu_limit = 0; /* the app got a share of core 1 (APT_SetAppCpuTimeLimit) */
 static int s_sound = 0;
 static int s_sound_core = 1; /* 2 on New 3DS: see ctr_platform_init */
@@ -134,36 +135,76 @@ static void config_trim(char* s) {
   }
 }
 
-int ctr_config_get(const char* key, char* out, int size) {
-  {
-    FILE* f = fopen("sdmc:/3ds/jak1/config.ini", "r");
-    if (!f) {
-      return 0;
-    }
-    char line[512];
-    int found = 0;
-    while (!found && fgets(line, sizeof(line), f)) {
-      char* c = strpbrk(line, "#;");
-      if (c) {
-        *c = 0;
-      }
-      char* eq = strchr(line, '=');
-      if (!eq) {
-        continue;
-      }
-      *eq = 0;
-      config_trim(line);
-      if (strcmp(line, key) == 0) {
-        char* v = eq + 1;
-        config_trim(v);
-        snprintf(out, (size_t)size, "%s", v);
-        found = 1;
-      }
-    }
-    fclose(f);
-    return found;
+/* (AI-assisted) config.ini, read once (the first call: ctr_platform_init, before any other thread):
+ * its key = value lines, in file order */
+#define CFG_TEXT_BYTES 16384
+#define CFG_MAX_LINES 256
+static char s_cfg_text[CFG_TEXT_BYTES];
+static const char* s_cfg_key[CFG_MAX_LINES];
+static const char* s_cfg_value[CFG_MAX_LINES];
+static int s_cfg_lines = -1; /* -1: not read yet */
+
+static void config_load(void) {
+  if (s_cfg_lines >= 0) {
+    return;
   }
-  return 0;
+  s_cfg_lines = 0;
+  FILE* f = fopen("sdmc:/3ds/jak1/config.ini", "r");
+  if (!f) {
+    return;
+  }
+  char line[512];
+  size_t used = 0;
+  while (fgets(line, sizeof(line), f)) {
+    char* c = strpbrk(line, "#;");
+    if (c) {
+      *c = 0;
+    }
+    char* eq = strchr(line, '=');
+    if (!eq) {
+      continue;
+    }
+    *eq = 0;
+    char* v = eq + 1;
+    config_trim(line);
+    config_trim(v);
+    const size_t kn = strlen(line) + 1, vn = strlen(v) + 1;
+    if (s_cfg_lines >= CFG_MAX_LINES || used + kn + vn > sizeof(s_cfg_text)) {
+      break;
+    }
+    memcpy(s_cfg_text + used, line, kn);
+    s_cfg_key[s_cfg_lines] = s_cfg_text + used;
+    used += kn;
+    memcpy(s_cfg_text + used, v, vn);
+    s_cfg_value[s_cfg_lines] = s_cfg_text + used;
+    used += vn;
+    s_cfg_lines++;
+  }
+  fclose(f);
+}
+
+/* (AI-assisted) a key's last line in config.ini (ctr_cfg_get_fn) */
+static const char* config_file_get(void* ctx, const char* key) {
+  (void)ctx;
+  const char* v = NULL;
+  for (int i = 0; i < s_cfg_lines; i++) {
+    if (strcmp(s_cfg_key[i], key) == 0) {
+      v = s_cfg_value[i];
+    }
+  }
+  return v;
+}
+
+/* (AI-assisted) the key's line, else a user key's (particles, text_size), else the preset's, else
+ * the default (ctr_config_presets.h): the same values CtrSettings.cpp uses */
+int ctr_config_get(const char* key, char* out, int size) {
+  config_load();
+  const char* v = ctr_cfg_resolve(key, config_file_get, NULL, 1);
+  if (!v) {
+    return 0;
+  }
+  snprintf(out, (size_t)size, "%s", v);
+  return 1;
 }
 
 int ctr_config_bool(const char* key, int def) {
@@ -181,6 +222,7 @@ int ctr_platform_init(int enable_console) {
   /* paths without a device name ("/3ds/jak1/...") then refer to the SD card, and
    * std::filesystem treats them as absolute ("sdmc:/..." would be a relative path to it) */
   ctr_boot_mark("2 main");
+  config_load(); /* (AI-assisted) config.ini, while there is one thread */
   /* (AI-assisted) hardware hang bisect (config.ini, default on): ctr_mem.S's memcpy / memmove /
    * memset (off: ctr_mem_c.c's loops, also used until here) and ctr_clock.cpp's steady_clock */
   {
@@ -204,11 +246,8 @@ int ctr_platform_init(int enable_console) {
     s_console = 1;
   }
   ctr_thread_install_crash_handler();
-  /* Let the app use part of the system core (core 1) for the IO / IOP threads, so that core 0 is
-   * left to the game logic (EE thread). 80% of core 1; the system keeps the rest. */
-  /* Experimental, off by default: in Azahar, boot hangs at the first IOP file load when the IOP
-   * thread runs on core 1 (not investigated further; untested on hardware). Turned on by the file
-   * config.ini io_on_system_core = on. */
+  /* (AI-assisted) The IO / IOP threads stay on core 0: config.ini io_on_system_core (core 1 for
+   * them) was removed on Oct 16 (boot hung at the first IOP file load in Azahar). */
   /* Audio output (config.ini: sound = on, sound_core = N). Default core: 2 on New 3DS, else 1.
    * (AI-assisted) 2026-10-02: core 2 again. It went to core 0 when the render thread on core 2 was
    * the limit (~11 fps); now the game thread on core 0 is (logic 10-30 ms of 33) and the render
@@ -220,7 +259,7 @@ int ctr_platform_init(int enable_console) {
   /* (AI-assisted) config.ini: sound = on, sound_core = N */
   {
     char v[16];
-    if (ctr_config_bool("sound", 0)) {
+    if (ctr_config_bool("sound", 1)) { /* (AI-assisted) on by default since Oct 16 */
       s_sound = 1;
       s_sound_core = ctr_is_new3ds() ? 2 : 1;
       if (ctr_config_get("sound_core", v, sizeof(v)) && v[0] >= '0' && v[0] <= '3') {
@@ -228,11 +267,9 @@ int ctr_platform_init(int enable_console) {
       }
     }
   }
-  int want_syscore = ctr_config_bool("io_on_system_core", 0);
-  if (want_syscore || (s_sound && s_sound_core == 1)) {
+  if (s_sound && s_sound_core == 1) {
     ctr_core1_enable();
   }
-  s_syscore = (want_syscore && s_cpu_limit) ? 1 : 0;
   /* C-stick / ZL / ZR on New 3DS (and the Circle Pad Pro) */
   s_irrst = R_SUCCEEDED(irrstInit()) ? 1 : 0;
   ctr_boot_mark("5 console and input");
@@ -1300,10 +1337,6 @@ static void thread_trampoline(void* p) {
   ThreadStart start = *(ThreadStart*)p;
   free(p);
   start.fn(start.arg);
-}
-
-int ctr_syscore_available(void) {
-  return s_syscore;
 }
 
 int ctr_core1_share(void) {

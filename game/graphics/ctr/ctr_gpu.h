@@ -118,19 +118,12 @@ enum { CTR_TCC_ST_ATLAS = 16 };
 /* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
  * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
- * (mesh shader old or new, not dph). */
+ * (ctr_mesh_old_fa, or shader_opt's ctr_mesh_opt_fa). */
 void ctr_gpu_set_fog_alpha(int on);
-/* (AI-assisted) config.ini shader_groups (each frame after ctr_gpu_frame_begin; gpu_profile = ab
- * switches it): the vertex programs from two shared shbins (fewer code uploads and uniform
- * writes) instead of one shbin each. ctr_gpu_shader_groups_ready: they loaded (not with
- * shader_mesh = dph). */
-void ctr_gpu_set_shader_groups(int on);
-int ctr_gpu_shader_groups_ready(void);
 /* (AI-assisted) config.ini shader_opt (each frame after ctr_gpu_frame_begin; gpu_profile = ab
  * switches it): the shorter ctr_*_opt.v.pica programs for level meshes, merc and the PS2 ocean
  * (fewer instructions per vertex, fog rows folded into the mesh matrix, texcoord1 packed into
- * texcoord0's output register). It wins over shader_groups when both are on. ctr_gpu_shader_opt_ready:
- * they loaded. */
+ * texcoord0's output register). ctr_gpu_shader_opt_ready: they loaded. */
 void ctr_gpu_set_shader_opt(int on);
 int ctr_gpu_shader_opt_ready(void);
 void ctr_gpu_set_tex1_gating(int on);
@@ -358,12 +351,6 @@ void ctr_gpu_set_skin_rows_f24(int on);
  * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
  * converts f32 its own way): edge pixels of models can flip. Each frame. */
 void ctr_gpu_set_skin_clip_f24(int on);
-/* (AI-assisted) config.ini cb_read_opaque: GPUREG_COLORBUFFER_READ = 0 for draws whose color
- * doesn't depend on the framebuffer (no blending reading it, all four channels written), 0xF
- * again for the others (a framebuffer flush before each switch). citro3d sets read = write =
- * the color mask. GBATEK: what read disable does is unknown; pica_bench B6.cbread0.probe bg_ok
- * says whether pixels of a partly covered block survive. Any time. */
-void ctr_gpu_set_cb_read_opaque(int on);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
  * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
  * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */
@@ -447,18 +434,15 @@ int ctr_gpu_breakdown_line(char* out, int size, const char* label);
 void ctr_gpu_set_cmd_dump(int on);
 /* (AI-assisted) the next finished frame's command list too (pad script "set cmd_dump on") */
 void ctr_gpu_cmd_dump_next(void);
-/* (AI-assisted) hardware hang bisect (config.ini new_shaders / asm_tex, CtrSettings.h).
- * new_shaders 0: the Oct 2 vertex shaders and their uniform conventions; before ctr_gpu_init.
- * asm_tex 0: the old per texel texture tiling loops (no LDM/STM, no 64-bit stores). */
-void ctr_gpu_set_new_shaders(int on);
+/* (AI-assisted) hardware hang bisect (config.ini asm_tex, CtrSettings.h). asm_tex 0: the old per
+ * texel texture tiling loops (no LDM/STM, no 64-bit stores). */
 void ctr_gpu_set_asm_tex(int on);
 /* (AI-assisted) config.ini defer_flush (hang bisect): 0 = every cache flush right away */
 void ctr_gpu_set_defer_flush(int on);
-/* (AI-assisted) config.ini shader_basic / shader_mesh (hang bisect), -1 = follow new_shaders */
-void ctr_gpu_set_shader_modes(int basic, int mesh);
-/* (AI-assisted) config.ini shader_skin: 1 new, 0 the Oct 2 ctr_skin / ctr_skin_env (the same
- * uniforms), -1 = new_shaders; before ctr_gpu_init */
-void ctr_gpu_set_shader_skin(int skin);
+/* (AI-assisted) config.ini shader_basic: 1 the 7 instruction ctr_basic (default), 0 the Oct 2
+ * ctr_basic_old; before ctr_gpu_init. Level meshes and merc use the Oct 2 ctr_mesh_old /
+ * ctr_skin_old / ctr_skin_env_old, or with shader_opt the ctr_*_opt programs. */
+void ctr_gpu_set_shader_basic(int basic);
 int ctr_gpu_asm_tex(void);
 /* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
  * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start: config.ini
@@ -619,7 +603,7 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
                         int index_count);
 void ctr_gpu_ocean_end(void);
 
-/* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh.v.pica), from clip w:
+/* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh_old.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)
  *   distance fog = (w * fog1.x - fog1.y) * fog1.z
  * the larger of the two mixes the color towards (r, g, b). Call after ctr_gpu_frame_begin. */
@@ -660,13 +644,12 @@ typedef struct {
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
   int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
-  int cbread_switches;     /* (AI-assisted) cb_read_opaque: COLORBUFFER_READ changes */
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
                       * tex1_gating) */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
   unsigned int cmd_dedup_words; /* (AI-assisted) command words cmd_dedup(_draw) left out */
   /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
-   * uniform vectors written at the switches (shader_groups keeps some) */
+   * uniform vectors written at the switches */
   int prog_switches, prog_uploads, prog_unif_vectors;
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
