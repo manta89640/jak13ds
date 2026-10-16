@@ -862,36 +862,52 @@
   (defconstant PC_3DS_CAP_PX_SMALL 6.7)
   ;; #t while print-game-text measures with its own (already adjusted) scale
   (define *pc-3ds-text-scale-off* #f)
+  ;; the part of the scale of the text drawn now that is an animation (text growing in with a menu:
+  ;; print-game-text-scaled's scale, draw-options' transition), 1.0 for text at rest. The size
+  ;; at rest is enlarged and the animation applied to that, so text that grows in grows from small
+  ;; to the enlarged size instead of starting at the minimum size.
+  (define *pc-3ds-text-anim* 1.0)
+  ;; the part of print-game-text-scaled's scale that is a size, not an animation (callers that pass
+  ;; a size times the menu's transition set it around the call)
+  (define *pc-3ds-text-size* 1.0)
   (defun pc-3ds-text-scale ((scale float) (flags font-flags))
     "The scale for text the game draws with this scale and font: text_scale times it, and at least
-     the one that makes its capitals text_min_height pixels tall."
+     the one that makes its capitals text_min_height pixels tall; for text that grows in
+     (*pc-3ds-text-anim*), that of its size at rest, times the animation."
     (if *pc-3ds-text-scale-off*
       scale
-      (let ((cap (if (logtest? flags (font-flags large)) PC_3DS_CAP_PX_LARGE PC_3DS_CAP_PX_SMALL)))
-        (fmax (* scale *pc-3ds-text-scale*) (/ *pc-3ds-text-min-height* cap)))))
+      (let ((cap (if (logtest? flags (font-flags large)) PC_3DS_CAP_PX_LARGE PC_3DS_CAP_PX_SMALL))
+            (anim *pc-3ds-text-anim*))
+        (if (< 0.01 anim)
+          (* anim (fmax (* (/ scale anim) *pc-3ds-text-scale*) (/ *pc-3ds-text-min-height* cap)))
+          (* scale *pc-3ds-text-scale*)))))
   (defun pc-3ds-text-k ((scale float) (ctxt font-context))
     "How many times its size print-game-text draws the text of this context with scale."
     (/ scale (fmax 0.1 (-> ctxt scale))))
   (defun pc-3ds-text-width ((ctxt font-context) (k float))
     "The width of the text box of a context for text k times its size: centered text gets a box k
      times as wide around the same center (the same lines as on the PS2), but no wider than what
-     stays 16 units (12 pixels) inside the screen (0 .. 512), narrower than the game's box if that
-     one already went past the screen's edge; other text keeps its width (and wraps more)."
+     stays 16 units (12 pixels) inside the screen (0 .. 512), and never narrower than the game's
+     box (centered text sliding in from off the screen keeps its lines); other text keeps its
+     width (and wraps more)."
     (let ((w0 (-> ctxt width)))
       (if (logtest? (-> ctxt flags) (font-flags middle))
-        (let* ((c (+ (-> ctxt origin x) (* 0.5 w0)))
-               (half (fmin (* 0.5 w0 (fmax 1.0 k)) (fmin (- c 16.0) (- 496.0 c)))))
-          (fmax 32.0 (* 2.0 half)))
+        (let ((c (+ (-> ctxt origin x) (* 0.5 w0))))
+          (fmax w0 (fmin (* w0 k) (* 2.0 (fmin (- c 16.0) (- 496.0 c))))))
         w0)))
-  (defun pc-3ds-draw-line ((str string) (buf dma-buffer) (ctxt font-context))
-    "draw-string for a line of print-game-text: a left-aligned line that would end less than 16
-     units from the screen's right edge moves left (not closer than 16 units to the left edge)."
-    (if (logtest? (-> ctxt flags) (font-flags middle right))
+  (defun pc-3ds-draw-line ((str string) (buf dma-buffer) (ctxt font-context) (k float))
+    "draw-string for a line of print-game-text, drawn k times its size: a left-aligned line that
+     would end less than 16 units from the screen's right edge moves left, by at most what the
+     enlargement added to it (not closer than 16 units to the left edge). A line sliding in from off
+     the screen keeps its right end where the game's line has it, and stops 16 units inside the
+     edge once the game's line is on the screen."
+    (if (or (>= 1.0 k) (logtest? (-> ctxt flags) (font-flags middle right)))
       (draw-string str buf ctxt)
       (let* ((x (-> ctxt origin x))
-             (over (- (+ x (* (get-string-length str ctxt) (-> *video-parms* relative-x-scale))) 496.0))
+             (len (* (get-string-length str ctxt) (-> *video-parms* relative-x-scale)))
+             (shift (fmin (- (+ x len) 496.0) (* len (- 1.0 (/ 1.0 k)))))
              (width 0.0))
-        (if (< 0.0 over) (set! (-> ctxt origin x) (fmax (fmin x 16.0) (- x over))))
+        (if (< 0.0 shift) (set! (-> ctxt origin x) (fmax (fmin x 16.0) (- x shift))))
         (set! width (draw-string str buf ctxt))
         (set! (-> ctxt origin x) x)
         width)))
