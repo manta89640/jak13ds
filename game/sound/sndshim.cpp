@@ -37,7 +37,9 @@ bool snd_HasOutput() {
 #ifdef __3DS__
   return snd::g_output_active;
 #else
-  return true;
+  // (AI-assisted) no player with -nosound: the stream voices never play, so spooled cutscenes
+  // must run on the IOP's fake clock (iso.cpp), or they wait forever (host test runs)
+  return player != nullptr;
 #endif
 }
 

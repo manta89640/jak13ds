@@ -227,6 +227,19 @@ JOINT` (logs that joint, the process's rider count and Jak), `crash` (tests the 
 - `platform/3ds/tests/minecart.pad`: Jak on a Volcanic Crater minecart (`village3-warp`), logging
   the cart, its rider count and Jak for a lap of the rail: riding works when Jak stays ~1.2 m above
   the cart's joint with `riders 1`.
+- (AI-assisted) Playthrough tests (host small-memory C-mode gk, `--config-path` to a scratch dir so
+  the saves stay out of the user's OpenGOAL folder; `call` / `pstate` in the header):
+  `playthrough_sweep.pad` (every checkpoint on a new game), `playthrough_late.pad` (every checkpoint
+  with all tasks closed and 100 cells), `klaww.pad`, `ending.pad` (the robot's last phase, the sage
+  movies, credits, 100-cell ending, back to the title), `saveload.pad`, `long_session.pad` (88 level
+  loads). Oct 16 results: all pass on the host, also with the modules built with
+  `-DGOALC_STACK_POISON`.
+  - Host `-nosound` used to freeze every spooled cutscene (the IOP's real stream clock follows a
+    voice that never plays without a sound player); `snd_HasOutput()` is now false there, so the
+    fake clock runs as on a 3DS without audio output. Without `-nosound`, `OPENGOAL_NO_SOUND=1`
+    alone also keeps a host run silent (the sound engine runs, the output is zeroed).
+  - A `continue` while Jak dies or while the intro sequence (`village1-warp`, `village1-hut` on a
+    new game) plays is not a real-play situation and can leave Jak in `target-continue`.
 
 ```sh
 platform/3ds/tools/run_emu.sh --seconds 900 --out build-3ds/emu-game \

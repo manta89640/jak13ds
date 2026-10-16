@@ -1,0 +1,78 @@
+# (AI-assisted) Klaww (ogre-start): the intro starts by itself, then ogreboss is forced through
+# stage2, stage3 and die (pgo): ogreboss-dead, ogre-boss (task 86) at need-resolution (7, its cell
+# to collect). Jak stands still.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=<this file> build-host-small/game/gk --proj-path <proj>
+#     --config-path <scratch dir> --ctr-gfx -- -boot -fakeiso -nosound -cbackend
+# (host small-memory C-mode gk running the p3ds modules; --config-path keeps the saves out of
+# the user's OpenGOAL folder). Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+200 log BOSS klaww
+200 continue ogre-start
+201 wait *target* target-continue
+440 pstate ogreboss
+440 pos *target*
+740 pstate ogreboss
+740 pos *target*
+1040 pstate ogreboss
+1040 pos *target*
+1340 pstate ogreboss
+1340 pos *target*
+1640 pstate ogreboss
+1640 pos *target*
+1940 pstate ogreboss
+1940 pos *target*
+2240 pstate ogreboss
+2240 pos *target*
+2540 pstate ogreboss
+2540 pos *target*
+2840 call pgo ogreboss ogreboss-stage2
+2850 pstate ogreboss
+2850 pos *target*
+3150 pstate ogreboss
+3150 pos *target*
+3450 pstate ogreboss
+3450 pos *target*
+3750 pstate ogreboss
+3750 pos *target*
+4050 pstate ogreboss
+4050 pos *target*
+4350 pstate ogreboss
+4350 pos *target*
+4650 call pgo ogreboss ogreboss-stage3-shuffle
+4660 pstate ogreboss
+4660 pos *target*
+4960 pstate ogreboss
+4960 pos *target*
+5260 pstate ogreboss
+5260 pos *target*
+5560 pstate ogreboss
+5560 pos *target*
+5860 pstate ogreboss
+5860 pos *target*
+6160 pstate ogreboss
+6160 pos *target*
+6460 call pgo ogreboss ogreboss-die
+6470 pstate ogreboss
+6470 pos *target*
+6770 pstate ogreboss
+6770 pos *target*
+7070 pstate ogreboss
+7070 pos *target*
+7370 pstate ogreboss
+7370 pos *target*
+7670 pstate ogreboss
+7670 pos *target*
+7970 pstate ogreboss
+7970 pos *target*
+8270 pstate ogreboss
+8270 pos *target*
+8570 pstate ogreboss
+8570 pos *target*
+8870 pstate ogreboss
+8870 pos *target*
+9170 pstate ogreboss
+9170 pos *target*
+9470 call get-task-status 86
+9480 ly=0
+10080 pos *target*
+10090 exit

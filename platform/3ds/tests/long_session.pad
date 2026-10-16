@@ -1,0 +1,250 @@
+# (AI-assisted) long session: 48 continues to far-apart checkpoints (about 88 level loads), the
+# GOAL global heap logged after each. On the 3DS: watch '[heap]' / largest free block and
+# 'failed to load'. On the host: sample the malloc zone (vmmap --summary <pid>) while it runs.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=<this file> build-host-small/game/gk --proj-path <proj>
+#     --config-path <scratch dir> --ctr-gfx -- -boot -fakeiso -nosound -cbackend
+# (host small-memory C-mode gk running the p3ds modules; --config-path keeps the saves out of
+# the user's OpenGOAL folder). Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+200 log PP 1 beach-start
+200 continue beach-start
+201 wait *target* target-continue
+500 pos *target*
+501 call heap
+620 log PP 2 snow-start
+620 continue snow-start
+621 wait *target* target-continue
+920 pos *target*
+921 call heap
+1040 log PP 3 sunken-start
+1040 continue sunken-start
+1041 wait *target* target-continue
+1340 pos *target*
+1341 call heap
+1460 log PP 4 maincave-start
+1460 continue maincave-start
+1461 wait *target* target-continue
+1760 pos *target*
+1761 call heap
+1880 log PP 5 misty-start
+1880 continue misty-start
+1881 wait *target* target-continue
+2180 pos *target*
+2181 call heap
+2300 log PP 6 lavatube-start
+2300 continue lavatube-start
+2301 wait *target* target-continue
+2600 pos *target*
+2601 call heap
+2720 log PP 7 swamp-start
+2720 continue swamp-start
+2721 wait *target* target-continue
+3020 pos *target*
+3021 call heap
+3140 log PP 8 citadel-start
+3140 continue citadel-start
+3141 wait *target* target-continue
+3440 pos *target*
+3441 call heap
+3560 log PP 9 jungle-start
+3560 continue jungle-start
+3561 wait *target* target-continue
+3860 pos *target*
+3861 call heap
+3980 log PP 10 ogre-start
+3980 continue ogre-start
+3981 wait *target* target-continue
+4280 pos *target*
+4281 call heap
+4400 log PP 11 rolling-start
+4400 continue rolling-start
+4401 wait *target* target-continue
+4700 pos *target*
+4701 call heap
+4820 log PP 12 firecanyon-start
+4820 continue firecanyon-start
+4821 wait *target* target-continue
+5120 pos *target*
+5121 call heap
+5240 log PP 13 darkcave-start
+5240 continue darkcave-start
+5241 wait *target* target-continue
+5540 pos *target*
+5541 call heap
+5660 log PP 14 robocave-start
+5660 continue robocave-start
+5661 wait *target* target-continue
+5960 pos *target*
+5961 call heap
+6080 log PP 15 finalboss-start
+6080 continue finalboss-start
+6081 wait *target* target-continue
+6380 pos *target*
+6381 call heap
+6500 log PP 16 training-start
+6500 continue training-start
+6501 wait *target* target-continue
+6800 pos *target*
+6801 call heap
+6920 log PP 17 beach-start
+6920 continue beach-start
+6921 wait *target* target-continue
+7220 pos *target*
+7221 call heap
+7340 log PP 18 snow-start
+7340 continue snow-start
+7341 wait *target* target-continue
+7640 pos *target*
+7641 call heap
+7760 log PP 19 sunken-start
+7760 continue sunken-start
+7761 wait *target* target-continue
+8060 pos *target*
+8061 call heap
+8180 log PP 20 maincave-start
+8180 continue maincave-start
+8181 wait *target* target-continue
+8480 pos *target*
+8481 call heap
+8600 log PP 21 misty-start
+8600 continue misty-start
+8601 wait *target* target-continue
+8900 pos *target*
+8901 call heap
+9020 log PP 22 lavatube-start
+9020 continue lavatube-start
+9021 wait *target* target-continue
+9320 pos *target*
+9321 call heap
+9440 log PP 23 swamp-start
+9440 continue swamp-start
+9441 wait *target* target-continue
+9740 pos *target*
+9741 call heap
+9860 log PP 24 citadel-start
+9860 continue citadel-start
+9861 wait *target* target-continue
+10160 pos *target*
+10161 call heap
+10280 log PP 25 jungle-start
+10280 continue jungle-start
+10281 wait *target* target-continue
+10580 pos *target*
+10581 call heap
+10700 log PP 26 ogre-start
+10700 continue ogre-start
+10701 wait *target* target-continue
+11000 pos *target*
+11001 call heap
+11120 log PP 27 rolling-start
+11120 continue rolling-start
+11121 wait *target* target-continue
+11420 pos *target*
+11421 call heap
+11540 log PP 28 firecanyon-start
+11540 continue firecanyon-start
+11541 wait *target* target-continue
+11840 pos *target*
+11841 call heap
+11960 log PP 29 darkcave-start
+11960 continue darkcave-start
+11961 wait *target* target-continue
+12260 pos *target*
+12261 call heap
+12380 log PP 30 robocave-start
+12380 continue robocave-start
+12381 wait *target* target-continue
+12680 pos *target*
+12681 call heap
+12800 log PP 31 finalboss-start
+12800 continue finalboss-start
+12801 wait *target* target-continue
+13100 pos *target*
+13101 call heap
+13220 log PP 32 training-start
+13220 continue training-start
+13221 wait *target* target-continue
+13520 pos *target*
+13521 call heap
+13640 log PP 33 beach-start
+13640 continue beach-start
+13641 wait *target* target-continue
+13940 pos *target*
+13941 call heap
+14060 log PP 34 snow-start
+14060 continue snow-start
+14061 wait *target* target-continue
+14360 pos *target*
+14361 call heap
+14480 log PP 35 sunken-start
+14480 continue sunken-start
+14481 wait *target* target-continue
+14780 pos *target*
+14781 call heap
+14900 log PP 36 maincave-start
+14900 continue maincave-start
+14901 wait *target* target-continue
+15200 pos *target*
+15201 call heap
+15320 log PP 37 misty-start
+15320 continue misty-start
+15321 wait *target* target-continue
+15620 pos *target*
+15621 call heap
+15740 log PP 38 lavatube-start
+15740 continue lavatube-start
+15741 wait *target* target-continue
+16040 pos *target*
+16041 call heap
+16160 log PP 39 swamp-start
+16160 continue swamp-start
+16161 wait *target* target-continue
+16460 pos *target*
+16461 call heap
+16580 log PP 40 citadel-start
+16580 continue citadel-start
+16581 wait *target* target-continue
+16880 pos *target*
+16881 call heap
+17000 log PP 41 jungle-start
+17000 continue jungle-start
+17001 wait *target* target-continue
+17300 pos *target*
+17301 call heap
+17420 log PP 42 ogre-start
+17420 continue ogre-start
+17421 wait *target* target-continue
+17720 pos *target*
+17721 call heap
+17840 log PP 43 rolling-start
+17840 continue rolling-start
+17841 wait *target* target-continue
+18140 pos *target*
+18141 call heap
+18260 log PP 44 firecanyon-start
+18260 continue firecanyon-start
+18261 wait *target* target-continue
+18560 pos *target*
+18561 call heap
+18680 log PP 45 darkcave-start
+18680 continue darkcave-start
+18681 wait *target* target-continue
+18980 pos *target*
+18981 call heap
+19100 log PP 46 robocave-start
+19100 continue robocave-start
+19101 wait *target* target-continue
+19400 pos *target*
+19401 call heap
+19520 log PP 47 finalboss-start
+19520 continue finalboss-start
+19521 wait *target* target-continue
+19820 pos *target*
+19821 call heap
+19940 log PP 48 training-start
+19940 continue training-start
+19941 wait *target* target-continue
+20240 pos *target*
+20241 call heap
+20360 log LONG SESSION DONE
+20361 exit
