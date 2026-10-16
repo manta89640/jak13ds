@@ -41,8 +41,7 @@ ocean = full
 - **normal**: everything that is finished and works on the New 3DS (the default).
 - **safe**: the Oct 11 behaviour, every renderer and loading improvement made after it switched
   back off. Use it if a new build hangs or draws something wrong, and say so in the bug report.
-  Without a `particles` line it also draws fewer, smaller particles (1000, at most half the
-  screen); `stage_sd.sh --preset safe` leaves that line out.
+  For the old particle limits too, also set `particles = reduced`.
 - **bench**: normal plus a GPU benchmark when the game starts (20-60 s, progress on the bottom
   screen) and GPU timing logs; send back `data/log/gk.log` and `data/log/bench.txt`.
 - **breakdown**: normal plus a log of what each part of the frame costs the GPU (a little slower).

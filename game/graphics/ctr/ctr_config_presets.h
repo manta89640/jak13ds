@@ -26,9 +26,9 @@ typedef struct {
 
 /* safe: the Oct 11 behaviour that held 29.9 fps on hardware (3ds-sdcard-oct12d config-safe.ini):
  * every runtime feature added after it back to its old behaviour; crash fixes stay in the code.
- * Its particle limits apply only without a particles line. */
+ * Particles come from the particles line (stage_sd.sh --preset safe writes particles = reduced). */
 static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
-    {"max_sprites", "1000"},     {"sprite_max_size", "0.5"},   {"overlap", "off"},
+    {"overlap", "off"},
     {"shader_opt", "off"},       {"frame_overlap2", "off"},    {"skin_rows_f24", "off"},
     {"skin_clip_f24", "off"},    {"cmd_dedup", "off"},         {"cmd_dedup_draw", "off"},
     {"fog_alpha", "off"},        {"tex1_gating", "off"},       {"cull_merc", "off"},

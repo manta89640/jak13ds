@@ -259,8 +259,8 @@ set_key() {  # set_key KEY VALUE: replace the key's line where it is (or add it 
 if [ -n "$PRESET" ]; then
   set_key preset "$PRESET"
   if [ "$PRESET" = safe ] && [ -z "$RENDER_INI" ] && [ "$KEEP_CONFIG" = 0 ]; then
-    # safe's own particle limits (1000, half the screen) apply without a particles line
-    sed -i '' -e 's/^particles = full$/# particles = full   (left out: safe uses its own lower particle limits)/' "$TMP_CONFIG"
+    # (AI-assisted) safe's particle limits are particles = reduced, written as a plain line
+    set_key particles reduced
   fi
 fi
 if [ "$HAVE_ARGS" = 1 ]; then set_key args "$ARGS"; fi

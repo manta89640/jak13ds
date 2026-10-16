@@ -27,8 +27,8 @@ A key's value is, first match wins (one table for every reader:
 3. the preset (`preset = normal | safe | bench | breakdown`; presets set only these keys, never
    the user keys):
    - `normal`: nothing (the defaults);
-   - `safe`: the Oct 11 behaviour (3ds-sdcard-oct12d config-safe.ini): `max_sprites = 1000`,
-     `sprite_max_size = 0.5` (only without a `particles` line), `overlap`, `shader_opt`,
+   - `safe`: the Oct 11 behaviour (3ds-sdcard-oct12d config-safe.ini; its particle limits are the
+     user key `particles = reduced`, which `stage_sd.sh --preset safe` writes): `overlap`, `shader_opt`,
      `frame_overlap2`, `skin_rows_f24`, `skin_clip_f24`, `cmd_dedup`, `cmd_dedup_draw`,
      `fog_alpha`, `tex1_gating`, `cull_merc`, `sky_last`, `vista_untextured`, `bones_native`,
      `fog_stage_skip`, `static_cmdlists`, `ocean_tex_half`, `opaque_alpha`, `fine_vis`,
