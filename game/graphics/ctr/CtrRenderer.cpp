@@ -161,13 +161,6 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
     {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
      [](const CtrSettings& s) { return s.skin_rows_f24; }},
-    // cb_read_opaque: only when the config turns it on (unknown hardware semantics: GBATEK)
-    {"cb_read_opaque",
-     [](CtrSettings& s, bool on) {
-       static const bool kConfig = s.cb_read_opaque;
-       s.cb_read_opaque = on && kConfig;
-     },
-     [](const CtrSettings& s) { return s.cb_read_opaque; }},
     // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
     // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
     {"early_depth",
@@ -184,8 +177,6 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.tex1_gating; }},
     {"cull_merc", [](CtrSettings& s, bool on) { s.cull_merc = on; },
      [](const CtrSettings& s) { return s.cull_merc; }},
-    {"shader_groups", [](CtrSettings& s, bool on) { s.shader_groups = on; },
-     [](const CtrSettings& s) { return s.shader_groups; }},
     // (AI-assisted) shader-opt's keys (Oct 12): the shorter vertex programs
     {"shader_opt", [](CtrSettings& s, bool on) { s.shader_opt = on; },
      [](const CtrSettings& s) { return s.shader_opt; }},
@@ -591,14 +582,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_mip_bias(ctr_settings().mip_bias);                          // (AI-assisted)
   ctr_gpu_set_skin_rows_f24(ctr_settings().skin_rows_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_skin_clip_f24(ctr_settings().skin_clip_f24 ? 1 : 0);         // (AI-assisted)
-  ctr_gpu_set_cb_read_opaque(ctr_settings().cb_read_opaque ? 1 : 0);       // (AI-assisted)
   ctr_gpu_set_early_depth_params(
       ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
       ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
   // (AI-assisted) fog_alpha, tex1_gating (gpu_profile = ab may switch them between frames too)
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
-  ctr_gpu_set_shader_groups(ctr_settings().shader_groups ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
@@ -743,13 +732,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear, {} color buffer read switches",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
                gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws,
                gs.fog_alpha_draws, gs.unit1_toggles, gs.prog_switches, gs.prog_uploads,
-               gs.prog_unif_vectors, gs.tex_clears_skipped, gs.cbread_switches);
+               gs.prog_unif_vectors, gs.tex_clears_skipped);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
@@ -1213,9 +1202,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_framebuffer(ctr_settings().early_depth_block32 ? 1 : 0,
                           ctr_settings().depth16 ? 1 : 0);
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
-  ctr_gpu_set_new_shaders(ctr_settings().new_shaders ? 1 : 0);
-  ctr_gpu_set_shader_modes(ctr_settings().shader_basic, ctr_settings().shader_mesh);
-  ctr_gpu_set_shader_skin(ctr_settings().shader_skin);
+  ctr_gpu_set_shader_basic(ctr_settings().shader_basic);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
   lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");

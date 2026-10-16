@@ -15,6 +15,9 @@ struct CtrSettings {
   // level geometry: chunks further than this are not drawn, with extra fog towards it so the
   // cutoff blends into the sky (meters, 0 = no limit)
   float draw_distance = 500.f;
+  // (AI-assisted) The defaults are the settled play values (Oct 16 config cleanup: the user's
+  // release config.ini); config.ini's preset = safe | bench | breakdown changes some of them
+  // (ctr_config_presets.h), its own lines win over both.
   // the extra fog starts at this fraction of draw_distance
   float fog_start = 0.6f;
   // the game's own distance fog (like the PC renderer)
@@ -55,7 +58,7 @@ struct CtrSettings {
   // (AI-assisted) config ocean = off | flat | waves | full (on = flat). flat: CtrOcean's static grid;
   // waves: the grid plus real waves near the camera; full: the PS2 ocean (draw-ocean)
   enum class OceanMode { Flat, Waves, Full };
-  OceanMode ocean_mode = OceanMode::Flat;
+  OceanMode ocean_mode = OceanMode::Full;  // (AI-assisted) full since the Oct 16 config cleanup
   // (AI-assisted) ocean = full: the wave texture is made every nth frame (1 = every frame; the
   // render thread's 1-1.7 ms for it, half as often by default)
   int ocean_texture_rate = 2;
@@ -65,7 +68,7 @@ struct CtrSettings {
   float ocean_near_alpha = 0.6f;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
-  bool distort = false;  // (AI-assisted) off: square sprites reported on hardware
+  bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
   // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
@@ -106,19 +109,19 @@ struct CtrSettings {
   // needs what's behind it), only where they left the cleared depth: its pixels behind them are
   // dropped by the depth test (before blending and writing; with the early depth test, before
   // texturing). Same picture
-  bool sky_last = false;
+  bool sky_last = true;
   // (AI-assisted) frames whose opaque sky roof covers the whole screen (looking up) clear only the
   // depth buffer, not the color. Same picture
-  bool skip_clear = false;
+  bool skip_clear = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
-  bool overlap = false;
+  bool overlap = true;
   // CPU builds frame N+1 while the GPU draws frame N
-  bool pipeline = false;
+  bool pipeline = true;
   // (AI-assisted) config frame_overlap2 = off | clean | on (with the pipeline; ctr_gpu.h
   // ctr_gpu_set_frame_overlap2): 0 the old frame end; 1 (clean, default) the frame's command list
   // cleaned from the CPU cache before waiting for the GPU, handed over without the GSP's flush;
   // 2 (on) the list queued behind the frame the GPU is drawing, no wait at the frame end
-  int frame_overlap2 = 1;
+  int frame_overlap2 = 2;
   // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
   int fps_cap = 30;
   // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game
@@ -237,46 +240,37 @@ struct CtrSettings {
   // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here
   float vista_distance = 3000.f;
   // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
-  // fog stage (texture combiner pass-through, texture unit 1 off). Off until priced on hardware
-  // (gpu_profile ab): switching the unit per draw may cost more than the ramp lookups
-  bool fog_stage_skip = false;
+  // fog stage (texture combiner pass-through, texture unit 1 off). On (preset safe: off)
+  bool fog_stage_skip = true;
   // (AI-assisted) fog_alpha: level draws whose vertex alpha is 0x80 (~99.5%) get the fog amount in
-  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_fa) and mix in the fog color as a
+  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_opt_fa) and mix in the fog color as a
   // combiner constant: no fog ramp texture lookups, one vertex output less. The rest keep the
   // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
   // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
-  // shadows never read it). Both off until priced on hardware (gpu_profile ab): new shader
-  // programs / register writes that haven't run on a real 3DS yet.
+  // shadows never read it). Both on (preset safe: off).
   // (AI-assisted) levels converted with ctr_level_converter --vista-flat hold an untextured copy of
   // the vista tier (each texture's average color in the vertex colors, one draw per cell): on uses
   // it instead of the textured one (Snowy fort: 60 -> 22 vista draws, host). Read at level load
   // (not switchable while running)
-  bool vista_untextured = false;
-  bool fog_alpha = false;
-  bool tex1_gating = false;
-  // (AI-assisted) the vertex programs from two shared shbins (group E: basic, mesh, skin, clip,
-  // clip2 and their variants; F: skin_env, ocean, ocean_full, ocean_full_clip) instead of one each:
-  // citro3d uploads no shader code at a switch inside a group, and uniforms another program of the
-  // group doesn't use aren't written again. Off until priced on hardware (gpu_profile ab; pica_bench
-  // B2.prog_entry times the switch): shared-DVLB entry points never ran in the game on a real 3DS
-  bool shader_groups = false;
+  bool vista_untextured = true;
+  bool fog_alpha = true;
+  bool tex1_gating = true;
   // (AI-assisted) shader_opt: the shorter vertex programs (platform/3ds/shaders/ctr_*_opt.v.pica:
   // level meshes 21 -> 10 instructions and 4 -> 3 output registers, merc 53 -> 33, merc shine
   // 56 -> 33, PS2 ocean 14 -> 9 and 12 -> 6). Same picture in Azahar. On (the user's decision,
   // Oct 12: "we will keep the optimised shaders on"); pica_bench B3.mesh_opt / B3.skin_opt price
-  // it. It wins over shader_groups when both are on (the opt programs aren't in the groups)
+  // it. Off (preset safe): the Oct 2 programs (ctr_mesh_old, ctr_skin_old, ...)
   bool shader_opt = true;
   // (AI-assisted) cmd_dedup: register writes that would give a register the value it already has
   // are left out of the command list (texture unit 0's type at a texture change). The same
   // registers, the same picture; on. cmd_dedup_draw: the raw draws' PRIMITIVE_CONFIG mode and
-  // VERTEX_OFFSET writes too (4 of their ~30 words; citro3d writes them before every draw): off
-  // until hardware ran it (pica_bench B2 prices a command word; gpu_profile = ab)
+  // VERTEX_OFFSET writes too (4 of their ~30 words; citro3d writes them before every draw)
   bool cmd_dedup = true;
-  bool cmd_dedup_draw = false;
+  bool cmd_dedup_draw = true;
   // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
   // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until
   // priced (pica_bench B2.unif_f24 vs B2.unif_f32, the same line as skin_rows_f24)
-  bool skin_clip_f24 = false;
+  bool skin_clip_f24 = true;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
@@ -300,13 +294,13 @@ struct CtrSettings {
   // their vertex normals, at most 2% of their triangles at an open edge, opaque) are culled, with
   // cull_ties' winding (flip). Not HUD models, not draws whose palette has a mirroring bone. Needs
   // levels converted with the current ctr_level_converter (older files: no marks)
-  bool cull_merc = false;
+  bool cull_merc = true;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
   // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
   // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
-  bool vcache_reuse = false;
+  bool vcache_reuse = true;
   // (AI-assisted, gpu-rt) static_cmdlists: the level meshes' raw command words of a stretch of
   // draws (same program, no citro3d update) are kept after two frames drew them alike and copied
   // in again while the draws, the GPU state before them and the settings stay the same; only the
@@ -330,33 +324,24 @@ struct CtrSettings {
   // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
   // (platform/3ds/tools/cmd_report.py); diagnostic, off
   bool cmd_dump = false;
-  // (AI-assisted) tex_cache_clear = always | uploads: always (default) clears the GPU's texture
+  // (AI-assisted) tex_cache_clear = always | uploads (default): always clears the GPU's texture
   // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it only for binds
   // that keep a level pool texture and change its sampling settings (switches between level pool
   // textures skipped it too until the minecart red patches, see bind_texture)
-  bool tex_cache_uploads = false;
-  // (AI-assisted) cb_read_opaque: the GPU doesn't read the color buffer for draws that overwrite
-  // it whole (opaque); unknown on hardware (GBATEK), pica_bench B6.cbread0.probe decides. Off
-  bool cb_read_opaque = false;
+  bool tex_cache_uploads = true;
   // (AI-assisted) hardware hang bisect switches (Oct 3 optimisations; off = the Oct 2 behaviour):
-  // new_shaders: the shorter vertex shaders (off: the Oct 2 ctr_basic/mesh/skin/skin_env);
   // asm_tex: the 4x2 group / LDM-STM texture tiling, 64-bit PSMCT32 uploads and SIMD sky loops
   // (off: the old per texel loops); asm_mem: ctr_mem.S memcpy/memmove/memset (off: byte/word C
   // loops; read by platform/3ds/port at boot); fast_clock: steady_clock without divides (off:
   // clock_gettime)
-  // (AI-assisted) off by default: the new ctr_mesh hung the real GPU (hardware bisect 2026-10-03);
-  // the new ctr_basic passed on hardware (shader_basic = new below), the skin ones are untested
-  bool new_shaders = false;
   bool asm_tex = true;
   // (AI-assisted) defer_flush: the render thread's cache flushes held until the frame is submitted
   // (e165bc719); off: each one right away, as on Oct 2
   bool defer_flush = true;
-  // (AI-assisted) hang bisect: shader_basic old|new, shader_mesh old|new|dph (-1: new_shaders)
-  int shader_basic = 1, shader_mesh = -1;
-  // (AI-assisted) shader_skin old|new: ctr_skin and ctr_skin_env (-1: new_shaders). The new ones
-  // pass platform/3ds/tools/check_shaders.py but never ran on hardware (pica_bench B3.skin_new
-  // runs the new ctr_skin once)
-  int shader_skin = -1;
+  // (AI-assisted) shader_basic new | old: the 7 instruction ctr_basic (hardware proven) or the
+  // Oct 2 one (ctr_basic_old). (The Oct 3 ctr_mesh / ctr_skin, which hung the real GPU, and their
+  // switches new_shaders / shader_mesh / shader_skin were removed on Oct 16.)
+  int shader_basic = 1;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above

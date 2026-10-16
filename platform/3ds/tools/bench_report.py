@@ -225,7 +225,9 @@ def report(s):
                         est = (f"; the hardware default (old, {old_instr} instructions) is "
                                f"~{old_est:.2f} ns/vertex by the fit: "
                                f"{100.0 * (b3[opt] / old_est - 1.0):+.1f}%")
-                    print(f"  -> shader_opt {opt[3:]}: {ratio(opt, new)} against {new[3:]}{est}")
+                    # (AI-assisted) benches before Oct 16 also ran the removed new ctr_mesh / ctr_skin
+                    vs_new = f"{ratio(opt, new)} against {new[3:]}" if new in b3 else "measured"
+                    print(f"  -> shader_opt {opt[3:]}: {vs_new}{est}")
         elif prefix == "B4.":
             for t in names:
                 if t == "B4.cachenum":

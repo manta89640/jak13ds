@@ -136,8 +136,8 @@ int ctr_gpu_perflog_line(char* out, int size, int frames, double draw_ms_sum, do
  * (platform/3ds/tools/bench_report.py turns them into a table). Each line also goes to
  * sdmc:/3ds/jak1/data/log/bench.txt, opened and closed per line like boot.txt, with a
  * `start <test>` line before the test: if the GPU hangs, the last `start` names the test.
- * The tests that could hang the GPU run last (the bench's own shaders, then the unproven new
- * ctr_mesh and ctr_skin). A GPU queue that doesn't finish within 3 s stops the bench.
+ * The tests that could hang the GPU run last (the bench's own shaders, then shader_opt's
+ * ctr_mesh_opt and ctr_skin_opt). A GPU queue that doesn't finish within 3 s stops the bench.
  *
  * Measurement of one test: the test's command list is built once and queued `reps` times back to
  * back (no CPU gaps), together with any fills / transfers it needs; then
@@ -155,10 +155,6 @@ extern const uint8_t ctr_basic_shbin[];
 extern const size_t ctr_basic_shbin_size;
 extern const uint8_t ctr_clip2_shbin[];
 extern const size_t ctr_clip2_shbin_size;
-extern const uint8_t ctr_mesh_shbin[];
-extern const size_t ctr_mesh_shbin_size;
-extern const uint8_t ctr_skin_shbin[];
-extern const size_t ctr_skin_shbin_size;
 extern const uint8_t ctr_mesh_opt_shbin[];
 extern const size_t ctr_mesh_opt_shbin_size;
 extern const uint8_t ctr_skin_opt_shbin[];
@@ -259,7 +255,7 @@ static struct {
   int cull_mode; /* GPU_CULL_* that culls them all (checked) */
   C3D_Tex tex[6]; /* RGBA8, RGB565, ETC1 at 256x256; the same with all mip levels */
   int tex_ok[6];
-  Prog basic, clip2, mesh, skin, bench, sep;
+  Prog basic, clip2, bench, sep;
   Prog mesh_opt, skin_opt; /* (AI-assisted) config.ini shader_opt's */
   shaderProgram_s bench_entry[BENCH_ENTRIES]; /* the bench DVLB's entry points (shared code) */
   int bench_entry_ok[BENCH_ENTRIES];
@@ -1631,8 +1627,7 @@ static void b3_entry(const char* id, int entry) {
   put_meas(id, BIG_TRIS, 3, &m, "");
 }
 
-/* the game's new ctr_mesh (shader_mesh = new) on the same triangles; (AI-assisted) opt: its
- * shader_opt version ctr_mesh_opt (the fog rows clip[4], clip[5] zero: no fog, as fog0/fog1 here) */
+/* a level mesh program on the same triangles; (AI-assisted) opt: shader_opt's ctr_mesh_opt (the fog rows clip[4], clip[5] zero: no fog, as fog0/fog1 here) */
 static void b3_mesh(const char* id, Prog* prog, int opt) {
   if (B.dead || !prog->ok) {
     return;
@@ -1660,8 +1655,7 @@ static void b3_mesh(const char* id, Prog* prog, int opt) {
   put_meas(id, BIG_TRIS, 3, &m, "");
 }
 
-/* the game's new ctr_skin (shader_skin = new): one bone (the identity) per vertex; (AI-assisted)
- * opt: its shader_opt version ctr_skin_opt (weights unscaled: the clip matrix's x, y, z columns
+/* a merc program, one bone (the identity) per vertex; (AI-assisted) opt: shader_opt's ctr_skin_opt (weights unscaled: the clip matrix's x, y, z columns
  * / 255 give the same triangles) */
 static void b3_skin(const char* id, Prog* prog, int opt) {
   if (B.dead || !prog->ok) {
@@ -1780,8 +1774,6 @@ static int setup(void) {
   mtx_geo(&B.m_geo);
   prog_load(&B.basic, ctr_basic_shbin, ctr_basic_shbin_size, 0);
   prog_load(&B.clip2, ctr_clip2_shbin, ctr_clip2_shbin_size, 0);
-  prog_load(&B.mesh, ctr_mesh_shbin, ctr_mesh_shbin_size, 0);
-  prog_load(&B.skin, ctr_skin_shbin, ctr_skin_shbin_size, 0);
   prog_load(&B.mesh_opt, ctr_mesh_opt_shbin, ctr_mesh_opt_shbin_size, 0);
   prog_load(&B.skin_opt, ctr_skin_opt_shbin, ctr_skin_opt_shbin_size, 0);
   prog_load(&B.sep, ctr_bench_sep_shbin, ctr_bench_sep_shbin_size, 0);
@@ -1811,8 +1803,6 @@ static void teardown(void) {
   }
   prog_free(&B.basic);
   prog_free(&B.clip2);
-  prog_free(&B.mesh);
-  prog_free(&B.skin);
   prog_free(&B.mesh_opt);
   prog_free(&B.skin_opt);
   prog_free(&B.sep);
@@ -1864,12 +1854,12 @@ int ctr_gpu_bench_run(void) {
   APT_CheckNew3DS(&is_new);
   const int ok = setup();
   bench_emitf("[bench] begin v=1 new3ds=%d emulator=%d perflog=%d upm=%.1f vblank_raw=%lu hw=%d "
-              "hs_interval=%u setup=%d t1=%d t2=%d textures=%d%d%d%d%d%d programs=basic%d,clip2%d,mesh%d,"
-              "skin%d,bench%d,sep%d,mesh_opt%d,skin_opt%d",
+              "hs_interval=%u setup=%d t1=%d t2=%d textures=%d%d%d%d%d%d programs=basic%d,clip2%d,"
+              "bench%d,sep%d,mesh_opt%d,skin_opt%d",
               is_new ? 1 : 0, ctr_gpu_is_emulator(), B.pl_ok, B.upm, (unsigned long)B.vblank_raw,
               B.hw_ok, HS_INTERVAL, ok,
               B.t1 != NULL, B.t2 != NULL, B.tex_ok[0], B.tex_ok[1], B.tex_ok[2], B.tex_ok[3],
-              B.tex_ok[4], B.tex_ok[5], B.basic.ok, B.clip2.ok, B.mesh.ok, B.skin.ok,
+              B.tex_ok[4], B.tex_ok[5], B.basic.ok, B.clip2.ok,
               B.bench.ok, B.sep.ok, B.mesh_opt.ok, B.skin_opt.ok);
   if (ok) {
     b1();
@@ -1898,7 +1888,7 @@ int ctr_gpu_bench_run(void) {
     b4(1);
     b8(B.t2, "b32");
     /* everything so far is on the card before the tests that could hang the GPU: the bench's
-     * own shaders, then the game's unproven new ctr_mesh and ctr_skin */
+     * own shaders, then shader_opt's programs */
     ctr_log_sync();
     b2(B2_PROG_ENTRY, "B2.prog_entry");
     b2(B2_PROG_SEP, "B2.prog_sep");
@@ -1910,8 +1900,6 @@ int ctr_gpu_bench_run(void) {
         b3_entry(ids[i], i);
       }
     }
-    b3_mesh("B3.mesh_new", &B.mesh, 0);
-    b3_skin("B3.skin_new", &B.skin, 0);
     /* (AI-assisted) config.ini shader_opt's programs, the packed output register (o3p) before
      * the program that packs texcoord1 that way */
     b3_skin("B3.skin_opt", &B.skin_opt, 1);

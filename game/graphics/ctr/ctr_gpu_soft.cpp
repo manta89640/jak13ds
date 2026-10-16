@@ -1606,11 +1606,6 @@ void ctr_gpu_set_fog_alpha(int on) {
   g_soft_fog_alpha = on;
 }
 void ctr_gpu_set_tex1_gating(int) {}
-// (AI-assisted) shader_groups: one program set here (statistics count program switches as before)
-void ctr_gpu_set_shader_groups(int) {}
-int ctr_gpu_shader_groups_ready(void) {
-  return 1;
-}
 void ctr_gpu_set_shader_opt(int) {}  // (AI-assisted) the vertex math is the same here
 int ctr_gpu_shader_opt_ready(void) {
   return 1;
@@ -1645,7 +1640,6 @@ int ctr_gpu_skin_rows_f24_on(void) {
 }
 void ctr_gpu_pack_skin_rows_f24(const float*, int, uint32_t*) {}
 void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
-void ctr_gpu_set_cb_read_opaque(int) {}     // (AI-assisted) no color buffer cache here
 void ctr_gpu_set_framebuffer(int, int depth16) {
   g_soft.depth16 = depth16 ? 1 : 0;  // (AI-assisted) no stencil, like the 3DS's D16 buffer
 }
@@ -1713,11 +1707,9 @@ int ctr_gpu_breakdown_line(char*, int, const char*) {
   return 0;
 }
 void ctr_gpu_cmd_dump_next(void) {}
-void ctr_gpu_set_new_shaders(int) {}
 void ctr_gpu_set_asm_tex(int) {}
 void ctr_gpu_set_defer_flush(int) {}
-void ctr_gpu_set_shader_modes(int, int) {}
-void ctr_gpu_set_shader_skin(int) {}
+void ctr_gpu_set_shader_basic(int) {}
 int ctr_gpu_asm_tex(void) {
   return 1;
 }

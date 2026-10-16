@@ -7,7 +7,7 @@
 #                 [--screenshots N] [--args "..."] [--gl] [--sound [CORE]]
 #
 #   --sound  audio output on (config.ini sound = on; CORE: sound_core = the mixer thread's core,
-#            default 0 on New 3DS, else 1). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
+#            default 2 on New 3DS, else 1; without --sound: sound = off unless the --ini sets it). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
 #            Azahar's HLE DSP accepts any file (real hardware needs a real dump).
 #
 # DIR/Azahar.app and DIR/user/ (config/qt-config.ini with sdmc_directory=DIR/user/sdmc/).
@@ -60,6 +60,9 @@ if [ -n "$SOUND" ]; then
   if [ ! -f "$SD/3ds/dspfirm.cdc" ]; then
     printf 'placeholder DSP component for Azahar HLE audio\n' > "$SD/3ds/dspfirm.cdc"
   fi
+else
+  # (AI-assisted) the game's default is sound on since Oct 16: test runs stay silent without --sound
+  grep -q -E "^[[:space:]]*sound[[:space:]]*=" "$CONFIG" || echo "sound = off" >> "$CONFIG"
 fi
 rm -rf "$DATA/log" "$BASE/user"
 if [ -n "$PAD" ]; then
