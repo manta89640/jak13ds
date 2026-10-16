@@ -223,6 +223,10 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
+  // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
+  // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
+  // off: the far versions only (as before v17)
+  bool tie_lod = true;
   // (AI-assisted) a neighbouring level's visibility string (the camera is in the other level): its
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)

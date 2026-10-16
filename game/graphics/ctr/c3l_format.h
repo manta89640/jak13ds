@@ -35,7 +35,12 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // color (index < Header::tod_color_count) or multiplied color (tod_color_count + TodMul index),
 // 0xffff: none. Vertex::rgba keeps the converter's palette (--palette), until the first blend.
 // Otherwise v15.
-constexpr uint32_t kVersion = 16;
+// v17 (AI-assisted): tie levels of detail (see ExtHeader, TieLodGroup, RunLod): Header::ext_offset
+// (was tod_pad, 0) points at an ExtHeader. Otherwise v16; an older reader would draw both versions
+// of the LOD groups.
+constexpr uint32_t kVersion = 17;
+// (AI-assisted) the first version with the extension header (tie levels of detail)
+constexpr uint32_t kTieLodVersion = 17;
 // (AI-assisted) the first version with the time of day table
 constexpr uint32_t kTodVersion = 16;
 // (AI-assisted) the first version whose shrub chunks carry their PS2 distance
@@ -60,7 +65,8 @@ struct Header {
   uint32_t tod_offset;
   uint32_t tod_color_count;
   uint32_t tod_mul_count;
-  uint32_t tod_pad;
+  // (AI-assisted) v17: absolute offset of the ExtHeader (0: none; before v17 always 0)
+  uint32_t ext_offset;
   uint32_t num_textures;
   uint32_t textures_offset;  // Texture[num_textures]
   uint32_t num_chunks;
@@ -159,6 +165,42 @@ struct VisRun {
   uint32_t index_count;  // the draw's next index_count indices
 };
 static_assert(sizeof(VisRun) == 8);
+
+/*!
+ * (AI-assisted) v17: tie levels of detail. The PS2 draws each tie instance with one of its
+ * prototype's four geometries, picked by distance (prototype-bucket-tie dists; geometry 3 beyond
+ * the far-plane). A file keeps two versions of some instance groups (a tie prototype in one
+ * visibility node, or one wind instance): the near one (geometry 0) and the far one (geometry 3, or
+ * nothing), in the same chunks, as visibility runs of their own (RunLod: per VisRun of the file, in
+ * file order). The runtime draws a group's near runs while the camera is within its distance of
+ * the group's sphere (|camera - center| < dist + radius, with hysteresis), else its far runs. The
+ * runs of one draw are ordered near, always, far. Groups not listed (kRunLodAlways runs) have one
+ * version (geometry 3, as before v17).
+ */
+constexpr char kExtMagic[4] = {'C', '3', 'L', 'X'};
+struct ExtHeader {
+  char magic[4];               // kExtMagic
+  uint32_t size;               // sizeof(ExtHeader) (later versions may append fields)
+  uint32_t lod_group_count;    // TieLodGroup[]
+  uint32_t lod_groups_offset;  // absolute
+  uint32_t run_lod_count;      // RunLod[]: one per VisRun of the file, from runs_offset on
+  uint32_t run_lod_offset;     // absolute
+  uint32_t runs_offset;        // where the file's VisRuns start (RunLod i is VisRun i from here)
+  uint32_t pad;
+};
+static_assert(sizeof(ExtHeader) == 32);
+struct TieLodGroup {
+  float bsphere[4];  // world: x, y, z, radius (both versions)
+  float dist;        // the near version up to this distance of the sphere (game units)
+};
+static_assert(sizeof(TieLodGroup) == 20);
+constexpr uint8_t kRunLodAlways = 0, kRunLodNear = 1, kRunLodFar = 2;
+struct RunLod {
+  uint16_t group;  // TieLodGroup index (0xffff with kRunLodAlways)
+  uint8_t lod;     // kRunLod*
+  uint8_t pad;
+};
+static_assert(sizeof(RunLod) == 4);
 
 /*!
  * (AI-assisted) v16: a time of day color: its rgb in each of the game's 8 palettes, GS units

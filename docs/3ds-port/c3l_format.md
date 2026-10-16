@@ -19,7 +19,12 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 |---|---|---|
 | `--tfrag-geo N` | 0 | tfrag level of detail near the camera. 0 is the most detailed, 2 the least (2 has holes). (AI-assisted) 0 since v16, as the PS2 near the camera: 1 cut Volcanic Crater's yellow pools into polygons (village3 +1.1% triangles, +50 KB of vertices). |
 | `--far-tfrag-geo N` | 2 | tfrag level of detail for far away cells (-1: no far version). |
-| `--tie-geo N` | 3 | tie level of detail. 0 is the most detailed, 3 the least. |
+| `--tie-geo N` | 3 | tie level of detail (the far version with v17 levels of detail). 0 is the most detailed, 3 the least. |
+| `--no-tie-lod` | off | (AI-assisted, v17) no near tie versions: every tie at `--tie-geo` (v16's ties). See "Tie levels of detail". |
+| `--tie-near-geo N` | 0 | (v17) geometry of the near tie versions. |
+| `--tie-lod-budget-kb K` | per level | (v17) extra vertex and index data for near versions per level; default: the level's planned budget (`kTieLodBudgets` in main.cpp), else every group. |
+| `--tie-lod-min-angle A`, `--tie-lod-view-m M` | 0.002, 15 | (v17) a group gets a near version when its shape error seen from the larger of its radius and M meters is at least A radians. |
+| `--tie-lod-default-m M` | 60 | (v17) near version distance of groups without a PS2 distance (wind instances). |
 | `--palette N` | 1 | time of day palette baked into the vertex colors (0..7): what a v16 runtime shows until its first blend, and older runtimes always. |
 | `--no-tod` | off | (AI-assisted, v16) no time of day table: the vertex colors stay the baked palette. See "Time of day". |
 | `--max-tex N` | 128 | maximum texture size. Larger textures are box-filtered down. |
@@ -188,10 +193,11 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 16 (7..15 still load; v12: merc rewritten vertices; v13: vista
+  char magic[4] = "C3LV"; u32 version = 17 (7..16 still load; v12: merc rewritten vertices; v13: vista
   tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"; v16: time
-  of day); char level_name[16]; (AI-assisted, v16) u32 tod_offset, tod_color_count, tod_mul_count, pad
-  (the end of the 32 byte level name before: zero)
+  of day; v17: tie levels of detail); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
+  tod_color_count, tod_mul_count, (v17) ext_offset (ExtHeader, 0: none; the end of the 32 byte level
+  name before: zero)
   u32 num_textures, textures_offset
   u32 num_chunks, chunks_offset
   u32 vertex_data_offset, vertex_data_size      Vertex[]
@@ -335,6 +341,56 @@ vertices took ~7 ms there (hence 4000); 29.9 fps throughout. Log: `[ctr] <level>
 load, `[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...)`
 with the stats. Host: env `CTR_TOD_LOG=1` logs the weights every 30 frames; the pad script command
 `tod H` sets the game's clock (pictures at a time of day).
+
+## Tie levels of detail (v17)
+
+(AI-assisted.) The PS2 has four geometries per tie prototype (`prototype-bucket-tie geometry[4]`)
+and picks one per instance and frame by its distance (`draw-inline-array-instance-tie`: the view
+depth of the instance's sphere minus its radius against the prototype's `dists`): geometry 0 within
+8 m (32 x the near clip distance) or where the instance needs clipping, geometry 1 up to the
+mid-plane, geometry 2 up to the far-plane (morphing toward geometry 3 on the way), geometry 3
+beyond. The far-planes are 45-90 m for most prototypes (`tools/ctr_level_converter/tie_ps2_dists.inc`,
+1188 prototypes, from the decompiler's BSP data). Geometry 1 is geometry 0 in every level, geometry 2
+~90% of its triangles, geometry 3 ~30-45%. The PC renderer (Tie3) draws one geometry everywhere
+(`lod_tie`, 0: the most detailed); v16 files had geometry 3 everywhere (the village3 warp gate ring a
+pentagon).
+
+v17 keeps two versions of an instance group (a prototype in one visibility node of the tie tree, up
+to 8 instances; or one wind instance): the near version (geometry 0) and the far version (geometry 3,
+or nothing: some prototypes have no geometry 3). Both are in one chunk (the group's triangles go to
+the cell of the group's center) and share its vertices: geometry 3's corners are geometry 0
+vertices (all of them, every level), so the far version costs only its indices. Each version is a
+visibility run of its own, the runs of a draw in the order near, one-version, far (so drawing either
+version of all of a chunk's groups is one piece per draw). `ExtHeader` (at Header::ext_offset):
+`{"C3LX", size 32, lod_group_count, lod_groups_offset, run_lod_count, run_lod_offset, runs_offset,
+pad}`; `TieLodGroup {float bsphere[4]; float dist}` (dist: the prototype's PS2 far-plane, game
+units); `RunLod {u16 group; u8 lod; u8 pad}` per VisRun of the file from runs_offset on (lod 0: one
+version, 1 near, 2 far). The vista tier copies the far versions.
+
+Which groups: a group whose shape error (the larger one-sided Hausdorff distance between the two
+versions, sampled at the triangles' corners and centers) seen from the larger of its radius and
+15 m is at least 0.002 rad (half a pixel) is a candidate; nearly all are (geometry 3 is coarse).
+Their cost is the extra vertex and index data (near vertices the far version doesn't use, near
+indices, ~64 bytes of runs); every candidate is taken unless the level has a budget (`kTieLodBudgets`),
+then the most error per byte first. Budgets (Oct 17), planned so that every pair of neighbouring
+levels keeps >= 3 MB of linear memory free with the 512 KB vertex stream buffers (2 MB more than
+before): citadel 5800 KB, firecanyon 6000, jungle 4500, lavatube 5700, misty 4700, ogre 3300,
+rolling 2400, swamp 4900, village1 4500, village2 2500; every group in the others. The converter
+logs per level the groups, triangles, cost and the prototypes left coarse (`tie levels of detail:`
+lines).
+
+Sizes (Oct 17, vertex + index data added): village3 +1954 KB (every group), snow +8230 KB (every
+group), ogre +3268 KB (758 of 1210 candidates), lavatube +5504 KB (2874 of 5772), village2 +2461 KB
+(792 of 1110); all levels' files 118 -> 162 MB; conversion of all levels ~60 s.
+
+Runtime (`CtrLevel.cpp`, config `tie_lod`): per level draw, each group's version: near while the
+camera is within dist x detail_scale (x 0.5..1 with auto_detail: half while the GPU is busy) of the
+group's sphere (10% hysteresis; every group every frame, so turning the camera switches nothing).
+A chunk with versioned runs is drawn run by run; a run of the other version is hidden and never
+drawn along with its neighbours (the small-gap merge), so the two versions are never on top of each
+other. Visibility bits, run culling, static_cmdlists (a version change is a new draw list for one
+frame), cull_ties (each version oriented on its own), time of day (the chunk's vertices are both
+versions') and impostors (cards show the far version) work as before.
 
 ## Merc
 

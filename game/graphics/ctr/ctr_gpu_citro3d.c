@@ -168,7 +168,14 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
    GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB565) |                                          \
    GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB565) | GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO))
 
-#define VBUF_BYTES (1536 * 1024)
+/* (AI-assisted) The frame's immediate vertices (sprites, HUD, sky, shadow volumes, the ocean),
+ * two of them with the pipeline. 512 KB since Oct 17 (was 1536 KB): the largest frame measured
+ * used ~100 KB (level_pairs.pad, Azahar) and the worst case adds up to ~360 KB (2176 sprites
+ * 204 KB, the shadow volumes' 165 KB reservation, an ocean reservation of 152 KB is returned in
+ * part); a draw that doesn't fit is dropped and counted (log: "vertex buffer peak N of 512 KB",
+ * "N draws DROPPED (vertex buffer full)"), never written past the end. Frees 2 MB of linear
+ * memory for the levels (c3l v17 tie levels of detail). */
+#define VBUF_BYTES (512 * 1024)
 #define MAX_STAGING 1024
 #define MAX_TEXTURES 2048
 #define MAX_POOLS 16
