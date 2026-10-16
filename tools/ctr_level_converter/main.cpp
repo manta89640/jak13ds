@@ -20,12 +20,14 @@
 #include "common/custom_data/Tfrag3Data.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
+#include "common/util/Timer.h"
 #include "common/util/Serializer.h"
 #include "common/util/compress.h"
 
 #include "c3l_opt.h"
 #include "c3l_pack.h"
 #include "ctr_texture.h"
+#include "tie_lod.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "third-party/BS_thread_pool.hpp"
@@ -42,6 +44,19 @@ struct Options {
   int tfrag_geo = 0;  // 0 = most detailed, 2 = least (2 has large holes)
   int far_tfrag_geo = 2;  // coarse version for far away cells (-1: none)
   int tie_geo = 3;    // 0 = most detailed, 3 = least
+  // (AI-assisted) v17 tie levels of detail (tie_lod.h): the instance groups whose shape changes
+  // most also get the tie_near_geo version (geo 0), drawn up to their PS2 far-plane (beyond it the
+  // PS2 too draws geometry 3), within tie_lod_budget_kb of extra vertex and index data per level
+  // (< 0: the level's budget from kTieLodBudgets, else all groups)
+  bool tie_lod = true;
+  int tie_near_geo = 0;
+  float tie_lod_budget_kb = -1.f;
+  // smallest shape error worth a near version, as an angle (radians) at the larger of the group's
+  // radius and tie_lod_view_m meters (0.002: half a pixel on the top screen)
+  float tie_lod_min_angle = 0.002f;
+  float tie_lod_view_m = 15.f;
+  // the switch distance of groups without a PS2 distance (wind instances), meters
+  float tie_lod_default_m = 60.f;
   int palette = -1;   // time of day palette to bake (0..7; -1: auto_palette)
   // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
   // runtime blends the palettes with the game's weights (off: the baked palette only)
@@ -216,6 +231,10 @@ struct SrcTri {
   // (AI-assisted) v15: the draw key before the atlas (the vista tier copies with it; UINT32_MAX:
   // draw_key)
   u32 orig_key = UINT32_MAX;
+  // (AI-assisted) v17 tie levels of detail: c3l::kRunLodNear / kRunLodFar version of LOD group
+  // lod_group (Converter::lod_groups), or kRunLodAlways
+  u8 lod = 0;
+  u32 lod_group = UINT32_MAX;
 };
 
 struct DrawKey {
@@ -819,9 +838,43 @@ struct Converter {
     }
   }
 
+  // (AI-assisted) v17 tie levels of detail (tie_lod.h): the selected instance groups (group key ->
+  // index into lod_groups), and per group its detail class (mark_small, from both versions)
+  std::unordered_map<u64, u32> lod_group_of;
+  std::vector<c3l::TieLodGroup> lod_groups;
+  std::vector<u32> lod_group_detail;
+  // the tree being added (add_tie_tree): its index in the level's tree list, and which version:
+  // -1 without levels of detail (every group, as before v17), 0 the near geometry (only the
+  // selected groups), 1 the far geometry (every group; the selected ones as their far version)
+  u32 cur_tree = 0;
+  int cur_lod_slot = -1;
+  size_t lod_tris[2] = {0, 0};
+  // a group's triangles [first, end) were added: their LOD version and detail class (selected
+  // groups), else mark_small. Returns false for a group the near tree doesn't add.
+  bool lod_wanted(u64 key) const {
+    return cur_lod_slot != 0 || lod_group_of.count(key);
+  }
+  void lod_mark(u64 key, size_t first) {
+    auto it = cur_lod_slot >= 0 ? lod_group_of.find(key) : lod_group_of.end();
+    if (it == lod_group_of.end()) {
+      mark_small(first);
+      return;
+    }
+    const u32 detail = lod_group_detail[it->second];
+    for (size_t i = first; i < tris.size(); i++) {
+      tris[i].lod = cur_lod_slot == 0 ? c3l::kRunLodNear : c3l::kRunLodFar;
+      tris[i].lod_group = it->second;
+      tris[i].detail = detail;
+    }
+    small_tris += detail ? tris.size() - first : 0;
+    lod_tris[cur_lod_slot] += tris.size() - first;
+  }
+
   void add_tie_tree(tfrag3::TieTree& tree) {
     const size_t tree_first_tri = tris.size();
-    tree.unpack();
+    if (tree.unpacked.indices.empty()) {
+      tree.unpack();  // (AI-assisted) once: unpack() appends the indices again
+    }
     u32 base = verts.size();
     for (auto& v : tree.unpacked.vertices) {
       SrcVertex sv;
@@ -851,9 +904,15 @@ struct Converter {
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (auto& g : d.vis_groups) {
         size_t first_tri = tris.size();
+        // (AI-assisted) v17: the group's levels of detail
+        const u64 lkey = tie_lod::static_key(cur_tree, g.vis_idx_in_pc_bvh, g.tie_proto_idx);
+        if (!lod_wanted(lkey)) {
+          idx += g.num_inds;
+          continue;
+        }
         cur_vis = vis_id(tree.bvh, g.vis_idx_in_pc_bvh);  // (AI-assisted) up to 8 instances
         add_strips(tree.unpacked.indices, idx, g.num_inds, base, key);
-        mark_small(first_tri);
+        lod_mark(lkey, first_tri);
         idx += g.num_inds;
       }
       cur_vis = 0xffff;
@@ -865,6 +924,12 @@ struct Converter {
       u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
       size_t idx = 0;
       for (const auto& g : d.instance_groups) {
+        // (AI-assisted) v17: the instance's levels of detail
+        const u64 lkey = tie_lod::wind_key(cur_tree, g.instance_idx);
+        if (!lod_wanted(lkey)) {
+          idx += g.num;
+          continue;
+        }
         const auto& mat = tree.wind_instance_info.at(g.instance_idx).matrix;
         std::vector<u32> local;  // strip indices into new world space vertices
         std::unordered_map<u32, u32> remap;
@@ -897,7 +962,7 @@ struct Converter {
         add_strips(local, 0, local.size(), 0, key);
         cur_vis = 0xffff;
         wind_tris += tris.size() - first_tri;
-        mark_small(first_tri);
+        lod_mark(lkey, first_tri);
         idx += g.num;
       }
     }
@@ -1970,6 +2035,10 @@ void optimize_draws(Converter& cv,
       if (ta.tier != tb.tier && ta.tier && tb.tier && ta.tier + tb.tier == 3) {
         continue;
       }
+      // (AI-assisted) v17: nor the near and far versions of a tie group
+      if (ta.lod_group != UINT32_MAX && ta.lod_group == tb.lod_group && ta.lod != tb.lod) {
+        continue;
+      }
       if (ta.draw_key == tb.draw_key) {
         continue;
       }
@@ -2385,6 +2454,189 @@ void optimize_draws(Converter& cv,
   }
 }
 
+
+// (AI-assisted) v17 tie levels of detail: the levels whose near versions for every group don't fit
+// in linear memory next to their neighbours (KB of extra vertex and index data, estimated as in
+// select_tie_lods; the others get every group). Planned Oct 17 from Azahar's linear free memory
+// with level pairs loaded (level_pairs.pad, 3ds-sdcard v16 levels; worst village3 + ogre 9.1 MB)
+// plus the 2 MB the smaller vertex stream buffers freed, the rule: every pair of neighbouring levels
+// keeps >= 3 MB (+ 256 KB margin). Pairs the pad doesn't load were estimated from the levels' sizes
+// (village2 + rolling ~6.5 MB, village2 + ogre ~7.3 MB before: the tightest). The groups left
+// coarse are logged ("left coarse").
+struct TieLodBudget {
+  const char* level;
+  float kb;
+};
+constexpr TieLodBudget kTieLodBudgets[] = {
+    {"citadel", 5800},  {"firecanyon", 6000}, {"jungle", 4500}, {"lavatube", 5700},
+    {"misty", 4700},    {"ogre", 3300},       {"rolling", 2400}, {"swamp", 4900},
+    {"village1", 4500}, {"village2", 2500},
+};
+
+// (AI-assisted) v17 tie levels of detail: statistics for the log
+struct TieLodStats {
+  size_t groups = 0, candidates = 0, selected = 0, no_dist = 0;
+  size_t near_tris = 0, far_tris = 0;          // all groups: near / far geometry
+  size_t sel_near_tris = 0, sel_far_tris = 0;  // the selected groups
+  double cost_kb = 0, cost_all_kb = 0;         // estimated extra vertex + index data
+  double budget_kb = 0;
+  double ms = 0;
+  // per prototype: groups selected / candidates, near triangles of the candidates left coarse
+  struct Proto {
+    u32 selected = 0, candidates = 0;
+    size_t left_tris = 0;
+    float worst_left = 0;  // largest shape error left coarse (meters)
+  };
+  std::map<std::string, Proto> protos;
+};
+
+/*!
+ * (AI-assisted) v17: picks the tie instance groups that get a near version (geometry
+ * opt.tie_near_geo, drawn up to the prototype's PS2 far-plane; the far version is geometry
+ * opt.tie_geo). Every group whose shape changes visibly is a candidate: its shape error
+ * (tie_lod::shape_error) seen from the larger of its radius and tie_lod_view_m is at least
+ * tie_lod_min_angle. The candidates with the most error per byte of extra data (near vertices not
+ * in the far version, near indices) are taken until tie_lod_budget_kb is used.
+ */
+void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, TieLodStats* st) {
+  Timer timer;
+  std::unordered_map<u64, tie_lod::Group> groups;
+  for (int slot = 0; slot < 2; slot++) {
+    auto& trees = level.tie_trees[slot ? opt.tie_geo : opt.tie_near_geo];
+    for (u32 t = 0; t < trees.size(); t++) {
+      if (trees[t].unpacked.indices.empty()) {
+        trees[t].unpack();
+      }
+      tie_lod::collect(trees[t], t, slot, &groups);
+    }
+  }
+  std::vector<std::pair<u64, const tie_lod::Group*>> list;
+  for (const auto& [k, g] : groups) {
+    list.push_back({k, &g});
+  }
+  std::sort(list.begin(), list.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<float> err(list.size());
+  {
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(list.size(), [&](size_t a, size_t b) {
+      for (size_t i = a; i < b; i++) {
+        err[i] = tie_lod::shape_error(*list[i].second);
+      }
+    });
+    pool.wait_for_tasks();
+  }
+  struct Cand {
+    size_t i;
+    double value;
+    u64 cost;
+  };
+  std::vector<Cand> cands;
+  std::vector<std::string> names(list.size());
+  std::vector<float> dists(list.size());
+  for (size_t i = 0; i < list.size(); i++) {
+    const auto& g = *list[i].second;
+    const u32 tree = (u32)((list[i].first >> 40) & 0x7fffff);
+    const auto& far_trees = level.tie_trees[opt.tie_geo];
+    names[i] = g.proto != 0xffff && tree < far_trees.size() &&
+                       g.proto < far_trees[tree].proto_names.size()
+                   ? far_trees[tree].proto_names[g.proto]
+                   : std::string("(wind)");
+    float mid = 0, far = 0;
+    if (!tie_lod::ps2_dists(level.level_name, names[i], &mid, &far)) {
+      far = opt.tie_lod_default_m;
+      st->no_dist += g.proto != 0xffff;
+    }
+    dists[i] = far * 4096.f;
+    st->groups++;
+    st->near_tris += g.tris[0].size();
+    st->far_tris += g.tris[1].size();
+    if (g.tris[0].empty()) {
+      continue;
+    }
+    const auto bs = tie_lod::bounds(g);
+    const double benefit = err[i] / std::max(bs[3], opt.tie_lod_view_m * 4096.f);
+    if (benefit < opt.tie_lod_min_angle) {
+      continue;
+    }
+    // extra data: the near vertices the far version doesn't have (its corners are near ones),
+    // the near indices, a visibility run per draw and the group
+    // (vertices: position and texture coordinates; colors are the same at both)
+    std::set<std::array<float, 5>> p0(g.corners[0].begin(), g.corners[0].end());
+    size_t shared = 0;
+    for (const auto& c : std::set<std::array<float, 5>>(g.corners[1].begin(), g.corners[1].end())) {
+      shared += p0.count(c);
+    }
+    const u64 cost = (p0.size() - shared) * sizeof(c3l::Vertex) +
+                     g.tris[0].size() * 3 * sizeof(u16) + 64;
+    cands.push_back({i, benefit / cost, cost});
+    st->cost_all_kb += cost / 1024.0;
+    auto& pr = st->protos[names[i]];
+    pr.candidates++;
+  }
+  st->candidates = cands.size();
+  std::sort(cands.begin(), cands.end(), [&](const Cand& a, const Cand& b) {
+    return a.value != b.value ? a.value > b.value : list[a.i].first < list[b.i].first;
+  });
+  double budget_kb = opt.tie_lod_budget_kb;
+  if (budget_kb < 0) {
+    budget_kb = 1e12;  // every group
+    for (const auto& b : kTieLodBudgets) {
+      if (level.level_name == b.level) {
+        budget_kb = b.kb;
+      }
+    }
+  }
+  st->budget_kb = budget_kb;
+  const u64 budget = (u64)(budget_kb * 1024.0);
+  u64 used = 0;
+  std::vector<u8> picked(list.size(), 0);
+  for (const auto& c : cands) {
+    if (used + c.cost <= budget) {
+      used += c.cost;
+      picked[c.i] = 1;
+    } else {
+      auto& pr = st->protos[names[c.i]];
+      pr.left_tris += list[c.i].second->tris[0].size();
+      pr.worst_left = std::max(pr.worst_left, err[c.i] / 4096.f);
+    }
+  }
+  st->cost_kb = used / 1024.0;
+  // the groups in key order (deterministic indices)
+  for (size_t i = 0; i < list.size(); i++) {
+    if (!picked[i]) {
+      continue;
+    }
+    const auto& g = *list[i].second;
+    const auto bs = tie_lod::bounds(g);
+    c3l::TieLodGroup lg{};
+    for (int c = 0; c < 4; c++) {
+      lg.bsphere[c] = bs[c];
+    }
+    lg.dist = dists[i];
+    cv->lod_group_of[list[i].first] = (u32)cv->lod_groups.size();
+    cv->lod_groups.push_back(lg);
+    cv->lod_group_detail.push_back(bs[3] < opt.detail_radius * 4096.f   ? 1
+                                   : bs[3] < opt.medium_radius * 4096.f ? 2
+                                                                        : 0);
+    st->selected++;
+    st->sel_near_tris += g.tris[0].size();
+    st->sel_far_tris += g.tris[1].size();
+    st->protos[names[i]].selected++;
+  }
+  if (cv->lod_groups.size() > 0xfffe) {
+    // (RunLod::group is 16 bits)
+    lg::warn("{}: {} tie LOD groups, only levels of detail for the first 65534",
+             level.level_name, cv->lod_groups.size());
+    cv->lod_groups.resize(0xfffe);
+    cv->lod_group_detail.resize(0xfffe);
+    for (auto it = cv->lod_group_of.begin(); it != cv->lod_group_of.end();) {
+      it = it->second >= 0xfffe ? cv->lod_group_of.erase(it) : std::next(it);
+    }
+  }
+  st->ms = timer.getMs();
+}
+
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Options opt = opt_in;
   if (is_interior(in.stem().string())) {
@@ -2477,11 +2729,25 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   const size_t far_tris = cv.tris.size() - far_first;
   cv.cur_tier = 0;
+  TieLodStats lstats;
   if (!opt.no_tie && !opt.merc_only) {
-    for (auto& tree : level.tie_trees[opt.tie_geo]) {
-      cv.add_tie_tree(tree);
-      tie_trees++;
+    // (AI-assisted) v17: which instance groups get a near version (select_tie_lods)
+    const bool lod = opt.tie_lod && opt.tie_near_geo >= 0 && opt.tie_near_geo < opt.tie_geo &&
+                     level.tie_trees[opt.tie_near_geo].size() == level.tie_trees[opt.tie_geo].size();
+    if (lod) {
+      select_tie_lods(level, opt, &cv, &lstats);
     }
+    for (u32 t = 0; t < level.tie_trees[opt.tie_geo].size(); t++) {
+      cv.cur_tree = t;
+      cv.cur_lod_slot = lod ? 1 : -1;
+      cv.add_tie_tree(level.tie_trees[opt.tie_geo][t]);
+      tie_trees++;
+      if (lod && !cv.lod_groups.empty()) {
+        cv.cur_lod_slot = 0;
+        cv.add_tie_tree(level.tie_trees[opt.tie_near_geo][t]);
+      }
+    }
+    cv.cur_lod_slot = -1;
   }
   int shrub_trees = 0;
   if (!opt.no_shrub && !opt.merc_only) {
@@ -2527,10 +2793,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   for (u32 i = 0; i < cv.tris.size(); i++) {
     const auto& t = cv.tris[i];
     float cx = 0, cy = 0, cz = 0;
-    for (int k = 0; k < 3; k++) {
-      cx += cv.verts[t.v[k]].x;
-      cy += cv.verts[t.v[k]].y;
-      cz += cv.verts[t.v[k]].z;
+    if (t.lod_group != UINT32_MAX) {
+      // (AI-assisted) v17: a LOD group's triangles (both versions) in its center's cell: one chunk
+      // holds both, and they share its vertices (the far corners are near ones)
+      const auto& g = cv.lod_groups[t.lod_group];
+      cx = 3 * g.bsphere[0];
+      cy = 3 * g.bsphere[1];
+      cz = 3 * g.bsphere[2];
+    } else {
+      for (int k = 0; k < 3; k++) {
+        cx += cv.verts[t.v[k]].x;
+        cy += cv.verts[t.v[k]].y;
+        cz += cv.verts[t.v[k]].z;
+      }
     }
     const float cell = cell_of_detail((int)t.detail);
     // (AI-assisted) detail + 4 * tier + 64 * shrub distance class
@@ -2568,7 +2843,17 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         if (ra != rb) {
           return ra < rb;
         }
-        return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
+        if (ta.draw_key != tb.draw_key) {
+          return ta.draw_key < tb.draw_key;
+        }
+        // (AI-assisted) v17: a draw's near versions, then the triangles of one version, then the
+        // far versions (c3l::RunLod), each by visibility id (BVH order: near runs drawn together
+        // are mostly neighbours), then LOD group
+        constexpr u8 kLodRank[3] = {1, 0, 2};
+        if (ta.lod != tb.lod) {
+          return kLodRank[ta.lod] < kLodRank[tb.lod];
+        }
+        return ta.vis != tb.vis ? ta.vis < tb.vis : ta.lod_group < tb.lod_group;
       });
       size_t pos = 0;
       while (pos < tri_ids.size()) {
@@ -2653,6 +2938,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::map<std::tuple<int, int, u32>, std::vector<u32>> groups;
       for (u32 t : cp.tris) {
         const auto& tr = cv.tris[t];
+        if (tr.lod == c3l::kRunLodNear) {
+          continue;  // (AI-assisted) v17: the vista copies the far versions
+        }
         float cx = 0, cz = 0;
         for (int k = 0; k < 3; k++) {
           cx += cv.verts[tr.v[k]].x / 3;
@@ -2740,6 +3028,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           SrcTri nt = cv.tris[ids[0]];
           nt.draw_key = src_key_id;  // (AI-assisted) not the atlas's
           nt.orig_key = UINT32_MAX;
+          nt.lod = c3l::kRunLodAlways;  // (AI-assisted) v17: one version
+          nt.lod_group = UINT32_MAX;
           for (int k = 0; k < 3; k++) {
             const u32 r = out_idx[i + k];
             auto [it, fresh] = made.emplace(r, (u32)cv.verts.size());
@@ -2918,6 +3208,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::Draw> out_draws;
   // (AI-assisted) visibility runs of all chunks (c3l::VisRun), and each chunk's first one
   std::vector<c3l::VisRun> out_runs;
+  std::vector<c3l::RunLod> out_run_lods;  // (AI-assisted) v17: one per out_runs
+  size_t lod_runs = 0, lod_chunks = 0;
   std::vector<u32> chunk_first_run;
   size_t vis_tris = 0;
   VcacheStats vc_before, vc_after;
@@ -3016,7 +3308,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       ch.first_draw = out_draws.size();
       u32 cur_key = UINT32_MAX;
       std::vector<c3l::VisRun> runs;
-      bool any_vis = false;
+      std::vector<c3l::RunLod> run_lods;  // (AI-assisted) v17
+      bool any_vis = false, any_lod = false;
       for (size_t i = 0; i < cp.tris.size(); i++) {
         const auto& t = cv.tris[cp.tris[i]];
         const bool new_draw = t.draw_key != cur_key;
@@ -3035,14 +3328,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           out_indices.push_back(local.at(t.v[k]));
         }
         out_draws.back().index_count += 3;
-        if (new_draw || runs.back().vis != t.vis) {
+        // (AI-assisted) v17: a run per LOD group version too (run_lods: c3l::RunLod)
+        const u16 lg = t.lod ? (u16)t.lod_group : (u16)0xffff;
+        if (new_draw || runs.back().vis != t.vis || run_lods.back().group != lg ||
+            run_lods.back().lod != t.lod) {
           runs.push_back(c3l::VisRun{(u16)(out_draws.size() - 1 - ch.first_draw), t.vis, 0});
+          run_lods.push_back(c3l::RunLod{lg, t.lod, 0});
         }
         runs.back().index_count += 3;
         if (t.vis != 0xffff) {
           any_vis = true;
           vis_tris++;
         }
+        any_lod |= t.lod != c3l::kRunLodAlways;
       }
       ch.draw_count = out_draws.size() - ch.first_draw;
       // (AI-assisted) vertex cache order (meshoptimizer). Only inside a visibility run (the runs
@@ -3180,11 +3478,16 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           }
         }
       }
-      // the runs only if some can be hidden (the offset is made absolute at write)
-      chunk_first_run.push_back(any_vis ? (u32)out_runs.size() : 0);
-      ch.vis_run_count = any_vis ? (u32)runs.size() : 0;
-      if (any_vis) {
+      // the runs only if some can be hidden (the offset is made absolute at write); (AI-assisted)
+      // v17: or there are levels of detail
+      const bool keep_runs = any_vis || any_lod;
+      chunk_first_run.push_back(keep_runs ? (u32)out_runs.size() : 0);
+      ch.vis_run_count = keep_runs ? (u32)runs.size() : 0;
+      if (keep_runs) {
         out_runs.insert(out_runs.end(), runs.begin(), runs.end());
+        out_run_lods.insert(out_run_lods.end(), run_lods.begin(), run_lods.end());
+        lod_runs += any_lod ? runs.size() : 0;
+        lod_chunks += any_lod;
       }
       chunks.push_back(ch);
     }
@@ -3285,8 +3588,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   strncpy(hdr.level_name, level.level_name.c_str(), sizeof(hdr.level_name) - 1);
   hdr.num_chunks = chunks.size();
   // (AI-assisted) the visibility runs first: the chunks point at them
+  u32 runs_offset = 0;
   {
-    const u32 runs_offset = out_runs.empty() ? 0 : append(buf, out_runs.data(), out_runs.size());
+    runs_offset = out_runs.empty() ? 0 : append(buf, out_runs.data(), out_runs.size());
     for (size_t i = 0; i < chunks.size(); i++) {
       chunks[i].vis_runs_offset =
           chunks[i].vis_run_count ? runs_offset + chunk_first_run[i] * (u32)sizeof(c3l::VisRun)
@@ -3302,6 +3606,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     buf.insert(buf.end(), (const u8*)cv.tod_muls.data(),
                (const u8*)(cv.tod_muls.data() + cv.tod_muls.size()));
     align16(buf);
+  }
+  // (AI-assisted) v17: tie levels of detail (c3l::ExtHeader)
+  if (!cv.lod_groups.empty() && !out_runs.empty() && out_run_lods.size() == out_runs.size()) {
+    c3l::ExtHeader eh{};
+    memcpy(eh.magic, c3l::kExtMagic, 4);
+    eh.size = sizeof(eh);
+    hdr.ext_offset = append(buf, &eh, 1);
+    eh.lod_group_count = cv.lod_groups.size();
+    eh.lod_groups_offset = append(buf, cv.lod_groups.data(), cv.lod_groups.size());
+    eh.run_lod_count = out_run_lods.size();
+    eh.run_lod_offset = append(buf, out_run_lods.data(), out_run_lods.size());
+    eh.runs_offset = runs_offset;
+    memcpy(buf.data() + hdr.ext_offset, &eh, sizeof(eh));
   }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
   hdr.vertex_data_size = out_verts.size() * sizeof(c3l::Vertex);
@@ -3380,6 +3697,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     if (hdr.tod_offset) {
       starts.push_back({hdr.tod_offset, "time of day"});  // (AI-assisted) v16
     }
+    if (hdr.ext_offset) {
+      starts.push_back({hdr.ext_offset, "tie lod"});  // (AI-assisted) v17
+    }
     if (!out_runs.empty()) {
       starts.push_back({(u32)sizeof(c3l::Header), "vis runs"});
     }
@@ -3457,6 +3777,33 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
       merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, file.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
+  if (lstats.groups) {
+    // (AI-assisted) v17 tie levels of detail
+    lg::info("{}: tie levels of detail: {} of {} instance groups ({} candidates, {} without a PS2 "
+             "distance) have a near version (geo {}): {} near + {} far tris (all groups: {} near, {} "
+             "far), estimated +{:.0f} KB (budget {}; all candidates {:.0f} KB); {} LOD runs "
+             "in {} chunks; {} near / {} far tris added; {:.0f} ms",
+             level.level_name, lstats.selected, lstats.groups, lstats.candidates, lstats.no_dist,
+             opt.tie_near_geo, lstats.sel_near_tris, lstats.sel_far_tris, lstats.near_tris,
+             lstats.far_tris, lstats.cost_kb,
+             lstats.budget_kb >= 1e11 ? std::string("all groups") : fmt::format("{:.0f} KB", lstats.budget_kb),
+             lstats.cost_all_kb, lod_runs,
+             lod_chunks, cv.lod_tris[0], cv.lod_tris[1], lstats.ms);
+    std::vector<std::pair<std::string, TieLodStats::Proto>> left(lstats.protos.begin(),
+                                                                 lstats.protos.end());
+    std::sort(left.begin(), left.end(),
+              [](const auto& a, const auto& b) { return a.second.left_tris > b.second.left_tris; });
+    std::string l;
+    for (size_t i = 0; i < left.size() && i < 12 && left[i].second.left_tris; i++) {
+      l += fmt::format("{}{} ({} of {} groups coarse, {} tris, error up to {:.2f} m)",
+                       i ? ", " : "", left[i].first,
+                       left[i].second.candidates - left[i].second.selected,
+                       left[i].second.candidates, left[i].second.left_tris,
+                       left[i].second.worst_left);
+    }
+    lg::info("{}: tie levels of detail: left coarse (over budget): {}", level.level_name,
+             l.empty() ? "none" : l);
+  }
   if (cv.shrub_tris && opt.shrub_ps2_dist) {
     // (AI-assisted) shrub triangles by distance class
     std::string cl;
@@ -3645,6 +3992,21 @@ int main(int argc, char** argv) {
   app.add_flag("--all", all, "convert every .fr3 in the input folder");
   app.add_option("--tfrag-geo", opt.tfrag_geo, "tfrag level of detail (0 = most detailed, 2)");
   app.add_option("--tie-geo", opt.tie_geo, "tie level of detail (0 = most detailed, 3)");
+  bool no_tie_lod = false;
+  app.add_flag("--no-tie-lod", no_tie_lod,
+               "(AI-assisted, v17) no near versions of ties: all at --tie-geo, as v16");
+  app.add_option("--tie-near-geo", opt.tie_near_geo,
+                 "(v17) geometry of the ties' near versions (0 = most detailed)");
+  app.add_option("--tie-lod-budget-kb", opt.tie_lod_budget_kb,
+                 "(v17) extra vertex and index data for near tie versions per level (KB; default: "
+                 "the level's planned budget, else all groups)");
+  app.add_option("--tie-lod-min-angle", opt.tie_lod_min_angle,
+                 "(v17) smallest shape error worth a near version (radians, at the larger of the "
+                 "group's radius and --tie-lod-view-m)");
+  app.add_option("--tie-lod-view-m", opt.tie_lod_view_m,
+                 "(v17) viewing distance for the shape error (meters)");
+  app.add_option("--tie-lod-default-m", opt.tie_lod_default_m,
+                 "(v17) near version distance of ties without a PS2 distance (wind; meters)");
   app.add_option("--far-tfrag-geo", opt.far_tfrag_geo,
                  "tfrag level of detail for far away cells (-1: no far version)");
   app.add_option("--palette", opt.palette,
@@ -3745,6 +4107,7 @@ int main(int argc, char** argv) {
   opt.atlas = !no_atlas;
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
+  opt.tie_lod = !no_tie_lod;
   opt.vista = !no_vista;
   opt.tod = !no_tod;
   opt.pack.threads = opt.threads;
