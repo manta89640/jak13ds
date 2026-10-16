@@ -865,6 +865,358 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
   }
 }
 
+// (AI-assisted) the weights each level was last blended with (by name: a level loaded again starts
+// with them, CtrLevels::load_file), and the last blend's of any level with its day palettes
+// (Tod::palettes without the lights: a level loaded for the first time with the same ones, Sandover
+// and its neighbours, starts with those)
+struct TodSeen {
+  std::mutex lock;
+  std::map<std::string, std::array<u8, 24>> by_level;
+  std::array<u8, 24> last{};
+  u32 last_day_mask = 0;
+};
+TodSeen& tod_seen() {
+  static TodSeen s;
+  return s;
+}
+u32 tod_day_mask(const CtrLevelData::Tod& t) {
+  u32 m = 0;
+  for (u32 k = 0; k < t.palette_count; k++) {
+    m |= 1u << t.palettes[k];
+  }
+  return m & ~t.light_mask;
+}
+
+// (AI-assisted) c3l v16 time of day. The game's weight (64 = 1.0) of palette p for channel c (r, g,
+// b), from the camera's itimes as interp_time_of_day_slow (background_common.cpp) reads them.
+void tod_weights(const CtrBackgroundCamera& cam, u8 w[8][3]) {
+  for (int p = 0; p < 8; p++) {
+    for (int c = 0; c < 3; c++) {
+      const u32 word = (u32)cam.itimes[p / 2][(p % 2) * 2 + c / 2];
+      w[p][c] = (u8)((c % 2 ? word >> 16 : word) & 0xff);
+    }
+  }
+}
+
+// Blends the level's colors with the game's weights when they moved: all colors when a day palette's
+// weight moved by 2/64 or more, or by 1/64 after kTodMinFrames (the day goes on slowly: 1/64 every
+// ~40 frames); else only the light colors when a light palette's
+// weight moved (the lamps flicker every frame). Chunks are recolored as they are drawn
+// (tod_recolor): all of a chunk's vertices after a blend of all colors, else its light vertices.
+constexpr u64 kTodMinFrames = 60;
+// vertices recolored per level draw after a blend of all colors (chunks not recolored yet since
+// their mesh was made: always; the first chunk of a draw: always)
+constexpr u32 kTodBudget = 24000;
+
+void tod_blend(CtrLevelData::Tod& t, u32 color) {
+  const u8* src = t.colors.data() + (size_t)color * t.palette_count * 3;
+  u32 r = 0, g = 0, b = 0;
+  for (u32 k = 0; k < t.palette_count; k++, src += 3) {
+    const u8* w = t.weights[t.palettes[k]];
+    r += w[0] * src[0];
+    g += w[1] * src[1];
+    b += w[2] * src[2];
+  }
+  t.blended[color] = std::min<u32>(255, r >> 6) | std::min<u32>(255, g >> 6) << 8 |
+                     std::min<u32>(255, b >> 6) << 16;
+}
+
+// returns 2: all colors blended, 1: the light colors, 0: nothing
+int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
+               u64 frame) {
+  u8 w[8][3];
+  tod_weights(cam, w);
+  int day_diff = 0, light_diff = 0;
+  for (int p = 0; p < 8; p++) {
+    for (int c = 0; c < 3; c++) {
+      const int d = std::abs((int)w[p][c] - (int)t.weights[p][c]);
+      if (t.light_mask >> p & 1) {
+        light_diff = std::max(light_diff, d);
+      } else {
+        day_diff = std::max(day_diff, d);
+      }
+    }
+  }
+  const bool all = !t.blended_valid || day_diff >= 2 ||
+                   (day_diff == 1 && frame >= t.blend_frame + kTodMinFrames);
+  if (!all && !light_diff) {
+    return 0;
+  }
+  for (int p = 0; p < 8; p++) {
+    if (all || (t.light_mask >> p & 1)) {
+      memcpy(t.weights[p], w[p], 3);
+    }
+  }
+  t.light_gen = t.light_gen + 1 == CtrLevelData::Tod::kChunkNone ? 1 : t.light_gen + 1;
+  if (!all) {
+    for (u16 c : t.light_colors) {
+      tod_blend(t, c);
+    }
+    return 1;
+  }
+  t.blended_valid = true;
+  t.blend_frame = frame;
+  t.gen = t.gen + 1 == CtrLevelData::Tod::kChunkNone ? 1 : t.gen + 1;
+  for (u32 c = 0; c < t.color_count; c++) {
+    tod_blend(t, c);
+  }
+  {
+    auto& seen = tod_seen();
+    std::lock_guard<std::mutex> lk(seen.lock);
+    auto& wl = seen.by_level[level];
+    memcpy(wl.data(), t.weights, 24);
+    seen.last = wl;
+    seen.last_day_mask = tod_day_mask(t);
+  }
+  return 2;
+}
+
+// a vertex's color from the blend (false: it has none)
+inline bool tod_vertex_rgb(const CtrLevelData::Tod& t, u32 idx, u32* out) {
+  const u32 nc = t.color_count;
+  if (idx < nc) {
+    *out = t.blended[idx];
+    return true;
+  }
+  if (idx - nc < t.muls.size()) {
+    const auto& m = t.muls[idx - nc];
+    const u32 c = t.blended[m.color];
+    *out = std::min<u32>(255, ((c & 0xff) * m.mul[0] + 64) >> 7) |
+           std::min<u32>(255, (((c >> 8) & 0xff) * m.mul[1] + 64) >> 7) << 8 |
+           std::min<u32>(255, (((c >> 16) & 0xff) * m.mul[2] + 64) >> 7) << 16;
+    return true;
+  }
+  return false;
+}
+
+inline void tod_set_rgb(c3l::Vertex& v, u32 rgb) {
+  u32 old;
+  memcpy(&old, v.rgba, 4);
+  rgb |= old & 0xff000000u;
+  memcpy(v.rgba, &rgb, 4);
+}
+
+// All of n vertices' colors from the blend; lights: the ones with a light color (if not null).
+// Returns the vertices with a time of day color.
+u32 tod_color_vertices(const CtrLevelData::Tod& t, c3l::Vertex* v, int n, std::vector<u16>* lights) {
+  u32 colored = 0;
+  const u32 nc = t.color_count;
+  for (int i = 0; i < n; i++) {
+    const u32 idx = (u16)v[i].pad;
+    u32 rgb;
+    if (!tod_vertex_rgb(t, idx, &rgb)) {
+      continue;
+    }
+    tod_set_rgb(v[i], rgb);
+    colored++;
+    if (lights) {
+      const u32 c = idx < nc ? idx : t.muls[idx - nc].color;
+      if (std::binary_search(t.light_colors.begin(), t.light_colors.end(), (u16)c)) {
+        lights->push_back((u16)i);
+      }
+    }
+  }
+  if (lights) {
+    lights->shrink_to_fit();
+  }
+  return colored;
+}
+
+
+// The chunk's vertex colors from the blends, rewritten in its mesh (the alpha stays): all of them
+// for a mesh not recolored yet (the file's colors: made again by a detail / repair load) or after
+// a blend of all colors, within *budget vertices (the first chunk of a draw always; the rest the
+// next frames); else its light vertices after a blend of the light colors. Returns the vertices
+// looked at; *ms the time.
+u32 tod_recolor(CtrLevelData& lev, size_t ci, u32* budget, double* ms) {
+  auto& t = *lev.tod;
+  const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
+  if (mesh < 0 || ci >= t.chunk_gen.size() || !t.blended_valid) {
+    return 0;
+  }
+  const bool fresh = t.chunk_mesh[ci] != mesh;
+  if (!fresh && (t.chunk_gen[ci] == CtrLevelData::Tod::kChunkNone ||
+                 (t.chunk_gen[ci] == t.gen && t.chunk_light_gen[ci] == t.light_gen))) {
+    return 0;
+  }
+  int n = 0;
+  auto* v = (c3l::Vertex*)ctr_gpu_mesh_vertices_inplace(mesh, &n);
+  if (!v || n <= 0) {
+    return 0;
+  }
+  const bool all = fresh || t.chunk_gen[ci] != t.gen;
+  if (all && *budget < (u32)n && *budget < kTodBudget) {
+    return 0;
+  }
+  const double t0 = ctr_gpu_time_ms();
+  u32 looked = 0;
+  if (!all) {
+    // the light vertices only
+    auto it = t.chunk_lights.find((u32)ci);
+    if (it != t.chunk_lights.end() && !it->second.empty()) {
+      const auto& lv = it->second;
+      for (u16 i : lv) {
+        u32 rgb;
+        if (i < n && tod_vertex_rgb(t, (u16)v[i].pad, &rgb)) {
+          tod_set_rgb(v[i], rgb);
+        }
+      }
+      ctr_gpu_mesh_flush(mesh, lv.front() * (int)sizeof(c3l::Vertex),
+                         (lv.back() + 1 - lv.front()) * (int)sizeof(c3l::Vertex));
+      looked = (u32)lv.size();
+    }
+    t.chunk_light_gen[ci] = t.light_gen;
+    *ms += ctr_gpu_time_ms() - t0;
+    return looked;
+  }
+  // (the light vertices are found at the first recolor of a chunk: the vertices never change)
+  std::vector<u16>* lights = nullptr;
+  if (fresh && t.light_mask && !t.chunk_lights.count((u32)ci)) {
+    lights = &t.chunk_lights[(u32)ci];
+  }
+  const u32 colored = tod_color_vertices(t, v, n, lights);
+  if (lights && lights->empty()) {
+    t.chunk_lights.erase((u32)ci);
+  }
+  t.chunk_mesh[ci] = mesh;
+  if (!colored) {
+    t.chunk_gen[ci] = CtrLevelData::Tod::kChunkNone;
+    *ms += ctr_gpu_time_ms() - t0;
+    return 0;
+  }
+  ctr_gpu_mesh_flush(mesh, 0, n * (int)sizeof(c3l::Vertex));
+  t.chunk_gen[ci] = t.gen;
+  t.chunk_light_gen[ci] = t.light_gen;
+  *budget -= std::min(*budget, (u32)n);
+  *ms += ctr_gpu_time_ms() - t0;
+  return (u32)n;
+}
+
+// (AI-assisted) c3l v16 time of day: the file's table into lev->tod, the palettes no color uses
+// left out (Volcanic Crater: 4 of 8). Read in pieces (no second copy of the table). On the 3DS
+// only when the heap keeps kTodHeapReserve free after it (the level then keeps its baked palette:
+// the colors of an older file). After the chunks are final (vista tier picked).
+void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  if (hdr.version < c3l::kTodVersion || !hdr.tod_offset || !hdr.tod_color_count ||
+      hdr.tod_color_count + hdr.tod_mul_count >= 0xffff) {
+    return;
+  }
+  const u32 nc = hdr.tod_color_count, nm = hdr.tod_mul_count;
+  constexpr u32 kPiece = 2048;
+  std::vector<c3l::TodColor> piece;
+  u32 mask = 0, used[8] = {};
+  for (u32 i = 0; i < nc; i += kPiece) {
+    const u32 n = std::min(kPiece, nc - i);
+    if (!f.read_array(hdr.tod_offset + i * (u32)sizeof(c3l::TodColor), n, &piece)) {
+      lg::warn("[ctr] {}: bad time of day table, not used", lev->name);
+      return;
+    }
+    for (const auto& c : piece) {
+      for (int p = 0; p < 8; p++) {
+        if (c.rgb[p][0] | c.rgb[p][1] | c.rgb[p][2]) {
+          mask |= 1u << p;
+          used[p]++;
+        }
+      }
+    }
+  }
+  auto t = std::make_unique<CtrLevelData::Tod>();
+  u32 light_colors = 0;
+  for (int p = 0; p < 8; p++) {
+    if (mask & (1u << p)) {
+      t->palettes[t->palette_count++] = (u8)p;
+      // a light palette: a quarter of the colors or fewer
+      if (used[p] * 4 <= nc) {
+        t->light_mask |= 1u << p;
+        light_colors += used[p];
+      }
+    }
+  }
+  [[maybe_unused]] const u32 need = nc * t->palette_count * 3 + nm * (u32)sizeof(c3l::TodMul) +
+                                     nc * 4 + light_colors * 2 + (u32)lev->chunks.size() * 12;
+#ifdef __3DS__
+  {
+    constexpr u32 kTodHeapReserve = 3u << 20;
+    CtrHeapStats st;
+    ctr_heap_stats(&st);
+    if (st.free < need + kTodHeapReserve || st.largest < need) {
+      lg::warn("[ctr] {}: no heap for the time of day colors ({} KB; {} KB free, largest block {} "
+               "KB): the baked palette",
+               lev->name, need / 1024, st.free / 1024, st.largest / 1024);
+      return;
+    }
+  }
+#endif
+  t->color_count = nc;
+  t->colors.resize((size_t)nc * t->palette_count * 3);
+  for (u32 i = 0; i < nc; i += kPiece) {
+    const u32 n = std::min(kPiece, nc - i);
+    if (!f.read_array(hdr.tod_offset + i * (u32)sizeof(c3l::TodColor), n, &piece)) {
+      return;
+    }
+    u8* dst = t->colors.data() + (size_t)i * t->palette_count * 3;
+    for (u32 j = 0; j < n; j++) {
+      const auto& c = piece[j];
+      bool light = false;
+      for (u32 k = 0; k < t->palette_count; k++) {
+        const u8* rgb = c.rgb[t->palettes[k]];
+        memcpy(dst, rgb, 3);
+        dst += 3;
+        light |= (t->light_mask >> t->palettes[k] & 1) && (rgb[0] | rgb[1] | rgb[2]);
+      }
+      if (light) {
+        t->light_colors.push_back((u16)(i + j));
+      }
+    }
+  }
+  if (nm && !f.read_array(hdr.tod_offset + nc * (u32)sizeof(c3l::TodColor), nm, &t->muls)) {
+    lg::warn("[ctr] {}: bad time of day table, not used", lev->name);
+    return;
+  }
+  for (const auto& m : t->muls) {
+    if (m.color >= nc) {
+      lg::warn("[ctr] {}: bad time of day table, not used", lev->name);
+      return;
+    }
+  }
+  t->blended.assign(nc, 0);
+  t->chunk_gen.assign(lev->chunks.size(), CtrLevelData::Tod::kChunkUnset);
+  t->chunk_light_gen.assign(lev->chunks.size(), CtrLevelData::Tod::kChunkUnset);
+  t->chunk_mesh.assign(lev->chunks.size(), -1);
+  // the weights the level was last drawn with, else the last level's with the same day palettes:
+  // the meshes are colored as they are read (CtrLevels::load_file), not all at the level's first
+  // draw. Else they keep the file's colors until drawn (tod_recolor).
+  {
+    auto& seen = tod_seen();
+    std::array<u8, 24> w{};
+    bool have = false;
+    {
+      std::lock_guard<std::mutex> lk(seen.lock);
+      auto it = seen.by_level.find(lev->name);
+      if (it != seen.by_level.end()) {
+        w = it->second;
+        have = true;
+      } else if (seen.last_day_mask && seen.last_day_mask == tod_day_mask(*t)) {
+        w = seen.last;
+        have = true;
+      }
+    }
+    if (have) {
+      memcpy(t->weights, w.data(), 24);
+      for (u32 c = 0; c < nc; c++) {
+        tod_blend(*t, c);
+      }
+      t->blended_valid = true;
+      t->gen = t->light_gen = 1;
+    }
+  }
+  lg::info("[ctr] {}: time of day: {} colors in {} palettes (lights {:02x}: {} colors), {} "
+           "multiplied ({} KB)",
+           lev->name, nc, t->palette_count, t->light_mask, t->light_colors.size(), nm,
+           t->bytes() / 1024);
+  lev->tod = std::move(t);
+}
+
 // (AI-assisted) fine_vis: <level>.c3v (c3v_format.h) into lev->fine when it was made from the
 // level's .c3l as loaded (its chunk, draw and run tables: c3v::fine_vis_level_hash). The level's
 // visibility runs (and run_culling's pieces) are made already. Anything wrong: no fine visibility.
@@ -1436,6 +1788,8 @@ bool CtrLevels::load_file(const fs::path& path,
     load_fine_vis(path, out);
   }
 
+  load_tod(f, hdr, out);  // (AI-assisted) c3l v16
+
   std::vector<c3l::Texture> texs;
   if (!f.read_array(hdr.textures_offset, hdr.num_textures, &texs)) {
     lg::error("[ctr] {}: truncated file", path.string());
@@ -1541,7 +1895,25 @@ bool CtrLevels::load_file(const fs::path& path,
           out->draw_alpha80[d] = ok ? 1 : 0;
         }
       }
+      // (AI-assisted) c3l v16: the time of day colors (load_tod's start weights)
+      int tod_colored = -1;
+      if (read_ok && out->tod && out->tod->blended_valid) {
+        auto& t = *out->tod;
+        std::vector<u16> lights;
+        tod_colored = (int)tod_color_vertices(t, (c3l::Vertex*)vdst, (int)ch.vertex_count,
+                                              t.light_mask ? &lights : nullptr);
+        if (!lights.empty()) {
+          t.chunk_lights[(u32)out->meshes.size()] = std::move(lights);
+        }
+      }
       mesh = ctr_gpu_mesh_end(mesh, read_ok);
+      if (mesh >= 0 && tod_colored >= 0) {
+        auto& t = *out->tod;
+        const size_t ci = out->meshes.size();
+        t.chunk_mesh[ci] = mesh;
+        t.chunk_gen[ci] = tod_colored ? t.gen : CtrLevelData::Tod::kChunkNone;
+        t.chunk_light_gen[ci] = t.light_gen;
+      }
     }
     out->meshes.push_back(mesh);
     // make the draws relative to the mesh's index buffer
@@ -2526,6 +2898,14 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
              m_vista_frames);
     m_vista_chunks = m_vista_tris = m_lowres_near = m_vista_frames = 0;
   }
+  if (rs.log_now && m_tod_frames) {
+    lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
+             "(most {} vertices, {:.2f} ms; {} level draws)",
+             m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames, m_tod_ms / m_tod_frames,
+             m_tod_max, m_tod_max_ms, m_tod_frames);
+    m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = 0;
+    m_tod_ms = m_tod_max_ms = 0;
+  }
   if (rs.log_now && m_fine_levels) {
     lg::info("[ctr] {}: fine vis hid {:.1f} chunks, {:.0f} tris per level draw with a cell ({} of "
              "{} level draws)",
@@ -2555,6 +2935,32 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrRenderState& rs) {
   const CtrSettings& settings = ctr_settings();
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
+  // (AI-assisted) c3l v16 time of day: blend the level's colors with the game's weights when they
+  // moved (the chunks are recolored as they are drawn, emit_chunk)
+  u32 tod_budget = kTodBudget;
+  u64 tod_verts = 0;
+  double tod_ms = 0;
+  if (lev.tod) {
+    const double t0 = ctr_gpu_time_ms();
+    m_tod_frames++;
+    m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
+    tod_ms += ctr_gpu_time_ms() - t0;
+  }
+#ifndef __3DS__
+  // (AI-assisted) host diagnostic: the game's time of day weights every 30 frames
+  if (getenv("CTR_TOD_LOG") && rs.frame_idx % 30 == 0) {
+    std::string w;
+    for (int p = 0; p < 8; p++) {
+      w += " [";
+      for (int ch = 0; ch < 4; ch++) {
+        const u32 word = (u32)cam.itimes[p / 2][(p % 2) * 2 + ch / 2];
+        w += fmt::format("{}{}", ch ? "," : "", ((ch % 2) ? (word >> 16) : word) & 0xff);
+      }
+      w += "]";
+    }
+    lg::info("[ctr] tod {} frame {}:{}", lev.name, rs.frame_idx, w);
+  }
+#endif
   // fog (ctr_gpu_set_mesh_fog): the game's (tfrag3.vert), and towards the draw distance
   const float draw_dist = settings.draw_distance * 4096.f;
   const float lod_dist = settings.lod_distance * 4096.f;
@@ -2890,6 +3296,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           const float dd = (far_d - fog1[1]) * fog1[2];
           vc.nofog = g <= kNoFog && dd <= kNoFog;
         }
+      }
+      if (lev.tod) {
+        tod_verts += tod_recolor(lev, ci, &tod_budget, &tod_ms);  // (AI-assisted) c3l v16
       }
       make_clip(ch, vc.clip);
       ctr_gpu_prepare_mesh_matrix(vc.clip, &vc.gpu);
@@ -3269,4 +3678,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   }
 #endif
+  if (lev.tod) {
+    m_tod_verts += tod_verts;
+    m_tod_max = std::max<u64>(m_tod_max, tod_verts);
+    m_tod_ms += tod_ms;
+    m_tod_max_ms = std::max(m_tod_max_ms, tod_ms);
+  }
 }

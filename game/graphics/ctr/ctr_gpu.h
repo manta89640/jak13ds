@@ -527,6 +527,11 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
 /* A mesh's vertices, to change them (blend shapes) before its draws of the frame; then flush the
  * changed bytes. The GPU finished the previous frame when a frame begins. */
 void* ctr_gpu_mesh_vertices(int mesh);
+/* (AI-assisted) A static mesh's own vertices (ctr_gpu_mesh_create / _end), to rewrite in place:
+ * no second buffer (unlike ctr_gpu_mesh_vertices), so a frame the GPU is still drawing may see
+ * part of the change. For slow changes (the level's time of day colors). Then ctr_gpu_mesh_flush.
+ * NULL if there is none. */
+void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count);
 void ctr_gpu_mesh_flush(int mesh, int offset, int size);
 
 /* bones: palette_count 3x4 row-major matrices, (pos, 1) -> camera space (x, y, z).

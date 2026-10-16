@@ -37,10 +37,15 @@
 namespace {
 
 struct Options {
-  int tfrag_geo = 1;  // 0 = most detailed, 2 = least (2 has large holes)
+  // (AI-assisted) 0 as the PS2 near the camera: 1 cut the yellow pools of Volcanic Crater into
+  // polygons (all levels: +1% triangles)
+  int tfrag_geo = 0;  // 0 = most detailed, 2 = least (2 has large holes)
   int far_tfrag_geo = 2;  // coarse version for far away cells (-1: none)
   int tie_geo = 3;    // 0 = most detailed, 3 = least
   int palette = -1;   // time of day palette to bake (0..7; -1: auto_palette)
+  // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
+  // runtime blends the palettes with the game's weights (off: the baked palette only)
+  bool tod = true;
   int max_tex = 128;
   float cell_meters = 200.f;
   // tie instances smaller than detail_radius (bounding sphere radius, meters) are only drawn up
@@ -191,6 +196,8 @@ struct SrcVertex {
   float x, y, z;
   float s, t;
   u8 rgba[4];
+  // (AI-assisted) v16: Converter::tod_colors index, or kTodMulBit | tod_muls index (kTodNone: none)
+  u32 tod = 0xffffffffu;
   // (AI-assisted) v15 atlas copies (Options::atlas): the vertex this one copies (UINT32_MAX: not a
   // copy) and its texture coordinates in the atlas (1/32768, c3l::kDrawAtlasUV)
   u32 orig = UINT32_MAX;
@@ -259,6 +266,64 @@ struct Converter {
   Options opt;
   const tfrag3::Level* level = nullptr;
   std::vector<SrcVertex> verts;
+  // (AI-assisted) v16: the level's time of day colors and multiplied colors (each once)
+  static constexpr u32 kTodNone = 0xffffffffu, kTodMulBit = 0x80000000u;
+  std::vector<c3l::TodColor> tod_colors;
+  std::vector<c3l::TodMul> tod_muls;
+  std::unordered_map<std::string, u32> tod_color_ids, tod_mul_ids;
+  // a tfrag / tie / shrub time of day color: its 8 palettes
+  u32 tod_color(const tfrag3::PackedTimeOfDay& c, u32 color) {
+    if (!opt.tod) {
+      return kTodNone;
+    }
+    c3l::TodColor e;
+    for (int p = 0; p < 8; p++) {
+      for (int ch = 0; ch < 3; ch++) {
+        e.rgb[p][ch] = c.read(color, p, ch);
+      }
+    }
+    auto [it, fresh] =
+        tod_color_ids.emplace(std::string((const char*)&e, sizeof(e)), (u32)tod_colors.size());
+    if (fresh) {
+      tod_colors.push_back(e);
+    }
+    return it->second;
+  }
+  // a time of day color times mul / 128 (u8 per channel)
+  u32 tod_mul(u32 id, const u8 mul[3]) {
+    if (id == kTodNone) {
+      return kTodNone;
+    }
+    if (id & kTodMulBit) {
+      // already a multiplied one: the product of the two
+      const auto& m = tod_muls[id & ~kTodMulBit];
+      u8 k[3];
+      for (int c = 0; c < 3; c++) {
+        k[c] = (u8)std::min(255, (m.mul[c] * mul[c] + 64) / 128);
+      }
+      return tod_mul(m.color, k);
+    }
+    if (mul[0] == 128 && mul[1] == 128 && mul[2] == 128) {
+      return id;
+    }
+    c3l::TodMul m{};
+    m.color = (u16)id;
+    memcpy(m.mul, mul, 3);
+    auto [it, fresh] =
+        tod_mul_ids.emplace(std::string((const char*)&m, sizeof(m)), (u32)tod_muls.size());
+    if (fresh) {
+      tod_muls.push_back(m);
+    }
+    return it->second | kTodMulBit;
+  }
+  // the vertex's Vertex::pad (colors first, then the multiplied ones)
+  u16 tod_pad(u32 id) const {
+    if (id == kTodNone) {
+      return 0xffff;
+    }
+    const u32 v = id & kTodMulBit ? (u32)tod_colors.size() + (id & ~kTodMulBit) : id;
+    return v < 0xffff ? (u16)v : (u16)0xffff;
+  }
   std::vector<SrcTri> tris;
   std::vector<DrawKey> draw_keys;
   std::map<DrawKey, u32> draw_key_ids;
@@ -426,6 +491,7 @@ struct Converter {
       for (int c = 0; c < 4; c++) {
         sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
       }
+      sv.tod = tod_color(tree.colors, v.color_index);
       verts.push_back(sv);
     }
     for (auto& d : tree.draws) {
@@ -513,6 +579,14 @@ struct Converter {
         sv.rgba[c] = (u8)std::min(255, v.rgba_base[c] * tod * 2 / 255);
       }
       sv.rgba[3] = tree.time_of_day_colors.read(v.color_index, opt.palette, 3);
+      {
+        // (AI-assisted) v16: the time of day color times the base color (/ 128, as above)
+        u8 mul[3];
+        for (int c = 0; c < 3; c++) {
+          mul[c] = (u8)std::min(255, (v.rgba_base[c] * 256 + 127) / 255);
+        }
+        sv.tod = tod_mul(tod_color(tree.time_of_day_colors, v.color_index), mul);
+      }
       verts.push_back(sv);
     }
     for (const auto& d : tree.static_draws) {
@@ -759,6 +833,7 @@ struct Converter {
       for (int c = 0; c < 4; c++) {
         sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
       }
+      sv.tod = tod_color(tree.colors, v.color_index);
       verts.push_back(sv);
     }
     // static instances (already in world space), one vis group per instance
@@ -811,6 +886,7 @@ struct Converter {
             for (int c = 0; c < 4; c++) {
               sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
             }
+            sv.tod = tod_color(tree.colors, v.color_index);
             it = remap.emplace(vi, verts.size()).first;
             verts.push_back(sv);
           }
@@ -2694,6 +2770,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                   v.rgba[c] = (u8)std::clamp((int)std::lround(v.rgba[c] * flat_rgb[c] / 128.f), 0,
                                              255);
                 }
+                {
+                  // (AI-assisted) v16: the time of day color times the texture's color
+                  u8 mul[3];
+                  for (int c = 0; c < 3; c++) {
+                    mul[c] = (u8)std::clamp((int)std::lround(flat_rgb[c]), 0, 255);
+                  }
+                  v.tod = cv.tod_mul(v.tod, mul);
+                }
                 cv.verts.push_back(v);
                 vista_vertex.resize(cv.verts.size(), 0);
                 vista_vertex.back() = 1;
@@ -2926,6 +3010,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           o.st[1] = v.ast[1];
         }
         memcpy(o.rgba, v.rgba, 4);
+        o.pad = (s16)cv.tod_pad(v.tod);  // (AI-assisted) v16: the time of day color
         out_verts.push_back(o);
       }
       ch.first_draw = out_draws.size();
@@ -3209,6 +3294,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
   hdr.chunks_offset = append(buf, chunks.data(), chunks.size());
+  // (AI-assisted) v16: the time of day table
+  if (!cv.tod_colors.empty() && cv.tod_colors.size() + cv.tod_muls.size() < 0xffff) {
+    hdr.tod_color_count = cv.tod_colors.size();
+    hdr.tod_mul_count = cv.tod_muls.size();
+    hdr.tod_offset = append(buf, cv.tod_colors.data(), cv.tod_colors.size());
+    buf.insert(buf.end(), (const u8*)cv.tod_muls.data(),
+               (const u8*)(cv.tod_muls.data() + cv.tod_muls.size()));
+    align16(buf);
+  }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
   hdr.vertex_data_size = out_verts.size() * sizeof(c3l::Vertex);
   hdr.index_data_offset = append(buf, out_indices.data(), out_indices.size());
@@ -3283,6 +3377,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         {hdr.merc_draw_offset, "merc draws"},
         {hdr.texture_data_offset, "textures"},
         {hdr.textures_offset, "texture table"}};
+    if (hdr.tod_offset) {
+      starts.push_back({hdr.tod_offset, "time of day"});  // (AI-assisted) v16
+    }
     if (!out_runs.empty()) {
       starts.push_back({(u32)sizeof(c3l::Header), "vis runs"});
     }
@@ -3421,6 +3518,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                                         : std::string("meshoptimizer"),
                                     vc_kept_pairs)
                       : "");
+  // (AI-assisted) v16
+  {
+    const size_t n = cv.tod_colors.size() + cv.tod_muls.size();
+    lg::info("{}: time of day: {} colors, {} multiplied ({} KB){}", level.level_name,
+             cv.tod_colors.size(), cv.tod_muls.size(),
+             (cv.tod_colors.size() * sizeof(c3l::TodColor) + cv.tod_muls.size() * sizeof(c3l::TodMul)) /
+                 1024,
+             n >= 0xffff ? " TOO MANY: left out (the baked palette only)" : "");
+  }
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
   }
@@ -3543,6 +3649,9 @@ int main(int argc, char** argv) {
                  "tfrag level of detail for far away cells (-1: no far version)");
   app.add_option("--palette", opt.palette,
                  "time of day palette to bake (0-7; default: 0 for interiors, else 1)");
+  bool no_tod = false;
+  app.add_flag("--no-tod", no_tod,
+               "(v16) no time of day table: the vertex colors stay the baked palette");
   app.add_option("--max-tex", opt.max_tex, "maximum texture size (power of two, <= 1024)");
   app.add_option("--cell", opt.cell_meters, "chunk grid size in meters");
   app.add_option("--detail-radius", opt.detail_radius,
@@ -3637,6 +3746,7 @@ int main(int argc, char** argv) {
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
   opt.vista = !no_vista;
+  opt.tod = !no_tod;
   opt.pack.threads = opt.threads;
   opt.pack.max_block = std::max<u32>(block_kb, 1) * 1024;
   opt.pack.min_block = std::min(opt.pack.min_block, opt.pack.max_block);

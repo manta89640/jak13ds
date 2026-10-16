@@ -1480,6 +1480,15 @@ void* ctr_gpu_mesh_vertices(int mesh) {
 
 void ctr_gpu_mesh_flush(int, int, int) {}
 
+void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+      g_soft.meshes[mesh].stride != 16) {
+    return nullptr;
+  }
+  *vertex_count = (int)(g_soft.meshes[mesh].verts.size() / 16);
+  return g_soft.meshes[mesh].verts.data();
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                           const float clip[16],
                           const float* bones,
