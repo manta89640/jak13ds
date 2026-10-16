@@ -97,6 +97,13 @@ struct CtrLevelData {
   };
   std::vector<RunSphere> run_spheres;
   std::vector<u32> chunk_run_count;
+  // (AI-assisted) c3l v17 tie levels of detail (c3l::ExtHeader): the LOD groups, each run's version
+  // (parallel to vis_runs; empty: no levels of detail), per chunk whether it has versioned runs,
+  // per group the last frame's choice (bit 0: near version, bit 1: chosen)
+  std::vector<c3l::TieLodGroup> lod_groups;
+  std::vector<c3l::RunLod> run_lod;
+  std::vector<u8> chunk_lod;
+  std::vector<u8> lod_state;
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
@@ -472,6 +479,11 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) run_culling: per run of the level being drawn, shown this frame (filled for the
   // chunks tested run by run); statistics: runs tested, triangles and chunks the view test hid
   std::vector<u8> m_run_shown;
+  // (AI-assisted) c3l v17 tie levels of detail: per run of the level being drawn, the other version
+  // of its group (hidden, and never drawn along with neighbouring runs); statistics: groups at
+  // their near version, triangles drawn of near / far versions (over m_lod_frames level draws)
+  std::vector<u8> m_run_nomerge;
+  u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
   // (AI-assisted) fine_vis: the level's set this frame (nullptr: none); statistics: chunks and
   // triangles it hid (that the other tests drew), level draws with a set / with a .c3v

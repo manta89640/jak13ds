@@ -86,6 +86,9 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.fine_vis; }},
     {"cull_ties", [](CtrSettings& s, bool on) { s.cull_ties = on; },
      [](const CtrSettings& s) { return s.cull_ties; }},
+    // (AI-assisted) c3l v17 tie levels of detail (off: the far versions only)
+    {"tie_lod", [](CtrSettings& s, bool on) { s.tie_lod = on; },
+     [](const CtrSettings& s) { return s.tie_lod; }},
     // the far scenery: lowres_vista and the vista tier (vista_distance 0: none)
     {"vista",
      [](CtrSettings& s, bool on) {

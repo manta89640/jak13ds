@@ -103,6 +103,8 @@ struct B {
   double copy_rows = 0;  // (AI-assisted) screen copy: 8-column tile rows (50 = the whole screen)
   double unif = 0;       // (AI-assisted) skin / env vertex uniforms uploaded (vectors), as the
                          // 3DS backend caches them
+  double sub = 0;  // (AI-assisted) level mesh triangles submitted (what the 3DS GPU's vertex stage
+                   // gets: before clipping and back face culling; tris counts the drawn ones)
 };
 std::map<std::string, B> acc;
 B* cur = &acc["(none)"];
@@ -524,9 +526,12 @@ void ctr_gpu_frame_end(void) {
           name, b.draws / n, b.tris / n, b.px / n, b.px / n / 96000.0, b.px_atest / n, b.px_z / n, b.px_blend / n, b.px_invis / n, b.px_proc / n, b.tex_changes / n, b.state_changes / n, b.prog_switches / n);
       if (b.copy_rows) line += fmt::format(" copyrows {:5.1f}", b.copy_rows / n);
       if (b.unif) line += fmt::format(" unif {:6.0f}", b.unif / n);
+      if (b.sub) line += fmt::format(" sub {:8.0f}", b.sub / n);
+      tot.sub += b.sub;
       tot.draws += b.draws; tot.tris += b.tris; tot.px += b.px; tot.px_blend += b.px_blend; tot.px_invis += b.px_invis; tot.px_z += b.px_z; tot.prog_switches += b.prog_switches; tot.tex_changes += b.tex_changes;
     }
     line += fmt::format("\n  {:<14} draws {:6.1f} tris {:8.0f} px {:8.0f} ({:5.2f} scr) zpass {:8.0f} blend {:8.0f} invis {:8.0f} texchg {:5.1f} progsw {:4.1f}", "TOTAL", tot.draws / n, tot.tris / n, tot.px / n, tot.px / n / 96000.0, tot.px_z / n, tot.px_blend / n, tot.px_invis / n, tot.tex_changes / n, tot.prog_switches / n);
+    line += fmt::format(" level mesh tris submitted {:.0f}", tot.sub / n);
     // the textures with the most fragments in sprite / merc buckets
     std::vector<std::pair<double, std::pair<std::string, int>>> top;
     for (auto& [k, v] : softstats::tex_px) top.push_back({v.first, k});
@@ -1327,6 +1332,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
                            const uint16_t* indices, int first_index, int index_count) {
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  if (softstats::enabled()) softstats::cur->sub += index_count / 3;  // (AI-assisted)
   // (AI-assisted) c3l v15 atlas draws: texture coordinates in 1/32768
   const float st_scale = state && (state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {

@@ -236,6 +236,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
       s.run_culling = parse_bool(v);  // (AI-assisted)
+    } else if (key == "tie_lod") {
+      s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
     } else if (key == "neighbour_vis") {
       s.neighbour_vis = parse_bool(v);  // (AI-assisted)
     } else if (key == "fine_vis") {
@@ -474,7 +476,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} ({}) "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
       "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
-      "vis_culling {} run_culling {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} impostors {} raw_cmds {} vcache_reuse {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} tie_lod {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} impostors {} raw_cmds {} vcache_reuse {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "static_cmdlists {} ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
@@ -518,7 +520,7 @@ std::string CtrSettings::summary() const {
           : std::string(),
       compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
-      vis_culling ? "on" : "off", run_culling ? "on" : "off", neighbour_vis ? "on" : "off", fine_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", vista_untextured ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", shader_opt ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
+      vis_culling ? "on" : "off", run_culling ? "on" : "off", tie_lod ? "on" : "off", neighbour_vis ? "on" : "off", fine_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", vista_untextured ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", shader_opt ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
       impostors ? fmt::format("on ({:.0f}m, {:.2f}px, {} tris, {} KB)", impostor_distance,
                               impostor_error, impostor_budget, impostor_atlas)
                 : std::string("off"),

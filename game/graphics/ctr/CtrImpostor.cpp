@@ -238,7 +238,9 @@ void CtrImpostors::build_chunk(LevelState& ls, u32 ci) {
     u32 idx = lev.draws[di].first_index;
     for (u32 r = lev.draw_first_run[di]; r < lev.draw_first_run[di] + lev.draw_run_count[di]; r++) {
       const u16 vis = lev.vis_runs[r].vis;
-      if (vis != 0xffff) {
+      // (AI-assisted) c3l v17: a card shows a tie LOD group's far version (cards are far away)
+      const bool near_version = r < lev.run_lod.size() && lev.run_lod[r].lod == c3l::kRunLodNear;
+      if (vis != 0xffff && !near_version) {
         runs.push_back({vis, r, idx});
       }
       idx += lev.vis_runs[r].index_count;

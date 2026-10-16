@@ -1233,6 +1233,71 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
 
 // (AI-assisted) fine_vis: <level>.c3v (c3v_format.h) into lev->fine when it was made from the
 // level's .c3l as loaded (its chunk, draw and run tables: c3v::fine_vis_level_hash). The level's
+// (AI-assisted) c3l v17 tie levels of detail (c3l::ExtHeader): the groups and each file run's
+// version, mapped onto vis_runs (whose first file_runs come from the file, from offset runs_lo).
+// Anything wrong: no levels of detail, and the far versions of the groups are never drawn (a
+// level drawn with every group's near version rather than both on top of each other).
+void load_tie_lod(c3l::Reader& f,
+                  const c3l::Header& hdr,
+                  u32 runs_lo,
+                  size_t file_runs,
+                  CtrLevelData* lev) {
+  lev->lod_groups.clear();
+  lev->run_lod.clear();
+  lev->chunk_lod.clear();
+  lev->lod_state.clear();
+  if (hdr.version < c3l::kTieLodVersion || !hdr.ext_offset) {
+    return;
+  }
+  c3l::ExtHeader eh{};
+  if (!f.read(hdr.ext_offset, &eh, sizeof(eh)) || memcmp(eh.magic, c3l::kExtMagic, 4) ||
+      eh.size < sizeof(eh)) {
+    lg::warn("[ctr] {}: bad extension header, no tie levels of detail", lev->name);
+    return;
+  }
+  if (!eh.lod_group_count || !eh.run_lod_count || runs_lo == UINT32_MAX || !file_runs) {
+    return;
+  }
+  std::vector<c3l::RunLod> all;
+  const bool ok = runs_lo >= eh.runs_offset && (runs_lo - eh.runs_offset) % sizeof(c3l::VisRun) == 0 &&
+                  (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun) + file_runs <= eh.run_lod_count &&
+                  f.read_array(eh.lod_groups_offset, eh.lod_group_count, &lev->lod_groups) &&
+                  f.read_array(eh.run_lod_offset, eh.run_lod_count, &all);
+  if (!ok) {
+    lg::warn("[ctr] {}: bad tie level of detail data, not used", lev->name);
+    lev->lod_groups.clear();
+    return;
+  }
+  const size_t first = (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun);
+  lev->run_lod.assign(lev->vis_runs.size(), c3l::RunLod{0xffff, c3l::kRunLodAlways, 0});
+  lev->chunk_lod.assign(lev->chunks.size(), 0);
+  size_t near_runs = 0, bad = 0;
+  for (size_t ci = 0; ci < lev->chunks.size(); ci++) {
+    const auto& ch = lev->chunks[ci];
+    if (!ch.vis_run_count) {
+      continue;  // (no runs, or runs that didn't check out at load: drawn whole)
+    }
+    for (u32 r = lev->chunk_first_run[ci]; r < lev->chunk_first_run[ci] + ch.vis_run_count; r++) {
+      if (r >= file_runs) {
+        break;
+      }
+      auto rl = all[first + r];
+      if (rl.lod != c3l::kRunLodAlways && (rl.group >= lev->lod_groups.size() || rl.lod > 2)) {
+        bad++;
+        rl = c3l::RunLod{0xffff, c3l::kRunLodAlways, 0};
+      }
+      lev->run_lod[r] = rl;
+      if (rl.lod != c3l::kRunLodAlways) {
+        lev->chunk_lod[ci] = 1;
+        near_runs += rl.lod == c3l::kRunLodNear;
+      }
+    }
+  }
+  lev->lod_state.assign(lev->lod_groups.size(), 0);
+  lg::info("[ctr] {}: tie levels of detail: {} groups, {} near runs{}", lev->name,
+           lev->lod_groups.size(), near_runs, bad ? fmt::format(" ({} bad runs)", bad) : "");
+}
+
 // visibility runs (and run_culling's pieces) are made already. Anything wrong: no fine visibility.
 void load_fine_vis(const fs::path& c3l_path, CtrLevelData* lev) {
   fs::path p = c3l_path;
@@ -1702,6 +1767,8 @@ bool CtrLevels::load_file(const fs::path& path,
   out->chunk_first_run.assign(out->chunks.size(), 0);
   out->draw_first_run.assign(out->draws.size(), 0);
   out->draw_run_count.assign(out->draws.size(), 0);
+  u32 runs_lo = UINT32_MAX;  // (AI-assisted) the file offset of vis_runs[0] (v17 tie LOD)
+  size_t file_runs = 0;
   if (hdr.version < 10) {
     for (auto& ch : out->chunks) {
       ch.vis_run_count = 0;
@@ -1718,6 +1785,8 @@ bool CtrLevels::load_file(const fs::path& path,
       lg::warn("[ctr] {}: bad visibility data, not used", path.string());
       out->vis_runs.clear();
     }
+    runs_lo = lo;
+    file_runs = out->vis_runs.size();
     for (size_t ci = 0; ci < out->chunks.size(); ci++) {
       auto& ch = out->chunks[ci];
       if (!ch.vis_run_count) {
@@ -1797,6 +1866,7 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     out->run_spheres.assign(out->vis_runs.size(), CtrLevelData::RunSphere{{0, 0, 0}, 0xffff});
   }
+  load_tie_lod(f, hdr, runs_lo, file_runs, out);  // (AI-assisted) c3l v17
   // (AI-assisted) fine_vis: the level's .c3v next to it, if it was made from this .c3l
   if (ctr_settings().fine_vis) {
     load_fine_vis(path, out);
@@ -2919,6 +2989,14 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
              m_vista_frames);
     m_vista_chunks = m_vista_tris = m_lowres_near = m_vista_frames = 0;
   }
+  if (rs.log_now && m_lod_frames) {
+    // (AI-assisted) c3l v17 tie levels of detail
+    const double n = (double)m_lod_frames;
+    lg::info("[ctr] {}: tie levels of detail: {:.0f} groups near, {:.0f} near + {:.0f} far version "
+             "tris drawn per level draw ({} level draws)",
+             m_name, m_lod_groups_near / n, m_lod_tris[0] / n, m_lod_tris[1] / n, m_lod_frames);
+    m_lod_groups_near = m_lod_frames = m_lod_tris[0] = m_lod_tris[1] = 0;
+  }
   if (rs.log_now && m_tod_frames) {
     lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
              "(most {} vertices, {:.2f} ms; {} level draws)",
@@ -3139,6 +3217,34 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (lev.chunk_state.size() != lev.chunks.size()) {
     lev.chunk_state.assign(lev.chunks.size(), 0);
   }
+  // (AI-assisted) c3l v17 tie levels of detail: each group's near version while the camera is
+  // within its distance (the prototype's PS2 far-plane, times tie_lod_scale) of its sphere, with 10%
+  // hysteresis, decided for every group every frame (turning the camera doesn't switch any).
+  // auto_detail pulls the distances in to half while the GPU is busy. tie_lod = off: the far
+  // versions only (as before v17).
+  const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
+  if (tie_lod) {
+    float k = settings.tie_lod ? settings.detail_scale : 0.f;
+    if (settings.auto_detail) {
+      k *= 0.5f + 0.5f * g_detail_t;
+    }
+    const float cx = cam.trans[0], cy = cam.trans[1], cz = cam.trans[2];
+    u32 near = 0;
+    for (size_t g = 0; g < lev.lod_groups.size(); g++) {
+      const auto& lg = lev.lod_groups[g];
+      u8& st = lev.lod_state[g];
+      const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
+      const float lim = lg.dist * k * ((st & 1) ? 1.1f : 1.f) + lg.bsphere[3];
+      const bool n = k > 0 && dx * dx + dy * dy + dz * dz < lim * lim;
+      st = (u8)(2 | (n ? 1 : 0));
+      near += n;
+    }
+    m_lod_groups_near += near;
+    m_lod_frames++;
+  }
+  if (m_run_nomerge.size() < lev.vis_runs.size()) {
+    m_run_nomerge.resize(lev.vis_runs.size());
+  }
   // (AI-assisted) a chunk that is to be drawn (mode and distance decided): the view test (the
   // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
   // runs tested against those planes on their own), the visibility bits or (vista tier) the
@@ -3215,9 +3321,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const bool vis_test = !vista_tier && m_vis && ch.vis_run_count &&
                             (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3) ||
                              (vis_nb && ch.lod_tier <= 3));
-      if (vis_test || straddles || vista_tier || fine_runs) {
+      // (AI-assisted) c3l v17: a chunk with tie levels of detail shows one version of each group
+      const bool lod_chunk = tie_lod && lev.chunk_lod[ci];
+      if (vis_test || straddles || vista_tier || fine_runs || lod_chunk) {
         // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
-        u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0;
+        u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
         const u32 r0 = lev.chunk_first_run[ci];
         // (fine_vis without run_culling: the file's runs)
         const u32 nr = vis_test || vista_tier
@@ -3251,6 +3359,23 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             const u16 src = lev.vis_runs[r].vis;
             s = src < m_vista_src.size() && m_vista_src[src];
           }
+          // (AI-assisted) c3l v17: the other version of a LOD group: hidden, and never drawn along
+          // with its neighbours (draw: both versions would be on top of each other)
+          u8 nomerge = 0, lod_version = 0;
+          if (lod_chunk) {
+            const auto& rl = lev.run_lod[r];
+            if (rl.lod != c3l::kRunLodAlways &&
+                (rl.lod == c3l::kRunLodNear) != (bool)(lev.lod_state[rl.group] & 1)) {
+              nomerge = 1;
+              if (s) {
+                s = false;
+                lod_hid++;
+              }
+            } else {
+              lod_version = rl.lod;
+            }
+          }
+          m_run_nomerge[r] = nomerge;
           if (s && straddles) {
             const auto& rs = lev.run_spheres[r];
             if (rs.r != 0xffff) {
@@ -3278,12 +3403,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
           m_run_shown[r] = s;
           shown += s;
+          if (s && lod_version) {
+            m_lod_tris[lod_version - 1] += lev.vis_runs[r].index_count / 3;  // (AI-assisted)
+          }
         }
         m_cull_tris += view_tris;
         runs_valid = true;
         if (!shown) {
           if (fine_hid) {
             m_fine_chunks++;
+          } else if (lod_hid && !view_hidden) {
+            // (AI-assisted) only the other versions: not a visibility statistic
           } else if (view_hidden) {
             m_cull_chunks++;
           } else if (!vista_tier) {
@@ -3550,7 +3680,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         len += run.index_count;
       } else if (open) {
         gap += run.index_count;
-        if (gap > kMaxGap) {
+        // (AI-assisted) c3l v17: the other version of a tie LOD group is never drawn along
+        if (gap > kMaxGap || m_run_nomerge[r]) {
           emit();
         }
       }
