@@ -1,4 +1,4 @@
-# (AI-assisted) linear memory with the tightest level pairs loaded (c3l v13 vista tier), and the
+# (AI-assisted) linear memory with the tightest level pairs loaded (c3l v13 vista tier; v17: 10 pairs), and the
 # teleport loads that stop the game. Read the [ctr] textures lines (linear free) between "pair" and
 # "pair-end", the [ctr] loaded lines and [load] lines. ~6 min in the emulator; config sound = off
 # (or the instance muted) unless load timing with sound matters.
@@ -42,4 +42,20 @@
 5704 log pair snow+village3
 6300 shot
 6600 log pair-end snow+village3
-6601 exit
+# (AI-assisted, c3l v17 tie levels of detail) pairs the levels' sizes said were tighter still
+6601 continue rolling-start
+6602 wait *target* target-continue
+6603 wait *target* target-stance
+6604 log pair rolling+village2
+7500 log pair-end rolling+village2
+7501 continue ogre-start
+7502 wait *target* target-continue
+7503 wait *target* target-stance
+7504 log pair ogre+village2
+8400 log pair-end ogre+village2
+8401 continue lavatube-start
+8402 wait *target* target-continue
+8403 wait *target* target-stance
+8404 log pair lavatube+village3
+9300 log pair-end lavatube+village3
+9301 exit

@@ -1,0 +1,36 @@
+# (AI-assisted) tie-heavy views for the tie levels of detail (c3l v17): village1, the village3 warp
+# gate, the snowy fort, jungle, beach. Each view: the checkpoint, ~6 s to settle, then a "view"
+# window of 120 frames (the [softstats] / [ctr] tie levels of detail lines in it) and a named shot.
+# Host: CTR_SOFT_STATS=60 gk --ctr-gfx --ctr-dump DIR ...; PC reference: gk without --ctr-gfx.
+0 wait *target* target-title-wait
+10 continue village1-hut
+11 wait *target* target-continue
+12 wait *target* target-stance
+200 log view-begin village1
+320 shot tie_village1
+321 log view-end village1
+330 continue village3-warp
+331 wait *target* target-continue
+332 wait *target* target-stance
+520 log view-begin village3-warp
+640 shot tie_village3_warp
+641 log view-end village3-warp
+650 continue snow-fort
+651 wait *target* target-continue
+652 wait *target* target-stance
+840 log view-begin snow-fort
+960 shot tie_snow_fort
+961 log view-end snow-fort
+970 continue jungle-tower
+971 wait *target* target-continue
+972 wait *target* target-stance
+1160 log view-begin jungle
+1280 shot tie_jungle
+1281 log view-end jungle
+1290 continue beach-start
+1291 wait *target* target-continue
+1292 wait *target* target-stance
+1480 log view-begin beach
+1600 shot tie_beach
+1601 log view-end beach
+1610 exit
