@@ -365,7 +365,9 @@
                        (s2-1 (-> s1-1 base)))
                   (set-font-color-alpha (-> font-ctxt color) alpha)
                   ;; og:preserve-this (AI-assisted) 3DS: lines kept off the screen's right edge
-                  (#if TARGET_3DS (pc-3ds-draw-line *game-text-line* s1-1 gp-0) (draw-string *game-text-line* s1-1 gp-0))
+                  (#if TARGET_3DS
+                    (pc-3ds-draw-line *game-text-line* s1-1 gp-0 (pc-3ds-text-k sv-136 font-ctxt))
+                    (draw-string *game-text-line* s1-1 gp-0))
                   (set-font-color-alpha (-> font-ctxt color) 128)
                   (set! (-> gp-0 color) (-> *font-work* last-color))
                   (let ((a3-3 (-> s1-1 base)))

@@ -139,10 +139,15 @@
       (+! (-> s4-1 origin x) -220.0)
       (+! (-> s4-1 origin y) 40.0)
       (set! (-> s4-1 flags) (font-flags shadow kerning middle large))
+      ;; og:preserve-this (AI-assisted) 3DS: 0.7 is the size, f30-0 the animation (font-h.gc)
+      (#when TARGET_3DS
+        (set! *pc-3ds-text-size* 0.7))
       (print-game-text-scaled (lookup-text! *common-text* (text-id total-collected) #f)
                               (* 0.7 f30-0)
                               s4-1
                               (the int (* 128.0 f30-0)))
+      (#when TARGET_3DS
+        (set! *pc-3ds-text-size* 1.0))
       (+! (-> s4-1 origin y) 15.0)
       (let ((s5-2 print-game-text-scaled))
         (format (clear *temp-string*) "~D/~D" (the int (-> *game-info* money-total)) (-> this total-nb-of-orbs))
@@ -186,10 +191,15 @@
         (+! (-> s4-1 origin x) -220.0)
         (+! (-> s4-1 origin y) 40.0)
         (set! (-> s4-1 flags) (font-flags shadow kerning middle large))
+        ;; og:preserve-this (AI-assisted) 3DS: 0.7 is the size, f30-0 the animation (font-h.gc)
+        (#when TARGET_3DS
+          (set! *pc-3ds-text-size* 0.7))
         (print-game-text-scaled (lookup-text! *common-text* (text-id total-collected) #f)
                                 (* 0.7 f30-0)
                                 s4-1
                                 (the int (* 128.0 f30-0)))
+        (#when TARGET_3DS
+          (set! *pc-3ds-text-size* 1.0))
         (+! (-> s4-1 origin y) 15.0)
         (let ((s5-2 print-game-text-scaled))
           (format (clear *temp-string*) "~D/~D" (the int (-> *game-info* buzzer-total)) (-> this total-nb-of-buzzers))

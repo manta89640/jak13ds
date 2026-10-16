@@ -3139,20 +3139,30 @@
            (set-color! font (font-color default))
            (set-origin! font (- 17 (-> obj left-x-offset)) 14)
            (set-scale! font (* 0.6 (-> obj transition-percentage-invert)))
+           ;; og:preserve-this (AI-assisted) 3DS: grows in to the 3DS text size (font-h.gc)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* (-> obj transition-percentage-invert)))
            (print-game-text (lookup-text! *common-text* (text-id select-level) #f)
                             font
                             #f
                             (the int (* 128.0 (-> obj transition-percentage-invert)))
-                            22))
+                            22)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* 1.0)))
           (((progress-screen flava-player))
            (set-color! font (font-color default))
            (set-origin! font (- 17 (-> obj left-x-offset)) 14)
            (set-scale! font (* 0.6 (-> obj transition-percentage-invert)))
+           ;; og:preserve-this (AI-assisted) 3DS: grows in to the 3DS text size (font-h.gc)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* (-> obj transition-percentage-invert)))
            (print-game-text (lookup-text! *common-text* (text-id select-flava) #f)
                             font
                             #f
                             (the int (* 128.0 (-> obj transition-percentage-invert)))
-                            22)))
+                            22)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* 1.0))))
         (dotimes (index (length options))
           (let ((option-str (the string #f)) ;; the option text
                 (option-x 17)
@@ -3469,7 +3479,13 @@
                   (set! (-> font origin x) (the float (- option-x (-> obj left-x-offset))))
                   (set! (-> font origin y) (the float (the int (* (the float option-y) (if (-> options index scale) f0-23 1.0)))))
                   (set-scale! font (* arg2 f0-23 scroll-amt))
-                  (print-game-text option-str font #f (the int (* 128.0 f0-23 scroll-amt)) 22)))
+                  ;; og:preserve-this (AI-assisted) 3DS: the rows grow in (and scroll in) to the 3DS
+                  ;; text size at rest (font-h.gc pc-3ds-text-scale)
+                  (#when TARGET_3DS
+                    (set! *pc-3ds-text-anim* (* f0-23 scroll-amt)))
+                  (print-game-text option-str font #f (the int (* 128.0 f0-23 scroll-amt)) 22)
+                  (#when TARGET_3DS
+                    (set! *pc-3ds-text-anim* 1.0))))
               (+! y-off arg1)
               (+! option-count 1)))))))
   0
