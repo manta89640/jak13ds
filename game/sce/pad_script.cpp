@@ -43,6 +43,8 @@ struct Entry {
   bool shot = false;
   std::string shot_name;  // (AI-assisted) "shot NAME" (renderer hook with a name)
   std::vector<std::pair<std::string, std::string>> sets;  // (AI-assisted) "set KEY VALUE"
+  std::vector<std::vector<std::string>> calls;  // (AI-assisted) "call FN ARGS...": FN first
+  std::vector<std::string> pstates;             // (AI-assisted) "pstate TYPE"
 };
 
 struct Script {
@@ -72,6 +74,8 @@ SetHook g_set_hook = nullptr;              // (AI-assisted)
 JointHook g_joint_hook = nullptr;
 TasksHook g_tasks_hook = nullptr;  // (AI-assisted)
 ProgressHook g_progress_hook = nullptr;  // (AI-assisted)
+CallHook g_call_hook = nullptr;          // (AI-assisted)
+ProcStateHook g_proc_state_hook = nullptr;  // (AI-assisted)
 std::string g_last_shot_name;      // (AI-assisted) "shot NAME" without a named shot hook
 
 // PadData::ButtonIndex
@@ -174,6 +178,20 @@ void load() {
         std::string key, value;  // (AI-assisted)
         ss >> key >> value;
         e.sets.push_back({key, value});
+      } else if (item == "call") {
+        // (AI-assisted) the rest of the line: FN ARGS...
+        std::vector<std::string> words;
+        std::string w;
+        while (ss >> w) {
+          words.push_back(w);
+        }
+        if (!words.empty()) {
+          e.calls.push_back(words);
+        }
+      } else if (item == "pstate") {
+        std::string type;
+        ss >> type;
+        e.pstates.push_back(type);
       } else if (item == "crash") {
         e.crash = true;
       } else if (item.size() > 3 && item[2] == '=') {
@@ -288,6 +306,21 @@ PadState next_frame() {
         g_progress_hook(n);
       }
     }
+    for (auto& c : e.calls) {
+      std::string line;
+      for (auto& w : c) {
+        line += " " + w;
+      }
+      lg::info("[pad script] frame {}: call{}", frame, line);
+      if (g_call_hook) {
+        g_call_hook(c[0], std::vector<std::string>(c.begin() + 1, c.end()));
+      }
+    }
+    for (auto& t : e.pstates) {
+      if (g_proc_state_hook) {
+        g_proc_state_hook(t.c_str());
+      }
+    }
     for (auto& [key, value] : e.sets) {
       lg::info("[pad script] frame {}: set {} {}", frame, key, value);
       if (!g_set_hook || !g_set_hook(key.c_str(), value.c_str())) {
@@ -360,6 +393,14 @@ void set_tasks_hook(TasksHook hook) {
 
 void set_progress_hook(ProgressHook hook) {
   g_progress_hook = hook;
+}
+
+void set_call_hook(CallHook hook) {
+  g_call_hook = hook;
+}
+
+void set_proc_state_hook(ProcStateHook hook) {
+  g_proc_state_hook = hook;
 }
 
 void set_shot_hook(ShotHook hook) {

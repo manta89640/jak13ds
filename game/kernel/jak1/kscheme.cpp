@@ -1629,6 +1629,220 @@ void pad_script_progress(int screen) {
   }
   call_goal(Ptr<Function>(fn->value), (u64)(s64)screen, 0, 0, s7.offset, g_ee_main_mem);
 }
+
+//! (AI-assisted) a pad script argument: an integer, 'SYM, $SYM, "TEXT", fN, #f or #t
+u64 pad_script_arg(const std::string& w) {
+  if (w.size() > 1 && w[0] == '\'') {
+    return intern_from_c(w.c_str() + 1).offset;
+  } else if (w.size() > 1 && w[0] == '$') {
+    auto v = find_symbol_from_c(w.c_str() + 1);
+    return v.offset ? (u64)v->value : s7.offset;
+  } else if (w.size() > 1 && w[0] == '"') {
+    std::string t = w.substr(1, w.size() - (w.back() == '"' ? 2 : 1));
+    return (u32)make_string_from_c(t.c_str());
+  } else if (w.size() > 1 && w[0] == 'f') {
+    float f = std::strtof(w.c_str() + 1, nullptr);
+    u32 bits;
+    memcpy(&bits, &f, 4);
+    return bits;
+  } else if (w == "#f") {
+    return s7.offset;
+  } else if (w == "#t") {
+    return (s7 + FIX_SYM_TRUE).offset;
+  }
+  return (u64)std::strtoll(w.c_str(), nullptr, 0);
+}
+
+//! (AI-assisted) the process of type type_name nearest to Jak (pad-script-nearest-joint, joint
+//! 0), 0 if none; its joint 0 position in pos (meters)
+u32 pad_script_nearest(const char* type_name, float* pos) {
+  static u32 vec = 0;
+  auto fn = find_symbol_from_c("pad-script-nearest-joint");
+  auto type = find_symbol_from_c(type_name);
+  if (!fn.offset || fn->value == s7.offset || !type.offset || type->value == s7.offset) {
+    lg::warn("[pad script] no pad-script-nearest-joint or no type {}", type_name);
+    return 0;
+  }
+  if (!vec) {
+    vec = kmalloc(kglobalheap, 16, KMALLOC_MEMSET | KMALLOC_ALIGN_16, "pad-script-vec").offset;
+  }
+  const u32 proc = (u32)call_goal(Ptr<Function>(fn->value), type->value, 0, vec, s7.offset,
+                                  g_ee_main_mem);
+  if (proc == s7.offset || (proc & OFFSET_MASK) != BASIC_OFFSET) {
+    return 0;
+  }
+  for (int i = 0; i < 3; i++) {
+    pos[i] = Ptr<float>(vec).c()[i] / 4096.f;
+  }
+  return proc;
+}
+
+//! (AI-assisted) "call FN ARGS..." in a pad script: FN's value called with up to 8 arguments
+//! (pad_script_arg), the result logged. C mode only (goalc_call_goal8). Pseudo functions:
+//!   poke32 BASE OFFSET VALUE  a 32-bit write to GOAL memory
+//!   pgo TYPE STATE            the nearest process of TYPE goes to the state in global STATE,
+//!                             or #N: its type's method N (a virtual state); next-state +
+//!                             enter-state with pp = the process, like go-process
+//!   pevent TYPE MSG ARGS...   (send-event the-nearest-process-of-TYPE 'MSG ARGS...), from #f
+void pad_script_call(const std::string& fn, const std::vector<std::string>& args) {
+  if (!goalc_enabled()) {
+    lg::warn("[pad script] call: C mode only");
+    return;
+  }
+  if (fn == "poke32") {
+    // e.g. 100 power cells: "call poke32 $*game-info* 92 f100" (game-info fuel: field offset
+    // 96 - 4, a basic)
+    if (args.size() < 3) {
+      return;
+    }
+    const u64 addr = pad_script_arg(args[0]) + pad_script_arg(args[1]);
+    if (addr < 0x100000 || addr + 4 > (u64)EE_MAIN_MEM_SIZE) {
+      lg::warn("[pad script] poke32: bad address {:#x}", addr);
+      return;
+    }
+    *Ptr<u32>((u32)addr) = (u32)pad_script_arg(args[2]);
+    lg::info("[pad script] poke32 {:#x} = {:#x}", addr, *Ptr<u32>((u32)addr));
+    return;
+  }
+  if (fn == "artctl") {
+    // the spooled animation buffers of *art-control* (loader-h.gc layouts; a basic's field at
+    // offset N is at address + N - 4)
+    auto sym = find_symbol_from_c("*art-control*");
+    const u32 ac = sym.offset ? sym->value : 0;
+    if ((ac & OFFSET_MASK) != BASIC_OFFSET) {
+      return;
+    }
+    auto str = [](u32 p) -> std::string {
+      if (p == s7.offset || (p & OFFSET_MASK) != BASIC_OFFSET || p < 0x84000) {
+        return "#f";
+      }
+      return Ptr<String>(p)->data();
+    };
+    auto sym_name = [](u32 p) -> std::string {
+      if ((p & OFFSET_MASK) != BASIC_OFFSET) {
+        return "?";
+      }
+      return info(Ptr<Symbol>(p))->str->data();
+    };
+    for (int i = 0; i < 2; i++) {
+      const u32 b = *Ptr<u32>(ac + 4 - 4 + 4 * i);
+      lg::info(
+          "[pad script] artctl buf {}: {} locked {} pending {} {} (prio {:.1f}) load {} {} len {} "
+          "art-group {:#x}",
+          i, sym_name(*Ptr<u32>(b + 12 - 4)), sym_name(*Ptr<u32>(b + 16 - 4)),
+          str(*Ptr<u32>(b + 48 - 4)), *Ptr<s32>(b + 52 - 4), *Ptr<float>(b + 64 - 4),
+          str(*Ptr<u32>(b + 68 - 4)), *Ptr<s32>(b + 72 - 4), *Ptr<s32>(b + 96 - 4),
+          *Ptr<u32>(b + 100 - 4));
+    }
+    for (int i = 0; i < 3; i++) {
+      const u32 r = ac + 16 - 4 + 48 * i + 4;  // inline spool-anim basics: 48 bytes, type first
+      lg::info("[pad script] artctl rec {}: {} parts {} prio {:.1f}", i,
+               str(*Ptr<u32>(r + 16 - 4)), *Ptr<s32>(r + 24 - 4), *Ptr<float>(r + 28 - 4));
+    }
+    lg::info("[pad script] artctl active {} preload {} reserve-count {}",
+             str(*Ptr<u32>(ac + 176 - 4)), str(*Ptr<u32>(ac + 184 + 4 + 16 - 4 - 4)),
+             *Ptr<s32>(ac + 172 - 4));
+    // the IOP's stream clock (sound-iop-info: frame 16, strpos 20, str-id 24)
+    auto iop = find_symbol_from_c("*sound-iop-info*");
+    if (iop.offset && (iop->value & OFFSET_MASK) == BASIC_OFFSET) {
+      const u32 si = iop->value;
+      lg::info("[pad script] artctl iop frame {} strpos {} str-id {}", *Ptr<u32>(si + 16 - 4),
+               *Ptr<s32>(si + 20 - 4), *Ptr<u32>(si + 24 - 4));
+    }
+    return;
+  }
+  if (fn == "pgo" || fn == "pevent") {
+    if (args.size() < 2) {
+      return;
+    }
+    float pos[3];
+    const u32 proc = pad_script_nearest(args[0].c_str(), pos);
+    if (!proc) {
+      lg::warn("[pad script] {}: no {}", fn, args[0]);
+      return;
+    }
+    if (fn == "pgo") {
+      // STATE: a global state, or #N: the virtual state in method N of the process's type
+      u32 state = 0;
+      if (args[1].size() > 1 && args[1][0] == '#') {
+        auto type = Ptr<Type>(*Ptr<u32>(proc - 4));
+        state = type->get_method(std::atoi(args[1].c_str() + 1)).offset;
+      } else {
+        auto st = find_symbol_from_c(args[1].c_str());
+        state = st.offset ? st->value : 0;
+      }
+      auto enter = find_symbol_from_c("enter-state");
+      if ((state & OFFSET_MASK) != BASIC_OFFSET || state == s7.offset || !enter.offset) {
+        lg::warn("[pad script] pgo: no state {}", args[1]);
+        return;
+      }
+      *Ptr<u32>(proc + 76 - 4) = state;  // process next-state
+      u64 a[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+      goalc_call_goal8(enter->value, a, proc);
+      lg::info("[pad script] pgo {} -> {}", args[0], args[1]);
+    } else {
+      static u32 block = 0;
+      auto send = find_symbol_from_c("send-event-function");
+      if (!send.offset) {
+        return;
+      }
+      if (!block) {
+        block = kmalloc(kglobalheap, 0x50, KMALLOC_MEMSET | KMALLOC_ALIGN_16, "pad-script-event")
+                    .offset;
+      }
+      // event-message-block: to 0, from 4, num-params 8, message 12, param 16 (7 x u64)
+      memset(Ptr<u8>(block).c(), 0, 0x48);
+      *Ptr<u32>(block + 4) = s7.offset;
+      *Ptr<u32>(block + 12) = intern_from_c(args[1].c_str()).offset;
+      int n = 0;
+      for (size_t i = 2; i < args.size() && n < 7; i++, n++) {
+        *Ptr<u64>(block + 16 + 8 * n) = pad_script_arg(args[i]);
+      }
+      *Ptr<s32>(block + 8) = n;
+      u64 a[8] = {proc, block, 0, 0, 0, 0, 0, 0};
+      const u64 r = goalc_call_goal8(send->value, a, s7.offset);
+      lg::info("[pad script] pevent {} {} = {:#x}", args[0], args[1], r);
+    }
+    return;
+  }
+  auto sym = find_symbol_from_c(fn.c_str());
+  if (!sym.offset || sym->value == s7.offset) {
+    lg::warn("[pad script] call: no function {}", fn);
+    return;
+  }
+  u64 a[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (size_t i = 0; i < args.size() && i < 8; i++) {
+    a[i] = pad_script_arg(args[i]);
+  }
+  u64 r;
+  if (goalc_on_goal_stack()) {
+    r = goalc_call_goal8(sym->value, a, s7.offset);
+  } else {
+    r = call_goal(Ptr<Function>(sym->value), a[0], a[1], a[2], s7.offset, g_ee_main_mem);
+  }
+  lg::info("[pad script] call {} = {:#x} ({})", fn, r, (s64)r);
+}
+
+//! (AI-assisted) "pstate TYPE" in a pad script: the state and position of the process of that
+//! type nearest to Jak
+void pad_script_proc_state(const char* type_name) {
+  float p[3];
+  const u32 proc = pad_script_nearest(type_name, p);
+  if (!proc) {
+    lg::info("[pad script] pstate {}: none", type_name);
+    return;
+  }
+  std::string state = "?";
+  u32 st = *Ptr<u32>(proc + 56 - 4);
+  if (st != s7.offset && (st & OFFSET_MASK) == BASIC_OFFSET) {
+    u32 state_name = *Ptr<u32>(st + 4 - 4);
+    if ((state_name & OFFSET_MASK) == BASIC_OFFSET) {
+      state = info(Ptr<Symbol>(state_name))->str->data();
+    }
+  }
+  lg::info("[pad script] pstate {}: {} at ({:.2f}, {:.2f}, {:.2f}) m", type_name, state, p[0],
+           p[1], p[2]);
+}
 }  // namespace
 
 s32 InitHeapAndSymbol() {
@@ -1639,6 +1853,8 @@ s32 InitHeapAndSymbol() {
   pad_script::set_save_hook(pad_script_save);
   pad_script::set_tasks_hook(pad_script_tasks);
   pad_script::set_progress_hook(pad_script_progress);
+  pad_script::set_call_hook(pad_script_call);
+  pad_script::set_proc_state_hook(pad_script_proc_state);
   pad_script::set_state_name_hook(pad_script_state_name);
   pad_script::set_position_hook(pad_script_position);
   Timer heap_init_timer;

@@ -45,6 +45,18 @@
  *             (config.ini screenshots = N / --ctr-dump).
  *   set KEY VALUE  (AI-assisted) the 3DS renderer: switch a gpu_profile = ab key (or fog) on/off
  *             from here on, e.g. "set fog_alpha on" (A/B pictures of one view)
+ *   call FN ARGS...  (AI-assisted) call the GOAL function in symbol FN with up to 8 arguments:
+ *             an integer, 'SYM (the symbol), $SYM (its value), "TEXT" (a new string, no spaces)
+ *             or fN (a float), and log the result, e.g. "call close-specific-task! 112 1" or
+ *             "call auto-save-command 'restore 0 0 $*default-pool*" (tests of the game's end,
+ *             save/load). Pseudo functions: "call poke32 BASE OFFSET VALUE" (a 32-bit write
+ *             to GOAL memory: "call poke32 $*game-info* 92 f100" = 100 power cells), "call pgo
+ *             TYPE STATE" (the process of TYPE nearest to Jak goes to STATE, like go-process;
+ *             #N: the virtual state in method N of its type), "call pevent TYPE MSG ARGS..."
+ *             (send it an event), "call artctl" (log the spooled animation buffers and the
+ *             IOP's stream clock: stuck cutscenes)
+ *   pstate TYPE  (AI-assisted) log the state and position of the process of type TYPE
+ *             nearest to Jak (bosses: "pstate robotboss")
  *   exit      stop the runtime
  *   handoff   stop the script: the real controller plays from here
  *   crash     fail an assert (to test the crash screen)
@@ -61,6 +73,7 @@
  */
 
 #include <string>
+#include <vector>
 
 #include "common/common_types.h"
 
@@ -92,6 +105,12 @@ void set_position_hook(PositionHook hook);
 //! Called for "continue NAME".
 using ContinueHook = void (*)(const char* name);
 void set_continue_hook(ContinueHook hook);
+
+//! (AI-assisted) Called for "call FN ARGS..." and "pstate TYPE".
+using CallHook = void (*)(const std::string& fn, const std::vector<std::string>& args);
+void set_call_hook(CallHook hook);
+using ProcStateHook = void (*)(const char* type);
+void set_proc_state_hook(ProcStateHook hook);
 
 //! Called for "exit".
 using ExitHook = void (*)();
