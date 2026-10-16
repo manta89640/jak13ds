@@ -179,7 +179,7 @@ bool load_level(const std::string& path, LevelGeo* out, std::string* err) {
     *err = fmt::format("c3l v{}: no visibility runs (convert again)", hdr.version);
     return false;
   }
-  out->name = std::string(hdr.level_name, strnlen(hdr.level_name, 32));
+  out->name = std::string(hdr.level_name, strnlen(hdr.level_name, sizeof(hdr.level_name)));
   std::vector<c3l::Chunk> chunks;
   std::vector<c3l::Draw> draws;
   std::vector<c3l::Texture> texs;

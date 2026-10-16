@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "common/common_types.h"
@@ -166,6 +167,45 @@ struct CtrLevelData {
     }
   };
   std::unique_ptr<FineVis> fine;
+  // (AI-assisted) c3l v16 time of day: the level's colors in the game's 8 palettes, blended with
+  // the weights the game sends (its mood's itimes, as the PC's tfrag3 / tie3 / shrub renderers do
+  // each frame) into the chunks' vertex colors (ctr_level_tod_* in CtrLevel.cpp). nullptr: the
+  // file's baked palette (older file, or no heap to spare at load).
+  struct Tod {
+    u32 color_count = 0;
+    u8 palettes[8] = {};  // the palettes any color uses (not black), in order
+    u32 palette_count = 0;
+    std::vector<u8> colors;  // color_count x palette_count x rgb (GS units)
+    std::vector<c3l::TodMul> muls;
+    std::vector<u32> blended;  // color_count: r | g << 8 | b << 16
+    // "light" palettes: used by few colors (the lamps, the lava glow: the game moves their weights
+    // every frame); their colors, and per chunk its vertices with one of those (found at
+    // load), are blended / recolored on their own when only those weights move
+    u32 light_mask = 0;  // palette bits
+    std::vector<u16> light_colors;
+    std::unordered_map<u32, std::vector<u16>> chunk_lights;
+    u8 weights[8][3] = {};  // the weights of the last blend (64 = 1.0)
+    bool blended_valid = false;
+    u32 gen = 0;        // + 1 per blend of all colors
+    u32 light_gen = 0;  // + 1 per blend (all colors or the light colors)
+    u64 blend_frame = 0;
+    // per chunk: the blends its mesh's colors are (kChunkUnset: the file's; kChunkNone: no time of
+    // day colors), and that mesh (a mesh made again has the file's colors)
+    static constexpr u32 kChunkUnset = 0, kChunkNone = 0xffffffffu;
+    std::vector<u32> chunk_gen, chunk_light_gen;
+    std::vector<u32> chunk_pos;  // a recolor done in part: where it goes on
+    std::vector<int> chunk_mesh;
+    u32 bytes() const {
+      u32 lights = 0;
+      for (const auto& [ci, v] : chunk_lights) {
+        lights += (u32)v.size() * 2 + 32;
+      }
+      return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + blended.size() * 4 +
+                   light_colors.size() * 2 + chunk_gen.size() * 16) +
+             lights;
+    }
+  };
+  std::unique_ptr<Tod> tod;
 };
 
 /*! (AI-assisted) host --ctr-gfx with env CTR_FINE_VIS_CHECK: the level pieces fine_vis hid this
@@ -443,6 +483,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
   // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
   u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;
+  // (AI-assisted) c3l v16 time of day: blends, vertices recolored and their time (ms) since the
+  // last log line, over m_tod_frames level draws; the most vertices in one draw
+  u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
+  double m_tod_ms = 0, m_tod_max_ms = 0;
   std::vector<const CtrLevelData*> m_loaded;
   // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
   // of its distance)

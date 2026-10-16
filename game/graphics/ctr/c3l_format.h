@@ -31,7 +31,13 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // Draw::kind kDrawAtlasUV (texture coordinates in 1/kAtlasUVScale, the draw's texture an atlas),
 // kDrawAlphaTestDropped and kDrawBlendDropped (the alpha test / blending the converter proved can't
 // change a pixel was taken out of Draw::mode). Otherwise v14. Readers detect them by their bits.
-constexpr uint32_t kVersion = 15;
+// v16 (AI-assisted): time of day at runtime (see TodColor). Vertex::pad is the vertex's time of day
+// color (index < Header::tod_color_count) or multiplied color (tod_color_count + TodMul index),
+// 0xffff: none. Vertex::rgba keeps the converter's palette (--palette), until the first blend.
+// Otherwise v15.
+constexpr uint32_t kVersion = 16;
+// (AI-assisted) the first version with the time of day table
+constexpr uint32_t kTodVersion = 16;
 // (AI-assisted) the first version whose shrub chunks carry their PS2 distance
 constexpr uint32_t kShrubPs2DistVersion = 14;
 // v7 files (16-bit textures without mip levels) still load
@@ -48,7 +54,13 @@ enum TextureFormat : uint8_t {
 struct Header {
   char magic[4];
   uint32_t version;
-  char level_name[32];
+  char level_name[16];
+  // (AI-assisted) v16: the time of day table: TodColor[tod_color_count], then TodMul[tod_mul_count]
+  // (0, 0: none). Zero in older files (the end of their 32 byte level name).
+  uint32_t tod_offset;
+  uint32_t tod_color_count;
+  uint32_t tod_mul_count;
+  uint32_t tod_pad;
   uint32_t num_textures;
   uint32_t textures_offset;  // Texture[num_textures]
   uint32_t num_chunks;
@@ -148,9 +160,32 @@ struct VisRun {
 };
 static_assert(sizeof(VisRun) == 8);
 
+/*!
+ * (AI-assisted) v16: a time of day color: its rgb in each of the game's 8 palettes, GS units
+ * (0x80 = 1.0); the PC's tfrag3 / tie3 / shrub time of day colors. The color at runtime, per
+ * channel: min(255, sum(w[p] * rgb[p]) >> 6) with the game's weights w (the mood's itimes, 64 =
+ * 1.0), as interp_time_of_day_slow (background_common.cpp). The vertex keeps its own alpha.
+ */
+struct TodColor {
+  uint8_t rgb[8][3];
+};
+static_assert(sizeof(TodColor) == 24);
+
+/*!
+ * (AI-assisted) v16: a time of day color times a vertex color: min(255, color * mul / 128) per
+ * channel. Shrubs (shrub.vert: base color * time of day color * 4, in GS units base * tod / 128),
+ * the untextured vista (the texture's average color).
+ */
+struct TodMul {
+  uint16_t color;  // TodColor index
+  uint8_t mul[3];
+  uint8_t pad;
+};
+static_assert(sizeof(TodMul) == 6);
+
 struct Vertex {
   int16_t pos[3];  // quantized, see Chunk
-  int16_t pad;
+  int16_t pad;     // (AI-assisted) v16: time of day color / TodMul (uint16_t, see kTodVersion)
   int16_t st[2];      // texture coordinates * 1024
   uint8_t rgba[4];    // baked time of day color, GS units (0x80 = 1.0)
 };

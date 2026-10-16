@@ -6802,6 +6802,15 @@ void* ctr_gpu_mesh_vertices(int mesh) {
   return m->verts;
 }
 
+void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || !g.meshes[mesh].fill_vbytes ||
+      g.meshes[mesh].verts_alt) {
+    return NULL;
+  }
+  *vertex_count = (int)(g.meshes[mesh].fill_vbytes / 16u);
+  return g.meshes[mesh].verts;
+}
+
 void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
   if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || size <= 0) {
     return;

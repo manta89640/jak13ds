@@ -40,6 +40,7 @@ struct Entry {
   bool save = false;
   std::vector<std::pair<int, int>> tasks;  // (AI-assisted) "tasks A B"
   std::vector<int> progress;  // (AI-assisted) "progress N"
+  std::vector<float> tod;     // (AI-assisted) "tod H"
   bool shot = false;
   std::string shot_name;  // (AI-assisted) "shot NAME" (renderer hook with a name)
   std::vector<std::pair<std::string, std::string>> sets;  // (AI-assisted) "set KEY VALUE"
@@ -72,6 +73,7 @@ SetHook g_set_hook = nullptr;              // (AI-assisted)
 JointHook g_joint_hook = nullptr;
 TasksHook g_tasks_hook = nullptr;  // (AI-assisted)
 ProgressHook g_progress_hook = nullptr;  // (AI-assisted)
+TodHook g_tod_hook = nullptr;            // (AI-assisted)
 std::string g_last_shot_name;      // (AI-assisted) "shot NAME" without a named shot hook
 
 // PadData::ButtonIndex
@@ -150,6 +152,10 @@ void load() {
         e.handoff = true;
       } else if (item == "save") {
         e.save = true;
+      } else if (item == "tod") {
+        float h = 12.f;
+        ss >> h;
+        e.tod.push_back(h);
       } else if (item == "progress") {
         int n = -1;
         ss >> n;
@@ -282,6 +288,12 @@ PadState next_frame() {
         g_tasks_hook(first, last);
       }
     }
+    for (float h : e.tod) {
+      lg::info("[pad script] frame {}: tod {}", frame, h);
+      if (g_tod_hook) {
+        g_tod_hook(h);
+      }
+    }
     for (int n : e.progress) {
       lg::info("[pad script] frame {}: progress {}", frame, n);
       if (g_progress_hook) {
@@ -360,6 +372,10 @@ void set_tasks_hook(TasksHook hook) {
 
 void set_progress_hook(ProgressHook hook) {
   g_progress_hook = hook;
+}
+
+void set_tod_hook(TodHook hook) {
+  g_tod_hook = hook;
 }
 
 void set_shot_hook(ShotHook hook) {

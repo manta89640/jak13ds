@@ -39,6 +39,8 @@
  *             to it (pad-script-progress, goal_src/jak1/pc/progress-pc.gc; progress-h.gc has the
  *             numbers: 23 memcard-no-data, 7 memcard-no-space, 29 auto-save, 55 music-player ...),
  *             for pictures of screens a test can't reach otherwise
+ *   tod H     (AI-assisted) set the game's clock to hour H (0..24, fractions are minutes):
+ *             (set-time-of-day H), for time of day pictures (it keeps running from there)
  *   shot [NAME]  (AI-assisted) a screenshot (PC OpenGL renderer: like F2, into the config
  *             folder's screenshots; for reference pictures to compare the 3DS renderer with). The
  *             3DS renderer: NAME.bmp (3DS) / NAME.png (--ctr-gfx) in its screenshot folder
@@ -112,6 +114,10 @@ void set_tasks_hook(TasksHook hook);
 //! (AI-assisted) Called for "progress N".
 using ProgressHook = void (*)(int screen);
 void set_progress_hook(ProgressHook hook);
+
+//! (AI-assisted) Called for "tod H".
+using TodHook = void (*)(float hour);
+void set_tod_hook(TodHook hook);
 
 //! (AI-assisted) The name of the last "shot" given to the hook below ("" before the first one).
 const char* last_shot_name();
