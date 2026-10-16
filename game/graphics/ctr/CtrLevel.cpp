@@ -913,7 +913,7 @@ void tod_weights(const CtrBackgroundCamera& cam, u8 w[8][3]) {
 // over frames), the light vertices after a blend of the light colors.
 constexpr u64 kTodMinFrames = 30;
 constexpr int kTodJump = 8;
-constexpr u32 kTodBudget = 8000;
+constexpr u32 kTodBudget = 4000;
 
 void tod_blend(CtrLevelData::Tod& t, u32 color) {
   const u8* src = t.colors.data() + (size_t)color * t.palette_count * 3;

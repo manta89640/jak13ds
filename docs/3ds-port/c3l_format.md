@@ -315,12 +315,13 @@ with the game's weights from the background camera's itimes (64 = 1.0), as the P
 `interp_time_of_day_slow`. It rewrites the chunks' vertex colors in place in their meshes (the
 alpha stays; a frame the GPU still draws may see part of the change):
 
-- all colors are blended again when a day palette's weight moves by 2/64, or by 1/64 after 60
-  frames (the day moves 1/64 every ~40 frames); then every chunk is recolored as it is drawn, up
-  to 24000 vertices per level draw (the first chunk of a draw always; the rest the next frames);
+- all colors are blended again when a day palette's weight moved by 2/64 and 30 frames went by
+  since the last such blend (the day moves 1/64 every ~40 frames; the title's attract mode ~20x as
+  fast), or at once by 8/64 (the clock set, a teleport); then every chunk is recolored as it is
+  drawn, 4000 vertices per level draw (a big chunk in pieces over frames, from where it stopped);
 - "light" palettes (used by a quarter of the colors or fewer: village1's lamps, palette 5) move
   every frame: only their colors are blended again, and only the vertices with one of them are
-  rewritten (per chunk a list made at its first recolor);
+  rewritten (per chunk a list made at load);
 - a level's meshes are colored as they are read when weights are known for it (the weights it was
   last drawn with, or the last level's with the same day palettes); else they show the baked
   palette until drawn.
@@ -328,7 +329,9 @@ alpha stays; a frame the GPU still draws may see part of the change):
 Heap: the colors (palettes used x 3 bytes), the TodMuls, 4 bytes per color for the blend and the
 chunk lists (village1 363 KB, jungle 497 KB). On the 3DS a level whose table would leave less
 than 3 MB of heap free keeps its baked palette (`[ctr] <level>: no heap for the time of day
-colors`). Log: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at
+colors`). Azahar (New 3DS, village1 at night with its flickering lamps): 0.6-0.8 ms of render
+thread per level draw on average (mostly the lamps' vertices), jungle 0.1-0.5 ms; a piece of 8000
+vertices took ~7 ms there (hence 4000); 29.9 fps throughout. Log: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at
 load, `[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...)`
 with the stats. Host: env `CTR_TOD_LOG=1` logs the weights every 30 frames; the pad script command
 `tod H` sets the game's clock (pictures at a time of day).
