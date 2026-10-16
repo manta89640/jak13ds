@@ -1681,7 +1681,7 @@ u32 pad_script_nearest(const char* type_name, float* pos) {
 //! (pad_script_arg), the result logged. C mode only (goalc_call_goal8). Pseudo functions:
 //!   poke32 BASE OFFSET VALUE  a 32-bit write to GOAL memory
 //!   pgo TYPE STATE            the nearest process of TYPE goes to the state in global STATE,
-//!                             or #N: its type's method N (a virtual state); next-state +
+//!                             or @N: its type's method N (a virtual state); next-state +
 //!                             enter-state with pp = the process, like go-process
 //!   pevent TYPE MSG ARGS...   (send-event the-nearest-process-of-TYPE 'MSG ARGS...), from #f
 //!   artctl                    log the spooled animation buffers and the IOP's stream clock
@@ -1771,9 +1771,9 @@ void pad_script_call(const std::string& fn, const std::vector<std::string>& args
       return;
     }
     if (fn == "pgo") {
-      // STATE: a global state, or #N: the virtual state in method N of the process's type
+      // STATE: a global state, or @N: the virtual state in method N of the process's type
       u32 state = 0;
-      if (args[1].size() > 1 && args[1][0] == '#') {
+      if (args[1].size() > 1 && args[1][0] == '@') {
         auto type = Ptr<Type>(*Ptr<u32>(proc - 4));
         state = type->get_method(std::atoi(args[1].c_str() + 1)).offset;
       } else {

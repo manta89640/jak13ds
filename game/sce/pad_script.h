@@ -52,7 +52,7 @@
  *             save/load). Pseudo functions: "call poke32 BASE OFFSET VALUE" (a 32-bit write
  *             to GOAL memory: "call poke32 $*game-info* 92 f100" = 100 power cells), "call pgo
  *             TYPE STATE" (the process of TYPE nearest to Jak goes to STATE, like go-process;
- *             #N: the virtual state in method N of its type), "call pevent TYPE MSG ARGS..."
+ *             @N: the virtual state in method N of its type), "call pevent TYPE MSG ARGS..."
  *             (send it an event), "call artctl" (log the spooled animation buffers and the
  *             IOP's stream clock: stuck cutscenes), "call heap" (the global heap's free space)
  *   pstate TYPE  (AI-assisted) log the state and position of the process of type TYPE

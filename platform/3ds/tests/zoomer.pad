@@ -1,0 +1,217 @@
+# (AI-assisted) the Zoomer: Fire Canyon, Lava Tube and the Mountain Pass race (all tasks closed,
+# 100 cells: every Zoomer pad is unlocked). Jak is put next to the Zoomer, Circle until he rides
+# it (a first-time Keira cutscene plays first), then X held (accelerate) with steering.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=<this file> build-host-small/game/gk --proj-path <proj>
+#     --config-path <scratch dir> --ctr-gfx -- -boot -fakeiso -nosound -cbackend
+# Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+150 tasks 2 111
+160 call poke32 $*game-info* 92 f100
+200 log SEG firecanyon-start
+200 continue firecanyon-start
+201 wait *target* target-continue
+440 pstate racer
+441 teleport racer 0 2
+500 circle
+506 -
+700 pos *target*
+900 circle
+906 -
+1100 pos *target*
+1300 circle
+1306 -
+1500 pos *target*
+1700 circle
+1706 -
+1900 pos *target*
+2100 circle
+2106 -
+2300 pos *target*
+2500 circle
+2506 -
+2700 pos *target*
+2900 circle
+2906 -
+3100 pos *target*
+3300 circle
+3306 -
+3500 pos *target*
+3701 x
+3800 x lx=200
+3900 x
+4000 pos *target*
+4001 x
+4100 x lx=60
+4200 x
+4300 pos *target*
+4301 x
+4400 x lx=200
+4500 x
+4600 pos *target*
+4601 x
+4700 x lx=60
+4800 x
+4900 pos *target*
+4901 x
+5000 x lx=200
+5100 x
+5200 pos *target*
+5201 x
+5300 x lx=60
+5400 x
+5500 pos *target*
+5501 x
+5600 x lx=200
+5700 x
+5800 pos *target*
+5801 x
+5900 x lx=60
+6000 x
+6100 pos *target*
+6101 x
+6200 x lx=200
+6300 x
+6400 pos *target*
+6401 x
+6500 x lx=60
+6600 x
+6700 pos *target*
+6720 log SEG lavatube-start
+6720 continue lavatube-start
+6721 wait *target* target-continue
+6960 pstate racer
+6961 teleport racer 0 2
+7020 circle
+7026 -
+7220 pos *target*
+7420 circle
+7426 -
+7620 pos *target*
+7820 circle
+7826 -
+8020 pos *target*
+8220 circle
+8226 -
+8420 pos *target*
+8620 circle
+8626 -
+8820 pos *target*
+9020 circle
+9026 -
+9220 pos *target*
+9420 circle
+9426 -
+9620 pos *target*
+9820 circle
+9826 -
+10020 pos *target*
+10221 x
+10320 x lx=200
+10420 x
+10520 pos *target*
+10521 x
+10620 x lx=60
+10720 x
+10820 pos *target*
+10821 x
+10920 x lx=200
+11020 x
+11120 pos *target*
+11121 x
+11220 x lx=60
+11320 x
+11420 pos *target*
+11421 x
+11520 x lx=200
+11620 x
+11720 pos *target*
+11721 x
+11820 x lx=60
+11920 x
+12020 pos *target*
+12021 x
+12120 x lx=200
+12220 x
+12320 pos *target*
+12321 x
+12420 x lx=60
+12520 x
+12620 pos *target*
+12621 x
+12720 x lx=200
+12820 x
+12920 pos *target*
+12921 x
+13020 x lx=60
+13120 x
+13220 pos *target*
+13240 log SEG ogre-race
+13240 continue ogre-race
+13241 wait *target* target-continue
+13480 pstate racer
+13481 teleport racer 0 2
+13540 circle
+13546 -
+13740 pos *target*
+13940 circle
+13946 -
+14140 pos *target*
+14340 circle
+14346 -
+14540 pos *target*
+14740 circle
+14746 -
+14940 pos *target*
+15140 circle
+15146 -
+15340 pos *target*
+15540 circle
+15546 -
+15740 pos *target*
+15940 circle
+15946 -
+16140 pos *target*
+16340 circle
+16346 -
+16540 pos *target*
+16741 x
+16840 x lx=200
+16940 x
+17040 pos *target*
+17041 x
+17140 x lx=60
+17240 x
+17340 pos *target*
+17341 x
+17440 x lx=200
+17540 x
+17640 pos *target*
+17641 x
+17740 x lx=60
+17840 x
+17940 pos *target*
+17941 x
+18040 x lx=200
+18140 x
+18240 pos *target*
+18241 x
+18340 x lx=60
+18440 x
+18540 pos *target*
+18541 x
+18640 x lx=200
+18740 x
+18840 pos *target*
+18841 x
+18940 x lx=60
+19040 x
+19140 pos *target*
+19141 x
+19240 x lx=200
+19340 x
+19440 pos *target*
+19441 x
+19540 x lx=60
+19640 x
+19740 pos *target*
+19760 exit
