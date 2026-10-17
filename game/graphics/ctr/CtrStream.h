@@ -9,9 +9,10 @@
  * level loads need whole (texture pools, meshes).
  *
  * Its first segment (config stream_kb) is taken at the first level that streams and kept. Growth
- * segments (at least kSegment) are taken while the units needed don't fit and the linear heap keeps
- * its reserve (config stream_reserve_kb) free after them, and given back when empty, or emptied
- * when a level load needs the memory (CtrLevels::housekeeping).
+ * segments (kSegment to kMaxSegment, sized to what the camera needs now and 2 s ahead) are taken
+ * while the units needed don't fit and the linear heap keeps its floor (config stream_reserve_kb)
+ * free after them, and given back when empty, or emptied under memory pressure and when a level
+ * load needs the memory (CtrLevels::stream_update, housekeeping).
  */
 
 #include <cstdint>
@@ -34,9 +35,14 @@ class CtrStreamArena {
   // a deleted mesh's memory
   void free(void* p);
   static void free_cb(void* mem);
-  // another segment of at least `bytes` (and kSegment) when the linear heap keeps `reserve` bytes
-  // free after it (render thread)
-  bool grow(u32 bytes, u32 reserve);
+  // another segment of `want` bytes, or less down to `bytes` (at least kSegment, at most
+  // kMaxSegment), as the linear heap keeps `reserve` bytes free after it and has a block that big
+  // (render thread). Returns its size, 0 for none.
+  u32 grow(u32 bytes, u32 want, u32 reserve);
+  u32 capacity() {
+    std::lock_guard<std::mutex> lk(m_lock);
+    return m_capacity;
+  }
   // the empty growth segments back to the linear heap (render thread, or the thread of
   // CtrLevels::service; no frame being built). Returns their bytes.
   u32 release_empty();
@@ -63,6 +69,9 @@ class CtrStreamArena {
   void new_period();
   static constexpr u32 kAlign = 128;
   static constexpr u32 kSegment = 1024 * 1024;
+  // (fewer, larger growth segments: fewer pieces in the linear heap; one this big still fits in
+  // the free room between levels' blocks)
+  static constexpr u32 kMaxSegment = 4 * 1024 * 1024;
 
  private:
   struct Seg {

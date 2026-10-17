@@ -199,15 +199,38 @@ void CtrStreamArena::free_cb(void* mem) {
   get().free(mem);
 }
 
-bool CtrStreamArena::grow(u32 bytes, u32 reserve) {
-  bytes = std::max<u32>((bytes + kAlign - 1) & ~(kAlign - 1), kSegment);
-  if (!m_ready || ctr_gpu_linear_free() < (u64)bytes + reserve) {
-    return false;
+u32 CtrStreamArena::grow(u32 bytes, u32 want, u32 reserve) {
+  constexpr u32 kStep = 64 * 1024;
+  if (!m_ready) {
+    return 0;
   }
-  u8* base = (u8*)ctr_gpu_linear_block(bytes);
+  // as much of `want` (at least kSegment) as the heap has over its reserve, at least `bytes`
+  // (the last one up to the reserve may be smaller than kSegment); in one block, else smaller
+  // (halving)
+  const u64 free_now = ctr_gpu_linear_free();
+  if (free_now < (u64)reserve + kStep) {
+    return 0;
+  }
+  const u32 avail = (u32)std::min<u64>((free_now - reserve) & ~(u64)(kStep - 1), 1u << 30);
+  bytes = std::max<u32>((bytes + kStep - 1) & ~(kStep - 1), std::min<u32>(kSegment, avail));
+  if (bytes > avail) {
+    return 0;
+  }
+  want = std::min<u32>(std::max<u32>((want + kStep - 1) & ~(kStep - 1), bytes),
+                       std::max<u32>(bytes, kMaxSegment));
+  want = std::min<u32>(want, avail);
+  u8* base = nullptr;
+  while (!base) {
+    base = (u8*)ctr_gpu_linear_block(want);
+    if (base || want <= bytes) {
+      break;
+    }
+    want = std::max<u32>(bytes, (want / 2) & ~(kStep - 1));
+  }
   if (!base) {
-    return false;
+    return 0;
   }
+  bytes = want;
   std::lock_guard<std::mutex> lk(m_lock);
   Seg s;
   s.base = base;
@@ -217,7 +240,7 @@ bool CtrStreamArena::grow(u32 bytes, u32 reserve) {
   m_capacity += bytes;
   m_peak_capacity = std::max(m_peak_capacity, m_capacity);
   m_grown++;
-  return true;
+  return bytes;
 }
 
 u32 CtrStreamArena::release_empty() {

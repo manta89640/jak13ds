@@ -3375,6 +3375,7 @@ void CtrLevels::process_pending_loads(u64 frame) {
     }
     ctr_gpu_stats st;
     ctr_gpu_get_stats(&st);
+    m_stream_repair_room = 0;
     for (auto& [name, lev] : m_levels) {
       if (level_loading || !lev->incomplete || lev->repair_requested || lev->detail_requested ||
           frame < lev->repair_retry_frame) {
@@ -3388,6 +3389,9 @@ void CtrLevels::process_pending_loads(u64 frame) {
         lg::info("[ctr] {}: making {} missing parts again ({} KB, {} KB free)", name, n,
                  bytes / 1024, st.linear_free / 1024);
         request_repair(*lev);
+      } else {
+        // (AI-assisted, streaming) the stream arena's growth makes way for it (stream_update)
+        m_stream_repair_room += bytes + kRepairMargin;
       }
     }
   }
@@ -3617,6 +3621,13 @@ constexpr float kInViewMeters = 300.f;
 constexpr float kCutMeters = 40.f;
 // a stream job: at most this many file bytes, units (one level load waits for it at most this)
 constexpr u32 kBatchBytes = 256 * 1024, kBatchUnits = 24;
+// the arena's growth (stream_update; the floor: config stream_reserve_kb): taken while the linear
+// heap keeps the floor + kGrowHeadroom free after it, by what is needed now and 2 s ahead +
+// kGrowMargin (or 1/8 of it); given back under the floor + kPressure (the units not needed now),
+// under the floor (all), while a level loads under the floor + kLoadRoom
+constexpr u32 kGrowHeadroom = 256 * 1024, kPressure = 128 * 1024;
+constexpr u32 kGrowMargin = 1024 * 1024;
+constexpr u32 kLoadRoom = 12u * 1024 * 1024;
 
 // The time of day groups of a near chunk read by a stream job (loader thread): as tod_make_groups
 // (one per visibility id of its runs when their vertex ranges don't overlap, in vertex order;
@@ -4008,14 +4019,20 @@ void CtrLevels::stream_update(u64 frame) {
   if (!m_cam_valid || !arena.ready()) {
     return;
   }
-  // the arena's growth: given back where the linear heap has less than its reserve or a level
-  // loads (its memory first); the empty segments back to the heap (their meshes' memory came back
-  // once the GPU was done with it)
-  const u32 reserve = (u32)ctr_settings().stream_reserve_kb * 1024u;
+  // the arena's growth: given back where the linear heap has less than its floor (+ what the
+  // repair of an incomplete level waits for) or a level loads (its memory first: the floor plus
+  // kLoadRoom); under the floor + kPressure the units not needed now first, under the floor all
+  // of them. The empty segments back to the heap (their meshes' memory came back once the GPU was
+  // done with it).
+  const u32 reserve = (u32)ctr_settings().stream_reserve_kb * 1024u + m_stream_repair_room;
   if (arena.has_growth()) {
-    const u32 need = level_loading ? reserve + 12u * 1024u * 1024u : reserve;
-    if (free_now < need) {
-      m_sst.shrunk += stream_shrink(free_now + 512 * 1024 < need);
+    if (level_loading) {
+      const u32 need = reserve + kLoadRoom;
+      if (free_now < need) {
+        m_sst.shrunk += stream_shrink(free_now + 512 * 1024 < need);
+      }
+    } else if (free_now < reserve + kPressure) {
+      m_sst.shrunk += stream_shrink(free_now < reserve);
     }
     arena.release_empty();
   }
@@ -4187,37 +4204,53 @@ void CtrLevels::stream_update(u64 frame) {
     // freeing makes a free run this big (with the free and pending pieces next to it: the arena's
     // pieces are of all sizes, its free room in many small pieces after a while); else the
     // furthest. Not more than this unit's worth (pending: their memory comes back next frame).
-    u64 freed_for = 0;
-    while (!mem && hi < m_have.size() && m_have[hi].score > kKeepMeters * kM &&
-           freed_for < su.bytes) {
-      size_t pick_i = hi;
-      for (size_t j = hi; j < m_have.size() && j < hi + 64 && m_have[j].score > kKeepMeters * kM;
-           j++) {
-        const auto& cu = m_have[j].lev->stream_units[m_have[j].unit];
-        if (cu.state == CtrLevelData::kUnitResident && arena.run_if_freed(cu.mem) >= su.bytes) {
-          pick_i = j;
-          break;
+    // (`beyond`: the victims' least score; m_have from hi on is sorted, the furthest first)
+    auto free_for = [&](float beyond) {
+      u64 freed_for = 0;
+      while (!mem && hi < m_have.size() && m_have[hi].score > beyond && freed_for < su.bytes) {
+        size_t pick_i = hi;
+        for (size_t j = hi; j < m_have.size() && j < hi + 64 && m_have[j].score > beyond; j++) {
+          const auto& cu = m_have[j].lev->stream_units[m_have[j].unit];
+          if (cu.state == CtrLevelData::kUnitResident && arena.run_if_freed(cu.mem) >= su.bytes) {
+            pick_i = j;
+            break;
+          }
         }
-      }
-      std::swap(m_have[hi], m_have[pick_i]);
-      const auto& victim = m_have[hi].lev->stream_units[m_have[hi].unit];
-      if (victim.state != CtrLevelData::kUnitResident) {
+        std::swap(m_have[hi], m_have[pick_i]);
+        const auto& victim = m_have[hi].lev->stream_units[m_have[hi].unit];
+        if (victim.state != CtrLevelData::kUnitResident) {
+          hi++;
+          continue;
+        }
+        const bool makes_room = arena.run_if_freed(victim.mem) >= su.bytes;
+        freed_for += makes_room ? su.bytes : victim.bytes;
+        evicted += victim.bytes;
+        stream_evict(*m_have[hi].lev, m_have[hi].unit);
         hi++;
-        continue;
+        mem = arena.alloc(su.bytes);
       }
-      const bool makes_room = arena.run_if_freed(victim.mem) >= su.bytes;
-      freed_for += makes_room ? su.bytes : victim.bytes;
-      evicted += victim.bytes;
-      stream_evict(*m_have[hi].lev, m_have[hi].unit);
-      hi++;
-      mem = arena.alloc(su.bytes);
+    };
+    free_for(kKeepMeters * kM);
+    // Every unit there is needed (none beyond the keep margin to free): more room, while the
+    // linear heap keeps its floor + kGrowHeadroom free after it. One segment for what the
+    // camera needs now and 2 s ahead (need_now) + kGrowMargin beyond the arena's capacity (at
+    // least this unit's and kSegment; at most kMaxSegment, or the largest block the heap has):
+    // few, large segments. While a level loads only when the heap keeps kLoadRoom more (the
+    // load's memory first; a load that runs short makes room, freeing the growth).
+    if (!mem && evicted < su.bytes) {
+      const u32 grow_reserve = reserve + (level_loading ? kLoadRoom : kGrowHeadroom);
+      const u64 cap = arena.capacity();
+      const u64 demand = need_now + std::max<u64>(kGrowMargin, need_now / 8);
+      const u32 want = demand > cap ? (u32)std::min<u64>(demand - cap, 1u << 30) : 0;
+      if (arena.grow(su.bytes, want, grow_reserve)) {
+        mem = arena.alloc(su.bytes);
+      }
     }
-    // (more room while a level loads only when the heap keeps the reserve plus a level's worth:
-    // the load's memory first; a load that runs short makes room, freeing the growth)
-    const u32 grow_reserve = level_loading ? reserve + 12u * 1024u * 1024u : reserve;
-    if (!mem && evicted < su.bytes && arena.grow(su.bytes, grow_reserve)) {
-      // every unit there is needed: more room, while the linear heap keeps its reserve
-      mem = arena.alloc(su.bytes);
+    // The arena at its most (the heap at its floor) and this unit needed now: the units kept
+    // within the keep margin that aren't wanted (beyond the wanted margin: not read now either)
+    // make room for it
+    if (!mem && evicted < su.bytes && w.score < 0) {
+      free_for(want_m);
     }
     if (!mem) {
       m_sst.no_room++;

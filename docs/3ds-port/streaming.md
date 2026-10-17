@@ -114,12 +114,27 @@ Linear memory: the level's resident data (everything but the units) is v16's tie
 other improvements: per level the v18 near data less its share of the far versions' vertices. The
 units live in the **stream arena** (`CtrStreamArena`): a first segment of `stream_kb` (4096 KB)
 taken at the first level that streams and kept (one block: the units' comings and goings never
-fragment the linear heap that level loads need whole), and **growth segments** (1 MB or a unit's
-size) taken while every unit there is needed and the linear heap keeps `stream_reserve_kb` (3.5 MB)
-free after it. Growth goes back when the heap has less than the reserve (units not needed now
-first, all of them below the reserve - 512 KB), while a level loads (its memory first), and when a
-level load runs out of memory (`make_room` -> `housekeeping` -> `stream_shrink(all)`); empty growth
-segments are freed at the next frame. Heap (malloc): per level the unit table (32 bytes per unit),
+fragment the linear heap that level loads need whole), and **growth segments** (stream-arena
+branch, Oct 17: up to the linear heap's floor, `stream_reserve_kb` 3 MB):
+
+- **Growth**: when a unit wanted doesn't fit and freeing the units beyond the keep margin (45 m)
+  didn't make room, one segment of what the camera needs now and 2 s ahead (`need_now`: the units
+  with score < 0 at the four lead positions and Jak, the ones being read included) plus 1 MB (or
+  1/8 of it) beyond the arena's capacity: at least 1 MB (or the unit), at most 4 MB, at most what
+  keeps the floor + 256 KB free, halved while the heap has no block that big. So the arena takes
+  the free linear memory down to ~3.25 MB in one to three large segments (before: 1 MB steps
+  while 3.5 MB + 1 MB stayed free, whose unused tails left the arena's free room in pieces).
+- **At capacity**: a unit needed now (score < 0) that still doesn't fit frees units kept within
+  the keep margin that aren't wanted either (beyond the wanted margin), the furthest first.
+- **Given back**: under the floor + 128 KB the units in growth segments not needed now, under the
+  floor all of them; while a level loads (it asked for a level: the load's memory first) all of
+  them unless the heap keeps the floor + 12 MB, and no growth then unless it keeps that much
+  after it; when a level load runs out of memory (`make_room` -> `housekeeping` ->
+  `stream_shrink(all)`); while an incomplete level waits for a repair, its missing bytes + 256 KB
+  are added to the floor. Empty growth segments are freed at the next frame (their meshes' memory
+  comes back once the GPU is done with it).
+
+Heap (malloc): per level the unit table (32 bytes per unit),
 the groups' unit lists, the time of day groups reserved for the units (12 bytes per visibility id),
 the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB).
 
@@ -163,6 +178,10 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   request) and decoder would have finished it, in frames of the fps cap (game time); `CTR_SOFT_LINEAR_KB`
   (default 34000) is the soft backend's model of the linear heap for the growth rule;
   `CTR_STREAM_CHECK=1` (above).
+- Since stream-arena: the late line also gives the late times **for lack of room in the arena**
+  (the arena had no room for the unit during that time, or it was freed under memory pressure);
+  the arena line gives the **linear free least** KB at the frames' starts (and while a level
+  loaded); the arena's peaks (used, capacity) are per stats period.
 - `platform/3ds/tests/stream_traverse.pad`: the title's flight, a run through Sandover, the Zoomer
   in Fire Canyon.
 
@@ -235,6 +254,33 @@ near versions without their data, 0 near chunks with baked colors. Late times: 1
 Swamp and Snowy Mountain, where the near data needed at once (5.6-6.6 MB) passes the arena and the
 growth the host's linear heap model allows (CTR_SOFT_LINEAR_KB 34000 with two levels in): the
 nearest chunks are read, the others' groups stay far (no holes) until room comes.
+
+**Arena up to the floor** (stream-arena, Oct 17; Azahar, private instance, sound off, the user's
+config, stats_period 5; per checkpoint of fps60_sweep.pad: continue, ~15 s camera turn, ~18 s walk;
+before = 1 MB steps while 3.5 MB + 1 MB stayed free):
+
+| checkpoint | arena MB before / after | needed now at most MB | late for lack of room (n / max ms) before / after | linear free least MB before / after |
+|---|---|---|---|---|
+| swamp-start | 9.0 / 9.4 | 6.3 | 0 / 0 | 3.83 / 3.35 |
+| swamp-dock1 | 9.0 / 9.4 | 6.1-6.4 | 17 / 768 -> 15 / 701 | 3.78 / 3.35 |
+| swamp-dock2 | 9.0 / 9.4 | 6.9-7.1 | 0 -> 3 / 5147 | 3.77 / 3.37 |
+| snow-start | 9.0 / 10.0 | 6.0-6.2 | 0 / 0 | 3.78 / 3.37 |
+| snow-fort | 11.0 / 11.8 | 6.3 | 36 / 935 -> 20 / 434 | 4.14 / 3.36 |
+| snow-flut-flut | 11.0 / 11.8 | 4.5-6.1 | 4 / 200 -> 4 / 200 | 4.14 / 3.36 |
+| snow-by-ice-lake-alt | 11.0 / 11.8 | 6.0-7.9 | 0 / 0 | 4.12 / 3.36 |
+
+On Azahar (the real 40 MB linear heap, as on hardware) the growth already reached 9-11 MB before:
+the near data needed at once (6-8 MB) fits; what is left is the arena's free room in small pieces
+(swamp-dock2: 2.7 MB free, none over 222 KB: one 5 s late of 3 units). The late times are almost
+all after the continue's cut. The host's linear model (CTR_SOFT_LINEAR_KB 34000) now lets the arena
+to 7.2 MB in Swamp, 8-9 MB in Snowy: late for lack of room at most 0.7 s there (before: up to 27 s).
+Level pairs (`level_pairs.pad` in the same run): least linear free per pair (KB; while a level
+loaded): lavatube+citadel 11024 (11048), finalboss+citadel 15198, maincave+robocave 10862,
+maincave+darkcave 10862, sunken+sunkenb 19022, village3+ogre 6761 (7450), snow+village3 6987
+(arena 8.3 MB), rolling+village2 5817 (6032), ogre+village2 4259 (5681; arena 5.1 MB),
+lavatube+village3 8855: every pair >= 4.2 MB, every load >= 5.6 MB. Host checks (CTR_STREAM_CHECK,
+SD model) over level_pairs.pad and these checkpoints: 0 near versions without their data, 0 baked
+colors, no load failures.
 
 ## Left / risks
 

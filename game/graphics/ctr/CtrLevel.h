@@ -645,6 +645,8 @@ class CtrLevels {
   u32 stream_shrink(bool all);
   static void free_stream_parts(const Job& job);
   u32 m_stream_inflight = 0;  // stream jobs queued, running or not taken (kJobsInFlight)
+  // the bytes the repair of incomplete levels waits for (kept free above the arena's floor)
+  u32 m_stream_repair_room = 0;
   u32 m_stream_serial = 0;
   std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
