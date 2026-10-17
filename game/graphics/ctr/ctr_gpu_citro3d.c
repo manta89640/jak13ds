@@ -130,10 +130,12 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
  * system call the exheader doesn't allow raises an exception instead of returning an error (the
  * render thread died at its first flush: black top screen, the game hung after a few seconds).
  * Azahar doesn't check the list. Any thread. */
+static u32 s_flush_requests; /* (AI-assisted, micro-gpu) statistics: GSP flush requests */
 static void cache_flush_now(const void* addr, u32 size) {
   if (!size) {
     return;
   }
+  s_flush_requests++;
   GSPGPU_FlushDataCache(addr, size);
 }
 /* a texture's texels (all levels; VRAM needs none), like C3D_TexFlush */
@@ -591,7 +593,18 @@ static void arena_free(u32 off, u32 bytes) {
 static C3D_ProcTexColorLut* s_radial[MAX_RADIAL];
 static C3D_ProcTex s_proctex;
 static C3D_ProcTexLut s_proc_map; /* the identity: distance -> color table position */
+/* (AI-assisted, micro-gpu) the tables in the procedural texture unit's LUT memory (what citro3d
+ * last uploaded there), valid in apt epoch s_proc_lut_epoch (the HOME Menu and pica_bench use the
+ * GPU too). Switching the unit off and on keeps them: a glow after other draws binds the unit
+ * again but uploads its tables (128 + 2 x 256 words) only when another table is wanted. */
+static const C3D_ProcTexLut* s_proc_lut_map_gpu;
+static const C3D_ProcTexColorLut* s_proc_lut_color_gpu;
+static u32 s_proc_lut_epoch;
+/* what they were at the frame begin (cmd_dump's prologue: state from frames before) */
+static const C3D_ProcTexLut* s_proc_lut_map_f0;
+static const C3D_ProcTexColorLut* s_proc_lut_color_f0;
 
+static void proc_lut_forget(const C3D_ProcTexColorLut* lut);
 /* the texels of a slot: freed (or given back to the reserved VRAM) */
 static void tex_slot_free_texels(TexSlot* t) {
   if (t->arena_off >= 0) {
@@ -602,6 +615,9 @@ static void tex_slot_free_texels(TexSlot* t) {
     C3D_TexDelete(&t->tex);
   }
   if (t->radial >= 0) {
+    /* (AI-assisted, micro-gpu) neither citro3d's context nor the LUT tracking may keep a freed
+     * table (another one could get its address) */
+    proc_lut_forget(s_radial[t->radial]);
     free(s_radial[t->radial]);
     s_radial[t->radial] = NULL;
     t->radial = -1;
@@ -1033,6 +1049,196 @@ static void prog_set_free(ProgSet* p) {
   memset(p, 0, sizeof(*p));
 }
 
+/* (AI-assisted, micro-gpu) config.ini shader_resident (default on): every vertex program of both
+ * sets in one code image that stays in the GPU's shader memory. citro3d uploads a program's code
+ * and operand descriptors at every switch to a program of another DVLP (C3D_BindProgram compares
+ * the DVLPs): with one shbin per program, every switch (~8 per frame) wrote its code again. Here
+ * the shbins' code is put one after another (351 of 512 instruction slots) and their operand
+ * descriptors into one table without duplicates (49 of 128; the ones a MAD uses first, MAD has 5
+ * bits for the index), each instruction's descriptor index rewritten, and each program's DVLE
+ * pointed at the image with its main offset moved by where its code went. So the first program
+ * bound uploads all of it and a switch writes only the entry point and the output map (citro3d's
+ * shaderProgramConfigure without the code). The instructions a draw runs are the same, only at
+ * another place (cmd_report.py --kicks resolves them per draw). Only programs without flow control
+ * (no addresses to move; check_shaders.py refuses flow control anyway) and with known instruction
+ * formats are merged; anything else keeps its own shbins. Uniforms are unchanged: a switch still
+ * keeps none (the programs' uniforms overlap). */
+static u32 s_res_code[512];
+static u32 s_res_desc[128];
+static DVLP_s s_res_dvlp;
+int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
+
+/* (AI-assisted, micro-gpu) config.ini gpu_micro (default on; off: every micro-gpu change of the
+ * command stream and its submission back to the Oct 17 behaviour, for the safe preset):
+ * the bits of s_micro. gpu_micro_ident = on (a test): each cmd_dump request dumps a frame with
+ * s_micro = 0 and the frame after the next with all on (the same vertex buffer copy), for
+ * cmd_report.py --kicks. */
+enum {
+  MICRO_RESIDENT = 1,   /* shader_resident's one code image (config.ini shader_resident too) */
+  MICRO_TEXREGS = 2,    /* texture unit 0: only the registers that change (with cmd_dedup) */
+  MICRO_GAS = 4,        /* GAS_DELTAZ_DEPTH only with a new depth function (with cmd_dedup) */
+  MICRO_PROCLUT = 8,    /* the procedural texture tables kept in the GPU's LUT memory */
+  MICRO_ATLAS = 16,     /* the mesh scales written raw */
+  MICRO_FENCE = 32,     /* steady pacing's fence words in the vertex buffer */
+  MICRO_FLUSHMERGE = 64 /* cache flush requests of near ranges merged */
+};
+#define MICRO_ALL 127u
+static u32 s_micro = MICRO_ALL;
+static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
+static int s_micro_ident;    /* gpu_micro_ident */
+static int s_micro_ident_st; /* its steps (ctr_gpu_frame_begin) */
+/* the programs' DVLEs as their shbins have them and in the image (res_apply) */
+static struct {
+  DVLE_s* dvle;
+  DVLP_s* own;
+  u32 main, endmain, base;
+} s_res_prog[24];
+static int s_res_n;
+static int s_res_on; /* the DVLEs point at the image */
+
+/* the operand descriptor field of a known instruction: 7 bits (1), 5 (MAD, MADI: 2), none (0),
+ * or -1: not merged */
+static int res_desc_bits(u32 ins) {
+  const u32 op = ins >> 26;
+  if (op <= 0x0F || op == 0x12 || op == 0x13 || (op >= 0x18 && op <= 0x1B)) {
+    return 1;
+  }
+  if (op == 0x21 || op == 0x22) {
+    return 0; /* NOP, END */
+  }
+  if (op >= 0x30) {
+    return 2;
+  }
+  return -1;
+}
+
+static void res_apply(int on);
+
+static void resident_programs(void) {
+  if (!ctr_config_bool("shader_resident", 1) || !(s_micro & MICRO_RESIDENT)) {
+    printf("[ctr] shader_resident: off\n");
+    return;
+  }
+  ProgSet* sets[2] = {&s_ps[0], &s_ps[1]};
+  DVLE_s* dvles[2 * 12];
+  int n = 0;
+  for (int k = 0; k < 2; k++) {
+    ProgSet* p = sets[k];
+    if (!p->ok && k) {
+      continue;
+    }
+    shaderProgram_s* all[12] = {&p->basic, &p->mesh, &p->mesh_fa, &p->skin, &p->env, &p->clip,
+                                &p->clip2, &p->ocean, &p->ocean_full, &p->ocean_full_clip,
+                                &p->mesh_df, &p->mesh_df_fa};
+    for (int i = 0; i < 12; i++) {
+      if (!all[i]->vertexShader) {
+        continue;
+      }
+      DVLE_s* d = all[i]->vertexShader->dvle;
+      int seen = 0;
+      for (int j = 0; j < n; j++) {
+        seen |= dvles[j] == d;
+      }
+      if (!seen) {
+        dvles[n++] = d;
+      }
+    }
+  }
+  /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
+  DVLP_s* dvlps[2 * 12];
+  u32 base[2 * 12];
+  int np = 0;
+  u32 code = 0, ndesc = 0;
+  for (int i = 0; i < n; i++) {
+    int seen = 0;
+    for (int j = 0; j < np; j++) {
+      seen |= dvlps[j] == dvles[i]->dvlp;
+    }
+    if (!seen) {
+      DVLP_s* d = dvles[i]->dvlp;
+      if (d->codeSize > 512 - code) {
+        printf("[ctr] shader_resident: the programs don't fit in shader memory, off\n");
+        return;
+      }
+      for (u32 k = 0; k < d->codeSize; k++) {
+        const int bits = res_desc_bits(d->codeData[k]);
+        const u32 di = bits == 2 ? (d->codeData[k] & 0x1F) : (d->codeData[k] & 0x7F);
+        if (bits < 0 || (bits && di >= d->opdescSize)) {
+          printf("[ctr] shader_resident: instruction %08lx not merged, off\n",
+                 (unsigned long)d->codeData[k]);
+          return;
+        }
+      }
+      dvlps[np] = d;
+      base[np] = code;
+      code += d->codeSize;
+      np++;
+    }
+  }
+  for (int pass = 2; pass >= 1; pass--) {
+    /* pass 2: the descriptors a MAD uses (indices < 32), pass 1: the others */
+    for (int j = 0; j < np; j++) {
+      const DVLP_s* d = dvlps[j];
+      for (u32 k = 0; k < d->codeSize; k++) {
+        if (res_desc_bits(d->codeData[k]) != pass) {
+          continue;
+        }
+        const u32 v = d->opcdescData[d->codeData[k] & (pass == 2 ? 0x1F : 0x7F)];
+        u32 f = 0;
+        while (f < ndesc && s_res_desc[f] != v) {
+          f++;
+        }
+        if (f == ndesc) {
+          if (ndesc == 128 || (pass == 2 && ndesc == 32)) {
+            printf("[ctr] shader_resident: too many operand descriptors, off\n");
+            return;
+          }
+          s_res_desc[ndesc++] = v;
+        }
+      }
+    }
+  }
+  for (int j = 0; j < np; j++) {
+    const DVLP_s* d = dvlps[j];
+    for (u32 k = 0; k < d->codeSize; k++) {
+      u32 ins = d->codeData[k];
+      const int bits = res_desc_bits(ins);
+      if (bits) {
+        const u32 m = bits == 2 ? 0x1Fu : 0x7Fu;
+        const u32 v = d->opcdescData[ins & m];
+        u32 f = 0;
+        while (s_res_desc[f] != v) {
+          f++;
+        }
+        ins = (ins & ~m) | f;
+      }
+      s_res_code[base[j] + k] = ins;
+    }
+  }
+  s_res_dvlp.codeSize = code;
+  s_res_dvlp.codeData = s_res_code;
+  s_res_dvlp.opdescSize = ndesc;
+  s_res_dvlp.opcdescData = s_res_desc;
+  s_res_n = 0;
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < np; j++) {
+      if (dvles[i]->dvlp == dvlps[j]) {
+        s_res_prog[s_res_n].dvle = dvles[i];
+        s_res_prog[s_res_n].own = dvlps[j];
+        s_res_prog[s_res_n].main = dvles[i]->mainOffset;
+        s_res_prog[s_res_n].endmain = dvles[i]->endmainOffset;
+        s_res_prog[s_res_n].base = base[j];
+        s_res_n++;
+        break;
+      }
+    }
+  }
+  res_apply(1);
+  printf("[ctr] shader_resident: %d programs from %d shbins in one image, %lu instructions, %lu "
+         "operand descriptors\n",
+         n, np, (unsigned long)code, (unsigned long)ndesc);
+}
+
 /* (AI-assisted) config.ini shader_opt: set 1, set 0's basic, clip, clip2 and ocean (the same
  * shbins) with the ctr_*_opt programs for the rest */
 static void load_opt_set(void) {
@@ -1205,6 +1411,12 @@ int ctr_gpu_init(void) {
   printf("[ctr] fog_alpha program: %s\n",
          s_ps[0].fa_ok ? "ready" : (g.mesh_fa_dvlb ? "uniforms don't match, off" : "none for this mesh shader, off"));
   load_opt_set(); /* (AI-assisted) config.ini shader_opt's programs (set 1) */
+  /* (AI-assisted, micro-gpu) config.ini gpu_micro, gpu_micro_ident */
+  s_micro = s_micro_cfg = ctr_config_bool("gpu_micro", 1) ? MICRO_ALL : 0;
+  s_micro_ident = ctr_config_bool("gpu_micro_ident", 0);
+  printf("[ctr] gpu_micro: %s%s\n", s_micro ? "on" : "off",
+         s_micro_ident ? " (gpu_micro_ident: dumps off / on pairs)" : "");
+  resident_programs(); /* (AI-assisted, micro-gpu) config.ini shader_resident */
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
    * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
@@ -1394,6 +1606,38 @@ _Static_assert(offsetof(C3Di_Context, lightEnv) == 0x10c, "citro3d context layou
 _Static_assert(offsetof(C3Di_Context, texEnvBuf) == 0x19c, "citro3d context layout");
 _Static_assert(offsetof(C3Di_Context, fogLut) == 0x1a8, "citro3d context layout");
 extern C3Di_Context __C3D_Context;
+/* (AI-assisted, micro-gpu) shader_resident: */
+/* the DVLEs to the image (on) or their own shbins'. A change while a program is bound: citro3d
+ * is made to upload the code at the next bind (no program bound: ctx->program), and the next
+ * use_program binds (the frame begin's use_program(PROG_BASIC) does) */
+static void res_apply(int on) {
+  on = on && s_res_n > 0;
+  if (on == s_res_on) {
+    return;
+  }
+  for (int i = 0; i < s_res_n; i++) {
+    DVLE_s* d = s_res_prog[i].dvle;
+    d->dvlp = on ? &s_res_dvlp : s_res_prog[i].own;
+    d->mainOffset = s_res_prog[i].main + (on ? s_res_prog[i].base : 0);
+    d->endmainOffset = s_res_prog[i].endmain + (on ? s_res_prog[i].base : 0);
+  }
+  s_res_on = on;
+  __C3D_Context.program = NULL;
+  g.cur_prog = PROG_NONE;
+}
+
+/* (AI-assisted, micro-gpu) a radial texture's color table is freed */
+static void proc_lut_forget(const C3D_ProcTexColorLut* lut) {
+  if (s_proc_lut_color_gpu == lut) {
+    s_proc_lut_color_gpu = NULL;
+  }
+  if (s_proc_lut_color_f0 == lut) {
+    s_proc_lut_color_f0 = NULL;
+  }
+  if (__C3D_Context.procTexColorLut == lut) {
+    C3D_ProcTexColorLutBind(NULL);
+  }
+}
 void C3Di_UpdateContext(void); /* citro3d: sends what's dirty (as its draws do first) */
 enum {
   C3DiF_Active = BIT(0),
@@ -2064,7 +2308,7 @@ static int pres_init(void) {
 
 /* after the frame's draws are in the GPU queue: its transfer to a free screen buffer, the
  * fence, and the frame handed to the vblank callback */
-static void pres_queue_frame(void) {
+static void pres_queue_frame(u32* fence_id) {
   int b = -1;
   const u64 t0 = svcGetSystemTick();
   for (int tries = 0; b < 0; tries++) {
@@ -2119,9 +2363,14 @@ static void pres_queue_frame(void) {
    * GPU queue stalled: black top screen, frozen game, sound still playing). Azahar fills any
    * memory. */
   {
-    u32* id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
-    id[0] = id[1] = id[2] = id[3] = g.frame_no;
-    cache_flush_now(id, 16);
+    /* (AI-assisted, micro-gpu) fence_id: the frame's number already in its vertex buffer
+     * (ctr_gpu_frame_end), out of the CPU cache with the vertices: no flush request of its own */
+    u32* id = fence_id;
+    if (!id) {
+      id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
+      id[0] = id[1] = id[2] = id[3] = g.frame_no;
+      cache_flush_now(id, 16);
+    }
     GX_TextureCopy(id, 0, s_pres.fence, 0, 16, 8 /* raw copy */);
   }
   /* the latency: up after a late frame. (AI-assisted) Down after a window of 150 frames (~5 s)
@@ -2503,10 +2752,24 @@ static void pipeline_submit(void) {
   }
 }
 
+static volatile int s_cmd_dump_next;
+static void proc_lut_snapshot(void);
 void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
   }
+  if (s_micro_ident_st) {
+    /* (AI-assisted, micro-gpu) gpu_micro_ident: frame k with everything off (dumped), k + 1 on,
+     * k + 2 on (dumped): k and k + 2 draw from the same vertex buffer copy */
+    const int st = s_micro_ident_st;
+    s_micro = st == 1 ? 0 : s_micro_cfg;
+    s_micro_ident_st = st == 3 ? 0 : st + 1;
+    if (st != 2) {
+      s_cmd_dump_next = 1;
+    }
+  }
+  res_apply((s_micro & MICRO_RESIDENT) != 0); /* (AI-assisted, micro-gpu) */
+  proc_lut_snapshot();
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
   s_sky_hook = NULL; /* (AI-assisted) sky_last: a hook left from a frame that didn't end */
@@ -2549,6 +2812,8 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
  * clouds, ocean, eyes; blend shape vertices; the fog ramp) wait here until the frame's commands
  * go to the GPU (flush_vbuf, at every submission point), merged where the ranges touch. */
 #define DEFER_FLUSH_MAX 48
+#define DEFER_GAP (8u * 1024u) /* (AI-assisted, micro-gpu) see flush_vbuf */
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size; /* libctru */
 static struct {
   u32 start[DEFER_FLUSH_MAX], end[DEFER_FLUSH_MAX];
   int n;
@@ -2585,6 +2850,35 @@ static void flush_vbuf(void) {
   if (g.vbuf_used > g.vbuf_flushed) {
     cache_flush_frame(g.vbuf + g.vbuf_flushed, (u32)(g.vbuf_used - g.vbuf_flushed));
     g.vbuf_flushed = g.vbuf_used;
+  }
+  /* (AI-assisted, micro-gpu) ranges of the linear heap less than DEFER_GAP apart in one request:
+   * each request is an IPC to the GSP (tens of microseconds on hardware), cleaning a few more
+   * cache lines between them costs far less (the gap's lines: at most 256) */
+  if (s_defer.n > 1 && (s_micro & MICRO_FLUSHMERGE)) {
+    for (int i = 1; i < s_defer.n; i++) { /* by start (insertion sort, at most 48) */
+      const u32 a = s_defer.start[i], e = s_defer.end[i];
+      int j = i - 1;
+      while (j >= 0 && s_defer.start[j] > a) {
+        s_defer.start[j + 1] = s_defer.start[j];
+        s_defer.end[j + 1] = s_defer.end[j];
+        j--;
+      }
+      s_defer.start[j + 1] = a;
+      s_defer.end[j + 1] = e;
+    }
+    const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
+    int k = 0;
+    for (int i = 1; i < s_defer.n; i++) {
+      const u32 a = s_defer.start[i], e = s_defer.end[i];
+      if (a <= s_defer.end[k] + DEFER_GAP && s_defer.start[k] >= lin0 && e <= lin1 && a >= lin0) {
+        s_defer.end[k] = e > s_defer.end[k] ? e : s_defer.end[k];
+      } else {
+        k++;
+        s_defer.start[k] = a;
+        s_defer.end[k] = e;
+      }
+    }
+    s_defer.n = k + 1;
   }
   for (int i = 0; i < s_defer.n; i++) {
     cache_flush_now((const void*)s_defer.start[i], s_defer.end[i] - s_defer.start[i]);
@@ -2696,13 +2990,21 @@ static unsigned int linear_largest_block(void) {
 #define CMD_DUMP_EVERY 600
 #define CMD_DUMP_MAX 12
 static int s_cmd_dump, s_cmd_dumps;
-static volatile int s_cmd_dump_next;
 void ctr_gpu_set_cmd_dump(int on) {
   s_cmd_dump = on ? 1 : 0;
 }
 void ctr_gpu_cmd_dump_next(void) {
+  if (s_micro_ident) {
+    /* (AI-assisted, micro-gpu) gpu_micro_ident: the off / on pair (ctr_gpu_frame_begin) */
+    if (!s_micro_ident_st) {
+      s_micro_ident_st = 1;
+    }
+    return;
+  }
   s_cmd_dump_next = 1;
 }
+static inline u32* raw_w(u32* p, u32 reg, u32 mask, u32 v);
+static inline u32* raw_n(u32* p, u32 reg, const u32* v, u32 n, int seq);
 static void cmd_dump_frame(void) {
   const int periodic = s_cmd_dump && g.frame_no % CMD_DUMP_EVERY == CMD_DUMP_EVERY / 2;
   if ((!periodic && !s_cmd_dump_next) || s_cmd_dumps >= CMD_DUMP_MAX * 2) {
@@ -2716,8 +3018,40 @@ static void cmd_dump_frame(void) {
   if (!f) {
     return;
   }
-  const u32 hdr[3] = {0x44444d43u, (u32)g.frame_no, words};
-  fwrite(hdr, 4, 3, f);
+  if (s_res_on || s_proc_lut_map_f0 || s_proc_lut_color_f0) {
+    /* (AI-assisted, micro-gpu) GPU memory the frame doesn't write but its draws use, from frames
+     * before (shader_resident's code image, the procedural texture tables as they were at the
+     * frame begin), as the commands that put it there: the file starts with them ("CMDE": a
+     * fourth header word, the prologue's word count; cmd_report.py --kicks runs it before the
+     * frame) */
+    static u32 pro[8 + 512 + 128 + 16 + 3 * 260];
+    u32* p = pro;
+    if (s_res_on) {
+      p = raw_w(p, GPUREG_VSH_CODETRANSFER_CONFIG, 0xF, 0);
+      for (u32 i = 0; i < s_res_dvlp.codeSize; i += 128) {
+        const u32 left = s_res_dvlp.codeSize - i;
+        p = raw_n(p, GPUREG_VSH_CODETRANSFER_DATA, s_res_code + i, left < 128 ? left : 128, 0);
+      }
+      p = raw_w(p, GPUREG_VSH_OPDESCS_CONFIG, 0xF, 0);
+      p = raw_n(p, GPUREG_VSH_OPDESCS_DATA, s_res_desc, s_res_dvlp.opdescSize, 0);
+    }
+    if (s_proc_lut_map_f0) {
+      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_RGBMAP << 8);
+      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, *s_proc_lut_map_f0, 128, 0);
+    }
+    if (s_proc_lut_color_f0) {
+      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_COLOR << 8);
+      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, s_proc_lut_color_f0->color, 256, 0);
+      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_COLORDIF << 8);
+      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, s_proc_lut_color_f0->diff, 256, 0);
+    }
+    const u32 hdr[4] = {0x45444d43u, (u32)g.frame_no, words, (u32)(p - pro)};
+    fwrite(hdr, 4, 4, f);
+    fwrite(pro, 4, (size_t)(p - pro), f);
+  } else {
+    const u32 hdr[3] = {0x44444d43u, (u32)g.frame_no, words};
+    fwrite(hdr, 4, 3, f);
+  }
   fwrite(g.cmd_base, 4, words, f);
   fclose(f);
   printf("[ctr] cmd_dump: frame %d, %lu words -> %s\n", g.frame_no, (unsigned long)words, path);
@@ -2731,6 +3065,16 @@ void ctr_gpu_frame_end(void) {
   ctr_gpu_run_sky_hook(); /* (AI-assisted) sky_last: still pending (nothing blended came) */
   diag_rt("frame_end: flush");
   raw_vc_flush();
+  /* (AI-assisted, micro-gpu) steady pacing's fence words (the frame number the fence copy writes)
+   * at the end of the frame's vertex buffer, flushed with it: one GSP request less per frame. The
+   * buffer is written again two frames later, after this frame's fence landed (overlap2_wait_frame,
+   * or C3D_FrameBegin's wait for an idle GPU) */
+  u32* fence_id = NULL;
+  if ((s_micro & MICRO_FENCE) && s_pres.on && g.vbuf_used + 16 <= VBUF_BYTES) {
+    fence_id = (u32*)(g.vbuf + g.vbuf_used);
+    fence_id[0] = fence_id[1] = fence_id[2] = fence_id[3] = (u32)g.frame_no;
+    g.vbuf_used += 16;
+  }
   flush_vbuf();
   const int bd = s_bd.frame;
   if (bd) {
@@ -2779,7 +3123,7 @@ void ctr_gpu_frame_end(void) {
   }
   if (s_pres.on) {
     diag_rt("frame_end: present queue (wait for a free screen buffer)");
-    pres_queue_frame();
+    pres_queue_frame(fence_id);
   }
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
@@ -3992,6 +4336,10 @@ static struct {
   int prim, voff0;
   const C3D_Tex* tex0_ctx; /* cmd_dedup: unit 0's texture after the last raw bind, its type */
   u32 tex0_fmt;
+  /* (AI-assisted, micro-gpu) cmd_dedup: unit 0's border, dim, param, lod and address registers
+   * as the last raw bind wrote them (valid while tex0_ctx is: see bind_texture) */
+  u32 tex0_regs[5];
+  int tex0_regs_ok; /* tex0_regs hold what the GPU has (static_cmdlists: not across stretches) */
 } s_raw = {.on = 1, .dedup = 1, .prim = -1};
 
 /* (AI-assisted) a citro3d draw writes the draw registers itself (c3d_draw_* below) */
@@ -4108,6 +4456,13 @@ static void raw_check_epoch(void) {
   }
 }
 
+/* (AI-assisted, micro-gpu) the procedural texture tables in the GPU at the frame begin (cmd_dump) */
+static void proc_lut_snapshot(void) {
+  const int ok = s_proc_lut_epoch == s_raw.apt_epoch;
+  s_proc_lut_map_f0 = ok ? s_proc_lut_map_gpu : NULL;
+  s_proc_lut_color_f0 = ok ? s_proc_lut_color_gpu : NULL;
+}
+
 /* before a raw draw's uniforms and the draw: citro3d sends what it has pending */
 static inline void raw_sync(void) {
   raw_check_epoch();
@@ -4164,21 +4519,20 @@ static inline u32* raw_unif(u32* p, int loc, const u32* data, u32 words, int f32
  * float24 uniforms. (AI-assisted) The mantissa is rounded to nearest, not truncated as f32tof24
  * does: truncating every chunk's matrix translation left sub-pixel gaps between neighbouring level
  * chunks up close (the converter's chunk grids are watertight otherwise). */
+/* (AI-assisted, micro-gpu) Without branches: |f| rounded at bit 6 (a carry out of the mantissa
+ * raises the exponent), shifted to 7.16 and the exponent rebased from 127 to 63; below the
+ * smallest exponent (zeros and denormals too) +-0, above the largest +-(exponent 0x7f, mantissa
+ * 0) as before. The same result as the branching form for all 2^32 inputs (checked on the host:
+ * docs/3ds-port/performance.md "micro-gpu"); 54 instead of 91 ARM instructions per raw_pack_f24. */
 static inline u32 raw_f24(float f) {
   union {
     float f;
     u32 i;
   } u = {f};
-  const u32 m23 = (u.i & 0x7fffff) + 0x40; /* a carry out of the mantissa raises the exponent */
-  const u32 sign = u.i >> 31, mant = (m23 >> 7) & 0xffff;
-  const s32 e = (s32)((u.i >> 23) & 0xff) - 127 + 63 + (s32)(m23 >> 23);
-  if (e < 0 || !((u.i >> 23) & 0xff)) {
-    return sign << 23;
-  }
-  if (e > 0x7f) {
-    return (sign << 23) | (0x7fu << 16);
-  }
-  return (sign << 23) | ((u32)e << 16) | mant;
+  s32 t = (s32)(((u.i & 0x7fffffffu) + 0x40u) >> 7) - (s32)(64u << 16);
+  t = t < 0 ? 0 : t;
+  t = t >= (s32)(0x80u << 16) ? (s32)(0x7fu << 16) : t;
+  return ((u.i >> 8) & 0x800000u) | (u32)t;
 }
 /* v: C3D_FVec order (w, z, y, x) */
 static void raw_pack_f24(const float* v, u32* out) {
@@ -4353,12 +4707,51 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
     C3Di_Context* ctx = &__C3D_Context;
     const u32 regs[5] = {tex->border, tex->dim, tex->param, tex->lodParam,
                          osConvertVirtToPhys(tex->data) >> 3};
-    u32* p = raw_n(raw_ptr(), GPUREG_TEXUNIT0_BORDER_COLOR, regs, 5, 1);
-    /* (AI-assisted) cmd_dedup: the type only when it changes: the last type written here is still
-     * the GPU's when citro3d hasn't bound or sent a texture on unit 0 since (the context's texture
-     * is still the one written then, and not marked for sending) */
-    if (s_raw.dedup && s_raw.tex0_ctx && ctx->tex[0] == s_raw.tex0_ctx &&
-        !(ctx->flags & C3DiF_Tex(0)) && s_raw.tex0_fmt == (u32)tex->fmt) {
+    /* (AI-assisted) cmd_dedup: the registers the last raw bind wrote are still the GPU's when
+     * citro3d hasn't bound or sent a texture on unit 0 since (the context's texture is still the
+     * one written then, and not marked for sending; citro3d's own binds here forget them) */
+    const int known = s_raw.dedup && s_raw.tex0_ctx && ctx->tex[0] == s_raw.tex0_ctx &&
+                      !(ctx->flags & C3DiF_Tex(0));
+    u32* p = raw_ptr();
+    if (known && s_raw.tex0_regs_ok && (s_micro & MICRO_TEXREGS)) {
+      /* (AI-assisted, micro-gpu) only the registers that change (mostly the address): one write
+       * each, or one burst over the changed span when that is shorter. The others already hold
+       * these values: the same registers at the draw (libctru's GPU_SetTexture writes them one
+       * by one too) */
+      u32 diff = 0;
+      int first = -1, last = -1, n = 0;
+      for (int k = 0; k < 5; k++) {
+        if (regs[k] != s_raw.tex0_regs[k]) {
+          diff |= 1u << k;
+          first = first < 0 ? k : first;
+          last = k;
+          n++;
+        }
+      }
+      u32 w = 0;
+      if (n) {
+        const u32 span = (u32)(last - first + 1);
+        const u32 burst = span + 1 + ((span & 1) ? 0 : 1);
+        if (2u * (u32)n <= burst) {
+          for (int k = 0; k < 5; k++) {
+            if (diff & (1u << k)) {
+              p = raw_w(p, GPUREG_TEXUNIT0_BORDER_COLOR + (u32)k, 0xF, regs[k]);
+            }
+          }
+          w = 2u * (u32)n;
+        } else {
+          p = raw_n(p, GPUREG_TEXUNIT0_BORDER_COLOR + (u32)first, regs + first, span, 1);
+          w = burst;
+        }
+      }
+      g.cur.cmd_dedup_words += 6 - w;
+    } else {
+      p = raw_n(p, GPUREG_TEXUNIT0_BORDER_COLOR, regs, 5, 1);
+    }
+    memcpy(s_raw.tex0_regs, regs, sizeof(regs));
+    s_raw.tex0_regs_ok = 1;
+    /* (AI-assisted) cmd_dedup: the type only when it changes (as the registers above) */
+    if (known && s_raw.tex0_fmt == (u32)tex->fmt) {
       g.cur.cmd_dedup_words += 2;
     } else {
       p = raw_w(p, GPUREG_TEXUNIT0_TYPE, 0xF, tex->fmt);
@@ -4387,6 +4780,7 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
     raw_end(p);
   } else {
     C3D_TexBind(0, tex);
+    s_raw.tex0_ctx = NULL; /* (AI-assisted, micro-gpu) citro3d sends unit 0 (cmd_dedup) */
   }
   g.bound_tex = tex;
   g.bound_data = tex->data;
@@ -4505,12 +4899,24 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   if (proc) {
     if (g.proc_radial != slot->radial) {
       C3D_ProcTexBind(0, &s_proctex);
-      C3D_ProcTexLutBind(GPU_LUT_RGBMAP, &s_proc_map);
-      C3D_ProcTexColorLutBind(s_radial[slot->radial]);
+      /* (AI-assisted, micro-gpu) the tables only when the LUT memory has others (see
+       * s_proc_lut_epoch); citro3d's context keeps pointing at them */
+      const C3D_ProcTexColorLut* lut = s_radial[slot->radial];
+      const int known = s_proc_lut_epoch == s_raw.apt_epoch && (s_micro & MICRO_PROCLUT);
+      if (!known || s_proc_lut_map_gpu != &s_proc_map || __C3D_Context.procTexLut[1] != &s_proc_map) {
+        C3D_ProcTexLutBind(GPU_LUT_RGBMAP, &s_proc_map);
+      }
+      if (!known || s_proc_lut_color_gpu != lut || __C3D_Context.procTexColorLut != lut) {
+        C3D_ProcTexColorLutBind(s_radial[slot->radial]);
+      }
+      s_proc_lut_map_gpu = &s_proc_map;
+      s_proc_lut_color_gpu = lut;
+      s_proc_lut_epoch = s_raw.apt_epoch;
       g.proc_radial = slot->radial;
     }
     if (g.bound_tex) {
       C3D_TexBind(0, NULL); /* texture unit 0 off: it would fetch texels nothing uses */
+      s_raw.tex0_ctx = NULL; /* (AI-assisted, micro-gpu) */
       g.bound_tex = NULL;
     }
   } else if (g.proc_radial >= 0) {
@@ -4745,8 +5151,15 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     p = raw_w(p, GPUREG_STENCIL_OP, 0xF, e.stencilOp);
   }
   if (e.depthTest != c->depthTest) {
-    p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
-              (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
+    /* (AI-assisted, micro-gpu) cmd_dedup: GAS_DELTAZ_DEPTH's byte only depends on the depth
+     * function (citro3d writes it from the context's, which is the GPU's): left out when only the
+     * enable or the write mask changes */
+    if (!s_raw.dedup || !(s_micro & MICRO_GAS) || ((e.depthTest ^ c->depthTest) & 0x70u)) {
+      p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
+                (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
+    } else {
+      g.cur.cmd_dedup_words += 2;
+    }
     p = raw_w(p, GPUREG_DEPTH_COLOR_MASK, 0xF, e.depthTest);
   }
   if (e.blendClr != c->blendClr) {
@@ -5749,6 +6162,29 @@ static void mesh_fog_rows(const float* m, float out[8]) {
   out[4] += g.fog0[2];
 }
 
+/* (AI-assisted) the mesh programs' scales (x: texture coordinates, 1/1024 or c3l v15 atlases'
+ * 1/32768). (micro-gpu) raw: written straight away, the same words C3D_UpdateUniforms writes for
+ * it (config, then w z y x as f32), with citro3d's copy of the uniform set and not marked: before,
+ * every change made the draw's raw_sync run all of C3Di_UpdateContext (~2000 instructions) for
+ * this one vector, and static_cmdlists couldn't record a stretch with one (a citro3d update).
+ * When citro3d has uniforms to send anyway (unif_pending), it sends this one with them. */
+static void mesh_scales_set(int atlas, int raw) {
+  const int loc = g.ps->uloc_scales;
+  const float sx = atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f;
+  if (!raw || !(s_micro & MICRO_ATLAS) || s_raw.unif_pending || loc < 0 ||
+      C3D_FVUnifDirty[GPU_VERTEX_SHADER][loc]) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, loc, sx, 1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
+    raw_note_unif();
+    return;
+  }
+  C3D_FVec* u = &C3D_FVUnif[GPU_VERTEX_SHADER][loc];
+  u->x = sx;
+  u->y = 1.0f / 255.0f;
+  u->z = 1.0f;
+  u->w = 1.0f / 127.0f;
+  raw_end(raw_unif(raw_ptr(), loc, (const u32*)u, 4, 1)); /* (C3D_FVec: w z y x in memory) */
+}
+
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count) {
   SKY_HOOK(state);
@@ -5772,9 +6208,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
     if (atlas != g.mesh_st_atlas) {
       g.mesh_st_atlas = atlas;
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_scales, atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f,
-                    1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
-      raw_note_unif();
+      mesh_scales_set(atlas, use_raw(state));
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
@@ -5979,6 +6413,9 @@ typedef struct {
   int prim, voff0;
   const C3D_Tex* tex0_ctx;
   u32 tex0_fmt;
+  u32 tex0_regs[5]; /* (AI-assisted, micro-gpu) */
+  int tex0_regs_ok;
+  int mesh_st_atlas; /* (AI-assisted, micro-gpu) the mesh scales the GPU has */
   int vc_dirty, vs_changed, unif_pending;
   int tex_dirty;
   /* the texture unit 0 binding is one no draw of the stretch uses (a texture with its own memory:
@@ -5992,6 +6429,7 @@ typedef struct {
   int depth16, fog_tex_valid, fog_df, zdef_valid, proctex;
   u32 lod_bias, early_clear, fog_abgr, zscale0, zoffset0;
   const void* ps;
+  u32 micro; /* (AI-assisted, micro-gpu) s_micro */
 } ClSet;
 typedef struct {
   ctr_draw_state st;
@@ -6036,6 +6474,10 @@ static struct {
       mismatches, frame0;
   int logged_mismatches, logged_why;
   u32 why[5]; /* not alike: arena restarted, draw count, settings, state before, the draws */
+  /* (AI-assisted, micro-gpu) draws drawn alone (heads of a stretch), by why: not a raw level
+   * pool draw (its texture: own memory / no mesh or count / citro3d), after such a draw, another
+   * program, the sky hook pending */
+  u32 head_why[6];
   const C3D_Tex* bound0_tex;
   const void* bound0_data;
   u32 bound0_param;
@@ -6098,6 +6540,11 @@ static void cl_track_save(ClTrack* t) {
   t->voff0 = s_raw.voff0;
   t->tex0_ctx = s_raw.tex0_ctx;
   t->tex0_fmt = s_raw.tex0_fmt;
+  if (s_raw.tex0_ctx && s_raw.tex0_regs_ok) {
+    memcpy(t->tex0_regs, s_raw.tex0_regs, sizeof(t->tex0_regs)); /* (AI-assisted, micro-gpu) */
+    t->tex0_regs_ok = 1;
+  }
+  t->mesh_st_atlas = g.mesh_st_atlas;
   t->vc_dirty = s_raw.vc_dirty;
   t->vs_changed = s_raw.vs_changed;
   t->unif_pending = s_raw.unif_pending;
@@ -6140,6 +6587,14 @@ static void cl_track_load(const ClTrack* t) {
   s_raw.voff0 = t->voff0;
   s_raw.tex0_ctx = t->tex0_ctx;
   s_raw.tex0_fmt = t->tex0_fmt;
+  memcpy(s_raw.tex0_regs, t->tex0_regs, sizeof(s_raw.tex0_regs)); /* (AI-assisted, micro-gpu) */
+  s_raw.tex0_regs_ok = t->tex0_regs_ok;
+  if (g.mesh_st_atlas != t->mesh_st_atlas && is_mesh_prog(g.cur_prog) && g.ps->uloc_scales >= 0) {
+    /* (AI-assisted, micro-gpu) the stretch changed the scales (raw): citro3d's copy too */
+    C3D_FVUnif[GPU_VERTEX_SHADER][g.ps->uloc_scales].x =
+        t->mesh_st_atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f;
+  }
+  g.mesh_st_atlas = t->mesh_st_atlas;
   s_raw.vc_dirty = t->vc_dirty;
   s_raw.vs_changed = t->vs_changed;
   s_raw.unif_pending = t->unif_pending;
@@ -6172,6 +6627,7 @@ static void cl_set_save(ClSet* t) {
   t->zscale0 = s_zscale0;
   t->zoffset0 = s_zoffset0;
   t->ps = g.ps;
+  t->micro = s_micro;
 }
 
 static inline void cl_stats(int* out) {
@@ -6410,6 +6866,10 @@ static void cl_compare(const ClSeg* sg, const ctr_mesh_call* c, int a, int b, u3
 
 static void cl_segment(ClSeg* sg, const ctr_mesh_call* c, int a, int b) {
   s_cl.segs++;
+  /* (AI-assisted, micro-gpu) a stretch's first texture bind writes all of unit 0's registers: the
+   * ones before it (a sky or ocean texture's other copy every second frame) aren't part of what a
+   * recording depends on */
+  s_raw.tex0_regs_ok = 0;
   ClSet set;
   cl_set_save(&set);
   ClTrack in;
@@ -6529,6 +6989,13 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** 
       prog = plain ? cl_prog(&calls[i]) : -1;
       head = i == 0 || !plain || !prev_plain || prog != prev_prog ||
              (s_sky_hook && !keeps_sky(calls[i].state));
+      if (head && i) {
+        const int t = calls[i].state->tex;
+        const int own_tex = t >= 0 && t < MAX_TEXTURES && g.textures[t].used == 1 &&
+                            g.textures[t].pool < 0;
+        s_cl.head_why[!plain ? (own_tex ? 0 : 1)
+                             : (!prev_plain ? 2 : (prog != prev_prog ? 3 : 4))]++;
+      }
     }
     if (head && start >= 0) {
       if (seg < CL_MAX_SEGS) {
@@ -6586,6 +7053,20 @@ int ctr_gpu_cmdlist_line(char* out, int size) {
                   s_cl.why[0], s_cl.why[1], s_cl.why[2], s_cl.why[3], s_cl.why[4]);
   }
   memset(s_cl.why, 0, sizeof(s_cl.why));
+  if (l < size) {
+    l += snprintf(out + l, size - l,
+                  "; drawn alone: %.1f texture in own memory, %.1f other not plain, %.1f after "
+                  "those, %.1f program change, %.1f sky hook",
+                  s_cl.head_why[0] / f, s_cl.head_why[1] / f, s_cl.head_why[2] / f,
+                  s_cl.head_why[3] / f, s_cl.head_why[4] / f);
+  }
+  memset(s_cl.head_why, 0, sizeof(s_cl.head_why));
+  if (l < size) {
+    /* (AI-assisted, micro-gpu) all threads' (textures made by the loader thread too) */
+    l += snprintf(out + l, size - l, "; GSP cache flush requests %.1f per frame",
+                  s_flush_requests / f);
+  }
+  s_flush_requests = 0;
   if (s_cl.mode == 2 && l < size) {
     l += snprintf(out + l, size - l, "; compare: %u copies checked, %u MISMATCHED", s_cl.compares,
                   s_cl.mismatches);
