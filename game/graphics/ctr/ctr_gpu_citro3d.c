@@ -4283,6 +4283,10 @@ static struct {
   int prim, voff0;
   const C3D_Tex* tex0_ctx; /* cmd_dedup: unit 0's texture after the last raw bind, its type */
   u32 tex0_fmt;
+  /* (AI-assisted, micro-gpu) cmd_dedup: unit 0's border, dim, param, lod and address registers
+   * as the last raw bind wrote them (valid while tex0_ctx is: see bind_texture) */
+  u32 tex0_regs[5];
+  int tex0_regs_ok; /* tex0_regs hold what the GPU has (static_cmdlists: not across stretches) */
 } s_raw = {.on = 1, .dedup = 1, .prim = -1};
 
 /* (AI-assisted) a citro3d draw writes the draw registers itself (c3d_draw_* below) */
@@ -4650,12 +4654,51 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
     C3Di_Context* ctx = &__C3D_Context;
     const u32 regs[5] = {tex->border, tex->dim, tex->param, tex->lodParam,
                          osConvertVirtToPhys(tex->data) >> 3};
-    u32* p = raw_n(raw_ptr(), GPUREG_TEXUNIT0_BORDER_COLOR, regs, 5, 1);
-    /* (AI-assisted) cmd_dedup: the type only when it changes: the last type written here is still
-     * the GPU's when citro3d hasn't bound or sent a texture on unit 0 since (the context's texture
-     * is still the one written then, and not marked for sending) */
-    if (s_raw.dedup && s_raw.tex0_ctx && ctx->tex[0] == s_raw.tex0_ctx &&
-        !(ctx->flags & C3DiF_Tex(0)) && s_raw.tex0_fmt == (u32)tex->fmt) {
+    /* (AI-assisted) cmd_dedup: the registers the last raw bind wrote are still the GPU's when
+     * citro3d hasn't bound or sent a texture on unit 0 since (the context's texture is still the
+     * one written then, and not marked for sending; citro3d's own binds here forget them) */
+    const int known = s_raw.dedup && s_raw.tex0_ctx && ctx->tex[0] == s_raw.tex0_ctx &&
+                      !(ctx->flags & C3DiF_Tex(0));
+    u32* p = raw_ptr();
+    if (known && s_raw.tex0_regs_ok && (s_micro & MICRO_TEXREGS)) {
+      /* (AI-assisted, micro-gpu) only the registers that change (mostly the address): one write
+       * each, or one burst over the changed span when that is shorter. The others already hold
+       * these values: the same registers at the draw (libctru's GPU_SetTexture writes them one
+       * by one too) */
+      u32 diff = 0;
+      int first = -1, last = -1, n = 0;
+      for (int k = 0; k < 5; k++) {
+        if (regs[k] != s_raw.tex0_regs[k]) {
+          diff |= 1u << k;
+          first = first < 0 ? k : first;
+          last = k;
+          n++;
+        }
+      }
+      u32 w = 0;
+      if (n) {
+        const u32 span = (u32)(last - first + 1);
+        const u32 burst = span + 1 + ((span & 1) ? 0 : 1);
+        if (2u * (u32)n <= burst) {
+          for (int k = 0; k < 5; k++) {
+            if (diff & (1u << k)) {
+              p = raw_w(p, GPUREG_TEXUNIT0_BORDER_COLOR + (u32)k, 0xF, regs[k]);
+            }
+          }
+          w = 2u * (u32)n;
+        } else {
+          p = raw_n(p, GPUREG_TEXUNIT0_BORDER_COLOR + (u32)first, regs + first, span, 1);
+          w = burst;
+        }
+      }
+      g.cur.cmd_dedup_words += 6 - w;
+    } else {
+      p = raw_n(p, GPUREG_TEXUNIT0_BORDER_COLOR, regs, 5, 1);
+    }
+    memcpy(s_raw.tex0_regs, regs, sizeof(regs));
+    s_raw.tex0_regs_ok = 1;
+    /* (AI-assisted) cmd_dedup: the type only when it changes (as the registers above) */
+    if (known && s_raw.tex0_fmt == (u32)tex->fmt) {
       g.cur.cmd_dedup_words += 2;
     } else {
       p = raw_w(p, GPUREG_TEXUNIT0_TYPE, 0xF, tex->fmt);
@@ -4684,6 +4727,7 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
     raw_end(p);
   } else {
     C3D_TexBind(0, tex);
+    s_raw.tex0_ctx = NULL; /* (AI-assisted, micro-gpu) citro3d sends unit 0 (cmd_dedup) */
   }
   g.bound_tex = tex;
   g.bound_data = tex->data;
@@ -4819,6 +4863,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     }
     if (g.bound_tex) {
       C3D_TexBind(0, NULL); /* texture unit 0 off: it would fetch texels nothing uses */
+      s_raw.tex0_ctx = NULL; /* (AI-assisted, micro-gpu) */
       g.bound_tex = NULL;
     }
   } else if (g.proc_radial >= 0) {
@@ -6287,6 +6332,8 @@ typedef struct {
   int prim, voff0;
   const C3D_Tex* tex0_ctx;
   u32 tex0_fmt;
+  u32 tex0_regs[5]; /* (AI-assisted, micro-gpu) */
+  int tex0_regs_ok;
   int vc_dirty, vs_changed, unif_pending;
   int tex_dirty;
   /* the texture unit 0 binding is one no draw of the stretch uses (a texture with its own memory:
@@ -6411,6 +6458,10 @@ static void cl_track_save(ClTrack* t) {
   t->voff0 = s_raw.voff0;
   t->tex0_ctx = s_raw.tex0_ctx;
   t->tex0_fmt = s_raw.tex0_fmt;
+  if (s_raw.tex0_ctx && s_raw.tex0_regs_ok) {
+    memcpy(t->tex0_regs, s_raw.tex0_regs, sizeof(t->tex0_regs)); /* (AI-assisted, micro-gpu) */
+    t->tex0_regs_ok = 1;
+  }
   t->vc_dirty = s_raw.vc_dirty;
   t->vs_changed = s_raw.vs_changed;
   t->unif_pending = s_raw.unif_pending;
@@ -6453,6 +6504,8 @@ static void cl_track_load(const ClTrack* t) {
   s_raw.voff0 = t->voff0;
   s_raw.tex0_ctx = t->tex0_ctx;
   s_raw.tex0_fmt = t->tex0_fmt;
+  memcpy(s_raw.tex0_regs, t->tex0_regs, sizeof(s_raw.tex0_regs)); /* (AI-assisted, micro-gpu) */
+  s_raw.tex0_regs_ok = t->tex0_regs_ok;
   s_raw.vc_dirty = t->vc_dirty;
   s_raw.vs_changed = t->vs_changed;
   s_raw.unif_pending = t->unif_pending;
@@ -6724,6 +6777,10 @@ static void cl_compare(const ClSeg* sg, const ctr_mesh_call* c, int a, int b, u3
 
 static void cl_segment(ClSeg* sg, const ctr_mesh_call* c, int a, int b) {
   s_cl.segs++;
+  /* (AI-assisted, micro-gpu) a stretch's first texture bind writes all of unit 0's registers: the
+   * ones before it (a sky or ocean texture's other copy every second frame) aren't part of what a
+   * recording depends on */
+  s_raw.tex0_regs_ok = 0;
   ClSet set;
   cl_set_save(&set);
   ClTrack in;
