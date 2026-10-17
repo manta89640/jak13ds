@@ -640,3 +640,48 @@ Azahar time per direct merc draw, the clip and light compares, the bone uploads)
 flushes and GX submits (SVCs, which a wall clock profile of Azahar shows as the render thread's
 biggest non-waiting part). The far ocean's time includes the sky when sky_last draws it at the far
 ocean's first vertex reservation (SKY_HOOK_ANY).
+
+## The level renderer's CPU code (AI-assisted, Oct 17, micro-level)
+
+Measured in Azahar with the camera still: l0-tfrag + l1-tfrag from "build ms/frame by renderer",
+minus the time of day lines' ms in the same window ("non-tod", because the time of day recolor is
+not part of this work). 5 s windows (stats_period = 5), 4-5 windows per view after `continue` +
+target-stance + 300 frames. Village1, Snowy, village3 and misty repeat to ~0.02 ms from run to
+run. Sunkenb moved by up to 0.45 ms between runs of the same build (the camera settles
+differently: different run counts in the culling lines).
+
+| change | village1 hut | Snowy fort | village3 warp | sunkenb start | misty bike |
+|---|---|---|---|---|---|
+| before (2754bb2a6c) | 5.97 | 5.47 | 4.05 | 6.18 / 6.63 | 4.59 |
+| ctr_settings() inline (pointer read) | 5.97 | 5.47 | 4.05 | (noise) | 4.59 |
+| run loop: one copy per (visibility, view test, tie LOD), arrays in locals | 5.27 | 4.94 | 3.61 | 5.43 | 4.03 |
+| draw walk tests the chunk inline; partly drawn runs in locals | 5.15 | 4.79 | 3.55 | 5.24 | 3.90 |
+| chunk loop: distance factors once per frame, arrays in locals | 5.09 | 4.66 | 3.45 | 4.82 | 3.85 |
+| chunk plane test lane by lane (no Vector4f temporaries) | 5.12 | 4.59 | 3.41 | 5.00 | 3.87 |
+| VisibleChunk not zeroed by emplace_back | 5.10 | 4.57 | 3.40 | 5.17 | 3.85 |
+| run loop per number of crossed planes, planes in registers | 4.91 | 4.45 | 3.33 | 4.97 | 3.73 |
+| vista split walk in locals | 4.90 | 4.44 | 3.32 | 5.07 | 3.73 |
+
+In total that is 0.7-1.1 ms per frame of the render thread. Most of it was codegen: every u8
+store (m_run_shown, m_run_nomerge, the chunk states) may alias anything, so GCC loaded every
+vector's data pointer again after each one, through `lev` and the lambdas' captures.
+
+Tried and dropped: finding a frame's draws from its visible chunks (bit sets of their places in
+the sorted lists) instead of walking the lists. A level has only 1-2.5k draws (village1 2112,
+Snowy 1841, village3 2466), so after the inline walk there was nothing left to save: ±0.05 ms.
+
+**Identity.** A check build (not in the tree) runs the baseline draw_level (2754bb2a6c, without
+side effects: no time of day, no pool priority / fog / unload calls) next to the new one at every
+level draw, with the hysteresis state put back in between. It compares the static_cmdlists call
+lists of both passes (state pointer, the matrix's 16 floats and 12 float24 words, mesh, index
+range, nofog), every statistics counter and the chunk / LOD states afterwards. Over the five views
+and their loads (title, village1, beach, snow, village3, ogre, sunken, sunkenb, misty) it found
+0 mismatches in ~2.6M calls (l0 + l1, ~8900 level draws), before and after the last two changes.
+Host: level_pairs.pad, all 10 pairs loaded and drawn (`--ctr-gfx -cbackend`).
+
+**Still there** (village1 profile after the changes): run_loop is still the largest piece of
+draw_level (the plane test's s16 -> float conversions; a float copy of the run spheres would take
+8 more bytes per run of heap); then the partly drawn draws' run walk, and the matrices
+(make_clip + ctr_gpu_prepare_mesh_matrix, ~400 instructions per visible chunk). The time of day
+recolor (0.8-8.7 ms in these views, most of it full blends nearly every frame in village3,
+sunken and misty) is tod-fix's.
