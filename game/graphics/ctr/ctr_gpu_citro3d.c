@@ -1080,9 +1080,11 @@ enum {
   MICRO_PROCLUT = 8,    /* the procedural texture tables kept in the GPU's LUT memory */
   MICRO_ATLAS = 16,     /* the mesh scales written raw */
   MICRO_FENCE = 32,     /* steady pacing's fence words in the vertex buffer */
-  MICRO_FLUSHMERGE = 64 /* cache flush requests of near ranges merged */
+  MICRO_FLUSHMERGE = 64, /* cache flush requests of near ranges merged */
+  /* (AI-assisted, micro-mg) round 2 */
+  MICRO_RAWGLOW = 128 /* the glows (procedural texture) as raw draws, not through citro3d */
 };
-#define MICRO_ALL 127u
+#define MICRO_ALL 255u
 static u32 s_micro = MICRO_ALL;
 static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
 static int s_micro_ident;    /* gpu_micro_ident */
@@ -4992,7 +4994,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     const int need1 = mesh == 1 || mesh == 3;
     const int want_off = g_tex1_gating ? !need1 : mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
-    if (raw && want_off != is_off) {
+    /* (AI-assisted, micro-mg) a glow drawn raw (MICRO_RAWGLOW) leaves unit 1 as the citro3d draw
+     * did (it never switched it: the same registers at the draw) */
+    const int gate = raw && !(st->flags & CTR_STATE_PROCTEX);
+    if (gate && want_off != is_off) {
       if (want_off) {
         tctx->texConfig &= ~BIT(1);
       } else {
@@ -5191,7 +5196,11 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
 
 /* (AI-assisted) the raw path takes every draw but the glows (procedural texture unit: citro3d) */
 static inline int use_raw(const ctr_draw_state* st) {
-  return s_raw.on && !(st->flags & CTR_STATE_PROCTEX);
+  /* (AI-assisted, micro-mg) gpu_micro: the glows too. What citro3d sent for them (the whole
+   * attribute buffer table, the fragment operations, both combiner stages, every uniform's dirty
+   * scan) is what the raw draw writes only where it changes; the procedural texture unit and
+   * texture unit 0's switch-off still go through citro3d (raw_sync sends them). */
+  return s_raw.on && (!(st->flags & CTR_STATE_PROCTEX) || (s_micro & MICRO_RAWGLOW));
 }
 
 /* the immediate draws (triangle lists or strips from g.vbuf): program, state, then the draw */
