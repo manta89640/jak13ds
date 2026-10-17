@@ -290,13 +290,13 @@ struct CtrSettings {
   // (AI-assisted) impostors (CtrImpostor): far tie objects (each visibility group, up to 8
   // instances: trees, rocks, houses) whose nearest point is beyond impostor_distance (meters) and
   // that cover at most 128x128 pixels are drawn into a texture at screen resolution and shown as
-  // a card (a 4x4 grid at the group's depth) in their place, until the picture could be off by
-  // impostor_error pixels (camera moved) or they come nearer: then drawn again. At most
-  // impostor_budget triangles are drawn into impostors per frame (the rest stay geometry that
-  // frame). impostor_atlas: the texture's
-  // size in KB (linear memory, 256 | 512 | 1024). Off: at Sentinel Beach's start a card still
-  // covers a stone arch that stands among the rocks it was made from (host, Oct 12)
-  bool impostors = false;
+  // a card (one quad per cell on the plane of the group's visible surface there) in their place,
+  // until the picture could be off by impostor_error pixels (camera moved), the time of day moved
+  // its colors, or they come nearer: then drawn again. At most impostor_budget triangles are drawn
+  // into impostors per frame (the rest stay geometry that frame). impostor_atlas: the texture's
+  // size in KB (256 | 512 | 1024; VRAM when there is room at start, else linear memory). On by
+  // default since Oct 17 (the Sentinel Beach arch depth error fixed: CtrImpostor.h)
+  bool impostors = true;  // (AI-assisted) on since Oct 17 (beach depth fix; preset safe: off)
   float impostor_distance = 120.f;
   float impostor_error = 1.f;
   int impostor_budget = 6000;

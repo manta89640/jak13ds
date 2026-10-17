@@ -12,26 +12,35 @@
  *  - The capture is the real draw: the same vertices, textures, states and projection, cropped to
  *    the group's rectangle on screen (so the card matches the geometry to the pixel in that
  *    frame), without fog.
- *  - The card is a 4x4 grid over the rectangle: each grid point on the capture camera's ray
- *    through it, at the depth of the nearest of the group's triangles in the cells around it (the
- *    CPU bins the group's triangles into the cells at the capture). So the card lies just in front
- *    of the group everywhere: its depth test against the rest of the scene is the group's own,
- *    to within the depth of one cell's contents (a flat card in front of the whole group would
- *    hide whatever stands among the group's objects, an arch among rocks). Drawn like the level
- *    mesh (same vertex program): the fog of each grid point's depth, with each frame's camera.
- *  - The error: how far the camera moved since the capture times the parallax between the grid
- *    and the farthest triangles of each cell (the grid's depth against the geometry's): camera
- *    rotation alone never makes a card wrong. Also a new capture when the card's size on screen is
- *    off by more than 15% (texels per pixel), or the group comes nearer than impostor_distance
- *    (then it's drawn as geometry again: within the error, no pop).
+ *  - The card's depth (Oct 17, the beach fix): the CPU rasterizes the group's triangles at the
+ *    capture into a small buffer of their nearest 1/w per texel (the visible surface; 2x2 texels
+ *    per sample for tiles over 64 pixels). The tile is cut into cells (about 12 pixels, at most
+ *    4x4); each cell with something in it becomes one quad on its own plane: the plane fitted to
+ *    the cell's visible depths (least squares in screen x, y and 1/w, where a flat surface is a
+ *    plane), moved towards the camera until no visible texel (and no vertex) of the cell is in
+ *    front of it. A cell whose plane is still more than ~0.6% of its distance in front of some
+ *    texel (a step in depth: a near rock's edge over a far one) is split in four, while the card
+ *    stays under a quarter of the group's triangles. Empty cells are left out. So the card lies
+ *    on the group's visible surface to within that slack: what stands between the group's parts
+ *    (the arch among the beach rocks, a tree in front of a cliff) is no longer hidden by the
+ *    nearest part of a cell (the old 4x4 grid took each point's depth from the nearest triangle
+ *    whose screen box touched any of the four cells around it). The quads overlap by half a texel
+ *    inside the tile (no cracks when the camera moves).
+ *    Drawn like the level mesh (same vertex program): the fog of each corner's depth.
+ *  - The error: how far the camera moved since the capture times the parallax between the cards'
+ *    planes and the visible texels behind them: camera rotation alone never makes a card wrong.
+ *    Also a new capture when the card's size on screen is off by more than 15% (texels per pixel),
+ *    when the time of day moved the group's colors by more than kTodMaxErr (vertex color units:
+ *    the weight changes of the palettes its vertices use times those palettes' brightest colors),
+ *    or the group comes nearer than impostor_distance (then it's drawn as geometry again: within
+ *    the error, no pop). Groups with a "light" palette (lamps, lava glow: moved every frame) stay
+ *    geometry.
  *  - Nearest texel sampling at 1:1 and the alpha test (alpha > 0) give the geometry's hard edges.
- *  - Level geometry has its time of day colors baked in the .c3l (no lighting changes at run time),
- *    so a card's colors stay right.
  * Only groups whose draws are all opaque (no blending, depth written, no decal), with no blended
  * group in front of part of them, and whose rectangle is at most 128x128 pixels. The texture
- * (impostor_atlas KB, RGBA8, linear memory) is cut into tiles (16 x 8 pixel cells, first fit); the
- * least recently shown tiles make room, and groups with more triangles per texel take the place of
- * those with fewer.
+ * (impostor_atlas KB, RGBA8; VRAM when there is room at start, else linear memory) is cut into
+ * tiles (16 x 8 pixel cells, first fit); the least recently shown tiles make room, and groups with
+ * more triangles per texel take the place of those with fewer.
  */
 
 #include <array>
@@ -68,9 +77,10 @@ class CtrImpostors {
   /*! A log line about the last stats period (render thread), then the counts start again. */
   void log_stats();
   bool active() const { return m_active; }
+  /*! (renderer init, impostors on) the texture now, before the level texture pools fill VRAM */
+  void reserve() { ensure_atlas(); }
 
-  static constexpr int kGrid = 4;                           // cells per side of a card
-  static constexpr int kGridV = (kGrid + 1) * (kGrid + 1);  // its points
+  static constexpr int kGrid = 4;  // cells per side of a card at most (before splits)
 
  private:
   struct Cluster {
@@ -84,6 +94,14 @@ class CtrImpostors {
     int slot = -1;
     bool eligible = false;
     bool exact = false;  // bmin / bmax from its vertices (else around its runs' spheres)
+    bool light = false;  // (exact) a vertex has a light palette's color: stays geometry
+    bool has_near = false;  // a tie LOD group: its runs include a near version
+    u8 pal = 0;            // (exact) the time of day palettes its vertices use
+    u8 tmax[8][3] = {};    // (exact) per palette and channel: its vertices' brightest color
+    u8 tmin[8][3] = {};    // ... and darkest
+    float kpar = -1.f;     // its last capture's parallax bound (-1: none yet)
+    u64 tod_hold = 0;      // no capture before this frame (the day ran too fast for its card)
+    u64 retry = 0;         // no new tile before this frame (the atlas was full for it)
   };
   struct ChunkInfo {
     int mesh = -2;  // the mesh the clusters were made from (-2: not looked at yet)
@@ -105,10 +123,21 @@ class CtrImpostors {
     u16 cw = 0, ch = 0;  // its size
     u16 wn = 0, hn = 0;  // the part the card shows (screen pixels at the capture)
     double cam[3] = {0, 0, 0};  // capture camera
-    float gv[kGridV][3] = {};   // the card's points, relative to cam
-    s16 gst[kGridV][2] = {};    // their texture coordinates * 1024 (c3l::Vertex)
+    // the card: quads (4 points each: x0y0 x1y0 x0y1 x1y1), relative to cam, and their texture
+    // coordinates * 1024 (c3l::Vertex)
+    std::vector<std::array<float, 3>> pv;
+    std::vector<std::array<s16, 2>> pst;
+    // the same as the cards' vertices (c3l::Vertex), quantized around m_qorigin (generation qgen)
+    std::vector<std::array<u32, 4>> qv;
+    int qgen = -1;
+    float corner[3][3] = {};  // the tile's corners x0y0, x1y0, x0y1 at the group's depth (size)
     float value = 0;  // triangles per texel
     float kpar = 0;   // parallax bound: pixels per game unit the camera moved since the capture
+    u8 tod_w[8][3] = {};  // the time of day weights at the capture
+    bool tod = false;     // tod_w valid
+    bool near = false;    // the tie LOD near version was drawn into it
+    u32 tod_ver = 0;      // the level's time of day version it was last checked against
+    u32 checks = 0;       // its validity checks (the size one every 8th)
     u64 captured = 0, last_used = 0;
   };
   // a shown group of this level draw that isn't opaque (no card may hide part of it)
@@ -135,6 +164,8 @@ class CtrImpostors {
     float zmin = 0, zmax = 0;              // its corners' depth range (ndc)
     float wmin = 0, wmax = 0;              // ... clip w
     float value = 0;
+    float tod_rate = 0;  // (a new capture for the time of day) its colors' move per frame
+    bool near = false;   // the level draw shows the near version of its tie LOD group
   };
   struct Proj {
     float xmin, xmax, ymin, ymax, zmin, zmax;  // screen pixels (y from the bottom), ndc z
@@ -152,6 +183,9 @@ class CtrImpostors {
   int alloc_slot(int wn, int hn, float value, u64 frame);
   bool capture(const Want& w, Slot& s);
   float card_scale(const Slot& s) const;
+  int tod_error(LevelState& ls, const Cluster& c, const Slot& s);
+  bool tod_behind(const LevelState& ls, const Cluster& c) const;
+  bool quantize(Slot& s);
   void hide(const Want& w);
 
   bool m_active = false;  // in a level draw with impostors
@@ -169,6 +203,11 @@ class CtrImpostors {
   float m_rowlen[4] = {};               // |m_Af rows|
   float m_cam_key[19] = {};             // the last level draw's camera (m_cam_same)
   bool m_cam_same = false;
+  // the camera's speed (game units per frame, smoothed) and its last position: a capture is only
+  // worth it when the card will stay right for a few frames
+  float m_speed = 0.f;
+  float m_last_trans[3] = {0, 0, 0};
+  bool m_have_last = false;
   u64 m_frame = 0;
   int m_builds = 0;      // chunks whose clusters were made this frame
   u32 m_exact_tris = 0;  // exact boxes made this frame (their triangles)
@@ -176,16 +215,34 @@ class CtrImpostors {
   std::vector<Want> m_wants;
   std::vector<Seen> m_seen;
   std::vector<int> m_cards;  // slots shown this level draw
+  std::vector<u64> m_keys;   // finish_chunks' scratch
+  std::vector<u32> m_order;
+  int m_card_verts = 0;      // their points
+  // the cards' vertices are quantized once (not per frame) in kQStep units around m_qorigin, a
+  // point near the camera (moved, and every card quantized again, when the camera gets far)
+  double m_qorigin[3] = {0, 0, 0};
+  int m_qgen = 0;
+  bool m_qvalid = false;
+  double m_cap_cpu_ms = 0;
+  double m_t_chunks = 0;    // begin_level's end (the chunk calls' time)  // this frame's capture CPU work (raster, planes)
+  // capture scratch: the group's vertices on the tile (x, y, 1/w; stamp: projected this capture)
+  // and the visible 1/w per sample
+  std::vector<std::array<float, 3>> m_pj;
+  std::vector<u32> m_pj_stamp;
+  u32 m_stamp = 0;
+  std::vector<float> m_zb;
+  std::vector<u32> m_used_verts;
   // statistics (per stats period)
   struct Stats {
     double frames = 0, level_draws = 0, cards = 0, card_tris = 0, captures = 0, capture_tris = 0,
            over_budget = 0, no_room = 0, too_big = 0, recapture_error = 0, recapture_scale = 0,
-           evicted = 0, built_chunks = 0, build_ms = 0, cpu_ms = 0;
+           evicted = 0, built_chunks = 0, build_ms = 0, cpu_ms = 0, recapture_tod = 0,
+           card_quads = 0, drawn_quads = 0, short_life = 0, recapture_lod = 0, splits = 0, slack_cells = 0, verts_full = 0;
     // triangles of the groups in chunks that reach beyond impostor_distance, by what became of
     // them
     double t_opaque_no = 0, t_hidden = 0, t_near = 0, t_big = 0, t_off = 0, t_budget = 0,
-           t_room = 0, t_blended = 0, t_pending = 0;
-    double ms_chunk = 0, ms_finish = 0, ms_capture = 0, ms_cards = 0;
+           t_room = 0, t_blended = 0, t_pending = 0, t_light = 0, t_short = 0;
+    double ms_chunk = 0, ms_finish = 0, ms_capture = 0, ms_cards = 0, ms_cap_cpu = 0, ms_card_draw = 0, ms_f_sort = 0, ms_f_loop = 0;
   } m_st;
 };
 

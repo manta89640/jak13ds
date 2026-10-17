@@ -37,6 +37,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
+#include "game/graphics/ctr/CtrImpostor.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
@@ -1264,6 +1265,10 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
+  // (AI-assisted) impostors: their texture in VRAM before the level texture pools fill it
+  if (ctr_settings().impostors) {
+    ctr_impostors().reserve();
+  }
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
