@@ -363,7 +363,8 @@ vertices (all of them, every level), so the far version costs only its indices. 
 visibility run of its own, the runs of a draw in the order near, one-version, far (so drawing either
 version of all of a chunk's groups is one piece per draw). `ExtHeader` (at Header::ext_offset):
 `{"C3LX", size 32, lod_group_count, lod_groups_offset, run_lod_count, run_lod_offset, runs_offset,
-pad}`; `TieLodGroup {float bsphere[4]; float dist}` (dist: the prototype's PS2 far-plane, game
+lod_error_offset}` (lod_error_offset, AI-assisted, title-popin: `float[lod_group_count]`, each group's
+shape error below, game units; 0 in files written before it: the runtime then switches at dist); `TieLodGroup {float bsphere[4]; float dist}` (dist: the prototype's PS2 far-plane, game
 units); `RunLod {u16 group; u8 lod; u8 pad}` per VisRun of the file from runs_offset on (lod 0: one
 version, 1 near, 2 far). The vista tier copies the far versions.
 
@@ -383,9 +384,16 @@ Sizes (Oct 17, vertex + index data added): village3 +1954 KB (every group), snow
 group), ogre +3268 KB (758 of 1210 candidates), lavatube +5504 KB (2874 of 5772), village2 +2461 KB
 (792 of 1110); all levels' files 118 -> 162 MB; conversion of all levels ~60 s.
 
-Runtime (`CtrLevel.cpp`, config `tie_lod`): per level draw, each group's version: near while the
-camera is within dist x detail_scale (x 0.5..1 with auto_detail: half while the GPU is busy) of the
-group's sphere (10% hysteresis; every group every frame, so turning the camera switches nothing).
+Runtime (`CtrLevel.cpp`, config `tie_lod`): per level draw, each group's version: with the shape
+errors (title-popin, Oct 17), near while the camera is within error x focal / tie_lod_px x
+detail_scale of the group's sphere (focal: pixels of the 400-wide top screen per unit of x / depth
+from this frame's projection, 256 in gameplay, 161 on the title's wide camera): the far version
+only where its error is at most tie_lod_px pixels. Without them (older files), near within dist x
+detail_scale (x 0.5..1 with auto_detail: half while the GPU is busy; a group in view keeps the factor
+it was decided with until it is out of view). 10% hysteresis; every group every frame, so turning
+the camera switches nothing. Why: the PS2 morphs geometry 2 into 3 up to the far-plane, the 3DS
+switched 0 against 3 there: village1's shape errors at the far-plane are 3.3 px median, 8.3 px for
+one group in ten, 19 px at most (the title camera: up to 19.7 px pops, palms and huts).
 A chunk with versioned runs is drawn run by run; a run of the other version is hidden and never
 drawn along with its neighbours (the small-gap merge), so the two versions are never on top of each
 other. Visibility bits, run culling, static_cmdlists (a version change is a new draw list for one
