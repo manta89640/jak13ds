@@ -12,10 +12,14 @@
 #   --gk     gk.3dsx to copy (default: build-3ds/gk.3dsx)
 #   --c3l    folder with the level backgrounds (default: <proj>/out/jak1/c3l if it exists;
 #            make them with: ctr_level_converter --all out/jak1/fr3 <dir>)
-# All settings go in one file, sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). The
-# options below set keys in it; other lines stay. Without --config the card's config.ini is kept
-# and updated; with --config FILE it starts from that file. Old flag files are removed.
+#   --c3v    (AI-assisted) folder with the levels' fine visibility sidecars (<level>.c3v, made by
+#            ctr_vis_builder; default: the .c3v files in the --c3l folder)
+# All settings go in one file, sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). It is
+# written from platform/3ds/tools/config_template.ini (the 8 user keys); the options below set keys
+# in it (the testing keys of docs/3ds-port/config_dev.md go at its end). Old flag files are removed.
 #
+#   --preset P  preset = P: normal (default) | safe | bench | breakdown
+#   --keep-config  start from the card's config.ini instead of the template (the old behaviour)
 #   --config FILE  the config.ini to start from (--render-ini FILE: the same)
 #   --args   args = ... (gk's default: "-boot -cbackend")
 #   --listener  listener = on (Wi-Fi REPL)
@@ -23,9 +27,9 @@
 #   --clean-user  delete user/ (settings, saves) before the run
 #   --screenshots N  screenshots = N: a screenshot every N frames to data/log/shot_<frame>.bmp
 #   --pad-script FILE  pad_script = pad_script.txt (copied): scripted controller input for tests
-#   --use-syscore  io_on_system_core = on: the IOP / listener / worker threads on core 1 (experimental)
-#   --sound [CORE]  sound = on (and sound_core = CORE; default: 0 on New 3DS, else 1).
-#            Needs sdmc:/3ds/dspfirm.cdc: a real dump on hardware (DSP1 homebrew), any file for
+#   --use-syscore  (removed Oct 16 with io_on_system_core: accepted, ignored)
+#   --sound [CORE]  sound = on (the default now; and sound_core = CORE; default: 2 on New 3DS, else 1)
+#   --no-sound  sound = off. With sound on the game needs sdmc:/3ds/dspfirm.cdc: a real dump on hardware (DSP1 homebrew), any file for
 #            Azahar's HLE audio (a placeholder is created on the emulator's SD card if missing).
 #   --perf-sections  perf_sections = on: per-section frame timing in the log
 #   --compress [lz4|zstd]  store the files read whole at load time (--compress-types) as X.ogz,
@@ -48,6 +52,7 @@ PROJ=""
 SD=""
 GK="$ROOT/build-3ds/gk.3dsx"
 C3L=""
+C3V=""
 ARGS=""
 HAVE_ARGS=0
 LISTENER=0
@@ -58,6 +63,9 @@ PAD_SCRIPT=""
 USE_SYSCORE=0
 PERF_SECTIONS=0
 SOUND=""
+NO_SOUND=0
+PRESET=""
+KEEP_CONFIG=0
 RENDER_INI=""
 COMPRESS=""
 COMPRESS_TYPES="DGO CGO VIS TXT STR"
@@ -71,6 +79,7 @@ while [ $# -gt 0 ]; do
     --sd) SD="$2"; SD_GIVEN=1; shift 2 ;;
     --gk) GK="$2"; shift 2 ;;
     --c3l) C3L="$2"; shift 2 ;;
+    --c3v) C3V="$2"; shift 2 ;;
     --args) ARGS="$2"; HAVE_ARGS=1; shift 2 ;;
     --listener) LISTENER=1; shift ;;
     --clean-logs) CLEAN_LOGS=1; shift ;;
@@ -78,6 +87,9 @@ while [ $# -gt 0 ]; do
     --screenshots) SHOTS="$2"; shift 2 ;;
     --pad-script) PAD_SCRIPT="$2"; shift 2 ;;
     --use-syscore) USE_SYSCORE=1; shift ;;
+    --preset) PRESET="$2"; shift 2 ;;
+    --keep-config) KEEP_CONFIG=1; shift ;;
+    --no-sound) NO_SOUND=1; shift ;;
     --perf-sections) PERF_SECTIONS=1; shift ;;
     --sound) SOUND=auto; if [ $# -gt 1 ] && [[ "$2" =~ ^[0-3]$ ]]; then SOUND="$2"; shift; fi; shift ;;
     --render-ini|--config) RENDER_INI="$2"; shift 2 ;;
@@ -91,6 +103,10 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PROJ" ] || { echo "--proj is required" >&2; exit 1; }
+case "${PRESET:-normal}" in
+  normal|safe|bench|breakdown) ;;
+  *) echo "--preset: normal, safe, bench or breakdown" >&2; exit 1 ;;
+esac
 "$(dirname "$0")/check_fresh.sh" proj "$PROJ" || exit 1
 "$(dirname "$0")/check_fresh.sh" gk "$GK" || exit 1
 
@@ -207,32 +223,60 @@ if [ -d "$C3L" ]; then
   for f in "$C3L"/*.c3l; do
     copy "$f" "$DATA/out/jak1/c3l/"
   done
-  echo "staged level backgrounds from $C3L"
+  # (AI-assisted) fine_vis sidecars (ctr_vis_builder): next to the levels, or from --c3v DIR
+  nc3v=0
+  for f in "$C3L"/*.c3v ${C3V:+"$C3V"/*.c3v}; do
+    [ -f "$f" ] || continue
+    copy "$f" "$DATA/out/jak1/c3l/"
+    nc3v=$((nc3v + 1))
+  done
+  echo "staged level backgrounds from $C3L ($nc3v fine visibility files)"
 fi
 
 if [ "$CLEAN_LOGS" = 1 ]; then rm -rf "$DATA/log"; fi
 if [ "$CLEAN_USER" = 1 ]; then rm -rf "$BASE/user"; fi
 
-# the one settings file
+# the one settings file: the template (or --config FILE / --keep-config: that file), then the
+# options' keys
 CONFIG="$BASE/config.ini"
 TMP_CONFIG="$(mktemp)"
 if [ -n "$RENDER_INI" ]; then
   cp "$RENDER_INI" "$TMP_CONFIG"
-elif [ -f "$CONFIG" ]; then
+elif [ "$KEEP_CONFIG" = 1 ] && [ -f "$CONFIG" ]; then
   cp "$CONFIG" "$TMP_CONFIG"
-elif [ -f "$BASE/render.ini" ]; then
+elif [ "$KEEP_CONFIG" = 1 ] && [ -f "$BASE/render.ini" ]; then
   cp "$BASE/render.ini" "$TMP_CONFIG"  # the older name: carried over
+else
+  cp "$ROOT/platform/3ds/tools/config_template.ini" "$TMP_CONFIG"
 fi
-set_key() {  # set_key KEY VALUE: replace the key's line (or add it)
+TESTING_HEADER=0
+set_key() {  # set_key KEY VALUE: replace the key's line where it is (or add it at the end)
   local tmp2
   tmp2="$(mktemp)"
-  grep -v -E "^[[:space:]]*$1[[:space:]]*=" "$TMP_CONFIG" > "$tmp2" || true
-  echo "$1 = $2" >> "$tmp2"
+  if grep -q -E "^[[:space:]]*$1[[:space:]]*=" "$TMP_CONFIG"; then
+    awk -v k="$1" -v v="$2" '
+      $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { if (!done) print k " = " v; done = 1; next }
+      { print }' "$TMP_CONFIG" > "$tmp2"
+  else
+    cp "$TMP_CONFIG" "$tmp2"
+    if [ "$TESTING_HEADER" = 0 ] && ! grep -q "^# testing keys" "$tmp2"; then
+      printf '\n# testing keys (docs/3ds-port/config_dev.md)\n' >> "$tmp2"
+    fi
+    TESTING_HEADER=1
+    echo "$1 = $2" >> "$tmp2"
+  fi
   mv "$tmp2" "$TMP_CONFIG"
 }
+if [ -n "$PRESET" ]; then
+  set_key preset "$PRESET"
+  if [ "$PRESET" = safe ] && [ -z "$RENDER_INI" ] && [ "$KEEP_CONFIG" = 0 ]; then
+    # (AI-assisted) safe's particle limits are particles = reduced, written as a plain line
+    set_key particles reduced
+  fi
+fi
 if [ "$HAVE_ARGS" = 1 ]; then set_key args "$ARGS"; fi
 if [ "$LISTENER" = 1 ]; then set_key listener on; fi
-if [ "$USE_SYSCORE" = 1 ]; then set_key io_on_system_core on; fi
+if [ "$USE_SYSCORE" = 1 ]; then echo "--use-syscore: io_on_system_core was removed (Oct 16), ignored" >&2; fi
 if [ "$PERF_SECTIONS" = 1 ]; then set_key perf_sections on; fi
 if [ "$IO_CHECKSUM" = 1 ]; then set_key io_checksum on; fi
 if [ "$SHOTS" != 0 ]; then set_key screenshots "$SHOTS"; fi
@@ -243,13 +287,17 @@ fi
 if [ -n "$SOUND" ]; then
   set_key sound on
   if [ "$SOUND" != auto ]; then set_key sound_core "$SOUND"; fi
-  if [ ! -f "$SD/3ds/dspfirm.cdc" ]; then
-    if [ -z "${SD_GIVEN:-}" ]; then
-      printf 'placeholder DSP component for Azahar HLE audio\n' > "$SD/3ds/dspfirm.cdc"
-      echo "created a placeholder $SD/3ds/dspfirm.cdc (emulator only)"
-    else
-      echo "warning: no $SD/3ds/dspfirm.cdc, the game will run without audio (dump it with the DSP1 homebrew)" >&2
-    fi
+fi
+if [ "$NO_SOUND" = 1 ]; then set_key sound off; fi
+# sound is on unless the file says off: the DSP firmware it needs
+if ! grep -q -E "^[[:space:]]*sound[[:space:]]*=[[:space:]]*(off|0|no|false)[[:space:]]*$" "$TMP_CONFIG" &&
+   [ ! -f "$SD/3ds/dspfirm.cdc" ]; then
+  if [ -z "${SD_GIVEN:-}" ]; then
+    mkdir -p "$SD/3ds"
+    printf 'placeholder DSP component for Azahar HLE audio\n' > "$SD/3ds/dspfirm.cdc"
+    echo "created a placeholder $SD/3ds/dspfirm.cdc (emulator only)"
+  else
+    echo "warning: no $SD/3ds/dspfirm.cdc, the game will run without audio (dump it with the DSP1 homebrew)" >&2
   fi
 fi
 mv "$TMP_CONFIG" "$CONFIG"

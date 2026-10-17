@@ -1,0 +1,760 @@
+# (AI-assisted) every checkpoint in game order on a new game. Jak walks, jumps and attacks at
+# each one; the dwell lets a death finish before the next continue (a continue during a death
+# or a cutscene is not a real-play situation and can leave Jak in target-continue).
+# Read: grep -a 'pad script' (CP lines, Jak's state at +240/+540/+880 frames), '[ctr] loaded',
+# 'failed to load', NaN warnings. About 25 min on the host.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=<this file> build-host-small/game/gk --proj-path <proj>
+#     --config-path <scratch dir> --ctr-gfx -- -boot -fakeiso -nosound -cbackend
+# (host small-memory C-mode gk running the p3ds modules; --config-path keeps the saves out of
+# the user's OpenGOAL folder). Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+200 log CP 1 training-start
+200 continue training-start
+201 wait *target* target-continue
+440 pos *target*
+441 ly=0
+530 ly=0 x
+536 ly=0
+560 square
+566 -
+740 pos *target*
+1080 pos *target*
+1100 log CP 2 training-warp
+1100 continue training-warp
+1101 wait *target* target-continue
+1340 pos *target*
+1341 ly=0
+1430 ly=0 x
+1436 ly=0
+1460 square
+1466 -
+1640 pos *target*
+1980 pos *target*
+2000 log CP 3 village1-hut
+2000 continue village1-hut
+2001 wait *target* target-continue
+2240 pos *target*
+2241 ly=0
+2330 ly=0 x
+2336 ly=0
+2360 square
+2366 -
+2540 pos *target*
+2880 pos *target*
+2900 log CP 4 village1-warp
+2900 continue village1-warp
+2901 wait *target* target-continue
+3140 pos *target*
+3141 ly=0
+3230 ly=0 x
+3236 ly=0
+3260 square
+3266 -
+3440 pos *target*
+3780 pos *target*
+3800 log CP 5 beach-start
+3800 continue beach-start
+3801 wait *target* target-continue
+4040 pos *target*
+4041 ly=0
+4130 ly=0 x
+4136 ly=0
+4160 square
+4166 -
+4340 pos *target*
+4680 pos *target*
+4700 log CP 6 jungle-start
+4700 continue jungle-start
+4701 wait *target* target-continue
+4940 pos *target*
+4941 ly=0
+5030 ly=0 x
+5036 ly=0
+5060 square
+5066 -
+5240 pos *target*
+5580 pos *target*
+5600 log CP 7 jungle-tower
+5600 continue jungle-tower
+5601 wait *target* target-continue
+5840 pos *target*
+5841 ly=0
+5930 ly=0 x
+5936 ly=0
+5960 square
+5966 -
+6140 pos *target*
+6480 pos *target*
+6500 log CP 8 misty-start
+6500 continue misty-start
+6501 wait *target* target-continue
+6740 pos *target*
+6741 ly=0
+6830 ly=0 x
+6836 ly=0
+6860 square
+6866 -
+7040 pos *target*
+7380 pos *target*
+7400 log CP 9 misty-silo
+7400 continue misty-silo
+7401 wait *target* target-continue
+7640 pos *target*
+7641 ly=0
+7730 ly=0 x
+7736 ly=0
+7760 square
+7766 -
+7940 pos *target*
+8280 pos *target*
+8300 log CP 10 misty-bike
+8300 continue misty-bike
+8301 wait *target* target-continue
+8540 pos *target*
+8541 ly=0
+8630 ly=0 x
+8636 ly=0
+8660 square
+8666 -
+8840 pos *target*
+9180 pos *target*
+9200 log CP 11 misty-backside
+9200 continue misty-backside
+9201 wait *target* target-continue
+9440 pos *target*
+9441 ly=0
+9530 ly=0 x
+9536 ly=0
+9560 square
+9566 -
+9740 pos *target*
+10080 pos *target*
+10100 log CP 12 misty-silo2
+10100 continue misty-silo2
+10101 wait *target* target-continue
+10340 pos *target*
+10341 ly=0
+10430 ly=0 x
+10436 ly=0
+10460 square
+10466 -
+10640 pos *target*
+10980 pos *target*
+11000 log CP 13 firecanyon-start
+11000 continue firecanyon-start
+11001 wait *target* target-continue
+11240 pos *target*
+11241 ly=0
+11330 ly=0 x
+11336 ly=0
+11360 square
+11366 -
+11540 pos *target*
+11880 pos *target*
+11900 log CP 14 firecanyon-end
+11900 continue firecanyon-end
+11901 wait *target* target-continue
+12140 pos *target*
+12141 ly=0
+12230 ly=0 x
+12236 ly=0
+12260 square
+12266 -
+12440 pos *target*
+12780 pos *target*
+12800 log CP 15 village2-start
+12800 continue village2-start
+12801 wait *target* target-continue
+13040 pos *target*
+13041 ly=0
+13130 ly=0 x
+13136 ly=0
+13160 square
+13166 -
+13340 pos *target*
+13680 pos *target*
+13700 log CP 16 village2-warp
+13700 continue village2-warp
+13701 wait *target* target-continue
+13940 pos *target*
+13941 ly=0
+14030 ly=0 x
+14036 ly=0
+14060 square
+14066 -
+14240 pos *target*
+14580 pos *target*
+14600 log CP 17 village2-dock
+14600 continue village2-dock
+14601 wait *target* target-continue
+14840 pos *target*
+14841 ly=0
+14930 ly=0 x
+14936 ly=0
+14960 square
+14966 -
+15140 pos *target*
+15480 pos *target*
+15500 log CP 18 sunken-start
+15500 continue sunken-start
+15501 wait *target* target-continue
+15740 pos *target*
+15741 ly=0
+15830 ly=0 x
+15836 ly=0
+15860 square
+15866 -
+16040 pos *target*
+16380 pos *target*
+16400 log CP 19 sunken1
+16400 continue sunken1
+16401 wait *target* target-continue
+16640 pos *target*
+16641 ly=0
+16730 ly=0 x
+16736 ly=0
+16760 square
+16766 -
+16940 pos *target*
+17280 pos *target*
+17300 log CP 20 sunken2
+17300 continue sunken2
+17301 wait *target* target-continue
+17540 pos *target*
+17541 ly=0
+17630 ly=0 x
+17636 ly=0
+17660 square
+17666 -
+17840 pos *target*
+18180 pos *target*
+18200 log CP 21 sunken-tube1
+18200 continue sunken-tube1
+18201 wait *target* target-continue
+18440 pos *target*
+18441 ly=0
+18530 ly=0 x
+18536 ly=0
+18560 square
+18566 -
+18740 pos *target*
+19080 pos *target*
+19100 log CP 22 sunkenb-start
+19100 continue sunkenb-start
+19101 wait *target* target-continue
+19340 pos *target*
+19341 ly=0
+19430 ly=0 x
+19436 ly=0
+19460 square
+19466 -
+19640 pos *target*
+19980 pos *target*
+20000 log CP 23 sunkenb-helix
+20000 continue sunkenb-helix
+20001 wait *target* target-continue
+20240 pos *target*
+20241 ly=0
+20330 ly=0 x
+20336 ly=0
+20360 square
+20366 -
+20540 pos *target*
+20880 pos *target*
+20900 log CP 24 swamp-start
+20900 continue swamp-start
+20901 wait *target* target-continue
+21140 pos *target*
+21141 ly=0
+21230 ly=0 x
+21236 ly=0
+21260 square
+21266 -
+21440 pos *target*
+21780 pos *target*
+21800 log CP 25 swamp-dock1
+21800 continue swamp-dock1
+21801 wait *target* target-continue
+22040 pos *target*
+22041 ly=0
+22130 ly=0 x
+22136 ly=0
+22160 square
+22166 -
+22340 pos *target*
+22680 pos *target*
+22700 log CP 26 swamp-cave1
+22700 continue swamp-cave1
+22701 wait *target* target-continue
+22940 pos *target*
+22941 ly=0
+23030 ly=0 x
+23036 ly=0
+23060 square
+23066 -
+23240 pos *target*
+23580 pos *target*
+23600 log CP 27 swamp-dock2
+23600 continue swamp-dock2
+23601 wait *target* target-continue
+23840 pos *target*
+23841 ly=0
+23930 ly=0 x
+23936 ly=0
+23960 square
+23966 -
+24140 pos *target*
+24480 pos *target*
+24500 log CP 28 swamp-cave2
+24500 continue swamp-cave2
+24501 wait *target* target-continue
+24740 pos *target*
+24741 ly=0
+24830 ly=0 x
+24836 ly=0
+24860 square
+24866 -
+25040 pos *target*
+25380 pos *target*
+25400 log CP 29 swamp-game
+25400 continue swamp-game
+25401 wait *target* target-continue
+25640 pos *target*
+25641 ly=0
+25730 ly=0 x
+25736 ly=0
+25760 square
+25766 -
+25940 pos *target*
+26280 pos *target*
+26300 log CP 30 swamp-cave3
+26300 continue swamp-cave3
+26301 wait *target* target-continue
+26540 pos *target*
+26541 ly=0
+26630 ly=0 x
+26636 ly=0
+26660 square
+26666 -
+26840 pos *target*
+27180 pos *target*
+27200 log CP 31 rolling-start
+27200 continue rolling-start
+27201 wait *target* target-continue
+27440 pos *target*
+27441 ly=0
+27530 ly=0 x
+27536 ly=0
+27560 square
+27566 -
+27740 pos *target*
+28080 pos *target*
+28100 log CP 32 ogre-start
+28100 continue ogre-start
+28101 wait *target* target-continue
+28340 pos *target*
+28341 ly=0
+28430 ly=0 x
+28436 ly=0
+28460 square
+28466 -
+28640 pos *target*
+28980 pos *target*
+29000 log CP 33 ogre-race
+29000 continue ogre-race
+29001 wait *target* target-continue
+29240 pos *target*
+29241 ly=0
+29330 ly=0 x
+29336 ly=0
+29360 square
+29366 -
+29540 pos *target*
+29880 pos *target*
+29900 log CP 34 ogre-end
+29900 continue ogre-end
+29901 wait *target* target-continue
+30140 pos *target*
+30141 ly=0
+30230 ly=0 x
+30236 ly=0
+30260 square
+30266 -
+30440 pos *target*
+30780 pos *target*
+30800 log CP 35 village3-start
+30800 continue village3-start
+30801 wait *target* target-continue
+31040 pos *target*
+31041 ly=0
+31130 ly=0 x
+31136 ly=0
+31160 square
+31166 -
+31340 pos *target*
+31680 pos *target*
+31700 log CP 36 village3-warp
+31700 continue village3-warp
+31701 wait *target* target-continue
+31940 pos *target*
+31941 ly=0
+32030 ly=0 x
+32036 ly=0
+32060 square
+32066 -
+32240 pos *target*
+32580 pos *target*
+32600 log CP 37 village3-farside
+32600 continue village3-farside
+32601 wait *target* target-continue
+32840 pos *target*
+32841 ly=0
+32930 ly=0 x
+32936 ly=0
+32960 square
+32966 -
+33140 pos *target*
+33480 pos *target*
+33500 log CP 38 snow-start
+33500 continue snow-start
+33501 wait *target* target-continue
+33740 pos *target*
+33741 ly=0
+33830 ly=0 x
+33836 ly=0
+33860 square
+33866 -
+34040 pos *target*
+34380 pos *target*
+34400 log CP 39 snow-fort
+34400 continue snow-fort
+34401 wait *target* target-continue
+34640 pos *target*
+34641 ly=0
+34730 ly=0 x
+34736 ly=0
+34760 square
+34766 -
+34940 pos *target*
+35280 pos *target*
+35300 log CP 40 snow-flut-flut
+35300 continue snow-flut-flut
+35301 wait *target* target-continue
+35540 pos *target*
+35541 ly=0
+35630 ly=0 x
+35636 ly=0
+35660 square
+35666 -
+35840 pos *target*
+36180 pos *target*
+36200 log CP 41 snow-pass-to-fort
+36200 continue snow-pass-to-fort
+36201 wait *target* target-continue
+36440 pos *target*
+36441 ly=0
+36530 ly=0 x
+36536 ly=0
+36560 square
+36566 -
+36740 pos *target*
+37080 pos *target*
+37100 log CP 42 snow-by-ice-lake
+37100 continue snow-by-ice-lake
+37101 wait *target* target-continue
+37340 pos *target*
+37341 ly=0
+37430 ly=0 x
+37436 ly=0
+37460 square
+37466 -
+37640 pos *target*
+37980 pos *target*
+38000 log CP 43 snow-by-ice-lake-alt
+38000 continue snow-by-ice-lake-alt
+38001 wait *target* target-continue
+38240 pos *target*
+38241 ly=0
+38330 ly=0 x
+38336 ly=0
+38360 square
+38366 -
+38540 pos *target*
+38880 pos *target*
+38900 log CP 44 snow-outside-fort
+38900 continue snow-outside-fort
+38901 wait *target* target-continue
+39140 pos *target*
+39141 ly=0
+39230 ly=0 x
+39236 ly=0
+39260 square
+39266 -
+39440 pos *target*
+39780 pos *target*
+39800 log CP 45 snow-outside-cave
+39800 continue snow-outside-cave
+39801 wait *target* target-continue
+40040 pos *target*
+40041 ly=0
+40130 ly=0 x
+40136 ly=0
+40160 square
+40166 -
+40340 pos *target*
+40680 pos *target*
+40700 log CP 46 snow-across-from-flut
+40700 continue snow-across-from-flut
+40701 wait *target* target-continue
+40940 pos *target*
+40941 ly=0
+41030 ly=0 x
+41036 ly=0
+41060 square
+41066 -
+41240 pos *target*
+41580 pos *target*
+41600 log CP 47 maincave-start
+41600 continue maincave-start
+41601 wait *target* target-continue
+41840 pos *target*
+41841 ly=0
+41930 ly=0 x
+41936 ly=0
+41960 square
+41966 -
+42140 pos *target*
+42480 pos *target*
+42500 log CP 48 maincave-to-darkcave
+42500 continue maincave-to-darkcave
+42501 wait *target* target-continue
+42740 pos *target*
+42741 ly=0
+42830 ly=0 x
+42836 ly=0
+42860 square
+42866 -
+43040 pos *target*
+43380 pos *target*
+43400 log CP 49 maincave-to-robocave
+43400 continue maincave-to-robocave
+43401 wait *target* target-continue
+43640 pos *target*
+43641 ly=0
+43730 ly=0 x
+43736 ly=0
+43760 square
+43766 -
+43940 pos *target*
+44280 pos *target*
+44300 log CP 50 darkcave-start
+44300 continue darkcave-start
+44301 wait *target* target-continue
+44540 pos *target*
+44541 ly=0
+44630 ly=0 x
+44636 ly=0
+44660 square
+44666 -
+44840 pos *target*
+45180 pos *target*
+45200 log CP 51 robocave-start
+45200 continue robocave-start
+45201 wait *target* target-continue
+45440 pos *target*
+45441 ly=0
+45530 ly=0 x
+45536 ly=0
+45560 square
+45566 -
+45740 pos *target*
+46080 pos *target*
+46100 log CP 52 robocave-bottom
+46100 continue robocave-bottom
+46101 wait *target* target-continue
+46340 pos *target*
+46341 ly=0
+46430 ly=0 x
+46436 ly=0
+46460 square
+46466 -
+46640 pos *target*
+46980 pos *target*
+47000 log CP 53 lavatube-start
+47000 continue lavatube-start
+47001 wait *target* target-continue
+47240 pos *target*
+47241 ly=0
+47330 ly=0 x
+47336 ly=0
+47360 square
+47366 -
+47540 pos *target*
+47880 pos *target*
+47900 log CP 54 lavatube-middle
+47900 continue lavatube-middle
+47901 wait *target* target-continue
+48140 pos *target*
+48141 ly=0
+48230 ly=0 x
+48236 ly=0
+48260 square
+48266 -
+48440 pos *target*
+48780 pos *target*
+48800 log CP 55 lavatube-after-ribbon
+48800 continue lavatube-after-ribbon
+48801 wait *target* target-continue
+49040 pos *target*
+49041 ly=0
+49130 ly=0 x
+49136 ly=0
+49160 square
+49166 -
+49340 pos *target*
+49680 pos *target*
+49700 log CP 56 lavatube-end
+49700 continue lavatube-end
+49701 wait *target* target-continue
+49940 pos *target*
+49941 ly=0
+50030 ly=0 x
+50036 ly=0
+50060 square
+50066 -
+50240 pos *target*
+50580 pos *target*
+50600 log CP 57 citadel-start
+50600 continue citadel-start
+50601 wait *target* target-continue
+50840 pos *target*
+50841 ly=0
+50930 ly=0 x
+50936 ly=0
+50960 square
+50966 -
+51140 pos *target*
+51480 pos *target*
+51500 log CP 58 citadel-entrance
+51500 continue citadel-entrance
+51501 wait *target* target-continue
+51740 pos *target*
+51741 ly=0
+51830 ly=0 x
+51836 ly=0
+51860 square
+51866 -
+52040 pos *target*
+52380 pos *target*
+52400 log CP 59 citadel-warp
+52400 continue citadel-warp
+52401 wait *target* target-continue
+52640 pos *target*
+52641 ly=0
+52730 ly=0 x
+52736 ly=0
+52760 square
+52766 -
+52940 pos *target*
+53280 pos *target*
+53300 log CP 60 citadel-launch-start
+53300 continue citadel-launch-start
+53301 wait *target* target-continue
+53540 pos *target*
+53541 ly=0
+53630 ly=0 x
+53636 ly=0
+53660 square
+53666 -
+53840 pos *target*
+54180 pos *target*
+54200 log CP 61 citadel-launch-end
+54200 continue citadel-launch-end
+54201 wait *target* target-continue
+54440 pos *target*
+54441 ly=0
+54530 ly=0 x
+54536 ly=0
+54560 square
+54566 -
+54740 pos *target*
+55080 pos *target*
+55100 log CP 62 citadel-plat-start
+55100 continue citadel-plat-start
+55101 wait *target* target-continue
+55340 pos *target*
+55341 ly=0
+55430 ly=0 x
+55436 ly=0
+55460 square
+55466 -
+55640 pos *target*
+55980 pos *target*
+56000 log CP 63 citadel-plat-end
+56000 continue citadel-plat-end
+56001 wait *target* target-continue
+56240 pos *target*
+56241 ly=0
+56330 ly=0 x
+56336 ly=0
+56360 square
+56366 -
+56540 pos *target*
+56880 pos *target*
+56900 log CP 64 citadel-generator-start
+56900 continue citadel-generator-start
+56901 wait *target* target-continue
+57140 pos *target*
+57141 ly=0
+57230 ly=0 x
+57236 ly=0
+57260 square
+57266 -
+57440 pos *target*
+57780 pos *target*
+57800 log CP 65 citadel-generator-end
+57800 continue citadel-generator-end
+57801 wait *target* target-continue
+58040 pos *target*
+58041 ly=0
+58130 ly=0 x
+58136 ly=0
+58160 square
+58166 -
+58340 pos *target*
+58680 pos *target*
+58700 log CP 66 citadel-elevator
+58700 continue citadel-elevator
+58701 wait *target* target-continue
+58940 pos *target*
+58941 ly=0
+59030 ly=0 x
+59036 ly=0
+59060 square
+59066 -
+59240 pos *target*
+59580 pos *target*
+59600 log CP 67 finalboss-start
+59600 continue finalboss-start
+59601 wait *target* target-continue
+59840 pos *target*
+59841 ly=0
+59930 ly=0 x
+59936 ly=0
+59960 square
+59966 -
+60140 pos *target*
+60480 pos *target*
+60500 log CP 68 finalboss-fight
+60500 continue finalboss-fight
+60501 wait *target* target-continue
+60740 pos *target*
+60741 ly=0
+60830 ly=0 x
+60836 ly=0
+60860 square
+60866 -
+61040 pos *target*
+61380 pos *target*
+61400 log SWEEP DONE
+61401 exit

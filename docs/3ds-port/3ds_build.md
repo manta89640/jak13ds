@@ -195,13 +195,13 @@ A `.3dsx` runs inside another title's memory:
   when there were more. `perf:` has `wait` (the game waiting for the render thread in `sync-path`)
   after `idle`; `logic` no longer includes it.
 - Old 3DS / Old 2DS: not enough memory (64 MB); the game says so and exits.
-- All settings are in one file, `sdmc:/3ds/jak1/config.ini` (`config_ini.md`): renderer
-  settings, `args` (game arguments, default `-boot -cbackend`), `listener` (Wi-Fi REPL),
-  `screenshots` (N: save the top screen every N frames to `data/log`), `pad_script` (scripted
-  input, see below), `io_on_system_core` (experimental: IOP / IO threads on core 1; hangs at boot
-  in Azahar, untested on hardware), `perf_sections` (per-section frame timing in the log),
-  `sound` / `sound_core` (audio output through the DSP, see "Sound" below). `stage_sd.sh` options
-  set these keys.
+- All settings are in one file, `sdmc:/3ds/jak1/config.ini`: the 8 user keys (`config_ini.md`:
+  `preset`, `sound`, `fog`, `draw_distance`, `shadows`, `particles`, `text_size`, `ocean`) that
+  `stage_sd.sh` writes, and the testing keys (`config_dev.md`): `args` (game arguments, default
+  `-boot -cbackend`), `listener` (Wi-Fi REPL), `screenshots` (N: save the top screen every N
+  frames to `data/log`), `pad_script` (scripted input, see below), `perf_sections` (per-section
+  frame timing in the log), `sound_core` (see "Sound" below), renderer switches. `stage_sd.sh`
+  options set these keys.
 
 ### Automated gameplay test (scripted input)
 
@@ -227,6 +227,19 @@ JOINT` (logs that joint, the process's rider count and Jak), `crash` (tests the 
 - `platform/3ds/tests/minecart.pad`: Jak on a Volcanic Crater minecart (`village3-warp`), logging
   the cart, its rider count and Jak for a lap of the rail: riding works when Jak stays ~1.2 m above
   the cart's joint with `riders 1`.
+- (AI-assisted) Playthrough tests (host small-memory C-mode gk, `--config-path` to a scratch dir so
+  the saves stay out of the user's OpenGOAL folder; `call` / `pstate` in the header):
+  `playthrough_sweep.pad` (every checkpoint on a new game), `playthrough_late.pad` (every checkpoint
+  with all tasks closed and 100 cells), `klaww.pad`, `ending.pad` (the robot's last phase, the sage
+  movies, credits, 100-cell ending, back to the title), `saveload.pad`, `long_session.pad` (88 level
+  loads). Oct 16 results: all pass on the host, also with the modules built with
+  `-DGOALC_STACK_POISON`.
+  - Host `-nosound` used to freeze every spooled cutscene (the IOP's real stream clock follows a
+    voice that never plays without a sound player); `snd_HasOutput()` is now false there, so the
+    fake clock runs as on a 3DS without audio output. Without `-nosound`, `OPENGOAL_NO_SOUND=1`
+    alone also keeps a host run silent (the sound engine runs, the output is zeroed).
+  - A `continue` while Jak dies or while the intro sequence (`village1-warp`, `village1-hut` on a
+    new game) plays is not a real-play situation and can leave Jak in `target-continue`.
 
 ```sh
 platform/3ds/tools/run_emu.sh --seconds 900 --out build-3ds/emu-game \
@@ -250,8 +263,8 @@ Measured in Azahar with the gameplay script:
 - Everything but the renderer on core 0 (default): title 50+ fps, gameplay 12-15 fps.
 - IOP / listener / EE worker on core 2 (with the render thread): 1.4 fps (695 ms of logic per
   frame, the EE waits for the IOP). Not used.
-- IOP on core 1 (`APT_SetAppCpuTimeLimit(80)`, `config.ini` `io_on_system_core = on`): boot hangs at the first
-  IOP file load. Off by default.
+- IOP on core 1 (`APT_SetAppCpuTimeLimit(80)`, the former `config.ini` `io_on_system_core = on`,
+  removed Oct 16): boot hung at the first IOP file load.
 
 ### Controls
 
@@ -311,15 +324,15 @@ Face buttons by position, like the PS2 pad:
   `sdl_util`. The kernel only reaches them through `Display::GetMainDisplay()`, which is always
   null on the 3DS.
 - **Sound:** `snd::Player` without cubeb. The whole stack (overlord, RPCs, bank loading, 989snd
-  handlers, VAG streaming) runs as on PC. Audio output is opt-in with `sound = on` in
-  `config.ini` (`platform/3ds/port/ctr_port.c`, `ctr_audio_*`): the 989snd software
+  handlers, VAG streaming) runs as on PC. Audio output is on by default (`sound = on` in
+  `config.ini`; opt-in before Oct 16) (`platform/3ds/port/ctr_port.c`, `ctr_audio_*`): the 989snd software
   mixer (48 kHz stereo, PS2 SPU emulation, unchanged) runs on its own thread at `CTR_PRIO_SOUND`
-  on the core `sound_core` names (default 0 on New 3DS, else 1; core 1 is the system core: the
+  on the core `sound_core` names (default 2 on New 3DS, else 1; core 1 is the system core: the
   app gets 80% of it with `APT_SetAppCpuTimeLimit` and may create one thread there),
   filling 3 buffers of 1024 frames (21 ms each) that one ndsp channel plays; the DSP resamples
   to its 32.7 kHz. It needs the DSP firmware `sdmc:/3ds/dspfirm.cdc` (real hardware: dump it
   once with the DSP1 homebrew; Azahar's HLE audio accepts any file, the scripts create a
-  placeholder). Without `sound = on`, or if the DSP can't start, a thread advances the 240 Hz
+  placeholder). With `sound = off`, or if the DSP can't start, a thread advances the 240 Hz
   handler tick without synthesizing samples, voices are dropped as they start
   (`vagvoice.cpp`), and the VAG stream position for spooled cutscenes comes from the frame
   counter (`iso.cpp`, fake VAG clock) instead of the stream voice, which never moves then.
@@ -504,7 +517,9 @@ PC it runs with `gk --ctr-gfx`.
     (`platform/3ds/shaders`).
   - `game/graphics/ctr/ctr_gpu_soft.cpp`: a software rasterizer for PC. It writes PNG frames
     (`gk --ctr-gfx --ctr-dump DIR --ctr-dump-every N`), which lets the renderer be tested without
-    an emulator.
+    an emulator. (AI-assisted, far-fog, Oct 17) It draws the fog as the 3DS does (level meshes and
+    the ocean: the game fog and the draw distance / vista haze; merc with merc_fog; the PS2 ocean's
+    vertex fog); before, host frames had no fog at all. `CTR_SOFT_NO_FOG=1`: none, as before.
 - **Text, menus, debug draws** (buckets `debug`, `debug-no-zbuf`, `subtitle`): `CtrDirect`
   interprets the GIF packets, like `DirectRenderer`.
   - Textures come from `CtrVram`, an emulation of the 4 MB GS VRAM.

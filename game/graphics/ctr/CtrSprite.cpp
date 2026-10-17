@@ -15,6 +15,7 @@
 #include "common/util/FileUtil.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
+#include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
 
@@ -79,14 +80,15 @@ s32 as_int(float f) {
   return r;
 }
 
-// (AI-assisted) all ten words of two sprites' AdGif data equal (newlib's memcmp took ~11
-// instructions per word, for every sprite)
+// (AI-assisted) The AdGif words resolve_state makes the state from (TEX0, TEX1, CLAMP_1 or the
+// ZBUF_1 written in its place, ALPHA_1) equal: the same state. The other five (MIPTBP1 and the
+// register numbers of the others) never change it: a state made again for them came out the same
+// (with the same clamp mode, also kept), so sprites that differ only there share it now. (All ten
+// words were compared; newlib's memcmp before that took ~11 instructions per word.)
 template <typename AdGif>
-bool same_adgif(const AdGif& a, const AdGif& b) {
-  return ((a.tex0_data ^ b.tex0_data) | (a.tex0_addr ^ b.tex0_addr) | (a.tex1_data ^ b.tex1_data) |
-          (a.tex1_addr ^ b.tex1_addr) | (a.mip_data ^ b.mip_data) | (a.mip_addr ^ b.mip_addr) |
-          (a.clamp_data ^ b.clamp_data) | (a.clamp_addr ^ b.clamp_addr) |
-          (a.alpha_data ^ b.alpha_data) | (a.alpha_addr ^ b.alpha_addr)) == 0;
+bool same_state_words(const AdGif& a, const AdGif& b) {
+  return ((a.tex0_data ^ b.tex0_data) | (a.tex1_data ^ b.tex1_data) | (a.clamp_data ^ b.clamp_data) |
+          (a.clamp_addr ^ b.clamp_addr) | (a.alpha_data ^ b.alpha_data)) == 0;
 }
 
 u8 color_byte(float f) {
@@ -137,7 +139,69 @@ CtrSpriteRenderer::CtrSpriteRenderer(std::string name, int id, CtrVram* vram)
 
 CtrSpriteRenderer::~CtrSpriteRenderer() = default;
 
+void CtrSpriteRenderer::snapshot(DmaFollower& dma, CtrRenderState& rs) {
+  m_snap_refs.clear();
+  m_snap_quads = 0;
+  m_snap_cursor = 0;
+  while (dma.current_tag_offset() != rs.next_bucket) {
+    const DmaTag::Kind kind = dma.current_tag().kind;
+    const DmaTransfer t = dma.read_and_advance();
+    if ((kind != DmaTag::Kind::REF && kind != DmaTag::Kind::REFS) || !t.data || !t.size_bytes) {
+      continue;  // CNT / NEXT data lives in the DMA buffer, which the game double buffers
+    }
+    const size_t q = (t.size_bytes + 15) / 16;
+    if (m_snap_quads + q > m_snap_cap) {
+      // grows without zeroing (once warmed up: never)
+      const size_t cap = std::max<size_t>(2 * m_snap_cap, m_snap_quads + q + 1024);
+      std::unique_ptr<Quad[]> bigger(new Quad[cap]);
+      if (m_snap_quads) {
+        memcpy(bigger.get(), m_snap_data.get(), m_snap_quads * sizeof(Quad));
+      }
+      m_snap_data = std::move(bigger);
+      m_snap_cap = cap;
+    }
+    memcpy(m_snap_data.get() + m_snap_quads, t.data, t.size_bytes);
+    m_snap_refs.push_back({t.data, t.size_bytes, (u32)m_snap_quads});
+    m_snap_quads += q;
+  }
+  m_snap_valid = true;
+}
+
+const u8* CtrSpriteRenderer::snap_data(const u8* src, u32 bytes) {
+  if (!m_snap_valid) {
+    return src;
+  }
+  // the render reads the transfers in the chain's order: the next one from the cursor on
+  for (size_t i = m_snap_cursor; i < m_snap_refs.size(); i++) {
+    const SnapRef& r = m_snap_refs[i];
+    if (r.src == src && r.bytes == bytes) {
+      m_snap_cursor = i + 1;
+      const u8* copy = m_snap_data[r.at].b;
+      if (!m_snap_logged) {
+        m_snap_logged = true;
+        lg::info("[ctr] sprite snapshot: in use ({} transfers, {} KB this frame)",
+                 m_snap_refs.size(), m_snap_quads * 16 / 1024);
+      }
+#ifndef __3DS__
+      // host (synchronous: game memory doesn't change under the render): the same bytes
+      if (memcmp(copy, src, bytes)) {
+        m_snap_mismatch++;
+      }
+#endif
+      return copy;
+    }
+  }
+  m_snap_misses++;
+  return src;
+}
+
 void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
+  // (AI-assisted) the snapshot is this frame's: used up by this render, however it ends
+  struct SnapDone {
+    bool& valid;
+    ~SnapDone() { valid = false; }
+  } snap_done{m_snap_valid};
+  m_snap_cursor = 0;
   auto skip_rest = [&]() {
     while (dma.current_tag_offset() != rs.next_bucket) {
       dma.read_and_advance();
@@ -194,6 +258,16 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
               m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
               m_stats.distort, m_stats.distort_small, m_stats.faint, m_stats.draws);
     m_stats = Stats();
+    // (AI-assisted) the sprite arrays' snapshot (game thread): its size in the last frame, and
+    // chunks that found none (read in place) or (host) whose copy differs from game memory
+    lg::debug("[ctr] sprite snapshot: {} transfers, {} KB in the last frame", m_snap_refs.size(),
+              m_snap_quads * 16 / 1024);
+    if (m_snap_misses || m_snap_mismatch) {
+      lg::warn("[ctr] sprite snapshot: {} transfers read in place, {} copies differ (since the "
+               "last stats)",
+               m_snap_misses, m_snap_mismatch);
+      m_snap_misses = m_snap_mismatch = 0;
+    }
   }
 }
 
@@ -206,7 +280,11 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   m_last_tex = -1;  // textures may have changed since the last frame
   m_last_tex_valid = false;
   m_have_last_ad = false;
-  m_world_left = ctr_settings().sprites ? ctr_settings().max_sprites : 0;
+  // (AI-assisted) the settings looked up once per frame (each ctr_settings() call is a function
+  // call with a memory barrier for its static's guard)
+  const CtrSettings& cs = ctr_settings();
+  m_alpha_discard = cs.sprite_alpha_discard;
+  m_world_left = cs.sprites ? cs.max_sprites : 0;
   // direct GS data sent before the sprites
   m_direct->reset_state();
   while (dma.current_tag().qwc != 7 && dma.current_tag_offset() != rs.next_bucket) {
@@ -221,7 +299,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   }
 
   // the distorter first (like Sprite3::render_jak1): it reads the screen as drawn so far
-  if (read_distorter(dma, rs) && ctr_settings().sprites && ctr_settings().distort) {
+  if (read_distorter(dma, rs) && cs.sprites && cs.distort) {
     const double td = ctr_gpu_time_ms();
 #ifndef __3DS__
     ctr_gpu_soft_bucket("sprite-distort");
@@ -262,8 +340,8 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     }
     m_corner_reach = b * xy;
   }
-  m_size_cap = ctr_settings().sprite_max_size * 224.f;
-  m_min_alpha_big = (float)ctr_settings().sprite_min_alpha;
+  m_size_cap = cs.sprite_max_size * 224.f;
+  m_min_alpha_big = (float)cs.sprite_min_alpha;
   for (int k = 0; k < 4; k++) {
     for (int p = 0; p < 2; p++) {
       const float st_mul = p ? 2.f : 1.f, st_add = p ? -1.f : 0.f;
@@ -320,7 +398,8 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
 #ifndef __3DS__
   ctr_gpu_soft_bucket("sprite-hud");
 #endif
-  flush();
+  ctr_gpu_phase(CTR_PH_HUD);  // (AI-assisted, gpu-rt) gpu_breakdown
+  flush(true);
   skip_rest();
 }
 
@@ -495,10 +574,11 @@ bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
   u32 h[4];
   memcpy(h, header.data, 16);
   *count = std::min<u32>(h[0], kSpritesPerChunk);
+  // (AI-assisted) from the snapshot of the sprite arrays when there is one (see snapshot)
   auto vec = dma.read_and_advance();
-  memcpy(m_vec, vec.data, std::min<size_t>(vec.size_bytes, sizeof(m_vec)));
+  m_vec = (const VecData*)snap_data(vec.data, vec.size_bytes);
   auto adgif = dma.read_and_advance();
-  memcpy(m_adgif, adgif.data, std::min<size_t>(adgif.size_bytes, sizeof(m_adgif)));
+  m_adgif = (const AdGif*)snap_data(adgif.data, adgif.size_bytes);
   auto run = dma.read_and_advance();
   if (run.vifcode1().kind != VifCode::Kind::MSCAL) {
     return false;
@@ -508,13 +588,16 @@ bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
          adgif.size_bytes >= *count * sizeof(AdGif);
 }
 
+static_assert(sizeof(ctr_draw_state) == 16);  // (AI-assisted) bucket_for's compare
+
 CtrSpriteRenderer::Bucket& CtrSpriteRenderer::bucket_for(const ctr_draw_state& st) {
-  if (m_last_bucket < m_bucket_count &&
-      !memcmp(&m_buckets[m_last_bucket].state, &st, sizeof(st))) {
+  // (AI-assisted) the 16 bytes compared as four words (CtrMicro.h), not with a memcmp call per
+  // bucket
+  if (m_last_bucket < m_bucket_count && ctr_micro::same16(&m_buckets[m_last_bucket].state, &st)) {
     return m_buckets[m_last_bucket];
   }
   for (size_t i = 0; i < m_bucket_count; i++) {
-    if (!memcmp(&m_buckets[i].state, &st, sizeof(st))) {
+    if (ctr_micro::same16(&m_buckets[i].state, &st)) {
       m_last_bucket = i;
       return m_buckets[i];
     }
@@ -530,13 +613,24 @@ CtrSpriteRenderer::Bucket& CtrSpriteRenderer::bucket_for(const ctr_draw_state& s
   return b;
 }
 
-void CtrSpriteRenderer::flush() {
+void CtrSpriteRenderer::flush(bool hud) {
   for (size_t i = 0; i < m_bucket_count; i++) {
     auto& b = m_buckets[i];
     if (!b.verts.empty()) {
       // 4 vertices per sprite (ctr_gpu_draw_quads makes the two triangles)
       ctr_gpu_draw_quads(&b.state, b.verts.data(), (int)(b.verts.size() / 4));
       m_stats.draws++;
+      // (AI-assisted) GS alpha fail FB_ONLY: a fragment under the alpha reference still draws,
+      // only without its depth write. Sprite3 draws HUD buckets a second time for those
+      // (AFAIL_NO_DEPTH_WRITE); without it the faint parts of HUD particles were dropped: the
+      // progress menu's power cells of tasks not yet found (alpha 42) didn't show at all
+      if (hud && b.state.zwrite && b.state.atest == CTR_TEST_GEQUAL) {
+        ctr_draw_state faint = b.state;
+        faint.atest = CTR_TEST_LESS;
+        faint.zwrite = 0;
+        ctr_gpu_draw_quads_again(&faint);  // (AI-assisted) the same vertices, not copied again
+        m_stats.draws++;
+      }
     }
     if (!b.clip.empty()) {
       ctr_gpu_draw_clip(&b.state, b.clip.data(), (int)b.clip.size());
@@ -550,7 +644,108 @@ void CtrSpriteRenderer::flush() {
   m_have_last_ad = false;  // m_last_bucket_ptr pointed into a bucket
 }
 
+void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
+  if (!m_have_last_ad || !same_state_words(ad, m_last_ad)) {
+    m_last_ad = ad;
+    m_have_last_ad = true;
+    ctr_draw_state& st = m_last_state;
+    memset(&st, 0, sizeof(st));
+    GsTex0 tex0(ad.tex0_data);
+    if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
+      const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
+      m_last_tex0 = ad.tex0_data;
+      m_last_tex = tex ? tex->handle : -1;
+      m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
+    }
+    st.tex = m_last_tex;
+    st.tcc = tex0.tcc();
+#ifndef __3DS__
+    {
+      // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
+      static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
+      static std::vector<u64> dumped;
+      if (dump_dir && dumped.size() < 200 &&
+          std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
+        dumped.push_back(ad.tex0_data);
+        std::vector<u32> rgba;
+        int w = 0, h = 0;
+        if (m_vram->decode_for_cpu(ad.tex0_data, &rgba, &w, &h) && w > 0 && h > 0) {
+          u32 amin = 255, amax = 0;
+          for (u32 c : rgba) {
+            amin = std::min(amin, c >> 24);
+            amax = std::max(amax, c >> 24);
+          }
+          lg::info("[sprite dump {}] handle {} tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
+                   dumped.size(), st.tex, ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
+                   ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
+          try {
+            file_util::write_rgba_png(
+                fs::path(dump_dir) / fmt::format("sprite_{:02d}.png", dumped.size()),
+                rgba.data(), w, h);
+          } catch (std::exception&) {
+          }
+        }
+      }
+    }
+#endif
+    st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
+    bool zwrite = false;
+    if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
+      zwrite = !GsZbuf(ad.clamp_data).zmsk();
+    } else {
+      m_clamp_s = (ad.clamp_data & 0b001) != 0;
+      m_clamp_t = (ad.clamp_data & 0b100) != 0;
+    }
+    // (AI-assisted) a sprite whose adgif sets ZBUF_1 instead of CLAMP_1 keeps the clamp mode
+    // in effect, as Sprite3::do_block_common's m_current_mode: clamped at the start of each
+    // chunk (its default mode). Repeat there let the bilinear filter blend in the texture's
+    // opposite edge: a 1 pixel dark line along the inner edges of the progress menu's side
+    // panels while they zoom in and out (texels several pixels wide).
+    st.clamp_s = m_clamp_s;
+    st.clamp_t = m_clamp_t;
+    st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
+    st.fix = GsAlpha(ad.alpha_data).fix();
+    // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with
+    // FB_ONLY (only matters for depth writes)
+    st.ztest = CTR_TEST_GEQUAL;
+    st.zwrite = zwrite;
+    st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
+    st.aref = 38;
+    // (AI-assisted) config sprite_alpha_discard: fragments with alpha 0 skip the blending (no
+    // framebuffer read and write) where alpha 0 adds nothing: Cs * As (+ or -) Cd. Not for the
+    // blend modes that use a fixed factor or the destination's alpha.
+    if (!zwrite && mode != MODE_HUD && m_alpha_discard &&
+        (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
+         st.blend == CTR_BLEND_SUB)) {
+      st.atest = CTR_TEST_GREATER;
+      st.aref = 0;
+    }
+    // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
+    // its texture coordinates then go from -1 to 1 (see m_proc below)
+    if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {
+      st.flags |= CTR_STATE_PROCTEX;
+    }
+    m_last_bucket_ptr = &bucket_for(st);
+  }
+}
+
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
+  // (AI-assisted) one loop per mode: the mode's tests and paths decided at compile time
+  switch (mode) {
+    case MODE_2D:
+      draw_chunk_mode<MODE_2D>(count);
+      break;
+    case MODE_HUD:
+      draw_chunk_mode<MODE_HUD>(count);
+      break;
+    case MODE_3D:
+      draw_chunk_mode<MODE_3D>(count);
+      break;
+  }
+}
+
+template <CtrSpriteRenderer::Mode mode>
+void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
   constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
   // (AI-assisted) MODE_3D: a corner's GS position is t * (pfog0 / w) + hvdf, and its clip space
   // position that times w, so the division cancels: c = t * k + w * o (see the corner loop)
@@ -558,6 +753,13 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
   const float k3y = -m_pfog0 * (1.f / 112.f), o3y = (2048.f - m_hvdf_offset.y()) * (1.f / 112.f);
   const float k3z = m_pfog0 * (1.f / 8388607.5f),
               o3z = m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
+  // (AI-assisted) the frame's values in locals: the vertex stores could be to any float as far as
+  // the compiler knows, which made it load the matrix and these again for every sprite
+  float m[16];
+  memcpy(m, mode == MODE_HUD ? m_hud_matrix : m_camera, sizeof(m));
+  const float pfog0 = m_pfog0, inv_area = m_inv_area, min_alpha_big = m_min_alpha_big;
+  const float corner_reach = m_corner_reach, min_scale = m_min_scale, max_scale = m_max_scale;
+  const float size_cap = m_size_cap, deg_to_rad = m_deg_to_rad;
   // (AI-assisted) each chunk starts clamped (Sprite3: m_current_mode = m_default_mode, whose
   // clamp bits are set); the cached state of the last adgif holds the clamp mode it was made with
   if (!m_clamp_s || !m_clamp_t) {
@@ -573,21 +775,33 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     }
     const VecData& v = m_vec[i];
     const AdGif& ad = m_adgif[i];
+    // (AI-assisted) HUD sprites: the draw state, so the order of the buckets, before a sprite can
+    // be left out, as Sprite3 (which buckets every HUD sprite, off screen or not). The buckets are
+    // drawn in the order of their first sprite: when the first power cell of a progress menu page
+    // was a task not done yet (its orbiting sparkles and its glow parked off screen), its core
+    // came first and every cell's additive glow was drawn after the cores. Their depths are 2e-6
+    // apart (GS: 33 units), the same value in the GPU's 24-bit floats on hardware, so the glow
+    // passed the depth test over the cores: cores behind a glow too bright. In the game's order
+    // (sparkles, glow, core) the core is drawn last and its depth is never below the glow's.
+    if (mode == MODE_HUD) {
+      resolve_state(ad, mode);
+    }
 
     // sprite3_3d.vert
-    const math::Vector4f pos(v.xyz_sx.x(), v.xyz_sx.y(), v.xyz_sx.z(), 1.f);
+    const float px = v.xyz_sx.x(), py = v.xyz_sx.y(), pz = v.xyz_sx.z();
     const float sx = v.xyz_sx.w();
     const float sy = v.flag_rot_sy.w();
     const s32 flag = as_int(v.flag_rot_sy.x());
     const s32 matrix = as_int(v.flag_rot_sy.y());
-    math::Vector4f tp = transform(mode == MODE_HUD ? m_hud_matrix : m_camera, pos);
-    if (tp.w() == 0) {
+    // transform(): m[12 + i] + m[i] * x + m[4 + i] * y + m[8 + i] * z, the four lanes apart
+    const float tw = m[15] + m[3] * px + m[7] * py + m[11] * pz;
+    if (tw == 0) {
       continue;
     }
-    float Q = m_pfog0 / tp.w();
+    float Q = pfog0 / tw;
     float scale_y = sy * Q;
     float scale_x = sx * Q;
-    float alpha_scale = std::min(scale_x * scale_y * m_inv_area, 1.f);
+    float alpha_scale = std::min(scale_x * scale_y * inv_area, 1.f);
     // (AI-assisted) a world sprite that ends up (nearly) transparent is skipped before any corner
     // math: the game fades sprites out as they get small on screen, so these are mostly sub-pixel
     // particles, and each one still cost a quad of blending on the 3DS GPU
@@ -599,8 +813,8 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       // (AI-assisted) config sprite_min_alpha: a faint sprite with a half size over kBigHalfGs
       // (~20 pixels) is skipped below that alpha too (128 = opaque): mist and smoke layers that
       // add a few color steps each but blend a big area
-      if (a < m_min_alpha_big &&
-          std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach > kBigHalfGs) {
+      if (a < min_alpha_big &&
+          std::max(std::abs(scale_x), std::abs(scale_y)) * corner_reach > kBigHalfGs) {
         m_stats.faint++;
         continue;
       }
@@ -629,12 +843,15 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       int out_left = 0, out_right = 0, out_bottom = 0, out_top = 0, behind = 0;
       for (int k = 0; k < 4; k++) {
         const auto& off = m_xyz_array[k];
-        math::Vector4f p = pos;
+        float p[3] = {px, py, pz};
         for (int r = 0; r < 3; r++) {
           p[r] += rot[0][r] * off.x() * sx + rot[1][r] * off.y() + rot[2][r] * off.z() * sy;
         }
-        math::Vector4f t = transform(m_camera, p) * -1.f;
-        const float w = t.w();
+        // transform(m_camera, p) * -1.f
+        const float tx = (m[12] + m[0] * p[0] + m[4] * p[1] + m[8] * p[2]) * -1.f;
+        const float ty = (m[13] + m[1] * p[0] + m[5] * p[1] + m[9] * p[2]) * -1.f;
+        const float tz = (m[14] + m[2] * p[0] + m[6] * p[1] + m[10] * p[2]) * -1.f;
+        const float w = (m[15] + m[3] * p[0] + m[7] * p[1] + m[11] * p[2]) * -1.f;
         if (w == 0) {
           ok = false;
           break;
@@ -642,9 +859,9 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
         // GS x = t.x * pfog0 / w + hvdf.x; clip x = (GS x - 2048) / 256 * w (y, z alike): no
         // divide per corner (AI-assisted)
         auto& c = clip[k];
-        c.x = t.x() * k3x + w * o3x;
-        c.y = t.y() * k3y + w * o3y;
-        c.z = t.z() * k3z + w * o3z;
+        c.x = tx * k3x + w * o3x;
+        c.y = ty * k3y + w * o3y;
+        c.z = tz * k3z + w * o3z;
         c.w = w;
         out_left += c.x < -c.w;
         out_right += c.x > c.w;
@@ -659,25 +876,25 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       }
       m_stats.sprites_3d++;
     } else {
-      math::Vector4f base = tp;
-      for (int r = 0; r < 3; r++) {
-        base[r] *= Q;
-      }
+      const float tx = m[12] + m[0] * px + m[4] * py + m[8] * pz;
+      const float ty = m[13] + m[1] * px + m[5] * py + m[9] * pz;
+      const float tz = m[14] + m[2] * px + m[6] * py + m[10] * pz;
       const math::Vector4f& hvdf =
           mode == MODE_HUD ? m_hud_hvdf[(matrix >= 0 && matrix < 76) ? matrix : 0] : m_hvdf_offset;
-      base += hvdf;
+      const float base_x = tx * Q + hvdf.x(), base_y = ty * Q + hvdf.y(),
+                  base_z = tz * Q + hvdf.z();
       if (mode == MODE_HUD) {
-        scale_y = std::max(scale_y, m_min_scale);
-        scale_x = std::max(scale_x, m_min_scale);
+        scale_y = std::max(scale_y, min_scale);
+        scale_x = std::max(scale_x, min_scale);
         m_stats.sprites_hud++;
       } else {
-        scale_y = std::clamp(scale_y, m_min_scale, m_max_scale);
-        scale_x = std::clamp(scale_x, m_min_scale, m_max_scale);
+        scale_y = std::clamp(scale_y, min_scale, max_scale);
+        scale_x = std::clamp(scale_x, min_scale, max_scale);
         // (AI-assisted) config.ini sprite_max_size: a particle or glow close to the camera covers
         // a big part of the screen, and every covered pixel is blended (the 3DS GPU's fill rate):
         // at most that fraction of the screen height (448 GS units) across
-        const float cap = m_size_cap;
-        const float half = std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach;
+        const float cap = size_cap;
+        const float half = std::max(std::abs(scale_x), std::abs(scale_y)) * corner_reach;
         if (cap > 0.f && half > cap) {
           const float k = cap / half;
           scale_x *= k;
@@ -688,13 +905,13 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       }
       if (mode == MODE_2D) {
         // quick reject: center further off screen than the sprite can reach
-        const float reach = (std::abs(scale_x) + std::abs(scale_y)) * m_corner_reach;
-        if (base.x() + reach < 1792.f || base.x() - reach > 2304.f ||
-            base.y() + reach < 1824.f || base.y() - reach > 2272.f) {
+        const float reach = (std::abs(scale_x) + std::abs(scale_y)) * corner_reach;
+        if (base_x + reach < 1792.f || base_x - reach > 2304.f || base_y + reach < 1824.f ||
+            base_y - reach > 2272.f) {
           continue;
         }
       }
-      const float angle = v.flag_rot_sy.z() * m_deg_to_rad;
+      const float angle = v.flag_rot_sy.z() * deg_to_rad;
       float s = 0.f, c = 1.f;
       if (angle != 0.f) {
         fast_sincos(angle, &s, &c);
@@ -707,8 +924,8 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
       const float bx = (m_basis_x[0] * s + m_basis_y[0] * c) * scale_y * kInvX;
       const float by = (m_basis_x[1] * s + m_basis_y[1] * c) * scale_y * -kInvY;
       const float bz = (m_basis_x[2] * s + m_basis_y[2] * c) * scale_y * kInvZ;
-      const float cx = (base.x() - 2048.f) * kInvX, cy = (2048.f - base.y()) * kInvY,
-                  cz = base.z() * kInvZ;
+      const float cx = (base_x - 2048.f) * kInvX, cy = (2048.f - base_y) * kInvY,
+                  cz = base_z * kInvZ;
       for (int k = 0; k < 4; k++) {
         const auto& xy = m_xy_array[(k + (flag & 15)) & 7];
         corners[k][0] = cx + ax * xy.x() + bx * xy.y();
@@ -733,88 +950,8 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
     }
     // Resolve GS state only for sprites that survived the screen bounds test.
     // Texture lookup can decode/upload a texture, and offscreen sprites never use it.
-    if (!m_have_last_ad || !same_adgif(ad, m_last_ad)) {
-      m_last_ad = ad;
-      m_have_last_ad = true;
-      ctr_draw_state& st = m_last_state;
-      memset(&st, 0, sizeof(st));
-      GsTex0 tex0(ad.tex0_data);
-      if (ad.tex0_data != m_last_tex0 || !m_last_tex_valid) {
-        const CtrTexture* tex = m_vram->get_texture(ad.tex0_data);
-        m_last_tex0 = ad.tex0_data;
-        m_last_tex = tex ? tex->handle : -1;
-        m_last_tex_valid = true;  // also for unsupported formats: don't retry every sprite
-      }
-      st.tex = m_last_tex;
-      st.tcc = tex0.tcc();
-#ifndef __3DS__
-      {
-        // debugging on PC: OPENGOAL_SPRITE_DUMP=<dir> writes the first sprite textures
-        static const char* dump_dir = getenv("OPENGOAL_SPRITE_DUMP");
-        static std::vector<u64> dumped;
-        if (dump_dir && dumped.size() < 200 &&
-            std::find(dumped.begin(), dumped.end(), ad.tex0_data) == dumped.end()) {
-          dumped.push_back(ad.tex0_data);
-          std::vector<u32> rgba;
-          int w = 0, h = 0;
-          if (m_vram->decode_for_cpu(ad.tex0_data, &rgba, &w, &h) && w > 0 && h > 0) {
-            u32 amin = 255, amax = 0;
-            for (u32 c : rgba) {
-              amin = std::min(amin, c >> 24);
-              amax = std::max(amax, c >> 24);
-            }
-            lg::info("[sprite dump {}] handle {} tex0 {:x} {}x{} psm {} tcc {} alpha {:x} blend {} alpha {}..{}",
-                     dumped.size(), st.tex, ad.tex0_data, w, h, (int)tex0.psm(), tex0.tcc(),
-                     ad.alpha_data, (int)ctr_blend_from_gs_alpha(ad.alpha_data), amin, amax);
-            try {
-              file_util::write_rgba_png(
-                  fs::path(dump_dir) / fmt::format("sprite_{:02d}.png", dumped.size()),
-                  rgba.data(), w, h);
-            } catch (std::exception&) {
-            }
-          }
-        }
-      }
-#endif
-      st.filter = (ad.tex1_data >> 5) & 1;  // MMAG
-      bool zwrite = false;
-      if ((u8)ad.clamp_addr == (u8)GsRegisterAddress::ZBUF_1) {
-        zwrite = !GsZbuf(ad.clamp_data).zmsk();
-      } else {
-        m_clamp_s = (ad.clamp_data & 0b001) != 0;
-        m_clamp_t = (ad.clamp_data & 0b100) != 0;
-      }
-      // (AI-assisted) a sprite whose adgif sets ZBUF_1 instead of CLAMP_1 keeps the clamp mode
-      // in effect, as Sprite3::do_block_common's m_current_mode: clamped at the start of each
-      // chunk (its default mode). Repeat there let the bilinear filter blend in the texture's
-      // opposite edge: a 1 pixel dark line along the inner edges of the progress menu's side
-      // panels while they zoom in and out (texels several pixels wide).
-      st.clamp_s = m_clamp_s;
-      st.clamp_t = m_clamp_t;
-      st.blend = ctr_blend_from_gs_alpha(ad.alpha_data);
-      st.fix = GsAlpha(ad.alpha_data).fix();
-      // default mode: z test GEQUAL without writes, alpha blending, alpha test GEQUAL 38 with
-      // FB_ONLY (only matters for depth writes)
-      st.ztest = CTR_TEST_GEQUAL;
-      st.zwrite = zwrite;
-      st.atest = zwrite ? CTR_TEST_GEQUAL : CTR_TEST_ALWAYS;
-      st.aref = 38;
-      // (AI-assisted) config sprite_alpha_discard: fragments with alpha 0 skip the blending (no
-      // framebuffer read and write) where alpha 0 adds nothing: Cs * As (+ or -) Cd. Not for the
-      // blend modes that use a fixed factor or the destination's alpha.
-      if (!zwrite && mode != MODE_HUD && ctr_settings().sprite_alpha_discard &&
-          (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
-           st.blend == CTR_BLEND_SUB)) {
-        st.atest = CTR_TEST_GREATER;
-        st.aref = 0;
-      }
-      // (AI-assisted) a radial glow texture: from the procedural texture unit (no texels read);
-      // its texture coordinates then go from -1 to 1 (see m_proc below)
-      if (mode != MODE_HUD && ctr_gpu_tex_radial(st.tex)) {
-        st.flags |= CTR_STATE_PROCTEX;
-      }
-      m_last_bucket_ptr = &bucket_for(st);
-    }
+    // (AI-assisted) HUD sprites did it before any test (see the top of the loop).
+    resolve_state(ad, mode);
 
     // vertex k is corner k of a strip 0, 1, 3, 2 (Sprite3::do_block_common): the order of
     // ctr_gpu_draw_quads

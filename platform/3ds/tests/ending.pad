@@ -1,0 +1,421 @@
+# (AI-assisted) the end of the game: Gol and Maia's robot (finalboss-fight) forced into its last
+# phase (robotboss-yellow-dark-bomb), its white eco and Daxter movies, the white eco 'picked up'
+# (event), the sage movies, the credits (x held: fast-forward), the 100-cell movie, the final door
+# (target-final-door) and the secret ending, then back to the title (target-title-wait).
+# finalboss-movies (task 112) status goes 1 -> 3 -> 4 -> 5 -> 6 -> 0. About 15 min on the host.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=<this file> build-host-small/game/gk --proj-path <proj>
+#     --config-path <scratch dir> --ctr-gfx -- -boot -fakeiso -nosound -cbackend
+# (host small-memory C-mode gk running the p3ds modules; --config-path keeps the saves out of
+# the user's OpenGOAL folder). Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+200 continue finalboss-fight
+201 wait *target* target-continue
+440 pos *target*
+441 pstate robotboss
+460 call poke32 $*game-info* 92 f100
+470 call pgo robotboss robotboss-yellow-dark-bomb
+600 pstate robotboss
+600 pstate sage-finalboss
+600 pos *target*
+600 call get-task-status 112
+900 pstate robotboss
+900 pstate sage-finalboss
+900 pos *target*
+900 call get-task-status 112
+1200 pstate robotboss
+1200 pstate sage-finalboss
+1200 pos *target*
+1200 call get-task-status 112
+1500 pstate robotboss
+1500 pstate sage-finalboss
+1500 pos *target*
+1500 call get-task-status 112
+1800 pstate robotboss
+1800 pstate sage-finalboss
+1800 pos *target*
+1800 call get-task-status 112
+2100 pstate robotboss
+2100 pstate sage-finalboss
+2100 pos *target*
+2100 call get-task-status 112
+2400 pstate robotboss
+2400 pstate sage-finalboss
+2400 pos *target*
+2400 call get-task-status 112
+2700 pstate robotboss
+2700 pstate sage-finalboss
+2700 pos *target*
+2700 call get-task-status 112
+3000 pstate robotboss
+3000 pstate sage-finalboss
+3000 pos *target*
+3000 call get-task-status 112
+3000 call pevent robotboss white-eco-picked-up
+3001 x
+3300 pstate robotboss
+3300 pstate sage-finalboss
+3300 pos *target*
+3300 call get-task-status 112
+3300 call pevent robotboss white-eco-picked-up
+3301 x
+3600 pstate robotboss
+3600 pstate sage-finalboss
+3600 pos *target*
+3600 call get-task-status 112
+3600 call pevent robotboss white-eco-picked-up
+3601 x
+3900 pstate robotboss
+3900 pstate sage-finalboss
+3900 pos *target*
+3900 call get-task-status 112
+3900 call pevent robotboss white-eco-picked-up
+3901 x
+4200 pstate robotboss
+4200 pstate sage-finalboss
+4200 pos *target*
+4200 call get-task-status 112
+4200 call pevent robotboss white-eco-picked-up
+4201 x
+4500 pstate robotboss
+4500 pstate sage-finalboss
+4500 pos *target*
+4500 call get-task-status 112
+4500 call pevent robotboss white-eco-picked-up
+4501 x
+4800 pstate robotboss
+4800 pstate sage-finalboss
+4800 pos *target*
+4800 call get-task-status 112
+4800 call pevent robotboss white-eco-picked-up
+4801 x
+5100 pstate robotboss
+5100 pstate sage-finalboss
+5100 pos *target*
+5100 call get-task-status 112
+5100 call pevent robotboss white-eco-picked-up
+5101 x
+5400 pstate robotboss
+5400 pstate sage-finalboss
+5400 pos *target*
+5400 call get-task-status 112
+5400 call pevent robotboss white-eco-picked-up
+5401 x
+5700 pstate robotboss
+5700 pstate sage-finalboss
+5700 pos *target*
+5700 call get-task-status 112
+5700 call pevent robotboss white-eco-picked-up
+5701 x
+6000 pstate robotboss
+6000 pstate sage-finalboss
+6000 pos *target*
+6000 call get-task-status 112
+6000 call pevent robotboss white-eco-picked-up
+6001 x
+6300 pstate robotboss
+6300 pstate sage-finalboss
+6300 pos *target*
+6300 call get-task-status 112
+6300 call pevent robotboss white-eco-picked-up
+6301 x
+6600 pstate robotboss
+6600 pstate sage-finalboss
+6600 pos *target*
+6600 call get-task-status 112
+6600 call pevent robotboss white-eco-picked-up
+6601 x
+6900 pstate robotboss
+6900 pstate sage-finalboss
+6900 pos *target*
+6900 call get-task-status 112
+6900 call pevent robotboss white-eco-picked-up
+6901 x
+7200 pstate robotboss
+7200 pstate sage-finalboss
+7200 pos *target*
+7200 call get-task-status 112
+7200 call pevent robotboss white-eco-picked-up
+7201 x
+7500 pstate robotboss
+7500 pstate sage-finalboss
+7500 pos *target*
+7500 call get-task-status 112
+7500 call pevent robotboss white-eco-picked-up
+7501 x
+7800 pstate robotboss
+7800 pstate sage-finalboss
+7800 pos *target*
+7800 call get-task-status 112
+7800 call pevent robotboss white-eco-picked-up
+7801 x
+8100 pstate robotboss
+8100 pstate sage-finalboss
+8100 pos *target*
+8100 call get-task-status 112
+8100 call pevent robotboss white-eco-picked-up
+8101 x
+8400 pstate robotboss
+8400 pstate sage-finalboss
+8400 pos *target*
+8400 call get-task-status 112
+8400 call pevent robotboss white-eco-picked-up
+8401 x
+8700 pstate robotboss
+8700 pstate sage-finalboss
+8700 pos *target*
+8700 call get-task-status 112
+8700 call pevent robotboss white-eco-picked-up
+8701 x
+9000 pstate robotboss
+9000 pstate sage-finalboss
+9000 pos *target*
+9000 call get-task-status 112
+9000 call pevent robotboss white-eco-picked-up
+9001 x
+9300 pstate robotboss
+9300 pstate sage-finalboss
+9300 pos *target*
+9300 call get-task-status 112
+9300 call pevent robotboss white-eco-picked-up
+9301 x
+9600 pstate robotboss
+9600 pstate sage-finalboss
+9600 pos *target*
+9600 call get-task-status 112
+9600 call pevent robotboss white-eco-picked-up
+9601 x
+9900 pstate robotboss
+9900 pstate sage-finalboss
+9900 pos *target*
+9900 call get-task-status 112
+9900 call pevent robotboss white-eco-picked-up
+9901 x
+10200 pstate robotboss
+10200 pstate sage-finalboss
+10200 pos *target*
+10200 call get-task-status 112
+10200 call pevent robotboss white-eco-picked-up
+10201 x
+10500 pstate robotboss
+10500 pstate sage-finalboss
+10500 pos *target*
+10500 call get-task-status 112
+10500 call pevent robotboss white-eco-picked-up
+10501 x
+10800 pstate robotboss
+10800 pstate sage-finalboss
+10800 pos *target*
+10800 call get-task-status 112
+10800 call pevent robotboss white-eco-picked-up
+10801 x
+11100 pstate robotboss
+11100 pstate sage-finalboss
+11100 pos *target*
+11100 call get-task-status 112
+11100 call pevent robotboss white-eco-picked-up
+11101 x
+11400 pstate robotboss
+11400 pstate sage-finalboss
+11400 pos *target*
+11400 call get-task-status 112
+11400 call pevent robotboss white-eco-picked-up
+11401 x
+11700 pstate robotboss
+11700 pstate sage-finalboss
+11700 pos *target*
+11700 call get-task-status 112
+11700 call pevent robotboss white-eco-picked-up
+11701 x
+12000 pstate robotboss
+12000 pstate sage-finalboss
+12000 pos *target*
+12000 call get-task-status 112
+12000 call pevent robotboss white-eco-picked-up
+12001 x
+12300 pstate robotboss
+12300 pstate sage-finalboss
+12300 pos *target*
+12300 call get-task-status 112
+12300 call pevent robotboss white-eco-picked-up
+12301 x
+12600 pstate robotboss
+12600 pstate sage-finalboss
+12600 pos *target*
+12600 call get-task-status 112
+12600 call pevent robotboss white-eco-picked-up
+12601 x
+12900 pstate robotboss
+12900 pstate sage-finalboss
+12900 pos *target*
+12900 call get-task-status 112
+12900 call pevent robotboss white-eco-picked-up
+12901 x
+13200 pstate robotboss
+13200 pstate sage-finalboss
+13200 pos *target*
+13200 call get-task-status 112
+13200 call pevent robotboss white-eco-picked-up
+13201 x
+13500 pstate robotboss
+13500 pstate sage-finalboss
+13500 pos *target*
+13500 call get-task-status 112
+13500 call pevent robotboss white-eco-picked-up
+13501 x
+13800 pstate robotboss
+13800 pstate sage-finalboss
+13800 pos *target*
+13800 call get-task-status 112
+13800 call pevent robotboss white-eco-picked-up
+13801 x
+14100 pstate robotboss
+14100 pstate sage-finalboss
+14100 pos *target*
+14100 call get-task-status 112
+14100 call pevent robotboss white-eco-picked-up
+14101 x
+14400 pstate robotboss
+14400 pstate sage-finalboss
+14400 pos *target*
+14400 call get-task-status 112
+14400 call pevent robotboss white-eco-picked-up
+14401 x
+14700 pstate robotboss
+14700 pstate sage-finalboss
+14700 pos *target*
+14700 call get-task-status 112
+14700 call pevent robotboss white-eco-picked-up
+14701 x
+15000 pstate robotboss
+15000 pstate sage-finalboss
+15000 pos *target*
+15000 call get-task-status 112
+15000 call pevent robotboss white-eco-picked-up
+15001 x
+15300 pstate robotboss
+15300 pstate sage-finalboss
+15300 pos *target*
+15300 call get-task-status 112
+15300 call pevent robotboss white-eco-picked-up
+15301 x
+15600 pstate robotboss
+15600 pstate sage-finalboss
+15600 pos *target*
+15600 call get-task-status 112
+15600 call pevent robotboss white-eco-picked-up
+15601 x
+15900 pstate robotboss
+15900 pstate sage-finalboss
+15900 pos *target*
+15900 call get-task-status 112
+15900 call pevent robotboss white-eco-picked-up
+15901 x
+16200 pstate robotboss
+16200 pstate sage-finalboss
+16200 pos *target*
+16200 call get-task-status 112
+16200 call pevent robotboss white-eco-picked-up
+16201 x
+16500 pstate robotboss
+16500 pstate sage-finalboss
+16500 pos *target*
+16500 call get-task-status 112
+16500 call pevent robotboss white-eco-picked-up
+16501 x
+16800 pstate robotboss
+16800 pstate sage-finalboss
+16800 pos *target*
+16800 call get-task-status 112
+16800 call pevent robotboss white-eco-picked-up
+16801 x
+17100 pstate robotboss
+17100 pstate sage-finalboss
+17100 pos *target*
+17100 call get-task-status 112
+17100 call pevent robotboss white-eco-picked-up
+17101 x
+17400 pstate robotboss
+17400 pstate sage-finalboss
+17400 pos *target*
+17400 call get-task-status 112
+17400 call pevent robotboss white-eco-picked-up
+17401 x
+17700 pstate robotboss
+17700 pstate sage-finalboss
+17700 pos *target*
+17700 call get-task-status 112
+17700 call pevent robotboss white-eco-picked-up
+17701 x
+18000 pstate robotboss
+18000 pstate sage-finalboss
+18000 pos *target*
+18000 call get-task-status 112
+18000 call pevent robotboss white-eco-picked-up
+18001 x
+18300 pstate robotboss
+18300 pstate sage-finalboss
+18300 pos *target*
+18300 call get-task-status 112
+18300 call pevent robotboss white-eco-picked-up
+18301 x
+18600 pstate robotboss
+18600 pstate sage-finalboss
+18600 pos *target*
+18600 call get-task-status 112
+18600 call pevent robotboss white-eco-picked-up
+18601 x
+18900 pstate robotboss
+18900 pstate sage-finalboss
+18900 pos *target*
+18900 call get-task-status 112
+18900 call pevent robotboss white-eco-picked-up
+18901 x
+19200 pstate robotboss
+19200 pstate sage-finalboss
+19200 pos *target*
+19200 call get-task-status 112
+19200 call pevent robotboss white-eco-picked-up
+19201 x
+19500 pstate robotboss
+19500 pstate sage-finalboss
+19500 pos *target*
+19500 call get-task-status 112
+19500 call pevent robotboss white-eco-picked-up
+19501 x
+19800 pstate robotboss
+19800 pstate sage-finalboss
+19800 pos *target*
+19800 call get-task-status 112
+19800 call pevent robotboss white-eco-picked-up
+19801 x
+20100 pstate robotboss
+20100 pstate sage-finalboss
+20100 pos *target*
+20100 call get-task-status 112
+20100 call pevent robotboss white-eco-picked-up
+20101 x
+20400 pstate robotboss
+20400 pstate sage-finalboss
+20400 pos *target*
+20400 call get-task-status 112
+20400 call pevent robotboss white-eco-picked-up
+20401 x
+20700 pstate robotboss
+20700 pstate sage-finalboss
+20700 pos *target*
+20700 call get-task-status 112
+20700 call pevent robotboss white-eco-picked-up
+20701 x
+21000 pstate robotboss
+21000 pstate sage-finalboss
+21000 pos *target*
+21000 call get-task-status 112
+21000 call pevent robotboss white-eco-picked-up
+21001 x
+21300 pstate robotboss
+21300 pstate sage-finalboss
+21300 pos *target*
+21300 call get-task-status 112
+21300 call pevent robotboss white-eco-picked-up
+21301 x
+21600 exit

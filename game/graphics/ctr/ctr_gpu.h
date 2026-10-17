@@ -112,22 +112,22 @@ enum { CTR_TCC_CULL_OWN = 8 };
  * (the texture combiner then takes the constant 0x80 for the vertex alpha). CtrLevel sets it at
  * load from the chunk's vertices. */
 enum { CTR_TCC_ALPHA80 = 4 };
+/* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws (c3l v15 kDrawAtlasUV): the vertices'
+ * texture coordinates are in 1/32768 (c3l::kAtlasUVScale: a texture atlas's cells), not 1/1024 */
+enum { CTR_TCC_ST_ATLAS = 16 };
+/* (AI-assisted, far-fog) ctr_draw_state::tcc bit of merc draws (ctr_gpu_draw_skinned): the game's
+ * fog per vertex (merc2.vert / merc2.frag), with the values of the last ctr_gpu_set_merc_fog. Only
+ * set when ctr_gpu_merc_fog_ready says so. */
+enum { CTR_TCC_FOG = 32 };
 /* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
  * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
- * (mesh shader old or new, not dph). */
+ * (ctr_mesh_old_fa, or shader_opt's ctr_mesh_opt_fa). */
 void ctr_gpu_set_fog_alpha(int on);
-/* (AI-assisted) config.ini shader_groups (each frame after ctr_gpu_frame_begin; gpu_profile = ab
- * switches it): the vertex programs from two shared shbins (fewer code uploads and uniform
- * writes) instead of one shbin each. ctr_gpu_shader_groups_ready: they loaded (not with
- * shader_mesh = dph). */
-void ctr_gpu_set_shader_groups(int on);
-int ctr_gpu_shader_groups_ready(void);
 /* (AI-assisted) config.ini shader_opt (each frame after ctr_gpu_frame_begin; gpu_profile = ab
  * switches it): the shorter ctr_*_opt.v.pica programs for level meshes, merc and the PS2 ocean
  * (fewer instructions per vertex, fog rows folded into the mesh matrix, texcoord1 packed into
- * texcoord0's output register). It wins over shader_groups when both are on. ctr_gpu_shader_opt_ready:
- * they loaded. */
+ * texcoord0's output register). ctr_gpu_shader_opt_ready: they loaded. */
 void ctr_gpu_set_shader_opt(int on);
 int ctr_gpu_shader_opt_ready(void);
 void ctr_gpu_set_tex1_gating(int on);
@@ -215,11 +215,40 @@ int ctr_gpu_copy_screen(void);
  * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
  * keep what an earlier copy left: only read the screen in x0..x1. */
 int ctr_gpu_copy_screen_part(float x0, float x1);
+/* (AI-assisted) Render to texture (impostors, CtrImpostor): an RGBA8 texture the GPU draws into,
+ * in VRAM when there is room (else linear memory: make it before the level texture pools fill
+ * VRAM), and a D16 depth buffer for
+ * tiles of up to max_tile_w x 256 pixels. "Logical" pixels: lw along ctr x (left to right), lh
+ * along ctr y (bottom to top), lw and lh powers of two, lh 256 at most. Returns a texture handle
+ * (draw it with filter 0, clamped, like any other) or -1; deleted with ctr_gpu_rt_delete.
+ * ctr_gpu_rt_begin: the draws from now on (any kind except screen copies and reservations) go to
+ * the tile x..x+w, y..y+h of it: their clip / ctr coordinates [-1, 1] cover the tile as they
+ * cover the screen (x: tile left to right, y: bottom to top); x a multiple of 16, w + (x & 15)
+ * <= max_tile_w; the tile is NOT cleared (draw over all of it first: alpha 0 for empty texels,
+ * depth 0 with ztest ALWAYS). No early depth test and no sky hook in between (both resume after).
+ * Another ctr_gpu_rt_begin may follow (the next tile) without an end in between.
+ * ctr_gpu_rt_end: the screen again. Only inside a frame. ctr_gpu_rt_uv: the texture coordinates
+ * (ctr_vertex s, t) of logical point (lx, ly) of the texture (pixel edges at integers). */
+int ctr_gpu_rt_create(int lw, int lh, int max_tile_w);
+void ctr_gpu_rt_delete(int tex);
+int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h);
+void ctr_gpu_rt_end(void);
+void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t);
+/* (AI-assisted) a static mesh's vertices and indices as made (ctr_gpu_mesh_create / _end), to
+ * read on the CPU (the impostors' bounding boxes); 0 if there is none */
+int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
+                      int* index_count);
+/* (AI-assisted) measurement: the CPU time spent in the screen copies since the last call (ms; the
+ * draws so far sent to the GPU, then the copy), part of the distorter's build time */
+double ctr_gpu_take_screen_copy_ms(void);
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t);
 
 /* Draw quads: 4 vertices each, triangles (0, 1, 3) and (3, 1, 2) (a strip in the order 0 1 3 2).
  * A third fewer vertices than ctr_gpu_draw for sprites. */
 void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, int quad_count);
+/* (AI-assisted) The quads of the last ctr_gpu_draw_quads again with another state (their vertices
+ * stay where that call put them: no second copy), right after it. */
+void ctr_gpu_draw_quads_again(const ctr_draw_state* state);
 /* (AI-assisted) Draw a triangle strip: count vertices, count - 2 triangles (k - 2, k - 1, k).
  * Several strips go in one draw joined by repeating the last vertex of one and the first of the
  * next (the triangles in between have no area). State like ctr_gpu_draw. */
@@ -312,9 +341,9 @@ void ctr_gpu_set_early_depth(int on);
  * uses it). Defaults 0, 0, 0 = the old state. Any time. */
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
 /* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
- * texture cache, as citro3d does), 1 uploads (binds of level pool textures, whose texels don't
- * change, don't clear it unless a pool was filled or moved since the last clear; the first bind
- * of a frame and every other texture's bind still clear). Any time. */
+ * texture cache, as citro3d does), 1 uploads (a bind that keeps a level pool texture and only
+ * changes its sampling settings doesn't clear it unless a pool was filled or moved since the last
+ * clear; every switch to another texture and the first bind of a frame clear). Any time. */
 void ctr_gpu_set_tex_cache_clear(int mode);
 /* (AI-assisted) config.ini mip_bias: the LOD bias of mipmapped textures (levels, + = a smaller
  * level sooner: blurrier, fewer texels read), -4..4 in 1/256 steps. 0 = none. Any time. */
@@ -327,12 +356,6 @@ void ctr_gpu_set_skin_rows_f24(int on);
  * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
  * converts f32 its own way): edge pixels of models can flip. Each frame. */
 void ctr_gpu_set_skin_clip_f24(int on);
-/* (AI-assisted) config.ini cb_read_opaque: GPUREG_COLORBUFFER_READ = 0 for draws whose color
- * doesn't depend on the framebuffer (no blending reading it, all four channels written), 0xF
- * again for the others (a framebuffer flush before each switch). citro3d sets read = write =
- * the color mask. GBATEK: what read disable does is unknown; pica_bench B6.cbread0.probe bg_ok
- * says whether pixels of a partly covered block survive. Any time. */
-void ctr_gpu_set_cb_read_opaque(int on);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
  * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
  * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */
@@ -388,26 +411,47 @@ void ctr_gpu_set_vcache_reuse(int on);
  * are left out: texture unit 0's type) and cmd_dedup_draw (the raw draws' PRIMITIVE_CONFIG mode
  * and VERTEX_OFFSET writes too). Each frame (gpu_profile = ab switches them). */
 void ctr_gpu_set_cmd_dedup(int on, int draw);
+/* (AI-assisted, gpu-rt) config.ini gpu_breakdown (profiling, off): every 4th frame (pipeline on) each
+ * part of the frame goes to the GPU alone and is waited for, timed from its submission to its GSP
+ * event (P3D, PSC, PPF): the phases below. ctr_gpu_phase: the commands built from now on belong to
+ * that phase (the renderer calls it per bucket; the backend for the sky hook, the screen copy and
+ * the transfer itself). ctr_gpu_breakdown_line: the window's line, 0 when nothing was measured. */
+enum {
+  CTR_PH_OTHER,
+  CTR_PH_CLEAR,
+  CTR_PH_SKY,
+  CTR_PH_LEVEL,
+  CTR_PH_MERC,
+  CTR_PH_TRANS,
+  CTR_PH_SHADOW,
+  CTR_PH_OCEAN,
+  CTR_PH_SPRITE,
+  CTR_PH_DISTORT,
+  CTR_PH_HUD,
+  CTR_PH_TRANSFER,
+  CTR_GPU_PHASES
+};
+void ctr_gpu_set_gpu_breakdown(int on);
+void ctr_gpu_phase(int phase);
+int ctr_gpu_breakdown_line(char* out, int size, const char* label);
 /* (AI-assisted) config.ini cmd_dump: write a frame's GPU command list every 20 s (diagnostic,
  * platform/3ds/tools/cmd_report.py) */
 void ctr_gpu_set_cmd_dump(int on);
 /* (AI-assisted) the next finished frame's command list too (pad script "set cmd_dump on") */
 void ctr_gpu_cmd_dump_next(void);
-/* (AI-assisted) hardware hang bisect (config.ini new_shaders / asm_tex, CtrSettings.h).
- * new_shaders 0: the Oct 2 vertex shaders and their uniform conventions; before ctr_gpu_init.
- * asm_tex 0: the old per texel texture tiling loops (no LDM/STM, no 64-bit stores). */
-void ctr_gpu_set_new_shaders(int on);
+/* (AI-assisted) hardware hang bisect (config.ini asm_tex, CtrSettings.h). asm_tex 0: the old per
+ * texel texture tiling loops (no LDM/STM, no 64-bit stores). */
 void ctr_gpu_set_asm_tex(int on);
 /* (AI-assisted) config.ini defer_flush (hang bisect): 0 = every cache flush right away */
 void ctr_gpu_set_defer_flush(int on);
-/* (AI-assisted) config.ini shader_basic / shader_mesh (hang bisect), -1 = follow new_shaders */
-void ctr_gpu_set_shader_modes(int basic, int mesh);
-/* (AI-assisted) config.ini shader_skin: 1 new, 0 the Oct 2 ctr_skin / ctr_skin_env (the same
- * uniforms), -1 = new_shaders; before ctr_gpu_init */
-void ctr_gpu_set_shader_skin(int skin);
+/* (AI-assisted) config.ini shader_basic: 1 the 7 instruction ctr_basic (default), 0 the Oct 2
+ * ctr_basic_old; before ctr_gpu_init. Level meshes and merc use the Oct 2 ctr_mesh_old /
+ * ctr_skin_old / ctr_skin_env_old, or with shader_opt the ctr_*_opt programs. */
+void ctr_gpu_set_shader_basic(int basic);
 int ctr_gpu_asm_tex(void);
 /* (AI-assisted) where the render thread is (a static string) and its frame count; logged once
- * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start), so a hang shows the
+ * per second for the first 60 s by a watchdog thread (ctr_gpu_diag_start: config.ini
+ * render_watchdog), so a hang shows the
  * stage it stopped in */
 void ctr_gpu_diag_stage(const char* stage);
 void ctr_gpu_diag_start(void);
@@ -451,6 +495,23 @@ void ctr_gpu_mesh_delete(int mesh);
  * -1. Not drawn or deleted between the two. */
 int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices);
 int ctr_gpu_mesh_end(int mesh, int ok);
+/* (AI-assisted, streaming) The same in memory the caller owns (linear memory: the level stream
+ * arena, CtrStream.h): mem holds the vertices (vertex_count * 16 bytes) and then the indices at
+ * mem + ctr_gpu_ext_index_offset(vertex_count). Nothing is allocated; once a deleted (or failed)
+ * one is no longer used by the GPU, the function set with ctr_gpu_set_ext_free gets mem back
+ * (render thread, or the thread of ctr_gpu_free_pending_now; with the linear lock held). */
+int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
+                           uint16_t** indices);
+void ctr_gpu_set_ext_free(void (*fn)(void* mem));
+static inline unsigned int ctr_gpu_ext_index_offset(int vertex_count) {
+  return ((unsigned int)vertex_count * 16u + 127u) & ~127u;
+}
+/* (AI-assisted, streaming) a block of linear memory for the stream arena's segments (NULL when
+ * there is no room for it and LINEAR_RESERVE), freed with ctr_gpu_linear_block_free (no GPU use
+ * left in it); the linear heap's free bytes now (the host: a model, env CTR_SOFT_LINEAR_KB) */
+void* ctr_gpu_linear_block(unsigned int bytes);
+void ctr_gpu_linear_block_free(void* p);
+unsigned int ctr_gpu_linear_free(void);
 /* (AI-assisted) Free the deleted textures, pools and meshes now instead of at the next frame
  * begin, once the GPU has finished what it was given (a level was unloaded and the next one loads
  * on another thread: with no frames drawn meanwhile its memory stayed taken). Only while no frame
@@ -472,32 +533,72 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
 /* A mesh's vertices, to change them (blend shapes) before its draws of the frame; then flush the
  * changed bytes. The GPU finished the previous frame when a frame begins. */
 void* ctr_gpu_mesh_vertices(int mesh);
+/* (AI-assisted) A static mesh's own vertices (ctr_gpu_mesh_create / _end), to rewrite in place:
+ * no second buffer (unlike ctr_gpu_mesh_vertices), so a frame the GPU is still drawing may see
+ * part of the change. For slow changes (the level's time of day colors). Then ctr_gpu_mesh_flush.
+ * NULL if there is none. */
+void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count);
 void ctr_gpu_mesh_flush(int mesh, int offset, int size);
+/* (AI-assisted, micro-mg) Bytes the CPU wrote that the GPU reads in this frame (any memory: linear
+ * heap ranges are what matter): queued, not flushed now. In a frame (between ctr_gpu_frame_begin
+ * and ctr_gpu_frame_end) every queued range is flushed before the next part of the command list
+ * goes to the GPU (a partial submit, a screen copy or the frame end), touching and near ranges of
+ * the linear heap merged into one GSP request each (gpu_micro: up to 64 KB apart); outside a frame
+ * at once. One GSP request costs tens of microseconds of the calling thread (~62 us in Azahar):
+ * call this for every dirty range (e.g. each chunk's rewritten vertices) and let the merging do the
+ * rest, rather than flushing yourself. ctr_gpu_mesh_flush is this for a part of a mesh's
+ * vertices. Any thread may call it outside a frame; in a frame, the render thread. */
+void ctr_gpu_flush_range(const void* addr, unsigned int size);
+/* (AI-assisted, micro-mg) a test (pad script "set gpu_micro_mask N"): gpu_micro's changes as the
+ * bits of N (0 = all off, 1023 = all on; ctr_gpu_citro3d.c MICRO_*) from the next frame on, for
+ * old / new measurements of one view in one run */
+void ctr_gpu_set_micro_mask(unsigned int mask);
 
 /* bones: palette_count 3x4 row-major matrices, (pos, 1) -> camera space (x, y, z).
  * clip: row-major 4x4 from (camera x, y, z, 1) to OpenGL-style clip space.
  * tint: multiplies the final color (lighting approximation), 0..1. */
 /* lights: 7 vec4 like merc2.vert: light direction rows 0-2 (light_dir0/1/2), light colors 0-2,
- * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal). */
+ * ambient. Vertices are c3l::MercVertex (24 bytes, with a normal).
+ * (AI-assisted) bones_id: a number new for every palette the caller makes (never reused for other
+ * contents while it may still be the last one drawn), so draws compare it instead of the bones; 0:
+ * unknown, uploaded at every draw. bones_f24: NULL, or the bones as ctr_gpu_pack_skin_rows_f24
+ * made them (used with skin_rows_f24 instead of converting them again). */
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
-                          int palette_count, const float lights[28], int mesh, int first_index,
-                          int index_count);
+                          int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                          const float lights[28], int mesh, int first_index, int index_count);
+/* (AI-assisted) skin_rows_f24 is on (the draws take bones_f24), and the float24 words of a palette
+ * for them: 9 words per bone, row by row (row r of bone b at out[3 * (r * palette_count + b)]),
+ * palette_count <= CTR_MAX_PALETTE. */
+int ctr_gpu_skin_rows_f24_on(void);
+void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out);
+/* (AI-assisted, far-fog) the fog of the next CTR_TCC_FOG skinned draws, as merc2.vert computes it
+ * from the merc camera (Merc2 low memory: hvdf_offset.w, fog min and max): amount =
+ * (255 - clamp(hvdf_w - clip w, fog_min, fog_max)) / 255, mixed towards (r, g, b) (the frame's fog
+ * color, the fog ramp's) like merc2.frag. ctr_gpu_merc_fog_ready: the skin program in use has the
+ * fog (shader_opt's ctr_skin_opt; the Oct 2 ctr_skin_old has none) and the fog ramp exists. */
+void ctr_gpu_set_merc_fog(float hvdf_w, float fog_min, float fog_max, uint8_t r, uint8_t g,
+                          uint8_t b);
+int ctr_gpu_merc_fog_ready(void);
 
 /* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space
  * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, GS value / 255 as
  * in Merc2, so 0x80 = texture x 1). */
 void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16], const float* bones,
-                              int palette_count, const float fade[4], int mesh, int first_index,
-                              int index_count);
+                              int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
+                              const float fade[4], int mesh, int first_index, int index_count);
 
 /* The same with the matrix converted once (ctr_gpu_prepare_mesh_matrix) for many draws: the level
  * renderer draws chunks interleaved (sorted by texture), so the conversion would be redone at
  * every chunk change. */
 typedef struct {
   float m[16];
-  uint32_t f24[12]; /* (AI-assisted) m as float24 uniform words (3DS raw draws) */
+  /* (AI-assisted) m as float24 uniform words (3DS raw draws), then shader_opt's two fog rows: 6
+   * words the draws make at the first upload with the fog of fog_gen (a cache in the matrix: a
+   * prepared matrix is never in const memory) */
+  uint32_t f24[18];
   uint32_t id;      /* (AI-assisted) new for every prepare: draws compare it, not m (so a
                      * prepared matrix must not be changed, only prepared again) */
+  uint32_t fog_gen; /* (AI-assisted) the fog f24[12..17] were made with (0: not made) */
 } ctr_mesh_matrix;
 void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 /* (AI-assisted) config.ini fog_stage_skip: the next ctr_gpu_draw_mesh(_prepared) draws are entirely
@@ -507,6 +608,28 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
+/* (AI-assisted, gpu-rt) config.ini static_cmdlists. The level renderer hands a pass's draws over in
+ * one list (in drawing order; nofog as ctr_gpu_set_mesh_nofog for that draw). The 3DS backend keeps
+ * the raw command words of each stretch of draws with one program (after two frames drew it alike)
+ * in linear memory and copies them in again while the draws, the GPU state before them and the
+ * settings are the same, writing only the chunk matrices anew: the same words as drawing them one
+ * by one. *cache: the pass's (NULL at first; ctr_gpu_cmd_cache_free). mode 0 off, 1 on, 2 compare
+ * (every copy checked against the per-frame path, mismatches counted in the log line). */
+typedef struct {
+  const ctr_draw_state* state;
+  const ctr_mesh_matrix* matrix;
+  int mesh, first_index, index_count, nofog;
+} ctr_mesh_call;
+typedef struct ctr_cmd_cache ctr_cmd_cache;
+void ctr_gpu_set_static_cmdlists(int mode);
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** cache);
+void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache);
+/* the statistics line since the last call ([ctr] static_cmdlists ...); 0: nothing to say */
+int ctr_gpu_cmdlist_line(char* out, int size);
+/* (AI-assisted) impostor cards (CtrImpostor): the same with this frame's vertices (c3l::Vertex)
+ * and u16 indices from ctr_gpu_stream_alloc instead of a mesh's */
+void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                              const void* verts, const uint16_t* indices, int index_count);
 
 /* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
  * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
@@ -529,7 +652,7 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
                         int index_count);
 void ctr_gpu_ocean_end(void);
 
-/* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh.v.pica), from clip w:
+/* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh_old.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)
  *   distance fog = (w * fog1.x - fog1.y) * fog1.z
  * the larger of the two mixes the color towards (r, g, b). Call after ctr_gpu_frame_begin. */
@@ -570,13 +693,12 @@ typedef struct {
   int nofog_draws;   /* (AI-assisted) level draws without the fog stage (fog_stage_skip) */
   int color_clear_skipped; /* (AI-assisted) skip_clear: this frame cleared only the depth */
   int tex_clears_skipped;  /* (AI-assisted) tex_cache_clear = uploads: binds without the clear */
-  int cbread_switches;     /* (AI-assisted) cb_read_opaque: COLORBUFFER_READ changes */
   int unit1_toggles; /* (AI-assisted) texture unit 1 switched off or on (fog_stage_skip,
                       * tex1_gating) */
   int fog_alpha_draws; /* (AI-assisted) level draws with the fog in the vertex alpha (fog_alpha) */
   unsigned int cmd_dedup_words; /* (AI-assisted) command words cmd_dedup(_draw) left out */
   /* (AI-assisted) vertex program switches, of them with a shader code upload (another shbin), and
-   * uniform vectors written at the switches (shader_groups keeps some) */
+   * uniform vectors written at the switches */
   int prog_switches, prog_uploads, prog_unif_vectors;
   /* (AI-assisted) GPU timing that works with config.ini pipeline: gpu_wait_ms is the render
    * thread waiting for the GPU (C3D_FrameBegin) in this frame; gpu_busy_ms the GPU time of the
@@ -602,8 +724,16 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out);
 #ifndef __3DS__
 /* (AI-assisted) snow-gpu-audit: the renderer the next draws belong to (soft backend statistics) */
 void ctr_gpu_soft_bucket(const char* name);
+/* (AI-assisted) debugging: a texture's texels as a PNG (soft backend only) */
+void ctr_gpu_soft_dump_tex(int tex, const char* path);
 /* (AI-assisted) the name the draws are counted under now */
 const char* ctr_gpu_soft_bucket_name(void);
+/* (AI-assisted) occlusion query (CTR_FINE_VIS_CHECK): between begin and end, draws write nothing
+ * and count their fragments that pass the alpha, stencil and depth tests (count: so far); the
+ * frame's statistics leave them out */
+void ctr_gpu_soft_query_begin(void);
+long ctr_gpu_soft_query_count(void);
+void ctr_gpu_soft_query_end(void);
 #endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);

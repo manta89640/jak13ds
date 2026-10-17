@@ -1,0 +1,33 @@
+# (AI-assisted) save then load: tasks 2..30 closed and 42 cells, an autosave (slot 0) in
+# village2; then tasks 60..69 closed elsewhere; restore slot 0 (auto-save-command 'restore):
+# Jak is back at village2-start, task 4 closed (0) and task 62 open again (2).
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=<this file> build-host-small/game/gk --proj-path <proj>
+#     --config-path <scratch dir> --ctr-gfx -- -boot -fakeiso -nosound -cbackend
+# (host small-memory C-mode gk running the p3ds modules; --config-path keeps the saves out of
+# the user's OpenGOAL folder). Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+200 continue village2-start
+201 wait *target* target-continue
+440 tasks 2 30
+450 call poke32 $*game-info* 92 f42
+460 save
+900 log SAVED
+901 call get-task-status 4
+902 call get-task-status 62
+1000 continue snow-start
+1001 wait *target* target-continue
+1240 tasks 60 69
+1250 call poke32 $*game-info* 92 f1
+1260 call get-task-status 62
+1300 call auto-save-command 'restore 0 0 $*default-pool*
+1310 log RESTORE
+1600 pos *target*
+1900 pos *target*
+2200 pos *target*
+2201 call get-task-status 4
+2202 call get-task-status 62
+2203 print *game-info*
+2210 progress 0
+2400 shot
+2500 log DONE
+2501 exit

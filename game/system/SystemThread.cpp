@@ -138,9 +138,9 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
   {
     // The EE thread runs the kernel and deep C++ call chains (fmt, file IO). Others are small.
     const size_t stack_size = (name == "EE") ? 512 * 1024 : 128 * 1024;
-    // Core 0 is for the game (EE). The IOP (overlord, DGO loading), the listener and the EE worker
-    // run on the system core when the app got a share of it (ctr_port.c).
-    const int core = (name == "EE" || !ctr_syscore_available()) ? CTR_CORE_APP : CTR_CORE_SYS;
+    // Core 0: the game (EE), the IOP (overlord, DGO loading), the listener and the EE worker.
+    // (AI-assisted) The system core option for the others (io_on_system_core) was removed Oct 16.
+    const int core = CTR_CORE_APP;
     int prio = CTR_PRIO_WORKER;
     if (name == "EE") {
       prio = CTR_PRIO_EE;

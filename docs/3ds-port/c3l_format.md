@@ -17,10 +17,20 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 
 | option | default | meaning |
 |---|---|---|
-| `--tfrag-geo N` | 1 | tfrag level of detail near the camera. 0 is the most detailed, 2 the least (2 has holes). |
+| `--tfrag-geo N` | 0 | tfrag level of detail near the camera. 0 is the most detailed, 2 the least (2 has holes). (AI-assisted) 0 since v16, as the PS2 near the camera: 1 cut Volcanic Crater's yellow pools into polygons (village3 +1.1% triangles, +50 KB of vertices). |
 | `--far-tfrag-geo N` | 2 | tfrag level of detail for far away cells (-1: no far version). |
-| `--tie-geo N` | 3 | tie level of detail. 0 is the most detailed, 3 the least. |
-| `--palette N` | 1 | time of day palette baked into the vertex colors (0..7). |
+| `--tie-geo N` | 3 | tie level of detail (the far version with v17 levels of detail). 0 is the most detailed, 3 the least. |
+| `--no-tie-lod` | off | (AI-assisted, v17) no near tie versions: every tie at `--tie-geo` (v16's ties). See "Tie levels of detail". |
+| `--tie-near-geo N` | 0 | (v17) geometry of the near tie versions. |
+| `--tie-lod-budget-kb K` | per level | (v17) extra vertex and index data for near versions per level; default: the level's planned budget (`kTieLodBudgets` in main.cpp), else every group. |
+| `--tie-lod-min-angle A`, `--tie-lod-view-m M` | 0.002, 15 | (v17) a group gets a near version when its shape error seen from the larger of its radius and M meters is at least A radians. |
+| `--tie-lod-default-m M` | 60 | (v17) near version distance of groups without a PS2 distance (wind instances). |
+| `--tie-far-own-colors` | off | (AI-assisted, lod-light) tie far versions keep geometry 3's own vertex colors (the PS2's) instead of colors fitted to their near version. See "Far version colors". |
+| `--no-stream` | off | (AI-assisted, v19) no near chunks: a v18 file (near versions within `kTieLodBudgets`, in the far versions' chunks). See "Near chunks (v19)" and `streaming.md`. |
+| `--stream-classes M,...`, `--stream-class-cells M,...` | 30,60,120,240 / 50,50,100,100,200 | (v19) near chunks per need class: a group's near version is needed within error x 70.4 + radius of its center (gameplay focal 256 / tie_lod_px 4 x 1.1); the classes' bounds (meters) and each class's cell size. |
+| `--stream-cell M` | 100 | (v19) the near chunk cell size of classes without one in `--stream-class-cells`. |
+| `--palette N` | 1 | time of day palette baked into the vertex colors (0..7): what a v16 runtime shows until its first blend, and older runtimes always. |
+| `--no-tod` | off | (AI-assisted, v16) no time of day table: the vertex colors stay the baked palette. See "Time of day". |
 | `--max-tex N` | 128 | maximum texture size. Larger textures are box-filtered down. |
 | `--cell M` | 200 | chunk grid size in meters. Triangles go to the cell of their centroid. |
 | `--detail-radius M`, `--detail-dist M` | 4, 100 | tie instances smaller than the radius only drawn up to the distance |
@@ -49,6 +59,9 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--sd-mbps`, `--lz4-mbps`, `--zstd-mbps` | 5.5, 100, 16 | the cost model: New 3DS SD read speed and decode speeds (MB/s). |
 | `--block-kb N` | 64 | largest compressed block (raw KB). |
 | `--no-vcache` | off | keep the triangle and vertex order (no vertex welding, no meshoptimizer). |
+| `--vcache-fifo N` | -1 | (AI-assisted, v15) the triangle order inside each visibility run of an opaque draw, for the post-vertex cache (see "Vertex order"): N > 0 for a first-in first-out cache of N entries; -1 (default) per run the best of the orders for 4 and 12 entries and meshoptimizer's, by the vertices a FIFO of 4 + 8 + 16 entries shades; 0 the v14 order (meshoptimizer, without the coplanar rule). |
+| `--no-opaque-alpha` | off | (AI-assisted, v15) keep alpha tests and blending that can't change a pixel (see "Draw optimisations"). |
+| `--no-atlas`, `--atlas-max N`, `--atlas-kb-per-bind K` | off, 32, 2 | (AI-assisted, v15) texture atlases (see "Draw optimisations"): textures up to N texels a side; an atlas only when the memory it adds is at most K KB per texture bind it saves. |
 | `--no-verify` | off | don't read every written file back with the runtime's reader to compare it. |
 
 What goes in:
@@ -108,9 +121,75 @@ wins. lambda 10: ETC1 texels of misty LZ4 81 % -> 75 %, PSNR 37.3 -> 36.8 dB.
 
 Vertex order: within each chunk identical vertices (after quantizing) are merged (the PS2 strips
 share none), the triangles of each visibility run of a draw without blending that writes depth are
-put in vertex cache order (meshoptimizer `optimizeVertexCache`; blended draws and decals keep their
-order), then the vertices in first-use order (`optimizeVertexFetchRemap`). The GPU's post-vertex
-cache is cleared before every draw. Misty: 1.55 -> 1.27 vertices shaded per triangle (FIFO 16).
+put in vertex cache order (blended draws and decals keep their order), then the vertices in
+first-use order (`optimizeVertexFetchRemap`). The GPU's post-vertex cache is cleared before every
+draw (citro3d, and the raw draws unless `vcache_reuse`), and the runs of a draw may be drawn on
+their own, so each run starts with an empty cache. The draws are indexed triangle lists (no strips:
+the PICA200 has no restart index, and a list keeps every triangle's own corner order).
+Misty: 1.55 -> 1.27 vertices shaded per triangle (FIFO 16).
+
+(AI-assisted) v15 (`--vcache-fifo`): the cache's size and policy aren't documented
+(GPUREG_POST_VERTEX_CACHE_NUM 0x22D, "usually 0x4 or 0x84": 3dbrew, GBATEK; citro3d never writes
+it; pica_bench B4 measures it). So each run gets the best of three orders by the vertices a
+first-in first-out cache of 4, 8 and 16 entries shades together: `c3l_opt::vcache_order` (a
+greedy, Forsyth-style order scored on a simulated FIFO: fewest misses, then the oldest entries'
+vertices, then vertices with few triangles left) for 4 and for 12 entries, and meshoptimizer's
+(only where no order has to be kept). Triangles of a run that lie in one plane (within 1 mm, ~1
+degree) and overlap there keep their order (`c3l_opt::coplanar_pairs`; with the GEQUAL depth test
+the later of two equal-depth fragments wins): v14's meshoptimizer order didn't keep it (village1:
+1207 such pairs in reordered runs, 852 of them the same three corners; Snowy 2092, village3 1884).
+Vertices shaded per triangle, FIFO 4 / 8 / 16 / 32 (each vertex once: the least possible), v14 ->
+v15: village1 1.411 / 1.258 / 1.245 / 1.241 -> 1.346 / 1.268 / 1.249 / 1.243 (1.236), Snowy
+1.410 / 1.253 / 1.233 / 1.227 -> 1.358 / 1.266 / 1.241 / 1.232 (1.218), village3 1.403 / 1.215 /
+1.201 / 1.197 -> 1.354 / 1.222 / 1.207 / 1.199 (1.186): -4% for a 4 entry cache, within 1% of the
+v14 order for 8 and more (both near the bound there). The converter logs these per level.
+
+## Draw optimisations (v15)
+
+(AI-assisted) `Draw::kind` flags (c3l_format.h), each one pixel for pixel the draw it replaces
+(except the atlas gutters, below):
+
+- **Opaque alpha** (`kDrawAlphaTestDropped`, `kDrawBlendDropped`; config `opaque_alpha`): a draw
+  with an alpha test (GEQUAL) or alpha blending (Cs * As + Cd * (1 - As)) whose texture has alpha
+  1.0 in every texel of every mip level as the GPU reads it (ETC1, RGB565, or every 4-bit alpha
+  0xF) and whose every vertex alpha is >= 0x80 (the combiner's tex.a * v.a * 2 saturates at 1;
+  fog_alpha puts the constant 0x80 there) gets alpha 1.0 everywhere: the test passes, the
+  blending leaves Cs. The bit is cleared from `mode` (the alpha test's aref stays in the mode for
+  `opaque_alpha = off`, which puts the test back). Alpha tested draws of one texture and state then
+  merge with the opaque ones of that texture in a chunk where those also have alpha 1.0. Not done
+  where a draw's triangles overlap another draw's of the same texture in one plane (the runtime
+  sorts opaque draws by texture, then state: the state change would reorder them). Blended ones
+  keep their place among the blended draws (`kDrawBlendDropped` draws stay in `ordered_draws`):
+  moved to the opaque draws they would be drawn before blended draws that were drawn under them.
+  Formats: a texture whose alpha is 1.0 everywhere is already ETC1 / RGB565 (every texel >= 240
+  at conversion counts as opaque), so nothing to gain there. All levels: 1094 alpha tested draws
+  (per level and state) lose the test (village1 85, Snowy 71, village3 119; 18 kept for overlaps),
+  28 merges;
+  no level has a blended draw with alpha 1.0 everywhere (the ones with an opaque texture have
+  vertex alpha below 0x80, and the other way round).
+- **Atlases** (`kDrawAtlasUV`): small textures (`--atlas-max`) whose every level draw is opaque
+  (any order), each triangle within one copy of the texture (clamped axes: coordinates 0..1;
+  repeating axes: after a whole number shift of the triangle, which a repeating texture doesn't
+  see), one clamp mode per axis, and no coplanar overlap with another draw (the sort by texture
+  would change), are packed per format and mip level count into atlases (shelves, the smallest
+  power of two that holds them; at most 256 << (levels - 1) a side). A cell's position is a multiple
+  of 4 << (levels - 1) texels, so every level's 4x4 blocks are the texture's own, copied; between
+  cells (and at the edges) a gap of the same size: at each level a gutter of 2 << (levels - 1 -
+  level) texels around each cell holds what the texture's own addressing reads beyond its edge
+  (repeat: the other side, clamp: the edge texel), encoded again (ETC1: approximately; at the
+  smallest level a gutter shares a 4x4 block with the neighbour's). The texture coordinates are in
+  1/32768 (`c3l::kAtlasUVScale`): 32768 / atlas side units per atlas texel, at most 256 << (levels -
+  1) a side, so `kx * (cell x + (st - shift) * w / 1024)` is a whole number: the exact texel
+  position of the cell's own coordinates (st in 1/1024). The level of detail is the same (the
+  derivatives scale with the atlas, the size the other way). The vertices of an atlased triangle
+  are copies (one per shift a vertex needs). The vista tier's copies keep the original texture
+  (welded by position there), as do merc models: those textures stay in the file; the others get
+  no texels (`data_size` 0: the runtime makes no texture). An atlas is made only when the memory it
+  adds (atlas - the textures it replaces + 16 bytes per vertex copy) is at most `--atlas-kb-per-bind`
+  KB per texture bind it saves. Draws of a chunk with the same state merge. The level textures are
+  mostly 128 x 128 and repeat across their triangles (tfrag, walls), so few fit: all levels 11
+  atlases of 40 textures, 5776 triangles (village1 2 atlases, 14 textures, 1006 triangles; Snowy
+  none; village3 1, 4).
 
 ## Layout
 
@@ -118,7 +197,12 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 12 (7..11 still load; v12: merc rewritten vertices); char level_name[32]
+  char magic[4] = "C3LV"; u32 version = 19 (7..18 still load; v12: merc rewritten vertices; v13: vista
+  tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"; v16: time
+  of day; v17: tie levels of detail; v18: a chunk's vertices grouped by visibility id, see "Time of
+  day"; v19: near chunks, see "Near chunks (v19)"); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
+  tod_color_count, tod_mul_count, (v17) ext_offset (ExtHeader, 0: none; the end of the 32 byte level
+  name before: zero)
   u32 num_textures, textures_offset
   u32 num_chunks, chunks_offset
   u32 vertex_data_offset, vertex_data_size      Vertex[]
@@ -148,15 +232,21 @@ Chunk (80 bytes)
 
 Vertex (16 bytes)
   s16 pos[3]              quantized position (see "Positions")
-  s16 pad
+  u16 tod                 (v16) time of day color: < tod_color_count a TodColor, then the TodMuls,
+                          0xffff none (before v16: 0, "pad")
   s16 st[2]               texture coordinates * 1024
   u8  rgba[4]             baked time of day color, GS units (0x80 = 1.0)
+
+TodColor (24 bytes, v16)  u8 rgb[8][3]: the color in each of the game's 8 palettes, GS units
+TodMul (6 bytes, v16)     u16 color (TodColor); u8 mul[3] (128 = 1.0); u8 pad
 
 Draw (16 bytes)
   u32 mode                tfrag3 DrawMode bits (common/dma/gs.h): blend, alpha test, clamp,
                           depth write, ...
   u16 texture             texture index, 0xffff = untextured
-  u16 kind                0 = tfrag, 1 = tie, 2 = shrub
+  u16 kind                0 = tfrag, 1 = tie, 2 = shrub (low byte); flags: 0x100 kDrawCullBack (v13),
+                          0x200 kDrawAtlasUV, 0x400 kDrawBlendDropped, 0x800 kDrawAlphaTestDropped (v15),
+                          0x1000 kDrawAlpha80 (v19: every vertex the draw uses has alpha 0x80)
   u32 first_index, index_count   triangle list; indices are relative to the chunk's first_vertex
 
 Texture (16 bytes)
@@ -215,6 +305,224 @@ Texture (16 bytes)
   Alpha is doubled when converting, so 0xff = opaque.
 - **Vertex colors:** vertex colors keep GS units. The renderer applies the same `* 2` that the PC
   tfrag shader does.
+
+## Time of day (v16)
+
+(AI-assisted.) The PS2 and the PC light the level background with 8 palettes per vertex color,
+blended every frame with weights from the level's mood (time of day: 2-3 of the day's palettes at
+a time; lights: lamps and lava glow, which the game moves every frame). Before v16 the converter
+baked one palette (`--palette`, daytime), so night, dusk and dawn were drawn lit like day (and noon
+darker than the PC: village1's ground 81 instead of 183).
+
+v16 keeps each vertex's color in the 8 palettes: `TodColor`s for the tfrag, tie and shrub time
+of day colors (each once per level), and `TodMul`s for a color times a vertex color (shrubs: their
+base color, shrub.vert's `base * tod * 4`; the untextured vista: its texture's average color).
+Vertex::tod indexes them. Sizes (TodColor + TodMul): village1 10673 + 10567 (312 KB), jungle
+9357 + 40645 (457 KB, the largest; shrubs), village3 7238 + 8902 (221 KB); all levels 5.9 MB of
+the files.
+
+**v18 vertex groups.** (AI-assisted.) The converter orders each chunk's vertices by the
+visibility id of its runs (`group_vertices_by_vis`): each id's vertices are one range that no other
+id's indices use (ids in order of their first run, first use inside; a vertex that several ids use
+is copied for each but the first: ~0.4% more vertices; a chunk whose copies would pass 65536
+vertices is kept as it was). No layout change: the runtime finds the ranges from the indices
+(`tod_make_groups`, sorted by vertex) and treats a chunk whose ranges overlap (older files) as one
+group. So the runtime rewrites the time of day colors of the groups drawn (one tie instance, one
+tfrag visibility group) and leaves hidden ones until they are drawn. Log: `[ctr] <level>: vertices
+by visibility id (v18): N chunks, M vertices copied, K chunks kept as they were` (converter).
+
+The runtime (`CtrLevel.cpp`: `load_tod`, `tod_update`, `tod_recolor`, `tod_finish`) keeps the
+palettes some color uses (village3: 7 of 8), and rewrites the chunks' vertex colors in place in
+their meshes (the alpha stays; a frame the GPU still draws may see part of the change):
+
+- **Table.** Per entry (a color, then the TodMuls; `Vertex::tod`) its rgb, blended as the PC's
+  `interp_time_of_day_slow` (per channel `min(255, sum(w * c) >> 6)`, the game's weights from the
+  background camera's itimes, 64 = 1.0), only the palettes whose weight isn't 0. Entries are blended
+  when a vertex being written needs them: each has a version stamp, and is current when it is at
+  least the last move of its palettes (`lut[mask]`). Exact: 0 vertices drawn differ from the PC's
+  blend (host check below) when the rewrites keep up.
+- **Groups.** A group is rewritten whole when one of its chunk's day palettes moved since it was
+  written (or it has the file's colors); a chunk's light vertices (palettes used by a quarter of
+  the colors or fewer: lamps, lava glow; the game moves them every frame) all at once when a light
+  palette moved (a list per chunk made at load). Within a budget per frame (all levels): the light
+  pass first (up to 70% of 1.2 ms, from where the last frame's stopped), then the groups drawn (from
+  where the last frame's budget ran out). What the budget doesn't reach is drawn as it is, a day move
+  or two behind; a group 3 moves behind, or with the file's colors, is rewritten at once. While the
+  day moves fast (the title screen's attract mode: a move nearly every frame) the group pass gets
+  the chunks drawn once per 2 moves (their vertices at the measured ms per vertex, spread over the
+  frames 2 moves take). The day's own steps (1/64 every ~40 frames in the game) spread over a few
+  frames; a group is one visibility id's vertices, so a chunk can show two steps for a frame or two.
+  The rewritten ranges are flushed together after the level's pass (sorted, merged within 64 KB:
+  a few `ctr_gpu_flush_range` per frame).
+- Config `tod_busy_half` (default on, preset safe: off): while day palettes jump (more than 4/64 in
+  a frame) every frame for 8 frames (sunken's cycling lights), they are taken every second frame.
+- (AI-assisted, citadel) Config `tod_pulse_step` (default 4, preset safe: 0): a day palette that
+  pulses (its weight turned around twice within 256 frames: citadel's palette 1, a mood light
+  that 71% of its colors use, moving 1/64 every ~2 frames) is taken only when it moved that many
+  64ths from the weight last taken, or once it stood still for 8 frames. Without it every move
+  rewrote the drawn vertices (the groups were 3 moves behind every ~6 frames): citadel 3.5-8.7 ms
+  of time of day per frame, single frames 13-29 ms.
+  A palette found pulsing is remembered per level, so a reload counts it as pulsing at once.
+- (AI-assisted, citadel) Config `tod_max_ms` (default 2, preset safe: 0): the most ms of rewrites
+  per frame (all levels). Groups 3 moves behind or with the file's colors wait beyond it instead
+  of being rewritten at once (the next frame's pass starts from them), the group pass's budget
+  stays between 0.8 of it and it, and a day move waits (up to 32 frames; a move of 8/64 or more
+  doesn't) until the vertices drawn could be rewritten once per move within 0.7 of it (citadel's
+  pulse: taken every ~8-12 frames; on its smoothly lit pixels 2% of the 2-frame steps are 5
+  levels or more against 0.1% exact, Azahar screenshots). Not exact: a GPU path (palette 1's
+  contribution per vertex, 4 bytes, mixed in the vertex shader with a uniform weight) would be,
+  for ~1.7 MB of linear memory in citadel (435k vertices). Firecanyon's lava
+  (palettes 4-7, 62% of its colors) and swamp's lightning (palette 2, 53%) move as day palettes;
+  without the limit single frames took 14-19 ms.
+- A level's meshes are colored as they are read when weights are known for it (the weights it was
+  last drawn with, or the last level's with the same day palettes); else they show the baked
+  palette until drawn (then rewritten at once).
+
+Heap: the colors (palettes used x 3 bytes), the TodMuls, per entry 9 bytes (mask, rgb, stamp), per
+chunk 28 bytes, per group 12, per run 2, and the light lists: village1 600 KB, misty 545 KB, snow
+458 KB, sunken 309 KB. On the 3DS a level whose table would leave less than 3 MB of heap free keeps
+its baked palette (`[ctr] <level>: no heap for the time of day colors`).
+
+Azahar (Oct 17, New 3DS, tod ms of the render thread per frame, average / most in one frame over
+25 s): title 7.5 / 16.7 (29.9 fps; the day moves nearly every frame there), village1 hut 1.9 / 2.2,
+Snowy 1.2 / 1.8, Volcanic Crater 0.7 / 1.7, sunkenb 5.6 / 9.5 (its cycling lights recolor about half
+of the vertices drawn every second frame), Misty 1.4 / 2.1. A group costs ~80 ns per vertex there.
+
+Logs: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at load;
+`[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...); G
+groups rewritten, C chunks drawn behind; groups drawn behind by at most L day moves (...)` and
+`[ctr] time of day ms/frame A, most B in one frame, N frames over 2 ms` with the stats. Host: env
+`CTR_TOD_LOG=1` (2: every frame) logs the weights; `CTR_TOD_CHECK=1` (2: a line per frame) checks
+every vertex drawn against the PC's blend (stale vertices, the largest error, those more than 4
+off); `CTR_TOD_BUDGET_MS` sets the budget. A 3DS build with `CTR_TOD_CHECK_BUILD=2` defined in
+CtrLevel.cpp runs the check every 16th frame. The pad script command `tod H` sets the game's clock
+(pictures at a time of day).
+
+## Tie levels of detail (v17)
+
+(AI-assisted.) The PS2 has four geometries per tie prototype (`prototype-bucket-tie geometry[4]`)
+and picks one per instance and frame by its distance (`draw-inline-array-instance-tie`: the view
+depth of the instance's sphere minus its radius against the prototype's `dists`): geometry 0 within
+8 m (32 x the near clip distance) or where the instance needs clipping, geometry 1 up to the
+mid-plane, geometry 2 up to the far-plane (morphing toward geometry 3 on the way), geometry 3
+beyond. The far-planes are 45-90 m for most prototypes (`tools/ctr_level_converter/tie_ps2_dists.inc`,
+1188 prototypes, from the decompiler's BSP data). Geometry 1 is geometry 0 in every level, geometry 2
+~90% of its triangles, geometry 3 ~30-45%. The PC renderer (Tie3) draws one geometry everywhere
+(`lod_tie`, 0: the most detailed); v16 files had geometry 3 everywhere (the village3 warp gate ring a
+pentagon).
+
+v17 keeps two versions of an instance group (a prototype in one visibility node of the tie tree, up
+to 8 instances; or one wind instance): the near version (geometry 0) and the far version (geometry 3,
+or nothing: some prototypes have no geometry 3). Both are in one chunk (the group's triangles go to
+the cell of the group's center) and share its vertices: geometry 3's corners are geometry 0
+vertices (all of them, every level), so the far version costs only its indices. Each version is a
+visibility run of its own, the runs of a draw in the order near, one-version, far (so drawing either
+version of all of a chunk's groups is one piece per draw). `ExtHeader` (at Header::ext_offset):
+`{"C3LX", size 32, lod_group_count, lod_groups_offset, run_lod_count, run_lod_offset, runs_offset,
+lod_error_offset}` (lod_error_offset, AI-assisted, title-popin: `float[lod_group_count]`, each group's
+shape error below, game units; 0 in files written before it: the runtime then switches at dist); `TieLodGroup {float bsphere[4]; float dist}` (dist: the prototype's PS2 far-plane, game
+units); `RunLod {u16 group; u8 lod; u8 pad}` per VisRun of the file from runs_offset on (lod 0: one
+version, 1 near, 2 far). The vista tier copies the far versions.
+
+Which groups: a group whose shape error (the larger one-sided Hausdorff distance between the two
+versions, sampled at the triangles' corners and centers) seen from the larger of its radius and
+15 m is at least 0.002 rad (half a pixel) is a candidate; nearly all are (geometry 3 is coarse).
+Their cost is the extra vertex and index data (near vertices the far version doesn't use, near
+indices, ~64 bytes of runs); every candidate is taken unless the level has a budget (`kTieLodBudgets`),
+then the most error per byte first. Budgets (Oct 17), planned so that every pair of neighbouring
+levels keeps >= 3 MB of linear memory free with the 512 KB vertex stream buffers (2 MB more than
+before): citadel 5800 KB, firecanyon 6000, jungle 4500, lavatube 5700, misty 4700, ogre 3300,
+rolling 2400, swamp 4900, village1 4500, village2 2500; every group in the others. The converter
+logs per level the groups, triangles, cost and the prototypes left coarse (`tie levels of detail:`
+lines).
+
+Sizes (Oct 17, vertex + index data added): village3 +1954 KB (every group), snow +8230 KB (every
+group), ogre +3268 KB (758 of 1210 candidates), lavatube +5504 KB (2874 of 5772), village2 +2461 KB
+(792 of 1110); all levels' files 118 -> 162 MB; conversion of all levels ~60 s.
+
+**Far version colors.** (AI-assisted, lod-light, Oct 18.) The PS2 bakes the light into each tie
+geometry's vertex colors on its own (an instance's color indices per geometry), and geometry 3 loses
+geometry 0's extra vertices: on rocks the dark crevices and lit ridges between its corners. Its
+corners sit mostly on the ridges, so a far rock was lighter as a whole, and the switch showed as the
+light on the surface changing as the camera came near (hardware report Oct 18; the PC draws geometry
+0 only, nothing changes there). Host, beach-start, near against far version of the arch rocks on
+16x16 pixel blocks: mean |block difference| 7.7 levels, far lighter by 5.2. The converter
+(`Converter::far_colors_from_near`) now gives each far vertex the near surface's mean color around
+it: the near surface is sampled (each triangle's corners and center, by area), each sample goes to
+the nearest point of the far surface, and a far vertex's color is the mean of the samples weighted
+by its barycentric weight there (so the far surface has the near surface's mean color as a whole,
+and nearly so in each part). The vertex takes the color of the group's near vertex nearest to that
+mean in all 8 palettes (a difference in the mean of the 24 values weighted 16x: no bias toward
+dark), so the time of day table doesn't grow. Converter, far color minus the near surface's under
+each far triangle (GS units, area weighted, mean |d| / mean d), geometry 3's own colors -> fitted
+(the exact mean in brackets; the rest is the detail a far triangle can't have): beach 4.56 / +1.42
+-> 2.60 / -0.09 (2.48), village1 4.19 / +1.09 -> 2.32 / -0.09, jungle 4.00 / +0.76 -> 2.09 / -0.06,
+training 3.92 / +1.50 -> 2.35 / -0.09, firecanyon 2.50 / +1.22 -> 1.40 / -0.18; the time of day
+tables unchanged, files +1%, all levels ~150 s. Host frames (beach-start, tod 12, near against far
+version): the arch rocks' 16x16 block difference 7.7 -> 4.8 levels, the far version lighter by 5.2
+-> 1.1. Log: `<level>: tie levels of detail: far version colors fitted to the near versions:
+...`. The detail itself (crevices) still appears at the switch, as on the PS2.
+
+Runtime (`CtrLevel.cpp`, config `tie_lod`): per level draw, each group's version: with the shape
+errors (title-popin, Oct 17), near while the camera is within error x focal / tie_lod_px x
+detail_scale of the group's sphere (focal: pixels of the 400-wide top screen per unit of x / depth
+from this frame's projection, 256 in gameplay, 161 on the title's wide camera): the far version
+only where its error is at most tie_lod_px pixels. Without them (older files), near within dist x
+detail_scale (x 0.5..1 with auto_detail: half while the GPU is busy; a group in view keeps the factor
+it was decided with until it is out of view). 10% hysteresis; every group every frame, so turning
+the camera switches nothing. Why: the PS2 morphs geometry 2 into 3 up to the far-plane, the 3DS
+switched 0 against 3 there: village1's shape errors at the far-plane are 3.3 px median, 8.3 px for
+one group in ten, 19 px at most (the title camera: up to 19.7 px pops, palms and huts).
+A chunk with versioned runs is drawn run by run; a run of the other version is hidden and never
+drawn along with its neighbours (the small-gap merge), so the two versions are never on top of each
+other. Visibility bits, run culling, static_cmdlists (a version change is a new draw list for one
+frame), cull_ties (each version oriented on its own), time of day (the chunk's vertices are both
+versions') and impostors (cards show the far version) work as before.
+
+## Near chunks (v19)
+
+(AI-assisted, streaming.) v17/v18 kept a tie LOD group's near version (geometry 0) in the chunk of
+its far version, sharing its vertices, and only for the groups that fit a per-level budget
+(`kTieLodBudgets`: geometry 0 everywhere needs up to ~17 MB per level). v19 gives every candidate
+group its near version, in chunks of their own that the runtime streams (`streaming.md`):
+
+- **Near chunks.** A group's near triangles go to a near chunk (Chunk::kind CHUNK_KIND_TIE,
+  lod_tier 0, max_dist the group's detail class as before) of the cell of the group's center, the
+  cell size by its *need class*: the distance its near version is drawn within is error x
+  70.4 + radius (the runtime's screen-space rule at gameplay's focal length 256 and tie_lod_px 4,
+  x 1.1 hysteresis); classes < 30, < 60, < 120, < 240 m and beyond, cells 50, 50, 100, 100, 200 m
+  (`--stream-classes`, `--stream-class-cells`). Without the classes one large rock made its whole
+  100 m cell needed from 300 m away: Snowy needed up to 9.2 MB of near data at once (camera at each
+  group's center), with them 6.2 MB. A near chunk holds near versions only (RunLod kRunLodNear runs,
+  visibility ids as before) and its own vertices (the shared ones are copied: the far chunk keeps
+  what its far versions use). Its far versions stay in the ordinary 200 m tie chunks
+  (kRunLodFar runs), so the far chunks are v16's ties plus nothing.
+- **Order.** The near chunks come after the other chunks (before the vista tier) and their vertex
+  and index data after the others' in those sections, in the Morton order of their cells (x, z),
+  then height: chunks near each other in space lie together in the file, and the runtime reads the
+  ones it needs together in one request per section (c3l::Reader::preload). The block cuts start
+  a block at each chunk's vertices and indices as before.
+- **Core set.** The v18 budget still runs: the groups it takes are the core set (StreamChunk::cls
+  1, kStreamCore), the others extra (2). Near chunks are per class, so a runtime without streaming
+  loads the core ones with the level and never the others: v18's ties.
+- `ExtHeader` (size 48): after v17's fields `u32 run_sphere_offset, stream_count, stream_offset,
+  stream_flags`. `RunSphere {s16 c[3]; u16 r}` per file run (from runs_offset, run_lod_count of
+  them): the runtime's run_culling spheres (before v19 made at load from the vertices, which a near
+  chunk doesn't have then: the converter makes them the same way, the host check compares).
+  `StreamChunk {u32 chunk; u16 cls, pad; float need_a, need_e}` per near chunk: it is needed while
+  the camera is within need_a + need_e x the runtime's factor of its sphere's center (need_a: the
+  largest distance of a group's center to it plus the group's radius; need_e: the largest error).
+  Draw::kind kDrawAlpha80 (fog_alpha, before v19 worked out at load from the vertices). An ExtHeader
+  is written whenever the file has runs.
+- Sizes (Oct 17, all levels; vertex + index data): the near chunks hold 142 MB (village1 7.7 MB in
+  305 chunks, lavatube 22.2 MB in 1312, snow 10.5 MB in 351), the other chunks 149 MB (village1
+  7.1 MB, lavatube 10.9 MB, snow 7.9 MB); v18's vertex and index data were 223 MB. Files 199 MB
+  (v18 157 MB). The converter logs per level `streaming (v19): N near chunks (cells by need
+  distance: ...): core ..., extra ...; other chunks K KB` and `near chunk data needed at once, the
+  camera at the groups' centers: A KB on average, at most M KB`.
+- fine_vis: a .c3v made from a v18 file doesn't match a v19 one (other chunk, draw and run tables):
+  run `ctr_vis_builder --all` on the v19 folder (it reads v19 files as they are: near chunks are tie
+  chunks, never occluders, their runs units like any tie chunk's).
 
 ## Merc
 
@@ -275,3 +583,128 @@ u8 masks[] (one per fragment: 1 = unpacked).
   model's vertices on the render thread (`apply_mod`, the mesh's second vertex buffer with the
   pipeline). The model's position scale gets the blend shapes' 1.5x room for the waves. v11 files
   have none: those models stay at their base pose, as before.
+
+## Fine visibility (.c3v)
+
+(AI-assisted.) A sidecar per level, `<level>.c3v` next to `<level>.c3l`, layout in
+`game/graphics/ctr/c3v_format.h` (v2), read by `CtrFineVis` (`game/graphics/ctr/CtrFineVis.cpp`)
+for `CtrLevels` with config `fine_vis = on` (off by default: none are shipped, see "Results"). It is not part of the .c3l: it is made from the
+finished .c3l by `ctr_vis_builder` and keyed to it by a fingerprint of the chunk, draw and
+visibility run tables (`c3v::fine_vis_level_hash`: chunk bounds, quantization, vertex and draw
+counts, LOD fields, kinds, draw index counts, runs; not file offsets, compression, textures, draw
+modes, time of day data or the index / vertex order within a run). A .c3l converted again with other
+tables makes the runtime ignore its old .c3v (warning `<level>.c3v not used: made from another
+conversion`) and draw the level as without one, until the tool is run again. A v1 file (Oct 12) is
+refused the same way.
+
+```sh
+# every level, the sidecars into their own folder (all cores; the .fr3 files for the collision)
+build/tools/ctr_vis_builder --all out/jak1/c3l --fr3 out/jak1/fr3 --out-dir <dir>
+# one level / some levels
+build/tools/ctr_vis_builder out/jak1/c3l/maincave.c3l <dir>/maincave.c3v --fr3 out/jak1/fr3
+build/tools/ctr_vis_builder --all out/jak1/c3l --only maincave,snow --fr3 out/jak1/fr3 --out-dir <dir>
+# stage them with the levels
+platform/3ds/tools/stage_sd.sh ... --c3v <dir>
+```
+
+After a reconvert of the .c3l files that changes any of the tables above (any converter change of
+chunking, draws or runs), run `--all` again on the new folder; one that only changes what isn't
+in the fingerprint keeps the old files valid (the runtime checks at load). Levels where it finds
+nothing to do (no units, floors or occluders: GAME, jungleb) get no file (an old one is removed).
+Time: ~16 ms per sample per core, ~2.2 samples per cell: Precursor Basin (maincave, 328k cells)
+~13 min on 11 cores (maincave + sunkenb: 22 min); all levels at the defaults ~20.6M cells, ~18 h. Size: maincave 37
+MB with `--block-kb 32` (13 MB with 8, which cuts a fifth as much); all levels ~2.3 GB / ~0.8 GB.
+
+**Units**: the chunks before the vista chunks (vista tiers are never hidden by it); a chunk's
+units are its visibility runs, or (chunks without) its draws in pieces of 288 indices: the pieces
+run_culling makes at load. tfrag, ties (both versions of a tie LOD group: each its own runs) and
+shrubs; merc (Jak, doors, platforms, anything that moves) is never hidden and never hides.
+
+**Cells**: `--cell` meters (2) where the camera can be: within `--fine-above` (10) meters over /
+`--below` (2) under a floor, `--fine-spread` (6) meters sideways; further up (to `--above`, 20)
+and out (`--coarse-spread`, 10) cells of twice the size (a 4 m cell with any 2 m cell in it is
+cut into 2 m cells). Floors: the level's collision (`--fr3`: its .fr3, or a folder of them; by
+default `../fr3/<level>.fr3` from the .c3l folder), triangles steeper than 60 degrees left out; no
+.fr3 (or `--draw-floors`): roughly horizontal tfrag / tie triangles (more cells: unreachable
+scenery too). Samples: each cell's corners and center (a body-centered lattice; every point of a cell
+is within eps = 0.56 cell of one: 1.14 m / 2.26 m). `--center-only`: the center alone (eps half the
+diagonal), the same culling with half the samples, but the check found a hole behind a near
+object that only a corner sample sees (maincave, 15 pixels in one frame): not the default.
+
+**Occlusion** (conservative, CPU): from each sample, the level's own opaque static geometry within
+`--occ-range` (250) m into a cube of 64x64 depth maps, in four layers (the nearest occluder beyond 1.5, 4, 8, 16
+eps). An occluder is a draw that's opaque (no blending), depth tested (GEQUAL) and written, with
+no alpha test that can fail (GEQUAL whose reference the texture's smallest alpha passes, at the
+GPU's 2 x scale, and vertex alpha >= 0x80), and only from where the runtime draws it for certain
+from every point within eps of the sample:
+- tfrag: its LOD tier: the detailed one (1) only within 0.9 x `--lod-lo` (180 m) of its
+  lod_center, the coarse one (2) only beyond 1.5 x `--lod-hi` (220 m): a detailed cell in view is
+  held to 1.5 x lod_distance (title-popin), so the coarse tier isn't certain before;
+- every chunk's own distance limit at the smallest factors the sets are for: `--detail-min` (1)
+  x detail_scale, ties x `--tie-scale-min` (1) tie_distance_scale, shrubs (v14 PS2 distances) x
+  `--shrub-scale-min` (0.8) shrub_scale;
+- ties: only nearer than `--tie-occ-max` (120 m, impostor_distance: beyond it a group may be a
+  card); the versions of a tie LOD group only where the switch (CtrLevel.cpp: near while the
+  camera is within shape error x k + radius, k = detail_scale x focal / tie_lod_px) picks that one
+  for every k in `--tie-k-lo` .. `--tie-k-hi` (58 .. 70; gameplay: 1 x 256 / 4 = 64); kRunLodAlways
+  runs always;
+- closed tie surfaces (kDrawCullBack, which cull_ties may cull): only triangles whose front side
+  (counter-clockwise) faces every point within eps.
+A camera moved by up to eps sees at most asin(eps / d) around a direction at depth d: a pixel
+hides only what is further than the largest depth within asin(eps / dmin) of it (dmin: the
+nearest depth there, iterated), +2% + 0.25 m; a window with an empty direction hides nothing.
+The windows' pixel rectangles come from a table (per face, 2x2 block, and 64 radius steps, each
+rounded up). A unit is hidden from a sample when every pixel its box (then each of its triangles'
+boxes) covers hides it; a chunk's box first. A cell's set is what any of its samples may see. The
+one case this can't see: a hole in a far wall right behind a near object, seen by none of the
+cell's 9 samples.
+
+**Blocks**: the cells in blocks of `--block` (8) cells (16 m), each block on its own in the file
+(`BlockEntry` index, then the blocks): the block's distinct sets as a tree, each set the units
+where it differs from its parent (the root: from nothing), a spanning tree of the fewest
+differences rooted at its center; a cell map (runs of cells with the same set). Sets are merged
+(their union: conservative) only in a block over `--block-kb` (32 KB). The tool decodes every
+cell of every block again before it writes the file.
+
+**Runtime** (`CtrFineVis`): at the level's load, the header and the block index (8 bytes per block)
+and a pool of `fine_vis_kb` (64) KB per level. Each level draw (render thread): the camera's block
+and the blocks within 8 m of the camera are asked for; a loader thread of its own (priority 0x3B,
+core 2 on New 3DS, a 32 KB stack) reads each with one unbuffered SD card read into the pool, the
+blocks wanted least recently making room (never one being read). The cell's set is decoded when
+the camera enters a cell with another set (its path in the block's tree), then per covered chunk
+whether it hides none / all / some of its units. No block yet (the first frames in a new area),
+the camera outside every cell (cutscene and title cameras high up, warps), far mode, an
+incomplete load, draw_distance < 250 m + 2 eps, lod_distance x 0.9 < 162 m or x 1.5 > 330 m (so
+180 .. 220 m), detail_scale / tie_distance_scale / shrub_scale below the tool's, impostors with
+impostor_distance < 120 m, cull_ties = flip, or the tie LOD factor outside the tool's range:
+nothing more hidden that frame. Log every stats period: `[ctr] <level>: fine vis: N of M level
+draws with a set (W waiting for a block, O outside the cells, U not usable); C cells entered, D
+sets decoded (ms); B blocks read (KB, ms each); ... ms per level draw` and `[ctr] l0-tfrag: fine
+vis hid N chunks, M tris per level draw with a set`.
+
+Host checks (`--ctr-gfx`): `CTR_FINE_VIS_CHECK=1` draws what fine_vis hid again at the end of each
+frame against its depth and counts the pixels that would have been seen (log `[ctr] fine_vis
+check:`; any pixel is a culling error); `CTR_FINE_VIS_ORACLE=1` reports how many drawn triangles
+were in runs with no pixel seen.
+
+**Results** (Oct 17, finer-vis). The sets are conservative over every view direction and every
+point of a cell, which is why they hide much less than a view hides (the host oracle: 50-85% of
+the tfrag drawn at the maincave start has no visible pixel). Share of the level that may be seen
+from a cell (triangle weighted, as written): maincave 88%, darkcave 87%, robocave 94%, sunkenb 91%
+(at 4 m cells 91-97%). Per frame in Azahar, Jak standing, fine_vis off -> on (all renderers'
+triangles; GPU estimate 10.6 ms + 0.13 ms per 1k triangles):
+- c3l v18, center-only sets: maincave-start 153.7k -> 131.9k (-14%, ~2.8 ms), sunkenb-start
+  -6%; the other maincave checkpoints, darkcave and robocave ~0. But the host check found 15
+  pixels in one frame (maincave seen from darkcave-start: a hole only a cell corner sees);
+- c3l v19, 9 samples per cell (the default since), no near tie versions as occluders (streamed:
+  not certain): maincave-start 0%, sunkenb-start -4% (within the noise of the title view's
+  +-1.5%).
+So no .c3v files are shipped and `fine_vis` is off by default. Runtime cost: 0.006-0.06 ms per
+level draw on the render thread (Azahar), a set decode 0.01 ms (host) to ~1.3 ms (Azahar) when the
+camera enters a cell with another set, a block read ~5-6 ms of its loader thread (Azahar), 4-7
+blocks when a level starts; memory: the block index (8 bytes per 16 m block) + the 128 KB pool.
+
+`occ_cull` (config_dev.md, CtrOccCull.h) is the exact per-view alternative: it hides far more
+where it runs (maincave start in Azahar: 16.6k triangles with 600 occluders), but its render
+thread cost on the 3DS is larger than the GPU time it saves (24.5 ms for that; 6.4 ms for 3.1k
+with 300), so it is off by default too.

@@ -38,9 +38,14 @@ struct Entry {
   bool handoff = false;
   bool crash = false;
   bool save = false;
+  std::vector<std::pair<int, int>> tasks;  // (AI-assisted) "tasks A B"
+  std::vector<int> progress;  // (AI-assisted) "progress N"
+  std::vector<float> tod;     // (AI-assisted) "tod H"
   bool shot = false;
   std::string shot_name;  // (AI-assisted) "shot NAME" (renderer hook with a name)
   std::vector<std::pair<std::string, std::string>> sets;  // (AI-assisted) "set KEY VALUE"
+  std::vector<std::vector<std::string>> calls;  // (AI-assisted) "call FN ARGS...": FN first
+  std::vector<std::string> pstates;             // (AI-assisted) "pstate TYPE"
 };
 
 struct Script {
@@ -68,6 +73,12 @@ ShotHook g_shot_hook = nullptr;
 NamedShotHook g_named_shot_hook = nullptr;  // (AI-assisted)
 SetHook g_set_hook = nullptr;              // (AI-assisted)
 JointHook g_joint_hook = nullptr;
+TasksHook g_tasks_hook = nullptr;  // (AI-assisted)
+ProgressHook g_progress_hook = nullptr;  // (AI-assisted)
+TodHook g_tod_hook = nullptr;            // (AI-assisted)
+CallHook g_call_hook = nullptr;          // (AI-assisted)
+ProcStateHook g_proc_state_hook = nullptr;  // (AI-assisted)
+std::string g_last_shot_name;      // (AI-assisted) "shot NAME" without a named shot hook
 
 // PadData::ButtonIndex
 int button_index(const std::string& name) {
@@ -145,6 +156,18 @@ void load() {
         e.handoff = true;
       } else if (item == "save") {
         e.save = true;
+      } else if (item == "tod") {
+        float h = 12.f;
+        ss >> h;
+        e.tod.push_back(h);
+      } else if (item == "progress") {
+        int n = -1;
+        ss >> n;
+        e.progress.push_back(n);
+      } else if (item == "tasks") {
+        int a = 0, b = 0;
+        ss >> a >> b;
+        e.tasks.push_back({a, b});
       } else if (item == "shot") {
         e.shot = true;
         // (AI-assisted) an optional name (a word that isn't a button or axis)
@@ -161,6 +184,20 @@ void load() {
         std::string key, value;  // (AI-assisted)
         ss >> key >> value;
         e.sets.push_back({key, value});
+      } else if (item == "call") {
+        // (AI-assisted) the rest of the line: FN ARGS...
+        std::vector<std::string> words;
+        std::string w;
+        while (ss >> w) {
+          words.push_back(w);
+        }
+        if (!words.empty()) {
+          e.calls.push_back(words);
+        }
+      } else if (item == "pstate") {
+        std::string type;
+        ss >> type;
+        e.pstates.push_back(type);
       } else if (item == "crash") {
         e.crash = true;
       } else if (item.size() > 3 && item[2] == '=') {
@@ -263,6 +300,39 @@ PadState next_frame() {
         g_save_hook();
       }
     }
+    for (auto& [first, last] : e.tasks) {
+      lg::info("[pad script] frame {}: tasks {} {}", frame, first, last);
+      if (g_tasks_hook) {
+        g_tasks_hook(first, last);
+      }
+    }
+    for (float h : e.tod) {
+      lg::info("[pad script] frame {}: tod {}", frame, h);
+      if (g_tod_hook) {
+        g_tod_hook(h);
+      }
+    }
+    for (int n : e.progress) {
+      lg::info("[pad script] frame {}: progress {}", frame, n);
+      if (g_progress_hook) {
+        g_progress_hook(n);
+      }
+    }
+    for (auto& c : e.calls) {
+      std::string line;
+      for (auto& w : c) {
+        line += " " + w;
+      }
+      lg::info("[pad script] frame {}: call{}", frame, line);
+      if (g_call_hook) {
+        g_call_hook(c[0], std::vector<std::string>(c.begin() + 1, c.end()));
+      }
+    }
+    for (auto& t : e.pstates) {
+      if (g_proc_state_hook) {
+        g_proc_state_hook(t.c_str());
+      }
+    }
     for (auto& [key, value] : e.sets) {
       lg::info("[pad script] frame {}: set {} {}", frame, key, value);
       if (!g_set_hook || !g_set_hook(key.c_str(), value.c_str())) {
@@ -275,6 +345,10 @@ PadState next_frame() {
       lg::info("[pad script] frame {}: shot {}", frame, name);
       g_named_shot_hook(name.c_str());
     } else if (e.shot && g_shot_hook) {
+      // (AI-assisted) the PC renderer reads the name back (last_shot_name), else it overwrote one
+      // file for every shot
+      g_last_shot_name = e.shot_name.empty() ? fmt::format("shot_f{}", frame) : e.shot_name;
+      lg::info("[pad script] frame {}: shot {}", frame, g_last_shot_name);
       g_shot_hook();
     }
     if (!e.wait_sym.empty()) {
@@ -319,6 +393,30 @@ void set_position_hook(PositionHook hook) {
 
 void set_save_hook(SaveHook hook) {
   g_save_hook = hook;
+}
+
+const char* last_shot_name() {
+  return g_last_shot_name.c_str();
+}
+
+void set_tasks_hook(TasksHook hook) {
+  g_tasks_hook = hook;
+}
+
+void set_progress_hook(ProgressHook hook) {
+  g_progress_hook = hook;
+}
+
+void set_tod_hook(TodHook hook) {
+  g_tod_hook = hook;
+}
+
+void set_call_hook(CallHook hook) {
+  g_call_hook = hook;
+}
+
+void set_proc_state_hook(ProcStateHook hook) {
+  g_proc_state_hook = hook;
 }
 
 void set_shot_hook(ShotHook hook) {

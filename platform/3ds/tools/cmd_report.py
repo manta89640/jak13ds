@@ -12,8 +12,11 @@
 # 16-19, extra parameters 20-27, consecutive registers bit 31), the extra parameters, padding to
 # 8 bytes.
 #   cmd_report.py [--shbin-dir build-3ds] cmd_00.bin [cmd_01.bin ...]
+#   cmd_report.py --kicks A.bin B.bin   (AI-assisted, micro-gpu: the GPU state at every draw of two
+#   dumps compared; config.ini gpu_micro_ident makes off / on pairs of one paused view)
 import argparse
 import collections
+import difflib
 import pathlib
 import re
 import struct
@@ -175,19 +178,198 @@ def decode(words, shbins):
     return st
 
 
+# (AI-assisted, micro-gpu) --kicks A B: the GPU state at every draw of two dumps, compared draw by
+# draw. A draw's state: every register (byte masks applied; trigger writes left out), the float
+# uniforms, the fixed attributes and LUT memories, and the vertex program the draw runs, resolved:
+# the instructions from the entry point to END with each operand descriptor index replaced by the
+# descriptor's value (so programs at another place in code memory, with their descriptors at other
+# indices, count as the same program). Registers whose value only says where the program is
+# (the entry point) are left out of the register compare for that reason.
+MEMS = {  # data port -> (index register, words per entry)
+    "vsh_f": (0x2C0, range(0x2C1, 0x2C9)), "gsh_f": (0x290, range(0x291, 0x299)),
+    "vsh_code": (0x2CB, range(0x2CC, 0x2D4)), "vsh_desc": (0x2D5, range(0x2D6, 0x2DE)),
+    "gsh_code": (0x29B, range(0x29C, 0x2A4)), "gsh_desc": (0x2A5, range(0x2A6, 0x2AE)),
+    "light_lut": (0x1C5, range(0x1C8, 0x1D0)), "fog_lut": (0x0E6, range(0x0E8, 0x0F0)),
+    "proc_lut": (0x0AF, range(0x0B0, 0x0B8)), "fixattr": (0x232, range(0x233, 0x236)),
+}
+PORT_OF = {r: k for k, (_, rs) in MEMS.items() for r in rs}
+INDEX_OF = {ix: k for k, (ix, _) in MEMS.items()}
+KICKS = {0x22E, 0x22F}
+NO_STATE = TRIGGERS | {0x2BA}  # (the VSH entry point: in the resolved program)
+
+
+def mad(op):
+    return op >= 0x30
+
+
+def resolve_program(code, desc, entry):
+    if not code:
+        return None  # (no upload seen yet in this dump)
+    out = []
+    pc = entry
+    for _ in range(512):
+        x = code.get(pc, 0)
+        op = x >> 26
+        if mad(op):
+            out.append((x & ~0x1F, desc.get(x & 0x1F, 0)))
+        elif op in (0x21, 0x22) or 0x20 <= op <= 0x2D:
+            out.append((x, None))
+        else:
+            out.append((x & ~0x7F, desc.get(x & 0x7F, 0)))
+        if op == 0x22:
+            break
+        pc += 1
+    return tuple(out)
+
+
+def kick_states(words):
+    regs = {}
+    mem = {k: {} for k in MEMS}
+    ptr = {k: 0 for k in MEMS}
+    f32 = {"vsh_f": False, "gsh_f": False}
+    fbuf = {"vsh_f": [], "gsh_f": []}
+    kicks = []
+    i, n = 0, len(words)
+    while i + 1 < n:
+        param, hdr = words[i], words[i + 1]
+        reg, mask, extra, seq = hdr & 0xFFFF, (hdr >> 16) & 0xF, (hdr >> 20) & 0xFF, hdr >> 31
+        vals = [param] + list(words[i + 2: i + 2 + extra])
+        i += 2 + extra + (extra & 1)
+        bmask = sum(0xFF << (8 * b) for b in range(4) if mask & (1 << b))
+        for k, v in enumerate(vals):
+            r = reg + k if seq else reg
+            if r in INDEX_OF:
+                m = INDEX_OF[r]
+                if m in f32:
+                    f32[m], ptr[m], fbuf[m] = bool(v >> 31), v & 0xFF, []
+                elif m == "fixattr":
+                    ptr[m], fbuf.setdefault(m, [])[:] = v & 0xF, []
+                elif m in ("vsh_code", "gsh_code", "vsh_desc", "gsh_desc"):
+                    ptr[m] = v & 0xFFF
+                elif m in ("light_lut", "proc_lut"):
+                    ptr[m] = v & 0xFFFF  # (the table in bits 8-12, the entry in 0-7)
+                else:
+                    ptr[m] = v & 0xFF
+                continue
+            if r in PORT_OF:
+                m = PORT_OF[r]
+                if m in f32:
+                    fbuf[m].append(v)
+                    if len(fbuf[m]) == (4 if f32[m] else 3):
+                        mem[m][ptr[m]] = (f32[m], tuple(fbuf[m]))
+                        ptr[m], fbuf[m] = ptr[m] + 1, []
+                elif m == "fixattr":
+                    fbuf.setdefault(m, []).append(v)
+                    if len(fbuf[m]) == 3:
+                        mem[m][ptr[m]] = tuple(fbuf[m])
+                        ptr[m], fbuf[m] = ptr[m] + 1, []
+                else:
+                    mem[m][ptr[m]] = v
+                    ptr[m] += 1
+                continue
+            if r in KICKS:
+                prog = resolve_program(mem["vsh_code"], mem["vsh_desc"],
+                                       regs.get(0x2BA, 0) & 0xFFFF)
+                st = {rr: vv for rr, vv in regs.items() if rr not in NO_STATE}
+                kicks.append((r, st, {k: dict(mem[k]) for k in MEMS
+                                      if k not in ("vsh_code", "vsh_desc")}, prog))
+                continue
+            if r in TRIGGERS:
+                continue
+            regs[r] = (regs.get(r, 0) & ~bmask) | (v & bmask)
+    return kicks
+
+
+def read_dump(f):
+    """(frame, prologue words, frame words). "CMDE" files (shader_resident) start with the
+    resident shader image as upload commands: state only, not the frame's words."""
+    b = pathlib.Path(f).read_bytes()
+    magic, frame, nw = struct.unpack("<3I", b[:12])
+    if magic == 0x44444D43:
+        return frame, (), struct.unpack("<%dI" % nw, b[12:12 + 4 * nw])
+    if magic == 0x45444D43:
+        npro = struct.unpack("<I", b[12:16])[0]
+        pro = struct.unpack("<%dI" % npro, b[16:16 + 4 * npro])
+        o = 16 + 4 * npro
+        return frame, pro, struct.unpack("<%dI" % nw, b[o:o + 4 * nw])
+    raise ValueError(f)
+
+
+def compare_kicks(fa, fb, max_report):
+    def load(f):
+        frame, pro, words = read_dump(f)
+        return frame, pro + words
+    (frA, wa), (frB, wb) = load(fa), load(fb)
+    ka, kb = kick_states(wa), kick_states(wb)
+    print(f"A {fa}: frame {frA}, {len(wa)} words, {len(ka)} draws")
+    print(f"B {fb}: frame {frB}, {len(wb)} words, {len(kb)} draws")
+    # the draws paired up by kind, vertex layout and count (difflib: draws only one dump has, such as
+    # particles of a frame that differ, are left out of the pairs and counted)
+    sig = lambda k: (k[0], k[1].get(0x205, 0), k[1].get(0x228, 0))
+    sm = difflib.SequenceMatcher(None, [sig(k) for k in ka], [sig(k) for k in kb], autojunk=False)
+    pairs = [(a + j, b + j) for a, b, n in sm.get_matching_blocks() for j in range(n)]
+    print(f"paired {len(pairs)} draws ({len(ka) - len(pairs)} of A and {len(kb) - len(pairs)} of B "
+          f"without a partner)")
+    same = 0
+    reported = 0
+    unknown_prog = 0
+    by_what = collections.Counter()
+    for ia, ib in pairs:
+        x, y, d = ka[ia], kb[ib], ia
+        diffs = []
+        if x[0] != y[0]:
+            diffs.append("draw kind")
+        rk = set(x[1]) | set(y[1])
+        for r in sorted(rk):
+            if x[1].get(r) != y[1].get(r):
+                diffs.append(f"{NAMES.get(r, hex(r))} {x[1].get(r, 0):#x}/{y[1].get(r, 0):#x}")
+        for m in x[2]:
+            if x[2][m] != y[2][m]:
+                ks = sorted(set(x[2][m]) | set(y[2][m]))
+                bad = [k for k in ks if x[2][m].get(k) != y[2][m].get(k)]
+                diffs.append(f"{m}[{','.join(str(k) for k in bad[:6])}{'...' if len(bad) > 6 else ''}]")
+        if x[3] is None or y[3] is None:
+            unknown_prog += 1
+        elif x[3] != y[3]:
+            diffs.append(f"program ({len(x[3])} / {len(y[3])} instructions)")
+        if diffs:
+            if reported < max_report:
+                print(f"  draw {d}: {'; '.join(diffs[:8])}")
+            reported += 1
+            for x_ in diffs:
+                by_what[x_.split(" ")[0].split("[")[0]] += 1
+        else:
+            same += 1
+    if by_what:
+        print("  what differs (draws): " + ", ".join(f"{k} {v}" for k, v in by_what.most_common()))
+    if unknown_prog:
+        print(f"{unknown_prog} draws before the dump's first shader upload: program not compared")
+    print(f"same state at {same} of {len(pairs)} paired draws ({reported} differ)"
+          f"{'' if len(ka) == len(kb) == len(pairs) else ', NOT ALL DRAWS PAIRED'}")
+    return 0 if same == len(ka) == len(kb) else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--shbin-dir", default=None)
+    ap.add_argument("--kicks", action="store_true",
+                    help="compare the GPU state at each draw of two dumps (A B)")
+    ap.add_argument("--max-report", type=int, default=20)
     ap.add_argument("files", nargs="+")
     a = ap.parse_args()
+    if a.kicks:
+        if len(a.files) != 2:
+            print("--kicks takes two files")
+            return 2
+        return compare_kicks(a.files[0], a.files[1], a.max_report)
     shbins = Shbins(a.shbin_dir)
     for f in a.files:
-        b = pathlib.Path(f).read_bytes()
-        magic, frame, nw = struct.unpack("<3I", b[:12])
-        if magic != 0x44444D43:
+        try:
+            frame, _, words = read_dump(f)
+        except ValueError:
             print(f"{f}: not a cmd_dump file")
             continue
-        words = struct.unpack("<%dI" % nw, b[12:12 + 4 * nw])
+        nw = len(words)
         st = decode(words, shbins)
         draws = sum(st["draws"].values())
         print(f"== {f}: frame {frame}, {nw} words ({nw * 4 / 1024:.1f} KB), {draws} draws, "

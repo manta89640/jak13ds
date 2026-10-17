@@ -39,7 +39,10 @@ class Loader {
   BankHandle BankLoad(std::span<u8> bank);
   // (AI-assisted) BankLoad in two steps, so a player can parse a bank without holding its lock:
   // ParseBank touches no loader state, AddBank takes the parsed bank (nullptr: returns nullptr).
-  static std::unique_ptr<SoundBank> ParseBank(std::span<u8> bank);
+  // (AI-assisted) owner: the buffer `bank` is in; the bank may keep it and use its samples where
+  // they are (no copy: the heap needs one piece of the bank's size, not two)
+  static std::unique_ptr<SoundBank> ParseBank(std::span<u8> bank,
+                                              std::unique_ptr<u8[]>* owner = nullptr);
   BankHandle AddBank(std::unique_ptr<SoundBank> bank);
 
  private:

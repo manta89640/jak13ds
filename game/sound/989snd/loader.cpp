@@ -191,7 +191,9 @@ static Grain ReadGrainV2(BinaryReader& data, BinaryReader grainData, u8* samples
   return grain;
 };
 
-SFXBlock* SFXBlock::ReadBlock(std::span<u8> bank_data, std::span<u8> samples) {
+SFXBlock* SFXBlock::ReadBlock(std::span<u8> bank_data,
+                              std::span<u8> samples,
+                              std::unique_ptr<u8[]>* owner) {
   BinaryReader data(bank_data);
   // auto block = std::make_unique<SFXBlock>();
   auto block = new SFXBlock();
@@ -200,8 +202,16 @@ SFXBlock* SFXBlock::ReadBlock(std::span<u8> bank_data, std::span<u8> samples) {
     return nullptr;
   }
 
-  block->SampleData = std::make_unique<u8[]>(samples.size());
-  std::copy(samples.begin(), samples.end(), block->SampleData.get());
+  // (AI-assisted) the samples where they are in the owner's buffer (kept), or a copy
+  u8* sample_base;
+  if (owner && *owner) {
+    block->SampleData = std::move(*owner);
+    sample_base = samples.data();
+  } else {
+    block->SampleData = std::make_unique<u8[]>(samples.size());
+    std::copy(samples.begin(), samples.end(), block->SampleData.get());
+    sample_base = block->SampleData.get();
+  }
 
   block->Version = data.read<u32>();
   block->Flags.flags = data.read<u32>();
@@ -249,9 +259,9 @@ SFXBlock* SFXBlock::ReadBlock(std::span<u8> bank_data, std::span<u8> samples) {
       auto grains = data.at(FirstGrain + FirstSFXGrain);
       for (auto& grain : sfx.Grains) {
         if (block->Version < 2) {
-          grain = ReadGrainV1(grains, block->SampleData.get());
+          grain = ReadGrainV1(grains, sample_base);
         } else {
-          grain = ReadGrainV2(grains, data.at(GrainData), block->SampleData.get());
+          grain = ReadGrainV2(grains, data.at(GrainData), sample_base);
         }
       }
     }
@@ -315,7 +325,8 @@ SFXBlock* SFXBlock::ReadBlock(std::span<u8> bank_data, std::span<u8> samples) {
 
 MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
                                std::span<u8> samples,
-                               std::span<u8> midi_data) {
+                               std::span<u8> midi_data,
+                               std::unique_ptr<u8[]>* owner) {
   BinaryReader data(bank_data);
   // auto bank = std::make_unique<MusicBank>();
   auto bank = new MusicBank();
@@ -325,8 +336,16 @@ MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
     return nullptr;
   }
 
-  bank->SampleData = std::make_unique<u8[]>(samples.size_bytes());
-  std::copy(samples.begin(), samples.end(), bank->SampleData.get());
+  // (AI-assisted) as SFXBlock::ReadBlock
+  u8* sample_base;
+  if (owner && *owner) {
+    bank->SampleData = std::move(*owner);
+    sample_base = samples.data();
+  } else {
+    bank->SampleData = std::make_unique<u8[]>(samples.size_bytes());
+    std::copy(samples.begin(), samples.end(), bank->SampleData.get());
+    sample_base = bank->SampleData.get();
+  }
 
   bank->SeqData = std::make_unique<u8[]>(midi_data.size_bytes());
   std::copy(midi_data.begin(), midi_data.end(), bank->SeqData.get());
@@ -384,7 +403,7 @@ MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
 
     auto tones = data.at(FirstTone);
     for (auto& tone : prog.Tones) {
-      tone = ReadTone(tones, bank->SampleData.get());
+      tone = ReadTone(tones, sample_base);
     }
   }
 
@@ -420,7 +439,7 @@ BankHandle Loader::AddBank(std::unique_ptr<SoundBank> bank) {
   return handle;
 }
 
-std::unique_ptr<SoundBank> Loader::ParseBank(std::span<u8> bank) {
+std::unique_ptr<SoundBank> Loader::ParseBank(std::span<u8> bank, std::unique_ptr<u8[]>* owner) {
   BinaryReader reader(bank);
   FileAttributes fa;
   fa.Read(reader);
@@ -442,9 +461,10 @@ std::unique_ptr<SoundBank> Loader::ParseBank(std::span<u8> bank) {
     }
     std::span<u8> midi_data(std::span<u8>(bank).subspan(fa.where[2].offset, fa.where[2].size));
 
-    return std::unique_ptr<SoundBank>(MusicBank::ReadBank(bank_data, sample_data, midi_data));
+    return std::unique_ptr<SoundBank>(
+        MusicBank::ReadBank(bank_data, sample_data, midi_data, owner));
   } else if (fourcc == snd::fourcc("SBlk")) {
-    return std::unique_ptr<SoundBank>(SFXBlock::ReadBlock(bank_data, sample_data));
+    return std::unique_ptr<SoundBank>(SFXBlock::ReadBlock(bank_data, sample_data, owner));
   }
 
   return nullptr;

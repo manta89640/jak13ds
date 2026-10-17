@@ -7,6 +7,9 @@
 ;    255 to undo that (the translation column stays). The normal is normalized anyway (rsq).
 ;  - lights[3..6] (light colors, ambient) are premultiplied by the color scale (1/510 rgb, 1/255
 ;    alpha): the vertex color goes in unscaled (one mul less).
+; (AI-assisted, far-fog) The game's fog (merc2.vert): 3 instructions more (36). Its amount, in
+; texcoord1 = outtc0.zw (packed like ctr_mesh_opt: no extra output register), is read from the fog
+; ramp on texture unit 1 by the CTR_TCC_FOG draws' combiner stage; the other draws don't read it.
 ; Every output component is written exactly once; the two MOVAs are apart.
 
 .fvec clip[4]
@@ -16,12 +19,16 @@
 .fvec scales        ; x: texture coordinate scale (1/1024)
 .fvec lights[7]     ; 0-2: light direction rows, 3-5: light colors, 6: ambient (3-6 times the
                     ; color scale)
+.fvec mfog[2]       ; (AI-assisted, far-fog) 0: the fog amount as a row (dph with the camera space
+                    ; position: clip[3] / 255 and 1 - hvdf.w / 255), 1: x its lower, y its upper
+                    ; clamp (ctr_gpu_draw_skinned, skin_fog_rows)
 
 .constf consts(0.0, 0.0, 0.0, 0.0)
 .alias zero consts.xxxx
 
 .out outpos position
-.out outtc0 texcoord0
+.out outtc0 texcoord0.xy
+.out - texcoord1 outtc0.zw
 .out outclr color
 
 .alias inpos v0
@@ -53,6 +60,8 @@
   dp3 r5.y, innrm, r2
   dph r4.z, inpos, r3
   dp3 r5.z, innrm, r3
+  ; (AI-assisted, far-fog) the fog amount r9.x (unclamped)
+  dph r9.x, r4, mfog[0]
   dph outpos.x, r4, clip[0]
   dp3 r6.x, r5, r5
   dph outpos.y, r4, clip[1]
@@ -64,12 +73,14 @@
   mad r7, -r5.yyyy, lights[1], r7
   dph outpos.w, r4, clip[3]
   mad r7, -r5.zzzz, lights[2], r7
-  mul outtc0, scales.xxxx, intex
+  mul outtc0.xy, scales.xxxx, intex.xyyy
+  max r9.x, mfog[1].xxxx, r9.xxxx
   max r7, zero, r7
   mul r8, lights[3], r7.xxxx
   mad r8, r7.yyyy, lights[4], r8
   mad r8, r7.zzzz, lights[5], r8
   mad r8, r8, r6.xxxx, lights[6]
+  min outtc0.zw, mfog[1].yyyy, r9.xxxx
   mul outclr, inclr, r8
   end
 .end

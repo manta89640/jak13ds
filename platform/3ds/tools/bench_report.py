@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # (AI-assisted) Table of a config.ini pica_bench run (game/graphics/ctr/ctr_gpu_bench.c).
 #   bench_report.py <gk.log | stdout.log | bench.txt> [more files] [--all]
+# (AI-assisted, gpu-rt) Also the `[ctr] gpu breakdown` lines of config.ini gpu_breakdown = on: the
+# GPU time per frame of each part of the frame, averaged per level, with the triangles and draws of
+# the `render ms/frame` line of the same window and the fit fixed + per 1k triangles over windows.
 # Reads the `[bench] ...` lines of the last bench session (--all: every session, one after the
 # other) and prints, per test group, the GPU time and what it means per item, the hotspot stage
 # shares and the memory traffic (calibrated with B1's fills and transfers). docs/3ds-port/
@@ -222,7 +225,9 @@ def report(s):
                         est = (f"; the hardware default (old, {old_instr} instructions) is "
                                f"~{old_est:.2f} ns/vertex by the fit: "
                                f"{100.0 * (b3[opt] / old_est - 1.0):+.1f}%")
-                    print(f"  -> shader_opt {opt[3:]}: {ratio(opt, new)} against {new[3:]}{est}")
+                    # (AI-assisted) benches before Oct 16 also ran the removed new ctr_mesh / ctr_skin
+                    vs_new = f"{ratio(opt, new)} against {new[3:]}" if new in b3 else "measured"
+                    print(f"  -> shader_opt {opt[3:]}: {vs_new}{est}")
         elif prefix == "B4.":
             for t in names:
                 if t == "B4.cachenum":
@@ -276,13 +281,87 @@ def report(s):
                "pass bench.txt too: its last `start` line names the test that hung"))
 
 
+BD = re.compile(r"\[ctr\] gpu breakdown (\S+) over (\d+) frames.*?\(lists per frame\):(.*?); sum ([\d.]+); "
+                r"overhead ([\d.]+) ms per list")
+BD_ITEM = re.compile(r"(\w+) ([\d.]+) \(([\d.]+)\)")
+REND = re.compile(r"render ms/frame over \d+ frames:.*?; ([\d.]+) triangles, ([\d.]+) draws")
+
+
+def breakdown(paths):
+    """(AI-assisted, gpu-rt) per level: frame-weighted mean ms per phase (lists per frame)"""
+    levels, rows, last_rend = {}, [], None
+    for p in paths:
+        for raw in open(p, encoding="utf-8", errors="replace"):
+            m = REND.search(raw)
+            if m:
+                last_rend = (float(m.group(1)), float(m.group(2)))
+                continue
+            m = BD.search(raw)
+            if not m:
+                continue
+            lev, frames = m.group(1), int(m.group(2))
+            items = {k: (float(ms), float(n)) for k, ms, n in BD_ITEM.findall(m.group(3))}
+            d = levels.setdefault(lev, {"frames": 0, "ms": {}, "lists": {}, "sum": 0.0, "ovh": 0.0,
+                                         "tris": 0.0, "draws": 0.0})
+            d["frames"] += frames
+            for k, (ms, n) in items.items():
+                d["ms"][k] = d["ms"].get(k, 0.0) + ms * frames
+                d["lists"][k] = d["lists"].get(k, 0.0) + n * frames
+            d["sum"] += float(m.group(4)) * frames
+            d["ovh"] += float(m.group(5)) * frames
+            if last_rend:
+                d["tris"] += last_rend[0] * frames
+                d["draws"] += last_rend[1] * frames
+                rows.append((last_rend[0], float(m.group(4)), items))
+    if not levels:
+        return False
+    phases = []
+    for d in levels.values():
+        for k in d["ms"]:
+            if k not in phases:
+                phases.append(k)
+    print("== gpu breakdown (gpu_breakdown = on; ms per measured frame, each part alone on the GPU)")
+    print("  " + f"{'level':12s} {'frames':>6s} {'tris':>7s} {'draws':>6s} " +
+          " ".join(f"{k:>8s}" for k in phases) + f" {'sum':>7s} {'ovh/list':>8s}")
+    for lev, d in levels.items():
+        n = d["frames"]
+        print("  " + f"{lev:12s} {n:6d} {d['tris'] / n:7.0f} {d['draws'] / n:6.0f} " +
+              " ".join(f"{d['ms'].get(k, 0) / n:8.2f}" for k in phases) +
+              f" {d['sum'] / n:7.2f} {d['ovh'] / n:8.3f}")
+    print("  lists per frame: " + "; ".join(
+        f"{lev} " + " ".join(f"{k} {d['lists'].get(k, 0) / d['frames']:.1f}" for k in phases)
+        for lev, d in levels.items()))
+    if len(rows) >= 3:
+        # least squares: sum = a + b * triangles / 1000, and per phase the same (the fixed part)
+        xs = [r[0] / 1000.0 for r in rows]
+        mx = sum(xs) / len(xs)
+        vx = sum((x - mx) ** 2 for x in xs)
+
+        def fit(ys):
+            my = sum(ys) / len(ys)
+            b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / vx if vx else 0.0
+            return my - b * mx, b
+
+        a, b = fit([r[1] for r in rows])
+        print(f"  fit over {len(rows)} windows: sum = {a:.2f} ms + {b:.3f} ms per 1k triangles")
+        parts = []
+        for k in phases:
+            pa, pb = fit([r[2].get(k, (0.0, 0.0))[0] for r in rows])
+            parts.append(f"{k} {pa:.2f}+{pb:.3f}")
+        print("  per phase (fixed ms + ms per 1k triangles): " + ", ".join(parts))
+    return True
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if not args:
         print(__doc__ or "usage: bench_report.py <gk.log|bench.txt> [--all]", file=sys.stderr)
         return 2
+    had_bd = breakdown(args)
     ss = sessions(args)
     if not ss:
+        if had_bd:
+            return 0
         print("no [bench] lines found", file=sys.stderr)
         return 1
     for s in (ss if "--all" in sys.argv else ss[-1:]):

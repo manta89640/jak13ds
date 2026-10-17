@@ -38,8 +38,13 @@ set(RUNTIME_SOURCE
         graphics/gfx_test.cpp
         graphics/gfx.cpp
         graphics/pipelines/null.cpp
+        graphics/ctr/CtrButtonArt.cpp
         graphics/ctr/CtrDirect.cpp
+        graphics/ctr/CtrFineVis.cpp
+        graphics/ctr/CtrOccCull.cpp
+        graphics/ctr/CtrImpostor.cpp
         graphics/ctr/CtrLevel.cpp
+        graphics/ctr/CtrStream.cpp
         graphics/ctr/CtrMerc.cpp
         graphics/ctr/CtrEye.cpp
         graphics/ctr/CtrOcean.cpp

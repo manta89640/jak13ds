@@ -15,6 +15,9 @@ struct CtrSettings {
   // level geometry: chunks further than this are not drawn, with extra fog towards it so the
   // cutoff blends into the sky (meters, 0 = no limit)
   float draw_distance = 500.f;
+  // (AI-assisted) The defaults are the settled play values (Oct 16 config cleanup: the user's
+  // release config.ini); config.ini's preset = safe | bench | breakdown changes some of them
+  // (ctr_config_presets.h), its own lines win over both.
   // the extra fog starts at this fraction of draw_distance
   float fog_start = 0.6f;
   // the game's own distance fog (like the PC renderer)
@@ -55,7 +58,7 @@ struct CtrSettings {
   // (AI-assisted) config ocean = off | flat | waves | full (on = flat). flat: CtrOcean's static grid;
   // waves: the grid plus real waves near the camera; full: the PS2 ocean (draw-ocean)
   enum class OceanMode { Flat, Waves, Full };
-  OceanMode ocean_mode = OceanMode::Flat;
+  OceanMode ocean_mode = OceanMode::Full;  // (AI-assisted) full since the Oct 16 config cleanup
   // (AI-assisted) ocean = full: the wave texture is made every nth frame (1 = every frame; the
   // render thread's 1-1.7 ms for it, half as often by default)
   int ocean_texture_rate = 2;
@@ -65,7 +68,7 @@ struct CtrSettings {
   float ocean_near_alpha = 0.6f;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
-  bool distort = false;  // (AI-assisted) off: square sprites reported on hardware
+  bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
   // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
@@ -96,7 +99,8 @@ struct CtrSettings {
   bool shadows_full_wanted = false;  // full in config.ini, blob because of depth16 (for the log)
   // (AI-assisted) shadows = full: at most this many objects' shadows per frame, the ones that look
   // biggest from the camera (bounding sphere over distance: Jak's normally is one); 0 = all
-  int shadow_casters = 6;
+  // (AI-assisted) default 0 since Oct 12 (all casters, like the PS2); 6 was the 30 fps era cut
+  int shadow_casters = 0;
   // the sky (time of day sky texture, clouds); off: the screen is cleared to the fog color
   bool sky = true;
   // (AI-assisted) the clouds over the sky (one added pass over the sky's part of the screen)
@@ -105,26 +109,28 @@ struct CtrSettings {
   // needs what's behind it), only where they left the cleared depth: its pixels behind them are
   // dropped by the depth test (before blending and writing; with the early depth test, before
   // texturing). Same picture
-  bool sky_last = false;
+  bool sky_last = true;
   // (AI-assisted) frames whose opaque sky roof covers the whole screen (looking up) clear only the
   // depth buffer, not the color. Same picture
-  bool skip_clear = false;
+  bool skip_clear = true;
   // GPU starts on each part of a frame while the CPU builds the rest (off: at the frame end)
-  bool overlap = false;
+  bool overlap = true;
   // CPU builds frame N+1 while the GPU draws frame N
-  bool pipeline = false;
+  bool pipeline = true;
   // (AI-assisted) config frame_overlap2 = off | clean | on (with the pipeline; ctr_gpu.h
   // ctr_gpu_set_frame_overlap2): 0 the old frame end; 1 (clean, default) the frame's command list
   // cleaned from the CPU cache before waiting for the GPU, handed over without the GSP's flush;
   // 2 (on) the list queued behind the frame the GPU is drawing, no wait at the frame end
-  int frame_overlap2 = 1;
+  int frame_overlap2 = 2;
   // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
   int fps_cap = 30;
   // (AI-assisted) frame_pacing: steady (default) shows each frame a fixed time after the game
   // made it, so motion is even; fast shows it as soon as the GPU is done (lower latency, uneven)
   bool steady_pacing = true;
   // world space sprites (particles) per frame; the HUD is always drawn
-  int max_sprites = 1000;
+  // (AI-assisted) default 2176 since Oct 12: the game's own particle capacity (1920 2d + 256 3d,
+  // sparticle.gc), so nothing the PS2 draws is left out; 1000 was the 30 fps era cut
+  int max_sprites = 2176;
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
   // Default (auto): on in the emulator, off on the 3DS.
   bool rgba4_as_rgba8 = false;
@@ -157,6 +163,10 @@ struct CtrSettings {
   // default: the hotspot profiler registers have never run on hardware (a GPU that stalls on its
   // result FIFO would hang the game); turn on for a diagnostic run.
   bool gpu_counters = false;
+  // (AI-assisted) render_watchdog: a thread (core 0, 16 KB stack) that logs once per second for the
+  // first 60 s whether the render thread still finishes frames and its last stage (for hangs at
+  // boot). Off by default: ~60 log lines and the stack for nothing in a normal session
+  bool render_watchdog = false;
   // (AI-assisted) seconds between the render thread's statistics bursts (frame times, triangles,
   // draws, culling); shorter for measuring fixed views (more SD card writes)
   float stats_period = 15.f;
@@ -199,10 +209,10 @@ struct CtrSettings {
   // glows (radial gradient textures) from the procedural texture unit: no texels read
   bool proctex_glows = true;
   // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
-  float sprite_max_size = 0.5f;
+  float sprite_max_size = 0.f;  // (AI-assisted) 0 since Oct 12, as the PS2 (0.5 was the 30 fps cut)
   // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
   // (the game's 0..128; all sprites are left out below 2, the old rule for every size)
-  int sprite_min_alpha = 6;
+  int sprite_min_alpha = 2;  // (AI-assisted) 2 since Oct 12: the old rule only (6 was the 30 fps cut)
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
@@ -213,10 +223,64 @@ struct CtrSettings {
   // pieces of ~96 triangles made at load) tested against the view on their own: only the ones on
   // screen are drawn (bounding spheres made at load, 8 bytes per piece)
   bool run_culling = true;
+  // (AI-assisted) c3l v17 tie levels of detail: the instance groups that have a near version
+  // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
+  // off: the far versions only (as before v17)
+  bool tie_lod = true;
+  // (AI-assisted, streaming) c3l v19 levels: the near versions of the tie LOD groups (near chunks)
+  // are read from the file around the camera on the loader thread, into a stream arena of
+  // stream_kb KB of linear memory (taken at the first such level, kept), and freed far away; a group
+  // whose near chunk isn't there yet is drawn with its far version. off: the near chunks of the
+  // groups the level's v18 budget took are loaded with the level, the others never (v18's ties)
+  bool streaming = true;
+  int stream_kb = 4096;
+  // (AI-assisted, streaming) the linear heap's floor: the arena grows past stream_kb (segments of
+  // 1-4 MB, sized to the near chunks needed now and 2 s ahead) while they don't fit and the heap
+  // keeps this much (+ 256 KB) free after it; given back when the heap has less, or a level load
+  // needs the memory
+  int stream_reserve_kb = 3072;
+  // (AI-assisted, streaming) diagnostic: a log line for each near chunk that is late (and the
+  // camera's speed, its score before)
+  bool stream_debug = false;
+  // (AI-assisted) time of day: day palettes that move every frame (sunken's cycling lights, most
+  // of its vertices) taken every second frame (CtrLevel.cpp tod_update). off: every frame (exact)
+  bool tod_busy_half = true;
+  // (AI-assisted, citadel) time of day: a day palette that pulses (its weight turned around twice
+  // within ~4 s: Gol and Maia's Citadel's update-mood-light on palette 1, which 71% of its colors
+  // use, moves 1/64 every ~2 frames) is taken only when it moved this many 64ths from the weight
+  // last taken, or once it stood still for 8 frames (CtrLevel.cpp tod_update). 0: every move
+  // (exact as the PC; citadel ~4-8 ms of rewrites per frame)
+  int tod_pulse_step = 4;
+  // (AI-assisted, citadel) time of day: the most ms of rewrites per frame (all levels): the groups
+  // too far behind (3 day moves, or the file's colors) wait beyond it instead of being rewritten
+  // at once, the group pass's budget stays under it, and a day move waits until the last one's
+  // rewrites of the vertices drawn could be spread (the title's fast day, flickers). 0: no limit
+  // (the tod-fix rules: citadel / firecanyon / swamp single frames of 14-19 ms)
+  float tod_max_ms = 2.f;
+  // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
+  // far version where the far version's shape error is at most this many pixels on screen (this
+  // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).
+  // 1 px costs ~+30-70k triangles on the title and in Snowy; 4 keeps the worst views about where
+  // they were (host, Oct 17)
+  float tie_lod_px = 4.f;
   // (AI-assisted) a neighbouring level's visibility string (the camera is in the other level): its
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)
   bool neighbour_vis = true;
+  // (AI-assisted) the levels' finer precomputed visibility (<level>.c3v next to the .c3l, made by
+  // ctr_vis_builder): per cell of the camera's space, the level pieces that may be seen from there;
+  // the others aren't drawn (static tfrag / tie / shrub only; merc as before). A level without the
+  // file, or a camera outside the cells, draws as without it
+  bool fine_vis = false;  // (off: no .c3v files shipped, see c3l_format.md "Results")
+  // (AI-assisted) fine_vis: the memory per level for the .c3v blocks read around the camera (KB)
+  int fine_vis_kb = 128;
+  // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h): each frame
+  // the drawn opaque pieces nearest the camera (up to occ_cull_tris triangles within
+  // occ_cull_dist meters, the biggest on screen first) are rasterized on the CPU; the pieces behind
+  // them aren't drawn
+  bool occ_cull = false;  // (off: costs more CPU than it saves GPU, see config_dev.md)
+  int occ_cull_tris = 300;
+  float occ_cull_dist = 60.f;
   // (AI-assisted) the levels' low resolution tfrag (the game's far scenery) as vista: also in near
   // mode, outside the loaded levels' detailed areas (+50 m), out to vista_distance, with a haze
   // towards the fog color from draw_distance on instead of the draw distance fog (that one is
@@ -225,91 +289,112 @@ struct CtrSettings {
   // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here
   float vista_distance = 3000.f;
   // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
-  // fog stage (texture combiner pass-through, texture unit 1 off). Off until priced on hardware
-  // (gpu_profile ab): switching the unit per draw may cost more than the ramp lookups
-  bool fog_stage_skip = false;
+  // fog stage (texture combiner pass-through, texture unit 1 off). On (preset safe: off)
+  bool fog_stage_skip = true;
   // (AI-assisted) fog_alpha: level draws whose vertex alpha is 0x80 (~99.5%) get the fog amount in
-  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_fa) and mix in the fog color as a
+  // the vertex color's alpha (ctr_mesh_old_fa / ctr_mesh_opt_fa) and mix in the fog color as a
   // combiner constant: no fog ramp texture lookups, one vertex output less. The rest keep the
   // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
   // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
-  // shadows never read it). Both off until priced on hardware (gpu_profile ab): new shader
-  // programs / register writes that haven't run on a real 3DS yet.
+  // shadows never read it). Both on (preset safe: off).
   // (AI-assisted) levels converted with ctr_level_converter --vista-flat hold an untextured copy of
   // the vista tier (each texture's average color in the vertex colors, one draw per cell): on uses
   // it instead of the textured one (Snowy fort: 60 -> 22 vista draws, host). Read at level load
   // (not switchable while running)
-  bool vista_untextured = false;
-  bool fog_alpha = false;
-  bool tex1_gating = false;
-  // (AI-assisted) the vertex programs from two shared shbins (group E: basic, mesh, skin, clip,
-  // clip2 and their variants; F: skin_env, ocean, ocean_full, ocean_full_clip) instead of one each:
-  // citro3d uploads no shader code at a switch inside a group, and uniforms another program of the
-  // group doesn't use aren't written again. Off until priced on hardware (gpu_profile ab; pica_bench
-  // B2.prog_entry times the switch): shared-DVLB entry points never ran in the game on a real 3DS
-  bool shader_groups = false;
+  bool vista_untextured = true;
+  bool fog_alpha = true;
+  bool tex1_gating = true;
   // (AI-assisted) shader_opt: the shorter vertex programs (platform/3ds/shaders/ctr_*_opt.v.pica:
   // level meshes 21 -> 10 instructions and 4 -> 3 output registers, merc 53 -> 33, merc shine
   // 56 -> 33, PS2 ocean 14 -> 9 and 12 -> 6). Same picture in Azahar. On (the user's decision,
   // Oct 12: "we will keep the optimised shaders on"); pica_bench B3.mesh_opt / B3.skin_opt price
-  // it. It wins over shader_groups when both are on (the opt programs aren't in the groups)
+  // it. Off (preset safe): the Oct 2 programs (ctr_mesh_old, ctr_skin_old, ...)
   bool shader_opt = true;
   // (AI-assisted) cmd_dedup: register writes that would give a register the value it already has
   // are left out of the command list (texture unit 0's type at a texture change). The same
   // registers, the same picture; on. cmd_dedup_draw: the raw draws' PRIMITIVE_CONFIG mode and
-  // VERTEX_OFFSET writes too (4 of their ~30 words; citro3d writes them before every draw): off
-  // until hardware ran it (pica_bench B2 prices a command word; gpu_profile = ab)
+  // VERTEX_OFFSET writes too (4 of their ~30 words; citro3d writes them before every draw)
   bool cmd_dedup = true;
-  bool cmd_dedup_draw = false;
+  bool cmd_dedup_draw = true;
   // (AI-assisted) skin_clip_f24: each merc model's clip matrix and lights as float24 uniforms like
   // the bone rows (skin_rows_f24): 11 words less per model. Not bit-identical (rounding): off until
   // priced (pica_bench B2.unif_f24 vs B2.unif_f32, the same line as skin_rows_f24)
-  bool skin_clip_f24 = false;
+  bool skin_clip_f24 = true;
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
+  // (AI-assisted) impostors (CtrImpostor): far tie objects (each visibility group, up to 8
+  // instances: trees, rocks, houses) whose nearest point is beyond impostor_distance (meters) and
+  // that cover at most 128x128 pixels are drawn into a texture at screen resolution and shown as
+  // a card (one quad per cell on the plane of the group's visible surface there) in their place,
+  // until the picture could be off by impostor_error pixels (camera moved), the time of day moved
+  // its colors, or they come nearer: then drawn again. At most impostor_budget triangles are drawn
+  // into impostors per frame (the rest stay geometry that frame). impostor_atlas: the texture's
+  // size in KB (256 | 512 | 1024; VRAM when there is room at start, else linear memory). On by
+  // default since Oct 17 (the Sentinel Beach arch depth error fixed: CtrImpostor.h)
+  bool impostors = true;  // (AI-assisted) on since Oct 17 (beach depth fix; preset safe: off)
+  float impostor_distance = 120.f;
+  float impostor_error = 1.f;
+  int impostor_budget = 6000;
+  int impostor_atlas = 512;
   bool cull_ties = true;
   bool cull_flip = false;
   // (AI-assisted) back faces of merc draws the converter marked (c3l kMercDrawCullBack: wound like
   // their vertex normals, at most 2% of their triangles at an open edge, opaque) are culled, with
   // cull_ties' winding (flip). Not HUD models, not draws whose palette has a mirroring bone. Needs
   // levels converted with the current ctr_level_converter (older files: no marks)
-  bool cull_merc = false;
+  bool cull_merc = true;
+  // (AI-assisted, far-fog) the game's fog on merc models (characters, objects, the far views of
+  // other levels: med-res-level, e.g. Sandover from Misty), per vertex like merc2.vert. Needs
+  // shader_opt (ctr_skin_opt); the Oct 2 skin program has no fog. Read per model (gpu_profile = ab)
+  bool merc_fog = true;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
   // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
   // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
-  bool vcache_reuse = false;
+  bool vcache_reuse = true;
+  // (AI-assisted, gpu-rt) static_cmdlists: the level meshes' raw command words of a stretch of
+  // draws (same program, no citro3d update) are kept after two frames drew them alike and copied
+  // in again while the draws, the GPU state before them and the settings stay the same; only the
+  // chunk matrices are written anew. Same words (static_cmdlists = compare checks every replay
+  // against the per-frame path and logs mismatches). 0 off, 1 on, 2 compare
+  int static_cmdlists = 1;
+  // (AI-assisted, gpu-rt) gpu_breakdown: every 4th frame the GPU runs each part of the frame alone
+  // (clear, sky, level, merc, translucent, shadows, ocean, sprites, distort copy, HUD, transfer)
+  // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower
+  // while on. Profiling only, off; needs pipeline = on
+  bool gpu_breakdown = false;
+  // (AI-assisted, gpu-rt) ocean_tex_half: the flat / waves ocean's shading texture is made every
+  // second frame (the heights still every frame for the near grid); ocean = full has
+  // ocean_texture_rate
+  bool ocean_tex_half = true;
+  // (AI-assisted) c3l v15 opaque alpha: the alpha tests / blending ctr_level_converter took out of
+  // level draws whose texture alpha is 1.0 in every texel of every mip level and whose vertex alpha
+  // is >= 0x80 (kDrawAlphaTestDropped / kDrawBlendDropped: they can't change a pixel) stay out; off
+  // puts them back. Each frame (gpu_profile = ab). Older files: no such draws
+  bool opaque_alpha = true;
   // (AI-assisted) cmd_dump: a frame's GPU command list to data/log/cmd_NN.bin every 20 s
   // (platform/3ds/tools/cmd_report.py); diagnostic, off
   bool cmd_dump = false;
-  // (AI-assisted) tex_cache_clear = always | uploads: always (default) clears the GPU's texture
-  // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it for level pool
-  // textures (static texels) unless a pool was filled or moved since the last clear
-  bool tex_cache_uploads = false;
-  // (AI-assisted) cb_read_opaque: the GPU doesn't read the color buffer for draws that overwrite
-  // it whole (opaque); unknown on hardware (GBATEK), pica_bench B6.cbread0.probe decides. Off
-  bool cb_read_opaque = false;
+  // (AI-assisted) tex_cache_clear = always | uploads (default): always clears the GPU's texture
+  // cache at every texture bind (citro3d's way, ~300 per frame); uploads skips it only for binds
+  // that keep a level pool texture and change its sampling settings (switches between level pool
+  // textures skipped it too until the minecart red patches, see bind_texture)
+  bool tex_cache_uploads = true;
   // (AI-assisted) hardware hang bisect switches (Oct 3 optimisations; off = the Oct 2 behaviour):
-  // new_shaders: the shorter vertex shaders (off: the Oct 2 ctr_basic/mesh/skin/skin_env);
   // asm_tex: the 4x2 group / LDM-STM texture tiling, 64-bit PSMCT32 uploads and SIMD sky loops
   // (off: the old per texel loops); asm_mem: ctr_mem.S memcpy/memmove/memset (off: byte/word C
   // loops; read by platform/3ds/port at boot); fast_clock: steady_clock without divides (off:
   // clock_gettime)
-  // (AI-assisted) off by default: the new ctr_mesh hung the real GPU (hardware bisect 2026-10-03);
-  // the new ctr_basic passed on hardware (shader_basic = new below), the skin ones are untested
-  bool new_shaders = false;
   bool asm_tex = true;
   // (AI-assisted) defer_flush: the render thread's cache flushes held until the frame is submitted
   // (e165bc719); off: each one right away, as on Oct 2
   bool defer_flush = true;
-  // (AI-assisted) hang bisect: shader_basic old|new, shader_mesh old|new|dph (-1: new_shaders)
-  int shader_basic = 1, shader_mesh = -1;
-  // (AI-assisted) shader_skin old|new: ctr_skin and ctr_skin_env (-1: new_shaders). The new ones
-  // pass platform/3ds/tools/check_shaders.py but never ran on hardware (pica_bench B3.skin_new
-  // runs the new ctr_skin once)
-  int shader_skin = -1;
+  // (AI-assisted) shader_basic new | old: the 7 instruction ctr_basic (hardware proven) or the
+  // Oct 2 one (ctr_basic_old). (The Oct 3 ctr_mesh / ctr_skin, which hung the real GPU, and their
+  // switches new_shaders / shader_mesh / shader_skin were removed on Oct 16.)
+  int shader_basic = 1;
   bool asm_mem = true;
   bool fast_clock = true;
   // running in an emulator (Azahar / Citra), for the auto defaults above
@@ -318,8 +403,18 @@ struct CtrSettings {
   std::string summary() const;
 };
 
-/*! The settings (loaded on first use). */
-const CtrSettings& ctr_settings();
+/*! The settings (loaded on first use). (AI-assisted, micro-level) Inline: after the first call a
+ * read of a plain pointer (published with a release store once the settings are made; the reads
+ * through it depend on its address, which ARM orders), not an out-of-line call with a static's
+ * guard and barrier. */
+namespace ctr_settings_detail {
+extern const CtrSettings* g_settings;
+const CtrSettings& first_use();
+}  // namespace ctr_settings_detail
+inline const CtrSettings& ctr_settings() {
+  const CtrSettings* s = ctr_settings_detail::g_settings;
+  return __builtin_expect(s != nullptr, 1) ? *s : ctr_settings_detail::first_use();
+}
 /*! (AI-assisted) The same, changeable: only for gpu_profile = ab (render thread, between frames;
  * the switches it changes are read by the renderers each frame). */
 CtrSettings& ctr_settings_ab();

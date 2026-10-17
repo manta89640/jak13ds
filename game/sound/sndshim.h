@@ -1,5 +1,6 @@
 
 #pragma once
+#include <memory>
 #include <span>
 
 #include "common/common_types.h"
@@ -80,6 +81,9 @@ snd::BankHandle snd_BankLoadEx(const char* filepath,
 // (AI-assisted) Like snd_BankLoadEx, for a bank that is already in memory (the data from the
 // offset on). The data is copied. Any thread (the parse runs outside the player's lock).
 snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data);
+// (AI-assisted) The same for data in owner's buffer, which the bank keeps: its samples aren't
+// copied (one piece of the heap of the file's size instead of two)
+snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data, std::unique_ptr<u8[]> owner);
 
 void snd_BankLoadFromIOPPartialEx_Start();
 void snd_BankLoadFromIOPPartialEx(const u8* data, u32 length, u32 spu_mem_loc, u32 spu_mem_size);
