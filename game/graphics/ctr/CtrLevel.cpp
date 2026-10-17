@@ -2700,6 +2700,117 @@ void fine_vis_select(CtrLevelData::FineVis& fv, int set) {
   }
 }
 
+// (AI-assisted, micro-level) a chunk's runs, one by one (CtrTfragRenderer::draw_level, emit_chunk):
+// the visibility bit (VIS) or the vista source, the other version of a tie LOD group (LOD), the
+// view test against the crossed planes (STR), the fine_vis bit; writes m_run_shown /
+// m_run_nomerge. A copy per combination of VIS, STR and LOD (no tests of them per run), the
+// arrays in locals (the u8 stores may alias anything: through members every vector's data
+// pointer was loaded again after each store).
+struct RunLoopIn {
+  const c3l::VisRun* runs;
+  const CtrLevelData::RunSphere* spheres;
+  const c3l::RunLod* run_lod;
+  const u8* lod_state;
+  const u8* vis;
+  const u8* vista_src;
+  size_t vista_src_n;
+  const u32* fbits;
+  u32 fine_u0;
+  bool vista_tier, fine_runs;
+  std::vector<std::pair<u32, u32>>* fine_hidden;  // CTR_FINE_VIS_CHECK (else nullptr)
+  u32 ci;
+  const float* po;
+  const float (*pk)[3];
+  int np;
+  float scale;
+  u8* shown_out;
+  u8* nomerge_out;
+};
+struct RunLoopOut {
+  u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
+  u64 fine_tris = 0, lod_tris[2] = {0, 0};
+};
+template <bool VIS, bool STR, bool LOD>
+void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
+  u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
+  u64 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
+  const c3l::VisRun* const runs = in.runs;
+  const u8* const vis = in.vis;
+  u8* const shown_out = in.shown_out;
+  u8* const nomerge_out = in.nomerge_out;
+  const bool vista_tier = in.vista_tier, fine_runs = in.fine_runs;
+  for (u32 r = r0; r < r0 + nr; r++) {
+    const c3l::VisRun& run = runs[r];
+    bool s = true;
+    if (VIS) {
+      const u16 id = run.vis;
+      s = id == 0xffff || (vis[id >> 3] & (0x80 >> (id & 7)));
+    } else if (vista_tier) {
+      // (AI-assisted) a vista run stands in for its source chunk where that one isn't drawn
+      const u16 src = run.vis;
+      s = src < in.vista_src_n && in.vista_src[src];
+    }
+    // (AI-assisted) c3l v17: the other version of a LOD group: hidden, and never drawn along
+    // with its neighbours (draw: both versions would be on top of each other)
+    u8 nomerge = 0, lod_version = 0;
+    if (LOD) {
+      const auto& rl = in.run_lod[r];
+      if (rl.lod != c3l::kRunLodAlways &&
+          (rl.lod == c3l::kRunLodNear) != (bool)(in.lod_state[rl.group] & 1)) {
+        nomerge = 1;
+        if (s) {
+          s = false;
+          lod_hid++;
+        }
+      } else {
+        lod_version = rl.lod;
+      }
+    }
+    nomerge_out[r] = nomerge;
+    if (STR && s) {
+      const auto& rs = in.spheres[r];
+      if (rs.r != 0xffff) {
+        const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * in.scale;
+        for (int i = 0; i < in.np; i++) {
+          if (!(in.po[i] + in.pk[i][0] * x + in.pk[i][1] * y + in.pk[i][2] * z > rad)) {
+            s = false;
+            break;
+          }
+        }
+        if (!s) {
+          view_hidden++;
+          view_tris += run.index_count / 3;
+        }
+      }
+    }
+    if (fine_runs && s) {
+      // (AI-assisted) fine_vis: the unit's bit in the camera cell's set
+      const u32 u = in.fine_u0 + (r - r0);
+      if (!((in.fbits[u >> 5] >> (u & 31)) & 1)) {
+        s = false;
+        fine_hid++;
+        fine_tris += run.index_count / 3;
+        if (in.fine_hidden) {
+          in.fine_hidden->push_back({in.ci, r});
+        }
+      }
+    }
+    shown_out[r] = s;
+    shown += s;
+    if (LOD && s && lod_version) {
+      (lod_version == 1 ? lod_tris1 : lod_tris2) += run.index_count / 3;  // (AI-assisted)
+    }
+  }
+  out->shown = shown;
+  out->view_hidden = view_hidden;
+  out->view_tris = view_tris;
+  out->fine_hid = fine_hid;
+  out->lod_hid = lod_hid;
+  out->fine_tris = fine_tris;
+  out->lod_tris[0] = lod_tris1;
+  out->lod_tris[1] = lod_tris2;
+}
+
 // (AI-assisted) host --ctr-gfx: env CTR_FINE_VIS_CHECK (ctr_level_fine_vis_check)
 bool fine_vis_check_enabled() {
 #ifdef __3DS__
@@ -3348,65 +3459,46 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
           m_cull_runs += nr;
         }
-        const float scale = ch.scale;
-        for (u32 r = r0; r < r0 + nr; r++) {
-          bool s = true;
-          if (vis_test) {
-            const u16 id = lev.vis_runs[r].vis;
-            s = id == 0xffff || (m_vis[id >> 3] & (0x80 >> (id & 7)));
-          } else if (vista_tier) {
-            // (AI-assisted) a vista run stands in for its source chunk where that one isn't drawn
-            const u16 src = lev.vis_runs[r].vis;
-            s = src < m_vista_src.size() && m_vista_src[src];
-          }
-          // (AI-assisted) c3l v17: the other version of a LOD group: hidden, and never drawn along
-          // with its neighbours (draw: both versions would be on top of each other)
-          u8 nomerge = 0, lod_version = 0;
-          if (lod_chunk) {
-            const auto& rl = lev.run_lod[r];
-            if (rl.lod != c3l::kRunLodAlways &&
-                (rl.lod == c3l::kRunLodNear) != (bool)(lev.lod_state[rl.group] & 1)) {
-              nomerge = 1;
-              if (s) {
-                s = false;
-                lod_hid++;
-              }
-            } else {
-              lod_version = rl.lod;
-            }
-          }
-          m_run_nomerge[r] = nomerge;
-          if (s && straddles) {
-            const auto& rs = lev.run_spheres[r];
-            if (rs.r != 0xffff) {
-              const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
-              for (int i = 0; i < np && s; i++) {
-                s = po[i] + pk[i][0] * x + pk[i][1] * y + pk[i][2] * z > rad;
-              }
-              if (!s) {
-                view_hidden++;
-                view_tris += lev.vis_runs[r].index_count / 3;
-              }
-            }
-          }
-          if (s && fine_runs) {
-            // (AI-assisted) fine_vis: the unit's bit in the camera cell's set
-            const u32 u = fine_u0 + (r - r0);
-            if (!((fine_bits[u >> 5] >> (u & 31)) & 1)) {
-              s = false;
-              fine_hid++;
-              m_fine_tris += lev.vis_runs[r].index_count / 3;
-              if (fine_check) {
-                m_fine_hidden.push_back({(u32)ci, r});
-              }
-            }
-          }
-          m_run_shown[r] = s;
-          shown += s;
-          if (s && lod_version) {
-            m_lod_tris[lod_version - 1] += lev.vis_runs[r].index_count / 3;  // (AI-assisted)
-          }
+        // (AI-assisted, micro-level) the loop is run_loop: one copy per combination of the tests
+        RunLoopIn in;
+        in.runs = lev.vis_runs.data();
+        in.spheres = lev.run_spheres.data();
+        in.run_lod = lev.run_lod.data();
+        in.lod_state = lev.lod_state.data();
+        in.vis = m_vis;
+        in.vista_src = m_vista_src.data();
+        in.vista_src_n = m_vista_src.size();
+        in.fbits = fine_bits;
+        in.fine_u0 = fine_u0;
+        in.vista_tier = vista_tier;
+        in.fine_runs = fine_runs;
+        in.fine_hidden = fine_check ? &m_fine_hidden : nullptr;
+        in.ci = (u32)ci;
+        in.po = po;
+        in.pk = pk;
+        in.np = np;
+        in.scale = ch.scale;
+        in.shown_out = m_run_shown.data();
+        in.nomerge_out = m_run_nomerge.data();
+        RunLoopOut o;
+        switch ((vis_test ? 1 : 0) | (straddles ? 2 : 0) | (lod_chunk ? 4 : 0)) {
+          case 0: run_loop<false, false, false>(in, r0, nr, &o); break;
+          case 1: run_loop<true, false, false>(in, r0, nr, &o); break;
+          case 2: run_loop<false, true, false>(in, r0, nr, &o); break;
+          case 3: run_loop<true, true, false>(in, r0, nr, &o); break;
+          case 4: run_loop<false, false, true>(in, r0, nr, &o); break;
+          case 5: run_loop<true, false, true>(in, r0, nr, &o); break;
+          case 6: run_loop<false, true, true>(in, r0, nr, &o); break;
+          default: run_loop<true, true, true>(in, r0, nr, &o); break;
         }
+        shown = o.shown;
+        view_hidden = o.view_hidden;
+        view_tris = o.view_tris;
+        fine_hid = o.fine_hid;
+        lod_hid = o.lod_hid;
+        m_fine_tris += o.fine_tris;
+        m_lod_tris[0] += o.lod_tris[0];
+        m_lod_tris[1] += o.lod_tris[1];
         m_cull_tris += view_tris;
         runs_valid = true;
         if (!shown) {
