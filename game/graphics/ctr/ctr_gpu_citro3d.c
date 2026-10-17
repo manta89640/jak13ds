@@ -4157,21 +4157,20 @@ static inline u32* raw_unif(u32* p, int loc, const u32* data, u32 words, int f32
  * float24 uniforms. (AI-assisted) The mantissa is rounded to nearest, not truncated as f32tof24
  * does: truncating every chunk's matrix translation left sub-pixel gaps between neighbouring level
  * chunks up close (the converter's chunk grids are watertight otherwise). */
+/* (AI-assisted, micro-gpu) Without branches: |f| rounded at bit 6 (a carry out of the mantissa
+ * raises the exponent), shifted to 7.16 and the exponent rebased from 127 to 63; below the
+ * smallest exponent (zeros and denormals too) +-0, above the largest +-(exponent 0x7f, mantissa
+ * 0) as before. The same result as the branching form for all 2^32 inputs (checked on the host:
+ * docs/3ds-port/performance.md "micro-gpu"); 54 instead of 91 ARM instructions per raw_pack_f24. */
 static inline u32 raw_f24(float f) {
   union {
     float f;
     u32 i;
   } u = {f};
-  const u32 m23 = (u.i & 0x7fffff) + 0x40; /* a carry out of the mantissa raises the exponent */
-  const u32 sign = u.i >> 31, mant = (m23 >> 7) & 0xffff;
-  const s32 e = (s32)((u.i >> 23) & 0xff) - 127 + 63 + (s32)(m23 >> 23);
-  if (e < 0 || !((u.i >> 23) & 0xff)) {
-    return sign << 23;
-  }
-  if (e > 0x7f) {
-    return (sign << 23) | (0x7fu << 16);
-  }
-  return (sign << 23) | ((u32)e << 16) | mant;
+  s32 t = (s32)(((u.i & 0x7fffffffu) + 0x40u) >> 7) - (s32)(64u << 16);
+  t = t < 0 ? 0 : t;
+  t = t >= (s32)(0x80u << 16) ? (s32)(0x7fu << 16) : t;
+  return ((u.i >> 8) & 0x800000u) | (u32)t;
 }
 /* v: C3D_FVec order (w, z, y, x) */
 static void raw_pack_f24(const float* v, u32* out) {
