@@ -49,9 +49,6 @@ class CtrSky {
   // (every source read): a frame with a source that couldn't be read used to leave a black or
   // partial texture for a frame (flickering clouds)
   std::vector<u8> m_work[2];
-  bool m_work_started[2] = {false, false};
-  bool m_work_failed[2] = {false, false};
-  int m_work_sources[2] = {0, 0};
   bool m_dirty[2] = {false, false};
   bool m_valid[2] = {false, false};
   bool m_depth_tested = false;  // (AI-assisted) sky_last
@@ -77,16 +74,23 @@ class CtrSky {
     int frames = 0;
     double blend_ms = 0;  // (AI-assisted, title-popin) render thread: blends and uploads
   } m_stats;
-  // (AI-assisted, title-popin) this frame's copies, and per (salt, texture) the weights of the
-  // copies of its last blend
+  // (AI-assisted, title-popin) this frame's copies, and per texture the copies of its last blend.
+  // (AI-assisted, sky-flicker) The copies of both levels (make-sky-textures runs per level: level
+  // 0's in bucket 32, level 1's added in bucket 39) are collected over the frame and blended once
+  // all of them are in (finish_blend, at the next sky draw): deciding per level whether to blend
+  // made frames from one level's part alone whenever the other level's weights stood still (Fire
+  // Canyon: village2's or village3's few percent and firecanyon's rest step at different frames as
+  // Jak moves; the sky and clouds flickered between the whole blend and one level's share).
   struct Copy {
-    u64 tex0;
+    u64 key;  // m_sources key (the source texture, as decoded in the copy's bucket)
     u32 intensity;
     int idx;
     bool first;
   };
   std::vector<Copy> m_copies;
-  std::map<std::pair<u64, int>, std::vector<u32>> m_last_weights;
+  u64 m_copies_frame = ~0ull;  // the frame the copies are from
+  std::vector<std::pair<u64, u32>> m_last_weights[2];
+  void finish_blend();
 };
 
 class CtrTfragRenderer;

@@ -831,6 +831,19 @@ distances moved), Snowy start 115k -> 114k. What is left: tie / shrub chunks the
 nearer to (the PS2 fades shrubs; ties have no limit there), the time of day vertex colors stepping
 (tod-fix), and on the host only, the sky drawn as hard-edged panels.
 
+**Fire Canyon sky flicker (AI-assisted, Oct 17, sky-flicker).** The table's "blended when the
+weights move" was decided per level. make-sky-textures runs once per level with a sky (level 0's
+copies in bucket 32, level 1's added in bucket 39, each weighted by the mood interpolation), and a
+frame where only one level's weights stepped was built from that level's share alone. Fire Canyon
+mixes its sky with village1's or village2's at about 40/60, and the shares step at different
+frames as the camera moves. The texture then flipped between the blend (Azahar, top of the screen
+~47/33/75), firecanyon alone (~65/38/50, dark red) and the neighbour alone (blue): 20 colour jumps
+in 90 frames standing at firecanyon-start, 165 partial blends in 1149 two-level host frames.
+Sentinel Beach next to village1 was hit the same way (36 in 317 frames). `CtrSky` now collects the
+frame's copies of both levels and decides and blends once, at the next sky draw (the same frame
+of latency as before): 0 jumps in Azahar, 0 one-frame texture flips on the host. village2's sky
+flashes (update-mood-lightning, sky weights 128 -> 0 -> 64) are the game's own and stay.
+
 ## Impostors on by default (AI-assisted, Oct 17, impostors)
 
 config_dev.md `impostors` has the mechanism. What changed on Oct 17, and what it costs:

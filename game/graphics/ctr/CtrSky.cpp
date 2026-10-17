@@ -72,11 +72,17 @@ CtrSky::~CtrSky() {
 
 void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
   const double t_start = ctr_gpu_time_ms();  // (AI-assisted, title-popin) statistics
+  // (AI-assisted, sky-flicker) copies left from a frame without a sky draw since: blended now
+  if (m_copies_frame != rs.frame_idx) {
+    finish_blend();
+    m_copies_frame = rs.frame_idx;
+  }
   // SkyBlendCPU::do_sky_blends: each copy is an adgif (the source texture) and a sprite whose
   // color is the weight (0x80 = 1.0); the first one of a frame draws (no ABE), the others add.
   // The sprite's second corner tells sky (32 px) from clouds (64 px).
-  // (AI-assisted, title-popin) the frame's copies first: whether to blend depends on all of them
-  m_copies.clear();
+  // (AI-assisted, sky-flicker) Here only the copies are collected and their sources decoded (the
+  // VRAM copy holds this level's pages now); finish_blend adds them up once the frame's copies of
+  // both levels are in.
   while (dma.current_tag().qwc == 6 && dma.current_tag_offset() != rs.next_bucket) {
     auto setup = dma.read_and_advance();
     if (dma.current_tag_offset() == rs.next_bucket) {
@@ -95,56 +101,6 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
     if (idx < 0) {
       continue;
     }
-    m_copies.push_back({tex0, intensity, idx, !GsPrim(tag.prim()).abe()});
-  }
-  // (AI-assisted) blended (and uploaded, with the clouds' mip levels) every 4th frame only: the
-  // time of day colors change over minutes, the clouds move by their texture offsets. It cost
-  // ~3 ms of the render thread per frame on the Misty zoomer course (Azahar).
-  // (AI-assisted, title-popin) Except while the weights move fast: the title runs the day ~20x
-  // faster and the sky stepped visibly every 4th frame (Azahar). A texture is blended again in any
-  // frame where its copies' weights (0x80 = 1.0) moved by kSkyFastDelta in all since its last blend.
-  constexpr u32 kSkyFastDelta = 1;
-  bool do_blend[2];
-  for (int i = 0; i < 2; i++) {
-    auto& last = m_last_weights[{salt, i}];
-    u32 delta = 0;
-    size_t n = 0;
-    for (const auto& c : m_copies) {
-      if (c.idx == i) {
-        delta += n < last.size() ? (u32)std::abs((int)c.intensity - (int)last[n]) : 0x80u;
-        n++;
-      }
-    }
-    delta += n != last.size() ? 0x80u : 0u;
-    do_blend[i] = !m_valid[i] || (rs.frame_idx & 3) == 0 || delta >= kSkyFastDelta;
-    if (do_blend[i]) {
-      last.clear();
-      for (const auto& c : m_copies) {
-        if (c.idx == i) {
-          last.push_back(c.intensity);
-        }
-      }
-      m_stats.fast_blends += (rs.frame_idx & 3) != 0 && m_valid[i];
-    }
-  }
-  for (const auto& copy : m_copies) {
-    const int idx = copy.idx;
-    if (!do_blend[idx]) {
-      continue;
-    }
-    const u64 tex0 = copy.tex0;
-    const bool first = copy.first;
-    const u32 intensity = copy.intensity;
-    auto& out = m_work[idx];
-    const size_t n = (size_t)kSize[idx] * kSize[idx] * 4;
-    if (first || !m_work_started[idx]) {
-      // the frame's blend starts from zero even when this source can't be read: the adds that
-      // follow would otherwise pile up over the frames (a saturated, technicolour sky)
-      out.assign(n, 0);
-      m_work_started[idx] = true;
-      m_work_failed[idx] = false;
-      m_work_sources[idx] = 0;
-    }
     constexpr u32 kRedecodeFrames = 300;
     // (AI-assisted) keyed by the uploads the texels and the CLUT came from too: another level's
     // page at the same VRAM address (same tex0) is a different texture
@@ -157,7 +113,8 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
       key = (key ^ p1) * 1099511628211ull;
     }
     if (m_sources.size() > 64 && !m_sources.count(key)) {
-      m_sources.clear();  // old levels' sources
+      // old levels' sources (this frame's copies so far find theirs missing: no blend this frame)
+      m_sources.clear();
     }
     Source& src = m_sources[key];
     if (src.frame == 0 || (u32)rs.frame_idx - src.frame >= kRedecodeFrames) {
@@ -188,27 +145,91 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
         }
       }
     }
-    if (!src.ok || src.w != kSize[idx] || src.h != kSize[idx]) {
-      m_work_failed[idx] = true;
-      continue;
-    }
-    if (out.size() != n) {
-      out.assign(n, 0);
-    }
-    // out[i] = min(255, out[i] + min(255, (in[i] * intensity) >> 7)), 4 bytes at a time
-    if (settings_asm_tex()) {
-      ctr_add_scaled_texels(out.data(), (const u8*)src.rgba.data(), n, intensity);
-    } else {
-      // (AI-assisted) asm_tex = off (hardware hang bisect): the Oct 2 byte loop
-      const u8* in = (const u8*)src.rgba.data();
-      for (size_t i = 0; i < n; i++) {
-        out[i] = (u8)std::min<u32>(255, out[i] + std::min<u32>(255, (in[i] * intensity) >> 7));
-      }
-    }
-    m_work_sources[idx]++;
-    m_stats.blends++;
+    m_copies.push_back({key, intensity, idx, !GsPrim(tag.prim()).abe()});
   }
   m_stats.blend_ms += ctr_gpu_time_ms() - t_start;
+}
+
+// (AI-assisted, sky-flicker) the collected frame's copies (both levels) into the two textures
+void CtrSky::finish_blend() {
+  if (m_copies_frame == ~0ull) {
+    return;
+  }
+  const u64 frame = m_copies_frame;
+  m_copies_frame = ~0ull;
+  // (AI-assisted) blended (and uploaded, with the clouds' mip levels) every 4th frame only: the
+  // time of day colors change over minutes, the clouds move by their texture offsets. It cost
+  // ~3 ms of the render thread per frame on the Misty zoomer course (Azahar).
+  // (AI-assisted, title-popin) Except while the weights move fast: the title runs the day ~20x
+  // faster and the sky stepped visibly every 4th frame (Azahar). A texture is blended again in any
+  // frame where its copies' weights (0x80 = 1.0) moved by kSkyFastDelta in all since its last blend.
+  // (AI-assisted, sky-flicker) Decided over all the frame's copies of the texture, both levels'.
+  constexpr u32 kSkyFastDelta = 1;
+  for (int i = 0; i < 2; i++) {
+    auto& last = m_last_weights[i];
+    u32 delta = 0;
+    size_t n = 0;
+    for (const auto& c : m_copies) {
+      if (c.idx == i) {
+        delta += n < last.size() && last[n].first == c.key
+                     ? (u32)std::abs((int)c.intensity - (int)last[n].second)
+                     : 0x80u;
+        n++;
+      }
+    }
+    if (n == 0) {
+      continue;  // not made this frame (no level with a sky): the last one stays
+    }
+    delta += n != last.size() ? 0x80u : 0u;
+    if (m_valid[i] && (frame & 3) != 0 && delta < kSkyFastDelta) {
+      continue;
+    }
+    // the whole blend from zero (the adds that follow a first copy would otherwise pile up over
+    // the frames: a saturated, technicolour sky); a source that can't be read keeps the last one
+    auto& out = m_work[i];
+    const size_t bytes = (size_t)kSize[i] * kSize[i] * 4;
+    out.assign(bytes, 0);
+    bool ok = true;
+    for (const auto& c : m_copies) {
+      if (c.idx != i) {
+        continue;
+      }
+      const auto it = m_sources.find(c.key);
+      if (it == m_sources.end() || !it->second.ok || it->second.w != kSize[i] ||
+          it->second.h != kSize[i]) {
+        ok = false;
+        break;
+      }
+      if (c.first) {
+        std::fill(out.begin(), out.end(), 0);  // drawn, not added (no ABE)
+      }
+      // out[i] = min(255, out[i] + min(255, (in[i] * intensity) >> 7)), 4 bytes at a time
+      if (settings_asm_tex()) {
+        ctr_add_scaled_texels(out.data(), (const u8*)it->second.rgba.data(), bytes, c.intensity);
+      } else {
+        // (AI-assisted) asm_tex = off (hardware hang bisect): the Oct 2 byte loop
+        const u8* in = (const u8*)it->second.rgba.data();
+        for (size_t k = 0; k < bytes; k++) {
+          out[k] = (u8)std::min<u32>(255, out[k] + std::min<u32>(255, (in[k] * c.intensity) >> 7));
+        }
+      }
+      m_stats.blends++;
+    }
+    if (!ok) {
+      continue;
+    }
+    m_stats.fast_blends += (frame & 3) != 0 && m_valid[i];
+    last.clear();
+    for (const auto& c : m_copies) {
+      if (c.idx == i) {
+        last.emplace_back(c.key, c.intensity);
+      }
+    }
+    m_rgba[i].swap(out);
+    m_dirty[i] = true;
+    m_valid[i] = true;
+  }
+  m_copies.clear();
 }
 
 void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
@@ -219,14 +240,10 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
   memcpy(&p, packet, sizeof(p));
   const double t_up = ctr_gpu_time_ms();  // (AI-assisted, title-popin) statistics
   m_stats.frames++;
-  // (AI-assisted) last frame's blends: keep them if they completed, otherwise the last good ones
-  for (int i = 0; i < 2; i++) {
-    if (m_work_started[i] && !m_work_failed[i] && m_work_sources[i] > 0) {
-      m_rgba[i].swap(m_work[i]);
-      m_dirty[i] = true;
-      m_valid[i] = true;
-    }
-    m_work_started[i] = false;
+  // (AI-assisted) last frame's blends (both levels' copies): kept if they completed, otherwise
+  // the last good ones stay. (sky-flicker) A frame draws the sky before its own sky blend buckets.
+  if (m_copies_frame != rs.frame_idx) {
+    finish_blend();
   }
   // the textures blended last frame (like the PS2: they sit in VRAM until this frame's sky)
   for (int i = 0; i < 2; i++) {
