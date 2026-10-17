@@ -69,6 +69,7 @@ class CtrEyeRenderer : public CtrBucketRenderer {
   u64 m_key[kSlots];   // of the sprites and textures they came from
   int m_age[kSlots];   // frames the key didn't change
   std::vector<u32> m_pixels;     // the eye being composited, kSize x kSize, top row first
+  std::vector<Eye> m_eyes;       // (AI-assisted) this frame's (handle_eye_dma)
   std::deque<Source> m_sources;  // textures decoded this frame (deque: pointers stay valid)
   struct Stats {
     int eyes = 0;
