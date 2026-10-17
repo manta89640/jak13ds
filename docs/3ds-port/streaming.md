@@ -166,6 +166,65 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
 - `platform/3ds/tests/stream_traverse.pad`: the title's flight, a run through Sandover, the Zoomer
   in Fire Canyon.
 
-## Measurements
+## Measurements (Oct 17, Azahar New 3DS, private instance, sound off; host for the checks)
 
-(filled in below)
+**Tie groups with their near version (geometry 0)**, v18 -> v19 (all candidates): citadel 1869 ->
+1977, firecanyon 965 -> 1026, jungle 780 -> 792, lavatube 2874 -> 5772, misty 1345 -> 1696, ogre 758
+-> 1210, rolling 739 -> 1359, swamp 1013 -> 1119, village1 1722 -> 1905, village2 792 -> 1110; the
+other levels had every candidate already.
+
+**Linear memory with level pairs** (`level_pairs.pad`, the `[ctr] textures` line's linear free
+memory, least in the pair's window, KB; v19 counts the arena with its growth then):
+
+| pair | v18 free | v18 largest | v19 free | v19 largest | v19 arena |
+|---|---|---|---|---|---|
+| lavatube + citadel | 4336 | 4200 | 11182 | 11048 | 4096 |
+| finalboss + citadel | 12683 | 4600 | 15355 | 11152 | 4096 |
+| maincave + robocave | 12748 | 12596 | 11094 | 10960 | 4096 |
+| maincave + darkcave | 18691 | 12772 | 15411 | 11132 | 4096 |
+| sunken + sunkenb | 16814 | 16680 | 19074 | 18920 | 4096 |
+| village3 + ogre | 5914 | 5768 | 7044 | 6876 | 4096 |
+| snow + village3 | 5223 | 5056 | 8284 | 7116 | 7168 |
+| rolling + village2 | 5389 | 5256 | 5998 | 5852 | 4096 |
+| ogre + village2 | 3832 | 3652 | 4440 | 4300 | 5120 |
+| lavatube + village3 | 5405 | 5272 | 8871 | 8728 | 4096 |
+
+Every pair keeps >= 4.3 MB (v18: 3.6 MB at worst) with every group at geometry 0 near the camera;
+the maincave pairs lose 1.6-3.3 MB to the fixed arena (their levels have little near data). The
+resident mesh data per level (vertex + index data, converter): v18 -> v19 other chunks, e.g.
+village1 11578 -> 7126 KB, lavatube 16480 -> 10878, snow 16131 -> 7869, firecanyon 13569 -> 7457,
+citadel 9824 -> 4503, ogre 15585 -> 12319.
+
+**Level loads** (`[ctr] loaded`, ms, v18 -> v19): village1 3755 -> 2651, snow 4781 -> 2627, citadel
+3305 -> 2032, lavatube 4207 -> 3008, ogre 4115 -> 3395, rolling 3837 -> 3371, village2 3396 -> 2957,
+beach 4024 -> 2632, firecanyon 3812 -> 2124 (less read at the load).
+
+**Fast traversal** (`stream_traverse.pad`): the title's flight over Sandover, the run from the hut,
+the Zoomer in Fire Canyon. Late = a near chunk needed (one of its groups within its near distance)
+before it was there: its groups drawn far meanwhile.
+
+| segment | late after a cut (avg / max ms) | late otherwise (avg / max ms) | read from the SD card | busiest 15 s |
+|---|---|---|---|---|
+| boot + title start (no camera yet) | - | 70 (348 / 433) | 4.2 MB in 168 reads | 280 KB/s |
+| title flight (~70 s) | 0 | 0 | 2.9 MB in 162 reads | 109 KB/s |
+| Sandover hut continue + run | 7 (1688 / 3206) | 0 | 0.9 MB in 42 reads | 60 KB/s |
+| Fire Canyon, Keira scene + Zoomer race | 41 (442 / 1236) | 46 (358 / 1135) | 12.5 MB in 602 reads | 494 KB/s |
+
+Before the tuning (first working version): Fire Canyon ~150 late a run, 0.7 s average, 2.3 s at
+most; the hut continue 44 at ~3.6 s (arena fragmentation and no growth while the beach loaded). In
+view, none of these arrivals pops: the groups stay far until out of view (above). The late times
+after cuts (the Keira scene's and the race's cameras, focal length changes) are what the scheduler
+can't foresee; the others are the race at Zoomer speed. Host with the SD model (CTR_STREAM_SIM=5.5): the
+Zoomer race 0.1-0.36 s average.
+
+**Render thread** (`render ms/frame` build, v18 -> v19, same segments): title 19.32 -> 16.73,
+Sandover run 14.90 -> 15.15, Fire Canyon 12.01 -> 12.72; of it the scheduler 0.45-0.54 ms/frame
+(scoring every unit's bound, the groups of the near ones). GPU busy 20.15 -> 17.59, 16.20 -> 16.49,
+13.37 -> 14.00 ms. Triangles 108640 -> 112422 (title), 85383 -> 83837, 74939 -> 76141: more groups
+at full detail; within run-to-run noise elsewhere.
+
+**Checks**: host `CTR_STREAM_CHECK=1` over level_pairs.pad, playthrough_sweep.pad, zoomer.pad and
+stream_traverse.pad: 0 near versions drawn without their data, 0 near chunks drawn with the file's
+baked colors, run spheres and kDrawAlpha80 flags of the file identical to the ones made at load
+(166k spheres, 48k draws). Azahar `static_cmdlists = compare` over level_pairs.pad: 0 mismatched
+copies (~10k stretches checked).
