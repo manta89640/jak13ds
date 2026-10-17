@@ -1028,6 +1028,27 @@ static void prog_set_free(ProgSet* p) {
   memset(p, 0, sizeof(*p));
 }
 
+int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
+
+/* (AI-assisted, micro-gpu) config.ini gpu_micro (default on; off: every micro-gpu change of the
+ * command stream and its submission back to the Oct 17 behaviour, for the safe preset):
+ * the bits of s_micro. gpu_micro_ident = on (a test): each cmd_dump request dumps a frame with
+ * s_micro = 0 and the frame after the next with all on (the same vertex buffer copy), for
+ * cmd_report.py --kicks. */
+enum {
+  MICRO_RESIDENT = 1,   /* shader_resident's one code image (config.ini shader_resident too) */
+  MICRO_TEXREGS = 2,    /* texture unit 0: only the registers that change (with cmd_dedup) */
+  MICRO_GAS = 4,        /* GAS_DELTAZ_DEPTH only with a new depth function (with cmd_dedup) */
+  MICRO_PROCLUT = 8,    /* the procedural texture tables kept in the GPU's LUT memory */
+  MICRO_ATLAS = 16,     /* the mesh scales written raw */
+  MICRO_FENCE = 32,     /* steady pacing's fence words in the vertex buffer */
+  MICRO_FLUSHMERGE = 64 /* cache flush requests of near ranges merged */
+};
+#define MICRO_ALL 127u
+static u32 s_micro = MICRO_ALL;
+static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
+static int s_micro_ident;    /* gpu_micro_ident */
+static int s_micro_ident_st; /* its steps (ctr_gpu_frame_begin) */
 /* (AI-assisted) config.ini shader_opt: set 1, set 0's basic, clip, clip2 and ocean (the same
  * shbins) with the ctr_*_opt programs for the rest */
 static void load_opt_set(void) {
@@ -1200,6 +1221,11 @@ int ctr_gpu_init(void) {
   printf("[ctr] fog_alpha program: %s\n",
          s_ps[0].fa_ok ? "ready" : (g.mesh_fa_dvlb ? "uniforms don't match, off" : "none for this mesh shader, off"));
   load_opt_set(); /* (AI-assisted) config.ini shader_opt's programs (set 1) */
+  /* (AI-assisted, micro-gpu) config.ini gpu_micro, gpu_micro_ident */
+  s_micro = s_micro_cfg = ctr_config_bool("gpu_micro", 1) ? MICRO_ALL : 0;
+  s_micro_ident = ctr_config_bool("gpu_micro_ident", 0);
+  printf("[ctr] gpu_micro: %s%s\n", s_micro ? "on" : "off",
+         s_micro_ident ? " (gpu_micro_ident: dumps off / on pairs)" : "");
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
    * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
@@ -2498,9 +2524,20 @@ static void pipeline_submit(void) {
   }
 }
 
+static volatile int s_cmd_dump_next;
 void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
+  }
+  if (s_micro_ident_st) {
+    /* (AI-assisted, micro-gpu) gpu_micro_ident: frame k with everything off (dumped), k + 1 on,
+     * k + 2 on (dumped): k and k + 2 draw from the same vertex buffer copy */
+    const int st = s_micro_ident_st;
+    s_micro = st == 1 ? 0 : s_micro_cfg;
+    s_micro_ident_st = st == 3 ? 0 : st + 1;
+    if (st != 2) {
+      s_cmd_dump_next = 1;
+    }
   }
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
@@ -2691,11 +2728,17 @@ static unsigned int linear_largest_block(void) {
 #define CMD_DUMP_EVERY 600
 #define CMD_DUMP_MAX 12
 static int s_cmd_dump, s_cmd_dumps;
-static volatile int s_cmd_dump_next;
 void ctr_gpu_set_cmd_dump(int on) {
   s_cmd_dump = on ? 1 : 0;
 }
 void ctr_gpu_cmd_dump_next(void) {
+  if (s_micro_ident) {
+    /* (AI-assisted, micro-gpu) gpu_micro_ident: the off / on pair (ctr_gpu_frame_begin) */
+    if (!s_micro_ident_st) {
+      s_micro_ident_st = 1;
+    }
+    return;
+  }
   s_cmd_dump_next = 1;
 }
 static void cmd_dump_frame(void) {
@@ -5986,6 +6029,7 @@ typedef struct {
   int depth16, fog_tex_valid, fog_df, zdef_valid, proctex;
   u32 lod_bias, early_clear, fog_abgr, zscale0, zoffset0;
   const void* ps;
+  u32 micro; /* (AI-assisted, micro-gpu) s_micro */
 } ClSet;
 typedef struct {
   ctr_draw_state st;
@@ -6170,6 +6214,7 @@ static void cl_set_save(ClSet* t) {
   t->zscale0 = s_zscale0;
   t->zoffset0 = s_zoffset0;
   t->ps = g.ps;
+  t->micro = s_micro;
 }
 
 static inline void cl_stats(int* out) {
