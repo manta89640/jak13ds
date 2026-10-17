@@ -3840,13 +3840,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (in list order: early, sorted, ordered, as the vista pass drew them) and the other visible
     // ones per list (in their order: the main pass draws them as it drew the whole lists)
     m_vista_draws.clear();
+    // (AI-assisted, micro-level) in locals: push_back's stores had them loaded again per draw
+    const u32* const draw_chunk = lev.draw_chunk.data();
+    const int* const vslot = m_visible_slot.data();
+    const VisibleChunk* const vchunks = m_visible.data();
     for (int li = 0; li < 3; li++) {
       std::vector<u32>& main = m_main_draws[li];
       main.clear();
       for (u32 di : *main_lists[li]) {
-        const int slot = m_visible_slot[lev.draw_chunk[di]];
+        const int slot = vslot[draw_chunk[di]];
         if (slot >= 0) {
-          (m_visible[slot].vista ? m_vista_draws : main).push_back(di);
+          (vchunks[slot].vista ? m_vista_draws : main).push_back(di);
         }
       }
       main_lists[li] = &main;
