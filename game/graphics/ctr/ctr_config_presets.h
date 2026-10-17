@@ -40,6 +40,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"logic_micro", "off"}, /* micro-logic */
     {"tod_busy_half", "off"},
     {"streaming", "off"}, /* (AI-assisted, streaming) */
+    {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
 };
 /* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the A/B GPU
  * profile, the GSP perf log and the GPU counters (3ds-sdcard-oct12d config-bench.ini) */
