@@ -2805,6 +2805,8 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
  * clouds, ocean, eyes; blend shape vertices; the fog ramp) wait here until the frame's commands
  * go to the GPU (flush_vbuf, at every submission point), merged where the ranges touch. */
 #define DEFER_FLUSH_MAX 48
+#define DEFER_GAP (8u * 1024u) /* (AI-assisted, micro-gpu) see flush_vbuf */
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size; /* libctru */
 static struct {
   u32 start[DEFER_FLUSH_MAX], end[DEFER_FLUSH_MAX];
   int n;
@@ -2841,6 +2843,35 @@ static void flush_vbuf(void) {
   if (g.vbuf_used > g.vbuf_flushed) {
     cache_flush_frame(g.vbuf + g.vbuf_flushed, (u32)(g.vbuf_used - g.vbuf_flushed));
     g.vbuf_flushed = g.vbuf_used;
+  }
+  /* (AI-assisted, micro-gpu) ranges of the linear heap less than DEFER_GAP apart in one request:
+   * each request is an IPC to the GSP (tens of microseconds on hardware), cleaning a few more
+   * cache lines between them costs far less (the gap's lines: at most 256) */
+  if (s_defer.n > 1 && (s_micro & MICRO_FLUSHMERGE)) {
+    for (int i = 1; i < s_defer.n; i++) { /* by start (insertion sort, at most 48) */
+      const u32 a = s_defer.start[i], e = s_defer.end[i];
+      int j = i - 1;
+      while (j >= 0 && s_defer.start[j] > a) {
+        s_defer.start[j + 1] = s_defer.start[j];
+        s_defer.end[j + 1] = s_defer.end[j];
+        j--;
+      }
+      s_defer.start[j + 1] = a;
+      s_defer.end[j + 1] = e;
+    }
+    const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
+    int k = 0;
+    for (int i = 1; i < s_defer.n; i++) {
+      const u32 a = s_defer.start[i], e = s_defer.end[i];
+      if (a <= s_defer.end[k] + DEFER_GAP && s_defer.start[k] >= lin0 && e <= lin1 && a >= lin0) {
+        s_defer.end[k] = e > s_defer.end[k] ? e : s_defer.end[k];
+      } else {
+        k++;
+        s_defer.start[k] = a;
+        s_defer.end[k] = e;
+      }
+    }
+    s_defer.n = k + 1;
   }
   for (int i = 0; i < s_defer.n; i++) {
     cache_flush_now((const void*)s_defer.start[i], s_defer.end[i] - s_defer.start[i]);
