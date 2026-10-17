@@ -8,6 +8,8 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrLevel.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrStream.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrImpostor.cpp
+  ${OG_ROOT}/game/graphics/ctr/CtrFineVis.cpp
+  ${OG_ROOT}/game/graphics/ctr/CtrOccCull.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrMerc.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrOcean.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrOceanFull.cpp

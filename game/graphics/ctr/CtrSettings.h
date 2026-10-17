@@ -270,7 +270,16 @@ struct CtrSettings {
   // ctr_vis_builder): per cell of the camera's space, the level pieces that may be seen from there;
   // the others aren't drawn (static tfrag / tie / shrub only; merc as before). A level without the
   // file, or a camera outside the cells, draws as without it
-  bool fine_vis = true;
+  bool fine_vis = false;  // (off: no .c3v files shipped, see c3l_format.md "Results")
+  // (AI-assisted) fine_vis: the memory per level for the .c3v blocks read around the camera (KB)
+  int fine_vis_kb = 128;
+  // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h): each frame
+  // the drawn opaque pieces nearest the camera (up to occ_cull_tris triangles within
+  // occ_cull_dist meters, the biggest on screen first) are rasterized on the CPU; the pieces behind
+  // them aren't drawn
+  bool occ_cull = false;  // (off: costs more CPU than it saves GPU, see config_dev.md)
+  int occ_cull_tris = 300;
+  float occ_cull_dist = 60.f;
   // (AI-assisted) the levels' low resolution tfrag (the game's far scenery) as vista: also in near
   // mode, outside the loaded levels' detailed areas (+50 m), out to vista_distance, with a haze
   // towards the fog color from draw_distance on instead of the draw distance fog (that one is

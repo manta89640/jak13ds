@@ -48,7 +48,10 @@ mkdir -p "$DATA/out/jak1"
 rm -rf "$DATA/out/jak1/iso" "$DATA/out/jak1/c3l"
 mkdir -p "$DATA/out/jak1/iso" "$DATA/out/jak1/c3l"
 for f in "$PROJ"/out/jak1/iso/*; do cp -c "$f" "$DATA/out/jak1/iso/" 2>/dev/null || cp "$f" "$DATA/out/jak1/iso/"; done
-for f in "$PROJ"/out/jak1/c3l/*.c3l; do cp -c "$f" "$DATA/out/jak1/c3l/" 2>/dev/null || cp "$f" "$DATA/out/jak1/c3l/"; done
+for f in "$PROJ"/out/jak1/c3l/*.c3l "$PROJ"/out/jak1/c3l/*.c3v; do
+  [ -f "$f" ] || continue  # (AI-assisted) .c3v: fine_vis sidecars, when there are some
+  cp -c "$f" "$DATA/out/jak1/c3l/" 2>/dev/null || cp "$f" "$DATA/out/jak1/c3l/"
+done
 cp "$GK" "$BASE/gk.3dsx"
 # the one settings file, made for this run: the --ini file (renderer settings) plus the options
 CONFIG="$BASE/config.ini"

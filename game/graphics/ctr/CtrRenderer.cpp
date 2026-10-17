@@ -85,6 +85,9 @@ const AbSwitch kAbSwitches[] = {
     // (AI-assisted) the finer precomputed visibility (.c3v files; loaded with fine_vis on)
     {"fine_vis", [](CtrSettings& s, bool on) { s.fine_vis = on; },
      [](const CtrSettings& s) { return s.fine_vis; }},
+    // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h)
+    {"occ_cull", [](CtrSettings& s, bool on) { s.occ_cull = on; },
+     [](const CtrSettings& s) { return s.occ_cull; }},
     {"cull_ties", [](CtrSettings& s, bool on) { s.cull_ties = on; },
      [](const CtrSettings& s) { return s.cull_ties; }},
     // (AI-assisted) c3l v17 tie levels of detail (off: the far versions only)
