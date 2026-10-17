@@ -228,3 +228,26 @@ stream_traverse.pad: 0 near versions drawn without their data, 0 near chunks dra
 baked colors, run spheres and kDrawAlpha80 flags of the file identical to the ones made at load
 (166k spheres, 48k draws). Azahar `static_cmdlists = compare` over level_pairs.pad: 0 mismatched
 copies (~10k stretches checked).
+
+**Playthrough sweep** (host, all 68 checkpoints, CTR_STREAM_CHECK + SD model): passes (exit 0), 0
+near versions without their data, 0 near chunks with baked colors. Late times: 1377 after cuts
+(continues: 0.97 s on average), 1073 otherwise (0.48 s). The long ones (up to 27 s) are in Boggy
+Swamp and Snowy Mountain, where the near data needed at once (5.6-6.6 MB) passes the arena and the
+growth the host's linear heap model allows (CTR_SOFT_LINEAR_KB 34000 with two levels in): the
+nearest chunks are read, the others' groups stay far (no holes) until room comes.
+
+## Left / risks
+
+- Capacity: where more near data is needed at once than the arena can hold (Swamp, Snowy:
+  converter estimate up to 6.4 / 6.2 MB), the furthest needed groups stay far. On hardware the
+  growth follows the real heap (more room than the host model); a level-dependent stream_kb or a
+  memory-pressure factor on the near distances (applied out of view only) would make it orderly.
+- Cuts: a cut to a camera with another focal length (cutscenes, the race camera) can't be
+  foreseen; the near chunks around Jak and the idle fill cover most of it, the rest is drawn far
+  for 0.3-1.7 s (never popping in view).
+- The scheduler costs 0.45-0.55 ms of render thread time per frame in Azahar (all units' bounds
+  every frame): could run every second frame.
+- tfrag tier 1 and the shrubs are not streamed (tier 2 has holes up close: no coarse fallback that
+  hides nothing); textures not streamed. Hardware SD timing not measured (Azahar reads the host's
+  disk; the cost model is 5.5 MB/s + 8 ms per request).
+- .c3v files: regenerate with `ctr_vis_builder --all` on the v19 folder (checked on sunkenb).
