@@ -3757,9 +3757,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       gap = 0;
     };
     const u32 r0 = lev.draw_first_run[di];
-    for (u32 r = r0; r < r0 + lev.draw_run_count[di]; r++) {
-      const auto& run = lev.vis_runs[r];
-      const bool shown = m_run_shown[r];  // (AI-assisted) visibility bit and view test
+    // (AI-assisted, micro-level) in locals: submit's stores would have them loaded again per run
+    const u32 r_end = r0 + lev.draw_run_count[di];
+    const c3l::VisRun* const runs = lev.vis_runs.data();
+    const u8* const run_shown = m_run_shown.data();
+    const u8* const run_nomerge = m_run_nomerge.data();
+    for (u32 r = r0; r < r_end; r++) {
+      const auto& run = runs[r];
+      const bool shown = run_shown[r];  // (AI-assisted) visibility bit and view test
       if (shown) {
         if (!open) {
           open = true;
@@ -3773,7 +3778,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       } else if (open) {
         gap += run.index_count;
         // (AI-assisted) c3l v17: the other version of a tie LOD group is never drawn along
-        if (gap > kMaxGap || m_run_nomerge[r]) {
+        if (gap > kMaxGap || run_nomerge[r]) {
           emit();
         }
       }
@@ -3827,6 +3832,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   m_vista_frames++;
   m_calls.clear();
+  // (AI-assisted, micro-level) the lists hold every draw of the level: the main pass's test of a
+  // draw's chunk here, inline (a call of draw for each hidden draw cost ~20 instructions)
+  const u32* const draw_chunk = lev.draw_chunk.data();
+  const int* const vslot = m_visible_slot.data();
+  const VisibleChunk* const vchunks = m_visible.data();
+  auto walk = [&](const std::vector<u32>& list) {
+    for (u32 di : list) {
+      const int slot = vslot[draw_chunk[di]];
+      if (slot >= 0 && !vchunks[slot].vista) {
+        draw(di);
+      }
+    }
+  };
   if (early_depth) {
     for (u8 band = 0; band < 3; band++) {
       for (u32 di : *main_lists[0]) {
@@ -3837,17 +3855,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
   } else {
-    for (u32 di : *main_lists[0]) {
-      draw(di);
-    }
+    walk(*main_lists[0]);
   }
-  for (u32 di : *main_lists[1]) {
-    draw(di);
-  }
+  walk(*main_lists[1]);
   impostors.draw_cards();  // (AI-assisted) opaque: before the blended draws
-  for (u32 di : *main_lists[2]) {
-    draw(di);
-  }
+  walk(*main_lists[2]);
   flush_calls(0);  // (AI-assisted, gpu-rt) static_cmdlists: the main pass's
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
