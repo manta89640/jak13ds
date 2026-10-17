@@ -355,6 +355,24 @@ their meshes (the alpha stays; a frame the GPU still draws may see part of the c
   a few `ctr_gpu_flush_range` per frame).
 - Config `tod_busy_half` (default on, preset safe: off): while day palettes jump (more than 4/64 in
   a frame) every frame for 8 frames (sunken's cycling lights), they are taken every second frame.
+- (AI-assisted, citadel) Config `tod_pulse_step` (default 4, preset safe: 0): a day palette that
+  pulses (its weight turned around twice within 256 frames: citadel's palette 1, a mood light
+  that 71% of its colors use, moving 1/64 every ~2 frames) is taken only when it moved that many
+  64ths from the weight last taken, or once it stood still for 8 frames. Without it every move
+  rewrote the drawn vertices (the groups were 3 moves behind every ~6 frames): citadel 3.5-8.7 ms
+  of time of day per frame, single frames 13-29 ms.
+  A palette found pulsing is remembered per level, so a reload counts it as pulsing at once.
+- (AI-assisted, citadel) Config `tod_max_ms` (default 2, preset safe: 0): the most ms of rewrites
+  per frame (all levels). Groups 3 moves behind or with the file's colors wait beyond it instead
+  of being rewritten at once (the next frame's pass starts from them), the group pass's budget
+  stays between 0.8 of it and it, and a day move waits (up to 32 frames; a move of 8/64 or more
+  doesn't) until the vertices drawn could be rewritten once per move within 0.7 of it (citadel's
+  pulse: taken every ~8-12 frames; on its smoothly lit pixels 2% of the 2-frame steps are 5
+  levels or more against 0.1% exact, Azahar screenshots). Not exact: a GPU path (palette 1's
+  contribution per vertex, 4 bytes, mixed in the vertex shader with a uniform weight) would be,
+  for ~1.7 MB of linear memory in citadel (435k vertices). Firecanyon's lava
+  (palettes 4-7, 62% of its colors) and swamp's lightning (palette 2, 53%) move as day palettes;
+  without the limit single frames took 14-19 ms.
 - A level's meshes are colored as they are read when weights are known for it (the weights it was
   last drawn with, or the last level's with the same day palettes); else they show the baked
   palette until drawn (then rewritten at once).

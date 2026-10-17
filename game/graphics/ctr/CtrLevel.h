@@ -221,6 +221,23 @@ struct CtrLevelData {
     u8 target_w[8][3] = {};
     bool blended_valid = false;  // weights taken at least once
     u8 busy_run = 0;  // config tod_busy_half: the level draws in a row a day palette jumped
+    // (AI-assisted, citadel) config tod_pulse_step: per palette the direction of the game's last
+    // move (1 up, 2 down), the frames of its last two reversals and of its last move, and the
+    // level draws a pulsing palette was held (statistics)
+    u8 pulse_dir[8] = {};
+    u64 pulse_rev[8][2] = {};
+    u64 pulse_move[8] = {};
+    u32 pulse_held = 0;
+    // the palettes found pulsing in an earlier load of the level (TodSeen) and the frame of the
+    // level's first draw: those count as pulsing from the start (until they don't turn around for
+    // as long as a pulse is recognised by)
+    u8 pulse_known = 0;
+    u64 first_frame = 0;
+    // (AI-assisted, citadel) config tod_max_ms: the frames a day move waits after the last one
+    // taken (from the vertices drawn: their rewrites once per move within
+    // tod_budget_ms; 0 while the day is slow)
+    float min_move_frames = 0;
+    bool day_waited = false;  // (statistics) a day move waited in the last tod_update
     // versions: + 1 per change of target_w (dver: of its day palettes); per palette its last;
     // lut[mask]: the last of the palettes in mask
     u32 ver = 0, dver = 0;
@@ -730,7 +747,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
-  u64 m_tod_spread = 0, m_tod_deferred = 0, m_tod_lag_frames = 0, m_tod_lag2 = 0;
+  u64 m_tod_spread = 0, m_tod_deferred = 0, m_tod_lag_frames = 0, m_tod_lag2 = 0, m_tod_held = 0,
+      m_tod_waited = 0, m_tod_capped = 0;
   u32 m_tod_lag_max = 0;
   double m_tod_ms = 0, m_tod_max_ms = 0;
   std::vector<const CtrLevelData*> m_loaded;
