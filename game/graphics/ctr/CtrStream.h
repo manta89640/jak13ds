@@ -40,6 +40,11 @@ class CtrStreamArena {
   // the empty growth segments back to the linear heap (render thread, or the thread of
   // CtrLevels::service; no frame being built). Returns their bytes.
   u32 release_empty();
+  // (fragmentation) a piece whose mesh was deleted: its memory comes back once the GPU is done
+  // (counted as free by run_if_freed); and the free run that freeing p would make (its piece with
+  // the free and pending pieces next to it)
+  void mark_pending(void* p);
+  u32 run_if_freed(void* p);
   // in a growth segment (those are emptied first); any growth segment
   bool in_growth(const void* p);
   bool has_growth() {
@@ -63,6 +68,7 @@ class CtrStreamArena {
     u32 size = 0;
     std::map<u32, u32> free;  // offset -> size (coalesced)
     std::map<u32, u32> used;  // offset -> size
+    std::map<u32, u32> pending;  // offset -> size: used pieces whose mesh was deleted
     u32 used_bytes = 0;
   };
   Seg* seg_of(const void* p);

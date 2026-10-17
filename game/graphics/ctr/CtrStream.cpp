@@ -101,6 +101,7 @@ void CtrStreamArena::free(void* p) {
   }
   u32 start = off, size = u->second;
   s->used.erase(u);
+  s->pending.erase(off);
   s->used_bytes -= size;
   m_used_bytes -= size;
   // coalesce with the free neighbours
@@ -118,6 +119,80 @@ void CtrStreamArena::free(void* p) {
     }
   }
   s->free[start] = size;
+}
+
+void CtrStreamArena::mark_pending(void* p) {
+  std::lock_guard<std::mutex> lk(m_lock);
+  Seg* s = p ? seg_of(p) : nullptr;
+  if (!s) {
+    return;
+  }
+  const u32 off = (u32)((u8*)p - s->base);
+  auto u = s->used.find(off);
+  if (u != s->used.end()) {
+    s->pending[off] = u->second;
+  }
+}
+
+u32 CtrStreamArena::run_if_freed(void* p) {
+  std::lock_guard<std::mutex> lk(m_lock);
+  Seg* s = p ? seg_of(p) : nullptr;
+  if (!s) {
+    return 0;
+  }
+  const u32 off = (u32)((u8*)p - s->base);
+  auto u = s->used.find(off);
+  if (u == s->used.end()) {
+    return 0;
+  }
+  // the pieces before and after it, free or pending, one after the other
+  auto size_at = [&](u32 o, u32* sz) {
+    auto f = s->free.find(o);
+    if (f != s->free.end()) {
+      *sz = f->second;
+      return true;
+    }
+    auto q = s->pending.find(o);
+    if (q != s->pending.end()) {
+      *sz = q->second;
+      return true;
+    }
+    return false;
+  };
+  u32 run = u->second, end = off + u->second, sz = 0;
+  while (end < s->size && size_at(end, &sz)) {
+    run += sz;
+    end += sz;
+  }
+  u32 start = off;
+  while (start > 0) {
+    // the piece ending at start: the free map's or the used (pending) one's
+    bool found = false;
+    auto f = s->free.lower_bound(start);
+    if (f != s->free.begin()) {
+      auto pf = std::prev(f);
+      if (pf->first + pf->second == start) {
+        run += pf->second;
+        start = pf->first;
+        found = true;
+      }
+    }
+    if (!found) {
+      auto q = s->pending.lower_bound(start);
+      if (q != s->pending.begin()) {
+        auto pq = std::prev(q);
+        if (pq->first + pq->second == start) {
+          run += pq->second;
+          start = pq->first;
+          found = true;
+        }
+      }
+    }
+    if (!found) {
+      break;
+    }
+  }
+  return run;
 }
 
 void CtrStreamArena::free_cb(void* mem) {

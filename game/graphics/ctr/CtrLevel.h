@@ -614,6 +614,7 @@ class CtrLevels {
   int m_levels_count = 0;
   std::set<std::string> m_parked;
   std::atomic<u64> m_render_frame{0};  // the render thread's frame (process_pending_loads)
+  std::atomic<u64> m_drawn_frame{0};   // (AI-assisted, streaming) the last frame a level was drawn
   std::set<std::string> m_resident;  // names in m_levels + m_prefetched (a prefetch skips them)
   void* m_thread = nullptr;
   std::set<std::string> m_requested;  // queued, loading or done but not taken (under m_lock)

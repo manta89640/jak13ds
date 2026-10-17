@@ -212,9 +212,20 @@ void CtrLevels::loader_main() {
       }
       return i;
     };
-    // (a "waited for" rule by the game's ready() calls was tried: the game polls ready() for the
-    // level it loads beside the one it plays too, and Sandover's hut waited 3.6 s for the beach)
-    auto it = pick([&](const Job& j) { return !j.stream && !j.prefetch && can_start(j); });
+    // While levels are drawn (the game plays: the level it loads is the neighbour, it doesn't
+    // wait) the stream jobs with near chunks needed now go first: they are short (at most ~0.1 s
+    // on hardware), and Sandover's hut waited 3.6 s behind the beach's load for its near chunks.
+    // With nothing drawn (a load the game waits for, black screen) the level loads go first. (A
+    // rule by the game's ready() calls was tried: it polls them for the neighbour too.)
+    const u64 rf = m_render_frame.load(), df = m_drawn_frame.load();
+    const bool playing = df && df + 3 >= rf;
+    auto it = m_queue.end();
+    if (playing) {
+      it = pick([](const Job& j) { return j.stream && j.urgent; });
+    }
+    if (it == m_queue.end()) {
+      it = pick([&](const Job& j) { return !j.stream && !j.prefetch && can_start(j); });
+    }
     if (it == m_queue.end()) {
       it = pick([](const Job& j) { return j.stream && j.urgent; });
     }
@@ -3755,6 +3766,7 @@ void CtrLevels::stream_note_camera(const math::Vector4f& t,
   }
   m_cam_frame = frame;
   m_cam_valid = true;
+  m_drawn_frame.store(frame);
 }
 
 void CtrLevels::stream_late(CtrLevelData& lev, u32 unit, u64 frame) {
@@ -3848,6 +3860,7 @@ void CtrLevels::stream_evict(CtrLevelData& lev, u32 unit) {
   if (lev.meshes[ci] >= 0) {
     ctr_gpu_mesh_delete(lev.meshes[ci]);  // the arena piece back after the GPU is done with it
     lev.meshes[ci] = -1;
+    CtrStreamArena::get().mark_pending(su.mem);
   }
   if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
     lev.tod->chunk_mesh[ci] = -1;
@@ -3988,8 +4001,9 @@ void CtrLevels::stream_update(u64 frame) {
   }
   if (arena.has_growth()) {
     const u32 free_now = ctr_gpu_linear_free();
-    if (level_loading || free_now < reserve) {
-      m_sst.shrunk += stream_shrink(level_loading || free_now + 512 * 1024 < reserve);
+    const u32 need = level_loading ? reserve + 12u * 1024u * 1024u : reserve;
+    if (free_now < need) {
+      m_sst.shrunk += stream_shrink(free_now + 512 * 1024 < need);
     }
     arena.release_empty();
   }
@@ -4151,15 +4165,41 @@ void CtrLevels::stream_update(u64 frame) {
                 [](const StreamCand& a, const StreamCand& b) { return a.score > b.score; });
       have_sorted = true;
     }
-    while (!mem && hi < m_have.size() && m_have[hi].score > kKeepMeters * kM) {
-      // the unit furthest beyond its need (the memory comes back once the GPU is done with it:
-      // at once on the host, at the next frame on the 3DS)
-      evicted += m_have[hi].lev->stream_units[m_have[hi].unit].bytes;
+    // (on the 3DS the freed memory comes back at the next frame: not more than this unit's worth
+    // freed for it, else one cut freed the whole arena)
+    // The victim: of the units beyond the keep margin (the furthest first), the first whose
+    // freeing makes a free run this big (with the free and pending pieces next to it: the arena's
+    // pieces are of all sizes, its free room in many small pieces after a while); else the
+    // furthest. Not more than this unit's worth (pending: their memory comes back next frame).
+    u64 freed_for = 0;
+    while (!mem && hi < m_have.size() && m_have[hi].score > kKeepMeters * kM &&
+           freed_for < su.bytes) {
+      size_t pick_i = hi;
+      for (size_t j = hi; j < m_have.size() && j < hi + 64 && m_have[j].score > kKeepMeters * kM;
+           j++) {
+        const auto& cu = m_have[j].lev->stream_units[m_have[j].unit];
+        if (cu.state == CtrLevelData::kUnitResident && arena.run_if_freed(cu.mem) >= su.bytes) {
+          pick_i = j;
+          break;
+        }
+      }
+      std::swap(m_have[hi], m_have[pick_i]);
+      const auto& victim = m_have[hi].lev->stream_units[m_have[hi].unit];
+      if (victim.state != CtrLevelData::kUnitResident) {
+        hi++;
+        continue;
+      }
+      const bool makes_room = arena.run_if_freed(victim.mem) >= su.bytes;
+      freed_for += makes_room ? su.bytes : victim.bytes;
+      evicted += victim.bytes;
       stream_evict(*m_have[hi].lev, m_have[hi].unit);
       hi++;
       mem = arena.alloc(su.bytes);
     }
-    if (!mem && evicted < su.bytes && !level_loading && arena.grow(su.bytes, reserve)) {
+    // (more room while a level loads only when the heap keeps the reserve plus a level's worth:
+    // the load's memory first; a load that runs short makes room, freeing the growth)
+    const u32 grow_reserve = level_loading ? reserve + 12u * 1024u * 1024u : reserve;
+    if (!mem && evicted < su.bytes && arena.grow(su.bytes, grow_reserve)) {
       // every unit there is needed: more room, while the linear heap keeps its reserve
       mem = arena.alloc(su.bytes);
     }
