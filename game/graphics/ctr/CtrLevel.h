@@ -505,6 +505,9 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<u8> m_vista_src;
   // this frame's visible chunks and draws (kept to avoid allocations)
   struct VisibleChunk {
+    // (AI-assisted, micro-level) not zeroed (emplace_back() zeroed all 220 bytes): draw_level sets
+    // every field, the backend makes gpu.f24's fog rows before it reads them (gpu.fog_gen 0)
+    VisibleChunk() {}
     u32 chunk;
     u8 band;    // (AI-assisted) distance band for the early depth order: 0 near .. 2 far
     bool partly;  // (AI-assisted) some of its visibility runs are hidden: draw run by run

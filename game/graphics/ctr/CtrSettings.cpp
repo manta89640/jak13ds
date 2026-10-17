@@ -550,9 +550,14 @@ CtrSettings& settings_instance() {
 }
 }  // namespace
 
-const CtrSettings& ctr_settings() {
-  return settings_instance();
+namespace ctr_settings_detail {
+const CtrSettings* g_settings = nullptr;
+const CtrSettings& first_use() {
+  const CtrSettings& s = settings_instance();
+  __atomic_store_n(&g_settings, &s, __ATOMIC_RELEASE);
+  return s;
 }
+}  // namespace ctr_settings_detail
 
 CtrSettings& ctr_settings_ab() {
   return settings_instance();

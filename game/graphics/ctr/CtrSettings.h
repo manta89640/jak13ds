@@ -354,8 +354,18 @@ struct CtrSettings {
   std::string summary() const;
 };
 
-/*! The settings (loaded on first use). */
-const CtrSettings& ctr_settings();
+/*! The settings (loaded on first use). (AI-assisted, micro-level) Inline: after the first call a
+ * read of a plain pointer (published with a release store once the settings are made; the reads
+ * through it depend on its address, which ARM orders), not an out-of-line call with a static's
+ * guard and barrier. */
+namespace ctr_settings_detail {
+extern const CtrSettings* g_settings;
+const CtrSettings& first_use();
+}  // namespace ctr_settings_detail
+inline const CtrSettings& ctr_settings() {
+  const CtrSettings* s = ctr_settings_detail::g_settings;
+  return __builtin_expect(s != nullptr, 1) ? *s : ctr_settings_detail::first_use();
+}
 /*! (AI-assisted) The same, changeable: only for gpu_profile = ab (render thread, between frames;
  * the switches it changes are read by the renderers each frame). */
 CtrSettings& ctr_settings_ab();
