@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 
+
 #include "common/dma/dma.h"
 #include "common/dma/gs.h"
 #include "common/log/log.h"
@@ -425,7 +426,15 @@ void texel_row(const TexAcross& a, const TexAcross& b, u32* out, const u32* env,
     const u32 cg = (WA * a.g[x] + WB * b.g[x]) >> 4;
     const u32 erb = e & 0x00ff00ffu;
     const u32 r = sat8(((s32)(s16)erb * (s32)(s16)crb) >> 7);  // (smulbb)
+#if defined(__ARM_FEATURE_DSP)
+    // (AI-assisted) the top halves' product in one instruction (both are 0..255: signed halves
+    // give the same), and the compiler then saturates with usat
+    s32 tt;
+    asm("smultt %0, %1, %2" : "=r"(tt) : "r"(erb), "r"(crb));
+    const u32 bl = sat8(tt >> 7);
+#else
     const u32 bl = sat8(((s32)erb >> 16) * ((s32)crb >> 16) >> 7);  // (smultt)
+#endif
     const u32 g = sat8((s32)(((e >> 8) & 0xff) * cg) >> 7);
     // alpha 0xff: the PS2's texture alpha only weights the env map pass (left out)
     out[x] = r | (g << 8) | (bl << 16) | 0xff000000u;
@@ -457,8 +466,8 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
   constexpr s32 kLim = 1 << 22;  // keeps the weighted sums below in range
   for (int r = 0; r <= kGrid; r++) {
     for (int g = 0; g < kGrid / 4; g++) {
-      float q[8][4];
-      memcpy(q, t.rows[r] + g * 8 * 16, sizeof(q));
+      // (AI-assisted) read in place (the DMA data, 16-byte aligned), not copied to the stack first
+      const float(*q)[4] = (const float(*)[4])(t.rows[r] + g * 8 * 16);
       const float* nx = q[1];
       const float* ny = q[3];
       const float* nz = q[5];
@@ -486,21 +495,32 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
 
   // across: 64 samples per vertex row (3a + b, a + 3b: 4x); red and blue in the 16 bit halves
   // of one word (at most 1020, then 4080 after the down weights: no carries between them)
+  // (AI-assisted) 3a + b and a + 3b as (a + b) + 2a and (a + b) + 2b (integers: the same), and
+  // vertex c + 1's values kept for the next square instead of read again
   static TexAcross across[kGrid + 1];
   for (int r = 0; r <= kGrid; r++) {
     TexAcross& o = across[r];
+    const V* row = verts[r];
+    s32 as = row[0].s, at = row[0].t, ag = row[0].g;
+    u32 arb = (u32)row[0].r | (u32)row[0].b << 16;
     for (int c = 0; c < kGrid; c++) {
-      const V& a = verts[r][c];
-      const V& b = verts[r][c + 1];
-      const u32 arb = (u32)a.r | (u32)a.b << 16, brb = (u32)b.r | (u32)b.b << 16;
-      o.s[2 * c] = 3 * a.s + b.s;
-      o.s[2 * c + 1] = a.s + 3 * b.s;
-      o.t[2 * c] = 3 * a.t + b.t;
-      o.t[2 * c + 1] = a.t + 3 * b.t;
-      o.rb[2 * c] = 3 * arb + brb;
-      o.rb[2 * c + 1] = arb + 3 * brb;
-      o.g[2 * c] = 3 * a.g + b.g;
-      o.g[2 * c + 1] = a.g + 3 * b.g;
+      const V& b = row[c + 1];
+      const s32 bs = b.s, bt = b.t, bg = b.g;
+      const u32 brb = (u32)b.r | (u32)b.b << 16;
+      const s32 ss = as + bs, st = at + bt, sg = ag + bg;
+      const u32 srb = arb + brb;
+      o.s[2 * c] = ss + 2 * as;
+      o.s[2 * c + 1] = ss + 2 * bs;
+      o.t[2 * c] = st + 2 * at;
+      o.t[2 * c + 1] = st + 2 * bt;
+      o.rb[2 * c] = srb + 2 * arb;
+      o.rb[2 * c + 1] = srb + 2 * brb;
+      o.g[2 * c] = sg + 2 * ag;
+      o.g[2 * c + 1] = sg + 2 * bg;
+      as = bs;
+      at = bt;
+      ag = bg;
+      arb = brb;
     }
   }
 

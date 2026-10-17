@@ -596,3 +596,47 @@ Leads that need files outside the backend: merc palettes that are windows of one
 shifted by one bone (consecutive draws of a model re-upload ~150 words of bones each; CtrMerc);
 the level draws sorted by texture across chunks re-upload the 18-word chunk matrix at almost every
 draw (534 of 716 draws in village1; CtrLevel's order).
+
+## The renderers' own CPU code, instruction by instruction (AI-assisted, Oct 17, micro-cpu)
+
+**What Azahar's milliseconds are.** Azahar counts emulated time per guest instruction: a loop of
+10 integer adds, VFP multiplies, conversions, loads or stores takes 12 system ticks per iteration
+(268 MHz ticks: 1 per instruction, 2 for the loop), a VFP compare + `vmrs` pair 3.4, a core <-> VFP
+`vmov` 2 and a `vdiv` 15 (measured with inline assembly in the 3DS build). So an Azahar ms is
+~268k instructions, cache misses and pipeline stalls don't count, and an SVC (svcGetSystemTick,
+GSPGPU_FlushDataCache) costs much more than its instructions: timing probes with
+svcGetSystemTick around small pieces inflate what they measure (~1.5 us per probe pair). Runs of
+the same build in the same view repeat to 0.01 ms (the stats lines' resolution); the Snowy fort's
+merc time moves by up to 0.3 ms between runs of one build (what the yetis do).
+
+What changed (all output identical; Azahar build ms/frame, 5 s windows, Sandover hut / Snowy fort,
+before -> after the change):
+
+| change | where | Sandover | Snowy fort | identity |
+|---|---|---|---|---|
+| palette float24 words in ~10 instructions per value (CtrMicro.h) | merc | 1.88 -> 1.66 | 4.50 -> 3.36 | host test, all 2^32 floats + 200k palettes |
+| bad bone test on the bits, OR-ed over the bones | merc | 1.66 -> 1.63 | 3.36 -> 3.29 | host test vs the old loop |
+| palette rows read once, mirror test on the bits | merc | 1.63 -> 1.59 | 3.29 -> 3.19 | host test, 4M bones |
+| ctr_settings() once per model / frame | merc, sprite | 1.59 -> 1.58 | (noise) | the same object |
+| texture-sorted draws as 64-bit sort keys | merc | 1.58 -> 1.58 | 2.81 -> 2.79 | in-run: 0 of 19235 orders differ |
+| model name lookup cache, name read in place | merc | 1.58 -> 1.55 | | in-run: 0 of 248650 lookups differ |
+| bone snapshot without zeroing each matrix first | game thread | 0.152 -> 0.110 | 0.280 -> 0.176 | the same copies |
+| one chunk loop per mode, matrix in registers | sprite | 1.39 -> 1.13 | 1.17 -> 1.03 | in-run: 0 of 64916 chunks differ |
+| chunk sprite data read in place (no 6 KB copy) | sprite | 1.13 -> 1.02 | 1.03 -> 0.92 | the same bytes |
+| draw states compared as four words | sprite | 1.02 -> 1.01 | 0.92 -> 0.90 | the same bytes compared |
+| state made again only when its AdGif words change | sprite | ~0.005 | ~0.01 | in-run: the two tests never disagreed |
+| eye texel columns once per sprite | eyes | (blinks vary) | | in-run: 0 of 7954 sprites differ |
+| ocean: transition / tile loops without reloads, wave texture loops | ocean | 2.17 -> 2.04 | | host replay: draws and texture byte for byte; in-run (smultt): 0 of 6.0M texels |
+| texture page info: only the fields kept | tex | 0.16 -> 0.11 | 0.29 -> 0.18 | in-run: 0 of 4.06M textures noted |
+
+In-run checks: a build with the old code kept next to the new (not in the tree) ran both on the
+same input every time and counted differences, Sandover + Snowy fort and the level_pairs.pad
+route. Host tests: test/ctr_micro (CtrMicro.h against copies of the code it replaced), and
+test/ctr_ocean's replay with OCEAN_DRAWS_OUT / OCEAN_DRAWS_REF (the native draws' bytes against
+an earlier build's).
+
+Left, outside these files: the skinned draws' command building (ctr_gpu_draw_skinned: ~20 us of
+Azahar time per direct merc draw, the clip and light compares, the bone uploads) and the data cache
+flushes and GX submits (SVCs, which a wall clock profile of Azahar shows as the render thread's
+biggest non-waiting part). The far ocean's time includes the sky when sky_last draws it at the far
+ocean's first vertex reservation (SKY_HOOK_ANY).

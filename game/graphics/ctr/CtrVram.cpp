@@ -7,6 +7,7 @@
 #include "CtrVram.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <functional>
 
@@ -251,11 +252,20 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
     if (!ptr || ptr == s7_ptr) {
       continue;
     }
-    GoalTexture tex;
-    memcpy(&tex, ee_mem + ptr, sizeof(tex));
-    if (tex.dest[0] < kBlocks) {
-      m_tex_info[tex.dest[0]] = TexInfo{(u16)tex.w, (u16)tex.h, tex.psm, tex.width[0],
-                                        tex.clutpsm, tex.clut_dest};
+    // (AI-assisted) only the fields kept, read where they are (not the whole 60 byte texture
+    // through a memcpy call, for every texture of a page uploaded again)
+    const u8* t = ee_mem + ptr;
+    u16 dest0;
+    memcpy(&dest0, t + offsetof(GoalTexture, dest), 2);
+    if (dest0 < kBlocks) {
+      s16 w, h;
+      u16 clutpsm, clut_dest;
+      memcpy(&w, t + offsetof(GoalTexture, w), 2);
+      memcpy(&h, t + offsetof(GoalTexture, h), 2);
+      memcpy(&clutpsm, t + offsetof(GoalTexture, clutpsm), 2);
+      memcpy(&clut_dest, t + offsetof(GoalTexture, clut_dest), 2);
+      m_tex_info[dest0] = TexInfo{(u16)w, (u16)h, t[offsetof(GoalTexture, psm)],
+                                  t[offsetof(GoalTexture, width)], clutpsm, clut_dest};
     }
   }
 }

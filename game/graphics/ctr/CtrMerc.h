@@ -12,6 +12,9 @@
  * unpacked from it each frame like Merc2::model_mod_draws (apply_mod).
  */
 
+#include <algorithm>
+#include <cstring>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -72,6 +75,22 @@ class CtrMercRenderer : public CtrBucketRenderer {
   void handle_setup(const DmaTransfer& setup);
   void handle_model(const DmaTransfer& init, CtrRenderState& rs);
   void hud_clip(float* out, float y_scale) const;
+  // (AI-assisted) a bone the model's slots name has a rotation / scale entry of 64 or more, a
+  // translation of 1e8 or more, or NaN (garbage: the model isn't drawn)
+  static bool bad_bones(const CtrMercMat* const* bones, const u8* slots, int n);
+  /*! (AI-assisted) CtrLevels::find_merc_model of the model name at name (NUL-ended, at most 127
+   * bytes), through a small cache: a found model (and its level) for its name while the loaded
+   * levels are the same (CtrLevels::set_generation; loading the common file, which doesn't change
+   * it, only adds names the cache can't hold: it keeps no misses). The map's lookup compared
+   * strings down a tree (~50 models per frame on both threads). */
+  const struct CtrMercModelData* find_model(const u8* name, const struct CtrLevelData** lev);
+  struct FindSlot {
+    u32 hash = 0, gen = 0;
+    const struct CtrMercModelData* model = nullptr;
+    const struct CtrLevelData* lev = nullptr;
+  };
+  static constexpr int kFindSlots = 64;
+  FindSlot m_find[kFindSlots];
 
   // (AI-assisted) config envmap_batch: the envmap draws of the bucket are queued and drawn
   // together (one skin -> env -> skin program switch pair, and the skin draws keep their uniforms)
@@ -101,7 +120,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   // texture is bound once for all of them. Flushed before a draw that blends or doesn't write
   // depth, before the queued shine.
   std::vector<QueuedDraw> m_q_opaque;
-  std::vector<u32> m_q_order;
+  std::vector<u64> m_q_order;  // (AI-assisted) sort keys (flush_opaque)
   std::vector<const void*> m_q_models;  // model rank -> model
   void flush_opaque();
   void flush_queues();
@@ -124,7 +143,29 @@ class CtrMercRenderer : public CtrBucketRenderer {
   float m_screen[16];  // the GS screen mapping part of m_clip (for HUD models' projection)
   bool m_have_camera = false;
   Stats m_stats;
-  std::vector<CtrMercMat> m_snap;
+  // (AI-assisted) the bone snapshot: an array that grows without zeroing the new matrices (a
+  // vector's emplace_back value-initializes each one: 64 bytes of zeros, then the copy)
+  struct SnapBuf {
+    std::unique_ptr<CtrMercMat[]> buf;
+    size_t n = 0, cap = 0;
+    CtrMercMat* grow(size_t k) {
+      if (n + k > cap) {
+        cap = std::max<size_t>(2 * cap, n + k + 256);
+        std::unique_ptr<CtrMercMat[]> bigger(new CtrMercMat[cap]);
+        if (n) {
+          memcpy(bigger.get(), buf.get(), n * sizeof(CtrMercMat));
+        }
+        buf = std::move(bigger);
+      }
+      CtrMercMat* p = buf.get() + n;
+      n += k;
+      return p;
+    }
+    size_t size() const { return n; }
+    void clear() { n = 0; }
+    const CtrMercMat& operator[](size_t i) const { return buf[i]; }
+  };
+  SnapBuf m_snap;
   size_t m_snap_pos = 0, m_snap_first = 0;
   // (AI-assisted) rewritten vertices: gather_mod's copies, made with the bone snapshot (game
   // thread) for the models (in DMA order: m_model_ordinal) that have them

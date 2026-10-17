@@ -41,6 +41,8 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   void draw_distorter();
   bool read_chunk(DmaFollower& dma, u32* count, u32* program);
   void draw_chunk(u32 count, Mode mode);
+  template <Mode mode>
+  void draw_chunk_mode(u32 count);
   // draws the buckets. hud: as Sprite3's HUD flush, a sprite that writes depth with the alpha test
   // (FB_ONLY) is drawn a second time for the fragments that fail it, without depth writes
   void flush(bool hud = false);
@@ -96,8 +98,10 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   int m_distort_count = 0;
   std::vector<ctr_vertex> m_distort_verts;  // (AI-assisted) one triangle strip (ctr_gpu_draw_strip)
 
-  VecData m_vec[kSpritesPerChunk];
-  AdGif m_adgif[kSpritesPerChunk];
+  // (AI-assisted) the chunk's sprites, read in place from the DMA data (read_chunk checked that
+  // it holds count of each; it was copied here, 6 KB per chunk)
+  const VecData* m_vec = nullptr;
+  const AdGif* m_adgif = nullptr;
 
   // (AI-assisted) a vertex array that grows without zeroing the new vertices (std::vector's
   // resize does), which are written right after
@@ -161,6 +165,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
   float m_st_out[2][4][2] = {};
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
+  bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
     int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels

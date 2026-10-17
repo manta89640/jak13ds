@@ -214,8 +214,11 @@ class CtrOceanBatch {
     u16* idx = m_i + m_ni;
     for (u32 i = 0; i < nloop; i++, v++) {
       const u8* p = data + 48 * i;
+      // (AI-assisted) the words read where they are, not copied to the stack first
       u32 w[12];
-      memcpy(w, p, 48);
+      for (int k : {0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11}) {
+        memcpy(&w[k], p + 4 * k, 4);
+      }
       // ST (with Q): floats; Q > 0 for the GPU's 1 / Q (a far vertex near the horizon has a tiny
       // Q): as integers, so no float compare (positive floats order like their bits)
       memcpy(&v->s, &w[0], 8);

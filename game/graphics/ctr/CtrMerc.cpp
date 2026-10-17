@@ -20,6 +20,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrEye.h"
+#include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -282,6 +283,41 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
 }
 
+bool CtrMercRenderer::bad_bones(const CtrMercMat* const* bones, const u8* slots, int n) {
+  static_assert(sizeof(CtrMercMat) == 64);
+  u32 bad = 0;
+  for (int b = 0; b < n; b++) {
+    if (slots[b] < 128) {
+      bad |= ctr_micro::bad_bone_bits(bones[slots[b]]->tmat[0].data());
+    }
+  }
+  return bad & 0x80000000u;
+}
+
+const CtrMercModelData* CtrMercRenderer::find_model(const u8* name, const CtrLevelData** lev) {
+  // the name's length and hash (as the string the lookup took: up to the first NUL, at most 127
+  // bytes)
+  u32 h = 2166136261u;
+  u32 len = 0;
+  while (len < 127 && name[len]) {
+    h = (h ^ name[len]) * 16777619u;
+    len++;
+  }
+  const u32 gen = m_levels->set_generation();
+  FindSlot& s = m_find[(h ^ (h >> 16)) & (kFindSlots - 1)];
+  if (s.model && s.gen == gen && s.hash == h && s.model->name.size() == len &&
+      !memcmp(s.model->name.data(), name, len)) {
+    *lev = s.lev;
+    return s.model;
+  }
+  const CtrMercModelData* model =
+      m_levels->find_merc_model(std::string_view((const char*)name, len), lev);
+  if (model) {
+    s = {h, gen, model, *lev};
+  }
+  return model;
+}
+
 u32 CtrMercRenderer::queue_floats(const float* src, int n) {
   const u32 at = (u32)m_qdata.size();
   m_qdata.insert(m_qdata.end(), src, src + n);
@@ -306,26 +342,39 @@ void CtrMercRenderer::flush_opaque() {
     return;
   }
   const u32 n = (u32)m_q_opaque.size();
-  m_q_order.resize(n);
-  for (u32 i = 0; i < n; i++) {
-    m_q_order[i] = i;
-  }
   // by model (in the order they came), then draw, then the instances in the order they came (the
-  // queue index: the order std::stable_sort gave, without its buffer from the heap every frame)
-  std::sort(m_q_order.begin(), m_q_order.end(), [&](u32 a, u32 b) {
-    const auto& qa = m_q_opaque[a];
-    const auto& qb = m_q_opaque[b];
-    if (qa.model_rank != qb.model_rank) {
-      return qa.model_rank < qb.model_rank;
-    }
-    if (qa.draw_index != qb.draw_index) {
-      return qa.draw_index < qb.draw_index;
-    }
-    return a < b;
-  });
-  const float* d = m_qdata.data();
-  for (u32 i : m_q_order) {
+  // queue index: the order std::stable_sort gave, without its buffer from the heap every frame).
+  // (AI-assisted) As one 64-bit key per draw (model rank, draw index, queue index: all distinct,
+  // so the same order as the comparison of the three), sorted without touching the queued draws
+  m_q_order.resize(n);
+  bool fits = n < (1u << 20);
+  for (u32 i = 0; i < n; i++) {
     const auto& q = m_q_opaque[i];
+    fits = fits && q.model_rank < (1u << 24) && q.draw_index < (1u << 20);
+    m_q_order[i] = (u64)q.model_rank << 40 | (u64)q.draw_index << 20 | i;
+  }
+  if (fits) {
+    std::sort(m_q_order.begin(), m_q_order.end());
+  } else {
+    // (never: more than a million queued draws or draws per model)
+    for (u32 i = 0; i < n; i++) {
+      m_q_order[i] = i;
+    }
+    std::sort(m_q_order.begin(), m_q_order.end(), [&](u64 a, u64 b) {
+      const auto& qa = m_q_opaque[a];
+      const auto& qb = m_q_opaque[b];
+      if (qa.model_rank != qb.model_rank) {
+        return qa.model_rank < qb.model_rank;
+      }
+      if (qa.draw_index != qb.draw_index) {
+        return qa.draw_index < qb.draw_index;
+      }
+      return a < b;
+    });
+  }
+  const float* d = m_qdata.data();
+  for (u64 key : m_q_order) {
+    const auto& q = m_q_opaque[fits ? (u32)(key & 0xfffff) : (u32)key];
     ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count,
                          q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24, q.bones_id,
                          d + q.lights, q.mesh, q.first_index, q.index_count);
@@ -589,11 +638,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       n++;
     }
     if (m_snapshot_mode) {
+      MercMat* dst = m_snap.grow(n);
       for (int b = 0; b < n; b++) {
         u32 addr;
         memcpy(&addr, &ma[b * 4], 4);
-        MercMat& m = m_snap.emplace_back();
-        memcpy(&m, rs.ee_mem + addr, sizeof(MercMat));  // (AI-assisted) tmat only
+        memcpy(&dst[b], rs.ee_mem + addr, sizeof(MercMat));  // (AI-assisted) tmat only
       }
       // (AI-assisted) vertices the game rewrites (ripple, texture scroll): the game changes them
       // during the next frame's logic, so they're copied now too. Only models with an effect
@@ -614,11 +663,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       if (maybe) {
         const double t0 = ctr_gpu_time_ms();
-        char name[128];
-        memcpy(name, input, 128);
-        name[127] = 0;
         const CtrLevelData* lev = nullptr;
-        const CtrMercModelData* model = m_levels->find_merc_model(name, &lev);
+        const CtrMercModelData* model = find_model(input, &lev);
         if (model && !model->mod.empty()) {
           m_mod_snaps.push_back({m_model_ordinal, m_mod_bytes.size()});
           gather_mod(rs.ee_mem, ptrs, ec, *model);
@@ -635,9 +681,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   if (!m_have_camera) {
     return;
   }
-  char name[128];
-  memcpy(name, input, 128);
-  name[127] = 0;
+  const u8* name = input;  // (AI-assisted) read in place (find_model): NUL-ended, at most 127
   input += 128;
 
 #ifndef __3DS__
@@ -645,12 +689,12 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     // (AI-assisted) snow-gpu-audit: statistics per model (env CTR_SOFT_MERC_MODELS)
     static const bool per_model = getenv("CTR_SOFT_MERC_MODELS") != nullptr;
     if (per_model) {
-      ctr_gpu_soft_bucket((std::string("m:") + name).c_str());
+      ctr_gpu_soft_bucket((std::string("m:") + std::string((const char*)name, strnlen((const char*)name, 127))).c_str());
     }
   }
 #endif
   const CtrLevelData* lev = nullptr;
-  const CtrMercModelData* model = m_levels->find_merc_model(name, &lev);
+  const CtrMercModelData* model = find_model(name, &lev);
   m_stats.models++;
   if (!model) {
     m_stats.missing++;
@@ -739,22 +783,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   }
 
   // Bone matrices that are garbage (seen in cutscenes whose streamed animation is missing) make
-  // screen-filling triangles: skip the model instead.
-  for (int b = 0; b < i; b++) {
-    if (slots[b] >= 128) {
-      continue;
-    }
-    const MercMat& m = *bones[slots[b]];
-    for (int r = 0; r < 4; r++) {
-      for (int c = 0; c < 3; c++) {
-        const float v = m.tmat[r][c];
-        const float lim = r < 3 ? 64.f : 1e8f;
-        if (!(std::abs(v) < lim)) {  // also catches NaN
-          m_stats.bad_bones++;
-          return;
-        }
-      }
-    }
+  // screen-filling triangles: skip the model instead. (AI-assisted) On the bits (CtrMicro.h
+  // not_below), OR-ed over the bones: no VFP compare and branch per value
+  if (bad_bones(bones, slots, i)) {
+    m_stats.bad_bones++;
+    return;
   }
 
   // the model's lights, for the skin shader's per vertex lighting (like merc2.vert)
@@ -832,14 +865,17 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted) cull_merc: a bone of the palette mirrors (its matrix' determinant isn't positive):
   // that draw's winding is flipped on screen, so it isn't culled. Not for HUD models (their own
   // projection)
-  const bool cull_merc = ctr_settings().cull_merc && !(flags.bitflags & 8);
+  // (AI-assisted) the settings looked up once per model (each ctr_settings() call is a function
+  // call with a memory barrier for its static's guard)
+  const CtrSettings& cs = ctr_settings();
+  const bool cull_merc = cs.cull_merc && !(flags.bitflags & 8);
   bool palette_mirrors = false;
   // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
   // there yet)
   // merc_tex_sort: not for models whose vertices change per instance (blend shapes, rewritten
   // vertices: one mesh); their shine is queued too then (its base may be in the queue)
-  const bool tex_sort = ctr_settings().merc_tex_sort && !model->blerc_count && model->mod.empty();
-  const bool env_batch = ctr_settings().envmap_batch || tex_sort;
+  const bool tex_sort = cs.merc_tex_sort && !model->blerc_count && model->mod.empty();
+  const bool env_batch = cs.envmap_batch || tex_sort;
   u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
   u32 model_rank = ~0u;
   // (AI-assisted) the palette's number for the GPU (new with every palette made) and its float24
@@ -855,7 +891,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       return nullptr;
     }
     if (!palette_f24_made) {
-      ctr_gpu_pack_skin_rows_f24(palette_rows, std::min<int>(count, CTR_MAX_PALETTE), palette_f24);
+      // (AI-assisted) ctr_gpu_pack_skin_rows_f24's words in fewer instructions (CtrMicro.h)
+      ctr_micro::pack_skin_rows_f24(palette_rows, std::min<int>(count, CTR_MAX_PALETTE), palette_f24);
       palette_f24_made = true;
     }
     return palette_f24;
@@ -877,14 +914,14 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
   // address of its bone matrices)
   const std::vector<c3l::MercDraw>* draws = &model->draws;
-  if (!model->gen_draws.empty() && ctr_settings().merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
+  if (!model->gen_draws.empty() && cs.merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
       slots[0] < 128) {
     u32 key;
     memcpy(&key, &matrix_array[0], 4);
     const math::Vector4f& t = bones[slots[0]]->tmat[3];
     const float d = std::sqrt(t.x() * t.x() + t.y() * t.y() + t.z() * t.z()) * (1.f / 4096.f);
     const float size_m = model->scale * 32767.f * (1.f / 4096.f);
-    const float at = std::max(25.f, 12.5f * size_m) * ctr_settings().merc_lod_scale;
+    const float at = std::max(25.f, 12.5f * size_m) * cs.merc_lod_scale;
     auto& g = m_gen_lod[key];
     g.frame = m_frame;
     g.low = g.low ? d > 0.9f * at : d > 1.1f * at;
@@ -895,7 +932,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       // (AI-assisted) per model statistics: the generated low LOD on its own line
       static const bool per_model = getenv("CTR_SOFT_MERC_MODELS") != nullptr;
       if (per_model) {
-        ctr_gpu_soft_bucket((std::string("m:") + name + c3l::kMercGenLodSuffix).c_str());
+        ctr_gpu_soft_bucket((std::string("m:") + std::string((const char*)name, strnlen((const char*)name, 127)) + c3l::kMercGenLodSuffix).c_str());
       }
 #endif
     }
@@ -907,7 +944,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     const bool envmap = draw.eye_id == c3l::kMercEnvmapDraw;
     float fade[4] = {0, 0, 0, 0};
     if (envmap) {
-      if (draw.effect >= effect_count || !ctr_settings().envmap) {
+      if (draw.effect >= effect_count || !cs.envmap) {
         continue;
       }
       const u8* f = fades + 4 * draw.effect;
@@ -934,6 +971,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (!same_palette) {
       palette_mirrors = false;
     }
+    const float scale = model->scale;
     for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       // (AI-assisted) a bone the game didn't send this frame: the table still has the matrix of
       // an earlier model (Merc2 reads its own leftover the same way). Counted, logged once per
@@ -948,23 +986,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
                    model->name, bi, i);
         }
       }
-      const MercMat& m = *bones[bi];
-      float* rows = &palette_rows[12 * p];
-      if (cull_merc) {
-        const math::Vector4f& a = m.tmat[0];
-        const math::Vector4f& b = m.tmat[1];
-        const math::Vector4f& c = m.tmat[2];
-        const float det = a.x() * (b.y() * c.z() - b.z() * c.y()) -
-                          a.y() * (b.x() * c.z() - b.z() * c.x()) +
-                          a.z() * (b.x() * c.y() - b.y() * c.x());
-        palette_mirrors = palette_mirrors || !(det > 0.f);
+      // (AI-assisted) CtrMicro.h: the matrix read once into registers (the model's scale too), the
+      // determinant's sign on its bits, and not worked out once a bone of the palette mirrors
+      const float* t = bones[bi]->tmat[0].data();
+      if (cull_merc && !palette_mirrors) {
+        palette_mirrors = ctr_micro::merc_bone_mirrors(t);
       }
-      for (int r = 0; r < 3; r++) {
-        rows[4 * r + 0] = -m.tmat[0][r] * model->scale;
-        rows[4 * r + 1] = -m.tmat[1][r] * model->scale;
-        rows[4 * r + 2] = -m.tmat[2][r] * model->scale;
-        rows[4 * r + 3] = -m.tmat[3][r];
-      }
+      ctr_micro::merc_bone_rows(t, scale, &palette_rows[12 * p]);
     }
     if (hud_nfix && !same_palette) {
       for (int p = 0; p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
