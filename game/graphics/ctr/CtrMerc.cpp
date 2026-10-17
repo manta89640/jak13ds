@@ -965,6 +965,14 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (the yeti) when its first bone is further from the camera than max(25 m, 12.5 x the model's
   // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
   // address of its bone matrices)
+  // (AI-assisted, streaming) Jak's place (his first bone's tmat[3]: world = camera position +
+  // camera rot * it, checked against the game's position to 0.6 m): the level streaming prefetches
+  // around him too (camera cuts land near him)
+  if (!(flags.bitflags & 8) && i > 0 && slots[0] < 128 && model->name.size() >= 6 &&
+      !model->name.compare(0, 6, "eichar")) {
+    const math::Vector4f& t = bones[slots[0]]->tmat[3];
+    m_levels->stream_note_target(t.x(), t.y(), t.z(), rs.frame_idx);
+  }
   const std::vector<c3l::MercDraw>* draws = &model->draws;
   if (!model->gen_draws.empty() && cs.merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
       slots[0] < 128) {

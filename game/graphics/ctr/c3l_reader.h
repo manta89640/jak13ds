@@ -48,6 +48,16 @@ class Reader {
   // stored (uncompressed) blocks and uncompressed files too: on the 3DS every SD card request
   // costs several ms of its own, and a stdio buffer refills itself from scratch after each seek.
   explicit Reader(const char* path, size_t window = 0, Buffers* buffers = nullptr);
+  // (AI-assisted, streaming) the same with the header and block directory of a reader of this file
+  // made before (no reads of them: a stream job's few near chunks, the directory ~16 bytes per
+  // block, up to ~50 KB)
+  struct Dir {
+    Header header{};
+    std::vector<Block> blocks;
+    uint32_t raw_size = 0, max_block = 0;
+  };
+  Reader(const char* path, size_t window, Buffers* buffers, const Dir& dir);
+  Dir dir() const;
   ~Reader();
   Reader(const Reader&) = delete;
   Reader& operator=(const Reader&) = delete;
@@ -56,13 +66,18 @@ class Reader {
   long file_size() const { return m_file_size; }
   // the size of the raw layout (the file size for files without compression)
   uint32_t raw_size() const { return m_raw_size; }
-  bool compressed() const { return !m_blocks.empty(); }
+  bool compressed() const { return !m_bl->empty(); }
   // (AI-assisted) unbuffered reads through two windows (constructed with a window size)
   bool window_mode() const { return m_window_cap != 0; }
-  const std::vector<Block>& blocks() const { return m_blocks; }
+  const std::vector<Block>& blocks() const { return *m_bl; }
 
   // bytes [offset, offset + bytes) of the raw layout into dst
   bool read(uint32_t offset, void* dst, size_t bytes);
+  // (AI-assisted, streaming) window mode: the file bytes holding raw [offset, offset + bytes) (its
+  // whole blocks) in one request into a window, when they fit in one: the reads of that range
+  // after it need no other request (a stream job's near chunks, which lie together in the file).
+  // false: not done (too big, not window mode); the reads work as without it.
+  bool preload(uint32_t offset, uint32_t bytes);
   template <typename T>
   bool read_array(uint32_t offset, size_t count, std::vector<T>* out) {
     out->resize(count);
@@ -101,7 +116,9 @@ class Reader {
   bool m_error = false;
   uint32_t m_raw_size = 0;
   Header m_header{};
-  std::vector<Block> m_blocks;
+  // (AI-assisted) the block directory: its own (m_own_blocks), or a Dir's (streaming)
+  std::vector<Block> m_own_blocks;
+  const std::vector<Block>* m_bl = &m_own_blocks;
   // (AI-assisted) file bytes [offset, offset + size): one window (stdio mode) or two in window
   // mode, the one used longest ago replaced (a level's index and vertex data are read in turns)
   Buffers m_own;

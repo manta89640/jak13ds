@@ -227,6 +227,20 @@ struct CtrSettings {
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
   bool tie_lod = true;
+  // (AI-assisted, streaming) c3l v19 levels: the near versions of the tie LOD groups (near chunks)
+  // are read from the file around the camera on the loader thread, into a stream arena of
+  // stream_kb KB of linear memory (taken at the first such level, kept), and freed far away; a group
+  // whose near chunk isn't there yet is drawn with its far version. off: the near chunks of the
+  // groups the level's v18 budget took are loaded with the level, the others never (v18's ties)
+  bool streaming = true;
+  int stream_kb = 4096;
+  // (AI-assisted, streaming) the arena grows past stream_kb (segments of 1 MB or more) while the
+  // near chunks needed don't fit and the linear heap keeps this much free after it; given back when
+  // the heap has less, or a level load needs the memory
+  int stream_reserve_kb = 3584;
+  // (AI-assisted, streaming) diagnostic: a log line for each near chunk that is late (and the
+  // camera's speed, its score before)
+  bool stream_debug = false;
   // (AI-assisted) time of day: day palettes that move every frame (sunken's cycling lights, most
   // of its vertices) taken every second frame (CtrLevel.cpp tod_update). off: every frame (exact)
   bool tod_busy_half = true;

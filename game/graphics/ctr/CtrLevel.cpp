@@ -9,6 +9,7 @@
 
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrImpostor.h"
+#include "game/graphics/ctr/CtrStream.h"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,7 @@
 #include <cstring>
 #include <map>
 #include <new>
+#include <stdexcept>
 #include <tuple>
 
 #include "common/dma/dma.h"
@@ -82,7 +84,8 @@ int missing_parts(const CtrLevelData& lev, u32* bytes) {
        ci < lev.chunks.size() && ci < lev.meshes.size() && ci < lev.mesh_index_first.size();
        ci++) {
     const auto& ch = lev.chunks[ci];
-    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX &&
+    // (AI-assisted, streaming) near chunks: streamed (or never there), not missing
+    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX && !lev.is_unit(ci) &&
         (lev.detail_loaded || far_chunk(lev, ch))) {
       n++;
       b += ch.vertex_count * (u32)sizeof(c3l::Vertex) +
@@ -146,6 +149,9 @@ CtrLevels::~CtrLevels() {
   for (auto& [name, p] : m_prefetched) {
     unload(*p.lev);
   }
+  for (auto& tk : m_take) {
+    ctr_gpu_mesh_delete(tk.out.mesh);  // (AI-assisted, streaming)
+  }
   for (auto& [name, lev] : m_levels) {
     unload(*lev);
   }
@@ -195,10 +201,39 @@ bool CtrLevels::can_start(const Job& job) const {
 void CtrLevels::loader_main() {
   std::unique_lock<std::mutex> lk(m_lock);
   while (!m_quit) {
-    // the first job that can run
-    auto it = m_queue.begin();
-    while (it != m_queue.end() && !can_start(*it)) {
-      ++it;
+    // the first job that can run. (AI-assisted, streaming) In this order: the loads the game
+    // waits for (not prefetches), stream jobs with near chunks needed now (the game doesn't wait
+    // for a prefetch: Sandover's hut waited ~3 s behind the beach's for its near chunks), the
+    // prefetches, the other stream jobs
+    auto pick = [&](auto&& want) {
+      auto i = m_queue.begin();
+      while (i != m_queue.end() && !want(*i)) {
+        ++i;
+      }
+      return i;
+    };
+    // While levels are drawn (the game plays: the level it loads is the neighbour, it doesn't
+    // wait) the stream jobs with near chunks needed now go first: they are short (at most ~0.1 s
+    // on hardware), and Sandover's hut waited 3.6 s behind the beach's load for its near chunks.
+    // With nothing drawn (a load the game waits for, black screen) the level loads go first. (A
+    // rule by the game's ready() calls was tried: it polls them for the neighbour too.)
+    const u64 rf = m_render_frame.load(), df = m_drawn_frame.load();
+    const bool playing = df && df + 3 >= rf;
+    auto it = m_queue.end();
+    if (playing) {
+      it = pick([](const Job& j) { return j.stream && j.urgent; });
+    }
+    if (it == m_queue.end()) {
+      it = pick([&](const Job& j) { return !j.stream && !j.prefetch && can_start(j); });
+    }
+    if (it == m_queue.end()) {
+      it = pick([](const Job& j) { return j.stream && j.urgent; });
+    }
+    if (it == m_queue.end()) {
+      it = pick([&](const Job& j) { return !j.stream && can_start(j); });
+    }
+    if (it == m_queue.end()) {
+      it = pick([](const Job& j) { return j.stream; });
     }
 
     if (it == m_queue.end()) {
@@ -228,7 +263,9 @@ void CtrLevels::run_job(const Job& job) {
   // (AI-assisted) an allocation that fails (bad_alloc) fails the job: the loader thread goes on
   // (an exception out of it is std::terminate); the render thread tries again later
   try {
-    if (job.parts()) {
+    if (job.stream) {
+      run_stream_job(job, &d);  // (AI-assisted, streaming)
+    } else if (job.parts()) {
       run_parts_job(job, &d);
     } else {
       d.lev = std::make_unique<CtrLevelData>();
@@ -363,9 +400,15 @@ bool CtrLevels::housekeeping(bool room) {
     m_prefetched.erase(name);
   }
   const bool dropped = !drop.empty();
+  if (room) {
+    stream_shrink(true);  // (AI-assisted, streaming) the arena's growth back for the load
+  }
   if (dropped || room) {
     // before the loader goes on (it may be waiting for this memory)
     ctr_gpu_free_pending_now();
+  }
+  if (room) {
+    CtrStreamArena::get().release_empty();  // (AI-assisted, streaming)
   }
   if (dropped) {
     update_level_count();
@@ -460,6 +503,14 @@ size_t c3l_read_window() {
 struct C3lReader : c3l::Reader {
   C3lReader(const fs::path& path, c3l::Reader::Buffers* buffers)
       : c3l::Reader(path.string().c_str(), c3l_read_window(), buffers) {}
+  // (AI-assisted, streaming) a window of its own size (at most c3l_read_window: the buffers'), the
+  // file's directory as read before
+  C3lReader(const fs::path& path,
+            c3l::Reader::Buffers* buffers,
+            size_t window,
+            const c3l::Reader::Dir& dir)
+      : c3l::Reader(path.string().c_str(),
+                    c3l_read_window() ? std::min(window, c3l_read_window()) : 0, buffers, dir) {}
   long size() const { return file_size(); }
 };
 }  // namespace
@@ -664,7 +715,7 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
   int freed = 0;
   for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
     // (AI-assisted) what far mode draws stays (far_chunk)
-    if (!far_chunk(lev, lev.chunks[ci]) && lev.meshes[ci] >= 0) {
+    if (!far_chunk(lev, lev.chunks[ci]) && lev.meshes[ci] >= 0 && !lev.is_unit(ci)) {
       ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
       lev.meshes[ci] = -1;
       if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
@@ -687,7 +738,7 @@ void CtrLevels::collect_chunks(const CtrLevelData& lev,
                       ci < lev.mesh_index_first.size();
        ci++) {
     const auto& ch = lev.chunks[ci];
-    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX &&
+    if (lev.meshes[ci] < 0 && lev.mesh_index_first[ci] != UINT32_MAX && !lev.is_unit(ci) &&
         (!missing_only || lev.detail_loaded || far_chunk(lev, ch))) {
       out->push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
                       lev.mesh_index_end[ci]});
@@ -806,7 +857,7 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   }
   failed -= std::min<int>(failed, (int)out->tex_empty);  // (AI-assisted) v15: none to make
   for (size_t i = 0; i < out->meshes.size(); i++) {
-    failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0;
+    failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0 && !out->is_unit(i);
   }
   for (auto& m : out->merc_models) {
     failed += m.mesh < 0;
@@ -1264,6 +1315,30 @@ void tod_make_groups(CtrLevelData* out, u32 ci, const u16* idst, u32 idx_first, 
     t.run_group[r] = slot[t.run_group[r]];
   }
   t.chunk_group_count[ci] = (u16)gs.size();
+}
+
+// (AI-assisted, streaming) a near chunk not read at load: room in Tod::groups for its groups (one
+// per visibility id of its runs: the most tod_make_groups makes), filled when it is first read
+// (CtrLevels::take_stream); one group for all of it until then.
+void tod_reserve_unit(CtrLevelData* out, u32 ci) {
+  auto& t = *out->tod;
+  const auto& ch = out->chunks[ci];
+  std::vector<u16> ids;
+  const u32 r0 = out->chunk_first_run[ci];
+  for (u32 r = r0; r < r0 + ch.vis_run_count && r < out->vis_runs.size(); r++) {
+    if (std::find(ids.begin(), ids.end(), out->vis_runs[r].vis) == ids.end()) {
+      ids.push_back(out->vis_runs[r].vis);
+    }
+  }
+  const u32 n = std::max<u32>(1, std::min<u32>((u32)ids.size(), 0xfffe));
+  using G = CtrLevelData::Tod::VisGroup;
+  t.chunk_group_first[ci] = (u32)t.groups.size();
+  t.groups.resize(t.groups.size() + n, G{0, (u16)(std::max<u32>(ch.vertex_count, 1) - 1), 0});
+  t.chunk_group_count[ci] = 1;
+  for (u32 r = r0; r < r0 + ch.vis_run_count && r < t.run_group.size(); r++) {
+    t.run_group[r] = 0;
+  }
+  out->stream_units[out->chunk_unit[ci]].tod_slots = (u16)n;
 }
 
 // The chunk's groups that are plain (every vertex with a time of day color: tod_write_range's fast
@@ -1847,6 +1922,26 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
 // version, mapped onto vis_runs (whose first file_runs come from the file, from offset runs_lo).
 // Anything wrong: no levels of detail, and the far versions of the groups are never drawn (a
 // level drawn with every group's near version rather than both on top of each other).
+// (AI-assisted, streaming) the extension header: v17/v18's 32 bytes, v19's 48 (the fields it
+// doesn't have stay 0)
+bool read_ext_header(c3l::Reader& f, const c3l::Header& hdr, c3l::ExtHeader* eh) {
+  *eh = c3l::ExtHeader{};
+  if (!hdr.ext_offset || !f.read(hdr.ext_offset, eh, c3l::kExtHeaderV17Size) ||
+      memcmp(eh->magic, c3l::kExtMagic, 4) || eh->size < c3l::kExtHeaderV17Size) {
+    *eh = c3l::ExtHeader{};
+    return false;
+  }
+  if (eh->size >= sizeof(c3l::ExtHeader) && hdr.version >= c3l::kStreamVersion &&
+      !f.read(hdr.ext_offset, eh, sizeof(c3l::ExtHeader))) {
+    *eh = c3l::ExtHeader{};
+    return false;
+  }
+  if (eh->size < sizeof(c3l::ExtHeader) || hdr.version < c3l::kStreamVersion) {
+    eh->run_sphere_offset = eh->stream_count = eh->stream_offset = eh->stream_flags = 0;
+  }
+  return true;
+}
+
 void load_tie_lod(c3l::Reader& f,
                   const c3l::Header& hdr,
                   u32 runs_lo,
@@ -1861,8 +1956,7 @@ void load_tie_lod(c3l::Reader& f,
     return;
   }
   c3l::ExtHeader eh{};
-  if (!f.read(hdr.ext_offset, &eh, sizeof(eh)) || memcmp(eh.magic, c3l::kExtMagic, 4) ||
-      eh.size < sizeof(eh)) {
+  if (!read_ext_header(f, hdr, &eh)) {
     lg::warn("[ctr] {}: bad extension header, no tie levels of detail", lev->name);
     return;
   }
@@ -1914,6 +2008,163 @@ void load_tie_lod(c3l::Reader& f,
            lev->lod_groups.size(), near_runs, bad ? fmt::format(" ({} bad runs)", bad) : "",
            lev->lod_error.empty() ? ", switched at the PS2 distances"
                                   : ", switched by screen-space error");
+}
+
+// (AI-assisted, streaming) host check, env CTR_STREAM_CHECK (CtrLevels::stream_check)
+bool stream_check_enabled() {
+#ifdef __3DS__
+  return false;
+#else
+  static const bool on = getenv("CTR_STREAM_CHECK") != nullptr;
+  return on;
+#endif
+}
+// (AI-assisted, streaming) the file's values against the ones worked out at load (host check)
+u64 g_stream_check_spheres = 0, g_stream_check_sphere_diff = 0, g_stream_check_alpha = 0,
+    g_stream_check_alpha_diff = 0;
+
+// (AI-assisted, streaming) c3l v19: each file run's sphere (run_culling: made at load from the
+// vertices before v19; a near chunk has none then) and the near chunks (c3l::StreamChunk) as units,
+// with the tie LOD groups whose near version they hold. After load_tie_lod. Anything wrong with the
+// near chunks: no tie levels of detail for the level (every group's far version), and the near
+// chunks never drawn.
+void load_stream_info(c3l::Reader& f,
+                      const c3l::Header& hdr,
+                      u32 runs_lo,
+                      size_t file_runs,
+                      CtrLevelData* lev) {
+  lev->stream_units.clear();
+  lev->chunk_unit.clear();
+  lev->group_unit_first.clear();
+  lev->group_unit_count.clear();
+  lev->group_units.clear();
+  if (hdr.version < c3l::kStreamVersion) {
+    return;
+  }
+  c3l::ExtHeader eh;
+  if (!read_ext_header(f, hdr, &eh)) {
+    return;
+  }
+  const bool runs_ok = runs_lo != UINT32_MAX && file_runs && runs_lo >= eh.runs_offset &&
+                       (runs_lo - eh.runs_offset) % sizeof(c3l::VisRun) == 0 &&
+                       (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun) + file_runs <=
+                           eh.run_lod_count;
+  const size_t first = runs_ok ? (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun) : 0;
+  if (eh.run_sphere_offset && runs_ok && lev->run_spheres.size() >= file_runs) {
+    std::vector<c3l::RunSphere> sp;
+    if (f.read_array(eh.run_sphere_offset + (u32)(first * sizeof(c3l::RunSphere)), file_runs,
+                     &sp)) {
+      static_assert(sizeof(c3l::RunSphere) == sizeof(CtrLevelData::RunSphere));
+      memcpy(lev->run_spheres.data(), sp.data(), file_runs * sizeof(c3l::RunSphere));
+    }
+  }
+  if (!eh.stream_count || !eh.stream_offset) {
+    return;
+  }
+  std::vector<c3l::StreamChunk> sc;
+  const char* why = nullptr;
+  if (!f.read_array(eh.stream_offset, eh.stream_count, &sc)) {
+    why = "truncated";
+  }
+  lev->chunk_unit.assign(lev->chunks.size(), UINT32_MAX);
+  for (size_t i = 0; !why && i < sc.size(); i++) {
+    const auto& c = sc[i];
+    if (c.chunk >= lev->chunks.size() || lev->chunk_unit[c.chunk] != UINT32_MAX ||
+        lev->chunks[c.chunk].kind != c3l::CHUNK_KIND_TIE || !lev->chunks[c.chunk].vis_run_count ||
+        (c.cls != c3l::kStreamCore && c.cls != c3l::kStreamExtra) || lev->run_lod.empty()) {
+      why = "bad near chunk";
+      break;
+    }
+    lev->chunk_unit[c.chunk] = (u32)lev->stream_units.size();
+    auto& u = lev->stream_units.emplace_back();
+    u.chunk = c.chunk;
+    u.cls = c.cls;
+    u.need_a = c.need_a;
+    u.need_e = c.need_e;
+  }
+  // the groups' units (a chunk's runs one after the other: a group's last unit is this one)
+  if (!why) {
+    const size_t ng = lev->lod_groups.size();
+    std::vector<u32> last(ng, UINT32_MAX);
+    lev->group_unit_count.assign(ng, 0);
+    for (int pass = 0; pass < 2 && !why; pass++) {
+      if (pass == 1) {
+        lev->group_unit_first.assign(ng, 0);
+        u32 n = 0;
+        for (size_t g = 0; g < ng; g++) {
+          lev->group_unit_first[g] = n;
+          n += lev->group_unit_count[g];
+          lev->group_unit_count[g] = 0;
+        }
+        lev->group_units.assign(n, 0);
+        last.assign(ng, UINT32_MAX);
+      }
+      for (u32 u = 0; u < lev->stream_units.size() && !why; u++) {
+        const u32 ci = lev->stream_units[u].chunk;
+        const auto& ch = lev->chunks[ci];
+        for (u32 r = lev->chunk_first_run[ci]; r < lev->chunk_first_run[ci] + ch.vis_run_count;
+             r++) {
+          const auto& rl = lev->run_lod[r];
+          if (rl.lod != c3l::kRunLodNear || rl.group >= ng) {
+            why = "a near chunk run that isn't a near version";
+            break;
+          }
+          if (last[rl.group] == u) {
+            continue;
+          }
+          last[rl.group] = u;
+          if (pass == 1) {
+            lev->group_units[lev->group_unit_first[rl.group] + lev->group_unit_count[rl.group]] = u;
+          }
+          if (lev->group_unit_count[rl.group] == 0xff) {
+            why = "a group in too many near chunks";
+            break;
+          }
+          lev->group_unit_count[rl.group]++;
+        }
+      }
+    }
+  }
+  if (!why) {
+    // the other way round: each unit's groups
+    lev->unit_group_first.assign(lev->stream_units.size() + 1, 0);
+    for (size_t g = 0; g < lev->group_unit_count.size(); g++) {
+      for (u32 j = 0; j < lev->group_unit_count[g]; j++) {
+        lev->unit_group_first[lev->group_units[lev->group_unit_first[g] + j] + 1]++;
+      }
+    }
+    for (size_t u = 0; u < lev->stream_units.size(); u++) {
+      lev->unit_group_first[u + 1] += lev->unit_group_first[u];
+    }
+    lev->unit_groups.assign(lev->unit_group_first.back(), 0);
+    std::vector<u32> fill(lev->unit_group_first.begin(), lev->unit_group_first.end() - 1);
+    for (size_t g = 0; g < lev->group_unit_count.size(); g++) {
+      for (u32 j = 0; j < lev->group_unit_count[g]; j++) {
+        lev->unit_groups[fill[lev->group_units[lev->group_unit_first[g] + j]]++] = (u32)g;
+      }
+    }
+  }
+  if (why) {
+    lev->unit_group_first.clear();
+    lev->unit_groups.clear();
+    lg::warn("[ctr] {}: {} in the near chunk table: no tie levels of detail", lev->name, why);
+    // every group far, never a near chunk (they stay units: never loaded, never drawn)
+    for (auto& u : lev->stream_units) {
+      u.state = CtrLevelData::kUnitNever;
+    }
+    lev->lod_groups.clear();
+    lev->run_lod.clear();
+    lev->chunk_lod.clear();
+    lev->lod_state.clear();
+    lev->lod_error.clear();
+    lev->group_unit_first.clear();
+    lev->group_unit_count.clear();
+    lev->group_units.clear();
+    if (lev->stream_units.empty()) {
+      lev->chunk_unit.clear();
+    }
+    return;
+  }
 }
 
 // visibility runs (and run_culling's pieces) are made already. Anything wrong: no fine visibility.
@@ -2485,6 +2736,11 @@ bool CtrLevels::load_file(const fs::path& path,
     out->run_spheres.assign(out->vis_runs.size(), CtrLevelData::RunSphere{{0, 0, 0}, 0xffff});
   }
   load_tie_lod(f, hdr, runs_lo, file_runs, out);  // (AI-assisted) c3l v17
+  // (AI-assisted, streaming) c3l v19: run spheres, near chunks
+  load_stream_info(f, hdr, runs_lo, file_runs, out);
+  out->streaming = !out->stream_units.empty() && out->stream_units[0].state != CtrLevelData::kUnitNever &&
+                   ctr_settings().streaming &&
+                   CtrStreamArena::get().init((u32)ctr_settings().stream_kb * 1024u);
   // (AI-assisted) fine_vis: the level's .c3v next to it, if it was made from this .c3l
   if (ctr_settings().fine_vis) {
     load_fine_vis(path, out);
@@ -2532,10 +2788,37 @@ bool CtrLevels::load_file(const fs::path& path,
   out->meshes.reserve(out->chunks.size());  // (AI-assisted)
   out->mesh_index_first.reserve(out->chunks.size());
   out->mesh_index_end.reserve(out->chunks.size());
+  // (AI-assisted, streaming) c3l v19: the draws' kDrawAlpha80 (worked out again below for the
+  // chunks read now: the same), and the file bytes of a raw range (a near chunk's blocks)
+  const bool v19 = hdr.version >= c3l::kStreamVersion;
+  if (v19) {
+    out->draw_alpha80.assign(out->draws.size(), 0);
+    for (size_t d = 0; d < out->draws.size(); d++) {
+      out->draw_alpha80[d] = (out->draws[d].kind & c3l::kDrawAlpha80) ? 1 : 0;
+    }
+  }
+  auto packed_of = [&](u32 off, u32 bytes) {
+    const auto& bl = f.blocks();
+    if (bl.empty() || !bytes) {
+      return bytes;
+    }
+    auto it = std::upper_bound(bl.begin(), bl.end(), off,
+                               [](u32 o, const c3l::Block& b) { return o < b.raw_offset; });
+    if (it != bl.begin()) {
+      --it;
+    }
+    u32 n = 0;
+    for (; it != bl.end() && it->raw_offset < off + bytes; ++it) {
+      n += it->packed_size();
+    }
+    return n;
+  };
+  u32 stream_skipped = 0, stream_core_kb = 0;
   for (auto& ch : out->chunks) {
     if (cancelled()) {
       return false;
     }
+    const size_t ci = out->meshes.size();
     // the chunk's draws cover a contiguous range of the index data
     u32 first = UINT32_MAX, end = 0;
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
@@ -2550,11 +2833,36 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     out->mesh_index_first.push_back(first);
     out->mesh_index_end.push_back(end);
+    // (AI-assisted, streaming) a near chunk: read later (streaming) or never (the ones the v18
+    // budget left out, without streaming); the core ones without streaming now
+    bool skip = false;
+    if (out->is_unit(ci)) {
+      auto& su = out->stream_units[out->chunk_unit[ci]];
+      su.bytes = CtrStreamArena::mesh_bytes(ch.vertex_count, end - first);
+      su.packed = packed_of(hdr.vertex_data_offset + ch.first_vertex * (u32)sizeof(c3l::Vertex),
+                            ch.vertex_count * (u32)sizeof(c3l::Vertex)) +
+                  packed_of(hdr.index_data_offset + first * (u32)sizeof(u16),
+                            (end - first) * (u32)sizeof(u16));
+      if (su.state == CtrLevelData::kUnitNever) {
+        skip = true;
+      } else if (out->streaming) {
+        su.state = CtrLevelData::kUnitAbsent;
+        skip = true;
+      } else if (su.cls != c3l::kStreamCore || !ctr_settings().tie_lod) {
+        // (tie_lod off: the near versions are never drawn)
+        su.state = CtrLevelData::kUnitNever;
+        skip = true;
+      } else {
+        su.state = CtrLevelData::kUnitResident;
+        stream_core_kb += su.bytes / 1024;
+      }
+      stream_skipped += skip;
+    }
     // (AI-assisted) the vertices are read (decoded) straight into GPU memory
     int mesh = -1;
     void* vdst;
     u16* idst;
-    if (end <= index_total) {
+    if (end <= index_total && !skip) {
       mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
       if (mesh < 0 && make_room(name, "meshes")) {
         mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
@@ -2571,7 +2879,19 @@ bool CtrLevels::load_file(const fs::path& path,
       read_ok = read_ok && f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
                                   vdst, ch.vertex_count * sizeof(c3l::Vertex));
       if (read_ok && !out->run_spheres.empty()) {
+        // (AI-assisted, streaming) host check: the v19 file's spheres are these
+        std::vector<CtrLevelData::RunSphere> file_sp;
+        const u32 r0 = out->chunk_first_run[ci], nr = out->chunk_run_count[ci];
+        if (v19 && stream_check_enabled() && ch.vis_run_count) {
+          file_sp.assign(out->run_spheres.begin() + r0, out->run_spheres.begin() + r0 + nr);
+        }
         make_run_spheres(out, (u32)out->meshes.size(), (const c3l::Vertex*)vdst, idst, first, end);
+        for (u32 k = 0; k < file_sp.size(); k++) {
+          const auto& a = file_sp[k];
+          const auto& b = out->run_spheres[r0 + k];
+          g_stream_check_spheres++;
+          g_stream_check_sphere_diff += memcmp(&a, &b, sizeof(a)) != 0;
+        }
       }
       if (read_ok) {
         // (AI-assisted) fog_alpha (CTR_TCC_ALPHA80): which draws have vertex alpha 0x80 everywhere.
@@ -2593,6 +2913,10 @@ bool CtrLevels::load_file(const fs::path& path,
               const u16 ix = idst[i - first];
               ok = ix < ch.vertex_count && vv[ix].rgba[3] == 0x80;
             }
+          }
+          if (v19 && stream_check_enabled()) {
+            g_stream_check_alpha++;
+            g_stream_check_alpha_diff += out->draw_alpha80[d] != (ok ? 1 : 0);
           }
           out->draw_alpha80[d] = ok ? 1 : 0;
         }
@@ -2624,7 +2948,6 @@ bool CtrLevels::load_file(const fs::path& path,
       mesh = ctr_gpu_mesh_end(mesh, read_ok);
       if (mesh >= 0 && tod_state >= 0) {
         auto& t = *out->tod;
-        const size_t ci = out->meshes.size();
         t.chunk_mesh[ci] = mesh;
         t.chunk_mask[ci] = tod_mask;
         t.chunk_scanned[ci] = tod_state == 0 ? 1 : 2;
@@ -2640,6 +2963,8 @@ bool CtrLevels::load_file(const fs::path& path,
           t.chunk_light_ver[ci] = t.ver;
         }
       }
+    } else if (out->tod && skip) {
+      tod_reserve_unit(out, (u32)ci);  // (AI-assisted, streaming)
     } else if (out->tod) {
       tod_make_groups(out, (u32)out->meshes.size(), nullptr, 0, 0);
     }
@@ -2648,6 +2973,31 @@ bool CtrLevels::load_file(const fs::path& path,
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
       out->draws[d].first_index -= first;
     }
+  }
+  // (AI-assisted, streaming) c3l v19 near chunks
+  if (out->streaming) {
+    out->file_dir = std::make_shared<const c3l::Reader::Dir>(f.dir());
+  }
+  if (!out->stream_units.empty()) {
+    u64 all = 0, packed = 0;
+    for (const auto& u : out->stream_units) {
+      all += u.bytes;
+      packed += u.packed;
+    }
+    u64 rest = 0;
+    for (size_t ci = 0; ci < out->chunks.size() && ci < out->mesh_index_first.size(); ci++) {
+      if (!out->is_unit(ci) && out->mesh_index_first[ci] != UINT32_MAX) {
+        rest += CtrStreamArena::mesh_bytes(out->chunks[ci].vertex_count,
+                                           out->mesh_index_end[ci] - out->mesh_index_first[ci]);
+      }
+    }
+    lg::info("[ctr] {}: near chunks (v19): {} with {} KB ({} KB in the file), {}; the other chunks "
+             "{} KB",
+             name, out->stream_units.size(), all / 1024, packed / 1024,
+             out->streaming ? std::string("streamed")
+                            : fmt::format("{} KB of them loaded now (streaming off), {} never",
+                                          stream_core_kb, stream_skipped),
+             rest / 1024);
   }
   // bounds of the level (for the "seen from another level" mode)
   {
@@ -2887,11 +3237,54 @@ void CtrLevels::process_pending_loads(u64 frame) {
       m_requested.erase(d.job.key());
     }
   }
+#ifndef __3DS__
+  // (AI-assisted, streaming) host, env CTR_STREAM_SIM=MBPS: a stream job is taken when the New 3DS's
+  // SD card (MBPS MB/s, 8 ms per request) and decoder (100 MB/s) would have finished it, in frames of
+  // the fps cap (game time: the host's frames run as fast as they can)
+  static const double sim_mbps =
+      getenv("CTR_STREAM_SIM") ? std::max(0.5, atof(getenv("CTR_STREAM_SIM"))) : 0.0;
+  if (sim_mbps > 0) {
+    const double frame_ms = 1000.0 / std::max(1, ctr_settings().fps_cap);
+    for (auto it = done.begin(); it != done.end();) {
+      if (!it->job.stream) {
+        ++it;
+        continue;
+      }
+      if (!it->ready_frame) {
+        u64 raw = 0;
+        for (const auto& p : it->job.stream_parts) {
+          raw += (u64)p.vertex_count * 16 + (u64)(p.index_end - p.index_first) * 2;
+        }
+        const double ms = it->reads * 8.0 + it->read_bytes / (sim_mbps * 1048.576) +
+                          raw / (100.0 * 1048.576);
+        it->ready_frame = frame + (u64)std::ceil(ms / frame_ms);
+      }
+      if (frame < it->ready_frame) {
+        m_stream_delayed.push_back(std::move(*it));
+        it = done.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = m_stream_delayed.begin(); it != m_stream_delayed.end();) {
+      if (frame >= it->ready_frame) {
+        done.push_back(std::move(*it));
+        it = m_stream_delayed.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+#endif
   bool levels_changed = false;
   bool unloaded = false;
   const double now = ctr_gpu_time_ms();
   for (auto& d : done) {
     const std::string& name = d.job.name;
+    if (d.job.stream) {
+      take_stream(d, frame);  // (AI-assisted, streaming)
+      continue;
+    }
     if (d.job.parts()) {
       // (AI-assisted) partial unload / repair: the meshes made again
       take_parts(d, frame);
@@ -2967,6 +3360,8 @@ void CtrLevels::process_pending_loads(u64 frame) {
   if (levels_changed) {
     update_level_count();
   }
+  stream_take_pending(frame);  // (AI-assisted, streaming) the near chunks read, colored
+  stream_update(frame);        // (AI-assisted, streaming) the near chunks around the camera
   // (AI-assisted) levels that loaded with parts left out (no memory then): made again once the last
   // frame's free linear memory covers them (another level was unloaded, or this one's textures
   // moved to VRAM), but not while a level loads (the game waits for that one: its memory first)
@@ -3133,6 +3528,10 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
     for (auto it = m_queue.begin(); it != m_queue.end();) {
       if (!it->common && !it->prefetch && !wanted(it->name)) {
         m_requested.erase(it->key());
+        if (it->stream) {
+          free_stream_parts(*it);  // (AI-assisted, streaming) its arena pieces back
+          m_stream_inflight -= std::min<u32>(m_stream_inflight, 1);
+        }
         it = m_queue.erase(it);
       } else {
         ++it;
@@ -3191,6 +3590,1050 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
       continue;
     }
     m_pending_loads.push_back(n);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (AI-assisted, streaming) Streaming of the c3l v19 near chunks (docs/3ds-port/streaming.md)
+// ---------------------------------------------------------------------------
+
+namespace {
+// a unit is wanted within its need (CtrLevelData::StreamUnit) plus this of the camera, now or where
+// it will be in kLeadFrames at its speed (and halfway there); kept (not freed for another) until
+// kKeepMeters beyond it
+constexpr float kWantMeters = 20.f, kKeepMeters = 45.f;
+constexpr float kLeadFrames = 60.f;  // 2 s at 30 fps
+constexpr int kLeadSteps = 4;        // positions: now, 1/3, 2/3, all of the lead
+constexpr u32 kJobsInFlight = 2;     // a second job queued behind the one being read
+// while nothing is wanted: the units within this of their bound read into the arena's free room
+// (no freeing, no growth), one small job every kIdleFrames: more is there when the camera cuts
+constexpr float kIdleMeters = 250.f;
+constexpr u64 kIdleFrames = 8;
+constexpr u32 kIdleBytes = 128 * 1024;
+// a unit needed now and in view goes this much ahead of the others (after a cut: what is on
+// screen first)
+constexpr float kInViewMeters = 300.f;
+// a jump of the camera of more than this in a frame (a warp, a cut): no speed
+constexpr float kCutMeters = 40.f;
+// a stream job: at most this many file bytes, units (one level load waits for it at most this)
+constexpr u32 kBatchBytes = 256 * 1024, kBatchUnits = 24;
+
+// The time of day groups of a near chunk read by a stream job (loader thread): as tod_make_groups
+// (one per visibility id of its runs when their vertex ranges don't overlap, in vertex order;
+// else one), from the job's copy of its draws and runs; plain: every vertex has a table entry
+// (ntab). Returns false for one group of all of it.
+void stream_tod_layout(const CtrLevels* /*unused*/,
+                       u32 vertex_count,
+                       u32 index_count,
+                       const std::vector<c3l::Draw>& draws,
+                       const std::vector<c3l::VisRun>& runs,
+                       const u16* idst,
+                       const c3l::Vertex* v,
+                       u32 ntab,
+                       std::vector<CtrLevelData::Tod::VisGroup>* groups,
+                       std::vector<u16>* run_group) {
+  using G = CtrLevelData::Tod::VisGroup;
+  groups->clear();
+  run_group->assign(runs.size(), 0);
+  auto one = [&]() {
+    groups->clear();
+    groups->push_back(G{0, (u16)(std::max<u32>(vertex_count, 1) - 1), 0});
+    run_group->assign(runs.size(), 0);
+  };
+  bool ok = vertex_count >= 2 && !runs.empty();
+  std::vector<std::pair<u16, u16>> ids;
+  std::vector<G> gs;
+  // per draw its runs in order (the file keeps a draw's runs together)
+  for (u32 k = 0; ok && k < draws.size(); k++) {
+    u32 idx = draws[k].first_index;
+    for (size_t r = 0; ok && r < runs.size(); r++) {
+      if (runs[r].draw != k) {
+        continue;
+      }
+      const u32 n = runs[r].index_count;
+      if (idx + n > index_count) {
+        ok = false;
+        break;
+      }
+      const u16 vis = runs[r].vis;
+      u16 g = 0xffff;
+      for (const auto& [id, gi] : ids) {
+        if (id == vis) {
+          g = gi;
+          break;
+        }
+      }
+      if (g == 0xffff) {
+        g = (u16)gs.size();
+        ids.emplace_back(vis, g);
+        gs.push_back(G{0xffff, 0, 0});
+      }
+      (*run_group)[r] = g;
+      for (u32 i = idx; i < idx + n; i++) {
+        gs[g].lo = std::min(gs[g].lo, idst[i]);
+        gs[g].hi = std::max(gs[g].hi, idst[i]);
+      }
+      idx += n;
+    }
+  }
+  if (!ok || gs.size() < 2 || gs.size() > 0xfffe) {
+    one();
+  } else {
+    std::vector<std::pair<u16, u16>> by_lo;
+    for (const auto& g : gs) {
+      by_lo.emplace_back(g.lo, g.hi);
+    }
+    std::sort(by_lo.begin(), by_lo.end());
+    for (size_t k = 1; k < by_lo.size(); k++) {
+      if (by_lo[k].first <= by_lo[k - 1].second) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) {
+      one();
+    } else {
+      std::vector<u16> order(gs.size()), slot(gs.size());
+      for (size_t g = 0; g < gs.size(); g++) {
+        order[g] = (u16)g;
+      }
+      std::sort(order.begin(), order.end(), [&](u16 a, u16 b) { return gs[a].lo < gs[b].lo; });
+      for (size_t k = 0; k < order.size(); k++) {
+        slot[order[k]] = (u16)k;
+        groups->push_back(gs[order[k]]);
+      }
+      for (auto& rg : *run_group) {
+        rg = slot[rg];
+      }
+    }
+  }
+  for (auto& g : *groups) {
+    bool plain = ntab > 0;
+    for (u32 i = g.lo; i <= std::min<u32>(g.hi, vertex_count - 1) && plain; i++) {
+      plain = (u16)v[i].pad < ntab;
+    }
+    g.plain = plain ? 1 : 0;
+    g.ver = 0;
+    g.dver = 0;
+  }
+}
+}  // namespace
+
+void CtrLevels::free_stream_parts(const Job& job) {
+  for (const auto& p : job.stream_parts) {
+    CtrStreamArena::get().free(p.mem);
+  }
+}
+
+void CtrLevels::stream_note_camera(const math::Vector4f& t,
+                                   const math::Vector4f planes[4],
+                                   const math::Vector4f rot[4],
+                                   u64 frame) {
+  if (m_cam_valid && frame == m_cam_frame) {
+    return;
+  }
+  // Jak's world place: camera position + rot (rows) times his first bone's tmat[3]
+  if (m_target_cam_frame + 2 >= frame) {
+    for (int i = 0; i < 3; i++) {
+      m_target[i] = t[i] + rot[i][0] * m_target_cam[0] + rot[i][1] * m_target_cam[1] +
+                    rot[i][2] * m_target_cam[2];
+    }
+    m_target_frame = frame;
+  }
+  for (int i = 0; i < 4; i++) {
+    m_planes[i] = planes[i];
+  }
+  if (m_cam_valid && frame > m_cam_frame) {
+    const float n = (float)std::min<u64>(frame - m_cam_frame, 8);
+    float v[3], d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      v[c] = (t[c] - m_cam[c]) / n;
+      d2 += v[c] * v[c];
+    }
+    if (d2 > kCutMeters * kCutMeters * 4096.f * 4096.f) {
+      for (float& c : m_cam_vel) {
+        c = 0;
+      }
+      m_cut_frame = frame;
+    } else {
+      for (int c = 0; c < 3; c++) {
+        m_cam_vel[c] = 0.75f * m_cam_vel[c] + 0.25f * v[c];
+      }
+    }
+  }
+  for (int c = 0; c < 3; c++) {
+    m_cam[c] = t[c];
+  }
+  m_cam_frame = frame;
+  m_cam_valid = true;
+  m_drawn_frame.store(frame);
+}
+
+void CtrLevels::stream_late(CtrLevelData& lev, u32 unit, u64 frame) {
+  auto& su = lev.stream_units[unit];
+  const double now = ctr_gpu_time_ms();
+  if (su.late_ms > 0 && frame > su.late_last + 2) {
+    // the last time ended without it (the camera went away): that time's length
+    stream_late_end(su, su.late_last_ms, su.late_last + 1);
+  }
+  if (su.late_ms <= 0) {
+    su.late_ms = now;
+    su.late_frame = frame;
+    su.late_cut = m_cut_frame && frame <= m_cut_frame + 60;
+    m_sst.late_events++;
+    // (being read already, or not asked for yet: the reads too slow, or the need not foreseen /
+    // no room)
+    (su.state == CtrLevelData::kUnitLoading ? m_sst.late_loading : m_sst.late_absent)++;
+    if (!su.want_frame) {
+      m_sst.late_unwanted++;
+    } else {
+      m_sst.late_wanted_frames += frame - std::min(frame, su.want_frame);
+    }
+    {
+#ifndef __3DS__
+      static const bool dbg_env = getenv("CTR_STREAM_DEBUG") != nullptr;
+#else
+      constexpr bool dbg_env = false;
+#endif
+      if (dbg_env || ctr_settings().stream_debug) {
+      lg::info("[ctr] stream late: {} unit {} ({} KB) {} frame {}, wanted since {}, last score {:.1f} "
+               "m, speed {:.1f} m/s, jobs in flight {}",
+               lev.name, unit, su.bytes / 1024,
+               su.state == CtrLevelData::kUnitLoading ? "loading" : "absent", frame, su.want_frame,
+               su.last_score / 4096.f,
+               std::sqrt(m_cam_vel[0] * m_cam_vel[0] + m_cam_vel[1] * m_cam_vel[1] +
+                         m_cam_vel[2] * m_cam_vel[2]) * 30.f / 4096.f,
+               m_stream_inflight);
+      }
+    }
+  }
+  su.late_last_ms = now;
+  su.late_last = frame;
+  if (stream_check_enabled() && su.state == CtrLevelData::kUnitAbsent &&
+      frame > su.late_frame + 2) {
+    m_scheck.late_unrequested++;
+  }
+}
+
+void CtrLevels::stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64 end_frame) {
+  const double late = std::max(0.0, end_ms - su.late_ms);
+  const u64 frames = end_frame - std::min(end_frame, su.late_frame);
+  m_sst.late_periods++;
+  m_sst.late_ms_total += late;
+  m_sst.late_ms_max = std::max(m_sst.late_ms_max, late);
+  m_sst.late_frames_total += frames;
+  m_sst.late_frames_max = std::max<u64>(m_sst.late_frames_max, frames);
+  if (su.late_cut) {
+    m_sst.late_cut++;
+    m_sst.late_cut_ms += late;
+    m_sst.late_cut_max = std::max(m_sst.late_cut_max, late);
+  } else {
+    m_sst.late_other++;
+    m_sst.late_other_ms += late;
+    m_sst.late_other_max = std::max(m_sst.late_other_max, late);
+  }
+  su.late_ms = 0;
+}
+
+void CtrLevels::stream_note_level(CtrLevelData& lev, u32 late_groups, u32 held_groups,
+                                  u64 frame) {
+  (void)lev;
+  if (held_groups) {
+    m_sst.held_group_frames += held_groups;
+    if (m_sst.last_held_frame != frame) {
+      m_sst.last_held_frame = frame;
+      m_sst.held_frames++;
+    }
+  }
+  if (late_groups) {
+    m_sst.late_group_frames += late_groups;
+    if (m_sst.last_late_frame != frame) {
+      m_sst.last_late_frame = frame;
+      m_sst.late_frames++;
+    }
+  }
+}
+
+void CtrLevels::stream_evict(CtrLevelData& lev, u32 unit) {
+  auto& su = lev.stream_units[unit];
+  const u32 ci = su.chunk;
+  if (lev.meshes[ci] >= 0) {
+    ctr_gpu_mesh_delete(lev.meshes[ci]);  // the arena piece back after the GPU is done with it
+    lev.meshes[ci] = -1;
+    CtrStreamArena::get().mark_pending(su.mem);
+  }
+  if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
+    lev.tod->chunk_mesh[ci] = -1;
+  }
+  su.state = CtrLevelData::kUnitAbsent;
+  su.mem = nullptr;
+  lev.stream_resident -= std::min(lev.stream_resident, su.bytes);
+  m_sst.evictions++;
+}
+
+u32 CtrLevels::stream_shrink(bool all) {
+  auto& arena = CtrStreamArena::get();
+  if (!arena.ready() || !arena.has_growth()) {
+    return 0;
+  }
+  u32 n = 0;
+  const float kM = 4096.f;
+  for (auto& [name, lp] : m_levels) {
+    CtrLevelData& lev = *lp;
+    for (u32 u = 0; u < lev.stream_units.size(); u++) {
+      auto& su = lev.stream_units[u];
+      if (su.state != CtrLevelData::kUnitResident || !su.mem || !arena.in_growth(su.mem)) {
+        continue;
+      }
+      if (!all) {
+        // not needed now (the camera beyond its groups' near distances by the keep margin)
+        const float* c = lev.chunks[su.chunk].bsphere;
+        const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
+        const float k = lev.stream_k;
+        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - (su.need_a + k * su.need_e) <
+                         kKeepMeters * kM) {
+          continue;
+        }
+      }
+      stream_evict(lev, u);
+      n++;
+    }
+  }
+  return n;
+}
+
+// Render thread: nothing wanted, the loader idle: the nearest units within kIdleMeters of their
+// bound (m_idle) into the arena's free room, one small job (non-urgent: behind level loads).
+void CtrLevels::stream_idle_fill(u64 frame) {
+  auto& arena = CtrStreamArena::get();
+  std::sort(m_idle.begin(), m_idle.end(),
+            [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
+  CtrLevelData& lev = *m_idle[0].lev;
+  Job job;
+  job.name = lev.name;
+  job.stream = true;
+  job.generation = lev.generation;
+  job.path = lev.path;
+  job.vertex_data_offset = lev.vertex_data_offset;
+  job.index_data_offset = lev.index_data_offset;
+  job.tod_ntab = lev.tod ? (u32)lev.tod->table.size() : 0;
+  job.dir = lev.file_dir;
+  u32 packed = 0;
+  for (const auto& w : m_idle) {
+    if (w.lev != &lev) {
+      continue;
+    }
+    auto& su = lev.stream_units[w.unit];
+    void* mem = arena.alloc(su.bytes);
+    if (!mem) {
+      continue;  // (no room: none freed for it)
+    }
+    const u32 ci = su.chunk;
+    const auto& ch = lev.chunks[ci];
+    Job::StreamPart part;
+    part.unit = w.unit;
+    part.chunk = ci;
+    part.first_vertex = ch.first_vertex;
+    part.vertex_count = ch.vertex_count;
+    part.index_first = lev.mesh_index_first[ci];
+    part.index_end = lev.mesh_index_end[ci];
+    part.mem = mem;
+    part.layout = lev.tod && !su.tod_layout;
+    if (part.layout) {
+      part.draws.assign(lev.draws.begin() + ch.first_draw,
+                        lev.draws.begin() + ch.first_draw + ch.draw_count);
+      const u32 r0 = lev.chunk_first_run[ci];
+      part.runs.assign(lev.vis_runs.begin() + r0, lev.vis_runs.begin() + r0 + ch.vis_run_count);
+    }
+    su.state = CtrLevelData::kUnitLoading;
+    su.mem = mem;
+    job.stream_parts.push_back(std::move(part));
+    packed += su.packed;
+    m_sst.idle_units++;
+    if (packed >= kIdleBytes || job.stream_parts.size() >= kBatchUnits) {
+      break;
+    }
+  }
+  m_idle_frame = frame;
+  if (job.stream_parts.empty()) {
+    return;
+  }
+  std::sort(job.stream_parts.begin(), job.stream_parts.end(),
+            [](const Job::StreamPart& a, const Job::StreamPart& b) {
+              return a.first_vertex < b.first_vertex;
+            });
+  job.window = c3l_read_window();
+  m_stream_inflight++;
+  m_sst.idle_jobs++;
+  job.serial = ++m_stream_serial;
+  request(job);
+}
+
+// Render thread, each frame (process_pending_loads): the units each level needs around the camera
+// (now and where its speed takes it), the most urgent first, into a stream job for one level (one
+// job at a time); the arena's room made by freeing the units furthest beyond their need.
+void CtrLevels::stream_update(u64 frame) {
+  const double t0 = ctr_gpu_time_ms();
+  struct Done_ {
+    CtrLevels* l;
+    double t0;
+    ~Done_() {
+      const double ms = ctr_gpu_time_ms() - t0;
+      l->m_sst.sched_ms += ms;
+      l->m_sst.sched_max_ms = std::max(l->m_sst.sched_max_ms, ms);
+    }
+  } timing{this, t0};
+  m_sst.frames++;
+  auto& arena = CtrStreamArena::get();
+  if (!m_cam_valid || !arena.ready()) {
+    return;
+  }
+  // the arena's growth: given back where the linear heap has less than its reserve or a level
+  // loads (its memory first); the empty segments back to the heap (their meshes' memory came back
+  // once the GPU was done with it)
+  const u32 reserve = (u32)ctr_settings().stream_reserve_kb * 1024u;
+  bool level_loading = false;
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    for (const auto& key : m_requested) {
+      level_loading |= key.find('#') == std::string::npos;
+    }
+  }
+  if (arena.has_growth()) {
+    const u32 free_now = ctr_gpu_linear_free();
+    const u32 need = level_loading ? reserve + 12u * 1024u * 1024u : reserve;
+    if (free_now < need) {
+      m_sst.shrunk += stream_shrink(free_now + 512 * 1024 < need);
+    }
+    arena.release_empty();
+  }
+  m_want.clear();
+  m_have.clear();
+  m_idle.clear();
+  auto in_view = [&](const float* c) {
+    for (int i = 0; i < 4; i++) {
+      const float a = m_planes[0][i] * c[0] + m_planes[1][i] * c[1] + m_planes[2][i] * c[2] -
+                      m_planes[3][i];
+      if (!(a > -c[3])) {
+        return false;
+      }
+    }
+    return true;
+  };
+  float p[kLeadSteps + 1][3];
+  for (int i = 0; i < kLeadSteps; i++) {
+    for (int c = 0; c < 3; c++) {
+      p[i][c] = m_cam[c] + m_cam_vel[c] * kLeadFrames * (float)i / (kLeadSteps - 1);
+    }
+  }
+  // (a camera standing still: one position)
+  const float v2 = m_cam_vel[0] * m_cam_vel[0] + m_cam_vel[1] * m_cam_vel[1] +
+                   m_cam_vel[2] * m_cam_vel[2];
+  int np = v2 * kLeadFrames * kLeadFrames < 4096.f * 4096.f ? 1 : kLeadSteps;
+  // the wanted margin: kWantMeters, + half a second of the camera's travel (a fast camera turning
+  // sees what its lead missed)
+  const float want_m = kWantMeters * 4096.f + std::sqrt(v2) * 15.f;
+  // Jak's place too (drawn within the last frames): a cut to another camera (a cutscene's, the
+  // race's, a zoom) lands near him, and his near chunks are there before it
+  if (m_target_frame + 3 >= frame) {
+    for (int c = 0; c < 3; c++) {
+      p[np][c] = m_target[c];
+    }
+    np++;
+  }
+  constexpr float kM = 4096.f;
+  u64 need_now = 0;
+  for (auto& [name, lp] : m_levels) {
+    CtrLevelData& lev = *lp;
+    if (!lev.streaming) {
+      continue;
+    }
+    // a level not drawn lately (far mode never asks: its k is 0 there) wants nothing
+    // (15% more, or the recent largest: a zooming camera's focal length moves the factor)
+    const float k = lev.stream_frame + 3 >= frame
+                        ? std::max(lev.stream_k * 1.15f, lev.stream_k_hi)
+                        : 0.f;
+    for (u32 u = 0; u < lev.stream_units.size(); u++) {
+      auto& su = lev.stream_units[u];
+      if (su.state != CtrLevelData::kUnitAbsent && su.state != CtrLevelData::kUnitResident) {
+        continue;
+      }
+      // the unit's bound first (its sphere's center: need_a + k x need_e), then its groups': how
+      // far the camera (now or where it goes) is beyond the nearest group's near distance
+      const bool resident = su.state == CtrLevelData::kUnitResident;
+      if (k <= 0) {
+        if (resident) {
+          m_have.push_back({&lev, u, 1e30f});
+        }
+        continue;
+      }
+      const float* c = lev.chunks[su.chunk].bsphere;
+      float dmin = 1e30f;
+      for (int i = 0; i < np; i++) {
+        const float dx = p[i][0] - c[0], dy = p[i][1] - c[1], dz = p[i][2] - c[2];
+        dmin = std::min(dmin, dx * dx + dy * dy + dz * dz);
+      }
+      // (squared first: most units are far beyond their bound, no root for them)
+      const float bound = su.need_a + k * su.need_e;
+      const float far_lim = bound + (resident ? kKeepMeters * kM : want_m);
+      if (dmin > far_lim * far_lim) {
+        if (resident) {
+          m_have.push_back({&lev, u, std::sqrt(dmin) - bound});
+        } else {
+          const float idle_lim = bound + kIdleMeters * kM;
+          if (dmin < idle_lim * idle_lim) {
+            m_idle.push_back({&lev, u, std::sqrt(dmin) - bound});
+          }
+        }
+        continue;
+      }
+      float score = std::sqrt(dmin) - bound;
+      if (!lev.unit_group_first.empty()) {
+        float best = 1e30f;
+        for (u32 j = lev.unit_group_first[u]; j < lev.unit_group_first[u + 1]; j++) {
+          const u32 g = lev.unit_groups[j];
+          const auto& lg = lev.lod_groups[g];
+          const float sw = g < lev.lod_error.size() ? lev.lod_error[g] : lg.dist;
+          const float lim = sw * k + lg.bsphere[3];
+          float g2 = 1e30f;
+          for (int i = 0; i < np; i++) {
+            const float dx = p[i][0] - lg.bsphere[0], dy = p[i][1] - lg.bsphere[1],
+                        dz = p[i][2] - lg.bsphere[2];
+            g2 = std::min(g2, dx * dx + dy * dy + dz * dz);
+          }
+          // (beyond best already: no root)
+          const float bl = best + lim;
+          if (best < 1e29f && bl > 0 && g2 >= bl * bl) {
+            continue;
+          }
+          best = std::min(best, std::sqrt(g2) - lim);
+        }
+        score = best;
+      }
+      if (score < 0) {
+        need_now += su.bytes;  // (statistics: needed now or soon)
+      }
+      su.last_score = score;
+      if (resident) {
+        m_have.push_back({&lev, u, score});
+      } else if (score < want_m) {
+        // (needed now and on screen: first)
+        const float prio = score < 0 && in_view(c) ? score - kInViewMeters * kM : score;
+        m_want.push_back({&lev, u, prio});
+        if (!su.want_frame) {
+          su.want_frame = frame;
+        }
+      } else {
+        m_idle.push_back({&lev, u, score});
+      }
+    }
+  }
+  m_sst.need_max = std::max<u64>(m_sst.need_max, need_now);
+  m_sst.need_sum += need_now;
+  if (m_want.empty() && !m_stream_inflight && !level_loading && !m_idle.empty() &&
+      frame >= m_idle_frame + kIdleFrames) {
+    stream_idle_fill(frame);
+    return;
+  }
+  if (m_want.empty() || m_stream_inflight >= kJobsInFlight) {
+    return;
+  }
+  std::sort(m_want.begin(), m_want.end(),
+            [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
+  bool have_sorted = false;
+  u64 evicted = 0;  // bytes freed now (back after the GPU is done with them: no growth for those)
+  CtrLevelData& lev = *m_want[0].lev;
+  Job job;
+  job.name = lev.name;
+  job.stream = true;
+  job.generation = lev.generation;
+  job.path = lev.path;
+  job.vertex_data_offset = lev.vertex_data_offset;
+  job.index_data_offset = lev.index_data_offset;
+  job.tod_ntab = lev.tod ? (u32)lev.tod->table.size() : 0;
+  job.dir = lev.file_dir;
+  size_t hi = 0;
+  u32 packed = 0;
+  for (const auto& w : m_want) {
+    if (w.lev != &lev) {
+      continue;
+    }
+    auto& su = lev.stream_units[w.unit];
+    void* mem = arena.alloc(su.bytes);
+    if (!mem && !have_sorted) {
+      std::sort(m_have.begin(), m_have.end(),
+                [](const StreamCand& a, const StreamCand& b) { return a.score > b.score; });
+      have_sorted = true;
+    }
+    // (on the 3DS the freed memory comes back at the next frame: not more than this unit's worth
+    // freed for it, else one cut freed the whole arena)
+    // The victim: of the units beyond the keep margin (the furthest first), the first whose
+    // freeing makes a free run this big (with the free and pending pieces next to it: the arena's
+    // pieces are of all sizes, its free room in many small pieces after a while); else the
+    // furthest. Not more than this unit's worth (pending: their memory comes back next frame).
+    u64 freed_for = 0;
+    while (!mem && hi < m_have.size() && m_have[hi].score > kKeepMeters * kM &&
+           freed_for < su.bytes) {
+      size_t pick_i = hi;
+      for (size_t j = hi; j < m_have.size() && j < hi + 64 && m_have[j].score > kKeepMeters * kM;
+           j++) {
+        const auto& cu = m_have[j].lev->stream_units[m_have[j].unit];
+        if (cu.state == CtrLevelData::kUnitResident && arena.run_if_freed(cu.mem) >= su.bytes) {
+          pick_i = j;
+          break;
+        }
+      }
+      std::swap(m_have[hi], m_have[pick_i]);
+      const auto& victim = m_have[hi].lev->stream_units[m_have[hi].unit];
+      if (victim.state != CtrLevelData::kUnitResident) {
+        hi++;
+        continue;
+      }
+      const bool makes_room = arena.run_if_freed(victim.mem) >= su.bytes;
+      freed_for += makes_room ? su.bytes : victim.bytes;
+      evicted += victim.bytes;
+      stream_evict(*m_have[hi].lev, m_have[hi].unit);
+      hi++;
+      mem = arena.alloc(su.bytes);
+    }
+    // (more room while a level loads only when the heap keeps the reserve plus a level's worth:
+    // the load's memory first; a load that runs short makes room, freeing the growth)
+    const u32 grow_reserve = level_loading ? reserve + 12u * 1024u * 1024u : reserve;
+    if (!mem && evicted < su.bytes && arena.grow(su.bytes, grow_reserve)) {
+      // every unit there is needed: more room, while the linear heap keeps its reserve
+      mem = arena.alloc(su.bytes);
+    }
+    if (!mem) {
+      m_sst.no_room++;
+      break;
+    }
+    const u32 ci = su.chunk;
+    const auto& ch = lev.chunks[ci];
+    Job::StreamPart part;
+    part.unit = w.unit;
+    part.chunk = ci;
+    part.first_vertex = ch.first_vertex;
+    part.vertex_count = ch.vertex_count;
+    part.index_first = lev.mesh_index_first[ci];
+    part.index_end = lev.mesh_index_end[ci];
+    part.mem = mem;
+    part.layout = lev.tod && !su.tod_layout;
+    if (part.layout) {
+      part.draws.assign(lev.draws.begin() + ch.first_draw,
+                        lev.draws.begin() + ch.first_draw + ch.draw_count);
+      const u32 r0 = lev.chunk_first_run[ci];
+      part.runs.assign(lev.vis_runs.begin() + r0, lev.vis_runs.begin() + r0 + ch.vis_run_count);
+    }
+    su.state = CtrLevelData::kUnitLoading;
+    su.mem = mem;
+    job.stream_parts.push_back(std::move(part));
+    packed += su.packed;
+    job.urgent = job.urgent || w.score < 0;
+    // (a backlog of needed units, after a cut: bigger jobs, fewer requests per byte)
+    const u32 limit = need_now > 1024 * 1024 ? 2 * kBatchBytes : kBatchBytes;
+    if (packed >= limit || job.stream_parts.size() >= 2 * kBatchUnits ||
+        (job.stream_parts.size() >= kBatchUnits && limit == kBatchBytes)) {
+      break;
+    }
+  }
+  if (job.stream_parts.empty()) {
+    return;
+  }
+  // the units next to these in the file (their neighbours in space) that will be needed soon,
+  // while there's room without freeing anything: read with them for little more than their bytes
+  // (one request for all), instead of a request of their own later
+  for (size_t k = 0; k < job.stream_parts.size() && packed < kBatchBytes &&
+                     job.stream_parts.size() < kBatchUnits;
+       k++) {
+    for (int dir = -1; dir <= 1; dir += 2) {
+      const u32 u = (u32)((int)job.stream_parts[k].unit + dir);
+      if (u >= lev.stream_units.size() || packed >= kBatchBytes ||
+          job.stream_parts.size() >= kBatchUnits) {
+        continue;
+      }
+      auto& su = lev.stream_units[u];
+      if (su.state != CtrLevelData::kUnitAbsent) {
+        continue;
+      }
+      float score = 1e30f;
+      for (const auto& h : m_want) {
+        if (h.lev == &lev && h.unit == u) {
+          score = h.score;
+          break;
+        }
+      }
+      if (score == 1e30f) {
+        // not wanted yet: its score now (the unit's bound)
+        const float* c = lev.chunks[su.chunk].bsphere;
+        const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
+        const float k2 = lev.stream_frame + 3 >= frame ? lev.stream_k : 0.f;
+        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - (su.need_a + k2 * su.need_e)
+                       : 1e30f;
+      }
+      if (score > kKeepMeters * kM) {
+        continue;
+      }
+      void* mem = arena.alloc(su.bytes);
+      if (!mem) {
+        continue;
+      }
+      const u32 ci = su.chunk;
+      const auto& ch = lev.chunks[ci];
+      Job::StreamPart part;
+      part.unit = u;
+      part.chunk = ci;
+      part.first_vertex = ch.first_vertex;
+      part.vertex_count = ch.vertex_count;
+      part.index_first = lev.mesh_index_first[ci];
+      part.index_end = lev.mesh_index_end[ci];
+      part.mem = mem;
+      part.layout = lev.tod && !su.tod_layout;
+      if (part.layout) {
+        part.draws.assign(lev.draws.begin() + ch.first_draw,
+                          lev.draws.begin() + ch.first_draw + ch.draw_count);
+        const u32 r0 = lev.chunk_first_run[ci];
+        part.runs.assign(lev.vis_runs.begin() + r0, lev.vis_runs.begin() + r0 + ch.vis_run_count);
+      }
+      su.state = CtrLevelData::kUnitLoading;
+      su.mem = mem;
+      job.stream_parts.push_back(std::move(part));
+      packed += su.packed;
+      m_sst.neighbours++;
+    }
+  }
+  // in file order (the reader's windows go forward through the vertex and index data)
+  std::sort(job.stream_parts.begin(), job.stream_parts.end(),
+            [](const Job::StreamPart& a, const Job::StreamPart& b) {
+              return a.first_vertex < b.first_vertex;
+            });
+  job.window = c3l_read_window();
+  m_stream_inflight++;
+  job.serial = ++m_stream_serial;
+  request(job);
+}
+
+// Loader thread: a stream job's near chunks, each read (indices, then vertices) straight into its
+// arena piece; their time of day groups made from the indices where asked. Stops at the first that
+// fails (the rest's pieces go back to the arena; the render thread asks again).
+void CtrLevels::run_stream_job(const Job& job, Done* d) {
+  Timer timer;
+  d->result = LoadResult::FAILED;
+  size_t i = 0;
+  try {
+    if (!job.dir) {
+      throw std::runtime_error("no file directory");
+    }
+    C3lReader f(job.path, &m_read_bufs, job.window, *job.dir);
+    size_t run_end = 0;
+    for (; i < job.stream_parts.size(); i++) {
+      const auto& p = job.stream_parts[i];
+      if (!f.ok() || cancelled()) {
+        break;
+      }
+      if (i >= run_end) {
+        // the parts lying one after the other in the file from here: their index and vertex
+        // bytes in one request each (the converter put the near chunks together, in spatial order)
+        // (and across small gaps: reading a few KB more costs less than another request)
+        constexpr u32 kGapVerts = 48 * 1024 / 16, kGapIndices = 16 * 1024 / 2;
+        constexpr u32 kSpanBytes = 384 * 1024;
+        run_end = i + 1;
+        while (run_end < job.stream_parts.size()) {
+          const auto& a = job.stream_parts[run_end - 1];
+          const auto& b = job.stream_parts[run_end];
+          const u32 a_vend = a.first_vertex + a.vertex_count;
+          if (b.first_vertex < a_vend || b.index_first < a.index_end ||
+              b.first_vertex - a_vend > kGapVerts || b.index_first - a.index_end > kGapIndices ||
+              (b.first_vertex + b.vertex_count - p.first_vertex) * 16u +
+                      (b.index_end - p.index_first) * 2u >
+                  kSpanBytes) {
+            break;
+          }
+          run_end++;
+        }
+        const auto& last = job.stream_parts[run_end - 1];
+        for (const bool ok :
+             {f.preload(job.index_data_offset + p.index_first * (u32)sizeof(u16),
+                        (last.index_end - p.index_first) * (u32)sizeof(u16)),
+              f.preload(job.vertex_data_offset + p.first_vertex * (u32)sizeof(c3l::Vertex),
+                        (last.first_vertex + last.vertex_count - p.first_vertex) *
+                            (u32)sizeof(c3l::Vertex))}) {
+          (ok ? d->preloads : d->preload_misses)++;
+        }
+      }
+      void* vdst;
+      u16* idst;
+      const u32 icount = p.index_end - p.index_first;
+      int mesh = ctr_gpu_mesh_begin_ext(p.mem, (int)p.vertex_count, (int)icount, &vdst, &idst);
+      if (mesh < 0) {
+        break;  // (its piece back below)
+      }
+      const bool ok =
+          f.read(job.index_data_offset + p.index_first * (u32)sizeof(u16), idst,
+                 icount * sizeof(u16)) &&
+          f.read(job.vertex_data_offset + p.first_vertex * (u32)sizeof(c3l::Vertex), vdst,
+                 p.vertex_count * sizeof(c3l::Vertex));
+      Done::StreamOut o;
+      o.unit = p.unit;
+      if (ok && p.layout) {
+        stream_tod_layout(this, p.vertex_count, icount, p.draws, p.runs, idst,
+                          (const c3l::Vertex*)vdst, job.tod_ntab, &o.groups, &o.run_group);
+        o.layout = true;
+      }
+      mesh = ctr_gpu_mesh_end(mesh, ok);  // (!ok: its piece back through ctr_gpu_set_ext_free)
+      if (mesh < 0) {
+        i++;
+        break;
+      }
+      o.mesh = mesh;
+      d->stream_out.push_back(std::move(o));
+    }
+    d->read_ms = f.read_ms;
+    d->decode_ms = f.decode_ms;
+    d->reads = f.file_reads;
+    d->read_bytes = f.file_bytes_read;
+  } catch (std::exception& e) {
+    lg::error("[ctr] {}: reading near chunks failed: {}", job.name, e.what());
+  }
+  for (; i < job.stream_parts.size(); i++) {
+    CtrStreamArena::get().free(job.stream_parts[i].mem);
+  }
+  d->ms = timer.getMs();
+  d->result = d->stream_out.size() == job.stream_parts.size() ? LoadResult::LOADED
+                                                               : LoadResult::FAILED;
+}
+
+// Render thread: a stream job's meshes into their level (the same load of it), or deleted.
+void CtrLevels::take_stream(Done& d, u64 frame) {
+  (void)frame;
+  m_stream_inflight -= std::min<u32>(m_stream_inflight, 1);
+  auto it = m_levels.find(d.job.name);
+  CtrLevelData* lev = it != m_levels.end() && it->second->generation == d.job.generation
+                          ? it->second.get()
+                          : nullptr;
+  m_sst.jobs++;
+  m_sst.preloads += d.preloads;
+  m_sst.preload_misses += d.preload_misses;
+  m_sst.read_bytes += d.read_bytes;
+  m_sst.reads += d.reads;
+  m_sst.read_ms += d.read_ms;
+  m_sst.decode_ms += d.decode_ms;
+  m_sst.job_ms += d.ms;
+  m_sst.job_max_ms = std::max(m_sst.job_max_ms, d.ms);
+  if (!lev) {
+    for (auto& o : d.stream_out) {
+      ctr_gpu_mesh_delete(o.mesh);
+    }
+    return;
+  }
+  // the parts the job didn't make: not there (asked for again); the others are taken by
+  // stream_take_pending (colored first, within a budget per frame), loading until then
+  std::vector<u8> made(lev->stream_units.size(), 0);
+  for (const auto& o : d.stream_out) {
+    if (o.unit < made.size()) {
+      made[o.unit] = 1;
+    }
+  }
+  for (const auto& p : d.job.stream_parts) {
+    if (p.unit < lev->stream_units.size() && !made[p.unit] &&
+        lev->stream_units[p.unit].state == CtrLevelData::kUnitLoading) {
+      lev->stream_units[p.unit].state = CtrLevelData::kUnitAbsent;
+    }
+  }
+  for (auto& o : d.stream_out) {
+    m_take.push_back({d.job.name, d.job.generation, std::move(o)});
+  }
+}
+
+// Render thread, each frame (outside of a GPU frame): the near chunks read, into their levels.
+// Each one's time of day colors are written first with the current blend (exact: a near chunk is
+// never drawn with the file's baked colors, and its rewrite doesn't wait for tod_max_ms); at most
+// kTakeVertices vertices per frame (a chunk at least), the rest the next frame (drawn far until
+// then).
+constexpr u32 kTakeVertices = 16384;
+void CtrLevels::stream_take_pending(u64 frame) {
+  u32 verts = 0;
+  size_t i = 0;
+  const double now = ctr_gpu_time_ms();
+  for (; i < m_take.size(); i++) {
+    auto& tk = m_take[i];
+    auto it = m_levels.find(tk.name);
+    CtrLevelData* lev = it != m_levels.end() && it->second->generation == tk.generation
+                            ? it->second.get()
+                            : nullptr;
+    auto& o = tk.out;
+    if (!lev || o.unit >= lev->stream_units.size()) {
+      ctr_gpu_mesh_delete(o.mesh);
+      continue;
+    }
+    auto& su = lev->stream_units[o.unit];
+    const u32 ci = su.chunk;
+    if (su.state != CtrLevelData::kUnitLoading || lev->meshes[ci] >= 0) {
+      ctr_gpu_mesh_delete(o.mesh);  // (freed meanwhile: evicted while loading never happens)
+      continue;
+    }
+    const u32 nv = lev->chunks[ci].vertex_count;
+    if (verts && verts + nv > kTakeVertices) {
+      break;
+    }
+    verts += nv;
+    lev->meshes[ci] = o.mesh;
+    su.state = CtrLevelData::kUnitResident;
+    su.want_frame = 0;
+    su.loads++;
+    lev->stream_resident += su.bytes;
+    m_sst.units++;
+    m_sst.bytes += su.bytes;
+    m_sst.packed += su.packed;
+    if (lev->tod) {
+      auto& t = *lev->tod;
+      t.chunk_mesh[ci] = -1;  // (the file's colors, unless colored below)
+      if (o.layout && !su.tod_layout && ci < t.chunk_group_first.size()) {
+        // its groups, into the room kept at load
+        const u32 g0 = t.chunk_group_first[ci];
+        const bool fits = o.groups.size() <= su.tod_slots && g0 + o.groups.size() <= t.groups.size();
+        const u32 n = fits ? (u32)o.groups.size() : 1;
+        for (u32 g = 0; g < n; g++) {
+          t.groups[g0 + g] = fits ? o.groups[g]
+                                  : CtrLevelData::Tod::VisGroup{
+                                        0, (u16)(std::max<u32>(nv, 1) - 1), 0};
+        }
+        t.chunk_group_count[ci] = (u16)n;
+        const u32 r0 = lev->chunk_first_run[ci];
+        for (u32 k = 0; k < o.run_group.size() && r0 + k < t.run_group.size(); k++) {
+          t.run_group[r0 + k] = fits ? o.run_group[k] : 0;
+        }
+        t.chunk_min_ver[ci] = t.chunk_min_dver[ci] = t.chunk_light_ver[ci] = 0;
+        su.tod_layout = 1;
+      }
+      int n = 0;
+      auto* v = (c3l::Vertex*)ctr_gpu_mesh_vertices_inplace(o.mesh, &n);
+      if (v && n > 0 && t.blended_valid && ci < t.chunk_mask.size()) {
+        if (!t.chunk_scanned[ci]) {
+          // its palettes and light vertices (once per level load)
+          CtrLevelData::Tod::LightList lights;
+          const u8 mask = tod_scan(t, v, n, &lights);
+          t.chunk_scanned[ci] = mask ? 2 : 1;
+          t.chunk_mask[ci] = mask;
+          if (!lights.verts.empty()) {
+            t.chunk_lights[ci] = std::move(lights);
+          }
+          if (mask) {
+            tod_mark_plain(t, ci, v, n);
+          }
+        }
+        if (t.chunk_scanned[ci] == 2) {
+          // every group with the current blend (the table's entries follow lazily, exact)
+          const u32 g0 = t.chunk_group_first[ci], ng = t.chunk_group_count[ci];
+          for (u32 g = g0; g < g0 + ng; g++) {
+            auto& gr = t.groups[g];
+            const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
+            if (end > first) {
+              tod_write_range(t, v, first, end, gr.plain);
+            }
+            gr.ver = t.ver;
+            gr.dver = t.dver;
+          }
+          t.chunk_min_ver[ci] = t.ver;
+          t.chunk_min_dver[ci] = t.dver;
+          t.chunk_light_ver[ci] = t.ver;
+          ctr_gpu_flush_range(v, (u32)n * (u32)sizeof(c3l::Vertex));
+          m_sst.colored++;
+        }
+        t.chunk_mesh[ci] = o.mesh;  // (colored: tod_recolor keeps it)
+      }
+    }
+    if (su.late_ms > 0) {
+      // (a time that ended before: up to its last frame)
+      const bool open = frame <= su.late_last + 2;
+      stream_late_end(su, open ? now : su.late_last_ms, open ? frame : su.late_last + 1);
+    }
+  }
+  m_take.erase(m_take.begin(), m_take.begin() + (long)i);
+}
+
+void CtrLevels::stream_log() {
+  const auto as = CtrStreamArena::get().stats();
+  const double now = ctr_gpu_time_ms();
+  const double secs = m_sst.since_ms > 0 ? (now - m_sst.since_ms) / 1000.0 : 0.0;
+  m_sst.since_ms = now;
+  if (!as.capacity && !m_sst.jobs) {
+    return;
+  }
+  // the levels' resident linear memory: meshes (near chunks apart), textures
+  std::string levels;
+  for (const auto& [name, lev] : m_levels) {
+    u64 meshes = 0;
+    for (size_t ci = 0; ci < lev->chunks.size() && ci < lev->meshes.size() &&
+                        ci < lev->mesh_index_first.size();
+         ci++) {
+      if (lev->meshes[ci] >= 0 && !(lev->is_unit(ci) && lev->streaming)) {
+        meshes += CtrStreamArena::mesh_bytes(lev->chunks[ci].vertex_count,
+                                             lev->mesh_index_end[ci] - lev->mesh_index_first[ci]);
+      }
+    }
+    u32 resident = 0, units = 0;
+    for (const auto& u : lev->stream_units) {
+      resident += u.state == CtrLevelData::kUnitResident;
+      units += u.state != CtrLevelData::kUnitNever;
+    }
+    levels += fmt::format("{}{} meshes {} KB + textures {} KB, near chunks {} of {} ({} KB)",
+                          levels.empty() ? "" : "; ", name, meshes / 1024,
+                          lev->tex_pool_bytes / 1024, resident, units,
+                          lev->streaming ? lev->stream_resident / 1024 : 0);
+  }
+  const double n = (double)std::max<u64>(m_sst.frames, 1);
+  if (m_sst.late_events || m_sst.late_periods || m_sst.held_frames || m_sst.idle_jobs) {
+    lg::info("[ctr] streaming: late near chunks: {} being read already, {} not asked for yet ({} "
+             "never wanted before; the others {:.1f} frames after they were wanted); late times "
+             "after a camera cut {} ({:.0f} ms on average, at most {:.0f}), else {} ({:.0f} ms, at "
+             "most {:.0f}); {} frames with groups kept far in view after their data came ({} "
+             "group frames); idle fill {} jobs, {} near chunks",
+             m_sst.late_loading, m_sst.late_absent, m_sst.late_unwanted,
+             (double)m_sst.late_wanted_frames /
+                 std::max<u64>(1, m_sst.late_events - m_sst.late_unwanted),
+             m_sst.late_cut, m_sst.late_cut ? m_sst.late_cut_ms / m_sst.late_cut : 0.0,
+             m_sst.late_cut_max, m_sst.late_other,
+             m_sst.late_other ? m_sst.late_other_ms / m_sst.late_other : 0.0,
+             m_sst.late_other_max, m_sst.held_frames, m_sst.held_group_frames, m_sst.idle_jobs,
+             m_sst.idle_units);
+  }
+  lg::info("[ctr] streaming: arena {} of {} KB used (peak {}, largest free {} KB, {} pieces; "
+           "growth {} KB in {} segments, at most {} KB in all; {} taken, {} given back, {} units "
+           "freed for it); {} "
+           "jobs, {} near chunks read ({} KB, {} KB of their blocks; file {} KB in {} reads, {} of "
+           "{} ranges in one request, {:.0f} ms reading, {:.0f} ms decoding, {:.0f} "
+           "ms in jobs, longest {:.0f} ms; {:.0f} KB/s), {} freed, {} times no room; late: {} "
+           "times, {} frames with groups drawn far for it ({} group frames), {:.0f} ms on "
+           "average, at most {:.0f} ms ({} frames); needed now {:.0f} KB on average, at most "
+           "{} KB; {} read with their file neighbours; "
+           "scheduling {:.3f} ms/frame (most {:.2f}); {}",
+           as.used / 1024, as.capacity / 1024, as.peak / 1024, as.largest_free / 1024, as.pieces,
+           as.growth / 1024, as.segments ? as.segments - 1 : 0, as.peak_capacity / 1024, as.grown,
+           as.released, m_sst.shrunk,
+           m_sst.jobs, m_sst.units, m_sst.bytes / 1024, m_sst.packed / 1024,
+           m_sst.read_bytes / 1024, m_sst.reads, m_sst.preloads,
+           m_sst.preloads + m_sst.preload_misses,
+           m_sst.read_ms, m_sst.decode_ms, m_sst.job_ms, m_sst.job_max_ms,
+           secs > 0 ? m_sst.read_bytes / 1024.0 / secs : 0.0, m_sst.evictions, m_sst.no_room,
+           m_sst.late_events, m_sst.late_frames, m_sst.late_group_frames,
+           m_sst.late_periods ? m_sst.late_ms_total / m_sst.late_periods : 0.0,
+           m_sst.late_ms_max, m_sst.late_frames_max, m_sst.need_sum / n / 1024.0,
+           m_sst.need_max / 1024, m_sst.neighbours,
+           m_sst.sched_ms / n, m_sst.sched_max_ms,
+           levels.empty() ? std::string("no levels") : levels);
+  const double since = m_sst.since_ms;
+  m_sst = StreamStats();
+  m_sst.since_ms = since;
+  if (stream_check_enabled()) {
+    lg::info("[ctr] stream check: {} level draws, {} group decisions; {} groups in {} draws drawn "
+             "far because their near chunks weren't there yet ({} of them not being read after 2 "
+             "frames); {} near versions drawn without their data; near chunks drawn {}, with a "
+             "group in the file's baked colors {}; file vs load: run spheres {} "
+             "of {} differ, alpha 0x80 flags {} of {} differ",
+             m_scheck.frames, m_scheck.groups, m_scheck.late_groups, m_scheck.late_frames,
+             m_scheck.late_unrequested, m_scheck.holes, m_scheck.units_drawn,
+             m_scheck.units_baked, g_stream_check_sphere_diff,
+             g_stream_check_spheres, g_stream_check_alpha_diff, g_stream_check_alpha);
   }
 }
 
@@ -3696,6 +5139,15 @@ CtrTfragRenderer::CtrTfragRenderer(std::string name, int id, CtrLevels* levels)
     : CtrBucketRenderer(std::move(name), id), m_levels(levels) {}
 
 void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
+  {
+    // (AI-assisted, streaming) the streaming statistics, once per log period (from the first
+    // background bucket of the frame: a level slot may be empty)
+    static u64 s_logged = ~0ull;
+    if (rs.log_now && s_logged != rs.frame_idx) {
+      s_logged = rs.frame_idx;
+      m_levels->stream_log();
+    }
+  }
   TfragPcPortData pc_data;
   bool have_data = false;
   while (dma.current_tag_offset() != rs.next_bucket) {
@@ -4011,14 +5463,153 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (lev.chunk_state.size() != lev.chunks.size()) {
     lev.chunk_state.assign(lev.chunks.size(), 0);
   }
+  // (AI-assisted, micro-level) chunk_max_dist's factors once per level draw (per chunk the same
+  // operations on them as before), and the arrays and the camera in locals: the u8 stores to the
+  // chunk states had every member and vector loaded again after each of them
+  const float det = settings.detail_scale;
+  // (AI-assisted, title-popin) the auto_detail factors at position t (t = g_detail_t: this frame's)
+  const bool auto_detail = settings.auto_detail;
+  const float shrub_k0 = settings.shrub_scale, shrub_d0 = settings.shrub_distance,
+              tie_k0 = settings.tie_distance_scale;
+  const float shrub_k_span = std::max(settings.shrub_scale_max, shrub_k0) - shrub_k0;
+  const float shrub_d_span = std::max(settings.shrub_distance_max, shrub_d0) - shrub_d0;
+  const float tie_k_span = std::max(settings.tie_distance_scale_max, tie_k0) - tie_k0;
+  const float t_now = auto_detail ? g_detail_t : 0.f;
+  const float shrub_k = shrub_k0 + shrub_k_span * t_now;
+  const float shrub_d = shrub_d0 + shrub_d_span * t_now;
+  const float tie_k = tie_k0 + tie_k_span * t_now;
+  const bool shrub_ps2 = lev.shrub_ps2_dist;
+  const bool shrub_fixed = settings.shrub_distance > 0;
+  const float shrub_fixed_dist = shrub_d * 4096.f * det;
+  // (AI-assisted, title-popin) a chunk's own distance limit (0: none) at auto_detail position t
+  auto chunk_limit = [&](const c3l::Chunk& ch, float t) {
+    if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
+      return ch.max_dist * (shrub_k0 + shrub_k_span * t) * det;
+    } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
+      return (shrub_d0 + shrub_d_span * t) * 4096.f * det;
+    } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
+      return ch.max_dist * (tie_k0 + tie_k_span * t) * det;
+    }
+    return ch.max_dist * det;
+  };
+  const u8 q_now = detail_q(g_detail_t);
+  if (lev.chunk_detail_q.size() != lev.chunks.size()) {
+    lev.chunk_detail_q.assign(lev.chunks.size(), 0xff);
+  }
+  u8* const chunk_q = lev.chunk_detail_q.data();
+  const float cx = cam.trans[0], cy = cam.trans[1], cz = cam.trans[2];
+  // (AI-assisted, streaming) a chunk's distance decision (draw distance, its own limit, 10%
+  // hysteresis, auto_detail's held distances, kept while in view and moving away): the chunk loop's,
+  // and the near chunks' (before the tie LOD groups, which need them). Updates the chunk's state.
+  auto decide_dist = [&](size_t ci, const c3l::Chunk& ch, u8& state,
+                         bool vista_chunk) __attribute__((always_inline)) {
+    bool dist_ok = true;
+    {
+      // draw distance; small objects only up close
+      const float base_dist = vista_chunk ? vista_dist : draw_dist;
+      float max_dist = base_dist;
+      float d;
+      if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
+        d = ch.max_dist * shrub_k * det;  // (AI-assisted) c3l v14: the shrubs' PS2 distance
+      } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
+        d = shrub_fixed_dist;
+      } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
+        d = ch.max_dist * tie_k * det;
+      } else {
+        d = ch.max_dist * det;
+      }
+      // (AI-assisted, title-popin) the limit with own distance d (the draw distance's fog hides
+      // what goes at base_dist: not held)
+      auto limit_with = [&](float dd) {
+        return dd > 0 ? (base_dist > 0 ? std::min(base_dist, dd) : dd) : base_dist;
+      };
+      max_dist = limit_with(d);
+      if (max_dist > 0) {
+        const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        const bool was_in = state & 4;
+        auto within = [&](float m, float f) {
+          const float lim = m * f + ch.bsphere[3];
+          return d2 <= lim * lim;
+        };
+        const float f = was_in ? 1.1f : 1.f;
+        dist_ok = within(max_dist, f);
+        // (AI-assisted, title-popin) no chunk in view appears or goes because auto_detail moved:
+        // it keeps the distances it was decided with while they decide otherwise (except a GPU
+        // about to miss frames, for going)
+        int in_view = -1;
+        float dd = d;
+        const u8 cq = chunk_q[ci];
+        if (auto_detail && cq != q_now && cq != 0xff && d > 0 &&
+            (ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE)) {
+          const float d_old = chunk_limit(ch, cq / kDetailQ);
+          const bool ok_old = within(limit_with(d_old), f);
+          if (ok_old != dist_ok && !(g_detail_urgent && !dist_ok)) {
+            in_view = sphere_in_view(cam, ch.bsphere);
+            if (in_view) {
+              dist_ok = ok_old;
+              dd = d_old;
+            }
+          }
+        }
+        if (dd == d) {
+          chunk_q[ci] = q_now;
+        }
+        // (AI-assisted, title-popin) in view and moving away: drawn up to kHoldInView x its own
+        // distance (not beyond the draw distance)
+        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist)) {
+          if (in_view < 0) {
+            in_view = sphere_in_view(cam, ch.bsphere);
+          }
+          if (in_view) {
+            dist_ok = within(limit_with(dd * kHoldInView), 1.f);
+          }
+        }
+        state = (u8)(dist_ok ? (state | 4) : (state & ~4));
+      }
+    }
+    return dist_ok;
+  };
+  // (AI-assisted, streaming) c3l v19 near chunks: there (or not) and within their distance, this
+  // frame (never in far mode: the far versions)
+  const bool has_units = !lev.stream_units.empty();
+  if (has_units) {
+    lev.unit_ok.assign(lev.stream_units.size(), 0);
+    // 0: no (far mode, never loaded), 1: yes, 2: beyond its distance, 3: within it but not there
+    // (its distance state follows the camera all the same: no hysteresis jump when it comes)
+    // (a unit whose groups are all beyond their near distance, by its bound with the last frame's
+    // factor x 1.25: not decided, 2; its groups are far anyway)
+    const float kb = lev.stream_k * 1.25f;
+    for (size_t u = 0; u < lev.stream_units.size(); u++) {
+      const auto& su = lev.stream_units[u];
+      const u32 ci = su.chunk;
+      if (far_level || su.state == CtrLevelData::kUnitNever) {
+        continue;
+      }
+      {
+        const float* c = lev.chunks[ci].bsphere;
+        const float dx = c[0] - cx, dy = c[1] - cy, dz = c[2] - cz;
+        const float lim = su.need_a + kb * su.need_e;
+        if (kb > 0 && dx * dx + dy * dy + dz * dz > lim * lim) {
+          lev.unit_ok[u] = 2;
+          continue;
+        }
+      }
+      const bool there = su.state == CtrLevelData::kUnitResident && lev.meshes[ci] >= 0;
+      lev.unit_ok[u] = !decide_dist(ci, lev.chunks[ci], lev.chunk_state[ci], false) ? 2
+                       : there                                                     ? 1
+                                                                                   : 3;
+    }
+  }
   // (AI-assisted) c3l v17 tie levels of detail: each group's near version while the camera is
   // within its distance (the prototype's PS2 far-plane, times tie_lod_scale) of its sphere, with 10%
   // hysteresis, decided for every group every frame (turning the camera doesn't switch any).
   // auto_detail pulls the distances in to half while the GPU is busy. tie_lod = off: the far
   // versions only (as before v17).
   const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
+  u32 late_groups = 0;  // (AI-assisted, streaming) drawn far: their near chunks not there yet
+  u32 held_groups = 0;  // (AI-assisted, streaming) ... there now, but kept far while in view
   if (tie_lod) {
-    const float cx = cam.trans[0], cy = cam.trans[1], cz = cam.trans[2];
     u32 near = 0;
     // (AI-assisted, title-popin) files with shape errors: the near version while the far one's
     // error would show as more than tie_lod_px pixels (focal: this frame's projection, pixels of
@@ -4034,20 +5625,26 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // doesn't move it: pulling the switch in made the pops larger); older files: the PS2 distance,
     // pulled in to half while the GPU is busy
     const float k0 = settings.tie_lod ? settings.detail_scale : 0.f;
-    const bool auto_detail = settings.auto_detail && !by_error;
+    // (AI-assisted, streaming: lod_auto, was auto_detail: the chunk loop's auto_detail is above now)
+    const bool lod_auto = settings.auto_detail && !by_error;
     const float px = std::max(settings.tie_lod_px, 0.25f);
     auto k_at = [&](float t) {
       if (by_error) {
         return k0 * focal / px;
       }
-      return auto_detail ? k0 * (0.5f + 0.5f * t) : k0;
+      return lod_auto ? k0 * (0.5f + 0.5f * t) : k0;
     };
     const float k = k_at(g_detail_t);
-    const u8 q_now = detail_q(g_detail_t);
     if (lev.lod_detail_q.size() != lev.lod_groups.size()) {
       lev.lod_detail_q.assign(lev.lod_groups.size(), 0xff);
     }
     u8* const lod_q = lev.lod_detail_q.data();
+    if (has_units && lev.lod_hold_since.size() != lev.lod_groups.size()) {
+      lev.lod_hold_since.assign(lev.lod_groups.size(), 0);
+    }
+    // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
+    // view once the data came (4 s at 30 fps)
+    constexpr u32 kHoldFrames = 120;
     for (size_t g = 0; g < lev.lod_groups.size(); g++) {
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
@@ -4064,7 +5661,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // keeps the factor it was decided with while the two would choose differently (except a
       // GPU about to miss frames, for the far version)
       bool held = false;
-      if (auto_detail && (st & 2) && lod_q[g] != q_now && lod_q[g] != 0xff) {
+      if (lod_auto && (st & 2) && lod_q[g] != q_now && lod_q[g] != 0xff) {
         const bool n_old = near_at(k_at(lod_q[g] / kDetailQ));
         if (n_old != n && !(g_detail_urgent && !n) && sphere_in_view(cam, lg.bsphere)) {
           n = n_old;
@@ -4074,12 +5671,93 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (!held) {
         lod_q[g] = q_now;
       }
-      st = (u8)(2 | (n ? 1 : 0));
+      // (AI-assisted, streaming) c3l v19: the near version only while every near chunk holding it
+      // is there and within its distance; else the far version (data late: statistics). A group
+      // drawn far in view for want of its data (bit 4: held) keeps its far version while in view
+      // once the data is there: switching then would be a pop on screen; it switches out of view
+      bool keep_far = (st & 4) != 0;
+      if (n && has_units) {
+        if (g >= lev.group_unit_count.size() || !lev.group_unit_count[g]) {
+          n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
+        } else {
+          const u32* gu = &lev.group_units[lev.group_unit_first[g]];
+          bool ok = true, late = false;
+          for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+            const u8 uo = lev.unit_ok[gu[j]];
+            ok = ok && uo == 1;
+            late = late || uo == 3;
+          }
+          if (!ok) {
+            n = false;
+            if (late) {
+              late_groups++;
+              for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+                if (lev.unit_ok[gu[j]] == 3) {
+                  m_levels->stream_late(lev, gu[j], rs.frame_idx);
+                }
+              }
+              if (!keep_far && sphere_in_view(cam, lg.bsphere)) {
+                keep_far = true;
+                lev.lod_hold_since[g] = (u32)rs.frame_idx;
+              }
+            }
+          } else if (keep_far) {
+            // kept far while in view, at most kHoldFrames, and while the switch would show: the
+            // far version's error at least 1.5 x tie_lod_px (the camera nearer than 2/3 of the
+            // group's near distance; near it the error is about tie_lod_px)
+            const float lim = sw * k / 1.5f + lg.bsphere[3];
+            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim &&
+                (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
+              n = false;
+              held_groups++;
+            } else {
+              keep_far = false;
+            }
+          }
+        }
+      } else if (!n) {
+        keep_far = false;  // (beyond its distance: far anyway)
+      }
+      st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0));
       near += n;
     }
     m_lod_groups_near += near;
     m_lod_frames++;
+    // (AI-assisted, streaming) where the near chunks are needed (CtrLevels::stream_update)
+    if (lev.stream_k > 0 && (k * 1.1f > lev.stream_k * 1.3f || k * 1.1f * 1.3f < lev.stream_k)) {
+      m_levels->stream_note_cut(rs.frame_idx);  // (another camera, or a zoom)
+    }
+    lev.stream_k = k * 1.1f;
+    lev.stream_k_hi = std::max(lev.stream_k, lev.stream_k_hi * 0.99f);
+    if (has_units && stream_check_enabled()) {
+      // (AI-assisted, streaming) host check: a near version is only ever drawn with all of its
+      // near chunks there and within their distance (else the far one: never a hole)
+      auto& sc = m_levels->stream_check();
+      sc.frames++;
+      sc.groups += lev.lod_groups.size();
+      sc.late_groups += late_groups;
+      sc.late_frames += late_groups > 0;
+      for (size_t g = 0; g < lev.lod_groups.size(); g++) {
+        if (!(lev.lod_state[g] & 1)) {
+          continue;
+        }
+        const u32 cnt = g < lev.group_unit_count.size() ? lev.group_unit_count[g] : 0;
+        bool ok = cnt > 0;
+        for (u32 j = 0; j < cnt; j++) {
+          const u32 u = lev.group_units[lev.group_unit_first[g] + j];
+          ok = ok && lev.unit_ok[u] == 1 && lev.meshes[lev.stream_units[u].chunk] >= 0;
+        }
+        sc.holes += !ok;
+      }
+    }
+  } else {
+    lev.stream_k = 0.f;
   }
+  if (has_units) {
+    lev.stream_frame = rs.frame_idx;
+    m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx);
+  }
+  m_levels->stream_note_camera(cam.trans, cam.planes, cam.rot, rs.frame_idx);
   if (m_run_nomerge.size() < lev.vis_runs.size()) {
     m_run_nomerge.resize(lev.vis_runs.size());
   }
@@ -4284,40 +5962,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float lim = vista_dist + ch.bsphere[3];
     m_vista_src[ci] = vista_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim;
   };
-  // (AI-assisted, micro-level) chunk_max_dist's factors once per level draw (per chunk the same
-  // operations on them as before), and the arrays and the camera in locals: the u8 stores to the
-  // chunk states had every member and vector loaded again after each of them
-  const float det = settings.detail_scale;
-  // (AI-assisted, title-popin) the auto_detail factors at position t (t = g_detail_t: this frame's)
-  const bool auto_detail = settings.auto_detail;
-  const float shrub_k0 = settings.shrub_scale, shrub_d0 = settings.shrub_distance,
-              tie_k0 = settings.tie_distance_scale;
-  const float shrub_k_span = std::max(settings.shrub_scale_max, shrub_k0) - shrub_k0;
-  const float shrub_d_span = std::max(settings.shrub_distance_max, shrub_d0) - shrub_d0;
-  const float tie_k_span = std::max(settings.tie_distance_scale_max, tie_k0) - tie_k0;
-  const float t_now = auto_detail ? g_detail_t : 0.f;
-  const float shrub_k = shrub_k0 + shrub_k_span * t_now;
-  const float shrub_d = shrub_d0 + shrub_d_span * t_now;
-  const float tie_k = tie_k0 + tie_k_span * t_now;
-  const bool shrub_ps2 = lev.shrub_ps2_dist;
-  const bool shrub_fixed = settings.shrub_distance > 0;
-  const float shrub_fixed_dist = shrub_d * 4096.f * det;
-  // (AI-assisted, title-popin) a chunk's own distance limit (0: none) at auto_detail position t
-  auto chunk_limit = [&](const c3l::Chunk& ch, float t) {
-    if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
-      return ch.max_dist * (shrub_k0 + shrub_k_span * t) * det;
-    } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
-      return (shrub_d0 + shrub_d_span * t) * 4096.f * det;
-    } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-      return ch.max_dist * (tie_k0 + tie_k_span * t) * det;
-    }
-    return ch.max_dist * det;
-  };
-  const u8 q_now = detail_q(g_detail_t);
-  if (lev.chunk_detail_q.size() != lev.chunks.size()) {
-    lev.chunk_detail_q.assign(lev.chunks.size(), 0xff);
-  }
-  u8* const chunk_q = lev.chunk_detail_q.data();
   // (AI-assisted, title-popin) the cell spheres of tiers 1 / 2 (lod_cell_sphere), once per load
   if (lev.lod_cell_sphere.size() != lev.chunks.size() * 4) {
     lev.lod_cell_sphere.assign(lev.chunks.size() * 4, 0.f);
@@ -4346,12 +5990,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const c3l::Chunk* const chunks = lev.chunks.data();
   u8* const chunk_state = lev.chunk_state.data();
   const int* const meshes = lev.meshes.data();
-  const float cx = cam.trans[0], cy = cam.trans[1], cz = cam.trans[2];
   const size_t nchunks = lev.chunks.size();
+  const u32* const chunk_unit = has_units ? lev.chunk_unit.data() : nullptr;  // (AI-assisted)
   for (size_t ci = 0; ci < nchunks; ci++) {
     const auto& ch = chunks[ci];
     if (ch.kind == c3l::CHUNK_KIND_VISTA) {
       continue;  // (AI-assisted) after the others (their decisions pick its runs)
+    }
+    if (chunk_unit && chunk_unit[ci] != UINT32_MAX) {
+      // (AI-assisted, streaming) a near chunk: decided before the tie LOD groups (unit_ok)
+      if (lev.unit_ok[chunk_unit[ci]] == 1) {
+        emit_chunk(ci, false);
+      }
+      continue;
     }
     // (AI-assisted) The detail and distance decisions get 10% hysteresis from last frame's, and
     // are made for every chunk every frame (off screen too): with hard cutoffs, turning the camera
@@ -4377,73 +6028,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       state = (u8)((state & ~3) | (near ? 1 : 2));
       lod_ok = near == (ch.lod_tier == 1);
     }
-    bool dist_ok = true;
     // (AI-assisted) lowres_vista: the low resolution tfrag is far scenery (vista_distance)
     const bool vista_chunk = lowres_vista && ch.lod_tier == 3;
-    {
-      // draw distance; small objects only up close
-      const float base_dist = vista_chunk ? vista_dist : draw_dist;
-      float max_dist = base_dist;
-      float d;
-      if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
-        d = ch.max_dist * shrub_k * det;  // (AI-assisted) c3l v14: the shrubs' PS2 distance
-      } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
-        d = shrub_fixed_dist;
-      } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-        d = ch.max_dist * tie_k * det;
-      } else {
-        d = ch.max_dist * det;
-      }
-      // (AI-assisted, title-popin) the limit with own distance d (the draw distance's fog hides
-      // what goes at base_dist: not held)
-      auto limit_with = [&](float dd) {
-        return dd > 0 ? (base_dist > 0 ? std::min(base_dist, dd) : dd) : base_dist;
-      };
-      max_dist = limit_with(d);
-      if (max_dist > 0) {
-        const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
-        const float d2 = dx * dx + dy * dy + dz * dz;
-        const bool was_in = state & 4;
-        auto within = [&](float m, float f) {
-          const float lim = m * f + ch.bsphere[3];
-          return d2 <= lim * lim;
-        };
-        const float f = was_in ? 1.1f : 1.f;
-        dist_ok = within(max_dist, f);
-        // (AI-assisted, title-popin) no chunk in view appears or goes because auto_detail moved:
-        // it keeps the distances it was decided with while they decide otherwise (except a GPU
-        // about to miss frames, for going)
-        int in_view = -1;
-        float dd = d;
-        const u8 cq = chunk_q[ci];
-        if (auto_detail && cq != q_now && cq != 0xff && d > 0 &&
-            (ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE)) {
-          const float d_old = chunk_limit(ch, cq / kDetailQ);
-          const bool ok_old = within(limit_with(d_old), f);
-          if (ok_old != dist_ok && !(g_detail_urgent && !dist_ok)) {
-            in_view = sphere_in_view(cam, ch.bsphere);
-            if (in_view) {
-              dist_ok = ok_old;
-              dd = d_old;
-            }
-          }
-        }
-        if (dd == d) {
-          chunk_q[ci] = q_now;
-        }
-        // (AI-assisted, title-popin) in view and moving away: drawn up to kHoldInView x its own
-        // distance (not beyond the draw distance)
-        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist)) {
-          if (in_view < 0) {
-            in_view = sphere_in_view(cam, ch.bsphere);
-          }
-          if (in_view) {
-            dist_ok = within(limit_with(dd * kHoldInView), 1.f);
-          }
-        }
-        state = (u8)(dist_ok ? (state | 4) : (state & ~4));
-      }
-    }
+    const bool dist_ok = decide_dist(ci, ch, state, vista_chunk);
     if (meshes[ci] < 0 || !dist_ok) {
       if (!dist_ok && ch.lod_tier != 3) {
         vista_source(ci);
@@ -4600,6 +6187,25 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     tod_finish();
     tod_ms += ctr_gpu_time_ms() - t0;
+    if (has_units && stream_check_enabled() && lev.tod->blended_valid) {
+      // (AI-assisted, streaming) host check: a near chunk drawn with a group still in the file's
+      // baked colors (version 0)
+      auto& t = *lev.tod;
+      auto& sc = m_levels->stream_check();
+      for (const auto& vc : m_visible) {
+        if (!lev.is_unit(vc.chunk) || t.chunk_scanned[vc.chunk] != 2) {
+          continue;
+        }
+        sc.units_drawn++;
+        const u32 g0 = t.chunk_group_first[vc.chunk], ng = t.chunk_group_count[vc.chunk];
+        for (u32 g = g0; g < g0 + ng; g++) {
+          if (!t.groups[g].ver || t.chunk_mesh[vc.chunk] != lev.meshes[vc.chunk]) {
+            sc.units_baked++;
+            break;
+          }
+        }
+      }
+    }
     m_tod_spread += ps.rewritten;
     m_tod_deferred += ps.behind;
     m_tod_capped += ps.waiting;                  // (AI-assisted, citadel) tod_max_ms
@@ -4627,7 +6233,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     impostors.begin_level(lev, ic, rs.frame_idx);
     if (impostors.active()) {
       for (auto& vc : m_visible) {
-        if (!vc.vista) {
+        // (AI-assisted, streaming) not the near chunks (cards show far versions; their meshes come
+        // and go)
+        if (!vc.vista && !lev.is_unit(vc.chunk)) {
           impostors.chunk(vc.chunk, vc.clip, vc.runs_valid, m_run_shown.data(), &vc.partly);
         }
       }
