@@ -30,6 +30,16 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   CtrSpriteRenderer(std::string name, int id, CtrVram* vram);
   ~CtrSpriteRenderer();
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  // (AI-assisted) game thread, before the frame goes to the render thread (CtrRenderer::
+  // prepare_frame): a copy of the data the bucket's REF transfers point at. Those are the sprite
+  // arrays (*sprite-array-2d* / -3d*: each chunk's vector and AdGif data), which the game thread
+  // rewrites while the render thread draws the frame: process-particles runs right after the frame
+  // is sent (main.gc display-loop), and the next frame's particle launches after it. The PC port
+  // copies the whole chain before it renders (DmaCopier); read in place, a sprite could take its
+  // position from one particle and its texture from another, or a half written slot: the
+  // progress menu's frame and the HUD orb's glow flickering and breaking on hardware (the render
+  // thread runs on its own core there).
+  void snapshot(DmaFollower& dma, CtrRenderState& rs);
 
   static constexpr int kSpritesPerChunk = 48;
 
@@ -98,10 +108,31 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   int m_distort_count = 0;
   std::vector<ctr_vertex> m_distort_verts;  // (AI-assisted) one triangle strip (ctr_gpu_draw_strip)
 
-  // (AI-assisted) the chunk's sprites, read in place from the DMA data (read_chunk checked that
-  // it holds count of each; it was copied here, 6 KB per chunk)
+  // (AI-assisted) the chunk's sprites: in the snapshot (see snapshot), else in place in the DMA
+  // data (read_chunk checked that it holds count of each)
   const VecData* m_vec = nullptr;
   const AdGif* m_adgif = nullptr;
+  // (AI-assisted) the snapshot: the REF transfers' data in the order of the chain, each at a
+  // 16-byte offset of m_snap_data; m_snap_cursor: the next one the render may ask for. Valid from
+  // snapshot to the end of the next render.
+  struct SnapRef {
+    const u8* src;
+    u32 bytes;
+    u32 at;  // in quadwords
+  };
+  struct alignas(16) Quad {
+    u8 b[16];
+  };
+  std::vector<SnapRef> m_snap_refs;
+  std::unique_ptr<Quad[]> m_snap_data;
+  size_t m_snap_quads = 0, m_snap_cap = 0;
+  size_t m_snap_cursor = 0;
+  bool m_snap_valid = false;
+  // the snapshot's copy of a transfer's data (src, bytes), else src itself
+  const u8* snap_data(const u8* src, u32 bytes);
+  bool m_snap_logged = false;  // (AI-assisted) the first use is logged
+  u32 m_snap_misses = 0;    // (AI-assisted) statistics: transfers read in place with a snapshot
+  u32 m_snap_mismatch = 0;  // host: snapshot bytes that differ from game memory (synchronous)
 
   // (AI-assisted) a vertex array that grows without zeroing the new vertices (std::vector's
   // resize does), which are written right after

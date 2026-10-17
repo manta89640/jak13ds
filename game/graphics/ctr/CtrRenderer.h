@@ -106,6 +106,9 @@ class CtrRenderer {
   void render_frame(const void* ee_mem, u32 chain_offset);
   /*! Game thread, before render_frame runs on the render thread (see prepare_frame). */
   void prepare_frame(const void* ee_mem, u32 chain_offset);
+  /*! (AI-assisted) the sprite bucket's part of prepare_frame (the host also runs it before a
+   * synchronous render_frame) */
+  void prepare_sprites(const void* ee_mem, u32 chain_offset);
   void set_async(bool async) { m_rs.call_vif_callback = !async; }
   // timing, averaged over the frames between two log lines
   struct Timing {
@@ -150,6 +153,7 @@ class CtrRenderer {
   std::vector<double> m_bucket_ms;
   std::vector<int> m_bucket_phase;  // (AI-assisted, gpu-rt) gpu_breakdown (ctr_gpu_phase)
   std::vector<std::pair<int, class CtrMercRenderer*>> m_merc;
+  class CtrSpriteRenderer* m_sprite = nullptr;  // (AI-assisted) prepare_sprites
   CtrDirectBucketRenderer* m_sky = nullptr;
   std::unique_ptr<class CtrSky> m_sky_draw;
 

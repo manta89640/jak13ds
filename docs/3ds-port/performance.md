@@ -629,6 +629,17 @@ before -> after the change):
 | ocean: transition / tile loops without reloads, wave texture loops | ocean | 2.17 -> 2.04 | | host replay: draws and texture byte for byte; in-run (smultt): 0 of 6.0M texels |
 | texture page info: only the fields kept | tex | 0.16 -> 0.11 | 0.29 -> 0.18 | in-run: 0 of 4.06M textures noted |
 
+(AI-assisted, Oct 18) "chunk sprite data read in place" read the sprite arrays (the REF
+transfers into *sprite-array-2d* / -3d*) while the game thread rewrites them: the render thread
+draws frame N while the game runs process-particles and frame N + 1's particle launches (main.gc
+display-loop; the PC port copies the chain first, DmaCopier). On hardware, with the render thread on
+its own core, the progress menu's frame and the HUD orb's glow flickered and broke (oct18). The copy
+before was taken on the render thread too, so it only narrowed the race. Now the game thread copies
+the bucket's REF data in CtrRenderer::prepare_frame (CtrSpriteRenderer::snapshot, next to the bone
+snapshot; ~128 bytes per sprite) and the chunks read the copy. Host runs take the same copy before
+their synchronous render and compare it with game memory (a warning line if a copy differs or a
+chunk finds none).
+
 In-run checks: a build with the old code kept next to the new (not in the tree) ran both on the
 same input every time and counted differences, Sandover + Snowy fort and the level_pairs.pad
 route. Host tests: test/ctr_micro (CtrMicro.h against copies of the code it replaced), and
