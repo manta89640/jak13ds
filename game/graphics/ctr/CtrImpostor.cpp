@@ -24,7 +24,8 @@ constexpr int kMaxTile = 128;          // pixels, both ways
 constexpr int kMaxCapturesPerFrame = 48;
 constexpr int kMaxTriesPerFrame = 96;  // capture candidates looked at per frame
 constexpr int kBuildsPerFrame = 4;     // chunks whose groups are made per frame
-constexpr u32 kExactTrisPerFrame = 3000;  // groups' exact boxes made per frame (their triangles)
+constexpr u32 kExactTrisPerFrame = 1500;  // groups' exact boxes made per frame (their triangles)
+constexpr double kExactMsPerFrame = 0.4;  // ... and their CPU time
 constexpr u64 kSlotTimeout = 600;      // frames a tile is kept without being shown
 constexpr int kMaxCards = 512;         // per level draw
 constexpr float kScaleTolerance = 0.15f;
@@ -123,6 +124,7 @@ void CtrImpostors::begin_level(CtrLevelData& lev, const Camera& cam, u64 frame) 
     m_frame = frame;
     m_builds = 0;
     m_exact_tris = 0;
+    m_exact_ms = 0;
     m_cap_cpu_ms = 0;
     m_st.frames++;
     // the camera's speed
@@ -358,6 +360,16 @@ bool CtrImpostors::exact_box(LevelState& ls, Cluster& c) {
   u32 pal = 0;
   memset(c.tmax, 0, sizeof(c.tmax));
   memset(c.tmin, 255, sizeof(c.tmin));
+  // (each vertex once: the indices repeat them)
+  if (m_pj_stamp.size() < (size_t)nv) {
+    m_pj.resize(nv);
+    m_pj_stamp.resize(nv, 0);
+  }
+  if (++m_stamp == 0) {
+    std::fill(m_pj_stamp.begin(), m_pj_stamp.end(), 0);
+    m_stamp = 1;
+  }
+  u32 work = 0;
   for (u32 i = 0; i < c.run_count; i++) {
     const u32 r = ls.runs[c.first_run + 2 * i];
     const u32 f = ls.runs[c.first_run + 2 * i + 1];
@@ -365,17 +377,23 @@ bool CtrImpostors::exact_box(LevelState& ls, Cluster& c) {
     if (f + n > (u32)ni) {
       return false;
     }
+    work += n;
     for (u32 k = f; k < f + n; k++) {
       const u16 v = ip[k];
       if (v >= (u32)nv) {
         return false;
       }
+      if (m_pj_stamp[v] == m_stamp) {
+        continue;
+      }
+      m_pj_stamp[v] = m_stamp;
       const s16* p = verts[v].pos;
       for (int a = 0; a < 3; a++) {
         mn[a] = std::min<int>(mn[a], p[a]);
         mx[a] = std::max<int>(mx[a], p[a]);
       }
-      // (time of day) the palettes of its color and their brightest
+      // (time of day) the palettes of its color, their brightest and darkest (only the ones
+      // not black in it: a black one adds nothing whatever its weight)
       if (tod) {
         const u32 idx = (u16)verts[v].pad;
         if (idx < tod_nc + tod_nm) {
@@ -386,6 +404,9 @@ bool CtrImpostors::exact_box(LevelState& ls, Cluster& c) {
           const u8* src = tod->colors.data() + (size_t)col * tod->palette_count * 3;
           for (u32 k = 0; k < tod->palette_count; k++) {
             const int p = tod->palettes[k] & 7;
+            if (!(m >> p & 1)) {
+              continue;
+            }
             for (int ch = 0; ch < 3; ch++) {
               const u32 x = mulv ? std::min<u32>(255, (src[k * 3 + ch] * mulv[ch] + 64) >> 7)
                                  : src[k * 3 + ch];
@@ -397,6 +418,7 @@ bool CtrImpostors::exact_box(LevelState& ls, Cluster& c) {
       }
     }
   }
+  m_exact_tris += work / 3;
   c.pal = (u8)pal;
   c.light = tod && (pal & tod->light_mask) != 0;
   if (mn[0] > mx[0]) {
@@ -1297,7 +1319,7 @@ void CtrImpostors::finish_chunks() {
   const u32 budget = (u32)std::max(0, set.impostor_budget);
   u32 spent = 0;
   int texels = 0;  // rasterized on the CPU this level draw
-  int captures = 0, tries = 0;
+  int captures = 0, tries = 0, looked = 0;
   std::vector<u8> ok(m_wants.size(), 0);
   for (u32 i = 0; i < m_wants.size(); i++) {
     ok[i] = !m_wants[i].capture;
@@ -1331,6 +1353,11 @@ void CtrImpostors::finish_chunks() {
       m_st.t_short += c.tris;
       continue;
     }
+    // (a bound on the wants looked at per frame: after a level arrives most are skipped below)
+    if (++looked > 4 * kMaxTriesPerFrame) {
+      m_st.t_budget += c.tris;
+      continue;
+    }
     // its vertex colors behind the time of day (the level's rewrites are spread over frames, a
     // jump takes several): not now, or the picture would keep the old colors
     if (tod_behind(ls, c)) {
@@ -1346,12 +1373,15 @@ void CtrImpostors::finish_chunks() {
     // its exact box (its vertices read once, a few thousand triangles' worth per frame) and its
     // rectangle on screen now
     if (!c.exact) {
-      if (m_exact_tris > kExactTrisPerFrame) {
+      if (m_exact_tris > kExactTrisPerFrame || m_exact_ms > kExactMsPerFrame) {
         m_st.t_pending += c.tris;
         continue;
       }
-      m_exact_tris += c.tris;
-      if (!exact_box(ls, c)) {
+      const double te = ctr_gpu_time_ms();
+      const bool ok_box = exact_box(ls, c);
+      m_exact_ms += ctr_gpu_time_ms() - te;
+      m_st.ms_exact += ctr_gpu_time_ms() - te;
+      if (!ok_box) {
         c.eligible = false;
         continue;
       }
@@ -1630,7 +1660,7 @@ void CtrImpostors::log_stats() {
       "recaptures for time of day {:.2f}, for the tie LOD {:.2f}, cards over the vertex cap {:.1f}, camera too fast "
       "{:.0f} tris; render thread "
       "ms/frame {:.3f}: chunks {:.3f} finish {:.3f} (sort {:.3f} loop {:.3f}, captures {:.3f}, their "
-      "CPU part {:.3f}) cards "
+      "CPU part {:.3f}, exact boxes {:.3f}) cards "
       "{:.3f} (+ their draw call {:.3f})",
       m_st.cards / f, m_st.card_tris / f, 2.0 * m_st.drawn_quads / f, m_st.captures / f, m_st.capture_tris / f,
       m_st.recapture_error / f, m_st.recapture_scale / f, m_st.over_budget / f, m_st.no_room / f,
@@ -1641,6 +1671,6 @@ void CtrImpostors::log_stats() {
       m_st.t_light / f, m_st.captures ? m_st.card_quads / m_st.captures : 0.0,
       m_st.captures ? m_st.splits / m_st.captures : 0.0, m_st.recapture_tod / f,
       m_st.recapture_lod / f, m_st.verts_full / f, m_st.t_short / f, m_st.cpu_ms / f, m_st.ms_chunk / f, m_st.ms_finish / f, m_st.ms_f_sort / f, m_st.ms_f_loop / f, m_st.ms_capture / f,
-      m_st.ms_cap_cpu / f, m_st.ms_cards / f, m_st.ms_card_draw / f);
+      m_st.ms_cap_cpu / f, m_st.ms_exact / f, m_st.ms_cards / f, m_st.ms_card_draw / f);
   m_st = Stats();
 }

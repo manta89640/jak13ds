@@ -224,6 +224,7 @@ class CtrImpostors {
   int m_qgen = 0;
   bool m_qvalid = false;
   double m_cap_cpu_ms = 0;
+  double m_exact_ms = 0;    // this frame's exact boxes' CPU time
   double m_t_chunks = 0;    // begin_level's end (the chunk calls' time)  // this frame's capture CPU work (raster, planes)
   // capture scratch: the group's vertices on the tile (x, y, 1/w; stamp: projected this capture)
   // and the visible 1/w per sample
@@ -242,7 +243,7 @@ class CtrImpostors {
     // them
     double t_opaque_no = 0, t_hidden = 0, t_near = 0, t_big = 0, t_off = 0, t_budget = 0,
            t_room = 0, t_blended = 0, t_pending = 0, t_light = 0, t_short = 0;
-    double ms_chunk = 0, ms_finish = 0, ms_capture = 0, ms_cards = 0, ms_cap_cpu = 0, ms_card_draw = 0, ms_f_sort = 0, ms_f_loop = 0;
+    double ms_chunk = 0, ms_finish = 0, ms_capture = 0, ms_cards = 0, ms_cap_cpu = 0, ms_card_draw = 0, ms_f_sort = 0, ms_f_loop = 0, ms_exact = 0;
   } m_st;
 };
 
