@@ -515,7 +515,7 @@ u8 masks[] (one per fragment: 1 = unpacked).
 
 (AI-assisted.) A sidecar per level, `<level>.c3v` next to `<level>.c3l`, layout in
 `game/graphics/ctr/c3v_format.h` (v2), read by `CtrFineVis` (`game/graphics/ctr/CtrFineVis.cpp`)
-for `CtrLevels` with config `fine_vis = on` (off by default: none are shipped, see "Results"). It is not part of the .c3l: it is made from the
+for `CtrLevels` with config `fine_vis = on`. Shipped for maincave and sunkenb (see "Results"). It is not part of the .c3l: it is made from the
 finished .c3l by `ctr_vis_builder` and keyed to it by a fingerprint of the chunk, draw and
 visibility run tables (`c3v::fine_vis_level_hash`: chunk bounds, quantization, vertex and draw
 counts, LOD fields, kinds, draw index counts, runs; not file offsets, compression, textures, draw
@@ -614,15 +614,28 @@ check:`; any pixel is a culling error); `CTR_FINE_VIS_ORACLE=1` reports how many
 were in runs with no pixel seen.
 
 **Results** (Oct 17, finer-vis; c3l v18). The sets are conservative over every view direction and
-every point of a cell, which is why they hide little next to what a view hides (the host oracle:
-50-85% of the tfrag drawn at the maincave start has no visible pixel):
-- triangle weighted share of the level that may be seen, maincave: 93% per 4 m cell, 80% per 2 m
-  cell as sampled; in the file 88% (32 KB blocks) / 96% (8 KB);
-- per frame, over three maincave checkpoints with camera turns (host): 4 m cells hide nothing,
-  2 m cells 2.2k of ~43k triangles (5%) with 32 KB blocks (37 MB), 0.4k (1%) with 8 KB (13 MB);
-- open levels lower. So no .c3v files are shipped and `fine_vis` is off by default; the
-  streaming runtime costs ~0.003 ms per level draw, a set decode 0.02 ms (host), a block read
-  ~0.3 ms of SD card time, 1-8 blocks per second while moving.
+every point of a cell, which is why they hide much less than a view hides (the host oracle:
+50-85% of the tfrag drawn at the maincave start has no visible pixel). Share of the level that
+may be seen from a cell (triangle weighted, as written): maincave 88%, darkcave 87%, robocave 94%,
+sunkenb 91% (at 4 m cells 91-97%). Per frame in Azahar, Jak standing (fine_vis off -> on, all
+the renderers' triangles; GPU estimate 10.6 ms + 0.13 ms per 1k triangles):
+
+| view | triangles | draws | GPU estimate |
+|---|---|---|---|
+| maincave-start | 153.7k -> 131.9k (-14.2%) | 755 -> 610 | 30.6 -> 27.7 ms |
+| maincave-to-darkcave, -to-robocave | -0.1%, 0% | = | = |
+| darkcave-start, robocave-start, -bottom | 0% | = | = |
+| sunkenb-start | 72.4k -> 68.0k (-6.1%) | 610 -> 600 | 20.0 -> 19.4 ms |
+| sunkenb-helix | 0% | = | = |
+
+On the host over three maincave checkpoints with camera turns: -5% on average (2.2k of ~43k).
+So only `maincave.c3v` (37 MB) and `sunkenb.c3v` (16 MB) are shipped; open levels gain less (the
+2 m sets of Oct 12 hid ~1% at 4 m). Runtime cost: 0.006-0.06 ms per level draw on the render
+thread (Azahar), a set decode when the camera enters a cell with another set 0.01-1 ms (Azahar;
+deep difference paths), a block read ~6 ms of the loader thread (Azahar), 1-20 blocks per 5 s
+while moving; memory: the block index (8 bytes per 16 m block) + the 128 KB pool per level.
+
 `occ_cull` (config_dev.md, CtrOccCull.h) is the exact per-view alternative: it hides far more
-(maincave start in Azahar: 16.6k triangles), but its CPU cost on the 3DS is larger than the GPU
-time it saves (24.5 ms for that; 6.4 ms for 3.1k with fewer occluders), so it is off too.
+where it runs (maincave start in Azahar: 16.6k triangles with 600 occluders), but its render
+thread cost on the 3DS is larger than the GPU time it saves (24.5 ms for that; 6.4 ms for 3.1k
+with 300), so it is off by default.
