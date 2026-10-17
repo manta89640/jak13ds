@@ -41,6 +41,8 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   void draw_distorter();
   bool read_chunk(DmaFollower& dma, u32* count, u32* program);
   void draw_chunk(u32 count, Mode mode);
+  template <Mode mode>
+  void draw_chunk_mode(u32 count);
   // draws the buckets. hud: as Sprite3's HUD flush, a sprite that writes depth with the alpha test
   // (FB_ONLY) is drawn a second time for the fragments that fail it, without depth writes
   void flush(bool hud = false);
