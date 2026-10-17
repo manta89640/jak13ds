@@ -323,6 +323,7 @@ struct CtrLevelData {
   std::vector<u32> unit_group_first;
   std::vector<u32> unit_groups;
   std::vector<u8> unit_ok;  // per unit, this frame (draw_level): there and within its distance
+  std::vector<u32> lod_hold_since;  // per LOD group: the frame its far version began to be kept
   bool streaming = false;
   float stream_k = 0.f;   // the last draw's tie LOD factor (a group is near within its error x
                           // this + its radius; 0: no near versions)
@@ -417,6 +418,7 @@ class CtrLevels {
     u64 late_groups = 0, late_frames = 0;    // near in the reference, far: data not there yet
     u64 late_unrequested = 0;                // ... and not even being read (no room)
     u64 holes = 0;                           // near versions drawn without their data (never)
+    u64 units_drawn = 0, units_baked = 0;    // near chunks drawn; ... with baked colors (never)
   };
   StreamCheck& stream_check() { return m_scheck; }
   /*! (AI-assisted, streaming) a unit needed (draw_level): late statistics */
@@ -628,6 +630,13 @@ class CtrLevels {
   void take_stream(Done& d, u64 frame);
   void stream_evict(CtrLevelData& lev, u32 unit);
   void stream_idle_fill(u64 frame);
+  void stream_take_pending(u64 frame);
+  struct StreamTake {
+    std::string name;
+    u32 generation;
+    Done::StreamOut out;
+  };
+  std::vector<StreamTake> m_take;  // read, not taken yet (colored first, within a budget)
   void stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64 end_frame);
   // the units in the arena's growth segments freed (all: a level load needs the memory; else the
   // ones not needed now); returns how many
@@ -672,6 +681,7 @@ class CtrLevels {
     double late_cut_ms = 0, late_other_ms = 0, late_cut_max = 0, late_other_max = 0;
     u64 held_group_frames = 0, held_frames = 0, last_held_frame = 0;  // far kept in view
     u64 idle_jobs = 0, idle_units = 0;
+    u64 colored = 0;  // near chunks colored as they were taken
     u64 late_wanted_frames = 0;  // late after being wanted: the frames between
     u64 preloads = 0, preload_misses = 0;
     u64 late_group_frames = 0, late_frames = 0, last_late_frame = 0;

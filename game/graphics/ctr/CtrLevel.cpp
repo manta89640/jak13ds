@@ -149,6 +149,9 @@ CtrLevels::~CtrLevels() {
   for (auto& [name, p] : m_prefetched) {
     unload(*p.lev);
   }
+  for (auto& tk : m_take) {
+    ctr_gpu_mesh_delete(tk.out.mesh);  // (AI-assisted, streaming)
+  }
   for (auto& [name, lev] : m_levels) {
     unload(*lev);
   }
@@ -209,6 +212,8 @@ void CtrLevels::loader_main() {
       }
       return i;
     };
+    // (a "waited for" rule by the game's ready() calls was tried: the game polls ready() for the
+    // level it loads beside the one it plays too, and Sandover's hut waited 3.6 s for the beach)
     auto it = pick([&](const Job& j) { return !j.stream && !j.prefetch && can_start(j); });
     if (it == m_queue.end()) {
       it = pick([](const Job& j) { return j.stream && j.urgent; });
@@ -3344,7 +3349,8 @@ void CtrLevels::process_pending_loads(u64 frame) {
   if (levels_changed) {
     update_level_count();
   }
-  stream_update(frame);  // (AI-assisted, streaming) the near chunks around the camera
+  stream_take_pending(frame);  // (AI-assisted, streaming) the near chunks read, colored
+  stream_update(frame);        // (AI-assisted, streaming) the near chunks around the camera
   // (AI-assisted) levels that loaded with parts left out (no memory then): made again once the last
   // frame's free linear memory covers them (another level was unloaded, or this one's textures
   // moved to VRAM), but not while a level loads (the game waits for that one: its memory first)
@@ -4010,6 +4016,9 @@ void CtrLevels::stream_update(u64 frame) {
   const float v2 = m_cam_vel[0] * m_cam_vel[0] + m_cam_vel[1] * m_cam_vel[1] +
                    m_cam_vel[2] * m_cam_vel[2];
   int np = v2 * kLeadFrames * kLeadFrames < 4096.f * 4096.f ? 1 : kLeadSteps;
+  // the wanted margin: kWantMeters, + half a second of the camera's travel (a fast camera turning
+  // sees what its lead missed)
+  const float want_m = kWantMeters * 4096.f + std::sqrt(v2) * 15.f;
   // Jak's place too (drawn within the last frames): a cut to another camera (a cutscene's, the
   // race's, a zoom) lands near him, and his near chunks are there before it
   if (m_target_frame + 3 >= frame) {
@@ -4052,7 +4061,7 @@ void CtrLevels::stream_update(u64 frame) {
       }
       // (squared first: most units are far beyond their bound, no root for them)
       const float bound = su.need_a + k * su.need_e;
-      const float far_lim = bound + (resident ? kKeepMeters : kWantMeters) * kM;
+      const float far_lim = bound + (resident ? kKeepMeters * kM : want_m);
       if (dmin > far_lim * far_lim) {
         if (resident) {
           m_have.push_back({&lev, u, std::sqrt(dmin) - bound});
@@ -4093,7 +4102,7 @@ void CtrLevels::stream_update(u64 frame) {
       su.last_score = score;
       if (resident) {
         m_have.push_back({&lev, u, score});
-      } else if (score < kWantMeters * kM) {
+      } else if (score < want_m) {
         // (needed now and on screen: first)
         const float prio = score < 0 && in_view(c) ? score - kInViewMeters * kM : score;
         m_want.push_back({&lev, u, prio});
@@ -4376,25 +4385,57 @@ void CtrLevels::take_stream(Done& d, u64 frame) {
     }
     return;
   }
-  for (const auto& p : d.job.stream_parts) {
-    if (p.unit < lev->stream_units.size() &&
-        lev->stream_units[p.unit].state == CtrLevelData::kUnitLoading) {
-      lev->stream_units[p.unit].state = CtrLevelData::kUnitAbsent;  // (unless made below)
+  // the parts the job didn't make: not there (asked for again); the others are taken by
+  // stream_take_pending (colored first, within a budget per frame), loading until then
+  std::vector<u8> made(lev->stream_units.size(), 0);
+  for (const auto& o : d.stream_out) {
+    if (o.unit < made.size()) {
+      made[o.unit] = 1;
     }
   }
-  const double now = ctr_gpu_time_ms();
+  for (const auto& p : d.job.stream_parts) {
+    if (p.unit < lev->stream_units.size() && !made[p.unit] &&
+        lev->stream_units[p.unit].state == CtrLevelData::kUnitLoading) {
+      lev->stream_units[p.unit].state = CtrLevelData::kUnitAbsent;
+    }
+  }
   for (auto& o : d.stream_out) {
-    if (o.unit >= lev->stream_units.size()) {
+    m_take.push_back({d.job.name, d.job.generation, std::move(o)});
+  }
+}
+
+// Render thread, each frame (outside of a GPU frame): the near chunks read, into their levels.
+// Each one's time of day colors are written first with the current blend (exact: a near chunk is
+// never drawn with the file's baked colors, and its rewrite doesn't wait for tod_max_ms); at most
+// kTakeVertices vertices per frame (a chunk at least), the rest the next frame (drawn far until
+// then).
+constexpr u32 kTakeVertices = 16384;
+void CtrLevels::stream_take_pending(u64 frame) {
+  u32 verts = 0;
+  size_t i = 0;
+  const double now = ctr_gpu_time_ms();
+  for (; i < m_take.size(); i++) {
+    auto& tk = m_take[i];
+    auto it = m_levels.find(tk.name);
+    CtrLevelData* lev = it != m_levels.end() && it->second->generation == tk.generation
+                            ? it->second.get()
+                            : nullptr;
+    auto& o = tk.out;
+    if (!lev || o.unit >= lev->stream_units.size()) {
       ctr_gpu_mesh_delete(o.mesh);
       continue;
     }
     auto& su = lev->stream_units[o.unit];
     const u32 ci = su.chunk;
-    if (su.state != CtrLevelData::kUnitAbsent || lev->meshes[ci] >= 0) {
-      ctr_gpu_mesh_delete(o.mesh);
+    if (su.state != CtrLevelData::kUnitLoading || lev->meshes[ci] >= 0) {
+      ctr_gpu_mesh_delete(o.mesh);  // (freed meanwhile: evicted while loading never happens)
       continue;
     }
-    // (su.mem: its arena piece, from the request)
+    const u32 nv = lev->chunks[ci].vertex_count;
+    if (verts && verts + nv > kTakeVertices) {
+      break;
+    }
+    verts += nv;
     lev->meshes[ci] = o.mesh;
     su.state = CtrLevelData::kUnitResident;
     su.want_frame = 0;
@@ -4405,7 +4446,7 @@ void CtrLevels::take_stream(Done& d, u64 frame) {
     m_sst.packed += su.packed;
     if (lev->tod) {
       auto& t = *lev->tod;
-      t.chunk_mesh[ci] = -1;  // the file's colors: rewritten when drawn (tod_recolor)
+      t.chunk_mesh[ci] = -1;  // (the file's colors, unless colored below)
       if (o.layout && !su.tod_layout && ci < t.chunk_group_first.size()) {
         // its groups, into the room kept at load
         const u32 g0 = t.chunk_group_first[ci];
@@ -4414,8 +4455,7 @@ void CtrLevels::take_stream(Done& d, u64 frame) {
         for (u32 g = 0; g < n; g++) {
           t.groups[g0 + g] = fits ? o.groups[g]
                                   : CtrLevelData::Tod::VisGroup{
-                                        0, (u16)(std::max<u32>(lev->chunks[ci].vertex_count, 1) - 1),
-                                        0};
+                                        0, (u16)(std::max<u32>(nv, 1) - 1), 0};
         }
         t.chunk_group_count[ci] = (u16)n;
         const u32 r0 = lev->chunk_first_run[ci];
@@ -4425,6 +4465,42 @@ void CtrLevels::take_stream(Done& d, u64 frame) {
         t.chunk_min_ver[ci] = t.chunk_min_dver[ci] = t.chunk_light_ver[ci] = 0;
         su.tod_layout = 1;
       }
+      int n = 0;
+      auto* v = (c3l::Vertex*)ctr_gpu_mesh_vertices_inplace(o.mesh, &n);
+      if (v && n > 0 && t.blended_valid && ci < t.chunk_mask.size()) {
+        if (!t.chunk_scanned[ci]) {
+          // its palettes and light vertices (once per level load)
+          CtrLevelData::Tod::LightList lights;
+          const u8 mask = tod_scan(t, v, n, &lights);
+          t.chunk_scanned[ci] = mask ? 2 : 1;
+          t.chunk_mask[ci] = mask;
+          if (!lights.verts.empty()) {
+            t.chunk_lights[ci] = std::move(lights);
+          }
+          if (mask) {
+            tod_mark_plain(t, ci, v, n);
+          }
+        }
+        if (t.chunk_scanned[ci] == 2) {
+          // every group with the current blend (the table's entries follow lazily, exact)
+          const u32 g0 = t.chunk_group_first[ci], ng = t.chunk_group_count[ci];
+          for (u32 g = g0; g < g0 + ng; g++) {
+            auto& gr = t.groups[g];
+            const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
+            if (end > first) {
+              tod_write_range(t, v, first, end, gr.plain);
+            }
+            gr.ver = t.ver;
+            gr.dver = t.dver;
+          }
+          t.chunk_min_ver[ci] = t.ver;
+          t.chunk_min_dver[ci] = t.dver;
+          t.chunk_light_ver[ci] = t.ver;
+          ctr_gpu_flush_range(v, (u32)n * (u32)sizeof(c3l::Vertex));
+          m_sst.colored++;
+        }
+        t.chunk_mesh[ci] = o.mesh;  // (colored: tod_recolor keeps it)
+      }
     }
     if (su.late_ms > 0) {
       // (a time that ended before: up to its last frame)
@@ -4432,6 +4508,7 @@ void CtrLevels::take_stream(Done& d, u64 frame) {
       stream_late_end(su, open ? now : su.late_last_ms, open ? frame : su.late_last + 1);
     }
   }
+  m_take.erase(m_take.begin(), m_take.begin() + (long)i);
 }
 
 void CtrLevels::stream_log() {
@@ -4510,10 +4587,12 @@ void CtrLevels::stream_log() {
   if (stream_check_enabled()) {
     lg::info("[ctr] stream check: {} level draws, {} group decisions; {} groups in {} draws drawn "
              "far because their near chunks weren't there yet ({} of them not being read after 2 "
-             "frames); {} near versions drawn without their data; file vs load: run spheres {} "
+             "frames); {} near versions drawn without their data; near chunks drawn {}, with a "
+             "group in the file's baked colors {}; file vs load: run spheres {} "
              "of {} differ, alpha 0x80 flags {} of {} differ",
              m_scheck.frames, m_scheck.groups, m_scheck.late_groups, m_scheck.late_frames,
-             m_scheck.late_unrequested, m_scheck.holes, g_stream_check_sphere_diff,
+             m_scheck.late_unrequested, m_scheck.holes, m_scheck.units_drawn,
+             m_scheck.units_baked, g_stream_check_sphere_diff,
              g_stream_check_spheres, g_stream_check_alpha_diff, g_stream_check_alpha);
   }
 }
@@ -5520,6 +5599,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lev.lod_detail_q.assign(lev.lod_groups.size(), 0xff);
     }
     u8* const lod_q = lev.lod_detail_q.data();
+    if (has_units && lev.lod_hold_since.size() != lev.lod_groups.size()) {
+      lev.lod_hold_since.assign(lev.lod_groups.size(), 0);
+    }
+    // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
+    // view once the data came (4 s at 30 fps)
+    constexpr u32 kHoldFrames = 120;
     for (size_t g = 0; g < lev.lod_groups.size(); g++) {
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
@@ -5571,10 +5656,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                   m_levels->stream_late(lev, gu[j], rs.frame_idx);
                 }
               }
-              keep_far = keep_far || sphere_in_view(cam, lg.bsphere);
+              if (!keep_far && sphere_in_view(cam, lg.bsphere)) {
+                keep_far = true;
+                lev.lod_hold_since[g] = (u32)rs.frame_idx;
+              }
             }
           } else if (keep_far) {
-            if (sphere_in_view(cam, lg.bsphere)) {
+            // kept far while in view, at most kHoldFrames, and while the switch would show: the
+            // far version's error at least 1.5 x tie_lod_px (the camera nearer than 2/3 of the
+            // group's near distance; near it the error is about tie_lod_px)
+            const float lim = sw * k / 1.5f + lg.bsphere[3];
+            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim &&
+                (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
               n = false;
               held_groups++;
             } else {
@@ -6054,6 +6147,25 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     tod_finish();
     tod_ms += ctr_gpu_time_ms() - t0;
+    if (has_units && stream_check_enabled() && lev.tod->blended_valid) {
+      // (AI-assisted, streaming) host check: a near chunk drawn with a group still in the file's
+      // baked colors (version 0)
+      auto& t = *lev.tod;
+      auto& sc = m_levels->stream_check();
+      for (const auto& vc : m_visible) {
+        if (!lev.is_unit(vc.chunk) || t.chunk_scanned[vc.chunk] != 2) {
+          continue;
+        }
+        sc.units_drawn++;
+        const u32 g0 = t.chunk_group_first[vc.chunk], ng = t.chunk_group_count[vc.chunk];
+        for (u32 g = g0; g < g0 + ng; g++) {
+          if (!t.groups[g].ver || t.chunk_mesh[vc.chunk] != lev.meshes[vc.chunk]) {
+            sc.units_baked++;
+            break;
+          }
+        }
+      }
+    }
     m_tod_spread += ps.rewritten;
     m_tod_deferred += ps.behind;
     m_tod_capped += ps.waiting;                  // (AI-assisted, citadel) tod_max_ms

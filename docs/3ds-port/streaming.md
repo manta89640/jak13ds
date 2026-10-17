@@ -37,6 +37,13 @@ is in an ordinary tie chunk that is always loaded. Per frame (`draw_level`):
 3. The units are drawn when `unit_ok` is 1 (their runs: the near versions of the groups that chose
    near, as any tie chunk's LOD runs); the far chunks' runs as before.
 
+**No pop when late data arrives.** A group drawn far *in view* because its near data was late
+keeps its far version while it stays in view once the data is there (`lod_state` bit 2), at most
+4 s (120 frames), and only while the switch would show: the camera within 2/3 of the group's near
+distance (there the far version's error is >= 1.5 x tie_lod_px; beyond it the switch is near the
+size of an ordinary LOD switch). Out of view it switches at once. The statistics count the frames
+with groups kept so.
+
 So a group's near runs are drawn only from a mesh that is there, and its far runs are hidden only
 when it chose near, which needs all of its near meshes there and within their distance: there is no
 frame where neither version is drawn. The rest of a unit's culling (the view test of its sphere,
@@ -54,10 +61,20 @@ kDrawAlpha80 flags with what the load works out from the vertices.
 A group g is near within `e_g x k + r_g` of its center (e_g its shape error, r_g its radius,
 k = focal / tie_lod_px x detail_scale x 1.1: the hysteresis' 1.1; ~70 in gameplay). A unit is
 needed while that holds for one of its groups: its **score** is the smallest `|p - c_g| - (e_g x k +
-r_g)` over its groups g, at three camera positions p: now, and 0.6 s and 1.2 s ahead at the
-camera's speed (frames: velocity per frame, smoothed, reset by cuts of more than 40 m). The unit's
-bound (need_a + need_e x k from its sphere's center, StreamChunk) skips the per-group pass for the
-units beyond it. Score < 0: needed now; < 15 m: wanted (read); > 40 m: may be freed for another.
+r_g)` over its groups g, at the camera now and 2/3, 4/3 and 2 s ahead at its speed (velocity per
+frame, smoothed, reset by cuts of more than 40 m), and at Jak (his first bone's place from the merc
+renderer: world = camera position + camera rot x tmat[3], within 0.6 m of the game's position):
+camera cuts (cutscene, race and zoom cameras) land near him. k is this frame's factor x 1.15 or
+its recent largest (decaying 1% a frame): a zoom moves it. The unit's bound (need_a + need_e x k
+from its sphere's center, StreamChunk) skips the per-group pass for the units beyond it, squared
+distances first. Score < 0: needed now; < 20 m + half a second of the camera's travel: wanted
+(read); > 45 m: may be freed for another. A needed unit in view goes before every other.
+**Camera cuts**: a jump of more than 40 m in a frame, or of the tie LOD factor by more than 30%
+(another camera's focal length, a zoom); late times are counted as after a cut (within 2 s of one)
+or not (speed, bandwidth, room).
+**Idle fill**: while nothing is wanted, no job runs and no level loads, every 8 frames one small job
+(at most 128 KB) reads the nearest units within 250 m of their bound into the arena's free room (no
+freeing, no growth): more is there before a cut.
 
 The converter puts groups of similar need distance into near chunks of their own (need classes:
 < 30, < 60, < 120, < 240 m and beyond, cells 50, 50, 100, 100, 200 m): one large rock in a 100 m
@@ -70,10 +87,13 @@ groups, 50 m: 4.2 / 6.3 Snowy).
 
 - The units of the loaded levels are scored (a level not drawn for 3 frames wants nothing).
 - Wanted units that aren't there, most urgent (lowest score) first, of the level of the most urgent
-  one, go into one stream job: at most 256 KB of file bytes or 24 units, plus the units next to
-  them in the file (their spatial neighbours) that are within the keep margin, while there's room
-  without freeing anything. One job at a time; level loads go first on the loader thread (a stream
-  job waits for them and is short: a level load waits for one at most ~50-100 ms on hardware).
+  one, go into one stream job: at most 256 KB of file bytes or 24 units (512 KB / 48 while more
+  than 1 MB is needed now), plus the units next to them in the file (their spatial neighbours) that
+  are within the keep margin, while there's room without freeing anything. Two jobs in flight.
+  Loader order: loads of levels the game waits for (it asked `ready()` for them within the last
+  second), stream jobs holding units needed now, the other level loads (the neighbouring level of
+  a continue, prefetches), the other stream jobs. A stream job is short (a level load waits for one
+  at most ~50-100 ms on hardware).
 - Room: each unit gets its arena piece when it goes into the job (the render thread allocates);
   when the arena has none, the units furthest beyond their need (score > 40 m) are freed
   (`ctr_gpu_mesh_delete`: the piece comes back once the GPU is done with it) until it fits, else
@@ -84,8 +104,9 @@ groups, 50 m: 4.2 / 6.3 Snowy).
   straight into its arena piece (`ctr_gpu_mesh_begin_ext`), and for a unit read the first time its
   time of day groups from its indices. Reads use the level's block directory as read at load (no
   directory read per job).
-- The render thread takes the meshes (`take_stream`) at the next frame: the unit is there from that
-  frame on.
+- The render thread takes the meshes (`take_stream`, `stream_take_pending`) at the next frame,
+  each one's time of day colors written first with the current blend (below), at most 16k vertices
+  a frame (a chunk at least; the rest the next frame): the unit is there from that frame on.
 
 ## Memory
 
@@ -104,18 +125,23 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
 
 ## Time of day, tie LOD, the other features
 
-- Time of day (c3l v16): a unit's colors are the file's when it is read; `tod_recolor` sees a new
-  mesh and rewrites each of its groups the first time it is drawn, at once (a group with the file's
-  colors never waits for the budget): exact for the current time. The groups (one per visibility
-  id, v18) are made from the unit's indices by the stream job at its first read, into room kept at
-  load; the light lists and palettes (`tod_scan`) at its first draw, once per level load.
+- Time of day (c3l v16): a unit is colored when it is taken, before its first draw: every group
+  written from the table with the current blend (exact; ~80 ns per vertex in Azahar, within the take
+  budget), its versions set, so `tod_recolor` and tod_max_ms (citadel's per-frame cap) treat it as
+  up to date: never drawn with the file's baked colors. The groups (one per visibility id, v18) are
+  made from the unit's indices by the stream job at its first read, into room kept at load; its
+  light lists and palettes (`tod_scan`) at its first take, once per level load. Host check:
+  `CTR_TOD_CHECK=1`.
 - Tie LOD: unchanged for the far chunks; a unit's runs are LOD runs like any tie LOD chunk's.
 - static_cmdlists: a recorded stretch is keyed by the draws' physical vertex and index addresses,
   counts and states: a unit freed and another read into the same arena piece with the same counts
   writes the same command words (the data at those addresses is what the GPU reads), so nothing is
   replayed stale (`static_cmdlists = compare` checks).
-- Impostors: units are never cards (cards show far versions) and don't restart the level's cards
-  when their meshes come and go.
+- Impostors (merged Oct 17: cards from the tie LOD version on screen): units are never cards and
+  don't restart the level's cards when their meshes come and go. A far chunk's card holds far
+  versions only (its near versions are in units): while a unit is late its groups are far and the
+  card shows what is drawn; once they switch near their far runs are hidden, the card's cluster
+  isn't shown and the unit draws them as geometry. No recapture needed.
 - fine_vis: units are tie chunks (never occluders); a .c3v made from the v19 file covers them.
   Regenerate the .c3v files after the reconvert (`ctr_vis_builder --all <c3l folder>`).
 - Partial unload (far mode), repair of incomplete loads: units are not theirs (never "missing").
