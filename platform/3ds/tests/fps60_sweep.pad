@@ -1,0 +1,764 @@
+# (AI-assisted) 60 fps sweep: every checkpoint in game order in the late-game world (all tasks
+# closed, 100 power cells, as playthrough_late.pad), for config.ini fps_cap = 60 and
+# stats_period = 5. At each checkpoint: continue, wait until Jak stands (target-stance; the two
+# Lava Tube middle checkpoints: target-racing), 3 s more, the marker "fps60 N NAME", then ~15 s
+# (900 frames) turning the camera slowly (right stick half left, ~2 turns) while Jak stands.
+# get-current-time is logged at the marker and at the end (game time in 1/300 s: with the pad
+# frames in between it gives the mean time ratio, i.e. whether game time per frame is right).
+# Read: platform/3ds/tools/fps60_report.py gk.log (per checkpoint: fps from the stats windows
+# that start after the marker). ~30-45 min (frames, not seconds: slower at lower fps).
+# Hardware: copy to sdmc:/3ds/jak1/fps60_sweep.pad, config.ini "pad_script = fps60_sweep.pad"
+# (platform/3ds/tests/fps60_hw_config.ini). Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+150 tasks 2 111
+160 call poke32 $*game-info* 92 f100
+200 log CP 1 training-start
+200 continue training-start
+201 wait *target* target-continue
+202 wait *target* target-stance
+382 pos *target*
+383 call get-current-time
+384 log fps60 1 training-start
+385 rx=64
+1285 -
+1286 pos *target*
+1287 call get-current-time
+1300 log CP 2 training-warp
+1300 continue training-warp
+1301 wait *target* target-continue
+1302 wait *target* target-stance
+1482 pos *target*
+1483 call get-current-time
+1484 log fps60 2 training-warp
+1485 rx=64
+2385 -
+2386 pos *target*
+2387 call get-current-time
+2400 log CP 3 village1-hut
+2400 continue village1-hut
+2401 wait *target* target-continue
+2402 wait *target* target-stance
+2582 pos *target*
+2583 call get-current-time
+2584 log fps60 3 village1-hut
+2585 rx=64
+3485 -
+3486 pos *target*
+3487 call get-current-time
+3500 log CP 4 village1-warp
+3500 continue village1-warp
+3501 wait *target* target-continue
+3502 wait *target* target-stance
+3682 pos *target*
+3683 call get-current-time
+3684 log fps60 4 village1-warp
+3685 rx=64
+4585 -
+4586 pos *target*
+4587 call get-current-time
+4600 log CP 5 beach-start
+4600 continue beach-start
+4601 wait *target* target-continue
+4602 wait *target* target-stance
+4782 pos *target*
+4783 call get-current-time
+4784 log fps60 5 beach-start
+4785 rx=64
+5685 -
+5686 pos *target*
+5687 call get-current-time
+5700 log CP 6 jungle-start
+5700 continue jungle-start
+5701 wait *target* target-continue
+5702 wait *target* target-stance
+5882 pos *target*
+5883 call get-current-time
+5884 log fps60 6 jungle-start
+5885 rx=64
+6785 -
+6786 pos *target*
+6787 call get-current-time
+6800 log CP 7 jungle-tower
+6800 continue jungle-tower
+6801 wait *target* target-continue
+6802 wait *target* target-stance
+6982 pos *target*
+6983 call get-current-time
+6984 log fps60 7 jungle-tower
+6985 rx=64
+7885 -
+7886 pos *target*
+7887 call get-current-time
+7900 log CP 8 misty-start
+7900 continue misty-start
+7901 wait *target* target-continue
+7902 wait *target* target-stance
+8082 pos *target*
+8083 call get-current-time
+8084 log fps60 8 misty-start
+8085 rx=64
+8985 -
+8986 pos *target*
+8987 call get-current-time
+9000 log CP 9 misty-silo
+9000 continue misty-silo
+9001 wait *target* target-continue
+9002 wait *target* target-stance
+9182 pos *target*
+9183 call get-current-time
+9184 log fps60 9 misty-silo
+9185 rx=64
+10085 -
+10086 pos *target*
+10087 call get-current-time
+10100 log CP 10 misty-bike
+10100 continue misty-bike
+10101 wait *target* target-continue
+10102 wait *target* target-stance
+10282 pos *target*
+10283 call get-current-time
+10284 log fps60 10 misty-bike
+10285 rx=64
+11185 -
+11186 pos *target*
+11187 call get-current-time
+11200 log CP 11 misty-backside
+11200 continue misty-backside
+11201 wait *target* target-continue
+11202 wait *target* target-stance
+11382 pos *target*
+11383 call get-current-time
+11384 log fps60 11 misty-backside
+11385 rx=64
+12285 -
+12286 pos *target*
+12287 call get-current-time
+12300 log CP 12 misty-silo2
+12300 continue misty-silo2
+12301 wait *target* target-continue
+12302 wait *target* target-stance
+12482 pos *target*
+12483 call get-current-time
+12484 log fps60 12 misty-silo2
+12485 rx=64
+13385 -
+13386 pos *target*
+13387 call get-current-time
+13400 log CP 13 firecanyon-start
+13400 continue firecanyon-start
+13401 wait *target* target-continue
+13402 wait *target* target-stance
+13582 pos *target*
+13583 call get-current-time
+13584 log fps60 13 firecanyon-start
+13585 rx=64
+14485 -
+14486 pos *target*
+14487 call get-current-time
+14500 log CP 14 firecanyon-end
+14500 continue firecanyon-end
+14501 wait *target* target-continue
+14502 wait *target* target-stance
+14682 pos *target*
+14683 call get-current-time
+14684 log fps60 14 firecanyon-end
+14685 rx=64
+15585 -
+15586 pos *target*
+15587 call get-current-time
+15600 log CP 15 village2-start
+15600 continue village2-start
+15601 wait *target* target-continue
+15602 wait *target* target-stance
+15782 pos *target*
+15783 call get-current-time
+15784 log fps60 15 village2-start
+15785 rx=64
+16685 -
+16686 pos *target*
+16687 call get-current-time
+16700 log CP 16 village2-warp
+16700 continue village2-warp
+16701 wait *target* target-continue
+16702 wait *target* target-stance
+16882 pos *target*
+16883 call get-current-time
+16884 log fps60 16 village2-warp
+16885 rx=64
+17785 -
+17786 pos *target*
+17787 call get-current-time
+17800 log CP 17 village2-dock
+17800 continue village2-dock
+17801 wait *target* target-continue
+17802 wait *target* target-stance
+17982 pos *target*
+17983 call get-current-time
+17984 log fps60 17 village2-dock
+17985 rx=64
+18885 -
+18886 pos *target*
+18887 call get-current-time
+18900 log CP 18 sunken-start
+18900 continue sunken-start
+18901 wait *target* target-continue
+18902 wait *target* target-stance
+19082 pos *target*
+19083 call get-current-time
+19084 log fps60 18 sunken-start
+19085 rx=64
+19985 -
+19986 pos *target*
+19987 call get-current-time
+20000 log CP 19 sunken1
+20000 continue sunken1
+20001 wait *target* target-continue
+20002 wait *target* target-stance
+20182 pos *target*
+20183 call get-current-time
+20184 log fps60 19 sunken1
+20185 rx=64
+21085 -
+21086 pos *target*
+21087 call get-current-time
+21100 log CP 20 sunken2
+21100 continue sunken2
+21101 wait *target* target-continue
+21102 wait *target* target-stance
+21282 pos *target*
+21283 call get-current-time
+21284 log fps60 20 sunken2
+21285 rx=64
+22185 -
+22186 pos *target*
+22187 call get-current-time
+22200 log CP 21 sunken-tube1
+22200 continue sunken-tube1
+22201 wait *target* target-continue
+22202 wait *target* target-stance
+22382 pos *target*
+22383 call get-current-time
+22384 log fps60 21 sunken-tube1
+22385 rx=64
+23285 -
+23286 pos *target*
+23287 call get-current-time
+23300 log CP 22 sunkenb-start
+23300 continue sunkenb-start
+23301 wait *target* target-continue
+23302 wait *target* target-stance
+23482 pos *target*
+23483 call get-current-time
+23484 log fps60 22 sunkenb-start
+23485 rx=64
+24385 -
+24386 pos *target*
+24387 call get-current-time
+24400 log CP 23 sunkenb-helix
+24400 continue sunkenb-helix
+24401 wait *target* target-continue
+24402 wait *target* target-stance
+24582 pos *target*
+24583 call get-current-time
+24584 log fps60 23 sunkenb-helix
+24585 rx=64
+25485 -
+25486 pos *target*
+25487 call get-current-time
+25500 log CP 24 swamp-start
+25500 continue swamp-start
+25501 wait *target* target-continue
+25502 wait *target* target-stance
+25682 pos *target*
+25683 call get-current-time
+25684 log fps60 24 swamp-start
+25685 rx=64
+26585 -
+26586 pos *target*
+26587 call get-current-time
+26600 log CP 25 swamp-dock1
+26600 continue swamp-dock1
+26601 wait *target* target-continue
+26602 wait *target* target-stance
+26782 pos *target*
+26783 call get-current-time
+26784 log fps60 25 swamp-dock1
+26785 rx=64
+27685 -
+27686 pos *target*
+27687 call get-current-time
+27700 log CP 26 swamp-cave1
+27700 continue swamp-cave1
+27701 wait *target* target-continue
+27702 wait *target* target-stance
+27882 pos *target*
+27883 call get-current-time
+27884 log fps60 26 swamp-cave1
+27885 rx=64
+28785 -
+28786 pos *target*
+28787 call get-current-time
+28800 log CP 27 swamp-dock2
+28800 continue swamp-dock2
+28801 wait *target* target-continue
+28802 wait *target* target-stance
+28982 pos *target*
+28983 call get-current-time
+28984 log fps60 27 swamp-dock2
+28985 rx=64
+29885 -
+29886 pos *target*
+29887 call get-current-time
+29900 log CP 28 swamp-cave2
+29900 continue swamp-cave2
+29901 wait *target* target-continue
+29902 wait *target* target-stance
+30082 pos *target*
+30083 call get-current-time
+30084 log fps60 28 swamp-cave2
+30085 rx=64
+30985 -
+30986 pos *target*
+30987 call get-current-time
+31000 log CP 29 swamp-game
+31000 continue swamp-game
+31001 wait *target* target-continue
+31002 wait *target* target-stance
+31182 pos *target*
+31183 call get-current-time
+31184 log fps60 29 swamp-game
+31185 rx=64
+32085 -
+32086 pos *target*
+32087 call get-current-time
+32100 log CP 30 swamp-cave3
+32100 continue swamp-cave3
+32101 wait *target* target-continue
+32102 wait *target* target-stance
+32282 pos *target*
+32283 call get-current-time
+32284 log fps60 30 swamp-cave3
+32285 rx=64
+33185 -
+33186 pos *target*
+33187 call get-current-time
+33200 log CP 31 rolling-start
+33200 continue rolling-start
+33201 wait *target* target-continue
+33202 wait *target* target-stance
+33382 pos *target*
+33383 call get-current-time
+33384 log fps60 31 rolling-start
+33385 rx=64
+34285 -
+34286 pos *target*
+34287 call get-current-time
+34300 log CP 32 ogre-start
+34300 continue ogre-start
+34301 wait *target* target-continue
+34302 wait *target* target-stance
+34482 pos *target*
+34483 call get-current-time
+34484 log fps60 32 ogre-start
+34485 rx=64
+35385 -
+35386 pos *target*
+35387 call get-current-time
+35400 log CP 33 ogre-race
+35400 continue ogre-race
+35401 wait *target* target-continue
+35402 wait *target* target-stance
+35582 pos *target*
+35583 call get-current-time
+35584 log fps60 33 ogre-race
+35585 rx=64
+36485 -
+36486 pos *target*
+36487 call get-current-time
+36500 log CP 34 ogre-end
+36500 continue ogre-end
+36501 wait *target* target-continue
+36502 wait *target* target-stance
+36682 pos *target*
+36683 call get-current-time
+36684 log fps60 34 ogre-end
+36685 rx=64
+37585 -
+37586 pos *target*
+37587 call get-current-time
+37600 log CP 35 village3-start
+37600 continue village3-start
+37601 wait *target* target-continue
+37602 wait *target* target-stance
+37782 pos *target*
+37783 call get-current-time
+37784 log fps60 35 village3-start
+37785 rx=64
+38685 -
+38686 pos *target*
+38687 call get-current-time
+38700 log CP 36 village3-warp
+38700 continue village3-warp
+38701 wait *target* target-continue
+38702 wait *target* target-stance
+38882 pos *target*
+38883 call get-current-time
+38884 log fps60 36 village3-warp
+38885 rx=64
+39785 -
+39786 pos *target*
+39787 call get-current-time
+39800 log CP 37 village3-farside
+39800 continue village3-farside
+39801 wait *target* target-continue
+39802 wait *target* target-stance
+39982 pos *target*
+39983 call get-current-time
+39984 log fps60 37 village3-farside
+39985 rx=64
+40885 -
+40886 pos *target*
+40887 call get-current-time
+40900 log CP 38 snow-start
+40900 continue snow-start
+40901 wait *target* target-continue
+40902 wait *target* target-stance
+41082 pos *target*
+41083 call get-current-time
+41084 log fps60 38 snow-start
+41085 rx=64
+41985 -
+41986 pos *target*
+41987 call get-current-time
+42000 log CP 39 snow-fort
+42000 continue snow-fort
+42001 wait *target* target-continue
+42002 wait *target* target-stance
+42182 pos *target*
+42183 call get-current-time
+42184 log fps60 39 snow-fort
+42185 rx=64
+43085 -
+43086 pos *target*
+43087 call get-current-time
+43100 log CP 40 snow-flut-flut
+43100 continue snow-flut-flut
+43101 wait *target* target-continue
+43102 wait *target* target-stance
+43282 pos *target*
+43283 call get-current-time
+43284 log fps60 40 snow-flut-flut
+43285 rx=64
+44185 -
+44186 pos *target*
+44187 call get-current-time
+44200 log CP 41 snow-pass-to-fort
+44200 continue snow-pass-to-fort
+44201 wait *target* target-continue
+44202 wait *target* target-stance
+44382 pos *target*
+44383 call get-current-time
+44384 log fps60 41 snow-pass-to-fort
+44385 rx=64
+45285 -
+45286 pos *target*
+45287 call get-current-time
+45300 log CP 42 snow-by-ice-lake
+45300 continue snow-by-ice-lake
+45301 wait *target* target-continue
+45302 wait *target* target-stance
+45482 pos *target*
+45483 call get-current-time
+45484 log fps60 42 snow-by-ice-lake
+45485 rx=64
+46385 -
+46386 pos *target*
+46387 call get-current-time
+46400 log CP 43 snow-by-ice-lake-alt
+46400 continue snow-by-ice-lake-alt
+46401 wait *target* target-continue
+46402 wait *target* target-stance
+46582 pos *target*
+46583 call get-current-time
+46584 log fps60 43 snow-by-ice-lake-alt
+46585 rx=64
+47485 -
+47486 pos *target*
+47487 call get-current-time
+47500 log CP 44 snow-outside-fort
+47500 continue snow-outside-fort
+47501 wait *target* target-continue
+47502 wait *target* target-stance
+47682 pos *target*
+47683 call get-current-time
+47684 log fps60 44 snow-outside-fort
+47685 rx=64
+48585 -
+48586 pos *target*
+48587 call get-current-time
+48600 log CP 45 snow-outside-cave
+48600 continue snow-outside-cave
+48601 wait *target* target-continue
+48602 wait *target* target-stance
+48782 pos *target*
+48783 call get-current-time
+48784 log fps60 45 snow-outside-cave
+48785 rx=64
+49685 -
+49686 pos *target*
+49687 call get-current-time
+49700 log CP 46 snow-across-from-flut
+49700 continue snow-across-from-flut
+49701 wait *target* target-continue
+49702 wait *target* target-stance
+49882 pos *target*
+49883 call get-current-time
+49884 log fps60 46 snow-across-from-flut
+49885 rx=64
+50785 -
+50786 pos *target*
+50787 call get-current-time
+50800 log CP 47 maincave-start
+50800 continue maincave-start
+50801 wait *target* target-continue
+50802 wait *target* target-stance
+50982 pos *target*
+50983 call get-current-time
+50984 log fps60 47 maincave-start
+50985 rx=64
+51885 -
+51886 pos *target*
+51887 call get-current-time
+51900 log CP 48 maincave-to-darkcave
+51900 continue maincave-to-darkcave
+51901 wait *target* target-continue
+51902 wait *target* target-stance
+52082 pos *target*
+52083 call get-current-time
+52084 log fps60 48 maincave-to-darkcave
+52085 rx=64
+52985 -
+52986 pos *target*
+52987 call get-current-time
+53000 log CP 49 maincave-to-robocave
+53000 continue maincave-to-robocave
+53001 wait *target* target-continue
+53002 wait *target* target-stance
+53182 pos *target*
+53183 call get-current-time
+53184 log fps60 49 maincave-to-robocave
+53185 rx=64
+54085 -
+54086 pos *target*
+54087 call get-current-time
+54100 log CP 50 darkcave-start
+54100 continue darkcave-start
+54101 wait *target* target-continue
+54102 wait *target* target-stance
+54282 pos *target*
+54283 call get-current-time
+54284 log fps60 50 darkcave-start
+54285 rx=64
+55185 -
+55186 pos *target*
+55187 call get-current-time
+55200 log CP 51 robocave-start
+55200 continue robocave-start
+55201 wait *target* target-continue
+55202 wait *target* target-stance
+55382 pos *target*
+55383 call get-current-time
+55384 log fps60 51 robocave-start
+55385 rx=64
+56285 -
+56286 pos *target*
+56287 call get-current-time
+56300 log CP 52 robocave-bottom
+56300 continue robocave-bottom
+56301 wait *target* target-continue
+56302 wait *target* target-stance
+56482 pos *target*
+56483 call get-current-time
+56484 log fps60 52 robocave-bottom
+56485 rx=64
+57385 -
+57386 pos *target*
+57387 call get-current-time
+57400 log CP 53 lavatube-start
+57400 continue lavatube-start
+57401 wait *target* target-continue
+57402 wait *target* target-stance
+57582 pos *target*
+57583 call get-current-time
+57584 log fps60 53 lavatube-start
+57585 rx=64
+58485 -
+58486 pos *target*
+58487 call get-current-time
+58500 log CP 54 lavatube-middle
+58500 continue lavatube-middle
+58501 wait *target* target-continue
+58502 wait *target* target-racing
+58682 pos *target*
+58683 call get-current-time
+58684 log fps60 54 lavatube-middle
+58685 rx=64
+59585 -
+59586 pos *target*
+59587 call get-current-time
+59600 log CP 55 lavatube-after-ribbon
+59600 continue lavatube-after-ribbon
+59601 wait *target* target-continue
+59602 wait *target* target-racing
+59782 pos *target*
+59783 call get-current-time
+59784 log fps60 55 lavatube-after-ribbon
+59785 rx=64
+60685 -
+60686 pos *target*
+60687 call get-current-time
+60700 log CP 56 lavatube-end
+60700 continue lavatube-end
+60701 wait *target* target-continue
+60702 wait *target* target-stance
+60882 pos *target*
+60883 call get-current-time
+60884 log fps60 56 lavatube-end
+60885 rx=64
+61785 -
+61786 pos *target*
+61787 call get-current-time
+61800 log CP 57 citadel-start
+61800 continue citadel-start
+61801 wait *target* target-continue
+61802 wait *target* target-stance
+61982 pos *target*
+61983 call get-current-time
+61984 log fps60 57 citadel-start
+61985 rx=64
+62885 -
+62886 pos *target*
+62887 call get-current-time
+62900 log CP 58 citadel-entrance
+62900 continue citadel-entrance
+62901 wait *target* target-continue
+62902 wait *target* target-stance
+63082 pos *target*
+63083 call get-current-time
+63084 log fps60 58 citadel-entrance
+63085 rx=64
+63985 -
+63986 pos *target*
+63987 call get-current-time
+64000 log CP 59 citadel-warp
+64000 continue citadel-warp
+64001 wait *target* target-continue
+64002 wait *target* target-stance
+64182 pos *target*
+64183 call get-current-time
+64184 log fps60 59 citadel-warp
+64185 rx=64
+65085 -
+65086 pos *target*
+65087 call get-current-time
+65100 log CP 60 citadel-launch-start
+65100 continue citadel-launch-start
+65101 wait *target* target-continue
+65102 wait *target* target-stance
+65282 pos *target*
+65283 call get-current-time
+65284 log fps60 60 citadel-launch-start
+65285 rx=64
+66185 -
+66186 pos *target*
+66187 call get-current-time
+66200 log CP 61 citadel-launch-end
+66200 continue citadel-launch-end
+66201 wait *target* target-continue
+66202 wait *target* target-stance
+66382 pos *target*
+66383 call get-current-time
+66384 log fps60 61 citadel-launch-end
+66385 rx=64
+67285 -
+67286 pos *target*
+67287 call get-current-time
+67300 log CP 62 citadel-plat-start
+67300 continue citadel-plat-start
+67301 wait *target* target-continue
+67302 wait *target* target-stance
+67482 pos *target*
+67483 call get-current-time
+67484 log fps60 62 citadel-plat-start
+67485 rx=64
+68385 -
+68386 pos *target*
+68387 call get-current-time
+68400 log CP 63 citadel-plat-end
+68400 continue citadel-plat-end
+68401 wait *target* target-continue
+68402 wait *target* target-stance
+68582 pos *target*
+68583 call get-current-time
+68584 log fps60 63 citadel-plat-end
+68585 rx=64
+69485 -
+69486 pos *target*
+69487 call get-current-time
+69500 log CP 64 citadel-generator-start
+69500 continue citadel-generator-start
+69501 wait *target* target-continue
+69502 wait *target* target-stance
+69682 pos *target*
+69683 call get-current-time
+69684 log fps60 64 citadel-generator-start
+69685 rx=64
+70585 -
+70586 pos *target*
+70587 call get-current-time
+70600 log CP 65 citadel-generator-end
+70600 continue citadel-generator-end
+70601 wait *target* target-continue
+70602 wait *target* target-stance
+70782 pos *target*
+70783 call get-current-time
+70784 log fps60 65 citadel-generator-end
+70785 rx=64
+71685 -
+71686 pos *target*
+71687 call get-current-time
+71700 log CP 66 citadel-elevator
+71700 continue citadel-elevator
+71701 wait *target* target-continue
+71702 wait *target* target-stance
+71882 pos *target*
+71883 call get-current-time
+71884 log fps60 66 citadel-elevator
+71885 rx=64
+72785 -
+72786 pos *target*
+72787 call get-current-time
+72800 log CP 67 finalboss-start
+72800 continue finalboss-start
+72801 wait *target* target-continue
+72802 wait *target* target-stance
+72982 pos *target*
+72983 call get-current-time
+72984 log fps60 67 finalboss-start
+72985 rx=64
+73885 -
+73886 pos *target*
+73887 call get-current-time
+73900 log CP 68 finalboss-fight
+73900 continue finalboss-fight
+73901 wait *target* target-continue
+73902 wait *target* target-stance
+74082 pos *target*
+74083 call get-current-time
+74084 log fps60 68 finalboss-fight
+74085 rx=64
+74985 -
+74986 pos *target*
+74987 call get-current-time
+75000 log FPS60 SWEEP DONE
+75001 exit
