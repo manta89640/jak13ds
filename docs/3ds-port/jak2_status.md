@@ -95,29 +95,41 @@ Next things to try:
   point with the `title` flag (`title-start`/`title-restart` from `initialize!`);
 - (d) boot without the title: `*kernel-boot-message*`, or make `-level` map to the DGO name.
 
-## C-backend warnings to review (from `j2data/cbuild1.log`)
+## C-backend warnings (from `j2data/cbuild1.log`), reviewed Oct 18
 
-These are the bug class that broke Jak 1's platforms (c-abi-v3-narrowing). Review each one before
-trusting gameplay. Fix each one in goal_src (type the parameter `handle`, as Jak 1 did), or show it
-is harmless.
+(AI-assisted) The bug class that broke Jak 1's platforms (c-abi-v3-narrowing). Branch jak2-abi
+fixed the real ones; a C build after the fixes has 310 warnings, all shown harmless below.
 
-Narrowing casts (11):
-- `levels/common/warp-gate.gc`: parameter `arg2` of type `target` cast to `handle`
-- `levels/city/traffic/citizen/civilian.gc`: `this` (civilian) cast to `handle`
-- `levels/city/traffic/citizen/guard.gc`: `this` (crimson-guard) cast to `handle`
-- `levels/common/enemy/guards/crimson-guard-level.gc`: `this` cast to `handle`
-- `levels/common/enemy/hover/crimson-guard-hover.gc`: `this` cast to `handle`
-- `engine/ps2/timer.gc`: a `time-frame` cast to `float` and passed as an argument
-- 5x `gs-*` register values cast to `adgif-shader` (`engine/debug/default-menu.gc` and others;
-  debug code, probably harmless)
+Narrowing casts (11 -> 6):
+- fixed: `warp-gate.gc` `target-warp-out` arg2 (`target` cast to `handle`): the warp gate sends its
+  handle through `change-state`, the `target`-typed parameter dropped the pid, so `handle->process`
+  failed and the gate never got `'effect`. arg2 is now `object` (target-h.gc): it is the gate's
+  handle, or the entity that `target-warp-in` passes on (a pointer, the same as native).
+- fixed (was harmless): civilian / guard / crimson-guard-level / crimson-guard-hover passed
+  `(the-as handle this)` to `speech-control-method-13`, which compares it with `handle->process`:
+  it was a process all along, never a real handle, and passed whole (hi = 0, as native).
+  `speech-control-method-13` and `speech-channel-method-10` now take a `process`.
+- harmless: `timer.gc` puts the frame delta (a small `time-frame`) into `sparticle-data x` as float
+  bits; the low half is the whole value, and a float field store keeps only it on every backend.
+- harmless: 5x `gs-tex0/tex1/clamp` cast to `adgif-shader` in `default-menu.gc` (debug): the value
+  is cast straight back to `int` and shifted, never passed as an argument (locals keep 64 bits).
 
-The four citizen/guard ones run constantly in Haven City (traffic), so check them first.
+Function-type casts (306 -> 304):
+- fixed: `editable-player.gc` (debug editor): a `(function editable symbol symbol)` lambda called
+  with an `editable-region`; `symbol` is WIDE in Jak 2, so `(= (-> arg0 region) arg1)` compared a
+  garbage upper half. The lambda takes `editable-region`, like its twin a few lines below.
+- fixed: `menu.gc` int items (debug menu) called their `(function int debug-menu-msg int int int)`
+  callbacks through the float view: the ints got a garbage upper half. They now store and call
+  `iactivate-func` with ints, as Jak 1 does.
+- harmless, the affected parameter is never read (a WIDE parameter only reads a float register):
+  300 bot course callbacks (`*-course.gc`: sewer mog/jinx/grim/hal, atoll sig0, under sig5, city
+  kor/kid/hal3, ash4, kiddogescort), `(lambda ((arg0 object) (arg1 <bot>)) ...)` stored as
+  `check-done` / `(function <wait-spot> <bot> symbol)`: arg0 unused in all of them; 2x
+  `leg-ik-callback` (arg1/arg2 `object`, unused); `pilot-states.gc` rotate-surface hook
+  (arg0-2 `object`, unused; Jak 1 retyped its twin to `surface`).
 
-Function-type casts (306): "a function of type X called as Y gets arguments without their upper
-half". Jak 1 had three and fixed them in goal_src. Most are probably like `leg-ik-callback` or
-debug-menu callbacks (an object parameter seen as matrix/float). Sort them by which mask bit is a
-real 64-bit value: handles, time-frames, 64-bit bitfields. The ABI check mode (c_backend.md:
-`-DGOALC_ABI_CHECK` + `OPENGOAL_C_ABI_CHECK=1`) finds the ones that matter at run time.
+Not checked statically: casts from untyped values (`function`, `basic` fields). Run the ABI check
+mode (`-DGOALC_ABI_CHECK` + `OPENGOAL_C_ABI_CHECK=1`, c_backend.md) once C mode boots.
 
 ## Next steps
 

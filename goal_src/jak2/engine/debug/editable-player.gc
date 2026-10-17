@@ -987,10 +987,9 @@
        0
        (editable-array-method-14
          arg0
-         (the-as
-           (function editable editable-region symbol)
-           (lambda ((arg0 editable) (arg1 symbol)) (and (type? arg0 editable-point) (= (-> arg0 region) arg1)))
-           )
+         ;; (AI-assisted) arg1 typed editable-region, as the callback type passes it: a symbol parameter
+         ;; is WIDE in the C backend and would compare a garbage upper half (c_backend.md, ABI v3)
+         (lambda ((arg0 editable) (arg1 editable-region)) (and (type? arg0 editable-point) (= (-> arg0 region) arg1)))
          (-> arg0 region)
          )
        (let ((s5-5 (-> arg0 selection length)))

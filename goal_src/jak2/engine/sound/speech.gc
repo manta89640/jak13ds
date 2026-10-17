@@ -194,7 +194,7 @@
   (none)
   )
 
-(defmethod speech-channel-method-10 ((this speech-channel) (arg0 handle))
+(defmethod speech-channel-method-10 ((this speech-channel) (arg0 process))
   (when (= arg0 (handle->process (-> this last-request handle)))
     (set-action!
       *gui-control*
@@ -241,7 +241,7 @@
   (none)
   )
 
-(defmethod speech-control-method-13 ((this speech-control) (arg0 handle))
+(defmethod speech-control-method-13 ((this speech-control) (arg0 process))
   (dotimes (s4-0 2)
     (speech-channel-method-10 (-> this channel-array s4-0) arg0)
     )

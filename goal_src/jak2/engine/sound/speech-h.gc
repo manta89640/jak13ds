@@ -129,7 +129,7 @@
    )
   (:methods
     (speech-channel-method-9 (_type_ process-drawable speech-type) none)
-    (speech-channel-method-10 (_type_ handle) none)
+    (speech-channel-method-10 (_type_ process) none) ;; (AI-assisted) a process, not a handle: callers pass themselves
     (speech-channel-method-11 (_type_) none)
     (speech-channel-method-12 (_type_) none)
     (speech-channel-method-13 (_type_) none)
@@ -146,7 +146,7 @@
     (speech-table-set! (_type_ speech-type speech-type-info) none)
     (speech-control-method-11 (_type_) none)
     (speech-control-method-12 (_type_ process-drawable speech-type) none)
-    (speech-control-method-13 (_type_ handle) none)
+    (speech-control-method-13 (_type_ process) none) ;; (AI-assisted) a process, not a handle: callers pass themselves
     (speech-control-method-14 (_type_) none)
     (speech-control-method-15 (_type_ process-drawable) none)
     (speech-control-method-16 (_type_) none)

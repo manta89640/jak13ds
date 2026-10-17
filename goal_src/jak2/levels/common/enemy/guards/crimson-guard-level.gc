@@ -1114,7 +1114,7 @@
        )
      )
     (('hit 'hit-flinch 'hit-knocked)
-     (speech-control-method-13 *speech-control* (the-as handle this))
+     (speech-control-method-13 *speech-control* this)
      (let ((a0-13 (the-as process (as-type (handle->process (-> this incoming attacker-handle)) process-focusable))))
        (if (and a0-13 (logtest? (-> a0-13 mask) (process-mask target)))
            (speech-control-method-12 *speech-control* this (speech-type speech-type-11))
