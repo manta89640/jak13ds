@@ -180,6 +180,9 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.tex1_gating; }},
     {"cull_merc", [](CtrSettings& s, bool on) { s.cull_merc = on; },
      [](const CtrSettings& s) { return s.cull_merc; }},
+    // (AI-assisted, far-fog) the game's fog on merc models
+    {"merc_fog", [](CtrSettings& s, bool on) { s.merc_fog = on; },
+     [](const CtrSettings& s) { return s.merc_fog; }},
     // (AI-assisted) shader-opt's keys (Oct 12): the shorter vertex programs
     {"shader_opt", [](CtrSettings& s, bool on) { s.shader_opt = on; },
      [](const CtrSettings& s) { return s.shader_opt; }},

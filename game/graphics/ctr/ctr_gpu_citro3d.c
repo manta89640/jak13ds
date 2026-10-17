@@ -284,6 +284,7 @@ typedef struct {
   int fa_ok;   /* mesh_fa usable (fog_alpha) */
   int uloc_projection, uloc_clip, uloc_scales, uloc_fog0, uloc_fog1;
   int uloc_skin_clip, uloc_skin_rows[3], uloc_skin_scales, uloc_skin_lights;
+  int uloc_skin_mfog; /* (AI-assisted, far-fog) the skin program's fog (ctr_skin_opt; -1: none) */
   int uloc_env_clip, uloc_env_rows[3], uloc_env_scales, uloc_env_fade;
   int uloc_clip_glpica, uloc_clip2_glpica;
   int uloc_ocean_clip, uloc_ocean_tex, uloc_ocean_scales, uloc_ocean_fog0, uloc_ocean_fog1;
@@ -357,6 +358,12 @@ static struct {
   float last_skin_lights[28];
   int last_skin_palette_count;
   uint32_t last_skin_bones_id; /* (AI-assisted) the palette's bones_id (0: none) */
+  /* (AI-assisted, far-fog) merc fog (ctr_gpu_set_merc_fog): hvdf.w, the amount's clamps, a number
+   * new with every change; the clip w row the skin program's mfog was made from (C3D_FVec order)
+   * and the number it was made with (0: not made since the clip upload) */
+  float merc_fog_hvdf_w, merc_fog_lo, merc_fog_hi;
+  uint32_t merc_fog_gen, skin_mfog_gen;
+  float skin_wrow[4];
   /* (AI-assisted) cmd_dedup: the last ctr_gpu_draw_skinned_env's matrix and bones (env_valid: still
    * in the env program's registers) */
   int env_valid;
@@ -1011,6 +1018,7 @@ static void prog_set_ulocs(ProgSet* p, int have_fa) {
   p->uloc_skin_rows[2] = shaderInstanceGetUniformLocation(vs, "row2");
   p->uloc_skin_scales = shaderInstanceGetUniformLocation(vs, "scales");
   p->uloc_skin_lights = shaderInstanceGetUniformLocation(vs, "lights");
+  p->uloc_skin_mfog = shaderInstanceGetUniformLocation(vs, "mfog"); /* (AI-assisted, far-fog) */
   vs = p->env.vertexShader;
   p->uloc_env_clip = shaderInstanceGetUniformLocation(vs, "clip");
   p->uloc_env_rows[0] = shaderInstanceGetUniformLocation(vs, "row0");
@@ -1376,6 +1384,9 @@ int ctr_gpu_init(void) {
   memcpy(g.mfog0, g.fog0, sizeof(g.mfog0));
   memcpy(g.mfog1, g.fog1, sizeof(g.mfog1));
   g.fog_gen = 1; /* (AI-assisted) */
+  g.merc_fog_gen = 1; /* (AI-assisted, far-fog) no merc fog until ctr_gpu_set_merc_fog */
+  g.merc_fog_hvdf_w = 255.0f;
+  g.merc_fog_lo = g.merc_fog_hi = 0.0f;
   g.fog_in_valid = 0;
   {
     /* the Oct 2 shader's form: hvdf.w, fog min, fog max, -1/255; w scale, start, 1 / range */
@@ -4861,6 +4872,9 @@ typedef struct {
   u32 in[16];   /* the settings the full path reads */
   u32 tex_config_bit1;
   C3D_TexEnv env0, env1;
+  /* (AI-assisted, far-fog) stage 2 and g.ocean_stage2 (merc fog draws: the fog stage) */
+  C3D_TexEnv env2;
+  int stage2;
   C3Di_Effect effect;
 } StateFast;
 static StateFast s_sf;
@@ -4920,7 +4934,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       /* (the filter and clamp bytes only matter to the bind) */
       !((((stw[1] ^ s_sf.words[0]) & 0x0000FFFFu) | ((stw[2] ^ s_sf.words[1]) & 0xFFFFFF00u) |
          (stw[3] ^ s_sf.words[2]))) &&
-      !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && !g.ocean_stage2 && mesh != 3) {
+      !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && g.ocean_stage2 == s_sf.stage2 &&
+      mesh != 3) {
     const u32 kind = textured0 ? 1u | ((u32)g.textures[st->tex].alpha_full << 1) : 0u;
     u32 in[16];
     state_inputs(in);
@@ -4929,6 +4944,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
         (fctx->texConfig & BIT(1)) == s_sf.tex_config_bit1 &&
         words_eq(&fctx->texEnv[0], &s_sf.env0, sizeof(C3D_TexEnv) / 4) &&
         words_eq(&fctx->texEnv[1], &s_sf.env1, sizeof(C3D_TexEnv) / 4) &&
+        words_eq(&fctx->texEnv[2], &s_sf.env2, sizeof(C3D_TexEnv) / 4) &&
         words_eq(&fctx->effect, &s_sf.effect, sizeof(C3Di_Effect) / 4)) {
       if (textured0) {
         bind_texture(&g.textures[st->tex], st, 1);
@@ -5090,9 +5106,12 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
    * a new color binds it again through citro3d), on again for the draws that read it. The context's
    * texConfig is what the GPU has (or gets: citro3d recomputes it from its bound textures when a
    * bind is pending, which only turns unit 1 on). */
+  /* (AI-assisted, far-fog) a merc draw with the game's fog (CTR_TCC_FOG): the fog ramp stage in
+   * stage 2 (the ocean's), its amount from texture unit 1 (ctr_skin_opt's texcoord1) */
+  const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
-    const int need1 = mesh == 1 || mesh == 3;
+    const int need1 = mesh == 1 || mesh == 3 || merc_fog;
     const int want_off = g_tex1_gating ? !need1 : mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
     /* (AI-assisted, micro-mg) a glow drawn raw (MICRO_RAWGLOW) leaves unit 1 as the citro3d draw
@@ -5111,9 +5130,20 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     }
     g.unit1_off = want_off;
   }
-  if (mesh != 3 && g.ocean_stage2) {
+  if (merc_fog && !g.ocean_stage2) {
+    /* (AI-assisted, far-fog) rgb = mix(previous, fog color, fog amount), as the ocean's stage 2
+     * (ocean_stage2: stage 2 holds that fog stage) */
+    C3D_TexEnv e2;
+    C3D_TexEnvInit(&e2);
+    C3D_TexEnvSrc(&e2, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
+    C3D_TexEnvOpRgb(&e2, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(&e2, C3D_RGB, GPU_INTERPOLATE);
+    commit_texenv(2, &e2, raw);
+    g.ocean_stage2 = 1;
+  } else if (mesh != 3 && !merc_fog && g.ocean_stage2) {
     /* (AI-assisted) stage 2 back to pass-through after the ocean (the far ring between its
-     * draws) */
+     * draws) or a merc draw with fog */
     C3D_TexEnv e2;
     C3D_TexEnvInit(&e2);
     commit_texenv(2, &e2, raw);
@@ -5294,8 +5324,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   raw_end(p);
   *c = e;
   /* (AI-assisted, micro-mg) what this full raw state worked from and wrote (StateFast) */
-  if (!proc && mesh != 3 && g.proc_radial < 0 && !g.ocean_stage2) {
+  if (!proc && mesh != 3 && g.proc_radial < 0) {
     s_sf.valid = 1;
+    s_sf.env2 = ctx->texEnv[2]; /* (AI-assisted, far-fog) */
+    s_sf.stage2 = g.ocean_stage2;
     s_sf.words[0] = ((const alias_u32*)st)[1];
     s_sf.words[1] = ((const alias_u32*)st)[2];
     s_sf.words[2] = ((const alias_u32*)st)[3];
@@ -7544,6 +7576,54 @@ static const u32* skin_rows_words(const float* bones, const uint32_t* bones_f24,
   return tmp;
 }
 
+/* (AI-assisted, far-fog) ctr_skin_opt's mfog uniform: [0] the fog amount as a row for the camera
+ * space position (merc2.vert: (255 - (hvdf.w - w)) / 255 = w / 255 + 1 - hvdf.w / 255, w = the clip
+ * matrix's w row, skin_wrow), [1] x, y: its clamps (fog max, fog min as amounts). C3D_FVec order
+ * (w z y x), f32. */
+static void skin_fog_rows(int raw) {
+  C3D_FVec v[2];
+  for (int k = 0; k < 4; k++) {
+    v[0].c[k] = g.skin_wrow[k] * (1.0f / 255.0f);
+  }
+  v[0].c[0] += 1.0f - g.merc_fog_hvdf_w * (1.0f / 255.0f);
+  v[1].c[0] = 0.0f;
+  v[1].c[1] = 0.0f;
+  v[1].c[2] = g.merc_fog_hi;
+  v[1].c[3] = g.merc_fog_lo;
+  if (raw) {
+    raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_mfog, (const u32*)v, 8, 1));
+  } else {
+    C3D_FVec* dst = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.ps->uloc_skin_mfog, 2);
+    dst[0] = v[0];
+    dst[1] = v[1];
+  }
+  g.skin_mfog_gen = g.merc_fog_gen;
+}
+
+void ctr_gpu_set_merc_fog(float hvdf_w, float fog_min, float fog_max, uint8_t r, uint8_t gr,
+                          uint8_t b) {
+  if (!g.ready) {
+    return;
+  }
+  /* the clamps kept in 0..255 (the amount in 0..1), as ctr_gpu_set_mesh_fog's */
+  fog_min = fog_min < 0.0f ? 0.0f : (fog_min > 255.0f ? 255.0f : fog_min);
+  fog_max = fog_max < 0.0f ? 0.0f : (fog_max > 255.0f ? 255.0f : fog_max);
+  const float lo = 1.0f - fog_max * (1.0f / 255.0f);
+  float hi = 1.0f - fog_min * (1.0f / 255.0f);
+  hi = hi < lo ? lo : hi;
+  if (hvdf_w != g.merc_fog_hvdf_w || lo != g.merc_fog_lo || hi != g.merc_fog_hi) {
+    g.merc_fog_hvdf_w = hvdf_w;
+    g.merc_fog_lo = lo;
+    g.merc_fog_hi = hi;
+    g.merc_fog_gen = g.merc_fog_gen + 1 ? g.merc_fog_gen + 1 : 1;
+  }
+  fog_ramp_color(r, gr, b); /* the frame's fog color (the level renderers' too) */
+}
+
+int ctr_gpu_merc_fog_ready(void) {
+  return g.ready && g.ps && g.ps->uloc_skin_mfog >= 0 && g.fog_tex_valid;
+}
+
 void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], const float* bones,
                           int palette_count, const uint32_t* bones_f24, uint32_t bones_id,
                           const float lights[28], int mesh, int first_index, int index_count) {
@@ -7575,6 +7655,9 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
     C3D_Mtx m;
     skin_clip_matrix(clip, &m);
     skin_opt_scale(&m);
+    /* (AI-assisted, far-fog) the w row for the fog rows (made again below) */
+    memcpy(g.skin_wrow, m.r[3].c, sizeof(g.skin_wrow));
+    g.skin_mfog_gen = 0;
     if (raw && s_skin_clip_f24) {
       /* (AI-assisted) skin_clip_f24: the matrix as float24 (12 words instead of 16) */
       u32 c24[12];
@@ -7588,6 +7671,10 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
       C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_skin_clip, &m);
     }
     memcpy(g.last_skin_clip, clip, sizeof(g.last_skin_clip));
+  }
+  /* (AI-assisted, far-fog) the skin program's fog rows: with every clip upload or fog change */
+  if (g.ps->uloc_skin_mfog >= 0 && g.skin_mfog_gen != g.merc_fog_gen) {
+    skin_fog_rows(raw);
   }
   if (palette_count > CTR_MAX_PALETTE) {
     palette_count = CTR_MAX_PALETTE;

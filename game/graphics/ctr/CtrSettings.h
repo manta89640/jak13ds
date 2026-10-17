@@ -299,6 +299,10 @@ struct CtrSettings {
   // cull_ties' winding (flip). Not HUD models, not draws whose palette has a mirroring bone. Needs
   // levels converted with the current ctr_level_converter (older files: no marks)
   bool cull_merc = true;
+  // (AI-assisted, far-fog) the game's fog on merc models (characters, objects, the far views of
+  // other levels: med-res-level, e.g. Sandover from Misty), per vertex like merc2.vert. Needs
+  // shader_opt (ctr_skin_opt); the Oct 2 skin program has no fog. Read per model (gpu_profile = ab)
+  bool merc_fog = true;
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;

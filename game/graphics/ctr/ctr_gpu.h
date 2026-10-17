@@ -115,6 +115,10 @@ enum { CTR_TCC_ALPHA80 = 4 };
 /* (AI-assisted) ctr_draw_state::tcc bit of level mesh draws (c3l v15 kDrawAtlasUV): the vertices'
  * texture coordinates are in 1/32768 (c3l::kAtlasUVScale: a texture atlas's cells), not 1/1024 */
 enum { CTR_TCC_ST_ATLAS = 16 };
+/* (AI-assisted, far-fog) ctr_draw_state::tcc bit of merc draws (ctr_gpu_draw_skinned): the game's
+ * fog per vertex (merc2.vert / merc2.frag), with the values of the last ctr_gpu_set_merc_fog. Only
+ * set when ctr_gpu_merc_fog_ready says so. */
+enum { CTR_TCC_FOG = 32 };
 /* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
  * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
@@ -549,6 +553,14 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
  * palette_count <= CTR_MAX_PALETTE. */
 int ctr_gpu_skin_rows_f24_on(void);
 void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out);
+/* (AI-assisted, far-fog) the fog of the next CTR_TCC_FOG skinned draws, as merc2.vert computes it
+ * from the merc camera (Merc2 low memory: hvdf_offset.w, fog min and max): amount =
+ * (255 - clamp(hvdf_w - clip w, fog_min, fog_max)) / 255, mixed towards (r, g, b) (the frame's fog
+ * color, the fog ramp's) like merc2.frag. ctr_gpu_merc_fog_ready: the skin program in use has the
+ * fog (shader_opt's ctr_skin_opt; the Oct 2 ctr_skin_old has none) and the fog ramp exists. */
+void ctr_gpu_set_merc_fog(float hvdf_w, float fog_min, float fog_max, uint8_t r, uint8_t g,
+                          uint8_t b);
+int ctr_gpu_merc_fog_ready(void);
 
 /* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space
  * normal and position (a sphere map), color = texture * fade * 2 (fade: rgba, GS value / 255 as

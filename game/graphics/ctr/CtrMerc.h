@@ -7,7 +7,7 @@
  * records as Merc2 (model name, lights, bone matrices, effect flags), finds the model in the
  * loaded .c3l files and draws it with GPU skinning (draws are pre-split by the converter so each
  * uses at most 24 bones). Not done: lighting (a per-model tint from the ambient + first light),
- * blend shapes, envmap, eyes, fog.
+ * blend shapes, envmap, eyes. (AI-assisted, far-fog) Fog: the game's, per vertex (merc_fog).
  * (AI-assisted) Vertices the game rewrites in its merc data (ripple water, texture scroll) are
  * unpacked from it each frame like Merc2::model_mod_draws (apply_mod).
  */
@@ -69,6 +69,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
     int culled = 0;        // (AI-assisted) cull_merc: draws drawn with back face culling
     int mirrored = 0;      // (AI-assisted) ... marked ones not culled: a bone mirrors
     int unsent_bones = 0;  // (AI-assisted) draws using a bone the game didn't send
+    int fogged = 0;        // (AI-assisted, far-fog) merc_fog: draws with the game's fog
   };
 
  private:
@@ -78,6 +79,13 @@ class CtrMercRenderer : public CtrBucketRenderer {
   // (AI-assisted) a bone the model's slots name has a rotation / scale entry of 64 or more, a
   // translation of 1e8 or more, or NaN (garbage: the model isn't drawn)
   static bool bad_bones(const CtrMercMat* const* bones, const u8* slots, int n);
+  /*! (AI-assisted, far-fog) merc_fog: the game's fog is more than ~0 somewhere on the model (its
+   * sent bones' origins, grown by its size) */
+  bool model_fog_visible(const struct CtrMercModelData& model,
+                         const CtrMercMat* const* bones,
+                         const u8* slots,
+                         int n) const;
+  bool m_fog_on = false;  // (AI-assisted, far-fog) this bucket's models may get the fog
   /*! (AI-assisted) CtrLevels::find_merc_model of the model name at name (NUL-ended, at most 127
    * bytes), through a small cache: a found model (and its level) for its name while the loaded
    * levels are the same (CtrLevels::set_generation; loading the common file, which doesn't change
