@@ -59,6 +59,8 @@ class CtrStreamArena {
     u64 allocs = 0, failed = 0, grown = 0, released = 0;
   };
   Stats stats();
+  // the next statistics period: its peaks (used, capacity) from now
+  void new_period();
   static constexpr u32 kAlign = 128;
   static constexpr u32 kSegment = 1024 * 1024;
 

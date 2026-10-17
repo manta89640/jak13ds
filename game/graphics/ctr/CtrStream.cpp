@@ -253,6 +253,12 @@ bool CtrStreamArena::in_growth(const void* p) {
   return false;
 }
 
+void CtrStreamArena::new_period() {
+  std::lock_guard<std::mutex> lk(m_lock);
+  m_peak = m_used_bytes;
+  m_peak_capacity = m_capacity;
+}
+
 CtrStreamArena::Stats CtrStreamArena::stats() {
   std::lock_guard<std::mutex> lk(m_lock);
   Stats st;
