@@ -38,7 +38,12 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v17 (AI-assisted): tie levels of detail (see ExtHeader, TieLodGroup, RunLod): Header::ext_offset
 // (was tod_pad, 0) points at an ExtHeader. Otherwise v16; an older reader would draw both versions
 // of the LOD groups.
-constexpr uint32_t kVersion = 17;
+// v18 (AI-assisted): a chunk's vertices grouped by the visibility id of its runs: each id's
+// vertices are one range that no other id's indices use (ids in order of their first run, first
+// use inside; a vertex of several ids copied, ~0.4%), so the runtime rewrites the time of day
+// colors of the drawn runs' ids only. No layout change; the runtime finds the ranges from the
+// indices (and rewrites whole chunks where they overlap, as in older files).
+constexpr uint32_t kVersion = 18;
 // (AI-assisted) the first version with the extension header (tie levels of detail)
 constexpr uint32_t kTieLodVersion = 17;
 // (AI-assisted) the first version with the time of day table

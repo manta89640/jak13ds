@@ -119,6 +119,7 @@ struct Options {
   // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
   // runs, for draws whose triangle order doesn't matter), vertices in first-use order
   bool vcache = true;
+  bool vis_vertex_groups = true;  // (AI-assisted) v18, see group_vertices_by_vis
   // (AI-assisted) v15: the triangle order for a first-in first-out post-vertex cache of this many
   // entries (c3l_opt::vcache_order), coplanar overlapping triangles kept in their order. -1 (the
   // default): per run the best of the orders for 4 and 12 entries and meshoptimizer's (where no
@@ -3216,6 +3217,123 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<u32> chunk_first_run;
   size_t vis_tris = 0;
   VcacheStats vc_before, vc_after;
+  // (AI-assisted) v18 (Options::vis_vertex_groups): the chunk's vertices by visibility id of its
+  // runs: each id's vertices one range of their own, the ids in order of their first run, first
+  // use inside; a vertex of several ids copied for each but the first. Kept as it was when the
+  // copies would pass 65536 vertices.
+  size_t vg_chunks = 0, vg_copies = 0, vg_skipped = 0;
+  auto group_vertices_by_vis = [&](c3l::Chunk& ch, const std::vector<c3l::VisRun>& runs) {
+    const u32 nv = ch.vertex_count;
+    // the index position of each run, in run order (runs are in draw order)
+    std::vector<u32> run_idx(runs.size());
+    {
+      u32 ri = 0;
+      for (u32 k = 0; k < ch.draw_count; k++) {
+        u32 idx = out_draws[ch.first_draw + k].first_index;
+        for (; ri < runs.size() && runs[ri].draw == k; ri++) {
+          run_idx[ri] = idx;
+          idx += runs[ri].index_count;
+        }
+      }
+      if (ri != runs.size()) {
+        vg_skipped++;
+        return;
+      }
+    }
+    // ids in order of their first run
+    std::vector<u16> ids;
+    std::unordered_map<u16, u32> id_slot;
+    for (const auto& r : runs) {
+      if (id_slot.emplace(r.vis, (u32)ids.size()).second) {
+        ids.push_back(r.vis);
+      }
+    }
+    if (ids.size() < 2) {
+      return;
+    }
+    // owner id of each vertex (its first id); copies for the others
+    std::vector<u32> owner(nv, UINT32_MAX);
+    std::map<std::pair<u32, u32>, u32> copy;  // (vertex, id slot) -> new vertex
+    std::vector<c3l::Vertex> extra;
+    std::vector<u32> extra_slot;
+    for (size_t r = 0; r < runs.size(); r++) {
+      const u32 slot = id_slot[runs[r].vis];
+      for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+        const u32 v = out_indices[i];
+        if (v >= nv) {
+          continue;  // (a copy made for this id already)
+        }
+        if (owner[v] == UINT32_MAX) {
+          owner[v] = slot;
+        }
+      }
+    }
+    for (size_t r = 0; r < runs.size(); r++) {
+      const u32 slot = id_slot[runs[r].vis];
+      for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+        const u32 v = out_indices[i];
+        if (owner[v] == slot) {
+          continue;
+        }
+        auto [it, fresh] = copy.emplace(std::make_pair(v, slot), nv + (u32)extra.size());
+        if (fresh) {
+          extra.push_back(out_verts[ch.first_vertex + v]);
+          extra_slot.push_back(slot);
+        }
+      }
+    }
+    if (nv + extra.size() > 65536) {
+      vg_skipped++;
+      return;
+    }
+    // the indices onto the copies
+    for (size_t r = 0; r < runs.size(); r++) {
+      const u32 slot = id_slot[runs[r].vis];
+      for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+        const u32 v = out_indices[i];
+        if (owner[v] != slot) {
+          out_indices[i] = (u16)copy.at({v, slot});
+        }
+      }
+    }
+    // the new order: per id slot, its vertices in first use order
+    const u32 total = nv + (u32)extra.size();
+    std::vector<u32> remap(total, UINT32_MAX);
+    u32 next = 0;
+    for (u32 slot = 0; slot < ids.size(); slot++) {
+      for (size_t r = 0; r < runs.size(); r++) {
+        if (id_slot[runs[r].vis] != slot) {
+          continue;
+        }
+        for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+          const u32 v = out_indices[i];
+          if (remap[v] == UINT32_MAX) {
+            remap[v] = next++;
+          }
+        }
+      }
+    }
+    for (u32 v = 0; v < total; v++) {
+      if (remap[v] == UINT32_MAX) {
+        remap[v] = next++;  // (unused vertices: never)
+      }
+    }
+    std::vector<c3l::Vertex> moved(total);
+    for (u32 v = 0; v < total; v++) {
+      moved[remap[v]] = v < nv ? out_verts[ch.first_vertex + v] : extra[v - nv];
+    }
+    out_verts.resize(ch.first_vertex);
+    out_verts.insert(out_verts.end(), moved.begin(), moved.end());
+    const u32 i0 = out_draws[ch.first_draw].first_index;
+    const u32 i1 = out_draws[ch.first_draw + ch.draw_count - 1].first_index +
+                   out_draws[ch.first_draw + ch.draw_count - 1].index_count;
+    for (u32 i = i0; i < i1; i++) {
+      out_indices[i] = (u16)remap[out_indices[i]];
+    }
+    ch.vertex_count = total;
+    vg_chunks++;
+    vg_copies += extra.size();
+  };
   size_t vc_kept_pairs = 0;  // (AI-assisted) coplanar overlaps kept in order by vcache_order
   size_t welded_verts = 0;
 
@@ -3479,6 +3597,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           for (u32 i = i0; i < i1; i++) {
             out_indices[i] = (u16)remap[out_indices[i]];
           }
+        }
+        // (AI-assisted) v18: the vertices of each visibility id together (ids in order of their
+        // first run, first use inside), a vertex used by several ids copied for each: the runtime
+        // rewrites the time of day colors of the drawn runs' ids only (CtrLevel.cpp tod_recolor)
+        if (opt.vis_vertex_groups && runs.size() > 1) {
+          group_vertices_by_vis(ch, runs);
         }
       }
       // the runs only if some can be hidden (the offset is made absolute at write); (AI-assisted)
@@ -3882,6 +4006,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
+    lg::info("{}: vertices by visibility id (v18): {} chunks, {} vertices copied, {} chunks kept "
+             "as they were",
+             level.level_name, vg_chunks, vg_copies, vg_skipped);
   }
   if (!plans.empty()) {
     // (AI-assisted) the quantizing grids against the old per-chunk bounding box steps
@@ -4072,6 +4199,10 @@ int main(int argc, char** argv) {
   app.add_option("--block-kb", block_kb, "largest compressed block (KB, raw)");
   bool no_vcache = false;
   app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
+  bool no_vis_groups = false;
+  app.add_flag("--no-vis-vertex-groups", no_vis_groups,
+               "(AI-assisted, v18) keep the vertices in first use order (not grouped by visibility "
+               "id: the runtime then rewrites a chunk's time of day colors all at once)");
   app.add_option("--vcache-fifo", opt.vcache_fifo,
                  "(AI-assisted) triangle order for a FIFO post-vertex cache of N entries, coplanar "
                  "overlaps kept in order (0: the v14 meshoptimizer order)");
@@ -4110,6 +4241,7 @@ int main(int argc, char** argv) {
   CLI11_PARSE(app, argc, argv);
   opt.verify = !no_verify;
   opt.vcache = !no_vcache;
+  opt.vis_vertex_groups = !no_vis_groups;
   opt.atlas = !no_atlas;
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;

@@ -193,9 +193,10 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 17 (7..16 still load; v12: merc rewritten vertices; v13: vista
+  char magic[4] = "C3LV"; u32 version = 18 (7..17 still load; v12: merc rewritten vertices; v13: vista
   tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"; v16: time
-  of day; v17: tie levels of detail); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
+  of day; v17: tie levels of detail; v18: a chunk's vertices grouped by visibility id, see "Time of
+  day"); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
   tod_color_count, tod_mul_count, (v17) ext_offset (ExtHeader, 0: none; the end of the 32 byte level
   name before: zero)
   u32 num_textures, textures_offset
@@ -315,32 +316,64 @@ Vertex::tod indexes them. Sizes (TodColor + TodMul): village1 10673 + 10567 (312
 9357 + 40645 (457 KB, the largest; shrubs), village3 7238 + 8902 (221 KB); all levels 5.9 MB of
 the files.
 
-The runtime (`CtrLevel.cpp`: `load_tod`, `tod_update`, `tod_recolor`) keeps the palettes some
-color uses (village3: 7 of 8), and per color its blend: per channel `min(255, sum(w * c) >> 6)`
-with the game's weights from the background camera's itimes (64 = 1.0), as the PC's
-`interp_time_of_day_slow`. It rewrites the chunks' vertex colors in place in their meshes (the
-alpha stays; a frame the GPU still draws may see part of the change):
+**v18 vertex groups.** (AI-assisted.) The converter orders each chunk's vertices by the
+visibility id of its runs (`group_vertices_by_vis`): each id's vertices are one range that no other
+id's indices use (ids in order of their first run, first use inside; a vertex that several ids use
+is copied for each but the first: ~0.4% more vertices; a chunk whose copies would pass 65536
+vertices is kept as it was). No layout change: the runtime finds the ranges from the indices
+(`tod_make_groups`, sorted by vertex) and treats a chunk whose ranges overlap (older files) as one
+group. So the runtime rewrites the time of day colors of the groups drawn (one tie instance, one
+tfrag visibility group) and leaves hidden ones until they are drawn. Log: `[ctr] <level>: vertices
+by visibility id (v18): N chunks, M vertices copied, K chunks kept as they were` (converter).
 
-- all colors are blended again when a day palette's weight moved by 2/64 and 30 frames went by
-  since the last such blend (the day moves 1/64 every ~40 frames; the title's attract mode ~20x as
-  fast), or at once by 8/64 (the clock set, a teleport); then every chunk is recolored as it is
-  drawn, 4000 vertices per level draw (a big chunk in pieces over frames, from where it stopped);
-- "light" palettes (used by a quarter of the colors or fewer: village1's lamps, palette 5) move
-  every frame: only their colors are blended again, and only the vertices with one of them are
-  rewritten (per chunk a list made at load);
-- a level's meshes are colored as they are read when weights are known for it (the weights it was
+The runtime (`CtrLevel.cpp`: `load_tod`, `tod_update`, `tod_recolor`, `tod_finish`) keeps the
+palettes some color uses (village3: 7 of 8), and rewrites the chunks' vertex colors in place in
+their meshes (the alpha stays; a frame the GPU still draws may see part of the change):
+
+- **Table.** Per entry (a color, then the TodMuls; `Vertex::tod`) its rgb, blended as the PC's
+  `interp_time_of_day_slow` (per channel `min(255, sum(w * c) >> 6)`, the game's weights from the
+  background camera's itimes, 64 = 1.0), only the palettes whose weight isn't 0. Entries are blended
+  when a vertex being written needs them: each has a version stamp, and is current when it is at
+  least the last move of its palettes (`lut[mask]`). Exact: 0 vertices drawn differ from the PC's
+  blend (host check below) when the rewrites keep up.
+- **Groups.** A group is rewritten whole when one of its chunk's day palettes moved since it was
+  written (or it has the file's colors); a chunk's light vertices (palettes used by a quarter of
+  the colors or fewer: lamps, lava glow; the game moves them every frame) all at once when a light
+  palette moved (a list per chunk made at load). Within a budget per frame (all levels): the light
+  pass first (up to 70% of 1.2 ms, from where the last frame's stopped), then the groups drawn (from
+  where the last frame's budget ran out). What the budget doesn't reach is drawn as it is, a day move
+  or two behind; a group 3 moves behind, or with the file's colors, is rewritten at once. While the
+  day moves fast (the title screen's attract mode: a move nearly every frame) the group pass gets
+  the chunks drawn once per 2 moves (their vertices at the measured ms per vertex, spread over the
+  frames 2 moves take). The day's own steps (1/64 every ~40 frames in the game) spread over a few
+  frames; a group is one visibility id's vertices, so a chunk can show two steps for a frame or two.
+  The rewritten ranges are flushed together after the level's pass (sorted, merged within 64 KB:
+  a few `ctr_gpu_flush_range` per frame).
+- Config `tod_busy_half` (default on, preset safe: off): while day palettes jump (more than 4/64 in
+  a frame) every frame for 8 frames (sunken's cycling lights), they are taken every second frame.
+- A level's meshes are colored as they are read when weights are known for it (the weights it was
   last drawn with, or the last level's with the same day palettes); else they show the baked
-  palette until drawn.
+  palette until drawn (then rewritten at once).
 
-Heap: the colors (palettes used x 3 bytes), the TodMuls, 4 bytes per color for the blend and the
-chunk lists (village1 363 KB, jungle 497 KB). On the 3DS a level whose table would leave less
-than 3 MB of heap free keeps its baked palette (`[ctr] <level>: no heap for the time of day
-colors`). Azahar (New 3DS, village1 at night with its flickering lamps): 0.6-0.8 ms of render
-thread per level draw on average (mostly the lamps' vertices), jungle 0.1-0.5 ms; a piece of 8000
-vertices took ~7 ms there (hence 4000); 29.9 fps throughout. Log: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at
-load, `[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...)`
-with the stats. Host: env `CTR_TOD_LOG=1` logs the weights every 30 frames; the pad script command
-`tod H` sets the game's clock (pictures at a time of day).
+Heap: the colors (palettes used x 3 bytes), the TodMuls, per entry 9 bytes (mask, rgb, stamp), per
+chunk 28 bytes, per group 12, per run 2, and the light lists: village1 600 KB, misty 545 KB, snow
+458 KB, sunken 309 KB. On the 3DS a level whose table would leave less than 3 MB of heap free keeps
+its baked palette (`[ctr] <level>: no heap for the time of day colors`).
+
+Azahar (Oct 17, New 3DS, tod ms of the render thread per frame, average / most in one frame over
+25 s): title 7.5 / 16.7 (29.9 fps; the day moves nearly every frame there), village1 hut 1.9 / 2.2,
+Snowy 1.2 / 1.8, Volcanic Crater 0.7 / 1.7, sunkenb 5.6 / 9.5 (its cycling lights recolor about half
+of the vertices drawn every second frame), Misty 1.4 / 2.1. A group costs ~80 ns per vertex there.
+
+Logs: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at load;
+`[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...); G
+groups rewritten, C chunks drawn behind; groups drawn behind by at most L day moves (...)` and
+`[ctr] time of day ms/frame A, most B in one frame, N frames over 2 ms` with the stats. Host: env
+`CTR_TOD_LOG=1` (2: every frame) logs the weights; `CTR_TOD_CHECK=1` (2: a line per frame) checks
+every vertex drawn against the PC's blend (stale vertices, the largest error, those more than 4
+off); `CTR_TOD_BUDGET_MS` sets the budget. A 3DS build with `CTR_TOD_CHECK_BUILD=2` defined in
+CtrLevel.cpp runs the check every 16th frame. The pad script command `tod H` sets the game's clock
+(pictures at a time of day).
 
 ## Tie levels of detail (v17)
 

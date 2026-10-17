@@ -131,6 +131,10 @@ class CtrRenderer {
     double triangles = 0;
     unsigned int vbuf_peak = 0, vbuf_size = 0;
     int vbuf_dropped = 0;
+    // (AI-assisted) the level renderers' time of day work: sum, the most in one frame, frames
+    // over 2 ms
+    double tod_ms = 0, tod_max_ms = 0;
+    int tod_over = 0;
   };
   CtrVram& vram() { return *m_vram; }
   CtrLevels& levels() { return *m_levels; }

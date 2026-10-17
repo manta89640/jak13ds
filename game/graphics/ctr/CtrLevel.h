@@ -189,39 +189,84 @@ struct CtrLevelData {
   std::unique_ptr<FineVis> fine;
   // (AI-assisted) c3l v16 time of day: the level's colors in the game's 8 palettes, blended with
   // the weights the game sends (its mood's itimes, as the PC's tfrag3 / tie3 / shrub renderers do
-  // each frame) into the chunks' vertex colors (ctr_level_tod_* in CtrLevel.cpp). nullptr: the
-  // file's baked palette (older file, or no heap to spare at load).
+  // each frame) into the chunks' vertex colors (tod_* in CtrLevel.cpp). nullptr: the file's baked
+  // palette (older file, or no heap to spare at load).
+  // A table entry (a color, then the TodMuls) is blended when a vertex drawn needs it after one of
+  // its palettes moved (version stamps), exact as the PC; a chunk's vertex groups are rewritten
+  // whole when one of the chunk's day palettes moved, its light vertices when a light palette
+  // moved, within a time budget per frame (CtrLevel.cpp tod_recolor).
   struct Tod {
     u32 color_count = 0;
     u8 palettes[8] = {};  // the palettes any color uses (not black), in order
     u32 palette_count = 0;
-    std::vector<u8> colors;  // color_count x palette_count x rgb (GS units)
+    std::vector<u8> colors;      // color_count x palette_count x rgb (GS units)
     std::vector<c3l::TodMul> muls;
-    std::vector<u32> blended;  // color_count: r | g << 8 | b << 16
+    // per entry (color_count colors, then the TodMuls; Vertex::pad): the palettes (bit p) its
+    // color isn't black in, its rgb (r | g << 8 | b << 16) and the version that rgb is of (current
+    // when at least lut[mask]: the last move of its palettes)
+    std::vector<u8> color_mask;
+    std::vector<u32> table, stamp;
     // "light" palettes: used by few colors (the lamps, the lava glow: the game moves their weights
-    // every frame); their colors, and per chunk its vertices with one of those (found at
-    // load), are blended / recolored on their own when only those weights move
+    // every frame); per chunk its vertices with a light color (by the light palettes they use),
+    // rewritten alone when only those move
     u32 light_mask = 0;  // palette bits
-    std::vector<u16> light_colors;
-    std::unordered_map<u32, std::vector<u16>> chunk_lights;
-    u8 weights[8][3] = {};  // the weights of the last blend (64 = 1.0)
-    bool blended_valid = false;
-    u32 gen = 0;        // + 1 per blend of all colors
-    u32 light_gen = 0;  // + 1 per blend (all colors or the light colors)
-    u64 blend_frame = 0;
-    // per chunk: the blends its mesh's colors are (kChunkUnset: the file's; kChunkNone: no time of
-    // day colors), and that mesh (a mesh made again has the file's colors)
-    static constexpr u32 kChunkUnset = 0, kChunkNone = 0xffffffffu;
-    std::vector<u32> chunk_gen, chunk_light_gen;
-    std::vector<u32> chunk_pos;  // a recolor done in part: where it goes on
+    u32 light_color_count = 0;
+    struct LightList {
+      std::vector<u16> verts;  // by the light palettes of their color, then by vertex
+      std::vector<std::pair<u8, u32>> groups;  // those palettes, end of their verts
+    };
+    std::unordered_map<u32, LightList> chunk_lights;
+    // weights (64 = 1.0): the game's at the level's last draw, the table's
+    u8 weights[8][3] = {};
+    u8 target_w[8][3] = {};
+    bool blended_valid = false;  // weights taken at least once
+    u8 busy_run = 0;  // config tod_busy_half: the level draws in a row a day palette jumped
+    // versions: + 1 per change of target_w (dver: of its day palettes); per palette its last;
+    // lut[mask]: the last of the palettes in mask
+    u32 ver = 0, dver = 0;
+    u32 pal_ver[8] = {};
+    u32 lut[256] = {};
+    // the palettes a blend adds (weight not 0): their slots in colors and weights
+    struct Act {
+      u32 n = 0;
+      u8 slot3[8] = {};
+      u8 w[8][3] = {};
+    };
+    Act act;
+    // the chunks the last frame's light / group rewrites stopped at (CtrLevel.cpp tod_recolor)
+    u32 light_round_chunk = 0, round_chunk = 0;
+    // frames per day move (moving average), the frame of the last; ms per vertex rewritten
+    float move_frames = 64;
+    u64 move_frame = 0;
+    double ms_per_vertex = 1e-4;
+    // per chunk: its vertex groups (VisGroup: one per visibility id of its runs when their vertex
+    // ranges don't overlap, c3l v18 files, in vertex order; else one for all), each with the
+    // version its colors are (0: the file's) and the day move count then; the oldest of those,
+    // the version its light vertices are (quick outs); the palettes its vertices use (scanned: 0
+    // not yet (no mesh at load), 1 no time of day color, 2 some) and its mesh (a mesh made again has
+    // the file's colors)
+    struct VisGroup {
+      u16 lo, hi;  // vertices [lo, hi]
+      u32 ver : 31;
+      u32 plain : 1;  // every vertex has a time of day color
+      u32 dver;
+    };
+    std::vector<VisGroup> groups;
+    std::vector<u32> chunk_group_first;
+    std::vector<u16> chunk_group_count;
+    std::vector<u16> run_group;  // per run (CtrLevelData::vis_runs): its group in the chunk
+    std::vector<u32> chunk_min_ver, chunk_min_dver, chunk_light_ver;
+    std::vector<u8> chunk_mask, chunk_scanned;
     std::vector<int> chunk_mesh;
     u32 bytes() const {
       u32 lights = 0;
-      for (const auto& [ci, v] : chunk_lights) {
-        lights += (u32)v.size() * 2 + 32;
+      for (const auto& [ci, l] : chunk_lights) {
+        lights += (u32)(l.verts.size() * 2 + l.groups.size() * 8) + 48;
       }
-      return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + blended.size() * 4 +
-                   light_colors.size() * 2 + chunk_gen.size() * 16) +
+      return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + color_mask.size() +
+                   table.size() * 8 +
+                   groups.size() * sizeof(VisGroup) + run_group.size() * 2 +
+                   chunk_group_first.size() * 24) +
              lights;
     }
   };
@@ -472,6 +517,9 @@ void ctr_level_set_detail(float t);
 // vblank): lower distances apply to what is in view too
 void ctr_level_set_detail_urgent(bool urgent);
 float ctr_level_detail();
+/*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
+ * of auto_detail's build time). */
+double ctr_level_tod_take_ms();
 
 class CtrTfragRenderer : public CtrBucketRenderer {
  public:
@@ -514,6 +562,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) c3l v16 time of day: blends, vertices recolored and their time (ms) since the
   // last log line, over m_tod_frames level draws; the most vertices in one draw
   u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
+  // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
+  // group drawn was behind, draws with one 2 or more behind
+  u64 m_tod_spread = 0, m_tod_deferred = 0, m_tod_lag_frames = 0, m_tod_lag2 = 0;
+  u32 m_tod_lag_max = 0;
   double m_tod_ms = 0, m_tod_max_ms = 0;
   std::vector<const CtrLevelData*> m_loaded;
   // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
