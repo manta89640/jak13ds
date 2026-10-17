@@ -1082,9 +1082,10 @@ enum {
   MICRO_FENCE = 32,     /* steady pacing's fence words in the vertex buffer */
   MICRO_FLUSHMERGE = 64, /* cache flush requests of near ranges merged */
   /* (AI-assisted, micro-mg) round 2 */
-  MICRO_RAWGLOW = 128 /* the glows (procedural texture) as raw draws, not through citro3d */
+  MICRO_RAWGLOW = 128, /* the glows (procedural texture) as raw draws, not through citro3d */
+  MICRO_TEXSTATE = 256 /* a raw draw state that differs only in its texture: only the bind */
 };
-#define MICRO_ALL 255u
+#define MICRO_ALL 511u
 static u32 s_micro = MICRO_ALL;
 static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
 static int s_micro_ident;    /* gpu_micro_ident */
@@ -4817,6 +4818,52 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
   }
 }
 
+/* (AI-assisted, micro-mg) gpu_micro: what the last full raw apply_state_tint worked from and
+ * wrote (MICRO_TEXSTATE). A raw state whose other words, mesh, tint, texture kind and inputs
+ * (the settings below) are those, while the GPU's (the context's) combiner stages and fragment
+ * operations are still what it wrote, gets the same combiner and fragment registers from the
+ * full path, so only its texture is bound (bind_texture, as the full path does). */
+typedef struct {
+  int valid;
+  u32 words[3]; /* the state's words 1..3 (word 0 is the texture) */
+  int mesh;
+  uint32_t tint;
+  u32 kind;     /* textured | alpha_full << 1 (proctex draws never take the short path) */
+  u32 in[16];   /* the settings the full path reads */
+  u32 tex_config_bit1;
+  C3D_TexEnv env0, env1;
+  C3Di_Effect effect;
+} StateFast;
+static StateFast s_sf;
+static u32 s_state_fast; /* statistics (ctr_gpu_cmdlist_line) */
+static inline int words_eq(const void* a, const void* b, unsigned n) {
+  const alias_u32* x = (const alias_u32*)a;
+  const alias_u32* y = (const alias_u32*)b;
+  u32 d = 0;
+  for (unsigned i = 0; i < n; i++) {
+    d |= x[i] ^ y[i];
+  }
+  return d == 0;
+}
+static inline void state_inputs(u32* in) {
+  in[0] = (u32)g_depth_far;
+  in[1] = (u32)g_cull_enable;
+  in[2] = (u32)g_cull_flip;
+  in[3] = (u32)g_early_depth;
+  in[4] = (u32)g_early_sky;
+  in[5] = (u32)g_early_func;
+  in[6] = g_early_clear;
+  in[7] = (u32)s_zdef_valid;
+  in[8] = s_zscale0;
+  in[9] = s_zoffset0;
+  in[10] = (u32)g_depth16;
+  in[11] = (u32)g.fog_tex_valid;
+  in[12] = g.fog_abgr;
+  in[13] = g.clear_abgr;
+  in[14] = (u32)g_tex1_gating;
+  in[15] = (u32)g_proctex;
+}
+
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
  * (AI-assisted) 3 = the ocean (ctr_gpu_ocean_draw), 4 = level mesh without the fog stage
  * (fog_stage_skip), 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
@@ -4837,6 +4884,31 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   g.last_state_mesh = mesh;
   g.last_tint = tint;
   g.last_state_valid = 1;
+  /* (AI-assisted, micro-mg) gpu_micro: the same state but for its texture (see StateFast) */
+  const int textured0 = st->tex >= 0 && st->tex < MAX_TEXTURES && g.textures[st->tex].used == 1;
+  const alias_u32* stw = (const alias_u32*)st;
+  if (raw && s_sf.valid && (s_micro & MICRO_TEXSTATE) && s_sf.mesh == mesh && s_sf.tint == tint &&
+      /* (the filter and clamp bytes only matter to the bind) */
+      !((((stw[1] ^ s_sf.words[0]) & 0x0000FFFFu) | ((stw[2] ^ s_sf.words[1]) & 0xFFFFFF00u) |
+         (stw[3] ^ s_sf.words[2]))) &&
+      !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && !g.ocean_stage2 && mesh != 3) {
+    const u32 kind = textured0 ? 1u | ((u32)g.textures[st->tex].alpha_full << 1) : 0u;
+    u32 in[16];
+    state_inputs(in);
+    C3Di_Context* fctx = &__C3D_Context;
+    if (kind == s_sf.kind && words_eq(in, s_sf.in, 16) &&
+        (fctx->texConfig & BIT(1)) == s_sf.tex_config_bit1 &&
+        words_eq(&fctx->texEnv[0], &s_sf.env0, sizeof(C3D_TexEnv) / 4) &&
+        words_eq(&fctx->texEnv[1], &s_sf.env1, sizeof(C3D_TexEnv) / 4) &&
+        words_eq(&fctx->effect, &s_sf.effect, sizeof(C3Di_Effect) / 4)) {
+      if (textured0) {
+        bind_texture(&g.textures[st->tex], st, 1);
+      }
+      s_state_fast++;
+      return;
+    }
+  }
+  s_sf.valid = 0;
   /* stage 1: lighting tint for skinned meshes, pass-through otherwise */
   C3D_TexEnv e1;
   C3D_TexEnv* env1 = &e1;
@@ -5192,6 +5264,21 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   raw_end(p);
   *c = e;
+  /* (AI-assisted, micro-mg) what this full raw state worked from and wrote (StateFast) */
+  if (!proc && mesh != 3 && g.proc_radial < 0 && !g.ocean_stage2) {
+    s_sf.valid = 1;
+    s_sf.words[0] = ((const alias_u32*)st)[1];
+    s_sf.words[1] = ((const alias_u32*)st)[2];
+    s_sf.words[2] = ((const alias_u32*)st)[3];
+    s_sf.mesh = mesh;
+    s_sf.tint = tint;
+    s_sf.kind = textured ? 1u | ((u32)afull << 1) : 0u;
+    state_inputs(s_sf.in);
+    s_sf.tex_config_bit1 = ctx->texConfig & BIT(1);
+    s_sf.env0 = ctx->texEnv[0];
+    s_sf.env1 = ctx->texEnv[1];
+    s_sf.effect = *c;
+  }
 }
 
 /* (AI-assisted) the raw path takes every draw but the glows (procedural texture unit: citro3d) */
@@ -7076,6 +7163,12 @@ int ctr_gpu_cmdlist_line(char* out, int size) {
                   s_flush_requests / f);
   }
   s_flush_requests = 0;
+  if (l < size) {
+    /* (AI-assisted, micro-mg) MICRO_TEXSTATE */
+    l += snprintf(out + l, size - l, "; %.1f draw states only bound their texture",
+                  s_state_fast / f);
+  }
+  s_state_fast = 0;
   if (s_cl.mode == 2 && l < size) {
     l += snprintf(out + l, size - l, "; compare: %u copies checked, %u MISMATCHED", s_cl.compares,
                   s_cl.mismatches);
