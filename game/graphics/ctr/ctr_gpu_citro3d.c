@@ -586,7 +586,18 @@ static void arena_free(u32 off, u32 bytes) {
 static C3D_ProcTexColorLut* s_radial[MAX_RADIAL];
 static C3D_ProcTex s_proctex;
 static C3D_ProcTexLut s_proc_map; /* the identity: distance -> color table position */
+/* (AI-assisted, micro-gpu) the tables in the procedural texture unit's LUT memory (what citro3d
+ * last uploaded there), valid in apt epoch s_proc_lut_epoch (the HOME Menu and pica_bench use the
+ * GPU too). Switching the unit off and on keeps them: a glow after other draws binds the unit
+ * again but uploads its tables (128 + 2 x 256 words) only when another table is wanted. */
+static const C3D_ProcTexLut* s_proc_lut_map_gpu;
+static const C3D_ProcTexColorLut* s_proc_lut_color_gpu;
+static u32 s_proc_lut_epoch;
+/* what they were at the frame begin (cmd_dump's prologue: state from frames before) */
+static const C3D_ProcTexLut* s_proc_lut_map_f0;
+static const C3D_ProcTexColorLut* s_proc_lut_color_f0;
 
+static void proc_lut_forget(const C3D_ProcTexColorLut* lut);
 /* the texels of a slot: freed (or given back to the reserved VRAM) */
 static void tex_slot_free_texels(TexSlot* t) {
   if (t->arena_off >= 0) {
@@ -597,6 +608,9 @@ static void tex_slot_free_texels(TexSlot* t) {
     C3D_TexDelete(&t->tex);
   }
   if (t->radial >= 0) {
+    /* (AI-assisted, micro-gpu) neither citro3d's context nor the LUT tracking may keep a freed
+     * table (another one could get its address) */
+    proc_lut_forget(s_radial[t->radial]);
     free(s_radial[t->radial]);
     s_radial[t->radial] = NULL;
     t->radial = -1;
@@ -1605,6 +1619,18 @@ static void res_apply(int on) {
   g.cur_prog = PROG_NONE;
 }
 
+/* (AI-assisted, micro-gpu) a radial texture's color table is freed */
+static void proc_lut_forget(const C3D_ProcTexColorLut* lut) {
+  if (s_proc_lut_color_gpu == lut) {
+    s_proc_lut_color_gpu = NULL;
+  }
+  if (s_proc_lut_color_f0 == lut) {
+    s_proc_lut_color_f0 = NULL;
+  }
+  if (__C3D_Context.procTexColorLut == lut) {
+    C3D_ProcTexColorLutBind(NULL);
+  }
+}
 void C3Di_UpdateContext(void); /* citro3d: sends what's dirty (as its draws do first) */
 enum {
   C3DiF_Active = BIT(0),
@@ -2715,6 +2741,7 @@ static void pipeline_submit(void) {
 }
 
 static volatile int s_cmd_dump_next;
+static void proc_lut_snapshot(void);
 void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
@@ -2730,6 +2757,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     }
   }
   res_apply((s_micro & MICRO_RESIDENT) != 0); /* (AI-assisted, micro-gpu) */
+  proc_lut_snapshot();
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
   s_sky_hook = NULL; /* (AI-assisted) sky_last: a hook left from a frame that didn't end */
@@ -2947,11 +2975,12 @@ static void cmd_dump_frame(void) {
   if (!f) {
     return;
   }
-  if (s_res_on) {
+  if (s_res_on || s_proc_lut_map_f0 || s_proc_lut_color_f0) {
     /* (AI-assisted, micro-gpu) GPU memory the frame doesn't write but its draws use, from frames
-     * before (shader_resident's code image), as the commands that put it there: the file starts
-     * with them ("CMDE": a fourth header word, the prologue's word count; cmd_report.py --kicks
-     * runs it before the frame) */
+     * before (shader_resident's code image, the procedural texture tables as they were at the
+     * frame begin), as the commands that put it there: the file starts with them ("CMDE": a
+     * fourth header word, the prologue's word count; cmd_report.py --kicks runs it before the
+     * frame) */
     static u32 pro[8 + 512 + 128 + 16 + 3 * 260];
     u32* p = pro;
     if (s_res_on) {
@@ -2962,6 +2991,16 @@ static void cmd_dump_frame(void) {
       }
       p = raw_w(p, GPUREG_VSH_OPDESCS_CONFIG, 0xF, 0);
       p = raw_n(p, GPUREG_VSH_OPDESCS_DATA, s_res_desc, s_res_dvlp.opdescSize, 0);
+    }
+    if (s_proc_lut_map_f0) {
+      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_RGBMAP << 8);
+      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, *s_proc_lut_map_f0, 128, 0);
+    }
+    if (s_proc_lut_color_f0) {
+      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_COLOR << 8);
+      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, s_proc_lut_color_f0->color, 256, 0);
+      p = raw_w(p, GPUREG_PROCTEX_LUT, 0xF, (u32)GPU_LUT_COLORDIF << 8);
+      p = raw_n(p, GPUREG_PROCTEX_LUT_DATA0, s_proc_lut_color_f0->diff, 256, 0);
     }
     const u32 hdr[4] = {0x45444d43u, (u32)g.frame_no, words, (u32)(p - pro)};
     fwrite(hdr, 4, 4, f);
@@ -4360,6 +4399,13 @@ static void raw_check_epoch(void) {
   }
 }
 
+/* (AI-assisted, micro-gpu) the procedural texture tables in the GPU at the frame begin (cmd_dump) */
+static void proc_lut_snapshot(void) {
+  const int ok = s_proc_lut_epoch == s_raw.apt_epoch;
+  s_proc_lut_map_f0 = ok ? s_proc_lut_map_gpu : NULL;
+  s_proc_lut_color_f0 = ok ? s_proc_lut_color_gpu : NULL;
+}
+
 /* before a raw draw's uniforms and the draw: citro3d sends what it has pending */
 static inline void raw_sync(void) {
   raw_check_epoch();
@@ -4756,8 +4802,19 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   if (proc) {
     if (g.proc_radial != slot->radial) {
       C3D_ProcTexBind(0, &s_proctex);
-      C3D_ProcTexLutBind(GPU_LUT_RGBMAP, &s_proc_map);
-      C3D_ProcTexColorLutBind(s_radial[slot->radial]);
+      /* (AI-assisted, micro-gpu) the tables only when the LUT memory has others (see
+       * s_proc_lut_epoch); citro3d's context keeps pointing at them */
+      const C3D_ProcTexColorLut* lut = s_radial[slot->radial];
+      const int known = s_proc_lut_epoch == s_raw.apt_epoch && (s_micro & MICRO_PROCLUT);
+      if (!known || s_proc_lut_map_gpu != &s_proc_map || __C3D_Context.procTexLut[1] != &s_proc_map) {
+        C3D_ProcTexLutBind(GPU_LUT_RGBMAP, &s_proc_map);
+      }
+      if (!known || s_proc_lut_color_gpu != lut || __C3D_Context.procTexColorLut != lut) {
+        C3D_ProcTexColorLutBind(s_radial[slot->radial]);
+      }
+      s_proc_lut_map_gpu = &s_proc_map;
+      s_proc_lut_color_gpu = lut;
+      s_proc_lut_epoch = s_raw.apt_epoch;
       g.proc_radial = slot->radial;
     }
     if (g.bound_tex) {
