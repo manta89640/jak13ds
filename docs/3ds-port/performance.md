@@ -830,3 +830,35 @@ shrub distances off screen), village1 hut p95 88k -> 91k, Snowy fort p95 121k ->
 distances moved), Snowy start 115k -> 114k. What is left: tie / shrub chunks the camera comes
 nearer to (the PS2 fades shrubs; ties have no limit there), the time of day vertex colors stepping
 (tod-fix), and on the host only, the sky drawn as hard-edged panels.
+
+## Impostors on by default (AI-assisted, Oct 17, impostors)
+
+config_dev.md `impostors` has the mechanism. What changed on Oct 17, and what it costs:
+
+- **The beach arch depth error.** Root cause: a card's grid point took the depth of the nearest
+  triangle whose screen box touched any of the four cells around it. The rock in front of the
+  arch put the whole cell's card in front of the arch, which then failed the depth test.
+  Now the CPU rasterizes the group's visible 1/w per texel at capture. Each cell gets one quad
+  on the plane fitted to that surface, split where it has a depth step, so the card sits within
+  ~0.6% of the distance of what it shows. On/off pictures at the arch, Sandover and Snowy differ
+  only in animated objects, clouds and a few edge texels.
+- **Render target on hardware.** The texture and its D16 depth are in VRAM (Azahar log:
+  `render to texture: 512x256 RGBA8 in VRAM A + D16 128x256 in VRAM B`). They are made at
+  renderer init, before the level pools take VRAM. The fallback is linear memory. A tile is
+  cleared by a draw (never GX_MemoryFill). The framebuffer band offsets are 16 KB multiples.
+  VRAM free in the level pairs: 1.19-1.68 MB. Linear free: unchanged (tightest ogre+village2
+  3.67 MB).
+- **Time of day.** Cards recapture when the palette weights move the group's colors by more
+  than 4 units. They don't capture while the level's rewrites lag. While the day runs too fast
+  (the title screen) the groups stay geometry. Before this, Sandover's cards kept stale
+  colors, and a near-tie card showed the far LOD version's colors.
+- **Popping.** A card is replaced while it is within `impostor_error` (1 px) of the geometry.
+  Title flight: 261 pop/flicker events with impostors on, 265 off (popdet.py, 8 px blocks);
+  1 event of 2 blocks only with impostors on. A walk and turn at the beach: 20 events on,
+  68 off. No crossfade needed.
+- **Cost (Azahar, steady).** The impostor code takes 1-3 ms of render thread time (village1:
+  250 cards, ~0.4 ms of that drawing them). Village1 is the worst view, at +4 ms render
+  thread build. The GPU model (10.6 ms + 0.13 ms per 1k triangles) saves 0.5-1.5 ms in the
+  three views, and the cards' fill is the same as the geometry they replace. The views stay
+  GPU-bound, so the frame time gains only a little. Most of the win is the triangle count
+  (-18% beach in Azahar) and the headroom in busy views.

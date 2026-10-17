@@ -216,7 +216,8 @@ int ctr_gpu_copy_screen(void);
  * keep what an earlier copy left: only read the screen in x0..x1. */
 int ctr_gpu_copy_screen_part(float x0, float x1);
 /* (AI-assisted) Render to texture (impostors, CtrImpostor): an RGBA8 texture the GPU draws into,
- * in linear memory (never VRAM: the level texture pools keep it), and a D16 depth buffer for
+ * in VRAM when there is room (else linear memory: make it before the level texture pools fill
+ * VRAM), and a D16 depth buffer for
  * tiles of up to max_tile_w x 256 pixels. "Logical" pixels: lw along ctr x (left to right), lh
  * along ctr y (bottom to top), lw and lh powers of two, lh 256 at most. Returns a texture handle
  * (draw it with filter 0, clamped, like any other) or -1; deleted with ctr_gpu_rt_delete.

@@ -5919,20 +5919,28 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
 }
 
 /* ---------------- (AI-assisted) render to texture (impostors, CtrImpostor) ----------------
- * The texture is an RGBA8 C3D_Tex in linear memory (VRAM stays for the level texture pools) and
- * is also the color buffer: the GPU's render targets use the textures' tiled layout (8x8 tiles,
- * Morton order inside). Its logical pixels are laid out like the top screen's (the color buffer
- * is 240 wide, the screen's x along its rows): logical x = buffer row, logical y = buffer column,
- * so the draws keep the screen's clip transform and only the viewport changes. A tile is drawn
- * with the framebuffer moved to its band of rows (the band's start at a multiple of 16 rows), so
- * the D16 depth buffer needs only max_tile_w rows. The switch goes through citro3d's context
- * (C3D_SetFrameBuf: at the next update citro3d flushes the framebuffer the draws used and binds
- * the new one), which keeps the raw draws' invariant (citro3d's context describes the GPU). */
+ * The texture is an RGBA8 C3D_Tex and is also the color buffer: the GPU's render targets use the
+ * textures' tiled layout (8x8 tiles, Morton order inside). Its logical pixels are laid out like
+ * the top screen's (the color buffer is 240 wide, the screen's x along its rows): logical x =
+ * buffer row, logical y = buffer column, so the draws keep the screen's clip transform and only
+ * the viewport changes. A tile is drawn with the framebuffer moved to its band of rows (the band's
+ * start at a multiple of 16 rows: 16 KB steps for 256 columns, far beyond the 8-byte alignment the
+ * framebuffer address registers need), so the D16 depth buffer needs only max_tile_w rows. The
+ * switch goes through citro3d's context (C3D_SetFrameBuf: at the next update citro3d flushes the
+ * framebuffer the draws used and binds the new one), which keeps the raw draws' invariant
+ * (citro3d's context describes the GPU).
+ * Memory (Oct 17, hardware safety): both in VRAM when there is room (made at renderer init, before
+ * the level texture pools fill it: C3D_TexInitVRAM, the usual render to texture place on the 3DS;
+ * the depth in the other VRAM bank when it fits), else linear memory (the GPU renders to FCRAM as
+ * well, slower). Nothing here touches the texels with the CPU or the transfer engine's memory fill
+ * (that only fills VRAM on hardware): every tile is cleared by a draw (CtrImpostor::capture's
+ * first quad, alpha 0 and depth 0) before it is drawn into or sampled. */
 #define MAX_RT 4
 static struct {
   int tex1; /* texture slot + 1 (0: free) */
   int lw, lh, max_w;
   void* depth;   /* D16, max_w rows x lh columns */
+  int depth_vram; /* (AI-assisted) depth is in VRAM (vramFree) */
   u32 dead_frame; /* ctr_gpu_rt_delete: the depth buffer is freed 3 frames later */
 } s_rt[MAX_RT];
 static struct {
@@ -5947,9 +5955,14 @@ static void rt_reap(void) {
   for (int i = 0; i < MAX_RT; i++) {
     if (!s_rt[i].tex1 && s_rt[i].depth && (u32)g.frame_no - s_rt[i].dead_frame > 3) {
       ctr_linear_lock();
-      linearFree(s_rt[i].depth);
+      if (s_rt[i].depth_vram) {
+        vramFree(s_rt[i].depth);
+      } else {
+        linearFree(s_rt[i].depth);
+      }
       ctr_linear_unlock();
       s_rt[i].depth = NULL;
+      s_rt[i].depth_vram = 0;
     }
   }
 }
@@ -5972,10 +5985,30 @@ int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
     return -1;
   }
   TexSlot* t = &g.textures[slot];
+  const size_t color_bytes = (size_t)lw * (size_t)lh * 4u;
+  const size_t depth_bytes = (size_t)max_tile_w * (size_t)lh * 2u;
   ctr_linear_lock();
-  /* the texture: lh wide (buffer columns), lw high (buffer rows) */
-  int ok = linear_room_for_tex(lh, lw, 0) && C3D_TexInit(&t->tex, (u16)lh, (u16)lw, GPU_RGBA8);
-  void* depth = ok ? linearAlloc((size_t)max_tile_w * (size_t)lh * 2u) : NULL;
+  /* the texture: lh wide (buffer columns), lw high (buffer rows). VRAM first (leaving the reserve:
+   * C3D_TexInitVRAM calls libctru's vramAlloc, not safe_vram_alloc) */
+  int in_vram = (size_t)vramSpaceFree() >= color_bytes + depth_bytes + VRAM_RESERVE &&
+                C3D_TexInitVRAM(&t->tex, (u16)lh, (u16)lw, GPU_RGBA8);
+  int ok = in_vram ||
+           (linear_room_for_tex(lh, lw, 0) && C3D_TexInit(&t->tex, (u16)lh, (u16)lw, GPU_RGBA8));
+  void* depth = NULL;
+  int depth_vram = 0;
+  if (ok && in_vram) {
+    /* the other bank than the color (the GPU reads both per pixel) */
+    if ((size_t)vramSpaceFree() >= depth_bytes + VRAM_RESERVE) {
+      depth = vramAllocAt(depth_bytes, vram_bank(t->tex.data) ? VRAM_ALLOC_A : VRAM_ALLOC_B);
+    }
+    if (!depth) {
+      depth = vramAlloc(depth_bytes);
+    }
+    depth_vram = depth != NULL;
+  }
+  if (ok && !depth) {
+    depth = linearAlloc(depth_bytes);
+  }
   if (ok && !depth) {
     C3D_TexDelete(&t->tex);
     ok = 0;
@@ -5985,9 +6018,13 @@ int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
     release_tex_slot(slot);
     return -1;
   }
-  /* no texel or dirty cache line from the memory's last use (the GPU writes it from now on) */
-  memset(t->tex.data, 0, t->tex.size);
-  cache_flush_now(t->tex.data, t->tex.size);
+  if (!in_vram) {
+    /* no dirty cache line from the memory's last use may land over what the GPU writes */
+    cache_flush_now(t->tex.data, t->tex.size);
+  }
+  if (!depth_vram) {
+    cache_flush_now(depth, (u32)depth_bytes);
+  }
   t->pool = -1;
   t->levels = 1;
   ctr_linear_lock();
@@ -5998,8 +6035,11 @@ int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
   s_rt[i].lh = lh;
   s_rt[i].max_w = max_tile_w;
   s_rt[i].depth = depth;
-  printf("[ctr] render to texture: %dx%d RGBA8 + D16 %dx%d in linear memory (%u KB)\n", lw, lh,
-         max_tile_w, lh, (unsigned)((t->tex.size + (u32)max_tile_w * (u32)lh * 2u) / 1024u));
+  s_rt[i].depth_vram = depth_vram;
+  printf("[ctr] render to texture: %dx%d RGBA8 in %s + D16 %dx%d in %s (%u KB)\n", lw, lh,
+         in_vram ? (vram_bank(t->tex.data) ? "VRAM B" : "VRAM A") : "linear memory", max_tile_w,
+         lh, depth_vram ? (vram_bank(depth) ? "VRAM B" : "VRAM A") : "linear memory",
+         (unsigned)((color_bytes + depth_bytes) / 1024u));
   return slot;
 }
 
