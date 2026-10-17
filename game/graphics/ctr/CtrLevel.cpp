@@ -882,6 +882,7 @@ struct TodSeen {
   std::map<std::string, std::array<u8, 24>> by_level;
   std::array<u8, 24> last{};
   u32 last_day_mask = 0;
+  std::map<std::string, u8> pulse;  // (AI-assisted, citadel) per level its pulsing palettes
 };
 TodSeen& tod_seen() {
   static TodSeen s;
@@ -970,6 +971,8 @@ inline u32 tod_entry(CtrLevelData::Tod& t, u32 idx) {
 // nothing.
 constexpr int kTodBusyFrames = 8;
 constexpr int kTodJump = 4;
+constexpr u64 kTodPulseFrames = 256, kTodPulseSettle = 8;  // (AI-assisted, citadel)
+constexpr int kTodTakeJump = 8;  // (AI-assisted, citadel) tod_max_ms: a day move this big doesn't wait
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
                u64 frame) {
   u8 w[8][3];
@@ -979,10 +982,80 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   for (u32 k = 0; k < t.palette_count; k++) {
     used |= 1u << t.palettes[k];
   }
+  // (AI-assisted, citadel) config tod_pulse_step: a day palette whose weight turned around twice
+  // within kTodPulseFrames (a mood light's pulse: citadel's palette 1, 0.875 +- 0.25 every 128
+  // frames, 1/64 every ~2 frames, 71% of its colors) is taken only when it moved tod_pulse_step
+  // 64ths from the weight last taken, or once it stood still for kTodPulseSettle frames: each move
+  // rewrites the vertices drawn (citadel: 4-8 ms per frame, all of them every ~6 frames). The
+  // day's own moves (1/64 every ~40 frames, one way for hours) and the lights as before. A palette
+  // found pulsing is remembered per level (TodSeen::pulse): a reload counts it as pulsing at once.
+  const int pulse_step = ctr_settings().tod_pulse_step;
+  if (!t.first_frame) {
+    t.first_frame = frame;
+  }
+  auto pulsing = [&](int p) {
+    return (t.pulse_rev[p][1] && frame - t.pulse_rev[p][1] < kTodPulseFrames) ||
+           ((t.pulse_known >> p & 1) &&
+            frame - std::max(t.pulse_rev[p][0], t.first_frame) < kTodPulseFrames);
+  };
+  if (pulse_step > 0 && t.blended_valid) {
+    for (u32 k = 0; k < t.palette_count; k++) {
+      const int p = t.palettes[k];
+      if ((t.light_mask >> p & 1) || memcmp(t.weights[p], w[p], 3) == 0) {
+        continue;
+      }
+      int d = 0;
+      for (int c = 0; c < 3; c++) {
+        d += (int)w[p][c] - (int)t.weights[p][c];
+      }
+      const u8 dir = d > 0 ? 1 : d < 0 ? 2 : 0;
+      if (dir && t.pulse_dir[p] && dir != t.pulse_dir[p]) {
+        t.pulse_rev[p][1] = t.pulse_rev[p][0];
+        t.pulse_rev[p][0] = frame;
+        if (t.pulse_rev[p][1] && frame - t.pulse_rev[p][1] < kTodPulseFrames &&
+            !(t.pulse_known >> p & 1)) {
+          t.pulse_known |= (u8)(1u << p);
+          auto& seen = tod_seen();
+          std::lock_guard<std::mutex> lk(seen.lock);
+          seen.pulse[level] |= (u8)(1u << p);
+        }
+      }
+      if (dir) {
+        t.pulse_dir[p] = dir;
+      }
+      t.pulse_move[p] = frame;
+    }
+  }
   u32 changed = 0, day = 0;
   int jump = 0;
+  // (AI-assisted, citadel) config tod_max_ms: a day move waits for min_move_frames after the last
+  const bool wait_day = ctr_settings().tod_max_ms > 0 && t.blended_valid &&
+                        (float)(frame - t.move_frame) < t.min_move_frames;
+  bool waited = false;
   for (u32 k = 0; k < t.palette_count; k++) {
     const int p = t.palettes[k];
+    if (pulse_step > 0 && t.blended_valid && !(t.light_mask >> p & 1) && pulsing(p) &&
+        frame - t.pulse_move[p] < kTodPulseSettle && memcmp(t.target_w[p], w[p], 3) != 0) {
+      int diff = 0;
+      for (int c = 0; c < 3; c++) {
+        diff = std::max(diff, std::abs((int)w[p][c] - (int)t.target_w[p][c]));
+      }
+      if (diff < pulse_step) {
+        t.pulse_held++;
+        continue;  // (held: target_w stays)
+      }
+    }
+    if (wait_day && !(t.light_mask >> p & 1) && memcmp(t.target_w[p], w[p], 3) != 0) {
+      // (tod_max_ms: the last day move's rewrites aren't spread yet; a jump is taken at once)
+      int diff = 0;
+      for (int c = 0; c < 3; c++) {
+        diff = std::max(diff, std::abs((int)w[p][c] - (int)t.target_w[p][c]));
+      }
+      if (diff < kTodTakeJump) {
+        waited = true;
+        continue;
+      }
+    }
     if (!t.blended_valid || memcmp(t.target_w[p], w[p], 3) != 0) {
       changed |= 1u << p;
       if (!(t.light_mask >> p & 1)) {
@@ -994,6 +1067,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
     }
   }
   memcpy(t.weights, w, sizeof(w));
+  t.day_waited = waited;
   if (t.blended_valid && day) {
     t.busy_run = jump > kTodJump ? (u8)std::min(255, t.busy_run + 1) : 0;
     if (ctr_settings().tod_busy_half && (frame & 1) && t.busy_run >= kTodBusyFrames) {
@@ -1234,6 +1308,8 @@ struct TodPass {
   // the pass: kTodLights (light vertices, up to kTodLightShare of the budget), kTodRound (groups)
   int pass = 0;
   bool over = false;     // the budget's used up
+  bool capped = false;   // (AI-assisted, citadel) tod_max_ms reached: nothing more this frame
+  u32 waiting = 0;       // groups too far behind left for tod_max_ms
   u32 work = 0, next_check = 0;  // vertices written (+ kTodChunkWork per chunk looked at)
   u32 stop_chunk = UINT32_MAX;  // the first chunk the budget didn't reach (the next round's start)
   u32 rewritten = 0, behind = 0;
@@ -1278,6 +1354,9 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   // quick out: every group up to date
   const bool day_ok = t.chunk_min_ver[ci] >= day_last;
   const bool light_ok = t.chunk_light_ver[ci] >= light_last;
+  if (ps.capped && ps.pass != kTodLights && !ps.measure) {
+    return 0;
+  }
   if (t.chunk_scanned[ci] == 2 &&
       ((ps.pass == kTodLights && (light_ok || ps.over)) ||
        (ps.pass != kTodLights &&
@@ -1326,6 +1405,22 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     ps.over = true;
     return false;
   };
+  // (AI-assisted, citadel) the frame's limit (tod_max_ms) for the groups that don't wait for the
+  // budget
+  auto cap_ok = [&]() {
+    const float cap = ctr_settings().tod_max_ms;
+    if (cap <= 0) {
+      return true;
+    }
+    if (ps.before_ms + (ctr_gpu_time_ms() - ps.t0) < cap) {
+      return true;
+    }
+    ps.capped = true;
+    if (ps.stop_chunk == UINT32_MAX) {
+      ps.stop_chunk = (u32)ci;  // (else the budget's stop chunk stays the next frame's start)
+    }
+    return false;
+  };
   const u32 r0 = lev.chunk_first_run[ci];
   const u32 nr = lev.chunks[ci].vis_run_count;
   const bool by_runs = shown && ng > 1;
@@ -1372,6 +1467,14 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       if (gr.ver && t.dver - gr.dver < kTodMaxLag && !budget_ok()) {
         left = true;
         ps.max_lag = std::max(ps.max_lag, t.dver - gr.dver);
+        return;
+      }
+      // (AI-assisted, citadel) tod_max_ms: those too far behind wait beyond it (the next frame's
+      // pass starts from them)
+      if (ps.capped || !cap_ok()) {
+        left = true;
+        ps.waiting++;
+        ps.max_lag = std::max(ps.max_lag, gr.ver ? t.dver - gr.dver : 99u);
         return;
       }
       const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
@@ -1704,6 +1807,9 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     bool have = false;
     {
       std::lock_guard<std::mutex> lk(seen.lock);
+      if (auto pit = seen.pulse.find(lev->name); pit != seen.pulse.end()) {
+        t->pulse_known = pit->second;  // (AI-assisted, citadel)
+      }
       auto it = seen.by_level.find(lev->name);
       if (it != seen.by_level.end()) {
         w = it->second;
@@ -3682,11 +3788,13 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
              "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, {} chunks drawn "
              "behind; groups drawn behind by at most {} day moves ({} of {} sampled level draws "
-             "2 or more)",
+             "2 or more); a pulsing palette held in {} level draws, a day move waited in {}, {} "
+             "groups too far behind waited for tod_max_ms",
              m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames, m_tod_ms / m_tod_frames,
              m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_deferred, m_tod_lag_max,
-             m_tod_lag2, m_tod_lag_frames);
-    m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = 0;
+             m_tod_lag2, m_tod_lag_frames, m_tod_held, m_tod_waited, m_tod_capped);
+    m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = 0;
+    m_tod_waited = m_tod_capped = 0;
     m_tod_spread = m_tod_deferred = m_tod_lag_frames = m_tod_lag_max = m_tod_lag2 = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
@@ -3726,7 +3834,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (lev.tod) {
     const double t0 = ctr_gpu_time_ms();
     m_tod_frames++;
+    const u32 held0 = lev.tod->pulse_held;
     m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
+    m_tod_held += lev.tod->pulse_held != held0;  // (AI-assisted, citadel) tod_pulse_step
     tod_ms += ctr_gpu_time_ms() - t0;
   }
 #ifndef __3DS__
@@ -4460,6 +4570,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ps.day_budget_ms = std::max(
           tod_budget_ms(),
           (double)drawn * t.ms_per_vertex / (kTodSpreadMoves * std::max(1.f, t.move_frames)));
+      // (AI-assisted, citadel) tod_max_ms: the budget under it, and the next day move waits until
+      // these vertices' rewrites fit once per move
+      if (const float cap = settings.tod_max_ms; cap > 0) {
+        // (the frame's group work up to 0.8 of the limit, a day move per full round at 0.7 of it:
+        // the light pass's share comes out of the same ms)
+        ps.day_budget_ms = std::min<double>(std::max<double>(ps.day_budget_ms, 0.8 * cap), cap);
+        t.min_move_frames = std::min<float>(
+            32.f, (float)((double)drawn * t.ms_per_vertex / (0.7 * cap)));
+      } else {
+        t.min_move_frames = 0;
+      }
       const double d0 = ctr_gpu_time_ms();
       const u32 w0 = ps.work;
       const u32 from = t.round_chunk;
@@ -4481,6 +4602,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     tod_ms += ctr_gpu_time_ms() - t0;
     m_tod_spread += ps.rewritten;
     m_tod_deferred += ps.behind;
+    m_tod_capped += ps.waiting;                  // (AI-assisted, citadel) tod_max_ms
+    m_tod_waited += lev.tod->day_waited ? 1 : 0;
     if (ps.measure) {
       m_tod_lag_frames++;
       m_tod_lag_max = std::max(m_tod_lag_max, ps.max_lag);
