@@ -104,7 +104,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   // texture is bound once for all of them. Flushed before a draw that blends or doesn't write
   // depth, before the queued shine.
   std::vector<QueuedDraw> m_q_opaque;
-  std::vector<u32> m_q_order;
+  std::vector<u64> m_q_order;  // (AI-assisted) sort keys (flush_opaque)
   std::vector<const void*> m_q_models;  // model rank -> model
   void flush_opaque();
   void flush_queues();
