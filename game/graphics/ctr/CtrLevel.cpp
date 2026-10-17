@@ -3482,6 +3482,14 @@ constexpr float kWantMeters = 20.f, kKeepMeters = 45.f;
 constexpr float kLeadFrames = 60.f;  // 2 s at 30 fps
 constexpr int kLeadSteps = 4;        // positions: now, 1/3, 2/3, all of the lead
 constexpr u32 kJobsInFlight = 2;     // a second job queued behind the one being read
+// while nothing is wanted: the units within this of their bound read into the arena's free room
+// (no freeing, no growth), one small job every kIdleFrames: more is there when the camera cuts
+constexpr float kIdleMeters = 250.f;
+constexpr u64 kIdleFrames = 8;
+constexpr u32 kIdleBytes = 128 * 1024;
+// a unit needed now and in view goes this much ahead of the others (after a cut: what is on
+// screen first)
+constexpr float kInViewMeters = 300.f;
 // a jump of the camera of more than this in a frame (a warp, a cut): no speed
 constexpr float kCutMeters = 40.f;
 // a stream job: at most this many file bytes, units (one level load waits for it at most this)
@@ -3594,9 +3602,23 @@ void CtrLevels::free_stream_parts(const Job& job) {
   }
 }
 
-void CtrLevels::stream_note_camera(const math::Vector4f& t, u64 frame) {
+void CtrLevels::stream_note_camera(const math::Vector4f& t,
+                                   const math::Vector4f planes[4],
+                                   const math::Vector4f rot[4],
+                                   u64 frame) {
   if (m_cam_valid && frame == m_cam_frame) {
     return;
+  }
+  // Jak's world place: camera position + rot (rows) times his first bone's tmat[3]
+  if (m_target_cam_frame + 2 >= frame) {
+    for (int i = 0; i < 3; i++) {
+      m_target[i] = t[i] + rot[i][0] * m_target_cam[0] + rot[i][1] * m_target_cam[1] +
+                    rot[i][2] * m_target_cam[2];
+    }
+    m_target_frame = frame;
+  }
+  for (int i = 0; i < 4; i++) {
+    m_planes[i] = planes[i];
   }
   if (m_cam_valid && frame > m_cam_frame) {
     const float n = (float)std::min<u64>(frame - m_cam_frame, 8);
@@ -3609,6 +3631,7 @@ void CtrLevels::stream_note_camera(const math::Vector4f& t, u64 frame) {
       for (float& c : m_cam_vel) {
         c = 0;
       }
+      m_cut_frame = frame;
     } else {
       for (int c = 0; c < 3; c++) {
         m_cam_vel[c] = 0.75f * m_cam_vel[c] + 0.25f * v[c];
@@ -3632,6 +3655,7 @@ void CtrLevels::stream_late(CtrLevelData& lev, u32 unit, u64 frame) {
   if (su.late_ms <= 0) {
     su.late_ms = now;
     su.late_frame = frame;
+    su.late_cut = m_cut_frame && frame <= m_cut_frame + 60;
     m_sst.late_events++;
     // (being read already, or not asked for yet: the reads too slow, or the need not foreseen /
     // no room)
@@ -3675,11 +3699,28 @@ void CtrLevels::stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64
   m_sst.late_ms_max = std::max(m_sst.late_ms_max, late);
   m_sst.late_frames_total += frames;
   m_sst.late_frames_max = std::max<u64>(m_sst.late_frames_max, frames);
+  if (su.late_cut) {
+    m_sst.late_cut++;
+    m_sst.late_cut_ms += late;
+    m_sst.late_cut_max = std::max(m_sst.late_cut_max, late);
+  } else {
+    m_sst.late_other++;
+    m_sst.late_other_ms += late;
+    m_sst.late_other_max = std::max(m_sst.late_other_max, late);
+  }
   su.late_ms = 0;
 }
 
-void CtrLevels::stream_note_level(CtrLevelData& lev, u32 late_groups, u64 frame) {
+void CtrLevels::stream_note_level(CtrLevelData& lev, u32 late_groups, u32 held_groups,
+                                  u64 frame) {
   (void)lev;
+  if (held_groups) {
+    m_sst.held_group_frames += held_groups;
+    if (m_sst.last_held_frame != frame) {
+      m_sst.last_held_frame = frame;
+      m_sst.held_frames++;
+    }
+  }
   if (late_groups) {
     m_sst.late_group_frames += late_groups;
     if (m_sst.last_late_frame != frame) {
@@ -3736,6 +3777,73 @@ u32 CtrLevels::stream_shrink(bool all) {
   return n;
 }
 
+// Render thread: nothing wanted, the loader idle: the nearest units within kIdleMeters of their
+// bound (m_idle) into the arena's free room, one small job (non-urgent: behind level loads).
+void CtrLevels::stream_idle_fill(u64 frame) {
+  auto& arena = CtrStreamArena::get();
+  std::sort(m_idle.begin(), m_idle.end(),
+            [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
+  CtrLevelData& lev = *m_idle[0].lev;
+  Job job;
+  job.name = lev.name;
+  job.stream = true;
+  job.generation = lev.generation;
+  job.path = lev.path;
+  job.vertex_data_offset = lev.vertex_data_offset;
+  job.index_data_offset = lev.index_data_offset;
+  job.tod_ntab = lev.tod ? (u32)lev.tod->table.size() : 0;
+  job.dir = lev.file_dir;
+  u32 packed = 0;
+  for (const auto& w : m_idle) {
+    if (w.lev != &lev) {
+      continue;
+    }
+    auto& su = lev.stream_units[w.unit];
+    void* mem = arena.alloc(su.bytes);
+    if (!mem) {
+      continue;  // (no room: none freed for it)
+    }
+    const u32 ci = su.chunk;
+    const auto& ch = lev.chunks[ci];
+    Job::StreamPart part;
+    part.unit = w.unit;
+    part.chunk = ci;
+    part.first_vertex = ch.first_vertex;
+    part.vertex_count = ch.vertex_count;
+    part.index_first = lev.mesh_index_first[ci];
+    part.index_end = lev.mesh_index_end[ci];
+    part.mem = mem;
+    part.layout = lev.tod && !su.tod_layout;
+    if (part.layout) {
+      part.draws.assign(lev.draws.begin() + ch.first_draw,
+                        lev.draws.begin() + ch.first_draw + ch.draw_count);
+      const u32 r0 = lev.chunk_first_run[ci];
+      part.runs.assign(lev.vis_runs.begin() + r0, lev.vis_runs.begin() + r0 + ch.vis_run_count);
+    }
+    su.state = CtrLevelData::kUnitLoading;
+    su.mem = mem;
+    job.stream_parts.push_back(std::move(part));
+    packed += su.packed;
+    m_sst.idle_units++;
+    if (packed >= kIdleBytes || job.stream_parts.size() >= kBatchUnits) {
+      break;
+    }
+  }
+  m_idle_frame = frame;
+  if (job.stream_parts.empty()) {
+    return;
+  }
+  std::sort(job.stream_parts.begin(), job.stream_parts.end(),
+            [](const Job::StreamPart& a, const Job::StreamPart& b) {
+              return a.first_vertex < b.first_vertex;
+            });
+  job.window = c3l_read_window();
+  m_stream_inflight++;
+  m_sst.idle_jobs++;
+  job.serial = ++m_stream_serial;
+  request(job);
+}
+
 // Render thread, each frame (process_pending_loads): the units each level needs around the camera
 // (now and where its speed takes it), the most urgent first, into a stream job for one level (one
 // job at a time); the arena's room made by freeing the units furthest beyond their need.
@@ -3775,7 +3883,18 @@ void CtrLevels::stream_update(u64 frame) {
   }
   m_want.clear();
   m_have.clear();
-  float p[kLeadSteps][3];
+  m_idle.clear();
+  auto in_view = [&](const float* c) {
+    for (int i = 0; i < 4; i++) {
+      const float a = m_planes[0][i] * c[0] + m_planes[1][i] * c[1] + m_planes[2][i] * c[2] -
+                      m_planes[3][i];
+      if (!(a > -c[3])) {
+        return false;
+      }
+    }
+    return true;
+  };
+  float p[kLeadSteps + 1][3];
   for (int i = 0; i < kLeadSteps; i++) {
     for (int c = 0; c < 3; c++) {
       p[i][c] = m_cam[c] + m_cam_vel[c] * kLeadFrames * (float)i / (kLeadSteps - 1);
@@ -3784,7 +3903,15 @@ void CtrLevels::stream_update(u64 frame) {
   // (a camera standing still: one position)
   const float v2 = m_cam_vel[0] * m_cam_vel[0] + m_cam_vel[1] * m_cam_vel[1] +
                    m_cam_vel[2] * m_cam_vel[2];
-  const int np = v2 * kLeadFrames * kLeadFrames < 4096.f * 4096.f ? 1 : kLeadSteps;
+  int np = v2 * kLeadFrames * kLeadFrames < 4096.f * 4096.f ? 1 : kLeadSteps;
+  // Jak's place too (drawn within the last frames): a cut to another camera (a cutscene's, the
+  // race's, a zoom) lands near him, and his near chunks are there before it
+  if (m_target_frame + 3 >= frame) {
+    for (int c = 0; c < 3; c++) {
+      p[np][c] = m_target[c];
+    }
+    np++;
+  }
   constexpr float kM = 4096.f;
   u64 need_now = 0;
   for (auto& [name, lp] : m_levels) {
@@ -3823,6 +3950,11 @@ void CtrLevels::stream_update(u64 frame) {
       if (dmin > far_lim * far_lim) {
         if (resident) {
           m_have.push_back({&lev, u, std::sqrt(dmin) - bound});
+        } else {
+          const float idle_lim = bound + kIdleMeters * kM;
+          if (dmin < idle_lim * idle_lim) {
+            m_idle.push_back({&lev, u, std::sqrt(dmin) - bound});
+          }
         }
         continue;
       }
@@ -3856,15 +3988,24 @@ void CtrLevels::stream_update(u64 frame) {
       if (resident) {
         m_have.push_back({&lev, u, score});
       } else if (score < kWantMeters * kM) {
-        m_want.push_back({&lev, u, score});
+        // (needed now and on screen: first)
+        const float prio = score < 0 && in_view(c) ? score - kInViewMeters * kM : score;
+        m_want.push_back({&lev, u, prio});
         if (!su.want_frame) {
           su.want_frame = frame;
         }
+      } else {
+        m_idle.push_back({&lev, u, score});
       }
     }
   }
   m_sst.need_max = std::max<u64>(m_sst.need_max, need_now);
   m_sst.need_sum += need_now;
+  if (m_want.empty() && !m_stream_inflight && !level_loading && !m_idle.empty() &&
+      frame >= m_idle_frame + kIdleFrames) {
+    stream_idle_fill(frame);
+    return;
+  }
   if (m_want.empty() || m_stream_inflight >= kJobsInFlight) {
     return;
   }
@@ -4218,12 +4359,20 @@ void CtrLevels::stream_log() {
                           lev->streaming ? lev->stream_resident / 1024 : 0);
   }
   const double n = (double)std::max<u64>(m_sst.frames, 1);
-  if (m_sst.late_events) {
+  if (m_sst.late_events || m_sst.late_periods || m_sst.held_frames || m_sst.idle_jobs) {
     lg::info("[ctr] streaming: late near chunks: {} being read already, {} not asked for yet ({} "
-             "never wanted before; the others {:.1f} frames after they were wanted)",
+             "never wanted before; the others {:.1f} frames after they were wanted); late times "
+             "after a camera cut {} ({:.0f} ms on average, at most {:.0f}), else {} ({:.0f} ms, at "
+             "most {:.0f}); {} frames with groups kept far in view after their data came ({} "
+             "group frames); idle fill {} jobs, {} near chunks",
              m_sst.late_loading, m_sst.late_absent, m_sst.late_unwanted,
              (double)m_sst.late_wanted_frames /
-                 std::max<u64>(1, m_sst.late_events - m_sst.late_unwanted));
+                 std::max<u64>(1, m_sst.late_events - m_sst.late_unwanted),
+             m_sst.late_cut, m_sst.late_cut ? m_sst.late_cut_ms / m_sst.late_cut : 0.0,
+             m_sst.late_cut_max, m_sst.late_other,
+             m_sst.late_other ? m_sst.late_other_ms / m_sst.late_other : 0.0,
+             m_sst.late_other_max, m_sst.held_frames, m_sst.held_group_frames, m_sst.idle_jobs,
+             m_sst.idle_units);
   }
   lg::info("[ctr] streaming: arena {} of {} KB used (peak {}, largest free {} KB, {} pieces; "
            "growth {} KB in {} segments, at most {} KB in all; {} taken, {} given back, {} units "
@@ -5230,6 +5379,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // versions only (as before v17).
   const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
   u32 late_groups = 0;  // (AI-assisted, streaming) drawn far: their near chunks not there yet
+  u32 held_groups = 0;  // (AI-assisted, streaming) ... there now, but kept far while in view
   if (tie_lod) {
     u32 near = 0;
     // (AI-assisted, title-popin) files with shape errors: the near version while the far one's
@@ -5287,35 +5437,53 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         lod_q[g] = q_now;
       }
       // (AI-assisted, streaming) c3l v19: the near version only while every near chunk holding it
-      // is there and within its distance; else the far version (data late: statistics)
-      if (n && has_units && (g >= lev.group_unit_count.size() || !lev.group_unit_count[g])) {
-        n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
-      } else if (n && has_units) {
-        const u32* gu = &lev.group_units[lev.group_unit_first[g]];
-        bool ok = true, late = false;
-        for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-          const u8 uo = lev.unit_ok[gu[j]];
-          ok = ok && uo == 1;
-          late = late || uo == 3;
-        }
-        if (!ok) {
-          n = false;
-          if (late) {
-            late_groups++;
-            for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
-              if (lev.unit_ok[gu[j]] == 3) {
-                m_levels->stream_late(lev, gu[j], rs.frame_idx);
+      // is there and within its distance; else the far version (data late: statistics). A group
+      // drawn far in view for want of its data (bit 4: held) keeps its far version while in view
+      // once the data is there: switching then would be a pop on screen; it switches out of view
+      bool keep_far = (st & 4) != 0;
+      if (n && has_units) {
+        if (g >= lev.group_unit_count.size() || !lev.group_unit_count[g]) {
+          n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
+        } else {
+          const u32* gu = &lev.group_units[lev.group_unit_first[g]];
+          bool ok = true, late = false;
+          for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+            const u8 uo = lev.unit_ok[gu[j]];
+            ok = ok && uo == 1;
+            late = late || uo == 3;
+          }
+          if (!ok) {
+            n = false;
+            if (late) {
+              late_groups++;
+              for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+                if (lev.unit_ok[gu[j]] == 3) {
+                  m_levels->stream_late(lev, gu[j], rs.frame_idx);
+                }
               }
+              keep_far = keep_far || sphere_in_view(cam, lg.bsphere);
+            }
+          } else if (keep_far) {
+            if (sphere_in_view(cam, lg.bsphere)) {
+              n = false;
+              held_groups++;
+            } else {
+              keep_far = false;
             }
           }
         }
+      } else if (!n) {
+        keep_far = false;  // (beyond its distance: far anyway)
       }
-      st = (u8)(2 | (n ? 1 : 0));
+      st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0));
       near += n;
     }
     m_lod_groups_near += near;
     m_lod_frames++;
     // (AI-assisted, streaming) where the near chunks are needed (CtrLevels::stream_update)
+    if (lev.stream_k > 0 && (k * 1.1f > lev.stream_k * 1.3f || k * 1.1f * 1.3f < lev.stream_k)) {
+      m_levels->stream_note_cut(rs.frame_idx);  // (another camera, or a zoom)
+    }
     lev.stream_k = k * 1.1f;
     lev.stream_k_hi = std::max(lev.stream_k, lev.stream_k_hi * 0.99f);
     if (has_units && stream_check_enabled()) {
@@ -5344,9 +5512,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   if (has_units) {
     lev.stream_frame = rs.frame_idx;
-    m_levels->stream_note_level(lev, late_groups, rs.frame_idx);
+    m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx);
   }
-  m_levels->stream_note_camera(cam.trans, rs.frame_idx);
+  m_levels->stream_note_camera(cam.trans, cam.planes, cam.rot, rs.frame_idx);
   if (m_run_nomerge.size() < lev.vis_runs.size()) {
     m_run_nomerge.resize(lev.vis_runs.size());
   }

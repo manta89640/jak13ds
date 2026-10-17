@@ -290,6 +290,7 @@ struct CtrLevelData {
     // a time it was needed while not there: since (ms, frame; late_ms 0: not late), last frame
     double late_ms = 0, late_last_ms = 0;
     u64 late_frame = 0, late_last = 0;
+    bool late_cut = false;  // the late time began within 2 s of a camera cut
     u32 loads = 0;
     u64 want_frame = 0;  // (statistics) the first frame it was wanted while absent (0: not)
     float last_score = 0;
@@ -376,7 +377,20 @@ class CtrLevels {
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
   /*! (AI-assisted, streaming) render thread, each level draw: the camera position (game units) */
-  void stream_note_camera(const math::Vector4f& trans, u64 frame);
+  void stream_note_camera(const math::Vector4f& trans,
+                          const math::Vector4f planes[4],
+                          const math::Vector4f rot[4],
+                          u64 frame);
+  /*! (AI-assisted, streaming) Jak's first bone in camera space (merc renderer, any frame) */
+  void stream_note_target(float x, float y, float z, u64 frame) {
+    m_target_cam[0] = x;
+    m_target_cam[1] = y;
+    m_target_cam[2] = z;
+    m_target_cam_frame = frame;
+  }
+  /*! (AI-assisted, streaming) a jump of a level's tie LOD factor (the camera's focal length: a cut
+   * to another camera, a zoom) */
+  void stream_note_cut(u64 frame) { m_cut_frame = frame; }
   /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
   void stream_log();
   /*! (AI-assisted, streaming) host check (env CTR_STREAM_CHECK): the counts of this frame's draw
@@ -391,7 +405,7 @@ class CtrLevels {
   /*! (AI-assisted, streaming) a unit needed (draw_level): late statistics */
   void stream_late(CtrLevelData& lev, u32 unit, u64 frame);
   /*! (AI-assisted, streaming) a level drawn: its groups drawn far because their data was late */
-  void stream_note_level(CtrLevelData& lev, u32 late_groups, u64 frame);
+  void stream_note_level(CtrLevelData& lev, u32 late_groups, u32 held_groups, u64 frame);
   /*! (AI-assisted) What the render thread does at the start of each frame for the loader: a
    * parked prefetch the game gave up on to unload, or the loader waiting for memory (make_room).
    * The game can wait for a level without drawing frames (both level slots empty: it loads in a
@@ -596,6 +610,7 @@ class CtrLevels {
   void run_stream_job(const Job& job, Done* d);
   void take_stream(Done& d, u64 frame);
   void stream_evict(CtrLevelData& lev, u32 unit);
+  void stream_idle_fill(u64 frame);
   void stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64 end_frame);
   // the units in the arena's growth segments freed (all: a level load needs the memory; else the
   // ones not needed now); returns how many
@@ -606,6 +621,12 @@ class CtrLevels {
   std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
+  math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
+  u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
+  u64 m_idle_frame = 0;        // the last idle fill job
+  // Jak: camera space (stream_note_target, its frame), then world (stream_note_camera)
+  float m_target_cam[3] = {0, 0, 0}, m_target[3] = {0, 0, 0};
+  u64 m_target_cam_frame = 0, m_target_frame = 0;
   u64 m_cam_frame = 0;
   bool m_cam_valid = false;
   // scheduling (kept to avoid allocations)
@@ -614,7 +635,7 @@ class CtrLevels {
     u32 unit;
     float score;
   };
-  std::vector<StreamCand> m_want, m_have;
+  std::vector<StreamCand> m_want, m_have, m_idle;
   StreamCheck m_scheck;
   struct StreamStats {
     u64 frames = 0, jobs = 0, units = 0, bytes = 0, read_bytes = 0, reads = 0, evictions = 0;
@@ -629,6 +650,11 @@ class CtrLevels {
     u64 packed = 0;  // the file bytes of the units read (their blocks)
     u64 late_loading = 0, late_absent = 0;
     u64 late_unwanted = 0;  // late, never wanted before (the need not foreseen)
+    // late times split: starting within 2 s of a camera cut, or not (speed, bandwidth, room)
+    u64 late_cut = 0, late_other = 0;
+    double late_cut_ms = 0, late_other_ms = 0, late_cut_max = 0, late_other_max = 0;
+    u64 held_group_frames = 0, held_frames = 0, last_held_frame = 0;  // far kept in view
+    u64 idle_jobs = 0, idle_units = 0;
     u64 late_wanted_frames = 0;  // late after being wanted: the frames between
     u64 preloads = 0, preload_misses = 0;
     u64 late_group_frames = 0, late_frames = 0, last_late_frame = 0;
