@@ -790,7 +790,34 @@ int main(int argc, char** argv) {
   const auto nat = triangles(g_draws);
   const bool tex_same = ref_tex == g_tex;
 
-  int errors = compare(ref, nat, 0) + compare(ref, nat, 1) + transition_errors;
+  // (AI-assisted) the native draws' bytes (vertices, indices) to a file / against an earlier
+  // version's file: a change that must not change them (OCEAN_DRAWS_OUT, OCEAN_DRAWS_REF)
+  int draws_errors = 0;
+  {
+    std::vector<u8> bytes;
+    auto put = [&](const void* p, size_t n) {
+      bytes.insert(bytes.end(), (const u8*)p, (const u8*)p + n);
+    };
+    for (const auto& d : g_draws) {
+      const u32 head[4] = {d.clip, (u32)d.bucket, (u32)d.v.size(), (u32)d.idx.size()};
+      put(head, sizeof(head));
+      put(d.v.data(), d.v.size() * sizeof(d.v[0]));
+      put(d.idx.data(), d.idx.size() * sizeof(d.idx[0]));
+    }
+    if (const char* out = getenv("OCEAN_DRAWS_OUT")) {
+      FILE* f = fopen(out, "wb");
+      fwrite(bytes.data(), 1, bytes.size(), f);
+      fclose(f);
+    }
+    if (const char* in = getenv("OCEAN_DRAWS_REF")) {
+      std::ifstream f(in, std::ios::binary);
+      std::vector<u8> old((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+      draws_errors = old != bytes;
+      printf("native draws vs %s: %zu vs %zu bytes, %s\n", in, old.size(), bytes.size(),
+             draws_errors ? "DIFFERENT" : "the same");
+    }
+  }
+  int errors = compare(ref, nat, 0) + compare(ref, nat, 1) + transition_errors + draws_errors;
   printf("wave texture: %s\n", tex_same ? "same" : "DIFFERENT");
   errors += !tex_same;
   // the wave texture (64 x 64 RGBA8, as uploaded) to a file / against an earlier version's file
