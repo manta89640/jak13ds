@@ -3373,10 +3373,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // planes (run_culling) has its runs tested against those planes on their own
       u32 cross = 0;  // planes the chunk's sphere crosses
       {
+        // (AI-assisted, micro-level) lane by lane, the operations of planes[0] * s[0] + planes[1] *
+        // s[1] + planes[2] * s[2] - planes[3] in their order (each product rounded, as the vector
+        // temporaries had it; separate statements: no fused multiply-add on hosts that have one)
+        // without the math::Vector4f temporaries (copied through the stack lane by lane)
         const float* s = ch.bsphere;
-        const math::Vector4f acc =
-            cam.planes[0] * s[0] + cam.planes[1] * s[1] + cam.planes[2] * s[2] - cam.planes[3];
-        if (!(acc.x() > -s[3] && acc.y() > -s[3] && acc.z() > -s[3] && acc.w() > -s[3])) {
+        float acc[4];
+        for (int i = 0; i < 4; i++) {
+          float a = cam.planes[0][i] * s[0];
+          float b = cam.planes[1][i] * s[1];
+          a = a + b;
+          b = cam.planes[2][i] * s[2];
+          a = a + b;
+          acc[i] = a - cam.planes[3][i];
+        }
+        if (!(acc[0] > -s[3] && acc[1] > -s[3] && acc[2] > -s[3] && acc[3] > -s[3])) {
           return;
         }
         if (run_culling && lev.chunk_run_count[ci]) {
