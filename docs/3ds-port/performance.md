@@ -749,3 +749,62 @@ draw_level (the plane test's s16 -> float conversions; a float copy of the run s
 (make_clip + ctr_gpu_prepare_mesh_matrix, ~400 instructions per visible chunk). The time of day
 recolor (0.8-8.7 ms in these views, most of it full blends nearly every frame in village3,
 sunken and misty) is tod-fix's.
+
+## Game thread micro-optimisations (AI-assisted, Oct 17, micro-logic)
+
+Round 2 on the game thread's logic (GOAL code, the natives it calls), measured in Azahar over the
+five checkpoints with the worst logic time of fps60_sweep.pad (`cp5.pad`: `continue` +
+target-stance + 180 frames, then 900 frames walking, fps_cap = 60, stats_period = 5, sections
+off): the game thread's "logic" ms per frame, mean of the full 5 s windows. Run-to-run noise is
+~0.1-0.4 ms (misty-silo moves most). A gdb-stub pc sampler on the private emulator
+(thread 10) and the perf sections (perf_sections = on, which add ~3-5 ms of their own) chose the
+targets: the far ocean's render-ocean-quad (~1.5 ms), the collide cache mesh fill (method 27,
+0.5-1.5 ms), ripple-apply-wave-table (0.6 ms jungle, 1.3 ms robocave) and the C backend's
+128-bit integer helpers.
+
+| change | jungle-start | misty-silo | village2-dock | swamp-start | robocave-start |
+|---|---|---|---|---|---|
+| before (2754bb2a6c) | 11.77 | 12.91 | 13.77 | 14.20 | 14.19 |
+| render-ocean-quad: no clip passes for quads inside all planes, scratchpad stored once | 11.26 | 12.46 | 13.30 | 13.66 | 14.23 |
+| collide cache mesh fill: an outcode per vertex, triangle rejected by AND of 3 | 11.10 | 11.90 | 13.11 | 13.29 | 13.82 |
+| native ripple-apply-wave-table (no ExecutionContext) | 10.72 | 11.53 | 13.07 | 13.29 | 12.82 |
+| goal_c_ops.h: 128-bit integer ops lane by lane in registers | 10.37 | 11.45 | 12.67 | 12.97 | 12.48 |
+
+In total 1.4-1.7 ms of logic per frame (-10 to -12%). The first three are behind config.ini
+`logic_micro` (default on, preset safe off; host `OPENGOAL_LOGIC_MICRO=0`). The header change is
+compiled into the game code and has no switch.
+
+- **render-ocean-quad** (~140 quads per frame): about half are inside all four clip planes, where
+  every clip pass returns its input; those skip the passes and both scratchpad buffers get the
+  copies the passes would have stored. Clipped quads store each pass's vertices once at the end.
+- **Mesh fill** (methods 26 / 27 of collide-cache): each vertex gets a 6-bit outcode (above bmax /
+  below bmin per axis) the first time a triangle uses it; a triangle's box misses the query box
+  exactly when the AND of its three outcodes isn't 0, the min / max test it replaces.
+- **ripple-apply-wave-table**: plain byte loads and stores; GOAL calls it directly
+  (MIPS2C_NATIVE_IMPL_GOAL).
+- **goal_c_ops.h**: pcpyld / pcpyud / pextlw / pextuw are lane moves; pcgtw, pceqw, psubw, por,
+  pxor, pand and the word shifts work on each lane's bits (gc_fbits / gc_bitsf are VFP-core
+  register moves); pshuflw / pshufhw / psrldq / pslldq / pextlb / pextlh build the words from
+  halfwords and shifted words, with the constant controls folded. Before, each went through a
+  gc_m128 union in memory and 4-16 iteration byte loops. sphere-in-view-frustum? (the ppach-style
+  pcgtw, pshuflw, pshufhw, psrldq, pcpyld sequence, called for every drawable) went from 167 to 77
+  ARM instructions; the 154 modules that use these ops lost 11,296 instructions (1.4%). The byte
+  compares, packuswb, paddb and halfword shifts (rare in Jak 1) still use the union versions.
+  Header only: the generated C and the module hashes don't change, so no goalc regeneration; the
+  3DS build recompiles the csrc objects through their dependency files. Host `cmod/*.so` caches
+  are keyed by the source hash and keep the old header's code until `out/jak1/cmod` is emptied
+  (same results either way).
+
+**Identity.** The natives: OPENGOAL_MIPS2C_VERIFY=1 host runs over cp5.pad, every call against the
+mips2c version (memory written and v0, the scratchpad included): render-ocean-quad 582,778 calls,
+methods 26 / 27 126,593 / 128,280 calls, ripple-apply-wave-table 4,774 calls, 0 mismatches. The
+header: `test/goal_c_ops/lanes.c` compares every changed op with its union version bit for bit,
+2M random cases with NaN, infinity, sign, 0 and -1 lane patterns plus every shift amount (0-63)
+and shuffle control (0-255), 43.66M checks: 0 mismatches with clang (arm64 and x86-64, -O0 and
+-O2) and with devkitARM -O2 (the 3DS flags) run under Unicorn (ARM1176, FPSCR 0x03000000); then a
+verify run with all host modules rebuilt with the new header (3.63M native calls, 0 mismatches,
+the same positions at every checkpoint).
+
+**Still there**: camera-slave (1.6-3.9 ms with sections on), the joint math and bones, the
+collide cache's other methods (32: frag uploads), sp-process-block-2d / sp-launch-particles-var
+in village2 and swamp.
