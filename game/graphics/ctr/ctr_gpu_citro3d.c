@@ -1083,9 +1083,10 @@ enum {
   MICRO_FLUSHMERGE = 64, /* cache flush requests of near ranges merged */
   /* (AI-assisted, micro-mg) round 2 */
   MICRO_RAWGLOW = 128, /* the glows (procedural texture) as raw draws, not through citro3d */
-  MICRO_TEXSTATE = 256 /* a raw draw state that differs only in its texture: only the bind */
+  MICRO_TEXSTATE = 256, /* a raw draw state that differs only in its texture: only the bind */
+  MICRO_FLUSHGAP = 512  /* deferred flush ranges up to DEFER_GAP2 apart in one request */
 };
-#define MICRO_ALL 511u
+#define MICRO_ALL 1023u
 static u32 s_micro = MICRO_ALL;
 static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
 static int s_micro_ident;    /* gpu_micro_ident */
@@ -2816,6 +2817,13 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
  * go to the GPU (flush_vbuf, at every submission point), merged where the ranges touch. */
 #define DEFER_FLUSH_MAX 48
 #define DEFER_GAP (8u * 1024u) /* (AI-assisted, micro-gpu) see flush_vbuf */
+/* (AI-assisted, micro-mg) with MICRO_FLUSHGAP. Azahar charges ~16.7k ticks (62 us) of the render
+ * thread for each GSP flush request (an IPC; tens of microseconds on hardware too), and the level's
+ * time of day colors alone flushed 20-35 ranges per frame (Snowy, Misty). Cleaning the cache lines
+ * of a 64 KB gap is 2048 line operations: less than one request even if the kernel cleans line by
+ * line (if it cleans the whole cache above a size, as citro3d's whole linear heap flush per frame
+ * relies on, merging costs nothing). */
+#define DEFER_GAP2 (64u * 1024u)
 extern u32 __ctru_linear_heap, __ctru_linear_heap_size; /* libctru */
 static struct {
   u32 start[DEFER_FLUSH_MAX], end[DEFER_FLUSH_MAX];
@@ -2841,6 +2849,19 @@ static void cache_flush_frame(const void* addr, u32 size) {
     }
   }
   if (s_defer.n == DEFER_FLUSH_MAX) {
+    /* (AI-assisted, micro-mg) MICRO_FLUSHGAP: into a range of the linear heap less than DEFER_GAP2
+     * away, rather than a request of its own now */
+    const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
+    if ((s_micro & MICRO_FLUSHGAP) && a >= lin0 && e <= lin1) {
+      for (int i = 0; i < s_defer.n; i++) {
+        if (s_defer.start[i] >= lin0 && s_defer.end[i] <= lin1 && a <= s_defer.end[i] + DEFER_GAP2 &&
+            e + DEFER_GAP2 >= s_defer.start[i]) {
+          s_defer.start[i] = a < s_defer.start[i] ? a : s_defer.start[i];
+          s_defer.end[i] = e > s_defer.end[i] ? e : s_defer.end[i];
+          return;
+        }
+      }
+    }
     cache_flush_now(addr, size);
     return;
   }
@@ -2870,10 +2891,11 @@ static void flush_vbuf(void) {
       s_defer.end[j + 1] = e;
     }
     const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
+    const u32 gap = (s_micro & MICRO_FLUSHGAP) ? DEFER_GAP2 : DEFER_GAP;
     int k = 0;
     for (int i = 1; i < s_defer.n; i++) {
       const u32 a = s_defer.start[i], e = s_defer.end[i];
-      if (a <= s_defer.end[k] + DEFER_GAP && s_defer.start[k] >= lin0 && e <= lin1 && a >= lin0) {
+      if (a <= s_defer.end[k] + gap && s_defer.start[k] >= lin0 && e <= lin1 && a >= lin0) {
         s_defer.end[k] = e > s_defer.end[k] ? e : s_defer.end[k];
       } else {
         k++;
@@ -7399,6 +7421,13 @@ void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
   }
   *vertex_count = (int)(g.meshes[mesh].fill_vbytes / 16u);
   return g.meshes[mesh].verts;
+}
+
+void ctr_gpu_flush_range(const void* addr, unsigned int size) {
+  if (!g.ready || !addr || !size) {
+    return;
+  }
+  cache_flush_frame(addr, (u32)size);
 }
 
 void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
