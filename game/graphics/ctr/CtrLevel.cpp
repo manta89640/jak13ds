@@ -2706,11 +2706,26 @@ struct RunLoopOut {
   u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
   u64 fine_tris = 0, lod_tris[2] = {0, 0};
 };
-template <bool VIS, bool STR, bool LOD>
+// (AI-assisted, micro-level) NP: the number of crossed planes (0: the chunk crosses none, no view
+// test), their coefficients in locals (registers: the stores don't make them be loaded again)
+template <bool VIS, int NP, bool LOD>
 void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
+  constexpr bool STR = NP > 0;
+  constexpr int kP = NP > 0 ? NP : 1;
+  float po[kP], pk0[kP], pk1[kP], pk2[kP];
+  for (int i = 0; i < NP; i++) {
+    po[i] = in.po[i];
+    pk0[i] = in.pk[i][0];
+    pk1[i] = in.pk[i][1];
+    pk2[i] = in.pk[i][2];
+  }
+  const float scale = in.scale;
   u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
   u64 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
   const c3l::VisRun* const runs = in.runs;
+  const CtrLevelData::RunSphere* const spheres = in.spheres;
+  const c3l::RunLod* const run_lod = in.run_lod;
+  const u8* const lod_state = in.lod_state;
   const u8* const vis = in.vis;
   u8* const shown_out = in.shown_out;
   u8* const nomerge_out = in.nomerge_out;
@@ -2730,9 +2745,9 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     // with its neighbours (draw: both versions would be on top of each other)
     u8 nomerge = 0, lod_version = 0;
     if (LOD) {
-      const auto& rl = in.run_lod[r];
+      const auto& rl = run_lod[r];
       if (rl.lod != c3l::kRunLodAlways &&
-          (rl.lod == c3l::kRunLodNear) != (bool)(in.lod_state[rl.group] & 1)) {
+          (rl.lod == c3l::kRunLodNear) != (bool)(lod_state[rl.group] & 1)) {
         nomerge = 1;
         if (s) {
           s = false;
@@ -2744,11 +2759,11 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     }
     nomerge_out[r] = nomerge;
     if (STR && s) {
-      const auto& rs = in.spheres[r];
+      const auto& rs = spheres[r];
       if (rs.r != 0xffff) {
-        const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * in.scale;
-        for (int i = 0; i < in.np; i++) {
-          if (!(in.po[i] + in.pk[i][0] * x + in.pk[i][1] * y + in.pk[i][2] * z > rad)) {
+        const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
+        for (int i = 0; i < NP; i++) {
+          if (!(po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z > rad)) {
             s = false;
             break;
           }
@@ -2786,6 +2801,19 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   out->lod_tris[0] = lod_tris1;
   out->lod_tris[1] = lod_tris2;
 }
+using RunLoopFn = void (*)(const RunLoopIn&, u32, u32, RunLoopOut*);
+// [VIS][NP][LOD]
+constexpr RunLoopFn kRunLoops[2][5][2] = {
+    {{run_loop<false, 0, false>, run_loop<false, 0, true>},
+     {run_loop<false, 1, false>, run_loop<false, 1, true>},
+     {run_loop<false, 2, false>, run_loop<false, 2, true>},
+     {run_loop<false, 3, false>, run_loop<false, 3, true>},
+     {run_loop<false, 4, false>, run_loop<false, 4, true>}},
+    {{run_loop<true, 0, false>, run_loop<true, 0, true>},
+     {run_loop<true, 1, false>, run_loop<true, 1, true>},
+     {run_loop<true, 2, false>, run_loop<true, 2, true>},
+     {run_loop<true, 3, false>, run_loop<true, 3, true>},
+     {run_loop<true, 4, false>, run_loop<true, 4, true>}}};
 
 // (AI-assisted) host --ctr-gfx: env CTR_FINE_VIS_CHECK (ctr_level_fine_vis_check)
 bool fine_vis_check_enabled() {
@@ -3468,16 +3496,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         in.shown_out = m_run_shown.data();
         in.nomerge_out = m_run_nomerge.data();
         RunLoopOut o;
-        switch ((vis_test ? 1 : 0) | (straddles ? 2 : 0) | (lod_chunk ? 4 : 0)) {
-          case 0: run_loop<false, false, false>(in, r0, nr, &o); break;
-          case 1: run_loop<true, false, false>(in, r0, nr, &o); break;
-          case 2: run_loop<false, true, false>(in, r0, nr, &o); break;
-          case 3: run_loop<true, true, false>(in, r0, nr, &o); break;
-          case 4: run_loop<false, false, true>(in, r0, nr, &o); break;
-          case 5: run_loop<true, false, true>(in, r0, nr, &o); break;
-          case 6: run_loop<false, true, true>(in, r0, nr, &o); break;
-          default: run_loop<true, true, true>(in, r0, nr, &o); break;
-        }
+        kRunLoops[vis_test ? 1 : 0][straddles ? np : 0][lod_chunk ? 1 : 0](in, r0, nr, &o);
         shown = o.shown;
         view_hidden = o.view_hidden;
         view_tris = o.view_tris;
