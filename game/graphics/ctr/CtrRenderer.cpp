@@ -671,6 +671,14 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.vbuf_dropped += gs.vbuf_dropped;
   m_timing.frames++;
   if (ctr_settings().auto_detail) {
+#ifndef __3DS__
+    // (AI-assisted, title-popin) host test: env CTR_AUTO_DETAIL_MODEL gives auto_detail the GPU time
+    // of the hardware fit (busy ~ 10.6 ms + 0.13 ms per 1000 triangles) of this frame's triangles
+    static const bool model = getenv("CTR_AUTO_DETAIL_MODEL") != nullptr;
+    if (model) {
+      auto_detail_frame(10.6f + 0.13f * gs.triangles / 1000.f, 1, 0.0);
+    } else
+#endif
     auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1);
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
@@ -919,6 +927,10 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, doub
     m_auto.ups++;
   }
   t = std::clamp(t, 0.f, 1.f);
+  // (AI-assisted, title-popin) a GPU close to missing frames lowers the distances of what is on
+  // screen too (else those keep theirs until they are out of view; the build time's spikes, the
+  // time of day recolor, don't count here)
+  ctr_level_set_detail_urgent(avg > target + 3.0 || m_auto.busy_max > 33.0);
   if (t != m_auto.t) {
     m_auto.t = t;
     ctr_level_set_detail(t);

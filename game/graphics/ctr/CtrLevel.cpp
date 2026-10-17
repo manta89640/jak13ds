@@ -15,7 +15,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <new>
+#include <tuple>
 
 #include "common/dma/dma.h"
 #include "common/dma/gs.h"
@@ -1246,6 +1248,7 @@ void load_tie_lod(c3l::Reader& f,
   lev->run_lod.clear();
   lev->chunk_lod.clear();
   lev->lod_state.clear();
+  lev->lod_error.clear();
   if (hdr.version < c3l::kTieLodVersion || !hdr.ext_offset) {
     return;
   }
@@ -1294,8 +1297,15 @@ void load_tie_lod(c3l::Reader& f,
     }
   }
   lev->lod_state.assign(lev->lod_groups.size(), 0);
-  lg::info("[ctr] {}: tie levels of detail: {} groups, {} near runs{}", lev->name,
-           lev->lod_groups.size(), near_runs, bad ? fmt::format(" ({} bad runs)", bad) : "");
+  // (AI-assisted, title-popin) the groups' shape errors: the switch by screen-space error
+  if (eh.lod_error_offset &&
+      !f.read_array(eh.lod_error_offset, eh.lod_group_count, &lev->lod_error)) {
+    lev->lod_error.clear();
+  }
+  lg::info("[ctr] {}: tie levels of detail: {} groups, {} near runs{}{}", lev->name,
+           lev->lod_groups.size(), near_runs, bad ? fmt::format(" ({} bad runs)", bad) : "",
+           lev->lod_error.empty() ? ", switched at the PS2 distances"
+                                  : ", switched by screen-space error");
 }
 
 // visibility runs (and run_culling's pieces) are made already. Anything wrong: no fine visibility.
@@ -2624,6 +2634,31 @@ bool outside_detail(const CtrLevelData& l, const float* s, float margin) {
 // (AI-assisted) auto_detail: how far between the near (0) and the far (1) shrub / tie distances
 // (render thread: set by CtrRenderer from the GPU time, read here)
 float g_detail_t = 0.25f;
+// (AI-assisted, title-popin) auto_detail: the GPU is about to miss frames (ctr_level_set_detail_urgent)
+bool g_detail_urgent = false;
+// (AI-assisted, title-popin) the auto_detail position as stored per chunk / tie LOD group
+// (CtrLevelData::chunk_detail_q): 0..kDetailQ, 0xff none yet
+constexpr float kDetailQ = 250.f;
+u8 detail_q(float t) {
+  return (u8)std::lround(std::clamp(t, 0.f, 1.f) * kDetailQ);
+}
+// (AI-assisted, title-popin) what is in view and moving away keeps its nearer version / stays drawn
+// up to this many times its distance (with the 10% hysteresis out of view): it goes when it is out
+// of view or small on screen, instead of where the camera happens to cross the distance. On the
+// title camera's flight (host, Oct 17) most switches of tie versions, tfrag tiers and distance
+// limits in view were of things moving away.
+constexpr float kHoldInView = 1.5f;
+// (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
+bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
+  for (int i = 0; i < 4; i++) {
+    const float a = cam.planes[0][i] * s[0] + cam.planes[1][i] * s[1] + cam.planes[2][i] * s[2] -
+                    cam.planes[3][i];
+    if (!(a > -s[3])) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // (AI-assisted) a chunk's draw distance limit (game units, 0: none): the converter's (small and
 // medium objects) times detail_scale. With chunk kinds (newer c3l files): shrubs up to
@@ -2948,6 +2983,10 @@ void ctr_level_fine_vis_check(u64 frame, bool log_now) {
 
 void ctr_level_set_detail(float t) {
   g_detail_t = std::clamp(t, 0.f, 1.f);
+}
+
+void ctr_level_set_detail_urgent(bool urgent) {
+  g_detail_urgent = urgent;
 }
 
 float ctr_level_detail() {
@@ -3339,18 +3378,62 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // versions only (as before v17).
   const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
   if (tie_lod) {
-    float k = settings.tie_lod ? settings.detail_scale : 0.f;
-    if (settings.auto_detail) {
-      k *= 0.5f + 0.5f * g_detail_t;
-    }
     const float cx = cam.trans[0], cy = cam.trans[1], cz = cam.trans[2];
     u32 near = 0;
+    // (AI-assisted, title-popin) files with shape errors: the near version while the far one's
+    // error would show as more than tie_lod_px pixels (focal: this frame's projection, pixels of
+    // the 400-wide top screen per unit of x / depth; make_cam_mat). The PS2 morphs geometry 2 into
+    // 3 up to the far-plane; switching there between 0 and 3 made pops of 3 px (median) to 19 px
+    // in village1, and auto_detail pulling the distances in made them larger. Older files: the
+    // PS2 distance, auto_detail pulling it in to half while the GPU is busy.
+    const bool by_error = lev.lod_error.size() == lev.lod_groups.size();
+    const float pzw = std::abs(cam.perspective[2][3]);
+    const float focal =
+        pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
+    // the distance factor at auto_detail position t: with shape errors tie_lod_px pixels (auto_detail
+    // doesn't move it: pulling the switch in made the pops larger); older files: the PS2 distance,
+    // pulled in to half while the GPU is busy
+    const float k0 = settings.tie_lod ? settings.detail_scale : 0.f;
+    const bool auto_detail = settings.auto_detail && !by_error;
+    const float px = std::max(settings.tie_lod_px, 0.25f);
+    auto k_at = [&](float t) {
+      if (by_error) {
+        return k0 * focal / px;
+      }
+      return auto_detail ? k0 * (0.5f + 0.5f * t) : k0;
+    };
+    const float k = k_at(g_detail_t);
+    const u8 q_now = detail_q(g_detail_t);
+    if (lev.lod_detail_q.size() != lev.lod_groups.size()) {
+      lev.lod_detail_q.assign(lev.lod_groups.size(), 0xff);
+    }
+    u8* const lod_q = lev.lod_detail_q.data();
     for (size_t g = 0; g < lev.lod_groups.size(); g++) {
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
       const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
-      const float lim = lg.dist * k * ((st & 1) ? 1.1f : 1.f) + lg.bsphere[3];
-      const bool n = k > 0 && dx * dx + dy * dy + dz * dz < lim * lim;
+      const float d2 = dx * dx + dy * dy + dz * dz;
+      const float sw = by_error ? lev.lod_error[g] : lg.dist;
+      const float f = (st & 1) ? 1.1f : 1.f;
+      auto near_at = [&](float kk) {
+        const float lim = sw * kk * f + lg.bsphere[3];
+        return kk > 0 && d2 < lim * lim;
+      };
+      bool n = near_at(k);
+      // (AI-assisted, title-popin) no switch in view because auto_detail moved: a group in view
+      // keeps the factor it was decided with while the two would choose differently (except a
+      // GPU about to miss frames, for the far version)
+      bool held = false;
+      if (auto_detail && (st & 2) && lod_q[g] != q_now && lod_q[g] != 0xff) {
+        const bool n_old = near_at(k_at(lod_q[g] / kDetailQ));
+        if (n_old != n && !(g_detail_urgent && !n) && sphere_in_view(cam, lg.bsphere)) {
+          n = n_old;
+          held = true;
+        }
+      }
+      if (!held) {
+        lod_q[g] = q_now;
+      }
       st = (u8)(2 | (n ? 1 : 0));
       near += n;
     }
@@ -3568,17 +3651,61 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // operations on them as before), and the arrays and the camera in locals: the u8 stores to the
   // chunk states had every member and vector loaded again after each of them
   const float det = settings.detail_scale;
-  float shrub_k = settings.shrub_scale;
-  float shrub_d = settings.shrub_distance;
-  float tie_k = settings.tie_distance_scale;
-  if (settings.auto_detail) {
-    shrub_k += (std::max(settings.shrub_scale_max, shrub_k) - shrub_k) * g_detail_t;
-    shrub_d += (std::max(settings.shrub_distance_max, shrub_d) - shrub_d) * g_detail_t;
-    tie_k += (std::max(settings.tie_distance_scale_max, tie_k) - tie_k) * g_detail_t;
-  }
+  // (AI-assisted, title-popin) the auto_detail factors at position t (t = g_detail_t: this frame's)
+  const bool auto_detail = settings.auto_detail;
+  const float shrub_k0 = settings.shrub_scale, shrub_d0 = settings.shrub_distance,
+              tie_k0 = settings.tie_distance_scale;
+  const float shrub_k_span = std::max(settings.shrub_scale_max, shrub_k0) - shrub_k0;
+  const float shrub_d_span = std::max(settings.shrub_distance_max, shrub_d0) - shrub_d0;
+  const float tie_k_span = std::max(settings.tie_distance_scale_max, tie_k0) - tie_k0;
+  const float t_now = auto_detail ? g_detail_t : 0.f;
+  const float shrub_k = shrub_k0 + shrub_k_span * t_now;
+  const float shrub_d = shrub_d0 + shrub_d_span * t_now;
+  const float tie_k = tie_k0 + tie_k_span * t_now;
   const bool shrub_ps2 = lev.shrub_ps2_dist;
   const bool shrub_fixed = settings.shrub_distance > 0;
   const float shrub_fixed_dist = shrub_d * 4096.f * det;
+  // (AI-assisted, title-popin) a chunk's own distance limit (0: none) at auto_detail position t
+  auto chunk_limit = [&](const c3l::Chunk& ch, float t) {
+    if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
+      return ch.max_dist * (shrub_k0 + shrub_k_span * t) * det;
+    } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
+      return (shrub_d0 + shrub_d_span * t) * 4096.f * det;
+    } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
+      return ch.max_dist * (tie_k0 + tie_k_span * t) * det;
+    }
+    return ch.max_dist * det;
+  };
+  const u8 q_now = detail_q(g_detail_t);
+  if (lev.chunk_detail_q.size() != lev.chunks.size()) {
+    lev.chunk_detail_q.assign(lev.chunks.size(), 0xff);
+  }
+  u8* const chunk_q = lev.chunk_detail_q.data();
+  // (AI-assisted, title-popin) the cell spheres of tiers 1 / 2 (lod_cell_sphere), once per load
+  if (lev.lod_cell_sphere.size() != lev.chunks.size() * 4) {
+    lev.lod_cell_sphere.assign(lev.chunks.size() * 4, 0.f);
+    std::map<std::tuple<float, float, float>, float> radius;
+    for (const auto& ch : lev.chunks) {
+      if (ch.lod_tier == 1 || ch.lod_tier == 2) {
+        float d2 = 0;
+        for (int c = 0; c < 3; c++) {
+          d2 += (ch.bsphere[c] - ch.lod_center[c]) * (ch.bsphere[c] - ch.lod_center[c]);
+        }
+        float& r = radius[{ch.lod_center[0], ch.lod_center[1], ch.lod_center[2]}];
+        r = std::max(r, std::sqrt(d2) + ch.bsphere[3]);
+      }
+    }
+    for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+      const auto& ch = lev.chunks[ci];
+      if (ch.lod_tier == 1 || ch.lod_tier == 2) {
+        float* cs = &lev.lod_cell_sphere[ci * 4];
+        cs[0] = ch.lod_center[0];
+        cs[1] = ch.lod_center[1];
+        cs[2] = ch.lod_center[2];
+        cs[3] = radius[{ch.lod_center[0], ch.lod_center[1], ch.lod_center[2]}];
+      }
+    }
+  }
   const c3l::Chunk* const chunks = lev.chunks.data();
   u8* const chunk_state = lev.chunk_state.data();
   const int* const meshes = lev.meshes.data();
@@ -3602,7 +3729,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const float dx = ch.lod_center[0] - cx, dy = ch.lod_center[1] - cy,
                   dz = ch.lod_center[2] - cz;
       const float lim = lod_dist * f;
-      const bool near = lod_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim;
+      const float d2 = dx * dx + dy * dy + dz * dz;
+      bool near = lod_dist <= 0 || d2 < lim * lim;
+      // (AI-assisted, title-popin) a cell in view moving away keeps its detailed version up to
+      // kHoldInView x lod_distance (both versions test the same cell sphere: one is drawn)
+      if (!near && last == 1 && sphere_in_view(cam, &lev.lod_cell_sphere[ci * 4])) {
+        const float hl = lod_dist * kHoldInView;
+        near = d2 < hl * hl;
+      }
       state = (u8)((state & ~3) | (near ? 1 : 2));
       lod_ok = near == (ch.lod_tier == 1);
     }
@@ -3611,7 +3745,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const bool vista_chunk = lowres_vista && ch.lod_tier == 3;
     {
       // draw distance; small objects only up close
-      float max_dist = vista_chunk ? vista_dist : draw_dist;
+      const float base_dist = vista_chunk ? vista_dist : draw_dist;
+      float max_dist = base_dist;
       float d;
       if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
         d = ch.max_dist * shrub_k * det;  // (AI-assisted) c3l v14: the shrubs' PS2 distance
@@ -3622,13 +3757,53 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       } else {
         d = ch.max_dist * det;
       }
-      if (d > 0) {
-        max_dist = max_dist > 0 ? std::min(max_dist, d) : d;
-      }
+      // (AI-assisted, title-popin) the limit with own distance d (the draw distance's fog hides
+      // what goes at base_dist: not held)
+      auto limit_with = [&](float dd) {
+        return dd > 0 ? (base_dist > 0 ? std::min(base_dist, dd) : dd) : base_dist;
+      };
+      max_dist = limit_with(d);
       if (max_dist > 0) {
         const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
-        const float lim = max_dist * ((state & 4) ? 1.1f : 1.f) + ch.bsphere[3];
-        dist_ok = dx * dx + dy * dy + dz * dz <= lim * lim;
+        const float d2 = dx * dx + dy * dy + dz * dz;
+        const bool was_in = state & 4;
+        auto within = [&](float m, float f) {
+          const float lim = m * f + ch.bsphere[3];
+          return d2 <= lim * lim;
+        };
+        const float f = was_in ? 1.1f : 1.f;
+        dist_ok = within(max_dist, f);
+        // (AI-assisted, title-popin) no chunk in view appears or goes because auto_detail moved:
+        // it keeps the distances it was decided with while they decide otherwise (except a GPU
+        // about to miss frames, for going)
+        int in_view = -1;
+        float dd = d;
+        const u8 cq = chunk_q[ci];
+        if (auto_detail && cq != q_now && cq != 0xff && d > 0 &&
+            (ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE)) {
+          const float d_old = chunk_limit(ch, cq / kDetailQ);
+          const bool ok_old = within(limit_with(d_old), f);
+          if (ok_old != dist_ok && !(g_detail_urgent && !dist_ok)) {
+            in_view = sphere_in_view(cam, ch.bsphere);
+            if (in_view) {
+              dist_ok = ok_old;
+              dd = d_old;
+            }
+          }
+        }
+        if (dd == d) {
+          chunk_q[ci] = q_now;
+        }
+        // (AI-assisted, title-popin) in view and moving away: drawn up to kHoldInView x its own
+        // distance (not beyond the draw distance)
+        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist)) {
+          if (in_view < 0) {
+            in_view = sphere_in_view(cam, ch.bsphere);
+          }
+          if (in_view) {
+            dist_ok = within(limit_with(dd * kHoldInView), 1.f);
+          }
+        }
         state = (u8)(dist_ok ? (state | 4) : (state & ~4));
       }
     }

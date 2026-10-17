@@ -808,3 +808,25 @@ the same positions at every checkpoint).
 **Still there**: camera-slave (1.6-3.9 ms with sections on), the joint math and bones, the
 collide cache's other methods (32: frag uploads), sp-process-block-2d / sp-launch-particles-var
 in village2 and swamp.
+
+## Title pop-in (AI-assisted, Oct 17, title-popin)
+
+The user saw "pretty bad pop in" on the title (the attract camera over Sandover, the day ~20x
+faster). Host `--ctr-gfx` frames of the flight (1450 frames, each frame dumped) with a per-frame log
+of every distance / LOD decision that flipped for something in view, and auto_detail fed the
+hardware GPU fit of each frame's triangles (`CTR_AUTO_DETAIL_MODEL=1`, host only):
+
+| cause | before | after |
+|---|---|---|
+| tie LOD switches (geometry 3 <-> 0) in view | 109, up to 19.7 px of shape change (palms, huts) | 77, at most 4.0 px (`tie_lod_px`) |
+| tie / shrub distance limits in view | 23 | 13 (the rest: things the camera comes nearer to) |
+| tfrag detailed / coarse tier switch in view | 1 (a cliff changed shape) | 0 |
+| sky texture steps (blended every 4th frame) | visible in Azahar every 4th frame | blended when the weights move (0.31-0.34 ms/frame render thread in Azahar with the title's fast day) |
+
+Azahar (private instance, the user's short config, screenshots every frame): frame-to-frame step
+blocks (8x8 px blocks that change in one frame and stay) 5290 -> 741, events of 20+ blocks 23 -> 2.
+Triangles (host): title p95 136k -> 147k (+1.4 ms by the fit; auto_detail then shortens tie and
+shrub distances off screen), village1 hut p95 88k -> 91k, Snowy fort p95 121k -> 111k (noise: the
+distances moved), Snowy start 115k -> 114k. What is left: tie / shrub chunks the camera comes
+nearer to (the PS2 fades shrubs; ties have no limit there), the time of day vertex colors stepping
+(tod-fix), and on the host only, the sky drawn as hard-edged panels.
