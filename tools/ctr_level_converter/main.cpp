@@ -57,6 +57,18 @@ struct Options {
   float tie_lod_view_m = 15.f;
   // the switch distance of groups without a PS2 distance (wind instances), meters
   float tie_lod_default_m = 60.f;
+  // (AI-assisted, streaming) v19: every candidate group gets its near version, in near chunks of
+  // stream_cell meters (c3l::StreamChunk) that the runtime streams in around the camera; the level's
+  // v18 budget (kTieLodBudgets) only marks which groups a runtime without streaming loads (cls 1).
+  // Off: v18 files (the near versions in the far versions' chunks, within the budget)
+  bool stream = true;
+  float stream_cell = 100.f;
+  // (AI-assisted, streaming) near chunks by need class too: a group's near version is needed within
+  // error x kStreamNeedK + radius of its center; the groups of one class (bounds in meters) in near
+  // chunks of their own, of the class's cell size (stream_class_cells; else stream_cell), so a chunk
+  // isn't needed from far away for one large group in it
+  std::vector<float> stream_classes = {30.f, 60.f, 120.f, 240.f};
+  std::vector<float> stream_class_cells = {50.f, 50.f, 100.f, 100.f, 200.f};
   int palette = -1;   // time of day palette to bake (0..7; -1: auto_palette)
   // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
   // runtime blends the palettes with the game's weights (off: the baked palette only)
@@ -236,6 +248,9 @@ struct SrcTri {
   // lod_group (Converter::lod_groups), or kRunLodAlways
   u8 lod = 0;
   u32 lod_group = UINT32_MAX;
+  // (AI-assisted, streaming) v19: a near version in a near chunk: c3l::kStreamCore (a group the
+  // budget took) or kStreamExtra; 0: an ordinary chunk's
+  u8 stream = 0;
 };
 
 struct DrawKey {
@@ -845,6 +860,8 @@ struct Converter {
   std::vector<c3l::TieLodGroup> lod_groups;
   std::vector<u32> lod_group_detail;
   std::vector<float> lod_group_error;  // (AI-assisted, title-popin) shape error per group
+  // (AI-assisted, streaming) v19: per group, whether the level's v18 budget took it
+  std::vector<u8> lod_group_core;
   // the tree being added (add_tie_tree): its index in the level's tree list, and which version:
   // -1 without levels of detail (every group, as before v17), 0 the near geometry (only the
   // selected groups), 1 the far geometry (every group; the selected ones as their far version)
@@ -863,10 +880,15 @@ struct Converter {
       return;
     }
     const u32 detail = lod_group_detail[it->second];
+    // (AI-assisted, streaming) v19: the near versions go to near chunks
+    const u8 stream = cur_lod_slot == 0 && opt.stream
+                          ? (lod_group_core[it->second] ? (u8)c3l::kStreamCore : (u8)c3l::kStreamExtra)
+                          : (u8)0;
     for (size_t i = first; i < tris.size(); i++) {
       tris[i].lod = cur_lod_slot == 0 ? c3l::kRunLodNear : c3l::kRunLodFar;
       tris[i].lod_group = it->second;
       tris[i].detail = detail;
+      tris[i].stream = stream;
     }
     small_tris += detail ? tris.size() - first : 0;
     lod_tris[cur_lod_slot] += tris.size() - first;
@@ -2478,6 +2500,7 @@ constexpr TieLodBudget kTieLodBudgets[] = {
 // (AI-assisted) v17 tie levels of detail: statistics for the log
 struct TieLodStats {
   size_t groups = 0, candidates = 0, selected = 0, no_dist = 0;
+  size_t core = 0;  // (AI-assisted, streaming) selected groups the budget took
   size_t near_tris = 0, far_tris = 0;          // all groups: near / far geometry
   size_t sel_near_tris = 0, sel_far_tris = 0;  // the selected groups
   double cost_kb = 0, cost_all_kb = 0;         // estimated extra vertex + index data
@@ -2592,15 +2615,18 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
   st->budget_kb = budget_kb;
   const u64 budget = (u64)(budget_kb * 1024.0);
   u64 used = 0;
-  std::vector<u8> picked(list.size(), 0);
+  std::vector<u8> picked(list.size(), 0), core(list.size(), 0);
   for (const auto& c : cands) {
     if (used + c.cost <= budget) {
       used += c.cost;
       picked[c.i] = 1;
+      core[c.i] = 1;
     } else {
       auto& pr = st->protos[names[c.i]];
       pr.left_tris += list[c.i].second->tris[0].size();
       pr.worst_left = std::max(pr.worst_left, err[c.i] / 4096.f);
+      // (AI-assisted, streaming) v19: every candidate; the budget's are the core set
+      picked[c.i] = opt.stream ? 1 : 0;
     }
   }
   st->cost_kb = used / 1024.0;
@@ -2617,6 +2643,8 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
     }
     lg.dist = dists[i];
     cv->lod_group_error.push_back(err[i]);
+    cv->lod_group_core.push_back(core[i]);  // (AI-assisted, streaming)
+    st->core += core[i];
     cv->lod_group_of[list[i].first] = (u32)cv->lod_groups.size();
     cv->lod_groups.push_back(lg);
     cv->lod_group_detail.push_back(bs[3] < opt.detail_radius * 4096.f   ? 1
@@ -2634,11 +2662,28 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
     cv->lod_groups.resize(0xfffe);
     cv->lod_group_detail.resize(0xfffe);
     cv->lod_group_error.resize(0xfffe);
+    cv->lod_group_core.resize(0xfffe);
     for (auto it = cv->lod_group_of.begin(); it != cv->lod_group_of.end();) {
       it = it->second >= 0xfffe ? cv->lod_group_of.erase(it) : std::next(it);
     }
   }
   st->ms = timer.getMs();
+}
+
+// (AI-assisted, streaming) a group's near version is needed within this many x its shape error (+
+// its radius) of its center: gameplay's focal length 256 / tie_lod_px 4, x 1.1 (the hysteresis)
+constexpr float kStreamNeedK = 256.f / 4.f * 1.1f;
+int stream_need_class(const Converter& cv, const Options& opt, u32 g) {
+  const float e = g < cv.lod_group_error.size() ? cv.lod_group_error[g] : cv.lod_groups[g].dist;
+  const float m = (e * kStreamNeedK + cv.lod_groups[g].bsphere[3]) / 4096.f;
+  int c = 0;
+  while (c < (int)opt.stream_classes.size() && m >= opt.stream_classes[c]) {
+    c++;
+  }
+  return c;
+}
+float stream_class_cell(const Options& opt, int nc) {
+  return nc < (int)opt.stream_class_cells.size() ? opt.stream_class_cells[nc] : opt.stream_cell;
 }
 
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
@@ -2811,9 +2856,17 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         cz += cv.verts[t.v[k]].z;
       }
     }
-    const float cell = cell_of_detail((int)t.detail);
-    // (AI-assisted) detail + 4 * tier + 64 * shrub distance class
-    auto key = std::make_tuple((int)(t.detail + 4 * t.tier + 64 * t.sclass),
+    // (AI-assisted, streaming) v19 near versions: near chunks of stream_cell meters (or their need
+    // class's cell size)
+    int nc = 0;
+    if (t.stream && t.lod_group < cv.lod_groups.size()) {
+      nc = stream_need_class(cv, opt, t.lod_group);
+    }
+    const float cell = t.stream ? stream_class_cell(opt, nc) * 4096.f : cell_of_detail((int)t.detail);
+    // (AI-assisted) detail + 4 * tier + 64 * shrub distance class (+ 1024 * (stream class + 3 *
+    // need class): the near chunks after the others)
+    auto key = std::make_tuple(
+        (int)(t.detail + 4 * t.tier + 64 * t.sclass + (t.stream ? 1024 * (t.stream + 3 * nc) : 0)),
                                (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell),
                                (int)(cv.draw_keys[t.draw_key].kind & 0xff));
@@ -2889,6 +2942,42 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   };
   make_plans(cells);
+  // (AI-assisted, streaming) v19: the near chunks (the last of these plans: their keys sort last) in
+  // spatial order, so that the ones the runtime reads together lie together in the file: by the
+  // Morton order of their cells (x, z), then height, then key
+  size_t first_stream_plan = plans.size();
+  for (size_t pi = 0; pi < plans.size(); pi++) {
+    if (std::get<0>(plans[pi].key) >= 1024) {
+      first_stream_plan = pi;
+      break;
+    }
+  }
+  {
+    int mx = INT32_MAX, mz = INT32_MAX;
+    for (size_t pi = first_stream_plan; pi < plans.size(); pi++) {
+      mx = std::min(mx, std::get<1>(plans[pi].key));
+      mz = std::min(mz, std::get<3>(plans[pi].key));
+    }
+    auto morton = [&](const CellKey& k) {
+      const u32 x = (u32)(std::get<1>(k) - mx) & 0xffff, z = (u32)(std::get<3>(k) - mz) & 0xffff;
+      u64 m = 0;
+      for (int b = 0; b < 16; b++) {
+        m |= (u64)((x >> b) & 1) << (2 * b) | (u64)((z >> b) & 1) << (2 * b + 1);
+      }
+      return m;
+    };
+    std::stable_sort(plans.begin() + first_stream_plan, plans.end(),
+                     [&](const ChunkPlan& a, const ChunkPlan& b) {
+                       const u64 ma = morton(a.key), mb = morton(b.key);
+                       if (ma != mb) {
+                         return ma < mb;
+                       }
+                       if (std::get<2>(a.key) != std::get<2>(b.key)) {
+                         return std::get<2>(a.key) < std::get<2>(b.key);
+                       }
+                       return a.key < b.key;
+                     });
+  }
   // (AI-assisted) the vista tier (Options::vista): copies of the far content, in large cells
   const size_t normal_plans = plans.size();
   size_t vista_src_tris = 0, vista_tris = 0, vista_flat_tris = 0;
@@ -2933,7 +3022,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       const int tier = std::get<0>(cp.key) / 4 % 16, detail = std::get<0>(cp.key) % 4;
       const int kind = std::get<4>(cp.key);  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
       const bool lowres = tier == 3;
-      const bool landmark = tier == 0 && kind == 1 && detail == 0;
+      // (AI-assisted, streaming) not the near chunks (near versions only)
+      const bool landmark = tier == 0 && kind == 1 && detail == 0 && std::get<0>(cp.key) < 1024;
       const bool coarse = tier == 2 && kind == 0 && !has_lowres;
       if (!lowres && !landmark && !coarse) {
         continue;
@@ -3215,6 +3305,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::RunLod> out_run_lods;  // (AI-assisted) v17: one per out_runs
   size_t lod_runs = 0, lod_chunks = 0;
   std::vector<u32> chunk_first_run;
+  std::vector<u8> chunk_stream_cls;  // (AI-assisted, streaming) v19: per chunk, 0 or its class
   size_t vis_tris = 0;
   VcacheStats vc_before, vc_after;
   // (AI-assisted) v18 (Options::vis_vertex_groups): the chunk's vertices by visibility id of its
@@ -3346,9 +3437,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
       ch.lod_tier = std::get<0>(key) / 4 % 16;
-      const int sclass = std::get<0>(key) / 64;  // (AI-assisted)
-      const float cell =
-          ch.lod_tier == c3l::kVistaTier ? opt.vista_cell * 4096.f : cell_of_detail(detail);
+      const int sclass = std::get<0>(key) / 64 % 16;  // (AI-assisted)
+      // (AI-assisted, streaming) v19 near chunk: its class (core / extra), need class
+      const int stream_cls = std::get<0>(key) / 1024 % 3;
+      const int need_cls = std::get<0>(key) / 1024 / 3;
+      const float cell = ch.lod_tier == c3l::kVistaTier ? opt.vista_cell * 4096.f
+                         : stream_cls ? stream_class_cell(opt, need_cls) * 4096.f
+                                      : cell_of_detail(detail);
       ch.lod_center[0] = (std::get<1>(key) + 0.5f) * cell;
       ch.lod_center[1] = (std::get<2>(key) + 0.5f) * cell;
       ch.lod_center[2] = (std::get<3>(key) + 0.5f) * cell;
@@ -3617,7 +3712,168 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         lod_chunks += any_lod;
       }
       chunks.push_back(ch);
+      chunk_stream_cls.push_back((u8)stream_cls);
     }
+  }
+  // (AI-assisted, streaming) v19: what the runtime worked out from a chunk's vertices at load and
+  // can't for a near chunk that isn't there yet: each draw's kDrawAlpha80 (fog_alpha: every vertex
+  // the draw uses has alpha 0x80, as CtrLevels::load_file), each run's bounding sphere (as
+  // make_run_spheres), and the near chunk table (c3l::StreamChunk)
+  std::vector<c3l::RunSphere> run_spheres;
+  std::vector<c3l::StreamChunk> stream_chunks;
+  struct StreamStats {
+    size_t chunks[3] = {0, 0, 0};
+    u64 bytes[3] = {0, 0, 0};  // vertex + index data
+    u64 tris[3] = {0, 0, 0};
+    u64 other_bytes = 0;  // every other chunk's
+  } sst;
+  if (opt.stream) {
+    run_spheres.assign(out_runs.size(), c3l::RunSphere{{0, 0, 0}, 0xffff});
+    for (size_t ci = 0; ci < chunks.size(); ci++) {
+      const auto& ch = chunks[ci];
+      bool all = true;
+      for (u32 v = 0; v < ch.vertex_count && all; v++) {
+        all = out_verts[ch.first_vertex + v].rgba[3] == 0x80;
+      }
+      u32 i_lo = UINT32_MAX, i_hi = 0;
+      for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+        auto& dr = out_draws[d];
+        i_lo = std::min(i_lo, dr.first_index);
+        i_hi = std::max(i_hi, dr.first_index + dr.index_count);
+        bool ok = all;
+        if (!ok) {
+          ok = true;
+          for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
+            const u16 ix = out_indices[i];
+            ok = ix < ch.vertex_count && out_verts[ch.first_vertex + ix].rgba[3] == 0x80;
+          }
+        }
+        if (ok) {
+          dr.kind |= c3l::kDrawAlpha80;
+        }
+      }
+      const u64 bytes = (u64)ch.vertex_count * sizeof(c3l::Vertex) +
+                        (i_hi > i_lo ? (u64)(i_hi - i_lo) * 2 : 0);
+      const u8 cls = chunk_stream_cls[ci];
+      if (cls) {
+        sst.chunks[cls]++;
+        sst.bytes[cls] += bytes;
+        sst.tris[cls] += i_hi > i_lo ? (i_hi - i_lo) / 3 : 0;
+      } else {
+        sst.other_bytes += bytes;
+      }
+      if (!ch.vis_run_count) {
+        continue;
+      }
+      // the runs' spheres (runs are in draw order, each draw's from its first index on)
+      const u32 r0 = chunk_first_run[ci];
+      u32 idx = 0, last_draw = UINT32_MAX;
+      float need_a = 0, need_e = 0;
+      for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
+        const auto& run = out_runs[r];
+        if (run.draw != last_draw) {
+          last_draw = run.draw;
+          idx = out_draws[ch.first_draw + run.draw].first_index;
+        }
+        const u32 n = run.index_count;
+        int mn[3] = {32767, 32767, 32767}, mx[3] = {-32768, -32768, -32768};
+        bool ok = n > 0 && idx >= i_lo && idx + n <= i_hi;
+        for (u32 i = idx; ok && i < idx + n; i++) {
+          const u16 v = out_indices[i];
+          ok = v < ch.vertex_count;
+          for (int c = 0; ok && c < 3; c++) {
+            mn[c] = std::min<int>(mn[c], out_verts[ch.first_vertex + v].pos[c]);
+            mx[c] = std::max<int>(mx[c], out_verts[ch.first_vertex + v].pos[c]);
+          }
+        }
+        idx += n;
+        if (ok) {
+          auto& sp = run_spheres[r];
+          float d2 = 0;
+          for (int c = 0; c < 3; c++) {
+            sp.c[c] = (s16)((mn[c] + mx[c]) >> 1);
+            const float h = (float)std::max(sp.c[c] - mn[c], mx[c] - sp.c[c]);
+            d2 += h * h;
+          }
+          sp.r = (u16)std::min(65534.f, std::ceil(std::sqrt(d2)) + 1.f);
+        }
+        // a near chunk's groups: where it is needed
+        const auto& rl = out_run_lods[r];
+        if (cls && rl.lod == c3l::kRunLodNear && rl.group < cv.lod_groups.size()) {
+          const auto& g = cv.lod_groups[rl.group];
+          float dd = 0;
+          for (int c = 0; c < 3; c++) {
+            dd += (g.bsphere[c] - ch.bsphere[c]) * (g.bsphere[c] - ch.bsphere[c]);
+          }
+          need_a = std::max(need_a, std::sqrt(dd) + g.bsphere[3]);
+          need_e = std::max(need_e, rl.group < cv.lod_group_error.size()
+                                        ? cv.lod_group_error[rl.group]
+                                        : g.dist);
+        }
+      }
+      if (cls) {
+        stream_chunks.push_back(c3l::StreamChunk{(u32)ci, cls, 0, need_a, need_e});
+      }
+    }
+  }
+  // (AI-assisted, streaming) the near chunk data needed at once (the runtime's rule: a group's
+  // near version within error x kNeedK + its radius of its center; kNeedK: gameplay focal 256 /
+  // tie_lod_px 4 x 1.1), the camera at each group's center (a rough sample of where it goes)
+  if (opt.stream && !stream_chunks.empty()) {
+    constexpr float kNeedK = kStreamNeedK;
+    struct UG {
+      u64 bytes;
+      std::vector<u32> groups;
+    };
+    std::vector<UG> ug;
+    for (const auto& sc : stream_chunks) {
+      const auto& ch = chunks[sc.chunk];
+      UG u;
+      u32 lo = UINT32_MAX, hi = 0;
+      for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+        lo = std::min(lo, out_draws[d].first_index);
+        hi = std::max(hi, out_draws[d].first_index + out_draws[d].index_count);
+      }
+      u.bytes = (u64)ch.vertex_count * 16 + (hi > lo ? (u64)(hi - lo) * 2 : 0);
+      for (u32 r = chunk_first_run[sc.chunk]; r < chunk_first_run[sc.chunk] + ch.vis_run_count; r++) {
+        if (out_run_lods[r].lod == c3l::kRunLodNear) {
+          u.groups.push_back(out_run_lods[r].group);
+        }
+      }
+      std::sort(u.groups.begin(), u.groups.end());
+      u.groups.erase(std::unique(u.groups.begin(), u.groups.end()), u.groups.end());
+      ug.push_back(std::move(u));
+    }
+    std::vector<float> lim(cv.lod_groups.size());
+    for (size_t g = 0; g < cv.lod_groups.size(); g++) {
+      lim[g] = (g < cv.lod_group_error.size() ? cv.lod_group_error[g] : cv.lod_groups[g].dist) *
+                   kNeedK +
+               cv.lod_groups[g].bsphere[3];
+    }
+    u64 mx = 0;
+    double sum = 0;
+    const size_t step = std::max<size_t>(1, cv.lod_groups.size() / 2000);
+    size_t samples = 0;
+    for (size_t sgi = 0; sgi < cv.lod_groups.size(); sgi += step) {
+      const float* cam = cv.lod_groups[sgi].bsphere;
+      u64 need = 0;
+      for (const auto& u : ug) {
+        for (u32 g : u.groups) {
+          const float* c = cv.lod_groups[g].bsphere;
+          const float dx = c[0] - cam[0], dy = c[1] - cam[1], dz = c[2] - cam[2];
+          if (dx * dx + dy * dy + dz * dz < lim[g] * lim[g]) {
+            need += u.bytes;
+            break;
+          }
+        }
+      }
+      mx = std::max(mx, need);
+      sum += need;
+      samples++;
+    }
+    lg::info("{}: streaming: near chunk data needed at once, the camera at the groups' centers: "
+             "{:.0f} KB on average, at most {} KB",
+             level.level_name, sum / std::max<size_t>(1, samples) / 1024, mx / 1024);
   }
   if (qs.shared_mismatch) {
     lg::error("{}: {} positions in several chunks reconstruct differently", in.stem().string(),
@@ -3711,7 +3967,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   c3l::Header hdr{};
   memcpy(hdr.magic, c3l::kMagic, 4);
   // (AI-assisted) --shrub-one-dist: v13 (the shrub chunks don't carry PS2 distances)
-  hdr.version = opt.shrub_ps2_dist ? c3l::kVersion : c3l::kShrubPs2DistVersion - 1;
+  // (AI-assisted, streaming) --no-stream: v18
+  hdr.version = !opt.shrub_ps2_dist ? c3l::kShrubPs2DistVersion - 1
+                : opt.stream        ? c3l::kVersion
+                                    : c3l::kStreamVersion - 1;
   strncpy(hdr.level_name, level.level_name.c_str(), sizeof(hdr.level_name) - 1);
   hdr.num_chunks = chunks.size();
   // (AI-assisted) the visibility runs first: the chunks point at them
@@ -3735,20 +3994,32 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     align16(buf);
   }
   // (AI-assisted) v17: tie levels of detail (c3l::ExtHeader)
-  if (!cv.lod_groups.empty() && !out_runs.empty() && out_run_lods.size() == out_runs.size()) {
+  // (AI-assisted, streaming) v19: always with runs (the run spheres), 48 bytes; v18: 32
+  if ((!cv.lod_groups.empty() || opt.stream) && !out_runs.empty() &&
+      out_run_lods.size() == out_runs.size()) {
     c3l::ExtHeader eh{};
     memcpy(eh.magic, c3l::kExtMagic, 4);
-    eh.size = sizeof(eh);
-    hdr.ext_offset = append(buf, &eh, 1);
+    const u32 eh_size = opt.stream ? (u32)sizeof(eh) : c3l::kExtHeaderV17Size;
+    eh.size = eh_size;
+    align16(buf);
+    hdr.ext_offset = (u32)buf.size();
+    buf.insert(buf.end(), (const u8*)&eh, (const u8*)&eh + eh_size);
     eh.lod_group_count = cv.lod_groups.size();
-    eh.lod_groups_offset = append(buf, cv.lod_groups.data(), cv.lod_groups.size());
+    eh.lod_groups_offset =
+        cv.lod_groups.empty() ? 0 : append(buf, cv.lod_groups.data(), cv.lod_groups.size());
     eh.run_lod_count = out_run_lods.size();
     eh.run_lod_offset = append(buf, out_run_lods.data(), out_run_lods.size());
     eh.runs_offset = runs_offset;
-    if (cv.lod_group_error.size() == cv.lod_groups.size()) {
+    if (!cv.lod_groups.empty() && cv.lod_group_error.size() == cv.lod_groups.size()) {
       eh.lod_error_offset = append(buf, cv.lod_group_error.data(), cv.lod_group_error.size());
     }
-    memcpy(buf.data() + hdr.ext_offset, &eh, sizeof(eh));
+    if (opt.stream) {
+      eh.run_sphere_offset = append(buf, run_spheres.data(), run_spheres.size());
+      eh.stream_count = stream_chunks.size();
+      eh.stream_offset =
+          stream_chunks.empty() ? 0 : append(buf, stream_chunks.data(), stream_chunks.size());
+    }
+    memcpy(buf.data() + hdr.ext_offset, &eh, eh_size);
   }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
   hdr.vertex_data_size = out_verts.size() * sizeof(c3l::Vertex);
@@ -3931,8 +4202,25 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                        left[i].second.candidates, left[i].second.left_tris,
                        left[i].second.worst_left);
     }
-    lg::info("{}: tie levels of detail: left coarse (over budget): {}", level.level_name,
+    lg::info("{}: tie levels of detail: {} (over budget): {}", level.level_name,
+             opt.stream ? "streamed only, not in the budget's core set" : "left coarse",
              l.empty() ? "none" : l);
+  }
+  if (opt.stream) {
+    // (AI-assisted, streaming) v19 near chunks
+    std::string cls;
+    for (size_t c = 0; c <= opt.stream_classes.size(); c++) {
+      cls += fmt::format("{}{}{:g} m", c ? ", " : "",
+                         c < opt.stream_classes.size() ? fmt::format("< {:g} m: ", opt.stream_classes[c])
+                                                       : std::string("beyond: "),
+                         stream_class_cell(opt, (int)c));
+    }
+    lg::info("{}: streaming (v19): {} near chunks (cells by need distance: {}): core {} ({} KB, {} "
+             "tris), extra {} ({} KB, {} tris); {} groups in the budget's core set of {}; other "
+             "chunks {} KB",
+             level.level_name, sst.chunks[1] + sst.chunks[2], cls, sst.chunks[1],
+             sst.bytes[1] / 1024, sst.tris[1], sst.chunks[2], sst.bytes[2] / 1024, sst.tris[2],
+             lstats.core, lstats.selected, sst.other_bytes / 1024);
   }
   if (cv.shrub_tris && opt.shrub_ps2_dist) {
     // (AI-assisted) shrub triangles by distance class
@@ -4140,6 +4428,19 @@ int main(int argc, char** argv) {
                  "(v17) viewing distance for the shape error (meters)");
   app.add_option("--tie-lod-default-m", opt.tie_lod_default_m,
                  "(v17) near version distance of ties without a PS2 distance (wind; meters)");
+  bool no_stream = false;
+  app.add_flag("--no-stream", no_stream,
+               "(AI-assisted, v19) no near chunks for streaming: v18 files (near versions within "
+               "the level's budget, in the far versions' chunks)");
+  app.add_option("--stream-cell", opt.stream_cell,
+                 "(AI-assisted, v19) near chunk cell size (meters)");
+  app.add_option("--stream-classes", opt.stream_classes,
+                 "(AI-assisted, v19) near chunks per need class: the bounds (meters) of the "
+                 "distance a group's near version is needed within")
+      ->delimiter(',');
+  app.add_option("--stream-class-cells", opt.stream_class_cells,
+                 "(AI-assisted, v19) near chunk cell size per need class (meters)")
+      ->delimiter(',');
   app.add_option("--far-tfrag-geo", opt.far_tfrag_geo,
                  "tfrag level of detail for far away cells (-1: no far version)");
   app.add_option("--palette", opt.palette,
@@ -4246,6 +4547,7 @@ int main(int argc, char** argv) {
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
   opt.tie_lod = !no_tie_lod;
+  opt.stream = !no_stream;
   opt.vista = !no_vista;
   opt.tod = !no_tod;
   opt.pack.threads = opt.threads;

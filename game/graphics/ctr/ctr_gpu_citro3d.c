@@ -243,7 +243,11 @@ typedef struct {
   u32 verts_pa, indices_pa;
   /* (AI-assisted) the buffer sizes between ctr_gpu_mesh_begin and _end */
   u32 fill_vbytes, fill_ibytes;
+  /* (AI-assisted, streaming) ctr_gpu_mesh_begin_ext: verts is the caller's block (indices inside
+   * it), given back to s_ext_free instead of freed */
+  int ext;
 } MeshSlot;
+static void (*s_ext_free)(void* mem); /* (AI-assisted, streaming) ctr_gpu_set_ext_free */
 
 enum {
   PROG_NONE = 0,
@@ -737,8 +741,16 @@ static void process_pending_deletes(int hold) {
       m->used = 4;
       g.pending_mesh_delete[kept++] = g.pending_mesh_delete[i];
     } else if (m->used == 2 || m->used == 4) {
-      linearFree(m->verts);
-      linearFree(m->indices);
+      if (m->ext) {
+        /* (AI-assisted, streaming) the caller's memory */
+        if (s_ext_free) {
+          s_ext_free(m->verts);
+        }
+        m->ext = 0;
+      } else {
+        linearFree(m->verts);
+        linearFree(m->indices);
+      }
       if (m->verts_alt) {
         linearFree(m->verts_alt);
       }
@@ -1515,8 +1527,11 @@ void ctr_gpu_exit(void) {
   linearFree(g.quad_indices);
   for (int i = 0; i < MAX_MESHES; i++) {
     if (g.meshes[i].used) {
-      linearFree(g.meshes[i].verts);
-      linearFree(g.meshes[i].indices);
+      if (!g.meshes[i].ext) { /* (AI-assisted, streaming) the stream arena's: not ours */
+        linearFree(g.meshes[i].verts);
+        linearFree(g.meshes[i].indices);
+      }
+      g.meshes[i].ext = 0;
       if (g.meshes[i].verts_alt) {
         linearFree(g.meshes[i].verts_alt);
         g.meshes[i].verts_alt = NULL;
@@ -6229,6 +6244,7 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
   }
   ctr_linear_unlock();
   g.meshes[slot].verts = v;
+  g.meshes[slot].ext = 0; /* (AI-assisted, streaming) */
   g.meshes[slot].indices = ix;
   g.meshes[slot].fill_vbytes = (u32)vbytes;
   g.meshes[slot].fill_ibytes = (u32)ibytes;
@@ -6237,8 +6253,67 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
   return slot;
 }
 
+/* (AI-assisted, streaming) see ctr_gpu.h */
+void ctr_gpu_set_ext_free(void (*fn)(void* mem)) {
+  s_ext_free = fn;
+}
+
+void* ctr_gpu_linear_block(unsigned int bytes) {
+  ctr_linear_lock();
+  void* p = linearAlloc(bytes);
+  ctr_linear_unlock();
+  return p;
+}
+
+void ctr_gpu_linear_block_free(void* p) {
+  if (!p) {
+    return;
+  }
+  ctr_linear_lock();
+  linearFree(p);
+  ctr_linear_unlock();
+}
+
+unsigned int ctr_gpu_linear_free(void) {
+  return (unsigned int)linearSpaceFree();
+}
+
+int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
+                           uint16_t** indices) {
+  if (!g.ready || !mem) {
+    return -1;
+  }
+  const int slot = reserve_mesh_slot();
+  if (slot < 0) {
+    return -1;
+  }
+  g.meshes[slot].verts = mem;
+  g.meshes[slot].indices = (uint16_t*)((uint8_t*)mem + ctr_gpu_ext_index_offset(vertex_count));
+  g.meshes[slot].verts_alt = NULL;
+  g.meshes[slot].vbytes = 0;
+  g.meshes[slot].ext = 1;
+  g.meshes[slot].fill_vbytes = (u32)vertex_count * 16u;
+  g.meshes[slot].fill_ibytes = (u32)index_count * 2u;
+  *verts = mem;
+  *indices = g.meshes[slot].indices;
+  return slot;
+}
+
 int ctr_gpu_mesh_end(int mesh, int ok) {
   if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 3) {
+    return -1;
+  }
+  if (!ok && g.meshes[mesh].ext) {
+    /* (AI-assisted, streaming) the caller's memory back to it */
+    ctr_linear_lock();
+    if (s_ext_free) {
+      s_ext_free(g.meshes[mesh].verts);
+    }
+    g.meshes[mesh].ext = 0;
+    g.meshes[mesh].verts = NULL;
+    g.meshes[mesh].indices = NULL;
+    g.meshes[mesh].used = 0;
+    ctr_linear_unlock();
     return -1;
   }
   if (!ok) {
@@ -7454,6 +7529,7 @@ int ctr_gpu_skinned_mesh_create(const void* verts, int vertex_count, const uint1
   cache_flush_now(v, vbytes);
   cache_flush_now(ix, ibytes);
   g.meshes[slot].verts = v;
+  g.meshes[slot].ext = 0; /* (AI-assisted, streaming) */
   g.meshes[slot].indices = ix;
   g.meshes[slot].verts_pa = osConvertVirtToPhys(v);
   g.meshes[slot].indices_pa = osConvertVirtToPhys(ix);

@@ -495,6 +495,23 @@ void ctr_gpu_mesh_delete(int mesh);
  * -1. Not drawn or deleted between the two. */
 int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices);
 int ctr_gpu_mesh_end(int mesh, int ok);
+/* (AI-assisted, streaming) The same in memory the caller owns (linear memory: the level stream
+ * arena, CtrStream.h): mem holds the vertices (vertex_count * 16 bytes) and then the indices at
+ * mem + ctr_gpu_ext_index_offset(vertex_count). Nothing is allocated; once a deleted (or failed)
+ * one is no longer used by the GPU, the function set with ctr_gpu_set_ext_free gets mem back
+ * (render thread, or the thread of ctr_gpu_free_pending_now; with the linear lock held). */
+int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
+                           uint16_t** indices);
+void ctr_gpu_set_ext_free(void (*fn)(void* mem));
+static inline unsigned int ctr_gpu_ext_index_offset(int vertex_count) {
+  return ((unsigned int)vertex_count * 16u + 127u) & ~127u;
+}
+/* (AI-assisted, streaming) a block of linear memory for the stream arena's segments (NULL when
+ * there is no room for it and LINEAR_RESERVE), freed with ctr_gpu_linear_block_free (no GPU use
+ * left in it); the linear heap's free bytes now (the host: a model, env CTR_SOFT_LINEAR_KB) */
+void* ctr_gpu_linear_block(unsigned int bytes);
+void ctr_gpu_linear_block_free(void* p);
+unsigned int ctr_gpu_linear_free(void);
 /* (AI-assisted) Free the deleted textures, pools and meshes now instead of at the next frame
  * begin, once the GPU has finished what it was given (a level was unloaded and the next one loads
  * on another thread: with no frames drawn meanwhile its memory stayed taken). Only while no frame

@@ -71,15 +71,15 @@ Reader::Reader(const char* path, size_t window, Buffers* buffers)
     m_error = true;
     return;
   }
-  m_blocks.resize(dir.num_blocks);
-  if (!file_read(sizeof(Header) + sizeof(BlockDir), m_blocks.data(),
-                 m_blocks.size() * sizeof(Block))) {
-    m_blocks.clear();
+  m_own_blocks.resize(dir.num_blocks);
+  if (!file_read(sizeof(Header) + sizeof(BlockDir), m_own_blocks.data(),
+                 m_own_blocks.size() * sizeof(Block))) {
+    m_own_blocks.clear();
     return;
   }
   // the blocks must cover [128, raw_size) in order and be inside the file
   uint32_t expect = sizeof(Header), max_block = 0;
-  for (const auto& b : m_blocks) {
+  for (const auto& b : (*m_bl)) {
     if (b.raw_offset != expect || b.codec() > CODEC_ZSTD ||
         (uint64_t)b.file_offset + b.packed_size() > (uint64_t)m_file_size ||
         (b.codec() == CODEC_STORED && b.packed_size() != b.raw_size)) {
@@ -97,6 +97,38 @@ Reader::Reader(const char* path, size_t window, Buffers* buffers)
   if (m_bufs->cache[0].size() < dir.max_block) {
     m_bufs->cache[0].resize(dir.max_block);
   }
+}
+
+Reader::Reader(const char* path, size_t window, Buffers* buffers, const Dir& dir)
+    : m_f(fopen(path, "rb")), m_window_cap(window) {
+  if (buffers) {
+    m_bufs = buffers;
+  }
+  m_windows[0].buf = &m_bufs->window[0];
+  m_windows[1].buf = &m_bufs->window[1];
+  if (!m_f) {
+    return;
+  }
+  setvbuf(m_f, nullptr, m_window_cap ? _IONBF : _IOFBF, m_window_cap ? 0 : 64 * 1024);
+  fseek(m_f, 0, SEEK_END);
+  m_file_size = ftell(m_f);
+  fseek(m_f, 0, SEEK_SET);
+  m_header = dir.header;
+  m_bl = &dir.blocks;  // (the caller keeps dir while this reader is used)
+  m_raw_size = dir.blocks.empty() ? (uint32_t)m_file_size : dir.raw_size;
+  m_max_block = dir.max_block;
+  if (!m_bl->empty() && m_bufs->cache[0].size() < m_max_block) {
+    m_bufs->cache[0].resize(m_max_block);
+  }
+}
+
+Reader::Dir Reader::dir() const {
+  Dir d;
+  d.header = m_header;
+  d.blocks = *m_bl;
+  d.raw_size = m_raw_size;
+  d.max_block = m_max_block;
+  return d;
 }
 
 Reader::~Reader() {
@@ -228,7 +260,7 @@ bool Reader::decode_block(uint32_t codec,
 }
 
 const uint8_t* Reader::packed_bytes(size_t bi) {
-  const Block& b = m_blocks[bi];
+  const Block& b = (*m_bl)[bi];
   const long start = (long)b.file_offset;
   const size_t size = b.packed_size();
   if (const uint8_t* p = in_window(start, size)) {
@@ -240,8 +272,8 @@ const uint8_t* Reader::packed_bytes(size_t bi) {
   if (m_window_cap) {
     // (AI-assisted) whole blocks only: a block cut at the window's end was read again with the next
     size_t whole = size;
-    for (size_t j = bi + 1; j < m_blocks.size(); j++) {
-      const Block& n = m_blocks[j];
+    for (size_t j = bi + 1; j < (*m_bl).size(); j++) {
+      const Block& n = (*m_bl)[j];
       if ((long)n.file_offset != start + (long)whole || whole + n.packed_size() > want) {
         break;
       }
@@ -253,7 +285,7 @@ const uint8_t* Reader::packed_bytes(size_t bi) {
 }
 
 bool Reader::read_block(size_t bi, uint32_t offset, uint8_t* dst, size_t bytes) {
-  const Block& b = m_blocks[bi];
+  const Block& b = (*m_bl)[bi];
   const bool whole = offset == b.raw_offset && bytes == b.raw_size;
   if (b.codec() == CODEC_STORED) {
     // straight from the file (or the window, if it's there already)
@@ -305,6 +337,41 @@ bool Reader::read_block(size_t bi, uint32_t offset, uint8_t* dst, size_t bytes) 
   return true;
 }
 
+bool Reader::preload(uint32_t offset, uint32_t bytes) {
+  if (!ok() || !m_window_cap || !bytes || (uint64_t)offset + bytes > m_raw_size) {
+    return false;
+  }
+  long start, end;
+  if ((*m_bl).empty()) {
+    start = (long)offset;
+    end = (long)offset + (long)bytes;
+  } else {
+    if (offset < sizeof(Header)) {
+      return false;
+    }
+    const auto first = std::upper_bound((*m_bl).begin(), (*m_bl).end(), offset,
+                                        [](uint32_t o, const Block& b) { return o < b.raw_offset; }) -
+                       1;
+    auto last = std::upper_bound((*m_bl).begin(), (*m_bl).end(), offset + bytes - 1,
+                                 [](uint32_t o, const Block& b) { return o < b.raw_offset; }) -
+                1;
+    start = (long)first->file_offset;
+    end = (long)last->file_offset + (long)last->packed_size();
+    for (auto b = first; b != last; ++b) {
+      if ((long)(b + 1)->file_offset != (long)b->file_offset + (long)b->packed_size()) {
+        return false;  // (not one after the other in the file)
+      }
+    }
+  }
+  if (end - start > (long)m_window_cap || end > m_file_size) {
+    return false;
+  }
+  if (in_window(start, (size_t)(end - start))) {
+    return true;
+  }
+  return load_window(start, (size_t)(end - start)) != nullptr;
+}
+
 bool Reader::read(uint32_t offset, void* dst_v, size_t bytes) {
   if (!ok() || (uint64_t)offset + bytes > m_raw_size) {
     m_error = true;
@@ -313,7 +380,7 @@ bool Reader::read(uint32_t offset, void* dst_v, size_t bytes) {
   if (bytes == 0) {
     return true;
   }
-  if (m_blocks.empty()) {
+  if ((*m_bl).empty()) {
     return raw_read((long)offset, dst_v, bytes);
   }
   uint8_t* dst = (uint8_t*)dst_v;
@@ -328,11 +395,11 @@ bool Reader::read(uint32_t offset, void* dst_v, size_t bytes) {
     return true;
   }
   // the first block holding offset
-  size_t bi = std::upper_bound(m_blocks.begin(), m_blocks.end(), offset,
+  size_t bi = std::upper_bound((*m_bl).begin(), (*m_bl).end(), offset,
                                [](uint32_t o, const Block& b) { return o < b.raw_offset; }) -
-              m_blocks.begin() - 1;
+              (*m_bl).begin() - 1;
   while (offset < end) {
-    const Block& b = m_blocks[bi];
+    const Block& b = (*m_bl)[bi];
     const uint32_t n = std::min(end, b.raw_offset + b.raw_size) - offset;
     if (!read_block(bi, offset, dst, n)) {
       return false;
