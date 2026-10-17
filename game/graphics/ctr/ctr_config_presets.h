@@ -36,7 +36,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"bones_native", "off"},     {"c3l_read_buffer", "0"},     {"fog_stage_skip", "off"},
     {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
     {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
-    {"tie_lod", "off"},
+    {"tie_lod", "off"},          {"gpu_micro", "off"},
 };
 /* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the A/B GPU
  * profile, the GSP perf log and the GPU counters (3ds-sdcard-oct12d config-bench.ini) */
@@ -85,6 +85,7 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
  * in CtrSettings.h). The callers' own fallbacks only matter without this table. */
 static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
+    {"gpu_micro", "on"}, {"shader_resident", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
     {"sound_core", "auto"}, /* 2 on a New 3DS, else 1 */
     {"args", "-boot -cbackend"},
     {"debug_log", "off"},
