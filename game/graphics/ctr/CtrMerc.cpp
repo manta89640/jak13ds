@@ -638,11 +638,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       n++;
     }
     if (m_snapshot_mode) {
+      MercMat* dst = m_snap.grow(n);
       for (int b = 0; b < n; b++) {
         u32 addr;
         memcpy(&addr, &ma[b * 4], 4);
-        MercMat& m = m_snap.emplace_back();
-        memcpy(&m, rs.ee_mem + addr, sizeof(MercMat));  // (AI-assisted) tmat only
+        memcpy(&dst[b], rs.ee_mem + addr, sizeof(MercMat));  // (AI-assisted) tmat only
       }
       // (AI-assisted) vertices the game rewrites (ripple, texture scroll): the game changes them
       // during the next frame's logic, so they're copied now too. Only models with an effect
