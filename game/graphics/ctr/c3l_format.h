@@ -43,7 +43,17 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // use inside; a vertex of several ids copied, ~0.4%), so the runtime rewrites the time of day
 // colors of the drawn runs' ids only. No layout change; the runtime finds the ranges from the
 // indices (and rewrites whole chunks where they overlap, as in older files).
-constexpr uint32_t kVersion = 18;
+// v19 (AI-assisted, streaming): geometry streaming (see StreamChunk). Every tie instance group whose
+// shape changes visibly gets its near version (geometry 0), in chunks of their own ("near chunks",
+// --stream-cell meters) that the runtime reads from the file while the camera comes near and frees
+// when it is far; the group's far version stays in its tie chunk as before (a near chunk that isn't
+// there yet draws the far version). The near chunks' vertex and index data come last in their
+// sections, in spatial order. The extension header grows (ExtHeader::size 48): each file run's
+// bounding sphere (RunSphere), the near chunk table. Draw::kind kDrawAlpha80. Otherwise v18; a v18
+// reader would draw both versions (it is refused: version 19).
+constexpr uint32_t kVersion = 19;
+// (AI-assisted) the first version with near chunks (StreamChunk), run spheres and kDrawAlpha80
+constexpr uint32_t kStreamVersion = 19;
 // (AI-assisted) the first version with the extension header (tie levels of detail)
 constexpr uint32_t kTieLodVersion = 17;
 // (AI-assisted) the first version with the time of day table
@@ -195,8 +205,48 @@ struct ExtHeader {
   // (the larger one-sided Hausdorff distance between its two versions, game units), from which
   // the runtime switches by screen-space error; 0: none (files before it: the dist switch)
   uint32_t lod_error_offset;
+  // (AI-assisted, streaming) v19 (size >= 48): RunSphere[run_lod_count] (the file's runs from
+  // runs_offset on, 0: none), StreamChunk[stream_count], flags (0)
+  uint32_t run_sphere_offset;
+  uint32_t stream_count;
+  uint32_t stream_offset;
+  uint32_t stream_flags;
 };
-static_assert(sizeof(ExtHeader) == 32);
+static_assert(sizeof(ExtHeader) == 48);
+constexpr uint32_t kExtHeaderV17Size = 32;
+
+/*!
+ * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
+ * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
+ * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the
+ * vertices before v19: CtrLevel.cpp make_run_spheres). r = 0xffff: unknown (never hidden by it).
+ */
+struct RunSphere {
+  int16_t c[3];
+  uint16_t r;
+};
+static_assert(sizeof(RunSphere) == 8);
+
+/*!
+ * (AI-assisted, streaming) v19: a near chunk (Chunk::kind CHUNK_KIND_TIE, lod_tier 0): the near
+ * versions (RunLod kRunLodNear) of the tie LOD groups whose center is in its cell. Every LOD group's
+ * near version is in near chunks; its far version in an ordinary tie chunk. cls 1: a group the level's
+ * v18 budget took (kTieLodBudgets: loaded with the level when streaming is off), 2: one it left coarse
+ * (only streamed). A group of a near chunk is near when the camera is within its shape error x the
+ * runtime's factor (tie_lod_px, focal length) + its radius of its center, so the chunk is needed
+ * within need_a + need_e x that factor of its bounding sphere's center: need_a the largest distance of
+ * a group's center to that center plus the group's radius, need_e the largest group error (game
+ * units).
+ */
+struct StreamChunk {
+  uint32_t chunk;
+  uint16_t cls;
+  uint16_t pad;
+  float need_a;
+  float need_e;
+};
+static_assert(sizeof(StreamChunk) == 16);
+constexpr uint16_t kStreamCore = 1, kStreamExtra = 2;
 struct TieLodGroup {
   float bsphere[4];  // world: x, y, z, radius (both versions)
   float dist;        // the near version up to this distance of the sphere (game units)
@@ -266,6 +316,10 @@ constexpr uint16_t kDrawBlendDropped = 0x400;
 // never fail for these triangles (alpha 1.0 everywhere, as above): its enable bit was cleared
 // (draws of the same texture and state may have been merged). config opaque_alpha = off: tested.
 constexpr uint16_t kDrawAlphaTestDropped = 0x800;
+// (AI-assisted, streaming) v19: every vertex the draw uses has alpha 0x80 (the runtime's fog_alpha,
+// CTR_TCC_ALPHA80: before v19 worked out at load from the chunk's vertices, which a near chunk
+// doesn't have then)
+constexpr uint16_t kDrawAlpha80 = 0x1000;
 constexpr uint32_t kAtlasVersion = 15;
 
 /*!
