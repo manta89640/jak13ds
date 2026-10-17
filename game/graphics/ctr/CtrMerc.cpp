@@ -294,6 +294,30 @@ bool CtrMercRenderer::bad_bones(const CtrMercMat* const* bones, const u8* slots,
   return bad & 0x80000000u;
 }
 
+const CtrMercModelData* CtrMercRenderer::find_model(const u8* name, const CtrLevelData** lev) {
+  // the name's length and hash (as the string the lookup took: up to the first NUL, at most 127
+  // bytes)
+  u32 h = 2166136261u;
+  u32 len = 0;
+  while (len < 127 && name[len]) {
+    h = (h ^ name[len]) * 16777619u;
+    len++;
+  }
+  const u32 gen = m_levels->set_generation();
+  FindSlot& s = m_find[(h ^ (h >> 16)) & (kFindSlots - 1)];
+  if (s.model && s.gen == gen && s.hash == h && s.model->name.size() == len &&
+      !memcmp(s.model->name.data(), name, len)) {
+    *lev = s.lev;
+    return s.model;
+  }
+  const CtrMercModelData* model =
+      m_levels->find_merc_model(std::string_view((const char*)name, len), lev);
+  if (model) {
+    s = {h, gen, model, *lev};
+  }
+  return model;
+}
+
 u32 CtrMercRenderer::queue_floats(const float* src, int n) {
   const u32 at = (u32)m_qdata.size();
   m_qdata.insert(m_qdata.end(), src, src + n);
@@ -639,11 +663,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       if (maybe) {
         const double t0 = ctr_gpu_time_ms();
-        char name[128];
-        memcpy(name, input, 128);
-        name[127] = 0;
         const CtrLevelData* lev = nullptr;
-        const CtrMercModelData* model = m_levels->find_merc_model(name, &lev);
+        const CtrMercModelData* model = find_model(input, &lev);
         if (model && !model->mod.empty()) {
           m_mod_snaps.push_back({m_model_ordinal, m_mod_bytes.size()});
           gather_mod(rs.ee_mem, ptrs, ec, *model);
@@ -660,9 +681,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   if (!m_have_camera) {
     return;
   }
-  char name[128];
-  memcpy(name, input, 128);
-  name[127] = 0;
+  const u8* name = input;  // (AI-assisted) read in place (find_model): NUL-ended, at most 127
   input += 128;
 
 #ifndef __3DS__
@@ -670,12 +689,12 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     // (AI-assisted) snow-gpu-audit: statistics per model (env CTR_SOFT_MERC_MODELS)
     static const bool per_model = getenv("CTR_SOFT_MERC_MODELS") != nullptr;
     if (per_model) {
-      ctr_gpu_soft_bucket((std::string("m:") + name).c_str());
+      ctr_gpu_soft_bucket((std::string("m:") + std::string((const char*)name, strnlen((const char*)name, 127))).c_str());
     }
   }
 #endif
   const CtrLevelData* lev = nullptr;
-  const CtrMercModelData* model = m_levels->find_merc_model(name, &lev);
+  const CtrMercModelData* model = find_model(name, &lev);
   m_stats.models++;
   if (!model) {
     m_stats.missing++;
@@ -913,7 +932,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       // (AI-assisted) per model statistics: the generated low LOD on its own line
       static const bool per_model = getenv("CTR_SOFT_MERC_MODELS") != nullptr;
       if (per_model) {
-        ctr_gpu_soft_bucket((std::string("m:") + name + c3l::kMercGenLodSuffix).c_str());
+        ctr_gpu_soft_bucket((std::string("m:") + std::string((const char*)name, strnlen((const char*)name, 127)) + c3l::kMercGenLodSuffix).c_str());
       }
 #endif
     }

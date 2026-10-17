@@ -75,6 +75,19 @@ class CtrMercRenderer : public CtrBucketRenderer {
   // (AI-assisted) a bone the model's slots name has a rotation / scale entry of 64 or more, a
   // translation of 1e8 or more, or NaN (garbage: the model isn't drawn)
   static bool bad_bones(const CtrMercMat* const* bones, const u8* slots, int n);
+  /*! (AI-assisted) CtrLevels::find_merc_model of the model name at name (NUL-ended, at most 127
+   * bytes), through a small cache: a found model (and its level) for its name while the loaded
+   * levels are the same (CtrLevels::set_generation; loading the common file, which doesn't change
+   * it, only adds names the cache can't hold: it keeps no misses). The map's lookup compared
+   * strings down a tree (~50 models per frame on both threads). */
+  const struct CtrMercModelData* find_model(const u8* name, const struct CtrLevelData** lev);
+  struct FindSlot {
+    u32 hash = 0, gen = 0;
+    const struct CtrMercModelData* model = nullptr;
+    const struct CtrLevelData* lev = nullptr;
+  };
+  static constexpr int kFindSlots = 64;
+  FindSlot m_find[kFindSlots];
 
   // (AI-assisted) config envmap_batch: the envmap draws of the bucket are queued and drawn
   // together (one skin -> env -> skin program switch pair, and the skin draws keep their uniforms)
