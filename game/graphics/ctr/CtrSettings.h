@@ -227,6 +227,9 @@ struct CtrSettings {
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
   bool tie_lod = true;
+  // (AI-assisted) time of day: day palettes that move every frame (sunken's cycling lights, most
+  // of its vertices) taken every second frame (CtrLevel.cpp tod_update). off: every frame (exact)
+  bool tod_busy_half = true;
   // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
   // far version where the far version's shape error is at most this many pixels on screen (this
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).

@@ -670,6 +670,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.vbuf_size = gs.vbuf_size;
   m_timing.vbuf_dropped += gs.vbuf_dropped;
   m_timing.frames++;
+  // (AI-assisted) the time of day work isn't GPU load: not counted for auto_detail
+  const double tod_ms = ctr_level_tod_take_ms();
+  m_timing.tod_ms += tod_ms;
+  m_timing.tod_max_ms = std::max(m_timing.tod_max_ms, tod_ms);
+  m_timing.tod_over += tod_ms > 2.0;
   if (ctr_settings().auto_detail) {
 #ifndef __3DS__
     // (AI-assisted, title-popin) host test: env CTR_AUTO_DETAIL_MODEL gives auto_detail the GPU time
@@ -679,7 +684,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       auto_detail_frame(10.6f + 0.13f * gs.triangles / 1000.f, 1, 0.0);
     } else
 #endif
-    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1);
+    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms);
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
@@ -789,6 +794,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         by_name += fmt::format(" (screen copies {:.2f})", copy_ms / n);
       }
       lg::info("[ctr] build ms/frame by renderer:{}", by_name);
+      if (m_timing.tod_max_ms > 0) {
+        // (AI-assisted) of the level renderers' time: the time of day's
+        lg::info("[ctr] time of day ms/frame {:.2f}, most {:.2f} in one frame, {} frames over 2 ms",
+                 m_timing.tod_ms / n, m_timing.tod_max_ms, m_timing.tod_over);
+      }
       {
         // (AI-assisted, gpu-rt) gpu_breakdown, static_cmdlists
         char line[1024];
