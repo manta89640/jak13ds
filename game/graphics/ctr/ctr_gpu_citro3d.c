@@ -130,10 +130,12 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
  * system call the exheader doesn't allow raises an exception instead of returning an error (the
  * render thread died at its first flush: black top screen, the game hung after a few seconds).
  * Azahar doesn't check the list. Any thread. */
+static u32 s_flush_requests; /* (AI-assisted, micro-gpu) statistics: GSP flush requests */
 static void cache_flush_now(const void* addr, u32 size) {
   if (!size) {
     return;
   }
+  s_flush_requests++;
   GSPGPU_FlushDataCache(addr, size);
 }
 /* a texture's texels (all levels; VRAM needs none), like C3D_TexFlush */
@@ -6028,6 +6030,10 @@ static struct {
       mismatches, frame0;
   int logged_mismatches, logged_why;
   u32 why[5]; /* not alike: arena restarted, draw count, settings, state before, the draws */
+  /* (AI-assisted, micro-gpu) draws drawn alone (heads of a stretch), by why: not a raw level
+   * pool draw (its texture: own memory / no mesh or count / citro3d), after such a draw, another
+   * program, the sky hook pending */
+  u32 head_why[6];
   const C3D_Tex* bound0_tex;
   const void* bound0_data;
   u32 bound0_param;
@@ -6521,6 +6527,13 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** 
       prog = plain ? cl_prog(&calls[i]) : -1;
       head = i == 0 || !plain || !prev_plain || prog != prev_prog ||
              (s_sky_hook && !keeps_sky(calls[i].state));
+      if (head && i) {
+        const int t = calls[i].state->tex;
+        const int own_tex = t >= 0 && t < MAX_TEXTURES && g.textures[t].used == 1 &&
+                            g.textures[t].pool < 0;
+        s_cl.head_why[!plain ? (own_tex ? 0 : 1)
+                             : (!prev_plain ? 2 : (prog != prev_prog ? 3 : 4))]++;
+      }
     }
     if (head && start >= 0) {
       if (seg < CL_MAX_SEGS) {
@@ -6578,6 +6591,20 @@ int ctr_gpu_cmdlist_line(char* out, int size) {
                   s_cl.why[0], s_cl.why[1], s_cl.why[2], s_cl.why[3], s_cl.why[4]);
   }
   memset(s_cl.why, 0, sizeof(s_cl.why));
+  if (l < size) {
+    l += snprintf(out + l, size - l,
+                  "; drawn alone: %.1f texture in own memory, %.1f other not plain, %.1f after "
+                  "those, %.1f program change, %.1f sky hook",
+                  s_cl.head_why[0] / f, s_cl.head_why[1] / f, s_cl.head_why[2] / f,
+                  s_cl.head_why[3] / f, s_cl.head_why[4] / f);
+  }
+  memset(s_cl.head_why, 0, sizeof(s_cl.head_why));
+  if (l < size) {
+    /* (AI-assisted, micro-gpu) all threads' (textures made by the loader thread too) */
+    l += snprintf(out + l, size - l, "; GSP cache flush requests %.1f per frame",
+                  s_flush_requests / f);
+  }
+  s_flush_requests = 0;
   if (s_cl.mode == 2 && l < size) {
     l += snprintf(out + l, size - l, "; compare: %u copies checked, %u MISMATCHED", s_cl.compares,
                   s_cl.mismatches);
