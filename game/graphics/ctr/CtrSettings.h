@@ -230,6 +230,18 @@ struct CtrSettings {
   // (AI-assisted) time of day: day palettes that move every frame (sunken's cycling lights, most
   // of its vertices) taken every second frame (CtrLevel.cpp tod_update). off: every frame (exact)
   bool tod_busy_half = true;
+  // (AI-assisted, citadel) time of day: a day palette that pulses (its weight turned around twice
+  // within ~4 s: Gol and Maia's Citadel's update-mood-light on palette 1, which 71% of its colors
+  // use, moves 1/64 every ~2 frames) is taken only when it moved this many 64ths from the weight
+  // last taken, or once it stood still for 8 frames (CtrLevel.cpp tod_update). 0: every move
+  // (exact as the PC; citadel ~4-8 ms of rewrites per frame)
+  int tod_pulse_step = 4;
+  // (AI-assisted, citadel) time of day: the most ms of rewrites per frame (all levels): the groups
+  // too far behind (3 day moves, or the file's colors) wait beyond it instead of being rewritten
+  // at once, the group pass's budget stays under it, and a day move waits until the last one's
+  // rewrites of the vertices drawn could be spread (the title's fast day, flickers). 0: no limit
+  // (the tod-fix rules: citadel / firecanyon / swamp single frames of 14-19 ms)
+  float tod_max_ms = 2.f;
   // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
   // far version where the far version's shape error is at most this many pixels on screen (this
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).
@@ -299,13 +311,13 @@ struct CtrSettings {
   // (AI-assisted) impostors (CtrImpostor): far tie objects (each visibility group, up to 8
   // instances: trees, rocks, houses) whose nearest point is beyond impostor_distance (meters) and
   // that cover at most 128x128 pixels are drawn into a texture at screen resolution and shown as
-  // a card (a 4x4 grid at the group's depth) in their place, until the picture could be off by
-  // impostor_error pixels (camera moved) or they come nearer: then drawn again. At most
-  // impostor_budget triangles are drawn into impostors per frame (the rest stay geometry that
-  // frame). impostor_atlas: the texture's
-  // size in KB (linear memory, 256 | 512 | 1024). Off: at Sentinel Beach's start a card still
-  // covers a stone arch that stands among the rocks it was made from (host, Oct 12)
-  bool impostors = false;
+  // a card (one quad per cell on the plane of the group's visible surface there) in their place,
+  // until the picture could be off by impostor_error pixels (camera moved), the time of day moved
+  // its colors, or they come nearer: then drawn again. At most impostor_budget triangles are drawn
+  // into impostors per frame (the rest stay geometry that frame). impostor_atlas: the texture's
+  // size in KB (256 | 512 | 1024; VRAM when there is room at start, else linear memory). On by
+  // default since Oct 17 (the Sentinel Beach arch depth error fixed: CtrImpostor.h)
+  bool impostors = true;  // (AI-assisted) on since Oct 17 (beach depth fix; preset safe: off)
   float impostor_distance = 120.f;
   float impostor_error = 1.f;
   int impostor_budget = 6000;

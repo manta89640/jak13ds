@@ -37,6 +37,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
+#include "game/graphics/ctr/CtrImpostor.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
@@ -929,13 +930,18 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, doub
   if (++m_auto.frames < 15) {
     return;
   }
-  const double target = ctr_settings().auto_detail_gpu_ms;
+  // (AI-assisted, citadel) the target and margins are for fps_cap = 30's 33 ms frame: at fps_cap =
+  // 60 half of them (a 27 ms target kept the distances at their far end in a 16.7 ms frame:
+  // Azahar citadel-generator-start 92-99k triangles, 50 fps)
+  const double k = ctr_settings().fps_cap >= 60 ? 0.5 : 1.0;
+  const double target = ctr_settings().auto_detail_gpu_ms * k;
   const double avg = m_auto.busy_ms / m_auto.busy_frames;
   float t = m_auto.t;
-  if (avg > target || m_auto.busy_max > target + 4.0 || m_auto.build_max > target) {
+  if (avg > target || m_auto.busy_max > target + 4.0 * k || m_auto.build_max > target) {
     t -= 0.1f;
     m_auto.downs++;
-  } else if (avg < target - 4.0 && m_auto.busy_max < target && m_auto.build_max < target - 8.0) {
+  } else if (avg < target - 4.0 * k && m_auto.busy_max < target &&
+             m_auto.build_max < target - 8.0 * k) {
     t += 0.04f;
     m_auto.ups++;
   }
@@ -943,7 +949,7 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, doub
   // (AI-assisted, title-popin) a GPU close to missing frames lowers the distances of what is on
   // screen too (else those keep theirs until they are out of view; the build time's spikes, the
   // time of day recolor, don't count here)
-  ctr_level_set_detail_urgent(avg > target + 3.0 || m_auto.busy_max > 33.0);
+  ctr_level_set_detail_urgent(avg > target + 3.0 * k || m_auto.busy_max > 33.0 * k);
   if (t != m_auto.t) {
     m_auto.t = t;
     ctr_level_set_detail(t);
@@ -1267,6 +1273,10 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
+  // (AI-assisted) impostors: their texture in VRAM before the level texture pools fill it
+  if (ctr_settings().impostors) {
+    ctr_impostors().reserve();
+  }
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
