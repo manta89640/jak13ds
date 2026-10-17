@@ -5098,8 +5098,15 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     p = raw_w(p, GPUREG_STENCIL_OP, 0xF, e.stencilOp);
   }
   if (e.depthTest != c->depthTest) {
-    p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
-              (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
+    /* (AI-assisted, micro-gpu) cmd_dedup: GAS_DELTAZ_DEPTH's byte only depends on the depth
+     * function (citro3d writes it from the context's, which is the GPU's): left out when only the
+     * enable or the write mask changes */
+    if (!s_raw.dedup || !(s_micro & MICRO_GAS) || ((e.depthTest ^ c->depthTest) & 0x70u)) {
+      p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
+                (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
+    } else {
+      g.cur.cmd_dedup_words += 2;
+    }
     p = raw_w(p, GPUREG_DEPTH_COLOR_MASK, 0xF, e.depthTest);
   }
   if (e.blendClr != c->blendClr) {
