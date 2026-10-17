@@ -17,10 +17,9 @@ constexpr float kInf = 1e30f;
 // surface leave no sample between them, as on the GPU; the edges of the covered area are then
 // taken in by a sample (finish_occluders) against any difference in where the samples are
 constexpr float kInside = 0.f;
-// clip w (~ meters in front of the camera): triangles are clipped to w >= kClipW, and to a guard
-// band of kGuard times the screen
+// clip w (~ meters in front of the camera) below this: behind the camera; occluder triangles are
+// clipped to a guard band of kGuard times the screen
 constexpr float kNearW = 1e-3f;
-constexpr float kClipW = 0.05f;
 constexpr float kGuard = 4.f;
 }  // namespace
 
@@ -48,8 +47,17 @@ void CtrOccCull::begin_frame(u64 frame) {
 
 void CtrOccCull::add_triangle(const float* a, const float* b, const float* c) {
   tris_in++;
-  // clipped to w >= kClipW (in front of the camera) and a guard band of 4x the screen: the part
-  // left is a part of the triangle (a smaller occluder hides less, never more)
+  // only triangles every corner of which is between the near and far planes (-w <= z <= w, w > 0):
+  // the GPU draws all of such a triangle that is on screen; one crossing the near plane may be
+  // clipped there (the GPU) or dropped whole (the host's software backend): never an occluder
+  for (const float* v : {a, b, c}) {
+    if (!(v[3] > kNearW && v[2] >= -v[3] && v[2] <= v[3])) {
+      near_rejects++;
+      return;
+    }
+  }
+  // clipped to a guard band of 4x the screen (x, y): the part left is a part of the triangle (a
+  // smaller occluder hides less, never more)
   constexpr int kMax = 9;
   float poly[2][kMax][4];
   int n = 3;
@@ -60,12 +68,10 @@ void CtrOccCull::add_triangle(const float* a, const float* b, const float* c) {
   }
   int cur = 0;
   bool clipped = false;
-  for (int plane = 0; plane < 5 && n >= 3; plane++) {
+  for (int plane = 1; plane < 5 && n >= 3; plane++) {
     // plane value: >= 0 inside
     auto val = [&](const float* v) {
       switch (plane) {
-        case 0:
-          return v[3] - kClipW;
         case 1:
           return kGuard * v[3] - v[0];
         case 2:

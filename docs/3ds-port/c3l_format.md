@@ -514,47 +514,115 @@ u8 masks[] (one per fragment: 1 = unpacked).
 ## Fine visibility (.c3v)
 
 (AI-assisted.) A sidecar per level, `<level>.c3v` next to `<level>.c3l`, layout in
-`game/graphics/ctr/c3v_format.h`, read by `CtrLevels` with config `fine_vis = on`. It is not part
-of the .c3l: it is made from the finished .c3l by `ctr_vis_builder` and keyed to it by a
-fingerprint of the chunk, draw and visibility run tables (`c3v::fine_vis_level_hash`: chunk bounds,
-quantization, vertex and draw counts, LOD fields, kinds, draw index counts, runs; not textures,
-draw modes or the index order within a run). A .c3l converted again with other tables makes the
-runtime ignore its old .c3v (warning `<level>.c3v not used: made from another conversion`) and draw
-the level as without one, until the tool is run again.
+`game/graphics/ctr/c3v_format.h` (v2), read by `CtrFineVis` (`game/graphics/ctr/CtrFineVis.cpp`)
+for `CtrLevels` with config `fine_vis = on` (off by default: none are shipped, see "Results"). It is not part of the .c3l: it is made from the
+finished .c3l by `ctr_vis_builder` and keyed to it by a fingerprint of the chunk, draw and
+visibility run tables (`c3v::fine_vis_level_hash`: chunk bounds, quantization, vertex and draw
+counts, LOD fields, kinds, draw index counts, runs; not file offsets, compression, textures, draw
+modes, time of day data or the index / vertex order within a run). A .c3l converted again with other
+tables makes the runtime ignore its old .c3v (warning `<level>.c3v not used: made from another
+conversion`) and draw the level as without one, until the tool is run again. A v1 file (Oct 12) is
+refused the same way.
 
 ```sh
-build/tools/ctr_vis_builder --all out/jak1/c3l          # every level: <level>.c3v next to each .c3l
-build/tools/ctr_vis_builder out/jak1/c3l/maincave.c3l   # one level
+# every level, the sidecars into their own folder (all cores; the .fr3 files for the collision)
+build/tools/ctr_vis_builder --all out/jak1/c3l --fr3 out/jak1/fr3 --out-dir <dir>
+# one level / some levels
+build/tools/ctr_vis_builder out/jak1/c3l/maincave.c3l <dir>/maincave.c3v --fr3 out/jak1/fr3
+build/tools/ctr_vis_builder --all out/jak1/c3l --only maincave,snow --fr3 out/jak1/fr3 --out-dir <dir>
+# stage them with the levels
+platform/3ds/tools/stage_sd.sh ... --c3v <dir>
 ```
 
-After a reconvert of the .c3l files (any converter change), run `--all` again on the new folder.
-Levels where it finds nothing to do (no units, floors or occluders) get no file (an old one is
-removed). Time: ~5 min per level on 11 cores at the defaults (all cores; `--threads`).
+After a reconvert of the .c3l files that changes any of the tables above (any converter change of
+chunking, draws or runs), run `--all` again on the new folder; one that only changes what isn't
+in the fingerprint keeps the old files valid (the runtime checks at load). Levels where it finds
+nothing to do (no units, floors or occluders: GAME, jungleb) get no file (an old one is removed).
+Time: ~16 ms per cell per core (one sample per cell): Precursor Basin (maincave, 328k cells) 10
+min on 10 cores; all levels at the defaults ~20.6M cells, ~8-9 h on 11 cores. Size: maincave 37
+MB with `--block-kb 32` (13 MB with 8, which cuts a fifth as much); all levels ~2.3 GB / ~0.8 GB.
 
-Units: the chunks before the vista chunks (vista tiers are never hidden by it); a chunk's units are
-its visibility runs, or (chunks without) its draws in pieces of 288 indices: the pieces run_culling
-makes at load. Cells: `--cell` meters (4), where the camera can be: within `--above` (14) / `--below`
-(2) meters of a roughly horizontal tfrag / tie surface, `--spread` (2) cells sideways; or with
-`--camera <files>` (lines `level x y z`, meters) only around recorded camera positions
-(`--cam-radius 6`, `--cam-up 3`, `--cam-down 3`). Samples: each cell's corners and center; every
-point of a cell is within eps = 0.56 cell of one.
+**Units**: the chunks before the vista chunks (vista tiers are never hidden by it); a chunk's
+units are its visibility runs, or (chunks without) its draws in pieces of 288 indices: the pieces
+run_culling makes at load. tfrag, ties (both versions of a tie LOD group: each its own runs) and
+shrubs; merc (Jak, doors, platforms, anything that moves) is never hidden and never hides.
 
-Occlusion (conservative, CPU): from each sample, the level's opaque tfrag (drawn opaque, depth
-tested and written, no alpha test that can fail, no distance limit, not back face culled; detailed
-tier only within 160 m of its lod_center, coarse only beyond 240 m: what lod_distance 200 draws for
-certain) within 400 m into a cube of 64x64 depth maps, in four layers (the nearest occluder beyond
-1.5, 4, 8, 16 eps). Ties, shrubs, merc (doors, platforms), blended and alpha tested geometry never
-hide anything. A camera moved by up to eps sees at most asin(eps / d) around a direction at depth d:
-a pixel hides only what is further than the largest depth within asin(eps / dmin) of it (dmin: the
-nearest depth there, iterated), +2% + 0.25 m; a window with an empty direction hides nothing. A
-unit is hidden from a sample when every pixel its box (then each of its triangles' boxes) covers
-hides it; a cell's set is what any of its samples may see. Neighbouring cells with similar sets are
-merged until the sets fit `--budget-kb` (128). The one case this can't see: a hole in a far wall
-right behind a near object, seen by none of the cell's 9 samples.
+**Cells**: `--cell` meters (2) where the camera can be: within `--fine-above` (10) meters over /
+`--below` (2) under a floor, `--fine-spread` (6) meters sideways; further up (to `--above`, 20)
+and out (`--coarse-spread`, 10) cells of twice the size (a 4 m cell with any 2 m cell in it is
+cut into 2 m cells). Floors: the level's collision (`--fr3`: its .fr3, or a folder of them; by
+default `../fr3/<level>.fr3` from the .c3l folder), triangles steeper than 60 degrees left out; no
+.fr3 (or `--draw-floors`): roughly horizontal tfrag / tie triangles (more cells: unreachable
+scenery too). One sample per cell, at its center: every point of the cell is within eps = half
+its diagonal (1.75 m / 3.48 m). (The 9 samples of a body-centered lattice, eps 0.56 cell, gave
+the same sets per cell with twice the samples: their union adds up each sample's uncertainty.)
 
-Runtime: the cell of the camera's own position (cam.trans), each frame; no cell (cutscene cameras
-outside the cells, warps), far mode, an incomplete load, draw_distance < 400 m + 2 eps or
-lod_distance outside 178..218 m: nothing more hidden. Host check: `CTR_FINE_VIS_CHECK=1` with
-`--ctr-gfx` draws what fine_vis hid again at the end of each frame against its depth and counts the
-pixels that would have been seen (log `[ctr] fine_vis check:`; any pixel is a culling error);
-`CTR_FINE_VIS_ORACLE=1` reports how many drawn triangles were in runs with no pixel seen.
+**Occlusion** (conservative, CPU): from each sample, the level's own opaque static geometry within
+`--occ-range` (250) m into a cube of 64x64 depth maps, in four layers (the nearest occluder beyond 1.5, 4, 8, 16
+eps). An occluder is a draw that's opaque (no blending), depth tested (GEQUAL) and written, with
+no alpha test that can fail (GEQUAL whose reference the texture's smallest alpha passes, at the
+GPU's 2 x scale, and vertex alpha >= 0x80), and only from where the runtime draws it for certain
+from every point within eps of the sample:
+- tfrag: its LOD tier: the detailed one (1) only within 0.9 x `--lod-lo` (180 m) of its
+  lod_center, the coarse one (2) only beyond 1.5 x `--lod-hi` (220 m): a detailed cell in view is
+  held to 1.5 x lod_distance (title-popin), so the coarse tier isn't certain before;
+- every chunk's own distance limit at the smallest factors the sets are for: `--detail-min` (1)
+  x detail_scale, ties x `--tie-scale-min` (1) tie_distance_scale, shrubs (v14 PS2 distances) x
+  `--shrub-scale-min` (0.8) shrub_scale;
+- ties: only nearer than `--tie-occ-max` (120 m, impostor_distance: beyond it a group may be a
+  card); the versions of a tie LOD group only where the switch (CtrLevel.cpp: near while the
+  camera is within shape error x k + radius, k = detail_scale x focal / tie_lod_px) picks that one
+  for every k in `--tie-k-lo` .. `--tie-k-hi` (58 .. 70; gameplay: 1 x 256 / 4 = 64); kRunLodAlways
+  runs always;
+- closed tie surfaces (kDrawCullBack, which cull_ties may cull): only triangles whose front side
+  (counter-clockwise) faces every point within eps.
+A camera moved by up to eps sees at most asin(eps / d) around a direction at depth d: a pixel
+hides only what is further than the largest depth within asin(eps / dmin) of it (dmin: the
+nearest depth there, iterated), +2% + 0.25 m; a window with an empty direction hides nothing.
+The windows' pixel rectangles come from a table (per face, 2x2 block, and 64 radius steps, each
+rounded up). A unit is hidden from a sample when every pixel its box (then each of its triangles'
+boxes) covers hides it; a chunk's box first. A cell's set is what any of its samples may see. The
+one case this can't see: a hole in a far wall right behind a near object, seen by none of the
+cell's 9 samples.
+
+**Blocks**: the cells in blocks of `--block` (8) cells (16 m), each block on its own in the file
+(`BlockEntry` index, then the blocks): the block's distinct sets as a tree, each set the units
+where it differs from its parent (the root: from nothing), a spanning tree of the fewest
+differences rooted at its center; a cell map (runs of cells with the same set). Sets are merged
+(their union: conservative) only in a block over `--block-kb` (32 KB). The tool decodes every
+cell of every block again before it writes the file.
+
+**Runtime** (`CtrFineVis`): at the level's load, the header and the block index (8 bytes per block)
+and a pool of `fine_vis_kb` (64) KB per level. Each level draw (render thread): the camera's block
+and the blocks within 8 m of the camera are asked for; a loader thread of its own (priority 0x3B,
+core 2 on New 3DS, a 32 KB stack) reads each with one unbuffered SD card read into the pool, the
+blocks wanted least recently making room (never one being read). The cell's set is decoded when
+the camera enters a cell with another set (its path in the block's tree), then per covered chunk
+whether it hides none / all / some of its units. No block yet (the first frames in a new area),
+the camera outside every cell (cutscene and title cameras high up, warps), far mode, an
+incomplete load, draw_distance < 250 m + 2 eps, lod_distance x 0.9 < 162 m or x 1.5 > 330 m (so
+180 .. 220 m), detail_scale / tie_distance_scale / shrub_scale below the tool's, impostors with
+impostor_distance < 120 m, cull_ties = flip, or the tie LOD factor outside the tool's range:
+nothing more hidden that frame. Log every stats period: `[ctr] <level>: fine vis: N of M level
+draws with a set (W waiting for a block, O outside the cells, U not usable); C cells entered, D
+sets decoded (ms); B blocks read (KB, ms each); ... ms per level draw` and `[ctr] l0-tfrag: fine
+vis hid N chunks, M tris per level draw with a set`.
+
+Host checks (`--ctr-gfx`): `CTR_FINE_VIS_CHECK=1` draws what fine_vis hid again at the end of each
+frame against its depth and counts the pixels that would have been seen (log `[ctr] fine_vis
+check:`; any pixel is a culling error); `CTR_FINE_VIS_ORACLE=1` reports how many drawn triangles
+were in runs with no pixel seen.
+
+**Results** (Oct 17, finer-vis; c3l v18). The sets are conservative over every view direction and
+every point of a cell, which is why they hide little next to what a view hides (the host oracle:
+50-85% of the tfrag drawn at the maincave start has no visible pixel):
+- triangle weighted share of the level that may be seen, maincave: 93% per 4 m cell, 80% per 2 m
+  cell as sampled; in the file 88% (32 KB blocks) / 96% (8 KB);
+- per frame, over three maincave checkpoints with camera turns (host): 4 m cells hide nothing,
+  2 m cells 2.2k of ~43k triangles (5%) with 32 KB blocks (37 MB), 0.4k (1%) with 8 KB (13 MB);
+- open levels lower. So no .c3v files are shipped and `fine_vis` is off by default; the
+  streaming runtime costs ~0.003 ms per level draw, a set decode 0.02 ms (host), a block read
+  ~0.3 ms of SD card time, 1-8 blocks per second while moving.
+`occ_cull` (config_dev.md, CtrOccCull.h) is the exact per-view alternative: it hides far more
+(maincave start in Azahar: 16.6k triangles), but its CPU cost on the 3DS is larger than the GPU
+time it saves (24.5 ms for that; 6.4 ms for 3.1k with fewer occluders), so it is off too.

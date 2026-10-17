@@ -258,7 +258,7 @@ struct CtrSettings {
   // file, or a camera outside the cells, draws as without it
   bool fine_vis = false;  // (off: no .c3v files are shipped, see c3l_format.md)
   // (AI-assisted) fine_vis: the memory per level for the .c3v blocks read around the camera (KB)
-  int fine_vis_kb = 64;
+  int fine_vis_kb = 128;
   // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h): each frame
   // the drawn opaque pieces nearest the camera (up to occ_cull_tris triangles within
   // occ_cull_dist meters, the biggest on screen first) are rasterized on the CPU; the pieces behind

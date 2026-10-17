@@ -27,9 +27,9 @@
 
 namespace {
 
-// the blocks within this distance of the camera are read ahead of time (game units: 8 m; at a
-// fast 20 m/s the camera crosses it in 0.4 s, a block read takes a few ms)
-constexpr float kPrefetch = 8.f * 4096.f;
+// the blocks within this distance of the camera are read ahead of time (game units: 4 m; at a
+// fast 20 m/s the camera crosses it in 0.2 s, a block read takes ~6 ms in Azahar)
+constexpr float kPrefetch = 4.f * 4096.f;
 // below the render thread (0x2F) and the sound mixer (0x2E); above the level loader (0x3C), whose
 // jobs take seconds while a block takes a few ms of SD card time
 constexpr int kLoaderPrio = 0x3B;
