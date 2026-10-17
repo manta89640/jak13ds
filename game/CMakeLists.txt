@@ -42,6 +42,7 @@ set(RUNTIME_SOURCE
         graphics/ctr/CtrDirect.cpp
         graphics/ctr/CtrImpostor.cpp
         graphics/ctr/CtrLevel.cpp
+        graphics/ctr/CtrStream.cpp
         graphics/ctr/CtrMerc.cpp
         graphics/ctr/CtrEye.cpp
         graphics/ctr/CtrOcean.cpp

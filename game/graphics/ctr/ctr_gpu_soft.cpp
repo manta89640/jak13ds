@@ -41,6 +41,7 @@ struct SoftMesh {
   int stride = 16;             // 16: c3l::Vertex, 20: c3l::MercVertex
   std::vector<uint8_t> verts;
   std::vector<uint16_t> indices;
+  void* ext = nullptr;  // (AI-assisted, streaming) ctr_gpu_mesh_begin_ext's block (given back)
 };
 
 struct SoftPool {
@@ -1335,12 +1336,67 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
   return slot;
 }
 
+// (AI-assisted, streaming) the host keeps its own copy of the vertices and indices (as for every
+// mesh) and gives the caller's block back when the mesh goes
+static void (*s_soft_ext_free)(void* mem) = nullptr;
+void ctr_gpu_set_ext_free(void (*fn)(void* mem)) {
+  s_soft_ext_free = fn;
+}
+static std::map<void*, unsigned int> s_soft_blocks;
+void* ctr_gpu_linear_block(unsigned int bytes) {
+  void* p = malloc(bytes);
+  if (p) {
+    s_soft_blocks[p] = bytes;
+  }
+  return p;
+}
+void ctr_gpu_linear_block_free(void* p) {
+  s_soft_blocks.erase(p);
+  free(p);
+}
+// (AI-assisted, streaming) a model of the 3DS linear heap: env CTR_SOFT_LINEAR_KB (default 34000:
+// what levels, their textures and the stream arena have of it there, about) less the level texture
+// pools, the meshes and the arena's blocks
+unsigned int ctr_gpu_linear_free(void) {
+  static const double total =
+      (getenv("CTR_SOFT_LINEAR_KB") ? atof(getenv("CTR_SOFT_LINEAR_KB")) : 34000.0) * 1024.0;
+  double used = 0;
+  for (const auto& p : g_soft.pools) {
+    used += p.used ? (double)p.data.size() : 0.0;
+  }
+  for (const auto& m : g_soft.meshes) {
+    used += m.used && !m.ext ? (double)(m.verts.size() + m.indices.size() * 2) : 0.0;
+  }
+  for (const auto& [p, n] : s_soft_blocks) {
+    used += n;
+  }
+  return used >= total ? 0u : (unsigned int)(total - used);
+}
+static void soft_mesh_free(int mesh) {
+  void* ext = g_soft.meshes[mesh].ext;
+  g_soft.meshes[mesh] = SoftMesh();
+  if (ext && s_soft_ext_free) {
+    s_soft_ext_free(ext);
+  }
+}
+int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
+                           uint16_t** indices) {
+  if (!mem) {
+    return -1;
+  }
+  const int slot = ctr_gpu_mesh_begin(vertex_count, index_count, verts, indices);
+  if (slot >= 0) {
+    g_soft.meshes[slot].ext = mem;
+  }
+  return slot;
+}
+
 int ctr_gpu_mesh_end(int mesh, int ok) {
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size()) {
     return -1;
   }
   if (!ok) {
-    g_soft.meshes[mesh] = SoftMesh();
+    soft_mesh_free(mesh);
     return -1;
   }
   return mesh;
@@ -1362,7 +1418,7 @@ void ctr_gpu_free_pending_now(void) {}
 
 void ctr_gpu_mesh_delete(int mesh) {
   if (mesh >= 0 && mesh < (int)g_soft.meshes.size()) {
-    g_soft.meshes[mesh] = SoftMesh();
+    soft_mesh_free(mesh);
   }
 }
 
