@@ -291,6 +291,8 @@ struct CtrLevelData {
     double late_ms = 0, late_last_ms = 0;
     u64 late_frame = 0, late_last = 0;
     u32 loads = 0;
+    u64 want_frame = 0;  // (statistics) the first frame it was wanted while absent (0: not)
+    float last_score = 0;
   };
   static constexpr u8 kUnitAbsent = 0, kUnitLoading = 1, kUnitResident = 2, kUnitNever = 3;
   std::vector<StreamUnit> stream_units;
@@ -307,6 +309,8 @@ struct CtrLevelData {
   float stream_k = 0.f;   // the last draw's tie LOD factor (a group is near within its error x
                           // this + its radius; 0: no near versions)
   u64 stream_frame = 0;   // the last draw's frame
+  float stream_k_hi = 0.f;  // its recent largest (decaying 1% a frame): the scheduler's headroom
+                            // for a camera that zooms (the factor follows the focal length)
   u32 stream_resident = 0;  // bytes of the units there
   // the file's header and block directory, for the stream jobs' readers (no reads of them)
   std::shared_ptr<const c3l::Reader::Dir> file_dir;
@@ -475,12 +479,14 @@ class CtrLevels {
     u32 tod_ntab = 0;                      // the level's time of day entries (0: none)
     std::shared_ptr<const c3l::Reader::Dir> dir;  // the file's directory (CtrLevelData::file_dir)
     size_t window = 0;                     // the reader's window for these reads
+    u32 serial = 0;                        // (stream jobs: each its own key)
+    bool urgent = false;  // (stream) holds units needed now: before a level's prefetch
     bool parts() const { return detail || repair || stream; }
     // in m_requested
     std::string key() const {
       return detail   ? name + "#detail"
              : repair ? name + "#repair"
-             : stream ? name + "#stream"
+             : stream ? name + "#stream" + std::to_string(serial)
                       : name;
     }
   };
@@ -510,7 +516,7 @@ class CtrLevels {
       std::vector<u16> run_group;  // per run of the chunk
     };
     std::vector<StreamOut> stream_out;
-    double ms = 0, read_ms = 0;  // the job's time, its file reads'
+    double ms = 0, read_ms = 0, decode_ms = 0;  // the job's time, its file reads', decoding
     u64 read_bytes = 0;
     u32 reads = 0;
     u32 preloads = 0, preload_misses = 0;  // (streaming) runs read in one request each, or not
@@ -595,7 +601,8 @@ class CtrLevels {
   // ones not needed now); returns how many
   u32 stream_shrink(bool all);
   static void free_stream_parts(const Job& job);
-  bool m_stream_inflight = false;  // a stream job queued, running or not taken (one at a time)
+  u32 m_stream_inflight = 0;  // stream jobs queued, running or not taken (kJobsInFlight)
+  u32 m_stream_serial = 0;
   std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
@@ -612,13 +619,17 @@ class CtrLevels {
   struct StreamStats {
     u64 frames = 0, jobs = 0, units = 0, bytes = 0, read_bytes = 0, reads = 0, evictions = 0;
     u64 no_room = 0, late_events = 0, late_frames_total = 0;
-    double read_ms = 0, job_ms = 0, job_max_ms = 0, late_ms_total = 0, late_ms_max = 0;
+    double read_ms = 0, decode_ms = 0, job_ms = 0, job_max_ms = 0, late_ms_total = 0,
+           late_ms_max = 0;
     double sched_ms = 0, sched_max_ms = 0;
     u64 need_max = 0, need_sum = 0;  // bytes of the units needed now (score < 0) per frame
     u64 neighbours = 0;  // units read along with their file neighbours before they were wanted
     u64 late_periods = 0, late_frames_max = 0;
     u64 shrunk = 0;  // units freed to give growth segments back
     u64 packed = 0;  // the file bytes of the units read (their blocks)
+    u64 late_loading = 0, late_absent = 0;
+    u64 late_unwanted = 0;  // late, never wanted before (the need not foreseen)
+    u64 late_wanted_frames = 0;  // late after being wanted: the frames between
     u64 preloads = 0, preload_misses = 0;
     u64 late_group_frames = 0, late_frames = 0, last_late_frame = 0;
     double since_ms = 0;  // the window's start

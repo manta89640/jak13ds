@@ -25,6 +25,9 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--tie-lod-budget-kb K` | per level | (v17) extra vertex and index data for near versions per level; default: the level's planned budget (`kTieLodBudgets` in main.cpp), else every group. |
 | `--tie-lod-min-angle A`, `--tie-lod-view-m M` | 0.002, 15 | (v17) a group gets a near version when its shape error seen from the larger of its radius and M meters is at least A radians. |
 | `--tie-lod-default-m M` | 60 | (v17) near version distance of groups without a PS2 distance (wind instances). |
+| `--no-stream` | off | (AI-assisted, v19) no near chunks: a v18 file (near versions within `kTieLodBudgets`, in the far versions' chunks). See "Near chunks (v19)" and `streaming.md`. |
+| `--stream-classes M,...`, `--stream-class-cells M,...` | 30,60,120,240 / 50,50,100,100,200 | (v19) near chunks per need class: a group's near version is needed within error x 70.4 + radius of its center (gameplay focal 256 / tie_lod_px 4 x 1.1); the classes' bounds (meters) and each class's cell size. |
+| `--stream-cell M` | 100 | (v19) the near chunk cell size of classes without one in `--stream-class-cells`. |
 | `--palette N` | 1 | time of day palette baked into the vertex colors (0..7): what a v16 runtime shows until its first blend, and older runtimes always. |
 | `--no-tod` | off | (AI-assisted, v16) no time of day table: the vertex colors stay the baked palette. See "Time of day". |
 | `--max-tex N` | 128 | maximum texture size. Larger textures are box-filtered down. |
@@ -193,10 +196,10 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 18 (7..17 still load; v12: merc rewritten vertices; v13: vista
+  char magic[4] = "C3LV"; u32 version = 19 (7..18 still load; v12: merc rewritten vertices; v13: vista
   tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"; v16: time
   of day; v17: tie levels of detail; v18: a chunk's vertices grouped by visibility id, see "Time of
-  day"); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
+  day"; v19: near chunks, see "Near chunks (v19)"); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
   tod_color_count, tod_mul_count, (v17) ext_offset (ExtHeader, 0: none; the end of the 32 byte level
   name before: zero)
   u32 num_textures, textures_offset
@@ -241,7 +244,8 @@ Draw (16 bytes)
                           depth write, ...
   u16 texture             texture index, 0xffff = untextured
   u16 kind                0 = tfrag, 1 = tie, 2 = shrub (low byte); flags: 0x100 kDrawCullBack (v13),
-                          0x200 kDrawAtlasUV, 0x400 kDrawBlendDropped, 0x800 kDrawAlphaTestDropped (v15)
+                          0x200 kDrawAtlasUV, 0x400 kDrawBlendDropped, 0x800 kDrawAlphaTestDropped (v15),
+                          0x1000 kDrawAlpha80 (v19: every vertex the draw uses has alpha 0x80)
   u32 first_index, index_count   triangle list; indices are relative to the chunk's first_vertex
 
 Texture (16 bytes)
@@ -432,6 +436,51 @@ drawn along with its neighbours (the small-gap merge), so the two versions are n
 other. Visibility bits, run culling, static_cmdlists (a version change is a new draw list for one
 frame), cull_ties (each version oriented on its own), time of day (the chunk's vertices are both
 versions') and impostors (cards show the far version) work as before.
+
+## Near chunks (v19)
+
+(AI-assisted, streaming.) v17/v18 kept a tie LOD group's near version (geometry 0) in the chunk of
+its far version, sharing its vertices, and only for the groups that fit a per-level budget
+(`kTieLodBudgets`: geometry 0 everywhere needs up to ~17 MB per level). v19 gives every candidate
+group its near version, in chunks of their own that the runtime streams (`streaming.md`):
+
+- **Near chunks.** A group's near triangles go to a near chunk (Chunk::kind CHUNK_KIND_TIE,
+  lod_tier 0, max_dist the group's detail class as before) of the cell of the group's center, the
+  cell size by its *need class*: the distance its near version is drawn within is error x
+  70.4 + radius (the runtime's screen-space rule at gameplay's focal length 256 and tie_lod_px 4,
+  x 1.1 hysteresis); classes < 30, < 60, < 120, < 240 m and beyond, cells 50, 50, 100, 100, 200 m
+  (`--stream-classes`, `--stream-class-cells`). Without the classes one large rock made its whole
+  100 m cell needed from 300 m away: Snowy needed up to 9.2 MB of near data at once (camera at each
+  group's center), with them 6.2 MB. A near chunk holds near versions only (RunLod kRunLodNear runs,
+  visibility ids as before) and its own vertices (the shared ones are copied: the far chunk keeps
+  what its far versions use). Its far versions stay in the ordinary 200 m tie chunks
+  (kRunLodFar runs), so the far chunks are v16's ties plus nothing.
+- **Order.** The near chunks come after the other chunks (before the vista tier) and their vertex
+  and index data after the others' in those sections, in the Morton order of their cells (x, z),
+  then height: chunks near each other in space lie together in the file, and the runtime reads the
+  ones it needs together in one request per section (c3l::Reader::preload). The block cuts start
+  a block at each chunk's vertices and indices as before.
+- **Core set.** The v18 budget still runs: the groups it takes are the core set (StreamChunk::cls
+  1, kStreamCore), the others extra (2). Near chunks are per class, so a runtime without streaming
+  loads the core ones with the level and never the others: v18's ties.
+- `ExtHeader` (size 48): after v17's fields `u32 run_sphere_offset, stream_count, stream_offset,
+  stream_flags`. `RunSphere {s16 c[3]; u16 r}` per file run (from runs_offset, run_lod_count of
+  them): the runtime's run_culling spheres (before v19 made at load from the vertices, which a near
+  chunk doesn't have then: the converter makes them the same way, the host check compares).
+  `StreamChunk {u32 chunk; u16 cls, pad; float need_a, need_e}` per near chunk: it is needed while
+  the camera is within need_a + need_e x the runtime's factor of its sphere's center (need_a: the
+  largest distance of a group's center to it plus the group's radius; need_e: the largest error).
+  Draw::kind kDrawAlpha80 (fog_alpha, before v19 worked out at load from the vertices). An ExtHeader
+  is written whenever the file has runs.
+- Sizes (Oct 17, all levels; vertex + index data): the near chunks hold 142 MB (village1 7.7 MB in
+  305 chunks, lavatube 22.2 MB in 1312, snow 10.5 MB in 351), the other chunks 149 MB (village1
+  7.1 MB, lavatube 10.9 MB, snow 7.9 MB); v18's vertex and index data were 223 MB. Files 199 MB
+  (v18 157 MB). The converter logs per level `streaming (v19): N near chunks (cells by need
+  distance: ...): core ..., extra ...; other chunks K KB` and `near chunk data needed at once, the
+  camera at the groups' centers: A KB on average, at most M KB`.
+- fine_vis: a .c3v made from a v18 file doesn't match a v19 one (other chunk, draw and run tables):
+  run `ctr_vis_builder --all` on the v19 folder (it reads v19 files as they are: near chunks are tie
+  chunks, never occluders, their runs units like any tie chunk's).
 
 ## Merc
 

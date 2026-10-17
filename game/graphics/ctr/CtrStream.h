@@ -40,8 +40,12 @@ class CtrStreamArena {
   // the empty growth segments back to the linear heap (render thread, or the thread of
   // CtrLevels::service; no frame being built). Returns their bytes.
   u32 release_empty();
-  // in a growth segment (those are emptied first)
+  // in a growth segment (those are emptied first); any growth segment
   bool in_growth(const void* p);
+  bool has_growth() {
+    std::lock_guard<std::mutex> lk(m_lock);
+    return m_segs.size() > 1;
+  }
   // the bytes of a mesh's piece: its vertices, then its indices (ctr_gpu_mesh_begin_ext)
   static u32 mesh_bytes(u32 vertex_count, u32 index_count);
   struct Stats {

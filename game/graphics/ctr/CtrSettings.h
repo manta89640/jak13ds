@@ -238,6 +238,9 @@ struct CtrSettings {
   // near chunks needed don't fit and the linear heap keeps this much free after it; given back when
   // the heap has less, or a level load needs the memory
   int stream_reserve_kb = 3584;
+  // (AI-assisted, streaming) diagnostic: a log line for each near chunk that is late (and the
+  // camera's speed, its score before)
+  bool stream_debug = false;
   // (AI-assisted) time of day: day palettes that move every frame (sunken's cycling lights, most
   // of its vertices) taken every second frame (CtrLevel.cpp tod_update). off: every frame (exact)
   bool tod_busy_half = true;
