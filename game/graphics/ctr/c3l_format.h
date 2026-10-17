@@ -186,7 +186,10 @@ struct ExtHeader {
   uint32_t run_lod_count;      // RunLod[]: one per VisRun of the file, from runs_offset on
   uint32_t run_lod_offset;     // absolute
   uint32_t runs_offset;        // where the file's VisRuns start (RunLod i is VisRun i from here)
-  uint32_t pad;
+  // (AI-assisted, title-popin) absolute offset of float[lod_group_count]: each group's shape error
+  // (the larger one-sided Hausdorff distance between its two versions, game units), from which
+  // the runtime switches by screen-space error; 0: none (files before it: the dist switch)
+  uint32_t lod_error_offset;
 };
 static_assert(sizeof(ExtHeader) == 32);
 struct TieLodGroup {

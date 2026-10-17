@@ -843,6 +843,7 @@ struct Converter {
   std::unordered_map<u64, u32> lod_group_of;
   std::vector<c3l::TieLodGroup> lod_groups;
   std::vector<u32> lod_group_detail;
+  std::vector<float> lod_group_error;  // (AI-assisted, title-popin) shape error per group
   // the tree being added (add_tie_tree): its index in the level's tree list, and which version:
   // -1 without levels of detail (every group, as before v17), 0 the near geometry (only the
   // selected groups), 1 the far geometry (every group; the selected ones as their far version)
@@ -2614,6 +2615,7 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
       lg.bsphere[c] = bs[c];
     }
     lg.dist = dists[i];
+    cv->lod_group_error.push_back(err[i]);
     cv->lod_group_of[list[i].first] = (u32)cv->lod_groups.size();
     cv->lod_groups.push_back(lg);
     cv->lod_group_detail.push_back(bs[3] < opt.detail_radius * 4096.f   ? 1
@@ -2630,6 +2632,7 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
              level.level_name, cv->lod_groups.size());
     cv->lod_groups.resize(0xfffe);
     cv->lod_group_detail.resize(0xfffe);
+    cv->lod_group_error.resize(0xfffe);
     for (auto it = cv->lod_group_of.begin(); it != cv->lod_group_of.end();) {
       it = it->second >= 0xfffe ? cv->lod_group_of.erase(it) : std::next(it);
     }
@@ -3618,6 +3621,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     eh.run_lod_count = out_run_lods.size();
     eh.run_lod_offset = append(buf, out_run_lods.data(), out_run_lods.size());
     eh.runs_offset = runs_offset;
+    if (cv.lod_group_error.size() == cv.lod_groups.size()) {
+      eh.lod_error_offset = append(buf, cv.lod_group_error.data(), cv.lod_group_error.size());
+    }
     memcpy(buf.data() + hdr.ext_offset, &eh, sizeof(eh));
   }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());

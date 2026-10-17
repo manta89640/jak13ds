@@ -16,6 +16,7 @@
  *   are, and CtrSky::draw draws the same polygons, clipped by the GPU (ctr_gpu_draw_clip).
  */
 
+#include <map>
 #include <vector>
 
 #include "common/common_types.h"
@@ -72,7 +73,20 @@ class CtrSky {
   std::vector<u64> m_logged;  // source textures already logged
   struct Stats {
     int blends = 0, draws = 0;
+    int fast_blends = 0;  // (AI-assisted, title-popin) textures blended between the 4th frames
+    int frames = 0;
+    double blend_ms = 0;  // (AI-assisted, title-popin) render thread: blends and uploads
   } m_stats;
+  // (AI-assisted, title-popin) this frame's copies, and per (salt, texture) the weights of the
+  // copies of its last blend
+  struct Copy {
+    u64 tex0;
+    u32 intensity;
+    int idx;
+    bool first;
+  };
+  std::vector<Copy> m_copies;
+  std::map<std::pair<u64, int>, std::vector<u32>> m_last_weights;
 };
 
 class CtrTfragRenderer;

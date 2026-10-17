@@ -104,6 +104,9 @@ struct CtrLevelData {
   std::vector<c3l::RunLod> run_lod;
   std::vector<u8> chunk_lod;
   std::vector<u8> lod_state;
+  // (AI-assisted, title-popin) per group its shape error (c3l::ExtHeader::lod_error_offset, game
+  // units; empty: an older file, the groups switch at their dist)
+  std::vector<float> lod_error;
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
@@ -154,6 +157,16 @@ struct CtrLevelData {
   // (AI-assisted) last frame's decisions, for hysteresis (CtrTfragRenderer::draw_level): per chunk
   // bits 0-1 detailed/coarse (1 near, 2 far, 0 not decided yet), bit 2 within its draw distance
   std::vector<u8> chunk_state;
+  // (AI-assisted, title-popin) the auto_detail position (ctr_level_detail x kDetailQ) each chunk's
+  // distance and each tie LOD group's version were last decided with (0xff: none yet). A chunk or
+  // group in view keeps deciding with it, so a change of the auto_detail distances never makes
+  // something on screen appear, vanish or change its version; it takes the new distances when it
+  // is out of view, or when the old and the new decide alike.
+  std::vector<u8> chunk_detail_q;
+  std::vector<u8> lod_detail_q;
+  // (AI-assisted, title-popin) per chunk of tiers 1/2: a sphere around its lod_center holding both
+  // versions of the cell (the same for both: their in-view tests agree), x y z r
+  std::vector<float> lod_cell_sphere;
   bool was_far = false;
   u32 generation = 0;             // tells loads of the same level apart
   // (AI-assisted) config fine_vis: the level's .c3v sidecar (c3v_format.h), read at load when it
@@ -455,6 +468,9 @@ static_assert(sizeof(CtrBackgroundCamera) == 16 * 23);
 /*! (AI-assisted) config.ini auto_detail: where the shrub / tie distances are between their near
  * (0) and far (1) values (render thread). */
 void ctr_level_set_detail(float t);
+// (AI-assisted, title-popin) auto_detail: the GPU is over its budget (frames about to miss their
+// vblank): lower distances apply to what is in view too
+void ctr_level_set_detail_urgent(bool urgent);
 float ctr_level_detail();
 
 class CtrTfragRenderer : public CtrBucketRenderer {

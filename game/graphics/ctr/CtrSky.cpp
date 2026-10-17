@@ -71,9 +71,12 @@ CtrSky::~CtrSky() {
 }
 
 void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
+  const double t_start = ctr_gpu_time_ms();  // (AI-assisted, title-popin) statistics
   // SkyBlendCPU::do_sky_blends: each copy is an adgif (the source texture) and a sprite whose
   // color is the weight (0x80 = 1.0); the first one of a frame draws (no ABE), the others add.
   // The sprite's second corner tells sky (32 px) from clouds (64 px).
+  // (AI-assisted, title-popin) the frame's copies first: whether to blend depends on all of them
+  m_copies.clear();
   while (dma.current_tag().qwc == 6 && dma.current_tag_offset() != rs.next_bucket) {
     auto setup = dma.read_and_advance();
     if (dma.current_tag_offset() == rs.next_bucket) {
@@ -85,7 +88,6 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
       continue;
     }
     GifTag tag(draw.data);
-    const bool first = !GsPrim(tag.prim()).abe();
     u32 coord, intensity;
     memcpy(&coord, draw.data + 5 * 16, 4);
     memcpy(&intensity, draw.data + 16, 4);
@@ -93,12 +95,46 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
     if (idx < 0) {
       continue;
     }
-    // (AI-assisted) blended (and uploaded, with the clouds' mip levels) every 4th frame only: the
-    // time of day colors change over minutes, the clouds move by their texture offsets. It cost
-    // ~3 ms of the render thread per frame on the Misty zoomer course (Azahar).
-    if (m_valid[idx] && (rs.frame_idx & 3) != 0) {
+    m_copies.push_back({tex0, intensity, idx, !GsPrim(tag.prim()).abe()});
+  }
+  // (AI-assisted) blended (and uploaded, with the clouds' mip levels) every 4th frame only: the
+  // time of day colors change over minutes, the clouds move by their texture offsets. It cost
+  // ~3 ms of the render thread per frame on the Misty zoomer course (Azahar).
+  // (AI-assisted, title-popin) Except while the weights move fast: the title runs the day ~20x
+  // faster and the sky stepped visibly every 4th frame (Azahar). A texture is blended again in any
+  // frame where its copies' weights (0x80 = 1.0) moved by kSkyFastDelta in all since its last blend.
+  constexpr u32 kSkyFastDelta = 1;
+  bool do_blend[2];
+  for (int i = 0; i < 2; i++) {
+    auto& last = m_last_weights[{salt, i}];
+    u32 delta = 0;
+    size_t n = 0;
+    for (const auto& c : m_copies) {
+      if (c.idx == i) {
+        delta += n < last.size() ? (u32)std::abs((int)c.intensity - (int)last[n]) : 0x80u;
+        n++;
+      }
+    }
+    delta += n != last.size() ? 0x80u : 0u;
+    do_blend[i] = !m_valid[i] || (rs.frame_idx & 3) == 0 || delta >= kSkyFastDelta;
+    if (do_blend[i]) {
+      last.clear();
+      for (const auto& c : m_copies) {
+        if (c.idx == i) {
+          last.push_back(c.intensity);
+        }
+      }
+      m_stats.fast_blends += (rs.frame_idx & 3) != 0 && m_valid[i];
+    }
+  }
+  for (const auto& copy : m_copies) {
+    const int idx = copy.idx;
+    if (!do_blend[idx]) {
       continue;
     }
+    const u64 tex0 = copy.tex0;
+    const bool first = copy.first;
+    const u32 intensity = copy.intensity;
     auto& out = m_work[idx];
     const size_t n = (size_t)kSize[idx] * kSize[idx] * 4;
     if (first || !m_work_started[idx]) {
@@ -172,6 +208,7 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
     m_work_sources[idx]++;
     m_stats.blends++;
   }
+  m_stats.blend_ms += ctr_gpu_time_ms() - t_start;
 }
 
 void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
@@ -180,6 +217,8 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
   }
   SkyPacket p;
   memcpy(&p, packet, sizeof(p));
+  const double t_up = ctr_gpu_time_ms();  // (AI-assisted, title-popin) statistics
+  m_stats.frames++;
   // (AI-assisted) last frame's blends: keep them if they completed, otherwise the last good ones
   for (int i = 0; i < 2; i++) {
     if (m_work_started[i] && !m_work_failed[i] && m_work_sources[i] > 0) {
@@ -222,6 +261,7 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
     }
     m_dirty[i] = false;
   }
+  m_stats.blend_ms += ctr_gpu_time_ms() - t_up;
   constexpr u32 kEeBytes = 128 * 1024 * 1024;
   auto verts_at = [&](u32 addr, int count) -> const SkyVertex* {
     if (!addr || addr + (u64)count * sizeof(SkyVertex) > kEeBytes) {
@@ -346,7 +386,9 @@ void CtrSky::draw(const u8* packet, CtrRenderState& rs) {
     }
   }
   if (rs.log_now) {
-    lg::debug("[ctr] sky: {} texture blends, {} draws", m_stats.blends, m_stats.draws);
+    lg::info("[ctr] sky: {} texture blends ({} between the 4th frames: the weights moving fast), "
+             "{} draws, blends and uploads {:.2f} ms per frame", m_stats.blends,
+             m_stats.fast_blends, m_stats.draws, m_stats.blend_ms / std::max(1, m_stats.frames));
     m_stats = Stats();
   }
 }

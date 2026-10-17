@@ -227,6 +227,12 @@ struct CtrSettings {
   // (geometry 0) are drawn with it within their PS2 distance, else with the far one (geometry 3).
   // off: the far versions only (as before v17)
   bool tie_lod = true;
+  // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
+  // far version where the far version's shape error is at most this many pixels on screen (this
+  // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).
+  // 1 px costs ~+30-70k triangles on the title and in Snowy; 4 keeps the worst views about where
+  // they were (host, Oct 17)
+  float tie_lod_px = 4.f;
   // (AI-assisted) a neighbouring level's visibility string (the camera is in the other level): its
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)

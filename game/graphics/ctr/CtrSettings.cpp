@@ -238,6 +238,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.run_culling = parse_bool(v);  // (AI-assisted)
     } else if (key == "tie_lod") {
       s.tie_lod = parse_bool(v);  // (AI-assisted) c3l v17
+    } else if (key == "tie_lod_px") {
+      s.tie_lod_px = std::clamp(f, 0.25f, 16.f);  // (AI-assisted, title-popin)
     } else if (key == "neighbour_vis") {
       s.neighbour_vis = parse_bool(v);  // (AI-assisted)
     } else if (key == "fine_vis") {
