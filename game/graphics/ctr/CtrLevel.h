@@ -174,6 +174,10 @@ struct CtrLevelData {
   // at load when it matches the .c3l (nullptr: none, or another conversion's); its blocks are read
   // around the camera as it moves
   std::shared_ptr<CtrFineVis> fine;
+  // (AI-assisted) occ_cull: per run, hidden by the occlusion buffer last frame (tested every frame;
+  // the others every 4th)
+  std::vector<u8> occ_hidden;
+  float occ_ema = 1e9f;  // triangles it hid per level draw (moving average; start: run it)
   // (AI-assisted) c3l v16 time of day: the level's colors in the game's 8 palettes, blended with
   // the weights the game sends (its mood's itimes, as the PC's tfrag3 / tie3 / shrub renderers do
   // each frame) into the chunks' vertex colors (tod_* in CtrLevel.cpp). nullptr: the file's baked
@@ -549,9 +553,14 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     u32 slot, di, first, count;
   };
   std::vector<OccCand> m_occ_cands;
+  struct OccTri {
+    float q[3][4];
+    float size;
+  };
+  std::vector<OccTri> m_occ_tris_buf;
   u64 m_occ_frames = 0, m_occ_tris_in = 0, m_occ_tris_drawn = 0, m_occ_chunks = 0, m_occ_runs = 0,
       m_occ_tris = 0, m_occ_drawn_tris = 0;
-  double m_occ_ms = 0, m_occ_max_ms = 0, m_occ_phase[4] = {0, 0, 0, 0};
+  double m_occ_ms = 0, m_occ_max_ms = 0, m_occ_phase[6] = {0, 0, 0, 0, 0, 0};
   // (AI-assisted) host --ctr-gfx, env CTR_FINE_VIS_CHECK: the runs fine_vis hid this level draw
   // (chunk, run; run ~0u: all of the chunk), checked against the frame's depth at its end
   std::vector<std::pair<u32, u32>> m_fine_hidden;

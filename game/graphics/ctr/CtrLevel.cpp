@@ -3109,6 +3109,10 @@ u8 detail_q(float t) {
 // title camera's flight (host, Oct 17) most switches of tie versions, tfrag tiers and distance
 // limits in view were of things moving away.
 constexpr float kHoldInView = 1.5f;
+// (AI-assisted) occ_cull: a level whose occlusion buffer hid fewer triangles than this per level
+// draw lately (average) runs it every 8th frame only; runs of fewer triangles aren't tested
+constexpr float kOccMinTris = 1000.f;
+constexpr u32 kOccMinRunTris = 16;
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
 bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
   for (int i = 0; i < 4; i++) {
@@ -3589,11 +3593,13 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (rs.log_now && m_occ_frames) {
     lg::info("[ctr] {}: occ cull hid {:.1f} chunks, {:.1f} runs, {:.0f} tris per level draw; "
              "occluders {:.0f} tris taken, {:.0f} rasterized; {:.3f} ms per level draw ({:.3f} at "
-             "most; {} level draws; gather {:.3f}, raster {:.3f}, pyramid {:.3f}, tests {:.3f})",
+             "most; {} level draws; gather {:.3f}, raster {:.3f} (transform {:.3f}, sort {:.3f}), pyramid "
+             "{:.3f}, tests {:.3f})",
              m_name, (double)m_occ_chunks / m_occ_frames, (double)m_occ_runs / m_occ_frames,
              (double)m_occ_tris / m_occ_frames, (double)m_occ_tris_in / m_occ_frames,
              (double)m_occ_tris_drawn / m_occ_frames, m_occ_ms / m_occ_frames, m_occ_max_ms,
              m_occ_frames, m_occ_phase[0] / m_occ_frames, m_occ_phase[1] / m_occ_frames,
+             m_occ_phase[4] / m_occ_frames, m_occ_phase[5] / m_occ_frames,
              m_occ_phase[2] / m_occ_frames, m_occ_phase[3] / m_occ_frames);
     for (auto& ph : m_occ_phase) {
       ph = 0;
@@ -4380,14 +4386,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // occ_cull_tris triangles within occ_cull_dist), then every drawn piece (chunk, then run) behind
   // it isn't drawn. Not the vista pass's chunks (far scenery with its own fog: never hidden, never
   // an occluder).
-  if (settings.occ_cull && settings.occ_cull_tris > 0 && !m_visible.empty()) {
+  // (a level where it hid little lately: only every 8th frame, to see whether that changed)
+  if (settings.occ_cull && settings.occ_cull_tris > 0 && !m_visible.empty() &&
+      (lev.occ_ema >= kOccMinTris || (rs.frame_idx & 7) == 0)) {
+    const u64 occ_tris0 = m_occ_tris;
     const double t0 = ctr_gpu_time_ms();
     static CtrOccCull s_occ;  // (render thread; one buffer per frame for all the levels drawn)
     CtrOccCull& oc = s_occ;
     if (oc.frame() != rs.frame_idx) {
       oc.begin_frame(rs.frame_idx);
     }
-    oc.tris_in = oc.tris_drawn = 0;
+    oc.tris_in = oc.tris_drawn = oc.cells_written = 0;
+    // the cells a level draw's occluders may write (a full screen: 6000)
+    constexpr u64 kOccCellBudget = 4000;  // (a screen: 1500 cells)
     const float maxd = settings.occ_cull_dist * 4096.f;
     // an occluder draw: drawn opaque and depth written (GEQUAL), every pixel of it: no blending,
     // an alpha test that its texture's smallest alpha (the GPU's 2 x aref) and vertex alpha 0x80
@@ -4430,6 +4441,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         continue;
       }
       const auto& ch = lev.chunks[vc.chunk];
+      // impostors: a tie group beyond impostor_distance may be drawn as a card (an occludee,
+      // never an occluder): ties occlude only nearer than that
+      const float chunk_maxd = ch.kind == c3l::CHUNK_KIND_TIE && settings.impostors
+                                   ? std::min(maxd, settings.impostor_distance * 4096.f)
+                                   : maxd;
       const float* M = vc.clip;
       const float len0 = std::sqrt(M[0] * M[0] + M[1] * M[1] + M[2] * M[2]);
       const float len1 = std::sqrt(M[4] * M[4] + M[5] * M[5] + M[6] * M[6]);
@@ -4459,6 +4475,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const auto& dr = lev.draws[di];
         const u32 nr = lev.draw_run_count[di];
         if (!nr || lev.run_spheres.empty()) {
+          if (ch.kind == c3l::CHUNK_KIND_TIE) {
+            continue;  // (impostors: per group)
+          }
           const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                       dz = ch.bsphere[2] - cam.trans[2];
           const float d2 = std::max(dx * dx + dy * dy + dz * dz, 1.f);
@@ -4476,7 +4495,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             const float dx = c[0] - cam.trans[0], dy = c[1] - cam.trans[1],
                         dz = c[2] - cam.trans[2];
             const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (d - rad <= maxd) {
+            if (ch.kind == c3l::CHUNK_KIND_TIE ? d + rad <= chunk_maxd : d - rad <= maxd) {
               m_occ_cands.push_back({rad * rad / std::max(d * d, 1.f), slot, di, idx, n});
             }
           }
@@ -4492,10 +4511,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const c3l::Vertex* verts = nullptr;
     const u16* inds = nullptr;
     int nv = 0, ni = 0;
+    // the triangles of the candidates (nearest, biggest runs first) transformed, up to
+    // kOccTransform of them; then the biggest on screen rasterized, up to the budget
+    constexpr u32 kOccTransform = 1000;
+    m_occ_tris_buf.clear();
+    u32 transformed = 0;
     for (const auto& oc_c : m_occ_cands) {
-      // the budget: triangles rasterized (those off screen cost only their transform: at most
-      // four times as many taken)
-      if (oc.tris_drawn >= budget || oc.tris_in >= 4 * budget) {
+      if (transformed >= kOccTransform) {
         break;
       }
       const auto& vc = m_visible[oc_c.slot];
@@ -4522,9 +4544,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const float* M = vc.clip;
       for (u32 i = oc_c.first; i + 3 <= oc_c.first + oc_c.count; i += 3) {
         const u16 i0 = inds[i], i1 = inds[i + 1], i2 = inds[i + 2];
-        if (i0 >= (u32)nv || i1 >= (u32)nv || i2 >= (u32)nv) {
+        if (i0 >= (u32)nv || i1 >= (u32)nv || i2 >= (u32)nv || transformed >= kOccTransform) {
           continue;
         }
+        transformed++;
         const s16* p[3] = {verts[i0].pos, verts[i1].pos, verts[i2].pos};
         if (culled) {
           const float ax = p[1][0] - p[0][0], ay = p[1][1] - p[0][1], az = p[1][2] - p[0][2];
@@ -4541,8 +4564,40 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             q[k][r] = M[4 * r] * x + M[4 * r + 1] * y + M[4 * r + 2] * z + M[4 * r + 3];
           }
         }
-        oc.add_triangle(q[0], q[1], q[2]);
+        // its size on screen (clip x / w, y / w; a corner behind the camera: the biggest)
+        float sz = 1e30f;
+        if (q[0][3] > 1e-3f && q[1][3] > 1e-3f && q[2][3] > 1e-3f) {
+          const float x0 = q[0][0] / q[0][3], y0 = q[0][1] / q[0][3];
+          const float x1 = q[1][0] / q[1][3], y1 = q[1][1] / q[1][3];
+          const float x2 = q[2][0] / q[2][3], y2 = q[2][1] / q[2][3];
+          sz = std::abs((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0));
+          if (sz < 4e-4f || std::max({x0, x1, x2}) < -1.f || std::min({x0, x1, x2}) > 1.f ||
+              std::max({y0, y1, y2}) < -1.f || std::min({y0, y1, y2}) > 1.f) {
+            continue;  // (smaller than ~2 cells, or off screen)
+          }
+        } else if (q[0][3] <= 0 && q[1][3] <= 0 && q[2][3] <= 0) {
+          continue;
+        }
+        OccTri t;
+        memcpy(t.q, q, sizeof(q));
+        t.size = sz;
+        m_occ_tris_buf.push_back(t);
       }
+    }
+    const double t_xf = ctr_gpu_time_ms();
+    m_occ_phase[4] += t_xf - t_gather;
+    {
+      const size_t n = std::min<size_t>(budget, m_occ_tris_buf.size());
+      if (n < m_occ_tris_buf.size()) {
+        std::nth_element(m_occ_tris_buf.begin(), m_occ_tris_buf.begin() + n,
+                         m_occ_tris_buf.end(),
+                         [](const OccTri& a, const OccTri& b) { return a.size > b.size; });
+      }
+      m_occ_phase[5] += ctr_gpu_time_ms() - t_xf;
+      for (size_t i = 0; i < n && oc.cells_written < kOccCellBudget; i++) {
+        oc.add_triangle(m_occ_tris_buf[i].q[0], m_occ_tris_buf[i].q[1], m_occ_tris_buf[i].q[2]);
+      }
+      oc.tris_in = transformed;
     }
     const double t_raster = ctr_gpu_time_ms();
     oc.finish_occluders();
@@ -4550,40 +4605,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_occ_phase[0] += t_gather - t0;
     m_occ_phase[1] += t_raster - t_gather;
     m_occ_phase[2] += t_finish - t_raster;
-    {
-      static int dbg = getenv("CTR_OCC_DEBUG") ? 1 : 0;
-      if (dbg && rs.frame_idx % 60 == 0) {
-        oc.dump(fmt::format("/private/tmp/claude-501/occ/occ_{}_{}.pgm", lev.name, rs.frame_idx)
-                    .c_str());
-      }
-      if (dbg && rs.log_now) {
-        lg::info("[ctr] occ debug {}: {} full cells, {} partial; {} near rejects, {} area rejects; "
-                 "{} candidates",
-                 lev.name, oc.full_cells, oc.partial_cells, oc.near_rejects, oc.area_rejects,
-                 m_occ_cands.size());
-        if (!m_visible.empty()) {
-          const auto& vc = m_visible[0];
-          const auto& ch = lev.chunks[vc.chunk];
-          const float cq[3] = {(ch.bsphere[0] - ch.origin[0]) / ch.scale,
-                               (ch.bsphere[1] - ch.origin[1]) / ch.scale,
-                               (ch.bsphere[2] - ch.origin[2]) / ch.scale};
-          float q[4];
-          for (int r = 0; r < 4; r++) {
-            q[r] = vc.clip[4 * r] * cq[0] + vc.clip[4 * r + 1] * cq[1] +
-                   vc.clip[4 * r + 2] * cq[2] + vc.clip[4 * r + 3];
-          }
-          const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
-                      dz = ch.bsphere[2] - cam.trans[2];
-          lg::info("[ctr] occ debug: chunk center clip {} {} {} {}, distance {} m", q[0], q[1], q[2],
-                   q[3], std::sqrt(dx * dx + dy * dy + dz * dz) / 4096.f);
-        }
-      }
-      oc.near_rejects = oc.area_rejects = 0;
-    }
     m_occ_tris_in += oc.tris_in;
     m_occ_tris_drawn += oc.tris_drawn;
     // ---- tests ----
     bool removed = false;
+    if (lev.occ_hidden.size() != lev.vis_runs.size()) {
+      lev.occ_hidden.assign(lev.vis_runs.size(), 0);
+    }
     for (auto& vc : m_visible) {
       if (vc.vista) {
         continue;
@@ -4609,7 +4637,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const float cq[3] = {(ch.bsphere[0] - ch.origin[0]) / ch.scale,
                              (ch.bsphere[1] - ch.origin[1]) / ch.scale,
                              (ch.bsphere[2] - ch.origin[2]) / ch.scale};
-        if (all_hideable && test(cq, ch.bsphere[3] / ch.scale)) {
+        float q[4];
+        for (int r = 0; r < 4; r++) {
+          q[r] = M[4 * r] * cq[0] + M[4 * r + 1] * cq[1] + M[4 * r + 2] * cq[2] + M[4 * r + 3];
+        }
+        const float rq = ch.bsphere[3] / ch.scale;
+        if (!oc.may_hide(q, rq * len0, rq * len1, rq * len3)) {
+          continue;  // nothing of it can be hidden: no run tests
+        }
+        if (all_hideable && test(cq, rq)) {
           m_occ_chunks++;
           for (u32 k = 0; k < ch.draw_count; k++) {
             const u32 di = ch.first_draw + k;
@@ -4656,6 +4692,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           if ((vc.runs_valid && !m_run_shown[r]) || lev.run_spheres[r].r == 0xffff) {
             continue;
           }
+          // a run seen last frame is tested every 4th frame only (staggered): one that was hidden
+          // every frame (a run not tested stays drawn)
+          if (lev.vis_runs[r].index_count < 3 * kOccMinRunTris) {
+            continue;  // (hiding it would save less than the test costs)
+          }
+          u8& was = lev.occ_hidden[r];
+          if (!was && ((r + rs.frame_idx) & 3) != 0) {
+            continue;
+          }
+          was = 0;
           const auto& rsph = lev.run_spheres[r];
           const float cq[3] = {(float)rsph.c[0], (float)rsph.c[1], (float)rsph.c[2]};
           if (!test(cq, rsph.r)) {
@@ -4673,6 +4719,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             vc.runs_valid = true;
           }
           m_run_shown[r] = 0;
+          was = 1;
           vc.partly = true;
           m_occ_runs++;
           m_occ_tris += lev.vis_runs[r].index_count / 3;
@@ -4696,6 +4743,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       m_visible.resize(o);
     }
     m_occ_frames++;
+    lev.occ_ema = 0.75f * lev.occ_ema + 0.25f * (float)(m_occ_tris - occ_tris0);
     const double dt = ctr_gpu_time_ms() - t0;
     m_occ_phase[3] += ctr_gpu_time_ms() - t_finish;
     m_occ_ms += dt;

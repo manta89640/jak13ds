@@ -36,6 +36,7 @@ void CtrOccCull::begin_frame(u64 frame) {
       m_pw[l] = w;
       m_ph[l] = h;
       m_pyr[l].assign((size_t)w * h, kInf);
+      m_min[l].assign((size_t)w * h, kInf);
       w = (w + 1) / 2;
       h = (h + 1) / 2;
     }
@@ -127,103 +128,122 @@ void CtrOccCull::raster(const float* a, const float* b, const float* c) {
   const float* v[3] = {a, b, c};
   for (int k = 0; k < 3; k++) {
     iw[k] = 1.f / v[k][3];
-    sx[k] = 200.f + 200.f * v[k][0] * iw[k];
-    sy[k] = 120.f - 120.f * v[k][1] * iw[k];
+    // in samples: sample i's center (pixel kStep i + 0.5) at i + 0.5
+    sx[k] = (200.f + 200.f * v[k][0] * iw[k] - 0.5f) * (1.f / kStep) + 0.5f;
+    sy[k] = (120.f - 120.f * v[k][1] * iw[k] - 0.5f) * (1.f / kStep) + 0.5f;
   }
-  float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
-  if (!(std::abs(area) > 0.25f)) {
+  const float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+  if (!(std::abs(area) > 0.1f)) {
     area_rejects++;
-    return;  // (no pixel center a half pixel inside it)
+    return;
   }
-  if (area < 0) {
-    std::swap(sx[1], sx[2]);
-    std::swap(sy[1], sy[2]);
-    std::swap(iw[1], iw[2]);
-    area = -area;
-  }
-  // edge k: from corner k to k + 1, inside where e = A x + B y + C >= kInside (pixels)
+  // edges as half planes A x + B y + C >= 0 (inside), oriented by the third corner
   float A[3], B[3], C[3];
   for (int k = 0; k < 3; k++) {
-    const int k2 = (k + 1) % 3;
-    const float ex = sx[k2] - sx[k], ey = sy[k2] - sy[k];
-    const float len = std::sqrt(ex * ex + ey * ey);
-    if (!(len > 1e-6f)) {
-      return;
-    }
-    // e(p) = (ex (py - sy) - ey (px - sx)) / len: positive inside (counter-clockwise, y down: the
-    // area above is positive for this orientation)
-    A[k] = -ey / len;
-    B[k] = ex / len;
+    const int k2 = (k + 1) % 3, k3 = (k + 2) % 3;
+    A[k] = sy[k] - sy[k2];
+    B[k] = sx[k2] - sx[k];
     C[k] = -(A[k] * sx[k] + B[k] * sy[k]);
-  }
-  // (orientation: the third corner must be inside every edge)
-  if (A[0] * sx[2] + B[0] * sy[2] + C[0] < 0) {
-    for (int k = 0; k < 3; k++) {
+    if (A[k] * sx[k3] + B[k] * sy[k3] + C[k] < 0) {
       A[k] = -A[k];
       B[k] = -B[k];
       C[k] = -C[k];
     }
   }
+  float IA[3];
+  for (int k = 0; k < 3; k++) {
+    IA[k] = A[k] != 0 ? 1.f / A[k] : 0.f;
+  }
   // 1 / w over the screen: a plane through the corners
   const float dx1 = sx[1] - sx[0], dy1 = sy[1] - sy[0], dx2 = sx[2] - sx[0], dy2 = sy[2] - sy[0];
   const float det = dx1 * dy2 - dx2 * dy1;
-  if (!(std::abs(det) > 1e-9f)) {
-    return;
-  }
   const float d1 = iw[1] - iw[0], d2 = iw[2] - iw[0];
   const float P = (d1 * dy2 - d2 * dy1) / det, Q = (dx1 * d2 - dx2 * d1) / det;
   const float R = iw[0] - P * sx[0] - Q * sy[0];
-  const float minx = std::min({sx[0], sx[1], sx[2]}), maxx = std::max({sx[0], sx[1], sx[2]});
   const float miny = std::min({sy[0], sy[1], sy[2]}), maxy = std::max({sy[0], sy[1], sy[2]});
-  const int cx0 = std::max(0, (int)std::floor(minx) / kCell);
-  const int cx1 = std::min(kCW - 1, (int)std::floor(maxx) / kCell);
+  const float minx = std::min({sx[0], sx[1], sx[2]}), maxx = std::max({sx[0], sx[1], sx[2]});
   const int cy0 = std::max(0, (int)std::floor(miny) / kCell);
   const int cy1 = std::min(kCH - 1, (int)std::floor(maxy) / kCell);
-  if (cx0 > cx1 || cy0 > cy1 || maxx < 0 || maxy < 0) {
+  if (cy0 > cy1 || maxy < 0 || maxx < 0 || minx >= kSW) {
     return;
   }
   tris_drawn++;
+  // 1 / w is smallest (w farthest) at the cell corner picked by the signs of P and Q
+  const float ox = P < 0 ? kCell - 1 : 0, oy = Q < 0 ? kCell - 1 : 0;
+  // the edges as x bounds along a sample row y: x >= a0 + a1 y (left), x <= a0 + a1 y (right);
+  // an edge along a row (A = 0) bounds y instead
+  float la0[3], la1[3], ra0[3], ra1[3];
+  int nl = 0, nr = 0;
+  float ylo = -1e9f, yhi = 1e9f;
+  for (int k = 0; k < 3; k++) {
+    if (A[k] > 0) {
+      la0[nl] = -C[k] * IA[k];
+      la1[nl++] = -B[k] * IA[k];
+    } else if (A[k] < 0) {
+      ra0[nr] = -C[k] * IA[k];
+      ra1[nr++] = -B[k] * IA[k];
+    } else if (B[k] > 0) {
+      ylo = std::max(ylo, -C[k] / B[k]);  // B y + C >= 0
+    } else if (B[k] < 0) {
+      yhi = std::min(yhi, -C[k] / B[k]);
+    } else if (C[k] < 0) {
+      return;
+    }
+  }
+  // floor / ceil of values clamped to the samples' range (positive after the offset: a cast)
+  auto ifloor = [](float v) {
+    v = std::min(std::max(v, -(float)kSW - 8.f), (float)kSW + 8.f);
+    return (int)(v + (float)(2 * kSW)) - 2 * kSW;
+  };
   for (int cy = cy0; cy <= cy1; cy++) {
-    const float y0 = cy * kCell + 0.5f, y3 = y0 + (kCell - 1);
-    for (int cx = cx0; cx <= cx1; cx++) {
-      const float x0 = cx * kCell + 0.5f, x3 = x0 + (kCell - 1);
-      // each edge at the cell's corner samples: all outside -> nothing, all inside -> all
-      bool all = true, none = false;
-      for (int k = 0; k < 3 && !none; k++) {
-        const float e00 = A[k] * x0 + B[k] * y0 + C[k];
-        const float ea = A[k] * (kCell - 1), eb = B[k] * (kCell - 1);
-        const float emin = e00 + std::min(0.f, ea) + std::min(0.f, eb);
-        const float emax = e00 + std::max(0.f, ea) + std::max(0.f, eb);
-        if (emax < kInside) {
-          none = true;
-        } else if (emin < kInside) {
-          all = false;
-        }
+    // per sample row j: the samples inside are x in [lo, hi] (sample centers x + 0.5)
+    int lo[kCell], hi[kCell];
+    int span_lo = 1 << 20, span_hi = -1;  // cells some sample of which is covered
+    int full_lo = 0, full_hi = kCW - 1;     // cells all of whose samples are covered
+    for (int j = 0; j < kCell; j++) {
+      const float y = cy * kCell + j + 0.5f;
+      float xl = -1e9f, xr = 1e9f;
+      for (int k = 0; k < nl; k++) {
+        xl = std::max(xl, la0[k] + la1[k] * y);
       }
-      if (none) {
+      for (int k = 0; k < nr; k++) {
+        xr = std::min(xr, ra0[k] + ra1[k] * y);
+      }
+      if (y < ylo || y > yhi) {
+        xl = 1e9f;
+      }
+      // sample x index i (center i + 0.5) inside: xl <= i + 0.5 <= xr
+      lo[j] = xl > (float)kSW ? kSW : std::max(0, -ifloor(0.5f - xl));
+      hi[j] = xr < 0.f ? -1 : std::min(kSW - 1, ifloor(xr - 0.5f));
+      if (lo[j] > hi[j]) {
+        full_lo = kCW;
         continue;
       }
+      span_lo = std::min(span_lo, lo[j] / kCell);
+      span_hi = std::max(span_hi, hi[j] / kCell);
+      full_lo = std::max(full_lo, (lo[j] + kCell - 1) / kCell);
+      full_hi = std::min(full_hi, (hi[j] + 1) / kCell - 1);
+    }
+    if (span_hi < span_lo) {
+      continue;
+    }
+    for (int cx = span_lo; cx <= span_hi; cx++) {
       u16 mask = 0xffff;
-      if (!all) {
+      if (cx < full_lo || cx > full_hi) {
         mask = 0;
         for (int j = 0; j < kCell; j++) {
-          for (int i = 0; i < kCell; i++) {
-            const float px = x0 + i, py = y0 + j;
-            if (A[0] * px + B[0] * py + C[0] >= kInside &&
-                A[1] * px + B[1] * py + C[1] >= kInside &&
-                A[2] * px + B[2] * py + C[2] >= kInside) {
-              mask |= (u16)(1u << (j * kCell + i));
-            }
+          const int l = std::max(lo[j], cx * kCell), h = std::min(hi[j], cx * kCell + kCell - 1);
+          if (l <= h) {
+            const u32 bits = ((1u << (h - l + 1)) - 1) << (l - cx * kCell);
+            mask |= (u16)(bits << (4 * j));
           }
         }
         if (!mask) {
           continue;
         }
       }
-      // the farthest w over the cell's samples (1 / w is a plane: its smallest at a corner)
-      const float m = std::min(std::min(P * x0 + Q * y0, P * x3 + Q * y0),
-                               std::min(P * x0 + Q * y3, P * x3 + Q * y3)) +
-                      R;
+      cells_written++;
+      const float m = P * (cx * kCell + 0.5f + ox) + Q * (cy * kCell + 0.5f + oy) + R;
       if (!(m > 0)) {
         continue;
       }
@@ -264,6 +284,12 @@ void CtrOccCull::finish_occluders() {
         continue;
       }
       const u32 ml = mask_at(cx - 1, cy), mr = mask_at(cx + 1, cy);
+      if (m == 0xffff && ml == 0xffff && mr == 0xffff && mask_at(cx, cy - 1) == 0xffff &&
+          mask_at(cx, cy + 1) == 0xffff) {
+        p0[i] = m_w[i];
+        full_cells++;
+        continue;
+      }
       const u32 mu = mask_at(cx, cy - 1), md = mask_at(cx, cy + 1);
       u32 e = 0;
       for (int j = 0; j < kCell; j++) {
@@ -271,13 +297,26 @@ void CtrOccCull::finish_occluders() {
         const u32 left = ((row << 1) | ((ml >> (4 * j + 3)) & 1)) & 0xf;
         const u32 right = (row >> 1) | (((mr >> (4 * j)) & 1) << 3);
         const u32 up = j > 0 ? (m >> (4 * (j - 1))) & 0xf : (mu >> 12) & 0xf;
-        const u32 down = j < kCell - 1 ? (m >> (4 * (j + 1))) & 0xf : mu & 0 | (md & 0xf);
+        const u32 down = j < kCell - 1 ? (m >> (4 * (j + 1))) & 0xf : md & 0xf;
         e |= (row & left & right & up & down) << (4 * j);
       }
       const bool full = e == 0xffff;
       p0[i] = full ? m_w[i] : kInf;
       full_cells += full;
       partial_cells += !full;
+    }
+  }
+  m_min[0] = p0;
+  for (int l = 1; l < kLevels; l++) {
+    const auto& sm = m_min[l - 1];
+    auto& dm = m_min[l];
+    const int sw = m_pw[l - 1], sh = m_ph[l - 1];
+    for (int y = 0; y < m_ph[l]; y++) {
+      for (int x = 0; x < m_pw[l]; x++) {
+        const int x1 = std::min(2 * x + 1, sw - 1), y1 = std::min(2 * y + 1, sh - 1);
+        dm[y * m_pw[l] + x] = std::min(std::min(sm[(2 * y) * sw + 2 * x], sm[(2 * y) * sw + x1]),
+                                       std::min(sm[y1 * sw + 2 * x], sm[y1 * sw + x1]));
+      }
     }
   }
   for (int l = 1; l < kLevels; l++) {
@@ -326,20 +365,24 @@ bool CtrOccCull::hidden(const float* q, float rx, float ry, float rw) const {
     return false;
   }
   // the sphere's clip x / w and y / w over w0..w1 (the extremes are at an end)
-  const float xa = std::min((q[0] - rx) / w0, (q[0] - rx) / w1);
-  const float xb = std::max((q[0] + rx) / w0, (q[0] + rx) / w1);
-  const float ya = std::min((q[1] - ry) / w0, (q[1] - ry) / w1);
-  const float yb = std::max((q[1] + ry) / w0, (q[1] + ry) / w1);
+  const float i0 = 1.f / w0, i1 = 1.f / w1;
+  const float xa = std::min((q[0] - rx) * i0, (q[0] - rx) * i1);
+  const float xb = std::max((q[0] + rx) * i0, (q[0] + rx) * i1);
+  const float ya = std::min((q[1] - ry) * i0, (q[1] - ry) * i1);
+  const float yb = std::max((q[1] + ry) * i0, (q[1] + ry) * i1);
   // pixels, a pixel wider each way
   const float px0 = 200.f + 200.f * xa - 1.f, px1 = 200.f + 200.f * xb + 1.f;
   const float py0 = 120.f - 120.f * yb - 1.f, py1 = 120.f - 120.f * ya + 1.f;
   if (!(px1 >= 0 && px0 < kW && py1 >= 0 && py0 < kH)) {
     return false;  // (off screen: the view test's business)
   }
-  const int cx0 = std::max(0, (int)std::floor(px0) / kCell);
-  const int cx1 = std::min(kCW - 1, (int)std::floor(std::min(px1, (float)kW - 1)) / kCell);
-  const int cy0 = std::max(0, (int)std::floor(py0) / kCell);
-  const int cy1 = std::min(kCH - 1, (int)std::floor(std::min(py1, (float)kH - 1)) / kCell);
+  // the cells holding the samples nearest to the rectangle's pixels (a pixel is between two
+  // samples at most kStep apart: both must be covered)
+  auto sx_of = [](float px) { return (px - 0.5f) * (1.f / kStep); };
+  const int cx0 = std::max(0, (int)std::floor(sx_of(std::max(px0, 0.f))) / kCell);
+  const int cx1 = std::min(kCW - 1, ((int)std::floor(sx_of(std::min(px1, (float)kW - 1))) + 1) / kCell);
+  const int cy0 = std::max(0, (int)std::floor(sx_of(std::max(py0, 0.f))) / kCell);
+  const int cy1 = std::min(kCH - 1, ((int)std::floor(sx_of(std::min(py1, (float)kH - 1))) + 1) / kCell);
   const float m = rect_max(cx0, cy0, cx1, cy1);
   // behind it by 2% (depth buffer precision; GEQUAL passes what's level with the occluder)
   return m < kInf && m * 1.02f < w0;
@@ -371,4 +414,39 @@ void CtrOccCull::dump(const char* path) const {
     fputc(v, fp);
   }
   fclose(fp);
+}
+
+bool CtrOccCull::may_hide(const float* q, float rx, float ry, float rw) const {
+  const float w0 = q[3] - rw, w1 = q[3] + rw;
+  if (!(w0 > kNearW)) {
+    return true;  // (the camera near or in it: its parts may be anywhere on screen)
+  }
+  const float i0 = 1.f / w0, i1 = 1.f / w1;
+  const float xa = std::min((q[0] - rx) * i0, (q[0] - rx) * i1);
+  const float xb = std::max((q[0] + rx) * i0, (q[0] + rx) * i1);
+  const float ya = std::min((q[1] - ry) * i0, (q[1] - ry) * i1);
+  const float yb = std::max((q[1] + ry) * i0, (q[1] + ry) * i1);
+  const float px0 = std::max(0.5f, 200.f + 200.f * xa - 1.f),
+              px1 = std::min((float)kW - 1, 200.f + 200.f * xb + 1.f);
+  const float py0 = std::max(0.5f, 120.f - 120.f * yb - 1.f),
+              py1 = std::min((float)kH - 1, 120.f - 120.f * ya + 1.f);
+  if (!(px1 >= px0 && py1 >= py0)) {
+    return false;
+  }
+  const int x0 = (int)((px0 - 0.5f) * (1.f / kStep)) / kCell,
+            x1 = std::min(kCW - 1, ((int)((px1 - 0.5f) * (1.f / kStep)) + 1) / kCell);
+  const int y0 = (int)((py0 - 0.5f) * (1.f / kStep)) / kCell,
+            y1 = std::min(kCH - 1, ((int)((py1 - 0.5f) * (1.f / kStep)) + 1) / kCell);
+  // the nearest full cell over the rectangle (rounded out to the level's cells: a lower bound)
+  int l = 0;
+  while (l + 1 < kLevels && ((x1 >> l) - (x0 >> l) > 1 || (y1 >> l) - (y0 >> l) > 1)) {
+    l++;
+  }
+  float m = kInf;
+  for (int y = y0 >> l; y <= (y1 >> l); y++) {
+    for (int x = x0 >> l; x <= (x1 >> l); x++) {
+      m = std::min(m, m_min[l][y * m_pw[l] + x]);
+    }
+  }
+  return m < kInf && m * 1.02f < w1;
 }

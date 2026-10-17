@@ -27,8 +27,10 @@
 class CtrOccCull {
  public:
   static constexpr int kW = 400, kH = 240;  // screen pixels
-  static constexpr int kCell = 4;           // pixels per cell side
-  static constexpr int kCW = kW / kCell, kCH = kH / kCell;
+  static constexpr int kStep = 2;           // pixels between samples (a sample: a pixel center)
+  static constexpr int kSW = kW / kStep, kSH = kH / kStep;  // samples
+  static constexpr int kCell = 4;           // samples per cell side
+  static constexpr int kCW = kSW / kCell, kCH = kSH / kCell;
   static constexpr int kLevels = 8;
 
   /*! A new frame: an empty buffer (it is shared by the levels drawn in the frame). */
@@ -41,6 +43,9 @@ class CtrOccCull {
   /*! Is a sphere (its center in clip space, its half extents in clip x, y and w) behind the buffer
    * everywhere on screen? (false where unsure) */
   bool hidden(const float* q, float rx, float ry, float rw) const;
+  /*! Could anything of the sphere be hidden: a full cell under its rectangle nearer than its far
+   * side? (false: neither it nor anything in it can be hidden) */
+  bool may_hide(const float* q, float rx, float ry, float rw) const;
   /*! Could any of the sphere be on screen (in front of the camera)? (true where unsure) */
   static bool on_screen(const float* q, float rx, float ry, float rw);
   /*! (testing) the buffer as a picture (PGM): full cells by depth, partial grey, empty black */
@@ -50,6 +55,7 @@ class CtrOccCull {
   u64 tris_in = 0, tris_drawn = 0;
   u64 full_cells = 0, partial_cells = 0;  // after finish_occluders (statistics)
   u64 near_rejects = 0, area_rejects = 0;
+  u64 cells_written = 0;  // (the caller's budget)
 
  private:
   u64 m_frame = ~0ull;
@@ -57,6 +63,7 @@ class CtrOccCull {
   u16 m_mask[kCW * kCH];  // which of its 16 samples are covered (bit y * 4 + x)
   // max pyramid of the cells (a full cell: its w, others: infinity); level 0 is the cells
   std::vector<float> m_pyr[kLevels];
+  std::vector<float> m_min[kLevels];  // min pyramid of the full cells' w (infinity: none)
   int m_pw[kLevels] = {}, m_ph[kLevels] = {};
   float rect_max(int x0, int y0, int x1, int y1) const;
   void raster(const float* a, const float* b, const float* c);
