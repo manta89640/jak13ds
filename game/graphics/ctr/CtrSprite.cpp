@@ -15,6 +15,7 @@
 #include "common/util/FileUtil.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
+#include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
 
@@ -513,13 +514,16 @@ bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
          adgif.size_bytes >= *count * sizeof(AdGif);
 }
 
+static_assert(sizeof(ctr_draw_state) == 16);  // (AI-assisted) bucket_for's compare
+
 CtrSpriteRenderer::Bucket& CtrSpriteRenderer::bucket_for(const ctr_draw_state& st) {
-  if (m_last_bucket < m_bucket_count &&
-      !memcmp(&m_buckets[m_last_bucket].state, &st, sizeof(st))) {
+  // (AI-assisted) the 16 bytes compared as four words (CtrMicro.h), not with a memcmp call per
+  // bucket
+  if (m_last_bucket < m_bucket_count && ctr_micro::same16(&m_buckets[m_last_bucket].state, &st)) {
     return m_buckets[m_last_bucket];
   }
   for (size_t i = 0; i < m_bucket_count; i++) {
-    if (!memcmp(&m_buckets[i].state, &st, sizeof(st))) {
+    if (ctr_micro::same16(&m_buckets[i].state, &st)) {
       m_last_bucket = i;
       return m_buckets[i];
     }

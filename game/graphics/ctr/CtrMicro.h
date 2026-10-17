@@ -119,4 +119,12 @@ inline bool merc_bone_mirrors(const float* t) {
   return !positive(det);
 }
 
+//! 16 bytes equal (memcmp(a, b, 16) == 0) as four word compares
+inline bool same16(const void* a, const void* b) {
+  uint32_t x[4], y[4];
+  memcpy(x, a, 16);
+  memcpy(y, b, 16);
+  return ((x[0] ^ y[0]) | (x[1] ^ y[1]) | (x[2] ^ y[2]) | (x[3] ^ y[3])) == 0;
+}
+
 }  // namespace ctr_micro
