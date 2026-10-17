@@ -6109,6 +6109,29 @@ static void mesh_fog_rows(const float* m, float out[8]) {
   out[4] += g.fog0[2];
 }
 
+/* (AI-assisted) the mesh programs' scales (x: texture coordinates, 1/1024 or c3l v15 atlases'
+ * 1/32768). (micro-gpu) raw: written straight away, the same words C3D_UpdateUniforms writes for
+ * it (config, then w z y x as f32), with citro3d's copy of the uniform set and not marked: before,
+ * every change made the draw's raw_sync run all of C3Di_UpdateContext (~2000 instructions) for
+ * this one vector, and static_cmdlists couldn't record a stretch with one (a citro3d update).
+ * When citro3d has uniforms to send anyway (unif_pending), it sends this one with them. */
+static void mesh_scales_set(int atlas, int raw) {
+  const int loc = g.ps->uloc_scales;
+  const float sx = atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f;
+  if (!raw || !(s_micro & MICRO_ATLAS) || s_raw.unif_pending || loc < 0 ||
+      C3D_FVUnifDirty[GPU_VERTEX_SHADER][loc]) {
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, loc, sx, 1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
+    raw_note_unif();
+    return;
+  }
+  C3D_FVec* u = &C3D_FVUnif[GPU_VERTEX_SHADER][loc];
+  u->x = sx;
+  u->y = 1.0f / 255.0f;
+  u->z = 1.0f;
+  u->w = 1.0f / 127.0f;
+  raw_end(raw_unif(raw_ptr(), loc, (const u32*)u, 4, 1)); /* (C3D_FVec: w z y x in memory) */
+}
+
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count) {
   SKY_HOOK(state);
@@ -6132,9 +6155,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
     if (atlas != g.mesh_st_atlas) {
       g.mesh_st_atlas = atlas;
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_scales, atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f,
-                    1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
-      raw_note_unif();
+      mesh_scales_set(atlas, use_raw(state));
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
@@ -6341,6 +6362,7 @@ typedef struct {
   u32 tex0_fmt;
   u32 tex0_regs[5]; /* (AI-assisted, micro-gpu) */
   int tex0_regs_ok;
+  int mesh_st_atlas; /* (AI-assisted, micro-gpu) the mesh scales the GPU has */
   int vc_dirty, vs_changed, unif_pending;
   int tex_dirty;
   /* the texture unit 0 binding is one no draw of the stretch uses (a texture with its own memory:
@@ -6469,6 +6491,7 @@ static void cl_track_save(ClTrack* t) {
     memcpy(t->tex0_regs, s_raw.tex0_regs, sizeof(t->tex0_regs)); /* (AI-assisted, micro-gpu) */
     t->tex0_regs_ok = 1;
   }
+  t->mesh_st_atlas = g.mesh_st_atlas;
   t->vc_dirty = s_raw.vc_dirty;
   t->vs_changed = s_raw.vs_changed;
   t->unif_pending = s_raw.unif_pending;
@@ -6513,6 +6536,12 @@ static void cl_track_load(const ClTrack* t) {
   s_raw.tex0_fmt = t->tex0_fmt;
   memcpy(s_raw.tex0_regs, t->tex0_regs, sizeof(s_raw.tex0_regs)); /* (AI-assisted, micro-gpu) */
   s_raw.tex0_regs_ok = t->tex0_regs_ok;
+  if (g.mesh_st_atlas != t->mesh_st_atlas && is_mesh_prog(g.cur_prog) && g.ps->uloc_scales >= 0) {
+    /* (AI-assisted, micro-gpu) the stretch changed the scales (raw): citro3d's copy too */
+    C3D_FVUnif[GPU_VERTEX_SHADER][g.ps->uloc_scales].x =
+        t->mesh_st_atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f;
+  }
+  g.mesh_st_atlas = t->mesh_st_atlas;
   s_raw.vc_dirty = t->vc_dirty;
   s_raw.vs_changed = t->vs_changed;
   s_raw.unif_pending = t->unif_pending;
