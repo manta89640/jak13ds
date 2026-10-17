@@ -50,6 +50,10 @@ struct Options {
   // (< 0: the level's budget from kTieLodBudgets, else all groups)
   bool tie_lod = true;
   int tie_near_geo = 0;
+  // (AI-assisted, lod-light) the far versions' vertex colors fitted to the near ones (the PC draws
+  // geometry 0 only): no change of light on a surface at the switch (Converter::far_colors_from_near).
+  // false: each geometry's own colors (the PS2's)
+  bool tie_far_near_colors = true;
   float tie_lod_budget_kb = -1.f;
   // smallest shape error worth a near version, as an angle (radians) at the larger of the group's
   // radius and tie_lod_view_m meters (0.002: half a pixel on the top screen)
@@ -892,6 +896,306 @@ struct Converter {
     }
     small_tris += detail ? tris.size() - first : 0;
     lod_tris[cur_lod_slot] += tris.size() - first;
+  }
+
+  // (AI-assisted, lod-light) far_colors_from_near's statistics: the far surface's color against
+  // the near surface's under it (area weighted, GS units, mean over the 8 palettes' rgb): with
+  // geometry 3's own colors (the PS2's), with the fit, with the colors picked
+  struct FarColorStats {
+    size_t far_verts = 0, changed = 0;
+    double area = 0;
+    double abs_own = 0, abs_fit = 0, abs_pick = 0;
+    double sgn_own = 0, sgn_fit = 0, sgn_pick = 0;
+  };
+
+  /*!
+   * (AI-assisted, lod-light) The far versions' vertex colors fitted to their near versions. The
+   * PS2 and the PC light ties by baked vertex colors. The PS2 bakes each geometry's own (an
+   * instance's color indices per geometry) and its far versions lose geometry 0's extra vertices:
+   * on rocks, the dark crevices and lit ridges between the far corners. The far corners
+   * sat mostly on ridges, so a far rock was lighter as a whole (beach: +5 levels on 16x16 pixel
+   * blocks), and the near/far switch showed as the light on the surface changing when the camera
+   * came near (the PC draws geometry 0 only: nothing changes there).
+   *
+   * Each far vertex gets the near surface's mean color around it: the near surface is sampled
+   * (each near triangle's corners and center, by area), each sample goes to the nearest point of
+   * the far surface, and a far vertex's color is the mean of the samples weighted by its
+   * barycentric weight there (the far surface then has the near surface's mean color as a whole,
+   * and nearly so in each part). The table of colors stays as it is: the vertex takes the color
+   * of the near vertex (among those whose samples it got) nearest to that mean, in all 8 palettes.
+   */
+  void far_colors_from_near(FarColorStats* st) {
+    struct GroupTris {
+      std::vector<u32> near_t, far_t;
+    };
+    std::unordered_map<u32, GroupTris> groups;
+    for (u32 i = 0; i < tris.size(); i++) {
+      const auto& t = tris[i];
+      if (t.lod_group == UINT32_MAX) {
+        continue;
+      }
+      if (t.lod == c3l::kRunLodNear) {
+        groups[t.lod_group].near_t.push_back(i);
+      } else if (t.lod == c3l::kRunLodFar) {
+        groups[t.lod_group].far_t.push_back(i);
+      }
+    }
+    constexpr int kC = 24;  // 8 palettes x rgb
+    // the pick's weight of a difference in the mean of the 24 values (beach, per far triangle:
+    // 0 -> 2.94 GS units off, the far version 0.62 darker; 16 -> 2.60, 0.09 darker; the fit 2.48)
+    constexpr float kMeanWeight = 16.f;
+    using Col = std::array<float, kC>;
+    auto color_of = [&](u32 vi) {
+      Col c;
+      const auto& v = verts[vi];
+      if (v.tod != kTodNone && !(v.tod & kTodMulBit) && v.tod < tod_colors.size()) {
+        for (int k = 0; k < kC; k++) {
+          c[k] = tod_colors[v.tod].rgb[k / 3][k % 3];
+        }
+      } else {
+        for (int k = 0; k < kC; k++) {
+          c[k] = v.rgba[k % 3];
+        }
+      }
+      return c;
+    };
+    auto pos_of = [&](u32 vi, float* p) {
+      p[0] = verts[vi].x;
+      p[1] = verts[vi].y;
+      p[2] = verts[vi].z;
+    };
+    std::vector<u32> keys;
+    for (const auto& [g, gt] : groups) {
+      if (!gt.near_t.empty() && !gt.far_t.empty()) {
+        keys.push_back(g);
+      }
+    }
+    std::sort(keys.begin(), keys.end());
+    struct Sample {
+      u32 ftri;
+      float w[3];
+      float weight;
+      Col col;
+    };
+    struct Result {
+      std::vector<std::pair<u32, u32>> pick;  // far vertex, near vertex whose colors it takes
+      double area = 0, abs_own = 0, abs_fit = 0, abs_pick = 0, sgn_own = 0, sgn_fit = 0,
+             sgn_pick = 0;
+    };
+    std::vector<Result> results(keys.size());
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(keys.size(), [&](size_t a, size_t b) {
+      for (size_t gi = a; gi < b; gi++) {
+        const auto& gt = groups.at(keys[gi]);
+        auto& res = results[gi];
+        // the far surface
+        std::vector<tie_lod::Tri> ft(gt.far_t.size());
+        std::vector<std::array<float, 6>> boxes(gt.far_t.size());
+        std::unordered_map<u32, u32> slot;  // far vertex -> local index
+        std::vector<u32> fverts;
+        for (size_t i = 0; i < gt.far_t.size(); i++) {
+          const auto& t = tris[gt.far_t[i]];
+          for (int k = 0; k < 3; k++) {
+            pos_of(t.v[k], &ft[i][3 * k]);
+            if (slot.emplace(t.v[k], (u32)fverts.size()).second) {
+              fverts.push_back(t.v[k]);
+            }
+          }
+          for (int c = 0; c < 3; c++) {
+            boxes[i][c] = std::min({ft[i][c], ft[i][3 + c], ft[i][6 + c]});
+            boxes[i][3 + c] = std::max({ft[i][c], ft[i][3 + c], ft[i][6 + c]});
+          }
+        }
+        std::vector<Col> own(fverts.size());
+        for (size_t i = 0; i < fverts.size(); i++) {
+          own[i] = color_of(fverts[i]);
+        }
+        // the near surface's samples on it
+        std::vector<Col> acc(fverts.size());
+        for (auto& c : acc) {
+          c.fill(0.f);
+        }
+        std::vector<double> wacc(fverts.size(), 0.0);
+        std::vector<Sample> samples;
+        size_t hint = 0;
+        auto nearest = [&](const float* p, float* w) {
+          float best = tie_lod::closest_point_bary(p, ft[hint], w);
+          size_t bi = hint;
+          for (size_t i = 0; i < ft.size(); i++) {
+            float d2 = 0;
+            for (int c = 0; c < 3; c++) {
+              const float o = p[c] < boxes[i][c]       ? boxes[i][c] - p[c]
+                              : p[c] > boxes[i][3 + c] ? p[c] - boxes[i][3 + c]
+                                                       : 0.f;
+              d2 += o * o;
+            }
+            if (i == hint || d2 >= best) {
+              continue;
+            }
+            float ww[3];
+            const float d = tie_lod::closest_point_bary(p, ft[i], ww);
+            if (d < best) {
+              best = d;
+              bi = i;
+              memcpy(w, ww, sizeof(ww));
+            }
+          }
+          hint = bi;
+          return (u32)bi;
+        };
+        for (u32 ti : gt.near_t) {
+          const auto& t = tris[ti];
+          float p[3][3];
+          Col c[3];
+          for (int k = 0; k < 3; k++) {
+            pos_of(t.v[k], p[k]);
+            c[k] = color_of(t.v[k]);
+          }
+          float e1[3], e2[3];
+          for (int k = 0; k < 3; k++) {
+            e1[k] = p[1][k] - p[0][k];
+            e2[k] = p[2][k] - p[0][k];
+          }
+          const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2],
+                      cz = e1[0] * e2[1] - e1[1] * e2[0];
+          const float area = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+          if (!(area > 0)) {
+            continue;
+          }
+          // the corners (half of the area) and the center (the other half)
+          for (int k = 0; k < 4; k++) {
+            Sample s;
+            float q[3];
+            if (k < 3) {
+              memcpy(q, p[k], sizeof(q));
+              s.col = c[k];
+              s.weight = area / 6.f;
+            } else {
+              for (int j = 0; j < 3; j++) {
+                q[j] = (p[0][j] + p[1][j] + p[2][j]) / 3.f;
+              }
+              for (int j = 0; j < kC; j++) {
+                s.col[j] = (c[0][j] + c[1][j] + c[2][j]) / 3.f;
+              }
+              s.weight = area / 2.f;
+            }
+            s.ftri = nearest(q, s.w);
+            const auto& f = tris[gt.far_t[s.ftri]];
+            for (int j = 0; j < 3; j++) {
+              const u32 sl = slot.at(f.v[j]);
+              const float ww = s.w[j] * s.weight;
+              for (int ch = 0; ch < kC; ch++) {
+                acc[sl][ch] += ww * s.col[ch];
+              }
+              wacc[sl] += ww;
+            }
+            samples.push_back(s);
+          }
+        }
+        // the fit, then the group's near color nearest to it (in all 8 palettes; a difference in
+        // the mean, the overall light, counts more than one between channels or palettes)
+        std::vector<std::pair<u32, Col>> gcols;  // a near vertex of each of the group's colors
+        {
+          std::set<std::pair<u32, u32>> seen;  // (tod, rgba)
+          for (u32 ti : gt.near_t) {
+            for (u32 nv : tris[ti].v) {
+              u32 rgba;
+              memcpy(&rgba, verts[nv].rgba, 4);
+              if (seen.emplace(verts[nv].tod, rgba).second) {
+                gcols.push_back({nv, color_of(nv)});
+              }
+            }
+          }
+        }
+        std::vector<Col> fit(fverts.size()), pick(fverts.size());
+        for (size_t i = 0; i < fverts.size(); i++) {
+          if (wacc[i] <= 0) {
+            fit[i] = pick[i] = own[i];
+            continue;
+          }
+          for (int ch = 0; ch < kC; ch++) {
+            fit[i][ch] = (float)(acc[i][ch] / wacc[i]);
+          }
+          float best = 1e30f;
+          u32 bv = UINT32_MAX;
+          for (const auto& [nv, cc] : gcols) {
+            float d = 0, m = 0;
+            for (int ch = 0; ch < kC; ch++) {
+              const float x = cc[ch] - fit[i][ch];
+              d += x * x;
+              m += x;
+            }
+            d += kMeanWeight * m * m / kC;
+            if (d < best) {
+              best = d;
+              bv = nv;
+            }
+          }
+          if (bv == UINT32_MAX) {
+            pick[i] = own[i];
+            continue;
+          }
+          pick[i] = color_of(bv);
+          res.pick.push_back({fverts[i], bv});
+        }
+        // statistics: per far triangle, the mean difference over the near surface under it (what
+        // the far version's light is off by there; the detail within a triangle it can't have)
+        std::vector<std::array<double, 4>> per(ft.size(), {0, 0, 0, 0});  // weight, own, fit, pick
+        for (const auto& s : samples) {
+          const auto& f = tris[gt.far_t[s.ftri]];
+          double d_own = 0, d_fit = 0, d_pick = 0;
+          for (int ch = 0; ch < kC; ch++) {
+            float o = 0, ft_ = 0, pk = 0;
+            for (int j = 0; j < 3; j++) {
+              const u32 sl = slot.at(f.v[j]);
+              o += s.w[j] * own[sl][ch];
+              ft_ += s.w[j] * fit[sl][ch];
+              pk += s.w[j] * pick[sl][ch];
+            }
+            d_own += o - s.col[ch];
+            d_fit += ft_ - s.col[ch];
+            d_pick += pk - s.col[ch];
+          }
+          auto& pt = per[s.ftri];
+          pt[0] += s.weight;
+          pt[1] += s.weight * d_own / kC;
+          pt[2] += s.weight * d_fit / kC;
+          pt[3] += s.weight * d_pick / kC;
+        }
+        for (const auto& pt : per) {
+          if (pt[0] <= 0) {
+            continue;
+          }
+          res.area += pt[0];
+          res.abs_own += std::abs(pt[1]);
+          res.abs_fit += std::abs(pt[2]);
+          res.abs_pick += std::abs(pt[3]);
+          res.sgn_own += pt[1];
+          res.sgn_fit += pt[2];
+          res.sgn_pick += pt[3];
+        }
+      }
+    });
+    pool.wait_for_tasks();
+    for (const auto& r : results) {
+      for (const auto& [fv, nv] : r.pick) {
+        auto& v = verts[fv];
+        const auto& n = verts[nv];
+        st->far_verts++;
+        if (memcmp(v.rgba, n.rgba, 4) != 0 || v.tod != n.tod) {
+          memcpy(v.rgba, n.rgba, 4);
+          v.tod = n.tod;
+          st->changed++;
+        }
+      }
+      st->area += r.area;
+      st->abs_own += r.abs_own;
+      st->abs_fit += r.abs_fit;
+      st->abs_pick += r.abs_pick;
+      st->sgn_own += r.sgn_own;
+      st->sgn_fit += r.sgn_fit;
+      st->sgn_pick += r.sgn_pick;
+    }
   }
 
   void add_tie_tree(tfrag3::TieTree& tree) {
@@ -2797,6 +3101,18 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
     }
     cv.cur_lod_slot = -1;
+    if (lod && opt.tie_far_near_colors) {
+      // (AI-assisted, lod-light)
+      Converter::FarColorStats fs;
+      cv.far_colors_from_near(&fs);
+      const double a = std::max(fs.area, 1e-9);
+      lg::info("{}: tie levels of detail: far version colors fitted to the near versions: {} of {} "
+               "vertices changed; far - near surface color per far triangle (GS units, area "
+               "weighted, mean |d| / mean d): geometry 3's own {:.2f} / {:+.2f}, fit {:.2f} / "
+               "{:+.2f}, picked {:.2f} / {:+.2f}",
+               in.stem().string(), fs.changed, fs.far_verts, fs.abs_own / a, fs.sgn_own / a,
+               fs.abs_fit / a, fs.sgn_fit / a, fs.abs_pick / a, fs.sgn_pick / a);
+    }
   }
   int shrub_trees = 0;
   if (!opt.no_shrub && !opt.merc_only) {
@@ -4519,6 +4835,10 @@ int main(int argc, char** argv) {
   bool no_verify = false;
   app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
   bool no_tie_winding = false, no_vista = false;
+  bool tie_far_own_colors = false;  // (AI-assisted, lod-light)
+  app.add_flag("--tie-far-own-colors", tie_far_own_colors,
+               "(AI-assisted) tie far versions keep geometry 3's own vertex colors (the PS2's) instead "
+               "of their near version's (the PC's: the light on a surface doesn't change at the switch)");
   app.add_flag("--no-tie-winding", no_tie_winding,
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
@@ -4546,6 +4866,7 @@ int main(int argc, char** argv) {
   opt.atlas = !no_atlas;
   opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
+  opt.tie_far_near_colors = !tie_far_own_colors;
   opt.tie_lod = !no_tie_lod;
   opt.stream = !no_stream;
   opt.vista = !no_vista;

@@ -52,6 +52,12 @@ void collect(const tfrag3::TieTree& tree, u32 tree_idx, int slot, std::unordered
  */
 float shape_error(const Group& g);
 
+/*!
+ * (AI-assisted, lod-light) The point of triangle t nearest to p, as barycentric weights w (of t's
+ * corners 0, 1, 2); returns its squared distance.
+ */
+float closest_point_bary(const float* p, const Tri& t, float* w);
+
 /*! Bounding sphere (x, y, z, r) of a group's triangles (both versions). */
 std::array<float, 4> bounds(const Group& g);
 

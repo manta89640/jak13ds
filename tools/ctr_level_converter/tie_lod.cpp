@@ -273,6 +273,58 @@ float shape_error(const Group& g) {
   return std::sqrt(e2);
 }
 
+float closest_point_bary(const float* p, const Tri& t, float* w) {
+  // Ericson, Real-Time Collision Detection 5.1.5, as dist2_point_tri, keeping the weights
+  const float* a = &t[0];
+  const float* b = &t[3];
+  const float* c = &t[6];
+  float ab[3], ac[3], ap[3], bp[3], cp[3];
+  for (int k = 0; k < 3; k++) {
+    ab[k] = b[k] - a[k];
+    ac[k] = c[k] - a[k];
+    ap[k] = p[k] - a[k];
+    bp[k] = p[k] - b[k];
+    cp[k] = p[k] - c[k];
+  }
+  auto dot = [](const float* x, const float* y) { return x[0] * y[0] + x[1] * y[1] + x[2] * y[2]; };
+  const float d1 = dot(ab, ap), d2 = dot(ac, ap), d3 = dot(ab, bp), d4 = dot(ac, bp),
+              d5 = dot(ab, cp), d6 = dot(ac, cp);
+  const float vc = d1 * d4 - d3 * d2, vb = d5 * d2 - d1 * d6, va = d3 * d6 - d5 * d4;
+  float u = 0, v = 0;  // the point: a + u * ab + v * ac
+  if (d1 <= 0 && d2 <= 0) {
+    // a
+  } else if (d3 >= 0 && d4 <= d3) {
+    u = 1;
+  } else if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    u = d1 / (d1 - d3);
+  } else if (d6 >= 0 && d5 <= d6) {
+    v = 1;
+  } else if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    v = d2 / (d2 - d6);
+  } else if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+    v = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    u = 1 - v;
+  } else {
+    const float den = va + vb + vc;
+    if (std::abs(den) > 1e-20f) {
+      u = vb / den;
+      v = vc / den;
+    }
+  }
+  if (!std::isfinite(u) || !std::isfinite(v)) {
+    u = v = 0;  // (a degenerate triangle: its first corner)
+  }
+  w[0] = 1 - u - v;
+  w[1] = u;
+  w[2] = v;
+  float d2s = 0;
+  for (int k = 0; k < 3; k++) {
+    const float q = a[k] + u * ab[k] + v * ac[k] - p[k];
+    d2s += q * q;
+  }
+  return d2s;
+}
+
 bool ps2_dists(const std::string& level, const std::string& proto, float* mid, float* far) {
   for (const auto& e : kTiePs2Dists) {
     if (level == e.level && proto == e.proto) {
