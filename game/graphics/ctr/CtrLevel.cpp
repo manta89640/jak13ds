@@ -9,6 +9,7 @@
 
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrImpostor.h"
+#include "game/graphics/ctr/CtrOccCull.h"
 
 #include <algorithm>
 #include <array>
@@ -1814,77 +1815,12 @@ void load_tie_lod(c3l::Reader& f,
 void load_fine_vis(const fs::path& c3l_path, CtrLevelData* lev) {
   fs::path p = c3l_path;
   p.replace_extension(".c3v");
-  FILE* fp = fopen(p.string().c_str(), "rb");
-  if (!fp) {
-    return;  // (none: the level draws as without it)
-  }
-  auto fv = std::make_unique<CtrLevelData::FineVis>();
-  auto& h = fv->hdr;
-  const char* why = nullptr;
-  const u32 covered = c3v::covered_chunks(lev->chunks.data(), (u32)lev->chunks.size());
-  if (fread(&h, sizeof(h), 1, fp) != 1 || memcmp(h.magic, c3v::kMagic, 4) ||
-      h.version != c3v::kVersion) {
-    why = "not a C3V v1 file";
-  } else if (h.num_chunks != covered ||
-             h.level_hash != c3v::fine_vis_level_hash(lev->chunks.data(), covered,
-                                                      lev->draws.data(), (u32)lev->draws.size(),
-                                                      lev->vis_runs.data(),
-                                                      lev->chunk_first_run.data())) {
-    why = "made from another conversion of the level (run ctr_vis_builder on this .c3l)";
-  } else if (h.set_words != (h.num_units + 31) / 32 || h.num_sets == 0 || h.num_sets > 0xffff ||
-             h.cell <= 0 || h.nx == 0 || h.ny == 0 || h.nz == 0 ||
-             (u64)h.nx * h.ny * h.nz > 0xffffffffull) {
-    why = "bad header";
-  } else {
-    fv->cells.resize(h.num_cell_runs);
-    fv->sets.resize((size_t)h.num_sets * h.set_words);
-    if (fread(fv->cells.data(), sizeof(c3v::CellRun), fv->cells.size(), fp) != fv->cells.size() ||
-        fread(fv->sets.data(), 4, fv->sets.size(), fp) != fv->sets.size()) {
-      why = "truncated";
-    }
-  }
-  fclose(fp);
-  if (!why) {
-    // the units: each chunk's, in order (c3v_format.h); a chunk's runs are its units when there
-    // are as many (the file's runs, or run_culling's pieces)
-    fv->chunk_first_unit.resize(covered + 1);
-    fv->chunk_runs.resize(covered);
-    u32 u = 0;
-    for (u32 ci = 0; ci < covered; ci++) {
-      const auto& ch = lev->chunks[ci];
-      fv->chunk_first_unit[ci] = u;
-      const u32 n = c3v::chunk_units(ch, lev->draws.data(), (u32)lev->draws.size());
-      const u32 runs = ch.vis_run_count ? ch.vis_run_count
-                                        : (ci < lev->chunk_run_count.size() ? lev->chunk_run_count[ci] : 0);
-      fv->chunk_runs[ci] = n > 0 && runs == n;
-      u += n;
-    }
-    fv->chunk_first_unit[covered] = u;
-    if (u != h.num_units) {
-      why = "unit count differs";
-    }
-    u32 last_end = 0;
-    for (const auto& c : fv->cells) {
-      if (c.set >= h.num_sets || c.count == 0 || c.key < last_end) {
-        why = "bad cells";
-        break;
-      }
-      last_end = c.key + c.count;
-    }
-  }
-  if (why) {
-    lg::warn("[ctr] {}: {} not used: {}", lev->name, p.filename().string(), why);
-    return;
-  }
-  fv->chunk_hidden.assign(covered, 0);
-  u32 ncells = 0;
-  for (const auto& c : fv->cells) {
-    ncells += c.count;
-  }
-  lev->fine = std::move(fv);
-  lg::info("[ctr] {}: fine visibility {}: {} cells of {:.0f} m in {} runs, {} sets of {} units, {} KB",
-           lev->name, p.filename().string(), ncells, h.cell / 4096.f, h.num_cell_runs, h.num_sets,
-           h.num_units, (lev->fine->bytes() + 1023) / 1024);
+  lev->fine = CtrFineVis::open(p.string(), lev->name, lev->chunks.data(), (u32)lev->chunks.size(),
+                               lev->draws.data(), (u32)lev->draws.size(), lev->vis_runs.data(),
+                               lev->chunk_first_run.data(),
+                               lev->chunk_run_count.size() >= lev->chunks.size()
+                                   ? lev->chunk_run_count.data()
+                                   : std::vector<u32>(lev->chunks.size(), 0).data());
 }
 
 // (AI-assisted) run_culling: the bounding spheres of chunk ci's runs from its vertices (as read
@@ -2938,6 +2874,10 @@ void CtrLevels::retry_failed_loads(u64 frame) {
 
 void CtrLevels::unload(CtrLevelData& lev) {
   bump_set_generation();  // (AI-assisted)
+  if (lev.fine) {
+    lev.fine->cancel();  // (AI-assisted) fine_vis: its queued block reads are dropped
+    lev.fine.reset();
+  }
   for (int t : lev.textures) {
     ctr_gpu_tex_delete(t);
   }
@@ -3187,50 +3127,6 @@ bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
 // ties times tie_distance_scale (most ties stopped at 100 m: pop-in); with auto_detail both move
 // toward their _max values as far as the GPU time allows. (micro-level: worked out in draw_level's
 // chunk loop, its factors once per level draw)
-
-// (AI-assisted) fine_vis: the set of the cell holding the camera position t (-1: none)
-int fine_vis_cell_set(const CtrLevelData::FineVis& fv, const math::Vector4f& t) {
-  const auto& h = fv.hdr;
-  const float fx = (t.x() - h.origin[0]) / h.cell, fy = (t.y() - h.origin[1]) / h.cell,
-              fz = (t.z() - h.origin[2]) / h.cell;
-  if (!(fx >= 0 && fy >= 0 && fz >= 0 && fx < (float)h.nx && fy < (float)h.ny &&
-        fz < (float)h.nz)) {
-    return -1;  // (outside the grid, or not a number)
-  }
-  const u32 x = std::min<u32>((u32)fx, h.nx - 1), y = std::min<u32>((u32)fy, h.ny - 1),
-            z = std::min<u32>((u32)fz, h.nz - 1);
-  const u32 key = (z * h.ny + y) * h.nx + x;
-  auto it = std::upper_bound(fv.cells.begin(), fv.cells.end(), key,
-                             [](u32 k, const c3v::CellRun& c) { return k < c.key; });
-  if (it == fv.cells.begin()) {
-    return -1;
-  }
-  --it;
-  return key < it->key + it->count ? it->set : -1;
-}
-
-// (AI-assisted) fine_vis: what set `set` hides of each covered chunk (FineVis::chunk_hidden)
-void fine_vis_select(CtrLevelData::FineVis& fv, int set) {
-  fv.set = set;
-  if (set < 0) {
-    return;
-  }
-  const u32* bits = fv.sets.data() + (size_t)set * fv.hdr.set_words;
-  for (size_t ci = 0; ci < fv.chunk_hidden.size(); ci++) {
-    const u32 a = fv.chunk_first_unit[ci], b = fv.chunk_first_unit[ci + 1];
-    u32 seen = 0;
-    for (u32 u = a; u < b;) {
-      if ((u & 31) == 0 && u + 32 <= b) {
-        seen += (u32)__builtin_popcount(bits[u >> 5]);
-        u += 32;
-      } else {
-        seen += (bits[u >> 5] >> (u & 31)) & 1;
-        u++;
-      }
-    }
-    fv.chunk_hidden[ci] = seen == b - a ? 0 : (seen == 0 ? 1 : 2);
-  }
-}
 
 // (AI-assisted, micro-level) a chunk's runs, one by one (CtrTfragRenderer::draw_level, emit_chunk):
 // the visibility bit (VIS) or the vista source, the other version of a tie LOD group (LOD), the
@@ -3690,12 +3586,35 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_tod_spread = m_tod_deferred = m_tod_lag_frames = m_tod_lag_max = m_tod_lag2 = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
+  if (rs.log_now && m_occ_frames) {
+    lg::info("[ctr] {}: occ cull hid {:.1f} chunks, {:.1f} runs, {:.0f} tris per level draw; "
+             "occluders {:.0f} tris taken, {:.0f} rasterized; {:.3f} ms per level draw ({:.3f} at "
+             "most; {} level draws; gather {:.3f}, raster {:.3f}, pyramid {:.3f}, tests {:.3f})",
+             m_name, (double)m_occ_chunks / m_occ_frames, (double)m_occ_runs / m_occ_frames,
+             (double)m_occ_tris / m_occ_frames, (double)m_occ_tris_in / m_occ_frames,
+             (double)m_occ_tris_drawn / m_occ_frames, m_occ_ms / m_occ_frames, m_occ_max_ms,
+             m_occ_frames, m_occ_phase[0] / m_occ_frames, m_occ_phase[1] / m_occ_frames,
+             m_occ_phase[2] / m_occ_frames, m_occ_phase[3] / m_occ_frames);
+    for (auto& ph : m_occ_phase) {
+      ph = 0;
+    }
+    m_occ_frames = m_occ_tris_in = m_occ_tris_drawn = m_occ_chunks = m_occ_runs = m_occ_tris = 0;
+    m_occ_ms = m_occ_max_ms = 0;
+  }
   if (rs.log_now && m_fine_levels) {
-    lg::info("[ctr] {}: fine vis hid {:.1f} chunks, {:.0f} tris per level draw with a cell ({} of "
-             "{} level draws)",
+    lg::info("[ctr] {}: fine vis hid {:.1f} chunks, {:.0f} tris per level draw with a set ({} of "
+             "{} level draws){}",
              m_name, (double)m_fine_chunks / std::max<u64>(1, m_fine_frames),
-             (double)m_fine_tris / std::max<u64>(1, m_fine_frames), m_fine_frames, m_fine_levels);
+             (double)m_fine_tris / std::max<u64>(1, m_fine_frames), m_fine_frames, m_fine_levels,
+             m_fine_k_hi > 0 ? fmt::format("; tie LOD factor {:.3f}..{:.3f}", m_fine_k_lo,
+                                           m_fine_k_hi)
+                             : "");
     m_fine_chunks = m_fine_tris = m_fine_frames = m_fine_levels = 0;
+    m_fine_k_lo = 1e30f;
+    m_fine_k_hi = 0;
+    if (lev && lev->fine) {
+      lev->fine->log_stats(lev->name);  // (AI-assisted) its blocks, cells, decodes
+    }
   }
 }
 
@@ -3805,23 +3724,66 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   m_vis_own_frames += vis_own;
   // (AI-assisted) fine_vis: the set of the camera's cell (the camera's own position), while the
   // level is drawn as the sets assume: near mode with all of its meshes (an occluder that isn't
-  // drawn hides nothing), everything within the occluder range drawn (draw distance), and the LOD
-  // tiers by the distances the tool assumed. Elsewhere (no cell, cutscene cameras outside the
-  // cells, far mode...) nothing more is hidden.
+  // drawn hides nothing), everything within the occluder range drawn (draw distance), the LOD
+  // tiers by the distances the tool assumed (the coarse tier certain only beyond the 1.5x hold of
+  // a detailed cell in view), the occluders' own distance limits at factors no smaller than the
+  // tool's, ties drawn as geometry (impostors) and closed tie surfaces culled the right way round
+  // (cull_ties not flip), and the tie LOD switch within the tool's range. Elsewhere (no cell,
+  // cutscene cameras outside the cells, a block not read yet, far mode...) nothing more is hidden.
+#ifndef __3DS__
+  // (AI-assisted) host: env CTR_FINE_VIS_CAMLOG=FILE, the camera positions (level x y z, meters)
+  // every 4th level draw (ctr_vis_builder --cam-stats: where the cells should be)
+  static FILE* camlog = getenv("CTR_FINE_VIS_CAMLOG") ? fopen(getenv("CTR_FINE_VIS_CAMLOG"), "a")
+                                                      : nullptr;
+  if (camlog && (rs.frame_idx & 3) == 0) {
+    fprintf(camlog, "%s %.2f %.2f %.2f\n", lev.name.c_str(), cam.trans.x() / 4096.f,
+            cam.trans.y() / 4096.f, cam.trans.z() / 4096.f);
+    fflush(camlog);
+  }
+#endif
   m_fine = nullptr;
+  m_fine_bits = nullptr;
   m_fine_hidden.clear();
   if (lev.fine && settings.fine_vis) {
     auto& fv = *lev.fine;
+    const auto& fh = fv.hdr;
     m_fine_levels++;
-    const float occ_dist = fv.hdr.occluder_range + 2 * fv.hdr.eps;
-    const bool ok = !far_level && !lev.incomplete && (draw_dist <= 0 || draw_dist >= occ_dist) &&
-                    lod_dist > 0 && lod_dist * 0.9f >= fv.hdr.lod_near &&
-                    lod_dist * 1.1f <= fv.hdr.lod_far;
-    const int set = ok ? fine_vis_cell_set(fv, cam.trans) : -1;
-    if (set != fv.set) {
-      fine_vis_select(fv, set);
+    const float occ_dist = fh.occluder_range + 2 * std::max(fh.eps, fh.eps_coarse);
+    bool ok = !far_level && !lev.incomplete && (draw_dist <= 0 || draw_dist >= occ_dist) &&
+              lod_dist > 0 && lod_dist * 0.9f >= fh.lod_near &&
+              lod_dist * std::max(1.1f, kHoldInView) <= fh.lod_far &&
+              settings.detail_scale >= fh.detail_min;
+    if (ok && (fh.occluders & c3v::kOccTie)) {
+      ok = settings.tie_distance_scale >= fh.tie_scale_min &&
+           (!settings.impostors || settings.impostor_distance * 4096.f >= fh.tie_occ_max);
     }
-    if (set >= 0) {
+    if (ok && (fh.occluders & c3v::kOccShrub)) {
+      ok = lev.shrub_ps2_dist && settings.shrub_scale >= fh.shrub_scale_min;
+    }
+    if (ok && (fh.occluders & c3v::kOccClosed)) {
+      ok = !settings.cull_flip;
+    }
+    if (!lev.lod_groups.empty()) {
+      // the tie LOD switch factor (as below: detail_scale x focal / tie_lod_px, switched by the
+      // groups' shape errors)
+      const float pzw = std::abs(cam.perspective[2][3]);
+      const float focal =
+          pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
+      const float k = settings.tie_lod ? settings.detail_scale * focal /
+                                             std::max(settings.tie_lod_px, 0.25f)
+                                       : 0.f;
+      m_fine_k_lo = std::min(m_fine_k_lo, k);
+      m_fine_k_hi = std::max(m_fine_k_hi, k);
+      if (fh.occluders & c3v::kOccTieLod) {
+        ok = ok && lev.run_lod.size() >= lev.vis_runs.size() &&
+             lev.lod_error.size() == lev.lod_groups.size() && k >= fh.tie_k_lo &&
+             k <= fh.tie_k_hi;
+      }
+    } else if (fh.occluders & c3v::kOccTieLod) {
+      ok = false;
+    }
+    m_fine_bits = fv.update(cam.trans.x(), cam.trans.y(), cam.trans.z(), ok, rs.frame_idx);
+    if (m_fine_bits) {
       m_fine = &fv;
       m_fine_frames++;
     }
@@ -4000,8 +3962,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   };
   // (AI-assisted) fine_vis: the set's bits (nullptr: no set this frame)
-  const u32* fine_bits =
-      m_fine ? m_fine->sets.data() + (size_t)m_fine->set * m_fine->hdr.set_words : nullptr;
+  const u32* fine_bits = m_fine ? m_fine_bits : nullptr;
   const bool fine_check = fine_vis_check_enabled();
   // (AI-assisted) a chunk that is to be drawn (mode and distance decided): the view test (the
   // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
@@ -4413,6 +4374,332 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         emit_chunk(ci, true);
       }
     }
+  }
+  // (AI-assisted) occ_cull: software occlusion culling (CtrOccCull.h). The opaque pieces drawn
+  // this frame nearest the camera into the CPU occlusion buffer (the biggest on screen first, up to
+  // occ_cull_tris triangles within occ_cull_dist), then every drawn piece (chunk, then run) behind
+  // it isn't drawn. Not the vista pass's chunks (far scenery with its own fog: never hidden, never
+  // an occluder).
+  if (settings.occ_cull && settings.occ_cull_tris > 0 && !m_visible.empty()) {
+    const double t0 = ctr_gpu_time_ms();
+    static CtrOccCull s_occ;  // (render thread; one buffer per frame for all the levels drawn)
+    CtrOccCull& oc = s_occ;
+    if (oc.frame() != rs.frame_idx) {
+      oc.begin_frame(rs.frame_idx);
+    }
+    oc.tris_in = oc.tris_drawn = 0;
+    const float maxd = settings.occ_cull_dist * 4096.f;
+    // an occluder draw: drawn opaque and depth written (GEQUAL), every pixel of it: no blending,
+    // an alpha test that its texture's smallest alpha (the GPU's 2 x aref) and vertex alpha 0x80
+    // always pass; back face culled ones (closed tie surfaces) only with their front faces, and
+    // not with cull_ties = flip (then the GPU keeps the other side)
+    auto occluder = [&](u32 di, bool* culled) {
+      const auto& st = lev.draw_states[di];
+      if (st.blend != CTR_BLEND_OFF || !st.zwrite || st.ztest != CTR_TEST_GEQUAL) {
+        return false;
+      }
+      if (st.atest != CTR_TEST_ALWAYS) {
+        const auto& d = lev.draws[di];
+        const int ma = d.texture < lev.tex_min_alpha.size() ? lev.tex_min_alpha[d.texture] : 0;
+        if (st.atest != CTR_TEST_GEQUAL || ma < std::min(255, 2 * (int)st.aref) ||
+            di >= lev.draw_alpha80.size() || !lev.draw_alpha80[di]) {
+          return false;
+        }
+      }
+      *culled = (st.tcc & CTR_TCC_CULL_BACK) &&
+                (settings.cull_ties || (st.tcc & CTR_TCC_CULL_OWN));
+      return !(*culled && settings.cull_flip);
+    };
+    // a draw that may be hidden: depth tested
+    auto hideable = [&](u32 di) {
+      const auto& st = lev.draw_states[di];
+      return st.ztest == CTR_TEST_GEQUAL || st.ztest == CTR_TEST_GREATER;
+    };
+    auto run_world = [&](const c3l::Chunk& ch, u32 r, float* c, float* rad) {
+      const auto& rsph = lev.run_spheres[r];
+      for (int a = 0; a < 3; a++) {
+        c[a] = ch.origin[a] + rsph.c[a] * ch.scale;
+      }
+      *rad = rsph.r * ch.scale;
+    };
+    // ---- occluders ----
+    m_occ_cands.clear();
+    for (u32 slot = 0; slot < m_visible.size(); slot++) {
+      const auto& vc = m_visible[slot];
+      if (vc.vista) {
+        continue;
+      }
+      const auto& ch = lev.chunks[vc.chunk];
+      const float* M = vc.clip;
+      const float len0 = std::sqrt(M[0] * M[0] + M[1] * M[1] + M[2] * M[2]);
+      const float len1 = std::sqrt(M[4] * M[4] + M[5] * M[5] + M[6] * M[6]);
+      const float len3 = std::sqrt(M[12] * M[12] + M[13] * M[13] + M[14] * M[14]);
+      // a run's sphere on screen (its quantized center and radius)
+      auto run_on_screen = [&](const CtrLevelData::RunSphere& rsph) {
+        float q[4];
+        for (int r = 0; r < 4; r++) {
+          q[r] = M[4 * r] * rsph.c[0] + M[4 * r + 1] * rsph.c[1] + M[4 * r + 2] * rsph.c[2] +
+                 M[4 * r + 3];
+        }
+        return CtrOccCull::on_screen(q, rsph.r * len0, rsph.r * len1, rsph.r * len3);
+      };
+      {
+        const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                    dz = ch.bsphere[2] - cam.trans[2];
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) - ch.bsphere[3] > maxd) {
+          continue;
+        }
+      }
+      for (u32 k = 0; k < ch.draw_count; k++) {
+        const u32 di = ch.first_draw + k;
+        bool culled;
+        if (!occluder(di, &culled)) {
+          continue;
+        }
+        const auto& dr = lev.draws[di];
+        const u32 nr = lev.draw_run_count[di];
+        if (!nr || lev.run_spheres.empty()) {
+          const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                      dz = ch.bsphere[2] - cam.trans[2];
+          const float d2 = std::max(dx * dx + dy * dy + dz * dz, 1.f);
+          m_occ_cands.push_back(
+              {ch.bsphere[3] * ch.bsphere[3] / d2, slot, di, dr.first_index, dr.index_count});
+          continue;
+        }
+        u32 idx = dr.first_index;
+        for (u32 r = lev.draw_first_run[di]; r < lev.draw_first_run[di] + nr; r++) {
+          const u32 n = lev.vis_runs[r].index_count;
+          const bool shown = !vc.runs_valid || m_run_shown[r];
+          if (shown && lev.run_spheres[r].r != 0xffff && run_on_screen(lev.run_spheres[r])) {
+            float c[3], rad;
+            run_world(ch, r, c, &rad);
+            const float dx = c[0] - cam.trans[0], dy = c[1] - cam.trans[1],
+                        dz = c[2] - cam.trans[2];
+            const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d - rad <= maxd) {
+              m_occ_cands.push_back({rad * rad / std::max(d * d, 1.f), slot, di, idx, n});
+            }
+          }
+          idx += n;
+        }
+      }
+    }
+    std::sort(m_occ_cands.begin(), m_occ_cands.end(),
+              [](const OccCand& a, const OccCand& b) { return a.pri > b.pri; });
+    const double t_gather = ctr_gpu_time_ms();
+    const u64 budget = (u64)settings.occ_cull_tris;
+    int peeked_mesh = -1;
+    const c3l::Vertex* verts = nullptr;
+    const u16* inds = nullptr;
+    int nv = 0, ni = 0;
+    for (const auto& oc_c : m_occ_cands) {
+      // the budget: triangles rasterized (those off screen cost only their transform: at most
+      // four times as many taken)
+      if (oc.tris_drawn >= budget || oc.tris_in >= 4 * budget) {
+        break;
+      }
+      const auto& vc = m_visible[oc_c.slot];
+      const auto& ch = lev.chunks[vc.chunk];
+      const int mesh = lev.meshes[vc.chunk];
+      if (mesh != peeked_mesh) {
+        const void* vp = nullptr;
+        if (!ctr_gpu_mesh_peek(mesh, &vp, &nv, &inds, &ni)) {
+          continue;
+        }
+        verts = (const c3l::Vertex*)vp;
+        peeked_mesh = mesh;
+      }
+      if (oc_c.first + oc_c.count > (u32)ni) {
+        continue;
+      }
+      bool culled = false;
+      occluder(oc_c.di, &culled);
+      // the camera in the chunk's quantized units (front faces: counter-clockwise from outside,
+      // c3l kDrawCullBack)
+      const float cl[3] = {(cam.trans[0] - ch.origin[0]) / ch.scale,
+                           (cam.trans[1] - ch.origin[1]) / ch.scale,
+                           (cam.trans[2] - ch.origin[2]) / ch.scale};
+      const float* M = vc.clip;
+      for (u32 i = oc_c.first; i + 3 <= oc_c.first + oc_c.count; i += 3) {
+        const u16 i0 = inds[i], i1 = inds[i + 1], i2 = inds[i + 2];
+        if (i0 >= (u32)nv || i1 >= (u32)nv || i2 >= (u32)nv) {
+          continue;
+        }
+        const s16* p[3] = {verts[i0].pos, verts[i1].pos, verts[i2].pos};
+        if (culled) {
+          const float ax = p[1][0] - p[0][0], ay = p[1][1] - p[0][1], az = p[1][2] - p[0][2];
+          const float bx = p[2][0] - p[0][0], by = p[2][1] - p[0][1], bz = p[2][2] - p[0][2];
+          const float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+          if (!(nx * (cl[0] - p[0][0]) + ny * (cl[1] - p[0][1]) + nz * (cl[2] - p[0][2]) > 0)) {
+            continue;  // a back face: maybe culled
+          }
+        }
+        float q[3][4];
+        for (int k = 0; k < 3; k++) {
+          const float x = p[k][0], y = p[k][1], z = p[k][2];
+          for (int r = 0; r < 4; r++) {
+            q[k][r] = M[4 * r] * x + M[4 * r + 1] * y + M[4 * r + 2] * z + M[4 * r + 3];
+          }
+        }
+        oc.add_triangle(q[0], q[1], q[2]);
+      }
+    }
+    const double t_raster = ctr_gpu_time_ms();
+    oc.finish_occluders();
+    const double t_finish = ctr_gpu_time_ms();
+    m_occ_phase[0] += t_gather - t0;
+    m_occ_phase[1] += t_raster - t_gather;
+    m_occ_phase[2] += t_finish - t_raster;
+    {
+      static int dbg = getenv("CTR_OCC_DEBUG") ? 1 : 0;
+      if (dbg && rs.frame_idx % 60 == 0) {
+        oc.dump(fmt::format("/private/tmp/claude-501/occ/occ_{}_{}.pgm", lev.name, rs.frame_idx)
+                    .c_str());
+      }
+      if (dbg && rs.log_now) {
+        lg::info("[ctr] occ debug {}: {} full cells, {} partial; {} near rejects, {} area rejects; "
+                 "{} candidates",
+                 lev.name, oc.full_cells, oc.partial_cells, oc.near_rejects, oc.area_rejects,
+                 m_occ_cands.size());
+        if (!m_visible.empty()) {
+          const auto& vc = m_visible[0];
+          const auto& ch = lev.chunks[vc.chunk];
+          const float cq[3] = {(ch.bsphere[0] - ch.origin[0]) / ch.scale,
+                               (ch.bsphere[1] - ch.origin[1]) / ch.scale,
+                               (ch.bsphere[2] - ch.origin[2]) / ch.scale};
+          float q[4];
+          for (int r = 0; r < 4; r++) {
+            q[r] = vc.clip[4 * r] * cq[0] + vc.clip[4 * r + 1] * cq[1] +
+                   vc.clip[4 * r + 2] * cq[2] + vc.clip[4 * r + 3];
+          }
+          const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
+                      dz = ch.bsphere[2] - cam.trans[2];
+          lg::info("[ctr] occ debug: chunk center clip {} {} {} {}, distance {} m", q[0], q[1], q[2],
+                   q[3], std::sqrt(dx * dx + dy * dy + dz * dz) / 4096.f);
+        }
+      }
+      oc.near_rejects = oc.area_rejects = 0;
+    }
+    m_occ_tris_in += oc.tris_in;
+    m_occ_tris_drawn += oc.tris_drawn;
+    // ---- tests ----
+    bool removed = false;
+    for (auto& vc : m_visible) {
+      if (vc.vista) {
+        continue;
+      }
+      const u32 ci = vc.chunk;
+      const auto& ch = lev.chunks[ci];
+      const float* M = vc.clip;
+      const float len0 = std::sqrt(M[0] * M[0] + M[1] * M[1] + M[2] * M[2]);
+      const float len1 = std::sqrt(M[4] * M[4] + M[5] * M[5] + M[6] * M[6]);
+      const float len3 = std::sqrt(M[12] * M[12] + M[13] * M[13] + M[14] * M[14]);
+      auto test = [&](const float* cq, float rq) {
+        float q[4];
+        for (int r = 0; r < 4; r++) {
+          q[r] = M[4 * r] * cq[0] + M[4 * r + 1] * cq[1] + M[4 * r + 2] * cq[2] + M[4 * r + 3];
+        }
+        return oc.hidden(q, rq * len0, rq * len1, rq * len3);
+      };
+      bool all_hideable = true;
+      for (u32 k = 0; k < ch.draw_count && all_hideable; k++) {
+        all_hideable = hideable(ch.first_draw + k);
+      }
+      {
+        const float cq[3] = {(ch.bsphere[0] - ch.origin[0]) / ch.scale,
+                             (ch.bsphere[1] - ch.origin[1]) / ch.scale,
+                             (ch.bsphere[2] - ch.origin[2]) / ch.scale};
+        if (all_hideable && test(cq, ch.bsphere[3] / ch.scale)) {
+          m_occ_chunks++;
+          for (u32 k = 0; k < ch.draw_count; k++) {
+            const u32 di = ch.first_draw + k;
+            const u32 nr = lev.draw_run_count[di];
+            if (vc.partly && nr) {
+              for (u32 r = lev.draw_first_run[di]; r < lev.draw_first_run[di] + nr; r++) {
+                m_occ_tris += m_run_shown[r] ? lev.vis_runs[r].index_count / 3 : 0;
+              }
+            } else {
+              m_occ_tris += lev.draws[di].index_count / 3;
+            }
+          }
+          if (fine_check) {
+            if (vc.partly && vc.runs_valid) {
+              // (only the runs that were to be drawn)
+              const u32 r0 = lev.chunk_first_run[ci];
+              const u32 rn = lev.chunk_run_count.size() > ci && lev.chunk_run_count[ci]
+                                 ? lev.chunk_run_count[ci]
+                                 : ch.vis_run_count;
+              for (u32 q = r0; q < r0 + rn; q++) {
+                if (m_run_shown[q]) {
+                  m_fine_hidden.push_back({ci, q});
+                }
+              }
+            } else {
+              m_fine_hidden.push_back({ci, ~0u});
+            }
+          }
+          m_visible_slot[ci] = -1;
+          removed = true;
+          continue;
+        }
+      }
+      if (lev.run_spheres.empty()) {
+        continue;
+      }
+      for (u32 k = 0; k < ch.draw_count; k++) {
+        const u32 di = ch.first_draw + k;
+        const u32 nr = lev.draw_run_count[di];
+        if (!nr || !hideable(di)) {
+          continue;
+        }
+        for (u32 r = lev.draw_first_run[di]; r < lev.draw_first_run[di] + nr; r++) {
+          if ((vc.runs_valid && !m_run_shown[r]) || lev.run_spheres[r].r == 0xffff) {
+            continue;
+          }
+          const auto& rsph = lev.run_spheres[r];
+          const float cq[3] = {(float)rsph.c[0], (float)rsph.c[1], (float)rsph.c[2]};
+          if (!test(cq, rsph.r)) {
+            continue;
+          }
+          if (!vc.runs_valid) {
+            // all of the chunk's runs were shown: their flags from here on
+            const u32 r0 = lev.chunk_first_run[ci];
+            const u32 rn = lev.chunk_run_count.size() > ci && lev.chunk_run_count[ci]
+                               ? lev.chunk_run_count[ci]
+                               : ch.vis_run_count;
+            for (u32 q = r0; q < r0 + rn; q++) {
+              m_run_shown[q] = 1;
+            }
+            vc.runs_valid = true;
+          }
+          m_run_shown[r] = 0;
+          vc.partly = true;
+          m_occ_runs++;
+          m_occ_tris += lev.vis_runs[r].index_count / 3;
+          if (fine_check) {
+            m_fine_hidden.push_back({ci, r});
+          }
+        }
+      }
+    }
+    if (removed) {
+      size_t o = 0;
+      for (size_t i = 0; i < m_visible.size(); i++) {
+        if (m_visible_slot[m_visible[i].chunk] >= 0) {
+          if (o != i) {
+            m_visible[o] = m_visible[i];
+          }
+          m_visible_slot[m_visible[o].chunk] = (int)o;
+          o++;
+        }
+      }
+      m_visible.resize(o);
+    }
+    m_occ_frames++;
+    const double dt = ctr_gpu_time_ms() - t0;
+    m_occ_phase[3] += ctr_gpu_time_ms() - t_finish;
+    m_occ_ms += dt;
+    m_occ_max_ms = std::max(m_occ_max_ms, dt);
   }
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws

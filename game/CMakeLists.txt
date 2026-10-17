@@ -40,6 +40,8 @@ set(RUNTIME_SOURCE
         graphics/pipelines/null.cpp
         graphics/ctr/CtrButtonArt.cpp
         graphics/ctr/CtrDirect.cpp
+        graphics/ctr/CtrFineVis.cpp
+        graphics/ctr/CtrOccCull.cpp
         graphics/ctr/CtrImpostor.cpp
         graphics/ctr/CtrLevel.cpp
         graphics/ctr/CtrMerc.cpp

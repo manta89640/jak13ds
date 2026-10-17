@@ -246,6 +246,14 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.neighbour_vis = parse_bool(v);  // (AI-assisted)
     } else if (key == "fine_vis") {
       s.fine_vis = parse_bool(v);  // (AI-assisted)
+    } else if (key == "fine_vis_kb") {
+      s.fine_vis_kb = std::clamp(std::atoi(v.c_str()), 16, 1024);  // (AI-assisted)
+    } else if (key == "occ_cull") {
+      s.occ_cull = parse_bool(v);  // (AI-assisted)
+    } else if (key == "occ_cull_tris") {
+      s.occ_cull_tris = std::clamp(std::atoi(v.c_str()), 0, 100000);  // (AI-assisted)
+    } else if (key == "occ_cull_dist") {
+      s.occ_cull_dist = std::clamp(f, 5.f, 1000.f);  // (AI-assisted)
     } else if (key == "lowres_vista") {
       s.lowres_vista = parse_bool(v);  // (AI-assisted)
     } else if (key == "vista_distance") {
