@@ -80,14 +80,15 @@ s32 as_int(float f) {
   return r;
 }
 
-// (AI-assisted) all ten words of two sprites' AdGif data equal (newlib's memcmp took ~11
-// instructions per word, for every sprite)
+// (AI-assisted) The AdGif words resolve_state makes the state from (TEX0, TEX1, CLAMP_1 or the
+// ZBUF_1 written in its place, ALPHA_1) equal: the same state. The other five (MIPTBP1 and the
+// register numbers of the others) never change it: a state made again for them came out the same
+// (with the same clamp mode, also kept), so sprites that differ only there share it now. (All ten
+// words were compared; newlib's memcmp before that took ~11 instructions per word.)
 template <typename AdGif>
-bool same_adgif(const AdGif& a, const AdGif& b) {
-  return ((a.tex0_data ^ b.tex0_data) | (a.tex0_addr ^ b.tex0_addr) | (a.tex1_data ^ b.tex1_data) |
-          (a.tex1_addr ^ b.tex1_addr) | (a.mip_data ^ b.mip_data) | (a.mip_addr ^ b.mip_addr) |
-          (a.clamp_data ^ b.clamp_data) | (a.clamp_addr ^ b.clamp_addr) |
-          (a.alpha_data ^ b.alpha_data) | (a.alpha_addr ^ b.alpha_addr)) == 0;
+bool same_state_words(const AdGif& a, const AdGif& b) {
+  return ((a.tex0_data ^ b.tex0_data) | (a.tex1_data ^ b.tex1_data) | (a.clamp_data ^ b.clamp_data) |
+          (a.clamp_addr ^ b.clamp_addr) | (a.alpha_data ^ b.alpha_data)) == 0;
 }
 
 u8 color_byte(float f) {
@@ -571,7 +572,7 @@ void CtrSpriteRenderer::flush(bool hud) {
 }
 
 void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
-  if (!m_have_last_ad || !same_adgif(ad, m_last_ad)) {
+  if (!m_have_last_ad || !same_state_words(ad, m_last_ad)) {
     m_last_ad = ad;
     m_have_last_ad = true;
     ctr_draw_state& st = m_last_state;
