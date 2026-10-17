@@ -139,7 +139,69 @@ CtrSpriteRenderer::CtrSpriteRenderer(std::string name, int id, CtrVram* vram)
 
 CtrSpriteRenderer::~CtrSpriteRenderer() = default;
 
+void CtrSpriteRenderer::snapshot(DmaFollower& dma, CtrRenderState& rs) {
+  m_snap_refs.clear();
+  m_snap_quads = 0;
+  m_snap_cursor = 0;
+  while (dma.current_tag_offset() != rs.next_bucket) {
+    const DmaTag::Kind kind = dma.current_tag().kind;
+    const DmaTransfer t = dma.read_and_advance();
+    if ((kind != DmaTag::Kind::REF && kind != DmaTag::Kind::REFS) || !t.data || !t.size_bytes) {
+      continue;  // CNT / NEXT data lives in the DMA buffer, which the game double buffers
+    }
+    const size_t q = (t.size_bytes + 15) / 16;
+    if (m_snap_quads + q > m_snap_cap) {
+      // grows without zeroing (once warmed up: never)
+      const size_t cap = std::max<size_t>(2 * m_snap_cap, m_snap_quads + q + 1024);
+      std::unique_ptr<Quad[]> bigger(new Quad[cap]);
+      if (m_snap_quads) {
+        memcpy(bigger.get(), m_snap_data.get(), m_snap_quads * sizeof(Quad));
+      }
+      m_snap_data = std::move(bigger);
+      m_snap_cap = cap;
+    }
+    memcpy(m_snap_data.get() + m_snap_quads, t.data, t.size_bytes);
+    m_snap_refs.push_back({t.data, t.size_bytes, (u32)m_snap_quads});
+    m_snap_quads += q;
+  }
+  m_snap_valid = true;
+}
+
+const u8* CtrSpriteRenderer::snap_data(const u8* src, u32 bytes) {
+  if (!m_snap_valid) {
+    return src;
+  }
+  // the render reads the transfers in the chain's order: the next one from the cursor on
+  for (size_t i = m_snap_cursor; i < m_snap_refs.size(); i++) {
+    const SnapRef& r = m_snap_refs[i];
+    if (r.src == src && r.bytes == bytes) {
+      m_snap_cursor = i + 1;
+      const u8* copy = m_snap_data[r.at].b;
+      if (!m_snap_logged) {
+        m_snap_logged = true;
+        lg::info("[ctr] sprite snapshot: in use ({} transfers, {} KB this frame)",
+                 m_snap_refs.size(), m_snap_quads * 16 / 1024);
+      }
+#ifndef __3DS__
+      // host (synchronous: game memory doesn't change under the render): the same bytes
+      if (memcmp(copy, src, bytes)) {
+        m_snap_mismatch++;
+      }
+#endif
+      return copy;
+    }
+  }
+  m_snap_misses++;
+  return src;
+}
+
 void CtrSpriteRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
+  // (AI-assisted) the snapshot is this frame's: used up by this render, however it ends
+  struct SnapDone {
+    bool& valid;
+    ~SnapDone() { valid = false; }
+  } snap_done{m_snap_valid};
+  m_snap_cursor = 0;
   auto skip_rest = [&]() {
     while (dma.current_tag_offset() != rs.next_bucket) {
       dma.read_and_advance();
@@ -196,6 +258,16 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
               m_stats.sprites_2d, m_stats.capped, m_stats.sprites_hud, m_stats.sprites_3d,
               m_stats.distort, m_stats.distort_small, m_stats.faint, m_stats.draws);
     m_stats = Stats();
+    // (AI-assisted) the sprite arrays' snapshot (game thread): its size in the last frame, and
+    // chunks that found none (read in place) or (host) whose copy differs from game memory
+    lg::debug("[ctr] sprite snapshot: {} transfers, {} KB in the last frame", m_snap_refs.size(),
+              m_snap_quads * 16 / 1024);
+    if (m_snap_misses || m_snap_mismatch) {
+      lg::warn("[ctr] sprite snapshot: {} transfers read in place, {} copies differ (since the "
+               "last stats)",
+               m_snap_misses, m_snap_mismatch);
+      m_snap_misses = m_snap_mismatch = 0;
+    }
   }
 }
 
@@ -502,10 +574,11 @@ bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
   u32 h[4];
   memcpy(h, header.data, 16);
   *count = std::min<u32>(h[0], kSpritesPerChunk);
+  // (AI-assisted) from the snapshot of the sprite arrays when there is one (see snapshot)
   auto vec = dma.read_and_advance();
-  m_vec = (const VecData*)vec.data;
+  m_vec = (const VecData*)snap_data(vec.data, vec.size_bytes);
   auto adgif = dma.read_and_advance();
-  m_adgif = (const AdGif*)adgif.data;
+  m_adgif = (const AdGif*)snap_data(adgif.data, adgif.size_bytes);
   auto run = dma.read_and_advance();
   if (run.vifcode1().kind != VifCode::Kind::MSCAL) {
     return false;

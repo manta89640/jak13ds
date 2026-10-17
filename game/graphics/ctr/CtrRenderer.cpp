@@ -504,8 +504,12 @@ CtrRenderer::CtrRenderer()
                   std::make_unique<CtrTfragRenderer>("tfrag-trans", (int)id, m_levels.get())));
     }
   }
-  set(BucketId::SPRITE,
-      std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));
+  {
+    auto sprite =
+        std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get());
+    m_sprite = sprite.get();
+    set(BucketId::SPRITE, std::move(sprite));
+  }
   set(BucketId::DEBUG,
       std::make_unique<CtrDirectBucketRenderer>("debug", (int)BucketId::DEBUG, m_vram.get(), true));
   set(BucketId::DEBUG_NO_ZBUF,
@@ -842,7 +846,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 
 void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
   // game thread, before handing the frame to the render thread: copy what the frame needs from
-  // game memory that is not double buffered (merc bone matrices)
+  // game memory that is not double buffered (merc bone matrices, (AI-assisted) the sprite arrays)
   CtrRenderState rs;
   rs.ee_mem = (const u8*)ee_mem;
   rs.offset_of_s7 = s7.offset;
@@ -852,6 +856,22 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
     DmaFollower dma(ee_mem, base + 16 * id);
     merc->snapshot_bones(dma, rs);
   }
+  prepare_sprites(ee_mem, chain_offset);
+}
+
+void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
+  // (AI-assisted) see CtrSpriteRenderer::snapshot
+  if (!m_sprite) {
+    return;
+  }
+  CtrRenderState rs;
+  rs.ee_mem = (const u8*)ee_mem;
+  rs.offset_of_s7 = s7.offset;
+  const u32 base = chain_offset + 16;
+  const int id = (int)jak1::BucketId::SPRITE;
+  rs.next_bucket = base + 16 * (id + 1);
+  DmaFollower dma(ee_mem, base + 16 * id);
+  m_sprite->snapshot(dma, rs);
 }
 
 void CtrRenderer::hw_counters_frame() {
@@ -1377,6 +1397,11 @@ void ctr_send_chain(const void* data, u32 offset) {
     g_job_offset = offset;
     ctr_gpu_async_submit();
   } else {
+#ifndef __3DS__
+    // (AI-assisted) host (synchronous): the sprites from the snapshot too, so the host runs check
+    // it (CtrSpriteRenderer::snap_data compares it with game memory)
+    g_ctr->prepare_sprites(data, offset);
+#endif
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;
   }
