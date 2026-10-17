@@ -1485,6 +1485,8 @@ void* ctr_gpu_mesh_vertices(int mesh) {
 }
 
 void ctr_gpu_mesh_flush(int, int, int) {}
+void ctr_gpu_flush_range(const void*, unsigned int) {}  // (AI-assisted, micro-mg)
+void ctr_gpu_set_micro_mask(unsigned int) {}
 
 void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||

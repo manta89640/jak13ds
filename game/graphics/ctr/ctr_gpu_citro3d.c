@@ -1080,11 +1080,16 @@ enum {
   MICRO_PROCLUT = 8,    /* the procedural texture tables kept in the GPU's LUT memory */
   MICRO_ATLAS = 16,     /* the mesh scales written raw */
   MICRO_FENCE = 32,     /* steady pacing's fence words in the vertex buffer */
-  MICRO_FLUSHMERGE = 64 /* cache flush requests of near ranges merged */
+  MICRO_FLUSHMERGE = 64, /* cache flush requests of near ranges merged */
+  /* (AI-assisted, micro-mg) round 2 */
+  MICRO_RAWGLOW = 128, /* the glows (procedural texture) as raw draws, not through citro3d */
+  MICRO_TEXSTATE = 256, /* a raw draw state that differs only in its texture: only the bind */
+  MICRO_FLUSHGAP = 512  /* deferred flush ranges up to DEFER_GAP2 apart in one request */
 };
-#define MICRO_ALL 127u
+#define MICRO_ALL 1023u
 static u32 s_micro = MICRO_ALL;
 static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
+static volatile u32 s_micro_want; /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask's (bit 31: set) */
 static int s_micro_ident;    /* gpu_micro_ident */
 static int s_micro_ident_st; /* its steps (ctr_gpu_frame_begin) */
 /* the programs' DVLEs as their shbins have them and in the image (res_apply) */
@@ -2768,6 +2773,12 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
       s_cmd_dump_next = 1;
     }
   }
+  if (s_micro_want) {
+    /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask (a test): from this frame on */
+    s_micro = s_micro_cfg = s_micro_want & MICRO_ALL;
+    s_micro_want = 0;
+    printf("[ctr] gpu_micro mask 0x%lx\n", (unsigned long)s_micro);
+  }
   res_apply((s_micro & MICRO_RESIDENT) != 0); /* (AI-assisted, micro-gpu) */
   proc_lut_snapshot();
   /* texture combiner constant: R in the low byte */
@@ -2813,6 +2824,13 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
  * go to the GPU (flush_vbuf, at every submission point), merged where the ranges touch. */
 #define DEFER_FLUSH_MAX 48
 #define DEFER_GAP (8u * 1024u) /* (AI-assisted, micro-gpu) see flush_vbuf */
+/* (AI-assisted, micro-mg) with MICRO_FLUSHGAP. Azahar charges ~16.7k ticks (62 us) of the render
+ * thread for each GSP flush request (an IPC; tens of microseconds on hardware too), and the level's
+ * time of day colors alone flushed 20-35 ranges per frame (Snowy, Misty). Cleaning the cache lines
+ * of a 64 KB gap is 2048 line operations: less than one request even if the kernel cleans line by
+ * line (if it cleans the whole cache above a size, as citro3d's whole linear heap flush per frame
+ * relies on, merging costs nothing). */
+#define DEFER_GAP2 (64u * 1024u)
 extern u32 __ctru_linear_heap, __ctru_linear_heap_size; /* libctru */
 static struct {
   u32 start[DEFER_FLUSH_MAX], end[DEFER_FLUSH_MAX];
@@ -2838,6 +2856,19 @@ static void cache_flush_frame(const void* addr, u32 size) {
     }
   }
   if (s_defer.n == DEFER_FLUSH_MAX) {
+    /* (AI-assisted, micro-mg) MICRO_FLUSHGAP: into a range of the linear heap less than DEFER_GAP2
+     * away, rather than a request of its own now */
+    const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
+    if ((s_micro & MICRO_FLUSHGAP) && a >= lin0 && e <= lin1) {
+      for (int i = 0; i < s_defer.n; i++) {
+        if (s_defer.start[i] >= lin0 && s_defer.end[i] <= lin1 && a <= s_defer.end[i] + DEFER_GAP2 &&
+            e + DEFER_GAP2 >= s_defer.start[i]) {
+          s_defer.start[i] = a < s_defer.start[i] ? a : s_defer.start[i];
+          s_defer.end[i] = e > s_defer.end[i] ? e : s_defer.end[i];
+          return;
+        }
+      }
+    }
     cache_flush_now(addr, size);
     return;
   }
@@ -2867,10 +2898,11 @@ static void flush_vbuf(void) {
       s_defer.end[j + 1] = e;
     }
     const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
+    const u32 gap = (s_micro & MICRO_FLUSHGAP) ? DEFER_GAP2 : DEFER_GAP;
     int k = 0;
     for (int i = 1; i < s_defer.n; i++) {
       const u32 a = s_defer.start[i], e = s_defer.end[i];
-      if (a <= s_defer.end[k] + DEFER_GAP && s_defer.start[k] >= lin0 && e <= lin1 && a >= lin0) {
+      if (a <= s_defer.end[k] + gap && s_defer.start[k] >= lin0 && e <= lin1 && a >= lin0) {
         s_defer.end[k] = e > s_defer.end[k] ? e : s_defer.end[k];
       } else {
         k++;
@@ -4815,6 +4847,52 @@ static void commit_texenv(int id, const C3D_TexEnv* env, int raw) {
   }
 }
 
+/* (AI-assisted, micro-mg) gpu_micro: what the last full raw apply_state_tint worked from and
+ * wrote (MICRO_TEXSTATE). A raw state whose other words, mesh, tint, texture kind and inputs
+ * (the settings below) are those, while the GPU's (the context's) combiner stages and fragment
+ * operations are still what it wrote, gets the same combiner and fragment registers from the
+ * full path, so only its texture is bound (bind_texture, as the full path does). */
+typedef struct {
+  int valid;
+  u32 words[3]; /* the state's words 1..3 (word 0 is the texture) */
+  int mesh;
+  uint32_t tint;
+  u32 kind;     /* textured | alpha_full << 1 (proctex draws never take the short path) */
+  u32 in[16];   /* the settings the full path reads */
+  u32 tex_config_bit1;
+  C3D_TexEnv env0, env1;
+  C3Di_Effect effect;
+} StateFast;
+static StateFast s_sf;
+static u32 s_state_fast; /* statistics (ctr_gpu_cmdlist_line) */
+static inline int words_eq(const void* a, const void* b, unsigned n) {
+  const alias_u32* x = (const alias_u32*)a;
+  const alias_u32* y = (const alias_u32*)b;
+  u32 d = 0;
+  for (unsigned i = 0; i < n; i++) {
+    d |= x[i] ^ y[i];
+  }
+  return d == 0;
+}
+static inline void state_inputs(u32* in) {
+  in[0] = (u32)g_depth_far;
+  in[1] = (u32)g_cull_enable;
+  in[2] = (u32)g_cull_flip;
+  in[3] = (u32)g_early_depth;
+  in[4] = (u32)g_early_sky;
+  in[5] = (u32)g_early_func;
+  in[6] = g_early_clear;
+  in[7] = (u32)s_zdef_valid;
+  in[8] = s_zscale0;
+  in[9] = s_zoffset0;
+  in[10] = (u32)g_depth16;
+  in[11] = (u32)g.fog_tex_valid;
+  in[12] = g.fog_abgr;
+  in[13] = g.clear_abgr;
+  in[14] = (u32)g_tex1_gating;
+  in[15] = (u32)g_proctex;
+}
+
 /* mesh: 0 = immediate draws, 1 = level mesh, 2 = skinned mesh (tint = constant color stage).
  * (AI-assisted) 3 = the ocean (ctr_gpu_ocean_draw), 4 = level mesh without the fog stage
  * (fog_stage_skip), 5 = level mesh with the fog amount in the vertex alpha (fog_alpha: its vertex
@@ -4835,6 +4913,31 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   g.last_state_mesh = mesh;
   g.last_tint = tint;
   g.last_state_valid = 1;
+  /* (AI-assisted, micro-mg) gpu_micro: the same state but for its texture (see StateFast) */
+  const int textured0 = st->tex >= 0 && st->tex < MAX_TEXTURES && g.textures[st->tex].used == 1;
+  const alias_u32* stw = (const alias_u32*)st;
+  if (raw && s_sf.valid && (s_micro & MICRO_TEXSTATE) && s_sf.mesh == mesh && s_sf.tint == tint &&
+      /* (the filter and clamp bytes only matter to the bind) */
+      !((((stw[1] ^ s_sf.words[0]) & 0x0000FFFFu) | ((stw[2] ^ s_sf.words[1]) & 0xFFFFFF00u) |
+         (stw[3] ^ s_sf.words[2]))) &&
+      !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && !g.ocean_stage2 && mesh != 3) {
+    const u32 kind = textured0 ? 1u | ((u32)g.textures[st->tex].alpha_full << 1) : 0u;
+    u32 in[16];
+    state_inputs(in);
+    C3Di_Context* fctx = &__C3D_Context;
+    if (kind == s_sf.kind && words_eq(in, s_sf.in, 16) &&
+        (fctx->texConfig & BIT(1)) == s_sf.tex_config_bit1 &&
+        words_eq(&fctx->texEnv[0], &s_sf.env0, sizeof(C3D_TexEnv) / 4) &&
+        words_eq(&fctx->texEnv[1], &s_sf.env1, sizeof(C3D_TexEnv) / 4) &&
+        words_eq(&fctx->effect, &s_sf.effect, sizeof(C3Di_Effect) / 4)) {
+      if (textured0) {
+        bind_texture(&g.textures[st->tex], st, 1);
+      }
+      s_state_fast++;
+      return;
+    }
+  }
+  s_sf.valid = 0;
   /* stage 1: lighting tint for skinned meshes, pass-through otherwise */
   C3D_TexEnv e1;
   C3D_TexEnv* env1 = &e1;
@@ -4992,7 +5095,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     const int need1 = mesh == 1 || mesh == 3;
     const int want_off = g_tex1_gating ? !need1 : mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
-    if (raw && want_off != is_off) {
+    /* (AI-assisted, micro-mg) a glow drawn raw (MICRO_RAWGLOW) leaves unit 1 as the citro3d draw
+     * did (it never switched it: the same registers at the draw) */
+    const int gate = raw && !(st->flags & CTR_STATE_PROCTEX);
+    if (gate && want_off != is_off) {
       if (want_off) {
         tctx->texConfig &= ~BIT(1);
       } else {
@@ -5187,11 +5293,30 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   }
   raw_end(p);
   *c = e;
+  /* (AI-assisted, micro-mg) what this full raw state worked from and wrote (StateFast) */
+  if (!proc && mesh != 3 && g.proc_radial < 0 && !g.ocean_stage2) {
+    s_sf.valid = 1;
+    s_sf.words[0] = ((const alias_u32*)st)[1];
+    s_sf.words[1] = ((const alias_u32*)st)[2];
+    s_sf.words[2] = ((const alias_u32*)st)[3];
+    s_sf.mesh = mesh;
+    s_sf.tint = tint;
+    s_sf.kind = textured ? 1u | ((u32)afull << 1) : 0u;
+    state_inputs(s_sf.in);
+    s_sf.tex_config_bit1 = ctx->texConfig & BIT(1);
+    s_sf.env0 = ctx->texEnv[0];
+    s_sf.env1 = ctx->texEnv[1];
+    s_sf.effect = *c;
+  }
 }
 
 /* (AI-assisted) the raw path takes every draw but the glows (procedural texture unit: citro3d) */
 static inline int use_raw(const ctr_draw_state* st) {
-  return s_raw.on && !(st->flags & CTR_STATE_PROCTEX);
+  /* (AI-assisted, micro-mg) gpu_micro: the glows too. What citro3d sent for them (the whole
+   * attribute buffer table, the fragment operations, both combiner stages, every uniform's dirty
+   * scan) is what the raw draw writes only where it changes; the procedural texture unit and
+   * texture unit 0's switch-off still go through citro3d (raw_sync sends them). */
+  return s_raw.on && (!(st->flags & CTR_STATE_PROCTEX) || (s_micro & MICRO_RAWGLOW));
 }
 
 /* the immediate draws (triangle lists or strips from g.vbuf): program, state, then the draw */
@@ -7067,6 +7192,12 @@ int ctr_gpu_cmdlist_line(char* out, int size) {
                   s_flush_requests / f);
   }
   s_flush_requests = 0;
+  if (l < size) {
+    /* (AI-assisted, micro-mg) MICRO_TEXSTATE */
+    l += snprintf(out + l, size - l, "; %.1f draw states only bound their texture",
+                  s_state_fast / f);
+  }
+  s_state_fast = 0;
   if (s_cl.mode == 2 && l < size) {
     l += snprintf(out + l, size - l, "; compare: %u copies checked, %u MISMATCHED", s_cl.compares,
                   s_cl.mismatches);
@@ -7297,6 +7428,17 @@ void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
   }
   *vertex_count = (int)(g.meshes[mesh].fill_vbytes / 16u);
   return g.meshes[mesh].verts;
+}
+
+void ctr_gpu_set_micro_mask(unsigned int mask) {
+  s_micro_want = (u32)mask | BIT(31);
+}
+
+void ctr_gpu_flush_range(const void* addr, unsigned int size) {
+  if (!g.ready || !addr || !size) {
+    return;
+  }
+  cache_flush_frame(addr, (u32)size);
 }
 
 void ctr_gpu_mesh_flush(int mesh, int offset, int size) {

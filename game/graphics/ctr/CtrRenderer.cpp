@@ -284,6 +284,11 @@ bool pad_set(const char* key, const char* value) {
     ctr_gpu_cmd_dump_next();  // (AI-assisted) "set cmd_dump on": the next frame's command list
     return true;
   }
+  if (!strcmp(key, "gpu_micro_mask")) {
+    // (AI-assisted, micro-mg) a test: gpu_micro's changes as bits (old / new in one run)
+    ctr_gpu_set_micro_mask((unsigned int)strtoul(value, nullptr, 0));
+    return true;
+  }
   for (const auto& sw : kAbSwitches) {
     if (!strcmp(key, sw.key)) {
       sw.set(s, on);
