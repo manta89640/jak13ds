@@ -326,12 +326,149 @@ struct FragSkipVerify {
 FragSkipVerify g_frag_skip_verify;
 #endif
 
+/*!
+ * (AI-assisted) logic_micro: add_mesh_tris with an outcode per vertex instead of the min / max of
+ * each triangle's three vertices: bit 2i set when the vertex is above bmax in axis i, bit 2i+1 when
+ * below bmin. A triangle's box misses [bmin, bmax] exactly when its three vertices are all above
+ * (or all below) in one axis: the AND of their outcodes isn't 0. Each vertex's outcode is made the
+ * first time a triangle uses it (the scratchpad vertices don't change during the call), so a
+ * triangle costs a byte load instead of three 3-lane min / max. Same triangles, same order, same
+ * overflow handling.
+ */
+void add_mesh_tris_micro(u32 cache,
+                         u32 mesh,
+                         const Vec4i& bmin,
+                         const Vec4i& bmax,
+                         u32 int_offset,
+                         u64 st) {
+  const s64 max_tris = (s32)*max_tri_count;
+  s64 num_tris = gload<u32>(cache);
+  auto overflow = [&]() {
+    gstore<u32>(cache, (u32)max_tris);
+    print_too_many_tris(st);
+  };
+  if (max_tris - num_tris < 0) {
+    overflow();
+    return;
+  }
+  const s32 x0 = bmin.v[0], y0 = bmin.v[1], z0 = bmin.v[2];
+  const s32 x1 = bmax.v[0], y1 = bmax.v[1], z1 = bmax.v[2];
+  // indices are s8 >= 0 (or n - 1 for 1 <= n <= 128): 0..127
+  u8 oc[128];
+  memset(oc, 0xff, sizeof(oc));
+  const u8* const mem = g_ee_main_mem;
+  u32 spad = 0;
+  auto compute = [&](s32 i) -> u32 {
+    s32 v[3];
+    memcpy(v, mem + spad + (u32)i * 32 + int_offset, 12);
+    return (u32)(v[0] > x1) | ((u32)(v[0] < x0) << 1) | ((u32)(v[1] > y1) << 2) |
+           ((u32)(v[1] < y0) << 3) | ((u32)(v[2] > z1) << 4) | ((u32)(v[2] < z0) << 5);
+  };
+  auto code = [&](s32 i) -> u32 {
+    if ((u32)i >= 128) {
+      return compute(i);  // (a negative first-triangle index: never in the game's meshes)
+    }
+    u32 c = oc[i];
+    if (c == 0xff) {
+      c = compute(i);
+      oc[i] = (u8)c;
+    }
+    return c;
+  };
+
+  u32 tri_out = cache + 4908 + (u32)num_tris * 64;
+  u32 strip = gload<u32>(mesh) + ((u32)gload<u8>(mesh + 25) << 4);
+  u32 pat_index = strip + gload<u16>(mesh + 8);
+  const u32 pats = gload<u32>(mesh + 4);
+  const u32 ignore_mask = gload<u32>(cache + 8);
+
+  for (;;) {
+    // new strip
+    const u32 strip_spad = fake_spad();
+    if (strip_spad != spad) {
+      // (the same address every strip in practice; the outcodes belong to one scratchpad)
+      spad = strip_spad;
+      memset(oc, 0xff, sizeof(oc));
+    }
+    const s32 i0 = gload<s8>(strip);
+    const s32 i1 = gload<s8>(strip + 1);
+    const s32 i2 = gload<s8>(strip + 2);
+    if (i0 < 0) {
+      gstore<u32>(cache, (u32)num_tris);
+      return;
+    }
+    u32 p0 = spad + i0 * 32;
+    u32 p1 = spad + i1 * 32;
+    u32 p2 = spad + i2 * 32;
+    u32 ca = code(i0), cb = code(i1), cc = code(i2);
+    const u32 pat_addr = pats + ((u32)gload<u8>(pat_index) << 2);
+    if (!(ca & cb & cc)) {
+      if (num_tris == max_tris) {
+        overflow();
+        return;
+      }
+      const u32 pat = gload<u32>(pat_addr);
+      if (!(pat & ignore_mask)) {
+        store_pat_quad(tri_out + 48, pat);
+        num_tris++;
+        copy_quad(tri_out, p0 + 16);
+        copy_quad(tri_out + 16, p1 + 16);
+        copy_quad(tri_out + 32, p2 + 16);
+        tri_out += 64;
+      }
+    }
+    pat_index++;
+    strip += 3;
+    s32 flip = 16;
+
+    for (;;) {
+      s32 n = gload<s8>(strip);
+      strip++;
+      if (n == 0) {
+        break;
+      }
+      if (n < 0) {
+        n = -n;
+      } else {
+        ca = cb;
+        p0 = p1;
+        flip = -flip;
+      }
+      p1 = p2;
+      cb = cc;
+      p2 = spad + (n - 1) * 32;
+      const u32 pidx = gload<u8>(pat_index);
+      cc = code(n - 1);
+      pat_index++;
+      if (ca & cb & cc) {
+        continue;
+      }
+      const u32 pat = gload<u32>(pats + (pidx << 2));
+      if (pat & ignore_mask) {
+        continue;
+      }
+      if (num_tris == max_tris) {
+        overflow();
+        return;
+      }
+      // p1 in the middle, p0 and p2 on either side depending on the winding
+      store_pat_quad(tri_out + 48, pat);
+      num_tris++;
+      copy_quad(tri_out + 16, p1 + 16);
+      copy_quad(tri_out + 16 - flip, p0 + 16);
+      copy_quad(tri_out + 16 + flip, p2 + 16);
+      tri_out += 64;
+    }
+  }
+}
+
 void add_mesh_tris(u32 cache,
                    u32 mesh,
                    const Vec4i& bmin,
                    const Vec4i& bmax,
                    u32 int_offset,
                    u64 st) {
+  static const bool micro = logic_micro_on();
 #ifndef __3DS__
   struct VerifyAtEnd {
     bool on = false;
@@ -353,6 +490,10 @@ void add_mesh_tris(u32 cache,
     verify_at_end.before = gload<u32>(cache);
   }
 #endif
+  if (micro) {
+    add_mesh_tris_micro(cache, mesh, bmin, bmax, int_offset, st);
+    return;
+  }
   const s64 max_tris = (s32)*max_tri_count;
   s64 num_tris = gload<u32>(cache);
   auto overflow = [&]() {

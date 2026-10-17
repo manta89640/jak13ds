@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -560,6 +561,33 @@ u64 verify_adapter(void* fn, u64 idx, u64* args) {
 #endif
 
 }  // namespace
+
+/*!
+ * (AI-assisted) config.ini logic_micro (default on; preset safe: off): the game thread's
+ * micro-optimisations of native functions (docs/3ds-port/performance.md "Game thread
+ * micro-optimisations"). Same results; off runs the code as before. Host: OPENGOAL_LOGIC_MICRO=0.
+ */
+bool logic_micro_on() {
+  static int on = -1;
+  if (on < 0) {
+    on = 1;
+#ifdef __3DS__
+    char v[16];
+    if (ctr_config_get("logic_micro", v, sizeof(v)) &&
+        (!strcmp(v, "off") || !strcmp(v, "0") || !strcmp(v, "false"))) {
+      on = 0;
+    }
+#else
+    const char* e = getenv("OPENGOAL_LOGIC_MICRO");
+    if (e && e[0] == '0') {
+      on = 0;
+    }
+#endif
+    lg::info("logic_micro: {}", on ? "on" : "off (config.ini logic_micro)");
+  }
+  return on == 1;
+}
+
 
 #if MIPS2C_WRITE_LOG
 bool g_write_log_on = false;

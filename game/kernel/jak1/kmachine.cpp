@@ -649,6 +649,12 @@ void InitMachine_PCPort() {
 #ifdef __3DS__
     char v[32];
     ocean_full = ctr_config_get("ocean", v, sizeof(v)) && std::string(v) == "full";
+#else
+    // (AI-assisted) host test hook: OPENGOAL_OCEAN_FULL=1 runs draw-ocean like the 3DS default
+    // (render-ocean-quad and the other ocean natives, e.g. for OPENGOAL_MIPS2C_VERIFY runs)
+    if (const char* e = getenv("OPENGOAL_OCEAN_FULL")) {
+      ocean_full = e[0] == '1';
+    }
 #endif
     intern_from_c("*pc-3ds-ocean-full*")->value =
         ocean_full ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;

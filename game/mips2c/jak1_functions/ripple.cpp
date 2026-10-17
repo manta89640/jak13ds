@@ -721,9 +721,59 @@ u64 execute(void* ctxt) {
   return c->gprs[v0].du64[0];
 }
 
+/*!
+ * (AI-assisted) native version (config.ini logic_micro, default on; also off with
+ * mips2c_native_off): the same loads and byte stores as the mips2c code above, without the
+ * ExecutionContext. For each of the effect's fragments: per vertex, two 4-bit indices into the
+ * wave table (the scratchpad + 1024, written by ripple-create-wave-table) pick a 3-byte entry,
+ * stored at bytes 7, 2 and 10 of the vertex's 12. (A fragment count of 0 would loop forever, as
+ * the original does.)
+ */
+u64 native_impl(const NativeArgs& args) {
+  u8* const m = g_ee_main_mem;
+  const u32 effect = (u32)args.a[0];
+  const u32 table = gload<u32>((u32)((const u8*)cache.fake_scratchpad_data - m)) + 1024;
+  u32 a1 = gload<u32>(effect + 4);
+  u32 t2 = gload<u32>(effect + 0);
+  u32 a2 = gload<u32>(effect + 8);
+  u32 a3 = gload<u32>(effect + 12);
+  const u32 n = gload<u16>(effect + 18);
+  for (u32 frag = 0; frag < n; frag++) {
+    const u32 count = m[a3];
+    t2 += (((u32)m[a1] + 3) >> 2) << 4;
+    u32 src = a2, dst = t2;
+    u64 left = count;
+    do {
+      const u32 e = table + ((((u32)m[src] & 15) + (((u32)m[src + 1] & 15) << 4)) << 2);
+      const u8 b0 = m[e], b1 = m[e + 1], b2 = m[e + 2];
+      // (gstore without reloading g_ee_main_mem after each byte store)
+      MIPS2C_NATIVE_LOG_STORE(dst + 7, 1);
+      m[dst + 7] = b0;
+      MIPS2C_NATIVE_LOG_STORE(dst + 2, 1);
+      m[dst + 2] = b1;
+      MIPS2C_NATIVE_LOG_STORE(dst + 10, 1);
+      m[dst + 10] = b2;
+      left--;
+      src += 2;
+      dst += 12;
+    } while (left != 0);
+    t2 += ((u32)m[a1 + 2] + (((u32)m[a1 + 1] + 3) >> 2)) << 4;
+    a1 += ((u32)m[a1 + 3] << 1) + 4;
+    a2 += (((u32)count << 1) + 15) & 65520;
+    a3 += 2;
+  }
+  return args.st;
+}
+
+const NativeImpl kNative = MIPS2C_NATIVE_IMPL_GOAL(native_impl, 0);
+
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("ripple-apply-wave-table", execute, 128);
+  if (logic_micro_on()) {
+    gLinkedFunctionTable.reg("ripple-apply-wave-table", execute, 128, &kNative);
+  } else {
+    gLinkedFunctionTable.reg("ripple-apply-wave-table", execute, 128);
+  }
 }
 
 } // namespace ripple_apply_wave_table
