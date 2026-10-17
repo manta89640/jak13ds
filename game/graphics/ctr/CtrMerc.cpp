@@ -936,6 +936,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     if (!same_palette) {
       palette_mirrors = false;
     }
+    const float scale = model->scale;
     for (int p = 0; !same_palette && p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
       // (AI-assisted) a bone the game didn't send this frame: the table still has the matrix of
       // an earlier model (Merc2 reads its own leftover the same way). Counted, logged once per
@@ -950,23 +951,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
                    model->name, bi, i);
         }
       }
-      const MercMat& m = *bones[bi];
-      float* rows = &palette_rows[12 * p];
-      if (cull_merc) {
-        const math::Vector4f& a = m.tmat[0];
-        const math::Vector4f& b = m.tmat[1];
-        const math::Vector4f& c = m.tmat[2];
-        const float det = a.x() * (b.y() * c.z() - b.z() * c.y()) -
-                          a.y() * (b.x() * c.z() - b.z() * c.x()) +
-                          a.z() * (b.x() * c.y() - b.y() * c.x());
-        palette_mirrors = palette_mirrors || !(det > 0.f);
+      // (AI-assisted) CtrMicro.h: the matrix read once into registers (the model's scale too), the
+      // determinant's sign on its bits, and not worked out once a bone of the palette mirrors
+      const float* t = bones[bi]->tmat[0].data();
+      if (cull_merc && !palette_mirrors) {
+        palette_mirrors = ctr_micro::merc_bone_mirrors(t);
       }
-      for (int r = 0; r < 3; r++) {
-        rows[4 * r + 0] = -m.tmat[0][r] * model->scale;
-        rows[4 * r + 1] = -m.tmat[1][r] * model->scale;
-        rows[4 * r + 2] = -m.tmat[2][r] * model->scale;
-        rows[4 * r + 3] = -m.tmat[3][r];
-      }
+      ctr_micro::merc_bone_rows(t, scale, &palette_rows[12 * p]);
     }
     if (hud_nfix && !same_palette) {
       for (int p = 0; p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {

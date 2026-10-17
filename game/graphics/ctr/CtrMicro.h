@@ -77,4 +77,46 @@ inline uint32_t bad_bone_bits(const float* m) {
          not_below(m + 12, kPos) | not_below(m + 13, kPos) | not_below(m + 14, kPos);
 }
 
+/*
+ * f > 0 on the bits: positive, not +0, not NaN. (The same as the VFP's compare also with flush to
+ * zero for the results of arithmetic, which are never denormal then.)
+ */
+inline bool positive(float f) {
+  uint32_t b;
+  memcpy(&b, &f, 4);
+  return b - 1u < 0x7f800000u;
+}
+
+/*
+ * A merc bone (tmat, 4 rows of 4 floats) as CtrMercRenderer's palette rows: 3 rows of 4, camera =
+ * -(tmat[0] * x + tmat[1] * y + tmat[2] * z + tmat[3]) with the model's quantization scale folded
+ * in. The 12 values are read before the stores (rows may be anything to the compiler).
+ */
+inline void merc_bone_rows(const float* t, float scale, float* rows) {
+  const float m00 = t[0], m01 = t[1], m02 = t[2], m10 = t[4], m11 = t[5], m12 = t[6], m20 = t[8],
+              m21 = t[9], m22 = t[10], m30 = t[12], m31 = t[13], m32 = t[14];
+  rows[0] = -m00 * scale;
+  rows[1] = -m10 * scale;
+  rows[2] = -m20 * scale;
+  rows[3] = -m30;
+  rows[4] = -m01 * scale;
+  rows[5] = -m11 * scale;
+  rows[6] = -m21 * scale;
+  rows[7] = -m31;
+  rows[8] = -m02 * scale;
+  rows[9] = -m12 * scale;
+  rows[10] = -m22 * scale;
+  rows[11] = -m32;
+}
+
+//! !(det(tmat's 3x3) > 0): the bone mirrors (the same expression as before, positive() for the
+//! compare)
+inline bool merc_bone_mirrors(const float* t) {
+  const float ax = t[0], ay = t[1], az = t[2], bx = t[4], by = t[5], bz = t[6], cx = t[8],
+              cy = t[9], cz = t[10];
+  const float det =
+      ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+  return !positive(det);
+}
+
 }  // namespace ctr_micro

@@ -134,10 +134,50 @@ static int test_bad_bones() {
   return bad;
 }
 
+// CtrMerc.cpp handle_model's palette rows and mirror test before (AI-assisted, micro-cpu)
+static void ref_rows(const float* tm, const float* scale_p, float* rows, bool* mirrors) {
+  const float(*t)[4] = (const float(*)[4])tm;
+  const float det = t[0][0] * (t[1][1] * t[2][2] - t[1][2] * t[2][1]) -
+                    t[0][1] * (t[1][0] * t[2][2] - t[1][2] * t[2][0]) +
+                    t[0][2] * (t[1][0] * t[2][1] - t[1][1] * t[2][0]);
+  *mirrors = *mirrors || !(det > 0.f);
+  for (int r = 0; r < 3; r++) {
+    rows[4 * r + 0] = -t[0][r] * *scale_p;
+    rows[4 * r + 1] = -t[1][r] * *scale_p;
+    rows[4 * r + 2] = -t[2][r] * *scale_p;
+    rows[4 * r + 3] = -t[3][r];
+  }
+}
+
+static int test_bone_rows() {
+  std::mt19937 rng(3);
+  const float special[] = {0.f, -0.f, 1.f, -1.f, 1e-40f, -1e-40f, 1e-30f, INFINITY, -INFINITY, NAN,
+                           1e30f, 0.5f};
+  u32 bad = 0;
+  for (int t = 0; t < 4000000; t++) {
+    float m[16], scale;
+    for (int k = 0; k < 16; k++) {
+      const u32 r = rng();
+      m[k] = (t % 3 == 0) ? from_u32(r)
+                          : (t % 3 == 1 ? special[r % 12] : (float)(s32)r * (1.f / 1073741824.f));
+    }
+    scale = (t & 4) ? from_u32(rng()) : 1e-4f * (float)(rng() % 1000);
+    float a[12], b[12];
+    bool ma = false;
+    ref_rows(m, &scale, a, &ma);
+    ctr_micro::merc_bone_rows(m, scale, b);
+    const bool mb = ctr_micro::merc_bone_mirrors(m);
+    bad += memcmp(a, b, sizeof(a)) != 0 || ma != mb;
+  }
+  printf("bone rows + mirror test: 4M random bones, %u differ\n", bad);
+  return bad;
+}
+
 int main() {
   int errors = 0;
   errors += test_f24();
   errors += test_bad_bones();
+  errors += test_bone_rows();
   printf("%s\n", errors ? "FAIL" : "OK");
   return errors ? 1 : 0;
 }
