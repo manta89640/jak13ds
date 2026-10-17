@@ -449,10 +449,11 @@ void CtrFineVis::log_stats(const std::string& level) {
   const u64 reads = st_reads.exchange(0), bytes = st_bytes.exchange(0), failed = st_failed.exchange(0);
   const u64 read_us = st_read_us.exchange(0), read_max = st_read_max_us.exchange(0);
   lg::info("[ctr] {}: fine vis: {} of {} level draws with a set ({} waiting for a block, {} "
-           "outside the cells, {} not usable); {} cells entered, {} sets decoded ({:.3f} ms on "
+           "outside the cells, {} not usable{}); {} cells entered, {} sets decoded ({:.3f} ms on "
            "average, {:.3f} at most); {} blocks read ({:.1f} KB, {:.2f} ms each on average, {:.2f} "
            "at most{}), {} dropped, {} without room; {:.3f} ms per level draw",
-           level, m_with_set, m_frames, m_waiting, m_no_cell, m_unusable, m_cells_entered,
+           level, m_with_set, m_frames, m_waiting, m_no_cell, m_unusable,
+           m_unusable ? fmt::format(": {}", not_usable_why) : "", m_cells_entered,
            m_decodes, m_decodes ? m_decode_ms / m_decodes : 0.0, m_decode_max, reads,
            bytes / 1024.0, reads ? read_us / 1000.0 / reads : 0.0, read_max / 1000.0,
            failed ? fmt::format(", {} failed", failed) : "", m_evicted, m_no_room,

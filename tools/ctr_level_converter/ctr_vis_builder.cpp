@@ -14,9 +14,8 @@
  *    (ground the game stands on, from its .fr3: --fr3, found next to the c3l folder by default),
  *    or (--draw-floors, or no .fr3) roughly horizontal tfrag / tie triangles. The camera anywhere
  *    else: no set (nothing extra hidden).
- *  - Samples: one per cell, at its center; every point of the cell is within eps = half the cell's
- *    diagonal (0.87 cell) of it. (The 9 samples of a body-centered lattice, eps 0.56 cell, saw as
- *    much per cell with twice the samples: their union adds up each one's uncertainty.)
+ *  - Samples: the cells' corners and centers (a body-centered lattice): every point of a cell is
+ *    within eps = 0.56 cell of one of its 9 samples (--center-only: the center, eps 0.87 cell).
  *  - From each sample, the level's opaque static geometry (tfrag, ties, shrubs: draws the runtime
  *    draws opaque, depth tested and written, with no alpha test that can fail, and only where the
  *    runtime draws them for certain from every point within eps: their distance limits, LOD tiers
@@ -71,7 +70,8 @@ struct Options {
   float above = 20.f, coarse_spread = 10.f;
   float below = 2.f;
   bool coarse = true;
-  float eps_scale = 0.866f;  // eps / cell (one sample at the center: half the diagonal)
+  bool center_only = false;  // one sample per cell (its center) instead of 9
+  float eps_scale = 0.f;     // eps / cell (0: 0.56 with 9 samples, 0.866 with the center alone)
   std::string fr3;  // a .fr3 file or a folder of them ("": next to the c3l folder, ../fr3)
   bool draw_floors = false;
   // occlusion
@@ -101,6 +101,7 @@ struct Options {
   std::string save_bits, load_bits;  // (testing) the sampled cell sets to / from a file
   std::string cam_stats;  // (testing) camera positions (level x y z, meters): in which cells
   std::vector<float> debug_point;
+  std::vector<int> debug_units;  // (testing) with --debug-point: these units' visibility
 };
 
 constexpr float kM = 4096.f;  // game units per meter
@@ -312,6 +313,17 @@ bool load_level(const std::string& path, const Options& opt, LevelGeo* out, std:
     }
   }
   out->covered = c3v::covered_chunks(chunks.data(), (u32)chunks.size());
+  if (opt.verbose) {
+    u32 kinds[6] = {0, 0, 0, 0, 0, 0}, after = 0;
+    for (size_t ci = 0; ci < chunks.size(); ci++) {
+      kinds[std::min<u32>(chunks[ci].kind, 5)]++;
+      after += ci >= out->covered && !c3v::is_vista(chunks[ci]);
+    }
+    fmt::print("{}: c3l v{}: {} chunks (tfrag {}, tie {}, shrub {}, vista {}+{}), {} covered, {} "
+               "after the vista chunks\n",
+               out->name, hdr.version, chunks.size(), kinds[1], kinds[2], kinds[3], kinds[4],
+               kinds[5], out->covered, after);
+  }
   out->level_hash = c3v::fine_vis_level_hash(chunks.data(), out->covered, draws.data(),
                                              (u32)draws.size(), runs.data(),
                                              chunk_first_run.data());
@@ -630,8 +642,14 @@ bool load_level(const std::string& path, const Options& opt, LevelGeo* out, std:
               const V3 gc{g.bsphere[0] / kM, g.bsphere[1] / kM, g.bsphere[2] / kM};
               const float gr = g.bsphere[3] / kM, sw = lod_error[rl.group] / kM;
               OccCluster p = proto;
-              // CtrLevel.cpp: near while |c - sphere| < error x k x hysteresis (1 / 1.1) + r
-              if (rl.lod == c3l::kRunLodNear) {
+              // CtrLevel.cpp: near while |c - sphere| < error x k x hysteresis (1 / 1.1) + r.
+              // v19: a near version is in a near chunk the runtime streams in (the far version
+              // drawn until it's there): never certain, no occluder
+              if (rl.lod == c3l::kRunLodNear && hdr.version >= c3l::kStreamVersion) {
+                open_tris.clear();
+                closed_tris.clear();
+              } else if (rl.lod == c3l::kRunLodNear) {
+                out->occ_flags |= c3v::kOccTieNear;
                 p.in_c[p.n_in] = gc;
                 p.in_r[p.n_in] = sw * opt.tie_k_lo + gr;
                 p.n_in++;
@@ -1391,18 +1409,20 @@ class SampleWork {
           }
         }
         int k = m_p->level_for(d0);
-        bool ok = k >= 0;
-        for (int it = 0; ok && it < 16; it++) {
+        bool ok = k >= 0, done = false;
+        for (int it = 0; ok && it < 64; it++) {
           const float dmin = window(layer, f, b, k, false);
           const int k2 = m_p->level_for(dmin);
           if (k2 < 0) {
             ok = false;
           } else if (k2 <= k) {
+            done = true;
             break;
           } else {
             k = k2;
           }
         }
+        ok = ok && done;  // (a window that kept growing: hides nothing)
         if (!ok) {
           windows_too_wide++;
           continue;
@@ -2159,8 +2179,9 @@ bool build(const std::string& in, const std::string& out_path, const Options& op
   ct.init(geom);
   const float cell = opt.cell, ccell = 2 * opt.cell;
   Params pf, pc;
-  pf.init(cell * opt.eps_scale + 0.02f, opt, ct);
-  pc.init(ccell * opt.eps_scale + 0.02f, opt, ct);
+  const float eps_k = opt.eps_scale > 0 ? opt.eps_scale : (opt.center_only ? 0.866f : 0.56f);
+  pf.init(cell * eps_k + 0.02f, opt, ct);
+  pc.init(ccell * eps_k + 0.02f, opt, ct);
 
   const size_t nu = lev.units.size();
   const size_t words = (nu + 63) / 64;
@@ -2181,6 +2202,18 @@ bool build(const std::string& in, const std::string& out_path, const Options& op
                p.x, p.y, p.z, vis, nu, vt, lev.total_tris, w.windows_too_wide, w.t_render * 1e3,
                w.t_occ * 1e3, w.t_units * 1e3, w.clusters_drawn);
     w.dump(out_path);
+    for (int u : opt.debug_units) {
+      if (u >= 0 && (size_t)u < nu) {
+        u32 ci = 0;
+        while (ci + 1 < lev.chunk_unit_first.size() && lev.chunk_unit_first[ci + 1] <= (u32)u) {
+          ci++;
+        }
+        const auto& un = lev.units[u];
+        fmt::print("  unit {} (chunk {}): {} from here ({} tris, {:.1f} m away)\n", u, ci,
+                   (bits[u >> 6] >> (u & 63) & 1) ? "may be seen" : "HIDDEN", un.tri_count,
+                   box_dist(un.box, p));
+      }
+    }
     {
       const float offs[] = {0.05f, 0.25f, 0.5f, 1.f, 2.f};
       for (float o : offs) {
@@ -2341,22 +2374,39 @@ bool build(const std::string& in, const std::string& out_path, const Options& op
   std::vector<u32> s_first, s_cells;  // CSR: sample -> cells (fine 0.., coarse after)
   {
     std::vector<std::vector<u32>> lists;
-    // one sample per cell, at its center (eps: half the cell's diagonal). The union of the 9
-    // samples of a body-centered lattice (eps 0.56 cell) saw as much per cell with twice the samples:
-    // each sample's own uncertainty adds up in the union.
-    auto add_centers = [&](const std::vector<u32>& cells, int nx, int ny, float sz, u8 c,
+    // each cell's corners (lattice nodes, shared by the cells around them) and its center (a
+    // body-centered lattice: every point of the cell within 0.56 cell of one); --center-only: the
+    // center alone (half the cell's diagonal: the same sets with half the samples, but a hole
+    // behind a near object can escape the one sample: maincave, Oct 17, 15 pixels in one frame)
+    auto add_lattice = [&](const std::vector<u32>& cells, int nx, int ny, float sz, u8 c,
                            u32 cell_base) {
+      std::unordered_map<u64, u32> corner;
+      corner.reserve(cells.size() * 2);
+      const u64 nx1 = nx + 1, ny1 = ny + 1;
       for (u32 ci = 0; ci < cells.size(); ci++) {
         const u32 k = cells[ci];
         const int x = k % nx, y = (k / nx) % ny, z = k / nx / ny;
+        for (int cc = 0; cc < 8 && !opt.center_only; cc++) {
+          const int cx = x + (cc & 1), cy = y + ((cc >> 1) & 1), cz = z + (cc >> 2);
+          const u64 ck = ((u64)cz * ny1 + cy) * nx1 + cx;
+          auto it = corner.find(ck);
+          if (it == corner.end()) {
+            it = corner.emplace(ck, (u32)samples.size()).first;
+            samples.push_back({{grid.origin.x + cx * sz, grid.origin.y + cy * sz,
+                                grid.origin.z + cz * sz},
+                               c});
+            lists.emplace_back();
+          }
+          lists[it->second].push_back(cell_base + ci);
+        }
         samples.push_back({{grid.origin.x + (x + 0.5f) * sz, grid.origin.y + (y + 0.5f) * sz,
                             grid.origin.z + (z + 0.5f) * sz},
                            c});
         lists.push_back({cell_base + ci});
       }
     };
-    add_centers(fine_cells, grid.nx, grid.ny, cell, 0, 0);
-    add_centers(coarse_cells, cnx, cny, ccell, 1, (u32)fine_cells.size());
+    add_lattice(fine_cells, grid.nx, grid.ny, cell, 0, 0);
+    add_lattice(coarse_cells, cnx, cny, ccell, 1, (u32)fine_cells.size());
     s_first.reserve(samples.size() + 1);
     for (auto& l : lists) {
       s_first.push_back((u32)s_cells.size());
@@ -2704,6 +2754,7 @@ int main(int argc, char** argv) {
   app.add_option("--layers", opt.layers, "(testing) the depth layers' cuts (x eps), up to 4")
       ->delimiter(',');
   app.add_option("--eps-scale", opt.eps_scale, "(testing) eps / cell");
+  app.add_flag("--center-only", opt.center_only, "one sample per cell (half the time, less safe)");
   app.add_option("--block", opt.block, "cells per block side (even)");
   app.add_option("--block-kb", opt.block_kb, "the largest block (KB; sets merge above it)");
   app.add_option("--smooth", opt.smooth, "units seen from this share of a block's cells: all (0 off)");
@@ -2717,6 +2768,8 @@ int main(int argc, char** argv) {
   app.add_option("--load-bits", opt.load_bits, "(testing) the sets from --save-bits (same options)");
   app.add_option("--debug-point", opt.debug_point, "(testing) x y z: one sample, PGM pictures")
       ->expected(3);
+  app.add_option("--debug-units", opt.debug_units, "(testing) with --debug-point: these units")
+      ->delimiter(',');
   CLI11_PARSE(app, argc, argv);
   if (opt.face < 8 || (opt.face & (opt.face - 1)) || opt.face > 256) {
     fmt::print("--face: a power of two, 8..256\n");

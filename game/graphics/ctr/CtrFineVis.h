@@ -55,6 +55,7 @@ class CtrFineVis : public std::enable_shared_from_this<CtrFineVis> {
   u32 bytes() const;
 
   c3v::Header hdr{};
+  const char* not_usable_why = "";  // the last reason the level wasn't drawn as the sets assume
   std::vector<u32> chunk_first_unit;  // per covered chunk (hdr.num_chunks), and the end
   std::vector<u8> chunk_runs;  // per covered chunk: its runs (chunk_first_run...) are its units
   // what the current set hides of each covered chunk: 0 nothing, 1 all of it, 2 some of its units

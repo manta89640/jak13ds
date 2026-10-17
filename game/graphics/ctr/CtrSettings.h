@@ -270,7 +270,7 @@ struct CtrSettings {
   // ctr_vis_builder): per cell of the camera's space, the level pieces that may be seen from there;
   // the others aren't drawn (static tfrag / tie / shrub only; merc as before). A level without the
   // file, or a camera outside the cells, draws as without it
-  bool fine_vis = true;
+  bool fine_vis = false;  // (off: no .c3v files shipped, see c3l_format.md "Results")
   // (AI-assisted) fine_vis: the memory per level for the .c3v blocks read around the camera (KB)
   int fine_vis_kb = 128;
   // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h): each frame

@@ -4661,6 +4661,8 @@ constexpr float kHoldInView = 1.5f;
 // (AI-assisted) occ_cull: a level whose occlusion buffer hid fewer triangles than this per level
 // draw lately (average) runs it every 8th frame only; runs of fewer triangles aren't tested
 constexpr float kOccMinTris = 1000.f;
+// (AI-assisted) CTR_FINE_VIS_CHECK: the chunk of a piece occ_cull hid has this bit
+constexpr u32 kOccMark = 0x80000000u;
 constexpr u32 kOccMinRunTris = 16;
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
 bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
@@ -4839,6 +4841,7 @@ struct FineCheckDraw {
   u32 first, count;
   std::string level;
   u32 chunk, run;
+  bool by_occ;  // hidden by occ_cull (else fine_vis)
 };
 std::vector<FineCheckDraw> g_fine_check;
 // (AI-assisted) env CTR_FINE_VIS_ORACLE: every drawn run (kind: chunk kind), queried at the frame end
@@ -4881,8 +4884,10 @@ void ctr_level_fine_vis_check(u64 frame, bool log_now) {
       if (n > 0) {
         px += n;
         if (logged++ < 4) {
-          lg::warn("[ctr] fine_vis check: frame {}: {} chunk {} run {}: {} pixels would be seen",
-                   frame, d.level, d.chunk, d.run == ~0u ? -1 : (int)d.run, n);
+          lg::warn("[ctr] fine_vis check: frame {}: {} chunk {} run {}: {} pixels would be seen "
+                   "(hidden by {})",
+                   frame, d.level, d.chunk, d.run == ~0u ? -1 : (int)d.run, n,
+                   d.by_occ ? "occ_cull" : "fine_vis");
         }
       }
     }
@@ -5303,9 +5308,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // every 4th level draw (ctr_vis_builder --cam-stats: where the cells should be)
   static FILE* camlog = getenv("CTR_FINE_VIS_CAMLOG") ? fopen(getenv("CTR_FINE_VIS_CAMLOG"), "a")
                                                       : nullptr;
-  if (camlog && (rs.frame_idx & 3) == 0) {
-    fprintf(camlog, "%s %.2f %.2f %.2f\n", lev.name.c_str(), cam.trans.x() / 4096.f,
-            cam.trans.y() / 4096.f, cam.trans.z() / 4096.f);
+  if (camlog && (getenv("CTR_FINE_VIS_CAMLOG_ALL") || (rs.frame_idx & 3) == 0)) {
+    fprintf(camlog, "%s %.3f %.3f %.3f %llu\n", lev.name.c_str(), cam.trans.x() / 4096.f,
+            cam.trans.y() / 4096.f, cam.trans.z() / 4096.f, (unsigned long long)rs.frame_idx);
     fflush(camlog);
   }
 #endif
@@ -5317,19 +5322,29 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const auto& fh = fv.hdr;
     m_fine_levels++;
     const float occ_dist = fh.occluder_range + 2 * std::max(fh.eps, fh.eps_coarse);
-    bool ok = !far_level && !lev.incomplete && (draw_dist <= 0 || draw_dist >= occ_dist) &&
-              lod_dist > 0 && lod_dist * 0.9f >= fh.lod_near &&
-              lod_dist * std::max(1.1f, kHoldInView) <= fh.lod_far &&
-              settings.detail_scale >= fh.detail_min;
-    if (ok && (fh.occluders & c3v::kOccTie)) {
-      ok = settings.tie_distance_scale >= fh.tie_scale_min &&
-           (!settings.impostors || settings.impostor_distance * 4096.f >= fh.tie_occ_max);
-    }
-    if (ok && (fh.occluders & c3v::kOccShrub)) {
-      ok = lev.shrub_ps2_dist && settings.shrub_scale >= fh.shrub_scale_min;
-    }
-    if (ok && (fh.occluders & c3v::kOccClosed)) {
-      ok = !settings.cull_flip;
+    // (not while another level's visibility string hides this level's tfrag: neighbour_vis)
+    // why not (the first reason; statistics)
+    const char* why = nullptr;
+    if (far_level) {
+      why = "far mode";
+    } else if (lev.incomplete) {
+      why = "incomplete load";
+    } else if (!(draw_dist <= 0 || draw_dist >= occ_dist)) {
+      why = "draw_distance";
+    } else if (!(lod_dist > 0 && lod_dist * 0.9f >= fh.lod_near &&
+                 lod_dist * std::max(1.1f, kHoldInView) <= fh.lod_far)) {
+      why = "lod_distance";
+    } else if (settings.detail_scale < fh.detail_min) {
+      why = "detail_scale";
+    } else if ((fh.occluders & c3v::kOccTie) &&
+               (settings.tie_distance_scale < fh.tie_scale_min ||
+                (settings.impostors && settings.impostor_distance * 4096.f < fh.tie_occ_max))) {
+      why = "tie distances";
+    } else if ((fh.occluders & c3v::kOccShrub) &&
+               (!lev.shrub_ps2_dist || settings.shrub_scale < fh.shrub_scale_min)) {
+      why = "shrub distances";
+    } else if ((fh.occluders & c3v::kOccClosed) && settings.cull_flip) {
+      why = "cull_flip";
     }
     if (!lev.lod_groups.empty()) {
       // the tie LOD switch factor (as below: detail_scale x focal / tie_lod_px, switched by the
@@ -5342,13 +5357,22 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                        : 0.f;
       m_fine_k_lo = std::min(m_fine_k_lo, k);
       m_fine_k_hi = std::max(m_fine_k_hi, k);
-      if (fh.occluders & c3v::kOccTieLod) {
-        ok = ok && lev.run_lod.size() >= lev.vis_runs.size() &&
-             lev.lod_error.size() == lev.lod_groups.size() && k >= fh.tie_k_lo &&
-             k <= fh.tie_k_hi;
+      // the switch as draw_level makes it; without it (or tie_lod off) only the far versions are
+      // drawn: fine for far version occluders, not for near ones
+      const bool switching = settings.tie_lod && lev.run_lod.size() >= lev.vis_runs.size();
+      if (!why && (fh.occluders & c3v::kOccTieLod)) {
+        if (switching ? !(lev.lod_error.size() == lev.lod_groups.size() && k >= fh.tie_k_lo &&
+                          k <= fh.tie_k_hi)
+                      : (fh.occluders & c3v::kOccTieNear) != 0) {
+          why = "tie LOD switch";
+        }
       }
-    } else if (fh.occluders & c3v::kOccTieLod) {
-      ok = false;
+    } else if (!why && (fh.occluders & c3v::kOccTieLod)) {
+      why = "no tie LOD";
+    }
+    const bool ok = !why;
+    if (why) {
+      fv.not_usable_why = why;
     }
     m_fine_bits = fv.update(cam.trans.x(), cam.trans.y(), cam.trans.z(), ok, rs.frame_idx);
     if (m_fine_bits) {
@@ -6364,11 +6388,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                  : ch.vis_run_count;
               for (u32 q = r0; q < r0 + rn; q++) {
                 if (m_run_shown[q]) {
-                  m_fine_hidden.push_back({ci, q});
+                  m_fine_hidden.push_back({ci | kOccMark, q});
                 }
               }
             } else {
-              m_fine_hidden.push_back({ci, ~0u});
+              m_fine_hidden.push_back({ci | kOccMark, ~0u});
             }
           }
           m_visible_slot[ci] = -1;
@@ -6421,7 +6445,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           m_occ_runs++;
           m_occ_tris += lev.vis_runs[r].index_count / 3;
           if (fine_check) {
-            m_fine_hidden.push_back({ci, r});
+            m_fine_hidden.push_back({ci | kOccMark, r});
           }
         }
       }
@@ -6781,7 +6805,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (fine_check && !m_fine_hidden.empty()) {
     u32 last = ~0u;
     ctr_mesh_matrix mat;
-    for (const auto& [ci, r] : m_fine_hidden) {
+    for (const auto& [ci_marked, r] : m_fine_hidden) {
+      const u32 ci = ci_marked & ~kOccMark;
+      const bool by_occ = ci_marked & kOccMark;
       const auto& ch = lev.chunks[ci];
       if (lev.meshes[ci] < 0) {
         continue;
@@ -6794,7 +6820,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       auto add = [&](u32 di, u32 first, u32 count) {
         g_fine_check.push_back({lev.draw_states[di], mat, lev.meshes[ci], first, count, lev.name,
-                                ci, r});
+                                ci, r, by_occ});
       };
       if (r == ~0u) {
         for (u32 k = 0; k < ch.draw_count; k++) {

@@ -55,7 +55,8 @@ constexpr uint32_t kRunIndices = 96 * 3;
 constexpr uint32_t kOccTie = 1;        // ties (kRunLodAlways runs, nearer than tie_occ_max)
 constexpr uint32_t kOccShrub = 2;      // shrubs (v14+ PS2 distances)
 constexpr uint32_t kOccClosed = 4;     // kDrawCullBack draws, front faces only (cull_ties not flip)
-constexpr uint32_t kOccTieLod = 8;     // tie LOD versions (tie_k_lo .. tie_k_hi)
+constexpr uint32_t kOccTieLod = 8;     // tie LOD far versions (tie_k_lo .. tie_k_hi)
+constexpr uint32_t kOccTieNear = 16;   // tie LOD near versions too (c3l v17/v18 files)
 
 struct Header {
   char magic[4];
