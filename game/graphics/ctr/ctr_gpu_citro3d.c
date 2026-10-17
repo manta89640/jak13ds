@@ -1089,6 +1089,7 @@ enum {
 #define MICRO_ALL 1023u
 static u32 s_micro = MICRO_ALL;
 static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
+static volatile u32 s_micro_want; /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask's (bit 31: set) */
 static int s_micro_ident;    /* gpu_micro_ident */
 static int s_micro_ident_st; /* its steps (ctr_gpu_frame_begin) */
 /* the programs' DVLEs as their shbins have them and in the image (res_apply) */
@@ -2771,6 +2772,12 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     if (st != 2) {
       s_cmd_dump_next = 1;
     }
+  }
+  if (s_micro_want) {
+    /* (AI-assisted, micro-mg) ctr_gpu_set_micro_mask (a test): from this frame on */
+    s_micro = s_micro_cfg = s_micro_want & MICRO_ALL;
+    s_micro_want = 0;
+    printf("[ctr] gpu_micro mask 0x%lx\n", (unsigned long)s_micro);
   }
   res_apply((s_micro & MICRO_RESIDENT) != 0); /* (AI-assisted, micro-gpu) */
   proc_lut_snapshot();
@@ -7421,6 +7428,10 @@ void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
   }
   *vertex_count = (int)(g.meshes[mesh].fill_vbytes / 16u);
   return g.meshes[mesh].verts;
+}
+
+void ctr_gpu_set_micro_mask(unsigned int mask) {
+  s_micro_want = (u32)mask | BIT(31);
 }
 
 void ctr_gpu_flush_range(const void* addr, unsigned int size) {
