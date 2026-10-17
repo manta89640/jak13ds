@@ -283,6 +283,17 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
 }
 
+bool CtrMercRenderer::bad_bones(const CtrMercMat* const* bones, const u8* slots, int n) {
+  static_assert(sizeof(CtrMercMat) == 64);
+  u32 bad = 0;
+  for (int b = 0; b < n; b++) {
+    if (slots[b] < 128) {
+      bad |= ctr_micro::bad_bone_bits(bones[slots[b]]->tmat[0].data());
+    }
+  }
+  return bad & 0x80000000u;
+}
+
 u32 CtrMercRenderer::queue_floats(const float* src, int n) {
   const u32 at = (u32)m_qdata.size();
   m_qdata.insert(m_qdata.end(), src, src + n);
@@ -740,22 +751,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   }
 
   // Bone matrices that are garbage (seen in cutscenes whose streamed animation is missing) make
-  // screen-filling triangles: skip the model instead.
-  for (int b = 0; b < i; b++) {
-    if (slots[b] >= 128) {
-      continue;
-    }
-    const MercMat& m = *bones[slots[b]];
-    for (int r = 0; r < 4; r++) {
-      for (int c = 0; c < 3; c++) {
-        const float v = m.tmat[r][c];
-        const float lim = r < 3 ? 64.f : 1e8f;
-        if (!(std::abs(v) < lim)) {  // also catches NaN
-          m_stats.bad_bones++;
-          return;
-        }
-      }
-    }
+  // screen-filling triangles: skip the model instead. (AI-assisted) On the bits (CtrMicro.h
+  // not_below), OR-ed over the bones: no VFP compare and branch per value
+  if (bad_bones(bones, slots, i)) {
+    m_stats.bad_bones++;
+    return;
   }
 
   // the model's lights, for the skin shader's per vertex lighting (like merc2.vert)

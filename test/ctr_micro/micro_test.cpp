@@ -7,6 +7,8 @@
  *   test/ctr_micro/build.sh && /tmp/ctr_micro_test
  */
 
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -90,9 +92,52 @@ static int test_f24() {
   return bad + bad_pack;
 }
 
+// CtrMerc.cpp handle_model's bad bone test before (AI-assisted, micro-cpu)
+static bool ref_bad_bone(const float* m) {
+  for (int r = 0; r < 4; r++) {
+    for (int c = 0; c < 3; c++) {
+      const float v = m[4 * r + c];
+      const float lim = r < 3 ? 64.f : 1e8f;
+      if (!(std::abs(v) < lim)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static int test_bad_bones() {
+  // every float bit pattern in every position, then random matrices of values near the limits
+  static_assert(std::bit_cast<u32>(64.f) == 0x42800000u && std::bit_cast<u32>(1e8f) == 0x4cbebc20u);
+  u32 bad = 0;
+  float m[16] = {};
+  for (int pos = 0; pos < 16; pos++) {
+    for (u32 i = 0;; i += 7) {  // (every 7th pattern: 600 M per position would take long)
+      m[pos] = from_u32(i);
+      bad += ref_bad_bone(m) != (bool)(ctr_micro::bad_bone_bits(m) & 0x80000000u);
+      if (i > 0xffffffffu - 7) {
+        break;
+      }
+    }
+    m[pos] = 0;
+  }
+  const float near[] = {0.f, -0.f, 63.99999f, 64.f, -64.f, 64.00001f, 1e8f, -1e8f, 99999992.f,
+                        100000008.f, INFINITY, -INFINITY, NAN, -NAN, 1e-45f, 1.f, -1.f};
+  std::mt19937 rng(2);
+  for (int t = 0; t < 2000000; t++) {
+    for (int k = 0; k < 16; k++) {
+      m[k] = (rng() & 3) ? near[rng() % (sizeof(near) / 4)] : from_u32(rng());
+    }
+    bad += ref_bad_bone(m) != (bool)(ctr_micro::bad_bone_bits(m) & 0x80000000u);
+  }
+  printf("bad bones: 16 x 2^32 / 7 single values + 2M random matrices, %u differ\n", bad);
+  return bad;
+}
+
 int main() {
   int errors = 0;
   errors += test_f24();
+  errors += test_bad_bones();
   printf("%s\n", errors ? "FAIL" : "OK");
   return errors ? 1 : 0;
 }

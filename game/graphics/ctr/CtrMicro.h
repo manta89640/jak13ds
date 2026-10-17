@@ -56,4 +56,25 @@ inline void pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* 
   }
 }
 
+/*
+ * !(|v| < limit) (NaN too) for any of the values, on the bits: |v|'s bits + (2^31 - the limit's
+ * bits) has bit 31 set when they're >= the limit's (a positive limit; NaN's bits are above
+ * infinity's). OR the results, test bit 31 once.
+ */
+inline uint32_t not_below(const float* p, uint32_t limit_bits) {
+  return (bits_at(p) & 0x7fffffffu) + (0x80000000u - limit_bits);
+}
+
+/*
+ * A merc bone matrix (tmat: 4 rows of 4 floats) that is garbage: a rotation / scale entry (rows
+ * 0-2, x y z) not below 64, a translation (row 3) not below 1e8, or NaN. Bit 31 of the result.
+ */
+inline uint32_t bad_bone_bits(const float* m) {
+  constexpr uint32_t kRot = 0x42800000u, kPos = 0x4cbebc20u;  // 64.f, 1e8f
+  return not_below(m, kRot) | not_below(m + 1, kRot) | not_below(m + 2, kRot) |
+         not_below(m + 4, kRot) | not_below(m + 5, kRot) | not_below(m + 6, kRot) |
+         not_below(m + 8, kRot) | not_below(m + 9, kRot) | not_below(m + 10, kRot) |
+         not_below(m + 12, kPos) | not_below(m + 13, kPos) | not_below(m + 14, kPos);
+}
+
 }  // namespace ctr_micro

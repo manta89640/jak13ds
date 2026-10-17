@@ -72,6 +72,9 @@ class CtrMercRenderer : public CtrBucketRenderer {
   void handle_setup(const DmaTransfer& setup);
   void handle_model(const DmaTransfer& init, CtrRenderState& rs);
   void hud_clip(float* out, float y_scale) const;
+  // (AI-assisted) a bone the model's slots name has a rotation / scale entry of 64 or more, a
+  // translation of 1e8 or more, or NaN (garbage: the model isn't drawn)
+  static bool bad_bones(const CtrMercMat* const* bones, const u8* slots, int n);
 
   // (AI-assisted) config envmap_batch: the envmap draws of the bucket are queued and drawn
   // together (one skin -> env -> skin program switch pair, and the skin draws keep their uniforms)
