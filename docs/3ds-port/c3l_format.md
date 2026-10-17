@@ -25,6 +25,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--tie-lod-budget-kb K` | per level | (v17) extra vertex and index data for near versions per level; default: the level's planned budget (`kTieLodBudgets` in main.cpp), else every group. |
 | `--tie-lod-min-angle A`, `--tie-lod-view-m M` | 0.002, 15 | (v17) a group gets a near version when its shape error seen from the larger of its radius and M meters is at least A radians. |
 | `--tie-lod-default-m M` | 60 | (v17) near version distance of groups without a PS2 distance (wind instances). |
+| `--tie-far-own-colors` | off | (AI-assisted, lod-light) tie far versions keep geometry 3's own vertex colors (the PS2's) instead of colors fitted to their near version. See "Far version colors". |
 | `--no-stream` | off | (AI-assisted, v19) no near chunks: a v18 file (near versions within `kTieLodBudgets`, in the far versions' chunks). See "Near chunks (v19)" and `streaming.md`. |
 | `--stream-classes M,...`, `--stream-class-cells M,...` | 30,60,120,240 / 50,50,100,100,200 | (v19) near chunks per need class: a group's near version is needed within error x 70.4 + radius of its center (gameplay focal 256 / tie_lod_px 4 x 1.1); the classes' bounds (meters) and each class's cell size. |
 | `--stream-cell M` | 100 | (v19) the near chunk cell size of classes without one in `--stream-class-cells`. |
@@ -438,6 +439,29 @@ lines).
 Sizes (Oct 17, vertex + index data added): village3 +1954 KB (every group), snow +8230 KB (every
 group), ogre +3268 KB (758 of 1210 candidates), lavatube +5504 KB (2874 of 5772), village2 +2461 KB
 (792 of 1110); all levels' files 118 -> 162 MB; conversion of all levels ~60 s.
+
+**Far version colors.** (AI-assisted, lod-light, Oct 18.) The PS2 bakes the light into each tie
+geometry's vertex colors on its own (an instance's color indices per geometry), and geometry 3 loses
+geometry 0's extra vertices: on rocks the dark crevices and lit ridges between its corners. Its
+corners sit mostly on the ridges, so a far rock was lighter as a whole, and the switch showed as the
+light on the surface changing as the camera came near (hardware report Oct 18; the PC draws geometry
+0 only, nothing changes there). Host, beach-start, near against far version of the arch rocks on
+16x16 pixel blocks: mean |block difference| 7.7 levels, far lighter by 5.2. The converter
+(`Converter::far_colors_from_near`) now gives each far vertex the near surface's mean color around
+it: the near surface is sampled (each triangle's corners and center, by area), each sample goes to
+the nearest point of the far surface, and a far vertex's color is the mean of the samples weighted
+by its barycentric weight there (so the far surface has the near surface's mean color as a whole,
+and nearly so in each part). The vertex takes the color of the group's near vertex nearest to that
+mean in all 8 palettes (a difference in the mean of the 24 values weighted 16x: no bias toward
+dark), so the time of day table doesn't grow. Converter, far color minus the near surface's under
+each far triangle (GS units, area weighted, mean |d| / mean d), geometry 3's own colors -> fitted
+(the exact mean in brackets; the rest is the detail a far triangle can't have): beach 4.56 / +1.42
+-> 2.60 / -0.09 (2.48), village1 4.19 / +1.09 -> 2.32 / -0.09, jungle 4.00 / +0.76 -> 2.09 / -0.06,
+training 3.92 / +1.50 -> 2.35 / -0.09, firecanyon 2.50 / +1.22 -> 1.40 / -0.18; the time of day
+tables unchanged, files +1%, all levels ~150 s. Host frames (beach-start, tod 12, near against far
+version): the arch rocks' 16x16 block difference 7.7 -> 4.8 levels, the far version lighter by 5.2
+-> 1.1. Log: `<level>: tie levels of detail: far version colors fitted to the near versions:
+...`. The detail itself (crevices) still appears at the switch, as on the PS2.
 
 Runtime (`CtrLevel.cpp`, config `tie_lod`): per level draw, each group's version: with the shape
 errors (title-popin, Oct 17), near while the camera is within error x focal / tie_lod_px x
