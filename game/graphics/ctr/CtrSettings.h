@@ -234,10 +234,11 @@ struct CtrSettings {
   // groups the level's v18 budget took are loaded with the level, the others never (v18's ties)
   bool streaming = true;
   int stream_kb = 4096;
-  // (AI-assisted, streaming) the arena grows past stream_kb (segments of 1 MB or more) while the
-  // near chunks needed don't fit and the linear heap keeps this much free after it; given back when
-  // the heap has less, or a level load needs the memory
-  int stream_reserve_kb = 3584;
+  // (AI-assisted, streaming) the linear heap's floor: the arena grows past stream_kb (segments of
+  // 1-4 MB, sized to the near chunks needed now and 2 s ahead) while they don't fit and the heap
+  // keeps this much (+ 256 KB) free after it; given back when the heap has less, or a level load
+  // needs the memory
+  int stream_reserve_kb = 3072;
   // (AI-assisted, streaming) diagnostic: a log line for each near chunk that is late (and the
   // camera's speed, its score before)
   bool stream_debug = false;

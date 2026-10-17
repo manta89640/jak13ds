@@ -302,6 +302,7 @@ struct CtrLevelData {
     u32 loads = 0;
     u64 want_frame = 0;  // (statistics) the first frame it was wanted while absent (0: not)
     float last_score = 0;
+    u64 room_frame = 0;  // (statistics) the last frame the arena had no room for it
   };
   static constexpr u8 kUnitAbsent = 0, kUnitLoading = 1, kUnitResident = 2, kUnitNever = 3;
   std::vector<StreamUnit> stream_units;
@@ -635,6 +636,8 @@ class CtrLevels {
   u32 stream_shrink(bool all);
   static void free_stream_parts(const Job& job);
   u32 m_stream_inflight = 0;  // stream jobs queued, running or not taken (kJobsInFlight)
+  // the bytes the repair of incomplete levels waits for (kept free above the arena's floor)
+  u32 m_stream_repair_room = 0;
   u32 m_stream_serial = 0;
   std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
@@ -677,6 +680,11 @@ class CtrLevels {
     u64 late_wanted_frames = 0;  // late after being wanted: the frames between
     u64 preloads = 0, preload_misses = 0;
     u64 late_group_frames = 0, late_frames = 0, last_late_frame = 0;
+    // late times during which the arena had no room for the unit (capacity, not bandwidth)
+    u64 late_room = 0;
+    double late_room_ms = 0, late_room_max = 0;
+    // the linear heap's free bytes at the frame's start: least, least while a level loaded
+    u64 linear_min = ~0ull, linear_min_load = ~0ull;
     double since_ms = 0;  // the window's start
   } m_sst;
 };
