@@ -1028,6 +1028,23 @@ static void prog_set_free(ProgSet* p) {
   memset(p, 0, sizeof(*p));
 }
 
+/* (AI-assisted, micro-gpu) config.ini shader_resident (default on): every vertex program of both
+ * sets in one code image that stays in the GPU's shader memory. citro3d uploads a program's code
+ * and operand descriptors at every switch to a program of another DVLP (C3D_BindProgram compares
+ * the DVLPs): with one shbin per program, every switch (~8 per frame) wrote its code again. Here
+ * the shbins' code is put one after another (351 of 512 instruction slots) and their operand
+ * descriptors into one table without duplicates (49 of 128; the ones a MAD uses first, MAD has 5
+ * bits for the index), each instruction's descriptor index rewritten, and each program's DVLE
+ * pointed at the image with its main offset moved by where its code went. So the first program
+ * bound uploads all of it and a switch writes only the entry point and the output map (citro3d's
+ * shaderProgramConfigure without the code). The instructions a draw runs are the same, only at
+ * another place (cmd_report.py --kicks resolves them per draw). Only programs without flow control
+ * (no addresses to move; check_shaders.py refuses flow control anyway) and with known instruction
+ * formats are merged; anything else keeps its own shbins. Uniforms are unchanged: a switch still
+ * keeps none (the programs' uniforms overlap). */
+static u32 s_res_code[512];
+static u32 s_res_desc[128];
+static DVLP_s s_res_dvlp;
 int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
 
 /* (AI-assisted, micro-gpu) config.ini gpu_micro (default on; off: every micro-gpu change of the
@@ -1049,6 +1066,158 @@ static u32 s_micro = MICRO_ALL;
 static u32 s_micro_cfg = MICRO_ALL; /* config.ini gpu_micro's */
 static int s_micro_ident;    /* gpu_micro_ident */
 static int s_micro_ident_st; /* its steps (ctr_gpu_frame_begin) */
+/* the programs' DVLEs as their shbins have them and in the image (res_apply) */
+static struct {
+  DVLE_s* dvle;
+  DVLP_s* own;
+  u32 main, endmain, base;
+} s_res_prog[24];
+static int s_res_n;
+static int s_res_on; /* the DVLEs point at the image */
+
+/* the operand descriptor field of a known instruction: 7 bits (1), 5 (MAD, MADI: 2), none (0),
+ * or -1: not merged */
+static int res_desc_bits(u32 ins) {
+  const u32 op = ins >> 26;
+  if (op <= 0x0F || op == 0x12 || op == 0x13 || (op >= 0x18 && op <= 0x1B)) {
+    return 1;
+  }
+  if (op == 0x21 || op == 0x22) {
+    return 0; /* NOP, END */
+  }
+  if (op >= 0x30) {
+    return 2;
+  }
+  return -1;
+}
+
+static void res_apply(int on);
+
+static void resident_programs(void) {
+  if (!ctr_config_bool("shader_resident", 1) || !(s_micro & MICRO_RESIDENT)) {
+    printf("[ctr] shader_resident: off\n");
+    return;
+  }
+  ProgSet* sets[2] = {&s_ps[0], &s_ps[1]};
+  DVLE_s* dvles[2 * 12];
+  int n = 0;
+  for (int k = 0; k < 2; k++) {
+    ProgSet* p = sets[k];
+    if (!p->ok && k) {
+      continue;
+    }
+    shaderProgram_s* all[12] = {&p->basic, &p->mesh, &p->mesh_fa, &p->skin, &p->env, &p->clip,
+                                &p->clip2, &p->ocean, &p->ocean_full, &p->ocean_full_clip,
+                                &p->mesh_df, &p->mesh_df_fa};
+    for (int i = 0; i < 12; i++) {
+      if (!all[i]->vertexShader) {
+        continue;
+      }
+      DVLE_s* d = all[i]->vertexShader->dvle;
+      int seen = 0;
+      for (int j = 0; j < n; j++) {
+        seen |= dvles[j] == d;
+      }
+      if (!seen) {
+        dvles[n++] = d;
+      }
+    }
+  }
+  /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
+  DVLP_s* dvlps[2 * 12];
+  u32 base[2 * 12];
+  int np = 0;
+  u32 code = 0, ndesc = 0;
+  for (int i = 0; i < n; i++) {
+    int seen = 0;
+    for (int j = 0; j < np; j++) {
+      seen |= dvlps[j] == dvles[i]->dvlp;
+    }
+    if (!seen) {
+      DVLP_s* d = dvles[i]->dvlp;
+      if (d->codeSize > 512 - code) {
+        printf("[ctr] shader_resident: the programs don't fit in shader memory, off\n");
+        return;
+      }
+      for (u32 k = 0; k < d->codeSize; k++) {
+        const int bits = res_desc_bits(d->codeData[k]);
+        const u32 di = bits == 2 ? (d->codeData[k] & 0x1F) : (d->codeData[k] & 0x7F);
+        if (bits < 0 || (bits && di >= d->opdescSize)) {
+          printf("[ctr] shader_resident: instruction %08lx not merged, off\n",
+                 (unsigned long)d->codeData[k]);
+          return;
+        }
+      }
+      dvlps[np] = d;
+      base[np] = code;
+      code += d->codeSize;
+      np++;
+    }
+  }
+  for (int pass = 2; pass >= 1; pass--) {
+    /* pass 2: the descriptors a MAD uses (indices < 32), pass 1: the others */
+    for (int j = 0; j < np; j++) {
+      const DVLP_s* d = dvlps[j];
+      for (u32 k = 0; k < d->codeSize; k++) {
+        if (res_desc_bits(d->codeData[k]) != pass) {
+          continue;
+        }
+        const u32 v = d->opcdescData[d->codeData[k] & (pass == 2 ? 0x1F : 0x7F)];
+        u32 f = 0;
+        while (f < ndesc && s_res_desc[f] != v) {
+          f++;
+        }
+        if (f == ndesc) {
+          if (ndesc == 128 || (pass == 2 && ndesc == 32)) {
+            printf("[ctr] shader_resident: too many operand descriptors, off\n");
+            return;
+          }
+          s_res_desc[ndesc++] = v;
+        }
+      }
+    }
+  }
+  for (int j = 0; j < np; j++) {
+    const DVLP_s* d = dvlps[j];
+    for (u32 k = 0; k < d->codeSize; k++) {
+      u32 ins = d->codeData[k];
+      const int bits = res_desc_bits(ins);
+      if (bits) {
+        const u32 m = bits == 2 ? 0x1Fu : 0x7Fu;
+        const u32 v = d->opcdescData[ins & m];
+        u32 f = 0;
+        while (s_res_desc[f] != v) {
+          f++;
+        }
+        ins = (ins & ~m) | f;
+      }
+      s_res_code[base[j] + k] = ins;
+    }
+  }
+  s_res_dvlp.codeSize = code;
+  s_res_dvlp.codeData = s_res_code;
+  s_res_dvlp.opdescSize = ndesc;
+  s_res_dvlp.opcdescData = s_res_desc;
+  s_res_n = 0;
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < np; j++) {
+      if (dvles[i]->dvlp == dvlps[j]) {
+        s_res_prog[s_res_n].dvle = dvles[i];
+        s_res_prog[s_res_n].own = dvlps[j];
+        s_res_prog[s_res_n].main = dvles[i]->mainOffset;
+        s_res_prog[s_res_n].endmain = dvles[i]->endmainOffset;
+        s_res_prog[s_res_n].base = base[j];
+        s_res_n++;
+        break;
+      }
+    }
+  }
+  res_apply(1);
+  printf("[ctr] shader_resident: %d programs from %d shbins in one image, %lu instructions, %lu "
+         "operand descriptors\n",
+         n, np, (unsigned long)code, (unsigned long)ndesc);
+}
+
 /* (AI-assisted) config.ini shader_opt: set 1, set 0's basic, clip, clip2 and ocean (the same
  * shbins) with the ctr_*_opt programs for the rest */
 static void load_opt_set(void) {
@@ -1226,6 +1395,7 @@ int ctr_gpu_init(void) {
   s_micro_ident = ctr_config_bool("gpu_micro_ident", 0);
   printf("[ctr] gpu_micro: %s%s\n", s_micro ? "on" : "off",
          s_micro_ident ? " (gpu_micro_ident: dumps off / on pairs)" : "");
+  resident_programs(); /* (AI-assisted, micro-gpu) config.ini shader_resident */
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
    * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
@@ -1415,6 +1585,26 @@ _Static_assert(offsetof(C3Di_Context, lightEnv) == 0x10c, "citro3d context layou
 _Static_assert(offsetof(C3Di_Context, texEnvBuf) == 0x19c, "citro3d context layout");
 _Static_assert(offsetof(C3Di_Context, fogLut) == 0x1a8, "citro3d context layout");
 extern C3Di_Context __C3D_Context;
+/* (AI-assisted, micro-gpu) shader_resident: */
+/* the DVLEs to the image (on) or their own shbins'. A change while a program is bound: citro3d
+ * is made to upload the code at the next bind (no program bound: ctx->program), and the next
+ * use_program binds (the frame begin's use_program(PROG_BASIC) does) */
+static void res_apply(int on) {
+  on = on && s_res_n > 0;
+  if (on == s_res_on) {
+    return;
+  }
+  for (int i = 0; i < s_res_n; i++) {
+    DVLE_s* d = s_res_prog[i].dvle;
+    d->dvlp = on ? &s_res_dvlp : s_res_prog[i].own;
+    d->mainOffset = s_res_prog[i].main + (on ? s_res_prog[i].base : 0);
+    d->endmainOffset = s_res_prog[i].endmain + (on ? s_res_prog[i].base : 0);
+  }
+  s_res_on = on;
+  __C3D_Context.program = NULL;
+  g.cur_prog = PROG_NONE;
+}
+
 void C3Di_UpdateContext(void); /* citro3d: sends what's dirty (as its draws do first) */
 enum {
   C3DiF_Active = BIT(0),
@@ -2539,6 +2729,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
       s_cmd_dump_next = 1;
     }
   }
+  res_apply((s_micro & MICRO_RESIDENT) != 0); /* (AI-assisted, micro-gpu) */
   /* texture combiner constant: R in the low byte */
   g.clear_abgr = 0xff000000u | ((u32)b << 16) | ((u32)gr << 8) | (u32)r;
   s_sky_hook = NULL; /* (AI-assisted) sky_last: a hook left from a frame that didn't end */
@@ -2741,6 +2932,8 @@ void ctr_gpu_cmd_dump_next(void) {
   }
   s_cmd_dump_next = 1;
 }
+static inline u32* raw_w(u32* p, u32 reg, u32 mask, u32 v);
+static inline u32* raw_n(u32* p, u32 reg, const u32* v, u32 n, int seq);
 static void cmd_dump_frame(void) {
   const int periodic = s_cmd_dump && g.frame_no % CMD_DUMP_EVERY == CMD_DUMP_EVERY / 2;
   if ((!periodic && !s_cmd_dump_next) || s_cmd_dumps >= CMD_DUMP_MAX * 2) {
@@ -2754,8 +2947,29 @@ static void cmd_dump_frame(void) {
   if (!f) {
     return;
   }
-  const u32 hdr[3] = {0x44444d43u, (u32)g.frame_no, words};
-  fwrite(hdr, 4, 3, f);
+  if (s_res_on) {
+    /* (AI-assisted, micro-gpu) GPU memory the frame doesn't write but its draws use, from frames
+     * before (shader_resident's code image), as the commands that put it there: the file starts
+     * with them ("CMDE": a fourth header word, the prologue's word count; cmd_report.py --kicks
+     * runs it before the frame) */
+    static u32 pro[8 + 512 + 128 + 16 + 3 * 260];
+    u32* p = pro;
+    if (s_res_on) {
+      p = raw_w(p, GPUREG_VSH_CODETRANSFER_CONFIG, 0xF, 0);
+      for (u32 i = 0; i < s_res_dvlp.codeSize; i += 128) {
+        const u32 left = s_res_dvlp.codeSize - i;
+        p = raw_n(p, GPUREG_VSH_CODETRANSFER_DATA, s_res_code + i, left < 128 ? left : 128, 0);
+      }
+      p = raw_w(p, GPUREG_VSH_OPDESCS_CONFIG, 0xF, 0);
+      p = raw_n(p, GPUREG_VSH_OPDESCS_DATA, s_res_desc, s_res_dvlp.opdescSize, 0);
+    }
+    const u32 hdr[4] = {0x45444d43u, (u32)g.frame_no, words, (u32)(p - pro)};
+    fwrite(hdr, 4, 4, f);
+    fwrite(pro, 4, (size_t)(p - pro), f);
+  } else {
+    const u32 hdr[3] = {0x44444d43u, (u32)g.frame_no, words};
+    fwrite(hdr, 4, 3, f);
+  }
   fwrite(g.cmd_base, 4, words, f);
   fclose(f);
   printf("[ctr] cmd_dump: frame %d, %lu words -> %s\n", g.frame_no, (unsigned long)words, path);
