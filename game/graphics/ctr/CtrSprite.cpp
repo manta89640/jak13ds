@@ -501,9 +501,9 @@ bool CtrSpriteRenderer::read_chunk(DmaFollower& dma, u32* count, u32* program) {
   memcpy(h, header.data, 16);
   *count = std::min<u32>(h[0], kSpritesPerChunk);
   auto vec = dma.read_and_advance();
-  memcpy(m_vec, vec.data, std::min<size_t>(vec.size_bytes, sizeof(m_vec)));
+  m_vec = (const VecData*)vec.data;
   auto adgif = dma.read_and_advance();
-  memcpy(m_adgif, adgif.data, std::min<size_t>(adgif.size_bytes, sizeof(m_adgif)));
+  m_adgif = (const AdGif*)adgif.data;
   auto run = dma.read_and_advance();
   if (run.vifcode1().kind != VifCode::Kind::MSCAL) {
     return false;

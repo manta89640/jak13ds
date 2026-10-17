@@ -98,8 +98,10 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   int m_distort_count = 0;
   std::vector<ctr_vertex> m_distort_verts;  // (AI-assisted) one triangle strip (ctr_gpu_draw_strip)
 
-  VecData m_vec[kSpritesPerChunk];
-  AdGif m_adgif[kSpritesPerChunk];
+  // (AI-assisted) the chunk's sprites, read in place from the DMA data (read_chunk checked that
+  // it holds count of each; it was copied here, 6 KB per chunk)
+  const VecData* m_vec = nullptr;
+  const AdGif* m_adgif = nullptr;
 
   // (AI-assisted) a vertex array that grows without zeroing the new vertices (std::vector's
   // resize does), which are written right after
