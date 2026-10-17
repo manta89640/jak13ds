@@ -30,6 +30,16 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   CtrSpriteRenderer(std::string name, int id, CtrVram* vram);
   ~CtrSpriteRenderer();
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  // (AI-assisted) game thread, before the frame goes to the render thread (CtrRenderer::
+  // prepare_frame): a copy of the data the bucket's REF transfers point at. Those are the sprite
+  // arrays (*sprite-array-2d* / -3d*: each chunk's vector and AdGif data), which the game thread
+  // rewrites while the render thread draws the frame: process-particles runs right after the frame
+  // is sent (main.gc display-loop), and the next frame's particle launches after it. The PC port
+  // copies the whole chain before it renders (DmaCopier); read in place, a sprite could take its
+  // position from one particle and its texture from another, or a half written slot: the
+  // progress menu's frame and the HUD orb's glow flickering and breaking on hardware (the render
+  // thread runs on its own core there).
+  void snapshot(DmaFollower& dma, CtrRenderState& rs);
 
   static constexpr int kSpritesPerChunk = 48;
 
@@ -41,7 +51,11 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   void draw_distorter();
   bool read_chunk(DmaFollower& dma, u32* count, u32* program);
   void draw_chunk(u32 count, Mode mode);
-  void flush();
+  template <Mode mode>
+  void draw_chunk_mode(u32 count);
+  // draws the buckets. hud: as Sprite3's HUD flush, a sprite that writes depth with the alpha test
+  // (FB_ONLY) is drawn a second time for the fragments that fail it, without depth writes
+  void flush(bool hud = false);
 
   struct VecData {
     math::Vector4f xyz_sx;
@@ -94,8 +108,31 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   int m_distort_count = 0;
   std::vector<ctr_vertex> m_distort_verts;  // (AI-assisted) one triangle strip (ctr_gpu_draw_strip)
 
-  VecData m_vec[kSpritesPerChunk];
-  AdGif m_adgif[kSpritesPerChunk];
+  // (AI-assisted) the chunk's sprites: in the snapshot (see snapshot), else in place in the DMA
+  // data (read_chunk checked that it holds count of each)
+  const VecData* m_vec = nullptr;
+  const AdGif* m_adgif = nullptr;
+  // (AI-assisted) the snapshot: the REF transfers' data in the order of the chain, each at a
+  // 16-byte offset of m_snap_data; m_snap_cursor: the next one the render may ask for. Valid from
+  // snapshot to the end of the next render.
+  struct SnapRef {
+    const u8* src;
+    u32 bytes;
+    u32 at;  // in quadwords
+  };
+  struct alignas(16) Quad {
+    u8 b[16];
+  };
+  std::vector<SnapRef> m_snap_refs;
+  std::unique_ptr<Quad[]> m_snap_data;
+  size_t m_snap_quads = 0, m_snap_cap = 0;
+  size_t m_snap_cursor = 0;
+  bool m_snap_valid = false;
+  // the snapshot's copy of a transfer's data (src, bytes), else src itself
+  const u8* snap_data(const u8* src, u32 bytes);
+  bool m_snap_logged = false;  // (AI-assisted) the first use is logged
+  u32 m_snap_misses = 0;    // (AI-assisted) statistics: transfers read in place with a snapshot
+  u32 m_snap_mismatch = 0;  // host: snapshot bytes that differ from game memory (synchronous)
 
   // (AI-assisted) a vertex array that grows without zeroing the new vertices (std::vector's
   // resize does), which are written right after
@@ -134,6 +171,9 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   size_t m_bucket_count = 0;
   size_t m_last_bucket = 0;
   Bucket& bucket_for(const ctr_draw_state& st);
+  // the draw state and bucket of a sprite's adgif (m_last_state, m_last_bucket_ptr); nothing to
+  // do for the same adgif as the last one
+  void resolve_state(const AdGif& ad, Mode mode);
   // TEX0 -> texture lookups, per frame
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
@@ -156,6 +196,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
   float m_st_out[2][4][2] = {};
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
+  bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
     int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels

@@ -105,7 +105,8 @@ void CtrEyeRenderer::handle_eye_dma(DmaFollower& dma, CtrRenderState& rs) {
     dma.read_and_advance();
   }
 
-  std::vector<Eye> eyes;
+  std::vector<Eye>& eyes = m_eyes;  // (AI-assisted) kept: no heap block per frame
+  eyes.clear();
   // pairs of eyes until the 8 qw transfer that restores the GS
   while (more() && dma.current_tag().qwc != 8) {
     if (!read_pair(dma, rs, &eyes)) {
@@ -284,6 +285,13 @@ void CtrEyeRenderer::draw_sprite(const Eye& e,
   const int px1 = std::min(kSize, (int)std::ceil(std::max(x0, x1)));
   const int py0 = std::max(0, (int)std::floor(std::min(y0, y1)));
   const int py1 = std::min(kSize, (int)std::ceil(std::max(y0, y1)));
+  // (AI-assisted) the texel column of each pixel column, worked out once per sprite instead of
+  // once per pixel (the same divide and conversion; -1: outside the sprite's texture)
+  int tx_of[kSize];
+  for (int px = px0; px < px1; px++) {
+    const float u = ((float)px + 0.5f - x0) / (x1 - x0);
+    tx_of[px] = (u < 0.f || u >= 1.f) ? -1 : std::clamp((int)(u * src->w), 0, src->w - 1);
+  }
   for (int py = py0; py < py1; py++) {
     // the texture is stretched over the sprite: (0, 0) at xyz0, (1, 1) at xyz1
     const float t = ((float)py + 0.5f - y0) / (y1 - y0);
@@ -292,11 +300,10 @@ void CtrEyeRenderer::draw_sprite(const Eye& e,
     }
     const int ty = std::clamp((int)(t * src->h), 0, src->h - 1);
     for (int px = px0; px < px1; px++) {
-      const float u = ((float)px + 0.5f - x0) / (x1 - x0);
-      if (u < 0.f || u >= 1.f) {
+      const int tx = tx_of[px];
+      if (tx < 0) {
         continue;
       }
-      const int tx = std::clamp((int)(u * src->w), 0, src->w - 1);
       const u32 c = src->rgba[ty * src->w + tx];
       const u32 a = alpha255(c);
       u32& d = m_pixels[py * kSize + px];

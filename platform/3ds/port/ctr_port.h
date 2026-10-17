@@ -18,8 +18,11 @@ extern "C" {
 int ctr_platform_init(int enable_console);
 /* Append a line to sdmc:/3ds/jak1/boot.txt (boot progress, for hangs on hardware). */
 void ctr_boot_mark(const char* step);
-/* (AI-assisted) The one settings file: sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). "key = value" lines, # or ; comments. Copies the value of
- * key into out (size bytes) and returns 1, or returns 0 when the key isn't there. Any thread. */
+/* (AI-assisted) The one settings file: sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md,
+ * config_dev.md). "key = value" lines, # or ; comments, read once. Copies the key's value into out
+ * (size bytes) and returns 1, or returns 0 when nothing sets it. The value: the key's last line,
+ * else what a user key or the preset sets, else its default (game/graphics/ctr/ctr_config_presets.h).
+ * Any thread (after ctr_platform_init). */
 int ctr_config_get(const char* key, char* out, int size);
 /* the value as a bool (on/true/yes/1, off/false/no/0), or def when the key isn't there */
 int ctr_config_bool(const char* key, int def);
@@ -92,7 +95,7 @@ enum {
  * after they are created, and libctru's pthreads (std::thread) always use core 0. */
 enum {
   CTR_CORE_APP = 0,
-  CTR_CORE_SYS = 1, /* usable when ctr_platform_init got a time limit (ctr_syscore_available) */
+  CTR_CORE_SYS = 1, /* usable after a time limit (ctr_core1_enable) */
 };
 /* Create a thread on a core (falls back to core 0 if that core isn't usable). The handle is for
  * ctr_thread_join. Returns 0 on success. */
@@ -102,9 +105,6 @@ int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, in
 int ctr_thread_create_pinned(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio,
                              int core, void** handle);
 void ctr_thread_join(void* handle);
-/* 1 if the IOP / IO threads should run on the system core (core 1): config.ini
- * io_on_system_core = on, and the app got a share of that core. */
-int ctr_syscore_available(void);
 /* The app's share of core 1 in percent (APT_SetAppCpuTimeLimit: 80, 30 if refused, 0: none). */
 int ctr_core1_share(void);
 /* Ask for a share of core 1 (if not done yet); returns the share in percent (0: refused). */

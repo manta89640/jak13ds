@@ -20,11 +20,14 @@
 #include "common/custom_data/Tfrag3Data.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
+#include "common/util/Timer.h"
 #include "common/util/Serializer.h"
 #include "common/util/compress.h"
 
+#include "c3l_opt.h"
 #include "c3l_pack.h"
 #include "ctr_texture.h"
+#include "tie_lod.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "third-party/BS_thread_pool.hpp"
@@ -36,10 +39,44 @@
 namespace {
 
 struct Options {
-  int tfrag_geo = 1;  // 0 = most detailed, 2 = least (2 has large holes)
+  // (AI-assisted) 0 as the PS2 near the camera: 1 cut the yellow pools of Volcanic Crater into
+  // polygons (all levels: +1% triangles)
+  int tfrag_geo = 0;  // 0 = most detailed, 2 = least (2 has large holes)
   int far_tfrag_geo = 2;  // coarse version for far away cells (-1: none)
   int tie_geo = 3;    // 0 = most detailed, 3 = least
+  // (AI-assisted) v17 tie levels of detail (tie_lod.h): the instance groups whose shape changes
+  // most also get the tie_near_geo version (geo 0), drawn up to their PS2 far-plane (beyond it the
+  // PS2 too draws geometry 3), within tie_lod_budget_kb of extra vertex and index data per level
+  // (< 0: the level's budget from kTieLodBudgets, else all groups)
+  bool tie_lod = true;
+  int tie_near_geo = 0;
+  // (AI-assisted, lod-light) the far versions' vertex colors fitted to the near ones (the PC draws
+  // geometry 0 only): no change of light on a surface at the switch (Converter::far_colors_from_near).
+  // false: each geometry's own colors (the PS2's)
+  bool tie_far_near_colors = true;
+  float tie_lod_budget_kb = -1.f;
+  // smallest shape error worth a near version, as an angle (radians) at the larger of the group's
+  // radius and tie_lod_view_m meters (0.002: half a pixel on the top screen)
+  float tie_lod_min_angle = 0.002f;
+  float tie_lod_view_m = 15.f;
+  // the switch distance of groups without a PS2 distance (wind instances), meters
+  float tie_lod_default_m = 60.f;
+  // (AI-assisted, streaming) v19: every candidate group gets its near version, in near chunks of
+  // stream_cell meters (c3l::StreamChunk) that the runtime streams in around the camera; the level's
+  // v18 budget (kTieLodBudgets) only marks which groups a runtime without streaming loads (cls 1).
+  // Off: v18 files (the near versions in the far versions' chunks, within the budget)
+  bool stream = true;
+  float stream_cell = 100.f;
+  // (AI-assisted, streaming) near chunks by need class too: a group's near version is needed within
+  // error x kStreamNeedK + radius of its center; the groups of one class (bounds in meters) in near
+  // chunks of their own, of the class's cell size (stream_class_cells; else stream_cell), so a chunk
+  // isn't needed from far away for one large group in it
+  std::vector<float> stream_classes = {30.f, 60.f, 120.f, 240.f};
+  std::vector<float> stream_class_cells = {50.f, 50.f, 100.f, 100.f, 200.f};
   int palette = -1;   // time of day palette to bake (0..7; -1: auto_palette)
+  // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
+  // runtime blends the palettes with the game's weights (off: the baked palette only)
+  bool tod = true;
   int max_tex = 128;
   float cell_meters = 200.f;
   // tie instances smaller than detail_radius (bounding sphere radius, meters) are only drawn up
@@ -98,6 +135,27 @@ struct Options {
   // (AI-assisted) meshoptimizer: triangles in vertex cache order (within each draw's visibility
   // runs, for draws whose triangle order doesn't matter), vertices in first-use order
   bool vcache = true;
+  bool vis_vertex_groups = true;  // (AI-assisted) v18, see group_vertices_by_vis
+  // (AI-assisted) v15: the triangle order for a first-in first-out post-vertex cache of this many
+  // entries (c3l_opt::vcache_order), coplanar overlapping triangles kept in their order. -1 (the
+  // default): per run the best of the orders for 4 and 12 entries and meshoptimizer's (where no
+  // order has to be kept), by the vertices shaded with 4 + 8 + 16 entries (the cache's size is
+  // unknown). 0: the v14 order (meshoptimizer, without the coplanar rule)
+  int vcache_fifo = -1;
+  // (AI-assisted) v15 texture atlases (c3l::kDrawAtlasUV): the small textures (at most atlas_max
+  // texels on each side) whose every level draw is opaque and has each triangle within one copy of
+  // the texture go into atlases with gutters (one per format and level count, up to 256 x 256), so
+  // a chunk's draws of the same state merge and the level binds fewer textures
+  bool atlas = true;
+  int atlas_max = 32;
+  // an atlas is made only if the memory it adds (atlas - its textures) is at most this many KB per
+  // texture bind it saves (cells - 1)
+  float atlas_kb_per_bind = 2.f;
+  // (AI-assisted) v15 opaque alpha (c3l::kDrawAlphaTestDropped, kDrawBlendDropped): the alpha test
+  // or alpha blending of draws whose texture alpha is 1.0 in every texel of every level and whose
+  // vertex alpha is >= 0x80 is taken out (it can't change a pixel); then draws of the same texture
+  // and state merge
+  bool opaque_alpha = true;
   // (AI-assisted) v13: tie strips wound consistently (odd strip triangles flipped), closed tie
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
@@ -129,13 +187,29 @@ struct Options {
 // vertices shaded per triangle, for a FIFO cache of 8 and 16 entries
 struct VcacheStats {
   double shaded8 = 0, shaded16 = 0;
+  // (AI-assisted) a plain FIFO of 4, 8, 16 and 32 entries (c3l_opt::fifo_misses)
+  u64 fifo[4] = {0, 0, 0, 0};
   u64 tris = 0;
+  u64 unique = 0;  // (AI-assisted) vertices used: the least any order shades
   void add(const u16* idx, size_t count, size_t vertex_count) {
     std::vector<unsigned int> v(idx, idx + count);
+    {
+      std::vector<unsigned int> u(v);
+      std::sort(u.begin(), u.end());
+      unique += std::unique(u.begin(), u.end()) - u.begin();
+    }
     shaded8 += meshopt_analyzeVertexCache(v.data(), count, vertex_count, 8, 0, 0).vertices_transformed;
     shaded16 +=
         meshopt_analyzeVertexCache(v.data(), count, vertex_count, 16, 0, 0).vertices_transformed;
+    for (int k = 0; k < 4; k++) {
+      fifo[k] += c3l_opt::fifo_misses(v.data(), count, 4 << k);
+    }
     tris += count / 3;
+  }
+  std::string fifo_line() const {
+    const double t = (double)std::max<u64>(tris, 1);
+    return fmt::format("{:.3f} / {:.3f} / {:.3f} / {:.3f} (each vertex once: {:.3f})", fifo[0] / t,
+                       fifo[1] / t, fifo[2] / t, fifo[3] / t, unique / t);
   }
 };
 
@@ -154,6 +228,12 @@ struct SrcVertex {
   float x, y, z;
   float s, t;
   u8 rgba[4];
+  // (AI-assisted) v16: Converter::tod_colors index, or kTodMulBit | tod_muls index (kTodNone: none)
+  u32 tod = 0xffffffffu;
+  // (AI-assisted) v15 atlas copies (Options::atlas): the vertex this one copies (UINT32_MAX: not a
+  // copy) and its texture coordinates in the atlas (1/32768, c3l::kDrawAtlasUV)
+  u32 orig = UINT32_MAX;
+  s16 ast[2] = {0, 0};
 };
 
 struct SrcTri {
@@ -165,6 +245,16 @@ struct SrcTri {
   u32 sclass = 0;   // (AI-assisted) shrubs: distance class (kShrubClassMeters), 0: shrub_dist
   u16 vis = 0xffff;  // (AI-assisted) drawable id in the level's visibility string (c3l::VisRun)
                      // (vista tier: the source chunk)
+  // (AI-assisted) v15: the draw key before the atlas (the vista tier copies with it; UINT32_MAX:
+  // draw_key)
+  u32 orig_key = UINT32_MAX;
+  // (AI-assisted) v17 tie levels of detail: c3l::kRunLodNear / kRunLodFar version of LOD group
+  // lod_group (Converter::lod_groups), or kRunLodAlways
+  u8 lod = 0;
+  u32 lod_group = UINT32_MAX;
+  // (AI-assisted, streaming) v19: a near version in a near chunk: c3l::kStreamCore (a group the
+  // budget took) or kStreamExtra; 0: an ordinary chunk's
+  u8 stream = 0;
 };
 
 struct DrawKey {
@@ -215,6 +305,64 @@ struct Converter {
   Options opt;
   const tfrag3::Level* level = nullptr;
   std::vector<SrcVertex> verts;
+  // (AI-assisted) v16: the level's time of day colors and multiplied colors (each once)
+  static constexpr u32 kTodNone = 0xffffffffu, kTodMulBit = 0x80000000u;
+  std::vector<c3l::TodColor> tod_colors;
+  std::vector<c3l::TodMul> tod_muls;
+  std::unordered_map<std::string, u32> tod_color_ids, tod_mul_ids;
+  // a tfrag / tie / shrub time of day color: its 8 palettes
+  u32 tod_color(const tfrag3::PackedTimeOfDay& c, u32 color) {
+    if (!opt.tod) {
+      return kTodNone;
+    }
+    c3l::TodColor e;
+    for (int p = 0; p < 8; p++) {
+      for (int ch = 0; ch < 3; ch++) {
+        e.rgb[p][ch] = c.read(color, p, ch);
+      }
+    }
+    auto [it, fresh] =
+        tod_color_ids.emplace(std::string((const char*)&e, sizeof(e)), (u32)tod_colors.size());
+    if (fresh) {
+      tod_colors.push_back(e);
+    }
+    return it->second;
+  }
+  // a time of day color times mul / 128 (u8 per channel)
+  u32 tod_mul(u32 id, const u8 mul[3]) {
+    if (id == kTodNone) {
+      return kTodNone;
+    }
+    if (id & kTodMulBit) {
+      // already a multiplied one: the product of the two
+      const auto& m = tod_muls[id & ~kTodMulBit];
+      u8 k[3];
+      for (int c = 0; c < 3; c++) {
+        k[c] = (u8)std::min(255, (m.mul[c] * mul[c] + 64) / 128);
+      }
+      return tod_mul(m.color, k);
+    }
+    if (mul[0] == 128 && mul[1] == 128 && mul[2] == 128) {
+      return id;
+    }
+    c3l::TodMul m{};
+    m.color = (u16)id;
+    memcpy(m.mul, mul, 3);
+    auto [it, fresh] =
+        tod_mul_ids.emplace(std::string((const char*)&m, sizeof(m)), (u32)tod_muls.size());
+    if (fresh) {
+      tod_muls.push_back(m);
+    }
+    return it->second | kTodMulBit;
+  }
+  // the vertex's Vertex::pad (colors first, then the multiplied ones)
+  u16 tod_pad(u32 id) const {
+    if (id == kTodNone) {
+      return 0xffff;
+    }
+    const u32 v = id & kTodMulBit ? (u32)tod_colors.size() + (id & ~kTodMulBit) : id;
+    return v < 0xffff ? (u16)v : (u16)0xffff;
+  }
   std::vector<SrcTri> tris;
   std::vector<DrawKey> draw_keys;
   std::map<DrawKey, u32> draw_key_ids;
@@ -245,6 +393,18 @@ struct Converter {
       tex_use[tex].face |= face;
       tex_use[tex].envmap |= envmap;
     }
+  }
+
+  // (AI-assisted) v15: where a key's triangles go in a chunk's draw order (make_plans): a key made
+  // by the draw optimisations takes the place of the first key merged into it, so the chunks keep
+  // their layout (which keys end up in which chunk split, the quantizing grids)
+  std::vector<u32> key_rank;
+  u32 rank_of(u32 k) const { return k < key_rank.size() ? key_rank[k] : k; }
+  void rank_merge(u32 to, u32 from) {
+    while (key_rank.size() < draw_keys.size()) {
+      key_rank.push_back((u32)key_rank.size());
+    }
+    key_rank[to] = std::min(key_rank[to], rank_of(from));
   }
 
   u32 key_id(const DrawKey& k) {
@@ -370,6 +530,7 @@ struct Converter {
       for (int c = 0; c < 4; c++) {
         sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
       }
+      sv.tod = tod_color(tree.colors, v.color_index);
       verts.push_back(sv);
     }
     for (auto& d : tree.draws) {
@@ -457,6 +618,14 @@ struct Converter {
         sv.rgba[c] = (u8)std::min(255, v.rgba_base[c] * tod * 2 / 255);
       }
       sv.rgba[3] = tree.time_of_day_colors.read(v.color_index, opt.palette, 3);
+      {
+        // (AI-assisted) v16: the time of day color times the base color (/ 128, as above)
+        u8 mul[3];
+        for (int c = 0; c < 3; c++) {
+          mul[c] = (u8)std::min(255, (v.rgba_base[c] * 256 + 127) / 255);
+        }
+        sv.tod = tod_mul(tod_color(tree.time_of_day_colors, v.color_index), mul);
+      }
       verts.push_back(sv);
     }
     for (const auto& d : tree.static_draws) {
@@ -689,9 +858,351 @@ struct Converter {
     }
   }
 
+  // (AI-assisted) v17 tie levels of detail (tie_lod.h): the selected instance groups (group key ->
+  // index into lod_groups), and per group its detail class (mark_small, from both versions)
+  std::unordered_map<u64, u32> lod_group_of;
+  std::vector<c3l::TieLodGroup> lod_groups;
+  std::vector<u32> lod_group_detail;
+  std::vector<float> lod_group_error;  // (AI-assisted, title-popin) shape error per group
+  // (AI-assisted, streaming) v19: per group, whether the level's v18 budget took it
+  std::vector<u8> lod_group_core;
+  // the tree being added (add_tie_tree): its index in the level's tree list, and which version:
+  // -1 without levels of detail (every group, as before v17), 0 the near geometry (only the
+  // selected groups), 1 the far geometry (every group; the selected ones as their far version)
+  u32 cur_tree = 0;
+  int cur_lod_slot = -1;
+  size_t lod_tris[2] = {0, 0};
+  // a group's triangles [first, end) were added: their LOD version and detail class (selected
+  // groups), else mark_small. Returns false for a group the near tree doesn't add.
+  bool lod_wanted(u64 key) const {
+    return cur_lod_slot != 0 || lod_group_of.count(key);
+  }
+  void lod_mark(u64 key, size_t first) {
+    auto it = cur_lod_slot >= 0 ? lod_group_of.find(key) : lod_group_of.end();
+    if (it == lod_group_of.end()) {
+      mark_small(first);
+      return;
+    }
+    const u32 detail = lod_group_detail[it->second];
+    // (AI-assisted, streaming) v19: the near versions go to near chunks
+    const u8 stream = cur_lod_slot == 0 && opt.stream
+                          ? (lod_group_core[it->second] ? (u8)c3l::kStreamCore : (u8)c3l::kStreamExtra)
+                          : (u8)0;
+    for (size_t i = first; i < tris.size(); i++) {
+      tris[i].lod = cur_lod_slot == 0 ? c3l::kRunLodNear : c3l::kRunLodFar;
+      tris[i].lod_group = it->second;
+      tris[i].detail = detail;
+      tris[i].stream = stream;
+    }
+    small_tris += detail ? tris.size() - first : 0;
+    lod_tris[cur_lod_slot] += tris.size() - first;
+  }
+
+  // (AI-assisted, lod-light) far_colors_from_near's statistics: the far surface's color against
+  // the near surface's under it (area weighted, GS units, mean over the 8 palettes' rgb): with
+  // geometry 3's own colors (the PS2's), with the fit, with the colors picked
+  struct FarColorStats {
+    size_t far_verts = 0, changed = 0;
+    double area = 0;
+    double abs_own = 0, abs_fit = 0, abs_pick = 0;
+    double sgn_own = 0, sgn_fit = 0, sgn_pick = 0;
+  };
+
+  /*!
+   * (AI-assisted, lod-light) The far versions' vertex colors fitted to their near versions. The
+   * PS2 and the PC light ties by baked vertex colors. The PS2 bakes each geometry's own (an
+   * instance's color indices per geometry) and its far versions lose geometry 0's extra vertices:
+   * on rocks, the dark crevices and lit ridges between the far corners. The far corners
+   * sat mostly on ridges, so a far rock was lighter as a whole (beach: +5 levels on 16x16 pixel
+   * blocks), and the near/far switch showed as the light on the surface changing when the camera
+   * came near (the PC draws geometry 0 only: nothing changes there).
+   *
+   * Each far vertex gets the near surface's mean color around it: the near surface is sampled
+   * (each near triangle's corners and center, by area), each sample goes to the nearest point of
+   * the far surface, and a far vertex's color is the mean of the samples weighted by its
+   * barycentric weight there (the far surface then has the near surface's mean color as a whole,
+   * and nearly so in each part). The table of colors stays as it is: the vertex takes the color
+   * of the near vertex (among those whose samples it got) nearest to that mean, in all 8 palettes.
+   */
+  void far_colors_from_near(FarColorStats* st) {
+    struct GroupTris {
+      std::vector<u32> near_t, far_t;
+    };
+    std::unordered_map<u32, GroupTris> groups;
+    for (u32 i = 0; i < tris.size(); i++) {
+      const auto& t = tris[i];
+      if (t.lod_group == UINT32_MAX) {
+        continue;
+      }
+      if (t.lod == c3l::kRunLodNear) {
+        groups[t.lod_group].near_t.push_back(i);
+      } else if (t.lod == c3l::kRunLodFar) {
+        groups[t.lod_group].far_t.push_back(i);
+      }
+    }
+    constexpr int kC = 24;  // 8 palettes x rgb
+    // the pick's weight of a difference in the mean of the 24 values (beach, per far triangle:
+    // 0 -> 2.94 GS units off, the far version 0.62 darker; 16 -> 2.60, 0.09 darker; the fit 2.48)
+    constexpr float kMeanWeight = 16.f;
+    using Col = std::array<float, kC>;
+    auto color_of = [&](u32 vi) {
+      Col c;
+      const auto& v = verts[vi];
+      if (v.tod != kTodNone && !(v.tod & kTodMulBit) && v.tod < tod_colors.size()) {
+        for (int k = 0; k < kC; k++) {
+          c[k] = tod_colors[v.tod].rgb[k / 3][k % 3];
+        }
+      } else {
+        for (int k = 0; k < kC; k++) {
+          c[k] = v.rgba[k % 3];
+        }
+      }
+      return c;
+    };
+    auto pos_of = [&](u32 vi, float* p) {
+      p[0] = verts[vi].x;
+      p[1] = verts[vi].y;
+      p[2] = verts[vi].z;
+    };
+    std::vector<u32> keys;
+    for (const auto& [g, gt] : groups) {
+      if (!gt.near_t.empty() && !gt.far_t.empty()) {
+        keys.push_back(g);
+      }
+    }
+    std::sort(keys.begin(), keys.end());
+    struct Sample {
+      u32 ftri;
+      float w[3];
+      float weight;
+      Col col;
+    };
+    struct Result {
+      std::vector<std::pair<u32, u32>> pick;  // far vertex, near vertex whose colors it takes
+      double area = 0, abs_own = 0, abs_fit = 0, abs_pick = 0, sgn_own = 0, sgn_fit = 0,
+             sgn_pick = 0;
+    };
+    std::vector<Result> results(keys.size());
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(keys.size(), [&](size_t a, size_t b) {
+      for (size_t gi = a; gi < b; gi++) {
+        const auto& gt = groups.at(keys[gi]);
+        auto& res = results[gi];
+        // the far surface
+        std::vector<tie_lod::Tri> ft(gt.far_t.size());
+        std::vector<std::array<float, 6>> boxes(gt.far_t.size());
+        std::unordered_map<u32, u32> slot;  // far vertex -> local index
+        std::vector<u32> fverts;
+        for (size_t i = 0; i < gt.far_t.size(); i++) {
+          const auto& t = tris[gt.far_t[i]];
+          for (int k = 0; k < 3; k++) {
+            pos_of(t.v[k], &ft[i][3 * k]);
+            if (slot.emplace(t.v[k], (u32)fverts.size()).second) {
+              fverts.push_back(t.v[k]);
+            }
+          }
+          for (int c = 0; c < 3; c++) {
+            boxes[i][c] = std::min({ft[i][c], ft[i][3 + c], ft[i][6 + c]});
+            boxes[i][3 + c] = std::max({ft[i][c], ft[i][3 + c], ft[i][6 + c]});
+          }
+        }
+        std::vector<Col> own(fverts.size());
+        for (size_t i = 0; i < fverts.size(); i++) {
+          own[i] = color_of(fverts[i]);
+        }
+        // the near surface's samples on it
+        std::vector<Col> acc(fverts.size());
+        for (auto& c : acc) {
+          c.fill(0.f);
+        }
+        std::vector<double> wacc(fverts.size(), 0.0);
+        std::vector<Sample> samples;
+        size_t hint = 0;
+        auto nearest = [&](const float* p, float* w) {
+          float best = tie_lod::closest_point_bary(p, ft[hint], w);
+          size_t bi = hint;
+          for (size_t i = 0; i < ft.size(); i++) {
+            float d2 = 0;
+            for (int c = 0; c < 3; c++) {
+              const float o = p[c] < boxes[i][c]       ? boxes[i][c] - p[c]
+                              : p[c] > boxes[i][3 + c] ? p[c] - boxes[i][3 + c]
+                                                       : 0.f;
+              d2 += o * o;
+            }
+            if (i == hint || d2 >= best) {
+              continue;
+            }
+            float ww[3];
+            const float d = tie_lod::closest_point_bary(p, ft[i], ww);
+            if (d < best) {
+              best = d;
+              bi = i;
+              memcpy(w, ww, sizeof(ww));
+            }
+          }
+          hint = bi;
+          return (u32)bi;
+        };
+        for (u32 ti : gt.near_t) {
+          const auto& t = tris[ti];
+          float p[3][3];
+          Col c[3];
+          for (int k = 0; k < 3; k++) {
+            pos_of(t.v[k], p[k]);
+            c[k] = color_of(t.v[k]);
+          }
+          float e1[3], e2[3];
+          for (int k = 0; k < 3; k++) {
+            e1[k] = p[1][k] - p[0][k];
+            e2[k] = p[2][k] - p[0][k];
+          }
+          const float cx = e1[1] * e2[2] - e1[2] * e2[1], cy = e1[2] * e2[0] - e1[0] * e2[2],
+                      cz = e1[0] * e2[1] - e1[1] * e2[0];
+          const float area = 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
+          if (!(area > 0)) {
+            continue;
+          }
+          // the corners (half of the area) and the center (the other half)
+          for (int k = 0; k < 4; k++) {
+            Sample s;
+            float q[3];
+            if (k < 3) {
+              memcpy(q, p[k], sizeof(q));
+              s.col = c[k];
+              s.weight = area / 6.f;
+            } else {
+              for (int j = 0; j < 3; j++) {
+                q[j] = (p[0][j] + p[1][j] + p[2][j]) / 3.f;
+              }
+              for (int j = 0; j < kC; j++) {
+                s.col[j] = (c[0][j] + c[1][j] + c[2][j]) / 3.f;
+              }
+              s.weight = area / 2.f;
+            }
+            s.ftri = nearest(q, s.w);
+            const auto& f = tris[gt.far_t[s.ftri]];
+            for (int j = 0; j < 3; j++) {
+              const u32 sl = slot.at(f.v[j]);
+              const float ww = s.w[j] * s.weight;
+              for (int ch = 0; ch < kC; ch++) {
+                acc[sl][ch] += ww * s.col[ch];
+              }
+              wacc[sl] += ww;
+            }
+            samples.push_back(s);
+          }
+        }
+        // the fit, then the group's near color nearest to it (in all 8 palettes; a difference in
+        // the mean, the overall light, counts more than one between channels or palettes)
+        std::vector<std::pair<u32, Col>> gcols;  // a near vertex of each of the group's colors
+        {
+          std::set<std::pair<u32, u32>> seen;  // (tod, rgba)
+          for (u32 ti : gt.near_t) {
+            for (u32 nv : tris[ti].v) {
+              u32 rgba;
+              memcpy(&rgba, verts[nv].rgba, 4);
+              if (seen.emplace(verts[nv].tod, rgba).second) {
+                gcols.push_back({nv, color_of(nv)});
+              }
+            }
+          }
+        }
+        std::vector<Col> fit(fverts.size()), pick(fverts.size());
+        for (size_t i = 0; i < fverts.size(); i++) {
+          if (wacc[i] <= 0) {
+            fit[i] = pick[i] = own[i];
+            continue;
+          }
+          for (int ch = 0; ch < kC; ch++) {
+            fit[i][ch] = (float)(acc[i][ch] / wacc[i]);
+          }
+          float best = 1e30f;
+          u32 bv = UINT32_MAX;
+          for (const auto& [nv, cc] : gcols) {
+            float d = 0, m = 0;
+            for (int ch = 0; ch < kC; ch++) {
+              const float x = cc[ch] - fit[i][ch];
+              d += x * x;
+              m += x;
+            }
+            d += kMeanWeight * m * m / kC;
+            if (d < best) {
+              best = d;
+              bv = nv;
+            }
+          }
+          if (bv == UINT32_MAX) {
+            pick[i] = own[i];
+            continue;
+          }
+          pick[i] = color_of(bv);
+          res.pick.push_back({fverts[i], bv});
+        }
+        // statistics: per far triangle, the mean difference over the near surface under it (what
+        // the far version's light is off by there; the detail within a triangle it can't have)
+        std::vector<std::array<double, 4>> per(ft.size(), {0, 0, 0, 0});  // weight, own, fit, pick
+        for (const auto& s : samples) {
+          const auto& f = tris[gt.far_t[s.ftri]];
+          double d_own = 0, d_fit = 0, d_pick = 0;
+          for (int ch = 0; ch < kC; ch++) {
+            float o = 0, ft_ = 0, pk = 0;
+            for (int j = 0; j < 3; j++) {
+              const u32 sl = slot.at(f.v[j]);
+              o += s.w[j] * own[sl][ch];
+              ft_ += s.w[j] * fit[sl][ch];
+              pk += s.w[j] * pick[sl][ch];
+            }
+            d_own += o - s.col[ch];
+            d_fit += ft_ - s.col[ch];
+            d_pick += pk - s.col[ch];
+          }
+          auto& pt = per[s.ftri];
+          pt[0] += s.weight;
+          pt[1] += s.weight * d_own / kC;
+          pt[2] += s.weight * d_fit / kC;
+          pt[3] += s.weight * d_pick / kC;
+        }
+        for (const auto& pt : per) {
+          if (pt[0] <= 0) {
+            continue;
+          }
+          res.area += pt[0];
+          res.abs_own += std::abs(pt[1]);
+          res.abs_fit += std::abs(pt[2]);
+          res.abs_pick += std::abs(pt[3]);
+          res.sgn_own += pt[1];
+          res.sgn_fit += pt[2];
+          res.sgn_pick += pt[3];
+        }
+      }
+    });
+    pool.wait_for_tasks();
+    for (const auto& r : results) {
+      for (const auto& [fv, nv] : r.pick) {
+        auto& v = verts[fv];
+        const auto& n = verts[nv];
+        st->far_verts++;
+        if (memcmp(v.rgba, n.rgba, 4) != 0 || v.tod != n.tod) {
+          memcpy(v.rgba, n.rgba, 4);
+          v.tod = n.tod;
+          st->changed++;
+        }
+      }
+      st->area += r.area;
+      st->abs_own += r.abs_own;
+      st->abs_fit += r.abs_fit;
+      st->abs_pick += r.abs_pick;
+      st->sgn_own += r.sgn_own;
+      st->sgn_fit += r.sgn_fit;
+      st->sgn_pick += r.sgn_pick;
+    }
+  }
+
   void add_tie_tree(tfrag3::TieTree& tree) {
     const size_t tree_first_tri = tris.size();
-    tree.unpack();
+    if (tree.unpacked.indices.empty()) {
+      tree.unpack();  // (AI-assisted) once: unpack() appends the indices again
+    }
     u32 base = verts.size();
     for (auto& v : tree.unpacked.vertices) {
       SrcVertex sv;
@@ -703,6 +1214,7 @@ struct Converter {
       for (int c = 0; c < 4; c++) {
         sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
       }
+      sv.tod = tod_color(tree.colors, v.color_index);
       verts.push_back(sv);
     }
     // static instances (already in world space), one vis group per instance
@@ -720,9 +1232,15 @@ struct Converter {
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (auto& g : d.vis_groups) {
         size_t first_tri = tris.size();
+        // (AI-assisted) v17: the group's levels of detail
+        const u64 lkey = tie_lod::static_key(cur_tree, g.vis_idx_in_pc_bvh, g.tie_proto_idx);
+        if (!lod_wanted(lkey)) {
+          idx += g.num_inds;
+          continue;
+        }
         cur_vis = vis_id(tree.bvh, g.vis_idx_in_pc_bvh);  // (AI-assisted) up to 8 instances
         add_strips(tree.unpacked.indices, idx, g.num_inds, base, key);
-        mark_small(first_tri);
+        lod_mark(lkey, first_tri);
         idx += g.num_inds;
       }
       cur_vis = 0xffff;
@@ -734,6 +1252,12 @@ struct Converter {
       u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
       size_t idx = 0;
       for (const auto& g : d.instance_groups) {
+        // (AI-assisted) v17: the instance's levels of detail
+        const u64 lkey = tie_lod::wind_key(cur_tree, g.instance_idx);
+        if (!lod_wanted(lkey)) {
+          idx += g.num;
+          continue;
+        }
         const auto& mat = tree.wind_instance_info.at(g.instance_idx).matrix;
         std::vector<u32> local;  // strip indices into new world space vertices
         std::unordered_map<u32, u32> remap;
@@ -755,6 +1279,7 @@ struct Converter {
             for (int c = 0; c < 4; c++) {
               sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
             }
+            sv.tod = tod_color(tree.colors, v.color_index);
             it = remap.emplace(vi, verts.size()).first;
             verts.push_back(sv);
           }
@@ -765,7 +1290,7 @@ struct Converter {
         add_strips(local, 0, local.size(), 0, key);
         cur_vis = 0xffff;
         wind_tris += tris.size() - first_tri;
-        mark_small(first_tri);
+        lod_mark(lkey, first_tri);
         idx += g.num;
       }
     }
@@ -1725,6 +2250,746 @@ bool is_interior(const std::string& level) {
   return false;
 }
 
+// (AI-assisted) every texel of every level of the texture has alpha 1.0 (as the GPU reads it)
+bool texture_alpha_full(const c3l::Texture& d, const std::vector<u8>& data) {
+  if (d.format == c3l::TEX_ETC1 || d.format == c3l::TEX_RGB565) {
+    return true;
+  }
+  u32 off = 0;
+  for (int l = 0; l < std::max<int>(1, d.levels); l++) {
+    const int w = d.w >> l, h = d.h >> l;
+    const auto img = ctr_tex::decode_level(data.data() + off, w, h, (ctr_tex::Format)d.format);
+    for (int i = 0; i < w * h; i++) {
+      if (img.rgba[4 * i + 3] != 255) {
+        return false;
+      }
+    }
+    off += c3l::texture_level_bytes(w, h, d.format);
+  }
+  return true;
+}
+
+// (AI-assisted) bytes of a texture with `levels` mip levels
+u64 ctr_gpu_level_bytes(int w, int h, int format, int levels) {
+  u64 b = 0;
+  for (int l = 0; l < levels; l++) {
+    b += c3l::texture_level_bytes(w >> l, h >> l, (u8)format);
+  }
+  return b;
+}
+
+// (AI-assisted) v15 draw optimisations (Options::opaque_alpha, Options::atlas), on the triangles
+// before chunking. Statistics for the log.
+struct DrawOptStats {
+  size_t keys_at = 0, tris_at = 0, keys_blend = 0, tris_blend = 0, merged_keys = 0;
+  size_t at_candidates = 0, blend_candidates = 0, blocked_coplanar = 0;
+  size_t coplanar_pairs = 0, cross_key_pairs = 0;
+  int atlases = 0, atlas_cells = 0, atlas_textures_fit = 0, atlas_blocked_coplanar = 0;
+  int atlas_elsewhere = 0, atlas_costly = 0;
+  size_t atlas_tris = 0, atlas_verts = 0;
+  u64 atlas_bytes = 0;
+  std::vector<u16> atlased;  // textures moved into atlases (output indices)
+  c3l_opt::AtlasStats ast;
+};
+
+void optimize_draws(Converter& cv,
+                    const Options& opt,
+                    std::vector<c3l::Texture>& tex_descs,
+                    std::vector<std::vector<u8>>& tex_datas,
+                    std::vector<TexUse>& tex_use,
+                    DrawOptStats* st) {
+  const size_t nk = cv.draw_keys.size();
+  auto mode_of = [&](u32 k) {
+    DrawMode m;
+    m.as_int() = cv.draw_keys[k].mode;
+    return m;
+  };
+  auto any_order = [&](u32 k) {
+    const DrawMode m = mode_of(k);
+    return !m.get_ab_enable() && m.get_depth_write_enable();
+  };
+  // textures with alpha 1.0 in every texel of every level (as the GPU reads them)
+  std::vector<int> full(tex_descs.size(), -1);
+  auto tex_full = [&](u16 t) {
+    if (t == 0xffff) {
+      return true;
+    }
+    if (t >= tex_descs.size()) {
+      return false;
+    }
+    if (full[t] < 0) {
+      full[t] = texture_alpha_full(tex_descs[t], tex_datas[t]);
+    }
+    return full[t] == 1;
+  };
+  // per key: triangles, vertex alpha >= 0x80 everywhere
+  std::vector<size_t> key_tris(nk, 0);
+  std::vector<u8> key_va(nk, 1);
+  for (const auto& t : cv.tris) {
+    key_tris[t.draw_key]++;
+    for (u32 v : t.v) {
+      if (cv.verts[v].rgba[3] < 0x80) {
+        key_va[t.draw_key] = 0;
+      }
+    }
+  }
+  // coplanar overlaps between different keys (opaque ones: their order is the runtime's sort, by
+  // texture, then state): a key whose triangles overlap another key's of the same texture keeps its
+  // state (the sort among the texture's draws would change); a texture with any such overlap stays
+  // out of the atlases (the sort by texture would change)
+  std::vector<u8> key_blocked(nk, 0), tex_blocked(tex_descs.size(), 0);
+  {
+    std::vector<c3l_opt::Tri> wt;
+    std::vector<u32> ids;
+    for (u32 i = 0; i < cv.tris.size(); i++) {
+      const auto& t = cv.tris[i];
+      if (!any_order(t.draw_key)) {
+        continue;
+      }
+      c3l_opt::Tri w;
+      for (int k = 0; k < 3; k++) {
+        const auto& v = cv.verts[t.v[k]];
+        w[k] = {v.x, v.y, v.z};
+      }
+      wt.push_back(w);
+      ids.push_back(i);
+    }
+    const auto pairs = c3l_opt::coplanar_pairs(wt, {}, c3l_opt::CoplanarOptions{});
+    st->coplanar_pairs = pairs.size();
+    for (auto [a, b] : pairs) {
+      const auto& ta = cv.tris[ids[a]];
+      const auto& tb = cv.tris[ids[b]];
+      // the near and coarse tfrag versions of a cell are never drawn together
+      if (ta.tier != tb.tier && ta.tier && tb.tier && ta.tier + tb.tier == 3) {
+        continue;
+      }
+      // (AI-assisted) v17: nor the near and far versions of a tie group
+      if (ta.lod_group != UINT32_MAX && ta.lod_group == tb.lod_group && ta.lod != tb.lod) {
+        continue;
+      }
+      if (ta.draw_key == tb.draw_key) {
+        continue;
+      }
+      st->cross_key_pairs++;
+      const auto& ka = cv.draw_keys[ta.draw_key];
+      const auto& kb = cv.draw_keys[tb.draw_key];
+      if (ka.texture == kb.texture) {
+        key_blocked[ta.draw_key] = key_blocked[tb.draw_key] = 1;
+      }
+      for (u16 t : {ka.texture, kb.texture}) {
+        if (t < tex_blocked.size()) {
+          tex_blocked[t] = 1;
+        }
+      }
+    }
+  }
+  std::vector<u32> remap(nk);
+  for (u32 k = 0; k < nk; k++) {
+    remap[k] = k;
+  }
+  if (opt.opaque_alpha) {
+    constexpr u32 kAtBits = 0xFF00 | (3u << 16) | (1u << 18) | (3u << 21);
+    // groups of opaque keys that differ only in their alpha test: the ones whose alpha is 1.0
+    // everywhere become one key without the test (the largest aref kept for config opaque_alpha
+    // = off); blended ones (alpha blending of Cs * As + Cd * (1 - As)) lose the blending in place
+    std::map<std::tuple<u32, u16, u16>, std::vector<u32>> groups;
+    for (u32 k = 0; k < nk; k++) {
+      if (!key_tris[k]) {
+        continue;
+      }
+      const auto dk = cv.draw_keys[k];
+      const DrawMode m = mode_of(k);
+      const bool alpha1 = tex_full(dk.texture) && key_va[k];
+      const bool at = m.get_at_enable() && m.get_alpha_test() == DrawMode::AlphaTest::GEQUAL;
+      const bool blend =
+          m.get_ab_enable() && m.get_alpha_blend() == DrawMode::AlphaBlend::SRC_DST_SRC_DST;
+      st->at_candidates += at && alpha1;
+      st->blend_candidates += blend && alpha1;
+      if (!alpha1) {
+        continue;
+      }
+      if (blend) {
+        // in place: the same key number (the chunk's draw order: the blended draws keep theirs)
+        DrawMode nm = m;
+        nm.disable_ab();
+        u16 kind = (u16)(dk.kind | c3l::kDrawBlendDropped);
+        if (at) {
+          nm.disable_at();
+          kind |= c3l::kDrawAlphaTestDropped;
+        }
+        cv.draw_key_ids.erase(dk);
+        cv.draw_keys[k] = DrawKey{nm.as_int(), dk.texture, kind};
+        cv.draw_key_ids.emplace(cv.draw_keys[k], k);
+        st->keys_blend++;
+        st->tris_blend += key_tris[k];
+        continue;
+      }
+      if (!any_order(k) || key_blocked[k] || (m.get_at_enable() && !at)) {
+        st->blocked_coplanar += at && key_blocked[k];
+        continue;
+      }
+      groups[{dk.mode & ~kAtBits, dk.texture, dk.kind}].push_back(k);
+    }
+    for (auto& [g, keys] : groups) {
+      int aref = -1;
+      for (u32 k : keys) {
+        const DrawMode m = mode_of(k);
+        if (m.get_at_enable()) {
+          aref = std::max<int>(aref, m.get_aref());
+        }
+      }
+      if (aref < 0) {
+        continue;  // no alpha test among them
+      }
+      DrawMode nm;
+      nm.as_int() = std::get<0>(g);
+      nm.set_aref((u8)aref);
+      nm.set_alpha_test(DrawMode::AlphaTest::GEQUAL);
+      const u32 to = cv.key_id(DrawKey{nm.as_int(), std::get<1>(g),
+                                       (u16)(std::get<2>(g) | c3l::kDrawAlphaTestDropped)});
+      for (u32 k : keys) {
+        remap[k] = to;
+        if (mode_of(k).get_at_enable()) {
+          st->keys_at++;
+          st->tris_at += key_tris[k];
+        }
+      }
+      st->merged_keys += keys.size() - 1;
+    }
+    for (auto& t : cv.tris) {
+      if (remap[t.draw_key] != t.draw_key) {
+        if (t.orig_key == UINT32_MAX) {
+          t.orig_key = t.draw_key;  // the vista tier copies with the key from before
+        }
+        cv.rank_merge(remap[t.draw_key], t.draw_key);
+        t.draw_key = remap[t.draw_key];
+      }
+    }
+  }
+  if (!opt.atlas) {
+    return;
+  }
+  // ---- atlases ----
+  // the textures that fit: every key using it is opaque (any order) and each triangle is within
+  // one copy of the texture (clamped axes: 0..1; repeating ones: after a whole number shift), one
+  // clamp mode per axis
+  const size_t nk2 = cv.draw_keys.size();
+  std::vector<u8> key_used(nk2, 0);
+  for (const auto& t : cv.tris) {
+    key_used[t.draw_key] = 1;
+  }
+  struct TexFit {
+    bool used = false, ok = true;
+    int clamp_s = -1, clamp_t = -1;
+  };
+  std::vector<TexFit> fit(tex_descs.size());
+  for (u32 k = 0; k < nk2; k++) {
+    const auto& dk = cv.draw_keys[k];
+    if (!key_used[k] || dk.texture >= fit.size()) {
+      continue;
+    }
+    auto& f = fit[dk.texture];
+    f.used = true;
+    const DrawMode m = mode_of(k);
+    const int cs = m.get_clamp_s_enable(), ct = m.get_clamp_t_enable();
+    if (!any_order(k) || (f.clamp_s >= 0 && f.clamp_s != cs) || (f.clamp_t >= 0 && f.clamp_t != ct)) {
+      f.ok = false;
+    }
+    f.clamp_s = cs;
+    f.clamp_t = ct;
+  }
+  auto st_of = [](float v) { return (int)std::lround(v * 1024.f); };
+  // per triangle: its whole number shift (in 1024ths), or none
+  auto tri_shift = [&](const SrcTri& t, int* su, int* sv) {
+    const auto& f = fit[cv.draw_keys[t.draw_key].texture];
+    for (int ax = 0; ax < 2; ax++) {
+      int lo = INT32_MAX, hi = INT32_MIN;
+      for (u32 v : t.v) {
+        const int q = st_of(ax ? cv.verts[v].t : cv.verts[v].s);
+        lo = std::min(lo, q);
+        hi = std::max(hi, q);
+      }
+      const bool clamp = ax ? f.clamp_t : f.clamp_s;
+      int base = 0;
+      if (clamp) {
+        if (lo < 0 || hi > 1024) {
+          return false;
+        }
+      } else {
+        base = (int)std::floor(lo / 1024.0) * 1024;
+        if (hi - base > 1024) {
+          return false;
+        }
+      }
+      (ax ? *sv : *su) = base;
+    }
+    return true;
+  };
+  for (const auto& t : cv.tris) {
+    const u16 tex = cv.draw_keys[t.draw_key].texture;
+    if (tex < fit.size() && fit[tex].ok) {
+      int su, sv;
+      if (!tri_shift(t, &su, &sv)) {
+        fit[tex].ok = false;
+      }
+    }
+  }
+  // vertices an atlas would add per texture: a vertex whose triangles need different whole
+  // number shifts gets a copy for each
+  std::vector<u32> extra_verts(tex_descs.size(), 0);
+  {
+    std::set<std::tuple<u16, u32, int, int>> with;
+    std::set<std::pair<u16, u32>> plain;
+    for (const auto& t : cv.tris) {
+      const u16 tex = cv.draw_keys[t.draw_key].texture;
+      if (tex >= fit.size() || !fit[tex].ok) {
+        continue;
+      }
+      int su = 0, sv = 0;
+      tri_shift(t, &su, &sv);
+      for (u32 v : t.v) {
+        with.insert({tex, v, su, sv});
+        plain.insert({tex, v});
+      }
+    }
+    for (const auto& w : with) {
+      extra_verts[std::get<0>(w)]++;
+    }
+    for (const auto& p0 : plain) {
+      extra_verts[p0.first]--;
+    }
+  }
+  // textures the vista tier will draw (its copies keep the original texture: they are welded by
+  // position, and the atlas copies' shifted coordinates would mix there) or merc models draw: they
+  // stay in the file next to their atlas copy (counted in the atlas's cost)
+  std::vector<u8> elsewhere(tex_descs.size(), 0);
+  {
+    bool has_lowres = false;
+    for (const auto& t : cv.tris) {
+      has_lowres |= t.tier == 3;
+    }
+    for (const auto& t : cv.tris) {
+      const auto& dk = cv.draw_keys[t.draw_key];
+      const int kind = dk.kind & 0xff;
+      const bool vista = opt.vista && (t.tier == 3 || (t.tier == 0 && kind == 1 && t.detail == 0) ||
+                                       (t.tier == 2 && kind == 0 && !has_lowres));
+      if (vista && dk.texture < elsewhere.size()) {
+        elsewhere[dk.texture] = 1;
+      }
+    }
+    for (u16 t = 0; t < tex_use.size() && t < elsewhere.size(); t++) {
+      elsewhere[t] |= tex_use[t].merc;
+    }
+  }
+  // by format and levels
+  std::map<std::pair<int, int>, std::vector<u16>> groups;
+  for (u16 t = 0; t < fit.size(); t++) {
+    const auto& d = tex_descs[t];
+    if (!fit[t].used || !fit[t].ok || d.w > opt.atlas_max || d.h > opt.atlas_max ||
+        d.format == c3l::TEX_RGBA8) {
+      continue;
+    }
+    st->atlas_textures_fit++;
+    st->atlas_elsewhere += elsewhere[t];
+    if (tex_blocked[t]) {
+      st->atlas_blocked_coplanar++;
+      continue;
+    }
+    groups[{d.format, std::max<int>(1, d.levels)}].push_back(t);
+  }
+  // shelf packing into the smallest power of two atlases (by bytes) that hold them, at most
+  // 256 << (levels - 1) on a side: 1/32768 texture coordinates then land exactly on the cells'
+  // own 1/1024 ones (32768 / atlas side units per atlas texel, a multiple of 1024 / the cells'
+  // shortest side 8 << (levels - 1))
+  struct Cell {
+    u16 tex;
+    int atlas, x, y;
+  };
+  std::vector<int> cell_of(tex_descs.size(), -1);
+  std::vector<Cell> cells;
+  struct Atlas {
+    int format, levels, w = 0, h = 0;
+    u16 tex;  // output index
+  };
+  std::vector<Atlas> atlases;
+  // place list[from..] into w x h: how many fit (in order), and where
+  auto pack = [&](const std::vector<u16>& list, size_t from, int w, int h, int sp,
+                  std::vector<std::pair<int, int>>* pos) {
+    pos->clear();
+    int x = sp, y = sp, shelf_h = 0;
+    for (size_t j = from; j < list.size(); j++) {
+      const auto& d = tex_descs[list[j]];
+      if (x + d.w + sp > w) {
+        x = sp;
+        y += shelf_h + sp;
+        shelf_h = 0;
+      }
+      if (y + d.h + sp > h || x + d.w + sp > w) {
+        break;
+      }
+      pos->push_back({x, y});
+      x += d.w + sp;
+      shelf_h = std::max<int>(shelf_h, d.h);
+    }
+    return pos->size();
+  };
+  for (auto& [g, list] : groups) {
+    if (list.size() < 2) {
+      continue;
+    }
+    const int levels = g.second;
+    const int sp = 4 << (levels - 1);  // the gap between cells (and the margin)
+    const int max_side = std::min(1024, 256 << (levels - 1));
+    std::stable_sort(list.begin(), list.end(), [&](u16 a, u16 b) {
+      return std::make_pair(tex_descs[a].h, tex_descs[a].w) >
+             std::make_pair(tex_descs[b].h, tex_descs[b].w);
+    });
+    size_t i = 0;
+    while (i + 1 < list.size()) {
+      // the smallest atlas that holds the rest; if none does, the largest one (as many as fit)
+      int best_w = 0, best_h = 0;
+      size_t best_n = 0;
+      u64 best_area = UINT64_MAX;
+      std::vector<std::pair<int, int>> pos;
+      for (int w = 16; w <= max_side; w *= 2) {
+        for (int h = 16; h <= max_side; h *= 2) {
+          const size_t n = pack(list, i, w, h, sp, &pos);
+          const u64 area = (u64)w * h;
+          if (n == list.size() - i ? (best_n < n || area < best_area) : (n > best_n && best_n < list.size() - i)) {
+            if (n == list.size() - i || n > best_n) {
+              best_n = n;
+              best_w = w;
+              best_h = h;
+              best_area = area;
+            }
+          }
+        }
+      }
+      if (best_n < 2) {
+        break;
+      }
+      {
+        // worth it: the memory it adds (texels, and the vertex copies) per bind it saves at most
+        // atlas_kb_per_bind
+        // the textures the atlas replaces (not the vista's or merc's), less the vertex copies
+        double saved = 0;
+        for (size_t k = 0; k < best_n; k++) {
+          saved += elsewhere[list[i + k]] ? 0.0 : (double)tex_datas[list[i + k]].size();
+          saved -= 16.0 * extra_verts[list[i + k]];
+        }
+        const u64 atlas_bytes = ctr_gpu_level_bytes(best_w, best_h, g.first, levels);
+        if ((double)atlas_bytes - saved > opt.atlas_kb_per_bind * 1024.0 * (double)(best_n - 1)) {
+          st->atlas_costly += (int)best_n;
+          i += best_n;
+          continue;
+        }
+      }
+      pack(list, i, best_w, best_h, sp, &pos);
+      Atlas a;
+      a.format = g.first;
+      a.levels = levels;
+      a.w = best_w;
+      a.h = best_h;
+      a.tex = (u16)tex_descs.size();
+      std::vector<c3l_opt::AtlasCell> ac;
+      for (size_t k = 0; k < best_n; k++) {
+        const u16 t = list[i + k];
+        Cell c{t, (int)atlases.size(), pos[k].first, pos[k].second};
+        cell_of[t] = (int)cells.size();
+        cells.push_back(c);
+        c3l_opt::AtlasCell x0;
+        x0.data = tex_datas[t].data();
+        x0.w = tex_descs[t].w;
+        x0.h = tex_descs[t].h;
+        x0.x = c.x;
+        x0.y = c.y;
+        x0.clamp_s = fit[t].clamp_s == 1;
+        x0.clamp_t = fit[t].clamp_t == 1;
+        ac.push_back(x0);
+        st->atlased.push_back(t);
+      }
+      i += best_n;
+      c3l::Texture desc{};
+      desc.w = (u16)a.w;
+      desc.h = (u16)a.h;
+      desc.format = (u8)a.format;
+      desc.levels = (u8)a.levels;
+      tex_datas.push_back(
+          c3l_opt::build_atlas(a.w, a.h, a.format, a.levels, ac, opt.etc1_quality, &st->ast));
+      tex_descs.push_back(desc);
+      tex_use.emplace_back();
+      st->atlas_bytes += tex_datas.back().size();
+      {
+        u64 cb = 0;
+        std::string sizes;
+        for (size_t k = 0; k < best_n; k++) {
+          cb += tex_datas[list[i - best_n + k]].size();
+          sizes += fmt::format(" {}x{}", tex_descs[list[i - best_n + k]].w,
+                               tex_descs[list[i - best_n + k]].h);
+        }
+        lg::debug("atlas {}x{} format {} levels {}: {} cells ({} bytes) -> {} bytes:{}", a.w, a.h,
+                  a.format, a.levels, best_n, cb, tex_datas.back().size(), sizes);
+      }
+      atlases.push_back(a);
+      st->atlases++;
+      st->atlas_cells += (int)best_n;
+    }
+  }
+  if (cells.empty()) {
+    return;
+  }
+  // the triangles: the atlas's key, copies of their vertices with the atlas texture coordinates
+  std::map<std::tuple<u32, int, int, int>, u32> copies;  // (vertex, cell, shift s, shift t)
+  std::vector<u32> atlas_key(nk2, UINT32_MAX);
+  for (auto& t : cv.tris) {
+    const auto& dk = cv.draw_keys[t.draw_key];
+    if (dk.texture >= cell_of.size() || cell_of[dk.texture] < 0) {
+      continue;
+    }
+    const int ci = cell_of[dk.texture];
+    const Cell& c = cells[ci];
+    const Atlas& a = atlases[c.atlas];
+    const auto& d = tex_descs[c.tex];
+    int su = 0, sv = 0;
+    tri_shift(t, &su, &sv);
+    if (atlas_key[t.draw_key] == UINT32_MAX) {
+      atlas_key[t.draw_key] =
+          cv.key_id(DrawKey{dk.mode, a.tex, (u16)(dk.kind | c3l::kDrawAtlasUV)});
+    }
+    const u32 from = t.draw_key;
+    if (t.orig_key == UINT32_MAX) {
+      t.orig_key = t.draw_key;
+    }
+    t.draw_key = atlas_key[from];
+    cv.rank_merge(t.draw_key, from);
+    // 1/32768 units per atlas texel: kx = 32768 / atlas width; a cell texel is 1024 / w of its
+    // coordinates: st_atlas = kx * (x + (st - shift) * w / 1024), exact (kx * w / 1024 is whole)
+    const int kx = (int)c3l::kAtlasUVScale / a.w, ky = (int)c3l::kAtlasUVScale / a.h;
+    for (u32& vi : t.v) {
+      auto [it, fresh] = copies.emplace(std::make_tuple(vi, ci, su, sv), (u32)cv.verts.size());
+      if (fresh) {
+        SrcVertex v = cv.verts[vi];
+        v.orig = vi;
+        const int s0 = st_of(v.s) - su, t0 = st_of(v.t) - sv;
+        v.ast[0] = (s16)(kx * c.x + s0 * (kx * d.w / 1024));
+        v.ast[1] = (s16)(ky * c.y + t0 * (ky * d.h / 1024));
+        cv.verts.push_back(v);
+        st->atlas_verts++;
+      }
+      vi = it->second;
+    }
+    st->atlas_tris++;
+  }
+}
+
+
+// (AI-assisted) v17 tie levels of detail: the levels whose near versions for every group don't fit
+// in linear memory next to their neighbours (KB of extra vertex and index data, estimated as in
+// select_tie_lods; the others get every group). Planned Oct 17 from Azahar's linear free memory
+// with level pairs loaded (level_pairs.pad, 3ds-sdcard v16 levels; worst village3 + ogre 9.1 MB)
+// plus the 2 MB the smaller vertex stream buffers freed, the rule: every pair of neighbouring levels
+// keeps >= 3 MB (+ 256 KB margin). Pairs the pad doesn't load were estimated from the levels' sizes
+// (village2 + rolling ~6.5 MB, village2 + ogre ~7.3 MB before: the tightest). The groups left
+// coarse are logged ("left coarse").
+struct TieLodBudget {
+  const char* level;
+  float kb;
+};
+constexpr TieLodBudget kTieLodBudgets[] = {
+    {"citadel", 5800},  {"firecanyon", 6000}, {"jungle", 4500}, {"lavatube", 5700},
+    {"misty", 4700},    {"ogre", 3300},       {"rolling", 2400}, {"swamp", 4900},
+    {"village1", 4500}, {"village2", 2500},
+};
+
+// (AI-assisted) v17 tie levels of detail: statistics for the log
+struct TieLodStats {
+  size_t groups = 0, candidates = 0, selected = 0, no_dist = 0;
+  size_t core = 0;  // (AI-assisted, streaming) selected groups the budget took
+  size_t near_tris = 0, far_tris = 0;          // all groups: near / far geometry
+  size_t sel_near_tris = 0, sel_far_tris = 0;  // the selected groups
+  double cost_kb = 0, cost_all_kb = 0;         // estimated extra vertex + index data
+  double budget_kb = 0;
+  double ms = 0;
+  // per prototype: groups selected / candidates, near triangles of the candidates left coarse
+  struct Proto {
+    u32 selected = 0, candidates = 0;
+    size_t left_tris = 0;
+    float worst_left = 0;  // largest shape error left coarse (meters)
+  };
+  std::map<std::string, Proto> protos;
+};
+
+/*!
+ * (AI-assisted) v17: picks the tie instance groups that get a near version (geometry
+ * opt.tie_near_geo, drawn up to the prototype's PS2 far-plane; the far version is geometry
+ * opt.tie_geo). Every group whose shape changes visibly is a candidate: its shape error
+ * (tie_lod::shape_error) seen from the larger of its radius and tie_lod_view_m is at least
+ * tie_lod_min_angle. The candidates with the most error per byte of extra data (near vertices not
+ * in the far version, near indices) are taken until tie_lod_budget_kb is used.
+ */
+void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, TieLodStats* st) {
+  Timer timer;
+  std::unordered_map<u64, tie_lod::Group> groups;
+  for (int slot = 0; slot < 2; slot++) {
+    auto& trees = level.tie_trees[slot ? opt.tie_geo : opt.tie_near_geo];
+    for (u32 t = 0; t < trees.size(); t++) {
+      if (trees[t].unpacked.indices.empty()) {
+        trees[t].unpack();
+      }
+      tie_lod::collect(trees[t], t, slot, &groups);
+    }
+  }
+  std::vector<std::pair<u64, const tie_lod::Group*>> list;
+  for (const auto& [k, g] : groups) {
+    list.push_back({k, &g});
+  }
+  std::sort(list.begin(), list.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  std::vector<float> err(list.size());
+  {
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(list.size(), [&](size_t a, size_t b) {
+      for (size_t i = a; i < b; i++) {
+        err[i] = tie_lod::shape_error(*list[i].second);
+      }
+    });
+    pool.wait_for_tasks();
+  }
+  struct Cand {
+    size_t i;
+    double value;
+    u64 cost;
+  };
+  std::vector<Cand> cands;
+  std::vector<std::string> names(list.size());
+  std::vector<float> dists(list.size());
+  for (size_t i = 0; i < list.size(); i++) {
+    const auto& g = *list[i].second;
+    const u32 tree = (u32)((list[i].first >> 40) & 0x7fffff);
+    const auto& far_trees = level.tie_trees[opt.tie_geo];
+    names[i] = g.proto != 0xffff && tree < far_trees.size() &&
+                       g.proto < far_trees[tree].proto_names.size()
+                   ? far_trees[tree].proto_names[g.proto]
+                   : std::string("(wind)");
+    float mid = 0, far = 0;
+    if (!tie_lod::ps2_dists(level.level_name, names[i], &mid, &far)) {
+      far = opt.tie_lod_default_m;
+      st->no_dist += g.proto != 0xffff;
+    }
+    dists[i] = far * 4096.f;
+    st->groups++;
+    st->near_tris += g.tris[0].size();
+    st->far_tris += g.tris[1].size();
+    if (g.tris[0].empty()) {
+      continue;
+    }
+    const auto bs = tie_lod::bounds(g);
+    const double benefit = err[i] / std::max(bs[3], opt.tie_lod_view_m * 4096.f);
+    if (benefit < opt.tie_lod_min_angle) {
+      continue;
+    }
+    // extra data: the near vertices the far version doesn't have (its corners are near ones),
+    // the near indices, a visibility run per draw and the group
+    // (vertices: position and texture coordinates; colors are the same at both)
+    std::set<std::array<float, 5>> p0(g.corners[0].begin(), g.corners[0].end());
+    size_t shared = 0;
+    for (const auto& c : std::set<std::array<float, 5>>(g.corners[1].begin(), g.corners[1].end())) {
+      shared += p0.count(c);
+    }
+    const u64 cost = (p0.size() - shared) * sizeof(c3l::Vertex) +
+                     g.tris[0].size() * 3 * sizeof(u16) + 64;
+    cands.push_back({i, benefit / cost, cost});
+    st->cost_all_kb += cost / 1024.0;
+    auto& pr = st->protos[names[i]];
+    pr.candidates++;
+  }
+  st->candidates = cands.size();
+  std::sort(cands.begin(), cands.end(), [&](const Cand& a, const Cand& b) {
+    return a.value != b.value ? a.value > b.value : list[a.i].first < list[b.i].first;
+  });
+  double budget_kb = opt.tie_lod_budget_kb;
+  if (budget_kb < 0) {
+    budget_kb = 1e12;  // every group
+    for (const auto& b : kTieLodBudgets) {
+      if (level.level_name == b.level) {
+        budget_kb = b.kb;
+      }
+    }
+  }
+  st->budget_kb = budget_kb;
+  const u64 budget = (u64)(budget_kb * 1024.0);
+  u64 used = 0;
+  std::vector<u8> picked(list.size(), 0), core(list.size(), 0);
+  for (const auto& c : cands) {
+    if (used + c.cost <= budget) {
+      used += c.cost;
+      picked[c.i] = 1;
+      core[c.i] = 1;
+    } else {
+      auto& pr = st->protos[names[c.i]];
+      pr.left_tris += list[c.i].second->tris[0].size();
+      pr.worst_left = std::max(pr.worst_left, err[c.i] / 4096.f);
+      // (AI-assisted, streaming) v19: every candidate; the budget's are the core set
+      picked[c.i] = opt.stream ? 1 : 0;
+    }
+  }
+  st->cost_kb = used / 1024.0;
+  // the groups in key order (deterministic indices)
+  for (size_t i = 0; i < list.size(); i++) {
+    if (!picked[i]) {
+      continue;
+    }
+    const auto& g = *list[i].second;
+    const auto bs = tie_lod::bounds(g);
+    c3l::TieLodGroup lg{};
+    for (int c = 0; c < 4; c++) {
+      lg.bsphere[c] = bs[c];
+    }
+    lg.dist = dists[i];
+    cv->lod_group_error.push_back(err[i]);
+    cv->lod_group_core.push_back(core[i]);  // (AI-assisted, streaming)
+    st->core += core[i];
+    cv->lod_group_of[list[i].first] = (u32)cv->lod_groups.size();
+    cv->lod_groups.push_back(lg);
+    cv->lod_group_detail.push_back(bs[3] < opt.detail_radius * 4096.f   ? 1
+                                   : bs[3] < opt.medium_radius * 4096.f ? 2
+                                                                        : 0);
+    st->selected++;
+    st->sel_near_tris += g.tris[0].size();
+    st->sel_far_tris += g.tris[1].size();
+    st->protos[names[i]].selected++;
+  }
+  if (cv->lod_groups.size() > 0xfffe) {
+    // (RunLod::group is 16 bits)
+    lg::warn("{}: {} tie LOD groups, only levels of detail for the first 65534",
+             level.level_name, cv->lod_groups.size());
+    cv->lod_groups.resize(0xfffe);
+    cv->lod_group_detail.resize(0xfffe);
+    cv->lod_group_error.resize(0xfffe);
+    cv->lod_group_core.resize(0xfffe);
+    for (auto it = cv->lod_group_of.begin(); it != cv->lod_group_of.end();) {
+      it = it->second >= 0xfffe ? cv->lod_group_of.erase(it) : std::next(it);
+    }
+  }
+  st->ms = timer.getMs();
+}
+
+// (AI-assisted, streaming) a group's near version is needed within this many x its shape error (+
+// its radius) of its center: gameplay's focal length 256 / tie_lod_px 4, x 1.1 (the hysteresis)
+constexpr float kStreamNeedK = 256.f / 4.f * 1.1f;
+int stream_need_class(const Converter& cv, const Options& opt, u32 g) {
+  const float e = g < cv.lod_group_error.size() ? cv.lod_group_error[g] : cv.lod_groups[g].dist;
+  const float m = (e * kStreamNeedK + cv.lod_groups[g].bsphere[3]) / 4096.f;
+  int c = 0;
+  while (c < (int)opt.stream_classes.size() && m >= opt.stream_classes[c]) {
+    c++;
+  }
+  return c;
+}
+float stream_class_cell(const Options& opt, int nc) {
+  return nc < (int)opt.stream_class_cells.size() ? opt.stream_class_cells[nc] : opt.stream_cell;
+}
+
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Options opt = opt_in;
   if (is_interior(in.stem().string())) {
@@ -1817,10 +3082,36 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   const size_t far_tris = cv.tris.size() - far_first;
   cv.cur_tier = 0;
+  TieLodStats lstats;
   if (!opt.no_tie && !opt.merc_only) {
-    for (auto& tree : level.tie_trees[opt.tie_geo]) {
-      cv.add_tie_tree(tree);
+    // (AI-assisted) v17: which instance groups get a near version (select_tie_lods)
+    const bool lod = opt.tie_lod && opt.tie_near_geo >= 0 && opt.tie_near_geo < opt.tie_geo &&
+                     level.tie_trees[opt.tie_near_geo].size() == level.tie_trees[opt.tie_geo].size();
+    if (lod) {
+      select_tie_lods(level, opt, &cv, &lstats);
+    }
+    for (u32 t = 0; t < level.tie_trees[opt.tie_geo].size(); t++) {
+      cv.cur_tree = t;
+      cv.cur_lod_slot = lod ? 1 : -1;
+      cv.add_tie_tree(level.tie_trees[opt.tie_geo][t]);
       tie_trees++;
+      if (lod && !cv.lod_groups.empty()) {
+        cv.cur_lod_slot = 0;
+        cv.add_tie_tree(level.tie_trees[opt.tie_near_geo][t]);
+      }
+    }
+    cv.cur_lod_slot = -1;
+    if (lod && opt.tie_far_near_colors) {
+      // (AI-assisted, lod-light)
+      Converter::FarColorStats fs;
+      cv.far_colors_from_near(&fs);
+      const double a = std::max(fs.area, 1e-9);
+      lg::info("{}: tie levels of detail: far version colors fitted to the near versions: {} of {} "
+               "vertices changed; far - near surface color per far triangle (GS units, area "
+               "weighted, mean |d| / mean d): geometry 3's own {:.2f} / {:+.2f}, fit {:.2f} / "
+               "{:+.2f}, picked {:.2f} / {:+.2f}",
+               in.stem().string(), fs.changed, fs.far_verts, fs.abs_own / a, fs.sgn_own / a,
+               fs.abs_fit / a, fs.sgn_fit / a, fs.abs_pick / a, fs.sgn_pick / a);
     }
   }
   int shrub_trees = 0;
@@ -1831,6 +3122,30 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
 
+  // ---- textures (in parallel: ETC1 encoding is slow) ----
+  // (AI-assisted) before the chunks: the v15 draw optimisations look at the encoded texels
+  std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
+  std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
+  std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
+  std::vector<MercGate> tex_gate(cv.tex_order.size());
+  {
+    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+    pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
+      for (size_t i = a; i < b; i++) {
+        tex_descs[i] = c3l::Texture{};
+        tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
+                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
+      }
+    });
+    pool.wait_for_tasks();
+  }
+  // (AI-assisted) v15 draw optimisations: alpha tests / blending that can't change a pixel, atlases
+  DrawOptStats dstats;
+  if (!opt.merc_only) {
+    optimize_draws(cv, opt, tex_descs, tex_datas, cv.tex_use, &dstats);
+    tex_psnr.resize(tex_descs.size(), 99.0);
+    tex_gate.resize(tex_descs.size());
+  }
   // ---- chunking: grid cells by triangle centroid ----
   // shrubs are small and only drawn up close: smaller cells cull them better
   auto cell_of_detail = [&](int detail) {
@@ -1843,14 +3158,31 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   for (u32 i = 0; i < cv.tris.size(); i++) {
     const auto& t = cv.tris[i];
     float cx = 0, cy = 0, cz = 0;
-    for (int k = 0; k < 3; k++) {
-      cx += cv.verts[t.v[k]].x;
-      cy += cv.verts[t.v[k]].y;
-      cz += cv.verts[t.v[k]].z;
+    if (t.lod_group != UINT32_MAX) {
+      // (AI-assisted) v17: a LOD group's triangles (both versions) in its center's cell: one chunk
+      // holds both, and they share its vertices (the far corners are near ones)
+      const auto& g = cv.lod_groups[t.lod_group];
+      cx = 3 * g.bsphere[0];
+      cy = 3 * g.bsphere[1];
+      cz = 3 * g.bsphere[2];
+    } else {
+      for (int k = 0; k < 3; k++) {
+        cx += cv.verts[t.v[k]].x;
+        cy += cv.verts[t.v[k]].y;
+        cz += cv.verts[t.v[k]].z;
+      }
     }
-    const float cell = cell_of_detail((int)t.detail);
-    // (AI-assisted) detail + 4 * tier + 64 * shrub distance class
-    auto key = std::make_tuple((int)(t.detail + 4 * t.tier + 64 * t.sclass),
+    // (AI-assisted, streaming) v19 near versions: near chunks of stream_cell meters (or their need
+    // class's cell size)
+    int nc = 0;
+    if (t.stream && t.lod_group < cv.lod_groups.size()) {
+      nc = stream_need_class(cv, opt, t.lod_group);
+    }
+    const float cell = t.stream ? stream_class_cell(opt, nc) * 4096.f : cell_of_detail((int)t.detail);
+    // (AI-assisted) detail + 4 * tier + 64 * shrub distance class (+ 1024 * (stream class + 3 *
+    // need class): the near chunks after the others)
+    auto key = std::make_tuple(
+        (int)(t.detail + 4 * t.tier + 64 * t.sclass + (t.stream ? 1024 * (t.stream + 3 * nc) : 0)),
                                (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell),
                                (int)(cv.draw_keys[t.draw_key].kind & 0xff));
@@ -1879,7 +3211,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::stable_sort(tri_ids.begin(), tri_ids.end(), [&](u32 a, u32 b) {
         const auto& ta = cv.tris[a];
         const auto& tb = cv.tris[b];
-        return ta.draw_key != tb.draw_key ? ta.draw_key < tb.draw_key : ta.vis < tb.vis;
+        // (AI-assisted) v15: by key rank (Converter::key_rank), then key
+        const u32 ra = cv.rank_of(ta.draw_key), rb = cv.rank_of(tb.draw_key);
+        if (ra != rb) {
+          return ra < rb;
+        }
+        if (ta.draw_key != tb.draw_key) {
+          return ta.draw_key < tb.draw_key;
+        }
+        // (AI-assisted) v17: a draw's near versions, then the triangles of one version, then the
+        // far versions (c3l::RunLod), each by visibility id (BVH order: near runs drawn together
+        // are mostly neighbours), then LOD group
+        constexpr u8 kLodRank[3] = {1, 0, 2};
+        if (ta.lod != tb.lod) {
+          return kLodRank[ta.lod] < kLodRank[tb.lod];
+        }
+        return ta.vis != tb.vis ? ta.vis < tb.vis : ta.lod_group < tb.lod_group;
       });
       size_t pos = 0;
       while (pos < tri_ids.size()) {
@@ -1911,6 +3258,42 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   };
   make_plans(cells);
+  // (AI-assisted, streaming) v19: the near chunks (the last of these plans: their keys sort last) in
+  // spatial order, so that the ones the runtime reads together lie together in the file: by the
+  // Morton order of their cells (x, z), then height, then key
+  size_t first_stream_plan = plans.size();
+  for (size_t pi = 0; pi < plans.size(); pi++) {
+    if (std::get<0>(plans[pi].key) >= 1024) {
+      first_stream_plan = pi;
+      break;
+    }
+  }
+  {
+    int mx = INT32_MAX, mz = INT32_MAX;
+    for (size_t pi = first_stream_plan; pi < plans.size(); pi++) {
+      mx = std::min(mx, std::get<1>(plans[pi].key));
+      mz = std::min(mz, std::get<3>(plans[pi].key));
+    }
+    auto morton = [&](const CellKey& k) {
+      const u32 x = (u32)(std::get<1>(k) - mx) & 0xffff, z = (u32)(std::get<3>(k) - mz) & 0xffff;
+      u64 m = 0;
+      for (int b = 0; b < 16; b++) {
+        m |= (u64)((x >> b) & 1) << (2 * b) | (u64)((z >> b) & 1) << (2 * b + 1);
+      }
+      return m;
+    };
+    std::stable_sort(plans.begin() + first_stream_plan, plans.end(),
+                     [&](const ChunkPlan& a, const ChunkPlan& b) {
+                       const u64 ma = morton(a.key), mb = morton(b.key);
+                       if (ma != mb) {
+                         return ma < mb;
+                       }
+                       if (std::get<2>(a.key) != std::get<2>(b.key)) {
+                         return std::get<2>(a.key) < std::get<2>(b.key);
+                       }
+                       return a.key < b.key;
+                     });
+  }
   // (AI-assisted) the vista tier (Options::vista): copies of the far content, in large cells
   const size_t normal_plans = plans.size();
   size_t vista_src_tris = 0, vista_tris = 0, vista_flat_tris = 0;
@@ -1955,7 +3338,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       const int tier = std::get<0>(cp.key) / 4 % 16, detail = std::get<0>(cp.key) % 4;
       const int kind = std::get<4>(cp.key);  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
       const bool lowres = tier == 3;
-      const bool landmark = tier == 0 && kind == 1 && detail == 0;
+      // (AI-assisted, streaming) not the near chunks (near versions only)
+      const bool landmark = tier == 0 && kind == 1 && detail == 0 && std::get<0>(cp.key) < 1024;
       const bool coarse = tier == 2 && kind == 0 && !has_lowres;
       if (!lowres && !landmark && !coarse) {
         continue;
@@ -1964,12 +3348,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::map<std::tuple<int, int, u32>, std::vector<u32>> groups;
       for (u32 t : cp.tris) {
         const auto& tr = cv.tris[t];
+        if (tr.lod == c3l::kRunLodNear) {
+          continue;  // (AI-assisted) v17: the vista copies the far versions
+        }
         float cx = 0, cz = 0;
         for (int k = 0; k < 3; k++) {
           cx += cv.verts[tr.v[k]].x / 3;
           cz += cv.verts[tr.v[k]].z / 3;
         }
-        groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell), tr.draw_key}].push_back(t);
+        // (AI-assisted) v15: with the draw key and vertices from before the atlas (welded by
+        // position below: the atlas copies' shifted texture coordinates would mix)
+        groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell),
+                tr.orig_key == UINT32_MAX ? tr.draw_key : tr.orig_key}]
+            .push_back(t);
       }
       for (auto& [gk, ids] : groups) {
         vista_src_tris += ids.size();
@@ -1986,7 +3377,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         };
         for (u32 t : ids) {
           for (int k = 0; k < 3; k++) {
-            const u32 vi = cv.tris[t].v[k];
+            u32 vi = cv.tris[t].v[k];
+            if (cv.verts[vi].orig != UINT32_MAX) {
+              vi = cv.verts[vi].orig;  // (AI-assisted) not the atlas copy
+            }
             const auto& v = cv.verts[vi];
             auto [it, fresh] = weld.emplace(key_of(v), (u32)rep_src.size());
             if (fresh) {
@@ -2029,7 +3423,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         std::unordered_map<u32, u32> made, made_flat;
         // (AI-assisted) vista_flat: the copies' draw key (untextured, the draw mode without its
         // texture parts: clamp, filter, tcc, alpha test) and color
-        const DrawKey src_key = cv.draw_keys[cv.tris[ids[0]].draw_key];
+        const u32 src_key_id = cv.tris[ids[0]].orig_key == UINT32_MAX ? cv.tris[ids[0]].draw_key
+                                                                         : cv.tris[ids[0]].orig_key;
+        const DrawKey src_key = cv.draw_keys[src_key_id];
         constexpr u32 kTextureModeBits = 0x00E7FFE0;  // bits 5-18, 21-23
         const u32 flat_key =
             opt.vista_flat
@@ -2040,6 +3436,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             opt.vista_flat ? avg_color(src_key.texture) : std::array<float, 3>{128.f, 128.f, 128.f};
         for (size_t i = 0; i + 2 < out_idx.size(); i += 3) {
           SrcTri nt = cv.tris[ids[0]];
+          nt.draw_key = src_key_id;  // (AI-assisted) not the atlas's
+          nt.orig_key = UINT32_MAX;
+          nt.lod = c3l::kRunLodAlways;  // (AI-assisted) v17: one version
+          nt.lod_group = UINT32_MAX;
           for (int k = 0; k < 3; k++) {
             const u32 r = out_idx[i + k];
             auto [it, fresh] = made.emplace(r, (u32)cv.verts.size());
@@ -2069,6 +3469,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                 for (int c = 0; c < 3; c++) {
                   v.rgba[c] = (u8)std::clamp((int)std::lround(v.rgba[c] * flat_rgb[c] / 128.f), 0,
                                              255);
+                }
+                {
+                  // (AI-assisted) v16: the time of day color times the texture's color
+                  u8 mul[3];
+                  for (int c = 0; c < 3; c++) {
+                    mul[c] = (u8)std::clamp((int)std::lround(flat_rgb[c]), 0, 255);
+                  }
+                  v.tod = cv.tod_mul(v.tod, mul);
                 }
                 cv.verts.push_back(v);
                 vista_vertex.resize(cv.verts.size(), 0);
@@ -2210,9 +3618,130 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::Draw> out_draws;
   // (AI-assisted) visibility runs of all chunks (c3l::VisRun), and each chunk's first one
   std::vector<c3l::VisRun> out_runs;
+  std::vector<c3l::RunLod> out_run_lods;  // (AI-assisted) v17: one per out_runs
+  size_t lod_runs = 0, lod_chunks = 0;
   std::vector<u32> chunk_first_run;
+  std::vector<u8> chunk_stream_cls;  // (AI-assisted, streaming) v19: per chunk, 0 or its class
   size_t vis_tris = 0;
   VcacheStats vc_before, vc_after;
+  // (AI-assisted) v18 (Options::vis_vertex_groups): the chunk's vertices by visibility id of its
+  // runs: each id's vertices one range of their own, the ids in order of their first run, first
+  // use inside; a vertex of several ids copied for each but the first. Kept as it was when the
+  // copies would pass 65536 vertices.
+  size_t vg_chunks = 0, vg_copies = 0, vg_skipped = 0;
+  auto group_vertices_by_vis = [&](c3l::Chunk& ch, const std::vector<c3l::VisRun>& runs) {
+    const u32 nv = ch.vertex_count;
+    // the index position of each run, in run order (runs are in draw order)
+    std::vector<u32> run_idx(runs.size());
+    {
+      u32 ri = 0;
+      for (u32 k = 0; k < ch.draw_count; k++) {
+        u32 idx = out_draws[ch.first_draw + k].first_index;
+        for (; ri < runs.size() && runs[ri].draw == k; ri++) {
+          run_idx[ri] = idx;
+          idx += runs[ri].index_count;
+        }
+      }
+      if (ri != runs.size()) {
+        vg_skipped++;
+        return;
+      }
+    }
+    // ids in order of their first run
+    std::vector<u16> ids;
+    std::unordered_map<u16, u32> id_slot;
+    for (const auto& r : runs) {
+      if (id_slot.emplace(r.vis, (u32)ids.size()).second) {
+        ids.push_back(r.vis);
+      }
+    }
+    if (ids.size() < 2) {
+      return;
+    }
+    // owner id of each vertex (its first id); copies for the others
+    std::vector<u32> owner(nv, UINT32_MAX);
+    std::map<std::pair<u32, u32>, u32> copy;  // (vertex, id slot) -> new vertex
+    std::vector<c3l::Vertex> extra;
+    std::vector<u32> extra_slot;
+    for (size_t r = 0; r < runs.size(); r++) {
+      const u32 slot = id_slot[runs[r].vis];
+      for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+        const u32 v = out_indices[i];
+        if (v >= nv) {
+          continue;  // (a copy made for this id already)
+        }
+        if (owner[v] == UINT32_MAX) {
+          owner[v] = slot;
+        }
+      }
+    }
+    for (size_t r = 0; r < runs.size(); r++) {
+      const u32 slot = id_slot[runs[r].vis];
+      for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+        const u32 v = out_indices[i];
+        if (owner[v] == slot) {
+          continue;
+        }
+        auto [it, fresh] = copy.emplace(std::make_pair(v, slot), nv + (u32)extra.size());
+        if (fresh) {
+          extra.push_back(out_verts[ch.first_vertex + v]);
+          extra_slot.push_back(slot);
+        }
+      }
+    }
+    if (nv + extra.size() > 65536) {
+      vg_skipped++;
+      return;
+    }
+    // the indices onto the copies
+    for (size_t r = 0; r < runs.size(); r++) {
+      const u32 slot = id_slot[runs[r].vis];
+      for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+        const u32 v = out_indices[i];
+        if (owner[v] != slot) {
+          out_indices[i] = (u16)copy.at({v, slot});
+        }
+      }
+    }
+    // the new order: per id slot, its vertices in first use order
+    const u32 total = nv + (u32)extra.size();
+    std::vector<u32> remap(total, UINT32_MAX);
+    u32 next = 0;
+    for (u32 slot = 0; slot < ids.size(); slot++) {
+      for (size_t r = 0; r < runs.size(); r++) {
+        if (id_slot[runs[r].vis] != slot) {
+          continue;
+        }
+        for (u32 i = run_idx[r]; i < run_idx[r] + runs[r].index_count; i++) {
+          const u32 v = out_indices[i];
+          if (remap[v] == UINT32_MAX) {
+            remap[v] = next++;
+          }
+        }
+      }
+    }
+    for (u32 v = 0; v < total; v++) {
+      if (remap[v] == UINT32_MAX) {
+        remap[v] = next++;  // (unused vertices: never)
+      }
+    }
+    std::vector<c3l::Vertex> moved(total);
+    for (u32 v = 0; v < total; v++) {
+      moved[remap[v]] = v < nv ? out_verts[ch.first_vertex + v] : extra[v - nv];
+    }
+    out_verts.resize(ch.first_vertex);
+    out_verts.insert(out_verts.end(), moved.begin(), moved.end());
+    const u32 i0 = out_draws[ch.first_draw].first_index;
+    const u32 i1 = out_draws[ch.first_draw + ch.draw_count - 1].first_index +
+                   out_draws[ch.first_draw + ch.draw_count - 1].index_count;
+    for (u32 i = i0; i < i1; i++) {
+      out_indices[i] = (u16)remap[out_indices[i]];
+    }
+    ch.vertex_count = total;
+    vg_chunks++;
+    vg_copies += extra.size();
+  };
+  size_t vc_kept_pairs = 0;  // (AI-assisted) coplanar overlaps kept in order by vcache_order
   size_t welded_verts = 0;
 
   for (const auto& cp : plans) {
@@ -2224,9 +3753,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       c3l::Chunk ch{};
       const int detail = std::get<0>(key) % 4;
       ch.lod_tier = std::get<0>(key) / 4 % 16;
-      const int sclass = std::get<0>(key) / 64;  // (AI-assisted)
-      const float cell =
-          ch.lod_tier == c3l::kVistaTier ? opt.vista_cell * 4096.f : cell_of_detail(detail);
+      const int sclass = std::get<0>(key) / 64 % 16;  // (AI-assisted)
+      // (AI-assisted, streaming) v19 near chunk: its class (core / extra), need class
+      const int stream_cls = std::get<0>(key) / 1024 % 3;
+      const int need_cls = std::get<0>(key) / 1024 / 3;
+      const float cell = ch.lod_tier == c3l::kVistaTier ? opt.vista_cell * 4096.f
+                         : stream_cls ? stream_class_cell(opt, need_cls) * 4096.f
+                                      : cell_of_detail(detail);
       ch.lod_center[0] = (std::get<1>(key) + 0.5f) * cell;
       ch.lod_center[1] = (std::get<2>(key) + 0.5f) * cell;
       ch.lod_center[2] = (std::get<3>(key) + 0.5f) * cell;
@@ -2295,13 +3828,20 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         o.st[0] = (s16)std::clamp((int)std::lround(v.s * 1024.f), -32768, 32767);
         o.st[1] = (s16)std::clamp((int)std::lround(v.t * 1024.f), -32768, 32767);
+        if (v.orig != UINT32_MAX) {
+          // (AI-assisted) an atlas copy: the atlas texture coordinates (c3l::kDrawAtlasUV)
+          o.st[0] = v.ast[0];
+          o.st[1] = v.ast[1];
+        }
         memcpy(o.rgba, v.rgba, 4);
+        o.pad = (s16)cv.tod_pad(v.tod);  // (AI-assisted) v16: the time of day color
         out_verts.push_back(o);
       }
       ch.first_draw = out_draws.size();
       u32 cur_key = UINT32_MAX;
       std::vector<c3l::VisRun> runs;
-      bool any_vis = false;
+      std::vector<c3l::RunLod> run_lods;  // (AI-assisted) v17
+      bool any_vis = false, any_lod = false;
       for (size_t i = 0; i < cp.tris.size(); i++) {
         const auto& t = cv.tris[cp.tris[i]];
         const bool new_draw = t.draw_key != cur_key;
@@ -2320,14 +3860,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           out_indices.push_back(local.at(t.v[k]));
         }
         out_draws.back().index_count += 3;
-        if (new_draw || runs.back().vis != t.vis) {
+        // (AI-assisted) v17: a run per LOD group version too (run_lods: c3l::RunLod)
+        const u16 lg = t.lod ? (u16)t.lod_group : (u16)0xffff;
+        if (new_draw || runs.back().vis != t.vis || run_lods.back().group != lg ||
+            run_lods.back().lod != t.lod) {
           runs.push_back(c3l::VisRun{(u16)(out_draws.size() - 1 - ch.first_draw), t.vis, 0});
+          run_lods.push_back(c3l::RunLod{lg, t.lod, 0});
         }
         runs.back().index_count += 3;
         if (t.vis != 0xffff) {
           any_vis = true;
           vis_tris++;
         }
+        any_lod |= t.lod != c3l::kRunLodAlways;
       }
       ch.draw_count = out_draws.size() - ch.first_draw;
       // (AI-assisted) vertex cache order (meshoptimizer). Only inside a visibility run (the runs
@@ -2372,10 +3917,75 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           u32 idx = d.first_index;
           for (; ri < runs.size() && runs[ri].draw == di - ch.first_draw; ri++) {
             const u32 n = runs[ri].index_count;
-            if (any_order && opt.vcache) {
+            if (any_order && opt.vcache && opt.vcache_fifo == 0) {
               std::vector<unsigned int> in(&out_indices[idx], &out_indices[idx] + n), o(n);
               meshopt_optimizeVertexCache(o.data(), in.data(), n, nv);
               std::copy(o.begin(), o.end(), &out_indices[idx]);
+            } else if (any_order && opt.vcache && n > 3) {
+              // (AI-assisted) v15: for a FIFO cache; triangles that lie on top of each other in one
+              // plane keep their order (with the depth test's GEQUAL the later one wins)
+              std::vector<u32> in(&out_indices[idx], &out_indices[idx] + n);
+              std::vector<c3l_opt::Tri> wt(n / 3);
+              for (u32 t = 0; t < n / 3; t++) {
+                for (int k = 0; k < 3; k++) {
+                  const auto& v = out_verts[ch.first_vertex + in[3 * t + k]];
+                  for (int c = 0; c < 3; c++) {
+                    wt[t][k][c] = ch.origin[c] + v.pos[c] * ch.scale;
+                  }
+                }
+              }
+              const auto pairs = c3l_opt::coplanar_pairs(wt, {}, c3l_opt::CoplanarOptions{});
+              std::vector<std::vector<u32>> before;
+              if (!pairs.empty()) {
+                before.resize(n / 3);
+                for (auto [a, b] : pairs) {
+                  before[b].push_back(a);
+                }
+                vc_kept_pairs += pairs.size();
+              }
+              std::vector<u32> best;
+              if (opt.vcache_fifo > 0) {
+                const auto order = c3l_opt::vcache_order(in, nv, opt.vcache_fifo, before);
+                best.resize(n);
+                for (u32 t = 0; t < n / 3; t++) {
+                  for (int k = 0; k < 3; k++) {
+                    best[3 * t + k] = in[3 * order[t] + k];
+                  }
+                }
+              } else {
+                auto cost = [](const std::vector<u32>& v) {
+                  return c3l_opt::fifo_misses(v.data(), v.size(), 4) +
+                         c3l_opt::fifo_misses(v.data(), v.size(), 8) +
+                         c3l_opt::fifo_misses(v.data(), v.size(), 16);
+                };
+                u64 best_cost = UINT64_MAX;
+                for (int fifo : {4, 12}) {
+                  const auto order = c3l_opt::vcache_order(in, nv, fifo, before);
+                  std::vector<u32> o(n);
+                  for (u32 t = 0; t < n / 3; t++) {
+                    for (int k = 0; k < 3; k++) {
+                      o[3 * t + k] = in[3 * order[t] + k];
+                    }
+                  }
+                  const u64 c = cost(o);
+                  if (c < best_cost) {
+                    best_cost = c;
+                    best = std::move(o);
+                  }
+                }
+                if (pairs.empty()) {
+                  std::vector<u32> o(n);
+                  meshopt_optimizeVertexCache(o.data(), in.data(), n, nv);
+                  const u64 c = cost(o);
+                  if (c < best_cost) {
+                    best_cost = c;
+                    best = std::move(o);
+                  }
+                }
+              }
+              for (u32 i = 0; i < n; i++) {
+                out_indices[idx + i] = (u16)best[i];
+              }
             }
             idx += n;
           }
@@ -2399,15 +4009,187 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             out_indices[i] = (u16)remap[out_indices[i]];
           }
         }
+        // (AI-assisted) v18: the vertices of each visibility id together (ids in order of their
+        // first run, first use inside), a vertex used by several ids copied for each: the runtime
+        // rewrites the time of day colors of the drawn runs' ids only (CtrLevel.cpp tod_recolor)
+        if (opt.vis_vertex_groups && runs.size() > 1) {
+          group_vertices_by_vis(ch, runs);
+        }
       }
-      // the runs only if some can be hidden (the offset is made absolute at write)
-      chunk_first_run.push_back(any_vis ? (u32)out_runs.size() : 0);
-      ch.vis_run_count = any_vis ? (u32)runs.size() : 0;
-      if (any_vis) {
+      // the runs only if some can be hidden (the offset is made absolute at write); (AI-assisted)
+      // v17: or there are levels of detail
+      const bool keep_runs = any_vis || any_lod;
+      chunk_first_run.push_back(keep_runs ? (u32)out_runs.size() : 0);
+      ch.vis_run_count = keep_runs ? (u32)runs.size() : 0;
+      if (keep_runs) {
         out_runs.insert(out_runs.end(), runs.begin(), runs.end());
+        out_run_lods.insert(out_run_lods.end(), run_lods.begin(), run_lods.end());
+        lod_runs += any_lod ? runs.size() : 0;
+        lod_chunks += any_lod;
       }
       chunks.push_back(ch);
+      chunk_stream_cls.push_back((u8)stream_cls);
     }
+  }
+  // (AI-assisted, streaming) v19: what the runtime worked out from a chunk's vertices at load and
+  // can't for a near chunk that isn't there yet: each draw's kDrawAlpha80 (fog_alpha: every vertex
+  // the draw uses has alpha 0x80, as CtrLevels::load_file), each run's bounding sphere (as
+  // make_run_spheres), and the near chunk table (c3l::StreamChunk)
+  std::vector<c3l::RunSphere> run_spheres;
+  std::vector<c3l::StreamChunk> stream_chunks;
+  struct StreamStats {
+    size_t chunks[3] = {0, 0, 0};
+    u64 bytes[3] = {0, 0, 0};  // vertex + index data
+    u64 tris[3] = {0, 0, 0};
+    u64 other_bytes = 0;  // every other chunk's
+  } sst;
+  if (opt.stream) {
+    run_spheres.assign(out_runs.size(), c3l::RunSphere{{0, 0, 0}, 0xffff});
+    for (size_t ci = 0; ci < chunks.size(); ci++) {
+      const auto& ch = chunks[ci];
+      bool all = true;
+      for (u32 v = 0; v < ch.vertex_count && all; v++) {
+        all = out_verts[ch.first_vertex + v].rgba[3] == 0x80;
+      }
+      u32 i_lo = UINT32_MAX, i_hi = 0;
+      for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+        auto& dr = out_draws[d];
+        i_lo = std::min(i_lo, dr.first_index);
+        i_hi = std::max(i_hi, dr.first_index + dr.index_count);
+        bool ok = all;
+        if (!ok) {
+          ok = true;
+          for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
+            const u16 ix = out_indices[i];
+            ok = ix < ch.vertex_count && out_verts[ch.first_vertex + ix].rgba[3] == 0x80;
+          }
+        }
+        if (ok) {
+          dr.kind |= c3l::kDrawAlpha80;
+        }
+      }
+      const u64 bytes = (u64)ch.vertex_count * sizeof(c3l::Vertex) +
+                        (i_hi > i_lo ? (u64)(i_hi - i_lo) * 2 : 0);
+      const u8 cls = chunk_stream_cls[ci];
+      if (cls) {
+        sst.chunks[cls]++;
+        sst.bytes[cls] += bytes;
+        sst.tris[cls] += i_hi > i_lo ? (i_hi - i_lo) / 3 : 0;
+      } else {
+        sst.other_bytes += bytes;
+      }
+      if (!ch.vis_run_count) {
+        continue;
+      }
+      // the runs' spheres (runs are in draw order, each draw's from its first index on)
+      const u32 r0 = chunk_first_run[ci];
+      u32 idx = 0, last_draw = UINT32_MAX;
+      float need_a = 0, need_e = 0;
+      for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
+        const auto& run = out_runs[r];
+        if (run.draw != last_draw) {
+          last_draw = run.draw;
+          idx = out_draws[ch.first_draw + run.draw].first_index;
+        }
+        const u32 n = run.index_count;
+        int mn[3] = {32767, 32767, 32767}, mx[3] = {-32768, -32768, -32768};
+        bool ok = n > 0 && idx >= i_lo && idx + n <= i_hi;
+        for (u32 i = idx; ok && i < idx + n; i++) {
+          const u16 v = out_indices[i];
+          ok = v < ch.vertex_count;
+          for (int c = 0; ok && c < 3; c++) {
+            mn[c] = std::min<int>(mn[c], out_verts[ch.first_vertex + v].pos[c]);
+            mx[c] = std::max<int>(mx[c], out_verts[ch.first_vertex + v].pos[c]);
+          }
+        }
+        idx += n;
+        if (ok) {
+          auto& sp = run_spheres[r];
+          float d2 = 0;
+          for (int c = 0; c < 3; c++) {
+            sp.c[c] = (s16)((mn[c] + mx[c]) >> 1);
+            const float h = (float)std::max(sp.c[c] - mn[c], mx[c] - sp.c[c]);
+            d2 += h * h;
+          }
+          sp.r = (u16)std::min(65534.f, std::ceil(std::sqrt(d2)) + 1.f);
+        }
+        // a near chunk's groups: where it is needed
+        const auto& rl = out_run_lods[r];
+        if (cls && rl.lod == c3l::kRunLodNear && rl.group < cv.lod_groups.size()) {
+          const auto& g = cv.lod_groups[rl.group];
+          float dd = 0;
+          for (int c = 0; c < 3; c++) {
+            dd += (g.bsphere[c] - ch.bsphere[c]) * (g.bsphere[c] - ch.bsphere[c]);
+          }
+          need_a = std::max(need_a, std::sqrt(dd) + g.bsphere[3]);
+          need_e = std::max(need_e, rl.group < cv.lod_group_error.size()
+                                        ? cv.lod_group_error[rl.group]
+                                        : g.dist);
+        }
+      }
+      if (cls) {
+        stream_chunks.push_back(c3l::StreamChunk{(u32)ci, cls, 0, need_a, need_e});
+      }
+    }
+  }
+  // (AI-assisted, streaming) the near chunk data needed at once (the runtime's rule: a group's
+  // near version within error x kNeedK + its radius of its center; kNeedK: gameplay focal 256 /
+  // tie_lod_px 4 x 1.1), the camera at each group's center (a rough sample of where it goes)
+  if (opt.stream && !stream_chunks.empty()) {
+    constexpr float kNeedK = kStreamNeedK;
+    struct UG {
+      u64 bytes;
+      std::vector<u32> groups;
+    };
+    std::vector<UG> ug;
+    for (const auto& sc : stream_chunks) {
+      const auto& ch = chunks[sc.chunk];
+      UG u;
+      u32 lo = UINT32_MAX, hi = 0;
+      for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+        lo = std::min(lo, out_draws[d].first_index);
+        hi = std::max(hi, out_draws[d].first_index + out_draws[d].index_count);
+      }
+      u.bytes = (u64)ch.vertex_count * 16 + (hi > lo ? (u64)(hi - lo) * 2 : 0);
+      for (u32 r = chunk_first_run[sc.chunk]; r < chunk_first_run[sc.chunk] + ch.vis_run_count; r++) {
+        if (out_run_lods[r].lod == c3l::kRunLodNear) {
+          u.groups.push_back(out_run_lods[r].group);
+        }
+      }
+      std::sort(u.groups.begin(), u.groups.end());
+      u.groups.erase(std::unique(u.groups.begin(), u.groups.end()), u.groups.end());
+      ug.push_back(std::move(u));
+    }
+    std::vector<float> lim(cv.lod_groups.size());
+    for (size_t g = 0; g < cv.lod_groups.size(); g++) {
+      lim[g] = (g < cv.lod_group_error.size() ? cv.lod_group_error[g] : cv.lod_groups[g].dist) *
+                   kNeedK +
+               cv.lod_groups[g].bsphere[3];
+    }
+    u64 mx = 0;
+    double sum = 0;
+    const size_t step = std::max<size_t>(1, cv.lod_groups.size() / 2000);
+    size_t samples = 0;
+    for (size_t sgi = 0; sgi < cv.lod_groups.size(); sgi += step) {
+      const float* cam = cv.lod_groups[sgi].bsphere;
+      u64 need = 0;
+      for (const auto& u : ug) {
+        for (u32 g : u.groups) {
+          const float* c = cv.lod_groups[g].bsphere;
+          const float dx = c[0] - cam[0], dy = c[1] - cam[1], dz = c[2] - cam[2];
+          if (dx * dx + dy * dy + dz * dz < lim[g] * lim[g]) {
+            need += u.bytes;
+            break;
+          }
+        }
+      }
+      mx = std::max(mx, need);
+      sum += need;
+      samples++;
+    }
+    lg::info("{}: streaming: near chunk data needed at once, the camera at the groups' centers: "
+             "{:.0f} KB on average, at most {} KB",
+             level.level_name, sum / std::max<size_t>(1, samples) / 1024, mx / 1024);
   }
   if (qs.shared_mismatch) {
     lg::error("{}: {} positions in several chunks reconstruct differently", in.stem().string(),
@@ -2415,22 +4197,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     return false;
   }
 
-  // ---- textures (in parallel: ETC1 encoding is slow) ----
-  std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
-  std::vector<std::vector<u8>> tex_datas(cv.tex_order.size());
-  std::vector<double> tex_psnr(cv.tex_order.size(), 99.0);
-  std::vector<MercGate> tex_gate(cv.tex_order.size());
-  {
-    BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
-    pool.push_loop(cv.tex_order.size(), [&](size_t a, size_t b) {
-      for (size_t i = a; i < b; i++) {
-        tex_descs[i] = c3l::Texture{};
-        tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
-                                       &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
-      }
-    });
-    pool.wait_for_tasks();
-  }
   // (AI-assisted) textures made smaller than their original (max_tex): a blurry detail shows here
   for (size_t i = 0; i < cv.tex_order.size(); i++) {
     const auto& t = level.textures.at(cv.tex_order[i]);
@@ -2488,17 +4254,45 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
 
+  // (AI-assisted) v15: textures that went into atlases and nothing draws any more (the vista tier
+  // and merc models keep theirs): no texels (the runtime makes no texture of them)
+  size_t atlas_dropped = 0;
+  u64 atlas_dropped_bytes = 0;
+  if (!dstats.atlased.empty()) {
+    std::vector<u8> drawn(tex_descs.size(), 0);
+    for (const auto& d : out_draws) {
+      if (d.texture < drawn.size()) {
+        drawn[d.texture] = 1;
+      }
+    }
+    for (const auto& d : merc.draws) {
+      if (d.texture < drawn.size()) {
+        drawn[d.texture] = 1;
+      }
+    }
+    for (u16 t : dstats.atlased) {
+      if (!drawn[t]) {
+        atlas_dropped++;
+        atlas_dropped_bytes += tex_datas[t].size();
+        tex_datas[t].clear();
+      }
+    }
+  }
   // ---- write ----
   std::vector<u8> buf(sizeof(c3l::Header));
   c3l::Header hdr{};
   memcpy(hdr.magic, c3l::kMagic, 4);
   // (AI-assisted) --shrub-one-dist: v13 (the shrub chunks don't carry PS2 distances)
-  hdr.version = opt.shrub_ps2_dist ? c3l::kVersion : c3l::kShrubPs2DistVersion - 1;
+  // (AI-assisted, streaming) --no-stream: v18
+  hdr.version = !opt.shrub_ps2_dist ? c3l::kShrubPs2DistVersion - 1
+                : opt.stream        ? c3l::kVersion
+                                    : c3l::kStreamVersion - 1;
   strncpy(hdr.level_name, level.level_name.c_str(), sizeof(hdr.level_name) - 1);
   hdr.num_chunks = chunks.size();
   // (AI-assisted) the visibility runs first: the chunks point at them
+  u32 runs_offset = 0;
   {
-    const u32 runs_offset = out_runs.empty() ? 0 : append(buf, out_runs.data(), out_runs.size());
+    runs_offset = out_runs.empty() ? 0 : append(buf, out_runs.data(), out_runs.size());
     for (size_t i = 0; i < chunks.size(); i++) {
       chunks[i].vis_runs_offset =
           chunks[i].vis_run_count ? runs_offset + chunk_first_run[i] * (u32)sizeof(c3l::VisRun)
@@ -2506,6 +4300,43 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
   hdr.chunks_offset = append(buf, chunks.data(), chunks.size());
+  // (AI-assisted) v16: the time of day table
+  if (!cv.tod_colors.empty() && cv.tod_colors.size() + cv.tod_muls.size() < 0xffff) {
+    hdr.tod_color_count = cv.tod_colors.size();
+    hdr.tod_mul_count = cv.tod_muls.size();
+    hdr.tod_offset = append(buf, cv.tod_colors.data(), cv.tod_colors.size());
+    buf.insert(buf.end(), (const u8*)cv.tod_muls.data(),
+               (const u8*)(cv.tod_muls.data() + cv.tod_muls.size()));
+    align16(buf);
+  }
+  // (AI-assisted) v17: tie levels of detail (c3l::ExtHeader)
+  // (AI-assisted, streaming) v19: always with runs (the run spheres), 48 bytes; v18: 32
+  if ((!cv.lod_groups.empty() || opt.stream) && !out_runs.empty() &&
+      out_run_lods.size() == out_runs.size()) {
+    c3l::ExtHeader eh{};
+    memcpy(eh.magic, c3l::kExtMagic, 4);
+    const u32 eh_size = opt.stream ? (u32)sizeof(eh) : c3l::kExtHeaderV17Size;
+    eh.size = eh_size;
+    align16(buf);
+    hdr.ext_offset = (u32)buf.size();
+    buf.insert(buf.end(), (const u8*)&eh, (const u8*)&eh + eh_size);
+    eh.lod_group_count = cv.lod_groups.size();
+    eh.lod_groups_offset =
+        cv.lod_groups.empty() ? 0 : append(buf, cv.lod_groups.data(), cv.lod_groups.size());
+    eh.run_lod_count = out_run_lods.size();
+    eh.run_lod_offset = append(buf, out_run_lods.data(), out_run_lods.size());
+    eh.runs_offset = runs_offset;
+    if (!cv.lod_groups.empty() && cv.lod_group_error.size() == cv.lod_groups.size()) {
+      eh.lod_error_offset = append(buf, cv.lod_group_error.data(), cv.lod_group_error.size());
+    }
+    if (opt.stream) {
+      eh.run_sphere_offset = append(buf, run_spheres.data(), run_spheres.size());
+      eh.stream_count = stream_chunks.size();
+      eh.stream_offset =
+          stream_chunks.empty() ? 0 : append(buf, stream_chunks.data(), stream_chunks.size());
+    }
+    memcpy(buf.data() + hdr.ext_offset, &eh, eh_size);
+  }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
   hdr.vertex_data_size = out_verts.size() * sizeof(c3l::Vertex);
   hdr.index_data_offset = append(buf, out_indices.data(), out_indices.size());
@@ -2580,6 +4411,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         {hdr.merc_draw_offset, "merc draws"},
         {hdr.texture_data_offset, "textures"},
         {hdr.textures_offset, "texture table"}};
+    if (hdr.tod_offset) {
+      starts.push_back({hdr.tod_offset, "time of day"});  // (AI-assisted) v16
+    }
+    if (hdr.ext_offset) {
+      starts.push_back({hdr.ext_offset, "tie lod"});  // (AI-assisted) v17
+    }
     if (!out_runs.empty()) {
       starts.push_back({(u32)sizeof(c3l::Header), "vis runs"});
     }
@@ -2657,6 +4494,50 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tex_descs.size(), hdr.texture_data_size / 1024, merc.models.size(), merc.verts.size(),
       merc.indices.size() / 3, merc.draws.size(), merc.envmap_draws, file.size() / 1024, cv.wind_tris, cv.small_tris,
       far_tris, far_source);
+  if (lstats.groups) {
+    // (AI-assisted) v17 tie levels of detail
+    lg::info("{}: tie levels of detail: {} of {} instance groups ({} candidates, {} without a PS2 "
+             "distance) have a near version (geo {}): {} near + {} far tris (all groups: {} near, {} "
+             "far), estimated +{:.0f} KB (budget {}; all candidates {:.0f} KB); {} LOD runs "
+             "in {} chunks; {} near / {} far tris added; {:.0f} ms",
+             level.level_name, lstats.selected, lstats.groups, lstats.candidates, lstats.no_dist,
+             opt.tie_near_geo, lstats.sel_near_tris, lstats.sel_far_tris, lstats.near_tris,
+             lstats.far_tris, lstats.cost_kb,
+             lstats.budget_kb >= 1e11 ? std::string("all groups") : fmt::format("{:.0f} KB", lstats.budget_kb),
+             lstats.cost_all_kb, lod_runs,
+             lod_chunks, cv.lod_tris[0], cv.lod_tris[1], lstats.ms);
+    std::vector<std::pair<std::string, TieLodStats::Proto>> left(lstats.protos.begin(),
+                                                                 lstats.protos.end());
+    std::sort(left.begin(), left.end(),
+              [](const auto& a, const auto& b) { return a.second.left_tris > b.second.left_tris; });
+    std::string l;
+    for (size_t i = 0; i < left.size() && i < 12 && left[i].second.left_tris; i++) {
+      l += fmt::format("{}{} ({} of {} groups coarse, {} tris, error up to {:.2f} m)",
+                       i ? ", " : "", left[i].first,
+                       left[i].second.candidates - left[i].second.selected,
+                       left[i].second.candidates, left[i].second.left_tris,
+                       left[i].second.worst_left);
+    }
+    lg::info("{}: tie levels of detail: {} (over budget): {}", level.level_name,
+             opt.stream ? "streamed only, not in the budget's core set" : "left coarse",
+             l.empty() ? "none" : l);
+  }
+  if (opt.stream) {
+    // (AI-assisted, streaming) v19 near chunks
+    std::string cls;
+    for (size_t c = 0; c <= opt.stream_classes.size(); c++) {
+      cls += fmt::format("{}{}{:g} m", c ? ", " : "",
+                         c < opt.stream_classes.size() ? fmt::format("< {:g} m: ", opt.stream_classes[c])
+                                                       : std::string("beyond: "),
+                         stream_class_cell(opt, (int)c));
+    }
+    lg::info("{}: streaming (v19): {} near chunks (cells by need distance: {}): core {} ({} KB, {} "
+             "tris), extra {} ({} KB, {} tris); {} groups in the budget's core set of {}; other "
+             "chunks {} KB",
+             level.level_name, sst.chunks[1] + sst.chunks[2], cls, sst.chunks[1],
+             sst.bytes[1] / 1024, sst.tris[1], sst.chunks[2], sst.bytes[2] / 1024, sst.tris[2],
+             lstats.core, lstats.selected, sst.other_bytes / 1024);
+  }
   if (cv.shrub_tris && opt.shrub_ps2_dist) {
     // (AI-assisted) shrub triangles by distance class
     std::string cl;
@@ -2701,15 +4582,37 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              tstats.merc_etc1, opt.etc1_merc_psnr, opt.etc1_merc_block,
              tstats.merc_bytes_16 / 1024, tstats.merc_bytes / 1024);
   }
-  lg::info("{}: post-vertex cache: vertices shaded per triangle (FIFO 8 / 16) {:.3f} / {:.3f}{}",
+  lg::info("{}: post-vertex cache: vertices shaded per triangle (meshoptimizer's model 8 / 16) "
+           "{:.3f} / {:.3f}{}; FIFO 4 / 8 / 16 / 32: {}{}",
            level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
            vc_before.shaded16 / std::max<u64>(vc_before.tris, 1),
-           opt.vcache ? fmt::format(" -> {:.3f} / {:.3f} (meshoptimizer)",
+           opt.vcache ? fmt::format(" -> {:.3f} / {:.3f}",
                                     vc_after.shaded8 / std::max<u64>(vc_after.tris, 1),
                                     vc_after.shaded16 / std::max<u64>(vc_after.tris, 1))
+                      : "",
+           vc_before.fifo_line(),
+           opt.vcache ? fmt::format(" -> {} ({}; {} coplanar overlaps kept in order)",
+                                    vc_after.fifo_line(),
+                                    opt.vcache_fifo > 0
+                                        ? fmt::format("FIFO {} order", opt.vcache_fifo)
+                                    : opt.vcache_fifo < 0 ? std::string("best of FIFO 4 / 12 / meshoptimizer orders")
+                                        : std::string("meshoptimizer"),
+                                    vc_kept_pairs)
                       : "");
+  // (AI-assisted) v16
+  {
+    const size_t n = cv.tod_colors.size() + cv.tod_muls.size();
+    lg::info("{}: time of day: {} colors, {} multiplied ({} KB){}", level.level_name,
+             cv.tod_colors.size(), cv.tod_muls.size(),
+             (cv.tod_colors.size() * sizeof(c3l::TodColor) + cv.tod_muls.size() * sizeof(c3l::TodMul)) /
+                 1024,
+             n >= 0xffff ? " TOO MANY: left out (the baked palette only)" : "");
+  }
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
+    lg::info("{}: vertices by visibility id (v18): {} chunks, {} vertices copied, {} chunks kept "
+             "as they were",
+             level.level_name, vg_chunks, vg_copies, vg_skipped);
   }
   if (!plans.empty()) {
     // (AI-assisted) the quantizing grids against the old per-chunk bounding box steps
@@ -2783,6 +4686,30 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              "face culling ({} turned to face outward)",
              level.level_name, cv.orient_culled, cv.orient_tris, cv.orient_flipped);
   }
+  if (!opt.merc_only) {
+    // (AI-assisted) v15 draw optimisations
+    lg::info("{}: opaque alpha: {} draws ({} triangles) lose their alpha test, {} blended ones ({} "
+             "triangles) their blending (texture alpha 1.0 in every level, vertex alpha >= 0x80; "
+             "of {} alpha tested, {} blended such draws: {} kept for coplanar overlaps with other "
+             "draws of their texture); {} draws merged into others",
+             level.level_name, dstats.keys_at, dstats.tris_at, dstats.keys_blend, dstats.tris_blend,
+             dstats.at_candidates, dstats.blend_candidates, dstats.blocked_coplanar,
+             dstats.merged_keys);
+    lg::info("{}: atlases: {} of {} textures that fit ({} left out: coplanar overlaps with other "
+             "draws; {} also drawn by the vista tier or merc; {} too costly) in {} atlases ({} KB), {} "
+             "triangles, {} vertex copies; {} textures no longer "
+             "drawn ({} KB); gutters vs the textures' own edges: RMS {:.2f}, max {} (of {} texels), "
+             "cells exact: {}; coplanar overlaps of different draws: {} (of {})",
+             level.level_name, dstats.atlas_cells, dstats.atlas_textures_fit,
+             dstats.atlas_blocked_coplanar, dstats.atlas_elsewhere, dstats.atlas_costly,
+             dstats.atlases, dstats.atlas_bytes / 1024,
+             dstats.atlas_tris, dstats.atlas_verts, atlas_dropped, atlas_dropped_bytes / 1024,
+             dstats.ast.gutter_texels
+                 ? std::sqrt(dstats.ast.gutter_sq / (4.0 * dstats.ast.gutter_texels))
+                 : 0.0,
+             dstats.ast.gutter_max, dstats.ast.gutter_texels, dstats.ast.cells_exact ? "yes" : "NO",
+             dstats.cross_key_pairs, dstats.coplanar_pairs);
+  }
   lg::info("{}: visibility: {} of {} tris in {} runs (hidden when the game's visibility data says)",
            level.level_name, vis_tris, out_indices.size() / 3, out_runs.size());
   lg::debug("tie tris by instance radius (<2m, <4, <8, ... >=128m): {} {} {} {} {} {} {} {}",
@@ -2802,10 +4729,41 @@ int main(int argc, char** argv) {
   app.add_flag("--all", all, "convert every .fr3 in the input folder");
   app.add_option("--tfrag-geo", opt.tfrag_geo, "tfrag level of detail (0 = most detailed, 2)");
   app.add_option("--tie-geo", opt.tie_geo, "tie level of detail (0 = most detailed, 3)");
+  bool no_tie_lod = false;
+  app.add_flag("--no-tie-lod", no_tie_lod,
+               "(AI-assisted, v17) no near versions of ties: all at --tie-geo, as v16");
+  app.add_option("--tie-near-geo", opt.tie_near_geo,
+                 "(v17) geometry of the ties' near versions (0 = most detailed)");
+  app.add_option("--tie-lod-budget-kb", opt.tie_lod_budget_kb,
+                 "(v17) extra vertex and index data for near tie versions per level (KB; default: "
+                 "the level's planned budget, else all groups)");
+  app.add_option("--tie-lod-min-angle", opt.tie_lod_min_angle,
+                 "(v17) smallest shape error worth a near version (radians, at the larger of the "
+                 "group's radius and --tie-lod-view-m)");
+  app.add_option("--tie-lod-view-m", opt.tie_lod_view_m,
+                 "(v17) viewing distance for the shape error (meters)");
+  app.add_option("--tie-lod-default-m", opt.tie_lod_default_m,
+                 "(v17) near version distance of ties without a PS2 distance (wind; meters)");
+  bool no_stream = false;
+  app.add_flag("--no-stream", no_stream,
+               "(AI-assisted, v19) no near chunks for streaming: v18 files (near versions within "
+               "the level's budget, in the far versions' chunks)");
+  app.add_option("--stream-cell", opt.stream_cell,
+                 "(AI-assisted, v19) near chunk cell size (meters)");
+  app.add_option("--stream-classes", opt.stream_classes,
+                 "(AI-assisted, v19) near chunks per need class: the bounds (meters) of the "
+                 "distance a group's near version is needed within")
+      ->delimiter(',');
+  app.add_option("--stream-class-cells", opt.stream_class_cells,
+                 "(AI-assisted, v19) near chunk cell size per need class (meters)")
+      ->delimiter(',');
   app.add_option("--far-tfrag-geo", opt.far_tfrag_geo,
                  "tfrag level of detail for far away cells (-1: no far version)");
   app.add_option("--palette", opt.palette,
                  "time of day palette to bake (0-7; default: 0 for interiors, else 1)");
+  bool no_tod = false;
+  app.add_flag("--no-tod", no_tod,
+               "(v16) no time of day table: the vertex colors stay the baked palette");
   app.add_option("--max-tex", opt.max_tex, "maximum texture size (power of two, <= 1024)");
   app.add_option("--cell", opt.cell_meters, "chunk grid size in meters");
   app.add_option("--detail-radius", opt.detail_radius,
@@ -2858,9 +4816,29 @@ int main(int argc, char** argv) {
   app.add_option("--block-kb", block_kb, "largest compressed block (KB, raw)");
   bool no_vcache = false;
   app.add_flag("--no-vcache", no_vcache, "keep the triangle and vertex order (no meshoptimizer)");
+  bool no_vis_groups = false;
+  app.add_flag("--no-vis-vertex-groups", no_vis_groups,
+               "(AI-assisted, v18) keep the vertices in first use order (not grouped by visibility "
+               "id: the runtime then rewrites a chunk's time of day colors all at once)");
+  app.add_option("--vcache-fifo", opt.vcache_fifo,
+                 "(AI-assisted) triangle order for a FIFO post-vertex cache of N entries, coplanar "
+                 "overlaps kept in order (0: the v14 meshoptimizer order)");
+  bool no_atlas = false, no_opaque_alpha = false;
+  app.add_flag("--no-atlas", no_atlas, "(AI-assisted) no texture atlases (v15)");
+  app.add_option("--atlas-max", opt.atlas_max,
+                 "(AI-assisted) textures up to this size (texels per side) may go into atlases");
+  app.add_option("--atlas-kb-per-bind", opt.atlas_kb_per_bind,
+                 "(AI-assisted) make an atlas only if it adds at most this many KB per texture bind "
+                 "it saves");
+  app.add_flag("--no-opaque-alpha", no_opaque_alpha,
+               "(AI-assisted) keep alpha tests / blending that can't change a pixel (v15)");
   bool no_verify = false;
   app.add_flag("--no-verify", no_verify, "don't read the written files back to check them");
   bool no_tie_winding = false, no_vista = false;
+  bool tie_far_own_colors = false;  // (AI-assisted, lod-light)
+  app.add_flag("--tie-far-own-colors", tie_far_own_colors,
+               "(AI-assisted) tie far versions keep geometry 3's own vertex colors (the PS2's) instead "
+               "of their near version's (the PC's: the light on a surface doesn't change at the switch)");
   app.add_flag("--no-tie-winding", no_tie_winding,
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
@@ -2884,8 +4862,15 @@ int main(int argc, char** argv) {
   CLI11_PARSE(app, argc, argv);
   opt.verify = !no_verify;
   opt.vcache = !no_vcache;
+  opt.vis_vertex_groups = !no_vis_groups;
+  opt.atlas = !no_atlas;
+  opt.opaque_alpha = !no_opaque_alpha;
   opt.tie_winding = !no_tie_winding;
+  opt.tie_far_near_colors = !tie_far_own_colors;
+  opt.tie_lod = !no_tie_lod;
+  opt.stream = !no_stream;
   opt.vista = !no_vista;
+  opt.tod = !no_tod;
   opt.pack.threads = opt.threads;
   opt.pack.max_block = std::max<u32>(block_kb, 1) * 1024;
   opt.pack.min_block = std::min(opt.pack.min_block, opt.pack.max_block);

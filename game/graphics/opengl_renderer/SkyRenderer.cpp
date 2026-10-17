@@ -150,6 +150,14 @@ void SkyRenderer::render(DmaFollower& dma,
     return;
   }
 
+  if (dma.current_tag().qwc != 4) {
+    // (AI-assisted) the 3DS game's sky DMA (TARGET_3DS GOAL, run with the OpenGL renderer as a
+    // visual reference): skipped, not asserted on
+    while (dma.current_tag_offset() != render_state->next_bucket) {
+      dma.read_and_advance();
+    }
+    return;
+  }
   auto setup_packet = dma.read_and_advance();
   ASSERT(setup_packet.size_bytes == 16 * 4);
   m_direct_renderer.render_gif(setup_packet.data, setup_packet.size_bytes, render_state, prof);

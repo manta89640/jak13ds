@@ -63,6 +63,15 @@
   (auto-save-command 'save 0 0 *default-pool*)
   0)
 
+;; (AI-assisted) "progress N" in a pad script (game/sce/pad_script.h): open the progress menu at
+;; screen N, or switch the open menu to it, for pictures of screens a test can't otherwise reach
+(defun pad-script-progress ((screen int))
+  (cond
+    (*progress-process* (set! (-> *progress-process* 0 next-display-state) (the-as progress-screen screen)))
+    (else
+     (activate-progress *dproc* (the-as progress-screen screen))))
+  0)
+
 ;; (AI-assisted) pad scripts (game/sce/pad_script.h "teleport" / "jpos", tests of moving
 ;; platforms): the process-drawable of type tp whose joint (node-list index) is nearest to Jak.
 (define *pad-script-joint-type* (the-as type #f))
@@ -1969,7 +1978,12 @@
     (set! *PC-CELL-X-ADJUST* (pc-sprite-adjust-cell-x (-> *pc-settings* aspect-ratio)))
     (set! *PC-CELL-TEXT-X-ADJUST* (pc-sprite-adjust-cell-text-x (-> *pc-settings* aspect-ratio)))
     (set! *PC-BUZZER-TEXT-X-ADJUST* (pc-sprite-adjust-buzzer-text-x (-> *pc-settings* aspect-ratio)))
-    (set! *PC-OPTIONS-TEXT-X-ADJUST* (pc-sprite-adjust-options-text-x (-> *pc-settings* aspect-ratio))))
+    (set! *PC-OPTIONS-TEXT-X-ADJUST* (pc-sprite-adjust-options-text-x (-> *pc-settings* aspect-ratio)))
+    ;; og:preserve-this (AI-assisted) 3DS: the circle icon and its OPTIONS label further left, room
+    ;; for the label at the 3DS text size (font-h.gc pc-3ds-text-scale)
+    (#when TARGET_3DS
+      (-! *PC-CIRCLE-X-ADJUST* 14.0)
+      (-! *PC-OPTIONS-TEXT-X-ADJUST* 14.0)))
   (when (= video-mode 'pal)
     (set! (-> this icons 5 scale-y) (* 1.15 (-> this icons 5 scale-y)))
     (set! (-> this icons 4 scale-x) (* 1.05 (-> this icons 4 scale-x)))
@@ -1979,6 +1993,9 @@
   (none))
 
 (defmethod draw-progress ((this progress))
+  ;; og:preserve-this (AI-assisted) 3DS: the 3DS buttons for the PS2 icons (progress-draw.gc)
+  (#when TARGET_3DS
+    (pc-3ds-button-icons))
   (let ((f30-0 (+ -409.0 (-> this particles 2 init-pos x) (* 0.8 (the float (-> this left-x-offset)))))
         (s5-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 0 (-> this transition-offset))))
     (let ((f28-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 1.0 (-> this transition-percentage-invert))))
@@ -2116,6 +2133,35 @@
   0
   (none))
 
+;; og:preserve-this (AI-assisted) 3DS: the options menus without the PC's: no graphic options
+;; (window, resolution, display, V-sync, aspect ratio, MSAA, frame rate, the PS2 options: config.ini
+;; sets the 3DS renderer), no input options (keyboard, mouse, controller choice and binds: the 3DS's
+;; buttons; its camera options stay, straight from the game options) and no Discord. The menus share
+;; the PC menus' options (their value-to-modify included).
+(#when TARGET_3DS
+  (define *main-options-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (define *options-title-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (define *game-options-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (define *misc-options-3ds* (new 'static 'boxed-array :type game-option :length 16 :allocated-length 16))
+  (defun pc-3ds-options ((dst (array game-option)) (src (array game-option)))
+    "dst = src without the options the 3DS doesn't have (input options: its camera options)."
+    (let ((n 0))
+      (dotimes (i (min (-> src length) (-> dst allocated-length)))
+        (let ((o (-> src i)))
+          (case (-> o name)
+            (((text-id graphic-options) (text-id discord-rpc)) #f)
+            (((text-id input-options)) (set! (-> dst n) (-> *input-options* 0)) (+! n 1))
+            (else (set! (-> dst n) o) (+! n 1)))))
+      (set! (-> dst length) n))
+    dst)
+  (defun pc-3ds-options-menus ()
+    (set! (-> *options-remap* (progress-screen settings))
+          (pc-3ds-options *main-options-3ds* (-> *options-remap* (progress-screen settings))))
+    (set! (-> *options-remap* (progress-screen settings-title)) (pc-3ds-options *options-title-3ds* *options*))
+    (set! (-> *options-remap* (progress-screen game-settings)) (pc-3ds-options *game-options-3ds* *game-options-pc*))
+    (set! (-> *options-remap* (progress-screen misc-options)) (pc-3ds-options *misc-options-3ds* *misc-options*))
+    (none)))
+
 (defun init-game-options ((obj progress))
   "Set the options for all of the menus."
   ;; start off by making them all invalid
@@ -2188,6 +2234,8 @@
   (set! (-> *options-remap* (progress-screen speedrun-options)) *speedrun-options*)
   (set! (-> *options-remap* (progress-screen speedrun-il-options)) *speedrun-il-options*)
   (set! (-> *options-remap* (progress-screen speedrun-cat-ext-options)) *speedrun-cat-ext-options*)
+  (#when TARGET_3DS
+    (pc-3ds-options-menus))
   ;; set default params
   (set! (-> *progress-state* aspect-ratio-choice) (get-aspect-ratio))
   (set! (-> *progress-state* video-mode-choice) (get-video-mode))
@@ -3036,9 +3084,25 @@
   0
   (none))
 
+;; og:preserve-this (AI-assisted) 3DS: menu row spacing for the 3DS text size
+(#when TARGET_3DS
+  (defun pc-3ds-row-spacing ((center int) (spacing int) (scale float) (rows int))
+    "The spacing of rows of text drawn at scale (large font) around center: spacing times as much
+     as the 3DS text size enlarges the text, at most what keeps the rows between 12 and 212."
+    (let ((k (/ (pc-3ds-text-scale scale (font-flags large)) scale)))
+      (if (or (>= 1.0 k) (>= 1 rows))
+        spacing
+        (let ((room (the int (/ (* 2.0 (fmin (- (the float center) 12.0) (- 212.0 (the float center)))) (the float rows)))))
+          (max spacing (min (the int (+ 0.5 (* k (the float spacing)))) room)))))))
+
 (defmethod draw-options ((obj progress) (arg0 int) (arg1 int) (arg2 float))
   "common logic for drawing options menus."
   (let ((options (-> *options-remap* (-> obj display-state))))
+    ;; og:preserve-this (AI-assisted) 3DS: rows as much further apart as the text grows at the 3DS
+    ;; text size (font-h.gc pc-3ds-text-scale), as far as the rows stay on the screen
+    (#when TARGET_3DS
+      (when (and options (< 0 arg1) (< 0.0 arg2))
+        (set! arg1 (pc-3ds-row-spacing arg0 arg1 arg2 (min (length options) (1- PROGRESS_PC_PAGE_HEIGHT))))))
     (when options
       ;; this menu has options to draw omg
       (let* ((line-amt (if (> (length options) PROGRESS_PC_PAGE_HEIGHT) (1- PROGRESS_PC_PAGE_HEIGHT) (length options)))
@@ -3075,20 +3139,30 @@
            (set-color! font (font-color default))
            (set-origin! font (- 17 (-> obj left-x-offset)) 14)
            (set-scale! font (* 0.6 (-> obj transition-percentage-invert)))
+           ;; og:preserve-this (AI-assisted) 3DS: grows in to the 3DS text size (font-h.gc)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* (-> obj transition-percentage-invert)))
            (print-game-text (lookup-text! *common-text* (text-id select-level) #f)
                             font
                             #f
                             (the int (* 128.0 (-> obj transition-percentage-invert)))
-                            22))
+                            22)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* 1.0)))
           (((progress-screen flava-player))
            (set-color! font (font-color default))
            (set-origin! font (- 17 (-> obj left-x-offset)) 14)
            (set-scale! font (* 0.6 (-> obj transition-percentage-invert)))
+           ;; og:preserve-this (AI-assisted) 3DS: grows in to the 3DS text size (font-h.gc)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* (-> obj transition-percentage-invert)))
            (print-game-text (lookup-text! *common-text* (text-id select-flava) #f)
                             font
                             #f
                             (the int (* 128.0 (-> obj transition-percentage-invert)))
-                            22)))
+                            22)
+           (#when TARGET_3DS
+             (set! *pc-3ds-text-anim* 1.0))))
         (dotimes (index (length options))
           (let ((option-str (the string #f)) ;; the option text
                 (option-x 17)
@@ -3405,7 +3479,13 @@
                   (set! (-> font origin x) (the float (- option-x (-> obj left-x-offset))))
                   (set! (-> font origin y) (the float (the int (* (the float option-y) (if (-> options index scale) f0-23 1.0)))))
                   (set-scale! font (* arg2 f0-23 scroll-amt))
-                  (print-game-text option-str font #f (the int (* 128.0 f0-23 scroll-amt)) 22)))
+                  ;; og:preserve-this (AI-assisted) 3DS: the rows grow in (and scroll in) to the 3DS
+                  ;; text size at rest (font-h.gc pc-3ds-text-scale)
+                  (#when TARGET_3DS
+                    (set! *pc-3ds-text-anim* (* f0-23 scroll-amt)))
+                  (print-game-text option-str font #f (the int (* 128.0 f0-23 scroll-amt)) 22)
+                  (#when TARGET_3DS
+                    (set! *pc-3ds-text-anim* 1.0))))
               (+! y-off arg1)
               (+! option-count 1)))))))
   0
@@ -3604,7 +3684,11 @@
               (progress-screen memcard-formatting)
               (progress-screen memcard-creating))
              (draw-notice-screen self))
-            (((progress-screen save-game-title)) (draw-notice-screen self) (draw-options self 169 15 0.6))
+            ;; og:preserve-this (AI-assisted) 3DS: the two rows under the save slots further apart and a
+            ;; little higher (the 3DS text size made them touch; font-h.gc pc-3ds-text-scale)
+            (((progress-screen save-game-title))
+             (draw-notice-screen self)
+             (#if TARGET_3DS (draw-options self 163 17 0.6) (draw-options self 169 15 0.6)))
             (else (format 0 "PROGRESS - You forgot to add a `progress-screen` case to draw options!")))
           (when stats?
             (let* ((v1-98 (cond

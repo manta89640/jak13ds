@@ -139,10 +139,15 @@
       (+! (-> s4-1 origin x) -220.0)
       (+! (-> s4-1 origin y) 40.0)
       (set! (-> s4-1 flags) (font-flags shadow kerning middle large))
+      ;; og:preserve-this (AI-assisted) 3DS: 0.7 is the size, f30-0 the animation (font-h.gc)
+      (#when TARGET_3DS
+        (set! *pc-3ds-text-size* 0.7))
       (print-game-text-scaled (lookup-text! *common-text* (text-id total-collected) #f)
                               (* 0.7 f30-0)
                               s4-1
                               (the int (* 128.0 f30-0)))
+      (#when TARGET_3DS
+        (set! *pc-3ds-text-size* 1.0))
       (+! (-> s4-1 origin y) 15.0)
       (let ((s5-2 print-game-text-scaled))
         (format (clear *temp-string*) "~D/~D" (the int (-> *game-info* money-total)) (-> this total-nb-of-orbs))
@@ -186,10 +191,15 @@
         (+! (-> s4-1 origin x) -220.0)
         (+! (-> s4-1 origin y) 40.0)
         (set! (-> s4-1 flags) (font-flags shadow kerning middle large))
+        ;; og:preserve-this (AI-assisted) 3DS: 0.7 is the size, f30-0 the animation (font-h.gc)
+        (#when TARGET_3DS
+          (set! *pc-3ds-text-size* 0.7))
         (print-game-text-scaled (lookup-text! *common-text* (text-id total-collected) #f)
                                 (* 0.7 f30-0)
                                 s4-1
                                 (the int (* 128.0 f30-0)))
+        (#when TARGET_3DS
+          (set! *pc-3ds-text-size* 1.0))
         (+! (-> s4-1 origin y) 15.0)
         (let ((s5-2 print-game-text-scaled))
           (format (clear *temp-string*) "~D/~D" (the int (-> *game-info* buzzer-total)) (-> this total-nb-of-buzzers))
@@ -411,7 +421,9 @@
                         (!= (-> this option-index) s1-0)
                         (-> this in-transition)))
                 (set-scale! arg0 0.5)
-                (+! (-> arg0 origin y) 16.0)
+                ;; og:preserve-this (AI-assisted) 3DS: counts 1 higher and the totals under them 2
+                ;; lower (the same slot height): at the 3DS text size they overlapped
+                (+! (-> arg0 origin y) (#if TARGET_3DS 15.0 16.0))
                 (set! (-> arg0 flags) (font-flags shadow kerning middle large))
                 (set! (-> arg0 origin x) (the float (- -73 (-> this left-x-offset))))
                 (set-width! arg0 350)
@@ -434,7 +446,7 @@
                   (format (clear *temp-string*) "~D%" (the int (-> s3-3 file s1-0 completion-percentage)))
                   (s0-5 *temp-string* arg0 #f s4-1 22))
                 (set-scale! arg0 0.5)
-                (+! (-> arg0 origin y) 9.0)
+                (+! (-> arg0 origin y) (#if TARGET_3DS 11.0 9.0))
                 ;; og:preserve-this add 'middle' flag when custom-aspect to snap totals with counts
                 (if (-> *pc-settings* use-vis?)
                   (set! (-> arg0 flags) (font-flags shadow kerning large))
@@ -457,7 +469,7 @@
                 (let ((s0-8 print-game-text))
                   (format (clear *temp-string*) "/~D" (-> this total-nb-of-buzzers))
                   (s0-8 *temp-string* arg0 #f s4-1 22))
-                (+! (-> arg0 origin y) 15.0))
+                (+! (-> arg0 origin y) (#if TARGET_3DS 14.0 15.0)))
                (else
                 (+! (-> arg0 origin y) 18.0)
                 (set! (-> arg0 origin x) (the float (- 28 (-> this left-x-offset))))
@@ -989,7 +1001,25 @@
   0
   (none))
 
+;; og:preserve-this (AI-assisted) 3DS: the progress menu's PS2 button icons
+(#when TARGET_3DS
+  (define-extern pc-3ds-button-texture (function int int int none))
+  (defun pc-3ds-button-icons ()
+    "Tell the 3DS renderer where the icons headhud-button-01..04 (cross, square, triangle, circle) are
+     in VRAM: it draws the 3DS buttons there (game/graphics/ctr/CtrButtonArt.h)."
+    (when *pc-3ds-button-art*
+      (let ((page (-> *texture-page-dir* entries (-> headhud-button-01-Hud page) page)))
+        (when page
+          (dotimes (i 4)
+            (let ((idx (+ (-> headhud-button-01-Hud index) i)))
+              (when (< idx (-> page length))
+                (let ((tex (-> page data idx)))
+                  (if tex (pc-3ds-button-texture i (the int (-> tex dest 0)) (the int (-> tex psm)))))))))))
+    (none)))
+
 (defmethod draw-progress ((this progress))
+  (#when TARGET_3DS
+    (pc-3ds-button-icons))
   (let ((f30-0 (+ -409.0 (-> this particles 2 init-pos x) (* 0.8 (the float (-> this left-x-offset)))))
         (s5-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 0 (-> this transition-offset))))
     (let ((f28-0 (if (or (-> this stat-transition) (nonzero? (-> this level-transition))) 1.0 (-> this transition-percentage-invert))))

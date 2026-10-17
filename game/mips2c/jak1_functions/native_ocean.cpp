@@ -422,11 +422,242 @@ u64 render_ocean_quad_impl(const NativeArgs& args) {
   return args.st + 8;
 }
 
+// ---------------------------------------------------------------------------------------------
+// (AI-assisted) logic_micro: render-ocean-quad with the same results and scratchpad contents in
+// fewer instructions (~140 calls per frame with ocean = full).
+// - Half of the far quads are inside all four planes (host count, the 5 fps60 checkpoints with the
+//   ocean): then every clip pass gives back its input (each vertex inside, no edge crosses), so
+//   the passes are skipped and both scratchpad buffers get the copies those passes would store.
+// - The other quads are clipped as before, but the passes don't store each vertex to the
+//   scratchpad: poly_a / poly_b hold exactly what the stores leave in t4 / t5 (each store went to
+//   the same slot of the array), so their written slots are stored once at the end.
+// ---------------------------------------------------------------------------------------------
+
+//! from + (to - from) * t into r, the three quadwords (lerp in clip_polygon)
+inline void lerp_into(PolyVert& r, const PolyVert& from, const PolyVert& to, float t) {
+  for (int i = 0; i < 4; i++) {
+    const float d = to.p[i] - from.p[i];
+    const float acc = from.p[i] * 1.f;  // (vmulaw, then vmaddx: one expression)
+    r.p[i] = acc + d * t;
+  }
+  for (int i = 0; i < 4; i++) {
+    const float d = to.st[i] - from.st[i];
+    const float acc = from.st[i] * 1.f;
+    r.st[i] = acc + d * t;
+  }
+  for (int i = 0; i < 4; i++) {
+    const float d = to.c[i] - from.c[i];
+    const float acc = from.c[i] * 1.f;
+    r.c[i] = acc + d * t;
+  }
+}
+
+//! -w by its sign bit (neg.s)
+inline float neg_bits(float w) {
+  u32 u;
+  memcpy(&u, &w, 4);
+  u ^= 0x80000000u;
+  memcpy(&w, &u, 4);
+  return w;
+}
+
+//! clip_polygon without the stores: out[0..count] is what clip_polygon stores at out_addr.
+template <int comp, bool neg>
+int clip_polygon_nostore(const PolyVert* in, int n, PolyVert* out, bool* clipped) {
+  int count = 0;
+  const PolyVert* prev = &in[0];
+  float pa = neg ? neg_bits(prev->p[3]) : prev->p[3], px = prev->p[comp];
+  bool prev_out = neg ? px < pa : pa < px;
+  for (int e = 1; e <= n; e++) {
+    const PolyVert* next = &in[e];
+    const float na = neg ? neg_bits(next->p[3]) : next->p[3], nx = next->p[comp];
+    const bool next_out = neg ? nx < na : na < nx;
+    if (!prev_out) {
+      out[count++] = *prev;
+      if (next_out) {
+        const float fp = pa - px, fn = na - nx;
+        const float den = fn - fp;
+        lerp_into(out[count++], *next, *prev, fn / den);
+        *clipped = true;
+      }
+    } else if (!next_out) {
+      const float fp = pa - px, fn = na - nx;
+      const float den = fp - fn;
+      lerp_into(out[count++], *prev, *next, fp / den);
+      *clipped = true;
+    }
+    prev = next;
+    pa = na;
+    px = nx;
+    prev_out = next_out;
+  }
+  if (count > 0) {
+    out[count] = out[0];
+  }
+  return count;
+}
+
+//! the first `slots` vertices of a buffer into the scratchpad at addr (48 bytes each)
+inline void store_verts(u32 addr, const PolyVert* v, int slots) {
+  for (int i = 0; i < slots; i++) {
+    store_vert(addr + 48 * i, v[i]);
+  }
+}
+
+u64 render_ocean_quad_micro(const NativeArgs& args) {
+  static const u32 spad_sym = sym_addr("*fake-scratchpad-data*");
+  const auto& vf = ocean_regs_vfs.vfs;
+  const u32 src = (u32)args.a[0];
+  const u32 dma = (u32)args.a[1];
+  const u32 spad = gload<u32>(spad_sym);
+  const u32 t4 = spad | 12288, t5 = spad | 14336;
+
+  float m[4][4], k14[4];
+  for (int i = 0; i < 4; i++) {
+    m[0][i] = vf[31].f[i];
+    m[1][i] = vf[30].f[i];
+    m[2][i] = vf[29].f[i];
+    m[3][i] = vf[28].f[i];
+    k14[i] = vf[14].f[i];
+  }
+  float pos[4][4];
+  PolyVert poly_a[16], poly_b[16];
+  for (int v = 0; v < 4; v++) {
+    float p[4];
+    gload_q(p, src + 48 * v);
+    for (int i = 0; i < 4; i++) {
+      float acc = m[0][i] * p[0];
+      acc += m[1][i] * p[1];
+      acc += m[2][i] * p[2];
+      pos[v][i] = acc + m[3][i] * p[3];
+    }
+    PolyVert& q = poly_a[v];
+    for (int i = 0; i < 4; i++) {
+      q.p[i] = pos[v][i] * k14[i];
+    }
+    gload_q(q.st, src + 48 * v + 16);
+    gload_q(q.c, src + 48 * v + 32);
+  }
+  poly_a[4] = poly_a[0];
+  // slots of t4 (poly_a) and t5 (poly_b) the original stores wrote: t4 0..4 first
+  int slots_a = 5, slots_b = 0;
+  auto note = [](int& slots, int n) {
+    if (n > 0) {
+      slots = std::max(slots, n + 1);
+    }
+  };
+
+  // every vertex inside x, y <= w and x, y >= -w (the passes' own tests): nothing is clipped
+  bool inside = true;
+  for (int v = 0; v < 4; v++) {
+    const float* p = poly_a[v].p;
+    const float w = p[3], nw = neg_bits(p[3]);
+    inside &= !(w < p[0]) & !(w < p[1]) & !(p[0] < nw) & !(p[1] < nw);
+  }
+
+  bool clipped = false;
+  int n = 4;
+  if (inside) {
+    // each pass gives back its input: t5 and t4 both end with poly_a's 5 vertices
+    store_verts(t5, poly_a, 5);
+  } else {
+    // draw-large-polygon-ocean
+    auto bail = [&]() {
+      store_verts(t5, poly_b, slots_b);
+      store_verts(t4, poly_a, slots_a);
+      return args.st;
+    };
+    n = clip_polygon_nostore<0, false>(poly_a, 4, poly_b, &clipped);
+    note(slots_b, n);
+    if (!n) {
+      return bail();
+    }
+    n = clip_polygon_nostore<1, false>(poly_b, n, poly_a, &clipped);
+    note(slots_a, n);
+    if (!n) {
+      return bail();
+    }
+    n = clip_polygon_nostore<0, true>(poly_a, n, poly_b, &clipped);
+    note(slots_b, n);
+    if (!n) {
+      return bail();
+    }
+    n = clip_polygon_nostore<1, true>(poly_b, n, poly_a, &clipped);
+    note(slots_a, n);
+    if (!n) {
+      return bail();
+    }
+    store_verts(t5, poly_b, slots_b);
+  }
+
+  if (!clipped) {
+    // the original positions again (the 4 vertices and the first at the end)
+    for (int v = 0; v < 4; v++) {
+      memcpy(poly_a[v].p, pos[v], 16);
+    }
+    memcpy(poly_a[4].p, pos[0], 16);
+  }
+  store_verts(t4, poly_a, slots_a);
+
+  u32 out = gload<u32>(dma + 4);
+  gstore_q(out, vf[27].f);
+  gstore<u32>(out, (u32)n);
+  out += 16;
+  const float fog_lo = vf[13].f[1], fog_hi = vf[13].f[2];
+  for (int v = 0; v < n; v++) {
+    const PolyVert& q = poly_a[v];
+    float p[4], st[4];
+    s32 col[4];
+    float qq;
+    if (clipped) {
+      qq = 1.f / q.p[3];
+      for (int i = 0; i < 4; i++) {
+        p[i] = q.p[i] * vf[26].f[i];
+        st[i] = q.st[i] + vf[24].f[i];
+      }
+    } else {
+      qq = vf[13].f[0] / q.p[3];
+      for (int i = 0; i < 4; i++) {
+        p[i] = q.p[i];
+        st[i] = q.st[i];
+      }
+    }
+    for (int i = 0; i < 4; i++) {
+      col[i] = (s32)q.c[i];
+    }
+    for (int i = 0; i < 3; i++) {
+      p[i] = p[i] * qq;
+    }
+    for (int i = 0; i < 4; i++) {
+      st[i] = st[i] * qq;
+      p[i] = p[i] + vf[25].f[i];
+    }
+    p[2] = std::max(p[2], 0.f);
+    p[3] = std::min(p[3], fog_hi);
+    p[3] = std::max(p[3], fog_lo);
+    s32 xyzf[4];
+    for (int i = 0; i < 4; i++) {
+      xyzf[i] = (s32)(p[i] * 16.f);
+    }
+    gstore_q(out, st);
+    gstore_q(out + 16, col);
+    gstore_q(out + 32, xyzf);
+    out += 48;
+  }
+  gstore<u32>(dma + 4, out);
+  return args.st + 8;
+}
+
+u64 render_ocean_quad_select(const NativeArgs& args) {
+  static const bool micro = logic_micro_on();
+  return micro ? render_ocean_quad_micro(args) : render_ocean_quad_impl(args);
+}
+
 }  // namespace
 
 const NativeImpl ocean_interp_wave = MIPS2C_NATIVE_IMPL(ocean_interp_wave_impl, 0, 0);
 const NativeImpl ocean_generate_verts =
     MIPS2C_NATIVE_IMPL(ocean_generate_verts_impl, NATIVE_CALLS_GOAL, 0);
-const NativeImpl render_ocean_quad = MIPS2C_NATIVE_IMPL_GOAL(render_ocean_quad_impl, 0);
+const NativeImpl render_ocean_quad = MIPS2C_NATIVE_IMPL_GOAL(render_ocean_quad_select, 0);
 
 }  // namespace Mips2C::jak1::native

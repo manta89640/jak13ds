@@ -37,7 +37,9 @@ bool snd_HasOutput() {
 #ifdef __3DS__
   return snd::g_output_active;
 #else
-  return true;
+  // (AI-assisted) no player with -nosound: the stream voices never play, so spooled cutscenes
+  // must run on the IOP's fake clock (iso.cpp), or they wait forever (host test runs)
+  return player != nullptr;
 #endif
 }
 
@@ -245,6 +247,14 @@ snd::BankHandle snd_BankLoadEx(const char* filename,
 snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data) {
   if (player) {
     return player->LoadBank(data);
+  } else {
+    return 0;
+  }
+}
+
+snd::BankHandle snd_BankLoadFromMemory(std::span<u8> data, std::unique_ptr<u8[]> owner) {
+  if (player) {
+    return player->LoadBank(data, std::move(owner));
   } else {
     return 0;
   }

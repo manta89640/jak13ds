@@ -1019,7 +1019,7 @@
        )
      )
     (('hit 'hit-flinch 'hit-knocked)
-     (speech-control-method-13 *speech-control* (the-as handle this))
+     (speech-control-method-13 *speech-control* this)
      (when (and (-> this next-state) (let ((v1-8 (-> this next-state name)))
                                        (or (= v1-8 'ambush-fly) (= v1-8 'ambush-attack))
                                        )

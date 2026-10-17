@@ -37,6 +37,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
+#include "game/graphics/ctr/CtrImpostor.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
@@ -81,8 +82,17 @@ struct AbSwitch {
 const AbSwitch kAbSwitches[] = {
     {"run_culling", [](CtrSettings& s, bool on) { s.run_culling = on; },
      [](const CtrSettings& s) { return s.run_culling; }},
+    // (AI-assisted) the finer precomputed visibility (.c3v files; loaded with fine_vis on)
+    {"fine_vis", [](CtrSettings& s, bool on) { s.fine_vis = on; },
+     [](const CtrSettings& s) { return s.fine_vis; }},
+    // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h)
+    {"occ_cull", [](CtrSettings& s, bool on) { s.occ_cull = on; },
+     [](const CtrSettings& s) { return s.occ_cull; }},
     {"cull_ties", [](CtrSettings& s, bool on) { s.cull_ties = on; },
      [](const CtrSettings& s) { return s.cull_ties; }},
+    // (AI-assisted) c3l v17 tie levels of detail (off: the far versions only)
+    {"tie_lod", [](CtrSettings& s, bool on) { s.tie_lod = on; },
+     [](const CtrSettings& s) { return s.tie_lod; }},
     // the far scenery: lowres_vista and the vista tier (vista_distance 0: none)
     {"vista",
      [](CtrSettings& s, bool on) {
@@ -130,6 +140,9 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.merc_tex_sort; }},
     {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },
      [](const CtrSettings& s) { return s.merc_gen_lod; }},
+    // (AI-assisted) gpu-imp: far tie groups as cards (CtrImpostor)
+    {"impostors", [](CtrSettings& s, bool on) { s.impostors = on; },
+     [](const CtrSettings& s) { return s.impostors; }},
     {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
      [](const CtrSettings& s) { return s.clouds; }},
     // (AI-assisted) gpu-b's keys (Oct 11). frame_overlap2: the config's mode (on; clean when the
@@ -155,13 +168,6 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
     {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
      [](const CtrSettings& s) { return s.skin_rows_f24; }},
-    // cb_read_opaque: only when the config turns it on (unknown hardware semantics: GBATEK)
-    {"cb_read_opaque",
-     [](CtrSettings& s, bool on) {
-       static const bool kConfig = s.cb_read_opaque;
-       s.cb_read_opaque = on && kConfig;
-     },
-     [](const CtrSettings& s) { return s.cb_read_opaque; }},
     // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
     // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
     {"early_depth",
@@ -178,8 +184,9 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.tex1_gating; }},
     {"cull_merc", [](CtrSettings& s, bool on) { s.cull_merc = on; },
      [](const CtrSettings& s) { return s.cull_merc; }},
-    {"shader_groups", [](CtrSettings& s, bool on) { s.shader_groups = on; },
-     [](const CtrSettings& s) { return s.shader_groups; }},
+    // (AI-assisted, far-fog) the game's fog on merc models
+    {"merc_fog", [](CtrSettings& s, bool on) { s.merc_fog = on; },
+     [](const CtrSettings& s) { return s.merc_fog; }},
     // (AI-assisted) shader-opt's keys (Oct 12): the shorter vertex programs
     {"shader_opt", [](CtrSettings& s, bool on) { s.shader_opt = on; },
      [](const CtrSettings& s) { return s.shader_opt; }},
@@ -189,6 +196,19 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.cmd_dedup_draw; }},
     {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
      [](const CtrSettings& s) { return s.skin_clip_f24; }},
+    // (AI-assisted, gpu-rt) static_cmdlists: the config's mode (on; on when the config says off)
+    // or off; ocean_tex_half
+    {"static_cmdlists",
+     [](CtrSettings& s, bool on) {
+       static const int kConfigMode = s.static_cmdlists > 0 ? s.static_cmdlists : 1;
+       s.static_cmdlists = on ? kConfigMode : 0;
+     },
+     [](const CtrSettings& s) { return s.static_cmdlists > 0; }},
+    {"ocean_tex_half", [](CtrSettings& s, bool on) { s.ocean_tex_half = on; },
+     [](const CtrSettings& s) { return s.ocean_tex_half; }},
+    // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
+    {"opaque_alpha", [](CtrSettings& s, bool on) { s.opaque_alpha = on; },
+     [](const CtrSettings& s) { return s.opaque_alpha; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -269,6 +289,11 @@ bool pad_set(const char* key, const char* value) {
   }
   if (!strcmp(key, "cmd_dump")) {
     ctr_gpu_cmd_dump_next();  // (AI-assisted) "set cmd_dump on": the next frame's command list
+    return true;
+  }
+  if (!strcmp(key, "gpu_micro_mask")) {
+    // (AI-assisted, micro-mg) a test: gpu_micro's changes as bits (old / new in one run)
+    ctr_gpu_set_micro_mask((unsigned int)strtoul(value, nullptr, 0));
     return true;
   }
   for (const auto& sw : kAbSwitches) {
@@ -479,8 +504,12 @@ CtrRenderer::CtrRenderer()
                   std::make_unique<CtrTfragRenderer>("tfrag-trans", (int)id, m_levels.get())));
     }
   }
-  set(BucketId::SPRITE,
-      std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get()));
+  {
+    auto sprite =
+        std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::SPRITE, m_vram.get());
+    m_sprite = sprite.get();
+    set(BucketId::SPRITE, std::move(sprite));
+  }
   set(BucketId::DEBUG,
       std::make_unique<CtrDirectBucketRenderer>("debug", (int)BucketId::DEBUG, m_vram.get(), true));
   set(BucketId::DEBUG_NO_ZBUF,
@@ -572,17 +601,16 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_mip_bias(ctr_settings().mip_bias);                          // (AI-assisted)
   ctr_gpu_set_skin_rows_f24(ctr_settings().skin_rows_f24 ? 1 : 0);         // (AI-assisted)
   ctr_gpu_set_skin_clip_f24(ctr_settings().skin_clip_f24 ? 1 : 0);         // (AI-assisted)
-  ctr_gpu_set_cb_read_opaque(ctr_settings().cb_read_opaque ? 1 : 0);       // (AI-assisted)
   ctr_gpu_set_early_depth_params(
       ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
       ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
   // (AI-assisted) fog_alpha, tex1_gating (gpu_profile = ab may switch them between frames too)
   ctr_gpu_set_fog_alpha(ctr_settings().fog_alpha ? 1 : 0);
   ctr_gpu_set_tex1_gating(ctr_settings().tex1_gating ? 1 : 0);
-  ctr_gpu_set_shader_groups(ctr_settings().shader_groups ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
+  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);  // (AI-assisted, gpu-rt)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -612,7 +640,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #ifndef __3DS__
   ctr_gpu_soft_bucket("pmode-fade");
 #endif
+  ctr_gpu_phase(CTR_PH_HUD);  // (AI-assisted, gpu-rt) gpu_breakdown: the fade with the HUD
   draw_pmode_fade();
+  ctr_level_fine_vis_check(m_rs.frame_idx, m_rs.log_now);  // (AI-assisted) host check only
   const double t2 = ctr_gpu_time_ms();
   ctr_gpu_frame_end();
   ctr_gpu_diag_stage("after frame_end: stats, logs");
@@ -648,8 +678,21 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.vbuf_size = gs.vbuf_size;
   m_timing.vbuf_dropped += gs.vbuf_dropped;
   m_timing.frames++;
+  // (AI-assisted) the time of day work isn't GPU load: not counted for auto_detail
+  const double tod_ms = ctr_level_tod_take_ms();
+  m_timing.tod_ms += tod_ms;
+  m_timing.tod_max_ms = std::max(m_timing.tod_max_ms, tod_ms);
+  m_timing.tod_over += tod_ms > 2.0;
   if (ctr_settings().auto_detail) {
-    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1);
+#ifndef __3DS__
+    // (AI-assisted, title-popin) host test: env CTR_AUTO_DETAIL_MODEL gives auto_detail the GPU time
+    // of the hardware fit (busy ~ 10.6 ms + 0.13 ms per 1000 triangles) of this frame's triangles
+    static const bool model = getenv("CTR_AUTO_DETAIL_MODEL") != nullptr;
+    if (model) {
+      auto_detail_frame(10.6f + 0.13f * gs.triangles / 1000.f, 1, 0.0);
+    } else
+#endif
+    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms);
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
@@ -721,13 +764,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear, {} color buffer read switches",
+               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
                gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws,
                gs.fog_alpha_draws, gs.unit1_toggles, gs.prog_switches, gs.prog_uploads,
-               gs.prog_unif_vectors, gs.tex_clears_skipped, gs.cbread_switches);
+               gs.prog_unif_vectors, gs.tex_clears_skipped);
       // build time by bucket renderer
       std::string by_name;
       std::vector<std::pair<std::string, double>> sums;
@@ -752,7 +795,29 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           by_name += fmt::format(" {} {:.2f}", e.first, e.second / n);
         }
       }
+      // (AI-assisted) of that, the screen copies' (the distorter's: the command list sent so far,
+      // then the copy)
+      const double copy_ms = ctr_gpu_take_screen_copy_ms();
+      if (copy_ms / n >= 0.005) {
+        by_name += fmt::format(" (screen copies {:.2f})", copy_ms / n);
+      }
       lg::info("[ctr] build ms/frame by renderer:{}", by_name);
+      if (m_timing.tod_max_ms > 0) {
+        // (AI-assisted) of the level renderers' time: the time of day's
+        lg::info("[ctr] time of day ms/frame {:.2f}, most {:.2f} in one frame, {} frames over 2 ms",
+                 m_timing.tod_ms / n, m_timing.tod_max_ms, m_timing.tod_over);
+      }
+      {
+        // (AI-assisted, gpu-rt) gpu_breakdown, static_cmdlists
+        char line[1024];
+        if (ctr_gpu_breakdown_line(line, sizeof(line),
+                                    m_profile_level.empty() ? "-" : m_profile_level.c_str()) > 0) {
+          lg::info("{}", line);
+        }
+        if (ctr_gpu_cmdlist_line(line, sizeof(line)) > 0) {
+          lg::info("{}", line);
+        }
+      }
 #ifdef __3DS__
       if (ctr_settings().gpu_perflog) {
         char pl[512];
@@ -781,7 +846,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 
 void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
   // game thread, before handing the frame to the render thread: copy what the frame needs from
-  // game memory that is not double buffered (merc bone matrices)
+  // game memory that is not double buffered (merc bone matrices, (AI-assisted) the sprite arrays)
   CtrRenderState rs;
   rs.ee_mem = (const u8*)ee_mem;
   rs.offset_of_s7 = s7.offset;
@@ -791,6 +856,22 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
     DmaFollower dma(ee_mem, base + 16 * id);
     merc->snapshot_bones(dma, rs);
   }
+  prepare_sprites(ee_mem, chain_offset);
+}
+
+void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
+  // (AI-assisted) see CtrSpriteRenderer::snapshot
+  if (!m_sprite) {
+    return;
+  }
+  CtrRenderState rs;
+  rs.ee_mem = (const u8*)ee_mem;
+  rs.offset_of_s7 = s7.offset;
+  const u32 base = chain_offset + 16;
+  const int id = (int)jak1::BucketId::SPRITE;
+  rs.next_bucket = base + 16 * (id + 1);
+  DmaFollower dma(ee_mem, base + 16 * id);
+  m_sprite->snapshot(dma, rs);
 }
 
 void CtrRenderer::hw_counters_frame() {
@@ -869,17 +950,26 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, doub
   if (++m_auto.frames < 15) {
     return;
   }
-  const double target = ctr_settings().auto_detail_gpu_ms;
+  // (AI-assisted, citadel) the target and margins are for fps_cap = 30's 33 ms frame: at fps_cap =
+  // 60 half of them (a 27 ms target kept the distances at their far end in a 16.7 ms frame:
+  // Azahar citadel-generator-start 92-99k triangles, 50 fps)
+  const double k = ctr_settings().fps_cap >= 60 ? 0.5 : 1.0;
+  const double target = ctr_settings().auto_detail_gpu_ms * k;
   const double avg = m_auto.busy_ms / m_auto.busy_frames;
   float t = m_auto.t;
-  if (avg > target || m_auto.busy_max > target + 4.0 || m_auto.build_max > target) {
+  if (avg > target || m_auto.busy_max > target + 4.0 * k || m_auto.build_max > target) {
     t -= 0.1f;
     m_auto.downs++;
-  } else if (avg < target - 4.0 && m_auto.busy_max < target && m_auto.build_max < target - 8.0) {
+  } else if (avg < target - 4.0 * k && m_auto.busy_max < target &&
+             m_auto.build_max < target - 8.0 * k) {
     t += 0.04f;
     m_auto.ups++;
   }
   t = std::clamp(t, 0.f, 1.f);
+  // (AI-assisted, title-popin) a GPU close to missing frames lowers the distances of what is on
+  // screen too (else those keep theirs until they are out of view; the build time's spikes, the
+  // time of day recolor, don't count here)
+  ctr_level_set_detail_urgent(avg > target + 3.0 * k || m_auto.busy_max > 33.0 * k);
   if (t != m_auto.t) {
     m_auto.t = t;
     ctr_level_set_detail(t);
@@ -1065,7 +1155,28 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
   const bool profiling = m_profile_mode > 0;
+  if (m_bucket_phase.size() != m_buckets.size()) {
+    // (AI-assisted, gpu-rt) gpu_breakdown: the GPU phase of each bucket renderer (-1: keeps the
+    // phase before it, no draws of its own)
+    m_bucket_phase.assign(m_buckets.size(), -1);
+    for (size_t i = 0; i < m_buckets.size(); i++) {
+      const std::string& n = m_buckets[i]->name();
+      m_bucket_phase[i] =
+          n == "sky"                                                     ? CTR_PH_SKY
+          : n.find("tfrag") != std::string::npos && n != "tfrag-trans"   ? CTR_PH_LEVEL
+          : n == "merc" || n == "eyes"                                   ? CTR_PH_MERC
+          : n == "sky-blend" || n == "tfrag-trans"                       ? CTR_PH_TRANS
+          : n == "shadow"                                                ? CTR_PH_SHADOW
+          : n == "ocean"                                                 ? CTR_PH_OCEAN
+          : n == "sprite"                                                ? CTR_PH_SPRITE
+          : n == "debug" || n == "debug-no-zbuf" || n == "subtitle"      ? CTR_PH_HUD
+                                                                         : -1;
+    }
+  }
   for (size_t bucket_id = 0; bucket_id < m_buckets.size(); bucket_id++) {
+    if (m_bucket_phase[bucket_id] >= 0) {
+      ctr_gpu_phase(m_bucket_phase[bucket_id]);  // (AI-assisted, gpu-rt) gpu_breakdown
+    }
     if (bucket_id >= (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0) {
       // (AI-assisted) sky_last: at the latest before the translucent buckets (and the sky blend
       // in tfrag-trans, which starts this frame's sky textures)
@@ -1153,9 +1264,7 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_framebuffer(ctr_settings().early_depth_block32 ? 1 : 0,
                           ctr_settings().depth16 ? 1 : 0);
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
-  ctr_gpu_set_new_shaders(ctr_settings().new_shaders ? 1 : 0);
-  ctr_gpu_set_shader_modes(ctr_settings().shader_basic, ctr_settings().shader_mesh);
-  ctr_gpu_set_shader_skin(ctr_settings().shader_skin);
+  ctr_gpu_set_shader_basic(ctr_settings().shader_basic);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
   lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");
@@ -1184,12 +1293,19 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
+  // (AI-assisted) impostors: their texture in VRAM before the level texture pools fill it
+  if (ctr_settings().impostors) {
+    ctr_impostors().reserve();
+  }
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
   ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);
   ctr_gpu_set_cmd_dump(ctr_settings().cmd_dump ? 1 : 0);  // (AI-assisted)
+  ctr_gpu_set_gpu_breakdown(ctr_settings().gpu_breakdown ? 1 : 0);  // (AI-assisted, gpu-rt)
+  // (AI-assisted, gpu-rt) its linear memory block now, before levels load
+  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);
 #ifdef __3DS__
   if (ctr_settings().gpu_perflog) {
     // (AI-assisted) the GSP's performance log, read once per stats window (render_frame)
@@ -1211,7 +1327,9 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   g_ctr->levels().load_common();
   g_ctr->levels().prefetch("title");
   g_async = ctr_gpu_async_start(render_job, nullptr) != 0;
-  ctr_gpu_diag_start();
+  if (ctr_settings().render_watchdog) {
+    ctr_gpu_diag_start();  // (AI-assisted) config.ini render_watchdog
+  }
   g_ctr_ready = true;
   g_ctr->set_async(g_async);
   lg::info("[ctr] renderer ready ({})",
@@ -1279,6 +1397,11 @@ void ctr_send_chain(const void* data, u32 offset) {
     g_job_offset = offset;
     ctr_gpu_async_submit();
   } else {
+#ifndef __3DS__
+    // (AI-assisted) host (synchronous): the sprites from the snapshot too, so the host runs check
+    // it (CtrSpriteRenderer::snap_data compares it with game memory)
+    g_ctr->prepare_sprites(data, offset);
+#endif
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;
   }

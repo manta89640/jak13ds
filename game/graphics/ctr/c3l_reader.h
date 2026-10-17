@@ -26,12 +26,38 @@ namespace c3l {
 
 class Reader {
  public:
+  // (AI-assisted) The reader's buffers (its windows and decoded blocks: ~640 KB in window mode).
+  // A Reader made with one uses it instead of its own and leaves the memory in it: the 3DS level
+  // loader keeps one for all its loads, made at startup, so a load needs no 256 KB pieces of a
+  // heap that is fragmented by then (they failed with bad_alloc). One Reader at a time per Buffers.
+  struct Buffers {
+    std::vector<uint8_t> window[2];
+    std::vector<uint8_t> cache[2];
+    void* zstd = nullptr;  // the zstd decoder (~100 KB, made at the first zstd block)
+    Buffers() = default;
+    Buffers(const Buffers&) = delete;
+    Buffers& operator=(const Buffers&) = delete;
+    ~Buffers();
+    // (the memory for a reader of this window size and files with blocks of up to max_block)
+    void reserve(size_t window_size, size_t max_block);
+  };
+
   // (AI-assisted) window: 0, reads through a 64 KB stdio buffer and windows of kWindow packed
   // bytes. Otherwise every read from the file is one unbuffered read of `window` bytes (or one
   // exact read of a bigger piece) into the reader's window, which all pieces are copied from,
   // stored (uncompressed) blocks and uncompressed files too: on the 3DS every SD card request
   // costs several ms of its own, and a stdio buffer refills itself from scratch after each seek.
-  explicit Reader(const char* path, size_t window = 0);
+  explicit Reader(const char* path, size_t window = 0, Buffers* buffers = nullptr);
+  // (AI-assisted, streaming) the same with the header and block directory of a reader of this file
+  // made before (no reads of them: a stream job's few near chunks, the directory ~16 bytes per
+  // block, up to ~50 KB)
+  struct Dir {
+    Header header{};
+    std::vector<Block> blocks;
+    uint32_t raw_size = 0, max_block = 0;
+  };
+  Reader(const char* path, size_t window, Buffers* buffers, const Dir& dir);
+  Dir dir() const;
   ~Reader();
   Reader(const Reader&) = delete;
   Reader& operator=(const Reader&) = delete;
@@ -40,13 +66,18 @@ class Reader {
   long file_size() const { return m_file_size; }
   // the size of the raw layout (the file size for files without compression)
   uint32_t raw_size() const { return m_raw_size; }
-  bool compressed() const { return !m_blocks.empty(); }
+  bool compressed() const { return !m_bl->empty(); }
   // (AI-assisted) unbuffered reads through two windows (constructed with a window size)
   bool window_mode() const { return m_window_cap != 0; }
-  const std::vector<Block>& blocks() const { return m_blocks; }
+  const std::vector<Block>& blocks() const { return *m_bl; }
 
   // bytes [offset, offset + bytes) of the raw layout into dst
   bool read(uint32_t offset, void* dst, size_t bytes);
+  // (AI-assisted, streaming) window mode: the file bytes holding raw [offset, offset + bytes) (its
+  // whole blocks) in one request into a window, when they fit in one: the reads of that range
+  // after it need no other request (a stream job's near chunks, which lie together in the file).
+  // false: not done (too big, not window mode); the reads work as without it.
+  bool preload(uint32_t offset, uint32_t bytes);
   template <typename T>
   bool read_array(uint32_t offset, size_t count, std::vector<T>* out) {
     out->resize(count);
@@ -85,11 +116,15 @@ class Reader {
   bool m_error = false;
   uint32_t m_raw_size = 0;
   Header m_header{};
-  std::vector<Block> m_blocks;
+  // (AI-assisted) the block directory: its own (m_own_blocks), or a Dir's (streaming)
+  std::vector<Block> m_own_blocks;
+  const std::vector<Block>* m_bl = &m_own_blocks;
   // (AI-assisted) file bytes [offset, offset + size): one window (stdio mode) or two in window
   // mode, the one used longest ago replaced (a level's index and vertex data are read in turns)
+  Buffers m_own;
+  Buffers* m_bufs = &m_own;
   struct Window {
-    std::vector<uint8_t> buf;
+    std::vector<uint8_t>* buf = nullptr;  // m_bufs->window[i]
     long offset = 0;
     size_t size = 0;
     uint64_t used = 0;
@@ -100,14 +135,13 @@ class Reader {
   const uint8_t* in_window(long offset, size_t bytes);
   // a window of `want` file bytes from offset on (nullptr on a read error)
   const uint8_t* load_window(long offset, size_t want);
-  std::vector<uint8_t> m_cache;  // block m_cache_block, decoded
+  // block m_cache_block, decoded (m_bufs->cache[0], sized max_block)
   long m_cache_block = -1;
   // (AI-assisted) window mode: a second decoded block (index and vertex reads in turns share
-  // blocks with the next chunk's); the one used longest ago is replaced
-  std::vector<uint8_t> m_cache2;
+  // blocks with the next chunk's); the one used longest ago is replaced (m_bufs->cache[1])
   long m_cache2_block = -1;
+  uint32_t m_max_block = 0;
   bool m_cache2_newer = false;
-  void* m_zstd = nullptr;
 };
 
 }  // namespace c3l

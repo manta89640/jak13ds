@@ -1,0 +1,97 @@
+# (AI-assisted, streaming) fast traversals for geometry streaming (docs/3ds-port/streaming.md): the
+# title screen's flight over Sandover (~70 s), a run through village1 from the hut with the camera
+# turning, then the Zoomer in Fire Canyon (from zoomer.pad: all tasks closed, 100 cells). Read the
+# [ctr] streaming lines (SD bytes and reads, late near chunks, the arena) of each segment.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=<this file> CTR_STREAM_SIM=5.5 CTR_STREAM_CHECK=1
+#     build-host/game/gk --proj-path <proj> --config-path <scratch dir> --ctr-gfx -- -boot -fakeiso
+#     -nosound -cbackend
+# Format and commands: game/sce/pad_script.h
+0 wait *target* target-title-wait
+150 tasks 2 111
+160 call poke32 $*game-info* 92 f100
+200 log SEG title
+2400 log SEG village1-hut
+2400 continue village1-hut
+2401 wait *target* target-continue
+2640 pos *target*
+2641 ly=0
+2900 ly=0 lx=60
+3000 ly=0
+3300 ly=0 lx=200
+3400 ly=0
+3700 ly=0 rx=200
+3800 ly=0
+4000 ly=0 rx=60
+4100 pos *target*
+4101 -
+4200 log SEG firecanyon-start
+4200 continue firecanyon-start
+4201 wait *target* target-continue
+4440 pstate racer
+4441 teleport racer 0 2
+4500 circle
+4506 -
+4700 pos *target*
+4900 circle
+4906 -
+5100 pos *target*
+5300 circle
+5306 -
+5500 pos *target*
+5700 circle
+5706 -
+5900 pos *target*
+6100 circle
+6106 -
+6300 pos *target*
+6500 circle
+6506 -
+6700 pos *target*
+6900 circle
+6906 -
+7100 pos *target*
+7300 circle
+7306 -
+7500 pos *target*
+7701 x
+7800 x lx=200
+7900 x
+8000 pos *target*
+8001 x
+8100 x lx=60
+8200 x
+8300 pos *target*
+8301 x
+8400 x lx=200
+8500 x
+8600 pos *target*
+8601 x
+8700 x lx=60
+8800 x
+8900 pos *target*
+8901 x
+9000 x lx=200
+9100 x
+9200 pos *target*
+9201 x
+9300 x lx=60
+9400 x
+9500 pos *target*
+9501 x
+9600 x lx=200
+9700 x
+9800 pos *target*
+9801 x
+9900 x lx=60
+10000 x
+10100 pos *target*
+10101 x
+10200 x lx=200
+10300 x
+10400 pos *target*
+10401 x
+10500 x lx=60
+10600 x
+10700 pos *target*
+10750 log SEG end
+10760 exit

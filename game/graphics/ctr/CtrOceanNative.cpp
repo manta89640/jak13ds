@@ -140,6 +140,9 @@ void CtrOceanMidVu::native_tile() {
       cx[c][i] = xf.col[0][i] * x;
     }
   }
+  // (AI-assisted) the grid's texture coordinates 0..8 as floats once (not an int to float
+  // conversion and two register moves for each of s and t of every vertex)
+  static constexpr float kStep[9] = {0.f, 1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f};
   ctr_ocean_full_vertex* o = v;
   for (int r = 0; r < 9; r++) {
     const float z = m_vu_data[kGridXz + 9 * r].z();
@@ -148,14 +151,16 @@ void CtrOceanMidVu::native_tile() {
     const float r2 = xf.col[2][2] * z + xf.col[3][2];
     const float r3 = xf.col[2][3] * z + xf.col[3][3];
     const Vf* color = in + 8 + 12 * r;
+    const float t = kStep[r];
     for (int c = 0; c < 9; c++, o++) {
+      const float q = r3 + cx[c][3];
       o->x = r0 + cx[c][0];
       o->y = r1 + cx[c][1];
       o->z = r2 + cx[c][2];
-      o->q = r3 + cx[c][3];
-      o->s = (float)c;
-      o->t = (float)r;
-      o->fog = xf.fog(o->q);
+      o->q = q;
+      o->s = kStep[c];
+      o->t = t;
+      o->fog = xf.fog(q);
       put_color(o, lane(color[c], 0), lane(color[c], 1), lane(color[c], 2), lane(color[c], 3));
     }
   }
@@ -218,20 +223,36 @@ void CtrOceanMidVu::native_transition(bool fan) {
   }
   const ClipXform xf(in + 4, m_vu_data[kHmge], m_vu_data[kHvdf], m_vu_data[kFogConst]);
   const Vf* corner = m_vu_data + kCorners;
+  // (AI-assisted) the call's corners, colors and texture coordinates in locals: the vertex stores
+  // could be to the VU memory as far as the compiler knows, which made it read all 40 of them
+  // again for every vertex
+  float cor[4][4], cl[4][4], stc[4][2];
+  for (int j = 0; j < 4; j++) {
+    for (int k = 0; k < 4; k++) {
+      cor[j][k] = corner[j][k];
+      cl[j][k] = in[13 + j][k];
+    }
+    stc[j][0] = in[9 + j][0];
+    stc[j][1] = in[9 + j][1];
+  }
   for (int i = 0; i < n; i++) {
     const Vf& w = in[17 + i];
+    const float wx = w.x(), wy = w.y(), wz = w.z(), ww = w.w();
     float p[4], st[2], col[4];
+    // (AI-assisted) unrolled: the arrays become registers (the same operations in the same order)
+#pragma GCC unroll 4
     for (int k = 0; k < 4; k++) {
-      p[k] = corner[0][k] * w.x() + corner[1][k] * w.y() + corner[2][k] * w.z() +
-             corner[3][k] * w.w();
-      col[k] = in[13][k] * w.x() + in[14][k] * w.y() + in[15][k] * w.z() + in[16][k] * w.w();
+      p[k] = cor[0][k] * wx + cor[1][k] * wy + cor[2][k] * wz + cor[3][k] * ww;
+      col[k] = cl[0][k] * wx + cl[1][k] * wy + cl[2][k] * wz + cl[3][k] * ww;
     }
+#pragma GCC unroll 2
     for (int k = 0; k < 2; k++) {
-      st[k] = in[9][k] * w.x() + in[10][k] * w.y() + in[11][k] * w.z() + in[12][k] * w.w();
+      st[k] = stc[0][k] * wx + stc[1][k] * wy + stc[2][k] * wz + stc[3][k] * ww;
     }
     ctr_ocean_full_vertex* o = v + i;
     // (the program transforms (p.x, p.y, p.z, 1))
     float c[4];
+#pragma GCC unroll 4
     for (int k = 0; k < 4; k++) {
       c[k] = xf.col[0][k] * p[0] + xf.col[1][k] * p[1] + xf.col[2][k] * p[2] + xf.col[3][k];
     }

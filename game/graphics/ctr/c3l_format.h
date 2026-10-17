@@ -27,7 +27,37 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v14 (AI-assisted): a shrub chunk's max_dist is its shrubs' PS2 distance (the converter groups
 // shrubs by prototype distance class: the middle of the PS2 fade, from the prototype's dists);
 // before, every shrub chunk had the converter's --shrub-dist. Otherwise v13.
-constexpr uint32_t kVersion = 14;
+// v15 (AI-assisted): draw optimisations (ctr_level_converter --vcache-fifo, --atlas, --opaque-alpha):
+// Draw::kind kDrawAtlasUV (texture coordinates in 1/kAtlasUVScale, the draw's texture an atlas),
+// kDrawAlphaTestDropped and kDrawBlendDropped (the alpha test / blending the converter proved can't
+// change a pixel was taken out of Draw::mode). Otherwise v14. Readers detect them by their bits.
+// v16 (AI-assisted): time of day at runtime (see TodColor). Vertex::pad is the vertex's time of day
+// color (index < Header::tod_color_count) or multiplied color (tod_color_count + TodMul index),
+// 0xffff: none. Vertex::rgba keeps the converter's palette (--palette), until the first blend.
+// Otherwise v15.
+// v17 (AI-assisted): tie levels of detail (see ExtHeader, TieLodGroup, RunLod): Header::ext_offset
+// (was tod_pad, 0) points at an ExtHeader. Otherwise v16; an older reader would draw both versions
+// of the LOD groups.
+// v18 (AI-assisted): a chunk's vertices grouped by the visibility id of its runs: each id's
+// vertices are one range that no other id's indices use (ids in order of their first run, first
+// use inside; a vertex of several ids copied, ~0.4%), so the runtime rewrites the time of day
+// colors of the drawn runs' ids only. No layout change; the runtime finds the ranges from the
+// indices (and rewrites whole chunks where they overlap, as in older files).
+// v19 (AI-assisted, streaming): geometry streaming (see StreamChunk). Every tie instance group whose
+// shape changes visibly gets its near version (geometry 0), in chunks of their own ("near chunks",
+// --stream-cell meters) that the runtime reads from the file while the camera comes near and frees
+// when it is far; the group's far version stays in its tie chunk as before (a near chunk that isn't
+// there yet draws the far version). The near chunks' vertex and index data come last in their
+// sections, in spatial order. The extension header grows (ExtHeader::size 48): each file run's
+// bounding sphere (RunSphere), the near chunk table. Draw::kind kDrawAlpha80. Otherwise v18; a v18
+// reader would draw both versions (it is refused: version 19).
+constexpr uint32_t kVersion = 19;
+// (AI-assisted) the first version with near chunks (StreamChunk), run spheres and kDrawAlpha80
+constexpr uint32_t kStreamVersion = 19;
+// (AI-assisted) the first version with the extension header (tie levels of detail)
+constexpr uint32_t kTieLodVersion = 17;
+// (AI-assisted) the first version with the time of day table
+constexpr uint32_t kTodVersion = 16;
 // (AI-assisted) the first version whose shrub chunks carry their PS2 distance
 constexpr uint32_t kShrubPs2DistVersion = 14;
 // v7 files (16-bit textures without mip levels) still load
@@ -44,7 +74,14 @@ enum TextureFormat : uint8_t {
 struct Header {
   char magic[4];
   uint32_t version;
-  char level_name[32];
+  char level_name[16];
+  // (AI-assisted) v16: the time of day table: TodColor[tod_color_count], then TodMul[tod_mul_count]
+  // (0, 0: none). Zero in older files (the end of their 32 byte level name).
+  uint32_t tod_offset;
+  uint32_t tod_color_count;
+  uint32_t tod_mul_count;
+  // (AI-assisted) v17: absolute offset of the ExtHeader (0: none; before v17 always 0)
+  uint32_t ext_offset;
   uint32_t num_textures;
   uint32_t textures_offset;  // Texture[num_textures]
   uint32_t num_chunks;
@@ -144,9 +181,111 @@ struct VisRun {
 };
 static_assert(sizeof(VisRun) == 8);
 
+/*!
+ * (AI-assisted) v17: tie levels of detail. The PS2 draws each tie instance with one of its
+ * prototype's four geometries, picked by distance (prototype-bucket-tie dists; geometry 3 beyond
+ * the far-plane). A file keeps two versions of some instance groups (a tie prototype in one
+ * visibility node, or one wind instance): the near one (geometry 0) and the far one (geometry 3, or
+ * nothing), in the same chunks, as visibility runs of their own (RunLod: per VisRun of the file, in
+ * file order). The runtime draws a group's near runs while the camera is within its distance of
+ * the group's sphere (|camera - center| < dist + radius, with hysteresis), else its far runs. The
+ * runs of one draw are ordered near, always, far. Groups not listed (kRunLodAlways runs) have one
+ * version (geometry 3, as before v17).
+ */
+constexpr char kExtMagic[4] = {'C', '3', 'L', 'X'};
+struct ExtHeader {
+  char magic[4];               // kExtMagic
+  uint32_t size;               // sizeof(ExtHeader) (later versions may append fields)
+  uint32_t lod_group_count;    // TieLodGroup[]
+  uint32_t lod_groups_offset;  // absolute
+  uint32_t run_lod_count;      // RunLod[]: one per VisRun of the file, from runs_offset on
+  uint32_t run_lod_offset;     // absolute
+  uint32_t runs_offset;        // where the file's VisRuns start (RunLod i is VisRun i from here)
+  // (AI-assisted, title-popin) absolute offset of float[lod_group_count]: each group's shape error
+  // (the larger one-sided Hausdorff distance between its two versions, game units), from which
+  // the runtime switches by screen-space error; 0: none (files before it: the dist switch)
+  uint32_t lod_error_offset;
+  // (AI-assisted, streaming) v19 (size >= 48): RunSphere[run_lod_count] (the file's runs from
+  // runs_offset on, 0: none), StreamChunk[stream_count], flags (0)
+  uint32_t run_sphere_offset;
+  uint32_t stream_count;
+  uint32_t stream_offset;
+  uint32_t stream_flags;
+};
+static_assert(sizeof(ExtHeader) == 48);
+constexpr uint32_t kExtHeaderV17Size = 32;
+
+/*!
+ * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
+ * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
+ * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the
+ * vertices before v19: CtrLevel.cpp make_run_spheres). r = 0xffff: unknown (never hidden by it).
+ */
+struct RunSphere {
+  int16_t c[3];
+  uint16_t r;
+};
+static_assert(sizeof(RunSphere) == 8);
+
+/*!
+ * (AI-assisted, streaming) v19: a near chunk (Chunk::kind CHUNK_KIND_TIE, lod_tier 0): the near
+ * versions (RunLod kRunLodNear) of the tie LOD groups whose center is in its cell. Every LOD group's
+ * near version is in near chunks; its far version in an ordinary tie chunk. cls 1: a group the level's
+ * v18 budget took (kTieLodBudgets: loaded with the level when streaming is off), 2: one it left coarse
+ * (only streamed). A group of a near chunk is near when the camera is within its shape error x the
+ * runtime's factor (tie_lod_px, focal length) + its radius of its center, so the chunk is needed
+ * within need_a + need_e x that factor of its bounding sphere's center: need_a the largest distance of
+ * a group's center to that center plus the group's radius, need_e the largest group error (game
+ * units).
+ */
+struct StreamChunk {
+  uint32_t chunk;
+  uint16_t cls;
+  uint16_t pad;
+  float need_a;
+  float need_e;
+};
+static_assert(sizeof(StreamChunk) == 16);
+constexpr uint16_t kStreamCore = 1, kStreamExtra = 2;
+struct TieLodGroup {
+  float bsphere[4];  // world: x, y, z, radius (both versions)
+  float dist;        // the near version up to this distance of the sphere (game units)
+};
+static_assert(sizeof(TieLodGroup) == 20);
+constexpr uint8_t kRunLodAlways = 0, kRunLodNear = 1, kRunLodFar = 2;
+struct RunLod {
+  uint16_t group;  // TieLodGroup index (0xffff with kRunLodAlways)
+  uint8_t lod;     // kRunLod*
+  uint8_t pad;
+};
+static_assert(sizeof(RunLod) == 4);
+
+/*!
+ * (AI-assisted) v16: a time of day color: its rgb in each of the game's 8 palettes, GS units
+ * (0x80 = 1.0); the PC's tfrag3 / tie3 / shrub time of day colors. The color at runtime, per
+ * channel: min(255, sum(w[p] * rgb[p]) >> 6) with the game's weights w (the mood's itimes, 64 =
+ * 1.0), as interp_time_of_day_slow (background_common.cpp). The vertex keeps its own alpha.
+ */
+struct TodColor {
+  uint8_t rgb[8][3];
+};
+static_assert(sizeof(TodColor) == 24);
+
+/*!
+ * (AI-assisted) v16: a time of day color times a vertex color: min(255, color * mul / 128) per
+ * channel. Shrubs (shrub.vert: base color * time of day color * 4, in GS units base * tod / 128),
+ * the untextured vista (the texture's average color).
+ */
+struct TodMul {
+  uint16_t color;  // TodColor index
+  uint8_t mul[3];
+  uint8_t pad;
+};
+static_assert(sizeof(TodMul) == 6);
+
 struct Vertex {
   int16_t pos[3];  // quantized, see Chunk
-  int16_t pad;
+  int16_t pad;     // (AI-assisted) v16: time of day color / TodMul (uint16_t, see kTodVersion)
   int16_t st[2];      // texture coordinates * 1024
   uint8_t rgba[4];    // baked time of day color, GS units (0x80 = 1.0)
 };
@@ -163,6 +302,25 @@ static_assert(sizeof(Draw) == 16);
 // (AI-assisted) v13 Draw::kind flag: the draw's triangles are closed, consistently wound surfaces
 // (front faces counter-clockwise seen from outside, right-handed world): back faces may be culled
 constexpr uint16_t kDrawCullBack = 0x100;
+// (AI-assisted) v15 Draw::kind flags (see kVersion).
+// kDrawAtlasUV: the texture is an atlas of small textures and the texture coordinates are in units
+// of 1 / kAtlasUVScale (not 1 / 1024): the cells are small parts of it.
+constexpr uint16_t kDrawAtlasUV = 0x200;
+constexpr float kAtlasUVScale = 32768.f;
+// kDrawBlendDropped: the draw mode had alpha blending (Cs * As + Cd * (1 - As)), but every texel of
+// every mip level of the texture has alpha 1.0 (or it's untextured) and every vertex alpha is
+// >= 0x80: As = 1 everywhere, the blending leaves Cs. The ab bit was cleared; the draw keeps its
+// place among the blended draws (the runtime keeps its order). config opaque_alpha = off: blended.
+constexpr uint16_t kDrawBlendDropped = 0x400;
+// kDrawAlphaTestDropped: the draw mode's alpha test (GEQUAL, reference: the mode's aref field) can
+// never fail for these triangles (alpha 1.0 everywhere, as above): its enable bit was cleared
+// (draws of the same texture and state may have been merged). config opaque_alpha = off: tested.
+constexpr uint16_t kDrawAlphaTestDropped = 0x800;
+// (AI-assisted, streaming) v19: every vertex the draw uses has alpha 0x80 (the runtime's fog_alpha,
+// CTR_TCC_ALPHA80: before v19 worked out at load from the chunk's vertices, which a near chunk
+// doesn't have then)
+constexpr uint16_t kDrawAlpha80 = 0x1000;
+constexpr uint32_t kAtlasVersion = 15;
 
 /*!
  * (AI-assisted) v11: compression. The file is the v10 layout (the "raw image": every offset in the

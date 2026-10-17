@@ -136,8 +136,6 @@ int main(int /*argc*/, char** /*argv*/) {
     lg::info("3DS hardware: {}", probe);
   }
   lg::info("3DS: share of core 1 (APT_SetAppCpuTimeLimit): {}%", ctr_core1_share());
-  lg::info("3DS: system core (core 1) for the IOP/IO threads: {}",
-           ctr_syscore_available() ? "yes (80%, experimental: io_on_system_core)" : "no, core 0");
   {
     int sound_core = 1;
     if (ctr_sound_config(&sound_core)) {

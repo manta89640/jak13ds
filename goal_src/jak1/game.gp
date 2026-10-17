@@ -404,7 +404,11 @@
 ;; Text
 ;;;;;;;;;;;;;;;;;;;;;
 
-(defstep :in "game/assets/jak1/game_text.gp"
+;; (AI-assisted) the 3DS build (small memory) has its own wording for the PS2's memory card and
+;; disc messages (game_text_3ds.gp)
+(defstep :in (if (eq? (get-environment-variable "OPENGOAL_SMALL_MEMORY" :default "0") "1")
+                 "game/assets/jak1/game_text_3ds.gp"
+                 "game/assets/jak1/game_text.gp")
   :tool 'text
   :out '("$OUT/iso/0COMMON.TXT"
          "$OUT/iso/1COMMON.TXT"

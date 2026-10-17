@@ -526,6 +526,12 @@ BankHandle Player::LoadBank(std::span<u8> bank) {
   return mLoader.AddBank(std::move(parsed));
 }
 
+BankHandle Player::LoadBank(std::span<u8> bank, std::unique_ptr<u8[]> owner) {
+  auto parsed = Loader::ParseBank(bank, &owner);
+  std::scoped_lock lock(mTickLock);
+  return mLoader.AddBank(std::move(parsed));
+}
+
 void Player::UnloadBank(BankHandle bank_handle) {
   std::scoped_lock lock(mTickLock);
   auto* bank = mLoader.GetBankByHandle(bank_handle);
