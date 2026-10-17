@@ -2629,32 +2629,8 @@ float g_detail_t = 0.25f;
 // medium objects) times detail_scale. With chunk kinds (newer c3l files): shrubs up to
 // shrub_distance (GPU-bound levels had 200-300k shrub triangles within the converter's 100 m),
 // ties times tie_distance_scale (most ties stopped at 100 m: pop-in); with auto_detail both move
-// toward their _max values as far as the GPU time allows.
-float chunk_max_dist(const c3l::Chunk& ch, const CtrSettings& s, bool shrub_ps2_dist) {
-  if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2_dist) {
-    // (AI-assisted) c3l v14: the PS2 distance of the chunk's shrubs (their prototypes' class)
-    float k = s.shrub_scale;
-    if (s.auto_detail) {
-      k += (std::max(s.shrub_scale_max, k) - k) * g_detail_t;
-    }
-    return ch.max_dist * k * s.detail_scale;
-  }
-  if (ch.kind == c3l::CHUNK_KIND_SHRUB && s.shrub_distance > 0) {
-    float d = s.shrub_distance;
-    if (s.auto_detail) {
-      d += (std::max(s.shrub_distance_max, d) - d) * g_detail_t;
-    }
-    return d * 4096.f * s.detail_scale;
-  }
-  if (ch.kind == c3l::CHUNK_KIND_TIE) {
-    float k = s.tie_distance_scale;
-    if (s.auto_detail) {
-      k += (std::max(s.tie_distance_scale_max, k) - k) * g_detail_t;
-    }
-    return ch.max_dist * k * s.detail_scale;
-  }
-  return ch.max_dist * s.detail_scale;
-}
+// toward their _max values as far as the GPU time allows. (micro-level: worked out in draw_level's
+// chunk loop, its factors once per level draw)
 
 // (AI-assisted) fine_vis: the set of the cell holding the camera position t (-1: none)
 int fine_vis_cell_set(const CtrLevelData::FineVis& fv, const math::Vector4f& t) {
@@ -3558,8 +3534,28 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float lim = vista_dist + ch.bsphere[3];
     m_vista_src[ci] = vista_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim;
   };
-  for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
-    const auto& ch = lev.chunks[ci];
+  // (AI-assisted, micro-level) chunk_max_dist's factors once per level draw (per chunk the same
+  // operations on them as before), and the arrays and the camera in locals: the u8 stores to the
+  // chunk states had every member and vector loaded again after each of them
+  const float det = settings.detail_scale;
+  float shrub_k = settings.shrub_scale;
+  float shrub_d = settings.shrub_distance;
+  float tie_k = settings.tie_distance_scale;
+  if (settings.auto_detail) {
+    shrub_k += (std::max(settings.shrub_scale_max, shrub_k) - shrub_k) * g_detail_t;
+    shrub_d += (std::max(settings.shrub_distance_max, shrub_d) - shrub_d) * g_detail_t;
+    tie_k += (std::max(settings.tie_distance_scale_max, tie_k) - tie_k) * g_detail_t;
+  }
+  const bool shrub_ps2 = lev.shrub_ps2_dist;
+  const bool shrub_fixed = settings.shrub_distance > 0;
+  const float shrub_fixed_dist = shrub_d * 4096.f * det;
+  const c3l::Chunk* const chunks = lev.chunks.data();
+  u8* const chunk_state = lev.chunk_state.data();
+  const int* const meshes = lev.meshes.data();
+  const float cx = cam.trans[0], cy = cam.trans[1], cz = cam.trans[2];
+  const size_t nchunks = lev.chunks.size();
+  for (size_t ci = 0; ci < nchunks; ci++) {
+    const auto& ch = chunks[ci];
     if (ch.kind == c3l::CHUNK_KIND_VISTA) {
       continue;  // (AI-assisted) after the others (their decisions pick its runs)
     }
@@ -3567,14 +3563,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // are made for every chunk every frame (off screen too): with hard cutoffs, turning the camera
     // around Jak or standing at a threshold made whole cells of objects pop in and out. The two
     // versions of a cell share lod_center and see the same decisions: exactly one is drawn.
-    u8& state = lev.chunk_state[ci];
+    u8& state = chunk_state[ci];
     bool lod_ok = true;
     if (!far_level && (ch.lod_tier == 1 || ch.lod_tier == 2)) {
       // detailed version up close, coarse version further away
       const u8 last = state & 3;
       const float f = last == 1 ? 1.1f : (last == 2 ? 0.9f : 1.f);
-      const float dx = ch.lod_center[0] - cam.trans[0], dy = ch.lod_center[1] - cam.trans[1],
-                  dz = ch.lod_center[2] - cam.trans[2];
+      const float dx = ch.lod_center[0] - cx, dy = ch.lod_center[1] - cy,
+                  dz = ch.lod_center[2] - cz;
       const float lim = lod_dist * f;
       const bool near = lod_dist <= 0 || dx * dx + dy * dy + dz * dz < lim * lim;
       state = (u8)((state & ~3) | (near ? 1 : 2));
@@ -3586,19 +3582,27 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     {
       // draw distance; small objects only up close
       float max_dist = vista_chunk ? vista_dist : draw_dist;
-      const float d = chunk_max_dist(ch, settings, lev.shrub_ps2_dist);
+      float d;
+      if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
+        d = ch.max_dist * shrub_k * det;  // (AI-assisted) c3l v14: the shrubs' PS2 distance
+      } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
+        d = shrub_fixed_dist;
+      } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
+        d = ch.max_dist * tie_k * det;
+      } else {
+        d = ch.max_dist * det;
+      }
       if (d > 0) {
         max_dist = max_dist > 0 ? std::min(max_dist, d) : d;
       }
       if (max_dist > 0) {
-        const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
-                    dz = ch.bsphere[2] - cam.trans[2];
+        const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
         const float lim = max_dist * ((state & 4) ? 1.1f : 1.f) + ch.bsphere[3];
         dist_ok = dx * dx + dy * dy + dz * dz <= lim * lim;
         state = (u8)(dist_ok ? (state | 4) : (state & ~4));
       }
     }
-    if (lev.meshes[ci] < 0 || !dist_ok) {
+    if (meshes[ci] < 0 || !dist_ok) {
       if (!dist_ok && ch.lod_tier != 3) {
         vista_source(ci);
       }
@@ -3613,8 +3617,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // (AI-assisted) landmarks only within the LOD distance: a neighbouring level has no
       // visibility data here, and its landmark ties are 57k-152k triangles (village2, lavatube)
       if (ch.lod_tier == 0 && lod_dist > 0) {
-        const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
-                    dz = ch.bsphere[2] - cam.trans[2];
+        const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
         const float lim = lod_dist + ch.bsphere[3];
         if (dx * dx + dy * dy + dz * dz > lim * lim) {
           vista_source(ci);
