@@ -272,7 +272,7 @@ Instructions per vertex (including `end`), output registers; the hardware defaul
 | level mesh, game fog on | 22 / 4 regs | 15 / 4 | `ctr_mesh_opt` 11 / 3 | fog factors as two extra matrix rows (dph), texcoord1 in texcoord0's .zw |
 | level mesh, fog = off | 22 / 4 | 15 / 4 | `ctr_mesh_opt_df` 8 / 3 | only the draw distance fog: one dph straight into the output |
 | level mesh, fog_alpha | 20 / 3 | 13 / 3 | `ctr_mesh_opt_fa` 11, `_df_fa` 9 | no clamp at 1 (the GPU saturates colors) |
-| merc | 54 / 3 | 36 / 3 | `ctr_skin_opt` 34 / 3 | weights unscaled (clip x, y, z columns / 255), color scale in the light colors |
+| merc | 54 / 3 | 36 / 3 | `ctr_skin_opt` 37 / 3 | weights unscaled (clip x, y, z columns / 255), color scale in the light colors; (far-fog, Oct 17) +3 for merc_fog (dph + 2 clamps, texcoord1 in texcoord0's .zw) |
 | merc shine | 57 / 3 | 36 / 3 | `ctr_skin_env_opt` 34 / 3 | the same; texcoord0 written in two parts |
 | PS2 ocean | 15 / 4 | - | `ctr_ocean_full_opt` 10 / 3 | texcoord1 packed |
 | PS2 ocean, clipped | 13 / 4 | - | `ctr_ocean_full_clip_opt` 7 / 3 | one mov with the swizzle xyzz |

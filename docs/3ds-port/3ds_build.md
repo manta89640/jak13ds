@@ -517,7 +517,9 @@ PC it runs with `gk --ctr-gfx`.
     (`platform/3ds/shaders`).
   - `game/graphics/ctr/ctr_gpu_soft.cpp`: a software rasterizer for PC. It writes PNG frames
     (`gk --ctr-gfx --ctr-dump DIR --ctr-dump-every N`), which lets the renderer be tested without
-    an emulator.
+    an emulator. (AI-assisted, far-fog, Oct 17) It draws the fog as the 3DS does (level meshes and
+    the ocean: the game fog and the draw distance / vista haze; merc with merc_fog; the PS2 ocean's
+    vertex fog); before, host frames had no fog at all. `CTR_SOFT_NO_FOG=1`: none, as before.
 - **Text, menus, debug draws** (buckets `debug`, `debug-no-zbuf`, `subtitle`): `CtrDirect`
   interprets the GIF packets, like `DirectRenderer`.
   - Textures come from `CtrVram`, an emulation of the 4 MB GS VRAM.

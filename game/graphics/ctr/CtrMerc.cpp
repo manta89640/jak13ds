@@ -208,6 +208,15 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     return;
   }
   handle_setup(dma.read_and_advance());
+  // (AI-assisted, far-fog) the game's fog for this bucket's models (merc2.vert's hvdf_offset.w and
+  // fog constants, the frame's fog color), and whether the GPU can draw it
+  m_fog_on = false;
+  if (m_have_camera && !m_snapshot_mode && ctr_settings().merc_fog && ctr_settings().fog &&
+      ctr_gpu_merc_fog_ready()) {
+    ctr_gpu_set_merc_fog(m_hvdf_offset.w(), m_fog.y(), m_fog.z(), rs.fog_color[0],
+                         rs.fog_color[1], rs.fog_color[2]);
+    m_fog_on = true;
+  }
   // jak 1: test register setup + empty transfer
   if (dma.current_tag_offset() != rs.next_bucket) {
     dma.read_and_advance();
@@ -275,10 +284,10 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
               "{} draws, {} envmap batches, {} draws sorted by texture, {} with back faces culled "
-              "({} not: mirroring bone), {} palette bones not sent",
+              "({} not: mirroring bone), {} palette bones not sent, {} draws with fog",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
               m_stats.draws, m_stats.env_batches, m_stats.sorted_draws, m_stats.culled,
-              m_stats.mirrored, m_stats.unsent_bones);
+              m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged);
     m_stats = Stats();
   }
 }
@@ -625,6 +634,46 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos) {
   m_mod_ms += ctr_gpu_time_ms() - t0;
 }
 
+// (AI-assisted, far-fog) whether the game's fog reaches more than half a step (0.5 / 255) anywhere on
+// the model: its farthest point's clip w is at most the largest w of its bones' origins (camera =
+// -tmat[3]) plus the model's size (|vertex| <= 32767 * sqrt(3) * scale, times sqrt(3) times the
+// bone's largest column: a bound of its matrix's norm) along w's gradient. merc2.vert: amount = clamp(w / 255 + 1 - hvdf.w / 255, lo, hi).
+bool CtrMercRenderer::model_fog_visible(const CtrMercModelData& model,
+                                        const CtrMercMat* const* bones,
+                                        const u8* slots,
+                                        int n) const {
+  constexpr float kNoFog = 0.5f / 255.f;
+  const float fmax = std::clamp(m_fog.z(), 0.f, 255.f), fmin = std::clamp(m_fog.y(), 0.f, 255.f);
+  const float lo = 1.f - fmax / 255.f, hi = 1.f - fmin / 255.f;
+  if (lo > kNoFog) {
+    return true;  // fog everywhere
+  }
+  if (hi <= kNoFog) {
+    return false;  // no fog anywhere
+  }
+  const float* cw = m_clip + 12;  // the clip matrix's w row (camera x, y, z, 1)
+  const float grad = std::sqrt(cw[0] * cw[0] + cw[1] * cw[1] + cw[2] * cw[2]);
+  const float size = model.scale * 32767.f * 3.f;
+  // the w where the amount reaches kNoFog
+  const float w_fog = (kNoFog - 1.f) * 255.f + m_hvdf_offset.w();
+  for (int b = 0; b < n; b++) {
+    if (slots[b] >= 128) {
+      continue;
+    }
+    const math::Vector4f* t = bones[slots[b]]->tmat;
+    float col = 0;
+    for (int c = 0; c < 3; c++) {
+      col = std::max(col, t[c].x() * t[c].x() + t[c].y() * t[c].y() + t[c].z() * t[c].z());
+    }
+    const float w = -(cw[0] * t[3].x() + cw[1] * t[3].y() + cw[2] * t[3].z()) + cw[3] +
+                    grad * size * std::sqrt(col);
+    if (w > w_fog) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) {
   const u8* input = init.data;
   // The bone matrices are not in the DMA data (they're in game memory that the next frame's
@@ -789,6 +838,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     m_stats.bad_bones++;
     return;
   }
+  // (AI-assisted, far-fog) the game's fog on this model (not HUD models: their own projection),
+  // unless it is ~0 at all of it: no fog stage then (texture unit 1 stays off)
+  const bool model_fog = m_fog_on && !(flags.bitflags & 8) && model_fog_visible(*model, bones, slots, i);
 
   // the model's lights, for the skin shader's per vertex lighting (like merc2.vert)
   float light_data[28];
@@ -1022,6 +1074,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       mode.disable_depth_write();
     }
     ctr_draw_state st = ctr_state_from_draw_mode(mode, tex);
+    // (AI-assisted, far-fog) the draw's fog as Merc2 (its mode's fog enable); not the shine
+    if (model_fog && !envmap && mode.get_fog_enable()) {
+      st.tcc |= CTR_TCC_FOG;
+      m_stats.fogged++;
+    }
     // (AI-assisted) cull_merc: draws the converter marked (closed enough, wound like the vertex
     // normals: c3l::kMercDrawCullBack) lose their back faces
     if (cull_merc && (draw.palette[c3l::kMercDrawFlagsByte] & c3l::kMercDrawCullBack)) {

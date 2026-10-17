@@ -36,7 +36,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"bones_native", "off"},     {"c3l_read_buffer", "0"},     {"fog_stage_skip", "off"},
     {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
     {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
-    {"tie_lod", "off"},          {"gpu_micro", "off"},
+    {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"logic_micro", "off"}, /* micro-logic */
 };
 /* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the A/B GPU
