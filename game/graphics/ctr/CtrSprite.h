@@ -161,6 +161,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
   float m_st_out[2][4][2] = {};
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
+  bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
     int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels

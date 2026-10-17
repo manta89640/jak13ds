@@ -833,14 +833,17 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted) cull_merc: a bone of the palette mirrors (its matrix' determinant isn't positive):
   // that draw's winding is flipped on screen, so it isn't culled. Not for HUD models (their own
   // projection)
-  const bool cull_merc = ctr_settings().cull_merc && !(flags.bitflags & 8);
+  // (AI-assisted) the settings looked up once per model (each ctr_settings() call is a function
+  // call with a memory barrier for its static's guard)
+  const CtrSettings& cs = ctr_settings();
+  const bool cull_merc = cs.cull_merc && !(flags.bitflags & 8);
   bool palette_mirrors = false;
   // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
   // there yet)
   // merc_tex_sort: not for models whose vertices change per instance (blend shapes, rewritten
   // vertices: one mesh); their shine is queued too then (its base may be in the queue)
-  const bool tex_sort = ctr_settings().merc_tex_sort && !model->blerc_count && model->mod.empty();
-  const bool env_batch = ctr_settings().envmap_batch || tex_sort;
+  const bool tex_sort = cs.merc_tex_sort && !model->blerc_count && model->mod.empty();
+  const bool env_batch = cs.envmap_batch || tex_sort;
   u32 q_clip = ~0u, q_rows = ~0u, q_lights = ~0u;
   u32 model_rank = ~0u;
   // (AI-assisted) the palette's number for the GPU (new with every palette made) and its float24
@@ -879,14 +882,14 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
   // address of its bone matrices)
   const std::vector<c3l::MercDraw>* draws = &model->draws;
-  if (!model->gen_draws.empty() && ctr_settings().merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
+  if (!model->gen_draws.empty() && cs.merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
       slots[0] < 128) {
     u32 key;
     memcpy(&key, &matrix_array[0], 4);
     const math::Vector4f& t = bones[slots[0]]->tmat[3];
     const float d = std::sqrt(t.x() * t.x() + t.y() * t.y() + t.z() * t.z()) * (1.f / 4096.f);
     const float size_m = model->scale * 32767.f * (1.f / 4096.f);
-    const float at = std::max(25.f, 12.5f * size_m) * ctr_settings().merc_lod_scale;
+    const float at = std::max(25.f, 12.5f * size_m) * cs.merc_lod_scale;
     auto& g = m_gen_lod[key];
     g.frame = m_frame;
     g.low = g.low ? d > 0.9f * at : d > 1.1f * at;
@@ -909,7 +912,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     const bool envmap = draw.eye_id == c3l::kMercEnvmapDraw;
     float fade[4] = {0, 0, 0, 0};
     if (envmap) {
-      if (draw.effect >= effect_count || !ctr_settings().envmap) {
+      if (draw.effect >= effect_count || !cs.envmap) {
         continue;
       }
       const u8* f = fades + 4 * draw.effect;

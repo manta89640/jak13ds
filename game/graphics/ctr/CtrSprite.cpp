@@ -206,7 +206,11 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   m_last_tex = -1;  // textures may have changed since the last frame
   m_last_tex_valid = false;
   m_have_last_ad = false;
-  m_world_left = ctr_settings().sprites ? ctr_settings().max_sprites : 0;
+  // (AI-assisted) the settings looked up once per frame (each ctr_settings() call is a function
+  // call with a memory barrier for its static's guard)
+  const CtrSettings& cs = ctr_settings();
+  m_alpha_discard = cs.sprite_alpha_discard;
+  m_world_left = cs.sprites ? cs.max_sprites : 0;
   // direct GS data sent before the sprites
   m_direct->reset_state();
   while (dma.current_tag().qwc != 7 && dma.current_tag_offset() != rs.next_bucket) {
@@ -221,7 +225,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   }
 
   // the distorter first (like Sprite3::render_jak1): it reads the screen as drawn so far
-  if (read_distorter(dma, rs) && ctr_settings().sprites && ctr_settings().distort) {
+  if (read_distorter(dma, rs) && cs.sprites && cs.distort) {
     const double td = ctr_gpu_time_ms();
 #ifndef __3DS__
     ctr_gpu_soft_bucket("sprite-distort");
@@ -262,8 +266,8 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     }
     m_corner_reach = b * xy;
   }
-  m_size_cap = ctr_settings().sprite_max_size * 224.f;
-  m_min_alpha_big = (float)ctr_settings().sprite_min_alpha;
+  m_size_cap = cs.sprite_max_size * 224.f;
+  m_min_alpha_big = (float)cs.sprite_min_alpha;
   for (int k = 0; k < 4; k++) {
     for (int p = 0; p < 2; p++) {
       const float st_mul = p ? 2.f : 1.f, st_add = p ? -1.f : 0.f;
@@ -632,7 +636,7 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
     // (AI-assisted) config sprite_alpha_discard: fragments with alpha 0 skip the blending (no
     // framebuffer read and write) where alpha 0 adds nothing: Cs * As (+ or -) Cd. Not for the
     // blend modes that use a fixed factor or the destination's alpha.
-    if (!zwrite && mode != MODE_HUD && ctr_settings().sprite_alpha_discard &&
+    if (!zwrite && mode != MODE_HUD && m_alpha_discard &&
         (st.blend == CTR_BLEND_ALPHA || st.blend == CTR_BLEND_ADD ||
          st.blend == CTR_BLEND_SUB)) {
       st.atest = CTR_TEST_GREATER;
