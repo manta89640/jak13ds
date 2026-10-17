@@ -640,3 +640,67 @@ Azahar time per direct merc draw, the clip and light compares, the bone uploads)
 flushes and GX submits (SVCs, which a wall clock profile of Azahar shows as the render thread's
 biggest non-waiting part). The far ocean's time includes the sky when sky_last draws it at the far
 ocean's first vertex reservation (SKY_HOOK_ANY).
+
+## Round 2: where the render thread's time goes per draw and per request (AI-assisted, Oct 17, micro-mg)
+
+**Measured with tick probes.** A build with svcGetSystemTick around the backend's functions (not
+in the tree; a probe pair costs 352 ticks, subtracted below) in the five views (village1 hut,
+Snowy fort, village3 warp gate, sunkenb start, Misty bike), Azahar ticks (268 per us, ~1 per
+instruction):
+
+| what | per call | per frame |
+|---|---|---|
+| GSPGPU_FlushDataCache (an IPC to the GSP) | 16.7k ticks (62 us) | 10-35 (Snowy 23, Misty 32): 0.6-2.2 ms |
+| pipeline_submit (vertex flush, deferred flushes, GX_ProcessCommandList) | 40-130k | 3-5 |
+| ctr_gpu_draw_skinned (merc) | ~2.1k (without its nested calls' probes) | 115-195 |
+| apply_state_tint (full path) | ~650 | 140-400 |
+| raw_skin_rows_f24 (a palette upload) | ~250 | 150-180 (almost every merc draw) |
+| raw_draw_elements | ~110 | |
+| C3Di_UpdateContext after a program switch | ~3.6k | 12-18 |
+
+The flush requests were the biggest item: almost all of them came from CtrLevel's time of day
+recolor (one ctr_gpu_mesh_flush per chunk, tod_recolor; a Misty frame had 37 deferred ranges,
+0.4-0.7 MB each, ~2.5 MB in all), a request each where the ranges were more than 8 KB apart.
+
+**What changed** (gpu_micro, bits 128 / 256 / 512; `set gpu_micro_mask N` switches them in one
+run: the numbers are 127 (round 1 only) against 1023, two segments each per view, the windows that
+start inside a segment):
+
+| change | what | identity | Azahar |
+|---|---|---|---|
+| raw glows (MICRO_RAWGLOW) | the procedural texture sprites were citro3d draws: the whole attribute buffer table, fragment operations and both combiner stages, C3Di_UpdateContext's uniform scans, per glow. Now raw like every other sprite (the proctex unit and unit 0's switch-off still through citro3d at raw_sync); unit 1's gating left as the citro3d draw left it | register-equivalent (--kicks) | ~2k ticks less per glow (sprite quads draws 4.1k -> 3.5k average with 2 glows in 7 in village1); 1-2 glows per frame in these views |
+| texture-only state (MICRO_TEXSTATE) | a raw state that differs from the last full one only in its texture (or filter / clamp, which only the bind reads), with the same mesh, tint, texture kind and settings while the context still has what that one wrote: only the bind | the same command words | 45-84 of 160-240 states per frame; 25-77 ticks less per apply_state on average. A version that memoised the combiner and fragment parts separately hit more often but its checks cost more than it saved (+50-80 ticks per call): dropped |
+| flush gap 64 KB (MICRO_FLUSHGAP) | deferred ranges of the linear heap up to 64 KB apart in one request (was 8 KB), and a range that finds the queue full (48) joins a near one instead of a request at once | the same bytes flushed, or more | flush requests per frame 127 -> 1023: village1 21.9 -> 18.2, Snowy 25.5 -> 21.2, village3 9.5 -> 7.7, sunkenb 9.2 -> 8.7, Misty 29.9 -> 21.0 (62 us each) |
+
+Render thread build ms/frame, 127 -> 1023: village1 14.33 -> 14.07, Snowy 14.91 -> 14.51,
+village3 16.96 -> 16.75, sunkenb 21.72 -> 21.84, Misty 19.62 -> 19.45 (the level renderers'
+time moves by 0.3-0.5 ms between segments of one build: the time of day recolor's budget; the
+partial submits' flushes are inside build). merc 2.72 -> 2.53 (Misty), 2.70 -> 2.59 (sunkenb).
+
+`ctr_gpu_flush_range(addr, size)` (ctr_gpu.h) queues any dirty range for that merged flush before
+the next submit, for the renderers that flush by themselves (CtrLevel's recolor is being changed to
+pass its dirty ranges: the ranges' bytes matter on hardware too, ~2.5 MB per frame in Misty).
+
+Same GPU state (cmd_report.py --kicks, gpu_micro_ident = on, paused, five views): the differences
+are those of the noise floor (a sky texture's other copy, animated merc bones, immediate vertices
+further along the buffer) and two to four immediate draws that one of the two frames has and the
+other not (in either direction: the paused game's content, not the change).
+
+Checked and left:
+- raw_f24 with CtrMicro.h's formula: the same instruction count (55 vs 56 for raw_pack_f24 on this
+  compiler): nothing to gain.
+- merc palettes: consecutive uploads have 4-6 bones; 1-5% of the vectors are already in their slot
+  and 1-2% are the previous palette shifted by one: uploading only the changed rows doesn't pay.
+- the clip and light compares per merc draw (~110 ticks): an id would only skip them for draws
+  that share the palette with the draw before (~20 per frame).
+- sprites written in place: the buckets collect a frame's sprites by state before drawing, the
+  copy is ~1-2k ticks per draw call (4-16 per frame).
+- GX_FlushCacheRegions (three ranges per GSP command): submitted next to the GSP event thread's own
+  submits without libctru's queue lock (a lost command is a hung GPU), and the gxCmdQueue can't
+  take it (it counts completions by GPU events, which a flush doesn't send).
+- svcFlushProcessDataCache directly: killed the render thread on hardware (Oct 3).
+
+Leads: C3Di_UpdateContext after program switches (12-18 per frame x 3.6k ticks, ~0.2 ms: citro3d's
+program configure plus its vertex and geometry shader uniform scans); the merc renderer's own CPU
+outside the backend (~2 ms in Snowy); the sprites in village3 (3.4 ms); the time of day recolor's
+flushed bytes.
