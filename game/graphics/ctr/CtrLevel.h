@@ -271,6 +271,46 @@ struct CtrLevelData {
     }
   };
   std::unique_ptr<Tod> tod;
+  // (AI-assisted, streaming) c3l v19 near chunks (c3l::StreamChunk; CtrStream.h,
+  // docs/3ds-port/streaming.md): the near versions of the tie LOD groups, in chunks of their own.
+  // streaming: read from the file while the camera is near (CtrLevels::stream_update) into the
+  // stream arena, freed when far and the room is needed; else the core ones are loaded with the
+  // level and the others never. A group is drawn with its near version only while every near chunk
+  // holding it is there and within its distance (draw_level), else with its far version.
+  struct StreamUnit {
+    u32 chunk = 0;
+    u16 cls = 0;  // c3l::kStreamCore / kStreamExtra
+    u8 state = 0;  // kUnit*
+    u8 tod_layout = 0;  // its time of day groups were made (at its first read)
+    u16 tod_slots = 0;  // the time of day groups kept for it at load (its visibility ids)
+    float need_a = 0, need_e = 0;  // c3l::StreamChunk
+    u32 bytes = 0;   // vertices + indices in the arena (CtrStreamArena::mesh_bytes)
+    u32 packed = 0;  // file bytes of its blocks
+    void* mem = nullptr;  // kUnitLoading: the arena piece the job fills
+    // a time it was needed while not there: since (ms, frame; late_ms 0: not late), last frame
+    double late_ms = 0, late_last_ms = 0;
+    u64 late_frame = 0, late_last = 0;
+    u32 loads = 0;
+  };
+  static constexpr u8 kUnitAbsent = 0, kUnitLoading = 1, kUnitResident = 2, kUnitNever = 3;
+  std::vector<StreamUnit> stream_units;
+  std::vector<u32> chunk_unit;  // per chunk: its unit, UINT32_MAX none (empty: no near chunks)
+  // per tie LOD group: the units holding its near version (group_units[first, first + count))
+  std::vector<u32> group_unit_first;
+  std::vector<u8> group_unit_count;
+  std::vector<u32> group_units;
+  // per unit: the groups whose near version it holds (unit_groups[first[u], first[u + 1]))
+  std::vector<u32> unit_group_first;
+  std::vector<u32> unit_groups;
+  std::vector<u8> unit_ok;  // per unit, this frame (draw_level): there and within its distance
+  bool streaming = false;
+  float stream_k = 0.f;   // the last draw's tie LOD factor (a group is near within its error x
+                          // this + its radius; 0: no near versions)
+  u64 stream_frame = 0;   // the last draw's frame
+  u32 stream_resident = 0;  // bytes of the units there
+  // the file's header and block directory, for the stream jobs' readers (no reads of them)
+  std::shared_ptr<const c3l::Reader::Dir> file_dir;
+  bool is_unit(size_t ci) const { return !chunk_unit.empty() && chunk_unit[ci] != UINT32_MAX; }
 };
 
 /*! (AI-assisted) host --ctr-gfx with env CTR_FINE_VIS_CHECK: the level pieces fine_vis hid this
@@ -331,6 +371,23 @@ class CtrLevels {
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
+  /*! (AI-assisted, streaming) render thread, each level draw: the camera position (game units) */
+  void stream_note_camera(const math::Vector4f& trans, u64 frame);
+  /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
+  void stream_log();
+  /*! (AI-assisted, streaming) host check (env CTR_STREAM_CHECK): the counts of this frame's draw
+   * of a level (CtrTfragRenderer::draw_level) */
+  struct StreamCheck {
+    u64 frames = 0, groups = 0;
+    u64 late_groups = 0, late_frames = 0;    // near in the reference, far: data not there yet
+    u64 late_unrequested = 0;                // ... and not even being read (no room)
+    u64 holes = 0;                           // near versions drawn without their data (never)
+  };
+  StreamCheck& stream_check() { return m_scheck; }
+  /*! (AI-assisted, streaming) a unit needed (draw_level): late statistics */
+  void stream_late(CtrLevelData& lev, u32 unit, u64 frame);
+  /*! (AI-assisted, streaming) a level drawn: its groups drawn far because their data was late */
+  void stream_note_level(CtrLevelData& lev, u32 late_groups, u64 frame);
   /*! (AI-assisted) What the render thread does at the start of each frame for the loader: a
    * parked prefetch the game gave up on to unload, or the loader waiting for memory (make_room).
    * The game can wait for a level without drawing frames (both level slots empty: it loads in a
@@ -402,10 +459,29 @@ class CtrLevels {
     u32 merc_vertex_offset = 0, merc_index_offset = 0;
     std::vector<RepairMerc> merc;  // in file order
     bool textures = false;         // the texture pool
-    bool parts() const { return detail || repair; }
+    // (AI-assisted, streaming) a stream job: these near chunks into their arena pieces
+    bool stream = false;
+    struct StreamPart {
+      u32 unit, chunk;
+      u32 first_vertex, vertex_count, index_first, index_end;
+      void* mem = nullptr;
+      // the chunk's draws (first_index relative to its indices) and runs, for its time of day
+      // groups (layout: not made yet)
+      bool layout = false;
+      std::vector<c3l::Draw> draws;
+      std::vector<c3l::VisRun> runs;
+    };
+    std::vector<StreamPart> stream_parts;  // in file order
+    u32 tod_ntab = 0;                      // the level's time of day entries (0: none)
+    std::shared_ptr<const c3l::Reader::Dir> dir;  // the file's directory (CtrLevelData::file_dir)
+    size_t window = 0;                     // the reader's window for these reads
+    bool parts() const { return detail || repair || stream; }
     // in m_requested
     std::string key() const {
-      return detail ? name + "#detail" : (repair ? name + "#repair" : name);
+      return detail   ? name + "#detail"
+             : repair ? name + "#repair"
+             : stream ? name + "#stream"
+                      : name;
     }
   };
   // (AI-assisted) a level's texture pool and textures (load_textures)
@@ -425,6 +501,20 @@ class CtrLevels {
     std::vector<std::pair<u32, int>> merc_meshes;  // repair: (merc model, mesh)
     TexLoad tex;                                   // repair: the texture pool
     u32 heap_largest = 0;  // (AI-assisted) FAILED: the largest free heap block then (3DS)
+    // (AI-assisted, streaming) a stream job's meshes, each with its time of day groups if asked
+    struct StreamOut {
+      u32 unit = 0;
+      int mesh = -1;
+      bool layout = false;
+      std::vector<CtrLevelData::Tod::VisGroup> groups;
+      std::vector<u16> run_group;  // per run of the chunk
+    };
+    std::vector<StreamOut> stream_out;
+    double ms = 0, read_ms = 0;  // the job's time, its file reads'
+    u64 read_bytes = 0;
+    u32 reads = 0;
+    u32 preloads = 0, preload_misses = 0;  // (streaming) runs read in one request each, or not
+    u64 ready_frame = 0;  // host, env CTR_STREAM_SIM: taken from this frame on (SD card model)
   };
   void request(const Job& job);  // render thread
   void run_job(const Job& job);  // loader thread (or inline without one)
@@ -494,6 +584,45 @@ class CtrLevels {
   };
   std::map<std::string, Prefetched> m_prefetched;
   void update_level_count();
+
+  // ---- (AI-assisted, streaming) ----
+  void stream_update(u64 frame);
+  void run_stream_job(const Job& job, Done* d);
+  void take_stream(Done& d, u64 frame);
+  void stream_evict(CtrLevelData& lev, u32 unit);
+  void stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64 end_frame);
+  // the units in the arena's growth segments freed (all: a level load needs the memory; else the
+  // ones not needed now); returns how many
+  u32 stream_shrink(bool all);
+  static void free_stream_parts(const Job& job);
+  bool m_stream_inflight = false;  // a stream job queued, running or not taken (one at a time)
+  std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
+  // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
+  float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
+  u64 m_cam_frame = 0;
+  bool m_cam_valid = false;
+  // scheduling (kept to avoid allocations)
+  struct StreamCand {
+    CtrLevelData* lev;
+    u32 unit;
+    float score;
+  };
+  std::vector<StreamCand> m_want, m_have;
+  StreamCheck m_scheck;
+  struct StreamStats {
+    u64 frames = 0, jobs = 0, units = 0, bytes = 0, read_bytes = 0, reads = 0, evictions = 0;
+    u64 no_room = 0, late_events = 0, late_frames_total = 0;
+    double read_ms = 0, job_ms = 0, job_max_ms = 0, late_ms_total = 0, late_ms_max = 0;
+    double sched_ms = 0, sched_max_ms = 0;
+    u64 need_max = 0, need_sum = 0;  // bytes of the units needed now (score < 0) per frame
+    u64 neighbours = 0;  // units read along with their file neighbours before they were wanted
+    u64 late_periods = 0, late_frames_max = 0;
+    u64 shrunk = 0;  // units freed to give growth segments back
+    u64 packed = 0;  // the file bytes of the units read (their blocks)
+    u64 preloads = 0, preload_misses = 0;
+    u64 late_group_frames = 0, late_frames = 0, last_late_frame = 0;
+    double since_ms = 0;  // the window's start
+  } m_sst;
 };
 
 /*! The camera the game sends to the background renderers (GoalBackgroundCameraData). */
