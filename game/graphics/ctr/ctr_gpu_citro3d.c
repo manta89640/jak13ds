@@ -2301,7 +2301,7 @@ static int pres_init(void) {
 
 /* after the frame's draws are in the GPU queue: its transfer to a free screen buffer, the
  * fence, and the frame handed to the vblank callback */
-static void pres_queue_frame(void) {
+static void pres_queue_frame(u32* fence_id) {
   int b = -1;
   const u64 t0 = svcGetSystemTick();
   for (int tries = 0; b < 0; tries++) {
@@ -2356,9 +2356,14 @@ static void pres_queue_frame(void) {
    * GPU queue stalled: black top screen, frozen game, sound still playing). Azahar fills any
    * memory. */
   {
-    u32* id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
-    id[0] = id[1] = id[2] = id[3] = g.frame_no;
-    cache_flush_now(id, 16);
+    /* (AI-assisted, micro-gpu) fence_id: the frame's number already in its vertex buffer
+     * (ctr_gpu_frame_end), out of the CPU cache with the vertices: no flush request of its own */
+    u32* id = fence_id;
+    if (!id) {
+      id = s_pres.ids + 4 * (s_pres.q_tail % PRESENT_Q);
+      id[0] = id[1] = id[2] = id[3] = g.frame_no;
+      cache_flush_now(id, 16);
+    }
     GX_TextureCopy(id, 0, s_pres.fence, 0, 16, 8 /* raw copy */);
   }
   /* the latency: up after a late frame. (AI-assisted) Down after a window of 150 frames (~5 s)
@@ -3022,6 +3027,16 @@ void ctr_gpu_frame_end(void) {
   ctr_gpu_run_sky_hook(); /* (AI-assisted) sky_last: still pending (nothing blended came) */
   diag_rt("frame_end: flush");
   raw_vc_flush();
+  /* (AI-assisted, micro-gpu) steady pacing's fence words (the frame number the fence copy writes)
+   * at the end of the frame's vertex buffer, flushed with it: one GSP request less per frame. The
+   * buffer is written again two frames later, after this frame's fence landed (overlap2_wait_frame,
+   * or C3D_FrameBegin's wait for an idle GPU) */
+  u32* fence_id = NULL;
+  if ((s_micro & MICRO_FENCE) && s_pres.on && g.vbuf_used + 16 <= VBUF_BYTES) {
+    fence_id = (u32*)(g.vbuf + g.vbuf_used);
+    fence_id[0] = fence_id[1] = fence_id[2] = fence_id[3] = (u32)g.frame_no;
+    g.vbuf_used += 16;
+  }
   flush_vbuf();
   const int bd = s_bd.frame;
   if (bd) {
@@ -3070,7 +3085,7 @@ void ctr_gpu_frame_end(void) {
   }
   if (s_pres.on) {
     diag_rt("frame_end: present queue (wait for a free screen buffer)");
-    pres_queue_frame();
+    pres_queue_frame(fence_id);
   }
   /* all our buffers are flushed when written: only flush the command list, not the whole
    * linear heap (C3D_FrameEnd's default) */
