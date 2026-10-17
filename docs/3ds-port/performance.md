@@ -541,3 +541,58 @@ screenshots at the beach with it on and off look the same. Not done, and why:
   out (flicker at 15 Hz); the render thread's part of making them is ~0.2 ms in all.
 - the eyes are composited only when their sprites change; ocean = full has ocean_texture_rate = 2;
   envmap shine has no per-frame texture.
+
+## Micro-optimisations of the GPU backend (AI-assisted, Oct 17, micro-gpu)
+
+Branch micro-gpu: smaller command lists and less render-thread work for the same GPU state at
+every draw. `config.ini gpu_micro = off` turns all of it off (the safe preset's line), except the
+float24 conversion (bit-identical, no key).
+
+| change | what | command words per frame | render thread (Azahar) |
+|---|---|---|---|
+| raw_f24 without branches | f32 -> float24 (matrices, merc bones and lights): 54 instead of 91 ARM instructions per raw_pack_f24 (4 values), same result for all 2^32 inputs (`platform/3ds/tests/f24_test.c`) | 0 | Snowy fort paused build 12.03 -> 11.53 ms, beach 11.91 -> 11.69, village1 13.24 -> 13.06 (with gpu_micro = off: only this) |
+| shader_resident | the 18 vertex programs of both program sets in one code image (351 of 512 instructions, 49 of 128 operand descriptors, MAD's < 32), uploaded once; a program switch writes only the entry point and the output map | -600 (15-17 uploads of 7-34 instructions + descriptors per frame -> 0) | small (shaderProgramConfigure without the code) |
+| texture unit 0 registers | a raw bind writes only the registers that change (mostly the address; one burst over the changed span when shorter), with cmd_dedup | -280 to -430 | |
+| GAS_DELTAZ_DEPTH | written only when the depth function changes (not for a write mask change), with cmd_dedup | ~-70 | |
+| procedural texture tables | the glows' LUTs (128 + 2 x 256 words) stay in the GPU's LUT memory when the unit goes off and on between glows and other draws; uploaded only for another table (or after the HOME Menu / pica_bench) | -640 per glow after other draws | |
+| mesh scales written raw | the c3l v15 atlas draws' texture coordinate scale: the same 8 words C3D_UpdateUniforms writes, without running C3Di_UpdateContext (~2000 instructions); static_cmdlists can record a stretch with an atlas change again | 0 | village1 paused build 13.06 -> 11.95 ms: static_cmdlists copies 534 instead of 19 of ~540 level draws (each atlas change had stopped the stretch from being recorded) |
+| fence words in the vertex buffer | steady pacing's frame number for the fence copy flushed with the vertices | 0 | one GSP flush request less per frame (village1 7.6 -> 6.5) |
+| near flush ranges merged | deferred cache flushes of the linear heap less than 8 KB apart in one GSP request | 0 | (few in these views) |
+
+Words per frame (Azahar, paused, the same frame with everything off and on, see below): village1
+38790 -> 37444 (-3.5%), Snowy fort 35754 -> 34076 (-4.7%), beach 31794 -> 30108 (-5.3%). Program
+switches with a shader upload: 15-17 -> 0 per frame.
+
+**Same GPU state at every draw.** `cmd_report.py --kicks A.bin B.bin` decodes two command dumps
+into the GPU state at each draw: every register (byte masks applied; triggers left out), the float
+uniforms, the fixed attributes, the LUT memories and the vertex program the draw runs, resolved
+from the entry point to `end` with each operand descriptor index replaced by the descriptor
+(programs at another place in code memory compare equal). Memory a frame doesn't write (the
+resident shader image, the procedural tables kept from frames before) is in the dump file's
+prologue ("CMDE"). `gpu_micro_ident = on` makes each cmd_dump request dump frame k with
+gpu_micro off and frame k + 2 with it on (the same vertex buffer copy; the game paused):
+`platform/3ds/tests` has no pad for it, the micro-gpu runs used village1-hut, snow-fort and
+beach-start paused with `set cmd_dump on`. Result: every draw paired, the same state at all draws
+but those where the paused game itself changes between frames k and k + 2: a sky texture's other
+copy (TEXUNIT0_ADDR1, 2-19 draws), a few animated merc models' bones (vsh_f, 9 draws), immediate
+vertices further along the vertex buffer (ATTRIBBUFFER0_OFFSET, 20 draws); the same draws and
+registers differ when both frames are off (gpu_micro = off with gpu_micro_ident: the noise floor).
+
+On hardware (not measured; nothing here changes what the GPU computes):
+- the program switches without a code upload: `pica_bench` B2.prog_sep (a switch between two
+  shbins, with the upload) against B2.prog_entry (two entry points of one shbin) is the price of
+  the upload per switch, 15-17 per frame;
+- the command words: B2's per word price (B2.unif_f32 - B2.unif_f24 per word), ~1.3-1.7k words per
+  frame;
+- a GSP flush request is an IPC (tens of microseconds on hardware, the render thread waits).
+
+Risks: the resident image puts programs at code offsets other than 0 and descriptors at other
+indices (the shbins never did that on hardware, the shader_groups entry points didn't either);
+merging refuses anything but plain arithmetic, `mov`, `mova`, `nop`, `end` and `mad` (no flow
+control, check_shaders.py refuses it anyway) and keeps MAD's descriptors below 32, else it logs
+`[ctr] shader_resident: ... off` and the shbins are used as before.
+
+Leads that need files outside the backend: merc palettes that are windows of one bone array
+shifted by one bone (consecutive draws of a model re-upload ~150 words of bones each; CtrMerc);
+the level draws sorted by texture across chunks re-upload the 18-word chunk matrix at almost every
+draw (534 of 716 draws in village1; CtrLevel's order).
