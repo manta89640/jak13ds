@@ -640,6 +640,24 @@ snapshot; ~128 bytes per sprite) and the chunks read the copy. Host runs take th
 their synchronous render and compare it with game memory (a warning line if a copy differs or a
 chunk finds none).
 
+(AI-assisted, Oct 18, hud2) That copy is right but didn't fix the hardware report ("misshapen HUD
+elements, flickering light from orbs that jumps across the screen"). A host run with the render at
+its latest (`CTR_SOFT_DEFER=1`, 3ds_build.md) shows a clean HUD: no other live read. The cause is
+the PICA's float24: HUD models (the orb, power cell and scout fly icons, the orbs flying into the
+HUD) are drawn with the isometric projection at GS depth 2^24 - camera z (1024 or 2048 below the
+top of the range, or 9999999 for the flying orbs), ~50 GS units deep. A float24 step there is
+~128 GS units (64 at the flying orbs, whose camera z of ~1e7 also loses ~150 units in the skin
+shader's position), so each model had one or two depths: its back faces drew over its front faces
+in mesh order and its envmap shine (GEQUAL against its own base pass) lit them, a speckled bright
+orb that flickers as it spins. Azahar computes shaders in 32-bit floats and never showed it.
+`CtrMerc.cpp` hud_depth_spread now spreads a HUD model's depth about its center to +-2048 GS units
+(16 float24 steps; centers within 2304 of the top move down to 2304, still in front of the HUD
+sprites at ~63500 and the world's near plane at 16584), and HUD models further than 32768 from the
+camera take their bone translations relative to a point 16384 along the line to their center (the
+clip matrix adds it back; same positions, same envmap view direction). Host check with
+`CTR_SOFT_F24=1` and `hud.pad`: speckled icons and flying orbs before, the same as the 32-bit
+render after.
+
 In-run checks: a build with the old code kept next to the new (not in the tree) ran both on the
 same input every time and counted differences, Sandover + Snowy fort and the level_pairs.pad
 route. Host tests: test/ctr_micro (CtrMicro.h against copies of the code it replaced), and

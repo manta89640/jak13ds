@@ -481,10 +481,34 @@ void shade_pixel(const ctr_draw_state& st,
   }
 }
 
+// (AI-assisted) CTR_SOFT_F24=1: each vertex's depth rounded to the PICA's float24 (16 bit
+// mantissa) before it is interpolated, as the hardware's vertex output and depth map are (Azahar
+// computes them in 32-bit floats). Near the top of the depth range (GS z ~2^24: the HUD) a step is
+// 2^-17, ~128 GS z units. The skinned draws (merc) also take their bone rows, camera space
+// position and clip products in float24, as ctr_skin.v.pica on the GPU.
+float f24_round(float f) {
+  uint32_t u;
+  memcpy(&u, &f, 4);
+  u = (u + 0x40u) & ~0x7fu;
+  memcpy(&f, &u, 4);
+  return f;
+}
+
+const bool s_soft_f24 = getenv("CTR_SOFT_F24") != nullptr;
+
 void raster_triangle(const ctr_draw_state& st,
-                     const ctr_vertex* v,
+                     const ctr_vertex* v_in,
                      bool tex_alpha_full = false,
                      const float* fog = nullptr) {
+  ctr_vertex vq[3];
+  const ctr_vertex* v = v_in;
+  if (s_soft_f24) {
+    for (int i = 0; i < 3; i++) {
+      vq[i] = v_in[i];
+      vq[i].z = f24_round(v_in[i].z);
+    }
+    v = vq;
+  }
   // to screen: x in [-1, 1] -> [40, 360], y in [-1, 1] -> [240, 0]
   float sx[3], sy[3];
   for (int i = 0; i < 3; i++) {
@@ -1672,6 +1696,14 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
       for (int b = 0; b < 3; b++) {
         int bi = bidx[b] < palette_count ? bidx[b] : 0;
         const float* r = bones + 12 * bi;
+        float rq[12];
+        if (s_soft_f24) {
+          // (AI-assisted) CTR_SOFT_F24: the bone rows as the float24 uniforms they are
+          for (int e = 0; e < 12; e++) {
+            rq[e] = f24_round(r[e]);
+          }
+          r = rq;
+        }
         float w = bw[b] / 255.f;
         for (int row = 0; row < 3; row++) {
           cam[row] += w * (r[4 * row] * pos[0] + r[4 * row + 1] * pos[1] + r[4 * row + 2] * pos[2] +
@@ -1692,9 +1724,24 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                  l[2] * lights[20 + c];
       }
       float c[4];
-      for (int r = 0; r < 4; r++) {
-        c[r] = clip[4 * r] * cam[0] + clip[4 * r + 1] * cam[1] + clip[4 * r + 2] * cam[2] +
-               clip[4 * r + 3];
+      if (s_soft_f24) {
+        // (AI-assisted) CTR_SOFT_F24: the shader's camera space position, the clip matrix and
+        // its products in float24 (ctr_skin.v.pica: dph r4, then dph with clip)
+        for (int e = 0; e < 3; e++) {
+          cam[e] = f24_round(cam[e]);
+        }
+        for (int r = 0; r < 4; r++) {
+          float acc = f24_round(clip[4 * r + 3]);
+          for (int e = 0; e < 3; e++) {
+            acc = f24_round(acc + f24_round(f24_round(clip[4 * r + e]) * cam[e]));
+          }
+          c[r] = acc;
+        }
+      } else {
+        for (int r = 0; r < 4; r++) {
+          c[r] = clip[4 * r] * cam[0] + clip[4 * r + 1] * cam[1] + clip[4 * r + 2] * cam[2] +
+                 clip[4 * r + 3];
+        }
       }
       if (c[3] < 1e-3f) {
         ok = false;
@@ -1934,15 +1981,37 @@ double ctr_gpu_time_ms(void) {
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
-// the software backend renders synchronously
-int ctr_gpu_async_start(ctr_gpu_job_fn, void*) {
-  return 0;
+// the software backend renders synchronously. (AI-assisted) CTR_SOFT_DEFER=1: the 3DS render
+// thread's latest possible timing instead: a submitted frame is rendered only when the game next
+// waits for the render thread (ctr_gpu_async_wait: the next frame's sync-path, a texture upload,
+// ...), after the game thread has run everything it runs while the 3DS draws the frame. Game
+// memory the renderer reads outside the double buffered DMA chain and its snapshots
+// (CtrRenderer::prepare_frame) then has the next frame's contents, as on hardware in a slow frame.
+static ctr_gpu_job_fn s_defer_fn;
+static void* s_defer_arg;
+static bool s_defer_pending;
+int ctr_gpu_async_start(ctr_gpu_job_fn fn, void* arg) {
+  if (!getenv("CTR_SOFT_DEFER")) {
+    return 0;
+  }
+  s_defer_fn = fn;
+  s_defer_arg = arg;
+  lg::info("[ctr] soft: CTR_SOFT_DEFER, frames rendered at the game's next wait");
+  return 1;
 }
-void ctr_gpu_async_submit(void) {}
+void ctr_gpu_async_submit(void) {
+  s_defer_pending = true;
+}
 double ctr_gpu_async_wait(void) {
+  if (s_defer_pending) {
+    s_defer_pending = false;
+    s_defer_fn(s_defer_arg);
+  }
   return 0;
 }
-void ctr_gpu_async_stop(void) {}
+void ctr_gpu_async_stop(void) {
+  ctr_gpu_async_wait();
+}
 
 }
 

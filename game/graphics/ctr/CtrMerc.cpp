@@ -118,6 +118,76 @@ void mul44(float* out, const float* a, const float* b) {
   }
   memcpy(out, r, sizeof(r));
 }
+
+// (AI-assisted) HUD models' depth on the 3DS GPU. The isometric projection (hud_clip) puts a HUD
+// model at GS depth 2^24 - its camera z (the orb and power cell icons: 1024 or 2048 below the top
+// of the depth range) with the model only some 10-60 GS units deep. The PICA computes each
+// vertex's depth in float24 (16 bit mantissa): near the top of the range one step is 2^-17, ~128
+// GS units, so the whole model got one or two depth values. Its back faces (HUD models aren't
+// culled) then passed the GEQUAL test over its front faces in mesh order, and the envmap shine
+// (tested GEQUAL against its own base pass) lit back faces: the icons and the orbs flying into
+// the HUD looked misshapen with a flickering shine on hardware (Azahar's shaders compute in 32-bit
+// floats, ~1 GS unit). Here the model's depth is spread about its center by K, so it spans
+// kHudDepthRadius GS units (~16 float24 steps either way), and its center is moved down from the
+// top of the range far enough for that. The order against the rest stays: the HUD sprites are
+// ~63500 GS units below the top, the world's near plane (math-camera max-depth) 16584 below it.
+// clip: row-major, w constant (HUD), applied to the camera space position. bones[slots[0..n)]:
+// the model's bones (camera = -(tmat * p + tmat[3]), p the local position = quantized *
+// model_scale), the first one its center.
+constexpr double kHudDepthRadius = 2048.0;  // GS depth units
+constexpr double kHudDepthTop = 256.0;      // the closest a spread model comes to the top
+void hud_depth_spread(float* clip,
+                      const CtrMercMat* const* bones,
+                      const u8* slots,
+                      int n,
+                      float model_scale) {
+  if (clip[12] != 0.f || clip[13] != 0.f || clip[14] != 0.f || !(clip[15] > 0.f)) {
+    return;  // not the isometric projection (w changes with the position)
+  }
+  constexpr double S = 16777215.0;
+  const double w = clip[15];
+  // GS units below the top of the depth range: x = (1 - z / w) / 2 * S, its gradient over the
+  // camera space position, and the model's origin's
+  double grad[3];
+  for (int c = 0; c < 3; c++) {
+    grad[c] = -0.5 * S * clip[8 + c] / w;
+  }
+  const CtrMercMat& m0 = *bones[slots[0]];
+  const double cam[3] = {-m0.tmat[3].x(), -m0.tmat[3].y(), -m0.tmat[3].z()};
+  const double xc =
+      0.5 * S * (1.0 - (clip[8] * cam[0] + clip[9] * cam[1] + clip[10] * cam[2] + clip[11]) / w);
+  // the model's depth radius: x's gradient over the local position (camera = -(tmat * p)), the
+  // largest of its bones' (a model's first bone can be a tiny root: the power cell's), times the
+  // radius of its quantized coordinates' bounding cube
+  double g2max = 0;
+  for (int b = 0; b < n; b++) {
+    if (slots[b] >= 128) {
+      continue;
+    }
+    const CtrMercMat& m = *bones[slots[b]];
+    double g2 = 0;
+    for (int j = 0; j < 3; j++) {
+      const double gj =
+          grad[0] * m.tmat[j].x() + grad[1] * m.tmat[j].y() + grad[2] * m.tmat[j].z();
+      g2 += gj * gj;
+    }
+    g2max = std::max(g2max, g2);
+  }
+  const double r = std::sqrt(g2max) * (double)model_scale * 32767.0 * 1.7320508075688772;
+  if (!(r > 0) || !(r < kHudDepthRadius) || !std::isfinite(xc)) {
+    return;  // already deep enough (or garbage)
+  }
+  // (at most 2^16: a model shrunk to nothing, the progress menu's hidden icons, keeps sane
+  // float24 matrix values)
+  const double k = std::min(kHudDepthRadius / r, 65536.0);
+  const double xc2 = std::max(xc, kHudDepthRadius + kHudDepthTop);
+  // x' = xc2 + k (x - xc): with n = z / w, n' = k n + (1 - k) - 2 (xc2 - k xc) / S
+  const double c = (1.0 - k) - 2.0 * (xc2 - k * xc) / S;
+  for (int i = 0; i < 3; i++) {
+    clip[8 + i] = (float)(k * clip[8 + i]);
+  }
+  clip[11] = (float)(k * clip[11] + c * w);
+}
 }  // namespace
 
 CtrMercRenderer::CtrMercRenderer(std::string name, int id, CtrLevels* levels)
@@ -891,6 +961,9 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     float y_scale;
     memcpy(&y_scale, input + 20, sizeof(y_scale));
     hud_clip(hud, y_scale);
+    if (i > 0 && slots[0] < 128) {
+      hud_depth_spread(hud, bones, slots, i, model->scale);  // (AI-assisted) see there
+    }
     clip = hud;
   }
 
@@ -1012,6 +1085,47 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       mul44(hud_fixed_clip, clip, e);
       clip = hud_fixed_clip;
       hud_nfix = true;
+    }
+  }
+  // (AI-assisted) HUD models far along z (the orbs flying into the HUD: camera z -9999999): the
+  // skin shader's camera space position and the bone rows' translations are float24 on the GPU,
+  // whose step there (~150 GS units) is more than the model's size, so its vertices' depths (and
+  // its parts' places) lost what hud_depth_spread spreads. The bone rows' translations are taken
+  // relative to a point on the line to the model's center, kHudShiftTo from the camera, and the
+  // clip matrix adds it back: the same positions, the same view direction for the envmap's sphere
+  // map (to within the model's size over that distance).
+  constexpr double kHudShiftTo = 16384.0;
+  double hud_shift[3] = {0, 0, 0};
+  bool hud_shifted = false;
+  float hud_shift_clip[16];
+  if ((flags.bitflags & 8) && i > 0 && slots[0] < 128) {
+    // the center in the rows' space: -tmat[3], then D (hud_nfix)
+    const MercMat& m0 = *bones[slots[0]];
+    const double c0[3] = {-(double)m0.tmat[3].x(), -(double)m0.tmat[3].y(),
+                          -(double)m0.tmat[3].z()};
+    double c[3];
+    for (int r = 0; r < 3; r++) {
+      c[r] = hud_nfix ? hud_d[3 * r] * c0[0] + hud_d[3 * r + 1] * c0[1] + hud_d[3 * r + 2] * c0[2]
+                      : c0[r];
+    }
+    const double len = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+    if (len > 2.0 * kHudShiftTo && std::isfinite(len)) {
+      const double f = 1.0 - kHudShiftTo / len;
+      for (int r = 0; r < 4; r++) {
+        double t = clip[4 * r + 3];
+        for (int k = 0; k < 3; k++) {
+          if (r == 0) {
+            hud_shift[k] = c[k] * f;
+          }
+          t += (double)clip[4 * r + k] * hud_shift[k];
+        }
+        for (int k = 0; k < 3; k++) {
+          hud_shift_clip[4 * r + k] = clip[4 * r + k];
+        }
+        hud_shift_clip[4 * r + 3] = (float)t;
+      }
+      clip = hud_shift_clip;
+      hud_shifted = true;
     }
   }
 
@@ -1175,6 +1289,21 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
           }
         }
         memcpy(rows, o, sizeof(o));
+      }
+    }
+    if (hud_shifted && !same_palette) {
+      // (AI-assisted) the translations relative to the shifted center (see hud_shift), in double:
+      // the camera space ones are ~1e7
+      for (int p = 0; p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
+        const float* t = pal_bones[draw.palette[p]]->tmat[0].data();
+        const double c0[3] = {-(double)t[12], -(double)t[13], -(double)t[14]};
+        float* rows = &palette_rows[12 * p];
+        for (int r = 0; r < 3; r++) {
+          const double c = hud_nfix ? hud_d[3 * r] * c0[0] + hud_d[3 * r + 1] * c0[1] +
+                                          hud_d[3 * r + 2] * c0[2]
+                                    : c0[r];
+          rows[4 * r + 3] = (float)(c - hud_shift[r]);
+        }
       }
     }
     rows_of = &draw;

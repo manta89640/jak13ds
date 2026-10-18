@@ -536,6 +536,15 @@ PC it runs with `gk --ctr-gfx`.
     an emulator. (AI-assisted, far-fog, Oct 17) It draws the fog as the 3DS does (level meshes and
     the ocean: the game fog and the draw distance / vista haze; merc with merc_fog; the PS2 ocean's
     vertex fog); before, host frames had no fog at all. `CTR_SOFT_NO_FOG=1`: none, as before.
+  - (AI-assisted, Oct 18, hud2) Two host checks for what Azahar hides: `CTR_SOFT_F24=1` takes each
+    vertex's depth (and the merc skin math: bone rows, camera space position, clip products) in
+    the PICA's float24, whose step near the top of the depth range is ~128 GS units (Azahar's
+    shaders compute in 32-bit floats). `CTR_SOFT_DEFER=1` runs the renderer as the 3DS render
+    thread at its latest: a frame is drawn only when the game next waits for it (its next
+    sync-path, a texture upload...), after the game thread has run the next frame's logic, so a
+    read of game memory outside the DMA chain and `prepare_frame`'s copies shows up (the sprite
+    snapshot's "copies differ" warnings count the copies that protected a read).
+    `platform/3ds/tests/hud.pad` collects orbs at Sentinel Beach and opens the progress menu.
 - **Text, menus, debug draws** (buckets `debug`, `debug-no-zbuf`, `subtitle`): `CtrDirect`
   interprets the GIF packets, like `DirectRenderer`.
   - Textures come from `CtrVram`, an emulation of the 4 MB GS VRAM.
