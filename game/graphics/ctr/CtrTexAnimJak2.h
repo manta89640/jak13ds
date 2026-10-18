@@ -57,6 +57,12 @@ class CtrTexAnimJak2 {
   std::vector<float> m_acc, m_acc2, m_tmp;
   std::vector<u32> m_out;
   int m_frames = 0;
+ public:
+  /*! the clouds' render thread time: ms in all runs, runs (taken and reset by the stats line) */
+  double m_ms = 0;
+  int m_runs = 0;
+
+ private:
   // generic uploads: the snapshot (EE address -> offset in m_snap_bytes) and a PSMT8 image waiting
   // for its CLUT
   std::vector<std::pair<u32, size_t>> m_snap_index;

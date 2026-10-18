@@ -15,6 +15,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrVram.h"
+#include "game/graphics/ctr/ctr_gpu.h"
 
 namespace {
 // TextureAnimator.cpp kInitialRandomTable
@@ -134,9 +135,9 @@ CtrTexAnimJak2::CtrTexAnimJak2() {
     make_noise(n.new_tex.data(), dim);
     make_noise(n.old_tex.data(), dim);
   }
-  m_acc.resize(kCloudSize * kCloudSize);
-  m_acc2.resize(kCloudSize * kCloudSize);
-  m_tmp.resize(kCloudSize * kCloudSize / 2);  // upsample2's row pass: 2n x n
+  m_acc.resize(kCloudSize * kCloudSize / 4);   // 64 x 64
+  m_acc2.resize(kCloudSize * kCloudSize / 4);
+  m_tmp.resize(kCloudSize * kCloudSize / 8);   // upsample2's row pass: 2n x n (n <= 32)
   m_out.resize(kCloudSize * kCloudSize / 4);
 }
 
@@ -176,14 +177,17 @@ void CtrTexAnimJak2::clouds(const u8* data, int bytes, CtrVram* vram) {
     }
     n.last_time = t;
   }
-  // the clouds move slowly: every other frame, unless a layer got new noise
-  if ((m_frames++ & 1) && !changed && vram->has_override((u32)in.cloud_dest)) {
+  // the clouds move slowly: every 4th frame, unless a layer got new noise
+  if ((m_frames++ & 3) && !changed && vram->has_override((u32)in.cloud_dest)) {
     return;
   }
+  const double t0 = ctr_gpu_time_ms();
   // the layers are added coarse to fine (each 2x larger one is the sum so far magnified, plus
-  // its own): the same sum as magnifying each layer to 128 x 128 on its own, but for the
-  // bilinear filter of the 4x and 8x steps. The 8-bit frame buffer clamps every add at 1; the
-  // adds are all positive, so one clamp at the end gives the same.
+  // its own): the same sum as magnifying each layer to the final size on its own, but for the
+  // bilinear filter of the 4x and 8x steps. Made at 64 x 64 (the finest layer, 128 x 128, added
+  // as the average of each 2 x 2 of its texels): 16 KB of linear memory, a quarter of the work.
+  // The 8-bit frame buffer clamps every add at 1; the adds are all positive, so one clamp at the
+  // end gives the same.
   float* acc = m_acc.data();
   float* next = m_acc2.data();
   int dim = 0;
@@ -199,6 +203,21 @@ void CtrTexAnimJak2::clouds(const u8* data, int bytes, CtrVram* vram) {
       }
       continue;
     }
+    if (n.dim > kCloudSize / 2) {
+      // the finest layer: averaged down to the 64 x 64 result
+      const int nd = n.dim;
+      const float qn = 0.25f * wn, qo = 0.25f * wo;
+      for (int y = 0; y < dim; y++) {
+        for (int x = 0; x < dim; x++) {
+          const int a = 2 * y * nd + 2 * x;
+          acc[y * dim + x] += qn * (n.new_tex[a] + n.new_tex[a + 1] + n.new_tex[a + nd] +
+                                    n.new_tex[a + nd + 1]) +
+                              qo * (n.old_tex[a] + n.old_tex[a + 1] + n.old_tex[a + nd] +
+                                    n.old_tex[a + nd + 1]);
+        }
+      }
+      continue;
+    }
     upsample2(acc, dim, m_tmp.data(), next);
     std::swap(acc, next);
     dim *= 2;
@@ -207,22 +226,15 @@ void CtrTexAnimJak2::clouds(const u8* data, int bytes, CtrVram* vram) {
     }
   }
   // tex_anim.frag, enable_tex 2: rgb 0.5, alpha 0.5 * cloud_lookup of the 8-bit sum (0x80 = 1 in
-  // the PS2's texture scale, like the PC's texture); stored at half the size (64 x 64, the
-  // average of each 2 x 2: 16 KB of linear memory, and the sky is a few hundred pixels wide)
-  const int half = dim / 2;
-  for (int y = 0; y < half; y++) {
-    for (int x = 0; x < half; x++) {
-      float a = 0;
-      for (int k = 0; k < 4; k++) {
-        const float v =
-            std::round(std::min(acc[(2 * y + (k >> 1)) * dim + 2 * x + (k & 1)], 1.f) * 255.f) *
-            (1.f / 255.f);
-        a += cloud_lookup(v, in.cloud_min, in.cloud_max);
-      }
-      m_out[y * half + x] = 0x808080u | ((u32)std::lround(a * (127.5f / 4.f)) << 24);
-    }
+  // the PS2's texture scale, like the PC's texture)
+  const int half = dim;
+  for (int p = 0; p < dim * dim; p++) {
+    const float v = std::round(std::min(acc[p], 1.f) * 255.f) * (1.f / 255.f);
+    m_out[p] = 0x808080u | ((u32)std::lround(cloud_lookup(v, in.cloud_min, in.cloud_max) * 127.5f) << 24);
   }
   vram->set_override((u32)in.cloud_dest, half, half, m_out.data());
+  m_ms += ctr_gpu_time_ms() - t0;
+  m_runs++;
 }
 
 const u8* CtrTexAnimJak2::image_data(u32 addr, u32 bytes, const u8* ee_mem) const {

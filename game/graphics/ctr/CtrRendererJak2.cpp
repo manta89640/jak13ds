@@ -286,7 +286,13 @@ void CtrRenderer::prepare_textures(const void* ee_mem, u32 chain_offset) {
 }
 
 void CtrRenderer::tex_frame_done_jak2() {
-  tex_anim().frame_done();
+  auto& anim = tex_anim();
+  anim.frame_done();
+  if (m_rs.log_now && anim.m_runs) {
+    lg::info("[ctr] jak2 texture animation: clouds {:.2f} ms per update, {} updates", anim.m_ms / anim.m_runs, anim.m_runs);
+    anim.m_ms = 0;
+    anim.m_runs = 0;
+  }
 }
 
 void CtrRenderer::init_buckets_jak2() {
