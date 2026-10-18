@@ -665,8 +665,14 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
         if (g_minimap_rt >= 0 && m_draw_state.tex == g_minimap_rt && !m_offscreen) {
           // (AI-assisted) the minimap on the screen: the PS2 masks it to a circle through the
           // alpha its frame buffer got (alpha-only draws, FBMSK), which the 3DS's render to
-          // texture doesn't keep; drawn as the circle inside its rectangle instead
+          // texture doesn't keep; drawn as the circle inside its rectangle instead.
+          // (AI-assisted, j2-texanim) That draw also gave the whole circle alpha 1.0 (the mask's
+          // alpha replaced the map's): opaque here, as the texture's alpha (the map tiles') would
+          // let the screen through the dark parts (black roads came out gray, the sea cyan)
+          flush();
           batch_mode(false);
+          const u8 tcc_was = m_draw_state.tcc;
+          m_draw_state.tcc = 0;
           constexpr int kSeg = 32;
           BuildVert ctr = c1;
           ctr.x = 0.5f * (c1.x + c2.x);
@@ -694,6 +700,8 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
           }
           m_stats.triangles += kSeg;
           m_build_idx = 0;
+          flush();
+          m_draw_state.tcc = tcc_was;
           break;
         }
         // a quad: c1, c4, c2, c3 around (triangles c1 c4 c3, c3 c4 c2)
