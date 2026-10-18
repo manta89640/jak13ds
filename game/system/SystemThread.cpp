@@ -140,8 +140,7 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
     const size_t stack_size = (name == "EE") ? 512 * 1024 : 128 * 1024;
     // Core 0: the game (EE), the IOP (overlord, DGO loading), the listener and the EE worker.
     // (AI-assisted) The system core option for the others (io_on_system_core) was removed Oct 16.
-    // (AI-assisted) set_ctr_placement can move one elsewhere (Jak II: the IOP on core 2).
-    const int core = ctr_core;
+    const int core = CTR_CORE_APP;
     int prio = CTR_PRIO_WORKER;
     if (name == "EE") {
       prio = CTR_PRIO_EE;
@@ -149,9 +148,6 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
       prio = CTR_PRIO_IOP;
     } else if (name == "DMP") {
       prio = CTR_PRIO_DECI;
-    }
-    if (ctr_prio >= 0) {
-      prio = ctr_prio;
     }
     int err = ctr_thread_create(bootstrap_thread_func, this, stack_size, prio, core, &thread);
     if (err) {

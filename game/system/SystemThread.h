@@ -37,14 +37,6 @@ class SystemThread {
   void join();
   void stop();
   SystemThread() = default;
-#ifdef __3DS__
-  //! (AI-assisted) place the thread on another core with a priority (call before start). By
-  //! default every system thread runs on core 0 with the priority start() picks by name.
-  void set_ctr_placement(int core, int prio) {
-    ctr_core = core;
-    ctr_prio = prio;
-  }
-#endif
 
  private:
   friend class SystemThreadInterface;
@@ -56,8 +48,6 @@ class SystemThread {
   // std::thread cannot set a stack size or a core, and libctru's default stack is only 32 KB.
   // A libctru Thread (ctr_thread_create).
   void* thread = nullptr;
-  int ctr_core = 0;
-  int ctr_prio = -1;  // -1: by name
 #else
   std::thread thread;
 #endif
