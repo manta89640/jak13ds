@@ -1,0 +1,30 @@
+# (AI-assisted) Jak II title screen, no input: the intro scene (title-disk-intro) and the title view.
+# On PC / host --ctr-gfx the scene ends on the JAK II logo over the slums; on the 3DS (baseline B,
+# Azahar) it ends in the title-movie-end view instead: *target* at (980, 85, 346) m (see the pos line).
+# Use with screenshots (shot NAME: config.ini screenshots = N on the 3DS, --ctr-dump on PC).
+150 shot shot_t0150
+300 shot shot_t0300
+450 shot shot_t0450
+600 shot shot_t0600
+750 shot shot_t0750
+900 shot shot_t0900
+1050 shot shot_t1050
+1200 shot shot_t1200
+1350 shot shot_t1350
+1500 shot shot_t1500
+1650 shot shot_t1650
+1800 shot shot_t1800
+1950 shot shot_t1950
+2100 shot shot_t2100
+2250 shot shot_t2250
+2400 shot shot_t2400
+2550 shot shot_t2550
+2700 shot shot_t2700
+2850 shot shot_t2850
+3000 shot shot_t3000
+3150 shot shot_t3150
+3300 shot shot_t3300
+3450 shot shot_t3450
+3600 shot shot_t3600
+3601 pos *target*
+3700 exit
