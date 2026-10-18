@@ -50,6 +50,7 @@ enum : u16 {
   kAnimSetShader = 17,
   kAnimDraw = 18,
   kAnimClouds = 41,
+  kAnimSlime = 42,
   kAnimCloudsHires = 43,
 };
 
@@ -80,8 +81,8 @@ void log_stats(CtrDirect& d, CtrRenderState& rs, const std::string& name, int id
 /*!
  * A texture animation array (TextureAnimator::handle_texture_anim_data reads it): the generic
  * CT32 uploads (pc-upload-raw-texture: the boot logos, draw-raw-image) are written to the VRAM
- * copy; the rest (CLUT blends, the sky and cloud textures, scrolling textures) is not done yet and
- * read past.
+ * copy; the clouds, (AI-assisted) the slime, the CLUT blends and the fixed animations go to
+ * CtrTexAnimJak2; the PS2 drawing codes (erase, set shader, draw) are read past.
  */
 void handle_anim_array(DmaFollower& dma, CtrRenderState& rs) {
   while (dma.current_tag_offset() != rs.next_bucket) {
@@ -103,6 +104,9 @@ void handle_anim_array(DmaFollower& dma, CtrRenderState& rs) {
       case kAnimCloudsHires:
         tex_anim().clouds(tf.data, (int)tf.size_bytes, rs.vram);
         break;
+      case kAnimSlime:
+        tex_anim().slime(tf.data, (int)tf.size_bytes);  // (AI-assisted)
+        break;
       case kAnimErase:
         extra = 2;
         break;
@@ -111,6 +115,8 @@ void handle_anim_array(DmaFollower& dma, CtrRenderState& rs) {
         extra = 1;
         break;
       default:
+        // (AI-assisted) the CLUT blends (Dark Jak...) and fixed animations (waterfalls...)
+        tex_anim().run(v.immediate, tf.data, (int)tf.size_bytes);
         break;
     }
     for (int i = 0; i < extra && dma.current_tag_offset() != rs.next_bucket; i++) {
@@ -288,10 +294,8 @@ void CtrRenderer::prepare_textures(const void* ee_mem, u32 chain_offset) {
 void CtrRenderer::tex_frame_done_jak2() {
   auto& anim = tex_anim();
   anim.frame_done();
-  if (m_rs.log_now && anim.m_runs) {
-    lg::info("[ctr] jak2 texture animation: clouds {:.2f} ms per update, {} updates", anim.m_ms / anim.m_runs, anim.m_runs);
-    anim.m_ms = 0;
-    anim.m_runs = 0;
+  if (m_rs.log_now) {
+    anim.log_stats();
   }
 }
 

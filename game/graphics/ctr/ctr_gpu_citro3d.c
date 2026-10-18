@@ -663,6 +663,48 @@ static void release_tex_slot(int slot) {
   ctr_linear_unlock();
 }
 
+/* (AI-assisted, Jak II texture animation) ctr_gpu_tex_set_anim_slot / ctr_gpu_anim_slot_set:
+ * a texture's slot + 1 (0: none), each slot's texture + 1 for this frame and the next */
+static uint8_t s_tex_anim_slot[MAX_TEXTURES];
+static int16_t s_anim_slot_tex[CTR_ANIM_SLOTS], s_anim_slot_next[CTR_ANIM_SLOTS];
+static int s_anim_any;
+static uint64_t s_anim_drawn, s_anim_drawn_last; /* slots drawn this frame / the last one */
+/* the texture a draw of t uses */
+static inline int tex_res(int t) {
+  if (t >= 0 && t < MAX_TEXTURES && s_tex_anim_slot[t]) {
+    const int sl = s_tex_anim_slot[t] - 1;
+    s_anim_drawn |= 1ull << sl;
+    const int a = s_anim_slot_tex[sl] - 1;
+    if (a >= 0 && g.textures[a].used == 1) {
+      return a;
+    }
+  }
+  return t;
+}
+uint64_t ctr_gpu_anim_slots_drawn(void) {
+  return s_anim_drawn_last | s_anim_drawn;
+}
+void ctr_gpu_tex_set_anim_slot(int handle, int slot) {
+  if (handle >= 0 && handle < MAX_TEXTURES) {
+    s_tex_anim_slot[handle] = slot >= 0 && slot < CTR_ANIM_SLOTS ? (uint8_t)(slot + 1) : 0;
+  }
+}
+void ctr_gpu_anim_slot_set(int slot, int tex) {
+  if (slot >= 0 && slot < CTR_ANIM_SLOTS) {
+    s_anim_slot_next[slot] = (int16_t)(tex >= 0 && tex < MAX_TEXTURES ? tex + 1 : 0);
+  }
+}
+static void anim_slots_frame_begin(void) {
+  s_anim_drawn_last = s_anim_drawn;
+  s_anim_drawn = 0;
+  int any = 0;
+  for (int i = 0; i < CTR_ANIM_SLOTS; i++) {
+    s_anim_slot_tex[i] = s_anim_slot_next[i];
+    any |= s_anim_slot_tex[i];
+  }
+  s_anim_any = any != 0;
+}
+
 static int reserve_mesh_slot(void) {
   int slot = -1;
   ctr_linear_lock();
@@ -2789,6 +2831,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
   }
+  anim_slots_frame_begin(); /* (AI-assisted) */
   if (s_micro_ident_st) {
     /* (AI-assisted, micro-gpu) gpu_micro_ident: frame k with everything off (dumped), k + 1 on,
      * k + 2 on (dumped): k and k + 2 draw from the same vertex buffer copy */
@@ -4319,6 +4362,7 @@ void ctr_gpu_tex_delete(int handle) {
     return;
   }
   ctr_linear_lock();
+  s_tex_anim_slot[handle] = 0; /* (AI-assisted) */
   if (g.textures[handle].used == 1) {
     g.textures[handle].used = 2; /* pending */
     g.pending_delete[g.pending_delete_count++] = handle;
@@ -4943,7 +4987,8 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   g.last_tint = tint;
   g.last_state_valid = 1;
   /* (AI-assisted, micro-mg) gpu_micro: the same state but for its texture (see StateFast) */
-  const int textured0 = st->tex >= 0 && st->tex < MAX_TEXTURES && g.textures[st->tex].used == 1;
+  const int stex0 = tex_res(st->tex); /* (AI-assisted) an animated slot's texture */
+  const int textured0 = stex0 >= 0 && stex0 < MAX_TEXTURES && g.textures[stex0].used == 1;
   const alias_u32* stw = (const alias_u32*)st;
   if (raw && s_sf.valid && (s_micro & MICRO_TEXSTATE) && s_sf.mesh == mesh && s_sf.tint == tint &&
       /* (the filter and clamp bytes only matter to the bind) */
@@ -4951,7 +4996,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
          (stw[3] ^ s_sf.words[2]))) &&
       !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && g.ocean_stage2 == s_sf.stage2 &&
       mesh != 3) {
-    const u32 kind = textured0 ? 1u | ((u32)g.textures[st->tex].alpha_full << 1) : 0u;
+    const u32 kind = textured0 ? 1u | ((u32)g.textures[stex0].alpha_full << 1) : 0u;
     u32 in[16];
     state_inputs(in);
     C3Di_Context* fctx = &__C3D_Context;
@@ -4962,7 +5007,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
         words_eq(&fctx->texEnv[2], &s_sf.env2, sizeof(C3D_TexEnv) / 4) &&
         words_eq(&fctx->effect, &s_sf.effect, sizeof(C3Di_Effect) / 4)) {
       if (textured0) {
-        bind_texture(&g.textures[st->tex], st, 1);
+        bind_texture(&g.textures[stex0], st, 1);
       }
       s_state_fast++;
       return;
@@ -5022,8 +5067,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   C3D_TexEnv e0;
   C3D_TexEnv* env = &e0;
   C3D_TexEnvInit(env);
-  int textured = st->tex >= 0 && st->tex < MAX_TEXTURES && g.textures[st->tex].used == 1;
-  TexSlot* slot = textured ? &g.textures[st->tex] : NULL;
+  const int stex = tex_res(st->tex); /* (AI-assisted) an animated slot's texture */
+  int textured = stex >= 0 && stex < MAX_TEXTURES && g.textures[stex].used == 1;
+  TexSlot* slot = textured ? &g.textures[stex] : NULL;
   /* (AI-assisted) radial textures from the procedural texture unit (no texels read); compact
    * textures store GS alpha doubled (0xff = 1.0) */
   const int proc = textured && (st->flags & CTR_STATE_PROCTEX) && g_proctex && slot->radial >= 0 &&
@@ -6916,7 +6962,7 @@ static int cl_prog(const ctr_mesh_call* c) {
 }
 /* a draw that writes raw words only (inside a stretch) */
 static int cl_plain(const ctr_mesh_call* c) {
-  const int t = c->state->tex;
+  const int t = tex_res(c->state->tex);
   return c->index_count >= 3 && c->mesh >= 0 && c->mesh < MAX_MESHES &&
          g.meshes[c->mesh].used == 1 && use_raw(c->state) &&
          (t < 0 || t >= MAX_TEXTURES || g.textures[t].used != 1 || g.textures[t].pool >= 0);
@@ -6925,7 +6971,7 @@ static int cl_plain(const ctr_mesh_call* c) {
 static void cl_rec_call(const ctr_mesh_call* c, const ctr_mesh_call* prev, ClCall* r) {
   memset(r, 0, sizeof(*r));
   r->st = *c->state;
-  const int t = c->state->tex;
+  const int t = tex_res(c->state->tex);
   if (t >= 0 && t < MAX_TEXTURES && g.textures[t].used == 1) {
     const TexSlot* ts = &g.textures[t];
     r->tex_data = (u32)ts->tex.data;
@@ -7262,7 +7308,7 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** 
       head = i == 0 || !plain || !prev_plain || prog != prev_prog ||
              (s_sky_hook && !keeps_sky(calls[i].state));
       if (head && i) {
-        const int t = calls[i].state->tex;
+        const int t = tex_res(calls[i].state->tex);
         const int own_tex = t >= 0 && t < MAX_TEXTURES && g.textures[t].used == 1 &&
                             g.textures[t].pool < 0;
         s_cl.head_why[!plain ? (own_tex ? 0 : 1)

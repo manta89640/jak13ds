@@ -242,7 +242,8 @@ copy "$GK" "$BASE/gk.3dsx"
 if [ -d "$C3L" ]; then
   rm -rf "$DATA/out/$GAME/c3l"
   mkdir -p "$DATA/out/$GAME/c3l"
-  for f in "$C3L"/*.c3l; do
+  for f in "$C3L"/*.c3l "$C3L"/*.c3t; do
+    [ -f "$f" ] || continue  # (AI-assisted) .c3t: Jak II's texture animation sources
     copy "$f" "$DATA/out/$GAME/c3l/"
   done
   # (AI-assisted) fine_vis sidecars (ctr_vis_builder): next to the levels, or from --c3v DIR
