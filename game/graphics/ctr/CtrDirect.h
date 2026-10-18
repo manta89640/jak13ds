@@ -47,6 +47,14 @@ class CtrDirect {
   /*! Draw with depth test (debug bucket) or without (debug-no-zbuf, subtitles). */
   void set_allow_depth(bool allow) { m_allow_depth = allow; }
 
+  /*!
+   * (AI-assisted) Jak II's progress bucket: draws to the minimap's frame buffer (FRAME fbp 126,
+   * 128 x 128) go to a render to texture, which stands in for VRAM at tbp 4032 (where the game
+   * reads it back, like the PC's ProgressRenderer). end_offscreen at the bucket's end.
+   */
+  void enable_minimap() { m_minimap = true; }
+  void end_offscreen();
+
   struct Stats {
     int packets = 0;
     int triangles = 0;
@@ -70,6 +78,13 @@ class CtrDirect {
 
   CtrVram* m_vram;
   bool m_allow_depth = true;
+  // (AI-assisted) Jak II minimap (enable_minimap)
+  bool m_minimap = false;
+  bool m_offscreen = false;
+  u32 m_fbp = 408;
+  bool m_alpha_only = false;  // (AI-assisted) FBMSK masks rgb
+  float m_xyoff[2] = {0, 0};  // (AI-assisted) XYOFFSET - the screen's, GS pixels
+  void handle_frame(u64 val);
   // (AI-assisted) GS y to clip y: Jak 1 draws a 224 line field (1 / 112), Jak II a 416 line
   // frame (direct_basic.vert: HEIGHT_SCALE 0.5, SCISSOR_ADJUST 512 / 416: 1 / 208)
   float m_y_scale = 1.f / 112.f;

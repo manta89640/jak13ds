@@ -214,6 +214,9 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
   CtrJak2DirectRenderer(std::string name, int id, CtrVram* vram, bool depth)
       : CtrBucketRenderer(std::move(name), id), m_direct(std::make_unique<CtrDirect>(vram)) {
     m_direct->set_allow_depth(depth);
+    if (id == (int)jak2::BucketId::PROGRESS) {
+      m_direct->enable_minimap();
+    }
   }
   void render(DmaFollower& dma, CtrRenderState& rs) override {
     m_direct->reset_state();
@@ -238,6 +241,7 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
       }
     }
     m_direct->flush();
+    m_direct->end_offscreen();
     log_stats(*m_direct, rs, m_name, m_id);
 #ifndef __3DS__
     g_ctr_direct_dump = 0;  // only this bucket's

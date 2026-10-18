@@ -101,6 +101,15 @@ class CtrVram {
    */
   void set_override(u32 tbp, int w, int h, const u32* rgba);
   bool has_override(u32 tbp) const { return m_overrides.count(tbp) != 0; }
+  /*! (AI-assisted) The same with a texture made elsewhere (the minimap's render to texture),
+   * not deleted here */
+  void set_override_handle(u32 tbp, int handle, int w, int h) {
+    auto& t = m_overrides[tbp];
+    t.handle = handle;
+    t.w = w;
+    t.h = h;
+    m_borrowed[tbp] = true;
+  }
   /*! (AI-assisted) Jak II: textures whose dest the PC port moved (lookup_jak2_texture_dest_offset)
    * are read from where their page put them */
   void set_jak2_remap(bool on) {
@@ -156,6 +165,7 @@ class CtrVram {
 
   std::vector<u8> m_vram;
   std::unordered_map<u32, CtrTexture> m_overrides;  // (AI-assisted) see set_override
+  std::unordered_map<u32, bool> m_borrowed;  // (AI-assisted) set_override_handle's
   bool m_jak2_remap = false;
   std::vector<u8> m_remap;  // (AI-assisted) by TEX0 tbp: blocks the PC port moved the texture by
   std::vector<u32> m_tex_ptr;  // (AI-assisted, Jak II) by dest: the texture record's EE address

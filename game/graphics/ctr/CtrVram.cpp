@@ -948,13 +948,14 @@ u64 CtrVram::entry_sig(const Entry& e) const {
 void CtrVram::set_override(u32 tbp, int w, int h, const u32* rgba) {
   auto it = m_overrides.find(tbp);
   if (it != m_overrides.end() && it->second.w == w && it->second.h == h &&
-      it->second.handle >= 0) {
+      it->second.handle >= 0 && !m_borrowed[tbp]) {
     ctr_gpu_tex_update(it->second.handle, (const uint8_t*)rgba);
     return;
   }
-  if (it != m_overrides.end() && it->second.handle >= 0) {
+  if (it != m_overrides.end() && it->second.handle >= 0 && !m_borrowed[tbp]) {
     ctr_gpu_tex_delete(it->second.handle);
   }
+  m_borrowed.erase(tbp);
   CtrTexture t;
   t.w = w;
   t.h = h;
@@ -1053,9 +1054,10 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     if (dump_dir && dumped < 400) {
       dumped++;
       std::vector<u32> png(data);
+      static const bool rgb = getenv("CTR_TEX_DUMP_RGB") != nullptr;
       for (auto& c : png) {
         const u32 a = std::min(255u, (c >> 24) * 2);
-        c = 0xff000000u | a | (a << 8) | (a << 16);  // the alpha as grey
+        c = rgb ? (c | 0xff000000u) : (0xff000000u | a | (a << 8) | (a << 16));  // alpha as grey
       }
       file_util::write_rgba_png(fmt::format("{}/tex_{:x}.png", dump_dir, tex0), png.data(), w, h);
     }
