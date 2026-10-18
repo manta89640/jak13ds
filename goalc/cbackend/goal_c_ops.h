@@ -1002,7 +1002,8 @@ GC_INLINE u64 gc_chk_float(u64 v, const char* file, int line) {
 // ---------------------------------------------------------------------------
 
 //! GOAL address (zero extended, like every GOAL address) of symbol k (jak 1: the symbol value is
-//! at the symbol). Its value is accessed as gc_ld_u32(gc_stl, GC_SYMOFF(k)).
+//! at the symbol). Its value is accessed as gc_ld_u32(gc_stl, GC_SYMOFF(k)) in Jak 1, and at
+//! GC_SYMOFF(k) - 1 in Jak 2 and later (the value is at the symbol address - 1).
 #define GC_SYM(k) ((u64)(u32)(gc_stl + (u64)(s64)gc_sym_offsets[k]))
 #define GC_SYMOFF(k) (gc_sym_offsets[k])
 #define GC_SEG(s) ((u64)gc_seg_base[s])
