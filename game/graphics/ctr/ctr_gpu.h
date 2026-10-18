@@ -164,6 +164,9 @@ void ctr_gpu_tex_delete(int handle);
 #define CTR_ANIM_SLOTS 64
 void ctr_gpu_tex_set_anim_slot(int handle, int slot);
 void ctr_gpu_anim_slot_set(int slot, int tex);
+/* (AI-assisted) The slots a draw used in the last finished frame (bit i: slot i; drawn with the
+ * base texture or the slot's): their animations are worth updating. */
+uint64_t ctr_gpu_anim_slots_drawn(void);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
  * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create; (AI-assisted) not RGBA4: soft

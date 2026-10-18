@@ -14,9 +14,10 @@
  *    the level and model draws of a slot's base texture (c3l::texture_anim_slot) use the slot's
  *    GPU texture instead (ctr_gpu_anim_slot_set). Sources from texanim.c3t (next to the .c3l
  *    files), loaded when an animation first runs; an animation not sent for kIdleFrames frames
- *    gives its texture and sources back. Outputs at most 64 x 64 (c3t::kMaxSize); a fixed
- *    animation is redrawn every kFixedRate frames (and only when its input changed); a CLUT blend
- *    only when its weight changes.
+ *    gives its texture and sources back. Outputs at most 64 x 64 (fixed animations 32 x 32);
+ *    a fixed animation runs only while its slot is drawn (ctr_gpu_anim_slots_drawn), at most every
+ *    kFixedRate frames, only when its input changed, and one a frame; a CLUT blend only when its
+ *    weight changes.
  */
 
 #include <map>
@@ -130,6 +131,7 @@ class CtrTexAnimJak2 {
   void fixed_anim(const void* def, const u8* in, float time, const u8* vals, int nvals);
   void clut_group(const void* group, const u8* data, int bytes);
   u64 m_frame = 0;
+  int m_fixed_this_frame = 0;
   double m_slot_ms = 0;
   int m_slot_updates = 0;
   std::map<std::string, int> m_slot_names;  // updates per slot since the stats line
@@ -139,6 +141,8 @@ class CtrTexAnimJak2 {
   std::vector<float> m_slime_acc;
 
  public:
-  static constexpr int kFixedRate = 2;
+  static constexpr int kFixedRate = 3;
+  static constexpr int kFixedPerFrame = 1;
+  static constexpr int kFixedMax = 32;
   static constexpr int kIdleFrames = 300;
 };

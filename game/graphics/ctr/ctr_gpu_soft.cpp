@@ -339,10 +339,12 @@ ctr_gpu_stats s_query_saved{};
 // the 3DS backend: a texture's slot + 1, each slot's texture + 1 (this frame, the next)
 std::vector<uint8_t> s_tex_anim_slot;  // by handle: slot + 1, 0: none
 int s_anim_slot_tex[CTR_ANIM_SLOTS], s_anim_slot_next[CTR_ANIM_SLOTS];
+uint64_t s_anim_drawn = 0, s_anim_drawn_last = 0;
 int soft_tex_res(int t) {
   if (t < 0 || t >= (int)s_tex_anim_slot.size() || !s_tex_anim_slot[t]) {
     return t;
   }
+  s_anim_drawn |= 1ull << (s_tex_anim_slot[t] - 1);
   const int a = s_anim_slot_tex[s_tex_anim_slot[t] - 1] - 1;
   return a >= 0 && a < (int)g_soft.textures.size() && g_soft.textures[a].used ? a : t;
 }
@@ -555,6 +557,8 @@ void ctr_gpu_exit(void) {
 
 void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   memcpy(s_anim_slot_tex, s_anim_slot_next, sizeof(s_anim_slot_tex));  // (AI-assisted)
+  s_anim_drawn_last = s_anim_drawn;
+  s_anim_drawn = 0;
   s_sky_hook = nullptr;
   s_nofog = false;  // (AI-assisted, far-fog) as ctr_gpu_set_mesh_nofog says
   g_soft.cur = ctr_gpu_stats{};
@@ -1087,6 +1091,10 @@ void ctr_gpu_tex_set_anim_slot(int handle, int slot) {
     s_tex_anim_slot.resize(handle + 1024, 0);
   }
   s_tex_anim_slot[handle] = slot >= 0 && slot < CTR_ANIM_SLOTS ? (uint8_t)(slot + 1) : 0;
+}
+
+uint64_t ctr_gpu_anim_slots_drawn(void) {
+  return s_anim_drawn_last | s_anim_drawn;
 }
 
 void ctr_gpu_anim_slot_set(int slot, int tex) {

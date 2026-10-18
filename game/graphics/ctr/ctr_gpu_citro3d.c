@@ -668,15 +668,21 @@ static void release_tex_slot(int slot) {
 static uint8_t s_tex_anim_slot[MAX_TEXTURES];
 static int16_t s_anim_slot_tex[CTR_ANIM_SLOTS], s_anim_slot_next[CTR_ANIM_SLOTS];
 static int s_anim_any;
+static uint64_t s_anim_drawn, s_anim_drawn_last; /* slots drawn this frame / the last one */
 /* the texture a draw of t uses */
 static inline int tex_res(int t) {
-  if (s_anim_any && t >= 0 && t < MAX_TEXTURES && s_tex_anim_slot[t]) {
-    const int a = s_anim_slot_tex[s_tex_anim_slot[t] - 1] - 1;
+  if (t >= 0 && t < MAX_TEXTURES && s_tex_anim_slot[t]) {
+    const int sl = s_tex_anim_slot[t] - 1;
+    s_anim_drawn |= 1ull << sl;
+    const int a = s_anim_slot_tex[sl] - 1;
     if (a >= 0 && g.textures[a].used == 1) {
       return a;
     }
   }
   return t;
+}
+uint64_t ctr_gpu_anim_slots_drawn(void) {
+  return s_anim_drawn_last | s_anim_drawn;
 }
 void ctr_gpu_tex_set_anim_slot(int handle, int slot) {
   if (handle >= 0 && handle < MAX_TEXTURES) {
@@ -689,6 +695,8 @@ void ctr_gpu_anim_slot_set(int slot, int tex) {
   }
 }
 static void anim_slots_frame_begin(void) {
+  s_anim_drawn_last = s_anim_drawn;
+  s_anim_drawn = 0;
   int any = 0;
   for (int i = 0; i < CTR_ANIM_SLOTS; i++) {
     s_anim_slot_tex[i] = s_anim_slot_next[i];
