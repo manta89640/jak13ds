@@ -601,6 +601,11 @@ into one ndsp channel. `sound = on` is the default (`config_template_jak2.ini`);
   samples where the envelope changes at every tick (~15%: long release tails) run in their own
   loop without the span setup. Mixer cost per voice in the city: ~0.88% -> ~0.7% of real time
   (Azahar, two runs, so only roughly).
+- **Voice registers vs the mixer** (j2-title2): the overlord's key on / off and address writes
+  wait for the mixer between chunks (`snd_LockVoiceWrites`), and `sceSdGetAddr` reads the voice
+  addresses published after each chunk; without this, Jak II's title intro stream got a garbage
+  play position and the scene froze (jak2_status.md "Title intro on the 3DS"). The VAG stream log:
+  `OPENGOAL_VAG_DEBUG=1` (host), `-DOG_VAG_DEBUG` (3DS build).
 - Logs: `[sound] VAG stream NAME (id, EE|plugin)` per stream started. On the host,
   `OPENGOAL_NO_SOUND=1` (without `-nosound`) logs every ~10 s what was mixed before it was zeroed:
   `[sound] mixed 10.0 s: peak P, N% non-zero, S sounds, up to V voices`. `OPENGOAL_ISO_OGZ=1` makes

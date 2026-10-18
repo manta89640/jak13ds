@@ -191,6 +191,7 @@ VagCmd* SmartAllocVagCmd(VagCmd* cmd) {
 }
 
 void TerminateVAG(VagCmd* cmd, int /*param_2*/) {
+  VagDebugEvent("TerminateVAG", cmd);
   VagStrListNode vag_node;
   LfoListNode lfo_node;
   // undefined4 auStack32 [2];
@@ -233,6 +234,9 @@ void TerminateVAG(VagCmd* cmd, int /*param_2*/) {
 }
 
 void PauseVAG(VagCmd* cmd, int /*param_2*/) {
+  if (!cmd->byte11) {
+    VagDebugEvent("PauseVAG", cmd);
+  }
   if (!cmd->sb_paused) {
     // if (param_2 == 1) {
     // CpuSuspendIntr(local_20);
@@ -285,6 +289,9 @@ void PauseVAG(VagCmd* cmd, int /*param_2*/) {
 }
 
 void UnPauseVAG(VagCmd* param_1, int /*param_2*/) {
+  if (!param_1->byte11) {
+    VagDebugEvent("UnPauseVAG", param_1);
+  }
   if (param_1->sb_paused) {
     // if (param_2 == 1) {
     // CpuSuspendIntr(&local_30);
@@ -345,6 +352,7 @@ void RestartVag(VagCmd* param_1, int param_2, int /*param_3*/) {
   // CpuSuspendIntr(&local_30);
   //}
   u32 vol_l, vol_r;
+  VagDebugEvent(param_2 ? "RestartVag1" : "RestartVag0", param_1);
   CalculateVAGVolumes(param_1, &vol_l, &vol_r);
   if (param_1->status_bytes[BYTE11] == '\0') {
     auto* stereo_sibling = param_1->stereo_sibling;
@@ -685,6 +693,7 @@ int HowManyBelowThisPriority(int pri, int /*disable_intr*/) {
 }
 
 void StopVAG(VagCmd* cmd, int /*param_2*/) {
+  VagDebugEvent("StopVAG", cmd);
   //  int *piVar1;
   //  int iVar2;
   //  u32 uVar3;

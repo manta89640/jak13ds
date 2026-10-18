@@ -6,6 +6,7 @@
 #include "common/util/Assert.h"
 
 #include "game/sound/common/voice.h"
+#include "game/sound/sndshim.h"
 
 #include "fmt/format.h"
 
@@ -38,7 +39,19 @@ u32 sceSdGetAddr(u32 entry) {
   // u32 reg = entry & ~0x3f;
 
   // Only ever used for getting NAX
+#ifdef __3DS__
+  return voice->GetPublishedNax() << 1;  // (AI-assisted) see sceSdPublishVoiceAddrs
+#else
   return voice->GetNax() << 1;
+#endif
+}
+
+void sceSdPublishVoiceAddrs() {
+  for (auto& v : voices) {
+    if (v) {
+      v->PublishNax();
+    }
+  }
 }
 
 bool sceSdVoiceStopped(u32 entry) {
@@ -46,7 +59,18 @@ bool sceSdVoiceStopped(u32 entry) {
   return voice && voice->Stopped();
 }
 
+namespace {
+// (AI-assisted) snd_LockVoiceWrites for the scope of one register write
+struct VoiceWriteLock {
+  VoiceWriteLock() { snd_LockVoiceWrites(); }
+  ~VoiceWriteLock() { snd_UnlockVoiceWrites(); }
+  VoiceWriteLock(const VoiceWriteLock&) = delete;
+  VoiceWriteLock& operator=(const VoiceWriteLock&) = delete;
+};
+}  // namespace
+
 void sceSdSetSwitch(u32 entry, u32 value) {
+  VoiceWriteLock lock;
   u32 reg = entry & ~0x3f;
   u8 voice = 0;
   while (value) {
@@ -76,6 +100,7 @@ void sceSdSetAddr(u32 entry, u32 value) {
     return;
   }
   u32 reg = entry & ~0x3f;
+  VoiceWriteLock lock;
 
   switch (reg) {
     case SD_VA_SSA: {

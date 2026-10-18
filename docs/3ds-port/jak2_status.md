@@ -25,7 +25,8 @@ or an environment variable, or a hook that stays null for Jak 1.
 | **Integration build, baseline B (Oct 18)** | **Azahar slums 29.8 fps (30 Hz cap): logic 25-27 ms, render thread 28.5-29.3 ms, GPU busy 29-30 ms; staged in `port_test/3ds-sdcard-jak2-baseline-b`** (section below) |
 | Sound (j2-sound, Oct 18) | **Plays in Azahar** (muted runs): title stream, city music + banks, dialogue streams; 0 DSP drops, 0 late buffers. Mixer on core 1 (40% share): 12-14% of real time, 3.8-6.3 ms/frame there; slums 29.9 fps, render thread 27.7-28.2 ms (on core 2 it was 34 ms, 25-29 fps). 1.96 MB of banks in the slums. Compressed SD files (`--compress --compress-vag`) work for Jak II. Hardware not run. See 3ds_build.md "Jak II sound" |
 | Texture animations, ocean, minimap (j2-texanim); memory (j2-mem) | Merged Oct 18: CPU texture animations, flat ocean (ocean.gc), opaque minimap; dormant levels, 1.5 MB stream arena |
-| **Integration build, baseline C (Oct 18)** | **Azahar slums 29.4-29.6 fps with sound on: logic 21.5-22.5 ms, render thread 27-28 ms, GPU busy 28-29 ms, mixer 10-19% of real time, 0 DSP drops; linear free 2.9 MB, heap ~3.3 MB. Title intro still stops early (no JAK II logo). Staged in `port_test/3ds-sdcard-jak2-baseline-c`** (section below) |
+| **Integration build, baseline C (Oct 18)** | **Azahar slums 29.4-29.6 fps with sound on: logic 21.5-22.5 ms, render thread 27-28 ms, GPU busy 28-29 ms, mixer 10-19% of real time, 0 DSP drops; linear free 2.9 MB, heap ~3.3 MB. Title intro stopped early (no JAK II logo): fixed after C, see "Title intro on the 3DS". Staged in `port_test/3ds-sdcard-jak2-baseline-c`** (section below) |
+| Title intro (j2-title2, Oct 18) | **Fixed:** the intro (slums fly-through, Sony / Naughty Dog cards, JAK II logo from ~frame 1050) plays in Azahar as on the host; the cause was the 3DS mixer racing the overlord's SPU voice writes (section "Title intro on the 3DS") |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -119,7 +120,7 @@ config.ini: preset normal, sound on, renderer ctr; `data/out/jak2/iso` 605 files
 `--compress --compress-vag`: 4.52 -> 3.02 GB; `data/out/jak2/c3l` 149 files), README with what
 works and what's missing. Sound needs `sdmc:/3ds/dspfirm.cdc` (not staged; Jak 1's).
 
-**Known gaps:** the title intro (above); screen effects; tie / shrub prototype visibility masks;
+**Known gaps:** the title intro (above; fixed after baseline C by j2-title2); screen effects; tie / shrub prototype visibility masks;
 the ocean is Jak 1's flat approximation (opaque, no sky reflection or wave geometry); memory tight
 at the market spot (ctyindb visible: 128 KB linear free, j2-mem table below); Jak 1's banner and
 jingle; no hardware run.
@@ -128,6 +129,48 @@ Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one en
 (`ntsc_v1`). Both have the same serial and ELF hash, and the database lists both ISO hashes. The
 `ntsc_v2` overrides only change label and anonymous-function types, so they only matter for
 decompiling code. Data extraction and the build use `ntsc_v1`, as upstream does.
+
+## Title intro on the 3DS (j2-title2, Oct 18)
+
+(AI-assisted.) **Symptom** (baseline C, Azahar, sound on): the intro scene (`title-disk-intro`)
+froze ~1 s in on a city wall; its voice stream went quiet; the host played it all (~37 s).
+
+**How it was found:** the VAG stream log (`[vagdbg]`, spustreams.cpp: `OPENGOAL_VAG_DEBUG=1` on
+the host, `-DOG_VAG_DEBUG` in a 3DS build): the stream state every 250 ms, every pause / restart /
+stop, the STR part loads. The scene player (`ja-play-spooled-anim`) sets its frame from the
+stream's play position (`current-str-pos`), which the overlord computes from the voice's address
+in its double buffer (`GetVAGStreamPos`: buffer half flips + the address in the half). Host: the
+position rises ~1024 per second to 37788. Azahar: the first pause / continue pair of the stream
+(the scene does one when its next STR part isn't loaded yet; a normal thing) was followed by a
+voice address of 0x8000164a in a 0x4000 buffer and 94 buffer flips in 0.1 s: the position jumped
+~30 s ahead, the scene ran through parts 2-9 in a second ("loader pre stall" lines), then the
+stream (and the scene's frame) stood still for good.
+
+**Cause:** the 3DS mixer (core 1) runs each voice a 128-frame chunk at a time with its decoder
+state in registers (`Voice::RunBlock`) and writes it back at the end. The overlord (IOP, core 0)
+keyed voices on / off (`sceSdSetSwitch`) and set their addresses without any lock, so a key on in
+the middle of a chunk was undone or mixed with the old state: a garbage NAX. The host mixes
+sample by sample (`Voice::Run`), where the same race is practically harmless.
+
+**Fix** (game/sound, 3DS only in effect):
+- `sceSdSetSwitch` (key on / off) and `sceSdSetAddr` (start / loop address) take the mixer's
+  lock (`snd_LockVoiceWrites`), so they land between chunks. Volume / pitch / ADSR writes (single
+  fields) stay unlocked. Lock waits: title ~0.1 ms/frame, city as in baseline C.
+- `sceSdGetAddr` returns the address the mixer published after its last chunk for all 8 overlord
+  voices at once (`sceSdPublishVoiceAddrs`, `Voice::GetPublishedNax`; a key on publishes at once).
+  Read in the middle of a chunk, a stereo stream's two voices were up to a chunk apart, which
+  `GetVAGStreamPos` took for a drifted pair and re-synced with a pause / continue: ~15 clicks a
+  second through the whole intro (570 pairs); now 2 in the intro (the host has 1).
+- Jak 1: its overlord only writes voice registers (no `sceSdGetAddr`), so only the lock applies
+  there; the host is unchanged.
+
+**Checked:** host (C mode, `.ogz` files): stream to 37788, logo; Azahar (the CIA, compressed
+staging as baseline C, sound on, instance muted, `jak2_title_city.pad`): stream to 37744, the
+slums fly-through (450), "Sony Computer Entertainment America presents" (600), the Naughty Dog
+card (750), the city (900), the JAK II logo from 1050 with "Press the Start Button"; title
+27-29.7 fps with logic 25-28 ms (the scene now runs: baseline C's frozen title had 15 ms), then
+the city as before (Jak at (1065.98, 0.52, 194.46) in target-hide, guard lines kg010 / kg015, 0
+DSP drops). Screens: `port_test/reports/j2-title2`.
 
 ## Milestone 2: logic-only boot on the 3DS (Oct 18)
 

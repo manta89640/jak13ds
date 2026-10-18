@@ -225,6 +225,7 @@ static s16 ApplyVolume(s16 sample, s32 volume) {
 void Voice::KeyOn() {
   mNAX = mSSA;
   mNAX++;
+  PublishNax();  // (AI-assisted) the new address at once, not after the next mixer chunk
 
   UpdateBlockHeader();
 
