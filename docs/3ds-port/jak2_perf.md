@@ -265,6 +265,71 @@ one frame), so measure it with the soak test before using it.
   roughly -25 to -30% (city ~22 -> ~16 ms after the steps above).
 - Lower traffic update rate for far processes (AI every other frame).
 
+## Done: per-frame lookups, PC-port extras, kernel glue (j2-cheap, Oct 18)
+
+(AI-assisted.) Branch `j2-cheap` (from jak2-3ds 6d9c7881e2). Plan steps 4, 5 and part of 7.
+
+**Azahar (CIA, null renderer, `jak2_city.pad`, same windows as milestone 2):**
+
+| window | before (baseline-a) | after | |
+|---|---|---|---|
+| city-stand (slums) | 13.2 fps, logic 75.8 ms | 15.0 fps, logic 66.4 ms | -9.4 ms (-12%) |
+| city-walk | 13.5 fps, logic 74.3 ms | 15.0 fps, logic 66.7 ms | -7.6 ms |
+
+IOP on core 0: 2.36 -> 2.09 ms/frame. 142 suspends/frame and 24.7 KB of stack are unchanged
+(kernel copies only [sp, stack-top) already). Jak ends at (1065.98, 0.52, 194.46) in
+`target-hide`, as before. The Mac estimate was ~4 ms (85x on the shares below). The 3DS saved
+twice that: string and res-lump scans run at ARM11 memory speed, which the 85x doesn't model.
+
+What changed (all unconditional; PC behaviour unchanged unless noted):
+- **entity-by-name cache** (`engine/entity/entity.gc`). `(method update setting-control)` ->
+  `cam-master-set-entity` looks up the camera entity every frame. The name is usually `#f`, so
+  every actor, nav mesh, race mesh and camera of every active level was scanned with a res-lump
+  `lookup-tag-idx` each. Results are cached by the name's bytes, which is what `string=` reads,
+  whatever the argument's type. 8 entries. The cache is flushed when any `*level*` slot's
+  (active, name, bsp) changes. Mac share in the slums: setting-control update 5.4% -> 0.4%.
+- **subtitle2 scene lookup cache** (`pc/subtitle2.gc`). `get-scene-by-name` upcased every scene
+  name of the subtitle file for every queued gui (the city's ambient speech), twice per frame.
+  Results are cached per text file and upcased name, and the cache is cleared when the text loads.
+  A hit leaves `*vag-temp-string*`/`-2` as the search did, and searches that printed a warning
+  aren't cached. Mac: get-scene-by-name 2.8% -> 0.1%. What's left of draw-subtitles (1.7%) is
+  `subtitle-bump-up?` (4 gui lookups) and the text drawing.
+- **No controller LED on the 3DS** (`pc/pckernel.gc` `led-enabled?` is `#f` under TARGET_3DS).
+  `update-led` searched the process tree three times per frame. Mac: pc-settings update
+  2.1% -> 1.0%.
+- **pc-prof only when wanted** (`kernel/gcommon.gc` macros check `*pc-prof-on*`, set by
+  `jak2/kmachine.cpp` as in Jak 1: always on PC, on the 3DS only while kperf times sections). The
+  kernel dispatcher made 677 `pc-prof` calls per frame in the slums, each through an adapter thunk.
+- **Direct C-mode entries for hot kernel functions** (`GOALC_KFN`, c_backend.md "Typed kernel
+  functions"): the Jak 2 kernel primitives (reset-and-call and thread-resume run for every
+  process), `pc-rand`, `__mem-move`, `__read-ee-timer`. They skip the thunk's two indirect calls.
+- Already off on the 3DS before this work: the discord RPC (std::regex) and the speedrun update
+  (`#unless TARGET_3DS` in `pckernel-common.gc`). jak2-prof's profile was a PC-size build, which
+  is why it listed them.
+
+Identity: `jak2_city.pad` on the host (small memory, C mode) and in Azahar gives the same position
+and state. `jak2_route.pad` on the host gives the same checkpoints as the base build. The swim
+height at frame 2301 (`-2.6`..`-2.97`) and the main-town walk (one in four runs) vary between runs
+of the base build too, because the time a load takes changes the wave phase and the traffic.
+C-mode goalc-test (Jak 1 suite + Goalc*) passes: 1692 + 10 tests. Jak 1 `level_pairs.pad` (host
+small-memory gk) gives the same pad-script output as before, exit 0.
+
+**Tried and reverted: the IOP thread on core 2** (plan step 8). With the IOP SystemThread
+created on core 2, Azahar's boot hung after "IOP: After inits". The IOP thread kept dispatching
+(the stack report came 2 minutes later), but the overlord's start thread never finished, so the
+EE waited forever in `wait_for_overlord_init_finish`. That is the same place Jak 1's IOP-on-core-1
+attempt hung. Not understood. Leads:
+- the fake ISO reader pool (`BS::thread_pool`, libctru pthreads: core 0, priority 0x3F until
+  their first task raises them to `CTR_PRIO_IO`);
+- the IOP's polling loops, which assume they share a core with the threads they wait for.
+
+Note for a retry: `bootstrap_thread_func` (SystemThread.cpp) sets the IOP's priority back to
+`CTR_PRIO_IOP` after creation, so a placement priority has to be applied there.
+
+Kernel overhead left (not changed): 142 suspends/frame copying ~175 bytes each, plus
+`new 'process 'cpu-thread` / `delete` and a setjmp/longjmp pair per trans/post hook. On ARM11
+that is a few tenths of a ms in total.
+
 ## Caveats
 
 - One Mac, background load from other sessions (Discord, other agents' gk): the per-window

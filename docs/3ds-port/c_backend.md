@@ -262,6 +262,18 @@ not all 64-bit integers get a generated adapter (called through the thunk pool):
 The same adapters run on the Mac in C mode, so the C-mode test suite covers them. Unit test:
 `GoalcRuntime.TypedAdapters`.
 
+(AI-assisted, Oct 18) **Direct entries** (`GOALC_KFN(fn)` at the registration site, e.g.
+`make_function_symbol_from_c("pc-rand", GOALC_KFN(pc_rand))`): `kernel_function_detail::direct_entry<fn>`
+is a `goalc_fnx` compiled for that one function. It converts the arguments (wide parameters from
+both halves, the others from the low half) and the return exactly as the thunk + adapter do,
+without the thunk's two indirect calls and the 8-argument array. Used where GOAL calls a kernel
+function per process or per particle: the Jak 2 kernel primitives (`__goalc-reset-and-call`,
+`__goalc-thread-resume`, ...: ~430 calls per frame in Haven City), `pc-rand`, `__mem-move`,
+`__read-ee-timer`. Not for `arg3_is_pp` functions, and not with `OPENGOAL_C_ABI_CHECK=1` (the
+thunks do the checks then). Remaining thunk calls in the slums (host count, Oct 18): ~2700 per
+frame, nearly all mips2c functions (natives with `MIPS2C_NATIVE_IMPL_GOAL` skip them) and `pc-prof`
+(677, now only while kperf times sections on the 3DS).
+
 ### Argument passing (ABI version 3)
 
 (AI-assisted) With `u64` arguments, ARM32 passed only two arguments in registers (3-argument calls
