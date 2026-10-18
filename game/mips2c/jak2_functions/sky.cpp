@@ -1,5 +1,7 @@
 #include "sky.h"
 
+#include "native2.h"
+
 #include "game/kernel/jak2/kscheme.h"
 #include "game/mips2c/mips2c_private.h"
 
@@ -889,7 +891,7 @@ void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
   cache.math_camera = intern_from_c("*math-camera*").c();
   cache.draw_large_polygon = intern_from_c("draw-large-polygon").c();
-  gLinkedFunctionTable.reg("render-sky-quad", execute, 1024);
+  gLinkedFunctionTable.reg("render-sky-quad", execute, 1024, &native2::render_sky_quad);
 }
 
 } // namespace render_sky_quad
@@ -972,7 +974,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
   cache.draw_large_polygon = intern_from_c("draw-large-polygon").c();
-  gLinkedFunctionTable.reg("render-sky-tri", execute, 1024);
+  gLinkedFunctionTable.reg("render-sky-tri", execute, 1024, &native2::render_sky_tri);
 }
 
 } // namespace render_sky_tri
@@ -1331,7 +1333,9 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.vector_normalize = intern_from_c("vector-normalize!").c();
-  gLinkedFunctionTable.reg("(method 32 sky-work)", execute, 128);
+  gLinkedFunctionTable.reg("(method 32 sky-work)", execute, 128, &native2::method_32_sky_work);
+  // (AI-assisted) the VU0 registers the sky functions keep between calls: compared in verify mode
+  native_verify_host_state(&sky_regs_vfs.vfs[0], sizeof(sky_regs_vfs.vfs), "sky_regs_vfs");
 }
 
 } // namespace method_32_sky_work
@@ -1514,7 +1518,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.adgif_shader_texture_simple = intern_from_c("adgif-shader<-texture-simple!").c();
   cache.lookup_texture_by_id_fast = intern_from_c("lookup-texture-by-id-fast").c();
-  gLinkedFunctionTable.reg("(method 33 sky-work)", execute, 256);
+  gLinkedFunctionTable.reg("(method 33 sky-work)", execute, 256, &native2::method_33_sky_work);
 }
 
 } // namespace method_33_sky_work
