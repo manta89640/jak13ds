@@ -1151,9 +1151,10 @@ void init_common_pc_port_functions(
   g_pc_port_funcs.intern_from_c = intern_from_c_func;
   g_pc_port_funcs.make_string_from_c = make_string_from_c_func;
   // Get a 300MHz timer value. Called from EE thread
-  make_func_symbol_func("__read-ee-timer", read_ee_timer);
+  // (AI-assisted) GOALC_KFN: direct C-mode entries for the ones called often (kernel_function.h)
+  make_func_symbol_func("__read-ee-timer", GOALC_KFN(read_ee_timer));
   // Do a fast memory copy.
-  make_func_symbol_func("__mem-move", pc_memmove);
+  make_func_symbol_func("__mem-move", GOALC_KFN(pc_memmove));
   // Called from game thread to submit rendering DMA chain.
   make_func_symbol_func("__send-gfx-dma-chain", send_gfx_dma_chain);
   // Called from game thread to upload a texture outside of the main DMA chain.
@@ -1261,7 +1262,7 @@ void init_common_pc_port_functions(
   make_func_symbol_func("pc-prof", pc_prof);
 
   // RNG
-  make_func_symbol_func("pc-rand", pc_rand);
+  make_func_symbol_func("pc-rand", GOALC_KFN(pc_rand));  // (AI-assisted) per particle
 
   // text
   make_func_symbol_func("pc-encode-utf8-string", pc_encode_utf8_string);
