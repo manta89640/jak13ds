@@ -20,6 +20,11 @@
 
 class CtrVram;
 
+#ifndef __3DS__
+// (AI-assisted) host diagnosis: the next n vertices pushed by any CtrDirect are logged
+extern int g_ctr_direct_dump;
+#endif
+
 /*! GS ALPHA register -> enum ctr_blend (unknown equations: normal alpha blending). */
 u8 ctr_blend_from_gs_alpha(u64 alpha);
 

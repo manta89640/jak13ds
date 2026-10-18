@@ -8,10 +8,15 @@
 
 #include "game/graphics/ctr/CtrRendererJak2.h"
 
+#include <cstdlib>
 #include <cstring>
 
 #include "common/dma/dma.h"
+#include "common/common_types.h"
+#include "common/goal_constants.h"
 #include "common/log/log.h"
+
+#include "fmt/format.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrEye.h"
@@ -21,6 +26,7 @@
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
+#include "game/graphics/ctr/CtrTexAnimJak2.h"
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -38,9 +44,79 @@ enum : u16 {
   kAnimStart = 12,  // the tag that starts an animation array (TextureUploadHandler)
   kAnimFinish = 13,
   kAnimErase = 14,
+  kAnimUploadClut = 15,
+  kAnimGenericUpload = 16,
   kAnimSetShader = 17,
   kAnimDraw = 18,
+  kAnimClouds = 41,
+  kAnimCloudsHires = 43,
 };
+
+CtrTexAnimJak2& tex_anim() {
+  static CtrTexAnimJak2 anim;
+  return anim;
+}
+
+// the direct renderer's counts at the stats lines (debug level)
+void log_stats(CtrDirect& d, CtrRenderState& rs, const std::string& name, int id) {
+  if (rs.log_now) {
+    const auto& st = d.stats();
+    if (st.packets) {
+#ifndef __3DS__
+      static const bool info = getenv("CTR_DIRECT_STATS") != nullptr;  // host diagnosis
+      if (info) {
+        lg::info("[ctr] {} {}: {} packets, {} triangles, {} draws, {} skipped prims", name, id,
+                 st.packets, st.triangles, st.flushes, st.skipped_prims);
+      }
+#endif
+      lg::debug("[ctr] {} {}: {} packets, {} triangles, {} draws, {} skipped prims", name, id,
+                st.packets, st.triangles, st.flushes, st.skipped_prims);
+    }
+    d.clear_stats();
+  }
+}
+
+/*!
+ * A texture animation array (TextureAnimator::handle_texture_anim_data reads it): the generic
+ * CT32 uploads (pc-upload-raw-texture: the boot logos, draw-raw-image) are written to the VRAM
+ * copy; the rest (CLUT blends, the sky and cloud textures, scrolling textures) is not done yet and
+ * read past.
+ */
+void handle_anim_array(DmaFollower& dma, CtrRenderState& rs) {
+  while (dma.current_tag_offset() != rs.next_bucket) {
+    auto tf = dma.read_and_advance();
+    const VifCode v = tf.vifcode0();
+    if (v.kind != VifCode::Kind::PC_PORT) {
+      continue;
+    }
+    int extra = 0;
+    switch (v.immediate) {
+      case kAnimFinish:
+        return;
+      case kAnimUploadClut:
+      case kAnimGenericUpload:
+        tex_anim().generic_upload(tf.data, (int)tf.size_bytes, rs.ee_mem, rs.vram,
+                                  v.immediate == kAnimUploadClut);
+        break;
+      case kAnimClouds:
+      case kAnimCloudsHires:
+        tex_anim().clouds(tf.data, (int)tf.size_bytes, rs.vram);
+        break;
+      case kAnimErase:
+        extra = 2;
+        break;
+      case kAnimSetShader:
+      case kAnimDraw:
+        extra = 1;
+        break;
+      default:
+        break;
+    }
+    for (int i = 0; i < extra && dma.current_tag_offset() != rs.next_bucket; i++) {
+      dma.read_and_advance();
+    }
+  }
+}
 
 /*!
  * Jak II's texture buckets (TextureUploadHandler): texture page uploads into the emulated VRAM,
@@ -67,7 +143,7 @@ class CtrJak2TexRenderer : public CtrBucketRenderer {
       const VifCode vif0 = dma.current_tag_vifcode0();
       if (vif0.kind == VifCode::Kind::PC_PORT && vif0.immediate == kAnimStart) {
         dma.read_and_advance();
-        skip_anim_array(dma, rs);
+        handle_anim_array(dma, rs);
         continue;
       }
       auto data = dma.read_and_advance();
@@ -97,38 +173,11 @@ class CtrJak2TexRenderer : public CtrBucketRenderer {
     }
     if (m_direct) {
       m_direct->flush();
+      log_stats(*m_direct, rs, m_name, m_id);
     }
   }
 
  private:
-  // TextureAnimator::handle_texture_anim_data's reads, without drawing
-  void skip_anim_array(DmaFollower& dma, CtrRenderState& rs) {
-    while (dma.current_tag_offset() != rs.next_bucket) {
-      auto tf = dma.read_and_advance();
-      const VifCode v = tf.vifcode0();
-      if (v.kind != VifCode::Kind::PC_PORT) {
-        continue;
-      }
-      int extra = 0;
-      switch (v.immediate) {
-        case kAnimFinish:
-          return;
-        case kAnimErase:
-          extra = 2;
-          break;
-        case kAnimSetShader:
-        case kAnimDraw:
-          extra = 1;
-          break;
-        default:
-          break;
-      }
-      for (int i = 0; i < extra && dma.current_tag_offset() != rs.next_bucket; i++) {
-        dma.read_and_advance();
-      }
-    }
-  }
-
   std::unique_ptr<CtrDirect> m_direct;
 };
 
@@ -141,13 +190,28 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
   }
   void render(DmaFollower& dma, CtrRenderState& rs) override {
     m_direct->reset_state();
+#ifndef __3DS__
+    static const char* dump = getenv("CTR_DIRECT_DUMP");  // host diagnosis: ",id,frame,"
+    if (dump && strstr(dump, fmt::format(",{},{},", m_id, rs.frame_idx).c_str())) {
+      g_ctr_direct_dump = getenv("CTR_DIRECT_DUMP_N") ? atoi(getenv("CTR_DIRECT_DUMP_N")) : 60;
+      lg::info("[ctr direct] bucket {} ({}) frame {}", m_id, m_name, rs.frame_idx);
+    }
+#endif
     while (dma.current_tag_offset() != rs.next_bucket) {
+      // (AI-assisted) draw-raw-image puts its image upload (a texture animation array) here
+      const VifCode vif0 = dma.current_tag_vifcode0();
+      if (vif0.kind == VifCode::Kind::PC_PORT && vif0.immediate == kAnimStart) {
+        dma.read_and_advance();
+        handle_anim_array(dma, rs);
+        continue;
+      }
       auto data = dma.read_and_advance();
       if (data.size_bytes) {
         m_direct->render_vif(data.vif0(), data.vif1(), data.data, data.size_bytes);
       }
     }
     m_direct->flush();
+    log_stats(*m_direct, rs, m_name, m_id);
   }
 
  private:
@@ -155,6 +219,41 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
 };
 
 }  // namespace
+
+void CtrRenderer::prepare_textures(const void* ee_mem, u32 chain_offset) {
+  if (!m_jak2) {
+    return;
+  }
+  // game thread: the image data of the generic uploads in the animation arrays (the game may
+  // rewrite it while the render thread draws the frame)
+  auto& anim = tex_anim();
+  anim.snapshot_begin();
+  const u8* ee = (const u8*)ee_mem;
+  for (int id : m_anim_buckets) {
+    const u32 end = bucket_tag(chain_offset, id + 1);
+    DmaFollower dma(ee_mem, bucket_tag(chain_offset, id));
+    bool in_array = false;
+    for (int k = 0; k < 100000 && dma.current_tag_offset() != end; k++) {
+      auto tf = dma.read_and_advance();
+      const VifCode v = tf.vifcode0();
+      if (v.kind != VifCode::Kind::PC_PORT) {
+        continue;
+      }
+      if (v.immediate == kAnimStart) {
+        in_array = true;
+      } else if (v.immediate == kAnimFinish) {
+        in_array = false;
+      } else if (in_array &&
+                 (v.immediate == kAnimGenericUpload || v.immediate == kAnimUploadClut)) {
+        anim.snapshot_upload(tf.data, (int)tf.size_bytes, ee);
+      }
+    }
+  }
+}
+
+void CtrRenderer::tex_frame_done_jak2() {
+  tex_anim().frame_done();
+}
 
 void CtrRenderer::init_buckets_jak2() {
   using jak2::BucketId;
@@ -164,6 +263,7 @@ void CtrRenderer::init_buckets_jak2() {
   };
   auto tex = [&](BucketId id, bool direct = false) {
     set(id, std::make_unique<CtrJak2TexRenderer>("tex", (int)id, m_vram.get(), direct));
+    m_anim_buckets.push_back((int)id);
   };
   auto merc = [&](BucketId id) {
     auto r = std::make_unique<CtrMercRenderer>("merc", (int)id, m_levels.get());
@@ -219,6 +319,10 @@ void CtrRenderer::init_buckets_jak2() {
   set(BucketId::DEBUG3, std::make_unique<CtrJak2DirectRenderer>("debug", (int)BucketId::DEBUG3,
                                                                 m_vram.get(), true));
 
+  for (auto id : {BucketId::SKY_DRAW, BucketId::PROGRESS, BucketId::SCREEN_FILTER,
+                  BucketId::DEBUG2, BucketId::DEBUG_NO_ZBUF2, BucketId::DEBUG3}) {
+    m_anim_buckets.push_back((int)id);  // draw-raw-image (the boot logos) may go to any bucket
+  }
   for (size_t i = 0; i < m_buckets.size(); i++) {
     if (!m_buckets[i]) {
       m_buckets[i] = std::make_unique<CtrSkipRenderer>("skip", (int)i);

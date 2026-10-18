@@ -28,6 +28,7 @@ target_sources(og3ds_runtime PRIVATE
 if(OG3DS_GAME STREQUAL "jak2")
   target_sources(og3ds_runtime PRIVATE
     ${OG_ROOT}/game/graphics/ctr/CtrRendererJak2.cpp
+    ${OG_ROOT}/game/graphics/ctr/CtrTexAnimJak2.cpp
     ${OG_ROOT}/game/graphics/ctr/CtrRendererJak2Bg.cpp
   )
 endif()

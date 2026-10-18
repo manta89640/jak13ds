@@ -106,6 +106,10 @@ bool same_state(const ctr_draw_state& a, const ctr_draw_state& b) {
 }
 }  // namespace
 
+#ifndef __3DS__
+int g_ctr_direct_dump = 0;
+#endif
+
 CtrDirect::CtrDirect(CtrVram* vram) : m_vram(vram) {
   if (ctr_is_jak2()) {
     m_y_scale = 1.f / 208.f;
@@ -464,6 +468,15 @@ void CtrDirect::push_vertex(int idx) {
   v.b = b.rgba[2];
   v.a = b.rgba[3];
   m_verts.push_back(v);
+#ifndef __3DS__
+  if (g_ctr_direct_dump > 0) {  // (AI-assisted) host diagnosis, see ctr_direct_dump
+    g_ctr_direct_dump--;
+    lg::info("[ctr direct] v {:.3f} {:.3f} {:.6f} st {:.3f} {:.3f} rgba {} {} {} {} tex {} tex0 {:x} "
+             "atest {} blend {}",
+             v.x, v.y, v.z, v.s, v.t, v.r, v.g, v.b, v.a, m_draw_state.tex, m_tex0,
+             m_draw_state.atest, m_draw_state.blend);
+  }
+#endif
 }
 
 void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {

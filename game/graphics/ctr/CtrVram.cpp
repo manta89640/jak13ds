@@ -159,9 +159,13 @@ u32 CtrVram::read32(u32 byte_addr) const {
 }
 
 void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
-  write_ct32(data, dest_block, width, height);
   // (AI-assisted) whole pages (a page row's blocks are spread over the page)
   const u32 end = dest_block + (height + 31) / 32 * std::max(1u, width / 64) * 32;
+  // (AI-assisted, Jak II raw images) written now: page uploads still pending there are older and
+  // would overwrite it when a texture reads them; a page uploaded again later is written again
+  trim_pending(dest_block, end);
+  forget_uploads(dest_block, end);
+  write_ct32(data, dest_block, width, height);
   mark_unique(dest_block, end);
   note_write(dest_block, end);
 }
@@ -311,6 +315,15 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     words = ((u32)EE_MAIN_MEM_SIZE - seg.block_data_ptr) / 4 / 128 * 128;
   }
   const u32 dest_block = seg.dest / 64;
+#ifndef __3DS__
+  {
+    static const bool log_uploads = getenv("CTR_UPLOAD_LOG") != nullptr;  // (AI-assisted) host
+    if (log_uploads) {
+      lg::info("[ctr vram] upload page {} ({}) mode {}: {} words to block {}",
+               (const char*)(ee_mem + page.name_ptr + 4), page.length, mode, words, dest_block);
+    }
+  }
+#endif
   // skip the upload if this exact data is already there (sampled hash, pages are static)
   const u8* src = ee_mem + seg.block_data_ptr;
   u64 hash = words;
@@ -877,7 +890,31 @@ u64 CtrVram::entry_sig(const Entry& e) const {
                        e.clut_first, e.clut_end);
 }
 
+void CtrVram::set_override(u32 tbp, int w, int h, const u32* rgba) {
+  auto it = m_overrides.find(tbp);
+  if (it != m_overrides.end() && it->second.w == w && it->second.h == h &&
+      it->second.handle >= 0) {
+    ctr_gpu_tex_update(it->second.handle, (const uint8_t*)rgba);
+    return;
+  }
+  if (it != m_overrides.end() && it->second.handle >= 0) {
+    ctr_gpu_tex_delete(it->second.handle);
+  }
+  CtrTexture t;
+  t.w = w;
+  t.h = h;
+  t.handle = ctr_gpu_tex_create(w, h, (const uint8_t*)rgba);
+  m_overrides[tbp] = t;
+}
+
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
+  // (AI-assisted) Jak II's animated textures (set_override; none in Jak 1)
+  if (!m_overrides.empty()) {
+    auto ov = m_overrides.find((u32)(tex0 & 0x3fff));
+    if (ov != m_overrides.end()) {
+      return &ov->second;
+    }
+  }
   // the parts of TEX0 that select the texture data (not TCC / TFX / CLUT load control)
   constexpr u64 kKeyMask = ~((0b111ull << 34) | (0b111ull << 61));
   u64 key = tex0 & kKeyMask;

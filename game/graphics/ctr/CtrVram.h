@@ -93,6 +93,15 @@ class CtrVram {
    */
   const void* upload_source(u32 block) const;
 
+  /*!
+   * (AI-assisted, Jak II texture animation) A texture made on the CPU (CtrTexAnimJak2) that
+   * replaces whatever VRAM holds at block tbp, for every TEX0 there (the PC's texture pool gives
+   * its texture by address too): rgba is w x h RGBA8 in the GS's scale (0x80 = 1). Updated in
+   * place when the size is the same.
+   */
+  void set_override(u32 tbp, int w, int h, const u32* rgba);
+  bool has_override(u32 tbp) const { return m_overrides.count(tbp) != 0; }
+
   void clear_cache();
   // (AI-assisted) drop the cached textures ctr_button_art::patch may change
   void drop_art_textures();
@@ -139,6 +148,7 @@ class CtrVram {
   u32 clut_color(u32 cbp, u32 cpsm, u32 entry) const;
 
   std::vector<u8> m_vram;
+  std::unordered_map<u32, CtrTexture> m_overrides;  // (AI-assisted) see set_override
   u32 m_art_gen = 0;  // (AI-assisted) ctr_button_art::generation() of the cached textures
   // (AI-assisted) per 16 KB chunk: what it holds (see the top of this file). Page chunks have odd
   // ids, all others even ones from m_next_unique_id.
