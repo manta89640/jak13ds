@@ -106,6 +106,7 @@ class CtrVram {
   void set_jak2_remap(bool on) {
     m_jak2_remap = on;
     m_remap.assign(on ? 16384 : 0, 0);
+    m_tex_ptr.assign(on ? 16384 : 0, 0);
   }
 
   void clear_cache();
@@ -157,6 +158,8 @@ class CtrVram {
   std::unordered_map<u32, CtrTexture> m_overrides;  // (AI-assisted) see set_override
   bool m_jak2_remap = false;
   std::vector<u8> m_remap;  // (AI-assisted) by TEX0 tbp: blocks the PC port moved the texture by
+  std::vector<u32> m_tex_ptr;  // (AI-assisted, Jak II) by dest: the texture record's EE address
+  const u8* m_ee_mem = nullptr;
   u64 data_tex0(u64 tex0) const {
     if (!m_jak2_remap) {
       return tex0;

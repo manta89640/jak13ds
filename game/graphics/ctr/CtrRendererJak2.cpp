@@ -197,6 +197,9 @@ class CtrJak2TexRenderer : public CtrBucketRenderer {
     if (m_direct) {
       m_direct->flush();
       log_stats(*m_direct, rs, m_name, m_id);
+#ifndef __3DS__
+      g_ctr_direct_dump = 0;  // only this bucket's
+#endif
     }
   }
 
@@ -236,6 +239,9 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
     }
     m_direct->flush();
     log_stats(*m_direct, rs, m_name, m_id);
+#ifndef __3DS__
+    g_ctr_direct_dump = 0;  // only this bucket's
+#endif
   }
 
  private:

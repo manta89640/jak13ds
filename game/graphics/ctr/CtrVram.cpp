@@ -17,6 +17,9 @@
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
 
+#include "fmt/format.h"
+#include "common/util/FileUtil.h"
+
 #if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
 #include "game/graphics/jak2_texture_remap.h"
 #else
@@ -291,6 +294,10 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
         u32 page_id;
         memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
         m_remap[dest0] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+        // (AI-assisted) where the texture record is: setup-font-texture changes the font
+        // textures' height before relocating them (see relocate)
+        m_tex_ptr[dest0] = ptr;
+        m_ee_mem = ee_mem;
       }
     }
   }
@@ -556,7 +563,18 @@ bool is_indexed(u32 psm) {
 }  // namespace
 
 void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
-  const TexInfo info = src_block < kBlocks ? m_tex_info[src_block] : TexInfo{};
+  TexInfo info = src_block < kBlocks ? m_tex_info[src_block] : TexInfo{};
+  if (m_jak2_remap && info.w && src_block < m_tex_ptr.size() && m_tex_ptr[src_block] && m_ee_mem) {
+    // (AI-assisted) Jak II's setup-font-texture sets the font textures' height (320, 800) before
+    // it relocates them: the large fonts are 800 rows, and the next one starts right after them
+    // (6016 + 800 rows = 9216). With the page's 1024 the first relocated font's last rows wrote
+    // over the top of the next one (letters A-K, the button symbols)
+    s16 h;
+    memcpy(&h, m_ee_mem + m_tex_ptr[src_block] + offsetof(GoalTexture, h), 2);
+    if (h > 0 && h <= 1024) {
+      info.h = (u16)h;
+    }
+  }
   if (!info.w) {
     lg::warn("[ctr vram] relocate from unknown texture at {}", src_block);
     return;
@@ -564,6 +582,17 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
   if (!is_indexed(info.psm) || !is_indexed(dest_psm)) {
     lg::warn("[ctr vram] relocate {} -> {} not supported", info.psm, dest_psm);
     return;
+  }
+#ifndef __3DS__
+  if (getenv("CTR_UPLOAD_LOG")) {  // (AI-assisted) host diagnosis
+    lg::info("[ctr vram] relocate {} -> {} psm {}: {}x{} psm {} width {} clut {} remap {}", src_block,
+             dest_block, dest_psm, info.w, info.h, info.psm, info.width, info.clutdest,
+             m_jak2_remap && src_block < m_remap.size() ? m_remap[src_block] : 0);
+  }
+#endif
+  // (AI-assisted) Jak II: a texture whose dest the PC port moved (m_remap) has its data lower
+  if (m_jak2_remap && src_block < m_remap.size()) {
+    src_block -= std::min<u32>(m_remap[src_block], src_block);
   }
   // source texture and CLUT, in blocks (generous: whole pages)
   const u32 bits = (info.psm == (u32)GsTex0::PSM::PSMT4) ? 4
@@ -1016,6 +1045,22 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
 
   // (AI-assisted) the PS2 button symbols of the font and the progress menu -> 3DS buttons
   ctr_button_art::patch(tex0, data.data(), w, h);
+#ifndef __3DS__
+  {
+    // (AI-assisted) host diagnosis: env CTR_TEX_DUMP=<dir> writes every decoded texture
+    static const char* dump_dir = getenv("CTR_TEX_DUMP");
+    static int dumped = 0;
+    if (dump_dir && dumped < 400) {
+      dumped++;
+      std::vector<u32> png(data);
+      for (auto& c : png) {
+        const u32 a = std::min(255u, (c >> 24) * 2);
+        c = 0xff000000u | a | (a << 8) | (a << 16);  // the alpha as grey
+      }
+      file_util::write_rgba_png(fmt::format("{}/tex_{:x}.png", dump_dir, tex0), png.data(), w, h);
+    }
+  }
+#endif
 
   // the 3DS needs at least 8x8: repeat pixels (normalized coordinates stay the same)
   int gw = std::max(w, 8), gh = std::max(h, 8);
