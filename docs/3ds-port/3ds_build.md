@@ -747,13 +747,13 @@ every platform:
   `*cos-poly-vec*` changes (it was rebuilt every frame: 0.18 ms on hardware).
 - (AI-assisted, Oct 11) `pc-collide-frag-may-hit?` keeps each mesh's vertex box in a cache keyed
   by mesh, vertex data, count and `g_link_generation` (incremented by every link, klink.h);
-  `config.ini collide_frag_cache = off` (host `OPENGOAL_FRAG_CACHE=0`) scans every call,
+  always on (host `OPENGOAL_FRAG_CACHE=0` scans every call; no config.ini switch since Oct 18),
   `OPENGOAL_FRAG_CACHE_VERIFY=1` (host) scans and compares.
 - (AI-assisted, Oct 11) The box fills' GOAL walks, in C++ (`native_collide_cache.cpp`):
   `pc-bsp-collide-with-box` (the drawable-tree walk of `(method collide-with-box bsp-header)`) and
   `pc-fill-from-foreground-using-box` (the four collide-shape lists). The GOAL methods call them
   first (`#when TARGET_3DS` in bsp.gc and collide-cache.gc) and run their own code when they return
-  #f: `config.ini collide_native = off` (host `OPENGOAL_COLLIDE_NATIVE=0`).
+  #f: host `OPENGOAL_COLLIDE_NATIVE=0` (no config.ini switch since Oct 18).
   `OPENGOAL_COLLIDE_NATIVE_VERIFY=1` (host) runs the GOAL version first on every call and compares
   what both wrote (the collide-cache object, `*collide-list*`).
 - (AI-assisted, Oct 11) `pc-new-bones-mtx-calc` (`native_bones.cpp`): the loop of the GOAL
@@ -764,7 +764,7 @@ every platform:
   the results are bit-identical. Other hosts run the C++ version. ARM instructions per call (20
   bones): goalc's C 8486, native 5388 (1.6x; ~265 per bone against ~420). The GOAL function calls
   it first (`#when TARGET_3DS` in bones.gc) and runs its own loop when it returns #f:
-  `config.ini bones_native = off` (host `OPENGOAL_BONES_NATIVE=0`). Tested against the goalc C of
+  `config.ini mips2c_native_off` naming it (host `OPENGOAL_BONES_NATIVE=0`). Tested against the goalc C of
   the GOAL function (`test/mips2c_native` `pc-new-bones-mtx-calc`; `goalc_ref/bones.c`, made by
   `extract.py ... bones` from the C of bones.gc without the guard; `unicorn/run.sh --only
   pc-new-bones-mtx-calc` on ARM in the 3DS's VFP mode).

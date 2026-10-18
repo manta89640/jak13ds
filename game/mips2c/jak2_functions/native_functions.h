@@ -5,21 +5,14 @@
  * (AI-assisted)
  * Native C++ versions of Jak 2 mips2c functions (see game/mips2c/mips2c_native.h). Ported from
  * Jak 1's (game/mips2c/jak1_functions/native_*.cpp) to Jak 2's code and types. The mips2c files
- * register them next to their execute function through on(): config.ini logic_native = off (host
- * OPENGOAL_LOGIC_NATIVE=0) registers none of them, so the mips2c versions run.
+ * register them next to their execute function, always (the same results; no config.ini switch
+ * since Oct 18). Debugging: OPENGOAL_MIPS2C_NATIVE=0 (host) / config.ini mips2c_native_off pick
+ * the mips2c versions, OPENGOAL_MIPS2C_VERIFY=1 compares them.
  */
 
 #include "game/mips2c/mips2c_native.h"
 
 namespace Mips2C::jak2::native {
-
-//! config.ini logic_native (default on; the safe preset: off)
-bool logic_native_on();
-
-//! impl, or null when logic_native is off (for LinkedFunctionTable::reg)
-inline const NativeImpl* on(const NativeImpl& impl) {
-  return logic_native_on() ? &impl : nullptr;
-}
 
 //! GOAL address of a symbol's value (Jak 2: the symbol's address - 1)
 u32 sym_val_addr(const char* name);

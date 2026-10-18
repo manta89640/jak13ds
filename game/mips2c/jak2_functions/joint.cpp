@@ -2548,7 +2548,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   gLinkedFunctionTable.reg("cspace<-parented-transformq-joint!", execute, 128,
-                           native::on(native::cspace_parented_transformq_joint));
+                           &native::cspace_parented_transformq_joint);
 }
 
 } // namespace cspace<_parented_transformq_joint

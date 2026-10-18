@@ -14,10 +14,6 @@
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
 
-#ifdef __3DS__
-extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
-#endif
-
 extern const u32* max_tri_count;  // collide_cache.cpp
 extern u32 g_link_generation;      // (AI-assisted) game/kernel/common/klink.h
 
@@ -1236,7 +1232,8 @@ inline void scan_vertex_box(const u16* data, int count, u32 ulo[3], u32 uhi[3]) 
  * used for the same mesh, vertex data address and count, and the same g_link_generation (a level
  * that was loaded since could have put another mesh at that address). The cached values are the
  * scan's, so results are the same.
- * config.ini collide_frag_cache = off (3DS) or OPENGOAL_FRAG_CACHE=0 (host): scan every time.
+ * Always on (no config.ini switch since Oct 18). Host debugging: OPENGOAL_FRAG_CACHE=0 scans
+ * every time.
  * OPENGOAL_FRAG_CACHE_VERIFY=1 (host): scan every time and compare with the cache.
  */
 struct FragBoxCache {
@@ -1257,13 +1254,7 @@ bool frag_box_cache_on() {
   auto& c = g_frag_box_cache;
   if (c.on < 0) {
     c.on = 1;
-#ifdef __3DS__
-    char v[16];
-    if (ctr_config_get("collide_frag_cache", v, sizeof(v)) &&
-        (!strcmp(v, "off") || !strcmp(v, "0") || !strcmp(v, "no") || !strcmp(v, "false"))) {
-      c.on = 0;
-    }
-#else
+#ifndef __3DS__
     const char* env = getenv("OPENGOAL_FRAG_CACHE");
     if (env && env[0] == '0') {
       c.on = 0;
@@ -1446,8 +1437,8 @@ u64 pc_collide_frag_may_hit_impl(const NativeArgs& args) {
 // the same stores in the same order:
 //   pc-bsp-collide-with-box: (method collide-with-box bsp-header), after its *collide-stats* count
 //   pc-fill-from-foreground-using-box: (method fill-from-foreground-using-box collide-cache)
-// Both return #f when off (config.ini collide_native = off; host: OPENGOAL_COLLIDE_NATIVE=0): the
-// GOAL code then runs. The node types are recognized by their type; other types (and the
+// Always on (no config.ini switch since Oct 18). Both return #f when off (host debugging:
+// OPENGOAL_COLLIDE_NATIVE=0): the GOAL code then runs. The node types are recognized by their type; other types (and the
 // collide-shape-prim methods other than sphere and group) are called through their method table
 // like the original. instance-sphere-box-intersect? stays GOAL (called for the collide fragments
 // of the ties that pass the box tests).
@@ -1468,13 +1459,7 @@ bool collide_native_on() {
   auto& c = g_collide_native;
   if (c.on < 0) {
     c.on = 1;
-#ifdef __3DS__
-    char v[16];
-    if (ctr_config_get("collide_native", v, sizeof(v)) &&
-        (!strcmp(v, "off") || !strcmp(v, "0") || !strcmp(v, "no") || !strcmp(v, "false"))) {
-      c.on = 0;
-    }
-#else
+#ifndef __3DS__
     const char* env = getenv("OPENGOAL_COLLIDE_NATIVE");
     if (env && env[0] == '0') {
       c.on = 0;
@@ -1484,7 +1469,7 @@ bool collide_native_on() {
 #endif
     printf("[collide] native box fills (pc-bsp-collide-with-box, "
            "pc-fill-from-foreground-using-box) %s%s\n",
-           c.on ? "on" : "off (config.ini collide_native)", c.verify ? ", verify" : "");
+           c.on ? "on" : "off (OPENGOAL_COLLIDE_NATIVE=0)", c.verify ? ", verify" : "");
   }
   return c.on == 1 && !c.in_goal;
 }
@@ -1895,7 +1880,7 @@ const NativeImpl method_14_collide_shape_prim_mesh =
     MIPS2C_NATIVE_IMPL(method_12_collide_shape_prim_mesh_impl, 0, 0);
 const NativeImpl pc_upload_collide_frag = MIPS2C_NATIVE_IMPL(pc_upload_collide_frag_impl, 0, 0);
 const NativeImpl pc_collide_frag_may_hit = MIPS2C_NATIVE_IMPL_GOAL(pc_collide_frag_may_hit_impl, 0);
-// (AI-assisted) the box fills (see above): no mips2c version, config.ini collide_native turns them off
+// (AI-assisted) the box fills (see above): no mips2c version, OPENGOAL_COLLIDE_NATIVE=0 (host) turns them off
 const NativeImpl pc_bsp_collide_with_box =
     MIPS2C_NATIVE_IMPL(pc_bsp_collide_with_box_impl, NATIVE_CALLS_GOAL, 0);
 const NativeImpl pc_fill_from_foreground_using_box =

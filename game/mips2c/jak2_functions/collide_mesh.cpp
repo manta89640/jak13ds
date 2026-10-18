@@ -198,7 +198,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.closest_pt_in_triangle = intern_from_c("closest-pt-in-triangle").c();
-  gLinkedFunctionTable.reg("(method 12 collide-mesh)", execute, 256, native::on(native::method_12_collide_mesh));
+  gLinkedFunctionTable.reg("(method 12 collide-mesh)", execute, 256, &native::method_12_collide_mesh);
 }
 
 } // namespace method_12_collide_mesh
@@ -403,7 +403,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 14 collide-mesh)", execute, 256, native::on(native::method_14_collide_mesh));
+  gLinkedFunctionTable.reg("(method 14 collide-mesh)", execute, 256, &native::method_14_collide_mesh);
 }
 
 } // namespace method_14_collide_mesh
@@ -712,7 +712,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 15 collide-mesh)", execute, 256, native::on(native::method_15_collide_mesh));
+  gLinkedFunctionTable.reg("(method 15 collide-mesh)", execute, 256, &native::method_15_collide_mesh);
 }
 
 } // namespace method_15_collide_mesh

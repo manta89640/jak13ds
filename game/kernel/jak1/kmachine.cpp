@@ -671,15 +671,14 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-anim-lod*")->value =
         anim_lod ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
   }
-  // (AI-assisted) config.ini anim_native (default on): the joint decompressor's requests and
-  // final normalize run as native code (joint.gc, game/mips2c/jak1_functions/native_anim.cpp).
-  // Off on other builds (the GOAL versions).
+  // (AI-assisted) The joint decompressor's requests and final normalize run as native code on the
+  // 3DS (joint.gc, game/mips2c/jak1_functions/native_anim.cpp; the same results, always on: no
+  // config.ini switch since Oct 18). Off on other builds (the GOAL versions).
   {
-    bool anim_native = false;
 #ifdef __3DS__
-    anim_native = ctr_config_bool("anim_native", 1);
-    lg::info("native animation decompressor {} (config.ini anim_native)",
-             anim_native ? "on" : "off");
+    const bool anim_native = true;
+#else
+    const bool anim_native = false;
 #endif
     intern_from_c("*pc-3ds-anim-native*")->value =
         anim_native ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;

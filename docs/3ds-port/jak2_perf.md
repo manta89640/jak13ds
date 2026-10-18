@@ -189,9 +189,10 @@ None of Jak 2's 28 mips2c files has a native version yet. By N3DS ms (as is -> n
 
 #### Done: the ports from Jak 1 (AI-assisted, Oct 18, j2-nat-port)
 
-`game/mips2c/jak2_functions/native_*.cpp`, registered next to the mips2c versions through
-`native::on()` (native_functions.h). `config.ini logic_native = off` (preset safe; host
-`OPENGOAL_LOGIC_NATIVE=0`) registers none of them; `mips2c_native_off` still names single ones.
+`game/mips2c/jak2_functions/native_*.cpp`, registered next to the mips2c versions, always (Oct 18:
+the config.ini switch `logic_native` was removed; they give the same results). Debugging:
+`mips2c_native_off` (3DS) or `OPENGOAL_MIPS2C_NATIVE=0` (host) picks the mips2c versions,
+`OPENGOAL_MIPS2C_VERIFY=1` compares.
 
 | native | Jak 2 changes against Jak 1's native |
 |---|---|

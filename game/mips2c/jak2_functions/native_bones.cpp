@@ -5,10 +5,10 @@
  * (jak1_functions/native_bones.cpp: the same GOAL code; the C++ and the 3DS's VFP assembly are
  * the same, only Jak 2's bone is 80 bytes, without Jak 1's bone-cache). See there for the details.
  *
- * (pc-new-bones-mtx-calc output joints bones cam count) -> symbol: #f when off (config.ini
- * logic_native = off or bones_native = off, or mips2c_native_off lists pc-new-bones-mtx-calc;
- * host: OPENGOAL_LOGIC_NATIVE=0 or OPENGOAL_BONES_NATIVE=0); new-bones-mtx-calc-asm then runs its
- * own code.
+ * (pc-new-bones-mtx-calc output joints bones cam count) -> symbol: always on (no config.ini switch
+ * since Oct 18); #f only for debugging (config.ini mips2c_native_off lists pc-new-bones-mtx-calc
+ * or is all; host: OPENGOAL_BONES_NATIVE=0 or OPENGOAL_MIPS2C_NATIVE=0): new-bones-mtx-calc-asm
+ * then runs its own code.
  *
  * It replaces a GOAL function, so OPENGOAL_MIPS2C_VERIFY has no mips2c version to compare it with.
  * Instead, in verify mode (host) every call computes the native result into a buffer, then calls
@@ -39,13 +39,8 @@ int g_bones_native = -1;  // -1: config not read yet
 
 bool bones_native_on() {
   if (g_bones_native < 0) {
-    g_bones_native = logic_native_on() ? 1 : 0;
+    g_bones_native = 1;
 #ifdef __3DS__
-    char v[16];
-    if (ctr_config_get("bones_native", v, sizeof(v)) &&
-        (!strcmp(v, "off") || !strcmp(v, "0") || !strcmp(v, "no") || !strcmp(v, "false"))) {
-      g_bones_native = 0;
-    }
     // mips2c_native_off = all (or on, 1...) or a list with this name: off too
     char list[256];
     if (ctr_config_get("mips2c_native_off", list, sizeof(list)) &&
@@ -64,7 +59,7 @@ bool bones_native_on() {
     }
 #endif
     lg::info("[bones] Jak 2 native new-bones-mtx-calc-asm {}",
-             g_bones_native ? "on" : "off (config.ini logic_native / bones_native)");
+             g_bones_native ? "on" : "off (mips2c_native_off / OPENGOAL_*_NATIVE=0)");
   }
   return g_bones_native == 1;
 }

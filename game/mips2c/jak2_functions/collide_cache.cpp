@@ -1048,7 +1048,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.moving_sphere_triangle_intersect = intern_from_c("moving-sphere-triangle-intersect").c();
-  gLinkedFunctionTable.reg("(method 9 collide-cache-prim)", execute, 1024, native::on(native::method_9_collide_cache_prim));
+  gLinkedFunctionTable.reg("(method 9 collide-cache-prim)", execute, 1024, &native::method_9_collide_cache_prim);
 }
 
 } // namespace method_9_collide_cache_prim
@@ -1255,7 +1255,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.moving_sphere_sphere_intersect = intern_from_c("moving-sphere-sphere-intersect").c();
-  gLinkedFunctionTable.reg("(method 10 collide-cache-prim)", execute, 256, native::on(native::method_10_collide_cache_prim));
+  gLinkedFunctionTable.reg("(method 10 collide-cache-prim)", execute, 256, &native::method_10_collide_cache_prim);
 }
 
 } // namespace method_10_collide_cache_prim

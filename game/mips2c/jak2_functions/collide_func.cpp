@@ -234,7 +234,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.collide_do_primitives = intern_from_c("collide-do-primitives").c();
-  gLinkedFunctionTable.reg("moving-sphere-triangle-intersect", execute, 512, native::on(native::moving_sphere_triangle_intersect));
+  gLinkedFunctionTable.reg("moving-sphere-triangle-intersect", execute, 512, &native::moving_sphere_triangle_intersect);
 }
 
 } // namespace moving_sphere_triangle_intersect
@@ -494,7 +494,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.ray_cylinder_intersect = intern_from_c("ray-cylinder-intersect").c();
   cache.ray_sphere_intersect = intern_from_c("ray-sphere-intersect").c();
-  gLinkedFunctionTable.reg("collide-do-primitives", execute, 512, native::on(native::collide_do_primitives));
+  gLinkedFunctionTable.reg("collide-do-primitives", execute, 512, &native::collide_do_primitives);
 }
 
 } // namespace collide_do_primitives

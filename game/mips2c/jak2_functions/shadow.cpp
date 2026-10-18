@@ -2806,7 +2806,7 @@ void link() {
   cache.shadow_scissor_edges = intern_from_c("shadow-scissor-edges").c();
   cache.shadow_scissor_top = intern_from_c("shadow-scissor-top").c();
   cache.shadow_xform_verts = intern_from_c("shadow-xform-verts").c();
-  gLinkedFunctionTable.reg("shadow-execute", execute, 256, native::on(native::shadow_execute));
+  gLinkedFunctionTable.reg("shadow-execute", execute, 256, &native::shadow_execute);
 }
 
 } // namespace shadow_execute
