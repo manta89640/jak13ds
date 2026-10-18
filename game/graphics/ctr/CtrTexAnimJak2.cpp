@@ -136,8 +136,8 @@ CtrTexAnimJak2::CtrTexAnimJak2() {
   }
   m_acc.resize(kCloudSize * kCloudSize);
   m_acc2.resize(kCloudSize * kCloudSize);
-  m_tmp.resize(kCloudSize * kCloudSize);
-  m_out.resize(kCloudSize * kCloudSize);
+  m_tmp.resize(kCloudSize * kCloudSize / 2);  // upsample2's row pass: 2n x n
+  m_out.resize(kCloudSize * kCloudSize / 4);
 }
 
 void CtrTexAnimJak2::make_noise(u8* dest, int dim) {
@@ -207,13 +207,22 @@ void CtrTexAnimJak2::clouds(const u8* data, int bytes, CtrVram* vram) {
     }
   }
   // tex_anim.frag, enable_tex 2: rgb 0.5, alpha 0.5 * cloud_lookup of the 8-bit sum (0x80 = 1 in
-  // the PS2's texture scale, like the PC's texture)
-  for (int p = 0; p < dim * dim; p++) {
-    const float v = std::round(std::min(acc[p], 1.f) * 255.f) * (1.f / 255.f);
-    const u32 a = (u32)std::lround(cloud_lookup(v, in.cloud_min, in.cloud_max) * 127.5f);
-    m_out[p] = 0x808080u | (a << 24);
+  // the PS2's texture scale, like the PC's texture); stored at half the size (64 x 64, the
+  // average of each 2 x 2: 16 KB of linear memory, and the sky is a few hundred pixels wide)
+  const int half = dim / 2;
+  for (int y = 0; y < half; y++) {
+    for (int x = 0; x < half; x++) {
+      float a = 0;
+      for (int k = 0; k < 4; k++) {
+        const float v =
+            std::round(std::min(acc[(2 * y + (k >> 1)) * dim + 2 * x + (k & 1)], 1.f) * 255.f) *
+            (1.f / 255.f);
+        a += cloud_lookup(v, in.cloud_min, in.cloud_max);
+      }
+      m_out[y * half + x] = 0x808080u | ((u32)std::lround(a * (127.5f / 4.f)) << 24);
+    }
   }
-  vram->set_override((u32)in.cloud_dest, dim, dim, m_out.data());
+  vram->set_override((u32)in.cloud_dest, half, half, m_out.data());
 }
 
 const u8* CtrTexAnimJak2::image_data(u32 addr, u32 bytes, const u8* ee_mem) const {
