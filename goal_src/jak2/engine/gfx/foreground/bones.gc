@@ -205,8 +205,18 @@ this is done by a linked list of "bone calculations", which is stashed in the dm
      )
   )
 
+;; og:preserve-this (AI-assisted) 3DS: new-bones-mtx-calc-asm's loop in C++
+;; (jak2_functions/native_bones.cpp, the same results). #f when it is off (config.ini logic_native
+;; or bones_native = off): the GOAL code runs.
+(#when TARGET_3DS
+  (def-mips2c pc-new-bones-mtx-calc
+              (function (inline-array pris-mtx) (inline-array joint) (inline-array bone) matrix int symbol)))
+
 (defun new-bones-mtx-calc-asm ((output (inline-array pris-mtx)) (joints (inline-array joint)) (bones (inline-array bone)) (cam matrix) (count int))
   ;; (declare (print-asm))
+  ;; og:preserve-this (AI-assisted) 3DS: the native did all of it: no bones left for the loop
+  (#when TARGET_3DS
+    (if (pc-new-bones-mtx-calc output joints bones cam count) (set! count 1)))
   (dotimes (i (- count 1))
     (let ((b (-> bones (+ i 1) transform))
           (j (-> joints i bind-pose))

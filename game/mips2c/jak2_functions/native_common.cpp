@@ -39,7 +39,7 @@ bool logic_native_on() {
       on = 0;
     }
 #endif
-    lg::info("logic_native (Jak 2 native mips2c functions): {}",
+    lg::info("Jak 2 native mips2c functions (logic_native): {}",
              on ? "on" : "off (config.ini logic_native)");
   }
   return on == 1;

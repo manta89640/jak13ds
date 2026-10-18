@@ -143,6 +143,7 @@ namespace generic_tie_convert { extern void link(); }
 
 #if !OPENGOAL_ONLY_JAK1
 namespace jak2 {
+namespace pc_new_bones_mtx_calc { extern void link(); }  // (AI-assisted) 3DS
 namespace collide_do_primitives { extern void link(); }
 namespace moving_sphere_triangle_intersect { extern void link(); }
 namespace calc_animation_from_spr { extern void link(); }
@@ -686,7 +687,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak2::method_11_collide_shape_prim_group::link, jak2::method_9_collide_cache_prim::link,
        jak2::method_10_collide_cache_prim::link, jak2::method_17_collide_cache::link,
        jak2::method_9_collide_puss_work::link, jak2::method_10_collide_puss_work::link}},
-     {"bones", {jak2::bones_mtx_calc::link}},
+     {"bones", {jak2::bones_mtx_calc::link, jak2::pc_new_bones_mtx_calc::link}},
      {"foreground",
       {jak2::foreground_check_longest_edge_asm::link, jak2::foreground_merc::link,
        jak2::foreground_generic_merc::link, jak2::foreground_draw_hud::link}},
