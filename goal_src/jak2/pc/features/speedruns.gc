@@ -695,6 +695,10 @@
                 (* 0.0009765625 (the float (- (the int (-> lev heap current)) (the int (-> lev heap base)))))
                 (* 0.0009765625 (the float (- (the int (-> lev heap top)) (the int (-> lev heap base)))))
                 (* 0.0009765625 (the float (- (the int (-> lev code-memory-end)) (the int (-> lev code-memory-start)))))))))
+  (#when SMALL_MEMORY
+    (format 0 "  dma global-buf peak ~10,,1f KB of ~10,,1f KB~%"
+            (* 0.0009765625 (the float *dma-mem-peak*))
+            (* 0.0009765625 (the float (-> *display* frames 0 global-buf allocated-length)))))
   ;; live processes by type
   (set! *pad-script-mem-ntypes* 0)
   (iterate-process-tree

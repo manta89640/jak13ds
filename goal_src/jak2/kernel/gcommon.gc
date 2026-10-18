@@ -16,14 +16,27 @@
 ;; removes level loading d3mo mode changes when enabled
 (defglobalconstant DEMO_HACK #f)
 
-;; whether we're allowed to use more memory than the original game or not
-(defglobalconstant BIG_MEMORY #t)
-(defglobalconstant PC_BIG_MEMORY (and PC_PORT BIG_MEMORY))
+;; 3DS port (AI-assisted): small memory mode, 48 MB of EE memory instead of 128 MB, as in Jak 1
+;; (goal_src/jak1/kernel/gcommon.gc). Set with OPENGOAL_SMALL_MEMORY=1 in the environment of the
+;; compiler; the runtime must be built with the same setting (OPENGOAL_SMALL_MEMORY in
+;; common/goal_constants.h, on for the 3DS), which the C kernel checks against *goal-small-memory*.
+;; With it, BIG_MEMORY is off: the PS2's process heap, DMA buffer and sprite sizes, and level heaps
+;; of the PS2 size (C mode keeps the code out of the level heaps). The shared goal_src/jak1/pc files
+;; test SMALL_MEMORY and TARGET_3DS too. (defglobalconstant doesn't evaluate its value: use #if.)
+(#if (eq? (get-environment-variable "OPENGOAL_SMALL_MEMORY" :default "0") "1")
+  (defglobalconstant SMALL_MEMORY #t)
+  (defglobalconstant SMALL_MEMORY #f))
+(#if SMALL_MEMORY
+  (defglobalconstant TARGET_3DS #t)
+  (defglobalconstant TARGET_3DS #f))
 
-;; 3DS port (AI-assisted): the shared goal_src/jak1/pc files test these. Jak 2 has no small
-;; memory (3DS) layout yet, so both are off.
-(defglobalconstant SMALL_MEMORY #f)
-(defglobalconstant TARGET_3DS #f)
+;; whether we're allowed to use more memory than the original game or not
+(#if SMALL_MEMORY
+  (defglobalconstant BIG_MEMORY #f)
+  (defglobalconstant BIG_MEMORY #t))
+(#if (and PC_PORT BIG_MEMORY)
+  (defglobalconstant PC_BIG_MEMORY #t)
+  (defglobalconstant PC_BIG_MEMORY #f))
 
 ;; redirects access to EE memory mapped registers through get-vm-ptr to valid addresses that
 ;; are monitored in the runtime for debugging.
@@ -48,7 +61,8 @@
   )
 
 ;; pointers larger than this are invalid by valid?
-(defconstant END_OF_MEMORY #x8000000)
+;; (EE_MAIN_MEM_SIZE in common/goal_constants.h)
+(defconstant END_OF_MEMORY (#if SMALL_MEMORY #x3000000 #x8000000))
 
 (defun identity ((arg0 object))
   "Return the input. Works for any 64-bit value."
@@ -1012,6 +1026,10 @@
 
 ;; the column that will be printed to by format.
 (define *print-column* (the-as binteger 0))
+
+;; 3DS port (AI-assisted): checked by the C kernel, which must use the same memory layout (see
+;; SMALL_MEMORY)
+(define *goal-small-memory* (#if SMALL_MEMORY #t #f))
 
 ;; note: normal use of print/inspect will have the compiler pick the appropriate method
 ;; for non-basics.  However, it may be useful to have print/inspect available as a function

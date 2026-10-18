@@ -11,6 +11,8 @@
 #include "common/goal_constants.h"
 #include "common/log/log.h"
 #include "common/symbols.h"
+#include "common/link_types.h"
+#include "common/util/FileUtil.h"
 
 #include "game/kernel/common/codegen.h"
 #include "game/kernel/common/fileio.h"
@@ -1609,7 +1611,118 @@ void pad_script_exit() {
   MasterExit = RuntimeExitStatus::EXIT;
 }
 
+//! (AI-assisted) a pad script argument: an integer, 'SYM, $SYM, "TEXT", fN, #f or #t
+u64 pad_script_arg(const std::string& w) {
+  if (w.size() > 1 && w[0] == '\'') {
+    return intern_from_c(w.c_str() + 1).offset;
+  } else if (w.size() > 1 && w[0] == '$') {
+    auto v = find_symbol_from_c(w.c_str() + 1);
+    return v.offset ? (u64)v->value() : s7.offset;
+  } else if (w.size() > 1 && w[0] == '"') {
+    std::string t = w.substr(1, w.size() - (w.back() == '"' ? 2 : 1));
+    return (u32)make_string_from_c(t.c_str());
+  } else if (w.size() > 1 && w[0] == 'f') {
+    float f = std::strtof(w.c_str() + 1, nullptr);
+    u32 bits;
+    memcpy(&bits, &f, 4);
+    return bits;
+  } else if (w == "#f") {
+    return s7.offset;
+  } else if (w == "#t") {
+    return (s7 + FIX_SYM_TRUE).offset;
+  }
+  return (u64)std::strtoll(w.c_str(), nullptr, 0);
+}
+
+/*!
+ * (AI-assisted) "call link-copy DGO OBJECT": a test of the C module instances (docs/3ds-port/
+ * c_backend.md). Links another copy of OBJECT (read from out/jak2/iso/DGO) into the global heap
+ * without running its top level, as when a second loaded level has the same object file, then
+ * overwrites that copy with 0xff. The first copy's code (the running processes) must not use the
+ * second copy's static data: with one instance per module (the old behaviour,
+ * OPENGOAL_C_MODULE_INSTANCES=1) it does, and reads the garbage.
+ */
+void pad_script_link_copy(const std::string& dgo, const std::string& obj) {
+  auto path = file_util::get_jak_project_dir() / "out" / game_version_names[g_game_version] /
+              "iso" / dgo;
+  FILE* fp = file_util::open_file(path, "rb");
+  if (!fp) {
+    lg::warn("[pad script] link-copy: no {}", path.string());
+    return;
+  }
+  DgoHeader header;
+  bool found = false;
+  if (fread(&header, sizeof(header), 1, fp) == 1) {
+    for (u32 i = 0; i < header.object_count; i++) {
+      ObjectHeader oh;
+      if (fread(&oh, sizeof(oh), 1, fp) != 1) {
+        break;
+      }
+      const u32 aligned = (oh.size + 15) & ~15u;
+      if (obj + ".o" != oh.name && obj != oh.name) {
+        fseek(fp, aligned, SEEK_CUR);
+        continue;
+      }
+      auto old_top = kglobalheap->top;
+      auto buf = kmalloc(kglobalheap, aligned + 64, KMALLOC_TOP | KMALLOC_ALIGN_64, "link-copy");
+      if (!buf.offset || fread(buf.c(), aligned, 1, fp) != 1) {
+        lg::warn("[pad script] link-copy: no memory or read error");
+        kglobalheap->top = old_top;
+        break;
+      }
+      const u32 before = kglobalheap->current.offset;
+      link_and_exec(buf, oh.name, oh.size, kglobalheap, LINK_FLAG_OUTPUT_LOAD, true);
+      const u32 after = kglobalheap->current.offset;
+      kglobalheap->top = old_top;
+      memset(Ptr<u8>(before).c(), 0xff, after - before);
+      lg::info("[pad script] link-copy {} {}: linked at {:#x}..{:#x}, then overwritten", dgo, obj,
+               before, after);
+      found = true;
+      break;
+    }
+  }
+  fclose(fp);
+  if (!found) {
+    lg::warn("[pad script] link-copy: no {} in {}", obj, dgo);
+  }
+}
+
+//! (AI-assisted) "call FN ARGS..." in a pad script: FN's value called with up to 8 arguments
+//! (pad_script_arg), the result logged. Pseudo functions: "heap" (the global heap's free space),
+//! "link-copy DGO OBJECT" (pad_script_link_copy).
+void pad_script_call(const std::string& fn, const std::vector<std::string>& args) {
+  if (fn == "heap") {
+    lg::info("[pad script] heap global: {} KB free (current {:#x}, top {:#x})",
+             (kglobalheap->top.offset - kglobalheap->current.offset) / 1024,
+             kglobalheap->current.offset, kglobalheap->top.offset);
+    return;
+  }
+  if (fn == "link-copy") {
+    if (args.size() >= 2) {
+      pad_script_link_copy(args[0], args[1]);
+    }
+    return;
+  }
+  auto sym = find_symbol_from_c(fn.c_str());
+  if (!sym.offset || sym->value() == s7.offset) {
+    lg::warn("[pad script] call: no function {}", fn);
+    return;
+  }
+  u64 a[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (size_t i = 0; i < args.size() && i < 8; i++) {
+    a[i] = pad_script_arg(args[i]);
+  }
+  u64 r;
+  if (goalc_enabled() && goalc_on_goal_stack()) {
+    r = goalc_call_goal8(sym->value(), a, s7.offset);
+  } else {
+    r = call_goal(Ptr<Function>(sym->value()), a[0], a[1], a[2], s7.offset, g_ee_main_mem);
+  }
+  lg::info("[pad script] call {} = {:#x} ({})", fn, r, (s64)r);
+}
+
 void install_pad_script_hooks() {
+  pad_script::set_call_hook(pad_script_call);
   pad_script::set_print_symbol_hook(pad_script_print_symbol);
   pad_script::set_exit_hook(pad_script_exit);
   pad_script::set_continue_hook(pad_script_continue);
@@ -1917,6 +2030,18 @@ int InitHeapAndSymbol() {
                              LINK_FLAG_OUTPUT_LOAD | LINK_FLAG_EXECUTE | LINK_FLAG_PRINT_LOGIN,
                              0x400000, true);
     *EnableMethodSet = *EnableMethodSet + -1;
+
+    // (AI-assisted) check that the kernel was compiled for our memory layout (memory_layout.h)
+    bool goal_small_memory =
+        intern_from_c("*goal-small-memory*")->value() == (s7 + FIX_SYM_TRUE).offset;
+    if (goal_small_memory != (bool)OPENGOAL_SMALL_MEMORY) {
+      lg::die(
+          "The GOAL code was compiled for {} memory, but this runtime uses {} memory. Build the "
+          "GOAL code with OPENGOAL_SMALL_MEMORY={} in the environment.",
+          goal_small_memory ? "small" : "big", OPENGOAL_SMALL_MEMORY ? "small" : "big",
+          OPENGOAL_SMALL_MEMORY);
+      return -1;
+    }
 
     auto kernel_version = intern_from_c("*kernel-version*")->value();
     if (!kernel_version || ((kernel_version >> 0x13) != KERNEL_VERSION_MAJOR)) {

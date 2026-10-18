@@ -106,7 +106,7 @@ constexpr u32 GOAL_RELOC_METHOD = 7;     // method ID of GOAL relocate
 constexpr u32 GOAL_MEMUSAGE_METHOD = 8;  // method ID of GOAL mem-usage
 
 /*!
- * Small memory mode (Jak 1 only): 48 MB of EE memory instead of the 128 MB of a PS2 TOOL, with
+ * Small memory mode (Jak 1 and Jak 2): 48 MB of EE memory instead of the 128 MB of a PS2 TOOL, with
  * BIG_MEMORY off in GOAL. Used on the 3DS. The GOAL code must be compiled with
  * the same setting (OPENGOAL_SMALL_MEMORY=1 in the environment of goalc, see gcommon.gc), which
  * the kernel checks at boot. See game/kernel/common/memory_layout.h for the layout.

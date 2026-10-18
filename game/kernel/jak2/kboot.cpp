@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "common/goal_constants.h"
+#include "game/kernel/common/memory_layout.h"
 #include "common/log/log.h"
 #include "common/repl/repl_wrapper.h"
 #include "common/util/Timer.h"
@@ -32,8 +33,13 @@ void kboot_init_globals() {
   // strcpy(DebugBootUser, "unknown");
   // CHANGED : let's just try to find the username automatically by default!
   // the default is still "unknown"
+#ifdef __3DS__
+  // (AI-assisted) no REPL (common/repl) on the 3DS
+  strcpy(DebugBootUser, "unknown");
+#else
   auto username = REPL::find_repl_username();
   strcpy(DebugBootUser, username.c_str());
+#endif
 }
 
 void KernelCheckAndDispatch();
@@ -91,7 +97,7 @@ s32 goal_main(int argc, const char* const* argv) {
 
 void KernelDispatch(u32 dispatcher_func) {
   // place our stack at the end of EE memory
-  u64 goal_stack = u64(g_ee_main_mem) + EE_MAIN_MEM_SIZE - GOAL_STACK_TOP_OFFSET;
+  u64 goal_stack = u64(g_ee_main_mem) + GOAL_KERNEL_STACK_TOP - GOAL_STACK_TOP_OFFSET;
 
   // try to get a message from the listener, and process it if needed
   Ptr<char> new_message = WaitForMessageAndAck();
@@ -124,9 +130,13 @@ void KernelDispatch(u32 dispatcher_func) {
   // (AI-assisted) frame timing lines ("perf: ... logic ..."), as in Jak 1
   kperf::add(kperf::Cat::DISPATCH, (u64)(time_ms * 1000));
   kperf::frame_done();
+#ifndef __3DS__
+  // (on the 3DS, the stats from kperf are logged every 5 s instead, as in Jak 1: a line per slow
+  // frame there is a line per frame, and SD card writes)
   if (time_ms > 50) {
     lg::print("Kernel dispatch time: {:.3f} ms\n", time_ms);
   }
+#endif
 
   // flush stdout
   ClearPending();

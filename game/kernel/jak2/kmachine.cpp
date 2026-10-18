@@ -399,7 +399,12 @@ int InitMachine() {
     // note: either MasterDebug or DebugSegment is enough to give use the debug heap.
     kdebugheap.offset = 0;
   } else {
+#if OPENGOAL_SMALL_MEMORY
+    // (AI-assisted) small memory layout (memory_layout.h): what is left after the kernel stack
+    kinitheap(kdebugheap, Ptr<u8>(DEBUG_HEAP_START), DEBUG_HEAP_END - DEBUG_HEAP_START);
+#else
     kinitheap(kdebugheap, Ptr<u8>(DEBUG_HEAP_START), jak2::DEBUG_HEAP_SIZE);
+#endif
   }
   init_output();
   InitIOP();
@@ -716,9 +721,16 @@ void InitMachineScheme() {
   if (goalc_enabled()) {
     goalc_dump_kernel_functions_if_requested();
   }
+#if OPENGOAL_SMALL_MEMORY
+  // (AI-assisted) the kernel stack of the small memory layout (memory_layout.h)
+  intern_from_c("*stack-top*")->value() = GOAL_KERNEL_STACK_TOP - GOAL_KERNEL_STACK_SIZE;
+  intern_from_c("*stack-base*")->value() = GOAL_KERNEL_STACK_TOP - 1;
+  intern_from_c("*stack-size*")->value() = GOAL_KERNEL_STACK_SIZE;
+#else
   intern_from_c("*stack-top*")->value() = 0x7f00000;
   intern_from_c("*stack-base*")->value() = 0x7ffffff;
   intern_from_c("*stack-size*")->value() = 0x100000;
+#endif
   intern_from_c("*kernel-boot-message*")->value() = intern_from_c(DebugBootMessage).offset;
   intern_from_c("*user*")->value() = make_string_from_c(DebugBootUser);
   if (DiskBoot) {
@@ -757,6 +769,13 @@ void InitMachineScheme() {
 
 sqlite::SQLiteDatabase sql_db;
 
+#ifdef __3DS__
+// (AI-assisted) no sqlite on the 3DS: the debug editor's database (REPL queries) stays closed
+void initialize_sql_db() {}
+sqlite::GenericResponse run_sql_query(const std::string&) {
+  return sqlite::GenericResponse();
+}
+#else
 void initialize_sql_db() {
   // If the DB has already been initialized, no-op
   if (sql_db.is_open()) {
@@ -816,5 +835,6 @@ sqlite::GenericResponse run_sql_query(const std::string& query) {
   }
   return sql_db.run_query(query);
 }
+#endif
 
 }  // namespace jak2

@@ -30,7 +30,11 @@ into 7 sections, which might explain the weird sizes in the center.
 
 (defglobalconstant LEVEL_HEAP_SIZE (* NUM_LEVEL_PAGES LEVEL_PAGE_SIZE))
 ;(defglobalconstant DEBUG_LEVEL_HEAP_MULT 1.5) ;; level heap in debug mode is 1.5x larger
-(defglobalconstant DEBUG_LEVEL_HEAP_MULT 1.15) ;; we're gonna use debug mode-style heaps but we don't actually need them at 1.5x size right now
+;; 3DS port (AI-assisted): the PS2 size with the small memory layout. C mode keeps the code out of the
+;; level heaps (ctywide's 1240 KB of arm64 code is what needed 1.15x on the PC).
+(#if SMALL_MEMORY
+  (defglobalconstant DEBUG_LEVEL_HEAP_MULT 1.0)
+  (defglobalconstant DEBUG_LEVEL_HEAP_MULT 1.15)) ;; we're gonna use debug mode-style heaps but we don't actually need them at 1.5x size right now
 (defglobalconstant DEBUG_LEVEL_PAGE_SIZE (* 1024 (* DEBUG_LEVEL_HEAP_MULT LEVEL_PAGE_SIZE_KB)))
 (defglobalconstant DEBUG_LEVEL_HEAP_SIZE (* NUM_LEVEL_PAGES DEBUG_LEVEL_PAGE_SIZE))
 

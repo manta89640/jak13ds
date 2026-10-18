@@ -2156,6 +2156,12 @@
       ;; make sure nothing is in cache
       (flush-cache 0)
 
+      ;; 3DS port (AI-assisted): the peak global-buf use, for the memory report (pad scripts)
+      (#when SMALL_MEMORY
+        (let ((used (&- (-> s4-0 global-buf base) (the-as uint (-> s4-0 global-buf data)))))
+          (if (< *dma-mem-peak* used)
+              (set! *dma-mem-peak* used))))
+
       ;; list final dma sizes
       (when (not (paused?))
         (when *stats-buffer*

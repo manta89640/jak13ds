@@ -40,6 +40,11 @@
   (defconstant PROCESS_HEAP_MULT 1)
   )
 (defconstant PROCESS_HEAP_SIZE (* PROCESS_HEAP_MULT 1540 1024))
+;; 3DS port (AI-assisted): with SMALL_MEMORY, PROCESS_HEAP_MULT is the PS2's 1 (the city's traffic
+;; peaks at ~1.1 MB of the 1540 KB *nk-dead-pool* on the PC), and the global DMA buffers are this
+;; many times the PS2's 1280 KB (display.gc). The PC port's renderers take little DMA from GOAL:
+;; the slums with traffic peaked at 199 KB a frame (C mode, Oct 18).
+(defconstant DMA_BUFFER_SMALL_MULT 1)
 (defconstant PROCESS_HEAP_MAX (* PROCESS_HEAP_MULT 768))
 
 (defconstant *tab-size* (the binteger 8))
