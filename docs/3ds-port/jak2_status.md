@@ -118,6 +118,47 @@ black), the ocean, `ctr_level_ready` (the game doesn't wait for a level's `.c3l`
 prefetch (`ctr_jak2_level_for_dgo` exists, nothing calls it yet), Jak II interiors for the vista
 tier.
 
+## Renderer: foreground (j2-render-fg, Oct 18)
+
+(AI-assisted.) Branch `j2-render-fg`. Jak II's bucket table and dispatch for the Ctr renderer
+(`CtrRendererJak2.cpp`, `CtrRenderer.cpp` `dispatch_buckets_jak2`: the chain starts with bucket 0,
+`vif_interrupt_callback(bucket + 1)`), the foreground renderers on Jak II's DMA. Everything Jak II
+is behind `ctr_is_jak2()` / the bucket table; Jak 1 keeps its constants.
+
+| What | How | Notes |
+|---|---|---|
+| Screen y | `ctr_gs_y_scale()`: 512 / 416 * 0.5 (Shader.cpp SCISSOR_ADJUST * HEIGHT_SCALE); direct draws 1 / 208 | Jak 1: 512 / 448, 1 / 112 |
+| Merc (all 6 level slots + lcom, every texture group) | `CtrMercRenderer`: no uses-water quadword, one link per model, bit 3 = disable-envmap | Jak's face / hair / fingers / eyebrows: the converter bakes the animated slots' index textures with their `-norm` CLUT (`add_anim_slot_textures`); Dark Jak's blend not done |
+| Eyes | `CtrEyeRenderer` from the texture buckets' eye DMA (no eyes bucket in Jak II) | not checked up close |
+| Texture uploads | `CtrJak2TexRenderer` on every TEX bucket; `CtrVram` reads textures the PC port moved (`__pc-get-tex-remap`, +1..4 blocks) from their data | the city signs and the glow were block-scrambled without it |
+| Texture animation | `CtrTexAnimJak2`: clouds (CPU port of `run_clouds`, 64 x 64, every 4th frame), generic uploads (CT32 images: the Dolby logo; PSMT8 + its CLUT: the sky's fog gradient), image data copied on the game thread | not done: Dark Jak / prison / oracle CLUT blends, waterfalls, lava, security walls, slime and the other fixed animations (their textures keep the converter's) |
+| Sky | the game's sky-work GIF packets (`SKY_DRAW`, direct), the clouds above | ~70k vertices a frame (stars, cloud grid) |
+| Sprites / particles | `CtrSpriteRenderer` on `PARTICLES`: Jak II frame data, matrix -1 sprites skipped; glows: the glow VU program's flare math, added, depth tested at the flare center (no probe read back) | distorter off for Jak II |
+| Shadows | `CtrShadowJak2Renderer` (SHADOW, SHADOW2): Shadow2's volumes into Jak 1's stencil passes | darkened by multiplying (the PC subtracts) |
+| HUD / text | direct buckets (progress, debug2, ...); font relocations use the game's font heights (setup-font-texture's 800) | the letters A-K and the button symbols were missing before |
+| Minimap | the progress bucket's FBP 126 draws go to a 128 x 128 render to texture (XYOFFSET, tbp 4032), drawn as the circle in its rectangle | the PS2's alpha-only circle mask isn't kept; left out |
+| Boot logos, title | Dolby logo, "Press the Start Button" | |
+
+**Azahar (one run, the CIA, `jak2_city.pad`, before the clouds change):** title, Dolby logo, the
+slums with merc, HUD, text, minimap, particles, shadows. Render thread 27-29 ms/frame build (of it
+foreground: texture buckets 6.5, of which the clouds most (now ~1.5 by the host ratio), merc
+3.4-4.2, shadows 2.6-3.1, sprites 2.2-3.0, sky 0.9, HUD/text ~1.1; background ~8.5), GPU busy
+28-30 ms/frame, 44-57k triangles, 574-739 draws; game thread logic 45-47 ms (21 fps: logic bound).
+Linear free 128 KB in the slums (the level pools), VRAM free 1654 KB.
+
+**Memory the foreground adds:** heap ~180 KB (clouds 95 KB, CtrVram's Jak II tables 80 KB; the
+logo snapshot's ~850 KB at boot is given back); GPU textures 24 KB linear (clouds, fog gradient)
++ the minimap's 128 x 128 render target and its D16 tile (VRAM while there is room).
+
+**Host checks:** `gk --ctr-gfx` small-memory C mode (`j2fg` mirror) against the PC OpenGL
+reference (native, same pad): title, slums standing / turning / walking. Jak 1: level_pairs.pad,
+the 10 pairs' shots against a gk without these changes: only run-to-run differences (particles,
+Jak's idle, the time of day); Jak 1 3DS build links, make_cia.
+
+Host diagnosis switches (no effect on the 3DS): `CTR_SKIP_BUCKETS=",id,"`, `CTR_DIRECT_STATS`,
+`CTR_DIRECT_DUMP=",bucket,frame,"` (+ `CTR_DIRECT_DUMP_N`), `CTR_UPLOAD_LOG`,
+`CTR_TEX_DUMP=<dir>` (+ `CTR_TEX_DUMP_RGB`), `CTR_GLOW_LOG`, `CTR_MINIMAP_DUMP=<png>`.
+
 ## Paths
 
 | What | Where | Needed to resume? |
