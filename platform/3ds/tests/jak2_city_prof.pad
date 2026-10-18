@@ -1,0 +1,15 @@
+# (AI-assisted) profiling pad (docs/3ds-port/jak2_perf.md): Haven City slums, stand + walk windows; platform/3ds/tools/sample_run.sh turns no-sync on inside them
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 log city: ctysluma-start
+1004 pos *target*
+1400 print *pad-script-mem*
+1401 log perf-mark stand
+31400 log perf-mark stand-end
+31401 log perf-mark walk
+31402 ly=0
+37400 -
+37401 log perf-mark walk-end
+37402 pos *target*
+37500 exit
