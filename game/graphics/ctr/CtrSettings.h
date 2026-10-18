@@ -341,6 +341,10 @@ struct CtrSettings {
   // size in KB (256 | 512 | 1024; VRAM when there is room at start, else linear memory). On by
   // default since Oct 17 (the Sentinel Beach arch depth error fixed: CtrImpostor.h)
   bool impostors = true;  // (AI-assisted) on since Oct 17 (beach depth fix; preset safe: off)
+  // (AI-assisted, j2-mem2) impostors was in config.ini (or a preset): else Jak II has them off
+  // (ctr_init): in Haven City they drew ~1000 of 75k triangles a frame as cards (0.13 ms of GPU)
+  // for ~0.9 MB of heap (their groups) and their 512 KB texture
+  bool impostors_set = false;
   float impostor_distance = 120.f;
   float impostor_error = 1.f;
   int impostor_budget = 6000;

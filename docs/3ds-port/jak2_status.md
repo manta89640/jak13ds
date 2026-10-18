@@ -27,6 +27,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | Texture animations, ocean, minimap (j2-texanim); memory (j2-mem) | Merged Oct 18: CPU texture animations, flat ocean (ocean.gc), opaque minimap; dormant levels, 1.5 MB stream arena |
 | **Integration build, baseline C (Oct 18)** | **Azahar slums 29.4-29.6 fps with sound on: logic 21.5-22.5 ms, render thread 27-28 ms, GPU busy 28-29 ms, mixer 10-19% of real time, 0 DSP drops; linear free 2.9 MB, heap ~3.3 MB. Title intro stopped early (no JAK II logo): fixed after C, see "Title intro on the 3DS". Staged in `port_test/3ds-sdcard-jak2-baseline-c`** (section below) |
 | Title intro (j2-title2, Oct 18) | **Fixed:** the intro (slums fly-through, Sony / Naughty Dog cards, JAK II logo from ~frame 1050) plays in Azahar as on the host; the cause was the 3DS mixer racing the overlord's SPU voice writes (section "Title intro on the 3DS") |
+| Memory cuts (j2-mem2, Oct 18) | Sparse VRAM copy, no Jak 1 code, impostors off, no RAMDISK, smaller stacks, 1.25 MB command buffer, linear 34 MB: route heap free 6.5-9.0 MB (was 2.5-3.5), linear free >= 3.4 MB except the market with ctyindb in view (1.8 MB, was 128 KB); section "Memory: heap and linear cuts" |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -718,3 +719,59 @@ list arena, merc double buffers); texture pools stay in linear behind their VRAM
 .text: -Os on the GOAL C modules saves 3.9% (80-module sample: 1058 -> 1017 KB), ~0.5 MB for all
 of them; the 108 module instances (+1.7 MB) need per-instance code sharing (a codegen change) or a
 proven shorter list.
+
+## Memory: heap and linear cuts (j2-mem2, Oct 18)
+
+(AI-assisted.) Branch `j2-mem2` from baseline C. Jak 1 keeps its sizes: everything below is behind
+`OG3DS_GAME_JAK2` / `OPENGOAL_NO_JAK1` (the Jak II 3DS build) or the game version at run time.
+
+| Cut | What | Saved |
+|---|---|---|
+| GS VRAM copy (`CtrVram`) | Kept per 16 KB chunk, made at the first write (unwritten chunks read as zeros, as before). Chunks only `relocate()` writes into PSMT8H / 4HH / 4HL (the fonts in the depth buffer's top bytes: 110 chunks) keep only the words' top bytes (4 KB). Jak II's uploads are lazy, so only what something reads is written: 1368 KB on the whole route, all of it during boot and the title | heap 2.7 MB |
+| Jak 1 code in the Jak II build | `OPENGOAL_NO_JAK1`: Jak 1's kernel entry, overlord entry and global inits, mips2c table; the linker drops the rest (Jak 1's overlord pieces Jak II uses stay: ramdisk server, fake ISO, the C-mode kernel's suspend hook) | .text 783 KB, .data 29 KB, .bss 273 KB (heap +1.06 MB) |
+| Impostors | Off for Jak II unless `impostors` is in config.ini: in the city they drew ~1000 of 75k triangles a frame as cards | heap ~0.9 MB, VRAM 576 KB (texture + depth) |
+| RAMDISK | `jak1::InitRamdisk(false)`: Jak II's vis is never in the IOP (`update-vis!`: "ramdisk vis ... not supported") and nothing calls `*ramdisk-rpc*`; a load would fail like a full RAMDISK | heap 811 KB |
+| IOP coroutine stacks | 16 KB each (was 64; 11 threads). Deepest on the route: 2.7 KB. `check_stacks` now stops the game with a log line if a stack is used up (it ran into libco's context) | heap 528 KB |
+| Thread stacks | EE 128 KB (was 512: C-mode GOAL runs on its own stack in EE memory; EE used 3.9 KB), IOP 64, EE-Worker 64, DMP 48 (were 128), mixer 64 (was 128) | heap 656 KB |
+| Command buffer | 1.25 MB (pipeline halves 640 KB, were 1 MB); route peak 277 KB in one frame (`commands (peak N of M KB)` in the render line) | linear 768 KB |
+| Sound banks with sound off | No audio output (`sound = off`, no DSP): banks and music aren't loaded (the bank counts as loaded, its sounds don't start; the EE's voice streams don't need banks) | heap 1.9 MB in the city (only with sound off) |
+| GlobalProfiler | Its event buffer only when profiling is switched on | heap 152 KB |
+| Heap -> linear | Linear 34 MB (was 32): heap 71.1 MB at boot (72.1 before), still over the 68 MB check | linear +2 MB |
+
+New logs: `[ctr] thread stacks used (KB used/size)` (libctru threads, from `ctr_thread_create`: their
+stacks are filled with a pattern at start; every 10 s with the IOP's line when one went 4 KB
+deeper), `VRAM copy N KB` in the `[ctr] memory` line, `commands (peak N of M KB)`.
+
+**Azahar (one run: the CIA, `jak2_route.pad`, private instance, sound on, instance muted; staged
+files compressed as on the card).** The `[ctr] memory` lines in each stop's window (standing, then
+the 200-frame walk); before = the j2-mem table (Azahar, same route) and baseline C (slums):
+
+| stop | linear free KB (largest) | heap free KB (largest) | before: linear / heap (largest) |
+|---|---|---|---|
+| slums (ctyindb dormant) | 5140 (2324), 4224 (2244) | 7828 (7601), 7529 (7233) | 2878 / 3295 (2778) baseline C; 1839 / 2846 (2335) j2-mem |
+| port | 9506 (5820) | 7965 (6883) | 7527 / 3176 (1971) |
+| market, standing | 8695 (5832) | 8376 (6202) | |
+| market, ctyindb loaded and in view | **1804** (1632) | 6797 (5650) | 128 / 2511 (963) |
+| main town (ctygena dormant) | 8328 (5788), 8797 (5836) | 7885 (6632), 7787 (6495) | 5466 / 2991 (1412) |
+| industrial (ctyindb dormant) | 7550 (4300) | 7379 (5774) | 3371 / 2909 (951) |
+| farms | 14527 (5836), 3512 (2244) | 9041 (6495), 7932 (6263) | 1955 / 3377 (1556) |
+| sewer | 4913 (4756), 3377 (3216) | 6661 (5012), 6537 (5012) | (2.6 MB / largest 257 KB earlier) |
+
+The thread stack sizes for EE and the mixer were set from this run's measurements afterwards
+(EE 512 -> 128 KB, mixer 128 -> 64 KB: 448 KB more heap than the table shows; not run again).
+No `[heap]` failures, no "making room" or incomplete loads; every load complete; slums 29.5-29.6
+fps (logic 21-24 ms), render thread and GPU as baseline C; 0 DSP drops; 13 bank loads. Host
+(`gk --ctr-gfx`, small-memory C mode, `jak2_route.pad`, `CTR_STREAM_CHECK=1`): the same stops,
+positions (one walk end differs by 0.6 m: run-to-run, as noted in jak2_perf.md), dormant and stream
+checks as the base build; decoded textures byte-identical to the base build (`CTR_TEX_DUMP`, city
+pad, alpha and colour). Jak 1: host `level_pairs.pad` on proj-final gives the same pad output as
+the base build (exit 0); the Jak 1 3DS build links and makes its CIA (its .text is 16 KB smaller:
+the zero chunk isn't in it).
+
+**Not reached:** >= 3 MB linear at the market while ctyindb is fully in view (1.8 MB; 4.1 MB once
+it goes dormant, before only 128 KB with parts of it left out). Heap >= 6 MB everywhere (least 6.5
+MB, sewer, before the stack cuts). Left: the time of day tables (0.3-0.9 MB per district; storing
+only non-black palette entries or 16-bit stamps saves ~10-25% of them for real work in the hot
+blend path), heap fragmentation from level and bank loads (largest block 5.0-7.6 MB now; the bank
+buffers could get their own arena), Jak II's SPU memory (845 KB of .bss) and the .c3l reader's
+640 KB.

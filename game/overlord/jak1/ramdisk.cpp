@@ -66,10 +66,18 @@ void ramdisk_init_globals() {
  * For some reason the name of this function is lost, so this is a guess at the name.
  * DONE, EXACT
  */
-void InitRamdisk() {
+void InitRamdisk(bool with_memory) {
   gNumFiles = 0;
   gMemUsed = 0;
   gMemSize = RAMDISK_SIZE;
+  if (!with_memory) {
+    // (AI-assisted, j2-mem2) see ramdisk.h: 811 KB of heap less on the 3DS
+    gMemSize = 0;
+    gMem = nullptr;
+    gRamdiskRAM = nullptr;
+    gMemFreeAtStart = QueryTotalFreeMemSize();
+    return;
+  }
 
   // some sort of "trick" to allocate memory if we are on a debug system to simulate the memory size
   // of the real PS2.
@@ -134,7 +142,8 @@ void* RPC_Ramdisk(unsigned int fno, void* data, int size) {
     // if we have available memory and records (we'll always have enough records, we just reset it!)
     // NOTE - there is a bug here where the rounding up to 16-bytes can cause it to overflow!
     auto file_length = GetISOFileLength(file_record);
-    if ((file_length + gMemUsed <= gMemSize) && (gNumFiles != RAMDISK_MAX_FILES)) {
+    // (AI-assisted, j2-mem2) gMem: none without RAMDISK memory (InitRamdisk(false))
+    if (gMem && (file_length + gMemUsed <= gMemSize) && (gNumFiles != RAMDISK_MAX_FILES)) {
       // Create the new file record
       gFiles[gNumFiles].size = (file_length + 0xf) & 0xfffffff0;
       ASSERT(gFiles[gNumFiles].size + gMemUsed <

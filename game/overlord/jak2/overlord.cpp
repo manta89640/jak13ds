@@ -37,7 +37,10 @@ int start_overlord(int, const char* const*) {
 
   InitBanks();
   InitSound_overlord();
-  jak1::InitRamdisk();  // ramdisk believed unused.
+  // ramdisk believed unused. (AI-assisted, j2-mem2) Unused: Jak II's update-vis! never reads vis
+  // from the IOP ("ramdisk vis ... not supported") and nothing calls *ramdisk-rpc* (decomp.gc only
+  // checks it's not busy), so no memory for it (811 KB)
+  jak1::InitRamdisk(false);
   RegisterVblankHandler(0, 0x20, VBlank_Handler, 0);
 
   // ramdisk believed unused.

@@ -523,7 +523,7 @@ platform/3ds/tools/run_my_emu.sh --game jak2 --cia build-3ds-jak2/jak2.cia ...  
   editor's database: `initialize_sql_db` does nothing), the REPL user name, and the PC renderer's
   merc mutex (`platform/3ds/port/ctr_jak2_stubs.cpp`).
 - (AI-assisted, j2-render-bg, Oct 18) The 3DS renderer (`renderer = ctr`, the default; `renderer =
-  null`: no picture, paced at 30 Hz by `null_fps`). Linear heap 32 MB (Jak 1: 40 MB); the regular
+  null`: no picture, paced at 30 Hz by `null_fps`). Linear heap 32 MB (Jak 1: 40 MB; 34 MB since j2-mem2, jak2_status.md "Memory: heap and linear cuts"); the regular
   heap gets ~70 MB, just over gk's 68 MB check (36 MB of linear left 66 MB and was refused).
   Level backgrounds: `ctr_level_converter --all out/jak2/fr3 out/jak2/c3l` (GAME.fr3 with
   `--merc-only`), staged by `stage_sd.sh --game jak2` / `run_my_emu.sh --game jak2` from

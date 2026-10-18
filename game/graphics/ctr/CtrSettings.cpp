@@ -124,6 +124,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.envmap = parse_bool(v);
     } else if (key == "impostors") {
       s.impostors = parse_bool(v);  // (AI-assisted)
+      s.impostors_set = true;       // (AI-assisted, j2-mem2)
     } else if (key == "impostor_distance") {
       s.impostor_distance = std::clamp(f, 30.f, 3000.f);  // (AI-assisted)
     } else if (key == "impostor_error") {

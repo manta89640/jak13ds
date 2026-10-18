@@ -73,6 +73,13 @@ void TickLock::lock() {
   }
 }
 
+#ifdef OG3DS_GAME_JAK2
+// (AI-assisted, j2-mem2) Jak II: the mixer went 0.7 KB deep (Azahar, jak2_route.pad with sound)
+constexpr unsigned kMixerStack = 64 * 1024;
+#else
+constexpr unsigned kMixerStack = 128 * 1024;
+#endif
+
 void Player::InitCubeb() {
   mHandlerThreadStop = false;
   g_output_active = false;
@@ -82,12 +89,12 @@ void Player::InitCubeb() {
       // pinned: the mixer has the highest priority, so on the game's core (ctr_thread_create's
       // fallback when the app got no share of core 1) it would take the CPU from the game, all of
       // it once mixing falls behind (the game stops). No audio instead.
-      int err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, 128 * 1024,
+      int err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, kMixerStack,
                                          CTR_PRIO_SOUND, core, &mMixerThread);
       if (err != 0 && core == 2 && ctr_core1_enable() > 0) {
         // no core 2 (Old 3DS): the system core, with the share of it the app got
         core = 1;
-        err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, 128 * 1024,
+        err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, kMixerStack,
                                        CTR_PRIO_SOUND, core, &mMixerThread);
       }
       if (err == 0) {

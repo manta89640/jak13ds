@@ -43,7 +43,8 @@ endif()
 if(OG3DS_GAME STREQUAL "jak2")
   # Jak 1 and Jak 2 in the runtime (game/common/game_common_types.h), no Jak 3 / X; SD folder
   # /3ds/jak2 (common/util/FileUtil.h, platform/3ds/port/ctr_port.h)
-  add_compile_definitions(OPENGOAL_ONLY_JAK1=0 OPENGOAL_NO_JAK3=1 OG3DS_GAME_JAK2=1)
+  # (AI-assisted, j2-mem2) OPENGOAL_NO_JAK1: Jak 1's kernel entry and mips2c functions compiled out
+  add_compile_definitions(OPENGOAL_ONLY_JAK1=0 OPENGOAL_NO_JAK3=1 OPENGOAL_NO_JAK1=1 OG3DS_GAME_JAK2=1)
 endif()
 if(OG3DS_SMALL_MEMORY)
   add_compile_definitions(OPENGOAL_SMALL_MEMORY=1)

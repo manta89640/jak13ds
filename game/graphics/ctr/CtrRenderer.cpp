@@ -427,7 +427,9 @@ void CtrDirectBucketRenderer::deferred_sky(void* arg) {
 // ---------------------------------------------------------------------------
 
 CtrRenderer::CtrRenderer()
-    : m_vram(std::make_unique<CtrVram>()), m_levels(std::make_unique<CtrLevels>()) {
+    // (AI-assisted, j2-mem2) Jak II: the VRAM copy only where something is written (sparse)
+    : m_vram(std::make_unique<CtrVram>(g_game_version == GameVersion::Jak2)),
+      m_levels(std::make_unique<CtrLevels>()) {
 #if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
   // (AI-assisted) Jak II: its own bucket table (CtrRendererJak2.cpp)
   if (g_game_version == GameVersion::Jak2) {
@@ -697,6 +699,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.gpu_draw_ms += gs.draw_ms;
   m_timing.splits += gs.cmd_splits;
   m_timing.cmd_kb += gs.cmd_bytes / 1024.0;
+  m_timing.cmd_kb_peak = std::max(m_timing.cmd_kb_peak, gs.cmd_bytes / 1024.0);
   m_timing.dedup_kb += gs.cmd_dedup_words * 4 / 1024.0;
   m_timing.dropped += gs.dropped_draws;
   // (AI-assisted) a pipelined frame that ran out of command buffer lost its last draws: the
@@ -785,13 +788,14 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       lg::info(
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
-          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands ({:.1f} KB left out by "
-          "cmd_dedup); vertex buffer peak {} of {} KB{}{}{}",
+          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands (peak {:.0f} of {} KB; {:.1f} KB left "
+          "out by cmd_dedup); vertex buffer peak {} of {} KB{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
           m_timing.triangles / n, m_timing.draws / n, m_timing.tex_binds / n,
-          m_timing.cmd_kb / n, m_timing.dedup_kb / n, m_timing.vbuf_peak / 1024,
+          m_timing.cmd_kb / n, m_timing.cmd_kb_peak, ctr_gpu_cmd_buffer_kb(), m_timing.dedup_kb / n,
+          m_timing.vbuf_peak / 1024,
           m_timing.vbuf_size / 1024,
           m_timing.vbuf_dropped
               ? fmt::format(", {} draws DROPPED (vertex buffer full)", m_timing.vbuf_dropped)
@@ -1377,6 +1381,11 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
+  // (AI-assisted, j2-mem2) Jak II: impostors off unless config.ini says (CtrSettings.h)
+  if (g_game_version == GameVersion::Jak2 && !ctr_settings().impostors_set) {
+    ctr_settings_ab().impostors = false;  // (before any frame: see ctr_settings_ab)
+    lg::info("[ctr] Jak II: impostors off (config.ini impostors = on for them)");
+  }
   // (AI-assisted) impostors: their texture in VRAM before the level texture pools fill it
   if (ctr_settings().impostors) {
     ctr_impostors().reserve();

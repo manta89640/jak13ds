@@ -7,6 +7,7 @@
 #include "CtrVram.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <functional>
@@ -127,9 +128,43 @@ struct Range {
 };
 }  // namespace
 
-CtrVram::CtrVram() {
+namespace {
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+// (AI-assisted, j2-mem2) what unwritten chunks of a sparse VRAM copy read as (not in the Jak 1 3DS
+// build: its copy is never sparse)
+alignas(16) const u8 kZeroChunk[16384] = {};
+constexpr bool kSparseBuild = true;
+#else
+const u8* const kZeroChunk = nullptr;
+constexpr bool kSparseBuild = false;
+#endif
+std::atomic<u32> g_copy_bytes{0};  // of the last CtrVram made (the renderer's)
+}  // namespace
+
+unsigned ctr_vram_copy_kb() {
+  return g_copy_bytes.load(std::memory_order_relaxed) / 1024;
+}
+
+CtrVram::CtrVram(bool sparse) : m_sparse(sparse && kSparseBuild) {
+  sparse = m_sparse;
   static_assert(kChunks == kChunkCount);
-  m_vram.resize(kVramBytes);
+  static_assert(kChunks * kChunkBytes == kVramBytes);
+  memset(m_top, 0, sizeof(m_top));
+  memset(m_is_top, 0, sizeof(m_is_top));
+  if (sparse) {
+    for (u32 c = 0; c < kChunks; c++) {
+      m_rd[c] = kZeroChunk;
+      m_wr[c] = nullptr;
+    }
+  } else {
+    m_mem.reset(new u8[kVramBytes]());
+    for (u32 c = 0; c < kChunks; c++) {
+      m_wr[c] = m_mem.get() + (size_t)c * kChunkBytes;
+      m_rd[c] = m_wr[c];
+    }
+    m_full_chunks = kChunks;
+  }
+  note_chunks();
   m_tex_info.resize(kBlocks);
   // a PSMCT32 page is 64 x 32 pixels (8 KB)
   m_ct32_page_table.resize(64 * 32);
@@ -164,10 +199,46 @@ CtrVram::~CtrVram() {
   clear_cache();
 }
 
+void CtrVram::note_chunks() const {
+  g_copy_bytes = copy_bytes();
+}
+
+u8* CtrVram::make_full(u32 chunk) {
+  // (only sparse copies have chunks without memory)
+  std::unique_ptr<u8[]> mem(new u8[kChunkBytes]());
+  u8* c = mem.get();
+  if (m_is_top[chunk]) {
+    // its top bytes go back into their words, the rest was zero
+    const u8* t = m_top[chunk];
+    for (u32 w = 0; w < kChunkBytes / 4; w++) {
+      c[4 * w + 3] = t[w];
+    }
+    m_top[chunk] = nullptr;
+    m_is_top[chunk] = 0;
+    m_top_chunks--;
+  }
+  m_own[chunk] = std::move(mem);
+  m_wr[chunk] = c;
+  m_rd[chunk] = c;
+  m_full_chunks++;
+  note_chunks();
+  return c;
+}
+
+u8* CtrVram::make_top(u32 chunk) {
+  std::unique_ptr<u8[]> mem(new u8[kChunkBytes / 4]());
+  u8* t = mem.get();
+  m_own[chunk] = std::move(mem);
+  m_top[chunk] = t;
+  m_rd[chunk] = t;
+  m_is_top[chunk] = 1;
+  m_top_chunks++;
+  note_chunks();
+  return t;
+}
+
 u32 CtrVram::read32(u32 byte_addr) const {
-  u32 v;
-  memcpy(&v, m_vram.data() + (byte_addr & kVramMask & ~3u), 4);
-  return v;
+  return view().rd32(byte_addr & kVramMask & ~3u);
 }
 
 void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
@@ -227,16 +298,18 @@ void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) 
   u32 y = 0;
   const u32 page_rows = (height + 31) / 32;
   // (AI-assisted) asm_tex = off (hardware hang bisect): the per pair loop only, no 64-bit stores
-  if (ctr_gpu_asm_tex() && m_ct32_lines && width % 64 == 0 &&
+  if (ctr_gpu_asm_tex() && m_ct32_lines && width % 64 == 0 && base % 8192 == 0 &&
       base + page_rows * pages_per_row * 8192 <= kVramBytes) {
     // (AI-assisted) two rows at a time, one 32 byte VRAM line per 4 texels of each (see the
     // constructor), as 64-bit pairs; the upload doesn't wrap around the end of VRAM
     for (; y + 1 < height; y += 2) {
-      u8* row_dst = m_vram.data() + base + (y / 32) * pages_per_row * 8192;
+      // (AI-assisted, j2-mem2) a page (8 KB, page aligned: base % 8192 == 0) is within one chunk
+      const u32 row_addr = base + (y / 32) * pages_per_row * 8192;
       const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
       const u64* s0 = (const u64*)(data + 4 * y * width);
       const u64* s1 = s0 + width / 2;
-      for (u32 page = 0; page < width / 64; page++, row_dst += 8192) {
+      for (u32 page = 0; page < width / 64; page++) {
+        u8* row_dst = wr(row_addr + page * 8192);
         for (u32 x = 0; x < 64; x += 4, s0 += 2, s1 += 2) {
           u64* d = (u64*)(row_dst + ytab[x]);
           const u64 a01 = s0[0], a23 = s0[1], b01 = s1[0], b23 = s1[1];
@@ -255,13 +328,13 @@ void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) 
     if (m_ct32_pairs && width % 2 == 0) {
       for (u32 x = 0; x < width; x += 2) {
         u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
-        memcpy(m_vram.data() + addr, src_row + 4 * x, 8);
+        memcpy(wr(addr), src_row + 4 * x, 8);
       }
       continue;
     }
     for (u32 x = 0; x < width; x++) {
       u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
-      memcpy(m_vram.data() + addr, src_row + 4 * x, 4);
+      memcpy(wr(addr), src_row + 4 * x, 4);
     }
   }
 }
@@ -626,11 +699,11 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
         case GsTex0::PSM::PSMT4: {
           u32 a = (psmt4_addr_half_byte(x, y, width) + src_block * kBlockBytes * 2) &
                   (kVramMask * 2 + 1);
-          u8 b = m_vram[a / 2];
+          u8 b = view().rd8(a / 2);
           idx = (a & 1) ? (b >> 4) : (b & 0xf);
         } break;
         case GsTex0::PSM::PSMT8:
-          idx = m_vram[(psmt8_addr(x, y, width) + src_block * kBlockBytes) & kVramMask];
+          idx = view().rd8((psmt8_addr(x, y, width) + src_block * kBlockBytes) & kVramMask);
           break;
         default: {
           u32 v = read32(psmct32_addr(x, y, width) + src_block * kBlockBytes);
@@ -644,7 +717,7 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
         case GsTex0::PSM::PSMT4: {
           u32 a = (psmt4_addr_half_byte(x, y, width) + dest_block * kBlockBytes * 2) &
                   (kVramMask * 2 + 1);
-          u8& b = m_vram[a / 2];
+          u8& b = *wr(a / 2);
           const u8 nb = (a & 1) ? ((b & 0x0f) | (idx << 4)) : ((b & 0xf0) | (idx & 0xf));
           changed |= nb != b;
           b = nb;
@@ -652,24 +725,26 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
         } break;
         case GsTex0::PSM::PSMT8: {
           u32 a = (psmt8_addr(x, y, width) + dest_block * kBlockBytes) & kVramMask;
-          changed |= m_vram[a] != (u8)idx;
-          m_vram[a] = idx;
+          u8& b = *wr(a);
+          changed |= b != (u8)idx;
+          b = idx;
           range.add(a);
         } break;
         default: {
           u32 a = (psmct32_addr(x, y, width) + dest_block * kBlockBytes) & kVramMask & ~3u;
-          u32 v;
-          memcpy(&v, m_vram.data() + a, 4);
-          const u32 old = v;
+          // (AI-assisted, j2-mem2) only the word's top byte changes (see m_top in CtrVram.h)
+          u8* top = wr_top(a);
+          const u8 old = *top;
+          u8 nb;
           if (dest_psm == (u32)GsTex0::PSM::PSMT8H) {
-            v = (v & 0x00ffffff) | (idx << 24);
+            nb = (u8)idx;
           } else if (dest_psm == (u32)GsTex0::PSM::PSMT4HH) {
-            v = (v & 0x0fffffff) | ((idx & 0xf) << 28);
+            nb = (u8)((old & 0x0f) | ((idx & 0xf) << 4));
           } else {
-            v = (v & 0xf0ffffff) | ((idx & 0xf) << 24);
+            nb = (u8)((old & 0xf0) | (idx & 0xf));
           }
-          changed |= v != old;
-          memcpy(m_vram.data() + a, &v, 4);
+          changed |= nb != old;
+          *top = nb;
           range.add(a);
         } break;
       }
@@ -733,7 +808,7 @@ u32 CtrVram::clut_color(u32 cbp, u32 cpsm, u32 entry) const {
   } else {  // PSMCT16 / 16S
     u32 addr = (psmct16_addr(x, y, 64) + cbp * kBlockBytes) & kVramMask;
     u16 c;
-    memcpy(&c, m_vram.data() + (addr & ~1u), 2);
+    c = view().rd16(addr & ~1u);
     return ct16_to_rgba(c);
   }
 }
@@ -742,7 +817,7 @@ namespace {
 // clut(cbp, cpsm, index) -> RGBA8: a template (inlined per texel), not a std::function
 template <typename Clut>
 bool decode_impl(const CtrVram* self,
-                 const std::vector<u8>& vram,
+                 const CtrVram::View& vram,
                  u64 tex0,
                  std::vector<u32>* out,
                  int* w_out,
@@ -779,9 +854,7 @@ bool decode_impl(const CtrVram* self,
   auto rd32 = [&](u32 a) {
     tex_range->add(a);
     a &= kVramMask & ~3u;
-    u32 v;
-    memcpy(&v, vram.data() + a, 4);
-    return v;
+    return vram.rd32(a);
   };
 
   switch (t.psm()) {
@@ -804,8 +877,7 @@ bool decode_impl(const CtrVram* self,
           u32 a = psmct16_addr(x, y, width) + tbp * kBlockBytes;
           tex_range->add(a);
           a &= kVramMask;
-          u16 c;
-          memcpy(&c, vram.data() + (a & ~1u), 2);
+          const u16 c = vram.rd16(a & ~1u);
           (*out)[x + y * w] = ct16_to_rgba(c);
         }
       }
@@ -816,7 +888,7 @@ bool decode_impl(const CtrVram* self,
           u32 a = psmt8_addr(x, y, width) + tbp * kBlockBytes;
           tex_range->add(a);
           a &= kVramMask;
-          (*out)[x + y * w] = clut_tab[vram[a]];
+          (*out)[x + y * w] = clut_tab[vram.rd8(a)];
         }
       }
       break;
@@ -826,7 +898,7 @@ bool decode_impl(const CtrVram* self,
           u32 a = psmt4_addr_half_byte(x, y, width) + tbp * kBlockBytes * 2;
           tex_range->add(a / 2);
           a &= kVramMask * 2 + 1;
-          u8 b = vram[a / 2];
+          u8 b = vram.rd8(a / 2);
           u32 idx = (a & 1) ? (b >> 4) : (b & 0xf);
           (*out)[x + y * w] = clut_tab[idx];
         }
@@ -899,7 +971,7 @@ u32 texture_block_span(const GsTex0& t) {
 bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
   const_cast<CtrVram*>(this)->flush_pending();
   Range r;
-  return decode_impl(this, m_vram, tex0, out, w, h, &r,
+  return decode_impl(this, view(), tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
 }
 
@@ -915,10 +987,10 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   Range r;
   if (reloc) {
-    return decode_impl(this, m_vram, tex0, out, w, h, &r,
+    return decode_impl(this, view(), tex0, out, w, h, &r,
                        [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; });
   }
-  return decode_impl(this, m_vram, tex0, out, w, h, &r,
+  return decode_impl(this, view(), tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
 }
 
@@ -1035,9 +1107,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // textures moved by texture-relocate use the CLUT they had when they were moved
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   const bool decoded =
-      reloc ? decode_impl(this, m_vram, data_key, &data, &w, &h, &tex_range,
+      reloc ? decode_impl(this, view(), data_key, &data, &w, &h, &tex_range,
                           [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; })
-            : decode_impl(this, m_vram, data_key, &data, &w, &h, &tex_range,
+            : decode_impl(this, view(), data_key, &data, &w, &h, &tex_range,
                           [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
   if (!decoded) {
     lg::warn("[ctr vram] unsupported texture format {} (tex0 {:x})", (int)t.psm(), tex0);

@@ -469,6 +469,9 @@ void ctr_gpu_diag_start(void);
 void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
+/* (AI-assisted, j2-mem2) the command words one frame has room for (KB): the pipeline's half, else
+ * citro3d's whole buffer */
+unsigned int ctr_gpu_cmd_buffer_kb(void);
 int ctr_gpu_set_pipeline(int on);
 /* (AI-assisted) config.ini sky_last. ctr_gpu_set_sky_hook: fn(arg) is called once, right before
  * the first draw of this frame that needs what is behind it on screen: blending, no depth write,

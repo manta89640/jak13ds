@@ -11,6 +11,7 @@
 #include "game/graphics/ctr/CtrImpostor.h"
 #include "game/graphics/ctr/CtrOccCull.h"
 #include "game/graphics/ctr/CtrStream.h"
+#include "game/graphics/ctr/CtrVram.h"
 
 #include <algorithm>
 #include <array>
@@ -4998,8 +4999,11 @@ void CtrLevels::log_memory() {
 #else
   free = fmt::format("; free: linear model {} KB", ctr_gpu_linear_free() / 1024);
 #endif
-  lg::info("[ctr] memory (frame {}): levels {}; stream arena {} KB; {} (linear / heap KB){}",
-           m_render_frame.load(), level_mem_text(all), as.capacity / 1024, per, free);
+  // (AI-assisted, j2-mem2) + the GS VRAM copy (CtrVram: sparse for Jak II)
+  lg::info("[ctr] memory (frame {}): levels {}; stream arena {} KB; VRAM copy {} KB; {} (linear / "
+           "heap KB){}",
+           m_render_frame.load(), level_mem_text(all), as.capacity / 1024, ctr_vram_copy_kb(), per,
+           free);
 }
 
 void CtrLevels::stream_log() {

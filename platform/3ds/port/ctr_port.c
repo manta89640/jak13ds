@@ -32,7 +32,11 @@
  * ~12.8 MB, a neighbouring district 3-7 MB, ctywide 3.2, lwidea ~2, GAME ~0.8), the near tie
  * stream arena, the vertex and command buffers and the audio buffers; when it runs out, the
  * loader's degrade paths take over (incomplete loads repaired later, far levels' detail freed). */
-u32 __ctru_linear_heap_size = 32 << 20;
+/* (AI-assisted, j2-mem2) 34 MB: the heap gave up ~6 MB (sparse VRAM copy, no RAMDISK, impostors
+ * off, smaller IOP / thread stacks, no Jak 1 code), so 2 MB of it moved here (the market with
+ * ctyindb in view had 128 KB of linear memory left); the heap stays at ~69.5 MB, over the 68 MB
+ * check. */
+u32 __ctru_linear_heap_size = 34 << 20;
 #else
 u32 __ctru_linear_heap_size = 40 << 20;
 #endif
@@ -1350,12 +1354,121 @@ void ctr_thread_install_crash_handler(void) {
 typedef struct {
   void* (*fn)(void*);
   void* arg;
+  unsigned int stack_size; /* (AI-assisted, j2-mem2) */
 } ThreadStart;
+
+/* (AI-assisted, j2-mem2) Stack high-water marks of the threads made here: at its start a thread
+ * fills its stack below the current frame with a pattern (from 512 bytes under it down to 1 KB
+ * above the stack's bottom, where libctru keeps the thread's own record); ctr_thread_stacks_check
+ * finds the deepest word written. */
+#define STK_MAX 24
+#define STK_PATTERN 0x5a5a57acu
+static struct {
+  void* (*fn)(void*);
+  const char* name;
+  u32* lo;  /* the lowest patterned word */
+  u32* hi;  /* one past the highest */
+  unsigned int size;
+  unsigned int logged;
+  volatile int live;
+} s_stk[STK_MAX];
+static LightLock s_stk_lock = 1; /* free (LightLock_Init's value): threads start concurrently */
+
+static int stk_slot_new(void* (*fn)(void*), unsigned int size, u32* lo, u32* hi) {
+  int slot = -1;
+  LightLock_Lock(&s_stk_lock);
+  for (int i = 0; i < STK_MAX; i++) {
+    if (!s_stk[i].live) {
+      slot = i;
+      s_stk[i].fn = fn;
+      s_stk[i].name = NULL;
+      s_stk[i].lo = lo;
+      s_stk[i].hi = hi;
+      s_stk[i].size = size;
+      s_stk[i].logged = 0;
+      s_stk[i].live = 1;
+      break;
+    }
+  }
+  LightLock_Unlock(&s_stk_lock);
+  return slot;
+}
+
+void ctr_thread_name_current(const char* name) {
+  const u32 here = (u32)(uintptr_t)&name;
+  LightLock_Lock(&s_stk_lock);
+  for (int i = 0; i < STK_MAX; i++) {
+    if (s_stk[i].live && here >= (u32)(uintptr_t)s_stk[i].lo &&
+        here < (u32)(uintptr_t)s_stk[i].hi + 4096) {
+      s_stk[i].name = name;
+    }
+  }
+  LightLock_Unlock(&s_stk_lock);
+}
+
+int ctr_thread_stacks_check(char* line, unsigned int line_size) {
+  if (line_size < 128) {
+    return 0;
+  }
+  int len = 0, grew = 0, deep = 0;
+  line[0] = 0;
+  LightLock_Lock(&s_stk_lock);
+  for (int i = 0; i < STK_MAX; i++) {
+    if (!s_stk[i].live) {
+      continue;
+    }
+    const u32* w = s_stk[i].lo;
+    while (w < s_stk[i].hi && *w == STK_PATTERN) {
+      w++;
+    }
+    /* + the 512 bytes above the pattern and the trampoline's frame (roughly) */
+    const unsigned int used = (unsigned int)((const u8*)s_stk[i].hi - (const u8*)w) + 640;
+    if (!s_stk[i].logged || used >= s_stk[i].logged + 4096) {
+      grew = 1;
+    }
+    if (used > s_stk[i].size / 2) {
+      deep = 1;
+    }
+    if (used > s_stk[i].logged) {
+      s_stk[i].logged = used;
+    }
+    if (len < (int)line_size - 64) {
+      char nm[16];
+      if (s_stk[i].name) {
+        snprintf(nm, sizeof(nm), "%s", s_stk[i].name);
+      } else {
+        snprintf(nm, sizeof(nm), "%08x", (unsigned)(uintptr_t)s_stk[i].fn);
+      }
+      len += snprintf(line + len, line_size - len, " %s %.1f/%u", nm, used / 1024.0,
+                      s_stk[i].size / 1024);
+    }
+  }
+  LightLock_Unlock(&s_stk_lock);
+  return grew ? (deep ? 2 : 1) : 0;
+}
 
 static void thread_trampoline(void* p) {
   ThreadStart start = *(ThreadStart*)p;
   free(p);
+  /* (AI-assisted, j2-mem2) the pattern below this frame (see s_stk) */
+  int slot = -1;
+  {
+    volatile u32 marker = 0;
+    const uintptr_t here = (uintptr_t)&marker;
+    u32* hi = (u32*)((here - 512) & ~(uintptr_t)3);
+    u32* lo = (u32*)((here - start.stack_size + 1024 + 3) & ~(uintptr_t)3);
+    if (start.stack_size > 4096 && lo < hi) {
+      for (u32* w = lo; w < hi; w++) {
+        *w = STK_PATTERN;
+      }
+      slot = stk_slot_new(start.fn, start.stack_size, lo, hi);
+    }
+    (void)marker;
+  }
   start.fn(start.arg);
+  if (slot >= 0) {
+    s_stk[slot].live = 0;
+  }
 }
 
 int ctr_core1_share(void) {
@@ -1391,6 +1504,7 @@ static int thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size,
   }
   start->fn = fn;
   start->arg = arg;
+  start->stack_size = stack_size;
   Thread t = threadCreate(thread_trampoline, start, stack_size, prio, core, false);
   if (!t && core != CTR_CORE_APP && !pinned) {
     t = threadCreate(thread_trampoline, start, stack_size, prio, CTR_CORE_APP, false);

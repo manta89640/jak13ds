@@ -880,6 +880,18 @@ void bank_load_job(BankLoad* b, s32 thread_to_wake) {
 snd::BankHandle load_bank_file(FileRecord* file) {
   BankLoad b;
   b.path = get_file_path(file);
+#ifdef __3DS__
+  if (!snd_HasOutput()) {
+    // (AI-assisted, j2-mem2) No audio output (sound = off, or no DSP): the bank's samples would
+    // never be heard (the voice manager drops the non-stream voices without output), so they
+    // aren't loaded: 1.9 MB of heap in Haven City. The bank counts as loaded (its name, no
+    // handle); its sounds don't start (a play finds no sound and returns no handle), the EE's
+    // voice streams (dialogue, cutscenes) don't need banks and still run silently.
+    lg::info("[io] sound bank {}: not loaded (no audio output)",
+             b.path.substr(b.path.find_last_of('/') + 1));
+    return nullptr;
+  }
+#endif
   b.compressed = is_file_compressed(file);
   const auto t0 = std::chrono::steady_clock::now();
   auto future = thpool.submit(bank_load_job, &b, GetThreadId());
