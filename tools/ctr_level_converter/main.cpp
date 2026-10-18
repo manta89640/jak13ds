@@ -31,6 +31,7 @@
 #include "tie_lod.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
+#include "game/graphics/ctr/CtrTexAnimJak2Defs.h"
 #include "third-party/BS_thread_pool.hpp"
 #include "third-party/CLI11.hpp"
 #include "third-party/lz4/lz4hc.h"
@@ -225,6 +226,10 @@ struct TexUse {
   // (AI-assisted) merc uses that keep a texture 16-bit (Options::etc1_merc_psnr): an eye draw's
   // placeholder, a draw of an effect with blend shapes (a face). envmap: an envmap pass's texture.
   bool eye = false, face = false, envmap = false;
+  // (AI-assisted) Jak II: the animated texture slot (jak2_animated_texture_slots index + 1) whose
+  // base texture this is (0: none). Written to c3l::Texture::pad (c3l::texture_anim_slot); kept out
+  // of the content sharing, the atlases and the alpha optimisations (the runtime replaces it)
+  u16 anim_slot = 0;
 };
 
 // A triangle soup vertex before chunking
@@ -451,9 +456,11 @@ struct Converter {
   std::unordered_map<s32, s32> anim_slot_tex;
 
   u16 texture_id(s32 tree_tex_id) {
+    u16 slot = 0;  // (AI-assisted) animated slot + 1
     if (tree_tex_id < 0) {
       auto a = anim_slot_tex.find(-(tree_tex_id + 1));
       if (a != anim_slot_tex.end()) {
+        slot = (u16)(-tree_tex_id);
         tree_tex_id = a->second;
       }
     }
@@ -465,17 +472,22 @@ struct Converter {
       return it->second;
     }
     const tfrag3::Texture* t = &level->textures[tree_tex_id];
-    auto cit = tex_by_content.find(t);
-    if (cit != tex_by_content.end()) {
-      tex_map[tree_tex_id] = cit->second;
-      tex_copies++;
-      return cit->second;
+    if (!slot) {
+      auto cit = tex_by_content.find(t);
+      if (cit != tex_by_content.end() && !tex_use[cit->second].anim_slot) {
+        tex_map[tree_tex_id] = cit->second;
+        tex_copies++;
+        return cit->second;
+      }
     }
     u16 id = tex_order.size();
     tex_order.push_back(tree_tex_id);
     tex_use.emplace_back();
+    tex_use.back().anim_slot = slot;
     tex_map[tree_tex_id] = id;
-    tex_by_content.emplace(t, id);
+    if (!slot) {
+      tex_by_content.emplace(t, id);
+    }
     return id;
   }
 
@@ -1366,6 +1378,29 @@ void add_anim_slot_textures(tfrag3::Level* level, std::unordered_map<s32, s32>* 
     level->textures.push_back(std::move(t));
     lg::info("animated texture slot {}: {}x{} with the CLUT of {}", slots[i], dest->w, dest->h,
              clut->name);
+  }
+}
+
+/*!
+ * (AI-assisted) Jak II: the slots of the fixed texture animations (waterfalls, lava, security walls,
+ * the slime...: TextureAnimator's FixedAnimDef destinations, no index texture) have a level texture
+ * of their name, the base texture (as fr3_to_gltf's anim_slot_to_base_tex): the draws get it, and
+ * the runtime draws the animation into its place (CtrTexAnimJak2).
+ */
+void add_anim_slot_base_textures(const tfrag3::Level& level, std::unordered_map<s32, s32>* out) {
+  const auto& slots = jak2_animated_texture_slots();
+  for (size_t i = 0; i < slots.size(); i++) {
+    if (out->count((s32)i)) {
+      continue;
+    }
+    for (size_t t = 0; t < level.textures.size(); t++) {
+      if (level.textures[t].debug_name == slots[i]) {
+        (*out)[(s32)i] = (s32)t;
+        lg::info("animated texture slot {}: base texture {}x{}", slots[i], level.textures[t].w,
+                 level.textures[t].h);
+        break;
+      }
+    }
   }
 }
 
@@ -2383,8 +2418,8 @@ void optimize_draws(Converter& cv,
     if (t == 0xffff) {
       return true;
     }
-    if (t >= tex_descs.size()) {
-      return false;
+    if (t >= tex_descs.size() || (t < tex_use.size() && tex_use[t].anim_slot)) {
+      return false;  // (AI-assisted) an animated slot's texels change at runtime
     }
     if (full[t] < 0) {
       full[t] = texture_alpha_full(tex_descs[t], tex_datas[t]);
@@ -2655,7 +2690,7 @@ void optimize_draws(Converter& cv,
   for (u16 t = 0; t < fit.size(); t++) {
     const auto& d = tex_descs[t];
     if (!fit[t].used || !fit[t].ok || d.w > opt.atlas_max || d.h > opt.atlas_max ||
-        d.format == c3l::TEX_RGBA8) {
+        d.format == c3l::TEX_RGBA8 || (t < tex_use.size() && tex_use[t].anim_slot)) {
       continue;
     }
     st->atlas_textures_fit++;
@@ -3089,6 +3124,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Converter cv;
   cv.opt = opt;
   add_anim_slot_textures(&level, &cv.anim_slot_tex);
+  if (jak2) {
+    add_anim_slot_base_textures(level, &cv.anim_slot_tex);
+  }
   cv.level = &level;
   int tfrag_trees = 0, tie_trees = 0;
   MercOut merc;
@@ -3212,6 +3250,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         tex_descs[i] = c3l::Texture{};
         tex_datas[i] = convert_texture(level.textures.at(cv.tex_order[i]), opt, cv.tex_use[i],
                                        &tex_descs[i], &tex_psnr[i], &tex_gate[i]);
+        c3l::set_texture_anim_slot(&tex_descs[i], cv.tex_use[i].anim_slot);  // (AI-assisted)
       }
     });
     pool.wait_for_tasks();
@@ -4796,6 +4835,183 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
 }
 }  // namespace
 
+/*!
+ * (AI-assisted) Jak II: texanim.c3t (see CtrTexAnimJak2Defs.h), the source and destination
+ * textures of the texture animations, from GAME.fr3.
+ */
+bool write_texanim(const fs::path& in, const fs::path& out) {
+  using namespace ctr_texanim_jak2;
+  auto data = file_util::read_binary_file(in);
+  auto decomp = compression::decompress_zstd(data.data(), data.size());
+  Serializer ser(decomp.data(), decomp.size());
+  tfrag3::Level level;
+  level.serialize(ser);
+
+  std::vector<c3t::Entry> entries;
+  std::vector<u8> blob;
+  std::set<std::pair<std::string, std::string>> done;
+  auto set_name = [](char* dst, size_t n, const std::string& s) {
+    memset(dst, 0, n);
+    memcpy(dst, s.data(), std::min(s.size(), n - 1));
+  };
+  auto find_rgba = [&](const std::string& name) -> const tfrag3::Texture* {
+    for (const auto& t : level.textures) {
+      if (t.debug_name == name) {
+        return &t;
+      }
+    }
+    return nullptr;
+  };
+  auto add_rgba = [&](const std::string& name, bool size_only, int ow, int oh) {
+    if (!done.insert({name, ""}).second) {
+      return true;
+    }
+    const auto* t = find_rgba(name);
+    if (!t) {
+      lg::error("texanim: no texture {}", name);
+      return false;
+    }
+    c3t::Entry e{};
+    set_name(e.name, sizeof(e.name), name);
+    int w = ow ? ow : t->w, h = oh ? oh : t->h;
+    if (size_only) {
+      while (w > c3t::kMaxSize || h > c3t::kMaxSize) {
+        w = std::max(1, w / 2);
+        h = std::max(1, h / 2);
+      }
+      e.w = (u16)w;
+      e.h = (u16)h;
+      e.kind = c3t::kSizeOnly;
+      entries.push_back(e);
+      return true;
+    }
+    // halved (box filter) until it fits
+    std::vector<u32> img(t->data.begin(), t->data.end());
+    w = t->w;
+    h = t->h;
+    while ((w > c3t::kMaxSize || h > c3t::kMaxSize) && w > 1 && h > 1) {
+      const int nw = w / 2, nh = h / 2;
+      std::vector<u32> o((size_t)nw * nh);
+      for (int y = 0; y < nh; y++) {
+        for (int x = 0; x < nw; x++) {
+          u32 acc[4] = {0, 0, 0, 0};
+          for (int k = 0; k < 4; k++) {
+            const u32 v = img[(size_t)(2 * y + (k >> 1)) * w + 2 * x + (k & 1)];
+            for (int c = 0; c < 4; c++) {
+              acc[c] += (v >> (8 * c)) & 0xff;
+            }
+          }
+          u32 r = 0;
+          for (int c = 0; c < 4; c++) {
+            r |= ((acc[c] + 2) / 4) << (8 * c);
+          }
+          o[(size_t)y * nw + x] = r;
+        }
+      }
+      img.swap(o);
+      w = nw;
+      h = nh;
+    }
+    e.w = (u16)w;
+    e.h = (u16)h;
+    e.kind = c3t::kRgba;
+    e.offset = blob.size();
+    e.size = (u32)img.size() * 4;
+    const u8* p = (const u8*)img.data();
+    blob.insert(blob.end(), p, p + e.size);
+    entries.push_back(e);
+    return true;
+  };
+  auto find_index = [&](const std::string& name, const char* dgo) -> const tfrag3::IndexTexture* {
+    for (const auto& t : level.index_textures) {
+      if (t.name != name) {
+        continue;
+      }
+      if (dgo && std::find(t.level_names.begin(), t.level_names.end(), std::string(dgo)) ==
+                     t.level_names.end()) {
+        continue;
+      }
+      return &t;
+    }
+    return nullptr;
+  };
+  auto add_index = [&](const std::string& name, const char* dgo) {
+    const std::string d = dgo ? dgo : "";
+    if (!done.insert({name, d}).second) {
+      return true;
+    }
+    const auto* t = find_index(name, dgo);
+    if (!t) {
+      lg::error("texanim: no index texture {} ({})", name, d);
+      return false;
+    }
+    c3t::Entry e{};
+    set_name(e.name, sizeof(e.name), name);
+    set_name(e.dgo, sizeof(e.dgo), d);
+    int step = 1;
+    while (t->w / step > c3t::kMaxSize || t->h / step > c3t::kMaxSize) {
+      step *= 2;
+    }
+    const int w = std::max(1, t->w / step), h = std::max(1, t->h / step);
+    e.w = (u16)w;
+    e.h = (u16)h;
+    e.kind = c3t::kIndex;
+    e.offset = blob.size();
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        blob.push_back(t->index_data[(size_t)y * step * t->w + (size_t)x * step]);
+      }
+    }
+    for (const auto& c : t->color_table) {
+      blob.push_back(c.x());
+      blob.push_back(c.y());
+      blob.push_back(c.z());
+      blob.push_back(c.w());
+    }
+    e.size = blob.size() - e.offset;
+    entries.push_back(e);
+    return true;
+  };
+  int missing = 0;
+  for (const auto& arr : kArrays) {
+    for (int a = 0; a < arr.anims; a++) {
+      const auto& an = arr.anim[a];
+      missing += !add_rgba(an.dest, true, an.w, an.h);
+      for (int l = 0; l < an.layers; l++) {
+        missing += !add_rgba(an.layer[l].tex, false, 0, 0);
+      }
+    }
+  }
+  for (const auto& g : kClutGroups) {
+    for (int i = 0; i < g.count; i++) {
+      const auto& t = g.tex[i];
+      missing += !add_index(t.name, t.dgo);
+      missing += !add_index(std::string(t.name) + t.suf0, t.dgo);
+      missing += !add_index(std::string(t.name) + t.suf1, t.dgo);
+    }
+  }
+  c3t::Header hdr{};
+  memcpy(hdr.magic, c3t::kMagic, 4);
+  hdr.version = c3t::kVersion;
+  hdr.count = (u32)entries.size();
+  hdr.entries_offset = sizeof(hdr);
+  const u32 data_start = sizeof(hdr) + (u32)(entries.size() * sizeof(c3t::Entry));
+  for (auto& e : entries) {
+    if (e.kind != c3t::kSizeOnly) {
+      e.offset += data_start;
+    }
+  }
+  std::vector<u8> file(sizeof(hdr));
+  memcpy(file.data(), &hdr, sizeof(hdr));
+  const u8* ep = (const u8*)entries.data();
+  file.insert(file.end(), ep, ep + entries.size() * sizeof(c3t::Entry));
+  file.insert(file.end(), blob.begin(), blob.end());
+  file_util::write_binary_file(out, file.data(), file.size());
+  lg::info("texanim: {} textures, {} KB ({} missing) -> {}", entries.size(), file.size() / 1024,
+           missing, out.string());
+  return true;
+}
+
 int main(int argc, char** argv) {
   CLI::App app{"fr3 -> c3l (3DS level background) converter (AI-assisted)"};
   Options opt;
@@ -4804,6 +5020,10 @@ int main(int argc, char** argv) {
   app.add_option("input", in, "input .fr3 (or folder with --all)")->required();
   app.add_option("output", out, "output .c3l (or folder with --all)")->required();
   app.add_flag("--all", all, "convert every .fr3 in the input folder");
+  bool texanim = false;
+  app.add_flag("--texanim", texanim,
+               "(AI-assisted, Jak II) write the texture animations' textures from GAME.fr3 "
+               "(input) to a .c3t file (output); --all writes <output>/texanim.c3t too");
   app.add_option("--game", opt.game,
                  "(AI-assisted) jak1 | jak2 (default: from the input path, out/jak2/fr3: jak2)");
   app.add_option("--tfrag-geo", opt.tfrag_geo, "tfrag level of detail (0 = most detailed, 2)");
@@ -4967,8 +5187,16 @@ int main(int argc, char** argv) {
   opt.mips = !no_mips;
   lg::initialize();
 
+  if (texanim) {
+    return write_texanim(in, out) ? 0 : 1;
+  }
   if (all) {
     file_util::create_dir_if_needed(out);
+    // (AI-assisted) Jak II: the texture animations' textures (CtrTexAnimJak2)
+    if (fs::exists(fs::path(in) / "GAME.fr3") &&
+        (opt.game == "jak2" || fs::path(in).string().find("jak2") != std::string::npos)) {
+      write_texanim(fs::path(in) / "GAME.fr3", fs::path(out) / "texanim.c3t");
+    }
     for (auto& e : fs::directory_iterator(in)) {
       if (e.path().extension() == ".fr3") {
         auto dst = fs::path(out) / (e.path().stem().string() + ".c3l");

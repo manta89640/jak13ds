@@ -59,8 +59,10 @@ for f in "$PROJ"/out/$GAME/iso/*; do cp -c "$f" "$DATA/out/$GAME/iso/" 2>/dev/nu
 # (AI-assisted) the level backgrounds, Jak II's too (out/jak2/c3l)
 if [ -d "$PROJ/out/$GAME/c3l" ]; then
   mkdir -p "$DATA/out/$GAME/c3l"
-  for f in "$PROJ"/out/$GAME/c3l/*.c3l "$PROJ"/out/$GAME/c3l/*.c3v; do
-    [ -f "$f" ] || continue  # (AI-assisted) .c3v: fine_vis sidecars, when there are some
+  for f in "$PROJ"/out/$GAME/c3l/*.c3l "$PROJ"/out/$GAME/c3l/*.c3v "$PROJ"/out/$GAME/c3l/*.c3t; do
+    # (AI-assisted) .c3v: fine_vis sidecars, when there are some; .c3t: Jak II's texture
+    # animation sources
+    [ -f "$f" ] || continue
     cp -c "$f" "$DATA/out/$GAME/c3l/" 2>/dev/null || cp "$f" "$DATA/out/$GAME/c3l/"
   done
 fi

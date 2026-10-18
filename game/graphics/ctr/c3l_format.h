@@ -123,6 +123,17 @@ struct Texture {
 };
 static_assert(sizeof(Texture) == 16);
 
+// (AI-assisted, Jak II) Texture::pad: the animated texture slot whose base texture this is
+// (jak2_animated_texture_slots() index + 1, little endian; 0: not animated). The runtime draws the
+// slot's animation (CtrTexAnimJak2) in its place. Files before it have 0 there.
+inline uint16_t texture_anim_slot(const Texture& t) {
+  return (uint16_t)(t.pad[0] | (t.pad[1] << 8));
+}
+inline void set_texture_anim_slot(Texture* t, uint16_t slot) {
+  t->pad[0] = (uint8_t)(slot & 0xff);
+  t->pad[1] = (uint8_t)(slot >> 8);
+}
+
 /*!
  * A piece of the level: triangle lists sharing one quantized vertex range.
  * world position = origin + pos * scale (game units, 4096 = 1 meter)

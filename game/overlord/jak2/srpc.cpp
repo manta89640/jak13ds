@@ -428,6 +428,13 @@ void* RPC_Loader(unsigned int /*fno*/, void* data, int size) {
         bank->in_use = false;
         snd_UnloadBank(handle);
         snd_ResolveBankXREFS();
+        {
+          // (AI-assisted) the sound memory left (the loads log it too: iso_cd.cpp)
+          u32 banks = 0;
+          const u32 bytes = snd_ResidentBankBytes(&banks);
+          lg::info("[sound] unloaded bank {}: {} banks, {} KB", cmd->load_bank.bank_name, banks,
+                   bytes / 1024);
+        }
       } break;
       case Jak2SoundCommand::get_irx_version: {
         cmd->irx_version.major = 4;

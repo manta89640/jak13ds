@@ -59,6 +59,10 @@ class Player {
   BankHandle LoadBank(std::span<u8> bank);
   // (AI-assisted) bank is in owner's buffer, which the bank keeps (Loader::ParseBank)
   BankHandle LoadBank(std::span<u8> bank, std::unique_ptr<u8[]> owner);
+  // (AI-assisted) memory held by the loaded banks (their file bytes), and how many there are
+  u32 ResidentBankBytes(u32* count = nullptr);
+  // (AI-assisted) snd_RunStreamsWithoutOutput
+  void SetRunStreamsWithoutOutput(bool on) { mRunStreamsSilent = on; }
 
   u32 PlaySound(BankHandle bank, u32 sound, s32 vol, s32 pan, s32 pm, s32 pb);
   u32 PlaySoundByName(BankHandle bank,
@@ -112,6 +116,8 @@ class Player {
 #endif
 
   Loader mLoader;
+  std::map<BankHandle, u32> mBankBytes;  // (AI-assisted) ResidentBankBytes
+  std::atomic<bool> mRunStreamsSilent{false};
   Synth mSynth;
   VoiceManager mVmanager;
   s32 mTick{0};

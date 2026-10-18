@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/dma/dma.h"
@@ -127,6 +128,13 @@ void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   bool have = false;
   while (dma.current_tag_offset() != rs.next_bucket) {
     auto data = dma.read_and_advance();
+#ifndef __3DS__
+    static const bool olog = getenv("CTR_OCEAN_LOG") != nullptr;  // host diagnosis
+    if (olog && rs.log_now) {
+      lg::info("[ctr] ocean bucket: transfer {} bytes vif1 {}", data.size_bytes,
+               (int)data.vifcode1().kind);
+    }
+#endif
     if (data.size_bytes == sizeof(Packet) && data.vifcode1().kind == VifCode::Kind::PC_PORT) {
       memcpy(&p, data.data, sizeof(Packet));
       have = p.magic == kMagic;
@@ -134,6 +142,20 @@ void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (!have || !ctr_settings().ocean) {
     return;
+  }
+  // (AI-assisted) Jak II's packet: the sky's light on the water (ocean.gc ocean-3ds-packet:
+  // add-colors!, 0x80 = 1.0) where Jak 1 sends zeros
+  m_tint[0] = m_tint[1] = m_tint[2] = 1.f;
+  if (ctr_is_jak2()) {
+    float tint[4];
+    memcpy(tint, &p.cam.itimes[0], sizeof(tint));
+    if (tint[3] == 1.f) {
+      // the square root: the PS2 adds the sky's reflection too (the env map pass), which keeps
+      // the night water brighter than the light alone (the PC's port at night: about 1.5x it)
+      for (int c = 0; c < 3; c++) {
+        m_tint[c] = std::sqrt(std::clamp(tint[c] / 128.f, 0.f, 2.f));
+      }
+    }
   }
   const u32 key[6] = {p.colors, p.mid_indices, p.mid_masks, p.trans_indices,
                       (u32)(s32)p.start[0], (u32)(s32)p.start[2]};
@@ -332,11 +354,11 @@ void CtrOceanRenderer::update_texture(const u8* ee, u32 heights, bool shade) {
       const float gz = (down[x] - up[x]) * kInvStep;
       float v = 0.66f + 2.2f * (gx * lx + gz * lz) + row[x] * (0.10f / 4096.f);
       v = std::min(1.f, std::max(0.35f, v));
-      const u8 c = (u8)(v * 255.f);
       u8* t = &m_texels[4 * (z * N + x)];
-      t[0] = c;
-      t[1] = c;
-      t[2] = c;
+      // (AI-assisted) Jak II: times the sky's light (m_tint; 1 for Jak 1)
+      for (int c = 0; c < 3; c++) {
+        t[c] = (u8)std::min(255.f, v * 255.f * m_tint[c]);
+      }
       t[3] = 255;
     }
   }
@@ -478,7 +500,8 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
       }
       m[4 * c + 3] = (float)-t;
     }
-    constexpr float kYScale = 512.f / 448.f;  // Jak 1 scissor adjust (tfrag3.vert)
+    // Jak 1 scissor adjust 512 / 448 (tfrag3.vert); (AI-assisted) Jak II's (ctr_gs_y_scale)
+    const float kYScale = ctr_gs_y_scale();
     for (int i = 0; i < 4; i++) {
       m[4 + i] *= kYScale;
     }
@@ -588,7 +611,7 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
       ctr_clip_vertex o;
       memset(&o, 0, sizeof(o));
       o.x = c[0];
-      o.y = c[1] * (512.f / 448.f);  // Jak 1 scissor adjust, as the mesh matrix below
+      o.y = c[1] * ctr_gs_y_scale();  // the scissor adjust, as the mesh matrix below
       o.z = c[2];
       o.w = c[3];
       o.r = r;

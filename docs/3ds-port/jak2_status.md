@@ -23,7 +23,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | Natives (j2-nat-port, j2-nat-new) | Merged; always on (Oct 18: the `logic_native` key and the other native switches were removed, config_dev.md) |
 | Renderer (j2-render-bg, j2-render-fg) | Merged: backgrounds, merc, sky + clouds, particles, shadows, HUD, text, minimap |
 | **Integration build, baseline B (Oct 18)** | **Azahar slums 29.8 fps (30 Hz cap): logic 25-27 ms, render thread 28.5-29.3 ms, GPU busy 29-30 ms; staged in `port_test/3ds-sdcard-jak2-baseline-b`** (section below) |
-| Sound | Not started (Jak II overlord streaming on ndsp) |
+| Sound (j2-sound, Oct 18) | **Plays in Azahar** (muted runs): title stream, city music + banks, dialogue streams; 0 DSP drops, 0 late buffers. Mixer on core 1 (40% share): 12-14% of real time, 3.8-6.3 ms/frame there; slums 29.9 fps, render thread 27.7-28.2 ms (on core 2 it was 34 ms, 25-29 fps). 1.96 MB of banks in the slums. Compressed SD files (`--compress --compress-vag`) work for Jak II. Hardware not run. See 3ds_build.md "Jak II sound" |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -59,10 +59,12 @@ The frame is now bounded by the 30 Hz cap with the GPU close behind (29-30 ms bu
 config.ini: preset normal, sound off, renderer ctr; `data/out/jak2/iso` 605 files,
 `data/out/jak2/c3l` 148 files), README with what works and what's missing.
 
-**Known gaps:** no sound; texture animations other than the clouds and the sky gradient (Dark
+**Known gaps:** no sound (since added: j2-sound); texture animations other than the clouds and the sky gradient (Dark
 Jak / prison / oracle CLUT blends, waterfalls, lava, security walls, slime; background billboards
 black); no ocean (black areas on the title screen), screen effects or envmap shine; the minimap's
 circle mask; tie / shrub prototype visibility masks; linear memory nearly full in the city; other
+**Known gaps:** no sound; (j2-texanim: texture animations, the ocean and the minimap are done, see
+below) screen effects; tie / shrub prototype visibility masks; linear memory nearly full in the city; other
 districts not run in Azahar with this build; Jak 1's banner and jingle (Jak II icon only); no
 hardware run.
 
@@ -204,6 +206,54 @@ Jak's idle, the time of day); Jak 1 3DS build links, make_cia.
 Host diagnosis switches (no effect on the 3DS): `CTR_SKIP_BUCKETS=",id,"`, `CTR_DIRECT_STATS`,
 `CTR_DIRECT_DUMP=",bucket,frame,"` (+ `CTR_DIRECT_DUMP_N`), `CTR_UPLOAD_LOG`,
 `CTR_TEX_DUMP=<dir>` (+ `CTR_TEX_DUMP_RGB`), `CTR_GLOW_LOG`, `CTR_MINIMAP_DUMP=<png>`.
+
+## Texture animation, ocean, minimap (j2-texanim, Oct 18)
+
+(AI-assisted.) Branch `j2-texanim`.
+
+| What | How | Where it shows |
+|---|---|---|
+| CLUT blends: Dark Jak (`jakbsmall-*`), prison (`jak-orig-*`, `jakb-*` LDJAKBRN), oracle, nest | `CtrTexAnimJak2::clut_group`: ClutBlender's blend of the two CLUTs, then the index lookups, at most 64 x 64; only when the game's weight changes (weight 0: the level's base texture, baked with the first CLUT, is the same) | Jak's hair / face / fingers / eyebrows going dark |
+| Fixed animations: security walls, waterfall(s), lava, conveyors, skull gem, bomb gradient, stadium wall, robotank treads, fortress screen, metal kor / shield / krew holograms | `CtrTexAnimJak2Defs.h` (TextureAnimatorDefs.cpp's Jak II definitions as tables), `draw_layer`: each layer's quad, colour and texture coordinates as the game sends them, bilinear, the two blends; fixed point, row spans | ctywide (security walls), forest + mountain (waterfall), dig1 + dig3a (lava), castle, fortress levels...; skull gem and bomb gradient are sent in every level |
+| Slime | the clouds' noise (shared random table) + the PC's slime LUT, 64 x 64, scrolled copy | castle |
+| Where the results go | the converter marks each slot's base texture in a level (`c3l::texture_anim_slot`); `ctr_gpu_tex_set_anim_slot` at load; draws of such a texture use the slot's texture (`ctr_gpu_anim_slot_set`, taken at the next frame begin, so a frame never mixes two) | every level and merc draw of a slot |
+| Ocean | `ocean-3ds-packet` (ocean.gc, TARGET_3DS): Jak 1's OCN3 packet (the map, this frame's wave heights, camera) plus the sky's light toward the view (add-colors!); `CtrOceanRenderer` (Jak 1's flat ocean) in ocean-near with Jak II's y scale, the wave texture times the square root of that light. The EE no longer builds the PS2 ocean's vertices, wave texture, far / mid / near DMA | title backdrop, the port, the city's edges |
+| Minimap | the circle (already drawn as a fan instead of the PS2's alpha-only mask) now opaque: the mask gave the whole circle alpha 1, the map's own alpha let the scene through (black roads were gray, the sea cyan) | HUD |
+| Envmap / emerc shine | nothing new: CtrMerc's envmap path already draws Jak II's envmap draws (`envmap batches` in the merc stats; 35 envmap draws in garage alone) | guards, vehicles |
+
+Not done: VRAM copies of the move-to-pool animations (oracle / nest blends, skull gem, fortress
+screen, metal kor / shield / holograms: only the generic renderer, which the 3DS doesn't have, read
+them there); the PS2 ocean's sky reflection and transparency near the shore (the flat ocean is
+opaque, one colour from the map, shaded by the waves).
+
+Ocean next to the PC: daytime the port's water is the map's teal with the wave shading (the PC's
+is lighter and reflects the sky); at night darker and less blue than the PC's (port, average colour: PC (6, 22, 43); 3DS
+(17, 46, 55) untinted, (3, 9, 14) with the plain tint; the square root of it now in use sits between,
+not measured again); no waves' geometry (flat at the map's
+height; `ocean = waves` would add Jak 1's near grid, not enabled for Jak II), no transparency.
+
+Memory: texanim.c3t sources loaded per animation (slums: 68-84 KB of heap), GPU textures 4-8 x
+up to 16 KB linear (x2 while updated: the pipeline's second copy), freed 10 s after an animation
+stops; the ocean's mesh (~140 KB linear, 8.8k vertices, 15k triangles at the port) and its 32 x 32
+texture.
+
+Host checks (`gk --ctr-gfx`, C mode, `platform/3ds/tests/jak2_texanim.pad` and the PC renderer on
+the same pad; images in port_test/reports/j2-texanim): title, slums, forest, dig1, port day and
+night; Dark Jak with `CTR_TEST_CLUT_WEIGHT=1` (host diagnosis); Jak 1 `level_pairs.pad` exit 0, all
+10 pairs.
+
+**Azahar (the CIA, `jak2_texanim.pad`, private instance, sound off), two runs:**
+- First run (every fixed animation every 2nd frame at 64 x 64): 3.2 ms of render thread per
+  update; the slums sent bomb gradient, skull gem and both security textures every frame: texture
+  buckets 8.7 ms (2.5 before), build 30.6 ms. Hence the second version: an animation runs only
+  while its slot was drawn last frame (`ctr_gpu_anim_slots_drawn`), at 32 x 32, at most every 3rd
+  frame and one animation a frame.
+- Second run: slums with traffic 28.4-29.7 fps, render thread build 26.85 ms (texture buckets 2.59,
+  as before; no security wall in view: 0 updates), GPU busy 27.6 ms, 65k triangles; logic 26.5 ms.
+  Forest: the waterfall ~1.3 ms per update, every 3rd frame (~0.45 ms a frame); dig1: the lava
+  ~1.2 ms per update. Port: the ocean 0.25-0.36 ms of render thread (the mesh is built once per map).
+- Memory in the slums: linear free 144 KB (131 before), heap ~68.6 MB used of 72.1 (as before):
+  the slots' textures and sources are only allocated while an animation runs.
 
 ## Paths
 

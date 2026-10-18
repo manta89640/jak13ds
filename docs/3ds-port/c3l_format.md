@@ -80,7 +80,8 @@ What goes in:
   distance class (v14, see `--shrub-one-dist`) or `--shrub-dist`.
   Their vertex colors are the base color times the time of day color (shrub.vert).
 - Merc models (characters, objects), see "Merc" below.
-- Not converted: hfrag, animated textures (those draws become untextured).
+- Not converted: hfrag. (AI-assisted) Jak II's animated texture slots get their base texture,
+  marked in `Texture::pad` (`c3l::texture_anim_slot`); the runtime draws the animation over it.
 
 Sizes (defaults, AI-assisted, Oct 3): village1 254k triangles in 626 chunks, 296 textures
 (1.2 MB), file 4.9 MB; misty 5.1 MB, citadel 4.2 MB (241 textures, 1.4 MB; before textures were
@@ -92,7 +93,16 @@ The same format and converter. `ctr_level_converter --all out/jak2/fr3 out/jak2/
 `--merc-only`), the runtime reads `out/<game>/c3l` (`ctr_level_c3l_dir()`). Jak II's fr3 files have
 the same tree kinds (no hfrag: that is Jak 3); envmapped ties keep their base pass only, as in
 Jak 1. Not used yet: the tie / shrub prototype visibility masks the game sends (`proto-vis`,
-prototypes hidden by game state), and texture animation (those draws are untextured).
+prototypes hidden by game state).
+
+(AI-assisted, j2-texanim) Animated texture slots: each slot a level's draws name (merc, tfrag, tie,
+shrub) gets a texture: the index texture baked with its first CLUT (`add_anim_slot_textures`) or
+the level's texture of the slot's name (`add_anim_slot_base_textures`; the jakb cutscene faces of
+31 levels were untextured before). Marked with the slot + 1 in `Texture::pad` (old files: 0), never
+shared by content, put in an atlas or given the alpha optimisations. `--all` on a Jak II fr3 folder
+also writes `texanim.c3t` (`--texanim GAME.fr3 FILE` alone): the texture animations' sources and
+destination sizes from GAME.fr3, at most 64 x 64 (`CtrTexAnimJak2Defs.h` `c3t`), 97 textures,
+463 KB; staged with the levels.
 
 The PS2 distances (`tie_ps2_dists_jak2.inc`: 5327 tie prototypes, `shrub_ps2_dists_jak2.inc`:
 535 shrub prototypes, all 147 levels) come from the levels' BSPs:

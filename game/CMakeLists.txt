@@ -331,6 +331,7 @@ set(RUNTIME_SOURCE
         mips2c/mips2c_goalc.cpp
         mips2c/mips2c_native.cpp
         mips2c/mips2c_table.cpp
+        overlord/common/compressed_iso_file.cpp
         overlord/common/dma.cpp
         overlord/common/fake_iso.cpp
         overlord/common/iso_api.cpp
@@ -455,6 +456,9 @@ add_subdirectory(sound)
 add_library(runtime STATIC ${RUNTIME_SOURCE} "../third-party/glad/src/glad.c")
 
 target_link_libraries(runtime common fmt SDL3::SDL3 imgui discord-rpc sound stb_image libco libcurl)
+# (AI-assisted) the 3DS's block-compressed game files (.ogz), read on the host only with
+# OPENGOAL_ISO_OGZ=1 (tests; game/overlord/common/fake_iso.h)
+target_compile_definitions(runtime PRIVATE OG_HOST_ISO_OGZ=1)
 if(WIN32)
     target_link_libraries(runtime mman)
 else()

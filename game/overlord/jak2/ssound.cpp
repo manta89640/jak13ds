@@ -43,6 +43,9 @@ void InitSound_overlord() {
 
   // need this one for PC sound to start up
   snd_StartSoundSystem();
+  // (AI-assisted) 3DS without audio output: the stream voices still play (silently), so voice
+  // streams end and their play position moves (see Player::HandlerTickThread)
+  snd_RunStreamsWithoutOutput(true);
 
   StreamVoice[0] = SD_VOICE(0, 0);
   StreamVoice[1] = SD_VOICE(0, 1);
