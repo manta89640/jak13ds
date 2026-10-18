@@ -1,8 +1,9 @@
-# Jak II -> New 3DS: status and handoff (milestone 1, Oct 12 2026)
+# Jak II -> New 3DS: status and handoff (milestone 1, updated Oct 18 2026)
 
 (AI-assisted.) Branch `jak2-3ds` (worktree `jak-project/.claude/worktrees/jak2`), started from
-`batch-oct11` c1da64bc1. Jak 1 behaviour is unchanged: every shared-code change is either Jak 2
-only or a hook that stays null for Jak 1.
+`batch-oct11` c1da64bc1; batch-oct11 9da503ce27 merged in on Oct 18 (no conflicts). Jak 1
+behaviour is unchanged: every shared-code change is either Jak 2 only, gated on the game version
+or an environment variable, or a hook that stays null for Jak 1.
 
 ## Where it stands
 
@@ -12,11 +13,12 @@ only or a hook that stays null for Jak 1.
 | Extract / decompile data | Done. `iso_data/jak2` 4.1 GB, `decompiler_out/jak2` 509 MB, 147 fr3 levels |
 | Native PC build (arm64) | Done. Boots to the title and renders Haven City (slums, HUD minimap); silent |
 | Native `(mi)` | 2273 targets build |
-| C-backend compile of all of Jak 2 | **840/840 modules, 0 functions unsupported** (lenient pass, 137 s); warnings below |
-| C-mode runtime and GOAL kernel | Written and building (commit db229ab71). **Not run yet** |
-| C-mode boot on the Mac | Not started |
-| Haven City timing (the feasibility number) | Not measured yet |
-| Scripted route into city gameplay | Not working yet: the title level puts Jak back in `target-title` (see below) |
+| C-backend compile of all of Jak 2 | **Strict build (no LENIENT): 840 modules, 2273 targets, ~2 min**; 310 warnings, reviewed below |
+| C-mode boot on the Mac | **Works (Oct 18).** Title screen, 5 min idle stable at 30 fps; Haven City slums with traffic (291 processes) |
+| C mode vs native | Same Jak position/state after the city pad; OpenGL screenshots of the title and the slums match native |
+| ABI check run / stack poison run | Done, nothing real left (see "C mode on the Mac") |
+| Haven City timing (the feasibility number) | Mac C mode: logic 0.83 ms/frame in the slums vs Jak 1 village1 0.20 ms (rough: ~4x Jak 1, see below) |
+| Scripted route into city gameplay | Works (jak2-route): `platform/3ds/tests/jak2_city.pad`, `jak2_route.pad` |
 
 Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one entry
 (`ntsc_v1`). Both have the same serial and ELF hash, and the database lists both ISO hashes. The
@@ -34,7 +36,8 @@ decompiling code. Data extraction and the build use `ntsc_v1`, as upstream does.
 | Native game output | `<worktree>/out/jak2` (fr3, obj, iso) | regenerable: decompile and `(mi)` |
 | C-mode mirror | `port_test/j2mirror`: symlinks to the worktree except `out/`; `out/jak2/{csrc,cmod,obj,iso}`, `out/jak2/fr3` symlinked to the worktree's | regenerable, ~2.5 min |
 | Project-path link | `port_test/j2link/jak-project` -> worktree (binaries find the project by the last "jak-project" in their path) | yes (tiny) |
-| Logs | `port_test/j2data` (extract, decompile, native and C build logs; `cbuild1.log` = the lenient C build) | no |
+| Logs | `port_test/j2data` (extract, decompile, native and C build logs; `cbuild1.log` = the lenient C build, `cbuild6-strict.log` = the strict one) | no |
+| Host small-memory gk (Jak 1 check) | `<worktree>/build-host-small` (Release, `-DOPENGOAL_SMALL_MEMORY=1` C and C++ flags) | regenerable, ~10 min |
 
 The VAG/STR/MUS copies in both `out/jak2/iso` folders are APFS clones of `iso_data/jak2` (`cp -c`),
 so they take no extra space. A new `(mi)` copies them again, so clone them again afterwards (see the
@@ -64,9 +67,22 @@ cd <out>/jak2/iso && for f in *; do s=$(find -L $W/iso_data/jak2 -name "$f" -typ
 # <config>/OpenGOAL/jak2/screenshots/screenshot.png)
 OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=city.pad $W/build/game/gk -g jak2 --proj-path $W \
   --config-path <scratch>/cfg -- -boot -fakeiso -nosound
-# C mode (next step): add -cbackend, run from the mirror
+# C mode: add -cbackend, run from the mirror (a scratch --config-path keeps the user's settings)
 OPENGOAL_NO_SOUND=1 OPENGOAL_NULL_GFX_FPS=30 $W/build/game/gk -g jak2 --proj-path port_test/j2mirror \
-  --null-gfx -- -boot -fakeiso -nosound -cbackend
+  --config-path <scratch>/cfg --null-gfx -- -boot -fakeiso -nosound -cbackend
+# windowed (OpenGL) runs while the screen is locked or the display sleeps: add
+# OPENGOAL_GL_NO_VSYNC=1, otherwise the macOS buffer swap waits forever (native too)
+# ABI check mode: move out/jak2/cmod aside, rm out/jak2/obj, build with
+#   OPENGOAL_C_BACKEND_CC="cc -DGOALC_ABI_CHECK", run with OPENGOAL_C_ABI_CHECK=1;
+# stack poison: OPENGOAL_C_BACKEND_CC="cc -DGOALC_STACK_POISON" the same way. Put the normal cmod back
+# (or rebuild it) afterwards: the module hash doesn't include the cc flags.
+# kernel function ABI audit (compile time, like Jak 1's CAbiKernelFunctionTypes test):
+OPENGOAL_C_ABI_KERNEL_DUMP=<scratch>/kdump.txt gk ... -cbackend      # a few seconds of boot
+$W/build/goalc/goalc --game jak2 --proj-path port_test/j2mirror --instruction-set c \
+  -c '(begin (mi) (__c-abi-check-kernel-functions "<scratch>/kdump.txt"))'
+# frame timing: "perf: ... logic ..." lines once a second (kperf, as Jak 1); average them per
+# "perf-mark" window of the pad (platform/3ds/tools/perf_report.py's regex doesn't match the host
+# lines' spacing yet)
 ```
 
 Notes:
@@ -128,25 +144,70 @@ Function-type casts (306 -> 304):
   `leg-ik-callback` (arg1/arg2 `object`, unused); `pilot-states.gc` rotate-surface hook
   (arg0-2 `object`, unused; Jak 1 retyped its twin to `surface`).
 
-Not checked statically: casts from untyped values (`function`, `basic` fields). Run the ABI check
-mode (`-DGOALC_ABI_CHECK` + `OPENGOAL_C_ABI_CHECK=1`, c_backend.md) once C mode boots.
+Not checked statically: casts from untyped values (`function`, `basic` fields). The ABI check
+mode run (Oct 18, below) covered the title and the slums.
+
+## C mode on the Mac (Oct 18)
+
+(AI-assisted.) Strict C build into `port_test/j2mirror`, gk from `<worktree>/build`.
+
+Bugs fixed to boot:
+- **Symbol values (goalc C backend).** The generated C read and wrote a symbol's value at the
+  symbol's own st offset, which is only right for Jak 1. In Jak 2 the value is at the symbol
+  address - 1 (Symbol4.h; the native backends use `LINK_SYM_NO_OFFSET_FLAG`). The first boot
+  crashed in gcommon's top level. `IR_C.cpp` now emits `GC_SYMOFF(k) - 1` for Jak 2+; Jak 1's
+  generated code and module hashes are unchanged. After this fix C mode booted with no kernel
+  changes: the Jak 2 goalc_kernel (suspend/resume with the Jak 2 offsets, set-to-run-bootstrap,
+  catch/throw, reset-stack-and-call) worked as written.
+- **Kernel function argument widths.** New audit (commands above): gk writes every registered
+  kernel function and the arguments its adapter reads in full; goalc checks them against the GOAL
+  types. 2 of 177 read the upper half of 32-bit arguments: `file-stream-open` (`kopen`) and
+  `dgo-load`. Both are `u32` now, like Jak 1's (it was harmless: `Ptr` truncates).
+- **Jak2TypeConsistency** failed after the jak2-abi merge: `decompiler/config/jak2/all-types.gc`
+  now has its speech-method and `target-warp-out` types. Jak3TypeConsistency failed on batch-oct11
+  already (`SMALL_MEMORY` undefined in the shared jak1/pc files): Jak 3's gcommon defines it `#f`.
+
+Runs (all silent, `--null-gfx` at 30 Hz unless noted):
+- Title, 5 min idle: stable, 1800 frames per minute, Jak in `target-title` throughout.
+- `jak2_city.pad`: ctysluma-start in 18 frames; memory report: global heap 52.0 of 62.9 MB used
+  (native 55.3), scheme-globals 5508 KB (native 10115: C mode keeps no code in the GOAL heap),
+  ctywide's level heap 3402 of 4354 KB (native 4196: its 1240 KB of arm64 code is gone), 291
+  processes incl. 45 riders, 10 guards, 45 citizens, 55 vehicles. Jak ends at (1065.99, 0.52,
+  194.46) m in `target-hide`, exactly as native.
+- OpenGL (`OPENGOAL_GL_NO_VSYNC=1`, screen locked): title (frame 900) and the slums (standing and
+  after walking) look the same as native; Jak's position matches to the cm.
+- ABI check mode (`-DGOALC_ABI_CHECK`, city pad): 40 reports, all expected: `enter-state` /
+  `set-to-run` / `run-function-in-process` / `__goalc-reset-stack-and-call` WIDE arguments beyond
+  the caller's count (as in Jak 1); `format` arguments beyond the format string's (rpc-h's
+  "flushing RPC port" warning); `sparticle-track-sun` arg0 (unused); pointer arguments with the
+  check marker in pc-settings `read-from-file` (the `new 'stack` allocation comes back through a
+  narrow parameter; normal builds zero-extend it); `kopen` (fixed above).
+- Stack poison (`-DGOALC_STACK_POISON`, city pad): no difference, same end position and state.
+- Not seen: any `[goalc]` error, suspended-stack overflow, or NaN symptom.
+
+Timing (Mac, C mode, null renderer at 30 Hz, logic = kernel dispatch minus vsync/render waits,
+averaged over the pad windows): Haven City slums standing in traffic **0.83 ms/frame**, walking
+0.87 ms. Same session, Jak 1 (host small-memory gk, proj-final): village1 0.20 ms, Snowy 0.14 ms.
+The Jak 1 numbers are at the perf lines' 0.1 ms resolution, so the ratio is rough: the city costs
+about 4-6x Jak 1's village1. With Jak 1's Mac-to-N3DS ratio (village1 ~12.5 ms game thread on
+N3DS, Snowy 11-13 ms logic on hardware: ~60-85x), Haven City logic would be roughly **50-70 ms on
+the N3DS** (15-20 fps from logic alone) before any 3DS-specific work. Measure on the 3DS (a
+logic-only boot) before planning around this; the city's traffic (citizens, vehicles, nav) is the
+first profiling target.
 
 ## Next steps
 
-Milestone 1 (Mac):
-1. Strict C build (no LENIENT), then boot C mode from the mirror: `gk ... -cbackend`. Expect
-   kernel-port bugs: suspend/resume with the Jak 2 offsets, `set-to-run-bootstrap`,
-   catch/throw. Jak 1's runtime tests (`GoalcRuntime*`, C-mode kernel tests) have Jak 2
-   equivalents only for the compiler (`Jak2*`).
-2. Fix the city route above, then time Haven City. Method: `OPENGOAL_NULL_GFX_FPS=30
-   OPENGOAL_PERF_SECTIONS` / kperf `logic` per frame in C mode on the Mac. Measure Jak 1 village1
-   and Snowy the same way in the same session (p3ds / rtmirror-style mirror). Scale by the Jak 1
-   Mac-to-N3DS ratio: Jak 1 village1 game thread ~12.5 ms on N3DS, sections off; Snowy logic
-   11-13 ms on hardware.
-3. Memory: log the level heap sizes and the levels loaded at once in the city (title showed
-   ctysluma + ctywide + lwidea + title), the global heap (61.5 MB on PC), and the process pools
-   (`*city-dead-pool*` showed "empty" on the first continue). Compare with the 124 MB app region
-   (Jak 1 small memory = 48 MB EE).
+Milestone 1 (Mac): done except as noted.
+1. Done: strict C build, C-mode boot, title and city stable, OpenGL matches native, ABI check and
+   stack poison runs (above).
+2. Done roughly: Haven City timing (above). Better: per-section timing (`OPENGOAL_PERF_SECTIONS`,
+   Jak 2's with-profiler blocks) to see what the 0.83 ms is made of, and `jak2_route.pad` in C
+   mode for the other districts.
+3. Done (jak2-route, native; C mode numbers above). Next: choose the Jak 2 small-memory layout.
+4. Not done: Jak 2 C-mode runtime tests in goalc-test (Jak 1 has `GoalcRuntime*` and C-mode
+   kernel tests; Jak 2 has only compiler tests).
+5. The C module hazard is reachable in Jak 2 (risks below): fix it before the 3DS build relies on
+   the city.
 
 Milestone 2 (boot on the 3DS) and the baseline the user asked for (Oct 12):
 - Unmodified Jak II logic: crash fixes only, plus mandatory porting (C-mode kernel, 3DS platform
@@ -171,17 +232,25 @@ Milestone 2 (boot on the 3DS) and the baseline the user asked for (Oct 12):
 
 ## Open questions and risks
 
-- Speed is still unknown. Jak 2 runs more code per frame than Jak 1: the city has traffic,
-  citizens and guards, and nav meshes.
+- Speed: rough Mac estimate above (city logic ~4-6x Jak 1's village1, maybe 50-70 ms on the
+  N3DS). Unknown until a logic-only 3DS boot.
 - Memory: Jak 2 PC uses `BIG_MEMORY`. The PS2 levels were sized for 32 MB, and the city keeps
   several large levels plus `*city-dead-pool*` in memory.
 - `-boot -debug` crashes natively on arm64. This may hide a real bug that C mode also hits.
-- The C module hazard (c_backend.md): two loaded levels with the same object file share seg_base.
-  Jak 2 may share objects across the city's neighbouring levels. Check the DGO lists.
+- The C module hazard (c_backend.md): two loaded levels with the same object file share one
+  seg_base, so the first copy's code uses the second copy's static data (and freed memory once it
+  unloads). Jak 2's DGO lists (Oct 18): 122 objects are in more than one DGO; the ones that can
+  meet in the city: `searchlight` (cwi = ctywide, always loaded in the city, and pac), and the bot
+  code `ai-task-h`, `bot`, `bot-h`, `bot-states` (ate, ctyasha, ctykora, lkiddoge, seb, swb, unb),
+  `hal`, `hal-h`, `hal-task` (ctykora, lkiddoge, seb, swb, unb), `ash*`, `juicer` (ate, ctyasha).
+  Whether two of those are ever loaded together (e.g. ctykora with lkiddoge, ctywide with pac)
+  is not checked. Safest: per-link segment bases (c_backend.md has the design).
 - mips2c: Jak 2 has 28 mips2c files (`game/mips2c/jak2_functions`) and no native ARM versions.
   The `(method 33 sky-work)` mips2c function is registered twice (warning at boot).
-- `jak1/goalc_kernel.cpp` now includes the hook. The 3DS Jak 1 build was not rebuilt to confirm
-  it still links. It only uses a pointer defined in that file, so it should.
+- `jak1/goalc_kernel.cpp` now includes the hook. The 3DS Jak 1 build was not rebuilt from this
+  branch to confirm it still links. It only uses a pointer defined in that file, so it should.
+  (The host checks on Oct 18 passed: Jak 1 level_pairs.pad on the host small-memory gk, exit 0,
+  19 loads; goalc-test all pass.)
 
 ## CIA art (for the baseline package)
 
