@@ -55,7 +55,9 @@ n x { u32 stub_offset_in_segment, u32 func_index }
    if not found.
 2. `mod->seg_base[i] = code_infos[i].offset` for all 3 segments (0 when absent).
 3. Resolve symbols: `mod->sym_offsets[k] = intern(mod->sym_names[k]) - s7` (same meaning as the
-   x86 symbol memory link: st-relative offset of the symbol).
+   x86 symbol memory link: st-relative offset of the symbol). The generated code reads a symbol's
+   value at that offset in Jak 1, and at the offset - 1 in Jak 2 and later, where the value is at
+   the symbol address - 1 (Symbol4.h; AI-assisted, Oct 2026).
 4. Give every module function a global id (entries in `goalc_fn_table`), and write the host
    address of `func_index` at each `stub_offset`.
 
