@@ -3,7 +3,10 @@
 #include "common/type_system/deftype.h"
 #include "common/type_system/state.h"
 #include "common/util/math_util.h"
+#include "common/util/FileUtil.h"
 #include "common/util/string_util.h"
+
+#include <sstream>
 
 #include "goalc/compiler/CEmitter.h"
 #include "goalc/compiler/Compiler.h"
@@ -1752,6 +1755,46 @@ Val* Compiler::compile_c_abi_method_wide_mask(const goos::Object& form,
   auto info = m_ts.lookup_method(type_name, (int)args.unnamed.at(1).as_int());
   return compile_integer(c_abi_wide_mask(&m_ts, info.type.substitute_for_method_call(type_name)),
                          env);
+}
+
+/*!
+ * (AI-assisted) (__c-abi-check-kernel-functions "file"): compile-time audit of the kernel
+ * functions a runtime registered (OPENGOAL_C_ABI_KERNEL_DUMP, "name wide_mask" lines). An adapter
+ * may only read the upper half of arguments that are wide in the function's GOAL type, because
+ * callers don't pass it for the others (docs/3ds-port/c_backend.md, ABI version 3). Prints each
+ * function that reads more and returns how many there are. Like Jak 1's CAbiKernelFunctionTypes
+ * test, for games that have no in-process runtime test.
+ */
+Val* Compiler::compile_c_abi_check_kernel_functions(const goos::Object& form,
+                                                    const goos::Object& rest,
+                                                    Env* env) {
+  auto args = get_va(form, rest);
+  va_check(form, args, {goos::ObjectType::STRING}, {});
+  const auto& path = args.unnamed.at(0).as_string()->data;
+  auto text = file_util::read_text_file(path);
+  int checked = 0, bad = 0, untyped = 0;
+  std::istringstream in(text);
+  std::string name;
+  u32 mask;
+  while (in >> name >> mask) {
+    auto type = lookup_typespec(name);
+    if (!type || type->base_type() != "function" || type->arg_count() == 0) {
+      untyped++;
+      continue;
+    }
+    u32 n_args = std::min<u32>(8, type->arg_count() - 1);
+    u32 goal_wide = c_abi_wide_mask(&m_ts, *type);
+    u32 reads = mask & ((1u << n_args) - 1);
+    if (reads & ~goal_wide) {
+      lg::print("c abi kernel check: {} {} reads 0x{:x}, wide 0x{:x}\n", name, type->print(),
+                reads, goal_wide);
+      bad++;
+    }
+    checked++;
+  }
+  lg::print("c abi kernel check: {} checked, {} bad, {} without a function type\n", checked, bad,
+            untyped);
+  return compile_integer(bad, env);
 }
 
 Val* Compiler::compile_psize_of(const goos::Object& form, const goos::Object& rest, Env* env) {
