@@ -101,7 +101,9 @@ level table is `ctr_jak2_level_for_dgo`). Without them every tie group switched 
 default and every shrub was drawn to 100 m: in the slums 244k shrub triangles at 100 m; with them
 50 m (142k), 70 (45k), 90 (40k), 120 (15k), 160 m (3k), and ~85k -> ~75k triangles per frame.
 
-Sizes (all 147 levels, defaults): 672 MB. Haven City districts 4.6-13 MB each (ctysluma 10.6 MB:
+Sizes (all 147 levels + GAME, defaults; AI-assisted, Oct 18 reconvert with the merged converter:
+171 s on the Mac, 148 files): 570 MB (672 MB before the PS2 distances and the animated slot
+textures). Haven City districts 4.6-13 MB each (ctysluma 10.8 MB:
 641k triangles, 13.3 MB of vertices of which 5 MB near tie versions streamed), ctywide 2.1 MB,
 lwidea 1 MB (merc and textures only).
 

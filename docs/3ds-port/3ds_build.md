@@ -527,7 +527,7 @@ platform/3ds/tools/run_my_emu.sh --game jak2 --cia build-3ds-jak2/jak2.cia ...  
   heap gets ~70 MB, just over gk's 68 MB check (36 MB of linear left 66 MB and was refused).
   Level backgrounds: `ctr_level_converter --all out/jak2/fr3 out/jak2/c3l` (GAME.fr3 with
   `--merc-only`), staged by `stage_sd.sh --game jak2` / `run_my_emu.sh --game jak2` from
-  `<proj>/out/jak2/c3l` into `sdmc:/3ds/jak2/data/out/jak2/c3l` (all 147 levels: 672 MB).
+  `<proj>/out/jak2/c3l` into `sdmc:/3ds/jak2/data/out/jak2/c3l` (all 147 levels + GAME: 570 MB, Oct 18).
   Default `args = -boot -fakeiso -cbackend` (Jak II's kernel starts the IOP from the "DVD" without
   `-fakeiso`).
 - Title: "OpenGOAL Jak II", unique id 0xF7A21 (title 000400000F7A2100), product code CTR-H-OGJ2;

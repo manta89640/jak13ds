@@ -1,4 +1,4 @@
-# Jak II -> New 3DS: status and handoff (milestone 2, updated Oct 18 2026)
+# Jak II -> New 3DS: status and handoff (baseline B, updated Oct 18 2026)
 
 (AI-assisted.) Branch `jak2-3ds` (worktree `jak-project/.claude/worktrees/jak2`), started from
 `batch-oct11` c1da64bc1; batch-oct11 9da503ce27 merged in on Oct 18 (no conflicts). Jak 1
@@ -20,6 +20,51 @@ or an environment variable, or a hook that stays null for Jak 1.
 | Haven City timing (the feasibility number) | Profiled (Oct 18, jak2_perf.md): Mac 0.44-0.70 ms/frame by district (~4.5x Jak 1); N3DS estimate ~77 ms city average, ~97 ms slums, unmodified; ~22 ms after natives, codegen and core-2 jobs |
 | Cheap logic fixes (j2-cheap, Oct 18) | Azahar slums logic 75.8 -> 66.4 ms (13.2 -> 15.0 fps): entity-by-name and subtitle scene caches, no LED update, pc-prof gated, direct kernel entries; IOP on core 2 hung the boot and is reverted (jak2_perf.md "Done") |
 | Scripted route into city gameplay | Works (jak2-route): `platform/3ds/tests/jak2_city.pad`, `jak2_route.pad` |
+| Natives (j2-nat-port, j2-nat-new) | Merged; always on (Oct 18: the `logic_native` key and the other native switches were removed, config_dev.md) |
+| Renderer (j2-render-bg, j2-render-fg) | Merged: backgrounds, merc, sky + clouds, particles, shadows, HUD, text, minimap |
+| **Integration build, baseline B (Oct 18)** | **Azahar slums 29.8 fps (30 Hz cap): logic 25-27 ms, render thread 28.5-29.3 ms, GPU busy 29-30 ms; staged in `port_test/3ds-sdcard-jak2-baseline-b`** (section below) |
+| Sound | Not started (Jak II overlord streaming on ndsp) |
+
+## Integration build: baseline B (Oct 18)
+
+(AI-assisted.) Everything merged into jak2-3ds (C mode, small memory, module instances, natives,
+j2-cheap, j2-render-bg, j2-render-fg), then:
+- Switches: `logic_native` (and Jak 1's `logic_micro`, `bones_native`, `collide_native`,
+  `collide_frag_cache`, `anim_native`) removed; the natives always run (config_dev.md "Removed on
+  Oct 18"; debugging overrides `mips2c_native_off` / `OPENGOAL_*_NATIVE=0` stay).
+- `port_test/j2mirror` regenerated (small memory C, 840 modules; bones.gc and types-h.gc had
+  changed), 3DS build rebuilt (`build-3ds-jak2`), all levels reconverted with the merged converter
+  into `j2mirror/out/jak2/c3l`: 148 files, 570 MB, 171 s on the Mac (c3l_format.md).
+- Checks: host small-memory C-mode `gk --ctr-gfx` with `jak2_city.pad` (Jak's green hair, the
+  minimap, "Press (triangle) to use.", "Krimzon Guard:" in red with its capitals; Jak ends at
+  (1065.98, 0.52, 194.46) in target-hide as before); Jak 1 host `level_pairs.pad` (exit 0, the same
+  18 DGO loads and checkpoints as the previous pass); goalc-test 1708 passed; make_cia for both
+  games (check_shaders 29 shaders, check_svc 31 calls: all allowed).
+
+**Azahar (one run, the CIA, `jak2_city.pad`, private instance, sound off), slums with traffic:**
+
+| | |
+|---|---|
+| fps | 29.0-29.9 (30 Hz cap) |
+| game thread | logic 24.6-27.7 ms, waiting for the render thread 3.8-7.0 ms |
+| render thread | build 25.6-29.3 ms: texture buckets 2.5 (the clouds change landed: 6.5 before), merc 3.8-5.0, shadows 2.9-3.9, sprites 3.6-4.3, sky 0.9, tfrag/tie (4 slots) ~9-10, debug/HUD ~1.3 |
+| GPU busy | 26.3-30.0 ms, 64-79k triangles, 750-892 draws |
+| memory | linear 32 MB: 131 KB free (ctyindb's load had to make room: "no memory for meshes, making room"); heap 68.4 of 72.2 MB used (~3.8 MB free); VRAM free 1654 KB |
+
+The frame is now bounded by the 30 Hz cap with the GPU close behind (29-30 ms busy). Seen: the
+"Krimzon Guard: Seal off the area." subtitle stays on screen from frame 1200 to the end in Azahar
+(sound off), the host run shows it only briefly; not investigated.
+
+**Staged:** `port_test/3ds-sdcard-jak2-baseline-b`: `cias/jak2.cia`, `3ds/jak2/` (gk.3dsx,
+config.ini: preset normal, sound off, renderer ctr; `data/out/jak2/iso` 605 files,
+`data/out/jak2/c3l` 148 files), README with what works and what's missing.
+
+**Known gaps:** no sound; texture animations other than the clouds and the sky gradient (Dark
+Jak / prison / oracle CLUT blends, waterfalls, lava, security walls, slime; background billboards
+black); no ocean (black areas on the title screen), screen effects or envmap shine; the minimap's
+circle mask; tie / shrub prototype visibility masks; linear memory nearly full in the city; other
+districts not run in Azahar with this build; Jak 1's banner and jingle (Jak II icon only); no
+hardware run.
 
 Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one entry
 (`ntsc_v1`). Both have the same serial and ELF hash, and the database lists both ISO hashes. The
