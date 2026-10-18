@@ -12,8 +12,8 @@
 #   --sd     root of the SD card (default: Azahar's virtual SD card, read from its qt-config.ini,
 #            normally ~/Library/Application Support/Azahar/sdmc). For a real card: its mount point.
 #   --gk     gk.3dsx to copy (default: build-3ds/gk.3dsx)
-#   --c3l    folder with the level backgrounds (default: <proj>/out/jak1/c3l if it exists;
-#            make them with: ctr_level_converter --all out/jak1/fr3 <dir>)
+#   --c3l    folder with the level backgrounds (default: <proj>/out/<game>/c3l if it exists;
+#            make them with: ctr_level_converter --all out/<game>/fr3 <dir>)
 #   --c3v    (AI-assisted) folder with the levels' fine visibility sidecars (<level>.c3v, made by
 #            ctr_vis_builder; default: the .c3v files in the --c3l folder)
 # All settings go in one file, sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). It is
@@ -230,18 +230,19 @@ fi
 copy "$GK" "$BASE/gk.3dsx"
 
 # level backgrounds for the 3DS renderer
-[ -n "$C3L" ] || C3L="$PROJ/out/jak1/c3l"
-if [ "$GAME" = jak1 ] && [ -d "$C3L" ]; then
-  rm -rf "$DATA/out/jak1/c3l"
-  mkdir -p "$DATA/out/jak1/c3l"
+# (AI-assisted) Jak II too: out/jak2/c3l (ctr_level_converter on the Jak II fr3 files)
+[ -n "$C3L" ] || C3L="$PROJ/out/$GAME/c3l"
+if [ -d "$C3L" ]; then
+  rm -rf "$DATA/out/$GAME/c3l"
+  mkdir -p "$DATA/out/$GAME/c3l"
   for f in "$C3L"/*.c3l; do
-    copy "$f" "$DATA/out/jak1/c3l/"
+    copy "$f" "$DATA/out/$GAME/c3l/"
   done
   # (AI-assisted) fine_vis sidecars (ctr_vis_builder): next to the levels, or from --c3v DIR
   nc3v=0
   for f in "$C3L"/*.c3v ${C3V:+"$C3V"/*.c3v}; do
     [ -f "$f" ] || continue
-    copy "$f" "$DATA/out/jak1/c3l/"
+    copy "$f" "$DATA/out/$GAME/c3l/"
     nc3v=$((nc3v + 1))
   done
   echo "staged level backgrounds from $C3L ($nc3v fine visibility files)"

@@ -25,10 +25,14 @@
  * village1 + jungle (28 MB of .c3l) left 0 KB free and 92 textures/meshes missing; the heap used
  * ~64-66 MB of its 81 MB on hardware. */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
-/* (AI-assisted) the Jak II build draws nothing yet (null renderer): linear memory only holds the
- * audio buffers, the rest goes to the regular heap (48 MB of EE memory + the runtime). Raise it
- * with the renderer. */
-u32 __ctru_linear_heap_size = 8 << 20;
+/* (AI-assisted, j2-render-bg) Jak II with the 3DS renderer: 32 MB. Jak II's .text is 8 MB bigger
+ * than Jak 1's, so heap + linear is ~102 MB (Jak 1: ~121): 32 MB leaves the heap 70 MB, just over
+ * gk's 68 MB check (48 MB of EE memory + 20); the null renderer used 55.6 MB of it in Haven City.
+ * (36 MB left 66 MB: refused at boot.) Linear memory holds the level backgrounds (.c3l: the slums
+ * ~12.8 MB, a neighbouring district 3-7 MB, ctywide 3.2, lwidea ~2, GAME ~0.8), the near tie
+ * stream arena, the vertex and command buffers and the audio buffers; when it runs out, the
+ * loader's degrade paths take over (incomplete loads repaired later, far levels' detail freed). */
+u32 __ctru_linear_heap_size = 32 << 20;
 #else
 u32 __ctru_linear_heap_size = 40 << 20;
 #endif
