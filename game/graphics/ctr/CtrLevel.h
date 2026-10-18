@@ -169,6 +169,21 @@ struct CtrLevelData {
   // versions of the cell (the same for both: their in-view tests agree), x y z r
   std::vector<float> lod_cell_sphere;
   bool was_far = false;
+  // (AI-assisted, j2-mem) Jak II: a level the game's visibility string has hidden whole for a while
+  // (dormant_levels; CtrLevel.cpp "Dormant levels")
+  bool dormant = false;
+  u32 hidden_frames = 0;        // level draws in a row with its string all zero
+  u32 vis_scan_bytes = UINT32_MAX;  // the string's bytes its ids are in (UINT32_MAX: not known yet)
+  // per chunk (made at its first dormancy): kDormFreed its mesh freed for that, kDormReading being
+  // read back; and the frame a chunk without its mesh began to be kept hidden in view (0: not)
+  std::vector<u8> chunk_dormant;
+  std::vector<u32> chunk_hold_since;
+  bool dormant_requested = false;  // a read of its freed chunks is queued
+  u64 dormant_retry_frame = 0;     // after a failed one: not before this frame
+  static constexpr u8 kDormFreed = 1, kDormReading = 2;
+  bool dormant_freed(size_t ci) const {
+    return ci < chunk_dormant.size() && chunk_dormant[ci] != 0;
+  }
   u32 generation = 0;             // tells loads of the same level apart
   // (AI-assisted) config fine_vis: the level's .c3v sidecar (c3v_format.h, CtrFineVis.h), opened
   // at load when it matches the .c3l (nullptr: none, or another conversion's); its blocks are read
@@ -404,6 +419,9 @@ class CtrLevels {
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
+  /*! (AI-assisted, j2-mem) Jak II, render thread, each frame: the dormant levels' chunks freed
+   * or read back by the camera's distance (CtrLevel.cpp "Dormant levels") */
+  void dormant_update(u64 frame);
   /*! (AI-assisted, streaming) render thread, each level draw: the camera position (game units) */
   void stream_note_camera(const math::Vector4f& trans,
                           const math::Vector4f planes[4],
@@ -421,6 +439,8 @@ class CtrLevels {
   void stream_note_cut(u64 frame) { m_cut_frame = frame; }
   /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
   void stream_log();
+  /*! (AI-assisted, j2-mem) the levels' memory, the free linear memory and heap (render thread) */
+  void log_memory();
   /*! (AI-assisted, streaming) host check (env CTR_STREAM_CHECK): the counts of this frame's draw
    * of a level (CtrTfragRenderer::draw_level) */
   struct StreamCheck {
@@ -429,6 +449,9 @@ class CtrLevels {
     u64 late_unrequested = 0;                // ... and not even being read (no room)
     u64 holes = 0;                           // near versions drawn without their data (never)
     u64 units_drawn = 0, units_baked = 0;    // near chunks drawn; ... with baked colors (never)
+    // (AI-assisted, j2-mem) dormant levels: freed tie chunks within their distance in view (not
+    // drawn: never, but for camera cuts), and shown in view after a hold ran out
+    u64 dorm_missing = 0, dorm_switch_in_view = 0;
   };
   StreamCheck& stream_check() { return m_scheck; }
   /*! (AI-assisted, streaming) a unit needed (draw_level): late statistics */
@@ -500,6 +523,7 @@ class CtrLevels {
     // (request_repair): only these parts of the loaded level `generation`
     bool detail = false;
     bool repair = false;
+    bool dormant = false;  // (AI-assisted, j2-mem) with detail: a dormant level's chunks read back
     u32 generation = 0;
     std::string path;
     u32 vertex_data_offset = 0, index_data_offset = 0;
@@ -528,7 +552,8 @@ class CtrLevels {
     bool parts() const { return detail || repair || stream; }
     // in m_requested
     std::string key() const {
-      return detail   ? name + "#detail"
+      return dormant  ? name + "#dormant"
+             : detail ? name + "#detail"
              : repair ? name + "#repair"
              : stream ? name + "#stream" + std::to_string(serial)
                       : name;
