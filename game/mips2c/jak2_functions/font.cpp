@@ -3,6 +3,7 @@
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak2/kscheme.h"
+#include "game/mips2c/jak2_functions/native2.h"  // (AI-assisted) draw-string-asm native
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
 namespace get_string_length {
@@ -2622,7 +2623,7 @@ void link() {
   cache.font24_table = intern_from_c("*font24-table*").c();
   cache.math_camera = intern_from_c("*math-camera*").c();
   cache.video_params = intern_from_c("*video-params*").c();
-  gLinkedFunctionTable.reg("draw-string-asm", execute, 512);
+  gLinkedFunctionTable.reg("draw-string-asm", execute, 512, &native2::draw_string_asm);
 }
 
 } // namespace draw_string_asm

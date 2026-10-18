@@ -1,6 +1,7 @@
 //--------------------------MIPS2C---------------------
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak2_functions/native2.h"
 #include "game/kernel/jak2/kscheme.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
@@ -397,7 +398,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("add-light-sphere-to-light-group", execute, 256);
+  gLinkedFunctionTable.reg("add-light-sphere-to-light-group", execute, 256,
+                           &native2::add_light_sphere_to_light_group);
 }
 
 } // namespace add_light_sphere_to_light_group

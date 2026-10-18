@@ -202,8 +202,7 @@ None of Jak 2's 28 mips2c files has a native version yet. By N3DS ms (as is -> n
 | `shadow-execute` (+ its 15 helpers and the VU0 code inlined) | j2-nat-shadow: Jak 2's offsets, debug-draw path, add-single-tris, scissor-edges without clipping |
 | `moving-sphere-triangle-intersect`, `collide-do-primitives`, collide-cache-prim 9 / 10, collide-mesh 12 / 14 / 15 | j2-nat-collide: the GOAL helpers (ray-sphere-intersect, closest-pt-in-triangle...) stay GOAL calls; collide-puss-work 9 / 10 written but not registered (Jak 2 never calls them) |
 
-Not here (j2-nat-new): sky-work, spatial / collide hash, fill-bg-using-*, sparticle-motion-blur,
-draw-string-asm, nav.
+Not here: the natives without a Jak 1 model (j2-nat-new, below).
 
 **Identity** (host small-memory C mode, `OPENGOAL_MIPS2C_VERIFY=1`, 0 mismatches everywhere):
 jak2_route.pad, all natives (`OPENGOAL_MIPS2C_VERIFY_FULL_EVERY=200`): 3.95M calls (cspace 3.84M,
@@ -220,6 +219,52 @@ the frame): particles 1.6x, cspace 1.6x, shadow 3.7x, bones (C++ vs goalc C) 4.5
 **Azahar** (CIA, jak2_city.pad, null renderer): city-stand 75.6 -> **49.7 ms** logic (13.2 ->
 20.1 fps), city-walk 74.7 -> 50.0 ms. iop ~1.7 ms of that. The Mac ratios predicted ~21 ms; the
 ARM gain is larger (Jak 1: 4-8x fewer instructions than mips2c).
+
+#### Done: the natives without a Jak 1 model (AI-assisted, Oct 18, j2-nat-new)
+
+`game/mips2c/jak2_functions/native2_*.cpp` (native2.h), registered next to the mips2c versions,
+always on (`OPENGOAL_MIPS2C_NATIVE=0` / `mips2c_native_off` still pick the mips2c ones):
+
+| native | notes |
+|---|---|
+| `render-sky-quad`, `render-sky-tri` | draw-large-polygon and both clip passes inlined (GOAL never calls them); the scratchpad buffers and the DMA get the same bytes, so the sky DMA is unchanged |
+| `(method 32 sky-work)`, `(method 33 sky-work)` | stars transform / DMA; vector-normalize!, lookup-texture-by-id-fast and adgif-shader<-texture-simple! stay GOAL calls; the VU0 registers they leave in `sky_regs_vfs` are the mips2c's |
+| grid-hash 18 / 19 / 20 / 22, sphere-hash 28-33, spatial-hash 33 / 35 / 36 / 37 / 39 | 18 / 19 inlined into their callers; 20 and 22 called directly when the method slot holds their stub; update-grid and line-sphere-to-grid-box stay GOAL |
+| collide-hash 11 / 12, `fill-bg-using-box-new`, `fill-bg-using-line-sphere-new` | the scratchpad bit array, the query state and the collide cache entries as the mips2c writes them |
+| `sparticle-motion-blur` | particle callback; atan stays a GOAL call |
+| `add-light-sphere-to-light-group`, `draw-string-asm` | draw-string-asm is a register-for-register translation (locals instead of the ExecutionContext) |
+| `mem-copy!` | gcommon.gc's byte loop: memmove unless dst overlaps above src; `types-h.gc` (first GAME file, after `__pc-get-mips2c` exists) points the symbol at it; the reference "mips2c" side is the byte loop |
+
+Verify mode now also compares host memory that mips2c functions keep state in
+(`native_verify_host_state`: the sky's shared VU0 registers) and knows Jak 2's scratchpad.
+
+**Identity** (host C mode, `OPENGOAL_MIPS2C_VERIFY=1`, 0 mismatches): jak2_city.pad 3.93M calls
+(`FULL_EVERY=4`: motion blur 2.39M, render-sky-quad 458k, add-light-sphere 359k, mem-copy! 353k,
+fill-bg-box 84k, grid-hash 22: 76k, collide-hash 11: 50k, sphere-hash 30: 46k, sky-work 32 / 33:
+525 full-memory checks each, sphere-hash 28: 1130 calls); jak2_route.pad 6.11M calls
+(`FULL_EVERY=8`, all districts). Jak ends where the mips2c run ends (city 1065.99 0.52 194.46).
+Not reached by the pads: grid-hash 18 / 19 (inlined in the callers, which are checked),
+sphere-hash 29 / 31 / 33 (few or no calls).
+
+**Mac** (slums stand, sampled, `OPENGOAL_MIPS2C_NATIVE=0` vs on, the same build): these functions
+129 -> 68 us of the 0.70 ms frame (frame 0.699 -> 0.642 ms): motion blur 29 -> 14 us, sky 41 ->
+~25, spatial hash 27 -> 10, collide hash 11 -> ~5, add-light-sphere 4.7 -> 3.3, draw-string-asm
+3.5 -> 2.0, mem-copy! (C++ byte loop as the reference) 9.3 -> 1.2. N3DS estimate (mips2c 200x,
+natives 85x): ~21 ms -> ~5 ms, so **~16 ms** less in the slums (the plan's list was ~14 ms).
+
+**Azahar** (CIA of jak2-3ds with j2-nat-port, j2-cheap and these natives merged; jak2_city.pad,
+null renderer, private instance): city-stand **26.3-28.4 ms logic, mean 27.0** (30.0 fps, the cap;
+vsync 5-7 ms left), city-walk 26.3-27.1 ms (30.0 fps); iop 1.4 ms of that. Before: 75.6 ms
+(baseline), 49.7 ms with j2-nat-port alone, 66.4 ms with j2-cheap alone, so roughly 40 ms with both
+and ~13 ms of the drop to 27 ms from these natives (the Mac estimate was ~16 ms). Jak ends at
+(1065.98, 0.52, 194.46) in target-hide, as before. The merged host build's verify run
+(jak2_city.pad): 3.87M calls, 0 mismatches over all natives (these and j2-nat-port's). Logs:
+`port_test/reports/j2-nat-new`.
+
+Left here: the sky clip passes are hardly faster than mips2c on the Mac (most cloud quads are
+inside all four planes, where a pass only copies: skipping the passes and storing the copies
+once, as Jak 1's micro-logic render-ocean-quad does, is next), ocean (render-ocean-quad), the
+nav-mesh methods (~0.3 ms of mips2c).
 
 ### 2. Codegen and C-mode overhead (~4-5 ms)
 

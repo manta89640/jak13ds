@@ -113,6 +113,11 @@ u64 native_as_goal(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6, u32 a
 //! (AI-assisted) config.ini logic_micro (default on): the micro-optimised versions of natives
 bool logic_micro_on();
 
+//! (AI-assisted) Host memory that mips2c functions keep state in between calls (Jak 2's
+//! sky_regs_vfs: the VU0 registers the sky functions share). Verify mode saves it before the
+//! mips2c run, puts it back before the native run and compares it after (MISMATCH "host state").
+void native_verify_host_state(void* p, u32 size, const char* name);
+
 //! Call a GOAL function from native code (like ExecutionContext::jalr).
 u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller);
 

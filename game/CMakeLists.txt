@@ -257,6 +257,12 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/native_sparticle_launcher.cpp
         mips2c/jak2_functions/nav_control.cpp
         mips2c/jak2_functions/nav_mesh.cpp
+        mips2c/jak2_functions/native2_collide_hash.cpp
+        mips2c/jak2_functions/native2_common.cpp
+        mips2c/jak2_functions/native2_font.cpp
+        mips2c/jak2_functions/native2_misc.cpp
+        mips2c/jak2_functions/native2_sky.cpp
+        mips2c/jak2_functions/native2_spatial_hash.cpp
         mips2c/jak2_functions/ocean_vu0.cpp
         mips2c/jak2_functions/ocean.cpp
         mips2c/jak2_functions/ripple.cpp

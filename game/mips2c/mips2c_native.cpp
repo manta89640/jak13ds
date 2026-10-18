@@ -81,6 +81,15 @@ std::unordered_map<std::string, u32> g_stub_addrs;
 
 int g_verify = -1;  // -1: not read yet
 
+// (AI-assisted) native_verify_host_state: host memory compared like GOAL memory
+struct HostState {
+  u8* p;
+  u32 size;
+  std::string name;
+  std::vector<u8> before, after;
+};
+std::vector<HostState> g_host_states;
+
 bool verify_enabled() {
   if (g_verify < 0) {
 #if MIPS2C_WRITE_LOG
@@ -321,6 +330,27 @@ void report(NativeEntry* e, const u64* args, const std::string& what) {
   }
 }
 
+bool host_states_check(NativeEntry* e, const u64* args) {
+  for (auto& h : g_host_states) {
+    if (!memcmp(h.p, h.after.data(), h.size)) {
+      continue;
+    }
+    for (u32 i = 0; i < h.size; i++) {
+      if (h.p[i] != h.after[i]) {
+        const u32 q = i & ~15u;
+        report(e, args,
+               fmt::format("host state {} differs at +{}: mips2c{} native{}", h.name, i,
+                           describe_bytes(h.after.data() + q, std::min(16u, h.size - q)),
+                           describe_bytes(h.p + q, std::min(16u, h.size - q))));
+        break;
+      }
+    }
+    // the native run's state stays (the game goes on with it)
+    return false;
+  }
+  return true;
+}
+
 // OPENGOAL_MIPS2C_VERIFY_SELF=1: the second run is the mips2c version again (tests the checker)
 bool g_verify_self = false;
 
@@ -330,6 +360,22 @@ u64 second_run(NativeEntry* e, u64* args) {
   }
   return run_native(e->impl, args);
 }
+
+// (AI-assisted) native_verify_host_state: before the mips2c run
+void host_states_save() {
+  for (auto& h : g_host_states) {
+    h.before.assign(h.p, h.p + h.size);
+  }
+}
+// after the mips2c run: keep its result, put the old state back for the native run
+void host_states_swap() {
+  for (auto& h : g_host_states) {
+    h.after.assign(h.p, h.p + h.size);
+    memcpy(h.p, h.before.data(), h.size);
+  }
+}
+// after the native run (both runs left the state they made)
+bool host_states_check(NativeEntry* e, const u64* args);
 
 u64 verify_call(NativeEntry* e, u64* args_in) {
   u64 args[8];
@@ -347,6 +393,7 @@ u64 verify_call(NativeEntry* e, u64* args_in) {
   }
 
   // 1. mips2c, with the stores logged
+  host_states_save();
   g_log.clear();
   g_log_bytes.clear();
   g_write_log_on = true;
@@ -366,6 +413,7 @@ u64 verify_call(NativeEntry* e, u64* args_in) {
     auto& l = g_log[i];
     memcpy(g_ee_main_mem + l.addr, g_log_bytes.data() + l.old_offset, l.size);
   }
+  host_states_swap();
 
   // 3. native, with its stores logged too
   g_native_log.clear();
@@ -376,8 +424,8 @@ u64 verify_call(NativeEntry* e, u64* args_in) {
   g_native_log_on = false;
 
   // 4. compare: v0, the bytes at every address mips2c wrote, and no native store elsewhere
-  bool ok = true;
-  if (!(e->impl->flags & NATIVE_V0_UNDEFINED) && v0_mips2c != v0_native) {
+  bool ok = host_states_check(e, args);
+  if (ok && !(e->impl->flags & NATIVE_V0_UNDEFINED) && v0_mips2c != v0_native) {
     report(e, args,
            fmt::format("v0: mips2c {:x} ({}) native {:x} ({})", v0_mips2c, u2f((u32)v0_mips2c),
                        v0_native, u2f((u32)v0_native)));
@@ -491,6 +539,7 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
   static std::mt19937* pc_rand_before = new std::mt19937();
   *rng_before = gRng;
   *pc_rand_before = extra_random_generator;
+  host_states_save();
   g_state = VerifyState::IN_MIPS2C;
   const u64 v0_mips2c = mips2c_goalc_adapter((void*)e->exec, e->stack_size, args);
   g_state = VerifyState::NONE;
@@ -505,6 +554,7 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
   }
   gRng = *rng_before;
   extra_random_generator = *pc_rand_before;
+  host_states_swap();
   g_state = VerifyState::IN_NATIVE;
   const u64 v0_native = second_run(e, args);
   g_state = VerifyState::NONE;
@@ -514,6 +564,9 @@ u64 verify_call_full(NativeEntry* e, u64* args_in) {
   // IOP writes during the check: equal in the snapshot and in memory
   for (auto& w : g_iop_writes) {
     memcpy(g_snap_after + w.addr, g_ee_main_mem + w.addr, w.size);
+  }
+  if (!host_states_check(e, args)) {
+    return v0_native;
   }
   if (!(e->impl->flags & NATIVE_V0_UNDEFINED) && v0_mips2c != v0_native) {
     report(e, args,
@@ -706,6 +759,21 @@ u32 native_goalc_fn_id(const std::string& name,
 
 u64 (*native_exec_for_backend(const NativeImpl* impl))(void*) {
   return natives_disabled() ? nullptr : impl->as_exec;
+}
+
+void native_verify_host_state(void* p, u32 size, const char* name) {
+#if MIPS2C_WRITE_LOG
+  for (auto& h : g_host_states) {
+    if (h.p == p) {
+      return;
+    }
+  }
+  g_host_states.push_back({(u8*)p, size, name, {}, {}});
+#else
+  (void)p;
+  (void)size;
+  (void)name;
+#endif
 }
 
 void native_set_stub_addr(const std::string& name, u32 addr) {

@@ -1,6 +1,7 @@
 //--------------------------MIPS2C---------------------
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak2_functions/native2.h"
 #include "game/kernel/jak2/kscheme.h"
 #include "game/mips2c/jak2_functions/native_functions.h"
 using ::jak2::intern_from_c;
@@ -1154,7 +1155,8 @@ u64 execute(void* ctxt) {
 void link() {
   cache.math_camera = intern_from_c("*math-camera*").c();
   cache.atan = intern_from_c("atan").c();
-  gLinkedFunctionTable.reg("sparticle-motion-blur", execute, 128);
+  gLinkedFunctionTable.reg("sparticle-motion-blur", execute, 128,
+                           &native2::sparticle_motion_blur);
 }
 
 } // namespace sparticle_motion_blur

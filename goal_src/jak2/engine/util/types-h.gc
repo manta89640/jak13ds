@@ -89,3 +89,12 @@
      )
     )
   )
+
+;; 3DS port (AI-assisted): mem-copy! (gcommon.gc) in C++ (game/mips2c/jak2_functions/native2_misc.cpp:
+;; memmove when the ranges allow it, the same bytes); verify mode (OPENGOAL_MIPS2C_VERIFY=1)
+;; checks it against the GOAL loop's bytes. Here, the first file of GAME:
+;; __pc-get-mips2c is defined after the kernel is loaded.
+(#when PC_PORT
+  (set! mem-copy! (the-as (function pointer pointer int pointer)
+                          (__pc-get-mips2c "mem-copy!" (__c-abi-wide-mask (function pointer pointer int pointer)))))
+  )
