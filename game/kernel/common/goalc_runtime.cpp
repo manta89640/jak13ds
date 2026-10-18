@@ -390,6 +390,10 @@ u32 goalc_fn_id_for_host(void* fn) {
   return id;
 }
 
+bool goalc_abi_check_enabled() {
+  return g_abi_check;
+}
+
 u32 goalc_fn_id_for_adapted(goalc_adapter adapter, void* fn, u64 extra, u32 wide_mask) {
   wide_mask &= GOALC_ALL_WIDE;
   for (u32 i = 0; i < g_thunk_count; i++) {

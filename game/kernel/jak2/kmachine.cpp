@@ -638,6 +638,24 @@ void InitMachine_PCPort() {
   intern_from_c("*pc-settings-folder*")->value() =
       make_string_from_c(settings_path.string().c_str());
   intern_from_c("*pc-settings-built-sha*")->value() = make_string_from_c(build_revision().c_str());
+
+  // (AI-assisted) GOAL's profiler macros only call pc-prof when this is true (as in Jak 1): always
+  // on PC (the imgui frame profiler), on the 3DS only while kperf times sections. The kernel
+  // dispatcher alone makes 8 calls per process and frame (~2300 in Haven City).
+#ifdef __3DS__
+  kperf::init_sections();
+  const bool prof_on = kperf::g_sections_enabled;
+#else
+  const bool prof_on = true;
+#endif
+  intern_from_c("*pc-prof-on*")->value() =
+      prof_on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+#ifdef __3DS__
+  kperf::set_sections_hook([](bool on) {
+    intern_from_c("*pc-prof-on*")->value() =
+        on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+  });
+#endif
 }
 
 /*!

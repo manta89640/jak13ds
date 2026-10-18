@@ -62,6 +62,9 @@ constexpr u32 GOALC_ALL_WIDE = 0xff;
 //! Get an id for a host function with the goalc_fnx signature (it reads the arguments itself). The
 //! same function always gets the same id.
 u32 goalc_fn_id_for_host(void* fn);
+//! (AI-assisted) OPENGOAL_C_ABI_CHECK=1: kernel functions then go through the adapter thunks,
+//! which check their wide arguments (not through direct entries, see kernel_function.h).
+bool goalc_abi_check_enabled();
 //! Get an id for a host function with the goalc_fn8 signature (all arguments uint64_t).
 u32 goalc_fn_id_for_fn8(void* fn, u32 wide_mask);
 //! Get an id for a host function called through an adapter. Deduplicated on (adapter, fn, extra,

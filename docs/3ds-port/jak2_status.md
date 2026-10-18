@@ -18,6 +18,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | C mode vs native | Same Jak position/state after the city pad; OpenGL screenshots of the title and the slums match native |
 | ABI check run / stack poison run | Done, nothing real left (see "C mode on the Mac") |
 | Haven City timing (the feasibility number) | Profiled (Oct 18, jak2_perf.md): Mac 0.44-0.70 ms/frame by district (~4.5x Jak 1); N3DS estimate ~77 ms city average, ~97 ms slums, unmodified; ~22 ms after natives, codegen and core-2 jobs |
+| Cheap logic fixes (j2-cheap, Oct 18) | Azahar slums logic 75.8 -> 66.4 ms (13.2 -> 15.0 fps): entity-by-name and subtitle scene caches, no LED update, pc-prof gated, direct kernel entries; IOP on core 2 hung the boot and is reverted (jak2_perf.md "Done") |
 | Scripted route into city gameplay | Works (jak2-route): `platform/3ds/tests/jak2_city.pad`, `jak2_route.pad` |
 
 Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one entry
