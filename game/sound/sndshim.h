@@ -60,6 +60,18 @@ s32 snd_PlaySoundVolPanPMPB(snd::BankHandle bank_handle,
                             s32 pitch_mod,
                             s32 pitch_bend);
 
+// (AI-assisted) "play as Keira" (3DS easter egg): as snd_PlaySoundVolPanPMPB, the sound's tones
+// that are Jak's voice (snd_SetKeiraVoice) a little higher
+s32 snd_PlaySoundVolPanPMPBKeira(snd::BankHandle bank_handle,
+                                 s32 sound_id,
+                                 s32 vol,
+                                 s32 pan,
+                                 s32 pitch_mod,
+                                 s32 pitch_bend);
+// (AI-assisted) mark grain `grain` of sound `sound_id` (a tone) as Jak's voice: +pm (1/128
+// semitone) when snd_PlaySoundVolPanPMPBKeira plays it. Returns 0 if it isn't a tone.
+s32 snd_SetKeiraVoice(snd::BankHandle bank_handle, s32 sound_id, s32 grain, s32 pm);
+
 s32 snd_PlaySoundByNameVolPanPMPB(snd::BankHandle bank_handle,
                                   char* bank_name,
                                   char* sound_name,

@@ -65,7 +65,8 @@ s32 Grain::snd_SFX_GRAIN_TYPE_TONE(BlockSoundHandler& handler) {
   voice->start_note = handler.m_note;
   voice->start_fine = handler.m_fine;
   voice->current_pb = handler.m_cur_pb;
-  voice->current_pm = handler.m_cur_pm;
+  // (AI-assisted) "play as Keira": her voice a little higher (Tone::KeiraPm)
+  voice->current_pm = handler.m_cur_pm + (handler.m_keira_voice ? tone.KeiraPm : 0);
   voice->group = handler.m_group;
   voice->g_vol = vol;
   voice->g_pan = pan;
@@ -154,6 +155,7 @@ s32 Grain::snd_SFX_GRAIN_TYPE_STARTCHILDSOUND(BlockSoundHandler& handler) {
   params.pitch_mod = handler.m_app_pm;
   params.pitch_bend = handler.m_app_pb;
   params.registers = handler.m_registers;
+  params.keira_voice = handler.m_keira_voice;  // (AI-assisted) child sounds too
 
   auto& block = static_cast<SoundBank&>(handler.Bank());
   s32 index = psp.sound_id;

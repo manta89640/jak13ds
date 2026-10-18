@@ -19,6 +19,9 @@ struct SndPlayParams {
   std::optional<s32> pitch_mod;
   std::optional<s32> pitch_bend;
   std::optional<std::array<s8, 4>> registers;
+  // (AI-assisted) "play as Keira": the sound is played by her (the player): its tones that are
+  // Jak's voice get their Tone::KeiraPm
+  bool keira_voice{false};
 };
 
 struct BankTag {

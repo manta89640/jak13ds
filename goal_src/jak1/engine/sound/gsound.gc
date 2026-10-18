@@ -279,6 +279,15 @@
                       (sound-group ,group)
                       ,position))
 
+;; (AI-assisted) 3DS "play as Keira" (bones.gc *pc-3ds-keira*): the sounds the player plays get bit
+;; 15 of their mask (not used by the game), and the IOP plays Jak's voice in them (his grunts, yells
+;; and hurt sounds in the common bank: game/overlord/jak1/srpc.cpp) a little higher. Other sounds,
+;; and Jak's voice from anything but the player, stay as they are.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-keira* symbol)
+  (defmacro pc-3ds-keira-sound-mask (mask)
+    `(with-pp (if (and *pc-3ds-keira* *target* (= pp *target*)) (logior ,mask (the sound-mask #x8000)) ,mask))))
+
 (defun sound-play-by-name ((name sound-name) (id sound-id) (vol int) (pitch int) (bend int) (group sound-group) (trans symbol))
   "Play a sound called name with the specified params"
   (local-vars (sv-16 sound-group))
@@ -289,7 +298,7 @@
         (set! (-> cmd command) (sound-command play))
         (set! (-> cmd id) id)
         (set! (-> cmd name) name)
-        (set! (-> cmd parms mask) (sound-mask))
+        (set! (-> cmd parms mask) (#if TARGET_3DS (pc-3ds-keira-sound-mask (sound-mask)) (sound-mask)))
         (set! (-> cmd parms group) sv-16)
         (set! (-> cmd parms volume) vol)
         (set! (-> cmd parms pitch-mod) pitch)
@@ -304,7 +313,7 @@
       (set! (-> cmd command) (sound-command play))
       (set! (-> cmd id) id)
       (set! (-> cmd name) (-> spec sound-name))
-      (set! (-> cmd parms mask) (-> spec mask))
+      (set! (-> cmd parms mask) (#if TARGET_3DS (pc-3ds-keira-sound-mask (-> spec mask)) (-> spec mask)))
       (set! (-> cmd parms group) (-> spec group))
       (set! (-> cmd parms volume) (-> spec volume))
       (set! (-> cmd parms pitch-mod) (-> spec pitch-mod))

@@ -182,6 +182,28 @@ s32 snd_PlaySoundVolPanPMPB(snd::BankHandle bank,
   }
 }
 
+s32 snd_PlaySoundVolPanPMPBKeira(snd::BankHandle bank,
+                                 s32 sound,
+                                 s32 vol,
+                                 s32 pan,
+                                 s32 pitch_mod,
+                                 s32 pitch_bend) {
+  // (AI-assisted) see sndshim.h
+  if (player) {
+    return player->PlaySound(bank, sound, vol, pan, pitch_mod, pitch_bend, true);
+  } else {
+    return 0;
+  }
+}
+
+s32 snd_SetKeiraVoice(snd::BankHandle bank, s32 sound_id, s32 grain, s32 pm) {
+  // (AI-assisted) see sndshim.h
+  if (player && sound_id >= 0 && grain >= 0) {
+    return player->SetKeiraVoice(bank, (u32)sound_id, (u32)grain, (s16)pm) ? 1 : 0;
+  }
+  return 0;
+}
+
 s32 snd_PlaySoundByNameVolPanPMPB(snd::BankHandle bank_handle,
                                   char* bank_name,
                                   char* sound_name,

@@ -29,6 +29,10 @@ struct Tone {
   u16 ADSR1;
   u16 ADSR2;
   u16 Flags;
+  // (AI-assisted) "play as Keira" (3DS easter egg): the pitch added to this tone (1/128 semitone)
+  // when a sound the player plays as Keira starts it: set on Jak's voice in the common bank
+  // (snd_SetKeiraVoice), 0 for every other tone
+  s16 KeiraPm{0};
   u8* Sample;
 };
 

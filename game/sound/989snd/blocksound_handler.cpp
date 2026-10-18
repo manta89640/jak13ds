@@ -27,6 +27,7 @@ BlockSoundHandler::BlockSoundHandler(SoundBank& bank,
       m_sound_id(sound_id),
       m_start_tick(start_tick) {
   m_sound_handle = owner;
+  m_keira_voice = params.keira_voice;  // (AI-assisted)
 
   s32 vol, pan, pitch_mod, pitch_bend;
   if (sfx_vol == -1) {
@@ -262,7 +263,9 @@ void BlockSoundHandler::UpdatePitch() {
       continue;
     }
 
-    auto note = PitchBend(voice->tone, m_cur_pb, m_cur_pm, m_note, m_fine);
+    // (AI-assisted) "play as Keira": her voice a little higher (Tone::KeiraPm)
+    auto note = PitchBend(voice->tone, m_cur_pb,
+                          m_cur_pm + (m_keira_voice ? voice->tone.KeiraPm : 0), m_note, m_fine);
     auto pitch =
         PS1Note2Pitch(voice->tone.CenterNote, voice->tone.CenterFine, note.first, note.second);
 

@@ -98,5 +98,7 @@ class BlockSoundHandler : public SoundHandler {
 
   u32 m_sound_id{0};
   s32 m_start_tick{0};
+  // (AI-assisted) "play as Keira" (SndPlayParams::keira_voice): her voice tones get Tone::KeiraPm
+  bool m_keira_voice{false};
 };
 }  // namespace snd

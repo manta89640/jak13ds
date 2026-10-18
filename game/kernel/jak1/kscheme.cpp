@@ -1657,6 +1657,15 @@ u64 pad_script_arg(const std::string& w) {
     u32 bits;
     memcpy(&bits, &f, 4);
     return bits;
+  } else if (w == "zeros") {
+    // (AI-assisted) 256 zero bytes in GOAL memory (e.g. an attack-info with nothing set:
+    // "call pevent target attack #f zeros" hurts Jak like a plain hit)
+    static u32 zeros = 0;
+    if (!zeros) {
+      zeros = kmalloc(kglobalheap, 256, KMALLOC_MEMSET | KMALLOC_ALIGN_16, "pad-script-zeros").offset;
+    }
+    memset(Ptr<u8>(zeros).c(), 0, 256);
+    return zeros;
   } else if (w == "#f") {
     return s7.offset;
   } else if (w == "#t") {

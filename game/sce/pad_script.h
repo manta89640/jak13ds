@@ -55,7 +55,8 @@
  *             to GOAL memory: "call poke32 $*game-info* 92 f100" = 100 power cells), "call pgo
  *             TYPE STATE" (the process of TYPE nearest to Jak goes to STATE, like go-process;
  *             @N: the virtual state in method N of its type), "call pevent TYPE MSG ARGS..."
- *             (send it an event), "call artctl" (log the spooled animation buffers and the
+ *             (send it an event; the argument "zeros" is 256 zero bytes: "call pevent target
+ *             attack #f zeros" hurts Jak), "call artctl" (log the spooled animation buffers and the
  *             IOP's stream clock: stuck cutscenes), "call heap" (the global heap's free space)
  *   pstate TYPE  (AI-assisted) log the state and position of the process of type TYPE
  *             nearest to Jak (bosses: "pstate robotboss")
