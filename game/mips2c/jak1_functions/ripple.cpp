@@ -722,8 +722,8 @@ u64 execute(void* ctxt) {
 }
 
 /*!
- * (AI-assisted) native version (config.ini logic_micro, default on; also off with
- * mips2c_native_off): the same loads and byte stores as the mips2c code above, without the
+ * (AI-assisted) native version (always on; off only for debugging: mips2c_native_off,
+ * host OPENGOAL_LOGIC_MICRO=0): the same loads and byte stores as the mips2c code above, without the
  * ExecutionContext. For each of the effect's fragments: per vertex, two 4-bit indices into the
  * wave table (the scratchpad + 1024, written by ripple-create-wave-table) pick a 3-byte entry,
  * stored at bytes 7, 2 and 10 of the vertex's 12. (A fragment count of 0 would loop forever, as

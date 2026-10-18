@@ -781,9 +781,9 @@ targets: the far ocean's render-ocean-quad (~1.5 ms), the collide cache mesh fil
 | native ripple-apply-wave-table (no ExecutionContext) | 10.72 | 11.53 | 13.07 | 13.29 | 12.82 |
 | goal_c_ops.h: 128-bit integer ops lane by lane in registers | 10.37 | 11.45 | 12.67 | 12.97 | 12.48 |
 
-In total 1.4-1.7 ms of logic per frame (-10 to -12%). The first three are behind config.ini
-`logic_micro` (default on, preset safe off; host `OPENGOAL_LOGIC_MICRO=0`). The header change is
-compiled into the game code and has no switch.
+In total 1.4-1.7 ms of logic per frame (-10 to -12%). The first three are always on (the
+config.ini key `logic_micro` was removed on Oct 18; host debugging: `OPENGOAL_LOGIC_MICRO=0`). The
+header change is compiled into the game code and has no switch.
 
 - **render-ocean-quad** (~140 quads per frame): about half are inside all four clip planes, where
   every clip pass returns its input; those skip the passes and both scratchpad buffers get the

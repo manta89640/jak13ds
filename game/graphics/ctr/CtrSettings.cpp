@@ -325,18 +325,16 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
                key == "debug_log" || key == "particle_density" ||
-               key == "io_checksum" || key == "anim_lod" || key == "anim_native" ||
-               key == "io_cache" || key == "log_async" || key == "collide_native" ||
-               key == "collide_frag_cache" || key == "bones_native" ||
-               key == "c3l_read_buffer" || key == "text_scale" || key == "text_min_height" ||
+               key == "io_checksum" || key == "anim_lod" || key == "io_cache" ||
+               key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
+               key == "text_min_height" ||
                key == "button_art" || key == "preset" || key == "gpu_micro" ||
                key == "shader_resident" || key == "gpu_micro_ident" ||
-               key == "logic_micro" ||
                ctr_cfg_is_user_alias(key.c_str())) {
       // not the renderer's (preset, particles, text_size: ctr_config_presets.h, applied as the
       // keys they stand for) (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,
       // overlord/jak1/fake_iso.cpp, kernel/jak1/kmachine.cpp, common/log/log.cpp,
-      // (AI-assisted) native_collide_cache.cpp, native_bones.cpp, CtrLevel.cpp)
+      // (AI-assisted) mips2c native code, CtrLevel.cpp)
     } else if (!s_quiet) {
       lg::warn("[ctr] {}:{}: unknown setting {}", path.string(), n, key);
     }

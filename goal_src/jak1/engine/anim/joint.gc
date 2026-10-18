@@ -388,8 +388,8 @@
   #f)
 
 ;; og:preserve-this (AI-assisted) The 3DS runs native (C++) versions of decomp-request and
-;; finalize-joint-frame (game/mips2c/jak1_functions/native_anim.cpp), unless config.ini
-;; anim_native = off (set by the kernel: kmachine.cpp InitMachine_PCPort). They give the same
+;; finalize-joint-frame (game/mips2c/jak1_functions/native_anim.cpp; *pc-3ds-anim-native*, set by
+;; the kernel: kmachine.cpp InitMachine_PCPort, always on the 3DS). They give the same
 ;; results as the GOAL functions above compiled by goalc (test/mips2c_native checks it); the native
 ;; request does the fixed part and both frames in one pass over the joints.
 (def-mips2c pc-anim-decomp-request (function joint-anim-frame int joint-decomp-request none))

@@ -30,9 +30,10 @@ A key's value is, first match wins (one table for every reader:
    - `safe`: the Oct 11 behaviour (3ds-sdcard-oct12d config-safe.ini; its particle limits are the
      user key `particles = reduced`, which `stage_sd.sh --preset safe` writes): `overlap`, `shader_opt`,
      `frame_overlap2`, `skin_rows_f24`, `skin_clip_f24`, `cmd_dedup`, `cmd_dedup_draw`,
-     `fog_alpha`, `tex1_gating`, `cull_merc`, `sky_last`, `vista_untextured`, `bones_native`,
+     `fog_alpha`, `tex1_gating`, `cull_merc`, `sky_last`, `vista_untextured`,
      `fog_stage_skip`, `static_cmdlists`, `ocean_tex_half`, `opaque_alpha`, `fine_vis`,
-     `vcache_reuse`, `skip_clear`, `tie_lod`, `merc_fog`, `tod_busy_half`, `streaming` off, `tod_pulse_step = 0`, `tod_max_ms = 0`, `tex_cache_clear = always`, `c3l_read_buffer = 0`;
+     `vcache_reuse`, `skip_clear`, `tie_lod`, `merc_fog`, `tod_busy_half`, `streaming` off,
+     `tod_pulse_step = 0`, `tod_max_ms = 0`, `tex_cache_clear = always`, `c3l_read_buffer = 0`;
    - `bench`: `pica_bench = on`, `gpu_profile = ab`, `gpu_perflog = on`, `gpu_counters = on`,
      `overlap = off`;
    - `breakdown`: `gpu_breakdown = on`;
@@ -43,15 +44,20 @@ Removed on Oct 16 (with their code; ignored with a note in the log): `new_shader
 programs), `shader_groups` (shared shbins, never better than `shader_opt`), `cb_read_opaque`
 (corrupted partly covered 8x8 tiles on hardware), `io_on_system_core` (boot hang).
 
+(AI-assisted) Removed on Oct 18 (the switches only; the native code they chose is always on, it
+gives the same results as the code it replaces; ignored with a note in the log): `logic_micro`
+(the game thread's micro-optimised natives), `bones_native`, `collide_native`,
+`collide_frag_cache`, `anim_native`. For debugging, `mips2c_native_off` (3DS) and the host
+environment variables still pick the old code: `OPENGOAL_MIPS2C_NATIVE=0`,
+`OPENGOAL_BONES_NATIVE=0`, `OPENGOAL_COLLIDE_NATIVE=0`, `OPENGOAL_FRAG_CACHE=0`,
+`OPENGOAL_LOGIC_MICRO=0` (and the `*_VERIFY=1` comparisons).
+
 ## Sound and system
 
 ```ini
 sound = on                 # (user key) sound output (off: silent; it costs CPU time). On by default since Oct 16
 sound_core = auto          # CPU core of the sound mixer: 2 (default on New 3DS: the render thread's core, which has room; core 0 runs the game logic), 0, 1
-mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names
-collide_frag_cache = on    # (AI-assisted) pc-collide-frag-may-hit? keeps each collide mesh's vertex box; off: scans the vertices every call
-collide_native = on        # (AI-assisted) the drawable-tree walks of collide-with-box / fill-from-foreground-using-box in C++; off: the GOAL code
-bones_native = on          # (AI-assisted) the skinning matrices (new-bones-mtx-calc-asm) in C++ / VFP assembly; off: the GOAL code (also off with mips2c_native_off = all or a list naming pc-new-bones-mtx-calc)
+mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names (also pc-new-bones-mtx-calc). Debugging only
 perf_sections = off        # on: per-section timing in the log (slower)
 args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)
 listener = off             # on: Wi-Fi REPL (goalc can connect; 1 MB of RAM)
@@ -206,7 +212,6 @@ static_cmdlists = on       # (AI-assisted, gpu-rt) the level meshes' raw command
 gpu_micro = on             # (AI-assisted, micro-gpu, Oct 17) the backend's micro-optimisations of the command stream (performance.md "Micro-optimisations of the GPU backend"): the vertex programs in one resident code image (shader_resident), texture unit 0's registers only where they change and GAS_DELTAZ_DEPTH only with a new depth function (both with cmd_dedup), the glows' procedural texture tables kept in the GPU, the atlas draws' scales written raw (static_cmdlists records those stretches again), steady pacing's fence words flushed with the vertices, near cache flush ranges in one request; (micro-mg, round 2) the glows drawn raw, a draw state that differs only in its texture only binds it, deferred cache flush ranges up to 64 KB apart in one request (performance.md "Round 2"). The same GPU state at every draw (cmd_report.py --kicks). Pad script "set gpu_micro_mask N" (a test): the changes as bits from the next frame (127 = round 1 only, 1023 = all). off: all of it as before (for the safe preset). Read by ctr_config_get (3DS only). Log: [ctr] gpu_micro: on
 shader_resident = on       # (AI-assisted, micro-gpu) with gpu_micro: all vertex programs (both shader_opt sets, 18 programs) in one code image (351 of 512 instructions, operand descriptors deduplicated: 49 of 128), uploaded once: a program switch uploads no code (15-17 uploads per frame before). Programs with flow control or unknown instructions aren't merged (then the shbins as before). pica_bench B2.prog_sep - B2.prog_entry prices one upload. Log: [ctr] shader_resident: 18 programs from 18 shbins in one image, 351 instructions, 49 operand descriptors
 gpu_micro_ident = off      # (AI-assisted, micro-gpu) test: each cmd_dump request (pad script "set cmd_dump on") dumps one frame with gpu_micro off and the frame after the next with it on, for cmd_report.py --kicks (pause the game first)
-logic_micro = on           # (AI-assisted, micro-logic, Oct 17) the game thread's micro-optimised natives (performance.md "Game thread micro-optimisations"): render-ocean-quad without the clip passes for quads inside all planes, the collide cache mesh fill with per-vertex outcodes, a native ripple-apply-wave-table. Same results (OPENGOAL_MIPS2C_VERIFY host runs). off: the code as before (for the safe preset). Read by mips2c_native.cpp (3DS; host: OPENGOAL_LOGIC_MICRO=0). Not covered: goal_c_ops.h's lane-by-lane 128-bit ops are compiled into the game code. Log: logic_micro: on
 ocean_tex_half = on        # (AI-assisted, gpu-rt) ocean = flat / waves: the ocean's shading texture (32x32 from the wave heights, with mip levels) is made every second frame; the heights are still read every frame (the waves' near grid moves with them). ocean = full has ocean_texture_rate. In gpu_profile = ab
 cmd_dump = off             # (AI-assisted, Oct 12) diagnostic: a frame's whole GPU command list to data/log/cmd_NN.bin every 20 s (12 at most; the pad script's "set cmd_dump on" dumps the next frame); read with platform/3ds/tools/cmd_report.py --shbin-dir build-3ds cmd_*.bin (words per register group, per draw kind, writes that change nothing)
 tex1_gating = on           # (AI-assisted) texture unit 1 (the fog ramp) on only for the draws whose texture combiner reads it (level draws with the ramp fog, the ocean's fog stage; clouds bind their own): merc, sprites, sky, HUD, shadows and fog_alpha draws switch it off by its enable bit, without the texture cache clear of a bind. Log: [ctr] textures: ... (M texture unit 1 switches) (default on since Oct 16; preset safe: off)
@@ -225,7 +230,6 @@ impostor_error = 1         # (AI-assisted) pixels: a card is drawn again when a 
 impostor_budget = 6000     # (AI-assisted) triangles drawn into the impostor texture per frame at most (the groups and what may hide parts of them); the others stay geometry that frame
 impostor_atlas = 512       # (AI-assisted) KB of the impostor texture (256 | 512 | 1024: 256 pixels high, 256 / 512 / 1024 wide; VRAM when there is room at start). Fuller views keep more groups as geometry ("no room" in the log)
 anim_lod = on              # (AI-assisted) actors that weren't drawn last frame and are more than 30 m (plus their size) from both the camera and Jak update their skeleton every 4th frame only. Never Jak, Daxter, cutscenes or actors with joint callbacks. off: every frame, like the PS2
-anim_native = on           # (AI-assisted) the animation decompressor's per-joint work (decompress, normalize) in native code instead of the GOAL code; same results. off: the GOAL versions, to compare
 
 # ---- hardware hang bisect (AI-assisted, 2026-10-03): off = the Oct 2 behaviour of each Oct 3 optimisation (new_shaders, shader_mesh, shader_skin removed Oct 16) ----
 shader_basic = new         # new: the 7 instruction ctr_basic (verified on hardware). old: the Oct 2 one
