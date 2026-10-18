@@ -1,4 +1,4 @@
-# Jak II -> New 3DS: status and handoff (baseline B, updated Oct 18 2026)
+# Jak II -> New 3DS: status and handoff (baseline C, updated Oct 18 2026)
 
 (AI-assisted.) Branch `jak2-3ds` (worktree `jak-project/.claude/worktrees/jak2`), started from
 `batch-oct11` c1da64bc1; batch-oct11 9da503ce27 merged in on Oct 18 (no conflicts). Jak 1
@@ -24,6 +24,8 @@ or an environment variable, or a hook that stays null for Jak 1.
 | Renderer (j2-render-bg, j2-render-fg) | Merged: backgrounds, merc, sky + clouds, particles, shadows, HUD, text, minimap |
 | **Integration build, baseline B (Oct 18)** | **Azahar slums 29.8 fps (30 Hz cap): logic 25-27 ms, render thread 28.5-29.3 ms, GPU busy 29-30 ms; staged in `port_test/3ds-sdcard-jak2-baseline-b`** (section below) |
 | Sound (j2-sound, Oct 18) | **Plays in Azahar** (muted runs): title stream, city music + banks, dialogue streams; 0 DSP drops, 0 late buffers. Mixer on core 1 (40% share): 12-14% of real time, 3.8-6.3 ms/frame there; slums 29.9 fps, render thread 27.7-28.2 ms (on core 2 it was 34 ms, 25-29 fps). 1.96 MB of banks in the slums. Compressed SD files (`--compress --compress-vag`) work for Jak II. Hardware not run. See 3ds_build.md "Jak II sound" |
+| Texture animations, ocean, minimap (j2-texanim); memory (j2-mem) | Merged Oct 18: CPU texture animations, flat ocean (ocean.gc), opaque minimap; dormant levels, 1.5 MB stream arena |
+| **Integration build, baseline C (Oct 18)** | **Azahar slums 29.4-29.6 fps with sound on: logic 21.5-22.5 ms, render thread 27-28 ms, GPU busy 28-29 ms, mixer 10-19% of real time, 0 DSP drops; linear free 2.9 MB, heap ~3.3 MB. Title intro still stops early (no JAK II logo). Staged in `port_test/3ds-sdcard-jak2-baseline-c`** (section below) |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -59,14 +61,68 @@ The frame is now bounded by the 30 Hz cap with the GPU close behind (29-30 ms bu
 config.ini: preset normal, sound off, renderer ctr; `data/out/jak2/iso` 605 files,
 `data/out/jak2/c3l` 148 files), README with what works and what's missing.
 
-**Known gaps:** no sound (since added: j2-sound); texture animations other than the clouds and the sky gradient (Dark
-Jak / prison / oracle CLUT blends, waterfalls, lava, security walls, slime; background billboards
-black); no ocean (black areas on the title screen), screen effects or envmap shine; the minimap's
+**Known gaps (baseline B):** no sound; texture animations other than the clouds and the sky
+gradient; no ocean (black areas on the title screen), screen effects or envmap shine; the minimap's
 circle mask; tie / shrub prototype visibility masks; linear memory nearly full in the city; other
-**Known gaps:** no sound; (j2-texanim: texture animations, the ocean and the minimap are done, see
-below) screen effects; tie / shrub prototype visibility masks; linear memory nearly full in the city; other
 districts not run in Azahar with this build; Jak 1's banner and jingle (Jak II icon only); no
-hardware run.
+hardware run. (Sound, texture animations, the ocean, the minimap and memory: see baseline C.)
+
+## Integration build: baseline C (Oct 18)
+
+(AI-assisted.) jak2-3ds after the j2-sound, j2-texanim and j2-mem merges (20e00088b7), plus the
+title pads from j2-title (`jak2_title.pad`, `jak2_title_end.pad`) and `jak2_title_city.pad` (the
+title pad's 3600 frames, then `jak2_city.pad` shifted by 2800 frames: one emulator run for both).
+- `port_test/j2mirror` regenerated (small memory C; ocean.gc had changed), `build-3ds-jak2`
+  rebuilt (.text 19.9 MB, .bss 2.4 MB), all levels reconverted with the merged converter (slot
+  marks, texanim.c3t) into `j2mirror/out/jak2/c3l`: 149 files (147 levels + GAME + texanim.c3t:
+  97 textures, 463 KB), 572 MB, 557 s on the Mac (ran next to the 3DS build; 171 s alone in B).
+- Checks: host small-memory C-mode `gk --ctr-gfx`, `jak2_city.pad`: Jak's green hair, the
+  minimap, "Press (triangle) to use."; Jak ends at (1065.99, 0.52, 194.46) in target-hide. (A first
+  run with 6 pad shots, next to the Jak 1 run, ended at (1062.70, 8.00, 206.62) in target-stance:
+  the soft renderer's host is paced at 60 Hz and the time ratio follows the real frame time, so a
+  loaded host changes the walk; alone it matches.) Jak 1 host `level_pairs.pad` on proj-final:
+  exit 0, 10 pairs, 18 DGO loads. make_cia (jak2): check_shaders 29 shaders, check_svc 31 calls,
+  all allowed.
+
+**Azahar (one run, the CIA, `jak2_title_city.pad`, private instance, sound on, instance muted;
+staged files: compressed .ogz as on the card):**
+
+| | |
+|---|---|
+| title (frames 600-3600) | 29.7 fps, logic 15.3 ms |
+| slums standing (city-stand) | 29.6 fps; logic 21.5-22.5 ms, waiting for the render thread 8-9 ms |
+| slums walking (city-walk) | 28.4-29.5 fps; logic 24.8-25.6 ms |
+| render thread | build 26.9-27.9 ms (tex 2.6, merc 4.1-4.6, l3-tfrag 6.3-6.5, l0 2.0, l1 1.5, shadow 2.8-3.2, sprite 4.0, sky 1.0, debug/HUD 0.8) |
+| GPU busy | 27.8-28.7 ms, 75-76k triangles, 835-854 draws |
+| sound | mixer on core 1: 10-19% of real time, 15-22 voices; sound thread 3.7-6.6 ms/frame; 0 DSP frames dropped, 0 late buffers; CITY1 music, CTYWIDE1-3 banks, kg010 / kg015 guard lines |
+| memory (slums, ctyindb dormant) | linear free 2.9 MB (B: 131 KB), heap free 3.3-3.5 MB (largest block 2.8-3.1 MB); ctyindb's load had to make room (128 KB linear free right after it) |
+
+**Title (the key question): not fixed.** The intro scene still doesn't run to the JAK II logo.
+What changed against baseline B: `*target*` is now at the PC's title position (1138.79, 33.40,
+147.99) in `target-title` from frame 900 to 3601 (B: (980, 85, 346), the title-movie-end point),
+the same position as the host run. What didn't: from frame 450 (a few seconds after
+`title-disk-intro` starts) to 3600 every screenshot is the same still view, a city wall under the
+sky (camera ~(958, 47, 359) m by the `[ctr] ctywide: shown again` line) with "Press the Start
+Button" and black below it; no slums fly-through, no "Sony presents" / Naughty Dog cards, no
+logo. The host (`gk --ctr-gfx`, `OPENGOAL_NO_SOUND=1`, sound engine running) plays the scene: the
+slums street (450), the credits cards (600-750), Daxter (900), the logo from ~1050, "Press the
+Start Button" with it. The intro's voice stream: on the host it mixes for ~40 s; on the 3DS the
+mixer stats show 2 voices at +4 s and 0 voices by +15 s, so the stream (and with it the scene)
+ends early even with audio output on. The scene's art was still loaded at the `continue` (frame
+3800: "title-disk-intro+9 could not find a master slot to unlink"). Next: log the scene-player's
+frame and the stream's play position (the IOP's `GetPlayPos` / the 989snd stream voice) over the
+first 20 s on the 3DS; check whether the title's STR (the spooled animation) or the VAG stream
+stops first. Screenshots and logs: `port_test/reports/j2-baseline-c`.
+
+**Staged:** `port_test/3ds-sdcard-jak2-baseline-c`: `cias/jak2.cia`, `3ds/jak2/` (gk.3dsx,
+config.ini: preset normal, sound on, renderer ctr; `data/out/jak2/iso` 605 files, compressed with
+`--compress --compress-vag`: 4.52 -> 3.02 GB; `data/out/jak2/c3l` 149 files), README with what
+works and what's missing. Sound needs `sdmc:/3ds/dspfirm.cdc` (not staged; Jak 1's).
+
+**Known gaps:** the title intro (above); screen effects; tie / shrub prototype visibility masks;
+the ocean is Jak 1's flat approximation (opaque, no sky reflection or wave geometry); memory tight
+at the market spot (ctyindb visible: 128 KB linear free, j2-mem table below); Jak 1's banner and
+jingle; no hardware run.
 
 Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one entry
 (`ntsc_v1`). Both have the same serial and ELF hash, and the database lists both ISO hashes. The
