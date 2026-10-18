@@ -12,6 +12,7 @@
 #include "common/dma/dma.h"
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrRenderer.h"  // (AI-assisted) ctr_is_jak2
 #include "game/graphics/ctr/CtrVram.h"
 
 namespace {
@@ -106,6 +107,9 @@ bool same_state(const ctr_draw_state& a, const ctr_draw_state& b) {
 }  // namespace
 
 CtrDirect::CtrDirect(CtrVram* vram) : m_vram(vram) {
+  if (ctr_is_jak2()) {
+    m_y_scale = 1.f / 208.f;
+  }
   m_verts.reserve(kMaxBatchVerts + 6);
   memset(&m_draw_state, 0, sizeof(m_draw_state));
   m_draw_state.tex = -1;
@@ -471,7 +475,7 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
   float px = x / 16.f;
   float py = y / 16.f;
   b.x = (px - 2048.f) / 256.f;
-  b.y = (2048.f - py) * (1.f / 112.f);
+  b.y = (2048.f - py) * m_y_scale;
   b.z = z * (1.f / 16777215.f);
   if (m_prim.fst()) {
     b.s = m_u * m_uv_scale_s;

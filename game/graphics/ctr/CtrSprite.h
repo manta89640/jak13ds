@@ -195,6 +195,10 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   float m_min_alpha_big = 2.f;
   static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
   float m_st_out[2][4][2] = {};
+  // (AI-assisted) game version (see the constructor): GS y to clip y, kBigHalfGs
+  bool m_jak2 = false;
+  float m_inv_y = 1.f / 112.f;
+  float m_big_half_gs = kBigHalfGs;
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
