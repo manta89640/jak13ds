@@ -156,6 +156,14 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba);
  * GPU finished the previous frame, and this frame's draws read the new texels. */
 void ctr_gpu_tex_update(int handle, const uint8_t* rgba);
 void ctr_gpu_tex_delete(int handle);
+/* (AI-assisted, Jak II texture animation) A texture can stand for an animated texture slot (a
+ * level's base texture of it: c3l::texture_anim_slot): draws of it use the slot's texture
+ * (ctr_gpu_anim_slot_set) instead while the slot has one. Slot -1: none (the default; a deleted
+ * handle loses it). ctr_gpu_anim_slot_set takes effect at the next frame begin (draws within a
+ * frame all see the same texture); tex -1: none. */
+#define CTR_ANIM_SLOTS 64
+void ctr_gpu_tex_set_anim_slot(int handle, int slot);
+void ctr_gpu_anim_slot_set(int slot, int tex);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
  * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create; (AI-assisted) not RGBA4: soft

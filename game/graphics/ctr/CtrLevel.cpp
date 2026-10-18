@@ -2550,6 +2550,10 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     }
     if (read_ok) {
       out->handles[i] = ctr_gpu_pool_tex(pool, p.offset, t.w, t.h, p.format, p.levels);
+      // (AI-assisted, Jak II) an animated slot's base texture: drawn as the slot's animation
+      if (const u16 anim_slot = c3l::texture_anim_slot(t)) {
+        ctr_gpu_tex_set_anim_slot(out->handles[i], anim_slot - 1);
+      }
       out->min_alpha[i] = (u8)texture_min_alpha(dst, t.w, t.h, p.format);
     }
   }

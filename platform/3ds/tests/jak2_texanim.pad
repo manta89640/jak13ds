@@ -1,0 +1,43 @@
+# (AI-assisted) Jak II: texture animation and ocean views (j2-texanim). Title (ocean), the slums
+# (security walls in ctywide, Jak), the forest (waterfall), the drill platform level dig1 (lava).
+# Shots named for side by side images against the PC renderer (same pad).
+300 shot title_0
+500 shot title_1
+700 shot title_a
+900 shot title_b
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 log stop: slums
+1300 shot slums_stand
+1301 rx=0
+1360 -
+1361 shot slums_turn
+1362 rx=0
+1420 -
+1421 shot slums_turn2
+1500 continue forest-start
+1501 -
+1502 wait *target* target-stance
+1503 log stop: forest
+1800 shot forest_a
+1801 rx=0
+1860 -
+1861 shot forest_b
+1900 continue dig1-start
+1901 -
+1902 wait *target* target-stance
+1903 log stop: dig1
+2200 shot dig1_a
+2201 rx=0
+2260 -
+2261 shot dig1_b
+2300 continue ctyport-start
+2301 -
+2302 wait *target* target-stance
+2303 log stop: port
+2600 shot port_a
+2601 rx=0
+2660 -
+2661 shot port_b
+2700 exit

@@ -4,11 +4,24 @@
  * @file CtrTexAnimJak2.h
  * (AI-assisted)
  * Jak II texture animation for the 3DS renderer, on the CPU (the PC's TextureAnimator draws them
- * with OpenGL). Done so far: the sky's clouds (CLOUDS_AND_FOG: TextureAnimator::run_clouds).
- * Results go to CtrVram as textures that replace what VRAM holds at their address
- * (CtrVram::set_override), as the PC's texture pool does.
+ * with OpenGL):
+ *  - the sky's clouds (CLOUDS_AND_FOG: TextureAnimator::run_clouds) and the generic uploads go to
+ *    CtrVram as textures that replace what VRAM holds at their address (CtrVram::set_override),
+ *    as the PC's texture pool does;
+ *  - (AI-assisted) the CLUT blends (Dark Jak, prison, oracle, nest: ClutBlender) and the fixed
+ *    animations (waterfalls, lava, security walls, conveyors, the skull gem...:
+ *    run_fixed_animation, CtrTexAnimJak2Defs.h) and the slime go to the animated texture slots:
+ *    the level and model draws of a slot's base texture (c3l::texture_anim_slot) use the slot's
+ *    GPU texture instead (ctr_gpu_anim_slot_set). Sources from texanim.c3t (next to the .c3l
+ *    files), loaded when an animation first runs; an animation not sent for kIdleFrames frames
+ *    gives its texture and sources back. Outputs at most 64 x 64 (c3t::kMaxSize); a fixed
+ *    animation is redrawn every kFixedRate frames (and only when its input changed); a CLUT blend
+ *    only when its weight changes.
  */
 
+#include <map>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -38,8 +51,16 @@ class CtrTexAnimJak2 {
     m_snap_bytes.clear();
     m_snap_valid = true;
   }
-  /*! Render thread: the frame was drawn (the snapshot is used up). */
-  void frame_done() { m_snap_valid = false; }
+  /*! Render thread: the frame was drawn (the snapshot is used up); idle animations freed. */
+  void frame_done();
+
+  /*! (AI-assisted) A fixed animation array (codes 27..40) or a CLUT blend group (22..26), the
+   * transfer's data; false: not one of them. */
+  bool run(u16 code, const u8* data, int bytes);
+  /*! (AI-assisted) SLIME (SlimeInput). */
+  void slime(const u8* data, int bytes);
+  /*! (AI-assisted) the stats line (render thread ms of the slot animations since the last one) */
+  void log_stats();
 
   /*! CLOUDS_AND_FOG / CLOUDS_HIRES: data is the game's sky input (SkyInput, bytes bytes). */
   void clouds(const u8* data, int bytes, CtrVram* vram);
@@ -78,4 +99,46 @@ class CtrTexAnimJak2 {
   u32 m_t8_dest = 0;
   bool m_t8_waiting = false;
   std::vector<u32> m_t8_rgba;
+
+  // ---- (AI-assisted) the animated texture slots ----
+  struct Src {
+    std::string name, dgo;
+    int w = 0, h = 0, kind = 0;
+    u32 offset = 0, size = 0;
+    std::vector<u8> data;  // loaded when used (kRgba: RGBA8; kIndex: indices, then 256 colors)
+    u64 used_frame = 0;
+  };
+  bool m_c3t_tried = false;
+  std::string m_c3t_path;
+  std::vector<Src> m_srcs;
+  Src* src(const char* name, const char* dgo, bool load);
+  // a slot's output: its GPU texture and texels
+  struct Out {
+    int slot = -1;
+    int w = 0, h = 0;
+    int tex = -1;
+    std::vector<u32> rgba;
+    u64 seen_frame = 0;   // the last frame the game sent it
+    u64 drawn_frame = 0;  // the last frame it was redrawn
+    std::vector<u8> input;  // the input it was last drawn from (redrawn when it changes)
+    float weight = -1.f;    // CLUT blends
+    bool upload(int slot_index);
+    void release();
+  };
+  std::map<std::string, Out> m_outs;  // by slot name
+  Out* out(const char* name, int w, int h);
+  void fixed_anim(const void* def, const u8* in, float time, const u8* vals, int nvals);
+  void clut_group(const void* group, const u8* data, int bytes);
+  u64 m_frame = 0;
+  double m_slot_ms = 0;
+  int m_slot_updates = 0;
+  std::map<std::string, int> m_slot_names;  // updates per slot since the stats line
+  // the slime (TextureAnimator::run_slime): noise layers like the clouds', at 64 x 64
+  Noise m_slime_noise[4];
+  bool m_slime_init = false;
+  std::vector<float> m_slime_acc;
+
+ public:
+  static constexpr int kFixedRate = 2;
+  static constexpr int kIdleFrames = 300;
 };

@@ -111,6 +111,7 @@ set(OG3DS_COMMON_SOURCES
   dma/gs.cpp
   global_profiler/GlobalProfiler.cpp
   log/log.cpp
+  texture/texture_slots.cpp
   util/Assert.cpp
   util/BitUtils.cpp
   util/crc32.cpp
