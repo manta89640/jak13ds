@@ -100,6 +100,9 @@
 #include "sce/libcdvd_ee.h"
 #include "sce/sif_ee.h"
 #include "system/SystemThread.h"
+#ifdef __3DS__
+#include "platform/3ds/port/ctr_port.h"
+#endif
 
 u8* g_ee_main_mem = nullptr;
 u8* g_ee_main_mem_exec = nullptr;
@@ -517,6 +520,28 @@ RuntimeExitStatus exec_runtime(GameLaunchOptions game_options, int argc, const c
   // game)
   auto& ee_worker_thread = tm.create_thread("EE-Worker");
   prof().end_event();
+
+#ifdef __3DS__
+  // (AI-assisted) Jak II: the IOP thread (the overlord's threads, DGO and file loading) runs on
+  // core 2 of the New 3DS, so its ~2 ms per frame in Haven City come off the game's core. Core 2
+  // also has the render thread (priority 0x2F, ctr_gpu_citro3d.c) and the level loaders. The IOP
+  // must be above the render thread, or the game waits for the IOP while the IOP waits for the
+  // render thread (Jak 1 with the IOP at its core 0 priority: 1.4 fps). It mostly sleeps
+  // (wait_run_iop), so it takes little from the render thread. Same priority as the sound mixer
+  // (CTR_PRIO_SOUND): neither preempts the other, both run in short bursts. Not core 1: Jak 1's
+  // boot hung there. config.ini iop_core = 0 puts it back on core 0 (Jak 1: always core 0).
+  {
+    int iop_core = g_game_version == GameVersion::Jak2 ? 2 : 0;
+    char v[8];
+    if (ctr_config_get("iop_core", v, sizeof(v)) && (v[0] == '0' || v[0] == '2')) {
+      iop_core = v[0] - '0';
+    }
+    if (iop_core == 2 && ctr_is_new3ds()) {
+      iop_thread.set_ctr_placement(2, CTR_PRIO_SOUND);
+      lg::info("3DS: IOP thread on core 2");
+    }
+  }
+#endif
 
   // step 3: start the EE!
   {
