@@ -31,6 +31,10 @@ class CtrTexAnimJak2 {
   /*! Game thread: a new frame's snapshot starts. */
   void snapshot_begin() {
     m_snap_index.clear();
+    // (AI-assisted) the boot logos are ~850 KB a frame: don't keep that much heap afterwards
+    if (m_snap_bytes.capacity() > (256u << 10) && m_snap_bytes.size() < (64u << 10)) {
+      std::vector<u8>().swap(m_snap_bytes);
+    }
     m_snap_bytes.clear();
     m_snap_valid = true;
   }
