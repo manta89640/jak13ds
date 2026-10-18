@@ -33,11 +33,10 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"skin_clip_f24", "off"},    {"cmd_dedup", "off"},         {"cmd_dedup_draw", "off"},
     {"fog_alpha", "off"},        {"tex1_gating", "off"},       {"cull_merc", "off"},
     {"sky_last", "off"},         {"tex_cache_clear", "always"}, {"vista_untextured", "off"},
-    {"bones_native", "off"},     {"c3l_read_buffer", "0"},     {"fog_stage_skip", "off"},
+    {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
     {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
     {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
-    {"logic_micro", "off"}, /* micro-logic */
     {"tod_busy_half", "off"},    {"tod_pulse_step", "0"}, {"tod_max_ms", "0"}, /* citadel */
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
@@ -90,7 +89,6 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
 static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
     {"gpu_micro", "on"}, {"shader_resident", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
-    {"logic_micro", "on"}, /* micro-logic: mips2c_native.cpp logic_micro_on */
     {"sound_core", "auto"}, /* 2 on a New 3DS, else 1 */
     {"args", "-boot -cbackend"},
     {"debug_log", "off"},
@@ -105,12 +103,8 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"io_cache", "on"},
     {"io_checksum", "off"},
     {"c3l_read_buffer", "256"},
-    {"bones_native", "on"},
     {"particle_density", "0.7"},
-    {"collide_native", "on"},
-    {"collide_frag_cache", "on"},
     {"anim_lod", "on"},
-    {"anim_native", "on"},
     {"merc_lod_scale", "1"},
     {"ocean", "full"},
     {"shadows", "full"},
@@ -120,10 +114,14 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"button_art", "off"},
 };
 
-/* Keys that were removed (with their code): ignored with a note, not an "unknown setting" */
+/* Keys that were removed (with their code): ignored with a note, not an "unknown setting".
+ * (AI-assisted, Oct 18) The switches of native code with the same results as the code it replaces
+ * are gone too (the natives are always on): logic_micro, bones_native, collide_native,
+ * collide_frag_cache, anim_native. mips2c_native_off stays (debugging). */
 static const char* const ctr_cfg_removed[] = {
-    "new_shaders", "shader_groups", "shader_mesh", "shader_skin", "cb_read_opaque",
-    "io_on_system_core",
+    "new_shaders",  "shader_groups",  "shader_mesh",        "shader_skin",
+    "cb_read_opaque", "io_on_system_core", "logic_micro",   "bones_native",
+    "collide_native", "collide_frag_cache", "anim_native",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

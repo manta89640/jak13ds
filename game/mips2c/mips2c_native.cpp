@@ -563,27 +563,22 @@ u64 verify_adapter(void* fn, u64 idx, u64* args) {
 }  // namespace
 
 /*!
- * (AI-assisted) config.ini logic_micro (default on; preset safe: off): the game thread's
- * micro-optimisations of native functions (docs/3ds-port/performance.md "Game thread
- * micro-optimisations"). Same results; off runs the code as before. Host: OPENGOAL_LOGIC_MICRO=0.
+ * (AI-assisted) The game thread's micro-optimisations of native functions (docs/3ds-port/
+ * performance.md "Game thread micro-optimisations"): always on, the same results as the code
+ * before them (no config.ini switch since Oct 18). Host debugging: OPENGOAL_LOGIC_MICRO=0 runs
+ * the code as before.
  */
 bool logic_micro_on() {
   static int on = -1;
   if (on < 0) {
     on = 1;
-#ifdef __3DS__
-    char v[16];
-    if (ctr_config_get("logic_micro", v, sizeof(v)) &&
-        (!strcmp(v, "off") || !strcmp(v, "0") || !strcmp(v, "false"))) {
-      on = 0;
-    }
-#else
+#ifndef __3DS__
     const char* e = getenv("OPENGOAL_LOGIC_MICRO");
     if (e && e[0] == '0') {
       on = 0;
+      lg::info("logic_micro: off (OPENGOAL_LOGIC_MICRO=0)");
     }
 #endif
-    lg::info("logic_micro: {}", on ? "on" : "off (config.ini logic_micro)");
   }
   return on == 1;
 }

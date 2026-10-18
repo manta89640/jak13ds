@@ -787,7 +787,7 @@
 ;; for an unknown reason, the goal compiler went insane on this function
 
 ;; og:preserve-this (AI-assisted) 3DS: fill-from-foreground-using-box in C++ (native_collide_cache.cpp,
-;; the same results). #f when it is off (config.ini collide_native = off): the GOAL code runs.
+;; the same results; always on). #f when it is off (host debugging): the GOAL code runs.
 (#when TARGET_3DS
   (def-mips2c pc-fill-from-foreground-using-box (function collide-cache symbol)))
 

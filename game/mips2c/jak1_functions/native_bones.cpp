@@ -14,9 +14,9 @@
  * are bit-identical to goalc's C code (test/mips2c_native: tests_bones.cpp against the goalc
  * reference, and unicorn/run.sh in the 3DS's VFP mode).
  *
- * (pc-new-bones-mtx-calc output joints bones cam count) -> symbol: #f when off (config.ini
- * bones_native = off, or mips2c_native_off lists pc-new-bones-mtx-calc; host:
- * OPENGOAL_BONES_NATIVE=0); new-bones-mtx-calc-asm then runs its own code.
+ * (pc-new-bones-mtx-calc output joints bones cam count) -> symbol: always on (no config.ini switch
+ * since Oct 18); #f only for debugging (config.ini mips2c_native_off lists pc-new-bones-mtx-calc
+ * or is all; host: OPENGOAL_BONES_NATIVE=0): new-bones-mtx-calc-asm then runs its own code.
  */
 
 #include <cstdlib>
@@ -41,11 +41,6 @@ bool bones_native_on() {
   if (g_bones_native < 0) {
     g_bones_native = 1;
 #ifdef __3DS__
-    char v[16];
-    if (ctr_config_get("bones_native", v, sizeof(v)) &&
-        (!strcmp(v, "off") || !strcmp(v, "0") || !strcmp(v, "no") || !strcmp(v, "false"))) {
-      g_bones_native = 0;
-    }
     // mips2c_native_off = all (or on, 1...) or a list with this name: off too
     char list[256];
     if (ctr_config_get("mips2c_native_off", list, sizeof(list)) &&
@@ -60,7 +55,7 @@ bool bones_native_on() {
     }
 #endif
     printf("[bones] native new-bones-mtx-calc-asm %s\n",
-           g_bones_native ? "on" : "off (config.ini bones_native)");
+           g_bones_native ? "on" : "off (mips2c_native_off / OPENGOAL_BONES_NATIVE)");
   }
   return g_bones_native == 1;
 }

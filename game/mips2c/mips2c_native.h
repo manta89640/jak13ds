@@ -110,7 +110,7 @@ u64 native_as_goal(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6, u32 a
     &fn, &::Mips2C::native_as_exec<&fn>, flags, 0, &::Mips2C::native_as_goal<&fn> \
   }
 
-//! (AI-assisted) config.ini logic_micro (default on): the micro-optimised versions of natives
+//! (AI-assisted) the micro-optimised versions of natives (always on; host: OPENGOAL_LOGIC_MICRO=0 off)
 bool logic_micro_on();
 
 //! Call a GOAL function from native code (like ExecutionContext::jalr).
