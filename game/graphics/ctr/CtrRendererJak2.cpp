@@ -138,6 +138,13 @@ class CtrJak2TexRenderer : public CtrBucketRenderer {
   void render(DmaFollower& dma, CtrRenderState& rs) override {
     if (m_direct) {
       m_direct->reset_state();
+#ifndef __3DS__
+      static const char* dump = getenv("CTR_DIRECT_DUMP");  // host diagnosis: ",id,frame,"
+      if (dump && strstr(dump, fmt::format(",{},{},", m_id, rs.frame_idx).c_str())) {
+        g_ctr_direct_dump = getenv("CTR_DIRECT_DUMP_N") ? atoi(getenv("CTR_DIRECT_DUMP_N")) : 60;
+        lg::info("[ctr direct] bucket {} ({}) frame {}", m_id, m_name, rs.frame_idx);
+      }
+#endif
     }
     while (dma.current_tag_offset() != rs.next_bucket) {
       const auto tag = dma.current_tag();
