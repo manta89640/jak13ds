@@ -187,6 +187,40 @@ None of Jak 2's 28 mips2c files has a native version yet. By N3DS ms (as is -> n
   (small), ocean (render-ocean-quad: Jak 1's micro-logic version).
 - Verify every one with `OPENGOAL_MIPS2C_VERIFY=1` over the city pads (as Jak 1 did).
 
+#### Done: the ports from Jak 1 (AI-assisted, Oct 18, j2-nat-port)
+
+`game/mips2c/jak2_functions/native_*.cpp`, registered next to the mips2c versions through
+`native::on()` (native_functions.h). `config.ini logic_native = off` (preset safe; host
+`OPENGOAL_LOGIC_NATIVE=0`) registers none of them; `mips2c_native_off` still names single ones.
+
+| native | Jak 2 changes against Jak 1's native |
+|---|---|
+| `sp-process-block-2d` / `-3d` | per-particle time vector from the scratchpad table (byte 129), frames 0 = paused, valid is byte 128, flag bits moved (alpha 32, orbiter 64), aux flags 0x8080 call add-to-sprite-aux-list instead of the callback (2d); 3d: rotvel3d once per 10 frames, then quaternion-normalize! |
+| `sp-launch-particles-var`, `particle-adgif` | a matrix instead of a position (rows on the frame, row 4 = (0 0 0 1) for sp-adjust-launch), the clock byte, colors truncated to whole numbers, 5 levels, the state's launch control; adgif: uncache a shader with bit 1024 |
+| `cspace<-parented-transformq-joint!` | the w lane of 1/scale cleared (Jak 2's mips2c patch) |
+| `new-bones-mtx-calc-asm` | `pc-new-bones-mtx-calc` (bones.gc `#when TARGET_3DS`, like Jak 1): bone stride 80; host verify mode runs the GOAL loop in a nested call and compares (`bones verify`) |
+| `shadow-execute` (+ its 15 helpers and the VU0 code inlined) | j2-nat-shadow: Jak 2's offsets, debug-draw path, add-single-tris, scissor-edges without clipping |
+| `moving-sphere-triangle-intersect`, `collide-do-primitives`, collide-cache-prim 9 / 10, collide-mesh 12 / 14 / 15 | j2-nat-collide: the GOAL helpers (ray-sphere-intersect, closest-pt-in-triangle...) stay GOAL calls; collide-puss-work 9 / 10 written but not registered (Jak 2 never calls them) |
+
+Not here (j2-nat-new): sky-work, spatial / collide hash, fill-bg-using-*, sparticle-motion-blur,
+draw-string-asm, nav.
+
+**Identity** (host small-memory C mode, `OPENGOAL_MIPS2C_VERIFY=1`, 0 mismatches everywhere):
+jak2_route.pad, all natives (`OPENGOAL_MIPS2C_VERIFY_FULL_EVERY=200`): 3.95M calls (cspace 3.84M,
+collide-cache-prim 9: 86k, shadow-execute 5600, collide-mesh 14 / 15: 3392 / 2440, msti 8711,
+launch 1098, adgif 798, block-2d 324, -3d 58 full-memory checks), bones 92942 calls / 1.39M bones;
+jak2_city.pad, particles with a full check every 8th call: adgif 25859, launch 11455, 2d 4183,
+3d 1015; cspace 1.53M; bones 39902. Shadow and collision on both pads in their branches. Jak's
+end positions are the mips2c runs' (city 1065.98 0.52 194.46, route 1161.20 -50.58 513.13).
+Weakly covered: collide-mesh 12 (9 calls, no hit), collide-cache-prim 10 (73 calls).
+
+**Mac** (slums stand, sampled, on vs off, loaded machine: shares against the unchanged rest of
+the frame): particles 1.6x, cspace 1.6x, shadow 3.7x, bones (C++ vs goalc C) 4.5x, collision 2.3x.
+
+**Azahar** (CIA, jak2_city.pad, null renderer): city-stand 75.6 -> **49.7 ms** logic (13.2 ->
+20.1 fps), city-walk 74.7 -> 50.0 ms. iop ~1.7 ms of that. The Mac ratios predicted ~21 ms; the
+ARM gain is larger (Jak 1: 4-8x fewer instructions than mips2c).
+
 ### 2. Codegen and C-mode overhead (~4-5 ms)
 
 - The thunk / adapter path costs time by itself: on the Mac 6.4% of the slums frame is in
@@ -264,6 +298,71 @@ one frame), so measure it with the soak test before using it.
   collision, spatial hash, traffic AI) are ~60% of the frame, so half the traffic would be
   roughly -25 to -30% (city ~22 -> ~16 ms after the steps above).
 - Lower traffic update rate for far processes (AI every other frame).
+
+## Done: per-frame lookups, PC-port extras, kernel glue (j2-cheap, Oct 18)
+
+(AI-assisted.) Branch `j2-cheap` (from jak2-3ds 6d9c7881e2). Plan steps 4, 5 and part of 7.
+
+**Azahar (CIA, null renderer, `jak2_city.pad`, same windows as milestone 2):**
+
+| window | before (baseline-a) | after | |
+|---|---|---|---|
+| city-stand (slums) | 13.2 fps, logic 75.8 ms | 15.0 fps, logic 66.4 ms | -9.4 ms (-12%) |
+| city-walk | 13.5 fps, logic 74.3 ms | 15.0 fps, logic 66.7 ms | -7.6 ms |
+
+IOP on core 0: 2.36 -> 2.09 ms/frame. 142 suspends/frame and 24.7 KB of stack are unchanged
+(kernel copies only [sp, stack-top) already). Jak ends at (1065.98, 0.52, 194.46) in
+`target-hide`, as before. The Mac estimate was ~4 ms (85x on the shares below). The 3DS saved
+twice that: string and res-lump scans run at ARM11 memory speed, which the 85x doesn't model.
+
+What changed (all unconditional; PC behaviour unchanged unless noted):
+- **entity-by-name cache** (`engine/entity/entity.gc`). `(method update setting-control)` ->
+  `cam-master-set-entity` looks up the camera entity every frame. The name is usually `#f`, so
+  every actor, nav mesh, race mesh and camera of every active level was scanned with a res-lump
+  `lookup-tag-idx` each. Results are cached by the name's bytes, which is what `string=` reads,
+  whatever the argument's type. 8 entries. The cache is flushed when any `*level*` slot's
+  (active, name, bsp) changes. Mac share in the slums: setting-control update 5.4% -> 0.4%.
+- **subtitle2 scene lookup cache** (`pc/subtitle2.gc`). `get-scene-by-name` upcased every scene
+  name of the subtitle file for every queued gui (the city's ambient speech), twice per frame.
+  Results are cached per text file and upcased name, and the cache is cleared when the text loads.
+  A hit leaves `*vag-temp-string*`/`-2` as the search did, and searches that printed a warning
+  aren't cached. Mac: get-scene-by-name 2.8% -> 0.1%. What's left of draw-subtitles (1.7%) is
+  `subtitle-bump-up?` (4 gui lookups) and the text drawing.
+- **No controller LED on the 3DS** (`pc/pckernel.gc` `led-enabled?` is `#f` under TARGET_3DS).
+  `update-led` searched the process tree three times per frame. Mac: pc-settings update
+  2.1% -> 1.0%.
+- **pc-prof only when wanted** (`kernel/gcommon.gc` macros check `*pc-prof-on*`, set by
+  `jak2/kmachine.cpp` as in Jak 1: always on PC, on the 3DS only while kperf times sections). The
+  kernel dispatcher made 677 `pc-prof` calls per frame in the slums, each through an adapter thunk.
+- **Direct C-mode entries for hot kernel functions** (`GOALC_KFN`, c_backend.md "Typed kernel
+  functions"): the Jak 2 kernel primitives (reset-and-call and thread-resume run for every
+  process), `pc-rand`, `__mem-move`, `__read-ee-timer`. They skip the thunk's two indirect calls.
+- Already off on the 3DS before this work: the discord RPC (std::regex) and the speedrun update
+  (`#unless TARGET_3DS` in `pckernel-common.gc`). jak2-prof's profile was a PC-size build, which
+  is why it listed them.
+
+Identity: `jak2_city.pad` on the host (small memory, C mode) and in Azahar gives the same position
+and state. `jak2_route.pad` on the host gives the same checkpoints as the base build. The swim
+height at frame 2301 (`-2.6`..`-2.97`) and the main-town walk (one in four runs) vary between runs
+of the base build too, because the time a load takes changes the wave phase and the traffic.
+C-mode goalc-test (Jak 1 suite + Goalc*) passes: 1692 + 10 tests. Jak 1 `level_pairs.pad` (host
+small-memory gk) gives the same pad-script output as before, exit 0.
+
+**Tried and reverted: the IOP thread on core 2** (plan step 8). With the IOP SystemThread
+created on core 2, Azahar's boot hung after "IOP: After inits". The IOP thread kept dispatching
+(the stack report came 2 minutes later), but the overlord's start thread never finished, so the
+EE waited forever in `wait_for_overlord_init_finish`. That is the same place Jak 1's IOP-on-core-1
+attempt hung. Not understood. Leads:
+- the fake ISO reader pool (`BS::thread_pool`, libctru pthreads: core 0, priority 0x3F until
+  their first task raises them to `CTR_PRIO_IO`);
+- the IOP's polling loops, which assume they share a core with the threads they wait for.
+
+Note for a retry: `bootstrap_thread_func` (SystemThread.cpp) sets the IOP's priority back to
+`CTR_PRIO_IOP` after creation, so a placement priority has to be applied there.
+
+Kernel overhead left (not changed): 142 suspends/frame copying ~175 bytes each, plus
+`new 'process 'cpu-thread` / `delete` and a setjmp/longjmp pair per trans/post hook. On ARM11
+that is a few tenths of a ms in total.
 
 ## Caveats
 

@@ -45,9 +45,7 @@ extern "C" int ctr_config_get(const char* key, char* out, int size);  // platfor
 #include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kperf.h"
 #include "game/kernel/jak1/kscheme.h"
-#if !OPENGOAL_ONLY_JAK1
 #include "game/kernel/jak2/kscheme.h"
-#endif
 #include "game/runtime.h"
 
 extern std::mt19937 extra_random_generator;  // pc-rand (kmachine.cpp)
@@ -229,19 +227,14 @@ constexpr u32 kStackScratch = 256 * 1024;
  */
 u32 scratch_low(u32 sp) {
   u32 lo = sp > kStackScratch ? sp - kStackScratch : 0;
-  u32 spad = 0;
-  if (g_game_version == GameVersion::Jak1) {
-    static const u32 spad_sym = ::jak1::intern_from_c("*fake-scratchpad-data*").offset;
-    spad = gload<u32>(spad_sym);
-  }
-#if !OPENGOAL_ONLY_JAK1
-  else if (g_game_version == GameVersion::Jak2) {
-    // (AI-assisted) Jak 2: the symbol's value is the word before the symbol
-    static const u32 spad_sym = ::jak2::intern_from_c("*fake-scratchpad-data*").offset - 1;
-    spad = gload<u32>(spad_sym);
-  }
-#endif
-  if (spad) {
+  if (g_game_version == GameVersion::Jak1 || g_game_version == GameVersion::Jak2) {
+    // (AI-assisted) Jak 2: the symbol's value is at its address - 1; its fake scratchpad is
+    // 64 kB, with the process stacks at the top (gkernel.gc) and the first 16 kB data
+    static const u32 spad_sym =
+        g_game_version == GameVersion::Jak1
+            ? ::jak1::intern_from_c("*fake-scratchpad-data*").offset
+            : ::jak2::intern_from_c("*fake-scratchpad-data*").offset - 1;
+    const u32 spad = gload<u32>(spad_sym);
     const u32 spad_data_end = spad + 16 * 1024;
     if (spad < sp && spad_data_end > lo) {
       lo = std::min(spad_data_end, sp);

@@ -38,6 +38,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"logic_micro", "off"}, /* micro-logic */
+    {"logic_native", "off"}, /* (AI-assisted) Jak II's native mips2c functions (j2-nat-port) */
     {"tod_busy_half", "off"},    {"tod_pulse_step", "0"}, {"tod_max_ms", "0"}, /* citadel */
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
@@ -91,6 +92,7 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
     {"gpu_micro", "on"}, {"shader_resident", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
     {"logic_micro", "on"}, /* micro-logic: mips2c_native.cpp logic_micro_on */
+    {"logic_native", "on"}, /* (AI-assisted) Jak II: jak2_functions/native_common.cpp */
     {"sound_core", "auto"}, /* 2 on a New 3DS, else 1 */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
     /* (AI-assisted) Jak II's kernel starts the IOP from the "DVD" without -fakeiso */

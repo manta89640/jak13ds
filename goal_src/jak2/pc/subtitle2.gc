@@ -51,6 +51,35 @@
       (the string #f))
   )
 
+;; (AI-assisted) get-scene-by-name runs for every queued subtitle gui, twice per frame, and
+;; upcases every scene name of the text file each time (3.7% of a Haven City frame in C mode on the
+;; Mac: the city's ambient speech is always queued). Results are cached per text file and upcased
+;; name. The text only changes in load-subtitle2-text-info, which clears the cache. A hit leaves the
+;; temp strings as the search would have (the queried name, and the found or last scene name), and
+;; searches that printed a warning are never cached, so the results and side effects are the same.
+(defconstant PC_SUBTITLE_SCENE_CACHE_SIZE 8)
+
+(deftype subtitle2-scene-cache (structure)
+  ((text  subtitle2-text-info PC_SUBTITLE_SCENE_CACHE_SIZE)
+   (scene subtitle2-scene     PC_SUBTITLE_SCENE_CACHE_SIZE)
+   (key   string              PC_SUBTITLE_SCENE_CACHE_SIZE)
+   (next  int32)
+   )
+  )
+
+(define *subtitle2-scene-cache* (new 'global 'subtitle2-scene-cache))
+(dotimes (i PC_SUBTITLE_SCENE_CACHE_SIZE)
+  (set! (-> *subtitle2-scene-cache* text i) #f)
+  (set! (-> *subtitle2-scene-cache* key i) (new 'global 'string 128 (the string #f)))
+  )
+(set! (-> *subtitle2-scene-cache* next) 0)
+
+(defun subtitle2-scene-cache-clear ()
+  (dotimes (i PC_SUBTITLE_SCENE_CACHE_SIZE)
+    (set! (-> *subtitle2-scene-cache* text i) #f)
+    )
+  0)
+
 (defmethod get-scene-by-name ((obj subtitle2-text-info) (name string))
   "get a subtitle scene info with the corresponding name. #f = none found"
 
@@ -64,17 +93,51 @@
 
   ;; uppercase the string so we have a consistent name format
   (string-upcase name *vag-temp-string*)
-  (dotimes (i (length obj))
-    ;; bounds checking
-    (when (> (length (-> obj data i name)) (-> *vag-temp-string-2* allocated-length))
-        (format 0 "vag temp string is too short!! wanted: ~D chars~%" (length name)))
-    ;; name and kind matches, return that!
-    (string-upcase (-> obj data i name) *vag-temp-string-2*)
-    (when (string= *vag-temp-string-2* *vag-temp-string*)
-      (return (-> obj data i)))
-    )
 
-  (the subtitle2-scene #f))
+  (let ((cache *subtitle2-scene-cache*))
+    ;; cached?
+    (dotimes (c PC_SUBTITLE_SCENE_CACHE_SIZE)
+      (when (and (= (-> cache text c) obj) (string= (-> cache key c) *vag-temp-string*))
+        (let ((scene (-> cache scene c)))
+          (cond
+            (scene
+              (string-upcase (-> scene name) *vag-temp-string-2*))
+            ((> (length obj) 0)
+              (string-upcase (-> obj data (+ (length obj) -1) name) *vag-temp-string-2*))
+            )
+          (return scene)
+          )
+        )
+      )
+
+    (let ((result (the subtitle2-scene #f))
+          (printed? #f)
+          (i 0)
+          (count (length obj)))
+      (while (and (not result) (< i count))
+        ;; bounds checking
+        (when (> (length (-> obj data i name)) (-> *vag-temp-string-2* allocated-length))
+            (format 0 "vag temp string is too short!! wanted: ~D chars~%" (length name))
+            (set! printed? #t))
+        ;; name and kind matches, return that!
+        (string-upcase (-> obj data i name) *vag-temp-string-2*)
+        (if (string= *vag-temp-string-2* *vag-temp-string*)
+            (set! result (-> obj data i)))
+        (+! i 1)
+        )
+
+      (when (and (not printed?) (<= (length name) (-> *vag-temp-string* allocated-length)))
+        (let ((c (-> cache next)))
+          (set! (-> cache next) (if (>= (+ c 1) PC_SUBTITLE_SCENE_CACHE_SIZE) 0 (+ c 1)))
+          (set! (-> cache text c) obj)
+          (set! (-> cache scene c) result)
+          (copy-string<-string (-> cache key c) *vag-temp-string*)
+          )
+        )
+      result
+      )
+    )
+  )
 
 
 (defmethod get-line-at-pos ((obj subtitle2-scene) (pos float) (index int))
@@ -117,6 +180,8 @@
 
       ;; reset the text heap.
       (kheap-reset heap)
+      ;; (AI-assisted) the text changes: forget the cached scene lookups
+      (subtitle2-scene-cache-clear)
 
       ;; try to load load...
       (while (not (str-load (string-format "~D~S.TXT" lang txt-name) -1 (logand -64 (&+ (-> heap current) 63)) (&- (-> heap top) (-> heap current))))

@@ -22,6 +22,16 @@
 
 #include "game/graphics/gfx.h"
 
+/*!
+ * (AI-assisted) The game's GS screen y to the 3DS's clip space y, on top of the GS mapping
+ * ((y - 2048) / -128 for a 448 line screen): Jak 1's scissor adjust 512 / 448; Jak II draws 416
+ * lines of a frame twice as tall (OpenGL Shader.cpp: SCISSOR_ADJUST * HEIGHT_SCALE = 512 / 416 *
+ * 0.5). Set once by the renderer for the game version (ctr_set_gs_y_scale).
+ */
+float ctr_gs_y_scale();
+/*! (AI-assisted) The game is Jak II (jak2::BucketId, its DMA formats). */
+bool ctr_is_jak2();
+
 class CtrVram;
 class CtrDirect;
 class CtrLevels;
@@ -144,6 +154,18 @@ class CtrRenderer {
 
  private:
   void dispatch_buckets_jak1(DmaFollower dma);
+  // (AI-assisted) Jak II: buckets from the start of the chain (no default registers call)
+  void dispatch_buckets_jak2(DmaFollower dma);
+  // (AI-assisted) the bucket loop of both: the sky hook from bucket sky_hook_bucket on,
+  // vif_interrupt_callback(bucket + callback_offset); false: a bucket
+  // didn't end at the next one
+  bool run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int callback_offset);
+  // (AI-assisted) Jak II's bucket table (CtrRendererJak2.cpp)
+  void init_buckets_jak2();
+  // (AI-assisted) the DMA tag of a bucket in a chain (Jak 1: after the default registers call)
+  u32 bucket_tag(u32 chain_offset, int id) const;
+  bool m_jak2 = false;
+  int m_sprite_bucket = -1;  // (AI-assisted) prepare_sprites
   void draw_pmode_fade();
   std::unique_ptr<CtrVram> m_vram;
   std::unique_ptr<CtrLevels> m_levels;

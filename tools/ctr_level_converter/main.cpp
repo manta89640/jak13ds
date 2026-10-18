@@ -39,6 +39,9 @@
 namespace {
 
 struct Options {
+  // (AI-assisted) the game of the .fr3: "jak1" or "jak2" ("": from the input path, out/jak2/...).
+  // Jak II looks up its own PS2 distances (tie_ps2_dists_jak2.inc, shrub_ps2_dists_jak2.inc).
+  std::string game;
   // (AI-assisted) 0 as the PS2 near the camera: 1 cut the yellow pools of Volcanic Crater into
   // polygons (all levels: +1% triangles)
   int tfrag_geo = 0;  // 0 = most detailed, 2 = least (2 has large holes)
@@ -274,7 +277,11 @@ struct ShrubPs2Dist {
 };
 const ShrubPs2Dist kShrubPs2Dists[] = {
 #include "shrub_ps2_dists.inc"
+#include "shrub_ps2_dists_jak2.inc"
 };
+// (AI-assisted) the PS2 distance tables' level prefix of the game being converted: "" for Jak 1,
+// "jak2/" for Jak II (its levels' names are in the tables so: Jak II has a village1 too)
+std::string g_dist_prefix;
 // shrub distance classes (meters, index = SrcTri::sclass; 0 unused): a chunk holds one class
 constexpr float kShrubClassMeters[] = {0.f, 35.f, 50.f, 70.f, 90.f, 120.f, 160.f, 400.f};
 constexpr int kShrubClasses = sizeof(kShrubClassMeters) / sizeof(kShrubClassMeters[0]);
@@ -638,7 +645,7 @@ struct Converter {
       int sclass = 0;
       if (opt.shrub_ps2_dist && d.proto_idx < tree.proto_names.size()) {
         float m = 0;
-        sclass = shrub_class(level->level_name, tree.proto_names[d.proto_idx], &m);
+        sclass = shrub_class(g_dist_prefix + level->level_name, tree.proto_names[d.proto_idx], &m);
         if (!sclass) {
           lg::warn("{}: shrub {} has no PS2 distance, drawn up to {} m", level->level_name,
                    tree.proto_names[d.proto_idx], opt.shrub_dist);
@@ -2872,7 +2879,7 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
                    ? far_trees[tree].proto_names[g.proto]
                    : std::string("(wind)");
     float mid = 0, far = 0;
-    if (!tie_lod::ps2_dists(level.level_name, names[i], &mid, &far)) {
+    if (!tie_lod::ps2_dists(g_dist_prefix + level.level_name, names[i], &mid, &far)) {
       far = opt.tie_lod_default_m;
       st->no_dist += g.proto != 0xffff;
     }
@@ -2911,7 +2918,7 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
   if (budget_kb < 0) {
     budget_kb = 1e12;  // every group
     for (const auto& b : kTieLodBudgets) {
-      if (level.level_name == b.level) {
+      if (g_dist_prefix + level.level_name == b.level) {  // (AI-assisted) Jak 1's levels
         budget_kb = b.kb;
       }
     }
@@ -2992,11 +2999,18 @@ float stream_class_cell(const Options& opt, int nc) {
 
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Options opt = opt_in;
-  if (is_interior(in.stem().string())) {
+  if (opt.game.empty()) {
+    // (AI-assisted) out/jak2/fr3/<level>.fr3: Jak II
+    opt.game = in.parent_path().parent_path().filename() == "jak2" ? "jak2" : "jak1";
+  }
+  const bool jak2 = opt.game == "jak2";
+  g_dist_prefix = jak2 ? "jak2/" : "";
+  // (the interior and fixed mood lists are Jak 1's levels)
+  if (!jak2 && is_interior(in.stem().string())) {
     opt.vista = false;
   }
   if (opt.palette < 0) {
-    opt.palette = auto_palette(in.stem().string());
+    opt.palette = jak2 ? 1 : auto_palette(in.stem().string());
   }
   // (AI-assisted) the title screen's textures at their full size: the logo's "The Precursor
   // Legacy" lettering (256x64) was cut to 128 wide and unreadable. The whole level is ~200 KB.
@@ -4727,6 +4741,8 @@ int main(int argc, char** argv) {
   app.add_option("input", in, "input .fr3 (or folder with --all)")->required();
   app.add_option("output", out, "output .c3l (or folder with --all)")->required();
   app.add_flag("--all", all, "convert every .fr3 in the input folder");
+  app.add_option("--game", opt.game,
+                 "(AI-assisted) jak1 | jak2 (default: from the input path, out/jak2/fr3: jak2)");
   app.add_option("--tfrag-geo", opt.tfrag_geo, "tfrag level of detail (0 = most detailed, 2)");
   app.add_option("--tie-geo", opt.tie_geo, "tie level of detail (0 = most detailed, 3)");
   bool no_tie_lod = false;

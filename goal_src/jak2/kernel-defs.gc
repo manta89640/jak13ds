@@ -406,6 +406,8 @@
   (instant 2)
   )
 (define-extern pc-prof (function string pc-prof-event none))
+;; (AI-assisted) set by the C kernel: #t when pc-prof events are wanted (see with-pc-profiler)
+(define-extern *pc-prof-on* symbol)
 
 (define-extern *pc-settings-folder* string)
 (define-extern *pc-settings-built-sha* string)

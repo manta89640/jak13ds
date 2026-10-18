@@ -293,9 +293,9 @@ if(OG3DS_GAME STREQUAL "jak2")
     overlord/jak2/streamlist.cpp
     overlord/jak2/vag.cpp)
   file(GLOB OG3DS_MIPS2C_JAK2 ${OG_ROOT}/game/mips2c/jak2_functions/*.cpp)
-  # (AI-assisted) the Jak 2 natives (native2_*.cpp): -O3 like Jak 1's
-  file(GLOB OG3DS_MIPS2C_NATIVE2 ${OG_ROOT}/game/mips2c/jak2_functions/native2_*.cpp)
-  set_source_files_properties(${OG3DS_MIPS2C_NATIVE2} PROPERTIES COMPILE_OPTIONS "-O3")
+  # (AI-assisted) Jak 2's natives (native_*.cpp, native2_*.cpp): -O3 like Jak 1's (see above)
+  file(GLOB OG3DS_MIPS2C_NATIVE_JAK2 ${OG_ROOT}/game/mips2c/jak2_functions/native*.cpp)
+  set_source_files_properties(${OG3DS_MIPS2C_NATIVE_JAK2} PROPERTIES COMPILE_OPTIONS "-O3")
   list(APPEND OG3DS_MIPS2C_JAK2 ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_jak2_stubs.cpp)
 endif()
 list(TRANSFORM OG3DS_RUNTIME_SOURCES PREPEND ${OG_ROOT}/game/)

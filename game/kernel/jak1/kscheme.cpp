@@ -547,6 +547,9 @@ Ptr<Function> make_goalc_function(u32 id) {
 Ptr<Function> make_function_from_c(KernelFunction kfunc, bool arg3_is_pp = false) {
   if (goalc_enabled()) {
     // see kernel_function.h
+    if (kfunc.entry && !arg3_is_pp && !goalc_abi_check_enabled()) {
+      return make_goalc_function(goalc_fn_id_for_host((void*)kfunc.entry));
+    }
     if (kfunc.direct && !arg3_is_pp) {
       return make_goalc_function(goalc_fn_id_for_host(kfunc.ptr));
     }
