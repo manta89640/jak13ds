@@ -78,6 +78,9 @@ struct GoalcKernelFunctionInfo {
 };
 void goalc_note_kernel_function(const char* name, u32 wide_mask);
 const std::vector<GoalcKernelFunctionInfo>& goalc_kernel_functions();
+//! (AI-assisted) OPENGOAL_C_ABI_KERNEL_DUMP=<file> (host): write "name wide_mask" for every kernel
+//! function registered so far, for goalc's (__c-abi-check-kernel-functions "<file>").
+void goalc_dump_kernel_functions_if_requested();
 //! Allocate a contiguous range of ids for n host functions (used for modules).
 u32 goalc_alloc_fn_ids(void* const* fns, u32 n);
 //! Number of ids in use (including the reserved id 0).

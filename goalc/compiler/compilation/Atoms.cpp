@@ -225,6 +225,8 @@ const std::unordered_map<std::string, GoalCompilerForm> g_goal_forms = {
     {"psize-of", {.form_function = &Compiler::compile_psize_of}},
     {"__c-abi-wide-mask", {.form_function = &Compiler::compile_c_abi_wide_mask}},
     {"__c-abi-method-wide-mask", {.form_function = &Compiler::compile_c_abi_method_wide_mask}},
+    {"__c-abi-check-kernel-functions",
+     {.form_function = &Compiler::compile_c_abi_check_kernel_functions}},
     {"offset-of", {.form_function = &Compiler::compile_offset_of}},
     {"current-method-id", {.form_function = &Compiler::compile_current_method_id}},
     {"cast-to-method-type", {.form_function = &Compiler::compile_cast_to_method_type}},

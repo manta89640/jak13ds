@@ -124,7 +124,7 @@ void ContinueLoadingDGO(Ptr<u8> b1, Ptr<u8> b2, Ptr<u8> heapPtr) {
  * Load and link a DGO file.
  * This does not use the mutli-threaded linker and will block until the entire file is done.
  */
-void load_and_link_dgo(u64 name_gstr, u64 heap_info, u64 flag, u64 buffer_size) {
+void load_and_link_dgo(u32 name_gstr, u32 heap_info, u64 flag, u64 buffer_size) {
   auto name = Ptr<char>(name_gstr + 4).c();
   auto heap = Ptr<kheapinfo>(heap_info);
   load_and_link_dgo_from_c(name, heap, flag, buffer_size, false);

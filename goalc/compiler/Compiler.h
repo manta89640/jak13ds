@@ -762,6 +762,9 @@ class Compiler {
   Val* compile_c_abi_method_wide_mask(const goos::Object& form,
                                       const goos::Object& rest,
                                       Env* env);
+  Val* compile_c_abi_check_kernel_functions(const goos::Object& form,
+                                            const goos::Object& rest,
+                                            Env* env);
 
   Val* compile_offset_of(const goos::Object& form, const goos::Object& rest, Env* env);
   Val* compile_current_method_id(const goos::Object& form, const goos::Object& rest, Env* env);

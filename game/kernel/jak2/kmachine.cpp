@@ -518,7 +518,7 @@ u32 MouseGetData(u32 _mouse) {
  * Open a file-stream.  Name is a GOAL string. Mode is a GOAL symbol.  Use 'read for readonly
  * and anything else for write only.
  */
-u64 kopen(u64 fs, u64 name, u64 mode) {
+u64 kopen(u32 fs, u32 name, u32 mode) {
   auto file_stream = Ptr<FileStream>(fs).c();
   file_stream->mode = mode;
   file_stream->name = name;
@@ -699,6 +699,10 @@ void InitMachineScheme() {
   InitMachine_PCPort();
 
   InitSoundScheme();
+  // (AI-assisted) C mode ABI audit: the kernel functions and the arguments their adapters read
+  if (goalc_enabled()) {
+    goalc_dump_kernel_functions_if_requested();
+  }
   intern_from_c("*stack-top*")->value() = 0x7f00000;
   intern_from_c("*stack-base*")->value() = 0x7ffffff;
   intern_from_c("*stack-size*")->value() = 0x100000;

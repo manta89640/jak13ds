@@ -184,9 +184,17 @@ void check_thunk_arg(float hi, u32 lo, int i, const ThunkSlot& slot) {
   u32 bits;
   memcpy(&bits, &hi, 4);
   if (bits == kAbiPoison) {
-    char what[96];
-    snprintf(what, sizeof(what), "host function %p (adapter %p) wide argument %d", slot.fn,
-             (void*)slot.adapter, i);
+    char what[192];
+    const char* fn_name = "?";
+#if GOALC_USE_DLOPEN
+    // (AI-assisted) name the host function when the dynamic symbol table has it
+    Dl_info info;
+    if (dladdr(slot.fn, &info) && info.dli_sname) {
+      fn_name = info.dli_sname;
+    }
+#endif
+    snprintf(what, sizeof(what), "host function %p %s (adapter %p) wide argument %d", slot.fn,
+             fn_name, (void*)slot.adapter, i);
     goalc_abi_check_failed("thunk", 0, what, lo);
   }
 }
@@ -380,6 +388,23 @@ void goalc_note_kernel_function(const char* name, u32 wide_mask) {
 
 const std::vector<GoalcKernelFunctionInfo>& goalc_kernel_functions() {
   return g_kernel_functions;
+}
+
+void goalc_dump_kernel_functions_if_requested() {
+  const char* path = getenv("OPENGOAL_C_ABI_KERNEL_DUMP");
+  if (!path || !path[0]) {
+    return;
+  }
+  FILE* f = fopen(path, "w");
+  if (!f) {
+    lg::error("goalc: can't write the kernel function list to {}", path);
+    return;
+  }
+  for (const auto& kf : g_kernel_functions) {
+    fprintf(f, "%s %u\n", kf.name, kf.wide_mask);
+  }
+  fclose(f);
+  lg::info("goalc: wrote {} kernel functions to {}", g_kernel_functions.size(), path);
 }
 
 u32 goalc_fn_id_for_fn8(void* fn, u32 wide_mask) {
