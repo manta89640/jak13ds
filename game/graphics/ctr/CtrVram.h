@@ -101,6 +101,12 @@ class CtrVram {
    */
   void set_override(u32 tbp, int w, int h, const u32* rgba);
   bool has_override(u32 tbp) const { return m_overrides.count(tbp) != 0; }
+  /*! (AI-assisted) Jak II: textures whose dest the PC port moved (lookup_jak2_texture_dest_offset)
+   * are read from where their page put them */
+  void set_jak2_remap(bool on) {
+    m_jak2_remap = on;
+    m_remap.assign(on ? 16384 : 0, 0);
+  }
 
   void clear_cache();
   // (AI-assisted) drop the cached textures ctr_button_art::patch may change
@@ -149,6 +155,15 @@ class CtrVram {
 
   std::vector<u8> m_vram;
   std::unordered_map<u32, CtrTexture> m_overrides;  // (AI-assisted) see set_override
+  bool m_jak2_remap = false;
+  std::vector<u8> m_remap;  // (AI-assisted) by TEX0 tbp: blocks the PC port moved the texture by
+  u64 data_tex0(u64 tex0) const {
+    if (!m_jak2_remap) {
+      return tex0;
+    }
+    const u32 off = m_remap[tex0 & 0x3fff];
+    return off <= (tex0 & 0x3fff) ? tex0 - off : tex0;
+  }
   u32 m_art_gen = 0;  // (AI-assisted) ctr_button_art::generation() of the cached textures
   // (AI-assisted) per 16 KB chunk: what it holds (see the top of this file). Page chunks have odd
   // ids, all others even ones from m_next_unique_id.

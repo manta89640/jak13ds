@@ -56,6 +56,8 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // draws the buckets. hud: as Sprite3's HUD flush, a sprite that writes depth with the alpha test
   // (FB_ONLY) is drawn a second time for the fragments that fail it, without depth writes
   void flush(bool hud = false);
+  // (AI-assisted) Jak II: the glow sprites after the HUD (Sprite3::glow_dma_and_draw)
+  void draw_glows(DmaFollower& dma, CtrRenderState& rs);
 
   struct VecData {
     math::Vector4f xyz_sx;
@@ -205,6 +207,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
     int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels
     int faint = 0;          // (AI-assisted) sprite_min_alpha: big faint ones left out
+    int glows = 0;          // (AI-assisted) Jak II glow flares drawn
   } m_stats;
   // (AI-assisted) a frame that took more than 3 ms logs its counts (render)
   void build_sprites(DmaFollower& dma, CtrRenderState& rs);

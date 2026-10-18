@@ -17,6 +17,15 @@
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
 
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+#include "game/graphics/jak2_texture_remap.h"
+#else
+// (AI-assisted) the Jak 1 3DS build has no Jak II tables (set_jak2_remap is never on there)
+static int lookup_jak2_texture_dest_offset(int, int) {
+  return 0;
+}
+#endif
+
 #include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -166,6 +175,11 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
   trim_pending(dest_block, end);
   forget_uploads(dest_block, end);
   write_ct32(data, dest_block, width, height);
+  if (m_jak2_remap) {
+    // no page textures (with moved dests) there any more
+    std::fill(m_remap.begin() + std::min<u32>(dest_block, 16384),
+              m_remap.begin() + std::min<u32>(end, 16384), 0);
+  }
   mark_unique(dest_block, end);
   note_write(dest_block, end);
 }
@@ -270,6 +284,14 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
       memcpy(&clut_dest, t + offsetof(GoalTexture, clut_dest), 2);
       m_tex_info[dest0] = TexInfo{(u16)w, (u16)h, t[offsetof(GoalTexture, psm)],
                                   t[offsetof(GoalTexture, width)], clutpsm, clut_dest};
+      if (m_jak2_remap) {
+        // (AI-assisted) Jak II: the PC port moved this texture's dest by a few blocks
+        // (__pc-get-tex-remap, so no two textures share an address); its data is where the
+        // page put it, offset blocks lower
+        u32 page_id;
+        memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
+        m_remap[dest0] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+      }
     }
   }
 }
@@ -319,8 +341,11 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   {
     static const bool log_uploads = getenv("CTR_UPLOAD_LOG") != nullptr;  // (AI-assisted) host
     if (log_uploads) {
-      lg::info("[ctr vram] upload page {} ({}) mode {}: {} words to block {}",
-               (const char*)(ee_mem + page.name_ptr + 4), page.length, mode, words, dest_block);
+      lg::info("[ctr vram] upload page {} ({}) mode {}: {} words to block {}; segs {:x}/{}/{} {:x}/{}/{} {:x}/{}/{}",
+               (const char*)(ee_mem + page.name_ptr + 4), page.length, mode, words, dest_block,
+               page.segment[0].block_data_ptr, page.segment[0].size, page.segment[0].dest,
+               page.segment[1].block_data_ptr, page.segment[1].size, page.segment[1].dest,
+               page.segment[2].block_data_ptr, page.segment[2].size, page.segment[2].dest);
     }
   }
 #endif
@@ -850,6 +875,7 @@ bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
 }
 
 bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
+  tex0 = data_tex0(tex0);  // (AI-assisted) Jak II
   GsTex0 t(tex0);
   if (!m_pending.empty()) {
     // only the pending uploads this texture reads (as get_texture)
@@ -934,7 +960,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     m_stats.cached++;
     return &cached->tex;
   }
-  GsTex0 t(tex0);
+  // (AI-assisted) Jak II: where the texture's data is (see m_remap); key stays the cache key
+  const u64 data_key = data_tex0(key);
+  GsTex0 t(data_tex0(tex0));
   if (!m_pending.empty()) {
     // write the pending uploads this texture (or its cached version) may read
     const u32 blocks = texture_block_span(t);
@@ -977,9 +1005,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // textures moved by texture-relocate use the CLUT they had when they were moved
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   const bool decoded =
-      reloc ? decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+      reloc ? decode_impl(this, m_vram, data_key, &data, &w, &h, &tex_range,
                           [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; })
-            : decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+            : decode_impl(this, m_vram, data_key, &data, &w, &h, &tex_range,
                           [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
   if (!decoded) {
     lg::warn("[ctr vram] unsupported texture format {} (tex0 {:x})", (int)t.psm(), tex0);

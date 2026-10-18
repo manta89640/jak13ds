@@ -434,6 +434,7 @@ CtrRenderer::CtrRenderer()
     m_jak2 = true;
     g_is_jak2 = true;
     g_gs_y_scale = 512.f / 416.f * 0.5f;
+    m_vram->set_jak2_remap(true);
     init_buckets_jak2();
     return;
   }

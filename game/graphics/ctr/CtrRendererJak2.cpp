@@ -156,6 +156,12 @@ class CtrJak2TexRenderer : public CtrBucketRenderer {
         s64 mode;
         memcpy(&page, data.data, 8);
         memcpy(&mode, data.data + 8, 8);
+#ifndef __3DS__
+        static const bool log_up = getenv("CTR_UPLOAD_LOG") != nullptr;  // host diagnosis
+        if (log_up && rs.log_now) {
+          lg::info("[ctr] frame {} bucket {}: page upload", rs.frame_idx, m_id);
+        }
+#endif
         rs.vram->upload_texture_page(rs.ee_mem + page, (int)mode, rs.ee_mem, rs.offset_of_s7);
         continue;
       }
@@ -303,6 +309,14 @@ void CtrRenderer::init_buckets_jak2() {
   merc(BucketId::MERC_LCOM_WATER);
   tex(BucketId::TEX_LCOM_SKY_POST);
   tex(BucketId::TEX_ALL_SPRITE);
+  {
+    // particles, world sprites and the HUD's sprites (Sprite3::render_jak2)
+    auto sprite = std::make_unique<CtrSpriteRenderer>("sprite", (int)BucketId::PARTICLES,
+                                                      m_vram.get());
+    m_sprite = sprite.get();
+    m_sprite_bucket = (int)BucketId::PARTICLES;
+    set(BucketId::PARTICLES, std::move(sprite));
+  }
   tex(BucketId::TEX_ALL_WARP);
   tex(BucketId::DEBUG_NO_ZBUF1, true);
   tex(BucketId::TEX_ALL_MAP, true);
