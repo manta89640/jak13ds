@@ -20,6 +20,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrEye.h"
+#include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
@@ -319,12 +320,46 @@ const CtrMercModelData* CtrMercRenderer::find_model(const u8* name, const CtrLev
     *lev = s.lev;
     return s.model;
   }
-  const CtrMercModelData* model =
-      m_levels->find_merc_model(std::string_view((const char*)name, len), lev);
+#ifndef __3DS__
+  {
+    // (AI-assisted) host test of the "play as Keira" model without a save that has her:
+    // CTR_KEIRA_FORCE=1 draws her for every Jak
+    static const bool force = getenv("CTR_KEIRA_FORCE") != nullptr;
+    if (force && len >= 6 && !memcmp(name, "eichar", 6)) {
+      u8 buf[128];
+      const u32 n = std::min<u32>(len, 127 - ctr_keira::kModelPrefixLen);
+      memcpy(buf, ctr_keira::kModelPrefix, ctr_keira::kModelPrefixLen);
+      memcpy(buf + ctr_keira::kModelPrefixLen, name, n);
+      buf[ctr_keira::kModelPrefixLen + n] = 0;
+      return find_model_named(buf, ctr_keira::kModelPrefixLen + n, h, gen, s, lev);
+    }
+  }
+#endif
+  return find_model_named(name, len, h, gen, s, lev);
+}
+
+const CtrMercModelData* CtrMercRenderer::find_model_named(const u8* name,
+                                                          u32 len,
+                                                          u32 h,
+                                                          u32 gen,
+                                                          FindSlot& s,
+                                                          const CtrLevelData** lev) {
+  const std::string_view sv((const char*)name, len);
+  const CtrMercModelData* model = m_levels->find_merc_model(sv, lev);
   if (model) {
     s = {h, gen, model, *lev};
+    return model;
   }
-  return model;
+  // (AI-assisted) "play as Keira": her file loads the first time the game asks for her (render
+  // thread only: not from the bone snapshot); Jak is drawn until it's there (or if it's missing)
+  if (len > (u32)ctr_keira::kModelPrefixLen &&
+      !memcmp(name, ctr_keira::kModelPrefix, ctr_keira::kModelPrefixLen)) {
+    if (!m_snapshot_mode) {
+      m_levels->load_extra(ctr_keira::kFileName);
+    }
+    return m_levels->find_merc_model(sv.substr(ctr_keira::kModelPrefixLen), lev);
+  }
+  return nullptr;
 }
 
 u32 CtrMercRenderer::queue_floats(const float* src, int n) {
@@ -785,6 +820,23 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
   }
   input += 128 + 16 * i;
+  // (AI-assisted) "play as Keira": her bones from Jak's (her draws' palettes name her rig's slots)
+  const MercMat* const* pal_bones = bones;
+  if (model->keira_rig) {
+    const float* jak[128];
+    for (int k = 0; k < 128; k++) {
+      jak[k] = bones[k]->tmat[0].data();
+    }
+    if (!ctr_keira::pose(jak, sent, (float(*)[16])m_rig_mats, 128)) {
+      return;
+    }
+    if (!m_rig_slot[0]) {
+      for (int k = 0; k < 256; k++) {
+        m_rig_slot[k] = &m_rig_mats[k < 128 ? k : 0];
+      }
+    }
+    pal_bones = m_rig_slot;
+  }
   PcMercFlags flags;
   memcpy(&flags, input, sizeof(flags));
   // HUD models (the orb and power cell icons...): isometric projection, see hud_clip
@@ -968,8 +1020,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted, streaming) Jak's place (his first bone's tmat[3]: world = camera position +
   // camera rot * it, checked against the game's position to 0.6 m): the level streaming prefetches
   // around him too (camera cuts land near him)
-  if (!(flags.bitflags & 8) && i > 0 && slots[0] < 128 && model->name.size() >= 6 &&
-      !model->name.compare(0, 6, "eichar")) {
+  if (!(flags.bitflags & 8) && i > 0 && slots[0] < 128 &&
+      ((model->name.size() >= 6 && !model->name.compare(0, 6, "eichar")) || model->keira_rig)) {
     const math::Vector4f& t = bones[slots[0]]->tmat[3];
     m_levels->stream_note_target(t.x(), t.y(), t.z(), rs.frame_idx);
   }
@@ -1037,7 +1089,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       // an earlier model (Merc2 reads its own leftover the same way). Counted, logged once per
       // model: it would put that part of the model somewhere else
       const u8 bi = draw.palette[p];
-      if (bi < 128 && !(sent[bi >> 6] & (1ull << (bi & 63)))) {
+      if (bi < 128 && !model->keira_rig && !(sent[bi >> 6] & (1ull << (bi & 63)))) {
         m_stats.unsent_bones++;
         if (std::find(m_unsent_bone_logged.begin(), m_unsent_bone_logged.end(), model->name) ==
             m_unsent_bone_logged.end()) {
@@ -1048,7 +1100,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       // (AI-assisted) CtrMicro.h: the matrix read once into registers (the model's scale too), the
       // determinant's sign on its bits, and not worked out once a bone of the palette mirrors
-      const float* t = bones[bi]->tmat[0].data();
+      const float* t = pal_bones[bi]->tmat[0].data();
       if (cull_merc && !palette_mirrors) {
         palette_mirrors = ctr_micro::merc_bone_mirrors(t);
       }

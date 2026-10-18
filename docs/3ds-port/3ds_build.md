@@ -283,6 +283,15 @@ Face buttons by position, like the PS2 pad:
 | Start / Select | Start / Select | pause menu / (unused) |
 | touch screen top / bottom half | L3 / R3 | (unused in Jak 1) |
 
+(AI-assisted) Easter egg: hold L + R while picking the save slot of a new game (title, New Game;
+or when it starts without a save) to play as Keira. The save keeps it (a spare word of the
+game-save header, `info-int32 8` = `"KERA"`): loading that save brings her back, other saves and
+new games are Jak. Only the picture changes: the game asks the renderer for `keira-as-eichar-lod0`
+instead of Jak's model (`bones.gc` `pc-merc-draw-request`, the player process only: cutscenes
+keep their own Jak; cutscenes that animate the player show Keira), and the renderer draws Keira from `KEIRA.c3l` with Jak's animation
+(`CtrKeiraRig.h`, `c3l_format.md`). Daxter stays where Jak's shoulder is; the shadow is Jak's
+(the game's shadow volume of his mesh). Host test without a save: `CTR_KEIRA_FORCE=1`.
+
 ## Platform pieces
 
 - **Types:** on `__3DS__`, `s32`/`u32` are `int`/`unsigned int` (`common/common_types.h`),

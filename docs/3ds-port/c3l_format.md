@@ -584,6 +584,26 @@ u8 masks[] (one per fragment: 1 = unpacked).
   pipeline). The model's position scale gets the blend shapes' 1.5x room for the waves. v11 files
   have none: those models stay at their base pose, as before.
 
+### KEIRA.c3l: "play as Keira" (AI-assisted)
+
+`ctr_level_converter GAME.fr3 KEIRA.c3l --keira-from village1.fr3` (and `--all` when both fr3
+files are in the input folder) writes a merc-only file with one model, `keira-as-eichar-lod0`:
+Keira's `assistant-lod0` from village1 (`tools/ctr_level_converter/keira_model.cpp`), ~80 KB.
+
+- Her vertices stay hers, bound to her rig (`game/graphics/ctr/CtrKeiraRig.h`): matrix slot =
+  her joint + 1, plus a virtual upper chest joint (slot 97) that takes the upper part of her chest
+  weights (1.90-2.10 m), so her torso bends and twists at Jak's chest joint too.
+- Her effects keep their numbers (0 body, 1 eyes, 2 shiny parts, 3 hair, like Jak's: the game
+  enables and fades his). No blend shapes (the game sends Jak's face weights); her eye draws use
+  Jak's eye slots (his eyes, blinking with him); her welding torch (joints `torch`, `torchTIP`, at
+  her feet in the bind pose) is left out.
+- The runtime loads it the first time the game asks for a `keira-as-` model (`CtrLevels::
+  load_extra`; Jak is drawn until then, or if the file is missing) and poses her from Jak's
+  bones every frame (`ctr_keira::pose`).
+- The skeleton bind poses come from `game/graphics/ctr/keira_skeletons.inc`
+  (`tools/ctr_level_converter/gen_keira_skeletons.py`, from the decompiler's `rip_levels` .glb of
+  GAME.CGO and VI1.DGO).
+
 ## Fine visibility (.c3v)
 
 (AI-assisted.) A sidecar per level, `<level>.c3v` next to `<level>.c3l`, layout in

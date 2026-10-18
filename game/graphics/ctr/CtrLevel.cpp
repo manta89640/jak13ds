@@ -7,6 +7,7 @@
 
 #include "CtrLevel.h"
 
+#include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrImpostor.h"
 #include "game/graphics/ctr/CtrOccCull.h"
@@ -158,6 +159,9 @@ CtrLevels::~CtrLevels() {
   }
   if (m_common) {
     unload(*m_common);
+  }
+  for (auto& [name, lev] : m_extras) {
+    unload(*lev);
   }
 }
 
@@ -3092,6 +3096,8 @@ bool CtrLevels::load_file(const fs::path& path,
       if (md.draws.empty()) {
         continue;
       }
+      // (AI-assisted) the "play as Keira" model: bound to her rig, posed from Jak's bones
+      md.keira_rig = !md.name.compare(0, ctr_keira::kModelPrefixLen, ctr_keira::kModelPrefix);
       {
         auto git = gen_of.find(md.name);
         if (git != gen_of.end()) {
@@ -3224,6 +3230,18 @@ void CtrLevels::process_pending_loads(u64 frame) {
     if (d.job.parts()) {
       // (AI-assisted) partial unload / repair: the meshes made again
       take_parts(d, frame);
+      continue;
+    }
+    if (d.job.common && name != "GAME") {
+      // (AI-assisted) load_extra
+      if (d.result == LoadResult::LOADED) {
+        ctr_gpu_pool_set_priority(d.lev->tex_pool, 3);
+        lg::info("[ctr] loaded {}.c3l ({} models)", name, d.lev->merc_models.size());
+        m_extras[name] = std::move(d.lev);
+        rebuild_merc_index();
+      } else {
+        lg::warn("[ctr] no {} (out/jak1/c3l/{}.c3l)", name, name);
+      }
       continue;
     }
     if (d.job.common) {
@@ -3408,11 +3426,25 @@ void CtrLevels::load_common() {
   request({"GAME", true, false});
 }
 
+void CtrLevels::load_extra(const std::string& name) {
+  if (std::find(m_extra_asked.begin(), m_extra_asked.end(), name) != m_extra_asked.end()) {
+    return;
+  }
+  m_extra_asked.push_back(name);
+  lg::info("[ctr] loading {}.c3l", name);
+  request({name, true, false});
+}
+
 void CtrLevels::rebuild_merc_index() {
   m_merc_index.clear();
   if (m_common) {
     for (size_t i = 0; i < m_common->merc_models.size(); i++) {
       m_merc_index[m_common->merc_models[i].name] = {m_common.get(), (int)i};
+    }
+  }
+  for (auto& [name, lev] : m_extras) {
+    for (size_t i = 0; i < lev->merc_models.size(); i++) {
+      m_merc_index[lev->merc_models[i].name] = {lev.get(), (int)i};
     }
   }
   for (auto& [name, lev] : m_levels) {
