@@ -36,7 +36,11 @@ u64 get_current_ts() {
 
 GlobalProfiler::GlobalProfiler() {
   m_t0 = get_current_ts();
+#if !(defined(__3DS__) && defined(OG3DS_GAME_JAK2))
   m_nodes.resize(m_max_events);
+#endif
+  // (AI-assisted, j2-mem2) Jak II on the 3DS: the event buffer (152 KB) only once profiling is
+  // switched on (set_enable), which it never is there
 }
 
 void GlobalProfiler::update_event_buffer_size(size_t new_size) {
@@ -75,7 +79,7 @@ void GlobalProfiler::root_event() {
 }
 
 size_t GlobalProfiler::get_next_idx() {
-  return (m_next_idx % m_nodes.size());
+  return m_nodes.empty() ? 0 : (m_next_idx % m_nodes.size());  // (AI-assisted) see set_enable
 }
 
 void GlobalProfiler::begin_event(const char* name) {
@@ -99,6 +103,9 @@ void GlobalProfiler::clear() {
 }
 
 void GlobalProfiler::set_enable(bool en) {
+  if (en && m_nodes.empty()) {
+    m_nodes.resize(m_max_events);  // (AI-assisted, j2-mem2) see the constructor
+  }
   m_enabled = en;
 }
 

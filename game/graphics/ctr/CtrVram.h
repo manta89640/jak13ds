@@ -28,10 +28,15 @@
  */
 
 #include <cstdint>
+#include <cstring>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
 #include "common/common_types.h"
+
+/*! (AI-assisted, j2-mem2) the KB of GS VRAM copy the renderer's CtrVram holds (memory log) */
+unsigned ctr_vram_copy_kb();
 
 struct CtrTexture {
   int handle = -1;  // ctr_gpu texture
@@ -40,7 +45,13 @@ struct CtrTexture {
 
 class CtrVram {
  public:
-  CtrVram();
+  /*!
+   * (AI-assisted, j2-mem2) sparse: the VRAM copy is kept per 16 KB chunk, made when something is
+   * first written there (unwritten chunks read as zeros, as the whole copy did); Jak II only
+   * writes the areas something reads (uploads are lazy), ~a third of the 4 MB. Else (Jak 1) one
+   * 4 MB block, as before.
+   */
+  explicit CtrVram(bool sparse = false);
   ~CtrVram();
 
   /*!
@@ -132,6 +143,8 @@ class CtrVram {
     int chunks_written = 0;  // (AI-assisted) 16 KB chunks of page uploads written to the VRAM copy
     int chunks_skipped = 0;  // (AI-assisted) and not written: the same data was there already
   };
+  /*! (AI-assisted, j2-mem2) the bytes the VRAM copy holds (sparse: the chunks written so far) */
+  u32 copy_bytes() const { return m_full_chunks * kChunkBytes + m_top_chunks * (kChunkBytes / 4); }
   const Stats& stats() const { return m_stats; }
 
  private:
@@ -163,7 +176,79 @@ class CtrVram {
   u32 read32(u32 byte_addr) const;
   u32 clut_color(u32 cbp, u32 cpsm, u32 entry) const;
 
-  std::vector<u8> m_vram;
+  // (AI-assisted, j2-mem2) The VRAM copy, by 16 KB chunk (kChunkBytes; a chunk's bytes are the
+  // GS addresses [c * 16 KB, (c + 1) * 16 KB): 64 blocks, two PSMCT32 pages). Every access is
+  // within one chunk (aligned to its size). A chunk is
+  //  - full: m_wr / m_rd point to its 16 KB (m_rd to a shared chunk of zeros while it doesn't
+  //    exist: m_wr nullptr, wr() makes it);
+  //  - top bytes only (m_top set, sparse only): written only by relocate() into PSMT8H / 4HH /
+  //    4HL, which change the top byte of each word (the font: 110 chunks in Jak II), so the
+  //    other three bytes are zero: 4 KB, byte 3 of each word. Made full (wr()) when anything
+  //    else writes there.
+  static constexpr u32 kChunkBytes = 16384;
+  const u8* m_rd[256];
+  u8* m_wr[256];
+  u8* m_top[256];
+  u8 m_is_top[256];
+  bool m_sparse = false;
+  std::unique_ptr<u8[]> m_mem;  // not sparse (Jak 1): all chunks
+  std::unique_ptr<u8[]> m_own[256];  // sparse: the chunk's memory
+  u32 m_full_chunks = 0, m_top_chunks = 0;
+  u8* wr(u32 addr) {
+    u8* c = m_wr[addr >> 14];
+    if (!c) {
+      c = make_full(addr >> 14);
+    }
+    return c + (addr & (kChunkBytes - 1));
+  }
+  // the top byte (byte 3) of the word at addr (4 aligned)
+  u8* wr_top(u32 addr) {
+    const u32 c = addr >> 14;
+    if (u8* f = m_wr[c]) {
+      return f + (addr & (kChunkBytes - 1)) + 3;
+    }
+    u8* t = m_top[c] ? m_top[c] : make_top(c);
+    return t + ((addr & (kChunkBytes - 1)) >> 2);
+  }
+  u8* make_full(u32 chunk);
+  u8* make_top(u32 chunk);
+  void note_chunks() const;
+
+ public:
+  // (AI-assisted, j2-mem2) read access (CtrVram.cpp decode_impl); a, 4 / 2 aligned for rd32 /
+  // rd16, in [0, 4 MB)
+  struct View {
+    const u8* const* chunks;
+    const u8* is_top;
+    u32 rd32(u32 a) const {
+      const u32 c = a >> 14;
+      if (is_top[c]) {
+        return (u32)chunks[c][(a & 16383u) >> 2] << 24;
+      }
+      u32 v;
+      memcpy(&v, chunks[c] + (a & 16383u), 4);
+      return v;
+    }
+    u16 rd16(u32 a) const {
+      const u32 c = a >> 14;
+      if (is_top[c]) {
+        return (a & 2) ? (u16)(chunks[c][(a & 16383u) >> 2] << 8) : 0;
+      }
+      u16 v;
+      memcpy(&v, chunks[c] + (a & 16383u), 2);
+      return v;
+    }
+    u8 rd8(u32 a) const {
+      const u32 c = a >> 14;
+      if (is_top[c]) {
+        return (a & 3) == 3 ? chunks[c][(a & 16383u) >> 2] : 0;
+      }
+      return chunks[c][a & 16383u];
+    }
+  };
+  View view() const { return View{m_rd, m_is_top}; }
+
+ private:
   std::unordered_map<u32, CtrTexture> m_overrides;  // (AI-assisted) see set_override
   std::unordered_map<u32, bool> m_borrowed;  // (AI-assisted) set_override_handle's
   bool m_jak2_remap = false;

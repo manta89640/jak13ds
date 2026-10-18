@@ -108,6 +108,7 @@ void* bootstrap_thread_func(void* x) {
 #elif defined(__3DS__)
   // show a crash screen for CPU exceptions in this thread
   ctr_thread_install_crash_handler();
+  ctr_thread_name_current(thd->name.c_str());  // (AI-assisted, j2-mem2) for the stack line
   // no thread names. Priorities: see ctr_port.h (no time slicing between equal priorities)
   if (thd->name == "EE") {
     ctr_thread_set_priority(CTR_PRIO_EE);
@@ -137,7 +138,21 @@ void SystemThread::start(std::function<void(SystemThreadInterface&)> f) {
 #ifdef __3DS__
   {
     // The EE thread runs the kernel and deep C++ call chains (fmt, file IO). Others are small.
-    const size_t stack_size = (name == "EE") ? 512 * 1024 : 128 * 1024;
+    size_t stack_size = (name == "EE") ? 512 * 1024 : 128 * 1024;
+#ifdef OG3DS_GAME_JAK2
+    // (AI-assisted, j2-mem2) Jak II: the listener (DMP: waits for a connection, listener = off),
+    // the IOP's own thread (its overlord threads run on their own stacks) and the background
+    // worker are small; their depth is logged ("[ctr] thread stacks used")
+    // In Azahar (jak2_route.pad, Oct 18) the deepest were: EE 3.9 KB (C-mode GOAL runs on its own
+    // stack in EE memory), IOP 4.2, DMP and EE-Worker 0.6. EE 128 KB set from that run.
+    if (name == "DMP") {
+      stack_size = 48 * 1024;
+    } else if (name == "IOP" || name == "EE-Worker") {
+      stack_size = 64 * 1024;
+    } else if (name == "EE") {
+      stack_size = 128 * 1024;
+    }
+#endif
     // Core 0: the game (EE), the IOP (overlord, DGO loading), the listener and the EE worker.
     // (AI-assisted) The system core option for the others (io_on_system_core) was removed Oct 16.
     const int core = CTR_CORE_APP;

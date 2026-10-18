@@ -72,7 +72,14 @@ struct IopThread {
   ~IopThread() { co_delete(thread); }
 #ifdef __3DS__
   // (AI-assisted) was 512 KB each: 4.5 MB of the heap for 9 threads using under 3 KB each
+#ifdef OG3DS_GAME_JAK2
+  // (AI-assisted, j2-mem2) Jak II: 16 KB each (11 threads: 528 KB less). Its overlord's threads
+  // went at most 2.6 KB deep in Azahar (title, city with sound: the "[iop] thread stacks used"
+  // line); the SD reads and bank loads run on the thread pool's own stacks.
+  static constexpr u32 kStackSize = 16 * 1024;
+#else
   static constexpr u32 kStackSize = 64 * 1024;
+#endif
   // (AI-assisted) libco's context is at the start of the block, the stack grows down from its end
   static constexpr u32 kStackContextBytes = 256;
   static constexpr u32 kStackPattern = 0x57ac57acu;

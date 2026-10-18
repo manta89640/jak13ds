@@ -249,7 +249,9 @@ void ee_runner(SystemThreadInterface& iface) {
   mprotect((void*)g_ee_main_mem, EE_MAIN_MEM_LOW_PROTECT, PROT_NONE);
 #endif
   fileio_init_globals();
+#if !OPENGOAL_NO_JAK1
   jak1::kboot_init_globals();
+#endif
 #if !OPENGOAL_ONLY_JAK1
   jak2::kboot_init_globals();
 #if !OPENGOAL_NO_JAK3
@@ -259,7 +261,9 @@ void ee_runner(SystemThreadInterface& iface) {
 
   kboot_init_globals_common();
   kdgo_init_globals();
+#if !OPENGOAL_NO_JAK1
   jak1::kdgo_init_globals();
+#endif
 #if !OPENGOAL_ONLY_JAK1
   jak2::kdgo_init_globals();
 #if !OPENGOAL_NO_JAK3
@@ -271,7 +275,9 @@ void ee_runner(SystemThreadInterface& iface) {
   klink_init_globals();
 
   kmachine_init_globals_common();
+#if !OPENGOAL_NO_JAK1
   jak1::kscheme_init_globals();
+#endif
 #if !OPENGOAL_ONLY_JAK1
   jak2::kscheme_init_globals();
 #if !OPENGOAL_NO_JAK3
@@ -282,7 +288,9 @@ void ee_runner(SystemThreadInterface& iface) {
   kmalloc_init_globals_common();
 
   klisten_init_globals();
+#if !OPENGOAL_NO_JAK1
   jak1::klisten_init_globals();
+#endif
 #if !OPENGOAL_ONLY_JAK1
   jak2::klisten_init_globals();
 #if !OPENGOAL_NO_JAK3
@@ -301,9 +309,11 @@ void ee_runner(SystemThreadInterface& iface) {
   xdbg::allow_debugging();
 
   switch (g_game_version) {
+#if !OPENGOAL_NO_JAK1  // (AI-assisted, j2-mem2) the Jak II 3DS build: no Jak 1 kernel
     case GameVersion::Jak1:
       jak1::goal_main(g_argc, g_argv);
       break;
+#endif
 #if !OPENGOAL_ONLY_JAK1
     case GameVersion::Jak2:
       jak2::goal_main(g_argc, g_argv);
@@ -365,19 +375,29 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
 #endif
 
   if (version != GameVersion::Jak3 && version != GameVersion::JakX) {
+#if !OPENGOAL_NO_JAK1  // (AI-assisted, j2-mem2) Jak II doesn't use these
     jak1::dma_init_globals();
+#endif
     iso_init_globals();
+#if !OPENGOAL_NO_JAK1  // (AI-assisted, j2-mem2) Jak II doesn't use these
     jak1::iso_init_globals();
+#endif
     fake_iso_init_globals();
     jak1::fake_iso_init_globals();
+#if !OPENGOAL_NO_JAK1  // (AI-assisted, j2-mem2) Jak II doesn't use these
     jak1::iso_queue_init_globals();
+#endif
     jak1::ramdisk_init_globals();
     sbank_init_globals();
     // soundcommon
+#if !OPENGOAL_NO_JAK1  // (AI-assisted, j2-mem2) Jak II doesn't use these
     jak1::srpc_init_globals();
+#endif
     srpc_init_globals();
     ssound_init_globals();
+#if !OPENGOAL_NO_JAK1  // (AI-assisted, j2-mem2) Jak II doesn't use these
     jak1::stream_init_globals();
+#endif
 #if !OPENGOAL_ONLY_JAK1
     jak2::dma_init_globals();
     jak2::iso_init_globals();
@@ -413,9 +433,11 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
   {
     auto p = scoped_prof("overlord-start");
     switch (version) {
+#if !OPENGOAL_NO_JAK1
       case GameVersion::Jak1:
         jak1::start_overlord_wrapper(iop.overlord_argc, iop.overlord_argv, &complete);
         break;
+#endif
 #if !OPENGOAL_ONLY_JAK1
       case GameVersion::Jak2:
         jak2::start_overlord_wrapper(iop.overlord_argc, iop.overlord_argv, &complete);

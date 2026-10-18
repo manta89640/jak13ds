@@ -183,7 +183,14 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
 #define MAX_POOLS 16
 /* GPU command buffer: a frame's commands must all fit (splitting it doesn't make room). 2 MB of
  * linear memory; a busy frame (3000 level draws) takes ~1 MB. */
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+/* (AI-assisted, j2-mem2) Jak II: 1.25 MB (the pipeline's halves 640 KB). Haven City frames
+ * take ~190 KB of commands (Azahar, baseline C: 835-854 draws, 75k triangles); a frame that
+ * doesn't fit switches the pipeline off (CtrRenderer::render_frame) and has all of it. */
+#define CMDBUF_BYTES (1280 * 1024)
+#else
 #define CMDBUF_BYTES (2 * 1024 * 1024)
+#endif
 /* command words kept free for the end of the frame, and needed for one draw with state changes */
 #define CMD_RESERVE_WORDS 512
 #define CMD_DRAW_WORDS 384
@@ -1742,12 +1749,16 @@ static int s_pipeline = 0;
  * (AI-assisted) They are the two halves of citro3d's own command buffer (C3D_Init's
  * CMDBUF_BYTES), which citro3d only writes in frames without the pipeline: 2 MB of linear memory
  * less. Its C3D_FrameBegin in ctr_gpu_frame_end only points gpuCmdBuf there for a moment. */
-#define PIPE_CMD_BYTES (1024 * 1024)
+#define PIPE_CMD_BYTES (CMDBUF_BYTES / 2) /* (AI-assisted, j2-mem2) Jak 1: 1 MB, as before */
 _Static_assert(2 * PIPE_CMD_BYTES <= CMDBUF_BYTES, "the pipeline's buffers are halves of citro3d's");
 static void defer_linear_free(void* mem);
 static u32* s_cmdbufs[2];
 static uint8_t* s_vbufs[2];
 static int s_k;
+
+unsigned int ctr_gpu_cmd_buffer_kb(void) {
+  return (s_pipeline ? PIPE_CMD_BYTES : CMDBUF_BYTES) / 1024;
+}
 
 int ctr_gpu_set_pipeline(int on) {
   if (!g.ready || g.in_frame) {

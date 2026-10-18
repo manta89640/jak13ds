@@ -561,6 +561,9 @@ LinkedFunctionTable gLinkedFunctionTable;
 Rng gRng;
 PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2CLinkCallbacks = {
     //////// JAK 1
+#if OPENGOAL_NO_JAK1
+    {},  // (AI-assisted, j2-mem2) see game_common_types.h
+#else
     {{"font", {jak1::draw_string::link}},
      {"sparticle-launcher", {jak1::particle_adgif::link, jak1::sp_launch_particles_var::link}},
      {"sparticle", {jak1::sp_process_block_3d::link, jak1::sp_process_block_2d::link}},
@@ -634,6 +637,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
       {jak1::draw_inline_array_instance_tie::link,
        jak1::draw_inline_array_prototype_tie_generic_asm::link}},
      {"generic-tie", {jak1::generic_tie_dma_to_spad_sync::link, jak1::generic_tie_convert::link}}},
+#endif  // OPENGOAL_NO_JAK1
 #if !OPENGOAL_ONLY_JAK1
     /////////// JAK 2
     {{"types-h", {jak2::mem_copy::link}},  // (AI-assisted) mem-copy! (native2_misc.cpp)
@@ -974,11 +978,13 @@ void LinkedFunctionTable::reg(const std::string& name,
   // this is short stub that will jump to the appropriate function.
   Ptr<u8> jump_to_asm;
   switch (g_game_version) {
+#if !OPENGOAL_NO_JAK1
     case GameVersion::Jak1:
       jump_to_asm = Ptr<u8>(::jak1::alloc_heap_object(s7.offset + jak1_symbols::FIX_SYM_GLOBAL_HEAP,
                                                       *(s7 + jak1_symbols::FIX_SYM_FUNCTION_TYPE),
                                                       0x40, UNKNOWN_PP));
       break;
+#endif
 #if !OPENGOAL_ONLY_JAK1
     case GameVersion::Jak2:
       jump_to_asm = Ptr<u8>(::jak2::alloc_heap_object(
