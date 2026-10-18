@@ -289,8 +289,15 @@ game-save header, `info-int32 8` = `"KERA"`): loading that save brings her back,
 new games are Jak. Only the picture changes: the game asks the renderer for `keira-as-eichar-lod0`
 instead of Jak's model (`bones.gc` `pc-merc-draw-request`, the player process only: cutscenes
 keep their own Jak; cutscenes that animate the player show Keira), and the renderer draws Keira from `KEIRA.c3l` with Jak's animation
-(`CtrKeiraRig.h`, `c3l_format.md`). Daxter stays where Jak's shoulder is; the shadow is Jak's
-(the game's shadow volume of his mesh). Host test without a save: `CTR_KEIRA_FORCE=1`.
+(`CtrKeiraRig.h`, `c3l_format.md`). Daxter stays where Jak's shoulder is. (AI-assisted, round 2)
+Her shadow is her own: 18 convex hulls of her body parts (`<model>~shadow` in KEIRA.c3l), drawn by
+`CtrShadowVolumes` in place of Jak's volume with his light and bottom plane. Her hands are put on
+Jak's wrists by a two-bone IK of her arms (stretched up to 1.2x when his reach is longer; host
+measurement: wrist gap 0.25-0.36 m mean before, 0 after, at most 5 cm when the cap is hit). Her
+face: a blink of her own eyelids about every 4 s, and Jak's cutscene blend shape weights mapped to
+her targets (jaw, lips, mouth corners, lids, brows). Her ponytail swings on a damped spring in the
+world. Host test without a save: `CTR_KEIRA_FORCE=1`; host A/B: `CTR_KEIRA_NO_IK`,
+`CTR_KEIRA_JAK_SHADOW`, `CTR_KEIRA_IK_LOG`.
 
 ## Platform pieces
 

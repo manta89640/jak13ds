@@ -6,8 +6,11 @@
 
 #include "CtrShadow.h"
 
+#include "game/graphics/ctr/CtrKeiraRig.h"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/dma/dma.h"
@@ -286,7 +289,152 @@ bool CtrShadowVolumes::ensure_transformed() {
   return true;
 }
 
+void CtrShadowVolumes::keira_check_object() {
+  m_keira_obj = false;
+  const ctr_keira::ShadowFrame* f = ctr_keira::shadow_frame(m_frame);
+  if (!f || m_ntop < 3) {
+    return;
+  }
+#ifndef __3DS__
+  // host A/B pictures: Jak's shadow mesh for her (env CTR_KEIRA_JAK_SHADOW)
+  static const bool jak_shadow = getenv("CTR_KEIRA_JAK_SHADOW") != nullptr;
+  if (jak_shadow) {
+    return;
+  }
+#endif
+  float c[3];
+  ctr_keira::shadow_center(*f, c);
+  double t[3] = {0, 0, 0};
+  for (int i = 0; i < m_ntop; i++) {
+    for (int k = 0; k < 3; k++) {
+      t[k] += m_top[4 * i + k];
+    }
+  }
+  float dp = 0, dm = 0;
+  for (int k = 0; k < 3; k++) {
+    const float m = (float)(t[k] / m_ntop);
+    dp += (m - c[k]) * (m - c[k]);
+    dm += (m + c[k]) * (m + c[k]);
+  }
+  constexpr float kMatch = 1.2f * 4096.f;  // Jak's shadow mesh's center near her body's
+  if (std::min(dp, dm) < kMatch * kMatch) {
+    m_keira_obj = true;
+    m_keira_sign = dp <= dm ? 1.f : -1.f;
+    m_obj_dropped = true;  // (not counted: replaced)
+  }
+}
+
+void CtrShadowVolumes::keira_emit() {
+  const ctr_keira::ShadowFrame* f = ctr_keira::shadow_frame(m_frame);
+  if (!f || !m_top || !m_dual || m_keira_done) {
+    return;
+  }
+  const int n = std::min(m_ntop, m_ndual);
+  // the light (top -> bottom) and the bottom plane, from Jak's tables
+  float L[3] = {0, 0, 0};
+  int used = 0;
+  for (int i = 0; i < n; i++) {
+    float d[3];
+    for (int k = 0; k < 3; k++) {
+      d[k] = m_dual[4 * i + k] - m_top[4 * i + k];
+    }
+    const float l = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (l > 1.f) {
+      for (int k = 0; k < 3; k++) {
+        L[k] += d[k] / l;
+      }
+      used++;
+    }
+  }
+  const float ll = std::sqrt(L[0] * L[0] + L[1] * L[1] + L[2] * L[2]);
+  if (used < 3 || ll < 1e-3f) {
+    return;
+  }
+  for (float& x : L) {
+    x /= ll;
+  }
+  // three far apart points of the bottom table
+  auto P = [&](int i) { return m_dual + 4 * i; };
+  int a = 0, b = 0, c = 0;
+  float best = -1;
+  for (int i = 1; i < n; i++) {
+    float d2 = 0;
+    for (int k = 0; k < 3; k++) {
+      d2 += (P(i)[k] - P(0)[k]) * (P(i)[k] - P(0)[k]);
+    }
+    if (d2 > best) {
+      best = d2;
+      b = i;
+    }
+  }
+  float nrm[3] = {0, 0, 0};
+  best = -1;
+  for (int i = 1; i < n; i++) {
+    const float u[3] = {P(b)[0] - P(a)[0], P(b)[1] - P(a)[1], P(b)[2] - P(a)[2]};
+    const float v[3] = {P(i)[0] - P(a)[0], P(i)[1] - P(a)[1], P(i)[2] - P(a)[2]};
+    const float x[3] = {u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                        u[0] * v[1] - u[1] * v[0]};
+    const float l2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+    if (l2 > best) {
+      best = l2;
+      c = i;
+      memcpy(nrm, x, sizeof(nrm));
+    }
+  }
+  const float nl = std::sqrt(best);
+  if (nl < 1.f) {
+    return;  // (the bottom points on a line)
+  }
+  float plane[4];
+  for (int k = 0; k < 3; k++) {
+    plane[k] = nrm[k] / nl;
+  }
+  plane[3] = plane[0] * P(a)[0] + plane[1] * P(a)[1] + plane[2] * P(a)[2];
+  (void)c;
+  m_keira_done = true;
+  if (!m_keira_replaced++) {
+    lg::info("[ctr] shadow: Keira's hulls drawn for Jak's shadow ({} hulls, sign {}, light {:.2f} "
+             "{:.2f} {:.2f})",
+             f->mesh->nhulls, m_keira_sign, L[0], L[1], L[2]);
+  }
+  // her hulls, each an object of its own (its own tables and screen rectangle)
+  static ctr_keira::HullVolume hv;
+  for (int h = 0; h < f->mesh->nhulls; h++) {
+    if (!ctr_keira::hull_volume(*f, h, m_keira_sign, L, plane, &hv) || hv.nv < 4) {
+      continue;
+    }
+    m_top = hv.T;
+    m_dual = hv.D;
+    m_ntop = m_ndual = hv.nv;
+    m_obj_open = true;
+    m_obj_transformed = m_obj_dropped = m_obj_any = false;
+    if (!ensure_transformed()) {
+      m_obj_open = false;
+      continue;
+    }
+    if (m_nf + m_nb + 6 * (hv.ntris + hv.nedges) > m_icap) {
+      drop_object();
+      m_obj_open = false;
+      break;
+    }
+    tris<false>(hv.tris, hv.ntris, false);
+    edges<false>(hv.edges, hv.nedges);
+    m_obj_any = m_nf + m_nb > m_obj_f0 + m_obj_b0;
+    close_object();
+  }
+  m_top = m_dual = nullptr;
+  m_ntop = m_ndual = 0;
+}
+
 void CtrShadowVolumes::close_object() {
+  if (m_keira_obj) {
+    // (AI-assisted) Jak's (not drawn): hers instead
+    m_keira_obj = false;
+    m_obj_open = false;
+    m_obj_any = false;
+    keira_emit();
+    return;
+  }
   if (m_obj_open && m_obj_any) {
     m_stats.objects++;
     if (m_obj_full) {
@@ -413,6 +561,7 @@ void CtrShadowVolumes::transfer(const DmaTransfer& t) {
         m_obj_dropped = true;
         m_stats.capped++;
       }
+      keira_check_object();
     } else if (up.addr_qw == kVuDual) {
       if (m_obj_open && !m_obj_transformed) {
         m_dual = data;
@@ -513,6 +662,7 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   m_vol.begin(nullptr, CtrShadowVolumes::kMaxVerts, nullptr, m_back.data(),
               CtrShadowVolumes::kMaxIndices);
+  m_vol.set_frame(rs.frame_idx);
   m_reserved = false;
   bool no_room = false;
   // (AI-assisted) config shadow_casters: only the N objects that look biggest from the camera
@@ -570,11 +720,11 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     const auto& st = m_vol.stats();
     lg::debug("[ctr] shadow: {} objects ({} left out, {} over shadow_casters), {} vertices, {} "
               "front + {} back triangles, {} rectangles{}; {} bad entries, {} bad packets, {} "
-              "without camera",
+              "without camera; Keira's shadow drawn {} times",
               st.objects, st.dropped_objects, st.capped, m_vol.vert_count(), m_vol.front_count() / 3,
               m_vol.back_count() / 3, m_vol.rect_count(),
               m_vol.full_screen() ? " (full screen)" : "", st.bad_entries, st.bad_packets,
-              st.no_camera);
+              st.no_camera, m_vol.keira_replaced());
   }
 }
 
