@@ -27,6 +27,9 @@ using sceSdTransIntrHandler = int (*)(int, void*);
 
 u32 sceSdGetSwitch(u32 entry);
 u32 sceSdGetAddr(u32 entry);
+// (AI-assisted) 3DS: the mixer calls this after each chunk (under its lock): sceSdGetAddr then
+// gives every voice's address as of the same moment (Voice::GetPublishedNax)
+void sceSdPublishVoiceAddrs();
 // (AI-assisted) port addition: the voice stopped (played a loop end block without repeat)
 bool sceSdVoiceStopped(u32 entry);
 void sceSdSetSwitch(u32 entry, u32 value);

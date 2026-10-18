@@ -57,6 +57,22 @@ u32 snd_ResidentBankBytes(u32* count) {
   return player ? player->ResidentBankBytes(count) : 0;
 }
 
+void snd_LockVoiceWrites() {
+#ifdef __3DS__
+  if (player) {
+    player->LockVoices();
+  }
+#endif
+}
+
+void snd_UnlockVoiceWrites() {
+#ifdef __3DS__
+  if (player) {
+    player->UnlockVoices();
+  }
+#endif
+}
+
 void snd_RunStreamsWithoutOutput(bool on) {
   if (player) {
     player->SetRunStreamsWithoutOutput(on);

@@ -22,6 +22,7 @@
 
 #ifdef __3DS__
 #include "game/kernel/common/kperf.h"
+#include "game/sound/sdshim.h"
 #include "platform/3ds/port/ctr_port.h"
 #endif
 
@@ -381,6 +382,7 @@ void Player::Tick(s16Output* stream, int samples) {
     spu += (u64)n * 48000;
     i += n;
   }
+  sceSdPublishVoiceAddrs();  // (AI-assisted) the overlord's stream voices, all at this moment
   return;
 #endif
   static int htick = 200;

@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "common/log/log.h"
 #include "common/util/FileUtil.h"
 
 #include "game/common/play_rpc_types.h"
@@ -11,6 +12,7 @@
 #include "game/overlord/common/isocommon.h"
 #include "game/overlord/jak2/iso.h"
 #include "game/overlord/jak2/iso_api.h"
+#include "game/overlord/jak2/spustreams.h"
 #include "game/overlord/jak2/streamlist.h"
 #include "game/overlord/jak2/vag.h"
 #include "game/runtime.h"
@@ -105,6 +107,10 @@ void* RPC_STR(unsigned int /*fno*/, void* _cmd, int /*y*/) {
       }
 
       // load data, using the cached header to find the location of the chunk.
+      if (vag_debug_on()) {
+        lg::info("[vagdbg] {:.0f} str-load {} part {} start", vag_debug_ms(), cmd->basename,
+                 cmd->section);
+      }
       if (!LoadISOFileChunkToEE(file_record, cmd->address,
                                 sCache[cache_entry].header.sizes[cmd->section],
                                 sCache[cache_entry].header.sectors[cmd->section])) {
@@ -115,6 +121,10 @@ void* RPC_STR(unsigned int /*fno*/, void* _cmd, int /*y*/) {
         // successful load!
         cmd->maxlen = sCache[cache_entry].header.sizes[cmd->section];
         cmd->result = 0;
+        if (vag_debug_on()) {
+          lg::info("[vagdbg] {:.0f} str-load {} part {} done ({} KB)", vag_debug_ms(),
+                   cmd->basename, cmd->section, cmd->maxlen >> 10);
+        }
       }
     }
   }

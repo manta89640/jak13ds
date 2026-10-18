@@ -63,6 +63,11 @@ class Player {
   u32 ResidentBankBytes(u32* count = nullptr);
   // (AI-assisted) snd_RunStreamsWithoutOutput
   void SetRunStreamsWithoutOutput(bool on) { mRunStreamsSilent = on; }
+#ifdef __3DS__
+  // (AI-assisted) snd_LockVoiceWrites: the mixer's lock, for the SPU register writes (sdshim)
+  void LockVoices() { mTickLock.lock(); }
+  void UnlockVoices() { mTickLock.unlock(); }
+#endif
 
   u32 PlaySound(BankHandle bank, u32 sound, s32 vol, s32 pan, s32 pm, s32 pb);
   u32 PlaySoundByName(BankHandle bank,
