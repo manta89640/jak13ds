@@ -101,7 +101,7 @@ void Player::InitCubeb() {
       lg::error("3DS sound: DSP not available (sdmc:/3ds/dspfirm.cdc?), no audio");
     }
   } else {
-    lg::info("3DS sound: off (no sdmc:/3ds/jak1/sound flag file)");
+    lg::info("3DS sound: off (config.ini sound = off)");
   }
   if (!g_output_active) {
     mHandlerThread = std::thread(&Player::HandlerTickThread, this);
@@ -203,8 +203,25 @@ void Player::HandlerTickThread() {
   using clock = std::chrono::steady_clock;
   constexpr auto kTick = std::chrono::nanoseconds(1000000000 / 240);
   auto next = clock::now();
+  // (AI-assisted) snd_RunStreamsWithoutOutput: Tick() makes the samples of 4 handler ticks (800
+  // SPU ticks) per wakeup into this buffer, which nobody plays. Only the permanent (stream)
+  // voices are in the synth then (VoiceManager drops the others without output), so it costs
+  // only while a stream plays.
+  static s16Output scratch[(800 * kMixRate + 47999) / 48000 + 1];
+  u64 acc = 0;
   while (!mHandlerThreadStop) {
     const u64 t_start = kperf::ticks();
+    if (mRunStreamsSilent.load(std::memory_order_relaxed)) {
+      acc += 800ull * kMixRate;
+      const int n = (int)(acc / 48000);
+      acc -= (u64)n * 48000;
+      Tick(scratch, n);
+      kperf::add_thread(kperf::Thread::SOUND, kperf::ticks() - t_start, 1);
+      kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, (u32)mHandlers.size());
+      next += 4 * kTick;
+      std::this_thread::sleep_until(next);
+      continue;
+    }
     // run 4 handler ticks per wakeup (60 Hz) to keep the thread cheap
     for (int i = 0; i < 4; i++) {
       std::scoped_lock lock(mTickLock);
@@ -299,6 +316,27 @@ long Player::sound_callback([[maybe_unused]] cubeb_stream* stream,
     return e && e[0] && e[0] != '0';
   }();
   if (silent) {
+    // (AI-assisted) a line every ~10 s of audio: what was mixed before it was zeroed (tests
+    // that need to know the sound engine made sound: the peak level and the share of non-zero
+    // frames), the sounds and voices playing
+    static u64 frames = 0, nonzero = 0;
+    static int peak = 0, max_voices = 0;
+    const s16* pcm = (const s16*)output_buffer;
+    for (long i = 0; i < nframes; i++) {
+      const int l = std::abs((int)pcm[2 * i]), r = std::abs((int)pcm[2 * i + 1]);
+      peak = std::max(peak, std::max(l, r));
+      nonzero += (l | r) != 0;
+    }
+    auto* self = (Player*)user;
+    max_voices = std::max(max_voices, self->mSynth.VoiceCount());
+    frames += nframes;
+    if (frames >= 480000) {
+      lg::info("[sound] mixed {:.1f} s: peak {}, {:.0f}% non-zero, {} sounds, up to {} voices",
+               frames / 48000.0, peak, 100.0 * nonzero / frames, self->mHandlers.size(),
+               max_voices);
+      frames = nonzero = 0;
+      peak = max_voices = 0;
+    }
     memset(output_buffer, 0, (size_t)nframes * sizeof(s16Output));
   }
   return nframes;
@@ -523,13 +561,33 @@ BankHandle Player::LoadBank(std::span<u8> bank) {
   // it: the mixer holds the lock while it mixes, so a long parse under it held up the audio.
   auto parsed = Loader::ParseBank(bank);
   std::scoped_lock lock(mTickLock);
-  return mLoader.AddBank(std::move(parsed));
+  auto handle = mLoader.AddBank(std::move(parsed));
+  if (handle) {
+    mBankBytes[handle] = (u32)bank.size();
+  }
+  return handle;
 }
 
 BankHandle Player::LoadBank(std::span<u8> bank, std::unique_ptr<u8[]> owner) {
   auto parsed = Loader::ParseBank(bank, &owner);
   std::scoped_lock lock(mTickLock);
-  return mLoader.AddBank(std::move(parsed));
+  auto handle = mLoader.AddBank(std::move(parsed));
+  if (handle) {
+    mBankBytes[handle] = (u32)bank.size();
+  }
+  return handle;
+}
+
+u32 Player::ResidentBankBytes(u32* count) {
+  std::scoped_lock lock(mTickLock);
+  u32 total = 0;
+  for (auto& [h, n] : mBankBytes) {
+    total += n;
+  }
+  if (count) {
+    *count = (u32)mBankBytes.size();
+  }
+  return total;
 }
 
 void Player::UnloadBank(BankHandle bank_handle) {
@@ -548,6 +606,7 @@ void Player::UnloadBank(BankHandle bank_handle) {
   }
 
   mLoader.UnloadBank(bank_handle);
+  mBankBytes.erase(bank_handle);
 }
 
 void Player::SetPanTable(VolPair* pantable) {

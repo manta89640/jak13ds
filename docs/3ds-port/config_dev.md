@@ -56,7 +56,7 @@ code: `OPENGOAL_MIPS2C_NATIVE=0`, `OPENGOAL_BONES_NATIVE=0`, `OPENGOAL_COLLIDE_N
 
 ```ini
 sound = on                 # (user key) sound output (off: silent; it costs CPU time). On by default since Oct 16
-sound_core = auto          # CPU core of the sound mixer: 2 (default on New 3DS: the render thread's core, which has room; core 0 runs the game logic), 0, 1
+sound_core = auto          # CPU core of the sound mixer: 2 (Jak 1's default on New 3DS: the render thread's core, which has room; core 0 runs the game logic), 1 (Jak II's default: the system core, 40% share; its render thread fills core 2), 0
 mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names (also pc-new-bones-mtx-calc). Debugging only
 perf_sections = off        # on: per-section timing in the log (slower)
 args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)

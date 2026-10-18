@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "common/log/log.h"
 #include "common/util/FileUtil.h"
 
 #include "game/overlord/common/srpc.h"
@@ -109,6 +110,10 @@ void QueueVAGStream(VagStrListNode* param_1) {
     cmd.unk_232 = '\x01';
   }
   cmd.unk_296 = 0;
+  // (AI-assisted) one line per voice stream started (dialogue, ambient, 989snd plugin streams)
+  lg::info("[sound] VAG stream {} (id {}, {}{})", cmd.name, cmd.id,
+           param_1->sound_handler ? "plugin" : "EE",
+           cmd.vag_dir_entry ? "" : ", not in VAGDIR");
   IsoQueueVagStream(&cmd, 1);
 }
 

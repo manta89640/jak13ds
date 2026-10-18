@@ -28,6 +28,12 @@ void snd_StopSoundSystem();
 // false when the sound system runs without audio output (3DS without the sound flag file or the
 // DSP firmware): the SPU voices never advance then.
 bool snd_HasOutput();
+// (AI-assisted) bytes held by the loaded sound banks / music (count: how many)
+u32 snd_ResidentBankBytes(u32* count);
+// (AI-assisted) 3DS: without audio output, still run the permanent SPU voices (the overlord's
+// VAG streams) into a scratch buffer. Jak II follows its streams by their play position; Jak 1
+// uses the fake VAG clock instead (overlord/jak1/iso.cpp). No effect elsewhere.
+void snd_RunStreamsWithoutOutput(bool on);
 s32 snd_GetTick();
 void snd_RegisterIOPMemAllocator(AllocFun alloc, FreeFun free);
 int snd_LockVoiceAllocator(bool block);

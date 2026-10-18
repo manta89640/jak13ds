@@ -23,7 +23,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | Natives (j2-nat-port, j2-nat-new) | Merged; always on (Oct 18: the `logic_native` key and the other native switches were removed, config_dev.md) |
 | Renderer (j2-render-bg, j2-render-fg) | Merged: backgrounds, merc, sky + clouds, particles, shadows, HUD, text, minimap |
 | **Integration build, baseline B (Oct 18)** | **Azahar slums 29.8 fps (30 Hz cap): logic 25-27 ms, render thread 28.5-29.3 ms, GPU busy 29-30 ms; staged in `port_test/3ds-sdcard-jak2-baseline-b`** (section below) |
-| Sound | Not started (Jak II overlord streaming on ndsp) |
+| Sound (j2-sound, Oct 18) | **Plays in Azahar** (muted runs): title stream, city music + banks, dialogue streams; 0 DSP drops, 0 late buffers. Mixer on core 1 (40% share): 12-14% of real time, 3.8-6.3 ms/frame there; slums 29.9 fps, render thread 27.7-28.2 ms (on core 2 it was 34 ms, 25-29 fps). 1.96 MB of banks in the slums. Compressed SD files (`--compress --compress-vag`) work for Jak II. Hardware not run. See 3ds_build.md "Jak II sound" |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -59,7 +59,7 @@ The frame is now bounded by the 30 Hz cap with the GPU close behind (29-30 ms bu
 config.ini: preset normal, sound off, renderer ctr; `data/out/jak2/iso` 605 files,
 `data/out/jak2/c3l` 148 files), README with what works and what's missing.
 
-**Known gaps:** no sound; texture animations other than the clouds and the sky gradient (Dark
+**Known gaps:** no sound (since added: j2-sound); texture animations other than the clouds and the sky gradient (Dark
 Jak / prison / oracle CLUT blends, waterfalls, lava, security walls, slime; background billboards
 black); no ocean (black areas on the title screen), screen effects or envmap shine; the minimap's
 circle mask; tie / shrub prototype visibility masks; linear memory nearly full in the city; other

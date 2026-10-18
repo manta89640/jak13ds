@@ -40,7 +40,8 @@
 #            Each file is checked with the game's decoder after compressing (iso_pack), and kept
 #            in --compress-cache (default build-3ds/iso-ogz-<codec>) until its source changes.
 #   --compress-types "DGO CGO ..."  extensions to compress (default: DGO CGO VIS TXT STR).
-#            Never SBK/MUS (the sound loader reads those itself) or the VAGWAD audio streams.
+#            Never SBK/MUS (the sound loader reads those itself) or the VAGWAD audio streams,
+#            nor Jak II's CGO files (its kernel reads them itself).
 #   --compress-vag  also the VAGWAD.* voice streams (all languages), as zstd + ADPCM frame split
 #            in 16 KB blocks (~0.67 of the size; works with or without --compress)
 #   --compress-cache DIR
@@ -163,6 +164,9 @@ file_codec() {  # file name -> the iso_pack codec to store it with, or nothing
   esac
   [ -n "$COMPRESS" ] || return
   case "$ext" in SBK|MUS|AYB) return ;; esac
+  # (AI-assisted) Jak II's kernel reads KERNEL.CGO / GAME.CGO itself (kernel/jak2/kdgo.cpp), not
+  # through the overlord's fake ISO: they stay as they are
+  [ "$GAME" = jak2 ] && [ "$ext" = CGO ] && return
   for t in $COMPRESS_TYPES; do [ "$ext" = "$t" ] && echo "$COMPRESS" && return; done
 }
 compressed_type() { [ -n "$(file_codec "$1")" ]; }
@@ -189,6 +193,9 @@ if [ -n "$COMPRESS" ] || [ "$COMPRESS_VAG" = 1 ]; then
     [ "$GAME" = jak2 ] && COMPRESS_CACHE="$ROOT/build-3ds-jak2/iso-ogz-${COMPRESS:-vag}"
   fi
   mkdir -p "$COMPRESS_CACHE"
+  # (AI-assisted) blocks of the overlord's read page: Jak 1 reads 48 KB pages, Jak II 32 KB ones
+  # (iso_cd.cpp), so a page read decodes one whole block straight into its buffer
+  PACK_BS=0xc000; [ "$GAME" = jak2 ] && PACK_BS=0x8000
   todo=()
   for f in "$ISO"/*; do
     b="$(basename "$f")"
@@ -199,8 +206,8 @@ if [ -n "$COMPRESS" ] || [ "$COMPRESS_VAG" = 1 ]; then
   if [ ${#todo[@]} -gt 0 ]; then
     echo "compressing ${#todo[@]} files into $COMPRESS_CACHE"
     printf '%s\n' "${todo[@]}" |
-      xargs -P 8 -I{} sh -c 'c="${2%% *}"; f="${2#* }"; b="$(basename "$f")"; bs=0xc000; [ "$c" = zstd-adpcm ] && bs=0x4000; "$1" --codec "$c" --block-size $bs "$f" "$3/$b.ogz.tmp" && mv "$3/$b.ogz.tmp" "$3/$b.ogz" || { echo "iso_pack failed on $f" >&2; exit 255; }' \
-        _ "$PACK" {} "$COMPRESS_CACHE"
+      xargs -P 8 -I{} sh -c 'c="${2%% *}"; f="${2#* }"; b="$(basename "$f")"; bs=$4; [ "$c" = zstd-adpcm ] && bs=0x4000; "$1" --codec "$c" --block-size $bs "$f" "$3/$b.ogz.tmp" && mv "$3/$b.ogz.tmp" "$3/$b.ogz" || { echo "iso_pack failed on $f" >&2; exit 255; }' \
+        _ "$PACK" {} "$COMPRESS_CACHE" "$PACK_BS"
   fi
 fi
 

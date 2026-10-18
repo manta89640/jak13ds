@@ -31,6 +31,7 @@ class Synth {
   // else changes the voices meanwhile): one voice at a time over the block. ratio: SPU ticks per
   // output sample, 16.16 (see Voice::RunBlock).
   void Tick(s16Output* out, int samples, u32 ratio = 0x10000);
+#endif
   // (AI-assisted) voices that aren't stopped (statistics)
   int VoiceCount() const {
     int n = 0;
@@ -39,7 +40,6 @@ class Synth {
     }
     return n;
   }
-#endif
   void AddVoice(std::shared_ptr<Voice> voice);
   void SetMasterVol(u32 volume);
 

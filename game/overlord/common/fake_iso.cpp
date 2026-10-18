@@ -33,8 +33,26 @@
 #include <future>
 #include <thread>
 
-#include "game/overlord/common/compressed_iso_file.h"
 #include "platform/3ds/port/ctr_port.h"
+#endif
+#ifdef OG_ISO_OGZ
+#include <cstdlib>
+
+#include "game/overlord/common/compressed_iso_file.h"
+
+namespace {
+bool ogz_enabled() {
+#ifdef __3DS__
+  return true;
+#else
+  static const bool on = [] {
+    const char* e = getenv("OPENGOAL_ISO_OGZ");
+    return e && e[0] == '1';
+  }();
+  return on;
+#endif
+}
+}  // namespace
 #endif
 
 using namespace iop;
@@ -99,10 +117,13 @@ int fake_iso_FS_Init() {
       std::string file_name = f.path().filename().string();
       std::string iso_name = file_name;
       bool compressed = false;
-#ifdef __3DS__
-      // (AI-assisted) X.ogz is the compressed X (stage_sd.sh --compress), and wins over X
+#ifdef OG_ISO_OGZ
+      // (AI-assisted) X.ogz is the compressed X (stage_sd.sh --compress), and wins over X. On the
+      // host only with OPENGOAL_ISO_OGZ=1 (tests of the 3DS's compressed files; Jak II only reads
+      // them, game/overlord/jak2/iso_cd.cpp)
       const size_t sl = strlen(iso_cz::kSuffix);
-      if (iso_name.size() > sl && iso_name.compare(iso_name.size() - sl, sl, iso_cz::kSuffix) == 0) {
+      if (ogz_enabled() && iso_name.size() > sl &&
+          iso_name.compare(iso_name.size() - sl, sl, iso_cz::kSuffix) == 0) {
         iso_name.resize(iso_name.size() - sl);
         compressed = true;
       }
@@ -211,14 +232,16 @@ uint32_t FS_GetLength(FileRecord* fr) {
   file_util::assert_file_exists(path, "fake_iso FS_GetLength");
   FILE* fp = file_util::open_file(path, "rb");
   ASSERT(fp);
-#ifdef __3DS__
+#ifdef OG_ISO_OGZ
   // (AI-assisted) the length of the original file: in the .ogz header
   if (is_file_compressed(fr)) {
     iso_cz::Header h;
     const bool ok = fread(&h, sizeof(h), 1, fp) == 1;
     fclose(fp);
     ASSERT_MSG(ok, fmt::format("[FAKEISO] bad compressed file {}", path));
+#ifdef __3DS__
     iop::iWakeupThread(thread_to_wake);
+#endif
     return h.size;
   }
 #endif
