@@ -522,9 +522,14 @@ platform/3ds/tools/run_my_emu.sh --game jak2 --cia build-3ds-jak2/jak2.cia ...  
   `runtime.cpp` and `mips2c_table.cpp`) and `OG3DS_GAME_JAK2=1`. Not on the 3DS: sqlite (the debug
   editor's database: `initialize_sql_db` does nothing), the REPL user name, and the PC renderer's
   merc mutex (`platform/3ds/port/ctr_jak2_stubs.cpp`).
-- Null renderer (no picture), paced at 30 Hz (`null_fps` in config.ini), linear heap 8 MB (Jak 1:
-  40 MB, for the renderer); the regular heap gets 94 MB. Default `args = -boot -fakeiso -cbackend`
-  (Jak II's kernel starts the IOP from the "DVD" without `-fakeiso`).
+- (AI-assisted, j2-render-bg, Oct 18) The 3DS renderer (`renderer = ctr`, the default; `renderer =
+  null`: no picture, paced at 30 Hz by `null_fps`). Linear heap 32 MB (Jak 1: 40 MB); the regular
+  heap gets ~70 MB, just over gk's 68 MB check (36 MB of linear left 66 MB and was refused).
+  Level backgrounds: `ctr_level_converter --all out/jak2/fr3 out/jak2/c3l` (GAME.fr3 with
+  `--merc-only`), staged by `stage_sd.sh --game jak2` / `run_my_emu.sh --game jak2` from
+  `<proj>/out/jak2/c3l` into `sdmc:/3ds/jak2/data/out/jak2/c3l` (all 147 levels: 672 MB).
+  Default `args = -boot -fakeiso -cbackend` (Jak II's kernel starts the IOP from the "DVD" without
+  `-fakeiso`).
 - Title: "OpenGOAL Jak II", unique id 0xF7A21 (title 000400000F7A2100), product code CTR-H-OGJ2;
   gk.rsf's settings otherwise (124 MB, 804 MHz, the same SVC list). Icon from
   `platform/3ds/cia/local/jak2/icon.png` (git-ignored, like Jak 1's art).
@@ -532,7 +537,8 @@ platform/3ds/tools/run_my_emu.sh --game jak2 --cia build-3ds-jak2/jak2.cia ...  
   `platform/3ds/tools/config_template_jak2.ini` (sound = off, renderer = null).
 - Size (840 modules + 108 instances, -O2): .text 18.7 MB (17.1 MB without the instances; Jak 1:
   10.7 MB), .rodata 0.8 MB, .data 46 KB, .bss 2.3 MB. In the 124 MB mode: heap 96.9 MB, of which
-  ~55.6 MB used in the city (48 MB EE + the runtime), linear 8 MB.
+  ~55.6 MB used in the city (48 MB EE + the runtime), linear 8 MB (null renderer; 32 MB with the
+  renderer, heap ~70 MB).
 - Only the CIA has enough memory: a `.3dsx` in Azahar gets 62 MB of heap ("Not enough memory").
 
 ## Renderer (M4 phase 1)

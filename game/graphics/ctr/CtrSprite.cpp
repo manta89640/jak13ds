@@ -7,6 +7,7 @@
 #include "CtrSprite.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <cstring>
 
@@ -134,6 +135,13 @@ CtrSpriteRenderer::CtrSpriteRenderer(std::string name, int id, CtrVram* vram)
       m_vram(vram),
       m_direct(std::make_unique<CtrDirect>(vram)) {
   memset(m_camera, 0, sizeof(m_camera));
+  // (AI-assisted) Jak II: its frame data has one more GIF tag, its screen is 416 lines of a
+  // frame twice as tall (sprite3_3d.vert: SCISSOR_ADJUST * HEIGHT_SCALE)
+  m_jak2 = ctr_is_jak2();
+  if (m_jak2) {
+    m_inv_y = 1.f / 208.f;
+    m_big_half_gs = 20.f * 832.f / 240.f;
+  }
   memset(m_hud_matrix, 0, sizeof(m_hud_matrix));
 }
 
@@ -299,7 +307,8 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   }
 
   // the distorter first (like Sprite3::render_jak1): it reads the screen as drawn so far
-  if (read_distorter(dma, rs) && cs.sprites && cs.distort) {
+  // (AI-assisted) not for Jak II yet: its screen texture is 512 x 512 (tex0 th 9)
+  if (read_distorter(dma, rs) && cs.sprites && cs.distort && !m_jak2) {
     const double td = ctr_gpu_time_ms();
 #ifndef __3DS__
     ctr_gpu_soft_bucket("sprite-distort");
@@ -311,12 +320,22 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   // frame setup: direct data (3 qw), frame data, mscalf, base/offset
   auto direct_setup = dma.read_and_advance();
   auto frame_data = dma.read_and_advance();
-  if (direct_setup.size_bytes != 3 * 16 || frame_data.size_bytes != (int)sizeof(FrameDataJak1)) {
+  // (AI-assisted) Jak II's SpriteFrameData: sprite_3d_giftag_2 after sprite_3d_giftag
+  constexpr int kJak2Extra = 16;
+  constexpr int kGiftag2At = offsetof(FrameDataJak1, screen_shader);
+  const int fd_bytes = (int)sizeof(FrameDataJak1) + (m_jak2 ? kJak2Extra : 0);
+  if (direct_setup.size_bytes != 3 * 16 || frame_data.size_bytes != fd_bytes) {
     skip_rest();
     return;
   }
   FrameDataJak1 fd;
-  memcpy(&fd, frame_data.data, sizeof(fd));
+  if (m_jak2) {
+    memcpy(&fd, frame_data.data, kGiftag2At);
+    memcpy((u8*)&fd + kGiftag2At, frame_data.data + kGiftag2At + kJak2Extra,
+           sizeof(fd) - kGiftag2At);
+  } else {
+    memcpy(&fd, frame_data.data, sizeof(fd));
+  }
   memcpy(m_xy_array, fd.xy_array, sizeof(m_xy_array));
   memcpy(m_st_array, fd.st_array, sizeof(m_st_array));
   memcpy(m_xyz_array, fd.xyz_array, sizeof(m_xyz_array));
@@ -340,7 +359,7 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     }
     m_corner_reach = b * xy;
   }
-  m_size_cap = cs.sprite_max_size * 224.f;
+  m_size_cap = cs.sprite_max_size * (m_jak2 ? 416.f : 224.f);
   m_min_alpha_big = (float)cs.sprite_min_alpha;
   for (int k = 0; k < 4; k++) {
     for (int p = 0; p < 2; p++) {
@@ -746,11 +765,11 @@ void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
 
 template <CtrSpriteRenderer::Mode mode>
 void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
-  constexpr float kInvX = 1.f / 256.f, kInvY = 1.f / 112.f, kInvZ = 1.f / 16777215.f;
+  const float kInvX = 1.f / 256.f, kInvY = m_inv_y, kInvZ = 1.f / 16777215.f;
   // (AI-assisted) MODE_3D: a corner's GS position is t * (pfog0 / w) + hvdf, and its clip space
   // position that times w, so the division cancels: c = t * k + w * o (see the corner loop)
   const float k3x = m_pfog0 * (1.f / 256.f), o3x = (m_hvdf_offset.x() - 2048.f) * (1.f / 256.f);
-  const float k3y = -m_pfog0 * (1.f / 112.f), o3y = (2048.f - m_hvdf_offset.y()) * (1.f / 112.f);
+  const float k3y = -m_pfog0 * kInvY, o3y = (2048.f - m_hvdf_offset.y()) * kInvY;
   const float k3z = m_pfog0 * (1.f / 8388607.5f),
               o3z = m_hvdf_offset.z() * (1.f / 8388607.5f) - 1.f;
   // (AI-assisted) the frame's values in locals: the vertex stores could be to any float as far as
@@ -760,6 +779,8 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
   const float pfog0 = m_pfog0, inv_area = m_inv_area, min_alpha_big = m_min_alpha_big;
   const float corner_reach = m_corner_reach, min_scale = m_min_scale, max_scale = m_max_scale;
   const float size_cap = m_size_cap, deg_to_rad = m_deg_to_rad;
+  const float big_half_gs = m_big_half_gs;
+  const bool jak2 = m_jak2;
   // (AI-assisted) each chunk starts clamped (Sprite3: m_current_mode = m_default_mode, whose
   // clamp bits are set); the cached state of the last adgif holds the clamp mode it was made with
   if (!m_clamp_s || !m_clamp_t) {
@@ -793,6 +814,10 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     const float sy = v.flag_rot_sy.w();
     const s32 flag = as_int(v.flag_rot_sy.x());
     const s32 matrix = as_int(v.flag_rot_sy.y());
+    // (AI-assisted) Jak II: the glow code parks sprites with matrix -1 (Sprite3: skipped)
+    if (jak2 && matrix == -1) {
+      continue;
+    }
     // transform(): m[12 + i] + m[i] * x + m[4 + i] * y + m[8 + i] * z, the four lanes apart
     const float tw = m[15] + m[3] * px + m[7] * py + m[11] * pz;
     if (tw == 0) {
@@ -814,7 +839,7 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
       // (~20 pixels) is skipped below that alpha too (128 = opaque): mist and smoke layers that
       // add a few color steps each but blend a big area
       if (a < min_alpha_big &&
-          std::max(std::abs(scale_x), std::abs(scale_y)) * corner_reach > kBigHalfGs) {
+          std::max(std::abs(scale_x), std::abs(scale_y)) * corner_reach > big_half_gs) {
         m_stats.faint++;
         continue;
       }

@@ -65,6 +65,9 @@ class CtrDirect {
 
   CtrVram* m_vram;
   bool m_allow_depth = true;
+  // (AI-assisted) GS y to clip y: Jak 1 draws a 224 line field (1 / 112), Jak II a 416 line
+  // frame (direct_basic.vert: HEIGHT_SCALE 0.5, SCISSOR_ADJUST 512 / 416: 1 / 208)
+  float m_y_scale = 1.f / 112.f;
 
   // GS registers
   GsPrim m_prim;

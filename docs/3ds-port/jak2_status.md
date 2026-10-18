@@ -83,6 +83,41 @@ it): `cias/jak2.cia`, `3ds/jak2/` with gk.3dsx, config.ini, data/out/jak2/iso (6
 3. Sound (Jak 2 overlord streaming on ndsp), then a hardware run.
 4. Banner (Jak II logo model) and jingle for the CIA; it has the icon only.
 
+## Renderer: level backgrounds (j2-render-bg, Oct 18)
+
+(AI-assisted.) Branch `j2-render-bg`. Jak II's tfrag, tie and shrub (every kind: normal, alpha,
+water, envmapped ties' base pass) come from `.c3l` files made from Jak II's fr3 files by the same
+converter (`c3l_format.md` "Jak II"), loaded by the same `CtrLevels`, drawn by
+`CtrTfragRenderer::render_jak2` (`CtrRendererJak2Bg.cpp`: one renderer per level slot 0..5, set on
+all of the slot's background buckets; the first bucket with the level's camera, the
+`add-pc-tfrag3-data` packet, draws the whole level). Time of day (the level's mood itimes, as
+Jak 1), fog (`*fog-color*` from bucket 2), the game's visibility strings (bucket 2, all 6 slots;
+an all-zero string hides the level, as the PS2 and PC do: ctyindb seen from the slums), tie levels
+of detail with streaming, impostors, run culling, vista tier: all as in Jak 1. Jak II's GS y
+scale (`ctr_gs_y_scale`, j2-render-fg) in the level matrix. Jak II has no hfrag (Jak 3 only).
+The foreground (merc, sprites, HUD, text, sky, texture uploads) and the Jak II dispatch are
+j2-render-fg's.
+
+**Host (`gk --ctr-gfx`, `jak2_city.pad` plus shots):** the slums match the PC OpenGL reference
+(same geometry, lighting and fog; side-by-side shots in the j2-render-bg report). ~72-78k
+triangles per frame in the slums (ctysluma + ctywide; ctyindb loaded, hidden by its string).
+
+**Azahar (CIA, 804 MHz, `jak2_city.pad`, Oct 18):** the city draws.
+- Render thread (core 2): build 20-22 ms per frame, GPU busy 21-23 ms at 76-80k triangles, ~1150
+  draws (the GPU model 10.6 ms + 0.13 ms per 1000 triangles: ~21 ms). `auto_detail` climbs to
+  1.00 (shrubs 120 m, ties x3) because the frame is logic-bound.
+- Game thread: logic 74-77 ms (13 fps), the same as with the null renderer: rendering doesn't slow
+  the logic.
+- Memory (the problem): linear 32 MB, 128 KB free in the slums with ctyindb loaded (its load
+  had to make room); level pools 2.8 MB, stream arena 4 MB full. Heap ~72.3 MB, 67.6 MB used:
+  the renderer adds ~12 MB of heap (~6 MB fixed, ~2 MB per district).
+
+Not done yet: tie / shrub prototype visibility masks (Jak II hides prototypes by game state;
+everything is drawn), animated textures in the background (untextured, e.g. the billboards are
+black), the ocean, `ctr_level_ready` (the game doesn't wait for a level's `.c3l`), the DGO
+prefetch (`ctr_jak2_level_for_dgo` exists, nothing calls it yet), Jak II interiors for the vista
+tier.
+
 ## Paths
 
 | What | Where | Needed to resume? |

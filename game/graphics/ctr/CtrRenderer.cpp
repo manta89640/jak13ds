@@ -50,6 +50,16 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 // (AI-assisted) PMODE alpha from the game thread (ctr_set_pmode_alp), 1 = no fade
 static std::atomic<float> g_pmode_alp{1.f};
 
+// (AI-assisted) see CtrRenderer.h; set by the CtrRenderer constructor
+static float g_gs_y_scale = 512.f / 448.f;
+static bool g_is_jak2 = false;
+float ctr_gs_y_scale() {
+  return g_gs_y_scale;
+}
+bool ctr_is_jak2() {
+  return g_is_jak2;
+}
+
 namespace {
 std::string g_shot_dir;
 int g_shot_every = 0;
@@ -418,7 +428,18 @@ void CtrDirectBucketRenderer::deferred_sky(void* arg) {
 
 CtrRenderer::CtrRenderer()
     : m_vram(std::make_unique<CtrVram>()), m_levels(std::make_unique<CtrLevels>()) {
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+  // (AI-assisted) Jak II: its own bucket table (CtrRendererJak2.cpp)
+  if (g_game_version == GameVersion::Jak2) {
+    m_jak2 = true;
+    g_is_jak2 = true;
+    g_gs_y_scale = 512.f / 416.f * 0.5f;
+    init_buckets_jak2();
+    return;
+  }
+#endif
   using jak1::BucketId;
+  m_sprite_bucket = (int)BucketId::SPRITE;
   m_buckets.resize((int)BucketId::MAX_BUCKETS);
   auto set = [&](BucketId id, std::unique_ptr<CtrBucketRenderer> r) {
     m_buckets[(int)id] = std::move(r);
@@ -535,7 +556,22 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) The last frame's when they can't be read: black would fog everything to black.
   u8 clear[4];
   memcpy(clear, m_rs.fog_color, 4);
-  {
+  if (m_jak2) {
+    // (AI-assisted) Jak II: *fog-color* in the vif0 of the vis packets (bucket 2, like
+    // VisDataHandler)
+    DmaFollower peek(ee_mem, bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_2));
+    const u32 end = bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_2 + 1);
+    if (peek.current_tag_offset() != end) {
+      peek.read_and_advance();
+      if (peek.current_tag_offset() != end) {
+        auto vis = peek.read_and_advance();
+        if (vis.vifcode1().kind == VifCode::Kind::PC_PORT) {
+          const u32 v = vis.vif0();
+          memcpy(clear, &v, 4);
+        }
+      }
+    }
+  } else {
     DmaFollower peek(ee_mem, chain_offset);
     if (peek.current_tag().kind == DmaTag::Kind::CALL) {
       peek.read_and_advance();
@@ -575,7 +611,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // the whole screen (looking up): every pixel's color is drawn over
   {
     bool covered = false;
-    if (ctr_settings().skip_clear && m_sky_draw && ctr_settings().sky) {
+    if (ctr_settings().skip_clear && m_sky_draw && ctr_settings().sky && !m_jak2) {
       const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
       const u32 id = (u32)jak1::BucketId::SKY_DRAW;
       DmaFollower dma(ee_mem, base + 16 * id);
@@ -635,7 +671,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
     g_pad_shot.clear();
   }
-  dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
+  if (m_jak2) {
+    dispatch_buckets_jak2(DmaFollower(ee_mem, chain_offset));
+  } else {
+    dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
+  }
   ctr_gpu_diag_stage("pmode fade");
 #ifndef __3DS__
   ctr_gpu_soft_bucket("pmode-fade");
@@ -850,10 +890,9 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
   CtrRenderState rs;
   rs.ee_mem = (const u8*)ee_mem;
   rs.offset_of_s7 = s7.offset;
-  const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
   for (auto& [id, merc] : m_merc) {
-    rs.next_bucket = base + 16 * (id + 1);
-    DmaFollower dma(ee_mem, base + 16 * id);
+    rs.next_bucket = bucket_tag(chain_offset, id + 1);
+    DmaFollower dma(ee_mem, bucket_tag(chain_offset, id));
     merc->snapshot_bones(dma, rs);
   }
   prepare_sprites(ee_mem, chain_offset);
@@ -867,11 +906,15 @@ void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
   CtrRenderState rs;
   rs.ee_mem = (const u8*)ee_mem;
   rs.offset_of_s7 = s7.offset;
-  const u32 base = chain_offset + 16;
-  const int id = (int)jak1::BucketId::SPRITE;
-  rs.next_bucket = base + 16 * (id + 1);
-  DmaFollower dma(ee_mem, base + 16 * id);
+  const int id = m_sprite_bucket;
+  rs.next_bucket = bucket_tag(chain_offset, id + 1);
+  DmaFollower dma(ee_mem, bucket_tag(chain_offset, id));
   m_sprite->snapshot(dma, rs);
+}
+
+u32 CtrRenderer::bucket_tag(u32 chain_offset, int id) const {
+  // Jak 1: a call to the default registers first (see dispatch_buckets_jak1); Jak II: none
+  return chain_offset + (m_jak2 ? 0 : 16) + 16 * id;
 }
 
 void CtrRenderer::hw_counters_frame() {
@@ -1154,6 +1197,28 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   // (AI-assisted) the visibility strings come with bucket tfrag-0 every frame
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
+  run_buckets(dma, (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0, 0);
+}
+
+void CtrRenderer::dispatch_buckets_jak2(DmaFollower dma) {
+  // (AI-assisted) as OpenGLRenderer::dispatch_buckets_jak2: bucket 0 is the start of the chain
+  m_rs.buckets_base = dma.current_tag_offset();
+  m_rs.next_bucket = m_rs.buckets_base + 16;
+  m_rs.default_regs_buffer = 0xffffffff;  // none
+  if (m_bucket_ms.size() != m_buckets.size()) {
+    m_bucket_ms.assign(m_buckets.size(), 0.0);
+  }
+  m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
+  m_rs.vis_packets = 0;
+  if (!run_buckets(dma, (size_t)jak2::BucketId::TEX_L0_ALPHA, 1)) {
+    return;
+  }
+  if (m_rs.call_vif_callback) {
+    vif_interrupt_callback(m_buckets.size());
+  }
+}
+
+bool CtrRenderer::run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int callback_offset) {
   const bool profiling = m_profile_mode > 0;
   if (m_bucket_phase.size() != m_buckets.size()) {
     // (AI-assisted, gpu-rt) gpu_breakdown: the GPU phase of each bucket renderer (-1: keeps the
@@ -1177,7 +1242,7 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
     if (m_bucket_phase[bucket_id] >= 0) {
       ctr_gpu_phase(m_bucket_phase[bucket_id]);  // (AI-assisted, gpu-rt) gpu_breakdown
     }
-    if (bucket_id >= (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0) {
+    if (bucket_id >= sky_hook_bucket) {
       // (AI-assisted) sky_last: at the latest before the translucent buckets (and the sky blend
       // in tfrag-trans, which starts this frame's sky textures)
       ctr_gpu_run_sky_hook();
@@ -1201,13 +1266,14 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
     if (dma.current_tag_offset() != m_rs.next_bucket) {
       lg::error("[ctr] bucket {} ({}) did not end at the next bucket", bucket_id,
                 m_buckets[bucket_id]->name());
-      return;
+      return false;
     }
     m_rs.next_bucket += 16;
     if (m_rs.call_vif_callback) {
-      vif_interrupt_callback(bucket_id);
+      vif_interrupt_callback(bucket_id + callback_offset);
     }
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

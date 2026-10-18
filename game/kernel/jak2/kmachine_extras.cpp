@@ -146,6 +146,18 @@ void pc_set_levels(u32 lev_list) {
     }
   }
 
+#ifdef __3DS__
+  // (AI-assisted) level-update calls this every frame. The 3DS renderer's set_levels waits for the
+  // render thread to finish its frame (as Jak 1's pc_set_levels notes), so the game thread and
+  // the render thread would never run at the same time. The list only matters when it changes.
+  static std::vector<std::string> last_levels;
+  static bool have_last = false;
+  if (have_last && levels == last_levels) {
+    return;
+  }
+  last_levels = levels;
+  have_last = true;
+#endif
   Gfx::GetCurrentRenderer()->set_levels(levels);
 }
 

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -31,6 +32,7 @@
 #include "game/graphics/ctr/c3l_reader.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
+#include "game/runtime.h"  // (AI-assisted) g_game_version
 
 #ifdef __3DS__
 #include "game/overlord/jak1/fake_iso.h"  // (AI-assisted) io_heap_free
@@ -493,7 +495,9 @@ size_t c3l_read_window() {
 #ifdef __3DS__
   // the heap's level-load peak leaves ~3 MB (the DGO's read-ahead window is there too): at most
   // the old reads' 128 KB window when it's low
-  if (bytes > 128 * 1024 && jak1::io_heap_free() < (2u << 20)) {
+  // (AI-assisted) Jak 1's overlord heap (Jak II's overlord doesn't use it)
+  if (bytes > 128 * 1024 && g_game_version == GameVersion::Jak1 &&
+      jak1::io_heap_free() < (2u << 20)) {
     bytes = 128 * 1024;
   }
 #endif
@@ -796,8 +800,86 @@ void CtrLevels::request_repair(CtrLevelData& lev) {
   request(job);
 }
 
+fs::path ctr_level_c3l_dir() {
+  // (AI-assisted) the running game's: out/jak1/c3l, out/jak2/c3l
+  return file_util::get_jak_project_dir() / "out" / version_to_game_name(g_game_version) / "c3l";
+}
+
+// (AI-assisted) Jak II: the level of a DGO file (its nickname, as the game asks for it: "CTA.DGO"
+// is ctysluma), from goal_src/jak2/engine/level/level-info.gc's level-load-info :nickname / :name.
+// nullptr: not a level's DGO.
+const char* ctr_jak2_level_for_dgo(const char* dgo_name) {
+  static const struct {
+    const char* dgo;
+    const char* level;
+  } kLevels[] = {
+      {"INT", "intro"}, {"DEMO", "demo"}, {"TITLE", "title"}, {"VIN", "vinroom"}, {"DMI", "drillmid"},
+      {"DRI", "drill"}, {"DRB", "drillb"}, {"DRILLMTN", "drillmtn"}, {"SEW", "sewer"},
+      {"SEB", "sewerb"}, {"SWE", "sewesc"}, {"SWB", "sewescb"}, {"TOA", "tomba"}, {"TOB", "tombb"},
+      {"TOC", "tombc"}, {"TOD", "tombd"}, {"TOE", "tombe"}, {"TOMBEXT", "tombext"},
+      {"TBO", "tombboss"}, {"UND", "under"}, {"UNB", "underb"}, {"PAC", "palcab"},
+      {"PAS", "palshaft"}, {"PALBOSS", "palboss"}, {"PAR", "palroof"}, {"PALOUT", "palout"},
+      {"THR", "throne"}, {"LBRNERMK", "lbrnermk"}, {"LASHTHRN", "lashthrn"}, {"LTHRNOUT", "lthrnout"},
+      {"PAE", "palent"}, {"PRI", "prison"}, {"LDJAKBRN", "ldjakbrn"}, {"LPRSNCST", "lprsncst"},
+      {"FEA", "forexita"}, {"FEB", "forexitb"}, {"FRA", "forresca"}, {"FRB", "forrescb"},
+      {"FDA", "fordumpa"}, {"FDB", "fordumpb"}, {"FORDUMPC", "fordumpc"}, {"FORDUMPD", "fordumpd"},
+      {"STR", "strip"}, {"RUI", "ruins"}, {"SAG", "sagehut"}, {"ATO", "atoll"}, {"ATE", "atollext"},
+      {"MTN", "mountain"}, {"MTX", "mtnext"}, {"FOR", "forest"}, {"FOB", "forestb"},
+      {"MCN", "mincan"}, {"CWI", "ctywide"}, {"LWIDEA", "lwidea"}, {"LWIDEB", "lwideb"},
+      {"LWIDEC", "lwidec"}, {"CTYKORA", "ctykora"}, {"CTYASHA", "ctyasha"}, {"CGA", "ctygena"},
+      {"CGB", "ctygenb"}, {"CGC", "ctygenc"}, {"CTA", "ctysluma"}, {"CTB", "ctyslumb"},
+      {"CTC", "ctyslumc"}, {"CPO", "ctyport"}, {"LJKDXASH", "ljkdxash"}, {"CFA", "ctyfarma"},
+      {"CFB", "ctyfarmb"}, {"CIA", "ctyinda"}, {"COA", "consite"}, {"COB", "consiteb"},
+      {"CIB", "ctyindb"}, {"CMA", "ctymarka"}, {"CMB", "ctymarkb"}, {"CPA", "ctypal"},
+      {"STA", "stadium"}, {"STB", "stadiumb"}, {"STC", "stadiumc"}, {"STD", "stadiumd"},
+      {"SKA", "skatea"}, {"GARAGE", "garage"}, {"STADBLMP", "stadblmp"}, {"LWIDESTA", "lwidesta"},
+      {"LERROL", "lerrol"}, {"LKEIRIFT", "lkeirift"}, {"LRACELIT", "lracelit"},
+      {"LRACEBB", "lracebb"}, {"LRACEBF", "lracebf"}, {"LRACECB", "lracecb"}, {"LRACECF", "lracecf"},
+      {"LRACEDB", "lracedb"}, {"LRACEDF", "lracedf"}, {"LGARCSTA", "lgarcsta"},
+      {"LSAMERGD", "lsamergd"}, {"LERBRNGD", "lerbrngd"}, {"LSMYSBRT", "lsmysbrt"},
+      {"LASHGRD", "lashgrd"}, {"ONINTENT", "onintent"}, {"LTENTOUT", "ltentout"},
+      {"LTENTOB", "ltentob"}, {"KIOSK", "kiosk"}, {"ORACLE", "oracle"}, {"HIDEOUT", "hideout"},
+      {"LTRNTESS", "ltrntess"}, {"LTRNKRKD", "ltrnkrkd"}, {"LTRNYSAM", "ltrnysam"},
+      {"LYSAMSAM", "lysamsam"}, {"LYSKDCD", "lyskdcd"}, {"LKIDDOGE", "lkiddoge"},
+      {"LHELLDOG", "lhelldog"}, {"LPACKAGE", "lpackage"}, {"LSACK", "lsack"},
+      {"LPORTRUN", "lportrun"}, {"LSHUTTLE", "lshuttle"}, {"LMEETBRT", "lmeetbrt"},
+      {"LPOWER", "lpower"}, {"LERLCHAL", "lerlchal"}, {"LPRTRACE", "lprtrace"},
+      {"LBOMBBOT", "lbombbot"}, {"LBBUSH", "lbbush"}, {"LPROTECT", "lprotect"}, {"HIPHOG", "hiphog"},
+      {"LTESS", "ltess"}, {"LHIPOUT", "lhipout"}, {"LWHACK", "lwhack"}, {"LGUARD", "lguard"},
+      {"LCGUARD", "lcguard"}, {"LERLTESS", "lerltess"}, {"GGA", "gungame"}, {"DG1", "dig1"},
+      {"D3A", "dig3a"}, {"D3B", "dig3b"}, {"CAP", "caspad"}, {"CAS", "castle"}, {"CAB", "casboss"},
+      {"CASEXT", "casext"}, {"CASCITY", "cascity"}, {"VI1", "village1"}, {"INTROCST", "introcst"},
+      {"LCITYLOW", "lcitylow"}, {"LINTCSTB", "lintcstb"}, {"LJAKDAX", "ljakdax"}, {"NES", "nest"},
+      {"NEB", "nestb"}, {"OUTROCST", "outrocst"}, {"PORTWALL", "portwall"}, {"LOUTCSTB", "loutcstb"},
+      {"ISLAND1", "island1"}, {"SKATEPARK", "skatepark"}, {"HALFPIPE", "halfpipe"},
+      {"VIS", "vistest"}, {"WOODSTEST", "woodstest"}, {"TOBYTEST", "tobytest"},
+      {"CHARTEST", "chartest"}, {"DPT", "dptest"}, {"CTYFENCE", "ctyfence"}, {"4AARON", "4aaron"},
+      {"4PAL01", "4pal01"}, {"ANDREW01", "andrew01"}, {"BSBS", "bsbs"}, {"EITEST", "eitest"},
+      {"MIKETEST", "miketest"}, {"TATETEST", "tatetest"}, {"TESTSTDC", "teststdc"},
+      {"TESTSTDD", "teststdd"}, {"WASALL", "wasall"}, {"STADOCC", "stadocc"}, {"TSZ", "test-zone"},
+  };
+  if (!dgo_name) {
+    return nullptr;
+  }
+  std::string n(dgo_name);
+  const auto dot = n.find('.');
+  if (dot != std::string::npos) {
+    n.resize(dot);
+  }
+  for (auto& c : n) {
+    c = (char)toupper((unsigned char)c);
+  }
+  for (const auto& l : kLevels) {
+    if (n == l.dgo) {
+      return l.level;
+    }
+  }
+  return nullptr;
+}
+
 CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out) {
-  auto path = file_util::get_jak_project_dir() / "out" / "jak1" / "c3l" / (name + ".c3l");
+  // (AI-assisted) out/jak1/c3l or out/jak2/c3l (the running game's)
+  auto path = ctr_level_c3l_dir() / (name + ".c3l");
   if (!fs::exists(path)) {
     return LoadResult::MISSING;
   }
@@ -3233,13 +3315,15 @@ void CtrLevels::process_pending_loads(u64 frame) {
         ctr_gpu_pool_set_priority(m_common->tex_pool, 3);
         rebuild_merc_index();
       } else {
-        lg::warn("[ctr] no common models (out/jak1/c3l/GAME.c3l): Jak won't be drawn");
+        lg::warn("[ctr] no common models ({}/GAME.c3l): Jak won't be drawn",
+                 ctr_level_c3l_dir().string());
       }
       continue;
     }
     switch (d.result) {
       case LoadResult::MISSING:
-        lg::warn("[ctr] no background for level {} (out/jak1/c3l/{}.c3l)", name, name);
+        lg::warn("[ctr] no background for level {} ({}/{}.c3l)", name, ctr_level_c3l_dir().string(),
+                 name);
         m_missing[name] = true;
         break;
       case LoadResult::FAILED:
@@ -5170,6 +5254,45 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     lev->drawn_frame = rs.frame_idx;
     draw_level(*lev, pc_data.camera, rs);
   }
+  log_stats(rs, lev);
+}
+
+// (AI-assisted) Jak II: tfrag (tfrag.gc), tie (tie-methods.gc) and shrub (shrubbery.gc) all put
+// add-pc-tfrag3-data's packet (a PC_PORT transfer of TfragPcPortData) in their buckets; the rest of
+// their DMA is for the PS2's VU programs. The .c3l has all of the level's background, so the first
+// bucket of the slot with the camera this frame draws it, the others only skip their DMA.
+void CtrTfragRenderer::render_jak2(DmaFollower& dma, CtrRenderState& rs, int slot) {
+  {
+    static u64 s_logged = ~0ull;  // the streaming statistics, as render()
+    if (rs.log_now && s_logged != rs.frame_idx) {
+      s_logged = rs.frame_idx;
+      m_levels->stream_log();
+    }
+  }
+  TfragPcPortData pc_data;
+  bool have_data = false;
+  while (dma.current_tag_offset() != rs.next_bucket) {
+    auto t = dma.read_and_advance();
+    if (!have_data && t.size_bytes == sizeof(TfragPcPortData) &&
+        t.vifcode1().kind == VifCode::Kind::PC_PORT) {
+      memcpy(&pc_data, t.data, sizeof(pc_data));
+      pc_data.level_name[11] = '\0';
+      have_data = true;
+    }
+  }
+  if (!have_data) {
+    return;
+  }
+  CtrLevelData* lev = m_levels->get(pc_data.level_name, rs.frame_idx);
+  if (lev && lev->drawn_frame != rs.frame_idx) {
+    lev->drawn_frame = rs.frame_idx;
+    m_jak2_slot = slot;
+    draw_level(*lev, pc_data.camera, rs);
+  }
+  log_stats(rs, lev);
+}
+
+void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
   if (rs.log_now && m_level_draws) {
     lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
               m_level_draws);
@@ -5347,6 +5470,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // hidden by it always; tfrag only when the string is the level's own: seen from another
   // level's place the game picks the low resolution tfrag through these bits, which the 3DS
   // picks by distance (far_level) instead, so the detailed tfrag would get holes.
+  bool vis_own = false;
+  if (m_jak2_slot >= 0) {
+    // (AI-assisted) Jak II: the slot's string (bucket 2). It has no 3DS flags; the PC hides the
+    // level's tfrag and tie by it alike, so it counts as the level's own.
+    const auto& v = m_levels->jak2_vis();
+    const bool ok = m_jak2_slot < CtrJak2Vis::kSlots && v.valid[m_jak2_slot];
+    m_vis = settings.vis_culling && ok && !lev.vis_runs.empty() ? v.bits[m_jak2_slot] : nullptr;
+    vis_own = m_vis != nullptr;
+  } else {
   const int li = (m_id == (int)jak1::BucketId::TFRAG_LEVEL1 ||
                   m_id == (int)jak1::BucketId::TFRAG_TRANS1_AND_SKY_BLEND_LEVEL1 ||
                   m_id == (int)jak1::BucketId::TFRAG_DIRT_LEVEL1 ||
@@ -5355,7 +5487,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                      : 0;
   m_vis = settings.vis_culling && rs.vis_valid[li] && !lev.vis_runs.empty() ? rs.vis_bits[li]
                                                                             : nullptr;
-  const bool vis_own = m_vis && (rs.vis_flags[li] & 4);
+  vis_own = m_vis && (rs.vis_flags[li] & 4);
+  }
   // (AI-assisted) neighbour_vis: the string of a level the camera isn't in (computed from the
   // other level's data): the PS2 and PC draw its tfrag, low resolution tfrag included, by the bits
   const bool vis_nb = settings.neighbour_vis && m_vis && !vis_own;
@@ -5508,8 +5641,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
   ctr_gpu_pool_set_priority(lev.tex_pool, far_level ? 1 : 2);
-  // Jak 1 scissor adjust (tfrag3.vert: y *= 512 / 448)
-  constexpr float kYScale = 512.f / 448.f;
+  // Jak 1 scissor adjust (tfrag3.vert: y *= 512 / 448); (AI-assisted) Jak II's 512 / 416 * 0.5
+  const float kYScale = ctr_gs_y_scale();
   m_visible.clear();
   m_visible_slot.assign(lev.chunks.size(), -1);
   // (AI-assisted) run_culling (needs the spheres made at load)

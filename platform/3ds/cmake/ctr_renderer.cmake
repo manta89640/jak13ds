@@ -24,6 +24,13 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrVram.cpp
   ${OG_ROOT}/game/graphics/ctr/c3l_reader.cpp
 )
+# (AI-assisted) Jak II's bucket tables (CtrRendererJak2.h): only in the Jak II build
+if(OG3DS_GAME STREQUAL "jak2")
+  target_sources(og3ds_runtime PRIVATE
+    ${OG_ROOT}/game/graphics/ctr/CtrRendererJak2.cpp
+    ${OG_ROOT}/game/graphics/ctr/CtrRendererJak2Bg.cpp
+  )
+endif()
 
 # (AI-assisted) the decoders for compressed .c3l files (v11): LZ4 and zstd (decompression only)
 set(OG3DS_ZSTD ${OG_ROOT}/third-party/zstd/lib)
