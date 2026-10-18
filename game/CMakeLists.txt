@@ -59,6 +59,7 @@ set(RUNTIME_SOURCE
         graphics/ctr/CtrRenderer.cpp
         graphics/ctr/CtrRendererJak2.cpp
         graphics/ctr/CtrTexAnimJak2.cpp
+        graphics/ctr/CtrShadowJak2.cpp
         graphics/ctr/CtrRendererJak2Bg.cpp
         graphics/ctr/CtrVram.cpp
         graphics/ctr/c3l_reader.cpp

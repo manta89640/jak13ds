@@ -168,7 +168,8 @@ class CtrRenderer {
   // (AI-assisted) the DMA tag of a bucket in a chain (Jak 1: after the default registers call)
   u32 bucket_tag(u32 chain_offset, int id) const;
   bool m_jak2 = false;
-  std::vector<int> m_anim_buckets;  // (AI-assisted) Jak II buckets that may hold animation arrays
+  std::vector<int> m_anim_buckets;
+  std::unique_ptr<CtrBucketRenderer> m_jak2_eyes;  // (AI-assisted) CtrEyeRenderer, no bucket  // (AI-assisted) Jak II buckets that may hold animation arrays
   void tex_frame_done_jak2();
   int m_sprite_bucket = -1;  // (AI-assisted) prepare_sprites
   void draw_pmode_fade();

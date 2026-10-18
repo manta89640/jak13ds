@@ -25,6 +25,7 @@
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrShadow.h"
+#include "game/graphics/ctr/CtrShadowJak2.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrTexAnimJak2.h"
 #include "game/graphics/ctr/CtrVram.h"
@@ -126,8 +127,8 @@ void handle_anim_array(DmaFollower& dma, CtrRenderState& rs) {
  */
 class CtrJak2TexRenderer : public CtrBucketRenderer {
  public:
-  CtrJak2TexRenderer(std::string name, int id, CtrVram* vram, bool direct)
-      : CtrBucketRenderer(std::move(name), id) {
+  CtrJak2TexRenderer(std::string name, int id, CtrVram* vram, bool direct, CtrEyeRenderer* eyes)
+      : CtrBucketRenderer(std::move(name), id), m_eyes(eyes) {
     if (direct) {
       m_direct = std::make_unique<CtrDirect>(vram);
       m_direct->set_allow_depth(false);
@@ -145,6 +146,15 @@ class CtrJak2TexRenderer : public CtrBucketRenderer {
         dma.read_and_advance();
         handle_anim_array(dma, rs);
         continue;
+      }
+      // the eyes of the characters (TextureUploadHandler: handle_eye_dma2), their GS setup is
+      // 8 qw
+      if (m_eyes && tag.qwc == 8) {
+        const u32 before = dma.current_tag_offset();
+        m_eyes->handle_eye_dma(dma, rs);
+        if (dma.current_tag_offset() != before) {
+          continue;
+        }
       }
       auto data = dma.read_and_advance();
       if (data.size_bytes == 0 && data.vif0() == 0 && data.vif1() == 0) {
@@ -185,6 +195,7 @@ class CtrJak2TexRenderer : public CtrBucketRenderer {
 
  private:
   std::unique_ptr<CtrDirect> m_direct;
+  CtrEyeRenderer* m_eyes = nullptr;
 };
 
 /*! Jak II's direct buckets: GIF packets, with calls to the default registers in between. */
@@ -267,12 +278,18 @@ void CtrRenderer::init_buckets_jak2() {
   CtrJak2BucketSet set = [&](BucketId id, std::unique_ptr<CtrBucketRenderer> r) {
     m_buckets[(int)id] = std::move(r);
   };
+  // eyes: drawn to textures from the tex buckets, used by the merc eye draws (no bucket)
+  auto eyes = std::make_unique<CtrEyeRenderer>("eyes", -1, m_vram.get());
+  CtrEyeRenderer* eye_renderer = eyes.get();
+  m_jak2_eyes = std::move(eyes);
   auto tex = [&](BucketId id, bool direct = false) {
-    set(id, std::make_unique<CtrJak2TexRenderer>("tex", (int)id, m_vram.get(), direct));
+    set(id, std::make_unique<CtrJak2TexRenderer>("tex", (int)id, m_vram.get(), direct,
+                                                 eye_renderer));
     m_anim_buckets.push_back((int)id);
   };
   auto merc = [&](BucketId id) {
     auto r = std::make_unique<CtrMercRenderer>("merc", (int)id, m_levels.get());
+    r->set_eye_renderer(eye_renderer);
     m_merc.emplace_back((int)id, r.get());
     set(id, std::move(r));
   };
@@ -307,6 +324,10 @@ void CtrRenderer::init_buckets_jak2() {
   merc(BucketId::MERC_LCOM_PRIS2);
   tex(BucketId::TEX_LCOM_WATER);
   merc(BucketId::MERC_LCOM_WATER);
+  // shadow volumes (Shadow2): config.ini shadows = full with a stencil buffer
+  set(BucketId::SHADOW, std::make_unique<CtrShadowJak2Renderer>("shadow", (int)BucketId::SHADOW));
+  set(BucketId::SHADOW2,
+      std::make_unique<CtrShadowJak2Renderer>("shadow", (int)BucketId::SHADOW2));
   tex(BucketId::TEX_LCOM_SKY_POST);
   tex(BucketId::TEX_ALL_SPRITE);
   {
