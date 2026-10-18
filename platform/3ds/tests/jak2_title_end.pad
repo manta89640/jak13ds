@@ -1,0 +1,7 @@
+# (AI-assisted) Jak II: the title-movie-end view that the 3DS title ends up in (the intro scene released
+# early). Reproduces it on PC / host by jumping to that continue point.
+400 continue title-movie-end
+900 shot a0900
+1200 shot a1200
+1201 pos *target*
+1300 exit
