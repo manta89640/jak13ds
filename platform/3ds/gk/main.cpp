@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <sstream>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <malloc.h>
 #include <fstream>
@@ -182,13 +183,18 @@ int main(int /*argc*/, char** /*argv*/) {
 
   GameLaunchOptions game_options;
 #if OG3DS_GAME_JAK2
-  // (AI-assisted) the Jak II build (OG3DS_GAME=jak2): the logic with the null renderer for now
-  // (the Ctr renderer only knows Jak 1's buckets)
+  // (AI-assisted) the Jak II build (OG3DS_GAME=jak2): the 3DS renderer with Jak II's buckets;
+  // config.ini renderer = null: no picture, the logic alone (the null renderer paces vsync)
   game_options.game_version = GameVersion::Jak2;
-  game_options.disable_display = false;  // "display" = the null renderer, which paces vsync
+  game_options.disable_display = false;
   game_options.server_port = DECI2_PORT;
-  Gfx::SetPreferredPipeline(GfxPipeline::Null);
-  lg::info("3DS: Jak II, null renderer (config.ini renderer = null)");
+  {
+    char v[32];
+    const bool null_gfx = ctr_config_get("renderer", v, sizeof(v)) && !strcmp(v, "null");
+    Gfx::SetPreferredPipeline(null_gfx ? GfxPipeline::Null : GfxPipeline::Ctr);
+    lg::info("3DS: Jak II, {} renderer (config.ini renderer = {})", null_gfx ? "null" : "3DS",
+             null_gfx ? "null" : "ctr");
+  }
 #else
   game_options.game_version = GameVersion::Jak1;
   game_options.disable_display = false;  // "display" = the null renderer, which paces vsync

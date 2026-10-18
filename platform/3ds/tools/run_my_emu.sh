@@ -6,7 +6,7 @@
 #   run_my_emu.sh --app DIR --gk gk.3dsx --proj DIR --out DIR [--seconds N] [--pad FILE]
 #                 [--screenshots N] [--args "..."] [--gl] [--sound [CORE]] [--game jak1|jak2]
 #
-#   --game jak2  (AI-assisted) the Jak II build: sdmc:/3ds/jak2/, <proj>/out/jak2/iso, no levels
+#   --game jak2  (AI-assisted) the Jak II build: sdmc:/3ds/jak2/, <proj>/out/jak2/iso and c3l
 #   --cia FILE   (AI-assisted) install the CIA in this emulator and run the installed title instead
 #                of --gk (the CIA's 124 MB memory mode, as on hardware; a .3dsx gets less)
 #
@@ -56,11 +56,12 @@ mkdir -p "$DATA/out/$GAME"
 rm -rf "$DATA/out/$GAME/iso" "$DATA/out/$GAME/c3l"
 mkdir -p "$DATA/out/$GAME/iso"
 for f in "$PROJ"/out/$GAME/iso/*; do cp -c "$f" "$DATA/out/$GAME/iso/" 2>/dev/null || cp "$f" "$DATA/out/$GAME/iso/"; done
-if [ "$GAME" = jak1 ]; then
-  mkdir -p "$DATA/out/jak1/c3l"
-  for f in "$PROJ"/out/jak1/c3l/*.c3l "$PROJ"/out/jak1/c3l/*.c3v; do
+# (AI-assisted) the level backgrounds, Jak II's too (out/jak2/c3l)
+if [ -d "$PROJ/out/$GAME/c3l" ]; then
+  mkdir -p "$DATA/out/$GAME/c3l"
+  for f in "$PROJ"/out/$GAME/c3l/*.c3l "$PROJ"/out/$GAME/c3l/*.c3v; do
     [ -f "$f" ] || continue  # (AI-assisted) .c3v: fine_vis sidecars, when there are some
-    cp -c "$f" "$DATA/out/jak1/c3l/" 2>/dev/null || cp "$f" "$DATA/out/jak1/c3l/"
+    cp -c "$f" "$DATA/out/$GAME/c3l/" 2>/dev/null || cp "$f" "$DATA/out/$GAME/c3l/"
   done
 fi
 cp "$GK" "$BASE/gk.3dsx"

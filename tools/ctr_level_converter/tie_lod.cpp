@@ -20,6 +20,7 @@ struct TiePs2Dist {
 };
 const TiePs2Dist kTiePs2Dists[] = {
 #include "tie_ps2_dists.inc"
+#include "tie_ps2_dists_jak2.inc"  // (AI-assisted) level names "jak2/<level>"
 };
 
 // strips with UINT32_MAX restarts -> triangles (corner order doesn't matter here)

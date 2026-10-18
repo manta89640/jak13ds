@@ -63,6 +63,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--no-opaque-alpha` | off | (AI-assisted, v15) keep alpha tests and blending that can't change a pixel (see "Draw optimisations"). |
 | `--no-atlas`, `--atlas-max N`, `--atlas-kb-per-bind K` | off, 32, 2 | (AI-assisted, v15) texture atlases (see "Draw optimisations"): textures up to N texels a side; an atlas only when the memory it adds is at most K KB per texture bind it saves. |
 | `--no-verify` | off | don't read every written file back with the runtime's reader to compare it. |
+| `--game G` | from the path | (AI-assisted) `jak1` or `jak2`; by default `jak2` when the input is in a `jak2` folder (`out/jak2/fr3/<level>.fr3`). Jak II uses its own PS2 distance tables (`tie_ps2_dists_jak2.inc`, `shrub_ps2_dists_jak2.inc`, level names prefixed `jak2/`), bakes palette 1, and skips Jak 1's interior list and tie LOD budgets (every group gets its near version, streamed). |
 
 What goes in:
 
@@ -84,6 +85,25 @@ What goes in:
 Sizes (defaults, AI-assisted, Oct 3): village1 254k triangles in 626 chunks, 296 textures
 (1.2 MB), file 4.9 MB; misty 5.1 MB, citadel 4.2 MB (241 textures, 1.4 MB; before textures were
 shared, 1017 and 17.6 MB). All 26 files 98 MB (textures 21 MB).
+
+## Jak II (AI-assisted, Oct 18)
+
+The same format and converter. `ctr_level_converter --all out/jak2/fr3 out/jak2/c3l` (GAME with
+`--merc-only`), the runtime reads `out/<game>/c3l` (`ctr_level_c3l_dir()`). Jak II's fr3 files have
+the same tree kinds (no hfrag: that is Jak 3); envmapped ties keep their base pass only, as in
+Jak 1. Not used yet: the tie / shrub prototype visibility masks the game sends (`proto-vis`,
+prototypes hidden by game state), and texture animation (those draws are untextured).
+
+The PS2 distances (`tie_ps2_dists_jak2.inc`: 5327 tie prototypes, `shrub_ps2_dists_jak2.inc`:
+535 shrub prototypes, all 147 levels) come from the levels' BSPs:
+`level_dump --game jak2 --dists <level> out/jak2/iso/<NICK>.DGO` prints them (the DGO nickname to
+level table is `ctr_jak2_level_for_dgo`). Without them every tie group switched at the 60 m
+default and every shrub was drawn to 100 m: in the slums 244k shrub triangles at 100 m; with them
+50 m (142k), 70 (45k), 90 (40k), 120 (15k), 160 m (3k), and ~85k -> ~75k triangles per frame.
+
+Sizes (all 147 levels, defaults): 672 MB. Haven City districts 4.6-13 MB each (ctysluma 10.6 MB:
+641k triangles, 13.3 MB of vertices of which 5 MB near tie versions streamed), ctywide 2.1 MB,
+lwidea 1 MB (merc and textures only).
 
 ## Compression (v11)
 

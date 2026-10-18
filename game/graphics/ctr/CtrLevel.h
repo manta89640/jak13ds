@@ -349,8 +349,26 @@ class Reader;
  * Threads: get/find_merc_model/process_pending_loads run on the render thread, set_wanted and
  * service on the game thread while the render thread is idle, prefetch on any thread.
  */
+/*! (AI-assisted) Where the running game's .c3l files are: <project>/out/<game>/c3l. */
+fs::path ctr_level_c3l_dir();
+/*! (AI-assisted) Jak II: the level whose DGO file this is ("CTA.DGO" -> "ctysluma"), nullptr: none.
+ * For prefetching a level's .c3l when the overlord starts reading its DGO. */
+const char* ctr_jak2_level_for_dgo(const char* dgo_name);
+
+/*! (AI-assisted) Jak II: the visibility strings of the 6 level slots (*level* draw-level) this
+ * frame, from bucket 2 (add-pc-port-background-data), for the background buckets of each slot. */
+struct CtrJak2Vis {
+  static constexpr int kSlots = 6;
+  u8 bits[kSlots][2048];
+  bool valid[kSlots] = {};
+};
+
 class CtrLevels {
  public:
+  /*! (AI-assisted) Jak II's visibility strings (CtrRendererJak2Bg.cpp writes, the level draws
+   * read; render thread). */
+  CtrJak2Vis& jak2_vis() { return m_jak2_vis; }
+
   CtrLevels();
   ~CtrLevels();
   /*! Load the common file (GAME.c3l: Jak and other shared models), kept loaded. */
@@ -426,6 +444,7 @@ class CtrLevels {
   void service();
 
  private:
+  CtrJak2Vis m_jak2_vis;  // (AI-assisted)
   enum class LoadResult { LOADED, MISSING, FAILED, CANCELLED };
   LoadResult load(const std::string& name, CtrLevelData* out);
   // (AI-assisted) decode: time spent decompressing (c3l v11), 0 for older files
@@ -719,10 +738,16 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   CtrTfragRenderer(std::string name, int id, CtrLevels* levels);
   ~CtrTfragRenderer() override;
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  /*! (AI-assisted) Jak II: the background buckets of level slot `slot` (tfrag, tie, shrub of any
+   * kind): the first one in a frame that has the level's camera (TfragPcPortData) draws all of the
+   * level's .c3l. */
+  void render_jak2(DmaFollower& dma, CtrRenderState& rs, int slot);
 
  private:
   void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
   void flush_calls(int pass);
+  void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines
+  int m_jak2_slot = -1;  // (AI-assisted) Jak II: the level slot being drawn (-1: Jak 1)
   // (AI-assisted, gpu-rt) static_cmdlists: a pass's draws, and each pass's command cache
   std::vector<ctr_mesh_call> m_calls;
   ctr_cmd_cache* m_cmd_cache[2] = {nullptr, nullptr};

@@ -2,6 +2,7 @@
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak2/kscheme.h"
+#include "game/mips2c/jak2_functions/native_functions.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
 namespace sp_process_block_2d {
@@ -337,7 +338,7 @@ void link() {
   cache.sp_free_particle = intern_from_c("sp-free-particle").c();
   cache.sp_orbiter = intern_from_c("sp-orbiter").c();
   cache.sp_relaunch_particle_2d = intern_from_c("sp-relaunch-particle-2d").c();
-  gLinkedFunctionTable.reg("sp-process-block-2d", execute, 256);
+  gLinkedFunctionTable.reg("sp-process-block-2d", execute, 256, native::on(native::sp_process_block_2d));
 }
 
 } // namespace sp_process_block_2d
@@ -705,7 +706,7 @@ void link() {
   cache.quaternion_normalize = intern_from_c("quaternion-normalize!").c();
   cache.sp_free_particle = intern_from_c("sp-free-particle").c();
   cache.sp_relaunch_particle_3d = intern_from_c("sp-relaunch-particle-3d").c();
-  gLinkedFunctionTable.reg("sp-process-block-3d", execute, 512);
+  gLinkedFunctionTable.reg("sp-process-block-3d", execute, 512, native::on(native::sp_process_block_3d));
 }
 
 } // namespace sp_process_block_3d

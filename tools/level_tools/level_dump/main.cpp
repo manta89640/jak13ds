@@ -10,7 +10,8 @@
 
 #include "fmt/format.h"
 
-constexpr GameVersion kGameVersion = GameVersion::Jak1;
+// (AI-assisted) --game jak2: a Jak II DGO (default Jak 1)
+GameVersion kGameVersion = GameVersion::Jak1;
 
 /*!
  * Get the level data from a DGO File.
@@ -61,16 +62,32 @@ int main(int argc, char** argv) {
   try {
     fmt::print("Level Dump Tool\n");
 
-    if (argc != 2) {
-      fmt::print("Usage: level_dump <path-to-dgo>\n");
+    // (AI-assisted) level_dump [--game jak1|jak2] [--dists LEVEL] <path-to-dgo>
+    // --dists: only the tie and shrub prototypes' PS2 distances, as the lines of
+    // tools/ctr_level_converter/tie_ps2_dists.inc and shrub_ps2_dists.inc (LEVEL: the level name
+    // to write in them)
+    std::string dists_level;
+    std::string file_name;
+    for (int i = 1; i < argc; i++) {
+      std::string a = argv[i];
+      if (a == "--game" && i + 1 < argc) {
+        kGameVersion = game_name_to_version(argv[++i]);
+      } else if (a == "--dists" && i + 1 < argc) {
+        dists_level = argv[++i];
+      } else {
+        file_name = a;
+      }
+    }
+    if (file_name.empty()) {
+      fmt::print("Usage: level_dump [--game jak1|jak2] [--dists LEVEL] <path-to-dgo>\n");
       return 1;
     }
 
+    file_util::setup_project_path(std::nullopt);  // (AI-assisted) for the type definitions
     fmt::print("Setting up types...\n");
     decompiler::DecompilerTypeSystem dts(kGameVersion);
-    dts.parse_type_defs({"decompiler", "config", "all-types.gc"});
-
-    std::string file_name = argv[1];
+    dts.parse_type_defs(
+        {"decompiler", "config", version_to_game_name(kGameVersion), "all-types.gc"});
 
     fmt::print("Loading data...\n");
     auto data = load_bsp_from_dgo(file_name, dts);
@@ -84,6 +101,27 @@ int main(int argc, char** argv) {
     // draw_stats.debug_print_dma_data = true;
     level_tools::BspHeader bsp_header;
     bsp_header.read_from_file(data, dts, kGameVersion);
+
+    if (!dists_level.empty()) {
+      // (AI-assisted) "tie {level, proto, near, mid, far}" / "shrub {level, proto, x, w}" (meters)
+      for (const auto& tree : bsp_header.drawable_tree_array.trees) {
+        if (auto* tie = dynamic_cast<level_tools::DrawableTreeInstanceTie*>(tree.get())) {
+          for (const auto& p : tie->prototypes.prototype_array_tie.data) {
+            fmt::print("tie {{\"{}\", \"{}\", {:.1f}f, {:.1f}f, {:.1f}f}},\n", dists_level, p.name,
+                       p.dists.data[0] / 4096.f, p.dists.data[2] / 4096.f,
+                       p.dists.data[3] / 4096.f);
+          }
+        } else if (auto* shrub =
+                       dynamic_cast<level_tools::shrub_types::DrawableTreeInstanceShrub*>(
+                           tree.get())) {
+          for (const auto& p : shrub->info.prototype_inline_array_shrub.data) {
+            fmt::print("shrub {{\"{}\", \"{}\", {:.1f}f, {:.1f}f}},\n", dists_level, p.name,
+                       p.dists.data[0] / 4096.f, p.dists.data[3] / 4096.f);
+          }
+        }
+      }
+      return 0;
+    }
 
     level_tools::PrintSettings settings;
     fmt::print("{}\n", bsp_header.print(settings));
