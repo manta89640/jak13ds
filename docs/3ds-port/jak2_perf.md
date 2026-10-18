@@ -187,6 +187,40 @@ None of Jak 2's 28 mips2c files has a native version yet. By N3DS ms (as is -> n
   (small), ocean (render-ocean-quad: Jak 1's micro-logic version).
 - Verify every one with `OPENGOAL_MIPS2C_VERIFY=1` over the city pads (as Jak 1 did).
 
+#### Done: the ports from Jak 1 (AI-assisted, Oct 18, j2-nat-port)
+
+`game/mips2c/jak2_functions/native_*.cpp`, registered next to the mips2c versions through
+`native::on()` (native_functions.h). `config.ini logic_native = off` (preset safe; host
+`OPENGOAL_LOGIC_NATIVE=0`) registers none of them; `mips2c_native_off` still names single ones.
+
+| native | Jak 2 changes against Jak 1's native |
+|---|---|
+| `sp-process-block-2d` / `-3d` | per-particle time vector from the scratchpad table (byte 129), frames 0 = paused, valid is byte 128, flag bits moved (alpha 32, orbiter 64), aux flags 0x8080 call add-to-sprite-aux-list instead of the callback (2d); 3d: rotvel3d once per 10 frames, then quaternion-normalize! |
+| `sp-launch-particles-var`, `particle-adgif` | a matrix instead of a position (rows on the frame, row 4 = (0 0 0 1) for sp-adjust-launch), the clock byte, colors truncated to whole numbers, 5 levels, the state's launch control; adgif: uncache a shader with bit 1024 |
+| `cspace<-parented-transformq-joint!` | the w lane of 1/scale cleared (Jak 2's mips2c patch) |
+| `new-bones-mtx-calc-asm` | `pc-new-bones-mtx-calc` (bones.gc `#when TARGET_3DS`, like Jak 1): bone stride 80; host verify mode runs the GOAL loop in a nested call and compares (`bones verify`) |
+| `shadow-execute` (+ its 15 helpers and the VU0 code inlined) | j2-nat-shadow: Jak 2's offsets, debug-draw path, add-single-tris, scissor-edges without clipping |
+| `moving-sphere-triangle-intersect`, `collide-do-primitives`, collide-cache-prim 9 / 10, collide-mesh 12 / 14 / 15 | j2-nat-collide: the GOAL helpers (ray-sphere-intersect, closest-pt-in-triangle...) stay GOAL calls; collide-puss-work 9 / 10 written but not registered (Jak 2 never calls them) |
+
+Not here (j2-nat-new): sky-work, spatial / collide hash, fill-bg-using-*, sparticle-motion-blur,
+draw-string-asm, nav.
+
+**Identity** (host small-memory C mode, `OPENGOAL_MIPS2C_VERIFY=1`, 0 mismatches everywhere):
+jak2_route.pad, all natives (`OPENGOAL_MIPS2C_VERIFY_FULL_EVERY=200`): 3.95M calls (cspace 3.84M,
+collide-cache-prim 9: 86k, shadow-execute 5600, collide-mesh 14 / 15: 3392 / 2440, msti 8711,
+launch 1098, adgif 798, block-2d 324, -3d 58 full-memory checks), bones 92942 calls / 1.39M bones;
+jak2_city.pad, particles with a full check every 8th call: adgif 25859, launch 11455, 2d 4183,
+3d 1015; cspace 1.53M; bones 39902. Shadow and collision on both pads in their branches. Jak's
+end positions are the mips2c runs' (city 1065.98 0.52 194.46, route 1161.20 -50.58 513.13).
+Weakly covered: collide-mesh 12 (9 calls, no hit), collide-cache-prim 10 (73 calls).
+
+**Mac** (slums stand, sampled, on vs off, loaded machine: shares against the unchanged rest of
+the frame): particles 1.6x, cspace 1.6x, shadow 3.7x, bones (C++ vs goalc C) 4.5x, collision 2.3x.
+
+**Azahar** (CIA, jak2_city.pad, null renderer): city-stand 75.6 -> **49.7 ms** logic (13.2 ->
+20.1 fps), city-walk 74.7 -> 50.0 ms. iop ~1.7 ms of that. The Mac ratios predicted ~21 ms; the
+ARM gain is larger (Jak 1: 4-8x fewer instructions than mips2c).
+
 ### 2. Codegen and C-mode overhead (~4-5 ms)
 
 - The thunk / adapter path costs time by itself: on the Mac 6.4% of the slums frame is in
