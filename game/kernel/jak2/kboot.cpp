@@ -13,6 +13,7 @@
 #include "game/kernel/common/Ptr.h"
 #include "game/kernel/common/Symbol4.h"
 #include "game/kernel/common/klisten.h"
+#include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/common/ksocket.h"
@@ -120,6 +121,9 @@ void KernelDispatch(u32 dispatcher_func) {
   }
 
   float time_ms = dispatch_timer.getMs();
+  // (AI-assisted) frame timing lines ("perf: ... logic ..."), as in Jak 1
+  kperf::add(kperf::Cat::DISPATCH, (u64)(time_ms * 1000));
+  kperf::frame_done();
   if (time_ms > 50) {
     lg::print("Kernel dispatch time: {:.3f} ms\n", time_ms);
   }

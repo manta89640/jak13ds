@@ -24,6 +24,7 @@
 #include "game/kernel/common/kernel_types.h"
 #include "game/kernel/common/klink.h"
 #include "game/kernel/common/kmachine.h"
+#include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kmalloc.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
@@ -663,10 +664,22 @@ u32 sceGsSyncPath(u32 mode, u32 timeout) {
 
 void aybabtu() {}
 
+namespace {
+// (AI-assisted) vsync and render-thread waits are not "logic" in the perf lines (kperf.h)
+u32 syncv_timed(u32 mode) {
+  kperf::Scope perf_scope(kperf::Cat::VSYNC);
+  return sceGsSyncV(mode);
+}
+u32 sync_path_timed(u32 mode, u32 timeout) {
+  kperf::Scope perf_scope(kperf::Cat::WAIT);
+  return sceGsSyncPath(mode, timeout);
+}
+}  // namespace
+
 void InitMachineScheme() {
   make_function_symbol_from_c("put-display-env", PutDisplayEnv);
-  make_function_symbol_from_c("syncv", sceGsSyncV);
-  make_function_symbol_from_c("sync-path", sceGsSyncPath);
+  make_function_symbol_from_c("syncv", syncv_timed);
+  make_function_symbol_from_c("sync-path", sync_path_timed);
   make_function_symbol_from_c("reset-path", ee::sceGsResetPath);
   make_function_symbol_from_c("reset-graph", sceGsResetGraph);
   make_function_symbol_from_c("dma-sync", sceDmaSync);
