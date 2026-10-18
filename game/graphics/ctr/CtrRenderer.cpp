@@ -434,6 +434,7 @@ CtrRenderer::CtrRenderer()
     m_jak2 = true;
     g_is_jak2 = true;
     g_gs_y_scale = 512.f / 416.f * 0.5f;
+    m_vram->set_jak2_remap(true);
     init_buckets_jak2();
     return;
   }
@@ -896,6 +897,7 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
     merc->snapshot_bones(dma, rs);
   }
   prepare_sprites(ee_mem, chain_offset);
+  prepare_textures(ee_mem, chain_offset);
 }
 
 void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
@@ -911,6 +913,12 @@ void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
   DmaFollower dma(ee_mem, bucket_tag(chain_offset, id));
   m_sprite->snapshot(dma, rs);
 }
+
+#if defined(__3DS__) && !defined(OG3DS_GAME_JAK2)
+// (AI-assisted) the Jak 1 3DS build has no Jak II tables (CtrRendererJak2.cpp)
+void CtrRenderer::prepare_textures(const void*, u32) {}
+void CtrRenderer::tex_frame_done_jak2() {}
+#endif
 
 u32 CtrRenderer::bucket_tag(u32 chain_offset, int id) const {
   // Jak 1: a call to the default registers first (see dispatch_buckets_jak1); Jak II: none
@@ -1210,7 +1218,9 @@ void CtrRenderer::dispatch_buckets_jak2(DmaFollower dma) {
   }
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
-  if (!run_buckets(dma, (size_t)jak2::BucketId::TEX_L0_ALPHA, 1)) {
+  const bool ok = run_buckets(dma, (size_t)jak2::BucketId::TEX_L0_ALPHA, 1);
+  tex_frame_done_jak2();
+  if (!ok) {
     return;
   }
   if (m_rs.call_vif_callback) {
@@ -1251,7 +1261,15 @@ bool CtrRenderer::run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int call
     // (AI-assisted) shadows switched off by gpu_profile = ab: the shadow bucket left out
     const bool ab_skip = ctr_settings().shadows != CtrSettings::ShadowMode::Full &&
                          m_buckets[bucket_id]->name() == "shadow";
-    if ((profiling && profile_skips(m_buckets[bucket_id]->name())) || ab_skip) {
+#ifndef __3DS__
+    // (AI-assisted) host diagnosis: env CTR_SKIP_BUCKETS=",id,id," leaves those buckets out
+    static const char* skip_ids = getenv("CTR_SKIP_BUCKETS");
+    const bool env_skip =
+        skip_ids && strstr(skip_ids, fmt::format(",{},", bucket_id).c_str()) != nullptr;
+#else
+    const bool env_skip = false;
+#endif
+    if ((profiling && profile_skips(m_buckets[bucket_id]->name())) || ab_skip || env_skip) {
       while (dma.current_tag_offset() != m_rs.next_bucket) {
         dma.read_and_advance();
       }
@@ -1467,6 +1485,7 @@ void ctr_send_chain(const void* data, u32 offset) {
     // (AI-assisted) host (synchronous): the sprites from the snapshot too, so the host runs check
     // it (CtrSpriteRenderer::snap_data compares it with game memory)
     g_ctr->prepare_sprites(data, offset);
+    g_ctr->prepare_textures(data, offset);  // (AI-assisted) Jak II
 #endif
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;

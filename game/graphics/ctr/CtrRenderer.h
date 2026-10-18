@@ -120,6 +120,9 @@ class CtrRenderer {
    * synchronous render_frame) */
   void prepare_sprites(const void* ee_mem, u32 chain_offset);
   void set_async(bool async) { m_rs.call_vif_callback = !async; }
+  /*! (AI-assisted) Jak II, game thread: copy what the texture animation arrays upload from game
+   * memory (CtrTexAnimJak2::snapshot_upload); nothing for Jak 1 */
+  void prepare_textures(const void* ee_mem, u32 chain_offset);
   // timing, averaged over the frames between two log lines
   struct Timing {
     double begin_ms = 0;  // frame begin: waiting for the GPU to finish the previous frame
@@ -165,6 +168,9 @@ class CtrRenderer {
   // (AI-assisted) the DMA tag of a bucket in a chain (Jak 1: after the default registers call)
   u32 bucket_tag(u32 chain_offset, int id) const;
   bool m_jak2 = false;
+  std::vector<int> m_anim_buckets;
+  std::unique_ptr<CtrBucketRenderer> m_jak2_eyes;  // (AI-assisted) CtrEyeRenderer, no bucket  // (AI-assisted) Jak II buckets that may hold animation arrays
+  void tex_frame_done_jak2();
   int m_sprite_bucket = -1;  // (AI-assisted) prepare_sprites
   void draw_pmode_fade();
   std::unique_ptr<CtrVram> m_vram;

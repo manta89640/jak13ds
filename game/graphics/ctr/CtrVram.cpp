@@ -17,6 +17,18 @@
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
 
+#include "fmt/format.h"
+#include "common/util/FileUtil.h"
+
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+#include "game/graphics/jak2_texture_remap.h"
+#else
+// (AI-assisted) the Jak 1 3DS build has no Jak II tables (set_jak2_remap is never on there)
+static int lookup_jak2_texture_dest_offset(int, int) {
+  return 0;
+}
+#endif
+
 #include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -159,9 +171,18 @@ u32 CtrVram::read32(u32 byte_addr) const {
 }
 
 void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
-  write_ct32(data, dest_block, width, height);
   // (AI-assisted) whole pages (a page row's blocks are spread over the page)
   const u32 end = dest_block + (height + 31) / 32 * std::max(1u, width / 64) * 32;
+  // (AI-assisted, Jak II raw images) written now: page uploads still pending there are older and
+  // would overwrite it when a texture reads them; a page uploaded again later is written again
+  trim_pending(dest_block, end);
+  forget_uploads(dest_block, end);
+  write_ct32(data, dest_block, width, height);
+  if (m_jak2_remap) {
+    // no page textures (with moved dests) there any more
+    std::fill(m_remap.begin() + std::min<u32>(dest_block, 16384),
+              m_remap.begin() + std::min<u32>(end, 16384), 0);
+  }
   mark_unique(dest_block, end);
   note_write(dest_block, end);
 }
@@ -266,6 +287,18 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
       memcpy(&clut_dest, t + offsetof(GoalTexture, clut_dest), 2);
       m_tex_info[dest0] = TexInfo{(u16)w, (u16)h, t[offsetof(GoalTexture, psm)],
                                   t[offsetof(GoalTexture, width)], clutpsm, clut_dest};
+      if (m_jak2_remap) {
+        // (AI-assisted) Jak II: the PC port moved this texture's dest by a few blocks
+        // (__pc-get-tex-remap, so no two textures share an address); its data is where the
+        // page put it, offset blocks lower
+        u32 page_id;
+        memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
+        m_remap[dest0] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+        // (AI-assisted) where the texture record is: setup-font-texture changes the font
+        // textures' height before relocating them (see relocate)
+        m_tex_ptr[dest0] = ptr;
+        m_ee_mem = ee_mem;
+      }
     }
   }
 }
@@ -311,6 +344,18 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     words = ((u32)EE_MAIN_MEM_SIZE - seg.block_data_ptr) / 4 / 128 * 128;
   }
   const u32 dest_block = seg.dest / 64;
+#ifndef __3DS__
+  {
+    static const bool log_uploads = getenv("CTR_UPLOAD_LOG") != nullptr;  // (AI-assisted) host
+    if (log_uploads) {
+      lg::info("[ctr vram] upload page {} ({}) mode {}: {} words to block {}; segs {:x}/{}/{} {:x}/{}/{} {:x}/{}/{}",
+               (const char*)(ee_mem + page.name_ptr + 4), page.length, mode, words, dest_block,
+               page.segment[0].block_data_ptr, page.segment[0].size, page.segment[0].dest,
+               page.segment[1].block_data_ptr, page.segment[1].size, page.segment[1].dest,
+               page.segment[2].block_data_ptr, page.segment[2].size, page.segment[2].dest);
+    }
+  }
+#endif
   // skip the upload if this exact data is already there (sampled hash, pages are static)
   const u8* src = ee_mem + seg.block_data_ptr;
   u64 hash = words;
@@ -518,7 +563,18 @@ bool is_indexed(u32 psm) {
 }  // namespace
 
 void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
-  const TexInfo info = src_block < kBlocks ? m_tex_info[src_block] : TexInfo{};
+  TexInfo info = src_block < kBlocks ? m_tex_info[src_block] : TexInfo{};
+  if (m_jak2_remap && info.w && src_block < m_tex_ptr.size() && m_tex_ptr[src_block] && m_ee_mem) {
+    // (AI-assisted) Jak II's setup-font-texture sets the font textures' height (320, 800) before
+    // it relocates them: the large fonts are 800 rows, and the next one starts right after them
+    // (6016 + 800 rows = 9216). With the page's 1024 the first relocated font's last rows wrote
+    // over the top of the next one (letters A-K, the button symbols)
+    s16 h;
+    memcpy(&h, m_ee_mem + m_tex_ptr[src_block] + offsetof(GoalTexture, h), 2);
+    if (h > 0 && h <= 1024) {
+      info.h = (u16)h;
+    }
+  }
   if (!info.w) {
     lg::warn("[ctr vram] relocate from unknown texture at {}", src_block);
     return;
@@ -526,6 +582,17 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
   if (!is_indexed(info.psm) || !is_indexed(dest_psm)) {
     lg::warn("[ctr vram] relocate {} -> {} not supported", info.psm, dest_psm);
     return;
+  }
+#ifndef __3DS__
+  if (getenv("CTR_UPLOAD_LOG")) {  // (AI-assisted) host diagnosis
+    lg::info("[ctr vram] relocate {} -> {} psm {}: {}x{} psm {} width {} clut {} remap {}", src_block,
+             dest_block, dest_psm, info.w, info.h, info.psm, info.width, info.clutdest,
+             m_jak2_remap && src_block < m_remap.size() ? m_remap[src_block] : 0);
+  }
+#endif
+  // (AI-assisted) Jak II: a texture whose dest the PC port moved (m_remap) has its data lower
+  if (m_jak2_remap && src_block < m_remap.size()) {
+    src_block -= std::min<u32>(m_remap[src_block], src_block);
   }
   // source texture and CLUT, in blocks (generous: whole pages)
   const u32 bits = (info.psm == (u32)GsTex0::PSM::PSMT4) ? 4
@@ -837,6 +904,7 @@ bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
 }
 
 bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
+  tex0 = data_tex0(tex0);  // (AI-assisted) Jak II
   GsTex0 t(tex0);
   if (!m_pending.empty()) {
     // only the pending uploads this texture reads (as get_texture)
@@ -877,7 +945,32 @@ u64 CtrVram::entry_sig(const Entry& e) const {
                        e.clut_first, e.clut_end);
 }
 
+void CtrVram::set_override(u32 tbp, int w, int h, const u32* rgba) {
+  auto it = m_overrides.find(tbp);
+  if (it != m_overrides.end() && it->second.w == w && it->second.h == h &&
+      it->second.handle >= 0 && !m_borrowed[tbp]) {
+    ctr_gpu_tex_update(it->second.handle, (const uint8_t*)rgba);
+    return;
+  }
+  if (it != m_overrides.end() && it->second.handle >= 0 && !m_borrowed[tbp]) {
+    ctr_gpu_tex_delete(it->second.handle);
+  }
+  m_borrowed.erase(tbp);
+  CtrTexture t;
+  t.w = w;
+  t.h = h;
+  t.handle = ctr_gpu_tex_create(w, h, (const uint8_t*)rgba);
+  m_overrides[tbp] = t;
+}
+
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
+  // (AI-assisted) Jak II's animated textures (set_override; none in Jak 1)
+  if (!m_overrides.empty()) {
+    auto ov = m_overrides.find((u32)(tex0 & 0x3fff));
+    if (ov != m_overrides.end()) {
+      return &ov->second;
+    }
+  }
   // the parts of TEX0 that select the texture data (not TCC / TFX / CLUT load control)
   constexpr u64 kKeyMask = ~((0b111ull << 34) | (0b111ull << 61));
   u64 key = tex0 & kKeyMask;
@@ -897,7 +990,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     m_stats.cached++;
     return &cached->tex;
   }
-  GsTex0 t(tex0);
+  // (AI-assisted) Jak II: where the texture's data is (see m_remap); key stays the cache key
+  const u64 data_key = data_tex0(key);
+  GsTex0 t(data_tex0(tex0));
   if (!m_pending.empty()) {
     // write the pending uploads this texture (or its cached version) may read
     const u32 blocks = texture_block_span(t);
@@ -940,9 +1035,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // textures moved by texture-relocate use the CLUT they had when they were moved
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   const bool decoded =
-      reloc ? decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+      reloc ? decode_impl(this, m_vram, data_key, &data, &w, &h, &tex_range,
                           [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; })
-            : decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+            : decode_impl(this, m_vram, data_key, &data, &w, &h, &tex_range,
                           [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
   if (!decoded) {
     lg::warn("[ctr vram] unsupported texture format {} (tex0 {:x})", (int)t.psm(), tex0);
@@ -951,6 +1046,23 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
 
   // (AI-assisted) the PS2 button symbols of the font and the progress menu -> 3DS buttons
   ctr_button_art::patch(tex0, data.data(), w, h);
+#ifndef __3DS__
+  {
+    // (AI-assisted) host diagnosis: env CTR_TEX_DUMP=<dir> writes every decoded texture
+    static const char* dump_dir = getenv("CTR_TEX_DUMP");
+    static int dumped = 0;
+    if (dump_dir && dumped < 400) {
+      dumped++;
+      std::vector<u32> png(data);
+      static const bool rgb = getenv("CTR_TEX_DUMP_RGB") != nullptr;
+      for (auto& c : png) {
+        const u32 a = std::min(255u, (c >> 24) * 2);
+        c = rgb ? (c | 0xff000000u) : (0xff000000u | a | (a << 8) | (a << 16));  // alpha as grey
+      }
+      file_util::write_rgba_png(fmt::format("{}/tex_{:x}.png", dump_dir, tex0), png.data(), w, h);
+    }
+  }
+#endif
 
   // the 3DS needs at least 8x8: repeat pixels (normalized coordinates stay the same)
   int gw = std::max(w, 8), gh = std::max(h, 8);

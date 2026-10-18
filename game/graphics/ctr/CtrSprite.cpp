@@ -419,7 +419,180 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
 #endif
   ctr_gpu_phase(CTR_PH_HUD);  // (AI-assisted, gpu-rt) gpu_breakdown
   flush(true);
+  if (m_jak2 && dma.current_tag_offset() != rs.next_bucket) {
+    // (AI-assisted) Jak II: nop + flushe, then the glows (Sprite3::glow_dma_and_draw)
+    dma.read_and_advance();
+    if (cs.sprites) {
+#ifndef __3DS__
+      ctr_gpu_soft_bucket("sprite-glow");
+#endif
+      draw_glows(dma, rs);
+    }
+  }
   skip_rest();
+}
+
+namespace {
+// Sprite3_Glow.cpp SpriteGlowData, sprite_common.h SpriteGlowConsts
+struct GlowData {
+  float pos[3];
+  float size_x;
+  float size_probe;
+  float z_offset;
+  float rot_angle;
+  float size_y;
+  float color[4];
+  float fade_a;
+  float fade_b;
+  u32 tex_id;
+  u32 dummy;
+};
+static_assert(sizeof(GlowData) == 64);
+struct GlowConsts {
+  math::Vector4f camera[4];
+  math::Vector4f perspective[4];
+  math::Vector4f hvdf;
+  math::Vector4f hmge;
+  float pfog0, deg_to_rad, min_scale, inv_area;
+  math::Vector4f sincos[5];
+  math::Vector4f basis_x;
+  math::Vector4f basis_y;
+  math::Vector4f xy_array[4];
+  math::Vector4f clamp_min;
+  math::Vector4f clamp_max;
+};
+static_assert(sizeof(GlowConsts) == 0x180);
+}  // namespace
+
+void CtrSpriteRenderer::draw_glows(DmaFollower& dma, CtrRenderState& rs) {
+  // (AI-assisted) Jak II's glows (street lamps, lights): the flare of the sprite-glow VU program
+  // (glow_math). The PC's GlowRenderer fades each flare by how much of a small probe square
+  // around its center passes the depth test (read back from the depth buffer); the 3DS can't
+  // read depth back in the frame, so the flare is depth tested per pixel at its center's depth
+  // instead (pushed towards the camera by z_offset, as the game does): hidden flares vanish,
+  // partly hidden ones are cut instead of faded. Added (Cs + Cd), like the PS2 with a visible
+  // probe.
+  auto more = [&]() { return dma.current_tag_offset() != rs.next_bucket; };
+  if (!more()) {
+    return;
+  }
+  auto consts_xfer = dma.read_and_advance();
+  if (consts_xfer.size_bytes != sizeof(GlowConsts)) {
+    return;
+  }
+  GlowConsts c;
+  memcpy(&c, consts_xfer.data, sizeof(c));
+  for (int i = 0; i < 4 && more(); i++) {
+    dma.read_and_advance();  // two templates, base / offset, flushe
+  }
+  auto next_control = [&]() {
+    while (more()) {
+      auto t = dma.read_and_advance();
+      if (t.size_bytes == 0 && t.vifcode0().kind == VifCode::Kind::NOP &&
+          t.vifcode1().kind == VifCode::Kind::NOP) {
+        continue;
+      }
+      return t;
+    }
+    return DmaTransfer();
+  };
+  const float kInvX = 1.f / 256.f, kInvY = m_inv_y, kInvZ = 1.f / 16777215.f;
+  int glows = 0;
+  m_have_last_ad = false;
+  for (auto control = next_control(); control.size_bytes == 16 && more();
+       control = next_control()) {
+    auto vec_xfer = dma.read_and_advance();
+    if (!more()) {
+      break;
+    }
+    auto shader_xfer = dma.read_and_advance();
+    if (more()) {
+      dma.read_and_advance();  // the program call
+    }
+    if (vec_xfer.size_bytes != 64 || shader_xfer.size_bytes != 80) {
+      continue;
+    }
+    GlowData in;
+    memcpy(&in, snap_data(vec_xfer.data, 64), 64);
+    AdGif ad;
+    memset(&ad, 0, sizeof(ad));
+    memcpy(&ad, snap_data(shader_xfer.data, 80), 80);
+    // glow_math: camera frame, fade by depth, the z offset towards the camera, perspective
+    math::Vector4f p = c.camera[3] + c.camera[0] * in.pos[0] + c.camera[1] * in.pos[1] +
+                       c.camera[2] * in.pos[2];
+    const float fade = std::clamp(in.fade_a * p.z() + in.fade_b, 0.f, 1.f);
+    if (fade <= 0.f || p.z() == 0.f) {
+      continue;
+    }
+    const float pscale = 1.f - in.z_offset / p.z();
+    const float px = p.x() * pscale, py = p.y() * pscale, pz = p.z() * pscale;
+    p = c.perspective[3] + c.perspective[0] * px + c.perspective[1] * py + c.perspective[2] * pz;
+    const math::Vector4f h(p.x() * c.hmge.x(), p.y() * c.hmge.y(), p.z() * c.hmge.z(),
+                           p.w() * c.hmge.w());
+    const float lim = std::abs(h.w());
+    if (lim == 0.f || std::abs(h.x()) > lim || std::abs(h.y()) > lim || std::abs(h.z()) > lim) {
+      continue;
+    }
+    const float q = 1.f / h.w();
+    const float sx = p.x() * q + c.hvdf.x(), sy = p.y() * q + c.hvdf.y(),
+                sz = p.z() * q + c.hvdf.z();
+    const float size_x = std::min(in.size_x * q, c.clamp_max.z());
+    const float size_y = std::min(in.size_y * q, c.clamp_max.z());
+    const float rot = in.rot_angle * c.deg_to_rad;
+    const float rs_ = std::sin(rot), rc = std::cos(rot);
+    // rotated basis (only basis_x.x and basis_y.y are used)
+    const float bxx = c.basis_x[0] * rs_ * size_x, bxy = -c.basis_y[1] * rc * size_x;
+    const float byx = c.basis_x[0] * rc * size_y, byy = c.basis_y[1] * rs_ * size_y;
+    // the flare's color: rgb * a * fade / 128 (PS2 scale)
+    const float k = in.color[3] * fade / 128.f;
+    const u8 r = (u8)std::clamp(in.color[0] * k, 0.f, 255.f);
+    const u8 g = (u8)std::clamp(in.color[1] * k, 0.f, 255.f);
+    const u8 b = (u8)std::clamp(in.color[2] * k, 0.f, 255.f);
+    if (!(r | g | b)) {
+      continue;
+    }
+    resolve_state(ad, MODE_2D);
+#ifndef __3DS__
+    {
+      static const bool log_glow = getenv("CTR_GLOW_LOG") != nullptr;  // host diagnosis
+      static int logged = 0;
+      if (log_glow && logged < 40) {
+        logged++;
+        lg::info("[ctr glow] tex0 {:x} tex {} color {} {} {} {} fade {:.2f} size {:.1f} x {:.1f} "
+                 "at {:.0f} {:.0f} {:.0f} alpha {:x} clamp {:x}@{:x}",
+                 ad.tex0_data, m_last_state.tex, in.color[0], in.color[1], in.color[2],
+                 in.color[3], fade, size_x, size_y, sx, sy, sz, ad.alpha_data, ad.clamp_data,
+                 ad.clamp_addr);
+      }
+    }
+#endif
+    ctr_draw_state st = m_last_state;
+    st.blend = CTR_BLEND_ONE_ONE;
+    st.zwrite = 0;
+    st.ztest = CTR_TEST_GEQUAL;
+    st.atest = CTR_TEST_ALWAYS;
+    st.flags &= ~CTR_STATE_PROCTEX;
+    ctr_vertex* out = bucket_for(st).verts.grow(4);
+    m_have_last_ad = false;  // the bucket above isn't m_last_bucket_ptr's
+    // corners in the order of the GS fan (uv 00, 10, 11, 01 as GlowRenderer)
+    static const float kS[4] = {0, 1, 1, 0}, kT[4] = {0, 0, 1, 1};
+    for (int i = 0; i < 4; i++) {
+      const float ox = bxx * c.xy_array[i].x() + byx * c.xy_array[i].y();
+      const float oy = bxy * c.xy_array[i].x() + byy * c.xy_array[i].y();
+      out[i].x = (sx + ox - 2048.f) * kInvX;
+      out[i].y = (2048.f - (sy + oy)) * kInvY;
+      out[i].z = std::clamp(sz * kInvZ, 0.f, 1.f);
+      out[i].s = kS[i];
+      out[i].t = kT[i];
+      out[i].r = r;
+      out[i].g = g;
+      out[i].b = b;
+      out[i].a = 0x80;
+    }
+    glows++;
+  }
+  flush();
+  m_stats.glows += glows;
 }
 
 bool CtrSpriteRenderer::read_distorter(DmaFollower& dma, CtrRenderState& rs) {

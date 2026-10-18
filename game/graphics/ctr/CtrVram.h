@@ -93,6 +93,31 @@ class CtrVram {
    */
   const void* upload_source(u32 block) const;
 
+  /*!
+   * (AI-assisted, Jak II texture animation) A texture made on the CPU (CtrTexAnimJak2) that
+   * replaces whatever VRAM holds at block tbp, for every TEX0 there (the PC's texture pool gives
+   * its texture by address too): rgba is w x h RGBA8 in the GS's scale (0x80 = 1). Updated in
+   * place when the size is the same.
+   */
+  void set_override(u32 tbp, int w, int h, const u32* rgba);
+  bool has_override(u32 tbp) const { return m_overrides.count(tbp) != 0; }
+  /*! (AI-assisted) The same with a texture made elsewhere (the minimap's render to texture),
+   * not deleted here */
+  void set_override_handle(u32 tbp, int handle, int w, int h) {
+    auto& t = m_overrides[tbp];
+    t.handle = handle;
+    t.w = w;
+    t.h = h;
+    m_borrowed[tbp] = true;
+  }
+  /*! (AI-assisted) Jak II: textures whose dest the PC port moved (lookup_jak2_texture_dest_offset)
+   * are read from where their page put them */
+  void set_jak2_remap(bool on) {
+    m_jak2_remap = on;
+    m_remap.assign(on ? 16384 : 0, 0);
+    m_tex_ptr.assign(on ? 16384 : 0, 0);
+  }
+
   void clear_cache();
   // (AI-assisted) drop the cached textures ctr_button_art::patch may change
   void drop_art_textures();
@@ -139,6 +164,19 @@ class CtrVram {
   u32 clut_color(u32 cbp, u32 cpsm, u32 entry) const;
 
   std::vector<u8> m_vram;
+  std::unordered_map<u32, CtrTexture> m_overrides;  // (AI-assisted) see set_override
+  std::unordered_map<u32, bool> m_borrowed;  // (AI-assisted) set_override_handle's
+  bool m_jak2_remap = false;
+  std::vector<u8> m_remap;  // (AI-assisted) by TEX0 tbp: blocks the PC port moved the texture by
+  std::vector<u32> m_tex_ptr;  // (AI-assisted, Jak II) by dest: the texture record's EE address
+  const u8* m_ee_mem = nullptr;
+  u64 data_tex0(u64 tex0) const {
+    if (!m_jak2_remap) {
+      return tex0;
+    }
+    const u32 off = m_remap[tex0 & 0x3fff];
+    return off <= (tex0 & 0x3fff) ? tex0 - off : tex0;
+  }
   u32 m_art_gen = 0;  // (AI-assisted) ctr_button_art::generation() of the cached textures
   // (AI-assisted) per 16 KB chunk: what it holds (see the top of this file). Page chunks have odd
   // ids, all others even ones from m_next_unique_id.

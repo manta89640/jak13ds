@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "common/custom_data/Tfrag3Data.h"
+#include "common/texture/texture_slots.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 #include "common/util/Timer.h"
@@ -445,7 +446,17 @@ struct Converter {
   std::unordered_map<const tfrag3::Texture*, u16, TexContentHash, TexContentEq> tex_by_content;
   size_t tex_copies = 0;  // level textures that are a copy of an earlier one
 
+  // (AI-assisted) Jak II's animated texture slots (merc draws with tree_tex_id -(slot + 1)): the
+  // level texture made for the slot by add_anim_slot_textures, if any
+  std::unordered_map<s32, s32> anim_slot_tex;
+
   u16 texture_id(s32 tree_tex_id) {
+    if (tree_tex_id < 0) {
+      auto a = anim_slot_tex.find(-(tree_tex_id + 1));
+      if (a != anim_slot_tex.end()) {
+        tree_tex_id = a->second;
+      }
+    }
     if (tree_tex_id < 0 || tree_tex_id >= (s32)level->textures.size()) {
       return 0xffff;  // animated / missing
     }
@@ -1306,6 +1317,57 @@ struct Converter {
     }
   }
 };
+
+/*!
+ * (AI-assisted) Jak II: merc draws of animated textures (Jak's face, hair, fingers and eyebrows,
+ * whose colors the texture animator blends between a normal and a dark CLUT; the jakb cutscene
+ * models) name a slot of jak2_animated_texture_slots() instead of a texture. The 3DS has no
+ * texture animator for them yet: the slot gets a fixed texture, the index texture of the slot's
+ * name with its first CLUT (name + "-norm", else "-start", else its own), as TextureAnimator's
+ * ClutBlender shows it at weight 0. Added to the level's textures; slots without an index texture
+ * in this level stay untextured. Nothing changes for files without such textures (Jak 1).
+ */
+void add_anim_slot_textures(tfrag3::Level* level, std::unordered_map<s32, s32>* out) {
+  if (level->index_textures.empty()) {
+    return;
+  }
+  auto find = [&](const std::string& name) -> const tfrag3::IndexTexture* {
+    for (const auto& t : level->index_textures) {
+      if (t.name == name) {
+        return &t;
+      }
+    }
+    return nullptr;
+  };
+  const auto& slots = jak2_animated_texture_slots();
+  for (size_t i = 0; i < slots.size(); i++) {
+    const tfrag3::IndexTexture* dest = find(slots[i]);
+    if (!dest) {
+      continue;
+    }
+    const tfrag3::IndexTexture* clut = find(slots[i] + "-norm");
+    if (!clut) {
+      clut = find(slots[i] + "-start");
+    }
+    if (!clut) {
+      clut = dest;
+    }
+    tfrag3::Texture t;
+    t.w = dest->w;
+    t.h = dest->h;
+    t.debug_name = slots[i];
+    t.debug_tpage_name = dest->tpage_name;
+    t.data.resize(dest->index_data.size());
+    for (size_t p = 0; p < dest->index_data.size(); p++) {
+      const auto& c = clut->color_table[dest->index_data[p]];
+      t.data[p] = (u32)c.x() | ((u32)c.y() << 8) | ((u32)c.z() << 16) | ((u32)c.w() << 24);
+    }
+    (*out)[(s32)i] = (s32)level->textures.size();
+    level->textures.push_back(std::move(t));
+    lg::info("animated texture slot {}: {}x{} with the CLUT of {}", slots[i], dest->w, dest->h,
+             clut->name);
+  }
+}
 
 // ---------------- merc ----------------
 
@@ -3026,6 +3088,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
 
   Converter cv;
   cv.opt = opt;
+  add_anim_slot_textures(&level, &cv.anim_slot_tex);
   cv.level = &level;
   int tfrag_trees = 0, tie_trees = 0;
   MercOut merc;
