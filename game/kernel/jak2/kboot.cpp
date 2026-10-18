@@ -14,6 +14,7 @@
 #include "game/kernel/common/Ptr.h"
 #include "game/kernel/common/Symbol4.h"
 #include "game/kernel/common/klisten.h"
+#include "game/graphics/pipelines/null.h"
 #include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
@@ -155,6 +156,13 @@ void KernelDispatch(u32 dispatcher_func) {
     SendAck();
   }
 
+#ifndef __3DS__
+  // (AI-assisted) profiling with the null renderer (OPENGOAL_NULL_GFX_NO_SYNC): run frames back to
+  // back, as Jak 1's kernel loop does
+  if (null_gfx_no_sync()) {
+    return;
+  }
+#endif
   // prevent crazy spinning if we're not vsyncing (added)
   if (time_ms < 4) {
     std::this_thread::sleep_for(std::chrono::microseconds(1000));

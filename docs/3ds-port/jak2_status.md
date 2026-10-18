@@ -17,7 +17,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | C-mode boot on the Mac | **Works (Oct 18).** Title screen, 5 min idle stable at 30 fps; Haven City slums with traffic (291 processes) |
 | C mode vs native | Same Jak position/state after the city pad; OpenGL screenshots of the title and the slums match native |
 | ABI check run / stack poison run | Done, nothing real left (see "C mode on the Mac") |
-| Haven City timing (the feasibility number) | Mac C mode: logic 0.83 ms/frame in the slums vs Jak 1 village1 0.20 ms (rough: ~4x Jak 1, see below) |
+| Haven City timing (the feasibility number) | Profiled (Oct 18, jak2_perf.md): Mac 0.44-0.70 ms/frame by district (~4.5x Jak 1); N3DS estimate ~77 ms city average, ~97 ms slums, unmodified; ~22 ms after natives, codegen and core-2 jobs |
 | Scripted route into city gameplay | Works (jak2-route): `platform/3ds/tests/jak2_city.pad`, `jak2_route.pad` |
 
 Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one entry
@@ -258,9 +258,9 @@ first profiling target.
 Milestone 1 (Mac): done except as noted.
 1. Done: strict C build, C-mode boot, title and city stable, OpenGL matches native, ABI check and
    stack poison runs (above).
-2. Done roughly: Haven City timing (above). Better: per-section timing (`OPENGOAL_PERF_SECTIONS`,
-   Jak 2's with-profiler blocks) to see what the 0.83 ms is made of, and `jak2_route.pad` in C
-   mode for the other districts.
+2. Done: Haven City profile (docs/3ds-port/jak2_perf.md: sampling profiler, every district, the
+   N3DS estimate and the <= 15 ms plan). The 30 Hz Mac logic numbers below are unreliable (the
+   game thread runs on efficiency cores); use the no-sync windows described there.
 3. Done (jak2-route, native; C mode numbers above). Next: choose the Jak 2 small-memory layout.
 4. Not done: Jak 2 C-mode runtime tests in goalc-test (Jak 1 has `GoalcRuntime*` and C-mode
    kernel tests; Jak 2 has only compiler tests).
