@@ -55,6 +55,9 @@ struct CtrMercModelData {
   mutable bool blerc_moved = false;  // vertices not in the base pose (CtrMercRenderer)
   std::vector<CtrMercModEffect> mod;  // (AI-assisted) v12, see CtrMercRenderer::apply_mod
   mutable bool mod_checked = false;   // the first update was compared with the file's vertices
+  // (AI-assisted) "keira-as-..." (CtrKeiraRig.h): its vertices use her rig's slots, which
+  // CtrMercRenderer poses from Jak's bones
+  bool keira_rig = false;
   // (AI-assisted) where the mesh's data is in the file, to make it again after a load that ran out
   // of memory: first MercVertex and count, merc index range (index_end 0: not possible)
   u32 file_vertex = 0, vertex_count = 0, index_first = 0, index_end = 0;
@@ -355,6 +358,9 @@ class CtrLevels {
   ~CtrLevels();
   /*! Load the common file (GAME.c3l: Jak and other shared models), kept loaded. */
   void load_common();
+  /*! (AI-assisted) Load another file of models kept loaded like the common one (render thread), the
+   * first time it's asked for: KEIRA.c3l, the "play as Keira" easter egg's (CtrKeiraRig.h). */
+  void load_extra(const std::string& name);
   /*! Start loading a level before the game asks for it (any thread): the overlord started its DGO.
    * Kept aside, not drawn, until set_wanted or get asks for it. (AI-assisted) The game loads one
    * level at a time: a prefetch of any other level it doesn't want is dropped (it gave up on that
@@ -452,6 +458,9 @@ class CtrLevels {
   std::vector<std::string> m_wanted;
   bool m_common_wanted = false;
   std::unique_ptr<CtrLevelData> m_common;
+  // (AI-assisted) load_extra: the files asked for, and the loaded ones (with the common file's)
+  std::vector<std::string> m_extra_asked;
+  std::map<std::string, std::unique_ptr<CtrLevelData>> m_extras;
   // merc model name -> (level, model index); rebuilt when levels change
   std::map<std::string, std::pair<CtrLevelData*, int>, std::less<>> m_merc_index;
   void rebuild_merc_index();

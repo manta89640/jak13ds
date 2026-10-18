@@ -2929,6 +2929,16 @@
             (commit-to-file *pc-settings*)))))))
   (none))
 
+;; (AI-assisted) 3DS "play as Keira" easter egg (bones.gc *pc-3ds-keira*): a new game started from
+;; the title with L1 + R1 (the 3DS's L and R) held when its save slot is picked (or when it starts
+;; without a save) has Keira; any other new game Jak.
+(#when TARGET_3DS
+  (define-extern *pc-3ds-keira* symbol)
+  (defun pc-3ds-keira-pick! ()
+    (set! *pc-3ds-keira* (and (cpad-hold? 0 l1) (cpad-hold? 0 r1)))
+    (if *pc-3ds-keira* (format 0 "3DS: new game as Keira~%"))
+    (none)))
+
 (defmethod respond-memcard ((obj progress))
   "logic for handling input in memcard screens."
   (let ((s5-0 (-> obj card-info)))
@@ -2950,6 +2960,9 @@
              ((< (-> obj option-index) 4)
               (sound-play "start-options")
               (set! (-> *progress-state* which) (-> obj option-index))
+              ;; (AI-assisted) 3DS: Keira for a new game whose slot is picked with L1 + R1 held
+              (#when TARGET_3DS
+                (if (= (-> obj display-state) (progress-screen save-game-title)) (pc-3ds-keira-pick!)))
               ;; save slot selected
               (if (zero? (-> s5-0 file (-> obj option-index) present))
                 (set! (-> obj next-display-state) (progress-screen memcard-saving))
@@ -2963,7 +2976,7 @@
                 ;; Start a new game differently if speedrunning mode is active
                 (speedrun-start-full-game-run)
                 ;; start the game normally
-                (initialize! *game-info* 'game (the-as game-save #f) "intro-start"))
+                (begin (#when TARGET_3DS (pc-3ds-keira-pick!)) (initialize! *game-info* 'game (the-as game-save #f) "intro-start")))
               (set-master-mode 'game))
              (else (sound-play "cursor-options") (set! (-> obj next-display-state) (progress-screen invalid)))))
           (((progress-screen memcard-insert))
@@ -2992,7 +3005,7 @@
               (cond
                 ((-> *pc-settings* speedrunner-mode?) (speedrun-start-full-game-run))
                 ;; start the game normally
-                (else (initialize! *game-info* 'game (the-as game-save #f) "intro-start")))
+                (else (begin (#when TARGET_3DS (pc-3ds-keira-pick!)) (initialize! *game-info* 'game (the-as game-save #f) "intro-start"))))
               (set-master-mode 'game))))
           (((progress-screen memcard-no-space) (progress-screen memcard-not-inserted) (progress-screen memcard-not-formatted))
            (cond
@@ -3004,7 +3017,7 @@
               (cond
                 ((-> *pc-settings* speedrunner-mode?) (speedrun-start-full-game-run))
                 ;; start the game normally
-                (else (initialize! *game-info* 'game (the-as game-save #f) "intro-start")))
+                (else (begin (#when TARGET_3DS (pc-3ds-keira-pick!)) (initialize! *game-info* 'game (the-as game-save #f) "intro-start"))))
               (set-master-mode 'game))
              ((nonzero? (-> obj display-state-stack 0)) (sound-play "start-options") (set-master-mode 'game))
              (else (sound-play "cursor-options") (set! (-> obj next-display-state) (progress-screen invalid)))))
@@ -3063,7 +3076,7 @@
               (cond
                 ((-> *pc-settings* speedrunner-mode?) (speedrun-start-full-game-run))
                 ;; start the game normally
-                (else (initialize! *game-info* 'game (the-as game-save #f) "intro-start")))
+                (else (begin (#when TARGET_3DS (pc-3ds-keira-pick!)) (initialize! *game-info* 'game (the-as game-save #f) "intro-start"))))
               (set-master-mode 'game))
              (else (sound-play "cursor-options") (set! (-> obj next-display-state) (progress-screen invalid)))))
           (((progress-screen quit-title))

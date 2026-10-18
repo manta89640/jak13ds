@@ -97,6 +97,16 @@ class CtrMercRenderer : public CtrBucketRenderer {
     const struct CtrMercModelData* model = nullptr;
     const struct CtrLevelData* lev = nullptr;
   };
+  const struct CtrMercModelData* find_model_named(const u8* name,
+                                                  u32 len,
+                                                  u32 h,
+                                                  u32 gen,
+                                                  FindSlot& s,
+                                                  const struct CtrLevelData** lev);
+  // (AI-assisted) "play as Keira" (CtrKeiraRig.h): her bone matrices, posed from Jak's for each of
+  // her models, and the slot table of pointers into them
+  CtrMercMat m_rig_mats[128];
+  const CtrMercMat* m_rig_slot[256] = {};
   static constexpr int kFindSlots = 64;
   FindSlot m_find[kFindSlots];
 
