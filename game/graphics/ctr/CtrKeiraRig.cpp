@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace ctr_keira {
@@ -388,7 +390,12 @@ bool pose(const float* const* jak,
   }
 
   // (AI-assisted) the arms: her wrist onto his (two-bone IK in the plane her elbow bends in)
-  for (int a = 0; a < 2; a++) {
+#ifndef __3DS__
+  static const bool no_ik = getenv("CTR_KEIRA_NO_IK") != nullptr;  // host A/B pictures
+#else
+  constexpr bool no_ik = false;
+#endif
+  for (int a = 0; a < 2 && !no_ik; a++) {
     const int S = r.arm[a][0], E = r.arm[a][1], H = r.arm[a][2];
     if (S < 0 || E < 0 || H < 0) {
       continue;
@@ -420,6 +427,29 @@ bool pose(const float* const* jak,
     const float reach = (la + lb) * 0.999f;
     const float s = std::clamp(d / reach, 1.f, kMaxArmStretch);
     const float A = la * s, B = lb * s;
+#ifndef __3DS__
+    // host check (env CTR_KEIRA_IK_LOG): her FK wrist's distance from his, and after the IK
+    static const bool ik_log = getenv("CTR_KEIRA_IK_LOG") != nullptr;
+    static double gap_sum = 0, gap_max = 0, after_max = 0, stretch_max = 1, n_log = 0;
+    if (ik_log) {
+      float g[3];
+      for (int c = 0; c < 3; c++) {
+        g[c] = q[H][c] - P[c];
+      }
+      const double gap = len3(g) / 4096.0;
+      gap_sum += gap;
+      gap_max = std::max(gap_max, gap);
+      stretch_max = std::max<double>(stretch_max, d / reach);
+      after_max = std::max<double>(after_max, std::max(0.f, d - (A + B)) / 4096.0);
+      if (++n_log >= 600) {
+        printf("[keira ik] wrist gap before IK: mean %.3f m, max %.3f m; after: max %.3f m; "
+               "reach needed up to %.2fx (stretch capped at %.2f)\n",
+               gap_sum / n_log, gap_max, after_max, stretch_max, kMaxArmStretch);
+        gap_sum = gap_max = after_max = n_log = 0;
+        stretch_max = 1;
+      }
+    }
+#endif
     const float dd = std::min(d, (A + B) * 0.9999f);
     float D[3];
     for (int c = 0; c < 3; c++) {
