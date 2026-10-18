@@ -15,6 +15,10 @@
 
 #include "game/kernel/common/kboot.h"
 
+#if defined(__3DS__) && OG3DS_GAME_JAK2
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 namespace {
 
 using clock_type = std::chrono::steady_clock;
@@ -55,6 +59,17 @@ u32 null_vsync() {
     if (const char* e = getenv("OPENGOAL_NULL_GFX_FPS")) {
       fps = std::max(1, std::min(60, atoi(e)));
       lg::info("Null renderer: {} Hz vsync pacing (OPENGOAL_NULL_GFX_FPS)", fps);
+    }
+#elif OG3DS_GAME_JAK2
+    // (AI-assisted) the Jak II 3DS build: 30 Hz like Jak 1's 3DS frame rate cap (and the host
+    // timing runs, OPENGOAL_NULL_GFX_FPS=30); config.ini null_fps = 60 for 60 Hz
+    {
+      char v[16];
+      fps = 30;
+      if (ctr_config_get("null_fps", v, sizeof(v))) {
+        fps = std::max(1, std::min(60, atoi(v)));
+      }
+      lg::info("Null renderer: {} Hz vsync pacing", fps);
     }
 #endif
     return std::chrono::nanoseconds(1000000000LL / fps);

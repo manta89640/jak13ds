@@ -497,6 +497,44 @@ needs to cover this (runtime work). Before that, the log shows `kmalloc: !alloc 
 (11264000 bytes)` during `play`, which the small memory layout has to account for.
 
 
+## Jak II build (AI-assisted, Oct 18 2026)
+
+A separate configuration of the same CMake project, in its own build dir. Jak 1's build is
+unchanged (`OG3DS_GAME` defaults to `jak1`).
+
+```sh
+source platform/3ds/toolchain/env.sh
+# Jak II compiled to C with the small memory layout (mirror: port_test/j2mirror)
+OPENGOAL_SMALL_MEMORY=1 build/goalc/goalc --game jak2 --proj-path <j2mirror> \
+  --instruction-set c -c '(mi)'
+cmake -S platform/3ds -B build-3ds-jak2 -G Ninja -DOG3DS_GAME=jak2 \
+  -DCMAKE_TOOLCHAIN_FILE=$PWD/platform/3ds/cmake/Toolchain-3DS.cmake \
+  -DOG3DS_CSRC_DIR=<j2mirror>/out/jak2/csrc \
+  -DOG3DS_MODULE_INSTANCES=$PWD/platform/3ds/jak2_module_instances.txt
+cmake --build build-3ds-jak2                     # gk.3dsx, gk.elf
+platform/3ds/tools/make_cia.sh --game jak2       # build-3ds-jak2/jak2.cia
+platform/3ds/tools/stage_sd.sh --game jak2 --proj <j2mirror> --sd <folder>
+platform/3ds/tools/run_my_emu.sh --game jak2 --cia build-3ds-jak2/jak2.cia ...   # private Azahar
+```
+
+- `OG3DS_GAME=jak2` adds the Jak 2 kernel, overlord (jak2 + the common 989 stream plugin) and
+  mips2c functions, and defines `OPENGOAL_ONLY_JAK1=0 OPENGOAL_NO_JAK3=1` (Jak 3 / X compiled out of
+  `runtime.cpp` and `mips2c_table.cpp`) and `OG3DS_GAME_JAK2=1`. Not on the 3DS: sqlite (the debug
+  editor's database: `initialize_sql_db` does nothing), the REPL user name, and the PC renderer's
+  merc mutex (`platform/3ds/port/ctr_jak2_stubs.cpp`).
+- Null renderer (no picture), paced at 30 Hz (`null_fps` in config.ini), linear heap 8 MB (Jak 1:
+  40 MB, for the renderer); the regular heap gets 94 MB. Default `args = -boot -fakeiso -cbackend`
+  (Jak II's kernel starts the IOP from the "DVD" without `-fakeiso`).
+- Title: "OpenGOAL Jak II", unique id 0xF7A21 (title 000400000F7A2100), product code CTR-H-OGJ2;
+  gk.rsf's settings otherwise (124 MB, 804 MHz, the same SVC list). Icon from
+  `platform/3ds/cia/local/jak2/icon.png` (git-ignored, like Jak 1's art).
+- SD card: `sdmc:/3ds/jak2/` (`gk.3dsx`, `config.ini`, `data/out/jak2/iso`, `data/log`),
+  `platform/3ds/tools/config_template_jak2.ini` (sound = off, renderer = null).
+- Size (840 modules + 108 instances, -O2): .text 18.7 MB (17.1 MB without the instances; Jak 1:
+  10.7 MB), .rodata 0.8 MB, .data 46 KB, .bss 2.3 MB. In the 124 MB mode: heap 96.9 MB, of which
+  ~55.6 MB used in the city (48 MB EE + the runtime), linear 8 MB.
+- Only the CIA has enough memory: a `.3dsx` in Azahar gets 62 MB of heap ("Not enough memory").
+
 ## Renderer (M4 phase 1)
 
 (AI-assisted.) `GfxPipeline::Ctr`, in `game/graphics/ctr`. It is the default on the 3DS, and on

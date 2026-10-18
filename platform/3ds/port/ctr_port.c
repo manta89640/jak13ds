@@ -24,7 +24,14 @@
 /* (AI-assisted) 40 MB: the GPU reads level data only from linear memory or VRAM. With 32 MB,
  * village1 + jungle (28 MB of .c3l) left 0 KB free and 92 textures/meshes missing; the heap used
  * ~64-66 MB of its 81 MB on hardware. */
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+/* (AI-assisted) the Jak II build draws nothing yet (null renderer): linear memory only holds the
+ * audio buffers, the rest goes to the regular heap (48 MB of EE memory + the runtime). Raise it
+ * with the renderer. */
+u32 __ctru_linear_heap_size = 8 << 20;
+#else
 u32 __ctru_linear_heap_size = 40 << 20;
+#endif
 
 extern char* fake_heap_start;
 extern char* fake_heap_end;
@@ -91,7 +98,7 @@ static void log_watchdog(void);
  * emulator), so running one doesn't overwrite what the other got to. The first lines are written
  * by __appInit below, before main. */
 static const char* boot_file(void) {
-  return envIsHomebrew() ? "sdmc:/3ds/jak1/boot.txt" : "sdmc:/3ds/jak1/boot_cia.txt";
+  return envIsHomebrew() ? CTR_SD_DIR "/boot.txt" : CTR_SD_DIR "/boot_cia.txt";
 }
 
 /* libctru's __appInit (services, before the constructors and main), except that the SD card is
@@ -149,7 +156,7 @@ static void config_load(void) {
     return;
   }
   s_cfg_lines = 0;
-  FILE* f = fopen("sdmc:/3ds/jak1/config.ini", "r");
+  FILE* f = fopen(CTR_SD_DIR "/config.ini", "r");
   if (!f) {
     return;
   }
@@ -1264,7 +1271,7 @@ void ctr_crash(const char* title, const char* detail) {
     _exit(1);
   }
   show_screen("\x1b[31m", "*** OpenGOAL crashed ***", title, detail, 1,
-              "Logs: sdmc:/3ds/jak1/data/log/\nPlease report stdout.log and gk.log\n"
+              "Logs: " CTR_SD_DIR "/data/log/\nPlease report stdout.log and gk.log\n"
               "(this session is at their end).\n"
               "\x1b[32mPress START to exit.\x1b[0m");
   if (s_log_on && files) {

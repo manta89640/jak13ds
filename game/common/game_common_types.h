@@ -12,6 +12,10 @@
 #define OPENGOAL_ONLY_JAK1 0
 #endif
 #endif
+//! (AI-assisted) When set, Jak 3 and Jak X are compiled out (the Jak II 3DS build: Jak 1 and 2).
+#if !defined(OPENGOAL_NO_JAK3)
+#define OPENGOAL_NO_JAK3 OPENGOAL_ONLY_JAK1
+#endif
 
 //! Supported languages.
 enum class Language {

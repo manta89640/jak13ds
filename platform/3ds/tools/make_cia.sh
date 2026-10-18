@@ -3,6 +3,11 @@
 # Package gk.elf as an installable CIA (New 3DS 124 MB memory mode). See docs/3ds-port/3ds_build.md.
 #
 #   platform/3ds/tools/make_cia.sh [--build-dir DIR] [--out FILE] [--boottest] [--mem 124|legacy]
+#                                  [--game jak1|jak2]
+#
+# --game jak2: (AI-assisted) the Jak II build (build-3ds-jak2/gk.elf -> jak2.cia): its own title
+#   ("OpenGOAL Jak II", unique id 0xF7A21, product code CTR-H-OGJ2; gk.rsf's settings otherwise)
+#   and its art from platform/3ds/cia/local/jak2/ (banner.png, banner.wav, icon.png).
 #
 # --boottest: package the small test app platform/3ds/hello (build it first: make -C
 #   platform/3ds/hello) as four separate titles, each with one CIA setting changed, to find the
@@ -31,10 +36,13 @@ BUILD_DIR="$ROOT/build-3ds"
 OUT=""
 BOOTTEST=0
 MEM=124
+GAME=jak1
+BUILD_DIR_GIVEN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --build-dir) BUILD_DIR="$2"; shift 2 ;;
+    --build-dir) BUILD_DIR="$2"; BUILD_DIR_GIVEN=1; shift 2 ;;
+    --game) GAME="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     --boottest) BOOTTEST=1; shift ;;
     --mem) MEM="$2"; shift 2 ;;
@@ -42,6 +50,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$MEM" in 124|legacy) ;; *) echo "--mem: 124 or legacy" >&2; exit 1 ;; esac
+case "$GAME" in jak1|jak2) ;; *) echo "--game: jak1 or jak2" >&2; exit 1 ;; esac
+if [ "$GAME" = jak2 ] && [ "$BUILD_DIR_GIVEN" = 0 ]; then BUILD_DIR="$ROOT/build-3ds-jak2"; fi
 MAKEROM="$(command -v makerom || true)"
 [ -n "$MAKEROM" ] || MAKEROM="$HOME/devkitpro-3ds/tools/bin/makerom"
 [ -x "$MAKEROM" ] || { echo "makerom not found (see the header of this script)" >&2; exit 1; }
@@ -69,16 +79,30 @@ python3 "$ROOT/platform/3ds/tools/check_svc.py" "$ELF" "$RSF" ||
 mkdir -p "$BUILD_DIR"
 
 CIA_DIR="$ROOT/platform/3ds/cia"
+LOCAL_ART="$CIA_DIR/local"
+SHORT_TITLE="Jak and Daxter"
+LONG_TITLE="The Precursor Legacy (OpenGOAL 3DS port)"
+if [ "$GAME" = jak2 ]; then
+  # (AI-assisted) Jak II: its own title and art; the rest of the settings are gk.rsf's
+  LOCAL_ART="$CIA_DIR/local/jak2"
+  SHORT_TITLE="OpenGOAL Jak II"
+  LONG_TITLE="Jak II (OpenGOAL 3DS port)"
+  mkdir -p "$BUILD_DIR"
+  sed -e 's/^\(  Title *: *\).*/\1"OpenGOAL Jak II"/' \
+      -e 's/^\(  ProductCode *: *\).*/\1"CTR-H-OGJ2"/' \
+      -e 's/^\(  UniqueId *: *\).*/\10xF7A21/' "$RSF" > "$BUILD_DIR/gk_jak2.rsf"
+  RSF="$BUILD_DIR/gk_jak2.rsf"
+fi
 # (AI-assisted) a banner made from your own copy of the game (the title logo, the power cell jingle):
 # platform/3ds/cia/local/banner.png (256x128) and banner.wav (3 s at most). The folder is ignored
 # by git: game assets are never committed. See docs/3ds-port/3ds_build.md, "Custom HOME Menu banner".
 BANNER_PNG="$CIA_DIR/banner.png"
 BANNER_WAV="$CIA_DIR/banner.wav"
-[ -f "$CIA_DIR/local/banner.png" ] && BANNER_PNG="$CIA_DIR/local/banner.png"
-[ -f "$CIA_DIR/local/banner.wav" ] && BANNER_WAV="$CIA_DIR/local/banner.wav"
+[ -f "$LOCAL_ART/banner.png" ] && BANNER_PNG="$LOCAL_ART/banner.png"
+[ -f "$LOCAL_ART/banner.wav" ] && BANNER_WAV="$LOCAL_ART/banner.wav"
 # (AI-assisted) and a HOME Menu icon from a picture of your choice (make_banner.py --icon)
 ICON_PNG="$CIA_DIR/icon.png"
-[ -f "$CIA_DIR/local/icon.png" ] && ICON_PNG="$CIA_DIR/local/icon.png"
+[ -f "$LOCAL_ART/icon.png" ] && ICON_PNG="$LOCAL_ART/icon.png"
 echo "banner: $BANNER_PNG, $BANNER_WAV; icon: $ICON_PNG"
 BANNERTOOL="$(command -v bannertool || true)"
 [ -n "$BANNERTOOL" ] || BANNERTOOL="$HOME/devkitpro-3ds/tools/bin/bannertool"
@@ -133,12 +157,12 @@ if [ "$BOOTTEST" = 1 ]; then
 fi
 
 if [ -z "$OUT" ]; then
-  OUT="$BUILD_DIR/jak1.cia"
-  [ "$MEM" = legacy ] && OUT="$BUILD_DIR/jak1_legacy.cia"
+  OUT="$BUILD_DIR/$GAME.cia"
+  [ "$MEM" = legacy ] && OUT="$BUILD_DIR/${GAME}_legacy.cia"
 fi
 if [ "$MEM" = legacy ]; then
   # the same settings without the 124 MB mode
   sed "${LEGACY[@]}" "$RSF" > "$BUILD_DIR/cia_legacy.rsf"
   RSF="$BUILD_DIR/cia_legacy.rsf"
 fi
-build_cia "$OUT" "$RSF" "Jak and Daxter" "The Precursor Legacy (OpenGOAL 3DS port)"
+build_cia "$OUT" "$RSF" "$SHORT_TITLE" "$LONG_TITLE"

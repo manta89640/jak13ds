@@ -10,6 +10,14 @@
  * these functions, which use plain C types.
  */
 
+/* (AI-assisted) The game's folder on the SD card: sdmc:/3ds/jak1, or sdmc:/3ds/jak2 for the Jak II
+ * build (OG3DS_GAME=jak2 in platform/3ds/CMakeLists.txt). The paths below are in it. */
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+#define CTR_SD_DIR "sdmc:/3ds/jak2"
+#else
+#define CTR_SD_DIR "sdmc:/3ds/jak1"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

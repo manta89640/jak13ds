@@ -57,11 +57,13 @@
 #include "game/kernel/jak2/kdgo.h"
 #include "game/kernel/jak2/klisten.h"
 #include "game/kernel/jak2/kscheme.h"
+#if !OPENGOAL_NO_JAK3
 #include "game/kernel/jak3/kboot.h"
 #include "game/kernel/jak3/kdgo.h"
 #include "game/kernel/jak3/klisten.h"
 #include "game/kernel/jak3/kscheme.h"
 #include "game/kernel/jakx/kboot.h"
+#endif
 #endif
 #include "game/overlord/common/fake_iso.h"
 #include "game/overlord/common/iso.h"
@@ -87,7 +89,9 @@
 #include "game/overlord/jak2/stream.h"
 #include "game/overlord/jak2/streamlist.h"
 #include "game/overlord/jak2/vag.h"
+#if !OPENGOAL_NO_JAK3
 #include "game/overlord/jak3/overlord.h"
+#endif
 #endif
 #include "game/system/Deci2Server.h"
 #include "game/system/iop_thread.h"
@@ -248,7 +252,9 @@ void ee_runner(SystemThreadInterface& iface) {
   jak1::kboot_init_globals();
 #if !OPENGOAL_ONLY_JAK1
   jak2::kboot_init_globals();
+#if !OPENGOAL_NO_JAK3
   jak3::kboot_init_globals();
+#endif
 #endif
 
   kboot_init_globals_common();
@@ -256,7 +262,9 @@ void ee_runner(SystemThreadInterface& iface) {
   jak1::kdgo_init_globals();
 #if !OPENGOAL_ONLY_JAK1
   jak2::kdgo_init_globals();
+#if !OPENGOAL_NO_JAK3
   jak3::kdgo_init_globals();
+#endif
 #endif
 
   kdsnetm_init_globals_common();
@@ -266,7 +274,9 @@ void ee_runner(SystemThreadInterface& iface) {
   jak1::kscheme_init_globals();
 #if !OPENGOAL_ONLY_JAK1
   jak2::kscheme_init_globals();
+#if !OPENGOAL_NO_JAK3
   jak3::kscheme_init_globals();
+#endif
 #endif
   kscheme_init_globals_common();
   kmalloc_init_globals_common();
@@ -275,7 +285,9 @@ void ee_runner(SystemThreadInterface& iface) {
   jak1::klisten_init_globals();
 #if !OPENGOAL_ONLY_JAK1
   jak2::klisten_init_globals();
+#if !OPENGOAL_NO_JAK3
   jak3::klisten_init_globals();
+#endif
 
   jak2::vag_init_globals();
 
@@ -296,12 +308,14 @@ void ee_runner(SystemThreadInterface& iface) {
     case GameVersion::Jak2:
       jak2::goal_main(g_argc, g_argv);
       break;
+#if !OPENGOAL_NO_JAK3
     case GameVersion::Jak3:
       jak3::goal_main(g_argc, g_argv);
       break;
     case GameVersion::JakX:
       jakx::goal_main(g_argc, g_argv);
       break;
+#endif
 #endif
     default:
       ASSERT_MSG(false, "Unsupported game version");
@@ -406,10 +420,12 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
       case GameVersion::Jak2:
         jak2::start_overlord_wrapper(iop.overlord_argc, iop.overlord_argv, &complete);
         break;
+#if !OPENGOAL_NO_JAK3
       case GameVersion::Jak3:
       case GameVersion::JakX:
         jak3::start_overlord_wrapper(&complete);
         break;
+#endif
 #endif
       default:
         ASSERT_NOT_REACHED();

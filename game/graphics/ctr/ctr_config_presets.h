@@ -92,7 +92,12 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"gpu_micro", "on"}, {"shader_resident", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
     {"logic_micro", "on"}, /* micro-logic: mips2c_native.cpp logic_micro_on */
     {"sound_core", "auto"}, /* 2 on a New 3DS, else 1 */
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+    /* (AI-assisted) Jak II's kernel starts the IOP from the "DVD" without -fakeiso */
+    {"args", "-boot -fakeiso -cbackend"},
+#else
     {"args", "-boot -cbackend"},
+#endif
     {"debug_log", "off"},
     {"listener", "off"},
     {"screenshots", "0"},

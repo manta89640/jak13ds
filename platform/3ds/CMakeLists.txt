@@ -8,6 +8,11 @@
 #   cmake --build build-3ds
 #
 # Produces libgk3ds_*.a static libraries and (when everything links) gk.3dsx.
+#
+# (AI-assisted) -DOG3DS_GAME=jak2: the Jak II build (its kernel, overlord and mips2c functions as
+# well as Jak 1's, null renderer, data in sdmc:/3ds/jak2/). Use its own build dir (build-3ds-jak2):
+#   cmake -S platform/3ds -B build-3ds-jak2 -G Ninja -DOG3DS_GAME=jak2 \
+#         -DCMAKE_TOOLCHAIN_FILE=$PWD/platform/3ds/cmake/Toolchain-3DS.cmake
 
 cmake_minimum_required(VERSION 3.20)
 project(opengoal_3ds C CXX ASM)
@@ -31,6 +36,15 @@ set(CMAKE_C_FLAGS_RELEASE "-O2")
 # 32/48 MB GOAL memory layout (common/goal_constants.h). The GOAL code (C modules, CGO/DGO) must be
 # built with the same setting: platform/3ds/tools/build_cmodules.sh
 option(OG3DS_SMALL_MEMORY "Small (48 MB) EE memory layout" ON)
+set(OG3DS_GAME "jak1" CACHE STRING "game: jak1 or jak2")
+if(NOT OG3DS_GAME STREQUAL "jak1" AND NOT OG3DS_GAME STREQUAL "jak2")
+  message(FATAL_ERROR "OG3DS_GAME must be jak1 or jak2")
+endif()
+if(OG3DS_GAME STREQUAL "jak2")
+  # Jak 1 and Jak 2 in the runtime (game/common/game_common_types.h), no Jak 3 / X; SD folder
+  # /3ds/jak2 (common/util/FileUtil.h, platform/3ds/port/ctr_port.h)
+  add_compile_definitions(OPENGOAL_ONLY_JAK1=0 OPENGOAL_NO_JAK3=1 OG3DS_GAME_JAK2=1)
+endif()
 if(OG3DS_SMALL_MEMORY)
   add_compile_definitions(OPENGOAL_SMALL_MEMORY=1)
 else()
@@ -177,6 +191,21 @@ set(OG3DS_KERNEL_SOURCES
   mips2c/mips2c_table.cpp
   runtime.cpp
 )
+if(OG3DS_GAME STREQUAL "jak2")
+  list(APPEND OG3DS_KERNEL_SOURCES
+    kernel/jak2/fileio.cpp
+    kernel/jak2/goalc_kernel.cpp
+    kernel/jak2/kboot.cpp
+    kernel/jak2/kdgo.cpp
+    kernel/jak2/klink.cpp
+    kernel/jak2/klisten.cpp
+    kernel/jak2/kmachine.cpp
+    kernel/jak2/kmachine_extras.cpp
+    kernel/jak2/kmalloc.cpp
+    kernel/jak2/kprint.cpp
+    kernel/jak2/kscheme.cpp
+    kernel/jak2/ksound.cpp)
+endif()
 list(TRANSFORM OG3DS_KERNEL_SOURCES PREPEND ${OG_ROOT}/game/)
 add_library(og3ds_kernel STATIC ${OG3DS_KERNEL_SOURCES})
 
@@ -243,8 +272,31 @@ set(OG3DS_RUNTIME_SOURCES
   system/hid/input_bindings.cpp
   tools/filter_menu/filter_menu_json.cpp
 )
+if(OG3DS_GAME STREQUAL "jak2")
+  list(APPEND OG3DS_RUNTIME_SOURCES
+    graphics/jak2_texture_remap.cpp
+    overlord/jak2/dma.cpp
+    overlord/jak2/iso_api.cpp
+    overlord/jak2/iso_cd.cpp
+    overlord/jak2/iso_queue.cpp
+    overlord/jak2/iso.cpp
+    overlord/jak2/list.cpp
+    overlord/jak2/overlord.cpp
+    overlord/jak2/pages.cpp
+    overlord/jak2/989_plugins/plugin_strv.cpp
+    overlord/common/989_plugins/plugin_strv.cpp
+    overlord/jak2/spustreams.cpp
+    overlord/jak2/srpc.cpp
+    overlord/jak2/ssound.cpp
+    overlord/jak2/stream.cpp
+    overlord/jak2/streamlfo.cpp
+    overlord/jak2/streamlist.cpp
+    overlord/jak2/vag.cpp)
+  file(GLOB OG3DS_MIPS2C_JAK2 ${OG_ROOT}/game/mips2c/jak2_functions/*.cpp)
+  list(APPEND OG3DS_MIPS2C_JAK2 ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_jak2_stubs.cpp)
+endif()
 list(TRANSFORM OG3DS_RUNTIME_SOURCES PREPEND ${OG_ROOT}/game/)
-add_library(og3ds_runtime STATIC ${OG3DS_RUNTIME_SOURCES} ${OG3DS_MIPS2C_JAK1})
+add_library(og3ds_runtime STATIC ${OG3DS_RUNTIME_SOURCES} ${OG3DS_MIPS2C_JAK1} ${OG3DS_MIPS2C_JAK2})
 
 # ---------------- gk.3dsx ----------------
 add_library(og3ds_port STATIC ${CMAKE_CURRENT_SOURCE_DIR}/port/ctr_port.c)
@@ -282,11 +334,20 @@ set_target_properties(gk PROPERTIES SUFFIX ".elf")
 if(3DSXTOOL AND SMDHTOOL)
   # (AI-assisted) the icon made by make_banner.py --icon when there is one (git ignores local/)
   set(OG3DS_ICON ${CMAKE_CURRENT_SOURCE_DIR}/cia/icon.png)
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/cia/local/icon.png)
-    set(OG3DS_ICON ${CMAKE_CURRENT_SOURCE_DIR}/cia/local/icon.png)
+  set(OG3DS_LOCAL_ART ${CMAKE_CURRENT_SOURCE_DIR}/cia/local)
+  set(OG3DS_SHORT_TITLE "Jak and Daxter")
+  set(OG3DS_LONG_TITLE "The Precursor Legacy (OpenGOAL 3DS port)")
+  if(OG3DS_GAME STREQUAL "jak2")
+    # Jak II's art lives in its own folder, so Jak 1's stays untouched
+    set(OG3DS_LOCAL_ART ${CMAKE_CURRENT_SOURCE_DIR}/cia/local/jak2)
+    set(OG3DS_SHORT_TITLE "OpenGOAL Jak II")
+    set(OG3DS_LONG_TITLE "Jak II (OpenGOAL 3DS port)")
+  endif()
+  if(EXISTS ${OG3DS_LOCAL_ART}/icon.png)
+    set(OG3DS_ICON ${OG3DS_LOCAL_ART}/icon.png)
   endif()
   add_custom_command(TARGET gk POST_BUILD
-    COMMAND ${SMDHTOOL} --create "Jak and Daxter" "The Precursor Legacy (OpenGOAL 3DS port)"
+    COMMAND ${SMDHTOOL} --create "${OG3DS_SHORT_TITLE}" "${OG3DS_LONG_TITLE}"
             "OpenGOAL" ${OG3DS_ICON} ${CMAKE_CURRENT_BINARY_DIR}/gk.smdh
     COMMAND ${3DSXTOOL} $<TARGET_FILE:gk> ${CMAKE_CURRENT_BINARY_DIR}/gk.3dsx
             --smdh=${CMAKE_CURRENT_BINARY_DIR}/gk.smdh

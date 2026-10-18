@@ -11,8 +11,10 @@
 #include "game/kernel/jak1/kscheme.h"
 #if !OPENGOAL_ONLY_JAK1
 #include "game/kernel/jak2/kscheme.h"
+#if !OPENGOAL_NO_JAK3
 #include "game/kernel/jak3/kscheme.h"
 #include "game/kernel/jakx/kscheme.h"
+#endif
 #endif
 #include "game/runtime.h"
 
@@ -280,6 +282,7 @@ namespace shadow_scissor_edges { extern void link(); }
 namespace shadow_calc_dual_verts { extern void link(); }
 namespace shadow_xform_verts { extern void link(); }
 }
+#if !OPENGOAL_NO_JAK3
 namespace jak3 {
 namespace light_hash_get_bucket_index { extern void link(); }
 namespace add_light_sphere_to_light_group { extern void link(); }
@@ -548,6 +551,7 @@ namespace shadow_add_double_tris { extern void link(); }
 namespace shadow_execute { extern void link(); }
 namespace method_21_cloth_system { extern void link(); }
 }
+#endif  // !OPENGOAL_NO_JAK3
 #endif  // !OPENGOAL_ONLY_JAK1
 // clang-format on
 
@@ -725,6 +729,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak2::shadow_find_facing_single_tris::link, jak2::shadow_init_vars::link,
        jak2::shadow_scissor_top::link, jak2::shadow_scissor_edges::link,
        jak2::shadow_calc_dual_verts::link, jak2::shadow_xform_verts::link}}},
+#if !OPENGOAL_NO_JAK3
     /////////// JAK 3
     {{"lights",
       {jak3::light_hash_get_bucket_index::link, jak3::add_light_sphere_to_light_group::link,
@@ -932,6 +937,10 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
 #else
     {},
     {},
+#endif  // !OPENGOAL_NO_JAK3
+#else
+    {},
+    {},
     {},
 #endif
 };
@@ -973,6 +982,7 @@ void LinkedFunctionTable::reg(const std::string& name,
           s7.offset + jak2_symbols::FIX_SYM_GLOBAL_HEAP,
           ::jak2::u32_in_fixed_sym(jak2_symbols::FIX_SYM_FUNCTION_TYPE), 0x40, UNKNOWN_PP));
       break;
+#if !OPENGOAL_NO_JAK3
     case GameVersion::Jak3:
       jump_to_asm = Ptr<u8>(::jak3::alloc_heap_object(
           s7.offset + jak3_symbols::FIX_SYM_GLOBAL_HEAP,
@@ -983,6 +993,7 @@ void LinkedFunctionTable::reg(const std::string& name,
           s7.offset + jak3_symbols::FIX_SYM_GLOBAL_HEAP,
           ::jakx::u32_in_fixed_sym(jakx_symbols::FIX_SYM_FUNCTION_TYPE), 0x40, UNKNOWN_PP));
       break;
+#endif  // !OPENGOAL_NO_JAK3
 #endif
     default:
       ASSERT(false);

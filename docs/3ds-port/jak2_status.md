@@ -1,4 +1,4 @@
-# Jak II -> New 3DS: status and handoff (milestone 1, updated Oct 18 2026)
+# Jak II -> New 3DS: status and handoff (milestone 2, updated Oct 18 2026)
 
 (AI-assisted.) Branch `jak2-3ds` (worktree `jak-project/.claude/worktrees/jak2`), started from
 `batch-oct11` c1da64bc1; batch-oct11 9da503ce27 merged in on Oct 18 (no conflicts). Jak 1
@@ -24,6 +24,64 @@ Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one en
 (`ntsc_v1`). Both have the same serial and ELF hash, and the database lists both ISO hashes. The
 `ntsc_v2` overrides only change label and anonymous-function types, so they only matter for
 decompiling code. Data extraction and the build use `ntsc_v1`, as upstream does.
+
+## Milestone 2: logic-only boot on the 3DS (Oct 18)
+
+(AI-assisted.) Jak II boots in Azahar (New 3DS, the CIA) with the null renderer and reaches Haven
+City with traffic (`jak2_city.pad`). Build and packaging: 3ds_build.md "Jak II build"; module
+instances: c_backend.md "Shared object files".
+
+**City frame time (Azahar, CIA, 804 MHz mode, null renderer, 30 Hz cap):**
+
+| Window (jak2_city.pad) | fps | logic ms/frame | notes |
+|---|---|---|---|
+| title screen | 30.0 | ~26 | |
+| city-stand (600 frames, slums, 291 processes) | 13.2 | 75.6 | iop 2.3 ms, 143 thread suspends/frame, 25 KB stack saved/frame |
+| city-walk (300 frames) | 13.4 | 74.7 | |
+
+The `perf:` lines' logic is kernel dispatch minus the vsync wait; with the null renderer there is
+no render wait, so it is all game logic (plus the IOP thread's 2.3 ms on the same core). The Mac
+estimate was 50-70 ms. Jak 1 on Azahar ran about at hardware speed for logic, so expect ~75 ms
+on a real New 3DS as well (not measured). Jak's end position (1065.98, 0.52, 194.46) target-hide
+is the same as on the PC. Logs: `port_test/3ds-sdcard-jak2-baseline-a` (staging) and this
+session's run; jak2-prof works on the logic profile.
+
+**Small memory layout** (`OPENGOAL_SMALL_MEMORY=1` for goalc, on for the 3DS; same 48 MB layout as
+Jak 1):
+- `gcommon.gc`: SMALL_MEMORY / TARGET_3DS from the environment, BIG_MEMORY / PC_BIG_MEMORY off,
+  END_OF_MEMORY #x3000000, `*goal-small-memory*` (checked by the Jak 2 kernel, kscheme.cpp).
+- PROCESS_HEAP_MULT 1 (PS2: *nk-dead-pool* 1540 KB, the city uses 918-1078 KB), SPRITE_MAX_AMOUNT_MULT
+  off (PS2 sizes), DEBUG_LEVEL_HEAP_MULT 1.0 (level heap 18396 KB, the PS2's 146 pages),
+  DMA_BUFFER_SMALL_MULT 1 (2 x 1280 KB; `*dma-mem-peak*` in the memory report: 199-284 KB on the
+  route).
+- Jak 2 kernel: stack at GOAL_KERNEL_STACK_TOP (0x2c00000), `*stack-top*` etc. to match, debug heap
+  the 4 MB above it.
+- Result (host small-memory C mode and Azahar): global heap 30.5 of 42.5 MB used in the slums
+  (level-heaps 18396, scheme-globals 5436, dma-buffers 2585, process-buffers 1754, tpages 879 KB). Level
+  heaps at 1.0x: ctysluma 5843 / ctyindb 5949 of 6048 KB, ctywide 3402 of 3825, lwidea (borrow)
+  2088 of 2095 KB: the tightest. `jak2_route.pad` (slums, port, market, main town, industrial,
+  farms, sewer) passes on the host with these sizes.
+
+**Shared object files:** fixed with module instances (c_backend.md). The Jak 2 3DS build compiles
+108 objects twice (+1.7 MB .text). Host A/B test `jak2_link_copy.pad`: with instances Jak walks to
+the same place as in `jak2_city.pad`; with one instance (old behaviour) he never moves.
+
+**Boot fixes found on the way:** `iso.h` open_wad / sync_read function types (int32_t is `long` on
+ARM newlib); sqlite and the REPL user name stubbed on the 3DS; `-fakeiso` in the default args (the
+Jak 2 kernel otherwise reboots the IOP from the DVD and the RPC binds fail: `sif_busy` assert);
+the CIA is needed (a .3dsx gets 62 MB of heap); per-frame "Kernel dispatch time" prints off on
+the 3DS (one SD write per slow frame).
+
+**Staged:** `port_test/3ds-sdcard-jak2-baseline-a` (LOGIC ONLY, black screen, no sound; README in
+it): `cias/jak2.cia`, `3ds/jak2/` with gk.3dsx, config.ini, data/out/jak2/iso (605 files).
+
+**Next:**
+1. Logic speed (13 fps in the city): jak2-prof's profile; the Jak 1 optimisations (native mips2c,
+   32-bit codegen) apply. 143 thread suspends/frame with 25 KB of stack copied is a target too.
+2. Renderer: the Ctr renderers adapted to Jak 2's buckets (background via the converter on Jak 2
+   fr3, merc, sprites/HUD/text, ...); linear heap back up from 8 MB.
+3. Sound (Jak 2 overlord streaming on ndsp), then a hardware run.
+4. Banner (Jak II logo model) and jingle for the CIA; it has the icon only.
 
 ## Paths
 
@@ -237,8 +295,8 @@ Milestone 2 (boot on the 3DS) and the baseline the user asked for (Oct 12):
 - Memory: Jak 2 PC uses `BIG_MEMORY`. The PS2 levels were sized for 32 MB, and the city keeps
   several large levels plus `*city-dead-pool*` in memory.
 - `-boot -debug` crashes natively on arm64. This may hide a real bug that C mode also hits.
-- The C module hazard (c_backend.md): two loaded levels with the same object file share one
-  seg_base, so the first copy's code uses the second copy's static data (and freed memory once it
+- (Fixed Oct 18 with module instances, see milestone 2.) The C module hazard (c_backend.md): two
+  loaded levels with the same object file share one seg_base, so the first copy's code uses the second copy's static data (and freed memory once it
   unloads). Jak 2's DGO lists (Oct 18): 122 objects are in more than one DGO; the ones that can
   meet in the city: `searchlight` (cwi = ctywide, always loaded in the city, and pac), and the bot
   code `ai-task-h`, `bot`, `bot-h`, `bot-states` (ate, ctyasha, ctykora, lkiddoge, seb, swb, unb),

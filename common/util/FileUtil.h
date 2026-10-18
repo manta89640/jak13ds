@@ -46,7 +46,12 @@ namespace fs = ghc::filesystem;
 // Root of the OpenGOAL files on the SD card (see docs/3ds-port/3ds_build.md)
 // (a plain POSIX path: gk sets the current directory to sdmc:/, so std::filesystem sees it as
 // absolute)
+// (AI-assisted) the Jak II build (OG3DS_GAME=jak2) has its own folder
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+#define OPENGOAL_3DS_SD_ROOT "/3ds/jak2"
+#else
 #define OPENGOAL_3DS_SD_ROOT "/3ds/jak1"
+#endif
 #endif
 
 namespace file_util {
