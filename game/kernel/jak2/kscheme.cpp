@@ -1848,6 +1848,8 @@ int InitHeapAndSymbol() {
   make_function_symbol_from_c("kmalloc", goal_malloc);
   make_function_symbol_from_c("kmemopen", kmemopen);
   make_function_symbol_from_c("kmemclose", kmemclose);
+  // (AI-assisted) memory report of the pad script
+  make_function_symbol_from_c("pad-script-kmem-report", kmem_report);
   make_function_symbol_from_c("new-dynamic-structure", new_dynamic_structure);
   make_function_symbol_from_c("method-set!", method_set);
   make_stack_arg_function_symbol_from_c("link", link_and_exec_wrapper, 0b10100);

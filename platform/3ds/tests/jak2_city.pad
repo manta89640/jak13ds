@@ -1,0 +1,24 @@
+# (AI-assisted) Jak II: from the title screen into Haven City gameplay (the slums, with traffic).
+# docs/3ds-port/jak2_status.md "Scripted route and memory survey". Native PC or C mode, e.g.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_NULL_GFX_FPS=30 OPENGOAL_PAD_SCRIPT=jak2_city.pad \
+#     gk -g jak2 --proj-path <project> --null-gfx -- -boot -fakeiso -nosound
+# "continue" starts a new game (speedrun act-2 task state) at that continue point from anywhere,
+# title screen included (goal_src/jak2/pc/features/speedruns.gc pad-script-continue).
+# Frames below count game frames; "wait" stops the clock until Jak stands (levels loaded).
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 log city: ctysluma-start
+1004 pos *target*
+# let traffic spawn (citizens, guards, vehicles), then the memory report
+1400 print *pad-script-mem*
+# timing windows (platform/3ds/tools/perf_report.py): city-stand = 600 frames standing in the
+# slums with traffic around; city-walk = 300 frames walking forward (ends against a wall)
+1401 log perf-mark city-stand
+2000 log perf-mark city-walk
+2001 ly=0
+2300 -
+2301 log perf-mark end
+2302 pos *target*
+2303 print *target*
+2400 exit

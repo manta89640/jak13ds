@@ -195,3 +195,100 @@ Milestone 2 (boot on the 3DS) and the baseline the user asked for (Oct 12):
   "cell-prize"), say which, and the user can swap it.
 - Keep the Jak II art in its own git-ignored folder (e.g. `platform/3ds/cia/local/jak2/`), so Jak
   1's banner and icon stay untouched.
+
+## Scripted route and memory survey (jak2-route, Oct 18)
+
+(AI-assisted.) Branch `jak2-route`. Native PC (arm64) only; C mode not tried.
+
+### Route into Haven City: solved
+
+Cause of the `target-title` loop: on the title screen the intro movie runs in a `scene-player`
+("title-disk-intro"). When it ends (or sees a new Jak), it sends `*target*` to its end point, the
+`title-movie-end` continue, whose `title-movie` flag puts Jak in `target-title`. `target-title`'s
+enter then spawns a new `title-control`. Killing the title-control alone could not help.
+`pad-script-continue` (`goal_src/jak2/pc/features/speedruns.gc`) now kills the scene-player and
+the title-control, then starts. Jak stands in the city 20-46 frames after `continue` (85 for
+Strip), from the title screen or from another continue point. Ideas (a), (b) and (d) were not
+needed.
+
+Second problem: **no traffic in the native PC city.** ctywide's level heap (small-center, PC
+1.1x = 4178 KB) is full after loading: 4163 KB used, 1240 KB of it arm64 code. `ctywide-login`'s
+32 KB `*city-dead-pool*` allocation then fails (`kmalloc: !alloc mem global-object`), the
+traffic-manager can't be spawned ("*city-dead-pool* was empty"), and there are no citizens,
+guards or cars. Commit 907ce45a9 sets `DEBUG_LEVEL_HEAP_MULT` to 1.15 (PC only). With it the
+slums have about 290 live processes: 45 citizens, 10 guards, 45 riders, 55 vehicles. It is a
+separate commit, so it can be dropped. C mode doesn't put code in the level heap, so the 3DS
+doesn't need it.
+
+Pads (`platform/3ds/tests`):
+- `jak2_city.pad`: title, then `continue ctysluma-start`. Waits until Jak stands, then 400
+  frames for traffic and a memory report. Timing windows `perf-mark city-stand` (600 frames
+  standing in traffic) and `city-walk` (300 frames walking forward, ends against a wall),
+  then exit at frame 2400.
+- `jak2_route.pad`: the slums, port, market (`ctymarkb-burning-bush`), main town (`ctygenb-start`),
+  industrial (`ctyinda-start`), farms (`ctyfarma-start`), then the sewer (`sewer-start`, a
+  non-city level). Each stop: wait to stand, memory report, walk 200 frames. Exit at 5900.
+  (`strip-start` works too, but walking forward there kills Jak.)
+
+Run them with `--null-gfx` (`OPENGOAL_NULL_GFX_FPS=30` or 60). Windowed OpenGL runs stalled
+before the first frame twice on Oct 18 (probably while the display was asleep); null-gfx runs
+were fine. `print *pad-script-mem*` in any pad prints the memory report: heaps, pools, levels,
+live processes by type, and global heap categories. For the categories, the Jak 2 kernel's
+`kmemopen`/`kmemclose` now keep totals (`game/kernel/jak2/kmalloc.cpp`, printed through
+`pad-script-kmem-report`).
+
+### Memory on native PC (arm64, level heap 1.15x)
+
+Global heap: 61.5 MB, 55.3 MB used (the same in every spot: everything big is preallocated).
+By kmemopen category:
+
+| Category | PC KB | PC multiplier | PS2-size estimate |
+|---|---|---|---|
+| level-heaps | 21024 | 1.15x (1.1x upstream: 20148) | 18396 (146 pages x 126 KB) |
+| scheme-globals (kernel + GAME.CGO code and data) | 10115 | arm64 code included | less in C mode (no code) |
+| dma-buffers | 10265 | 4x (`PROCESS_HEAP_MULT`) | ~2600 |
+| process-buffers (`*nk-dead-pool*` 6160 + fixed pools) | 6400 | 4x | ~1780 |
+| part-systems | 3693 | 12x (`SPRITE_MAX_AMOUNT_MULT`) | ~310 |
+| sprite-tables | 3330 | 12x | ~280 |
+| tpages | 879 | | 879 |
+| other (anim-manager, collide lists, game-info, text, bigmap...) | ~930 | | ~930 |
+
+Levels loaded at once:
+
+| Spot | Levels (mode, heap used / size KB, code KB) | Live processes | nk pool used |
+|---|---|---|---|
+| title | title (s-edge 2637/6624), ctywide (s-center 4164/4178), lwidea (borrow 2088/2304), ctysluma (s-edge 5852/6624) | 161 | 222 KB |
+| slums | ctysluma (5852/6912, 73), ctyindb (5949/6912, 12), ctywide (4196/4354, 1240), lwidea (2088/2409) | 291 | 918 KB |
+| port | ctyport (5899, 54), ctypal (5783, 22), ctywide, lwidea | 288 | 979 KB |
+| market | ctymarkb (5774, 49), ctyindb, ctywide, lwidea | 299 | 978 KB |
+| main town | ctygenb (5525, 13), ctygena (5309, 27), ctywide, lwidea | 374 | 980 KB |
+| industrial | ctyinda (5893, 12), ctyindb, ctywide, lwidea | 312 | 920 KB |
+| farms | ctyfarma (5537, 69), ctygena, ctywide, lwidea | 346 | 1078 KB |
+| sewer | sewer (large 10190/13824), sewerb (s-edge 5986/6912, 629) | 85 | 145 KB |
+| strip | strip (large 11411/13824, 389), vinroom (s-edge 5574/6912, 114) | 150 | 282 KB |
+
+The city fills the whole level heap: two districts take the edge sections (48 pages each), and
+ctywide takes the centre (50 pages). lwidea (and a 380 KB second slot) is borrowed from
+ctywide's top. District data is 5.3-5.95 MB per 6048 KB PS2 section, which fits at 1.0x. All
+traffic processes (up to ~360) come from `*nk-dead-pool*`, 0.9-1.1 MB at peak. That is 60-70% of
+the PS2 1540 KB pool, under its 768-process cap. `*city-dead-pool*` is only 32 KB, and only the
+traffic-manager lives in it.
+
+Renderer-side data (fr3, a proxy for the C heap / linear of the Ctr renderers): the slums set
+(ctysluma 7.1 + ctyindb 5.5 + ctywide 2.5 + lwidea 4.7 MB) is 19.9 MB. The biggest district
+pair (slumb + slumc + ctywide + lwidec) is 21.2 MB, and strip + vinroom is 21.4 MB. Jak 1's two
+loaded levels are about 23-28 MB (village1 11.5, beach 11.6, citadel 16.3 MB). So the
+renderer-side budget is about Jak 1's.
+
+### What a small-memory (3DS) Jak 2 layout needs
+
+The EE global heap, in C mode with PS2-like multipliers: level heap 18.4 MB at 1.0x (20.2 MB at
+1.1x), DMA 2.6-5 MB (1-2x), process heap 1.8-3.3 MB (1-2x; 2x gives the city pool margin),
+particles/sprites 0.6-2.4 MB (1-4x), tpages and the rest ~1.8 MB, plus engine data (at most
+10.1 MB; less without code). That is **~35-43 MB of global heap**, so an EE of ~40-48 MB. Jak 1's
+48 MB small layout (42.5 MB global heap) is the right size. Jak 2 needs its own END_OF_MEMORY /
+`SMALL_MEMORY` constants in gcommon.gc and `PROCESS_HEAP_MULT` / `SPRITE_MAX_AMOUNT_MULT` /
+`DEBUG_LEVEL_HEAP_MULT` small-memory values. Measure the first C-mode boot with this report
+(scheme-globals without code) before choosing the multipliers. With the renderer data about Jak
+1's, the 124 MB app region looks feasible at 48 EE + ~25 C heap + ~40 linear. The risk is the
+C-mode binary size: Jak 2 has 840 modules compiled to C, against Jak 1's.
