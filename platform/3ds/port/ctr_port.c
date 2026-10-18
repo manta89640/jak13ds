@@ -272,7 +272,15 @@ int ctr_platform_init(int enable_console) {
     char v[16];
     if (ctr_config_bool("sound", 1)) { /* (AI-assisted) on by default since Oct 16 */
       s_sound = 1;
+#ifdef OG3DS_GAME_JAK2
+      /* (AI-assisted, j2-sound) Jak II: core 1 with a share of it (ctr_core1_enable). On core 2
+       * the mixer (4.5-7.2 ms per frame in the city, Azahar) pushed Jak II's render thread, which
+       * is at its limit there, over 33 ms (slums 29.8 -> 25-29 fps); core 0 has the game logic
+       * (~27 ms) and the IOP. */
+      s_sound_core = 1;
+#else
       s_sound_core = ctr_is_new3ds() ? 2 : 1;
+#endif
       if (ctr_config_get("sound_core", v, sizeof(v)) && v[0] >= '0' && v[0] <= '3') {
         s_sound_core = v[0] - '0';
       }
@@ -1355,9 +1363,14 @@ int ctr_core1_share(void) {
 }
 
 int ctr_core1_enable(void) {
-  /* 30% if 80% is refused; without any share, ctr_thread_create_pinned refuses core 1 */
+  /* 30% if 80% is refused; without any share, ctr_thread_create_pinned refuses core 1.
+   * (AI-assisted, j2-sound) On New 3DS 40% first: only the sound mixer runs there (11-17% of
+   * real time in Jak II's city, Azahar), and the rest stays with the system's services (GPU, SD
+   * card, DSP), which every service call of the game waits for. The Old 3DS's slower core keeps
+   * 80% first. */
   if (!s_cpu_limit) {
-    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(80))   ? 80
+    const int first = ctr_is_new3ds() ? 40 : 80;
+    s_cpu_limit = R_SUCCEEDED(APT_SetAppCpuTimeLimit(first))  ? first
                   : R_SUCCEEDED(APT_SetAppCpuTimeLimit(30)) ? 30
                                                              : 0;
   }

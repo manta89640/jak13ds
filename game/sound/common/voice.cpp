@@ -281,6 +281,10 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
     DecodeBlock();  // (AI-assisted) after a key on: the first block
   }
   const s32 vol_l = mVolume.left.GetCurrent(), vol_r = mVolume.right.GetCurrent();
+  // (AI-assisted) 1 / ratio as a 0.32 fixed point number, for the span lengths below: a 32-bit
+  // division per span was a libgcc call (the 3DS's ARM11 has no divide instruction), and in
+  // Jak II's city about a quarter of the voice samples are in spans shorter than 16 samples
+  const u32 inv_ratio = 0xFFFFFFFFu / ratio;
 #if defined(SND_ARM_DSP)
   // (AI-assisted) the volumes as a pair: left at the bottom
   const u32 vol = (u32)(u16)vol_l | ((u32)(u16)vol_r << 16);
@@ -350,18 +354,50 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
     // more SPU ticks. Output sample k (from 1) ends at tick (mTickFrac + k * ratio) >> 16: the
     // samples that end by then are made with this level and their ticks added in one go
     // (SkipQuiet).
-    const s16 level = mADSR.Level();
     const u32 quiet = (u32)mADSR.QuietSamples();
+    if (quiet == 0) {
+      // (AI-assisted) The level may change at the next tick: one sample at a time, as below with
+      // run = 0, without the span setup (Jak II's city: ~15% of the voice samples, mostly the
+      // long tails of releases whose level goes down by 1 per tick). The sample uses the level
+      // from before its ticks.
+      bool stopped = false;
+      do {
+        const s16 lv = mADSR.Level();
+        const u32 acc = mTickFrac + ratio;
+        mTickFrac = acc & 0xFFFF;
+        if (!run_sample(out[i], lv, lv == 0 || (vol_l == 0 && vol_r == 0))) {
+          i++;
+          stopped = true;
+          break;
+        }
+        i++;
+        for (u32 t = 0; t < (acc >> 16); t++) {
+          mADSR.Run();
+        }
+        if (Stopped()) {
+          stopped = true;  // released to silence
+          break;
+        }
+      } while (i < n && mADSR.QuietSamples() == 0);
+      if (stopped) {
+        break;
+      }
+      continue;
+    }
+    const s16 level = mADSR.Level();
     const bool silent = level == 0 || (vol_l == 0 && vol_r == 0);
     const u32 left = (u32)(n - i);
     u32 run;
     if ((u64)mTickFrac + (u64)left * ratio < (((u64)quiet + 1) << 16)) {
       run = left;
-    } else if (quiet == 0) {
-      run = 0;
     } else {
-      // the largest k with mTickFrac + k * ratio < (quiet + 1) << 16 (quiet < 2 * left here)
-      run = ((((quiet + 1) << 16) - 1 - mTickFrac) / ratio);
+      // the largest k with mTickFrac + k * ratio < (quiet + 1) << 16 (quiet < 2 * left here):
+      // num / ratio. (AI-assisted) num * inv_ratio >> 32 is at most 2 below it, then counted up.
+      const u32 num = ((quiet + 1) << 16) - 1 - mTickFrac;
+      run = (u32)(((u64)num * inv_ratio) >> 32);
+      while ((u64)(run + 1) * ratio <= num) {
+        run++;
+      }
     }
     u32 done = 0;
     bool stopped = false;

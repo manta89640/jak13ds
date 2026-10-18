@@ -50,6 +50,19 @@ s32 snd_GetFreeSPUDMA() {
 
 void snd_FreeSPUDMA([[maybe_unused]] s32 channel) {}
 
+u32 snd_ResidentBankBytes(u32* count) {
+  if (count) {
+    *count = 0;
+  }
+  return player ? player->ResidentBankBytes(count) : 0;
+}
+
+void snd_RunStreamsWithoutOutput(bool on) {
+  if (player) {
+    player->SetRunStreamsWithoutOutput(on);
+  }
+}
+
 s32 snd_GetTick() {
   if (player) {
     return player->GetTick();
