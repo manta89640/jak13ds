@@ -85,6 +85,11 @@ class CtrShadowVolumes {
   //! place) and the back list, room for index_cap indices together. verts / front may come later
   //! (set_output, when the first object arrives), back must be there now.
   void begin(ctr_clip_vertex* verts, int vert_cap, u16* front, u16* back, int index_cap);
+  //! (AI-assisted) the frame (her shadow's pose, CtrKeiraRig.h shadow_frame)
+  void set_frame(u64 frame) {
+    m_frame = frame;
+    m_keira_done = false;
+  }
   void set_output(ctr_clip_vertex* verts, u16* front);
   //! The transfer starts an object (its vertex table): the output is needed from here on.
   static bool starts_object(const DmaTransfer& t);
@@ -129,6 +134,22 @@ class CtrShadowVolumes {
   template <bool kTrace>
   void edges(const u8* entries, int count);
   void make_clip_matrix();
+  // (AI-assisted) "play as Keira" (CtrKeiraRig.h): Jak's shadow is replaced by hers. An object is
+  // Jak's when its vertices' center is within kKeiraMatch of her hulls' center; its light and
+  // bottom plane (from its top and bottom tables) place her hulls' volumes, drawn once per frame
+  // after it (it isn't drawn)
+  void keira_check_object();
+  void keira_emit();
+  u64 m_frame = 0;
+  bool m_keira_obj = false;    // the open object is Jak's
+  bool m_keira_done = false;   // hers was drawn this frame
+  float m_keira_sign = 1.f;    // the shadow's camera space vs the merc matrices'
+
+ public:
+  int keira_replaced() const { return m_keira_replaced; }
+
+ private:
+  int m_keira_replaced = 0;
 
   // the program's constants (VU 0x370..0x37c) and matrix (VU 0..3) from the init packets
   float m_const[13][4] = {};

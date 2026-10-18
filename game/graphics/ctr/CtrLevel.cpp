@@ -3130,6 +3130,40 @@ bool CtrLevels::load_file(const fs::path& path,
                          m.vertex_count, &mverts) &&
             f.read_array(hdr.merc_index_offset + first * (u32)sizeof(u16), end - first,
                          &mindices)) {
+          // (AI-assisted) her shadow's hulls: model space positions, slots, triangles
+          const size_t sfx = strlen(ctr_keira::kShadowSuffix);
+          if (md.name.size() > sfx &&
+              !md.name.compare(md.name.size() - sfx, sfx, ctr_keira::kShadowSuffix)) {
+            std::vector<float> pos(3 * m.vertex_count);
+            std::vector<u8> slot(m.vertex_count, 0);
+            std::vector<u16> tris;
+            for (const auto& d : md.draws) {
+              for (u32 k = d.first_index; k + 2 < d.first_index + d.index_count &&
+                                          k + 2 < mindices.size();
+                   k += 3) {
+                for (int i = 0; i < 3; i++) {
+                  const u16 v = mindices[k + i];
+                  if (v < m.vertex_count) {
+                    slot[v] = d.palette[mverts[v].bones[0] % c3l::kMercPaletteSize];
+                  }
+                  tris.push_back(v);
+                }
+              }
+            }
+            for (u32 v = 0; v < m.vertex_count; v++) {
+              for (int c = 0; c < 3; c++) {
+                pos[3 * v + c] = mverts[v].pos[c] * m.scale;
+              }
+            }
+            auto sm = std::make_shared<ctr_keira::ShadowMeshData>();
+            if (ctr_keira::build_shadow_mesh(pos.data(), slot.data(), (int)m.vertex_count,
+                                             tris.data(), (int)tris.size() / 3, sm.get())) {
+              md.keira_shadow = sm;
+              lg::info("[ctr] {}: {} shadow hulls", md.name, sm->view.nhulls);
+            } else {
+              lg::warn("[ctr] {}: shadow hulls not closed, not used", md.name);
+            }
+          }
           md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
                                                 end - first);
           if (md.mesh < 0 && make_room(name, "the models")) {
@@ -3725,6 +3759,11 @@ void CtrLevels::stream_note_camera(const math::Vector4f& t,
   }
   for (int i = 0; i < 4; i++) {
     m_planes[i] = planes[i];
+  }
+  for (int i = 0; i < 3; i++) {
+    for (int c = 0; c < 3; c++) {
+      m_cam_rot[3 * i + c] = rot[i][c];
+    }
   }
   if (m_cam_valid && frame > m_cam_frame) {
     const float n = (float)std::min<u64>(frame - m_cam_frame, 8);

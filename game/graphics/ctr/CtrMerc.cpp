@@ -362,6 +362,23 @@ const CtrMercModelData* CtrMercRenderer::find_model_named(const u8* name,
   return nullptr;
 }
 
+void CtrMercRenderer::note_keira_shadow(const CtrMercModelData& model, u64 frame) {
+  // (AI-assisted) her shadow's hulls: the model "<her model>~shadow" (looked up once per set of
+  // loaded levels)
+  const u32 gen = m_levels->set_generation();
+  if (m_keira_shadow_for != &model || m_keira_shadow_gen != gen) {
+    const CtrLevelData* lev = nullptr;
+    const CtrMercModelData* sm =
+        m_levels->find_merc_model(model.name + ctr_keira::kShadowSuffix, &lev);
+    m_keira_shadow = sm && sm->keira_shadow ? sm->keira_shadow : nullptr;
+    m_keira_shadow_for = &model;
+    m_keira_shadow_gen = gen;
+  }
+  if (m_keira_shadow) {
+    ctr_keira::note_shadow_frame(frame, &m_keira_shadow->view, (const float(*)[16])m_rig_mats);
+  }
+}
+
 u32 CtrMercRenderer::queue_floats(const float* src, int n) {
   const u32 at = (u32)m_qdata.size();
   m_qdata.insert(m_qdata.end(), src, src + n);
@@ -755,6 +772,30 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         }
         m_mod_gather_ms += ctr_gpu_time_ms() - t0;
       }
+      // (AI-assisted) "play as Keira": her pose for the shadow bucket (drawn before her merc
+      // bucket), from these matrices
+      if (n > 0 && (!memcmp(input, ctr_keira::kModelPrefix, ctr_keira::kModelPrefixLen) ||
+                    !memcmp(input, "eichar", 6))) {
+        const CtrLevelData* lev = nullptr;
+        const CtrMercModelData* model = find_model(input, &lev);
+        if (model && model->keira_rig) {
+          const float* jak[128];
+          u64 sent[2] = {0, 0};
+          static const float kZero[16] = {};
+          for (int k = 0; k < 128; k++) {
+            jak[k] = kZero;
+          }
+          for (int b = 0; b < n; b++) {
+            if (sl[b] < 128) {
+              jak[sl[b]] = dst[b].tmat[0].data();
+              sent[sl[b] >> 6] |= 1ull << (sl[b] & 63);
+            }
+          }
+          if (ctr_keira::pose(jak, sent, (float(*)[16])m_rig_mats, 128, nullptr, rs.frame_idx)) {
+            note_keira_shadow(*model, rs.frame_idx);
+          }
+        }
+      }
       m_model_ordinal++;
       return;
     }
@@ -827,9 +868,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     for (int k = 0; k < 128; k++) {
       jak[k] = bones[k]->tmat[0].data();
     }
-    if (!ctr_keira::pose(jak, sent, (float(*)[16])m_rig_mats, 128)) {
+    ctr_keira::Camera cam;
+    const bool have_cam = m_levels->camera(rs.frame_idx, cam.rot, cam.trans);
+    if (!ctr_keira::pose(jak, sent, (float(*)[16])m_rig_mats, 128, have_cam ? &cam : nullptr,
+                         rs.frame_idx)) {
       return;
     }
+    note_keira_shadow(*model, rs.frame_idx);
     if (!m_rig_slot[0]) {
       for (int k = 0; k < 256; k++) {
         m_rig_slot[k] = &m_rig_mats[k < 128 ? k : 0];
@@ -850,7 +895,20 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   }
 
   // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model)
-  if (model->blerc_count) {
+  if (model->blerc_count && model->keira_rig) {
+    // (AI-assisted) her face: Jak's weights mapped to her targets, and her blinks
+    float weights[c3l::kMercBlercWeights];
+    float jak_w[c3l::kMercBlercWeights];
+    const bool uses_blerc = flags.bitflags & 4;
+    if (uses_blerc) {
+      memcpy(jak_w, input + 32, sizeof(jak_w));
+    }
+    const bool any = ctr_keira::face_weights(uses_blerc ? jak_w : nullptr, rs.frame_idx, weights);
+    if (any || model->blerc_moved) {
+      apply_blerc(*lev, *model, weights);
+      model->blerc_moved = any;
+    }
+  } else if (model->blerc_count) {
     const bool uses_blerc = flags.bitflags & 4;
     if (uses_blerc || model->blerc_moved) {
       float weights[c3l::kMercBlercWeights] = {};

@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <deque>
 #include <map>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -27,6 +28,7 @@
 
 #include "game/graphics/ctr/CtrFineVis.h"
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/c3l_reader.h"
 #include "game/graphics/ctr/c3v_format.h"
@@ -58,6 +60,8 @@ struct CtrMercModelData {
   // (AI-assisted) "keira-as-..." (CtrKeiraRig.h): its vertices use her rig's slots, which
   // CtrMercRenderer poses from Jak's bones
   bool keira_rig = false;
+  // (AI-assisted) "keira-as-...~shadow": her shadow's hulls (CtrKeiraRig.h ShadowMesh)
+  std::shared_ptr<ctr_keira::ShadowMeshData> keira_shadow;
   // (AI-assisted) where the mesh's data is in the file, to make it again after a load that ran out
   // of memory: first MercVertex and count, merc index range (index_end 0: not possible)
   u32 file_vertex = 0, vertex_count = 0, index_first = 0, index_end = 0;
@@ -397,6 +401,16 @@ class CtrLevels {
                           const math::Vector4f planes[4],
                           const math::Vector4f rot[4],
                           u64 frame);
+  /*! (AI-assisted) the camera of the last level draw if it is this frame's: world = trans + rot *
+   * (merc camera space), rot row major (the "play as Keira" ponytail) */
+  bool camera(u64 frame, float rot[9], float trans[3]) const {
+    if (!m_cam_valid || m_cam_frame != frame) {
+      return false;
+    }
+    memcpy(rot, m_cam_rot, sizeof(m_cam_rot));
+    memcpy(trans, m_cam, sizeof(m_cam));
+    return true;
+  }
   /*! (AI-assisted, streaming) Jak's first bone in camera space (merc renderer, any frame) */
   void stream_note_target(float x, float y, float z, u64 frame) {
     m_target_cam[0] = x;
@@ -651,6 +665,7 @@ class CtrLevels {
   std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
+  float m_cam_rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // (AI-assisted) rows, see camera()
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
   u64 m_idle_frame = 0;        // the last idle fill job

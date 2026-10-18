@@ -12,6 +12,7 @@ c++ -std=c++20 -O2 -ffp-contract=off -DOPENGOAL_SCALAR_SIMD=1 -DFMT_HEADER_ONLY 
   -I"$R" -I"$R/third-party/fmt/include" -I"$R/third-party" -I"$R/third-party/SDL/include" \
   "$R/test/ctr_shadow/shadow_test.cpp" \
   "$R/game/graphics/ctr/CtrShadow.cpp" \
+  "$R/game/graphics/ctr/CtrKeiraRig.cpp" \
   "$R/game/graphics/opengl_renderer/Shadow_PS2.cpp" \
   "$R/common/dma/dma.cpp" "$R/common/dma/gs.cpp" \
   -o "$OUT"
