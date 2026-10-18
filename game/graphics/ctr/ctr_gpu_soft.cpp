@@ -501,6 +501,12 @@ void raster_triangle(const ctr_draw_state& st,
                      const ctr_vertex* v,
                      bool tex_alpha_full = false,
                      const float* fog = nullptr) {
+  // (AI-assisted, j2-mem) env CTR_SOFT_NO_RASTER: no pixels (long memory / streaming runs: the
+  // renderers' decisions are the same, ~10x faster)
+  static const bool no_raster = getenv("CTR_SOFT_NO_RASTER") != nullptr;
+  if (no_raster) {
+    return;
+  }
   // to screen: x in [-1, 1] -> [40, 360], y in [-1, 1] -> [240, 0]
   float sx[3], sy[3];
   for (int i = 0; i < 3; i++) {

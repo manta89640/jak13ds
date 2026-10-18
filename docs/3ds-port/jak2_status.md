@@ -591,3 +591,31 @@ particles/sprites 0.6-2.4 MB (1-4x), tpages and the rest ~1.8 MB, plus engine da
 (scheme-globals without code) before choosing the multipliers. With the renderer data about Jak
 1's, the 124 MB app region looks feasible at 48 EE + ~25 C heap + ~40 linear. The risk is the
 C-mode binary size: Jak 2 has 840 modules compiled to C, against Jak 1's.
+
+## Memory: dormant levels, stream arena (j2-mem, Oct 18)
+
+(AI-assisted.) Branch `j2-mem` (streaming.md "Jak II: dormant levels and the arena size"). Azahar,
+the CIA merged with j2-sound + j2-texanim (525b0c0acc), `jak2_route.pad`, the `[ctr] memory`
+line after each stop's memory report (baseline B: slums linear 131 KB, heap ~3.8 MB, ctyindb
+loaded incomplete):
+
+| stop | linear free KB | heap free KB (largest block) | note |
+|---|---|---|---|
+| slums | 1839 | 2846 (2335) | ctyindb dormant (2.4 of 7.4 MB resident); its load was still incomplete (3.3 MB left out, now never repaired while dormant) |
+| port | 7527 | 3176 (1971) | |
+| market | 128 | 2511 (963) | ctyindb visible from the spawn point: not dormant |
+| main town | 5466 | 2991 (1412) | ctygena dormant |
+| industrial | 3371 | 2909 (951) | ctyindb dormant |
+| farms | 1955 | 3377 (1556) | ctygena dormant |
+
+Not reached: >= 3 MB linear and >= 6 MB heap everywhere. What holds them (heap trace build,
+`OG3DS_HEAP_TRACE`, slums): EE 48 MB; CtrVram 4.1 MB; sound banks 1.9 MB (SFXBlock 4 x 373 KB,
+music 382 KB, loaded with sound = off); 14 libctru thread stacks 1.3 MB; IOP ramdisk 811 KB
+(Jak 1's InitRamdisk, unused by Jak II's vis) + paged memory 576 KB + 11 coroutine stacks 704 KB;
+the levels' tables ~3.5 MB (time of day ~1.5 MB, chunks / draws / draw order / tie LOD / stream
+tables); impostors ~0.9 MB; .c3l reader buffers 640 KB; log ring 256 KB; GlobalProfiler 152 KB.
+Linear: ~6.5 MB is the renderer's own (command buffers, vertex rings, present buffers, command
+list arena, merc double buffers); texture pools stay in linear behind their VRAM copies.
+.text: -Os on the GOAL C modules saves 3.9% (80-module sample: 1058 -> 1017 KB), ~0.5 MB for all
+of them; the 108 module instances (+1.7 MB) need per-instance code sharing (a codegen change) or a
+proven shorter list.
