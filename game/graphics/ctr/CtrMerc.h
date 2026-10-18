@@ -142,6 +142,10 @@ class CtrMercRenderer : public CtrBucketRenderer {
   u32 m_frame = 0;
 
   CtrLevels* m_levels;
+  // (AI-assisted) game version: Jak II's records (see the constructor)
+  bool m_jak2 = false;
+  int m_water_bytes = 16;
+  int m_links = 2;
   const class CtrEyeRenderer* m_eyes = nullptr;
   // camera from the merc setup packet (low memory of the merc VU program)
   math::Vector4f m_hvdf_offset;
