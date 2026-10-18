@@ -1,0 +1,62 @@
+# (AI-assisted, lodnear) walks toward tie objects in village1, beach, misty and jungle, for the tie
+# level of detail switch distances (host: CTR_LOD_LOG=1 logs every switch in view with its
+# distance). Each: the checkpoint at noon, ~4 s to settle, ~10 s walking forward, a slow camera
+# turn, shots along the way.
+0 wait *target* target-title-wait
+10 continue village1-hut
+11 wait *target* target-continue
+12 wait *target* target-stance
+13 tod 12
+130 log walk-begin village1
+130 ly=0
+220 shot lod_village1_a
+300 ly=0 lx=90
+330 ly=0
+420 shot lod_village1_b
+460 rx=40
+560 -
+561 shot lod_village1_c
+562 log walk-end village1
+570 continue beach-start
+571 wait *target* target-continue
+572 wait *target* target-stance
+573 tod 12
+690 log walk-begin beach
+690 ly=0
+780 shot lod_beach_a
+860 ly=0 lx=170
+890 ly=0
+980 shot lod_beach_b
+1020 rx=40
+1120 -
+1121 shot lod_beach_c
+1122 log walk-end beach
+1130 continue misty-start
+1131 wait *target* target-continue
+1132 wait *target* target-stance
+1133 tod 12
+1250 log walk-begin misty
+1250 ly=0
+1340 shot lod_misty_a
+1420 ly=0 lx=90
+1450 ly=0
+1540 shot lod_misty_b
+1580 rx=40
+1680 -
+1681 shot lod_misty_c
+1682 log walk-end misty
+1690 continue jungle-start
+1691 wait *target* target-continue
+1692 wait *target* target-stance
+1693 tod 12
+1810 log walk-begin jungle
+1810 ly=0
+1900 shot lod_jungle_a
+1980 ly=0 lx=90
+2010 ly=0
+2100 shot lod_jungle_b
+2140 rx=40
+2240 -
+2241 shot lod_jungle_c
+2242 log walk-end jungle
+2250 exit

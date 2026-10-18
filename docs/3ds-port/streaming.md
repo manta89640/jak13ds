@@ -39,9 +39,12 @@ is in an ordinary tie chunk that is always loaded. Per frame (`draw_level`):
 
 **No pop when late data arrives.** A group drawn far *in view* because its near data was late
 keeps its far version while it stays in view once the data is there (`lod_state` bit 2), at most
-4 s (120 frames), and only while the switch would show: the camera within 2/3 of the group's near
-distance (there the far version's error is >= 1.5 x tie_lod_px; beyond it the switch is near the
-size of an ordinary LOD switch). Out of view it switches at once. The statistics count the frames
+1 s (30 frames; 4 s before lodnear), and only while the switch would show but the far version isn't
+plainly wrong: the camera within 2/3 of the group's error distance (there the far version's error
+is >= 1.5 x tie_lod_px; beyond it the switch is near the size of an ordinary LOD switch) but not
+within 1/3 of it (an error of 3 x tie_lod_px or more: near at once). Out of view it switches at once.
+(lodnear: with the 4 s hold, the late groups after a continue stayed coarse 3-15 m from the camera
+and then switched together.) The statistics count the frames
 with groups kept so.
 
 So a group's near runs are drawn only from a mesh that is there, and its far runs are hidden only
@@ -59,7 +62,14 @@ kDrawAlpha80 flags with what the load works out from the vertices.
 ## Where a unit is needed
 
 A group g is near within `e_g x k + r_g` of its center (e_g its shape error, r_g its radius,
-k = focal / tie_lod_px x detail_scale x 1.1: the hysteresis' 1.1; ~70 in gameplay). A unit is
+k = focal / tie_lod_px x detail_scale x 1.1: the hysteresis' 1.1; ~70 in gameplay).
+(AI-assisted, lodnear, Oct 18) With the PS2 floor, e_g is max(shape error, PS2 far-plane x
+detail_scale / k) (`CtrLevelData::lod_switch_error`), and a unit's bound is need_a + k x max(need_e,
+need_d x detail_scale / k) (need_d: its groups' largest far-plane, made at load: no new file data). A
+unit that one of its groups needs by shape error (the far version would show more than tie_lod_px)
+is **urgent**: wanted urgent units go before the others (an extra kInViewMeters of priority), and
+at the arena's capacity an urgent unit that still has no room frees units there only for the floor,
+the furthest first (their groups go far, within tie_lod_px). A unit is
 needed while that holds for one of its groups: its **score** is the smallest `|p - c_g| - (e_g x k +
 r_g)` over its groups g, at the camera now and 2/3, 4/3 and 2 s ahead at its speed (velocity per
 frame, smoothed, reset by cuts of more than 40 m), and at Jak (his first bone's place from the merc
