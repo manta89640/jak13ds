@@ -1,0 +1,27 @@
+# (AI-assisted) Jak II: test of the C module instances (docs/3ds-port/c_backend.md, "shared object
+# files"). In the slums with traffic, link second copies of ctywide's searchlight, vehicle and
+# citizen objects (as when a second loaded level has the same object file: searchlight is in
+# ctywide and palcab), without running their top level, and overwrite them with 0xff. The running
+# processes use the first copies: they must keep working. Compare the end position with
+# jak2_city.pad's (1065.99, 0.52, 194.46) target-hide. With OPENGOAL_C_MODULE_INSTANCES=1 (one
+# instance per module, the old behaviour) their code reads the overwritten copy's static data.
+# Host only (C mode, small or big memory gk):
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_NULL_GFX_FPS=30 OPENGOAL_PAD_SCRIPT=jak2_link_copy.pad \
+#     gk -g jak2 --proj-path <C-mode project> --null-gfx -- -boot -fakeiso -nosound -cbackend
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 pos *target*
+1400 call heap
+1401 call link-copy CWI.DGO searchlight
+1402 call link-copy CWI.DGO vehicle
+1403 call link-copy CWI.DGO citizen
+1404 call link-copy GAME.CGO target
+1405 call link-copy GAME.CGO logic-target
+1406 call heap
+2000 log walk
+2001 ly=0
+2300 -
+2302 pos *target*
+2303 print *target*
+2400 exit

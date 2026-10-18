@@ -196,14 +196,25 @@ s32 goalc_resolve_symbol(const char* name) {
 /*!
  * Link a LINK_C_MODULE entry: find the module and patch the function stubs of this segment.
  */
-uint32_t c_module_link_v3(Ptr<u8> link, ObjectFileHeader* ofh, int current_seg, const char* name) {
+uint32_t c_module_link_v3(Ptr<u8> link,
+                          ObjectFileHeader* ofh,
+                          int current_seg,
+                          const char* name,
+                          Ptr<kheapinfo> heap) {
   u32 seg_bases[3] = {0, 0, 0};
   for (u32 i = 0; i < ofh->segment_count && i < 3; i++) {
     seg_bases[i] = ofh->code_infos[i].offset;
   }
+  // (AI-assisted) the heap tells the runtime when earlier copies of this object are gone
+  GoalcLinkHeap link_heap;
+  if (heap.offset) {
+    link_heap.key = heap.offset;
+    link_heap.base = heap->base.offset;
+    link_heap.end = heap->top_base.offset;
+  }
   return goalc_link_module_entry(link.c(), seg_bases,
                                  Ptr<u8>(ofh->code_infos[current_seg].offset).c(),
-                                 goalc_resolve_symbol, name);
+                                 goalc_resolve_symbol, name, link_heap);
 }
 
 }  // namespace
@@ -326,7 +337,7 @@ uint32_t link_control::jak1_work_v3() {
               break;
             case LINK_C_MODULE:
               lp = lp + 1;
-              lp = lp + c_module_link_v3(lp, ofh, m_segment_process, m_object_name);
+              lp = lp + c_module_link_v3(lp, ofh, m_segment_process, m_object_name, m_heap);
               break;
             default:
               ASSERT_MSG(false, fmt::format("unknown link table thing {}", *lp));

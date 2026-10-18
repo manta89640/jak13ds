@@ -61,23 +61,45 @@ n x { u32 stub_offset_in_segment, u32 func_index }
 4. Give every module function a global id (entries in `goalc_fn_table`), and write the host
    address of `func_index` at each `stub_offset`.
 
-Loading a module with the same hash twice re-links it (the latest seg_base/syms win).
+Loading a module with the same hash again re-links an instance whose old copy is gone (see
+below).
 
-Known hazard (not fixed): the module keeps one `seg_base` per segment, so if two loaded levels
-contain the same object file (same code, so the same hash), linking the second copy points the
-first copy's functions at the second copy's static data (constants, static structures, strings).
-That is harmless while both are loaded and the data is read-only, but the first level then
-modifies the other copy's static data, and reads freed memory after the second level unloads.
-A fix would give each linked copy its own segment bases (for example, one module instance per
-link, with the bases passed through the stub).
+Shared object files: module instances (AI-assisted, Oct 18 2026). A module keeps one `seg_base`
+per segment, so before this fix, linking a second copy of an object file (the same object in two
+loaded level DGOs, so the same hash) pointed the first copy's functions at the second copy's
+static data. They then read garbage, or freed memory once that level unloaded. In Jak 2 this can
+happen (122 objects are in more than one DGO, e.g. bot code in ctykora / ctyasha / lkiddoge;
+searchlight in ctywide + palcab). The fix gives each loaded copy its own *instance* of the module:
+a separately compiled copy of the same C source, with its own static `seg_base` / `sym_offsets`.
+No codegen or ABI change, no run-time cost per call.
 
-(AI-assisted, Oct 2026) Not reachable in Jak 1: no level DGO shares an object with GAME.CGO, and
-the objects that several level DGOs share (racer/target-racer: fic lav mis ogr rol; flutflut: sno
-swa; oracle/villagep-obs: vi1 vi2 vi3 cit; battlecontroller: mis swa cit; blocking-plane,
-launcherdoor, snow-bunny, firecanyon-obs, babak-with-cannon, mistycannon, static-screen) are only
-in levels that are never neighbours (two-level load slots). Not checked: whether a warp-gate
-transition between villages (vi1/vi2/vi3 share oracle and villagep-obs) can keep the old village
-loaded while the new one links.
+- Runtime (`goalc_runtime.cpp`, `pick_instance`): the registry maps a hash to a list of instances.
+  A link entry whose segment bases equal an instance's current copy is that copy (one entry per
+  segment). Otherwise the copy gets the first instance whose old copy is gone, else a new instance
+  (dlopen hosts copy `cmod/<hash>.so` under another name: dlopen of the same path returns the
+  same library; at most 8, `OPENGOAL_C_MODULE_INSTANCES=N` caps it, 1 = the old behaviour),
+  else the least recently linked one, logging `[goalc] X: N copies loaded at once but only K C
+  module instance(s)` once per module.
+- An old copy is gone when: its heap's base changed or a newer object was linked at or below the
+  previous one there (the heap was emptied); or its address is at or above the heap's `current`
+  (kheapinfo: emptied but not filled again, e.g. both levels of a continue unload first); or its
+  first stub outside the top-level segment no longer holds the instance's function (overwritten).
+  The linkers pass the object's heap (`GoalcLinkHeap`: kheapinfo address, base, end).
+- Static builds (3DS): `OG3DS_MODULE_INSTANCES=<list>` (`cmodules.cmake`); `gen_c_registry.py
+  --instances` writes `<name>.i<k>.c` wrappers that `#define` the accessor to `..._i<k>` and
+  `#include` the module's C file, and the registry registers them after instance 0. The weak
+  direct-call aliases (`gc_d_*`) are defined once per instance; the linker keeps one, which is
+  fine: a guard that doesn't match takes the indirect call.
+- Jak 2 list: `platform/3ds/jak2_module_instances.txt` (`platform/3ds/tools/module_instances.py`:
+  objects in two level DGOs whose memory modes can share the level heap; 108 objects, 2
+  instances each, +1.7 MB of .text). Jak 1's 3DS build has no list (one instance each, as before);
+  the host Jak 1 `level_pairs.pad` with `OPENGOAL_C_MODULE_INSTANCES=1` reports no shared copy.
+- Test: `GoalcRuntime.LinkModuleInstances`, and `platform/3ds/tests/jak2_link_copy.pad` (host, C
+  mode; pad command `call link-copy DGO OBJECT` links a second copy of an object into the global
+  heap without its top level, then overwrites it with 0xff). With instances, Jak ends the walk at
+  (1065.98, 0.52, 194.46) in target-hide, as in `jak2_city.pad`. With
+  `OPENGOAL_C_MODULE_INSTANCES=1` (old behaviour) Jak never moves from (1062.23, 8.15, 221.91):
+  target/logic-target's code reads the overwritten copy's data.
 
 ## Runtime duties
 
@@ -129,8 +151,8 @@ chosen at startup, not detected from the first `LINK_C_MODULE`:
 - the `-cbackend` kernel argument (`gk -- -boot -fakeiso -cbackend`), or
 - always, on hosts without a native backend (neither x86-64 nor AArch64: the 3DS).
 
-A `LINK_C_MODULE` entry when the runtime isn't in C mode is a fatal error that says so. Only Jak 1
-is supported (Jak 2/3/X kernels don't check the flag).
+A `LINK_C_MODULE` entry when the runtime isn't in C mode is a fatal error that says so. Jak 1 and
+Jak 2 are supported (the Jak 3/X kernels don't check the flag).
 
 ### Function ids
 

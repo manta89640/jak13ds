@@ -113,11 +113,23 @@ using goalc_sym_resolver = s32 (*)(const char* name);
  * seg_bases are the GOAL addresses of the 3 segments (0 if absent), seg_data is the host address
  * of the segment this link table belongs to. Returns the number of bytes consumed.
  */
+//! (AI-assisted) The heap an object file is linked into: key = GOAL address of its kheapinfo,
+//! [base, end) its memory. Tells when the copies linked there before are gone (key 0: unknown).
+struct GoalcLinkHeap {
+  u32 key = 0;
+  u32 base = 0;
+  u32 end = 0;
+};
+
 u32 goalc_link_module_entry(const u8* link,
                             const u32 seg_bases[3],
                             u8* seg_data,
                             goalc_sym_resolver resolver,
-                            const char* object_name);
+                            const char* object_name,
+                            const GoalcLinkHeap& heap = GoalcLinkHeap());
+
+//! (AI-assisted) How many instances of a module have been linked since the last init (tests).
+u32 goalc_module_instance_count(u64 hash);
 
 // ---------------------------------------------------------------------------
 // Calling GOAL

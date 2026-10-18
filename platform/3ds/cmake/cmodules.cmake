@@ -8,6 +8,9 @@
 # Rebuild everything after a GOAL change: platform/3ds/tools/build_cmodules.sh
 
 set(OG3DS_CSRC_DIR "" CACHE PATH "out/<game>/csrc folder with the C backend output to link into gk")
+# (AI-assisted) modules compiled more than once, so that copies of one object file in co-loaded
+# levels each have their own static data (lines "<object> <instances>", see gen_c_registry.py)
+set(OG3DS_MODULE_INSTANCES "" CACHE FILEPATH "list of C modules that need more than one instance")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(OG3DS_REGISTRY_OBJ "")
@@ -20,7 +23,23 @@ if(OG3DS_CSRC_DIR)
     message(FATAL_ERROR "OG3DS_CSRC_DIR=${OG3DS_CSRC_DIR} has no .c files")
   endif()
 
-  add_library(og3ds_goal_modules STATIC ${OG3DS_CSRC_FILES})
+  set(OG3DS_INSTANCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/cmod_instances)
+  set(OG3DS_INSTANCE_FILES "")
+  if(OG3DS_MODULE_INSTANCES)
+    execute_process(
+      COMMAND ${Python3_EXECUTABLE} ${OG_ROOT}/scripts/3ds/gen_c_registry.py --instances
+              ${OG3DS_MODULE_INSTANCES} ${OG3DS_CSRC_DIR} ${OG3DS_INSTANCE_DIR}
+      RESULT_VARIABLE og3ds_inst_result)
+    if(NOT og3ds_inst_result EQUAL 0)
+      message(FATAL_ERROR "gen_c_registry.py --instances failed")
+    endif()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${OG3DS_MODULE_INSTANCES})
+    file(GLOB OG3DS_INSTANCE_FILES ${OG3DS_INSTANCE_DIR}/*.c)
+  else()
+    file(REMOVE_RECURSE ${OG3DS_INSTANCE_DIR})
+  endif()
+
+  add_library(og3ds_goal_modules STATIC ${OG3DS_CSRC_FILES} ${OG3DS_INSTANCE_FILES})
   target_compile_definitions(og3ds_goal_modules PRIVATE GOALC_STATIC)
   target_include_directories(og3ds_goal_modules PRIVATE
     ${OG_ROOT}/goalc/cbackend ${OG_ROOT}/game/kernel/common)
@@ -32,8 +51,8 @@ if(OG3DS_CSRC_DIR)
   add_custom_command(
     OUTPUT ${OG3DS_REGISTRY_C}
     COMMAND ${Python3_EXECUTABLE} ${OG_ROOT}/scripts/3ds/gen_c_registry.py
-            ${OG3DS_CSRC_DIR} ${OG3DS_REGISTRY_C}
-    DEPENDS ${OG3DS_CSRC_FILES} ${OG_ROOT}/scripts/3ds/gen_c_registry.py
+            ${OG3DS_CSRC_DIR} ${OG3DS_REGISTRY_C} ${OG3DS_INSTANCE_DIR}
+    DEPENDS ${OG3DS_CSRC_FILES} ${OG3DS_INSTANCE_FILES} ${OG_ROOT}/scripts/3ds/gen_c_registry.py
     COMMENT "Generating the GOAL C module registry"
     VERBATIM)
   set_source_files_properties(${OG3DS_REGISTRY_C} PROPERTIES
