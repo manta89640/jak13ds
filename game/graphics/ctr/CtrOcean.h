@@ -67,6 +67,7 @@ class CtrOceanRenderer : public CtrBucketRenderer {
   int m_tex = -1;
   std::vector<u8> m_texels;
   float m_heights[32 * 32];  // this frame's wave heights
+  float m_tint[3] = {1.f, 1.f, 1.f};  // (AI-assisted) Jak II: the sky's light on the water
   // statistics
   int m_frames = 0, m_tiles_drawn = 0, m_triangles = 0;
 
