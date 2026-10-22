@@ -323,6 +323,24 @@ struct Spring {
   float swing[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // the last swing (camera space rotation)
 };
 Spring g_spring;
+
+// (AI-assisted, keira3) Daxter's seat (daxter_shift)
+struct Seat {
+  bool valid = false;
+  uint64_t frame = 0;
+  float jak[3];     // the seat on Jak (camera space)
+  float delta[3];   // to the seat on her
+  float Lc[9], Tc[3];  // Jak's chest matrix (for the host log)
+};
+Seat g_seat;
+// where Daxter's hips (his main joint) are on Jak (Jak's bind pose, meters: in his standing,
+// walking and running animations, host log CTR_KEIRA_DAX_LOG: (0.34..0.37, 2.77..2.78, 0.09..0.11))
+// and the same place on her (her bind pose): over her shoulder joint as his is over Jak's arm joint
+// (hers is 0.18 m nearer her middle; 0.13 here: her front hair locks and his shoulder pad), as
+// high above her shoulder's top as above his pad's (the meshes under him: 2.12..2.14 m against
+// 2.15..2.23 m)
+constexpr float kJakSeat[3] = {0.35f, 2.78f, 0.10f};
+constexpr float kKeiraSeat[3] = {0.22f, 2.72f, 0.10f};
 constexpr float kSpringK = 0.22f;      // pull toward the rest tip per frame
 constexpr float kSpringDamp = 0.72f;   // velocity kept per frame
 constexpr float kSpringMaxCos = 0.6f;  // at most ~53 degrees from the rest direction
@@ -387,6 +405,28 @@ bool pose(const float* const* jak,
   }
   if (!any) {
     return false;
+  }
+
+  // (AI-assisted, keira3) Daxter's seat: on Jak (his chest's matrix) and on her (her upper chest)
+  {
+    float Lc[9], Tc[3];
+    if (r.chest2 >= 0 && jak_mat(r.jak[r.chest2], Lc, Tc)) {
+      const float sj[3] = {kJakSeat[0] * 4096.f, kJakSeat[1] * 4096.f, kJakSeat[2] * 4096.f};
+      float d[3], pj[3], pk[3];
+      for (int c = 0; c < 3; c++) {
+        d[c] = kKeiraSeat[c] * 4096.f - r.pos[r.chest2][c];
+      }
+      mul33v(Lc, sj, pj);
+      mul33v(lin[r.chest2], d, pk);
+      for (int c = 0; c < 3; c++) {
+        g_seat.jak[c] = pj[c] + Tc[c];
+        g_seat.delta[c] = q[r.chest2][c] + pk[c] - g_seat.jak[c];
+        g_seat.Tc[c] = Tc[c];
+      }
+      memcpy(g_seat.Lc, Lc, sizeof(Lc));
+      g_seat.frame = frame;
+      g_seat.valid = true;
+    }
   }
 
   // (AI-assisted) the arms: her wrist onto his (two-bone IK in the plane her elbow bends in)
@@ -455,10 +495,43 @@ bool pose(const float* const* jak,
     for (int c = 0; c < 3; c++) {
       D[c] = st[c] / d;
     }
-    // the bend direction: where FK put the elbow, off the shoulder-wrist line
+    // the bend direction: (AI-assisted, keira3) the way Jak's own elbow sticks out of his
+    // shoulder-wrist line (her FK elbow, which round 2 used, can land on the inner side of her
+    // narrower shoulder line: her left elbow bent into her body in his idle); FK's if his arm is
+    // straight
     float pole[3], e0[3];
-    for (int c = 0; c < 3; c++) {
-      e0[c] = q[E][c] - q[S][c];
+    bool have_pole = false;
+#ifndef __3DS__
+    static const bool fk_pole = getenv("CTR_KEIRA_FK_POLE") != nullptr;  // host A/B: round 2's
+#else
+    constexpr bool fk_pole = false;
+#endif
+    if (!fk_pole) {
+      float Ls[9], Ts[3], Le[9], Te[3], sj[3], ej[3];
+      if (jak_mat(r.jak[S], Ls, Ts) && jak_mat(r.jak[E], Le, Te)) {
+        mul33v(Ls, r.jak_pos[r.jak[S]], sj);
+        mul33v(Le, r.jak_pos[r.jak[E]], ej);
+        float dj[3], ue[3];
+        for (int c = 0; c < 3; c++) {
+          sj[c] += Ts[c];
+          ej[c] += Te[c];
+          dj[c] = P[c] - sj[c];
+          ue[c] = ej[c] - sj[c];
+        }
+        const float djl = len3(dj);
+        if (djl > 1.f) {
+          const float a1 = (ue[0] * dj[0] + ue[1] * dj[1] + ue[2] * dj[2]) / (djl * djl);
+          for (int c = 0; c < 3; c++) {
+            e0[c] = ue[c] - a1 * dj[c];  // his bend, off his shoulder-wrist line
+          }
+          have_pole = len3(e0) > 0.02f * len3(ue);
+        }
+      }
+    }
+    if (!have_pole) {
+      for (int c = 0; c < 3; c++) {
+        e0[c] = q[E][c] - q[S][c];
+      }
     }
     const float along = e0[0] * D[0] + e0[1] * D[1] + e0[2] * D[2];
     for (int c = 0; c < 3; c++) {
@@ -468,6 +541,39 @@ bool pose(const float* const* jak,
     if (pl < 1e-3f * la) {
       continue;  // straight arm along the line: FK's own
     }
+#ifndef __3DS__
+    // host check (env CTR_KEIRA_IK_LOG): the bend direction (unit, Jak's chest's bind space: +x
+    // his left, +y up, +z forward) of his elbow and of her FK elbow, every 2 s
+    if (ik_log && frame % 60 == 0) {
+      float Lc[9], Tc[3];
+      if (jak_mat(r.jak[r.chest2], Lc, Tc)) {
+        auto to_bind = [&](const float* v, float* o) {  // rotation part: transpose, scale out
+          float t[3];
+          for (int c = 0; c < 3; c++) {
+            t[c] = Lc[c] * v[0] + Lc[3 + c] * v[1] + Lc[6 + c] * v[2];
+          }
+          const float l = len3(t);
+          for (int c = 0; c < 3; c++) {
+            o[c] = l > 0 ? t[c] / l : 0;
+          }
+        };
+        float fk[3], fkp[3], jb[3], fb[3];
+        for (int c = 0; c < 3; c++) {
+          fk[c] = q[E][c] - q[S][c];
+        }
+        const float al = fk[0] * D[0] + fk[1] * D[1] + fk[2] * D[2];
+        for (int c = 0; c < 3; c++) {
+          fkp[c] = fk[c] - al * D[c];
+        }
+        to_bind(pole, jb);
+        to_bind(fkp, fb);
+        printf("[keira ik] frame %llu %s arm: bend used (%.2f %.2f %.2f)%s, her FK elbow's (%.2f "
+               "%.2f %.2f)\n",
+               (unsigned long long)frame, a == 0 ? "left" : "right", jb[0], jb[1], jb[2],
+               have_pole ? " (Jak's)" : " (FK)", fb[0], fb[1], fb[2]);
+      }
+    }
+#endif
     const float x = (A * A - B * B + dd * dd) / (2.f * dd);
     const float h = std::sqrt(std::max(A * A - x * x, 0.f));
     float e[3], w[3];
@@ -625,6 +731,68 @@ bool pose(const float* const* jak,
     o[15] = 1.f;
   }
   return true;
+}
+
+// ---- (AI-assisted, keira3) Daxter ----
+
+bool daxter_shift(uint64_t frame, const float* m, float out[3]) {
+  out[0] = out[1] = out[2] = 0;
+  const Seat& s = g_seat;
+  if (!s.valid || !(s.frame == frame || s.frame + 1 == frame)) {
+    return false;
+  }
+#ifndef __3DS__
+  static const bool no_dax = getenv("CTR_KEIRA_NO_DAX") != nullptr;  // host A/B: Jak's seat
+  if (no_dax) {
+    return false;
+  }
+#endif
+  // his hips: his main joint's matrix (columns, as the game's bone matrices) at his bind pose
+  float h[3];
+  for (int row = 0; row < 3; row++) {
+    h[row] = m[row] * kDaxterMain[0] * 4096.f + m[4 + row] * kDaxterMain[1] * 4096.f +
+             m[8 + row] * kDaxterMain[2] * 4096.f + m[12 + row];
+  }
+  float g[3];
+  for (int c = 0; c < 3; c++) {
+    g[c] = h[c] - s.jak[c];
+  }
+  // (camera space matrices may carry a uniform scale: distances in Jak's chest's units)
+  const float unit = len3(s.Lc) > 1e-6f ? len3(s.Lc) : 1.f;
+  const float dist = len3(g) / unit / 4096.f;
+#ifndef __3DS__
+  // host check (env CTR_KEIRA_DAX_LOG): his hips in Jak's bind space (his chest's matrix), meters
+  static const bool dax_log = getenv("CTR_KEIRA_DAX_LOG") != nullptr;
+  if (dax_log && frame % 30 == 0) {
+    // inverse of the chest's linear part (general 3x3)
+    const float* L = s.Lc;
+    const float det = L[0] * (L[4] * L[8] - L[5] * L[7]) - L[1] * (L[3] * L[8] - L[5] * L[6]) +
+                      L[2] * (L[3] * L[7] - L[4] * L[6]);
+    if (det > 1e-12f || det < -1e-12f) {
+      const float inv[9] = {(L[4] * L[8] - L[5] * L[7]) / det, (L[2] * L[7] - L[1] * L[8]) / det,
+                            (L[1] * L[5] - L[2] * L[4]) / det, (L[5] * L[6] - L[3] * L[8]) / det,
+                            (L[0] * L[8] - L[2] * L[6]) / det, (L[2] * L[3] - L[0] * L[5]) / det,
+                            (L[3] * L[7] - L[4] * L[6]) / det, (L[1] * L[6] - L[0] * L[7]) / det,
+                            (L[0] * L[4] - L[1] * L[3]) / det};
+      float v[3], b[3];
+      for (int c = 0; c < 3; c++) {
+        v[c] = h[c] - s.Tc[c];
+      }
+      mul33v(inv, v, b);
+      printf("[keira dax] frame %llu: his hips at (%.3f %.3f %.3f) m in Jak's bind space, %.3f m "
+             "from the seat\n",
+             (unsigned long long)frame, b[0] / 4096.f, b[1] / 4096.f, b[2] / 4096.f, dist);
+    }
+  }
+#endif
+  // meters: all of it while he sits or holds on (he leans back to 0.5 m in a punch), none when
+  // he has hopped off (cutscenes: 1 m and more)
+  constexpr float kFull = 0.55f, kNone = 0.9f;
+  const float w = dist <= kFull ? 1.f : dist >= kNone ? 0.f : (kNone - dist) / (kNone - kFull);
+  for (int c = 0; c < 3; c++) {
+    out[c] = s.delta[c] * w;
+  }
+  return w > 0;
 }
 
 // ---- (AI-assisted) the face ----

@@ -87,6 +87,19 @@ bool pose(const float* const* jak,
 constexpr float kMaxArmStretch = 1.2f;
 
 /*!
+ * (AI-assisted, keira3) Daxter on her shoulder. Daxter (the sidekick model, his own process) is
+ * placed by his own animation where Jak's shoulder is, not attached to a joint. pose() also works
+ * out where his seat on Jak (kJakSeat, a point of Jak's bind pose that rides on his chest joint) is
+ * on her (kKeiraSeat, on her upper chest) this frame; daxter_shift() is the move for Daxter's bones
+ * (camera space), full while his hips are on the seat, fading out when he is away from it (he hops
+ * off in some moves and cutscenes). Frame: as given to pose() (this frame or the one before).
+ */
+bool daxter_shift(uint64_t frame, const float* daxter_main /* his main joint's matrix */, float out[3]);
+// Daxter's main joint (his hips) at his bind pose, meters; its matrix slot
+constexpr float kDaxterMain[3] = {0.f, 0.521f, 0.018f};
+constexpr int kDaxterMainSlot = 3;
+
+/*!
  * (AI-assisted) Her face (blend shapes, 40 weights like the game's; 4096 = a target fully on): Jak's
  * weights when the game sends them (cutscenes), each to her target that moves the same part the
  * same way (jaw, lips, mouth corners, eyelids, brows: matched by where and which way they move

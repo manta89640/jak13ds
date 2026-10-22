@@ -60,7 +60,17 @@ class Player {
   // (AI-assisted) bank is in owner's buffer, which the bank keeps (Loader::ParseBank)
   BankHandle LoadBank(std::span<u8> bank, std::unique_ptr<u8[]> owner);
 
-  u32 PlaySound(BankHandle bank, u32 sound, s32 vol, s32 pan, s32 pm, s32 pb);
+  // (AI-assisted) keira_voice: "play as Keira", see SndPlayParams::keira_voice
+  u32 PlaySound(BankHandle bank,
+                u32 sound,
+                s32 vol,
+                s32 pan,
+                s32 pm,
+                s32 pb,
+                bool keira_voice = false);
+  // (AI-assisted) "play as Keira": Tone::KeiraPm of grain `grain` of sound `sound` (an SFX bank's
+  // tone), false if that grain isn't a tone
+  bool SetKeiraVoice(BankHandle bank, u32 sound, u32 grain, s16 pm);
   u32 PlaySoundByName(BankHandle bank,
                       char* bank_name,
                       char* sound_name,

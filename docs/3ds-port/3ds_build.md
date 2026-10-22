@@ -289,15 +289,29 @@ game-save header, `info-int32 8` = `"KERA"`): loading that save brings her back,
 new games are Jak. Only the picture changes: the game asks the renderer for `keira-as-eichar-lod0`
 instead of Jak's model (`bones.gc` `pc-merc-draw-request`, the player process only: cutscenes
 keep their own Jak; cutscenes that animate the player show Keira), and the renderer draws Keira from `KEIRA.c3l` with Jak's animation
-(`CtrKeiraRig.h`, `c3l_format.md`). Daxter stays where Jak's shoulder is. (AI-assisted, round 2)
+(`CtrKeiraRig.h`, `c3l_format.md`). (AI-assisted, keira3) Daxter sits on her shoulder: his
+animation puts him on Jak's (he is his own process, on no joint), so the renderer moves his bones
+by the way from Jak's seat to hers each frame (`ctr_keira::daxter_shift`: the seat measured from his
+idle, walk and run, 0.13 m nearer her middle and 0.06 m lower), all of it while he sits or holds on
+and none once he is 0.9 m away (cutscenes where he hops off). Her voice: the sounds the player plays
+get a spare mask bit (`gsound.gc`) and the overlord plays Jak's voice in them (94 tones of 25 common
+bank sounds: grunts, yells, hurt, deaths; not the whooshes and hits layered with them) 4 semitones
+higher (`srpc.cpp` `kKeiraVoices`). The game has no Keira efforts (no Keira sound in any bank, her
+VAG lines are whole sentences), and this needs no data or streaming: as quick and sure as his.
+(AI-assisted, round 2)
 Her shadow is her own: 18 convex hulls of her body parts (`<model>~shadow` in KEIRA.c3l), drawn by
 `CtrShadowVolumes` in place of Jak's volume with his light and bottom plane. Her hands are put on
 Jak's wrists by a two-bone IK of her arms (stretched up to 1.2x when his reach is longer; host
 measurement: wrist gap 0.25-0.36 m mean before, 0 after, at most 5 cm when the cap is hit). Her
 face: a blink of her own eyelids about every 4 s, and Jak's cutscene blend shape weights mapped to
 her targets (jaw, lips, mouth corners, lids, brows). Her ponytail swings on a damped spring in the
-world. Host test without a save: `CTR_KEIRA_FORCE=1`; host A/B: `CTR_KEIRA_NO_IK`,
-`CTR_KEIRA_JAK_SHADOW`, `CTR_KEIRA_IK_LOG`.
+world. (keira3) Her elbows bend the way Jak's do (the IK's bend direction is his elbow's, off his
+shoulder-wrist line): round 2 took her own FK elbow's, which in his idle pointed into her body on
+both sides (host log: (-0.81, -0.20, -0.54) for the left arm in his chest's frame, now (0.26, 0.37,
+-0.89), back and a little out). Her legs have no IK: their knees turn with his. Host test without a
+save: `CTR_KEIRA_FORCE=1` (`platform/3ds/tests/keira.pad`: idle views, walk, run, jumps, attacks,
+a hit); host A/B: `CTR_KEIRA_NO_IK`, `CTR_KEIRA_JAK_SHADOW`, `CTR_KEIRA_FK_POLE`, `CTR_KEIRA_NO_DAX`;
+logs: `CTR_KEIRA_IK_LOG`, `CTR_KEIRA_DAX_LOG`, `CTR_KEIRA_VOICE_LOG`.
 
 ## Platform pieces
 
