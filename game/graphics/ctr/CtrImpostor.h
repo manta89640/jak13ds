@@ -65,7 +65,7 @@ class CtrImpostors {
     u8 fog_rgb[3] = {0, 0, 0};
   };
   /*! CtrTfragRenderer::draw_level, for each level drawn this frame: */
-  void begin_level(CtrLevelData& lev, const Camera& cam, u64 frame);
+  void begin_level(CtrLevelData& lev, const Camera& cam, u64 frame, bool allowed = true);
   /*! A visible chunk (after the view and visibility tests), its clip matrix (on its quantized
    * positions). run_shown: the per run flags the level draw uses (valid for this chunk's runs only
    * if runs_valid; else all of them are shown); partly: set when runs of it are hidden. */
@@ -77,6 +77,9 @@ class CtrImpostors {
   /*! A log line about the last stats period (render thread), then the counts start again. */
   void log_stats();
   bool active() const { return m_active; }
+  // (AI-assisted, title3) host diagnostic CTR_POP_LOG: this stats period's cards drawn, captures
+  double stat_cards() const { return m_st.cards; }
+  double stat_captures() const { return m_st.captures; }
   /*! (renderer init, impostors on) the texture now, before the level texture pools fill VRAM */
   void reserve() { ensure_atlas(); }
 

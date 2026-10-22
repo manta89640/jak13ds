@@ -624,6 +624,11 @@ void ctr_gpu_frame_end(void) {
     file_util::write_rgba_png(g_soft.screenshot_path, out.data(), kW, kH);
     g_soft.screenshot_path.clear();
   }
+  // (AI-assisted, title3) CTR_POP_LOG: the frame number of the dump (frame_N.png) after its lines
+  static const bool pop_log = getenv("CTR_POP_LOG") != nullptr;
+  if (pop_log) {
+    lg::info("[pop] soft frame {}", g_soft.frame);
+  }
   if (!g_soft.dump_dir.empty() && g_soft.dump_every > 0 && g_soft.frame % g_soft.dump_every == 0) {
     auto out = g_soft.color;
     for (int i = 0; i < kW * kH; i++) {
