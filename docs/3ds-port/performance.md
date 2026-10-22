@@ -904,3 +904,42 @@ config_dev.md `impostors` has the mechanism. What changed on Oct 17, and what it
   three views, and the cards' fill is the same as the geometry they replace. The views stay
   GPU-bound, so the frame time gains only a little. Most of the win is the triangle count
   (-18% beach in Azahar) and the headroom in busy views.
+
+## Coarse ties close to the camera (AI-assisted, Oct 18-22, lodnear)
+
+Hardware report: "coarse models are reloading really close". Two causes, both tie LOD (merc LOD is at
+the PS2's distances, impostors start at 120 m, fine_vis is off, the vista tier is far scenery):
+
+- **The switch by screen-space error alone** (title-popin, `tie_lod_px` 4): a group went to geometry
+  3 where its shape error fell under 4 px, which for most groups is well inside the PS2 far-plane
+  (30-100 m; the PS2 morphs toward geometry 3 only up to there). Groups whose error distance is
+  nearer than their far-plane: village1 1107 of 1905 (p10 12 m), misty 994 of 1696, beach 370 of 815,
+  jungle 299 of 792.
+- **The late-data hold** (streaming): groups drawn far in view because their near chunk was late
+  stayed far up to 4 s after it came. After a continue, jungle groups went detailed only at 3-5 m.
+
+Fix (runtime only, no reconvert; `CtrLevelData::lod_switch_error`): a group is near within
+max(error x focal / tie_lod_px, PS2 far-plane) x detail_scale + radius (where the PS2 distance
+decides, the far version's error at the switch is under tie_lod_px). Stream units' bounds include
+the floor (`need_d`, at load). Units a group needs by shape error go first and may free floor-only
+units at the arena's capacity. The hold is 1 s, and none where the far error is 3 x tie_lod_px or
+more. ctr_vis_builder and the fine_vis check assume the floor (detail_scale <= max(1, the set's)).
+
+Host walks (`platform/3ds/tests/lod_walk.pad`, CTR_LOD_LOG=1; CTR_LOD_NO_FLOOR=1 is the old rule):
+
+| | before | after |
+|---|---|---|
+| switches to far in view nearer than the PS2 far-plane | beach 1 at 15 m (PS2 60), village1 1 at 30 m (65) | 0 |
+| jungle switches to near in view inside half the far-plane | 18-22, nearest 3-5 m | 0, nearest 53 m |
+| other levels' switches to near | 9-49 m inside the far-plane | at it (59.x of 60 m) |
+| frames with groups kept far after their data came (per ~15 s window) | 106-117 | 0-29 |
+
+Cost: host fixed views (tie_views.pad) village1 hut 105.1k -> 106.7k triangles, beach start 44.0k
+-> 44.7k (+0.1-0.2 ms on the GPU model 10.6 ms + 0.13 ms per 1k); walks +0.7-5k tie triangles; jungle
+the heaviest at 26.6 ms model. Near data needed at once +10-40% (beach peak 4.3 -> 5.9 MB, within
+the arena's growth). Azahar (private instance, sound off, the user's config, stats_period 5, the
+village1 + beach part of lod_walk.pad): village1 walk 115.5-117.6k triangles, render thread build
+18.2-18.8 ms, GPU busy 19.1-19.8 ms, model 25.6-25.9 ms; beach walk 65.6-86.3k triangles, build
+15.2-17.0 ms, busy 16.0-17.8 ms, model 19.1-21.8 ms; no late times for lack of room during the walks
+(arena 4.1 MB village1, 8.3 MB beach + village1). Oct 17 reference (impostors, Azahar): village1 hut
+110.8k triangles. Still coarse: ~1 s after a continue while the area's near chunks load.

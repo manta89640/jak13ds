@@ -654,8 +654,12 @@ bool load_level(const std::string& path, const Options& opt, LevelGeo* out, std:
                 p.in_r[p.n_in] = sw * opt.tie_k_lo + gr;
                 p.n_in++;
               } else {
+                // (AI-assisted, lodnear) the runtime's PS2 floor: near within the PS2 far-plane x
+                // detail_scale at least (the sets are for detail_scale up to max(1, detail_min))
                 p.out_c = gc;
-                p.out_r = sw * opt.tie_k_hi * 1.1f + gr;
+                p.out_r = std::max(sw * opt.tie_k_hi, g.dist / kM * std::max(1.f, opt.detail_min)) *
+                              1.1f +
+                          gr;
               }
               flush(p);
             } else {

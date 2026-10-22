@@ -467,7 +467,10 @@ Runtime (`CtrLevel.cpp`, config `tie_lod`): per level draw, each group's version
 errors (title-popin, Oct 17), near while the camera is within error x focal / tie_lod_px x
 detail_scale of the group's sphere (focal: pixels of the 400-wide top screen per unit of x / depth
 from this frame's projection, 256 in gameplay, 161 on the title's wide camera): the far version
-only where its error is at most tie_lod_px pixels. Without them (older files), near within dist x
+only where its error is at most tie_lod_px pixels. (AI-assisted, lodnear, Oct 18) And never nearer
+than the PS2's: near at least within the group's `dist` (the PS2 far-plane) x detail_scale, so the
+switch distance is max(error x focal / tie_lod_px, far-plane) x detail_scale + radius (see
+performance.md "Coarse ties close to the camera"). Without them (older files), near within dist x
 detail_scale (x 0.5..1 with auto_detail: half while the GPU is busy; a group in view keeps the factor
 it was decided with until it is out of view). 10% hysteresis; every group every frame, so turning
 the camera switches nothing. Why: the PS2 morphs geometry 2 into 3 up to the far-plane, the 3DS

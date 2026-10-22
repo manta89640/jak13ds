@@ -2009,12 +2009,41 @@ void load_tie_lod(c3l::Reader& f,
       !f.read_array(eh.lod_error_offset, eh.lod_group_count, &lev->lod_error)) {
     lev->lod_error.clear();
   }
+#ifndef __3DS__
+  // (AI-assisted, lodnear) host log, env CTR_LOD_LOG: where the groups switch to their far
+  // version by screen-space error (gameplay focal 256, tie_lod_px 4) against the PS2 far-plane
+  if (getenv("CTR_LOD_LOG") && lev->lod_error.size() == lev->lod_groups.size() &&
+      !lev->lod_groups.empty()) {
+    std::vector<float> e_m, ratio;
+    u32 closer = 0, closer_half = 0;
+    for (size_t g = 0; g < lev->lod_groups.size(); g++) {
+      const float de = lev->lod_error[g] * 64.f / 4096.f, dp = lev->lod_groups[g].dist / 4096.f;
+      e_m.push_back(de);
+      ratio.push_back(dp > 0 ? de / dp : 1e9f);
+      closer += de < dp;
+      closer_half += de < 0.5f * dp;
+    }
+    auto pct = [](std::vector<float> v, float q) {
+      std::sort(v.begin(), v.end());
+      return v[std::min(v.size() - 1, (size_t)(q * v.size()))];
+    };
+    lg::info("[lodlog] {}: {} groups: screen-error switch (4 px, focal 256) at p10 {:.1f} / p50 "
+             "{:.1f} / p90 {:.1f} m (+ radius); / PS2 far-plane p10 {:.2f} p50 {:.2f} p90 {:.2f}; "
+             "nearer than the PS2 far-plane {}, nearer than half of it {}",
+             lev->name, e_m.size(), pct(e_m, 0.1f), pct(e_m, 0.5f), pct(e_m, 0.9f),
+             pct(ratio, 0.1f), pct(ratio, 0.5f), pct(ratio, 0.9f), closer, closer_half);
+  }
+#endif
   lg::info("[ctr] {}: tie levels of detail: {} groups, {} near runs{}{}", lev->name,
            lev->lod_groups.size(), near_runs, bad ? fmt::format(" ({} bad runs)", bad) : "",
            lev->lod_error.empty() ? ", switched at the PS2 distances"
                                   : ", switched by screen-space error");
 }
 
+#ifndef __3DS__
+// (AI-assisted, lodnear) host log counters (CTR_LOD_LOG), by unit state
+u64 g_lod_far_why[4] = {}, g_lod_far_close[4] = {};
+#endif
 // (AI-assisted, streaming) host check, env CTR_STREAM_CHECK (CtrLevels::stream_check)
 bool stream_check_enabled() {
 #ifdef __3DS__
@@ -2147,6 +2176,14 @@ void load_stream_info(c3l::Reader& f,
       for (u32 j = 0; j < lev->group_unit_count[g]; j++) {
         lev->unit_groups[fill[lev->group_units[lev->group_unit_first[g] + j]]++] = (u32)g;
       }
+    }
+    // (AI-assisted, lodnear) each unit's largest PS2 far-plane (the switch's floor)
+    for (size_t u = 0; u < lev->stream_units.size(); u++) {
+      float d = 0;
+      for (u32 j = lev->unit_group_first[u]; j < lev->unit_group_first[u + 1]; j++) {
+        d = std::max(d, lev->lod_groups[lev->unit_groups[j]].dist);
+      }
+      lev->stream_units[u].need_d = d;
     }
   }
   if (why) {
@@ -3918,7 +3955,7 @@ u32 CtrLevels::stream_shrink(bool all) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k = lev.stream_k;
-        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - (su.need_a + k * su.need_e) <
+        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k, lev.lod_floor_k) <
                          kKeepMeters * kM) {
           continue;
         }
@@ -4104,6 +4141,7 @@ void CtrLevels::stream_update(u64 frame) {
       // the unit's bound first (its sphere's center: need_a + k x need_e), then its groups': how
       // far the camera (now or where it goes) is beyond the nearest group's near distance
       const bool resident = su.state == CtrLevelData::kUnitResident;
+      su.urgent = false;
       if (k <= 0) {
         if (resident) {
           m_have.push_back({&lev, u, 1e30f});
@@ -4117,7 +4155,7 @@ void CtrLevels::stream_update(u64 frame) {
         dmin = std::min(dmin, dx * dx + dy * dy + dz * dz);
       }
       // (squared first: most units are far beyond their bound, no root for them)
-      const float bound = su.need_a + k * su.need_e;
+      const float bound = su.bound(k, lev.lod_floor_k);
       const float far_lim = bound + (resident ? kKeepMeters * kM : want_m);
       if (dmin > far_lim * far_lim) {
         if (resident) {
@@ -4131,18 +4169,27 @@ void CtrLevels::stream_update(u64 frame) {
         continue;
       }
       float score = std::sqrt(dmin) - bound;
+      // (AI-assisted, lodnear) with the PS2 floor, a unit needed only by it (its groups' far
+      // versions within tie_lod_px there) is less urgent than one whose groups' far versions
+      // would show: those first, and they may take the others' room at capacity
+      const bool floor_on = lev.lod_floor_k > 0 && lev.lod_error.size() == lev.lod_groups.size();
+      bool urgent = !floor_on;
       if (!lev.unit_group_first.empty()) {
         float best = 1e30f;
         for (u32 j = lev.unit_group_first[u]; j < lev.unit_group_first[u + 1]; j++) {
           const u32 g = lev.unit_groups[j];
           const auto& lg = lev.lod_groups[g];
-          const float sw = g < lev.lod_error.size() ? lev.lod_error[g] : lg.dist;
+          const float sw = g < lev.lod_error.size() ? lev.lod_switch_error(g) : lg.dist;
           const float lim = sw * k + lg.bsphere[3];
           float g2 = 1e30f;
           for (int i = 0; i < np; i++) {
             const float dx = p[i][0] - lg.bsphere[0], dy = p[i][1] - lg.bsphere[1],
                         dz = p[i][2] - lg.bsphere[2];
             g2 = std::min(g2, dx * dx + dy * dy + dz * dz);
+          }
+          if (!urgent) {
+            const float lim_e = lev.lod_error[g] * k + lg.bsphere[3];
+            urgent = g2 < lim_e * lim_e;
           }
           // (beyond best already: no root)
           const float bl = best + lim;
@@ -4157,11 +4204,13 @@ void CtrLevels::stream_update(u64 frame) {
         need_now += su.bytes;  // (statistics: needed now or soon)
       }
       su.last_score = score;
+      su.urgent = urgent && score < 0;
       if (resident) {
         m_have.push_back({&lev, u, score});
       } else if (score < want_m) {
-        // (needed now and on screen: first)
-        const float prio = score < 0 && in_view(c) ? score - kInViewMeters * kM : score;
+        // (needed now and on screen: first; (AI-assisted, lodnear) then the urgent ones)
+        const float prio = (score < 0 && in_view(c) ? score - kInViewMeters * kM : score) -
+                           (su.urgent ? kInViewMeters * kM : 0.f);
         m_want.push_back({&lev, u, prio});
         if (!su.want_frame) {
           su.want_frame = frame;
@@ -4263,6 +4312,26 @@ void CtrLevels::stream_update(u64 frame) {
     if (!mem && evicted < su.bytes && w.score < 0) {
       free_for(want_m);
     }
+    // (AI-assisted, lodnear) still none and this unit urgent: the units there only for the PS2
+    // floor (their groups go to the far version, within tie_lod_px), the furthest first
+    if (!mem && evicted < su.bytes && su.urgent) {
+      if (!have_sorted) {
+        std::sort(m_have.begin(), m_have.end(),
+                  [](const StreamCand& a, const StreamCand& b) { return a.score > b.score; });
+        have_sorted = true;
+      }
+      u64 freed_for = 0;
+      for (size_t j = hi; !mem && j < m_have.size() && freed_for < su.bytes; j++) {
+        auto& victim = m_have[j].lev->stream_units[m_have[j].unit];
+        if (victim.state != CtrLevelData::kUnitResident || victim.urgent) {
+          continue;
+        }
+        freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
+        evicted += victim.bytes;
+        stream_evict(*m_have[j].lev, m_have[j].unit);
+        mem = arena.alloc(su.bytes);
+      }
+    }
     if (!mem) {
       m_sst.no_room++;
       no_room = true;
@@ -4338,7 +4407,7 @@ void CtrLevels::stream_update(u64 frame) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k2 = lev.stream_frame + 3 >= frame ? lev.stream_k : 0.f;
-        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - (su.need_a + k2 * su.need_e)
+        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k2, lev.lod_floor_k)
                        : 1e30f;
       }
       if (score > kKeepMeters * kM) {
@@ -5498,8 +5567,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // drawn: fine for far version occluders, not for near ones
       const bool switching = settings.tie_lod && lev.run_lod.size() >= lev.vis_runs.size();
       if (!why && (fh.occluders & c3v::kOccTieLod)) {
+        // (AI-assisted, lodnear) and the PS2 floor (detail_scale x the far-plane) the builder
+        // assumed: detail_scale up to max(1, the set's smallest)
         if (switching ? !(lev.lod_error.size() == lev.lod_groups.size() && k >= fh.tie_k_lo &&
-                          k <= fh.tie_k_hi)
+                          k <= fh.tie_k_hi &&
+                          settings.detail_scale <= std::max(1.f, fh.detail_min))
                       : (fh.occluders & c3v::kOccTieNear) != 0) {
           why = "tie LOD switch";
         }
@@ -5718,7 +5790,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       {
         const float* c = lev.chunks[ci].bsphere;
         const float dx = c[0] - cx, dy = c[1] - cy, dz = c[2] - cz;
-        const float lim = su.need_a + kb * su.need_e;
+        const float lim = su.bound(kb, lev.lod_floor_k);
         if (kb > 0 && dx * dx + dy * dy + dz * dz > lim * lim) {
           lev.unit_ok[u] = 2;
           continue;
@@ -5738,6 +5810,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
   u32 late_groups = 0;  // (AI-assisted, streaming) drawn far: their near chunks not there yet
   u32 held_groups = 0;  // (AI-assisted, streaming) ... there now, but kept far while in view
+#ifndef __3DS__
+  if (getenv("CTR_LOD_LOG") && rs.frame_idx % 30 == 0 &&
+      (g_lod_far_why[0] + g_lod_far_why[2] + g_lod_far_why[3])) {
+    lg::info("[lodlog] {}: group frames in view within their distance but far (30 frames): late {} "
+             "(within 20 m: {}), beyond the near chunk's distance {} ({}), no near chunk {} ({})",
+             lev.name, g_lod_far_why[3], g_lod_far_close[3], g_lod_far_why[2], g_lod_far_close[2],
+             g_lod_far_why[0], g_lod_far_close[0]);
+    memset(g_lod_far_why, 0, sizeof(g_lod_far_why));
+    memset(g_lod_far_close, 0, sizeof(g_lod_far_close));
+  }
+#endif
   if (tie_lod) {
     u32 near = 0;
     // (AI-assisted, title-popin) files with shape errors: the near version while the far one's
@@ -5764,6 +5847,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       return lod_auto ? k0 * (0.5f + 0.5f * t) : k0;
     };
     const float k = k_at(g_detail_t);
+    // (AI-assisted, lodnear) the PS2 floor: by screen-space error alone (4 px of the 400-wide top
+    // screen) half of the groups switched to geometry 3 nearer than their PS2 far-plane, some at
+    // 3-15 m (jungle, beach: "coarse models really close"); the PS2 morphs toward geometry 3 only up
+    // to the far-plane. So a group is near within max(error x k, PS2 far-plane x detail_scale):
+    // never coarser than the PS2, and where the PS2 distance decides, its far version's error at
+    // the switch is under tie_lod_px
+    lev.lod_floor_k = by_error && k > 0 ? k0 / k : 0.f;
+#ifndef __3DS__
+    static const bool no_floor = getenv("CTR_LOD_NO_FLOOR") != nullptr;  // (host A/B: as before)
+    if (no_floor) {
+      lev.lod_floor_k = 0.f;
+    }
+#endif
     if (lev.lod_detail_q.size() != lev.lod_groups.size()) {
       lev.lod_detail_q.assign(lev.lod_groups.size(), 0xff);
     }
@@ -5772,14 +5868,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lev.lod_hold_since.assign(lev.lod_groups.size(), 0);
     }
     // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
-    // view once the data came (4 s at 30 fps)
-    constexpr u32 kHoldFrames = 120;
+    // view once the data came (1 s at 30 fps)
+    constexpr u32 kHoldFrames = 30;  // (AI-assisted, lodnear: was 120)
     for (size_t g = 0; g < lev.lod_groups.size(); g++) {
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
       const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
       const float d2 = dx * dx + dy * dy + dz * dz;
-      const float sw = by_error ? lev.lod_error[g] : lg.dist;
+      const float sw = by_error ? lev.lod_switch_error(g) : lg.dist;
       const float f = (st & 1) ? 1.1f : 1.f;
       auto near_at = [&](float kk) {
         const float lim = sw * kk * f + lg.bsphere[3];
@@ -5818,6 +5914,25 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
           if (!ok) {
             n = false;
+#ifndef __3DS__
+            {
+              // (AI-assisted, lodnear) host log: groups in view within their distance drawn far,
+              // by why (worst unit state: 3 late, 2 beyond the near chunk's draw distance, 0 none)
+              static const bool lod_log2 = getenv("CTR_LOD_LOG") != nullptr;
+              if (lod_log2 && sphere_in_view(cam, lg.bsphere)) {
+                u8 w = 1;
+                for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+                  const u8 uo = lev.unit_ok[gu[j]];
+                  w = uo == 3 ? 3 : (w == 3 ? 3 : (uo != 1 ? uo : w));
+                }
+                const float d = std::sqrt(d2) / 4096.f;
+                g_lod_far_why[w & 3] += 1;
+                if (d < 20.f) {
+                  g_lod_far_close[w & 3] += 1;
+                }
+              }
+            }
+#endif
             if (late) {
               late_groups++;
               for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
@@ -5833,9 +5948,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           } else if (keep_far) {
             // kept far while in view, at most kHoldFrames, and while the switch would show: the
             // far version's error at least 1.5 x tie_lod_px (the camera nearer than 2/3 of the
-            // group's near distance; near it the error is about tie_lod_px)
-            const float lim = sw * k / 1.5f + lg.bsphere[3];
-            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim &&
+            // group's near distance; near it the error is about tie_lod_px). (AI-assisted,
+            // lodnear) but not where the far version is plainly wrong: from 3 x tie_lod_px of
+            // error on (the camera within 1/3 of that distance) the near version at once. Held
+            // up to 4 s, a continue's late groups stayed coarse 3-15 m from the camera and then
+            // switched together
+            const float e = by_error ? lev.lod_error[g] : lg.dist;
+            const float lim = e * k / 1.5f + lg.bsphere[3], lim_close = e * k / 3.f + lg.bsphere[3];
+            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim && d2 > lim_close * lim_close &&
                 (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
               n = false;
               held_groups++;
@@ -5847,6 +5967,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       } else if (!n) {
         keep_far = false;  // (beyond its distance: far anyway)
       }
+#ifndef __3DS__
+      // (AI-assisted, lodnear) host log, env CTR_LOD_LOG: every switch of a group in view, its
+      // distance, the PS2 far-plane and the screen-error distance, and why it is far
+      static const bool lod_log = getenv("CTR_LOD_LOG") != nullptr;
+      if (lod_log && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
+        const char* why = n ? "near" : !near_at(k) ? "dist" : keep_far ? "late/held" : "nodata";
+        lg::info("[lodlog] {} g{} {} d {:.1f} m (to surface {:.1f}) ps2 far {:.1f} err-dist {:.1f} "
+                 "r {:.1f} err {:.3f} m",
+                 lev.name, g, why, std::sqrt(d2) / 4096.f, (std::sqrt(d2) - lg.bsphere[3]) / 4096.f,
+                 lg.dist / 4096.f, by_error ? lev.lod_error[g] * k / 4096.f : 0.f,
+                 lg.bsphere[3] / 4096.f, by_error ? lev.lod_error[g] / 4096.f : 0.f);
+      }
+#endif
       st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0));
       near += n;
     }
@@ -5881,6 +6014,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   } else {
     lev.stream_k = 0.f;
+    lev.lod_floor_k = 0.f;
   }
   if (has_units) {
     lev.stream_frame = rs.frame_idx;

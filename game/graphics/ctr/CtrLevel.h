@@ -7,6 +7,7 @@
  * <project>/out/jak1/c3l and draws them from the tfrag buckets with the camera the game sends.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -115,6 +116,14 @@ struct CtrLevelData {
   // (AI-assisted, title-popin) per group its shape error (c3l::ExtHeader::lod_error_offset, game
   // units; empty: an older file, the groups switch at their dist)
   std::vector<float> lod_error;
+  // (AI-assisted, lodnear) the PS2 floor of the switch by screen-space error, as an error per
+  // unit of the factor: detail_scale / k of the last draw (0: none, older files). A group's
+  // switch error is max(its shape error, its PS2 far-plane x this), so it is near at least within
+  // the PS2 far-plane x detail_scale (+ hysteresis, + radius): never coarser than the PS2
+  float lod_floor_k = 0.f;
+  float lod_switch_error(size_t g) const {
+    return std::max(lod_error[g], lod_groups[g].dist * lod_floor_k);
+  }
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
@@ -299,6 +308,14 @@ struct CtrLevelData {
     u8 tod_layout = 0;  // its time of day groups were made (at its first read)
     u16 tod_slots = 0;  // the time of day groups kept for it at load (its visibility ids)
     float need_a = 0, need_e = 0;  // c3l::StreamChunk
+    float need_d = 0;  // (AI-assisted, lodnear) the largest PS2 far-plane of its groups (game units)
+    // (AI-assisted, lodnear) this frame (stream_update): one of its groups is within its distance
+    // by shape error (its far version would show more than tie_lod_px), not only by the PS2 floor
+    bool urgent = false;
+    // its bound with the factor k: within this of its sphere's center one of its groups is near
+    float bound(float k, float floor_k) const {
+      return need_a + k * std::max(need_e, need_d * floor_k);
+    }
     u32 bytes = 0;   // vertices + indices in the arena (CtrStreamArena::mesh_bytes)
     u32 packed = 0;  // file bytes of its blocks
     void* mem = nullptr;  // kUnitLoading: the arena piece the job fills
