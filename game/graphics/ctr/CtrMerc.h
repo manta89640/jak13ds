@@ -114,6 +114,9 @@ class CtrMercRenderer : public CtrBucketRenderer {
   const struct CtrMercModelData* m_keira_shadow_for = nullptr;
   u32 m_keira_shadow_gen = 0;
   const CtrMercMat* m_rig_slot[256] = {};
+  // (AI-assisted, keira3) Daxter's bones moved onto Keira's shoulder
+  CtrMercMat m_dax_mats[128];
+  const CtrMercMat* m_dax_slot[256] = {};
   static constexpr int kFindSlots = 64;
   FindSlot m_find[kFindSlots];
 

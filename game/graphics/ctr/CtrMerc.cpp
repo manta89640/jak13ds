@@ -881,6 +881,24 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
     }
     pal_bones = m_rig_slot;
+  } else if (model->name.size() > 12 && !model->name.compare(0, 12, "sidekick-lod")) {
+    // (AI-assisted, keira3) "play as Keira": Daxter on her shoulder, not Jak's (his bones moved
+    // to her seat, ctr_keira::daxter_shift: nothing to do when she isn't drawn)
+    float shift[3];
+    if (ctr_keira::daxter_shift(rs.frame_idx, bones[ctr_keira::kDaxterMainSlot]->tmat[0].data(),
+                                shift)) {
+      for (int k = 0; k < 128; k++) {
+        m_dax_mats[k] = *bones[k];
+        m_dax_mats[k].tmat[3].x() += shift[0];
+        m_dax_mats[k].tmat[3].y() += shift[1];
+        m_dax_mats[k].tmat[3].z() += shift[2];
+        m_dax_slot[k] = &m_dax_mats[k];
+      }
+      for (int k = 128; k < 256; k++) {
+        m_dax_slot[k] = bones[k];
+      }
+      pal_bones = m_dax_slot;
+    }
   }
   PcMercFlags flags;
   memcpy(&flags, input, sizeof(flags));

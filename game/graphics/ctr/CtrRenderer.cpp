@@ -850,6 +850,7 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
   CtrRenderState rs;
   rs.ee_mem = (const u8*)ee_mem;
   rs.offset_of_s7 = s7.offset;
+  rs.frame_idx = m_rs.frame_idx;  // (AI-assisted, keira3) the frame drawn next (Keira's pose)
   const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
   for (auto& [id, merc] : m_merc) {
     rs.next_bucket = base + 16 * (id + 1);

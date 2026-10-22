@@ -1,4 +1,7 @@
-# (AI-assisted) keira3 host check (CTR_KEIRA_FORCE=1): Keira's sounds (L1+R1 pick), Daxter, arms
+# (AI-assisted) "play as Keira" host check (CTR_KEIRA_FORCE=1 draws her; L1+R1 + pc-3ds-keira-pick!
+# makes her sounds): idle from behind, the side, the front, the other side (C-stick orbits), walk,
+# run, jump, double jump, punch, spin kick, a hit (her hurt sound). Logs: CTR_KEIRA_VOICE_LOG=1 (her
+# voice), CTR_KEIRA_DAX_LOG=1 (Daxter's seat); shots with --ctr-dump. Silent: OPENGOAL_NO_SOUND=1.
 0 wait *target* target-title-wait
 196 l1 r1
 200 l1 r1 call pc-3ds-keira-pick!
@@ -7,41 +10,43 @@
 211 wait *target* target-continue
 300 tod 12
 300 print *pc-3ds-keira*
-420 shot idle_back
-430 rx=255
-452 -
-520 shot idle_side
-530 rx=255
-552 -
-620 shot idle_front
-630 rx=255
-652 -
-720 shot idle_side2
-730 rx=255
-752 -
-840 shot idle_back2
-900 shot idle_back3
-1000 ly=90
-1040 ly=90 shot walk1
-1050 ly=90 shot walk2
-1060 ly=90 shot walk3
-1070 -
-1100 ly=0
-1130 ly=0 shot run1
-1140 ly=0 shot run2
-1150 -
-1200 x
-1208 shot jump1
-1210 -
-1222 x
-1230 shot djump1
-1232 -
-1300 square
-1305 shot punch1
-1307 -
-1360 circle
-1366 shot spin1
-1368 -
-1440 call pevent target attack #f zeros
-1452 shot hit1
-1600 exit
+400 ry=0
+520 -
+540 shot idle_back
+550 rx=255
+572 -
+640 shot idle_side
+650 rx=255
+672 -
+740 shot idle_front
+750 rx=255
+772 -
+840 shot idle_side2
+850 rx=255
+872 -
+960 shot idle_back2
+1020 shot idle_back3
+1120 ly=90
+1160 ly=90 shot walk1
+1170 ly=90 shot walk2
+1180 ly=90 shot walk3
+1190 -
+1220 ly=0
+1250 ly=0 shot run1
+1260 ly=0 shot run2
+1270 -
+1320 x
+1328 shot jump1
+1330 -
+1342 x
+1350 shot djump1
+1352 -
+1420 square
+1425 shot punch1
+1427 -
+1480 circle
+1486 shot spin1
+1488 -
+1560 call pevent target attack false damage-info
+1572 shot hit1
+1720 exit
