@@ -347,6 +347,11 @@ struct CtrLevelData {
   float stream_k_hi = 0.f;  // its recent largest (decaying 1% a frame): the scheduler's headroom
                             // for a camera that zooms (the factor follows the focal length)
   u32 stream_resident = 0;  // bytes of the units there
+  // (AI-assisted, title3) the frame of the last draw_level (any mode): a draw after a gap of more
+  // than 2 frames shows the level again (the title's reveal of Sandover, a level start): its time
+  // of day rewrites aren't capped or spread that frame (draw_level)
+  u64 last_draw_frame = 0;
+  u64 reveal_frame = 0;  // (AI-assisted, title3) the last such draw's frame
   // the file's header and block directory, for the stream jobs' readers (no reads of them)
   std::shared_ptr<const c3l::Reader::Dir> file_dir;
   bool is_unit(size_t ci) const { return !chunk_unit.empty() && chunk_unit[ci] != UINT32_MAX; }
@@ -428,6 +433,19 @@ class CtrLevels {
     memcpy(trans, m_cam, sizeof(m_cam));
     return true;
   }
+  /*! (AI-assisted, title3) the game's camera position this frame (*math-camera* trans, game
+   * units; game thread, while the render thread is idle): the near chunks of a level that is loaded
+   * but not drawn (Sandover behind the title's logo) are read around it before it is shown */
+  /*! (AI-assisted, title3) draw_level, any level (the title's logo too): this frame's tie LOD factor
+   * (detail_scale x focal / tie_lod_px x 1.1), the hidden levels' factor before any streaming level
+   * was drawn */
+  void note_k_any(float k) { m_k_any = k; }
+  void note_game_camera(const float* trans) {
+    for (int i = 0; i < 3; i++) {
+      m_game_cam_next[i] = trans[i];
+    }
+    m_game_cam_new = true;
+  }
   /*! (AI-assisted, streaming) Jak's first bone in camera space (merc renderer, any frame) */
   void stream_note_target(float x, float y, float z, u64 frame) {
     m_target_cam[0] = x;
@@ -438,6 +456,26 @@ class CtrLevels {
   /*! (AI-assisted, streaming) a jump of a level's tie LOD factor (the camera's focal length: a cut
    * to another camera, a zoom) */
   void stream_note_cut(u64 frame) { m_cut_frame = frame; }
+  /*! (AI-assisted, title3) draw_level: tie LOD groups in view drawn far this frame because their
+   * near chunks aren't there yet (recent: the level was shown again within the last 3 s). The
+   * renderer keeps a screen that comes out of black black while there are such groups after a
+   * level was shown or the camera cut (CtrRenderer::draw_pmode_fade), at most 1.5 s. */
+  void note_late_in_view(u64 frame, u32 groups, bool recent) {
+    if (m_lv_frame != frame) {
+      m_lv_frame = frame;
+      m_lv_groups = 0;
+      m_lv_recent = false;
+    }
+    m_lv_groups += groups;
+    m_lv_recent = m_lv_recent || recent;
+  }
+  //! the groups of this frame (note_late_in_view), and whether a level was shown or the camera cut
+  //! within the last 3 s
+  u32 late_in_view(u64 frame, bool* shown_or_cut) const {
+    const bool now = m_lv_frame == frame;
+    *shown_or_cut = (now && m_lv_recent) || (m_cut_frame && frame < m_cut_frame + 90);
+    return now ? m_lv_groups : 0;
+  }
   /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
   void stream_log();
   /*! (AI-assisted, streaming) host check (env CTR_STREAM_CHECK): the counts of this frame's draw
@@ -691,6 +729,14 @@ class CtrLevels {
   u64 m_target_cam_frame = 0, m_target_frame = 0;
   u64 m_cam_frame = 0;
   bool m_cam_valid = false;
+  // (AI-assisted, title3) the game's camera (note_game_camera): this frame's, the last one used
+  // and its velocity (game units per frame, smoothed); the tie LOD factor of the last level drawn
+  float m_game_cam_next[3] = {0, 0, 0}, m_game_cam[3] = {0, 0, 0}, m_game_vel[3] = {0, 0, 0};
+  bool m_game_cam_new = false, m_game_cam_valid = false;
+  float m_k_last = 0.f, m_k_any = 0.f;
+  u64 m_lv_frame = 0;  // (AI-assisted, title3) note_late_in_view
+  u32 m_lv_groups = 0;
+  bool m_lv_recent = false;
   // scheduling (kept to avoid allocations)
   struct StreamCand {
     CtrLevelData* lev;
@@ -750,6 +796,10 @@ void ctr_level_set_detail(float t);
 // (AI-assisted, title-popin) auto_detail: the GPU is over its budget (frames about to miss their
 // vblank): lower distances apply to what is in view too
 void ctr_level_set_detail_urgent(bool urgent);
+/*! (AI-assisted, title3) render thread, before the frame's level draws: the screen is black this
+ * frame (the game's PMODE fade, or the renderer holding it): no tie LOD group is kept far "in view"
+ * for late data then (nobody saw it far), CtrTfragRenderer::draw_level */
+void ctr_level_set_screen_black(bool black);
 float ctr_level_detail();
 /*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
  * of auto_detail's build time). */

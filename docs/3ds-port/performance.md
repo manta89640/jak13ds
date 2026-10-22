@@ -860,6 +860,23 @@ distances moved), Snowy start 115k -> 114k. What is left: tie / shrub chunks the
 nearer to (the PS2 fades shrubs; ties have no limit there), the time of day vertex colors stepping
 (tod-fix), and on the host only, the sky drawn as hard-edged panels.
 
+**Title's first seconds (AI-assisted, Oct 22, title3).** "Still on the title screen geometry
+changes in the first couple seconds". Every frame from the logo to 3 s after Sandover appears
+(host `--ctr-gfx` with `CTR_POP_LOG`, Azahar with a pad script shot every game frame;
+port_test/reports/title3) showed four causes at Sandover's reveal behind the logo's falling pieces:
+(1) its near chunks were never read while it was hidden (streaming.md "Levels not drawn yet"):
+coarse tie groups switching to their near versions on screen (Azahar frames 113-115 after
+title-play: the island's hut, grass and palms); (2) the time of day rewrites of its first frames
+capped by tod_max_ms (host: 194 groups waiting at the first frame): stale colors for a few
+frames; (3) impostor cards coming in by the dozen over the first ~40 frames (0 -> 322) and going
+back to geometry when the fast day starts; (4) single tie LOD switches (the switch distance:
+lodnear's). Fixes: (1) hidden levels stream around the game's camera; (2) a level shown again
+(no draw for 3+ frames) brings its groups up to date within 7 ms a frame for its first 6 frames,
+not the budget or tod_max_ms (all at once took 20.2 ms in one frame in Azahar; spread: 9.4 ms at
+most); (3) no impostors while the title level is loaded. Azahar, 192 frames from the reveal:
+late near chunks 71 -> 0, pop / flicker events (popdet) 37 -> 27 (the rest: the logo's pieces,
+the day's colors and sky, single LOD switches). Boot: the title isn't held (no extra time).
+
 **Fire Canyon sky flicker (AI-assisted, Oct 17, sky-flicker).** The table's "blended when the
 weights move" was decided per level. make-sky-textures runs once per level with a sky (level 0's
 copies in bucket 32, level 1's added in bucket 39, each weighted by the mood interpolation), and a

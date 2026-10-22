@@ -45,6 +45,25 @@ extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 // ---------------------------------------------------------------------------
 
 namespace {
+// (AI-assisted, title3) host diagnostic, env CTR_POP_LOG: per level draw, what changed on screen
+// (chunks appearing / going by distance in view, tie LOD switches in view, groups late or held
+// far, time of day rewrites, impostor cards, units taken): which mechanism a visible change is
+#ifndef __3DS__
+bool pop_log_on() {
+  static const bool on = getenv("CTR_POP_LOG") != nullptr;
+  return on;
+}
+#else
+constexpr bool pop_log_on() {
+  return false;
+}
+#endif
+struct PopLog {
+  u32 chunk_in[4] = {}, chunk_out[4] = {};  // by chunk kind
+  u32 lod_up = 0, lod_down = 0;
+  u32 taken = 0;
+};
+PopLog g_pop;
 // below the render thread (0x2F) and the sound mixer (0x2E), which share core 2 with the loader
 constexpr int kLoaderPrio = 0x3C;
 // a prefetched level nothing asked for is dropped after this long
@@ -1030,7 +1049,7 @@ constexpr int kTodJump = 4;
 constexpr u64 kTodPulseFrames = 256, kTodPulseSettle = 8;  // (AI-assisted, citadel)
 constexpr int kTodTakeJump = 8;  // (AI-assisted, citadel) tod_max_ms: a day move this big doesn't wait
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
-               u64 frame) {
+               u64 frame, bool reveal) {
   u8 w[8][3];
   tod_weights(cam, w);
   // (palettes no color uses don't matter)
@@ -1085,7 +1104,9 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   u32 changed = 0, day = 0;
   int jump = 0;
   // (AI-assisted, citadel) config tod_max_ms: a day move waits for min_move_frames after the last
-  const bool wait_day = ctr_settings().tod_max_ms > 0 && t.blended_valid &&
+  // (AI-assisted, title3) not when the level is shown again (reveal): its first frame takes the
+  // game's weights
+  const bool wait_day = ctr_settings().tod_max_ms > 0 && t.blended_valid && !reveal &&
                         (float)(frame - t.move_frame) < t.min_move_frames;
   bool waited = false;
   for (u32 k = 0; k < t.palette_count; k++) {
@@ -1372,6 +1393,8 @@ constexpr float kTodSpreadMoves = 2;
 constexpr u32 kTodMaxLag = 3;
 constexpr u32 kTodCheckWork = 1000, kTodChunkWork = 40;
 constexpr int kTodLights = 0, kTodRound = 1;
+constexpr double kTodRevealMs = 7.0;
+constexpr u64 kTodRevealFrames = 6;
 inline double tod_budget_ms() {
 #ifndef __3DS__
   // (AI-assisted) host: env CTR_TOD_BUDGET_MS (a smaller budget: more chunks drawn behind)
@@ -1394,6 +1417,11 @@ struct TodPass {
   u32 stop_chunk = UINT32_MAX;  // the first chunk the budget didn't reach (the next round's start)
   u32 rewritten = 0, behind = 0;
   double day_budget_ms = 0;  // the budget of the group pass
+  // (AI-assisted, title3) the level was shown again within kTodRevealFrames (draw_level): the
+  // groups drawn are brought up to date within kTodRevealMs a frame instead of the budget and
+  // tod_max_ms (Sandover's ~200k vertices at the title's reveal took 20 ms in Azahar in one frame:
+  // spread over the first frames, which the logo's falling pieces mostly cover)
+  bool reveal = false;
   bool measure = false;  // (statistics, every 8th frame) the day moves the groups drawn are behind
   u32 max_lag = 0;
 };
@@ -1477,7 +1505,9 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       return true;
     }
     if (ps.before_ms + (ctr_gpu_time_ms() - ps.t0) <
-        (ps.pass == kTodLights ? tod_budget_ms() * kTodLightShare : ps.day_budget_ms)) {
+        (ps.reveal ? kTodRevealMs
+                   : (ps.pass == kTodLights ? tod_budget_ms() * kTodLightShare
+                                            : ps.day_budget_ms))) {
       ps.next_check = ps.work + kTodCheckWork;
       return true;
     }
@@ -1488,7 +1518,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   // (AI-assisted, citadel) the frame's limit (tod_max_ms) for the groups that don't wait for the
   // budget
   auto cap_ok = [&]() {
-    const float cap = ctr_settings().tod_max_ms;
+    const float cap = ps.reveal ? (float)kTodRevealMs : ctr_settings().tod_max_ms;
     if (cap <= 0) {
       return true;
     }
@@ -4064,7 +4094,7 @@ void CtrLevels::stream_update(u64 frame) {
   if (level_loading) {
     m_sst.linear_min_load = std::min<u64>(m_sst.linear_min_load, free_now);
   }
-  if (!m_cam_valid || !arena.ready()) {
+  if ((!m_cam_valid && !m_game_cam_new) || !arena.ready()) {
     return;
   }
   // the arena's growth: given back where the linear heap has less than its floor (+ what the
@@ -4119,6 +4149,43 @@ void CtrLevels::stream_update(u64 frame) {
     np++;
   }
   constexpr float kM = 4096.f;
+  // (AI-assisted, title3) the game's camera this frame (note_game_camera) and where its speed takes
+  // it: a level loaded but not drawn lately (Sandover behind the title's logo, for seconds before
+  // the logo reveals it at the attract camera's start; a level the game shows later) reads the near
+  // chunks needed there, with the tie LOD factor of the last level drawn. They are there when it is
+  // shown: no groups drawn far at its first frames, then switching near on screen.
+  float pg[kLeadSteps][3];
+  int ngp = 0;
+  if (m_game_cam_new) {
+    m_game_cam_new = false;
+    float v[3], d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      v[c] = m_game_cam_next[c] - m_game_cam[c];
+      d2 += v[c] * v[c];
+    }
+    const bool cut = !m_game_cam_valid || d2 > kCutMeters * kCutMeters * kM * kM;
+    for (int c = 0; c < 3; c++) {
+      m_game_vel[c] = cut ? 0.f : 0.75f * m_game_vel[c] + 0.25f * v[c];
+      m_game_cam[c] = m_game_cam_next[c];
+    }
+    m_game_cam_valid = true;
+    const float gv2 = m_game_vel[0] * m_game_vel[0] + m_game_vel[1] * m_game_vel[1] +
+                      m_game_vel[2] * m_game_vel[2];
+    ngp = gv2 * kLeadFrames * kLeadFrames < kM * kM ? 1 : kLeadSteps;
+    for (int i = 0; i < ngp; i++) {
+      for (int c = 0; c < 3; c++) {
+        pg[i][c] = m_game_cam[c] + m_game_vel[c] * kLeadFrames * (float)i / (kLeadSteps - 1);
+      }
+    }
+  }
+  for (auto& [name, lp] : m_levels) {
+    if (lp->streaming && lp->stream_frame + 3 >= frame && lp->stream_k > 0) {
+      m_k_last = std::max(lp->stream_k * 1.15f, lp->stream_k_hi);
+    }
+  }
+  if (m_k_last <= 0) {
+    m_k_last = m_k_any * 1.15f;  // (no streaming level drawn yet: the title's logo)
+  }
   u64 need_now = 0;
   for (auto& [name, lp] : m_levels) {
     CtrLevelData& lev = *lp;
@@ -4127,9 +4194,15 @@ void CtrLevels::stream_update(u64 frame) {
     }
     // a level not drawn lately (far mode never asks: its k is 0 there) wants nothing
     // (15% more, or the recent largest: a zooming camera's focal length moves the factor)
+    // (AI-assisted, title3) except one not drawn at all lately (in no mode) while loaded: the
+    // near chunks around the game's camera, with the last level's factor (hidden)
+    const bool hidden = lev.stream_frame + 3 < frame && lev.last_draw_frame + 3 < frame &&
+                        ngp > 0 && m_k_last > 0;
     const float k = lev.stream_frame + 3 >= frame
                         ? std::max(lev.stream_k * 1.15f, lev.stream_k_hi)
-                        : 0.f;
+                        : (hidden ? m_k_last : 0.f);
+    const float(*const pp)[3] = hidden ? pg : p;
+    const int npp = hidden ? ngp : np;
     for (u32 u = 0; u < lev.stream_units.size(); u++) {
       auto& su = lev.stream_units[u];
       if (su.state != CtrLevelData::kUnitAbsent && su.state != CtrLevelData::kUnitResident) {
@@ -4150,8 +4223,8 @@ void CtrLevels::stream_update(u64 frame) {
       }
       const float* c = lev.chunks[su.chunk].bsphere;
       float dmin = 1e30f;
-      for (int i = 0; i < np; i++) {
-        const float dx = p[i][0] - c[0], dy = p[i][1] - c[1], dz = p[i][2] - c[2];
+      for (int i = 0; i < npp; i++) {
+        const float dx = pp[i][0] - c[0], dy = pp[i][1] - c[1], dz = pp[i][2] - c[2];
         dmin = std::min(dmin, dx * dx + dy * dy + dz * dz);
       }
       // (squared first: most units are far beyond their bound, no root for them)
@@ -4182,9 +4255,9 @@ void CtrLevels::stream_update(u64 frame) {
           const float sw = g < lev.lod_error.size() ? lev.lod_switch_error(g) : lg.dist;
           const float lim = sw * k + lg.bsphere[3];
           float g2 = 1e30f;
-          for (int i = 0; i < np; i++) {
-            const float dx = p[i][0] - lg.bsphere[0], dy = p[i][1] - lg.bsphere[1],
-                        dz = p[i][2] - lg.bsphere[2];
+          for (int i = 0; i < npp; i++) {
+            const float dx = pp[i][0] - lg.bsphere[0], dy = pp[i][1] - lg.bsphere[1],
+                        dz = pp[i][2] - lg.bsphere[2];
             g2 = std::min(g2, dx * dx + dy * dy + dz * dz);
           }
           if (!urgent) {
@@ -4208,8 +4281,9 @@ void CtrLevels::stream_update(u64 frame) {
       if (resident) {
         m_have.push_back({&lev, u, score});
       } else if (score < want_m) {
-        // (needed now and on screen: first; (AI-assisted, lodnear) then the urgent ones)
-        const float prio = (score < 0 && in_view(c) ? score - kInViewMeters * kM : score) -
+        // (needed now and on screen: first; (AI-assisted, lodnear) then the urgent ones; title3:
+        // not for hidden levels)
+        const float prio = (score < 0 && !hidden && in_view(c) ? score - kInViewMeters * kM : score) -
                            (su.urgent ? kInViewMeters * kM : 0.f);
         m_want.push_back({&lev, u, prio});
         if (!su.want_frame) {
@@ -4618,6 +4692,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
     verts += nv;
     lev->meshes[ci] = o.mesh;
     su.state = CtrLevelData::kUnitResident;
+    g_pop.taken++;  // (AI-assisted, title3: CTR_POP_LOG)
     su.want_frame = 0;
     su.loads++;
     lev->stream_resident += su.bytes;
@@ -4852,6 +4927,7 @@ bool outside_detail(const CtrLevelData& l, const float* s, float margin) {
 float g_detail_t = 0.25f;
 // (AI-assisted, title-popin) auto_detail: the GPU is about to miss frames (ctr_level_set_detail_urgent)
 bool g_detail_urgent = false;
+bool g_screen_black = false;  // (AI-assisted, title3) ctr_level_set_screen_black
 // (AI-assisted, title-popin) the auto_detail position as stored per chunk / tie LOD group
 // (CtrLevelData::chunk_detail_q): 0..kDetailQ, 0xff none yet
 constexpr float kDetailQ = 250.f;
@@ -5172,6 +5248,10 @@ void ctr_level_set_detail(float t) {
   g_detail_t = std::clamp(t, 0.f, 1.f);
 }
 
+void ctr_level_set_screen_black(bool black) {
+  g_screen_black = black;
+}
+
 void ctr_level_set_detail_urgent(bool urgent) {
   g_detail_urgent = urgent;
 }
@@ -5414,7 +5494,31 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrBackgroundCamera& cam,
                                   const CtrRenderState& rs) {
   const CtrSettings& settings = ctr_settings();
+  {
+    const u32 taken = g_pop.taken;  // (AI-assisted, title3: CTR_POP_LOG; taken since the last draw)
+    g_pop = PopLog();
+    g_pop.taken = taken;
+  }
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
+  // (AI-assisted, title3) shown again after a gap (the title's reveal of Sandover behind the logo,
+  // a level's start): its time of day brought up to date over its first frames (tod_update,
+  // TodPass::reveal)
+  {
+    // (AI-assisted, title3) this frame's tie LOD factor for the hidden levels' near chunks
+    // (CtrLevels::stream_update), as the tie LOD block below works it out
+    const float pzw = std::abs(cam.perspective[2][3]);
+    const float focal =
+        pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
+    if (settings.tie_lod && focal > 0) {
+      m_levels->note_k_any(settings.detail_scale * focal / std::max(settings.tie_lod_px, 0.25f) *
+                           1.1f);
+    }
+  }
+  const bool reveal = lev.last_draw_frame + 2 < rs.frame_idx;
+  lev.last_draw_frame = rs.frame_idx;
+  if (reveal) {
+    lev.reveal_frame = rs.frame_idx;
+  }
   // (AI-assisted) c3l v16 time of day: blend the level's colors with the game's weights when they
   // moved (the chunks are recolored as they are drawn, emit_chunk)
   u64 tod_verts = 0;
@@ -5423,7 +5527,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const double t0 = ctr_gpu_time_ms();
     m_tod_frames++;
     const u32 held0 = lev.tod->pulse_held;
-    m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
+    m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx, reveal) == 2;
     m_tod_held += lev.tod->pulse_held != held0;  // (AI-assisted, citadel) tod_pulse_step
     tod_ms += ctr_gpu_time_ms() - t0;
   }
@@ -5766,6 +5870,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             dist_ok = within(limit_with(dd * kHoldInView), 1.f);
           }
         }
+        if (pop_log_on() && was_in != dist_ok && sphere_in_view(cam, ch.bsphere)) {
+          (dist_ok ? g_pop.chunk_in : g_pop.chunk_out)[ch.kind & 3]++;
+        }
         state = (u8)(dist_ok ? (state | 4) : (state & ~4));
       }
     }
@@ -5821,6 +5928,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     memset(g_lod_far_close, 0, sizeof(g_lod_far_close));
   }
 #endif
+  u32 late_view = 0;    // (AI-assisted, title3) ... late and in view
   if (tie_lod) {
     u32 near = 0;
     // (AI-assisted, title-popin) files with shape errors: the near version while the far one's
@@ -5900,7 +6008,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // is there and within its distance; else the far version (data late: statistics). A group
       // drawn far in view for want of its data (bit 4: held) keeps its far version while in view
       // once the data is there: switching then would be a pop on screen; it switches out of view
-      bool keep_far = (st & 4) != 0;
+      // (AI-assisted, title3) not while the screen is black: none was seen far
+      bool keep_far = (st & 4) != 0 && !g_screen_black;
       if (n && has_units) {
         if (g >= lev.group_unit_count.size() || !lev.group_unit_count[g]) {
           n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
@@ -5940,9 +6049,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                   m_levels->stream_late(lev, gu[j], rs.frame_idx);
                 }
               }
-              if (!keep_far && sphere_in_view(cam, lg.bsphere)) {
-                keep_far = true;
-                lev.lod_hold_since[g] = (u32)rs.frame_idx;
+              if (sphere_in_view(cam, lg.bsphere)) {
+                late_view++;
+                if (!keep_far && !g_screen_black) {
+                  keep_far = true;
+                  lev.lod_hold_since[g] = (u32)rs.frame_idx;
+                }
               }
             }
           } else if (keep_far) {
@@ -5980,6 +6092,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                  lg.bsphere[3] / 4096.f, by_error ? lev.lod_error[g] / 4096.f : 0.f);
       }
 #endif
+      if (pop_log_on() && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
+        (n ? g_pop.lod_up : g_pop.lod_down)++;
+      }
       st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0));
       near += n;
     }
@@ -6019,6 +6134,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (has_units) {
     lev.stream_frame = rs.frame_idx;
     m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx);
+    m_levels->note_late_in_view(rs.frame_idx, late_view, rs.frame_idx < lev.reveal_frame + 90);
   }
   m_levels->stream_note_camera(cam.trans, cam.planes, cam.rot, rs.frame_idx);
   if (m_run_nomerge.size() < lev.vis_runs.size()) {
@@ -6743,10 +6859,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws
+  u32 pop_tod[3] = {0, 0, 0};  // (AI-assisted, title3: CTR_POP_LOG) rewritten, behind, waiting
   if (lev.tod) {
     const double t0 = ctr_gpu_time_ms();
     TodPass ps;
     ps.t0 = t0;
+    ps.reveal = rs.frame_idx < lev.reveal_frame + kTodRevealFrames;
     ps.before_ms = g_tod_frame_ms + tod_ms;
     auto shown_of = [&](const VisibleChunk& vc) {
       return vc.runs_valid ? &m_run_shown[lev.chunk_first_run[vc.chunk]] : nullptr;
@@ -6836,6 +6954,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       }
     }
+    pop_tod[0] = ps.rewritten;
+    pop_tod[1] = ps.behind;
+    pop_tod[2] = ps.waiting;
     m_tod_spread += ps.rewritten;
     m_tod_deferred += ps.behind;
     m_tod_capped += ps.waiting;                  // (AI-assisted, citadel) tod_max_ms
@@ -6850,6 +6971,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted) impostors: far tie groups shown as cards (their runs hidden here), the new
   // pictures of them drawn now (CtrImpostor.h)
   CtrImpostors& impostors = ctr_impostors();
+  double pop_imp0[2] = {0, 0};  // (AI-assisted, title3: CTR_POP_LOG) the stats before this level
   {
     CtrImpostors::Camera ic;
     ic.R = R;
@@ -6860,7 +6982,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (int c = 0; c < 3; c++) {
       ic.fog_rgb[c] = rs.fog_color[c];
     }
-    impostors.begin_level(lev, ic, rs.frame_idx);
+    pop_imp0[0] = impostors.stat_cards();
+    pop_imp0[1] = impostors.stat_captures();
+    // (AI-assisted, title3) not on the title screen (the title level loaded): its cards came in by
+    // the dozen over the first seconds of Sandover's reveal and went back to geometry all at once
+    // when the day starts running ~60x faster (no picture lasts then); the title stays geometry
+    bool title = false;
+    for (const auto* l : m_loaded) {
+      title = title || l->name == "title";
+    }
+    impostors.begin_level(lev, ic, rs.frame_idx, !title);
     if (impostors.active()) {
       for (auto& vc : m_visible) {
         // (AI-assisted, streaming) not the near chunks (cards show far versions; their meshes come
@@ -7125,5 +7256,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tod_max = std::max<u64>(m_tod_max, tod_verts);
     m_tod_ms += tod_ms;
     m_tod_max_ms = std::max(m_tod_max_ms, tod_ms);
+  }
+  if (pop_log_on()) {
+    // (AI-assisted, title3) CTR_POP_LOG: one line per level draw (in view: appeared / went by
+    // distance per kind tfrag, tie, shrub; tie LOD switches near / far; groups drawn far for late
+    // data, kept far once it came; time of day groups rewritten, left behind, waiting for
+    // tod_max_ms; impostor cards drawn and captured; near chunks taken since the last draw)
+    lg::info("[pop] f={} {} cam={:.1f},{:.1f},{:.1f} vis={} far={} t={:.2f} in={}/{}/{} out={}/{}/{} "
+             "lod+={} lod-={} late={} held={} tod={}/{}/{} cards={:.0f} cap={:.0f} fine={} taken={}",
+             rs.frame_idx, lev.name, cam.trans.x() / 4096.f, cam.trans.y() / 4096.f,
+             cam.trans.z() / 4096.f, m_visible.size(), far_level ? 1 : 0, g_detail_t,
+             g_pop.chunk_in[1], g_pop.chunk_in[2], g_pop.chunk_in[3], g_pop.chunk_out[1],
+             g_pop.chunk_out[2], g_pop.chunk_out[3], g_pop.lod_up, g_pop.lod_down, late_groups,
+             held_groups, pop_tod[0], pop_tod[1], pop_tod[2],
+             ctr_impostors().stat_cards() - pop_imp0[0],
+             ctr_impostors().stat_captures() - pop_imp0[1], m_fine_bits ? 1 : 0, g_pop.taken);
+    g_pop.taken = 0;
   }
 }

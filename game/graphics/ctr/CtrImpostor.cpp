@@ -114,10 +114,11 @@ bool CtrImpostors::ensure_atlas() {
   return true;
 }
 
-void CtrImpostors::begin_level(CtrLevelData& lev, const Camera& cam, u64 frame) {
+void CtrImpostors::begin_level(CtrLevelData& lev, const Camera& cam, u64 frame, bool allowed) {
   m_active = false;
   const CtrSettings& set = ctr_settings();
-  if (!set.impostors || m_failed || !ensure_atlas()) {
+  // (AI-assisted, title3) allowed: false on the title screen (CtrTfragRenderer::draw_level)
+  if (!set.impostors || m_failed || !allowed || !ensure_atlas()) {
     return;
   }
   if (frame != m_frame) {

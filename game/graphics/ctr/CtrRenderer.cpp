@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -44,6 +45,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/kernel/common/kboot.h"
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kscheme.h"
+#include "game/kernel/jak1/kscheme.h"  // (AI-assisted, title3) find_symbol_from_c
 #include "game/runtime.h"
 #include "game/sce/pad_script.h"
 
@@ -635,6 +637,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
     g_pad_shot.clear();
   }
+  // (AI-assisted, title3) the screen is black this frame (the game's fade at 0 since the last
+  // frame, or held black below): the level draws keep no group far for late data
+  ctr_level_set_screen_black(m_hold_black ||
+                             (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) <
+                                                         0.01f));
   dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
   ctr_gpu_diag_stage("pmode fade");
 #ifndef __3DS__
@@ -1102,7 +1109,43 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
 // the frame by it): the game's fades and blackouts, e.g. at boot before the logo and while a level
 // loads. Drawn last, a black screen-sized quad with alpha 1 - alp.
 void CtrRenderer::draw_pmode_fade() {
-  const float alp = std::clamp(g_pmode_alp.load(std::memory_order_relaxed), 0.f, 1.f);
+  float alp = std::clamp(g_pmode_alp.load(std::memory_order_relaxed), 0.f, 1.f);
+  // (AI-assisted, title3) a screen coming out of black (a level start, a continue, loading a save:
+  // the game fades in from its blackout) stays black while a level shown within the last 3 s, or
+  // after a camera cut, still has tie LOD groups in view drawn with their far version because
+  // their near chunks are being read (CtrLevels::note_late_in_view): its first visible frame is
+  // final, not the far versions switching to the near ones on screen. At most kMaxHoldMs.
+  {
+    constexpr double kMaxHoldMs = 1500.0;
+    bool shown_or_cut = false;
+    const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
+    const double now = ctr_gpu_time_ms();
+    if (!m_hold_black && m_shown_alp < 0.01f && alp >= 0.01f && late > 0 && shown_or_cut) {
+      m_hold_black = true;
+      m_hold_t0 = now;
+      m_hold_groups = 0;
+      m_hold_frames = 0;
+    }
+    if (m_hold_black) {
+      m_hold_groups = std::max(m_hold_groups, late);
+      if (late == 0 || now - m_hold_t0 >= kMaxHoldMs) {
+        m_hold_black = false;
+        m_hold_ramp = true;
+        lg::info("[ctr] screen kept black {:.0f} ms ({} frames) for near chunks in view{} (at most {} "
+                 "tie LOD groups drawn far)",
+                 now - m_hold_t0, m_hold_frames, late ? ", given up" : "", m_hold_groups);
+      } else {
+        m_hold_frames++;
+        alp = 0.f;
+      }
+    }
+    if (m_hold_ramp && !m_hold_black) {
+      const float game_alp = alp;
+      alp = std::min(alp, m_shown_alp + 0.125f);
+      m_hold_ramp = alp < game_alp;
+    }
+    m_shown_alp = alp;
+  }
   if (alp >= 0.999f) {
     return;
   }
@@ -1366,6 +1409,35 @@ u32 ctr_sync_path() {
   return 0;
 }
 
+// (AI-assisted, title3) the game's camera position (*math-camera* trans, game units) for this frame
+// (game thread): false before the game made its camera
+bool game_camera_trans(float* out) {
+  static u32 sym = 0;
+  static u32 tries = 0;
+  if (!sym) {
+    if (tries++ % 64) {
+      return false;
+    }
+    sym = jak1::find_symbol_from_c("*math-camera*").offset;  // (game thread: kernel lookup)
+    if (!sym) {
+      return false;
+    }
+  }
+  const u32 mc = Ptr<jak1::Symbol>(sym)->value;
+  if ((mc & OFFSET_MASK) != BASIC_OFFSET || mc < 0x100000 || mc + 1024 >= (u32)EE_MAIN_MEM_SIZE) {
+    return false;
+  }
+  // math-camera trans: layout offset 848 (a basic's fields from its address - 4)
+  const float* t = Ptr<float>(mc + 848 - 4).c();
+  for (int i = 0; i < 3; i++) {
+    if (!std::isfinite(t[i])) {
+      return false;
+    }
+    out[i] = t[i];
+  }
+  return true;
+}
+
 void ctr_send_chain(const void* data, u32 offset) {
   if (!g_ctr) {
     return;
@@ -1388,8 +1460,13 @@ void ctr_send_chain(const void* data, u32 offset) {
   g_upload_count_mark = g_upload_count_total;
   g_ee.last_send = now;
   ctr_gpu_note_release();
+  float game_cam[3];
+  const bool have_game_cam = game_camera_trans(game_cam);
   if (g_async) {
     wait_render_idle();
+    if (have_game_cam) {
+      g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3; render thread idle)
+    }
     const double tp = ctr_gpu_time_ms();
     g_ctr->prepare_frame(data, offset);
     g_ee.prepare_ms += ctr_gpu_time_ms() - tp;
@@ -1402,6 +1479,9 @@ void ctr_send_chain(const void* data, u32 offset) {
     // it (CtrSpriteRenderer::snap_data compares it with game memory)
     g_ctr->prepare_sprites(data, offset);
 #endif
+    if (have_game_cam) {
+      g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3)
+    }
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;
   }

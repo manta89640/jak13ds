@@ -118,6 +118,25 @@ groups, 50 m: 4.2 / 6.3 Snowy).
   each one's time of day colors written first with the current blend (below), at most 16k vertices
   a frame (a chunk at least; the rest the next frame): the unit is there from that frame on.
 
+## Levels not drawn yet, level starts (title3, Oct 22)
+
+- **Hidden levels**: a level that is loaded but not drawn in any mode for 3 frames (Sandover behind
+  the title's logo for seconds; a level the game shows later) scores its units around the game's
+  camera (`*math-camera*` trans, read on the game thread at `ctr_send_chain`:
+  `CtrLevels::note_game_camera`), with its speed's lead, and the tie LOD factor of the last streaming
+  level drawn or else of any level drawn (`note_k_any`: the title's logo). Its near chunks are there
+  when it is shown. Before: none was read until Sandover's first draw, which drew 71 near chunks'
+  groups far (Azahar 326 ms on average, 401 ms at most) and switched them on screen (the user's
+  "geometry changes in the first couple seconds" of the title).
+- **Coming out of black**: no group is kept far "in view" for late data while the screen is black
+  (`ctr_level_set_screen_black`: the game's PMODE fade at 0, or held). When the screen comes out of
+  black within 3 s of a level being shown or of a camera cut, while tie LOD groups in view are
+  drawn far for late data (`note_late_in_view`), the renderer keeps it black until they are there
+  (at most 1.5 s), then fades in over 8 frames (`CtrRenderer::draw_pmode_fade`; log line `[ctr]
+  screen kept black N ms`). A continue to firecanyon-start (host, SD model): 25 groups far at the
+  first visible frame, 23 of them switching in view when the 4 s hold ended -> 11 frames more black,
+  none far once visible.
+
 ## Memory
 
 Linear memory: the level's resident data (everything but the units) is v16's tie data plus v18's
@@ -184,6 +203,10 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   (group frames), ms on average, at most (frames); needed now KB on average, at most; read with
   their file neighbours; scheduling ms/frame (most); per level: meshes KB + textures KB, near chunks
   there of all (KB)`.
+- Host: `CTR_POP_LOG=1` (title3): one `[pop]` line per level draw (chunks appearing / going by
+  distance in view, tie LOD switches in view, groups late / held far, time of day groups rewritten,
+  left behind, waiting, impostor cards and captures, near chunks taken) and `[pop] soft frame N`
+  after each dumped frame (`--ctr-dump DIR --ctr-dump-every 1`: frame_N.png).
 - Host: `CTR_STREAM_SIM=5.5` takes each stream job only when a New 3DS SD card (5.5 MB/s, 8 ms per
   request) and decoder would have finished it, in frames of the fps cap (game time); `CTR_SOFT_LINEAR_KB`
   (default 34000) is the soft backend's model of the linear heap for the growth rule;
