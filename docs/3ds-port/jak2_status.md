@@ -1,4 +1,4 @@
-# Jak II -> New 3DS: status and handoff (baseline C, updated Oct 18 2026)
+# Jak II -> New 3DS: status and handoff (baseline D, updated Oct 22 2026)
 
 (AI-assisted.) Branch `jak2-3ds` (worktree `jak-project/.claude/worktrees/jak2`), started from
 `batch-oct11` c1da64bc1; batch-oct11 9da503ce27 merged in on Oct 18 (no conflicts). Jak 1
@@ -28,6 +28,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | **Integration build, baseline C (Oct 18)** | **Azahar slums 29.4-29.6 fps with sound on: logic 21.5-22.5 ms, render thread 27-28 ms, GPU busy 28-29 ms, mixer 10-19% of real time, 0 DSP drops; linear free 2.9 MB, heap ~3.3 MB. Title intro stopped early (no JAK II logo): fixed after C, see "Title intro on the 3DS". Staged in `port_test/3ds-sdcard-jak2-baseline-c`** (section below) |
 | Title intro (j2-title2, Oct 18) | **Fixed:** the intro (slums fly-through, Sony / Naughty Dog cards, JAK II logo from ~frame 1050) plays in Azahar as on the host; the cause was the 3DS mixer racing the overlord's SPU voice writes (section "Title intro on the 3DS") |
 | Memory cuts (j2-mem2, Oct 18) | Sparse VRAM copy, no Jak 1 code, impostors off, no RAMDISK, smaller stacks, 1.25 MB command buffer, linear 34 MB: route heap free 6.5-9.0 MB (was 2.5-3.5), linear free >= 3.4 MB except the market with ctyindb in view (1.8 MB, was 128 KB); section "Memory: heap and linear cuts" |
+| **Integration build, baseline D (Oct 22)** | **j2-title2 + j2-mem2 merged (144c36070b). Azahar: intro to the JAK II logo, title 29.1-29.7 fps, slums 29.5-29.6 fps (logic 22.5-23.3 ms), all route stops 29.6-29.7 fps; heap free 6.3-10.1 MB; 0 DSP drops. Staged in `port_test/3ds-sdcard-jak2-baseline-d`** (section below) |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -130,6 +131,77 @@ Decompiler config: OpenGOAL's extractor database files v1 and v2.01 under one en
 (`ntsc_v1`). Both have the same serial and ELF hash, and the database lists both ISO hashes. The
 `ntsc_v2` overrides only change label and anonymous-function types, so they only matter for
 decompiling code. Data extraction and the build use `ntsc_v1`, as upstream does.
+
+## Integration build: baseline D (Oct 22)
+
+(AI-assisted.) Branch `j2-int-d` off baseline C (517021c5c8): j2-title2 (40457d03ad) merged, then
+j2-mem2 (5d2006bb90); the only conflict was the status table here (both rows kept). No GOAL change,
+so the C modules are baseline C's (`j2mirror/out/jak2/csrc`, linked from a private copy).
+- Mixer stack: 64 KB (j2-mem2) with j2-title2's code: the mixer thread only adds
+  `sceSdPublishVoiceAddrs` (a loop of relaxed atomic stores); the voice write locks are taken on
+  the overlord's thread (`std::recursive_mutex`). Azahar: the 64 KB threads used 0.6-3.7 KB.
+- Sizes: Jak II .text 19.19 MB, .data 19 KB, .bss 2.09 MB; Jak 1 3DS build .text 11.47 MB (links,
+  CIA made). make_cia: check_shaders 29 shaders, check_svc 31 calls, all allowed (both games).
+- Host checks (`build-host-small`, small-memory C mode):
+  - `jak2_route.pad` with `CTR_STREAM_CHECK=1`: every stop and walk end matches j2-mem2's host
+    run (industrial walk end (938.25, 7.99, 924.32), 0.6 m from it: run-to-run); 0 near versions
+    without data; dormant check 4 / 2 (as before); exit 0.
+  - `jak2_title.pad` (`OPENGOAL_VAG_DEBUG=1`, `OPENGOAL_NO_SOUND=1`): the intro stream runs to
+    pos 38036 (j2-title2: 37788), 2 pause / unpause pairs; Jak at the title position; exit 0.
+  - Jak 1 `level_pairs.pad` on proj-final: 10 pairs, 18 DGO loads, exit 0.
+  - No audio path: the bank skip is 3DS only, so a temporary uncommitted host patch skipped the
+    banks (`J2INTD_NO_BANKS`) with the streams still mixed: `jak2_title_city.pad`, 9 banks not
+    loaded (COMMON, CITY1.MUS, CTYWIDE1-3, ...), no crash; the intro stream ran to 37844 and the
+    title ended on the logo position; guard line kg010 played to its end (stop at pos 1020); Jak
+    at (1065.98, 0.52, 194.46) target-hide as with banks; exit 0. Not run on a 3DS with sound off.
+- **Azahar** (one run, the CIA, private instance, sound on, instance muted, compressed staging;
+  `jak2_title_city.pad` then `jak2_route.pad` shifted by 4400 frames in the same session):
+
+  | window | fps | logic ms | notes |
+  |---|---|---|---|
+  | title (600-3600) | 29.1-29.7 | 24.6-28.7 | intro to the JAK II logo (shots 450-1500: slums, Sony card, Naughty Dog card, city, logo from 1050, "Press the Start Button"); stream voices for ~35 s |
+  | slums city-stand | 29.5-29.6 | 22.5-23.3 | render cpu 28.6-30.3 ms, GPU busy 27.8-29.4 ms, 82-85k tris |
+  | slums city-walk | 28.9-29.5 | 23.8-26.9 | Jak ends at (1065.98, 0.52, 194.46) target-hide |
+  | route stops (port .. sewer) | 29.6-29.7 | 17-25 (sewer 9) | |
+
+  Mixer 4-21% of real time, 0 DSP frames dropped, 0 late buffers; sound lock waits <= 1 ms/frame.
+
+  Memory (`[ctr] memory` lines in each stop's window: linear free (largest), heap free (largest),
+  KB), against j2-mem2's table:
+
+  | stop | linear free | heap free | j2-mem2: linear / heap |
+  |---|---|---|---|
+  | boot (frame 0) | 23326 | 14961 (14843) | 23326 / 14512: +449 KB heap, the stack cuts |
+  | slums right after the title (ctyindb just loaded, in view) | **315** (156) | 7045 (6645) | not in j2-mem2's route (baseline C: 128) |
+  | slums, ctyindb dormant (city pad, then route) | 4640, 3708, 3616 (~1550) | 7004-7036 (6645) | 5140, 4224 / 7828, 7529 |
+  | port | 19263 (6388), 10302 (3496) | 10150, 7522 (6411-6678) | 9506 / 7965 |
+  | market, standing | 7593 (3496) | 6882 (5618) | 8695 / 8376 |
+  | market, ctyindb in view | **1270** (1108) | 6508 (5400) | 1804 / 6797 |
+  | main town | 7790, 8259 (~3470) | 7540, 7645 (5924) | 8328, 8797 / 7885, 7787 |
+  | industrial | ~7000 (3496) | 6998 (5286) | 7550 / 7379 |
+  | farms | 12557 (3476), 3424 (908) | 8901, 7808 (5949) | 14527, 3512 / 9041, 7932 |
+  | sewer | 4377 (3484), 3353 (2456) | 6391, 6328 (4532) | 4913, 3377 / 6661, 6537 |
+
+  Boot memory is j2-mem2's plus the stack cuts. Later stops are 0.3-1.3 MB lower than j2-mem2's
+  (and the largest blocks smaller): this session first played the whole intro and the city pad
+  (5200 frames) before the route (j2-mem2's route cut the intro at frame 1000), and the stream
+  arena grew to 3584 KB here (j2-mem2: at most 3008). No `[heap]` failures, no "making room", no
+  incomplete loads.
+- Loose ends from j2-mem2:
+  - The second boot after the pad's `exit`: not the game. `exit` ends the runtime cleanly (status
+    2 = `RuntimeExitStatus::EXIT`; `main` only loops on `RESTART_RUNTIME`, then returns), and the
+    second session in j2-mem2's log starts with the startup banner of a new process. In this run
+    the same exit was followed by Azahar's `~Process: Cleaning up process` and nothing for the
+    remaining ~230 s until the run script stopped the emulator. So it was a relaunch from outside
+    the game (emulator / launcher), harmless.
+  - The black shot 4800: game frame 4800 is ~23:12.9 in j2-mem2's log (frame 4418 at 23:00, 4866
+    at 23:15), between the farms `continue` (23:12) and Jak standing (23:15): the continue's
+    blackout while ctyfarma loads. This run has the same thing once: shot 6150, in the port
+    continue (57:45-57:47).
+- Staged `port_test/3ds-sdcard-jak2-baseline-d` as baseline C (`stage_sd.sh --game jak2
+  --compress --compress-vag`, preset normal, sound on): `cias/jak2.cia`, `3ds/jak2/` (gk.3dsx,
+  config.ini, data: 754 files, byte-identical to baseline C's), README. gk.3dsx and the CIA are
+  byte-identical to the build. Logs and screenshots: `port_test/reports/j2-baseline-d`.
 
 ## Title intro on the 3DS (j2-title2, Oct 18)
 
