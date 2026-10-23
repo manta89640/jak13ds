@@ -96,7 +96,7 @@ build_cia() {
     "$BANNERTOOL" makebanner -i "$BANNER_PNG" -a "$BANNER_WAV" \
       -o "$BUILD_DIR/banner.bnr" > /dev/null
     smdh="$BUILD_DIR/$(basename "$out" .cia).smdh"
-    "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p "OpenGOAL" -i "$ICON_PNG" \
+    "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p " " -i "$ICON_PNG" \
       -o "$smdh" > /dev/null
     banner_args=(-banner "$BUILD_DIR/banner.bnr")
   fi
@@ -141,4 +141,4 @@ if [ "$MEM" = legacy ]; then
   sed "${LEGACY[@]}" "$RSF" > "$BUILD_DIR/cia_legacy.rsf"
   RSF="$BUILD_DIR/cia_legacy.rsf"
 fi
-build_cia "$OUT" "$RSF" "Jak and Daxter" "The Precursor Legacy (OpenGOAL 3DS port)"
+build_cia "$OUT" "$RSF" "Jak and Daxter" "The Precursor Legacy"
