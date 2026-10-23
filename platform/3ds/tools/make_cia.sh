@@ -6,7 +6,7 @@
 #                                  [--game jak1|jak2]
 #
 # --game jak2: (AI-assisted) the Jak II build (build-3ds-jak2/gk.elf -> jak2.cia): its own title
-#   ("OpenGOAL Jak II", unique id 0xF7A21, product code CTR-H-OGJ2; gk.rsf's settings otherwise)
+#   ("Jak2", unique id 0xF7A21, product code CTR-H-OGJ2; gk.rsf's settings otherwise)
 #   and its art from platform/3ds/cia/local/jak2/ (banner.png, banner.wav, icon.png).
 #
 # --boottest: package the small test app platform/3ds/hello (build it first: make -C
@@ -81,14 +81,14 @@ mkdir -p "$BUILD_DIR"
 CIA_DIR="$ROOT/platform/3ds/cia"
 LOCAL_ART="$CIA_DIR/local"
 SHORT_TITLE="Jak and Daxter"
-LONG_TITLE="The Precursor Legacy (OpenGOAL 3DS port)"
+LONG_TITLE="The Precursor Legacy"
 if [ "$GAME" = jak2 ]; then
   # (AI-assisted) Jak II: its own title and art; the rest of the settings are gk.rsf's
   LOCAL_ART="$CIA_DIR/local/jak2"
-  SHORT_TITLE="OpenGOAL Jak II"
-  LONG_TITLE="Jak II (OpenGOAL 3DS port)"
+  SHORT_TITLE="Jak II"
+  LONG_TITLE="Jak II"
   mkdir -p "$BUILD_DIR"
-  sed -e 's/^\(  Title *: *\).*/\1"OpenGOAL Jak II"/' \
+  sed -e 's/^\(  Title *: *\).*/\1"Jak2"/' \
       -e 's/^\(  ProductCode *: *\).*/\1"CTR-H-OGJ2"/' \
       -e 's/^\(  UniqueId *: *\).*/\10xF7A21/' "$RSF" > "$BUILD_DIR/gk_jak2.rsf"
   RSF="$BUILD_DIR/gk_jak2.rsf"
@@ -120,7 +120,7 @@ build_cia() {
     "$BANNERTOOL" makebanner -i "$BANNER_PNG" -a "$BANNER_WAV" \
       -o "$BUILD_DIR/banner.bnr" > /dev/null
     smdh="$BUILD_DIR/$(basename "$out" .cia).smdh"
-    "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p "OpenGOAL" -i "$ICON_PNG" \
+    "$BANNERTOOL" makesmdh -s "$short" -l "$long" -p " " -i "$ICON_PNG" \
       -o "$smdh" > /dev/null
     banner_args=(-banner "$BUILD_DIR/banner.bnr")
   fi
