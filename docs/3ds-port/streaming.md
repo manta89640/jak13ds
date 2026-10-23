@@ -128,6 +128,10 @@ groups, 50 m: 4.2 / 6.3 Snowy).
   when it is shown. Before: none was read until Sandover's first draw, which drew 71 near chunks'
   groups far (Azahar 326 ms on average, 401 ms at most) and switched them on screen (the user's
   "geometry changes in the first couple seconds" of the title).
+- (AI-assisted, todlag, Oct 23) **Time of day at a reveal**: a level shown again rewrites all of
+  its groups drawn in its first frame (title3's spread over 6 frames at up to 7 ms drew groups
+  with the file's colors meanwhile: removed). Sandover at the title: 20.6 ms of time of day in that
+  frame in Azahar, behind the logo (c3l_format.md "Time of day").
 - **Coming out of black**: no group is kept far "in view" for late data while the screen is black
   (`ctr_level_set_screen_black`: the game's PMODE fade at 0, or held). When the screen comes out of
   black within 3 s of a level being shown or of a camera cut, while tie LOD groups in view are
@@ -171,8 +175,9 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
 
 - Time of day (c3l v16): a unit is colored when it is taken, before its first draw: every group
   written from the table with the current blend (exact; ~80 ns per vertex in Azahar, within the take
-  budget), its versions set, so `tod_recolor` and tod_max_ms (citadel's per-frame cap) treat it as
-  up to date: never drawn with the file's baked colors. The groups (one per visibility id, v18) are
+  budget), its versions set, so `tod_recolor` treats it as up to date: never drawn with the file's
+  baked colors. (A unit taken before its level's first draw keeps the file's colors until then:
+  since Oct 23 tod_recolor rewrites every group drawn before its draw, no cap.) The groups (one per visibility id, v18) are
   made from the unit's indices by the stream job at its first read, into room kept at load; its
   light lists and palettes (`tod_scan`) at its first take, once per level load. Host check:
   `CTR_TOD_CHECK=1`.

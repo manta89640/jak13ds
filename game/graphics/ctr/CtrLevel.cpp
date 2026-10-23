@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <new>
 #include <stdexcept>
@@ -1021,7 +1022,12 @@ inline u32 tod_blend_rgb(const CtrLevelData::Tod& t, u32 c, const CtrLevelData::
          std::min<u32>(255, b >> 6) << 16;
 }
 
-// Table entry idx blended again (it was older than its palettes' last move).
+// Table entry idx blended again (it was older than its palettes' last move). (AI-assisted,
+// todlag) a TodMul from its color's entry (blended once for all of its TodMuls).
+u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx);
+inline u32 tod_entry(CtrLevelData::Tod& t, u32 idx) {
+  return t.stamp[idx] >= t.lut[t.color_mask[idx]] ? t.table[idx] : tod_entry_slow(t, idx);
+}
 __attribute__((noinline)) u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx) {
   const u32 nc = t.color_count;
   u32 rgb;
@@ -1029,27 +1035,101 @@ __attribute__((noinline)) u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx) {
     rgb = tod_blend_rgb(t, idx, t.act);
   } else {
     const auto& m = t.muls[idx - nc];
-    rgb = tod_mul_rgb(tod_blend_rgb(t, m.color, t.act), m);
+    rgb = tod_mul_rgb(tod_entry(t, m.color), m);
   }
   t.table[idx] = rgb;
   t.stamp[idx] = t.ver;
   return rgb;
 }
-inline u32 tod_entry(CtrLevelData::Tod& t, u32 idx) {
-  return t.stamp[idx] >= t.lut[t.color_mask[idx]] ? t.table[idx] : tod_entry_slow(t, idx);
+
+// (AI-assisted, todlag) the colors [0, nc) not up to date blended with the N palettes of t.act,
+// whose weights are the same for r, g and b and add up to at most 256: r and b in the two halves
+// of one word (each sum <= 255 * 256 < 65536), g in another, the palettes' offsets and weights in
+// registers: ~6 instructions per palette instead of ~14 (tod_blend_rgb), the same sums.
+template <int N>
+void tod_refresh_colors(CtrLevelData::Tod& t) {
+  const auto& a = t.act;
+  u32 off[N], w[N];
+  for (int k = 0; k < N; k++) {
+    off[k] = a.slot3[k];
+    w[k] = a.w[k][0];
+  }
+  const u32 nc = t.color_count, stride = t.palette_count * 3, ver = t.ver;
+  const u8* src = t.colors.data();
+  u32* const table = t.table.data();
+  u32* const stamp = t.stamp.data();
+  const u8* const cm = t.color_mask.data();
+  const u32* const lut = t.lut;
+  for (u32 c = 0; c < nc; c++, src += stride) {
+    if (stamp[c] >= lut[cm[c]]) {
+      continue;
+    }
+    u32 rb = 0, g = 0;
+    for (int k = 0; k < N; k++) {
+      const u8* x = src + off[k];
+      rb += ((u32)x[0] | (u32)x[2] << 16) * w[k];
+      g += (u32)x[1] * w[k];
+    }
+    table[c] = std::min<u32>(255, (rb & 0xffff) >> 6) | std::min<u32>(255, g >> 6) << 8 |
+               std::min<u32>(255, rb >> 22) << 16;
+    stamp[c] = ver;
+  }
+}
+
+// (AI-assisted, todlag) every entry brought up to date (colors first: the TodMuls use them). For a
+// frame whose group rewrites touch many more vertices than the table has entries (the title's fast
+// day, citadel's pulse): the rewrites then read the table without the version checks.
+void tod_refresh_all(CtrLevelData::Tod& t) {
+  const auto& a = t.act;
+  bool packed = a.n >= 1 && a.n <= 8;
+  u32 sum = 0;
+  for (u32 k = 0; k < a.n && packed; k++) {
+    packed = a.w[k][0] == a.w[k][1] && a.w[k][0] == a.w[k][2];
+    sum += a.w[k][0];
+  }
+  packed = packed && sum <= 256;
+  if (packed) {
+    switch (a.n) {
+      case 1: tod_refresh_colors<1>(t); break;
+      case 2: tod_refresh_colors<2>(t); break;
+      case 3: tod_refresh_colors<3>(t); break;
+      case 4: tod_refresh_colors<4>(t); break;
+      case 5: tod_refresh_colors<5>(t); break;
+      case 6: tod_refresh_colors<6>(t); break;
+      case 7: tod_refresh_colors<7>(t); break;
+      default: tod_refresh_colors<8>(t); break;
+    }
+  }
+  const u32 n = (u32)t.table.size(), nc = t.color_count, ver = t.ver;
+  u32* const table = t.table.data();
+  u32* const stamp = t.stamp.data();
+  const u8* const cm = t.color_mask.data();
+  const u32* const lut = t.lut;
+  if (!packed) {
+    for (u32 idx = 0; idx < nc; idx++) {
+      if (stamp[idx] < lut[cm[idx]]) {
+        tod_entry_slow(t, idx);
+      }
+    }
+  }
+  // the TodMuls from their (now current) colors, as tod_entry_slow
+  const c3l::TodMul* const muls = t.muls.data();
+  for (u32 idx = nc; idx < n; idx++) {
+    if (stamp[idx] < lut[cm[idx]]) {
+      const auto& m = muls[idx - nc];
+      table[idx] = tod_mul_rgb(table[m.color], m);
+      stamp[idx] = ver;
+    }
+  }
 }
 
 // Every level draw: the game's weights into target_w (the table's entries follow lazily, exact as
-// the PC). Day palettes taken in a frame with config tod_busy_half every second frame only while
-// they jumped (moved by more than kTodJump in a frame) in each of the last kTodBusyFrames level
-// draws (sunken's cycling lights). Returns 2: day palettes taken, 1: only light palettes, 0:
+// the PC). (AI-assisted, todlag) every frame's weights are taken (config tod_pulse_step, off by
+// default, can hold a pulsing palette). Returns 2: day palettes taken, 1: only light palettes, 0:
 // nothing.
-constexpr int kTodBusyFrames = 8;
-constexpr int kTodJump = 4;
 constexpr u64 kTodPulseFrames = 256, kTodPulseSettle = 8;  // (AI-assisted, citadel)
-constexpr int kTodTakeJump = 8;  // (AI-assisted, citadel) tod_max_ms: a day move this big doesn't wait
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
-               u64 frame, bool reveal) {
+               u64 frame) {
   u8 w[8][3];
   tod_weights(cam, w);
   // (palettes no color uses don't matter)
@@ -1102,13 +1182,6 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
     }
   }
   u32 changed = 0, day = 0;
-  int jump = 0;
-  // (AI-assisted, citadel) config tod_max_ms: a day move waits for min_move_frames after the last
-  // (AI-assisted, title3) not when the level is shown again (reveal): its first frame takes the
-  // game's weights
-  const bool wait_day = ctr_settings().tod_max_ms > 0 && t.blended_valid && !reveal &&
-                        (float)(frame - t.move_frame) < t.min_move_frames;
-  bool waited = false;
   for (u32 k = 0; k < t.palette_count; k++) {
     const int p = t.palettes[k];
     if (pulse_step > 0 && t.blended_valid && !(t.light_mask >> p & 1) && pulsing(p) &&
@@ -1122,38 +1195,14 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
         continue;  // (held: target_w stays)
       }
     }
-    if (wait_day && !(t.light_mask >> p & 1) && memcmp(t.target_w[p], w[p], 3) != 0) {
-      // (tod_max_ms: the last day move's rewrites aren't spread yet; a jump is taken at once)
-      int diff = 0;
-      for (int c = 0; c < 3; c++) {
-        diff = std::max(diff, std::abs((int)w[p][c] - (int)t.target_w[p][c]));
-      }
-      if (diff < kTodTakeJump) {
-        waited = true;
-        continue;
-      }
-    }
     if (!t.blended_valid || memcmp(t.target_w[p], w[p], 3) != 0) {
       changed |= 1u << p;
       if (!(t.light_mask >> p & 1)) {
         day |= 1u << p;
-        for (int c = 0; c < 3; c++) {
-          jump = std::max(jump, std::abs((int)w[p][c] - (int)t.weights[p][c]));
-        }
       }
     }
   }
   memcpy(t.weights, w, sizeof(w));
-  t.day_waited = waited;
-  if (t.blended_valid && day) {
-    t.busy_run = jump > kTodJump ? (u8)std::min(255, t.busy_run + 1) : 0;
-    if (ctr_settings().tod_busy_half && (frame & 1) && t.busy_run >= kTodBusyFrames) {
-      changed &= ~day;  // (next frame)
-      day = 0;
-    }
-  } else if (!day) {
-    t.busy_run = 0;
-  }
   t.blended_valid = true;
   if (!changed) {
     return 0;
@@ -1172,10 +1221,6 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   }
   tod_make_act(t, t.target_w, &t.act);
   if (day) {
-    // frames per day move (the group pass's budget)
-    const float since = (float)std::min<u64>(64, frame - t.move_frame);
-    t.move_frames = 0.75f * t.move_frames + 0.25f * std::max(1.f, since);
-    t.move_frame = frame;
     t.dver++;
     auto& seen = tod_seen();
     std::lock_guard<std::mutex> lk(seen.lock);
@@ -1192,6 +1237,29 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
 typedef u32 __attribute__((may_alias)) tod_word;
 static_assert(offsetof(c3l::Vertex, pad) == 6 && offsetof(c3l::Vertex, rgba) == 12);
 static_assert(sizeof(c3l::Vertex) == 16);
+
+// (AI-assisted, todlag) vertices [first, end) of a plain group from a table that is all up to date
+// (tod_refresh_all): no version checks, and the rgb written as a halfword and a byte (the alpha
+// byte isn't read): ~6 instructions per vertex instead of ~15
+typedef u16 __attribute__((may_alias)) tod_half;
+inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end) {
+  const u32* const tab = t.table.data();
+  u8* p = (u8*)(v + first);
+  u8* const e = (u8*)(v + end);
+  for (; p + 32 <= e; p += 32) {
+    const u32 a = tab[*(const tod_half*)(p + 6)];
+    const u32 b = tab[*(const tod_half*)(p + 22)];
+    *(tod_half*)(p + 12) = (u16)a;
+    p[14] = (u8)(a >> 16);
+    *(tod_half*)(p + 28) = (u16)b;
+    p[30] = (u8)(b >> 16);
+  }
+  if (p < e) {
+    const u32 a = tab[*(const tod_half*)(p + 6)];
+    *(tod_half*)(p + 12) = (u16)a;
+    p[14] = (u8)(a >> 16);
+  }
+}
 
 // Vertices [first, end) from the table (the alpha stays; plain: every one has a time of day color).
 inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end, bool plain) {
@@ -1382,48 +1450,30 @@ void tod_mark_plain(CtrLevelData::Tod& t, u32 ci, const c3l::Vertex* v, int n) {
 }
 
 // One level draw's rewrites: tod_recolor per chunk drawn in two passes (the light vertices, then
-// the groups), then tod_finish.
-// kTodBudgetMs: the frame's time of day work (all levels) the rewrites may take (Azahar ms; the
-//   light pass up to kTodLightShare of it); the group pass gets more while the day moves fast
-//   (kTodSpreadMoves). Groups kTodMaxLag day moves behind or with the file's colors don't wait.
-// Oct 17, Azahar: a group of vertices costs ~80 ns per vertex, a clock read as much as ~20 vertices.
-constexpr double kTodBudgetMs = 1.2;
-constexpr double kTodLightShare = 0.7;
-constexpr float kTodSpreadMoves = 2;
-constexpr u32 kTodMaxLag = 3;
-constexpr u32 kTodCheckWork = 1000, kTodChunkWork = 40;
+// the groups), then tod_finish. (AI-assisted, todlag) no budget: every group drawn is brought up to
+// this frame's weights before its draw (the colors drawn are the frame's, as on the PC). Azahar,
+// Oct 23: the title's fast day (a move nearly every frame) 4.6-8.0 ms a frame; c3l_format.md.
 constexpr int kTodLights = 0, kTodRound = 1;
-constexpr double kTodRevealMs = 7.0;
-constexpr u64 kTodRevealFrames = 6;
-inline double tod_budget_ms() {
+// (AI-assisted, todlag) the group pass refreshes the whole table first (tod_refresh_all) when the
+// vertices drawn are this many times the table's entries
+constexpr u64 kTodFreshRatio = 3;
+// (AI-assisted, todlag) the time of day's clock: ctr_gpu_time_ms; on the host times env
+// CTR_TOD_TIME_SCALE (statistics only: the host is ~10x faster than Azahar)
+inline double tod_now_ms() {
 #ifndef __3DS__
-  // (AI-assisted) host: env CTR_TOD_BUDGET_MS (a smaller budget: more chunks drawn behind)
-  static const double ms =
-      getenv("CTR_TOD_BUDGET_MS") ? atof(getenv("CTR_TOD_BUDGET_MS")) : kTodBudgetMs;
-  return ms;
+  static const double scale =
+      getenv("CTR_TOD_TIME_SCALE") ? atof(getenv("CTR_TOD_TIME_SCALE")) : 1.0;
+  return ctr_gpu_time_ms() * scale;
 #else
-  return kTodBudgetMs;
+  return ctr_gpu_time_ms();
 #endif
 }
 struct TodPass {
-  double t0 = 0;         // ctr_gpu_time_ms at the start
-  double before_ms = 0;  // the frame's time of day ms before this pass
-  // the pass: kTodLights (light vertices, up to kTodLightShare of the budget), kTodRound (groups)
+  // the pass: kTodLights (light vertices), kTodRound (groups)
   int pass = 0;
-  bool over = false;     // the budget's used up
-  bool capped = false;   // (AI-assisted, citadel) tod_max_ms reached: nothing more this frame
-  u32 waiting = 0;       // groups too far behind left for tod_max_ms
-  u32 work = 0, next_check = 0;  // vertices written (+ kTodChunkWork per chunk looked at)
-  u32 stop_chunk = UINT32_MAX;  // the first chunk the budget didn't reach (the next round's start)
-  u32 rewritten = 0, behind = 0;
-  double day_budget_ms = 0;  // the budget of the group pass
-  // (AI-assisted, title3) the level was shown again within kTodRevealFrames (draw_level): the
-  // groups drawn are brought up to date within kTodRevealMs a frame instead of the budget and
-  // tod_max_ms (Sandover's ~200k vertices at the title's reveal took 20 ms in Azahar in one frame:
-  // spread over the first frames, which the logo's falling pieces mostly cover)
-  bool reveal = false;
-  bool measure = false;  // (statistics, every 8th frame) the day moves the groups drawn are behind
-  u32 max_lag = 0;
+  bool fresh_ok = false;  // (AI-assisted, todlag) many vertices drawn: tod_refresh_all first
+  bool fresh = false;     // the table is all up to date (tod_refresh_all done this pass)
+  u32 rewritten = 0;
 };
 std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
   static std::vector<std::pair<uintptr_t, uintptr_t>> d;  // render thread
@@ -1434,11 +1484,8 @@ std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
 // may see the change) before it is drawn (shown: the chunk's runs drawn this frame, nullptr: all of
 // them). A vertex group (one visibility id's vertices) is always rewritten whole, when a day palette
 // the chunk uses moved since (or it has the file's colors); its light vertices, all at once, when a
-// light palette moved. Within the frame's budget: the light pass (from where the last frame's
-// stopped, up to kTodLightShare of tod_budget_ms), then the groups (from where the last frame's
-// budget ran out, TodPass::day_budget_ms); what the budget doesn't reach is drawn as it is, a day
-// move or two behind: groups with the file's colors or kTodMaxLag moves behind are rewritten at
-// once. Hidden groups wait until they are drawn. Returns the vertices written.
+// light palette moved (the light pass). Hidden groups wait until they are drawn. (AI-assisted,
+// todlag) no budget: everything drawn is current. Returns the vertices written.
 u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   auto& t = *lev.tod;
   const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
@@ -1462,19 +1509,9 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   // quick out: every group up to date
   const bool day_ok = t.chunk_min_ver[ci] >= day_last;
   const bool light_ok = t.chunk_light_ver[ci] >= light_last;
-  if (ps.capped && ps.pass != kTodLights && !ps.measure) {
+  if (t.chunk_scanned[ci] == 2 && (ps.pass == kTodLights ? light_ok : day_ok)) {
     return 0;
   }
-  if (t.chunk_scanned[ci] == 2 &&
-      ((ps.pass == kTodLights && (light_ok || ps.over)) ||
-       (ps.pass != kTodLights &&
-        (day_ok ||
-         // (the budget used up: only groups too far behind are rewritten)
-         (ps.over && t.chunk_min_ver[ci] && t.dver - t.chunk_min_dver[ci] < kTodMaxLag &&
-          !ps.measure))))) {
-    return 0;
-  }
-  ps.work += kTodChunkWork;
   int n = 0;
   auto* v = (c3l::Vertex*)ctr_gpu_mesh_vertices_inplace(mesh, &n);
   if (!v || n <= 0) {
@@ -1495,49 +1532,13 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     tod_mark_plain(t, (u32)ci, v, n);
     return tod_recolor(lev, ci, shown, ps);  // (the groups: one for all, made at load)
   }
-  // (the clock read every kTodCheckWork vertices of work: a read costs about as much as 20
-  // vertices in Azahar)
-  auto budget_ok = [&]() {
-    if (ps.over) {
-      return false;
-    }
-    if (ps.work < ps.next_check) {
-      return true;
-    }
-    if (ps.before_ms + (ctr_gpu_time_ms() - ps.t0) <
-        (ps.reveal ? kTodRevealMs
-                   : (ps.pass == kTodLights ? tod_budget_ms() * kTodLightShare
-                                            : ps.day_budget_ms))) {
-      ps.next_check = ps.work + kTodCheckWork;
-      return true;
-    }
-    ps.stop_chunk = (u32)ci;
-    ps.over = true;
-    return false;
-  };
-  // (AI-assisted, citadel) the frame's limit (tod_max_ms) for the groups that don't wait for the
-  // budget
-  auto cap_ok = [&]() {
-    const float cap = ps.reveal ? (float)kTodRevealMs : ctr_settings().tod_max_ms;
-    if (cap <= 0) {
-      return true;
-    }
-    if (ps.before_ms + (ctr_gpu_time_ms() - ps.t0) < cap) {
-      return true;
-    }
-    ps.capped = true;
-    if (ps.stop_chunk == UINT32_MAX) {
-      ps.stop_chunk = (u32)ci;  // (else the budget's stop chunk stays the next frame's start)
-    }
-    return false;
-  };
   const u32 r0 = lev.chunk_first_run[ci];
   const u32 nr = lev.chunks[ci].vis_run_count;
   const bool by_runs = shown && ng > 1;
   u32 looked = 0;
   int flo = n, fhi = -1;
   // the light pass: its light vertices (the lamps move every frame)
-  if (ps.pass == kTodLights && !light_ok && budget_ok()) {
+  if (ps.pass == kTodLights && !light_ok) {
     u32 moved = 0;
     for (u32 mm = lm; mm; mm &= mm - 1) {
       const int p = __builtin_ctz(mm);
@@ -1559,39 +1560,31 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
           flo = std::min<int>(flo, vl[begin]);
           fhi = std::max<int>(fhi, vl[lend - 1]);
           looked += lend - begin;
-          ps.work += lend - begin;
         }
         begin = lend;
       }
     }
   }
   if (ps.pass != kTodLights && !day_ok) {
-    bool any = false, left = false;
+    bool any = false;
     auto day_group = [&](u32 g) {
       auto& gr = t.groups[g];
       if (gr.ver >= day_last) {
         return;
       }
-      // (the file's colors: now)
-      // (the file's colors, or kTodMaxLag day moves behind: now)
-      if (gr.ver && t.dver - gr.dver < kTodMaxLag && !budget_ok()) {
-        left = true;
-        ps.max_lag = std::max(ps.max_lag, t.dver - gr.dver);
-        return;
-      }
-      // (AI-assisted, citadel) tod_max_ms: those too far behind wait beyond it (the next frame's
-      // pass starts from them)
-      if (ps.capped || !cap_ok()) {
-        left = true;
-        ps.waiting++;
-        ps.max_lag = std::max(ps.max_lag, gr.ver ? t.dver - gr.dver : 99u);
-        return;
+      if (ps.fresh_ok && !ps.fresh) {
+        // (at the frame's first group to rewrite; versions don't move until the next tod_update)
+        tod_refresh_all(t);
+        ps.fresh = true;
       }
       const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
       if (end > first) {
-        tod_write_range(t, v, first, end, gr.plain);
+        if (ps.fresh && gr.plain) {
+          tod_write_fresh(t, v, first, end);
+        } else {
+          tod_write_range(t, v, first, end, gr.plain);
+        }
         looked += (u32)(end - first);
-        ps.work += (u32)(end - first);
         flo = std::min(flo, first);
         fhi = std::max(fhi, end - 1);
       }
@@ -1620,7 +1613,6 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       t.chunk_min_ver[ci] = mv;
       t.chunk_min_dver[ci] = md;
     }
-    ps.behind += left;
   }
   if (fhi >= flo) {
     tod_dirty().emplace_back((uintptr_t)(v + flo), (uintptr_t)(v + fhi + 1));
@@ -1677,7 +1669,16 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
     int max_err = 0, max_step = 0;
     std::array<u8, 24> prev{};
     bool have_prev = false;
+    // (AI-assisted, todlag) the game's weights of the last kAgeFrames frames (newest first) and
+    // the age in frames of the colors drawn: the smallest k whose weights' blend a drawn vertex
+    // shows (kAgeFrames: none of them, e.g. day and light palettes from different frames)
+    std::deque<std::array<u8, 24>> hist;
+    u64 age_sum = 0, age_verts = 0, aged_frames = 0;
+    u32 age_max = 0;
+    // groups drawn with colors 3+ frames old (file: still the file's colors), group draws
+    u64 old_groups = 0, file_groups = 0, group_draws = 0;
   };
+  constexpr u32 kAgeFrames = 64;
   static std::map<std::string, St> stats;
   auto& st = stats[lev.name];
   u8 w[8][3];
@@ -1710,16 +1711,49 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   }
   memcpy(st.prev.data(), w, 24);
   st.have_prev = true;
+  st.hist.push_front(st.prev);
+  if (st.hist.size() > kAgeFrames) {
+    st.hist.pop_back();
+  }
+  std::vector<std::vector<u32>> aged(st.hist.size());  // exact(hist[k]), made when needed
+  auto age_of = [&](u32 idx, u32 c) -> u32 {
+    for (u32 k = 1; k < st.hist.size(); k++) {
+      if (aged[k].empty()) {
+        u8 hw[8][3];
+        memcpy(hw, st.hist[k].data(), 24);
+        exact(hw, aged[k]);
+      }
+      if (aged[k][idx] == c) {
+        return k;
+      }
+    }
+    return kAgeFrames;
+  };
+  u32 frame_age = 0;
+  u64 frame_age_sum = 0;
   // (AI-assisted) "off": vertices that aren't the table's weights' color (drawn behind)
   std::vector<u32> tgt;
   exact(t.target_w, tgt);
   u64 verts = 0, stale = 0, off = 0, far = 0;
   int err = 0, step = 0;
   std::vector<u8> used;
+  u64 old_groups = 0, file_groups = 0, group_draws = 0;
   for (const auto& [ci, shown] : drawn) {
     if (ci >= lev.meshes.size() || lev.meshes[ci] < 0) {
       continue;
     }
+    // (AI-assisted, todlag) per group of the chunk: vertices drawn, the oldest color's age
+    const u32 cg0 = ci < t.chunk_group_first.size() ? t.chunk_group_first[ci] : 0;
+    const u32 cgn = ci < t.chunk_group_count.size() ? t.chunk_group_count[ci] : 0;
+    std::vector<u32> g_age(cgn, 0), g_n(cgn, 0);
+    auto group_of = [&](int i) -> int {
+      for (u32 g = 0; g < cgn; g++) {
+        if (i >= t.groups[cg0 + g].lo && i <= t.groups[cg0 + g].hi) {
+          return (int)g;
+        }
+      }
+      return -1;
+    };
     int n = 0;
     const auto* v = (const c3l::Vertex*)ctr_gpu_mesh_vertices_inplace(lev.meshes[ci], &n);
     // the vertices of the runs drawn (all of the chunk's when it is drawn whole)
@@ -1770,6 +1804,18 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
       }
       stale += e > 0;
       far += e > 4;
+      const int gi = group_of(i);
+      if (gi >= 0) {
+        g_n[gi]++;
+      }
+      if (e > 0) {
+        const u32 a = age_of(idx, rgb & 0xffffff);
+        frame_age = std::max(frame_age, a);
+        frame_age_sum += a;
+        if (gi >= 0) {
+          g_age[gi] = std::max(g_age[gi], a);
+        }
+      }
       {
         const u32 c = rgb & 0xffffff;
         off += c != tgt[idx];
@@ -1777,7 +1823,28 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
       err = std::max(err, e);
       step = std::max(step, s);
     }
+    for (u32 g = 0; g < cgn; g++) {
+      if (!g_n[g]) {
+        continue;
+      }
+      group_draws++;
+      const auto& gr = t.groups[cg0 + g];
+      if (g_age[g] >= 3) {
+        old_groups++;
+        file_groups += gr.ver == 0;
+        if (mode >= 3 || (mode >= 2 && gr.ver == 0)) {
+          lg::info("[ctr] tod old group {} frame {}: chunk {} (kind {} tier {}{}) group {} ({} "
+                   "vertices drawn): colors {} frames old{}, {} day moves behind",
+                   lev.name, rs.frame_idx, ci, lev.chunks[ci].kind, lev.chunks[ci].lod_tier,
+                   lev.is_unit(ci) ? ", streamed" : "", g, g_n[g], g_age[g],
+                   gr.ver == 0 ? " (the file's)" : "", gr.ver ? t.dver - gr.dver : 0);
+        }
+      }
+    }
   }
+  st.old_groups += old_groups;
+  st.file_groups += file_groups;
+  st.group_draws += group_draws;
   st.frames++;
   st.verts += verts;
   st.stale += stale;
@@ -1785,19 +1852,34 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   st.max_err = std::max(st.max_err, err);
   st.max_step = std::max(st.max_step, step);
   st.steps += step > 0;
+  st.age_sum += frame_age_sum;
+  st.age_verts += verts;
+  st.age_max = std::max(st.age_max, frame_age);
+  st.aged_frames += frame_age > 1;
   if (mode >= 2) {
     lg::info("[ctr] tod check {} frame {}: {} vertices drawn, {} stale (max error {}), step {}, "
-             "{} off, {} more than 4 off",
-             lev.name, rs.frame_idx, verts, stale, err, step, off, far);
+             "{} off, {} more than 4 off; color age {} frames at most, {:.2f} on average; {} of "
+             "{} groups drawn 3+ frames old ({} with the file's colors)",
+             lev.name, rs.frame_idx, verts, stale, err, step, off, far, frame_age,
+             (double)frame_age_sum / std::max<u64>(1, verts), old_groups, group_draws,
+             file_groups);
   }
   if (rs.log_now) {
     lg::info("[ctr] tod check {}: {} frames, {:.0f} vertices drawn per frame, {} stale vertices in "
              "{} frames (max error {}), {} frames with a color step (max step {})",
              lev.name, st.frames, (double)st.verts / std::max<u64>(1, st.frames), st.stale,
              st.stale_frames, st.max_err, st.steps, st.max_step);
+    lg::info("[ctr] tod check {}: color age of the vertices drawn {} frames at most ({} = none of "
+             "the last {}), {:.3f} on average, {} frames with a color more than 1 frame old; "
+             "{} of {} group draws 3+ frames old ({} with the file's colors)",
+             lev.name, st.age_max, kAgeFrames, kAgeFrames,
+             (double)st.age_sum / std::max<u64>(1, st.age_verts), st.aged_frames, st.old_groups,
+             st.group_draws, st.file_groups);
     const auto keep = st.prev;
+    auto keep_hist = std::move(st.hist);
     st = St();
     st.prev = keep;
+    st.hist = std::move(keep_hist);
     st.have_prev = true;
   }
 }
@@ -4660,7 +4742,7 @@ void CtrLevels::take_stream(Done& d, u64 frame) {
 
 // Render thread, each frame (outside of a GPU frame): the near chunks read, into their levels.
 // Each one's time of day colors are written first with the current blend (exact: a near chunk is
-// never drawn with the file's baked colors, and its rewrite doesn't wait for tod_max_ms); at most
+// never drawn with the file's baked colors); at most
 // kTakeVertices vertices per frame (a chunk at least), the rest the next frame (drawn far until
 // then).
 constexpr u32 kTakeVertices = 16384;
@@ -5429,16 +5511,12 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now && m_tod_frames) {
     lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
-             "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, {} chunks drawn "
-             "behind; groups drawn behind by at most {} day moves ({} of {} sampled level draws "
-             "2 or more); a pulsing palette held in {} level draws, a day move waited in {}, {} "
-             "groups too far behind waited for tod_max_ms",
+             "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
+             "refreshed whole in {} level draws; a pulsing palette held in {} level draws",
              m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames, m_tod_ms / m_tod_frames,
-             m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_deferred, m_tod_lag_max,
-             m_tod_lag2, m_tod_lag_frames, m_tod_held, m_tod_waited, m_tod_capped);
+             m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_fresh, m_tod_held);
     m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = 0;
-    m_tod_waited = m_tod_capped = 0;
-    m_tod_spread = m_tod_deferred = m_tod_lag_frames = m_tod_lag_max = m_tod_lag2 = 0;
+    m_tod_spread = m_tod_fresh = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
   if (rs.log_now && m_occ_frames) {
@@ -5501,8 +5579,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
   // (AI-assisted, title3) shown again after a gap (the title's reveal of Sandover behind the logo,
-  // a level's start): its time of day brought up to date over its first frames (tod_update,
-  // TodPass::reveal)
+  // a level's start): reveal_frame (late near chunks in view)
   {
     // (AI-assisted, title3) this frame's tie LOD factor for the hidden levels' near chunks
     // (CtrLevels::stream_update), as the tie LOD block below works it out
@@ -5524,12 +5601,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   u64 tod_verts = 0;
   double tod_ms = 0;
   if (lev.tod) {
-    const double t0 = ctr_gpu_time_ms();
+    const double t0 = tod_now_ms();
     m_tod_frames++;
     const u32 held0 = lev.tod->pulse_held;
-    m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx, reveal) == 2;
+    m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
     m_tod_held += lev.tod->pulse_held != held0;  // (AI-assisted, citadel) tod_pulse_step
-    tod_ms += ctr_gpu_time_ms() - t0;
+    tod_ms += tod_now_ms() - t0;
   }
 #ifndef __3DS__
   // (AI-assisted) host diagnostic: the game's time of day weights every 30 frames
@@ -6859,42 +6936,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws
-  u32 pop_tod[3] = {0, 0, 0};  // (AI-assisted, title3: CTR_POP_LOG) rewritten, behind, waiting
+  u32 pop_tod = 0;  // (AI-assisted, title3: CTR_POP_LOG) groups rewritten
   if (lev.tod) {
-    const double t0 = ctr_gpu_time_ms();
+    const double t0 = tod_now_ms();
     TodPass ps;
-    ps.t0 = t0;
-    ps.reveal = rs.frame_idx < lev.reveal_frame + kTodRevealFrames;
-    ps.before_ms = g_tod_frame_ms + tod_ms;
     auto shown_of = [&](const VisibleChunk& vc) {
       return vc.runs_valid ? &m_run_shown[lev.chunk_first_run[vc.chunk]] : nullptr;
     };
-    // the light pass from where the last frame's stopped, then the groups: the chunks the most
-    // day moves behind first (one the camera just revealed), else from where the last frame's
-    // stopped
+    // the light pass, then the groups (AI-assisted, todlag: all of those drawn, no budget)
     ps.pass = kTodLights;
-    ps.over = false;
-    ps.stop_chunk = UINT32_MAX;
-    {
-      const u32 from = lev.tod->light_round_chunk;
-      for (int half = 0; half < 2; half++) {
-        for (const auto& vc : m_visible) {
-          if ((vc.chunk >= from) == (half == 0)) {
-            tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
-          }
-        }
-      }
-      lev.tod->light_round_chunk = ps.stop_chunk == UINT32_MAX ? 0 : ps.stop_chunk;
+    for (const auto& vc : m_visible) {
+      tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
     }
     ps.pass = kTodRound;
-    ps.over = false;
-    ps.stop_chunk = UINT32_MAX;
-    ps.measure = rs.frame_idx % 8 == 0;
     {
-      // the groups from where the last frame's budget ran out. The budget: tod_budget_ms, or more
-      // while the day moves fast (the title screen's ~20x: a move nearly every frame): the chunks
-      // drawn (their vertices, at the last frames' ms per vertex) once per kTodSpreadMoves day
-      // moves, so that they keep within that of the game (kTodMaxLag behind: rewritten at once)
       auto& t = *lev.tod;
       u64 drawn = 0;
       for (const auto& vc : m_visible) {
@@ -6902,39 +6957,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                      ? lev.chunks[vc.chunk].vertex_count
                      : 0;
       }
-      ps.day_budget_ms = std::max(
-          tod_budget_ms(),
-          (double)drawn * t.ms_per_vertex / (kTodSpreadMoves * std::max(1.f, t.move_frames)));
-      // (AI-assisted, citadel) tod_max_ms: the budget under it, and the next day move waits until
-      // these vertices' rewrites fit once per move
-      if (const float cap = settings.tod_max_ms; cap > 0) {
-        // (the frame's group work up to 0.8 of the limit, a day move per full round at 0.7 of it:
-        // the light pass's share comes out of the same ms)
-        ps.day_budget_ms = std::min<double>(std::max<double>(ps.day_budget_ms, 0.8 * cap), cap);
-        t.min_move_frames = std::min<float>(
-            32.f, (float)((double)drawn * t.ms_per_vertex / (0.7 * cap)));
-      } else {
-        t.min_move_frames = 0;
-      }
-      const double d0 = ctr_gpu_time_ms();
-      const u32 w0 = ps.work;
-      const u32 from = t.round_chunk;
-      for (int half = 0; half < 2; half++) {
-        for (const auto& vc : m_visible) {
-          if ((vc.chunk >= from) == (half == 0)) {
-            tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
-          }
-        }
-      }
-      t.round_chunk = ps.stop_chunk == UINT32_MAX ? 0 : ps.stop_chunk;
-      // ms per vertex of work (for the budget above)
-      if (ps.work - w0 >= 2000) {
-        const double mpv = (ctr_gpu_time_ms() - d0) / (ps.work - w0);
-        t.ms_per_vertex = 0.875 * t.ms_per_vertex + 0.125 * std::clamp(mpv, 1e-6, 1e-3);
+      ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
+      for (const auto& vc : m_visible) {
+        tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
       }
     }
     tod_finish();
-    tod_ms += ctr_gpu_time_ms() - t0;
+    tod_ms += tod_now_ms() - t0;
     if (has_units && stream_check_enabled() && lev.tod->blended_valid) {
       // (AI-assisted, streaming) host check: a near chunk drawn with a group still in the file's
       // baked colors (version 0)
@@ -6954,18 +6983,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       }
     }
-    pop_tod[0] = ps.rewritten;
-    pop_tod[1] = ps.behind;
-    pop_tod[2] = ps.waiting;
+    pop_tod = ps.rewritten;
     m_tod_spread += ps.rewritten;
-    m_tod_deferred += ps.behind;
-    m_tod_capped += ps.waiting;                  // (AI-assisted, citadel) tod_max_ms
-    m_tod_waited += lev.tod->day_waited ? 1 : 0;
-    if (ps.measure) {
-      m_tod_lag_frames++;
-      m_tod_lag_max = std::max(m_tod_lag_max, ps.max_lag);
-      m_tod_lag2 += ps.max_lag >= 2;
-    }
+    m_tod_fresh += ps.fresh ? 1 : 0;
   }
 
   // (AI-assisted) impostors: far tie groups shown as cards (their runs hidden here), the new
@@ -7260,15 +7280,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (pop_log_on()) {
     // (AI-assisted, title3) CTR_POP_LOG: one line per level draw (in view: appeared / went by
     // distance per kind tfrag, tie, shrub; tie LOD switches near / far; groups drawn far for late
-    // data, kept far once it came; time of day groups rewritten, left behind, waiting for
-    // tod_max_ms; impostor cards drawn and captured; near chunks taken since the last draw)
+    // data, kept far once it came; time of day groups rewritten; impostor cards drawn and
+    // captured; near chunks taken since the last draw)
     lg::info("[pop] f={} {} cam={:.1f},{:.1f},{:.1f} vis={} far={} t={:.2f} in={}/{}/{} out={}/{}/{} "
-             "lod+={} lod-={} late={} held={} tod={}/{}/{} cards={:.0f} cap={:.0f} fine={} taken={}",
+             "lod+={} lod-={} late={} held={} tod={} cards={:.0f} cap={:.0f} fine={} taken={}",
              rs.frame_idx, lev.name, cam.trans.x() / 4096.f, cam.trans.y() / 4096.f,
              cam.trans.z() / 4096.f, m_visible.size(), far_level ? 1 : 0, g_detail_t,
              g_pop.chunk_in[1], g_pop.chunk_in[2], g_pop.chunk_in[3], g_pop.chunk_out[1],
              g_pop.chunk_out[2], g_pop.chunk_out[3], g_pop.lod_up, g_pop.lod_down, late_groups,
-             held_groups, pop_tod[0], pop_tod[1], pop_tod[2],
+             held_groups, pop_tod,
              ctr_impostors().stat_cards() - pop_imp0[0],
              ctr_impostors().stat_captures() - pop_imp0[1], m_fine_bits ? 1 : 0, g_pop.taken);
     g_pop.taken = 0;

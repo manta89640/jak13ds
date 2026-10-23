@@ -873,7 +873,8 @@ back to geometry when the fast day starts; (4) single tie LOD switches (the swit
 lodnear's). Fixes: (1) hidden levels stream around the game's camera; (2) a level shown again
 (no draw for 3+ frames) brings its groups up to date within 7 ms a frame for its first 6 frames,
 not the budget or tod_max_ms (all at once took 20.2 ms in one frame in Azahar; spread: 9.4 ms at
-most); (3) no impostors while the title level is loaded. Azahar, 192 frames from the reveal:
+most; removed Oct 23, todlag: every group drawn is current in its first frame now); (3) no
+impostors while the title level is loaded. Azahar, 192 frames from the reveal:
 late near chunks 71 -> 0, pop / flicker events (popdet) 37 -> 27 (the rest: the logo's pieces,
 the day's colors and sky, single LOD switches). Boot: the title isn't held (no extra time).
 
@@ -960,3 +961,19 @@ village1 + beach part of lod_walk.pad): village1 walk 115.5-117.6k triangles, re
 15.2-17.0 ms, busy 16.0-17.8 ms, model 19.1-21.8 ms; no late times for lack of room during the walks
 (arena 4.1 MB village1, 8.3 MB beach + village1). Oct 17 reference (impostors, Azahar): village1 hut
 110.8k triangles. Still coarse: ~1 s after a continue while the area's near chunks load.
+
+## Time of day every frame (AI-assisted, Oct 23, todlag)
+
+The user saw the title's day/night colors update late and unevenly, and parts of surfaces losing
+their tint for a frame or so. Both came from the time of day limits added for 60 fps (tod_max_ms
+2, the 1.2 ms budget, a day move waiting, tod_busy_half, title3's reveal spread): on the title a
+day move waited in 188-427 of 289-449 level draws, 116-26626 groups per 15 s waited for the cap,
+and groups were drawn up to 102 day moves behind or with the file's baked colors (Azahar stats;
+host with Azahar's clock: colors 26 frames old on average, 77% of the groups drawn 3+ frames old;
+streamed tie chunks and a first-drawn shrub with the file's colors for 1-8 frames, 1431 groups for
+2 frames at Sandover's reveal). Now every group drawn is rewritten before its draw (host check: 0
+stale vertices in every frame of the title, village1 and citadel), with a whole-table refresh and
+a check-free write loop when many vertices are drawn (c3l_format.md "Time of day"). With the target
+at 30 fps there is room: Azahar render CPU title 14.1-20.4 ms (was 10.6-18.5), citadel 19.8-24.7
+(was 15.8-17.7), 29.9 fps in both.
+

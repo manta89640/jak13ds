@@ -201,7 +201,8 @@ struct CtrLevelData {
   // A table entry (a color, then the TodMuls) is blended when a vertex drawn needs it after one of
   // its palettes moved (version stamps), exact as the PC; a chunk's vertex groups are rewritten
   // whole when one of the chunk's day palettes moved, its light vertices when a light palette
-  // moved, within a time budget per frame (CtrLevel.cpp tod_recolor).
+  // moved, every frame before the chunk is drawn (CtrLevel.cpp tod_recolor; AI-assisted, todlag:
+  // no budget).
   struct Tod {
     u32 color_count = 0;
     u8 palettes[8] = {};  // the palettes any color uses (not black), in order
@@ -227,7 +228,6 @@ struct CtrLevelData {
     u8 weights[8][3] = {};
     u8 target_w[8][3] = {};
     bool blended_valid = false;  // weights taken at least once
-    u8 busy_run = 0;  // config tod_busy_half: the level draws in a row a day palette jumped
     // (AI-assisted, citadel) config tod_pulse_step: per palette the direction of the game's last
     // move (1 up, 2 down), the frames of its last two reversals and of its last move, and the
     // level draws a pulsing palette was held (statistics)
@@ -240,11 +240,6 @@ struct CtrLevelData {
     // as long as a pulse is recognised by)
     u8 pulse_known = 0;
     u64 first_frame = 0;
-    // (AI-assisted, citadel) config tod_max_ms: the frames a day move waits after the last one
-    // taken (from the vertices drawn: their rewrites once per move within
-    // tod_budget_ms; 0 while the day is slow)
-    float min_move_frames = 0;
-    bool day_waited = false;  // (statistics) a day move waited in the last tod_update
     // versions: + 1 per change of target_w (dver: of its day palettes); per palette its last;
     // lut[mask]: the last of the palettes in mask
     u32 ver = 0, dver = 0;
@@ -257,12 +252,6 @@ struct CtrLevelData {
       u8 w[8][3] = {};
     };
     Act act;
-    // the chunks the last frame's light / group rewrites stopped at (CtrLevel.cpp tod_recolor)
-    u32 light_round_chunk = 0, round_chunk = 0;
-    // frames per day move (moving average), the frame of the last; ms per vertex rewritten
-    float move_frames = 64;
-    u64 move_frame = 0;
-    double ms_per_vertex = 1e-4;
     // per chunk: its vertex groups (VisGroup: one per visibility id of its runs when their vertex
     // ranges don't overlap, c3l v18 files, in vertex order; else one for all), each with the
     // version its colors are (0: the file's) and the day move count then; the oldest of those,
@@ -865,9 +854,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
-  u64 m_tod_spread = 0, m_tod_deferred = 0, m_tod_lag_frames = 0, m_tod_lag2 = 0, m_tod_held = 0,
-      m_tod_waited = 0, m_tod_capped = 0;
-  u32 m_tod_lag_max = 0;
+  u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;
   double m_tod_ms = 0, m_tod_max_ms = 0;
   std::vector<const CtrLevelData*> m_loaded;
   // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because

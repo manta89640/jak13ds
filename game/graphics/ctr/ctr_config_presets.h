@@ -37,7 +37,6 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
     {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
-    {"tod_busy_half", "off"},    {"tod_pulse_step", "0"}, {"tod_max_ms", "0"}, /* citadel */
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
 };
@@ -122,6 +121,8 @@ static const char* const ctr_cfg_removed[] = {
     "new_shaders",  "shader_groups",  "shader_mesh",        "shader_skin",
     "cb_read_opaque", "io_on_system_core", "logic_micro",   "bones_native",
     "collide_native", "collide_frag_cache", "anim_native",
+    /* (AI-assisted, todlag, Oct 23) the time of day's per-frame limits: every frame current now */
+    "tod_busy_half", "tod_max_ms",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

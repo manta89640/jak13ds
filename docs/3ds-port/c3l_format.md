@@ -344,36 +344,31 @@ their meshes (the alpha stays; a frame the GPU still draws may see part of the c
 - **Groups.** A group is rewritten whole when one of its chunk's day palettes moved since it was
   written (or it has the file's colors); a chunk's light vertices (palettes used by a quarter of
   the colors or fewer: lamps, lava glow; the game moves them every frame) all at once when a light
-  palette moved (a list per chunk made at load). Within a budget per frame (all levels): the light
-  pass first (up to 70% of 1.2 ms, from where the last frame's stopped), then the groups drawn (from
-  where the last frame's budget ran out). What the budget doesn't reach is drawn as it is, a day move
-  or two behind; a group 3 moves behind, or with the file's colors, is rewritten at once. While the
-  day moves fast (the title screen's attract mode: a move nearly every frame) the group pass gets
-  the chunks drawn once per 2 moves (their vertices at the measured ms per vertex, spread over the
-  frames 2 moves take). The day's own steps (1/64 every ~40 frames in the game) spread over a few
-  frames; a group is one visibility id's vertices, so a chunk can show two steps for a frame or two.
+  palette moved (a list per chunk made at load). (AI-assisted, todlag, Oct 23) every frame, before
+  the chunk is drawn: the light pass, then every group drawn that is behind (no budget, no cap: the
+  colors drawn are the frame's, exact as the PC; hidden groups wait until they are drawn). When the
+  vertices drawn are 3 times the table's entries or more (the title's fast day, citadel's pulse),
+  the frame's first group rewrite refreshes the whole table first (`tod_refresh_all`: the colors
+  with r and b packed in one word when the weights are the same for r, g and b and add up to 256 or
+  less, ~6 instructions per palette; the TodMuls from their colors) and the groups are then written
+  without version checks (`tod_write_fresh`: ~6.5 instructions per vertex instead of ~17).
   The rewritten ranges are flushed together after the level's pass (sorted, merged within 64 KB:
   a few `ctr_gpu_flush_range` per frame).
-- Config `tod_busy_half` (default on, preset safe: off): while day palettes jump (more than 4/64 in
-  a frame) every frame for 8 frames (sunken's cycling lights), they are taken every second frame.
-- (AI-assisted, citadel) Config `tod_pulse_step` (default 4, preset safe: 0): a day palette that
-  pulses (its weight turned around twice within 256 frames: citadel's palette 1, a mood light
-  that 71% of its colors use, moving 1/64 every ~2 frames) is taken only when it moved that many
-  64ths from the weight last taken, or once it stood still for 8 frames. Without it every move
-  rewrote the drawn vertices (the groups were 3 moves behind every ~6 frames): citadel 3.5-8.7 ms
-  of time of day per frame, single frames 13-29 ms.
-  A palette found pulsing is remembered per level, so a reload counts it as pulsing at once.
-- (AI-assisted, citadel) Config `tod_max_ms` (default 2, preset safe: 0): the most ms of rewrites
-  per frame (all levels). Groups 3 moves behind or with the file's colors wait beyond it instead
-  of being rewritten at once (the next frame's pass starts from them), the group pass's budget
-  stays between 0.8 of it and it, and a day move waits (up to 32 frames; a move of 8/64 or more
-  doesn't) until the vertices drawn could be rewritten once per move within 0.7 of it (citadel's
-  pulse: taken every ~8-12 frames; on its smoothly lit pixels 2% of the 2-frame steps are 5
-  levels or more against 0.1% exact, Azahar screenshots). Not exact: a GPU path (palette 1's
-  contribution per vertex, 4 bytes, mixed in the vertex shader with a uniform weight) would be,
-  for ~1.7 MB of linear memory in citadel (435k vertices). Firecanyon's lava
-  (palettes 4-7, 62% of its colors) and swamp's lightning (palette 2, 53%) move as day palettes;
-  without the limit single frames took 14-19 ms.
+- Removed Oct 23 (todlag): config `tod_busy_half` (sunken's cycling lights taken every second
+  frame), `tod_max_ms` (2 ms of rewrites per frame; a day move waited until the vertices drawn
+  could be rewritten within it; groups 3 moves behind or with the file's colors waited beyond
+  it), the 1.2 ms budget that left groups up to 2 moves behind, and title3's reveal spread (7 ms a
+  frame for 6 frames). On the title they left colors drawn 26 frames old on average (host, Azahar's
+  clock), 77% of the groups drawn 3+ frames old, a day move waiting in 188-427 of 289-449 level
+  draws, and groups with the file's baked colors drawn for 1-8 frames (streamed tie chunks, a
+  first-drawn shrub, 1431 groups for 2 frames at Sandover's reveal): the user's "visible lag" and
+  "parts of textures losing their tint for a frame or so".
+- (AI-assisted, citadel) Config `tod_pulse_step` (default 0 since Oct 23; an approximation): a day
+  palette that pulses (its weight turned around twice within 256 frames: citadel's palette 1, a
+  mood light that 71% of its colors use, moving 1/64 every ~2 frames) is taken only when it moved
+  that many 64ths from the weight last taken, or once it stood still for 8 frames. Not needed with
+  the cheaper rewrites (citadel below); on the title's fast day it took the day's own palettes for
+  pulsing and held them. A palette found pulsing is remembered per level.
 - A level's meshes are colored as they are read when weights are known for it (the weights it was
   last drawn with, or the last level's with the same day palettes); else they show the baked
   palette until drawn (then rewritten at once).
@@ -383,18 +378,23 @@ chunk 28 bytes, per group 12, per run 2, and the light lists: village1 600 KB, m
 458 KB, sunken 309 KB. On the 3DS a level whose table would leave less than 3 MB of heap free keeps
 its baked palette (`[ctr] <level>: no heap for the time of day colors`).
 
-Azahar (Oct 17, New 3DS, tod ms of the render thread per frame, average / most in one frame over
-25 s): title 7.5 / 16.7 (29.9 fps; the day moves nearly every frame there), village1 hut 1.9 / 2.2,
-Snowy 1.2 / 1.8, Volcanic Crater 0.7 / 1.7, sunkenb 5.6 / 9.5 (its cycling lights recolor about half
-of the vertices drawn every second frame), Misty 1.4 / 2.1. A group costs ~80 ns per vertex there.
+Azahar (Oct 23, todlag, New 3DS, preset normal, render thread per 15 s window; before: the
+oct23 build with tod_max_ms 2): title tod 1.4-2.0 -> 4.6-8.0 ms/frame (most 20.6 in one frame at
+Sandover's reveal behind the logo, else 12.6), render CPU 10.6-18.5 -> 14.1-20.4 ms, 29.9 fps in
+both (2 vblanks a frame); citadel tod 1.3-1.6 -> 5.6-8.3 ms (most 17.7), render CPU 15.8-17.7 ->
+19.8-24.7 ms, 29.9 fps (one 3-vblank frame in ~900); village1 hut idle tod 1.1 -> 1.0 ms. Before
+(Oct 17, older code): sunkenb 5.6 / 9.5 ms at half rate (tod_busy_half): ~2x the vertices now, at
+~40% of the cost per vertex (not measured since).
 
 Logs: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at load;
 `[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...); G
-groups rewritten, C chunks drawn behind; groups drawn behind by at most L day moves (...)` and
+groups rewritten, the table refreshed whole in F level draws; a pulsing palette held in H` and
 `[ctr] time of day ms/frame A, most B in one frame, N frames over 2 ms` with the stats. Host: env
 `CTR_TOD_LOG=1` (2: every frame) logs the weights; `CTR_TOD_CHECK=1` (2: a line per frame) checks
 every vertex drawn against the PC's blend (stale vertices, the largest error, those more than 4
-off); `CTR_TOD_BUDGET_MS` sets the budget. A 3DS build with `CTR_TOD_CHECK_BUILD=2` defined in
+off; the age in frames of the colors drawn: the newest of the last 64 frames' weights whose blend
+they show; groups drawn 3+ frames old or with the file's colors, which `CTR_TOD_CHECK=2` lists);
+`CTR_TOD_TIME_SCALE=10` scales the time of day's ms in the statistics (the host is ~10x Azahar). A 3DS build with `CTR_TOD_CHECK_BUILD=2` defined in
 CtrLevel.cpp runs the check every 16th frame. The pad script command `tod H` sets the game's clock
 (pictures at a time of day).
 
