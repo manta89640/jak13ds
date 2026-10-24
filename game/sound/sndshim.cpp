@@ -43,6 +43,22 @@ bool snd_HasOutput() {
 #endif
 }
 
+void snd_LockVoiceWrites() {
+#ifdef __3DS__
+  if (player) {
+    player->LockVoices();
+  }
+#endif
+}
+
+void snd_UnlockVoiceWrites() {
+#ifdef __3DS__
+  if (player) {
+    player->UnlockVoices();
+  }
+#endif
+}
+
 // dma is always instant, allocation not required
 s32 snd_GetFreeSPUDMA() {
   return 0;
@@ -314,13 +330,17 @@ s32 snd_GetVoiceStatus(s32 voice) {
 
 void snd_keyOnVoiceRaw(u32 core, u32 voice_id) {
   if (voices[0]) {
+    snd_LockVoiceWrites();  // (AI-assisted) between mixer chunks, see snd_LockVoiceWrites
     voices[0]->KeyOn();
+    snd_UnlockVoiceWrites();
   }
 }
 
 void snd_keyOffVoiceRaw(u32 core, u32 voice_id) {
   if (voices[0]) {
+    snd_LockVoiceWrites();  // (AI-assisted)
     voices[0]->KeyOff();
+    snd_UnlockVoiceWrites();
   }
 }
 

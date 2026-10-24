@@ -210,9 +210,12 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   {
     // (AI-assisted) particle_density: bursts and periodic emitters launch fewer particles. A
     // launch of exactly one particle stays: a glow or a sparkle relaunched every frame would
-    // blink, and a single particle is all of its effect.
+    // blink, and a single particle is all of its effect. So does a launch with a sound (birthinfo
+    // sound, set above): its accumulator advances per particle launched (below), so fewer
+    // particles played the sound less often (geyser, steam-release, fire-pop, spark, ...). Birth
+    // functions only set up the particle they get, so they go with the particles left out.
     const float d = particle_density();
-    if (d < 1.f && std::abs(births - 1.f) > 1e-3f) {
+    if (d < 1.f && std::abs(births - 1.f) > 1e-3f && gload<u32>(sp + 120) == 0) {
       births = births > 1.f ? std::max(1.f, births * d) : births * d;
     }
   }

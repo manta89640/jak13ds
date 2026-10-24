@@ -28,6 +28,14 @@ void snd_StopSoundSystem();
 // false when the sound system runs without audio output (3DS without the sound flag file or the
 // DSP firmware): the SPU voices never advance then.
 bool snd_HasOutput();
+// (AI-assisted) 3DS: the overlord's SPU voice register writes (sdshim.cpp: key on / off, start and
+// loop addresses; snd_keyOnVoiceRaw / snd_keyOffVoiceRaw) wait for the mixer between chunks. The
+// mixer (another core) runs a voice a chunk at a time with its decoder state in registers
+// (Voice::RunBlock), so a key on in the middle of it was undone or mixed with the old state: the
+// stream's play address (NAX) became garbage. No effect elsewhere (the host mixes sample by
+// sample).
+void snd_LockVoiceWrites();
+void snd_UnlockVoiceWrites();
 s32 snd_GetTick();
 void snd_RegisterIOPMemAllocator(AllocFun alloc, FreeFun free);
 int snd_LockVoiceAllocator(bool block);
