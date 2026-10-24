@@ -729,6 +729,7 @@ u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller) {
 // ---------------------------------------------------------------------------
 // (AI-assisted) verify mode for GOAL functions that natives run inline (native_verify_inline)
 // ---------------------------------------------------------------------------
+bool inline_instr_mode();
 namespace {
 struct InlineEntry {
   std::string name;
@@ -768,8 +769,8 @@ InlineEntry* inline_entry(const char* name) {
             "inline verify: {}: {} calls ({} with all of GOAL memory), {} mismatches; host "
             "instructions per call: native {:.0f}, GOAL {:.0f}",
             x->name, x->calls, x->full_checks, x->mismatches,
-            x->calls ? (double)x->instr_native / x->calls : 0.0,
-            x->calls ? (double)x->instr_goal / x->calls : 0.0);
+            x->calls ? (double)x->instr_native / (inline_instr_mode() ? (x->calls + 1) / 2 : x->calls) : 0.0,
+            x->calls ? (double)x->instr_goal / (inline_instr_mode() ? x->calls / 2 : x->calls) : 0.0);
       }
     });
   }
@@ -778,7 +779,22 @@ InlineEntry* inline_entry(const char* name) {
 }
 }  // namespace
 
+//! OPENGOAL_INLINE_INSTR=1 (host measuring aid, without verify mode): the inline call sites run the
+//! GOAL function and the native version on alternate calls and count each one's host instructions
+//! (the same results either way); a summary at exit
+bool inline_instr_mode() {
+  static int on = -1;
+  if (on < 0) {
+    const char* v = getenv("OPENGOAL_INLINE_INSTR");
+    on = (v && v[0] && v[0] != '0') ? 1 : 0;
+  }
+  return on == 1;
+}
+
 bool native_verify_inline_on() {
+  if (inline_instr_mode()) {
+    return !g_inline_active;
+  }
   // not inside a mips2c check (that one compares the caller as a whole) or another inline check
   return verify_enabled() && g_state == VerifyState::NONE && !g_inline_active;
 }
@@ -788,6 +804,16 @@ u64 native_verify_inline(const char* name,
                          const std::function<u64()>& native,
                          const std::function<u64()>& goal) {
   InlineEntry* e = inline_entry(name);
+  if (inline_instr_mode()) {
+    // alternate calls: native, GOAL (counted as calls / 2 each)
+    g_inline_active = true;
+    const bool use_native = (e->calls++ & 1) == 0;
+    const u64 i0 = thread_instructions();
+    const u64 r = use_native ? native() : goal();
+    (use_native ? e->instr_native : e->instr_goal) += thread_instructions() - i0;
+    g_inline_active = false;
+    return r;
+  }
   g_inline_active = true;
   e->calls++;
   // all of memory on one call in OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY (default 64: these run
