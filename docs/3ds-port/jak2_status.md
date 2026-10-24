@@ -30,6 +30,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | Memory cuts (j2-mem2, Oct 18) | Sparse VRAM copy, no Jak 1 code, impostors off, no RAMDISK, smaller stacks, 1.25 MB command buffer, linear 34 MB: route heap free 6.5-9.0 MB (was 2.5-3.5), linear free >= 3.4 MB except the market with ctyindb in view (1.8 MB, was 128 KB); section "Memory: heap and linear cuts" |
 | **Integration build, baseline D (Oct 22)** | **j2-title2 + j2-mem2 merged (144c36070b). Azahar: intro to the JAK II logo, title 29.1-29.7 fps, slums 29.5-29.6 fps (logic 22.5-23.3 ms), all route stops 29.6-29.7 fps; heap free 6.3-10.1 MB; 0 DSP drops. Staged in `port_test/3ds-sdcard-jak2-baseline-d`** (section below) |
 | Title intro's first frames (j2intro, Oct 24) | **Fixed:** the slums fly-through could start before ctysluma's background was read (ctywide's walls over a black void for ~2 s in baseline D's Azahar run). Jak II's level login now waits for the level's .c3l (as Jak 1), the .c3l is read from the DGO's start, a black hold covers what's late at the reveal; the title's loads went from ~20 s to ~9 s (section "Title intro: missing geometry") |
+| New game hang (j2hang, Oct 24) | **Fixed:** New Game -> slot could stay on "Saving data" for good: the menu dropped the save's done notify when the 3DS save worker finished after the menu's transition (section "New game: the save notify") |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -203,6 +204,55 @@ so the C modules are baseline C's (`j2mirror/out/jak2/csrc`, linked from a priva
   --compress --compress-vag`, preset normal, sound on): `cias/jak2.cia`, `3ds/jak2/` (gk.3dsx,
   config.ini, data: 754 files, byte-identical to baseline C's), README. gk.3dsx and the CIA are
   byte-identical to the build. Logs and screenshots: `port_test/reports/j2-baseline-d`.
+
+## New game: the save notify (j2hang, Oct 24)
+
+(AI-assisted.) **Report** (the user, Azahar, Japanese): "it hangs on the main menu when beginning a
+new game after selecting a save file".
+
+**Cause.** New Game -> a slot sets the progress menu's next state to `saving`, which starts the
+auto-save process; its `'notify 'done` makes the menu start the game (`progress-intro-start`).
+OpenGOAL changed that handler (progress.gc, "og:preserve-this patched to next instead of current
+because we save synchronously") to look at the menu's `next` state, since a PC save finishes within
+a frame or two, before the menu's transition moves `next` into `current` (~10 frames at 60 fps,
+~5 at 30: ~170 ms). The 3DS saves on a worker thread (kmemcard.cpp: SD writes while the game keeps
+running), and the auto-save first waits for the art buffer (`reserve-alloc`, not while a STR load
+RPC is busy). When the save ended after the transition, `next` was `none`, the notify matched
+nothing, and the menu stayed on "Saving data" forever (the save itself was written). The error
+notify had the same problem (no "error saving" screen). Language plays no part (host runs in
+English and Japanese take the same path); whether it hangs is a race against ~170 ms.
+
+**Evidence.**
+- Host (`build-host-small`, C mode, `jak2_newgame.pad`), new test hook `OPENGOAL_MC_SAVE_DELAY_MS=N`
+  (host only: a finished save reads BUSY for N ms, as the 3DS worker): baseline D's code with 600
+  ms: `DONE NOTIFY: ok saving` (the notify came with `current` = saving), then "Saving data" on
+  screen and Jak in target-title to the end (frame 3800). Without the delay: `DONE NOTIFY: ok
+  select-save-title`, the intro starts.
+- Azahar, the user's CIA (oct23b, compressed staging, sound on, instance muted, English, fresh SD,
+  Start pressed at the logo): no hang in that run: `[mc] save to slot 0 ... done on the worker
+  thread in 132 ms`, `DONE NOTIFY: ok select-save-title` (inside the window, barely).
+
+**Fix** (`goal_src/jak2/engine/ui/progress/progress.gc`): both notify cases use `next`, or
+`current` once `next` is `none` (the PS2 code used `current`). PC behaviour is unchanged (the
+notify still comes while `next` is set).
+
+**Checked.**
+- Host, fixed code, 600 ms delay: `DONE NOTIFY: ok saving` -> the intro (introcst, village1,
+  ctyindb, prison), Jak in target-stance in the prison after 8207 frames at (474.22, 8.42, 67.27),
+  the first auto-save's notice, Continue, the walk (Jak falls off the walkway: the prison's
+  gameplay).
+- Azahar (the fixed CIA, the oct23b data with the new GAME.CGO, `jak2_newgame_3ds.pad`; private
+  instance, sound on, muted): save 126 ms (`DONE NOTIFY: ok select-save-title`: fast this time),
+  the intro scenes play ("Sony Computer Entertainment America presents", subtitles), Jak in
+  target-stance in the prison after 8454 frames at the host's position; the auto-save notice is up
+  at the end (the pad's x came before it opened; now later in the pad).
+- `jak2_title_city.pad` (host): title, Jak at (1065.98, 0.52, 194.46) target-hide as before. Jak 1
+  host `level_pairs.pad` on proj-final: exit 0, 18 loads, 10 pairs (kmemcard.cpp's hook is host
+  only and off without the variable). make_cia: 29 shaders, 31 system calls, all allowed.
+- The save worker (priority 0x3D on core 2, below the render thread 0x2F and the level loaders
+  0x3B/0x3C): 126-132 ms from `[mc] save to slot N (worker thread)` to its done line in both
+  Azahar runs at the title menu. With the fix a slower save only keeps "Saving data" up longer;
+  its priority is unchanged (shared with Jak 1's autosaves).
 
 ## Title intro on the 3DS (j2-title2, Oct 18)
 
