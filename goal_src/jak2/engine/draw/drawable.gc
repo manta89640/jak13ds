@@ -1879,6 +1879,10 @@
   (none)
   )
 
+;; 3DS port (AI-assisted): the 60 Hz vblanks the last frame took (kmachine.cpp)
+(#when TARGET_3DS
+  (define-extern pc-3ds-frame-vblanks (function int)))
+
 ;; og:preserve-this pc port function
 (defun pc-maybe-vsync ()
   "PC Port implementation of the block of code in display-sync that computes frame-time-ratio and maybe vsyncs."
@@ -1888,7 +1892,12 @@
 
   (syncv 0) ;; sync always!
   ;(set! *ticks-per-frame* 9765) ;; hack!
-  1.0       ;; and report that we run at full speed.
+  ;; 3DS port (AI-assisted): the 3DS presents at 30 fps, two vblanks a frame. Report that as the
+  ;; dog ratio, like the PS2 did for a frame that took two vblanks, so the clocks advance 1/30 s per
+  ;; frame (at 1.0 the game ran at half speed).
+  (#if TARGET_3DS
+    (the float (pc-3ds-frame-vblanks))
+    1.0)       ;; and report that we run at full speed.
   )
 
 (defun display-sync ((arg0 display))
