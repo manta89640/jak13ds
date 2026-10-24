@@ -147,6 +147,7 @@ namespace jak2 {
 namespace pc_new_bones_mtx_calc { extern void link(); }  // (AI-assisted) 3DS
 namespace pc_new_joint_decompressor { extern void link(); }  // (AI-assisted) native_anim.cpp
 namespace pc_light_hash_add_lights { extern void link(); }  // (AI-assisted) native2_lights.cpp
+namespace pc_traffic_natives { extern void link(); }  // (AI-assisted) native2_traffic.cpp
 namespace mem_copy { extern void link(); }  // (AI-assisted) native2_misc.cpp
 namespace collide_do_primitives { extern void link(); }
 namespace moving_sphere_triangle_intersect { extern void link(); }
@@ -709,6 +710,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
       {jak2::add_light_sphere_to_light_group::link, jak2::light_hash_add_items::link,
        jak2::light_hash_count_items::link, jak2::light_hash_get_bucket_index::link}},
      {"drawable", {jak2::pc_light_hash_add_lights::link}},  // (AI-assisted)
+     {"traffic-engine", {jak2::pc_traffic_natives::link}},  // (AI-assisted)
      {"nav-control", {jak2::method_39_nav_state::link}},
      {"nav-mesh",
       {jak2::nav_state_patch_pointers::link, jak2::method_45_nav_mesh::link,
