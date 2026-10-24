@@ -5049,8 +5049,15 @@ constexpr float kHoldInView = 1.5f;
 // plane. Now a chunk's shrubs reach kShrubFarK x max_dist (~w: w / ((x + w) / 2) is 1.2-1.5 over
 // the table) and each run has its own limit between kShrubNearK of that (~x) and all of it, from
 // a hash of its index: the shrubs thin out over the PS2's fade zone instead of a patch at once.
+#ifdef __3DS__
 constexpr float kShrubFarK = 1.3f;
 constexpr float kShrubNearK = 0.55f;
+#else
+// host tests: env CTR_SHRUB_FAR_K / CTR_SHRUB_NEAR_K (1 and 1: the Oct 24 titlemove behaviour)
+static const float kShrubFarK = getenv("CTR_SHRUB_FAR_K") ? atof(getenv("CTR_SHRUB_FAR_K")) : 1.3f;
+static const float kShrubNearK =
+    getenv("CTR_SHRUB_NEAR_K") ? atof(getenv("CTR_SHRUB_NEAR_K")) : 0.55f;
+#endif
 inline float shrub_run_limit(float far, u32 run) {
   const float h = (float)((run * 2654435761u) >> 24) * (1.f / 256.f);
   return far * (kShrubNearK + (1.f - kShrubNearK) * h);
