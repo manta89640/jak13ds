@@ -248,6 +248,7 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/joint.cpp
         mips2c/jak2_functions/lights.cpp
         mips2c/jak2_functions/merc_blend_shape.cpp
+        mips2c/jak2_functions/native_anim.cpp
         mips2c/jak2_functions/native_bones.cpp
         mips2c/jak2_functions/native_collide_cache.cpp
         mips2c/jak2_functions/native_collide_func.cpp

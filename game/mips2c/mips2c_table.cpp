@@ -144,6 +144,7 @@ namespace generic_tie_convert { extern void link(); }
 #if !OPENGOAL_ONLY_JAK1
 namespace jak2 {
 namespace pc_new_bones_mtx_calc { extern void link(); }  // (AI-assisted) 3DS
+namespace pc_new_joint_decompressor { extern void link(); }  // (AI-assisted) native_anim.cpp
 namespace mem_copy { extern void link(); }  // (AI-assisted) native2_misc.cpp
 namespace collide_do_primitives { extern void link(); }
 namespace moving_sphere_triangle_intersect { extern void link(); }
@@ -643,7 +644,9 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
     {{"types-h", {jak2::mem_copy::link}},  // (AI-assisted) mem-copy! (native2_misc.cpp)
      {"collide-func",
       {jak2::collide_do_primitives::link, jak2::moving_sphere_triangle_intersect::link}},
-     {"joint", {jak2::calc_animation_from_spr::link, jak2::cspace_parented_transformq_joint::link}},
+     {"joint",
+      {jak2::calc_animation_from_spr::link, jak2::cspace_parented_transformq_joint::link,
+       jak2::pc_new_joint_decompressor::link}},
      {"font", {jak2::get_string_length::link, jak2::draw_string_asm::link}},
      {"texture", {jak2::adgif_shader_texture_with_update::link}},
      {"debug",
