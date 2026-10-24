@@ -726,6 +726,9 @@ every platform:
   `game/mips2c/native_goalc_ops.h`: goalc's C semantics (compares with a constant, int/float
   conversions, the PS2 divide) for natives that replace GOAL code. Host measuring aid:
   `OPENGOAL_PERF_INSTR=1` (macOS) logs the game thread's instructions and cycles per frame.
+- (AI-assisted, Oct 24) GOAL functions the particle natives call per particle, run in C++ by them:
+  sp-adjust-launch, sp-init-fields!, sp-get-particle (launcher), sp-orbiter and
+  sp-relaunch-particle-2d (process-block); performance.md "Particle launch and callbacks inline".
 - ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame),
   `ocean-generate-verts` (the wave texture's vertices, only with `ocean = full`)
 - shadows: `shadow-execute` (the EE half of the shadow volumes, with the 14 functions it calls and

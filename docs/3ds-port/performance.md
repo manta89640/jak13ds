@@ -1016,3 +1016,38 @@ a check-free write loop when many vertices are drawn (c3l_format.md "Time of day
 at 30 fps there is room: Azahar render CPU title 14.1-20.4 ms (was 10.6-18.5), citadel 19.8-24.7
 (was 15.8-17.7), 29.9 fps in both.
 
+
+## Particle launch and callbacks inline (AI-assisted, Oct 24, core-opt part B)
+
+The particle natives called five GOAL functions per particle through native_call_goal (an adapter
+thunk into goalc's C and back each time). They now run them in C++ while the symbols of the
+function and of what it calls still hold what they held at the first call (otherwise the GOAL
+call):
+
+| GOAL function | called by | C++ (file) | host instructions per call, GOAL / C++ (verify run) |
+|---|---|---|---|
+| sp-adjust-launch (sp-init-fields!, matrix-rotate-xyz! with sin / cos, vector3s products, the y rotation) | launcher | `native_sparticle_launcher.cpp` adjust_launch | 11883 / 2925 |
+| sp-init-fields! (3 per particle) | launcher | pc-sp-init-fields! directly (`native_sp_init_fields.h`) | the GOAL wrapper's hop |
+| sp-get-particle | launcher | `native_sp_init_fields.h` get_particle | 1821 / 1788 |
+| sp-orbiter (quaternion*!, quaternion-normalize!, quaternion->matrix, vector-matrix*!) | process-block | `native_sp_callbacks.cpp` | 2228 / 1966 |
+| sp-relaunch-particle-2d (+ sp-relaunch-setup-fields; the time of day color case stays GOAL: no test pad reaches it) | process-block | `native_sp_callbacks.cpp` | 17336 / 17011 (mostly the two field inits) |
+
+`native_goalc_ops.h` has goalc's C of sin, cos, the matrix-rotate functions, matrix*!,
+vector-matrix*!, vector-rotate*!, quaternion*!, quaternion-normalize! and quaternion->matrix (the
+same float operations per lane in the same order, vf0 as a multiply by a 1.0 the compiler can't
+fold). The launcher's scratch grew by 64 bytes for sp-adjust-launch's local launchinfo.
+
+**Identity**: verify mode (`OPENGOAL_MIPS2C_VERIFY=1`) runs the GOAL function and the C++ on the
+same state for every call (`native_verify_inline`: the particle, its sprite, the launch info,
+the VU0 random register, pc-rand's generator, the result; all of GOAL memory on one call in
+`OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY`, default 64). level_pairs.pad: get-particle 119k,
+adjust-launch 53k, orbiter 239k, relaunch 62k calls, 0 mismatches; mips2c verify 4.67M calls and
+sp-init-fields! 841k calls, 0 mismatches. A deliberate error put into each was reported at once
+(relaunch's at its 1002nd call, the first whose specs leave next-launcher alone), then removed.
+
+**Azahar** (one run, A/B in the same session: a test-only toggle, -DPARTB_AB=1, the pad's
+`log partb-off/on`; village2 dock standing, late-game state; 5 s perf lines, first of each window
+left out): logic 13.6 / 13.6 ms with the inline paths (a1, a2), 14.3 / 14.2 ms without (b1, b2):
+**0.7 ms less** (5%), steady to 0.1 ms within each window. Host (Mac, game thread instructions per
+frame, `OPENGOAL_PERF_INSTR=1`, jak1_calib_prof.pad): village2 2393k -> 2313k, swamp 2184k ->
+2100k, jungle 1868k -> 1847k (the scene's own variation is ~1-2%).
