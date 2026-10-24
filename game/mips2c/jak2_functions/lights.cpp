@@ -753,7 +753,9 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("light-hash-get-bucket-index", execute, 128);
+  // (AI-assisted) native version: native2_lights.cpp
+  gLinkedFunctionTable.reg("light-hash-get-bucket-index", execute, 128,
+                           &native2::light_hash_get_bucket_index);
 }
 
 } // namespace light_hash_get_bucket_index

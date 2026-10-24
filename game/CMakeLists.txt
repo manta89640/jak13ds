@@ -266,6 +266,7 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/native2_collide_hash.cpp
         mips2c/jak2_functions/native2_common.cpp
         mips2c/jak2_functions/native2_font.cpp
+        mips2c/jak2_functions/native2_lights.cpp
         mips2c/jak2_functions/native2_misc.cpp
         mips2c/jak2_functions/native2_sky.cpp
         mips2c/jak2_functions/native2_spatial_hash.cpp

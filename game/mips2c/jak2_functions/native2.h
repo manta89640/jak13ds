@@ -58,6 +58,9 @@ extern const NativeImpl draw_string_asm;
 // native2_misc.cpp
 extern const NativeImpl sparticle_motion_blur;
 extern const NativeImpl add_light_sphere_to_light_group;
+// native2_lights.cpp (AI-assisted)
+extern const NativeImpl light_hash_get_bucket_index;
+extern const NativeImpl pc_light_hash_add_lights;
 //! (mem-copy! dst src size), gcommon.gc (registered by mem_copy::link for the types-h module)
 extern const NativeImpl mem_copy;
 
