@@ -38,6 +38,7 @@ namespace jak1 {
 namespace draw_string { extern void link(); }
 namespace particle_adgif { extern void link(); }
 namespace sp_launch_particles_var { extern void link(); }
+namespace pc_sp_init_fields { extern void link(); }  // (AI-assisted) native_sp_init.cpp
 namespace sp_process_block_3d { extern void link(); }
 namespace sp_process_block_2d { extern void link(); }
 namespace draw_large_polygon { extern void link(); }
@@ -556,7 +557,9 @@ Rng gRng;
 PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2CLinkCallbacks = {
     //////// JAK 1
     {{"font", {jak1::draw_string::link}},
-     {"sparticle-launcher", {jak1::particle_adgif::link, jak1::sp_launch_particles_var::link}},
+     {"sparticle-launcher",
+      {jak1::particle_adgif::link, jak1::sp_launch_particles_var::link,
+       jak1::pc_sp_init_fields::link}},
      {"sparticle", {jak1::sp_process_block_3d::link, jak1::sp_process_block_2d::link}},
      {"texture", {jak1::adgif_shader_texture_with_update::link}},
      {"sky-tng",
