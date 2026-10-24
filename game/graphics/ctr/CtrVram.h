@@ -158,6 +158,7 @@ class CtrVram {
   void write_upload(const u8* src, u32 dest_block, u32 words);
   void write_rows(const u8* src, u32 dest_block, u32 words);
   void write_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
+  bool ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const;  // (AI-assisted)
   // write the pending uploads (all, or only those overlapping the given block ranges)
   void flush_pending();
   void flush_pending(u32 first_block, u32 end_block);

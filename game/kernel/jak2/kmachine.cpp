@@ -48,6 +48,8 @@
 
 using namespace ee;
 
+bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
+
 namespace jak2 {
 /*!
  * Initialize global variables based on command line parameters. Not called in retail versions,
@@ -546,6 +548,24 @@ u64 kopen(u32 fs, u32 name, u32 mode) {
   return fs;
 }
 
+// (AI-assisted, j2intro) level-update-after-load (TARGET_3DS) waits for the level's .c3l. Host
+// builds running the 3DS GOAL code (small memory) load a .c3l in the frame it's wanted (no loader
+// thread): nothing to wait for (as Jak 1's), unless the host's load model is on
+// (CTR_LOAD_DELAY_MS, --ctr-gfx: CtrLevel.cpp).
+u64 pc_3ds_level_ready(u32 name) {
+#ifndef __3DS__
+  // (CTR_LOAD_NO_WAIT: the model without the game's wait, the 3DS before j2intro)
+  static const bool sim =
+      getenv("CTR_LOAD_DELAY_MS") != nullptr && getenv("CTR_LOAD_NO_WAIT") == nullptr;
+  if (!sim) {
+    return offset_of_s7() + jak2_symbols::FIX_SYM_TRUE;
+  }
+#endif
+  return ctr_level_ready(Ptr<String>(name).c()->data())
+             ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE
+             : offset_of_s7();
+}
+
 void InitMachine_PCPort() {
   // PC Port added functions
   init_common_pc_port_functions(
@@ -562,6 +582,8 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("__pc-set-active-levels",
                               kmachine_extras::pc_set_active_levels);
   make_function_symbol_from_c("__pc-get-tex-remap", lookup_jak2_texture_dest_offset);
+  // (AI-assisted, j2intro) level-update-after-load waits for the 3DS renderer's .c3l of the level
+  make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
   make_function_symbol_from_c("pc-init-autosplitter-struct",
                               kmachine_extras::init_autosplit_struct);
 

@@ -23,6 +23,8 @@
 
 using namespace iop;
 
+void ctr_level_dgo_started(const char* dgo_name);  // game/graphics/ctr/CtrRenderer.cpp
+
 namespace jak2 {
 void spu_dma_hack();
 u32 DGOThread();
@@ -953,6 +955,9 @@ void LoadDGO(RPC_Dgo_Cmd* param_1) {
     param_1->result = 1;
   } else {
     CancelDGO(0);
+    // (AI-assisted, j2intro) the 3DS renderer reads the level's .c3l meanwhile (CtrRenderer.cpp;
+    // nothing without it: the PC renderers, the host without --ctr-gfx)
+    ::ctr_level_dgo_started(param_1->name);
     sLoadDgo.header.cmd_kind = 0x200;
     sLoadDgo.header.thread_id = 0;
     sLoadDgo.header.mbx_to_reply = dgo_mbx;

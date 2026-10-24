@@ -173,6 +173,9 @@ struct CtrLevelData {
   // (dormant_levels; CtrLevel.cpp "Dormant levels")
   bool dormant = false;
   u32 hidden_frames = 0;        // level draws in a row with its string all zero
+  // (AI-assisted, j2intro) the frame its string showed it again after it was dormant (a reveal: the
+  // title intro's first frame); CtrLevels::note_late_in_view
+  u64 shown_frame = 0;
   u32 vis_scan_bytes = UINT32_MAX;  // the string's bytes its ids are in (UINT32_MAX: not known yet)
   // per chunk (made at its first dormancy): kDormFreed its mesh freed for that, kDormReading being
   // read back; and the frame a chunk without its mesh began to be kept hidden in view (0: not)
@@ -406,6 +409,11 @@ class CtrLevels {
   /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
    * nothing to wait for (any thread). The game waits for this before a level starts. */
   bool ready(const std::string& name);
+  /*! (AI-assisted, j2intro) host, env CTR_LOAD_DELAY_MS (load_sim_on): the game thread waits in
+   * ready() without frames (Jak II's boot and play loops), and the host has no loader thread: run
+   * the queued loads, hand over the delayed ones whose time came (render thread idle) */
+  void host_service();
+  static bool load_sim_on();
   /*! (AI-assisted) The levels being drawn (render thread). */
   void loaded(std::vector<const CtrLevelData*>* out) const {
     out->clear();
@@ -437,6 +445,28 @@ class CtrLevels {
   /*! (AI-assisted, streaming) a jump of a level's tie LOD factor (the camera's focal length: a cut
    * to another camera, a zoom) */
   void stream_note_cut(u64 frame) { m_cut_frame = frame; }
+  /*! (AI-assisted, j2intro; Jak 1's title3 has the same) draw_level (Jak II): what of a level is
+   * missing in view this frame: tie LOD groups drawn far because their near chunks aren't there
+   * yet, and dormant tie chunks not read back yet (not drawn at all). recent: the level was shown
+   * again (its dormancy ended) within the last 3 s. The renderer keeps a screen that comes out of
+   * black black while there is such a thing after a level was shown or the camera cut
+   * (CtrRenderer::draw_pmode_fade), at most 1.5 s. */
+  void note_late_in_view(u64 frame, u32 n, bool recent) {
+    if (m_lv_frame != frame) {
+      m_lv_frame = frame;
+      m_lv_count = 0;
+      m_lv_recent = false;
+    }
+    m_lv_count += n;
+    m_lv_recent = m_lv_recent || recent;
+  }
+  //! this frame's count (note_late_in_view), and whether a level was shown or the camera cut
+  //! within the last 3 s
+  u32 late_in_view(u64 frame, bool* shown_or_cut) const {
+    const bool now = m_lv_frame == frame;
+    *shown_or_cut = (now && m_lv_recent) || (m_cut_frame && frame < m_cut_frame + 90);
+    return now ? m_lv_count : 0;
+  }
   /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
   void stream_log();
   /*! (AI-assisted, j2-mem) the levels' memory, the free linear memory and heap (render thread) */
@@ -590,6 +620,8 @@ class CtrLevels {
     u32 reads = 0;
     u32 preloads = 0, preload_misses = 0;  // (streaming) runs read in one request each, or not
     u64 ready_frame = 0;  // host, env CTR_STREAM_SIM: taken from this frame on (SD card model)
+    // (AI-assisted, j2intro) host, env CTR_LOAD_DELAY_MS: a level load handed over from then on
+    double sim_ready_ms = 0;
   };
   void request(const Job& job);  // render thread
   void run_job(const Job& job);  // loader thread (or inline without one)
@@ -684,10 +716,14 @@ class CtrLevels {
   u32 m_stream_repair_room = 0;
   u32 m_stream_serial = 0;
   std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
+  std::vector<Done> m_load_delayed;    // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS: the same
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
+  u64 m_lv_frame = 0;  // (AI-assisted, j2intro) note_late_in_view
+  u32 m_lv_count = 0;
+  bool m_lv_recent = false;
   u64 m_idle_frame = 0;        // the last idle fill job
   // Jak: camera space (stream_note_target, its frame), then world (stream_note_camera)
   float m_target_cam[3] = {0, 0, 0}, m_target[3] = {0, 0, 0};
@@ -753,6 +789,11 @@ void ctr_level_set_detail(float t);
 // (AI-assisted, title-popin) auto_detail: the GPU is over its budget (frames about to miss their
 // vblank): lower distances apply to what is in view too
 void ctr_level_set_detail_urgent(bool urgent);
+/*! (AI-assisted, j2intro; as Jak 1's title3) render thread, before the frame's level draws (Jak II):
+ * the screen is black this frame (the game's blackout, or the renderer holding it). Nothing is
+ * kept hidden or far "in view" for late data then (nobody saw it missing): dormant chunks read
+ * back and near chunks that came are drawn at once (CtrTfragRenderer::draw_level). */
+void ctr_level_set_screen_black(bool black);
 float ctr_level_detail();
 /*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
  * of auto_detail's build time). */
@@ -773,6 +814,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   void flush_calls(int pass);
   void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines
   int m_jak2_slot = -1;  // (AI-assisted) Jak II: the level slot being drawn (-1: Jak 1)
+  u32 m_late_in_view = 0;  // (AI-assisted, j2intro) draw_level: missing in view (note_late_in_view)
   // (AI-assisted, gpu-rt) static_cmdlists: a pass's draws, and each pass's command cache
   std::vector<ctr_mesh_call> m_calls;
   ctr_cmd_cache* m_cmd_cache[2] = {nullptr, nullptr};
