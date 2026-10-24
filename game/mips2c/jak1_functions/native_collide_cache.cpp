@@ -1552,10 +1552,15 @@ inline bool box_test(const BoxWalk& w, u32 addr) {
 
 void add_list_item(BoxWalk& w, u32 mesh, u32 inst) {
   const s32 n = gload<s32>(w.list);
-  if (n >= 256 && !g_collide_native.overflow_logged) {
-    // the original doesn't check either (it writes past *collide-list*): only log it
-    g_collide_native.overflow_logged = true;
-    printf("[collide] WARNING: *collide-list* overflow (%d items, 256 fit)\n", n + 1);
+  if (n >= 256) {
+    // (AI-assisted) the original doesn't check (it writes past *collide-list*, 256 items, into the
+    // global heap; a box with an inf radius from a NaN actor adds every fragment): drop the extra
+    // entries like the probe natives (kCollideListMax in native_collide_probe.cpp)
+    if (!g_collide_native.overflow_logged) {
+      g_collide_native.overflow_logged = true;
+      printf("[collide] WARNING: *collide-list* overflow (%d items, 256 fit), dropped\n", n + 1);
+    }
+    return;
   }
   const u32 item = w.list + 16 + ((u32)n << 4);
   gstore<u32>(item, mesh);
