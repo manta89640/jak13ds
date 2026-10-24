@@ -195,8 +195,9 @@ SFXBlock* SFXBlock::ReadBlock(std::span<u8> bank_data,
                               std::span<u8> samples,
                               std::unique_ptr<u8[]>* owner) {
   BinaryReader data(bank_data);
-  // auto block = std::make_unique<SFXBlock>();
-  auto block = new SFXBlock();
+  // (AI-assisted) owned until it is returned: an exception (bad_alloc) or a bad id frees it and the
+  // file buffer it took from *owner (a raw new leaked the whole bank file on every failed try)
+  auto block = std::make_unique<SFXBlock>();
   block->DataID = data.read<u32>();
   if (block->DataID != fourcc("SBlk")) {
     return nullptr;
@@ -320,7 +321,7 @@ SFXBlock* SFXBlock::ReadBlock(std::span<u8> bank_data,
     }
   }
 
-  return block;
+  return block.release();
 }
 
 MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
@@ -328,8 +329,8 @@ MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
                                std::span<u8> midi_data,
                                std::unique_ptr<u8[]>* owner) {
   BinaryReader data(bank_data);
-  // auto bank = std::make_unique<MusicBank>();
-  auto bank = new MusicBank();
+  // (AI-assisted) owned until it is returned, as in SFXBlock::ReadBlock
+  auto bank = std::make_unique<MusicBank>();
 
   bank->DataID = data.read<u32>();
   if (bank->DataID != fourcc("SBv2")) {
@@ -389,8 +390,8 @@ MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
     sound.Flags = data.read<u8>();
     data.read<u32>();  // midiblockptr
 
-    sound.Bank = bank;
-    sound.OrigBank = bank;
+    sound.Bank = bank.get();
+    sound.OrigBank = bank.get();
   }
 
   data.set_seek(FirstProg);
@@ -423,7 +424,7 @@ MusicBank* MusicBank::ReadBank(std::span<u8> bank_data,
     lg::error("Invalid midi\n");
   }
 
-  return bank;
+  return bank.release();
 }
 
 BankHandle Loader::BankLoad(std::span<u8> bank) {

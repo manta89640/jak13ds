@@ -31,6 +31,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrRendererJak2.h"
 #include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
@@ -628,6 +629,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         }
       }
     }
+    // (AI-assisted, j2gaps) Jak II: a menu opens; bucket 3 copies the last frame for its
+    // background before anything is drawn (CtrJak2BlitRenderer)
+    if (m_jak2 && ctr_jak2_frame_copies_screen(
+                      ee_mem, bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3),
+                      bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3 + 1))) {
+      covered = true;
+    }
     ctr_gpu_set_skip_color_clear(covered ? 1 : 0);
   }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
@@ -713,8 +721,24 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   if (gs.dropped_draws && ctr_settings().pipeline && !m_pipeline_off) {
     ctr_gpu_set_pipeline(0);
     m_pipeline_off = true;
-    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off from now on",
+    m_pipeline_calm = 0;
+    m_pipeline_retry_frames = std::min(m_pipeline_retry_frames * 2, 30 * 600);
+    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off for now",
              gs.dropped_draws);
+  } else if (m_pipeline_off && ctr_settings().pipeline) {
+    // (AI-assisted, j2gaps) one spike frame used to cost the CPU / GPU overlap for the rest of
+    // the session: back on after a run of frames whose commands fit well in a pipeline half
+    // (60%), waiting twice as long after each overflow; stays off without the linear memory
+    const u32 half_bytes = (u32)ctr_gpu_cmd_buffer_kb() * 1024 / 2;
+    m_pipeline_calm = gs.cmd_bytes < half_bytes * 6 / 10 ? m_pipeline_calm + 1 : 0;
+    if (m_pipeline_calm >= m_pipeline_retry_frames) {
+      m_pipeline_calm = 0;
+      if (ctr_gpu_set_pipeline(1)) {
+        m_pipeline_off = false;
+        lg::info("[ctr] pipeline: on again ({} frames fit in half the command buffer)",
+                 m_pipeline_retry_frames);
+      }
+    }
   }
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
@@ -928,6 +952,9 @@ void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
 // (AI-assisted) the Jak 1 3DS build has no Jak II tables (CtrRendererJak2.cpp)
 void CtrRenderer::prepare_textures(const void*, u32) {}
 void CtrRenderer::tex_frame_done_jak2() {}
+bool ctr_jak2_frame_copies_screen(const void*, u32, u32) {
+  return false;
+}
 #endif
 
 u32 CtrRenderer::bucket_tag(u32 chain_offset, int id) const {

@@ -226,6 +226,9 @@ int ctr_gpu_copy_screen(void);
  * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
  * keep what an earlier copy left: only read the screen in x0..x1. */
 int ctr_gpu_copy_screen_part(float x0, float x1);
+/* (AI-assisted, j2gaps) frees the screen copy's texture (the next copy makes it again): Jak II's
+ * menu keeps a copy of the game's last frame only while the menu shows it */
+void ctr_gpu_screen_copy_release(void);
 /* (AI-assisted) Render to texture (impostors, CtrImpostor): an RGBA8 texture the GPU draws into,
  * in VRAM when there is room (else linear memory: make it before the level texture pools fill
  * VRAM), and a D16 depth buffer for

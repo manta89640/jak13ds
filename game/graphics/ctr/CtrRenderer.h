@@ -233,6 +233,8 @@ class CtrRenderer {
   double m_profile_arm_ms = 0;            // when its measurement may start
   std::vector<std::string> m_profiled;    // levels measured already
   bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
+  int m_pipeline_calm = 0;           // (AI-assisted, j2gaps) frames since then that fit in a half
+  int m_pipeline_retry_frames = 450;  // calm frames before it goes on again (x2 per overflow)
   // (AI-assisted, j2intro) Jak II, draw_pmode_fade: the fade's alpha last shown (0: black); a screen
   // coming out of black kept black while a level just shown (or after a cut) misses something in
   // view (jak2_hold_black): since when, the most missing, the frames

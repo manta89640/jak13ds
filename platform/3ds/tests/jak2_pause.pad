@@ -1,0 +1,18 @@
+# (AI-assisted, j2gaps) Jak II pause menu: into the slums (as jak2_city.pad), then Start opens the
+# pause menu over the game's last frame (CtrJak2BlitRenderer: a copy of it at tbp 0x3300, which
+# the sky bucket draws tinted behind the menu, as the PC's BlitDisplays), Start again closes it.
+# Host: gk --ctr-gfx --ctr-dump <dir> (the shots), C mode or native.
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 log pause: ctysluma-start
+1300 shot pause_before
+1301 start
+1307 -
+1500 shot pause_menu
+1700 shot pause_menu_later
+1701 start
+1707 -
+1900 shot pause_after
+1901 pos *target*
+2000 exit

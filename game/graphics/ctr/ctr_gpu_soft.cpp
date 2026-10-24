@@ -1038,10 +1038,19 @@ int ctr_gpu_copy_screen_part(float x0, float x1) {
   return h;
 }
 
+static int s_screen_copy = -1;  // (AI-assisted) ctr_gpu_copy_screen's texture
+
+void ctr_gpu_screen_copy_release(void) {
+  if (s_screen_copy >= 0) {
+    ctr_gpu_tex_delete(s_screen_copy);
+    s_screen_copy = -1;
+  }
+}
+
 int ctr_gpu_copy_screen(void) {
   sky_hook(nullptr);
   if (softstats::enabled()) softstats::cur->copy_rows += 50;
-  static int handle = -1;
+  int& handle = s_screen_copy;
   if (handle < 0 || handle >= (int)g_soft.textures.size() || !g_soft.textures[handle].used ||
       g_soft.textures[handle].w != kW) {
     std::vector<uint8_t> empty(kW * kH * 4, 0);

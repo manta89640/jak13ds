@@ -245,8 +245,15 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
   // (AI-assisted) whole pages (a page row's blocks are spread over the page)
   const u32 end = dest_block + (height + 31) / 32 * std::max(1u, width / 64) * 32;
   // (AI-assisted, Jak II raw images) written now: page uploads still pending there are older and
-  // would overwrite it when a texture reads them; a page uploaded again later is written again
-  trim_pending(dest_block, end);
+  // would overwrite it when a texture reads them; a page uploaded again later is written again.
+  // (AI-assisted, j2gaps) Dropped only where the image covers whole page rows: an image less than
+  // 32 rows high (or not a multiple of 64 wide) leaves texels of its pages that the pending upload
+  // still has to write (they stayed stale), so the overlapping pending chunks are written first.
+  if (height % 32 == 0 && width % 64 == 0) {
+    trim_pending(dest_block, end);
+  } else {
+    flush_pending(dest_block, end);
+  }
   forget_uploads(dest_block, end);
   // (AI-assisted, j2intro) the same image again (draw-raw-image sends the Dolby / title screen
   // cards every frame for seconds while the title's levels load): VRAM already holds it, so the
@@ -1070,6 +1077,18 @@ void CtrVram::set_override(u32 tbp, int w, int h, const u32* rgba) {
   t.h = h;
   t.handle = ctr_gpu_tex_create(w, h, (const uint8_t*)rgba);
   m_overrides[tbp] = t;
+}
+
+void CtrVram::clear_override(u32 tbp) {
+  auto it = m_overrides.find(tbp);
+  if (it == m_overrides.end()) {
+    return;
+  }
+  if (it->second.handle >= 0 && !m_borrowed[tbp]) {
+    ctr_gpu_tex_delete(it->second.handle);
+  }
+  m_borrowed.erase(tbp);
+  m_overrides.erase(it);
 }
 
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
