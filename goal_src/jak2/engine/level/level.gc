@@ -1102,6 +1102,11 @@ into 7 sections, which might explain the weird sizes in the center.
   this
   )
 
+;; (AI-assisted, j2intro) the 3DS renderer's background (.c3l) of a level is in (game/kernel/jak2/
+;; kmachine.cpp: ctr_level_ready; always #t on other builds)
+(#when TARGET_3DS
+  (define-extern pc-3ds-level-ready? (function string symbol)))
+
 (defun level-update-after-load ((lev level) (lstate login-state))
   "Make progress on login.
    Will set status to loaded when done."
@@ -1342,6 +1347,16 @@ into 7 sections, which might explain the weird sizes in the center.
     )
 
   ;; final!
+
+  ;; (AI-assisted, j2intro) 3DS: the renderer reads the level's background (.c3l, started with its
+  ;; DGO) meanwhile, which takes seconds on the SD card. Stay in login until it is in, so the level
+  ;; isn't shown (or a scene started in it: the title intro's slums waits for ctysluma 'active) with
+  ;; its background missing. Called again every frame (load-continue); the renderer stops waiting
+  ;; after 20 s. As Jak 1's level-update-after-load.
+  (#when TARGET_3DS
+    (when (not (pc-3ds-level-ready? (symbol->string (-> lev name))))
+      (return lev)))
+
 
   ;; name
   (set! (-> lev nickname) (-> lev bsp nickname))

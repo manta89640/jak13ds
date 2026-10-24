@@ -260,6 +260,11 @@ CtrLevels::~CtrLevels() {
     }
     delete_parts(d);
   }
+  for (auto& d : m_load_delayed) {  // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS
+    if (d.lev) {
+      unload(*d.lev);
+    }
+  }
   for (auto& [name, p] : m_prefetched) {
     unload(*p.lev);
   }
@@ -308,8 +313,11 @@ bool CtrLevels::can_start(const Job& job) const {
     parked++;
   }
   // a prefetch waits while two levels that matter are loaded (the game has two level slots, so
-  // the level it replaces is still in memory)
-  return !job.prefetch || m_levels_count + parked < 2;
+  // the level it replaces is still in memory). (AI-assisted, j2intro) Jak II has six: its title
+  // loads title, ctywide, lwidea and ctysluma one after the other, each prefetched with its DGO
+  // and waited for (pc-3ds-level-ready?); lwidea's waited 20 s behind title + ctywide.
+  const int slots = g_game_version == GameVersion::Jak2 ? CtrJak2Vis::kSlots : 2;
+  return !job.prefetch || m_levels_count + parked < slots;
 }
 
 void CtrLevels::loader_main() {
@@ -370,6 +378,10 @@ void CtrLevels::loader_main() {
   }
 }
 
+namespace {
+double load_sim_delay_ms(const std::string& name);  // (AI-assisted, j2intro) below
+}  // namespace
+
 void CtrLevels::run_job(const Job& job) {
   Done d;
   d.job = job;
@@ -396,6 +408,12 @@ void CtrLevels::run_job(const Job& job) {
   }
   if (!job.parts() && d.result != LoadResult::LOADED) {
     d.lev.reset();
+  }
+  if (!job.stream && !job.parts() && !job.common && d.result == LoadResult::LOADED) {
+    // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS: handed over this much later
+    if (const double ms = load_sim_delay_ms(job.name); ms > 0) {
+      d.sim_ready_ms = ctr_gpu_time_ms() + ms;
+    }
   }
 #ifdef __3DS__
   if (d.result == LoadResult::FAILED) {
@@ -442,12 +460,85 @@ bool CtrLevels::ready(const std::string& name) {
     return true;
   }
   for (const auto& d : m_done) {
-    if (d.job.name == name && !d.job.parts()) {
+    // (AI-assisted, j2intro: sim_ready_ms, host only, CTR_LOAD_DELAY_MS)
+    if (d.job.name == name && !d.job.parts() && d.sim_ready_ms <= ctr_gpu_time_ms()) {
       m_promised[name] = ctr_gpu_time_ms();
       return true;  // read (or failed); the render thread takes it at its next frame
     }
   }
   return m_requested.count(name) == 0;  // queued or loading: wait
+}
+
+// (AI-assisted, j2intro) Host model of slow level loads (the 3DS reads a .c3l from the SD card in
+// seconds; the host in milliseconds, in the frame it's wanted): env CTR_LOAD_DELAY_MS =
+// "level:ms,level:ms" or "*:ms" (all levels). A level load is handed over (ready(), the render
+// thread's take) that long after it ran. Reproduces a level shown before its background is in
+// (Jak II's title intro, j2intro) and the game's wait for it (pc-3ds-level-ready? on the host
+// follows ready() while this is set).
+namespace {
+double load_sim_delay_ms(const std::string& name) {
+#ifdef __3DS__
+  (void)name;
+  return 0;
+#else
+  static const char* env = getenv("CTR_LOAD_DELAY_MS");
+  if (!env) {
+    return 0;
+  }
+  std::string e(env);
+  size_t p = 0;
+  while (p < e.size()) {
+    size_t q = e.find(',', p);
+    if (q == std::string::npos) {
+      q = e.size();
+    }
+    const std::string item = e.substr(p, q - p);
+    const size_t c = item.find(':');
+    if (c != std::string::npos && (item.substr(0, c) == name || item.substr(0, c) == "*")) {
+      return atof(item.c_str() + c + 1);
+    }
+    p = q + 1;
+  }
+  return 0;
+#endif
+}
+}  // namespace
+
+bool CtrLevels::load_sim_on() {
+#ifdef __3DS__
+  return false;
+#else
+  static const bool on = getenv("CTR_LOAD_DELAY_MS") != nullptr;
+  return on;
+#endif
+}
+
+void CtrLevels::host_service() {
+  if (m_thread || !load_sim_on()) {
+    return;
+  }
+  for (;;) {
+    Job job;
+    {
+      std::lock_guard<std::mutex> lk(m_lock);
+      if (m_queue.empty()) {
+        break;
+      }
+      job = m_queue.front();
+      m_queue.pop_front();
+    }
+    run_job(job);
+  }
+  std::lock_guard<std::mutex> lk(m_lock);
+  const double now = ctr_gpu_time_ms();
+  for (auto it = m_load_delayed.begin(); it != m_load_delayed.end();) {
+    if (it->sim_ready_ms <= now) {
+      m_done.push_back(std::move(*it));  // (its key stays requested until the frame takes it)
+      it = m_load_delayed.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void CtrLevels::prefetch(const std::string& name) {
@@ -3618,6 +3709,32 @@ void CtrLevels::process_pending_loads(u64 frame) {
     }
   }
 #endif
+#ifndef __3DS__
+  if (load_sim_on()) {
+    // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS: level loads whose time hasn't come wait (still
+    // requested: ready() says no), the others are taken now
+    const double tnow = ctr_gpu_time_ms();
+    std::lock_guard<std::mutex> lk(m_lock);
+    for (auto it = done.begin(); it != done.end();) {
+      if (it->sim_ready_ms > tnow) {
+        m_requested.insert(it->job.key());
+        m_load_delayed.push_back(std::move(*it));
+        it = done.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = m_load_delayed.begin(); it != m_load_delayed.end();) {
+      if (it->sim_ready_ms <= tnow) {
+        m_requested.erase(it->job.key());
+        done.push_back(std::move(*it));
+        it = m_load_delayed.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+#endif
   bool levels_changed = false;
   bool unloaded = false;
   const double now = ctr_gpu_time_ms();
@@ -5171,6 +5288,8 @@ bool outside_detail(const CtrLevelData& l, const float* s, float margin) {
 float g_detail_t = 0.25f;
 // (AI-assisted, title-popin) auto_detail: the GPU is about to miss frames (ctr_level_set_detail_urgent)
 bool g_detail_urgent = false;
+// (AI-assisted, j2intro) the screen is black this frame (ctr_level_set_screen_black; Jak II only)
+bool g_screen_black = false;
 // (AI-assisted, title-popin) the auto_detail position as stored per chunk / tie LOD group
 // (CtrLevelData::chunk_detail_q): 0..kDetailQ, 0xff none yet
 constexpr float kDetailQ = 250.f;
@@ -5495,6 +5614,10 @@ void ctr_level_set_detail_urgent(bool urgent) {
   g_detail_urgent = urgent;
 }
 
+void ctr_level_set_screen_black(bool black) {
+  g_screen_black = black;
+}
+
 float ctr_level_detail() {
   return g_detail_t;
 }
@@ -5773,6 +5896,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrRenderState& rs) {
   const CtrSettings& settings = ctr_settings();
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
+  m_late_in_view = 0;  // (AI-assisted, j2intro) counted below, reported after the chunk loop
   // (AI-assisted) c3l v16 time of day: blend the level's colors with the game's weights when they
   // moved (the chunks are recolored as they are drawn, emit_chunk)
   u64 tod_verts = 0;
@@ -5881,6 +6005,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                  kDormantFrames);
       } else if (!j2_hidden && lev.dormant) {
         lev.dormant = false;
+        lev.shown_frame = std::max<u64>(rs.frame_idx, 1);  // (AI-assisted, j2intro) a reveal
         lg::info("[ctr] {}: shown by the visibility string again (camera {:.0f} {:.0f} {:.0f} m)",
                  lev.name, cam.trans.x() / 4096.f, cam.trans.y() / 4096.f, cam.trans.z() / 4096.f);
       }
@@ -6298,11 +6423,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                   m_levels->stream_late(lev, gu[j], rs.frame_idx);
                 }
               }
-              if (!keep_far && sphere_in_view(cam, lg.bsphere)) {
+              const bool seen = sphere_in_view(cam, lg.bsphere);
+              m_late_in_view += seen;  // (AI-assisted, j2intro)
+              // (AI-assisted, j2intro) not while the screen is black (Jak II): it switches as soon
+              // as the data is there
+              if (!keep_far && !g_screen_black && seen) {
                 keep_far = true;
                 lev.lod_hold_since[g] = (u32)rs.frame_idx;
               }
             }
+          } else if (keep_far && g_screen_black) {
+            keep_far = false;  // (AI-assisted, j2intro) black screen: near at once
           } else if (keep_far) {
             // kept far while in view, at most kHoldFrames, and while the switch would show: the
             // far version's error at least 1.5 x tie_lod_px (the camera nearer than 2/3 of the
@@ -6651,7 +6782,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         if (meshes[ci] < 0) {
           hold = seen ? (hold ? hold : frame32) : 0;
           m_levels->stream_check().dorm_missing += seen;
-        } else if (seen && frame32 - hold < kDormantHoldFrames) {
+          m_late_in_view += seen;  // (AI-assisted, j2intro)
+        } else if (seen && !g_screen_black && frame32 - hold < kDormantHoldFrames) {
+          // (AI-assisted, j2intro: not while the screen is black: nobody saw it missing)
           continue;
         } else {
           m_levels->stream_check().dorm_switch_in_view += seen;
@@ -6723,6 +6856,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       continue;
     }
     emit_chunk(ci, vista_chunk);
+  }
+  if (m_jak2_slot >= 0) {
+    // (AI-assisted, j2intro) Jak II: what is missing in view (late tie LOD groups, dormant chunks
+    // not back yet), for the renderer's black hold after a reveal or a cut
+    m_levels->note_late_in_view(rs.frame_idx, m_late_in_view,
+                                lev.shown_frame && rs.frame_idx < lev.shown_frame + 90);
   }
   // (AI-assisted) the vista tier: where its source chunks aren't drawn, up to vista_distance
   if (lev.has_vista && vista_dist > 0) {

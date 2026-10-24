@@ -233,6 +233,15 @@ class CtrRenderer {
   double m_profile_arm_ms = 0;            // when its measurement may start
   std::vector<std::string> m_profiled;    // levels measured already
   bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
+  // (AI-assisted, j2intro) Jak II, draw_pmode_fade: the fade's alpha last shown (0: black); a screen
+  // coming out of black kept black while a level just shown (or after a cut) misses something in
+  // view (jak2_hold_black): since when, the most missing, the frames
+  float jak2_hold_black(float alp);
+  float m_shown_alp = 1.f;
+  bool m_hold_black = false;
+  bool m_hold_ramp = false;  // after the hold: faded in from black (1/8 a frame), not cut in
+  double m_hold_t0 = 0;
+  u32 m_hold_late = 0, m_hold_frames = 0;
   // (AI-assisted) config.ini gpu_counters: the GPU's own counters over every stats window, with
   // everything drawn (gpu_profile measures them in its own way)
   void hw_counters_frame();

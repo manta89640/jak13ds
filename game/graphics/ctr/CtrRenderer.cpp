@@ -675,6 +675,11 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     g_pad_shot.clear();
   }
   if (m_jak2) {
+    // (AI-assisted, j2intro) the screen is black this frame (the game's blackout since the last
+    // frame, or held black by draw_pmode_fade): the level draws keep nothing hidden for late data
+    ctr_level_set_screen_black(
+        m_hold_black ||
+        (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f));
     dispatch_buckets_jak2(DmaFollower(ee_mem, chain_offset));
   } else {
     dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
@@ -1157,7 +1162,10 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
 // the frame by it): the game's fades and blackouts, e.g. at boot before the logo and while a level
 // loads. Drawn last, a black screen-sized quad with alpha 1 - alp.
 void CtrRenderer::draw_pmode_fade() {
-  const float alp = std::clamp(g_pmode_alp.load(std::memory_order_relaxed), 0.f, 1.f);
+  float alp = std::clamp(g_pmode_alp.load(std::memory_order_relaxed), 0.f, 1.f);
+  if (m_jak2) {
+    alp = jak2_hold_black(alp);  // (AI-assisted, j2intro)
+  }
   if (alp >= 0.999f) {
     return;
   }
@@ -1180,6 +1188,46 @@ void CtrRenderer::draw_pmode_fade() {
     v[i].a = a;
   }
   ctr_gpu_draw(&st, v, 6);
+}
+
+// (AI-assisted, j2intro; Jak 1's title3 does the same) Jak II: a screen coming out of black (the
+// game's blackout before the title intro, a continue, a level start) stays black while, within 3 s
+// of a level shown again (dormant) or of a camera cut, something in view is missing: tie LOD groups
+// drawn far for want of their near chunks, dormant tie chunks not read back yet
+// (CtrLevels::note_late_in_view). Its first visible frame is complete, not filling in on screen.
+// At most kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
+// follows its voice stream): only the picture waits.
+float CtrRenderer::jak2_hold_black(float alp) {
+  constexpr double kMaxHoldMs = 1500.0;
+  bool shown_or_cut = false;
+  const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
+  const double now = ctr_gpu_time_ms();
+  if (!m_hold_black && m_shown_alp < 0.01f && alp >= 0.01f && late > 0 && shown_or_cut) {
+    m_hold_black = true;
+    m_hold_t0 = now;
+    m_hold_late = 0;
+    m_hold_frames = 0;
+  }
+  if (m_hold_black) {
+    m_hold_late = std::max(m_hold_late, late);
+    if (late == 0 || now - m_hold_t0 >= kMaxHoldMs) {
+      m_hold_black = false;
+      m_hold_ramp = true;
+      lg::info("[ctr] screen kept black {:.0f} ms ({} frames) for what is missing in view{} (at most "
+               "{} tie LOD groups drawn far / dormant chunks not back)",
+               now - m_hold_t0, m_hold_frames, late ? ", given up" : "", m_hold_late);
+    } else {
+      m_hold_frames++;
+      alp = 0.f;
+    }
+  }
+  if (m_hold_ramp && !m_hold_black) {
+    const float game_alp = alp;
+    alp = std::min(alp, m_shown_alp + 0.125f);
+    m_hold_ramp = alp < game_alp;
+  }
+  m_shown_alp = alp;
+  return alp;
 }
 
 void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
@@ -1603,6 +1651,14 @@ bool ctr_level_ready(const char* name) {
     wait_render_idle();
     g_ctr->levels().service();
   }
+#ifndef __3DS__
+  if (CtrLevels::load_sim_on()) {
+    // (AI-assisted, j2intro) host load model: no loader thread, and the game may wait here without
+    // drawing frames
+    wait_render_idle();
+    g_ctr->levels().host_service();
+  }
+#endif
   if (g_ctr->levels().ready(n)) {
     // (AI-assisted) how long the game waited for the .c3l after its DGO was in
     auto w = waiting_since.find(n);
@@ -1650,6 +1706,15 @@ void ctr_level_dgo_started(const char* dgo_name) {
       {"TSZ", "test-zone"},
   };
   if (!dgo_name || !g_ctr_ready) {
+    return;
+  }
+  if (g_is_jak2) {
+    // (AI-assisted, j2intro) Jak II's DGO names (CtrLevel.cpp's table). Its level-update-after-load
+    // waits for the .c3l (TARGET_3DS) and reports a level to set_levels only once it's loaded:
+    // without this the .c3l of a level would only be asked for by the wait's timeout.
+    if (const char* level = ctr_jak2_level_for_dgo(dgo_name)) {
+      g_ctr->levels().prefetch(level);
+    }
     return;
   }
   // the game asks for "vi1.DGO"

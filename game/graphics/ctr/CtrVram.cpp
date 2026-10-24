@@ -248,6 +248,22 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
   // would overwrite it when a texture reads them; a page uploaded again later is written again
   trim_pending(dest_block, end);
   forget_uploads(dest_block, end);
+  // (AI-assisted, j2intro) the same image again (draw-raw-image sends the Dolby / title screen
+  // cards every frame for seconds while the title's levels load): VRAM already holds it, so the
+  // textures decoded from it stay valid. Rewriting it made a new copy of its chunks' ids and the
+  // 512 x 416 card was decoded again every frame: Azahar's tex bucket 76 ms a frame, the render
+  // thread starving the level loader on its core (the .c3l loads of the title took 8-11 s).
+  const bool same = ct32_same(data, dest_block, width, height);
+#ifndef __3DS__
+  static const bool log_up = getenv("CTR_UPLOAD_LOG") != nullptr;  // host diagnosis
+  if (log_up) {
+    lg::info("[ctr] raw image {}x{} at {}: {}", width, height, dest_block,
+             same ? "unchanged, not written" : "written");
+  }
+#endif
+  if (same) {
+    return;
+  }
   write_ct32(data, dest_block, width, height);
   if (m_jak2_remap) {
     // no page textures (with moved dests) there any more
@@ -256,6 +272,27 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
   }
   mark_unique(dest_block, end);
   note_write(dest_block, end);
+}
+
+// (AI-assisted, j2intro) VRAM holds this CT32 image at dest_block already (write_ct32's layout)
+bool CtrVram::ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const {
+  const u32 pages_per_row = std::max(1u, width / 64);
+  const u32 base = dest_block * kBlockBytes;
+  const View v = view();
+  for (u32 y = 0; y < height; y++) {
+    const u32 page_row = (y / 32) * pages_per_row;
+    const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
+    const u8* src_row = data + 4 * y * width;
+    for (u32 x = 0; x < width; x++) {
+      const u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
+      u32 s;
+      memcpy(&s, src_row + 4 * x, 4);
+      if (v.rd32(addr) != s) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 void CtrVram::mark_unique(u32 first_block, u32 end_block) {

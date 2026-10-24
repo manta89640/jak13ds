@@ -29,6 +29,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | Title intro (j2-title2, Oct 18) | **Fixed:** the intro (slums fly-through, Sony / Naughty Dog cards, JAK II logo from ~frame 1050) plays in Azahar as on the host; the cause was the 3DS mixer racing the overlord's SPU voice writes (section "Title intro on the 3DS") |
 | Memory cuts (j2-mem2, Oct 18) | Sparse VRAM copy, no Jak 1 code, impostors off, no RAMDISK, smaller stacks, 1.25 MB command buffer, linear 34 MB: route heap free 6.5-9.0 MB (was 2.5-3.5), linear free >= 3.4 MB except the market with ctyindb in view (1.8 MB, was 128 KB); section "Memory: heap and linear cuts" |
 | **Integration build, baseline D (Oct 22)** | **j2-title2 + j2-mem2 merged (144c36070b). Azahar: intro to the JAK II logo, title 29.1-29.7 fps, slums 29.5-29.6 fps (logic 22.5-23.3 ms), all route stops 29.6-29.7 fps; heap free 6.3-10.1 MB; 0 DSP drops. Staged in `port_test/3ds-sdcard-jak2-baseline-d`** (section below) |
+| Title intro's first frames (j2intro, Oct 24) | **Fixed:** the slums fly-through could start before ctysluma's background was read (ctywide's walls over a black void for ~2 s in baseline D's Azahar run). Jak II's level login now waits for the level's .c3l (as Jak 1), the .c3l is read from the DGO's start, a black hold covers what's late at the reveal; the title's loads went from ~20 s to ~9 s (section "Title intro: missing geometry") |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -244,6 +245,83 @@ card (750), the city (900), the JAK II logo from 1050 with "Press the Start Butt
 27-29.7 fps with logic 25-28 ms (the scene now runs: baseline C's frozen title had 15 ms), then
 the city as before (Jak at (1065.98, 0.52, 194.46) in target-hide, guard lines kg010 / kg015, 0
 DSP drops). Screens: `port_test/reports/j2-title2`.
+
+## Title intro: missing geometry at the start (j2intro, Oct 24)
+
+(AI-assisted.) **Report** (user, Azahar, Japanese): "in the game intro, haven city is initially
+displayed with lots of missing geometry".
+
+**What was missing:** the slums themselves (ctysluma: houses, street, the tower) for the first
+seconds of `title-disk-intro`. Only ctywide was drawn (the city wall, the billboards, the sky), with
+black below it and citizens floating in it. Baseline D's Azahar log: the intro's voice stream (and
+with it the scene) started at 54:28, and ctysluma's .c3l came in at 54:30, so the scene was ~2 s in.
+In this session's Azahar run of the user's CIA (oct23b), ctysluma happened to arrive 5 s before the
+intro, so the frames were complete: it's a race. The host loads a .c3l in the frame it's wanted, so
+it never shows this. A host model of the SD card's load time (`CTR_LOAD_DELAY_MS`, below) reproduces
+it every time: `reports/j2intro/host_sdmodel_before_*.png`.
+
+**Why:**
+1. Jak II never waited for a level's background. Jak 1's `level-update-after-load` waits for
+   `pc-3ds-level-ready?`, but Jak II didn't call it. Jak II also reports a level to the renderer
+   (`__pc-set-levels`) only once it is `loaded`, so the .c3l read only began after the DGO was
+   in and logged in. The title waits for ctysluma and ctywide to be `active`, then starts the scene
+   at once.
+2. The .c3l reads were slow at the title: ctywide 9-10 s, lwidea 2.3 s, ctysluma 7.8-11.3 s, one
+   after the other. The level loader runs on core 2 below the render thread. The render thread
+   spent 76 ms a frame in the tex bucket on the Dolby card, so the loader starved:
+   `draw-raw-image` sends the 512 x 416 card every frame, and `CtrVram::upload_ct32` rewrote it.
+   That gave its chunks new ids, so the card was decoded again every frame.
+3. At the reveal: ctywide went dormant before the intro (its string was all zero for 90 frames), so
+   its 36 freed tie chunks were read back after the cut. The near versions of the tie LOD groups in
+   view were also late after the cut (Azahar ~400 ms). Without a black screen, j2-mem's and
+   streaming's holds kept them hidden or far in view for up to 4 s.
+
+**Fix:**
+- `goal_src/jak2/engine/level/level.gc` (TARGET_3DS): `level-update-after-load` stays in login
+  until `pc-3ds-level-ready?` (game/kernel/jak2/kmachine.cpp -> `ctr_level_ready`, at most 20 s
+  per level). The scene starts when the levels are in, and the stream starts with the scene, so
+  the audio stays in sync.
+- The .c3l is read from the start of the level's DGO. The Jak II overlord's `LoadDGO` calls
+  `ctr_level_dgo_started`, which maps the name through `ctr_jak2_level_for_dgo` and prefetches.
+  Without this, a level waiting in login would never be asked for. Jak II's prefetches aren't
+  limited to Jak 1's two level slots (`can_start`: 6 for Jak II). With two, lwidea waited 20 s
+  behind title + ctywide.
+- `CtrVram::upload_ct32`: an image that is already in VRAM (`ct32_same`) isn't written again, so
+  the textures decoded from it stay valid.
+- Black hold (Jak II; Jak 1's title3 does the same on batch-oct11): `CtrRenderer::jak2_hold_black`.
+  A screen coming out of the game's black (pmode alpha = 1 - bg-a: blackouts and fades) within 3 s
+  of a level shown again (dormancy ended) or a camera cut stays black while something in view is
+  missing: tie LOD groups drawn far for late near chunks, or dormant chunks not back
+  (`CtrLevels::note_late_in_view`). At most 1.5 s, then a fade in over 8 frames. While the screen
+  is black (`ctr_level_set_screen_black`), nothing is kept hidden or far in view for late data.
+  The game runs on behind the black, so the scene clock (the voice stream) isn't touched.
+- Host model `CTR_LOAD_DELAY_MS="level:ms,..."` or `"*:ms"`: a level load is handed over that long
+  after it ran; with it the host's `pc-3ds-level-ready?` follows `ready()`. `CTR_LOAD_NO_WAIT=1`
+  gives the model without the game's wait, i.e. the 3DS before this fix. `CTR_UPLOAD_LOG` also
+  logs raw images written or skipped.
+
+**Checked:**
+- Host (`gk --ctr-gfx`, small-memory C mode, every frame dumped):
+  - Without the model, intro frames 326-389 are the same before and after.
+  - With `CTR_LOAD_DELAY_MS="ctysluma:20000,ctywide:6000"`:
+    - before (`CTR_LOAD_NO_WAIT`): only ctywide;
+    - after: the game waited 19.8 s for ctysluma, then the intro's first frame is complete (black
+      held 3 frames).
+  - The Dolby card: 193 of 194 uploads skipped.
+- Azahar: one run of the CIA with the user's config (sound on, instance muted, compressed staging
+  as oct23b), `jak2_title_city.pad` with a screenshot every frame 250-1100:
+  - Loads: ctywide 1.9 s, lwidea 0.8 s, ctysluma 6.2 s (the game waited 5.3 s for it).
+  - The intro started 22 s after the title level was in (it was 34-38 s).
+  - Black held 469 ms (5 frames at the screenshot-slowed rate). The first visible frame (330) is
+    complete.
+  - The tex bucket on the Dolby card took 22-24 ms a frame (it was 76).
+  - Title 29.6 fps outside the screenshot window. The city as before: Jak at (1065.98, 0.52,
+    194.46) in target-hide; linear 307 KB free right after ctyindb's load (baseline D: 315).
+- Jak 1: host `level_pairs.pad` (proj-final), exit 0, 18 DGO loads.
+- Strips and logs: `port_test/reports/j2intro`.
+
+Left: the intro's later camera cuts (no black between them) still show tie LOD groups far for
+~0.4 s (streaming's normal late-data path).
 
 ## Milestone 2: logic-only boot on the 3DS (Oct 18)
 
