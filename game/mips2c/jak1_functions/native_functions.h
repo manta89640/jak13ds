@@ -15,6 +15,10 @@ extern ExecutionContext ocean_regs_vfs;
 }  // namespace Mips2C::jak1
 
 namespace Mips2C::jak1::native {
+// native_sp_init.cpp (AI-assisted): pc-sp-init-fields!, also run by the launcher directly
+u64 pc_sp_init_fields_impl(const NativeArgs& args);
+// native_sp_callbacks.cpp (AI-assisted): a particle callback or relaunch, inline when it can be
+void sp_call_particle_fn(u32 fn, const u64 a[8], const NativeArgs& caller);
 // native_joint.cpp
 extern const NativeImpl cspace_parented_transformq_joint;
 // native_anim.cpp (GOAL functions of joint.gc)

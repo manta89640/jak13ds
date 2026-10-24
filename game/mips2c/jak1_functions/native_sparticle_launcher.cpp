@@ -15,6 +15,8 @@
 
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
+#include "game/mips2c/native_goalc_ops.h"
+#include "game/mips2c/native_sp_init_fields.h"
 
 #ifdef __3DS__
 extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
@@ -105,6 +107,121 @@ u64 particle_adgif_impl(const NativeArgs& args) {
 namespace {
 
 /*!
+ * (AI-assisted) The GOAL functions the launcher calls for every particle, run inline while their
+ * symbols (and those of the functions they call) hold what they held at the first launch:
+ * sp-init-fields! (pc-sp-init-fields!, which it calls first: native_sp_init.cpp) and
+ * sp-adjust-launch (sparticle-launcher.gc, with matrix-rotate-xyz!, matrix-rotate-y!, sin, cos and
+ * the matrix functions of matrix.gc as goalc compiles them: native_goalc_ops.h). Verify mode
+ * (OPENGOAL_MIPS2C_VERIFY=1) runs the GOAL function and compares (native_verify_inline).
+ */
+struct InlineSyms {
+  const char* name;
+  u32 sym;
+  u32 fn;
+};
+
+//! true while every symbol still holds the function it held at the first call
+template <size_t N>
+bool syms_unchanged(InlineSyms (&syms)[N]) {
+  for (auto& s : syms) {
+    if (!s.sym) {
+      s.sym = sym_addr(s.name);
+      s.fn = gload<u32>(s.sym);
+    }
+    if (gload<u32>(s.sym) != s.fn) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool adjust_launch_inline_ok() {
+  static InlineSyms syms[] = {
+      {"sp-adjust-launch", 0, 0},   {"sp-init-fields!", 0, 0},   {"matrix-rotate-xyz!", 0, 0},
+      {"vector3s-matrix*!", 0, 0},  {"vector-matrix*!", 0, 0},   {"matrix-rotate-y!", 0, 0},
+      {"vector3s-rotate*!", 0, 0},  {"vector-rotate*!", 0, 0},   {"matrix-rotate-x!", 0, 0},
+      {"matrix-rotate-z!", 0, 0},   {"matrix*!", 0, 0},          {"sin", 0, 0},
+      {"cos", 0, 0}};
+  return syms_unchanged(syms);
+}
+
+//! vector3s-matrix*! / vector3s-rotate*! on the vector3s at addr (x y z stored, w untouched)
+inline void vector3s_mul(u32 addr, const float m[16], bool rotate) {
+  float v[4];
+  v[0] = gload<float>(addr);
+  v[1] = gload<float>(addr + 4);
+  v[2] = gload<float>(addr + 8);
+  v[3] = 1.f;
+  if (rotate) {
+    goalc_ops::vector_rotate_mul(v, v, m);
+  } else {
+    goalc_ops::vector_matrix_mul(v, v, m);
+  }
+  gstore<float>(addr, v[0]);
+  gstore<float>(addr + 4, v[1]);
+  gstore<float>(addr + 8, v[2]);
+}
+
+/*!
+ * (sp-adjust-launch launchinfo cpuinfo specs): the launch fields 54-63 into a local
+ * sparticle-launchinfo (tmp: 48 bytes of the caller's scratch, as the GOAL code's stack), the
+ * velocity rotated by the launch rotation and the cone rotation, the cone radius added to the
+ * launch position, and the optional y rotation of the launch position, velocity and acceleration.
+ */
+void adjust_launch(u32 info, u32 cpu, u32 specs, u32 tmp) {
+  GC_NATIVE_FP_EXACT
+  static const u32 vu_r = sym_addr("*_vu-reg-R_*");
+  static const u32 part_id_table = sym_addr("*part-id-table*");
+  const sp_init::Syms syms{vu_r, gload<u32>(part_id_table), 0};
+  sp_init::init_fields<0, false>(tmp, specs, 53, 64, true, syms);
+
+  float rot[4], m[16];
+  rot[0] = gload<float>(tmp);
+  rot[1] = gload<float>(tmp + 4);
+  rot[2] = gload<float>(tmp + 8);
+  goalc_ops::matrix_rotate_xyz(m, rot);
+  vector3s_mul(cpu + 16, m, false);
+  rot[0] = gload<float>(tmp + 16);
+  rot[1] = gload<float>(tmp + 20);
+  rot[2] = gload<float>(tmp + 24);
+  goalc_ops::matrix_rotate_xyz(m, rot);
+  vector3s_mul(cpu + 16, m, false);
+  float cone[4];
+  const float radius = gload<float>(tmp + 32);
+  if (gload<u32>(cpu + 104) & 0x20000) {  // launch-along-z
+    cone[0] = 0.f;
+    cone[1] = 0.f;
+    cone[2] = radius;
+  } else {
+    cone[0] = 0.f;
+    cone[1] = radius;
+    cone[2] = 0.f;
+  }
+  cone[3] = 1.f;
+  goalc_ops::vector_matrix_mul(cone, cone, m);
+  for (int i = 0; i < 3; i++) {
+    gstore<float>(info + 4 * i, gload<float>(info + 4 * i) + cone[i]);
+  }
+  const float rotate_y = gload<float>(tmp + 36);
+  if (goalc_ops::fcmp_xk(rotate_y, 0, goalc_ops::GC_FEQ)) {
+    return;
+  }
+  goalc_ops::matrix_rotate_y(m, rotate_y);
+  vector3s_mul(info, m, true);
+  vector3s_mul(cpu + 16, m, true);
+  if (!(gload<u32>(cpu + 104) & 0x10000)) {  // not use-global-acc
+    vector3s_mul(cpu + 64, m, true);
+  }
+  if (gload<u32>(cpu + 104) & 0x100000) {  // set-conerot
+    gstore<float>(info + 20, 16384.f + gload<float>(tmp + 36));
+  }
+}
+
+}  // namespace
+
+namespace {
+
+/*!
  * (sp-launch-particles-var system launcher pos launch-state launch-control rate)
  * Launches the particles of a launcher at pos: num-to-birth times rate is added to the launcher's
  * (or the launch state's) accumulator, and a particle is launched for each whole one: its fields
@@ -170,6 +287,19 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     v0 = native_call_goal(fn, r, callee);
     return v0;
   };
+  // (AI-assisted) sp-init-fields! inline: what it returns when its first call,
+  // pc-sp-init-fields!, does (the spec after the last one used; verify mode compares there)
+  static const u32 init_fields_fn = gload<u32>(init_fields_sym);
+  auto init_fields_call = [&](u32 fn) {
+    if (fn == init_fields_fn) {
+      const u64 res = pc_sp_init_fields_impl(NativeArgs{r, callee.pp, st, callee.stack});
+      if ((u32)res != (u32)st) {
+        v0 = res;
+        return v0;
+      }
+    }
+    return call(fn);
+  };
 
   if (lw(enable_sym) == st) {
     return 0;
@@ -204,7 +334,7 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   r[2] = 0;
   r[3] = 8;
   r[4] = st + 8;
-  call(gload<u32>(init_fields_sym));
+  init_fields_call(gload<u32>(init_fields_sym));
   gstore<u32>(sp + 12, (u32)v0);
   float births = gload<float>(sp + 116) * rate;
   {
@@ -249,7 +379,28 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
       }
     }
     r[0] = system;
-    const u64 cpu = call(gload<u32>(get_particle_sym));
+    // (AI-assisted) sp-get-particle inline while its symbol holds what it held at the first launch
+    static const u32 get_particle_fn = gload<u32>(get_particle_sym);
+    u64 cpu;
+    if (gload<u32>(get_particle_sym) == get_particle_fn) {
+      const u32 sys = (u32)r[0];
+      const u64 group = r[1];
+#if MIPS2C_WRITE_LOG
+      if (native_verify_inline_on()) {
+        const u32 nblocks = gload<u32>(sys) + gload<u32>(sys + 4);
+        v0 = native_verify_inline(
+            "sp-get-particle", {{sys, 48}, {gload<u32>(sys + 32), nblocks * 8}},
+            [&]() -> u64 { return sp_init::get_particle<false>(sys, group, st); },
+            [&]() -> u64 { return native_call_goal(get_particle_fn, r, callee); });
+      } else
+#endif
+      {
+        v0 = sp_init::get_particle<false>(sys, group, st);
+      }
+      cpu = v0;
+    } else {
+      cpu = call(gload<u32>(get_particle_sym));
+    }
     if (cpu == st) {
       return v0;
     }
@@ -262,13 +413,13 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     r[3] = 22;
     r[4] = st + 8;
     const u32 init_fields = gload<u32>(init_fields_sym);
-    call(init_fields);
+    init_fields_call(init_fields);
     r[0] = cpu + 12;
     r[1] = v0;
     r[2] = 23;
     r[3] = 52;
     r[4] = st + 8;
-    call(init_fields);
+    init_fields_call(init_fields);
     gstore<u32>(sp + 80, (u32)v0);
     u64 flags = lw(info + 104);
 
@@ -350,7 +501,29 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     {
       const u32 adjust = gload<u32>(adjust_sym);
       if ((s64)lh((u32)r[2]) - 64 < 0) {
-        call(adjust);
+        // (AI-assisted) inline (adjust_launch) while the symbols hold the GOAL functions; its local
+        // launchinfo goes below the original's frame (the scratch's first 64 bytes)
+        if (adjust_launch_inline_ok()) {
+          const u32 specs = (u32)r[2];
+#if MIPS2C_WRITE_LOG
+          if (native_verify_inline_on()) {
+            static const u32 vu_r = sym_addr("*_vu-reg-R_*");
+            native_verify_inline(
+                "sp-adjust-launch", {{sp + 128, 48}, {(u32)cpu, 144}, {vu_r, 4}},
+                [&]() -> u64 {
+                  adjust_launch(sp + 128, (u32)cpu, specs, sp - 64);
+                  return 0;
+                },
+                [&]() -> u64 { return call(adjust); });
+          } else
+#endif
+          {
+            adjust_launch(sp + 128, (u32)cpu, specs, sp - 64);
+          }
+          v0 = 0;
+        } else {
+          call(adjust);
+        }
       }
     }
     if (is_3d != st) {
@@ -497,8 +670,8 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
 
 const NativeImpl particle_adgif =
     MIPS2C_NATIVE_IMPL(particle_adgif_impl, NATIVE_CALLS_GOAL | NATIVE_V0_UNDEFINED, 0);
-// scratch: the original's stack frame
+// scratch: the original's stack frame (256 bytes), below it sp-adjust-launch's launchinfo (64)
 const NativeImpl sp_launch_particles_var =
-    MIPS2C_NATIVE_IMPL(sp_launch_particles_var_impl, NATIVE_CALLS_GOAL | NATIVE_V0_UNDEFINED, 256);
+    MIPS2C_NATIVE_IMPL(sp_launch_particles_var_impl, NATIVE_CALLS_GOAL | NATIVE_V0_UNDEFINED, 320);
 
 }  // namespace Mips2C::jak1::native
