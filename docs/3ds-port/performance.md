@@ -1090,3 +1090,19 @@ default (on). It never had anything to do with the red HUD shard (see below).
   over the PS2's fade zone instead of a patch coming in at once (an approximation of the PS2's
   alpha fade of its trans version; a per-run alpha would need a draw per run with its own
   combiner constant). auto_detail still pulls `shrub_scale` to 0.8 when the GPU is busy.
+- **The red HUD shard (not solved).** The user's progress-menu shot (Spider Cave, Japanese,
+  `frame_overlap2 = off`, so the pipelining is not the cause): the shard is a translucent red
+  triangle whose two sharp corners are the circle-button icon quad's top-right and bottom-left
+  corners (its diagonal; host `CTR_HUD_DUMP=1` with hud3.pad lists the menu's HUD sprites and
+  their screen corners) and whose third corner lies 72 px left of the icon's top-left corner at
+  the same height; the icon itself is complete in the shot, so it is an extra triangle, not one
+  of the icon's own two. The HUD chunk also carries 21 all-zero sprites (scale 0, color 0, tex0 0:
+  the game's unused entries; drawn as sub-pixel quads, as the PS2 does). Checked and equivalent:
+  the quads' command words (PRIMITIVE_CONFIG / VERTEX_OFFSET tracking across citro3d draws, the
+  post-vertex cache clear before every draw with new vertices, the index buffer, the sprite
+  snapshot of the REF data; Azahar runs each draw's vertex fetch from memory at submit time, so a
+  vertex of another draw can only come from the data or the command words). Not reproduced: a
+  16000-frame Japanese title-menu soak with sound on, hud3's A/B stages, the host. `CtrSprite.cpp`
+  now has a canary on every 2D / HUD quad (no parallelogram, or a corner over 16 screen widths
+  out: a `[ctr] sprite canary` line with the sprite's data and a saved frame, rate limited): if the
+  next report's log has none, the data the CPU sends is right and the mixing happens after it.
