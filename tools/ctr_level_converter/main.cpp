@@ -454,8 +454,12 @@ struct Converter {
   // (AI-assisted) Jak II's animated texture slots (merc draws with tree_tex_id -(slot + 1)): the
   // level texture made for the slot by add_anim_slot_textures, if any
   std::unordered_map<s32, s32> anim_slot_tex;
+  std::unordered_map<u16, u16> slot_tex_map;  // (AI-assisted, j2gaps) slot + 1 -> output texture
+  std::unordered_map<s32, u16> base_tex_slot;  // (AI-assisted, j2gaps) base texture -> slot + 1
+  int slot_tex_first_plain = 0;  // slot textures first used by a plain draw (unmarked before)
 
   u16 texture_id(s32 tree_tex_id) {
+    const s32 orig_tex_id = tree_tex_id;
     u16 slot = 0;  // (AI-assisted) animated slot + 1
     if (tree_tex_id < 0) {
       auto a = anim_slot_tex.find(-(tree_tex_id + 1));
@@ -463,9 +467,38 @@ struct Converter {
         slot = (u16)(-tree_tex_id);
         tree_tex_id = a->second;
       }
+    } else if (!anim_slot_tex.empty()) {
+      // (AI-assisted, j2gaps) a plain draw of a slot's base texture (the background's draws of a
+      // fixed animation's texture: waterfalls, security walls) is a draw of the slot too
+      if (base_tex_slot.empty()) {
+        for (const auto& [s, t] : anim_slot_tex) {
+          base_tex_slot.emplace(t, (u16)(s + 1));
+        }
+      }
+      auto b = base_tex_slot.find(tree_tex_id);
+      if (b != base_tex_slot.end()) {
+        slot = b->second;
+      }
     }
     if (tree_tex_id < 0 || tree_tex_id >= (s32)level->textures.size()) {
       return 0xffff;  // animated / missing
+    }
+    if (slot) {
+      // (AI-assisted, j2gaps) a slot's draws (and its base texture's) get one texture, marked
+      // with the slot, whatever came first: a plain draw of the base texture, or of a copy with the
+      // same content, used to create the shared entry unmarked; the slot's draws then found it and
+      // never animated
+      auto sit = slot_tex_map.find(slot);
+      if (sit != slot_tex_map.end()) {
+        return sit->second;
+      }
+      u16 id = tex_order.size();
+      tex_order.push_back(tree_tex_id);
+      tex_use.emplace_back();
+      tex_use.back().anim_slot = slot;
+      slot_tex_map[slot] = id;
+      slot_tex_first_plain += orig_tex_id >= 0;
+      return id;
     }
     auto it = tex_map.find(tree_tex_id);
     if (it != tex_map.end()) {
@@ -4688,6 +4721,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   if (cv.tex_copies) {
     lg::info("{}: {} textures used were copies of others: drawn with the one copy",
              level.level_name, cv.tex_copies);
+  }
+  if (!cv.slot_tex_map.empty()) {
+    lg::info("{}: {} animated slot textures, {} of them first drawn by a plain draw of the base "
+             "texture",
+             level.level_name, cv.slot_tex_map.size(), cv.slot_tex_first_plain);
   }
   if (tstats.merc) {
     lg::info("{}: merc textures: {}, {} of {}x{} and up: {} faces / eyes kept 16-bit, {} "
