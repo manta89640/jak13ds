@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/log/log.h"
@@ -73,6 +74,20 @@ static void* save_worker(void*) {
 }
 bool MC_save_in_progress() {
   return s_save_state.load() == 1;
+}
+#endif
+#ifndef __3DS__
+// (AI-assisted) Host test hook: OPENGOAL_MC_SAVE_DELAY_MS=N keeps a finished save BUSY for N ms of
+// real time, as the 3DS's save worker does (its saves take 100-300 ms of SD card writes while the
+// game keeps running). For tests of how the menus handle a save that takes several frames.
+static Timer s_save_delay_timer;
+static bool s_save_delay_active = false;
+static int save_delay_ms() {
+  static int ms = [] {
+    const char* v = std::getenv("OPENGOAL_MC_SAVE_DELAY_MS");
+    return v ? std::atoi(v) : 0;
+  }();
+  return ms;
 }
 #endif
 // instead of two memory cards we just simulate the 4 save files (8 banks).
@@ -585,6 +600,12 @@ void MC_run() {
     s_save_state.store(0);  // no thread: save here, as before
 #endif
     pc_game_save_synch();
+#ifndef __3DS__
+    if (save_delay_ms() > 0) {
+      s_save_delay_active = true;
+      s_save_delay_timer.start();
+    }
+#endif
     // allow some number of errors.
     op.retry_count--;
     if (op.retry_count == 0) {
@@ -763,6 +784,14 @@ void MC_makefile(s32 port, s32 size) {
  * Get the result of the currently executing (or most recently executed) command
  */
 u32 MC_check_result() {
+#ifndef __3DS__
+  if (s_save_delay_active) {
+    if (s_save_delay_timer.getMs() < save_delay_ms()) {
+      return (u32)McStatusCode::BUSY;
+    }
+    s_save_delay_active = false;
+  }
+#endif
   return (u32)op.result;
 }
 

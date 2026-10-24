@@ -1505,7 +1505,12 @@
                 (symbol->string (-> self current))
                 )
               )
-            (case (-> self next) ;; og:preserve-this patched to next instead of current because we save synchronously
+            ;; og:preserve-this patched to next instead of current because we save synchronously.
+            ;; (AI-assisted) A save that takes longer than the menu's transition (the 3DS saves on a
+            ;; worker thread: 100-300 ms of SD writes; the auto-save also waits for the art buffer)
+            ;; ends after next became current: then current is the state (as on the PS2). With
+            ;; next only, the notify was dropped and the menu stayed on "saving" for good.
+            (case (if (= (-> self next) 'none) (-> self current) (-> self next))
               (('saving)
                (cond
                  ((= (-> self state-stack 0) 'title)
@@ -1610,7 +1615,9 @@
                (set-next-state self 'insufficient-space 0)
                )
               (else
-                (case (-> self next) ;; og:preserve-this patched to next instead of current because we save synchronously
+                ;; og:preserve-this patched to next instead of current because we save synchronously
+                ;; (AI-assisted) or current, once the transition is done (see the 'done case)
+                (case (if (= (-> self next) 'none) (-> self current) (-> self next))
                   (('formatting 'format-card)
                    (set-next-state self 'error-formatting 0)
                    ) ;; og:preserve-this jp patch
