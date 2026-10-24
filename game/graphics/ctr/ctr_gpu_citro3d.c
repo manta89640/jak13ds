@@ -5981,6 +5981,16 @@ static int copy_screen_body(float x0, float x1, int part) {
   return g.screen_tex;
 }
 
+void ctr_gpu_screen_copy_release(void) {
+  if (g.ready && g.screen_tex >= 0) {
+    ctr_gpu_tex_delete(g.screen_tex); /* (freed once the GPU is done with it) */
+    if (g.bound_tex == &g.textures[g.screen_tex].tex) {
+      g.bound_tex = NULL;
+    }
+    g.screen_tex = -1;
+  }
+}
+
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
   /* color buffer column = screen y from the bottom (240), row = screen x from the left (400)
    * (see write_screenshot); texture s along the columns (256), t along the rows (512). The GPU

@@ -20,6 +20,17 @@
 
 class CtrVram;
 
+/*!
+ * (AI-assisted, j2gaps) Jak II's menu background (BlitDisplays on the PC): the copy of the game's
+ * last frame (ctr_gpu_copy_screen) that stands in for VRAM at tbp 0x3300, where the sky bucket's
+ * menu draws read it. Draws of it sample the copy at their own screen position (the game's
+ * sprites cover the screen with the whole image). -1: none.
+ */
+void ctr_direct_set_menu_screen(int handle);
+int ctr_direct_menu_screen();
+/*! drawn since the last call (the copy is freed once the menu no longer draws it) */
+bool ctr_direct_take_menu_screen_drawn();
+
 #ifndef __3DS__
 // (AI-assisted) host diagnosis: the next n vertices pushed by any CtrDirect are logged
 extern int g_ctr_direct_dump;

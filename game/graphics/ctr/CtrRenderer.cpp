@@ -30,6 +30,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrRendererJak2.h"
 #include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
@@ -627,6 +628,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         }
       }
     }
+    // (AI-assisted, j2gaps) Jak II: a menu opens; bucket 3 copies the last frame for its
+    // background before anything is drawn (CtrJak2BlitRenderer)
+    if (m_jak2 && ctr_jak2_frame_copies_screen(
+                      ee_mem, bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3),
+                      bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3 + 1))) {
+      covered = true;
+    }
     ctr_gpu_set_skip_color_clear(covered ? 1 : 0);
   }
   ctr_gpu_frame_begin(clear[0], clear[1], clear[2]);
@@ -943,6 +951,9 @@ void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
 // (AI-assisted) the Jak 1 3DS build has no Jak II tables (CtrRendererJak2.cpp)
 void CtrRenderer::prepare_textures(const void*, u32) {}
 void CtrRenderer::tex_frame_done_jak2() {}
+bool ctr_jak2_frame_copies_screen(const void*, u32, u32) {
+  return false;
+}
 #endif
 
 u32 CtrRenderer::bucket_tag(u32 chain_offset, int id) const {

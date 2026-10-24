@@ -121,6 +121,8 @@ class CtrVram {
     t.h = h;
     m_borrowed[tbp] = true;
   }
+  /*! (AI-assisted, j2gaps) VRAM at tbp again (a borrowed texture is not deleted) */
+  void clear_override(u32 tbp);
   /*! (AI-assisted) Jak II: textures whose dest the PC port moved (lookup_jak2_texture_dest_offset)
    * are read from where their page put them */
   void set_jak2_remap(bool on) {

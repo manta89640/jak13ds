@@ -120,7 +120,23 @@ constexpr u32 kMinimapTbp = 4032;
 constexpr int kMinimapSize = 128;
 int g_minimap_rt = -1;
 float g_minimap_uv[6];  // s, t at (0, 0); per unit of lx; per unit of ly
+int g_menu_screen = -1;         // (AI-assisted, j2gaps) ctr_direct_set_menu_screen
+bool g_menu_screen_drawn = false;
 }  // namespace
+
+void ctr_direct_set_menu_screen(int handle) {
+  g_menu_screen = handle;
+}
+
+int ctr_direct_menu_screen() {
+  return g_menu_screen;
+}
+
+bool ctr_direct_take_menu_screen_drawn() {
+  const bool d = g_menu_screen_drawn;
+  g_menu_screen_drawn = false;
+  return d;
+}
 
 void CtrDirect::handle_frame(u64 val) {
   const u32 fbp = val & 0x1ff;
@@ -496,6 +512,12 @@ void CtrDirect::update_draw_state() {
         st.clamp_s = (m_clamp & 3) == 1 || (m_clamp & 3) == 2;
         st.clamp_t = ((m_clamp >> 2) & 3) == 1 || ((m_clamp >> 2) & 3) == 2;
       }
+      if (st.tex == g_menu_screen) {
+        // (AI-assisted, j2gaps) the screen copy: its alpha is meaningless, texel for pixel
+        st.tcc = 0;
+        st.filter = 0;
+        st.clamp_s = st.clamp_t = 1;
+      }
       m_tex_w = 1 << t.tw();
       m_tex_h = 1 << t.th();
       m_uv_scale_s = 1.f / (16.f * m_tex_w);
@@ -550,6 +572,10 @@ void CtrDirect::push_vertex(int idx) {
     const float lx = b.s * kMinimapSize, ly = b.t * kMinimapSize;
     v.s = g_minimap_uv[0] + g_minimap_uv[2] * lx + g_minimap_uv[4] * ly;
     v.t = g_minimap_uv[1] + g_minimap_uv[3] * lx + g_minimap_uv[5] * ly;
+  } else if (g_menu_screen >= 0 && m_draw_state.tex == g_menu_screen) {
+    // (AI-assisted, j2gaps) the copy of the last frame, where this vertex is on the screen
+    ctr_gpu_screen_uv(b.x, b.y, &v.s, &v.t);
+    g_menu_screen_drawn = true;
   }
   v.r = b.rgba[0];
   v.g = b.rgba[1];

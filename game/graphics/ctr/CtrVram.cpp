@@ -1079,6 +1079,18 @@ void CtrVram::set_override(u32 tbp, int w, int h, const u32* rgba) {
   m_overrides[tbp] = t;
 }
 
+void CtrVram::clear_override(u32 tbp) {
+  auto it = m_overrides.find(tbp);
+  if (it == m_overrides.end()) {
+    return;
+  }
+  if (it->second.handle >= 0 && !m_borrowed[tbp]) {
+    ctr_gpu_tex_delete(it->second.handle);
+  }
+  m_borrowed.erase(tbp);
+  m_overrides.erase(it);
+}
+
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // (AI-assisted) Jak II's animated textures (set_override; none in Jak 1)
   if (!m_overrides.empty()) {
