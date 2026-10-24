@@ -962,6 +962,45 @@ village1 + beach part of lod_walk.pad): village1 walk 115.5-117.6k triangles, re
 (arena 4.1 MB village1, 8.3 MB beach + village1). Oct 17 reference (impostors, Azahar): village1 hut
 110.8k triangles. Still coarse: ~1 s after a continue while the area's near chunks load.
 
+## Title flight pops, shrub distances (AI-assisted, Oct 24, titlemove)
+
+User report (Azahar, Japanese): "parts of the geometry pop in as the title sequence's camera
+begins to move" (the island's palms, grass and hut). Every frame on the host (`CTR_POP_LOG`, now
+also `[popC]` chunk / `[popL]` tie LOD / `[popS]` streaming lines) and one real-time Azahar run of a
+measurement build (`cmake -DOG3DS_POP_LOG=ON`: the same lines per frame in gk.log; game sound on,
+no screenshots): no near chunk was late, no chunk came in by distance, vis and fine_vis hid nothing
+new. What changed on screen was tie LOD: groups switching from geometry 3 to 0 in view as the
+flight came nearer, at max(shape error distance, PS2 far-plane) = 35-75 m for the island: 807 in
+40 s in Azahar, 80 in the flight's first ~8 s on the host, objects up to 137 px across (the island
+rock, palms, grass tufts, the hut). Each is a step in shape (under tie_lod_px) and in shading: a far
+version has its own vertex colors (the island rock's underside visibly darker / lighter), which the
+shape error doesn't see. (The 1.5 s of host-only "missing" palms at the start is the logo's black
+outline covering them, also on Azahar.)
+
+Fix: while the title level is loaded, no group switches nearer than `kTitleLodMin` (100 m;
+`CtrLevelData::lod_min_e`, also in the near chunks' need distances, so they are read before the
+reveal). The island's groups are near from the reveal on; the flight's first ~8 s have 19 switches
+in view, all at 102-113 m. Cost (host, CTR_AUTO_DETAIL_MODEL): +3-10k triangles in the flight's
+later parts, stream arena 5 MB. 130 m left 7 switches but cost +14-34k (Azahar: 201k triangles and
+28 ms render thread build where gameplay distances drew 138k / 19.5 ms). Azahar after-run (130 m
+build, frames 100-400 after title-play shot): no geometry change on the island from the reveal on,
+late near chunks 0, 29.9 fps once the shots stopped. Host test: env `CTR_TITLE_LOD_MIN` (meters).
+
+Shrubs (gameplay report: "small things like shrubs pop in when i walk close, but if i walk away
+they stay"): shrubs are resident, never streamed (only tie near versions are). A shrub cell
+(chunk, ~20 m radius, one PS2 distance class) came in whole once its sphere was within the distance
+and stayed up to 1.5 x that while in view (kHoldInView), and an auto_detail change never let one
+in while on screen, so a cell culled while the GPU was busy came in only within the old, shorter
+distance. Now: shrub runs (a visibility node, up to 8 instances, ~10 m radius) are drawn while
+their sphere reaches within the distance (10% hysteresis, `run_dist_in`), no 1.5x hold for shrubs,
+and auto_detail holds a chunk on screen only for going, never for coming. Host lod_walk: 12-150
+shrub runs hidden per level draw (log `[ctr] <bucket>: shrub runs hidden by distance`).
+
+Also: impostor cards (`ctr_gpu_draw_mesh_stream`) set the texture coordinate scale as the level
+meshes do (a card after an atlas draw sampled at 1/32768: far objects missing until they came back
+as geometry); the near chunks' bound uses this frame's tie LOD factor too (a cut to another focal
+length decided units with the last frame's).
+
 ## Time of day every frame (AI-assisted, Oct 23, todlag)
 
 The user saw the title's day/night colors update late and unevenly, and parts of surfaces losing

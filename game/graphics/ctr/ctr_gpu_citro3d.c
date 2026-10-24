@@ -6568,6 +6568,17 @@ void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix
   const int fa = g_fog_alpha && g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80);
   const int df = g.ps->df_ok && g.fog_df;
   use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
+  /* (AI-assisted, titlemove) the texture coordinate scale as ctr_gpu_draw_mesh_prepared sets it:
+   * a card drawn after a level draw of an atlas (1/32768) kept that scale, so its texels were
+   * sampled from one corner (garbage or alpha-killed: far objects missing until they came back as
+   * geometry) */
+  {
+    const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
+    if (atlas != g.mesh_st_atlas) {
+      g.mesh_st_atlas = atlas;
+      mesh_scales_set(atlas, use_raw(state));
+    }
+  }
   const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
   g.cur.nofog_draws += g.mesh_nofog && !fa;
   g.cur.fog_alpha_draws += fa;

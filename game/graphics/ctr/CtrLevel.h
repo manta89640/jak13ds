@@ -106,6 +106,8 @@ struct CtrLevelData {
   };
   std::vector<RunSphere> run_spheres;
   std::vector<u32> chunk_run_count;
+  // (AI-assisted, titlemove) shrub runs: within their distance last frame (hysteresis; per run)
+  std::vector<u8> run_dist_in;
   // (AI-assisted) c3l v17 tie levels of detail (c3l::ExtHeader): the LOD groups, each run's version
   // (parallel to vis_runs; empty: no levels of detail), per chunk whether it has versioned runs,
   // per group the last frame's choice (bit 0: near version, bit 1: chosen)
@@ -122,8 +124,11 @@ struct CtrLevelData {
   // the PS2 far-plane x detail_scale (+ hysteresis, + radius): never coarser than the PS2
   float lod_floor_k = 0.f;
   float lod_switch_error(size_t g) const {
-    return std::max(lod_error[g], lod_groups[g].dist * lod_floor_k);
+    return std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
   }
+  // (AI-assisted, titlemove) the title screen's least switch distance, in the units of
+  // lod_switch_error (distance / factor; 0 elsewhere)
+  float lod_min_e = 0.f;
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
@@ -302,8 +307,8 @@ struct CtrLevelData {
     // by shape error (its far version would show more than tie_lod_px), not only by the PS2 floor
     bool urgent = false;
     // its bound with the factor k: within this of its sphere's center one of its groups is near
-    float bound(float k, float floor_k) const {
-      return need_a + k * std::max(need_e, need_d * floor_k);
+    float bound(float k, float floor_k, float min_e = 0.f) const {
+      return need_a + k * std::max(std::max(need_e, need_d * floor_k), min_e);
     }
     u32 bytes = 0;   // vertices + indices in the arena (CtrStreamArena::mesh_bytes)
     u32 packed = 0;  // file bytes of its blocks
@@ -857,6 +862,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;
   double m_tod_ms = 0, m_tod_max_ms = 0;
   std::vector<const CtrLevelData*> m_loaded;
+  // (AI-assisted, titlemove) per chunk of the level drawn: a shrub chunk's distance limit (game
+  // units, its runs' limit)
+  std::vector<float> m_shrub_lim;
+  u64 m_shrub_run_hid = 0;  // (statistics) shrub runs hidden by their distance
   // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
   // of its distance)
   std::vector<u8> m_vista_src;
