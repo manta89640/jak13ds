@@ -8,7 +8,9 @@ names come from the "// name" comment above each definition in <hash>.c.
   sample_profile.py est    x.folded MAC_MS [Rgoal Rc Rm2c] [N]     categories, kinds, top functions
                                                                    with an N3DS estimate per item
   sample_profile.py win    out.log                                 ms/frame per perf-mark window
-                                                                   (1000 / fps of the no-sync lines)
+                                                                   (1000 / fps of the no-sync lines;
+                                                                   with OPENGOAL_PERF_INSTR=1 also the
+                                                                   game thread's instructions/frame)
 Kinds: m2c = in a mips2c function (adapter/jalr glue under it included; GOAL callbacks it calls are
 GOAL); c = C++ kernel / libc (memmove, typed adapters, timers); goal = goalc's C code and the C-mode
 call glue. The ratios (Mac ms -> N3DS ms) default to 50 / 150 / 270, from Jak 1 (jak2_perf.md).
@@ -207,7 +209,7 @@ def est_main(argv):
         print(f"{100*s/tot:5.1f}% {1000*ms(s):6.1f}us {n3(cn):6.2f}ms  {f}  <{c}>")
 
 def win_main(path):
-    cur = None; first = False; vals = {}
+    cur = None; first = False; vals = {}; instr = {}; skip_instr = False
     for line in open(path, errors="replace"):
         m = re.search(r"perf-mark (\S+)\s*$", line)
         if m:
@@ -215,12 +217,22 @@ def win_main(path):
         m = re.search(r"perf: +([\d.]+) fps +logic", line)
         if m and cur:
             fps = float(m.group(1))
+            skip_instr = fps < 100 or first
             if fps < 100: continue  # a 30 Hz line
             if first: first = False; continue  # partly before the window
             vals.setdefault(cur, []).append(1000.0 / fps)
+        # (AI-assisted) OPENGOAL_PERF_INSTR=1 (macOS host): the game thread's instructions and
+        # cycles per frame, which other processes' load doesn't change (the line after its perf line)
+        m = re.search(r"perf instr: +([\d.]+) k instructions/frame, +([\d.]+) k cycles", line)
+        if m and cur and not skip_instr:
+            instr.setdefault(cur, []).append((float(m.group(1)), float(m.group(2))))
     for k, v in vals.items():
         v2 = sorted(v)
         print(f"{k:12s} n={len(v):3d} mean {sum(v)/len(v):.3f} ms  median {v2[len(v)//2]:.3f}  min {v2[0]:.3f} max {v2[-1]:.3f}")
+        if k in instr:
+            iv = instr[k]; n = len(iv)
+            print(f"{'':12s} game thread: {sum(x for x, _ in iv)/n:.1f} k instructions/frame, "
+                  f"{sum(c for _, c in iv)/n:.1f} k cycles/frame (mean of {n})")
 
 if __name__ == "__main__":
     cmd = sys.argv[1]
