@@ -64,6 +64,11 @@ extern const NativeImpl pc_light_hash_add_lights;
 // native2_traffic.cpp (AI-assisted)
 extern const NativeImpl pc_per_frame_cell_update;
 extern const NativeImpl pc_sphere_in_loaded_city_infos;
+// native2_merc_request.cpp (AI-assisted)
+extern const NativeImpl pc_merc_draw_request_native;
+// native2_sky_light.cpp (AI-assisted)
+extern const NativeImpl pc_adjust_cloud_lighting;
+extern const NativeImpl pc_adjust_haze_lighting;
 //! (mem-copy! dst src size), gcommon.gc (registered by mem_copy::link for the types-h module)
 extern const NativeImpl mem_copy;
 
