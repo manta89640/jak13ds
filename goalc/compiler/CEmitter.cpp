@@ -18,7 +18,7 @@
 
 namespace {
 // must match GOALC_ABI_VERSION in goal_c_ops.h
-constexpr int kCBackendAbiVersion = 5;
+constexpr int kCBackendAbiVersion = 6;
 
 // tokens are resolved after memory layout: \x01 <kind> <index> \x02
 constexpr char TOKEN_START = '\x01';
@@ -501,7 +501,9 @@ void CFunctionEmitter::emit() {
   text += ") {\n";
   // GOAL addresses are 32 bits: telling the compiler that the upper half of the symbol table
   // address is 0 makes symbol addresses and #f compares 32-bit operations on 32-bit hosts.
-  text += "  u8* const gc_mb = goalc_mem;\n  const u64 gc_stl = (u32)goalc_st;\n";
+  // (AI-assisted, ABI 6) both come from the module's gc_ctx (see CModuleEmitter::finish), which
+  // one literal address reaches together with the symbol table and the segment bases.
+  text += "  u8* const gc_mb = gc_ctx.mb;\n  const u64 gc_stl = gc_ctx.st;\n";
   if (m_uses_own_seg) {
     // the segment base only changes when the module is linked again
     text += fmt::format("  const u64 gc_sb = GC_SEG({});\n", m_env->segment);
@@ -664,10 +666,18 @@ std::string CModuleEmitter::finish(u64* hash_out) {
       "made this file\");\n\n",
       kCBackendAbiVersion);
 
-  // symbols
+  // symbols. (AI-assisted, ABI 6) The module's link-time state is one struct, so a function
+  // reaches all of it from one literal address: the memory base and symbol table address (copies
+  // of goalc_mem / goalc_st), the host address of each symbol's value (sym, for loads and stores
+  // of symbol values: one load of the pointer and the access, without adding the symbol table
+  // address and the offset), the segment bases and the symbol offsets (filled by the runtime's
+  // linker). gc_after_link fills mb, st and sym after the runtime linked the module.
   int n_syms = std::max(1, (int)m_symbols.size());
-  out += fmt::format("static int32_t gc_sym_offsets[{}];\n", n_syms);
-  out += "static uint32_t gc_seg_base[3];\n";
+  out += fmt::format(
+      "static struct {{\n  u8* mb;\n  uint32_t st;\n  u8* sym[{}];\n  uint32_t seg[3];\n"
+      "  int32_t off[{}];\n}} gc_ctx;\n",
+      n_syms, n_syms);
+  out += "#define gc_sym_offsets gc_ctx.off\n#define gc_seg_base gc_ctx.seg\n";
   out += fmt::format("static const char* const gc_sym_names[{}] = {{\n", n_syms);
   for (auto& s : m_symbols) {
     out += fmt::format("  {},\n", c_string_literal(s));
@@ -757,7 +767,8 @@ std::string CModuleEmitter::finish(u64* hash_out) {
 
   resolved += fmt::format(
       "static const GoalCModule gc_module = {{\n"
-      "  0x{:016x}ull, {}, {}, gc_funcs, {}, gc_sym_names, gc_sym_offsets, gc_seg_base\n"
+      "  0x{:016x}ull, {}, {}, gc_funcs, {}, gc_sym_names, gc_sym_offsets, gc_seg_base,\n"
+      "  gc_after_link\n"
       "}};\n\n",
       hash, c_string_literal(m_obj_name), function_text.size(), m_symbols.size());
   // statically linked modules are found by a generated registry (scripts/3ds/gen_c_registry.py)
@@ -780,3 +791,10 @@ std::string CModuleEmitter::finish(u64* hash_out) {
       "#endif\n";
   return resolved;
 }
+  // (AI-assisted, ABI 6) called by the runtime after every link of this module. Jak 2 and later:
+  // a symbol's value is at its address - 1 (Symbol4.h).
+  out += fmt::format(
+      "static void gc_after_link(void) {{\n  gc_ctx.mb = goalc_mem;\n  gc_ctx.st = (u32)goalc_st;\n"
+      "  for (int k = 0; k < {}; k++) {{\n"
+      "    gc_ctx.sym[k] = goalc_mem + (u32)(gc_ctx.st + (u32)gc_ctx.off[k] - {}u);\n  }}\n}}\n\n",
+      m_symbols.size(), m_version == GameVersion::Jak1 ? 0 : 1);

@@ -32,6 +32,9 @@ typedef struct GoalcRefModule {
   uint32_t seg0_size;
   uint32_t n_funcs;
   const GoalcRefFunc* funcs;
+  //! (AI-assisted) ABI 6 fixtures: computes the module's gc_ctx after the loader filled
+  //! sym_offsets and seg_base (null for older fixtures)
+  void (*after_link)(void);
 } GoalcRefModule;
 
 #ifdef __cplusplus

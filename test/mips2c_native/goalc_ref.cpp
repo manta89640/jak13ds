@@ -161,6 +161,9 @@ void load_goalc_references() {
     for (u32 k = 0; k < m->n_syms; k++) {
       m->sym_offsets[k] = (s32)(sym(m->sym_names[k]) - kSymTable);
     }
+    if (m->after_link) {
+      m->after_link();  // (AI-assisted) ABI 6 fixtures
+    }
     for (u32 i = 0; i < m->n_funcs; i++) {
       const auto& f = m->funcs[i];
       const u32 value = seg + f.value;

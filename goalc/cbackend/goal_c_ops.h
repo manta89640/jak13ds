@@ -38,7 +38,7 @@ _Static_assert(sizeof(v128) == 16, "v128 size");
 
 //! Changes whenever generated code and this header must be rebuilt together (the check is in
 //! every module, and the version is part of the module source, so of its hash).
-#define GOALC_ABI_VERSION 5
+#define GOALC_ABI_VERSION 6
 
 // ---------------------------------------------------------------------------
 // memory. GOAL addresses are 32 bits.
@@ -1000,6 +1000,26 @@ GC_INLINE u64 gc_chk_float(u64 v, const char* file, int line) {
 // ---------------------------------------------------------------------------
 // module support
 // ---------------------------------------------------------------------------
+
+//! (AI-assisted, ABI 6) the value of symbol k of this module, through the host address of the value
+//! that the module's gc_after_link keeps in gc_ctx.sym[k]: a load of the pointer and the access.
+GC_INLINE u64 gc_hld_u32(const u8* p) {
+  u32 v;
+  memcpy(&v, p, 4);
+  return v;
+}
+GC_INLINE u64 gc_hld_s32(const u8* p) {
+  s32 v;
+  memcpy(&v, p, 4);
+  return (u64)(s64)v;
+}
+GC_INLINE void gc_hst_u32(u8* p, u64 v) {
+  u32 x = (u32)v;
+  memcpy(p, &x, 4);
+}
+#define gc_symv_u32(k) gc_hld_u32(gc_ctx.sym[k])
+#define gc_symv_s32(k) gc_hld_s32(gc_ctx.sym[k])
+#define gc_symv_set(k, v) gc_hst_u32(gc_ctx.sym[k], (v))
 
 //! GOAL address (zero extended, like every GOAL address) of symbol k (jak 1: the symbol value is
 //! at the symbol). Its value is accessed as gc_ld_u32(gc_stl, GC_SYMOFF(k)) in Jak 1, and at

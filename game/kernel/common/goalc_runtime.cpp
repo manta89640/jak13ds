@@ -535,6 +535,9 @@ u32 goalc_link_module_entry(const u8* link,
   for (u32 i = 0; i < mod->n_syms; i++) {
     mod->sym_offsets[i] = resolver(mod->sym_names[i]);
   }
+  if (mod->after_link) {
+    mod->after_link();
+  }
 
   auto it = g_linked_modules.find(hash);
   if (it == g_linked_modules.end() || it->second.mod != mod) {
