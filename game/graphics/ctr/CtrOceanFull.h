@@ -24,10 +24,20 @@
  * The GS packets become indexed triangle lists written straight to the frame's vertex memory
  * (ctr_gpu_ocean_full_reserve / draw, ctr_ocean_full.v.pica: the GS's S, T, Q perspective, the GS
  * fog value); the native programs' vertices are in clip space, unclipped (draw_clip,
- * ctr_ocean_full_clip.v.pica: the GPU clips). Only the textured pass is drawn: the PS2's env map pass (sky
- * reflection added through the destination alpha) is left out (the wave texture already has the
- * env map's shading). (AI-assisted) The near ocean's alpha has a floor instead (config.ini
- * ocean_near_alpha, CtrOceanNearVu::set_alpha_floor): the reflection made it less see-through.
+ * ctr_ocean_full_clip.v.pica: the GPU clips).
+ * (AI-assisted, j1ocean) The sky reflection: the PS2 draws an env map pass after the textured one
+ * where the programs say so (mid tiles of call 73, the transitions, the near patches; not the far
+ * ocean or call 46's tiles): environment-ocean times the time of day's env-color, at the view
+ * direction's horizontal part, added with the destination alpha as its weight. That alpha is the
+ * wave texture's alpha (environment-ocean-alphamod's) times the vertex alpha: written by the mid
+ * ocean's opaque textured pass, and by the near ocean's alpha-only pass (CommonOceanRenderer's
+ * three buckets). The 3DS draws all of it in the textured pass's draw (ctr_gpu_ocean_full_draw_env):
+ * the env map times env-color is made here once per change (ocean_env), the native programs give
+ * each vertex the pass's texture coordinates, and the combiner adds env * weight after the fog.
+ * Mid: fog(tex * v) + env * tex.a * v.a, as the PS2's two passes; near: alpha blended with v.a,
+ * fog(tex * v) + env * tex.a, = the PS2's three passes (v.a * fog(tex * v) + (1 - v.a) * dest, then
+ * + env * v.a * tex.a) but for where the sum reaches white (the GS saturates once at the end).
+ * config.ini ocean_near_alpha (default 0: the PS2's own alpha) is a floor on the near alpha.
  *
  * Log: "[ctr] ocean full:" once per level (set of levels), the render thread's ms per frame;
  * (AI-assisted) a warning when parts weren't drawn (at most every 300 frames, see frame_stats).
@@ -39,13 +49,14 @@
 
 #include "common/common_types.h"
 
+#include "game/graphics/ctr/CtrOceanVu.h"
 #include "game/graphics/ctr/CtrRenderer.h"
 
 class CtrOceanMidVu;
 class CtrOceanNearVu;
 class CtrOceanBatch;
 
-class CtrOceanFull {
+class CtrOceanFull : public CtrOceanEnvHook {
  public:
   CtrOceanFull();
   ~CtrOceanFull();
@@ -55,6 +66,8 @@ class CtrOceanFull {
   static void note_levels(const std::vector<std::string>& levels);
   //! the native ocean programs (default) or the emulated VU programs (host replay test)
   void set_native(bool on);
+  //! (AI-assisted, j1ocean) CtrOceanEnvHook: the sky reflection's texture for this bucket's draws
+  void ocean_env(u64 tex0, const float color[4]) override;
 
  private:
   struct TextureDma;
@@ -82,11 +95,21 @@ class CtrOceanFull {
   std::vector<u32> m_env;
   std::vector<u64> m_env_logged;
 
+  // (AI-assisted, j1ocean) the sky reflection: environment-ocean (decoded) times env-color
+  CtrRenderState* m_rs = nullptr;  // the bucket being drawn (ocean_env)
+  int m_refl = -1, m_refl_w = 0, m_refl_h = 0;
+  u64 m_refl_key = 0, m_refl_frame = ~0ull, m_refl_made = ~0ull;
+  u32 m_refl_color = ~0u;
+  bool m_refl_ok = false;
+  std::vector<u32> m_refl_src, m_refl_texels;
+  std::vector<u64> m_refl_logged;
+
   // statistics: ms on the render thread, per frame
   u64 m_stat_frame = ~0ull;
   int m_frames = 0;
   double m_tex_ms = 0, m_mid_ms = 0, m_near_ms = 0, m_max_frame_ms = 0, m_cur_frame_ms = 0;
   int m_mid_runs = 0, m_near_runs = 0, m_failed = 0, m_tex_updates = 0;
+  int m_refl_updates = 0;  // (AI-assisted, j1ocean) sky reflection textures made
   u32 m_window_gen = 0, m_logged_gen = ~0u;
   // (AI-assisted) the warning about parts not drawn (frame_stats)
   int m_failed_unlogged = 0;

@@ -259,12 +259,16 @@ void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, in
  * centered at 2048 * 16; Jak 1's 512 x 224 field like CtrDirect), z: GS depth (24 bits, larger =
  * closer), q: the GS Q (1 / w, > 0); s, t: the GS S, T (texture coordinates times q: the GPU
  * divides them per pixel, perspective correct like the GS); fog: the amount of fog color, 0..1
- * (the GS's (255 - F) / 255); rgba: GS vertex color. 32 bytes. Colors like ctr_gpu_draw_mesh:
- * textured rgb = tex.rgb * v.rgb / 128, a = tex.a (0xff = 1) * v.a / 128, then the fog. */
+ * (the GS's (255 - F) / 255); rgba: GS vertex color. Colors like ctr_gpu_draw_mesh:
+ * textured rgb = tex.rgb * v.rgb / 128, then the fog; a = tex.a (0xff = 1) * v.a / 128 when the
+ * state's tcc (bit 0) is set, else v.a / 128 (the GS's TEX0.TCC: the near ocean's textured pass).
+ * (AI-assisted, j1ocean) es, et: the sky reflection's texture coordinates (env map, clamped; only
+ * ctr_gpu_ocean_full_draw_env reads them). 40 bytes. */
 typedef struct {
   float x, y, z, q;
   float s, t, fog;
   uint8_t r, g, b, a;
+  float es, et;
 } ctr_ocean_full_vertex;
 /* Room for up to max_verts vertices and max_indices u16 indices (a triangle list) in this frame's
  * vertex memory, written in place (no copy), then drawn with ctr_gpu_ocean_full_draw: one draw, nothing
@@ -280,6 +284,16 @@ void ctr_gpu_ocean_full_draw(const ctr_draw_state* state, int vert_count, int in
  * W > 0 in front of the camera (the GPU clips), s, t = the texture coordinates (not times Q). */
 void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state, int vert_count, int index_count,
                                   uint8_t fog_r, uint8_t fog_g, uint8_t fog_b);
+/* (AI-assisted, j1ocean) Like ctr_gpu_ocean_full_draw_clip, with the PS2 ocean's sky reflection
+ * (its env map pass, CommonOceanRenderer's ENV_MAP bucket) in the same draw: env_tex (texture
+ * unit 2, clamped, at es, et; the env map already times the pass's GS color) is added after the fog,
+ * weighted like the PS2's destination alpha:
+ *   tcc set (mid ocean, opaque):  rgb = fog(tex * v) + env * (tex.a * v.a / 128), a = tex.a * v.a
+ *   tcc clear (near ocean, blended): rgb = fog(tex * v) + env * tex.a, a = v.a
+ * (the near ocean's alpha blending then weights both by v.a, as the PS2's alpha-only pass did).
+ * ctr_gpu_ocean_end after the bucket's draws (texture unit 2 off, combiner stage 2 reset). */
+void ctr_gpu_ocean_full_draw_env(const ctr_draw_state* state, int vert_count, int index_count,
+                                 uint8_t fog_r, uint8_t fog_g, uint8_t fog_b, int env_tex);
 
 /* ---------------- static meshes (level background, see c3l_format.h) ----------------
  * Vertex layout = c3l::Vertex (16 bytes): s16 pos[3], s16 pad, s16 st[2] (* 1024), u8 rgba[4]

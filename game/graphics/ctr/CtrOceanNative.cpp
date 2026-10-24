@@ -29,6 +29,44 @@ namespace {
 // ocean-mid VU memory (OceanMid_PS2.cpp)
 constexpr int kGridXz = 236;  // 9 x 9 (x, 0, z, 1), made by call 0
 constexpr int kHmge = 733, kHvdf = 735, kFogConst = 736, kIndexTable = 757, kCorners = 765;
+// (AI-assisted, j1ocean) ocean-mid-constants' constants, constants2 (the env map's scale, offset)
+constexpr int kMidEnvScale = 737, kMidEnvOffset = 738;
+
+/*!
+ * (AI-assisted, j1ocean) The env map pass's texture coordinates (the sky reflection; ocean-mid
+ * L32 / L45 / L43 and ocean-near L15 + L21): the vertex in camera space v = the call's camera
+ * matrix (in[0..3]) times the vertex, then s = v.x / |v| * scale.x + offset.x, t = v.z / |v| *
+ * scale.y + offset.y (scale 0.5, offset 0.5: the view direction's horizontal part, which a flat
+ * mirror reflects unchanged; the PS2's Q = scale.z * v.z + offset.z = 1). The GPU interpolates them
+ * with perspective, as the GS did with S, T, Q times the textured pass's Q.
+ */
+struct EnvXform {
+  float m[4][3];  // the camera matrix's x, y, z rows
+  float sx, ox, sz, oz;
+  EnvXform(const Vf* cam, const Vf& scale, const Vf& offset) {
+    for (int j = 0; j < 4; j++) {
+      m[j][0] = cam[j].x();
+      m[j][1] = cam[j].y();
+      m[j][2] = cam[j].z();
+    }
+    sx = scale.x();
+    sz = scale.y();
+    ox = offset.x();
+    oz = offset.y();
+  }
+  //! from the camera space vector (vx, vy, vz)
+  void st_cam(float vx, float vy, float vz, float* es, float* et) const {
+    const float r = 1.f / std::sqrt(vx * vx + vy * vy + vz * vz);
+    *es = vx * r * sx + ox;
+    *et = vz * r * sz + oz;
+  }
+  //! for the point (x, y, z, 1)
+  void st(float x, float y, float z, float* es, float* et) const {
+    st_cam(m[0][0] * x + m[1][0] * y + m[2][0] * z + m[3][0],
+           m[0][1] * x + m[1][1] * y + m[2][1] * z + m[3][1],
+           m[0][2] * x + m[1][2] * y + m[2][2] * z + m[3][2], es, et);
+  }
+};
 
 inline u32 lane(const Vf& v, int i) {
   u32 r;
@@ -109,7 +147,7 @@ bool CtrOceanMidVu::native_ready() {
  * out, a byte of 0xff the row. The grid's vertices are shared by the rows (one vertex per grid
  * point: t counts the rows, the texture repeats).
  */
-void CtrOceanMidVu::native_tile() {
+void CtrOceanMidVu::native_tile(bool env) {
   const u16 base = xtop();
   const Vf* in = m_vu_data + base;
   const ClipXform xf(in + 4, m_vu_data[kHmge], m_vu_data[kHvdf], m_vu_data[kFogConst]);
@@ -128,9 +166,11 @@ void CtrOceanMidVu::native_tile() {
   ctr_ocean_full_vertex* v;
   u16* idx;
   int first;
-  if (!m_batch->reserve_clip(81, 6 * 8 * rows, &v, &idx, &first)) {
+  if (!m_batch->reserve_clip(81, 6 * 8 * rows, &v, &idx, &first, env)) {
     return;
   }
+  // (AI-assisted, j1ocean) call 73 (L32) also draws the env map pass, call 46 doesn't
+  const EnvXform ex(in, m_vu_data[kMidEnvScale], m_vu_data[kMidEnvOffset]);
 
   // grid point (r, c) = (x[c], 0, z[r], 1): out = col0 * x[c] + (col2 * z[r] + col3)
   float cx[9][4];
@@ -162,6 +202,11 @@ void CtrOceanMidVu::native_tile() {
       o->t = t;
       o->fog = xf.fog(q);
       put_color(o, lane(color[c], 0), lane(color[c], 1), lane(color[c], 2), lane(color[c], 3));
+      if (env) {
+        ex.st(m_vu_data[kGridXz + c].x(), 0.f, z, &o->es, &o->et);
+      } else {
+        o->es = o->et = 0.f;
+      }
     }
   }
 
@@ -218,10 +263,12 @@ void CtrOceanMidVu::native_transition(bool fan) {
   ctr_ocean_full_vertex* v;
   u16* idx;
   int first;
-  if (!m_batch->reserve_clip(n, 3 * tris, &v, &idx, &first)) {
+  if (!m_batch->reserve_clip(n, 3 * tris, &v, &idx, &first, true)) {
     return;
   }
   const ClipXform xf(in + 4, m_vu_data[kHmge], m_vu_data[kHvdf], m_vu_data[kFogConst]);
+  // (AI-assisted, j1ocean) calls 107 / 275 draw the env map pass too (L19 / L24)
+  const EnvXform ex(in, m_vu_data[kMidEnvScale], m_vu_data[kMidEnvOffset]);
   const Vf* corner = m_vu_data + kCorners;
   // (AI-assisted) the call's corners, colors and texture coordinates in locals: the vertex stores
   // could be to the VU memory as far as the compiler knows, which made it read all 40 of them
@@ -264,6 +311,7 @@ void CtrOceanMidVu::native_transition(bool fan) {
     o->t = st[1];
     o->fog = xf.fog(c[3]);
     put_color(o, (u32)(s32)col[0], (u32)(s32)col[1], (u32)(s32)col[2], (u32)(s32)col[3]);
+    ex.st(p[0], p[1], p[2], &o->es, &o->et);
   }
   u16* out = idx;
   if (fan) {
@@ -343,10 +391,14 @@ void CtrOceanNearVu::native_patch() {
   ctr_ocean_full_vertex* v;
   u16* idx;
   int first;
-  if (!m_batch->reserve_clip(81, 6 * 8 * rows, &v, &idx, &first)) {
+  if (!m_batch->reserve_clip(81, 6 * 8 * rows, &v, &idx, &first, true)) {
     return;
   }
   const ClipXform xf(in + 4, vu[kNearHmge], vu[kNearHvdf], vu[kNearFog]);
+  // (AI-assisted, j1ocean) the env map pass (L15's camera space vertex, L21): constants (fade) and
+  // constants2 (alpha) hold its scale and offset in x, y
+  const float env_sx = vu[kNearFade].x(), env_sz = vu[kNearFade].y();
+  const float env_ox = vu[kNearAlpha].x(), env_oz = vu[kNearAlpha].y();
 
   // heights: rows 0..7 from in[10].x / .y (the 9th column), row 8 from .z / .w
   float h[9][9];
@@ -398,6 +450,11 @@ void CtrOceanNearVu::native_patch() {
       const float vz = ((cam0.z() * x + cam1.z() * y) + cam2.z() * z) + cam3.z();
       const float d = std::sqrt(vx * vx + vy * vy + vz * vz);
       const float f0 = min_pos(d * fade_k, 1.f);
+      {
+        const float r = 1.f / d;
+        o->es = vx * r * env_sx + env_ox;
+        o->et = vz * r * env_sz + env_oz;
+      }
       const float hy = y * (1.f - f0);
       const float f = max_pos(f0, fade_min);
       o->x = xf.col[0][0] * x + xf.col[1][0] * hy + xf.col[2][0] * z + xf.col[3][0];
