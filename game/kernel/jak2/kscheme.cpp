@@ -984,7 +984,7 @@ Ptr<Type> set_fixed_type(u32 offset,
 }
 
 static bool in_valid_memory_for_new_type(u32 addr) {
-  if (SymbolTable2.offset <= addr && addr < 0x8000000) {
+  if (SymbolTable2.offset <= addr && addr < (u32)EE_MAIN_MEM_SIZE) {
     return true;
   }
 
@@ -1142,7 +1142,7 @@ u64 method_set(u32 type_, u32 method_id, u32 method) {
  * Call a GOAL method of a given type.
  */
 u64 call_method_of_type(u32 arg, Ptr<Type> type, u32 method_id) {
-  if (((type.offset < SymbolTable2.offset || 0x7ffffff < type.offset) &&  // not in normal memory
+  if (((type.offset < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < type.offset) &&  // not in normal memory
        (type.offset < 0x84000 || 0x100000 <= type.offset))                // not in kernel memory
       || ((type.offset & OFFSET_MASK) != BASIC_OFFSET)) {                 // invalid type
     cprintf("#<#%x has invalid type ptr #x%x>\n", arg, type.offset);
@@ -1178,7 +1178,7 @@ u64 call_goal_function_by_name(const char* name) {
  * Like call_method_of_type, but has two arguments. Used to "relocate" v2/s4 loads.
  */
 u64 call_method_of_type_arg2(u32 arg, Ptr<Type> type, u32 method_id, u32 a1, u32 a2) {
-  if (((type.offset < SymbolTable2.offset || 0x7ffffff < type.offset) &&  // not in normal memory
+  if (((type.offset < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < type.offset) &&  // not in normal memory
        (type.offset < 0x84000 || 0x100000 <= type.offset))                // not in kernel memory
       || ((type.offset & OFFSET_MASK) != BASIC_OFFSET)) {                 // invalid type
     cprintf("#<#%x has invalid type ptr #x%x>\n", arg, type.offset);
@@ -1218,7 +1218,7 @@ u64 print_object(u32 obj) {
   if ((obj & OFFSET_MASK) == BINTEGER_OFFSET) {
     return print_binteger(s64(s32(obj)));
   } else {
-    if ((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+    if ((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
         (obj < 0x84000 || 0x100000 <= obj)) {              // not in kernel memory
       cprintf("#<invalid object #x%x>", obj);
     } else if ((obj & OFFSET_MASK) == PAIR_OFFSET) {
@@ -1240,7 +1240,7 @@ u64 print_object(u32 obj) {
  * Confirms basic is valid and prints the type name.
  */
 u64 print_basic(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET)) {
     cprintf("#<invalid basic #x%x>", obj);
@@ -1302,7 +1302,7 @@ u64 print_pair(u32 obj) {
  * Print method for symbol.  Just prints the name without quotes or anything fancy.
  */
 u64 print_symbol(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & 1) != 1) || obj < SymbolTable2.offset || obj >= LastSymbol.offset) {
     cprintf("#<invalid symbol #x%x>", obj);
@@ -1317,7 +1317,7 @@ u64 print_symbol(u32 obj) {
  * Print method for type.  Just prints the name without quotes
  */
 u64 print_type(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != u32_in_fixed_sym(FIX_SYM_TYPE_TYPE)) {
@@ -1332,7 +1332,7 @@ u64 print_type(u32 obj) {
  * Print method for string.  Prints the string in quotes.
  */
 u64 print_string(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != u32_in_fixed_sym(FIX_SYM_STRING_TYPE)) {
@@ -1400,7 +1400,7 @@ u64 inspect_object(u32 obj) {
   if ((obj & OFFSET_MASK) == BINTEGER_OFFSET) {
     return inspect_binteger(obj);
   } else {
-    if ((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+    if ((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
         (obj < 0x84000 || 0x100000 <= obj)) {              // not in kernel memory
       cprintf("#<invalid object #x%x>", obj);
     } else if ((obj & OFFSET_MASK) == PAIR_OFFSET) {
@@ -1433,7 +1433,7 @@ u64 inspect_pair(u32 obj) {
  * This typo is fixed in later games.
  */
 u64 inspect_string(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != u32_in_fixed_sym(FIX_SYM_STRING_TYPE)) {
@@ -1449,7 +1449,7 @@ u64 inspect_string(u32 obj) {
  * Inspect a symbol.
  */
 u64 inspect_symbol(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & 1) != 1) || obj < SymbolTable2.offset || obj >= LastSymbol.offset) {
     cprintf("#<invalid symbol #x%x>", obj);
@@ -1467,7 +1467,7 @@ u64 inspect_symbol(u32 obj) {
  * Inspect a type.
  */
 u64 inspect_type(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET) ||
       *Ptr<u32>(obj - 4) != u32_in_fixed_sym(FIX_SYM_TYPE_TYPE)) {
@@ -1493,7 +1493,7 @@ u64 inspect_type(u32 obj) {
  * We just use print_object.
  */
 u64 inspect_basic(u32 obj) {
-  if (((obj < SymbolTable2.offset || 0x7ffffff < obj) &&  // not in normal memory
+  if (((obj < SymbolTable2.offset || (u32)(EE_MAIN_MEM_SIZE - 1) < obj) &&  // not in normal memory
        (obj < 0x84000 || 0x100000 <= obj))                // not in kernel memory
       || ((obj & OFFSET_MASK) != BASIC_OFFSET)) {
     if (obj == s7.offset) {
