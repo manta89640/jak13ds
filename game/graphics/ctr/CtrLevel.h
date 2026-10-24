@@ -860,6 +860,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
   u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;
+  // (AI-assisted, fable1) heavy frames (the last level draw's vertices drawn >= 3x the table):
+  // every second one takes no new weights (draw_level); the count for the statistics
+  bool m_tod_heavy = false;
+  u64 m_tod_skipped = 0;
   double m_tod_ms = 0, m_tod_max_ms = 0;
   std::vector<const CtrLevelData*> m_loaded;
   // (AI-assisted, titlemove) per chunk of the level drawn: a shrub chunk's distance limit (game

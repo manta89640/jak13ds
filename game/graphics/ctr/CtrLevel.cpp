@@ -5042,6 +5042,19 @@ u8 detail_q(float t) {
 // title camera's flight (host, Oct 17) most switches of tie versions, tfrag tiers and distance
 // limits in view were of things moving away.
 constexpr float kHoldInView = 1.5f;
+// (AI-assisted, fable1) c3l v14 shrubs: a chunk's max_dist is its PS2 distance class, the middle of
+// the prototype's fade (x + w) / 2 (shrub_ps2_dists.inc: full detail up to x, the fading version
+// up to w). The PS2 shows a shrub out to w and the PC without a limit; the 3DS drew a run up to
+// max_dist x shrub_scale (0.8 by default): a wall of shrubs coming in at ~0.6 of the PS2's far
+// plane. Now a chunk's shrubs reach kShrubFarK x max_dist (~w: w / ((x + w) / 2) is 1.2-1.5 over
+// the table) and each run has its own limit between kShrubNearK of that (~x) and all of it, from
+// a hash of its index: the shrubs thin out over the PS2's fade zone instead of a patch at once.
+constexpr float kShrubFarK = 1.3f;
+constexpr float kShrubNearK = 0.55f;
+inline float shrub_run_limit(float far, u32 run) {
+  const float h = (float)((run * 2654435761u) >> 24) * (1.f / 256.f);
+  return far * (kShrubNearK + (1.f - kShrubNearK) * h);
+}
 // (AI-assisted) occ_cull: a level whose occlusion buffer hid fewer triangles than this per level
 // draw lately (average) runs it every 8th frame only; runs of fewer triangles aren't tested
 constexpr float kOccMinTris = 1000.f;
@@ -5538,11 +5551,13 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (rs.log_now && m_tod_frames) {
     lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
              "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
-             "refreshed whole in {} level draws; a pulsing palette held in {} level draws",
+             "refreshed whole in {} level draws ({} heavy frames took no new weights); a pulsing "
+             "palette held in {} level draws",
              m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames, m_tod_ms / m_tod_frames,
-             m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_fresh, m_tod_held);
+             m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_fresh, m_tod_skipped,
+             m_tod_held);
     m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = 0;
-    m_tod_spread = m_tod_fresh = 0;
+    m_tod_spread = m_tod_fresh = m_tod_skipped = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
   if (rs.log_now && m_occ_frames) {
@@ -5647,7 +5662,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const double t0 = tod_now_ms();
     m_tod_frames++;
     const u32 held0 = lev.tod->pulse_held;
-    m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
+    // (AI-assisted, fable1) a heavy frame (the frame before drew 3x the table's entries in
+    // vertices or more: the title's fast day, citadel's pulse, where a move comes nearly every
+    // frame and every group drawn is rewritten after it) takes the game's new weights every second
+    // frame only: the table and the groups are then rewritten once per two frames, together, and
+    // the colors drawn are at most one frame behind the PC's blend (2-8 color units at the title's
+    // 20x day; the same for every group). Half the time of day work there; gameplay (a move every
+    // few frames, few vertices) is unchanged. Azahar, title: performance.md "Time of day".
+    const bool tod_skip = m_tod_heavy && (rs.frame_idx & 1);
+    m_tod_skipped += tod_skip;
+    if (!tod_skip) {
+      m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
+    }
     m_tod_held += lev.tod->pulse_held != held0;  // (AI-assisted, citadel) tod_pulse_step
     tod_ms += tod_now_ms() - t0;
   }
@@ -5909,7 +5935,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, title-popin) a chunk's own distance limit (0: none) at auto_detail position t
   auto chunk_limit = [&](const c3l::Chunk& ch, float t) {
     if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
-      return ch.max_dist * (shrub_k0 + shrub_k_span * t) * det;
+      return ch.max_dist * kShrubFarK * (shrub_k0 + shrub_k_span * t) * det;
     } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
       return (shrub_d0 + shrub_d_span * t) * 4096.f * det;
     } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
@@ -5941,7 +5967,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       float max_dist = base_dist;
       float d;
       if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
-        d = ch.max_dist * shrub_k * det;  // (AI-assisted) c3l v14: the shrubs' PS2 distance
+        // (AI-assisted) c3l v14: the shrubs' PS2 far plane (kShrubFarK; the runs thin out before it)
+        d = ch.max_dist * kShrubFarK * shrub_k * det;
       } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
         d = shrub_fixed_dist;
       } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
@@ -6472,8 +6499,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                 : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci]
                                                            : ch.vis_run_count);
         u8* const rin = lev.run_dist_in.data();
-        if (dc + ch.bsphere[3] <= lim) {
-          // all of it within: every run in (no per run test)
+        if (dc + ch.bsphere[3] <= lim * kShrubNearK) {
+          // all of it within the nearest run limit: every run in (no per run test)
           for (u32 r = r0; r < r0 + nr; r++) {
             rin[r] = 1;
           }
@@ -6493,8 +6520,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               const float x = ch.origin[0] + rs_.c[0] * ch.scale - cam.trans[0];
               const float y = ch.origin[1] + rs_.c[1] * ch.scale - cam.trans[1];
               const float z = ch.origin[2] + rs_.c[2] * ch.scale - cam.trans[2];
-              // (its nearest shrub within the distance: none comes in later than the PS2's)
-              const float l = (rin[r] ? lim * 1.1f : lim) + (float)rs_.r * ch.scale;
+              // (its nearest shrub within the distance: none comes in later than the PS2's far
+              // plane; the run's own limit, fable1: shrub_run_limit)
+              const float lr = shrub_run_limit(lim, r);
+              const float l = (rin[r] ? lr * 1.1f : lr) + (float)rs_.r * ch.scale;
               in = x * x + y * y + z * z <= l * l;
             }
             rin[r] = in;
@@ -7119,6 +7148,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     pop_tod = ps.rewritten;
     m_tod_spread += ps.rewritten;
     m_tod_fresh += ps.fresh ? 1 : 0;
+    m_tod_heavy = ps.fresh_ok;  // (AI-assisted, fable1) the next frame's tod_update, see there
   }
 
   // (AI-assisted) impostors: far tie groups shown as cards (their runs hidden here), the new
