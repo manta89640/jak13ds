@@ -1024,18 +1024,21 @@ thunk into goalc's C and back each time). They now run them in C++ while the sym
 function and of what it calls still hold what they held at the first call (otherwise the GOAL
 call):
 
-| GOAL function | called by | C++ (file) | host instructions per call, GOAL / C++ (verify run) |
+| GOAL function | called by | C++ (file) | host instructions saved per call x calls per frame (village2) |
 |---|---|---|---|
-| sp-adjust-launch (sp-init-fields!, matrix-rotate-xyz! with sin / cos, vector3s products, the y rotation) | launcher | `native_sparticle_launcher.cpp` adjust_launch | 11883 / 2925 |
-| sp-init-fields! (3 per particle) | launcher | pc-sp-init-fields! directly (`native_sp_init_fields.h`) | the GOAL wrapper's hop |
-| sp-get-particle | launcher | `native_sp_init_fields.h` get_particle | 1821 / 1788 |
-| sp-orbiter (quaternion*!, quaternion-normalize!, quaternion->matrix, vector-matrix*!) | process-block | `native_sp_callbacks.cpp` | 2228 / 1966 |
-| sp-relaunch-particle-2d (+ sp-relaunch-setup-fields; the time of day color case stays GOAL: no test pad reaches it) | process-block | `native_sp_callbacks.cpp` | 17336 / 17011 (mostly the two field inits) |
+| sp-adjust-launch (sp-init-fields!, matrix-rotate-xyz! with sin / cos, vector3s products, the y rotation) | launcher | `native_sparticle_launcher.cpp` adjust_launch | 1956 x 65 |
+| sp-init-fields! (3 per particle) | launcher | pc-sp-init-fields! directly (`native_sp_init_fields.h`) | the GOAL wrapper's hop (not measured) |
+| sp-get-particle | launcher | `native_sp_init_fields.h` get_particle | 29 x 89 |
+| sp-orbiter (quaternion*!, quaternion-normalize!, quaternion->matrix, vector-matrix*!) | process-block | `native_sp_callbacks.cpp` | 261 x 19 |
+| sp-relaunch-particle-2d (+ sp-relaunch-setup-fields; the time of day color case stays GOAL: no test pad reaches it) | process-block | `native_sp_callbacks.cpp` | 140 x 38 |
 
 `native_goalc_ops.h` has goalc's C of sin, cos, the matrix-rotate functions, matrix*!,
 vector-matrix*!, vector-rotate*!, quaternion*!, quaternion-normalize! and quaternion->matrix (the
 same float operations per lane in the same order, vf0 as a multiply by a 1.0 the compiler can't
 fold). The launcher's scratch grew by 64 bytes for sp-adjust-launch's local launchinfo.
+Host costs: `OPENGOAL_INLINE_INSTR=1` runs the GOAL function and the C++ on alternate calls and
+counts each one's host (arm64) instructions; ~141k of village2's 2.3M instructions per frame. arm64
+runs goalc's 64-bit C well, ARM11 doesn't: the Azahar numbers below are the real measure.
 
 **Identity**: verify mode (`OPENGOAL_MIPS2C_VERIFY=1`) runs the GOAL function and the C++ on the
 same state for every call (`native_verify_inline`: the particle, its sprite, the launch info,
