@@ -671,9 +671,14 @@ std::deque<IsoMessage*> sSoundLoadQueue;
 
 // (AI-assisted) a load that runs out of heap memory (bad_alloc: an exception out of a thread pool
 // task is std::terminate, the Spider Cave crash on hardware) waits and tries again, up to
-// kSoundLoadRetries times; then the bank stays out (no sound from it) and the game goes on
-constexpr int kSoundLoadRetries = 40;
-constexpr int kSoundLoadRetryMs = 500;
+// kSoundLoadRetries times; then the bank stays out (no sound from it) and the game goes on.
+// (AI-assisted) The wait doubles from kSoundLoadRetryMs up to kSoundLoadRetryMaxMs: 11 tries over
+// about 16 s (before: 41 over 20 s). Every try allocates the whole file again, so frequent tries
+// competed with the level load for the heap they waited for. A failed try frees everything it
+// allocated (loader.cpp owns the bank until it is in).
+constexpr int kSoundLoadRetries = 10;
+constexpr int kSoundLoadRetryMs = 250;
+constexpr int kSoundLoadRetryMaxMs = 2000;
 
 // one try: whether the file was read (the bank may still have failed to parse: handle)
 bool sound_load_try(SoundLoad* s) {
@@ -735,10 +740,11 @@ void sound_load_job(SoundLoad* s) {
         break;
       }
       if (attempt == 0) {
-        lg::warn("[io] sound bank {}: {}, trying again every {} ms", s->path, e.what(),
-                 kSoundLoadRetryMs);
+        lg::warn("[io] sound bank {}: {}, trying again in {} ms (up to {} ms between tries)",
+                 s->path, e.what(), kSoundLoadRetryMs, kSoundLoadRetryMaxMs);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(kSoundLoadRetryMs));
+      std::this_thread::sleep_for(std::chrono::milliseconds(
+          std::min(kSoundLoadRetryMs << std::min(attempt, 4), kSoundLoadRetryMaxMs)));
     }
   }
   const double ms =
