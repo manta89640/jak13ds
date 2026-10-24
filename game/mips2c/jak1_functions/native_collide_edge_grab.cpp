@@ -277,8 +277,13 @@ u64 method_10_collide_edge_hold_list_impl(const NativeArgs& args) {
   memcpy(center, gptr(item + 16), 16);
   const u32 head = gload<u32>(list + 8);
   const float rating = gload<float>(item + 4);
-  gstore<u32>(list + 4, attempts + 1);
-  gstore_bytes(list + 1552 + (attempts << 4), center, 16);
+  // (AI-assisted) attempts (qword 32) has room for 32: the original kept counting and storing past
+  // it into the rest of *collide-edge-work* (search-for-edges adds up to 32, then find-best-grab!
+  // up to 32 more). The count saturates at 32 instead; only debug-draw reads it.
+  if (attempts < 32) {
+    gstore<u32>(list + 4, attempts + 1);
+    gstore_bytes(list + 1552 + (attempts << 4), center, 16);
+  }
   if (head == st) {
     gstore<u32>(list + 8, item);
     gstore<u32>(item, st);
