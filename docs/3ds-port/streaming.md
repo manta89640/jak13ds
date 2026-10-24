@@ -79,6 +79,8 @@ its recent largest (decaying 1% a frame): a zoom moves it. The unit's bound (nee
 from its sphere's center, StreamChunk) skips the per-group pass for the units beyond it, squared
 distances first. Score < 0: needed now; < 20 m + half a second of the camera's travel: wanted
 (read); > 45 m: may be freed for another. A needed unit in view goes before every other.
+(AI-assisted, titlemove) On the title screen e_g is at least kTitleLodMin (100 m) / k
+(`lod_min_e`; performance.md "Title flight pops"), in the units' bounds too.
 **Camera cuts**: a jump of more than 40 m in a frame, or of the tie LOD factor by more than 30%
 (another camera's focal length, a zoom); late times are counted as after a cut (within 2 s of one)
 or not (speed, bandwidth, room).

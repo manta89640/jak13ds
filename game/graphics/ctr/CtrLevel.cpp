@@ -54,6 +54,12 @@ bool pop_log_on() {
   static const bool on = getenv("CTR_POP_LOG") != nullptr;
   return on;
 }
+#elif defined(OG3DS_POP_LOG)
+// (AI-assisted, titlemove) a 3DS measurement build (cmake -DOG3DS_POP_LOG=ON): the same lines every
+// frame in gk.log
+constexpr bool pop_log_on() {
+  return true;
+}
 #else
 constexpr bool pop_log_on() {
   return false;
@@ -65,6 +71,12 @@ struct PopLog {
   u32 taken = 0;
 };
 PopLog g_pop;
+// (AI-assisted, titlemove) the title screen's least tie LOD switch distance, meters
+// (CtrTfragRenderer::draw_level). Host, the flight's first ~8 s: switches in view 80 -> 19 (all at
+// 102-113 m; the island's groups are near from the reveal on), the flight's later parts +3-10k
+// triangles; 130 m: 7 switches, but +14-34k triangles later (Azahar: 201k triangles, 28 ms render
+// thread build where the gameplay distances drew 138k / 19.5 ms)
+constexpr float kTitleLodMin = 100.f;
 // below the render thread (0x2F) and the sound mixer (0x2E), which share core 2 with the loader
 constexpr int kLoaderPrio = 0x3C;
 // a prefetched level nothing asked for is dropped after this long
@@ -4067,7 +4079,7 @@ u32 CtrLevels::stream_shrink(bool all) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k = lev.stream_k;
-        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k, lev.lod_floor_k) <
+        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k, lev.lod_floor_k, lev.lod_min_e) <
                          kKeepMeters * kM) {
           continue;
         }
@@ -4310,7 +4322,7 @@ void CtrLevels::stream_update(u64 frame) {
         dmin = std::min(dmin, dx * dx + dy * dy + dz * dz);
       }
       // (squared first: most units are far beyond their bound, no root for them)
-      const float bound = su.bound(k, lev.lod_floor_k);
+      const float bound = su.bound(k, lev.lod_floor_k, lev.lod_min_e);
       const float far_lim = bound + (resident ? kKeepMeters * kM : want_m);
       if (dmin > far_lim * far_lim) {
         if (resident) {
@@ -4378,6 +4390,14 @@ void CtrLevels::stream_update(u64 frame) {
   }
   m_sst.need_max = std::max<u64>(m_sst.need_max, need_now);
   m_sst.need_sum += need_now;
+  if (pop_log_on()) {  // (AI-assisted, titlemove) CTR_POP_LOG: the streaming's view of the frame
+    u32 want_now = 0;
+    for (const auto& w : m_want) want_now += w.score < 0;
+    lg::info("[popS] f={} gcam={:.1f},{:.1f},{:.1f} ngp={} cam={:.1f},{:.1f},{:.1f} np={} want={} want_now={} need_now={}KB inflight={} idle={} arena={}KB",
+             frame, m_game_cam[0] / 4096.f, m_game_cam[1] / 4096.f, m_game_cam[2] / 4096.f, ngp,
+             m_cam[0] / 4096.f, m_cam[1] / 4096.f, m_cam[2] / 4096.f, np, m_want.size(), want_now,
+             need_now / 1024, m_stream_inflight, m_idle.size(), arena.capacity() / 1024);
+  }
   if (m_want.empty() && !m_stream_inflight && !level_loading && !m_idle.empty() &&
       frame >= m_idle_frame + kIdleFrames) {
     stream_idle_fill(frame);
@@ -4563,7 +4583,7 @@ void CtrLevels::stream_update(u64 frame) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k2 = lev.stream_frame + 3 >= frame ? lev.stream_k : 0.f;
-        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k2, lev.lod_floor_k)
+        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k2, lev.lod_floor_k, lev.lod_min_e)
                        : 1e30f;
       }
       if (score > kKeepMeters * kM) {
@@ -5472,6 +5492,12 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     lev->drawn_frame = rs.frame_idx;
     draw_level(*lev, pc_data.camera, rs);
   }
+  if (rs.log_now && m_shrub_run_hid && m_level_draws) {
+    // (AI-assisted, titlemove) shrub runs beyond their distance in chunks that were drawn
+    lg::info("[ctr] {}: shrub runs hidden by distance {:.1f} per level draw", m_name,
+             (double)m_shrub_run_hid / m_level_draws);
+    m_shrub_run_hid = 0;
+  }
   if (rs.log_now && m_level_draws) {
     lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
               m_level_draws);
@@ -5578,6 +5604,23 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     g_pop.taken = taken;
   }
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
+  // (AI-assisted, titlemove) the title screen (the title level loaded): its attract camera flies a
+  // fixed path over Sandover. No tie group switches LOD (geometry 3 -> 0) nearer than
+  // kTitleLodMin there: at the gameplay distances (the PS2 far-plane, 35-75 m for the island) the
+  // island's palms, grass, hut and rock switched one after another on screen as the flight came
+  // nearer (807 switches in view in 40 s in Azahar; 81 in its first ~8 s on the host, objects up to
+  // 137 px across), each a step in shape and in the vertex colors (the far versions' own shading)
+  m_levels->loaded(&m_loaded);
+  bool title_on = false;
+  for (const auto* l : m_loaded) {
+    title_on = title_on || l->name == "title";
+  }
+  float title_min = kTitleLodMin;
+#ifndef __3DS__
+  if (const char* e = getenv("CTR_TITLE_LOD_MIN")) {
+    title_min = (float)atof(e);  // (host test: meters; 0 = as in gameplay)
+  }
+#endif
   // (AI-assisted, title3) shown again after a gap (the title's reveal of Sandover behind the logo,
   // a level's start): reveal_frame (late near chunks in view)
   {
@@ -5883,6 +5926,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, streaming) a chunk's distance decision (draw distance, its own limit, 10%
   // hysteresis, auto_detail's held distances, kept while in view and moving away): the chunk loop's,
   // and the near chunks' (before the tie LOD groups, which need them). Updates the chunk's state.
+  if (m_shrub_lim.size() < lev.chunks.size()) {
+    m_shrub_lim.resize(lev.chunks.size());
+  }
+  if (lev.run_dist_in.size() != lev.vis_runs.size()) {
+    lev.run_dist_in.assign(lev.vis_runs.size(), 0);
+  }
   auto decide_dist = [&](size_t ci, const c3l::Chunk& ch, u8& state,
                          bool vista_chunk) __attribute__((always_inline)) {
     bool dist_ok = true;
@@ -5922,7 +5971,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         int in_view = -1;
         float dd = d;
         const u8 cq = chunk_q[ci];
-        if (auto_detail && cq != q_now && cq != 0xff && d > 0 &&
+        // (AI-assisted, titlemove) only for going: a chunk the new distances show is shown (held
+        // back, a shrub cell culled while the GPU was busy came in only once the camera was within
+        // the old, shorter distance: close up)
+        if (auto_detail && cq != q_now && cq != 0xff && d > 0 && !dist_ok &&
             (ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE)) {
           const float d_old = chunk_limit(ch, cq / kDetailQ);
           const bool ok_old = within(limit_with(d_old), f);
@@ -5938,8 +5990,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           chunk_q[ci] = q_now;
         }
         // (AI-assisted, title-popin) in view and moving away: drawn up to kHoldInView x its own
-        // distance (not beyond the draw distance)
-        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist)) {
+        // distance (not beyond the draw distance). (AI-assisted, titlemove) not shrubs: they
+        // follow the PS2's distances (the user: "small things like shrubs pop in when i walk close,
+        // but if i walk away they stay"); their runs are culled by distance one by one too
+        // (emit_chunk)
+        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist) &&
+            ch.kind != c3l::CHUNK_KIND_SHRUB) {
           if (in_view < 0) {
             in_view = sphere_in_view(cam, ch.bsphere);
           }
@@ -5949,8 +6005,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
         if (pop_log_on() && was_in != dist_ok && sphere_in_view(cam, ch.bsphere)) {
           (dist_ok ? g_pop.chunk_in : g_pop.chunk_out)[ch.kind & 3]++;
+          lg::info("[popC] f={} {} ci={} kind={} {} d={:.1f} lim={:.1f} r={:.1f}", rs.frame_idx,
+                   lev.name, ci, ch.kind, dist_ok ? "in" : "out", std::sqrt(d2) / 4096.f,
+                   max_dist / 4096.f, ch.bsphere[3] / 4096.f);  // (titlemove: which chunk)
         }
         state = (u8)(dist_ok ? (state | 4) : (state & ~4));
+        if (ch.kind == c3l::CHUNK_KIND_SHRUB && ci < m_shrub_lim.size()) {
+          m_shrub_lim[ci] = limit_with(dd);  // (AI-assisted, titlemove) for its runs
+        }
       }
     }
     return dist_ok;
@@ -5964,7 +6026,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (its distance state follows the camera all the same: no hysteresis jump when it comes)
     // (a unit whose groups are all beyond their near distance, by its bound with the last frame's
     // factor x 1.25: not decided, 2; its groups are far anyway)
-    const float kb = lev.stream_k * 1.25f;
+    // (AI-assisted, titlemove) with this frame's factor too (stream_k is the last frame's: after a
+    // cut to another focal length units were decided beyond their bound for a frame and their
+    // groups drawn far)
+    float kb = lev.stream_k * 1.25f;
+    if (settings.tie_lod && lev.lod_error.size() == lev.lod_groups.size()) {
+      const float pzw = std::abs(cam.perspective[2][3]);
+      const float focal =
+          pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
+      kb = std::max(kb, settings.detail_scale * focal / std::max(settings.tie_lod_px, 0.25f) *
+                            1.1f * 1.25f);
+    }
     for (size_t u = 0; u < lev.stream_units.size(); u++) {
       const auto& su = lev.stream_units[u];
       const u32 ci = su.chunk;
@@ -5974,7 +6046,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       {
         const float* c = lev.chunks[ci].bsphere;
         const float dx = c[0] - cx, dy = c[1] - cy, dz = c[2] - cz;
-        const float lim = su.bound(kb, lev.lod_floor_k);
+        const float lim = su.bound(kb, lev.lod_floor_k, lev.lod_min_e);
         if (kb > 0 && dx * dx + dy * dy + dz * dz > lim * lim) {
           lev.unit_ok[u] = 2;
           continue;
@@ -6039,6 +6111,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // never coarser than the PS2, and where the PS2 distance decides, its far version's error at
     // the switch is under tie_lod_px
     lev.lod_floor_k = by_error && k > 0 ? k0 / k : 0.f;
+    // (AI-assisted, titlemove) the title: no group switches nearer than kTitleLodMin meters
+    lev.lod_min_e = title_on && by_error && k > 0 ? title_min * 4096.f / k : 0.f;
 #ifndef __3DS__
     static const bool no_floor = getenv("CTR_LOD_NO_FLOOR") != nullptr;  // (host A/B: as before)
     if (no_floor) {
@@ -6171,6 +6245,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #endif
       if (pop_log_on() && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
         (n ? g_pop.lod_up : g_pop.lod_down)++;
+        lg::info("[popL] f={} {} g{} {} d={:.1f} sw={:.1f} r={:.1f} keep_far={}", rs.frame_idx,
+                 lev.name, g, n ? "near" : (!near_at(k) ? "dist" : "nodata/late"),
+                 std::sqrt(d2) / 4096.f, (sw * k) / 4096.f, lg.bsphere[3] / 4096.f,
+                 keep_far ? 1 : 0);  // (titlemove: which group, why)
       }
       st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0));
       near += n;
@@ -6376,6 +6454,61 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           return;
         }
         partly = shown < nr;
+      }
+      // (AI-assisted, titlemove) shrubs follow the PS2's distance by their runs (a visibility
+      // node: up to 8 instances, ~10 m in radius in village1), not by their cell (~20 m in radius):
+      // a run is drawn while its sphere reaches within the chunk's distance (10% hysteresis).
+      // Before, a whole cell came in at once and stayed while any of it was within the distance
+      // (and up to 1.5x that while in view)
+      if (ch.kind == c3l::CHUNK_KIND_SHRUB && !vista_tier && ci < m_shrub_lim.size() &&
+          m_shrub_lim[ci] > 0 && !lev.run_spheres.empty()) {
+        const float lim = m_shrub_lim[ci];
+        const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
+                    dcz = ch.bsphere[2] - cam.trans[2];
+        const float dc = std::sqrt(dcx * dcx + dcy * dcy + dcz * dcz);
+        const u32 r0 = lev.chunk_first_run[ci];
+        // (the runs the run loop above uses)
+        const u32 nr = vis_test ? ch.vis_run_count
+                                : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci]
+                                                           : ch.vis_run_count);
+        u8* const rin = lev.run_dist_in.data();
+        if (dc + ch.bsphere[3] <= lim) {
+          // all of it within: every run in (no per run test)
+          for (u32 r = r0; r < r0 + nr; r++) {
+            rin[r] = 1;
+          }
+        } else {
+          if (!runs_valid) {
+            for (u32 r = r0; r < r0 + nr; r++) {
+              m_run_shown[r] = 1;
+              m_run_nomerge[r] = 0;
+            }
+            runs_valid = true;
+          }
+          u32 shown = 0;
+          for (u32 r = r0; r < r0 + nr; r++) {
+            const auto& rs_ = lev.run_spheres[r];
+            bool in = true;
+            if (rs_.r != 0xffff) {
+              const float x = ch.origin[0] + rs_.c[0] * ch.scale - cam.trans[0];
+              const float y = ch.origin[1] + rs_.c[1] * ch.scale - cam.trans[1];
+              const float z = ch.origin[2] + rs_.c[2] * ch.scale - cam.trans[2];
+              // (its nearest shrub within the distance: none comes in later than the PS2's)
+              const float l = (rin[r] ? lim * 1.1f : lim) + (float)rs_.r * ch.scale;
+              in = x * x + y * y + z * z <= l * l;
+            }
+            rin[r] = in;
+            if (!in && m_run_shown[r]) {
+              m_run_shown[r] = 0;
+              m_shrub_run_hid++;
+            }
+            shown += m_run_shown[r];
+          }
+          if (!shown) {
+            return;
+          }
+          partly = shown < nr;
+        }
       }
       m_visible_slot[ci] = (int)m_visible.size();
       VisibleChunk& vc = m_visible.emplace_back();

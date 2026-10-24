@@ -92,3 +92,8 @@ target_sources(og3ds_port PRIVATE
   ${OG3DS_SHADER_CS}
 )
 target_include_directories(og3ds_port PRIVATE ${OG_ROOT})
+# (AI-assisted, titlemove) measurement builds: CtrLevel.cpp's CTR_POP_LOG lines every frame in gk.log
+option(OG3DS_POP_LOG "per-frame pop log (diagnostic builds)" OFF)
+if(OG3DS_POP_LOG)
+  set_source_files_properties(${OG_ROOT}/game/graphics/ctr/CtrLevel.cpp PROPERTIES COMPILE_DEFINITIONS OG3DS_POP_LOG=1)
+endif()
