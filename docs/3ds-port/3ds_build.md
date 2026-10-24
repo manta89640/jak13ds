@@ -718,6 +718,14 @@ every platform:
 - animation: `cspace<-parented-transformq-joint!`
 - particles: `sp-process-block-2d`, `sp-process-block-3d`, `sp-launch-particles-var`,
   `particle-adgif`
+- (AI-assisted, Oct 24, from core-opt) `pc-sp-init-fields!` (`game/mips2c/native_sp_init_fields.h`,
+  shared with Jak II): the GOAL function sp-init-fields! (every launched particle's fields, rand-vu
+  inlined with the same pc-rand draws); sp-init-fields! calls it first (`#when TARGET_3DS`).
+  `OPENGOAL_MIPS2C_VERIFY=1` compares every call with the GOAL code (fields, random register,
+  pc-rand's state, the returned spec): level_pairs.pad 619k calls, 0 mismatches.
+  `game/mips2c/native_goalc_ops.h`: goalc's C semantics (compares with a constant, int/float
+  conversions, the PS2 divide) for natives that replace GOAL code. Host measuring aid:
+  `OPENGOAL_PERF_INSTR=1` (macOS) logs the game thread's instructions and cycles per frame.
 - ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame),
   `ocean-generate-verts` (the wave texture's vertices, only with `ocean = full`)
 - shadows: `shadow-execute` (the EE half of the shadow volumes, with the 14 functions it calls and
