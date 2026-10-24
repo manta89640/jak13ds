@@ -33,6 +33,10 @@ extern const NativeImpl sp_process_block_3d;
 extern const NativeImpl particle_adgif;
 extern const NativeImpl sp_launch_particles_var;
 u64 particle_adgif_impl(const NativeArgs& args);
+// native_sp_init.cpp (AI-assisted): pc-sp-init-fields!, also run by the particle natives directly
+u64 pc_sp_init_fields_impl(const NativeArgs& args);
+// native_sp_callbacks.cpp (AI-assisted): a particle callback or relaunch, inline when it can be
+void sp_call_particle_fn(u32 fn, const u64 a[8], const NativeArgs& caller);
 // native_shadow.cpp
 extern const NativeImpl shadow_execute;
 // native_collide_func.cpp

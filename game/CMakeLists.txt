@@ -259,6 +259,7 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/native_shadow.cpp
         mips2c/jak2_functions/native_sparticle.cpp
         mips2c/jak2_functions/native_sp_init.cpp
+        mips2c/jak2_functions/native_sp_callbacks.cpp
         mips2c/jak2_functions/native_sparticle_launcher.cpp
         mips2c/jak2_functions/nav_control.cpp
         mips2c/jak2_functions/nav_mesh.cpp

@@ -11,6 +11,7 @@
 #include <cmath>
 
 #include "game/mips2c/jak2_functions/native_functions.h"
+#include "game/mips2c/native_sp_init_fields.h"
 
 namespace Mips2C::jak2::native {
 
@@ -144,6 +145,19 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     v0 = native_call_goal(fn, r, callee);
     return v0;
   };
+  // (AI-assisted) sp-init-fields! inline: what it returns when its first call,
+  // pc-sp-init-fields!, does (the spec after the last one used; verify mode compares there)
+  static const u32 init_fields_fn = gload<u32>(init_fields_sym);
+  auto init_fields_call = [&](u32 fn) {
+    if (fn == init_fields_fn) {
+      const u64 res = pc_sp_init_fields_impl(NativeArgs{r, callee.pp, st, callee.stack});
+      if ((u32)res != (u32)st) {
+        v0 = res;
+        return v0;
+      }
+    }
+    return call(fn);
+  };
 
   if (lw(enable_sym) == st) {
     return 0;
@@ -187,7 +201,7 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   r[2] = 0;
   r[3] = 8;
   r[4] = t;
-  call(gload<u32>(init_fields_sym));
+  init_fields_call(gload<u32>(init_fields_sym));
   gstore<u32>(sp + 12, (u32)v0);
   const float births = gload<float>(sp + 180) * rate;
   // the accumulator: the launch state's (which then gets the launch control), or the launcher's
@@ -223,7 +237,28 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
       }
     }
     r[0] = system;
-    const u64 cpu = call(gload<u32>(get_particle_sym));
+    // (AI-assisted) sp-get-particle inline while its symbol holds what it held at the first launch
+    static const u32 get_particle_fn = gload<u32>(get_particle_sym);
+    u64 cpu;
+    if (gload<u32>(get_particle_sym) == get_particle_fn) {
+      const u32 sys = (u32)r[0];
+      const u64 group = r[1];
+#if MIPS2C_WRITE_LOG
+      if (native_verify_inline_on()) {
+        const u32 nblocks = gload<u32>(sys) + gload<u32>(sys + 4);
+        v0 = native_verify_inline(
+            "sp-get-particle", {{sys, 48}, {gload<u32>(sys + 32), nblocks * 8}},
+            [&]() -> u64 { return sp_init::get_particle<true>(sys, group, st); },
+            [&]() -> u64 { return native_call_goal(get_particle_fn, r, callee); });
+      } else
+#endif
+      {
+        v0 = sp_init::get_particle<true>(sys, group, st);
+      }
+      cpu = v0;
+    } else {
+      cpu = call(gload<u32>(get_particle_sym));
+    }
     if (cpu == st) {
       return v0;
     }
@@ -236,13 +271,13 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     r[3] = 22;
     r[4] = t;
     const u32 init_fields = gload<u32>(init_fields_sym);
-    call(init_fields);
+    init_fields_call(init_fields);
     r[0] = cpu + 12;
     r[1] = v0;
     r[2] = 23;
     r[3] = 52;
     r[4] = t;
-    call(init_fields);
+    init_fields_call(init_fields);
     gstore<u32>(sp + 144, (u32)v0);
     u64 flags = lw(info + 104);
 
