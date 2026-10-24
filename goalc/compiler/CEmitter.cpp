@@ -137,6 +137,8 @@ CFunctionEmitter::CFunctionEmitter(CModuleEmitter* module, FunctionEnv* env, int
     : m_module(module), m_env(env), m_f_idx(f_idx) {
   const auto& ri = c_reg_info();
   m_vars.resize(env->max_vars());
+  m_writes.resize(env->max_vars());
+  m_addr_taken.resize(env->max_vars(), false);
 
   for (auto& rv : env->reg_vals()) {
     auto id = rv->ireg().id;
@@ -204,6 +206,7 @@ std::string CFunctionEmitter::access(const RegVal* rv, bool for_write) {
       // the local copy, see emit(). A write is copied to the global by line().
       if (for_write) {
         m_pp_written = true;
+        m_last_write = -1;
       }
       return "gc_pp";
     case Special::ST:
@@ -227,8 +230,105 @@ std::string CFunctionEmitter::access(const RegVal* rv, bool for_write) {
 
   if (for_write) {
     m_known.erase(rv->ireg().id);
+    m_writes.at(rv->ireg().id).emplace_back();
+    m_last_write = rv->ireg().id;
   }
   return var_expr(rv->ireg().id, want);
+}
+
+void CFunctionEmitter::write_fact(WriteFact::Kind kind, std::initializer_list<const RegVal*> rvs) {
+  if (m_last_write < 0) {
+    return;  // a special register
+  }
+  WriteFact f;
+  f.kind = kind;
+  bool any_32 = false;
+  for (auto* rv : rvs) {
+    const auto& v = var(rv);
+    if (v.special == Special::ST) {
+      any_32 = true;  // gc_stl: a 32-bit address
+    } else if (v.special != Special::NONE) {
+      if (kind == WriteFact::ALL) {
+        f.kind = WriteFact::NEVER;  // pp, off, sp: 64-bit C values
+      }
+    } else {
+      f.deps.push_back(rv->ireg().id);
+    }
+  }
+  if (kind == WriteFact::ANY && any_32) {
+    f.kind = WriteFact::ALWAYS;
+  } else if (kind == WriteFact::ANY && f.deps.empty()) {
+    f.kind = WriteFact::NEVER;
+  } else if (kind == WriteFact::ALL && f.kind == WriteFact::ALL && f.deps.empty()) {
+    f.kind = WriteFact::ALWAYS;
+  }
+  m_writes.at(m_last_write).back() = f;
+}
+
+void CFunctionEmitter::write_is_32() {
+  write_fact(WriteFact::ALWAYS, {});
+}
+
+void CFunctionEmitter::write_is_32_if_all(std::initializer_list<const RegVal*> rvs) {
+  write_fact(WriteFact::ALL, rvs);
+}
+
+void CFunctionEmitter::write_is_32_if_any(std::initializer_list<const RegVal*> rvs) {
+  write_fact(WriteFact::ANY, rvs);
+}
+
+void CFunctionEmitter::address_taken(const RegVal* rv) {
+  m_addr_taken.at(rv->ireg().id) = true;
+}
+
+std::vector<bool> CFunctionEmitter::narrow_vars() const {
+  // (AI-assisted) Greatest fixed point: start from every plain GPR variable and drop the ones with a
+  // write that can store a value of 2^32 or more, given the variables still in the set. Exact by
+  // induction over the execution: every variable starts at 0 and every write keeps it below 2^32,
+  // so declaring it u32 changes no value. (Reads promote it back to u64.)
+  std::vector<bool> n(m_vars.size(), false);
+  for (size_t id = 0; id < m_vars.size(); id++) {
+    const auto& v = m_vars[id];
+    n[id] = v.used && v.special == Special::NONE && !v.on_stack && !v.mixed &&
+            v.reg_class == RegClass::GPR_64 && !m_addr_taken[id];
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t id = 0; id < m_vars.size(); id++) {
+      if (!n[id]) {
+        continue;
+      }
+      for (const auto& f : m_writes[id]) {
+        bool ok = false;
+        switch (f.kind) {
+          case WriteFact::NEVER:
+            ok = false;
+            break;
+          case WriteFact::ALWAYS:
+            ok = true;
+            break;
+          case WriteFact::ALL:
+            ok = true;
+            for (int d : f.deps) {
+              ok = ok && n[d];
+            }
+            break;
+          case WriteFact::ANY:
+            for (int d : f.deps) {
+              ok = ok || n[d];
+            }
+            break;
+        }
+        if (!ok) {
+          n[id] = false;
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+  return n;
 }
 
 std::string CFunctionEmitter::var_expr(int id, RegClass want) {
@@ -289,11 +389,17 @@ void CFunctionEmitter::move(const RegVal* dst, const RegVal* src) {
   }
   if (d == s) {
     m_pp_written = false;  // nothing changes
+    if (m_last_write >= 0 && var(dst).special == Special::NONE) {
+      m_writes.at(m_last_write).pop_back();
+    }
     return;
   }
   std::string value;
   if (dc == sc || (is_128(dc) && is_128(sc))) {
     value = s;
+    if (dc == RegClass::GPR_64) {
+      write_is_32_if_all({src});
+    }
   } else if (sc == RegClass::FLOAT && dc == RegClass::GPR_64) {
     value = fmt::format("gc_f2g({})", s);
   } else if (sc == RegClass::GPR_64 && dc == RegClass::FLOAT) {
@@ -460,6 +566,15 @@ void CFunctionEmitter::emit() {
     }
   }
 
+  // (AI-assisted) parameters, for the 32-bit analysis: addresses are zero-extended
+  for (auto& [idx, id] : params) {
+    WriteFact f;
+    if (param_class.at(idx) == CArgClass::PTR) {
+      f.kind = WriteFact::ALWAYS;
+    }
+    m_writes.at(id).push_back(f);
+  }
+
   // body
   for (int i = 0; i < (int)code.size(); i++) {
     if (is_target.at(i)) {
@@ -517,13 +632,15 @@ void CFunctionEmitter::emit() {
     text += "  u64 gc_pp = goalc_pp;\n";
   }
 
-  // locals
+  // locals. (AI-assisted) GPR variables that never hold a value of 2^32 or more are u32: on 32-bit
+  // hosts their upper half (and its phis, compares and moves) is gone.
+  const auto narrow = narrow_vars();
   for (int id = 0; id < (int)m_vars.size(); id++) {
     const auto& v = m_vars.at(id);
     if (!v.used || v.special != Special::NONE) {
       continue;
     }
-    const char* type = c_type(v.reg_class);
+    const char* type = narrow.at(id) ? "u32" : c_type(v.reg_class);
     const char* init = is_128(v.reg_class) ? "{0}" : "0";
     if (v.mixed) {
       if (!is_128(v.reg_class)) {
@@ -737,6 +854,14 @@ std::string CModuleEmitter::finish(u64* hash_out) {
   }
   out += "};\n\n";
 
+  // (AI-assisted, ABI 6) called by the runtime after every link of this module. Jak 2 and later:
+  // a symbol's value is at its address - 1 (Symbol4.h).
+  out += fmt::format(
+      "static void gc_after_link(void) {{\n  gc_ctx.mb = goalc_mem;\n  gc_ctx.st = (u32)goalc_st;\n"
+      "  for (int k = 0; k < {}; k++) {{\n"
+      "    gc_ctx.sym[k] = goalc_mem + (u32)(gc_ctx.st + (u32)gc_ctx.off[k] - {}u);\n  }}\n}}\n\n",
+      m_symbols.size(), m_version == GameVersion::Jak1 ? 0 : 1);
+
   // the hash is computed over everything up to here (after token resolution), then embedded.
   // resolve tokens
   std::string resolved;
@@ -791,10 +916,3 @@ std::string CModuleEmitter::finish(u64* hash_out) {
       "#endif\n";
   return resolved;
 }
-  // (AI-assisted, ABI 6) called by the runtime after every link of this module. Jak 2 and later:
-  // a symbol's value is at its address - 1 (Symbol4.h).
-  out += fmt::format(
-      "static void gc_after_link(void) {{\n  gc_ctx.mb = goalc_mem;\n  gc_ctx.st = (u32)goalc_st;\n"
-      "  for (int k = 0; k < {}; k++) {{\n"
-      "    gc_ctx.sym[k] = goalc_mem + (u32)(gc_ctx.st + (u32)gc_ctx.off[k] - {}u);\n  }}\n}}\n\n",
-      m_symbols.size(), m_version == GameVersion::Jak1 ? 0 : 1);
