@@ -211,6 +211,14 @@ const AbSwitch kAbSwitches[] = {
     // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
     {"opaque_alpha", [](CtrSettings& s, bool on) { s.opaque_alpha = on; },
      [](const CtrSettings& s) { return s.opaque_alpha; }},
+    // (AI-assisted, hud3) the post-vertex cache kept between raw draws (config.ini vcache_reuse):
+    // switchable while running for A/B tests (pad script "set vcache_reuse off")
+    {"vcache_reuse", [](CtrSettings& s, bool on) { s.vcache_reuse = on; },
+     [](const CtrSettings& s) { return s.vcache_reuse; }},
+    // (AI-assisted, hud3) the draws' command words written raw (config.ini raw_cmds), for A/B
+    // tests; applied at each frame's begin, where the backend forgets its raw state anyway
+    {"raw_cmds", [](CtrSettings& s, bool on) { s.raw_cmds = on; },
+     [](const CtrSettings& s) { return s.raw_cmds; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -613,6 +621,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
   ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);  // (AI-assisted, gpu-rt)
+  ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);          // (AI-assisted, hud3)
+  ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);  // (AI-assisted, hud3)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
