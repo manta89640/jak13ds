@@ -244,7 +244,7 @@ void process_request(u8* m, u32 out, s64 num_joints, u32 req, u32 stats) {
   // (!= 0.0 frame-interp): goalc's gc_fcmp(0.0, interp, GC_FEQ) skips the second frame
   const bool two = !fcmp_xk(interp, kZero, GC_FEQ);
 
-  Stream fx, f0, f1;
+  Stream fx, f0, f1{};  // f1 only when two (zeroed: GCC warns otherwise)
   fx.init(m, fixed + 80, fixed + 64, amount);
   float w0 = 1.f - interp;
   w0 = w0 * amount;
