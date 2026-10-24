@@ -21,18 +21,11 @@ std::string hex(u64 x) {
   return fmt::format("0x{:x}ull", x);
 }
 
-//! (AI-assisted) st-relative offset of a symbol's value. Jak 1: the symbol is its value slot.
-//! Jak 2 and later: the value is at the symbol's address - 1 (Symbol4.h), like the native
-//! LINK_SYM_NO_OFFSET_FLAG links.
-std::string sym_value_offset(CFunctionEmitter& e, const std::string& name) {
-  if (e.version() == GameVersion::Jak1) {
-    return fmt::format("GC_SYMOFF({})", e.symbol(name));
-  }
-  return fmt::format("GC_SYMOFF({}) - 1", e.symbol(name));
-}
-
+//! (AI-assisted) load of a symbol's value: through the host address of the value in the module's
+//! gc_ctx.sym (ABI 6, goal_c_ops.h). The runtime's linker computes it for each game (Jak 2 and
+//! later: the symbol's address - 1, Symbol4.h).
 std::string sym_value_load(CFunctionEmitter& e, const std::string& name, bool sext) {
-  return fmt::format("gc_ld_{}32(gc_stl, {})", sext ? "s" : "u", sym_value_offset(e, name));
+  return fmt::format("gc_symv_{}32({})", sext ? "s" : "u", e.symbol(name));
 }
 
 //! write a u64 value into a register of any class
@@ -71,8 +64,7 @@ void IR_LoadSymbolPointer::do_codegen_c(CFunctionEmitter& e) {
 }
 
 void IR_SetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
-  e.line(fmt::format("gc_st_u32(gc_stl, {}, {});", sym_value_offset(e, m_dest->name()),
-                     e.read(m_src)));
+  e.line(fmt::format("gc_symv_set({}, {});", e.symbol(m_dest->name()), e.read(m_src)));
   // (AI-assisted) a function of this object stored in a global: the target of guarded calls
   int f_idx = e.known_function(m_src);
   if (f_idx >= 0) {

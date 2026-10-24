@@ -738,6 +738,9 @@ u32 goalc_link_module_entry(const u8* link,
   for (u32 i = 0; i < mod->n_syms; i++) {
     mod->sym_offsets[i] = resolver(mod->sym_names[i]);
   }
+  if (mod->after_link) {
+    mod->after_link();
+  }
 
   if (!inst.has_ids) {
     inst.base_id = goalc_alloc_fn_ids(mod->funcs, mod->n_funcs);

@@ -131,6 +131,9 @@ typedef struct GoalCModule {
   const char* const* sym_names;   //! symbol names, by symbol index
   int32_t* sym_offsets;           //! filled by the linker: symbol address - goalc_st
   uint32_t* seg_base;             //! filled by the linker: GOAL address of each of the 3 segments
+  //! (AI-assisted, ABI 6) called by the linker after it filled sym_offsets and seg_base (the module
+  //! computes its own link-time state from them), or null
+  void (*after_link)(void);
 } GoalCModule;
 
 //! Register a statically linked module (called from module constructors when GOALC_STATIC).

@@ -463,6 +463,26 @@ often hoisted out of loops). Not measured on hardware yet.
   unaligned-safe `ldr` pairs; 128-bit accesses are 16-byte aligned on x86 (`movaps`), so VLDR's
   word alignment holds.
 
+### Module context and symbol value pointers (ABI version 6)
+
+(AI-assisted, Oct 24 2026, branch j2codegen) The calling convention is the same as version 5;
+version 6 changes the module's link-time state:
+
+- Each module keeps it in one struct, `gc_ctx` (`CModuleEmitter::finish`): copies of `goalc_mem`
+  and `goalc_st`, the host address of each referenced symbol's value (`sym[k]`), the segment bases
+  and the symbol offsets (`gc_sym_offsets` / `gc_seg_base` are macros for its fields, and the
+  runtime's linker fills them as before). A function reaches all of it from one literal address
+  (before: `goalc_mem`, `goalc_st`, `gc_sym_offsets` and `gc_seg_base` were four).
+- Loads and stores of symbol values are `gc_symv_u32(k)` / `gc_symv_s32(k)` / `gc_symv_set(k, v)`:
+  a load of `sym[k]` and the access. Before, a symbol value was `goalc_mem + st + offset[k]`
+  (Jak 2: `- 1`), an add or two more per access and two registers kept live for the bases.
+- `GoalCModule.after_link` (new, last field): the runtime calls it after filling `sym_offsets` and
+  `seg_base`; the module's `gc_after_link` copies the bases and computes `sym[k]` (Jak 2 and
+  later: the symbol's address - 1, Symbol4.h). Symbols never move, and every relink (module
+  instances, heap init) calls it again.
+- The mips2c-native test fixtures (`test/mips2c_native/goalc_ref`) are ABI 5 code; they compile
+  with the version 6 header (the old accessors are still there), `extract.py` handles both shapes.
+
 ## Known later work
 
 - Performance: function bodies still use `u64` for every GPR. Declaring locals whose types are all
