@@ -59,6 +59,11 @@ class Player {
   BankHandle LoadBank(std::span<u8> bank);
   // (AI-assisted) bank is in owner's buffer, which the bank keeps (Loader::ParseBank)
   BankHandle LoadBank(std::span<u8> bank, std::unique_ptr<u8[]> owner);
+#ifdef __3DS__
+  // (AI-assisted) snd_LockVoiceWrites: the mixer's lock, for the SPU register writes (sdshim)
+  void LockVoices() { mTickLock.lock(); }
+  void UnlockVoices() { mTickLock.unlock(); }
+#endif
 
   // (AI-assisted) keira_voice: "play as Keira", see SndPlayParams::keira_voice
   u32 PlaySound(BankHandle bank,
