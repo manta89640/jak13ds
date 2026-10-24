@@ -435,6 +435,40 @@ remaining proposals: `port_test/reports/core-opt.md`.
 - Host measuring aid: `OPENGOAL_PERF_INSTR=1` (macOS) adds the game thread's instructions and
   cycles per frame, which other processes' load doesn't change; `sample_profile.py win` shows them.
 
+## Done: particle callbacks and lights inline (core-opt part B, Oct 24)
+
+(AI-assisted.) Proposals 3 and 4 of `port_test/reports/core-opt.md`, on jak2-3ds (Jak 1's part on
+batch-oct11, performance.md "Particle launch and callbacks inline").
+
+- sp-process-block-2d / -3d call particle callbacks and relaunches through `sp_call_particle_fn`
+  (`game/mips2c/jak2_functions/native_sp_callbacks.cpp`): sparticle-mode-animate,
+  sparticle-texture-day-night, sp-relaunch-particle-2d (with sp-relaunch-setup-fields), the
+  check-drop-level-* callbacks of the city levels (ctysluma, ctyslumb, ctyport, ctyfarma, ctyfarmb,
+  ctypal; all `(when (< y user-float) <splash>) (sparticle-motion-blur ...)`) while the particle is
+  above its drop height, and sparticle-motion-blur's native entry directly. The launcher runs
+  pc-sp-init-fields! and sp-get-particle directly. All as goalc's C of the GOAL code, while the
+  symbols hold what they held at the first call (level callbacks: the symbol's current value).
+- light-hash-get-bucket-index has a native version (`native2_lights.cpp`, a direct GOAL entry), and
+  the light-hash loop of dma-add-process-drawable is `light-hash-add-lights!` on the 3DS
+  (drawable.gc, the same GOAL code), which runs `pc-light-hash-add-lights!` first: the loop in C++
+  calling the bucket lookup and add-light-sphere-to-light-group's native directly.
+- Identity: verify mode (`native_verify_inline`: every call against the GOAL function, the
+  particle / sprite / adgif / light group, pc-rand and VU0 random state, the result; all of GOAL
+  memory on one call in 64). jak2_city.pad + jak2_route.pad: mode-animate 306k, drop checks 282k,
+  get-particle 197k, light-hash-add-lights! 168k, relaunch 86k, day-night 82k calls; mips2c verify
+  of the bucket index 289k calls; 0 mismatches. Jak ends at (1065.99, 0.52, 194.46) and (1161.20,
+  -50.58, 513.13) as before. A deliberate error in each was reported at once, then removed.
+- Host cost per call (`OPENGOAL_INLINE_INSTR=1`: the GOAL function and the C++ on alternate calls,
+  slums standing; GOAL minus C++, host arm64 instructions, x calls per frame): light-hash-add-lights!
+  1563 x 27, relaunch 459 x 29, mode-animate 198 x 105, drop checks 136 x 119, day-night 58 x 19,
+  get-particle 31 x 31: ~94k of the 4.6M instructions per frame, before the direct motion blur,
+  sp-init-fields! and bucket-index entries (no thunk). arm64 runs goalc's 64-bit C well; ARM11 doesn't.
+- Azahar (one run, A/B in the same session with a test-only toggle,
+  `port_test/reports/core-opt-partb/ab-test-build-jak2.patch`, `jak2_city_partb_ab.pad`): slums
+  standing, logic 20.8 / 22.9 ms on (a1, a2), 22.9 / 24.0 ms off (b1, b2): off - on 2.1 and 1.1 ms
+  pairwise, about 0.6 ms after the scene's drift (a1 -> a2 +2.1 ms) is removed. The traffic
+  varies by 1-3 ms between windows, so read it as 0.5-1.5 ms.
+
 ## Caveats
 
 - One Mac, background load from other sessions (Discord, other agents' gk): the per-window
