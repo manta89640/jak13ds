@@ -220,6 +220,7 @@ set(RUNTIME_SOURCE
         mips2c/jak1_functions/native_ocean.cpp
         mips2c/jak1_functions/native_shadow.cpp
         mips2c/jak1_functions/native_sparticle.cpp
+        mips2c/jak1_functions/native_sp_init.cpp
         mips2c/jak1_functions/native_sparticle_launcher.cpp
         mips2c/jak1_functions/merc_blend_shape.cpp
         mips2c/jak1_functions/ocean_vu0.cpp
@@ -248,6 +249,7 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/joint.cpp
         mips2c/jak2_functions/lights.cpp
         mips2c/jak2_functions/merc_blend_shape.cpp
+        mips2c/jak2_functions/native_anim.cpp
         mips2c/jak2_functions/native_bones.cpp
         mips2c/jak2_functions/native_collide_cache.cpp
         mips2c/jak2_functions/native_collide_func.cpp
@@ -256,6 +258,7 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/native_joint.cpp
         mips2c/jak2_functions/native_shadow.cpp
         mips2c/jak2_functions/native_sparticle.cpp
+        mips2c/jak2_functions/native_sp_init.cpp
         mips2c/jak2_functions/native_sparticle_launcher.cpp
         mips2c/jak2_functions/nav_control.cpp
         mips2c/jak2_functions/nav_mesh.cpp

@@ -344,6 +344,37 @@ void report_sections(double frames) {
   g_section_events = 0;
 }
 
+#if defined(__APPLE__) && !defined(__3DS__)
+// (AI-assisted) host measuring aid: OPENGOAL_PERF_INSTR=1 adds "perf instr" lines with the game
+// thread's own retired instructions and cycles per frame (macOS thread_selfcounts: the thread's
+// counters, so other processes' load doesn't change them, unlike the ms of the perf lines)
+extern "C" int thread_selfcounts(int type, void* buf, size_t nbytes);
+namespace {
+int g_instr_on = -1;
+u64 g_instr_last[2] = {0, 0};
+void log_instr(double frames) {
+  if (g_instr_on < 0) {
+    const char* e = getenv("OPENGOAL_PERF_INSTR");
+    g_instr_on = (e && e[0] && e[0] != '0') ? 1 : 0;
+  }
+  if (!g_instr_on) {
+    return;
+  }
+  u64 c[2] = {0, 0};  // instructions, cycles
+  if (thread_selfcounts(1, c, sizeof(c)) != 0) {
+    return;
+  }
+  if (g_instr_last[0]) {
+    lg::info("perf instr: {:.1f} k instructions/frame, {:.1f} k cycles/frame (game thread)",
+             (double)(c[0] - g_instr_last[0]) / frames / 1000.0,
+             (double)(c[1] - g_instr_last[1]) / frames / 1000.0);
+  }
+  g_instr_last[0] = c[0];
+  g_instr_last[1] = c[1];
+}
+}  // namespace
+#endif
+
 void frame_done() {
   u64 now = now_us();
   hitch_check(now);
@@ -413,6 +444,9 @@ void frame_done() {
              fps, logic, render, vsync, idle, wait);
 #endif
     lg::info("perf: {}{}", line, g_log_sampled ? " (sampled section timing on: slower)" : "");
+#if defined(__APPLE__) && !defined(__3DS__)
+    log_instr(frames);
+#endif
 
     // other threads on the game's core
     {

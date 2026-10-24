@@ -40,6 +40,7 @@ namespace jak1 {
 namespace draw_string { extern void link(); }
 namespace particle_adgif { extern void link(); }
 namespace sp_launch_particles_var { extern void link(); }
+namespace pc_sp_init_fields { extern void link(); }  // (AI-assisted) native_sp_init.cpp
 namespace sp_process_block_3d { extern void link(); }
 namespace sp_process_block_2d { extern void link(); }
 namespace draw_large_polygon { extern void link(); }
@@ -144,6 +145,7 @@ namespace generic_tie_convert { extern void link(); }
 #if !OPENGOAL_ONLY_JAK1
 namespace jak2 {
 namespace pc_new_bones_mtx_calc { extern void link(); }  // (AI-assisted) 3DS
+namespace pc_new_joint_decompressor { extern void link(); }  // (AI-assisted) native_anim.cpp
 namespace mem_copy { extern void link(); }  // (AI-assisted) native2_misc.cpp
 namespace collide_do_primitives { extern void link(); }
 namespace moving_sphere_triangle_intersect { extern void link(); }
@@ -161,6 +163,7 @@ namespace set_sky_vf23_value { extern void link(); }
 namespace draw_boundary_polygon { extern void link(); }
 namespace particle_adgif { extern void link(); }
 namespace sp_launch_particles_var { extern void link(); }
+namespace pc_sp_init_fields { extern void link(); }  // (AI-assisted) native_sp_init.cpp
 namespace sparticle_motion_blur { extern void link(); }
 namespace sp_process_block_2d { extern void link(); }
 namespace sp_process_block_3d { extern void link(); }
@@ -565,7 +568,9 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
     {},  // (AI-assisted, j2-mem2) see game_common_types.h
 #else
     {{"font", {jak1::draw_string::link}},
-     {"sparticle-launcher", {jak1::particle_adgif::link, jak1::sp_launch_particles_var::link}},
+     {"sparticle-launcher",
+      {jak1::particle_adgif::link, jak1::sp_launch_particles_var::link,
+       jak1::pc_sp_init_fields::link}},
      {"sparticle", {jak1::sp_process_block_3d::link, jak1::sp_process_block_2d::link}},
      {"texture", {jak1::adgif_shader_texture_with_update::link}},
      {"sky-tng",
@@ -643,7 +648,9 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
     {{"types-h", {jak2::mem_copy::link}},  // (AI-assisted) mem-copy! (native2_misc.cpp)
      {"collide-func",
       {jak2::collide_do_primitives::link, jak2::moving_sphere_triangle_intersect::link}},
-     {"joint", {jak2::calc_animation_from_spr::link, jak2::cspace_parented_transformq_joint::link}},
+     {"joint",
+      {jak2::calc_animation_from_spr::link, jak2::cspace_parented_transformq_joint::link,
+       jak2::pc_new_joint_decompressor::link}},
      {"font", {jak2::get_string_length::link, jak2::draw_string_asm::link}},
      {"texture", {jak2::adgif_shader_texture_with_update::link}},
      {"debug",
@@ -652,7 +659,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak2::draw_boundary_polygon::link}},
      {"sparticle-launcher",
       {jak2::particle_adgif::link, jak2::sp_launch_particles_var::link,
-       jak2::sparticle_motion_blur::link}},
+       jak2::sparticle_motion_blur::link, jak2::pc_sp_init_fields::link}},
      {"sparticle", {jak2::sp_process_block_2d::link, jak2::sp_process_block_3d::link}},
      {"sky-tng",
       {jak2::set_tex_offset::link, jak2::draw_large_polygon::link, jak2::render_sky_quad::link,

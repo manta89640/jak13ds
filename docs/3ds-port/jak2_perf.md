@@ -410,6 +410,31 @@ Kernel overhead left (not changed): 142 suspends/frame copying ~175 bytes each, 
 `new 'process 'cpu-thread` / `delete` and a setjmp/longjmp pair per trans/post hook. On ARM11
 that is a few tenths of a ms in total.
 
+## Done: shared engine code (core-opt, Oct 24)
+
+(AI-assisted.) Branch `core-opt` (from jak2-3ds b5c1b33e69). Report with the profile and the
+remaining proposals: `port_test/reports/core-opt.md`.
+
+- `pc-new-joint-decompressor` (`game/mips2c/jak2_functions/native_anim.cpp`): the whole
+  new-joint-decompressor of joint.gc (Jak 3 has the same GOAL code). `#f` (the GOAL code runs)
+  where the GOAL code would `(break!)`, checked before anything is written.
+  create-interpolated-joint-animation-frame no longer reads the clock twice per call on the 3DS
+  (only for the debug stat `*new-joint-decompressor-stats*` total-time).
+- `pc-sp-init-fields!` (`game/mips2c/native_sp_init_fields.h`, Jak 1 and Jak II): sp-init-fields!
+  with rand-vu inlined (the same pc-rand draws).
+- sparticle-motion-blur and (method 32 sky-work) compute atan / vector-normalize! inline
+  (`game/mips2c/native_goalc_ops.h`: goalc's C semantics for natives) instead of calling GOAL.
+- Identity (host, `OPENGOAL_MIPS2C_VERIFY=1`: every call against the GOAL code, pc-rand's state
+  included): jak2_city.pad and jak2_route.pad 408k decompressor and 1.13M sp-init-fields! calls,
+  Jak 1 level_pairs.pad 619k sp-init-fields! calls, 0 mismatches; the natives against mips2c
+  11.6M calls, 0 mismatches; the same end positions.
+- Azahar (one run, A/B in the same session with a test-only toggle,
+  `port_test/reports/core-opt/ab-test-build.patch`): slums standing, logic 21.6 / 22.9 ms with
+  the three native changes, 24.8 / 23.4 ms without: about 1.2-1.9 ms less (traffic varies 1-3 ms
+  between windows).
+- Host measuring aid: `OPENGOAL_PERF_INSTR=1` (macOS) adds the game thread's instructions and
+  cycles per frame, which other processes' load doesn't change; `sample_profile.py win` shows them.
+
 ## Caveats
 
 - One Mac, background load from other sessions (Discord, other agents' gk): the per-window

@@ -10,6 +10,7 @@
 #include <cmath>
 
 #include "native2.h"
+#include "game/mips2c/native_goalc_ops.h"
 
 namespace Mips2C::jak2::native2 {
 
@@ -157,10 +158,18 @@ u64 sparticle_motion_blur_impl(const NativeArgs& args) {
         const u64 s4 = (u64)f2u(dx) | ((u64)f2u(dy) << 32);
         const u64 s5 = (u64)(s64)(s32)f2u(dy);
         scale = scale * q;
-        const u64 call_args[8] = {s4, s5, 0, args.a[3], args.a[4], args.a[5], args.a[6], args.a[7]};
-        const u64 angle = native_call_goal(gload<u32>(atan_sym), call_args, args);
+        // (AI-assisted) atan inlined (native_goalc_ops.h: goalc's C of the GOAL function, the same
+        // bits) while the symbol holds the function it held at the first call; otherwise the call
+        static const u32 atan_fn = gload<u32>(atan_sym);
+        float angle;
+        if (gload<u32>(atan_sym) == atan_fn) {
+          angle = goalc_ops::atan(dx, dy);
+        } else {
+          const u64 call_args[8] = {s4, s5, 0, args.a[3], args.a[4], args.a[5], args.a[6], args.a[7]};
+          angle = u2f((u32)native_call_goal(gload<u32>(atan_sym), call_args, args));
+        }
         const u32 omega = gload<u32>(info + 12);
-        gstore<float>(vec + 24, -16384.f + u2f((u32)angle));
+        gstore<float>(vec + 24, -16384.f + angle);
         if (omega != 0) {
           float f2 = scale;
           const float c3 = u2f(0x358637bd);
