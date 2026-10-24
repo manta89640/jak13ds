@@ -34,7 +34,18 @@ CtrShadowJak2Renderer::CtrShadowJak2Renderer(std::string name, int id)
 
 bool CtrShadowJak2Renderer::reserve() {
   if (!m_reserved && !m_full) {
-    m_reserved = ctr_gpu_clip_reserve(kReserveVerts, kReserveIndices, &m_verts, &m_indices) != 0;
+    // (AI-assisted, j2gaps) the whole reservation is ~372 KB of the frame's 512 KB of vertex
+    // memory: after a busy particle bucket (SHADOW2 comes after PARTICLES) it didn't fit and the
+    // bucket drew no shadow at all. Smaller ones before giving up (a frame's shadow volumes
+    // usually take a few thousand vertices); the room not used goes back after the draw.
+    for (int div = 1; div <= 8 && !m_reserved; div *= 2) {
+      m_reserved = ctr_gpu_clip_reserve(kReserveVerts / div, kReserveIndices / div, &m_verts,
+                                        &m_indices) != 0;
+      if (m_reserved) {
+        m_cap_verts = kReserveVerts / div;
+        m_cap_indices = kReserveIndices / div;
+      }
+    }
     m_full = !m_reserved;
   }
   return m_reserved;
@@ -53,8 +64,8 @@ bool faces_away(const float* p0, const float* p1, const float* p2) {
 
 void CtrShadowJak2Renderer::add_face(const float* const* p, int n, bool away) {
   const int tris = n - 2;
-  if (!reserve() || m_nv + n + 4 > kReserveVerts ||
-      (int)(m_front.size() + m_back.size()) + 3 * tris + 6 > kReserveIndices) {
+  if (!reserve() || m_nv + n + 4 > m_cap_verts ||
+      (int)(m_front.size() + m_back.size()) + 3 * tris + 6 > m_cap_indices) {
     m_stats.dropped++;
     return;
   }

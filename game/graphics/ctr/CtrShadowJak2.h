@@ -35,6 +35,7 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   u16* m_indices = nullptr;
   bool m_reserved = false, m_full = false;
   int m_nv = 0;
+  int m_cap_verts = 0, m_cap_indices = 0;  // the reservation taken this frame
   std::vector<u16> m_front, m_back;
   u8 m_color[4] = {0x80, 0x80, 0x80, 0x80};
   int m_no_room = 0;
