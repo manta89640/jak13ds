@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include "native2.h"
+#include "game/mips2c/native_goalc_ops.h"
 
 namespace Mips2C::jak2::native2 {
 
@@ -323,9 +324,24 @@ u64 method_32_sky_work_impl(const NativeArgs& args) {
     gstore_q(out + 1936, r[3]);
     out += 64;
   }
-  for (u32 k = 0; k < 512; k++) {
-    const u64 call_args[8] = {gp + 1888 + k * 16, 0x47435000, 0, 0, 0, 0, 0, 0};  // 50000.0
-    native_call_goal(gload<u32>(normalize_sym), call_args, args);
+  // (AI-assisted) vector-normalize! inlined (native_goalc_ops.h: goalc's C of the GOAL function, the
+  // same bits) while the symbol holds the function it held at the first call; otherwise the calls
+  static const u32 normalize_fn = gload<u32>(normalize_sym);
+  if (gload<u32>(normalize_sym) == normalize_fn) {
+    for (u32 k = 0; k < 512; k++) {
+      const u32 v = gp + 1888 + k * 16;
+      float x[4];
+      gload_q(x, v);
+      goalc_ops::vector_normalize(x, 50000.f);
+      gstore<float>(v, x[0]);
+      gstore<float>(v + 4, x[1]);
+      gstore<float>(v + 8, x[2]);
+    }
+  } else {
+    for (u32 k = 0; k < 512; k++) {
+      const u64 call_args[8] = {gp + 1888 + k * 16, 0x47435000, 0, 0, 0, 0, 0, 0};  // 50000.0
+      native_call_goal(gload<u32>(normalize_sym), call_args, args);
+    }
   }
   set_vf(31, m31);
   set_vf(30, m30);
