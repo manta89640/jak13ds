@@ -313,4 +313,52 @@ u64 entry(const NativeArgs& args, const Syms& syms, u32 goal_fn_val_addr) {
   return init_fields<kSymValOff, kFloatStore>(dst, spec, first, end, write_missing, syms);
 }
 
+/*!
+ * (AI-assisted) sp-get-particle (sparticle.gc, the PC port's version: blocks searched in order) as
+ * goalc's C of it: the first free particle of group (0: the first blocks0 blocks, 1: the next
+ * blocks1) in the system's alloc table (a set bit is a free particle), marked used, counted
+ * (num-alloc), its valid field set (Jak 1: #t as a word, Jak 2: 1 as a byte). #f when full.
+ */
+template <bool kJak2>
+u64 get_particle(u32 sys, u64 group, u64 s7) {
+  u8* const m = g_ee_main_mem;
+  u64 first = 0;
+  s64 n = ld<s32>(m, sys);
+  s64 a3 = 0;
+  if ((s64)group == 1) {
+    first = (u64)n;
+    n = ld<s32>(m, sys + 4);
+  }
+  for (s64 blk = 0; blk < n; blk++) {
+    const u64 idx = first + (u64)a3;
+    const u32 word_addr = (u32)((idx << 3) + ld<u32>(m, sys + 32));
+    if (ld<u64>(m, word_addr) != 0) {
+      for (s64 bit = 0; bit < 64; bit++) {
+        const u64 mask = (u64)1 << bit;
+        const u64 w = ld<u64>(m, (u32)((idx << 3) + ld<u32>(m, sys + 32)));
+        if ((s64)(mask & w) != 0) {
+          const u32 a = (u32)((idx << 3) + ld<u32>(m, sys + 32));
+          st<u64>(m, a, ld<u64>(m, a) ^ mask);
+          const u32 cnt = (u32)((group << 2) + 16 + sys);
+          st<u32>(m, cnt, (u32)((u64)(s64)ld<s32>(m, cnt) + 1));
+          const u64 i = (u64)bit + (idx << 6);
+          const u64 cpu =
+              (u64)(s64)(s32)((u32)0x90 * (u32)i) + (u64)ld<u32>(m, sys + 36);
+          if (kJak2) {
+            st<u8>(m, (u32)cpu + 128, 1);
+          } else {
+            st<u32>(m, (u32)cpu + 128, (u32)(s7 + 8));
+          }
+          return cpu;
+        }
+      }
+    }
+    a3++;
+    if (a3 == n) {
+      a3 = 0;
+    }
+  }
+  return s7;
+}
+
 }  // namespace Mips2C::sp_init

@@ -29,7 +29,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -796,6 +798,195 @@ u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller) {
   ctx.jalr(fn);
   return ctx.gprs[v0].du64[0];
 }
+
+#if MIPS2C_WRITE_LOG
+// ---------------------------------------------------------------------------
+// (AI-assisted) verify mode for GOAL functions that natives run inline (native_verify_inline)
+// ---------------------------------------------------------------------------
+namespace {
+struct InlineEntry {
+  std::string name;
+  u64 calls = 0, full_checks = 0, mismatches = 0;
+  u64 instr_goal = 0, instr_native = 0;  // host instructions of both runs (macOS)
+};
+
+#if defined(__APPLE__) && !defined(__3DS__)
+extern "C" int thread_selfcounts(int type, void* buf, size_t nbytes);
+//! the game thread's retired instructions so far (macOS thread_selfcounts), 0 elsewhere
+u64 thread_instructions() {
+  u64 c[2] = {0, 0};
+  return thread_selfcounts(1, c, sizeof(c)) == 0 ? c[0] : 0;
+}
+#else
+u64 thread_instructions() {
+  return 0;
+}
+#endif
+std::vector<InlineEntry*> g_inline_entries;
+bool g_inline_active = false;
+u8* g_inl_before = nullptr;
+u8* g_inl_after = nullptr;
+
+InlineEntry* inline_entry(const char* name) {
+  for (auto* e : g_inline_entries) {
+    if (e->name == name) {
+      return e;
+    }
+  }
+  auto* e = new InlineEntry();
+  e->name = name;
+  if (g_inline_entries.empty()) {
+    atexit([] {
+      for (auto* x : g_inline_entries) {
+        lg::info(
+            "inline verify: {}: {} calls ({} with all of GOAL memory), {} mismatches; host "
+            "instructions per call: native {:.0f}, GOAL {:.0f}",
+            x->name, x->calls, x->full_checks, x->mismatches,
+            x->calls ? (double)x->instr_native / x->calls : 0.0,
+            x->calls ? (double)x->instr_goal / x->calls : 0.0);
+      }
+    });
+  }
+  g_inline_entries.push_back(e);
+  return e;
+}
+}  // namespace
+
+bool native_verify_inline_on() {
+  // not inside a mips2c check (that one compares the caller as a whole) or another inline check
+  return verify_enabled() && g_state == VerifyState::NONE && !g_inline_active;
+}
+
+u64 native_verify_inline(const char* name,
+                         std::initializer_list<NativeVerifyRegion> regions,
+                         const std::function<u64()>& native,
+                         const std::function<u64()>& goal) {
+  InlineEntry* e = inline_entry(name);
+  g_inline_active = true;
+  e->calls++;
+  // all of memory on one call in OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY (default 64: these run
+  // per particle)
+  static u64 full_every = [] {
+    const char* v = getenv("OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY");
+    return v ? strtoull(v, nullptr, 10) : (u64)64;
+  }();
+  const bool full = full_every && (e->calls % full_every) == 1 % full_every;
+  uintptr_t host_sp;
+  GOALC_READ_HOST_SP(host_sp);
+  const u32 sp = (u32)(host_sp - (uintptr_t)g_ee_main_mem);
+  const u32 lo = EE_MAIN_MEM_LOW_PROTECT;
+  const u32 end = EE_MAIN_MEM_SIZE;
+  // the stack of this check and of the callers' frames: not compared with all of memory (the
+  // regions are compared wherever they are)
+  const u32 ex_lo = scratch_low(sp);
+  const u32 ex_hi = std::min(end, sp + 65536);
+
+  std::vector<std::vector<u8>> before, after;
+  for (auto& r : regions) {
+    before.emplace_back(g_ee_main_mem + r.addr, g_ee_main_mem + r.addr + r.size);
+  }
+  static Rng* rng_before = new Rng();
+  static Rng* rng_goal = new Rng();
+  static std::mt19937* pc_before = new std::mt19937();
+  static std::mt19937* pc_goal = new std::mt19937();
+  *rng_before = gRng;
+  *pc_before = extra_random_generator;
+  if (full) {
+    e->full_checks++;
+    if (!g_inl_before) {
+      g_inl_before = (u8*)malloc(EE_MAIN_MEM_SIZE);
+      g_inl_after = (u8*)malloc(EE_MAIN_MEM_SIZE);
+    }
+    std::lock_guard<std::mutex> lock(g_iop_mutex);
+    g_iop_track = true;
+    g_iop_writes.clear();
+    g_iop_bytes.clear();
+    memcpy(g_inl_before + lo, g_ee_main_mem + lo, end - lo);
+  }
+
+  // 1. the GOAL code (the reference)
+  const u64 i0 = thread_instructions();
+  const u64 r_goal = goal();
+  e->instr_goal += thread_instructions() - i0;
+  for (auto& r : regions) {
+    after.emplace_back(g_ee_main_mem + r.addr, g_ee_main_mem + r.addr + r.size);
+  }
+  *rng_goal = gRng;
+  *pc_goal = extra_random_generator;
+  gRng = *rng_before;
+  extra_random_generator = *pc_before;
+  if (full) {
+    std::lock_guard<std::mutex> lock(g_iop_mutex);
+    memcpy(g_inl_after + lo, g_ee_main_mem + lo, end - lo);
+    memcpy(g_ee_main_mem + lo, g_inl_before + lo, ex_lo - lo);
+    memcpy(g_ee_main_mem + ex_hi, g_inl_before + ex_hi, end - ex_hi);
+    for (auto& w : g_iop_writes) {
+      memcpy(g_ee_main_mem + w.addr, g_iop_bytes.data() + w.old_offset, w.size);
+    }
+  }
+  for (size_t i = 0; i < regions.size(); i++) {
+    auto& r = regions.begin()[i];
+    memcpy(g_ee_main_mem + r.addr, before[i].data(), r.size);
+  }
+
+  // 2. the native code; its results stay
+  const u64 i1 = thread_instructions();
+  const u64 r_native = native();
+  e->instr_native += thread_instructions() - i1;
+
+  std::string what;
+  if (r_native != r_goal) {
+    what = fmt::format("returned {:x} (GOAL {:x})", r_native, r_goal);
+  } else if (!(extra_random_generator == *pc_goal)) {
+    what = "pc-rand draws";
+  } else if (memcmp(&gRng, rng_goal, sizeof(Rng))) {
+    what = "VU0 random register";
+  }
+  for (size_t i = 0; i < regions.size() && what.empty(); i++) {
+    auto& r = regions.begin()[i];
+    for (u32 k = 0; k < r.size; k++) {
+      if (g_ee_main_mem[r.addr + k] != after[i][k]) {
+        const u32 q = k & ~15u;
+        const u32 n = std::min(16u, r.size - q);
+        what = fmt::format("region {} +{} (#x{:x}): GOAL{} native{}", i, k, r.addr + k,
+                           describe_bytes(after[i].data() + q, n),
+                           describe_bytes(g_ee_main_mem + r.addr + q, n));
+        break;
+      }
+    }
+  }
+  if (full) {
+    std::lock_guard<std::mutex> lock(g_iop_mutex);
+    g_iop_track = false;
+    for (auto& w : g_iop_writes) {
+      memcpy(g_inl_after + w.addr, g_ee_main_mem + w.addr, w.size);
+    }
+    for (auto [a, b] : {std::pair<u32, u32>{lo, ex_lo}, {ex_hi, end}}) {
+      if (!what.empty() || !memcmp(g_ee_main_mem + a, g_inl_after + a, b - a)) {
+        continue;
+      }
+      for (u32 i = a; i < b; i++) {
+        if (g_ee_main_mem[i] != g_inl_after[i]) {
+          const u32 q = i & ~15u;
+          what = fmt::format("memory at #x{:x}{}: GOAL{} native{}", i, symbol_at(i),
+                             describe_bytes(g_inl_after + q, 16),
+                             describe_bytes(g_ee_main_mem + q, 16));
+          break;
+        }
+      }
+    }
+  }
+  if (!what.empty()) {
+    e->mismatches++;
+    if (e->mismatches <= g_reports_per_fn) {
+      lg::error("inline verify MISMATCH in {} (call {}{}): {}", name, e->calls,
+                full ? ", all memory" : "", what);
+    }
+  }
+  g_inline_active = false;
+  return r_native;
+}
+#endif
 
 void native_print_verify_summary() {
 #if MIPS2C_WRITE_LOG

@@ -33,6 +33,8 @@
 
 #include <cfloat>
 #include <cstring>
+#include <functional>
+#include <initializer_list>
 
 #include "common/common_types.h"
 
@@ -117,6 +119,25 @@ bool logic_micro_on();
 //! sky_regs_vfs: the VU0 registers the sky functions share). Verify mode saves it before the
 //! mips2c run, puts it back before the native run and compares it after (MISMATCH "host state").
 void native_verify_host_state(void* p, u32 size, const char* name);
+
+#if MIPS2C_WRITE_LOG
+//! (AI-assisted) GOAL memory compared by native_verify_inline
+struct NativeVerifyRegion {
+  u32 addr, size;
+};
+//! (AI-assisted) verify mode (OPENGOAL_MIPS2C_VERIFY=1) is on and this isn't inside another check
+bool native_verify_inline_on();
+//! (AI-assisted) verify mode for a GOAL function that a native runs inline (in place of calling it):
+//! runs goal() (the GOAL code) and keeps what it wrote to the regions, the random generators
+//! (pc-rand, VU0) and its result, puts the regions and generators back, runs native(), and compares.
+//! One call in OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY (default 64) compares all of GOAL memory
+//! too (outside the stack around the check). "inline verify MISMATCH" lines, a summary at exit. Returns native()'s result
+//! (its results stay in memory).
+u64 native_verify_inline(const char* name,
+                         std::initializer_list<NativeVerifyRegion> regions,
+                         const std::function<u64()>& native,
+                         const std::function<u64()>& goal);
+#endif
 
 //! Call a GOAL function from native code (like ExecutionContext::jalr).
 u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller);
