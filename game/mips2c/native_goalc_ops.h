@@ -235,4 +235,231 @@ inline void vector_normalize(float v[4], float length) {
   v[2] = v[2] * f;
 }
 
+// ---------------------------------------------------------------------------
+// (AI-assisted) trigonometry.gc / matrix.gc, as goalc's C of them (the same in Jak 1 and Jak 2):
+// sin, cos, the matrix-rotate-x/y/z! matrices, matrix*!, vector-matrix*!, vector-rotate*! and
+// matrix-rotate-xyz!. Matrices are 16 floats, row by row (GOAL's (-> m data i)). Every lane is
+// computed, the zero entries too (signed zeros, NaNs as the GOAL code has them).
+// ---------------------------------------------------------------------------
+
+//! sin (trigonometry.gc): the angle (rotation units) wrapped to 16 bits, in radians, the odd series
+inline float sin(float a) {
+  GC_NATIVE_FP_EXACT
+  const s64 i = f2i(a);
+  const float x = bitsf(0x38c90fdau) * i2f((s64)(s16)i);
+  const float p1 = bitsf(0x3f7fffdeu) * x;
+  const float x2 = x * x;
+  const float x3 = x * x2;
+  float acc = p1 + bitsf(0xbe2aa8f5u) * x3;
+  const float x5 = x3 * x2;
+  acc = acc + bitsf(0x3c086bf6u) * x5;
+  const float x7 = x5 * x2;
+  acc = acc + bitsf(0xb94d2072u) * x7;
+  const float x9 = x7 * x2;
+  return acc + bitsf(0x361aa27fu) * x9;
+}
+
+//! cos (trigonometry.gc): (sin (+ 16384.0 a))
+inline float cos(float a) {
+  GC_NATIVE_FP_EXACT
+  return ::Mips2C::goalc_ops::sin(16384.f + a);
+}
+
+//! matrix-rotate-x! / -y! / -z! (matrix.gc)
+inline void matrix_rotate_x(float m[16], float a) {
+  GC_NATIVE_FP_EXACT
+  const float s = ::Mips2C::goalc_ops::sin(a);
+  const float c = ::Mips2C::goalc_ops::cos(a);
+  for (int i = 0; i < 16; i++) {
+    m[i] = 0.f;
+  }
+  m[0] = 1.f;
+  m[5] = c;
+  m[6] = s;
+  m[9] = 0.f - s;
+  m[10] = c;
+  m[15] = 1.f;
+}
+inline void matrix_rotate_y(float m[16], float a) {
+  GC_NATIVE_FP_EXACT
+  const float s = ::Mips2C::goalc_ops::sin(a);
+  const float c = ::Mips2C::goalc_ops::cos(a);
+  for (int i = 0; i < 16; i++) {
+    m[i] = 0.f;
+  }
+  m[0] = c;
+  m[2] = 0.f - s;
+  m[5] = 1.f;
+  m[8] = s;
+  m[10] = c;
+  m[15] = 1.f;
+}
+inline void matrix_rotate_z(float m[16], float a) {
+  GC_NATIVE_FP_EXACT
+  const float s = ::Mips2C::goalc_ops::sin(a);
+  const float c = ::Mips2C::goalc_ops::cos(a);
+  for (int i = 0; i < 16; i++) {
+    m[i] = 0.f;
+  }
+  m[0] = c;
+  m[1] = s;
+  m[4] = 0.f - s;
+  m[5] = c;
+  m[10] = 1.f;
+  m[15] = 1.f;
+}
+
+//! vector-matrix*! (matrix.gc): dst = ((m0 * v.x + m1 * v.y) + m2 * v.z) + m3 * v.w; dst may be v
+inline void vector_matrix_mul(float dst[4], const float v[4], const float m[16]) {
+  GC_NATIVE_FP_EXACT
+  const float x = v[0], y = v[1], z = v[2], w = v[3];
+  for (int l = 0; l < 4; l++) {
+    float acc = m[l] * x;
+    const float py = m[4 + l] * y;
+    acc = acc + py;
+    const float pz = m[8 + l] * z;
+    acc = acc + pz;
+    const float pw = m[12 + l] * w;
+    dst[l] = acc + pw;
+  }
+}
+
+//! vector-rotate*! (matrix.gc): dst = (m0 * v.x + m1 * v.y) + m2 * v.z, all four lanes
+inline void vector_rotate_mul(float dst[4], const float v[4], const float m[16]) {
+  GC_NATIVE_FP_EXACT
+  const float x = v[0], y = v[1], z = v[2];
+  for (int l = 0; l < 4; l++) {
+    float acc = m[l] * x;
+    const float py = m[4 + l] * y;
+    acc = acc + py;
+    const float pz = m[8 + l] * z;
+    dst[l] = acc + pz;
+  }
+}
+
+//! matrix*! (matrix.gc): dst = a * b (each row of a times b); dst may be a or b
+inline void matrix_mul(float dst[16], const float a[16], const float b[16]) {
+  float r[16];
+  for (int i = 0; i < 4; i++) {
+    ::Mips2C::goalc_ops::vector_matrix_mul(r + 4 * i, a + 4 * i, b);
+  }
+  memcpy(dst, r, sizeof(r));
+}
+
+//! matrix-rotate-xyz! (matrix.gc): rot-x * (rot-y * rot-z), the angles at rot[0..2]
+inline void matrix_rotate_xyz(float dst[16], const float rot[3]) {
+  float z[16], t[16], yz[16];
+  ::Mips2C::goalc_ops::matrix_rotate_z(z, rot[2]);
+  ::Mips2C::goalc_ops::matrix_rotate_y(t, rot[1]);
+  ::Mips2C::goalc_ops::matrix_mul(yz, t, z);
+  ::Mips2C::goalc_ops::matrix_rotate_x(t, rot[0]);
+  ::Mips2C::goalc_ops::matrix_mul(dst, t, yz);
+}
+
+// ---------------------------------------------------------------------------
+// (AI-assisted) goalc's vector float ops (goal_c_ops.h gc_vf_*: one operation per lane, each on its
+// own) and quaternion.gc's quaternion*!, quaternion-normalize! and quaternion->matrix as goalc's C
+// of them (vf0 = (0 0 0 1); the registers they blend into start at 0 like goalc's locals).
+// ---------------------------------------------------------------------------
+struct v4 {
+  float x, y, z, w;
+  float lane(int l) const { return l == 0 ? x : l == 1 ? y : l == 2 ? z : w; }
+};
+//! a 1.0 the compiler can't fold away (vf0.w times a value: the same multiply as the GOAL code)
+inline float one() {
+  static volatile float v = 1.0f;
+  return v;
+}
+inline v4 vadd(v4 a, v4 b) {
+  return {a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w};
+}
+inline v4 vsub(v4 a, v4 b) {
+  return {a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w};
+}
+inline v4 vmul(v4 a, v4 b) {
+  return {a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w};
+}
+inline v4 vdiv(v4 a, v4 b) {
+  return {a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w};
+}
+inline v4 vsqrt(v4 a) {
+  return {__builtin_sqrtf(a.x), __builtin_sqrtf(a.y), __builtin_sqrtf(a.z), __builtin_sqrtf(a.w)};
+}
+inline v4 vsplat(v4 a, int l) {
+  const float f = a.lane(l);
+  return {f, f, f, f};
+}
+//! shufps a, a, ctrl
+inline v4 vswz(v4 a, u32 c) {
+  return {a.lane(c & 3), a.lane((c >> 2) & 3), a.lane((c >> 4) & 3), a.lane((c >> 6) & 3)};
+}
+//! blendps: mask bit i takes lane i from b
+inline v4 vblend(v4 a, v4 b, u32 m) {
+  return {(m & 1) ? b.x : a.x, (m & 2) ? b.y : a.y, (m & 4) ? b.z : a.z, (m & 8) ? b.w : a.w};
+}
+inline v4 vf0() {
+  return {0.f, 0.f, 0.f, one()};
+}
+
+//! quaternion*! (quaternion.gc): a * b
+inline v4 quaternion_mul(v4 a, v4 b) {
+  GC_NATIVE_FP_EXACT
+  const v4 c = vf0();
+  v4 r12 = {0.f, 0.f, 0.f, 0.f};
+  r12 = vblend(r12, vsub(c, c), 8);
+  const v4 r11 = vmul(a, b);
+  v4 r7 = vmul(vswz(a, 9), vswz(b, 18));
+  v4 r16 = vmul(vswz(b, 9), vswz(a, 18));
+  r12 = vsub(r7, r16);
+  r7 = vmul(a, vsplat(b, 3));
+  r7 = vadd(r7, vmul(b, vsplat(a, 3)));
+  for (int l = 3; l >= 0; l--) {
+    r7 = vblend(r7, vsub(r7, vmul(c, vsplat(r11, l))), 8);
+  }
+  return vadd(r7, vmul(r12, vsplat(c, 3)));
+}
+
+//! quaternion-normalize! (quaternion.gc)
+inline v4 quaternion_normalize(v4 q) {
+  GC_NATIVE_FP_EXACT
+  const v4 c = vf0();
+  v4 r3 = {0.f, 0.f, 0.f, 0.f};
+  v4 r7 = vmul(q, q);
+  r3 = vblend(r3, vadd(r7, vsplat(r7, 2)), 8);
+  r3 = vblend(r3, vadd(r3, vmul(c, vsplat(r7, 1))), 8);
+  r7 = vblend(r7, vadd(r3, vmul(c, vsplat(r7, 0))), 8);
+  const v4 r4 = vdiv(vsplat(c, 3), vsqrt(vsplat(r7, 3)));
+  return vmul(q, r4);
+}
+
+//! quaternion->matrix (quaternion.gc): rows m[0..3]
+inline void quaternion_to_matrix(v4 m[4], v4 q) {
+  GC_NATIVE_FP_EXACT
+  const v4 c = vf0();
+  const v4 q2 = vadd(q, q);
+  v4 r8 = {0.f, 0.f, 0.f, 0.f}, r9 = r8, r10 = r8;
+  r8 = vblend(r8, vadd(c, vsplat(q, 3)), 1);
+  r8 = vblend(r8, vadd(c, vsplat(q, 2)), 2);
+  r8 = vblend(r8, vsub(c, vsplat(q, 1)), 4);
+  r8 = vblend(r8, vsub(c, vsplat(c, 3)), 8);
+  r9 = vblend(r9, vsub(c, vsplat(q, 2)), 1);
+  r9 = vblend(r9, vadd(c, vsplat(q, 3)), 2);
+  r9 = vblend(r9, vadd(c, vsplat(q, 0)), 4);
+  r9 = vblend(r9, vsub(c, vsplat(c, 3)), 8);
+  r10 = vblend(r10, vadd(c, vsplat(q, 1)), 1);
+  r10 = vblend(r10, vsub(c, vsplat(q, 0)), 2);
+  r10 = vblend(r10, vadd(c, vsplat(q, 3)), 4);
+  r10 = vblend(r10, vsub(c, vsplat(c, 3)), 8);
+  r8 = vsub(vmul(vswz(q2, 9), vswz(r8, 18)), vmul(vswz(r8, 9), vswz(q2, 18)));
+  r9 = vsub(vmul(vswz(q2, 9), vswz(r9, 18)), vmul(vswz(r9, 9), vswz(q2, 18)));
+  r10 = vsub(vmul(vswz(q2, 9), vswz(r10, 18)), vmul(vswz(r10, 9), vswz(q2, 18)));
+  r8 = vblend(r8, vadd(r8, vsplat(c, 3)), 1);
+  r9 = vblend(r9, vadd(r9, vsplat(c, 3)), 2);
+  r10 = vblend(r10, vadd(r10, vsplat(c, 3)), 4);
+  m[0] = r8;
+  m[1] = r9;
+  m[2] = r10;
+  m[3] = c;
+}
+
 }  // namespace Mips2C::goalc_ops
