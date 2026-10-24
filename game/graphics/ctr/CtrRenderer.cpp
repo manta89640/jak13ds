@@ -712,8 +712,24 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   if (gs.dropped_draws && ctr_settings().pipeline && !m_pipeline_off) {
     ctr_gpu_set_pipeline(0);
     m_pipeline_off = true;
-    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off from now on",
+    m_pipeline_calm = 0;
+    m_pipeline_retry_frames = std::min(m_pipeline_retry_frames * 2, 30 * 600);
+    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off for now",
              gs.dropped_draws);
+  } else if (m_pipeline_off && ctr_settings().pipeline) {
+    // (AI-assisted, j2gaps) one spike frame used to cost the CPU / GPU overlap for the rest of
+    // the session: back on after a run of frames whose commands fit well in a pipeline half
+    // (60%), waiting twice as long after each overflow; stays off without the linear memory
+    const u32 half_bytes = (u32)ctr_gpu_cmd_buffer_kb() * 1024 / 2;
+    m_pipeline_calm = gs.cmd_bytes < half_bytes * 6 / 10 ? m_pipeline_calm + 1 : 0;
+    if (m_pipeline_calm >= m_pipeline_retry_frames) {
+      m_pipeline_calm = 0;
+      if (ctr_gpu_set_pipeline(1)) {
+        m_pipeline_off = false;
+        lg::info("[ctr] pipeline: on again ({} frames fit in half the command buffer)",
+                 m_pipeline_retry_frames);
+      }
+    }
   }
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
