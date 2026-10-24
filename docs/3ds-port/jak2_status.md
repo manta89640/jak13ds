@@ -31,6 +31,7 @@ or an environment variable, or a hook that stays null for Jak 1.
 | **Integration build, baseline D (Oct 22)** | **j2-title2 + j2-mem2 merged (144c36070b). Azahar: intro to the JAK II logo, title 29.1-29.7 fps, slums 29.5-29.6 fps (logic 22.5-23.3 ms), all route stops 29.6-29.7 fps; heap free 6.3-10.1 MB; 0 DSP drops. Staged in `port_test/3ds-sdcard-jak2-baseline-d`** (section below) |
 | Title intro's first frames (j2intro, Oct 24) | **Fixed:** the slums fly-through could start before ctysluma's background was read (ctywide's walls over a black void for ~2 s in baseline D's Azahar run). Jak II's level login now waits for the level's .c3l (as Jak 1), the .c3l is read from the DGO's start, a black hold covers what's late at the reveal; the title's loads went from ~20 s to ~9 s (section "Title intro: missing geometry") |
 | New game hang (j2hang, Oct 24) | **Fixed:** New Game -> slot could stay on "Saving data" for good: the menu dropped the save's done notify when the 3DS save worker finished after the menu's transition (section "New game: the save notify") |
+| **Integration build, baseline E (Oct 24)** | **j2intro + j2hang merged (ba9a04bf71). Azahar: the intro's first visible frame (329) has the slums; title 29.1-29.6 fps; New Game -> slot 1 -> intro scenes -> Jak in the prison (29.3-29.7 fps); saves 132 ms (slot) and 119 ms (first auto-save); 0 DSP drops. Staged in `port_test/3ds-sdcard-jak2-e`** (section below) |
 
 ## Integration build: baseline B (Oct 18)
 
@@ -204,6 +205,50 @@ so the C modules are baseline C's (`j2mirror/out/jak2/csrc`, linked from a priva
   --compress --compress-vag`, preset normal, sound on): `cias/jak2.cia`, `3ds/jak2/` (gk.3dsx,
   config.ini, data: 754 files, byte-identical to baseline C's), README. gk.3dsx and the CIA are
   byte-identical to the build. Logs and screenshots: `port_test/reports/j2-baseline-d`.
+
+## Integration build: baseline E (Oct 24)
+
+(AI-assisted.) Branch `j2-int-e` off jak2-3ds (b5c1b33e69): j2intro (9db48e139b) merged, then j2hang
+(4a4402a364): merge ba9a04bf71. The only conflict was the status table here (both rows kept).
+- C modules: `goalc` from this worktree's `build-host-small`, `OPENGOAL_SMALL_MEMORY=1 goalc --game
+  jak2 --proj-path port_test/j2mirror --instruction-set c -c '(mi)'`, with j2mirror's source links
+  pointed at the j2-int-e worktree for the build (they point at the jak2 worktree again, the same
+  commit after the fast-forward). Against the mirror before: `csrc` level.c and progress.c, `obj`
+  level.o and progress.o, `iso` GAME.CGO, two new `cmod` .c/.so pairs; level.c is j2intro's
+  mirror's, progress.c j2hang's. (The custom test level TSZ.DGO / test-zone.go / test-actor-ag.go
+  came out with a new build date string only; the previous files were put back.)
+- Sizes: .text 18.19 MB, .rodata 0.83 MB, .data 19 KB, .bss 2.09 MB. make_cia: check_shaders 29
+  shaders, check_svc 31 calls, all allowed.
+- Host checks (`build-host-small`, small-memory C mode, `--ctr-gfx`):
+  - `jak2_title_city.pad`: Jak at (1065.99, 0.52, 194.46) target-hide (1 cm from baseline D's
+    1065.98), exit 0.
+  - `jak2_newgame.pad` with `OPENGOAL_MC_SAVE_DELAY_MS=600`: `DONE NOTIFY: ok saving` (the late
+    notify that hung before), then the intro scenes, Jak in target-stance in the prison at (474.22,
+    8.42, 67.27) after 10107 frames, exit 0.
+  - Jak 1 `level_pairs.pad` on proj-final: 10 pairs, 18 level loads, exit 0.
+- **Azahar** (one run, the CIA, private instance, sound on, instance muted, the user's config.ini,
+  compressed staging as the SD folder below, fresh save data; pad `reports/j2-int-e/verify_e.pad`:
+  the intro without input with a shot every frame 300-420, then `jak2_newgame_3ds.pad` shifted by
+  300 frames):
+  - Title loads: ctywide 1.9 s, lwidea 0.8 s (waited 357 ms), ctysluma 6.8 s (the game waited 6.0
+    s for it). Black held 500 ms (5 frames) at the reveal; frames 316-328 black, 329 the first
+    visible one, fading in with the slums' houses, street and tower there (no ctywide-only frames).
+  - JAK II logo with "Press the Start Button" by frame 1100; Start at 1800, New Game, slot 1
+    (empty): `[mc] save to slot 0 done on the worker thread in 132 ms`, `DONE NOTIFY: ok
+    select-save-title`; the intro scenes (introcst, village1, the city with ctyindb and lcitylow,
+    prison): Jak in target-stance in the prison at (474.22, 8.42, 67.27) after 8428 frames of
+    waiting; the auto-save notice, Continue, the first auto-save in 119 ms; the walk falls off the
+    walkway (`jakfall`, "GAMEPLAY: enter prison" again), as on the host.
+  - fps: title 29.1-29.6 (logic 24.7-27.0 ms); menu 29.7-29.8; intro scenes mostly 29.4-29.9 (26.5-28.9
+    while levels load); prison 29.3-29.7 (logic 12-16 ms). The shot-every-frame
+    window ran at 11.4-12.0 fps (screenshot writes).
+  - Memory: lowest linear free 1076 KB (the intro's city scene, ctyindb + lcitylow in), heap free
+    >= 6.2 MB; no `[heap]` failures. Mixer 1-12% of real time, 0 DSP frames dropped, 0 late
+    buffers.
+- Staged `port_test/3ds-sdcard-jak2-e` (`stage_sd.sh --game jak2 --compress --compress-vag`,
+  preset normal, sound on, as baseline D): against oct23b's `3ds/jak2` (baseline D's data) the same
+  756 files; only gk.3dsx and `data/out/jak2/iso/GAME.CGO` differ; config.ini the same. gk.3dsx and
+  `cias/jak2.cia` are byte-identical to the build. Logs and sheets: `port_test/reports/j2-int-e`.
 
 ## New game: the save notify (j2hang, Oct 24)
 
