@@ -47,6 +47,9 @@ void IR_Return::do_codegen_c(CFunctionEmitter& e) {
 
 void IR_LoadConstant64::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, hex(m_value));
+  if (m_value <= 0xffffffffull) {
+    e.write_is_32();
+  }
 }
 
 void IR_LoadSymbolPointer::do_codegen_c(CFunctionEmitter& e) {
@@ -61,6 +64,7 @@ void IR_LoadSymbolPointer::do_codegen_c(CFunctionEmitter& e) {
     value = fmt::format("GC_SYM({})", e.symbol(m_name));
   }
   set_from_gpr(e, m_dest, value);
+  e.write_is_32();
 }
 
 void IR_SetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
@@ -75,6 +79,7 @@ void IR_SetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
 void IR_GetSymbolValue::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, sym_value_load(e, m_src->name(), m_sext));
   if (!m_sext) {
+    e.write_is_32();
     e.set_known_symbol(m_dest, m_src->name());
   }
 }
@@ -156,11 +161,14 @@ void IR_FunctionCall::do_codegen_c(CFunctionEmitter& e) {
 }
 
 void IR_RegValAddr::do_codegen_c(CFunctionEmitter& e) {
+  e.address_taken(m_src);
   e.line(fmt::format("{} = gc_goal_ptr((const void*)&{});", e.write(m_dest), e.read(m_src)));
+  e.write_is_32();
 }
 
 void IR_StaticVarAddr::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, e.static_addr(m_src->rec, m_src->get_addr_offset()));
+  e.write_is_32();
 }
 
 void IR_StaticVarLoad::do_codegen_c(CFunctionEmitter& e) {
@@ -185,6 +193,7 @@ void IR_StaticVarLoad::do_codegen_c(CFunctionEmitter& e) {
 
 void IR_FunctionAddr::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, e.function_addr(m_src->idx_in_file));
+  e.write_is_32();
   e.set_known_function(m_dest, m_src->idx_in_file);
 }
 
@@ -201,12 +210,15 @@ void IR_IntegerMath::do_codegen_c(CFunctionEmitter& e) {
       break;
     case IntegerMathKind::AND_64:
       e.line(fmt::format("{} = {} & {};", d, dv, a()));
+      e.write_is_32_if_any({m_dest, m_arg});
       break;
     case IntegerMathKind::OR_64:
       e.line(fmt::format("{} = {} | {};", d, dv, a()));
+      e.write_is_32_if_all({m_dest, m_arg});
       break;
     case IntegerMathKind::XOR_64:
       e.line(fmt::format("{} = {} ^ {};", d, dv, a()));
+      e.write_is_32_if_all({m_dest, m_arg});
       break;
     case IntegerMathKind::NOT_64:
       e.line(fmt::format("{} = ~{};", d, dv));
@@ -216,18 +228,26 @@ void IR_IntegerMath::do_codegen_c(CFunctionEmitter& e) {
       break;
     case IntegerMathKind::SHRV_64:
       e.line(fmt::format("{} = gc_shr({}, {});", d, dv, a()));
+      e.write_is_32_if_all({m_dest});  // no larger than before
       break;
     case IntegerMathKind::SARV_64:
       e.line(fmt::format("{} = gc_sar({}, {});", d, dv, a()));
+      e.write_is_32_if_all({m_dest});  // a value below 2^32 is not negative: no larger
       break;
     case IntegerMathKind::SHL_64:
       e.line(fmt::format("{} = gc_shl({}, {});", d, dv, (int)m_shift_amount));
       break;
     case IntegerMathKind::SHR_64:
       e.line(fmt::format("{} = gc_shr({}, {});", d, dv, (int)m_shift_amount));
+      if ((m_shift_amount & 63) >= 32) {
+        e.write_is_32();
+      } else {
+        e.write_is_32_if_all({m_dest});
+      }
       break;
     case IntegerMathKind::SAR_64:
       e.line(fmt::format("{} = gc_sar({}, {});", d, dv, (int)m_shift_amount));
+      e.write_is_32_if_all({m_dest});
       break;
     case IntegerMathKind::IMUL_32:
       e.line(fmt::format("{} = gc_imul32({}, {});", d, dv, a()));
@@ -360,6 +380,7 @@ void IR_IntToFloat::do_codegen_c(CFunctionEmitter& e) {
 
 void IR_GetStackAddr::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, e.stack_slot_addr(m_slot));
+  e.write_is_32();
 }
 
 void IR_Nop::do_codegen_c(CFunctionEmitter&) {}
@@ -375,6 +396,9 @@ void IR_LoadConstOffset::do_codegen_c(CFunctionEmitter& e) {
       case 2:
       case 4:
         e.line(fmt::format("{} = gc_ld_{}{}({});", d, sign, m_info.size * 8, addr));
+        if (!m_info.sign_extend) {
+          e.write_is_32();
+        }
         break;
       case 8:
         e.line(fmt::format("{} = gc_ld_u64({});", d, addr));
@@ -446,6 +470,9 @@ void IR_AsmFWait::do_codegen_c(CFunctionEmitter&) {}
 
 void IR_GetSymbolValueAsm::do_codegen_c(CFunctionEmitter& e) {
   set_from_gpr(e, m_dest, sym_value_load(e, m_sym_name, m_sext));
+  if (!m_sext) {
+    e.write_is_32();
+  }
 }
 
 void IR_JumpReg::do_codegen_c(CFunctionEmitter& e) {

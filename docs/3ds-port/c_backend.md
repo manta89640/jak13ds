@@ -483,6 +483,20 @@ version 6 changes the module's link-time state:
 - The mips2c-native test fixtures (`test/mips2c_native/goalc_ref`) are ABI 5 code; they compile
   with the version 6 header (the old accessors are still there), `extract.py` handles both shapes.
 
+### 32-bit locals (AI-assisted, Oct 24 2026, j2codegen)
+
+GPR variables whose every write stores a value below 2^32 are declared `u32` instead of `u64`
+(`CFunctionEmitter::narrow_vars`). No type assumption: each `do_codegen_c` says what its write
+stores (`write_is_32`: zero-extending loads of 1-4 bytes, symbol values, symbol / static / stack /
+function addresses, constants below 2^32, address-typed parameters; `write_is_32_if_all`: moves,
+`or`, `xor`, right shifts; `write_is_32_if_any`: `and`), every other write may need 64 bits
+(call results, sign-extending loads, arithmetic, float bits...). The greatest fixed point over a
+function is exact by induction: every variable starts at 0 and every write keeps it below 2^32.
+Variables whose address is taken, `volatile` stack variables, the special registers and mixed-class
+variables stay `u64`. Reads promote the value back to `u64`, so expressions are unchanged; GCC
+then drops the upper halves through phis and loops (64-bit compares of loop variables, the upper
+half of WIDE arguments: `gc_hi` of a `u32` is 0).
+
 ## Known later work
 
 - Performance: function bodies still use `u64` for every GPR. Declaring locals whose types are all

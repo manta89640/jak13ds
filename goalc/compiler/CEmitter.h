@@ -11,6 +11,7 @@
  * the object are printed as tokens and resolved in CModuleEmitter::finish, after layout.
  */
 
+#include <initializer_list>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -94,6 +95,18 @@ class CFunctionEmitter {
   int known_function(const RegVal* rv) const;
   CModuleEmitter* module() { return m_module; }
 
+  // (AI-assisted) What the statement of the last write() stores into a GPR variable, for the
+  // 32-bit analysis in emit(): variables whose every write stores a value below 2^32 are declared
+  // u32 (exact: they never hold anything else). Without one of these, a write may need 64 bits.
+  //! the value is below 2^32
+  void write_is_32();
+  //! the value is below 2^32 when all of these registers' values are
+  void write_is_32_if_all(std::initializer_list<const RegVal*> rvs);
+  //! the value is below 2^32 when one of these registers' values is
+  void write_is_32_if_any(std::initializer_list<const RegVal*> rvs);
+  //! the C code takes the address of this register's variable
+  void address_taken(const RegVal* rv);
+
  private:
   enum class Special { NONE, PP, ST, OFF, SP };
   struct VarInfo {
@@ -128,6 +141,17 @@ class CFunctionEmitter {
     int function = -1;
   };
   std::unordered_map<int, Known> m_known;
+  // (AI-assisted) 32-bit analysis, see write_is_32
+  struct WriteFact {
+    enum Kind { NEVER, ALWAYS, ALL, ANY } kind = NEVER;
+    std::vector<int> deps;
+  };
+  std::vector<std::vector<WriteFact>> m_writes;  // by variable
+  std::vector<bool> m_addr_taken;                // by variable
+  int m_last_write = -1;                         // variable of the last write(), or -1
+  void write_fact(WriteFact::Kind kind, std::initializer_list<const RegVal*> rvs);
+  //! the variables that only ever hold values below 2^32 (by variable)
+  std::vector<bool> narrow_vars() const;
 };
 
 class CModuleEmitter {
