@@ -106,11 +106,22 @@
 ;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; og:preserve-this this was rewritten from assembly
+;; og:preserve-this (AI-assisted) 3DS: sp-init-fields! (with rand-vu) in C++
+;; (game/mips2c/native_sp_init_fields.h: the same results, verified against the GOAL code below with
+;; OPENGOAL_MIPS2C_VERIFY=1; always on). #f only when turned off for debugging (config.ini
+;; mips2c_native_off): the GOAL code runs.
+(#when TARGET_3DS
+  (def-mips2c pc-sp-init-fields!
+              (function (pointer float) (inline-array sp-field-init-spec) sp-field-id sp-field-id symbol object)))
+
 (defun sp-init-fields! ((arg0 (pointer float))
         (arg1 (inline-array sp-field-init-spec))
         (arg2 sp-field-id)
         (arg3 sp-field-id)
         (write-missing-fields symbol))
+  (#when TARGET_3DS
+    (let ((native (pc-sp-init-fields! arg0 arg1 arg2 arg3 write-missing-fields)))
+      (if native (return (the-as (inline-array sp-field-init-spec) native)))))
   (1+! arg2)
   (let ((cur-spec arg1))
     (while (< (-> cur-spec 0 field) arg2)
