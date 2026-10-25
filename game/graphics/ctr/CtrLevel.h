@@ -520,8 +520,8 @@ class CtrLevels {
    * or read back by the camera's distance (CtrLevel.cpp "Dormant levels") */
   void dormant_update(u64 frame);
   /*! (AI-assisted, j2strip) Jak II, render thread, each frame: the levels short of linear memory
-   * (dist_free): their chunks freed beyond their draw distance while the heap is short, read back
-   * by distance (CtrLevel.cpp "Distance freeing") */
+   * (dist_free): their freed chunks read back by distance (CtrLevel.cpp "Distance freeing"; they
+   * are freed only by a load that would fail otherwise: make_room) */
   void dist_update(u64 frame, u32 free_now);
   /*! (AI-assisted, streaming) render thread, each level draw: the camera position (game units) */
   void stream_note_camera(const math::Vector4f& trans,
@@ -566,7 +566,7 @@ class CtrLevels {
    * yet, and dormant tie chunks not read back yet (not drawn at all). recent: the level was shown
    * again (its dormancy ended) within the last 3 s. The renderer keeps a screen that comes out of
    * black black while there is such a thing after a level was shown or the camera cut
-   * (CtrRenderer::draw_pmode_fade), at most 1.5 s. */
+   * (CtrRenderer::draw_pmode_fade), at most 1.5 s (Jak II: while it gets fewer, at most 6 s). */
   void note_late_in_view(u64 frame, u32 n, bool recent) {
     if (m_lv_frame != frame) {
       m_lv_frame = frame;
@@ -764,8 +764,10 @@ class CtrLevels {
   // (AI-assisted) loader: an allocation failed. Once per job: has the render thread unload the
   // parked prefetches the game gave up on and free the deleted GPU memory now, waits for it, and
   // returns true (try the allocation again).
-  bool make_room(const std::string& name, const char* what);
-  bool m_room_tried = false;  // by the loader's job (one at a time)
+  // (AI-assisted, j2pop) bytes: what the allocation wants (distance freeing frees about that much,
+  // the farthest first); a second try in the same job frees all it can
+  bool make_room(const std::string& name, const char* what, u64 bytes = 0);
+  int m_room_tries = 0;  // by the loader's job (one at a time)
   // (AI-assisted) the .c3l reader's windows and block caches, kept for all loads (one at a time):
   // made at startup, while the heap is in one piece
   c3l::Reader::Buffers m_read_bufs;
@@ -776,6 +778,7 @@ class CtrLevels {
   // under m_lock: the loader asks for room / the number of times the render thread made it
   bool m_room_wanted = false;
   u32 m_room_serial = 0;
+  u64 m_room_bytes = 0;  // (AI-assisted, j2pop) make_room's want (0: everything far)
   bool can_start(const Job& job) const;  // under m_lock
   std::atomic<u32> m_generation{0};
   void loader_main();
@@ -844,7 +847,12 @@ class CtrLevels {
   // units; n of them, 0: not known), for the render thread (dist_positions) and a copy the loader
   // reads (m_lock: m_dist_snap)
   int dist_positions(float pos[4][3]) const;
-  u64 dist_free_far(CtrLevelData& lev, const float pos[4][3], int np);
+  // (AI-assisted, j2pop) min_excess: only the chunks more than that (game units) beyond their
+  // freeing distance
+  u64 dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, float min_excess = 0.f);
+  // (AI-assisted, j2pop) a load that made room: the farthest chunks first, until want bytes are
+  // freed (0: all of those far beyond their distance); returns the bytes freed
+  u64 dist_make_room(u64 want);
   float m_dist_snap[4][3] = {};
   int m_dist_snap_n = 0;
   u64 m_dist_log_frame = 0;

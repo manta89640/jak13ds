@@ -244,6 +244,8 @@ class CtrRenderer {
   bool m_hold_ramp = false;  // after the hold: faded in from black (1/8 a frame), not cut in
   double m_hold_t0 = 0;
   u32 m_hold_late = 0, m_hold_frames = 0;
+  u32 m_hold_least = 0;          // (AI-assisted, j2pop) the least missing since the hold began
+  double m_hold_progress_t = 0;  // when it last got fewer
   // (AI-assisted) config.ini gpu_counters: the GPU's own counters over every stats window, with
   // everything drawn (gpu_profile measures them in its own way)
   void hw_counters_frame();

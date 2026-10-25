@@ -1250,10 +1250,14 @@ void CtrRenderer::draw_pmode_fade() {
 // of a level shown again (dormant) or of a camera cut, something in view is missing: tie LOD groups
 // drawn far for want of their near chunks, dormant tie chunks not read back yet
 // (CtrLevels::note_late_in_view). Its first visible frame is complete, not filling in on screen.
-// At most kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
-// follows its voice stream): only the picture waits.
+// (AI-assisted, j2pop) Jak II: while what is missing gets fewer (a new least count within kStallMs), at
+// most kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
+// follows its voice stream): only the picture waits. (Was at most 1.5 s: HW Oct 25, the title
+// intro gave up with 102 tie LOD groups drawn far and a continue to the slums with 200, read back
+// over the next seconds in view: the user's "rocks pop in".)
 float CtrRenderer::hold_black(float alp) {
-  constexpr double kMaxHoldMs = 1500.0;
+  // (Jak 1: 1.5 s, as before)
+  const double kMaxHoldMs = m_jak2 ? 6000.0 : 1500.0, kStallMs = 1500.0;
   bool shown_or_cut = false;
   const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
   const double now = ctr_gpu_time_ms();
@@ -1262,10 +1266,16 @@ float CtrRenderer::hold_black(float alp) {
     m_hold_t0 = now;
     m_hold_late = 0;
     m_hold_frames = 0;
+    m_hold_least = late;
+    m_hold_progress_t = now;
   }
   if (m_hold_black) {
     m_hold_late = std::max(m_hold_late, late);
-    if (late == 0 || now - m_hold_t0 >= kMaxHoldMs) {
+    if (late < m_hold_least) {
+      m_hold_least = late;
+      m_hold_progress_t = now;
+    }
+    if (late == 0 || now - m_hold_t0 >= kMaxHoldMs || now - m_hold_progress_t >= kStallMs) {
       m_hold_black = false;
       m_hold_ramp = true;
       lg::info("[ctr] screen kept black {:.0f} ms ({} frames) for what is missing in view{} (at most "
