@@ -23,5 +23,7 @@ bool FS_SoundLoadPending();
 // a spool chunk or voice stream read is running, or one ended less than quiet_ms ago (any
 // thread; the save worker waits for these, kmemcard.cpp)
 bool FS_StreamBusy(u32 quiet_ms);
+// a stream read made outside this file (Jak II's fake CD), for FS_StreamBusy
+void FS_NoteStreamRead();
 #endif
 }  // namespace jak1

@@ -102,6 +102,7 @@ struct CdFile {
   iso_cz::Reader* cz = nullptr;  // compressed file: owns its FILE
 #endif
   bool voice = false;  // the VAGWAD voice stream file
+  bool stream = false;  // (AI-assisted, j2gaps) a voice (VAGWAD) or spooled animation (.STR) file
   u32 last_use = 0;
 };
 constexpr int kCdFiles = 3;
@@ -184,6 +185,7 @@ static bool open_cd_file(CdFile* f, FileRecord* fr, s32 thread_to_wake) {
   if (ok) {
     f->fr = fr;
     f->voice = strstr(path, "VAGWAD") != nullptr;
+    f->stream = f->voice || strstr(path, ".STR") != nullptr;
 #ifdef OG_ISO_OGZ
     if (is_file_compressed(fr)) {
       auto* r = new iso_cz::Reader();
@@ -293,6 +295,13 @@ int sceCdRead(int lsn, int num_sectors, void* dest, void* mode) {
       }
     }
     ASSERT(gFakeCd.callback);
+#ifdef __3DS__
+    // (AI-assisted, j2gaps) the save worker (kmemcard.cpp) waits while streams read: an auto-save's
+    // card writes made the spool and dialogue wait. Jak II's reads weren't marked, so it never did
+    if (f->stream) {
+      jak1::FS_NoteStreamRead();
+    }
+#endif
 
     iWakeupThread(thid);
   };

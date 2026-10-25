@@ -49,6 +49,7 @@
 using namespace ee;
 
 bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
+u32 ctr_frame_vblanks();                  // game/graphics/ctr/CtrRenderer.cpp
 
 namespace jak2 {
 /*!
@@ -566,6 +567,19 @@ u64 pc_3ds_level_ready(u32 name) {
              : offset_of_s7();
 }
 
+// (AI-assisted) pc-maybe-vsync (TARGET_3DS): 60 Hz vblanks the last frame took, the game's
+// dog-ratio. The 3DS presents at 30 fps (2), and Jak II only steps its clocks by 1/60 s per frame
+// at dog-ratio 1, so it ran at half speed. Host builds keep 1 (pad scripts unchanged) unless
+// CTR_FRAME_VBLANKS sets a fixed count (host test of the 3DS timing).
+u64 pc_3ds_frame_vblanks() {
+#ifndef __3DS__
+  static const int fixed = getenv("CTR_FRAME_VBLANKS") ? atoi(getenv("CTR_FRAME_VBLANKS")) : 1;
+  return (u64)std::clamp(fixed, 1, 4);
+#else
+  return ctr_frame_vblanks();
+#endif
+}
+
 void InitMachine_PCPort() {
   // PC Port added functions
   init_common_pc_port_functions(
@@ -584,6 +598,8 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("__pc-get-tex-remap", lookup_jak2_texture_dest_offset);
   // (AI-assisted, j2intro) level-update-after-load waits for the 3DS renderer's .c3l of the level
   make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
+  // (AI-assisted) pc-maybe-vsync's dog-ratio on the 3DS: the vblanks the last frame took
+  make_function_symbol_from_c("pc-3ds-frame-vblanks", pc_3ds_frame_vblanks);
   make_function_symbol_from_c("pc-init-autosplitter-struct",
                               kmachine_extras::init_autosplit_struct);
 

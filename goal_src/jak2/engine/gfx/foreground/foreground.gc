@@ -1558,11 +1558,17 @@
                           (set! (-> (scratchpad-object foreground-work) regs merc-used) 1)
                           (dotimes (effect-idx (the-as int (-> geo header effect-count)))
                             (cond
-                              ((or (logtest? (-> geo effect effect-idx effect-bits) (effect-bits cross-fade))
-                                   (logtest? (-> geo effect effect-idx effect-bits) (effect-bits force-mercneric))
+                              ;; 3DS port (AI-assisted): the 3DS renderer has no generic renderer (its gmerc
+                              ;; buckets are skipped), so everything but the warp effects stays merc: models
+                              ;; in their death effect (killed enemies, Jak in a warp gate) and cross-fade /
+                              ;; force-mercneric effects are drawn plain instead of not at all.
+                              ((#if TARGET_3DS
                                    (= (-> geo effect effect-idx texture-index) (tpage-category warp))
-                                   (nonzero? (-> dc death-timer))
-                                   )
+                                   (or (logtest? (-> geo effect effect-idx effect-bits) (effect-bits cross-fade))
+                                       (logtest? (-> geo effect effect-idx effect-bits) (effect-bits force-mercneric))
+                                       (= (-> geo effect effect-idx texture-index) (tpage-category warp))
+                                       (nonzero? (-> dc death-timer))
+                                       ))
 
                                ; (if (logtest? (-> geo effect effect-idx effect-bits) (effect-bits cross-fade))
                                ;     (format *stdcon* "[fg] ~S to generic 1~%" (-> dc process name))

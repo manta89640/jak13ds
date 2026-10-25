@@ -4362,9 +4362,13 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
     tex_mipmaps_rgba8(tex); /* (AI-assisted) (RGBA8 checked above) */
   }
   cache_flush_frame(tex->data, C3D_TexCalcTotalSize(tex->size, tex->maxLevel));
-  /* bind again at the next use: that clears the GPU's texture cache (it may hold old texels) */
+  /* bind again at the next use: that clears the GPU's texture cache (it may hold old texels).
+   * (AI-assisted, j2gaps) The state cache too: a next draw with the same state words returned
+   * before the bind, so the unit kept the old address (the other copy in pipeline mode) and the
+   * animation showed a frame late */
   if (g.bound_tex == tex) {
     g.bound_tex = NULL;
+    g.last_state_valid = 0;
   }
 }
 
@@ -5975,6 +5979,16 @@ static int copy_screen_body(float x0, float x1, int part) {
   /* the GPU's texture cache may hold the old texels */
   g.bound_tex = NULL;
   return g.screen_tex;
+}
+
+void ctr_gpu_screen_copy_release(void) {
+  if (g.ready && g.screen_tex >= 0) {
+    ctr_gpu_tex_delete(g.screen_tex); /* (freed once the GPU is done with it) */
+    if (g.bound_tex == &g.textures[g.screen_tex].tex) {
+      g.bound_tex = NULL;
+    }
+    g.screen_tex = -1;
+  }
 }
 
 void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {

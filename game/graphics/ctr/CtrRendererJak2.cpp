@@ -8,8 +8,11 @@
 
 #include "game/graphics/ctr/CtrRendererJak2.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "common/dma/dma.h"
 #include "common/common_types.h"
@@ -258,7 +261,267 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
   std::unique_ptr<CtrDirect> m_direct;
 };
 
+/*!
+ * (AI-assisted, j2gaps) Jak II's bucket 3 (BlitDisplays on the PC). When a menu opens
+ * (blit-displays, menu-mode) the game stops drawing the world and sends one copy request (pc-port
+ * 0x10, tbp 0x3300) here; the sky bucket then draws that copy, tinted, behind the menu every frame
+ * (sky-tng.gc). The 3DS kept nothing there: menus showed on black. The frame with the request
+ * leaves the color buffer as the last frame left it (CtrRenderer::render_frame clears only the
+ * depth then) and nothing is drawn before this bucket, so the copy is the game's last frame, as
+ * the PC's copy of its frame buffer before the clear. The copy is given back once the menu stops
+ * drawing it (~1 s). Not done: the zoom blur, color filter and slow-time copies (0x13-0x15: Jak II
+ * doesn't send them) and the PC's copy-back in the 3 frames after opening / closing (0x11).
+ */
+class CtrJak2BlitRenderer : public CtrBucketRenderer {
+ public:
+  static constexpr u32 kCopyTbp = 0x3300;
+  CtrJak2BlitRenderer(std::string name, int id) : CtrBucketRenderer(std::move(name), id) {}
+  void render(DmaFollower& dma, CtrRenderState& rs) override {
+    bool copy = false;
+    while (dma.current_tag_offset() != rs.next_bucket) {
+      auto data = dma.read_and_advance();
+      if (data.vifcode0().kind == VifCode::Kind::PC_PORT && data.vifcode0().immediate == 0x10 &&
+          data.vifcode1().immediate == kCopyTbp) {
+        copy = true;
+      }
+    }
+    const bool drawn = ctr_direct_take_menu_screen_drawn();
+    if (copy) {
+      const int h = ctr_gpu_copy_screen_part(-1.f, 1.f);  // (in VRAM when there is room)
+      ctr_direct_set_menu_screen(h);
+      if (h >= 0) {
+        rs.vram->set_override_handle(kCopyTbp, h, 512, 512);
+        lg::info("[ctr] menu: the last frame copied for the menu's background");
+      }
+      m_idle = 0;
+    } else if (ctr_direct_menu_screen() >= 0) {
+      m_idle = drawn ? 0 : m_idle + 1;
+      if (m_idle > 30) {
+        rs.vram->clear_override(kCopyTbp);
+        ctr_direct_set_menu_screen(-1);
+        ctr_gpu_screen_copy_release();
+      }
+    }
+  }
+
+ private:
+  int m_idle = 0;  // frames the copy wasn't drawn in
+};
+
+/*!
+ * (AI-assisted, j2gaps) Jak II's lightning (the EFFECTS bucket: Generic2's LIGHTNING mode on the
+ * PC): electric gates' bolts and rings, the guards' and enemies' electric attacks, the prison's
+ * and the cutscenes' arcs. The 3DS skipped the bucket, so an electric gate was an invisible wall
+ * that still shocked. The DMA as Generic2::process_dma_lightning reads it: per fragment a header
+ * (the projection matrix in its first 4 qw, a giftag, two extra GS registers), one adgif and up
+ * to 32 vertices of 3 qw (s t as ints, rgba, xyz in camera space; s bit 0 set: no kick). The
+ * vertices go to clip space the way generic.vert (not the full-matrix path) and CtrShadowJak2 do
+ * it and are drawn as strips with ctr_gpu_draw_clip (the GPU clips them). Generic2's lightning
+ * state: no alpha test, depth test GEQUAL without depth writes, blend from the adgif; no fog.
+ */
+class CtrLightningJak2Renderer : public CtrBucketRenderer {
+ public:
+  using CtrBucketRenderer::CtrBucketRenderer;
+  void render(DmaFollower& dma, CtrRenderState& rs) override {
+    auto more = [&]() { return dma.current_tag_offset() != rs.next_bucket; };
+    auto skip_rest = [&]() {
+      while (more()) {
+        dma.read_and_advance();
+      }
+    };
+    if (!more()) {
+      return;
+    }
+    auto first = dma.read_and_advance();
+    (void)first;
+    if (!more()) {
+      return;
+    }
+    auto direct_setup = dma.read_and_advance();
+    if (direct_setup.size_bytes != 32 || !more()) {
+      skip_rest();
+      return;
+    }
+    auto constants = dma.read_and_advance();
+    if (constants.size_bytes != 128 || constants.vifcode1().kind != VifCode::Kind::UNPACK_V4_32) {
+      skip_rest();
+      return;
+    }
+    float fog, hvdf[4];
+    memcpy(&fog, constants.data, 4);
+    memcpy(hvdf, constants.data + 32, 16);
+    if (!(std::abs(fog) > 1e-20f) || !more()) {
+      skip_rest();
+      return;
+    }
+    dma.read_and_advance();  // MSCALF STMOD
+    if (!more()) {
+      return;
+    }
+    dma.read_and_advance();  // NOP NOP
+    bool have_clip = false;
+    float clip[16];
+    int frags = 0, tris = 0;
+    while (more()) {
+      auto up1 = dma.read_and_advance();
+      if (up1.vifcode1().kind != VifCode::Kind::UNPACK_V4_32 ||
+          up1.size_bytes != kHeaderBytes + 5 * 16 || !more()) {
+        break;  // the ending (FLUSHA DIRECT ...)
+      }
+      auto up2 = dma.read_and_advance();
+      if (more()) {
+        dma.read_and_advance();  // MSCAL
+      }
+      const u8* header = up1.data;
+      float mat_33;
+      memcpy(&mat_33, header + 15 * 4, 4);
+      if (mat_33 != 0.f) {
+        continue;  // a hud matrix (Generic2 keeps them apart; lightning has none)
+      }
+      if (!have_clip) {
+        make_clip(header, fog, hvdf, clip);
+        have_clip = true;
+      }
+      frags++;
+      tris += draw_frag(header, up1.data + kHeaderBytes, up2.data, up2.size_bytes / 48, clip, rs);
+    }
+    skip_rest();
+    if (rs.log_now && frags) {
+      lg::info("[ctr] lightning: {} fragments, {} triangles", frags, tris);
+    }
+  }
+
+ private:
+  static constexpr u32 kHeaderBytes = 16 * 7;  // Generic2::FRAG_HEADER_SIZE
+
+  // generic.vert: t = -(m * (x, y, z, 1)), screen = t.xyz * fog / t.w + hvdf; as clip space rows
+  // (CtrShadowJak2's mapping)
+  static void make_clip(const u8* header, float fog, const float* hvdf, float* clip) {
+    float persp[4][4];
+    memcpy(persp, header, 64);
+    const float a = 1.f / fog;
+    const float ky = ctr_gs_y_scale() * (1.f / 128.f);
+    for (int c = 0; c < 4; c++) {
+      const float col[4] = {-persp[c][0], -persp[c][1], -persp[c][2], -persp[c][3]};
+      const float w = col[3] * a;
+      clip[c] = (col[0] + (hvdf[0] - 2048.f) * w) * (1.f / 256.f);
+      clip[4 + c] = -(col[1] + (hvdf[1] - 2048.f) * w) * ky;
+      clip[8 + c] = col[2] * (1.f / 8388608.f) + (hvdf[2] * (1.f / 8388608.f) - 1.f) * w;
+      clip[12 + c] = w;
+    }
+  }
+
+  int draw_frag(const u8* header,
+                const u8* adgif,
+                const u8* vdata,
+                u32 nv,
+                const float* clip,
+                CtrRenderState& rs) {
+    if (nv < 3) {
+      return 0;
+    }
+    u64 tex0, tex1, clamp, alpha = 0;
+    u8 alpha_addr;
+    memcpy(&tex0, adgif, 8);
+    memcpy(&tex1, adgif + 16, 8);
+    memcpy(&clamp, adgif + 48, 8);
+    memcpy(&alpha, adgif + 64, 8);
+    alpha_addr = adgif[72];
+    bool have_alpha = alpha_addr == (u8)GsRegisterAddress::ALPHA_1;
+    // the header's two extra registers (Generic2::determine_draw_modes): an alpha there wins
+    u64 bonus[4];
+    memcpy(bonus, header + 5 * 16, 32);
+    if ((u8)bonus[1] == (u8)GsRegisterAddress::ALPHA_1) {
+      alpha = bonus[0];
+      have_alpha = true;
+    } else if ((u8)bonus[3] == (u8)GsRegisterAddress::ALPHA_1) {
+      alpha = bonus[2];
+      have_alpha = true;
+    }
+    ctr_draw_state st;
+    memset(&st, 0, sizeof(st));
+    st.tex = -1;
+    const CtrTexture* tex = rs.vram->get_texture(tex0);
+    if (tex && tex->handle >= 0) {
+      GsTex0 t(tex0);
+      st.tex = tex->handle;
+      st.tcc = t.tcc();
+      st.decal = t.tfx() == GsTex0::TextureFunction::DECAL;
+      st.filter = (tex1 >> 5) & 1;  // MMAG
+      st.clamp_s = (clamp & 1) != 0;
+      st.clamp_t = (clamp & 4) != 0;
+    }
+    st.blend = have_alpha ? ctr_blend_from_gs_alpha(alpha) : CTR_BLEND_OFF;
+    st.fix = (u8)(alpha >> 32);
+    st.atest = CTR_TEST_ALWAYS;
+    st.ztest = CTR_TEST_GEQUAL;
+    st.zwrite = 0;
+    // strips: a vertex with its s bit 0 clear continues the strip, set starts one again with the
+    // vertex before it (Generic2::build_index_buffer)
+    m_tri.clear();
+    ctr_clip_vertex strip[3];
+    int in_strip = 0;
+    for (u32 i = 0; i < nv; i++) {
+      const u8* in = vdata + 48 * i;
+      s32 s, t;
+      u32 rgba[4];
+      float p[3];
+      memcpy(&s, in, 4);
+      memcpy(&t, in + 4, 4);
+      memcpy(rgba, in + 16, 16);
+      memcpy(p, in + 32, 12);
+      ctr_clip_vertex v;
+      v.x = clip[0] * p[0] + clip[1] * p[1] + clip[2] * p[2] + clip[3];
+      v.y = clip[4] * p[0] + clip[5] * p[1] + clip[6] * p[2] + clip[7];
+      v.z = clip[8] * p[0] + clip[9] * p[1] + clip[10] * p[2] + clip[11];
+      v.w = clip[12] * p[0] + clip[13] * p[1] + clip[14] * p[2] + clip[15];
+      v.s = (float)(s & ~1) * (1.f / 4096.f);
+      v.t = (float)t * (1.f / 4096.f);
+      v.r = (u8)std::min<u32>(rgba[0], 255);
+      v.g = (u8)std::min<u32>(rgba[1], 255);
+      v.b = (u8)std::min<u32>(rgba[2], 255);
+      v.a = (u8)std::min<u32>(rgba[3], 255);
+      if ((s & 1) == 0) {
+        if (in_strip == 3) {
+          strip[0] = strip[1];
+          strip[1] = strip[2];
+          in_strip = 2;
+        }
+        strip[in_strip++] = v;
+      } else {
+        if (in_strip > 0) {
+          strip[0] = strip[in_strip - 1];
+          in_strip = 1;
+        }
+        strip[in_strip++] = v;
+      }
+      if (in_strip == 3) {
+        m_tri.push_back(strip[0]);
+        m_tri.push_back(strip[1]);
+        m_tri.push_back(strip[2]);
+      }
+    }
+    if (!m_tri.empty()) {
+      ctr_gpu_draw_clip(&st, m_tri.data(), (int)m_tri.size());
+    }
+    return (int)m_tri.size() / 3;
+  }
+
+  std::vector<ctr_clip_vertex> m_tri;
+};
+
 }  // namespace
+
+bool ctr_jak2_frame_copies_screen(const void* ee_mem, u32 first_tag, u32 end_tag) {
+  DmaFollower dma(ee_mem, first_tag);
+  for (int k = 0; k < 16 && dma.current_tag_offset() != end_tag; k++) {
+    auto data = dma.read_and_advance();
+    if (data.vifcode0().kind == VifCode::Kind::PC_PORT && data.vifcode0().immediate == 0x10) {
+      return true;
+    }
+  }
+  return false;
+}
 
 void CtrRenderer::prepare_textures(const void* ee_mem, u32 chain_offset) {
   if (!m_jak2) {
@@ -323,6 +586,9 @@ void CtrRenderer::init_buckets_jak2() {
 
   // the background first: its renderers may be replaced below only where both name one
   ctr_jak2_background_buckets(set, m_levels.get(), m_vram.get());
+  set(BucketId::BUCKET_3, std::make_unique<CtrJak2BlitRenderer>("blit", (int)BucketId::BUCKET_3));
+  set(BucketId::EFFECTS,
+      std::make_unique<CtrLightningJak2Renderer>("lightning", (int)BucketId::EFFECTS));
 
   tex(BucketId::TEX_LCOM_SKY_PRE);
   set(BucketId::SKY_DRAW,
