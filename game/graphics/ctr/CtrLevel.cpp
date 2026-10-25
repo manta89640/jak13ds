@@ -5612,6 +5612,14 @@ double ctr_level_tod_take_ms() {
   return ms;
 }
 
+static double g_last_build_ms = 0;  // (AI-assisted, perfv2) render thread
+void ctr_level_note_build_ms(double ms) {
+  g_last_build_ms = ms;
+}
+double ctr_level_last_build_ms() {
+  return g_last_build_ms;
+}
+
 void ctr_level_set_detail(float t) {
   g_detail_t = std::clamp(t, 0.f, 1.f);
 }

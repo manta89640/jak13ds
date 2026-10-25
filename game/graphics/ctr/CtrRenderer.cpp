@@ -709,6 +709,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.frames++;
   // (AI-assisted) the time of day work isn't GPU load: not counted for auto_detail
   const double tod_ms = ctr_level_tod_take_ms();
+  ctr_level_note_build_ms(t2 - t1);  // (AI-assisted, perfv2) impostor captures' budget
   m_timing.tod_ms += tod_ms;
   m_timing.tod_max_ms = std::max(m_timing.tod_max_ms, tod_ms);
   m_timing.tod_over += tod_ms > 2.0;

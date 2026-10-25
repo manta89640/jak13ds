@@ -823,6 +823,10 @@ float ctr_level_detail();
 /*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
  * of auto_detail's build time). */
 double ctr_level_tod_take_ms();
+// (AI-assisted, perfv2) the render thread's build time of the frame before (CtrRenderer), for the
+// work that can wait (impostor captures)
+void ctr_level_note_build_ms(double ms);
+double ctr_level_last_build_ms();
 
 class CtrTfragRenderer : public CtrBucketRenderer {
  public:
