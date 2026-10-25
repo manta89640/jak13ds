@@ -930,9 +930,10 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);         /* x, y, z, q / w */
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 3);         /* s, t, fog */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
-    if (prog == PROG_OCEAN_FULL_CLIP) {
-      AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 2); /* es, et */
-    }
+    /* (AI-assisted, j1hang) es, et for both programs (ctr_ocean_full.v.pica doesn't read them):
+     * the attributes loaded add up to the 40 byte stride. With 3 (32 bytes in a 40 byte stride)
+     * the GS ocean draws hung the real 3DS's GPU at the title (Azahar takes any stride) */
+    AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 2); /* es, et */
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER,
                      prog == PROG_OCEAN_FULL ? g.ps->uloc_ocean_full_gs
                                              : g.ps->uloc_ocean_full_clip_gs,
@@ -5888,6 +5889,7 @@ int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_ve
 }
 
 static void ocean_bind_tex2_wrap(int handle, int clamp);
+static const C3D_Tex* s_ocean_tex2; /* (AI-assisted, j1hang) defined with ocean_bind_tex2_wrap */
 
 static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count,
                             uint8_t fog_r, uint8_t fog_g, uint8_t fog_b, int prog, int env_tex) {
@@ -5921,8 +5923,17 @@ static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int ind
   if (env) {
     ocean_bind_tex2_wrap(env_tex, 1);
   }
-  const int attribs = prog == PROG_OCEAN_FULL_CLIP ? 4 : 3;
-  const u32 perm = prog == PROG_OCEAN_FULL_CLIP ? 0x3210 : 0x210;
+  /* (AI-assisted, j1hang) a draw without the reflection: texture unit 2 off (no unit on whose
+   * coordinates the program may not output: ctr_ocean_full.v.pica has no texcoord2) */
+  if (!env && g.ocean_tex2_bound) {
+    __C3D_Context.tex[2] = NULL;
+    __C3D_Context.flags |= C3DiF_Tex(2);
+    g.ocean_tex2_bound = 0;
+    s_ocean_tex2 = NULL;
+  }
+  /* (AI-assisted, j1hang) all 4 attributes (40 bytes, the whole stride) for both programs */
+  const int attribs = 4;
+  const u32 perm = 0x3210;
   if (use_raw(state)) {
     apply_state_tint(state, 6, (uint32_t)env, 1);
     raw_vertex_buffer(raw_vbuf_pa(voff), perm,
