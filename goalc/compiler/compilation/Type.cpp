@@ -1363,11 +1363,19 @@ Val* Compiler::compile_stack_new(const goos::Object& form,
     if (!info.can_deref) {
       throw_compiler_error(form, "Cannot make an {} of {}\n", type_of_object.print(), ts.print());
     }
+    // Decompiled code uses (new 'stack-no-clear 'array 'foo n) as the memory for
+    // ((method-of-type array new) <that> array foo n), which zeroes and fills the array header
+    // too: 4 bytes of type tag + the array fields + n elements. The stack slot only had room for
+    // the elements, so the constructor wrote (and zeroed) the bytes past it: on the 3DS those
+    // were the saved callee-saved registers of the C function (combo-tracker-method-13 cleared
+    // r4-r6 of the Dark Jak attack code). Leave room for the header. (AI-assisted)
+    const int array_header_room =
+        is_inline ? 0 : m_ts.lookup_type(TypeSpec("array"))->get_size_in_memory();
     auto type_info = m_ts.lookup_type_allow_partial_def(ts.get_single_arg());
     if (!m_ts.lookup_type_allow_partial_def(elt_type)->is_reference()) {
       // not a reference type
       m_ts.lookup_type(elt_type);  // should be fully defined
-      int size_in_bytes = info.stride * constant_count;
+      int size_in_bytes = info.stride * constant_count + array_header_room;
       auto addr = fe->allocate_aligned_stack_variable(ts, size_in_bytes,
                                                       type_info->get_in_memory_alignment());
       return addr;
@@ -1382,7 +1390,7 @@ Val* Compiler::compile_stack_new(const goos::Object& form,
                            : 4;
     ASSERT(stride == info.stride);
 
-    int size_in_bytes = info.stride * constant_count;
+    int size_in_bytes = info.stride * constant_count + array_header_room;
     auto addr = fe->allocate_aligned_stack_variable(ts, size_in_bytes, 16);
     return addr;
   } else {
