@@ -66,6 +66,11 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
     u64 tex0_data, tex0_addr, tex1_data, tex1_addr, mip_data, mip_addr, clamp_data, clamp_addr,
         alpha_data, alpha_addr;
   };
+  // (AI-assisted, fable1) canary: a 2D / HUD quad that isn't a parallelogram or reaches far off
+  // screen (the red HUD shard, hud3): logs the sprite and asks for a screenshot (rate limited)
+  void canary_report(Mode mode, u32 i, u32 count, const VecData& v, const AdGif& ad,
+                     const float corners[4][3], float scale_x, float scale_y);
+
   static_assert(sizeof(AdGif) == 80);
 
   CtrVram* m_vram;
@@ -186,6 +191,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   bool m_clamp_t = true;
   ctr_draw_state m_last_state;
   Bucket* m_last_bucket_ptr = nullptr;
+  bool m_hud_dump = false;  // (AI-assisted, fable1) host: this frame's HUD sprites to the log
   float m_corner_reach = 0;
   // (AI-assisted) per frame: config.ini sprite_max_size in GS units, and the corners' texture
   // coordinates ([1]: for the procedural texture, centered on 0)

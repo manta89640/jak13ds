@@ -19,7 +19,17 @@
 
 #include "game/common/vu.h"
 
-class CtrOceanBatch;  // the GS packets of the VU programs (xgkick), see CtrOceanFull.cpp
+class CtrOceanBatch;
+
+/*!
+ * (AI-assisted, j1ocean) Called by the VU classes once per bucket, before the first native draw,
+ * with the env map pass's texture (its TEX0) and GS color (the constants' env-color, floats):
+ * CtrOceanFull makes the sky reflection's texture and hands it to the batch (set_env).
+ */
+struct CtrOceanEnvHook {
+  virtual void ocean_env(u64 tex0, const float color[4]) = 0;
+  virtual ~CtrOceanEnvHook() = default;
+};  // the GS packets of the VU programs (xgkick), see CtrOceanFull.cpp
 
 /*!
  * The ocean-mid VU program (the mid ocean and the transition to the near ocean): OceanMid.
@@ -32,13 +42,18 @@ class CtrOceanMidVu {
   bool run(DmaFollower& dma, CtrOceanBatch* batch);
   //! the native programs (default) or the emulated VU programs (for the host replay test)
   void set_native(bool on) { m_native = on; }
+  //! (AI-assisted, j1ocean) see CtrOceanEnvHook
+  void set_env_hook(CtrOceanEnvHook* h) { m_env_hook = h; }
 
  private:
+  CtrOceanEnvHook* m_env_hook = nullptr;
   // (AI-assisted) the native programs (CtrOceanNative.cpp): the textured pass of call 46 / 73 (a
   // mid ocean tile) and call 107 / 275 (the transition to the near ocean: quads / a fan), as
-  // clip-space triangles (the GPU clips, so the VU's clipping and env map pass are left out)
+  // clip-space triangles (the GPU clips, so the VU's clipping is left out). (AI-assisted, j1ocean)
+  // With the env map pass's texture coordinates (es, et) where the program draws it: call 73
+  // (env true), 107, 275 (not call 46)
   bool native_ready();
-  void native_tile();
+  void native_tile(bool env);
   void native_transition(bool fan);
   bool m_native = true;
   int m_native_ok = -1;  // the constants' index table checked this frame: -1 not yet, 0 bad, 1 ok
@@ -209,8 +224,12 @@ class CtrOceanNearVu {
   //! (AI-assisted) config.ini ocean_near_alpha: the native program's vertex alpha is at least
   //! this (GS units, 0x80 = opaque; 0: the program's own, 0x40 within 12 m of the camera)
   void set_alpha_floor(int a) { m_alpha_floor = a < 0 ? 0 : (a > 0x80 ? 0x80 : a); }
+  //! (AI-assisted, j1ocean) see CtrOceanEnvHook
+  void set_env_hook(CtrOceanEnvHook* h) { m_env_hook = h; }
 
  private:
+  CtrOceanEnvHook* m_env_hook = nullptr;
+  bool m_env_sent = false;  // this bucket's call to the hook made
   // (AI-assisted) the native program (CtrOceanNative.cpp): call 39's textured pass, in clip space
   void native_patch();
   bool m_native = true;

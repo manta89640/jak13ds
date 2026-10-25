@@ -32,6 +32,9 @@ inline const CtrOceanFogTable kOceanFog;
  * written into the frame's vertex memory (CommonOceanRenderer, without its OpenGL buffers). Only
  * the textured pass is kept: the near ocean's alpha and env map passes and the mid ocean's env map
  * pass are skipped while reading (their vertices aren't converted).
+ * (AI-assisted, j1ocean) The native programs' vertices carry the env map pass too (es, et): their
+ * draws with it (reserve_clip with env) add the sky reflection in the same draw
+ * (ctr_gpu_ocean_full_draw_env, with the texture of set_env).
  */
 class CtrOceanBatch {
  public:
@@ -42,6 +45,8 @@ class CtrOceanBatch {
     memcpy(m_fog, fog, 3);
     m_failed = false;
   }
+  //! (AI-assisted, j1ocean) the sky reflection's texture for the env draws (-1: drawn without)
+  void set_env(int tex) { m_env_tex = tex; }
   void end() { flush(); }
 
   /*!
@@ -49,8 +54,9 @@ class CtrOceanBatch {
    * programs): written at *v and *idx (vertex numbers from *first on), then commit(n, m). false:
    * no vertex memory left this frame (nothing is drawn).
    */
-  bool reserve_clip(int n, int m, ctr_ocean_full_vertex** v, u16** idx, int* first) {
-    if (m_failed || !mode(true) || !room(n, m)) {
+  bool reserve_clip(int n, int m, ctr_ocean_full_vertex** v, u16** idx, int* first,
+                    bool env = false) {
+    if (m_failed || !mode(env && m_env_tex >= 0 ? kModeEnv : kModeClip) || !room(n, m)) {
       return false;
     }
     *v = m_v + m_nv;
@@ -149,6 +155,7 @@ class CtrOceanBatch {
 
   // statistics
   int vertices = 0, triangles = 0, draws = 0, dropped = 0;
+  int env_draws = 0;  // (AI-assisted, j1ocean) draws with the sky reflection
   // (AI-assisted) transition pieces the native program refused (vertex count out of range), and
   // both counts since the last warning in the log (CtrOceanFull::frame_stats)
   int rejected = 0;
@@ -206,7 +213,7 @@ class CtrOceanBatch {
     if (m_failed || nloop < 3) {
       return;
     }
-    if (!mode(false) || !room((int)nloop, 3 * (int)nloop)) {
+    if (!mode(kModeGs) || !room((int)nloop, 3 * (int)nloop)) {
       return;
     }
     const int first = m_nv;
@@ -234,6 +241,7 @@ class CtrOceanBatch {
       v->y = (float)(w[9] & 0xffff);
       v->z = (float)((w[10] >> 4) & 0xffffff);
       v->fog = kOceanFog.amount[(w[11] >> 4) & 0xff];
+      v->es = v->et = 0.f;  // (AI-assisted, j1ocean) no sky reflection in these draws
       if (i >= 2 && !(w[11] & 0x8000)) {
         const int k = first + (int)i;
         idx[0] = (u16)(fan ? first : k - 2);
@@ -247,11 +255,12 @@ class CtrOceanBatch {
     vertices += (int)nloop;
   }
 
-  //! GS vertices (false) or clip space (true): a change ends the draw
-  bool mode(bool clip) {
-    if (clip != m_clip) {
+  //! GS vertices, clip space, or clip space with the sky reflection: a change ends the draw
+  enum : int { kModeGs = 0, kModeClip = 1, kModeEnv = 2 };
+  bool mode(int m) {
+    if (m != m_mode) {
       flush();
-      m_clip = clip;
+      m_mode = m;
     }
     return true;
   }
@@ -283,7 +292,10 @@ class CtrOceanBatch {
       return;
     }
     m_open = false;
-    if (m_clip) {
+    if (m_mode == kModeEnv) {
+      ctr_gpu_ocean_full_draw_env(&m_state, m_nv, m_ni, m_fog[0], m_fog[1], m_fog[2], m_env_tex);
+      env_draws++;
+    } else if (m_mode == kModeClip) {
       ctr_gpu_ocean_full_draw_clip(&m_state, m_nv, m_ni, m_fog[0], m_fog[1], m_fog[2]);
     } else {
       ctr_gpu_ocean_full_draw(&m_state, m_nv, m_ni, m_fog[0], m_fog[1], m_fog[2]);
@@ -297,7 +309,9 @@ class CtrOceanBatch {
 
   ctr_draw_state m_state;
   u8 m_fog[3] = {0, 0, 0};
-  bool m_open = false, m_failed = false, m_clip = false;
+  bool m_open = false, m_failed = false;
+  int m_mode = kModeGs;
+  int m_env_tex = -1;  // (AI-assisted, j1ocean)
   ctr_ocean_full_vertex* m_v = nullptr;
   u16* m_i = nullptr;
   int m_nv = 0, m_ni = 0, m_max_v = 0, m_max_i = 0;

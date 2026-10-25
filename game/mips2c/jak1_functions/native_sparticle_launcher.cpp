@@ -235,7 +235,7 @@ namespace {
  * 128: the sparticle-launchinfo / sprite (x y z sx, flag matrix rot sy, r g b a).
  */
 /*!
- * (AI-assisted) config.ini particle_density (0.1 .. 1; 0.7 on the 3DS, 1 elsewhere): the share of
+ * (AI-assisted) config.ini particle_density (0.1 .. 1, default 1; particles = reduced: 0.7): the share of
  * particles launched, for the 3DS GPU (every particle is a blended sprite: fill rate) and the
  * game thread (fewer to simulate). An approximation of the effects, not the original's look.
  */
@@ -244,7 +244,6 @@ float particle_density() {
   if (density < 0.f) {
     density = 1.f;
 #ifdef __3DS__
-    density = 0.7f;
     char v[32];
     if (ctr_config_get("particle_density", v, sizeof(v))) {
       density = std::clamp((float)atof(v), 0.1f, 1.f);

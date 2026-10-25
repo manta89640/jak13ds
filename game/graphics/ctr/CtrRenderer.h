@@ -227,4 +227,10 @@ namespace ctr_gfx {
 void set_soft_frame_dump(const std::string& dir, int every_nth);
 /*! Save a screenshot every nth frame to <dir>/shot_<frame>.(png|bmp) (3DS: BMP from the GPU). */
 void set_screenshots(const std::string& dir, int every_nth);
+/*! (AI-assisted, fable1) a named screenshot of the next frame into the screenshot folder (as the
+ * pad script's "shot"; nothing without a folder). */
+void request_named_shot(const char* name);
+/*! (AI-assisted, fable1) host, env CTR_HUD_DUMP: true once after each pad "shot" (the sprite
+ * renderer then logs every HUD sprite of that frame). */
+bool take_hud_dump();
 }  // namespace ctr_gfx

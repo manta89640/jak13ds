@@ -1054,3 +1054,76 @@ left out): logic 13.6 / 13.6 ms with the inline paths (a1, a2), 14.3 / 14.2 ms w
 **0.7 ms less** (5%), steady to 0.1 ms within each window. Host (Mac, game thread instructions per
 frame, `OPENGOAL_PERF_INSTR=1`, jak1_calib_prof.pad): village2 2393k -> 2313k, swamp 2184k ->
 2100k, jungle 1868k -> 1847k (the scene's own variation is ~1-2%).
+
+## Title chug, time of day at half rate, shrub fade (AI-assisted, Oct 24, fable1)
+
+The user (Azahar, Japanese, `frame_overlap2 = off` as a test): "the game chugs on the title
+screen". Azahar, title 100 s, 5 s windows, the user's config with sound on (the mixer on the
+render thread's core, 2 ms/frame): render build 20.7-28.5 ms, of which the time of day rewrites
+5.0-10.9 ms (the title's fast day moves palettes nearly every frame, so every group drawn is
+rewritten every frame: 60-100k vertices, and village1's 22k-entry table is refreshed whole each
+time, ~3 ms of it), l1-tfrag without that ~7 ms, ocean 2.5, sprites 0.9; logic 5.5-6.3 ms; 100-215k
+triangles (the title flight at auto_detail's far end: ties x3, shrubs 120 m). A few 3-vblank frames
+per window at the busiest views. `frame_overlap2` on and off measure the same in Azahar (no GPU
+time there); on hardware on overlaps the GPU with the next frame's build: it goes back to its
+default (on). It never had anything to do with the red HUD shard (see below).
+
+- **Time of day at half rate on heavy frames.** A level draw whose last frame drew 3x the
+  table's entries in vertices or more (the todlag `fresh_ok` test: the title's fast day, citadel's
+  pulse) takes the game's new weights every second frame only (`CtrLevel.cpp` draw_level,
+  `m_tod_heavy`): the table and the groups are rewritten once per two frames, together, so the
+  colors drawn are at most one frame behind the PC's blend (2-8 color units at the title's 20x
+  day, the same for every group: no unevenness). Gameplay (a move every few frames, few vertices)
+  is unchanged. Azahar, sound on, like windows: time of day 9.4 / 6.7 / 5.0 / 6.9 / 10.9 -> 7.1 /
+  4.0 / 4.7 / 4.8 / 7.4 ms per frame, build 23.4 / 20.7 / 21.2 / 21.7 / 28.5 -> 20.4 / 17.5 /
+  19.9 / 18.9 / 24.0 ms. The camera-cut peaks (every group behind at once, 13-15 ms in one frame)
+  stay. Tried first and dropped: writing every second group per move (alternating by group index):
+  only ~10% less, because the whole-table refresh and the per-chunk bookkeeping cost as much as the
+  vertex writes.
+- **Shrubs to the PS2's far plane, thinning out** (`kShrubFarK`, `kShrubNearK`, `shrub_run_limit`):
+  a c3l v14 shrub chunk's `max_dist` is its PS2 distance class, the middle of the prototype's
+  fade (shrub_ps2_dists.inc: full detail to x, the fading version to w). The PS2 shows a shrub to
+  w and the PC has no limit at all; with `shrub_scale` 0.8 a run came in at 0.8 x the middle, i.e.
+  ~0.6 of the PS2's far plane: the user's "shrubs pop in so close". Now a chunk's shrubs reach
+  1.3 x max_dist (~w) and each run (up to 8 instances) has its own limit between 0.55 and 1.0 of
+  that (~x to w) from a hash of its index, with the 10% hysteresis as before: the shrubs thin out
+  over the PS2's fade zone instead of a patch coming in at once (an approximation of the PS2's
+  alpha fade of its trans version; a per-run alpha would need a draw per run with its own
+  combiner constant). auto_detail still pulls `shrub_scale` to 0.8 when the GPU is busy.
+- **The red HUD shard (not solved).** The user's progress-menu shot (Spider Cave, Japanese,
+  `frame_overlap2 = off`, so the pipelining is not the cause): the shard is a translucent red
+  triangle whose two sharp corners are the circle-button icon quad's top-right and bottom-left
+  corners (its diagonal; host `CTR_HUD_DUMP=1` with hud3.pad lists the menu's HUD sprites and
+  their screen corners) and whose third corner lies 72 px left of the icon's top-left corner at
+  the same height; the icon itself is complete in the shot, so it is an extra triangle, not one
+  of the icon's own two. The HUD chunk also carries 21 all-zero sprites (scale 0, color 0, tex0 0:
+  the game's unused entries; drawn as sub-pixel quads, as the PS2 does). Checked and equivalent:
+  the quads' command words (PRIMITIVE_CONFIG / VERTEX_OFFSET tracking across citro3d draws, the
+  post-vertex cache clear before every draw with new vertices, the index buffer, the sprite
+  snapshot of the REF data; Azahar runs each draw's vertex fetch from memory at submit time, so a
+  vertex of another draw can only come from the data or the command words). Not reproduced: a
+  16000-frame Japanese title-menu soak with sound on, hud3's A/B stages, the host. `CtrSprite.cpp`
+  now has a canary on every 2D / HUD quad (no parallelogram, or a corner over 16 screen widths
+  out: a `[ctr] sprite canary` line with the sprite's data and a saved frame, rate limited): if the
+  next report's log has none, the data the CPU sends is right and the mixing happens after it.
+
+## Ocean sky reflection, particles, pickups (AI-assisted, Oct 25, j1ocean)
+
+- **Sky reflection** (the PS2 ocean's env map pass, `ctr_gpu_ocean_full_draw_env`, see
+  3ds_build.md): folded into the textured draw, so no extra triangles or draws; one more texture
+  read per ocean pixel (texture unit 2) and a 64x64 reflection texture made again only when the
+  env color changes (0-4% of frames). `ocean_near_alpha` default 0.6 -> 0 (the PS2's alpha).
+  Host 3DS renderer vs PC renderer at the village1 shore (same pose, noon): the ocean's blue-teal
+  and dark streaks now match the PC; before it was a flat lighter cyan.
+- **particle_density** default 0.7 -> 1 (every particle, like the PS2); `particles = reduced`
+  (the safe preset) keeps 0.7.
+- **Pickups always full detail**: power cells, scout flies, orbs, orb caches, eco vents never
+  use the generated low LOD (`c3l::merc_gen_lod_exempt`).
+- Azahar (private instance, sound off, stats_period 5, defaults; one run): title build 14.4-20.0
+  ms, GPU busy 15.3-20.8 ms, 124-163k triangles, ocean build 1.8-3.8 ms; beach-start (camera
+  turned to the sea) build 16.6-18.1, busy 17.4-19.0, 61-123k triangles, ocean 3.0; misty-start
+  build 12.6-15.4, busy 13.4-16.3, 63-87k triangles, ocean 3.05; 29.9 fps throughout. There was
+  no same-run "before" (no switch for the reflection, one run). Earlier documented numbers from
+  other builds and configs: fable1 title build 17.5-24.0 ms with sound on (ocean 2.5 ms); Oct 17
+  beach-start 14.1 ms and misty-start 11.5 ms, standing. Azahar doesn't model the GPU's fill
+  cost: the extra texture read and the extra particles are only priced on hardware.

@@ -2004,11 +2004,12 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     out->models.push_back(mm);
     // (AI-assisted) a generated low LOD for "<base>-lod0" without lower LODs (not with blend
     // shapes or rewritten vertices: those move per frame)
-    // (not Jak and Daxter: always close and in view, their look stays the PS2's)
+    // (not Jak and Daxter: always close and in view, their look stays the PS2's; (AI-assisted,
+    // j1ocean) not the pickups: power cells, scout flies, orbs always full detail)
     const auto p = model.name.rfind("-lod0");
     if (cv.opt.gen_lod_ratio > 0.f && p != std::string::npos && p + 5 == model.name.size() &&
         model.name.rfind("eichar-", 0) != 0 && model.name.rfind("sidekick-", 0) != 0 &&
-        model.name.rfind("keira-as-", 0) != 0 &&
+        model.name.rfind("keira-as-", 0) != 0 && !c3l::merc_gen_lod_exempt(model.name) &&
         !has_lower[model.name.substr(0, p)] && !mm.blerc_count &&
         out->mod_effects.size() == mod_first) {
       c3l::MercModel gen;

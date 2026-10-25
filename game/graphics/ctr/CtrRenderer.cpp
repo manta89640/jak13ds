@@ -54,6 +54,7 @@ static std::atomic<float> g_pmode_alp{1.f};
 
 namespace {
 std::string g_shot_dir;
+bool g_hud_dump_pending = false;  // (AI-assisted, fable1) host: CTR_HUD_DUMP with a pad "shot"
 int g_shot_every = 0;
 
 // config.ini gpu_profile: what each mode leaves out (bucket renderer names)
@@ -325,6 +326,14 @@ void pad_shot(const char* name) {
 }  // namespace
 
 namespace ctr_gfx {
+void request_named_shot(const char* name) {
+  pad_shot(name);
+}
+bool take_hud_dump() {
+  const bool p = g_hud_dump_pending;
+  g_hud_dump_pending = false;
+  return p;
+}
 void set_screenshots(const std::string& dir, int every_nth) {
   g_shot_dir = dir;
   g_shot_every = every_nth;
@@ -644,6 +653,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       const char* ext = "png";
 #endif
       ctr_gpu_request_screenshot(fmt::format("{}/{}.{}", g_shot_dir, g_pad_shot, ext).c_str());
+#ifndef __3DS__
+      g_hud_dump_pending = getenv("CTR_HUD_DUMP") != nullptr;  // (AI-assisted, fable1)
+#endif
     }
     g_pad_shot.clear();
   }

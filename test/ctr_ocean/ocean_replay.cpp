@@ -91,19 +91,36 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
   g_tex.assign(rgba, rgba + 4 * w * h);
   return 1;
 }
-void ctr_gpu_tex_update(int, const uint8_t* rgba) {
-  memcpy(g_tex.data(), rgba, g_tex.size());
+// (AI-assisted, j1ocean) the sky reflection's texture (CtrOceanFull::ocean_env): handle 2
+std::vector<u8> g_refl_tex;
+int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
+  g_refl_tex.assign(rgba, rgba + 4 * w * h);
+  return 2;
+}
+void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
+  auto& t = handle == 2 ? g_refl_tex : g_tex;
+  memcpy(t.data(), rgba, t.size());
 }
 void ctr_gpu_tex_delete(int) {}
+// (AI-assisted, j1ocean) the sky reflection's draws: captured like the clip space draws
+void ctr_gpu_ocean_full_draw_env(const ctr_draw_state*, int nv, int ni, uint8_t, uint8_t, uint8_t,
+                                 int) {
+  draw(nv, ni, true);
+}
+void ctr_gpu_ocean_end(void) {}
 double ctr_gpu_time_ms(void) {
   using namespace std::chrono;
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 // (AI-assisted) config.ini: the defaults, changed in main
+// (CtrSettings.h's inline ctr_settings reads ctr_settings_detail::g_settings: pointed at this one)
 CtrSettings g_settings;
-const CtrSettings& ctr_settings() {
-  return g_settings;
+namespace ctr_settings_detail {
+const CtrSettings* g_settings = &::g_settings;
+const CtrSettings& first_use() {
+  return ::g_settings;
 }
+}  // namespace ctr_settings_detail
 bool CtrVram::decode_for_cpu(u64, std::vector<u32>* out, int* w, int* h) {
   *out = g_env;
   *w = g_env_w;
