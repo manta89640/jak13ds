@@ -110,6 +110,9 @@ T read(const u8* ee, u32 addr) {
 constexpr int kEnvSize = 64;
 int g_env_first_rt = -1;
 u64 g_env_first_frame = ~0ull;
+// the last frame the ocean had a tile near enough for the reflection: the env map is drawn only
+// while it is wanted (the slums see the ocean only far away)
+u64 g_env_wanted_frame = ~0ull;
 // PS2 env pass tiles: within 192 m (ocean-mid's call 73; the farther ones, call 46, have none)
 constexpr float kEnvTileDist = 786432.f;
 
@@ -150,6 +153,10 @@ CtrOceanEnvJak2::~CtrOceanEnvJak2() = default;
 void CtrOceanEnvJak2::render(DmaFollower& dma, CtrRenderState& rs) {
   int frames = 0;  // FRAME writes seen: 1 = the first pass (drawn), 2 = ocean-method-83's warp
   bool active = false;
+  if (g_env_wanted_frame == ~0ull || rs.frame_idx < g_env_wanted_frame ||
+      rs.frame_idx - g_env_wanted_frame > 4) {
+    frames = 2;  // not wanted: the DMA skipped
+  }
   while (dma.current_tag_offset() != rs.next_bucket) {
     auto data = dma.read_and_advance();
     if (!data.size_bytes || frames >= 2 || !ctr_settings().ocean) {
@@ -636,8 +643,10 @@ void CtrOceanRenderer::update_alphamod(u64 tex0, const CtrRenderState& rs) {
   if (!tex0 || !rs.vram) {
     return;
   }
-  if (tex0 == m_alphamod_tex0 && rs.frame_idx >= m_alphamod_frame &&
-      rs.frame_idx - m_alphamod_frame < 600) {
+  // again only while it isn't there (decoding writes the pending page uploads first, which can
+  // take milliseconds on hardware)
+  if (tex0 == m_alphamod_tex0 && (!m_alphamod.empty() || (rs.frame_idx >= m_alphamod_frame &&
+                                                          rs.frame_idx - m_alphamod_frame < 300))) {
     return;
   }
   m_alphamod_tex0 = tex0;
@@ -650,8 +659,14 @@ void CtrOceanRenderer::update_alphamod(u64 tex0, const CtrRenderState& rs) {
     return;
   }
   m_alphamod.resize((size_t)w * h);
+  u32 any = 0;
   for (size_t i = 0; i < m_alphamod.size(); i++) {
     m_alphamod[i] = (u8)(px[i] >> 24);
+    any |= m_alphamod[i];
+  }
+  if (!any) {
+    m_alphamod.clear();  // not uploaded yet: tried again later
+    return;
   }
   m_alphamod_w = w;
   m_alphamod_h = h;
@@ -1078,12 +1093,17 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
       }
     }
     const float tdx = s[0] - cam.trans[0], tdy = s[1] - cam.trans[1], tdz = s[2] - cam.trans[2];
+    // (AI-assisted, j2water) within 192 m: the PS2 draws this tile with the sky reflection
+    const bool env_tile = ctr_is_jak2() && m_have_lights &&
+                          std::sqrt(tdx * tdx + tdy * tdy + tdz * tdz) - s[3] < kEnvTileDist;
+    if (env_tile) {
+      g_env_wanted_frame = rs.frame_idx;
+    }
     if (waves_on) {
       ocean_rows(fd, kScale, 0, 0, tile.center[0], tile.center[2]);
       ctr_gpu_ocean_draw(&st, m_shimmer, &fd, m_mesh, nullptr, nullptr, (int)tile.first_index,
                          (int)tile.index_count);
-    } else if (env_on &&
-               std::sqrt(tdx * tdx + tdy * tdy + tdz * tdz) - s[3] < kEnvTileDist) {
+    } else if (env_tile && env_on) {
       // (AI-assisted, j2water) with the sky reflection
       ctr_gpu_ocean_env_draw(&st, m_env_rt, &ed, m_mesh, (int)tile.first_index,
                              (int)tile.index_count);
