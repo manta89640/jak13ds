@@ -416,11 +416,8 @@ void ctr_gpu_set_compact_textures(int on);
  * rest of the frame. Off: the GPU starts at the end of the frame (config.ini overlap). */
 void ctr_gpu_set_overlap(int on);
 /* (AI-assisted) config.ini raw_cmds: the draws write their GPU commands themselves instead of
- * through citro3d (much less CPU per draw, fewer command words). vcache_reuse: consecutive draws
- * of the same vertices and matrices keep the GPU's post-vertex cache (only with raw_cmds). Both
- * can change at any time. */
+ * through citro3d (much less CPU per draw, fewer command words). Can change at any time. */
 void ctr_gpu_set_raw_cmds(int on);
-void ctr_gpu_set_vcache_reuse(int on);
 /* (AI-assisted) config.ini cmd_dedup (on: register writes that give a register the value it has
  * are left out: texture unit 0's type) and cmd_dedup_draw (the raw draws' PRIMITIVE_CONFIG mode
  * and VERTEX_OFFSET writes too). Each frame (gpu_profile = ab switches them). */

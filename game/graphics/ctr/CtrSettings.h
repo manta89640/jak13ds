@@ -342,9 +342,6 @@ struct CtrSettings {
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
-  // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
-  // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
-  bool vcache_reuse = true;
   // (AI-assisted, gpu-rt) static_cmdlists: the level meshes' raw command words of a stretch of
   // draws (same program, no citro3d update) are kept after two frames drew them alike and copied
   // in again while the draws, the GPU state before them and the settings stay the same; only the

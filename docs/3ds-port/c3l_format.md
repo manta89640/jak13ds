@@ -123,7 +123,7 @@ Vertex order: within each chunk identical vertices (after quantizing) are merged
 share none), the triangles of each visibility run of a draw without blending that writes depth are
 put in vertex cache order (blended draws and decals keep their order), then the vertices in
 first-use order (`optimizeVertexFetchRemap`). The GPU's post-vertex cache is cleared before every
-draw (citro3d, and the raw draws unless `vcache_reuse`), and the runs of a draw may be drawn on
+draw (citro3d and the raw draws alike), and the runs of a draw may be drawn on
 their own, so each run starts with an empty cache. The draws are indexed triangle lists (no strips:
 the PICA200 has no restart index, and a list keeps every triangle's own corner order).
 Misty: 1.55 -> 1.27 vertices shaded per triangle (FIFO 16).
