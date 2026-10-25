@@ -62,35 +62,56 @@ bool faces_away(const float* p0, const float* p1, const float* p2) {
 }
 }  // namespace
 
-void CtrShadowJak2Renderer::add_face(const float* const* p, int n, bool away) {
+int CtrShadowJak2Renderer::vertex(const u8* verts, int idx, bool bottom) {
+  // (AI-assisted, j2gpu) each camera space vertex of the upload once in the frame's vertex
+  // memory (the GPU's clip program applies m_clip: ctr_gpu_clip_draw_ranges_mtx), shared by the
+  // faces that use it
+  const int k = bottom ? 1 : 0;
+  if (m_stamp[k][idx] == m_gen[k]) {
+    return m_map[k][idx];
+  }
+  const float* p = (const float*)(verts + 16 * idx);
+  // (AI-assisted, j2gpu + gpuopt) the camera space box of this volume (the darkening rectangle)
+  Box& b = m_boxes.back();
+  for (int c = 0; c < 3; c++) {
+    b.lo[c] = std::min(b.lo[c], p[c]);
+    b.hi[c] = std::max(b.hi[c], p[c]);
+  }
+  ctr_clip_vertex& v = m_verts[m_nv];
+  v.x = p[0];
+  v.y = p[1];
+  v.z = p[2];
+  v.w = 1.f;
+  v.s = v.t = 0.f;
+  v.r = v.g = v.b = v.a = 0;
+  m_stamp[k][idx] = m_gen[k];
+  m_map[k][idx] = (u16)m_nv;
+  return m_nv++;
+}
+
+void CtrShadowJak2Renderer::add_face(const Corner* c, int n, bool away) {
   const int tris = n - 2;
   if (!reserve() || m_nv + n + 4 > m_cap_verts ||
       (int)(m_front.size() + m_back.size()) + 3 * tris + 6 > m_cap_indices) {
     m_stats.dropped++;
     return;
   }
+  int vi[4];
   for (int i = 0; i < n; i++) {
-    const float x = p[i][0], y = p[i][1], z = p[i][2];
-    ctr_clip_vertex& v = m_verts[m_nv + i];
-    v.x = m_clip[0] * x + m_clip[1] * y + m_clip[2] * z + m_clip[3];
-    v.y = m_clip[4] * x + m_clip[5] * y + m_clip[6] * z + m_clip[7];
-    v.z = m_clip[8] * x + m_clip[9] * y + m_clip[10] * z + m_clip[11];
-    v.w = m_clip[12] * x + m_clip[13] * y + m_clip[14] * z + m_clip[15];
-    v.s = v.t = 0.f;
-    v.r = v.g = v.b = v.a = 0;
+    vi[i] = vertex(c[i].verts, c[i].idx, c[i].bottom);
   }
   auto& list = away ? m_back : m_front;
   // a strip: (0 1 2), (1 2 3)
   for (int t = 0; t < tris; t++) {
-    list.push_back((u16)(m_nv + t));
-    list.push_back((u16)(m_nv + t + 1));
-    list.push_back((u16)(m_nv + t + 2));
+    list.push_back((u16)vi[t]);
+    list.push_back((u16)vi[t + 1]);
+    list.push_back((u16)vi[t + 2]);
   }
-  m_nv += n;
   m_stats.faces++;
 }
 
-void CtrShadowJak2Renderer::add_caps(const u8* idx, const u8* verts, bool flip, bool flippable) {
+void CtrShadowJak2Renderer::add_caps(const u8* idx, const u8* verts, bool flip, bool flippable,
+                                     bool bottom) {
   // Shadow2::add_cap_tris / add_flippable_tris
   const int n = idx[0];
   idx += 4;
@@ -99,12 +120,12 @@ void CtrShadowJak2Renderer::add_caps(const u8* idx, const u8* verts, bool flip, 
     if (!a && !b && !c) {
       continue;  // padding of the unpack
     }
-    const float* p[3];
     const bool swap = flippable ? ((flip ^ (idx[3] != 0)) == 0) : flip;
-    p[0] = (const float*)(verts + 16 * a);
-    p[1] = (const float*)(verts + 16 * (swap ? c : b));
-    p[2] = (const float*)(verts + 16 * (swap ? b : c));
-    add_face(p, 3, faces_away(p[0], p[1], p[2]));
+    const int i1 = swap ? c : b, i2 = swap ? b : c;
+    const Corner cs[3] = {{verts, a, bottom}, {verts, i1, bottom}, {verts, i2, bottom}};
+    add_face(cs, 3,
+             faces_away((const float*)(verts + 16 * a), (const float*)(verts + 16 * i1),
+                        (const float*)(verts + 16 * i2)));
   }
 }
 
@@ -117,20 +138,13 @@ void CtrShadowJak2Renderer::add_walls(const u8* idx, const u8* top, const u8* bo
     if (!a && !b) {
       continue;
     }
-    const float* q[4];
-    if (idx[2] == 0) {
-      q[0] = (const float*)(top + 16 * b);
-      q[1] = (const float*)(top + 16 * a);
-      q[2] = (const float*)(bottom + 16 * a);
-      q[3] = (const float*)(bottom + 16 * b);
-    } else {
-      q[0] = (const float*)(top + 16 * a);
-      q[1] = (const float*)(top + 16 * b);
-      q[2] = (const float*)(bottom + 16 * b);
-      q[3] = (const float*)(bottom + 16 * a);
-    }
-    const float* strip[4] = {q[1], q[0], q[2], q[3]};
-    add_face(strip, 4, faces_away(q[0], q[1], q[2]));
+    // q0 q1 on top, q2 q3 below (a and b swapped when idx[2] is 0)
+    const int u = idx[2] == 0 ? b : a, w = idx[2] == 0 ? a : b;
+    const float* q0 = (const float*)(top + 16 * u);
+    const float* q1 = (const float*)(top + 16 * w);
+    const float* q2 = (const float*)(bottom + 16 * w);
+    const Corner strip[4] = {{top, w, false}, {top, u, false}, {bottom, w, true}, {bottom, u, true}};
+    add_face(strip, 4, faces_away(q0, q1, q2));
   }
 }
 
@@ -143,6 +157,10 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
   };
   m_reserved = m_full = false;
   m_nv = 0;
+  m_gen[0]++;  // (AI-assisted, j2gpu) last frame's vertex copies are gone
+  m_gen[1]++;
+  m_boxes.clear();
+  m_boxes.push_back(Box());
   m_front.clear();
   m_back.clear();
   if (!more()) {
@@ -204,8 +222,13 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
     if (v1.kind == VifCode::Kind::UNPACK_V4_32) {
       if (v1.immediate == kTopVertexDataAddr) {
         top = t.data;
+        m_gen[0]++;  // (AI-assisted, j2gpu) new vertices: none of them copied yet
+        if (m_boxes.back().lo[0] <= m_boxes.back().hi[0]) {
+          m_boxes.push_back(Box());  // the next volume's box
+        }
       } else if (v1.immediate == kBottomVertexDataAddr) {
         bottom = t.data;
+        m_gen[1]++;
       }
     } else if (v1.kind == VifCode::Kind::UNPACK_V4_8) {
       const u32 offset = 4 * v1.num;
@@ -227,8 +250,8 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
       switch (mscal.immediate) {
         case 2:  // caps, top and bottom
           if (cap) {
-            add_caps(cap, top, false, false);
-            add_caps(cap, bottom, true, false);
+            add_caps(cap, top, false, false, false);
+            add_caps(cap, bottom, true, false, true);
           }
           break;
         case 4:  // walls
@@ -238,8 +261,8 @@ void CtrShadowJak2Renderer::render(DmaFollower& dma, CtrRenderState& rs) {
           break;
         case 6:  // caps whose winding each triangle says
           if (cap) {
-            add_caps(cap, top, false, true);
-            add_caps(cap, bottom, true, true);
+            add_caps(cap, top, false, true, false);
+            add_caps(cap, bottom, true, true, true);
           }
           break;
         default:
@@ -278,30 +301,86 @@ void CtrShadowJak2Renderer::draw() {
   }
   memcpy(m_indices, m_front.data(), (size_t)nf * 2);
   memcpy(m_indices + nf, m_back.data(), (size_t)nb * 2);
-  // the darkening rectangle over the whole screen: the PC subtracts (a - c) / 256 per channel
-  // (the color's alpha is the "no change" level); multiplied by c / a here (CTR_BLEND_MUL: 0xff
-  // = 1), like Jak 1's shadow color
-  ctr_clip_vertex* v = m_verts + m_nv;
-  const float xy[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+  // the darkening rectangles: the PC subtracts (a - c) / 256 per channel (the color's alpha is the
+  // "no change" level); multiplied by c / a here (CTR_BLEND_MUL: 0xff = 1), like Jak 1's shadow
+  // color.
+  // (AI-assisted, gpuopt + j2gpu) Not over the whole screen: only where a volume can have changed
+  // the stencil, the projection of each volume's camera space box (+2 pixels), like Jak 1's
+  // CtrShadowVolumes rectangles. Outside them the stencil is still the frame's 0, so the
+  // darkening (stencil != 0) and its stencil clear change nothing there. The whole screen when a
+  // box corner is at or behind the camera plane (its projection means nothing), as before.
   u8 mul[3];
   for (int c = 0; c < 3; c++) {
     mul[c] = (u8)std::clamp(255 * (int)m_color[c] / std::max(1, (int)m_color[3]), 0, 255);
   }
-  for (int k = 0; k < 4; k++) {
-    v[k].x = xy[k][0];
-    v[k].y = xy[k][1];
-    v[k].z = 0.f;
-    v[k].w = 1.f;
-    v[k].s = v[k].t = 0.f;
-    v[k].r = mul[0];
-    v[k].g = mul[1];
-    v[k].b = mul[2];
-    v[k].a = 0x80;
+  std::vector<Rect>& rects = m_rects;
+  rects.clear();
+  bool full = false;
+  Rect all = {1.f, 1.f, -1.f, -1.f};
+  for (const Box& b : m_boxes) {
+    if (b.lo[0] > b.hi[0]) {
+      continue;  // no vertices
+    }
+    Rect r = {1.f, 1.f, -1.f, -1.f};
+    for (int k = 0; k < 8 && !full; k++) {
+      const float x = (k & 1) ? b.hi[0] : b.lo[0], y = (k & 2) ? b.hi[1] : b.lo[1],
+                  z = (k & 4) ? b.hi[2] : b.lo[2];
+      const float cw = m_clip[12] * x + m_clip[13] * y + m_clip[14] * z + m_clip[15];
+      if (!(cw > 1e-4f)) {
+        full = true;
+        break;
+      }
+      const float rw = 1.f / cw;
+      const float nx = (m_clip[0] * x + m_clip[1] * y + m_clip[2] * z + m_clip[3]) * rw;
+      const float ny = (m_clip[4] * x + m_clip[5] * y + m_clip[6] * z + m_clip[7]) * rw;
+      r.x0 = std::min(r.x0, nx);
+      r.x1 = std::max(r.x1, nx);
+      r.y0 = std::min(r.y0, ny);
+      r.y1 = std::max(r.y1, ny);
+    }
+    if (full) {
+      break;
+    }
+    const float px = 2.f / 200.f, py = 2.f / 120.f;  // 2 pixels (400 x 240 target)
+    r.x0 = std::max(-1.f, r.x0 - px);
+    r.x1 = std::min(1.f, r.x1 + px);
+    r.y0 = std::max(-1.f, r.y0 - py);
+    r.y1 = std::min(1.f, r.y1 + py);
+    if (r.x0 >= r.x1 || r.y0 >= r.y1) {
+      continue;  // off screen: nothing of it to darken
+    }
+    rects.push_back(r);
+    all = {std::min(all.x0, r.x0), std::min(all.y0, r.y0), std::max(all.x1, r.x1),
+           std::max(all.y1, r.y1)};
+  }
+  int ni = nf + nb;
+  // one rectangle's room was kept back (add_face); more only while they fit, else their union
+  const int room = std::min((m_cap_verts - m_nv) / 4, (m_cap_indices - ni) / 6);
+  if (full) {
+    rects.assign(1, Rect{-1.f, -1.f, 1.f, 1.f});
+  } else if ((int)rects.size() > room) {
+    rects.assign(1, all);
   }
   static const u16 kQuad[6] = {0, 1, 2, 0, 2, 3};
-  int ni = nf + nb;
-  for (int k = 0; k < 6; k++) {
-    m_indices[ni++] = (u16)(m_nv + kQuad[k]);
+  int nq = 0;
+  for (const Rect& r : rects) {
+    ctr_clip_vertex* v = m_verts + m_nv + 4 * nq;
+    const float xy[4][2] = {{r.x0, r.y0}, {r.x1, r.y0}, {r.x1, r.y1}, {r.x0, r.y1}};
+    for (int k = 0; k < 4; k++) {
+      v[k].x = xy[k][0];
+      v[k].y = xy[k][1];
+      v[k].z = 0.f;
+      v[k].w = 1.f;
+      v[k].s = v[k].t = 0.f;
+      v[k].r = mul[0];
+      v[k].g = mul[1];
+      v[k].b = mul[2];
+      v[k].a = 0x80;
+    }
+    for (int k = 0; k < 6; k++) {
+      m_indices[ni++] = (u16)(m_nv + 4 * nq + kQuad[k]);
+    }
+    nq++;
   }
   ctr_draw_state st[3];
   memset(st, 0, sizeof(st));
@@ -318,6 +397,8 @@ void CtrShadowJak2Renderer::draw() {
   st[2].ztest = CTR_TEST_ALWAYS;
   st[2].flags = CTR_STATE_STENCIL_CLEAR;
   const int first[3] = {0, nf, nf + nb};
-  const int count[3] = {nf, nb, 6};
-  ctr_gpu_clip_draw_ranges(st, first, count, 3, m_nv + 4, ni);
+  const int count[3] = {nf, nb, 6 * nq};
+  // (AI-assisted, j2gpu) the volumes (passes 0, 1) in camera space, through m_clip on the GPU;
+  // the rectangle in clip space
+  ctr_gpu_clip_draw_ranges_mtx(m_clip, 2, st, first, count, 3, m_nv + 4 * std::max(nq, 1), ni);
 }

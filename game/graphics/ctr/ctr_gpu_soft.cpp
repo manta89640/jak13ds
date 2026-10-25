@@ -822,6 +822,23 @@ int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts
   return 1;
 }
 
+namespace {
+// (AI-assisted, j2gpu) ctr_gpu_clip_draw_ranges_mtx: the matrix the GPU's clip program applies to
+// the first g_clip_n_mtx ranges (row major, clip = M (x y z 1))
+const float* g_clip_mtx = nullptr;
+int g_clip_n_mtx = 0;
+}  // namespace
+
+void ctr_gpu_clip_draw_ranges_mtx(const float matrix[16], int n_mtx, const ctr_draw_state* states,
+                                  const int* first, const int* count, int n, int vert_count,
+                                  int index_count) {
+  g_clip_mtx = matrix;
+  g_clip_n_mtx = n_mtx;
+  ctr_gpu_clip_draw_ranges(states, first, count, n, vert_count, index_count);
+  g_clip_mtx = nullptr;
+  g_clip_n_mtx = 0;
+}
+
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
                               int n, int vert_count, int index_count) {
   softstats::prog(4);
@@ -851,7 +868,23 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
         ok &= vi < vert_count;
         tri[j] = &g_clip_verts[ok ? vi : 0];
       }
-      if (ok) {
+      if (ok && g_clip_mtx && i < g_clip_n_mtx) {
+        // (AI-assisted, j2gpu) what the GPU's vertex shader does for these ranges
+        ctr_clip_vertex t[3];
+        const float* m = g_clip_mtx;
+        for (int j = 0; j < 3; j++) {
+          const ctr_clip_vertex& v = *tri[j];
+          t[j] = v;
+          t[j].x = m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3];
+          t[j].y = m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7];
+          t[j].z = m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11];
+          t[j].w = m[12] * v.x + m[13] * v.y + m[14] * v.z + m[15];
+          tri[j] = &t[j];
+        }
+        clip_draw_triangle(states[i], tri);
+        g_soft.cur.triangles++;
+        softstats::cur->tris++;
+      } else if (ok) {
         clip_draw_triangle(states[i], tri);
         g_soft.cur.triangles++;
         softstats::cur->tris++;

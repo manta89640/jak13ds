@@ -22,15 +22,38 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   void render(DmaFollower& dma, CtrRenderState& rs) override;
 
  private:
-  // the 3 (cap) or 4 (wall) camera space positions of one face, as a strip; away: the stencil
-  // decrement pass
-  void add_face(const float* const* p, int n, bool away);
-  void add_caps(const u8* idx, const u8* verts, bool flip, bool flippable);
+  // (AI-assisted, j2gpu) a face's corner: vertex idx of an upload (top or bottom)
+  struct Corner {
+    const u8* verts;
+    int idx;
+    bool bottom;
+  };
+  // the 3 (cap) or 4 (wall) corners of one face, as a strip; away: the stencil decrement pass
+  void add_face(const Corner* c, int n, bool away);
+  // (AI-assisted, j2gpu) the vertex's index in the frame's vertex memory (copied at first use)
+  int vertex(const u8* verts, int idx, bool bottom);
+  void add_caps(const u8* idx, const u8* verts, bool flip, bool flippable, bool bottom);
   void add_walls(const u8* idx, const u8* top, const u8* bottom);
   bool reserve();
   void draw();
 
-  float m_clip[16];  // camera space -> clip space, row major
+  float m_clip[16];  // camera space -> clip space, row major (applied by the GPU)
+  // (AI-assisted, j2gpu) per upload (0 top, 1 bottom) and vertex: its index in m_verts when its
+  // stamp is the upload's generation
+  u16 m_map[2][256] = {};
+  u32 m_stamp[2][256] = {};
+  u32 m_gen[2] = {1, 1};
+  // (AI-assisted, j2gpu + gpuopt) per volume (from one top vertex upload to the next) its camera
+  // space box: the darkening rectangles cover only their projections
+  struct Box {
+    float lo[3] = {1e30f, 1e30f, 1e30f};
+    float hi[3] = {-1e30f, -1e30f, -1e30f};
+  };
+  std::vector<Box> m_boxes;
+  struct Rect {
+    float x0, y0, x1, y1;  // clip space x, y / w
+  };
+  std::vector<Rect> m_rects;
   ctr_clip_vertex* m_verts = nullptr;
   u16* m_indices = nullptr;
   bool m_reserved = false, m_full = false;

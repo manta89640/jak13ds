@@ -5789,8 +5789,14 @@ int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts
   return 1;
 }
 
-void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
-                              int n, int vert_count, int index_count) {
+static void gl_to_pica_mul(const float clip[16], C3D_Mtx* m);
+
+/* (AI-assisted, j2gpu) matrix (row major) != NULL: the first n_mtx ranges' vertices go through it
+ * in the vertex shader (the clip program's glpica uniform = gl_to_pica * matrix for them, then
+ * gl_to_pica again) */
+static void clip_draw_ranges(const float* matrix, int n_mtx, const ctr_draw_state* states,
+                             const int* first, const int* count, int n, int vert_count,
+                             int index_count) {
   if (!s_clipres.open) {
     return;
   }
@@ -5823,7 +5829,20 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
   }
   use_program(PROG_CLIP);
   int stencil = 0;
+  int mtx_on = 0;
   for (int i = 0; i < n; i++) {
+    /* (AI-assisted, j2gpu) the matrix in the uniform for ranges [0, n_mtx), gl_to_pica after */
+    const int want = matrix && i < n_mtx;
+    if (want != mtx_on) {
+      C3D_Mtx m;
+      if (want) {
+        gl_to_pica_mul(matrix, &m);
+      }
+      raw_vc_flush();
+      C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip_glpica, want ? &m : &g.gl_to_pica);
+      raw_note_unif();
+      mtx_on = want;
+    }
     if (count[i] < 3) {
       continue;
     }
@@ -5846,6 +5865,11 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
     g.cur.draws++;
     g.cur.triangles += (int)nidx / 3;
   }
+  if (mtx_on) {
+    /* (AI-assisted, j2gpu) the other clip draws' matrix again (sent at the next draw) */
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip_glpica, &g.gl_to_pica);
+    raw_note_unif();
+  }
   if (stencil) {
     /* the stencil test off again (citro3d sends the effect at the next draw), for draws that
      * don't set the fragment operations themselves (the clouds), like ctr_gpu_ocean_end */
@@ -5856,6 +5880,17 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
     }
     g.last_state_valid = 0;
   }
+}
+
+void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
+                              int n, int vert_count, int index_count) {
+  clip_draw_ranges(NULL, 0, states, first, count, n, vert_count, index_count);
+}
+
+void ctr_gpu_clip_draw_ranges_mtx(const float matrix[16], int n_mtx, const ctr_draw_state* states,
+                                  const int* first, const int* count, int n, int vert_count,
+                                  int index_count) {
+  clip_draw_ranges(matrix, n_mtx, states, first, count, n, vert_count, index_count);
 }
 
 /* ---------------- the screen as a texture ---------------- */

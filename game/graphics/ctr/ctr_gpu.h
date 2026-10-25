@@ -200,6 +200,13 @@ int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts
                          uint16_t** indices);
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
                               int n, int vert_count, int index_count);
+/* (AI-assisted, j2gpu) ctr_gpu_clip_draw_ranges whose first n_mtx ranges have their vertices'
+ * x, y, z (w ignored, taken as 1) in a space that `matrix` (4x4, row major: clip = M (x y z 1))
+ * takes to clip space: the vertex shader multiplies (the clip program's 4 dp4 with the matrix
+ * folded into its uniform), not the CPU. The ranges after them are in clip space as usual. */
+void ctr_gpu_clip_draw_ranges_mtx(const float matrix[16], int n_mtx, const ctr_draw_state* states,
+                                  const int* first, const int* count, int n, int vert_count,
+                                  int index_count);
 
 /* (AI-assisted) Two texture layers in one pass (the sky's two cloud layers): like
  * ctr_gpu_draw_clip, with a second set of texture coordinates for the same texture on texture
