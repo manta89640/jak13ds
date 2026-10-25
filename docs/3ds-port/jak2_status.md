@@ -1046,3 +1046,30 @@ PC. Format and runtime: `c3l_format.md` "Prototype visibility (v20)".
 - Open: strip loaded after vinroom (the pad's continue) had 128 KB of linear memory left and 79
   textures / meshes not created; the v20 file is 2 KB bigger than v19 with the same vertex and index
   data, so this is the level's memory, not the change.
+
+## Memory: distance freeing (j2strip, Oct 25)
+
+(AI-assisted)
+
+- **Problem:** strip-start's continue wants vinroom (special) and strip (display). In Azahar,
+  strip left 128 KB of linear memory and 79 textures/meshes not created; the view had holes.
+  - strip's meshes are 19.2 MB: 13 MB are shrubs (670k triangles). vinroom is 7.1 MB, and 15.8 MB
+    was free after it loaded. This is a true budget overflow, not a timing problem: the city levels
+    were already unloaded.
+  - slums -> ctyindb, mountain and caspad failed the same way in older logs.
+- **Fix** (CtrLevel.cpp "Distance freeing"; Jak II only):
+  - A load whose meshes, plus the merc models and a 1.5 MB margin, don't fit the free linear memory
+    doesn't make some chunks: shrubs and distance-limited ties that are more than 60 m beyond their
+    largest draw distance from the camera, its 2 s lead or Jak.
+  - A load that makes room frees those chunks of the levels already loaded.
+  - These levels (dist_free) free far chunks again whenever the heap is below stream_reserve_kb.
+  - A freed chunk is read back once the camera comes within 30 m beyond its draw distance:
+    nearest first, at most 2 MB per job.
+  - A chunk not back in time is held hidden in view, like a dormant level's.
+  - With enough memory nothing triggers.
+- **Checks:**
+  - Host `jak2_title_city.pad`: 0 triggers, ends at (1065.98, 0.52, 194.46).
+  - Host `platform/3ds/tests/jak2_strip_mem.pad` with CTR_SOFT_LINEAR_KB=25400: the shots match
+    j2vis's host strip shot.
+  - Azahar: strip left 423 chunks (14.5 MB) for later, with 0 failed creates. Linear free was
+    13194 KB after the load (was 128 KB) and 5556 KB after the read-backs.
