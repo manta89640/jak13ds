@@ -645,6 +645,25 @@
     :from *pc-dead-pool* :to *pc-pool*)
   0)
 
+(defun pad-script-darkjak ()
+  "(AI-assisted) 'call pad-script-darkjak' in a pad script (tests only): give Jak the Dark Jak
+   feature and turn him into Dark Jak (the change-mode event the missions send), for tests of the
+   Dark Jak attacks (platform/3ds/tests/jak2_darkjak.pad)."
+  (logior! (-> *game-info* features) (game-feature darkjak))
+  ;; the pad script calls this while the game reads the pads: send the event from a process
+  (process-spawn-function process
+    (lambda ()
+      (suspend)
+      (when *target*
+        (format 0 "pad-script-darkjak: dark ~A stage #x~X~%"
+                (and (focus-test? *target* dark) (nonzero? (-> *target* darkjak)))
+                (if (nonzero? (-> *target* darkjak)) (-> *target* darkjak stage) 0))
+        (send-event *target* 'change-mode 'darkjak #f (darkjak-stage force-on))
+        )
+      (none))
+    :from *pc-dead-pool* :to *pc-pool*)
+  0)
+
 ;; (AI-assisted) "print *pad-script-mem*" in a pad script (tests only): a memory report. print_object
 ;; calls the print method, which writes the report to stdout (format 0).
 (deftype pad-script-mem-report (basic) ())
