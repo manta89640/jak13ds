@@ -40,6 +40,8 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
     {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
+    /* (AI-assisted, fidelity2) the full texture and shine detail */
+    {"mip_bias", "0"},   {"envmap_min_px", "0"},
 };
 /* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the A/B GPU
  * profile, the GSP perf log and the GPU counters (3ds-sdcard-oct12d config-bench.ini) */

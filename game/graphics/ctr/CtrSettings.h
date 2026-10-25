@@ -71,6 +71,9 @@ struct CtrSettings {
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
+  // (AI-assisted, fidelity2) envmap_min_px: no shine pass for models smaller than this on the top
+  // screen (their bounding sphere's diameter in pixels; 0 = every model). HUD models always keep it
+  float envmap_min_px = 16.f;
   // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
   // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
   bool envmap_batch = true;
@@ -142,8 +145,9 @@ struct CtrSettings {
   // (blends two levels: smoother, slower).
   int mipmaps = 1;
   // (AI-assisted) the LOD bias of mipmapped level / model textures (+0.5, +1: the next smaller
-  // level sooner, blurrier, fewer texels read); 0 = none
-  float mip_bias = 0.f;
+  // level sooner, blurrier, fewer texels read); 0 = none. (AI-assisted, fidelity2) +0.25 by default
+  // (+0.5 looked too blurry to the user in Azahar; safe preset: 0)
+  float mip_bias = 0.25f;
   // (AI-assisted) merc bone rows uploaded as float24 instead of float32 (a quarter fewer uniform
   // words; the GPU computes in float24 either way). On: Jak and Daxter identical in Azahar, the
   // float24 uniform path (raw_unif, raw_pack_f24) already draws the level meshes on hardware
