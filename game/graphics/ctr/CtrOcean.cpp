@@ -15,8 +15,11 @@
 #include "common/dma/dma.h"
 #include "common/goal_constants.h"
 #include "common/log/log.h"
+#include "common/util/FileUtil.h"
 
+#include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/CtrOceanNear.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -102,7 +105,86 @@ T read(const u8* ee, u32 addr) {
   return v;
 }
 
+// (AI-assisted, j2water) Jak II's sky reflection: the env map's first pass (CtrOceanEnvJak2, the
+// view from above) and the frame it was drawn in
+constexpr int kEnvSize = 64;
+int g_env_first_rt = -1;
+u64 g_env_first_frame = ~0ull;
+// PS2 env pass tiles: within 192 m (ocean-mid's call 73; the farther ones, call 46, have none)
+constexpr float kEnvTileDist = 786432.f;
+
+// does this GIF packet (a dma-buffer-add-gs-set: PACKED, A+D) write the GS register reg?
+bool gif_sets(const u8* data, u32 size, u8 reg) {
+  if (size < 16) {
+    return false;
+  }
+  GifTag tag(data);
+  if (tag.flg() != GifTag::Format::PACKED) {
+    return false;
+  }
+  const u32 nreg = tag.nreg();
+  u32 offset = 16;
+  for (u32 loop = 0; loop < tag.nloop(); loop++) {
+    for (u32 r = 0; r < nreg; r++) {
+      if (offset + 16 > size) {
+        return false;
+      }
+      if (tag.reg(r) == GifTag::RegisterDescriptor::AD && data[offset + 8] == reg) {
+        return true;
+      }
+      offset += 16;
+    }
+  }
+  return false;
+}
+
 }  // namespace
+
+CtrOceanEnvJak2::CtrOceanEnvJak2(std::string name, int id, CtrVram* vram)
+    : CtrBucketRenderer(std::move(name), id), m_direct(std::make_unique<CtrDirect>(vram)) {
+  m_direct->enable_envmap();
+}
+
+CtrOceanEnvJak2::~CtrOceanEnvJak2() = default;
+
+void CtrOceanEnvJak2::render(DmaFollower& dma, CtrRenderState& rs) {
+  int frames = 0;  // FRAME writes seen: 1 = the first pass (drawn), 2 = ocean-method-83's warp
+  bool active = false;
+  while (dma.current_tag_offset() != rs.next_bucket) {
+    auto data = dma.read_and_advance();
+    if (!data.size_bytes || frames >= 2 || !ctr_settings().ocean) {
+      continue;
+    }
+    if (gif_sets(data.data, data.size_bytes, (u8)GsRegisterAddress::FRAME_1)) {
+      frames++;
+      if (frames == 1) {
+        if (g_env_first_rt < 0) {
+          g_env_first_rt = ctr_gpu_rt_create(kEnvSize, kEnvSize, kEnvSize);
+        }
+        if (g_env_first_rt < 0 || !ctr_gpu_rt_begin(g_env_first_rt, 0, 0, kEnvSize, kEnvSize)) {
+          frames = 2;
+          continue;
+        }
+        m_direct->reset_state();
+        active = true;
+      } else if (active) {
+        m_direct->flush();
+        ctr_gpu_rt_end();
+        active = false;
+        g_env_first_frame = rs.frame_idx;
+        continue;
+      }
+    }
+    if (active) {
+      m_direct->render_vif(data.vif0(), data.vif1(), data.data, data.size_bytes);
+    }
+  }
+  if (active) {
+    m_direct->flush();
+    ctr_gpu_rt_end();
+    g_env_first_frame = rs.frame_idx;
+  }
+}
 
 CtrOceanRenderer::CtrOceanRenderer(std::string name, int id)
     : CtrBucketRenderer(std::move(name), id) {}
@@ -117,6 +199,118 @@ CtrOceanRenderer::~CtrOceanRenderer() {
   if (m_shimmer >= 0) {
     ctr_gpu_tex_delete(m_shimmer);
   }
+  if (m_env_rt >= 0) {
+    ctr_gpu_rt_delete(m_env_rt);
+  }
+}
+
+/*!
+ * (AI-assisted, j2water) Jak II: this frame's env map for the sky reflection, in m_env_rt (64 x 64,
+ * the PS2's ocean-envmap texture): ocean-method-83's warp of CtrOceanEnvJak2's view from above (64
+ * columns around the heading; rows 0..31 from the zenith to the horizon, 32..63 the same mirrored,
+ * the frame's last sprite) times env-color (GS modulate, as the PS2's env pass draws it), or
+ * without the sky the environment-ocean texture times env-color. Made again when either changes.
+ */
+bool CtrOceanRenderer::update_env_jak2(const Packet& p, const CtrRenderState& rs) {
+  float ec[4];
+  memcpy(ec, &p.cam.itimes[1], sizeof(ec));
+  u64 tex0[2];
+  memcpy(tex0, &p.cam.itimes[2], sizeof(tex0));
+  const bool sky = ec[3] == 1.f;
+  const bool fresh = g_env_first_frame != ~0ull && rs.frame_idx >= g_env_first_frame &&
+                     rs.frame_idx - g_env_first_frame <= 8;
+  int src = -1;
+  float src_uv[6] = {0, 0, 1, 0, 0, 1};  // the source's s, t at (0, 0), per unit of u, of v
+  if (sky) {
+    if (!fresh || g_env_first_rt < 0) {
+      return false;
+    }
+    src = g_env_first_rt;
+    float s0, t0, s1, t1, s2, t2;
+    ctr_gpu_rt_uv(src, 0, 0, &s0, &t0);
+    ctr_gpu_rt_uv(src, kEnvSize, 0, &s1, &t1);
+    ctr_gpu_rt_uv(src, 0, kEnvSize, &s2, &t2);
+    const float uv[6] = {s0, t0, s1 - s0, t1 - t0, s2 - s0, t2 - t0};
+    memcpy(src_uv, uv, sizeof(uv));
+  } else {
+    const CtrTexture* t = tex0[0] && rs.vram ? rs.vram->get_texture(tex0[0]) : nullptr;
+    if (!t || t->handle < 0) {
+      return false;
+    }
+    src = t->handle;
+  }
+  if (m_env_rt < 0) {
+    m_env_rt = ctr_gpu_rt_create(kEnvSize, kEnvSize, kEnvSize);
+    if (m_env_rt < 0) {
+      return false;
+    }
+    float s0, t0, s1, t1, s2, t2;
+    ctr_gpu_rt_uv(m_env_rt, 0, 0, &s0, &t0);
+    ctr_gpu_rt_uv(m_env_rt, kEnvSize, 0, &s1, &t1);
+    ctr_gpu_rt_uv(m_env_rt, 0, kEnvSize, &s2, &t2);
+    const float uv[6] = {s0, t0, s1 - s0, t1 - t0, s2 - s0, t2 - t0};
+    memcpy(m_env_uv, uv, sizeof(uv));
+    m_env_made_from = ~0ull;
+    m_env_static = 0;
+  }
+  const bool color_same = ec[0] == m_env_color[0] && ec[1] == m_env_color[1] && ec[2] == m_env_color[2];
+  if (color_same && (sky ? m_env_made_from == g_env_first_frame : m_env_static == tex0[0])) {
+    return true;  // made already
+  }
+  if (!ctr_gpu_rt_begin(m_env_rt, 0, 0, kEnvSize, kEnvSize)) {
+    return false;
+  }
+  // env-color halved: the PC's env pass (CommonOceanRenderer bucket 4: the vertex color as it is,
+  // 0x80 = 0.5), the reference the 3DS is compared with (the PS2's GS modulate: 0x80 = 1)
+  auto col = [](float c) { return (u8)std::clamp(0.5f * c, 0.f, 255.f); };
+  const u8 cr = col(ec[0]), cg = col(ec[1]), cb = col(ec[2]);
+  auto vert = [&](float lx, float ly, float u, float v) {
+    ctr_vertex o;
+    o.x = lx * (2.f / kEnvSize) - 1.f;
+    o.y = ly * (2.f / kEnvSize) - 1.f;
+    o.z = 0.5f;
+    o.s = src_uv[0] + src_uv[2] * u + src_uv[4] * v;
+    o.t = src_uv[1] + src_uv[3] * u + src_uv[5] * v;
+    o.r = cr;
+    o.g = cg;
+    o.b = cb;
+    o.a = 0x80;
+    return o;
+  };
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  st.tex = src;
+  st.tcc = 0;
+  st.filter = 1;
+  st.clamp_s = st.clamp_t = sky ? 1 : 0;
+  st.blend = CTR_BLEND_OFF;
+  st.atest = CTR_TEST_ALWAYS;
+  st.ztest = CTR_TEST_ALWAYS;
+  st.zwrite = 0;
+  std::vector<ctr_vertex> v;
+  if (sky) {
+    // ocean-method-83: column i from the center (row 0) to the edge (row 32) at the angle
+    // 180 - i * 360 / 64 degrees: s, t = 0.5 + 0.5 * r * (sin, cos); rows 32..64 mirrored
+    v.reserve(kEnvSize * 12);
+    for (int i = 0; i < kEnvSize; i++) {
+      const float a = 3.14159265f - (float)i * (6.2831853f / kEnvSize);
+      const float es = 0.5f + 0.5f * std::sin(a), et = 0.5f + 0.5f * std::cos(a);
+      const ctr_vertex c0 = vert((float)i, 0, 0.5f, 0.5f), c1 = vert((float)i + 1, 0, 0.5f, 0.5f);
+      const ctr_vertex e0 = vert((float)i, 32, es, et), e1 = vert((float)i + 1, 32, es, et);
+      const ctr_vertex d0 = vert((float)i, 64, 0.5f, 0.5f), d1 = vert((float)i + 1, 64, 0.5f, 0.5f);
+      v.insert(v.end(), {c0, c1, e1, c0, e1, e0, e0, e1, d1, e0, d1, d0});
+    }
+  } else {
+    const ctr_vertex a = vert(0, 0, 0, 0), b = vert(kEnvSize, 0, 1, 0),
+                     c = vert(kEnvSize, kEnvSize, 1, 1), d = vert(0, kEnvSize, 0, 1);
+    v.insert(v.end(), {a, b, c, a, c, d});
+  }
+  ctr_gpu_draw(&st, v.data(), (int)v.size());
+  ctr_gpu_rt_end();
+  memcpy(m_env_color, ec, sizeof(m_env_color));
+  m_env_made_from = sky ? g_env_first_frame : ~0ull;
+  m_env_static = sky ? 0 : tex0[0];
+  return true;
 }
 
 bool CtrOceanRenderer::waves() const {
@@ -138,6 +332,14 @@ void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     if (data.size_bytes == sizeof(Packet) && data.vifcode1().kind == VifCode::Kind::PC_PORT) {
       memcpy(&p, data.data, sizeof(Packet));
       have = p.magic == kMagic;
+      m_have_lights = false;
+    } else if (data.size_bytes == sizeof(Packet) + sizeof(m_lights) &&
+               data.vifcode1().kind == VifCode::Kind::PC_PORT) {
+      // (AI-assisted, j2water) Jak II's packet: + the wave texture's lights (vu-lights)
+      memcpy(&p, data.data, sizeof(Packet));
+      memcpy(m_lights, data.data + sizeof(Packet), sizeof(m_lights));
+      have = p.magic == kMagic;
+      m_have_lights = true;
     }
   }
   if (!have || !ctr_settings().ocean) {
@@ -146,7 +348,7 @@ void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   // (AI-assisted) Jak II's packet: the sky's light on the water (ocean.gc ocean-3ds-packet:
   // add-colors!, 0x80 = 1.0) where Jak 1 sends zeros
   m_tint[0] = m_tint[1] = m_tint[2] = 1.f;
-  if (ctr_is_jak2()) {
+  if (ctr_is_jak2() && !m_have_lights) {
     float tint[4];
     memcpy(tint, &p.cam.itimes[0], sizeof(tint));
     if (tint[3] == 1.f) {
@@ -171,18 +373,66 @@ void CtrOceanRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   // (AI-assisted, gpu-rt) ocean_tex_half: the shading every second frame (the heights every frame:
   // the near grid of ocean = waves moves with them)
-  update_texture(rs.ee_mem, p.heights,
-                 !ctr_settings().ocean_tex_half || m_tex < 0 || (rs.frame_idx & 1) == 0);
+  const bool shade = !ctr_settings().ocean_tex_half || m_tex < 0 || (rs.frame_idx & 1) == 0;
+  if (ctr_is_jak2() && m_have_lights) {
+    // (AI-assisted, j2water) Jak II: the PS2's wave texture (ocean-generate-verts' lighting, the
+    // environment-ocean-alphamod lookup for the sky reflection's weight)
+    u64 tex0[2];
+    memcpy(tex0, &p.cam.itimes[2], sizeof(tex0));
+    update_alphamod(tex0[1], rs);
+    update_texture_jak2(rs.ee_mem, p.heights, shade);
+  } else {
+    update_texture(rs.ee_mem, p.heights, shade);
+  }
   m_near_index_count = 0;
   if (waves()) {
     build_near(rs.ee_mem, p);
   }
+  // (AI-assisted, j2water) Jak II: the sky reflection's env map
+  m_env_ok = ctr_is_jak2() && update_env_jak2(p, rs);
+#ifndef __3DS__
+  {
+    static const bool no_env = getenv("CTR_OCEAN_NO_ENV") != nullptr;  // host diagnosis
+    m_env_ok = m_env_ok && !no_env;
+    // host diagnosis: CTR_OCEAN_ENV_DUMP=DIR writes the env map's two passes at frame N
+    static const char* dump = getenv("CTR_OCEAN_ENV_DUMP");
+    static const int at = getenv("CTR_OCEAN_ENV_DUMP_N") ? atoi(getenv("CTR_OCEAN_ENV_DUMP_N")) : 0;
+    if (dump && ctr_is_jak2() && (u64)at == rs.frame_idx) {
+      float ec[4], c2[4];
+      memcpy(ec, &p.cam.itimes[1], sizeof(ec));
+      memcpy(c2, &p.cam.itimes[3], sizeof(c2));
+      lg::info("[ctr] ocean env frame {}: ok {} first pass frame {} env color {} {} {} sky {} "
+               "constants2 {} {} alpha {} tex0 {:x} {:x}",
+               rs.frame_idx, m_env_ok, g_env_first_frame, ec[0], ec[1], ec[2], ec[3], c2[0], c2[1],
+               c2[2], ((const u64*)&p.cam.itimes[2])[0], ((const u64*)&p.cam.itimes[2])[1]);
+      ctr_gpu_soft_dump_tex(g_env_first_rt, fmt::format("{}/env_first.png", dump).c_str());
+      ctr_gpu_soft_dump_tex(m_env_rt, fmt::format("{}/env_map.png", dump).c_str());
+      std::vector<u32> px;
+      int w = 0, h = 0;
+      const u64 am = ((const u64*)&p.cam.itimes[2])[1];
+      if (am && rs.vram->decode_for_cpu(am, &px, &w, &h)) {
+        std::vector<u8> rgba(px.size() * 4), alpha(px.size() * 4);
+        for (size_t i = 0; i < px.size(); i++) {
+          memcpy(&rgba[4 * i], &px[i], 4);
+          rgba[4 * i + 3] = 255;
+          alpha[4 * i] = alpha[4 * i + 1] = alpha[4 * i + 2] = (u8)(px[i] >> 24);
+          alpha[4 * i + 3] = 255;
+        }
+        file_util::write_rgba_png(fmt::format("{}/alphamod_rgb.png", dump), rgba.data(), w, h);
+        file_util::write_rgba_png(fmt::format("{}/alphamod_a.png", dump), alpha.data(), w, h);
+        lg::info("[ctr] ocean env: alphamod {}x{}", w, h);
+      }
+    }
+  }
+#endif
   draw(p, rs);
   m_frames++;
   if (rs.log_now && m_frames) {
-    lg::debug("[ctr] ocean: {:.1f} tiles, {:.0f} triangles per frame, height {:.2f} m",
-              (float)m_tiles_drawn / m_frames, (float)m_triangles / m_frames, p.start[1] / 4096.f);
-    m_frames = m_tiles_drawn = m_triangles = 0;
+    lg::debug("[ctr] ocean: {:.1f} tiles ({:.1f} with the sky reflection), {:.0f} triangles per "
+              "frame, height {:.2f} m",
+              (float)m_tiles_drawn / m_frames, (float)m_env_tiles / m_frames,
+              (float)m_triangles / m_frames, p.start[1] / 4096.f);
+    m_frames = m_tiles_drawn = m_triangles = m_env_tiles = 0;
   }
 }
 
@@ -321,8 +571,14 @@ bool CtrOceanRenderer::build_mesh(const u8* ee, const Packet& p) {
   }
   m_mesh = ctr_gpu_mesh_create(verts.data(), (int)verts.size(), indices.data(), (int)indices.size());
   m_water = std::move(water);
-  lg::info("[ctr] ocean mesh: {} tiles, {} cells ({} shore), {} vertices, {} triangles{}",
-           m_tiles.size(), cells, shore_cells, verts.size(), indices.size() / 3,
+  u8 amin = 255, amax = 0;  // (AI-assisted, j2water) the map colors' alpha (the env weight)
+  for (const auto& v : verts) {
+    amin = std::min(amin, v.rgba[3]);
+    amax = std::max(amax, v.rgba[3]);
+  }
+  lg::info("[ctr] ocean mesh: {} tiles, {} cells ({} shore), {} vertices, {} triangles, alpha "
+           "{:#x}..{:#x}{}",
+           m_tiles.size(), cells, shore_cells, verts.size(), indices.size() / 3, amin, amax,
            m_mesh < 0 ? " (could not be created)" : "");
   return m_mesh >= 0;
 }
@@ -364,6 +620,126 @@ void CtrOceanRenderer::update_texture(const u8* ee, u32 heights, bool shade) {
   }
   // one texture, updated in place (with mip levels: at the horizon a 96 m repeat is a few
   // pixels, and the GPU reads the smallest level there)
+  if (m_tex < 0) {
+    m_tex = ctr_gpu_tex_create_mipmapped(N, N, m_texels.data());
+  } else {
+    ctr_gpu_tex_update(m_tex, m_texels.data());
+  }
+}
+
+/*!
+ * (AI-assisted, j2water) Jak II: environment-ocean-alphamod (sky-textures), decoded from the VRAM
+ * copy when its tex0 changes and every 600 frames (its page may come later than the first frame).
+ * Only its alpha is used (its color is a flat 0x80): the wave texture's alpha.
+ */
+void CtrOceanRenderer::update_alphamod(u64 tex0, const CtrRenderState& rs) {
+  if (!tex0 || !rs.vram) {
+    return;
+  }
+  if (tex0 == m_alphamod_tex0 && rs.frame_idx >= m_alphamod_frame &&
+      rs.frame_idx - m_alphamod_frame < 600) {
+    return;
+  }
+  m_alphamod_tex0 = tex0;
+  m_alphamod_frame = rs.frame_idx;
+  std::vector<u32> px;
+  int w = 0, h = 0;
+  if (!rs.vram->decode_for_cpu(tex0, &px, &w, &h) || w < 1 || h < 1 ||
+      px.size() < (size_t)w * h) {
+    m_alphamod.clear();
+    return;
+  }
+  m_alphamod.resize((size_t)w * h);
+  for (size_t i = 0; i < m_alphamod.size(); i++) {
+    m_alphamod[i] = (u8)(px[i] >> 24);
+  }
+  m_alphamod_w = w;
+  m_alphamod_h = h;
+}
+
+/*!
+ * (AI-assisted, j2water) Jak II's wave texture as the PS2 makes it, one texel per wave height
+ * (32 x 32, 3 m apart; the PS2 draws a 128 x 128 texture from the same 32 x 32 vertices):
+ * ocean-generate-verts (mips2c ocean_vu0 method 16, vcallms 0) gives each height a normal
+ *   n.x = (h[x + 1] - h[x]) * -1/8192, n.z = (h[z + 1] - h[z]) * -1/8192, n.y = 1 - n.x^2 - n.z^2
+ * and a color = ambient + the lights' colors * max(0, n . direction) (the lights scaled down when
+ * all of them together pass 1.25, x 128, at most 255), alpha = 128 * the sum of those dots; the
+ * ocean texture program draws it times environment-ocean-alphamod (color 0x80) at
+ * s, t = 0.5 + (n.x, n.z). The texture's alpha is the sky reflection's weight (0x80 = 1, stored
+ * doubled: 0xff = 1 for the GPU).
+ */
+void CtrOceanRenderer::update_texture_jak2(const u8* ee, u32 heights, bool shade) {
+  constexpr int N = kTexSize;
+  float* h = m_heights;
+  if (valid_addr(heights, sizeof(m_heights))) {
+    memcpy(h, ee + heights, sizeof(m_heights));
+  } else {
+    memset(h, 0, sizeof(m_heights));
+  }
+  if (!shade) {
+    return;
+  }
+  // the vu-lights: direction[3] (transposed: x, y, z of the 3 lights), color[3], ambient
+  const float(*L)[4] = m_lights;
+  float col[3][3], amb[3];
+  for (int c = 0; c < 3; c++) {
+    amb[c] = L[6][c];
+    for (int i = 0; i < 3; i++) {
+      col[i][c] = L[3 + i][c];
+    }
+  }
+  float sum[3];
+  for (int c = 0; c < 3; c++) {
+    sum[c] = col[0][c] + col[1][c] + col[2][c] + amb[c];
+  }
+  if (sum[0] > 1.25f || sum[1] > 1.25f || sum[2] > 1.25f) {
+    // the brightest channel brought to 1.25 (the lights scaled, the ambient kept)
+    int m = sum[1] < sum[0] ? 0 : 1;
+    if (sum[m] < sum[2]) {
+      m = 2;
+    }
+    const float k = (1.25f - amb[m]) / (sum[m] - amb[m]);
+    for (int i = 0; i < 3; i++) {
+      for (int c = 0; c < 3; c++) {
+        col[i][c] *= k;
+      }
+    }
+  }
+  const bool have_am = !m_alphamod.empty();
+  m_texels.resize(N * N * 4);
+  for (int z = 0; z < N; z++) {
+    const float* row = h + z * N;
+    const float* down = h + ((z + 1) & (N - 1)) * N;
+    for (int x = 0; x < N; x++) {
+      const float nx = (row[(x + 1) & (N - 1)] - row[x]) * (-1.f / 8192.f);
+      const float nz = (down[x] - row[x]) * (-1.f / 8192.f);
+      const float ny = 1.f - nx * nx - nz * nz;
+      float rgb[3] = {amb[0] * 128.f, amb[1] * 128.f, amb[2] * 128.f};
+      float a = 0;
+      for (int i = 0; i < 3; i++) {
+        const float d = std::max(0.f, L[0][i] * nx + L[1][i] * ny + L[2][i] * nz);
+        for (int c = 0; c < 3; c++) {
+          rgb[c] += col[i][c] * 128.f * d;
+        }
+        a += 128.f * d;
+      }
+      u8* t = &m_texels[4 * (z * N + x)];
+      for (int c = 0; c < 3; c++) {
+        t[c] = (u8)std::clamp(rgb[c], 0.f, 255.f);
+      }
+      // alphamod's alpha (clamped) times the vertex alpha / 128, GS units; doubled for the GPU
+      float am = 128.f;
+      if (have_am) {
+        const int ax = std::clamp((int)((0.5f + nx) * m_alphamod_w), 0, m_alphamod_w - 1);
+        const int az = std::clamp((int)((0.5f + nz) * m_alphamod_h), 0, m_alphamod_h - 1);
+        am = m_alphamod[az * m_alphamod_w + ax];
+      }
+      // the PC's (OceanTexture: the vertex alpha left out, alphamod's alpha only), the reference
+      // the 3DS is compared with; the PS2 also multiplies it by the vertex alpha / 128 (a)
+      (void)a;
+      t[3] = (u8)std::clamp(2.f * am, 0.f, 255.f);
+    }
+  }
   if (m_tex < 0) {
     m_tex = ctr_gpu_tex_create_mipmapped(N, N, m_texels.data());
   } else {
@@ -553,6 +929,11 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
   st.tcc = 1;
   st.filter = 1;
   st.blend = CTR_BLEND_ALPHA;
+  if (ctr_is_jak2() && m_have_lights) {
+    // (AI-assisted, j2water) the PS2's mid ocean is opaque; its texture's alpha weights the sky
+    // reflection (and the map's alpha is 0x80 everywhere)
+    st.blend = CTR_BLEND_OFF;
+  }
   st.atest = CTR_TEST_ALWAYS;
   st.ztest = CTR_TEST_GEQUAL;
   st.zwrite = 1;
@@ -650,6 +1031,39 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
     st.flags = CTR_STATE_STENCIL_OUT;
     ctr_gpu_prepare_mesh_matrix(m, &fd.clip);
   }
+  // (AI-assisted, j2water) Jak II's sky reflection (the PS2's env map pass, OceanMid L32): env map
+  // s, t = constants2 + (-0.25, -0.5) * (camera space x, y of the vertex direction) / its length,
+  // at the env map's texels (m_env_uv). The wave texture: one repeat per 96 m (512 mesh units),
+  // as the mesh's own coordinates
+  ctr_ocean_env_draw ed;
+  const bool env_on = m_env_ok && !waves_on;
+  bool env_used = false;
+  if (env_on) {
+    ctr_gpu_prepare_mesh_matrix(m, &ed.clip);
+    const float k = 1.f / 512.f;
+    const float t0[4] = {k, 0, 0, 0}, t1[4] = {0, 0, k, 0};
+    memcpy(ed.tex[0], t0, sizeof(t0));
+    memcpy(ed.tex[1], t1, sizeof(t1));
+    // d in meters: origin + pos * scale - camera
+    for (int i = 0; i < 3; i++) {
+      for (int j = 0; j < 4; j++) {
+        ed.dir[i][j] = 0;
+      }
+      ed.dir[i][i] = far_scale[i] / 4096.f;
+      ed.dir[i][3] = (float)((origin[i] - (double)cam.trans[i]) / 4096.0);
+    }
+    float c2[4];
+    memcpy(c2, &p.cam.itimes[3], sizeof(c2));
+    // u = c2.x - 0.25 * cx / |d|, v = c2.y - 0.5 * cy / |d| (cx, cy: d * camera-rot)
+    const float* uv = m_env_uv;
+    for (int r = 0; r < 2; r++) {
+      const float ku = uv[2 + r], kv = uv[4 + r];  // this coordinate per unit of u, of v
+      for (int i = 0; i < 3; i++) {
+        ed.env[r][i] = ku * -0.25f * cam.rot[i][0] + kv * -0.5f * cam.rot[i][1];
+      }
+      ed.env[r][3] = uv[r] + ku * c2[0] + kv * c2[1];
+    }
+  }
   for (const auto& tile : m_tiles) {
     const float s[4] = {tile.center[0] + p.start[0], p.start[1], tile.center[2] + p.start[2],
                         tile.radius};
@@ -663,17 +1077,25 @@ void CtrOceanRenderer::draw(const Packet& p, const CtrRenderState& rs) {
         continue;
       }
     }
+    const float tdx = s[0] - cam.trans[0], tdy = s[1] - cam.trans[1], tdz = s[2] - cam.trans[2];
     if (waves_on) {
       ocean_rows(fd, kScale, 0, 0, tile.center[0], tile.center[2]);
       ctr_gpu_ocean_draw(&st, m_shimmer, &fd, m_mesh, nullptr, nullptr, (int)tile.first_index,
                          (int)tile.index_count);
+    } else if (env_on &&
+               std::sqrt(tdx * tdx + tdy * tdy + tdz * tdz) - s[3] < kEnvTileDist) {
+      // (AI-assisted, j2water) with the sky reflection
+      ctr_gpu_ocean_env_draw(&st, m_env_rt, &ed, m_mesh, (int)tile.first_index,
+                             (int)tile.index_count);
+      env_used = true;
+      m_env_tiles++;
     } else {
       ctr_gpu_draw_mesh(&st, m, m_mesh, (int)tile.first_index, (int)tile.index_count);
     }
     m_tiles_drawn++;
     m_triangles += (int)tile.index_count / 3;
   }
-  if (waves_on) {
+  if (waves_on || env_used) {
     ctr_gpu_ocean_end();
   }
 }

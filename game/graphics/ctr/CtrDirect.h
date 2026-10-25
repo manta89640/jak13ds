@@ -66,6 +66,17 @@ class CtrDirect {
   void enable_minimap() { m_minimap = true; }
   void end_offscreen();
 
+  /*!
+   * (AI-assisted, j2water) Jak II's ocean env map (ocean-method-89, CtrOceanEnvJak2): the draws go
+   * to a 64 x 64 render target the caller has begun (ctr_gpu_rt_begin), GS pixel (X - XYOFFSET) /
+   * 16 at its logical point of the same coordinates; no depth test (the PS2's z buffer there isn't
+   * cleared), and the alpha test's FB_ONLY fails written (the clouds).
+   */
+  void enable_envmap() {
+    m_envmap = true;
+    m_allow_depth = false;
+  }
+
   struct Stats {
     int packets = 0;
     int triangles = 0;
@@ -92,6 +103,7 @@ class CtrDirect {
   // (AI-assisted) Jak II minimap (enable_minimap)
   bool m_minimap = false;
   bool m_offscreen = false;
+  bool m_envmap = false;  // (AI-assisted, j2water) enable_envmap
   u32 m_fbp = 408;
   bool m_alpha_only = false;  // (AI-assisted) FBMSK masks rgb
   float m_xyoff[2] = {0, 0};  // (AI-assisted) XYOFFSET - the screen's, GS pixels

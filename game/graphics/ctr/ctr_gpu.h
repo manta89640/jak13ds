@@ -669,6 +669,20 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
                         int index_count);
 void ctr_gpu_ocean_end(void);
 
+/* (AI-assisted, j2water) Jak II's ocean with the sky reflection (the PS2 env map pass in the same
+ * draw), platform/3ds/shaders/ctr_ocean_env.v.pica. Vertices in the static mesh layout:
+ *   rgb = fog(tex(st0) * color * 2) + env(st2) * a, a = tex.a * color.a * 2 (clamped to 1)
+ * with env on texture unit 2 (repeat, linear), st2 = dot(env row.xyz, d) / |d| + env row.w and
+ * d = dir rows . (pos, 1) (the vertex relative to the camera). ctr_gpu_ocean_end after the draws. */
+typedef struct {
+  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
+  float tex[2][4];      /* wave texture s, t = dot(row.xyz, pos) + row.w */
+  float dir[3][4];      /* d = dot(row.xyz, pos) + row.w */
+  float env[2][4];      /* env s, t (see above) */
+} ctr_ocean_env_draw;
+void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_ocean_env_draw* d,
+                            int mesh, int first_index, int index_count);
+
 /* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh_old.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)
  *   distance fog = (w * fog1.x - fog1.y) * fog1.z

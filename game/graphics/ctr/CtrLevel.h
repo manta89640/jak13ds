@@ -808,6 +808,9 @@ class CtrTfragRenderer : public CtrBucketRenderer {
    * kind): the first one in a frame that has the level's camera (TfragPcPortData) draws all of the
    * level's .c3l. */
   void render_jak2(DmaFollower& dma, CtrRenderState& rs, int slot);
+  /*! (AI-assisted, j2water) Jak II: the slot's water buckets: the level's blended and ordered
+   * draws of this frame, held back by draw_level (after the characters) */
+  void draw_jak2_late(const CtrRenderState& rs);
 
  private:
   void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
@@ -817,7 +820,13 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u32 m_late_in_view = 0;  // (AI-assisted, j2intro) draw_level: missing in view (note_late_in_view)
   // (AI-assisted, gpu-rt) static_cmdlists: a pass's draws, and each pass's command cache
   std::vector<ctr_mesh_call> m_calls;
-  ctr_cmd_cache* m_cmd_cache[2] = {nullptr, nullptr};
+  ctr_cmd_cache* m_cmd_cache[3] = {nullptr, nullptr, nullptr};  // (AI-assisted, j2water) 2: late
+  // (AI-assisted, j2water) Jak II: the blended draws held back (draw_jak2_late), their frame and fog
+  std::vector<ctr_mesh_call> m_late_calls;
+  bool m_late_collect = false;  // host: submit collects them instead of drawing
+  u64 m_late_frame = ~0ull;
+  float m_late_fog0[4] = {0, 0, 0, 0}, m_late_fog1[4] = {0, 0, 0, 0};
+  u8 m_late_fog_rgb[3] = {0, 0, 0};
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;

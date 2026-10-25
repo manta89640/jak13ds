@@ -32,15 +32,25 @@ namespace {
 /*! A background bucket of one level slot: hands its DMA to the slot's CtrTfragRenderer. */
 class CtrJak2BgBucket : public CtrBucketRenderer {
  public:
-  CtrJak2BgBucket(std::string name, int id, std::shared_ptr<CtrTfragRenderer> tfrag, int slot)
-      : CtrBucketRenderer(std::move(name), id), m_tfrag(std::move(tfrag)), m_slot(slot) {}
+  CtrJak2BgBucket(std::string name,
+                  int id,
+                  std::shared_ptr<CtrTfragRenderer> tfrag,
+                  int slot,
+                  bool water = false)
+      : CtrBucketRenderer(std::move(name), id), m_tfrag(std::move(tfrag)), m_slot(slot),
+        m_water(water) {}
   void render(DmaFollower& dma, CtrRenderState& rs) override {
     m_tfrag->render_jak2(dma, rs, m_slot);
+    if (m_water) {
+      // (AI-assisted, j2water) the level's blended draws, after the characters
+      m_tfrag->draw_jak2_late(rs);
+    }
   }
 
  private:
   std::shared_ptr<CtrTfragRenderer> m_tfrag;
   int m_slot;
+  bool m_water;  // (AI-assisted, j2water) one of the slot's water buckets
 };
 
 /*!
@@ -91,7 +101,6 @@ class CtrJak2VisBucket : public CtrBucketRenderer {
 }  // namespace
 
 void ctr_jak2_background_buckets(const CtrJak2BucketSet& set, CtrLevels* levels, CtrVram* vram) {
-  (void)vram;
   using B = jak2::BucketId;
   set(B::BUCKET_2, std::make_unique<CtrJak2VisBucket>("vis", (int)B::BUCKET_2, levels));
   // (AI-assisted) the ocean: the packet of ocean-3ds-packet (goal_src/jak2/engine/gfx/ocean/
@@ -99,6 +108,8 @@ void ctr_jak2_background_buckets(const CtrJak2BucketSet& set, CtrLevels* levels,
   // is the flat ocean too: the PS2 ocean's DMA isn't sent)
   if (ctr_settings().ocean) {
     set(B::OCEAN_NEAR, std::make_unique<CtrOceanRenderer>("ocean", (int)B::OCEAN_NEAR));
+    // (AI-assisted, j2water) the sky reflection's env map (ocean-3ds-envmap)
+    set(B::OCEAN_MID_FAR, std::make_unique<CtrOceanEnvJak2>("ocean", (int)B::OCEAN_MID_FAR, vram));
   }
   // the bucket of slot i: first + (second - first) * i (the slots' groups have the same layout)
   auto for_slot = [](B l0, B l1, int i) { return (B)((int)l0 + ((int)l1 - (int)l0) * i); };
@@ -128,7 +139,10 @@ void ctr_jak2_background_buckets(const CtrJak2BucketSet& set, CtrLevels* levels,
         levels);
     for (const auto& k : kKinds) {
       const B id = for_slot(k.l0, k.l1, i);
-      set(id, std::make_unique<CtrJak2BgBucket>(tfrag->name(), (int)id, tfrag, i));
+      // (AI-assisted, j2water) the water group (after the slot's merc buckets) draws the blended
+      // background held back
+      const bool water = (int)k.l0 >= (int)B::TFRAG_W_L0_WATER;
+      set(id, std::make_unique<CtrJak2BgBucket>(tfrag->name(), (int)id, tfrag, i, water));
     }
   }
 }

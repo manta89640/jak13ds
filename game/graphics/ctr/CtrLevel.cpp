@@ -5790,6 +5790,21 @@ void CtrTfragRenderer::render_jak2(DmaFollower& dma, CtrRenderState& rs, int slo
   log_stats(rs, lev);
 }
 
+// (AI-assisted, j2water) Jak II: the level's blended and ordered draws held back by draw_level, at
+// the slot's water buckets (after the merc buckets), with the level's fog of the frame
+void CtrTfragRenderer::draw_jak2_late(const CtrRenderState& rs) {
+  if (m_late_calls.empty() || m_late_frame != rs.frame_idx) {
+    m_late_calls.clear();
+    return;
+  }
+  ctr_gpu_set_mesh_fog(m_late_fog0, m_late_fog1, m_late_fog_rgb[0], m_late_fog_rgb[1],
+                       m_late_fog_rgb[2]);
+  ctr_gpu_draw_mesh_calls(m_late_calls.data(), (int)m_late_calls.size(), &m_cmd_cache[2]);
+  m_late_calls.clear();
+  ctr_gpu_set_mesh_nofog(0);
+  ctr_gpu_cull_reset();
+}
+
 void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
   if (rs.log_now && m_level_draws) {
     lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
@@ -7400,6 +7415,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
     ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
     auto submit = [&](u32 first, u32 count) {
+      if (m_late_collect) {
+        // (AI-assisted, j2water) Jak II's blended draws, drawn later (draw_jak2_late)
+        m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
+                           (int)count, vc.nofog ? 1 : 0});
+        return;
+      }
       ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], first,
                                  count);
     };
@@ -7537,7 +7558,23 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   walk(*main_lists[1]);
   impostors.draw_cards();  // (AI-assisted) opaque: before the blended draws
-  walk(*main_lists[2]);
+  if (m_jak2_slot >= 0) {
+    // (AI-assisted, j2water) Jak II: the blended and ordered draws (water, glass, decals) wait
+    // for the slot's water bucket (draw_jak2_late), after the characters (merc), as the PS2
+    // draws its translucent background groups after the opaque merc ones
+    flush_calls(0);
+    m_late_collect = true;
+    walk(*main_lists[2]);
+    m_late_collect = false;
+    m_late_calls.swap(m_calls);
+    m_calls.clear();
+    m_late_frame = rs.frame_idx;
+    memcpy(m_late_fog0, fog0, sizeof(m_late_fog0));
+    memcpy(m_late_fog1, fog1, sizeof(m_late_fog1));
+    memcpy(m_late_fog_rgb, rs.fog_color, sizeof(m_late_fog_rgb));
+  } else {
+    walk(*main_lists[2]);
+  }
   flush_calls(0);  // (AI-assisted, gpu-rt) static_cmdlists: the main pass's
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties

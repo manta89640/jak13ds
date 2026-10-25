@@ -446,7 +446,11 @@ void CtrDirect::handle_ad(const u8* data) {
       }
       break;
     case GsRegisterAddress::XYOFFSET_1:
-      if (m_minimap) {
+      if (m_envmap) {
+        // (AI-assisted, j2water) the env map's frame buffer: GS pixels from its corner
+        m_xyoff[0] = (float)(value & 0xffff) / 16.f;
+        m_xyoff[1] = (float)((value >> 32) & 0xffff) / 16.f;
+      } else if (m_minimap) {
         // (AI-assisted) the minimap's frame buffer is drawn with its own offset (DirectRenderer::
         // handle_xyoffset): window x = GS x - (ofx - 0x7000)
         m_xyoff[0] = ((float)(value & 0xffff) - (float)0x7000) / 16.f;
@@ -529,7 +533,9 @@ void CtrDirect::update_draw_state() {
   if (m_test.alpha_test_enable()) {
     st.atest = map_atest(m_test.alpha_test());
     st.aref = m_test.aref();
-    if (m_test.afail() != GsTest::AlphaFail::KEEP && st.atest == CTR_TEST_NEVER) {
+    if ((m_test.afail() != GsTest::AlphaFail::KEEP && st.atest == CTR_TEST_NEVER) ||
+        (m_envmap && m_test.afail() == GsTest::AlphaFail::FB_ONLY)) {
+      // (AI-assisted, j2water) the env map: no z buffer there, so FB_ONLY fails are written too
       // "never pass, but still write rgb/z": used to write only depth or only color. Draw.
       st.atest = CTR_TEST_ALWAYS;
     }
@@ -609,7 +615,11 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
       return;
     }
   }
-  if (m_offscreen) {
+  if (m_envmap) {
+    // (AI-assisted, j2water) the env map's 64 x 64 frame buffer: row 0 at ctr y = -1
+    b.x = (px - m_xyoff[0]) * (1.f / 32.f) - 1.f;
+    b.y = (py - m_xyoff[1]) * (1.f / 32.f) - 1.f;
+  } else if (m_offscreen) {
     // (AI-assisted) the minimap's frame buffer: GS x 1792..1920, y 1840..1968 (ProgressRenderer's
     // offscreen mode); its top row (the texture's row 0) at the render target's ctr y = -1
     b.x = (px - 1856.f) * (1.f / 64.f);
