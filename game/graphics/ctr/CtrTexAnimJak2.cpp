@@ -229,10 +229,25 @@ void CtrTexAnimJak2::clouds(const u8* data, int bytes, CtrVram* vram) {
   }
   // tex_anim.frag, enable_tex 2: rgb 0.5, alpha 0.5 * cloud_lookup of the 8-bit sum (0x80 = 1 in
   // the PS2's texture scale, like the PC's texture)
+  // (AI-assisted, j2gpu) The sum is an 8-bit value first, so the lookup (a sinf per texel: most of
+  // the update's 3 ms in Azahar) is made once per value: the same texels
   const int half = dim;
+  u32 ramp[256];
+  for (int i = 0; i < 256; i++) {
+    const float v = (float)i * (1.f / 255.f);
+    ramp[i] = 0x808080u | ((u32)std::lround(cloud_lookup(v, in.cloud_min, in.cloud_max) * 127.5f) << 24);
+  }
   for (int p = 0; p < dim * dim; p++) {
-    const float v = std::round(std::min(acc[p], 1.f) * 255.f) * (1.f / 255.f);
-    m_out[p] = 0x808080u | ((u32)std::lround(cloud_lookup(v, in.cloud_min, in.cloud_max) * 127.5f) << 24);
+    const float q = std::round(std::min(acc[p], 1.f) * 255.f);
+    if (q >= 0.f && q <= 255.f) {
+      m_out[p] = ramp[(int)q];
+    } else {
+      // (a negative sum: a layer's time past its end; or not a number) as before
+      m_out[p] = 0x808080u |
+                 ((u32)std::lround(cloud_lookup(q * (1.f / 255.f), in.cloud_min, in.cloud_max) *
+                                   127.5f)
+                  << 24);
+    }
   }
   vram->set_override((u32)in.cloud_dest, half, half, m_out.data());
   m_ms += ctr_gpu_time_ms() - t0;
