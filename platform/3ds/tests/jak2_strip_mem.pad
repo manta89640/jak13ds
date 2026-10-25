@@ -1,0 +1,18 @@
+# (AI-assisted) j2strip: Vin's room, then the strip mine (strip-start loads vinroom + strip: the
+# pair that left 128 KB of linear memory and 79 parts out). Shots on arrival and 10 s later;
+# [ctr] memory lines every 15 s.
+1000 continue vinroom-start
+1001 -
+1002 wait *target* target-stance
+1003 log stop: vinroom-start
+1004 pos *target*
+1300 continue strip-start
+1301 -
+1302 wait *target* target-stance
+1303 log stop: strip-start
+1304 pos *target*
+1400 shot shot_strip_start
+1700 shot shot_strip_later
+1701 pos *target*
+1702 log stop: end
+1900 exit

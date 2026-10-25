@@ -185,6 +185,11 @@ struct CtrLevelData {
   bool dormant_requested = false;  // a read of its freed chunks is queued
   u64 dormant_retry_frame = 0;     // after a failed one: not before this frame
   static constexpr u8 kDormFreed = 1, kDormReading = 2;
+  // (AI-assisted, j2strip) Jak II, linear memory short (CtrLevel.cpp "Distance freeing"): a shrub
+  // or tie chunk with a draw distance, its mesh left out (or freed) while the camera is far beyond
+  // that distance, read back by distance (being read)
+  static constexpr u8 kDistFreed = 3, kDistReading = 4;
+  bool dist_free = false;  // its load ran short of linear memory, or a load made room: on
   bool dormant_freed(size_t ci) const {
     return ci < chunk_dormant.size() && chunk_dormant[ci] != 0;
   }
@@ -458,6 +463,10 @@ class CtrLevels {
   /*! (AI-assisted, j2-mem) Jak II, render thread, each frame: the dormant levels' chunks freed
    * or read back by the camera's distance (CtrLevel.cpp "Dormant levels") */
   void dormant_update(u64 frame);
+  /*! (AI-assisted, j2strip) Jak II, render thread, each frame: the levels short of linear memory
+   * (dist_free): their chunks freed beyond their draw distance while the heap is short, read back
+   * by distance (CtrLevel.cpp "Distance freeing") */
+  void dist_update(u64 frame, u32 free_now);
   /*! (AI-assisted, streaming) render thread, each level draw: the camera position (game units) */
   void stream_note_camera(const math::Vector4f& trans,
                           const math::Vector4f planes[4],
@@ -582,6 +591,7 @@ class CtrLevels {
     bool detail = false;
     bool repair = false;
     bool dormant = false;  // (AI-assisted, j2-mem) with detail: a dormant level's chunks read back
+    bool dist = false;  // (AI-assisted, j2strip) with dormant: chunks freed by distance read back
     u32 generation = 0;
     std::string path;
     u32 vertex_data_offset = 0, index_data_offset = 0;
@@ -747,6 +757,14 @@ class CtrLevels {
   std::vector<Done> m_load_delayed;    // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS: the same
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
+  // (AI-assisted, j2strip) distance freeing: where the camera is and will be, and Jak (game
+  // units; n of them, 0: not known), for the render thread (dist_positions) and a copy the loader
+  // reads (m_lock: m_dist_snap)
+  int dist_positions(float pos[4][3]) const;
+  u64 dist_free_far(CtrLevelData& lev, const float pos[4][3], int np);
+  float m_dist_snap[4][3] = {};
+  int m_dist_snap_n = 0;
+  u64 m_dist_log_frame = 0;
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
   u64 m_lv_frame = 0;  // (AI-assisted, j2intro) note_late_in_view
