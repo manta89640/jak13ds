@@ -3027,6 +3027,13 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
 
 #define PARTIAL_MIN_DRAWS 24
 #define PARTIAL_MAX 6 /* citro3d's queue has 32 entries per frame */
+/* (AI-assisted, gpuopt) with the pipeline the GPU draws the frame before while this one is built,
+ * so splitting this one finely buys little: fewer, bigger parts. Each part costs the render
+ * thread a GSP cache flush request for its vertices (and, while the queue is idle, the submit:
+ * Azahar charges ~62 us for each request) and the GPU a framebuffer flush and invalidate
+ * (Haven City slums: 5-6 parts per frame with the limits above) */
+#define PIPE_PARTIAL_MIN_DRAWS 200
+#define PIPE_PARTIAL_MAX 2
 
 void ctr_gpu_free_pending_now(void) {
   if (!g.ready || g.in_frame) {
@@ -3049,8 +3056,9 @@ void ctr_gpu_set_overlap(int on) {
  * the queue, citro3d only runs it at the frame end otherwise). Draw order is kept: the queue runs
  * its entries in order, and the frame end adds the rest and the display transfer after them. */
 void ctr_gpu_submit_partial(void) {
-  if (!s_overlap || !g.ready || !g.in_frame || s_partials >= PARTIAL_MAX ||
-      g.cur.draws < s_partial_draws + PARTIAL_MIN_DRAWS) {
+  if (!s_overlap || !g.ready || !g.in_frame ||
+      s_partials >= (s_pipeline ? PIPE_PARTIAL_MAX : PARTIAL_MAX) ||
+      g.cur.draws < s_partial_draws + (s_pipeline ? PIPE_PARTIAL_MIN_DRAWS : PARTIAL_MIN_DRAWS)) {
     return;
   }
   if (s_pipeline) {
