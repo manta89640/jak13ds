@@ -461,6 +461,20 @@ variables stay `u64`. Reads promote the value back to `u64`, so expressions are 
 then drops the upper halves through phis and loops (64-bit compares of loop variables, the upper
 half of WIDE arguments: `gc_hi` of a `u32` is 0).
 
+### Measured (AI-assisted, Oct 25 2026, j2codegen)
+
+ABI 6 and the 32-bit locals together, with jak2-3ds f0ecc808da merged in.
+- **Code size:** Jak II gk.elf .text is 19.24 -> 17.97 MB.
+- **Azahar A/B, no measurable change.** One run each in a private instance (sound off), with
+  `jak2_city_long.pad`. The window is the 1800-frame city-stand window, standing in the slums.
+  - Baseline (f0ecc808da's goalc and runtime, same goal source): logic 22.6 ms (sd 0.9).
+  - New: logic 22.9 ms (sd 1.0).
+  - The sampled sections show no difference either: GOAL process code is only about 5 ms of the
+    frame there, and the rest is natives, the kernel and the renderer.
+  - The static estimate was -11% of hot instructions, about -1 to -1.5 ms. It did not show up
+    above the noise of about 1 ms between runs.
+- **Jak 1:** builds, and the CIA boots to the title.
+
 ## Known later work
 
 - Performance: function bodies still use `u64` for every GPR. Declaring locals whose types are all
