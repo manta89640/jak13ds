@@ -3935,6 +3935,11 @@ constexpr u32 kIdleBytes = 128 * 1024;
 // a unit needed now and in view goes this much ahead of the others (after a cut: what is on
 // screen first)
 constexpr float kInViewMeters = 300.f;
+// (AI-assisted, popin2) at the arena's capacity: a unit needed now frees units there whose priority
+// (StreamUnit::prio) is this much smaller than its own; in view a unit's priority counts this much
+// more; a unit taken this many frames ago or less is not freed so (no back and forth)
+constexpr float kPrioHyst = 1.5f, kInViewPrio = 1.5f;
+constexpr u64 kMinResidentFrames = 30;
 // a jump of the camera of more than this in a frame (a warp, a cut): no speed
 constexpr float kCutMeters = 40.f;
 // a stream job: at most this many file bytes, units (one level load waits for it at most this)
@@ -4348,17 +4353,26 @@ void CtrLevels::stream_update(u64 frame) {
   // of them. The empty segments back to the heap (their meshes' memory came back once the GPU was
   // done with it).
   const u32 reserve = (u32)ctr_settings().stream_reserve_kb * 1024u + m_stream_repair_room;
+  // (AI-assisted, popin2) while the growth is emptied for the heap (all of it freed), no new piece
+  // goes there. Before, the units read meanwhile went into the growth segments again and were freed
+  // the next frame, so a segment never emptied and the heap never got its memory back: Oct 25
+  // hardware log, rolling + village2 at 2.6 MB linear free (floor 3 MB) for minutes, 250-850 near
+  // chunks read and freed again per 15 s, needed ones late 0.5-1.7 s on average (up to 15 s)
+  bool drain = false;
   if (arena.has_growth()) {
     if (level_loading) {
       const u32 need = reserve + kLoadRoom;
       if (free_now < need) {
-        m_sst.shrunk += stream_shrink(free_now + 512 * 1024 < need);
+        drain = free_now + 512 * 1024 < need;
+        m_sst.shrunk += stream_shrink(drain);
       }
     } else if (free_now < reserve + kPressure) {
-      m_sst.shrunk += stream_shrink(free_now < reserve);
+      drain = free_now < reserve;
+      m_sst.shrunk += stream_shrink(drain);
     }
     arena.release_empty();
   }
+  arena.set_draining(drain);
   m_want.clear();
   m_have.clear();
   m_idle.clear();
@@ -4460,6 +4474,7 @@ void CtrLevels::stream_update(u64 frame) {
       // far the camera (now or where it goes) is beyond the nearest group's near distance
       const bool resident = su.state == CtrLevelData::kUnitResident;
       su.urgent = false;
+      su.prio = 0.f;
       if (k <= 0) {
         if (resident) {
           m_have.push_back({&lev, u, 1e30f});
@@ -4490,8 +4505,10 @@ void CtrLevels::stream_update(u64 frame) {
       // (AI-assisted, lodnear) with the PS2 floor, a unit needed only by it (its groups' far
       // versions within tie_lod_px there) is less urgent than one whose groups' far versions
       // would show: those first, and they may take the others' room at capacity
-      const bool floor_on = lev.lod_floor_k > 0 && lev.lod_error.size() == lev.lod_groups.size();
+      const bool has_err = lev.lod_error.size() == lev.lod_groups.size();
+      const bool floor_on = lev.lod_floor_k > 0 && has_err;
       bool urgent = !floor_on;
+      float prio = 0.f;  // (AI-assisted, popin2) StreamUnit::prio before the in-view factor
       if (!lev.unit_group_first.empty()) {
         float best = 1e30f;
         for (u32 j = lev.unit_group_first[u]; j < lev.unit_group_first[u + 1]; j++) {
@@ -4509,6 +4526,15 @@ void CtrLevels::stream_update(u64 frame) {
             const float lim_e = lev.lod_error[g] * k + lg.bsphere[3];
             urgent = g2 < lim_e * lim_e;
           }
+          if (has_err) {
+            // (AI-assisted, popin2) its far version's error from the camera now (not the lead
+            // positions: a unit needed only ahead is read when there is room, and frees nothing),
+            // in units of the switch's (shape error x k at the distance to the group's surface)
+            const float dx = pp[0][0] - lg.bsphere[0], dy = pp[0][1] - lg.bsphere[1],
+                        dz = pp[0][2] - lg.bsphere[2];
+            const float ds = std::sqrt(dx * dx + dy * dy + dz * dz) - lg.bsphere[3];
+            prio = std::max(prio, lev.lod_error[g] * k / std::max(ds, kM));
+          }
           // (beyond best already: no root)
           const float bl = best + lim;
           if (best < 1e29f && bl > 0 && g2 >= bl * bl) {
@@ -4523,14 +4549,20 @@ void CtrLevels::stream_update(u64 frame) {
       }
       su.last_score = score;
       su.urgent = urgent && score < 0;
+      const bool view = (resident || score < 0) && !hidden && in_view(c);
+      su.prio = prio * (view ? kInViewPrio : 1.f);
       if (resident) {
         m_have.push_back({&lev, u, score});
       } else if (score < want_m) {
         // (needed now and on screen: first; (AI-assisted, lodnear) then the urgent ones; title3:
-        // not for hidden levels)
-        const float prio = (score < 0 && !hidden && in_view(c) ? score - kInViewMeters * kM : score) -
-                           (su.urgent ? kInViewMeters * kM : 0.f);
-        m_want.push_back({&lev, u, prio});
+        // not for hidden levels). (AI-assisted, popin2) with shape errors: the needed ones by
+        // priority, the most first (where the far versions show most), then the others by score
+        const float key =
+            has_err && score < 0
+                ? -kM * (1.f + 100.f * su.prio)
+                : (score < 0 && view ? score - kInViewMeters * kM : score) -
+                      (su.urgent ? kInViewMeters * kM : 0.f);
+        m_want.push_back({&lev, u, key});
         if (!su.want_frame) {
           su.want_frame = frame;
         }
@@ -4560,6 +4592,8 @@ void CtrLevels::stream_update(u64 frame) {
   std::sort(m_want.begin(), m_want.end(),
             [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
   bool have_sorted = false;
+  bool prio_sorted = false;  // (AI-assisted, popin2) m_have_prio made, pi: its next unit
+  size_t pi = 0;
   u64 evicted = 0;  // bytes freed now (back after the GPU is done with them: no growth for those)
   CtrLevelData& lev = *m_want[0].lev;
   Job job;
@@ -4656,6 +4690,46 @@ void CtrLevels::stream_update(u64 frame) {
         freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
         evicted += victim.bytes;
         stream_evict(*m_have[j].lev, m_have[j].unit);
+        mem = arena.alloc(su.bytes);
+      }
+    }
+    // (AI-assisted, popin2) still none and needed now: the units there whose groups' far versions
+    // would show kPrioHyst x less than this one's (StreamUnit::prio), the least first, not one
+    // taken within kMinResidentFrames. The hardware log (Oct 25: rolling + village2, swamp,
+    // lavatube) had the needed near data larger than the arena most of the time (needed 4-8 MB, the
+    // arena 5-8 MB at the linear heap's floor) and every unit there urgent: a needed unit waited
+    // for room until the camera went away from others, on average 0.5-2 s and up to 15 s, its
+    // groups drawn far meanwhile, then switched near on screen up close. At capacity the arena
+    // now holds what shows most: a group left far for want of room is one whose far version shows
+    // little, and it comes when it shows more than what is there, at about the same error
+    if (!mem && evicted < su.bytes && w.score < 0 && su.prio > 0) {
+      if (!prio_sorted) {
+        m_have_prio.clear();
+        for (const auto& h : m_have) {
+          const auto& hu = h.lev->stream_units[h.unit];
+          if (hu.state == CtrLevelData::kUnitResident) {
+            m_have_prio.push_back({h.lev, h.unit, hu.prio});
+          }
+        }
+        std::sort(m_have_prio.begin(), m_have_prio.end(),
+                  [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
+        prio_sorted = true;
+      }
+      u64 freed_for = 0;
+      for (; !mem && pi < m_have_prio.size() && freed_for < su.bytes; pi++) {
+        const auto& h = m_have_prio[pi];
+        auto& victim = h.lev->stream_units[h.unit];
+        if (h.score * kPrioHyst >= su.prio) {
+          break;  // (the rest have more)
+        }
+        if (victim.state != CtrLevelData::kUnitResident ||
+            frame < victim.resident_frame + kMinResidentFrames) {
+          continue;
+        }
+        freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
+        evicted += victim.bytes;
+        stream_evict(*h.lev, h.unit);
+        m_sst.prio_evictions++;
         mem = arena.alloc(su.bytes);
       }
     }
@@ -4945,6 +5019,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
     verts += nv;
     lev->meshes[ci] = o.mesh;
     su.state = CtrLevelData::kUnitResident;
+    su.resident_frame = frame;  // (AI-assisted, popin2)
     g_pop.taken++;  // (AI-assisted, title3: CTR_POP_LOG)
     su.want_frame = 0;
     su.loads++;
@@ -5072,7 +5147,8 @@ void CtrLevels::stream_log() {
            "freed for it); {} "
            "jobs, {} near chunks read ({} KB, {} KB of their blocks; file {} KB in {} reads, {} of "
            "{} ranges in one request, {:.0f} ms reading, {:.0f} ms decoding, {:.0f} "
-           "ms in jobs, longest {:.0f} ms; {:.0f} KB/s), {} freed, {} times no room; late: {} "
+           "ms in jobs, longest {:.0f} ms; {:.0f} KB/s), {} freed ({} for a needed one of more "
+           "priority), {} times no room; late: {} "
            "times, {} frames with groups drawn far for it ({} group frames), {:.0f} ms on "
            "average, at most {:.0f} ms ({} frames); needed now {:.0f} KB on average, at most "
            "{} KB; {} read with their file neighbours; linear free least {} KB ({} while a "
@@ -5084,7 +5160,8 @@ void CtrLevels::stream_log() {
            m_sst.read_bytes / 1024, m_sst.reads, m_sst.preloads,
            m_sst.preloads + m_sst.preload_misses,
            m_sst.read_ms, m_sst.decode_ms, m_sst.job_ms, m_sst.job_max_ms,
-           secs > 0 ? m_sst.read_bytes / 1024.0 / secs : 0.0, m_sst.evictions, m_sst.no_room,
+           secs > 0 ? m_sst.read_bytes / 1024.0 / secs : 0.0, m_sst.evictions,
+           m_sst.prio_evictions, m_sst.no_room,
            m_sst.late_events, m_sst.late_frames, m_sst.late_group_frames,
            m_sst.late_periods ? m_sst.late_ms_total / m_sst.late_periods : 0.0,
            m_sst.late_ms_max, m_sst.late_frames_max, m_sst.need_sum / n / 1024.0,

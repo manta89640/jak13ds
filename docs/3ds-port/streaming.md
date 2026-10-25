@@ -110,6 +110,25 @@ groups, 50 m: 4.2 / 6.3 Snowy).
   when the arena has none, the units furthest beyond their need (score > 40 m) are freed
   (`ctr_gpu_mesh_delete`: the piece comes back once the GPU is done with it) until it fits, else
   the arena grows (below), else the unit waits (statistics: no room).
+- (AI-assisted, popin2, Oct 25) **Priority at capacity.** Each unit has a priority
+  (`StreamUnit::prio`): the largest of its groups' `e_g x k / (distance to the group's surface)`
+  from the camera now. 1 means the switch distance (tie_lod_px of error); a unit in view counts
+  1.5x. Needed units of levels with shape errors are read in priority order, most first. When a
+  needed unit still has no room after the steps above, it frees units whose priority is 1.5x lower
+  than its own, least first, but not units taken within the last 30 frames.
+  - Why: in the Oct 25 hardware log (swamp + village2, lavatube + village3), the near data needed
+    now was larger than the arena most of the time (6-7 MB needed, 8 MB arena), and every unit
+    there was urgent. A needed unit waited until the camera left another unit's area: 0.5-3.4 s on
+    average, up to 10 s. Its groups stayed far meanwhile and then switched on screen up close.
+  - Now a group left far for lack of room is one whose far version shows little. It comes in once
+    it shows more than what is there.
+- (AI-assisted, popin2) **Draining.** While the linear heap is below its floor, all of the
+  arena's growth units are freed so the growth segments can go back to the heap. While that
+  happens, `CtrStreamArena::alloc` takes no piece in a growth segment (`set_draining`).
+  - The bug: units read meanwhile went into the growth segment and were freed the next frame, so
+    the segment never emptied.
+  - Hardware log, rolling + village2, 2.6 MB free under a 3 MB floor for minutes: 250-850 near
+    chunks read and freed again per 15 s, needed ones late 0.4-1.7 s on average, up to 15 s.
 - The loader (`run_stream_job`) reads each run of parts that lie together in the file (across gaps
   of up to 48 KB of vertices / 16 KB of indices) with one request per section
   (`c3l::Reader::preload`: the run's blocks into a window), then each part's indices and vertices

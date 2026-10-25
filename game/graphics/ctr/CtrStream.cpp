@@ -52,8 +52,11 @@ void* CtrStreamArena::alloc(u32 bytes) {
   bytes = (std::max<u32>(bytes, kAlign) + kAlign - 1) & ~(kAlign - 1);
   std::lock_guard<std::mutex> lk(m_lock);
   m_allocs++;
-  // first fit, the first segment first (the pieces are 10-300 KB)
-  for (auto& s : m_segs) {
+  // first fit, the first segment first (the pieces are 10-300 KB); (AI-assisted, popin2) only the
+  // first while the growth is being emptied: a piece put there would be freed again at once
+  const size_t nsegs = m_draining ? std::min<size_t>(m_segs.size(), 1) : m_segs.size();
+  for (size_t si = 0; si < nsegs; si++) {
+    auto& s = m_segs[si];
     for (auto it = s.free.begin(); it != s.free.end(); ++it) {
       if (it->second < bytes) {
         continue;
