@@ -61,6 +61,8 @@ MODULES = {
     ],
 }
 
+# (AI-assisted) the oldest goal_c_ops.h version the fixtures compile with (ABI 6 changed the module
+# shape, not the calling convention: fixtures from either version work with the ABI 6 header)
 ABI_VERSION = 5
 
 
@@ -112,6 +114,12 @@ def main():
                 r"(r\d+) = GC_SEG_ADDR\(0, (\d+)\);\n  gc_st_u32\(gc_stl, GC_SYMOFF\((\d+)\), \1\);",
                 src):
             binds[sym_names[int(k)][1:-1]] = int(off)
+        # (AI-assisted) ABI 6: symbol values are set through gc_ctx.sym
+        for r, off, k in re.findall(
+                r"(r\d+) = GC_SEG_ADDR\(0, (\d+)\);\n  gc_symv_set\((\d+), \1\);", src):
+            binds[sym_names[int(k)][1:-1]] = int(off)
+        ctx_m = re.search(r"^static struct \{\n.*?^\} gc_ctx;\n(?:#define .*\n)*", src, re.S | re.M)
+        after_m = re.search(r"^static void gc_after_link\(void\) \{\n.*?^\}\n", src, re.S | re.M)
         funcs = functions(src)
         entries = []
         body = []
@@ -131,20 +139,22 @@ def main():
             '#include "goal_c_ops.h"',
             '#include "goalc_ref.h"',
             "",
-            f'_Static_assert(GOALC_ABI_VERSION == {ABI_VERSION}, "regenerate the fixtures (extract.py)");',
+            f'_Static_assert(GOALC_ABI_VERSION >= {ABI_VERSION}, "regenerate the fixtures (extract.py)");',
             "",
             # guarded direct calls (ABI 4) are never taken: every call goes through the symbol's
             # value, which the harness points at the reference or a fake
             *[f"#define GC_T{k} gc_nofn" for k in sorted(
                 {int(t) for b in body for t in re.findall(r"\bGC_T(\d+)\b", b)})],
             "",
-            f"static int32_t gc_sym_offsets[{n_syms}];",
-            "static uint32_t gc_seg_base[3];",
+            *([ctx_m.group(0).rstrip("\n")] if ctx_m else
+              [f"static int32_t gc_sym_offsets[{n_syms}];", "static uint32_t gc_seg_base[3];"]),
             f"static const char* const gc_sym_names[{n_syms}] = {{",
         ]
         lines += [f"  {s}," for s in sym_names]
         lines += ["};", ""]
         lines += body
+        if after_m:
+            lines += after_m.group(0).split("\n")
         lines.append(f"static const uint8_t gc_seg0[{len(seg)}] = {{")
         for i in range(0, len(seg), 16):
             lines.append("  " + " ".join(f"0x{b:02x}," for b in seg[i:i + 16]))
@@ -155,7 +165,8 @@ def main():
         lines += ["};", ""]
         lines.append(f"const GoalcRefModule goalc_ref_{c_ident(mod)} = {{")
         lines.append(f'  "{mod}", {n_syms}, gc_sym_names, gc_sym_offsets, gc_seg_base, gc_seg0, '
-                     f"{len(seg)}, {len(entries)}, gc_ref_funcs}};")
+                     f"{len(seg)}, {len(entries)}, gc_ref_funcs, "
+                     f"{'gc_after_link' if after_m else '0'}}};")
         path = os.path.join(out_dir, c_ident(mod) + ".c")
         with open(path, "w") as f:
             f.write("\n".join(lines) + "\n")

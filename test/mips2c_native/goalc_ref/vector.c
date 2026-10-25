@@ -4,7 +4,7 @@
 #include "goal_c_ops.h"
 #include "goalc_ref.h"
 
-_Static_assert(GOALC_ABI_VERSION == 5, "regenerate the fixtures (extract.py)");
+_Static_assert(GOALC_ABI_VERSION >= 5, "regenerate the fixtures (extract.py)");
 
 #define GC_T2 gc_nofn
 

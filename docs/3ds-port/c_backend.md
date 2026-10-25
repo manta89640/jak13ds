@@ -463,6 +463,54 @@ often hoisted out of loops). Not measured on hardware yet.
   unaligned-safe `ldr` pairs; 128-bit accesses are 16-byte aligned on x86 (`movaps`), so VLDR's
   word alignment holds.
 
+### Module context and symbol value pointers (ABI version 6)
+
+(AI-assisted, Oct 24 2026, branch j2codegen) The calling convention is the same as version 5;
+version 6 changes the module's link-time state:
+
+- Each module keeps it in one struct, `gc_ctx` (`CModuleEmitter::finish`): copies of `goalc_mem`
+  and `goalc_st`, the host address of each referenced symbol's value (`sym[k]`), the segment bases
+  and the symbol offsets (`gc_sym_offsets` / `gc_seg_base` are macros for its fields, and the
+  runtime's linker fills them as before). A function reaches all of it from one literal address
+  (before: `goalc_mem`, `goalc_st`, `gc_sym_offsets` and `gc_seg_base` were four).
+- Loads and stores of symbol values are `gc_symv_u32(k)` / `gc_symv_s32(k)` / `gc_symv_set(k, v)`:
+  a load of `sym[k]` and the access. Before, a symbol value was `goalc_mem + st + offset[k]`
+  (Jak 2: `- 1`), an add or two more per access and two registers kept live for the bases.
+- `GoalCModule.after_link` (new, last field): the runtime calls it after filling `sym_offsets` and
+  `seg_base`; the module's `gc_after_link` copies the bases and computes `sym[k]` (Jak 2 and
+  later: the symbol's address - 1, Symbol4.h). Symbols never move, and every relink (module
+  instances, heap init) calls it again.
+- The mips2c-native test fixtures (`test/mips2c_native/goalc_ref`) are ABI 5 code; they compile
+  with the version 6 header (the old accessors are still there), `extract.py` handles both shapes.
+
+### 32-bit locals (AI-assisted, Oct 24 2026, j2codegen)
+
+GPR variables whose every write stores a value below 2^32 are declared `u32` instead of `u64`
+(`CFunctionEmitter::narrow_vars`). No type assumption: each `do_codegen_c` says what its write
+stores (`write_is_32`: zero-extending loads of 1-4 bytes, symbol values, symbol / static / stack /
+function addresses, constants below 2^32, address-typed parameters; `write_is_32_if_all`: moves,
+`or`, `xor`, right shifts; `write_is_32_if_any`: `and`), every other write may need 64 bits
+(call results, sign-extending loads, arithmetic, float bits...). The greatest fixed point over a
+function is exact by induction: every variable starts at 0 and every write keeps it below 2^32.
+Variables whose address is taken, `volatile` stack variables, the special registers and mixed-class
+variables stay `u64`. Reads promote the value back to `u64`, so expressions are unchanged; GCC
+then drops the upper halves through phis and loops (64-bit compares of loop variables, the upper
+half of WIDE arguments: `gc_hi` of a `u32` is 0).
+
+### Measured (AI-assisted, Oct 25 2026, j2codegen)
+
+ABI 6 and the 32-bit locals together, with jak2-3ds f0ecc808da merged in.
+- **Code size:** Jak II gk.elf .text is 19.24 -> 17.97 MB.
+- **Azahar A/B, no measurable change.** One run each in a private instance (sound off), with
+  `jak2_city_long.pad`. The window is the 1800-frame city-stand window, standing in the slums.
+  - Baseline (f0ecc808da's goalc and runtime, same goal source): logic 22.6 ms (sd 0.9).
+  - New: logic 22.9 ms (sd 1.0).
+  - The sampled sections show no difference either: GOAL process code is only about 5 ms of the
+    frame there, and the rest is natives, the kernel and the renderer.
+  - The static estimate was -11% of hot instructions, about -1 to -1.5 ms. It did not show up
+    above the noise of about 1 ms between runs.
+- **Jak 1:** builds, and the CIA boots to the title.
+
 ## Known later work
 
 - Performance: function bodies still use `u64` for every GPR. Declaring locals whose types are all
