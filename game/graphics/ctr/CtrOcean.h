@@ -29,12 +29,34 @@
  *    and crests brighter / troughs darker (ctr_ocean.v.pica).
  */
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "common/common_types.h"
 
 #include "game/graphics/ctr/CtrRenderer.h"
+
+class CtrDirect;
+class CtrVram;
+
+/*!
+ * (AI-assisted, j2water) Jak II's ocean sky reflection, part 1: the env map ocean-method-89 draws
+ * (ocean-3ds-envmap, goal_src/jak2/engine/gfx/ocean/ocean.gc: the sky color, the sun and moon
+ * glows, the haze and the lit clouds, seen from above), its GS packets in the ocean-mid-far bucket
+ * every second frame. CtrDirect draws them into a 64 x 64 render target, up to the packets that
+ * set the next frame buffer (ocean-method-83's warp, done by CtrOceanRenderer). The other frames
+ * keep the last one.
+ */
+class CtrOceanEnvJak2 : public CtrBucketRenderer {
+ public:
+  CtrOceanEnvJak2(std::string name, int id, CtrVram* vram);
+  ~CtrOceanEnvJak2() override;
+  void render(DmaFollower& dma, CtrRenderState& rs) override;
+
+ private:
+  std::unique_ptr<CtrDirect> m_direct;
+};
 
 class CtrOceanRenderer : public CtrBucketRenderer {
  public:
@@ -84,6 +106,23 @@ class CtrOceanRenderer : public CtrBucketRenderer {
   float m_time = 0;            // shimmer scroll time (ms), stops while the waves do
   double m_last_ms = 0;
   float m_last_h[2] = {0, 0};  // two wave heights of the last frame (paused when the same)
+  // (AI-assisted, j2water) Jak II's sky reflection: the env map (64 x 64 render target: the warp
+  // of CtrOceanEnvJak2's, or the environment-ocean texture without the sky) times env-color
+  bool update_env_jak2(const Packet& p, const CtrRenderState& rs);
+  void update_alphamod(u64 tex0, const CtrRenderState& rs);
+  void update_texture_jak2(const u8* ee, u32 heights, bool shade);
+  float m_lights[7][4];  // the packet's vu-lights (Jak II)
+  bool m_have_lights = false;
+  std::vector<u8> m_alphamod;  // environment-ocean-alphamod's alpha
+  int m_alphamod_w = 0, m_alphamod_h = 0;
+  u64 m_alphamod_tex0 = 0, m_alphamod_frame = 0;
+  int m_env_rt = -1;
+  float m_env_uv[6] = {0, 0, 0, 0, 0, 0};  // s, t at (0, 0); per unit of u; per unit of v
+  u64 m_env_made_from = ~0ull;  // CtrOceanEnvJak2's frame the env map was warped from
+  u64 m_env_static = 0;         // the environment-ocean tex0 it was copied from (no sky)
+  float m_env_color[3] = {-1, -1, -1};
+  bool m_env_ok = false;        // this frame: draw with the reflection
+  int m_env_tiles = 0;          // statistics: tiles drawn with it
   // the near grid's CPU time, logged once per level
   int m_near_frames = 0;
   double m_near_ms = 0;

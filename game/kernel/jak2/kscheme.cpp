@@ -1598,6 +1598,26 @@ bool pad_script_position(const char* name, float* xyz) {
   return true;
 }
 
+//! (AI-assisted) "tod H": the game's clock to hour H, as the time-of-day process's 'change 'hour
+//! event does (time-of-day.gc): the next day's hour H on *display*'s bg-clock (18000 time-frames
+//! an hour); the process reads the clock in its next tick. For time of day pictures of a view.
+void pad_script_tod(float hour) {
+  auto sym = find_symbol_from_c("*display*");
+  if (!sym.offset || !is_goal_basic(sym->value())) {
+    lg::warn("[pad script] tod: no *display*");
+    return;
+  }
+  // display bg-clock: layout offset 76 (a clock); clock frame-counter: offset 24 (s64)
+  const u32 clock = *Ptr<u32>(sym->value() + 76 - 4);
+  if (!is_goal_basic(clock)) {
+    lg::warn("[pad script] tod: no bg-clock");
+    return;
+  }
+  constexpr s64 kDay = 0x69780;  // 24 * 18000
+  s64& counter = *Ptr<s64>(clock + 24 - 4).c();
+  counter = counter - counter % kDay + kDay + (s64)(hour * 18000.f);
+}
+
 //! (pad-script-continue NAME) (goal_src/jak2/pc/features/speedruns.gc): a new game at that
 //! continue point, from anywhere including the title screen.
 void pad_script_continue(const char* name) {
@@ -1726,6 +1746,7 @@ void pad_script_call(const std::string& fn, const std::vector<std::string>& args
 
 void install_pad_script_hooks() {
   pad_script::set_call_hook(pad_script_call);
+  pad_script::set_tod_hook(pad_script_tod);
   pad_script::set_print_symbol_hook(pad_script_print_symbol);
   pad_script::set_exit_hook(pad_script_exit);
   pad_script::set_continue_hook(pad_script_continue);
