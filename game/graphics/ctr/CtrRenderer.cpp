@@ -169,6 +169,13 @@ const AbSwitch kAbSwitches[] = {
        s.mip_bias = on ? kConfigBias : 0.f;
      },
      [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
+    // (AI-assisted, fidelity2) envmap_min_px: the config's limit (on; 16 when it says 0) or 0 (off)
+    {"envmap_min_px",
+     [](CtrSettings& s, bool on) {
+       static const float kConfigPx = s.envmap_min_px > 0.f ? s.envmap_min_px : 16.f;
+       s.envmap_min_px = on ? kConfigPx : 0.f;
+     },
+     [](const CtrSettings& s) { return s.envmap_min_px > 0.f; }},
     {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
      [](const CtrSettings& s) { return s.skin_rows_f24; }},
     // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config

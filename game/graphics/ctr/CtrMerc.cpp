@@ -354,10 +354,10 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   if (rs.log_now && m_stats.models) {
     lg::debug("[ctr] {}: {} models ({} missing, {} with bad bones, {} with the generated low LOD), "
-              "{} draws, {} envmap batches, {} draws sorted by texture, {} with back faces culled "
+              "{} draws, {} envmap batches ({} shine draws left out: envmap_min_px), {} draws sorted by texture, {} with back faces culled "
               "({} not: mirroring bone), {} palette bones not sent, {} draws with fog",
               m_name, m_stats.models, m_stats.missing, m_stats.bad_bones, m_stats.gen_lod,
-              m_stats.draws, m_stats.env_batches, m_stats.sorted_draws, m_stats.culled,
+              m_stats.draws, m_stats.env_batches, m_stats.env_small, m_stats.sorted_draws, m_stats.culled,
               m_stats.mirrored, m_stats.unsent_bones, m_stats.fogged);
     m_stats = Stats();
   }
@@ -1240,6 +1240,30 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
 #endif
     }
   }
+  // (AI-assisted, fidelity2) envmap_min_px: the model's size on the top screen (its bounding
+  // sphere's diameter: 2 x the quantization range x the first bone's scale, over w, as x/w spans
+  // the 400 pixels), worked out at its first envmap draw; below the limit no shine pass
+  int env_small = -1;  // -1: not worked out yet
+  auto env_too_small = [&]() -> bool {
+    if (env_small < 0) {
+      env_small = 0;
+      if (cs.envmap_min_px > 0.f && !(flags.bitflags & 8) && i > 0 && slots[0] < 128) {
+        const math::Vector4f* t = bones[slots[0]]->tmat;
+        const float* cw = m_clip + 12;
+        const float w = -(cw[0] * t[3].x() + cw[1] * t[3].y() + cw[2] * t[3].z()) + cw[3];
+        float col = 0;
+        for (int c = 0; c < 3; c++) {
+          col = std::max(col, t[c].x() * t[c].x() + t[c].y() * t[c].y() + t[c].z() * t[c].z());
+        }
+        const float sx = std::sqrt(m_clip[0] * m_clip[0] + m_clip[1] * m_clip[1] +
+                                   m_clip[2] * m_clip[2]);
+        const float px = 2.f * model->scale * 32767.f * std::sqrt(col) * sx * 200.f;
+        // behind the camera or nearer than its size: keep it
+        env_small = w > 0.f && px < cs.envmap_min_px * w ? 1 : 0;
+      }
+    }
+    return env_small == 1;
+  };
   for (const auto& draw : *draws) {
     if (!(flags.enable_mask & (1ull << draw.effect))) {
       continue;
@@ -1248,6 +1272,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     float fade[4] = {0, 0, 0, 0};
     if (envmap) {
       if (draw.effect >= effect_count || !cs.envmap) {
+        continue;
+      }
+      if (env_too_small()) {
+        m_stats.env_small++;
         continue;
       }
       const u8* f = fades + 4 * draw.effect;

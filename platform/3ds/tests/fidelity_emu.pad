@@ -1,0 +1,43 @@
+# (AI-assisted, fidelity2) Azahar: mip_bias and envmap_min_px on/off pictures of the same views
+# (pad "set"), with tex_half as config.ini says; village1 (hut) and village2 (rock village)
+0 wait *target* target-title-wait
+10 continue village1-hut
+11 wait *target* target-continue
+12 wait *target* target-stance
+13 tod 12
+13 log FID village1
+300 shot fid_v1_on
+301 set mip_bias off
+302 set envmap_min_px off
+330 shot fid_v1_off
+331 set mip_bias on
+332 set envmap_min_px on
+340 rx=200
+400 -
+460 shot fid_v1b_on
+461 set mip_bias off
+462 set envmap_min_px off
+490 shot fid_v1b_off
+491 set mip_bias on
+492 set envmap_min_px on
+800 log FID-end village1
+810 continue village2-start
+811 wait *target* target-continue
+812 wait *target* target-stance
+813 tod 12
+813 log FID village2
+1100 shot fid_v2_on
+1101 set mip_bias off
+1102 set envmap_min_px off
+1130 shot fid_v2_off
+1131 set mip_bias on
+1132 set envmap_min_px on
+1140 rx=60
+1200 -
+1260 shot fid_v2b_on
+1261 set mip_bias off
+1262 set envmap_min_px off
+1290 shot fid_v2b_off
+1291 set mip_bias on
+1292 set envmap_min_px on
+1700 log FID-end village2
