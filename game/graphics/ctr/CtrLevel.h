@@ -7,6 +7,7 @@
  * <project>/out/jak1/c3l and draws them from the tfrag buckets with the camera the game sends.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -344,6 +345,33 @@ struct CtrLevelData {
   // the file's header and block directory, for the stream jobs' readers (no reads of them)
   std::shared_ptr<const c3l::Reader::Dir> file_dir;
   bool is_unit(size_t ci) const { return !chunk_unit.empty() && chunk_unit[ci] != UINT32_MAX; }
+  // (AI-assisted, j2vis) c3l v20 prototype visibility (c3l::ProtoVis): the prototypes Jak II hides
+  // by task state, each with its runs (vis_runs indices, sorted) and the chunks they are in. The
+  // game names the hidden ones every frame (pc-add-tie-vis-mask / pc-add-shrub-vis-mask packets,
+  // CtrTfragRenderer::proto_vis_scan); their runs aren't drawn (draw_level, emit_chunk).
+  struct ProtoVis {
+    std::string name;
+    u16 kind = 0;  // c3l::kProtoTie / kProtoShrub
+    bool hidden = false;
+    std::vector<u32> runs;
+    std::vector<u32> chunks;
+  };
+  std::vector<ProtoVis> protos;
+  // run r is one of a toggled prototype's (hidden or not)
+  bool proto_run(u32 r) const {
+    for (const auto& p : protos) {
+      if (std::binary_search(p.runs.begin(), p.runs.end(), r)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  // the game's last packets applied (tie, shrub; bytes as sent) and whether one came yet
+  std::string proto_mask[2];
+  bool proto_mask_seen[2] = {false, false};
+  // the hidden prototypes' runs (sorted) and per chunk whether it has some (empty: none hidden)
+  std::vector<u32> proto_hidden_runs;
+  std::vector<u8> chunk_proto_hidden;
 };
 
 /*! (AI-assisted) host --ctr-gfx with env CTR_FINE_VIS_CHECK: the level pieces fine_vis hid this
@@ -811,8 +839,19 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   /*! (AI-assisted, j2water) Jak II: the slot's water buckets: the level's blended and ordered
    * draws of this frame, held back by draw_level (after the characters) */
   void draw_jak2_late(const CtrRenderState& rs);
+  /*! (AI-assisted, j2vis) Jak II: the slot's tie and shrub buckets (tie-lN-tfrag, shrub-lN-shrub),
+   * where the game sends the names of the prototypes it hides (c3l v20 prototype visibility). */
+  void set_jak2_proto_buckets(int tie_bucket, int shrub_bucket) {
+    m_proto_bucket[0] = tie_bucket;
+    m_proto_bucket[1] = shrub_bucket;
+  }
 
  private:
+  // (AI-assisted, j2vis) the game's hidden prototype names this frame (the packet after the
+  // TfragPcPortData one in the slot's tie / shrub bucket) applied to the level's prototype runs
+  void proto_vis_scan(CtrLevelData& lev, const CtrRenderState& rs);
+  int m_proto_bucket[2] = {-1, -1};
+  u64 m_proto_tris = 0, m_proto_frames = 0;  // statistics: triangles hidden, level draws
   void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
   void flush_calls(int pass);
   void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines

@@ -29,6 +29,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--no-stream` | off | (AI-assisted, v19) no near chunks: a v18 file (near versions within `kTieLodBudgets`, in the far versions' chunks). See "Near chunks (v19)" and `streaming.md`. |
 | `--stream-classes M,...`, `--stream-class-cells M,...` | 30,60,120,240 / 50,50,100,100,200 | (v19) near chunks per need class: a group's near version is needed within error x 70.4 + radius of its center (gameplay focal 256 / tie_lod_px 4 x 1.1); the classes' bounds (meters) and each class's cell size. |
 | `--stream-cell M` | 100 | (v19) the near chunk cell size of classes without one in `--stream-class-cells`. |
+| `--no-proto-vis` | off | (AI-assisted, v20, Jak II) no runs of their own for the prototypes the game hides by task state: they are drawn always (v19's files, but for the version). See "Prototype visibility (v20)". |
 | `--palette N` | 1 | time of day palette baked into the vertex colors (0..7): what a v16 runtime shows until its first blend, and older runtimes always. |
 | `--no-tod` | off | (AI-assisted, v16) no time of day table: the vertex colors stay the baked palette. See "Time of day". |
 | `--max-tex N` | 128 | maximum texture size. Larger textures are box-filtered down. |
@@ -92,8 +93,9 @@ shared, 1017 and 17.6 MB). All 26 files 98 MB (textures 21 MB).
 The same format and converter. `ctr_level_converter --all out/jak2/fr3 out/jak2/c3l` (GAME with
 `--merc-only`), the runtime reads `out/<game>/c3l` (`ctr_level_c3l_dir()`). Jak II's fr3 files have
 the same tree kinds (no hfrag: that is Jak 3); envmapped ties keep their base pass only, as in
-Jak 1. Not used yet: the tie / shrub prototype visibility masks the game sends (`proto-vis`,
-prototypes hidden by game state).
+Jak 1. (AI-assisted, j2vis) The tie / shrub prototypes the game hides by task state (sewer doors,
+blocker crates, the palace statue wall and rubble, ...) are hidden as on the PC: see "Prototype
+visibility (v20)".
 
 (AI-assisted, j2-texanim) Animated texture slots: each slot a level's draws name (merc, tfrag, tie,
 shrub) gets a texture: the index texture baked with its first CLUT (`add_anim_slot_textures`) or
@@ -229,10 +231,11 @@ Little endian. All offsets are from the start of the file. Every section is 16-b
 
 ```
 Header (128 bytes)
-  char magic[4] = "C3LV"; u32 version = 19 (7..18 still load; v12: merc rewritten vertices; v13: vista
+  char magic[4] = "C3LV"; u32 version = 20 (7..19 still load; v12: merc rewritten vertices; v13: vista
   tier, kDrawCullBack; v14: shrub distances; v15: Draw::kind flags of "Draw optimisations"; v16: time
   of day; v17: tie levels of detail; v18: a chunk's vertices grouped by visibility id, see "Time of
-  day"; v19: near chunks, see "Near chunks (v19)"); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
+  day"; v19: near chunks, see "Near chunks (v19)"; v20: prototype visibility, see "Prototype visibility
+  (v20)"); char level_name[16]; (AI-assisted, v16) u32 tod_offset,
   tod_color_count, tod_mul_count, (v17) ext_offset (ExtHeader, 0: none; the end of the 32 byte level
   name before: zero)
   u32 num_textures, textures_offset
@@ -740,3 +743,38 @@ blocks when a level starts; memory: the block index (8 bytes per 16 m block) + t
 where it runs (maincave start in Azahar: 16.6k triangles with 600 occluders), but its render
 thread cost on the 3DS is larger than the GPU time it saves (24.5 ms for that; 6.4 ms for 3.1k
 with 300), so it is off by default too.
+
+## Prototype visibility (v20)
+
+(AI-assisted, j2vis, Oct 25.) Jak II hides and shows some background prototypes by task state:
+`prototypes-game-visible-set!` (`goal_src/jak2/engine/draw/drawable.gc`, called from
+`task-control.gc` per level) sets a prototype-bucket's `visible` flag (= hidden) and `no-collide`.
+The PC port's tie and shrub buckets send the names of the hidden ones every frame
+(`pc-add-tie-vis-mask` in `tie-methods.gc`, `pc-add-shrub-vis-mask` in `shrubbery.gc`: a PC_PORT
+transfer after `add-pc-tfrag3-data`'s), and Tie3 / Shrub skip them. v19 merged those prototypes'
+triangles into the level's runs, so they were always drawn (the statue rubble on the floor before
+the wall is broken, the sewer hover door, the strip's vents).
+
+- Converter: the 124 toggled names (`tools/ctr_level_converter/proto_vis_jak2.inc`, grepped from
+  `task-control.gc`) are tagged per tie vis group / shrub draw (`SrcTri::proto`). Runs split by
+  prototype (the last sort tiebreak, so other levels keep their order), vista copies are grouped by
+  prototype. Each prototype's runs, triangles and box (meters) go to the log. `--no-proto-vis`: off.
+- File: `ExtHeader::size` 64 (`kExtHeaderV20Size`); `ExtProtoVis {u32 proto_count, protos_offset,
+  proto_run_count, proto_runs_offset}` at ext_offset + 48; `ProtoVis {char name[52]; u16 kind (1 tie,
+  2 shrub), pad; u32 first_run, run_count}` (64 bytes) and a u32 list of file runs (VisRun index from
+  `runs_offset`). Written only for levels with toggled prototypes; every other file is v19's byte
+  for byte but for the version (checked on the 149 Jak II files: 136 differ in byte 4 only,
+  `texanim.c3t` identical).
+- Levels with toggled prototypes (12): atoll, caspad, consite, ctyasha, ctymarkb, ctypal, hiphog,
+  ruins, sewer, sewesc, stadiumb, strip (2 to 33 prototypes, 2 to 748 runs each).
+- Runtime: `load_proto_vis` maps the runs onto the level's vis runs and chunks.
+  `CtrTfragRenderer::proto_vis_scan` (from `render_jak2`) reads the slot's `tie-lN-tfrag` /
+  `shrub-lN-shrub` DMA ahead for the mask packet (the PC_PORT after the level's TfragPcPortData),
+  and works out the hidden set only when a packet changed (a frame without the packet keeps the last
+  one). `draw_level` drops the hidden runs (never gap-merged with their neighbours); impostor clusters
+  holding toggled runs are never carded. Logs: `prototype visibility: N prototypes the game may hide`
+  at load, `the game hides N of its M toggled prototypes (...): names` on change, `prototypes hidden
+  by the game: N tris not drawn per level draw` with the statistics.
+- Host check (pad `platform/3ds/tests/jak2_proto_vis.pad`, the pad's act-2 state): ctypal-tomb shows the
+  statue wall without the rubble slabs, as the PC; strip hides 13 of 24 (2093 triangles not drawn
+  per level draw), sewer its hover door.

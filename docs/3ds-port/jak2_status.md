@@ -506,7 +506,8 @@ triangles per frame in the slums (ctysluma + ctywide; ctyindb loaded, hidden by 
   the renderer adds ~12 MB of heap (~6 MB fixed, ~2 MB per district).
 
 Not done yet: tie / shrub prototype visibility masks (Jak II hides prototypes by game state;
-everything is drawn), animated textures in the background (untextured, e.g. the billboards are
+everything is drawn; (AI-assisted) done on j2vis, Oct 25: c3l v20, see the section below),
+animated textures in the background (untextured, e.g. the billboards are
 black), the ocean, `ctr_level_ready` (the game doesn't wait for a level's `.c3l`), the DGO
 prefetch (`ctr_jak2_level_for_dgo` exists, nothing calls it yet), Jak II interiors for the vista
 tier.
@@ -1020,3 +1021,28 @@ only non-black palette entries or 16-bit stamps saves ~10-25% of them for real w
 blend path), heap fragmentation from level and bank loads (largest block 5.0-7.6 MB now; the bank
 buffers could get their own arena), Jak II's SPU memory (845 KB of .bss) and the .c3l reader's
 640 KB.
+
+## Prototype visibility: task-toggled ties / shrubs (j2vis, Oct 25)
+
+(AI-assisted.) Branch `j2vis` off jak2-3ds (f0ecc808da). The background props the game hides by
+task state (`prototypes-game-visible-set!`: sewer doors, strip blocker crates / vents, the palace
+statue wall's rubble, stadium ramps, tanker barrels, hiphog paintings, the castle's low-res model,
+consite / ruins / caspad task pieces) were always drawn on the 3DS. Now c3l v20 keeps them in runs
+of their own and the renderer hides the ones the game's mask packets name, as Tie3 / Shrub on the
+PC. Format and runtime: `c3l_format.md` "Prototype visibility (v20)".
+- Levels: `ctr_level_converter --all` on all 149 files; 136 differ from v19 only in the version
+  byte, `texanim.c3t` identical, 12 levels carry the table. Mirror `port_test/j2vis-mirror`
+  (`out/jak2/c3l` = v20, `out/jak2/c3l.v19` = the previous set). C modules: `(mi)` changed only
+  foreground (the j2gaps merge).
+- Host (`build-host-small`, `--ctr-gfx`, pad `platform/3ds/tests/jak2_proto_vis.pad`): ctypal-tomb before
+  (v19) shows the rubble slabs in front of the statue wall, after (v20) not, the same as the native
+  PC; strip hides 13 of its 24 toggled prototypes, sewer the hover door. Regression:
+  `jak2_title_city.pad` (1065.98, 0.52, 194.46) target-hide; `jak2_route.pad` the same stops as
+  j2gaps (one swim-bob y 4 cm off); `jak2_newgame.pad` + `OPENGOAL_MC_SAVE_DELAY_MS=600` prison
+  (474.22, 8.42, 67.27); Jak 1 `level_pairs.pad` 10 pairs, exit 0.
+- Azahar (one run, private instance, sound off, volume 0, the CIA): the same hidden sets logged,
+  ctypal shot without the rubble; 1377-1912 triangles per level draw not drawn at the three stops;
+  29-30 fps between loads.
+- Open: strip loaded after vinroom (the pad's continue) had 128 KB of linear memory left and 79
+  textures / meshes not created; the v20 file is 2 KB bigger than v19 with the same vertex and index
+  data, so this is the level's memory, not the change.
