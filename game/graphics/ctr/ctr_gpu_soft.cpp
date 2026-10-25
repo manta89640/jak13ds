@@ -2036,6 +2036,16 @@ double ctr_gpu_time_ms(void) {
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
+unsigned long long ctr_gpu_ticks(void) {
+  using namespace std::chrono;
+  return (unsigned long long)duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
+      .count();
+}
+
+double ctr_gpu_ticks_to_ms(unsigned long long ticks) {
+  return (double)ticks / 1e6;
+}
+
 // the software backend renders synchronously. (AI-assisted) CTR_SOFT_DEFER=1: the 3DS render
 // thread's latest possible timing instead: a submitted frame is rendered only when the game next
 // waits for the render thread (ctr_gpu_async_wait: the next frame's sync-path, a texture upload,

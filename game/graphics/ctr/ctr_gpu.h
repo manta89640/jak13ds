@@ -754,6 +754,10 @@ void ctr_gpu_want_detailed_stats(void);
 
 /* Monotonic time in milliseconds. */
 double ctr_gpu_time_ms(void);
+/* (AI-assisted, j2cull) monotonic time in the clock's own ticks (cheap: no conversion), and ticks
+ * to milliseconds (for statistics: sums of tick differences converted once per log line) */
+unsigned long long ctr_gpu_ticks(void);
+double ctr_gpu_ticks_to_ms(unsigned long long ticks);
 
 /* Asynchronous rendering (the PS2 overlaps DMA/VU1/GS with the next frame's game logic).
  * ctr_gpu_async_start creates a render thread on another CPU core (New 3DS: core 2) that runs
