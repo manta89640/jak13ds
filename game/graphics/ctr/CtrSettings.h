@@ -216,6 +216,12 @@ struct CtrSettings {
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
+  // (AI-assisted, perfv2) particle_fill = off | on | strong: fewer blended particle pixels for the
+  // GPU. on: each world particle drawn over its texture's alpha box only (the same picture), and
+  // big faint particles thinned: of the ones with a half size of 16+ pixels and alpha <= 0.375,
+  // every 2nd particle slot is drawn with the alpha of two (1 - (1 - a)^2, additive 2a), the other
+  // left out. strong: every 3rd, 12+ pixels, alpha <= 0.25. off: as before (preset safe)
+  int particle_fill = 1;
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;
