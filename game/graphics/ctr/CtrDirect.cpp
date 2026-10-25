@@ -789,6 +789,11 @@ void CtrDirect::flush() {
 
 void CtrDirect::set_record(bool on) {
   flush();  // what came before is drawn (or kept) in the mode it came in
+  if (on && !m_record) {
+    // a recording no hook replayed (a frame that never ended): not drawn a frame late
+    m_rec.clear();
+    m_rec_verts.clear();
+  }
   m_record = on;
 }
 
