@@ -2260,7 +2260,6 @@ int ctr_gpu_tex_radial(int) {
 }
 void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}
-void ctr_gpu_set_vcache_reuse(int) {}
 void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
 void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
 // (AI-assisted, gpu-rt) static_cmdlists: no command words here, the draws one by one

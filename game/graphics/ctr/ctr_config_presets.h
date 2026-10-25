@@ -35,7 +35,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"sky_last", "off"},         {"tex_cache_clear", "always"}, {"vista_untextured", "off"},
     {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
     {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
-    {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
+    {"fine_vis", "off"},         {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
@@ -130,6 +130,8 @@ static const char* const ctr_cfg_removed[] = {
     "bones_native", "collide_native", "collide_frag_cache", "anim_native",
     /* (AI-assisted, todlag, Oct 23) the time of day's per-frame limits: every frame current now */
     "tod_busy_half", "tod_max_ms",
+    /* (AI-assisted, hudshard, Oct 25) the post-vertex cache kept across draws: the HUD shards */
+    "vcache_reuse",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

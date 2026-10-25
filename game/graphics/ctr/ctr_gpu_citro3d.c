@@ -1826,7 +1826,6 @@ static unsigned s_partial_draws, s_partials;
  * Not done while building: screenshots. Textures updated in place (sky, eyes) may show one frame
  * early in frame N. */
 static void flush_vbuf(void);
-static void raw_vc_flush(void);
 static void raw_frame_reset(void);
 static void clip_reserve_reset(void);
 static int s_pipeline = 0;
@@ -2155,7 +2154,6 @@ static void bd_list(u32* list, u32 words, int phase) {
 
 /* the commands built since the last split, as a part of the current phase */
 static void bd_part(void) {
-  raw_vc_flush();
   if (!gpuCmdBufOffset) {
     return;
   }
@@ -2907,7 +2905,6 @@ static void pipeline_frame_begin(u32 clear) {
 
 /* send what's built so far to the GPU (pipeline: our command buffer, citro3d isn't in a frame) */
 static void pipeline_submit(void) {
-  raw_vc_flush();
   flush_vbuf();
   GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
   GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
@@ -3105,7 +3102,6 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
   if (g.in_frame) {
     /* (AI-assisted) with overlap the queue may already be running (ctr_gpu_submit_partial): the
      * draws before the copy start right away, so their vertices must be out of the CPU cache */
-    raw_vc_flush();
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
   }
@@ -3151,7 +3147,6 @@ void ctr_gpu_submit_partial(void) {
   if (s_pipeline) {
     pipeline_submit();
   } else {
-    raw_vc_flush();
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
     gt_note_first(); /* (AI-assisted) the queue (stopped since C3D_FrameBegin) starts here */
@@ -3271,7 +3266,6 @@ void ctr_gpu_frame_end(void) {
   ctr_gpu_rt_end(); /* (AI-assisted) impostors: a render to texture left open */
   ctr_gpu_run_sky_hook(); /* (AI-assisted) sky_last: still pending (nothing blended came) */
   diag_rt("frame_end: flush");
-  raw_vc_flush();
   /* (AI-assisted, micro-gpu) steady pacing's fence words (the frame number the fence copy writes)
    * at the end of the frame's vertex buffer, flushed with it: one GSP request less per frame. The
    * buffer is written again two frames later, after this frame's fence landed (overlap2_wait_frame,
@@ -4523,20 +4517,21 @@ static GPU_TESTFUNC map_test(uint8_t t) {
  *    is right after citro3d's own draws (clouds, envmap, glows) as well.
  * After the HOME Menu citro3d sends everything again (APTHOOK_ONRESTORE), but not the uniforms
  * written raw (matrices, bones, lights): those caches are dropped then (s_raw.apt_epoch).
- * The post-vertex cache: citro3d clears it after every draw. Raw draws do the same, unless
- * config.ini vcache_reuse: then a draw with the same vertex buffer and uniforms as the draw before
- * keeps it (the cache holds vertex shader outputs by index), and it's cleared before any other
- * draw, command list split or the frame end (raw_vc_flush). */
+ * The post-vertex cache: citro3d clears it after every draw, and so do the raw draws (raw_vc_clear
+ * in their templates). (AI-assisted, hudshard) Never keep it for the next draw, not even one of the
+ * same vertices with the same uniforms: vcache_reuse (Oct 3, on by default from Oct 16 to Oct 25)
+ * did, and on the real 3DS the HUD's faint second pass (ctr_gpu_draw_quads_again: the first pass's
+ * vertices again) got a wrong first vertex in single-quad HUD buckets: the red / white HUD shards
+ * (one triangle of an icon stretched off to one side; the button icons, the progress menu's frame,
+ * the orb glow). Azahar keeps no vertices across draws, so it never showed. See
+ * docs/3ds-port/performance.md "The red HUD shard". */
 static struct {
   int on;           /* config.ini raw_cmds */
-  int vcache_reuse; /* config.ini vcache_reuse */
   int unif_pending; /* citro3d has uniforms to send (C3D_FVUnif* since its last update) */
   volatile u32 apt_epoch;
   u32 seen_epoch;
   int hooked;
   aptHookCookie cookie;
-  int vc_dirty;   /* a raw draw left vertices in the post-vertex cache */
-  int vs_changed; /* vertex buffer, uniforms or program changed since the last draw */
   const void* vbuf_va; /* g.vbuf and its physical address */
   u32 vbuf_pa;
   u32 quad_pa;    /* physical address of g.quad_indices */
@@ -4593,10 +4588,6 @@ void ctr_gpu_set_raw_cmds(int on) {
   s_raw.on = on ? 1 : 0;
 }
 
-void ctr_gpu_set_vcache_reuse(int on) {
-  s_raw.vcache_reuse = on ? 1 : 0;
-}
-
 void ctr_gpu_set_cmd_dedup(int on, int draw) {
   s_raw.dedup = on ? 1 : 0;
   s_raw.dedup_draw = draw ? 1 : 0;
@@ -4628,30 +4619,21 @@ static inline u32* raw_n(u32* p, u32 reg, const u32* v, u32 n, int seq) {
   return p;
 }
 
-/* the post-vertex cache clear (and citro3d's two writes after it) */
+/* the post-vertex cache clear (and citro3d's two writes after it), after every indexed draw */
 static inline u32* raw_vc_clear(u32* p) {
   p = raw_w(p, GPUREG_VTX_FUNC, 0xF, 1);
   p = raw_w(p, GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
   p = raw_w(p, GPUREG_PRIMITIVE_CONFIG, 0x8, 0);
-  s_raw.vc_dirty = 0;
   return p;
-}
-/* before anything that isn't a raw indexed draw: a cache left by vcache_reuse is cleared */
-static void raw_vc_flush(void) {
-  if (s_raw.vc_dirty) {
-    raw_end(raw_vc_clear(raw_ptr()));
-  }
 }
 
 static void raw_note_unif(void) {
   s_raw.unif_pending = 1;
 }
 
-/* a frame starts with citro3d's state (frame_state_reset) and an empty post-vertex cache */
+/* a frame starts with citro3d's state (frame_state_reset) */
 static void raw_frame_reset(void) {
   raw_forget_regs();
-  s_raw.vc_dirty = 0;
-  s_raw.vs_changed = 1;
   s_raw.unif_pending = 1;
 }
 
@@ -4664,7 +4646,6 @@ static void raw_check_epoch(void) {
     g.last_mesh_valid = 0;
     g.last_skin_valid = 0;
     g.skin_bl_valid = 0; /* (AI-assisted) */
-    s_raw.vs_changed = 1;
   }
 }
 
@@ -4682,7 +4663,6 @@ static inline void raw_sync(void) {
     s_ctx_updates++; /* (AI-assisted, gpu-rt) static_cmdlists: citro3d wrote words */
     C3Di_UpdateContext();
     s_raw.unif_pending = 0;
-    s_raw.vs_changed = 1;
   }
 }
 
@@ -4699,7 +4679,6 @@ static void raw_vertex_buffer(u32 pa, u32 flags0, u32 flags1) {
     c->flags[0] = flags0;
     c->flags[1] = flags1;
     __C3D_Context.flags |= C3DiF_BufInfo;
-    s_raw.vs_changed = 1;
     return;
   }
   if (c->flags[0] != flags0 || c->flags[1] != flags1) {
@@ -4713,7 +4692,6 @@ static void raw_vertex_buffer(u32 pa, u32 flags0, u32 flags1) {
   c->offset = off;
   c->flags[0] = flags0;
   c->flags[1] = flags1;
-  s_raw.vs_changed = 1;
 }
 /* attribute buffer 0 config of each program's vertex layout: permutation, stride, attributes */
 #define RAW_BUF_FLAGS1(stride, attribs, perm_hi) \
@@ -4723,7 +4701,6 @@ static void raw_vertex_buffer(u32 pa, u32 flags0, u32 flags1) {
  * (3 per vector), one config write and one burst to the data port */
 static inline u32* raw_unif(u32* p, int loc, const u32* data, u32 words, int f32) {
   p = raw_w(p, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0xF, (u32)loc | (f32 ? BIT(31) : 0));
-  s_raw.vs_changed = 1;
   return raw_n(p, GPUREG_VSH_FLOATUNIFORM_DATA, data, words, 0);
 }
 
@@ -4787,9 +4764,6 @@ static const u32 kRawArrays[22] = {
 /* an indexed triangle list: index_pa = physical address of the first u16 index */
 static void raw_draw_elements(u32 index_pa, u32 count) {
   u32* p = raw_ptr();
-  if (s_raw.vc_dirty && s_raw.vs_changed) {
-    p = raw_vc_clear(p);
-  }
   if (s_raw.dedup_draw && s_raw.prim == GPU_GEOMETRY_PRIM && s_raw.voff0) {
     /* (AI-assisted) cmd_dedup_draw: the GPU has this mode and vertex offset 0 already: the
      * template without its PRIMITIVE_CONFIG and VERTEX_OFFSET writes (20 words) */
@@ -4817,22 +4791,13 @@ static void raw_draw_elements(u32 index_pa, u32 count) {
   }
   s_raw.prim = GPU_GEOMETRY_PRIM;
   s_raw.voff0 = 1;
-  if (s_raw.vcache_reuse) {
-    s_raw.vc_dirty = 1;
-  } else {
-    p = raw_vc_clear(p);
-  }
-  raw_end(p);
-  s_raw.vs_changed = 0;
+  raw_end(raw_vc_clear(p));
   __C3D_Context.flags |= C3DiF_DrawUsed;
 }
 
 /* prim: GPU_TRIANGLES or (AI-assisted) GPU_TRIANGLE_STRIP (ctr_gpu_draw_strip), as C3D_DrawArrays */
 static void raw_draw_arrays(u32 count, u32 prim) {
   u32* p = raw_ptr();
-  if (s_raw.vc_dirty) {
-    p = raw_vc_clear(p);
-  }
   for (int i = 0; i < 22; i += 2) {
     p[i] = kRawArrays[i];
     p[i + 1] = kRawArrays[i + 1];
@@ -4842,7 +4807,6 @@ static void raw_draw_arrays(u32 count, u32 prim) {
   raw_end(p + 22);
   s_raw.prim = (int)prim; /* (AI-assisted) cmd_dedup_draw: what the template left */
   s_raw.voff0 = 1;
-  s_raw.vs_changed = 0;
   __C3D_Context.flags |= C3DiF_DrawUsed;
 }
 
@@ -5627,7 +5591,6 @@ static void draw_immediate(const ctr_draw_state* state, int prog, uint8_t* dst, 
     raw_sync();
     raw_draw_arrays((u32)count, (u32)prim);
   } else {
-    raw_vc_flush();
     apply_state(state, 0, 0);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
@@ -5710,7 +5673,6 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   uint8_t* dst = g.vbuf + g.vbuf_used;
   memcpy(dst, verts, bytes);
   g.vbuf_used += (bytes + 15) & ~(size_t)15;
-  raw_vc_flush();
   use_program(PROG_CLIP2);
   /* the texture on units 0 and 1 (binding unit 1 clears the texture cache like any bind) */
   TexSlot* slot = &g.textures[state->tex];
@@ -5805,7 +5767,6 @@ static void draw_quads_at(const ctr_draw_state* state, uint8_t* dst, int n) {
     }
     raw_draw_elements(s_raw.quad_pa, (u32)n * 6);
   } else {
-    raw_vc_flush();
     apply_state(state, 0, 0);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
@@ -5941,7 +5902,6 @@ static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int ind
     raw_sync();
     raw_draw_elements(raw_vbuf_pa(ioff), (u32)index_count);
   } else {
-    raw_vc_flush();
     apply_state_tint(state, 6, (uint32_t)env, 0);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
@@ -6074,7 +6034,6 @@ static void clip_draw_ranges(const float* matrix, int n_mtx, const ctr_draw_stat
       raw_sync();
       raw_draw_elements(raw_vbuf_pa(at), nidx);
     } else {
-      raw_vc_flush();
       apply_state(st, 0, 0);
       c3d_vertex_buffer(raw_vbuf_pa(voff), g.vbuf + voff, sizeof(ctr_clip_vertex), 3, 0x210);
       C3D_DrawElements(GPU_TRIANGLES, (int)nidx, C3D_UNSIGNED_SHORT, g.vbuf + at);
@@ -6193,7 +6152,6 @@ static int copy_screen_body(float x0, float x1, int part) {
     if (s_pipeline) {
       pipeline_submit();
     } else {
-      raw_vc_flush(); /* (AI-assisted) as sync_texture_copy: no post-vertex cache left open */
       flush_vbuf();
       C3D_FrameSplit(GX_CMDLIST_FLUSH);
     }
@@ -6413,7 +6371,6 @@ int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h) {
       y + h > s_rt[i].lh) {
     return 0;
   }
-  raw_vc_flush();
   if (!s_rtc.active) {
     /* a pending sky_last hook waits for the screen (it never draws into the tile) */
     s_rtc.hook = s_sky_hook;
@@ -6441,7 +6398,6 @@ void ctr_gpu_rt_end(void) {
   if (!s_rtc.active) {
     return;
   }
-  raw_vc_flush();
   C3D_SetFrameBuf(&g.top->frameBuf);
   set_top_viewport();
   C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -6856,7 +6812,6 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
   } else {
     s_rec.bad = 1; /* (AI-assisted, gpu-rt) static_cmdlists: citro3d's draw (not while on) */
-    raw_vc_flush();
     /* consecutive draws of a level chunk share the matrix and the vertex buffer */
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
       g.last_clip_id = matrix->id;
@@ -6929,7 +6884,6 @@ void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix
     }
     raw_draw_elements(ipa, (u32)index_count);
   } else {
-    raw_vc_flush();
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
       g.last_clip_id = matrix->id;
       C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
@@ -7022,7 +6976,7 @@ typedef struct {
   u32 tex0_regs[5]; /* (AI-assisted, micro-gpu) */
   int tex0_regs_ok;
   int mesh_st_atlas; /* (AI-assisted, micro-gpu) the mesh scales the GPU has */
-  int vc_dirty, vs_changed, unif_pending;
+  int unif_pending;
   int tex_dirty;
   /* the texture unit 0 binding is one no draw of the stretch uses (a texture with its own memory:
    * sky, ocean, eyes; its texels may swap copies every frame): bound_* are 1 / 1 / 0 here, and
@@ -7030,7 +6984,7 @@ typedef struct {
   int bound_other;
 } ClTrack;
 typedef struct {
-  int fog_alpha, tex1_gating, dedup, dedup_draw, vcache_reuse, mip_mode, tex_clear_mode;
+  int fog_alpha, tex1_gating, dedup, dedup_draw, mip_mode, tex_clear_mode;
   int early_depth, early_sky, depth_far, early_func, cull_enable, cull_flip;
   int depth16, fog_tex_valid, fog_df, zdef_valid, proctex;
   u32 lod_bias, early_clear, fog_abgr, zscale0, zoffset0;
@@ -7151,8 +7105,6 @@ static void cl_track_save(ClTrack* t) {
     t->tex0_regs_ok = 1;
   }
   t->mesh_st_atlas = g.mesh_st_atlas;
-  t->vc_dirty = s_raw.vc_dirty;
-  t->vs_changed = s_raw.vs_changed;
   t->unif_pending = s_raw.unif_pending;
   t->tex_dirty = s_tex_dirty;
   /* (the level draws only bind pool textures: cl_plain) */
@@ -7201,8 +7153,6 @@ static void cl_track_load(const ClTrack* t) {
         t->mesh_st_atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f;
   }
   g.mesh_st_atlas = t->mesh_st_atlas;
-  s_raw.vc_dirty = t->vc_dirty;
-  s_raw.vs_changed = t->vs_changed;
   s_raw.unif_pending = t->unif_pending;
   s_tex_dirty = t->tex_dirty;
 }
@@ -7213,7 +7163,6 @@ static void cl_set_save(ClSet* t) {
   t->tex1_gating = g_tex1_gating;
   t->dedup = s_raw.dedup;
   t->dedup_draw = s_raw.dedup_draw;
-  t->vcache_reuse = s_raw.vcache_reuse;
   t->mip_mode = g_mip_mode;
   t->tex_clear_mode = s_tex_clear_mode;
   t->early_depth = g_early_depth;
@@ -7801,7 +7750,6 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
     raw_end(p);
     raw_draw_elements(ipa, (u32)index_count);
   } else {
-    raw_vc_flush();
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_ocean_clip, (const C3D_Mtx*)d->clip.m);
     for (int i = 0; i < 5; i++) {
       const float* r = i < 4 ? d->tex[i] : d->crest;
@@ -8118,7 +8066,6 @@ static void raw_skin_rows(const int* locs, const float* bones, int palette_count
     }
   }
   raw_end(p);
-  s_raw.vs_changed = 1;
 }
 
 /* (AI-assisted) skin_rows_f24: the same as float24 uniforms (3 words per vector, raw_pack_f24),
@@ -8140,7 +8087,6 @@ static void raw_skin_rows_f24(const int* locs, const u32* words, int palette_cou
     }
   }
   raw_end(p);
-  s_raw.vs_changed = 1;
 }
 
 void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t* out) {
@@ -8318,8 +8264,6 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
     apply_state_tint(state, 2, 0xffffffffu, 1);
     raw_vertex_buffer(ms->verts_pa, 0x543210, RAW_BUF_FLAGS1(24, 6, 0));
     raw_sync();
-  } else {
-    raw_vc_flush();
   }
   /* matrix and lights: uploaded when they change (the draws of a model share them) */
   const int same_clip = g.last_skin_valid && words_equal(g.last_skin_clip, clip, 16);
@@ -8476,8 +8420,6 @@ void ctr_gpu_draw_skinned_env(const ctr_draw_state* state, const float clip[16],
     apply_state_tint(state, 2, 0xffffffffu, 1);
     raw_vertex_buffer(ms->verts_pa, 0x543210, RAW_BUF_FLAGS1(24, 6, 0));
     raw_sync();
-  } else {
-    raw_vc_flush();
   }
   /* (AI-assisted) cmd_dedup: the shine draws come one after another (envmap_batch), all with the
    * camera's matrix and each model's draws with the same bones: each uploaded again only when it
