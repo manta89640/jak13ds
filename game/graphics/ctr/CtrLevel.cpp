@@ -5307,6 +5307,10 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   constexpr bool STR = NP > 0;
   constexpr int kP = NP > 0 ? NP : 1;
   float po[kP], pk0[kP], pk1[kP], pk2[kP];
+  // (AI-assisted, perfv2) unrolled: GCC kept the planes in this stack array and reloaded all four
+  // coefficients and the loop pointers for every run (~92 instructions per 3-plane run); unrolled
+  // they are scalars in VFP registers
+#pragma GCC unroll 4
   for (int i = 0; i < NP; i++) {
     po[i] = in.po[i];
     pk0[i] = in.pk[i][0];
@@ -5315,7 +5319,9 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   }
   const float scale = in.scale;
   u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
-  u64 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
+  // (AI-assisted, perfv2) u32 within one chunk (at most 65536 vertices, runs of u16 index counts):
+  // the u64 sums were adds / adc pairs through the stack per run
+  u32 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
   const c3l::VisRun* const runs = in.runs;
   const CtrLevelData::RunSphere* const spheres = in.spheres;
   const c3l::RunLod* const run_lod = in.run_lod;
@@ -5356,6 +5362,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
       const auto& rs = spheres[r];
       if (rs.r != 0xffff) {
         const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
+#pragma GCC unroll 4
         for (int i = 0; i < NP; i++) {
           if (!(po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z > rad)) {
             s = false;
