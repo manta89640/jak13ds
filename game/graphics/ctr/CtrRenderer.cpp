@@ -1248,7 +1248,10 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
       // in tfrag-trans, which starts this frame's sky textures)
       ctr_gpu_run_sky_hook();
     }
-    const double tb = ctr_gpu_time_ms();
+    // (AI-assisted, j2gpu) the clock read only around buckets with data (Jak II has 327 buckets,
+    // most of them empty every frame: two system calls and two 64-bit to double conversions each)
+    const bool timed = dma.current_tag_offset() != m_rs.next_bucket;
+    const double tb = timed ? ctr_gpu_time_ms() : 0.0;
     // (AI-assisted) shadows switched off by gpu_profile = ab: the shadow bucket left out
     const bool ab_skip = ctr_settings().shadows != CtrSettings::ShadowMode::Full &&
                          m_buckets[bucket_id]->name() == "shadow";
@@ -1262,7 +1265,9 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
 #endif
       m_buckets[bucket_id]->render(dma, m_rs);
     }
-    m_bucket_ms[bucket_id] += ctr_gpu_time_ms() - tb;
+    if (timed) {
+      m_bucket_ms[bucket_id] += ctr_gpu_time_ms() - tb;
+    }
     ctr_gpu_submit_partial();  // config.ini overlap: the GPU starts on what's built so far
     if (dma.current_tag_offset() != m_rs.next_bucket) {
       lg::error("[ctr] bucket {} ({}) did not end at the next bucket", bucket_id,
