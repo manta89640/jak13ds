@@ -10,6 +10,7 @@
 #include <cmath>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <map>
@@ -46,6 +47,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/kernel/common/kboot.h"
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kscheme.h"
+#include "game/kernel/jak1/kscheme.h"  // (AI-assisted, title3) find_symbol_from_c
 #include "game/runtime.h"
 #include "game/sce/pad_script.h"
 
@@ -64,6 +66,7 @@ bool ctr_is_jak2() {
 
 namespace {
 std::string g_shot_dir;
+bool g_hud_dump_pending = false;  // (AI-assisted, fable1) host: CTR_HUD_DUMP with a pad "shot"
 int g_shot_every = 0;
 
 // config.ini gpu_profile: what each mode leaves out (bucket renderer names)
@@ -221,6 +224,14 @@ const AbSwitch kAbSwitches[] = {
     // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
     {"opaque_alpha", [](CtrSettings& s, bool on) { s.opaque_alpha = on; },
      [](const CtrSettings& s) { return s.opaque_alpha; }},
+    // (AI-assisted, hud3) the post-vertex cache kept between raw draws (config.ini vcache_reuse):
+    // switchable while running for A/B tests (pad script "set vcache_reuse off")
+    {"vcache_reuse", [](CtrSettings& s, bool on) { s.vcache_reuse = on; },
+     [](const CtrSettings& s) { return s.vcache_reuse; }},
+    // (AI-assisted, hud3) the draws' command words written raw (config.ini raw_cmds), for A/B
+    // tests; applied at each frame's begin, where the backend forgets its raw state anyway
+    {"raw_cmds", [](CtrSettings& s, bool on) { s.raw_cmds = on; },
+     [](const CtrSettings& s) { return s.raw_cmds; }},
 };
 constexpr size_t kAbSwitchCount = sizeof(kAbSwitches) / sizeof(kAbSwitches[0]);
 constexpr double kAbWindowMs = 1500.0;
@@ -327,6 +338,14 @@ void pad_shot(const char* name) {
 }  // namespace
 
 namespace ctr_gfx {
+void request_named_shot(const char* name) {
+  pad_shot(name);
+}
+bool take_hud_dump() {
+  const bool p = g_hud_dump_pending;
+  g_hud_dump_pending = false;
+  return p;
+}
 void set_screenshots(const std::string& dir, int every_nth) {
   g_shot_dir = dir;
   g_shot_every = every_nth;
@@ -659,6 +678,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
   ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);  // (AI-assisted, gpu-rt)
+  ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);          // (AI-assisted, hud3)
+  ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);  // (AI-assisted, hud3)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -680,15 +701,19 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       const char* ext = "png";
 #endif
       ctr_gpu_request_screenshot(fmt::format("{}/{}.{}", g_shot_dir, g_pad_shot, ext).c_str());
+#ifndef __3DS__
+      g_hud_dump_pending = getenv("CTR_HUD_DUMP") != nullptr;  // (AI-assisted, fable1)
+#endif
     }
     g_pad_shot.clear();
   }
+  // (AI-assisted, j2intro / title3) the screen is black this frame (the game's blackout since the
+  // last frame, or held black by draw_pmode_fade): the level draws keep nothing hidden or far for
+  // late data
+  ctr_level_set_screen_black(
+      m_hold_black ||
+      (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f));
   if (m_jak2) {
-    // (AI-assisted, j2intro) the screen is black this frame (the game's blackout since the last
-    // frame, or held black by draw_pmode_fade): the level draws keep nothing hidden for late data
-    ctr_level_set_screen_black(
-        m_hold_black ||
-        (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f));
     dispatch_buckets_jak2(DmaFollower(ee_mem, chain_offset));
   } else {
     dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
@@ -925,6 +950,8 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
   CtrRenderState rs;
   rs.ee_mem = (const u8*)ee_mem;
   rs.offset_of_s7 = s7.offset;
+  rs.frame_idx = m_rs.frame_idx;  // (AI-assisted, keira3) the frame drawn next (Keira's pose)
+  const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
   for (auto& [id, merc] : m_merc) {
     rs.next_bucket = bucket_tag(chain_offset, id + 1);
     DmaFollower dma(ee_mem, bucket_tag(chain_offset, id));
@@ -1191,8 +1218,8 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
 // loads. Drawn last, a black screen-sized quad with alpha 1 - alp.
 void CtrRenderer::draw_pmode_fade() {
   float alp = std::clamp(g_pmode_alp.load(std::memory_order_relaxed), 0.f, 1.f);
-  if (m_jak2) {
-    alp = jak2_hold_black(alp);  // (AI-assisted, j2intro)
+  {
+    alp = hold_black(alp);  // (AI-assisted, j2intro; Jak 1: title3)
   }
   if (alp >= 0.999f) {
     return;
@@ -1225,7 +1252,7 @@ void CtrRenderer::draw_pmode_fade() {
 // (CtrLevels::note_late_in_view). Its first visible frame is complete, not filling in on screen.
 // At most kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
 // follows its voice stream): only the picture waits.
-float CtrRenderer::jak2_hold_black(float alp) {
+float CtrRenderer::hold_black(float alp) {
   constexpr double kMaxHoldMs = 1500.0;
   bool shown_or_cut = false;
   const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
@@ -1547,6 +1574,35 @@ u32 ctr_sync_path() {
   return 0;
 }
 
+// (AI-assisted, title3) the game's camera position (*math-camera* trans, game units) for this frame
+// (game thread): false before the game made its camera
+bool game_camera_trans(float* out) {
+  static u32 sym = 0;
+  static u32 tries = 0;
+  if (!sym) {
+    if (tries++ % 64) {
+      return false;
+    }
+    sym = jak1::find_symbol_from_c("*math-camera*").offset;  // (game thread: kernel lookup)
+    if (!sym) {
+      return false;
+    }
+  }
+  const u32 mc = Ptr<jak1::Symbol>(sym)->value;
+  if ((mc & OFFSET_MASK) != BASIC_OFFSET || mc < 0x100000 || mc + 1024 >= (u32)EE_MAIN_MEM_SIZE) {
+    return false;
+  }
+  // math-camera trans: layout offset 848 (a basic's fields from its address - 4)
+  const float* t = Ptr<float>(mc + 848 - 4).c();
+  for (int i = 0; i < 3; i++) {
+    if (!std::isfinite(t[i])) {
+      return false;
+    }
+    out[i] = t[i];
+  }
+  return true;
+}
+
 void ctr_send_chain(const void* data, u32 offset) {
   if (!g_ctr) {
     return;
@@ -1569,8 +1625,14 @@ void ctr_send_chain(const void* data, u32 offset) {
   g_upload_count_mark = g_upload_count_total;
   g_ee.last_send = now;
   ctr_gpu_note_release();
+  float game_cam[3];
+  // (title3, Jak 1 only: *math-camera* through the Jak 1 kernel's symbol table)
+  const bool have_game_cam = g_game_version == GameVersion::Jak1 && game_camera_trans(game_cam);
   if (g_async) {
     wait_render_idle();
+    if (have_game_cam) {
+      g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3; render thread idle)
+    }
     const double tp = ctr_gpu_time_ms();
     g_ctr->prepare_frame(data, offset);
     g_ee.prepare_ms += ctr_gpu_time_ms() - tp;
@@ -1584,6 +1646,9 @@ void ctr_send_chain(const void* data, u32 offset) {
     g_ctr->prepare_sprites(data, offset);
     g_ctr->prepare_textures(data, offset);  // (AI-assisted) Jak II
 #endif
+    if (have_game_cam) {
+      g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3)
+    }
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;
   }

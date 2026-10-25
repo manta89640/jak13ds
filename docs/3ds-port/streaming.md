@@ -39,9 +39,12 @@ is in an ordinary tie chunk that is always loaded. Per frame (`draw_level`):
 
 **No pop when late data arrives.** A group drawn far *in view* because its near data was late
 keeps its far version while it stays in view once the data is there (`lod_state` bit 2), at most
-4 s (120 frames), and only while the switch would show: the camera within 2/3 of the group's near
-distance (there the far version's error is >= 1.5 x tie_lod_px; beyond it the switch is near the
-size of an ordinary LOD switch). Out of view it switches at once. The statistics count the frames
+1 s (30 frames; 4 s before lodnear), and only while the switch would show but the far version isn't
+plainly wrong: the camera within 2/3 of the group's error distance (there the far version's error
+is >= 1.5 x tie_lod_px; beyond it the switch is near the size of an ordinary LOD switch) but not
+within 1/3 of it (an error of 3 x tie_lod_px or more: near at once). Out of view it switches at once.
+(lodnear: with the 4 s hold, the late groups after a continue stayed coarse 3-15 m from the camera
+and then switched together.) The statistics count the frames
 with groups kept so.
 
 So a group's near runs are drawn only from a mesh that is there, and its far runs are hidden only
@@ -59,7 +62,14 @@ kDrawAlpha80 flags with what the load works out from the vertices.
 ## Where a unit is needed
 
 A group g is near within `e_g x k + r_g` of its center (e_g its shape error, r_g its radius,
-k = focal / tie_lod_px x detail_scale x 1.1: the hysteresis' 1.1; ~70 in gameplay). A unit is
+k = focal / tie_lod_px x detail_scale x 1.1: the hysteresis' 1.1; ~70 in gameplay).
+(AI-assisted, lodnear, Oct 18) With the PS2 floor, e_g is max(shape error, PS2 far-plane x
+detail_scale / k) (`CtrLevelData::lod_switch_error`), and a unit's bound is need_a + k x max(need_e,
+need_d x detail_scale / k) (need_d: its groups' largest far-plane, made at load: no new file data). A
+unit that one of its groups needs by shape error (the far version would show more than tie_lod_px)
+is **urgent**: wanted urgent units go before the others (an extra kInViewMeters of priority), and
+at the arena's capacity an urgent unit that still has no room frees units there only for the floor,
+the furthest first (their groups go far, within tie_lod_px). A unit is
 needed while that holds for one of its groups: its **score** is the smallest `|p - c_g| - (e_g x k +
 r_g)` over its groups g, at the camera now and 2/3, 4/3 and 2 s ahead at its speed (velocity per
 frame, smoothed, reset by cuts of more than 40 m), and at Jak (his first bone's place from the merc
@@ -69,6 +79,8 @@ its recent largest (decaying 1% a frame): a zoom moves it. The unit's bound (nee
 from its sphere's center, StreamChunk) skips the per-group pass for the units beyond it, squared
 distances first. Score < 0: needed now; < 20 m + half a second of the camera's travel: wanted
 (read); > 45 m: may be freed for another. A needed unit in view goes before every other.
+(AI-assisted, titlemove) On the title screen e_g is at least kTitleLodMin (100 m) / k
+(`lod_min_e`; performance.md "Title flight pops"), in the units' bounds too.
 **Camera cuts**: a jump of more than 40 m in a frame, or of the tie LOD factor by more than 30%
 (another camera's focal length, a zoom); late times are counted as after a cut (within 2 s of one)
 or not (speed, bandwidth, room).
@@ -108,6 +120,29 @@ groups, 50 m: 4.2 / 6.3 Snowy).
   each one's time of day colors written first with the current blend (below), at most 16k vertices
   a frame (a chunk at least; the rest the next frame): the unit is there from that frame on.
 
+## Levels not drawn yet, level starts (title3, Oct 22)
+
+- **Hidden levels**: a level that is loaded but not drawn in any mode for 3 frames (Sandover behind
+  the title's logo for seconds; a level the game shows later) scores its units around the game's
+  camera (`*math-camera*` trans, read on the game thread at `ctr_send_chain`:
+  `CtrLevels::note_game_camera`), with its speed's lead, and the tie LOD factor of the last streaming
+  level drawn or else of any level drawn (`note_k_any`: the title's logo). Its near chunks are there
+  when it is shown. Before: none was read until Sandover's first draw, which drew 71 near chunks'
+  groups far (Azahar 326 ms on average, 401 ms at most) and switched them on screen (the user's
+  "geometry changes in the first couple seconds" of the title).
+- (AI-assisted, todlag, Oct 23) **Time of day at a reveal**: a level shown again rewrites all of
+  its groups drawn in its first frame (title3's spread over 6 frames at up to 7 ms drew groups
+  with the file's colors meanwhile: removed). Sandover at the title: 20.6 ms of time of day in that
+  frame in Azahar, behind the logo (c3l_format.md "Time of day").
+- **Coming out of black**: no group is kept far "in view" for late data while the screen is black
+  (`ctr_level_set_screen_black`: the game's PMODE fade at 0, or held). When the screen comes out of
+  black within 3 s of a level being shown or of a camera cut, while tie LOD groups in view are
+  drawn far for late data (`note_late_in_view`), the renderer keeps it black until they are there
+  (at most 1.5 s), then fades in over 8 frames (`CtrRenderer::draw_pmode_fade`; log line `[ctr]
+  screen kept black N ms`). A continue to firecanyon-start (host, SD model): 25 groups far at the
+  first visible frame, 23 of them switching in view when the 4 s hold ended -> 11 frames more black,
+  none far once visible.
+
 ## Memory
 
 Linear memory: the level's resident data (everything but the units) is v16's tie data plus v18's
@@ -142,8 +177,9 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
 
 - Time of day (c3l v16): a unit is colored when it is taken, before its first draw: every group
   written from the table with the current blend (exact; ~80 ns per vertex in Azahar, within the take
-  budget), its versions set, so `tod_recolor` and tod_max_ms (citadel's per-frame cap) treat it as
-  up to date: never drawn with the file's baked colors. The groups (one per visibility id, v18) are
+  budget), its versions set, so `tod_recolor` treats it as up to date: never drawn with the file's
+  baked colors. (A unit taken before its level's first draw keeps the file's colors until then:
+  since Oct 23 tod_recolor rewrites every group drawn before its draw, no cap.) The groups (one per visibility id, v18) are
   made from the unit's indices by the stream job at its first read, into room kept at load; its
   light lists and palettes (`tod_scan`) at its first take, once per level load. Host check:
   `CTR_TOD_CHECK=1`.
@@ -174,6 +210,10 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   (group frames), ms on average, at most (frames); needed now KB on average, at most; read with
   their file neighbours; scheduling ms/frame (most); per level: meshes KB + textures KB, near chunks
   there of all (KB)`.
+- Host: `CTR_POP_LOG=1` (title3): one `[pop]` line per level draw (chunks appearing / going by
+  distance in view, tie LOD switches in view, groups late / held far, time of day groups rewritten,
+  left behind, waiting, impostor cards and captures, near chunks taken) and `[pop] soft frame N`
+  after each dumped frame (`--ctr-dump DIR --ctr-dump-every 1`: frame_N.png).
 - Host: `CTR_STREAM_SIM=5.5` takes each stream job only when a New 3DS SD card (5.5 MB/s, 8 ms per
   request) and decoder would have finished it, in frames of the fps cap (game time); `CTR_SOFT_LINEAR_KB`
   (default 34000) is the soft backend's model of the linear heap for the growth rule;

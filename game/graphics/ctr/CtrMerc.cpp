@@ -20,6 +20,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrEye.h"
+#include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrSettings.h"
@@ -116,6 +117,76 @@ void mul44(float* out, const float* a, const float* b) {
     }
   }
   memcpy(out, r, sizeof(r));
+}
+
+// (AI-assisted) HUD models' depth on the 3DS GPU. The isometric projection (hud_clip) puts a HUD
+// model at GS depth 2^24 - its camera z (the orb and power cell icons: 1024 or 2048 below the top
+// of the depth range) with the model only some 10-60 GS units deep. The PICA computes each
+// vertex's depth in float24 (16 bit mantissa): near the top of the range one step is 2^-17, ~128
+// GS units, so the whole model got one or two depth values. Its back faces (HUD models aren't
+// culled) then passed the GEQUAL test over its front faces in mesh order, and the envmap shine
+// (tested GEQUAL against its own base pass) lit back faces: the icons and the orbs flying into
+// the HUD looked misshapen with a flickering shine on hardware (Azahar's shaders compute in 32-bit
+// floats, ~1 GS unit). Here the model's depth is spread about its center by K, so it spans
+// kHudDepthRadius GS units (~16 float24 steps either way), and its center is moved down from the
+// top of the range far enough for that. The order against the rest stays: the HUD sprites are
+// ~63500 GS units below the top, the world's near plane (math-camera max-depth) 16584 below it.
+// clip: row-major, w constant (HUD), applied to the camera space position. bones[slots[0..n)]:
+// the model's bones (camera = -(tmat * p + tmat[3]), p the local position = quantized *
+// model_scale), the first one its center.
+constexpr double kHudDepthRadius = 2048.0;  // GS depth units
+constexpr double kHudDepthTop = 256.0;      // the closest a spread model comes to the top
+void hud_depth_spread(float* clip,
+                      const CtrMercMat* const* bones,
+                      const u8* slots,
+                      int n,
+                      float model_scale) {
+  if (clip[12] != 0.f || clip[13] != 0.f || clip[14] != 0.f || !(clip[15] > 0.f)) {
+    return;  // not the isometric projection (w changes with the position)
+  }
+  constexpr double S = 16777215.0;
+  const double w = clip[15];
+  // GS units below the top of the depth range: x = (1 - z / w) / 2 * S, its gradient over the
+  // camera space position, and the model's origin's
+  double grad[3];
+  for (int c = 0; c < 3; c++) {
+    grad[c] = -0.5 * S * clip[8 + c] / w;
+  }
+  const CtrMercMat& m0 = *bones[slots[0]];
+  const double cam[3] = {-m0.tmat[3].x(), -m0.tmat[3].y(), -m0.tmat[3].z()};
+  const double xc =
+      0.5 * S * (1.0 - (clip[8] * cam[0] + clip[9] * cam[1] + clip[10] * cam[2] + clip[11]) / w);
+  // the model's depth radius: x's gradient over the local position (camera = -(tmat * p)), the
+  // largest of its bones' (a model's first bone can be a tiny root: the power cell's), times the
+  // radius of its quantized coordinates' bounding cube
+  double g2max = 0;
+  for (int b = 0; b < n; b++) {
+    if (slots[b] >= 128) {
+      continue;
+    }
+    const CtrMercMat& m = *bones[slots[b]];
+    double g2 = 0;
+    for (int j = 0; j < 3; j++) {
+      const double gj =
+          grad[0] * m.tmat[j].x() + grad[1] * m.tmat[j].y() + grad[2] * m.tmat[j].z();
+      g2 += gj * gj;
+    }
+    g2max = std::max(g2max, g2);
+  }
+  const double r = std::sqrt(g2max) * (double)model_scale * 32767.0 * 1.7320508075688772;
+  if (!(r > 0) || !(r < kHudDepthRadius) || !std::isfinite(xc)) {
+    return;  // already deep enough (or garbage)
+  }
+  // (at most 2^16: a model shrunk to nothing, the progress menu's hidden icons, keeps sane
+  // float24 matrix values)
+  const double k = std::min(kHudDepthRadius / r, 65536.0);
+  const double xc2 = std::max(xc, kHudDepthRadius + kHudDepthTop);
+  // x' = xc2 + k (x - xc): with n = z / w, n' = k n + (1 - k) - 2 (xc2 - k xc) / S
+  const double c = (1.0 - k) - 2.0 * (xc2 - k * xc) / S;
+  for (int i = 0; i < 3; i++) {
+    clip[8 + i] = (float)(k * clip[8 + i]);
+  }
+  clip[11] = (float)(k * clip[11] + c * w);
 }
 }  // namespace
 
@@ -326,12 +397,63 @@ const CtrMercModelData* CtrMercRenderer::find_model(const u8* name, const CtrLev
     *lev = s.lev;
     return s.model;
   }
-  const CtrMercModelData* model =
-      m_levels->find_merc_model(std::string_view((const char*)name, len), lev);
+#ifndef __3DS__
+  {
+    // (AI-assisted) host test of the "play as Keira" model without a save that has her:
+    // CTR_KEIRA_FORCE=1 draws her for every Jak
+    static const bool force = getenv("CTR_KEIRA_FORCE") != nullptr;
+    if (force && len >= 6 && !memcmp(name, "eichar", 6)) {
+      u8 buf[128];
+      const u32 n = std::min<u32>(len, 127 - ctr_keira::kModelPrefixLen);
+      memcpy(buf, ctr_keira::kModelPrefix, ctr_keira::kModelPrefixLen);
+      memcpy(buf + ctr_keira::kModelPrefixLen, name, n);
+      buf[ctr_keira::kModelPrefixLen + n] = 0;
+      return find_model_named(buf, ctr_keira::kModelPrefixLen + n, h, gen, s, lev);
+    }
+  }
+#endif
+  return find_model_named(name, len, h, gen, s, lev);
+}
+
+const CtrMercModelData* CtrMercRenderer::find_model_named(const u8* name,
+                                                          u32 len,
+                                                          u32 h,
+                                                          u32 gen,
+                                                          FindSlot& s,
+                                                          const CtrLevelData** lev) {
+  const std::string_view sv((const char*)name, len);
+  const CtrMercModelData* model = m_levels->find_merc_model(sv, lev);
   if (model) {
     s = {h, gen, model, *lev};
+    return model;
   }
-  return model;
+  // (AI-assisted) "play as Keira": her file loads the first time the game asks for her (render
+  // thread only: not from the bone snapshot); Jak is drawn until it's there (or if it's missing)
+  if (len > (u32)ctr_keira::kModelPrefixLen &&
+      !memcmp(name, ctr_keira::kModelPrefix, ctr_keira::kModelPrefixLen)) {
+    if (!m_snapshot_mode) {
+      m_levels->load_extra(ctr_keira::kFileName);
+    }
+    return m_levels->find_merc_model(sv.substr(ctr_keira::kModelPrefixLen), lev);
+  }
+  return nullptr;
+}
+
+void CtrMercRenderer::note_keira_shadow(const CtrMercModelData& model, u64 frame) {
+  // (AI-assisted) her shadow's hulls: the model "<her model>~shadow" (looked up once per set of
+  // loaded levels)
+  const u32 gen = m_levels->set_generation();
+  if (m_keira_shadow_for != &model || m_keira_shadow_gen != gen) {
+    const CtrLevelData* lev = nullptr;
+    const CtrMercModelData* sm =
+        m_levels->find_merc_model(model.name + ctr_keira::kShadowSuffix, &lev);
+    m_keira_shadow = sm && sm->keira_shadow ? sm->keira_shadow : nullptr;
+    m_keira_shadow_for = &model;
+    m_keira_shadow_gen = gen;
+  }
+  if (m_keira_shadow) {
+    ctr_keira::note_shadow_frame(frame, &m_keira_shadow->view, (const float(*)[16])m_rig_mats);
+  }
 }
 
 u32 CtrMercRenderer::queue_floats(const float* src, int n) {
@@ -727,6 +849,30 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         }
         m_mod_gather_ms += ctr_gpu_time_ms() - t0;
       }
+      // (AI-assisted) "play as Keira": her pose for the shadow bucket (drawn before her merc
+      // bucket), from these matrices
+      if (n > 0 && (!memcmp(input, ctr_keira::kModelPrefix, ctr_keira::kModelPrefixLen) ||
+                    !memcmp(input, "eichar", 6))) {
+        const CtrLevelData* lev = nullptr;
+        const CtrMercModelData* model = find_model(input, &lev);
+        if (model && model->keira_rig) {
+          const float* jak[128];
+          u64 sent[2] = {0, 0};
+          static const float kZero[16] = {};
+          for (int k = 0; k < 128; k++) {
+            jak[k] = kZero;
+          }
+          for (int b = 0; b < n; b++) {
+            if (sl[b] < 128) {
+              jak[sl[b]] = dst[b].tmat[0].data();
+              sent[sl[b] >> 6] |= 1ull << (sl[b] & 63);
+            }
+          }
+          if (ctr_keira::pose(jak, sent, (float(*)[16])m_rig_mats, 128, nullptr, rs.frame_idx)) {
+            note_keira_shadow(*model, rs.frame_idx);
+          }
+        }
+      }
       m_model_ordinal++;
       return;
     }
@@ -794,6 +940,45 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
   }
   input += 128 + 16 * i;
+  // (AI-assisted) "play as Keira": her bones from Jak's (her draws' palettes name her rig's slots)
+  const MercMat* const* pal_bones = bones;
+  if (model->keira_rig) {
+    const float* jak[128];
+    for (int k = 0; k < 128; k++) {
+      jak[k] = bones[k]->tmat[0].data();
+    }
+    ctr_keira::Camera cam;
+    const bool have_cam = m_levels->camera(rs.frame_idx, cam.rot, cam.trans);
+    if (!ctr_keira::pose(jak, sent, (float(*)[16])m_rig_mats, 128, have_cam ? &cam : nullptr,
+                         rs.frame_idx)) {
+      return;
+    }
+    note_keira_shadow(*model, rs.frame_idx);
+    if (!m_rig_slot[0]) {
+      for (int k = 0; k < 256; k++) {
+        m_rig_slot[k] = &m_rig_mats[k < 128 ? k : 0];
+      }
+    }
+    pal_bones = m_rig_slot;
+  } else if (model->name.size() > 12 && !model->name.compare(0, 12, "sidekick-lod")) {
+    // (AI-assisted, keira3) "play as Keira": Daxter on her shoulder, not Jak's (his bones moved
+    // to her seat, ctr_keira::daxter_shift: nothing to do when she isn't drawn)
+    float shift[3];
+    if (ctr_keira::daxter_shift(rs.frame_idx, bones[ctr_keira::kDaxterMainSlot]->tmat[0].data(),
+                                shift)) {
+      for (int k = 0; k < 128; k++) {
+        m_dax_mats[k] = *bones[k];
+        m_dax_mats[k].tmat[3].x() += shift[0];
+        m_dax_mats[k].tmat[3].y() += shift[1];
+        m_dax_mats[k].tmat[3].z() += shift[2];
+        m_dax_slot[k] = &m_dax_mats[k];
+      }
+      for (int k = 128; k < 256; k++) {
+        m_dax_slot[k] = bones[k];
+      }
+      pal_bones = m_dax_slot;
+    }
+  }
   PcMercFlags flags;
   memcpy(&flags, input, sizeof(flags));
   // HUD models (the orb and power cell icons...): isometric projection, see hud_clip
@@ -806,11 +991,27 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     float y_scale;
     memcpy(&y_scale, input + 20, sizeof(y_scale));
     hud_clip(hud, y_scale);
+    if (i > 0 && slots[0] < 128) {
+      hud_depth_spread(hud, bones, slots, i, model->scale);  // (AI-assisted) see there
+    }
     clip = hud;
   }
 
   // blend shapes (faces): the game's weights follow the flags (Merc2::handle_pc_model)
-  if (model->blerc_count) {
+  if (model->blerc_count && model->keira_rig) {
+    // (AI-assisted) her face: Jak's weights mapped to her targets, and her blinks
+    float weights[c3l::kMercBlercWeights];
+    float jak_w[c3l::kMercBlercWeights];
+    const bool uses_blerc = flags.bitflags & 4;
+    if (uses_blerc) {
+      memcpy(jak_w, input + 32, sizeof(jak_w));
+    }
+    const bool any = ctr_keira::face_weights(uses_blerc ? jak_w : nullptr, rs.frame_idx, weights);
+    if (any || model->blerc_moved) {
+      apply_blerc(*lev, *model, weights);
+      model->blerc_moved = any;
+    }
+  } else if (model->blerc_count) {
     const bool uses_blerc = flags.bitflags & 4;
     if (uses_blerc || model->blerc_moved) {
       float weights[c3l::kMercBlercWeights] = {};
@@ -916,6 +1117,47 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       hud_nfix = true;
     }
   }
+  // (AI-assisted) HUD models far along z (the orbs flying into the HUD: camera z -9999999): the
+  // skin shader's camera space position and the bone rows' translations are float24 on the GPU,
+  // whose step there (~150 GS units) is more than the model's size, so its vertices' depths (and
+  // its parts' places) lost what hud_depth_spread spreads. The bone rows' translations are taken
+  // relative to a point on the line to the model's center, kHudShiftTo from the camera, and the
+  // clip matrix adds it back: the same positions, the same view direction for the envmap's sphere
+  // map (to within the model's size over that distance).
+  constexpr double kHudShiftTo = 16384.0;
+  double hud_shift[3] = {0, 0, 0};
+  bool hud_shifted = false;
+  float hud_shift_clip[16];
+  if ((flags.bitflags & 8) && i > 0 && slots[0] < 128) {
+    // the center in the rows' space: -tmat[3], then D (hud_nfix)
+    const MercMat& m0 = *bones[slots[0]];
+    const double c0[3] = {-(double)m0.tmat[3].x(), -(double)m0.tmat[3].y(),
+                          -(double)m0.tmat[3].z()};
+    double c[3];
+    for (int r = 0; r < 3; r++) {
+      c[r] = hud_nfix ? hud_d[3 * r] * c0[0] + hud_d[3 * r + 1] * c0[1] + hud_d[3 * r + 2] * c0[2]
+                      : c0[r];
+    }
+    const double len = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+    if (len > 2.0 * kHudShiftTo && std::isfinite(len)) {
+      const double f = 1.0 - kHudShiftTo / len;
+      for (int r = 0; r < 4; r++) {
+        double t = clip[4 * r + 3];
+        for (int k = 0; k < 3; k++) {
+          if (r == 0) {
+            hud_shift[k] = c[k] * f;
+          }
+          t += (double)clip[4 * r + k] * hud_shift[k];
+        }
+        for (int k = 0; k < 3; k++) {
+          hud_shift_clip[4 * r + k] = clip[4 * r + k];
+        }
+        hud_shift_clip[4 * r + 3] = (float)t;
+      }
+      clip = hud_shift_clip;
+      hud_shifted = true;
+    }
+  }
 
   // envmap strength and color per effect (pc-merc-draw-request "fades", after the flags and the
   // blend shape weights): 0 when the effect's envmap is off or faded out by distance
@@ -974,14 +1216,15 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     return q_f24;
   };
   // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
-  // (the yeti) when its first bone is further from the camera than max(25 m, 12.5 x the model's
+  // (the yeti; (j1ocean) never the pickups: CtrLevel gives those no gen_draws,
+  // c3l::merc_gen_lod_exempt) when its first bone is further from the camera than max(25 m, 12.5 x the model's
   // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
   // address of its bone matrices)
   // (AI-assisted, streaming) Jak's place (his first bone's tmat[3]: world = camera position +
   // camera rot * it, checked against the game's position to 0.6 m): the level streaming prefetches
   // around him too (camera cuts land near him)
-  if (!hud_model && i > 0 && slots[0] < 128 && model->name.size() >= 6 &&
-      !model->name.compare(0, 6, "eichar")) {
+  if (!hud_model && i > 0 && slots[0] < 128 &&
+      ((model->name.size() >= 6 && !model->name.compare(0, 6, "eichar")) || model->keira_rig)) {
     const math::Vector4f& t = bones[slots[0]]->tmat[3];
     m_levels->stream_note_target(t.x(), t.y(), t.z(), rs.frame_idx);
   }
@@ -1049,7 +1292,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       // an earlier model (Merc2 reads its own leftover the same way). Counted, logged once per
       // model: it would put that part of the model somewhere else
       const u8 bi = draw.palette[p];
-      if (bi < 128 && !(sent[bi >> 6] & (1ull << (bi & 63)))) {
+      if (bi < 128 && !model->keira_rig && !(sent[bi >> 6] & (1ull << (bi & 63)))) {
         m_stats.unsent_bones++;
         if (std::find(m_unsent_bone_logged.begin(), m_unsent_bone_logged.end(), model->name) ==
             m_unsent_bone_logged.end()) {
@@ -1060,7 +1303,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
       }
       // (AI-assisted) CtrMicro.h: the matrix read once into registers (the model's scale too), the
       // determinant's sign on its bits, and not worked out once a bone of the palette mirrors
-      const float* t = bones[bi]->tmat[0].data();
+      const float* t = pal_bones[bi]->tmat[0].data();
       if (cull_merc && !palette_mirrors) {
         palette_mirrors = ctr_micro::merc_bone_mirrors(t);
       }
@@ -1077,6 +1320,21 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
           }
         }
         memcpy(rows, o, sizeof(o));
+      }
+    }
+    if (hud_shifted && !same_palette) {
+      // (AI-assisted) the translations relative to the shifted center (see hud_shift), in double:
+      // the camera space ones are ~1e7
+      for (int p = 0; p < draw.palette_count && p < CTR_MAX_PALETTE; p++) {
+        const float* t = pal_bones[draw.palette[p]]->tmat[0].data();
+        const double c0[3] = {-(double)t[12], -(double)t[13], -(double)t[14]};
+        float* rows = &palette_rows[12 * p];
+        for (int r = 0; r < 3; r++) {
+          const double c = hud_nfix ? hud_d[3 * r] * c0[0] + hud_d[3 * r + 1] * c0[1] +
+                                          hud_d[3 * r + 2] * c0[2]
+                                    : c0[r];
+          rows[4 * r + 3] = (float)(c - hud_shift[r]);
+        }
       }
     }
     rows_of = &draw;

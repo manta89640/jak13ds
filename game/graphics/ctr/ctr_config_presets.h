@@ -37,7 +37,6 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
     {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
-    {"tod_busy_half", "off"},    {"tod_pulse_step", "0"}, {"tod_max_ms", "0"}, /* citadel */
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
 };
@@ -81,6 +80,8 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
     {"particles", "reduced", "max_sprites", "1000"},
     {"particles", "reduced", "sprite_max_size", "0.5"},
     {"particles", "reduced", "sprite_min_alpha", "6"},
+    /* (AI-assisted, j1ocean) the safe preset's particles = reduced keeps the old 0.7 density */
+    {"particles", "reduced", "particle_density", "0.7"},
     {"text_size", NULL, "text_scale", NULL},
 };
 
@@ -108,7 +109,7 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"io_cache", "on"},
     {"io_checksum", "off"},
     {"c3l_read_buffer", "256"},
-    {"particle_density", "0.7"},
+    {"particle_density", "1"}, /* (AI-assisted, j1ocean) every particle (was 0.7) */
     {"anim_lod", "on"},
     {"merc_lod_scale", "1"},
     {"ocean", "full"},
@@ -127,6 +128,8 @@ static const char* const ctr_cfg_removed[] = {
     "new_shaders",  "shader_groups",  "shader_mesh",        "shader_skin",
     "cb_read_opaque", "io_on_system_core", "logic_native", "logic_micro",
     "bones_native", "collide_native", "collide_frag_cache", "anim_native",
+    /* (AI-assisted, todlag, Oct 23) the time of day's per-frame limits: every frame current now */
+    "tod_busy_half", "tod_max_ms",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

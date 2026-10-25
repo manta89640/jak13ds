@@ -63,9 +63,9 @@ struct CtrSettings {
   // render thread's 1-1.7 ms for it, half as often by default)
   int ocean_texture_rate = 2;
   // (AI-assisted) ocean = full: the near ocean's alpha is at least this (0..1; the PS2's is 0.5
-  // within 12 m of the camera, 1 from 24 m on). It stands in for the sky reflection pass the 3DS
-  // leaves out; 0.5 = the textured pass as on the PS2 and PC.
-  float ocean_near_alpha = 0.6f;
+  // within 12 m of the camera, 1 from 24 m on). (j1ocean) 0 = the PS2's own alpha: the sky
+  // reflection is drawn now (ctr_gpu_ocean_full_draw_env), the old 0.6 stood in for it.
+  float ocean_near_alpha = 0.f;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
@@ -250,21 +250,12 @@ struct CtrSettings {
   // (AI-assisted, streaming) diagnostic: a log line for each near chunk that is late (and the
   // camera's speed, its score before)
   bool stream_debug = false;
-  // (AI-assisted) time of day: day palettes that move every frame (sunken's cycling lights, most
-  // of its vertices) taken every second frame (CtrLevel.cpp tod_update). off: every frame (exact)
-  bool tod_busy_half = true;
-  // (AI-assisted, citadel) time of day: a day palette that pulses (its weight turned around twice
-  // within ~4 s: Gol and Maia's Citadel's update-mood-light on palette 1, which 71% of its colors
-  // use, moves 1/64 every ~2 frames) is taken only when it moved this many 64ths from the weight
-  // last taken, or once it stood still for 8 frames (CtrLevel.cpp tod_update). 0: every move
-  // (exact as the PC; citadel ~4-8 ms of rewrites per frame)
-  int tod_pulse_step = 4;
-  // (AI-assisted, citadel) time of day: the most ms of rewrites per frame (all levels): the groups
-  // too far behind (3 day moves, or the file's colors) wait beyond it instead of being rewritten
-  // at once, the group pass's budget stays under it, and a day move waits until the last one's
-  // rewrites of the vertices drawn could be spread (the title's fast day, flickers). 0: no limit
-  // (the tod-fix rules: citadel / firecanyon / swamp single frames of 14-19 ms)
-  float tod_max_ms = 2.f;
+  // (AI-assisted, citadel) time of day, an approximation (off by default since Oct 23, todlag): a
+  // day palette that pulses (its weight turned around twice within ~4 s: Gol and Maia's Citadel's
+  // update-mood-light on palette 1, which 71% of its colors use, moves 1/64 every ~2 frames) is
+  // taken only when it moved this many 64ths from the weight last taken, or once it stood still
+  // for 8 frames (CtrLevel.cpp tod_update). 0: every move (exact as the PC)
+  int tod_pulse_step = 0;
   // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
   // far version where the far version's shape error is at most this many pixels on screen (this
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).

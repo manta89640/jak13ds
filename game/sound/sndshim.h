@@ -35,10 +35,11 @@ u32 snd_ResidentBankBytes(u32* count);
 // uses the fake VAG clock instead (overlord/jak1/iso.cpp). No effect elsewhere.
 void snd_RunStreamsWithoutOutput(bool on);
 // (AI-assisted) 3DS: the overlord's SPU voice register writes (sdshim.cpp: key on / off, start and
-// loop addresses) wait for the mixer between chunks. The mixer (another core) runs a voice a
-// chunk at a time with its decoder state in registers (Voice::RunBlock), so a key on in the
-// middle of it was undone or mixed with the old state: the stream's play address (NAX) became
-// garbage. No effect elsewhere (the host mixes sample by sample).
+// loop addresses; snd_keyOnVoiceRaw / snd_keyOffVoiceRaw) wait for the mixer between chunks. The
+// mixer (another core) runs a voice a chunk at a time with its decoder state in registers
+// (Voice::RunBlock), so a key on in the middle of it was undone or mixed with the old state: the
+// stream's play address (NAX) became garbage. No effect elsewhere (the host mixes sample by
+// sample).
 void snd_LockVoiceWrites();
 void snd_UnlockVoiceWrites();
 s32 snd_GetTick();
@@ -72,6 +73,18 @@ s32 snd_PlaySoundVolPanPMPB(snd::BankHandle bank_handle,
                             s32 pan,
                             s32 pitch_mod,
                             s32 pitch_bend);
+
+// (AI-assisted) "play as Keira" (3DS easter egg): as snd_PlaySoundVolPanPMPB, the sound's tones
+// that are Jak's voice (snd_SetKeiraVoice) a little higher
+s32 snd_PlaySoundVolPanPMPBKeira(snd::BankHandle bank_handle,
+                                 s32 sound_id,
+                                 s32 vol,
+                                 s32 pan,
+                                 s32 pitch_mod,
+                                 s32 pitch_bend);
+// (AI-assisted) mark grain `grain` of sound `sound_id` (a tone) as Jak's voice: +pm (1/128
+// semitone) when snd_PlaySoundVolPanPMPBKeira plays it. Returns 0 if it isn't a tone.
+s32 snd_SetKeiraVoice(snd::BankHandle bank_handle, s32 sound_id, s32 grain, s32 pm);
 
 s32 snd_PlaySoundByNameVolPanPMPB(snd::BankHandle bank_handle,
                                   char* bank_name,

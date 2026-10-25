@@ -14,6 +14,7 @@
 #include "game/overlord/common/overlord.h"
 #include "game/overlord/common/soundcommon.h"
 #include "game/overlord/jak1/isocommon.h"
+#include "game/overlord/jak1/srpc.h"
 #include "game/sound/sndshim.h"
 
 #ifdef __3DS__
@@ -643,6 +644,7 @@ uint32_t FS_LoadSoundBank(char* name, SoundBank* bank) {
   snd_ResolveBankXREFS();
   PrintBankInfo(bank);
   bank->bank_handle = handle;
+  KeiraMarkVoices(bank);  // (AI-assisted)
 
   return 0;
 }
@@ -831,6 +833,7 @@ IsoMessage* FS_FinishSoundLoad() {
       snd_ResolveBankXREFS();
       PrintBankInfo(cmd->bank);
       cmd->bank->bank_handle = s.handle;
+      KeiraMarkVoices(cmd->bank);  // (AI-assisted)
     } else {
       auto* cmd = (MusicLoadCommand*)msg;
       *cmd->music_handle = s.handle;

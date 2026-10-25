@@ -4,6 +4,7 @@
 #include <chrono>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "iso_api.h"
@@ -33,6 +34,78 @@
 using namespace iop;
 
 namespace jak1 {
+
+// (AI-assisted) "play as Keira" (3DS easter egg, goal_src/jak1/engine/sound/gsound.gc): the
+// sounds the player plays as Keira come with bit 15 of their mask. Jak's voice in them is played
+// kKeiraVoicePm higher: his grunts and yells sit around 300-380 Hz, Keira's speech (her hint
+// lines, ASSTLP* / ASSTV* in VAGWAD) around 350 Hz, so +4 semitones (x1.26) puts the efforts
+// where hers would be. Only the voice: the whooshes, hits and splashes layered with it in the same
+// sound keep their pitch. The game has no recordings of Keira's efforts (no Keira sound in any
+// bank; her VAG lines are whole sentences), so her voice is Jak's, retuned at the voice level:
+// no new data, nothing streamed (as fast and as reliable as his).
+constexpr s16 kKeiraVoicePm = 4 * 128;
+constexpr u16 kKeiraSoundMask = 0x8000;
+struct KeiraVoice {
+  const char* sound;  // in the common bank
+  u32 grains;         // the grains that are Jak's voice (tones), bit per grain
+};
+// from the common bank's samples (Jak's voice: the samples only these sounds use, voiced, not the
+// layers they share with the impact and whoosh sounds); grain numbers as in the bank
+constexpr KeiraVoice kKeiraVoices[] = {
+    {"punch", 0x1f8},          {"uppercut", 0x18},       {"spin-kick", 0x38},
+    {"flop-down", 0x7c},       {"jump-double", 0x1c},    {"jump-long", 0x7c},
+    {"jak-idle1", 0x7},        {"oof", 0xfc},            {"hit-back", 0x7c},
+    {"hit-up", 0x7c},          {"land-hard", 0x3f8},     {"smack-surface", 0x3ffc},
+    {"grunt", 0x7e},           {"hand-grab", 0x7e},      {"get-powered", 0x7e},
+    {"flop-land", 0x38},       {"jak-deatha", 0x2},      {"death-melt", 0x3},
+    {"death-darkeco", 0xc},    {"death-drown", 0x1},     {"death-fall", 0x1},
+    {"jak-stretch", 0x1},      {"jak-shocked", 0x2},     {"get-shocked", 0x1},
+    {"shield-zap", 0x1},
+};
+constexpr int kKeiraVoiceCount = sizeof(kKeiraVoices) / sizeof(kKeiraVoices[0]);
+// the common bank's sound index of each (-1: not there), and the tones marked
+static SoundBank* gKeiraBank = nullptr;
+static s32 gKeiraIndex[kKeiraVoiceCount];
+static u8 gKeiraTones[kKeiraVoiceCount];
+
+static bool sound_name_is(const SoundRecord& r, const char* name) {
+  return !strncmp(r.name.data(), name, 16);
+}
+static bool sound_name_is_bank(const SoundBank* b, const char* name) {
+  return !strncmp(b->name.data(), name, 16);
+}
+
+void KeiraMarkVoices(SoundBank* bank) {
+  if (!bank || !bank->bank_handle || !sound_name_is_bank(bank, "common")) {
+    return;
+  }
+  gKeiraBank = bank;
+  int tones = 0, sounds = 0;
+  for (int v = 0; v < kKeiraVoiceCount; v++) {
+    gKeiraIndex[v] = -1;
+    gKeiraTones[v] = 0;
+    for (u32 i = 0; i < bank->sound_count && i < bank->sound.size(); i++) {
+      if (sound_name_is(bank->sound[i], kKeiraVoices[v].sound)) {
+        gKeiraIndex[v] = (s32)i;
+        break;
+      }
+    }
+    if (gKeiraIndex[v] < 0) {
+      continue;
+    }
+    for (int g = 0; g < 32; g++) {
+      if ((kKeiraVoices[v].grains >> g) & 1) {
+        gKeiraTones[v] += snd_SetKeiraVoice(bank->bank_handle, gKeiraIndex[v], g, kKeiraVoicePm);
+      }
+    }
+    tones += gKeiraTones[v];
+    sounds += gKeiraTones[v] > 0;
+  }
+  lg::info("[keira] common bank: Jak's voice in {} tones of {} sounds (+{} semitones when the "
+           "player is Keira)",
+           tones, sounds, kKeiraVoicePm / 128);
+}
+
 constexpr int SRPC_MESSAGE_SIZE = 0x50;
 constexpr int SRPC_MESSAGE_COUNT = 128;
 static uint8_t gLoaderBuf[SRPC_MESSAGE_SIZE];
@@ -206,8 +279,27 @@ void* RPC_Player(unsigned int /*fno*/, void* data, int size) {
           }
           s32 vol = GetVolume(sound);
           s32 pan = GetPan(sound);
-          s32 handle = snd_PlaySoundVolPanPMPB(bank->bank_handle, index, vol, pan,
-                                               sound->params.pitch_mod, sound->params.bend);
+          s32 handle;
+          if ((sound->params.mask & kKeiraSoundMask) && bank == gKeiraBank) {
+            // (AI-assisted) "play as Keira": her voice in the player's sound (see kKeiraVoicePm)
+            handle = snd_PlaySoundVolPanPMPBKeira(bank->bank_handle, index, vol, pan,
+                                                  sound->params.pitch_mod, sound->params.bend);
+#ifndef __3DS__
+            // host check (env CTR_KEIRA_VOICE_LOG): which of the player's sounds have her voice
+            static const bool voice_log = getenv("CTR_KEIRA_VOICE_LOG") != nullptr;
+            if (voice_log) {
+              for (int v = 0; v < kKeiraVoiceCount; v++) {
+                if (gKeiraIndex[v] == index) {
+                  lg::info("[keira] voice {}: {} tones +{} semitones (handle {})",
+                           kKeiraVoices[v].sound, gKeiraTones[v], kKeiraVoicePm / 128, handle);
+                }
+              }
+            }
+#endif
+          } else {
+            handle = snd_PlaySoundVolPanPMPB(bank->bank_handle, index, vol, pan,
+                                             sound->params.pitch_mod, sound->params.bend);
+          }
           sound->sound_handle = handle;
           if (sound->sound_handle) {
             sound->id = cmd->play.sound_id;

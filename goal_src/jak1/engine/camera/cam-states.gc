@@ -1604,8 +1604,11 @@
         (set! *camera-base-mode* cam-string)
         (set! (-> self string-vel-dir) (the-as uint 0))
         (set! (-> self fov) 11650.845)
-        (set! (-> self los-tgt-spline-pt) (-> *camera* target-spline end-point))
-        (set! (-> self los-tgt-spline-pt-incarnation) (-> *camera* target-spline point (-> self los-tgt-spline-pt) incarnation))
+        ;; og:preserve-this (AI-assisted) 3DS: a voicebox camera can enter cam-string while *camera* is #f
+        ;; (cam-stop in target-continue). Reading the spline through #f lands past the 48 MB EE.
+        (when *camera*
+          (set! (-> self los-tgt-spline-pt) (-> *camera* target-spline end-point))
+          (set! (-> self los-tgt-spline-pt-incarnation) (-> *camera* target-spline point (-> self los-tgt-spline-pt) incarnation)))
         (set! (-> self min-z-override) (-> self string-max-val z))
         (if (!= (-> *camera* outro-t-step) 0.0) (set! (-> self min-z-override) (-> self string-min-val z)))
         (let ((gp-0 (new-stack-vector0)))

@@ -235,10 +235,10 @@ class CtrRenderer {
   bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
   int m_pipeline_calm = 0;           // (AI-assisted, j2gaps) frames since then that fit in a half
   int m_pipeline_retry_frames = 450;  // calm frames before it goes on again (x2 per overflow)
-  // (AI-assisted, j2intro) Jak II, draw_pmode_fade: the fade's alpha last shown (0: black); a screen
+  // (AI-assisted, j2intro) both games (Jak 1: title3), draw_pmode_fade: the fade's alpha last shown (0: black); a screen
   // coming out of black kept black while a level just shown (or after a cut) misses something in
-  // view (jak2_hold_black): since when, the most missing, the frames
-  float jak2_hold_black(float alp);
+  // view (hold_black): since when, the most missing, the frames
+  float hold_black(float alp);
   float m_shown_alp = 1.f;
   bool m_hold_black = false;
   bool m_hold_ramp = false;  // after the hold: faded in from black (1/8 a frame), not cut in
@@ -259,4 +259,10 @@ namespace ctr_gfx {
 void set_soft_frame_dump(const std::string& dir, int every_nth);
 /*! Save a screenshot every nth frame to <dir>/shot_<frame>.(png|bmp) (3DS: BMP from the GPU). */
 void set_screenshots(const std::string& dir, int every_nth);
+/*! (AI-assisted, fable1) a named screenshot of the next frame into the screenshot folder (as the
+ * pad script's "shot"; nothing without a folder). */
+void request_named_shot(const char* name);
+/*! (AI-assisted, fable1) host, env CTR_HUD_DUMP: true once after each pad "shot" (the sprite
+ * renderer then logs every HUD sprite of that frame). */
+bool take_hud_dump();
 }  // namespace ctr_gfx

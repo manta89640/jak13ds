@@ -7,6 +7,7 @@
 
 #include "CtrLevel.h"
 
+#include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrImpostor.h"
 #include "game/graphics/ctr/CtrOccCull.h"
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <new>
 #include <stdexcept>
@@ -47,6 +49,37 @@ extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 // ---------------------------------------------------------------------------
 
 namespace {
+// (AI-assisted, title3) host diagnostic, env CTR_POP_LOG: per level draw, what changed on screen
+// (chunks appearing / going by distance in view, tie LOD switches in view, groups late or held
+// far, time of day rewrites, impostor cards, units taken): which mechanism a visible change is
+#ifndef __3DS__
+bool pop_log_on() {
+  static const bool on = getenv("CTR_POP_LOG") != nullptr;
+  return on;
+}
+#elif defined(OG3DS_POP_LOG)
+// (AI-assisted, titlemove) a 3DS measurement build (cmake -DOG3DS_POP_LOG=ON): the same lines every
+// frame in gk.log
+constexpr bool pop_log_on() {
+  return true;
+}
+#else
+constexpr bool pop_log_on() {
+  return false;
+}
+#endif
+struct PopLog {
+  u32 chunk_in[4] = {}, chunk_out[4] = {};  // by chunk kind
+  u32 lod_up = 0, lod_down = 0;
+  u32 taken = 0;
+};
+PopLog g_pop;
+// (AI-assisted, titlemove) the title screen's least tie LOD switch distance, meters
+// (CtrTfragRenderer::draw_level). Host, the flight's first ~8 s: switches in view 80 -> 19 (all at
+// 102-113 m; the island's groups are near from the reveal on), the flight's later parts +3-10k
+// triangles; 130 m: 7 switches, but +14-34k triangles later (Azahar: 201k triangles, 28 ms render
+// thread build where the gameplay distances drew 138k / 19.5 ms)
+constexpr float kTitleLodMin = 100.f;
 // below the render thread (0x2F) and the sound mixer (0x2E), which share core 2 with the loader
 constexpr int kLoaderPrio = 0x3C;
 // a prefetched level nothing asked for is dropped after this long
@@ -276,6 +309,9 @@ CtrLevels::~CtrLevels() {
   }
   if (m_common) {
     unload(*m_common);
+  }
+  for (auto& [name, lev] : m_extras) {
+    unload(*lev);
   }
 }
 
@@ -1484,7 +1520,12 @@ inline u32 tod_blend_rgb(const CtrLevelData::Tod& t, u32 c, const CtrLevelData::
          std::min<u32>(255, b >> 6) << 16;
 }
 
-// Table entry idx blended again (it was older than its palettes' last move).
+// Table entry idx blended again (it was older than its palettes' last move). (AI-assisted,
+// todlag) a TodMul from its color's entry (blended once for all of its TodMuls).
+u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx);
+inline u32 tod_entry(CtrLevelData::Tod& t, u32 idx) {
+  return t.stamp[idx] >= t.lut[t.color_mask[idx]] ? t.table[idx] : tod_entry_slow(t, idx);
+}
 __attribute__((noinline)) u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx) {
   const u32 nc = t.color_count;
   u32 rgb;
@@ -1492,25 +1533,99 @@ __attribute__((noinline)) u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx) {
     rgb = tod_blend_rgb(t, idx, t.act);
   } else {
     const auto& m = t.muls[idx - nc];
-    rgb = tod_mul_rgb(tod_blend_rgb(t, m.color, t.act), m);
+    rgb = tod_mul_rgb(tod_entry(t, m.color), m);
   }
   t.table[idx] = rgb;
   t.stamp[idx] = t.ver;
   return rgb;
 }
-inline u32 tod_entry(CtrLevelData::Tod& t, u32 idx) {
-  return t.stamp[idx] >= t.lut[t.color_mask[idx]] ? t.table[idx] : tod_entry_slow(t, idx);
+
+// (AI-assisted, todlag) the colors [0, nc) not up to date blended with the N palettes of t.act,
+// whose weights are the same for r, g and b and add up to at most 256: r and b in the two halves
+// of one word (each sum <= 255 * 256 < 65536), g in another, the palettes' offsets and weights in
+// registers: ~6 instructions per palette instead of ~14 (tod_blend_rgb), the same sums.
+template <int N>
+void tod_refresh_colors(CtrLevelData::Tod& t) {
+  const auto& a = t.act;
+  u32 off[N], w[N];
+  for (int k = 0; k < N; k++) {
+    off[k] = a.slot3[k];
+    w[k] = a.w[k][0];
+  }
+  const u32 nc = t.color_count, stride = t.palette_count * 3, ver = t.ver;
+  const u8* src = t.colors.data();
+  u32* const table = t.table.data();
+  u32* const stamp = t.stamp.data();
+  const u8* const cm = t.color_mask.data();
+  const u32* const lut = t.lut;
+  for (u32 c = 0; c < nc; c++, src += stride) {
+    if (stamp[c] >= lut[cm[c]]) {
+      continue;
+    }
+    u32 rb = 0, g = 0;
+    for (int k = 0; k < N; k++) {
+      const u8* x = src + off[k];
+      rb += ((u32)x[0] | (u32)x[2] << 16) * w[k];
+      g += (u32)x[1] * w[k];
+    }
+    table[c] = std::min<u32>(255, (rb & 0xffff) >> 6) | std::min<u32>(255, g >> 6) << 8 |
+               std::min<u32>(255, rb >> 22) << 16;
+    stamp[c] = ver;
+  }
+}
+
+// (AI-assisted, todlag) every entry brought up to date (colors first: the TodMuls use them). For a
+// frame whose group rewrites touch many more vertices than the table has entries (the title's fast
+// day, citadel's pulse): the rewrites then read the table without the version checks.
+void tod_refresh_all(CtrLevelData::Tod& t) {
+  const auto& a = t.act;
+  bool packed = a.n >= 1 && a.n <= 8;
+  u32 sum = 0;
+  for (u32 k = 0; k < a.n && packed; k++) {
+    packed = a.w[k][0] == a.w[k][1] && a.w[k][0] == a.w[k][2];
+    sum += a.w[k][0];
+  }
+  packed = packed && sum <= 256;
+  if (packed) {
+    switch (a.n) {
+      case 1: tod_refresh_colors<1>(t); break;
+      case 2: tod_refresh_colors<2>(t); break;
+      case 3: tod_refresh_colors<3>(t); break;
+      case 4: tod_refresh_colors<4>(t); break;
+      case 5: tod_refresh_colors<5>(t); break;
+      case 6: tod_refresh_colors<6>(t); break;
+      case 7: tod_refresh_colors<7>(t); break;
+      default: tod_refresh_colors<8>(t); break;
+    }
+  }
+  const u32 n = (u32)t.table.size(), nc = t.color_count, ver = t.ver;
+  u32* const table = t.table.data();
+  u32* const stamp = t.stamp.data();
+  const u8* const cm = t.color_mask.data();
+  const u32* const lut = t.lut;
+  if (!packed) {
+    for (u32 idx = 0; idx < nc; idx++) {
+      if (stamp[idx] < lut[cm[idx]]) {
+        tod_entry_slow(t, idx);
+      }
+    }
+  }
+  // the TodMuls from their (now current) colors, as tod_entry_slow
+  const c3l::TodMul* const muls = t.muls.data();
+  for (u32 idx = nc; idx < n; idx++) {
+    if (stamp[idx] < lut[cm[idx]]) {
+      const auto& m = muls[idx - nc];
+      table[idx] = tod_mul_rgb(table[m.color], m);
+      stamp[idx] = ver;
+    }
+  }
 }
 
 // Every level draw: the game's weights into target_w (the table's entries follow lazily, exact as
-// the PC). Day palettes taken in a frame with config tod_busy_half every second frame only while
-// they jumped (moved by more than kTodJump in a frame) in each of the last kTodBusyFrames level
-// draws (sunken's cycling lights). Returns 2: day palettes taken, 1: only light palettes, 0:
+// the PC). (AI-assisted, todlag) every frame's weights are taken (config tod_pulse_step, off by
+// default, can hold a pulsing palette). Returns 2: day palettes taken, 1: only light palettes, 0:
 // nothing.
-constexpr int kTodBusyFrames = 8;
-constexpr int kTodJump = 4;
 constexpr u64 kTodPulseFrames = 256, kTodPulseSettle = 8;  // (AI-assisted, citadel)
-constexpr int kTodTakeJump = 8;  // (AI-assisted, citadel) tod_max_ms: a day move this big doesn't wait
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
                u64 frame) {
   u8 w[8][3];
@@ -1565,11 +1680,6 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
     }
   }
   u32 changed = 0, day = 0;
-  int jump = 0;
-  // (AI-assisted, citadel) config tod_max_ms: a day move waits for min_move_frames after the last
-  const bool wait_day = ctr_settings().tod_max_ms > 0 && t.blended_valid &&
-                        (float)(frame - t.move_frame) < t.min_move_frames;
-  bool waited = false;
   for (u32 k = 0; k < t.palette_count; k++) {
     const int p = t.palettes[k];
     if (pulse_step > 0 && t.blended_valid && !(t.light_mask >> p & 1) && pulsing(p) &&
@@ -1583,38 +1693,14 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
         continue;  // (held: target_w stays)
       }
     }
-    if (wait_day && !(t.light_mask >> p & 1) && memcmp(t.target_w[p], w[p], 3) != 0) {
-      // (tod_max_ms: the last day move's rewrites aren't spread yet; a jump is taken at once)
-      int diff = 0;
-      for (int c = 0; c < 3; c++) {
-        diff = std::max(diff, std::abs((int)w[p][c] - (int)t.target_w[p][c]));
-      }
-      if (diff < kTodTakeJump) {
-        waited = true;
-        continue;
-      }
-    }
     if (!t.blended_valid || memcmp(t.target_w[p], w[p], 3) != 0) {
       changed |= 1u << p;
       if (!(t.light_mask >> p & 1)) {
         day |= 1u << p;
-        for (int c = 0; c < 3; c++) {
-          jump = std::max(jump, std::abs((int)w[p][c] - (int)t.weights[p][c]));
-        }
       }
     }
   }
   memcpy(t.weights, w, sizeof(w));
-  t.day_waited = waited;
-  if (t.blended_valid && day) {
-    t.busy_run = jump > kTodJump ? (u8)std::min(255, t.busy_run + 1) : 0;
-    if (ctr_settings().tod_busy_half && (frame & 1) && t.busy_run >= kTodBusyFrames) {
-      changed &= ~day;  // (next frame)
-      day = 0;
-    }
-  } else if (!day) {
-    t.busy_run = 0;
-  }
   t.blended_valid = true;
   if (!changed) {
     return 0;
@@ -1633,10 +1719,6 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   }
   tod_make_act(t, t.target_w, &t.act);
   if (day) {
-    // frames per day move (the group pass's budget)
-    const float since = (float)std::min<u64>(64, frame - t.move_frame);
-    t.move_frames = 0.75f * t.move_frames + 0.25f * std::max(1.f, since);
-    t.move_frame = frame;
     t.dver++;
     auto& seen = tod_seen();
     std::lock_guard<std::mutex> lk(seen.lock);
@@ -1653,6 +1735,29 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
 typedef u32 __attribute__((may_alias)) tod_word;
 static_assert(offsetof(c3l::Vertex, pad) == 6 && offsetof(c3l::Vertex, rgba) == 12);
 static_assert(sizeof(c3l::Vertex) == 16);
+
+// (AI-assisted, todlag) vertices [first, end) of a plain group from a table that is all up to date
+// (tod_refresh_all): no version checks, and the rgb written as a halfword and a byte (the alpha
+// byte isn't read): ~6 instructions per vertex instead of ~15
+typedef u16 __attribute__((may_alias)) tod_half;
+inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end) {
+  const u32* const tab = t.table.data();
+  u8* p = (u8*)(v + first);
+  u8* const e = (u8*)(v + end);
+  for (; p + 32 <= e; p += 32) {
+    const u32 a = tab[*(const tod_half*)(p + 6)];
+    const u32 b = tab[*(const tod_half*)(p + 22)];
+    *(tod_half*)(p + 12) = (u16)a;
+    p[14] = (u8)(a >> 16);
+    *(tod_half*)(p + 28) = (u16)b;
+    p[30] = (u8)(b >> 16);
+  }
+  if (p < e) {
+    const u32 a = tab[*(const tod_half*)(p + 6)];
+    *(tod_half*)(p + 12) = (u16)a;
+    p[14] = (u8)(a >> 16);
+  }
+}
 
 // Vertices [first, end) from the table (the alpha stays; plain: every one has a time of day color).
 inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end, bool plain) {
@@ -1843,41 +1948,30 @@ void tod_mark_plain(CtrLevelData::Tod& t, u32 ci, const c3l::Vertex* v, int n) {
 }
 
 // One level draw's rewrites: tod_recolor per chunk drawn in two passes (the light vertices, then
-// the groups), then tod_finish.
-// kTodBudgetMs: the frame's time of day work (all levels) the rewrites may take (Azahar ms; the
-//   light pass up to kTodLightShare of it); the group pass gets more while the day moves fast
-//   (kTodSpreadMoves). Groups kTodMaxLag day moves behind or with the file's colors don't wait.
-// Oct 17, Azahar: a group of vertices costs ~80 ns per vertex, a clock read as much as ~20 vertices.
-constexpr double kTodBudgetMs = 1.2;
-constexpr double kTodLightShare = 0.7;
-constexpr float kTodSpreadMoves = 2;
-constexpr u32 kTodMaxLag = 3;
-constexpr u32 kTodCheckWork = 1000, kTodChunkWork = 40;
+// the groups), then tod_finish. (AI-assisted, todlag) no budget: every group drawn is brought up to
+// this frame's weights before its draw (the colors drawn are the frame's, as on the PC). Azahar,
+// Oct 23: the title's fast day (a move nearly every frame) 4.6-8.0 ms a frame; c3l_format.md.
 constexpr int kTodLights = 0, kTodRound = 1;
-inline double tod_budget_ms() {
+// (AI-assisted, todlag) the group pass refreshes the whole table first (tod_refresh_all) when the
+// vertices drawn are this many times the table's entries
+constexpr u64 kTodFreshRatio = 3;
+// (AI-assisted, todlag) the time of day's clock: ctr_gpu_time_ms; on the host times env
+// CTR_TOD_TIME_SCALE (statistics only: the host is ~10x faster than Azahar)
+inline double tod_now_ms() {
 #ifndef __3DS__
-  // (AI-assisted) host: env CTR_TOD_BUDGET_MS (a smaller budget: more chunks drawn behind)
-  static const double ms =
-      getenv("CTR_TOD_BUDGET_MS") ? atof(getenv("CTR_TOD_BUDGET_MS")) : kTodBudgetMs;
-  return ms;
+  static const double scale =
+      getenv("CTR_TOD_TIME_SCALE") ? atof(getenv("CTR_TOD_TIME_SCALE")) : 1.0;
+  return ctr_gpu_time_ms() * scale;
 #else
-  return kTodBudgetMs;
+  return ctr_gpu_time_ms();
 #endif
 }
 struct TodPass {
-  double t0 = 0;         // ctr_gpu_time_ms at the start
-  double before_ms = 0;  // the frame's time of day ms before this pass
-  // the pass: kTodLights (light vertices, up to kTodLightShare of the budget), kTodRound (groups)
+  // the pass: kTodLights (light vertices), kTodRound (groups)
   int pass = 0;
-  bool over = false;     // the budget's used up
-  bool capped = false;   // (AI-assisted, citadel) tod_max_ms reached: nothing more this frame
-  u32 waiting = 0;       // groups too far behind left for tod_max_ms
-  u32 work = 0, next_check = 0;  // vertices written (+ kTodChunkWork per chunk looked at)
-  u32 stop_chunk = UINT32_MAX;  // the first chunk the budget didn't reach (the next round's start)
-  u32 rewritten = 0, behind = 0;
-  double day_budget_ms = 0;  // the budget of the group pass
-  bool measure = false;  // (statistics, every 8th frame) the day moves the groups drawn are behind
-  u32 max_lag = 0;
+  bool fresh_ok = false;  // (AI-assisted, todlag) many vertices drawn: tod_refresh_all first
+  bool fresh = false;     // the table is all up to date (tod_refresh_all done this pass)
+  u32 rewritten = 0;
 };
 std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
   static std::vector<std::pair<uintptr_t, uintptr_t>> d;  // render thread
@@ -1888,11 +1982,8 @@ std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
 // may see the change) before it is drawn (shown: the chunk's runs drawn this frame, nullptr: all of
 // them). A vertex group (one visibility id's vertices) is always rewritten whole, when a day palette
 // the chunk uses moved since (or it has the file's colors); its light vertices, all at once, when a
-// light palette moved. Within the frame's budget: the light pass (from where the last frame's
-// stopped, up to kTodLightShare of tod_budget_ms), then the groups (from where the last frame's
-// budget ran out, TodPass::day_budget_ms); what the budget doesn't reach is drawn as it is, a day
-// move or two behind: groups with the file's colors or kTodMaxLag moves behind are rewritten at
-// once. Hidden groups wait until they are drawn. Returns the vertices written.
+// light palette moved (the light pass). Hidden groups wait until they are drawn. (AI-assisted,
+// todlag) no budget: everything drawn is current. Returns the vertices written.
 u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   auto& t = *lev.tod;
   const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
@@ -1916,19 +2007,9 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   // quick out: every group up to date
   const bool day_ok = t.chunk_min_ver[ci] >= day_last;
   const bool light_ok = t.chunk_light_ver[ci] >= light_last;
-  if (ps.capped && ps.pass != kTodLights && !ps.measure) {
+  if (t.chunk_scanned[ci] == 2 && (ps.pass == kTodLights ? light_ok : day_ok)) {
     return 0;
   }
-  if (t.chunk_scanned[ci] == 2 &&
-      ((ps.pass == kTodLights && (light_ok || ps.over)) ||
-       (ps.pass != kTodLights &&
-        (day_ok ||
-         // (the budget used up: only groups too far behind are rewritten)
-         (ps.over && t.chunk_min_ver[ci] && t.dver - t.chunk_min_dver[ci] < kTodMaxLag &&
-          !ps.measure))))) {
-    return 0;
-  }
-  ps.work += kTodChunkWork;
   int n = 0;
   auto* v = (c3l::Vertex*)ctr_gpu_mesh_vertices_inplace(mesh, &n);
   if (!v || n <= 0) {
@@ -1949,47 +2030,13 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     tod_mark_plain(t, (u32)ci, v, n);
     return tod_recolor(lev, ci, shown, ps);  // (the groups: one for all, made at load)
   }
-  // (the clock read every kTodCheckWork vertices of work: a read costs about as much as 20
-  // vertices in Azahar)
-  auto budget_ok = [&]() {
-    if (ps.over) {
-      return false;
-    }
-    if (ps.work < ps.next_check) {
-      return true;
-    }
-    if (ps.before_ms + (ctr_gpu_time_ms() - ps.t0) <
-        (ps.pass == kTodLights ? tod_budget_ms() * kTodLightShare : ps.day_budget_ms)) {
-      ps.next_check = ps.work + kTodCheckWork;
-      return true;
-    }
-    ps.stop_chunk = (u32)ci;
-    ps.over = true;
-    return false;
-  };
-  // (AI-assisted, citadel) the frame's limit (tod_max_ms) for the groups that don't wait for the
-  // budget
-  auto cap_ok = [&]() {
-    const float cap = ctr_settings().tod_max_ms;
-    if (cap <= 0) {
-      return true;
-    }
-    if (ps.before_ms + (ctr_gpu_time_ms() - ps.t0) < cap) {
-      return true;
-    }
-    ps.capped = true;
-    if (ps.stop_chunk == UINT32_MAX) {
-      ps.stop_chunk = (u32)ci;  // (else the budget's stop chunk stays the next frame's start)
-    }
-    return false;
-  };
   const u32 r0 = lev.chunk_first_run[ci];
   const u32 nr = lev.chunks[ci].vis_run_count;
   const bool by_runs = shown && ng > 1;
   u32 looked = 0;
   int flo = n, fhi = -1;
   // the light pass: its light vertices (the lamps move every frame)
-  if (ps.pass == kTodLights && !light_ok && budget_ok()) {
+  if (ps.pass == kTodLights && !light_ok) {
     u32 moved = 0;
     for (u32 mm = lm; mm; mm &= mm - 1) {
       const int p = __builtin_ctz(mm);
@@ -2011,39 +2058,31 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
           flo = std::min<int>(flo, vl[begin]);
           fhi = std::max<int>(fhi, vl[lend - 1]);
           looked += lend - begin;
-          ps.work += lend - begin;
         }
         begin = lend;
       }
     }
   }
   if (ps.pass != kTodLights && !day_ok) {
-    bool any = false, left = false;
+    bool any = false;
     auto day_group = [&](u32 g) {
       auto& gr = t.groups[g];
       if (gr.ver >= day_last) {
         return;
       }
-      // (the file's colors: now)
-      // (the file's colors, or kTodMaxLag day moves behind: now)
-      if (gr.ver && t.dver - gr.dver < kTodMaxLag && !budget_ok()) {
-        left = true;
-        ps.max_lag = std::max(ps.max_lag, t.dver - gr.dver);
-        return;
-      }
-      // (AI-assisted, citadel) tod_max_ms: those too far behind wait beyond it (the next frame's
-      // pass starts from them)
-      if (ps.capped || !cap_ok()) {
-        left = true;
-        ps.waiting++;
-        ps.max_lag = std::max(ps.max_lag, gr.ver ? t.dver - gr.dver : 99u);
-        return;
+      if (ps.fresh_ok && !ps.fresh) {
+        // (at the frame's first group to rewrite; versions don't move until the next tod_update)
+        tod_refresh_all(t);
+        ps.fresh = true;
       }
       const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
       if (end > first) {
-        tod_write_range(t, v, first, end, gr.plain);
+        if (ps.fresh && gr.plain) {
+          tod_write_fresh(t, v, first, end);
+        } else {
+          tod_write_range(t, v, first, end, gr.plain);
+        }
         looked += (u32)(end - first);
-        ps.work += (u32)(end - first);
         flo = std::min(flo, first);
         fhi = std::max(fhi, end - 1);
       }
@@ -2072,7 +2111,6 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       t.chunk_min_ver[ci] = mv;
       t.chunk_min_dver[ci] = md;
     }
-    ps.behind += left;
   }
   if (fhi >= flo) {
     tod_dirty().emplace_back((uintptr_t)(v + flo), (uintptr_t)(v + fhi + 1));
@@ -2129,7 +2167,16 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
     int max_err = 0, max_step = 0;
     std::array<u8, 24> prev{};
     bool have_prev = false;
+    // (AI-assisted, todlag) the game's weights of the last kAgeFrames frames (newest first) and
+    // the age in frames of the colors drawn: the smallest k whose weights' blend a drawn vertex
+    // shows (kAgeFrames: none of them, e.g. day and light palettes from different frames)
+    std::deque<std::array<u8, 24>> hist;
+    u64 age_sum = 0, age_verts = 0, aged_frames = 0;
+    u32 age_max = 0;
+    // groups drawn with colors 3+ frames old (file: still the file's colors), group draws
+    u64 old_groups = 0, file_groups = 0, group_draws = 0;
   };
+  constexpr u32 kAgeFrames = 64;
   static std::map<std::string, St> stats;
   auto& st = stats[lev.name];
   u8 w[8][3];
@@ -2162,16 +2209,49 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   }
   memcpy(st.prev.data(), w, 24);
   st.have_prev = true;
+  st.hist.push_front(st.prev);
+  if (st.hist.size() > kAgeFrames) {
+    st.hist.pop_back();
+  }
+  std::vector<std::vector<u32>> aged(st.hist.size());  // exact(hist[k]), made when needed
+  auto age_of = [&](u32 idx, u32 c) -> u32 {
+    for (u32 k = 1; k < st.hist.size(); k++) {
+      if (aged[k].empty()) {
+        u8 hw[8][3];
+        memcpy(hw, st.hist[k].data(), 24);
+        exact(hw, aged[k]);
+      }
+      if (aged[k][idx] == c) {
+        return k;
+      }
+    }
+    return kAgeFrames;
+  };
+  u32 frame_age = 0;
+  u64 frame_age_sum = 0;
   // (AI-assisted) "off": vertices that aren't the table's weights' color (drawn behind)
   std::vector<u32> tgt;
   exact(t.target_w, tgt);
   u64 verts = 0, stale = 0, off = 0, far = 0;
   int err = 0, step = 0;
   std::vector<u8> used;
+  u64 old_groups = 0, file_groups = 0, group_draws = 0;
   for (const auto& [ci, shown] : drawn) {
     if (ci >= lev.meshes.size() || lev.meshes[ci] < 0) {
       continue;
     }
+    // (AI-assisted, todlag) per group of the chunk: vertices drawn, the oldest color's age
+    const u32 cg0 = ci < t.chunk_group_first.size() ? t.chunk_group_first[ci] : 0;
+    const u32 cgn = ci < t.chunk_group_count.size() ? t.chunk_group_count[ci] : 0;
+    std::vector<u32> g_age(cgn, 0), g_n(cgn, 0);
+    auto group_of = [&](int i) -> int {
+      for (u32 g = 0; g < cgn; g++) {
+        if (i >= t.groups[cg0 + g].lo && i <= t.groups[cg0 + g].hi) {
+          return (int)g;
+        }
+      }
+      return -1;
+    };
     int n = 0;
     const auto* v = (const c3l::Vertex*)ctr_gpu_mesh_vertices_inplace(lev.meshes[ci], &n);
     // the vertices of the runs drawn (all of the chunk's when it is drawn whole)
@@ -2222,6 +2302,18 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
       }
       stale += e > 0;
       far += e > 4;
+      const int gi = group_of(i);
+      if (gi >= 0) {
+        g_n[gi]++;
+      }
+      if (e > 0) {
+        const u32 a = age_of(idx, rgb & 0xffffff);
+        frame_age = std::max(frame_age, a);
+        frame_age_sum += a;
+        if (gi >= 0) {
+          g_age[gi] = std::max(g_age[gi], a);
+        }
+      }
       {
         const u32 c = rgb & 0xffffff;
         off += c != tgt[idx];
@@ -2229,7 +2321,28 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
       err = std::max(err, e);
       step = std::max(step, s);
     }
+    for (u32 g = 0; g < cgn; g++) {
+      if (!g_n[g]) {
+        continue;
+      }
+      group_draws++;
+      const auto& gr = t.groups[cg0 + g];
+      if (g_age[g] >= 3) {
+        old_groups++;
+        file_groups += gr.ver == 0;
+        if (mode >= 3 || (mode >= 2 && gr.ver == 0)) {
+          lg::info("[ctr] tod old group {} frame {}: chunk {} (kind {} tier {}{}) group {} ({} "
+                   "vertices drawn): colors {} frames old{}, {} day moves behind",
+                   lev.name, rs.frame_idx, ci, lev.chunks[ci].kind, lev.chunks[ci].lod_tier,
+                   lev.is_unit(ci) ? ", streamed" : "", g, g_n[g], g_age[g],
+                   gr.ver == 0 ? " (the file's)" : "", gr.ver ? t.dver - gr.dver : 0);
+        }
+      }
+    }
   }
+  st.old_groups += old_groups;
+  st.file_groups += file_groups;
+  st.group_draws += group_draws;
   st.frames++;
   st.verts += verts;
   st.stale += stale;
@@ -2237,19 +2350,34 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   st.max_err = std::max(st.max_err, err);
   st.max_step = std::max(st.max_step, step);
   st.steps += step > 0;
+  st.age_sum += frame_age_sum;
+  st.age_verts += verts;
+  st.age_max = std::max(st.age_max, frame_age);
+  st.aged_frames += frame_age > 1;
   if (mode >= 2) {
     lg::info("[ctr] tod check {} frame {}: {} vertices drawn, {} stale (max error {}), step {}, "
-             "{} off, {} more than 4 off",
-             lev.name, rs.frame_idx, verts, stale, err, step, off, far);
+             "{} off, {} more than 4 off; color age {} frames at most, {:.2f} on average; {} of "
+             "{} groups drawn 3+ frames old ({} with the file's colors)",
+             lev.name, rs.frame_idx, verts, stale, err, step, off, far, frame_age,
+             (double)frame_age_sum / std::max<u64>(1, verts), old_groups, group_draws,
+             file_groups);
   }
   if (rs.log_now) {
     lg::info("[ctr] tod check {}: {} frames, {:.0f} vertices drawn per frame, {} stale vertices in "
              "{} frames (max error {}), {} frames with a color step (max step {})",
              lev.name, st.frames, (double)st.verts / std::max<u64>(1, st.frames), st.stale,
              st.stale_frames, st.max_err, st.steps, st.max_step);
+    lg::info("[ctr] tod check {}: color age of the vertices drawn {} frames at most ({} = none of "
+             "the last {}), {:.3f} on average, {} frames with a color more than 1 frame old; "
+             "{} of {} group draws 3+ frames old ({} with the file's colors)",
+             lev.name, st.age_max, kAgeFrames, kAgeFrames,
+             (double)st.age_sum / std::max<u64>(1, st.age_verts), st.aged_frames, st.old_groups,
+             st.group_draws, st.file_groups);
     const auto keep = st.prev;
+    auto keep_hist = std::move(st.hist);
     st = St();
     st.prev = keep;
+    st.hist = std::move(keep_hist);
     st.have_prev = true;
   }
 }
@@ -2491,12 +2619,41 @@ void load_tie_lod(c3l::Reader& f,
       !f.read_array(eh.lod_error_offset, eh.lod_group_count, &lev->lod_error)) {
     lev->lod_error.clear();
   }
+#ifndef __3DS__
+  // (AI-assisted, lodnear) host log, env CTR_LOD_LOG: where the groups switch to their far
+  // version by screen-space error (gameplay focal 256, tie_lod_px 4) against the PS2 far-plane
+  if (getenv("CTR_LOD_LOG") && lev->lod_error.size() == lev->lod_groups.size() &&
+      !lev->lod_groups.empty()) {
+    std::vector<float> e_m, ratio;
+    u32 closer = 0, closer_half = 0;
+    for (size_t g = 0; g < lev->lod_groups.size(); g++) {
+      const float de = lev->lod_error[g] * 64.f / 4096.f, dp = lev->lod_groups[g].dist / 4096.f;
+      e_m.push_back(de);
+      ratio.push_back(dp > 0 ? de / dp : 1e9f);
+      closer += de < dp;
+      closer_half += de < 0.5f * dp;
+    }
+    auto pct = [](std::vector<float> v, float q) {
+      std::sort(v.begin(), v.end());
+      return v[std::min(v.size() - 1, (size_t)(q * v.size()))];
+    };
+    lg::info("[lodlog] {}: {} groups: screen-error switch (4 px, focal 256) at p10 {:.1f} / p50 "
+             "{:.1f} / p90 {:.1f} m (+ radius); / PS2 far-plane p10 {:.2f} p50 {:.2f} p90 {:.2f}; "
+             "nearer than the PS2 far-plane {}, nearer than half of it {}",
+             lev->name, e_m.size(), pct(e_m, 0.1f), pct(e_m, 0.5f), pct(e_m, 0.9f),
+             pct(ratio, 0.1f), pct(ratio, 0.5f), pct(ratio, 0.9f), closer, closer_half);
+  }
+#endif
   lg::info("[ctr] {}: tie levels of detail: {} groups, {} near runs{}{}", lev->name,
            lev->lod_groups.size(), near_runs, bad ? fmt::format(" ({} bad runs)", bad) : "",
            lev->lod_error.empty() ? ", switched at the PS2 distances"
                                   : ", switched by screen-space error");
 }
 
+#ifndef __3DS__
+// (AI-assisted, lodnear) host log counters (CTR_LOD_LOG), by unit state
+u64 g_lod_far_why[4] = {}, g_lod_far_close[4] = {};
+#endif
 // (AI-assisted, streaming) host check, env CTR_STREAM_CHECK (CtrLevels::stream_check)
 bool stream_check_enabled() {
 #ifdef __3DS__
@@ -2629,6 +2786,14 @@ void load_stream_info(c3l::Reader& f,
       for (u32 j = 0; j < lev->group_unit_count[g]; j++) {
         lev->unit_groups[fill[lev->group_units[lev->group_unit_first[g] + j]]++] = (u32)g;
       }
+    }
+    // (AI-assisted, lodnear) each unit's largest PS2 far-plane (the switch's floor)
+    for (size_t u = 0; u < lev->stream_units.size(); u++) {
+      float d = 0;
+      for (u32 j = lev->unit_group_first[u]; j < lev->unit_group_first[u + 1]; j++) {
+        d = std::max(d, lev->lod_groups[lev->unit_groups[j]].dist);
+      }
+      lev->stream_units[u].need_d = d;
     }
   }
   if (why) {
@@ -3523,13 +3688,18 @@ bool CtrLevels::load_file(const fs::path& path,
     std::vector<c3l::MercVertex> mverts;
     // (AI-assisted) generated low LODs (c3l::kMercGenLodSuffix): the model they belong to (same
     // vertices) gets their draws as gen_draws, in one mesh with its own
+    // (AI-assisted, j1ocean) none for the pickups (c3l::merc_gen_lod_exempt: always full detail)
     std::unordered_map<std::string, u32> gen_of;
+    bool any_gen = false;
     const size_t gen_suffix_len = strlen(c3l::kMercGenLodSuffix);
     for (u32 mi = 0; mi < models.size(); mi++) {
       const std::string n(models[mi].name, strnlen(models[mi].name, sizeof(models[mi].name)));
       if (n.size() > gen_suffix_len &&
           n.compare(n.size() - gen_suffix_len, gen_suffix_len, c3l::kMercGenLodSuffix) == 0) {
-        gen_of[n.substr(0, n.size() - gen_suffix_len)] = mi;
+        any_gen = true;
+        if (!c3l::merc_gen_lod_exempt(n)) {
+          gen_of[n.substr(0, n.size() - gen_suffix_len)] = mi;
+        }
       }
     }
     out->merc_models.reserve(models.size());  // (AI-assisted) no copies while it grows
@@ -3541,8 +3711,8 @@ bool CtrLevels::load_file(const fs::path& path,
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
-      if (!gen_of.empty() && md.name.find(c3l::kMercGenLodSuffix) != std::string::npos) {
-        continue;  // (drawn as its model's gen_draws)
+      if (any_gen && md.name.find(c3l::kMercGenLodSuffix) != std::string::npos) {
+        continue;  // (drawn as its model's gen_draws, or not at all: an exempt model's)
       }
       for (const auto& me : mod_effects) {
         if (me.model != mi || (u64)me.first_mask + me.frag_count > mod_masks.size() ||
@@ -3582,6 +3752,8 @@ bool CtrLevels::load_file(const fs::path& path,
       if (md.draws.empty()) {
         continue;
       }
+      // (AI-assisted) the "play as Keira" model: bound to her rig, posed from Jak's bones
+      md.keira_rig = !md.name.compare(0, ctr_keira::kModelPrefixLen, ctr_keira::kModelPrefix);
       {
         auto git = gen_of.find(md.name);
         if (git != gen_of.end()) {
@@ -3614,6 +3786,40 @@ bool CtrLevels::load_file(const fs::path& path,
                          m.vertex_count, &mverts) &&
             f.read_array(hdr.merc_index_offset + first * (u32)sizeof(u16), end - first,
                          &mindices)) {
+          // (AI-assisted) her shadow's hulls: model space positions, slots, triangles
+          const size_t sfx = strlen(ctr_keira::kShadowSuffix);
+          if (md.name.size() > sfx &&
+              !md.name.compare(md.name.size() - sfx, sfx, ctr_keira::kShadowSuffix)) {
+            std::vector<float> pos(3 * m.vertex_count);
+            std::vector<u8> slot(m.vertex_count, 0);
+            std::vector<u16> tris;
+            for (const auto& d : md.draws) {
+              for (u32 k = d.first_index; k + 2 < d.first_index + d.index_count &&
+                                          k + 2 < mindices.size();
+                   k += 3) {
+                for (int i = 0; i < 3; i++) {
+                  const u16 v = mindices[k + i];
+                  if (v < m.vertex_count) {
+                    slot[v] = d.palette[mverts[v].bones[0] % c3l::kMercPaletteSize];
+                  }
+                  tris.push_back(v);
+                }
+              }
+            }
+            for (u32 v = 0; v < m.vertex_count; v++) {
+              for (int c = 0; c < 3; c++) {
+                pos[3 * v + c] = mverts[v].pos[c] * m.scale;
+              }
+            }
+            auto sm = std::make_shared<ctr_keira::ShadowMeshData>();
+            if (ctr_keira::build_shadow_mesh(pos.data(), slot.data(), (int)m.vertex_count,
+                                             tris.data(), (int)tris.size() / 3, sm.get())) {
+              md.keira_shadow = sm;
+              lg::info("[ctr] {}: {} shadow hulls", md.name, sm->view.nhulls);
+            } else {
+              lg::warn("[ctr] {}: shadow hulls not closed, not used", md.name);
+            }
+          }
           md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
                                                 end - first);
           if (md.mesh < 0 && make_room(name, "the models")) {
@@ -3747,6 +3953,18 @@ void CtrLevels::process_pending_loads(u64 frame) {
     if (d.job.parts()) {
       // (AI-assisted) partial unload / repair: the meshes made again
       take_parts(d, frame);
+      continue;
+    }
+    if (d.job.common && name != "GAME") {
+      // (AI-assisted) load_extra
+      if (d.result == LoadResult::LOADED) {
+        ctr_gpu_pool_set_priority(d.lev->tex_pool, 3);
+        lg::info("[ctr] loaded {}.c3l ({} models)", name, d.lev->merc_models.size());
+        m_extras[name] = std::move(d.lev);
+        rebuild_merc_index();
+      } else {
+        lg::warn("[ctr] no {} (out/jak1/c3l/{}.c3l)", name, name);
+      }
       continue;
     }
     if (d.job.common) {
@@ -3933,11 +4151,25 @@ void CtrLevels::load_common() {
   request({"GAME", true, false});
 }
 
+void CtrLevels::load_extra(const std::string& name) {
+  if (std::find(m_extra_asked.begin(), m_extra_asked.end(), name) != m_extra_asked.end()) {
+    return;
+  }
+  m_extra_asked.push_back(name);
+  lg::info("[ctr] loading {}.c3l", name);
+  request({name, true, false});
+}
+
 void CtrLevels::rebuild_merc_index() {
   m_merc_index.clear();
   if (m_common) {
     for (size_t i = 0; i < m_common->merc_models.size(); i++) {
       m_merc_index[m_common->merc_models[i].name] = {m_common.get(), (int)i};
+    }
+  }
+  for (auto& [name, lev] : m_extras) {
+    for (size_t i = 0; i < lev->merc_models.size(); i++) {
+      m_merc_index[lev->merc_models[i].name] = {lev.get(), (int)i};
     }
   }
   for (auto& [name, lev] : m_levels) {
@@ -4219,6 +4451,11 @@ void CtrLevels::stream_note_camera(const math::Vector4f& t,
   for (int i = 0; i < 4; i++) {
     m_planes[i] = planes[i];
   }
+  for (int i = 0; i < 3; i++) {
+    for (int c = 0; c < 3; c++) {
+      m_cam_rot[3 * i + c] = rot[i][c];
+    }
+  }
   if (m_cam_valid && frame > m_cam_frame) {
     const float n = (float)std::min<u64>(frame - m_cam_frame, 8);
     float v[3], d2 = 0;
@@ -4372,7 +4609,7 @@ u32 CtrLevels::stream_shrink(bool all) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k = lev.stream_k;
-        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - (su.need_a + k * su.need_e) <
+        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k, lev.lod_floor_k, lev.lod_min_e) <
                          kKeepMeters * kM) {
           continue;
         }
@@ -4482,7 +4719,7 @@ void CtrLevels::stream_update(u64 frame) {
     m_sst.linear_min_load = std::min<u64>(m_sst.linear_min_load, free_now);
   }
   dormant_update(frame);  // (AI-assisted, j2-mem)
-  if (!m_cam_valid || !arena.ready()) {
+  if ((!m_cam_valid && !m_game_cam_new) || !arena.ready()) {
     return;
   }
   // the arena's growth: given back where the linear heap has less than its floor (+ what the
@@ -4537,6 +4774,43 @@ void CtrLevels::stream_update(u64 frame) {
     np++;
   }
   constexpr float kM = 4096.f;
+  // (AI-assisted, title3) the game's camera this frame (note_game_camera) and where its speed takes
+  // it: a level loaded but not drawn lately (Sandover behind the title's logo, for seconds before
+  // the logo reveals it at the attract camera's start; a level the game shows later) reads the near
+  // chunks needed there, with the tie LOD factor of the last level drawn. They are there when it is
+  // shown: no groups drawn far at its first frames, then switching near on screen.
+  float pg[kLeadSteps][3];
+  int ngp = 0;
+  if (m_game_cam_new) {
+    m_game_cam_new = false;
+    float v[3], d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      v[c] = m_game_cam_next[c] - m_game_cam[c];
+      d2 += v[c] * v[c];
+    }
+    const bool cut = !m_game_cam_valid || d2 > kCutMeters * kCutMeters * kM * kM;
+    for (int c = 0; c < 3; c++) {
+      m_game_vel[c] = cut ? 0.f : 0.75f * m_game_vel[c] + 0.25f * v[c];
+      m_game_cam[c] = m_game_cam_next[c];
+    }
+    m_game_cam_valid = true;
+    const float gv2 = m_game_vel[0] * m_game_vel[0] + m_game_vel[1] * m_game_vel[1] +
+                      m_game_vel[2] * m_game_vel[2];
+    ngp = gv2 * kLeadFrames * kLeadFrames < kM * kM ? 1 : kLeadSteps;
+    for (int i = 0; i < ngp; i++) {
+      for (int c = 0; c < 3; c++) {
+        pg[i][c] = m_game_cam[c] + m_game_vel[c] * kLeadFrames * (float)i / (kLeadSteps - 1);
+      }
+    }
+  }
+  for (auto& [name, lp] : m_levels) {
+    if (lp->streaming && lp->stream_frame + 3 >= frame && lp->stream_k > 0) {
+      m_k_last = std::max(lp->stream_k * 1.15f, lp->stream_k_hi);
+    }
+  }
+  if (m_k_last <= 0) {
+    m_k_last = m_k_any * 1.15f;  // (no streaming level drawn yet: the title's logo)
+  }
   u64 need_now = 0;
   for (auto& [name, lp] : m_levels) {
     CtrLevelData& lev = *lp;
@@ -4545,9 +4819,15 @@ void CtrLevels::stream_update(u64 frame) {
     }
     // a level not drawn lately (far mode never asks: its k is 0 there) wants nothing
     // (15% more, or the recent largest: a zooming camera's focal length moves the factor)
+    // (AI-assisted, title3) except one not drawn at all lately (in no mode) while loaded: the
+    // near chunks around the game's camera, with the last level's factor (hidden)
+    const bool hidden = lev.stream_frame + 3 < frame && lev.last_draw_frame + 3 < frame &&
+                        ngp > 0 && m_k_last > 0;
     const float k = lev.stream_frame + 3 >= frame
                         ? std::max(lev.stream_k * 1.15f, lev.stream_k_hi)
-                        : 0.f;
+                        : (hidden ? m_k_last : 0.f);
+    const float(*const pp)[3] = hidden ? pg : p;
+    const int npp = hidden ? ngp : np;
     for (u32 u = 0; u < lev.stream_units.size(); u++) {
       auto& su = lev.stream_units[u];
       if (su.state != CtrLevelData::kUnitAbsent && su.state != CtrLevelData::kUnitResident) {
@@ -4559,6 +4839,7 @@ void CtrLevels::stream_update(u64 frame) {
       // the unit's bound first (its sphere's center: need_a + k x need_e), then its groups': how
       // far the camera (now or where it goes) is beyond the nearest group's near distance
       const bool resident = su.state == CtrLevelData::kUnitResident;
+      su.urgent = false;
       if (k <= 0) {
         if (resident) {
           m_have.push_back({&lev, u, 1e30f});
@@ -4567,12 +4848,12 @@ void CtrLevels::stream_update(u64 frame) {
       }
       const float* c = lev.chunks[su.chunk].bsphere;
       float dmin = 1e30f;
-      for (int i = 0; i < np; i++) {
-        const float dx = p[i][0] - c[0], dy = p[i][1] - c[1], dz = p[i][2] - c[2];
+      for (int i = 0; i < npp; i++) {
+        const float dx = pp[i][0] - c[0], dy = pp[i][1] - c[1], dz = pp[i][2] - c[2];
         dmin = std::min(dmin, dx * dx + dy * dy + dz * dz);
       }
       // (squared first: most units are far beyond their bound, no root for them)
-      const float bound = su.need_a + k * su.need_e;
+      const float bound = su.bound(k, lev.lod_floor_k, lev.lod_min_e);
       const float far_lim = bound + (resident ? kKeepMeters * kM : want_m);
       if (dmin > far_lim * far_lim) {
         if (resident) {
@@ -4586,18 +4867,27 @@ void CtrLevels::stream_update(u64 frame) {
         continue;
       }
       float score = std::sqrt(dmin) - bound;
+      // (AI-assisted, lodnear) with the PS2 floor, a unit needed only by it (its groups' far
+      // versions within tie_lod_px there) is less urgent than one whose groups' far versions
+      // would show: those first, and they may take the others' room at capacity
+      const bool floor_on = lev.lod_floor_k > 0 && lev.lod_error.size() == lev.lod_groups.size();
+      bool urgent = !floor_on;
       if (!lev.unit_group_first.empty()) {
         float best = 1e30f;
         for (u32 j = lev.unit_group_first[u]; j < lev.unit_group_first[u + 1]; j++) {
           const u32 g = lev.unit_groups[j];
           const auto& lg = lev.lod_groups[g];
-          const float sw = g < lev.lod_error.size() ? lev.lod_error[g] : lg.dist;
+          const float sw = g < lev.lod_error.size() ? lev.lod_switch_error(g) : lg.dist;
           const float lim = sw * k + lg.bsphere[3];
           float g2 = 1e30f;
-          for (int i = 0; i < np; i++) {
-            const float dx = p[i][0] - lg.bsphere[0], dy = p[i][1] - lg.bsphere[1],
-                        dz = p[i][2] - lg.bsphere[2];
+          for (int i = 0; i < npp; i++) {
+            const float dx = pp[i][0] - lg.bsphere[0], dy = pp[i][1] - lg.bsphere[1],
+                        dz = pp[i][2] - lg.bsphere[2];
             g2 = std::min(g2, dx * dx + dy * dy + dz * dz);
+          }
+          if (!urgent) {
+            const float lim_e = lev.lod_error[g] * k + lg.bsphere[3];
+            urgent = g2 < lim_e * lim_e;
           }
           // (beyond best already: no root)
           const float bl = best + lim;
@@ -4612,11 +4902,14 @@ void CtrLevels::stream_update(u64 frame) {
         need_now += su.bytes;  // (statistics: needed now or soon)
       }
       su.last_score = score;
+      su.urgent = urgent && score < 0;
       if (resident) {
         m_have.push_back({&lev, u, score});
       } else if (score < want_m) {
-        // (needed now and on screen: first)
-        const float prio = score < 0 && in_view(c) ? score - kInViewMeters * kM : score;
+        // (needed now and on screen: first; (AI-assisted, lodnear) then the urgent ones; title3:
+        // not for hidden levels)
+        const float prio = (score < 0 && !hidden && in_view(c) ? score - kInViewMeters * kM : score) -
+                           (su.urgent ? kInViewMeters * kM : 0.f);
         m_want.push_back({&lev, u, prio});
         if (!su.want_frame) {
           su.want_frame = frame;
@@ -4628,6 +4921,14 @@ void CtrLevels::stream_update(u64 frame) {
   }
   m_sst.need_max = std::max<u64>(m_sst.need_max, need_now);
   m_sst.need_sum += need_now;
+  if (pop_log_on()) {  // (AI-assisted, titlemove) CTR_POP_LOG: the streaming's view of the frame
+    u32 want_now = 0;
+    for (const auto& w : m_want) want_now += w.score < 0;
+    lg::info("[popS] f={} gcam={:.1f},{:.1f},{:.1f} ngp={} cam={:.1f},{:.1f},{:.1f} np={} want={} want_now={} need_now={}KB inflight={} idle={} arena={}KB",
+             frame, m_game_cam[0] / 4096.f, m_game_cam[1] / 4096.f, m_game_cam[2] / 4096.f, ngp,
+             m_cam[0] / 4096.f, m_cam[1] / 4096.f, m_cam[2] / 4096.f, np, m_want.size(), want_now,
+             need_now / 1024, m_stream_inflight, m_idle.size(), arena.capacity() / 1024);
+  }
   if (m_want.empty() && !m_stream_inflight && !level_loading && !m_idle.empty() &&
       frame >= m_idle_frame + kIdleFrames) {
     stream_idle_fill(frame);
@@ -4718,6 +5019,26 @@ void CtrLevels::stream_update(u64 frame) {
     if (!mem && evicted < su.bytes && w.score < 0) {
       free_for(want_m);
     }
+    // (AI-assisted, lodnear) still none and this unit urgent: the units there only for the PS2
+    // floor (their groups go to the far version, within tie_lod_px), the furthest first
+    if (!mem && evicted < su.bytes && su.urgent) {
+      if (!have_sorted) {
+        std::sort(m_have.begin(), m_have.end(),
+                  [](const StreamCand& a, const StreamCand& b) { return a.score > b.score; });
+        have_sorted = true;
+      }
+      u64 freed_for = 0;
+      for (size_t j = hi; !mem && j < m_have.size() && freed_for < su.bytes; j++) {
+        auto& victim = m_have[j].lev->stream_units[m_have[j].unit];
+        if (victim.state != CtrLevelData::kUnitResident || victim.urgent) {
+          continue;
+        }
+        freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
+        evicted += victim.bytes;
+        stream_evict(*m_have[j].lev, m_have[j].unit);
+        mem = arena.alloc(su.bytes);
+      }
+    }
     if (!mem) {
       m_sst.no_room++;
       no_room = true;
@@ -4793,7 +5114,7 @@ void CtrLevels::stream_update(u64 frame) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k2 = lev.stream_frame + 3 >= frame ? lev.stream_k : 0.f;
-        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - (su.need_a + k2 * su.need_e)
+        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k2, lev.lod_floor_k, lev.lod_min_e)
                        : 1e30f;
       }
       if (score > kKeepMeters * kM) {
@@ -4972,7 +5293,7 @@ void CtrLevels::take_stream(Done& d, u64 frame) {
 
 // Render thread, each frame (outside of a GPU frame): the near chunks read, into their levels.
 // Each one's time of day colors are written first with the current blend (exact: a near chunk is
-// never drawn with the file's baked colors, and its rewrite doesn't wait for tod_max_ms); at most
+// never drawn with the file's baked colors); at most
 // kTakeVertices vertices per frame (a chunk at least), the rest the next frame (drawn far until
 // then).
 constexpr u32 kTakeVertices = 16384;
@@ -5004,6 +5325,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
     verts += nv;
     lev->meshes[ci] = o.mesh;
     su.state = CtrLevelData::kUnitResident;
+    g_pop.taken++;  // (AI-assisted, title3: CTR_POP_LOG)
     su.want_frame = 0;
     su.loads++;
     lev->stream_resident += su.bytes;
@@ -5288,7 +5610,7 @@ bool outside_detail(const CtrLevelData& l, const float* s, float margin) {
 float g_detail_t = 0.25f;
 // (AI-assisted, title-popin) auto_detail: the GPU is about to miss frames (ctr_level_set_detail_urgent)
 bool g_detail_urgent = false;
-// (AI-assisted, j2intro) the screen is black this frame (ctr_level_set_screen_black; Jak II only)
+// (AI-assisted, j2intro / title3) the screen is black this frame (ctr_level_set_screen_black)
 bool g_screen_black = false;
 // (AI-assisted, title-popin) the auto_detail position as stored per chunk / tie LOD group
 // (CtrLevelData::chunk_detail_q): 0..kDetailQ, 0xff none yet
@@ -5302,6 +5624,26 @@ u8 detail_q(float t) {
 // title camera's flight (host, Oct 17) most switches of tie versions, tfrag tiers and distance
 // limits in view were of things moving away.
 constexpr float kHoldInView = 1.5f;
+// (AI-assisted, fable1) c3l v14 shrubs: a chunk's max_dist is its PS2 distance class, the middle of
+// the prototype's fade (x + w) / 2 (shrub_ps2_dists.inc: full detail up to x, the fading version
+// up to w). The PS2 shows a shrub out to w and the PC without a limit; the 3DS drew a run up to
+// max_dist x shrub_scale (0.8 by default): a wall of shrubs coming in at ~0.6 of the PS2's far
+// plane. Now a chunk's shrubs reach kShrubFarK x max_dist (~w: w / ((x + w) / 2) is 1.2-1.5 over
+// the table) and each run has its own limit between kShrubNearK of that (~x) and all of it, from
+// a hash of its index: the shrubs thin out over the PS2's fade zone instead of a patch at once.
+#ifdef __3DS__
+constexpr float kShrubFarK = 1.3f;
+constexpr float kShrubNearK = 0.55f;
+#else
+// host tests: env CTR_SHRUB_FAR_K / CTR_SHRUB_NEAR_K (1 and 1: the Oct 24 titlemove behaviour)
+static const float kShrubFarK = getenv("CTR_SHRUB_FAR_K") ? atof(getenv("CTR_SHRUB_FAR_K")) : 1.3f;
+static const float kShrubNearK =
+    getenv("CTR_SHRUB_NEAR_K") ? atof(getenv("CTR_SHRUB_NEAR_K")) : 0.55f;
+#endif
+inline float shrub_run_limit(float far, u32 run) {
+  const float h = (float)((run * 2654435761u) >> 24) * (1.f / 256.f);
+  return far * (kShrubNearK + (1.f - kShrubNearK) * h);
+}
 // (AI-assisted) occ_cull: a level whose occlusion buffer hid fewer triangles than this per level
 // draw lately (average) runs it every 8th frame only; runs of fewer triangles aren't tested
 constexpr float kOccMinTris = 1000.f;
@@ -5610,12 +5952,12 @@ void ctr_level_set_detail(float t) {
   g_detail_t = std::clamp(t, 0.f, 1.f);
 }
 
-void ctr_level_set_detail_urgent(bool urgent) {
-  g_detail_urgent = urgent;
-}
-
 void ctr_level_set_screen_black(bool black) {
   g_screen_black = black;
+}
+
+void ctr_level_set_detail_urgent(bool urgent) {
+  g_detail_urgent = urgent;
 }
 
 float ctr_level_detail() {
@@ -5791,6 +6133,12 @@ void CtrTfragRenderer::render_jak2(DmaFollower& dma, CtrRenderState& rs, int slo
 }
 
 void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
+  if (rs.log_now && m_shrub_run_hid && m_level_draws) {
+    // (AI-assisted, titlemove) shrub runs beyond their distance in chunks that were drawn
+    lg::info("[ctr] {}: shrub runs hidden by distance {:.1f} per level draw", m_name,
+             (double)m_shrub_run_hid / m_level_draws);
+    m_shrub_run_hid = 0;
+  }
   if (rs.log_now && m_level_draws) {
     lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
               m_level_draws);
@@ -5830,16 +6178,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
   }
   if (rs.log_now && m_tod_frames) {
     lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
-             "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, {} chunks drawn "
-             "behind; groups drawn behind by at most {} day moves ({} of {} sampled level draws "
-             "2 or more); a pulsing palette held in {} level draws, a day move waited in {}, {} "
-             "groups too far behind waited for tod_max_ms",
+             "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
+             "refreshed whole in {} level draws ({} heavy frames took no new weights); a pulsing "
+             "palette held in {} level draws",
              m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames, m_tod_ms / m_tod_frames,
-             m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_deferred, m_tod_lag_max,
-             m_tod_lag2, m_tod_lag_frames, m_tod_held, m_tod_waited, m_tod_capped);
+             m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_fresh, m_tod_skipped,
+             m_tod_held);
     m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = 0;
-    m_tod_waited = m_tod_capped = 0;
-    m_tod_spread = m_tod_deferred = m_tod_lag_frames = m_tod_lag_max = m_tod_lag2 = 0;
+    m_tod_spread = m_tod_fresh = m_tod_skipped = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
   if (rs.log_now && m_occ_frames) {
@@ -5895,19 +6241,70 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrBackgroundCamera& cam,
                                   const CtrRenderState& rs) {
   const CtrSettings& settings = ctr_settings();
+  {
+    const u32 taken = g_pop.taken;  // (AI-assisted, title3: CTR_POP_LOG; taken since the last draw)
+    g_pop = PopLog();
+    g_pop.taken = taken;
+  }
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
   m_late_in_view = 0;  // (AI-assisted, j2intro) counted below, reported after the chunk loop
+  // (AI-assisted, titlemove) the title screen (the title level loaded): its attract camera flies a
+  // fixed path over Sandover. No tie group switches LOD (geometry 3 -> 0) nearer than
+  // kTitleLodMin there: at the gameplay distances (the PS2 far-plane, 35-75 m for the island) the
+  // island's palms, grass, hut and rock switched one after another on screen as the flight came
+  // nearer (807 switches in view in 40 s in Azahar; 81 in its first ~8 s on the host, objects up to
+  // 137 px across), each a step in shape and in the vertex colors (the far versions' own shading)
+  m_levels->loaded(&m_loaded);
+  bool title_on = false;
+  for (const auto* l : m_loaded) {
+    title_on = title_on || (m_jak2_slot < 0 && l->name == "title");  // (Jak 1's title level)
+  }
+  float title_min = kTitleLodMin;
+#ifndef __3DS__
+  if (const char* e = getenv("CTR_TITLE_LOD_MIN")) {
+    title_min = (float)atof(e);  // (host test: meters; 0 = as in gameplay)
+  }
+#endif
+  // (AI-assisted, title3) shown again after a gap (the title's reveal of Sandover behind the logo,
+  // a level's start): reveal_frame (late near chunks in view)
+  {
+    // (AI-assisted, title3) this frame's tie LOD factor for the hidden levels' near chunks
+    // (CtrLevels::stream_update), as the tie LOD block below works it out
+    const float pzw = std::abs(cam.perspective[2][3]);
+    const float focal =
+        pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
+    if (settings.tie_lod && focal > 0) {
+      m_levels->note_k_any(settings.detail_scale * focal / std::max(settings.tie_lod_px, 0.25f) *
+                           1.1f);
+    }
+  }
+  const bool reveal = lev.last_draw_frame + 2 < rs.frame_idx;
+  lev.last_draw_frame = rs.frame_idx;
+  if (reveal) {
+    lev.reveal_frame = rs.frame_idx;
+  }
   // (AI-assisted) c3l v16 time of day: blend the level's colors with the game's weights when they
   // moved (the chunks are recolored as they are drawn, emit_chunk)
   u64 tod_verts = 0;
   double tod_ms = 0;
   if (lev.tod) {
-    const double t0 = ctr_gpu_time_ms();
+    const double t0 = tod_now_ms();
     m_tod_frames++;
     const u32 held0 = lev.tod->pulse_held;
-    m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
+    // (AI-assisted, fable1) a heavy frame (the frame before drew 3x the table's entries in
+    // vertices or more: the title's fast day, citadel's pulse, where a move comes nearly every
+    // frame and every group drawn is rewritten after it) takes the game's new weights every second
+    // frame only: the table and the groups are then rewritten once per two frames, together, and
+    // the colors drawn are at most one frame behind the PC's blend (2-8 color units at the title's
+    // 20x day; the same for every group). Half the time of day work there; gameplay (a move every
+    // few frames, few vertices) is unchanged. Azahar, title: performance.md "Time of day".
+    const bool tod_skip = m_tod_heavy && (rs.frame_idx & 1);
+    m_tod_skipped += tod_skip;
+    if (!tod_skip) {
+      m_tod_blends += tod_update(*lev.tod, lev.name, cam, rs.frame_idx) == 2;
+    }
     m_tod_held += lev.tod->pulse_held != held0;  // (AI-assisted, citadel) tod_pulse_step
-    tod_ms += ctr_gpu_time_ms() - t0;
+    tod_ms += tod_now_ms() - t0;
   }
 #ifndef __3DS__
   // (AI-assisted) host diagnostic: the game's time of day weights every 30 frames
@@ -6096,8 +6493,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // drawn: fine for far version occluders, not for near ones
       const bool switching = settings.tie_lod && lev.run_lod.size() >= lev.vis_runs.size();
       if (!why && (fh.occluders & c3v::kOccTieLod)) {
+        // (AI-assisted, lodnear) and the PS2 floor (detail_scale x the far-plane) the builder
+        // assumed: detail_scale up to max(1, the set's smallest)
         if (switching ? !(lev.lod_error.size() == lev.lod_groups.size() && k >= fh.tie_k_lo &&
-                          k <= fh.tie_k_hi)
+                          k <= fh.tie_k_hi &&
+                          settings.detail_scale <= std::max(1.f, fh.detail_min))
                       : (fh.occluders & c3v::kOccTieNear) != 0) {
           why = "tie LOD switch";
         }
@@ -6211,7 +6611,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, title-popin) a chunk's own distance limit (0: none) at auto_detail position t
   auto chunk_limit = [&](const c3l::Chunk& ch, float t) {
     if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
-      return ch.max_dist * (shrub_k0 + shrub_k_span * t) * det;
+      return ch.max_dist * kShrubFarK * (shrub_k0 + shrub_k_span * t) * det;
     } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
       return (shrub_d0 + shrub_d_span * t) * 4096.f * det;
     } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
@@ -6228,6 +6628,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // (AI-assisted, streaming) a chunk's distance decision (draw distance, its own limit, 10%
   // hysteresis, auto_detail's held distances, kept while in view and moving away): the chunk loop's,
   // and the near chunks' (before the tie LOD groups, which need them). Updates the chunk's state.
+  if (m_shrub_lim.size() < lev.chunks.size()) {
+    m_shrub_lim.resize(lev.chunks.size());
+  }
+  if (lev.run_dist_in.size() != lev.vis_runs.size()) {
+    lev.run_dist_in.assign(lev.vis_runs.size(), 0);
+  }
   auto decide_dist = [&](size_t ci, const c3l::Chunk& ch, u8& state,
                          bool vista_chunk) __attribute__((always_inline)) {
     bool dist_ok = true;
@@ -6237,7 +6643,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       float max_dist = base_dist;
       float d;
       if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_ps2) {
-        d = ch.max_dist * shrub_k * det;  // (AI-assisted) c3l v14: the shrubs' PS2 distance
+        // (AI-assisted) c3l v14: the shrubs' PS2 far plane (kShrubFarK; the runs thin out before it)
+        d = ch.max_dist * kShrubFarK * shrub_k * det;
       } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
         d = shrub_fixed_dist;
       } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
@@ -6267,7 +6674,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         int in_view = -1;
         float dd = d;
         const u8 cq = chunk_q[ci];
-        if (auto_detail && cq != q_now && cq != 0xff && d > 0 &&
+        // (AI-assisted, titlemove) only for going: a chunk the new distances show is shown (held
+        // back, a shrub cell culled while the GPU was busy came in only once the camera was within
+        // the old, shorter distance: close up)
+        if (auto_detail && cq != q_now && cq != 0xff && d > 0 && !dist_ok &&
             (ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE)) {
           const float d_old = chunk_limit(ch, cq / kDetailQ);
           const bool ok_old = within(limit_with(d_old), f);
@@ -6283,8 +6693,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           chunk_q[ci] = q_now;
         }
         // (AI-assisted, title-popin) in view and moving away: drawn up to kHoldInView x its own
-        // distance (not beyond the draw distance)
-        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist)) {
+        // distance (not beyond the draw distance). (AI-assisted, titlemove) not shrubs: they
+        // follow the PS2's distances (the user: "small things like shrubs pop in when i walk close,
+        // but if i walk away they stay"); their runs are culled by distance one by one too
+        // (emit_chunk)
+        if (was_in && !dist_ok && dd > 0 && (base_dist <= 0 || dd < base_dist) &&
+            ch.kind != c3l::CHUNK_KIND_SHRUB) {
           if (in_view < 0) {
             in_view = sphere_in_view(cam, ch.bsphere);
           }
@@ -6292,7 +6706,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             dist_ok = within(limit_with(dd * kHoldInView), 1.f);
           }
         }
+        if (pop_log_on() && was_in != dist_ok && sphere_in_view(cam, ch.bsphere)) {
+          (dist_ok ? g_pop.chunk_in : g_pop.chunk_out)[ch.kind & 3]++;
+          lg::info("[popC] f={} {} ci={} kind={} {} d={:.1f} lim={:.1f} r={:.1f}", rs.frame_idx,
+                   lev.name, ci, ch.kind, dist_ok ? "in" : "out", std::sqrt(d2) / 4096.f,
+                   max_dist / 4096.f, ch.bsphere[3] / 4096.f);  // (titlemove: which chunk)
+        }
         state = (u8)(dist_ok ? (state | 4) : (state & ~4));
+        if (ch.kind == c3l::CHUNK_KIND_SHRUB && ci < m_shrub_lim.size()) {
+          m_shrub_lim[ci] = limit_with(dd);  // (AI-assisted, titlemove) for its runs
+        }
       }
     }
     return dist_ok;
@@ -6306,7 +6729,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (its distance state follows the camera all the same: no hysteresis jump when it comes)
     // (a unit whose groups are all beyond their near distance, by its bound with the last frame's
     // factor x 1.25: not decided, 2; its groups are far anyway)
-    const float kb = lev.stream_k * 1.25f;
+    // (AI-assisted, titlemove) with this frame's factor too (stream_k is the last frame's: after a
+    // cut to another focal length units were decided beyond their bound for a frame and their
+    // groups drawn far)
+    float kb = lev.stream_k * 1.25f;
+    if (settings.tie_lod && lev.lod_error.size() == lev.lod_groups.size()) {
+      const float pzw = std::abs(cam.perspective[2][3]);
+      const float focal =
+          pzw > 0 ? 200.f * std::abs(cam.fog.x() * cam.perspective[0][0] / 256.f) / pzw : 0.f;
+      kb = std::max(kb, settings.detail_scale * focal / std::max(settings.tie_lod_px, 0.25f) *
+                            1.1f * 1.25f);
+    }
     for (size_t u = 0; u < lev.stream_units.size(); u++) {
       const auto& su = lev.stream_units[u];
       const u32 ci = su.chunk;
@@ -6316,7 +6749,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       {
         const float* c = lev.chunks[ci].bsphere;
         const float dx = c[0] - cx, dy = c[1] - cy, dz = c[2] - cz;
-        const float lim = su.need_a + kb * su.need_e;
+        const float lim = su.bound(kb, lev.lod_floor_k, lev.lod_min_e);
         if (kb > 0 && dx * dx + dy * dy + dz * dz > lim * lim) {
           lev.unit_ok[u] = 2;
           continue;
@@ -6336,6 +6769,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const bool tie_lod = !lev.lod_groups.empty() && lev.run_lod.size() >= lev.vis_runs.size();
   u32 late_groups = 0;  // (AI-assisted, streaming) drawn far: their near chunks not there yet
   u32 held_groups = 0;  // (AI-assisted, streaming) ... there now, but kept far while in view
+#ifndef __3DS__
+  if (getenv("CTR_LOD_LOG") && rs.frame_idx % 30 == 0 &&
+      (g_lod_far_why[0] + g_lod_far_why[2] + g_lod_far_why[3])) {
+    lg::info("[lodlog] {}: group frames in view within their distance but far (30 frames): late {} "
+             "(within 20 m: {}), beyond the near chunk's distance {} ({}), no near chunk {} ({})",
+             lev.name, g_lod_far_why[3], g_lod_far_close[3], g_lod_far_why[2], g_lod_far_close[2],
+             g_lod_far_why[0], g_lod_far_close[0]);
+    memset(g_lod_far_why, 0, sizeof(g_lod_far_why));
+    memset(g_lod_far_close, 0, sizeof(g_lod_far_close));
+  }
+#endif
+  u32 late_view = 0;    // (AI-assisted, title3) ... late and in view
   if (tie_lod) {
     u32 near = 0;
     // (AI-assisted, title-popin) files with shape errors: the near version while the far one's
@@ -6362,6 +6807,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       return lod_auto ? k0 * (0.5f + 0.5f * t) : k0;
     };
     const float k = k_at(g_detail_t);
+    // (AI-assisted, lodnear) the PS2 floor: by screen-space error alone (4 px of the 400-wide top
+    // screen) half of the groups switched to geometry 3 nearer than their PS2 far-plane, some at
+    // 3-15 m (jungle, beach: "coarse models really close"); the PS2 morphs toward geometry 3 only up
+    // to the far-plane. So a group is near within max(error x k, PS2 far-plane x detail_scale):
+    // never coarser than the PS2, and where the PS2 distance decides, its far version's error at
+    // the switch is under tie_lod_px
+    lev.lod_floor_k = by_error && k > 0 ? k0 / k : 0.f;
+    // (AI-assisted, titlemove) the title: no group switches nearer than kTitleLodMin meters
+    lev.lod_min_e = title_on && by_error && k > 0 ? title_min * 4096.f / k : 0.f;
+#ifndef __3DS__
+    static const bool no_floor = getenv("CTR_LOD_NO_FLOOR") != nullptr;  // (host A/B: as before)
+    if (no_floor) {
+      lev.lod_floor_k = 0.f;
+    }
+#endif
     if (lev.lod_detail_q.size() != lev.lod_groups.size()) {
       lev.lod_detail_q.assign(lev.lod_groups.size(), 0xff);
     }
@@ -6370,14 +6830,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       lev.lod_hold_since.assign(lev.lod_groups.size(), 0);
     }
     // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
-    // view once the data came (4 s at 30 fps)
-    constexpr u32 kHoldFrames = 120;
+    // view once the data came (1 s at 30 fps)
+    constexpr u32 kHoldFrames = 30;  // (AI-assisted, lodnear: was 120)
     for (size_t g = 0; g < lev.lod_groups.size(); g++) {
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
       const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
       const float d2 = dx * dx + dy * dy + dz * dz;
-      const float sw = by_error ? lev.lod_error[g] : lg.dist;
+      const float sw = by_error ? lev.lod_switch_error(g) : lg.dist;
       const float f = (st & 1) ? 1.1f : 1.f;
       auto near_at = [&](float kk) {
         const float lim = sw * kk * f + lg.bsphere[3];
@@ -6402,7 +6862,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       // is there and within its distance; else the far version (data late: statistics). A group
       // drawn far in view for want of its data (bit 4: held) keeps its far version while in view
       // once the data is there: switching then would be a pop on screen; it switches out of view
-      bool keep_far = (st & 4) != 0;
+      // (AI-assisted, title3) not while the screen is black: none was seen far
+      bool keep_far = (st & 4) != 0 && !g_screen_black;
       if (n && has_units) {
         if (g >= lev.group_unit_count.size() || !lev.group_unit_count[g]) {
           n = false;  // (a v19 group whose near version is in no near chunk: none to draw)
@@ -6416,6 +6877,25 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           }
           if (!ok) {
             n = false;
+#ifndef __3DS__
+            {
+              // (AI-assisted, lodnear) host log: groups in view within their distance drawn far,
+              // by why (worst unit state: 3 late, 2 beyond the near chunk's draw distance, 0 none)
+              static const bool lod_log2 = getenv("CTR_LOD_LOG") != nullptr;
+              if (lod_log2 && sphere_in_view(cam, lg.bsphere)) {
+                u8 w = 1;
+                for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+                  const u8 uo = lev.unit_ok[gu[j]];
+                  w = uo == 3 ? 3 : (w == 3 ? 3 : (uo != 1 ? uo : w));
+                }
+                const float d = std::sqrt(d2) / 4096.f;
+                g_lod_far_why[w & 3] += 1;
+                if (d < 20.f) {
+                  g_lod_far_close[w & 3] += 1;
+                }
+              }
+            }
+#endif
             if (late) {
               late_groups++;
               for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
@@ -6424,9 +6904,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                 }
               }
               const bool seen = sphere_in_view(cam, lg.bsphere);
-              m_late_in_view += seen;  // (AI-assisted, j2intro)
-              // (AI-assisted, j2intro) not while the screen is black (Jak II): it switches as soon
-              // as the data is there
+              m_late_in_view += seen;  // (AI-assisted, j2intro) Jak II
+              late_view += seen;       // (AI-assisted, title3) Jak 1
+              // (AI-assisted, j2intro / title3) not while the screen is black: it switches as
+              // soon as the data is there
               if (!keep_far && !g_screen_black && seen) {
                 keep_far = true;
                 lev.lod_hold_since[g] = (u32)rs.frame_idx;
@@ -6437,9 +6918,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           } else if (keep_far) {
             // kept far while in view, at most kHoldFrames, and while the switch would show: the
             // far version's error at least 1.5 x tie_lod_px (the camera nearer than 2/3 of the
-            // group's near distance; near it the error is about tie_lod_px)
-            const float lim = sw * k / 1.5f + lg.bsphere[3];
-            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim &&
+            // group's near distance; near it the error is about tie_lod_px). (AI-assisted,
+            // lodnear) but not where the far version is plainly wrong: from 3 x tie_lod_px of
+            // error on (the camera within 1/3 of that distance) the near version at once. Held
+            // up to 4 s, a continue's late groups stayed coarse 3-15 m from the camera and then
+            // switched together
+            const float e = by_error ? lev.lod_error[g] : lg.dist;
+            const float lim = e * k / 1.5f + lg.bsphere[3], lim_close = e * k / 3.f + lg.bsphere[3];
+            if (sphere_in_view(cam, lg.bsphere) && d2 < lim * lim && d2 > lim_close * lim_close &&
                 (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
               n = false;
               held_groups++;
@@ -6450,6 +6936,26 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       } else if (!n) {
         keep_far = false;  // (beyond its distance: far anyway)
+      }
+#ifndef __3DS__
+      // (AI-assisted, lodnear) host log, env CTR_LOD_LOG: every switch of a group in view, its
+      // distance, the PS2 far-plane and the screen-error distance, and why it is far
+      static const bool lod_log = getenv("CTR_LOD_LOG") != nullptr;
+      if (lod_log && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
+        const char* why = n ? "near" : !near_at(k) ? "dist" : keep_far ? "late/held" : "nodata";
+        lg::info("[lodlog] {} g{} {} d {:.1f} m (to surface {:.1f}) ps2 far {:.1f} err-dist {:.1f} "
+                 "r {:.1f} err {:.3f} m",
+                 lev.name, g, why, std::sqrt(d2) / 4096.f, (std::sqrt(d2) - lg.bsphere[3]) / 4096.f,
+                 lg.dist / 4096.f, by_error ? lev.lod_error[g] * k / 4096.f : 0.f,
+                 lg.bsphere[3] / 4096.f, by_error ? lev.lod_error[g] / 4096.f : 0.f);
+      }
+#endif
+      if (pop_log_on() && (st & 2) && ((st & 1) != 0) != n && sphere_in_view(cam, lg.bsphere)) {
+        (n ? g_pop.lod_up : g_pop.lod_down)++;
+        lg::info("[popL] f={} {} g{} {} d={:.1f} sw={:.1f} r={:.1f} keep_far={}", rs.frame_idx,
+                 lev.name, g, n ? "near" : (!near_at(k) ? "dist" : "nodata/late"),
+                 std::sqrt(d2) / 4096.f, (sw * k) / 4096.f, lg.bsphere[3] / 4096.f,
+                 keep_far ? 1 : 0);  // (titlemove: which group, why)
       }
       st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0));
       near += n;
@@ -6489,10 +6995,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   } else {
     lev.stream_k = 0.f;
+    lev.lod_floor_k = 0.f;
   }
   if (has_units) {
     lev.stream_frame = rs.frame_idx;
     m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx);
+    if (m_jak2_slot < 0) {
+      // (AI-assisted, title3) Jak 1 (Jak II reports after the chunk loop: m_late_in_view)
+      m_levels->note_late_in_view(rs.frame_idx, late_view, rs.frame_idx < lev.reveal_frame + 90);
+    }
   }
   m_levels->stream_note_camera(cam.trans, cam.planes, cam.rot, rs.frame_idx);
   if (m_run_nomerge.size() < lev.vis_runs.size()) {
@@ -6657,6 +7168,63 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           return;
         }
         partly = shown < nr;
+      }
+      // (AI-assisted, titlemove) shrubs follow the PS2's distance by their runs (a visibility
+      // node: up to 8 instances, ~10 m in radius in village1), not by their cell (~20 m in radius):
+      // a run is drawn while its sphere reaches within the chunk's distance (10% hysteresis).
+      // Before, a whole cell came in at once and stayed while any of it was within the distance
+      // (and up to 1.5x that while in view)
+      if (ch.kind == c3l::CHUNK_KIND_SHRUB && !vista_tier && ci < m_shrub_lim.size() &&
+          m_shrub_lim[ci] > 0 && !lev.run_spheres.empty()) {
+        const float lim = m_shrub_lim[ci];
+        const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
+                    dcz = ch.bsphere[2] - cam.trans[2];
+        const float dc = std::sqrt(dcx * dcx + dcy * dcy + dcz * dcz);
+        const u32 r0 = lev.chunk_first_run[ci];
+        // (the runs the run loop above uses)
+        const u32 nr = vis_test ? ch.vis_run_count
+                                : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci]
+                                                           : ch.vis_run_count);
+        u8* const rin = lev.run_dist_in.data();
+        if (dc + ch.bsphere[3] <= lim * kShrubNearK) {
+          // all of it within the nearest run limit: every run in (no per run test)
+          for (u32 r = r0; r < r0 + nr; r++) {
+            rin[r] = 1;
+          }
+        } else {
+          if (!runs_valid) {
+            for (u32 r = r0; r < r0 + nr; r++) {
+              m_run_shown[r] = 1;
+              m_run_nomerge[r] = 0;
+            }
+            runs_valid = true;
+          }
+          u32 shown = 0;
+          for (u32 r = r0; r < r0 + nr; r++) {
+            const auto& rs_ = lev.run_spheres[r];
+            bool in = true;
+            if (rs_.r != 0xffff) {
+              const float x = ch.origin[0] + rs_.c[0] * ch.scale - cam.trans[0];
+              const float y = ch.origin[1] + rs_.c[1] * ch.scale - cam.trans[1];
+              const float z = ch.origin[2] + rs_.c[2] * ch.scale - cam.trans[2];
+              // (its nearest shrub within the distance: none comes in later than the PS2's far
+              // plane; the run's own limit, fable1: shrub_run_limit)
+              const float lr = shrub_run_limit(lim, r);
+              const float l = (rin[r] ? lr * 1.1f : lr) + (float)rs_.r * ch.scale;
+              in = x * x + y * y + z * z <= l * l;
+            }
+            rin[r] = in;
+            if (!in && m_run_shown[r]) {
+              m_run_shown[r] = 0;
+              m_shrub_run_hid++;
+            }
+            shown += m_run_shown[r];
+          }
+          if (!shown) {
+            return;
+          }
+          partly = shown < nr;
+        }
       }
       m_visible_slot[ci] = (int)m_visible.size();
       VisibleChunk& vc = m_visible.emplace_back();
@@ -7248,40 +7816,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws
+  u32 pop_tod = 0;  // (AI-assisted, title3: CTR_POP_LOG) groups rewritten
   if (lev.tod) {
-    const double t0 = ctr_gpu_time_ms();
+    const double t0 = tod_now_ms();
     TodPass ps;
-    ps.t0 = t0;
-    ps.before_ms = g_tod_frame_ms + tod_ms;
     auto shown_of = [&](const VisibleChunk& vc) {
       return vc.runs_valid ? &m_run_shown[lev.chunk_first_run[vc.chunk]] : nullptr;
     };
-    // the light pass from where the last frame's stopped, then the groups: the chunks the most
-    // day moves behind first (one the camera just revealed), else from where the last frame's
-    // stopped
+    // the light pass, then the groups (AI-assisted, todlag: all of those drawn, no budget)
     ps.pass = kTodLights;
-    ps.over = false;
-    ps.stop_chunk = UINT32_MAX;
-    {
-      const u32 from = lev.tod->light_round_chunk;
-      for (int half = 0; half < 2; half++) {
-        for (const auto& vc : m_visible) {
-          if ((vc.chunk >= from) == (half == 0)) {
-            tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
-          }
-        }
-      }
-      lev.tod->light_round_chunk = ps.stop_chunk == UINT32_MAX ? 0 : ps.stop_chunk;
+    for (const auto& vc : m_visible) {
+      tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
     }
     ps.pass = kTodRound;
-    ps.over = false;
-    ps.stop_chunk = UINT32_MAX;
-    ps.measure = rs.frame_idx % 8 == 0;
     {
-      // the groups from where the last frame's budget ran out. The budget: tod_budget_ms, or more
-      // while the day moves fast (the title screen's ~20x: a move nearly every frame): the chunks
-      // drawn (their vertices, at the last frames' ms per vertex) once per kTodSpreadMoves day
-      // moves, so that they keep within that of the game (kTodMaxLag behind: rewritten at once)
       auto& t = *lev.tod;
       u64 drawn = 0;
       for (const auto& vc : m_visible) {
@@ -7289,39 +7837,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                      ? lev.chunks[vc.chunk].vertex_count
                      : 0;
       }
-      ps.day_budget_ms = std::max(
-          tod_budget_ms(),
-          (double)drawn * t.ms_per_vertex / (kTodSpreadMoves * std::max(1.f, t.move_frames)));
-      // (AI-assisted, citadel) tod_max_ms: the budget under it, and the next day move waits until
-      // these vertices' rewrites fit once per move
-      if (const float cap = settings.tod_max_ms; cap > 0) {
-        // (the frame's group work up to 0.8 of the limit, a day move per full round at 0.7 of it:
-        // the light pass's share comes out of the same ms)
-        ps.day_budget_ms = std::min<double>(std::max<double>(ps.day_budget_ms, 0.8 * cap), cap);
-        t.min_move_frames = std::min<float>(
-            32.f, (float)((double)drawn * t.ms_per_vertex / (0.7 * cap)));
-      } else {
-        t.min_move_frames = 0;
-      }
-      const double d0 = ctr_gpu_time_ms();
-      const u32 w0 = ps.work;
-      const u32 from = t.round_chunk;
-      for (int half = 0; half < 2; half++) {
-        for (const auto& vc : m_visible) {
-          if ((vc.chunk >= from) == (half == 0)) {
-            tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
-          }
-        }
-      }
-      t.round_chunk = ps.stop_chunk == UINT32_MAX ? 0 : ps.stop_chunk;
-      // ms per vertex of work (for the budget above)
-      if (ps.work - w0 >= 2000) {
-        const double mpv = (ctr_gpu_time_ms() - d0) / (ps.work - w0);
-        t.ms_per_vertex = 0.875 * t.ms_per_vertex + 0.125 * std::clamp(mpv, 1e-6, 1e-3);
+      ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
+      for (const auto& vc : m_visible) {
+        tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
       }
     }
     tod_finish();
-    tod_ms += ctr_gpu_time_ms() - t0;
+    tod_ms += tod_now_ms() - t0;
     if (has_units && stream_check_enabled() && lev.tod->blended_valid) {
       // (AI-assisted, streaming) host check: a near chunk drawn with a group still in the file's
       // baked colors (version 0)
@@ -7341,20 +7863,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       }
     }
+    pop_tod = ps.rewritten;
     m_tod_spread += ps.rewritten;
-    m_tod_deferred += ps.behind;
-    m_tod_capped += ps.waiting;                  // (AI-assisted, citadel) tod_max_ms
-    m_tod_waited += lev.tod->day_waited ? 1 : 0;
-    if (ps.measure) {
-      m_tod_lag_frames++;
-      m_tod_lag_max = std::max(m_tod_lag_max, ps.max_lag);
-      m_tod_lag2 += ps.max_lag >= 2;
-    }
+    m_tod_fresh += ps.fresh ? 1 : 0;
+    m_tod_heavy = ps.fresh_ok;  // (AI-assisted, fable1) the next frame's tod_update, see there
   }
 
   // (AI-assisted) impostors: far tie groups shown as cards (their runs hidden here), the new
   // pictures of them drawn now (CtrImpostor.h)
   CtrImpostors& impostors = ctr_impostors();
+  double pop_imp0[2] = {0, 0};  // (AI-assisted, title3: CTR_POP_LOG) the stats before this level
   {
     CtrImpostors::Camera ic;
     ic.R = R;
@@ -7365,7 +7883,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (int c = 0; c < 3; c++) {
       ic.fog_rgb[c] = rs.fog_color[c];
     }
-    impostors.begin_level(lev, ic, rs.frame_idx);
+    pop_imp0[0] = impostors.stat_cards();
+    pop_imp0[1] = impostors.stat_captures();
+    // (AI-assisted, title3) not on the title screen (the title level loaded): its cards came in by
+    // the dozen over the first seconds of Sandover's reveal and went back to geometry all at once
+    // when the day starts running ~60x faster (no picture lasts then); the title stays geometry
+    bool title = false;
+    for (const auto* l : m_loaded) {
+      title = title || (m_jak2_slot < 0 && l->name == "title");  // (Jak 1's title level)
+    }
+    impostors.begin_level(lev, ic, rs.frame_idx, !title);
     if (impostors.active()) {
       for (auto& vc : m_visible) {
         // (AI-assisted, streaming) not the near chunks (cards show far versions; their meshes come
@@ -7630,5 +8157,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tod_max = std::max<u64>(m_tod_max, tod_verts);
     m_tod_ms += tod_ms;
     m_tod_max_ms = std::max(m_tod_max_ms, tod_ms);
+  }
+  if (pop_log_on()) {
+    // (AI-assisted, title3) CTR_POP_LOG: one line per level draw (in view: appeared / went by
+    // distance per kind tfrag, tie, shrub; tie LOD switches near / far; groups drawn far for late
+    // data, kept far once it came; time of day groups rewritten; impostor cards drawn and
+    // captured; near chunks taken since the last draw)
+    lg::info("[pop] f={} {} cam={:.1f},{:.1f},{:.1f} vis={} far={} t={:.2f} in={}/{}/{} out={}/{}/{} "
+             "lod+={} lod-={} late={} held={} tod={} cards={:.0f} cap={:.0f} fine={} taken={}",
+             rs.frame_idx, lev.name, cam.trans.x() / 4096.f, cam.trans.y() / 4096.f,
+             cam.trans.z() / 4096.f, m_visible.size(), far_level ? 1 : 0, g_detail_t,
+             g_pop.chunk_in[1], g_pop.chunk_in[2], g_pop.chunk_in[3], g_pop.chunk_out[1],
+             g_pop.chunk_out[2], g_pop.chunk_out[3], g_pop.lod_up, g_pop.lod_down, late_groups,
+             held_groups, pop_tod,
+             ctr_impostors().stat_cards() - pop_imp0[0],
+             ctr_impostors().stat_captures() - pop_imp0[1], m_fine_bits ? 1 : 0, g_pop.taken);
+    g_pop.taken = 0;
   }
 }

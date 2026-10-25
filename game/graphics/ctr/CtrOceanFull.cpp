@@ -142,6 +142,12 @@ bool CtrOceanMidVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
     memcpy(&m_constants, constants.data, sizeof(Constants));
     memcpy(m_vu_data + Vu1Data::CONSTANTS, &m_constants, sizeof(Constants));
     m_native_ok = -1;
+    if (m_env_hook && m_native) {
+      // (AI-assisted, j1ocean) the env map pass's texture and color (ocean-mid-constants)
+      const float col[4] = {m_constants.env_color.x(), m_constants.env_color.y(),
+                            m_constants.env_color.z(), m_constants.env_color.w()};
+      m_env_hook->ocean_env(m_constants.env_texture.tex0_data, col);
+    }
   }
   {
     auto call0 = dma.read_and_advance();
@@ -195,10 +201,10 @@ bool CtrOceanMidVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
       const bool native = m_native && native_ready();
       switch (v1.immediate) {
         case 46:
-          native ? native_tile() : run_call46_vu2c();
+          native ? native_tile(false) : run_call46_vu2c();
           break;
         case 73:
-          native ? native_tile() : run_call73_vu2c();
+          native ? native_tile(true) : run_call73_vu2c();
           break;
         case 107:
           native ? native_transition(false) : run_call107_vu2c();
@@ -241,6 +247,7 @@ void CtrOceanNearVu::xgkick(u16 addr) {
 
 bool CtrOceanNearVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
   m_batch = batch;
+  m_env_sent = false;
   if (dma.current_tag().qwc != 2) {
     return false;  // (OceanNear: "abort OceanNear::render!")
   }
@@ -279,6 +286,16 @@ bool CtrOceanNearVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
           run_call0_vu2c();
           break;
         case 39:
+          if (m_native && m_env_hook && !m_env_sent) {
+            // (AI-assisted, j1ocean) the env map pass's texture and color, from the constants
+            // (ocean-near-constants: env-texture's TEX0 at 970, env-color at 976)
+            m_env_sent = true;
+            u64 tex0;
+            memcpy(&tex0, &m_vu_data[970], 8);
+            const float col[4] = {m_vu_data[976].x(), m_vu_data[976].y(), m_vu_data[976].z(),
+                                  m_vu_data[976].w()};
+            m_env_hook->ocean_env(tex0, col);
+          }
           m_native ? native_patch() : run_call39_vu2c();
           break;
         default:
@@ -436,8 +453,10 @@ void texel_row(const TexAcross& a, const TexAcross& b, u32* out, const u32* env,
     const u32 bl = sat8(((s32)erb >> 16) * ((s32)crb >> 16) >> 7);  // (smultt)
 #endif
     const u32 g = sat8((s32)(((e >> 8) & 0xff) * cg) >> 7);
-    // alpha 0xff: the PS2's texture alpha only weights the env map pass (left out)
-    out[x] = r | (g << 8) | (bl << 16) | 0xff000000u;
+    // (AI-assisted, j1ocean) alpha: the env map's (GS modulate with the program's alpha 0x80), 0xff
+    // = 1 (doubled, as the GPU's combiner takes it): the sky reflection's weight
+    const u32 a = e >> 24;
+    out[x] = r | (g << 8) | (bl << 16) | ((a >= 0x80 ? 0xffu : 2 * a) << 24);
   }
 }
 }  // namespace
@@ -451,7 +470,7 @@ void texel_row(const TexAcross& a, const TexAcross& b, u32* out, const u32* env,
 void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
   const bool env_ok = update_env(t.env_tex0, rs);
   const int ew = env_ok ? m_env_w : 1, eh = env_ok ? m_env_h : 1;
-  const u32 gray = 0xff808080;  // no env map: the vertex colors alone
+  const u32 gray = 0x80808080;  // no env map: the vertex colors alone (alpha 1)
   const u32* env = env_ok ? m_env.data() : &gray;
 
   // per vertex: env map texel coordinates with 8 fraction bits, color (GS: the low byte)
@@ -560,6 +579,8 @@ CtrOceanFull::CtrOceanFull()
   m_tex_rate = std::clamp(s.ocean_texture_rate, 1, 8);
   const int floor = (int)(std::clamp(s.ocean_near_alpha, 0.f, 1.f) * 128.f + 0.5f);
   m_near->set_alpha_floor(floor);
+  m_mid->set_env_hook(this);  // (AI-assisted, j1ocean) the sky reflection
+  m_near->set_env_hook(this);
   lg::info("[ctr] ocean full: wave texture every {} frame(s), near ocean alpha at least {:.2f}",
            m_tex_rate, floor / 128.0);
 }
@@ -568,6 +589,84 @@ CtrOceanFull::~CtrOceanFull() {
   if (m_tex >= 0) {
     ctr_gpu_tex_delete(m_tex);
   }
+  if (m_refl >= 0) {
+    ctr_gpu_tex_delete(m_refl);
+  }
+}
+
+/*!
+ * (AI-assisted, j1ocean) The sky reflection's texture: the env map pass's texture (environment-ocean,
+ * decoded from CtrVram again when its texture page changes and every 300 frames) times its GS
+ * color (env-color, the time of day's: GS modulate, (texel * color) >> 7 at most 255), made again
+ * when either changes (a color change alone: at most every ocean_texture_rate frames, like the
+ * wave texture). Given to the batch for the native programs' env draws.
+ */
+void CtrOceanFull::ocean_env(u64 tex0, const float color[4]) {
+  if (!m_rs || !m_rs->vram) {
+    m_batch->set_env(-1);
+    return;
+  }
+  CtrRenderState& rs = *m_rs;
+  GsTex0 t(tex0);
+  u64 key = tex0;
+  key = (key ^ (u64)(uintptr_t)rs.vram->upload_source(t.tbp0())) * 1099511628211ull;
+  key = (key ^ (u64)(uintptr_t)rs.vram->upload_source(t.cbp())) * 1099511628211ull;
+  bool src_new = false;
+  if (key != m_refl_key || rs.frame_idx < m_refl_frame || rs.frame_idx - m_refl_frame >= 300) {
+    int w = 0, h = 0;
+    m_refl_ok = rs.vram->decode_for_cpu(tex0, &m_refl_src, &w, &h) && w >= 8 && h >= 8 &&
+                w <= 1024 && h <= 1024 && m_refl_src.size() >= (size_t)w * h;
+    if (std::find(m_refl_logged.begin(), m_refl_logged.end(), tex0) == m_refl_logged.end() &&
+        m_refl_logged.size() < 16) {
+      m_refl_logged.push_back(tex0);
+      lg::info("[ctr] ocean full: sky reflection tex0 {:x} {}x{} {}", tex0, w, h,
+               m_refl_ok ? "ok" : "NOT DECODED (no reflection)");
+    }
+    if (m_refl_ok && (w != m_refl_w || h != m_refl_h) && m_refl >= 0) {
+      ctr_gpu_tex_delete(m_refl);
+      m_refl = -1;
+    }
+    m_refl_w = w;
+    m_refl_h = h;
+    m_refl_key = key;
+    m_refl_frame = rs.frame_idx;
+    src_new = true;
+  }
+  if (!m_refl_ok) {
+    m_batch->set_env(-1);
+    return;
+  }
+  // ftoi0, then the GS's 8 bits
+  u32 c[3];
+  for (int i = 0; i < 3; i++) {
+    c[i] = (u32)(s32)color[i] & 0xff;
+  }
+  const u32 col = c[0] | (c[1] << 8) | (c[2] << 16);
+  const bool due = m_refl_made == ~0ull || rs.frame_idx < m_refl_made ||
+                   rs.frame_idx - m_refl_made >= (u64)m_tex_rate;
+  if (m_refl < 0 || src_new || (col != m_refl_color && due)) {
+    const size_t n = (size_t)m_refl_w * m_refl_h;
+    m_refl_texels.resize(n);
+    const u32* src = m_refl_src.data();
+    u32* dst = m_refl_texels.data();
+    for (size_t i = 0; i < n; i++) {
+      const u32 e = src[i];
+      const u32 r = std::min<u32>(((e & 0xff) * c[0]) >> 7, 255);
+      const u32 g = std::min<u32>((((e >> 8) & 0xff) * c[1]) >> 7, 255);
+      const u32 b = std::min<u32>((((e >> 16) & 0xff) * c[2]) >> 7, 255);
+      dst[i] = r | (g << 8) | (b << 16) | 0xff000000u;
+    }
+    const u8* bytes = (const u8*)m_refl_texels.data();
+    if (m_refl < 0) {
+      m_refl = ctr_gpu_tex_create(m_refl_w, m_refl_h, bytes);  // clamped: no mip levels
+    } else {
+      ctr_gpu_tex_update(m_refl, bytes);
+    }
+    m_refl_color = col;
+    m_refl_made = rs.frame_idx;
+    m_refl_updates++;
+  }
+  m_batch->set_env(m_refl);
 }
 
 void CtrOceanFull::set_native(bool on) {
@@ -610,7 +709,8 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
   const u32 gen = g_levels_gen.load();
   if (gen != m_window_gen) {
     m_window_gen = gen;
-    m_frames = m_mid_runs = m_near_runs = m_failed = m_tex_updates = 0;
+    m_frames = m_mid_runs = m_near_runs = m_failed = m_tex_updates = m_refl_updates = 0;
+    m_batch->env_draws = 0;
     m_tex_ms = m_mid_ms = m_near_ms = m_max_frame_ms = 0;
     m_batch->vertices = m_batch->triangles = m_batch->draws = m_batch->dropped = 0;
     m_batch->rejected = 0;
@@ -622,11 +722,12 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
     lg::info(
         "[ctr] ocean full ({}): render thread {:.2f} ms/frame (texture {:.2f} in {:.0f}% of "
         "frames, far+mid {:.2f}, near {:.2f}; max {:.2f}), {:.0f} vertices, {:.0f} triangles, "
-        "{:.1f} draws per frame; mid in {:.0f}%, near in {:.0f}% of frames{}{}{}",
+        "{:.1f} draws per frame ({:.1f} with the sky reflection, its texture made in {:.0f}% of "
+        "frames); mid in {:.0f}%, near in {:.0f}% of frames{}{}{}",
         g_levels, (m_tex_ms + m_mid_ms + m_near_ms) / n, m_tex_ms / n,
         100.0 * m_tex_updates / n, m_mid_ms / n, m_near_ms / n, m_max_frame_ms,
         m_batch->vertices / n, m_batch->triangles / n, m_batch->draws / n,
-        100.0 * m_mid_runs / n, 100.0 * m_near_runs / n,
+        m_batch->env_draws / n, 100.0 * m_refl_updates / n, 100.0 * m_mid_runs / n, 100.0 * m_near_runs / n,
         m_failed ? fmt::format(", {} unexpected DMA", m_failed) : "",
         m_batch->dropped ? fmt::format(", {} dropped (no vertex memory)", m_batch->dropped) : "",
         m_batch->rejected ? fmt::format(", {} transition pieces refused", m_batch->rejected)
@@ -686,6 +787,9 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
   st.ztest = CTR_TEST_ALWAYS;
   st.zwrite = 1;
   m_batch->begin(st, rs.fog_color);
+  m_batch->set_env(-1);  // (AI-assisted, j1ocean) until the constants name it (ocean_env)
+  m_rs = &rs;
+  const int env_draws0 = m_batch->env_draws;
   read_far(dma);
   bool ok = true;
   if (dma.current_tag_vifcode0().kind == VifCode::Kind::BASE) {
@@ -693,6 +797,10 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
     m_mid_runs++;
   }
   m_batch->end();
+  m_rs = nullptr;
+  if (m_batch->env_draws != env_draws0) {
+    ctr_gpu_ocean_end();  // (AI-assisted, j1ocean) texture unit 2 off, combiner stage 2 reset
+  }
   if (!ok) {
     m_failed++;
     m_failed_unlogged++;
@@ -747,19 +855,28 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
   const double t1 = ctr_gpu_time_ms();
   m_tex_ms += t1 - t0;
 
-  // CommonOceanRenderer::flush_near's textured pass: alpha blended, depth tested, not written
+  // CommonOceanRenderer::flush_near's textured pass: alpha blended, depth tested, not written.
+  // (AI-assisted, j1ocean) TCC off (the PS2's drw-texture: the alpha is the vertex's; the texture's
+  // weights the sky reflection)
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
   st.tex = m_tex;
-  st.tcc = 1;
+  st.tcc = 0;
   st.filter = 1;
   st.blend = CTR_BLEND_ALPHA;
   st.atest = CTR_TEST_ALWAYS;
   st.ztest = CTR_TEST_GEQUAL;
   st.zwrite = 0;
   m_batch->begin(st, rs.fog_color);
+  m_batch->set_env(-1);
+  m_rs = &rs;
+  const int env_draws0 = m_batch->env_draws;
   const bool ok = m_near->run(dma, m_batch.get());
   m_batch->end();
+  m_rs = nullptr;
+  if (m_batch->env_draws != env_draws0) {
+    ctr_gpu_ocean_end();
+  }
   m_near_runs++;
   if (!ok) {
     m_failed++;

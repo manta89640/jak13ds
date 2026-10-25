@@ -18,6 +18,7 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrOceanVuNear.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSettings.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrShadow.cpp
+  ${OG_ROOT}/game/graphics/ctr/CtrKeiraRig.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSprite.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrSky.cpp
   ${OG_ROOT}/game/graphics/ctr/CtrRenderer.cpp
@@ -100,3 +101,8 @@ target_sources(og3ds_port PRIVATE
   ${OG3DS_SHADER_CS}
 )
 target_include_directories(og3ds_port PRIVATE ${OG_ROOT})
+# (AI-assisted, titlemove) measurement builds: CtrLevel.cpp's CTR_POP_LOG lines every frame in gk.log
+option(OG3DS_POP_LOG "per-frame pop log (diagnostic builds)" OFF)
+if(OG3DS_POP_LOG)
+  set_source_files_properties(${OG_ROOT}/game/graphics/ctr/CtrLevel.cpp PROPERTIES COMPILE_DEFINITIONS OG3DS_POP_LOG=1)
+endif()

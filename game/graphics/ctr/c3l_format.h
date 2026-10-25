@@ -11,6 +11,7 @@
  */
 
 #include <cstdint>
+#include <string_view>
 
 namespace c3l {
 
@@ -437,6 +438,21 @@ constexpr uint8_t kMercDrawCullBack = 0x01;
 // first_vertex and vertex_count; draws and indices of its own, ctr_level_converter --gen-lod). No
 // layout change: older readers load it as one more model, which nothing asks for.
 constexpr char kMercGenLodSuffix[] = "~genlod";
+// (AI-assisted, j1ocean) Merc models always drawn at full detail, never as a generated low LOD:
+// the pickups (power cells, scout flies, precursor orbs, orb caches, eco vents), small things the
+// player looks for from far away. The converter makes no low LOD for them; the runtime ignores one
+// that older files have.
+inline bool merc_gen_lod_exempt(std::string_view name) {
+  constexpr std::string_view kPrefixes[] = {"fuel-cell-", "fuelcell-naked-", "powercellalt-",
+                                            "buzzer-",    "money-",          "orb-cache-top-",
+                                            "ecovalve-"};
+  for (const auto p : kPrefixes) {
+    if (name.substr(0, p.size()) == p) {
+      return true;
+    }
+  }
+  return false;
+}
 static_assert(sizeof(MercDraw) == 48);
 
 struct MercVertex {

@@ -28,6 +28,7 @@
 #include "c3l_opt.h"
 #include "c3l_pack.h"
 #include "ctr_texture.h"
+#include "keira_model.h"
 #include "tie_lod.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -101,6 +102,9 @@ struct Options {
   bool shrub_ps2_dist = true;
   bool no_merc = false;
   bool merc_only = false;  // common file (GAME.fr3): merc models + their textures only
+  // (AI-assisted) the "play as Keira" easter egg's file (KEIRA.c3l, keira_model.h): the input is
+  // the common GAME.fr3, this the village1.fr3 her model comes from
+  std::string keira_from;
   // (AI-assisted) merc models whose skeleton group has only lod0 (no -lod1 / -lod2 model in the
   // level, e.g. the yeti): a simplified copy named <model> + c3l::kMercGenLodSuffix, with the
   // same vertices and ~gen_lod_ratio of the triangles (meshopt_simplify per draw, the draws'
@@ -2137,10 +2141,12 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     out->models.push_back(mm);
     // (AI-assisted) a generated low LOD for "<base>-lod0" without lower LODs (not with blend
     // shapes or rewritten vertices: those move per frame)
-    // (not Jak and Daxter: always close and in view, their look stays the PS2's)
+    // (not Jak and Daxter: always close and in view, their look stays the PS2's; (AI-assisted,
+    // j1ocean) not the pickups: power cells, scout flies, orbs always full detail)
     const auto p = model.name.rfind("-lod0");
     if (cv.opt.gen_lod_ratio > 0.f && p != std::string::npos && p + 5 == model.name.size() &&
         model.name.rfind("eichar-", 0) != 0 && model.name.rfind("sidekick-", 0) != 0 &&
+        model.name.rfind("keira-as-", 0) != 0 && !c3l::merc_gen_lod_exempt(model.name) &&
         !has_lower[model.name.substr(0, p)] && !mm.blerc_count &&
         out->mod_effects.size() == mod_first) {
       c3l::MercModel gen;
@@ -3153,6 +3159,20 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Serializer ser(decomp.data(), decomp.size());
   tfrag3::Level level;
   level.serialize(ser);
+  if (!opt.keira_from.empty()) {
+    // (AI-assisted) KEIRA.c3l: only her model, from village1, bound to the rig (keira_model.h)
+    auto vdata = file_util::read_binary_file(opt.keira_from);
+    auto vdecomp = compression::decompress_zstd(vdata.data(), vdata.size());
+    Serializer vser(vdecomp.data(), vdecomp.size());
+    tfrag3::Level village1;
+    village1.serialize(vser);
+    tfrag3::Level keira;
+    if (!keira_model::make_level(level, village1, &keira)) {
+      return false;
+    }
+    level = std::move(keira);
+    opt.merc_only = true;
+  }
 
   Converter cv;
   cv.opt = opt;
@@ -5117,6 +5137,9 @@ int main(int argc, char** argv) {
                "(AI-assisted) all shrubs up to --shrub-dist (v13), not each up to its PS2 distance");
   app.add_flag("--no-merc", opt.no_merc, "leave out merc models");
   app.add_flag("--merc-only", opt.merc_only, "only merc models (for the common GAME.fr3)");
+  app.add_option("--keira-from", opt.keira_from,
+                 "(AI-assisted) input GAME.fr3: write KEIRA.c3l, Keira's model from this "
+                 "village1.fr3 for the play-as-Keira easter egg (--all makes it too)");
   app.add_option("--gen-lod", opt.gen_lod_ratio,
                  "merc models with only lod0: a low LOD with this fraction of the triangles (0: "
                  "none)");
@@ -5244,6 +5267,15 @@ int main(int argc, char** argv) {
         if (!convert(e.path(), dst, o)) {
           return 1;
         }
+      }
+    }
+    // (AI-assisted) the "play as Keira" easter egg's KEIRA.c3l (from GAME.fr3 and village1.fr3)
+    const fs::path game_fr3 = fs::path(in) / "GAME.fr3", village1_fr3 = fs::path(in) / "village1.fr3";
+    if (fs::exists(game_fr3) && fs::exists(village1_fr3)) {
+      Options o = opt;
+      o.keira_from = village1_fr3.string();
+      if (!convert(game_fr3, fs::path(out) / "KEIRA.c3l", o)) {
+        return 1;
       }
     }
     return 0;

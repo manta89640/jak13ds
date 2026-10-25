@@ -43,20 +43,6 @@ bool snd_HasOutput() {
 #endif
 }
 
-// dma is always instant, allocation not required
-s32 snd_GetFreeSPUDMA() {
-  return 0;
-}
-
-void snd_FreeSPUDMA([[maybe_unused]] s32 channel) {}
-
-u32 snd_ResidentBankBytes(u32* count) {
-  if (count) {
-    *count = 0;
-  }
-  return player ? player->ResidentBankBytes(count) : 0;
-}
-
 void snd_LockVoiceWrites() {
 #ifdef __3DS__
   if (player) {
@@ -71,6 +57,20 @@ void snd_UnlockVoiceWrites() {
     player->UnlockVoices();
   }
 #endif
+}
+
+// dma is always instant, allocation not required
+s32 snd_GetFreeSPUDMA() {
+  return 0;
+}
+
+void snd_FreeSPUDMA([[maybe_unused]] s32 channel) {}
+
+u32 snd_ResidentBankBytes(u32* count) {
+  if (count) {
+    *count = 0;
+  }
+  return player ? player->ResidentBankBytes(count) : 0;
 }
 
 void snd_RunStreamsWithoutOutput(bool on) {
@@ -211,6 +211,28 @@ s32 snd_PlaySoundVolPanPMPB(snd::BankHandle bank,
   }
 }
 
+s32 snd_PlaySoundVolPanPMPBKeira(snd::BankHandle bank,
+                                 s32 sound,
+                                 s32 vol,
+                                 s32 pan,
+                                 s32 pitch_mod,
+                                 s32 pitch_bend) {
+  // (AI-assisted) see sndshim.h
+  if (player) {
+    return player->PlaySound(bank, sound, vol, pan, pitch_mod, pitch_bend, true);
+  } else {
+    return 0;
+  }
+}
+
+s32 snd_SetKeiraVoice(snd::BankHandle bank, s32 sound_id, s32 grain, s32 pm) {
+  // (AI-assisted) see sndshim.h
+  if (player && sound_id >= 0 && grain >= 0) {
+    return player->SetKeiraVoice(bank, (u32)sound_id, (u32)grain, (s16)pm) ? 1 : 0;
+  }
+  return 0;
+}
+
 s32 snd_PlaySoundByNameVolPanPMPB(snd::BankHandle bank_handle,
                                   char* bank_name,
                                   char* sound_name,
@@ -321,13 +343,17 @@ s32 snd_GetVoiceStatus(s32 voice) {
 
 void snd_keyOnVoiceRaw(u32 core, u32 voice_id) {
   if (voices[0]) {
+    snd_LockVoiceWrites();  // (AI-assisted) between mixer chunks, see snd_LockVoiceWrites
     voices[0]->KeyOn();
+    snd_UnlockVoiceWrites();
   }
 }
 
 void snd_keyOffVoiceRaw(u32 core, u32 voice_id) {
   if (voices[0]) {
+    snd_LockVoiceWrites();  // (AI-assisted)
     voices[0]->KeyOff();
+    snd_UnlockVoiceWrites();
   }
 }
 

@@ -283,6 +283,36 @@ Face buttons by position, like the PS2 pad:
 | Start / Select | Start / Select | pause menu / (unused) |
 | touch screen top / bottom half | L3 / R3 | (unused in Jak 1) |
 
+(AI-assisted) Easter egg: hold L + R while picking the save slot of a new game (title, New Game;
+or when it starts without a save) to play as Keira. The save keeps it (a spare word of the
+game-save header, `info-int32 8` = `"KERA"`): loading that save brings her back, other saves and
+new games are Jak. Only the picture changes: the game asks the renderer for `keira-as-eichar-lod0`
+instead of Jak's model (`bones.gc` `pc-merc-draw-request`, the player process only: cutscenes
+keep their own Jak; cutscenes that animate the player show Keira), and the renderer draws Keira from `KEIRA.c3l` with Jak's animation
+(`CtrKeiraRig.h`, `c3l_format.md`). (AI-assisted, keira3) Daxter sits on her shoulder: his
+animation puts him on Jak's (he is his own process, on no joint), so the renderer moves his bones
+by the way from Jak's seat to hers each frame (`ctr_keira::daxter_shift`: the seat measured from his
+idle, walk and run, 0.13 m nearer her middle and 0.06 m lower), all of it while he sits or holds on
+and none once he is 0.9 m away (cutscenes where he hops off). Her voice: the sounds the player plays
+get a spare mask bit (`gsound.gc`) and the overlord plays Jak's voice in them (94 tones of 25 common
+bank sounds: grunts, yells, hurt, deaths; not the whooshes and hits layered with them) 4 semitones
+higher (`srpc.cpp` `kKeiraVoices`). The game has no Keira efforts (no Keira sound in any bank, her
+VAG lines are whole sentences), and this needs no data or streaming: as quick and sure as his.
+(AI-assisted, round 2)
+Her shadow is her own: 18 convex hulls of her body parts (`<model>~shadow` in KEIRA.c3l), drawn by
+`CtrShadowVolumes` in place of Jak's volume with his light and bottom plane. Her hands are put on
+Jak's wrists by a two-bone IK of her arms (stretched up to 1.2x when his reach is longer; host
+measurement: wrist gap 0.25-0.36 m mean before, 0 after, at most 5 cm when the cap is hit). Her
+face: a blink of her own eyelids about every 4 s, and Jak's cutscene blend shape weights mapped to
+her targets (jaw, lips, mouth corners, lids, brows). Her ponytail swings on a damped spring in the
+world. (keira3) Her elbows bend the way Jak's do (the IK's bend direction is his elbow's, off his
+shoulder-wrist line): round 2 took her own FK elbow's, which in his idle pointed into her body on
+both sides (host log: (-0.81, -0.20, -0.54) for the left arm in his chest's frame, now (0.26, 0.37,
+-0.89), back and a little out). Her legs have no IK: their knees turn with his. Host test without a
+save: `CTR_KEIRA_FORCE=1` (`platform/3ds/tests/keira.pad`: idle views, walk, run, jumps, attacks,
+a hit); host A/B: `CTR_KEIRA_NO_IK`, `CTR_KEIRA_JAK_SHADOW`, `CTR_KEIRA_FK_POLE`, `CTR_KEIRA_NO_DAX`;
+logs: `CTR_KEIRA_IK_LOG`, `CTR_KEIRA_DAX_LOG`, `CTR_KEIRA_VOICE_LOG`.
+
 ## Platform pieces
 
 - **Types:** on `__3DS__`, `s32`/`u32` are `int`/`unsigned int` (`common/common_types.h`),
@@ -635,6 +665,15 @@ PC it runs with `gk --ctr-gfx`.
     an emulator. (AI-assisted, far-fog, Oct 17) It draws the fog as the 3DS does (level meshes and
     the ocean: the game fog and the draw distance / vista haze; merc with merc_fog; the PS2 ocean's
     vertex fog); before, host frames had no fog at all. `CTR_SOFT_NO_FOG=1`: none, as before.
+  - (AI-assisted, Oct 18, hud2) Two host checks for what Azahar hides: `CTR_SOFT_F24=1` takes each
+    vertex's depth (and the merc skin math: bone rows, camera space position, clip products) in
+    the PICA's float24, whose step near the top of the depth range is ~128 GS units (Azahar's
+    shaders compute in 32-bit floats). `CTR_SOFT_DEFER=1` runs the renderer as the 3DS render
+    thread at its latest: a frame is drawn only when the game next waits for it (its next
+    sync-path, a texture upload...), after the game thread has run the next frame's logic, so a
+    read of game memory outside the DMA chain and `prepare_frame`'s copies shows up (the sprite
+    snapshot's "copies differ" warnings count the copies that protected a read).
+    `platform/3ds/tests/hud.pad` collects orbs at Sentinel Beach and opens the progress menu.
 - **Text, menus, debug draws** (buckets `debug`, `debug-no-zbuf`, `subtitle`): `CtrDirect`
   interprets the GIF packets, like `DirectRenderer`.
   - Textures come from `CtrVram`, an emulation of the 4 MB GS VRAM.
@@ -694,8 +733,16 @@ PC it runs with `gk --ctr-gfx`.
     `CtrOceanFull.cpp`. Their textured pass becomes one indexed triangle list per bucket, written
     in place into the frame's vertex memory (`ctr_gpu_ocean_full_reserve` / `ctr_gpu_ocean_full_draw`,
     `ctr_ocean_full.v.pica`: the GS's x, y, z, Q, S, T and fog; perspective correct texturing).
-  - Left out: the env map passes (sky reflection added through the destination alpha); the near
-    ocean is at least `ocean_near_alpha` (0.6) opaque instead.
+  - (AI-assisted, j1ocean) The sky reflection (the PS2's env map passes: environment-ocean times
+    the time of day's env-color at the view direction, added with the destination alpha as its
+    weight) is drawn in the same draw as the textured pass: the native programs give each vertex
+    the env map's texture coordinates (mid tiles of call 73, the transitions 107 / 275, the near
+    patches of call 39; not the far ocean or call 46), `ctr_gpu_ocean_full_draw_env` adds
+    env * weight in combiner stage 2 (texture unit 2, clamped). Weight: wave texture alpha
+    (environment-ocean-alphamod's) times the vertex alpha (mid) or the texture alpha with the
+    vertex alpha as the blend weight (near): the PS2's sum but where it saturates. No extra
+    triangles; one more texture read per ocean pixel. `ocean_near_alpha` (default 0: the PS2's
+    alpha) is a floor on the near ocean's alpha.
   - Log: `[ctr] ocean full (<levels>): render thread N ms/frame (texture, far+mid, near)` once
     per set of levels, and a warning (at most every 300 frames) when parts were not drawn
     (unexpected DMA, no vertex memory, refused transition pieces). The game thread's cost is in
@@ -794,6 +841,17 @@ every platform:
 - animation: `cspace<-parented-transformq-joint!`
 - particles: `sp-process-block-2d`, `sp-process-block-3d`, `sp-launch-particles-var`,
   `particle-adgif`
+- (AI-assisted, Oct 24, from core-opt) `pc-sp-init-fields!` (`game/mips2c/native_sp_init_fields.h`,
+  shared with Jak II): the GOAL function sp-init-fields! (every launched particle's fields, rand-vu
+  inlined with the same pc-rand draws); sp-init-fields! calls it first (`#when TARGET_3DS`).
+  `OPENGOAL_MIPS2C_VERIFY=1` compares every call with the GOAL code (fields, random register,
+  pc-rand's state, the returned spec): level_pairs.pad 619k calls, 0 mismatches.
+  `game/mips2c/native_goalc_ops.h`: goalc's C semantics (compares with a constant, int/float
+  conversions, the PS2 divide) for natives that replace GOAL code. Host measuring aid:
+  `OPENGOAL_PERF_INSTR=1` (macOS) logs the game thread's instructions and cycles per frame.
+- (AI-assisted, Oct 24) GOAL functions the particle natives call per particle, run in C++ by them:
+  sp-adjust-launch, sp-init-fields!, sp-get-particle (launcher), sp-orbiter and
+  sp-relaunch-particle-2d (process-block); performance.md "Particle launch and callbacks inline".
 - ocean: `ocean-interp-wave` (the wave heights `ocean-get-height` reads, every frame),
   `ocean-generate-verts` (the wave texture's vertices, only with `ocean = full`)
 - shadows: `shadow-execute` (the EE half of the shadow volumes, with the 14 functions it calls and

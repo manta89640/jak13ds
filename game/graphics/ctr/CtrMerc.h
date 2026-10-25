@@ -20,6 +20,7 @@
 
 #include "common/math/Vector.h"
 
+#include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
@@ -97,6 +98,25 @@ class CtrMercRenderer : public CtrBucketRenderer {
     const struct CtrMercModelData* model = nullptr;
     const struct CtrLevelData* lev = nullptr;
   };
+  const struct CtrMercModelData* find_model_named(const u8* name,
+                                                  u32 len,
+                                                  u32 h,
+                                                  u32 gen,
+                                                  FindSlot& s,
+                                                  const struct CtrLevelData** lev);
+  // (AI-assisted) "play as Keira" (CtrKeiraRig.h): her bone matrices, posed from Jak's for each of
+  // her models, and the slot table of pointers into them
+  CtrMercMat m_rig_mats[128];
+  // (AI-assisted) her shadow (CtrShadowVolumes draws it): the hulls of her model, for the shadow
+  // bucket of this frame
+  void note_keira_shadow(const struct CtrMercModelData& model, u64 frame);
+  std::shared_ptr<ctr_keira::ShadowMeshData> m_keira_shadow;
+  const struct CtrMercModelData* m_keira_shadow_for = nullptr;
+  u32 m_keira_shadow_gen = 0;
+  const CtrMercMat* m_rig_slot[256] = {};
+  // (AI-assisted, keira3) Daxter's bones moved onto Keira's shoulder
+  CtrMercMat m_dax_mats[128];
+  const CtrMercMat* m_dax_slot[256] = {};
   static constexpr int kFindSlots = 64;
   FindSlot m_find[kFindSlots];
 

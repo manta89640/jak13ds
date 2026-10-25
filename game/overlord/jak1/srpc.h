@@ -9,6 +9,10 @@
 namespace jak1 {
 void srpc_init_globals();
 
+// (AI-assisted) "play as Keira" (3DS easter egg): after a bank loads, mark Jak's voice in it (the
+// common bank's grunts, yells and hurt sounds) for the pitch the player's sounds get as Keira
+void KeiraMarkVoices(struct SoundBank* bank);
+
 extern s32 gVAG_Id;
 
 enum class Jak1SoundCommand : u16 {

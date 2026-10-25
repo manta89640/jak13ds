@@ -1,0 +1,35 @@
+# (AI-assisted) the HUD while collecting: Sentinel Beach, precursor orbs fly into the HUD's orb counter
+# (convert-to-hud-object: merc HUD models), the orb and power cell counters show (their icons and
+# glow particles), then the progress menu opens (its frame, power cells, orbs). Host checks:
+# CTR_SOFT_F24=1 (the 3DS's float24 depth), CTR_SOFT_DEFER=1 (the render thread's latest timing);
+# pictures with --ctr-dump DIR --ctr-dump-every N.
+0 wait *target* target-title-wait
+60 continue beach-start
+61 wait *target* target-continue
+62 wait *target* target-stance
+100 log hud-collect
+110 call pevent target get-pickup 6 f1
+120 call pevent target get-pickup 5 f1
+130 call pevent money pickup
+160 call pevent money pickup
+190 call pevent money pickup
+220 call pevent target get-pickup 5 f1
+230 call pevent money pickup
+260 call pevent money pickup
+290 call pevent money pickup
+320 call pevent target get-pickup 5 f1
+330 call pevent money pickup
+360 call pevent money pickup
+420 shot hud_collect
+430 log hud-collect-end
+440 log menu
+441 start
+446 -
+560 shot hud_menu
+600 right
+606 -
+680 shot hud_menu2
+700 start
+706 -
+760 log menu-end
+761 exit

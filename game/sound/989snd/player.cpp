@@ -425,7 +425,13 @@ void Player::Tick(s16Output* stream, int samples) {
   }
 }
 
-u32 Player::PlaySound(BankHandle bank_id, u32 sound_id, s32 vol, s32 pan, s32 pm, s32 pb) {
+u32 Player::PlaySound(BankHandle bank_id,
+                      u32 sound_id,
+                      s32 vol,
+                      s32 pan,
+                      s32 pm,
+                      s32 pb,
+                      bool keira_voice) {
   std::scoped_lock lock(mTickLock);
   auto bank = mLoader.GetBankByHandle(bank_id);
   if (bank == nullptr) {
@@ -434,7 +440,20 @@ u32 Player::PlaySound(BankHandle bank_id, u32 sound_id, s32 vol, s32 pan, s32 pm
   }
 
   u32 handle = mHandleAllocator.GetId();
-  auto handler = bank->MakeHandler(mVmanager, sound_id, vol, pan, pm, pb, GetTick(), handle);
+  std::optional<std::unique_ptr<SoundHandler>> handler;
+  constexpr u32 kSBlk = 'S' | ('B' << 8) | ('l' << 16) | ((u32)'k' << 24);  // loader.cpp fourcc
+  if (keira_voice && bank->DataID == kSBlk) {
+    // (AI-assisted) as SoundBank::MakeHandler(vm, id, vol, pan, pm, pb, ...), with her voice
+    SndPlayParams params{};
+    params.vol = vol;
+    params.pan = pan;
+    params.pitch_mod = pm;
+    params.pitch_bend = pb;
+    params.keira_voice = true;
+    handler = bank->MakeHandler(mVmanager, sound_id, -1, -1, params, GetTick(), handle);
+  } else {
+    handler = bank->MakeHandler(mVmanager, sound_id, vol, pan, pm, pb, GetTick(), handle);
+  }
   if (!handler.has_value()) {
     return 0;
   }
@@ -452,6 +471,27 @@ u32 Player::PlaySound(BankHandle bank_id, u32 sound_id, s32 vol, s32 pan, s32 pm
   // fmt::print("play_sound {}:{} - {}\n", bank_id, sound_id, handle);
 
   return handle;
+}
+
+bool Player::SetKeiraVoice(BankHandle bank_id, u32 sound_id, u32 grain, s16 pm) {
+  // (AI-assisted) see player.h
+  std::scoped_lock lock(mTickLock);
+  auto bank = mLoader.GetBankByHandle(bank_id);
+  constexpr u32 kSBlk = 'S' | ('B' << 8) | ('l' << 16) | ((u32)'k' << 24);
+  if (bank == nullptr || bank->DataID != kSBlk) {
+    return false;
+  }
+  auto* block = static_cast<SFXBlock*>(bank);
+  if (sound_id >= block->Sounds.size() || grain >= block->Sounds[sound_id].Grains.size()) {
+    return false;
+  }
+  auto& g = block->Sounds[sound_id].Grains[grain];
+  auto* tone = std::get_if<Tone>(&g.data);
+  if (!tone || (g.Type != GrainType::TONE && g.Type != GrainType::TONE2)) {
+    return false;
+  }
+  tone->KeiraPm = pm;
+  return true;
 }
 
 void Player::DebugPrintAllSoundsInBank(BankHandle bank_id) {

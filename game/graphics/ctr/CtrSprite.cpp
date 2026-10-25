@@ -16,6 +16,7 @@
 #include "common/util/FileUtil.h"
 
 #include "game/graphics/ctr/CtrDirect.h"
+#include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/CtrVram.h"
@@ -405,6 +406,9 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
     if (mat.size_bytes == (int)kHudMatrixBytes) {
       memcpy(m_hud_matrix, mat.data, 64);
       memcpy(m_hud_hvdf, mat.data + 64, 76 * 16);
+#ifndef __3DS__
+      m_hud_dump = ctr_gfx::take_hud_dump();  // (AI-assisted, fable1)
+#endif
       while (looks_like_2d_chunk_start(dma)) {
         u32 count, program;
         if (!read_chunk(dma, &count, &program)) {
@@ -921,6 +925,35 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
   }
 }
 
+void CtrSpriteRenderer::canary_report(Mode mode, u32 i, u32 count, const VecData& v,
+                                      const AdGif& ad, const float corners[4][3], float scale_x,
+                                      float scale_y) {
+  // at most 8 lines per 5 s, and a screenshot for the first 20 in a session
+  static double last_window = -1e9;
+  static int in_window = 0, shots = 0;
+  const double now = ctr_gpu_time_ms();
+  if (now - last_window > 5000.0) {
+    last_window = now;
+    in_window = 0;
+  }
+  if (++in_window > 8) {
+    return;
+  }
+  const s32 flag = as_int(v.flag_rot_sy.x()), matrix = as_int(v.flag_rot_sy.y());
+  lg::warn("[ctr] sprite canary: {} sprite {} of {} not a parallelogram or far out: pos ({:.1f} "
+           "{:.1f} {:.1f}) sx {:.2f} sy {:.2f} rot {:.2f} flag {:#x} matrix {} rgba ({:.0f} {:.0f} "
+           "{:.0f} {:.0f}) tex0 {:#x} scale ({:.3f} {:.3f}) corners ({:.3f} {:.3f}) ({:.3f} {:.3f}) "
+           "({:.3f} {:.3f}) ({:.3f} {:.3f})",
+           mode == MODE_HUD ? "hud" : "2d", i, count, v.xyz_sx.x(), v.xyz_sx.y(), v.xyz_sx.z(),
+           v.xyz_sx.w(), v.flag_rot_sy.w(), v.flag_rot_sy.z(), (u32)flag, matrix, v.rgba.x(),
+           v.rgba.y(), v.rgba.z(), v.rgba.w(), ad.tex0_data, scale_x, scale_y, corners[0][0],
+           corners[0][1], corners[1][0], corners[1][1], corners[2][0], corners[2][1],
+           corners[3][0], corners[3][1]);
+  if (shots < 20) {
+    ctr_gfx::request_named_shot(fmt::format("canary_{:02d}", shots++).c_str());
+  }
+}
+
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
   // (AI-assisted) one loop per mode: the mode's tests and paths decided at compile time
   switch (mode) {
@@ -1145,6 +1178,19 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
       if (x1 < -1.f || x0 > 1.f || y1 < -2.f || y0 > 2.f) {
         continue;
       }
+      // (AI-assisted, fable1) canary for the red HUD shard (hud3: one triangle of a HUD quad with
+      // a far vertex): a quad is a parallelogram (corner 0 + 2 = 1 + 3) within rounding, and no
+      // corner of one on screen is more than 8 screen widths out. Anything else is logged with
+      // the sprite's data, and the frame is saved (a few per minute at most)
+      if (mode == MODE_HUD || mode == MODE_2D) {
+        const float ex = (corners[0][0] + corners[2][0]) - (corners[1][0] + corners[3][0]);
+        const float ey = (corners[0][1] + corners[2][1]) - (corners[1][1] + corners[3][1]);
+        const float reach = std::max({std::abs(x0), std::abs(x1), std::abs(y0), std::abs(y1)});
+        const bool bad = !(std::abs(ex) <= 1e-3f && std::abs(ey) <= 1e-3f && reach <= 16.f);
+        if (bad) {
+          canary_report(mode, i, count, v, ad, corners, scale_x, scale_y);
+        }
+      }
     }
     // Resolve GS state only for sprites that survived the screen bounds test.
     // Texture lookup can decode/upload a texture, and offscreen sprites never use it.
@@ -1177,6 +1223,23 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
       cv[5] = clip[2];
       continue;
     }
+#ifndef __3DS__
+    if (mode == MODE_HUD && m_hud_dump) {
+      // (AI-assisted, fable1) CTR_HUD_DUMP: every HUD sprite of a pad "shot" frame
+      const s32 fl = as_int(v.flag_rot_sy.x()), mx = as_int(v.flag_rot_sy.y());
+      lg::info("[hud dump] {} of {}: pos ({:.1f} {:.1f} {:.1f}) sx {:.1f} sy {:.1f} rot {:.2f} "
+               "flag {:#x} matrix {} rgba ({:.0f} {:.0f} {:.0f} {:.0f}) tex0 {:#x} blend {} tex {} "
+               "zwrite {} px ({:.0f} {:.0f}) ({:.0f} {:.0f}) ({:.0f} {:.0f}) ({:.0f} {:.0f})",
+               i, count, v.xyz_sx.x(), v.xyz_sx.y(), v.xyz_sx.z(), v.xyz_sx.w(),
+               v.flag_rot_sy.w(), v.flag_rot_sy.z(), (u32)fl, mx, v.rgba.x(), v.rgba.y(),
+               v.rgba.z(), v.rgba.w(), ad.tex0_data, (int)m_last_bucket_ptr->state.blend,
+               m_last_bucket_ptr->state.tex, (int)m_last_bucket_ptr->state.zwrite,
+               (corners[0][0] + 1.f) * 200.f, (1.f - corners[0][1] / 2.f) * 120.f,
+               (corners[1][0] + 1.f) * 200.f, (1.f - corners[1][1] / 2.f) * 120.f,
+               (corners[2][0] + 1.f) * 200.f, (1.f - corners[2][1] / 2.f) * 120.f,
+               (corners[3][0] + 1.f) * 200.f, (1.f - corners[3][1] / 2.f) * 120.f);
+    }
+#endif
     ctr_vertex* out = m_last_bucket_ptr->verts.grow(4);
     for (int k = 0; k < 4; k++) {
       // (already in ctr_gpu coordinates)

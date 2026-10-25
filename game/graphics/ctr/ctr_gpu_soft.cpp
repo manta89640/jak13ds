@@ -309,6 +309,7 @@ void sky_hook(const ctr_draw_state* st) {
 // stage. Env CTR_SOFT_NO_FOG=1: none (the old frames).
 float s_fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f}, s_fog1[4] = {0.f, 1.f, 0.f, 0.f};
 uint8_t s_fog_rgb[3] = {0, 0, 0};
+int s_env_tex = -1;  // (AI-assisted, j1ocean) the sky reflection's texture (ocean_full_draw)
 bool s_nofog = false;
 float s_mfog_hvdf_w = 255.f, s_mfog_lo = 0.f, s_mfog_hi = 0.f;
 int s_shader_opt = 1;
@@ -357,9 +358,11 @@ void shade_pixel(const ctr_draw_state& st,
                  float s,
                  float t,
                  bool tex_alpha_full = false,
-                 float fog = 0.f) {
+                 float fog = 0.f,
+                 const float* env = nullptr) {
   // color in GS units (0x80 = 1.0 for vertex color / alpha)
   float r = col[0], g = col[1], b = col[2], a = col[3];
+  float tex_a = 255.f;  // (AI-assisted, j1ocean) the texture's alpha (the sky reflection's weight)
   if (s_depth_far) {
     z = 0.f;  // (AI-assisted) ctr_gpu_set_depth_far
   }
@@ -371,6 +374,7 @@ void shade_pixel(const ctr_draw_state& st,
   if (stex >= 0 && stex < (int)g_soft.textures.size() && g_soft.textures[stex].used) {
     float tc[4];
     sample(g_soft.textures[stex], st, s, t, tc);
+    tex_a = tc[3];
     if (st.decal) {
       r = tc[0];
       g = tc[1];
@@ -399,6 +403,19 @@ void shade_pixel(const ctr_draw_state& st,
     r = std::min(r, 255.f) * (1.f - f) + s_fog_rgb[0] * f;
     g = std::min(g, 255.f) * (1.f - f) + s_fog_rgb[1] * f;
     b = std::min(b, 255.f) * (1.f - f) + s_fog_rgb[2] * f;
+  }
+  if (env && s_env_tex >= 0 && s_env_tex < (int)g_soft.textures.size() &&
+      g_soft.textures[s_env_tex].used) {
+    // (AI-assisted, j1ocean) ctr_gpu_ocean_full_draw_env: + env map (clamped) * weight after the
+    // fog; weight = tex.a (0xff = 1), times v.a (0x80 = 1) when the TCC is set (mid ocean)
+    ctr_draw_state es = st;
+    es.clamp_s = es.clamp_t = 1;
+    float ec[4];
+    sample(g_soft.textures[s_env_tex], es, env[0], env[1], ec);
+    const float w = tex_a / 255.f * ((st.tcc & 1) ? col[3] / 128.f : 1.f);
+    r = std::min(r, 255.f) + ec[0] * w;
+    g = std::min(g, 255.f) + ec[1] * w;
+    b = std::min(b, 255.f) + ec[2] * w;
   }
   const bool ss_on = softstats::enabled() != 0 && !s_query;
   if (ss_on) {
@@ -497,10 +514,35 @@ void shade_pixel(const ctr_draw_state& st,
   }
 }
 
+// (AI-assisted) CTR_SOFT_F24=1: each vertex's depth rounded to the PICA's float24 (16 bit
+// mantissa) before it is interpolated, as the hardware's vertex output and depth map are (Azahar
+// computes them in 32-bit floats). Near the top of the depth range (GS z ~2^24: the HUD) a step is
+// 2^-17, ~128 GS z units. The skinned draws (merc) also take their bone rows, camera space
+// position and clip products in float24, as ctr_skin.v.pica on the GPU.
+float f24_round(float f) {
+  uint32_t u;
+  memcpy(&u, &f, 4);
+  u = (u + 0x40u) & ~0x7fu;
+  memcpy(&f, &u, 4);
+  return f;
+}
+
+const bool s_soft_f24 = getenv("CTR_SOFT_F24") != nullptr;
+
 void raster_triangle(const ctr_draw_state& st,
-                     const ctr_vertex* v,
+                     const ctr_vertex* v_in,
                      bool tex_alpha_full = false,
-                     const float* fog = nullptr) {
+                     const float* fog = nullptr,
+                     const float* env = nullptr) {
+  ctr_vertex vq[3];
+  const ctr_vertex* v = v_in;
+  if (s_soft_f24) {
+    for (int i = 0; i < 3; i++) {
+      vq[i] = v_in[i];
+      vq[i].z = f24_round(v_in[i].z);
+    }
+    v = vq;
+  }
   // (AI-assisted, j2-mem) env CTR_SOFT_NO_RASTER: no pixels (long memory / streaming runs: the
   // renderers' decisions are the same, ~10x faster)
   static const bool no_raster = getenv("CTR_SOFT_NO_RASTER") != nullptr;
@@ -537,7 +579,12 @@ void raster_triangle(const ctr_draw_state& st,
       float s = w0 * v[0].s + w1 * v[1].s + w2 * v[2].s;
       float t = w0 * v[0].t + w1 * v[1].t + w2 * v[2].t;
       const float f = fog ? w0 * fog[0] + w1 * fog[1] + w2 * fog[2] : 0.f;
-      shade_pixel(st, px, py, z, col, s, t, tex_alpha_full, f);
+      float e[2] = {0.f, 0.f};  // (AI-assisted, j1ocean) the sky reflection's texture coordinates
+      if (env) {
+        e[0] = w0 * env[0] + w1 * env[2] + w2 * env[4];
+        e[1] = w0 * env[1] + w1 * env[3] + w2 * env[5];
+      }
+      shade_pixel(st, px, py, z, col, s, t, tex_alpha_full, f, env ? e : nullptr);
     }
   }
 }
@@ -648,6 +695,11 @@ void ctr_gpu_frame_end(void) {
     }
     file_util::write_rgba_png(g_soft.screenshot_path, out.data(), kW, kH);
     g_soft.screenshot_path.clear();
+  }
+  // (AI-assisted, title3) CTR_POP_LOG: the frame number of the dump (frame_N.png) after its lines
+  static const bool pop_log = getenv("CTR_POP_LOG") != nullptr;
+  if (pop_log) {
+    lg::info("[pop] soft frame {}", g_soft.frame);
   }
   if (!g_soft.dump_dir.empty() && g_soft.dump_every > 0 && g_soft.frame % g_soft.dump_every == 0) {
     auto out = g_soft.color;
@@ -884,7 +936,11 @@ int ctr_gpu_ocean_full_reserve(int max_verts,
 }
 
 namespace {
-void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count, bool clip) {
+void ocean_full_draw(const ctr_draw_state* state,
+                     int vert_count,
+                     int index_count,
+                     bool clip,
+                     int env_tex = -1) {
   if (!g_ocean_full_open) {
     return;
   }
@@ -894,6 +950,7 @@ void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_coun
   }
   std::vector<ctr_vertex> out;
   std::vector<float> fog;  // (AI-assisted, far-fog) the vertices' fog amounts
+  std::vector<float> env;  // (AI-assisted, j1ocean) es, et per vertex (with env_tex)
   out.reserve(index_count);
   fog.reserve(index_count);
   for (int i = 0; i + 2 < index_count; i += 3) {
@@ -923,6 +980,10 @@ void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_coun
       o.a = v.a;
       out.push_back(o);
       fog.push_back(fog_on() ? std::clamp(v.fog, 0.f, 1.f) : 0.f);
+      if (env_tex >= 0) {
+        env.push_back(v.es);
+        env.push_back(v.et);
+      }
     }
   }
   if (!out.empty()) {
@@ -930,11 +991,14 @@ void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_coun
     softstats::prog(0);
     g_soft.cur.draws++;
     if (state) softstats::draw(*state);
+    s_env_tex = env_tex;
     for (size_t i = 0; i + 2 < out.size(); i += 3) {
-      raster_triangle(*state, out.data() + i, false, fog.data() + i);
+      raster_triangle(*state, out.data() + i, false, fog.data() + i,
+                      env_tex >= 0 ? env.data() + 2 * i : nullptr);
       g_soft.cur.triangles++;
       softstats::cur->tris++;
     }
+    s_env_tex = -1;
   }
 }
 }  // namespace
@@ -963,6 +1027,21 @@ void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state,
   s_fog_rgb[1] = fog_g;
   s_fog_rgb[2] = fog_b;
   ocean_full_draw(state, vert_count, index_count, true);
+}
+
+// (AI-assisted, j1ocean) the sky reflection in the same draw (shade_pixel's env)
+void ctr_gpu_ocean_full_draw_env(const ctr_draw_state* state,
+                                 int vert_count,
+                                 int index_count,
+                                 uint8_t fog_r,
+                                 uint8_t fog_g,
+                                 uint8_t fog_b,
+                                 int env_tex) {
+  softstats::prog(7);
+  s_fog_rgb[0] = fog_r;
+  s_fog_rgb[1] = fog_g;
+  s_fog_rgb[2] = fog_b;
+  ocean_full_draw(state, vert_count, index_count, true, env_tex);
 }
 
 // (AI-assisted) the two cloud layers as two added passes (GS modulate with the constant color)
@@ -1729,6 +1808,14 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
       for (int b = 0; b < 3; b++) {
         int bi = bidx[b] < palette_count ? bidx[b] : 0;
         const float* r = bones + 12 * bi;
+        float rq[12];
+        if (s_soft_f24) {
+          // (AI-assisted) CTR_SOFT_F24: the bone rows as the float24 uniforms they are
+          for (int e = 0; e < 12; e++) {
+            rq[e] = f24_round(r[e]);
+          }
+          r = rq;
+        }
         float w = bw[b] / 255.f;
         for (int row = 0; row < 3; row++) {
           cam[row] += w * (r[4 * row] * pos[0] + r[4 * row + 1] * pos[1] + r[4 * row + 2] * pos[2] +
@@ -1749,9 +1836,24 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                  l[2] * lights[20 + c];
       }
       float c[4];
-      for (int r = 0; r < 4; r++) {
-        c[r] = clip[4 * r] * cam[0] + clip[4 * r + 1] * cam[1] + clip[4 * r + 2] * cam[2] +
-               clip[4 * r + 3];
+      if (s_soft_f24) {
+        // (AI-assisted) CTR_SOFT_F24: the shader's camera space position, the clip matrix and
+        // its products in float24 (ctr_skin.v.pica: dph r4, then dph with clip)
+        for (int e = 0; e < 3; e++) {
+          cam[e] = f24_round(cam[e]);
+        }
+        for (int r = 0; r < 4; r++) {
+          float acc = f24_round(clip[4 * r + 3]);
+          for (int e = 0; e < 3; e++) {
+            acc = f24_round(acc + f24_round(f24_round(clip[4 * r + e]) * cam[e]));
+          }
+          c[r] = acc;
+        }
+      } else {
+        for (int r = 0; r < 4; r++) {
+          c[r] = clip[4 * r] * cam[0] + clip[4 * r + 1] * cam[1] + clip[4 * r + 2] * cam[2] +
+                 clip[4 * r + 3];
+        }
       }
       if (c[3] < 1e-3f) {
         ok = false;
@@ -1995,15 +2097,37 @@ double ctr_gpu_time_ms(void) {
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
-// the software backend renders synchronously
-int ctr_gpu_async_start(ctr_gpu_job_fn, void*) {
-  return 0;
+// the software backend renders synchronously. (AI-assisted) CTR_SOFT_DEFER=1: the 3DS render
+// thread's latest possible timing instead: a submitted frame is rendered only when the game next
+// waits for the render thread (ctr_gpu_async_wait: the next frame's sync-path, a texture upload,
+// ...), after the game thread has run everything it runs while the 3DS draws the frame. Game
+// memory the renderer reads outside the double buffered DMA chain and its snapshots
+// (CtrRenderer::prepare_frame) then has the next frame's contents, as on hardware in a slow frame.
+static ctr_gpu_job_fn s_defer_fn;
+static void* s_defer_arg;
+static bool s_defer_pending;
+int ctr_gpu_async_start(ctr_gpu_job_fn fn, void* arg) {
+  if (!getenv("CTR_SOFT_DEFER")) {
+    return 0;
+  }
+  s_defer_fn = fn;
+  s_defer_arg = arg;
+  lg::info("[ctr] soft: CTR_SOFT_DEFER, frames rendered at the game's next wait");
+  return 1;
 }
-void ctr_gpu_async_submit(void) {}
+void ctr_gpu_async_submit(void) {
+  s_defer_pending = true;
+}
 double ctr_gpu_async_wait(void) {
+  if (s_defer_pending) {
+    s_defer_pending = false;
+    s_defer_fn(s_defer_arg);
+  }
   return 0;
 }
-void ctr_gpu_async_stop(void) {}
+void ctr_gpu_async_stop(void) {
+  ctr_gpu_async_wait();
+}
 
 }
 

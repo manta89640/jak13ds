@@ -1655,11 +1655,26 @@ u64 pad_script_arg(const std::string& w) {
   } else if (w.size() > 1 && w[0] == '"') {
     std::string t = w.substr(1, w.size() - (w.back() == '"' ? 2 : 1));
     return (u32)make_string_from_c(t.c_str());
+  } else if (w == "false") {
+    // (AI-assisted) #f, where a script line can't hold it ('#' starts a comment there)
+    return s7.offset;
   } else if (w.size() > 1 && w[0] == 'f') {
     float f = std::strtof(w.c_str() + 1, nullptr);
     u32 bits;
     memcpy(&bits, &f, 4);
     return bits;
+  } else if (w == "damage-info") {
+    // (AI-assisted) an attack-info (game-h.gc) with only its mode set, to 'damage: "call pevent
+    // target attack false damage-info" takes one hit of health from Jak and plays his hurt sound,
+    // without a state change (a 'go' from outside his process would not come back here)
+    static u32 info = 0;
+    if (!info) {
+      info = kmalloc(kglobalheap, 128, KMALLOC_MEMSET | KMALLOC_ALIGN_16, "pad-script-attack").offset;
+    }
+    memset(Ptr<u8>(info).c(), 0, 128);
+    *Ptr<u32>(info + 64) = 1u << 5;                          // mask: mode
+    *Ptr<u32>(info + 68) = intern_from_c("damage").offset;  // mode
+    return info;
   } else if (w == "#f") {
     return s7.offset;
   } else if (w == "#t") {

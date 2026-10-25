@@ -21,6 +21,12 @@
 ;; version identifier
 (defconstant SAVE_VERSION 1)
 
+;; (AI-assisted) 3DS "play as Keira" easter egg (bones.gc *pc-3ds-keira*): kept in a spare word of
+;; the save's header (info-int32 8, never written before: zero in older saves), as this value
+(#when TARGET_3DS
+  (define-extern *pc-3ds-keira* symbol)
+  (defconstant PC_3DS_KEIRA_MAGIC #x4b455241)) ;; "KERA"
+
 ;; the C++ memory card functions also use these codes.
 (defenum mc-status-code
   :type uint32
@@ -300,6 +306,8 @@
   (set! (-> arg0 money-count) (-> this money-total))
   (set! (-> arg0 buzzer-count) (-> this buzzer-total))
   (set! (-> arg0 completion-percentage) (calculate-completion (the-as progress #f)))
+  (#when TARGET_3DS
+    (set! (-> arg0 info-int32 8) (if *pc-3ds-keira* PC_3DS_KEIRA_MAGIC 0)))
   (when (string= (-> this current-continue name) "title-start")
     (set! (-> arg0 new-game) 1)
     (set! (-> arg0 level-index) (-> (lookup-level-info 'training) index))
@@ -585,6 +593,10 @@
 
 (defmethod load-game! ((this game-info) (save game-save))
   "Copy save data from a game-save to a game-info"
+  ;; (AI-assisted) 3DS: Keira or Jak, as the save says
+  (#when TARGET_3DS
+    (set! *pc-3ds-keira* (= (-> save info-int32 8) PC_3DS_KEIRA_MAGIC))
+    (if *pc-3ds-keira* (format 0 "3DS: this save plays as Keira~%")))
   (let ((save-data (the-as game-save-tag (-> save tag))))
     ;; loop over all tags
     (while (< (the-as int save-data) (the-as int (+ (+ (-> save length) 76) (the-as int save))))

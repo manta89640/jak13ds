@@ -640,6 +640,24 @@ snapshot; ~128 bytes per sprite) and the chunks read the copy. Host runs take th
 their synchronous render and compare it with game memory (a warning line if a copy differs or a
 chunk finds none).
 
+(AI-assisted, Oct 18, hud2) That copy is right but didn't fix the hardware report ("misshapen HUD
+elements, flickering light from orbs that jumps across the screen"). A host run with the render at
+its latest (`CTR_SOFT_DEFER=1`, 3ds_build.md) shows a clean HUD: no other live read. The cause is
+the PICA's float24: HUD models (the orb, power cell and scout fly icons, the orbs flying into the
+HUD) are drawn with the isometric projection at GS depth 2^24 - camera z (1024 or 2048 below the
+top of the range, or 9999999 for the flying orbs), ~50 GS units deep. A float24 step there is
+~128 GS units (64 at the flying orbs, whose camera z of ~1e7 also loses ~150 units in the skin
+shader's position), so each model had one or two depths: its back faces drew over its front faces
+in mesh order and its envmap shine (GEQUAL against its own base pass) lit them, a speckled bright
+orb that flickers as it spins. Azahar computes shaders in 32-bit floats and never showed it.
+`CtrMerc.cpp` hud_depth_spread now spreads a HUD model's depth about its center to +-2048 GS units
+(16 float24 steps; centers within 2304 of the top move down to 2304, still in front of the HUD
+sprites at ~63500 and the world's near plane at 16584), and HUD models further than 32768 from the
+camera take their bone translations relative to a point 16384 along the line to their center (the
+clip matrix adds it back; same positions, same envmap view direction). Host check with
+`CTR_SOFT_F24=1` and `hud.pad`: speckled icons and flying orbs before, the same as the 32-bit
+render after.
+
 In-run checks: a build with the old code kept next to the new (not in the tree) ran both on the
 same input every time and counted differences, Sandover + Snowy fort and the level_pairs.pad
 route. Host tests: test/ctr_micro (CtrMicro.h against copies of the code it replaced), and
@@ -842,6 +860,24 @@ distances moved), Snowy start 115k -> 114k. What is left: tie / shrub chunks the
 nearer to (the PS2 fades shrubs; ties have no limit there), the time of day vertex colors stepping
 (tod-fix), and on the host only, the sky drawn as hard-edged panels.
 
+**Title's first seconds (AI-assisted, Oct 22, title3).** "Still on the title screen geometry
+changes in the first couple seconds". Every frame from the logo to 3 s after Sandover appears
+(host `--ctr-gfx` with `CTR_POP_LOG`, Azahar with a pad script shot every game frame;
+port_test/reports/title3) showed four causes at Sandover's reveal behind the logo's falling pieces:
+(1) its near chunks were never read while it was hidden (streaming.md "Levels not drawn yet"):
+coarse tie groups switching to their near versions on screen (Azahar frames 113-115 after
+title-play: the island's hut, grass and palms); (2) the time of day rewrites of its first frames
+capped by tod_max_ms (host: 194 groups waiting at the first frame): stale colors for a few
+frames; (3) impostor cards coming in by the dozen over the first ~40 frames (0 -> 322) and going
+back to geometry when the fast day starts; (4) single tie LOD switches (the switch distance:
+lodnear's). Fixes: (1) hidden levels stream around the game's camera; (2) a level shown again
+(no draw for 3+ frames) brings its groups up to date within 7 ms a frame for its first 6 frames,
+not the budget or tod_max_ms (all at once took 20.2 ms in one frame in Azahar; spread: 9.4 ms at
+most; removed Oct 23, todlag: every group drawn is current in its first frame now); (3) no
+impostors while the title level is loaded. Azahar, 192 frames from the reveal:
+late near chunks 71 -> 0, pop / flicker events (popdet) 37 -> 27 (the rest: the logo's pieces,
+the day's colors and sky, single LOD switches). Boot: the title isn't held (no extra time).
+
 **Fire Canyon sky flicker (AI-assisted, Oct 17, sky-flicker).** The table's "blended when the
 weights move" was decided per level. make-sky-textures runs once per level with a sky (level 0's
 copies in bucket 32, level 1's added in bucket 39, each weighted by the mood interpolation), and a
@@ -886,3 +922,208 @@ config_dev.md `impostors` has the mechanism. What changed on Oct 17, and what it
   three views, and the cards' fill is the same as the geometry they replace. The views stay
   GPU-bound, so the frame time gains only a little. Most of the win is the triangle count
   (-18% beach in Azahar) and the headroom in busy views.
+
+## Coarse ties close to the camera (AI-assisted, Oct 18-22, lodnear)
+
+Hardware report: "coarse models are reloading really close". Two causes, both tie LOD (merc LOD is at
+the PS2's distances, impostors start at 120 m, fine_vis is off, the vista tier is far scenery):
+
+- **The switch by screen-space error alone** (title-popin, `tie_lod_px` 4): a group went to geometry
+  3 where its shape error fell under 4 px, which for most groups is well inside the PS2 far-plane
+  (30-100 m; the PS2 morphs toward geometry 3 only up to there). Groups whose error distance is
+  nearer than their far-plane: village1 1107 of 1905 (p10 12 m), misty 994 of 1696, beach 370 of 815,
+  jungle 299 of 792.
+- **The late-data hold** (streaming): groups drawn far in view because their near chunk was late
+  stayed far up to 4 s after it came. After a continue, jungle groups went detailed only at 3-5 m.
+
+Fix (runtime only, no reconvert; `CtrLevelData::lod_switch_error`): a group is near within
+max(error x focal / tie_lod_px, PS2 far-plane) x detail_scale + radius (where the PS2 distance
+decides, the far version's error at the switch is under tie_lod_px). Stream units' bounds include
+the floor (`need_d`, at load). Units a group needs by shape error go first and may free floor-only
+units at the arena's capacity. The hold is 1 s, and none where the far error is 3 x tie_lod_px or
+more. ctr_vis_builder and the fine_vis check assume the floor (detail_scale <= max(1, the set's)).
+
+Host walks (`platform/3ds/tests/lod_walk.pad`, CTR_LOD_LOG=1; CTR_LOD_NO_FLOOR=1 is the old rule):
+
+| | before | after |
+|---|---|---|
+| switches to far in view nearer than the PS2 far-plane | beach 1 at 15 m (PS2 60), village1 1 at 30 m (65) | 0 |
+| jungle switches to near in view inside half the far-plane | 18-22, nearest 3-5 m | 0, nearest 53 m |
+| other levels' switches to near | 9-49 m inside the far-plane | at it (59.x of 60 m) |
+| frames with groups kept far after their data came (per ~15 s window) | 106-117 | 0-29 |
+
+Cost: host fixed views (tie_views.pad) village1 hut 105.1k -> 106.7k triangles, beach start 44.0k
+-> 44.7k (+0.1-0.2 ms on the GPU model 10.6 ms + 0.13 ms per 1k); walks +0.7-5k tie triangles; jungle
+the heaviest at 26.6 ms model. Near data needed at once +10-40% (beach peak 4.3 -> 5.9 MB, within
+the arena's growth). Azahar (private instance, sound off, the user's config, stats_period 5, the
+village1 + beach part of lod_walk.pad): village1 walk 115.5-117.6k triangles, render thread build
+18.2-18.8 ms, GPU busy 19.1-19.8 ms, model 25.6-25.9 ms; beach walk 65.6-86.3k triangles, build
+15.2-17.0 ms, busy 16.0-17.8 ms, model 19.1-21.8 ms; no late times for lack of room during the walks
+(arena 4.1 MB village1, 8.3 MB beach + village1). Oct 17 reference (impostors, Azahar): village1 hut
+110.8k triangles. Still coarse: ~1 s after a continue while the area's near chunks load.
+
+## Title flight pops, shrub distances (AI-assisted, Oct 24, titlemove)
+
+User report (Azahar, Japanese): "parts of the geometry pop in as the title sequence's camera
+begins to move" (the island's palms, grass and hut). Every frame on the host (`CTR_POP_LOG`, now
+also `[popC]` chunk / `[popL]` tie LOD / `[popS]` streaming lines) and one real-time Azahar run of a
+measurement build (`cmake -DOG3DS_POP_LOG=ON`: the same lines per frame in gk.log; game sound on,
+no screenshots): no near chunk was late, no chunk came in by distance, vis and fine_vis hid nothing
+new. What changed on screen was tie LOD: groups switching from geometry 3 to 0 in view as the
+flight came nearer, at max(shape error distance, PS2 far-plane) = 35-75 m for the island: 807 in
+40 s in Azahar, 80 in the flight's first ~8 s on the host, objects up to 137 px across (the island
+rock, palms, grass tufts, the hut). Each is a step in shape (under tie_lod_px) and in shading: a far
+version has its own vertex colors (the island rock's underside visibly darker / lighter), which the
+shape error doesn't see. (The 1.5 s of host-only "missing" palms at the start is the logo's black
+outline covering them, also on Azahar.)
+
+Fix: while the title level is loaded, no group switches nearer than `kTitleLodMin` (100 m;
+`CtrLevelData::lod_min_e`, also in the near chunks' need distances, so they are read before the
+reveal). The island's groups are near from the reveal on; the flight's first ~8 s have 19 switches
+in view, all at 102-113 m. Cost (host, CTR_AUTO_DETAIL_MODEL): +3-10k triangles in the flight's
+later parts, stream arena 5 MB. 130 m left 7 switches but cost +14-34k (Azahar: 201k triangles and
+28 ms render thread build where gameplay distances drew 138k / 19.5 ms). Azahar after-run (130 m
+build, frames 100-400 after title-play shot): no geometry change on the island from the reveal on,
+late near chunks 0, 29.9 fps once the shots stopped. Host test: env `CTR_TITLE_LOD_MIN` (meters).
+
+Shrubs (gameplay report: "small things like shrubs pop in when i walk close, but if i walk away
+they stay"): shrubs are resident, never streamed (only tie near versions are). A shrub cell
+(chunk, ~20 m radius, one PS2 distance class) came in whole once its sphere was within the distance
+and stayed up to 1.5 x that while in view (kHoldInView), and an auto_detail change never let one
+in while on screen, so a cell culled while the GPU was busy came in only within the old, shorter
+distance. Now: shrub runs (a visibility node, up to 8 instances, ~10 m radius) are drawn while
+their sphere reaches within the distance (10% hysteresis, `run_dist_in`), no 1.5x hold for shrubs,
+and auto_detail holds a chunk on screen only for going, never for coming. Host lod_walk: 12-150
+shrub runs hidden per level draw (log `[ctr] <bucket>: shrub runs hidden by distance`).
+
+Also: impostor cards (`ctr_gpu_draw_mesh_stream`) set the texture coordinate scale as the level
+meshes do (a card after an atlas draw sampled at 1/32768: far objects missing until they came back
+as geometry); the near chunks' bound uses this frame's tie LOD factor too (a cut to another focal
+length decided units with the last frame's).
+
+## Time of day every frame (AI-assisted, Oct 23, todlag)
+
+The user saw the title's day/night colors update late and unevenly, and parts of surfaces losing
+their tint for a frame or so. Both came from the time of day limits added for 60 fps (tod_max_ms
+2, the 1.2 ms budget, a day move waiting, tod_busy_half, title3's reveal spread): on the title a
+day move waited in 188-427 of 289-449 level draws, 116-26626 groups per 15 s waited for the cap,
+and groups were drawn up to 102 day moves behind or with the file's baked colors (Azahar stats;
+host with Azahar's clock: colors 26 frames old on average, 77% of the groups drawn 3+ frames old;
+streamed tie chunks and a first-drawn shrub with the file's colors for 1-8 frames, 1431 groups for
+2 frames at Sandover's reveal). Now every group drawn is rewritten before its draw (host check: 0
+stale vertices in every frame of the title, village1 and citadel), with a whole-table refresh and
+a check-free write loop when many vertices are drawn (c3l_format.md "Time of day"). With the target
+at 30 fps there is room: Azahar render CPU title 14.1-20.4 ms (was 10.6-18.5), citadel 19.8-24.7
+(was 15.8-17.7), 29.9 fps in both.
+
+
+## Particle launch and callbacks inline (AI-assisted, Oct 24, core-opt part B)
+
+The particle natives called five GOAL functions per particle through native_call_goal (an adapter
+thunk into goalc's C and back each time). They now run them in C++ while the symbols of the
+function and of what it calls still hold what they held at the first call (otherwise the GOAL
+call):
+
+| GOAL function | called by | C++ (file) | host instructions saved per call x calls per frame (village2) |
+|---|---|---|---|
+| sp-adjust-launch (sp-init-fields!, matrix-rotate-xyz! with sin / cos, vector3s products, the y rotation) | launcher | `native_sparticle_launcher.cpp` adjust_launch | 1956 x 65 |
+| sp-init-fields! (3 per particle) | launcher | pc-sp-init-fields! directly (`native_sp_init_fields.h`) | the GOAL wrapper's hop (not measured) |
+| sp-get-particle | launcher | `native_sp_init_fields.h` get_particle | 29 x 89 |
+| sp-orbiter (quaternion*!, quaternion-normalize!, quaternion->matrix, vector-matrix*!) | process-block | `native_sp_callbacks.cpp` | 261 x 19 |
+| sp-relaunch-particle-2d (+ sp-relaunch-setup-fields; the time of day color case stays GOAL: no test pad reaches it) | process-block | `native_sp_callbacks.cpp` | 140 x 38 |
+
+`native_goalc_ops.h` has goalc's C of sin, cos, the matrix-rotate functions, matrix*!,
+vector-matrix*!, vector-rotate*!, quaternion*!, quaternion-normalize! and quaternion->matrix (the
+same float operations per lane in the same order, vf0 as a multiply by a 1.0 the compiler can't
+fold). The launcher's scratch grew by 64 bytes for sp-adjust-launch's local launchinfo.
+Host costs: `OPENGOAL_INLINE_INSTR=1` runs the GOAL function and the C++ on alternate calls and
+counts each one's host (arm64) instructions; ~141k of village2's 2.3M instructions per frame. arm64
+runs goalc's 64-bit C well, ARM11 doesn't: the Azahar numbers below are the real measure.
+
+**Identity**: verify mode (`OPENGOAL_MIPS2C_VERIFY=1`) runs the GOAL function and the C++ on the
+same state for every call (`native_verify_inline`: the particle, its sprite, the launch info,
+the VU0 random register, pc-rand's generator, the result; all of GOAL memory on one call in
+`OPENGOAL_MIPS2C_VERIFY_INLINE_FULL_EVERY`, default 64). level_pairs.pad: get-particle 119k,
+adjust-launch 53k, orbiter 239k, relaunch 62k calls, 0 mismatches; mips2c verify 4.67M calls and
+sp-init-fields! 841k calls, 0 mismatches. A deliberate error put into each was reported at once
+(relaunch's at its 1002nd call, the first whose specs leave next-launcher alone), then removed.
+
+**Azahar** (one run, A/B in the same session: a test-only toggle, -DPARTB_AB=1, the pad's
+`log partb-off/on`; village2 dock standing, late-game state; 5 s perf lines, first of each window
+left out): logic 13.6 / 13.6 ms with the inline paths (a1, a2), 14.3 / 14.2 ms without (b1, b2):
+**0.7 ms less** (5%), steady to 0.1 ms within each window. Host (Mac, game thread instructions per
+frame, `OPENGOAL_PERF_INSTR=1`, jak1_calib_prof.pad): village2 2393k -> 2313k, swamp 2184k ->
+2100k, jungle 1868k -> 1847k (the scene's own variation is ~1-2%).
+
+## Title chug, time of day at half rate, shrub fade (AI-assisted, Oct 24, fable1)
+
+The user (Azahar, Japanese, `frame_overlap2 = off` as a test): "the game chugs on the title
+screen". Azahar, title 100 s, 5 s windows, the user's config with sound on (the mixer on the
+render thread's core, 2 ms/frame): render build 20.7-28.5 ms, of which the time of day rewrites
+5.0-10.9 ms (the title's fast day moves palettes nearly every frame, so every group drawn is
+rewritten every frame: 60-100k vertices, and village1's 22k-entry table is refreshed whole each
+time, ~3 ms of it), l1-tfrag without that ~7 ms, ocean 2.5, sprites 0.9; logic 5.5-6.3 ms; 100-215k
+triangles (the title flight at auto_detail's far end: ties x3, shrubs 120 m). A few 3-vblank frames
+per window at the busiest views. `frame_overlap2` on and off measure the same in Azahar (no GPU
+time there); on hardware on overlaps the GPU with the next frame's build: it goes back to its
+default (on). It never had anything to do with the red HUD shard (see below).
+
+- **Time of day at half rate on heavy frames.** A level draw whose last frame drew 3x the
+  table's entries in vertices or more (the todlag `fresh_ok` test: the title's fast day, citadel's
+  pulse) takes the game's new weights every second frame only (`CtrLevel.cpp` draw_level,
+  `m_tod_heavy`): the table and the groups are rewritten once per two frames, together, so the
+  colors drawn are at most one frame behind the PC's blend (2-8 color units at the title's 20x
+  day, the same for every group: no unevenness). Gameplay (a move every few frames, few vertices)
+  is unchanged. Azahar, sound on, like windows: time of day 9.4 / 6.7 / 5.0 / 6.9 / 10.9 -> 7.1 /
+  4.0 / 4.7 / 4.8 / 7.4 ms per frame, build 23.4 / 20.7 / 21.2 / 21.7 / 28.5 -> 20.4 / 17.5 /
+  19.9 / 18.9 / 24.0 ms. The camera-cut peaks (every group behind at once, 13-15 ms in one frame)
+  stay. Tried first and dropped: writing every second group per move (alternating by group index):
+  only ~10% less, because the whole-table refresh and the per-chunk bookkeeping cost as much as the
+  vertex writes.
+- **Shrubs to the PS2's far plane, thinning out** (`kShrubFarK`, `kShrubNearK`, `shrub_run_limit`):
+  a c3l v14 shrub chunk's `max_dist` is its PS2 distance class, the middle of the prototype's
+  fade (shrub_ps2_dists.inc: full detail to x, the fading version to w). The PS2 shows a shrub to
+  w and the PC has no limit at all; with `shrub_scale` 0.8 a run came in at 0.8 x the middle, i.e.
+  ~0.6 of the PS2's far plane: the user's "shrubs pop in so close". Now a chunk's shrubs reach
+  1.3 x max_dist (~w) and each run (up to 8 instances) has its own limit between 0.55 and 1.0 of
+  that (~x to w) from a hash of its index, with the 10% hysteresis as before: the shrubs thin out
+  over the PS2's fade zone instead of a patch coming in at once (an approximation of the PS2's
+  alpha fade of its trans version; a per-run alpha would need a draw per run with its own
+  combiner constant). auto_detail still pulls `shrub_scale` to 0.8 when the GPU is busy.
+- **The red HUD shard (not solved).** The user's progress-menu shot (Spider Cave, Japanese,
+  `frame_overlap2 = off`, so the pipelining is not the cause): the shard is a translucent red
+  triangle whose two sharp corners are the circle-button icon quad's top-right and bottom-left
+  corners (its diagonal; host `CTR_HUD_DUMP=1` with hud3.pad lists the menu's HUD sprites and
+  their screen corners) and whose third corner lies 72 px left of the icon's top-left corner at
+  the same height; the icon itself is complete in the shot, so it is an extra triangle, not one
+  of the icon's own two. The HUD chunk also carries 21 all-zero sprites (scale 0, color 0, tex0 0:
+  the game's unused entries; drawn as sub-pixel quads, as the PS2 does). Checked and equivalent:
+  the quads' command words (PRIMITIVE_CONFIG / VERTEX_OFFSET tracking across citro3d draws, the
+  post-vertex cache clear before every draw with new vertices, the index buffer, the sprite
+  snapshot of the REF data; Azahar runs each draw's vertex fetch from memory at submit time, so a
+  vertex of another draw can only come from the data or the command words). Not reproduced: a
+  16000-frame Japanese title-menu soak with sound on, hud3's A/B stages, the host. `CtrSprite.cpp`
+  now has a canary on every 2D / HUD quad (no parallelogram, or a corner over 16 screen widths
+  out: a `[ctr] sprite canary` line with the sprite's data and a saved frame, rate limited): if the
+  next report's log has none, the data the CPU sends is right and the mixing happens after it.
+
+## Ocean sky reflection, particles, pickups (AI-assisted, Oct 25, j1ocean)
+
+- **Sky reflection** (the PS2 ocean's env map pass, `ctr_gpu_ocean_full_draw_env`, see
+  3ds_build.md): folded into the textured draw, so no extra triangles or draws; one more texture
+  read per ocean pixel (texture unit 2) and a 64x64 reflection texture made again only when the
+  env color changes (0-4% of frames). `ocean_near_alpha` default 0.6 -> 0 (the PS2's alpha).
+  Host 3DS renderer vs PC renderer at the village1 shore (same pose, noon): the ocean's blue-teal
+  and dark streaks now match the PC; before it was a flat lighter cyan.
+- **particle_density** default 0.7 -> 1 (every particle, like the PS2); `particles = reduced`
+  (the safe preset) keeps 0.7.
+- **Pickups always full detail**: power cells, scout flies, orbs, orb caches, eco vents never
+  use the generated low LOD (`c3l::merc_gen_lod_exempt`).
+- Azahar (private instance, sound off, stats_period 5, defaults; one run): title build 14.4-20.0
+  ms, GPU busy 15.3-20.8 ms, 124-163k triangles, ocean build 1.8-3.8 ms; beach-start (camera
+  turned to the sea) build 16.6-18.1, busy 17.4-19.0, 61-123k triangles, ocean 3.0; misty-start
+  build 12.6-15.4, busy 13.4-16.3, 63-87k triangles, ocean 3.05; 29.9 fps throughout. There was
+  no same-run "before" (no switch for the reflection, one run). Earlier documented numbers from
+  other builds and configs: fable1 title build 17.5-24.0 ms with sound on (ocean 2.5 ms); Oct 17
+  beach-start 14.1 ms and misty-start 11.5 ms, standing. Azahar doesn't model the GPU's fill
+  cost: the extra texture read and the extra particles are only priced on hardware.

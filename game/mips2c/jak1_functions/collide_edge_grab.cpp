@@ -616,8 +616,12 @@ u64 execute(void* ctxt) {
   c->daddiu(t0, t0, 1);                             // daddiu t0, t0, 1
   c->lwc1(f0, 4, a1);                               // lwc1 f0, 4(a1)
   c->daddu(a2, a2, a3);                             // daddu a2, a2, a3
+  // (AI-assisted) attempts has 32 entries: the original kept counting and storing past it (into
+  // the rest of *collide-edge-work*). Saturate at 32, as the native does; only debug-draw reads it.
+  if (c->sgpr64(t0) <= 32) {
   c->sw(t0, 4, a0);                                 // sw t0, 4(a0)
   c->sqc2(vf1, 0, a2);                              // sqc2 vf1, 0(a2)
+  }
   if (((s64)c->sgpr64(v1)) == ((s64)c->sgpr64(s7))) {// beql v1, s7, L68
     c->sw(a1, 8, a0);                               // sw a1, 8(a0)
     goto block_10;

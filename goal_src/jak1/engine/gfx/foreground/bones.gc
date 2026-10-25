@@ -937,6 +937,13 @@
       (let ((lev (-> *level* level i))) (when lev (when (= sg (-> lev water-tex-foreground-sink-group)) (return #t)))))
     #f))
 
+;; (AI-assisted) 3DS "play as Keira" easter egg: #t in a game started with L1 + R1 held when picking
+;; its save slot (progress-pc.gc pc-3ds-keira-pick!), kept in the save (game-save.gc). The player's
+;; model is then asked for as "keira-as-" + its name: the 3DS renderer draws Keira (KEIRA.c3l,
+;; game/graphics/ctr/CtrKeiraRig.h) posed from Jak's bones. Only the picture changes.
+(#when TARGET_3DS
+  (define *pc-3ds-keira* #f))
+
 (defun pc-merc-draw-request ((dc draw-control) (dma-buf pointer) (matrix-buf pointer) (update-verts symbol) (blercs (pointer float)))
   (let ((start-packet (the-as dma-packet dma-buf))
         (qwc-total 0))
@@ -948,7 +955,14 @@
     (set! (-> start-packet vif1) (new 'static 'vif-tag :cmd (vif-cmd pc-port)))
     (set! dma-buf (the pointer (&+ start-packet 16)))
     (let ((data-ptr (the-as (pointer uint128) dma-buf)))
-      (charp<-string (the (pointer uint8) (&-> data-ptr 0)) (-> dc mgeo name)))
+      (#if TARGET_3DS
+        (cond
+          ((and *pc-3ds-keira* (= (-> dc process) *target*))
+           ;; (AI-assisted) "play as Keira": the player's model as "keira-as-<name>"
+           (charp<-string (the (pointer uint8) (&-> data-ptr 0)) "keira-as-")
+           (charp<-string (&+ (the (pointer uint8) (&-> data-ptr 0)) 9) (-> dc mgeo name)))
+          (else (charp<-string (the (pointer uint8) (&-> data-ptr 0)) (-> dc mgeo name))))
+        (charp<-string (the (pointer uint8) (&-> data-ptr 0)) (-> dc mgeo name))))
     (&+! dma-buf (* 16 8))
     (+! qwc-total 8)
     ;; LIGHTS:

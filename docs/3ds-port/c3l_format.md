@@ -44,7 +44,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--vista-flat` | off | (AI-assisted) also an untextured copy of the vista tier: `CHUNK_KIND_VISTA_FLAT` (5) chunks after the `CHUNK_KIND_VISTA` ones (the end of the chunk list), each texture's average color (alpha weighted) baked into the vertex colors (texture * vertex / 128), untextured draws with the draw mode's texture bits (clamp, filter, tcc, alpha test) cleared: one draw per cell and mode (Snowy: 127 -> 2 draws, village3: 146 -> 38). The runtime keeps one of the two (config `vista_untextured`) and drops the other at load. No layout change; an older runtime would draw the copies as ordinary chunks. |
 | `--vista-error M`, `--vista-ratio R`, `--vista-sloppy-error M` | 3, 0.25, 10 | vista ties / coarse tfrag: simplified (topology kept) to the error, then (sloppy) towards the ratio of the triangles within the second error |
 | `--merc-only` | off | only merc models (used for the common GAME.fr3 with `--all`). |
-| `--gen-lod R`, `--gen-lod-error E`, `--gen-lod-lock-border` | 0.3, 0.02, off | (AI-assisted) merc models with only `-lod0` in the level (not Jak / Daxter, no blend shapes or rewritten vertices): a simplified copy named `<model>~genlod` (`c3l::kMercGenLodSuffix`) with the model's own vertices (same `first_vertex` / `vertex_count`) and draws of its own, aiming at R of the triangles with an error under E of the model's size (meshoptimizer; all draws together, so their seams move alike; eye draws kept, vertices at the eyes locked). No layout change: older runtimes load it as a model nobody asks for. `--gen-lod 0`: none. |
+| `--gen-lod R`, `--gen-lod-error E`, `--gen-lod-lock-border` | 0.3, 0.02, off | (AI-assisted) merc models with only `-lod0` in the level (not Jak / Daxter, (j1ocean) not the pickups: `c3l::merc_gen_lod_exempt`; no blend shapes or rewritten vertices): a simplified copy named `<model>~genlod` (`c3l::kMercGenLodSuffix`) with the model's own vertices (same `first_vertex` / `vertex_count`) and draws of its own, aiming at R of the triangles with an error under E of the model's size (meshoptimizer; all draws together, so their seams move alike; eye draws kept, vertices at the eyes locked). No layout change: older runtimes load it as a model nobody asks for. `--gen-lod 0`: none. |
 | `--merc-cull-agree R`, `--merc-cull-cos C`, `--merc-cull-open O` | 0.99, 0.2, 0.02 | (AI-assisted) merc back face culling marks (`kMercDrawCullBack` in `palette[30]`, config `cull_merc`): an opaque, depth written draw whose texture never fails the runtime's alpha test is marked when at least R of its triangles have all three corners' normals on one side (cos >= C; each is turned to face that side) and at most O of them have an open edge (the model's draws welded by position: single sheets and holes stay unculled). Envmap passes take their draw's mark; generated LODs never have it. `--merc-cull-agree 0`: no marks. |
 | `--no-etc1` | off | 16-bit textures (RGB565 / RGBA4444) instead of ETC1 / ETC1A4. |
 | `--etc1-merc` | off | ETC1 for all textures of merc models, without the quality test (faces too). |
@@ -376,36 +376,31 @@ their meshes (the alpha stays; a frame the GPU still draws may see part of the c
 - **Groups.** A group is rewritten whole when one of its chunk's day palettes moved since it was
   written (or it has the file's colors); a chunk's light vertices (palettes used by a quarter of
   the colors or fewer: lamps, lava glow; the game moves them every frame) all at once when a light
-  palette moved (a list per chunk made at load). Within a budget per frame (all levels): the light
-  pass first (up to 70% of 1.2 ms, from where the last frame's stopped), then the groups drawn (from
-  where the last frame's budget ran out). What the budget doesn't reach is drawn as it is, a day move
-  or two behind; a group 3 moves behind, or with the file's colors, is rewritten at once. While the
-  day moves fast (the title screen's attract mode: a move nearly every frame) the group pass gets
-  the chunks drawn once per 2 moves (their vertices at the measured ms per vertex, spread over the
-  frames 2 moves take). The day's own steps (1/64 every ~40 frames in the game) spread over a few
-  frames; a group is one visibility id's vertices, so a chunk can show two steps for a frame or two.
+  palette moved (a list per chunk made at load). (AI-assisted, todlag, Oct 23) every frame, before
+  the chunk is drawn: the light pass, then every group drawn that is behind (no budget, no cap: the
+  colors drawn are the frame's, exact as the PC; hidden groups wait until they are drawn). When the
+  vertices drawn are 3 times the table's entries or more (the title's fast day, citadel's pulse),
+  the frame's first group rewrite refreshes the whole table first (`tod_refresh_all`: the colors
+  with r and b packed in one word when the weights are the same for r, g and b and add up to 256 or
+  less, ~6 instructions per palette; the TodMuls from their colors) and the groups are then written
+  without version checks (`tod_write_fresh`: ~6.5 instructions per vertex instead of ~17).
   The rewritten ranges are flushed together after the level's pass (sorted, merged within 64 KB:
   a few `ctr_gpu_flush_range` per frame).
-- Config `tod_busy_half` (default on, preset safe: off): while day palettes jump (more than 4/64 in
-  a frame) every frame for 8 frames (sunken's cycling lights), they are taken every second frame.
-- (AI-assisted, citadel) Config `tod_pulse_step` (default 4, preset safe: 0): a day palette that
-  pulses (its weight turned around twice within 256 frames: citadel's palette 1, a mood light
-  that 71% of its colors use, moving 1/64 every ~2 frames) is taken only when it moved that many
-  64ths from the weight last taken, or once it stood still for 8 frames. Without it every move
-  rewrote the drawn vertices (the groups were 3 moves behind every ~6 frames): citadel 3.5-8.7 ms
-  of time of day per frame, single frames 13-29 ms.
-  A palette found pulsing is remembered per level, so a reload counts it as pulsing at once.
-- (AI-assisted, citadel) Config `tod_max_ms` (default 2, preset safe: 0): the most ms of rewrites
-  per frame (all levels). Groups 3 moves behind or with the file's colors wait beyond it instead
-  of being rewritten at once (the next frame's pass starts from them), the group pass's budget
-  stays between 0.8 of it and it, and a day move waits (up to 32 frames; a move of 8/64 or more
-  doesn't) until the vertices drawn could be rewritten once per move within 0.7 of it (citadel's
-  pulse: taken every ~8-12 frames; on its smoothly lit pixels 2% of the 2-frame steps are 5
-  levels or more against 0.1% exact, Azahar screenshots). Not exact: a GPU path (palette 1's
-  contribution per vertex, 4 bytes, mixed in the vertex shader with a uniform weight) would be,
-  for ~1.7 MB of linear memory in citadel (435k vertices). Firecanyon's lava
-  (palettes 4-7, 62% of its colors) and swamp's lightning (palette 2, 53%) move as day palettes;
-  without the limit single frames took 14-19 ms.
+- Removed Oct 23 (todlag): config `tod_busy_half` (sunken's cycling lights taken every second
+  frame), `tod_max_ms` (2 ms of rewrites per frame; a day move waited until the vertices drawn
+  could be rewritten within it; groups 3 moves behind or with the file's colors waited beyond
+  it), the 1.2 ms budget that left groups up to 2 moves behind, and title3's reveal spread (7 ms a
+  frame for 6 frames). On the title they left colors drawn 26 frames old on average (host, Azahar's
+  clock), 77% of the groups drawn 3+ frames old, a day move waiting in 188-427 of 289-449 level
+  draws, and groups with the file's baked colors drawn for 1-8 frames (streamed tie chunks, a
+  first-drawn shrub, 1431 groups for 2 frames at Sandover's reveal): the user's "visible lag" and
+  "parts of textures losing their tint for a frame or so".
+- (AI-assisted, citadel) Config `tod_pulse_step` (default 0 since Oct 23; an approximation): a day
+  palette that pulses (its weight turned around twice within 256 frames: citadel's palette 1, a
+  mood light that 71% of its colors use, moving 1/64 every ~2 frames) is taken only when it moved
+  that many 64ths from the weight last taken, or once it stood still for 8 frames. Not needed with
+  the cheaper rewrites (citadel below); on the title's fast day it took the day's own palettes for
+  pulsing and held them. A palette found pulsing is remembered per level.
 - A level's meshes are colored as they are read when weights are known for it (the weights it was
   last drawn with, or the last level's with the same day palettes); else they show the baked
   palette until drawn (then rewritten at once).
@@ -415,18 +410,23 @@ chunk 28 bytes, per group 12, per run 2, and the light lists: village1 600 KB, m
 458 KB, sunken 309 KB. On the 3DS a level whose table would leave less than 3 MB of heap free keeps
 its baked palette (`[ctr] <level>: no heap for the time of day colors`).
 
-Azahar (Oct 17, New 3DS, tod ms of the render thread per frame, average / most in one frame over
-25 s): title 7.5 / 16.7 (29.9 fps; the day moves nearly every frame there), village1 hut 1.9 / 2.2,
-Snowy 1.2 / 1.8, Volcanic Crater 0.7 / 1.7, sunkenb 5.6 / 9.5 (its cycling lights recolor about half
-of the vertices drawn every second frame), Misty 1.4 / 2.1. A group costs ~80 ns per vertex there.
+Azahar (Oct 23, todlag, New 3DS, preset normal, render thread per 15 s window; before: the
+oct23 build with tod_max_ms 2): title tod 1.4-2.0 -> 4.6-8.0 ms/frame (most 20.6 in one frame at
+Sandover's reveal behind the logo, else 12.6), render CPU 10.6-18.5 -> 14.1-20.4 ms, 29.9 fps in
+both (2 vblanks a frame); citadel tod 1.3-1.6 -> 5.6-8.3 ms (most 17.7), render CPU 15.8-17.7 ->
+19.8-24.7 ms, 29.9 fps (one 3-vblank frame in ~900); village1 hut idle tod 1.1 -> 1.0 ms. Before
+(Oct 17, older code): sunkenb 5.6 / 9.5 ms at half rate (tod_busy_half): ~2x the vertices now, at
+~40% of the cost per vertex (not measured since).
 
 Logs: `[ctr] <level>: time of day: N colors in P palettes (lights M: K colors), ...` at load;
 `[ctr] l0-tfrag: time of day N blends, V vertices recolored T ms per level draw (most ...); G
-groups rewritten, C chunks drawn behind; groups drawn behind by at most L day moves (...)` and
+groups rewritten, the table refreshed whole in F level draws; a pulsing palette held in H` and
 `[ctr] time of day ms/frame A, most B in one frame, N frames over 2 ms` with the stats. Host: env
 `CTR_TOD_LOG=1` (2: every frame) logs the weights; `CTR_TOD_CHECK=1` (2: a line per frame) checks
 every vertex drawn against the PC's blend (stale vertices, the largest error, those more than 4
-off); `CTR_TOD_BUDGET_MS` sets the budget. A 3DS build with `CTR_TOD_CHECK_BUILD=2` defined in
+off; the age in frames of the colors drawn: the newest of the last 64 frames' weights whose blend
+they show; groups drawn 3+ frames old or with the file's colors, which `CTR_TOD_CHECK=2` lists);
+`CTR_TOD_TIME_SCALE=10` scales the time of day's ms in the statistics (the host is ~10x Azahar). A 3DS build with `CTR_TOD_CHECK_BUILD=2` defined in
 CtrLevel.cpp runs the check every 16th frame. The pad script command `tod H` sets the game's clock
 (pictures at a time of day).
 
@@ -499,7 +499,10 @@ Runtime (`CtrLevel.cpp`, config `tie_lod`): per level draw, each group's version
 errors (title-popin, Oct 17), near while the camera is within error x focal / tie_lod_px x
 detail_scale of the group's sphere (focal: pixels of the 400-wide top screen per unit of x / depth
 from this frame's projection, 256 in gameplay, 161 on the title's wide camera): the far version
-only where its error is at most tie_lod_px pixels. Without them (older files), near within dist x
+only where its error is at most tie_lod_px pixels. (AI-assisted, lodnear, Oct 18) And never nearer
+than the PS2's: near at least within the group's `dist` (the PS2 far-plane) x detail_scale, so the
+switch distance is max(error x focal / tie_lod_px, far-plane) x detail_scale + radius (see
+performance.md "Coarse ties close to the camera"). Without them (older files), near within dist x
 detail_scale (x 0.5..1 with auto_detail: half while the GPU is busy; a group in view keeps the factor
 it was decided with until it is out of view). 10% hysteresis; every group every frame, so turning
 the camera switches nothing. Why: the PS2 morphs geometry 2 into 3 up to the far-plane, the 3DS
@@ -615,6 +618,26 @@ u8 masks[] (one per fragment: 1 = unpacked).
   model's vertices on the render thread (`apply_mod`, the mesh's second vertex buffer with the
   pipeline). The model's position scale gets the blend shapes' 1.5x room for the waves. v11 files
   have none: those models stay at their base pose, as before.
+
+### KEIRA.c3l: "play as Keira" (AI-assisted)
+
+`ctr_level_converter GAME.fr3 KEIRA.c3l --keira-from village1.fr3` (and `--all` when both fr3
+files are in the input folder) writes a merc-only file with one model, `keira-as-eichar-lod0`:
+Keira's `assistant-lod0` from village1 (`tools/ctr_level_converter/keira_model.cpp`), ~80 KB.
+
+- Her vertices stay hers, bound to her rig (`game/graphics/ctr/CtrKeiraRig.h`): matrix slot =
+  her joint + 1, plus a virtual upper chest joint (slot 97) that takes the upper part of her chest
+  weights (1.90-2.10 m), so her torso bends and twists at Jak's chest joint too.
+- Her effects keep their numbers (0 body, 1 eyes, 2 shiny parts, 3 hair, like Jak's: the game
+  enables and fades his). No blend shapes (the game sends Jak's face weights); her eye draws use
+  Jak's eye slots (his eyes, blinking with him); her welding torch (joints `torch`, `torchTIP`, at
+  her feet in the bind pose) is left out.
+- The runtime loads it the first time the game asks for a `keira-as-` model (`CtrLevels::
+  load_extra`; Jak is drawn until then, or if the file is missing) and poses her from Jak's
+  bones every frame (`ctr_keira::pose`).
+- The skeleton bind poses come from `game/graphics/ctr/keira_skeletons.inc`
+  (`tools/ctr_level_converter/gen_keira_skeletons.py`, from the decompiler's `rip_levels` .glb of
+  GAME.CGO and VI1.DGO).
 
 ## Fine visibility (.c3v)
 

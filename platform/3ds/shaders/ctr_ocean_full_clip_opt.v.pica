@@ -1,7 +1,7 @@
 ; (AI-assisted)
-; config.ini shader_opt: ctr_ocean_full_clip.v.pica in 6 instructions (12) and 3 output registers
-; (4): texcoord0 (s, t) and texcoord1 (the fog amount as s and t) in one register, one mov with the
-; swizzle xyzz. Same uniforms.
+; config.ini shader_opt: ctr_ocean_full_clip.v.pica in 7 instructions (15) and 4 output registers
+; (5): texcoord0 (s, t) and texcoord1 (the fog amount as s and t) in one register, one mov with the
+; swizzle xyzz; (j1ocean) texcoord2 for the sky reflection. Same uniforms.
 ; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
 
 .fvec gs[4]
@@ -13,10 +13,12 @@
 .out outtc texcoord0.xy
 .out - texcoord1 outtc.zw
 .out outclr color
+.out outtc2 texcoord2
 
 .alias inpos v0  ; W * (x, y, z, 1)
 .alias intex v1  ; s, t, fog amount
 .alias inclr v2
+.alias inenv v3  ; (AI-assisted, j1ocean) es, et: the sky reflection's texture coordinates
 
 .entry main_ctr_ocean_full_clip_opt
 .proc main_ctr_ocean_full_clip_opt
@@ -26,5 +28,6 @@
   dp4 outpos.w, gs[3], inpos
   mov outtc, intex.xyzz
   mul outclr, inv255, inclr
+  mov outtc2, inenv.xyyy  ; (AI-assisted, j1ocean) texture unit 2's coordinates (the sky reflection)
   end
 .end

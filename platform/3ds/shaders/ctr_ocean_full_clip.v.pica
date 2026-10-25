@@ -15,10 +15,12 @@
 .out outtc0 texcoord0
 .out outtc1 texcoord1
 .out outclr color
+.out outtc2 texcoord2
 
 .alias inpos v0  ; W * (x, y, z, 1)
 .alias intex v1  ; s, t, fog amount
 .alias inclr v2
+.alias inenv v3  ; (AI-assisted, j1ocean) es, et: the sky reflection's texture coordinates
 
 ; (AI-assisted) a named entry point: config.ini shader_groups links this file into a shbin with
 ; others (shared procedures need distinct names)
@@ -38,5 +40,9 @@
   mov r3.y, half
   mov outtc1, r3
   mul outclr, inv255, inclr
+  ; (AI-assisted, j1ocean) texcoord2 (texture unit 2: the sky reflection's env map), zw = 0
+  mov r4.zw, consts.zzzz
+  mov r4.xy, inenv.xyyy
+  mov outtc2, r4
   end
 .end

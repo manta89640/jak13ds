@@ -7,10 +7,12 @@
  * <project>/out/jak1/c3l and draws them from the tfrag buckets with the camera the game sends.
  */
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <map>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -27,6 +29,7 @@
 
 #include "game/graphics/ctr/CtrFineVis.h"
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/c3l_reader.h"
 #include "game/graphics/ctr/c3v_format.h"
@@ -55,6 +58,11 @@ struct CtrMercModelData {
   mutable bool blerc_moved = false;  // vertices not in the base pose (CtrMercRenderer)
   std::vector<CtrMercModEffect> mod;  // (AI-assisted) v12, see CtrMercRenderer::apply_mod
   mutable bool mod_checked = false;   // the first update was compared with the file's vertices
+  // (AI-assisted) "keira-as-..." (CtrKeiraRig.h): its vertices use her rig's slots, which
+  // CtrMercRenderer poses from Jak's bones
+  bool keira_rig = false;
+  // (AI-assisted) "keira-as-...~shadow": her shadow's hulls (CtrKeiraRig.h ShadowMesh)
+  std::shared_ptr<ctr_keira::ShadowMeshData> keira_shadow;
   // (AI-assisted) where the mesh's data is in the file, to make it again after a load that ran out
   // of memory: first MercVertex and count, merc index range (index_end 0: not possible)
   u32 file_vertex = 0, vertex_count = 0, index_first = 0, index_end = 0;
@@ -98,6 +106,8 @@ struct CtrLevelData {
   };
   std::vector<RunSphere> run_spheres;
   std::vector<u32> chunk_run_count;
+  // (AI-assisted, titlemove) shrub runs: within their distance last frame (hysteresis; per run)
+  std::vector<u8> run_dist_in;
   // (AI-assisted) c3l v17 tie levels of detail (c3l::ExtHeader): the LOD groups, each run's version
   // (parallel to vis_runs; empty: no levels of detail), per chunk whether it has versioned runs,
   // per group the last frame's choice (bit 0: near version, bit 1: chosen)
@@ -108,6 +118,17 @@ struct CtrLevelData {
   // (AI-assisted, title-popin) per group its shape error (c3l::ExtHeader::lod_error_offset, game
   // units; empty: an older file, the groups switch at their dist)
   std::vector<float> lod_error;
+  // (AI-assisted, lodnear) the PS2 floor of the switch by screen-space error, as an error per
+  // unit of the factor: detail_scale / k of the last draw (0: none, older files). A group's
+  // switch error is max(its shape error, its PS2 far-plane x this), so it is near at least within
+  // the PS2 far-plane x detail_scale (+ hysteresis, + radius): never coarser than the PS2
+  float lod_floor_k = 0.f;
+  float lod_switch_error(size_t g) const {
+    return std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
+  }
+  // (AI-assisted, titlemove) the title screen's least switch distance, in the units of
+  // lod_switch_error (distance / factor; 0 elsewhere)
+  float lod_min_e = 0.f;
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
@@ -203,7 +224,8 @@ struct CtrLevelData {
   // A table entry (a color, then the TodMuls) is blended when a vertex drawn needs it after one of
   // its palettes moved (version stamps), exact as the PC; a chunk's vertex groups are rewritten
   // whole when one of the chunk's day palettes moved, its light vertices when a light palette
-  // moved, within a time budget per frame (CtrLevel.cpp tod_recolor).
+  // moved, every frame before the chunk is drawn (CtrLevel.cpp tod_recolor; AI-assisted, todlag:
+  // no budget).
   struct Tod {
     u32 color_count = 0;
     u8 palettes[8] = {};  // the palettes any color uses (not black), in order
@@ -229,7 +251,6 @@ struct CtrLevelData {
     u8 weights[8][3] = {};
     u8 target_w[8][3] = {};
     bool blended_valid = false;  // weights taken at least once
-    u8 busy_run = 0;  // config tod_busy_half: the level draws in a row a day palette jumped
     // (AI-assisted, citadel) config tod_pulse_step: per palette the direction of the game's last
     // move (1 up, 2 down), the frames of its last two reversals and of its last move, and the
     // level draws a pulsing palette was held (statistics)
@@ -242,11 +263,6 @@ struct CtrLevelData {
     // as long as a pulse is recognised by)
     u8 pulse_known = 0;
     u64 first_frame = 0;
-    // (AI-assisted, citadel) config tod_max_ms: the frames a day move waits after the last one
-    // taken (from the vertices drawn: their rewrites once per move within
-    // tod_budget_ms; 0 while the day is slow)
-    float min_move_frames = 0;
-    bool day_waited = false;  // (statistics) a day move waited in the last tod_update
     // versions: + 1 per change of target_w (dver: of its day palettes); per palette its last;
     // lut[mask]: the last of the palettes in mask
     u32 ver = 0, dver = 0;
@@ -259,12 +275,6 @@ struct CtrLevelData {
       u8 w[8][3] = {};
     };
     Act act;
-    // the chunks the last frame's light / group rewrites stopped at (CtrLevel.cpp tod_recolor)
-    u32 light_round_chunk = 0, round_chunk = 0;
-    // frames per day move (moving average), the frame of the last; ms per vertex rewritten
-    float move_frames = 64;
-    u64 move_frame = 0;
-    double ms_per_vertex = 1e-4;
     // per chunk: its vertex groups (VisGroup: one per visibility id of its runs when their vertex
     // ranges don't overlap, c3l v18 files, in vertex order; else one for all), each with the
     // version its colors are (0: the file's) and the day move count then; the oldest of those,
@@ -310,6 +320,14 @@ struct CtrLevelData {
     u8 tod_layout = 0;  // its time of day groups were made (at its first read)
     u16 tod_slots = 0;  // the time of day groups kept for it at load (its visibility ids)
     float need_a = 0, need_e = 0;  // c3l::StreamChunk
+    float need_d = 0;  // (AI-assisted, lodnear) the largest PS2 far-plane of its groups (game units)
+    // (AI-assisted, lodnear) this frame (stream_update): one of its groups is within its distance
+    // by shape error (its far version would show more than tie_lod_px), not only by the PS2 floor
+    bool urgent = false;
+    // its bound with the factor k: within this of its sphere's center one of its groups is near
+    float bound(float k, float floor_k, float min_e = 0.f) const {
+      return need_a + k * std::max(std::max(need_e, need_d * floor_k), min_e);
+    }
     u32 bytes = 0;   // vertices + indices in the arena (CtrStreamArena::mesh_bytes)
     u32 packed = 0;  // file bytes of its blocks
     void* mem = nullptr;  // kUnitLoading: the arena piece the job fills
@@ -341,6 +359,11 @@ struct CtrLevelData {
   float stream_k_hi = 0.f;  // its recent largest (decaying 1% a frame): the scheduler's headroom
                             // for a camera that zooms (the factor follows the focal length)
   u32 stream_resident = 0;  // bytes of the units there
+  // (AI-assisted, title3) the frame of the last draw_level (any mode): a draw after a gap of more
+  // than 2 frames shows the level again (the title's reveal of Sandover, a level start): its time
+  // of day rewrites aren't capped or spread that frame (draw_level)
+  u64 last_draw_frame = 0;
+  u64 reveal_frame = 0;  // (AI-assisted, title3) the last such draw's frame
   // the file's header and block directory, for the stream jobs' readers (no reads of them)
   std::shared_ptr<const c3l::Reader::Dir> file_dir;
   bool is_unit(size_t ci) const { return !chunk_unit.empty() && chunk_unit[ci] != UINT32_MAX; }
@@ -391,6 +414,9 @@ class CtrLevels {
   ~CtrLevels();
   /*! Load the common file (GAME.c3l: Jak and other shared models), kept loaded. */
   void load_common();
+  /*! (AI-assisted) Load another file of models kept loaded like the common one (render thread), the
+   * first time it's asked for: KEIRA.c3l, the "play as Keira" easter egg's (CtrKeiraRig.h). */
+  void load_extra(const std::string& name);
   /*! Start loading a level before the game asks for it (any thread): the overlord started its DGO.
    * Kept aside, not drawn, until set_wanted or get asks for it. (AI-assisted) The game loads one
    * level at a time: a prefetch of any other level it doesn't want is dropped (it gave up on that
@@ -435,6 +461,29 @@ class CtrLevels {
                           const math::Vector4f planes[4],
                           const math::Vector4f rot[4],
                           u64 frame);
+  /*! (AI-assisted) the camera of the last level draw if it is this frame's: world = trans + rot *
+   * (merc camera space), rot row major (the "play as Keira" ponytail) */
+  bool camera(u64 frame, float rot[9], float trans[3]) const {
+    if (!m_cam_valid || m_cam_frame != frame) {
+      return false;
+    }
+    memcpy(rot, m_cam_rot, sizeof(m_cam_rot));
+    memcpy(trans, m_cam, sizeof(m_cam));
+    return true;
+  }
+  /*! (AI-assisted, title3) the game's camera position this frame (*math-camera* trans, game
+   * units; game thread, while the render thread is idle): the near chunks of a level that is loaded
+   * but not drawn (Sandover behind the title's logo) are read around it before it is shown */
+  /*! (AI-assisted, title3) draw_level, any level (the title's logo too): this frame's tie LOD factor
+   * (detail_scale x focal / tie_lod_px x 1.1), the hidden levels' factor before any streaming level
+   * was drawn */
+  void note_k_any(float k) { m_k_any = k; }
+  void note_game_camera(const float* trans) {
+    for (int i = 0; i < 3; i++) {
+      m_game_cam_next[i] = trans[i];
+    }
+    m_game_cam_new = true;
+  }
   /*! (AI-assisted, streaming) Jak's first bone in camera space (merc renderer, any frame) */
   void stream_note_target(float x, float y, float z, u64 frame) {
     m_target_cam[0] = x;
@@ -524,6 +573,9 @@ class CtrLevels {
   std::vector<std::string> m_wanted;
   bool m_common_wanted = false;
   std::unique_ptr<CtrLevelData> m_common;
+  // (AI-assisted) load_extra: the files asked for, and the loaded ones (with the common file's)
+  std::vector<std::string> m_extra_asked;
+  std::map<std::string, std::unique_ptr<CtrLevelData>> m_extras;
   // merc model name -> (level, model index); rebuilt when levels change
   std::map<std::string, std::pair<CtrLevelData*, int>, std::less<>> m_merc_index;
   void rebuild_merc_index();
@@ -719,6 +771,7 @@ class CtrLevels {
   std::vector<Done> m_load_delayed;    // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS: the same
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
+  float m_cam_rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // (AI-assisted) rows, see camera()
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
   u64 m_lv_frame = 0;  // (AI-assisted, j2intro) note_late_in_view
@@ -730,6 +783,11 @@ class CtrLevels {
   u64 m_target_cam_frame = 0, m_target_frame = 0;
   u64 m_cam_frame = 0;
   bool m_cam_valid = false;
+  // (AI-assisted, title3) the game's camera (note_game_camera): this frame's, the last one used
+  // and its velocity (game units per frame, smoothed); the tie LOD factor of the last level drawn
+  float m_game_cam_next[3] = {0, 0, 0}, m_game_cam[3] = {0, 0, 0}, m_game_vel[3] = {0, 0, 0};
+  bool m_game_cam_new = false, m_game_cam_valid = false;
+  float m_k_last = 0.f, m_k_any = 0.f;
   // scheduling (kept to avoid allocations)
   struct StreamCand {
     CtrLevelData* lev;
@@ -866,11 +924,17 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
-  u64 m_tod_spread = 0, m_tod_deferred = 0, m_tod_lag_frames = 0, m_tod_lag2 = 0, m_tod_held = 0,
-      m_tod_waited = 0, m_tod_capped = 0;
-  u32 m_tod_lag_max = 0;
+  u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;
+  // (AI-assisted, fable1) heavy frames (the last level draw's vertices drawn >= 3x the table):
+  // every second one takes no new weights (draw_level); the count for the statistics
+  bool m_tod_heavy = false;
+  u64 m_tod_skipped = 0;
   double m_tod_ms = 0, m_tod_max_ms = 0;
   std::vector<const CtrLevelData*> m_loaded;
+  // (AI-assisted, titlemove) per chunk of the level drawn: a shrub chunk's distance limit (game
+  // units, its runs' limit)
+  std::vector<float> m_shrub_lim;
+  u64 m_shrub_run_hid = 0;  // (statistics) shrub runs hidden by their distance
   // (AI-assisted) vista tier: per chunk, its vista copies are drawn this frame (it isn't, because
   // of its distance)
   std::vector<u8> m_vista_src;

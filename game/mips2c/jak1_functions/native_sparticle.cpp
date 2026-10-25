@@ -93,7 +93,8 @@ u64 sp_process_block_2d_impl(const NativeArgs& args) {
   auto call = [&](u32 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
     reg_a3 = a3;
     const u64 call_args[8] = {a0, a1, a2, a3, args.a[4], args.a[5], args.a[6], args.a[7]};
-    native_call_goal(fn, call_args, args);
+    // (AI-assisted) callbacks and relaunches inline when they can be (native_sp_callbacks.cpp)
+    sp_call_particle_fn(fn, call_args, args);
   };
   auto free_particle = [&]() { call(m.u(free_particle_sym), system, index, info, vec); };
 
@@ -264,7 +265,8 @@ u64 sp_process_block_3d_impl(const NativeArgs& args) {
   auto call = [&](u32 fn, u64 a0, u64 a1, u64 a2, u64 a3) {
     reg_a3 = a3;
     const u64 call_args[8] = {a0, a1, a2, a3, args.a[4], args.a[5], args.a[6], args.a[7]};
-    native_call_goal(fn, call_args, args);
+    // (AI-assisted) callbacks and relaunches inline when they can be (native_sp_callbacks.cpp)
+    sp_call_particle_fn(fn, call_args, args);
   };
   auto free_particle = [&]() { call(m.u(free_particle_sym), system, index, info, vec); };
 

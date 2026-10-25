@@ -887,12 +887,16 @@ static void use_program(int prog) {
                   g.fog1[3]);
     unif_vectors += 3;
   } else if (prog == PROG_OCEAN_FULL || prog == PROG_OCEAN_FULL_CLIP) {
-    /* (AI-assisted) 32 bytes: GS x, y, z, q (or W * (x, y, z, 1)); s, t (times q), fog; color */
+    /* (AI-assisted) 40 bytes: GS x, y, z, q (or W * (x, y, z, 1)); s, t (times q), fog; color;
+     * (j1ocean) the clip program also takes es, et (the sky reflection's texture coordinates) */
     C3D_BindProgram(prog == PROG_OCEAN_FULL ? &g.ps->ocean_full : &g.ps->ocean_full_clip);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_FLOAT, 4);         /* x, y, z, q / w */
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 3);         /* s, t, fog */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    if (prog == PROG_OCEAN_FULL_CLIP) {
+      AttrInfo_AddLoader(attr, 3, GPU_FLOAT, 2); /* es, et */
+    }
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER,
                      prog == PROG_OCEAN_FULL ? g.ps->uloc_ocean_full_gs
                                              : g.ps->uloc_ocean_full_clip_gs,
@@ -5010,7 +5014,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       !((((stw[1] ^ s_sf.words[0]) & 0x0000FFFFu) | ((stw[2] ^ s_sf.words[1]) & 0xFFFFFF00u) |
          (stw[3] ^ s_sf.words[2]))) &&
       !(st->flags & CTR_STATE_PROCTEX) && g.proc_radial < 0 && g.ocean_stage2 == s_sf.stage2 &&
-      mesh != 3) {
+      mesh != 3 && mesh != 6) {
     const u32 kind = textured0 ? 1u | ((u32)g.textures[stex0].alpha_full << 1) : 0u;
     u32 in[16];
     state_inputs(in);
@@ -5053,7 +5057,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, 0);
     C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvColor(env1, tint);
-  } else if (mesh == 1 && g.fog_tex_valid) {
+  } else if ((mesh == 1 || mesh == 6) && g.fog_tex_valid) {
     /* fog: rgb = mix(previous, fog color, fog amount) with the amount from the fog ramp texture
      * (texcoord1 from the mesh shader; bound on unit 1 at frame begin) */
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
@@ -5122,7 +5126,20 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     if (!proc) {
       bind_texture(slot, st, raw);
     }
-    if (mesh) {
+    if (mesh == 6) {
+      /* (AI-assisted, j1ocean) the PS2 ocean (ctr_gpu_ocean_full_draw*): GS modulate (texture
+       * alpha 0xff = 1, vertex color 0x80 = 1). Alpha: TCC set = tex.a * v.a; clear = v.a, or with
+       * the sky reflection (tint 1) tex.a here, for stage 2's weight (v.a comes in there) */
+      C3D_TexEnvSrc(env, C3D_Both, tsrc, GPU_PRIMARY_COLOR, 0);
+      C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+      C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
+      C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+      if (!(st->tcc & 1)) {
+        C3D_TexEnvSrc(env, C3D_Alpha, tint ? tsrc : GPU_PRIMARY_COLOR, 0, 0);
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        C3D_TexEnvScale(env, C3D_Alpha, tint ? GPU_TEVSCALE_1 : GPU_TEVSCALE_2);
+      }
+    } else if (mesh) {
       /* level meshes / merc: texture alpha 0xff = 1, vertex color 0x80 = 1 (merc: the skin shader
        * outputs half the lit color, so x4) */
       C3D_TexEnvSrc(env, C3D_Both, tsrc, GPU_PRIMARY_COLOR, 0);
@@ -5187,7 +5204,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
-    const int need1 = mesh == 1 || mesh == 3 || merc_fog;
+    const int need1 = mesh == 1 || mesh == 3 || mesh == 6 || merc_fog;
     const int want_off = g_tex1_gating ? !need1 : mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
     /* (AI-assisted, micro-mg) a glow drawn raw (MICRO_RAWGLOW) leaves unit 1 as the citro3d draw
@@ -5206,7 +5223,27 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     }
     g.unit1_off = want_off;
   }
-  if (merc_fog && !g.ocean_stage2) {
+  if (mesh == 6) {
+    /* (AI-assisted, j1ocean) the PS2 ocean's stage 2: with the sky reflection (tint 1) rgb =
+     * env map (unit 2) * previous alpha + previous (the fogged ocean), the PS2's env map pass
+     * added with the destination alpha as its weight; TCC clear: alpha = v.a (the near ocean's
+     * blend weight). Without: pass-through. ocean_stage2 = 2: stage 2 isn't the fog stage. */
+    C3D_TexEnv e2;
+    C3D_TexEnvInit(&e2);
+    if (tint) {
+      C3D_TexEnvSrc(&e2, C3D_RGB, GPU_TEXTURE2, GPU_PREVIOUS, GPU_PREVIOUS);
+      C3D_TexEnvOpRgb(&e2, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA,
+                      GPU_TEVOP_RGB_SRC_COLOR);
+      C3D_TexEnvFunc(&e2, C3D_RGB, GPU_MULTIPLY_ADD);
+      if (!(st->tcc & 1)) {
+        C3D_TexEnvSrc(&e2, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
+        C3D_TexEnvFunc(&e2, C3D_Alpha, GPU_REPLACE);
+        C3D_TexEnvScale(&e2, C3D_Alpha, GPU_TEVSCALE_2);
+      }
+    }
+    commit_texenv(2, &e2, raw);
+    g.ocean_stage2 = 2;
+  } else if (merc_fog && g.ocean_stage2 != 1) {
     /* (AI-assisted, far-fog) rgb = mix(previous, fog color, fog amount), as the ocean's stage 2
      * (ocean_stage2: stage 2 holds that fog stage) */
     C3D_TexEnv e2;
@@ -5218,6 +5255,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     commit_texenv(2, &e2, raw);
     g.ocean_stage2 = 1;
   } else if (mesh != 3 && !merc_fog && g.ocean_stage2) {
+    /* (AI-assisted, j1ocean) also after the PS2 ocean's stage 2 (ocean_stage2 = 2) */
     /* (AI-assisted) stage 2 back to pass-through after the ocean (the far ring between its
      * draws) or a merc draw with fog */
     C3D_TexEnv e2;
@@ -5400,7 +5438,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   raw_end(p);
   *c = e;
   /* (AI-assisted, micro-mg) what this full raw state worked from and wrote (StateFast) */
-  if (!proc && mesh != 3 && g.proc_radial < 0) {
+  if (!proc && mesh != 3 && mesh != 6 && g.proc_radial < 0) {
     s_sf.valid = 1;
     s_sf.env2 = ctx->texEnv[2]; /* (AI-assisted, far-fog) */
     s_sf.stage2 = g.ocean_stage2;
@@ -5680,7 +5718,7 @@ static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b);
 int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_vertex** verts,
                           uint16_t** indices) {
   SKY_HOOK_ANY(); /* (AI-assisted) sky_last: before the reservation */
-  _Static_assert(sizeof(ctr_ocean_full_vertex) == 32, "ctr_ocean_full.v.pica's vertex layout");
+  _Static_assert(sizeof(ctr_ocean_full_vertex) == 40, "ctr_ocean_full.v.pica's vertex layout");
   if (!g.ready || !g.in_frame || g.ocean_full_open || max_verts <= 0 || max_indices <= 0) {
     return 0;
   }
@@ -5699,8 +5737,10 @@ int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_ve
   return 1;
 }
 
+static void ocean_bind_tex2_wrap(int handle, int clamp);
+
 static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count,
-                            uint8_t fog_r, uint8_t fog_g, uint8_t fog_b, int prog) {
+                            uint8_t fog_r, uint8_t fog_g, uint8_t fog_b, int prog, int env_tex) {
   if (!g.ocean_full_open) {
     return;
   }
@@ -5723,18 +5763,28 @@ static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int ind
   }
   fog_ramp_color(fog_r, fog_g, fog_b);
   use_program(prog);
-  /* mesh = 1: the level meshes' combiners (texture alpha 0xff = 1, fog from texcoord1) */
+  /* (AI-assisted, j1ocean) mesh = 6: the level meshes' combiners (texture alpha 0xff = 1, fog from
+   * texcoord1), the GS's TCC, and with env_tex the sky reflection in stage 2 (texture unit 2, the
+   * clip program's texcoord2) */
+  const int env = env_tex >= 0 && env_tex < MAX_TEXTURES && g.textures[env_tex].used == 1 &&
+                  prog == PROG_OCEAN_FULL_CLIP;
+  if (env) {
+    ocean_bind_tex2_wrap(env_tex, 1);
+  }
+  const int attribs = prog == PROG_OCEAN_FULL_CLIP ? 4 : 3;
+  const u32 perm = prog == PROG_OCEAN_FULL_CLIP ? 0x3210 : 0x210;
   if (use_raw(state)) {
-    apply_state(state, 1, 1);
-    raw_vertex_buffer(raw_vbuf_pa(voff), 0x210, RAW_BUF_FLAGS1(sizeof(ctr_ocean_full_vertex), 3, 0));
+    apply_state_tint(state, 6, (uint32_t)env, 1);
+    raw_vertex_buffer(raw_vbuf_pa(voff), perm,
+                      RAW_BUF_FLAGS1(sizeof(ctr_ocean_full_vertex), attribs, 0));
     raw_sync();
     raw_draw_elements(raw_vbuf_pa(ioff), (u32)index_count);
   } else {
     raw_vc_flush();
-    apply_state(state, 1, 0);
+    apply_state_tint(state, 6, (uint32_t)env, 0);
     C3D_BufInfo* buf = C3D_GetBufInfo();
     BufInfo_Init(buf);
-    BufInfo_Add(buf, g.vbuf + voff, sizeof(ctr_ocean_full_vertex), 3, 0x210);
+    BufInfo_Add(buf, g.vbuf + voff, sizeof(ctr_ocean_full_vertex), attribs, perm);
     C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, g.vbuf + ioff);
   }
   g.cur.draws++;
@@ -5743,12 +5793,18 @@ static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int ind
 
 void ctr_gpu_ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count,
                              uint8_t fog_r, uint8_t fog_g, uint8_t fog_b) {
-  ocean_full_draw(state, vert_count, index_count, fog_r, fog_g, fog_b, PROG_OCEAN_FULL);
+  ocean_full_draw(state, vert_count, index_count, fog_r, fog_g, fog_b, PROG_OCEAN_FULL, -1);
 }
 
 void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state, int vert_count, int index_count,
                                   uint8_t fog_r, uint8_t fog_g, uint8_t fog_b) {
-  ocean_full_draw(state, vert_count, index_count, fog_r, fog_g, fog_b, PROG_OCEAN_FULL_CLIP);
+  ocean_full_draw(state, vert_count, index_count, fog_r, fog_g, fog_b, PROG_OCEAN_FULL_CLIP, -1);
+}
+
+void ctr_gpu_ocean_full_draw_env(const ctr_draw_state* state, int vert_count, int index_count,
+                                 uint8_t fog_r, uint8_t fog_g, uint8_t fog_b, int env_tex) {
+  ocean_full_draw(state, vert_count, index_count, fog_r, fog_g, fog_b, PROG_OCEAN_FULL_CLIP,
+                  env_tex);
 }
 
 /* ---------------- (AI-assisted) indexed clip space draws (the shadow volumes) ----------------
@@ -6639,6 +6695,17 @@ void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix
   const int fa = g_fog_alpha && g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80);
   const int df = g.ps->df_ok && g.fog_df;
   use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
+  /* (AI-assisted, titlemove) the texture coordinate scale as ctr_gpu_draw_mesh_prepared sets it:
+   * a card drawn after a level draw of an atlas (1/32768) kept that scale, so its texels were
+   * sampled from one corner (garbage or alpha-killed: far objects missing until they came back as
+   * geometry) */
+  {
+    const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
+    if (atlas != g.mesh_st_atlas) {
+      g.mesh_st_atlas = atlas;
+      mesh_scales_set(atlas, use_raw(state));
+    }
+  }
   const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
   g.cur.nofog_draws += g.mesh_nofog && !fa;
   g.cur.fog_alpha_draws += fa;
@@ -7449,22 +7516,26 @@ void* ctr_gpu_stream_alloc(int bytes) {
  * or its memory (pipeline copies) changed */
 static const C3D_Tex* s_ocean_tex2;
 static const void* s_ocean_tex2_data;
-static void ocean_bind_tex2(int handle) {
+static u32 s_ocean_tex2_param;
+/* (AI-assisted, j1ocean) clamp: the full ocean's sky reflection (env map clamped, no mip levels) */
+static void ocean_bind_tex2_wrap(int handle, int clamp) {
   if (handle < 0 || handle >= MAX_TEXTURES || g.textures[handle].used != 1) {
     return;
   }
   TexSlot* slot = &g.textures[handle];
   C3D_Tex* tex = &slot->tex;
-  if (s_ocean_tex2 == tex && s_ocean_tex2_data == tex->data && g.ocean_tex2_bound) {
-    return;
-  }
+  const GPU_TEXTURE_WRAP_PARAM wrap = clamp ? GPU_CLAMP_TO_EDGE : GPU_REPEAT;
   u32 param = tex->param & ~(GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
                              GPU_TEXTURE_WRAP_S(3) | GPU_TEXTURE_WRAP_T(3) |
                              GPU_TEXTURE_MIP_FILTER(GPU_LINEAR));
   param |= GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
-           GPU_TEXTURE_WRAP_S(GPU_REPEAT) | GPU_TEXTURE_WRAP_T(GPU_REPEAT);
+           GPU_TEXTURE_WRAP_S(wrap) | GPU_TEXTURE_WRAP_T(wrap);
+  if (s_ocean_tex2 == tex && s_ocean_tex2_data == tex->data && s_ocean_tex2_param == param &&
+      g.ocean_tex2_bound) {
+    return;
+  }
   u8 max_level = 0;
-  if (slot->levels > 1 && g_mip_mode > 0) {
+  if (slot->levels > 1 && g_mip_mode > 0 && !clamp) {
     max_level = (u8)(slot->levels - 1);
     if (g_mip_mode == 2) {
       param |= GPU_TEXTURE_MIP_FILTER(GPU_LINEAR);
@@ -7475,8 +7546,12 @@ static void ocean_bind_tex2(int handle) {
   C3D_TexBind(2, tex);
   s_ocean_tex2 = tex;
   s_ocean_tex2_data = tex->data;
+  s_ocean_tex2_param = param;
   g.ocean_tex2_bound = 1;
   g.cur.tex_binds++;
+}
+static void ocean_bind_tex2(int handle) {
+  ocean_bind_tex2_wrap(handle, 0);
 }
 
 void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_draw* d, int mesh,
