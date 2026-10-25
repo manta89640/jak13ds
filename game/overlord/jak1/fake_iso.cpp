@@ -26,6 +26,7 @@
 #include <thread>
 
 #include "game/overlord/common/compressed_iso_file.h"
+#include "platform/3ds/port/ctr_heap.h"
 #include "platform/3ds/port/ctr_port.h"
 #endif
 
@@ -658,6 +659,7 @@ struct SoundLoad {
   IsoMessage* msg = nullptr;  // the load running (nullptr: none)
   std::string path;
   long offset = 0;        // sound bank: where the 989snd bank starts (after the name list)
+  bool music = false;     // (AI-assisted, lavamem) a .MUS: into the music slot (ctr_heap.h)
   // (AI-assisted) the file's bytes before `offset` (the sound bank's name list). The rest is read
   // into a buffer the 989snd bank keeps (its samples aren't copied).
   std::vector<u8> data;
@@ -698,7 +700,9 @@ bool sound_load_try(SoundLoad* s) {
     const long size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
     if (size > 0) {
-      std::unique_ptr<u8[]> buf(new u8[size]);
+      // (AI-assisted, lavamem) a music bank in the block kept for it (freed back to it)
+      u8* slot = s->music ? (u8*)ctr_heap_music_slot_take((size_t)size) : nullptr;
+      std::unique_ptr<u8[]> buf(slot ? slot : new u8[size]);
       const auto t0 = std::chrono::steady_clock::now();
       ok = true;
       for (long pos = 0; ok && pos < size; pos += kSoundLoadPiece) {
@@ -767,6 +771,7 @@ void start_sound_load(IsoMessage* msg) {
   s.msg = msg;
   s.path.clear();
   s.offset = 0;
+  s.music = msg->cmd_id != LOAD_SOUND_BANK;
   s.data.clear();
   s.ok = false;
   s.size = 0;

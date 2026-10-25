@@ -490,7 +490,9 @@ void CtrSpriteRenderer::draw_distorter() {
   // draw, joined by repeating the last vertex of one and the first of the next (the triangles in
   // between have no area). As a triangle list it was 3 (n - 2) vertices per fan instead of n + 2:
   // up to 256 x 159 vertices (~1 MB of the frame's vertex buffer, and the GPU's vertex work)
-  m_distort_verts.reserve(256 * (5 * 11 + 2));
+  // (AI-assisted, lavamem) as many as this frame's sprites need (was always room for 256: 342 KB of
+  // the heap kept from the first frame with a distorter on)
+  m_distort_verts.reserve((size_t)std::min(m_distort_count, 256) * (5 * 11 + 2));
   for (int i = 0; i < m_distort_count && i < 256; i++) {
     const DistortSprite& sp = m_distort_sprites[i];
     const u32 slices = sp.flag;

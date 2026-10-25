@@ -71,8 +71,12 @@ struct IopThread {
 
   ~IopThread() { co_delete(thread); }
 #ifdef __3DS__
-  // (AI-assisted) was 512 KB each: 4.5 MB of the heap for 9 threads using under 3 KB each
-  static constexpr u32 kStackSize = 64 * 1024;
+  // (AI-assisted) was 512 KB each: 4.5 MB of the heap for 9 threads using under 3 KB each.
+  // (AI-assisted, lavamem) 64 -> 16 KB (Jak II's size): the deepest any went is 2.8 KB (Azahar:
+  // boot, 5 level loads, continues), and the hardware log of Oct 25 (1 h 40 of play, 30 level
+  // loads) never logged one 4 KB deeper than at boot (check_stacks): 432 KB of the heap back.
+  // check_stacks warns past half.
+  static constexpr u32 kStackSize = 16 * 1024;
   // (AI-assisted) libco's context is at the start of the block, the stack grows down from its end
   static constexpr u32 kStackContextBytes = 256;
   static constexpr u32 kStackPattern = 0x57ac57acu;
