@@ -2654,6 +2654,88 @@ void load_tie_lod(c3l::Reader& f,
 // (AI-assisted, lodnear) host log counters (CTR_LOD_LOG), by unit state
 u64 g_lod_far_why[4] = {}, g_lod_far_close[4] = {};
 #endif
+
+// (AI-assisted, j2vis) c3l v20 prototype visibility (c3l::ExtProtoVis): the prototypes the game
+// hides by task state, each with its runs (mapped onto vis_runs like load_tie_lod) and their chunks.
+// Anything wrong: none (drawn always, as before v20).
+void load_proto_vis(c3l::Reader& f,
+                    const c3l::Header& hdr,
+                    u32 runs_lo,
+                    size_t file_runs,
+                    CtrLevelData* lev) {
+  lev->protos.clear();
+  lev->proto_hidden_runs.clear();
+  lev->chunk_proto_hidden.clear();
+  for (int k = 0; k < 2; k++) {
+    lev->proto_mask[k].clear();
+    lev->proto_mask_seen[k] = false;
+  }
+  if (hdr.version < c3l::kProtoVisVersion || !hdr.ext_offset) {
+    return;
+  }
+  c3l::ExtHeader eh;
+  if (!read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV20Size) {
+    return;
+  }
+  c3l::ExtProtoVis ep{};
+  if (!f.read(hdr.ext_offset + (u32)sizeof(c3l::ExtHeader), &ep, sizeof(ep)) || !ep.proto_count) {
+    return;
+  }
+  std::vector<c3l::ProtoVis> pv;
+  std::vector<u32> pr;
+  const bool ok = runs_lo != UINT32_MAX && file_runs && runs_lo >= eh.runs_offset &&
+                  (runs_lo - eh.runs_offset) % sizeof(c3l::VisRun) == 0 && ep.proto_count < 4096 &&
+                  f.read_array(ep.protos_offset, ep.proto_count, &pv) &&
+                  f.read_array(ep.proto_runs_offset, ep.proto_run_count, &pr);
+  if (!ok) {
+    lg::warn("[ctr] {}: bad prototype visibility data, not used", lev->name);
+    return;
+  }
+  const size_t first = (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun);
+  // the listed runs (vis_runs indices) -> their chunks: one walk over the chunks' run ranges
+  std::vector<std::pair<u32, u32>> wanted;  // (run, proto)
+  size_t bad = 0;
+  for (size_t p = 0; p < pv.size(); p++) {
+    for (u32 j = pv[p].first_run; j < pv[p].first_run + pv[p].run_count; j++) {
+      if (j >= pr.size() || pr[j] < first || pr[j] - first >= file_runs) {
+        bad++;
+        continue;
+      }
+      wanted.push_back({(u32)(pr[j] - first), (u32)p});
+    }
+  }
+  std::sort(wanted.begin(), wanted.end());
+  lev->protos.resize(pv.size());
+  for (size_t p = 0; p < pv.size(); p++) {
+    auto& o = lev->protos[p];
+    o.name.assign(pv[p].name, strnlen(pv[p].name, sizeof(pv[p].name)));
+    o.kind = pv[p].kind;
+  }
+  size_t found = 0;
+  for (size_t ci = 0; ci < lev->chunks.size(); ci++) {
+    const auto& ch = lev->chunks[ci];
+    if (!ch.vis_run_count) {
+      continue;  // (runs that didn't check out at load: drawn whole)
+    }
+    const u32 r0 = lev->chunk_first_run[ci], r1 = r0 + ch.vis_run_count;
+    for (auto it = std::lower_bound(wanted.begin(), wanted.end(), std::make_pair(r0, 0u));
+         it != wanted.end() && it->first < r1; ++it) {
+      auto& o = lev->protos[it->second];
+      o.runs.push_back(it->first);
+      if (o.chunks.empty() || o.chunks.back() != ci) {
+        o.chunks.push_back((u32)ci);
+      }
+      found++;
+    }
+  }
+  bad += wanted.size() - found;
+  for (auto& o : lev->protos) {
+    std::sort(o.runs.begin(), o.runs.end());
+  }
+  lg::info("[ctr] {}: prototype visibility: {} prototypes the game may hide, {} runs{}", lev->name,
+           lev->protos.size(), found, bad ? fmt::format(" ({} bad runs)", bad) : "");
+}
+
 // (AI-assisted, streaming) host check, env CTR_STREAM_CHECK (CtrLevels::stream_check)
 bool stream_check_enabled() {
 #ifdef __3DS__
@@ -3329,6 +3411,7 @@ bool CtrLevels::load_file(const fs::path& path,
   load_tie_lod(f, hdr, runs_lo, file_runs, out);  // (AI-assisted) c3l v17
   // (AI-assisted, streaming) c3l v19: run spheres, near chunks
   load_stream_info(f, hdr, runs_lo, file_runs, out);
+  load_proto_vis(f, hdr, runs_lo, file_runs, out);  // (AI-assisted, j2vis) c3l v20
   out->streaming = !out->stream_units.empty() && out->stream_units[0].state != CtrLevelData::kUnitNever &&
                    ctr_settings().streaming &&
                    CtrStreamArena::get().init(ctr_stream_kb() * 1024u);
@@ -6127,9 +6210,97 @@ void CtrTfragRenderer::render_jak2(DmaFollower& dma, CtrRenderState& rs, int slo
   if (lev && lev->drawn_frame != rs.frame_idx) {
     lev->drawn_frame = rs.frame_idx;
     m_jak2_slot = slot;
+    if (!lev->protos.empty()) {
+      proto_vis_scan(*lev, rs);  // (AI-assisted, j2vis) c3l v20
+    }
     draw_level(*lev, pc_data.camera, rs);
   }
   log_stats(rs, lev);
+}
+
+// (AI-assisted, j2vis) c3l v20 prototype visibility. The game sends the names of the prototypes it
+// hides (prototypes-game-visible-set!: the prototype-bucket's `visible` flag) every frame it draws
+// the level's ties / shrubs: pc-add-tie-vis-mask (tie-methods.gc) in the slot's tie-lN-tfrag
+// bucket, pc-add-shrub-vis-mask (shrubbery.gc) in shrub-lN-shrub, each the PC_PORT transfer after
+// add-pc-tfrag3-data's (names NUL ended, zero padded to a quadword; none: an empty transfer). Those
+// buckets come after the slot's first background bucket, which draws the whole level, so their DMA
+// (all of the frame's chain is there) is read ahead here: a few tags. A packet that didn't come
+// (the game drew no ties this frame) keeps the last one. Only when a packet changed are the
+// level's hidden prototypes worked out again (Tie3 / Shrub on the PC: TieProtoVisibility).
+void CtrTfragRenderer::proto_vis_scan(CtrLevelData& lev, const CtrRenderState& rs) {
+  bool changed = false;
+  for (int k = 0; k < 2; k++) {
+    const int id = m_proto_bucket[k];
+    if (id < 0 || !rs.ee_mem) {
+      continue;
+    }
+    const u32 end = rs.buckets_base + 16 * (u32)(id + 1);
+    DmaFollower dma(rs.ee_mem, rs.buckets_base + 16 * (u32)id);
+    bool after_pc = false, mine = false;
+    for (int n = 0; n < 4096 && dma.current_tag_offset() != end; n++) {
+      auto t = dma.read_and_advance();
+      if (t.vifcode1().kind != VifCode::Kind::PC_PORT) {
+        after_pc = false;
+        continue;
+      }
+      if (after_pc) {
+        if (mine) {
+          if (!lev.proto_mask_seen[k] || lev.proto_mask[k].size() != t.size_bytes ||
+              (t.size_bytes && memcmp(lev.proto_mask[k].data(), t.data, t.size_bytes) != 0)) {
+            lev.proto_mask[k].assign((const char*)t.data, t.size_bytes);
+            changed = true;
+          }
+          lev.proto_mask_seen[k] = true;
+        }
+        break;
+      }
+      if (t.size_bytes == sizeof(TfragPcPortData)) {
+        // the level the packet is about (the slot's: the one being drawn)
+        const char* name = (const char*)t.data + offsetof(TfragPcPortData, level_name);
+        mine = strncmp(name, lev.name.c_str(), 11) == 0;
+        after_pc = true;
+      }
+    }
+  }
+  if (!changed) {
+    return;
+  }
+  // the names in a packet (Tie3's TieProtoVisibility::update)
+  auto named = [&](int k, const std::string& name) {
+    const std::string& m = lev.proto_mask[k];
+    size_t i = 0;
+    while (i < m.size()) {
+      const size_t len = strnlen(m.data() + i, m.size() - i);
+      if (len && len == name.size() && memcmp(m.data() + i, name.data(), len) == 0) {
+        return true;
+      }
+      i += len + 1;
+    }
+    return false;
+  };
+  lev.proto_hidden_runs.clear();
+  lev.chunk_proto_hidden.assign(lev.chunks.size(), 0);
+  std::string names;
+  u32 hidden = 0;
+  for (auto& p : lev.protos) {
+    const int k = p.kind == c3l::kProtoShrub ? 1 : 0;
+    p.hidden = lev.proto_mask_seen[k] && named(k, p.name);
+    if (!p.hidden) {
+      continue;
+    }
+    hidden++;
+    lev.proto_hidden_runs.insert(lev.proto_hidden_runs.end(), p.runs.begin(), p.runs.end());
+    for (u32 ci : p.chunks) {
+      lev.chunk_proto_hidden[ci] = 1;
+    }
+    names += (names.empty() ? "" : ", ") + p.name;
+  }
+  std::sort(lev.proto_hidden_runs.begin(), lev.proto_hidden_runs.end());
+  if (!hidden) {
+    lev.chunk_proto_hidden.clear();
+  }
+  lg::info("[ctr] {}: the game hides {} of its {} toggled prototypes ({} runs){}{}", lev.name,
+           hidden, lev.protos.size(), lev.proto_hidden_runs.size(), hidden ? ": " : "", names);
 }
 
 void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
@@ -6167,6 +6338,13 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              (double)m_vista_tris / m_vista_frames, (double)m_lowres_near / m_vista_frames,
              m_vista_frames);
     m_vista_chunks = m_vista_tris = m_lowres_near = m_vista_frames = 0;
+  }
+  if (rs.log_now && m_proto_frames) {
+    // (AI-assisted, j2vis) c3l v20
+    lg::info("[ctr] {}: prototypes hidden by the game: {:.0f} tris not drawn per level draw ({} "
+             "level draws with hidden prototypes)",
+             m_name, (double)m_proto_tris / m_proto_frames, m_proto_frames);
+    m_proto_tris = m_proto_frames = 0;
   }
   if (rs.log_now && m_lod_frames) {
     // (AI-assisted) c3l v17 tie levels of detail
@@ -6583,6 +6761,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   m_visible_slot.assign(lev.chunks.size(), -1);
   // (AI-assisted) run_culling (needs the spheres made at load)
   const bool run_culling = settings.run_culling && !lev.run_spheres.empty();
+  // (AI-assisted, j2vis) c3l v20: prototypes the game hides (proto_vis_scan)
+  const bool proto_hide = !lev.chunk_proto_hidden.empty() && m_jak2_slot >= 0;
+  m_proto_frames += proto_hide;
   m_cull_frames += run_culling;
   if (m_run_shown.size() < lev.vis_runs.size()) {
     m_run_shown.resize(lev.vis_runs.size());
@@ -7097,7 +7278,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                              (vis_nb && ch.lod_tier <= 3));
       // (AI-assisted) c3l v17: a chunk with tie levels of detail shows one version of each group
       const bool lod_chunk = tie_lod && lev.chunk_lod[ci];
-      if (vis_test || straddles || vista_tier || fine_runs || lod_chunk) {
+      // (AI-assisted, j2vis) c3l v20: runs of prototypes the game hides
+      const bool proto_chunk = proto_hide && lev.chunk_proto_hidden[ci];
+      if (vis_test || straddles || vista_tier || fine_runs || lod_chunk || proto_chunk) {
         // (AI-assisted) per run: the visibility bit, then the view test; m_run_shown for the draws
         u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
         const u32 r0 = lev.chunk_first_run[ci];
@@ -7145,6 +7328,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         in.nomerge_out = m_run_nomerge.data();
         RunLoopOut o;
         kRunLoops[vis_test ? 1 : 0][straddles ? np : 0][lod_chunk ? 1 : 0](in, r0, nr, &o);
+        if (proto_chunk) {
+          // (AI-assisted, j2vis) the hidden prototypes' runs: not drawn, and never drawn along
+          // with their neighbours (the small-gap merge)
+          const auto& hr = lev.proto_hidden_runs;
+          for (auto it = std::lower_bound(hr.begin(), hr.end(), r0); it != hr.end() && *it < r0 + nr;
+               ++it) {
+            o.shown -= m_run_shown[*it];
+            m_proto_tris += m_run_shown[*it] ? lev.vis_runs[*it].index_count / 3 : 0;
+            m_run_shown[*it] = 0;
+            m_run_nomerge[*it] = 1;
+          }
+        }
         shown = o.shown;
         view_hidden = o.view_hidden;
         view_tris = o.view_tris;
@@ -7162,6 +7357,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             // (AI-assisted) only the other versions: not a visibility statistic
           } else if (view_hidden) {
             m_cull_chunks++;
+          } else if (proto_chunk) {
+            // (AI-assisted, j2vis) hidden prototypes: counted in m_proto_tris
           } else if (!vista_tier) {
             m_vis_chunks++;
           }

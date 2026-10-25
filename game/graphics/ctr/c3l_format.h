@@ -52,7 +52,11 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // sections, in spatial order. The extension header grows (ExtHeader::size 48): each file run's
 // bounding sphere (RunSphere), the near chunk table. Draw::kind kDrawAlpha80. Otherwise v18; a v18
 // reader would draw both versions (it is refused: version 19).
-constexpr uint32_t kVersion = 19;
+// (AI-assisted, j2vis) v20: the prototypes the game hides by task state (Jak II), see ProtoVis.
+// Otherwise v19 (files without such prototypes are v19's byte for byte but for the version).
+constexpr uint32_t kVersion = 20;
+// (AI-assisted, j2vis) the first version with the prototype visibility table (ExtProtoVis)
+constexpr uint32_t kProtoVisVersion = 20;
 // (AI-assisted) the first version with near chunks (StreamChunk), run spheres and kDrawAlpha80
 constexpr uint32_t kStreamVersion = 19;
 // (AI-assisted) the first version with the extension header (tie levels of detail)
@@ -226,6 +230,34 @@ struct ExtHeader {
 };
 static_assert(sizeof(ExtHeader) == 48);
 constexpr uint32_t kExtHeaderV17Size = 32;
+
+/*!
+ * (AI-assisted, j2vis) v20: prototype visibility. Jak II hides and shows some background prototypes
+ * (ties, shrubs) by task state: prototypes-game-visible-set! (goal_src/jak2/engine/draw/drawable.gc,
+ * called from task-control.gc) sets the prototype's `visible` flag (= hidden) by name, and the PC
+ * port's tie and shrub buckets send the names of the hidden ones every frame (pc-add-tie-vis-mask,
+ * pc-add-shrub-vis-mask). The converter keeps the triangles of those prototypes (the names in
+ * tools/ctr_level_converter/proto_vis_jak2.inc) in visibility runs of their own and lists them:
+ * ExtHeader::size >= kExtHeaderV20Size, then this at ext_offset + sizeof(ExtHeader). The runtime
+ * hides the runs of the prototypes named in the game's packets. Older files: nothing hidden.
+ */
+constexpr uint32_t kExtHeaderV20Size = 64;
+struct ExtProtoVis {
+  uint32_t proto_count;        // ProtoVis[]
+  uint32_t protos_offset;      // absolute
+  uint32_t proto_run_count;    // uint32_t[]: file runs (VisRun index from ExtHeader::runs_offset)
+  uint32_t proto_runs_offset;  // absolute
+};
+static_assert(sizeof(ExtProtoVis) == kExtHeaderV20Size - 48);
+constexpr uint16_t kProtoTie = 1, kProtoShrub = 2;  // ProtoVis::kind: the game packet it's in
+struct ProtoVis {
+  char name[52];       // the prototype's name in the game ("sewer-c-connect-door.mb"), NUL ended
+  uint16_t kind;       // kProtoTie / kProtoShrub
+  uint16_t pad;
+  uint32_t first_run;  // its runs: proto runs [first_run, first_run + run_count)
+  uint32_t run_count;
+};
+static_assert(sizeof(ProtoVis) == 64);
 
 /*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =

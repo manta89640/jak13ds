@@ -1,0 +1,23 @@
+# (AI-assisted) j2vis: the task-toggled background prototypes at new-game task state (c3l v20).
+# ctypal-tomb: the statue wall (shown) and the rubble (hidden until canyon-insert-items-shard);
+# strip-start: strip-pipe-01 / vents (hidden until strip-grenade); sewer-start: sewer-hover-door
+# (hidden). Shots after each stop's stance; the [ctr] "the game hides" lines name what is hidden.
+1000 continue ctypal-tomb
+1001 -
+1002 wait *target* target-stance
+1003 log stop: ctypal-tomb
+1004 pos *target*
+1300 shot vis_ctypal
+1400 continue strip-start
+1401 -
+1402 wait *target* target-stance
+1403 log stop: strip-start
+1404 pos *target*
+1700 shot vis_strip
+1800 continue sewer-start
+1801 -
+1802 wait *target* target-stance
+1803 log stop: sewer-start
+1804 pos *target*
+2100 shot vis_sewer
+2200 exit
