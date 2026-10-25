@@ -2578,6 +2578,83 @@ void load_proto_vis(c3l::Reader& f,
            lev->protos.size(), found, bad ? fmt::format(" ({} bad runs)", bad) : "");
 }
 
+// (AI-assisted, j2water2) c3l v21 envmapped ties (c3l::ExtEnvTie): the listed base draws and the
+// normals of their chunks (all in one mesh's vertex memory, loaded with the level)
+void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->env_draws.clear();
+  lev->draw_env.clear();
+  lev->chunk_normals.clear();
+  lev->normals_mesh = -1;
+  if (hdr.version < c3l::kEnvTieVersion || !hdr.ext_offset || !ctr_gpu_etie_ready()) {
+    return;
+  }
+  c3l::ExtHeader eh;
+  if (!read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV21Size) {
+    return;
+  }
+  c3l::ExtEnvTie et{};
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderV20Size, &et, sizeof(et)) || !et.draw_count) {
+    return;
+  }
+  std::vector<c3l::EnvTieDraw> eds;
+  std::vector<c3l::EnvTieChunk> ecs;
+  if (et.draw_count > 65535 || !f.read_array(et.draws_offset, et.draw_count, &eds) ||
+      !f.read_array(et.chunks_offset, et.chunk_count, &ecs)) {
+    lg::warn("[ctr] {}: bad envmapped tie data, not used", lev->name);
+    return;
+  }
+  u32 total = 0;
+  for (const auto& ec : ecs) {
+    if (ec.chunk >= lev->chunks.size()) {
+      lg::warn("[ctr] {}: bad envmapped tie chunk, not used", lev->name);
+      return;
+    }
+    total += lev->chunks[ec.chunk].vertex_count * 4;
+  }
+  void* nv = nullptr;
+  uint16_t* ni = nullptr;
+  const int mesh = total ? ctr_gpu_mesh_begin((int)((total + 15) / 16), 2, &nv, &ni) : -1;
+  if (mesh < 0) {
+    lg::warn("[ctr] {}: no memory for the envmapped ties' normals ({} KB)", lev->name,
+             total / 1024);
+    return;
+  }
+  lev->chunk_normals.assign(lev->chunks.size(), -1);
+  u32 off = 0;
+  bool ok = true;
+  for (const auto& ec : ecs) {
+    const u32 n = lev->chunks[ec.chunk].vertex_count * 4;
+    ok = ok && f.read(ec.normals_offset, (u8*)nv + off, n);
+    lev->chunk_normals[ec.chunk] = (s32)off;
+    off += n;
+  }
+  ni[0] = ni[1] = 0;
+  if (!ok || ctr_gpu_mesh_end(mesh, 1) < 0) {
+    if (ok) {
+      lg::warn("[ctr] {}: envmapped tie normals not made", lev->name);
+    } else {
+      ctr_gpu_mesh_end(mesh, 0);
+      lg::warn("[ctr] {}: bad envmapped tie normals, not used", lev->name);
+    }
+    lev->chunk_normals.clear();
+    return;
+  }
+  lev->normals_mesh = mesh;
+  lev->draw_env.assign(lev->draws.size(), -1);
+  u32 used = 0;
+  for (size_t i = 0; i < eds.size(); i++) {
+    const auto& e = eds[i];
+    if (e.draw < lev->draws.size() && e.texture < lev->textures.size() &&
+        lev->chunk_normals[lev->draw_chunk.size() > e.draw ? lev->draw_chunk[e.draw] : 0] >= 0) {
+      lev->draw_env[e.draw] = (s16)i;
+      used++;
+    }
+  }
+  lev->env_draws = std::move(eds);
+  lg::info("[ctr] {}: envmapped ties: {} of {} draws with their shine, {} chunks' normals ({} KB)",
+           lev->name, used, lev->env_draws.size(), ecs.size(), total / 1024);
+}
+
 // (AI-assisted, streaming) host check, env CTR_STREAM_CHECK (CtrLevels::stream_check)
 bool stream_check_enabled() {
 #ifdef __3DS__
@@ -3548,6 +3625,7 @@ bool CtrLevels::load_file(const fs::path& path,
     }
   }
   build_draw_order(out);
+  load_env_ties(f, hdr, out);  // (AI-assisted, j2water2) c3l v21 (after the textures, draw order)
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -3999,6 +4077,10 @@ void CtrLevels::unload(CtrLevelData& lev) {
   }
   for (int m : lev.meshes) {
     ctr_gpu_mesh_delete(m);
+  }
+  if (lev.normals_mesh >= 0) {
+    ctr_gpu_mesh_delete(lev.normals_mesh);  // (AI-assisted, j2water2)
+    lev.normals_mesh = -1;
   }
   for (auto& m : lev.merc_models) {
     ctr_gpu_mesh_delete(m.mesh);
@@ -5870,6 +5952,10 @@ void CtrTfragRenderer::render_jak2(DmaFollower& dma, CtrRenderState& rs, int slo
     if (!lev->protos.empty()) {
       proto_vis_scan(*lev, rs);  // (AI-assisted, j2vis) c3l v20
     }
+    if (!lev->env_draws.empty()) {
+      env_color_scan(*lev, rs);  // (AI-assisted, j2water2) c3l v21
+      m_env_frames++;
+    }
     draw_level(*lev, pc_data.camera, rs);
   }
   log_stats(rs, lev);
@@ -5878,14 +5964,18 @@ void CtrTfragRenderer::render_jak2(DmaFollower& dma, CtrRenderState& rs, int slo
 // (AI-assisted, j2water) Jak II: the level's blended and ordered draws held back by draw_level, at
 // the slot's water buckets (after the merc buckets), with the level's fog of the frame
 void CtrTfragRenderer::draw_jak2_late(const CtrRenderState& rs) {
-  if (m_late_calls.empty() || m_late_frame != rs.frame_idx) {
+  if ((m_late_calls.empty() && m_env_late.empty()) || m_late_frame != rs.frame_idx) {
     m_late_calls.clear();
+    m_env_late.clear();
     return;
   }
   ctr_gpu_set_mesh_fog(m_late_fog0, m_late_fog1, m_late_fog_rgb[0], m_late_fog_rgb[1],
                        m_late_fog_rgb[2]);
-  ctr_gpu_draw_mesh_calls(m_late_calls.data(), (int)m_late_calls.size(), &m_cmd_cache[2]);
+  if (!m_late_calls.empty()) {
+    ctr_gpu_draw_mesh_calls(m_late_calls.data(), (int)m_late_calls.size(), &m_cmd_cache[2]);
+  }
   m_late_calls.clear();
+  draw_env_calls(m_env_late);  // (AI-assisted, j2water2) the blended envmapped ties
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();
 }
@@ -5975,6 +6065,59 @@ void CtrTfragRenderer::proto_vis_scan(CtrLevelData& lev, const CtrRenderState& r
            hidden, lev.protos.size(), lev.proto_hidden_runs.size(), hidden ? ": " : "", names);
 }
 
+// (AI-assisted, j2water2) the time of day's env color for the envmapped ties' shine: the transfer
+// after the hidden prototypes' names in the slot's tie bucket (tie-methods.gc: add-pc-tfrag3-data,
+// pc-add-tie-vis-mask, pc-add-tie-envmap-info: *time-of-day-context* current-env-color, GS units),
+// read ahead as proto_vis_scan does. Kept when the bucket has none this frame.
+void CtrTfragRenderer::env_color_scan(const CtrLevelData& lev, const CtrRenderState& rs) {
+  const int id = m_proto_bucket[0];
+  if (id < 0 || !rs.ee_mem) {
+    return;
+  }
+  const u32 end = rs.buckets_base + 16 * (u32)(id + 1);
+  DmaFollower dma(rs.ee_mem, rs.buckets_base + 16 * (u32)id);
+  int after = -1;  // PC_PORT transfers since this level's TfragPcPortData
+  for (int n = 0; n < 4096 && dma.current_tag_offset() != end; n++) {
+    auto t = dma.read_and_advance();
+    if (t.vifcode1().kind != VifCode::Kind::PC_PORT) {
+      after = -1;
+      continue;
+    }
+    if (after < 0) {
+      if (t.size_bytes == sizeof(TfragPcPortData) &&
+          strncmp((const char*)t.data + offsetof(TfragPcPortData, level_name), lev.name.c_str(),
+                  11) == 0) {
+        after = 0;
+      }
+      continue;
+    }
+    if (++after == 2) {
+      if (t.size_bytes == 16) {
+        const float* c = (const float*)t.data;
+        for (int k = 0; k < 3; k++) {
+          m_env_color[k] = std::isfinite(c[k]) ? std::clamp(c[k], 0.f, 255.f) : 128.f;
+        }
+      }
+      return;
+    }
+  }
+}
+
+// (AI-assisted, j2water2) c3l v21: the envmapped tie draws collected by draw_level
+void CtrTfragRenderer::draw_env_calls(std::vector<EnvCall>& calls) {
+  if (calls.empty()) {
+    return;
+  }
+  for (const auto& c : calls) {
+    ctr_gpu_etie_draw(c.state, c.env_tex, &c.d, c.mesh, c.normals_mesh, c.normals_offset, c.first,
+                      c.count);
+    m_env_tris += c.count / 3;
+  }
+  m_env_draws += calls.size();
+  ctr_gpu_etie_end();
+  calls.clear();
+}
+
 void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
   if (rs.log_now && m_level_draws) {
     lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
@@ -6004,6 +6147,14 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              (double)m_vista_tris / m_vista_frames, (double)m_lowres_near / m_vista_frames,
              m_vista_frames);
     m_vista_chunks = m_vista_tris = m_lowres_near = m_vista_frames = 0;
+  }
+  if (rs.log_now && m_env_frames) {
+    // (AI-assisted, j2water2) c3l v21
+    lg::info("[ctr] {}: envmapped ties: {:.1f} draws, {:.0f} tris per level draw with them ({} "
+             "level draws), env color {:.0f} {:.0f} {:.0f}",
+             m_name, (double)m_env_draws / m_env_frames, (double)m_env_tris / m_env_frames,
+             m_env_frames, m_env_color[0], m_env_color[1], m_env_color[2]);
+    m_env_draws = m_env_tris = m_env_frames = 0;
   }
   if (rs.log_now && m_proto_frames) {
     // (AI-assisted, j2vis) c3l v20
@@ -7595,6 +7746,45 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // The order is made at load (sorted_draws, ordered_draws): only the visible chunks' draws.
   bool vista_pass = false;  // (AI-assisted) the pass drawing: the vista chunks or the others
   u64 vista_indices = 0;    // (AI-assisted) drawn by the vista pass (statistics)
+  // (AI-assisted, j2water2) c3l v21: an envmapped tie draw (its shine in the same draw, drawn
+  // after the pass: ctr_gpu_etie_draw has its own program and state)
+  m_env_calls.clear();
+  auto env_submit = [&](u32 di, const VisibleChunk& vc, int env, u32 first, u32 count) {
+    const auto& e = lev.env_draws[env];
+    const auto& ch = lev.chunks[vc.chunk];
+    EnvCall c;
+    c.state = &lev.draw_states[di];
+    c.env_tex = e.texture < lev.textures.size() ? lev.textures[e.texture] : -1;
+    c.mesh = lev.meshes[vc.chunk];
+    c.normals_mesh = lev.normals_mesh;
+    c.normals_offset = lev.chunk_normals[vc.chunk];
+    c.first = (int)first;
+    c.count = (int)count;
+    c.d.clip = vc.gpu;
+    // etie.vert's cam_no_persp (the camera's rot, columns), the chunk's quantizing folded in
+    for (int r = 0; r < 3; r++) {
+      for (int k = 0; k < 3; k++) {
+        c.d.cam[r][k] = cam.rot[k][r] * ch.scale;
+        c.d.nrm[r][k] = cam.rot[k][r] * (1.f / 127.f);
+      }
+      c.d.cam[r][3] = cam.rot[0][r] * ch.origin[0] + cam.rot[1][r] * ch.origin[1] +
+                      cam.rot[2][r] * ch.origin[2] + cam.rot[3][r];
+      c.d.nrm[r][3] = 0.f;
+    }
+    c.d.st_scale = (c.state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
+    // the shine: proto tint (0xff = 1) * env color (0x80 = 1), as Tie3 (Jak II: env / 128),
+    // halved for the combiner's x2 (not decal)
+    u32 shine = 0xff000000u;
+    for (int k = 0; k < 3; k++) {
+      float v = e.tint[k] * m_env_color[k] / 128.f;
+      if (!c.state->decal) {
+        v *= 0.5f;
+      }
+      shine |= (u32)std::clamp((int)std::lround(v), 0, 255) << (8 * k);
+    }
+    c.d.shine = shine;
+    (m_late_collect ? m_env_late : m_env_calls).push_back(c);
+  };
   auto draw = [&](u32 di) {
     const int slot = m_visible_slot[lev.draw_chunk[di]];
     if (slot < 0 || m_visible[slot].vista != vista_pass) {
@@ -7602,15 +7792,24 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
+    const int env = lev.draw_env.empty() ? -1 : lev.draw_env[di];  // (AI-assisted, j2water2)
 #ifdef __3DS__
     // (AI-assisted, gpu-rt) static_cmdlists: the pass's draws go to the backend in one list
     auto submit = [&](u32 first, u32 count) {
+      if (env >= 0) {
+        env_submit(di, vc, env, first, count);
+        return;
+      }
       m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
                          (int)count, vc.nofog ? 1 : 0});
     };
 #else
     ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
     auto submit = [&](u32 first, u32 count) {
+      if (env >= 0) {
+        env_submit(di, vc, env, first, count);  // (AI-assisted, j2water2)
+        return;
+      }
       if (m_late_collect) {
         // (AI-assisted, j2water) Jak II's blended draws, drawn later (draw_jak2_late)
         m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
@@ -7759,6 +7958,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // for the slot's water bucket (draw_jak2_late), after the characters (merc), as the PS2
     // draws its translucent background groups after the opaque merc ones
     flush_calls(0);
+    draw_env_calls(m_env_calls);  // (AI-assisted, j2water2) the opaque envmapped ties
+    m_env_late.clear();
     m_late_collect = true;
     walk(*main_lists[2]);
     m_late_collect = false;
@@ -7772,6 +7973,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     walk(*main_lists[2]);
   }
   flush_calls(0);  // (AI-assisted, gpu-rt) static_cmdlists: the main pass's
+  draw_env_calls(m_env_calls);  // (AI-assisted, j2water2) (none left in Jak II's case)
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
 #ifndef __3DS__

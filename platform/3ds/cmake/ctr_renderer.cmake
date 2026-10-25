@@ -61,7 +61,7 @@ foreach(shader ctr_basic ctr_clip ctr_clip2 ctr_ocean ctr_ocean_full ctr_ocean_f
     ctr_basic_old ctr_mesh_old ctr_skin_old ctr_skin_env_old ctr_bench_sep
     ctr_mesh_old_fa ctr_mesh_opt ctr_mesh_opt_fa ctr_skin_opt ctr_skin_env_opt
     ctr_ocean_full_opt ctr_ocean_full_clip_opt ctr_mesh_opt_df ctr_mesh_opt_df_fa
-    ctr_ocean_env)
+    ctr_ocean_env ctr_etie)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
   set(csrc ${CMAKE_CURRENT_BINARY_DIR}/${shader}_shbin.c)

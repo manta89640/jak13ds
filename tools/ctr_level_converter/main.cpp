@@ -75,6 +75,7 @@ struct Options {
   // (c3l::ProtoVis; Jak II with streaming, set in convert; --no-proto-vis: off)
   bool proto_vis = false;
   bool no_proto_vis = false;
+  bool no_env_ties = false;  // (AI-assisted, j2water2) --no-env-ties: v20's base draws only
   float stream_cell = 100.f;
   // (AI-assisted, streaming) near chunks by need class too: a group's near version is needed within
   // error x kStreamNeedK + radius of its center; the groups of one class (bounds in meters) in near
@@ -247,6 +248,9 @@ struct SrcVertex {
   // copy) and its texture coordinates in the atlas (1/32768, c3l::kDrawAtlasUV)
   u32 orig = UINT32_MAX;
   s16 ast[2] = {0, 0};
+  // (AI-assisted, j2water2) c3l v21: an envmapped tie vertex's normal (world, unit length * 127)
+  s8 nrm[3] = {0, 0, 0};
+  u8 has_nrm = 0;
 };
 
 struct SrcTri {
@@ -277,10 +281,21 @@ struct DrawKey {
   u32 mode;
   u16 texture;
   u16 kind;
+  // (AI-assisted, j2water2) c3l v21: the envmapped tie base draw's shine (Converter::env_ties
+  // index), 0xffff: none. Kept by every key made from this one (copy it, then change fields).
+  u16 env = 0xffff;
   bool operator<(const DrawKey& o) const {
-    return std::tie(mode, texture, kind) < std::tie(o.mode, o.texture, o.kind);
+    return std::tie(mode, texture, kind, env) < std::tie(o.mode, o.texture, o.kind, o.env);
   }
 };
+// (AI-assisted, j2water2) a key made from dk: its env kept
+inline DrawKey key_like(const DrawKey& dk, u32 mode, u16 texture, u16 kind) {
+  DrawKey k = dk;
+  k.mode = mode;
+  k.texture = texture;
+  k.kind = kind;
+  return k;
+}
 
 // (AI-assisted) the PS2 shrub distances, see shrub_ps2_dists.inc
 struct ShrubPs2Dist {
@@ -397,6 +412,27 @@ struct Converter {
     return v < 0xffff ? (u16)v : (u16)0xffff;
   }
   std::vector<SrcTri> tris;
+  // (AI-assisted, j2water2) c3l v21: the envmap shine of envmapped tie base draws (DrawKey::env):
+  // the envmap texture (output index), its draw mode and the prototype's tint
+  bool env_ties_on = false;
+  struct EnvTie {
+    u16 texture;
+    u32 mode;
+    u8 tint[4];
+  };
+  std::vector<EnvTie> env_ties;
+  std::map<std::tuple<u16, u32, u32>, u16> env_tie_ids;
+  size_t env_tie_tris = 0, env_tie_groups_missing = 0;
+  u16 env_tie_id(u16 tex, u32 mode, const u8 tint[4]) {
+    u32 t;
+    memcpy(&t, tint, 4);
+    auto [it, fresh] = env_tie_ids.emplace(std::make_tuple(tex, mode, t), (u16)env_ties.size());
+    if (fresh) {
+      EnvTie e{tex, mode, {tint[0], tint[1], tint[2], tint[3]}};
+      env_ties.push_back(e);
+    }
+    return it->second;
+  }
   std::vector<DrawKey> draw_keys;
   std::map<DrawKey, u32> draw_key_ids;
   // level texture index -> output texture index
@@ -968,7 +1004,7 @@ struct Converter {
             orient_flipped++;
           }
           const auto dk = draw_keys[tri.draw_key];
-          tri.draw_key = key_id(DrawKey{dk.mode, dk.texture, (u16)(dk.kind | c3l::kDrawCullBack)});
+          tri.draw_key = key_id(key_like(dk, dk.mode, dk.texture, (u16)(dk.kind | c3l::kDrawCullBack)));
           orient_culled++;
         }
       }
@@ -1341,11 +1377,30 @@ struct Converter {
     if (last_draw == 0) {
       last_draw = tree.static_draws.size();
     }
+    // (AI-assisted, j2water2) c3l v21 (Jak II): the envmap shine draws (the second draw
+    // categories, Tie3::envmap_second_pass_draw) give each envmapped prototype its envmap texture
+    // and mode; its base draws carry them (DrawKey::env), with the prototype's tint (the vertices'
+    // rgba, etie.vert proto_tint) and the vertices' normals: one draw instead of two
+    const u32 env_first = tree.category_draw_indices[(int)tfrag3::TieCategory::NORMAL_ENVMAP];
+    std::unordered_map<u32, std::pair<s32, u32>> proto_env;  // proto -> (tree texture, mode)
+    if (env_ties_on && last_draw) {
+      const u32 e0 =
+          tree.category_draw_indices[(int)tfrag3::TieCategory::NORMAL_ENVMAP_SECOND_DRAW];
+      const u32 e1 =
+          tree.category_draw_indices[(int)tfrag3::TieCategory::WATER_ENVMAP_SECOND_DRAW + 1];
+      for (u32 di = e0; di < e1 && di < tree.static_draws.size(); di++) {
+        const auto& d = tree.static_draws[di];
+        for (const auto& g : d.vis_groups) {
+          proto_env.emplace(g.tie_proto_idx, std::make_pair(d.tree_tex_id, d.mode.as_int()));
+        }
+      }
+    }
     for (u32 di = 0; di < tree.static_draws.size() && di < last_draw; di++) {
       const auto& d = tree.static_draws[di];
       const u16 tex = texture_id(d.tree_tex_id);
       note_use(tex, d.mode.as_int(), false);
       u32 key = key_id(DrawKey{d.mode.as_int(), tex, 1});
+      const u32 plain_key = key;
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (auto& g : d.vis_groups) {
         size_t first_tri = tris.size();
@@ -1355,12 +1410,60 @@ struct Converter {
           idx += g.num_inds;
           continue;
         }
+        key = plain_key;
+        if (!proto_env.empty() && di >= env_first) {
+          // (AI-assisted, j2water2) an envmapped prototype's base draw: its shine
+          auto pe = proto_env.find(g.tie_proto_idx);
+          u32 v0 = UINT32_MAX;
+          for (size_t i = idx; i < idx + g.num_inds && i < tree.unpacked.indices.size(); i++) {
+            if (tree.unpacked.indices[i] != UINT32_MAX) {
+              v0 = tree.unpacked.indices[i];
+              break;
+            }
+          }
+          const u16 etex = pe == proto_env.end() ? (u16)0xffff : texture_id(pe->second.first);
+          if (etex != 0xffff && v0 != UINT32_MAX) {
+            const auto& pv = tree.unpacked.vertices.at(v0);
+            const u8 tint[4] = {pv.r, pv.g, pv.b, pv.a};
+            note_use(etex, pe->second.second, false);
+            DrawKey ek{d.mode.as_int(), tex, 1};
+            ek.env = env_tie_id(etex, pe->second.second, tint);
+            key = key_id(ek);
+            // the normals (Tfrag3Data unpack: 10-bit signed fields, world space)
+            for (size_t i = idx; i < idx + g.num_inds && i < tree.unpacked.indices.size(); i++) {
+              const u32 vi = tree.unpacked.indices[i];
+              if (vi == UINT32_MAX) {
+                continue;
+              }
+              auto& sv = verts[base + vi];
+              if (sv.has_nrm) {
+                continue;
+              }
+              const u32 nor = tree.unpacked.vertices[vi].nor;
+              float n[3];
+              for (int c = 0; c < 3; c++) {
+                int f = (int)((nor >> (10 * c)) & 0x3ff);
+                n[c] = (float)(f >= 512 ? f - 1024 : f);
+              }
+              const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+              for (int c = 0; c < 3; c++) {
+                sv.nrm[c] = len > 0 ? (s8)std::lround(127.f * n[c] / len) : 0;
+              }
+              sv.has_nrm = 1;
+            }
+          } else {
+            env_tie_groups_missing++;
+          }
+        }
         cur_vis = vis_id(tree.bvh, g.vis_idx_in_pc_bvh);  // (AI-assisted) up to 8 instances
         // (AI-assisted, j2vis) v20: a prototype the game hides by task state (Tie3: per group)
         cur_proto = tree.has_per_proto_visibility_toggle
                         ? proto_vis_id(tree.proto_names, g.tie_proto_idx, c3l::kProtoTie)
                         : (u16)0xffff;
         add_strips(tree.unpacked.indices, idx, g.num_inds, base, key);
+        if (key != plain_key) {
+          env_tie_tris += tris.size() - first_tri;  // (AI-assisted, j2water2)
+        }
         lod_mark(lkey, first_tri);
         idx += g.num_inds;
       }
@@ -2588,7 +2691,7 @@ void optimize_draws(Converter& cv,
     // groups of opaque keys that differ only in their alpha test: the ones whose alpha is 1.0
     // everywhere become one key without the test (the largest aref kept for config opaque_alpha
     // = off); blended ones (alpha blending of Cs * As + Cd * (1 - As)) lose the blending in place
-    std::map<std::tuple<u32, u16, u16>, std::vector<u32>> groups;
+    std::map<std::tuple<u32, u16, u16, u16>, std::vector<u32>> groups;  // (+ env, j2water2)
     for (u32 k = 0; k < nk; k++) {
       if (!key_tris[k]) {
         continue;
@@ -2614,7 +2717,7 @@ void optimize_draws(Converter& cv,
           kind |= c3l::kDrawAlphaTestDropped;
         }
         cv.draw_key_ids.erase(dk);
-        cv.draw_keys[k] = DrawKey{nm.as_int(), dk.texture, kind};
+        cv.draw_keys[k] = key_like(dk, nm.as_int(), dk.texture, kind);
         cv.draw_key_ids.emplace(cv.draw_keys[k], k);
         st->keys_blend++;
         st->tris_blend += key_tris[k];
@@ -2624,7 +2727,7 @@ void optimize_draws(Converter& cv,
         st->blocked_coplanar += at && key_blocked[k];
         continue;
       }
-      groups[{dk.mode & ~kAtBits, dk.texture, dk.kind}].push_back(k);
+      groups[{dk.mode & ~kAtBits, dk.texture, dk.kind, dk.env}].push_back(k);
     }
     for (auto& [g, keys] : groups) {
       int aref = -1;
@@ -2641,8 +2744,9 @@ void optimize_draws(Converter& cv,
       nm.as_int() = std::get<0>(g);
       nm.set_aref((u8)aref);
       nm.set_alpha_test(DrawMode::AlphaTest::GEQUAL);
-      const u32 to = cv.key_id(DrawKey{nm.as_int(), std::get<1>(g),
-                                       (u16)(std::get<2>(g) | c3l::kDrawAlphaTestDropped)});
+      DrawKey tk{nm.as_int(), std::get<1>(g), (u16)(std::get<2>(g) | c3l::kDrawAlphaTestDropped)};
+      tk.env = std::get<3>(g);  // (AI-assisted, j2water2)
+      const u32 to = cv.key_id(tk);
       for (u32 k : keys) {
         remap[k] = to;
         if (mode_of(k).get_at_enable()) {
@@ -2950,7 +3054,7 @@ void optimize_draws(Converter& cv,
     tri_shift(t, &su, &sv);
     if (atlas_key[t.draw_key] == UINT32_MAX) {
       atlas_key[t.draw_key] =
-          cv.key_id(DrawKey{dk.mode, a.tex, (u16)(dk.kind | c3l::kDrawAtlasUV)});
+          cv.key_id(key_like(dk, dk.mode, a.tex, (u16)(dk.kind | c3l::kDrawAtlasUV)));
     }
     const u32 from = t.draw_key;
     if (t.orig_key == UINT32_MAX) {
@@ -3223,6 +3327,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     add_anim_slot_base_textures(level, &cv.anim_slot_tex);
   }
   cv.level = &level;
+  // (AI-assisted, j2water2) c3l v21 envmapped tie shine: Jak II (in the extension header after
+  // v20's, so with near chunks)
+  cv.env_ties_on = jak2 && opt.stream && !opt.no_env_ties;
   int tfrag_trees = 0, tie_trees = 0;
   MercOut merc;
   if (!opt.no_merc) {
@@ -3362,9 +3469,40 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   auto cell_of_detail = [&](int detail) {
     return (detail == 3 ? opt.shrub_cell : opt.cell_meters) * 4096.f;
   };
+  // (AI-assisted, j2water2) v21: an envmap shine with fewer than kMinEnvTris triangles in the
+  // level isn't worth its own draws (each shine kind splits draws off the plain ones): plain
+  {
+    constexpr size_t kMinEnvTris = 256;
+    std::vector<size_t> n(cv.draw_keys.size(), 0);
+    for (const auto& t : cv.tris) {
+      n[t.draw_key]++;
+    }
+    std::map<u16, size_t> per_env;
+    for (size_t k = 0; k < n.size(); k++) {
+      if (cv.draw_keys[k].env != 0xffff) {
+        per_env[cv.draw_keys[k].env] += n[k];
+      }
+    }
+    size_t dropped = 0;
+    for (auto& t : cv.tris) {
+      const DrawKey dk = cv.draw_keys[t.draw_key];
+      if (dk.env != 0xffff && per_env[dk.env] < kMinEnvTris) {
+        DrawKey pk = dk;
+        pk.env = 0xffff;
+        t.draw_key = cv.key_id(pk);
+        dropped++;
+      }
+    }
+    if (dropped) {
+      lg::info("{}: envmapped ties: {} tris of small shines drawn plain", level.level_name,
+               dropped);
+      cv.env_tie_tris -= std::min(cv.env_tie_tris, dropped);
+    }
+  }
   // (detail, cell, kind) -> triangle indices. (AI-assisted) The kind (Draw::kind: tfrag, tie,
   // shrub) keeps every chunk to one (Chunk::kind); with the default tiers it splits nothing.
   using CellKey = std::tuple<int, int, int, int, int>;
+  constexpr int kEnvCellBit = 0x40;  // (AI-assisted, j2water2) in the kind
   std::map<CellKey, std::vector<u32>> cells;
   for (u32 i = 0; i < cv.tris.size(); i++) {
     const auto& t = cv.tris[i];
@@ -3396,7 +3534,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         (int)(t.detail + 4 * t.tier + 64 * t.sclass + (t.stream ? 1024 * (t.stream + 3 * nc) : 0)),
                                (int)std::floor(cx / 3 / cell),
                                (int)std::floor(cy / 3 / cell), (int)std::floor(cz / 3 / cell),
-                               (int)(cv.draw_keys[t.draw_key].kind & 0xff));
+                               (int)(cv.draw_keys[t.draw_key].kind & 0xff) |
+                                   // (AI-assisted, j2water2) v21: envmapped tie triangles in
+                                   // chunks of their own (only those get normals)
+                                   (cv.draw_keys[t.draw_key].env != 0xffff ? kEnvCellBit : 0));
     cells[key].push_back(i);
   }
 
@@ -3552,7 +3693,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     for (size_t pi = 0; pi < normal_plans && pi < 0xffff; pi++) {
       const auto& cp = plans[pi];
       const int tier = std::get<0>(cp.key) / 4 % 16, detail = std::get<0>(cp.key) % 4;
-      const int kind = std::get<4>(cp.key);  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
+      const int kind = std::get<4>(cp.key) & ~kEnvCellBit;  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
       const bool lowres = tier == 3;
       // (AI-assisted, streaming) not the near chunks (near versions only)
       const bool landmark = tier == 0 && kind == 1 && detail == 0 && std::get<0>(cp.key) < 1024;
@@ -3641,8 +3782,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         std::unordered_map<u32, u32> made, made_flat;
         // (AI-assisted) vista_flat: the copies' draw key (untextured, the draw mode without its
         // texture parts: clamp, filter, tcc, alpha test) and color
-        const u32 src_key_id = cv.tris[ids[0]].orig_key == UINT32_MAX ? cv.tris[ids[0]].draw_key
-                                                                         : cv.tris[ids[0]].orig_key;
+        u32 src_key_id = cv.tris[ids[0]].orig_key == UINT32_MAX ? cv.tris[ids[0]].draw_key
+                                                                   : cv.tris[ids[0]].orig_key;
+        if (cv.draw_keys[src_key_id].env != 0xffff) {
+          // (AI-assisted, j2water2) the vista draws no envmap shine (it needs the normals)
+          DrawKey nk = cv.draw_keys[src_key_id];
+          nk.env = 0xffff;
+          src_key_id = cv.key_id(nk);
+        }
         const DrawKey src_key = cv.draw_keys[src_key_id];
         constexpr u32 kTextureModeBits = 0x00E7FFE0;  // bits 5-18, 21-23
         const u32 flat_key =
@@ -3962,6 +4109,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   };
   size_t vc_kept_pairs = 0;  // (AI-assisted) coplanar overlaps kept in order by vcache_order
   size_t welded_verts = 0;
+  // (AI-assisted, j2water2) c3l v21: the envmapped tie base draws (c3l::EnvTieDraw), and per chunk
+  // with any the normal of each vertex by its bytes (no two vertices of such a chunk have the same
+  // bytes and different normals: the later one's s moved by 1/1024 until it differs), so welding,
+  // the vertex orders and copies after this keep them (looked up again at the end)
+  std::vector<c3l::EnvTieDraw> out_env_draws;
+  std::map<u32, std::unordered_map<std::string, std::array<s8, 3>>> env_chunk_normals;
+  size_t env_st_moved = 0;
 
   for (const auto& cp : plans) {
     {
@@ -3987,7 +4141,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                     : detail == 3 ? (sclass ? kShrubClassMeters[sclass] : opt.shrub_dist) * 4096.f
                                   : 0.f;
       // (AI-assisted) Draw::kind 0 tfrag, 1 tie, 2 shrub
-      ch.kind = (u32)std::get<4>(key) + c3l::CHUNK_KIND_TFRAG;
+      ch.kind = (u32)(std::get<4>(key) & ~kEnvCellBit) + c3l::CHUNK_KIND_TFRAG;
       // (AI-assisted) the positions on their grid (see "quantizing grids"), the old quantizer's
       // error for the stats
       std::vector<std::array<double, 3>> snapped(local_src.size());
@@ -4030,6 +4184,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       ch.bsphere[3] = rad;
       ch.first_vertex = out_verts.size();
       ch.vertex_count = local_src.size();
+      std::unordered_map<std::string, std::array<s8, 3>>* env_normals = nullptr;
+      for (u32 ti : cp.tris) {
+        if (cv.draw_keys[cv.tris[ti].draw_key].env != 0xffff) {
+          env_normals = &env_chunk_normals[(u32)chunks.size()];
+          break;
+        }
+      }
       for (size_t i = 0; i < local_src.size(); i++) {
         const auto& v = cv.verts[local_src[i]];
         c3l::Vertex o{};
@@ -4054,6 +4215,23 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         memcpy(o.rgba, v.rgba, 4);
         o.pad = (s16)cv.tod_pad(v.tod);  // (AI-assisted) v16: the time of day color
+        if (env_normals) {
+          // (AI-assisted, j2water2) v21
+          const std::array<s8, 3> n = {v.nrm[0], v.nrm[1], v.nrm[2]};
+          for (int tries = 0; tries < 64; tries++) {
+            auto [it, fresh] =
+                env_normals->emplace(std::string((const char*)&o, sizeof(o)), n);
+            if (fresh || it->second == n || !v.has_nrm) {
+              break;
+            }
+            if (!it->second[0] && !it->second[1] && !it->second[2]) {
+              it->second = n;  // a vertex without a normal came first
+              break;
+            }
+            o.st[0]++;
+            env_st_moved++;
+          }
+        }
         out_verts.push_back(o);
       }
       ch.first_draw = out_draws.size();
@@ -4075,6 +4253,16 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           d.first_index = out_indices.size();
           d.index_count = 0;
           out_draws.push_back(d);
+          if (dk.env != 0xffff) {
+            // (AI-assisted, j2water2) v21
+            const auto& e = cv.env_ties.at(dk.env);
+            c3l::EnvTieDraw ed{};
+            ed.draw = (u32)out_draws.size() - 1;
+            ed.texture = e.texture;
+            ed.mode = e.mode;
+            memcpy(ed.tint, e.tint, 4);
+            out_env_draws.push_back(ed);
+          }
         }
         for (int k = 0; k < 3; k++) {
           out_indices.push_back(local.at(t.v[k]));
@@ -4582,9 +4770,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
       }
     }
-    const u32 eh_size = !pv_protos.empty() ? c3l::kExtHeaderV20Size
-                        : opt.stream       ? (u32)sizeof(eh)
-                                           : c3l::kExtHeaderV17Size;
+    const u32 eh_size = !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
+                        : !pv_protos.empty()    ? c3l::kExtHeaderV20Size
+                        : opt.stream            ? (u32)sizeof(eh)
+                                                : c3l::kExtHeaderV17Size;
     eh.size = eh_size;
     align16(buf);
     hdr.ext_offset = (u32)buf.size();
@@ -4613,6 +4802,40 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       ep.proto_run_count = (u32)pv_runs.size();
       ep.proto_runs_offset = append(buf, pv_runs.data(), pv_runs.size());
       memcpy(buf.data() + hdr.ext_offset + sizeof(eh), &ep, sizeof(ep));
+    }
+    if (!out_env_draws.empty()) {
+      // (AI-assisted, j2water2) v21: the envmapped tie draws, their chunks' normals
+      c3l::ExtEnvTie et{};
+      et.draw_count = (u32)out_env_draws.size();
+      et.draws_offset = append(buf, out_env_draws.data(), out_env_draws.size());
+      std::vector<c3l::EnvTieChunk> ecs;
+      size_t missing = 0, nverts = 0, nv_dist = 0, nv_near = 0;
+      for (const auto& [ci, nm] : env_chunk_normals) {
+        const auto& ch = chunks.at(ci);
+        nv_dist += ch.max_dist > 0 ? ch.vertex_count : 0;
+        nv_near += chunk_stream_cls[ci] ? ch.vertex_count : 0;
+        std::vector<std::array<s8, 4>> n(ch.vertex_count, {0, 0, 0, 0});
+        for (u32 v = 0; v < ch.vertex_count; v++) {
+          const auto& o = out_verts[ch.first_vertex + v];
+          auto it = nm.find(std::string((const char*)&o, sizeof(o)));
+          if (it == nm.end()) {
+            missing++;
+            continue;
+          }
+          n[v] = {it->second[0], it->second[1], it->second[2], 0};
+        }
+        nverts += n.size();
+        ecs.push_back(c3l::EnvTieChunk{ci, append(buf, n.data(), n.size())});
+      }
+      et.chunk_count = (u32)ecs.size();
+      et.chunks_offset = append(buf, ecs.data(), ecs.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV20Size, &et, sizeof(et));
+      lg::info("{}: envmapped ties (v21): {} draws ({} shine kinds), {} tris, {} chunks with "
+               "{} normals ({} KB; {} KB in distance-limited chunks, {} KB in near chunks), {} "
+               "groups without a shine, {} s moved, {} vertices unmatched",
+               level.level_name, out_env_draws.size(), cv.env_ties.size(), cv.env_tie_tris,
+               ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
+               cv.env_tie_groups_missing, env_st_moved, missing);
     }
   }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
@@ -5214,6 +5437,8 @@ int main(int argc, char** argv) {
   app.add_flag("--no-stream", no_stream,
                "(AI-assisted, v19) no near chunks for streaming: v18 files (near versions within "
                "the level's budget, in the far versions' chunks)");
+  app.add_flag("--no-env-ties", opt.no_env_ties,
+               "(AI-assisted) Jak II: no envmapped tie shine (c3l v21 ExtEnvTie)");
   app.add_flag("--no-proto-vis", opt.no_proto_vis,
                "(AI-assisted, v20) Jak II: no runs of their own for the prototypes the game hides "
                "by task state (drawn always, as v19)");

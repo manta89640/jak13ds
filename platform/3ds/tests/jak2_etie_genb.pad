@@ -1,0 +1,15 @@
+# (AI-assisted) j2water2: envmapped ties at the canal (ctygenb), night and noon, four views
+1000 continue ctygenb-start
+1001 -
+1002 wait *target* target-stance
+1300 shot genb_a
+1301 rx=0
+1350 -
+1351 shot genb_b
+1352 tod 12
+1550 shot genb_day_a
+1551 rx=255
+1650 -
+1651 shot genb_day_b
+1652 log stats
+1660 exit

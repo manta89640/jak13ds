@@ -39,6 +39,9 @@ extern const size_t ctr_ocean_full_clip_shbin_size;
 /* (AI-assisted, j2water) Jak II's ocean with the sky reflection (loaded by the Jak II build only) */
 extern const uint8_t ctr_ocean_env_shbin[];
 extern const size_t ctr_ocean_env_shbin_size;
+/* (AI-assisted, j2water2) Jak II's envmapped ties (loaded by the Jak II build only) */
+extern const uint8_t ctr_etie_shbin[];
+extern const size_t ctr_etie_shbin_size;
 /* (AI-assisted) the Oct 2 shaders (hardware proven; the level meshes and merc without shader_opt,
  * config.ini shader_basic = old). The Oct 3 ctr_mesh / ctr_skin / ctr_skin_env (the new ctr_mesh
  * hung the real GPU), the dph bisect mesh and the shader_groups shbins were removed on Oct 16. */
@@ -276,6 +279,7 @@ enum {
   PROG_MESH_DF,
   PROG_MESH_DF_FA,
   PROG_OCEAN_ENV, /* (AI-assisted, j2water) ctr_gpu_ocean_env_draw (ctr_ocean_env.v.pica) */
+  PROG_ETIE,      /* (AI-assisted, j2water2) ctr_gpu_etie_draw (ctr_etie.v.pica) */
 };
 /* (AI-assisted) the level mesh programs (one vertex layout, the same uniforms) */
 static inline int is_mesh_prog(int prog) {
@@ -308,6 +312,10 @@ typedef struct {
   shaderProgram_s ocean_env;
   int uloc_oenv_clip, uloc_oenv_tex, uloc_oenv_dir, uloc_oenv_env, uloc_oenv_scales;
   int uloc_oenv_fog0, uloc_oenv_fog1;
+  /* (AI-assisted, j2water2) Jak II's envmapped ties (no vertexShader: not loaded) */
+  shaderProgram_s etie;
+  int uloc_etie_clip, uloc_etie_cam, uloc_etie_nrm, uloc_etie_scales, uloc_etie_fog0,
+      uloc_etie_fog1;
 } ProgSet;
 static ProgSet s_ps[2];
 
@@ -346,8 +354,10 @@ static struct {
   /* (AI-assisted) the ocean with waves (ctr_ocean.v.pica, ctr_gpu_ocean_draw) */
   DVLB_s* ocean_dvlb;
   DVLB_s* ocean_env_dvlb; /* (AI-assisted, j2water) ctr_ocean_env.v.pica (Jak II) */
+  DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
   int ocean_tex2_bound; /* texture unit 2 holds the ocean's shimmer texture */
   int ocean_stage2;     /* combiner stage 2 holds the ocean's fog stage */
+  int etie_stage3;      /* (AI-assisted, j2water2) combiner stage 3 holds the envmapped ties' fog */
   /* (AI-assisted) fog_stage_skip: level draws without the fog stage (ctr_gpu_set_mesh_nofog), and
    * texture unit 1 (the fog ramp) switched off for them (raw draws) */
   int mesh_nofog;
@@ -846,6 +856,7 @@ static void use_program(int prog) {
                                 : prog == PROG_MESH_DF  ? &g.ps->mesh_df
                                 : prog == PROG_MESH_DF_FA ? &g.ps->mesh_df_fa
                                 : prog == PROG_OCEAN_ENV ? &g.ps->ocean_env
+                                : prog == PROG_ETIE ? &g.ps->etie
                                                         : &g.ps->mesh;
     const void* dvlp = sp->vertexShader ? (const void*)sp->vertexShader->dvle->dvlp : NULL;
     g.cur.prog_switches++;
@@ -903,6 +914,14 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
     AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord (unused) */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+  } else if (prog == PROG_ETIE) {
+    /* (AI-assisted, j2water2) the static mesh layout + the normals (attribute buffer 1) */
+    C3D_BindProgram(&g.ps->etie);
+    g.last_state_valid = 0;
+    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
+    AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord */
+    AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    AttrInfo_AddLoader(attr, 3, GPU_BYTE, 4);          /* normal (+ 0) */
   } else if (prog == PROG_OCEAN_FULL || prog == PROG_OCEAN_FULL_CLIP) {
     /* (AI-assisted) 32 bytes: GS x, y, z, q (or W * (x, y, z, 1)); s, t (times q), fog; color */
     C3D_BindProgram(prog == PROG_OCEAN_FULL ? &g.ps->ocean_full : &g.ps->ocean_full_clip);
@@ -1126,6 +1145,16 @@ static void prog_set_ulocs(ProgSet* p, int have_fa) {
     p->uloc_oenv_fog0 = shaderInstanceGetUniformLocation(vs, "fog0");
     p->uloc_oenv_fog1 = shaderInstanceGetUniformLocation(vs, "fog1");
   }
+  if (p->etie.vertexShader) {
+    /* (AI-assisted, j2water2) */
+    vs = p->etie.vertexShader;
+    p->uloc_etie_clip = shaderInstanceGetUniformLocation(vs, "clip");
+    p->uloc_etie_cam = shaderInstanceGetUniformLocation(vs, "cam");
+    p->uloc_etie_nrm = shaderInstanceGetUniformLocation(vs, "nrm");
+    p->uloc_etie_scales = shaderInstanceGetUniformLocation(vs, "scales");
+    p->uloc_etie_fog0 = shaderInstanceGetUniformLocation(vs, "fog0");
+    p->uloc_etie_fog1 = shaderInstanceGetUniformLocation(vs, "fog1");
+  }
 }
 
 static void prog_set_free(ProgSet* p) {
@@ -1137,7 +1166,7 @@ static void prog_set_free(ProgSet* p) {
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
     shaderProgramFree(all[i]);
   }
-  shaderProgram_s* maybe[] = {&p->mesh_fa, &p->mesh_df, &p->mesh_df_fa, &p->ocean_env};
+  shaderProgram_s* maybe[] = {&p->mesh_fa, &p->mesh_df, &p->mesh_df_fa, &p->ocean_env, &p->etie};
   for (size_t i = 0; i < sizeof(maybe) / sizeof(maybe[0]); i++) {
     if (maybe[i]->vertexShader) {
       shaderProgramFree(maybe[i]);
@@ -1194,7 +1223,7 @@ static struct {
   DVLE_s* dvle;
   DVLP_s* own;
   u32 main, endmain, base;
-} s_res_prog[26]; /* (AI-assisted, j2water) 2 x 13 */
+} s_res_prog[28]; /* (AI-assisted, j2water, j2water2) 2 x 14 */
 static int s_res_n;
 static int s_res_on; /* the DVLEs point at the image */
 
@@ -1222,18 +1251,18 @@ static void resident_programs(void) {
     return;
   }
   ProgSet* sets[2] = {&s_ps[0], &s_ps[1]};
-  DVLE_s* dvles[2 * 13];
+  DVLE_s* dvles[2 * 14];
   int n = 0;
   for (int k = 0; k < 2; k++) {
     ProgSet* p = sets[k];
     if (!p->ok && k) {
       continue;
     }
-    /* (AI-assisted, j2water) + ocean_env (Jak II) */
-    shaderProgram_s* all[13] = {&p->basic, &p->mesh, &p->mesh_fa, &p->skin, &p->env, &p->clip,
+    /* (AI-assisted, j2water) + ocean_env (Jak II); (j2water2) + etie (Jak II) */
+    shaderProgram_s* all[14] = {&p->basic, &p->mesh, &p->mesh_fa, &p->skin, &p->env, &p->clip,
                                 &p->clip2, &p->ocean, &p->ocean_full, &p->ocean_full_clip,
-                                &p->mesh_df, &p->mesh_df_fa, &p->ocean_env};
-    for (int i = 0; i < 13; i++) {
+                                &p->mesh_df, &p->mesh_df_fa, &p->ocean_env, &p->etie};
+    for (int i = 0; i < 14; i++) {
       if (!all[i]->vertexShader) {
         continue;
       }
@@ -1248,8 +1277,8 @@ static void resident_programs(void) {
     }
   }
   /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
-  DVLP_s* dvlps[2 * 13];
-  u32 base[2 * 13];
+  DVLP_s* dvlps[2 * 14];
+  u32 base[2 * 14];
   int np = 0;
   u32 code = 0, ndesc = 0;
   for (int i = 0; i < n; i++) {
@@ -1392,6 +1421,11 @@ static void load_opt_set(void) {
     shaderProgramInit(&p->ocean_env);
     shaderProgramSetVsh(&p->ocean_env, &g.ocean_env_dvlb->DVLE[0]);
   }
+  if (g.etie_dvlb) {
+    /* (AI-assisted, j2water2) Jak II: set 0's */
+    shaderProgramInit(&p->etie);
+    shaderProgramSetVsh(&p->etie, &g.etie_dvlb->DVLE[0]);
+  }
   prog_set_ulocs(p, 1);
   p->opt = 1;
   p->df_ok = 1;
@@ -1524,6 +1558,12 @@ int ctr_gpu_init(void) {
     shaderProgramInit(&g.ps->ocean_env);
     shaderProgramSetVsh(&g.ps->ocean_env, &g.ocean_env_dvlb->DVLE[0]);
   }
+  /* (AI-assisted, j2water2) Jak II's envmapped ties */
+  g.etie_dvlb = DVLB_ParseFile((u32*)ctr_etie_shbin, (u32)ctr_etie_shbin_size);
+  if (g.etie_dvlb) {
+    shaderProgramInit(&g.ps->etie);
+    shaderProgramSetVsh(&g.ps->etie, &g.etie_dvlb->DVLE[0]);
+  }
 #endif
   prog_set_ulocs(&s_ps[0], g.mesh_fa_dvlb != NULL);
   s_ps[0].ok = 1;
@@ -1648,7 +1688,7 @@ void ctr_gpu_exit(void) {
   }
   DVLB_s* dvlbs[] = {g.dvlb,      g.mesh_dvlb,  g.mesh_fa_dvlb, g.skin_dvlb,
                      g.env_dvlb,  g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
-                     g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb};
+                     g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
     if (dvlbs[i]) {
       DVLB_Free(dvlbs[i]);
@@ -5234,6 +5274,48 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       C3D_TexEnvColor(env, 0x80000000u);
     }
   }
+  if (mesh == 6) {
+    /* (AI-assisted, j2water2) Jak II's envmapped ties (ctr_gpu_etie_draw), tint = the shine
+     * (abgr, halved unless decal): stage 0 rgb = env (unit 2) * shine, alpha = the base alpha (as
+     * the level meshes'); stage 1 rgb * alpha (the PC's destination alpha weight); stage 2 + the
+     * base color (tex * color, x2: hence the halved shine; decal: + tex); stage 3 the fog (as the
+     * level meshes' stage 1). The PC (Tie3 envmap_second_pass_draw) adds the shine unfogged. */
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE2, GPU_CONSTANT, 0);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+    C3D_TexEnvColor(env, tint);
+    C3D_TexEnvSrc(env, C3D_Alpha, textured ? tsrc : GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, 0);
+    C3D_TexEnvFunc(env, C3D_Alpha, textured ? GPU_MODULATE : GPU_REPLACE);
+    C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+    C3D_TexEnvInit(env1);
+    C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_PREVIOUS, 0);
+    C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA, 0);
+    C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
+    C3D_TexEnv e2, e3;
+    C3D_TexEnvInit(&e2);
+    if (textured && st->decal) {
+      C3D_TexEnvSrc(&e2, C3D_RGB, tsrc, GPU_PREVIOUS, 0);
+      C3D_TexEnvFunc(&e2, C3D_RGB, GPU_ADD);
+    } else if (textured) {
+      C3D_TexEnvSrc(&e2, C3D_RGB, tsrc, GPU_PRIMARY_COLOR, GPU_PREVIOUS);
+      C3D_TexEnvFunc(&e2, C3D_RGB, GPU_MULTIPLY_ADD);
+      C3D_TexEnvScale(&e2, C3D_RGB, GPU_TEVSCALE_2);
+    } else {
+      C3D_TexEnvSrc(&e2, C3D_RGB, GPU_PRIMARY_COLOR, GPU_PREVIOUS, 0);
+      C3D_TexEnvFunc(&e2, C3D_RGB, GPU_ADD);
+    }
+    C3D_TexEnvInit(&e3);
+    if (g.fog_tex_valid) {
+      C3D_TexEnvSrc(&e3, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
+      C3D_TexEnvOpRgb(&e3, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                      GPU_TEVOP_RGB_SRC_ALPHA);
+      C3D_TexEnvFunc(&e3, C3D_RGB, GPU_INTERPOLATE);
+    }
+    commit_texenv(2, &e2, raw);
+    commit_texenv(3, &e3, raw);
+    g.ocean_stage2 = 1; /* stage 2 back to pass-through at the next other draw */
+    g.etie_stage3 = 1;
+  }
   commit_texenv(1, env1, raw);
   commit_texenv(0, env, raw);
   /* (AI-assisted) fog_stage_skip (mesh 4), and with tex1_gating every draw whose combiner doesn't
@@ -5247,7 +5329,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
-    const int need1 = mesh == 1 || mesh == 3 || merc_fog;
+    const int need1 = mesh == 1 || mesh == 3 || mesh == 6 || merc_fog;
     const int want_off = g_tex1_gating ? !need1 : mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
     /* (AI-assisted, micro-mg) a glow drawn raw (MICRO_RAWGLOW) leaves unit 1 as the citro3d draw
@@ -5277,7 +5359,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     C3D_TexEnvFunc(&e2, C3D_RGB, GPU_INTERPOLATE);
     commit_texenv(2, &e2, raw);
     g.ocean_stage2 = 1;
-  } else if (mesh != 3 && !merc_fog && g.ocean_stage2) {
+  } else if (mesh != 3 && mesh != 6 && !merc_fog && g.ocean_stage2) {
     /* (AI-assisted) stage 2 back to pass-through after the ocean (the far ring between its
      * draws) or a merc draw with fog */
     C3D_TexEnv e2;
@@ -7643,6 +7725,94 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_
   C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
   g.cur.draws++;
   g.cur.triangles += index_count / 3;
+}
+
+/* (AI-assisted, j2water2) Jak II's envmapped ties (see ctr_gpu.h). Through citro3d (their draws
+ * are a few per frame): the uniforms with every draw, two attribute buffers (the mesh's vertices,
+ * the normals). The envmap on texture unit 2, clamped and linear (process_envmap_draw_mode). */
+static const void* s_etie_tex2;
+void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_draw* d, int mesh,
+                       int normals_mesh, int normals_offset, int first_index, int index_count) {
+  SKY_HOOK(state);
+  if (!g.ready || !g.in_frame || index_count <= 0 || !g.ps->etie.vertexShader ||
+      normals_mesh < 0 || normals_mesh >= MAX_MESHES || g.meshes[normals_mesh].used != 1 ||
+      mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || env_tex < 0 ||
+      env_tex >= MAX_TEXTURES || g.textures[env_tex].used != 1) {
+    return;
+  }
+  const MeshSlot* ms = &g.meshes[mesh];
+  if (!cmd_room()) {
+    return;
+  }
+  use_program(PROG_ETIE);
+  {
+    TexSlot* slot = &g.textures[env_tex];
+    C3D_Tex* tex = &slot->tex;
+    if (s_etie_tex2 != tex || !g.ocean_tex2_bound || s_ocean_tex2 != NULL) {
+      u32 param = tex->param & ~(GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) |
+                                 GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) | GPU_TEXTURE_WRAP_S(3) |
+                                 GPU_TEXTURE_WRAP_T(3) | GPU_TEXTURE_MIP_FILTER(GPU_LINEAR));
+      param |= GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
+               GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_EDGE) | GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_EDGE);
+      tex->param = param;
+      tex->maxLevel = 0;
+      C3D_TexBind(2, tex);
+      s_etie_tex2 = tex;
+      s_ocean_tex2 = NULL; /* the ocean binds its own again */
+      g.ocean_tex2_bound = 1;
+      g.cur.tex_binds++;
+    }
+  }
+  raw_vc_flush();
+  const ProgSet* p = g.ps;
+  C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, p->uloc_etie_clip, (const C3D_Mtx*)d->clip.m);
+  for (int i = 0; i < 3; i++) {
+    const float* r = d->cam[i];
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_etie_cam + i, r[0], r[1], r[2], r[3]);
+    r = d->nrm[i];
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_etie_nrm + i, r[0], r[1], r[2], r[3]);
+  }
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_etie_scales, d->st_scale, 1.0f / 255.0f, 1.0f, 0.0f);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_etie_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
+  C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_etie_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
+  raw_note_unif();
+  {
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, ms->verts, 16, 3, 0x210);
+    BufInfo_Add(buf, (const u8*)g.meshes[normals_mesh].verts + normals_offset, 4, 1, 0x3);
+  }
+  apply_state_tint(state, 6, d->shine, 0);
+  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
+}
+
+int ctr_gpu_etie_ready(void) {
+  return g.ready && g.ps->etie.vertexShader != NULL;
+}
+
+void ctr_gpu_etie_end(void) {
+  if (!g.ready || !g.in_frame) {
+    return;
+  }
+  C3Di_Context* ctx = &__C3D_Context;
+  if (g.ocean_tex2_bound) {
+    ctx->tex[2] = NULL;
+    ctx->flags |= C3DiF_Tex(2);
+    g.ocean_tex2_bound = 0;
+    s_ocean_tex2 = NULL;
+  }
+  s_etie_tex2 = NULL;
+  C3D_TexEnv e;
+  C3D_TexEnvInit(&e);
+  commit_texenv(2, &e, s_raw.on);
+  commit_texenv(3, &e, s_raw.on);
+  g.ocean_stage2 = 0;
+  g.etie_stage3 = 0;
+  /* the next draws' single attribute buffer (raw_vertex_buffer / c3d_vertex_buffer: bufCount) */
+  BufInfo_Init(C3D_GetBufInfo());
+  g.last_state_valid = 0;
 }
 
 void ctr_gpu_ocean_end(void) {

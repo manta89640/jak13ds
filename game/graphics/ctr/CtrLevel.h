@@ -372,6 +372,13 @@ struct CtrLevelData {
   // the hidden prototypes' runs (sorted) and per chunk whether it has some (empty: none hidden)
   std::vector<u32> proto_hidden_runs;
   std::vector<u8> chunk_proto_hidden;
+  // (AI-assisted, j2water2) c3l v21 envmapped ties (c3l::ExtEnvTie): the listed base draws (their
+  // shine), per draw its index there (-1: none; empty: no such draws), per chunk the byte offset of
+  // its normals in normals_mesh (-1: none), the mesh holding all of them (ctr_gpu, -1: none)
+  std::vector<c3l::EnvTieDraw> env_draws;
+  std::vector<s16> draw_env;
+  std::vector<s32> chunk_normals;
+  int normals_mesh = -1;
 };
 
 /*! (AI-assisted) host --ctr-gfx with env CTR_FINE_VIS_CHECK: the level pieces fine_vis hid this
@@ -866,6 +873,19 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_late_frame = ~0ull;
   float m_late_fog0[4] = {0, 0, 0, 0}, m_late_fog1[4] = {0, 0, 0, 0};
   u8 m_late_fog_rgb[3] = {0, 0, 0};
+  // (AI-assisted, j2water2) c3l v21 envmapped ties: their draws of this frame (the opaque ones
+  // after the opaque pass, the blended ones after draw_jak2_late's), the time of day's env color
+  // (the tie bucket's pc-add-tie-envmap-info, GS units: 0x80 = 1), statistics
+  struct EnvCall {
+    const ctr_draw_state* state;
+    int env_tex, mesh, normals_mesh, normals_offset, first, count;
+    ctr_etie_draw d;
+  };
+  std::vector<EnvCall> m_env_calls, m_env_late;
+  float m_env_color[3] = {128.f, 128.f, 128.f};
+  u64 m_env_draws = 0, m_env_tris = 0, m_env_frames = 0;
+  void env_color_scan(const CtrLevelData& lev, const CtrRenderState& rs);
+  void draw_env_calls(std::vector<EnvCall>& calls);
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;

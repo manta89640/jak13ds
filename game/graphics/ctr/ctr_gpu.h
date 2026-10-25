@@ -683,6 +683,27 @@ typedef struct {
 void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_ocean_env_draw* d,
                             int mesh, int first_index, int index_count);
 
+/* (AI-assisted, j2water2) Jak II's envmapped ties (c3l v21): a level mesh draw (the static mesh
+ * layout) with the envmap shine in the same draw, platform/3ds/shaders/ctr_etie.v.pica.
+ * normals_mesh: a mesh (ctr_gpu_mesh_create, its vertices as bytes) holding from byte
+ * normals_offset (a multiple of 4) int8 x, y, z, 0 per vertex of the mesh (world space * 127). With the envmap on
+ * texture unit 2 (clamped, linear) at etie.vert's coordinates:
+ *   rgb = fog(tex(st0) * color * 2 + env(st2) * shine * a), a = tex.a * color.a * 2 (at most 1)
+ * (decal: tex(st0) instead of tex * color * 2), shine: 0xff = 1 (abgr, the alpha unused).
+ * ctr_gpu_etie_end after the draws. */
+typedef struct {
+  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
+  float cam[3][4];      /* camera space position v = dot(row.xyz, pos) + row.w */
+  float nrm[3][4];      /* camera space normal n = dot(row.xyz, normal) */
+  float st_scale;       /* 1/1024 (CTR_TCC_ST_ATLAS: 1/32768) */
+  uint32_t shine;       /* the shine color (abgr) */
+} ctr_etie_draw;
+void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_draw* d, int mesh,
+                       int normals_mesh, int normals_offset, int first_index, int index_count);
+void ctr_gpu_etie_end(void);
+/* 1 when ctr_gpu_etie_draw can draw (the Jak II build's program is loaded) */
+int ctr_gpu_etie_ready(void);
+
 /* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh_old.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)
  *   distance fog = (w * fog1.x - fog1.y) * fog1.z

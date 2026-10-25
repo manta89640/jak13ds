@@ -355,6 +355,10 @@ struct SoftEnv {
   int tex = -1;
   float s = 0, t = 0;
   float vs[3] = {0, 0, 0}, vt[3] = {0, 0, 0};  // per vertex of the triangle
+  // (AI-assisted, j2water2) envmapped ties (ctr_gpu_etie_draw): added before the fog, times the
+  // shine (0..1 per channel), the envmap clamped
+  bool etie = false;
+  float shine[3] = {1, 1, 1};
 };
 SoftEnv s_env;
 
@@ -402,6 +406,19 @@ void shade_pixel(const ctr_draw_state& st,
   } else {
     // untextured: the GS outputs the vertex color as it is (see ctr_gpu_citro3d.c)
   }
+  if (s_env.etie && s_env.tex >= 0 && s_env.tex < (int)g_soft.textures.size() &&
+      g_soft.textures[s_env.tex].used) {
+    // (AI-assisted, j2water2) + env * shine * alpha (0x80 = 1, at most 1), before the fog
+    ctr_draw_state es{};
+    es.clamp_s = es.clamp_t = 1;
+    es.filter = 1;
+    float ec[4];
+    sample(g_soft.textures[s_env.tex], es, s_env.s, s_env.t, ec);
+    const float w = std::clamp(a / 128.f, 0.f, 1.f);
+    r = std::min(r, 255.f) + ec[0] * s_env.shine[0] * w;
+    g = std::min(g, 255.f) + ec[1] * s_env.shine[1] * w;
+    b = std::min(b, 255.f) + ec[2] * s_env.shine[2] * w;
+  }
   if (fog > 0.f) {
     // (AI-assisted, far-fog) the fog stage: rgb = mix(rgb, fog color, amount)
     const float f = std::min(fog, 1.f);
@@ -409,7 +426,8 @@ void shade_pixel(const ctr_draw_state& st,
     g = std::min(g, 255.f) * (1.f - f) + s_fog_rgb[1] * f;
     b = std::min(b, 255.f) * (1.f - f) + s_fog_rgb[2] * f;
   }
-  if (s_env.tex >= 0 && s_env.tex < (int)g_soft.textures.size() && g_soft.textures[s_env.tex].used) {
+  if (!s_env.etie && s_env.tex >= 0 && s_env.tex < (int)g_soft.textures.size() &&
+      g_soft.textures[s_env.tex].used) {
     // (AI-assisted, j2water) + env * alpha (0x80 = 1, at most 1), texture unit 2 repeats
     ctr_draw_state es{};
     float ec[4];
@@ -1734,6 +1752,116 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state,
 }
 
 void ctr_gpu_ocean_end(void) {}
+
+// (AI-assisted, j2water2) Jak II's envmapped ties (see ctr_gpu.h): the level mesh draw (as
+// soft_mesh_tris) with etie.vert's envmap coordinates per vertex, interpolated affinely as the 3DS
+// does
+void ctr_gpu_etie_draw(const ctr_draw_state* state,
+                       int env_tex,
+                       const ctr_etie_draw* d,
+                       int mesh,
+                       int normals_mesh,
+                       int normals_offset,
+                       int first_index,
+                       int index_count) {
+  sky_hook(state);
+  softstats::prog(11);
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used || !state ||
+      normals_mesh < 0 || normals_mesh >= (int)g_soft.meshes.size() ||
+      !g_soft.meshes[normals_mesh].used) {
+    return;
+  }
+  const void* normals = g_soft.meshes[normals_mesh].verts.data() + normals_offset;
+  const uint8_t* vbase = g_soft.meshes[mesh].verts.data();
+  const uint16_t* ibase = g_soft.meshes[mesh].indices.data();
+  const int8_t* nbase = (const int8_t*)normals;
+  const float* clip = d->clip.m;
+  g_soft.cur.draws++;
+  softstats::draw(*state);
+  const bool fogged = fog_on() && !s_nofog;
+  auto row = [](const float* r, const float* in) {
+    return r[0] * in[0] + r[1] * in[1] + r[2] * in[2] + r[3];
+  };
+  // host diagnosis: CTR_SOFT_NO_ETIE=1 leaves the shine out (A/B pictures)
+  static const bool no_shine = getenv("CTR_SOFT_NO_ETIE") != nullptr;
+  for (int c = 0; c < 3; c++) {
+    s_env.shine[c] = no_shine ? 0.f
+                              : (float)((d->shine >> (8 * c)) & 0xff) / 255.f *
+                                    (state->decal ? 1.f : 2.f);
+  }
+  for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
+    ctr_vertex tri[3];
+    float fog[3] = {0.f, 0.f, 0.f};
+    bool ok = true;
+    for (int k = 0; k < 3; k++) {
+      const uint16_t vi = ibase[i + k];
+      const uint8_t* src = vbase + 16 * vi;
+      int16_t pos[3], st[2];
+      memcpy(pos, src, 6);
+      memcpy(st, src + 8, 4);
+      const float in[3] = {(float)pos[0], (float)pos[1], (float)pos[2]};
+      float c[4];
+      for (int r = 0; r < 4; r++) {
+        c[r] = clip[4 * r] * in[0] + clip[4 * r + 1] * in[1] + clip[4 * r + 2] * in[2] +
+               clip[4 * r + 3];
+      }
+      if (c[3] < 1e-3f) {
+        ok = false;
+        break;
+      }
+      tri[k].x = c[0] / c[3];
+      tri[k].y = c[1] / c[3];
+      tri[k].z = (1.f + c[2] / c[3]) * 0.5f;
+      fog[k] = fogged ? mesh_fog(c[3]) : 0.f;
+      tri[k].s = st[0] * d->st_scale;
+      tri[k].t = st[1] * d->st_scale;
+      tri[k].r = src[12];
+      tri[k].g = src[13];
+      tri[k].b = src[14];
+      tri[k].a = src[15];
+      // the envmap coordinates (ctr_etie.v.pica)
+      const float nin[3] = {(float)nbase[4 * vi], (float)nbase[4 * vi + 1],
+                            (float)nbase[4 * vi + 2]};
+      const float v[3] = {row(d->cam[0], in), row(d->cam[1], in), row(d->cam[2], in)};
+      float n[3];
+      for (int r = 0; r < 3; r++) {
+        n[r] = d->nrm[r][0] * nin[0] + d->nrm[r][1] * nin[1] + d->nrm[r][2] * nin[2];
+      }
+      n[2] -= 1.f;
+      const float dot = v[0] * n[0] + v[1] * n[1] + v[2] * n[2];
+      const float rfl[3] = {v[0] * n[2], v[1] * n[2], v[2] * n[2]};
+      const float len = std::sqrt(std::max(rfl[0] * rfl[0] + rfl[1] * rfl[1] + rfl[2] * rfl[2], 1e-12f));
+      s_env.vs[k] = (n[0] * dot + rfl[0]) * (-0.5f / len) + 0.5f;
+      s_env.vt[k] = (n[1] * dot + rfl[1]) * (-0.5f / len) + 0.5f;
+    }
+    if (!ok) {
+      continue;
+    }
+    if ((state->tcc & CTR_TCC_CULL_BACK) && g_soft_cull_enable) {
+      const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
+                      (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+      if (g_soft_cull_flip ? a > 0 : a < 0) {
+        continue;
+      }
+    }
+    if ((tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
+        (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
+      continue;
+    }
+    s_env.tex = env_tex;
+    s_env.etie = true;
+    raster_triangle(*state, tri, true, fog);
+    s_env.tex = -1;
+    s_env.etie = false;
+    g_soft.cur.triangles++;
+    softstats::cur->tris++;
+  }
+}
+
+void ctr_gpu_etie_end(void) {}
+int ctr_gpu_etie_ready(void) {
+  return 1;
+}
 
 int ctr_gpu_skinned_mesh_create(const void* verts,
                                 int vertex_count,

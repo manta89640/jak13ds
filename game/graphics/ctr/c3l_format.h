@@ -53,7 +53,11 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // reader would draw both versions (it is refused: version 19).
 // (AI-assisted, j2vis) v20: the prototypes the game hides by task state (Jak II), see ProtoVis.
 // Otherwise v19 (files without such prototypes are v19's byte for byte but for the version).
-constexpr uint32_t kVersion = 20;
+// (AI-assisted, j2water2) v21: envmapped tie shine (Jak II), see ExtEnvTie. Otherwise v20 (files
+// without envmapped ties are v20's byte for byte but for the version).
+constexpr uint32_t kVersion = 21;
+// (AI-assisted, j2water2) the first version with the envmapped tie table (ExtEnvTie)
+constexpr uint32_t kEnvTieVersion = 21;
 // (AI-assisted, j2vis) the first version with the prototype visibility table (ExtProtoVis)
 constexpr uint32_t kProtoVisVersion = 20;
 // (AI-assisted) the first version with near chunks (StreamChunk), run spheres and kDrawAlpha80
@@ -257,6 +261,40 @@ struct ProtoVis {
   uint32_t run_count;
 };
 static_assert(sizeof(ProtoVis) == 64);
+
+/*!
+ * (AI-assisted, j2water2) v21: envmapped ties (Jak II ETIE: tie prototypes with an envmap shader,
+ * the PC's NORMAL / TRANS / WATER_ENVMAP categories). The PC draws them twice (Tie3: the base draw,
+ * then envmap_second_pass_draw: etie.vert's envmap coordinates from the camera space position and
+ * normal, color = proto tint * the time of day's env color, added with the destination alpha as its
+ * weight). The converter keeps the base draws (as before) and lists them here with the shine's
+ * texture, mode and tint; the runtime draws both in one (texture unit 2). Their chunks get each
+ * vertex's normal. ExtHeader::size >= kExtHeaderV21Size, then this at ext_offset + 64 (after
+ * ExtProtoVis, zero when the level has no toggled prototypes). Older files: no shine.
+ */
+constexpr uint32_t kExtHeaderV21Size = 80;
+struct ExtEnvTie {
+  uint32_t draw_count;     // EnvTieDraw[], by draw index
+  uint32_t draws_offset;   // absolute
+  uint32_t chunk_count;    // EnvTieChunk[], by chunk index
+  uint32_t chunks_offset;  // absolute
+};
+static_assert(sizeof(ExtEnvTie) == kExtHeaderV21Size - kExtHeaderV20Size);
+struct EnvTieDraw {
+  uint32_t draw;     // index into the file's draws (a tie base draw)
+  uint16_t texture;  // the envmap texture (index into the textures)
+  uint16_t pad;
+  uint32_t mode;     // its tfrag3 DrawMode (clamp, filter; blending Cs * Ad + Cd)
+  uint8_t tint[4];   // the prototype's tint (etie.vert proto_tint: 0xff = 1.0)
+};
+static_assert(sizeof(EnvTieDraw) == 16);
+// a chunk with envmapped tie draws: int8_t normal[4] (x, y, z: world space * 127, 0) per vertex of
+// the chunk at normals_offset (absolute; in the extension's section, loaded with the level)
+struct EnvTieChunk {
+  uint32_t chunk;
+  uint32_t normals_offset;
+};
+static_assert(sizeof(EnvTieChunk) == 8);
 
 /*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
