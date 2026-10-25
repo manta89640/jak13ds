@@ -77,6 +77,16 @@ class CtrDirect {
     m_allow_depth = false;
   }
 
+  /*!
+   * (AI-assisted, gpuopt) Record mode: flush() keeps the batches (state and vertices) instead of
+   * drawing them; replay_recorded() draws them later in the same frame (Jak II's sky with
+   * sky_last). depth_tested: as the deferred sky, only where nothing opaque wrote depth (GEQUAL
+   * against the cleared depth, no depth writes; the caller sets ctr_gpu_set_depth_far).
+   */
+  void set_record(bool on);
+  bool has_recorded() const { return !m_rec.empty(); }
+  void replay_recorded(bool depth_tested);
+
   struct Stats {
     int packets = 0;
     int triangles = 0;
@@ -142,6 +152,15 @@ class CtrDirect {
   std::vector<ctr_vertex> m_verts;
   bool m_quads = false;  // m_verts holds quads (sprites, ctr_gpu_draw_quads), not triangles
   void batch_mode(bool quads);
+  // (AI-assisted, gpuopt) set_record: the batches flush() kept, their vertices in m_rec_verts
+  struct RecBatch {
+    ctr_draw_state st;
+    bool quads;
+    u32 first, count;
+  };
+  bool m_record = false;
+  std::vector<RecBatch> m_rec;
+  std::vector<ctr_vertex> m_rec_verts;
 
   Stats m_stats;
 };

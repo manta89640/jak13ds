@@ -229,6 +229,16 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
   }
   void render(DmaFollower& dma, CtrRenderState& rs) override {
     m_direct->reset_state();
+    // (AI-assisted, gpuopt) sky_last for Jak II's sky (sky-work's GIF packets): its batches are
+    // kept and drawn by the sky hook after the opaque level and models, depth tested against them
+    // (as Jak 1's CtrSky): the ~3 screens of sky behind the city fail the depth test instead of
+    // being blended and written. Not in menu frames (the sky bucket draws the copy of the last
+    // frame there, CtrJak2BlitRenderer). Same picture.
+    bool defer = m_id == (int)jak2::BucketId::SKY_DRAW && ctr_settings().sky_last &&
+                 ctr_direct_menu_screen() < 0;
+    if (defer) {
+      m_direct->set_record(true);
+    }
 #ifndef __3DS__
     static const char* dump = getenv("CTR_DIRECT_DUMP");  // host diagnosis: ",id,frame,"
     if (dump && strstr(dump, fmt::format(",{},{},", m_id, rs.frame_idx).c_str())) {
@@ -240,6 +250,13 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
       // (AI-assisted) draw-raw-image puts its image upload (a texture animation array) here
       const VifCode vif0 = dma.current_tag_vifcode0();
       if (vif0.kind == VifCode::Kind::PC_PORT && vif0.immediate == kAnimStart) {
+        if (defer) {
+          // (AI-assisted, gpuopt) a texture upload after kept batches: they are drawn now, in
+          // order (they may read what it changes), and the rest of the bucket as usual
+          m_direct->set_record(false);
+          m_direct->replay_recorded(false);
+          defer = false;
+        }
         dma.read_and_advance();
         handle_anim_array(dma, rs);
         continue;
@@ -250,6 +267,12 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
       }
     }
     m_direct->flush();
+    if (defer) {
+      m_direct->set_record(false);
+      if (m_direct->has_recorded()) {
+        ctr_gpu_set_sky_hook(&CtrJak2DirectRenderer::deferred_sky, this);
+      }
+    }
     m_direct->end_offscreen();
     log_stats(*m_direct, rs, m_name, m_id);
 #ifndef __3DS__
@@ -258,6 +281,22 @@ class CtrJak2DirectRenderer : public CtrBucketRenderer {
   }
 
  private:
+  // (AI-assisted, gpuopt) the sky hook (sky_last): the kept batches at depth 0 where nothing
+  // opaque wrote depth
+  static void deferred_sky(void* arg) {
+    auto* self = static_cast<CtrJak2DirectRenderer*>(arg);
+#ifndef __3DS__
+    const std::string keep = ctr_gpu_soft_bucket_name();
+    ctr_gpu_soft_bucket("sky");
+#endif
+    ctr_gpu_set_depth_far(1);
+    self->m_direct->replay_recorded(true);
+    ctr_gpu_set_depth_far(0);
+#ifndef __3DS__
+    ctr_gpu_soft_bucket(keep.c_str());
+#endif
+  }
+
   std::unique_ptr<CtrDirect> m_direct;
 };
 
