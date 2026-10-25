@@ -7729,7 +7729,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     u32 chk_near = 0;
     for (const auto& gcl : lev.lod_clusters) {
       if (lod_skip && !(gcl.flags & CtrLevelData::kClPlain)) {
-        const float sw = by_error ? gcl.raw[0] : gcl.raw[1];
+        // (lod_switch_error: lodnear's PS2 floor and titlemove's title minimum raise the error)
+        const float sw = by_error ? std::max(std::max(gcl.raw[0], gcl.raw[1] * lev.lod_floor_k),
+                                             lev.lod_min_e)
+                                  : gcl.raw[1];
         bool far = !(k > 0);
         if (!far) {
           const float dx = gcl.c[0] - cx, dy = gcl.c[1] - cy, dz = gcl.c[2] - cz;
@@ -8280,7 +8283,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     if (f & (CtrLevelData::kClHas << 1)) {
       if (shrub_ps2) {
-        add(cl.raw[1] * shrub_k * det);
+        add(cl.raw[1] * kShrubFarK * shrub_k * det);  // (as decide_dist: fable1's far plane)
       } else if (shrub_fixed) {
         add(shrub_fixed_dist);
       } else {
