@@ -80,6 +80,8 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
     {"particles", "reduced", "max_sprites", "1000"},
     {"particles", "reduced", "sprite_max_size", "0.5"},
     {"particles", "reduced", "sprite_min_alpha", "6"},
+    /* (AI-assisted, j1ocean) the safe preset's particles = reduced keeps the old 0.7 density */
+    {"particles", "reduced", "particle_density", "0.7"},
     {"text_size", NULL, "text_scale", NULL},
 };
 
@@ -102,7 +104,7 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"io_cache", "on"},
     {"io_checksum", "off"},
     {"c3l_read_buffer", "256"},
-    {"particle_density", "0.7"},
+    {"particle_density", "1"}, /* (AI-assisted, j1ocean) every particle (was 0.7) */
     {"anim_lod", "on"},
     {"merc_lod_scale", "1"},
     {"ocean", "full"},

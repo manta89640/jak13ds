@@ -618,8 +618,16 @@ PC it runs with `gk --ctr-gfx`.
     `CtrOceanFull.cpp`. Their textured pass becomes one indexed triangle list per bucket, written
     in place into the frame's vertex memory (`ctr_gpu_ocean_full_reserve` / `ctr_gpu_ocean_full_draw`,
     `ctr_ocean_full.v.pica`: the GS's x, y, z, Q, S, T and fog; perspective correct texturing).
-  - Left out: the env map passes (sky reflection added through the destination alpha); the near
-    ocean is at least `ocean_near_alpha` (0.6) opaque instead.
+  - (AI-assisted, j1ocean) The sky reflection (the PS2's env map passes: environment-ocean times
+    the time of day's env-color at the view direction, added with the destination alpha as its
+    weight) is drawn in the same draw as the textured pass: the native programs give each vertex
+    the env map's texture coordinates (mid tiles of call 73, the transitions 107 / 275, the near
+    patches of call 39; not the far ocean or call 46), `ctr_gpu_ocean_full_draw_env` adds
+    env * weight in combiner stage 2 (texture unit 2, clamped). Weight: wave texture alpha
+    (environment-ocean-alphamod's) times the vertex alpha (mid) or the texture alpha with the
+    vertex alpha as the blend weight (near): the PS2's sum but where it saturates. No extra
+    triangles; one more texture read per ocean pixel. `ocean_near_alpha` (default 0: the PS2's
+    alpha) is a floor on the near ocean's alpha.
   - Log: `[ctr] ocean full (<levels>): render thread N ms/frame (texture, far+mid, near)` once
     per set of levels, and a warning (at most every 300 frames) when parts were not drawn
     (unexpected DMA, no vertex memory, refused transition pieces). The game thread's cost is in

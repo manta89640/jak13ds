@@ -63,9 +63,9 @@ struct CtrSettings {
   // render thread's 1-1.7 ms for it, half as often by default)
   int ocean_texture_rate = 2;
   // (AI-assisted) ocean = full: the near ocean's alpha is at least this (0..1; the PS2's is 0.5
-  // within 12 m of the camera, 1 from 24 m on). It stands in for the sky reflection pass the 3DS
-  // leaves out; 0.5 = the textured pass as on the PS2 and PC.
-  float ocean_near_alpha = 0.6f;
+  // within 12 m of the camera, 1 from 24 m on). (j1ocean) 0 = the PS2's own alpha: the sky
+  // reflection is drawn now (ctr_gpu_ocean_full_draw_env), the old 0.6 stood in for it.
+  float ocean_near_alpha = 0.f;
   // the sprite distorter: particles that warp what's behind them (portals, heat haze); each frame
   // with such particles costs one copy of the screen
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)

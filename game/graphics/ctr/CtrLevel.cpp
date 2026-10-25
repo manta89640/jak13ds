@@ -3198,13 +3198,18 @@ bool CtrLevels::load_file(const fs::path& path,
     std::vector<c3l::MercVertex> mverts;
     // (AI-assisted) generated low LODs (c3l::kMercGenLodSuffix): the model they belong to (same
     // vertices) gets their draws as gen_draws, in one mesh with its own
+    // (AI-assisted, j1ocean) none for the pickups (c3l::merc_gen_lod_exempt: always full detail)
     std::unordered_map<std::string, u32> gen_of;
+    bool any_gen = false;
     const size_t gen_suffix_len = strlen(c3l::kMercGenLodSuffix);
     for (u32 mi = 0; mi < models.size(); mi++) {
       const std::string n(models[mi].name, strnlen(models[mi].name, sizeof(models[mi].name)));
       if (n.size() > gen_suffix_len &&
           n.compare(n.size() - gen_suffix_len, gen_suffix_len, c3l::kMercGenLodSuffix) == 0) {
-        gen_of[n.substr(0, n.size() - gen_suffix_len)] = mi;
+        any_gen = true;
+        if (!c3l::merc_gen_lod_exempt(n)) {
+          gen_of[n.substr(0, n.size() - gen_suffix_len)] = mi;
+        }
       }
     }
     out->merc_models.reserve(models.size());  // (AI-assisted) no copies while it grows
@@ -3216,8 +3221,8 @@ bool CtrLevels::load_file(const fs::path& path,
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
-      if (!gen_of.empty() && md.name.find(c3l::kMercGenLodSuffix) != std::string::npos) {
-        continue;  // (drawn as its model's gen_draws)
+      if (any_gen && md.name.find(c3l::kMercGenLodSuffix) != std::string::npos) {
+        continue;  // (drawn as its model's gen_draws, or not at all: an exempt model's)
       }
       for (const auto& me : mod_effects) {
         if (me.model != mi || (u64)me.first_mask + me.frag_count > mod_masks.size() ||

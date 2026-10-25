@@ -1106,3 +1106,24 @@ default (on). It never had anything to do with the red HUD shard (see below).
   now has a canary on every 2D / HUD quad (no parallelogram, or a corner over 16 screen widths
   out: a `[ctr] sprite canary` line with the sprite's data and a saved frame, rate limited): if the
   next report's log has none, the data the CPU sends is right and the mixing happens after it.
+
+## Ocean sky reflection, particles, pickups (AI-assisted, Oct 25, j1ocean)
+
+- **Sky reflection** (the PS2 ocean's env map pass, `ctr_gpu_ocean_full_draw_env`, see
+  3ds_build.md): folded into the textured draw, so no extra triangles or draws; one more texture
+  read per ocean pixel (texture unit 2) and a 64x64 reflection texture made again only when the
+  env color changes (0-4% of frames). `ocean_near_alpha` default 0.6 -> 0 (the PS2's alpha).
+  Host 3DS renderer vs PC renderer at the village1 shore (same pose, noon): the ocean's blue-teal
+  and dark streaks now match the PC; before it was a flat lighter cyan.
+- **particle_density** default 0.7 -> 1 (every particle, like the PS2); `particles = reduced`
+  (the safe preset) keeps 0.7.
+- **Pickups always full detail**: power cells, scout flies, orbs, orb caches, eco vents never
+  use the generated low LOD (`c3l::merc_gen_lod_exempt`).
+- Azahar (private instance, sound off, stats_period 5, defaults; one run): title build 14.4-20.0
+  ms, GPU busy 15.3-20.8 ms, 124-163k triangles, ocean build 1.8-3.8 ms; beach-start (camera
+  turned to the sea) build 16.6-18.1, busy 17.4-19.0, 61-123k triangles, ocean 3.0; misty-start
+  build 12.6-15.4, busy 13.4-16.3, 63-87k triangles, ocean 3.05; 29.9 fps throughout. There was
+  no same-run "before" (no switch for the reflection, one run). Earlier documented numbers from
+  other builds and configs: fable1 title build 17.5-24.0 ms with sound on (ocean 2.5 ms); Oct 17
+  beach-start 14.1 ms and misty-start 11.5 ms, standing. Azahar doesn't model the GPU's fill
+  cost: the extra texture read and the extra particles are only priced on hardware.

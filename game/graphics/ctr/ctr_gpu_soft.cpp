@@ -308,6 +308,7 @@ void sky_hook(const ctr_draw_state* st) {
 // stage. Env CTR_SOFT_NO_FOG=1: none (the old frames).
 float s_fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f}, s_fog1[4] = {0.f, 1.f, 0.f, 0.f};
 uint8_t s_fog_rgb[3] = {0, 0, 0};
+int s_env_tex = -1;  // (AI-assisted, j1ocean) the sky reflection's texture (ocean_full_draw)
 bool s_nofog = false;
 float s_mfog_hvdf_w = 255.f, s_mfog_lo = 0.f, s_mfog_hi = 0.f;
 int s_shader_opt = 1;
@@ -342,9 +343,11 @@ void shade_pixel(const ctr_draw_state& st,
                  float s,
                  float t,
                  bool tex_alpha_full = false,
-                 float fog = 0.f) {
+                 float fog = 0.f,
+                 const float* env = nullptr) {
   // color in GS units (0x80 = 1.0 for vertex color / alpha)
   float r = col[0], g = col[1], b = col[2], a = col[3];
+  float tex_a = 255.f;  // (AI-assisted, j1ocean) the texture's alpha (the sky reflection's weight)
   if (s_depth_far) {
     z = 0.f;  // (AI-assisted) ctr_gpu_set_depth_far
   }
@@ -355,6 +358,7 @@ void shade_pixel(const ctr_draw_state& st,
   if (st.tex >= 0 && st.tex < (int)g_soft.textures.size() && g_soft.textures[st.tex].used) {
     float tc[4];
     sample(g_soft.textures[st.tex], st, s, t, tc);
+    tex_a = tc[3];
     if (st.decal) {
       r = tc[0];
       g = tc[1];
@@ -383,6 +387,19 @@ void shade_pixel(const ctr_draw_state& st,
     r = std::min(r, 255.f) * (1.f - f) + s_fog_rgb[0] * f;
     g = std::min(g, 255.f) * (1.f - f) + s_fog_rgb[1] * f;
     b = std::min(b, 255.f) * (1.f - f) + s_fog_rgb[2] * f;
+  }
+  if (env && s_env_tex >= 0 && s_env_tex < (int)g_soft.textures.size() &&
+      g_soft.textures[s_env_tex].used) {
+    // (AI-assisted, j1ocean) ctr_gpu_ocean_full_draw_env: + env map (clamped) * weight after the
+    // fog; weight = tex.a (0xff = 1), times v.a (0x80 = 1) when the TCC is set (mid ocean)
+    ctr_draw_state es = st;
+    es.clamp_s = es.clamp_t = 1;
+    float ec[4];
+    sample(g_soft.textures[s_env_tex], es, env[0], env[1], ec);
+    const float w = tex_a / 255.f * ((st.tcc & 1) ? col[3] / 128.f : 1.f);
+    r = std::min(r, 255.f) + ec[0] * w;
+    g = std::min(g, 255.f) + ec[1] * w;
+    b = std::min(b, 255.f) + ec[2] * w;
   }
   const bool ss_on = softstats::enabled() != 0 && !s_query;
   if (ss_on) {
@@ -499,7 +516,8 @@ const bool s_soft_f24 = getenv("CTR_SOFT_F24") != nullptr;
 void raster_triangle(const ctr_draw_state& st,
                      const ctr_vertex* v_in,
                      bool tex_alpha_full = false,
-                     const float* fog = nullptr) {
+                     const float* fog = nullptr,
+                     const float* env = nullptr) {
   ctr_vertex vq[3];
   const ctr_vertex* v = v_in;
   if (s_soft_f24) {
@@ -539,7 +557,12 @@ void raster_triangle(const ctr_draw_state& st,
       float s = w0 * v[0].s + w1 * v[1].s + w2 * v[2].s;
       float t = w0 * v[0].t + w1 * v[1].t + w2 * v[2].t;
       const float f = fog ? w0 * fog[0] + w1 * fog[1] + w2 * fog[2] : 0.f;
-      shade_pixel(st, px, py, z, col, s, t, tex_alpha_full, f);
+      float e[2] = {0.f, 0.f};  // (AI-assisted, j1ocean) the sky reflection's texture coordinates
+      if (env) {
+        e[0] = w0 * env[0] + w1 * env[2] + w2 * env[4];
+        e[1] = w0 * env[1] + w1 * env[3] + w2 * env[5];
+      }
+      shade_pixel(st, px, py, z, col, s, t, tex_alpha_full, f, env ? e : nullptr);
     }
   }
 }
@@ -888,7 +911,11 @@ int ctr_gpu_ocean_full_reserve(int max_verts,
 }
 
 namespace {
-void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_count, bool clip) {
+void ocean_full_draw(const ctr_draw_state* state,
+                     int vert_count,
+                     int index_count,
+                     bool clip,
+                     int env_tex = -1) {
   if (!g_ocean_full_open) {
     return;
   }
@@ -898,6 +925,7 @@ void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_coun
   }
   std::vector<ctr_vertex> out;
   std::vector<float> fog;  // (AI-assisted, far-fog) the vertices' fog amounts
+  std::vector<float> env;  // (AI-assisted, j1ocean) es, et per vertex (with env_tex)
   out.reserve(index_count);
   fog.reserve(index_count);
   for (int i = 0; i + 2 < index_count; i += 3) {
@@ -927,6 +955,10 @@ void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_coun
       o.a = v.a;
       out.push_back(o);
       fog.push_back(fog_on() ? std::clamp(v.fog, 0.f, 1.f) : 0.f);
+      if (env_tex >= 0) {
+        env.push_back(v.es);
+        env.push_back(v.et);
+      }
     }
   }
   if (!out.empty()) {
@@ -934,11 +966,14 @@ void ocean_full_draw(const ctr_draw_state* state, int vert_count, int index_coun
     softstats::prog(0);
     g_soft.cur.draws++;
     if (state) softstats::draw(*state);
+    s_env_tex = env_tex;
     for (size_t i = 0; i + 2 < out.size(); i += 3) {
-      raster_triangle(*state, out.data() + i, false, fog.data() + i);
+      raster_triangle(*state, out.data() + i, false, fog.data() + i,
+                      env_tex >= 0 ? env.data() + 2 * i : nullptr);
       g_soft.cur.triangles++;
       softstats::cur->tris++;
     }
+    s_env_tex = -1;
   }
 }
 }  // namespace
@@ -967,6 +1002,21 @@ void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state,
   s_fog_rgb[1] = fog_g;
   s_fog_rgb[2] = fog_b;
   ocean_full_draw(state, vert_count, index_count, true);
+}
+
+// (AI-assisted, j1ocean) the sky reflection in the same draw (shade_pixel's env)
+void ctr_gpu_ocean_full_draw_env(const ctr_draw_state* state,
+                                 int vert_count,
+                                 int index_count,
+                                 uint8_t fog_r,
+                                 uint8_t fog_g,
+                                 uint8_t fog_b,
+                                 int env_tex) {
+  softstats::prog(7);
+  s_fog_rgb[0] = fog_r;
+  s_fog_rgb[1] = fog_g;
+  s_fog_rgb[2] = fog_b;
+  ocean_full_draw(state, vert_count, index_count, true, env_tex);
 }
 
 // (AI-assisted) the two cloud layers as two added passes (GS modulate with the constant color)

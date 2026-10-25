@@ -1204,7 +1204,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     return q_f24;
   };
   // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
-  // (the yeti) when its first bone is further from the camera than max(25 m, 12.5 x the model's
+  // (the yeti; (j1ocean) never the pickups: CtrLevel gives those no gen_draws,
+  // c3l::merc_gen_lod_exempt) when its first bone is further from the camera than max(25 m, 12.5 x the model's
   // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
   // address of its bone matrices)
   // (AI-assisted, streaming) Jak's place (his first bone's tmat[3]: world = camera position +

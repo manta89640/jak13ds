@@ -658,7 +658,7 @@ void CtrOceanFull::ocean_env(u64 tex0, const float color[4]) {
     }
     const u8* bytes = (const u8*)m_refl_texels.data();
     if (m_refl < 0) {
-      m_refl = ctr_gpu_tex_create_mipmapped(m_refl_w, m_refl_h, bytes);
+      m_refl = ctr_gpu_tex_create(m_refl_w, m_refl_h, bytes);  // clamped: no mip levels
     } else {
       ctr_gpu_tex_update(m_refl, bytes);
     }
