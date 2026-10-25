@@ -1250,14 +1250,15 @@ void CtrRenderer::draw_pmode_fade() {
 // of a level shown again (dormant) or of a camera cut, something in view is missing: tie LOD groups
 // drawn far for want of their near chunks, dormant tie chunks not read back yet
 // (CtrLevels::note_late_in_view). Its first visible frame is complete, not filling in on screen.
-// (AI-assisted, j2pop) Jak II: while what is missing gets fewer (a new least count within kStallMs), at
-// most kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
+// (AI-assisted, j2pop) Jak II: while what is missing gets fewer (a new least count within
+// kStallMs, 2.5 s: in Azahar a continue to the slums gave up after 1.5 s without one), at most
+// kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
 // follows its voice stream): only the picture waits. (Was at most 1.5 s: HW Oct 25, the title
 // intro gave up with 102 tie LOD groups drawn far and a continue to the slums with 200, read back
 // over the next seconds in view: the user's "rocks pop in".)
 float CtrRenderer::hold_black(float alp) {
   // (Jak 1: 1.5 s, as before)
-  const double kMaxHoldMs = m_jak2 ? 6000.0 : 1500.0, kStallMs = 1500.0;
+  const double kMaxHoldMs = m_jak2 ? 6000.0 : 1500.0, kStallMs = m_jak2 ? 2500.0 : 1500.0;
   bool shown_or_cut = false;
   const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
   const double now = ctr_gpu_time_ms();

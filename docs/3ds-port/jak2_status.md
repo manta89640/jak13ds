@@ -1062,7 +1062,8 @@ PC. Format and runtime: `c3l_format.md` "Prototype visibility (v20)".
     doesn't make some chunks: shrubs and distance-limited ties that are more than 60 m beyond their
     largest draw distance from the camera, its 2 s lead or Jak.
   - A load that makes room frees those chunks of the levels already loaded.
-  - These levels (dist_free) free far chunks again whenever the heap is below stream_reserve_kb.
+  - ~~These levels (dist_free) free far chunks again whenever the heap is below stream_reserve_kb.~~
+    Removed by j2pop (below): only a load or read back that would fail frees chunks.
   - A freed chunk is read back once the camera comes within 30 m beyond its draw distance:
     nearest first, at most 2 MB per job.
   - A chunk not back in time is held hidden in view, like a dormant level's.
@@ -1073,3 +1074,47 @@ PC. Format and runtime: `c3l_format.md` "Prototype visibility (v20)".
     j2vis's host strip shot.
   - Azahar: strip left 423 chunks (14.5 MB) for later, with 0 failed creates. Linear free was
     13194 KB after the load (was 128 KB) and 5556 KB after the read-backs.
+
+## Pop-in and title fps from the HW log of Oct 25 (j2pop)
+
+(AI-assisted)
+
+- **User report** (real New 3DS, build 3ds-sdcard-oct25d; log reports/hw-oct25):
+  - Rocks and other small details pop in on the title screen and in Haven City.
+  - Visible fps drops on the title sequence.
+- **Causes:**
+  - Distance freeing ran whenever linear free was under stream_reserve_kb. The stream arena keeps
+    linear free near that floor in normal city play, so chunks were freed and read back as the
+    camera turned: 13 "freed by distance, reading back" lines.
+  - A continue to the slums: ctykora's 2.7 MB texture pool made room by freeing 7.7 MB of chunks
+    far from the stale camera. 2 MB of them were where the camera went next.
+  - The black hold gave up after 1.5 s with 102 tie LOD groups still drawn far (title intro), and
+    200 after the continue. They then filled in on screen.
+  - Title flight: the city's light palettes (neon flicker, flames:
+    mood-funcs.gc update-mood-ctysluma) move every frame. Every light vertex in view was rewritten
+    every second frame: 5.3 ms of time of day per frame, spikes to 19-45 ms, render build 22-27 ms,
+    and 40-66 of 150 frames shown for 3 vblanks. The game thread (logic ~30 ms, GOAL) waited 5-10
+    ms per frame for the render thread.
+- **Fixes** (CtrLevel.cpp "Distance freeing", CtrRenderer.cpp hold_black):
+  - dist_update frees nothing.
+  - Only make_room (an allocation that failed) and a read back that would leave under 512 KB free
+    distance-free chunks: the farthest first, about what is wanted + 1.5 MB (dist_make_room).
+  - A second make_room in the same job frees all far chunks; the texture, mesh and model sites
+    retry after it.
+  - Jak II black hold: lasts while what is missing keeps getting fewer (a new least count within
+    2.5 s), at most 6 s. Jak 1 keeps 1.5 s.
+  - Jak II heavy frames take the time of day weights every third frame instead of every second (at
+    most two frames behind, the same for every group).
+  - With enough memory the output is the same.
+- **Checks:**
+  - Host, all three EXIT 0:
+    - `jak2_title_city`: ends at (1065.98, 0.52, 194.46) target-hide; no distance freeing.
+    - `jak2_route`: the same positions as j2cull's run.
+    - `jak2_strip_mem` (CTR_SOFT_LINEAR_KB=25400): strip left 435 chunks for later; 0 "no memory";
+      no freeing while walking.
+  - Azahar (emu-j2pop, sound off, volume 0; reports/j2pop/azahar):
+    - The title intro was held black 1063 ms and complete at fade-in (HW before: gave up at 1527 ms).
+    - City: 0 chunks freed. ctyindb's load left 245 chunks for later (a load that would not fit);
+      18 near ones were read back.
+    - Title flight: time of day 2.0-3.2 ms per frame, 2/3 of heavy frames take no new weights,
+      29.1-29.9 fps.
