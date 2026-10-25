@@ -45,6 +45,11 @@ extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 // Loading
 // ---------------------------------------------------------------------------
 
+#ifndef __3DS__
+// (AI-assisted, perfv2) host diagnostic (ctr_gpu_soft.cpp): mesh handle -> what it is
+std::map<int, std::string>& ctr_soft_mesh_desc();
+#endif
+
 namespace {
 // (AI-assisted, title3) host diagnostic, env CTR_POP_LOG: per level draw, what changed on screen
 // (chunks appearing / going by distance in view, tie LOD switches in view, groups late or held
@@ -1234,6 +1239,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   tod_make_act(t, t.target_w, &t.act);
   if (day) {
     t.dver++;
+    t.day_move_frame = frame;  // (AI-assisted, perfv2) the spread of its rewrites (TodPass)
     auto& seen = tod_seen();
     std::lock_guard<std::mutex> lk(seen.lock);
     auto& wl = seen.by_level[level];
@@ -1254,11 +1260,16 @@ static_assert(sizeof(c3l::Vertex) == 16);
 // (tod_refresh_all): no version checks, and the rgb written as a halfword and a byte (the alpha
 // byte isn't read): ~6 instructions per vertex instead of ~15
 typedef u16 __attribute__((may_alias)) tod_half;
+// (AI-assisted, perfv2) the vertex rewrites run through level meshes in FCRAM (~200 ns a missed
+// cache line on hardware, 2 vertices a line: the loops wait on memory, Azahar can't show it): the
+// line this many bytes ahead is asked for early (PLD, as ctr_mem.S's copies)
+constexpr int kTodPrefetch = 128;
 inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end) {
   const u32* const tab = t.table.data();
   u8* p = (u8*)(v + first);
   u8* const e = (u8*)(v + end);
   for (; p + 32 <= e; p += 32) {
+    __builtin_prefetch(p + kTodPrefetch, 1);  // (AI-assisted, perfv2)
     const u32 a = tab[*(const tod_half*)(p + 6)];
     const u32 b = tab[*(const tod_half*)(p + 22)];
     *(tod_half*)(p + 12) = (u16)a;
@@ -1283,6 +1294,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
   tod_word* const e = (tod_word*)(v + end);
   if (plain) {
     for (; w < e; w += 4) {
+      __builtin_prefetch(w + kTodPrefetch / 4, 1);  // (AI-assisted, perfv2)
       const u32 idx = w[1] >> 16;
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
       w[3] = (w[3] & 0xff000000u) | rgb;
@@ -1291,6 +1303,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
   }
   const u32 ntab = (u32)t.table.size();
   for (; w < e; w += 4) {
+    __builtin_prefetch(w + kTodPrefetch / 4, 1);  // (AI-assisted, perfv2)
     const u32 idx = w[1] >> 16;
     if (idx < ntab) {
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
@@ -1469,6 +1482,14 @@ constexpr int kTodLights = 0, kTodRound = 1;
 // (AI-assisted, todlag) the group pass refreshes the whole table first (tod_refresh_all) when the
 // vertices drawn are this many times the table's entries
 constexpr u64 kTodFreshRatio = 3;
+// (AI-assisted, perfv2) a day move's group rewrites spread over this many frames (budget: the
+// vertices drawn / kTodSpreadFrames, at least kTodSpreadMin a frame). A day move is one 64th of
+// a palette's weight every ~40 frames in gameplay: one move rewrote every group drawn in one frame
+// (village2 on hardware: ~90k vertices, 14-22 ms on the render thread, 13 times per 15 s); a group
+// a step behind for a few frames differs by at most ~4 color units. Two moves behind (the title's
+// fast day): rewritten at once.
+constexpr u64 kTodSpreadFrames = 6;
+constexpr s64 kTodSpreadMin = 4000;
 // (AI-assisted, todlag) the time of day's clock: ctr_gpu_time_ms; on the host times env
 // CTR_TOD_TIME_SCALE (statistics only: the host is ~10x faster than Azahar)
 inline double tod_now_ms() {
@@ -1486,6 +1507,14 @@ struct TodPass {
   bool fresh_ok = false;  // (AI-assisted, todlag) many vertices drawn: tod_refresh_all first
   bool fresh = false;     // the table is all up to date (tod_refresh_all done this pass)
   u32 rewritten = 0;
+  u32 light_verts = 0;  // (AI-assisted, perfv2) the light pass's vertices written
+  // (AI-assisted, perfv2) within kTodSpreadFrames of a day move: a group exactly that one move
+  // behind (its colors this level's blend of the move before, not the file's) waits while the
+  // frame's vertex budget spread_left is used up (drawn with colors one day step old, at most
+  // kTodSpreadFrames frames); everything else is rewritten at once as before
+  bool spread = false;
+  s64 spread_left = 0;
+  u32 deferred = 0;
 };
 std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
   static std::vector<std::pair<uintptr_t, uintptr_t>> d;  // render thread
@@ -1566,12 +1595,15 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       for (const auto& [lmask, lend] : lights.groups) {
         if ((lmask & moved) && lend > begin) {
           for (u32 k = begin; k < lend; k++) {
+            // (AI-assisted, perfv2) the light vertices are scattered: the one 8 ahead asked for
+            __builtin_prefetch(w + 4 * vl[std::min<u32>(k + 8, lend - 1)], 1);
             tod_word* x = w + 4 * vl[k];
             x[3] = (x[3] & 0xff000000u) | tod_entry(t, x[1] >> 16);
           }
           flo = std::min<int>(flo, vl[begin]);
           fhi = std::max<int>(fhi, vl[lend - 1]);
           looked += lend - begin;
+          ps.light_verts += lend - begin;
         }
         begin = lend;
       }
@@ -1584,12 +1616,17 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       if (gr.ver >= day_last) {
         return;
       }
+      const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
+      if (ps.spread && gr.ver != 0 && gr.dver + 1 == t.dver && ps.spread_left < end - first) {
+        ps.deferred++;  // (AI-assisted, perfv2) one day step behind: a later frame of the spread
+        return;
+      }
+      ps.spread_left -= std::max(0, end - first);
       if (ps.fresh_ok && !ps.fresh) {
         // (at the frame's first group to rewrite; versions don't move until the next tod_update)
         tod_refresh_all(t);
         ps.fresh = true;
       }
-      const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
       if (end > first) {
         if (ps.fresh && gr.plain) {
           tod_write_fresh(t, v, first, end);
@@ -5355,6 +5392,10 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   constexpr bool STR = NP > 0;
   constexpr int kP = NP > 0 ? NP : 1;
   float po[kP], pk0[kP], pk1[kP], pk2[kP];
+  // (AI-assisted, perfv2) unrolled: GCC kept the planes in this stack array and reloaded all four
+  // coefficients and the loop pointers for every run (~92 instructions per 3-plane run); unrolled
+  // they are scalars in VFP registers
+#pragma GCC unroll 4
   for (int i = 0; i < NP; i++) {
     po[i] = in.po[i];
     pk0[i] = in.pk[i][0];
@@ -5363,7 +5404,9 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   }
   const float scale = in.scale;
   u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
-  u64 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
+  // (AI-assisted, perfv2) u32 within one chunk (at most 65536 vertices, runs of u16 index counts):
+  // the u64 sums were adds / adc pairs through the stack per run
+  u32 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
   const c3l::VisRun* const runs = in.runs;
   const CtrLevelData::RunSphere* const spheres = in.spheres;
   const c3l::RunLod* const run_lod = in.run_lod;
@@ -5404,6 +5447,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
       const auto& rs = spheres[r];
       if (rs.r != 0xffff) {
         const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
+#pragma GCC unroll 4
         for (int i = 0; i < NP; i++) {
           if (!(po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z > rad)) {
             s = false;
@@ -5653,6 +5697,14 @@ double ctr_level_tod_take_ms() {
   return ms;
 }
 
+static double g_last_build_ms = 0;  // (AI-assisted, perfv2) render thread
+void ctr_level_note_build_ms(double ms) {
+  g_last_build_ms = ms;
+}
+double ctr_level_last_build_ms() {
+  return g_last_build_ms;
+}
+
 void ctr_level_set_detail(float t) {
   g_detail_t = std::clamp(t, 0.f, 1.f);
 }
@@ -5870,14 +5922,15 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_lod_groups_near = m_lod_frames = m_lod_tris[0] = m_lod_tris[1] = 0;
   }
   if (rs.log_now && m_tod_frames) {
-    lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
-             "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
+    lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored ({:.0f} light) {:.2f} ms "
+             "per level draw (most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
              "refreshed whole in {} level draws ({} heavy frames took no new weights); a pulsing "
-             "palette held in {} level draws",
-             m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames, m_tod_ms / m_tod_frames,
+             "palette held in {} level draws; {} group rewrites spread to a later frame",
+             m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames,
+             (double)m_tod_light_verts / m_tod_frames, m_tod_ms / m_tod_frames,
              m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_fresh, m_tod_skipped,
-             m_tod_held);
-    m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = 0;
+             m_tod_held, m_tod_deferred);
+    m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = m_tod_light_verts = m_tod_deferred = 0;
     m_tod_spread = m_tod_fresh = m_tod_skipped = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
@@ -7598,6 +7651,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_occ_max_ms = std::max(m_occ_max_ms, dt);
   }
   phase(kPhOcc);
+#ifndef __3DS__
+  // (AI-assisted, perfv2) host diagnostic, env CTR_SOFT_DRAW_PX: what each mesh drawn is (the
+  // soft renderer's per-draw fragment list names them)
+  if (getenv("CTR_SOFT_DRAW_PX")) {
+    for (const auto& vc : m_visible) {
+      if (vc.chunk < lev.meshes.size() && lev.meshes[vc.chunk] >= 0) {
+        const auto& ch = lev.chunks[vc.chunk];
+        ctr_soft_mesh_desc()[lev.meshes[vc.chunk]] =
+            fmt::format("{} chunk {} kind {} tier {} sphere ({:.0f} {:.0f} {:.0f} r {:.0f}) verts {}",
+                        lev.name, vc.chunk, ch.kind, ch.lod_tier, ch.bsphere[0], ch.bsphere[1],
+                        ch.bsphere[2], ch.bsphere[3], ch.vertex_count);
+      }
+    }
+  }
+#endif
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws
   u32 pop_tod = 0;  // (AI-assisted, title3: CTR_POP_LOG) groups rewritten
@@ -7622,6 +7690,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                      : 0;
       }
       ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
+      ps.spread = t.day_move_frame && rs.frame_idx - t.day_move_frame < kTodSpreadFrames;
+      ps.spread_left = std::max<s64>(kTodSpreadMin, (s64)(drawn / kTodSpreadFrames));
       for (const auto& vc : m_visible) {
         tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
       }
@@ -7651,6 +7721,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tod_spread += ps.rewritten;
     m_tod_fresh += ps.fresh ? 1 : 0;
     m_tod_heavy = ps.fresh_ok;  // (AI-assisted, fable1) the next frame's tod_update, see there
+    m_tod_light_verts += ps.light_verts;
+    m_tod_deferred += ps.deferred;
   }
 
   phase(kPhTod);

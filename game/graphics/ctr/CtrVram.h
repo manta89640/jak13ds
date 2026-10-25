@@ -36,6 +36,10 @@
 struct CtrTexture {
   int handle = -1;  // ctr_gpu texture
   int w = 0, h = 0;  // size of the GPU texture (1 << tw, 1 << th, clamped to 8..1024)
+  // (AI-assisted, perfv2) the part of the texture (normalized s0, t0, s1, t1) outside of which
+  // every texel has alpha 0, one texel more on each side (bilinear filtering reads half a texel
+  // out); the whole texture when there is none. Particles are drawn over it only (CtrSprite)
+  float box[4] = {0.f, 0.f, 1.f, 1.f};
 };
 
 class CtrVram {

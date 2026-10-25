@@ -272,6 +272,7 @@ struct CtrLevelData {
     // versions: + 1 per change of target_w (dver: of its day palettes); per palette its last;
     // lut[mask]: the last of the palettes in mask
     u32 ver = 0, dver = 0;
+    u64 day_move_frame = 0;  // (AI-assisted, perfv2) the frame of the last day move (dver + 1)
     u32 pal_ver[8] = {};
     u32 lut[256] = {};
     // the palettes a blend adds (weight not 0): their slots in colors and weights
@@ -831,6 +832,10 @@ float ctr_level_detail();
 /*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
  * of auto_detail's build time). */
 double ctr_level_tod_take_ms();
+// (AI-assisted, perfv2) the render thread's build time of the frame before (CtrRenderer), for the
+// work that can wait (impostor captures)
+void ctr_level_note_build_ms(double ms);
+double ctr_level_last_build_ms();
 
 class CtrTfragRenderer : public CtrBucketRenderer {
  public:
@@ -898,6 +903,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) c3l v16 time of day: blends, vertices recolored and their time (ms) since the
   // last log line, over m_tod_frames level draws; the most vertices in one draw
   u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
+  u64 m_tod_light_verts = 0;  // (AI-assisted, perfv2) of m_tod_verts: the light pass's
+  u64 m_tod_deferred = 0;     // (AI-assisted, perfv2) group rewrites spread to a later frame
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
   u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;

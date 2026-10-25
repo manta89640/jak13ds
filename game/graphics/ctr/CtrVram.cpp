@@ -952,6 +952,29 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // (AI-assisted) the PS2 button symbols of the font and the progress menu -> 3DS buttons
   ctr_button_art::patch(tex0, data.data(), w, h);
 
+  // (AI-assisted, perfv2) the texels with alpha (CtrTexture::box)
+  float box[4] = {0.f, 0.f, 1.f, 1.f};
+  {
+    int x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (int y = 0; y < h; y++) {
+      const u32* row = data.data() + (size_t)y * w;
+      for (int x = 0; x < w; x++) {
+        if (row[x] >> 24) {
+          x0 = std::min(x0, x);
+          x1 = std::max(x1, x);
+          y0 = std::min(y0, y);
+          y1 = std::max(y1, y);
+        }
+      }
+    }
+    if (x1 >= 0) {
+      box[0] = (float)std::max(0, x0 - 1) / (float)w;
+      box[1] = (float)std::max(0, y0 - 1) / (float)h;
+      box[2] = (float)std::min(w, x1 + 2) / (float)w;
+      box[3] = (float)std::min(h, y1 + 2) / (float)h;
+    }
+  }
+
   // the 3DS needs at least 8x8: repeat pixels (normalized coordinates stay the same)
   int gw = std::max(w, 8), gh = std::max(h, 8);
   if (gw != w || gh != h) {
@@ -967,6 +990,7 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   Entry e;
   e.tex.w = gw;
   e.tex.h = gh;
+  memcpy(e.tex.box, box, sizeof(box));
   // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
   // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)
   e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), CTR_TEX_CHECK_RADIAL);

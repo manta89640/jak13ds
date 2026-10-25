@@ -40,6 +40,12 @@ constexpr int kTodMaxErr = 4;          // vertex color units (0x80 = 1.0) the ti
 constexpr int kMaxCardVerts = 8192;    // per level draw (the frame's vertex stream: 128 KB)
 constexpr int kRasterPerFrame = 40000; // capture texels the CPU rasterizes per frame at most
 constexpr double kCaptureCpuMs = 1.0;  // capture CPU work (raster, planes) per frame at most
+// (AI-assisted, perfv2) ... and while the render thread's build took kBusyBuildMs or more in the
+// frame before, kCaptureCpuMsBusy: there the build time sets the frame rate (village2 on hardware:
+// build 18-24 ms, the GPU waiting for it; captures 0.9-1.4 ms a frame of it to save 2-4k triangles
+// of GPU work it had room for), so new pictures come slower (their groups drawn as geometry)
+constexpr double kBusyBuildMs = 18.0;
+constexpr double kCaptureCpuMsBusy = 0.3;
 constexpr float kQStep = 128.f;        // card vertex quantization (game units: 3 cm)
 constexpr double kQGrid = 512.0 * 4096.0;  // m_qorigin's grid (game units)
 constexpr double kQMove = 384.0 * 4096.0;  // the camera this far from it: a new origin
@@ -1432,6 +1438,8 @@ void CtrImpostors::finish_chunks_impl() {
   const double t_loop = ctr_gpu_time_ms();
   m_st.ms_f_sort += t_loop - t0;
   float fail_value = -1.f;
+  const double cap_budget =
+      ctr_level_last_build_ms() >= kBusyBuildMs ? kCaptureCpuMsBusy : kCaptureCpuMs;
   for (size_t oi = 0; oi < order.size(); oi++) {
     const u32 i = order[oi];
     Want& w = m_wants[i];
@@ -1553,7 +1561,7 @@ void CtrImpostors::finish_chunks_impl() {
         free_slot(c.slot);
       }
     }
-    if (texels + w.wn * w.hn > kRasterPerFrame || m_cap_cpu_ms > kCaptureCpuMs) {
+    if (texels + w.wn * w.hn > kRasterPerFrame || m_cap_cpu_ms > cap_budget) {
       m_st.over_budget++;
       m_st.t_budget += c.tris;
       continue;
