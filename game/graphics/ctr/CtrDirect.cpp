@@ -774,11 +774,40 @@ void CtrDirect::flush() {
                v.a);
     }
   }
-  if (m_quads) {
+  if (m_record) {
+    // (AI-assisted, gpuopt) set_record: kept for replay_recorded
+    m_rec.push_back({m_draw_state, m_quads, (u32)m_rec_verts.size(), (u32)m_verts.size()});
+    m_rec_verts.insert(m_rec_verts.end(), m_verts.begin(), m_verts.end());
+  } else if (m_quads) {
     ctr_gpu_draw_quads(&m_draw_state, m_verts.data(), (int)m_verts.size() / 4);
   } else {
     ctr_gpu_draw(&m_draw_state, m_verts.data(), (int)m_verts.size());
   }
   m_stats.flushes++;
   m_verts.clear();
+}
+
+void CtrDirect::set_record(bool on) {
+  flush();  // what came before is drawn (or kept) in the mode it came in
+  m_record = on;
+}
+
+void CtrDirect::replay_recorded(bool depth_tested) {
+  for (const auto& b : m_rec) {
+    ctr_draw_state st = b.st;
+    if (depth_tested) {
+      // (AI-assisted, gpuopt) as CtrSky's deferred sky: only where the opaque draws left the
+      // cleared depth (the sky's fragments get depth 0: ctr_gpu_set_depth_far), no depth writes
+      st.ztest = CTR_TEST_GEQUAL;
+      st.zwrite = 0;
+    }
+    const ctr_vertex* v = m_rec_verts.data() + b.first;
+    if (b.quads) {
+      ctr_gpu_draw_quads(&st, v, (int)b.count / 4);
+    } else {
+      ctr_gpu_draw(&st, v, (int)b.count);
+    }
+  }
+  m_rec.clear();
+  m_rec_verts.clear();
 }
