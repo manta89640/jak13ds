@@ -2916,6 +2916,152 @@ void build_draw_order(CtrLevelData* out) {
       out->sorted_draws.push_back(di);
     }
   }
+  // (AI-assisted, j2cull) each draw's place in its list
+  out->draw_list_pos.assign(out->draws.size(), UINT32_MAX);
+  const std::vector<u32>* lists[3] = {&out->early_draws, &out->sorted_draws, &out->ordered_draws};
+  for (u32 li = 0; li < 3; li++) {
+    for (u32 p = 0; p < lists[li]->size(); p++) {
+      out->draw_list_pos[(*lists[li])[p]] = (li << 30) | p;
+    }
+  }
+}
+
+// (AI-assisted, j2cull) draw_level's cull clusters (CtrLevelData::CullCluster): runs of
+// consecutive chunks (and tie LOD groups) whose spheres lie together, at most kClusterMax of them
+// within kClusterR. Chunks the chunk loop doesn't decide by distance alone (the vista tier, the
+// low resolution tfrag, near chunks) are in plain clusters: always looked at one by one.
+constexpr u32 kClusterMax = 32;
+constexpr float kClusterR = 48.f * 4096.f;
+// a cluster's bound: center and the largest |c - center| + r (made a little larger: float)
+template <typename SphereOf>
+void cluster_bound(CtrLevelData::CullCluster& cl, SphereOf sphere_of) {
+  float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+  for (u32 i = cl.first; i < cl.first + cl.count; i++) {
+    const float* s = sphere_of(i);
+    for (int c = 0; c < 3; c++) {
+      mn[c] = std::min(mn[c], s[c]);
+      mx[c] = std::max(mx[c], s[c]);
+    }
+  }
+  for (int c = 0; c < 3; c++) {
+    cl.c[c] = 0.5f * (mn[c] + mx[c]);
+  }
+  float a = 0;
+  for (u32 i = cl.first; i < cl.first + cl.count; i++) {
+    const float* s = sphere_of(i);
+    const double dx = s[0] - cl.c[0], dy = s[1] - cl.c[1], dz = s[2] - cl.c[2];
+    a = std::max(a, (float)(std::sqrt(dx * dx + dy * dy + dz * dz) + s[3]));
+  }
+  cl.a = a * 1.0001f + 16.f;
+}
+// greedy: the next item joins while the cluster stays within kClusterR (centers' box half
+// diagonal + the largest radius)
+template <typename Ok, typename SphereOf>
+void make_clusters(std::vector<CtrLevelData::CullCluster>& out, u32 n, Ok ok, SphereOf sphere_of) {
+  out.clear();
+  u32 i = 0;
+  while (i < n) {
+    CtrLevelData::CullCluster cl{};
+    cl.first = i;
+    if (!ok(i)) {
+      u32 j = i + 1;
+      while (j < n && !ok(j) && j - i < 0xffffff) {
+        j++;
+      }
+      cl.count = j - i;
+      cl.flags = CtrLevelData::kClPlain;
+      out.push_back(cl);
+      i = j;
+      continue;
+    }
+    const float* s0 = sphere_of(i);
+    float mn[3] = {s0[0], s0[1], s0[2]}, mx[3] = {s0[0], s0[1], s0[2]}, rmax = s0[3];
+    u32 j = i + 1;
+    while (j < n && j - i < kClusterMax && ok(j)) {
+      const float* s = sphere_of(j);
+      float nmn[3], nmx[3];
+      float h2 = 0;
+      for (int c = 0; c < 3; c++) {
+        nmn[c] = std::min(mn[c], s[c]);
+        nmx[c] = std::max(mx[c], s[c]);
+        h2 += 0.25f * (nmx[c] - nmn[c]) * (nmx[c] - nmn[c]);
+      }
+      if (std::sqrt(h2) + std::max(rmax, s[3]) > kClusterR) {
+        break;
+      }
+      memcpy(mn, nmn, sizeof(mn));
+      memcpy(mx, nmx, sizeof(mx));
+      rmax = std::max(rmax, s[3]);
+      j++;
+    }
+    cl.count = j - i;
+    cluster_bound(cl, sphere_of);
+    out.push_back(cl);
+    i = j;
+  }
+}
+void make_cull_clusters(CtrLevelData& lev) {
+  lev.cull_made = true;
+  lev.cull_sizes[0] = lev.chunks.size();
+  lev.cull_sizes[1] = lev.lod_groups.size();
+  lev.cull_sizes[2] = lev.chunk_unit.size();
+  const u32 n = (u32)lev.chunks.size();
+  auto chunk_ok = [&](u32 ci) {
+    const auto& ch = lev.chunks[ci];
+    return ch.kind != c3l::CHUNK_KIND_VISTA && ch.lod_tier != 3 &&
+           (lev.chunk_unit.empty() || lev.chunk_unit[ci] == UINT32_MAX);
+  };
+  make_clusters(lev.chunk_clusters, n, chunk_ok,
+                [&](u32 ci) { return (const float*)lev.chunks[ci].bsphere; });
+  for (auto& cl : lev.chunk_clusters) {
+    if (cl.flags & CtrLevelData::kClPlain) {
+      continue;
+    }
+    cl.lod_a = 0;
+    for (u32 ci = cl.first; ci < cl.first + cl.count; ci++) {
+      const auto& ch = lev.chunks[ci];
+      const int k = ch.kind == c3l::CHUNK_KIND_TIE ? 0 : (ch.kind == c3l::CHUNK_KIND_SHRUB ? 1 : 2);
+      cl.flags |= CtrLevelData::kClHas << k;
+      if (ch.max_dist > 0) {
+        cl.raw[k] = std::max(cl.raw[k], ch.max_dist);
+      } else {
+        cl.flags |= CtrLevelData::kClNoOwn << k;
+      }
+      if (ch.lod_tier == 1 || ch.lod_tier == 2) {
+        cl.flags |= CtrLevelData::kClTier12;
+        const double dx = ch.lod_center[0] - cl.c[0], dy = ch.lod_center[1] - cl.c[1],
+                     dz = ch.lod_center[2] - cl.c[2];
+        cl.lod_a = std::max(cl.lod_a, (float)std::sqrt(dx * dx + dy * dy + dz * dz));
+      }
+    }
+    cl.lod_a = cl.lod_a * 1.0001f + 16.f;
+  }
+  lev.vista_chunks.clear();
+  for (u32 ci = 0; ci < n; ci++) {
+    if (lev.chunks[ci].kind == c3l::CHUNK_KIND_VISTA) {
+      lev.vista_chunks.push_back(ci);
+    }
+  }
+  const u32 ng = (u32)lev.lod_groups.size();
+  make_clusters(lev.lod_clusters, ng, [](u32) { return true; },
+                [&](u32 g) { return (const float*)lev.lod_groups[g].bsphere; });
+  const bool err = lev.lod_error.size() == ng;
+  for (auto& cl : lev.lod_clusters) {
+    for (u32 g = cl.first; g < cl.first + cl.count; g++) {
+      cl.raw[0] = std::max(cl.raw[0], err ? lev.lod_error[g] : 0.f);
+      cl.raw[1] = std::max(cl.raw[1], lev.lod_groups[g].dist);
+      if ((err && !(lev.lod_error[g] >= 0)) || !(lev.lod_groups[g].dist >= 0)) {
+        cl.flags |= CtrLevelData::kClPlain;  // (a negative switch distance: one by one)
+      }
+    }
+  }
+  size_t plain = 0;
+  for (const auto& cl : lev.chunk_clusters) {
+    plain += (cl.flags & CtrLevelData::kClPlain) ? cl.count : 0;
+  }
+  lg::debug("[ctr] {}: cull clusters: {} chunks in {} ({} looked at one by one), {} tie LOD groups "
+            "in {}",
+            lev.name, n, lev.chunk_clusters.size(), plain, ng, lev.lod_clusters.size());
 }
 }  // namespace
 
@@ -5548,6 +5694,62 @@ constexpr RunLoopFn kRunLoops[2][5][2] = {
      {run_loop<true, 3, false>, run_loop<true, 3, true>},
      {run_loop<true, 4, false>, run_loop<true, 4, true>}}};
 
+// (AI-assisted, j2cull) host --ctr-gfx: env CTR_CULL_CHECK: every cluster that stood for its
+// members (chunks, tie LOD groups) is decided member by member as well, and must have changed
+// nothing; the visible draws' lists are checked against the walk over the whole lists. Mismatches
+// are logged (the first few) and counted ("[ctr] cull check" line at exit and every 15 s).
+bool cull_check_enabled() {
+#ifdef __3DS__
+  return false;
+#else
+  static const bool on = getenv("CTR_CULL_CHECK") != nullptr;
+  return on;
+#endif
+}
+struct {
+  u64 checks = 0, bad = 0;
+} g_cull_check;
+void cull_check_count(bool ok, const std::string& level, const char* what, u32 first) {
+  g_cull_check.checks++;
+  if (!ok) {
+    if (g_cull_check.bad++ < 20) {
+      lg::error("[ctr] cull check: {} {} at {} differs", level, what, first);
+    }
+  }
+}
+// a cluster's members' decision state before deciding them one by one
+struct CullCheckSnap {
+  std::vector<u8> state, q, vsrc;
+  std::vector<u32> hold;
+  size_t visible = 0;
+  u64 emits = 0;
+  void snap(const CtrLevelData& lev, u32 first, u32 n, const std::vector<u8>& vista_src,
+            const u32* hold_since) {
+    state.assign(lev.chunk_state.begin() + first, lev.chunk_state.begin() + first + n);
+    q.assign(lev.chunk_detail_q.begin() + first, lev.chunk_detail_q.begin() + first + n);
+    vsrc.assign(n, 0);
+    if (!vista_src.empty()) {
+      memcpy(vsrc.data(), &vista_src[first], n);
+    }
+    hold.assign(n, 0);
+    if (hold_since) {
+      memcpy(hold.data(), hold_since + first, n * 4);
+    }
+  }
+  bool same(const CtrLevelData& lev, u32 first, u32 n, const std::vector<u8>& vista_src,
+            const u32* hold_since) const {
+    bool ok = memcmp(state.data(), &lev.chunk_state[first], n) == 0 &&
+              memcmp(q.data(), &lev.chunk_detail_q[first], n) == 0;
+    if (!vista_src.empty()) {
+      ok = ok && memcmp(vsrc.data(), &vista_src[first], n) == 0;
+    }
+    if (hold_since) {
+      ok = ok && memcmp(hold.data(), hold_since + first, n * 4) == 0;
+    }
+    return ok;
+  }
+};
+
 // (AI-assisted) host --ctr-gfx: env CTR_FINE_VIS_CHECK (ctr_level_fine_vis_check)
 bool fine_vis_check_enabled() {
 #ifdef __3DS__
@@ -5997,6 +6199,33 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_name, (double)m_proto_tris / m_proto_frames, m_proto_frames);
     m_proto_tris = m_proto_frames = 0;
   }
+  {
+    static u64 s_check_logged = ~0ull;  // (AI-assisted, j2cull) CTR_CULL_CHECK, once per log period
+    if (rs.log_now && cull_check_enabled() && s_check_logged != rs.frame_idx) {
+      s_check_logged = rs.frame_idx;
+      lg::info("[ctr] cull check: {} checks, {} differ", g_cull_check.checks, g_cull_check.bad);
+    }
+  }
+  if (rs.log_now && m_ph_draws) {
+    // (AI-assisted, j2cull) draw_level's phases
+    const double n = (double)m_ph_draws;
+    double tot = 0;
+    double ms[kPhN];
+    for (int k = 0; k < kPhN; k++) {
+      ms[k] = ctr_gpu_ticks_to_ms(m_ph[k]) / n;
+      tot += ms[k];
+      m_ph[k] = 0;
+    }
+    lg::info("[ctr] {}: draw_level ms per level draw {:.3f}: setup {:.3f} lod {:.3f} chunks {:.3f} "
+             "occ {:.3f} tod {:.3f} impostors {:.3f} lists {:.3f} cards {:.3f} flush {:.3f}; "
+             "{:.0f} chunks emitted, {:.0f} runs tested, {:.0f} draws walked, {:.0f} calls; "
+             "clusters stood for {:.0f} chunks, {:.0f} tie LOD groups ({} level draws)",
+             m_name, tot, ms[kPhSetup], ms[kPhLod], ms[kPhChunks], ms[kPhOcc], ms[kPhTod],
+             ms[kPhImp], ms[kPhLists], ms[kPhCards], ms[kPhFlush], m_ph_emits / n, m_ph_runs / n,
+             m_ph_walked / n, m_ph_calls / n, m_ph_skipped / n, m_ph_lod_skipped / n, m_ph_draws);
+    m_ph_draws = m_ph_emits = m_ph_runs = m_ph_walked = m_ph_calls = 0;
+    m_ph_skipped = m_ph_lod_skipped = 0;
+  }
   if (rs.log_now && m_lod_frames) {
     // (AI-assisted) c3l v17 tie levels of detail
     const double n = (double)m_lod_frames;
@@ -6071,6 +6300,18 @@ CtrTfragRenderer::~CtrTfragRenderer() {
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrBackgroundCamera& cam,
                                   const CtrRenderState& rs) {
+  // (AI-assisted, j2cull) the phases' ticks (m_ph)
+  u64 ph_t = ctr_gpu_ticks();
+  auto phase = [&](int k) {
+    const u64 now = ctr_gpu_ticks();
+    m_ph[k] += now - ph_t;
+    ph_t = now;
+  };
+  m_ph_draws++;
+  if (!lev.cull_made || lev.cull_sizes[0] != lev.chunks.size() ||
+      lev.cull_sizes[1] != lev.lod_groups.size() || lev.cull_sizes[2] != lev.chunk_unit.size()) {
+    make_cull_clusters(lev);  // (AI-assisted, j2cull) once per load
+  }
   const CtrSettings& settings = ctr_settings();
   auto R = make_cam_mat(cam.rot, cam.perspective, cam.fog.x(), cam.hvdf_off.z());
   m_late_in_view = 0;  // (AI-assisted, j2intro) counted below, reported after the chunk loop
@@ -6479,6 +6720,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   };
   // (AI-assisted, streaming) c3l v19 near chunks: there (or not) and within their distance, this
   // frame (never in far mode: the far versions)
+  phase(kPhSetup);
   const bool has_units = !lev.stream_units.empty();
   if (has_units) {
     lev.unit_ok.assign(lev.stream_units.size(), 0);
@@ -6552,7 +6794,45 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
     // view once the data came (4 s at 30 fps)
     constexpr u32 kHoldFrames = 120;
-    for (size_t g = 0; g < lev.lod_groups.size(); g++) {
+    // (AI-assisted, j2cull) cluster by cluster (CtrLevelData::CullCluster): a cluster beyond every
+    // member's near distance (largest switch distance x k, with margins for float rounding) whose
+    // members all were far and not held last frame (state 2) stands for their decisions: each
+    // would come out far again, state 2, its lod_detail_q this frame's (only so without lod_auto:
+    // its in-view hold reads them)
+    const u8* const lod_st = lev.lod_state.data();
+    const bool lod_skip = !lod_auto && lev.lod_state.size() == lev.lod_groups.size();
+    const bool cull_check = cull_check_enabled();
+    bool lod_check = false;
+    std::vector<u8> chk_lod_q;
+    u32 chk_near = 0;
+    for (const auto& gcl : lev.lod_clusters) {
+      if (lod_skip && !(gcl.flags & CtrLevelData::kClPlain)) {
+        const float sw = by_error ? gcl.raw[0] : gcl.raw[1];
+        bool far = !(k > 0);
+        if (!far) {
+          const float dx = gcl.c[0] - cx, dy = gcl.c[1] - cy, dz = gcl.c[2] - cz;
+          const float reach = (gcl.a + std::max(sw, 0.f) * k) * 1.0002f + 256.f;
+          far = dx * dx + dy * dy + dz * dz > reach * reach;
+        }
+        if (far) {
+          u32 g = gcl.first;
+          const u32 end = gcl.first + gcl.count;
+          while (g < end && lod_st[g] == 2) {
+            g++;
+          }
+          if (g == end) {
+            memset(lod_q + gcl.first, q_now, gcl.count);
+            m_ph_lod_skipped += gcl.count;
+            if (!cull_check) {
+              continue;
+            }
+            lod_check = true;
+            chk_lod_q.assign(lod_q + gcl.first, lod_q + end);
+            chk_near = near;
+          }
+        }
+      }
+    for (size_t g = gcl.first, g_end = gcl.first + gcl.count; g < g_end; g++) {
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
       const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
@@ -6634,6 +6914,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       st = (u8)((keep_far ? 4 : 0) | 2 | (n ? 1 : 0));
       near += n;
     }
+      if (lod_check) {
+        lod_check = false;
+        bool ok = chk_near == near &&
+                  memcmp(chk_lod_q.data(), lod_q + gcl.first, gcl.count) == 0;
+        for (u32 g = gcl.first; g < gcl.first + gcl.count; g++) {
+          ok = ok && lod_st[g] == 2;
+        }
+        cull_check_count(ok, lev.name, "tie LOD cluster", gcl.first);
+      }
+    }
     m_lod_groups_near += near;
     m_lod_frames++;
     // (AI-assisted, streaming) where the near chunks are needed (CtrLevels::stream_update)
@@ -6675,6 +6965,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx);
   }
   m_levels->stream_note_camera(cam.trans, cam.planes, cam.rot, rs.frame_idx);
+  phase(kPhLod);
   if (m_run_nomerge.size() < lev.vis_runs.size()) {
     m_run_nomerge.resize(lev.vis_runs.size());
   }
@@ -6712,6 +7003,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // runs tested against those planes on their own), the visibility bits or (vista tier) the
   // source chunks, then its matrix. vista: drawn in the vista pass.
   auto emit_chunk = [&](size_t ci, bool vista_chunk) {
+    m_ph_emits++;
     const auto& ch = lev.chunks[ci];
     const bool vista_tier = ch.kind == c3l::CHUNK_KIND_VISTA;
       // (AI-assisted) the view test: the chunk's sphere against the four planes; a chunk that crosses
@@ -6815,6 +7107,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         in.shown_out = m_run_shown.data();
         in.nomerge_out = m_run_nomerge.data();
         RunLoopOut o;
+        m_ph_runs += nr;
         kRunLoops[vis_test ? 1 : 0][straddles ? np : 0][lod_chunk ? 1 : 0](in, r0, nr, &o);
         if (proto_chunk) {
           // (AI-assisted, j2vis) the hidden prototypes' runs: not drawn, and never drawn along
@@ -6922,12 +7215,116 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const c3l::Chunk* const chunks = lev.chunks.data();
   u8* const chunk_state = lev.chunk_state.data();
   const int* const meshes = lev.meshes.data();
-  const size_t nchunks = lev.chunks.size();
   const u32* const chunk_unit = has_units ? lev.chunk_unit.data() : nullptr;  // (AI-assisted)
   // (AI-assisted, j2-mem) dormant levels: a level that was dormant once (its flags made)
   const bool dorm = !lev.chunk_dormant.empty();
   const u32 frame32 = std::max<u32>((u32)rs.frame_idx, 1u);
-  for (size_t ci = 0; ci < nchunks; ci++) {
+  // (AI-assisted, j2cull) the chunks cluster by cluster (CtrLevelData::CullCluster). A cluster
+  // beyond the distance limit of each of its members (their largest limit this frame, by kind: the
+  // limits decide_dist works out), whose members were all beyond theirs last frame (state bit 2
+  // clear, decided with this auto_detail position, no dormant hold; tiers 1 / 2: the coarse version
+  // chosen and the cell beyond 0.9 x lod_distance) needs none of their decisions: each would come
+  // out "beyond, as before" (not drawn, nothing changed) and only a vista source to mark. Its test
+  // has margins for float rounding: where it can't tell, the members are decided one by one.
+  auto lim_d = [&](float d) { return d > 0 ? (draw_dist > 0 ? std::min(draw_dist, d) : d) : draw_dist; };
+  const u32* const hold_since = dorm ? lev.chunk_hold_since.data() : nullptr;
+  u64 cl_skipped = 0;
+  const bool cull_check = cull_check_enabled();
+  bool cl_check = false;
+  CullCheckSnap chk;
+  auto cluster_beyond = [&](const CtrLevelData::CullCluster& cl, float* d2_out) {
+    // the members' largest distance limit this frame
+    float D = 0;
+    bool none = false;  // a member without a limit: always within
+    auto add = [&](float d) {
+      const float m = lim_d(d);
+      none = none || !(m > 0);
+      D = std::max(D, m);
+    };
+    const u32 f = cl.flags;
+    if (f & (CtrLevelData::kClHas << 0)) {
+      add(cl.raw[0] * tie_k * det);
+      if (f & (CtrLevelData::kClNoOwn << 0)) {
+        add(0.f);
+      }
+    }
+    if (f & (CtrLevelData::kClHas << 1)) {
+      if (shrub_ps2) {
+        add(cl.raw[1] * shrub_k * det);
+      } else if (shrub_fixed) {
+        add(shrub_fixed_dist);
+      } else {
+        add(cl.raw[1] * det);
+      }
+      if ((f & (CtrLevelData::kClNoOwn << 1)) && !(!shrub_ps2 && shrub_fixed)) {
+        add(0.f);
+      }
+    }
+    if (f & (CtrLevelData::kClHas << 2)) {
+      add(cl.raw[2] * det);
+      if (f & (CtrLevelData::kClNoOwn << 2)) {
+        add(0.f);
+      }
+    }
+    if (none) {
+      return false;
+    }
+    const float dx = cl.c[0] - cx, dy = cl.c[1] - cy, dz = cl.c[2] - cz;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    *d2_out = d2;
+    const float reach = (cl.a + D) * 1.0002f + 256.f;
+    if (!(d2 > reach * reach)) {
+      return false;
+    }
+    if ((f & CtrLevelData::kClTier12) && !far_level) {
+      if (!(lod_dist > 0)) {
+        return false;
+      }
+      const float lr = (cl.lod_a + 0.9f * lod_dist) * 1.0002f + 256.f;
+      if (!(d2 > lr * lr)) {
+        return false;
+      }
+    }
+    // last frame's decisions: all beyond
+    for (u32 ci = cl.first; ci < cl.first + cl.count; ci++) {
+      const u8 st = chunk_state[ci];
+      if ((st & 4) || chunk_q[ci] != q_now || (hold_since && hold_since[ci])) {
+        return false;
+      }
+      if (!far_level && (chunks[ci].lod_tier == 1 || chunks[ci].lod_tier == 2) && (st & 3) != 2) {
+        return false;
+      }
+    }
+    return true;
+  };
+  for (const auto& cl : lev.chunk_clusters) {
+    float cl_d2 = 0;
+    if (!(cl.flags & CtrLevelData::kClPlain) && cluster_beyond(cl, &cl_d2)) {
+      cl_skipped += cl.count;
+      if (lev.has_vista) {
+        // their vista sources (vista_source: within vista_distance)
+        const float in_r = vista_dist * 0.9998f - 256.f - cl.a;
+        const float out_r = (vista_dist + cl.a) * 1.0002f + 256.f;
+        if (vista_dist <= 0 || (in_r > 0 && cl_d2 < in_r * in_r)) {
+          memset(&m_vista_src[cl.first], 1, cl.count);
+        } else if (!(cl_d2 > out_r * out_r)) {
+          for (u32 ci = cl.first; ci < cl.first + cl.count; ci++) {
+            vista_source(ci);
+          }
+        }
+      }
+      if (!cull_check) {
+        continue;
+      }
+      // (host check: the members decided one by one all the same, nothing may change)
+      cl_check = true;
+      chk.snap(lev, cl.first, cl.count, m_vista_src, hold_since);
+      chk.visible = m_visible.size();
+      chk.emits = m_ph_emits;
+    } else {
+      cl_check = false;
+    }
+  for (size_t ci = cl.first, ci_end = cl.first + cl.count; ci < ci_end; ci++) {
     const auto& ch = chunks[ci];
     if (ch.kind == c3l::CHUNK_KIND_VISTA) {
       continue;  // (AI-assisted) after the others (their decisions pick its runs)
@@ -7053,6 +7450,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     emit_chunk(ci, vista_chunk);
   }
+    if (cl_check) {
+      cull_check_count(chk.same(lev, cl.first, cl.count, m_vista_src, hold_since) &&
+                           chk.visible == m_visible.size() && chk.emits == m_ph_emits,
+                       lev.name, "chunk cluster", cl.first);
+    }
+  }
+  m_ph_skipped += cl_skipped;
   if (m_jak2_slot >= 0) {
     // (AI-assisted, j2intro) Jak II: what is missing in view (late tie LOD groups, dormant chunks
     // not back yet), for the renderer's black hold after a reveal or a cut
@@ -7061,9 +7465,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted) the vista tier: where its source chunks aren't drawn, up to vista_distance
   if (lev.has_vista && vista_dist > 0) {
-    for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+    // (AI-assisted, j2cull) the vista chunks' list (in index order, as the walk over all chunks)
+    for (const u32 ci : lev.vista_chunks) {
       const auto& ch = lev.chunks[ci];
-      if (ch.kind != c3l::CHUNK_KIND_VISTA || lev.meshes[ci] < 0 || !ch.vis_run_count) {
+      if (lev.meshes[ci] < 0 || !ch.vis_run_count) {
         continue;
       }
       const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
@@ -7074,6 +7479,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
   }
+  phase(kPhChunks);
   // (AI-assisted) occ_cull: software occlusion culling (CtrOccCull.h). The opaque pieces drawn
   // this frame nearest the camera into the CPU occlusion buffer (the biggest on screen first, up to
   // occ_cull_tris triangles within occ_cull_dist), then every drawn piece (chunk, then run) behind
@@ -7442,6 +7848,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_occ_ms += dt;
     m_occ_max_ms = std::max(m_occ_max_ms, dt);
   }
+  phase(kPhOcc);
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws
   if (lev.tod) {
@@ -7548,6 +7955,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   }
 
+  phase(kPhTod);
   // (AI-assisted) impostors: far tie groups shown as cards (their runs hidden here), the new
   // pictures of them drawn now (CtrImpostor.h)
   CtrImpostors& impostors = ctr_impostors();
@@ -7573,6 +7981,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       impostors.finish_chunks();
     }
   }
+  phase(kPhImp);
 
   // The draws whose order doesn't matter (opaque, depth written) sorted by texture and state,
   // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
@@ -7616,7 +8025,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted) only the visible runs; neighbouring ones in one draw, with small hidden runs
     // between them drawn along (cheaper than another draw)
     // (not in the vista tier: a hidden vista run is a copy of what the main pass draws)
-    const u32 kMaxGap = lev.chunks[vc.chunk].kind == c3l::CHUNK_KIND_VISTA ? 0 : 48;
+    // (AI-assisted, gpuopt -> j2cull) a hidden gap of up to 300 indices (100 triangles) is drawn
+    // along: on hardware a draw costs ~15-24 us (reports/logs-oct12 fit), more than 100 triangles
+    // (<= 0.14 us each), so fewer, longer draws are cheaper (Haven City slums: -81 of ~890 draws
+    // per frame for +4.1k of ~80k triangles; reports/gpuopt/run_gap.md). Was 48.
+    const u32 kMaxGap = lev.chunks[vc.chunk].kind == c3l::CHUNK_KIND_VISTA ? 0 : 300;
     u32 idx = dr.first_index, start = 0, len = 0, gap = 0, drawn = 0;
     bool open = false;
     auto emit = [&]() {
@@ -7672,6 +8085,49 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // the main pass's draw lists: the level's, or (vista chunks) what of them the split left
   const std::vector<u32>* main_lists[3] = {&lev.early_draws, &lev.sorted_draws, &lev.ordered_draws};
+  // (AI-assisted, j2cull) only the visible chunks' draws, in list order: their places marked in a
+  // bit set per list (draw_list_pos), then the set bits in order (the walks below then see the
+  // same draws in the same order, without the level's hidden ones)
+  if (lev.draw_list_pos.size() == lev.draws.size()) {
+    const u32* const lpos = lev.draw_list_pos.data();
+    for (int li = 0; li < 3; li++) {
+      m_list_bits[li].assign((main_lists[li]->size() + 31) / 32, 0u);
+    }
+    u32* const bits[3] = {m_list_bits[0].data(), m_list_bits[1].data(), m_list_bits[2].data()};
+    for (const auto& vc : m_visible) {
+      const auto& ch = lev.chunks[vc.chunk];
+      const u32 end = std::min<u32>(ch.first_draw + ch.draw_count, (u32)lev.draws.size());
+      for (u32 di = ch.first_draw; di < end; di++) {
+        const u32 p = lpos[di];
+        if (p != UINT32_MAX) {
+          const u32 pos = p & 0x3fffffffu;
+          bits[p >> 30][pos >> 5] |= 1u << (pos & 31);
+        }
+      }
+    }
+    for (int li = 0; li < 3; li++) {
+      std::vector<u32>& out = m_list_vis[li];
+      out.clear();
+      const u32* const list = main_lists[li]->data();
+      const size_t nw = m_list_bits[li].size();
+      for (size_t w = 0; w < nw; w++) {
+        for (u32 b = bits[li][w]; b; b &= b - 1) {
+          out.push_back(list[32 * w + __builtin_ctz(b)]);
+        }
+      }
+      if (cull_check_enabled()) {
+        // (host check: the walk over the whole list keeps the same draws)
+        std::vector<u32> full;
+        for (u32 di : *main_lists[li]) {
+          if (m_visible_slot[lev.draw_chunk[di]] >= 0) {
+            full.push_back(di);
+          }
+        }
+        cull_check_count(full == out, lev.name, "draw list", (u32)li);
+      }
+      main_lists[li] = &out;
+    }
+  }
   if (vista_chunks) {
     // (AI-assisted) one walk over the three lists instead of one per pass: the vista chunks' draws
     // (in list order: early, sorted, ordered, as the vista pass drew them) and the other visible
@@ -7698,7 +8154,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (u32 di : m_vista_draws) {
       draw(di);
     }
+    phase(kPhLists);
+    m_ph_calls += m_calls.size();
     flush_calls(1);  // (AI-assisted, gpu-rt) static_cmdlists: the vista pass's
+    phase(kPhFlush);
     vista_pass = false;
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
     m_vista_chunks += vista_chunks;
@@ -7712,6 +8171,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const int* const vslot = m_visible_slot.data();
   const VisibleChunk* const vchunks = m_visible.data();
   auto walk = [&](const std::vector<u32>& list) {
+    m_ph_walked += list.size();
     for (u32 di : list) {
       const int slot = vslot[draw_chunk[di]];
       if (slot >= 0 && !vchunks[slot].vista) {
@@ -7732,11 +8192,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     walk(*main_lists[0]);
   }
   walk(*main_lists[1]);
+  phase(kPhLists);
   impostors.draw_cards();  // (AI-assisted) opaque: before the blended draws
+  phase(kPhCards);
   walk(*main_lists[2]);
+  phase(kPhLists);
+  m_ph_calls += m_calls.size();
   flush_calls(0);  // (AI-assisted, gpu-rt) static_cmdlists: the main pass's
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties
+  phase(kPhFlush);
 #ifndef __3DS__
   if (oracle_enabled()) {
     for (const auto& vc : m_visible) {
@@ -7827,4 +8292,5 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tod_ms += tod_ms;
     m_tod_max_ms = std::max(m_tod_max_ms, tod_ms);
   }
+  phase(kPhSetup);
 }

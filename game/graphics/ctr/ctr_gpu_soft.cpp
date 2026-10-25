@@ -1995,6 +1995,16 @@ double ctr_gpu_time_ms(void) {
   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
+unsigned long long ctr_gpu_ticks(void) {
+  using namespace std::chrono;
+  return (unsigned long long)duration_cast<nanoseconds>(steady_clock::now().time_since_epoch())
+      .count();
+}
+
+double ctr_gpu_ticks_to_ms(unsigned long long ticks) {
+  return (double)ticks / 1e6;
+}
+
 // the software backend renders synchronously
 int ctr_gpu_async_start(ctr_gpu_job_fn, void*) {
   return 0;
