@@ -71,6 +71,10 @@ struct Options {
   // v18 budget (kTieLodBudgets) only marks which groups a runtime without streaming loads (cls 1).
   // Off: v18 files (the near versions in the far versions' chunks, within the budget)
   bool stream = true;
+  // (AI-assisted, j2vis) v20: the prototypes the game hides by task state in runs of their own
+  // (c3l::ProtoVis; Jak II with streaming, set in convert; --no-proto-vis: off)
+  bool proto_vis = false;
+  bool no_proto_vis = false;
   float stream_cell = 100.f;
   // (AI-assisted, streaming) near chunks by need class too: a group's near version is needed within
   // error x kStreamNeedK + radius of its center; the groups of one class (bounds in meters) in near
@@ -264,6 +268,9 @@ struct SrcTri {
   // (AI-assisted, streaming) v19: a near version in a near chunk: c3l::kStreamCore (a group the
   // budget took) or kStreamExtra; 0: an ordinary chunk's
   u8 stream = 0;
+  // (AI-assisted, j2vis) v20: a prototype the game hides by task state (Converter::proto_vis
+  // index), 0xffff: none. Its triangles are visibility runs of their own (c3l::ProtoVis)
+  u16 proto = 0xffff;
 };
 
 struct DrawKey {
@@ -294,6 +301,19 @@ constexpr int kShrubClasses = sizeof(kShrubClassMeters) / sizeof(kShrubClassMete
 // prototypes the PS2 draws as billboards beyond w (big bushes, w = 10 m): no billboards here, the
 // whole shrub up to this distance (v13's shrub distance plus its cells' margin)
 constexpr float kShrubBillboardMeters = 70.f;
+
+// (AI-assisted, j2vis) v20: the prototypes Jak II hides and shows by task state (c3l::ProtoVis)
+const char* const kToggledProtosJak2[] = {
+#include "proto_vis_jak2.inc"
+};
+bool toggled_proto(const std::string& name) {
+  for (const char* n : kToggledProtosJak2) {
+    if (name == n) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // distance class of a shrub prototype of a level (0: not in the table)
 int shrub_class(const std::string& level, const std::string& proto, float* meters) {
@@ -527,6 +547,34 @@ struct Converter {
   // (AI-assisted) the visibility id of the triangles being added (see c3l::VisRun): a BVH node's
   // id in the level's visibility string, 0xffff = none
   u16 cur_vis = 0xffff;
+  // (AI-assisted, j2vis) v20: the toggled prototype of the triangles being added (proto_vis), 0xffff
+  u16 cur_proto = 0xffff;
+  struct ProtoOut {
+    std::string name;
+    u16 kind;  // c3l::kProtoTie / kProtoShrub
+  };
+  std::vector<ProtoOut> proto_vis;
+  // the prototype's id in proto_vis if the game toggles it (Jak II, proto_vis_jak2.inc), else 0xffff
+  u16 proto_vis_id(const std::vector<std::string>& names, u32 idx, u16 kind) {
+    if (!opt.proto_vis || idx >= names.size()) {
+      return 0xffff;
+    }
+    const std::string& name = names[idx];
+    if (!toggled_proto(name)) {
+      return 0xffff;
+    }
+    for (size_t i = 0; i < proto_vis.size(); i++) {
+      if (proto_vis[i].name == name && proto_vis[i].kind == kind) {
+        return (u16)i;
+      }
+    }
+    if (name.size() >= sizeof(c3l::ProtoVis::name)) {
+      lg::warn("{}: prototype name {} too long for the visibility table", level->level_name, name);
+      return 0xffff;
+    }
+    proto_vis.push_back(ProtoOut{name, kind});
+    return (u16)(proto_vis.size() - 1);
+  }
   static u16 vis_id(const tfrag3::BVH& bvh, u32 node) {
     return node < bvh.vis_nodes.size() ? bvh.vis_nodes[node].my_id : (u16)0xffff;
   }
@@ -551,6 +599,7 @@ struct Converter {
         }
         tris.push_back(SrcTri{{vertex_base + a, vertex_base + b, vertex_base + c}, key});
         tris.back().vis = cur_vis;
+        tris.back().proto = cur_proto;
       }
       strip.clear();
     };
@@ -696,7 +745,12 @@ struct Converter {
       note_use(tex, d.mode.as_int(), false);
       const u32 key = key_id(DrawKey{d.mode.as_int(), tex, 2});
       const size_t first_tri = tris.size();
+      // (AI-assisted, j2vis) v20: a prototype the game hides by task state (Shrub: per draw)
+      cur_proto = tree.has_per_proto_visibility_toggle
+                      ? proto_vis_id(tree.proto_names, d.proto_idx, c3l::kProtoShrub)
+                      : (u16)0xffff;
       add_strips(tree.indices, d.first_index_index, d.num_indices, base, key);
+      cur_proto = 0xffff;
       // (AI-assisted) shrub_ps2_dist: the prototype's distance class
       int sclass = 0;
       if (opt.shrub_ps2_dist && d.proto_idx < tree.proto_names.size()) {
@@ -1302,11 +1356,16 @@ struct Converter {
           continue;
         }
         cur_vis = vis_id(tree.bvh, g.vis_idx_in_pc_bvh);  // (AI-assisted) up to 8 instances
+        // (AI-assisted, j2vis) v20: a prototype the game hides by task state (Tie3: per group)
+        cur_proto = tree.has_per_proto_visibility_toggle
+                        ? proto_vis_id(tree.proto_names, g.tie_proto_idx, c3l::kProtoTie)
+                        : (u16)0xffff;
         add_strips(tree.unpacked.indices, idx, g.num_inds, base, key);
         lod_mark(lkey, first_tri);
         idx += g.num_inds;
       }
       cur_vis = 0xffff;
+      cur_proto = 0xffff;
     }
     // instances moved by the wind (plants, trees): baked at rest with their instance matrix
     for (const auto& d : tree.instanced_wind_draws) {
@@ -3135,6 +3194,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   const bool jak2 = opt.game == "jak2";
   g_dist_prefix = jak2 ? "jak2/" : "";
+  // (AI-assisted, j2vis) v20 prototype visibility: Jak II's task-toggled prototypes (v20 files only:
+  // with near chunks)
+  opt.proto_vis = jak2 && opt.stream && opt.shrub_ps2_dist && !opt.no_proto_vis;
   // (the interior and fixed mood lists are Jak 1's levels)
   if (!jak2 && is_interior(in.stem().string())) {
     opt.vista = false;
@@ -3375,7 +3437,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         if (ta.lod != tb.lod) {
           return kLodRank[ta.lod] < kLodRank[tb.lod];
         }
-        return ta.vis != tb.vis ? ta.vis < tb.vis : ta.lod_group < tb.lod_group;
+        if (ta.vis != tb.vis) {
+          return ta.vis < tb.vis;
+        }
+        // (AI-assisted, j2vis) v20: then the toggled prototype (0xffff, every other triangle,
+        // last: the order of levels without such prototypes doesn't change)
+        return ta.lod_group != tb.lod_group ? ta.lod_group < tb.lod_group : ta.proto < tb.proto;
       });
       size_t pos = 0;
       while (pos < tri_ids.size()) {
@@ -3494,7 +3561,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         continue;
       }
       // by vista cell and draw: simplified on their own (each copy stays one source chunk's)
-      std::map<std::tuple<int, int, u32>, std::vector<u32>> groups;
+      // (AI-assisted, j2vis) and by toggled prototype (v20: its copies are runs of their own too;
+      // 0xffff for all the others, so their groups don't change)
+      std::map<std::tuple<int, int, u32, u16>, std::vector<u32>> groups;
       for (u32 t : cp.tris) {
         const auto& tr = cv.tris[t];
         if (tr.lod == c3l::kRunLodNear) {
@@ -3508,7 +3577,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         // (AI-assisted) v15: with the draw key and vertices from before the atlas (welded by
         // position below: the atlas copies' shifted texture coordinates would mix)
         groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell),
-                tr.orig_key == UINT32_MAX ? tr.draw_key : tr.orig_key}]
+                tr.orig_key == UINT32_MAX ? tr.draw_key : tr.orig_key, tr.proto}]
             .push_back(t);
       }
       for (auto& [gk, ids] : groups) {
@@ -3768,6 +3837,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // (AI-assisted) visibility runs of all chunks (c3l::VisRun), and each chunk's first one
   std::vector<c3l::VisRun> out_runs;
   std::vector<c3l::RunLod> out_run_lods;  // (AI-assisted) v17: one per out_runs
+  std::vector<u16> out_run_protos;  // (AI-assisted, j2vis) v20: one per out_runs (SrcTri::proto)
   size_t lod_runs = 0, lod_chunks = 0;
   std::vector<u32> chunk_first_run;
   std::vector<u8> chunk_stream_cls;  // (AI-assisted, streaming) v19: per chunk, 0 or its class
@@ -3990,7 +4060,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       u32 cur_key = UINT32_MAX;
       std::vector<c3l::VisRun> runs;
       std::vector<c3l::RunLod> run_lods;  // (AI-assisted) v17
-      bool any_vis = false, any_lod = false;
+      std::vector<u16> run_protos;        // (AI-assisted, j2vis) v20
+      bool any_vis = false, any_lod = false, any_proto = false;
       for (size_t i = 0; i < cp.tris.size(); i++) {
         const auto& t = cv.tris[cp.tris[i]];
         const bool new_draw = t.draw_key != cur_key;
@@ -4011,11 +4082,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         out_draws.back().index_count += 3;
         // (AI-assisted) v17: a run per LOD group version too (run_lods: c3l::RunLod)
         const u16 lg = t.lod ? (u16)t.lod_group : (u16)0xffff;
+        // (AI-assisted, j2vis) v20: and per toggled prototype
         if (new_draw || runs.back().vis != t.vis || run_lods.back().group != lg ||
-            run_lods.back().lod != t.lod) {
+            run_lods.back().lod != t.lod || run_protos.back() != t.proto) {
           runs.push_back(c3l::VisRun{(u16)(out_draws.size() - 1 - ch.first_draw), t.vis, 0});
           run_lods.push_back(c3l::RunLod{lg, t.lod, 0});
+          run_protos.push_back(t.proto);
         }
+        any_proto |= t.proto != 0xffff;
         runs.back().index_count += 3;
         if (t.vis != 0xffff) {
           any_vis = true;
@@ -4167,12 +4241,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
       // the runs only if some can be hidden (the offset is made absolute at write); (AI-assisted)
       // v17: or there are levels of detail
-      const bool keep_runs = any_vis || any_lod;
+      // (AI-assisted, j2vis) v20: or a prototype the game hides (a shrub chunk: runs per draw and
+      // prototype, vis 0xffff)
+      const bool keep_runs = any_vis || any_lod || any_proto;
       chunk_first_run.push_back(keep_runs ? (u32)out_runs.size() : 0);
       ch.vis_run_count = keep_runs ? (u32)runs.size() : 0;
       if (keep_runs) {
         out_runs.insert(out_runs.end(), runs.begin(), runs.end());
         out_run_lods.insert(out_run_lods.end(), run_lods.begin(), run_lods.end());
+        out_run_protos.insert(out_run_protos.end(), run_protos.begin(), run_protos.end());
         lod_runs += any_lod ? runs.size() : 0;
         lod_chunks += any_lod;
       }
@@ -4464,11 +4541,55 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       out_run_lods.size() == out_runs.size()) {
     c3l::ExtHeader eh{};
     memcpy(eh.magic, c3l::kExtMagic, 4);
-    const u32 eh_size = opt.stream ? (u32)sizeof(eh) : c3l::kExtHeaderV17Size;
+    // (AI-assisted, j2vis) v20: the prototype visibility table (c3l::ExtProtoVis) after it, when the
+    // level has toggled prototypes (else v19's 48 bytes)
+    std::vector<c3l::ProtoVis> pv_protos;
+    std::vector<u32> pv_runs;
+    if (opt.stream && opt.proto_vis && out_run_protos.size() == out_runs.size()) {
+      for (size_t p = 0; p < cv.proto_vis.size(); p++) {
+        c3l::ProtoVis pv{};
+        strncpy(pv.name, cv.proto_vis[p].name.c_str(), sizeof(pv.name) - 1);
+        pv.kind = cv.proto_vis[p].kind;
+        pv.first_run = (u32)pv_runs.size();
+        u32 tris = 0;
+        for (u32 r = 0; r < out_run_protos.size(); r++) {
+          if (out_run_protos[r] == p) {
+            pv_runs.push_back(r);
+            tris += out_runs[r].index_count / 3;
+          }
+        }
+        pv.run_count = (u32)pv_runs.size() - pv.first_run;
+        if (pv.run_count) {
+          pv_protos.push_back(pv);
+          // where it is (meters; the box of its triangles, vista copies left out)
+          float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+          for (const auto& t : cv.tris) {
+            if (t.proto != p || t.tier == c3l::kVistaTier) {
+              continue;
+            }
+            for (u32 vi : t.v) {
+              const float q[3] = {cv.verts[vi].x, cv.verts[vi].y, cv.verts[vi].z};
+              for (int c = 0; c < 3; c++) {
+                mn[c] = std::min(mn[c], q[c] / 4096.f);
+                mx[c] = std::max(mx[c], q[c] / 4096.f);
+              }
+            }
+          }
+          lg::info("{}: prototype visibility (v20): {} {} in {} runs, {} triangles, box ({:.1f} "
+                   "{:.1f} {:.1f}) .. ({:.1f} {:.1f} {:.1f}) m",
+                   level.level_name, pv.kind == c3l::kProtoTie ? "tie" : "shrub", pv.name,
+                   pv.run_count, tris, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
+        }
+      }
+    }
+    const u32 eh_size = !pv_protos.empty() ? c3l::kExtHeaderV20Size
+                        : opt.stream       ? (u32)sizeof(eh)
+                                           : c3l::kExtHeaderV17Size;
     eh.size = eh_size;
     align16(buf);
     hdr.ext_offset = (u32)buf.size();
-    buf.insert(buf.end(), (const u8*)&eh, (const u8*)&eh + eh_size);
+    buf.insert(buf.end(), (const u8*)&eh, (const u8*)&eh + std::min<u32>(eh_size, sizeof(eh)));
+    buf.resize(hdr.ext_offset + eh_size, 0);  // (AI-assisted, j2vis) v20: ExtProtoVis, below
     eh.lod_group_count = cv.lod_groups.size();
     eh.lod_groups_offset =
         cv.lod_groups.empty() ? 0 : append(buf, cv.lod_groups.data(), cv.lod_groups.size());
@@ -4484,7 +4605,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       eh.stream_offset =
           stream_chunks.empty() ? 0 : append(buf, stream_chunks.data(), stream_chunks.size());
     }
-    memcpy(buf.data() + hdr.ext_offset, &eh, eh_size);
+    memcpy(buf.data() + hdr.ext_offset, &eh, std::min<u32>(eh_size, sizeof(eh)));
+    if (!pv_protos.empty()) {
+      c3l::ExtProtoVis ep{};
+      ep.proto_count = (u32)pv_protos.size();
+      ep.protos_offset = append(buf, pv_protos.data(), pv_protos.size());
+      ep.proto_run_count = (u32)pv_runs.size();
+      ep.proto_runs_offset = append(buf, pv_runs.data(), pv_runs.size());
+      memcpy(buf.data() + hdr.ext_offset + sizeof(eh), &ep, sizeof(ep));
+    }
   }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
   hdr.vertex_data_size = out_verts.size() * sizeof(c3l::Vertex);
@@ -5085,6 +5214,9 @@ int main(int argc, char** argv) {
   app.add_flag("--no-stream", no_stream,
                "(AI-assisted, v19) no near chunks for streaming: v18 files (near versions within "
                "the level's budget, in the far versions' chunks)");
+  app.add_flag("--no-proto-vis", opt.no_proto_vis,
+               "(AI-assisted, v20) Jak II: no runs of their own for the prototypes the game hides "
+               "by task state (drawn always, as v19)");
   app.add_option("--stream-cell", opt.stream_cell,
                  "(AI-assisted, v19) near chunk cell size (meters)");
   app.add_option("--stream-classes", opt.stream_classes,

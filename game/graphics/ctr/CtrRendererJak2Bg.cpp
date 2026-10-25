@@ -126,6 +126,9 @@ void ctr_jak2_background_buckets(const CtrJak2BucketSet& set, CtrLevels* levels,
     auto tfrag = std::make_shared<CtrTfragRenderer>(
         "l" + std::to_string(i) + "-tfrag", (int)for_slot(B::TFRAG_L0_TFRAG, B::TFRAG_L1_TFRAG, i),
         levels);
+    // (AI-assisted, j2vis) where the slot's hidden prototype names come (c3l v20)
+    tfrag->set_jak2_proto_buckets((int)for_slot(B::TIE_L0_TFRAG, B::TIE_L1_TFRAG, i),
+                                  (int)for_slot(B::SHRUB_L0_SHRUB, B::SHRUB_L1_SHRUB, i));
     for (const auto& k : kKinds) {
       const B id = for_slot(k.l0, k.l1, i);
       set(id, std::make_unique<CtrJak2BgBucket>(tfrag->name(), (int)id, tfrag, i));
