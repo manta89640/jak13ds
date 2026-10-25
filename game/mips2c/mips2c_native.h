@@ -35,6 +35,7 @@
 #include <cstring>
 #include <functional>
 #include <initializer_list>
+#include <string>
 
 #include "common/common_types.h"
 
@@ -138,6 +139,10 @@ u64 native_verify_inline(const char* name,
                          const std::function<u64()>& native,
                          const std::function<u64()>& goal);
 #endif
+
+//! (AI-assisted) the native `name` is turned off for debugging (3DS: config.ini mips2c_native_off
+//! naming it or all; host: OPENGOAL_MIPS2C_NATIVE=0)
+bool native_turned_off(const std::string& name);
 
 //! Call a GOAL function from native code (like ExecutionContext::jalr).
 u64 native_call_goal(u32 fn, const u64 args[8], const NativeArgs& caller);

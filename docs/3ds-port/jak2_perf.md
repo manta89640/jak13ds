@@ -469,6 +469,77 @@ batch-oct11, performance.md "Particle launch and callbacks inline").
   pairwise, about 0.6 ms after the scene's drift (a1 -> a2 +2.1 ms) is removed. The traffic
   varies by 1-3 ms between windows, so read it as 0.5-1.5 ms.
 
+## Done: traffic, sky lighting and merc requests in C++ (j2native, Oct 24)
+
+(AI-assisted.) Branch `j2native` (from jak2-3ds e84e8b63b3); notes in
+`port_test/reports/j2native/progress.md`. The host profile of the slums (`jak2_city_prof.pad`
+stand, macOS `sample`, 0.35 ms/frame) is flat after core-opt. The kernel lambda's own code is small:
+most of its "self" is the C++ runtime's reset-and-call / thread-resume, plus the host's pc-prof. So
+this round took leaf-like GOAL code that a per-call check can compare.
+
+- `native2_traffic.cpp`: (method per-frame-cell-update traffic-level-data). This is the pass over
+  every vis-cell of a city level. It inlines vector-vector-distance-squared,
+  sphere-in-view-frustum? and the active cell list methods. Also (method
+  sphere-in-loaded-city-infos? traffic-engine), with sphere-in-grid?, lookup-box-for-sphere and
+  lookup-cell-for-point inline. Host incl. 1.4% + 1.0% of the frame.
+- `native2_sky_light.cpp`: (method adjust-cloud-lighting sky-work), which covers 100 vertices,
+  each with cloud-vtx-light-update twice and cloud-vtx-tex-update. Also adjust-haze-lighting, which
+  covers 36 vertices with apply-haze-light. vector-dot, vector-normalize!, vector4-scale!,
+  vector4-madd! and vector--float*! are inline. Host incl. 1.5%.
+- `native2_merc_request.cpp`: pc-merc-draw-request, the PC merc request per object and texture
+  index. It inlines charp<-string, quad-copy! and mem-copy!. A matrix number >= 128 (the GOAL
+  code's `(break!)`) leaves the request to the GOAL code. Host incl. 1.9%.
+- Each one is goalc's C of the GOAL code: the same loads, 64-bit integer ops, float operations in
+  the same order (no fused multiply-adds, vf0.w products kept), and goalc's fmin / fmax and NaN
+  compare results. The GOAL function calls its native first and runs its own code when the native
+  says so. That happens when a function or method the native runs inline no longer holds what it
+  held at the first call, or when the native is turned off for debugging (`mips2c_native_off`).
+  There are no config switches.
+- Identity (host small-memory C mode, `OPENGOAL_MIPS2C_VERIFY=1`, `native_verify_inline`: every
+  call is checked against the GOAL code on the same state; full-memory checks every 256th call).
+  Calls over jak2_city.pad + jak2_route.pad, all with 0 mismatches:
+
+  | native | calls |
+  |---|---|
+  | per-frame-cell-update | 13.1k |
+  | sphere-in-loaded-city-infos? | 167k |
+  | adjust-cloud-lighting | 7.5k |
+  | adjust-haze-lighting | 7.5k |
+  | pc-merc-draw-request | 122k |
+
+  The end positions are as before: (1065.99, 0.52, 194.46) target-hide; route industrial
+  (938.25, 7.99, 924.32), end (1161.20, -50.58, 513.13). A deliberate error in each native was
+  reported on call 1, then removed.
+- Host instructions per call, native vs GOAL (arm64, which runs goalc's 64-bit C well):
+
+  | native | native | GOAL |
+  |---|---|---|
+  | cell update | 30k | 44k |
+  | cloud | 43k | 100k |
+  | haze | 7.6k | 13.2k |
+  | merc | 3.8k | 4.8k |
+  | city-infos | 1.75k | 2.5k |
+- Azahar: one run, an A/B in the same session with a test-only toggle
+  (`port_test/reports/j2native/ab-test-build.patch`, `jak2_city_ab.pad`). Slums standing, 5 s perf
+  lines, the first of each window left out:
+
+  | window | natives | logic ms (mean) |
+  |---|---|---|
+  | a1 | on | 21.5 |
+  | b1 | off | 24.6 |
+  | a2 | on | 23.8 |
+  | b2 | off | 24.0 |
+
+  Off minus on is 3.1 and 0.2 ms pairwise, about 0.5 ms once the scene's drift is removed
+  (a1 -> a2 is +2.3 ms as the traffic builds up). Read it as 0.5 ms with 1-3 ms of traffic noise.
+  The game thread also waited about 10 ms per frame for the render thread in those windows. Jak
+  ends at (1065.98, 0.52, 194.46) target-hide.
+- Verify-mode caveat: a full-memory check can race level data that is written outside the IOP
+  write tracking. One run with checks every 4th / 64th call died in a ctyindb load (klink
+  assertion) right after such a check zeroed freshly loaded memory (a sparticle-mode-animate
+  "MISMATCH"). One sp-launch-particles-var mismatch in 3462 calls came at the CITY1.MUS bank load.
+  Neither involves this round's natives; use sparse full checks.
+
 ## Caveats
 
 - One Mac, background load from other sessions (Discord, other agents' gk): the per-window

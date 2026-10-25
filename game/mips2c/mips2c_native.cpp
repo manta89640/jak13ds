@@ -623,6 +623,10 @@ u64 verify_adapter(void* fn, u64 idx, u64* args) {
 
 }  // namespace
 
+bool native_turned_off(const std::string& name) {
+  return native_off(name);
+}
+
 /*!
  * (AI-assisted) The game thread's micro-optimisations of native functions (docs/3ds-port/
  * performance.md "Game thread micro-optimisations"): always on, the same results as the code
