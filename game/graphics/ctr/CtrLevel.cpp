@@ -45,6 +45,11 @@ extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 // Loading
 // ---------------------------------------------------------------------------
 
+#ifndef __3DS__
+// (AI-assisted, perfv2) host diagnostic (ctr_gpu_soft.cpp): mesh handle -> what it is
+std::map<int, std::string>& ctr_soft_mesh_desc();
+#endif
+
 namespace {
 // (AI-assisted, title3) host diagnostic, env CTR_POP_LOG: per level draw, what changed on screen
 // (chunks appearing / going by distance in view, tie LOD switches in view, groups late or held
@@ -7566,6 +7571,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_occ_max_ms = std::max(m_occ_max_ms, dt);
   }
   phase(kPhOcc);
+#ifndef __3DS__
+  // (AI-assisted, perfv2) host diagnostic, env CTR_SOFT_DRAW_PX: what each mesh drawn is (the
+  // soft renderer's per-draw fragment list names them)
+  if (getenv("CTR_SOFT_DRAW_PX")) {
+    for (const auto& vc : m_visible) {
+      if (vc.chunk < lev.meshes.size() && lev.meshes[vc.chunk] >= 0) {
+        const auto& ch = lev.chunks[vc.chunk];
+        ctr_soft_mesh_desc()[lev.meshes[vc.chunk]] =
+            fmt::format("{} chunk {} kind {} tier {} sphere ({:.0f} {:.0f} {:.0f} r {:.0f}) verts {}",
+                        lev.name, vc.chunk, ch.kind, ch.lod_tier, ch.bsphere[0], ch.bsphere[1],
+                        ch.bsphere[2], ch.bsphere[3], ch.vertex_count);
+      }
+    }
+  }
+#endif
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws
   u32 pop_tod = 0;  // (AI-assisted, title3: CTR_POP_LOG) groups rewritten

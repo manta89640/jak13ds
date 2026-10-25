@@ -26,6 +26,12 @@
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
+// (AI-assisted, perfv2) host diagnostic: mesh handle -> what it is (CtrLevel fills it)
+std::map<int, std::string>& ctr_soft_mesh_desc() {
+  static std::map<int, std::string> m;
+  return m;
+}
+
 namespace {
 constexpr int kW = 400;
 constexpr int kH = 240;
@@ -119,6 +125,16 @@ int last_tex = -2;
 std::map<std::pair<std::string, int>, std::pair<double, double>> tex_px;
 int cur_prog = -1;
 std::pair<double, double>* cur_tp = nullptr;
+// (AI-assisted, perfv2) env CTR_SOFT_DRAW_PX: fragments per level mesh draw (bucket, texture,
+// mesh, first index): px, depth passed, triangles, draws
+using DrawKey = std::tuple<std::string, int, int, int>;
+std::map<DrawKey, std::array<double, 5>> draw_px;
+std::array<double, 5>* cur_dp = nullptr;
+double cull_px[2] = {0, 0};  // level mesh fragments in draws without / with CTR_TCC_CULL_BACK
+bool draw_px_on() {
+  static const bool on = getenv("CTR_SOFT_DRAW_PX") != nullptr;
+  return on;
+}
 void prog(int p) {
   if (p != cur_prog) {
     cur->prog_switches++;
@@ -138,6 +154,7 @@ void draw(const ctr_draw_state& st) {
   cur->draws++;
   cur_tp = &tex_px[{cur_name, st.tex}];
   cur_tp->second++;
+  cur_dp = nullptr;  // (AI-assisted, perfv2) set again by soft_mesh_tris
   if (!last_valid || memcmp(&st, &last_st, sizeof(st))) cur->state_changes++;
   if (st.tex != last_tex) cur->tex_changes++;
   last_tex = st.tex;
@@ -411,6 +428,10 @@ void shade_pixel(const ctr_draw_state& st,
       softstats::cur->px_invis++;
     }
     if (softstats::cur_tp) softstats::cur_tp->first++;
+    if (softstats::cur_dp) {
+      (*softstats::cur_dp)[0]++;
+      softstats::cull_px[(*softstats::cur_dp)[4] != 0]++;
+    }
   }
   if (!test(st.atest, a, (float)st.aref)) {
     return;
@@ -447,6 +468,7 @@ void shade_pixel(const ctr_draw_state& st,
     }
   }
   if (ss_on) {
+    if (softstats::cur_dp) (*softstats::cur_dp)[1]++;
     softstats::cur->px_z++;
     if (st.blend != CTR_BLEND_OFF) softstats::cur->px_blend++;
   }
@@ -632,6 +654,25 @@ void ctr_gpu_frame_end(void) {
       int w = 0, h = 0;
       if (t >= 0 && t < (int)g_soft.textures.size()) { w = g_soft.textures[t].w; h = g_soft.textures[t].h; }
       line += fmt::format(" [{} tex{} {}x{}: {:.0f}]", top[i].second.first, t, w, h, top[i].first / n);
+    }
+    if (softstats::draw_px_on()) {
+      std::vector<std::pair<double, softstats::DrawKey>> td;
+      for (auto& [k, v] : softstats::draw_px) td.push_back({v[0], k});
+      std::sort(td.rbegin(), td.rend());
+      line += "\n  top level draws by fragments (per frame: px, depth passed, tris, draws):";
+      for (size_t i = 0; i < td.size() && i < 20; i++) {
+        const auto& [b, t, m, f] = td[i].second;
+        const auto& v = softstats::draw_px[td[i].second];
+        auto it = ctr_soft_mesh_desc().find(m);
+        line += fmt::format("\n    {} tex{} mesh {} first {}: {:.0f} px {:.0f} zpass {:.0f} tris {:.2f} draws{} | {}",
+                            b, t, m, f, v[0] / n, v[1] / n, v[2] / n, v[3] / n, v[4] ? " cull" : "",
+                            it == ctr_soft_mesh_desc().end() ? std::string("?") : it->second);
+      }
+      line += fmt::format("\n  level mesh fragments: {:.0f} in draws without back face culling, {:.0f} with",
+                          softstats::cull_px[0] / n, softstats::cull_px[1] / n);
+      softstats::cull_px[0] = softstats::cull_px[1] = 0;
+      softstats::draw_px.clear();
+      softstats::cur_dp = nullptr;
     }
     lg::info("{}", line);
     if (!g_soft.dump_dir.empty()) {
@@ -1506,12 +1547,14 @@ static int g_soft_cull_flip = 0;
 static int g_soft_cull_enable = 0;
 static int g_soft_fog_alpha = 0;  // (AI-assisted) fog_alpha: only the program choice (statistics)
 
+static int g_soft_cur_mesh = -1;  // (AI-assisted, perfv2) CTR_SOFT_DRAW_PX
 void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                        const float clip[16],
                        int mesh,
                        int first_index,
                        int index_count) {
   sky_hook(state);
+  g_soft_cur_mesh = mesh;
   // (AI-assisted) fog_alpha: the 3DS backend's second mesh program (9) for CTR_TCC_ALPHA80 draws
   softstats::prog(g_soft_fog_alpha && state && (state->tcc & CTR_TCC_ALPHA80) ? 9 : 1);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
@@ -1527,6 +1570,14 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
   if (softstats::enabled()) softstats::cur->sub += index_count / 3;  // (AI-assisted)
+  if (state && softstats::enabled() && softstats::draw_px_on()) {
+    softstats::cur_dp = &softstats::draw_px[{softstats::cur_name, state->tex, g_soft_cur_mesh,
+                                             first_index}];
+    (*softstats::cur_dp)[2] += index_count / 3;
+    (*softstats::cur_dp)[3]++;
+    (*softstats::cur_dp)[4] = (state->tcc & CTR_TCC_CULL_BACK) ? 1 : 0;
+  }
+  g_soft_cur_mesh = -1;
   // (AI-assisted) c3l v15 atlas draws: texture coordinates in 1/32768
   const float st_scale = state && (state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
   const bool fogged = fog_on() && !s_nofog;  // (AI-assisted, far-fog)
