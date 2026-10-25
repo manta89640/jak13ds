@@ -8413,7 +8413,20 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out) {
  * --------------------------------------------------------------------------------------------- */
 
 double ctr_gpu_time_ms(void) {
-  return (double)svcGetSystemTick() / (double)(SYSCLOCK_ARM11 / 1000);
+  /* (AI-assisted, j2cull) the tick count to double as two 32-bit halves (VFP conversions) instead
+   * of libgcc's __floatundidf (~3% of the render thread's samples, Oct 25: a call per bucket and
+   * phase): exact while below 2^53 ticks (~1000 years), so the same value */
+  const u64 t = svcGetSystemTick();
+  const double d = (double)(u32)(t >> 32) * 4294967296.0 + (double)(u32)t;
+  return d / (double)(SYSCLOCK_ARM11 / 1000);
+}
+
+unsigned long long ctr_gpu_ticks(void) {
+  return svcGetSystemTick();
+}
+
+double ctr_gpu_ticks_to_ms(unsigned long long ticks) {
+  return (double)ticks / (double)(SYSCLOCK_ARM11 / 1000);
 }
 
 static struct {

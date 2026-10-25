@@ -89,6 +89,10 @@ struct CtrLevelData {
   // sorted like sorted_draws; drawn first, nearest chunks first (draw_level)
   std::vector<u32> early_draws;
   std::vector<u32> draw_chunk;
+  // (AI-assisted, j2cull) per draw: its list and place there (list << 30 | position; lists 0
+  // early_draws, 1 sorted_draws, 2 ordered_draws), for draw_level's walk of only the visible
+  // chunks' draws in list order (build_draw_order)
+  std::vector<u32> draw_list_pos;
   // (AI-assisted) c3l v10 visibility runs (c3l::VisRun): all of them, the first of each chunk,
   // and the range of each draw
   std::vector<c3l::VisRun> vis_runs;
@@ -202,6 +206,26 @@ struct CtrLevelData {
   // read back; and the frame a chunk without its mesh began to be kept hidden in view (0: not)
   std::vector<u8> chunk_dormant;
   std::vector<u32> chunk_hold_since;
+  // (AI-assisted, j2cull) draw_level's cull clusters, made at the level's first draw
+  // (make_cull_clusters): its chunks in runs of neighbouring ones in index order (one test of a
+  // cluster that lies beyond every member's distance limit, while all of them were beyond it last
+  // frame, stands for the members' own decisions: the same outcome), the same for the tie LOD
+  // groups, and the vista tier's chunks
+  struct CullCluster {
+    float c[3];          // center
+    float a;             // the members' largest |center - c| + radius
+    float lod_a;         // tiers 1 / 2 (chunks): the largest |lod_center - c|
+    float raw[3];        // chunks: the members' largest max_dist by kind (tie, shrub, other); LOD
+                         // groups: raw[0] the largest lod_error, raw[1] the largest dist
+    u32 first;
+    u32 count : 24;
+    u32 flags : 8;       // kCl*
+  };
+  static constexpr u8 kClPlain = 1, kClTier12 = 2, kClHas = 4, kClNoOwn = 32;  // kClHas << kind
+  std::vector<CullCluster> chunk_clusters, lod_clusters;
+  std::vector<u32> vista_chunks;  // the CHUNK_KIND_VISTA chunks, in index order
+  bool cull_made = false;
+  size_t cull_sizes[3] = {0, 0, 0};  // chunks, tie LOD groups, chunk_unit when made
   bool dormant_requested = false;  // a read of its freed chunks is queued
   u64 dormant_retry_frame = 0;     // after a failed one: not before this frame
   static constexpr u8 kDormFreed = 1, kDormReading = 2;
@@ -938,6 +962,14 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   void flush_calls(int pass);
   void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines
   int m_jak2_slot = -1;  // (AI-assisted) Jak II: the level slot being drawn (-1: Jak 1)
+  // (AI-assisted, j2cull) draw_level's phases (ticks summed since the last log line): setup, the
+  // tie LOD groups (and near chunks), the chunk loop (view / visibility / run tests), occ_cull, time
+  // of day, impostors (chunks), the draw lists (the walk and the calls made), impostor cards, the
+  // backend (flush_calls); counts: level draws, chunks emitted, runs tested, draws walked / drawn
+  enum { kPhSetup, kPhLod, kPhChunks, kPhOcc, kPhTod, kPhImp, kPhLists, kPhCards, kPhFlush, kPhN };
+  u64 m_ph[kPhN] = {};
+  u64 m_ph_draws = 0, m_ph_emits = 0, m_ph_runs = 0, m_ph_walked = 0, m_ph_calls = 0;
+  u64 m_ph_skipped = 0, m_ph_lod_skipped = 0;  // chunks / tie LOD groups their cluster stood for
   u32 m_late_in_view = 0;  // (AI-assisted, j2intro) draw_level: missing in view (note_late_in_view)
   // (AI-assisted, gpu-rt) static_cmdlists: a pass's draws, and each pass's command cache
   std::vector<ctr_mesh_call> m_calls;
@@ -1042,4 +1074,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) with vista chunks: the visible draws of early_draws, sorted_draws and
   // ordered_draws split in one walk, in list order: the vista pass's, and the main pass's lists
   std::vector<u32> m_vista_draws, m_main_draws[3];
+  // (AI-assisted, j2cull) the visible draws' places per list (bit sets), and those draws in order
+  std::vector<u32> m_list_bits[3], m_list_vis[3];
 };
