@@ -5094,6 +5094,9 @@ void CtrLevels::stream_log() {
                                           : std::to_string(m_sst.linear_min_load / 1024),
            m_sst.sched_ms / n, m_sst.sched_max_ms,
            levels.empty() ? std::string("no levels") : levels);
+#ifdef __3DS__
+  ctr_heap_trace_dump("stats");  // (AI-assisted, lavamem) trace builds only
+#endif
   const double since = m_sst.since_ms;
   CtrStreamArena::get().new_period();
   m_sst = StreamStats();

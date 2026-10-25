@@ -14,6 +14,13 @@
  *
  * Trace builds (cmake -DOG3DS_HEAP_TRACE=ON) also keep every live allocation of 2 KB or more with
  * its call stack; ctr_heap_trace_dump(tag) logs the sites holding the most.
+ *
+ * (AI-assisted, lavamem) A large allocation (kLinearMin or more) the heap can't serve comes from
+ * linear memory instead, as a last resort: only while that keeps kLinearFloor of it free (above the
+ * stream arena's floor) and such blocks stay within kLinearMax in all. free / realloc know such a
+ * block by its address. Lava tube on hardware (Oct 25): 2.6 MB of the heap free but no block of
+ * 557 KB (fragmented after 1 h 40 of play): the music bank failed and the impostors' table threw
+ * (abort). The CPU reads linear memory as any other memory.
  */
 
 #include <algorithm>
@@ -30,8 +37,11 @@
 #include "common/log/log.h"
 
 #include "platform/3ds/port/ctr_heap.h"
+#include "platform/3ds/port/ctr_port.h"
 
 extern "C" {
+extern u32 __ctru_linear_heap;       // the linear heap (libctru): its address
+extern u32 __ctru_linear_heap_size;  // ... and size
 void* __real_malloc(size_t n);
 void* __real_calloc(size_t n, size_t s);
 void* __real_realloc(void* p, size_t n);
@@ -159,6 +169,70 @@ void report_failure(size_t n, const char* what) {
       n, what, st.free / 1024, st.arena_free / 1024, st.never_used / 1024, st.largest / 1024,
       st.in_use / 1024, st.heap / 1024, g_failures.load(), where);
   g_reporting.store(0);
+}
+
+// ---- (AI-assisted, lavamem) large blocks from linear memory when the heap has none ----
+constexpr size_t kLinearMin = 64 * 1024;
+// A last resort only: linear memory is the near-chunk stream arena's (it grows into what's free
+// down to its 3 MB floor, stream_reserve_kb) and the level loads'. Such a block leaves more than
+// that floor free, and all of them together are at most kLinearMax.
+constexpr size_t kLinearFloor = 3584 * 1024;
+constexpr u32 kLinearMax = 2048 * 1024;
+std::atomic<u32> g_linear_blocks{0};
+std::atomic<u32> g_linear_bytes{0};
+std::atomic<u32> g_linear_peak{0};
+std::atomic<u32> g_linear_total{0};  // blocks taken so far
+std::atomic<u64> g_last_linear_report_ms{0};
+
+bool in_linear(const void* p) {
+  const uintptr_t a = (uintptr_t)p, base = __ctru_linear_heap;
+  return a >= base && a - base < __ctru_linear_heap_size;
+}
+
+// a block the heap couldn't give (n >= kLinearMin), or nullptr. Not under the malloc lock: the
+// linear allocator's own bookkeeping uses malloc (small blocks).
+void* linear_fallback(size_t n, size_t align) {
+  if (n < kLinearMin) {
+    return nullptr;
+  }
+  ctr_linear_lock();
+  void* p = nullptr;
+  if ((size_t)linearSpaceFree() >= n + kLinearFloor && g_linear_bytes.load() + n <= kLinearMax) {
+    p = linearMemAlign(n, align < 0x80 ? 0x80 : align);
+  }
+  size_t size = p ? linearGetSize(p) : 0;
+  ctr_linear_unlock();
+  if (!p) {
+    return nullptr;
+  }
+  g_linear_blocks++;
+  g_linear_total++;
+  const u32 bytes = g_linear_bytes += (u32)size;
+  if (bytes > g_linear_peak.load()) {
+    g_linear_peak.store(bytes);
+  }
+  const u64 now = osGetTime();
+  const u64 last = g_last_linear_report_ms.load();
+  if (!last || now - last >= 1000) {
+    g_last_linear_report_ms.store(now ? now : 1);
+    lg::warn("[heap] {} KB from linear memory (no heap block that big): {} blocks, {} KB there now",
+             n / 1024, g_linear_blocks.load(), bytes / 1024);
+  }
+  return p;
+}
+
+// the music bank's block (ctr_heap_music_slot_take): the largest .MUS is 575760 bytes (Jak 1)
+constexpr size_t kMusicSlotBytes = 576 * 1024;
+void* g_music_slot = nullptr;
+std::atomic<bool> g_music_slot_taken{false};
+
+void linear_release(void* p) {
+  ctr_linear_lock();
+  const size_t size = linearGetSize(p);
+  linearFree(p);
+  ctr_linear_unlock();
+  g_linear_blocks--;
+  g_linear_bytes -= (u32)size;
 }
 
 #ifdef OG3DS_HEAP_TRACE
@@ -308,7 +382,10 @@ void* __wrap_malloc(size_t n) {
   void* p = __real_malloc(n);
 #endif
   if (!p && n) {
-    report_failure(n, "malloc");
+    p = linear_fallback(n, 0);
+    if (!p) {
+      report_failure(n, "malloc");
+    }
   }
   return p;
 }
@@ -322,13 +399,45 @@ void* __wrap_calloc(size_t n, size_t s) {
 #else
   void* p = __real_calloc(n, s);
 #endif
-  if (!p && n && s) {
-    report_failure(n * s, "calloc");
+  if (!p && n && s && n * s / s == n) {
+    p = linear_fallback(n * s, 0);
+    if (p) {
+      memset(p, 0, n * s);
+    } else {
+      report_failure(n * s, "calloc");
+    }
   }
   return p;
 }
 
 void* __wrap_realloc(void* old, size_t n) {
+  if (old && old == g_music_slot) {
+    // (AI-assisted, lavamem) not done to it; a new block, the slot back
+    void* p = n ? __wrap_malloc(n) : nullptr;
+    if (p) {
+      memcpy(p, old, n < kMusicSlotBytes ? n : kMusicSlotBytes);
+    }
+    if (p || !n) {
+      g_music_slot_taken.store(false);
+    }
+    return p;
+  }
+  if (old && in_linear(old)) {
+    // (AI-assisted, lavamem) a block from linear memory: a new block (the heap first), copied
+    if (!n) {
+      linear_release(old);
+      return nullptr;
+    }
+    ctr_linear_lock();
+    const size_t had = linearGetSize(old);
+    ctr_linear_unlock();
+    void* p = __wrap_malloc(n);
+    if (p) {
+      memcpy(p, old, had < n ? had : n);
+      linear_release(old);
+    }
+    return p;
+  }
 #ifdef OG3DS_HEAP_TRACE
   __malloc_lock(_REENT);
   void* p = __real_realloc(old, n);
@@ -341,7 +450,20 @@ void* __wrap_realloc(void* old, size_t n) {
   void* p = __real_realloc(old, n);
 #endif
   if (!p && n) {
-    report_failure(n, "realloc");
+    // (AI-assisted, lavamem) realloc leaves the old block as it was when it fails
+    size_t had = 0;
+    if (old) {
+      had = malloc_usable_size(old);
+    }
+    p = linear_fallback(n, 0);
+    if (p) {
+      if (old) {
+        memcpy(p, old, had < n ? had : n);
+        __wrap_free(old);
+      }
+    } else {
+      report_failure(n, "realloc");
+    }
   }
   return p;
 }
@@ -356,12 +478,23 @@ void* __wrap_memalign(size_t a, size_t n) {
   void* p = __real_memalign(a, n);
 #endif
   if (!p && n) {
-    report_failure(n, "memalign");
+    p = linear_fallback(n, a);
+    if (!p) {
+      report_failure(n, "memalign");
+    }
   }
   return p;
 }
 
 void __wrap_free(void* p) {
+  if (p && p == g_music_slot) {
+    g_music_slot_taken.store(false);  // (AI-assisted, lavamem) kept for the next music bank
+    return;
+  }
+  if (p && in_linear(p)) {
+    linear_release(p);  // (AI-assisted, lavamem) a block from linear memory
+    return;
+  }
 #ifdef OG3DS_HEAP_TRACE
   __malloc_lock(_REENT);
   trace_remove(p);
@@ -394,6 +527,20 @@ void ctr_heap_stats(CtrHeapStats* st) {
     }
     st->largest = 0;
   }
+}
+
+void* ctr_heap_music_slot_take(size_t n) {
+  if (n > kMusicSlotBytes) {
+    return nullptr;
+  }
+  if (!g_music_slot) {
+    g_music_slot = __wrap_malloc(kMusicSlotBytes);  // (music loads: the ISO thread only)
+    if (!g_music_slot) {
+      return nullptr;
+    }
+  }
+  bool expected = false;
+  return g_music_slot_taken.compare_exchange_strong(expected, true) ? g_music_slot : nullptr;
 }
 
 u32 ctr_heap_failures() {

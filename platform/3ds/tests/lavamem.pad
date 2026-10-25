@@ -1,0 +1,73 @@
+# (AI-assisted, lavamem) heap with lavatube + village3: continue lavatube-start, ride the Zoomer forward
+0 wait *target* target-title-wait
+150 tasks 2 111
+160 call poke32 $*game-info* 92 f100
+200 continue lavatube-start
+201 wait *target* target-continue
+440 pstate racer
+441 teleport racer 0 2
+500 circle
+506 -
+700 pos *target*
+900 circle
+906 -
+1100 pos *target*
+1300 circle
+1306 -
+1500 pos *target*
+1700 circle
+1706 -
+1900 pos *target*
+2100 circle
+2106 -
+2300 pos *target*
+2500 circle
+2506 -
+2700 pos *target*
+2900 circle
+2906 -
+3100 pos *target*
+3300 circle
+3306 -
+3500 pos *target*
+3701 x
+3800 x lx=200
+3900 x
+4000 pos *target*
+4001 x
+4100 x lx=60
+4200 x
+4300 pos *target*
+4301 x
+4400 x lx=200
+4500 x
+4600 pos *target*
+4601 x
+4700 x lx=60
+4800 x
+4900 pos *target*
+4901 x
+5000 x lx=200
+5100 x
+5200 pos *target*
+5201 x
+5300 x lx=60
+5400 x
+5500 pos *target*
+5501 x
+5600 x lx=200
+5700 x
+5800 pos *target*
+5801 x
+5900 x lx=60
+6000 x
+6100 pos *target*
+6101 x
+6200 x lx=200
+6300 x
+6400 pos *target*
+6401 x
+6500 x lx=60
+6600 x
+6700 pos *target*
+7000 log heap-end
