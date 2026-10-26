@@ -83,6 +83,9 @@ struct AbSwitch {
   bool (*get)(const CtrSettings& s);
 };
 const AbSwitch kAbSwitches[] = {
+    // (AI-assisted) isolate missing geometry from visibility vs frustum/streaming decisions.
+    {"vis_culling", [](CtrSettings& s, bool on) { s.vis_culling = on; },
+     [](const CtrSettings& s) { return s.vis_culling; }},
     {"run_culling", [](CtrSettings& s, bool on) { s.run_culling = on; },
      [](const CtrSettings& s) { return s.run_culling; }},
     // (AI-assisted) the finer precomputed visibility (.c3v files; loaded with fine_vis on)

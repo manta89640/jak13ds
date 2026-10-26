@@ -1144,3 +1144,31 @@ default (on). It never had anything to do with the red HUD shard (see below).
   other builds and configs: fable1 title build 17.5-24.0 ms with sound on (ocean 2.5 ms); Oct 17
   beach-start 14.1 ms and misty-start 11.5 ms, standing. Azahar doesn't model the GPU's fill
   cost: the extra texture read and the extra particles are only priced on hardware.
+
+
+## Citadel robot cage (AI-assisted, Oct 26)
+
+Launcher 2420 now emits at one quarter density on 3DS (`shield_density = 0.25`;
+1 restores the original). It retains the original panel dimensions, randomized ring, flash/fade
+sequence and shield-off behavior. Launcher identity comes from the particle ID table, so other
+uses of the texture are unchanged and level unload/reload updates the pointer. The global
+particle density remains an upper bound.
+
+The birth callback `birth-func-random-rot` runs inline in C++: the original random draw sequence,
+matrix/vector operations and quaternion operations, with no intermediate GOAL ABI calls.
+`shield_native = off` keeps the generated GOAL callback. Replaced math functions fall back to
+GOAL. Host verify: 4,350 birth calls (68 comparing all GOAL memory), zero differences; overall
+mips2c verify 971,892 calls, zero differences. The native birth takes about 24% fewer host
+instructions per call including verification wrapper overhead; ARM11 time is measured below.
+
+Azahar, private instance, sound on, the same binary and scripted Citadel view/camera sequence,
+six five-second windows after warmup. Original settings `shield_density=1, shield_native=off`
+vs defaults: logic 16.155 -> 15.863 ms/frame; process-particles 0.737 -> 0.435;
+sp-process-block-3d (included in process-particles) 0.463 -> 0.162; launch 0.510 -> 0.438.
+Render build 23.18 -> 22.91 ms/frame. Both 29.9 fps. These are scene totals, not shield-only
+timings. Azahar does not model hardware fill cost, so this does not establish the real 3DS GPU
+saving from the 75% reduction in shield births.
+
+The complete arrival introduction (`green-sagecage-introduction`) was additionally captured in
+Azahar every four game frames, with sound on. Capture timing is excluded from the performance
+comparison. Evidence and scripts: `port_test/reports/citadel-effects/`.

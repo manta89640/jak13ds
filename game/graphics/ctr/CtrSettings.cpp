@@ -324,6 +324,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
                key == "debug_log" || key == "particle_density" ||
+               key == "shield_density" || key == "shield_native" ||
                key == "io_checksum" || key == "anim_lod" || key == "io_cache" ||
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
                key == "text_min_height" ||

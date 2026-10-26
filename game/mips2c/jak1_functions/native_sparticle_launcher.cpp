@@ -254,6 +254,29 @@ float particle_density() {
   return density;
 }
 
+// (AI-assisted) Only the robot cage's launcher 2420, not every use of citadel-shield.
+// Reduced births keep the original ring, animation, collision and shutdown fade intact.
+float shield_density() {
+  static const float density = [] {
+    float d = 1.f;
+#ifdef __3DS__
+    d = 0.25f;
+    char v[32];
+    if (ctr_config_get("shield_density", v, sizeof(v))) {
+      d = strtof(v, nullptr);
+    }
+#else
+    if (const char* v = getenv("OPENGOAL_SHIELD_DENSITY")) {
+      d = strtof(v, nullptr);
+    }
+#endif
+    d = std::isfinite(d) ? std::clamp(d, 0.125f, 1.f) : 1.f;
+    lg::info("particles: Citadel shield density {:.3f}", d);
+    return d;
+  }();
+  return density;
+}
+
 u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   static const u32 level_sym = sym_addr("*level*");
   static const u32 enable_sym = sym_addr("*sp-launcher-enable*");
@@ -336,6 +359,14 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   init_fields_call(gload<u32>(init_fields_sym));
   gstore<u32>(sp + 12, (u32)v0);
   float births = gload<float>(sp + 116) * rate;
+  static const u32 part_table_sym = sym_addr("*part-id-table*");
+  // The array's entries start at +12. Resolve its value each time: level unload/reload
+  // replaces launcher pointers. Do not intern a level symbol before its module loads.
+  const u32 part_table = gload<u32>(part_table_sym);
+  const bool shield = launcher == gload<u32>(part_table + 12 + 2420 * 4);
+  if (shield) {
+    births *= std::min(shield_density(), particle_density());
+  }
   {
     // (AI-assisted) particle_density: bursts and periodic emitters launch fewer particles. A
     // launch of exactly one particle stays: a glow or a sparkle relaunched every frame would
@@ -344,7 +375,7 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     // particles played the sound less often (geyser, steam-release, fire-pop, spark, ...). Birth
     // functions only set up the particle they get, so they go with the particles left out.
     const float d = particle_density();
-    if (d < 1.f && std::abs(births - 1.f) > 1e-3f && gload<u32>(sp + 120) == 0) {
+    if (!shield && d < 1.f && std::abs(births - 1.f) > 1e-3f && gload<u32>(sp + 120) == 0) {
       births = births > 1.f ? std::max(1.f, births * d) : births * d;
     }
   }
@@ -588,7 +619,11 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     r[4] = state;
     if (const u32 birth_func = gload<u32>(sp + 108)) {
       r[3] = launcher;
-      call(birth_func);
+      if (shield && sp_birth_random_rot(birth_func, r, callee)) {
+        v0 = 0;
+      } else {
+        call(birth_func);
+      }
     }
 
     // the sound, every time its accumulator reaches 1
