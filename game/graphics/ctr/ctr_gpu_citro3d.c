@@ -6015,7 +6015,6 @@ static void clip_draw_ranges(const float* matrix, int n_mtx, const ctr_draw_stat
       if (want) {
         gl_to_pica_mul(matrix, &m);
       }
-      raw_vc_flush();
       C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip_glpica, want ? &m : &g.gl_to_pica);
       raw_note_unif();
       mtx_on = want;
@@ -7779,7 +7778,6 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_
   }
   use_program(PROG_OCEAN_ENV);
   ocean_bind_tex2(env_tex);
-  raw_vc_flush();
   const ProgSet* p = g.ps;
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, p->uloc_oenv_clip, (const C3D_Mtx*)d->clip.m);
   for (int i = 0; i < 2; i++) {
@@ -7840,7 +7838,6 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
       g.cur.tex_binds++;
     }
   }
-  raw_vc_flush();
   const ProgSet* p = g.ps;
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, p->uloc_etie_clip, (const C3D_Mtx*)d->clip.m);
   for (int i = 0; i < 3; i++) {
