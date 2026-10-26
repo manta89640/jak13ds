@@ -1,0 +1,72 @@
+; (AI-assisted, j2water2)
+; Vertex shader for Jak II's envmapped ties (c3l v21 EnvTieDraw, ctr_gpu_etie_draw): the level mesh
+; layout (c3l::Vertex) plus a second attribute buffer with each vertex's normal (s8, world space,
+; * 127). Position, base texture coordinates, color and fog as the level meshes (ctr_mesh_old.v.pica,
+; the fog amount from clip w as ctr_ocean_env.v.pica). Texture unit 2 reads the envmap at the PC's
+; etie.vert coordinates (the PS2 etie VU program): v = the camera space position (cam rows),
+; n = the camera space normal (nrm rows), n.z -= 1, then
+;   st = 0.5 - 0.5 * (n.xy * dot(v, n) + v.xy * n.z) / |v * n.z|
+
+.fvec clip[4]
+.fvec cam[3]        ; v = dph(row, pos)
+.fvec nrm[3]        ; n = dp3(row, normal) (the rows hold the 1/127)
+.fvec scales        ; x: texture coordinate scale (1/1024 or atlas 1/32768), y: color scale (1/255)
+.fvec fog0          ; as ctr_ocean_env.v.pica
+.fvec fog1
+
+.constf consts(1.0, 0.5, 0.0, -0.5)
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+.alias innrm v3
+
+.entry main_ctr_etie
+.proc main_ctr_etie
+  ; dph: the position's pad (w) counts as 1
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  dph outpos.z, inpos, clip[2]
+  dph r1, inpos, clip[3]
+  mov outpos.w, r1
+
+  ; the fog amount (as ctr_ocean_env.v.pica)
+  mul r2.xy, fog0.xyxy, r1.xyxy
+  add r2.xy, fog0.zwzw, r2.xyxy
+  max r2.xy, fog1.xyxy, r2.xyxy
+  mov r4.zw, consts.zzzz
+  max r4.x, -r2.xxxx, r2.yyyy
+  mov r4.y, consts.yyyy
+  mov outtc1, r4
+
+  mul outtc0, scales.xxxx, intex
+
+  ; the envmap coordinates
+  dph r6.x, inpos, cam[0]
+  dph r6.y, inpos, cam[1]
+  dph r6.z, inpos, cam[2]
+  dp3 r7.x, nrm[0], innrm
+  dp3 r7.y, nrm[1], innrm
+  dp3 r7.z, nrm[2], innrm
+  add r7.z, -consts.xxxx, r7.zzzz   ; n.z - 1
+  dp3 r8.x, r6, r7                  ; dot(v, n)
+  mul r9.xyz, r6.xyz, r7.zzzz       ; rfl = v * n.z
+  dp3 r10.x, r9, r9
+  rsq r10.x, r10.xxxx               ; 1 / |rfl|
+  mul r11.xy, r7.xyyy, r8.xxxx      ; n.xy * dot
+  add r11.xy, r9.xyyy, r11.xyyy     ; + rfl.xy
+  mul r10.x, consts.wwww, r10.xxxx  ; -0.5 / |rfl|
+  mul r11.xy, r10.xxxx, r11.xyyy
+  add r11.xy, consts.yyyy, r11.xyyy ; + 0.5
+  mov r11.zw, consts.zzzz
+  mov outtc2, r11
+
+  mul outclr, scales.yyyy, inclr
+  end
+.end

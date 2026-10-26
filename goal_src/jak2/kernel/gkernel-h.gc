@@ -13,12 +13,38 @@
 (defconstant DPROCESS_STACK_SIZE (#if PC_PORT #x8000 #x3800))
 (defconstant PROCESS_STACK_SIZE (#if PC_PORT #x4000 #x1c00))
 
+;; (AI-assisted) ;; C backend kernel primitives (game/kernel/jak2/goalc_kernel.cpp). They replace the assembly
+;; used for context switching in gkernel.gc and gstate.gc.
+(#when (eq? INSTRUCTION_SET 'c)
+  ;; return to the kernel (the innermost thread-resume/reset-and-call) with a value. Never returns.
+  (define-extern __goalc-return-to-kernel (function object none))
+  ;; run the function on the thread's stack, return its result (or what's returned to the kernel)
+  (define-extern __goalc-reset-and-call (function object function object))
+  ;; suspend the cpu-thread in pp. Returns once the thread is resumed.
+  (define-extern __goalc-thread-suspend (function none))
+  ;; free the saved state of a suspended cpu-thread that won't be resumed (deactivate, set-to-run)
+  (define-extern __goalc-thread-release (function object none))
+  ;; resume (or start, after set-to-run) a cpu-thread. Returns when the thread returns to the kernel.
+  (define-extern __goalc-thread-resume (function object none))
+  ;; reset the stack to the given top and call the function with 4 args there, then
+  ;; return-from-thread-dead. Never returns.
+  (define-extern __goalc-reset-stack-and-call (function pointer function object object object object none))
+  ;; catch-frame new: allocation, type, name, function, param block
+  (define-extern __goalc-catch (function object type symbol function (pointer uint64) object))
+  ;; throw-dispatch: catch frame, value
+  (define-extern __goalc-throw (function object object none)))
+
 ;; the size of the shared heap used by dynamically sized processes
 (#if PC_BIG_MEMORY
   (defconstant PROCESS_HEAP_MULT 4) ;; 4x actors
   (defconstant PROCESS_HEAP_MULT 1)
   )
 (defconstant PROCESS_HEAP_SIZE (* PROCESS_HEAP_MULT 1540 1024))
+;; 3DS port (AI-assisted): with SMALL_MEMORY, PROCESS_HEAP_MULT is the PS2's 1 (the city's traffic
+;; peaks at ~1.1 MB of the 1540 KB *nk-dead-pool* on the PC), and the global DMA buffers are this
+;; many times the PS2's 1280 KB (display.gc). The PC port's renderers take little DMA from GOAL:
+;; the slums with traffic peaked at 199 KB a frame (C mode, Oct 18).
+(defconstant DMA_BUFFER_SMALL_MULT 1)
 (defconstant PROCESS_HEAP_MAX (* PROCESS_HEAP_MULT 768))
 
 (defconstant *tab-size* (the binteger 8))
@@ -631,7 +657,9 @@
   "suspend the current process, to be resumed on the next frame."
   `(rlet ((pp :reg r13 :reset-here #t))
          ;; debug check for stack overflow here, where we can easily print the process name.
-         (#when (or KERNEL_DEBUG)
+         ;; (AI-assisted) C backend: the runtime saves suspended stacks in host memory, there is no
+         ;; size limit to check.
+         (#when (and KERNEL_DEBUG (not (eq? INSTRUCTION_SET 'c)))
            (rlet ((sp :reg rsp :reset-here #t :type int)
                   (off :reg r15 :type uint))
                  (let* ((sp-goal (- sp off))
@@ -665,13 +693,13 @@
   "Define a mips2c object (typically a function)."
   `(begin
      (define-extern ,name ,type)
-     (set! ,name (the-as ,type (__pc-get-mips2c ,(symbol->string name))))
+     (set! ,name (the-as ,type (__pc-get-mips2c ,(symbol->string name) (__c-abi-wide-mask ,type))))
      )
   )
 
 (defmacro defmethod-mips2c (name method-id method-type)
   "Define a mips2c method."
-  `(method-set! ,method-type ,method-id (__pc-get-mips2c ,name))
+  `(method-set! ,method-type ,method-id (__pc-get-mips2c ,name (__c-abi-method-wide-mask ,method-type ,method-id)))
   )
 
 (defmacro kheap-alloc (heap size)

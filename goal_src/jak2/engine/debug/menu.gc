@@ -248,7 +248,7 @@
   (set! (-> arg0 fstart-inc) (the-as float arg2))
   (set! (-> arg0 fstep) (the-as float arg2))
   (set! (-> arg0 ihex-p) arg6)
-  (set! (-> arg0 factivate-func) (the-as (function int debug-menu-msg float float float) arg1))
+  (set! (-> arg0 iactivate-func) arg1) ;; (AI-assisted) the int view of the overlay (C backend ABI v3)
   (cond
     (arg3
       (set! (-> arg0 fval) (the-as float arg4))
@@ -1112,10 +1112,10 @@
                     )
               )
           )
-         (else
+         (else  ;; (AI-assisted) int items call iactivate-func with ints (C backend ABI v3: int parameters are WIDE)
            (if (-> arg0 factivate-func)
                (set! (-> arg0 fval)
-                     ((-> arg0 factivate-func) (-> arg0 id) (debug-menu-msg press) (-> arg0 fundo-val) (-> arg0 fval))
+                     (the-as float ((-> arg0 iactivate-func) (-> arg0 id) (debug-menu-msg press) (the-as int (-> arg0 fundo-val)) (the-as int (-> arg0 fval))))
                      )
                )
            )
@@ -1198,7 +1198,7 @@
                     (set! a2-4 (min (max a2-4 (the-as int (-> arg0 frange-min))) (the-as int (-> arg0 frange-max))))
                     )
                 (set! (-> arg0 fval)
-                      ((-> arg0 factivate-func) (-> arg0 id) (debug-menu-msg press) (the-as float a2-4) (-> arg0 fval))
+                      (the-as float ((-> arg0 iactivate-func) (-> arg0 id) (debug-menu-msg press) a2-4 (the-as int (-> arg0 fval))))
                       )
                 )
               )
@@ -1261,7 +1261,7 @@
        (else
          (if (-> arg0 factivate-func)
              (set! (-> arg0 fval)
-                   ((-> arg0 factivate-func) (-> arg0 id) (debug-menu-msg update) (-> arg0 fval) (-> arg0 fval))
+                   (the-as float ((-> arg0 iactivate-func) (-> arg0 id) (debug-menu-msg update) (the-as int (-> arg0 fval)) (the-as int (-> arg0 fval))))
                    )
              )
          )

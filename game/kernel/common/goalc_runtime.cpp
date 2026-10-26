@@ -35,6 +35,7 @@
 #if !defined(_WIN32) && !defined(__3DS__) && !defined(GOALC_NO_DLOPEN)
 #define GOALC_USE_DLOPEN 1
 #include <dlfcn.h>
+#include <unistd.h>
 #else
 #define GOALC_USE_DLOPEN 0
 #endif
@@ -209,18 +210,49 @@ const auto g_thunks = make_thunks(std::make_integer_sequence<u32, kMaxThunks>{})
 // Modules
 // ---------------------------------------------------------------------------
 
-std::unordered_map<u64, const GoalCModule*>& static_registry() {
-  static std::unordered_map<u64, const GoalCModule*> registry;
+// (AI-assisted) hash -> the instances of the module: separately compiled copies of the same C
+// source, each with its own static data (seg_base, sym_offsets). Several instances let several
+// loaded copies of one object file (the same object in two co-loaded level DGOs) each have their
+// own segment bases. Static builds register extra instances (gen_c_registry.py, the .c file
+// compiled again under another name); dlopen hosts load copies of the .so on demand.
+std::unordered_map<u64, std::vector<const GoalCModule*>>& static_registry() {
+  static std::unordered_map<u64, std::vector<const GoalCModule*>> registry;
   return registry;
 }
 
-struct LoadedModule {
+//! A level heap that objects are linked into, to tell when it was emptied (a level unloaded).
+struct HeapTrack {
+  u32 base = 0;
+  u32 last_addr = 0;
+  u32 generation = 0;
+};
+//! by the GOAL address of the kheapinfo
+std::unordered_map<u32, HeapTrack> g_heaps;
+
+struct ModuleInstance {
   const GoalCModule* mod = nullptr;
+  bool has_ids = false;
   u32 base_id = 0;
+  //! the object file copy linked to this instance last (0: none since the last init)
+  u32 seg_bases[3] = {0, 0, 0};
+  bool linked = false;
+  //! that copy is alive while the heap it is in wasn't emptied and its first stub (outside the
+  //! top-level segment) still holds this instance's function
+  u32 heap_key = 0;
+  u32 heap_generation = 0;
+  u32 probe_addr = 0;
+  void* probe_fn = nullptr;
+  u64 link_seq = 0;
+};
+
+struct LoadedModule {
+  std::vector<ModuleInstance> instances;
+  bool warned = false;
 };
 
 // modules that have been linked at least once since the last goalc_runtime_init
 std::unordered_map<u64, LoadedModule> g_linked_modules;
+u64 g_link_seq = 0;
 
 // ---------------------------------------------------------------------------
 // Stacks
@@ -294,14 +326,19 @@ void goalc_abi_check_failed(const char* file, int line, const char* what, uint64
 }
 
 void goalc_register_module(const GoalCModule* mod) {
-  auto& reg = static_registry();
-  auto it = reg.find(mod->hash);
-  if (it != reg.end() && it->second != mod) {
-    // can't use lg here, this may run in a static constructor.
-    fprintf(stderr, "[goalc] module %s has the same hash as %s (%016llx)\n", mod->name,
-            it->second->name, (unsigned long long)mod->hash);
+  // (AI-assisted) a module registered again under the same hash is another instance of it
+  auto& list = static_registry()[mod->hash];
+  for (auto* m : list) {
+    if (m == mod) {
+      return;
+    }
+    if (m->name && mod->name && strcmp(m->name, mod->name) != 0) {
+      // can't use lg here, this may run in a static constructor.
+      fprintf(stderr, "[goalc] module %s has the same hash as %s (%016llx)\n", mod->name,
+              m->name, (unsigned long long)mod->hash);
+    }
   }
-  reg[mod->hash] = mod;
+  list.push_back(mod);
 }
 }
 
@@ -326,6 +363,7 @@ void goalc_runtime_init(u8* mem, u32 st) {
   }
   g_thunk_count = 0;
   g_linked_modules.clear();
+  g_heaps.clear();
   if (const char* check = getenv("OPENGOAL_C_ABI_CHECK")) {
     g_abi_check = check[0] == '1';
   }
@@ -350,6 +388,10 @@ u32 goalc_fn_id_for_host(void* fn) {
   u32 id = g_fn_table.push(fn);
   g_fn_table.host_ids[fn] = id;
   return id;
+}
+
+bool goalc_abi_check_enabled() {
+  return g_abi_check;
 }
 
 u32 goalc_fn_id_for_adapted(goalc_adapter adapter, void* fn, u64 extra, u32 wide_mask) {
@@ -466,16 +508,9 @@ u64 goalc_zero_fn() {
 // Modules
 // ---------------------------------------------------------------------------
 
-const GoalCModule* goalc_find_module(u64 hash) {
-  auto& reg = static_registry();
-  auto it = reg.find(hash);
-  if (it != reg.end()) {
-    return it->second;
-  }
-
+namespace {
 #if GOALC_USE_DLOPEN
-  auto path = file_util::get_jak_project_dir() / "out" / game_version_names[g_game_version] /
-              "cmod" / fmt::format("{:016x}.so", hash);
+const GoalCModule* dlopen_module(const fs::path& path, u64 hash) {
   void* handle = dlopen(path.string().c_str(), RTLD_NOW | RTLD_LOCAL);
   if (!handle) {
     lg::error("[goalc] failed to load module {}: {}", path.string(), dlerror());
@@ -493,19 +528,194 @@ const GoalCModule* goalc_find_module(u64 hash) {
     dlclose(handle);
     return nullptr;
   }
-  // keep the library loaded forever, and remember it so we don't dlopen again.
-  reg[hash] = mod;
+  // keep the library loaded forever
+  return mod;
+}
+
+fs::path module_so_path(u64 hash) {
+  return file_util::get_jak_project_dir() / "out" / game_version_names[g_game_version] / "cmod" /
+         fmt::format("{:016x}.so", hash);
+}
+#endif
+
+/*!
+ * (AI-assisted) Instance k of a module, or null if there is none. Static builds have the instances
+ * that were compiled in. dlopen hosts make any number: dlopen of the same path returns the same
+ * library, so instance k > 0 is a copy of the .so under another name (its own static data).
+ */
+u32 max_instances() {
+  // OPENGOAL_C_MODULE_INSTANCES=1: one instance per module, the old behaviour (tests). The default
+  // bounds the dlopen copies, in case copies are wrongly thought alive.
+  static const u32 max = [] {
+    const char* v = getenv("OPENGOAL_C_MODULE_INSTANCES");
+    const int n = v ? atoi(v) : 0;
+    return n > 0 ? (u32)n : 8u;
+  }();
+  return max;
+}
+
+const GoalCModule* find_module_instance(u64 hash, u32 k) {
+  if (k >= max_instances()) {
+    return nullptr;
+  }
+  auto& list = static_registry()[hash];
+  if (k < list.size()) {
+    return list[k];
+  }
+#if GOALC_USE_DLOPEN
+  if (k != list.size()) {
+    return nullptr;
+  }
+  const GoalCModule* mod = nullptr;
+  if (k == 0) {
+    mod = dlopen_module(module_so_path(hash), hash);
+  } else {
+    std::error_code ec;
+    auto dir = fs::temp_directory_path(ec) / fmt::format("opengoal-cmod-{}", (int)getpid());
+    fs::create_directories(dir, ec);
+    auto copy = dir / fmt::format("{:016x}.{}.so", hash, k);
+    fs::copy_file(module_so_path(hash), copy, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+      lg::error("[goalc] could not copy module {:016x} for instance {}: {}", hash, k, ec.message());
+      return nullptr;
+    }
+    mod = dlopen_module(copy, hash);
+    fs::remove(copy, ec);  // stays mapped
+  }
+  if (mod) {
+    list.push_back(mod);
+  }
   return mod;
 #else
   return nullptr;
 #endif
 }
 
+bool instance_alive(const ModuleInstance& inst) {
+  if (!inst.linked || !inst.probe_addr) {
+    return false;
+  }
+  if (inst.heap_key) {
+    auto h = g_heaps.find(inst.heap_key);
+    if (h == g_heaps.end() || h->second.generation != inst.heap_generation) {
+      return false;
+    }
+    // the heap now (kheapinfo: base, top, current, top-base): a copy above its current end was
+    // freed (a level unloads by emptying its heap, before the next level fills it)
+    u32 heap_words[4];
+    memcpy(heap_words, goalc_mem + inst.heap_key, sizeof(heap_words));
+    if (heap_words[0] != h->second.base || inst.probe_addr >= heap_words[2]) {
+      return false;
+    }
+  }
+  void* fn = nullptr;
+  memcpy(&fn, goalc_mem + inst.probe_addr, sizeof(void*));
+  return fn == inst.probe_fn;
+}
+
+/*!
+ * Note an object linked at addr into a heap. Heaps allocate upwards until they are emptied, so an
+ * object at or below the previous one (or a heap with a new base) means the heap was emptied: the
+ * object files linked there before are gone. Returns the heap's generation.
+ */
+u32 note_heap_link(const GoalcLinkHeap& heap, u32 addr) {
+  if (!heap.key) {
+    return 0;
+  }
+  auto& h = g_heaps[heap.key];
+  if (h.base != heap.base || addr <= h.last_addr) {
+    h.generation++;
+    h.base = heap.base;
+  }
+  h.last_addr = addr;
+  return h.generation;
+}
+
+/*!
+ * The instance to link this copy of the object file to: the one this copy already uses (each
+ * segment has its own LINK_C_MODULE entry), else one whose copy is gone, else a new one (dlopen
+ * hosts), else the least recently linked one (its copy then uses this copy's static data: the old
+ * hazard, reported once per module).
+ */
+ModuleInstance& pick_instance(u64 hash,
+                              const u32 seg_bases[3],
+                              const GoalcLinkHeap& heap,
+                              const char* object_name) {
+  auto& lm = g_linked_modules[hash];
+  for (auto& inst : lm.instances) {
+    if (inst.linked && !memcmp(inst.seg_bases, seg_bases, sizeof(inst.seg_bases))) {
+      return inst;
+    }
+  }
+  // a new copy of the object file
+  const u32 main_addr = seg_bases[MAIN_SEGMENT];
+  const u32 generation = main_addr ? note_heap_link(heap, main_addr) : 0;
+  ModuleInstance* pick = nullptr;
+  for (auto& inst : lm.instances) {
+    if (!instance_alive(inst)) {
+      pick = &inst;
+      break;
+    }
+  }
+  if (!pick) {
+    if (auto* mod = find_module_instance(hash, (u32)lm.instances.size())) {
+      lm.instances.emplace_back();
+      pick = &lm.instances.back();
+      pick->mod = mod;
+      if (lm.instances.size() > 1) {
+        lg::info("[goalc] {}: {} copies loaded at once, linked to C module instance {}",
+                 object_name, lm.instances.size(), lm.instances.size() - 1);
+      }
+    }
+  }
+  if (!pick) {
+    if (lm.instances.empty()) {
+      // (AI-assisted) the usual cause: the game files (out/<game>/iso) and the runtime come from
+      // different goalc runs (the C modules are linked into the runtime, e.g. gk.3dsx on the 3DS)
+      ASSERT_MSG(false, fmt::format("goalc: could not find C module {:016x} for object file {}. "
+                                    "The game files (out/<game>/iso: CGO/DGO) and this runtime "
+                                    "are from different builds: copy both from the same build.",
+                                    hash, object_name));
+    }
+    pick = &lm.instances[0];
+    for (auto& inst : lm.instances) {
+      if (inst.link_seq < pick->link_seq) {
+        pick = &inst;
+      }
+    }
+    if (!lm.warned) {
+      lm.warned = true;
+      lg::error("[goalc] {}: {} copies loaded at once but only {} C module instance(s): the older "
+                "copy now uses this copy's static data (add instances for this module)",
+                object_name, lm.instances.size() + 1, lm.instances.size());
+    }
+  }
+  memcpy(pick->seg_bases, seg_bases, sizeof(pick->seg_bases));
+  pick->linked = true;
+  pick->heap_key = main_addr ? heap.key : 0;
+  pick->heap_generation = generation;
+  pick->probe_addr = 0;
+  pick->probe_fn = nullptr;
+  pick->link_seq = ++g_link_seq;
+  return *pick;
+}
+}  // namespace
+
+const GoalCModule* goalc_find_module(u64 hash) {
+  return find_module_instance(hash, 0);
+}
+
+u32 goalc_module_instance_count(u64 hash) {
+  auto it = g_linked_modules.find(hash);
+  return it == g_linked_modules.end() ? 0 : (u32)it->second.instances.size();
+}
+
 u32 goalc_link_module_entry(const u8* link,
                             const u32 seg_bases[3],
                             u8* seg_data,
                             goalc_sym_resolver resolver,
-                            const char* object_name) {
+                            const char* object_name,
+                            const GoalcLinkHeap& heap) {
   const u8* start = link;
   u64 hash = read_unaligned<u64>(link);
   link += 8;
@@ -518,15 +728,8 @@ u32 goalc_link_module_entry(const u8* link,
                                   object_name));
   }
 
-  const GoalCModule* mod = goalc_find_module(hash);
-  if (!mod) {
-    // (AI-assisted) the usual cause: the game files (out/jak1/iso) and the runtime come from
-    // different goalc runs (the C modules are linked into the runtime, e.g. gk.3dsx on the 3DS)
-    ASSERT_MSG(false, fmt::format("goalc: could not find C module {:016x} for object file {}. The "
-                                  "game files (out/jak1/iso: CGO/DGO) and this runtime are from "
-                                  "different builds: copy both from the same build.",
-                                  hash, object_name));
-  }
+  ModuleInstance& inst = pick_instance(hash, seg_bases, heap, object_name);
+  const GoalCModule* mod = inst.mod;
 
   for (int i = 0; i < 3; i++) {
     mod->seg_base[i] = seg_bases[i];
@@ -539,15 +742,14 @@ u32 goalc_link_module_entry(const u8* link,
     mod->after_link();
   }
 
-  auto it = g_linked_modules.find(hash);
-  if (it == g_linked_modules.end() || it->second.mod != mod) {
-    LoadedModule lm;
-    lm.mod = mod;
-    lm.base_id = goalc_alloc_fn_ids(mod->funcs, mod->n_funcs);
-    it = g_linked_modules.insert_or_assign(hash, lm).first;
+  if (!inst.has_ids) {
+    inst.base_id = goalc_alloc_fn_ids(mod->funcs, mod->n_funcs);
+    inst.has_ids = true;
   }
-  u32 base_id = it->second.base_id;
+  u32 base_id = inst.base_id;
 
+  const u32 seg_addr = (u32)(seg_data - goalc_mem);
+  const bool top_level = seg_bases[TOP_LEVEL_SEGMENT] && seg_addr == seg_bases[TOP_LEVEL_SEGMENT];
   for (u32 i = 0; i < n; i++) {
     u32 stub_offset = read_unaligned<u32>(link);
     u32 func_index = read_unaligned<u32>(link + 4);
@@ -558,6 +760,10 @@ u32 goalc_link_module_entry(const u8* link,
     // see goal_c_abi.h: the stub holds the host address of the function
     void* fn = goalc_fn_table[base_id + func_index];
     memcpy(seg_data + stub_offset, &fn, sizeof(void*));
+    if (!inst.probe_addr && !top_level) {
+      inst.probe_addr = seg_addr + stub_offset;
+      inst.probe_fn = fn;
+    }
   }
 
   return (u32)(link - start);

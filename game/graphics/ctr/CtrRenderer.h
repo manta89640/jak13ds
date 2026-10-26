@@ -22,6 +22,16 @@
 
 #include "game/graphics/gfx.h"
 
+/*!
+ * (AI-assisted) The game's GS screen y to the 3DS's clip space y, on top of the GS mapping
+ * ((y - 2048) / -128 for a 448 line screen): Jak 1's scissor adjust 512 / 448; Jak II draws 416
+ * lines of a frame twice as tall (OpenGL Shader.cpp: SCISSOR_ADJUST * HEIGHT_SCALE = 512 / 416 *
+ * 0.5). Set once by the renderer for the game version (ctr_set_gs_y_scale).
+ */
+float ctr_gs_y_scale();
+/*! (AI-assisted) The game is Jak II (jak2::BucketId, its DMA formats). */
+bool ctr_is_jak2();
+
 class CtrVram;
 class CtrDirect;
 class CtrLevels;
@@ -110,6 +120,9 @@ class CtrRenderer {
    * synchronous render_frame) */
   void prepare_sprites(const void* ee_mem, u32 chain_offset);
   void set_async(bool async) { m_rs.call_vif_callback = !async; }
+  /*! (AI-assisted) Jak II, game thread: copy what the texture animation arrays upload from game
+   * memory (CtrTexAnimJak2::snapshot_upload); nothing for Jak 1 */
+  void prepare_textures(const void* ee_mem, u32 chain_offset);
   // timing, averaged over the frames between two log lines
   struct Timing {
     double begin_ms = 0;  // frame begin: waiting for the GPU to finish the previous frame
@@ -120,6 +133,7 @@ class CtrRenderer {
     int splits = 0;
     int frames = 0;
     double cmd_kb = 0;
+    double cmd_kb_peak = 0;  // (AI-assisted, j2-mem2) the most in one frame
     double dedup_kb = 0;  // (AI-assisted) command words cmd_dedup left out
     int dropped = 0;
     int tex_binds = 0;
@@ -144,6 +158,21 @@ class CtrRenderer {
 
  private:
   void dispatch_buckets_jak1(DmaFollower dma);
+  // (AI-assisted) Jak II: buckets from the start of the chain (no default registers call)
+  void dispatch_buckets_jak2(DmaFollower dma);
+  // (AI-assisted) the bucket loop of both: the sky hook from bucket sky_hook_bucket on,
+  // vif_interrupt_callback(bucket + callback_offset); false: a bucket
+  // didn't end at the next one
+  bool run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int callback_offset);
+  // (AI-assisted) Jak II's bucket table (CtrRendererJak2.cpp)
+  void init_buckets_jak2();
+  // (AI-assisted) the DMA tag of a bucket in a chain (Jak 1: after the default registers call)
+  u32 bucket_tag(u32 chain_offset, int id) const;
+  bool m_jak2 = false;
+  std::vector<int> m_anim_buckets;
+  std::unique_ptr<CtrBucketRenderer> m_jak2_eyes;  // (AI-assisted) CtrEyeRenderer, no bucket  // (AI-assisted) Jak II buckets that may hold animation arrays
+  void tex_frame_done_jak2();
+  int m_sprite_bucket = -1;  // (AI-assisted) prepare_sprites
   void draw_pmode_fade();
   std::unique_ptr<CtrVram> m_vram;
   std::unique_ptr<CtrLevels> m_levels;
@@ -204,14 +233,19 @@ class CtrRenderer {
   double m_profile_arm_ms = 0;            // when its measurement may start
   std::vector<std::string> m_profiled;    // levels measured already
   bool m_pipeline_off = false;       // (AI-assisted) switched off after a frame dropped draws
-  // (AI-assisted, title3) draw_pmode_fade: the fade's alpha last shown (0: black); a screen coming
-  // out of black kept black while a level just shown (or after a cut) has groups in view drawn far
-  // for near chunks not read yet: since when, the most such groups, the frames
+  int m_pipeline_calm = 0;           // (AI-assisted, j2gaps) frames since then that fit in a half
+  int m_pipeline_retry_frames = 450;  // calm frames before it goes on again (x2 per overflow)
+  // (AI-assisted, j2intro) both games (Jak 1: title3), draw_pmode_fade: the fade's alpha last shown (0: black); a screen
+  // coming out of black kept black while a level just shown (or after a cut) misses something in
+  // view (hold_black): since when, the most missing, the frames
+  float hold_black(float alp);
   float m_shown_alp = 1.f;
   bool m_hold_black = false;
   bool m_hold_ramp = false;  // after the hold: faded in from black (1/8 a frame), not cut in
   double m_hold_t0 = 0;
-  u32 m_hold_groups = 0, m_hold_frames = 0;
+  u32 m_hold_late = 0, m_hold_frames = 0;
+  u32 m_hold_least = 0;          // (AI-assisted, j2pop) the least missing since the hold began
+  double m_hold_progress_t = 0;  // when it last got fewer
   // (AI-assisted) config.ini gpu_counters: the GPU's own counters over every stats window, with
   // everything drawn (gpu_profile measures them in its own way)
   void hw_counters_frame();

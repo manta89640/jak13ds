@@ -1,6 +1,7 @@
 //--------------------------MIPS2C---------------------
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak2_functions/native_functions.h"
 #include "game/kernel/jak2/kscheme.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
@@ -1047,7 +1048,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.moving_sphere_triangle_intersect = intern_from_c("moving-sphere-triangle-intersect").c();
-  gLinkedFunctionTable.reg("(method 9 collide-cache-prim)", execute, 1024);
+  gLinkedFunctionTable.reg("(method 9 collide-cache-prim)", execute, 1024, &native::method_9_collide_cache_prim);
 }
 
 } // namespace method_9_collide_cache_prim
@@ -1254,7 +1255,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.moving_sphere_sphere_intersect = intern_from_c("moving-sphere-sphere-intersect").c();
-  gLinkedFunctionTable.reg("(method 10 collide-cache-prim)", execute, 256);
+  gLinkedFunctionTable.reg("(method 10 collide-cache-prim)", execute, 256, &native::method_10_collide_cache_prim);
 }
 
 } // namespace method_10_collide_cache_prim
@@ -1686,6 +1687,8 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.closest_pt_in_triangle = intern_from_c("closest-pt-in-triangle").c();
+  // (AI-assisted) native::method_9_collide_puss_work exists but stays off: no Jak 2 GOAL code
+  // calls this method (0 calls on jak2_city.pad / jak2_route.pad), so it is unverified
   gLinkedFunctionTable.reg("(method 9 collide-puss-work)", execute, 256);
 }
 
@@ -1856,6 +1859,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
+  // (AI-assisted) native::method_10_collide_puss_work exists but stays off: no Jak 2 GOAL code
+  // calls this method (0 calls on jak2_city.pad / jak2_route.pad), so it is unverified
   gLinkedFunctionTable.reg("(method 10 collide-puss-work)", execute, 256);
 }
 

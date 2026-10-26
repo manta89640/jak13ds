@@ -1161,7 +1161,18 @@
   (none)
   )
 
+;; og:preserve-this (AI-assisted) 3DS: per-frame-cell-update and sphere-in-loaded-city-infos? (with
+;; sphere-in-grid?) in C++ (game/mips2c/jak2_functions/native2_traffic.cpp: the same results, verified
+;; against this code with OPENGOAL_MIPS2C_VERIFY=1; always on). The GOAL code runs when the native
+;; returns #f / 0 (debugging: config.ini mips2c_native_off).
+(#when TARGET_3DS
+  (def-mips2c pc-per-frame-cell-update (function traffic-level-data symbol))
+  (def-mips2c pc-sphere-in-loaded-city-infos? (function traffic-engine vector int object)))
+
 (defmethod sphere-in-loaded-city-infos? ((this traffic-engine) (arg0 vector) (arg1 int))
+  (#when TARGET_3DS
+    (let ((native (pc-sphere-in-loaded-city-infos? this arg0 arg1)))
+      (if (nonzero? native) (return (the-as symbol native)))))
   (dotimes (s3-0 2)
     (let ((v1-3 (-> this level-data-array s3-0)))
       (when (nonzero? (-> v1-3 city-info))
@@ -3358,6 +3369,7 @@
   )
 
 (defmethod per-frame-cell-update ((this traffic-level-data))
+  (when (#if TARGET_3DS (not (pc-per-frame-cell-update this)) #t)
   (set! (-> this newly-active-cell-count) (the-as uint 0))
   (dotimes (v1-0 (the-as int (-> this active-cell-count)))
     (let ((a0-3 (-> this active-cell-list v1-0)))
@@ -3434,6 +3446,7 @@
         (set! (-> v1-43 max z) (fmax (-> v1-43 max z) (+ (-> a1-16 sphere z) (-> a1-16 sphere r))))
         )
       )
+    )
     )
   0
   (none)

@@ -964,6 +964,10 @@
    )
   )
 
+(#when TARGET_3DS
+  (def-mips2c pc-merc-draw-request-native
+              (function draw-control pointer pointer int symbol (pointer float) object)))
+
 (defun pc-merc-draw-request ((dc draw-control) (dma-buf pointer) (matrix-buf pointer) (tex-idx int) (update-verts symbol) (blercs (pointer float)))
   "Send a request to PC Merc2 to draw the given object.
    Only draws the effects which match this texture index.
@@ -971,6 +975,13 @@
    If update-verts is set to #t, tell the PC renderer to use EE version of vertices.
    If update-verts is set to 'blerc, tell the PC renderer to use the included blerc weights
    to modify the vertices."
+  ;; og:preserve-this (AI-assisted) 3DS: this function in C++
+  ;; (game/mips2c/jak2_functions/native2_merc_request.cpp: the same results, verified against this
+  ;; code with OPENGOAL_MIPS2C_VERIFY=1; always on). 0 when this GOAL code must run: where it would
+  ;; (break!), or when turned off for debugging (config.ini mips2c_native_off).
+  (#when TARGET_3DS
+    (let ((native (pc-merc-draw-request-native dc dma-buf matrix-buf tex-idx update-verts blercs)))
+      (if (nonzero? native) (return (the-as pointer native)))))
   (let ((start-packet (the-as dma-packet dma-buf))
         (qwc-total 0))
     (set! (-> start-packet dma) (new 'static 'dma-tag :id (dma-tag-id cnt)))
@@ -1558,11 +1569,17 @@
                           (set! (-> (scratchpad-object foreground-work) regs merc-used) 1)
                           (dotimes (effect-idx (the-as int (-> geo header effect-count)))
                             (cond
-                              ((or (logtest? (-> geo effect effect-idx effect-bits) (effect-bits cross-fade))
-                                   (logtest? (-> geo effect effect-idx effect-bits) (effect-bits force-mercneric))
+                              ;; 3DS port (AI-assisted): the 3DS renderer has no generic renderer (its gmerc
+                              ;; buckets are skipped), so everything but the warp effects stays merc: models
+                              ;; in their death effect (killed enemies, Jak in a warp gate) and cross-fade /
+                              ;; force-mercneric effects are drawn plain instead of not at all.
+                              ((#if TARGET_3DS
                                    (= (-> geo effect effect-idx texture-index) (tpage-category warp))
-                                   (nonzero? (-> dc death-timer))
-                                   )
+                                   (or (logtest? (-> geo effect effect-idx effect-bits) (effect-bits cross-fade))
+                                       (logtest? (-> geo effect effect-idx effect-bits) (effect-bits force-mercneric))
+                                       (= (-> geo effect effect-idx texture-index) (tpage-category warp))
+                                       (nonzero? (-> dc death-timer))
+                                       ))
 
                                ; (if (logtest? (-> geo effect effect-idx effect-bits) (effect-bits cross-fade))
                                ;     (format *stdcon* "[fg] ~S to generic 1~%" (-> dc process name))

@@ -1,6 +1,7 @@
 //--------------------------MIPS2C---------------------
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak2_functions/native2.h"
 #include "game/kernel/jak2/kscheme.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
@@ -99,7 +100,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 18 grid-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 18 grid-hash)", execute, 128, &native2::method_18_grid_hash);
 }
 
 } // namespace method_18_grid_hash
@@ -206,7 +207,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 19 grid-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 19 grid-hash)", execute, 128, &native2::method_19_grid_hash);
 }
 
 } // namespace method_19_grid_hash
@@ -336,7 +337,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 20 grid-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 20 grid-hash)", execute, 128, &native2::method_20_grid_hash);
 }
 
 } // namespace method_20_grid_hash
@@ -410,7 +411,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 22 grid-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 22 grid-hash)", execute, 128, &native2::method_22_grid_hash);
 }
 
 } // namespace method_22_grid_hash
@@ -564,7 +565,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 28 sphere-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 28 sphere-hash)", execute, 128, &native2::method_28_sphere_hash);
 }
 
 } // namespace method_28_sphere_hash
@@ -695,7 +696,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 33 sphere-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 33 sphere-hash)", execute, 128, &native2::method_33_sphere_hash);
 }
 
 } // namespace method_33_sphere_hash
@@ -911,7 +912,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.perf_stats = intern_from_c("*perf-stats*").c();
-  gLinkedFunctionTable.reg("(method 29 sphere-hash)", execute, 256);
+  gLinkedFunctionTable.reg("(method 29 sphere-hash)", execute, 256, &native2::method_29_sphere_hash);
 }
 
 } // namespace method_29_sphere_hash
@@ -1122,7 +1123,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.perf_stats = intern_from_c("*perf-stats*").c();
-  gLinkedFunctionTable.reg("(method 30 sphere-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 30 sphere-hash)", execute, 128, &native2::method_30_sphere_hash);
 }
 
 } // namespace method_30_sphere_hash
@@ -1358,7 +1359,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.perf_stats = intern_from_c("*perf-stats*").c();
-  gLinkedFunctionTable.reg("(method 31 sphere-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 31 sphere-hash)", execute, 128, &native2::method_31_sphere_hash);
 }
 
 } // namespace method_31_sphere_hash
@@ -1651,7 +1652,7 @@ u64 execute(void* ctxt) {
 void link() {
   cache.perf_stats = intern_from_c("*perf-stats*").c();
   cache.vector_vector_distance_squared = intern_from_c("vector-vector-distance-squared").c();
-  gLinkedFunctionTable.reg("(method 32 sphere-hash)", execute, 256);
+  gLinkedFunctionTable.reg("(method 32 sphere-hash)", execute, 256, &native2::method_32_sphere_hash);
 }
 
 } // namespace method_32_sphere_hash
@@ -1786,7 +1787,7 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 33 spatial-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 33 spatial-hash)", execute, 128, &native2::method_33_spatial_hash);
 }
 
 } // namespace method_33_spatial_hash
@@ -1958,7 +1959,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.mem_copy = intern_from_c("mem-copy!").c();
-  gLinkedFunctionTable.reg("(method 39 spatial-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 39 spatial-hash)", execute, 128, &native2::method_39_spatial_hash);
 }
 
 } // namespace method_39_spatial_hash
@@ -2163,7 +2164,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.perf_stats = intern_from_c("*perf-stats*").c();
-  gLinkedFunctionTable.reg("(method 36 spatial-hash)", execute, 256);
+  gLinkedFunctionTable.reg("(method 36 spatial-hash)", execute, 256, &native2::method_36_spatial_hash);
 }
 
 } // namespace method_36_spatial_hash
@@ -2422,7 +2423,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.vector_vector_distance_squared = intern_from_c("vector-vector-distance-squared").c();
-  gLinkedFunctionTable.reg("(method 37 spatial-hash)", execute, 256);
+  gLinkedFunctionTable.reg("(method 37 spatial-hash)", execute, 256, &native2::method_37_spatial_hash);
 }
 
 } // namespace method_37_spatial_hash
@@ -2755,7 +2756,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.perf_stats = intern_from_c("*perf-stats*").c();
-  gLinkedFunctionTable.reg("(method 35 spatial-hash)", execute, 128);
+  gLinkedFunctionTable.reg("(method 35 spatial-hash)", execute, 128, &native2::method_35_spatial_hash);
 }
 
 } // namespace method_35_spatial_hash

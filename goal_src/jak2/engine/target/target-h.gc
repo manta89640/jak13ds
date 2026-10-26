@@ -346,7 +346,10 @@
     target-wade-walk
     target-walk
     (target-warp-in vector vector target)
-    (target-warp-out vector vector target)
+    ;; (AI-assisted) arg2 is object, not target: the warp gate sends its handle (change-state), and a
+    ;; target-typed parameter dropped the pid in the C backend (ABI v3, c_backend.md), so the gate never
+    ;; got 'effect. target-warp-in passes its entity here.
+    (target-warp-out vector vector object)
     target-yellow-jump-blast
     )
   )

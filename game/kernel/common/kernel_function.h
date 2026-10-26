@@ -131,10 +131,70 @@ constexpr bool is_u32_like() {
   return std::is_same_v<T, u32> || std::is_same_v<T, s32>;
 }
 
+template <typename F>
+struct arity_of;
+template <typename R, typename... A>
+struct arity_of<R (*)(A...)> {
+  static constexpr size_t value = sizeof...(A);
+};
+
 //! bit i: parameter i is a 64-bit integer (needs the upper half of the argument)
 template <typename... A, size_t... I>
 constexpr u32 wide_params_mask(std::index_sequence<I...>) {
   return ((is_u64_like<A>() ? (1u << I) : 0u) | ... | 0u);
+}
+
+//! (AI-assisted) Argument i of a direct entry: what the adapter thunk + typed_adapter would pass.
+template <typename A>
+A direct_arg(uint32_t lo, float hi) {
+  if constexpr (is_u64_like<A>()) {
+    return (A)goalc_arg64(lo, hi);
+  } else {
+    return from_goal<A>(lo);
+  }
+}
+
+template <typename F>
+struct direct_entry_impl;
+
+template <typename R, typename... A>
+struct direct_entry_impl<R (*)(A...)> {
+  template <R (*F)(A...), size_t... I>
+  static u64 call(const uint32_t* lo, const float* hi, std::index_sequence<I...>) {
+    if constexpr (std::is_void_v<R>) {
+      F(direct_arg<A>(lo[I], hi[I])...);
+      return 0;
+    } else {
+      return to_goal<R>(F(direct_arg<A>(lo[I], hi[I])...));
+    }
+  }
+};
+
+//! (AI-assisted) A goalc_fnx entry point for the host function F: converts the arguments and the
+//! return value exactly like the adapter thunk with typed_adapter (or adapter_fn8) does, without
+//! the thunk's two indirect calls and the argument array. Arguments past F's own are ignored.
+template <auto F>
+u64 direct_entry(uint32_t a0,
+                 uint32_t a1,
+                 uint32_t a2,
+                 uint32_t a3,
+                 uint32_t a4,
+                 uint32_t a5,
+                 uint32_t a6,
+                 uint32_t a7,
+                 float h0,
+                 float h1,
+                 float h2,
+                 float h3,
+                 float h4,
+                 float h5,
+                 float h6,
+                 float h7) {
+  using FT = decltype(F);
+  const uint32_t lo[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
+  const float hi[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+  return direct_entry_impl<FT>::template call<F>(lo, hi,
+                                                 std::make_index_sequence<arity_of<FT>::value>{});
 }
 
 }  // namespace kernel_function_detail
@@ -154,6 +214,9 @@ struct KernelFunction {
   goalc_adapter stack_adapter = nullptr;
   //! parameters that need both halves of the argument (64-bit integers), see goalc_runtime.h
   u32 wide_mask = 0;
+  //! (AI-assisted) C mode: a goalc_fnx entry for ptr that does the adapter's conversions itself
+  //! (KernelFunction::with_entry, GOALC_KFN), used instead of an adapter thunk
+  goalc_fnx entry = nullptr;
 
   template <typename R, typename... A>
   KernelFunction(R (*f)(A...)) : ptr((void*)f) {  // NOLINT(google-explicit-constructor)
@@ -169,6 +232,19 @@ struct KernelFunction {
     }
   }
 
+  //! (AI-assisted) the same, plus a direct C-mode entry (kernel_function_detail::direct_entry).
+  //! For the kernel functions that GOAL calls often (per process or per particle).
+  template <auto F>
+  static KernelFunction with_entry() {
+    KernelFunction k(F);
+    k.entry = &kernel_function_detail::direct_entry<F>;
+    return k;
+  }
+
   //! for code that still takes an untyped function (other games)
   operator void*() const { return ptr; }  // NOLINT(google-explicit-constructor)
 };
+
+//! (AI-assisted) A kernel function with a direct C-mode entry: make_function_symbol_from_c("name",
+//! GOALC_KFN(fn)). Same results as passing fn; saves the adapter thunk on every call.
+#define GOALC_KFN(f) KernelFunction::with_entry<&f>()

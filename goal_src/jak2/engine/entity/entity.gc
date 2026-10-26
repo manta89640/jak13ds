@@ -103,7 +103,7 @@
   (-> *level* default-level)
   )
 
-(defun entity-by-name ((arg0 string))
+(defun entity-by-name-uncached ((arg0 string))
   (dotimes (s5-0 (-> *level* length))
     (let ((s4-0 (-> *level* level s5-0)))
       (when (= (-> s4-0 status) 'active)
@@ -155,6 +155,102 @@
       )
     )
   (the-as entity #f)
+  )
+
+;; (AI-assisted) entity-by-name scans every actor, nav mesh, race mesh and camera of every active
+;; level with a res-lump lookup each. (method update setting-control) calls it every frame through
+;; cam-master-set-entity, with the camera entity name (#f in most places: then nothing matches and
+;; the scan is complete every frame, ~2% of a Haven City frame in C mode on the Mac). The result
+;; only depends on the bytes of the name (string= reads them up to the 0, whatever the name is) and
+;; on the active levels' data, which doesn't change while a level stays active. So results are
+;; cached with the name's bytes as the key, and the cache is flushed whenever the active levels
+;; (slot, name, bsp) differ from the ones it was filled with.
+(defconstant ENTITY_NAME_CACHE_SIZE 8)
+(defconstant ENTITY_NAME_CACHE_KEY 64) ;; bytes per key, with the 0
+
+(deftype entity-name-cache (structure)
+  ((level-count int32)
+   (next        int32)
+   (level-name  symbol ENTITY_NAME_CACHE_SIZE)     ;; per *level* slot (7 used): #f if not active
+   (level-bsp   bsp-header ENTITY_NAME_CACHE_SIZE)
+   (valid       symbol ENTITY_NAME_CACHE_SIZE)
+   (result      entity ENTITY_NAME_CACHE_SIZE)
+   (key         uint8 512)                          ;; ENTITY_NAME_CACHE_SIZE x ENTITY_NAME_CACHE_KEY
+   )
+  )
+
+(define *entity-name-cache* (new 'global 'entity-name-cache))
+(set! (-> *entity-name-cache* level-count) -1)
+(dotimes (i ENTITY_NAME_CACHE_SIZE)
+  (set! (-> *entity-name-cache* valid i) #f)
+  )
+
+(defun entity-name-cache-check ((c entity-name-cache))
+  "Flush the cache if the active levels changed. #f if the level list doesn't fit the cache."
+  (let ((n (-> *level* length))
+        (same? #t))
+    (if (> n ENTITY_NAME_CACHE_SIZE)
+        (return #f))
+    (if (!= n (-> c level-count))
+        (set! same? #f))
+    (dotimes (i n)
+      (let* ((lev (-> *level* level i))
+             (active? (= (-> lev status) 'active))
+             (name (if active? (-> lev name) #f))
+             (bsp (if active? (-> lev bsp) (the-as bsp-header #f))))
+        (when (or (!= name (-> c level-name i)) (!= bsp (-> c level-bsp i)))
+          (set! same? #f)
+          (set! (-> c level-name i) name)
+          (set! (-> c level-bsp i) bsp)
+          )
+        )
+      )
+    (when (not same?)
+      (set! (-> c level-count) n)
+      (dotimes (i ENTITY_NAME_CACHE_SIZE)
+        (set! (-> c valid i) #f)
+        )
+      )
+    )
+  #t)
+
+(defun entity-by-name ((arg0 string))
+  (if (zero? arg0)
+      (return (entity-by-name-uncached arg0)))
+  (let ((c *entity-name-cache*)
+        (src (-> arg0 data))
+        (len 0))
+    ;; key length (with the 0), or too long to cache
+    (while (and (< len ENTITY_NAME_CACHE_KEY) (nonzero? (-> src len)))
+      (+! len 1)
+      )
+    (if (or (>= len ENTITY_NAME_CACHE_KEY) (not (entity-name-cache-check c)))
+        (return (entity-by-name-uncached arg0)))
+    (dotimes (i ENTITY_NAME_CACHE_SIZE)
+      (when (-> c valid i)
+        (let ((key (&-> c key (* i ENTITY_NAME_CACHE_KEY)))
+              (k 0))
+          (while (and (nonzero? (-> key k)) (= (-> key k) (-> src k)))
+            (+! k 1)
+            )
+          (if (= (-> key k) (-> src k))
+              (return (-> c result i)))
+          )
+        )
+      )
+    (let ((result (entity-by-name-uncached arg0))
+          (i (-> c next)))
+      (set! (-> c next) (if (>= (+ i 1) ENTITY_NAME_CACHE_SIZE) 0 (+ i 1)))
+      (let ((key (&-> c key (* i ENTITY_NAME_CACHE_KEY))))
+        (dotimes (k (+ len 1))
+          (set! (-> key k) (-> src k))
+          )
+        )
+      (set! (-> c result i) result)
+      (set! (-> c valid i) #t)
+      result
+      )
+    )
   )
 
 (defun entity-by-type ((arg0 type))

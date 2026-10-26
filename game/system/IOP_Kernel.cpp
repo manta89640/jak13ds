@@ -13,6 +13,10 @@
 #include "game/kernel/common/kperf.h"
 #include "game/sce/iop.h"
 
+#ifdef __3DS__
+#include "platform/3ds/port/ctr_port.h"
+#endif
+
 using namespace std::chrono;
 
 /*
@@ -64,6 +68,16 @@ void IOP_Kernel::check_stacks() {
     return;
   }
   m_stack_check_time = now;
+  {
+    // (AI-assisted, j2-mem2) the libctru threads' stacks too (ctr_port.c)
+    char ctr_line[640];
+    const int r = ctr_thread_stacks_check(ctr_line, sizeof(ctr_line));
+    if (r == 2) {
+      lg::warn("[ctr] thread stacks used (KB used/size, over half!):{}", ctr_line);
+    } else if (r == 1) {
+      lg::info("[ctr] thread stacks used (KB used/size):{}", ctr_line);
+    }
+  }
   bool grew = false, deep = false;
   u32 used[64];
   const size_t n = std::min<size_t>(threads.size(), 64);
@@ -88,6 +102,15 @@ void IOP_Kernel::check_stacks() {
     }
     t.stack_logged = std::max<u32>(used[i], 1);
     line += fmt::format(" {} {:.1f}", t.name, used[i] / 1024.0);
+  }
+  // (AI-assisted, j2-mem2) the pattern gone to within 256 bytes of the bottom: the stack ran into
+  // libco's context below it (memory after it may be overwritten): stop with the line
+  for (size_t i = 0; i < n; i++) {
+    if (threads[i].function &&
+        used[i] + 256 >= IopThread::kStackSize - IopThread::kStackContextBytes) {
+      lg::die("[iop] thread {} used all of its {} KB stack:{}", threads[i].name,
+              IopThread::kStackSize / 1024, line);
+    }
   }
   if (deep) {
     lg::warn("[iop] thread stacks used (KB of {} KB, over half!):{}", IopThread::kStackSize / 1024,

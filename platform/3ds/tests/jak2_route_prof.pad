@@ -1,0 +1,86 @@
+# (AI-assisted) profiling pad (docs/3ds-port/jak2_perf.md): six Haven City districts + the sewer, a stand window and a camera-turn window each; no-sync inside them (sample_run.sh)
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 log stop: ctysluma-start
+1400 print *pad-script-mem*
+1401 log perf-mark slums
+41401 log perf-mark slums-end
+41402 rx=32
+41403 log perf-mark slumslook
+81403 log perf-mark slumslook-end
+81404 -
+81405 pos *target*
+81600 continue ctyport-start
+81601 -
+81602 wait *target* target-stance
+81603 log stop: ctyport-start
+82000 print *pad-script-mem*
+82001 log perf-mark port
+122001 log perf-mark port-end
+122002 rx=32
+122003 log perf-mark portlook
+162003 log perf-mark portlook-end
+162004 -
+162005 pos *target*
+162200 continue ctymarkb-burning-bush
+162201 -
+162202 wait *target* target-stance
+162203 log stop: ctymarkb-burning-bush
+162600 print *pad-script-mem*
+162601 log perf-mark market
+202601 log perf-mark market-end
+202602 rx=32
+202603 log perf-mark marketlook
+242603 log perf-mark marketlook-end
+242604 -
+242605 pos *target*
+242800 continue ctygenb-start
+242801 -
+242802 wait *target* target-stance
+242803 log stop: ctygenb-start
+243200 print *pad-script-mem*
+243201 log perf-mark main
+283201 log perf-mark main-end
+283202 rx=32
+283203 log perf-mark mainlook
+323203 log perf-mark mainlook-end
+323204 -
+323205 pos *target*
+323400 continue ctyinda-start
+323401 -
+323402 wait *target* target-stance
+323403 log stop: ctyinda-start
+323800 print *pad-script-mem*
+323801 log perf-mark indus
+363801 log perf-mark indus-end
+363802 rx=32
+363803 log perf-mark induslook
+403803 log perf-mark induslook-end
+403804 -
+403805 pos *target*
+404000 continue ctyfarma-start
+404001 -
+404002 wait *target* target-stance
+404003 log stop: ctyfarma-start
+404400 print *pad-script-mem*
+404401 log perf-mark farms
+444401 log perf-mark farms-end
+444402 rx=32
+444403 log perf-mark farmslook
+484403 log perf-mark farmslook-end
+484404 -
+484405 pos *target*
+484600 continue sewer-start
+484601 -
+484602 wait *target* target-stance
+484603 log stop: sewer-start
+485000 print *pad-script-mem*
+485001 log perf-mark sewer
+525001 log perf-mark sewer-end
+525002 rx=32
+525003 log perf-mark sewerlook
+565003 log perf-mark sewerlook-end
+565004 -
+565005 pos *target*
+565200 exit

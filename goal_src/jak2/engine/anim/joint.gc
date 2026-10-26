@@ -68,8 +68,16 @@
 (define *new-joint-decompressor-stats* (new 'global 'new-joint-decompressor-stats))
 (define *new-joint-decompressor-work* (new 'global 'new-joint-decompressor-work))
 
+;; og:preserve-this (AI-assisted) 3DS: the whole decompressor below in C++
+;; (game/mips2c/jak2_functions/native_anim.cpp: the same results, verified against this code with
+;; OPENGOAL_MIPS2C_VERIFY=1; always on). #f when this GOAL code must run: where it would (break!),
+;; or when turned off for debugging (config.ini mips2c_native_off).
+(#when TARGET_3DS
+  (def-mips2c pc-new-joint-decompressor (function joint-anim-frame int joint-control symbol)))
+
 (defun new-joint-decompressor ((dst joint-anim-frame) (num-joints int) (jc joint-control))
   "Decompress a joint animation!"
+  (when (#if TARGET_3DS (not (pc-new-joint-decompressor dst num-joints jc)) #t)
   (+! (-> *new-joint-decompressor-stats* num-calls) 1)
   ;; determine anim weights, write them out to the joint-control for other stuff to see.
   (eval-blend-tree! *new-joint-decompressor-work* jc)
@@ -82,6 +90,7 @@
   (init-frame! *new-joint-decompressor-work* dst num-joints)
   (process-requests! *new-joint-decompressor-work* dst num-joints)
   (finalize-frame! *new-joint-decompressor-work* dst num-joints)
+  )
 
   (none)
   )
@@ -2048,6 +2057,20 @@
 
 ;; og:preserve-this
 (defun create-interpolated-joint-animation-frame ((output-frame joint-anim-frame) (arg1 int) (arg2 joint-control))
+  ;; og:preserve-this (AI-assisted) 3DS: no timing. The clock is only read for the debug stat
+  ;; *new-joint-decompressor-stats* total-time (shown with *stats-joint*); two reads per animated
+  ;; process and frame cost more than a short decompression.
+  (#when TARGET_3DS
+    (if *use-new-decompressor*
+        (new-joint-decompressor output-frame arg1 arg2)
+        (begin
+          (flatten-joint-control-to-spr arg2)
+          (make-joint-jump-tables)
+          (calc-animation-from-spr output-frame arg1)
+          )
+        )
+    (return 0)
+    )
   (let ((start (get-cpu-clock)))
     (cond
       (*use-new-decompressor*

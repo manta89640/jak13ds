@@ -39,7 +39,19 @@ u32 sceSdGetAddr(u32 entry) {
   // u32 reg = entry & ~0x3f;
 
   // Only ever used for getting NAX
+#ifdef __3DS__
+  return voice->GetPublishedNax() << 1;  // (AI-assisted) see sceSdPublishVoiceAddrs
+#else
   return voice->GetNax() << 1;
+#endif
+}
+
+void sceSdPublishVoiceAddrs() {
+  for (auto& v : voices) {
+    if (v) {
+      v->PublishNax();
+    }
+  }
 }
 
 bool sceSdVoiceStopped(u32 entry) {

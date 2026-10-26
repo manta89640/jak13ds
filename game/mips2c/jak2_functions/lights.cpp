@@ -1,6 +1,7 @@
 //--------------------------MIPS2C---------------------
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/jak2_functions/native2.h"
 #include "game/kernel/jak2/kscheme.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
@@ -397,7 +398,8 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("add-light-sphere-to-light-group", execute, 256);
+  gLinkedFunctionTable.reg("add-light-sphere-to-light-group", execute, 256,
+                           &native2::add_light_sphere_to_light_group);
 }
 
 } // namespace add_light_sphere_to_light_group
@@ -751,7 +753,9 @@ u64 execute(void* ctxt) {
 }
 
 void link() {
-  gLinkedFunctionTable.reg("light-hash-get-bucket-index", execute, 128);
+  // (AI-assisted) native version: native2_lights.cpp
+  gLinkedFunctionTable.reg("light-hash-get-bucket-index", execute, 128,
+                           &native2::light_hash_get_bucket_index);
 }
 
 } // namespace light_hash_get_bucket_index

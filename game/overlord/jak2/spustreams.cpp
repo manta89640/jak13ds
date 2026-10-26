@@ -1,8 +1,11 @@
 #include "spustreams.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/common_types.h"
+#include "common/log/log.h"
 #include "common/util/Assert.h"
 
 #include "game/overlord/jak2/dma.h"
@@ -805,9 +808,63 @@ int CheckVAGStreamProgress(VagCmd* param_1) {
   return uVar1;
 }
 
+
+// (AI-assisted) The VAG stream log: "[vagdbg] MS EVENT NAME ..." with the stream's state (play /
+// pause flags, the GetVAGStreamPos state, buffer flips, the play position the EE sees, the voice
+// address in the stream buffer) every 250 ms and at each pause, restart and stop, and the STR
+// (spooled animation) part loads (stream.cpp). OPENGOAL_VAG_DEBUG=1 on the host; the 3DS build
+// with -DOG_VAG_DEBUG. Made for the Jak II title intro that stopped on the 3DS (Oct 18).
+bool vag_debug_on() {
+#ifdef OG_VAG_DEBUG
+  return true;
+#else
+  static const bool on = [] {
+    const char* e = getenv("OPENGOAL_VAG_DEBUG");
+    return e && e[0] == '1';
+  }();
+  return on;
+#endif
+}
+
+double vag_debug_ms() {
+  static const auto t0 = std::chrono::steady_clock::now();
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+void VagDebugEvent(const char* what, VagCmd* c) {
+  if (!vag_debug_on() || !c) {
+    return;
+  }
+  u32 nax = GetSpuRamAddress(c) - c->spu_stream_dma_mem_addr;
+  lg::info("[vagdbg] {:.0f} {} {} id {} play {} pause {} b4 {} b5 {} b6 {} st {} flips {} pos {} nax {:#x} chunks {} xfer {:#x} rdy {} u264 {:#x} u268 {} b20 {} b21 {} b22 {} odd {} even {} safe {}",
+           vag_debug_ms(), what, c->name, c->id, c->sb_playing, c->sb_paused, c->byte4, c->byte5,
+           c->byte6, c->unk_236, c->unk_204, c->unk_200, nax, c->num_processed_chunks,
+           c->xfer_size, c->header.ready_for_data, c->unk_264, c->unk_268, c->byte20, c->byte21,
+           c->byte22, c->sb_odd_buffer_dma_complete, c->sb_even_buffer_dma_complete,
+           c->safe_to_change_dma_fields);
+}
+
+static void VagDebugTick() {
+  if (!vag_debug_on()) {
+    return;
+  }
+  static double last = 0;
+  double now = vag_debug_ms();
+  if (now - last < 250.0) {
+    return;
+  }
+  last = now;
+  for (auto& cmd : VagCmds) {
+    if (cmd.id && !cmd.byte11) {
+      VagDebugEvent("tick", &cmd);
+    }
+  }
+}
+
 u32 CheckVagStreamsProgress() {
   while (true) {
     ProcessStreamData();
+    VagDebugTick();
 
     for (auto& cmd : VagCmds) {
       if (cmd.sb_playing || (cmd.byte4 && cmd.byte6) ||
@@ -815,6 +872,7 @@ u32 CheckVagStreamsProgress() {
         if (CheckVAGStreamProgress(&cmd)) {
           GetVAGStreamPos(&cmd);
         } else {
+          VagDebugEvent("progress-stop", &cmd);
           StopVagStream(&cmd, 1);
         }
       }
@@ -839,6 +897,7 @@ void StopVagStream(VagCmd* param_1, int param_2) {
   if (param_2 == 1) {
     // CpuSuspendIntr(local_20);
   }
+  VagDebugEvent("StopVagStream", param_1);
   cmd = param_1->stereo_sibling;
   param_1->sb_playing = '\0';
   if (cmd != 0x0) {

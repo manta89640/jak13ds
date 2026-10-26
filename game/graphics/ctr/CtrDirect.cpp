@@ -6,12 +6,14 @@
 
 #include "CtrDirect.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
 #include "common/dma/dma.h"
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrRenderer.h"  // (AI-assisted) ctr_is_jak2
 #include "game/graphics/ctr/CtrVram.h"
 
 namespace {
@@ -105,7 +107,90 @@ bool same_state(const ctr_draw_state& a, const ctr_draw_state& b) {
 }
 }  // namespace
 
+#ifndef __3DS__
+int g_ctr_direct_dump = 0;
+#endif
+
+namespace {
+// (AI-assisted) Jak II's minimap (CtrDirect::enable_minimap): the render to texture and its
+// texture coordinates (ctr_gpu_rt_uv of the minimap's corners)
+constexpr u32 kMinimapFbp = 126;
+constexpr u32 kScreenFbp = 408;
+constexpr u32 kMinimapTbp = 4032;
+constexpr int kMinimapSize = 128;
+int g_minimap_rt = -1;
+float g_minimap_uv[6];  // s, t at (0, 0); per unit of lx; per unit of ly
+int g_menu_screen = -1;         // (AI-assisted, j2gaps) ctr_direct_set_menu_screen
+bool g_menu_screen_drawn = false;
+}  // namespace
+
+void ctr_direct_set_menu_screen(int handle) {
+  g_menu_screen = handle;
+}
+
+int ctr_direct_menu_screen() {
+  return g_menu_screen;
+}
+
+bool ctr_direct_take_menu_screen_drawn() {
+  const bool d = g_menu_screen_drawn;
+  g_menu_screen_drawn = false;
+  return d;
+}
+
+void CtrDirect::handle_frame(u64 val) {
+  const u32 fbp = val & 0x1ff;
+  // (AI-assisted) FBMSK with all of rgb masked: a draw of alpha only (the minimap's circle mask,
+  // done as the circle the minimap is drawn as instead): left out
+  m_alpha_only = ((val >> 32) & 0xffffff) == 0xffffff;
+  if (fbp == m_fbp) {
+    return;
+  }
+  flush();
+  m_fbp = fbp;
+  if (fbp == kMinimapFbp) {
+    if (g_minimap_rt < 0) {
+      g_minimap_rt = ctr_gpu_rt_create(kMinimapSize, kMinimapSize, kMinimapSize);
+      if (g_minimap_rt >= 0) {
+        float s0, t0, s1, t1, s2, t2;
+        ctr_gpu_rt_uv(g_minimap_rt, 0, 0, &s0, &t0);
+        ctr_gpu_rt_uv(g_minimap_rt, 1, 0, &s1, &t1);
+        ctr_gpu_rt_uv(g_minimap_rt, 0, 1, &s2, &t2);
+        const float uv[6] = {s0, t0, s1 - s0, t1 - t0, s2 - s0, t2 - t0};
+        memcpy(g_minimap_uv, uv, sizeof(uv));
+      }
+    }
+    if (g_minimap_rt >= 0 && ctr_gpu_rt_begin(g_minimap_rt, 0, 0, kMinimapSize, kMinimapSize)) {
+      m_offscreen = true;
+      m_vram->set_override_handle(kMinimapTbp, g_minimap_rt, kMinimapSize, kMinimapSize);
+    }
+  } else {
+    end_offscreen();
+  }
+  m_state_dirty = true;
+}
+
+void CtrDirect::end_offscreen() {
+  if (m_offscreen) {
+    flush();
+    ctr_gpu_rt_end();
+    m_offscreen = false;
+#ifndef __3DS__
+    static const char* dump = getenv("CTR_MINIMAP_DUMP");  // host diagnosis: a PNG path
+    static int n = 0;
+    if (dump && ++n == (getenv("CTR_MINIMAP_DUMP_N") ? atoi(getenv("CTR_MINIMAP_DUMP_N")) : 400)) {
+      ctr_gpu_soft_dump_tex(g_minimap_rt, dump);
+      lg::info("[ctr] minimap rt {} dumped", g_minimap_rt);
+    }
+#endif
+  }
+  m_fbp = kScreenFbp;
+}
+
 CtrDirect::CtrDirect(CtrVram* vram) : m_vram(vram) {
+  if (ctr_is_jak2()) {
+    m_y_scale = 1.f / 208.f;
+  }
   m_verts.reserve(kMaxBatchVerts + 6);
   memset(&m_draw_state, 0, sizeof(m_draw_state));
   m_draw_state.tex = -1;
@@ -125,6 +210,7 @@ void CtrDirect::reset_state() {
   m_build_idx = 0;
   m_strip_count = 0;
   m_state_dirty = true;
+  m_xyoff[0] = m_xyoff[1] = 0;
 }
 
 void CtrDirect::render_vif(u32 vif0, u32 vif1, const u8* data, u32 size) {
@@ -354,6 +440,23 @@ void CtrDirect::handle_ad(const u8* data) {
         set_state_dirty();
       }
     } break;
+    case GsRegisterAddress::FRAME_1:
+      if (m_minimap) {
+        handle_frame(value);
+      }
+      break;
+    case GsRegisterAddress::XYOFFSET_1:
+      if (m_envmap) {
+        // (AI-assisted, j2water) the env map's frame buffer: GS pixels from its corner
+        m_xyoff[0] = (float)(value & 0xffff) / 16.f;
+        m_xyoff[1] = (float)((value >> 32) & 0xffff) / 16.f;
+      } else if (m_minimap) {
+        // (AI-assisted) the minimap's frame buffer is drawn with its own offset (DirectRenderer::
+        // handle_xyoffset): window x = GS x - (ofx - 0x7000)
+        m_xyoff[0] = ((float)(value & 0xffff) - (float)0x7000) / 16.f;
+        m_xyoff[1] = ((float)((value >> 32) & 0xffff) - (float)0x7300) / 16.f;
+      }
+      break;
     default:
       // SCISSOR, FRAME, TEXA, TEXCLUT, FOGCOL, TEXFLUSH, MIPTBP, PABE, COLCLAMP, XYOFFSET...
       break;
@@ -407,6 +510,18 @@ void CtrDirect::update_draw_state() {
       st.filter = (m_tex1 >> 5) & 1;  // MMAG
       st.clamp_s = (m_clamp & 3) != 0;
       st.clamp_t = ((m_clamp >> 2) & 3) != 0;
+      if (m_minimap) {
+        // (AI-assisted) Jak II's minimap tiles: REGION_REPEAT (3) over the whole texture, which
+        // repeats (their coordinates run past 1)
+        st.clamp_s = (m_clamp & 3) == 1 || (m_clamp & 3) == 2;
+        st.clamp_t = ((m_clamp >> 2) & 3) == 1 || ((m_clamp >> 2) & 3) == 2;
+      }
+      if (st.tex == g_menu_screen) {
+        // (AI-assisted, j2gaps) the screen copy: its alpha is meaningless, texel for pixel
+        st.tcc = 0;
+        st.filter = 0;
+        st.clamp_s = st.clamp_t = 1;
+      }
       m_tex_w = 1 << t.tw();
       m_tex_h = 1 << t.th();
       m_uv_scale_s = 1.f / (16.f * m_tex_w);
@@ -418,7 +533,9 @@ void CtrDirect::update_draw_state() {
   if (m_test.alpha_test_enable()) {
     st.atest = map_atest(m_test.alpha_test());
     st.aref = m_test.aref();
-    if (m_test.afail() != GsTest::AlphaFail::KEEP && st.atest == CTR_TEST_NEVER) {
+    if ((m_test.afail() != GsTest::AlphaFail::KEEP && st.atest == CTR_TEST_NEVER) ||
+        (m_envmap && m_test.afail() == GsTest::AlphaFail::FB_ONLY)) {
+      // (AI-assisted, j2water) the env map: no z buffer there, so FB_ONLY fails are written too
       // "never pass, but still write rgb/z": used to write only depth or only color. Draw.
       st.atest = CTR_TEST_ALWAYS;
     }
@@ -455,11 +572,31 @@ void CtrDirect::push_vertex(int idx) {
   v.z = b.z;
   v.s = b.s;
   v.t = b.t;
+  if (g_minimap_rt >= 0 && m_draw_state.tex == g_minimap_rt) {
+    // (AI-assisted) sampling the minimap: the GS's normalized texture coordinates (row 0 at the
+    // top) to the render target's
+    const float lx = b.s * kMinimapSize, ly = b.t * kMinimapSize;
+    v.s = g_minimap_uv[0] + g_minimap_uv[2] * lx + g_minimap_uv[4] * ly;
+    v.t = g_minimap_uv[1] + g_minimap_uv[3] * lx + g_minimap_uv[5] * ly;
+  } else if (g_menu_screen >= 0 && m_draw_state.tex == g_menu_screen) {
+    // (AI-assisted, j2gaps) the copy of the last frame, where this vertex is on the screen
+    ctr_gpu_screen_uv(b.x, b.y, &v.s, &v.t);
+    g_menu_screen_drawn = true;
+  }
   v.r = b.rgba[0];
   v.g = b.rgba[1];
   v.b = b.rgba[2];
   v.a = b.rgba[3];
   m_verts.push_back(v);
+#ifndef __3DS__
+  if (g_ctr_direct_dump > 0) {  // (AI-assisted) host diagnosis, see ctr_direct_dump
+    g_ctr_direct_dump--;
+    lg::info("[ctr direct] v {:.3f} {:.3f} {:.6f} st {:.3f} {:.3f} rgba {} {} {} {} tex {} tex0 {:x} "
+             "atest {} blend {} fbp {} off {}",
+             v.x, v.y, v.z, v.s, v.t, v.r, v.g, v.b, v.a, m_draw_state.tex, m_tex0,
+             m_draw_state.atest, m_draw_state.blend, m_fbp, m_offscreen);
+  }
+#endif
 }
 
 void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
@@ -470,8 +607,27 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
   // GS coordinates are 12.4 fixed point, centered at 2048. Jak 1 draws a 512 x 224 field.
   float px = x / 16.f;
   float py = y / 16.f;
-  b.x = (px - 2048.f) / 256.f;
-  b.y = (2048.f - py) * (1.f / 112.f);
+  if (m_minimap) {
+    px -= m_xyoff[0];
+    py -= m_xyoff[1];
+    if (m_alpha_only) {
+      m_build_idx = 0;
+      return;
+    }
+  }
+  if (m_envmap) {
+    // (AI-assisted, j2water) the env map's 64 x 64 frame buffer: row 0 at ctr y = -1
+    b.x = (px - m_xyoff[0]) * (1.f / 32.f) - 1.f;
+    b.y = (py - m_xyoff[1]) * (1.f / 32.f) - 1.f;
+  } else if (m_offscreen) {
+    // (AI-assisted) the minimap's frame buffer: GS x 1792..1920, y 1840..1968 (ProgressRenderer's
+    // offscreen mode); its top row (the texture's row 0) at the render target's ctr y = -1
+    b.x = (px - 1856.f) * (1.f / 64.f);
+    b.y = (py - 1904.f) * (1.f / 64.f);
+  } else {
+    b.x = (px - 2048.f) / 256.f;
+    b.y = (2048.f - py) * m_y_scale;
+  }
   b.z = z * (1.f / 16777215.f);
   if (m_prim.fst()) {
     b.s = m_u * m_uv_scale_s;
@@ -542,6 +698,48 @@ void CtrDirect::handle_xyz(u32 x, u32 y, u32 z, bool advance) {
         memcpy(c1.rgba, c2.rgba, 4);
         memcpy(c3.rgba, c2.rgba, 4);
         memcpy(c4.rgba, c2.rgba, 4);
+        if (g_minimap_rt >= 0 && m_draw_state.tex == g_minimap_rt && !m_offscreen) {
+          // (AI-assisted) the minimap on the screen: the PS2 masks it to a circle through the
+          // alpha its frame buffer got (alpha-only draws, FBMSK), which the 3DS's render to
+          // texture doesn't keep; drawn as the circle inside its rectangle instead.
+          // (AI-assisted, j2-texanim) That draw also gave the whole circle alpha 1.0 (the mask's
+          // alpha replaced the map's): opaque here, as the texture's alpha (the map tiles') would
+          // let the screen through the dark parts (black roads came out gray, the sea cyan)
+          flush();
+          batch_mode(false);
+          const u8 tcc_was = m_draw_state.tcc;
+          m_draw_state.tcc = 0;
+          constexpr int kSeg = 32;
+          BuildVert ctr = c1;
+          ctr.x = 0.5f * (c1.x + c2.x);
+          ctr.y = 0.5f * (c1.y + c2.y);
+          ctr.s = 0.5f * (c1.s + c2.s);
+          ctr.t = 0.5f * (c1.t + c2.t);
+          auto ring = [&](int k) {
+            BuildVert v = ctr;
+            const float a = 6.2831853f * k / kSeg;
+            // (a little inside the rectangle: the minimap's ring is drawn on its edge)
+            const float cx = std::cos(a) * 0.46f, cy = std::sin(a) * 0.46f;
+            v.x = ctr.x + cx * (c2.x - c1.x);
+            v.y = ctr.y + cy * (c2.y - c1.y);
+            v.s = ctr.s + cx * (c2.s - c1.s);
+            v.t = ctr.t + cy * (c2.t - c1.t);
+            return v;
+          };
+          for (int k = 0; k < kSeg; k++) {
+            m_build[0] = ctr;
+            m_build[1] = ring(k);
+            m_build[2] = ring(k + 1);
+            push_vertex(0);
+            push_vertex(1);
+            push_vertex(2);
+          }
+          m_stats.triangles += kSeg;
+          m_build_idx = 0;
+          flush();
+          m_draw_state.tcc = tcc_was;
+          break;
+        }
         // a quad: c1, c4, c2, c3 around (triangles c1 c4 c3, c3 c4 c2)
         batch_mode(true);
         m_build[0] = c1;
@@ -586,11 +784,45 @@ void CtrDirect::flush() {
                v.a);
     }
   }
-  if (m_quads) {
+  if (m_record) {
+    // (AI-assisted, gpuopt) set_record: kept for replay_recorded
+    m_rec.push_back({m_draw_state, m_quads, (u32)m_rec_verts.size(), (u32)m_verts.size()});
+    m_rec_verts.insert(m_rec_verts.end(), m_verts.begin(), m_verts.end());
+  } else if (m_quads) {
     ctr_gpu_draw_quads(&m_draw_state, m_verts.data(), (int)m_verts.size() / 4);
   } else {
     ctr_gpu_draw(&m_draw_state, m_verts.data(), (int)m_verts.size());
   }
   m_stats.flushes++;
   m_verts.clear();
+}
+
+void CtrDirect::set_record(bool on) {
+  flush();  // what came before is drawn (or kept) in the mode it came in
+  if (on && !m_record) {
+    // a recording no hook replayed (a frame that never ended): not drawn a frame late
+    m_rec.clear();
+    m_rec_verts.clear();
+  }
+  m_record = on;
+}
+
+void CtrDirect::replay_recorded(bool depth_tested) {
+  for (const auto& b : m_rec) {
+    ctr_draw_state st = b.st;
+    if (depth_tested) {
+      // (AI-assisted, gpuopt) as CtrSky's deferred sky: only where the opaque draws left the
+      // cleared depth (the sky's fragments get depth 0: ctr_gpu_set_depth_far), no depth writes
+      st.ztest = CTR_TEST_GEQUAL;
+      st.zwrite = 0;
+    }
+    const ctr_vertex* v = m_rec_verts.data() + b.first;
+    if (b.quads) {
+      ctr_gpu_draw_quads(&st, v, (int)b.count / 4);
+    } else {
+      ctr_gpu_draw(&st, v, (int)b.count);
+    }
+  }
+  m_rec.clear();
+  m_rec_verts.clear();
 }

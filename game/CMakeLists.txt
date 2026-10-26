@@ -58,6 +58,10 @@ set(RUNTIME_SOURCE
         graphics/ctr/CtrSprite.cpp
         graphics/ctr/CtrSky.cpp
         graphics/ctr/CtrRenderer.cpp
+        graphics/ctr/CtrRendererJak2.cpp
+        graphics/ctr/CtrTexAnimJak2.cpp
+        graphics/ctr/CtrShadowJak2.cpp
+        graphics/ctr/CtrRendererJak2Bg.cpp
         graphics/ctr/CtrVram.cpp
         graphics/ctr/c3l_reader.cpp
         ../third-party/lz4/lz4.c
@@ -145,6 +149,7 @@ set(RUNTIME_SOURCE
         kernel/common/ksound.cpp
         kernel/jak1/fileio.cpp
         kernel/jak1/goalc_kernel.cpp
+        kernel/jak2/goalc_kernel.cpp
         kernel/jak1/kboot.cpp
         kernel/jak1/kdgo.cpp
         kernel/jak1/klink.cpp
@@ -246,8 +251,30 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/joint.cpp
         mips2c/jak2_functions/lights.cpp
         mips2c/jak2_functions/merc_blend_shape.cpp
+        mips2c/jak2_functions/native_anim.cpp
+        mips2c/jak2_functions/native_bones.cpp
+        mips2c/jak2_functions/native_collide_cache.cpp
+        mips2c/jak2_functions/native_collide_func.cpp
+        mips2c/jak2_functions/native_collide_mesh.cpp
+        mips2c/jak2_functions/native_common.cpp
+        mips2c/jak2_functions/native_joint.cpp
+        mips2c/jak2_functions/native_shadow.cpp
+        mips2c/jak2_functions/native_sparticle.cpp
+        mips2c/jak2_functions/native_sp_init.cpp
+        mips2c/jak2_functions/native_sp_callbacks.cpp
+        mips2c/jak2_functions/native_sparticle_launcher.cpp
         mips2c/jak2_functions/nav_control.cpp
         mips2c/jak2_functions/nav_mesh.cpp
+        mips2c/jak2_functions/native2_collide_hash.cpp
+        mips2c/jak2_functions/native2_common.cpp
+        mips2c/jak2_functions/native2_font.cpp
+        mips2c/jak2_functions/native2_lights.cpp
+        mips2c/jak2_functions/native2_misc.cpp
+        mips2c/jak2_functions/native2_sky.cpp
+        mips2c/jak2_functions/native2_spatial_hash.cpp
+        mips2c/jak2_functions/native2_merc_request.cpp
+        mips2c/jak2_functions/native2_sky_light.cpp
+        mips2c/jak2_functions/native2_traffic.cpp
         mips2c/jak2_functions/ocean_vu0.cpp
         mips2c/jak2_functions/ocean.cpp
         mips2c/jak2_functions/ripple.cpp
@@ -314,6 +341,7 @@ set(RUNTIME_SOURCE
         mips2c/mips2c_goalc.cpp
         mips2c/mips2c_native.cpp
         mips2c/mips2c_table.cpp
+        overlord/common/compressed_iso_file.cpp
         overlord/common/dma.cpp
         overlord/common/fake_iso.cpp
         overlord/common/iso_api.cpp
@@ -438,6 +466,9 @@ add_subdirectory(sound)
 add_library(runtime STATIC ${RUNTIME_SOURCE} "../third-party/glad/src/glad.c")
 
 target_link_libraries(runtime common fmt SDL3::SDL3 imgui discord-rpc sound stb_image libco libcurl)
+# (AI-assisted) the 3DS's block-compressed game files (.ogz), read on the host only with
+# OPENGOAL_ISO_OGZ=1 (tests; game/overlord/common/fake_iso.h)
+target_compile_definitions(runtime PRIVATE OG_HOST_ISO_OGZ=1)
 if(WIN32)
     target_link_libraries(runtime mman)
 else()

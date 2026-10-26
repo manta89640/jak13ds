@@ -6,11 +6,19 @@
 ;; dgos: ENGINE, GAME
 
 ;(defconstant DMA_BUFFER_GLOBAL_SIZE (* 1280 1024)) ;; 1280K
-(defconstant DMA_BUFFER_GLOBAL_SIZE (* 1280 1024 PROCESS_HEAP_MULT)) ;; expand based on actor heap expansion
+(#if SMALL_MEMORY
+  ;; 3DS port (AI-assisted): DMA_BUFFER_SMALL_MULT x the PS2 size (PROCESS_HEAP_MULT is 1 there).
+  ;; *dma-mem-peak* (below) keeps the most a frame used, for the pad-script memory report.
+  (defconstant DMA_BUFFER_GLOBAL_SIZE (* 1280 1024 DMA_BUFFER_SMALL_MULT))
+  (defconstant DMA_BUFFER_GLOBAL_SIZE (* 1280 1024 PROCESS_HEAP_MULT))) ;; expand based on actor heap expansion
 ;(defconstant DMA_BUFFER_DEBUG_SIZE (* 8 1024 1024)) ;; 8M
 (defconstant DMA_BUFFER_DEBUG_SIZE (* 12 1024 1024)) ;; expand to 12M because we can
 
 (defconstant DISPLAY_FPS_RATIO (/ (-> *display* time-factor) 5.0))
+
+;; 3DS port (AI-assisted): the most DMA data a frame put in its global-buf (display-frame-finish)
+(#when SMALL_MEMORY
+  (define *dma-mem-peak* 0))
 
 ;; DECOMP BEGINS
 

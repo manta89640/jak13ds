@@ -2,6 +2,7 @@
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak2/kscheme.h"
+#include "game/mips2c/jak2_functions/native2.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
 namespace method_11_collide_hash {
@@ -247,7 +248,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 11 collide-hash)", execute, 256);
+  gLinkedFunctionTable.reg("(method 11 collide-hash)", execute, 256, &native2::method_11_collide_hash);
 }
 
 } // namespace method_11_collide_hash
@@ -604,7 +605,7 @@ u64 execute(void* ctxt) {
 
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
-  gLinkedFunctionTable.reg("(method 12 collide-hash)", execute, 256);
+  gLinkedFunctionTable.reg("(method 12 collide-hash)", execute, 256, &native2::method_12_collide_hash);
 }
 
 } // namespace method_12_collide_hash
@@ -1005,7 +1006,7 @@ void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
   cache.debug = intern_from_c("debug").c();
   cache.print_exceeded_max_cache_tris = intern_from_c("print-exceeded-max-cache-tris").c();
-  gLinkedFunctionTable.reg("fill-bg-using-box-new", execute, 256);
+  gLinkedFunctionTable.reg("fill-bg-using-box-new", execute, 256, &native2::fill_bg_using_box_new);
 }
 
 } // namespace fill_bg_using_box_new
@@ -1536,7 +1537,7 @@ void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
   cache.debug = intern_from_c("debug").c();
   cache.print_exceeded_max_cache_tris = intern_from_c("print-exceeded-max-cache-tris").c();
-  gLinkedFunctionTable.reg("fill-bg-using-line-sphere-new", execute, 256);
+  gLinkedFunctionTable.reg("fill-bg-using-line-sphere-new", execute, 256, &native2::fill_bg_using_line_sphere_new);
 }
 
 } // namespace fill_bg_using_line_sphere_new

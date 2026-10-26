@@ -13,6 +13,12 @@
 
 #include "isocommon.h"
 
+// (AI-assisted) block-compressed X.ogz files in the fake ISO (compressed_iso_file.h): always on
+// the 3DS; on the host the code is built in, but used only with OPENGOAL_ISO_OGZ=1 (fake_iso.cpp)
+#if defined(__3DS__) || defined(OG_HOST_ISO_OGZ)
+#define OG_ISO_OGZ 1
+#endif
+
 #include "third-party/BS_thread_pool.hpp"
 
 void fake_iso_init_globals();

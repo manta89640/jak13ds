@@ -7,6 +7,7 @@
 #include "CtrVram.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <functional>
@@ -16,6 +17,18 @@
 #include "common/log/log.h"
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
+
+#include "fmt/format.h"
+#include "common/util/FileUtil.h"
+
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+#include "game/graphics/jak2_texture_remap.h"
+#else
+// (AI-assisted) the Jak 1 3DS build has no Jak II tables (set_jak2_remap is never on there)
+static int lookup_jak2_texture_dest_offset(int, int) {
+  return 0;
+}
+#endif
 
 #include "game/graphics/ctr/CtrButtonArt.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -115,9 +128,43 @@ struct Range {
 };
 }  // namespace
 
-CtrVram::CtrVram() {
+namespace {
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+// (AI-assisted, j2-mem2) what unwritten chunks of a sparse VRAM copy read as (not in the Jak 1 3DS
+// build: its copy is never sparse)
+alignas(16) const u8 kZeroChunk[16384] = {};
+constexpr bool kSparseBuild = true;
+#else
+const u8* const kZeroChunk = nullptr;
+constexpr bool kSparseBuild = false;
+#endif
+std::atomic<u32> g_copy_bytes{0};  // of the last CtrVram made (the renderer's)
+}  // namespace
+
+unsigned ctr_vram_copy_kb() {
+  return g_copy_bytes.load(std::memory_order_relaxed) / 1024;
+}
+
+CtrVram::CtrVram(bool sparse) : m_sparse(sparse && kSparseBuild) {
+  sparse = m_sparse;
   static_assert(kChunks == kChunkCount);
-  m_vram.resize(kVramBytes);
+  static_assert(kChunks * kChunkBytes == kVramBytes);
+  memset(m_top, 0, sizeof(m_top));
+  memset(m_is_top, 0, sizeof(m_is_top));
+  if (sparse) {
+    for (u32 c = 0; c < kChunks; c++) {
+      m_rd[c] = kZeroChunk;
+      m_wr[c] = nullptr;
+    }
+  } else {
+    m_mem.reset(new u8[kVramBytes]());
+    for (u32 c = 0; c < kChunks; c++) {
+      m_wr[c] = m_mem.get() + (size_t)c * kChunkBytes;
+      m_rd[c] = m_wr[c];
+    }
+    m_full_chunks = kChunks;
+  }
+  note_chunks();
   m_tex_info.resize(kBlocks);
   // a PSMCT32 page is 64 x 32 pixels (8 KB)
   m_ct32_page_table.resize(64 * 32);
@@ -152,18 +199,107 @@ CtrVram::~CtrVram() {
   clear_cache();
 }
 
+void CtrVram::note_chunks() const {
+  g_copy_bytes = copy_bytes();
+}
+
+u8* CtrVram::make_full(u32 chunk) {
+  // (only sparse copies have chunks without memory)
+  std::unique_ptr<u8[]> mem(new u8[kChunkBytes]());
+  u8* c = mem.get();
+  if (m_is_top[chunk]) {
+    // its top bytes go back into their words, the rest was zero
+    const u8* t = m_top[chunk];
+    for (u32 w = 0; w < kChunkBytes / 4; w++) {
+      c[4 * w + 3] = t[w];
+    }
+    m_top[chunk] = nullptr;
+    m_is_top[chunk] = 0;
+    m_top_chunks--;
+  }
+  m_own[chunk] = std::move(mem);
+  m_wr[chunk] = c;
+  m_rd[chunk] = c;
+  m_full_chunks++;
+  note_chunks();
+  return c;
+}
+
+u8* CtrVram::make_top(u32 chunk) {
+  std::unique_ptr<u8[]> mem(new u8[kChunkBytes / 4]());
+  u8* t = mem.get();
+  m_own[chunk] = std::move(mem);
+  m_top[chunk] = t;
+  m_rd[chunk] = t;
+  m_is_top[chunk] = 1;
+  m_top_chunks++;
+  note_chunks();
+  return t;
+}
+
 u32 CtrVram::read32(u32 byte_addr) const {
-  u32 v;
-  memcpy(&v, m_vram.data() + (byte_addr & kVramMask & ~3u), 4);
-  return v;
+  return view().rd32(byte_addr & kVramMask & ~3u);
 }
 
 void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height) {
-  write_ct32(data, dest_block, width, height);
   // (AI-assisted) whole pages (a page row's blocks are spread over the page)
   const u32 end = dest_block + (height + 31) / 32 * std::max(1u, width / 64) * 32;
+  // (AI-assisted, Jak II raw images) written now: page uploads still pending there are older and
+  // would overwrite it when a texture reads them; a page uploaded again later is written again.
+  // (AI-assisted, j2gaps) Dropped only where the image covers whole page rows: an image less than
+  // 32 rows high (or not a multiple of 64 wide) leaves texels of its pages that the pending upload
+  // still has to write (they stayed stale), so the overlapping pending chunks are written first.
+  if (height % 32 == 0 && width % 64 == 0) {
+    trim_pending(dest_block, end);
+  } else {
+    flush_pending(dest_block, end);
+  }
+  forget_uploads(dest_block, end);
+  // (AI-assisted, j2intro) the same image again (draw-raw-image sends the Dolby / title screen
+  // cards every frame for seconds while the title's levels load): VRAM already holds it, so the
+  // textures decoded from it stay valid. Rewriting it made a new copy of its chunks' ids and the
+  // 512 x 416 card was decoded again every frame: Azahar's tex bucket 76 ms a frame, the render
+  // thread starving the level loader on its core (the .c3l loads of the title took 8-11 s).
+  const bool same = ct32_same(data, dest_block, width, height);
+#ifndef __3DS__
+  static const bool log_up = getenv("CTR_UPLOAD_LOG") != nullptr;  // host diagnosis
+  if (log_up) {
+    lg::info("[ctr] raw image {}x{} at {}: {}", width, height, dest_block,
+             same ? "unchanged, not written" : "written");
+  }
+#endif
+  if (same) {
+    return;
+  }
+  write_ct32(data, dest_block, width, height);
+  if (m_jak2_remap) {
+    // no page textures (with moved dests) there any more
+    std::fill(m_remap.begin() + std::min<u32>(dest_block, 16384),
+              m_remap.begin() + std::min<u32>(end, 16384), 0);
+  }
   mark_unique(dest_block, end);
   note_write(dest_block, end);
+}
+
+// (AI-assisted, j2intro) VRAM holds this CT32 image at dest_block already (write_ct32's layout)
+bool CtrVram::ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const {
+  const u32 pages_per_row = std::max(1u, width / 64);
+  const u32 base = dest_block * kBlockBytes;
+  const View v = view();
+  for (u32 y = 0; y < height; y++) {
+    const u32 page_row = (y / 32) * pages_per_row;
+    const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
+    const u8* src_row = data + 4 * y * width;
+    for (u32 x = 0; x < width; x++) {
+      const u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
+      u32 s;
+      memcpy(&s, src_row + 4 * x, 4);
+      if (v.rd32(addr) != s) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 void CtrVram::mark_unique(u32 first_block, u32 end_block) {
@@ -206,16 +342,18 @@ void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) 
   u32 y = 0;
   const u32 page_rows = (height + 31) / 32;
   // (AI-assisted) asm_tex = off (hardware hang bisect): the per pair loop only, no 64-bit stores
-  if (ctr_gpu_asm_tex() && m_ct32_lines && width % 64 == 0 &&
+  if (ctr_gpu_asm_tex() && m_ct32_lines && width % 64 == 0 && base % 8192 == 0 &&
       base + page_rows * pages_per_row * 8192 <= kVramBytes) {
     // (AI-assisted) two rows at a time, one 32 byte VRAM line per 4 texels of each (see the
     // constructor), as 64-bit pairs; the upload doesn't wrap around the end of VRAM
     for (; y + 1 < height; y += 2) {
-      u8* row_dst = m_vram.data() + base + (y / 32) * pages_per_row * 8192;
+      // (AI-assisted, j2-mem2) a page (8 KB, page aligned: base % 8192 == 0) is within one chunk
+      const u32 row_addr = base + (y / 32) * pages_per_row * 8192;
       const u32* ytab = &m_ct32_page_table[64 * (y % 32)];
       const u64* s0 = (const u64*)(data + 4 * y * width);
       const u64* s1 = s0 + width / 2;
-      for (u32 page = 0; page < width / 64; page++, row_dst += 8192) {
+      for (u32 page = 0; page < width / 64; page++) {
+        u8* row_dst = wr(row_addr + page * 8192);
         for (u32 x = 0; x < 64; x += 4, s0 += 2, s1 += 2) {
           u64* d = (u64*)(row_dst + ytab[x]);
           const u64 a01 = s0[0], a23 = s0[1], b01 = s1[0], b23 = s1[1];
@@ -234,13 +372,13 @@ void CtrVram::write_ct32(const u8* data, u32 dest_block, u32 width, u32 height) 
     if (m_ct32_pairs && width % 2 == 0) {
       for (u32 x = 0; x < width; x += 2) {
         u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
-        memcpy(m_vram.data() + addr, src_row + 4 * x, 8);
+        memcpy(wr(addr), src_row + 4 * x, 8);
       }
       continue;
     }
     for (u32 x = 0; x < width; x++) {
       u32 addr = (base + (page_row + x / 64) * 8192 + ytab[x % 64]) & kVramMask;
-      memcpy(m_vram.data() + addr, src_row + 4 * x, 4);
+      memcpy(wr(addr), src_row + 4 * x, 4);
     }
   }
 }
@@ -266,6 +404,18 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
       memcpy(&clut_dest, t + offsetof(GoalTexture, clut_dest), 2);
       m_tex_info[dest0] = TexInfo{(u16)w, (u16)h, t[offsetof(GoalTexture, psm)],
                                   t[offsetof(GoalTexture, width)], clutpsm, clut_dest};
+      if (m_jak2_remap) {
+        // (AI-assisted) Jak II: the PC port moved this texture's dest by a few blocks
+        // (__pc-get-tex-remap, so no two textures share an address); its data is where the
+        // page put it, offset blocks lower
+        u32 page_id;
+        memcpy(&page_id, tpage + offsetof(GoalTexturePageHeader, id), 4);
+        m_remap[dest0] = (u8)lookup_jak2_texture_dest_offset((int)page_id, (int)i);
+        // (AI-assisted) where the texture record is: setup-font-texture changes the font
+        // textures' height before relocating them (see relocate)
+        m_tex_ptr[dest0] = ptr;
+        m_ee_mem = ee_mem;
+      }
     }
   }
 }
@@ -311,6 +461,18 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     words = ((u32)EE_MAIN_MEM_SIZE - seg.block_data_ptr) / 4 / 128 * 128;
   }
   const u32 dest_block = seg.dest / 64;
+#ifndef __3DS__
+  {
+    static const bool log_uploads = getenv("CTR_UPLOAD_LOG") != nullptr;  // (AI-assisted) host
+    if (log_uploads) {
+      lg::info("[ctr vram] upload page {} ({}) mode {}: {} words to block {}; segs {:x}/{}/{} {:x}/{}/{} {:x}/{}/{}",
+               (const char*)(ee_mem + page.name_ptr + 4), page.length, mode, words, dest_block,
+               page.segment[0].block_data_ptr, page.segment[0].size, page.segment[0].dest,
+               page.segment[1].block_data_ptr, page.segment[1].size, page.segment[1].dest,
+               page.segment[2].block_data_ptr, page.segment[2].size, page.segment[2].dest);
+    }
+  }
+#endif
   // skip the upload if this exact data is already there (sampled hash, pages are static)
   const u8* src = ee_mem + seg.block_data_ptr;
   u64 hash = words;
@@ -518,7 +680,18 @@ bool is_indexed(u32 psm) {
 }  // namespace
 
 void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
-  const TexInfo info = src_block < kBlocks ? m_tex_info[src_block] : TexInfo{};
+  TexInfo info = src_block < kBlocks ? m_tex_info[src_block] : TexInfo{};
+  if (m_jak2_remap && info.w && src_block < m_tex_ptr.size() && m_tex_ptr[src_block] && m_ee_mem) {
+    // (AI-assisted) Jak II's setup-font-texture sets the font textures' height (320, 800) before
+    // it relocates them: the large fonts are 800 rows, and the next one starts right after them
+    // (6016 + 800 rows = 9216). With the page's 1024 the first relocated font's last rows wrote
+    // over the top of the next one (letters A-K, the button symbols)
+    s16 h;
+    memcpy(&h, m_ee_mem + m_tex_ptr[src_block] + offsetof(GoalTexture, h), 2);
+    if (h > 0 && h <= 1024) {
+      info.h = (u16)h;
+    }
+  }
   if (!info.w) {
     lg::warn("[ctr vram] relocate from unknown texture at {}", src_block);
     return;
@@ -526,6 +699,17 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
   if (!is_indexed(info.psm) || !is_indexed(dest_psm)) {
     lg::warn("[ctr vram] relocate {} -> {} not supported", info.psm, dest_psm);
     return;
+  }
+#ifndef __3DS__
+  if (getenv("CTR_UPLOAD_LOG")) {  // (AI-assisted) host diagnosis
+    lg::info("[ctr vram] relocate {} -> {} psm {}: {}x{} psm {} width {} clut {} remap {}", src_block,
+             dest_block, dest_psm, info.w, info.h, info.psm, info.width, info.clutdest,
+             m_jak2_remap && src_block < m_remap.size() ? m_remap[src_block] : 0);
+  }
+#endif
+  // (AI-assisted) Jak II: a texture whose dest the PC port moved (m_remap) has its data lower
+  if (m_jak2_remap && src_block < m_remap.size()) {
+    src_block -= std::min<u32>(m_remap[src_block], src_block);
   }
   // source texture and CLUT, in blocks (generous: whole pages)
   const u32 bits = (info.psm == (u32)GsTex0::PSM::PSMT4) ? 4
@@ -559,11 +743,11 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
         case GsTex0::PSM::PSMT4: {
           u32 a = (psmt4_addr_half_byte(x, y, width) + src_block * kBlockBytes * 2) &
                   (kVramMask * 2 + 1);
-          u8 b = m_vram[a / 2];
+          u8 b = view().rd8(a / 2);
           idx = (a & 1) ? (b >> 4) : (b & 0xf);
         } break;
         case GsTex0::PSM::PSMT8:
-          idx = m_vram[(psmt8_addr(x, y, width) + src_block * kBlockBytes) & kVramMask];
+          idx = view().rd8((psmt8_addr(x, y, width) + src_block * kBlockBytes) & kVramMask);
           break;
         default: {
           u32 v = read32(psmct32_addr(x, y, width) + src_block * kBlockBytes);
@@ -577,7 +761,7 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
         case GsTex0::PSM::PSMT4: {
           u32 a = (psmt4_addr_half_byte(x, y, width) + dest_block * kBlockBytes * 2) &
                   (kVramMask * 2 + 1);
-          u8& b = m_vram[a / 2];
+          u8& b = *wr(a / 2);
           const u8 nb = (a & 1) ? ((b & 0x0f) | (idx << 4)) : ((b & 0xf0) | (idx & 0xf));
           changed |= nb != b;
           b = nb;
@@ -585,24 +769,26 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
         } break;
         case GsTex0::PSM::PSMT8: {
           u32 a = (psmt8_addr(x, y, width) + dest_block * kBlockBytes) & kVramMask;
-          changed |= m_vram[a] != (u8)idx;
-          m_vram[a] = idx;
+          u8& b = *wr(a);
+          changed |= b != (u8)idx;
+          b = idx;
           range.add(a);
         } break;
         default: {
           u32 a = (psmct32_addr(x, y, width) + dest_block * kBlockBytes) & kVramMask & ~3u;
-          u32 v;
-          memcpy(&v, m_vram.data() + a, 4);
-          const u32 old = v;
+          // (AI-assisted, j2-mem2) only the word's top byte changes (see m_top in CtrVram.h)
+          u8* top = wr_top(a);
+          const u8 old = *top;
+          u8 nb;
           if (dest_psm == (u32)GsTex0::PSM::PSMT8H) {
-            v = (v & 0x00ffffff) | (idx << 24);
+            nb = (u8)idx;
           } else if (dest_psm == (u32)GsTex0::PSM::PSMT4HH) {
-            v = (v & 0x0fffffff) | ((idx & 0xf) << 28);
+            nb = (u8)((old & 0x0f) | ((idx & 0xf) << 4));
           } else {
-            v = (v & 0xf0ffffff) | ((idx & 0xf) << 24);
+            nb = (u8)((old & 0xf0) | (idx & 0xf));
           }
-          changed |= v != old;
-          memcpy(m_vram.data() + a, &v, 4);
+          changed |= nb != old;
+          *top = nb;
           range.add(a);
         } break;
       }
@@ -666,7 +852,7 @@ u32 CtrVram::clut_color(u32 cbp, u32 cpsm, u32 entry) const {
   } else {  // PSMCT16 / 16S
     u32 addr = (psmct16_addr(x, y, 64) + cbp * kBlockBytes) & kVramMask;
     u16 c;
-    memcpy(&c, m_vram.data() + (addr & ~1u), 2);
+    c = view().rd16(addr & ~1u);
     return ct16_to_rgba(c);
   }
 }
@@ -675,7 +861,7 @@ namespace {
 // clut(cbp, cpsm, index) -> RGBA8: a template (inlined per texel), not a std::function
 template <typename Clut>
 bool decode_impl(const CtrVram* self,
-                 const std::vector<u8>& vram,
+                 const CtrVram::View& vram,
                  u64 tex0,
                  std::vector<u32>* out,
                  int* w_out,
@@ -712,9 +898,7 @@ bool decode_impl(const CtrVram* self,
   auto rd32 = [&](u32 a) {
     tex_range->add(a);
     a &= kVramMask & ~3u;
-    u32 v;
-    memcpy(&v, vram.data() + a, 4);
-    return v;
+    return vram.rd32(a);
   };
 
   switch (t.psm()) {
@@ -737,8 +921,7 @@ bool decode_impl(const CtrVram* self,
           u32 a = psmct16_addr(x, y, width) + tbp * kBlockBytes;
           tex_range->add(a);
           a &= kVramMask;
-          u16 c;
-          memcpy(&c, vram.data() + (a & ~1u), 2);
+          const u16 c = vram.rd16(a & ~1u);
           (*out)[x + y * w] = ct16_to_rgba(c);
         }
       }
@@ -749,7 +932,7 @@ bool decode_impl(const CtrVram* self,
           u32 a = psmt8_addr(x, y, width) + tbp * kBlockBytes;
           tex_range->add(a);
           a &= kVramMask;
-          (*out)[x + y * w] = clut_tab[vram[a]];
+          (*out)[x + y * w] = clut_tab[vram.rd8(a)];
         }
       }
       break;
@@ -759,7 +942,7 @@ bool decode_impl(const CtrVram* self,
           u32 a = psmt4_addr_half_byte(x, y, width) + tbp * kBlockBytes * 2;
           tex_range->add(a / 2);
           a &= kVramMask * 2 + 1;
-          u8 b = vram[a / 2];
+          u8 b = vram.rd8(a / 2);
           u32 idx = (a & 1) ? (b >> 4) : (b & 0xf);
           (*out)[x + y * w] = clut_tab[idx];
         }
@@ -832,11 +1015,12 @@ u32 texture_block_span(const GsTex0& t) {
 bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
   const_cast<CtrVram*>(this)->flush_pending();
   Range r;
-  return decode_impl(this, m_vram, tex0, out, w, h, &r,
+  return decode_impl(this, view(), tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
 }
 
 bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
+  tex0 = data_tex0(tex0);  // (AI-assisted) Jak II
   GsTex0 t(tex0);
   if (!m_pending.empty()) {
     // only the pending uploads this texture reads (as get_texture)
@@ -847,10 +1031,10 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   Range r;
   if (reloc) {
-    return decode_impl(this, m_vram, tex0, out, w, h, &r,
+    return decode_impl(this, view(), tex0, out, w, h, &r,
                        [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; });
   }
-  return decode_impl(this, m_vram, tex0, out, w, h, &r,
+  return decode_impl(this, view(), tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
 }
 
@@ -877,7 +1061,44 @@ u64 CtrVram::entry_sig(const Entry& e) const {
                        e.clut_first, e.clut_end);
 }
 
+void CtrVram::set_override(u32 tbp, int w, int h, const u32* rgba) {
+  auto it = m_overrides.find(tbp);
+  if (it != m_overrides.end() && it->second.w == w && it->second.h == h &&
+      it->second.handle >= 0 && !m_borrowed[tbp]) {
+    ctr_gpu_tex_update(it->second.handle, (const uint8_t*)rgba);
+    return;
+  }
+  if (it != m_overrides.end() && it->second.handle >= 0 && !m_borrowed[tbp]) {
+    ctr_gpu_tex_delete(it->second.handle);
+  }
+  m_borrowed.erase(tbp);
+  CtrTexture t;
+  t.w = w;
+  t.h = h;
+  t.handle = ctr_gpu_tex_create(w, h, (const uint8_t*)rgba);
+  m_overrides[tbp] = t;
+}
+
+void CtrVram::clear_override(u32 tbp) {
+  auto it = m_overrides.find(tbp);
+  if (it == m_overrides.end()) {
+    return;
+  }
+  if (it->second.handle >= 0 && !m_borrowed[tbp]) {
+    ctr_gpu_tex_delete(it->second.handle);
+  }
+  m_borrowed.erase(tbp);
+  m_overrides.erase(it);
+}
+
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
+  // (AI-assisted) Jak II's animated textures (set_override; none in Jak 1)
+  if (!m_overrides.empty()) {
+    auto ov = m_overrides.find((u32)(tex0 & 0x3fff));
+    if (ov != m_overrides.end()) {
+      return &ov->second;
+    }
+  }
   // the parts of TEX0 that select the texture data (not TCC / TFX / CLUT load control)
   constexpr u64 kKeyMask = ~((0b111ull << 34) | (0b111ull << 61));
   u64 key = tex0 & kKeyMask;
@@ -897,7 +1118,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     m_stats.cached++;
     return &cached->tex;
   }
-  GsTex0 t(tex0);
+  // (AI-assisted) Jak II: where the texture's data is (see m_remap); key stays the cache key
+  const u64 data_key = data_tex0(key);
+  GsTex0 t(data_tex0(tex0));
   if (!m_pending.empty()) {
     // write the pending uploads this texture (or its cached version) may read
     const u32 blocks = texture_block_span(t);
@@ -940,9 +1163,9 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // textures moved by texture-relocate use the CLUT they had when they were moved
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   const bool decoded =
-      reloc ? decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+      reloc ? decode_impl(this, view(), data_key, &data, &w, &h, &tex_range,
                           [reloc](u32, u32, u32 e) { return reloc->clut[e % reloc->clut.size()]; })
-            : decode_impl(this, m_vram, key, &data, &w, &h, &tex_range,
+            : decode_impl(this, view(), data_key, &data, &w, &h, &tex_range,
                           [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
   if (!decoded) {
     lg::warn("[ctr vram] unsupported texture format {} (tex0 {:x})", (int)t.psm(), tex0);
@@ -951,6 +1174,23 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
 
   // (AI-assisted) the PS2 button symbols of the font and the progress menu -> 3DS buttons
   ctr_button_art::patch(tex0, data.data(), w, h);
+#ifndef __3DS__
+  {
+    // (AI-assisted) host diagnosis: env CTR_TEX_DUMP=<dir> writes every decoded texture
+    static const char* dump_dir = getenv("CTR_TEX_DUMP");
+    static int dumped = 0;
+    if (dump_dir && dumped < 400) {
+      dumped++;
+      std::vector<u32> png(data);
+      static const bool rgb = getenv("CTR_TEX_DUMP_RGB") != nullptr;
+      for (auto& c : png) {
+        const u32 a = std::min(255u, (c >> 24) * 2);
+        c = rgb ? (c | 0xff000000u) : (0xff000000u | a | (a << 8) | (a << 16));  // alpha as grey
+      }
+      file_util::write_rgba_png(fmt::format("{}/tex_{:x}.png", dump_dir, tex0), png.data(), w, h);
+    }
+  }
+#endif
 
   // (AI-assisted, perfv2) the texels with alpha (CtrTexture::box)
   float box[4] = {0.f, 0.f, 1.f, 1.f};

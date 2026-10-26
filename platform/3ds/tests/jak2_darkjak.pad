@@ -1,0 +1,72 @@
+# (AI-assisted) Jak II: Dark Jak combo attacks in the slums. The "protect Kor and Kid" crash
+# (reports/hw-oct25): the running-attack combo (target-darkjak.gc anon-function-10) calls
+# combo-tracker-method-13, whose stack array was 16 bytes short for the array header that
+# (method-of-type array new) zeroes; on the 3DS that wiped the caller's saved r4-r6.
+# Native PC or C mode, e.g.
+#   OPENGOAL_NO_SOUND=1 OPENGOAL_PAD_SCRIPT=jak2_darkjak.pad \
+#     gk -g jak2 --proj-path <project> -- -boot -fakeiso -nosound -cbackend
+# Expected: "darkjak: done" with Jak alive after the combos, then exit.
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 log darkjak: ctysluma-start
+1004 pos *target*
+1100 call pad-script-darkjak
+1101 -
+1400 log darkjak: transformed
+1401 call pad-script-darkjak
+1402 print *target*
+1403 ly=0
+1420 ly=0 square
+1422 ly=0 print *target*
+1428 ly=0 square
+1430 ly=0
+1436 ly=0 square
+1438 ly=0
+1444 ly=0 square
+1446 ly=0
+1452 ly=0 square
+1454 ly=0 print *target*
+1460 ly=0 square
+1462 ly=0
+1468 ly=0 square
+1470 ly=0
+1476 ly=0 square
+1478 ly=0
+1484 ly=0 square
+1486 ly=0 print *target*
+1492 ly=0 square
+1494 ly=0
+1500 ly=0 square
+1502 ly=0
+1508 ly=0 square
+1510 ly=0
+1516 ly=0 square
+1518 ly=0 print *target*
+1524 ly=0 square
+1526 ly=0
+1532 ly=0 square
+1534 ly=0
+1540 ly=0 square
+1542 ly=0
+1548 ly=0 square
+1550 ly=0 print *target*
+1556 ly=0 square
+1558 ly=0
+1564 ly=0 square
+1566 ly=0
+1572 ly=0 square
+1574 ly=0
+1580 ly=0 square
+1582 ly=0 print *target*
+1588 ly=0 square
+1590 ly=0
+1596 ly=0 square
+1598 ly=0
+1604 ly=0 square
+1606 ly=0
+1700 -
+1701 log darkjak: done
+1702 pos *target*
+1703 print *target*
+1800 exit

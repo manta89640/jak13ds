@@ -52,6 +52,15 @@ constexpr PerGameVersion<int> fr3_level_count(jak1::LEVEL_TOTAL,
                                               jak3::LEVEL_TOTAL,
                                               jakx::LEVEL_TOTAL);
 
+//! (AI-assisted) OPENGOAL_GL_NO_VSYNC=1: swap interval 0 regardless of the vsync setting.
+bool gl_no_vsync() {
+  static const bool v = [] {
+    const char* e = getenv("OPENGOAL_GL_NO_VSYNC");
+    return e && e[0] == '1';
+  }();
+  return v;
+}
+
 struct GraphicsData {
   // vsync
   std::mutex sync_mutex;
@@ -231,6 +240,13 @@ static std::shared_ptr<GfxDisplay> gl_make_display(int width,
                                            "supports this and your drivers are up to date.");
       return NULL;
     }
+  }
+
+  // (AI-assisted) OPENGOAL_GL_NO_VSYNC=1 (host test runs): never wait for vsync. On macOS the
+  // swap waits for the display link, which stops while the display sleeps or the screen is
+  // locked, so unattended windowed runs hang before their first frame otherwise.
+  if (gl_no_vsync()) {
+    SDL_GL_SetSwapInterval(0);
   }
 
   if (!gl_inited) {
@@ -700,7 +716,7 @@ void GLDisplay::render() {
   }
 
   // switch vsync modes, if requested
-  if (Gfx::g_global_settings.vsync != Gfx::g_global_settings.old_vsync) {
+  if (Gfx::g_global_settings.vsync != Gfx::g_global_settings.old_vsync && !gl_no_vsync()) {
     Gfx::g_global_settings.old_vsync = Gfx::g_global_settings.vsync;
     // NOTE - -1 can be used for adaptive vsync, maybe useful for Jak 2+?
     // https://wiki.libsdl.org/SDL3/SDL_GL_SetSwapInterval

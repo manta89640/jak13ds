@@ -38,6 +38,8 @@
 
 namespace jak1 {
 
+u64 (*g_goalc_suspend_impl_other)(goalc_ctx* caller_ctx) = nullptr;
+
 namespace {
 
 // thread / cpu-thread
@@ -290,6 +292,11 @@ u64 goalc_k_reset_and_call(u64 thread, u32 func) {
  * stack, then returns to the kernel. Resuming the thread returns from goalc_suspend_entry.
  */
 u64 goalc_suspend_impl(goalc_ctx* caller_ctx) {
+  // (AI-assisted) the Jak 2 kernel has its own copy with the Jak 2 structure layouts, installed by
+  // jak2::goalc_kernel_init (null when running Jak 1)
+  if (jak1::g_goalc_suspend_impl_other) {
+    return jak1::g_goalc_suspend_impl_other(caller_ctx);
+  }
   using namespace jak1;
   u32 thread = (u32)goalc_pp;
   u32 sp = goal_addr_of((void*)goalc_ctx_sp(caller_ctx));

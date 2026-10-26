@@ -4,7 +4,7 @@
 #include "common/goal_constants.h"
 
 /*
- * Jak 1 EE memory layout.
+ * Jak 1 (and, AI-assisted, Jak 2) EE memory layout.
  *
  * Default (PC):                          Small memory (OPENGOAL_SMALL_MEMORY, 3DS):
  *   0x0000000 kernel data, symbols         0x0000000 kernel data, symbols
@@ -17,6 +17,10 @@
  * The small layout is not the original 32 MB one: with the PC port's level heaps and DMA buffers,
  * Jak 1 needs about 36 MB of global heap (in C mode, where code isn't in GOAL memory). The debug
  * heap is only big enough for the listener (-debug-mem), not for debug segments (-debug).
+ *
+ * (AI-assisted) Jak 2 uses the same small layout: its kernel stack moves from the top of the 128 MB
+ * to GOAL_KERNEL_STACK_TOP, and its debug heap is the 4 MB above it. In C mode the Haven City
+ * slums use 30.5 MB of the 42.5 MB global heap (level heaps at the PS2 size, 18.4 MB).
  *
  * The kernel stack is the stack the GOAL kernel (and the C runtime called from it) runs on. In C
  * mode, compiled code frames are bigger than native ones, which is why it's bigger in small mode.

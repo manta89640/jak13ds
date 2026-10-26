@@ -901,6 +901,61 @@
 ;;      - does bone calcs for merc
 ;;      - does VU0/CPU stuff for generic/shadow/lightning
 
+;; og:preserve-this (AI-assisted) 3DS: the light-hash part of dma-add-process-drawable (the lights of
+;; the active levels' light hashes near the origin, added to lg) as a function, run by the native
+;; pc-light-hash-add-lights! (game/mips2c/jak2_functions/native2_misc.cpp: the same results, verified
+;; against this code with OPENGOAL_MIPS2C_VERIFY=1; always on); this GOAL code runs when it returns
+;; #f (debugging: config.ini mips2c_native_off).
+(#when TARGET_3DS
+  (def-mips2c pc-light-hash-add-lights! (function light-group draw-control symbol))
+  (defun light-hash-add-lights! ((lg light-group) (dc draw-control))
+    (local-vars
+      (my-origin vector)
+      (lev-mood mood-context)
+      (light-result-bucket light-hash-bucket)
+      (index-ptr pointer)
+      (index-index int)
+      )
+    (when (not (pc-light-hash-add-lights! lg dc))
+      (dotimes (fg-light-lev-idx (-> *level* length))
+        (let ((lev (-> *level* level fg-light-lev-idx)))
+          (when (= (-> lev status) 'active)
+            (let ((light-hash (-> lev light-hash)))
+              (set! my-origin (-> dc origin))
+              (set! lev-mood (-> lev mood-context))
+              (when (nonzero? light-hash)
+                (let ((light-lookup-result (light-hash-get-bucket-index light-hash (-> dc origin))))
+                  (when (!= light-lookup-result -1)
+                    (set! light-result-bucket (-> light-hash bucket-array light-lookup-result))
+                    (set! index-ptr (the pointer (+ (+ (-> light-result-bucket index) 0) (the-as uint (-> light-hash index-array)))))
+                    (set! index-index 0)
+                    (while (< index-index (the-as int (-> light-result-bucket count)))
+                      (let* ((light-sphere (-> light-hash light-sphere-array (-> (the-as (pointer uint8) (&+ index-ptr index-index)))))
+                             (palette-idx (-> light-sphere palette-index))
+                             (interp (if (= palette-idx -1)
+                                         1.0
+                                         (-> lev-mood times palette-idx w)
+                                         )
+                                     )
+                             )
+                        (if (!= (* (-> light-sphere brightness) interp) 0.0)
+                            (add-light-sphere-to-light-group lg light-sphere my-origin lev-mood)
+                            )
+                        )
+                      (set! index-index (+ index-index 1))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    0
+    )
+  )
+
 (defun dma-add-process-drawable ((pd process-drawable) (dc draw-control) (flag symbol) (dma-buf dma-buffer))
   "Draw a normal process-drawable. Set up lighting/shadow settings, then pass on to foreground renderer."
   (local-vars
@@ -1040,32 +1095,36 @@
                     (when (or (and (>= light-idx (the-as uint 10)) (< light-idx (the-as uint 18)))
                               (and (>= light-idx (the-as uint 30)) (< light-idx (the-as uint 38)))
                               )
-                      (dotimes (fg-light-lev-idx (-> *level* length))
-                        (let ((lev (-> *level* level fg-light-lev-idx)))
-                          (when (= (-> lev status) 'active)
-                            (let ((light-hash (-> lev light-hash)))
-                              (set! my-origin (-> dc origin))
-                              (set! lev-mood (-> lev mood-context))
-                              (when (nonzero? light-hash)
-                                (let ((light-lookup-result (light-hash-get-bucket-index light-hash (-> dc origin))))
-                                  (when (!= light-lookup-result -1)
-                                    (set! light-result-bucket (-> light-hash bucket-array light-lookup-result))
-                                    (set! index-ptr (the pointer (+ (+ (-> light-result-bucket index) 0) (the-as uint (-> light-hash index-array)))))
-                                    (set! index-index 0)
-                                    (while (< index-index (the-as int (-> light-result-bucket count)))
-                                      (let* ((light-sphere (-> light-hash light-sphere-array (-> (the-as (pointer uint8) (&+ index-ptr index-index)))))
-                                             (palette-idx (-> light-sphere palette-index))
-                                             (interp (if (= palette-idx -1)
-                                                         1.0
-                                                         (-> lev-mood times palette-idx w)
-                                                         )
-                                                     )
-                                             )
-                                        (if (!= (* (-> light-sphere brightness) interp) 0.0)
-                                            (add-light-sphere-to-light-group lg light-sphere my-origin lev-mood)
-                                            )
+                      (#if TARGET_3DS
+                        ;; og:preserve-this (AI-assisted) 3DS: the same loop in light-hash-add-lights! (native first)
+                        (light-hash-add-lights! lg dc)
+                        (dotimes (fg-light-lev-idx (-> *level* length))
+                          (let ((lev (-> *level* level fg-light-lev-idx)))
+                            (when (= (-> lev status) 'active)
+                              (let ((light-hash (-> lev light-hash)))
+                                (set! my-origin (-> dc origin))
+                                (set! lev-mood (-> lev mood-context))
+                                (when (nonzero? light-hash)
+                                  (let ((light-lookup-result (light-hash-get-bucket-index light-hash (-> dc origin))))
+                                    (when (!= light-lookup-result -1)
+                                      (set! light-result-bucket (-> light-hash bucket-array light-lookup-result))
+                                      (set! index-ptr (the pointer (+ (+ (-> light-result-bucket index) 0) (the-as uint (-> light-hash index-array)))))
+                                      (set! index-index 0)
+                                      (while (< index-index (the-as int (-> light-result-bucket count)))
+                                        (let* ((light-sphere (-> light-hash light-sphere-array (-> (the-as (pointer uint8) (&+ index-ptr index-index)))))
+                                               (palette-idx (-> light-sphere palette-index))
+                                               (interp (if (= palette-idx -1)
+                                                           1.0
+                                                           (-> lev-mood times palette-idx w)
+                                                           )
+                                                       )
+                                               )
+                                          (if (!= (* (-> light-sphere brightness) interp) 0.0)
+                                              (add-light-sphere-to-light-group lg light-sphere my-origin lev-mood)
+                                              )
+                                          )
+                                        (set! index-index (+ index-index 1))
                                         )
-                                      (set! index-index (+ index-index 1))
                                       )
                                     )
                                   )
@@ -1820,6 +1879,10 @@
   (none)
   )
 
+;; 3DS port (AI-assisted): the 60 Hz vblanks the last frame took (kmachine.cpp)
+(#when TARGET_3DS
+  (define-extern pc-3ds-frame-vblanks (function int)))
+
 ;; og:preserve-this pc port function
 (defun pc-maybe-vsync ()
   "PC Port implementation of the block of code in display-sync that computes frame-time-ratio and maybe vsyncs."
@@ -1829,7 +1892,12 @@
 
   (syncv 0) ;; sync always!
   ;(set! *ticks-per-frame* 9765) ;; hack!
-  1.0       ;; and report that we run at full speed.
+  ;; 3DS port (AI-assisted): the 3DS presents at 30 fps, two vblanks a frame. Report that as the
+  ;; dog ratio, like the PS2 did for a frame that took two vblanks, so the clocks advance 1/30 s per
+  ;; frame (at 1.0 the game ran at half speed).
+  (#if TARGET_3DS
+    (the float (pc-3ds-frame-vblanks))
+    1.0)       ;; and report that we run at full speed.
   )
 
 (defun display-sync ((arg0 display))
@@ -2155,6 +2223,12 @@
 
       ;; make sure nothing is in cache
       (flush-cache 0)
+
+      ;; 3DS port (AI-assisted): the peak global-buf use, for the memory report (pad scripts)
+      (#when SMALL_MEMORY
+        (let ((used (&- (-> s4-0 global-buf base) (the-as uint (-> s4-0 global-buf data)))))
+          (if (< *dma-mem-peak* used)
+              (set! *dma-mem-peak* used))))
 
       ;; list final dma sizes
       (when (not (paused?))

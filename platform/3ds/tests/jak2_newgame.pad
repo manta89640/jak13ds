@@ -1,0 +1,24 @@
+# (AI-assisted) Jak II new game from the title to the first gameplay (host gk --ctr-gfx: 60 fps
+# frames): Start (skips the intro), New Game, slot 1 (empty: "Saving data"), the intro scenes
+# (introcst, village1, ctyindb, prison), Jak stands in the prison, the first auto-save's notice
+# (Continue), then a walk. With OPENGOAL_MC_SAVE_DELAY_MS=600 (host: a save stays busy 600 ms, as on
+# the 3DS's save worker) this was the menu hang of Oct 24 (stuck on "Saving data"). Start with an
+# empty save folder (a scratch --config-path): a used slot 1 asks to overwrite first.
+1200 start
+1206 -
+1400 x
+1406 -
+1600 x
+1606 -
+2100 wait *target* target-stance
+2101 log newgame: gameplay
+2102 pos *target*
+2500 shot ngp_notice
+2501 x
+2507 -
+2700 shot ngp_play
+2800 ly=0
+3100 -
+3101 pos *target*
+3102 shot ngp_walk
+3103 exit

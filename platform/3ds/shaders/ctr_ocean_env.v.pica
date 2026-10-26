@@ -1,0 +1,69 @@
+; (AI-assisted, j2water)
+; Vertex shader for Jak II's ocean with the sky reflection (CtrOcean, ctr_gpu_ocean_env_draw).
+; Vertices in the static mesh layout (c3l::Vertex, its texture coordinates unused): the position
+; goes through one matrix to clip space like ctr_ocean.v.pica, the wave texture's coordinates
+; (unit 0) come from the position (dph with a row each), fog as ctr_ocean.v.pica. Texture unit 2
+; reads the env map at the PS2 env pass's coordinates (OceanMid's L32: the camera space vertex
+; direction's x and y times constants plus the view's heading and pitch): d = the vertex relative
+; to the camera (dph rows), s, t = dot(row.xyz, d) / |d| + row.w.
+
+.fvec clip[4]
+.fvec tex[2]        ; wave texture s, t (dph with the position)
+.fvec dir[3]        ; d (dph with the position)
+.fvec env[2]        ; env s, t: dot(row.xyz, d) * rsq(dot(d, d)) + row.w
+.fvec oscales       ; color scale (1/255) in xyzw
+.fvec fog0          ; as ctr_mesh.v.pica
+.fvec fog1
+
+.constf consts(1.0, 0.5, 0.0, 0.0)
+
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+.out outclr color
+
+.alias inpos v0
+.alias inclr v2
+
+.entry main_ctr_ocean_env
+.proc main_ctr_ocean_env
+  ; dph: the position's pad (w) counts as 1
+  dph outpos.x, inpos, clip[0]
+  dph outpos.y, inpos, clip[1]
+  dph outpos.z, inpos, clip[2]
+  dph r1, inpos, clip[3]
+  mov outpos.w, r1
+
+  ; the fog amount (as ctr_ocean.v.pica); each output built whole in a temporary, written once
+  mul r2.xy, fog0.xyxy, r1.xyxy
+  add r2.xy, fog0.zwzw, r2.xyxy
+  max r2.xy, fog1.xyxy, r2.xyxy
+  mov r4.zw, consts.zzzz
+  max r4.x, -r2.xxxx, r2.yyyy
+  mov r4.y, consts.yyyy
+  mov outtc1, r4
+
+  ; the wave texture
+  mov r5.zw, consts.zzzz
+  dph r5.x, inpos, tex[0]
+  dph r5.y, inpos, tex[1]
+  mov outtc0, r5
+
+  ; the env map: the direction from the camera
+  dph r6.x, inpos, dir[0]
+  dph r6.y, inpos, dir[1]
+  dph r6.z, inpos, dir[2]
+  dp3 r7.x, r6, r6
+  rsq r7.x, r7.xxxx
+  dp3 r8.x, env[0], r6
+  dp3 r8.y, env[1], r6
+  mul r8.xy, r7.xxxx, r8.xyyy
+  add r8.x, env[0].wwww, r8.xxxx
+  add r8.y, env[1].wwww, r8.yyyy
+  mov r8.zw, consts.zzzz
+  mov outtc2, r8
+
+  mul outclr, oscales, inclr
+  end
+.end

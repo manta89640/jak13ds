@@ -527,6 +527,121 @@ needs to cover this (runtime work). Before that, the log shows `kmalloc: !alloc 
 (11264000 bytes)` during `play`, which the small memory layout has to account for.
 
 
+## Jak II build (AI-assisted, Oct 18 2026)
+
+A separate configuration of the same CMake project, in its own build dir. Jak 1's build is
+unchanged (`OG3DS_GAME` defaults to `jak1`).
+
+```sh
+source platform/3ds/toolchain/env.sh
+# Jak II compiled to C with the small memory layout (mirror: port_test/j2mirror)
+OPENGOAL_SMALL_MEMORY=1 build/goalc/goalc --game jak2 --proj-path <j2mirror> \
+  --instruction-set c -c '(mi)'
+cmake -S platform/3ds -B build-3ds-jak2 -G Ninja -DOG3DS_GAME=jak2 \
+  -DCMAKE_TOOLCHAIN_FILE=$PWD/platform/3ds/cmake/Toolchain-3DS.cmake \
+  -DOG3DS_CSRC_DIR=<j2mirror>/out/jak2/csrc \
+  -DOG3DS_MODULE_INSTANCES=$PWD/platform/3ds/jak2_module_instances.txt
+cmake --build build-3ds-jak2                     # gk.3dsx, gk.elf
+platform/3ds/tools/make_cia.sh --game jak2       # build-3ds-jak2/jak2.cia
+platform/3ds/tools/stage_sd.sh --game jak2 --proj <j2mirror> --sd <folder>
+platform/3ds/tools/run_my_emu.sh --game jak2 --cia build-3ds-jak2/jak2.cia ...   # private Azahar
+```
+
+- `OG3DS_GAME=jak2` adds the Jak 2 kernel, overlord (jak2 + the common 989 stream plugin) and
+  mips2c functions, and defines `OPENGOAL_ONLY_JAK1=0 OPENGOAL_NO_JAK3=1` (Jak 3 / X compiled out of
+  `runtime.cpp` and `mips2c_table.cpp`) and `OG3DS_GAME_JAK2=1`. Not on the 3DS: sqlite (the debug
+  editor's database: `initialize_sql_db` does nothing), the REPL user name, and the PC renderer's
+  merc mutex (`platform/3ds/port/ctr_jak2_stubs.cpp`).
+- (AI-assisted, j2-render-bg, Oct 18) The 3DS renderer (`renderer = ctr`, the default; `renderer =
+  null`: no picture, paced at 30 Hz by `null_fps`). Linear heap 32 MB (Jak 1: 40 MB; 34 MB since j2-mem2, jak2_status.md "Memory: heap and linear cuts"); the regular
+  heap gets ~70 MB, just over gk's 68 MB check (36 MB of linear left 66 MB and was refused).
+  Level backgrounds: `ctr_level_converter --all out/jak2/fr3 out/jak2/c3l` (GAME.fr3 with
+  `--merc-only`), staged by `stage_sd.sh --game jak2` / `run_my_emu.sh --game jak2` from
+  `<proj>/out/jak2/c3l` into `sdmc:/3ds/jak2/data/out/jak2/c3l` (all 147 levels + GAME: 570 MB, Oct 18; + texanim.c3t since
+  j2-texanim: 149 files, 572 MB).
+  Default `args = -boot -fakeiso -cbackend` (Jak II's kernel starts the IOP from the "DVD" without
+  `-fakeiso`).
+- Title: "OpenGOAL Jak II", unique id 0xF7A21 (title 000400000F7A2100), product code CTR-H-OGJ2;
+  gk.rsf's settings otherwise (124 MB, 804 MHz, the same SVC list). Icon from
+  `platform/3ds/cia/local/jak2/icon.png` (git-ignored, like Jak 1's art).
+- SD card: `sdmc:/3ds/jak2/` (`gk.3dsx`, `config.ini`, `data/out/jak2/iso`, `data/log`),
+  `platform/3ds/tools/config_template_jak2.ini` (sound = on, renderer = ctr).
+- Size (840 modules + 108 instances, -O2): .text 18.7 MB (17.1 MB without the instances; Jak 1:
+  10.7 MB; 19.9 MB at baseline C with sound and texture animations), .rodata 0.8 MB, .data 46 KB, .bss 2.3 MB. In the 124 MB mode: heap 96.9 MB, of which
+  ~55.6 MB used in the city (48 MB EE + the runtime), linear 8 MB (null renderer; 32 MB with the
+  renderer, heap ~70 MB).
+- Only the CIA has enough memory: a `.3dsx` in Azahar gets 62 MB of heap ("Not enough memory").
+
+### Jak II sound (AI-assisted, j2-sound, Oct 18)
+
+The same path as Jak 1 (see "Sound" under "Platform pieces"): the Jak II overlord
+(`game/overlord/jak2`: VAG voice streams for dialogue, ambience and cutscenes, the 989snd plugin
+streams, sound banks, music) feeds the 989snd mixer thread on core 2, which mixes at 32728 Hz
+into one ndsp channel. `sound = on` is the default (`config_template_jak2.ini`); it needs
+`sdmc:/3ds/dspfirm.cdc` like Jak 1. What is Jak II's own:
+
+- **Bank and music loads** (`iso_cd.cpp`, `load_bank_file`): the whole SBK/MUS file is read and
+  parsed on a reader thread while the IOP keeps running its other threads (the load used to stop
+  the whole IOP for the SD read), into a buffer the 989snd bank keeps: its samples aren't copied,
+  so a load needs the file's size once, not twice. Out of heap memory (`bad_alloc`), it tries again
+  every 300 ms, 10 times, then the bank stays out. Each load logs `[io] sound bank X: ... ; N
+  banks, M KB` (the memory all loaded banks hold); unloads log `[sound] unloaded bank`. Haven City
+  slums: COMMON 744 KB + CITY1.MUS 406 KB + CTYWIDE1-3 807 KB = **1.96 MB** of banks (the same
+  with sound off: the banks are loaded either way).
+- **Fake CD files** (`iso_cd.cpp`, `select_cd_file`): 3 files stay open (least recently used one
+  closed): a voice stream (VAGWAD) is read between the pages of a level load, and every reopen
+  cost several SD requests. Plain files are read unbuffered (one card read per page).
+- **Compressed game files**: `stage_sd.sh --game jak2 --compress --compress-vag` works for Jak II.
+  The fake CD reads X.ogz through `iso_cz::Reader` (DGO, STR, TXT in 32 KB LZ4 blocks: Jak II's
+  read page, so a page decodes one whole block into its buffer; VAGWAD in 16 KB zstd + ADPCM
+  split blocks). Read-ahead up to 128 KB per card read for everything but the voice file, while
+  the heap has 2 MB free; the file read before keeps only its block index (and the voice file its
+  16 KB block). KERNEL.CGO / GAME.CGO stay uncompressed: Jak II's kernel reads them itself
+  (`kernel/jak2/kdgo.cpp`). Sizes: DGO 581 -> 332 MB, STR 479 -> 229 MB, TXT 8 -> 3 MB, each
+  VAGWAD 493 -> 352 MB (x7 languages: 3.45 -> 2.46 GB); all files 4.53 -> 3.02 GB.
+  Each closed compressed file logs `[io] cd X: ... KB from ... KB on the card`.
+- **Without audio output** (`sound = off`, or no DSP): `snd_RunStreamsWithoutOutput` (set by the
+  Jak II overlord only) lets the mixer-less thread run the 8 stream voices into a scratch buffer:
+  Jak II follows its voice streams by their play position, so a dialogue line or cutscene stream
+  never ended when nothing played them (a likely cause of baseline B's subtitle that stayed on
+  screen in Azahar with sound off). Jak 1 keeps its fake VAG clock. Not run yet: it needs a
+  `sound = off` 3DS run (the host has no such thread).
+- **Mixer core: 1 for Jak II** (`ctr_port.c`; `sound_core` still overrides it). The app asks for
+  40% of core 1 on New 3DS (`ctr_core1_enable`, 30% if refused; Old 3DS 80% first, as before).
+  On core 2 the mixer shared the render thread's core, which Jak II already fills; core 0 has the
+  game logic (~22-27 ms) and the IOP.
+- **Measured** (Azahar, the CIA, `jak2_city.pad`, instance muted, Oct 18; compressed files):
+  the title stream (`title-disk-intro`), CITY1 music, the CTYWIDE1-3 banks and guard lines
+  (`kg010`) played; 0 DSP frames dropped, 0 late buffers, in both runs. Slums (city-stand /
+  city-walk windows):
+
+  | | mixer | sound thread | render thread (cpu total) | fps |
+  |---|---|---|---|---|
+  | baseline B, sound off | - | - | 30.4 ms | 29.0-29.9 |
+  | mixer on core 2 | 11-17% of real time, 15-17 voices | 4.5-7.2 ms/frame | 34.2 ms | 24.8-28.9 |
+  | **mixer on core 1** (+ the RunBlock changes below) | 12-14%, 17-21 voices | 3.8-6.3 ms/frame | 27.7-28.2 ms | **29.9** |
+
+  Bank loads 55-95 ms each (CITY1.MUS 406 KB in 94 ms). Heap used +~0.4 MB against baseline B
+  (mixer stack 128 KB, the VAGWAD .ogz index ~120 KB, the read-ahead window), linear free 128 KB
+  (131 before). Not run on hardware: core 1 is where the system's services run (a busy mixer
+  there slows the game's service calls; the 40% share bounds it).
+- **Voice::RunBlock** (exact, `test/snd_voice` 24M samples 0 mismatches against the reference):
+  the span length is a multiply by 1/ratio instead of a 32-bit division per span (a libgcc call
+  on the ARM11; a quarter of the city's voice samples are in spans under 16 samples), and the
+  samples where the envelope changes at every tick (~15%: long release tails) run in their own
+  loop without the span setup. Mixer cost per voice in the city: ~0.88% -> ~0.7% of real time
+  (Azahar, two runs, so only roughly).
+- **Voice registers vs the mixer** (j2-title2): the overlord's key on / off and address writes
+  wait for the mixer between chunks (`snd_LockVoiceWrites`), and `sceSdGetAddr` reads the voice
+  addresses published after each chunk; without this, Jak II's title intro stream got a garbage
+  play position and the scene froze (jak2_status.md "Title intro on the 3DS"). The VAG stream log:
+  `OPENGOAL_VAG_DEBUG=1` (host), `-DOG_VAG_DEBUG` (3DS build).
+- Logs: `[sound] VAG stream NAME (id, EE|plugin)` per stream started. On the host,
+  `OPENGOAL_NO_SOUND=1` (without `-nosound`) logs every ~10 s what was mixed before it was zeroed:
+  `[sound] mixed 10.0 s: peak P, N% non-zero, S sounds, up to V voices`. `OPENGOAL_ISO_OGZ=1` makes
+  a host gk read .ogz files too (tests of the 3DS staging; Jak II only, Jak 1's host fake ISO
+  doesn't know them).
+
 ## Renderer (M4 phase 1)
 
 (AI-assisted.) `GfxPipeline::Ctr`, in `game/graphics/ctr`. It is the default on the 3DS, and on

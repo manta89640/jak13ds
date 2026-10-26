@@ -5,13 +5,15 @@
 #   platform/3ds/tools/stage_sd.sh --proj <project dir> [--sd <sdmc root>] [--gk <gk.3dsx>]
 #                                  [--args "<game args>"] [--listener] [--clean-logs]
 #
-#   --proj   project the game was built in (uses <proj>/out/jak1/iso). Must be the same build as
+#   --game   (AI-assisted) jak1 (default) or jak2: the Jak II build (sdmc:/3ds/jak2/, <proj>/out/jak2/iso,
+#            gk from build-3ds-jak2, platform/3ds/tools/config_template_jak2.ini, no level backgrounds)
+#   --proj   project the game was built in (uses <proj>/out/<game>/iso). Must be the same build as
 #            the C modules linked into gk.3dsx (platform/3ds/tools/build_cmodules.sh).
 #   --sd     root of the SD card (default: Azahar's virtual SD card, read from its qt-config.ini,
 #            normally ~/Library/Application Support/Azahar/sdmc). For a real card: its mount point.
 #   --gk     gk.3dsx to copy (default: build-3ds/gk.3dsx)
-#   --c3l    folder with the level backgrounds (default: <proj>/out/jak1/c3l if it exists;
-#            make them with: ctr_level_converter --all out/jak1/fr3 <dir>)
+#   --c3l    folder with the level backgrounds (default: <proj>/out/<game>/c3l if it exists;
+#            make them with: ctr_level_converter --all out/<game>/fr3 <dir>)
 #   --c3v    (AI-assisted) folder with the levels' fine visibility sidecars (<level>.c3v, made by
 #            ctr_vis_builder; default: the .c3v files in the --c3l folder)
 # All settings go in one file, sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). It is
@@ -38,7 +40,8 @@
 #            Each file is checked with the game's decoder after compressing (iso_pack), and kept
 #            in --compress-cache (default build-3ds/iso-ogz-<codec>) until its source changes.
 #   --compress-types "DGO CGO ..."  extensions to compress (default: DGO CGO VIS TXT STR).
-#            Never SBK/MUS (the sound loader reads those itself) or the VAGWAD audio streams.
+#            Never SBK/MUS (the sound loader reads those itself) or the VAGWAD audio streams,
+#            nor Jak II's CGO files (its kernel reads them itself).
 #   --compress-vag  also the VAGWAD.* voice streams (all languages), as zstd + ADPCM frame split
 #            in 16 KB blocks (~0.67 of the size; works with or without --compress)
 #   --compress-cache DIR
@@ -50,7 +53,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PROJ=""
 SD=""
-GK="$ROOT/build-3ds/gk.3dsx"
+GK=""
+GAME=jak1
 C3L=""
 C3V=""
 ARGS=""
@@ -76,6 +80,7 @@ IO_CHECKSUM=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --proj) PROJ="$2"; shift 2 ;;
+    --game) GAME="$2"; shift 2 ;;
     --sd) SD="$2"; SD_GIVEN=1; shift 2 ;;
     --gk) GK="$2"; shift 2 ;;
     --c3l) C3L="$2"; shift 2 ;;
@@ -103,11 +108,16 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$PROJ" ] || { echo "--proj is required" >&2; exit 1; }
+case "$GAME" in jak1|jak2) ;; *) echo "--game: jak1 or jak2" >&2; exit 1 ;; esac
+if [ -z "$GK" ]; then
+  GK="$ROOT/build-3ds/gk.3dsx"
+  [ "$GAME" = jak2 ] && GK="$ROOT/build-3ds-jak2/gk.3dsx"
+fi
 case "${PRESET:-normal}" in
   normal|safe|bench|breakdown) ;;
   *) echo "--preset: normal, safe, bench or breakdown" >&2; exit 1 ;;
 esac
-"$(dirname "$0")/check_fresh.sh" proj "$PROJ" || exit 1
+if [ "$GAME" = jak1 ]; then "$(dirname "$0")/check_fresh.sh" proj "$PROJ" || exit 1; fi
 "$(dirname "$0")/check_fresh.sh" gk "$GK" || exit 1
 
 # don't replace the files of an emulator run in progress (run_emu.sh holds this lock; it calls us
@@ -121,7 +131,7 @@ while [ -d "$EMU_LOCK" ]; do
   echo "waiting for the emulator run of pid $owner to finish"
   sleep 10
 done
-ISO="$PROJ/out/jak1/iso"
+ISO="$PROJ/out/$GAME/iso"
 [ -d "$ISO" ] || { echo "no $ISO (build the game first)" >&2; exit 1; }
 [ -f "$GK" ] || { echo "no $GK" >&2; exit 1; }
 
@@ -136,9 +146,10 @@ azahar_sdmc() {
 }
 [ -n "$SD" ] || SD="$(azahar_sdmc)"
 
-BASE="$SD/3ds/jak1"
+BASE="$SD/3ds/$GAME"
 DATA="$BASE/data"
-mkdir -p "$DATA/out/jak1"
+OUT_DIR="$DATA/out/$GAME"
+mkdir -p "$OUT_DIR"
 
 copy() {  # src dst: APFS clone if possible
   cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"
@@ -153,6 +164,9 @@ file_codec() {  # file name -> the iso_pack codec to store it with, or nothing
   esac
   [ -n "$COMPRESS" ] || return
   case "$ext" in SBK|MUS|AYB) return ;; esac
+  # (AI-assisted) Jak II's kernel reads KERNEL.CGO / GAME.CGO itself (kernel/jak2/kdgo.cpp), not
+  # through the overlord's fake ISO: they stay as they are
+  [ "$GAME" = jak2 ] && [ "$ext" = CGO ] && return
   for t in $COMPRESS_TYPES; do [ "$ext" = "$t" ] && echo "$COMPRESS" && return; done
 }
 compressed_type() { [ -n "$(file_codec "$1")" ]; }
@@ -173,8 +187,15 @@ if [ -n "$COMPRESS" ] || [ "$COMPRESS_VAG" = 1 ]; then
       xargs -P 8 -I{} sh -c 'o="$1/obj/$(basename "$(dirname "$2")")_$(basename "$2").o"; cc -O2 -c "$2" -o "$o"' _ "$PACK_DIR" {}
     c++ -O2 -std=c++17 -I"$ROOT" "${PACK_SRC[0]}" "${PACK_SRC[1]}" "$PACK_DIR"/obj/*.o -o "$PACK"
   fi
-  [ -n "$COMPRESS_CACHE" ] || COMPRESS_CACHE="$ROOT/build-3ds/iso-ogz-${COMPRESS:-vag}"
+  if [ -z "$COMPRESS_CACHE" ]; then
+    COMPRESS_CACHE="$ROOT/build-3ds/iso-ogz-${COMPRESS:-vag}"
+    # (AI-assisted) Jak II's files have the same names (KERNEL.CGO, GAME.CGO...)
+    [ "$GAME" = jak2 ] && COMPRESS_CACHE="$ROOT/build-3ds-jak2/iso-ogz-${COMPRESS:-vag}"
+  fi
   mkdir -p "$COMPRESS_CACHE"
+  # (AI-assisted) blocks of the overlord's read page: Jak 1 reads 48 KB pages, Jak II 32 KB ones
+  # (iso_cd.cpp), so a page read decodes one whole block straight into its buffer
+  PACK_BS=0xc000; [ "$GAME" = jak2 ] && PACK_BS=0x8000
   todo=()
   for f in "$ISO"/*; do
     b="$(basename "$f")"
@@ -185,25 +206,25 @@ if [ -n "$COMPRESS" ] || [ "$COMPRESS_VAG" = 1 ]; then
   if [ ${#todo[@]} -gt 0 ]; then
     echo "compressing ${#todo[@]} files into $COMPRESS_CACHE"
     printf '%s\n' "${todo[@]}" |
-      xargs -P 8 -I{} sh -c 'c="${2%% *}"; f="${2#* }"; b="$(basename "$f")"; bs=0xc000; [ "$c" = zstd-adpcm ] && bs=0x4000; "$1" --codec "$c" --block-size $bs "$f" "$3/$b.ogz.tmp" && mv "$3/$b.ogz.tmp" "$3/$b.ogz" || { echo "iso_pack failed on $f" >&2; exit 255; }' \
-        _ "$PACK" {} "$COMPRESS_CACHE"
+      xargs -P 8 -I{} sh -c 'c="${2%% *}"; f="${2#* }"; b="$(basename "$f")"; bs=$4; [ "$c" = zstd-adpcm ] && bs=0x4000; "$1" --codec "$c" --block-size $bs "$f" "$3/$b.ogz.tmp" && mv "$3/$b.ogz.tmp" "$3/$b.ogz" || { echo "iso_pack failed on $f" >&2; exit 255; }' \
+        _ "$PACK" {} "$COMPRESS_CACHE" "$PACK_BS"
   fi
 fi
 
 # GOAL objects and game files: replace the whole folder so stale files don't survive
-rm -rf "$DATA/out/jak1/iso"
-mkdir -p "$DATA/out/jak1/iso"
+rm -rf "$OUT_DIR/iso"
+mkdir -p "$OUT_DIR/iso"
 n=0
 bytes_in=0
 bytes_out=0
 for f in "$ISO"/*; do
   b="$(basename "$f")"
   if compressed_type "$b"; then
-    copy "$COMPRESS_CACHE/$b.ogz" "$DATA/out/jak1/iso/"
+    copy "$COMPRESS_CACHE/$b.ogz" "$OUT_DIR/iso/"
     bytes_in=$((bytes_in + $(stat -f %z "$f")))
     bytes_out=$((bytes_out + $(stat -f %z "$COMPRESS_CACHE/$b.ogz")))
   else
-    copy "$f" "$DATA/out/jak1/iso/"
+    copy "$f" "$OUT_DIR/iso/"
   fi
   n=$((n + 1))
 done
@@ -216,18 +237,20 @@ fi
 copy "$GK" "$BASE/gk.3dsx"
 
 # level backgrounds for the 3DS renderer
-[ -n "$C3L" ] || C3L="$PROJ/out/jak1/c3l"
+# (AI-assisted) Jak II too: out/jak2/c3l (ctr_level_converter on the Jak II fr3 files)
+[ -n "$C3L" ] || C3L="$PROJ/out/$GAME/c3l"
 if [ -d "$C3L" ]; then
-  rm -rf "$DATA/out/jak1/c3l"
-  mkdir -p "$DATA/out/jak1/c3l"
-  for f in "$C3L"/*.c3l; do
-    copy "$f" "$DATA/out/jak1/c3l/"
+  rm -rf "$DATA/out/$GAME/c3l"
+  mkdir -p "$DATA/out/$GAME/c3l"
+  for f in "$C3L"/*.c3l "$C3L"/*.c3t; do
+    [ -f "$f" ] || continue  # (AI-assisted) .c3t: Jak II's texture animation sources
+    copy "$f" "$DATA/out/$GAME/c3l/"
   done
   # (AI-assisted) fine_vis sidecars (ctr_vis_builder): next to the levels, or from --c3v DIR
   nc3v=0
   for f in "$C3L"/*.c3v ${C3V:+"$C3V"/*.c3v}; do
     [ -f "$f" ] || continue
-    copy "$f" "$DATA/out/jak1/c3l/"
+    copy "$f" "$DATA/out/$GAME/c3l/"
     nc3v=$((nc3v + 1))
   done
   echo "staged level backgrounds from $C3L ($nc3v fine visibility files)"
@@ -247,7 +270,11 @@ elif [ "$KEEP_CONFIG" = 1 ] && [ -f "$CONFIG" ]; then
 elif [ "$KEEP_CONFIG" = 1 ] && [ -f "$BASE/render.ini" ]; then
   cp "$BASE/render.ini" "$TMP_CONFIG"  # the older name: carried over
 else
-  cp "$ROOT/platform/3ds/tools/config_template.ini" "$TMP_CONFIG"
+  if [ "$GAME" = jak2 ]; then
+    cp "$ROOT/platform/3ds/tools/config_template_jak2.ini" "$TMP_CONFIG"
+  else
+    cp "$ROOT/platform/3ds/tools/config_template.ini" "$TMP_CONFIG"
+  fi
 fi
 TESTING_HEADER=0
 set_key() {  # set_key KEY VALUE: replace the key's line where it is (or add it at the end)

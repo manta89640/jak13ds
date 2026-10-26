@@ -7,6 +7,7 @@
 #include "CtrRenderer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -31,6 +32,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #endif
 #include "game/graphics/ctr/CtrEye.h"
 #include "game/graphics/ctr/CtrLevel.h"
+#include "game/graphics/ctr/CtrRendererJak2.h"
 #include "game/graphics/ctr/CtrSky.h"
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrOcean.h"
@@ -51,6 +53,16 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 
 // (AI-assisted) PMODE alpha from the game thread (ctr_set_pmode_alp), 1 = no fade
 static std::atomic<float> g_pmode_alp{1.f};
+
+// (AI-assisted) see CtrRenderer.h; set by the CtrRenderer constructor
+static float g_gs_y_scale = 512.f / 448.f;
+static bool g_is_jak2 = false;
+float ctr_gs_y_scale() {
+  return g_gs_y_scale;
+}
+bool ctr_is_jak2() {
+  return g_is_jak2;
+}
 
 namespace {
 std::string g_shot_dir;
@@ -442,8 +454,22 @@ void CtrDirectBucketRenderer::deferred_sky(void* arg) {
 // ---------------------------------------------------------------------------
 
 CtrRenderer::CtrRenderer()
-    : m_vram(std::make_unique<CtrVram>()), m_levels(std::make_unique<CtrLevels>()) {
+    // (AI-assisted, j2-mem2) Jak II: the VRAM copy only where something is written (sparse)
+    : m_vram(std::make_unique<CtrVram>(g_game_version == GameVersion::Jak2)),
+      m_levels(std::make_unique<CtrLevels>()) {
+#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
+  // (AI-assisted) Jak II: its own bucket table (CtrRendererJak2.cpp)
+  if (g_game_version == GameVersion::Jak2) {
+    m_jak2 = true;
+    g_is_jak2 = true;
+    g_gs_y_scale = 512.f / 416.f * 0.5f;
+    m_vram->set_jak2_remap(true);
+    init_buckets_jak2();
+    return;
+  }
+#endif
   using jak1::BucketId;
+  m_sprite_bucket = (int)BucketId::SPRITE;
   m_buckets.resize((int)BucketId::MAX_BUCKETS);
   auto set = [&](BucketId id, std::unique_ptr<CtrBucketRenderer> r) {
     m_buckets[(int)id] = std::move(r);
@@ -560,7 +586,22 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) The last frame's when they can't be read: black would fog everything to black.
   u8 clear[4];
   memcpy(clear, m_rs.fog_color, 4);
-  {
+  if (m_jak2) {
+    // (AI-assisted) Jak II: *fog-color* in the vif0 of the vis packets (bucket 2, like
+    // VisDataHandler)
+    DmaFollower peek(ee_mem, bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_2));
+    const u32 end = bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_2 + 1);
+    if (peek.current_tag_offset() != end) {
+      peek.read_and_advance();
+      if (peek.current_tag_offset() != end) {
+        auto vis = peek.read_and_advance();
+        if (vis.vifcode1().kind == VifCode::Kind::PC_PORT) {
+          const u32 v = vis.vif0();
+          memcpy(clear, &v, 4);
+        }
+      }
+    }
+  } else {
     DmaFollower peek(ee_mem, chain_offset);
     if (peek.current_tag().kind == DmaTag::Kind::CALL) {
       peek.read_and_advance();
@@ -600,7 +641,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // the whole screen (looking up): every pixel's color is drawn over
   {
     bool covered = false;
-    if (ctr_settings().skip_clear && m_sky_draw && ctr_settings().sky) {
+    if (ctr_settings().skip_clear && m_sky_draw && ctr_settings().sky && !m_jak2) {
       const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
       const u32 id = (u32)jak1::BucketId::SKY_DRAW;
       DmaFollower dma(ee_mem, base + 16 * id);
@@ -612,6 +653,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           break;
         }
       }
+    }
+    // (AI-assisted, j2gaps) Jak II: a menu opens; bucket 3 copies the last frame for its
+    // background before anything is drawn (CtrJak2BlitRenderer)
+    if (m_jak2 && ctr_jak2_frame_copies_screen(
+                      ee_mem, bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3),
+                      bucket_tag(chain_offset, (int)jak2::BucketId::BUCKET_3 + 1))) {
+      covered = true;
     }
     ctr_gpu_set_skip_color_clear(covered ? 1 : 0);
   }
@@ -664,12 +712,17 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     }
     g_pad_shot.clear();
   }
-  // (AI-assisted, title3) the screen is black this frame (the game's fade at 0 since the last
-  // frame, or held black below): the level draws keep no group far for late data
-  ctr_level_set_screen_black(m_hold_black ||
-                             (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) <
-                                                         0.01f));
-  dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
+  // (AI-assisted, j2intro / title3) the screen is black this frame (the game's blackout since the
+  // last frame, or held black by draw_pmode_fade): the level draws keep nothing hidden or far for
+  // late data
+  ctr_level_set_screen_black(
+      m_hold_black ||
+      (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f));
+  if (m_jak2) {
+    dispatch_buckets_jak2(DmaFollower(ee_mem, chain_offset));
+  } else {
+    dispatch_buckets_jak1(DmaFollower(ee_mem, chain_offset));
+  }
   ctr_gpu_diag_stage("pmode fade");
 #ifndef __3DS__
   ctr_gpu_soft_bucket("pmode-fade");
@@ -690,6 +743,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.gpu_draw_ms += gs.draw_ms;
   m_timing.splits += gs.cmd_splits;
   m_timing.cmd_kb += gs.cmd_bytes / 1024.0;
+  m_timing.cmd_kb_peak = std::max(m_timing.cmd_kb_peak, gs.cmd_bytes / 1024.0);
   m_timing.dedup_kb += gs.cmd_dedup_words * 4 / 1024.0;
   m_timing.dropped += gs.dropped_draws;
   // (AI-assisted) a pipelined frame that ran out of command buffer lost its last draws: the
@@ -697,8 +751,24 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   if (gs.dropped_draws && ctr_settings().pipeline && !m_pipeline_off) {
     ctr_gpu_set_pipeline(0);
     m_pipeline_off = true;
-    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off from now on",
+    m_pipeline_calm = 0;
+    m_pipeline_retry_frames = std::min(m_pipeline_retry_frames * 2, 30 * 600);
+    lg::warn("[ctr] pipeline: {} draws didn't fit in the command buffer, pipeline off for now",
              gs.dropped_draws);
+  } else if (m_pipeline_off && ctr_settings().pipeline) {
+    // (AI-assisted, j2gaps) one spike frame used to cost the CPU / GPU overlap for the rest of
+    // the session: back on after a run of frames whose commands fit well in a pipeline half
+    // (60%), waiting twice as long after each overflow; stays off without the linear memory
+    const u32 half_bytes = (u32)ctr_gpu_cmd_buffer_kb() * 1024 / 2;
+    m_pipeline_calm = gs.cmd_bytes < half_bytes * 6 / 10 ? m_pipeline_calm + 1 : 0;
+    if (m_pipeline_calm >= m_pipeline_retry_frames) {
+      m_pipeline_calm = 0;
+      if (ctr_gpu_set_pipeline(1)) {
+        m_pipeline_off = false;
+        lg::info("[ctr] pipeline: on again ({} frames fit in half the command buffer)",
+                 m_pipeline_retry_frames);
+      }
+    }
   }
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
@@ -779,13 +849,14 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       lg::info(
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
-          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands ({:.1f} KB left out by "
-          "cmd_dedup); vertex buffer peak {} of {} KB{}{}{}",
+          "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands (peak {:.0f} of {} KB; {:.1f} KB left "
+          "out by cmd_dedup); vertex buffer peak {} of {} KB{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
           m_timing.triangles / n, m_timing.draws / n, m_timing.tex_binds / n,
-          m_timing.cmd_kb / n, m_timing.dedup_kb / n, m_timing.vbuf_peak / 1024,
+          m_timing.cmd_kb / n, m_timing.cmd_kb_peak, ctr_gpu_cmd_buffer_kb(), m_timing.dedup_kb / n,
+          m_timing.vbuf_peak / 1024,
           m_timing.vbuf_size / 1024,
           m_timing.vbuf_dropped
               ? fmt::format(", {} draws DROPPED (vertex buffer full)", m_timing.vbuf_dropped)
@@ -888,11 +959,12 @@ void CtrRenderer::prepare_frame(const void* ee_mem, u32 chain_offset) {
   rs.frame_idx = m_rs.frame_idx;  // (AI-assisted, keira3) the frame drawn next (Keira's pose)
   const u32 base = chain_offset + 16;  // see dispatch_buckets_jak1
   for (auto& [id, merc] : m_merc) {
-    rs.next_bucket = base + 16 * (id + 1);
-    DmaFollower dma(ee_mem, base + 16 * id);
+    rs.next_bucket = bucket_tag(chain_offset, id + 1);
+    DmaFollower dma(ee_mem, bucket_tag(chain_offset, id));
     merc->snapshot_bones(dma, rs);
   }
   prepare_sprites(ee_mem, chain_offset);
+  prepare_textures(ee_mem, chain_offset);
 }
 
 void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
@@ -903,11 +975,24 @@ void CtrRenderer::prepare_sprites(const void* ee_mem, u32 chain_offset) {
   CtrRenderState rs;
   rs.ee_mem = (const u8*)ee_mem;
   rs.offset_of_s7 = s7.offset;
-  const u32 base = chain_offset + 16;
-  const int id = (int)jak1::BucketId::SPRITE;
-  rs.next_bucket = base + 16 * (id + 1);
-  DmaFollower dma(ee_mem, base + 16 * id);
+  const int id = m_sprite_bucket;
+  rs.next_bucket = bucket_tag(chain_offset, id + 1);
+  DmaFollower dma(ee_mem, bucket_tag(chain_offset, id));
   m_sprite->snapshot(dma, rs);
+}
+
+#if defined(__3DS__) && !defined(OG3DS_GAME_JAK2)
+// (AI-assisted) the Jak 1 3DS build has no Jak II tables (CtrRendererJak2.cpp)
+void CtrRenderer::prepare_textures(const void*, u32) {}
+void CtrRenderer::tex_frame_done_jak2() {}
+bool ctr_jak2_frame_copies_screen(const void*, u32, u32) {
+  return false;
+}
+#endif
+
+u32 CtrRenderer::bucket_tag(u32 chain_offset, int id) const {
+  // Jak 1: a call to the default registers first (see dispatch_buckets_jak1); Jak II: none
+  return chain_offset + (m_jak2 ? 0 : 16) + 16 * id;
 }
 
 void CtrRenderer::hw_counters_frame() {
@@ -1139,41 +1224,8 @@ void CtrRenderer::profile_frame(double gpu_draw_ms) {
 // loads. Drawn last, a black screen-sized quad with alpha 1 - alp.
 void CtrRenderer::draw_pmode_fade() {
   float alp = std::clamp(g_pmode_alp.load(std::memory_order_relaxed), 0.f, 1.f);
-  // (AI-assisted, title3) a screen coming out of black (a level start, a continue, loading a save:
-  // the game fades in from its blackout) stays black while a level shown within the last 3 s, or
-  // after a camera cut, still has tie LOD groups in view drawn with their far version because
-  // their near chunks are being read (CtrLevels::note_late_in_view): its first visible frame is
-  // final, not the far versions switching to the near ones on screen. At most kMaxHoldMs.
   {
-    constexpr double kMaxHoldMs = 1500.0;
-    bool shown_or_cut = false;
-    const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
-    const double now = ctr_gpu_time_ms();
-    if (!m_hold_black && m_shown_alp < 0.01f && alp >= 0.01f && late > 0 && shown_or_cut) {
-      m_hold_black = true;
-      m_hold_t0 = now;
-      m_hold_groups = 0;
-      m_hold_frames = 0;
-    }
-    if (m_hold_black) {
-      m_hold_groups = std::max(m_hold_groups, late);
-      if (late == 0 || now - m_hold_t0 >= kMaxHoldMs) {
-        m_hold_black = false;
-        m_hold_ramp = true;
-        lg::info("[ctr] screen kept black {:.0f} ms ({} frames) for near chunks in view{} (at most {} "
-                 "tie LOD groups drawn far)",
-                 now - m_hold_t0, m_hold_frames, late ? ", given up" : "", m_hold_groups);
-      } else {
-        m_hold_frames++;
-        alp = 0.f;
-      }
-    }
-    if (m_hold_ramp && !m_hold_black) {
-      const float game_alp = alp;
-      alp = std::min(alp, m_shown_alp + 0.125f);
-      m_hold_ramp = alp < game_alp;
-    }
-    m_shown_alp = alp;
+    alp = hold_black(alp);  // (AI-assisted, j2intro; Jak 1: title3)
   }
   if (alp >= 0.999f) {
     return;
@@ -1197,6 +1249,57 @@ void CtrRenderer::draw_pmode_fade() {
     v[i].a = a;
   }
   ctr_gpu_draw(&st, v, 6);
+}
+
+// (AI-assisted, j2intro; Jak 1's title3 does the same) Jak II: a screen coming out of black (the
+// game's blackout before the title intro, a continue, a level start) stays black while, within 3 s
+// of a level shown again (dormant) or of a camera cut, something in view is missing: tie LOD groups
+// drawn far for want of their near chunks, dormant tie chunks not read back yet
+// (CtrLevels::note_late_in_view). Its first visible frame is complete, not filling in on screen.
+// (AI-assisted, j2pop) Jak II: while what is missing gets fewer (a new least count within
+// kStallMs, 2.5 s: in Azahar a continue to the slums gave up after 1.5 s without one), at most
+// kMaxHoldMs; then a fade in over 8 frames. The game runs on (the intro's scene clock
+// follows its voice stream): only the picture waits. (Was at most 1.5 s: HW Oct 25, the title
+// intro gave up with 102 tie LOD groups drawn far and a continue to the slums with 200, read back
+// over the next seconds in view: the user's "rocks pop in".)
+float CtrRenderer::hold_black(float alp) {
+  // (Jak 1: 1.5 s, as before)
+  const double kMaxHoldMs = m_jak2 ? 6000.0 : 1500.0, kStallMs = m_jak2 ? 2500.0 : 1500.0;
+  bool shown_or_cut = false;
+  const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
+  const double now = ctr_gpu_time_ms();
+  if (!m_hold_black && m_shown_alp < 0.01f && alp >= 0.01f && late > 0 && shown_or_cut) {
+    m_hold_black = true;
+    m_hold_t0 = now;
+    m_hold_late = 0;
+    m_hold_frames = 0;
+    m_hold_least = late;
+    m_hold_progress_t = now;
+  }
+  if (m_hold_black) {
+    m_hold_late = std::max(m_hold_late, late);
+    if (late < m_hold_least) {
+      m_hold_least = late;
+      m_hold_progress_t = now;
+    }
+    if (late == 0 || now - m_hold_t0 >= kMaxHoldMs || now - m_hold_progress_t >= kStallMs) {
+      m_hold_black = false;
+      m_hold_ramp = true;
+      lg::info("[ctr] screen kept black {:.0f} ms ({} frames) for what is missing in view{} (at most "
+               "{} tie LOD groups drawn far / dormant chunks not back)",
+               now - m_hold_t0, m_hold_frames, late ? ", given up" : "", m_hold_late);
+    } else {
+      m_hold_frames++;
+      alp = 0.f;
+    }
+  }
+  if (m_hold_ramp && !m_hold_black) {
+    const float game_alp = alp;
+    alp = std::min(alp, m_shown_alp + 0.125f);
+    m_hold_ramp = alp < game_alp;
+  }
+  m_shown_alp = alp;
+  return alp;
 }
 
 void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
@@ -1226,6 +1329,30 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   // (AI-assisted) the visibility strings come with bucket tfrag-0 every frame
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
+  run_buckets(dma, (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0, 0);
+}
+
+void CtrRenderer::dispatch_buckets_jak2(DmaFollower dma) {
+  // (AI-assisted) as OpenGLRenderer::dispatch_buckets_jak2: bucket 0 is the start of the chain
+  m_rs.buckets_base = dma.current_tag_offset();
+  m_rs.next_bucket = m_rs.buckets_base + 16;
+  m_rs.default_regs_buffer = 0xffffffff;  // none
+  if (m_bucket_ms.size() != m_buckets.size()) {
+    m_bucket_ms.assign(m_buckets.size(), 0.0);
+  }
+  m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
+  m_rs.vis_packets = 0;
+  const bool ok = run_buckets(dma, (size_t)jak2::BucketId::TEX_L0_ALPHA, 1);
+  tex_frame_done_jak2();
+  if (!ok) {
+    return;
+  }
+  if (m_rs.call_vif_callback) {
+    vif_interrupt_callback(m_buckets.size());
+  }
+}
+
+bool CtrRenderer::run_buckets(DmaFollower& dma, size_t sky_hook_bucket, int callback_offset) {
   const bool profiling = m_profile_mode > 0;
   if (m_bucket_phase.size() != m_buckets.size()) {
     // (AI-assisted, gpu-rt) gpu_breakdown: the GPU phase of each bucket renderer (-1: keeps the
@@ -1249,7 +1376,7 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
     if (m_bucket_phase[bucket_id] >= 0) {
       ctr_gpu_phase(m_bucket_phase[bucket_id]);  // (AI-assisted, gpu-rt) gpu_breakdown
     }
-    if (bucket_id >= (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0) {
+    if (bucket_id >= sky_hook_bucket) {
       // (AI-assisted) sky_last: at the latest before the translucent buckets (and the sky blend
       // in tfrag-trans, which starts this frame's sky textures)
       ctr_gpu_run_sky_hook();
@@ -1261,7 +1388,15 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
     // (AI-assisted) shadows switched off by gpu_profile = ab: the shadow bucket left out
     const bool ab_skip = ctr_settings().shadows != CtrSettings::ShadowMode::Full &&
                          m_buckets[bucket_id]->name() == "shadow";
-    if ((profiling && profile_skips(m_buckets[bucket_id]->name())) || ab_skip) {
+#ifndef __3DS__
+    // (AI-assisted) host diagnosis: env CTR_SKIP_BUCKETS=",id,id," leaves those buckets out
+    static const char* skip_ids = getenv("CTR_SKIP_BUCKETS");
+    const bool env_skip =
+        skip_ids && strstr(skip_ids, fmt::format(",{},", bucket_id).c_str()) != nullptr;
+#else
+    const bool env_skip = false;
+#endif
+    if ((profiling && profile_skips(m_buckets[bucket_id]->name())) || ab_skip || env_skip) {
       while (dma.current_tag_offset() != m_rs.next_bucket) {
         dma.read_and_advance();
       }
@@ -1278,13 +1413,14 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
     if (dma.current_tag_offset() != m_rs.next_bucket) {
       lg::error("[ctr] bucket {} ({}) did not end at the next bucket", bucket_id,
                 m_buckets[bucket_id]->name());
-      return;
+      return false;
     }
     m_rs.next_bucket += 16;
     if (m_rs.call_vif_callback) {
-      vif_interrupt_callback(bucket_id);
+      vif_interrupt_callback(bucket_id + callback_offset);
     }
   }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1370,6 +1506,11 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
+  // (AI-assisted, j2-mem2) Jak II: impostors off unless config.ini says (CtrSettings.h)
+  if (g_game_version == GameVersion::Jak2 && !ctr_settings().impostors_set) {
+    ctr_settings_ab().impostors = false;  // (before any frame: see ctr_settings_ab)
+    lg::info("[ctr] Jak II: impostors off (config.ini impostors = on for them)");
+  }
   // (AI-assisted) impostors: their texture in VRAM before the level texture pools fill it
   if (ctr_settings().impostors) {
     ctr_impostors().reserve();
@@ -1426,12 +1567,24 @@ void ctr_exit() {
   ctr_gpu_exit();
 }
 
+// (AI-assisted) 60 Hz vblanks between the last two ctr_vsync returns, 1 to 4: how long the frame
+// the game just finished was on screen. Jak II's pc-maybe-vsync (TARGET_3DS) gives it to the game
+// as its dog-ratio, the PS2's lag ratio, so a 30 fps frame (2 vblanks) moves its clocks by 1/30 s.
+static u32 g_frame_vblanks = 1;
+static double g_last_vsync_ms = 0;
+
 u32 ctr_vsync() {
   if (MasterExit == RuntimeExitStatus::RUNNING) {
     const double t0 = ctr_gpu_time_ms();
     // config.ini fps_cap: 30 = two vblanks per frame at least, 60 = one
     ctr_gpu_wait_vblank(ctr_settings().fps_cap <= 30 ? 2 : 1);
-    g_ee.vsync_ms += ctr_gpu_time_ms() - t0;
+    const double t1 = ctr_gpu_time_ms();
+    g_ee.vsync_ms += t1 - t0;
+    if (g_last_vsync_ms != 0) {
+      const double vblanks = (t1 - g_last_vsync_ms) * (59.8261 / 1000.0);
+      g_frame_vblanks = (u32)std::clamp(std::lround(vblanks), 1L, 4L);
+    }
+    g_last_vsync_ms = t1;
   }
   g_frame_idx++;
   return g_frame_idx & 1;
@@ -1494,7 +1647,8 @@ void ctr_send_chain(const void* data, u32 offset) {
   g_ee.last_send = now;
   ctr_gpu_note_release();
   float game_cam[3];
-  const bool have_game_cam = game_camera_trans(game_cam);
+  // (title3, Jak 1 only: *math-camera* through the Jak 1 kernel's symbol table)
+  const bool have_game_cam = g_game_version == GameVersion::Jak1 && game_camera_trans(game_cam);
   if (g_async) {
     wait_render_idle();
     if (have_game_cam) {
@@ -1511,6 +1665,7 @@ void ctr_send_chain(const void* data, u32 offset) {
     // (AI-assisted) host (synchronous): the sprites from the snapshot too, so the host runs check
     // it (CtrSpriteRenderer::snap_data compares it with game memory)
     g_ctr->prepare_sprites(data, offset);
+    g_ctr->prepare_textures(data, offset);  // (AI-assisted) Jak II
 #endif
     if (have_game_cam) {
       g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3)
@@ -1601,6 +1756,11 @@ void ctr_set_pmode_alp(float alp) {
 // (AI-assisted) The game waits for this before a level starts (level-update-after-load, TARGET_3DS):
 // the level's .c3l is loaded, so the player doesn't start in a level with nothing drawn yet. Gives
 // up after kMaxWaitMs per level (then the level appears when its load is done, as before).
+// (AI-assisted) the 60 Hz vblanks the last frame took (g_frame_vblanks; Jak II's kmachine.cpp)
+u32 ctr_frame_vblanks() {
+  return g_frame_vblanks;
+}
+
 bool ctr_level_ready(const char* name) {
   constexpr double kMaxWaitMs = 20000.0;
   if (!name || !g_ctr_ready) {
@@ -1622,6 +1782,14 @@ bool ctr_level_ready(const char* name) {
     wait_render_idle();
     g_ctr->levels().service();
   }
+#ifndef __3DS__
+  if (CtrLevels::load_sim_on()) {
+    // (AI-assisted, j2intro) host load model: no loader thread, and the game may wait here without
+    // drawing frames
+    wait_render_idle();
+    g_ctr->levels().host_service();
+  }
+#endif
   if (g_ctr->levels().ready(n)) {
     // (AI-assisted) how long the game waited for the .c3l after its DGO was in
     auto w = waiting_since.find(n);
@@ -1669,6 +1837,15 @@ void ctr_level_dgo_started(const char* dgo_name) {
       {"TSZ", "test-zone"},
   };
   if (!dgo_name || !g_ctr_ready) {
+    return;
+  }
+  if (g_is_jak2) {
+    // (AI-assisted, j2intro) Jak II's DGO names (CtrLevel.cpp's table). Its level-update-after-load
+    // waits for the .c3l (TARGET_3DS) and reports a level to set_levels only once it's loaded:
+    // without this the .c3l of a level would only be asked for by the wait's timeout.
+    if (const char* level = ctr_jak2_level_for_dgo(dgo_name)) {
+      g_ctr->levels().prefetch(level);
+    }
     return;
   }
   // the game asks for "vi1.DGO"

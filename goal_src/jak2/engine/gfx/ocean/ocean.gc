@@ -1104,6 +1104,136 @@
 
 ;; ERROR: Unsupported inline assembly instruction kind - [psrah a2, a2, 8]
 
+;; og:preserve-this (AI-assisted) 3DS: the packet CtrOceanRenderer reads (game/graphics/ctr/CtrOcean.cpp
+;; Packet; goal_src/jak1/engine/gfx/ocean/ocean.gc draw-ocean-3ds): the map's addresses, this frame's
+;; 32 x 32 wave heights, the height and the camera, in the ocean-near bucket.
+(#when TARGET_3DS
+;; (AI-assisted, j2water) a texture's tex0 (as adgif-shader<-texture-simple! makes it), 0 for none
+(defun ocean-3ds-tex0 ((tex texture))
+  (if tex
+      (let ((sh (new 'stack 'adgif-shader)))
+        (adgif-shader<-texture-simple! sh tex)
+        (the-as uint (-> sh tex0)))
+      (the-as uint 0)))
+
+;; (AI-assisted, j2water) every second frame: the env map the PS2 renders for the ocean's sky
+;; reflection (ocean-method-89: the sky color, the sun and moon glows, the haze and the lit
+;; clouds, drawn from above, then warped around), its GS packets in the ocean-mid-far bucket as on
+;; the PS2. The 3DS renderer draws them into a render target (CtrOceanEnvJak2, CtrOcean.cpp) and
+;; does the warp itself; the frames between keep the last one.
+(define *ocean-3ds-env-count* 0)
+(defun ocean-3ds-envmap ((this ocean))
+  (set! *ocean-3ds-env-count* (+ *ocean-3ds-env-count* 1))
+  (when (zero? (logand *ocean-3ds-env-count* 1))
+    (mem-copy! (the-as pointer (-> this cloud-lights)) (the-as pointer (-> *sky-work* cloud-lights)) 156)
+    (let* ((buf (-> *display* frames (-> *display* on-screen) global-buf))
+           (start (-> buf base)))
+      (ocean-method-89 this buf)
+      (let ((end (-> buf base)))
+        (let ((next (the-as dma-packet (-> buf base))))
+          (set! (-> next dma) (new 'static 'dma-tag :id (dma-tag-id next)))
+          (set! (-> next vif0) (new 'static 'vif-tag))
+          (set! (-> next vif1) (new 'static 'vif-tag))
+          (set! (-> buf base) (the pointer (&+ next 16))))
+        (dma-bucket-insert-tag (-> *display* frames (-> *display* on-screen) bucket-group)
+                               (bucket-id ocean-mid-far)
+                               start
+                               (the-as (pointer dma-tag) end)))))
+  (none))
+
+(defun ocean-3ds-packet ((this ocean))
+  (let* ((buf (-> *display* frames (-> *display* on-screen) global-buf))
+         (start (-> buf base)))
+    (let ((packet (the-as dma-packet (-> buf base))))
+      (set! (-> packet dma) (new 'static 'dma-tag :id (dma-tag-id cnt) :qwc 34))
+      (set! (-> packet vif0) (new 'static 'vif-tag))
+      (set! (-> packet vif1) (new 'static 'vif-tag :cmd (vif-cmd pc-port)))
+      (set! (-> buf base) (the pointer (&+ packet 16))))
+    (let ((words (the-as (pointer uint32) (-> buf base)))
+          (quads (the-as (pointer uint128) (-> buf base))))
+      (set! (-> words 0) #x334e434f) ;; "OCN3"
+      (set! (-> words 1) (the-as uint (-> this heights)))
+      (set! (-> words 2) (the-as uint (-> this ocean-colors)))
+      (set! (-> words 3) (the-as uint (if (-> this mid-off) 1 0)))
+      (set! (-> words 4) (the-as uint (-> this ocean-mid-indices)))
+      (set! (-> words 5) (the-as uint (-> this ocean-mid-masks data)))
+      (set! (-> words 6) (the-as uint (-> this ocean-trans-indices)))
+      (set! (-> words 7) 0)
+      (set! (-> quads 2) (-> this start-corner quad))
+      (set! (-> quads 3) (-> this far-color quad))
+      (set! (-> quads 4) (-> *math-camera* plane 0 quad))
+      (set! (-> quads 5) (-> *math-camera* plane 1 quad))
+      (set! (-> quads 6) (-> *math-camera* plane 2 quad))
+      (set! (-> quads 7) (-> *math-camera* plane 3 quad))
+      ;; the sky's light on the water (add-colors! as the PS2 ocean's vertices get it), toward
+      ;; the camera's view: the renderer tints the water with it (w = 1.0: present)
+      (let ((vtx (new 'stack-no-clear 'ocean-vertex))
+            (col (-> (the (inline-array vector) quads) 8)))
+        (set! (-> vtx pos quad) (-> *math-camera* inv-camera-rot vector 2 quad))
+        (add-colors! this col vtx)
+        (set! (-> col w) 1.0))
+      ;; (AI-assisted, j2water) the sky reflection (the PS2 ocean's env map pass, as
+      ;; ocean-mid-setup-constants sets it up). quad 9: env-color (128 x ocean-alpha; without the
+      ;; sky the blue halved), w = 1.0: the env map ocean-3ds-envmap draws (ocean-mid-far bucket),
+      ;; 0.0: the environment-ocean texture. quad 10: environment-ocean's and
+      ;; environment-ocean-alphamod's tex0 (0: not loaded). quad 11: constants2 (the view's heading
+      ;; and pitch as env map coordinates), z: ocean-alpha.
+      (let ((ec (-> (the (inline-array vector) quads) 9))
+            (f (* 128.0 (-> *time-of-day-context* ocean-alpha))))
+        (set! (-> ec x) f)
+        (set! (-> ec y) f)
+        (set! (-> ec z) (if (-> *time-of-day-context* sky) f (* 0.5 f)))
+        (set! (-> ec w) (if (-> *time-of-day-context* sky) 1.0 0.0)))
+      (let ((t64 (the-as (pointer uint64) (-> (the (inline-array vector) quads) 10))))
+        (set! (-> t64 0) (ocean-3ds-tex0 (get-texture environment-ocean environment-generic)))
+        (set! (-> t64 1) (ocean-3ds-tex0 (get-texture environment-ocean-alphamod sky-textures))))
+      (let ((fwd (-> (matrix-local->world #f #f) vector 2))
+            (c2 (-> (the (inline-array vector) quads) 11)))
+        (set! (-> c2 x) (- 1.5 (* 0.000015258789 (atan (-> fwd x) (-> fwd z)))))
+        (set! (-> c2 y) (+ 0.5 (/ (-> fwd y) -2)))
+        (set! (-> c2 z) (-> *time-of-day-context* ocean-alpha))
+        (set! (-> c2 w) 0.0))
+      (set! (-> quads 12) (-> *math-camera* camera-temp vector 0 quad))
+      (set! (-> quads 13) (-> *math-camera* camera-temp vector 1 quad))
+      (set! (-> quads 14) (-> *math-camera* camera-temp vector 2 quad))
+      (set! (-> quads 15) (-> *math-camera* camera-temp vector 3 quad))
+      (set! (-> quads 16) (-> *math-camera* hvdf-off quad))
+      (let ((fog (-> (the (inline-array vector) quads) 17)))
+        (set! (-> fog x) (-> *math-camera* pfog0))
+        (set! (-> fog y) (-> *math-camera* fog-min))
+        (set! (-> fog z) (-> *math-camera* fog-max))
+        (set! (-> fog w) 0.0))
+      (set! (-> quads 18) (-> (math-camera-pos) quad))
+      (set! (-> quads 19) (-> *math-camera* camera-rot vector 0 quad))
+      (set! (-> quads 20) (-> *math-camera* camera-rot vector 1 quad))
+      (set! (-> quads 21) (-> *math-camera* camera-rot vector 2 quad))
+      (set! (-> quads 22) (-> *math-camera* camera-rot vector 3 quad))
+      (set! (-> quads 23) (-> *math-camera* perspective vector 0 quad))
+      (set! (-> quads 24) (-> *math-camera* perspective vector 1 quad))
+      (set! (-> quads 25) (-> *math-camera* perspective vector 2 quad))
+      (set! (-> quads 26) (-> *math-camera* perspective vector 3 quad))
+      ;; (AI-assisted, j2water) quads 27-33: the lights of the wave texture (ocean-generate-verts,
+      ;; ocean-vu0.gc's mips2c: sewerb's light group when that level is loaded, else the time of
+      ;; day's first), as vu-lights
+      (let ((lights (the-as vu-lights (-> (the (inline-array vector) quads) 27)))
+            (sewer (level-get *level* 'sewerb)))
+        (if sewer
+            (vu-lights<-light-group! lights (the-as light-group (&+ (the-as pointer sewer) 716)))
+            (vu-lights<-light-group! lights (-> *time-of-day-context* light-group 0)))))
+    (&+! (-> buf base) (* 16 34))
+    (let ((end (-> buf base)))
+      (let ((next (the-as dma-packet (-> buf base))))
+        (set! (-> next dma) (new 'static 'dma-tag :id (dma-tag-id next)))
+        (set! (-> next vif0) (new 'static 'vif-tag))
+        (set! (-> next vif1) (new 'static 'vif-tag))
+        (set! (-> buf base) (the pointer (&+ next 16))))
+      (dma-bucket-insert-tag (-> *display* frames (-> *display* on-screen) bucket-group)
+                             (bucket-id ocean-near)
+                             start
+                             (the-as (pointer dma-tag) end))))
+  (none))
+)
+
 (defmethod update-map ((this ocean))
   (set! (-> this heights) #f)
   (set! (-> this verts) #f)
@@ -1154,7 +1284,18 @@
       (&+! (-> s5-1 base) #x8000)
       )
     )
-  (when (not (or (-> this off) (-> *blit-displays-work* menu-mode)))
+  ;; og:preserve-this (AI-assisted) 3DS: the 3DS renderer draws the ocean from the map and the wave
+  ;; heights (CtrOcean.cpp, as Jak 1's draw-ocean-3ds): one packet instead of the PS2's ocean DMA
+  ;; (the vertices, the wave texture, the far, mid and near ocean). The heights above stay (get-height).
+  (#when TARGET_3DS
+    (when (and (not (or (-> this off) (-> *blit-displays-work* menu-mode)))
+               (logtest? (-> *display* vu1-enable-user) (vu1-renderer-mask ocean)))
+      (mem-copy! (the-as pointer (-> this haze-lights)) (the-as pointer (-> *sky-work* haze-lights)) 124)
+      ;; (AI-assisted, j2water) the sky reflection's env map, as the PS2 draws it
+      (if (-> *time-of-day-context* sky)
+          (ocean-3ds-envmap this))
+      (ocean-3ds-packet this)))
+  (when (and (#if TARGET_3DS #f #t) (not (or (-> this off) (-> *blit-displays-work* menu-mode))))
     (when (logtest? (-> *display* vu1-enable-user) (vu1-renderer-mask ocean))
       (mem-copy! (the-as pointer (-> this cloud-lights)) (the-as pointer (-> *sky-work* cloud-lights)) 156)
       (mem-copy! (the-as pointer (-> this haze-lights)) (the-as pointer (-> *sky-work* haze-lights)) 124)

@@ -449,9 +449,14 @@
 
 (defmethod led-enabled? ((obj pc-settings-jak2))
   "should the controller led be set?"
-  (or (-> obj controller-led-hp?)
-      (-> obj controller-led-status?)
-      ))
+  ;; (AI-assisted) the 3DS has no controller LED. update-led searches the process tree three times
+  ;; per frame (0.7% of a Haven City frame in C mode on the Mac), and its result is only the LED
+  ;; color, so it is off there.
+  (#if TARGET_3DS
+    #f
+    (or (-> obj controller-led-hp?)
+        (-> obj controller-led-status?)
+        )))
 
 (defmethod update-led ((obj pc-settings-jak2))
   "set the controller led color by modifying the controller-led-color vector"

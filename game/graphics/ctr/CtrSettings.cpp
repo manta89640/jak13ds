@@ -124,6 +124,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.envmap = parse_bool(v);
     } else if (key == "impostors") {
       s.impostors = parse_bool(v);  // (AI-assisted)
+      s.impostors_set = true;       // (AI-assisted, j2-mem2)
     } else if (key == "impostor_distance") {
       s.impostor_distance = std::clamp(f, 30.f, 3000.f);  // (AI-assisted)
     } else if (key == "impostor_error") {
@@ -247,6 +248,9 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.streaming = parse_bool(v);  // (AI-assisted, streaming) c3l v19
     } else if (key == "stream_kb") {
       s.stream_kb = std::clamp((int)f, 512, 16384);  // (AI-assisted, streaming)
+      s.stream_kb_set = true;                         // (AI-assisted, j2-mem)
+    } else if (key == "dormant_levels") {
+      s.dormant_levels = parse_bool(v);  // (AI-assisted, j2-mem) Jak II
     } else if (key == "stream_debug") {
       s.stream_debug = parse_bool(v);  // (AI-assisted, streaming)
     } else if (key == "stream_reserve_kb") {

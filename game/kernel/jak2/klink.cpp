@@ -5,6 +5,7 @@
 #include "common/symbols.h"
 
 #include "game/kernel/common/fileio.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/klink.h"
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kprint.h"
@@ -193,6 +194,38 @@ uint32_t symlink_v3(Ptr<uint8_t> link, Ptr<uint8_t> data, bool patch_mov32) {
 
   return seek;
 }
+/*!
+ * (AI-assisted) Symbol resolver for modules compiled to C: st-relative offset of the interned
+ * symbol (the symbol's address, like the native symbol links).
+ */
+s32 goalc_resolve_symbol(const char* name) {
+  return jak2::intern_from_c(name).offset - s7.offset;
+}
+
+/*!
+ * (AI-assisted) Link a LINK_C_MODULE entry: find the module and patch the function stubs of this
+ * segment.
+ */
+uint32_t c_module_link_v3(Ptr<u8> link,
+                          ObjectFileHeader* ofh,
+                          int current_seg,
+                          const char* name,
+                          Ptr<kheapinfo> heap) {
+  u32 seg_bases[3] = {0, 0, 0};
+  for (u32 i = 0; i < ofh->segment_count && i < 3; i++) {
+    seg_bases[i] = ofh->code_infos[i].offset;
+  }
+  // (AI-assisted) the heap tells the runtime when earlier copies of this object are gone
+  GoalcLinkHeap link_heap;
+  if (heap.offset) {
+    link_heap.key = heap.offset;
+    link_heap.base = heap->base.offset;
+    link_heap.end = heap->top_base.offset;
+  }
+  return goalc_link_module_entry(link.c(), seg_bases,
+                                 Ptr<u8>(ofh->code_infos[current_seg].offset).c(),
+                                 goalc_resolve_symbol, name, link_heap);
+}
 }  // namespace
 
 /*!
@@ -311,6 +344,10 @@ uint32_t link_control::jak2_work_v3() {
             case LINK_PTR:
               lp = lp + 1;
               lp = lp + ptr_link_v3(lp, ofh, m_segment_process);
+              break;
+            case LINK_C_MODULE:
+              lp = lp + 1;
+              lp = lp + c_module_link_v3(lp, ofh, m_segment_process, m_object_name, m_heap);
               break;
             default:
               ASSERT_MSG(false, fmt::format("unknown link table thing {}", *lp));
@@ -580,7 +617,7 @@ void link_control::jak2_finish(bool jump_from_c_to_goal) {
     // execute top level!
     if (m_entry.offset && (m_flags & LINK_FLAG_EXECUTE)) {
       if (jump_from_c_to_goal) {
-        u64 goal_stack = u64(g_ee_main_mem) + EE_MAIN_MEM_SIZE - GOAL_STACK_TOP_OFFSET;
+        u64 goal_stack = u64(g_ee_main_mem) + GOAL_KERNEL_STACK_TOP - GOAL_STACK_TOP_OFFSET;
         call_goal_on_stack(m_entry.cast<Function>(), goal_stack, s7.offset, g_ee_main_mem);
       } else {
         call_goal(m_entry.cast<Function>(), 0, 0, 0, s7.offset, g_ee_main_mem);

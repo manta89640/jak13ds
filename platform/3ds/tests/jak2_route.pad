@@ -1,0 +1,68 @@
+# (AI-assisted) Jak II: tour of Haven City districts plus one non-city level (the sewer), with a
+# memory report at each stop. docs/3ds-port/jak2_status.md "Scripted route and memory survey".
+# Each stop: continue (a new game at that continue point), wait until Jak stands, 400 frames for
+# traffic to spawn, memory report, walk forward 200 frames, log the position.
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1003 log stop: ctysluma-start (slums)
+1004 pos *target*
+1400 print *pad-script-mem*
+1401 ly=0
+1600 -
+1601 pos *target*
+1700 continue ctyport-start
+1701 -
+1702 wait *target* target-stance
+1703 log stop: ctyport-start (port)
+1704 pos *target*
+2100 print *pad-script-mem*
+2101 ly=0
+2300 -
+2301 pos *target*
+2400 continue ctymarkb-burning-bush
+2401 -
+2402 wait *target* target-stance
+2403 log stop: ctymarkb-burning-bush (market)
+2404 pos *target*
+2800 print *pad-script-mem*
+2801 ly=0
+3000 -
+3001 pos *target*
+3100 continue ctygenb-start
+3101 -
+3102 wait *target* target-stance
+3103 log stop: ctygenb-start (main town)
+3104 pos *target*
+3500 print *pad-script-mem*
+3501 ly=0
+3700 -
+3701 pos *target*
+3800 continue ctyinda-start
+3801 -
+3802 wait *target* target-stance
+3803 log stop: ctyinda-start (industrial)
+3804 pos *target*
+4200 print *pad-script-mem*
+4201 ly=0
+4400 -
+4401 pos *target*
+4500 continue ctyfarma-start
+4501 -
+4502 wait *target* target-stance
+4503 log stop: ctyfarma-start (farms)
+4504 pos *target*
+4900 print *pad-script-mem*
+4901 ly=0
+5100 -
+5101 pos *target*
+5200 continue sewer-start
+5201 -
+5202 wait *target* target-stance
+5203 log stop: sewer-start (non-city level)
+5204 pos *target*
+5600 print *pad-script-mem*
+5601 ly=0
+5800 -
+5801 pos *target*
+5900 exit

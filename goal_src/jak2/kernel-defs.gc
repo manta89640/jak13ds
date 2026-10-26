@@ -178,7 +178,7 @@
 (define-extern __send-gfx-dma-chain (function object object none))
 (define-extern __pc-texture-upload-now (function object object none))
 (define-extern __pc-texture-relocate (function object object object none))
-(define-extern __pc-get-mips2c (function string function))
+(define-extern __pc-get-mips2c (function string int function))
 (define-extern __pc-set-levels (function (pointer string) none))
 (define-extern __pc-set-active-levels (function (pointer string) none))
 (define-extern __pc-get-tex-remap (function int int int))
@@ -386,7 +386,7 @@
 (define-extern mc-check-result (function mc-status-code))
 ;; mc-makefile
 
-(define-extern __pc-get-mips2c (function string function))
+(define-extern __pc-get-mips2c (function string int function))
 
 (define-extern dma-sync (function pointer int int int))
 
@@ -406,6 +406,8 @@
   (instant 2)
   )
 (define-extern pc-prof (function string pc-prof-event none))
+;; (AI-assisted) set by the C kernel: #t when pc-prof events are wanted (see with-pc-profiler)
+(define-extern *pc-prof-on* symbol)
 
 (define-extern *pc-settings-folder* string)
 (define-extern *pc-settings-built-sha* string)

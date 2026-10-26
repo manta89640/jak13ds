@@ -62,6 +62,9 @@ constexpr u32 GOALC_ALL_WIDE = 0xff;
 //! Get an id for a host function with the goalc_fnx signature (it reads the arguments itself). The
 //! same function always gets the same id.
 u32 goalc_fn_id_for_host(void* fn);
+//! (AI-assisted) OPENGOAL_C_ABI_CHECK=1: kernel functions then go through the adapter thunks,
+//! which check their wide arguments (not through direct entries, see kernel_function.h).
+bool goalc_abi_check_enabled();
 //! Get an id for a host function with the goalc_fn8 signature (all arguments uint64_t).
 u32 goalc_fn_id_for_fn8(void* fn, u32 wide_mask);
 //! Get an id for a host function called through an adapter. Deduplicated on (adapter, fn, extra,
@@ -113,11 +116,23 @@ using goalc_sym_resolver = s32 (*)(const char* name);
  * seg_bases are the GOAL addresses of the 3 segments (0 if absent), seg_data is the host address
  * of the segment this link table belongs to. Returns the number of bytes consumed.
  */
+//! (AI-assisted) The heap an object file is linked into: key = GOAL address of its kheapinfo,
+//! [base, end) its memory. Tells when the copies linked there before are gone (key 0: unknown).
+struct GoalcLinkHeap {
+  u32 key = 0;
+  u32 base = 0;
+  u32 end = 0;
+};
+
 u32 goalc_link_module_entry(const u8* link,
                             const u32 seg_bases[3],
                             u8* seg_data,
                             goalc_sym_resolver resolver,
-                            const char* object_name);
+                            const char* object_name,
+                            const GoalcLinkHeap& heap = GoalcLinkHeap());
+
+//! (AI-assisted) How many instances of a module have been linked since the last init (tests).
+u32 goalc_module_instance_count(u64 hash);
 
 // ---------------------------------------------------------------------------
 // Calling GOAL

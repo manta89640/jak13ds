@@ -346,7 +346,7 @@
          )
      )
     (('hit 'hit-flinch 'hit-knocked)
-     (speech-control-method-13 *speech-control* (the-as handle this))
+     (speech-control-method-13 *speech-control* this)
      (if (logtest? (-> this flags) (citizen-flag female))
          (speech-control-method-12 *speech-control* this (speech-type speech-type-27))
          (speech-control-method-12 *speech-control* this (speech-type speech-type-19))

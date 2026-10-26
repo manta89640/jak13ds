@@ -25,6 +25,15 @@ target_sources(og3ds_runtime PRIVATE
   ${OG_ROOT}/game/graphics/ctr/CtrVram.cpp
   ${OG_ROOT}/game/graphics/ctr/c3l_reader.cpp
 )
+# (AI-assisted) Jak II's bucket tables (CtrRendererJak2.h): only in the Jak II build
+if(OG3DS_GAME STREQUAL "jak2")
+  target_sources(og3ds_runtime PRIVATE
+    ${OG_ROOT}/game/graphics/ctr/CtrRendererJak2.cpp
+    ${OG_ROOT}/game/graphics/ctr/CtrTexAnimJak2.cpp
+    ${OG_ROOT}/game/graphics/ctr/CtrShadowJak2.cpp
+    ${OG_ROOT}/game/graphics/ctr/CtrRendererJak2Bg.cpp
+  )
+endif()
 
 # (AI-assisted) the decoders for compressed .c3l files (v11): LZ4 and zstd (decompression only)
 set(OG3DS_ZSTD ${OG_ROOT}/third-party/zstd/lib)
@@ -52,7 +61,8 @@ set(OG3DS_SHADER_CS "")
 foreach(shader ctr_basic ctr_clip ctr_clip2 ctr_ocean ctr_ocean_full ctr_ocean_full_clip
     ctr_basic_old ctr_mesh_old ctr_skin_old ctr_skin_env_old ctr_bench_sep
     ctr_mesh_old_fa ctr_mesh_opt ctr_mesh_opt_fa ctr_skin_opt ctr_skin_env_opt
-    ctr_ocean_full_opt ctr_ocean_full_clip_opt ctr_mesh_opt_df ctr_mesh_opt_df_fa)
+    ctr_ocean_full_opt ctr_ocean_full_clip_opt ctr_mesh_opt_df ctr_mesh_opt_df_fa
+    ctr_ocean_env ctr_etie)
   set(src ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader}.v.pica)
   set(bin ${CMAKE_CURRENT_BINARY_DIR}/${shader}.shbin)
   set(csrc ${CMAKE_CURRENT_BINARY_DIR}/${shader}_shbin.c)

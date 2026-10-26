@@ -1,7 +1,10 @@
 #include "iso_cd.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <thread>
 
 #include "common/log/log.h"
 #include "common/util/Assert.h"
@@ -14,6 +17,13 @@
 #include "game/overlord/jak2/iso_queue.h"
 #include "game/sce/iop.h"
 #include "game/sound/sndshim.h"
+
+#ifdef OG_ISO_OGZ
+#include "game/overlord/common/compressed_iso_file.h"
+#endif
+#ifdef __3DS__
+#include "game/overlord/jak1/fake_iso.h"  // (AI-assisted) io_heap_free
+#endif
 
 using namespace iop;
 
@@ -80,12 +90,32 @@ uint32_t FS_LoadSoundBank(char* name, SoundBank* buffer);
 uint32_t FS_LoadMusic(char* name, snd::BankHandle* buffer);
 u32 FS_SyncRead();
 
+// (AI-assisted) The files the fake CD reads. A few stay open, the least recently used one is
+// closed for the next: a voice stream (VAGWAD) is read between the pages of a level load, a
+// spooled animation (STR) and its voice at once, and every reopen cost several SD card requests
+// on the 3DS. A block-compressed X.ogz (stage_sd.sh --compress, --compress-vag) is read through
+// iso_cz::Reader.
+struct CdFile {
+  FileRecord* fr = nullptr;
+  FILE* fp = nullptr;  // plain file (cz == nullptr)
+#ifdef OG_ISO_OGZ
+  iso_cz::Reader* cz = nullptr;  // compressed file: owns its FILE
+#endif
+  bool voice = false;  // the VAGWAD voice stream file
+  bool stream = false;  // (AI-assisted, j2gaps) a voice (VAGWAD) or spooled animation (.STR) file
+  u32 last_use = 0;
+};
+constexpr int kCdFiles = 3;
+
 struct FakeCd {
-  int offset_into_file = 0;
-  FILE* fp = nullptr;
+  CdFile files[kCdFiles];
+  CdFile* cur = nullptr;
+  u32 use_counter = 0;
   void (*callback)(int) = nullptr;
   FileRecord* last_fr = nullptr;
 } gFakeCd;
+
+static void close_cd_file(CdFile* f);
 
 void iso_cd_init_globals() {
   ReadPagesCurrentPage = nullptr;
@@ -118,14 +148,114 @@ void iso_cd_init_globals() {
   iso_cd.load_music = FS_LoadMusic;
   iso_cd.sync_read = FS_SyncRead;
   gFakeCd.last_fr = nullptr;
+  gFakeCd.cur = nullptr;
+  for (auto& f : gFakeCd.files) {
+    close_cd_file(&f);
+  }
 }
 
-static FILE* open_fr(FileRecord* fr, s32 thread_to_wake) {
+static void close_cd_file(CdFile* f) {
+#ifdef OG_ISO_OGZ
+  if (f->cz) {
+    auto* r = f->cz;
+    if (!f->voice && r->out_bytes) {
+      const char* path = get_file_path(f->fr);
+      const char* name = strrchr(path, '/');
+      lg::info("[io] cd {}: {} KB from {} KB on the card in {} reads, card {:.0f} ms, decode {:.0f} ms",
+               name ? name + 1 : path, r->out_bytes >> 10, r->sd_bytes >> 10, r->sd_reads,
+               r->sd_us / 1000.0, r->decode_us / 1000.0);
+    }
+    delete r;  // closes its file
+    f->cz = nullptr;
+    f->fp = nullptr;
+  }
+#endif
+  if (f->fp) {
+    fclose(f->fp);
+  }
+  *f = CdFile();
+}
+
+// on a reader thread: close what `f` holds, open fr in it. False if fr can't be read.
+static bool open_cd_file(CdFile* f, FileRecord* fr, s32 thread_to_wake) {
+  close_cd_file(f);
   const char* path = get_file_path(fr);
   FILE* fp = file_util::open_file(path, "rb");
+  bool ok = fp != nullptr;
+  if (ok) {
+    f->fr = fr;
+    f->voice = strstr(path, "VAGWAD") != nullptr;
+    f->stream = f->voice || strstr(path, ".STR") != nullptr;
+#ifdef OG_ISO_OGZ
+    if (is_file_compressed(fr)) {
+      auto* r = new iso_cz::Reader();
+      if (r->open(fp, path)) {
+        f->cz = r;
+        f->fp = r->file();
+      } else {
+        lg::error("[OVERLORD] fake iso: \"{}\" is not a valid compressed file", path);
+        delete r;  // closes fp
+        *f = CdFile();
+        ok = false;
+      }
+    } else
+#endif
+    {
+      // whole pages into the caller's buffer: unbuffered, each one a single card read
+      setvbuf(fp, nullptr, _IONBF, 0);
+      f->fp = fp;
+    }
+  }
   iop::iWakeupThread(thread_to_wake);
+  return ok;
+}
 
-  return fp;
+// the open file for fr, opening it (on a reader thread) in place of the least recently used one
+static CdFile* select_cd_file(FileRecord* fr) {
+  CdFile* pick = nullptr;
+  for (auto& f : gFakeCd.files) {
+    if (f.fr == fr) {
+      pick = &f;
+      break;
+    }
+  }
+  if (!pick) {
+    pick = &gFakeCd.files[0];
+    for (auto& f : gFakeCd.files) {
+      if (!f.fr) {
+        pick = &f;
+        break;
+      }
+      if (f.last_use < pick->last_use) {
+        pick = &f;
+      }
+    }
+    auto future = thpool.submit(open_cd_file, pick, fr, GetThreadId());
+    SleepThread();
+    if (!future.get()) {
+      lg::error("[OVERLORD] fake iso could not open the file \"{}\"", get_file_path(fr));
+      ASSERT_NOT_REACHED();
+    }
+  }
+#ifdef OG_ISO_OGZ
+  // the file read before keeps only its index (and a voice file its 16 KB block); this one reads
+  // ahead: whole compressed blocks up to 128 KB per card read, while the heap has room
+  if (gFakeCd.cur && gFakeCd.cur != pick && gFakeCd.cur->cz) {
+    gFakeCd.cur->cz->release_buffers(gFakeCd.cur->voice);
+  }
+  if (pick->cz) {
+    u32 ra = pick->voice ? 0 : (128u << 10);
+#ifdef __3DS__
+    if (jak1::io_heap_free() < (2u << 20)) {
+      ra = 0;
+    }
+#endif
+    pick->cz->set_read_ahead(ra);
+  }
+#endif
+  pick->last_use = ++gFakeCd.use_counter;
+  gFakeCd.cur = pick;
+  return pick;
 }
 
 ///////////////////////////
@@ -142,16 +272,36 @@ int sceCdRead(int lsn, int num_sectors, void* dest, void* mode) {
   (void)mode;
   auto do_read = [lsn, num_sectors, dest](s32 thid) {
     // printf("sceCdRead %d, %d -> %p\n", lsn, num_sectors, dest);
-    ASSERT(gFakeCd.fp);
-    if (fseek(gFakeCd.fp, lsn * SECTOR_SIZE, SEEK_SET)) {
-      ASSERT_MSG(false, "Failed to fseek");
-    }
-    if (fread(dest, num_sectors * SECTOR_SIZE, 1, gFakeCd.fp) < 0) {
-      printf("dest is %p, num_sectors %d, lsn %d\n", dest, num_sectors, lsn);
-      printf("err: %s\n", strerror(errno));
-      ASSERT_MSG(false, "Failed to fread");
+    CdFile* f = gFakeCd.cur;
+    ASSERT(f && f->fp);
+#ifdef OG_ISO_OGZ
+    if (f->cz) {
+      // (AI-assisted) past the end of the file: the rest of dest is left as it is (as fread)
+      if (f->cz->read((uint32_t)lsn * SECTOR_SIZE, dest, num_sectors * SECTOR_SIZE) < 0) {
+        lg::error("[OVERLORD] fake iso: read error in \"{}\" at sector {}", get_file_path(f->fr),
+                  lsn);
+        ASSERT_MSG(false, "Failed to read a compressed file");
+      }
+    } else
+#endif
+    {
+      if (fseek(f->fp, lsn * SECTOR_SIZE, SEEK_SET)) {
+        ASSERT_MSG(false, "Failed to fseek");
+      }
+      if (fread(dest, num_sectors * SECTOR_SIZE, 1, f->fp) < 0) {
+        printf("dest is %p, num_sectors %d, lsn %d\n", dest, num_sectors, lsn);
+        printf("err: %s\n", strerror(errno));
+        ASSERT_MSG(false, "Failed to fread");
+      }
     }
     ASSERT(gFakeCd.callback);
+#ifdef __3DS__
+    // (AI-assisted, j2gaps) the save worker (kmemcard.cpp) waits while streams read: an auto-save's
+    // card writes made the spool and dialogue wait. Jak II's reads weren't marked, so it never did
+    if (f->stream) {
+      jak1::FS_NoteStreamRead();
+    }
+#endif
 
     iWakeupThread(thid);
   };
@@ -611,21 +761,7 @@ int FS_PageBeginRead(LoadStackEntry* lse, Buffer* buffer) {
 
     // start a read!
     if (gFakeCd.last_fr != lse->fr) {
-      auto future = thpool.submit(open_fr, lse->fr, GetThreadId());
-      SleepThread();
-      FILE* fp = future.get();
-      if (!fp) {
-        lg::error("[OVERLORD] fake iso could not open the file \"{}\"", get_file_path(lse->fr));
-      } else {
-        // printf("PAGE READING %s\n", path);
-      }
-
-      ASSERT(fp);
-
-      if (gFakeCd.fp) {
-        fclose(gFakeCd.fp);
-      }
-      gFakeCd.fp = fp;
+      select_cd_file(lse->fr);
       gFakeCd.last_fr = lse->fr;
     }
 
@@ -657,6 +793,133 @@ int FS_PageBeginRead(LoadStackEntry* lse, Buffer* buffer) {
   return CMD_STATUS_IN_PROGRESS;
 }
 
+namespace {
+// (AI-assisted) Sound bank / music loads. The whole file is read on a reader thread, which also
+// parses the 989snd bank, into a buffer the bank keeps (its samples aren't copied: the heap peak
+// is the file once, it was twice). Meanwhile the IOP thread runs the other IOP threads (sound
+// RPCs, the VAG stream DMA, the player) instead of waiting for the SD card. A load out of heap
+// memory (bad_alloc) tries again a few times, then the bank stays out (no sound from it).
+constexpr int kBankLoadRetries = 10;
+constexpr int kBankLoadRetryMs = 300;
+
+struct BankLoad {
+  std::string path;
+  bool compressed = false;
+  snd::BankHandle handle = nullptr;
+  size_t size = 0;
+  double read_ms = 0;
+  int tries = 0;
+};
+
+snd::BankHandle bank_load_try(BankLoad* b) {
+  std::unique_ptr<u8[]> buf;
+  size_t size = 0;
+  const auto t0 = std::chrono::steady_clock::now();
+#ifdef OG_ISO_OGZ
+  if (b->compressed) {
+    FILE* fp = file_util::open_file(b->path.c_str(), "rb");
+    if (!fp) {
+      return nullptr;
+    }
+    iso_cz::Reader r;
+    if (!r.open(fp, nullptr)) {  // (closes fp)
+      return nullptr;
+    }
+    size = r.size();
+    buf.reset(new u8[size]);
+    if (r.read(0, buf.get(), size) != (int64_t)size) {
+      return nullptr;
+    }
+  } else
+#endif
+  {
+    FILE* fp = file_util::open_file(b->path.c_str(), "rb");
+    if (!fp) {
+      return nullptr;
+    }
+    setvbuf(fp, nullptr, _IONBF, 0);
+    fseek(fp, 0, SEEK_END);
+    const long len = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    bool ok = len > 0;
+    try {
+      if (ok) {
+        size = (size_t)len;
+        buf.reset(new u8[size]);
+        ok = fread(buf.get(), size, 1, fp) == 1;
+      }
+    } catch (...) {
+      fclose(fp);
+      throw;
+    }
+    fclose(fp);
+    if (!ok) {
+      return nullptr;
+    }
+  }
+  b->read_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  b->size = size;
+  u8* data = buf.get();
+  return snd_BankLoadFromMemory(std::span<u8>(data, size), std::move(buf));
+}
+
+void bank_load_job(BankLoad* b, s32 thread_to_wake) {
+  for (b->tries = 1;; b->tries++) {
+    try {
+      b->handle = bank_load_try(b);
+      break;
+    } catch (std::exception& e) {
+      if (b->tries > kBankLoadRetries) {
+        lg::error("[io] sound bank {}: {}, given up after {} tries (no sound from it)", b->path,
+                  e.what(), b->tries);
+        b->handle = nullptr;
+        break;
+      }
+      if (b->tries == 1) {
+        lg::warn("[io] sound bank {}: {}, trying again every {} ms", b->path, e.what(),
+                 kBankLoadRetryMs);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(kBankLoadRetryMs));
+    }
+  }
+  iop::iWakeupThread(thread_to_wake);
+}
+
+snd::BankHandle load_bank_file(FileRecord* file) {
+  BankLoad b;
+  b.path = get_file_path(file);
+#ifdef __3DS__
+  if (!snd_HasOutput()) {
+    // (AI-assisted, j2-mem2) No audio output (sound = off, or no DSP): the bank's samples would
+    // never be heard (the voice manager drops the non-stream voices without output), so they
+    // aren't loaded: 1.9 MB of heap in Haven City. The bank counts as loaded (its name, no
+    // handle); its sounds don't start (a play finds no sound and returns no handle), the EE's
+    // voice streams (dialogue, cutscenes) don't need banks and still run silently.
+    lg::info("[io] sound bank {}: not loaded (no audio output)",
+             b.path.substr(b.path.find_last_of('/') + 1));
+    return nullptr;
+  }
+#endif
+  b.compressed = is_file_compressed(file);
+  const auto t0 = std::chrono::steady_clock::now();
+  auto future = thpool.submit(bank_load_job, &b, GetThreadId());
+  SleepThread();
+  future.get();
+  const double ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  if (!b.handle) {
+    lg::error("[OVERLORD] fake iso could not load the sound bank \"{}\"", b.path);
+  }
+  u32 banks = 0;
+  const u32 resident = snd_ResidentBankBytes(&banks);
+  lg::info("[io] sound bank {}: {} KB read in {:.0f} ms, loaded in {:.0f} ms; {} banks, {} KB",
+           b.path.substr(b.path.find_last_of('/') + 1), b.size / 1024, b.read_ms, ms, banks,
+           resident / 1024);
+  return b.handle;
+}
+}  // namespace
+
 uint32_t FS_LoadSoundBank(char* name, SoundBank* buffer) {
   SoundBank* bank = (SoundBank*)buffer;
   FileRecord* file = nullptr;
@@ -674,7 +937,7 @@ uint32_t FS_LoadSoundBank(char* name, SoundBank* buffer) {
     return CMD_STATUS_FAILED_TO_OPEN;
   }
 
-  handle = snd_BankLoadEx(get_file_path(file), 0, bank->spu_loc, bank->spu_size);
+  handle = load_bank_file(file);  // (AI-assisted) was snd_BankLoadEx: see load_bank_file
   snd_ResolveBankXREFS();
   bank->bank_handle = handle;
 
@@ -698,7 +961,7 @@ uint32_t FS_LoadMusic(char* name, snd::BankHandle* bank_handle) {
     return CMD_STATUS_FAILED_TO_OPEN;
   }
 
-  handle = snd_BankLoadEx(get_file_path(file), 0, 0xcfcc0, 0x61a80);
+  handle = load_bank_file(file);  // (AI-assisted) was snd_BankLoadEx: see load_bank_file
   snd_ResolveBankXREFS();
   *bank_handle = handle;
 

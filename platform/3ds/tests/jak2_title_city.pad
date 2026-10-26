@@ -1,0 +1,24 @@
+# (AI-assisted) Jak II: jak2_title.pad (the intro scene title-disk-intro, no input, 3600 frames) then
+# jak2_city.pad shifted by 2800 frames (continue ctysluma-start at 3800, the city-stand / city-walk
+# perf windows). One emulator run for both; use with screenshots = 150 (config.ini) on the 3DS.
+# The title part: on PC the scene ends on the JAK II logo over the slums; baseline B's 3DS (sound
+# off) ended ~9 s in, in the title-movie-end view (*target* at (980, 85, 346) m: the pos line).
+600 log perf-mark title
+900 pos *target*
+1800 pos *target*
+3601 pos *target*
+3602 log perf-mark title-end
+3800 continue ctysluma-start
+3801 -
+3802 wait *target* target-stance
+3803 log city: ctysluma-start
+3804 pos *target*
+4200 print *pad-script-mem*
+4201 log perf-mark city-stand
+4800 log perf-mark city-walk
+4801 ly=0
+5100 -
+5101 log perf-mark end
+5102 pos *target*
+5103 print *target*
+5200 exit

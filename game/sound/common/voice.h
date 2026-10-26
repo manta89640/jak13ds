@@ -1,6 +1,8 @@
 // Copyright: 2021 - 2024, Ziemas
 // SPDX-License-Identifier: ISC
 #pragma once
+#include <atomic>
+
 #include "bitfield.h"
 #include "envelope.h"
 #include "fifo.h"
@@ -73,6 +75,12 @@ class Voice {
   }
 
   u32 GetNax() { return mNAX; }
+  // (AI-assisted) 3DS: the NAX as the mixer left it after its last chunk (PublishNax, for all the
+  // overlord's voices at once: sdshim.cpp). The mixer runs a chunk voice by voice, so reading
+  // mNAX in the middle of it gave a stereo stream's two voices a chunk apart, and the overlord
+  // took that for a drifted pair and restarted both (a click, ~15 times a second).
+  u32 GetPublishedNax() const { return mPubNAX.load(std::memory_order_relaxed); }
+  void PublishNax() { mPubNAX.store(mNAX, std::memory_order_relaxed); }
   // (AI-assisted) played a loop end block without repeat (the end of a stream)
   bool Stopped() const { return mADSR.GetPhase() == ADSR::Phase::Stopped; }
 
@@ -137,6 +145,7 @@ class Voice {
   u16* mSample{nullptr};
   u32 mSSA{0};
   u32 mNAX{0};
+  std::atomic<u32> mPubNAX{0};  // (AI-assisted) GetPublishedNax
   u32 mLSA{0};
   bool mCustomLoop{false};
 

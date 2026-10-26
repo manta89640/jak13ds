@@ -357,8 +357,17 @@ vf31: cam 0 (premultiplied by hmge)
   (none)
   )
 
+;; og:preserve-this (AI-assisted) 3DS: adjust-cloud-lighting and adjust-haze-lighting (with the
+;; vertex light / texture updates) in C++ (game/mips2c/jak2_functions/native2_sky_light.cpp: the
+;; same results, verified against this code with OPENGOAL_MIPS2C_VERIFY=1; always on). The GOAL code
+;; runs when the native returns #f (debugging: config.ini mips2c_native_off).
+(#when TARGET_3DS
+  (def-mips2c pc-adjust-cloud-lighting (function sky-work symbol))
+  (def-mips2c pc-adjust-haze-lighting (function sky-work symbol)))
+
 (defmethod adjust-cloud-lighting ((this sky-work))
   "Apply lighting to cloud vertices"
+  (when (#if TARGET_3DS (not (pc-adjust-cloud-lighting this)) #t)
   (let ((s5-0 *cloud-vert-array*)
         (s4-0 (-> this cloud-lights))
         )
@@ -414,6 +423,7 @@ vf31: cam 0 (premultiplied by hmge)
         (cloud-vtx-tex-update this (-> s2-1 stq2) (-> s2-1 stq) (-> s2-1 pos) s4-0)
         )
       )
+    )
     )
   0
   (none)
@@ -546,6 +556,7 @@ vf31: cam 0 (premultiplied by hmge)
 
 (defmethod adjust-haze-lighting ((this sky-work))
   "Adjust lighting for haze."
+  (when (#if TARGET_3DS (not (pc-adjust-haze-lighting this)) #t)
   (let ((s5-0 *haze-vert-array*)
         (s4-0 (-> this haze-lights))
         )
@@ -585,6 +596,7 @@ vf31: cam 0 (premultiplied by hmge)
         (apply-haze-light this (-> v1-25 col) (-> v1-25 nrm) s4-0)
         )
       )
+    )
     )
   0
   (none)

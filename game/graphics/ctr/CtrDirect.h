@@ -20,6 +20,22 @@
 
 class CtrVram;
 
+/*!
+ * (AI-assisted, j2gaps) Jak II's menu background (BlitDisplays on the PC): the copy of the game's
+ * last frame (ctr_gpu_copy_screen) that stands in for VRAM at tbp 0x3300, where the sky bucket's
+ * menu draws read it. Draws of it sample the copy at their own screen position (the game's
+ * sprites cover the screen with the whole image). -1: none.
+ */
+void ctr_direct_set_menu_screen(int handle);
+int ctr_direct_menu_screen();
+/*! drawn since the last call (the copy is freed once the menu no longer draws it) */
+bool ctr_direct_take_menu_screen_drawn();
+
+#ifndef __3DS__
+// (AI-assisted) host diagnosis: the next n vertices pushed by any CtrDirect are logged
+extern int g_ctr_direct_dump;
+#endif
+
 /*! GS ALPHA register -> enum ctr_blend (unknown equations: normal alpha blending). */
 u8 ctr_blend_from_gs_alpha(u64 alpha);
 
@@ -41,6 +57,35 @@ class CtrDirect {
 
   /*! Draw with depth test (debug bucket) or without (debug-no-zbuf, subtitles). */
   void set_allow_depth(bool allow) { m_allow_depth = allow; }
+
+  /*!
+   * (AI-assisted) Jak II's progress bucket: draws to the minimap's frame buffer (FRAME fbp 126,
+   * 128 x 128) go to a render to texture, which stands in for VRAM at tbp 4032 (where the game
+   * reads it back, like the PC's ProgressRenderer). end_offscreen at the bucket's end.
+   */
+  void enable_minimap() { m_minimap = true; }
+  void end_offscreen();
+
+  /*!
+   * (AI-assisted, j2water) Jak II's ocean env map (ocean-method-89, CtrOceanEnvJak2): the draws go
+   * to a 64 x 64 render target the caller has begun (ctr_gpu_rt_begin), GS pixel (X - XYOFFSET) /
+   * 16 at its logical point of the same coordinates; no depth test (the PS2's z buffer there isn't
+   * cleared), and the alpha test's FB_ONLY fails written (the clouds).
+   */
+  void enable_envmap() {
+    m_envmap = true;
+    m_allow_depth = false;
+  }
+
+  /*!
+   * (AI-assisted, gpuopt) Record mode: flush() keeps the batches (state and vertices) instead of
+   * drawing them; replay_recorded() draws them later in the same frame (Jak II's sky with
+   * sky_last). depth_tested: as the deferred sky, only where nothing opaque wrote depth (GEQUAL
+   * against the cleared depth, no depth writes; the caller sets ctr_gpu_set_depth_far).
+   */
+  void set_record(bool on);
+  bool has_recorded() const { return !m_rec.empty(); }
+  void replay_recorded(bool depth_tested);
 
   struct Stats {
     int packets = 0;
@@ -65,6 +110,17 @@ class CtrDirect {
 
   CtrVram* m_vram;
   bool m_allow_depth = true;
+  // (AI-assisted) Jak II minimap (enable_minimap)
+  bool m_minimap = false;
+  bool m_offscreen = false;
+  bool m_envmap = false;  // (AI-assisted, j2water) enable_envmap
+  u32 m_fbp = 408;
+  bool m_alpha_only = false;  // (AI-assisted) FBMSK masks rgb
+  float m_xyoff[2] = {0, 0};  // (AI-assisted) XYOFFSET - the screen's, GS pixels
+  void handle_frame(u64 val);
+  // (AI-assisted) GS y to clip y: Jak 1 draws a 224 line field (1 / 112), Jak II a 416 line
+  // frame (direct_basic.vert: HEIGHT_SCALE 0.5, SCISSOR_ADJUST 512 / 416: 1 / 208)
+  float m_y_scale = 1.f / 112.f;
 
   // GS registers
   GsPrim m_prim;
@@ -96,6 +152,15 @@ class CtrDirect {
   std::vector<ctr_vertex> m_verts;
   bool m_quads = false;  // m_verts holds quads (sprites, ctr_gpu_draw_quads), not triangles
   void batch_mode(bool quads);
+  // (AI-assisted, gpuopt) set_record: the batches flush() kept, their vertices in m_rec_verts
+  struct RecBatch {
+    ctr_draw_state st;
+    bool quads;
+    u32 first, count;
+  };
+  bool m_record = false;
+  std::vector<RecBatch> m_rec;
+  std::vector<ctr_vertex> m_rec_verts;
 
   Stats m_stats;
 };

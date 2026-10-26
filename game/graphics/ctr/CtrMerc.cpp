@@ -191,7 +191,12 @@ void hud_depth_spread(float* clip,
 }  // namespace
 
 CtrMercRenderer::CtrMercRenderer(std::string name, int id, CtrLevels* levels)
-    : CtrBucketRenderer(std::move(name), id), m_levels(levels) {}
+    : CtrBucketRenderer(std::move(name), id), m_levels(levels) {
+  // (AI-assisted) Jak II's model records: no uses-water quadword, one link after each model
+  m_jak2 = ctr_is_jak2();
+  m_water_bytes = m_jak2 ? 0 : 16;
+  m_links = m_jak2 ? 1 : 2;
+}
 
 void CtrMercRenderer::handle_setup(const DmaTransfer& setup) {
   // 10 qw: 1 qw of vifcodes, 8 qw of low memory, 1 qw of vifcodes
@@ -208,7 +213,8 @@ void CtrMercRenderer::handle_setup(const DmaTransfer& setup) {
   // merc2.vert: t = perspective * v, then the GS screen mapping (hvdf, fog constant), as a
   // linear map of t. v = (camera xyz, -1): the bone matrices give -X * p with w = -1.
   const float fx = m_fog.x();
-  constexpr float k = 512.f / 448.f;  // Jak 1 scissor adjust
+  // Jak 1 scissor adjust 512 / 448; (AI-assisted) Jak II's 512 / 416 * 0.5 (ctr_gs_y_scale)
+  const float k = ctr_gs_y_scale();
   const float L[16] = {fx / 256.f, 0, 0, (m_hvdf_offset.x() - 2048.f) / 256.f,
                        0, -fx / 128.f * k, 0, -(m_hvdf_offset.y() - 2048.f) / 128.f * k,
                        0, 0, fx / 8388608.f, m_hvdf_offset.z() / 8388608.f - 1.f,
@@ -312,7 +318,8 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     auto init = dma.read_and_advance();
     while (init.vifcode1().kind == VifCode::Kind::PC_PORT) {
       handle_model(init, rs);
-      for (int i = 0; i < 2 && dma.current_tag_offset() != rs.next_bucket; i++) {
+      // (AI-assisted) the links after a model: 2 in Jak 1, 1 in Jak II (Merc2 skip_count)
+      for (int i = 0; i < m_links && dma.current_tag_offset() != rs.next_bucket; i++) {
         dma.read_and_advance();
       }
       if (dma.current_tag_offset() == rs.next_bucket) {
@@ -802,7 +809,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // game logic rewrites while the render thread draws this one): snapshot_bones copies them on
   // the game thread, in the order of the models, and drawing reads that copy.
   {
-    const u8* sl = input + 128 + sizeof(VuLights) + 16;
+    const u8* sl = input + 128 + sizeof(VuLights) + m_water_bytes;
     const u32* ma = (const u32*)(sl + 128);
     int n = 0;
     while (n < 128 && sl[n] != 0xff) {
@@ -902,8 +909,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted) jak 1: uses-water (Merc2's jak1_water_mode: blended, no depth writes; the
   // jungle river and other water-anim models were drawn opaque)
   u64 uses_water = 0;
-  memcpy(&uses_water, input, 8);
-  input += 16;
+  if (m_water_bytes) {  // (AI-assisted) not in Jak II
+    memcpy(&uses_water, input, 8);
+    input += m_water_bytes;
+  }
 
   // matrix slot string + GOAL addresses of the bone matrices
   const MercMat* const* bones = g_bones.slot;  // (AI-assisted) see BoneTable
@@ -975,7 +984,10 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // HUD models (the orb and power cell icons...): isometric projection, see hud_clip
   float hud[16];
   const float* clip = m_clip;
-  if (flags.bitflags & 8) {
+  // (AI-assisted) Jak 1 3DS: bit 3 marks HUD models; Jak II: bit 3 is disable-envmap
+  const bool hud_model = !m_jak2 && (flags.bitflags & 8);
+  const bool no_envmap = m_jak2 && (flags.bitflags & 8);
+  if (hud_model) {
     float y_scale;
     memcpy(&y_scale, input + 20, sizeof(y_scale));
     hud_clip(hud, y_scale);
@@ -1041,7 +1053,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   }
   // (AI-assisted, far-fog) the game's fog on this model (not HUD models: their own projection),
   // unless it is ~0 at all of it: no fog stage then (texture unit 1 stays off)
-  const bool model_fog = m_fog_on && !(flags.bitflags & 8) && model_fog_visible(*model, bones, slots, i);
+  const bool model_fog = m_fog_on && !hud_model && model_fog_visible(*model, bones, slots, i);
 
   // the model's lights, for the skin shader's per vertex lighting (like merc2.vert)
   float light_data[28];
@@ -1069,7 +1081,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   float hud_d[9];
   bool hud_nfix = false;
   float hud_fixed_clip[16];
-  if ((flags.bitflags & 8) && i > 0 && slots[0] < 128) {
+  if (hud_model && i > 0 && slots[0] < 128) {
     const MercMat& m0 = *bones[slots[0]];
     double g[3][3];
     for (int r = 0; r < 3; r++) {
@@ -1162,7 +1174,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted) the settings looked up once per model (each ctr_settings() call is a function
   // call with a memory barrier for its static's guard)
   const CtrSettings& cs = ctr_settings();
-  const bool cull_merc = cs.cull_merc && !(flags.bitflags & 8);
+  const bool cull_merc = cs.cull_merc && !hud_model;
   bool palette_mirrors = false;
   // (AI-assisted) envmap_batch: this model's clip matrix and current palette in m_qdata (~0u: not
   // there yet)
@@ -1211,13 +1223,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted, streaming) Jak's place (his first bone's tmat[3]: world = camera position +
   // camera rot * it, checked against the game's position to 0.6 m): the level streaming prefetches
   // around him too (camera cuts land near him)
-  if (!(flags.bitflags & 8) && i > 0 && slots[0] < 128 &&
+  if (!hud_model && i > 0 && slots[0] < 128 &&
       ((model->name.size() >= 6 && !model->name.compare(0, 6, "eichar")) || model->keira_rig)) {
     const math::Vector4f& t = bones[slots[0]]->tmat[3];
     m_levels->stream_note_target(t.x(), t.y(), t.z(), rs.frame_idx);
   }
   const std::vector<c3l::MercDraw>* draws = &model->draws;
-  if (!model->gen_draws.empty() && cs.merc_gen_lod && !(flags.bitflags & 8) && i > 0 &&
+  if (!model->gen_draws.empty() && cs.merc_gen_lod && !hud_model && i > 0 &&
       slots[0] < 128) {
     u32 key;
     memcpy(&key, &matrix_array[0], 4);
@@ -1271,7 +1283,7 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     const bool envmap = draw.eye_id == c3l::kMercEnvmapDraw;
     float fade[4] = {0, 0, 0, 0};
     if (envmap) {
-      if (draw.effect >= effect_count || !cs.envmap) {
+      if (draw.effect >= effect_count || !cs.envmap || no_envmap) {
         continue;
       }
       if (env_too_small()) {

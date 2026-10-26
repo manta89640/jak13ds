@@ -684,6 +684,87 @@ TEST(GoalcRuntime, LinkModule) {
   g_goalc_enabled = was_enabled;
 }
 
+// (AI-assisted) two instances of one module (the same object file in two co-loaded levels)
+void* const g_inst_funcs_a[1] = {(void*)module_fn0};
+void* const g_inst_funcs_b[1] = {(void*)module_fn1};
+const char* const g_inst_syms[1] = {"foo"};
+int32_t g_inst_sym_offsets_a[1], g_inst_sym_offsets_b[1];
+uint32_t g_inst_seg_base_a[3], g_inst_seg_base_b[3];
+const GoalCModule g_inst_a = {0x99887766554433ull, "inst-module", 1, g_inst_funcs_a,
+                              1, g_inst_syms, g_inst_sym_offsets_a, g_inst_seg_base_a};
+const GoalCModule g_inst_b = {0x99887766554433ull, "inst-module", 1, g_inst_funcs_b,
+                              1, g_inst_syms, g_inst_sym_offsets_b, g_inst_seg_base_b};
+
+TEST(GoalcRuntime, LinkModuleInstances) {
+  FakeGoal goal;
+  bool was_enabled = g_goalc_enabled;
+  goalc_set_enabled(true);
+  goalc_register_module(&g_inst_a);
+  goalc_register_module(&g_inst_b);
+  goalc_register_module(&g_inst_a);  // registering again doesn't add an instance
+
+  std::vector<u8> link;
+  u64 hash = g_inst_a.hash;
+  u32 n = 1;
+  u32 entry[2] = {4, 0};
+  link.insert(link.end(), (const u8*)&hash, (const u8*)&hash + 8);
+  link.insert(link.end(), (const u8*)&n, (const u8*)&n + 4);
+  link.insert(link.end(), (const u8*)entry, (const u8*)entry + 8);
+  auto link_copy = [&](u32 seg, const GoalcLinkHeap& heap) {
+    goal.w(seg + 4) = 0xffffffff;
+    u32 bases[3] = {seg, 0, 0};
+    goalc_link_module_entry(link.data(), bases, goal.mem + seg, resolve_test_symbol,
+                            "inst-module", heap);
+  };
+  const u32 a = goal.alloc(4096), b = goal.alloc(4096);
+  // kheapinfo structures (base, top, current, top-base), all in use
+  const u32 ha = goal.alloc(16), hb = goal.alloc(16), hc = goal.alloc(16);
+  auto set_heap = [&](u32 h, u32 base, u32 end) {
+    goal.w(h) = base;
+    goal.w(h + 4) = end;
+    goal.w(h + 8) = end;
+    goal.w(h + 12) = end;
+  };
+  set_heap(ha, a, a + 4096);
+  set_heap(hb, b, b + 4096);
+  const GoalcLinkHeap heap_a{ha, a, a + 4096}, heap_b{hb, b, b + 4096};
+
+  // copy 1 in level heap A, copy 2 in level heap B: each keeps its own segment base
+  link_copy(a + 64, heap_a);
+  link_copy(b + 64, heap_b);
+  EXPECT_EQ(g_inst_seg_base_a[0], a + 64);
+  EXPECT_EQ(g_inst_seg_base_b[0], b + 64);
+  EXPECT_EQ(call8(a + 64 + 4, {10, 0, 0, 0, 0, 0, 0, 0}), 11u);  // instance a's function
+  EXPECT_EQ(call8(b + 64 + 4, {10, 0, 0, 0, 0, 0, 0, 0}), 12u);  // instance b's function
+
+  // heap A emptied (a level unloaded) and loaded again: copy 3 reuses copy 1's instance
+  link_copy(a + 32, heap_a);
+  EXPECT_EQ(g_inst_seg_base_a[0], a + 32);
+  EXPECT_EQ(g_inst_seg_base_b[0], b + 64);
+
+  // a copy whose stub was overwritten is gone too: copy 4 in heap B's memory reuses instance b
+  goal.w(b + 64 + 4) = 0;
+  if (sizeof(void*) == 8) {
+    goal.w(b + 64 + 8) = 0;
+  }
+  set_heap(hc, b + 1024, b + 4096);
+  const GoalcLinkHeap heap_c{hc, b + 1024, b + 4096};
+  link_copy(b + 1024, heap_c);
+  EXPECT_EQ(g_inst_seg_base_b[0], b + 1024);
+  EXPECT_EQ(g_inst_seg_base_a[0], a + 32);
+
+  // heap A emptied (current back at its base) but not filled again: its copy is gone, so a copy
+  // linked elsewhere first reuses instance a
+  goal.w(ha + 8) = a;
+  const u32 d = goal.alloc(4096), hd = goal.alloc(16);
+  set_heap(hd, d, d + 4096);
+  link_copy(d + 64, GoalcLinkHeap{hd, d, d + 4096});
+  EXPECT_EQ(g_inst_seg_base_a[0], d + 64);
+  EXPECT_EQ(g_inst_seg_base_b[0], b + 1024);
+  EXPECT_EQ(goalc_module_instance_count(hash), 2u);
+  g_goalc_enabled = was_enabled;
+}
+
 }  // namespace
 
 #endif

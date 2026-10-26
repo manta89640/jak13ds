@@ -94,7 +94,12 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
     {"gpu_micro", "on"}, {"shader_resident", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
     {"sound_core", "auto"}, /* 2 on a New 3DS, else 1 */
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+    /* (AI-assisted) Jak II's kernel starts the IOP from the "DVD" without -fakeiso */
+    {"args", "-boot -fakeiso -cbackend"},
+#else
     {"args", "-boot -cbackend"},
+#endif
     {"debug_log", "off"},
     {"listener", "off"},
     {"screenshots", "0"},
@@ -122,12 +127,12 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
 
 /* Keys that were removed (with their code): ignored with a note, not an "unknown setting".
  * (AI-assisted, Oct 18) The switches of native code with the same results as the code it replaces
- * are gone too (the natives are always on): logic_micro, bones_native, collide_native,
- * collide_frag_cache, anim_native. mips2c_native_off stays (debugging). */
+ * are gone too (the natives are always on): logic_native, logic_micro, bones_native,
+ * collide_native, collide_frag_cache, anim_native. mips2c_native_off stays (debugging). */
 static const char* const ctr_cfg_removed[] = {
     "new_shaders",  "shader_groups",  "shader_mesh",        "shader_skin",
-    "cb_read_opaque", "io_on_system_core", "logic_micro",   "bones_native",
-    "collide_native", "collide_frag_cache", "anim_native",
+    "cb_read_opaque", "io_on_system_core", "logic_native", "logic_micro",
+    "bones_native", "collide_native", "collide_frag_cache", "anim_native",
     /* (AI-assisted, todlag, Oct 23) the time of day's per-frame limits: every frame current now */
     "tod_busy_half", "tod_max_ms",
     /* (AI-assisted, hudshard, Oct 25) the post-vertex cache kept across draws: the HUD shards */

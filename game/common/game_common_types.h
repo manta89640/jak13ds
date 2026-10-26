@@ -12,6 +12,17 @@
 #define OPENGOAL_ONLY_JAK1 0
 #endif
 #endif
+//! (AI-assisted) When set, Jak 3 and Jak X are compiled out (the Jak II 3DS build: Jak 1 and 2).
+#if !defined(OPENGOAL_NO_JAK3)
+#define OPENGOAL_NO_JAK3 OPENGOAL_ONLY_JAK1
+#endif
+
+//! (AI-assisted, j2-mem2) When set, Jak 1's kernel entry, overlord entry and mips2c functions are
+//! compiled out (the Jak II 3DS build: ~1 MB of code and data the linker then drops). Jak 1's
+//! overlord pieces Jak II uses (ramdisk server, fake ISO) and the C-mode kernel stay.
+#if !defined(OPENGOAL_NO_JAK1)
+#define OPENGOAL_NO_JAK1 0
+#endif
 
 //! Supported languages.
 enum class Language {

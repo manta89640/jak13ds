@@ -17,12 +17,14 @@
 #include "game/graphics/jak2_texture_remap.h"
 #include "game/kernel/common/Symbol4.h"
 #include "game/kernel/common/fileio.h"
+#include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kboot.h"
 #include "game/kernel/common/kdgo.h"
 #include "game/kernel/common/kdsnetm.h"
 #include "game/kernel/common/kernel_types.h"
 #include "game/kernel/common/klink.h"
 #include "game/kernel/common/kmachine.h"
+#include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kmalloc.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
@@ -46,6 +48,9 @@
 
 using namespace ee;
 
+bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
+u32 ctr_frame_vblanks();                  // game/graphics/ctr/CtrRenderer.cpp
+
 namespace jak2 {
 /*!
  * Initialize global variables based on command line parameters. Not called in retail versions,
@@ -64,8 +69,18 @@ void InitParms(int argc, const char* const* argv) {
     MasterDebug = 0;
   }
 
+  // (AI-assisted) Run GOAL code compiled to C (docs/3ds-port/c_backend.md). Same environment
+  // variable as the compiler uses, or -cbackend.
+  const char* c_backend_env = getenv("OPENGOAL_C_BACKEND");
+  goalc_set_enabled(c_backend_env && strcmp(c_backend_env, "1") == 0);
+
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
+
+    // Code compiled with the C backend (goalc --instruction-set c)
+    if (arg == "-cbackend") {
+      goalc_set_enabled(true);
+    }
     // DVD Settings
     // ----------------------------
 
@@ -387,7 +402,12 @@ int InitMachine() {
     // note: either MasterDebug or DebugSegment is enough to give use the debug heap.
     kdebugheap.offset = 0;
   } else {
+#if OPENGOAL_SMALL_MEMORY
+    // (AI-assisted) small memory layout (memory_layout.h): what is left after the kernel stack
+    kinitheap(kdebugheap, Ptr<u8>(DEBUG_HEAP_START), DEBUG_HEAP_END - DEBUG_HEAP_START);
+#else
     kinitheap(kdebugheap, Ptr<u8>(DEBUG_HEAP_START), jak2::DEBUG_HEAP_SIZE);
+#endif
   }
   init_output();
   InitIOP();
@@ -529,6 +549,37 @@ u64 kopen(u32 fs, u32 name, u32 mode) {
   return fs;
 }
 
+// (AI-assisted, j2intro) level-update-after-load (TARGET_3DS) waits for the level's .c3l. Host
+// builds running the 3DS GOAL code (small memory) load a .c3l in the frame it's wanted (no loader
+// thread): nothing to wait for (as Jak 1's), unless the host's load model is on
+// (CTR_LOAD_DELAY_MS, --ctr-gfx: CtrLevel.cpp).
+u64 pc_3ds_level_ready(u32 name) {
+#ifndef __3DS__
+  // (CTR_LOAD_NO_WAIT: the model without the game's wait, the 3DS before j2intro)
+  static const bool sim =
+      getenv("CTR_LOAD_DELAY_MS") != nullptr && getenv("CTR_LOAD_NO_WAIT") == nullptr;
+  if (!sim) {
+    return offset_of_s7() + jak2_symbols::FIX_SYM_TRUE;
+  }
+#endif
+  return ctr_level_ready(Ptr<String>(name).c()->data())
+             ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE
+             : offset_of_s7();
+}
+
+// (AI-assisted) pc-maybe-vsync (TARGET_3DS): 60 Hz vblanks the last frame took, the game's
+// dog-ratio. The 3DS presents at 30 fps (2), and Jak II only steps its clocks by 1/60 s per frame
+// at dog-ratio 1, so it ran at half speed. Host builds keep 1 (pad scripts unchanged) unless
+// CTR_FRAME_VBLANKS sets a fixed count (host test of the 3DS timing).
+u64 pc_3ds_frame_vblanks() {
+#ifndef __3DS__
+  static const int fixed = getenv("CTR_FRAME_VBLANKS") ? atoi(getenv("CTR_FRAME_VBLANKS")) : 1;
+  return (u64)std::clamp(fixed, 1, 4);
+#else
+  return ctr_frame_vblanks();
+#endif
+}
+
 void InitMachine_PCPort() {
   // PC Port added functions
   init_common_pc_port_functions(
@@ -541,77 +592,81 @@ void InitMachine_PCPort() {
       },
       make_string_from_c);
 
-  make_function_symbol_from_c("__pc-set-levels", (void*)kmachine_extras::pc_set_levels);
+  make_function_symbol_from_c("__pc-set-levels", kmachine_extras::pc_set_levels);
   make_function_symbol_from_c("__pc-set-active-levels",
-                              (void*)kmachine_extras::pc_set_active_levels);
-  make_function_symbol_from_c("__pc-get-tex-remap", (void*)lookup_jak2_texture_dest_offset);
+                              kmachine_extras::pc_set_active_levels);
+  make_function_symbol_from_c("__pc-get-tex-remap", lookup_jak2_texture_dest_offset);
+  // (AI-assisted, j2intro) level-update-after-load waits for the 3DS renderer's .c3l of the level
+  make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
+  // (AI-assisted) pc-maybe-vsync's dog-ratio on the 3DS: the vblanks the last frame took
+  make_function_symbol_from_c("pc-3ds-frame-vblanks", pc_3ds_frame_vblanks);
   make_function_symbol_from_c("pc-init-autosplitter-struct",
-                              (void*)kmachine_extras::init_autosplit_struct);
+                              kmachine_extras::init_autosplit_struct);
 
   // discord rich presence
-  make_function_symbol_from_c("pc-discord-rpc-update", (void*)kmachine_extras::update_discord_rpc);
+  make_function_symbol_from_c("pc-discord-rpc-update", kmachine_extras::update_discord_rpc);
 
   // debugging tools
-  make_function_symbol_from_c("alloc-vagdir-names", (void*)kmachine_extras::alloc_vagdir_names);
+  make_function_symbol_from_c("alloc-vagdir-names", kmachine_extras::alloc_vagdir_names);
 
   // external RPCs
   make_function_symbol_from_c("pc-fetch-external-speedrun-times",
-                              (void*)kmachine_extras::pc_fetch_external_speedrun_times);
+                              kmachine_extras::pc_fetch_external_speedrun_times);
   make_function_symbol_from_c("pc-fetch-external-race-times",
-                              (void*)kmachine_extras::pc_fetch_external_race_times);
+                              kmachine_extras::pc_fetch_external_race_times);
   make_function_symbol_from_c("pc-fetch-external-highscores",
-                              (void*)kmachine_extras::pc_fetch_external_highscores);
+                              kmachine_extras::pc_fetch_external_highscores);
   make_function_symbol_from_c("pc-get-external-speedrun-time",
-                              (void*)kmachine_extras::pc_get_external_speedrun_time);
+                              kmachine_extras::pc_get_external_speedrun_time);
   make_function_symbol_from_c("pc-get-external-race-time",
-                              (void*)kmachine_extras::pc_get_external_race_time);
+                              kmachine_extras::pc_get_external_race_time);
   make_function_symbol_from_c("pc-get-external-highscore",
-                              (void*)kmachine_extras::pc_get_external_highscore);
+                              kmachine_extras::pc_get_external_highscore);
   make_function_symbol_from_c("pc-get-num-external-speedrun-times",
-                              (void*)kmachine_extras::pc_get_num_external_speedrun_times);
+                              kmachine_extras::pc_get_num_external_speedrun_times);
   make_function_symbol_from_c("pc-get-num-external-race-times",
-                              (void*)kmachine_extras::pc_get_num_external_race_times);
+                              kmachine_extras::pc_get_num_external_race_times);
   make_function_symbol_from_c("pc-get-num-external-highscores",
-                              (void*)kmachine_extras::pc_get_num_external_highscores);
+                              kmachine_extras::pc_get_num_external_highscores);
 
   // speedrunning stuff
   make_function_symbol_from_c("pc-sr-mode-get-practice-entries-amount",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entries_amount);
+                              kmachine_extras::pc_sr_mode_get_practice_entries_amount);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-name",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_name);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_name);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-continue-point",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_continue_point);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_continue_point);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-history-success",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_history_success);
+      kmachine_extras::pc_sr_mode_get_practice_entry_history_success);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-history-attempts",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_history_attempts);
+      kmachine_extras::pc_sr_mode_get_practice_entry_history_attempts);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-session-success",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_session_success);
+      kmachine_extras::pc_sr_mode_get_practice_entry_session_success);
   make_function_symbol_from_c(
       "pc-sr-mode-get-practice-entry-session-attempts",
-      (void*)kmachine_extras::pc_sr_mode_get_practice_entry_session_attempts);
+      kmachine_extras::pc_sr_mode_get_practice_entry_session_attempts);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-avg-time",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_avg_time);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_avg_time);
   make_function_symbol_from_c("pc-sr-mode-get-practice-entry-fastest-time",
-                              (void*)kmachine_extras::pc_sr_mode_get_practice_entry_fastest_time);
+                              kmachine_extras::pc_sr_mode_get_practice_entry_fastest_time);
   make_function_symbol_from_c("pc-sr-mode-record-practice-entry-attempt!",
-                              (void*)kmachine_extras::pc_sr_mode_record_practice_entry_attempt);
+                              kmachine_extras::pc_sr_mode_record_practice_entry_attempt);
   make_function_symbol_from_c("pc-sr-mode-init-practice-info!",
-                              (void*)kmachine_extras::pc_sr_mode_init_practice_info);
+                              kmachine_extras::pc_sr_mode_init_practice_info);
   make_function_symbol_from_c("pc-sr-mode-get-custom-category-amount",
-                              (void*)kmachine_extras::pc_sr_mode_get_custom_category_amount);
+                              kmachine_extras::pc_sr_mode_get_custom_category_amount);
   make_function_symbol_from_c("pc-sr-mode-get-custom-category-name",
-                              (void*)kmachine_extras::pc_sr_mode_get_custom_category_name);
+                              kmachine_extras::pc_sr_mode_get_custom_category_name);
   make_function_symbol_from_c(
       "pc-sr-mode-get-custom-category-continue-point",
-      (void*)kmachine_extras::pc_sr_mode_get_custom_category_continue_point);
+      kmachine_extras::pc_sr_mode_get_custom_category_continue_point);
   make_function_symbol_from_c("pc-sr-mode-init-custom-category-info!",
-                              (void*)kmachine_extras::pc_sr_mode_init_custom_category_info);
+                              kmachine_extras::pc_sr_mode_init_custom_category_info);
   make_function_symbol_from_c("pc-sr-mode-dump-new-custom-category",
-                              (void*)kmachine_extras::pc_sr_mode_dump_new_custom_category);
+                              kmachine_extras::pc_sr_mode_dump_new_custom_category);
 
   // setup string constants
   auto user_dir_path = file_util::get_user_config_dir();
@@ -621,6 +676,24 @@ void InitMachine_PCPort() {
   intern_from_c("*pc-settings-folder*")->value() =
       make_string_from_c(settings_path.string().c_str());
   intern_from_c("*pc-settings-built-sha*")->value() = make_string_from_c(build_revision().c_str());
+
+  // (AI-assisted) GOAL's profiler macros only call pc-prof when this is true (as in Jak 1): always
+  // on PC (the imgui frame profiler), on the 3DS only while kperf times sections. The kernel
+  // dispatcher alone makes 8 calls per process and frame (~2300 in Haven City).
+#ifdef __3DS__
+  kperf::init_sections();
+  const bool prof_on = kperf::g_sections_enabled;
+#else
+  const bool prof_on = true;
+#endif
+  intern_from_c("*pc-prof-on*")->value() =
+      prof_on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+#ifdef __3DS__
+  kperf::set_sections_hook([](bool on) {
+    intern_from_c("*pc-prof-on*")->value() =
+        on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+  });
+#endif
 }
 
 /*!
@@ -652,38 +725,50 @@ u32 sceGsSyncPath(u32 mode, u32 timeout) {
 
 void aybabtu() {}
 
+namespace {
+// (AI-assisted) vsync and render-thread waits are not "logic" in the perf lines (kperf.h)
+u32 syncv_timed(u32 mode) {
+  kperf::Scope perf_scope(kperf::Cat::VSYNC);
+  return sceGsSyncV(mode);
+}
+u32 sync_path_timed(u32 mode, u32 timeout) {
+  kperf::Scope perf_scope(kperf::Cat::WAIT);
+  return sceGsSyncPath(mode, timeout);
+}
+}  // namespace
+
 void InitMachineScheme() {
-  make_function_symbol_from_c("put-display-env", (void*)PutDisplayEnv);
-  make_function_symbol_from_c("syncv", (void*)sceGsSyncV);
-  make_function_symbol_from_c("sync-path", (void*)sceGsSyncPath);
-  make_function_symbol_from_c("reset-path", (void*)ee::sceGsResetPath);
-  make_function_symbol_from_c("reset-graph", (void*)sceGsResetGraph);
-  make_function_symbol_from_c("dma-sync", (void*)sceDmaSync);
-  make_function_symbol_from_c("gs-put-imr", (void*)sceGsPutIMR);
-  make_function_symbol_from_c("gs-get-imr", (void*)sceGsGetIMR);
-  make_function_symbol_from_c("gs-store-image", (void*)sceGsExecStoreImage);
-  make_function_symbol_from_c("flush-cache", (void*)FlushCache);
-  make_function_symbol_from_c("cpad-open", (void*)CPadOpen);
-  make_function_symbol_from_c("cpad-get-data", (void*)CPadGetData);
-  make_function_symbol_from_c("mouse-get-data", (void*)MouseGetData);
-  make_function_symbol_from_c("install-handler", (void*)InstallHandler);
-  make_function_symbol_from_c("install-debug-handler", (void*)InstallDebugHandler);
-  make_function_symbol_from_c("file-stream-open", (void*)kopen);
-  make_function_symbol_from_c("file-stream-close", (void*)kclose);
-  make_function_symbol_from_c("file-stream-length", (void*)klength);
-  make_function_symbol_from_c("file-stream-seek", (void*)kseek);
-  make_function_symbol_from_c("file-stream-read", (void*)kread);
-  make_function_symbol_from_c("file-stream-write", (void*)kwrite);
-  make_function_symbol_from_c("scf-get-language", (void*)DecodeLanguage);
-  make_function_symbol_from_c("scf-get-time", (void*)DecodeTime);
-  make_function_symbol_from_c("scf-get-aspect", (void*)DecodeAspect);
-  make_function_symbol_from_c("scf-get-volume", (void*)DecodeVolume);
-  make_function_symbol_from_c("scf-get-territory", (void*)DecodeTerritory);
-  make_function_symbol_from_c("scf-get-timeout", (void*)DecodeTimeout);
-  make_function_symbol_from_c("scf-get-inactive-timeout", (void*)DecodeInactiveTimeout);
-  make_function_symbol_from_c("dma-to-iop", (void*)dma_to_iop);
-  make_function_symbol_from_c("kernel-shutdown", (void*)KernelShutdown);
-  make_function_symbol_from_c("aybabtu", (void*)aybabtu);  // was nothing function
+  make_function_symbol_from_c("put-display-env", PutDisplayEnv);
+  make_function_symbol_from_c("syncv", syncv_timed);
+  make_function_symbol_from_c("sync-path", sync_path_timed);
+  make_function_symbol_from_c("reset-path", ee::sceGsResetPath);
+  make_function_symbol_from_c("reset-graph", sceGsResetGraph);
+  make_function_symbol_from_c("dma-sync", sceDmaSync);
+  make_function_symbol_from_c("gs-put-imr", sceGsPutIMR);
+  make_function_symbol_from_c("gs-get-imr", sceGsGetIMR);
+  make_function_symbol_from_c("gs-store-image", sceGsExecStoreImage);
+  make_function_symbol_from_c("flush-cache", FlushCache);
+  make_function_symbol_from_c("cpad-open", CPadOpen);
+  make_function_symbol_from_c("cpad-get-data", CPadGetData);
+  make_function_symbol_from_c("mouse-get-data", MouseGetData);
+  make_function_symbol_from_c("install-handler", InstallHandler);
+  make_function_symbol_from_c("install-debug-handler", InstallDebugHandler);
+  make_function_symbol_from_c("file-stream-open", kopen);
+  make_function_symbol_from_c("file-stream-close", kclose);
+  make_function_symbol_from_c("file-stream-length", klength);
+  make_function_symbol_from_c("file-stream-seek", kseek);
+  make_function_symbol_from_c("file-stream-read", kread);
+  make_function_symbol_from_c("file-stream-write", kwrite);
+  make_function_symbol_from_c("scf-get-language", DecodeLanguage);
+  make_function_symbol_from_c("scf-get-time", DecodeTime);
+  make_function_symbol_from_c("scf-get-aspect", DecodeAspect);
+  make_function_symbol_from_c("scf-get-volume", DecodeVolume);
+  make_function_symbol_from_c("scf-get-territory", DecodeTerritory);
+  make_function_symbol_from_c("scf-get-timeout", DecodeTimeout);
+  make_function_symbol_from_c("scf-get-inactive-timeout", DecodeInactiveTimeout);
+  make_function_symbol_from_c("dma-to-iop", dma_to_iop);
+  make_function_symbol_from_c("kernel-shutdown", KernelShutdown);
+  make_function_symbol_from_c("aybabtu", aybabtu);  // was nothing function
 
   InitMachine_PCPort();
 
@@ -692,9 +777,16 @@ void InitMachineScheme() {
   if (goalc_enabled()) {
     goalc_dump_kernel_functions_if_requested();
   }
+#if OPENGOAL_SMALL_MEMORY
+  // (AI-assisted) the kernel stack of the small memory layout (memory_layout.h)
+  intern_from_c("*stack-top*")->value() = GOAL_KERNEL_STACK_TOP - GOAL_KERNEL_STACK_SIZE;
+  intern_from_c("*stack-base*")->value() = GOAL_KERNEL_STACK_TOP - 1;
+  intern_from_c("*stack-size*")->value() = GOAL_KERNEL_STACK_SIZE;
+#else
   intern_from_c("*stack-top*")->value() = 0x7f00000;
   intern_from_c("*stack-base*")->value() = 0x7ffffff;
   intern_from_c("*stack-size*")->value() = 0x100000;
+#endif
   intern_from_c("*kernel-boot-message*")->value() = intern_from_c(DebugBootMessage).offset;
   intern_from_c("*user*")->value() = make_string_from_c(DebugBootUser);
   if (DiskBoot) {
@@ -733,6 +825,13 @@ void InitMachineScheme() {
 
 sqlite::SQLiteDatabase sql_db;
 
+#ifdef __3DS__
+// (AI-assisted) no sqlite on the 3DS: the debug editor's database (REPL queries) stays closed
+void initialize_sql_db() {}
+sqlite::GenericResponse run_sql_query(const std::string&) {
+  return sqlite::GenericResponse();
+}
+#else
 void initialize_sql_db() {
   // If the DB has already been initialized, no-op
   if (sql_db.is_open()) {
@@ -792,5 +891,6 @@ sqlite::GenericResponse run_sql_query(const std::string& query) {
   }
   return sql_db.run_query(query);
 }
+#endif
 
 }  // namespace jak2

@@ -44,10 +44,10 @@ struct IsoFs {
   FileRecord* (*find_in)(const char*);                  // 8
   uint32_t (*get_length)(FileRecord*);                  // c
   LoadStackEntry* (*open)(FileRecord*, int, OpenMode);  // 10
-  LoadStackEntry* (*open_wad)(FileRecord*, int32_t);    // 14
+  LoadStackEntry* (*open_wad)(FileRecord*, int);  // 14 (int, u32: as FS_OpenWad, FS_SyncRead; 3DS)
   void (*close)(LoadStackEntry*);                       // 18
   int (*page_begin_read)(LoadStackEntry*, Buffer*);     // 1c
-  uint32_t (*sync_read)();                              // 20
+  u32 (*sync_read)();                             // 20
   uint32_t (*load_sound_bank)(char*, SoundBank*);       // 24
   uint32_t (*load_music)(char*, snd::BankHandle*);
   // void (*poll_drive)();

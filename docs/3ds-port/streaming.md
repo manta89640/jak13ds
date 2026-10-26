@@ -356,3 +356,45 @@ colors, no load failures.
   hides nothing); textures not streamed. Hardware SD timing not measured (Azahar reads the host's
   disk; the cost model is 5.5 MB/s + 8 ms per request).
 - .c3v files: regenerate with `ctr_vis_builder --all` on the v19 folder (checked on sunkenb).
+
+## Jak II: dormant levels and the arena size (AI-assisted, j2-mem, Oct 18)
+
+**Dormant levels** (config `dormant_levels`, Jak II only; CtrLevel.cpp "Dormant levels"). Haven
+City keeps a neighbouring district loaded that the game's visibility string hides whole (ctyindb
+from the slums: 7.4 MB of linear memory, nothing drawn). After 90 level draws with the string all
+zero (the bytes of the level's ids) the level is dormant: its near chunks aren't wanted (stream_k
+0: the scheduler frees them first), and its tie chunks with a distance limit (the small and medium
+objects, the bulk of a district: ctyindb 4.4 of 7.4 MB) are freed where they are more than 100 m
+from the camera (sphere surface). They come back (a detail job of those chunks, `#dormant`) within
+75 m of the camera, of where it is 1.5 s ahead, or of Jak, and all of them as soon as the string
+shows the level again. Kept: everything within 100 m, the tfrag (small in Jak II: 13-376 KB a
+district), the ties without a distance limit (landmarks, LOD far versions), the vista tier, the
+chunks the string can't hide (shrubs have no visibility runs: they are drawn by distance alone),
+textures and merc models. Freed ties nearer than their own draw distance stay possible: the
+string hides them, and the game's per-leaf string can't be predicted from the renderer (the
+level's own BSP decides; the levels' bounds overlap, so distance to them says nothing: ctyindb
+went dormant with the camera inside its bounds). What the string shows first is therefore there
+within 75-100 m; farther freed ties come with the job (~1 s on the SD card for ctyindb's 4.3 MB).
+A freed tie still missing within its distance in view is not drawn; once its mesh comes it stays
+hidden while in view, at most 120 frames from when that began (the near chunks' rule): no pop
+on screen. Host check (`CTR_STREAM_CHECK=1`): `dormant check: N chunk frames of freed ties
+within their distance in view (not drawn), M shown in view after a hold`.
+
+Measured on the host (jak2_route.pad, `CTR_STREAM_SIM=5.5`, `CTR_STREAM_CHECK=1`): ctyindb dormant
+from the slums frees 4325 KB, ctygena from main town / farms 1.5 MB, ctysluma and ctywide during
+the title's flight (read back when it comes near); 4 tie chunk frames missing in view, 2 holds run
+out in view over the whole route; 0 near versions drawn without their data.
+
+Freeing only the ties beyond their worst-case draw distance (x3 auto_detail, x1.5 hold) freed
+76 KB (city ties are within their distances from the neighbouring district); a coarse-tfrag
+stand-in for the detailed cells was tried and dropped (tfrag is small in Jak II).
+
+**Arena size.** The near chunks needed at once on jak2_route.pad: 0.25-1.0 MB on average per stop,
+at most 1.14 MB in the city, 1.53 MB in the sewer. Jak II's first segment is 1536 KB
+(`kJak2StreamKb`, `stream_kb` overrides it); the growth rule adds segments above the floor
+(the farms and the sewer grew to 2.5 MB on the host). Jak 1 keeps 4096.
+
+Host switches: `CTR_SOFT_NO_RASTER=1` (no pixels: long memory runs ~10x faster),
+`CTR_MEM_LOG_EVERY=N` (the `[ctr] memory` line every N frames; it is also logged every stats
+period: per level linear / heap KB, the linear memory by kind, the free linear memory and heap on
+the 3DS), `CTR_MEM_FIELDS=1` (a level's biggest heap tables at load).

@@ -11,8 +11,10 @@
 #include "game/kernel/jak1/kscheme.h"
 #if !OPENGOAL_ONLY_JAK1
 #include "game/kernel/jak2/kscheme.h"
+#if !OPENGOAL_NO_JAK3
 #include "game/kernel/jak3/kscheme.h"
 #include "game/kernel/jakx/kscheme.h"
+#endif
 #endif
 #include "game/runtime.h"
 
@@ -142,6 +144,13 @@ namespace generic_tie_convert { extern void link(); }
 
 #if !OPENGOAL_ONLY_JAK1
 namespace jak2 {
+namespace pc_new_bones_mtx_calc { extern void link(); }  // (AI-assisted) 3DS
+namespace pc_new_joint_decompressor { extern void link(); }  // (AI-assisted) native_anim.cpp
+namespace pc_light_hash_add_lights { extern void link(); }  // (AI-assisted) native2_lights.cpp
+namespace pc_traffic_natives { extern void link(); }  // (AI-assisted) native2_traffic.cpp
+namespace pc_sky_light_natives { extern void link(); }  // (AI-assisted) native2_sky_light.cpp
+namespace pc_merc_request_natives { extern void link(); }  // (AI-assisted) native2_merc_request.cpp
+namespace mem_copy { extern void link(); }  // (AI-assisted) native2_misc.cpp
 namespace collide_do_primitives { extern void link(); }
 namespace moving_sphere_triangle_intersect { extern void link(); }
 namespace calc_animation_from_spr { extern void link(); }
@@ -158,6 +167,7 @@ namespace set_sky_vf23_value { extern void link(); }
 namespace draw_boundary_polygon { extern void link(); }
 namespace particle_adgif { extern void link(); }
 namespace sp_launch_particles_var { extern void link(); }
+namespace pc_sp_init_fields { extern void link(); }  // (AI-assisted) native_sp_init.cpp
 namespace sparticle_motion_blur { extern void link(); }
 namespace sp_process_block_2d { extern void link(); }
 namespace sp_process_block_3d { extern void link(); }
@@ -281,6 +291,7 @@ namespace shadow_scissor_edges { extern void link(); }
 namespace shadow_calc_dual_verts { extern void link(); }
 namespace shadow_xform_verts { extern void link(); }
 }
+#if !OPENGOAL_NO_JAK3
 namespace jak3 {
 namespace light_hash_get_bucket_index { extern void link(); }
 namespace add_light_sphere_to_light_group { extern void link(); }
@@ -549,6 +560,7 @@ namespace shadow_add_double_tris { extern void link(); }
 namespace shadow_execute { extern void link(); }
 namespace method_21_cloth_system { extern void link(); }
 }
+#endif  // !OPENGOAL_NO_JAK3
 #endif  // !OPENGOAL_ONLY_JAK1
 // clang-format on
 
@@ -556,6 +568,9 @@ LinkedFunctionTable gLinkedFunctionTable;
 Rng gRng;
 PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2CLinkCallbacks = {
     //////// JAK 1
+#if OPENGOAL_NO_JAK1
+    {},  // (AI-assisted, j2-mem2) see game_common_types.h
+#else
     {{"font", {jak1::draw_string::link}},
      {"sparticle-launcher",
       {jak1::particle_adgif::link, jak1::sp_launch_particles_var::link,
@@ -631,11 +646,15 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
       {jak1::draw_inline_array_instance_tie::link,
        jak1::draw_inline_array_prototype_tie_generic_asm::link}},
      {"generic-tie", {jak1::generic_tie_dma_to_spad_sync::link, jak1::generic_tie_convert::link}}},
+#endif  // OPENGOAL_NO_JAK1
 #if !OPENGOAL_ONLY_JAK1
     /////////// JAK 2
-    {{"collide-func",
+    {{"types-h", {jak2::mem_copy::link}},  // (AI-assisted) mem-copy! (native2_misc.cpp)
+     {"collide-func",
       {jak2::collide_do_primitives::link, jak2::moving_sphere_triangle_intersect::link}},
-     {"joint", {jak2::calc_animation_from_spr::link, jak2::cspace_parented_transformq_joint::link}},
+     {"joint",
+      {jak2::calc_animation_from_spr::link, jak2::cspace_parented_transformq_joint::link,
+       jak2::pc_new_joint_decompressor::link}},
      {"font", {jak2::get_string_length::link, jak2::draw_string_asm::link}},
      {"texture", {jak2::adgif_shader_texture_with_update::link}},
      {"debug",
@@ -644,14 +663,15 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak2::draw_boundary_polygon::link}},
      {"sparticle-launcher",
       {jak2::particle_adgif::link, jak2::sp_launch_particles_var::link,
-       jak2::sparticle_motion_blur::link}},
+       jak2::sparticle_motion_blur::link, jak2::pc_sp_init_fields::link}},
      {"sparticle", {jak2::sp_process_block_2d::link, jak2::sp_process_block_3d::link}},
      {"sky-tng",
       {jak2::set_tex_offset::link, jak2::draw_large_polygon::link, jak2::render_sky_quad::link,
        jak2::render_sky_tri::link, jak2::method_16_sky_work::link, jak2::method_17_sky_work::link,
        jak2::method_32_sky_work::link, jak2::method_33_sky_work::link,
        jak2::method_28_sky_work::link, jak2::method_29_sky_work::link,
-       jak2::method_30_sky_work::link, jak2::set_sky_vf23_value::link}},
+       jak2::method_30_sky_work::link, jak2::set_sky_vf23_value::link,
+       jak2::pc_sky_light_natives::link}},  // (AI-assisted) the last one
      {"collide-hash",
       {jak2::method_11_collide_hash::link, jak2::method_12_collide_hash::link,
        jak2::fill_bg_using_box_new::link, jak2::fill_bg_using_line_sphere_new::link}},
@@ -670,7 +690,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
      {"spatial-hash",
       {jak2::method_18_grid_hash::link, jak2::method_19_grid_hash::link,
        jak2::method_20_grid_hash::link, jak2::method_22_grid_hash::link,
-       jak2::method_28_sphere_hash::link, jak2::method_33_sky_work::link,
+       jak2::method_28_sphere_hash::link,
        jak2::method_29_sphere_hash::link, jak2::method_30_sphere_hash::link,
        jak2::method_31_sphere_hash::link, jak2::method_32_sphere_hash::link,
        jak2::method_33_spatial_hash::link, jak2::method_39_spatial_hash::link,
@@ -685,13 +705,16 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak2::method_11_collide_shape_prim_group::link, jak2::method_9_collide_cache_prim::link,
        jak2::method_10_collide_cache_prim::link, jak2::method_17_collide_cache::link,
        jak2::method_9_collide_puss_work::link, jak2::method_10_collide_puss_work::link}},
-     {"bones", {jak2::bones_mtx_calc::link}},
+     {"bones", {jak2::bones_mtx_calc::link, jak2::pc_new_bones_mtx_calc::link}},
      {"foreground",
       {jak2::foreground_check_longest_edge_asm::link, jak2::foreground_merc::link,
-       jak2::foreground_generic_merc::link, jak2::foreground_draw_hud::link}},
+       jak2::foreground_generic_merc::link, jak2::foreground_draw_hud::link,
+       jak2::pc_merc_request_natives::link}},  // (AI-assisted) the last one
      {"lights",
       {jak2::add_light_sphere_to_light_group::link, jak2::light_hash_add_items::link,
        jak2::light_hash_count_items::link, jak2::light_hash_get_bucket_index::link}},
+     {"drawable", {jak2::pc_light_hash_add_lights::link}},  // (AI-assisted)
+     {"traffic-engine", {jak2::pc_traffic_natives::link}},  // (AI-assisted)
      {"nav-control", {jak2::method_39_nav_state::link}},
      {"nav-mesh",
       {jak2::nav_state_patch_pointers::link, jak2::method_45_nav_mesh::link,
@@ -728,6 +751,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak2::shadow_find_facing_single_tris::link, jak2::shadow_init_vars::link,
        jak2::shadow_scissor_top::link, jak2::shadow_scissor_edges::link,
        jak2::shadow_calc_dual_verts::link, jak2::shadow_xform_verts::link}}},
+#if !OPENGOAL_NO_JAK3
     /////////// JAK 3
     {{"lights",
       {jak3::light_hash_get_bucket_index::link, jak3::add_light_sphere_to_light_group::link,
@@ -935,6 +959,10 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
 #else
     {},
     {},
+#endif  // !OPENGOAL_NO_JAK3
+#else
+    {},
+    {},
     {},
 #endif
 };
@@ -965,17 +993,20 @@ void LinkedFunctionTable::reg(const std::string& name,
   // this is short stub that will jump to the appropriate function.
   Ptr<u8> jump_to_asm;
   switch (g_game_version) {
+#if !OPENGOAL_NO_JAK1
     case GameVersion::Jak1:
       jump_to_asm = Ptr<u8>(::jak1::alloc_heap_object(s7.offset + jak1_symbols::FIX_SYM_GLOBAL_HEAP,
                                                       *(s7 + jak1_symbols::FIX_SYM_FUNCTION_TYPE),
                                                       0x40, UNKNOWN_PP));
       break;
+#endif
 #if !OPENGOAL_ONLY_JAK1
     case GameVersion::Jak2:
       jump_to_asm = Ptr<u8>(::jak2::alloc_heap_object(
           s7.offset + jak2_symbols::FIX_SYM_GLOBAL_HEAP,
           ::jak2::u32_in_fixed_sym(jak2_symbols::FIX_SYM_FUNCTION_TYPE), 0x40, UNKNOWN_PP));
       break;
+#if !OPENGOAL_NO_JAK3
     case GameVersion::Jak3:
       jump_to_asm = Ptr<u8>(::jak3::alloc_heap_object(
           s7.offset + jak3_symbols::FIX_SYM_GLOBAL_HEAP,
@@ -986,6 +1017,7 @@ void LinkedFunctionTable::reg(const std::string& name,
           s7.offset + jak3_symbols::FIX_SYM_GLOBAL_HEAP,
           ::jakx::u32_in_fixed_sym(jakx_symbols::FIX_SYM_FUNCTION_TYPE), 0x40, UNKNOWN_PP));
       break;
+#endif  // !OPENGOAL_NO_JAK3
 #endif
     default:
       ASSERT(false);

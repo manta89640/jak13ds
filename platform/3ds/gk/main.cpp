@@ -1,21 +1,25 @@
 /*!
  * @file main.cpp
  * (AI-assisted)
- * gk for the Nintendo 3DS: sets up the SD card paths and runs the Jak 1 runtime with the null
- * renderer (no graphics yet). Logs go to the bottom screen and to the log file.
+ * gk for the Nintendo 3DS: sets up the SD card paths and runs the Jak 1 runtime with the 3DS
+ * renderer, or (AI-assisted, OG3DS_GAME=jak2) the Jak II runtime with the null renderer. Logs go to
+ * the bottom screen and to the log file.
  *
  * SD card layout: see docs/3ds-port/3ds_build.md
  *
- * Settings: sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). Here:
- *   args = <game args> (default "-boot -cbackend": retail boot, no REPL, GOAL code compiled to C)
+ * Settings: sdmc:/3ds/jak1/config.ini (Jak II: sdmc:/3ds/jak2/config.ini; docs/3ds-port/config_ini.md).
+ * Here:
+ *   args = <game args> (default "-boot -cbackend": retail boot, no REPL, GOAL code compiled to C;
+ *          Jak II: "-boot -fakeiso -cbackend")
  *   listener = on: the soc:U socket service, so the REPL (goalc) can connect over Wi-Fi (1 MB RAM)
  *   screenshots = N: a screenshot every N frames to data/log
- *   pad_script = FILE: scripted controller input for tests (relative to sdmc:/3ds/jak1)
+ *   pad_script = FILE: scripted controller input for tests (relative to the game's folder)
  */
 
 #include <cstdio>
 #include <sstream>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <malloc.h>
 #include <fstream>
@@ -71,6 +75,11 @@ std::vector<std::string> read_game_args() {
     }
   } else {
     args.push_back("-boot");
+#if OG3DS_GAME_JAK2
+    // (AI-assisted) Jak II's kernel starts the IOP from the "DVD" unless told -fakeiso (its
+    // defaults are modsrc 1, reboot_iop 1; Jak 1's -boot path doesn't need it)
+    args.push_back("-fakeiso");
+#endif
     args.push_back("-cbackend");
   }
   return args;
@@ -173,10 +182,25 @@ int main(int /*argc*/, char** /*argv*/) {
   }
 
   GameLaunchOptions game_options;
+#if OG3DS_GAME_JAK2
+  // (AI-assisted) the Jak II build (OG3DS_GAME=jak2): the 3DS renderer with Jak II's buckets;
+  // config.ini renderer = null: no picture, the logic alone (the null renderer paces vsync)
+  game_options.game_version = GameVersion::Jak2;
+  game_options.disable_display = false;
+  game_options.server_port = DECI2_PORT;
+  {
+    char v[32];
+    const bool null_gfx = ctr_config_get("renderer", v, sizeof(v)) && !strcmp(v, "null");
+    Gfx::SetPreferredPipeline(null_gfx ? GfxPipeline::Null : GfxPipeline::Ctr);
+    lg::info("3DS: Jak II, {} renderer (config.ini renderer = {})", null_gfx ? "null" : "3DS",
+             null_gfx ? "null" : "ctr");
+  }
+#else
   game_options.game_version = GameVersion::Jak1;
   game_options.disable_display = false;  // "display" = the null renderer, which paces vsync
   game_options.server_port = DECI2_PORT;
   Gfx::SetPreferredPipeline(GfxPipeline::Ctr);
+#endif
   {
     // config.ini: screenshots = N, a screenshot every N frames to data/log
     char v[32];

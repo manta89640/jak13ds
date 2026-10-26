@@ -194,6 +194,18 @@ struct CtrLevelData {
   // versions of the cell (the same for both: their in-view tests agree), x y z r
   std::vector<float> lod_cell_sphere;
   bool was_far = false;
+  // (AI-assisted, j2-mem) Jak II: a level the game's visibility string has hidden whole for a while
+  // (dormant_levels; CtrLevel.cpp "Dormant levels")
+  bool dormant = false;
+  u32 hidden_frames = 0;        // level draws in a row with its string all zero
+  // (AI-assisted, j2intro) the frame its string showed it again after it was dormant (a reveal: the
+  // title intro's first frame); CtrLevels::note_late_in_view
+  u64 shown_frame = 0;
+  u32 vis_scan_bytes = UINT32_MAX;  // the string's bytes its ids are in (UINT32_MAX: not known yet)
+  // per chunk (made at its first dormancy): kDormFreed its mesh freed for that, kDormReading being
+  // read back; and the frame a chunk without its mesh began to be kept hidden in view (0: not)
+  std::vector<u8> chunk_dormant;
+  std::vector<u32> chunk_hold_since;
   // (AI-assisted, j2cull) draw_level's cull clusters, made at the level's first draw
   // (make_cull_clusters): its chunks in runs of neighbouring ones in index order (one test of a
   // cluster that lies beyond every member's distance limit, while all of them were beyond it last
@@ -214,6 +226,17 @@ struct CtrLevelData {
   std::vector<u32> vista_chunks;  // the CHUNK_KIND_VISTA chunks, in index order
   bool cull_made = false;
   size_t cull_sizes[3] = {0, 0, 0};  // chunks, tie LOD groups, chunk_unit when made
+  bool dormant_requested = false;  // a read of its freed chunks is queued
+  u64 dormant_retry_frame = 0;     // after a failed one: not before this frame
+  static constexpr u8 kDormFreed = 1, kDormReading = 2;
+  // (AI-assisted, j2strip) Jak II, linear memory short (CtrLevel.cpp "Distance freeing"): a shrub
+  // or tie chunk with a draw distance, its mesh left out (or freed) while the camera is far beyond
+  // that distance, read back by distance (being read)
+  static constexpr u8 kDistFreed = 3, kDistReading = 4;
+  bool dist_free = false;  // its load ran short of linear memory, or a load made room: on
+  bool dormant_freed(size_t ci) const {
+    return ci < chunk_dormant.size() && chunk_dormant[ci] != 0;
+  }
   u32 generation = 0;             // tells loads of the same level apart
   // (AI-assisted) config fine_vis: the level's .c3v sidecar (c3v_format.h, CtrFineVis.h), opened
   // at load when it matches the .c3l (nullptr: none, or another conversion's); its blocks are read
@@ -381,6 +404,40 @@ struct CtrLevelData {
   // the file's header and block directory, for the stream jobs' readers (no reads of them)
   std::shared_ptr<const c3l::Reader::Dir> file_dir;
   bool is_unit(size_t ci) const { return !chunk_unit.empty() && chunk_unit[ci] != UINT32_MAX; }
+  // (AI-assisted, j2vis) c3l v20 prototype visibility (c3l::ProtoVis): the prototypes Jak II hides
+  // by task state, each with its runs (vis_runs indices, sorted) and the chunks they are in. The
+  // game names the hidden ones every frame (pc-add-tie-vis-mask / pc-add-shrub-vis-mask packets,
+  // CtrTfragRenderer::proto_vis_scan); their runs aren't drawn (draw_level, emit_chunk).
+  struct ProtoVis {
+    std::string name;
+    u16 kind = 0;  // c3l::kProtoTie / kProtoShrub
+    bool hidden = false;
+    std::vector<u32> runs;
+    std::vector<u32> chunks;
+  };
+  std::vector<ProtoVis> protos;
+  // run r is one of a toggled prototype's (hidden or not)
+  bool proto_run(u32 r) const {
+    for (const auto& p : protos) {
+      if (std::binary_search(p.runs.begin(), p.runs.end(), r)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  // the game's last packets applied (tie, shrub; bytes as sent) and whether one came yet
+  std::string proto_mask[2];
+  bool proto_mask_seen[2] = {false, false};
+  // the hidden prototypes' runs (sorted) and per chunk whether it has some (empty: none hidden)
+  std::vector<u32> proto_hidden_runs;
+  std::vector<u8> chunk_proto_hidden;
+  // (AI-assisted, j2water2) c3l v21 envmapped ties (c3l::ExtEnvTie): the listed base draws (their
+  // shine), per draw its index there (-1: none; empty: no such draws), per chunk the byte offset of
+  // its normals in normals_mesh (-1: none), the mesh holding all of them (ctr_gpu, -1: none)
+  std::vector<c3l::EnvTieDraw> env_draws;
+  std::vector<s16> draw_env;
+  std::vector<s32> chunk_normals;
+  int normals_mesh = -1;
 };
 
 /*! (AI-assisted) host --ctr-gfx with env CTR_FINE_VIS_CHECK: the level pieces fine_vis hid this
@@ -404,8 +461,26 @@ class Reader;
  * Threads: get/find_merc_model/process_pending_loads run on the render thread, set_wanted and
  * service on the game thread while the render thread is idle, prefetch on any thread.
  */
+/*! (AI-assisted) Where the running game's .c3l files are: <project>/out/<game>/c3l. */
+fs::path ctr_level_c3l_dir();
+/*! (AI-assisted) Jak II: the level whose DGO file this is ("CTA.DGO" -> "ctysluma"), nullptr: none.
+ * For prefetching a level's .c3l when the overlord starts reading its DGO. */
+const char* ctr_jak2_level_for_dgo(const char* dgo_name);
+
+/*! (AI-assisted) Jak II: the visibility strings of the 6 level slots (*level* draw-level) this
+ * frame, from bucket 2 (add-pc-port-background-data), for the background buckets of each slot. */
+struct CtrJak2Vis {
+  static constexpr int kSlots = 6;
+  u8 bits[kSlots][2048];
+  bool valid[kSlots] = {};
+};
+
 class CtrLevels {
  public:
+  /*! (AI-assisted) Jak II's visibility strings (CtrRendererJak2Bg.cpp writes, the level draws
+   * read; render thread). */
+  CtrJak2Vis& jak2_vis() { return m_jak2_vis; }
+
   CtrLevels();
   ~CtrLevels();
   /*! Load the common file (GAME.c3l: Jak and other shared models), kept loaded. */
@@ -431,6 +506,11 @@ class CtrLevels {
   /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
    * nothing to wait for (any thread). The game waits for this before a level starts. */
   bool ready(const std::string& name);
+  /*! (AI-assisted, j2intro) host, env CTR_LOAD_DELAY_MS (load_sim_on): the game thread waits in
+   * ready() without frames (Jak II's boot and play loops), and the host has no loader thread: run
+   * the queued loads, hand over the delayed ones whose time came (render thread idle) */
+  void host_service();
+  static bool load_sim_on();
   /*! (AI-assisted) The levels being drawn (render thread). */
   void loaded(std::vector<const CtrLevelData*>* out) const {
     out->clear();
@@ -444,6 +524,13 @@ class CtrLevels {
   /*! Partial unload (render thread): free the meshes a far level doesn't draw / read them again. */
   void unload_detail(CtrLevelData& lev);
   void request_detail(CtrLevelData& lev);
+  /*! (AI-assisted, j2-mem) Jak II, render thread, each frame: the dormant levels' chunks freed
+   * or read back by the camera's distance (CtrLevel.cpp "Dormant levels") */
+  void dormant_update(u64 frame);
+  /*! (AI-assisted, j2strip) Jak II, render thread, each frame: the levels short of linear memory
+   * (dist_free): their freed chunks read back by distance (CtrLevel.cpp "Distance freeing"; they
+   * are freed only by a load that would fail otherwise: make_room) */
+  void dist_update(u64 frame, u32 free_now);
   /*! (AI-assisted, streaming) render thread, each level draw: the camera position (game units) */
   void stream_note_camera(const math::Vector4f& trans,
                           const math::Vector4f planes[4],
@@ -482,28 +569,32 @@ class CtrLevels {
   /*! (AI-assisted, streaming) a jump of a level's tie LOD factor (the camera's focal length: a cut
    * to another camera, a zoom) */
   void stream_note_cut(u64 frame) { m_cut_frame = frame; }
-  /*! (AI-assisted, title3) draw_level: tie LOD groups in view drawn far this frame because their
-   * near chunks aren't there yet (recent: the level was shown again within the last 3 s). The
-   * renderer keeps a screen that comes out of black black while there are such groups after a
-   * level was shown or the camera cut (CtrRenderer::draw_pmode_fade), at most 1.5 s. */
-  void note_late_in_view(u64 frame, u32 groups, bool recent) {
+  /*! (AI-assisted, j2intro; Jak 1's title3 has the same) draw_level (Jak II): what of a level is
+   * missing in view this frame: tie LOD groups drawn far because their near chunks aren't there
+   * yet, and dormant tie chunks not read back yet (not drawn at all). recent: the level was shown
+   * again (its dormancy ended) within the last 3 s. The renderer keeps a screen that comes out of
+   * black black while there is such a thing after a level was shown or the camera cut
+   * (CtrRenderer::draw_pmode_fade), at most 1.5 s (Jak II: while it gets fewer, at most 6 s). */
+  void note_late_in_view(u64 frame, u32 n, bool recent) {
     if (m_lv_frame != frame) {
       m_lv_frame = frame;
-      m_lv_groups = 0;
+      m_lv_count = 0;
       m_lv_recent = false;
     }
-    m_lv_groups += groups;
+    m_lv_count += n;
     m_lv_recent = m_lv_recent || recent;
   }
-  //! the groups of this frame (note_late_in_view), and whether a level was shown or the camera cut
+  //! this frame's count (note_late_in_view), and whether a level was shown or the camera cut
   //! within the last 3 s
   u32 late_in_view(u64 frame, bool* shown_or_cut) const {
     const bool now = m_lv_frame == frame;
     *shown_or_cut = (now && m_lv_recent) || (m_cut_frame && frame < m_cut_frame + 90);
-    return now ? m_lv_groups : 0;
+    return now ? m_lv_count : 0;
   }
   /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
   void stream_log();
+  /*! (AI-assisted, j2-mem) the levels' memory, the free linear memory and heap (render thread) */
+  void log_memory();
   /*! (AI-assisted, streaming) host check (env CTR_STREAM_CHECK): the counts of this frame's draw
    * of a level (CtrTfragRenderer::draw_level) */
   struct StreamCheck {
@@ -512,6 +603,9 @@ class CtrLevels {
     u64 late_unrequested = 0;                // ... and not even being read (no room)
     u64 holes = 0;                           // near versions drawn without their data (never)
     u64 units_drawn = 0, units_baked = 0;    // near chunks drawn; ... with baked colors (never)
+    // (AI-assisted, j2-mem) dormant levels: freed tie chunks within their distance in view (not
+    // drawn: never, but for camera cuts), and shown in view after a hold ran out
+    u64 dorm_missing = 0, dorm_switch_in_view = 0;
   };
   StreamCheck& stream_check() { return m_scheck; }
   /*! (AI-assisted, streaming) a unit needed (draw_level): late statistics */
@@ -527,6 +621,7 @@ class CtrLevels {
   void service();
 
  private:
+  CtrJak2Vis m_jak2_vis;  // (AI-assisted)
   enum class LoadResult { LOADED, MISSING, FAILED, CANCELLED };
   LoadResult load(const std::string& name, CtrLevelData* out);
   // (AI-assisted) decode: time spent decompressing (c3l v11), 0 for older files
@@ -585,6 +680,8 @@ class CtrLevels {
     // (request_repair): only these parts of the loaded level `generation`
     bool detail = false;
     bool repair = false;
+    bool dormant = false;  // (AI-assisted, j2-mem) with detail: a dormant level's chunks read back
+    bool dist = false;  // (AI-assisted, j2strip) with dormant: chunks freed by distance read back
     u32 generation = 0;
     std::string path;
     u32 vertex_data_offset = 0, index_data_offset = 0;
@@ -613,7 +710,8 @@ class CtrLevels {
     bool parts() const { return detail || repair || stream; }
     // in m_requested
     std::string key() const {
-      return detail   ? name + "#detail"
+      return dormant  ? name + "#dormant"
+             : detail ? name + "#detail"
              : repair ? name + "#repair"
              : stream ? name + "#stream" + std::to_string(serial)
                       : name;
@@ -650,6 +748,8 @@ class CtrLevels {
     u32 reads = 0;
     u32 preloads = 0, preload_misses = 0;  // (streaming) runs read in one request each, or not
     u64 ready_frame = 0;  // host, env CTR_STREAM_SIM: taken from this frame on (SD card model)
+    // (AI-assisted, j2intro) host, env CTR_LOAD_DELAY_MS: a level load handed over from then on
+    double sim_ready_ms = 0;
   };
   void request(const Job& job);  // render thread
   void run_job(const Job& job);  // loader thread (or inline without one)
@@ -672,8 +772,10 @@ class CtrLevels {
   // (AI-assisted) loader: an allocation failed. Once per job: has the render thread unload the
   // parked prefetches the game gave up on and free the deleted GPU memory now, waits for it, and
   // returns true (try the allocation again).
-  bool make_room(const std::string& name, const char* what);
-  bool m_room_tried = false;  // by the loader's job (one at a time)
+  // (AI-assisted, j2pop) bytes: what the allocation wants (distance freeing frees about that much,
+  // the farthest first); a second try in the same job frees all it can
+  bool make_room(const std::string& name, const char* what, u64 bytes = 0);
+  int m_room_tries = 0;  // by the loader's job (one at a time)
   // (AI-assisted) the .c3l reader's windows and block caches, kept for all loads (one at a time):
   // made at startup, while the heap is in one piece
   c3l::Reader::Buffers m_read_bufs;
@@ -684,6 +786,7 @@ class CtrLevels {
   // under m_lock: the loader asks for room / the number of times the render thread made it
   bool m_room_wanted = false;
   u32 m_room_serial = 0;
+  u64 m_room_bytes = 0;  // (AI-assisted, j2pop) make_room's want (0: everything far)
   bool can_start(const Job& job) const;  // under m_lock
   std::atomic<u32> m_generation{0};
   void loader_main();
@@ -744,11 +847,28 @@ class CtrLevels {
   u32 m_stream_repair_room = 0;
   u32 m_stream_serial = 0;
   std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
+  std::vector<Done> m_load_delayed;    // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS: the same
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
   float m_cam_rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // (AI-assisted) rows, see camera()
+  // (AI-assisted, j2strip) distance freeing: where the camera is and will be, and Jak (game
+  // units; n of them, 0: not known), for the render thread (dist_positions) and a copy the loader
+  // reads (m_lock: m_dist_snap)
+  int dist_positions(float pos[4][3]) const;
+  // (AI-assisted, j2pop) min_excess: only the chunks more than that (game units) beyond their
+  // freeing distance
+  u64 dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, float min_excess = 0.f);
+  // (AI-assisted, j2pop) a load that made room: the farthest chunks first, until want bytes are
+  // freed (0: all of those far beyond their distance); returns the bytes freed
+  u64 dist_make_room(u64 want);
+  float m_dist_snap[4][3] = {};
+  int m_dist_snap_n = 0;
+  u64 m_dist_log_frame = 0;
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
+  u64 m_lv_frame = 0;  // (AI-assisted, j2intro) note_late_in_view
+  u32 m_lv_count = 0;
+  bool m_lv_recent = false;
   u64 m_idle_frame = 0;        // the last idle fill job
   // Jak: camera space (stream_note_target, its frame), then world (stream_note_camera)
   float m_target_cam[3] = {0, 0, 0}, m_target[3] = {0, 0, 0};
@@ -760,9 +880,6 @@ class CtrLevels {
   float m_game_cam_next[3] = {0, 0, 0}, m_game_cam[3] = {0, 0, 0}, m_game_vel[3] = {0, 0, 0};
   bool m_game_cam_new = false, m_game_cam_valid = false;
   float m_k_last = 0.f, m_k_any = 0.f;
-  u64 m_lv_frame = 0;  // (AI-assisted, title3) note_late_in_view
-  u32 m_lv_groups = 0;
-  bool m_lv_recent = false;
   // scheduling (kept to avoid allocations)
   struct StreamCand {
     CtrLevelData* lev;
@@ -824,9 +941,10 @@ void ctr_level_set_detail(float t);
 // (AI-assisted, title-popin) auto_detail: the GPU is over its budget (frames about to miss their
 // vblank): lower distances apply to what is in view too
 void ctr_level_set_detail_urgent(bool urgent);
-/*! (AI-assisted, title3) render thread, before the frame's level draws: the screen is black this
- * frame (the game's PMODE fade, or the renderer holding it): no tie LOD group is kept far "in view"
- * for late data then (nobody saw it far), CtrTfragRenderer::draw_level */
+/*! (AI-assisted, j2intro; as Jak 1's title3) render thread, before the frame's level draws (Jak II):
+ * the screen is black this frame (the game's blackout, or the renderer holding it). Nothing is
+ * kept hidden or far "in view" for late data then (nobody saw it missing): dormant chunks read
+ * back and near chunks that came are drawn at once (CtrTfragRenderer::draw_level). */
 void ctr_level_set_screen_black(bool black);
 float ctr_level_detail();
 /*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
@@ -842,10 +960,30 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   CtrTfragRenderer(std::string name, int id, CtrLevels* levels);
   ~CtrTfragRenderer() override;
   void render(DmaFollower& dma, CtrRenderState& rs) override;
+  /*! (AI-assisted) Jak II: the background buckets of level slot `slot` (tfrag, tie, shrub of any
+   * kind): the first one in a frame that has the level's camera (TfragPcPortData) draws all of the
+   * level's .c3l. */
+  void render_jak2(DmaFollower& dma, CtrRenderState& rs, int slot);
+  /*! (AI-assisted, j2water) Jak II: the slot's water buckets: the level's blended and ordered
+   * draws of this frame, held back by draw_level (after the characters) */
+  void draw_jak2_late(const CtrRenderState& rs);
+  /*! (AI-assisted, j2vis) Jak II: the slot's tie and shrub buckets (tie-lN-tfrag, shrub-lN-shrub),
+   * where the game sends the names of the prototypes it hides (c3l v20 prototype visibility). */
+  void set_jak2_proto_buckets(int tie_bucket, int shrub_bucket) {
+    m_proto_bucket[0] = tie_bucket;
+    m_proto_bucket[1] = shrub_bucket;
+  }
 
  private:
+  // (AI-assisted, j2vis) the game's hidden prototype names this frame (the packet after the
+  // TfragPcPortData one in the slot's tie / shrub bucket) applied to the level's prototype runs
+  void proto_vis_scan(CtrLevelData& lev, const CtrRenderState& rs);
+  int m_proto_bucket[2] = {-1, -1};
+  u64 m_proto_tris = 0, m_proto_frames = 0;  // statistics: triangles hidden, level draws
   void draw_level(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRenderState& rs);
   void flush_calls(int pass);
+  void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines
+  int m_jak2_slot = -1;  // (AI-assisted) Jak II: the level slot being drawn (-1: Jak 1)
   // (AI-assisted, j2cull) draw_level's phases (ticks summed since the last log line): setup, the
   // tie LOD groups (and near chunks), the chunk loop (view / visibility / run tests), occ_cull, time
   // of day, impostors (chunks), the draw lists (the walk and the calls made), impostor cards, the
@@ -854,9 +992,29 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_ph[kPhN] = {};
   u64 m_ph_draws = 0, m_ph_emits = 0, m_ph_runs = 0, m_ph_walked = 0, m_ph_calls = 0;
   u64 m_ph_skipped = 0, m_ph_lod_skipped = 0;  // chunks / tie LOD groups their cluster stood for
+  u32 m_late_in_view = 0;  // (AI-assisted, j2intro) draw_level: missing in view (note_late_in_view)
   // (AI-assisted, gpu-rt) static_cmdlists: a pass's draws, and each pass's command cache
   std::vector<ctr_mesh_call> m_calls;
-  ctr_cmd_cache* m_cmd_cache[2] = {nullptr, nullptr};
+  ctr_cmd_cache* m_cmd_cache[3] = {nullptr, nullptr, nullptr};  // (AI-assisted, j2water) 2: late
+  // (AI-assisted, j2water) Jak II: the blended draws held back (draw_jak2_late), their frame and fog
+  std::vector<ctr_mesh_call> m_late_calls;
+  bool m_late_collect = false;  // host: submit collects them instead of drawing
+  u64 m_late_frame = ~0ull;
+  float m_late_fog0[4] = {0, 0, 0, 0}, m_late_fog1[4] = {0, 0, 0, 0};
+  u8 m_late_fog_rgb[3] = {0, 0, 0};
+  // (AI-assisted, j2water2) c3l v21 envmapped ties: their draws of this frame (the opaque ones
+  // after the opaque pass, the blended ones after draw_jak2_late's), the time of day's env color
+  // (the tie bucket's pc-add-tie-envmap-info, GS units: 0x80 = 1), statistics
+  struct EnvCall {
+    const ctr_draw_state* state;
+    int env_tex, mesh, normals_mesh, normals_offset, first, count;
+    ctr_etie_draw d;
+  };
+  std::vector<EnvCall> m_env_calls, m_env_late;
+  float m_env_color[3] = {128.f, 128.f, 128.f};
+  u64 m_env_draws = 0, m_env_tris = 0, m_env_frames = 0;
+  void env_color_scan(const CtrLevelData& lev, const CtrRenderState& rs);
+  void draw_env_calls(std::vector<EnvCall>& calls);
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
   int m_level_draws = 0;

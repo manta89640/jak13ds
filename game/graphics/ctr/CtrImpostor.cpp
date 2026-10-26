@@ -387,6 +387,11 @@ void CtrImpostors::build_chunk(LevelState& ls, u32 ci) {
       if (f + n > (u32)ni) {
         c.eligible = false;
       }
+      // (AI-assisted, j2vis) a prototype the game hides by task state (c3l v20): drawn as itself,
+      // never in a card (a card made while it was shown would keep it)
+      if (!lev.protos.empty() && lev.proto_run(r)) {
+        c.eligible = false;
+      }
       if (r < lev.run_spheres.size() && lev.run_spheres[r].r != 0xffff) {
         const auto& sp = lev.run_spheres[r];
         for (int a = 0; a < 3; a++) {

@@ -10,6 +10,14 @@
  * these functions, which use plain C types.
  */
 
+/* (AI-assisted) The game's folder on the SD card: sdmc:/3ds/jak1, or sdmc:/3ds/jak2 for the Jak II
+ * build (OG3DS_GAME=jak2 in platform/3ds/CMakeLists.txt). The paths below are in it. */
+#if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
+#define CTR_SD_DIR "sdmc:/3ds/jak2"
+#else
+#define CTR_SD_DIR "sdmc:/3ds/jak1"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -105,6 +113,12 @@ int ctr_thread_create(void* (*fn)(void*), void* arg, unsigned int stack_size, in
 int ctr_thread_create_pinned(void* (*fn)(void*), void* arg, unsigned int stack_size, int prio,
                              int core, void** handle);
 void ctr_thread_join(void* handle);
+/* (AI-assisted, j2-mem2) the stack high-water marks of the threads made by ctr_thread_create(_pinned)
+ * (" name used/size" in KB per thread, into line): returns 1 the first time and when one went 4 KB
+ * deeper, 2 if one is past half of its stack, else 0. ctr_thread_name_current names the calling
+ * thread there. */
+int ctr_thread_stacks_check(char* line, unsigned int line_size);
+void ctr_thread_name_current(const char* name);
 /* The app's share of core 1 in percent (APT_SetAppCpuTimeLimit: 80, 30 if refused, 0: none). */
 int ctr_core1_share(void);
 /* Ask for a share of core 1 (if not done yet); returns the share in percent (0: refused). */

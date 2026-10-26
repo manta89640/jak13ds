@@ -156,6 +156,17 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba);
  * GPU finished the previous frame, and this frame's draws read the new texels. */
 void ctr_gpu_tex_update(int handle, const uint8_t* rgba);
 void ctr_gpu_tex_delete(int handle);
+/* (AI-assisted, Jak II texture animation) A texture can stand for an animated texture slot (a
+ * level's base texture of it: c3l::texture_anim_slot): draws of it use the slot's texture
+ * (ctr_gpu_anim_slot_set) instead while the slot has one. Slot -1: none (the default; a deleted
+ * handle loses it). ctr_gpu_anim_slot_set takes effect at the next frame begin (draws within a
+ * frame all see the same texture); tex -1: none. */
+#define CTR_ANIM_SLOTS 64
+void ctr_gpu_tex_set_anim_slot(int handle, int slot);
+void ctr_gpu_anim_slot_set(int slot, int tex);
+/* (AI-assisted) The slots a draw used in the last finished frame (bit i: slot i; drawn with the
+ * base texture or the slot's): their animations are worth updating. */
+uint64_t ctr_gpu_anim_slots_drawn(void);
 /* (AI-assisted) The same as ctr_gpu_tex_create (GS alpha: 0x80 = 1.0), stored in the smallest
  * 3DS format that keeps it (config.ini compact_textures): gray -> L8 / LA8, opaque -> RGB565,
  * on/off alpha -> RGBA5551, else RGBA8 (as ctr_gpu_tex_create; (AI-assisted) not RGBA4: soft
@@ -189,6 +200,13 @@ int ctr_gpu_clip_reserve(int max_verts, int max_indices, ctr_clip_vertex** verts
                          uint16_t** indices);
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, const int* count,
                               int n, int vert_count, int index_count);
+/* (AI-assisted, j2gpu) ctr_gpu_clip_draw_ranges whose first n_mtx ranges have their vertices'
+ * x, y, z (w ignored, taken as 1) in a space that `matrix` (4x4, row major: clip = M (x y z 1))
+ * takes to clip space: the vertex shader multiplies (the clip program's 4 dp4 with the matrix
+ * folded into its uniform), not the CPU. The ranges after them are in clip space as usual. */
+void ctr_gpu_clip_draw_ranges_mtx(const float matrix[16], int n_mtx, const ctr_draw_state* states,
+                                  const int* first, const int* count, int n, int vert_count,
+                                  int index_count);
 
 /* (AI-assisted) Two texture layers in one pass (the sky's two cloud layers): like
  * ctr_gpu_draw_clip, with a second set of texture coordinates for the same texture on texture
@@ -215,6 +233,9 @@ int ctr_gpu_copy_screen(void);
  * for the filter, and makes the texture in VRAM if there is room then. Texels outside that range
  * keep what an earlier copy left: only read the screen in x0..x1. */
 int ctr_gpu_copy_screen_part(float x0, float x1);
+/* (AI-assisted, j2gaps) frees the screen copy's texture (the next copy makes it again): Jak II's
+ * menu keeps a copy of the game's last frame only while the menu shows it */
+void ctr_gpu_screen_copy_release(void);
 /* (AI-assisted) Render to texture (impostors, CtrImpostor): an RGBA8 texture the GPU draws into,
  * in VRAM when there is room (else linear memory: make it before the level texture pools fill
  * VRAM), and a D16 depth buffer for
@@ -469,6 +490,9 @@ void ctr_gpu_diag_start(void);
 void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */
+/* (AI-assisted, j2-mem2) the command words one frame has room for (KB): the pipeline's half, else
+ * citro3d's whole buffer */
+unsigned int ctr_gpu_cmd_buffer_kb(void);
 int ctr_gpu_set_pipeline(int on);
 /* (AI-assisted) config.ini sky_last. ctr_gpu_set_sky_hook: fn(arg) is called once, right before
  * the first draw of this frame that needs what is behind it on screen: blending, no depth write,
@@ -662,6 +686,41 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
                         const void* verts, const uint16_t* indices, int first_index,
                         int index_count);
 void ctr_gpu_ocean_end(void);
+
+/* (AI-assisted, j2water) Jak II's ocean with the sky reflection (the PS2 env map pass in the same
+ * draw), platform/3ds/shaders/ctr_ocean_env.v.pica. Vertices in the static mesh layout:
+ *   rgb = fog(tex(st0) * color * 2) + env(st2) * a, a = tex.a * color.a * 2 (clamped to 1)
+ * with env on texture unit 2 (repeat, linear), st2 = dot(env row.xyz, d) / |d| + env row.w and
+ * d = dir rows . (pos, 1) (the vertex relative to the camera). ctr_gpu_ocean_end after the draws. */
+typedef struct {
+  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
+  float tex[2][4];      /* wave texture s, t = dot(row.xyz, pos) + row.w */
+  float dir[3][4];      /* d = dot(row.xyz, pos) + row.w */
+  float env[2][4];      /* env s, t (see above) */
+} ctr_ocean_env_draw;
+void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_ocean_env_draw* d,
+                            int mesh, int first_index, int index_count);
+
+/* (AI-assisted, j2water2) Jak II's envmapped ties (c3l v21): a level mesh draw (the static mesh
+ * layout) with the envmap shine in the same draw, platform/3ds/shaders/ctr_etie.v.pica.
+ * normals_mesh: a mesh (ctr_gpu_mesh_create, its vertices as bytes) holding from byte
+ * normals_offset (a multiple of 4) int8 x, y, z, 0 per vertex of the mesh (world space * 127). With the envmap on
+ * texture unit 2 (clamped, linear) at etie.vert's coordinates:
+ *   rgb = fog(tex(st0) * color * 2 + env(st2) * shine * a), a = tex.a * color.a * 2 (at most 1)
+ * (decal: tex(st0) instead of tex * color * 2), shine: 0xff = 1 (abgr, the alpha unused).
+ * ctr_gpu_etie_end after the draws. */
+typedef struct {
+  ctr_mesh_matrix clip; /* (pos, 1) -> clip, prepared */
+  float cam[3][4];      /* camera space position v = dot(row.xyz, pos) + row.w */
+  float nrm[3][4];      /* camera space normal n = dot(row.xyz, normal) */
+  float st_scale;       /* 1/1024 (CTR_TCC_ST_ATLAS: 1/32768) */
+  uint32_t shine;       /* the shine color (abgr) */
+} ctr_etie_draw;
+void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_draw* d, int mesh,
+                       int normals_mesh, int normals_offset, int first_index, int index_count);
+void ctr_gpu_etie_end(void);
+/* 1 when ctr_gpu_etie_draw can draw (the Jak II build's program is loaded) */
+int ctr_gpu_etie_ready(void);
 
 /* Fog for ctr_gpu_draw_mesh (see platform/3ds/shaders/ctr_mesh_old.v.pica), from clip w:
  *   game fog = (255 - clamp(fog0.x - w, fog0.y, fog0.z)) / 255  (fog0.w = -1/255)

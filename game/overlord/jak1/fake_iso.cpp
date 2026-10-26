@@ -176,6 +176,12 @@ void close_all_parked() {
 }
 }  // namespace
 
+// (AI-assisted, j2gaps) Jak II's fake CD (overlord/jak2/iso_cd.cpp) reads its voice and spool
+// files itself: it marks each read here, so the save worker holds off for them as in Jak 1
+void FS_NoteStreamRead() {
+  stream_mark();
+}
+
 bool FS_StreamBusy(u32 quiet_ms) {
   if (sStreamReads.load() > 0) {
     return true;

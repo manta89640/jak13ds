@@ -1,0 +1,29 @@
+# (AI-assisted) jak2_newgame.pad at the 3DS's 30 fps: Start at the JAK II logo, New Game, slot 1
+# (empty on a fresh SD), the intro scenes, Jak stands in the prison. Use with screenshots = N in
+# config.ini (the shots). Azahar (Oct 24): the intro plays, Jak stands in the prison at
+# (474.22, 8.42, 67.27); the x at 2600 came before the auto-save notice was up (it opens ~3 s
+# after Jak stands), so the press is at 2700 now (not run on the 3DS yet with this frame).
+1500 start
+1506 -
+1700 shot ng3_menu
+1800 x
+1806 -
+2000 shot ng3_slots
+2100 x
+2106 -
+2160 shot ng3_after_slot
+2300 log newgame: +200 after the slot
+2301 pos *target*
+2400 shot ng3_intro
+2500 wait *target* target-stance
+2501 log newgame: gameplay
+2502 pos *target*
+2660 shot ng3_notice
+2700 x
+2706 -
+2760 shot ng3_play
+2800 ly=0
+3100 -
+3101 pos *target*
+3102 shot ng3_walk
+3103 exit

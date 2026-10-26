@@ -59,6 +59,10 @@ class Player {
   BankHandle LoadBank(std::span<u8> bank);
   // (AI-assisted) bank is in owner's buffer, which the bank keeps (Loader::ParseBank)
   BankHandle LoadBank(std::span<u8> bank, std::unique_ptr<u8[]> owner);
+  // (AI-assisted) memory held by the loaded banks (their file bytes), and how many there are
+  u32 ResidentBankBytes(u32* count = nullptr);
+  // (AI-assisted) snd_RunStreamsWithoutOutput
+  void SetRunStreamsWithoutOutput(bool on) { mRunStreamsSilent = on; }
 #ifdef __3DS__
   // (AI-assisted) snd_LockVoiceWrites: the mixer's lock, for the SPU register writes (sdshim)
   void LockVoices() { mTickLock.lock(); }
@@ -127,6 +131,8 @@ class Player {
 #endif
 
   Loader mLoader;
+  std::map<BankHandle, u32> mBankBytes;  // (AI-assisted) ResidentBankBytes
+  std::atomic<bool> mRunStreamsSilent{false};
   Synth mSynth;
   VoiceManager mVmanager;
   s32 mTick{0};

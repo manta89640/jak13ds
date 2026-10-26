@@ -2230,6 +2230,7 @@ void link() {
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak2/kscheme.h"
+#include "game/mips2c/jak2_functions/native_functions.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
 namespace shadow_execute {
@@ -2805,7 +2806,7 @@ void link() {
   cache.shadow_scissor_edges = intern_from_c("shadow-scissor-edges").c();
   cache.shadow_scissor_top = intern_from_c("shadow-scissor-top").c();
   cache.shadow_xform_verts = intern_from_c("shadow-xform-verts").c();
-  gLinkedFunctionTable.reg("shadow-execute", execute, 256);
+  gLinkedFunctionTable.reg("shadow-execute", execute, 256, &native::shadow_execute);
 }
 
 } // namespace shadow_execute
