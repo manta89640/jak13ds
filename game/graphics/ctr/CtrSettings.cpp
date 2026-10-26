@@ -189,6 +189,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       }
     } else if (key == "mip_bias") {
       s.mip_bias = std::clamp(f, -4.f, 4.f);  // (AI-assisted)
+    } else if (key == "envmap_min_px") {
+      s.envmap_min_px = std::clamp(f, 0.f, 400.f);  // (AI-assisted, fidelity2)
     } else if (key == "skin_rows_f24") {
       s.skin_rows_f24 = parse_bool(v);  // (AI-assisted)
     } else if (key == "mipmaps") {
@@ -232,6 +234,9 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.sprite_min_alpha = std::clamp(std::atoi(v.c_str()), 2, 64);  // (AI-assisted)
     } else if (key == "sprite_alpha_discard") {
       s.sprite_alpha_discard = parse_bool(v);  // (AI-assisted)
+    } else if (key == "particle_fill") {
+      // (AI-assisted, perfv2) off | on | strong (or 0 | 1 | 2)
+      s.particle_fill = v == "strong" || v == "2" ? 2 : (parse_bool(v) ? 1 : 0);
     } else if (key == "vis_culling") {
       s.vis_culling = parse_bool(v);
     } else if (key == "run_culling") {
@@ -292,8 +297,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.merc_fog = parse_bool(v);  // (AI-assisted, far-fog)
     } else if (key == "raw_cmds") {
       s.raw_cmds = parse_bool(v);
-    } else if (key == "vcache_reuse") {
-      s.vcache_reuse = parse_bool(v);
     } else if (key == "static_cmdlists") {
       // (AI-assisted, gpu-rt) on | off | compare
       s.static_cmdlists = v == "compare" ? 2 : (parse_bool(v) ? 1 : 0);
@@ -321,6 +324,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
                key == "debug_log" || key == "particle_density" ||
+               key == "shield_density" || key == "shield_native" ||
                key == "io_checksum" || key == "anim_lod" || key == "io_cache" ||
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
                key == "text_min_height" ||
@@ -497,9 +501,9 @@ std::string CtrSettings::summary() const {
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
-      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} skin_rows_f24 {} skin_clip_f24 {} "
-      "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} "
-      "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} impostors {} raw_cmds {} vcache_reuse {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
+      "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
+      "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
+      "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} impostors {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "static_cmdlists {} ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
@@ -531,6 +535,7 @@ std::string CtrSettings::summary() const {
       shadow_casters,
       rgba4_as_rgba8 ? "on" : "off", vram_textures ? "on" : "off",
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
+      envmap_min_px,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off", color16 ? "on" : "off",
       early_depth ? (early_depth_block32 ? "block32" : "on")
                   : (early_depth_sky ? (early_depth_block32 ? "sky32" : "sky") : "off"),
@@ -543,6 +548,7 @@ std::string CtrSettings::summary() const {
           : std::string(),
       compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
+      particle_fill == 2 ? "strong" : (particle_fill ? "on" : "off"),
       vis_culling ? "on" : "off", run_culling ? "on" : "off", tie_lod ? "on" : "off",
       streaming ? fmt::format("on ({} KB, reserve {} KB)", stream_kb, stream_reserve_kb)
                 : std::string("off"),
@@ -552,7 +558,7 @@ std::string CtrSettings::summary() const {
                               impostor_error, impostor_budget, impostor_atlas)
                 : std::string("off"),
       raw_cmds ? "on" : "off",
-      vcache_reuse ? "on" : "off", opaque_alpha ? "on" : "off",
+      opaque_alpha ? "on" : "off",
       tex_cache_uploads ? "uploads" : "always",
       asm_tex ? "on" : "off",
       asm_mem ? "on" : "off",

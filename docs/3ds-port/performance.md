@@ -345,8 +345,9 @@ lights as float24 (skin_clip_f24, ~11 words per model; off by default now).
   START_DRAW_FUNC0 around each draw (hazard related or actions, not redundant).
 - B4 (post-vertex cache) and B5 (attribute formats) don't change these keys: the level mesh is
   already 16 bytes (short4 + short2 + ubyte4), merc 24; B5.byte vs B5.short says whether a byte
-  position format (a converter change) would pay, B4 whether vcache_reuse / a bigger
-  POST_VERTEX_CACHE_NUM would.
+  position format (a converter change) would pay, B4 whether a bigger
+  POST_VERTEX_CACHE_NUM would (keeping the cache across draws, vcache_reuse, broke the HUD on
+  hardware and is gone: see "The red HUD shard").
 
 Leads not done: a one-bone merc program for draws whose vertices all have one bone (about 20
 instructions instead of 33; needs per-draw program switches, so shader_groups-style shared code
@@ -1090,23 +1091,39 @@ default (on). It never had anything to do with the red HUD shard (see below).
   over the PS2's fade zone instead of a patch coming in at once (an approximation of the PS2's
   alpha fade of its trans version; a per-run alpha would need a draw per run with its own
   combiner constant). auto_detail still pulls `shrub_scale` to 0.8 when the GPU is busy.
-- **The red HUD shard (not solved).** The user's progress-menu shot (Spider Cave, Japanese,
-  `frame_overlap2 = off`, so the pipelining is not the cause): the shard is a translucent red
-  triangle whose two sharp corners are the circle-button icon quad's top-right and bottom-left
-  corners (its diagonal; host `CTR_HUD_DUMP=1` with hud3.pad lists the menu's HUD sprites and
-  their screen corners) and whose third corner lies 72 px left of the icon's top-left corner at
-  the same height; the icon itself is complete in the shot, so it is an extra triangle, not one
-  of the icon's own two. The HUD chunk also carries 21 all-zero sprites (scale 0, color 0, tex0 0:
-  the game's unused entries; drawn as sub-pixel quads, as the PS2 does). Checked and equivalent:
-  the quads' command words (PRIMITIVE_CONFIG / VERTEX_OFFSET tracking across citro3d draws, the
-  post-vertex cache clear before every draw with new vertices, the index buffer, the sprite
-  snapshot of the REF data; Azahar runs each draw's vertex fetch from memory at submit time, so a
-  vertex of another draw can only come from the data or the command words). Not reproduced: a
-  16000-frame Japanese title-menu soak with sound on, hud3's A/B stages, the host. `CtrSprite.cpp`
-  now has a canary on every 2D / HUD quad (no parallelogram, or a corner over 16 screen widths
-  out: a `[ctr] sprite canary` line with the sprite's data and a saved frame, rate limited): if the
-  next report's log has none, the data the CPU sends is right and the mixing happens after it.
-
+- **The red HUD shard (solved Oct 25, hudshard).** Hardware only: one triangle of a HUD icon
+  stretched off to one side (the progress menu's red shard at the circle button, the red wedge
+  over the title menu's frame, the white streak at the pause screen's orb counter), always the same
+  elements. The progress-menu shot: the shard's two sharp corners are the circle icon quad's
+  top-right and bottom-left corners (vertices 1 and 3, the diagonal the quad's two triangles
+  share: indices 0 1 3 / 3 1 2), the third lies ~64-72 px left of its top-left corner, and the
+  icon itself is complete: so triangle (0, 1, 3) of a *second* draw of the same quad, with a wrong
+  vertex 0.
+  - The second draw is the HUD's faint pass (FB_ONLY alpha fail, b1032c8320): since a36940fb15
+    (Oct 12) `ctr_gpu_draw_quads_again` draws the first pass's vertices again, the same buffer
+    offset and the same uniforms. With `vcache_reuse` (bb1bcbeb74, Oct 3; on by default since
+    4b201f1d77, Oct 16) such a draw was the one HUD draw that kept the GPU's post-vertex cache:
+    no GPUREG_VTX_FUNC clear, no citro3d's two PRIMITIVE_CONFIG writes after it. Every other
+    sprite draw has new vertices, so it cleared.
+  - On the real 3DS the faint pass's first lookup (index 0, the oldest entry the first pass left)
+    returns a wrong vertex; the newer ones (1, 3, 2) are right. Only single-quad buckets (an icon
+    with its own texture: the four button icons, the frame pieces, the orb glow) still have index
+    0 in the cache at the faint pass (a bucket of 2+ quads has evicted it), hence always the same
+    elements. Why the PICA returns a bad entry rather than the kept one isn't documented anywhere
+    (3dbrew / GBATEK only list POST_VERTEX_CACHE_NUM "0x4 or 0x84" and VTX_FUNC "clears it");
+    the evidence is that the shard is exactly that triangle and that nothing else differs.
+  - Ruled out: the CPU data (the sprite canary of 6034f061fe never fired for these quads on
+    hardware in the oct25e log, and the REF snapshot reports 0 copies differ), the vertex cache
+    flushes (`flush_vbuf` / deferred ranges cover every vertex before each submit; the faint pass
+    reads bytes the first pass just read), the fence words (after the vertices, read only),
+    frame_overlap2 (the Oct 23 shot had it off). Azahar keeps no vertex cache across draws, so it
+    can't show it; the host neither.
+  - Fix: the raw draws clear the cache after every indexed draw, as citro3d does, and vcache_reuse
+    is gone (config key ignored, `ctr_cfg_removed`). Cost: 6 command words per raw draw that
+    vcache_reuse had saved for consecutive same-buffer draws; no shading work (the cache was only
+    kept, never shared between different vertices).
+  - The Oct 17 "HUD / progress menu flicker" (b461054860: the progress menu's frame and the orb
+    glow breaking on hardware, the day after the Oct 16 default) were most likely the same.
 ## Ocean sky reflection, particles, pickups (AI-assisted, Oct 25, j1ocean)
 
 - **Sky reflection** (the PS2 ocean's env map pass, `ctr_gpu_ocean_full_draw_env`, see
@@ -1127,3 +1144,31 @@ default (on). It never had anything to do with the red HUD shard (see below).
   other builds and configs: fable1 title build 17.5-24.0 ms with sound on (ocean 2.5 ms); Oct 17
   beach-start 14.1 ms and misty-start 11.5 ms, standing. Azahar doesn't model the GPU's fill
   cost: the extra texture read and the extra particles are only priced on hardware.
+
+
+## Citadel robot cage (AI-assisted, Oct 26)
+
+Launcher 2420 now emits at one quarter density on 3DS (`shield_density = 0.25`;
+1 restores the original). It retains the original panel dimensions, randomized ring, flash/fade
+sequence and shield-off behavior. Launcher identity comes from the particle ID table, so other
+uses of the texture are unchanged and level unload/reload updates the pointer. The global
+particle density remains an upper bound.
+
+The birth callback `birth-func-random-rot` runs inline in C++: the original random draw sequence,
+matrix/vector operations and quaternion operations, with no intermediate GOAL ABI calls.
+`shield_native = off` keeps the generated GOAL callback. Replaced math functions fall back to
+GOAL. Host verify: 4,350 birth calls (68 comparing all GOAL memory), zero differences; overall
+mips2c verify 971,892 calls, zero differences. The native birth takes about 24% fewer host
+instructions per call including verification wrapper overhead; ARM11 time is measured below.
+
+Azahar, private instance, sound on, the same binary and scripted Citadel view/camera sequence,
+six five-second windows after warmup. Original settings `shield_density=1, shield_native=off`
+vs defaults: logic 16.155 -> 15.863 ms/frame; process-particles 0.737 -> 0.435;
+sp-process-block-3d (included in process-particles) 0.463 -> 0.162; launch 0.510 -> 0.438.
+Render build 23.18 -> 22.91 ms/frame. Both 29.9 fps. These are scene totals, not shield-only
+timings. Azahar does not model hardware fill cost, so this does not establish the real 3DS GPU
+saving from the 75% reduction in shield births.
+
+The complete arrival introduction (`green-sagecage-introduction`) was additionally captured in
+Azahar every four game frames, with sound on. Capture timing is excluded from the performance
+comparison. Evidence and scripts: `port_test/reports/citadel-effects/`.

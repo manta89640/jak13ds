@@ -44,6 +44,7 @@
  */
 
 #include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,29 @@
 #include "game/graphics/ctr/ctr_gpu.h"
 
 struct CtrLevelData;
+
+// (AI-assisted, lavamem) A growing array in pages of 2^kShift elements: no block bigger than a page
+// and nothing copied when it grows (a vector doubles: the impostors' cluster table of lava tube
+// wanted one block of 557 KB, plus the old one while copying, of a fragmented heap: the hardware
+// abort of Oct 25).
+template <typename T, u32 kShift>
+class CtrPaged {
+ public:
+  T& operator[](size_t i) { return m_pages[i >> kShift][i & kMask]; }
+  const T& operator[](size_t i) const { return m_pages[i >> kShift][i & kMask]; }
+  size_t size() const { return m_size; }
+  void push_back(const T& v) {
+    if ((m_size >> kShift) == m_pages.size()) {
+      m_pages.emplace_back(new T[kMask + 1]);  // (may throw: nothing changed then)
+    }
+    (*this)[m_size++] = v;
+  }
+
+ private:
+  static constexpr size_t kMask = ((size_t)1 << kShift) - 1;
+  std::vector<std::unique_ptr<T[]>> m_pages;
+  size_t m_size = 0;
+};
 
 class CtrImpostors {
  public:
@@ -114,8 +138,8 @@ class CtrImpostors {
     const CtrLevelData* lev = nullptr;
     u32 generation = 0;
     std::vector<ChunkInfo> chunks;
-    std::vector<Cluster> clusters;
-    std::vector<u32> runs;  // the clusters' runs (CtrLevelData::vis_runs) and first indices
+    CtrPaged<Cluster, 7> clusters;  // (AI-assisted, lavamem) pages of 128 (17 KB)
+    CtrPaged<u32, 12> runs;  // the clusters' runs (CtrLevelData::vis_runs) and first indices
     u64 last_frame = 0;
   };
   struct Slot {
@@ -177,6 +201,13 @@ class CtrImpostors {
   };
 
   bool ensure_atlas();
+  // (AI-assisted, lavamem) the bodies of begin_level / chunk / finish_chunks / draw_cards; those
+  // catch std::bad_alloc from them (out_of_memory)
+  void begin_level_impl(CtrLevelData& lev, const Camera& cam, u64 frame, bool allowed);
+  void chunk_impl(u32 ci, const float clip[16], bool runs_valid, u8* run_shown, bool* partly);
+  void finish_chunks_impl();
+  void draw_cards_impl();
+  void out_of_memory(const char* where);
   void build_chunk(LevelState& ls, u32 ci);
   bool exact_box(LevelState& ls, Cluster& c);
   void project_box(const float bmin[3], const float bmax[3], Proj* out) const;
@@ -192,6 +223,9 @@ class CtrImpostors {
   void hide(const Want& w);
 
   bool m_active = false;  // in a level draw with impostors
+  bool m_rt_open = false;  // finish_chunks: captures into the atlas under way
+  u64 m_oom_until = 0;     // (AI-assisted, lavamem) out of heap: no impostors before this frame
+  u32 m_oom_count = 0;
   bool m_failed = false;  // the atlas couldn't be made: off
   int m_atlas = -1;
   int m_lw = 0, m_lh = 0;
@@ -229,11 +263,13 @@ class CtrImpostors {
   double m_cap_cpu_ms = 0;
   double m_exact_ms = 0;    // this frame's exact boxes' CPU time
   double m_t_chunks = 0;    // begin_level's end (the chunk calls' time)  // this frame's capture CPU work (raster, planes)
-  // capture scratch: the group's vertices on the tile (x, y, 1/w; stamp: projected this capture)
-  // and the visible 1/w per sample
+  // capture scratch: the group's vertices on the tile (x, y, 1/w), each once, in the order met,
+  // and the visible 1/w per sample. (AI-assisted, lavamem) m_vtag, per vertex index of a mesh
+  // (65536, 256 KB, made once): the pass (m_stamp) it was last met in << 16 | its index in m_pj
   std::vector<std::array<float, 3>> m_pj;
-  std::vector<u32> m_pj_stamp;
-  u32 m_stamp = 0;
+  std::vector<u32> m_vtag;
+  u16 m_stamp = 0;
+  bool new_pass();  // a new m_stamp (false: no memory for m_vtag)
   std::vector<float> m_zb;
   std::vector<u32> m_used_verts;
   // statistics (per stats period)

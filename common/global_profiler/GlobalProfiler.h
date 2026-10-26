@@ -36,7 +36,9 @@ class GlobalProfiler {
  private:
   std::atomic_bool m_enabled = false;
 #ifdef __3DS__
-  size_t m_max_events = 1024;  // 152 bytes each: 10 MB at the PC default
+  // 152 bytes each: 10 MB at the PC default. (AI-assisted, lavamem) 16 (was 1024, 152 KB): only
+  // the -profile argument turns it on, which the 3DS doesn't use
+  size_t m_max_events = 16;
 #else
   size_t m_max_events = 65536;
 #endif

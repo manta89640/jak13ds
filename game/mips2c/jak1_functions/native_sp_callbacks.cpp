@@ -19,6 +19,7 @@
 #include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
 #include "game/mips2c/native_goalc_ops.h"
+#include "game/mips2c/native_sp_init_fields.h"
 
 namespace Mips2C::jak1::native {
 
@@ -175,6 +176,82 @@ bool run_inline(Kind kind, const u64 a[8], const NativeArgs& caller) {
 }
 
 }  // namespace
+
+// (AI-assisted) This level callback is called for every cage panel. Keep the same float
+// operations/random draws as GOAL, but avoid its stack matrices and nested ABI calls.
+bool sp_birth_random_rot(u32 fn, const u64 a[8], const NativeArgs& caller) {
+  static FnSym birth("birth-func-random-rot");
+  if (!birth.unchanged() || fn != birth.fn) {
+    return false;
+  }
+  static const bool enabled = [] {
+#ifdef __3DS__
+    char v[32];
+    return !ctr_config_get("shield_native", v, sizeof(v)) || strcmp(v, "off");
+#else
+    const char* v = getenv("OPENGOAL_SHIELD_NATIVE");
+    return !v || strcmp(v, "0");
+#endif
+  }();
+  if (!enabled) {
+    return false;
+  }
+  static FnSym dependencies[] = {
+      FnSym("rand-vu-float-range"), FnSym("rand-vu"), FnSym("pc-rand"),
+      FnSym("matrix-rotate-y!"), FnSym("vector-matrix*!"), FnSym("vector3s-rotate*!"),
+      FnSym("vector-rotate*!"), FnSym("quaternion-rotate-y!"),
+      FnSym("quaternion-vector-angle!"), FnSym("quaternion*!"),
+      FnSym("quaternion-normalize!"), FnSym("sin"), FnSym("cos")};
+  for (auto& dep : dependencies) {
+    if (!dep.unchanged()) {
+      return false;
+    }
+  }
+  const u32 info = (u32)a[1], vec = (u32)a[2];
+  static const u32 vu_r = ::jak1::intern_from_c("*_vu-reg-R_*").offset;
+  auto run = [&]() -> u64 {
+    GC_NATIVE_FP_EXACT
+    const float lo = gload<float>(info + 108);
+    const float hi = 65536.f + lo;
+    const float angle = lo + sp_init::rand_vu(g_ee_main_mem, vu_r) * (hi - lo);
+    float mat[16];
+    go::matrix_rotate_y(mat, angle);
+    float p[4] = {go::bitsf(0x47e46666u), 0.f, 0.f, 1.f};
+    go::vector_matrix_mul(p, p, mat);
+    for (int i = 0; i < 3; i++) {
+      gstore<float>(vec + 4 * i, gload<float>(vec + 4 * i) + p[i]);
+    }
+    for (u32 offset : {16u, 64u}) {
+      float v[4] = {gload<float>(info + offset), gload<float>(info + offset + 4),
+                    gload<float>(info + offset + 8), 1.f};
+      go::vector_rotate_mul(v, v, mat);
+      for (int i = 0; i < 3; i++) {
+        gstore<float>(info + offset + 4 * i, v[i]);
+      }
+    }
+    go::v4 q = load4(vec + 16);
+    const float w2 = ((1.f - q.z * q.z) - q.y * q.y) - q.x * q.x;
+    q.w = __builtin_sqrtf(go::gc_fcmp_k(go::fbits(w2), 0, go::GC_FLT, 1) ? 0.f - w2 : w2);
+    const float half = 0.5f * (16384.f + angle);
+    const float sn = go::sin(half), cs = go::cos(half);
+    const go::v4 y = {0.f * sn, 1.f * sn, 0.f * sn, cs};
+    q = go::quaternion_normalize(go::quaternion_mul(y, q));
+    const bool negative = go::gc_fcmp_k(go::fbits(q.w), 0, go::GC_FLT, 1);
+    gstore<float>(vec + 16, negative ? 0.f - q.x : 0.f + q.x);
+    gstore<float>(vec + 20, negative ? 0.f - q.y : 0.f + q.y);
+    gstore<float>(vec + 24, negative ? 0.f - q.z : 0.f + q.z);
+    return 0;
+  };
+#if MIPS2C_WRITE_LOG
+  if (native_verify_inline_on()) {
+    native_verify_inline("birth-func-random-rot", {{info, 144}, {vec, 48}, {vu_r, 4}}, run,
+                         [&]() -> u64 { native_call_goal(fn, a, caller); return 0; });
+    return true;
+  }
+#endif
+  run();
+  return true;
+}
 
 /*!
  * (AI-assisted) a particle callback or relaunch (fn a0 a1 a2 a3 ...) from the particle natives:

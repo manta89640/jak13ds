@@ -71,6 +71,9 @@ struct CtrSettings {
   bool distort = true;  // (AI-assisted) on (Oct 16 config cleanup; was off: square sprites on hardware, fixed)
   // the envmap shine of merc models (power cells, precursor metal): a second pass over their draws
   bool envmap = true;
+  // (AI-assisted, fidelity2) envmap_min_px: no shine pass for models smaller than this on the top
+  // screen (their bounding sphere's diameter in pixels; 0 = every model). HUD models always keep it
+  float envmap_min_px = 16.f;
   // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
   // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
   bool envmap_batch = true;
@@ -142,8 +145,9 @@ struct CtrSettings {
   // (blends two levels: smoother, slower).
   int mipmaps = 1;
   // (AI-assisted) the LOD bias of mipmapped level / model textures (+0.5, +1: the next smaller
-  // level sooner, blurrier, fewer texels read); 0 = none
-  float mip_bias = 0.f;
+  // level sooner, blurrier, fewer texels read); 0 = none. (AI-assisted, fidelity2) +0.25 by default
+  // (+0.5 looked too blurry to the user in Azahar; safe preset: 0)
+  float mip_bias = 0.25f;
   // (AI-assisted) merc bone rows uploaded as float24 instead of float32 (a quarter fewer uniform
   // words; the GPU computes in float24 either way). On: Jak and Daxter identical in Azahar, the
   // float24 uniform path (raw_unif, raw_pack_f24) already draws the level meshes on hardware
@@ -216,6 +220,12 @@ struct CtrSettings {
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
+  // (AI-assisted, perfv2) particle_fill = off | on | strong: fewer blended particle pixels for the
+  // GPU. on: each world particle drawn over its texture's alpha box only (the same picture), and
+  // big faint particles thinned: of the ones with a half size of 16+ pixels and alpha <= 0.375,
+  // every 2nd particle slot is drawn with the alpha of two (1 - (1 - a)^2, additive 2a), the other
+  // left out. strong: every 3rd, 12+ pixels, alpha <= 0.25. off: as before (preset safe)
+  int particle_fill = 1;
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)
   bool vis_culling = true;
@@ -342,9 +352,6 @@ struct CtrSettings {
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
-  // (AI-assisted) with raw_cmds: draws of the same vertices and matrices one after the other keep
-  // the GPU's post-vertex cache (fewer command words; off until checked on hardware)
-  bool vcache_reuse = true;
   // (AI-assisted, gpu-rt) static_cmdlists: the level meshes' raw command words of a stretch of
   // draws (same program, no citro3d update) are kept after two frames drew them alike and copied
   // in again while the draws, the GPU state before them and the settings stay the same; only the

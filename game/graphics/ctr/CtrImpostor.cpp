@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <new>
 
 #include "common/log/log.h"
 
@@ -39,6 +40,12 @@ constexpr int kTodMaxErr = 4;          // vertex color units (0x80 = 1.0) the ti
 constexpr int kMaxCardVerts = 8192;    // per level draw (the frame's vertex stream: 128 KB)
 constexpr int kRasterPerFrame = 40000; // capture texels the CPU rasterizes per frame at most
 constexpr double kCaptureCpuMs = 1.0;  // capture CPU work (raster, planes) per frame at most
+// (AI-assisted, perfv2) ... and while the render thread's build took kBusyBuildMs or more in the
+// frame before, kCaptureCpuMsBusy: there the build time sets the frame rate (village2 on hardware:
+// build 18-24 ms, the GPU waiting for it; captures 0.9-1.4 ms a frame of it to save 2-4k triangles
+// of GPU work it had room for), so new pictures come slower (their groups drawn as geometry)
+constexpr double kBusyBuildMs = 18.0;
+constexpr double kCaptureCpuMsBusy = 0.3;
 constexpr float kQStep = 128.f;        // card vertex quantization (game units: 3 cm)
 constexpr double kQGrid = 512.0 * 4096.0;  // m_qorigin's grid (game units)
 constexpr double kQMove = 384.0 * 4096.0;  // the camera this far from it: a new origin
@@ -114,8 +121,82 @@ bool CtrImpostors::ensure_atlas() {
   return true;
 }
 
+// (AI-assisted, lavamem) The impostors' tables live in the heap, which a long session leaves
+// fragmented: an allocation that fails drops the level's impostors (their memory comes back) and
+// keeps them off for 10 s; the level is drawn as geometry meanwhile. Before, the bad_alloc ended
+// the game (lava tube, Oct 25).
+void CtrImpostors::out_of_memory(const char* where) {
+  if (m_rt_open) {
+    ctr_gpu_rt_end();
+    if (m_cam.fog0 && m_cam.fog1) {
+      ctr_gpu_set_mesh_fog(m_cam.fog0, m_cam.fog1, m_cam.fog_rgb[0], m_cam.fog_rgb[1],
+                           m_cam.fog_rgb[2]);
+    }
+    m_rt_open = false;
+  }
+  if (m_cur >= 0 && m_cur < (int)m_levels.size()) {
+    drop_level(m_cur);
+  }
+  m_recs.clear();
+  m_wants.clear();
+  m_seen.clear();
+  m_cards.clear();
+  m_active = false;
+  m_oom_until = m_frame + 300;
+  m_oom_count++;
+  lg::warn("[ctr] impostors: out of heap memory in {} ({} times): off for 10 s", where,
+           m_oom_count);
+}
+
 void CtrImpostors::begin_level(CtrLevelData& lev, const Camera& cam, u64 frame, bool allowed) {
   m_active = false;
+  if (frame < m_oom_until) {
+    m_frame = frame;
+    return;
+  }
+  try {
+    begin_level_impl(lev, cam, frame, allowed);
+  } catch (const std::bad_alloc&) {
+    out_of_memory("begin_level");
+  }
+}
+
+void CtrImpostors::chunk(u32 ci, const float clip[16], bool runs_valid, u8* run_shown,
+                         bool* partly) {
+  if (!m_active) {
+    return;
+  }
+  try {
+    chunk_impl(ci, clip, runs_valid, run_shown, partly);
+  } catch (const std::bad_alloc&) {
+    out_of_memory("chunk");
+  }
+}
+
+void CtrImpostors::finish_chunks() {
+  if (!m_active) {
+    return;
+  }
+  try {
+    finish_chunks_impl();
+  } catch (const std::bad_alloc&) {
+    out_of_memory("finish_chunks");
+  }
+}
+
+void CtrImpostors::draw_cards() {
+  if (!m_active) {
+    return;
+  }
+  try {
+    draw_cards_impl();
+  } catch (const std::bad_alloc&) {
+    out_of_memory("draw_cards");
+  }
+}
+
+void CtrImpostors::begin_level_impl(CtrLevelData& lev, const Camera& cam, u64 frame,
+                                    bool allowed) {
   const CtrSettings& set = ctr_settings();
   // (AI-assisted, title3) allowed: false on the title screen (CtrTfragRenderer::draw_level)
   if (!set.impostors || m_failed || !allowed || !ensure_atlas()) {
@@ -344,6 +425,23 @@ void CtrImpostors::build_chunk(LevelState& ls, u32 ci) {
   m_st.build_ms += ctr_gpu_time_ms() - t0;
 }
 
+// (AI-assisted, lavamem) a new pass over vertex indices (m_vtag), every 65535th one with the tags
+// cleared
+bool CtrImpostors::new_pass() {
+  if (m_vtag.empty()) {
+    try {
+      m_vtag.assign(65536, 0);
+    } catch (const std::bad_alloc&) {
+      return false;
+    }
+  }
+  if (++m_stamp == 0) {
+    std::fill(m_vtag.begin(), m_vtag.end(), 0);
+    m_stamp = 1;
+  }
+  return true;
+}
+
 // the group's exact box from its vertices (once); false if the mesh can't be read
 bool CtrImpostors::exact_box(LevelState& ls, Cluster& c) {
   const CtrLevelData& lev = *ls.lev;
@@ -362,13 +460,8 @@ bool CtrImpostors::exact_box(LevelState& ls, Cluster& c) {
   memset(c.tmax, 0, sizeof(c.tmax));
   memset(c.tmin, 255, sizeof(c.tmin));
   // (each vertex once: the indices repeat them)
-  if (m_pj_stamp.size() < (size_t)nv) {
-    m_pj.resize(nv);
-    m_pj_stamp.resize(nv, 0);
-  }
-  if (++m_stamp == 0) {
-    std::fill(m_pj_stamp.begin(), m_pj_stamp.end(), 0);
-    m_stamp = 1;
+  if (!new_pass()) {
+    return false;
   }
   u32 work = 0;
   for (u32 i = 0; i < c.run_count; i++) {
@@ -384,10 +477,10 @@ bool CtrImpostors::exact_box(LevelState& ls, Cluster& c) {
       if (v >= (u32)nv) {
         return false;
       }
-      if (m_pj_stamp[v] == m_stamp) {
+      if ((m_vtag[v] >> 16) == m_stamp) {
         continue;
       }
-      m_pj_stamp[v] = m_stamp;
+      m_vtag[v] = (u32)m_stamp << 16;
       const s16* p = verts[v].pos;
       for (int a = 0; a < 3; a++) {
         mn[a] = std::min<int>(mn[a], p[a]);
@@ -478,8 +571,8 @@ void CtrImpostors::project_box(const float bmin[3], const float bmax[3], Proj* o
   }
 }
 
-void CtrImpostors::chunk(u32 ci, const float clip[16], bool runs_valid, u8* run_shown,
-                         bool* partly) {
+void CtrImpostors::chunk_impl(u32 ci, const float clip[16], bool runs_valid, u8* run_shown,
+                              bool* partly) {
   if (!m_active) {
     return;
   }
@@ -929,13 +1022,20 @@ bool CtrImpostors::capture(const Want& w, Slot& s) {
   const int W = w.wn, H = w.hn;
   const double tcpu = ctr_gpu_time_ms();
   m_zb.assign((size_t)W * H, 0.f);
-  if (m_pj.size() < (size_t)nv) {
-    m_pj.resize(nv);
-    m_pj_stamp.resize(nv, 0);
+  if (!new_pass()) {
+    return false;
   }
-  if (++m_stamp == 0) {
-    std::fill(m_pj_stamp.begin(), m_pj_stamp.end(), 0);
-    m_stamp = 1;
+  // (AI-assisted, lavamem) the group's vertices projected once each, in the order first met
+  // (m_vtag: the pass and the index into m_pj). At most one per index of its runs: reserved before
+  // the loop, so the pointers into it stay valid. Was one entry per vertex of the whole mesh (up to
+  // 65536: 1 MB of the heap, grown in steps).
+  {
+    u32 idx = 0;
+    for (u32 i = 0; i < c.run_count; i++) {
+      idx += lev.vis_runs[ls.runs[c.first_run + 2 * i]].index_count;
+    }
+    m_pj.clear();
+    m_pj.reserve(std::min<u32>(idx, 0xffff));
   }
   const float* cl = rec.clip;
   const float fx0 = (float)w.px0, fy0 = (float)w.py0;
@@ -961,20 +1061,24 @@ bool CtrImpostors::capture(const Want& w, Slot& s) {
           okt = false;
           break;
         }
-        if (m_pj_stamp[vi] != m_stamp) {
-          m_pj_stamp[vi] = m_stamp;
+        if ((m_vtag[vi] >> 16) != m_stamp) {
+          if (m_pj.size() >= 0xffff) {
+            okt = false;  // (a group of 65535 vertices or more: not met in the levels)
+            break;
+          }
+          m_vtag[vi] = ((u32)m_stamp << 16) | (u32)m_pj.size();
           const s16* q = verts[vi].pos;
           const float qx = cl[0] * q[0] + cl[1] * q[1] + cl[2] * q[2] + cl[3];
           const float qy = cl[4] * q[0] + cl[5] * q[1] + cl[6] * q[2] + cl[7];
           const float qw = cl[12] * q[0] + cl[13] * q[1] + cl[14] * q[2] + cl[15];
           if (qw > 1e-3f) {
             const float iw = 1.f / qw;
-            m_pj[vi] = {200.f * (1.f + qx * iw) - fx0, 120.f * (1.f + qy * iw) - fy0, iw};
+            m_pj.push_back({200.f * (1.f + qx * iw) - fx0, 120.f * (1.f + qy * iw) - fy0, iw});
           } else {
-            m_pj[vi] = {0.f, 0.f, -1.f};
+            m_pj.push_back({0.f, 0.f, -1.f});
           }
         }
-        p[v] = &m_pj[vi];
+        p[v] = &m_pj[m_vtag[vi] & 0xffff];
         okt = okt && (*p[v])[2] > 0.f;
       }
       if (!okt) {
@@ -1265,7 +1369,7 @@ void CtrImpostors::hide(const Want& w) {
   m_st.card_tris += c.tris;
 }
 
-void CtrImpostors::finish_chunks() {
+void CtrImpostors::finish_chunks_impl() {
   if (!m_active) {
     return;
   }
@@ -1330,10 +1434,12 @@ void CtrImpostors::finish_chunks() {
   for (size_t j = 0; j < m_seen.size(); j++) {
     sphere_rect(ls.clusters[m_seen[j].cluster], &blended[j]);
   }
-  bool rt_open = false;
+  m_rt_open = false;
   const double t_loop = ctr_gpu_time_ms();
   m_st.ms_f_sort += t_loop - t0;
   float fail_value = -1.f;
+  const double cap_budget =
+      ctr_level_last_build_ms() >= kBusyBuildMs ? kCaptureCpuMsBusy : kCaptureCpuMs;
   for (size_t oi = 0; oi < order.size(); oi++) {
     const u32 i = order[oi];
     Want& w = m_wants[i];
@@ -1455,7 +1561,7 @@ void CtrImpostors::finish_chunks() {
         free_slot(c.slot);
       }
     }
-    if (texels + w.wn * w.hn > kRasterPerFrame || m_cap_cpu_ms > kCaptureCpuMs) {
+    if (texels + w.wn * w.hn > kRasterPerFrame || m_cap_cpu_ms > cap_budget) {
       m_st.over_budget++;
       m_st.t_budget += c.tris;
       continue;
@@ -1478,12 +1584,12 @@ void CtrImpostors::finish_chunks() {
       m_slots[s].cluster = w.cluster;
       c.slot = s;
     }
-    if (!rt_open) {
+    if (!m_rt_open) {
       // the captures without fog (the card gets it)
       static const float kNoFog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
       static const float kNoFog1[4] = {0.f, 1.f, 0.f, 0.f};
       ctr_gpu_set_mesh_fog(kNoFog0, kNoFog1, m_cam.fog_rgb[0], m_cam.fog_rgb[1], m_cam.fog_rgb[2]);
-      rt_open = true;
+      m_rt_open = true;
     }
     Slot& s = m_slots[c.slot];
     const double tc = ctr_gpu_time_ms();
@@ -1500,7 +1606,8 @@ void CtrImpostors::finish_chunks() {
     captures++;
     ok[i] = 1;
   }
-  if (rt_open) {
+  if (m_rt_open) {
+    m_rt_open = false;
     ctr_gpu_rt_end();
     if (m_cam.fog0 && m_cam.fog1) {
       ctr_gpu_set_mesh_fog(m_cam.fog0, m_cam.fog1, m_cam.fog_rgb[0], m_cam.fog_rgb[1],
@@ -1548,7 +1655,7 @@ void CtrImpostors::finish_chunks() {
   }
 }
 
-void CtrImpostors::draw_cards() {
+void CtrImpostors::draw_cards_impl() {
   if (!m_active) {
     return;
   }

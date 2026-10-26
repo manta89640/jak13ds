@@ -272,6 +272,7 @@ struct CtrLevelData {
     // versions: + 1 per change of target_w (dver: of its day palettes); per palette its last;
     // lut[mask]: the last of the palettes in mask
     u32 ver = 0, dver = 0;
+    u64 day_move_frame = 0;  // (AI-assisted, perfv2) the frame of the last day move (dver + 1)
     u32 pal_ver[8] = {};
     u32 lut[256] = {};
     // the palettes a blend adds (weight not 0): their slots in colors and weights
@@ -345,6 +346,13 @@ struct CtrLevelData {
     u64 want_frame = 0;  // (statistics) the first frame it was wanted while absent (0: not)
     float last_score = 0;
     u64 room_frame = 0;  // (statistics) the last frame the arena had no room for it
+    // (AI-assisted, popin2) this frame (stream_update): how much its groups' far versions would
+    // show from the camera now, the largest of them (shape error x k over the distance to the
+    // group's surface: 1 = at the switch distance, tie_lod_px; 1.5x while in view); 0 for a unit
+    // nobody needs, or a level without shape errors. At the arena's capacity a unit gives way to a
+    // needed one whose priority is kPrioHyst x larger
+    float prio = 0;
+    u64 resident_frame = 0;  // (AI-assisted, popin2) the frame it was last taken (became there)
   };
   static constexpr u8 kUnitAbsent = 0, kUnitLoading = 1, kUnitResident = 2, kUnitNever = 3;
   std::vector<StreamUnit> stream_units;
@@ -762,6 +770,7 @@ class CtrLevels {
     float score;
   };
   std::vector<StreamCand> m_want, m_have, m_idle;
+  std::vector<StreamCand> m_have_prio;  // (AI-assisted, popin2) m_have by priority, the least first
   StreamCheck m_scheck;
   struct StreamStats {
     u64 frames = 0, jobs = 0, units = 0, bytes = 0, read_bytes = 0, reads = 0, evictions = 0;
@@ -773,6 +782,7 @@ class CtrLevels {
     u64 neighbours = 0;  // units read along with their file neighbours before they were wanted
     u64 late_periods = 0, late_frames_max = 0;
     u64 shrunk = 0;  // units freed to give growth segments back
+    u64 prio_evictions = 0;  // (AI-assisted, popin2) units freed for a needed one of more priority
     u64 packed = 0;  // the file bytes of the units read (their blocks)
     u64 late_loading = 0, late_absent = 0;
     u64 late_unwanted = 0;  // late, never wanted before (the need not foreseen)
@@ -822,6 +832,10 @@ float ctr_level_detail();
 /*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
  * of auto_detail's build time). */
 double ctr_level_tod_take_ms();
+// (AI-assisted, perfv2) the render thread's build time of the frame before (CtrRenderer), for the
+// work that can wait (impostor captures)
+void ctr_level_note_build_ms(double ms);
+double ctr_level_last_build_ms();
 
 class CtrTfragRenderer : public CtrBucketRenderer {
  public:
@@ -889,6 +903,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) c3l v16 time of day: blends, vertices recolored and their time (ms) since the
   // last log line, over m_tod_frames level draws; the most vertices in one draw
   u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
+  u64 m_tod_light_verts = 0;  // (AI-assisted, perfv2) of m_tod_verts: the light pass's
+  u64 m_tod_deferred = 0;     // (AI-assisted, perfv2) group rewrites spread to a later frame
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
   u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;

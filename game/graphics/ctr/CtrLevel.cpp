@@ -45,6 +45,11 @@ extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 // Loading
 // ---------------------------------------------------------------------------
 
+#ifndef __3DS__
+// (AI-assisted, perfv2) host diagnostic (ctr_gpu_soft.cpp): mesh handle -> what it is
+std::map<int, std::string>& ctr_soft_mesh_desc();
+#endif
+
 namespace {
 // (AI-assisted, title3) host diagnostic, env CTR_POP_LOG: per level draw, what changed on screen
 // (chunks appearing / going by distance in view, tie LOD switches in view, groups late or held
@@ -1234,6 +1239,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   tod_make_act(t, t.target_w, &t.act);
   if (day) {
     t.dver++;
+    t.day_move_frame = frame;  // (AI-assisted, perfv2) the spread of its rewrites (TodPass)
     auto& seen = tod_seen();
     std::lock_guard<std::mutex> lk(seen.lock);
     auto& wl = seen.by_level[level];
@@ -1254,11 +1260,16 @@ static_assert(sizeof(c3l::Vertex) == 16);
 // (tod_refresh_all): no version checks, and the rgb written as a halfword and a byte (the alpha
 // byte isn't read): ~6 instructions per vertex instead of ~15
 typedef u16 __attribute__((may_alias)) tod_half;
+// (AI-assisted, perfv2) the vertex rewrites run through level meshes in FCRAM (~200 ns a missed
+// cache line on hardware, 2 vertices a line: the loops wait on memory, Azahar can't show it): the
+// line this many bytes ahead is asked for early (PLD, as ctr_mem.S's copies)
+constexpr int kTodPrefetch = 128;
 inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end) {
   const u32* const tab = t.table.data();
   u8* p = (u8*)(v + first);
   u8* const e = (u8*)(v + end);
   for (; p + 32 <= e; p += 32) {
+    __builtin_prefetch(p + kTodPrefetch, 1);  // (AI-assisted, perfv2)
     const u32 a = tab[*(const tod_half*)(p + 6)];
     const u32 b = tab[*(const tod_half*)(p + 22)];
     *(tod_half*)(p + 12) = (u16)a;
@@ -1283,6 +1294,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
   tod_word* const e = (tod_word*)(v + end);
   if (plain) {
     for (; w < e; w += 4) {
+      __builtin_prefetch(w + kTodPrefetch / 4, 1);  // (AI-assisted, perfv2)
       const u32 idx = w[1] >> 16;
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
       w[3] = (w[3] & 0xff000000u) | rgb;
@@ -1291,6 +1303,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
   }
   const u32 ntab = (u32)t.table.size();
   for (; w < e; w += 4) {
+    __builtin_prefetch(w + kTodPrefetch / 4, 1);  // (AI-assisted, perfv2)
     const u32 idx = w[1] >> 16;
     if (idx < ntab) {
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
@@ -1469,6 +1482,14 @@ constexpr int kTodLights = 0, kTodRound = 1;
 // (AI-assisted, todlag) the group pass refreshes the whole table first (tod_refresh_all) when the
 // vertices drawn are this many times the table's entries
 constexpr u64 kTodFreshRatio = 3;
+// (AI-assisted, perfv2) a day move's group rewrites spread over this many frames (budget: the
+// vertices drawn / kTodSpreadFrames, at least kTodSpreadMin a frame). A day move is one 64th of
+// a palette's weight every ~40 frames in gameplay: one move rewrote every group drawn in one frame
+// (village2 on hardware: ~90k vertices, 14-22 ms on the render thread, 13 times per 15 s); a group
+// a step behind for a few frames differs by at most ~4 color units. Two moves behind (the title's
+// fast day): rewritten at once.
+constexpr u64 kTodSpreadFrames = 6;
+constexpr s64 kTodSpreadMin = 4000;
 // (AI-assisted, todlag) the time of day's clock: ctr_gpu_time_ms; on the host times env
 // CTR_TOD_TIME_SCALE (statistics only: the host is ~10x faster than Azahar)
 inline double tod_now_ms() {
@@ -1486,6 +1507,14 @@ struct TodPass {
   bool fresh_ok = false;  // (AI-assisted, todlag) many vertices drawn: tod_refresh_all first
   bool fresh = false;     // the table is all up to date (tod_refresh_all done this pass)
   u32 rewritten = 0;
+  u32 light_verts = 0;  // (AI-assisted, perfv2) the light pass's vertices written
+  // (AI-assisted, perfv2) within kTodSpreadFrames of a day move: a group exactly that one move
+  // behind (its colors this level's blend of the move before, not the file's) waits while the
+  // frame's vertex budget spread_left is used up (drawn with colors one day step old, at most
+  // kTodSpreadFrames frames); everything else is rewritten at once as before
+  bool spread = false;
+  s64 spread_left = 0;
+  u32 deferred = 0;
 };
 std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
   static std::vector<std::pair<uintptr_t, uintptr_t>> d;  // render thread
@@ -1566,12 +1595,15 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       for (const auto& [lmask, lend] : lights.groups) {
         if ((lmask & moved) && lend > begin) {
           for (u32 k = begin; k < lend; k++) {
+            // (AI-assisted, perfv2) the light vertices are scattered: the one 8 ahead asked for
+            __builtin_prefetch(w + 4 * vl[std::min<u32>(k + 8, lend - 1)], 1);
             tod_word* x = w + 4 * vl[k];
             x[3] = (x[3] & 0xff000000u) | tod_entry(t, x[1] >> 16);
           }
           flo = std::min<int>(flo, vl[begin]);
           fhi = std::max<int>(fhi, vl[lend - 1]);
           looked += lend - begin;
+          ps.light_verts += lend - begin;
         }
         begin = lend;
       }
@@ -1584,12 +1616,17 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       if (gr.ver >= day_last) {
         return;
       }
+      const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
+      if (ps.spread && gr.ver != 0 && gr.dver + 1 == t.dver && ps.spread_left < end - first) {
+        ps.deferred++;  // (AI-assisted, perfv2) one day step behind: a later frame of the spread
+        return;
+      }
+      ps.spread_left -= std::max(0, end - first);
       if (ps.fresh_ok && !ps.fresh) {
         // (at the frame's first group to rewrite; versions don't move until the next tod_update)
         tod_refresh_all(t);
         ps.fresh = true;
       }
-      const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
       if (end > first) {
         if (ps.fresh && gr.plain) {
           tod_write_fresh(t, v, first, end);
@@ -3935,6 +3972,11 @@ constexpr u32 kIdleBytes = 128 * 1024;
 // a unit needed now and in view goes this much ahead of the others (after a cut: what is on
 // screen first)
 constexpr float kInViewMeters = 300.f;
+// (AI-assisted, popin2) at the arena's capacity: a unit needed now frees units there whose priority
+// (StreamUnit::prio) is this much smaller than its own; in view a unit's priority counts this much
+// more; a unit taken this many frames ago or less is not freed so (no back and forth)
+constexpr float kPrioHyst = 1.5f, kInViewPrio = 1.5f;
+constexpr u64 kMinResidentFrames = 30;
 // a jump of the camera of more than this in a frame (a warp, a cut): no speed
 constexpr float kCutMeters = 40.f;
 // a stream job: at most this many file bytes, units (one level load waits for it at most this)
@@ -4348,17 +4390,26 @@ void CtrLevels::stream_update(u64 frame) {
   // of them. The empty segments back to the heap (their meshes' memory came back once the GPU was
   // done with it).
   const u32 reserve = (u32)ctr_settings().stream_reserve_kb * 1024u + m_stream_repair_room;
+  // (AI-assisted, popin2) while the growth is emptied for the heap (all of it freed), no new piece
+  // goes there. Before, the units read meanwhile went into the growth segments again and were freed
+  // the next frame, so a segment never emptied and the heap never got its memory back: Oct 25
+  // hardware log, rolling + village2 at 2.6 MB linear free (floor 3 MB) for minutes, 250-850 near
+  // chunks read and freed again per 15 s, needed ones late 0.5-1.7 s on average (up to 15 s)
+  bool drain = false;
   if (arena.has_growth()) {
     if (level_loading) {
       const u32 need = reserve + kLoadRoom;
       if (free_now < need) {
-        m_sst.shrunk += stream_shrink(free_now + 512 * 1024 < need);
+        drain = free_now + 512 * 1024 < need;
+        m_sst.shrunk += stream_shrink(drain);
       }
     } else if (free_now < reserve + kPressure) {
-      m_sst.shrunk += stream_shrink(free_now < reserve);
+      drain = free_now < reserve;
+      m_sst.shrunk += stream_shrink(drain);
     }
     arena.release_empty();
   }
+  arena.set_draining(drain);
   m_want.clear();
   m_have.clear();
   m_idle.clear();
@@ -4460,6 +4511,7 @@ void CtrLevels::stream_update(u64 frame) {
       // far the camera (now or where it goes) is beyond the nearest group's near distance
       const bool resident = su.state == CtrLevelData::kUnitResident;
       su.urgent = false;
+      su.prio = 0.f;
       if (k <= 0) {
         if (resident) {
           m_have.push_back({&lev, u, 1e30f});
@@ -4490,8 +4542,10 @@ void CtrLevels::stream_update(u64 frame) {
       // (AI-assisted, lodnear) with the PS2 floor, a unit needed only by it (its groups' far
       // versions within tie_lod_px there) is less urgent than one whose groups' far versions
       // would show: those first, and they may take the others' room at capacity
-      const bool floor_on = lev.lod_floor_k > 0 && lev.lod_error.size() == lev.lod_groups.size();
+      const bool has_err = lev.lod_error.size() == lev.lod_groups.size();
+      const bool floor_on = lev.lod_floor_k > 0 && has_err;
       bool urgent = !floor_on;
+      float prio = 0.f;  // (AI-assisted, popin2) StreamUnit::prio before the in-view factor
       if (!lev.unit_group_first.empty()) {
         float best = 1e30f;
         for (u32 j = lev.unit_group_first[u]; j < lev.unit_group_first[u + 1]; j++) {
@@ -4509,6 +4563,15 @@ void CtrLevels::stream_update(u64 frame) {
             const float lim_e = lev.lod_error[g] * k + lg.bsphere[3];
             urgent = g2 < lim_e * lim_e;
           }
+          if (has_err) {
+            // (AI-assisted, popin2) its far version's error from the camera now (not the lead
+            // positions: a unit needed only ahead is read when there is room, and frees nothing),
+            // in units of the switch's (shape error x k at the distance to the group's surface)
+            const float dx = pp[0][0] - lg.bsphere[0], dy = pp[0][1] - lg.bsphere[1],
+                        dz = pp[0][2] - lg.bsphere[2];
+            const float ds = std::sqrt(dx * dx + dy * dy + dz * dz) - lg.bsphere[3];
+            prio = std::max(prio, lev.lod_error[g] * k / std::max(ds, kM));
+          }
           // (beyond best already: no root)
           const float bl = best + lim;
           if (best < 1e29f && bl > 0 && g2 >= bl * bl) {
@@ -4523,14 +4586,20 @@ void CtrLevels::stream_update(u64 frame) {
       }
       su.last_score = score;
       su.urgent = urgent && score < 0;
+      const bool view = (resident || score < 0) && !hidden && in_view(c);
+      su.prio = prio * (view ? kInViewPrio : 1.f);
       if (resident) {
         m_have.push_back({&lev, u, score});
       } else if (score < want_m) {
         // (needed now and on screen: first; (AI-assisted, lodnear) then the urgent ones; title3:
-        // not for hidden levels)
-        const float prio = (score < 0 && !hidden && in_view(c) ? score - kInViewMeters * kM : score) -
-                           (su.urgent ? kInViewMeters * kM : 0.f);
-        m_want.push_back({&lev, u, prio});
+        // not for hidden levels). (AI-assisted, popin2) with shape errors: the needed ones by
+        // priority, the most first (where the far versions show most), then the others by score
+        const float key =
+            has_err && score < 0
+                ? -kM * (1.f + 100.f * su.prio)
+                : (score < 0 && view ? score - kInViewMeters * kM : score) -
+                      (su.urgent ? kInViewMeters * kM : 0.f);
+        m_want.push_back({&lev, u, key});
         if (!su.want_frame) {
           su.want_frame = frame;
         }
@@ -4560,6 +4629,8 @@ void CtrLevels::stream_update(u64 frame) {
   std::sort(m_want.begin(), m_want.end(),
             [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
   bool have_sorted = false;
+  bool prio_sorted = false;  // (AI-assisted, popin2) m_have_prio made, pi: its next unit
+  size_t pi = 0;
   u64 evicted = 0;  // bytes freed now (back after the GPU is done with them: no growth for those)
   CtrLevelData& lev = *m_want[0].lev;
   Job job;
@@ -4656,6 +4727,46 @@ void CtrLevels::stream_update(u64 frame) {
         freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
         evicted += victim.bytes;
         stream_evict(*m_have[j].lev, m_have[j].unit);
+        mem = arena.alloc(su.bytes);
+      }
+    }
+    // (AI-assisted, popin2) still none and needed now: the units there whose groups' far versions
+    // would show kPrioHyst x less than this one's (StreamUnit::prio), the least first, not one
+    // taken within kMinResidentFrames. The hardware log (Oct 25: rolling + village2, swamp,
+    // lavatube) had the needed near data larger than the arena most of the time (needed 4-8 MB, the
+    // arena 5-8 MB at the linear heap's floor) and every unit there urgent: a needed unit waited
+    // for room until the camera went away from others, on average 0.5-2 s and up to 15 s, its
+    // groups drawn far meanwhile, then switched near on screen up close. At capacity the arena
+    // now holds what shows most: a group left far for want of room is one whose far version shows
+    // little, and it comes when it shows more than what is there, at about the same error
+    if (!mem && evicted < su.bytes && w.score < 0 && su.prio > 0) {
+      if (!prio_sorted) {
+        m_have_prio.clear();
+        for (const auto& h : m_have) {
+          const auto& hu = h.lev->stream_units[h.unit];
+          if (hu.state == CtrLevelData::kUnitResident) {
+            m_have_prio.push_back({h.lev, h.unit, hu.prio});
+          }
+        }
+        std::sort(m_have_prio.begin(), m_have_prio.end(),
+                  [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
+        prio_sorted = true;
+      }
+      u64 freed_for = 0;
+      for (; !mem && pi < m_have_prio.size() && freed_for < su.bytes; pi++) {
+        const auto& h = m_have_prio[pi];
+        auto& victim = h.lev->stream_units[h.unit];
+        if (h.score * kPrioHyst >= su.prio) {
+          break;  // (the rest have more)
+        }
+        if (victim.state != CtrLevelData::kUnitResident ||
+            frame < victim.resident_frame + kMinResidentFrames) {
+          continue;
+        }
+        freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
+        evicted += victim.bytes;
+        stream_evict(*h.lev, h.unit);
+        m_sst.prio_evictions++;
         mem = arena.alloc(su.bytes);
       }
     }
@@ -4945,6 +5056,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
     verts += nv;
     lev->meshes[ci] = o.mesh;
     su.state = CtrLevelData::kUnitResident;
+    su.resident_frame = frame;  // (AI-assisted, popin2)
     g_pop.taken++;  // (AI-assisted, title3: CTR_POP_LOG)
     su.want_frame = 0;
     su.loads++;
@@ -5072,7 +5184,8 @@ void CtrLevels::stream_log() {
            "freed for it); {} "
            "jobs, {} near chunks read ({} KB, {} KB of their blocks; file {} KB in {} reads, {} of "
            "{} ranges in one request, {:.0f} ms reading, {:.0f} ms decoding, {:.0f} "
-           "ms in jobs, longest {:.0f} ms; {:.0f} KB/s), {} freed, {} times no room; late: {} "
+           "ms in jobs, longest {:.0f} ms; {:.0f} KB/s), {} freed ({} for a needed one of more "
+           "priority), {} times no room; late: {} "
            "times, {} frames with groups drawn far for it ({} group frames), {:.0f} ms on "
            "average, at most {:.0f} ms ({} frames); needed now {:.0f} KB on average, at most "
            "{} KB; {} read with their file neighbours; linear free least {} KB ({} while a "
@@ -5084,7 +5197,8 @@ void CtrLevels::stream_log() {
            m_sst.read_bytes / 1024, m_sst.reads, m_sst.preloads,
            m_sst.preloads + m_sst.preload_misses,
            m_sst.read_ms, m_sst.decode_ms, m_sst.job_ms, m_sst.job_max_ms,
-           secs > 0 ? m_sst.read_bytes / 1024.0 / secs : 0.0, m_sst.evictions, m_sst.no_room,
+           secs > 0 ? m_sst.read_bytes / 1024.0 / secs : 0.0, m_sst.evictions,
+           m_sst.prio_evictions, m_sst.no_room,
            m_sst.late_events, m_sst.late_frames, m_sst.late_group_frames,
            m_sst.late_periods ? m_sst.late_ms_total / m_sst.late_periods : 0.0,
            m_sst.late_ms_max, m_sst.late_frames_max, m_sst.need_sum / n / 1024.0,
@@ -5094,6 +5208,9 @@ void CtrLevels::stream_log() {
                                           : std::to_string(m_sst.linear_min_load / 1024),
            m_sst.sched_ms / n, m_sst.sched_max_ms,
            levels.empty() ? std::string("no levels") : levels);
+#ifdef __3DS__
+  ctr_heap_trace_dump("stats");  // (AI-assisted, lavamem) trace builds only
+#endif
   const double since = m_sst.since_ms;
   CtrStreamArena::get().new_period();
   m_sst = StreamStats();
@@ -5275,6 +5392,10 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   constexpr bool STR = NP > 0;
   constexpr int kP = NP > 0 ? NP : 1;
   float po[kP], pk0[kP], pk1[kP], pk2[kP];
+  // (AI-assisted, perfv2) unrolled: GCC kept the planes in this stack array and reloaded all four
+  // coefficients and the loop pointers for every run (~92 instructions per 3-plane run); unrolled
+  // they are scalars in VFP registers
+#pragma GCC unroll 4
   for (int i = 0; i < NP; i++) {
     po[i] = in.po[i];
     pk0[i] = in.pk[i][0];
@@ -5283,7 +5404,9 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   }
   const float scale = in.scale;
   u32 shown = 0, view_hidden = 0, view_tris = 0, fine_hid = 0, lod_hid = 0;
-  u64 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
+  // (AI-assisted, perfv2) u32 within one chunk (at most 65536 vertices, runs of u16 index counts):
+  // the u64 sums were adds / adc pairs through the stack per run
+  u32 fine_tris = 0, lod_tris1 = 0, lod_tris2 = 0;
   const c3l::VisRun* const runs = in.runs;
   const CtrLevelData::RunSphere* const spheres = in.spheres;
   const c3l::RunLod* const run_lod = in.run_lod;
@@ -5324,6 +5447,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
       const auto& rs = spheres[r];
       if (rs.r != 0xffff) {
         const float x = rs.c[0], y = rs.c[1], z = rs.c[2], rad = -(float)rs.r * scale;
+#pragma GCC unroll 4
         for (int i = 0; i < NP; i++) {
           if (!(po[i] + pk0[i] * x + pk1[i] * y + pk2[i] * z > rad)) {
             s = false;
@@ -5573,6 +5697,14 @@ double ctr_level_tod_take_ms() {
   return ms;
 }
 
+static double g_last_build_ms = 0;  // (AI-assisted, perfv2) render thread
+void ctr_level_note_build_ms(double ms) {
+  g_last_build_ms = ms;
+}
+double ctr_level_last_build_ms() {
+  return g_last_build_ms;
+}
+
 void ctr_level_set_detail(float t) {
   g_detail_t = std::clamp(t, 0.f, 1.f);
 }
@@ -5790,14 +5922,15 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
     m_lod_groups_near = m_lod_frames = m_lod_tris[0] = m_lod_tris[1] = 0;
   }
   if (rs.log_now && m_tod_frames) {
-    lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored {:.2f} ms per level draw "
-             "(most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
+    lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored ({:.0f} light) {:.2f} ms "
+             "per level draw (most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
              "refreshed whole in {} level draws ({} heavy frames took no new weights); a pulsing "
-             "palette held in {} level draws",
-             m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames, m_tod_ms / m_tod_frames,
+             "palette held in {} level draws; {} group rewrites spread to a later frame",
+             m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames,
+             (double)m_tod_light_verts / m_tod_frames, m_tod_ms / m_tod_frames,
              m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_fresh, m_tod_skipped,
-             m_tod_held);
-    m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = 0;
+             m_tod_held, m_tod_deferred);
+    m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = m_tod_light_verts = m_tod_deferred = 0;
     m_tod_spread = m_tod_fresh = m_tod_skipped = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
@@ -7518,6 +7651,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_occ_max_ms = std::max(m_occ_max_ms, dt);
   }
   phase(kPhOcc);
+#ifndef __3DS__
+  // (AI-assisted, perfv2) host diagnostic, env CTR_SOFT_DRAW_PX: what each mesh drawn is (the
+  // soft renderer's per-draw fragment list names them)
+  if (getenv("CTR_SOFT_DRAW_PX")) {
+    for (const auto& vc : m_visible) {
+      if (vc.chunk < lev.meshes.size() && lev.meshes[vc.chunk] >= 0) {
+        const auto& ch = lev.chunks[vc.chunk];
+        ctr_soft_mesh_desc()[lev.meshes[vc.chunk]] =
+            fmt::format("{} chunk {} kind {} tier {} sphere ({:.0f} {:.0f} {:.0f} r {:.0f}) verts {}",
+                        lev.name, vc.chunk, ch.kind, ch.lod_tier, ch.bsphere[0], ch.bsphere[1],
+                        ch.bsphere[2], ch.bsphere[3], ch.vertex_count);
+      }
+    }
+  }
+#endif
   // (AI-assisted) c3l v16 time of day: the chunks to be drawn brought up to this frame's blend
   // (the groups of the runs drawn: m_run_shown when runs_valid), before any of their draws
   u32 pop_tod = 0;  // (AI-assisted, title3: CTR_POP_LOG) groups rewritten
@@ -7542,6 +7690,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                      : 0;
       }
       ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
+      ps.spread = t.day_move_frame && rs.frame_idx - t.day_move_frame < kTodSpreadFrames;
+      ps.spread_left = std::max<s64>(kTodSpreadMin, (s64)(drawn / kTodSpreadFrames));
       for (const auto& vc : m_visible) {
         tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
       }
@@ -7571,6 +7721,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tod_spread += ps.rewritten;
     m_tod_fresh += ps.fresh ? 1 : 0;
     m_tod_heavy = ps.fresh_ok;  // (AI-assisted, fable1) the next frame's tod_update, see there
+    m_tod_light_verts += ps.light_verts;
+    m_tod_deferred += ps.deferred;
   }
 
   phase(kPhTod);

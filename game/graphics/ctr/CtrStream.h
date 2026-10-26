@@ -57,6 +57,12 @@ class CtrStreamArena {
     std::lock_guard<std::mutex> lk(m_lock);
     return m_segs.size() > 1;
   }
+  // (AI-assisted, popin2) on: alloc takes no piece of a growth segment (they are being emptied for
+  // the linear heap: CtrLevels::stream_update below its floor). Render thread
+  void set_draining(bool on) {
+    std::lock_guard<std::mutex> lk(m_lock);
+    m_draining = on;
+  }
   // the bytes of a mesh's piece: its vertices, then its indices (ctr_gpu_mesh_begin_ext)
   static u32 mesh_bytes(u32 vertex_count, u32 index_count);
   struct Stats {
@@ -86,6 +92,7 @@ class CtrStreamArena {
   std::mutex m_lock;
   std::vector<Seg> m_segs;  // [0]: the first segment
   bool m_ready = false, m_tried = false;
+  bool m_draining = false;  // (AI-assisted, popin2) set_draining
   u32 m_used_bytes = 0, m_peak = 0, m_capacity = 0, m_peak_capacity = 0;
   u64 m_allocs = 0, m_failed = 0, m_grown = 0, m_released = 0;
 };

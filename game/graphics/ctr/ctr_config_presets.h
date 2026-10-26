@@ -35,10 +35,13 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"sky_last", "off"},         {"tex_cache_clear", "always"}, {"vista_untextured", "off"},
     {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
     {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
-    {"fine_vis", "off"},         {"vcache_reuse", "off"},      {"skip_clear", "off"},
+    {"fine_vis", "off"},         {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
+    {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
+    /* (AI-assisted, fidelity2) the full texture and shine detail */
+    {"mip_bias", "0"},   {"envmap_min_px", "0"},
 };
 /* bench: normal plus the GPU benchmark at boot (~20-60 s, data/log/bench.txt), the A/B GPU
  * profile, the GSP perf log and the GPU counters (3ds-sdcard-oct12d config-bench.ini) */
@@ -105,6 +108,8 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"io_checksum", "off"},
     {"c3l_read_buffer", "256"},
     {"particle_density", "1"}, /* (AI-assisted, j1ocean) every particle (was 0.7) */
+    {"shield_density", "0.25"}, /* (AI-assisted) Citadel robot cage, 0.125..1 */
+    {"shield_native", "on"}, /* (AI-assisted) native cage birth callback; off for A/B */
     {"anim_lod", "on"},
     {"merc_lod_scale", "1"},
     {"ocean", "full"},
@@ -125,6 +130,8 @@ static const char* const ctr_cfg_removed[] = {
     "collide_native", "collide_frag_cache", "anim_native",
     /* (AI-assisted, todlag, Oct 23) the time of day's per-frame limits: every frame current now */
     "tod_busy_half", "tod_max_ms",
+    /* (AI-assisted, hudshard, Oct 25) the post-vertex cache kept across draws: the HUD shards */
+    "vcache_reuse",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

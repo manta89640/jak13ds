@@ -83,6 +83,9 @@ struct AbSwitch {
   bool (*get)(const CtrSettings& s);
 };
 const AbSwitch kAbSwitches[] = {
+    // (AI-assisted) isolate missing geometry from visibility vs frustum/streaming decisions.
+    {"vis_culling", [](CtrSettings& s, bool on) { s.vis_culling = on; },
+     [](const CtrSettings& s) { return s.vis_culling; }},
     {"run_culling", [](CtrSettings& s, bool on) { s.run_culling = on; },
      [](const CtrSettings& s) { return s.run_culling; }},
     // (AI-assisted) the finer precomputed visibility (.c3v files; loaded with fine_vis on)
@@ -169,6 +172,13 @@ const AbSwitch kAbSwitches[] = {
        s.mip_bias = on ? kConfigBias : 0.f;
      },
      [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
+    // (AI-assisted, fidelity2) envmap_min_px: the config's limit (on; 16 when it says 0) or 0 (off)
+    {"envmap_min_px",
+     [](CtrSettings& s, bool on) {
+       static const float kConfigPx = s.envmap_min_px > 0.f ? s.envmap_min_px : 16.f;
+       s.envmap_min_px = on ? kConfigPx : 0.f;
+     },
+     [](const CtrSettings& s) { return s.envmap_min_px > 0.f; }},
     {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
      [](const CtrSettings& s) { return s.skin_rows_f24; }},
     // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
@@ -212,10 +222,6 @@ const AbSwitch kAbSwitches[] = {
     // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
     {"opaque_alpha", [](CtrSettings& s, bool on) { s.opaque_alpha = on; },
      [](const CtrSettings& s) { return s.opaque_alpha; }},
-    // (AI-assisted, hud3) the post-vertex cache kept between raw draws (config.ini vcache_reuse):
-    // switchable while running for A/B tests (pad script "set vcache_reuse off")
-    {"vcache_reuse", [](CtrSettings& s, bool on) { s.vcache_reuse = on; },
-     [](const CtrSettings& s) { return s.vcache_reuse; }},
     // (AI-assisted, hud3) the draws' command words written raw (config.ini raw_cmds), for A/B
     // tests; applied at each frame's begin, where the backend forgets its raw state anyway
     {"raw_cmds", [](CtrSettings& s, bool on) { s.raw_cmds = on; },
@@ -631,7 +637,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
   ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);  // (AI-assisted, gpu-rt)
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);          // (AI-assisted, hud3)
-  ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);  // (AI-assisted, hud3)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
 #ifdef __3DS__
@@ -709,6 +714,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.frames++;
   // (AI-assisted) the time of day work isn't GPU load: not counted for auto_detail
   const double tod_ms = ctr_level_tod_take_ms();
+  ctr_level_note_build_ms(t2 - t1);  // (AI-assisted, perfv2) impostor captures' budget
   m_timing.tod_ms += tod_ms;
   m_timing.tod_max_ms = std::max(m_timing.tod_max_ms, tod_ms);
   m_timing.tod_over += tod_ms > 2.0;
@@ -1372,7 +1378,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
-  ctr_gpu_set_vcache_reuse(ctr_settings().vcache_reuse ? 1 : 0);
   ctr_gpu_set_cmd_dump(ctr_settings().cmd_dump ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_gpu_breakdown(ctr_settings().gpu_breakdown ? 1 : 0);  // (AI-assisted, gpu-rt)
   // (AI-assisted, gpu-rt) its linear memory block now, before levels load

@@ -183,6 +183,18 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   u64 m_last_tex0 = 0;
   int m_last_tex = -1;
   bool m_last_tex_valid = false;
+  // (AI-assisted, perfv2) the last texture's CtrTexture::box, and its last sprite state's (the
+  // bucket's: what the vertices are drawn with)
+  float m_last_tex_box[4] = {0.f, 0.f, 1.f, 1.f};
+  float m_last_box[4] = {0.f, 0.f, 1.f, 1.f};
+  bool m_last_trim_ok = false;  // a texel of alpha 0 changes nothing in the last state's blend
+  bool m_last_trim = false;     // ... and particle_fill trims its world particles to m_last_box
+  float m_last_box_st[4] = {0.f, 0.f, 1.f, 1.f};  // m_last_box in texture coordinates
+  int m_st_sel[4][2] = {{0, 1}, {2, 1}, {2, 3}, {0, 3}};  // corner k: its m_last_box s, t entries
+  // (AI-assisted, perfv2) this frame's st corners (m_st_out[0]) as an affine frame: the corners
+  // with (s, t) = (lo, lo), (hi, lo), (lo, hi), where hi / lo of each; -1: not a rectangle (no trim)
+  int m_st_k00 = -1, m_st_k10 = -1, m_st_k01 = -1;
+  float m_st_lo[2] = {0.f, 0.f}, m_st_hi[2] = {1.f, 1.f};
   // state of the previous sprite (same adgif: same state and bucket)
   AdGif m_last_ad;
   bool m_have_last_ad = false;
@@ -200,6 +212,11 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // over kBigHalfGs GS units: 20 pixels at the screen's 240 / 448 pixels per GS unit
   float m_min_alpha_big = 2.f;
   static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
+  // (AI-assisted, perfv2) config particle_fill (0 off, 1 on, 2 strong), this frame; the world 2D
+  // sprites' slot (their index in the game's sparticle arrays: a particle keeps its slot while it
+  // lives) at the next chunk
+  int m_particle_fill = 1;
+  u32 m_slot2d = 0;
   float m_st_out[2][4][2] = {};
   int m_world_left = 0;  // world sprites left this frame (CtrSettings::max_sprites)
   bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
@@ -207,6 +224,8 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
     int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels
     int faint = 0;          // (AI-assisted) sprite_min_alpha: big faint ones left out
+    int trimmed = 0;        // (AI-assisted, perfv2) drawn over their texture's alpha box only
+    int thinned = 0;        // (AI-assisted, perfv2) big faint ones left out, their neighbours denser
   } m_stats;
   // (AI-assisted) a frame that took more than 3 ms logs its counts (render)
   void build_sprites(DmaFollower& dma, CtrRenderState& rs);
