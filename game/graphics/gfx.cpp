@@ -10,9 +10,6 @@
 #include <thread>
 #include <functional>
 #include <utility>
-#ifdef __3DS__
-#include <unistd.h>  // _exit
-#endif
 
 #include "display.h"
 
@@ -141,9 +138,8 @@ u32 Init(GameVersion version) {
  * game, IOP and render threads and runs the static destructors; with the app in the background
  * (the GPU belongs to the HOME Menu) a thread waiting for the GPU or the DSP never finishes, the
  * process never exits, and the HOME Menu shows "closing software" forever: it waits for the app
- * to tell APT it closed, which libctru does at the very end of the exit (aptExit). So: let a save
- * that is being written finish, release the DSP, and exit at once. _exit skips the destructors
- * but still runs __appExit (aptExit: the close handshake); the kernel ends the other threads.
+ * to tell APT it closed. Let a save that is being written finish, release the DSP, and complete
+ * the APT close handshake. Keep the heaps mapped until the kernel ends the other threads.
  */
 static void close_for_home_menu() {
   for (int i = 0; i < 500 && MC_save_in_progress(); i++) {
@@ -155,7 +151,7 @@ static void close_for_home_menu() {
   ctr_audio_close_for_exit();
   lg::info("3DS: closing now");
   lg::finish();
-  _exit(0);
+  ctr_close_application();
 }
 #endif
 

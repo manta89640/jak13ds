@@ -2284,8 +2284,8 @@ void tod_mark_plain(CtrLevelData::Tod& t, u32 ci, const c3l::Vertex* v, int n) {
   }
 }
 
-// One level draw's rewrites: tod_recolor per chunk drawn in two passes (the light vertices, then
-// the groups), then tod_finish. (AI-assisted, todlag) no budget: every group drawn is brought up to
+// One level draw's rewrites: groups first, then light vertices not already rewritten, followed
+// by tod_finish. (AI-assisted, todlag) every group drawn is brought up to
 // this frame's weights before its draw (the colors drawn are the frame's, as on the PC). Azahar,
 // Oct 23: the title's fast day (a move nearly every frame) 4.6-8.0 ms a frame; c3l_format.md.
 constexpr int kTodLights = 0, kTodRound = 1;
@@ -2325,6 +2325,7 @@ struct TodPass {
   bool spread = false;
   s64 spread_left = 0;
   u32 deferred = 0;
+  std::vector<u8> light_visible;  // scratch, reused for each chunk's visibility groups
 };
 std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
   static std::vector<std::pair<uintptr_t, uintptr_t>> d;  // render thread
@@ -2335,7 +2336,7 @@ std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
 // may see the change) before it is drawn (shown: the chunk's runs drawn this frame, nullptr: all of
 // them). A vertex group (one visibility id's vertices) is always rewritten whole, when a day palette
 // the chunk uses moved since (or it has the file's colors); its light vertices, all at once, when a
-// light palette moved (the light pass). Hidden groups wait until they are drawn. (AI-assisted,
+// light palette moved (the light pass, per shown group). Hidden groups wait until drawn. (AI-assisted,
 // todlag) no budget: everything drawn is current. Returns the vertices written.
 u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   auto& t = *lev.tod;
@@ -2350,6 +2351,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     for (u32 g = g0; g < g0 + ng; g++) {
       t.groups[g].ver = 0;
       t.groups[g].dver = 0;
+      t.groups[g].lver = 0;
     }
     t.chunk_min_ver[ci] = t.chunk_min_dver[ci] = t.chunk_light_ver[ci] = 0;
   }
@@ -2385,38 +2387,35 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   }
   const u32 r0 = lev.chunk_first_run[ci];
   const u32 nr = lev.chunks[ci].vis_run_count;
-  const bool by_runs = shown && ng > 1;
+  const bool by_runs = shown && ng > 1 && r0 <= t.run_group.size() &&
+                       nr <= t.run_group.size() - r0;
   u32 looked = 0;
   int flo = n, fhi = -1;
-  // the light pass: its light vertices (the lamps move every frame)
+  // (AI-assisted) Per-group light versions: hidden runs wait until revealed. The day pass
+  // runs first and marks its groups current, avoiding a second write of their light vertices.
   if (ps.pass == kTodLights && !light_ok) {
-    u32 moved = 0;
-    for (u32 mm = lm; mm; mm &= mm - 1) {
-      const int p = __builtin_ctz(mm);
-      moved |= t.pal_ver[p] > t.chunk_light_ver[ci] ? 1u << p : 0u;
-    }
-    t.chunk_light_ver[ci] = t.ver;
-    auto it = moved ? t.chunk_lights.find((u32)ci) : t.chunk_lights.end();
+    auto it = t.chunk_lights.find((u32)ci);
     if (it != t.chunk_lights.end()) {
       const auto& lights = it->second;
       tod_word* const w = (tod_word*)v;
-      const u16* const vl = lights.verts.data();
-      u32 begin = 0;
-      for (const auto& [lmask, lend] : lights.groups) {
-        if ((lmask & moved) && lend > begin) {
-          for (u32 k = begin; k < lend; k++) {
-            // (AI-assisted, perfv2) the light vertices are scattered: the one 8 ahead asked for
-            __builtin_prefetch(w + 4 * vl[std::min<u32>(k + 8, lend - 1)], 1);
-            tod_word* x = w + 4 * vl[k];
-            x[3] = (x[3] & 0xff000000u) | tod_entry(t, x[1] >> 16);
-          }
-          flo = std::min<int>(flo, vl[begin]);
-          fhi = std::max<int>(fhi, vl[lend - 1]);
-          looked += lend - begin;
-          ps.light_verts += lend - begin;
-        }
-        begin = lend;
-      }
+      t.chunk_light_ver[ci] = ctr_recolor_light_groups(
+          t.groups.data() + g0, ng, by_runs ? shown : nullptr,
+          by_runs ? t.run_group.data() + r0 : nullptr, nr, t.ver, light_last, lm,
+          t.pal_ver, lights.verts, lights.groups, ps.light_visible,
+          [&](auto first, auto last) {
+            for (auto p = first; p != last; ++p) {
+              const auto ahead = p + std::min<ptrdiff_t>(8, last - p - 1);
+              __builtin_prefetch(w + 4 * *ahead, 1);
+              tod_word* x = w + 4 * *p;
+              x[3] = (x[3] & 0xff000000u) | tod_entry(t, x[1] >> 16);
+            }
+            flo = std::min<int>(flo, *first);
+            fhi = std::max<int>(fhi, *(last - 1));
+            looked += (u32)(last - first);
+            ps.light_verts += (u32)(last - first);
+          });
+    } else {
+      t.chunk_light_ver[ci] = t.ver;
     }
   }
   if (ps.pass != kTodLights && !day_ok) {
@@ -2449,6 +2448,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       }
       gr.ver = t.ver;
       gr.dver = t.dver;
+      gr.lver = t.ver;
       any = true;
       ps.rewritten++;
     };
@@ -2783,10 +2783,12 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     }
   }
   // (colors, TodMuls, per entry its mask, rgb and stamp, per chunk 28 bytes with its groups, per
-  // run 2)
+  // run 2). (AI-assisted) Allow for the added light stamp of every possible visibility group
+  // (at most one per run, plus the whole-chunk fallback).
   [[maybe_unused]] const u32 need = nc * t->palette_count * 3 + nm * (u32)sizeof(c3l::TodMul) +
                                      (nc + nm) * 9 +
-                                     (u32)lev->chunks.size() * 28 + (u32)lev->vis_runs.size() * 2;
+                                     (u32)lev->chunks.size() * 28 + (u32)lev->vis_runs.size() * 2 +
+                                     (u32)(lev->chunks.size() + lev->vis_runs.size()) * sizeof(u32);
 #ifdef __3DS__
   {
     constexpr u32 kTodHeapReserve = 3u << 20;
@@ -4289,6 +4291,7 @@ bool CtrLevels::load_file(const fs::path& path,
                g++) {
             t.groups[g].ver = t.ver;
             t.groups[g].dver = t.dver;
+            t.groups[g].lver = t.ver;
           }
           t.chunk_min_ver[ci] = t.ver;
           t.chunk_min_dver[ci] = t.dver;
@@ -4360,6 +4363,9 @@ bool CtrLevels::load_file(const fs::path& path,
     }
     for (auto& ch : out->chunks) {
       const bool tfrag = ch.kind == c3l::CHUNK_KIND_TFRAG || ch.kind == c3l::CHUNK_KIND_UNKNOWN;
+      if (tfrag && ch.lod_tier < 3) {
+        out->detail_radius = std::max(out->detail_radius, ch.bsphere[3]);
+      }
       if (!(any_tier1 ? ch.lod_tier == 1 : (ch.lod_tier == 0 && tfrag))) {
         continue;
       }
@@ -5176,6 +5182,7 @@ void stream_tod_layout(const CtrLevels* /*unused*/,
     g.plain = plain ? 1 : 0;
     g.ver = 0;
     g.dver = 0;
+    g.lver = 0;
   }
 }
 }  // namespace
@@ -6204,6 +6211,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
             }
             gr.ver = t.ver;
             gr.dver = t.dver;
+            gr.lver = t.ver;
           }
           t.chunk_min_ver[ci] = t.ver;
           t.chunk_min_dver[ci] = t.dver;
@@ -6992,6 +7000,17 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   // background (tfrag of every kind, tie, shrub)
   if (lev && lev->drawn_frame != rs.frame_idx) {
     lev->drawn_frame = rs.frame_idx;
+    if (!lev->env_draws.empty()) {
+      // (AI-assisted) Jak 1 sends wind data then the reflection tint in the tie bucket;
+      // Jak II sends its prototype mask then the tint. Both are two PC_PORT transfers.
+      using B = jak1::BucketId;
+      const bool slot0 = m_id == (int)B::TFRAG_LEVEL0 || m_id == (int)B::TFRAG_DIRT_LEVEL0 ||
+                         m_id == (int)B::TFRAG_ICE_LEVEL0 ||
+                         m_id == (int)B::TFRAG_TRANS0_AND_SKY_BLEND_LEVEL0;
+      m_proto_bucket[0] = (int)(slot0 ? B::TIE_LEVEL0 : B::TIE_LEVEL1);
+      env_color_scan(*lev, rs);
+      m_env_frames++;
+    }
     draw_level(*lev, pc_data.camera, rs);
   }
   log_stats(rs, lev);
@@ -8700,6 +8719,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           oc |= 1 | (all ? 2 : 0);
         }
         want = oc & 2;
+        // (AI-assisted) The static bounds say where detail exists in the file, not where it
+        // is drawn this frame. Beyond the distance limit, allow the lowres fallback even
+        // inside those bounds (finalboss spans kilometers). Include hysteresis and twice
+        // the largest detail sphere: its center may be one radius past the cutoff and its
+        // geometry another radius past its center. This avoids overlapping nearby detail.
+        if (!want && draw_dist > 0) {
+          float radius = 0;
+          for (const CtrLevelData* l : m_loaded) {
+            radius = std::max(radius, l->detail_radius);
+          }
+          const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
+          const float lim = draw_dist * 1.1f + 2 * radius + ch.bsphere[3] + kDetailMargin;
+          want = dx * dx + dy * dy + dz * dz > lim * lim;
+        }
       }
       if (!want) {
         continue;
@@ -9152,11 +9185,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     auto shown_of = [&](const VisibleChunk& vc) {
       return vc.runs_valid ? &m_run_shown[lev.chunk_first_run[vc.chunk]] : nullptr;
     };
-    // the light pass, then the groups (AI-assisted, todlag: all of those drawn, no budget)
-    ps.pass = kTodLights;
-    for (const auto& vc : m_visible) {
-      tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
-    }
+    // (AI-assisted) Full groups first: their light vertices need no second rewrite.
     ps.pass = kTodRound;
     {
       auto& t = *lev.tod;
@@ -9172,6 +9201,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       for (const auto& vc : m_visible) {
         tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
       }
+    }
+    ps.pass = kTodLights;
+    for (const auto& vc : m_visible) {
+      tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
     }
     tod_finish();
     tod_ms += tod_now_ms() - t0;
@@ -9276,7 +9309,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // halved for the combiner's x2 (not decal)
     u32 shine = 0xff000000u;
     for (int k = 0; k < 3; k++) {
-      float v = e.tint[k] * m_env_color[k] / 128.f;
+      float v = e.tint[k] * m_env_color[k] / (m_jak2_slot < 0 ? 64.f : 128.f);
+      if (!settings.envmap) {
+        v = 0;
+      }
       if (!c.state->decal) {
         v *= 0.5f;
       }

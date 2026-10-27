@@ -54,10 +54,14 @@ int ctr_gpu_clip_reserve(int, int, ctr_clip_vertex**, uint16_t**) {
 }
 void ctr_gpu_clip_draw_ranges(const ctr_draw_state*, const int*, const int*, int, int, int) {}
 // (AI-assisted) the renderer reads shadow_casters (the test drives the decoder directly)
-const CtrSettings& ctr_settings() {
+namespace ctr_settings_detail {
+const CtrSettings* g_settings = nullptr;
+const CtrSettings& first_use() {
   static const CtrSettings s;
+  g_settings = &s;
   return s;
 }
+}  // namespace ctr_settings_detail
 namespace lg::internal {
 void log_message(level, LogTime&, const char* message) {
   printf("%s\n", message);

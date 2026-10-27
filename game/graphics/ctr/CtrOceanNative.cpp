@@ -8,10 +8,9 @@
  * (skipped with the GS's ADC bit, or cut by the program's clipper, L38 / L45) and the env map pass
  * (not drawn on the 3DS). Here only the textured triangles are made, in clip space: the vertex is
  * W * (GS x, GS y, GS z, 1) (one matrix per tile, from the tile matrix, the GS's Q = fog.x / w and
- * the hvdf offset), so the GPU divides and clips (ctr_gpu_ocean_full_draw_clip). Same triangles,
+ * the hvdf offset), with depth crossings clipped in CtrOceanBatch before the shader projects them. Same triangles,
  * colors, texture coordinates and fog as the program's for those it draws whole; the ones it
- * clips are drawn by the GPU's clipper instead (and the far tiles' ones it drops near the screen
- * edge are drawn).
+ * clips are cut at depth on the CPU and at screen edges on the GPU.
  *
  * The inputs are read from the emulated VU memory where the DMA put them (CtrOceanMidVu::run), at
  * the program's addresses: the constants (733...), the grid and texture coordinates made by

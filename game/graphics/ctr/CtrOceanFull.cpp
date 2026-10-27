@@ -27,7 +27,7 @@ namespace {
 std::atomic<u32> g_levels_gen{1};
 std::string g_levels;  // written while the render thread is idle (ctr_set_levels)
 
-constexpr int kTexSize = 64;   // the wave texture (the PS2's is 128: 32 x 32 quads of 4 x 4)
+constexpr int kTexSize = 128;  // (AI-assisted) original 32 x 32 quads of 4 x 4 texels
 constexpr int kGrid = 32;      // wave vertices per side (the 33rd row / column repeats the first)
 
 
@@ -415,9 +415,9 @@ bool CtrOceanFull::update_env(u64 tex0, CtrRenderState& rs) {
 namespace {
 //! a row of the wave texture's across samples (update_texture)
 struct TexAcross {
-  s32 s[kTexSize], t[kTexSize];  // env map texel coordinates (8 fraction bits), times 4
-  u32 rb[kTexSize];              // red | blue << 16, times 4
-  u32 g[kTexSize];               // green, times 4
+  s32 s[kTexSize], t[kTexSize];  // env map texel coordinates (8 fraction bits), times 8
+  u32 rb[kTexSize];              // red | blue << 16, times 8
+  u32 g[kTexSize];               // green, times 8
 };
 
 inline u32 sat8(s32 v) {
@@ -425,22 +425,22 @@ inline u32 sat8(s32 v) {
 }
 
 /*!
- * One texel row: rows a and b of the across samples weighted WA : 4 - WA (16x the value), the env
+ * One texel row: rows a and b of the across samples weighted WA : 8 - WA (64x the value), the env
  * map texel at the clamped coordinates times the color, (tex * color) >> 7 at most 255 (GS
  * modulate). ENV64: a 64 x 64 env map (shifts; the clamps are usat).
  */
 template <int WA, bool ENV64>
 void texel_row(const TexAcross& a, const TexAcross& b, u32* out, const u32* env, int ew, int eh) {
-  constexpr int WB = 4 - WA;
+  constexpr int WB = 8 - WA;
   const s32 smax = ENV64 ? 63 : ew - 1, tmax = ENV64 ? 63 : eh - 1;
   for (int x = 0; x < kTexSize; x++) {
-    s32 tx = (WA * a.s[x] + WB * b.s[x]) >> 12;
-    s32 ty = (WA * a.t[x] + WB * b.t[x]) >> 12;
+    s32 tx = (WA * a.s[x] + WB * b.s[x]) >> 14;
+    s32 ty = (WA * a.t[x] + WB * b.t[x]) >> 14;
     tx = tx < 0 ? 0 : (tx > smax ? smax : tx);  // clamp to the edge
     ty = ty < 0 ? 0 : (ty > tmax ? tmax : ty);
     const u32 e = env[ENV64 ? (ty << 6) + tx : ty * ew + tx];
-    const u32 crb = ((WA * a.rb[x] + WB * b.rb[x]) >> 4) & 0x00ff00ffu;
-    const u32 cg = (WA * a.g[x] + WB * b.g[x]) >> 4;
+    const u32 crb = ((WA * a.rb[x] + WB * b.rb[x]) >> 6) & 0x00ff00ffu;
+    const u32 cg = (WA * a.g[x] + WB * b.g[x]) >> 6;
     const u32 erb = e & 0x00ff00ffu;
     const u32 r = sat8(((s32)(s16)erb * (s32)(s16)crb) >> 7);  // (smulbb)
 #if defined(__ARM_FEATURE_DSP)
@@ -462,10 +462,8 @@ void texel_row(const TexAcross& a, const TexAcross& b, u32* out, const u32* env,
 }  // namespace
 
 /*!
- * The wave texture: run_L3_PC's math for the 33 x 33 vertices, then 64 x 64 texels between them
- * (texel centers at 1/4 and 3/4 of the PS2's 4 x 4 texel quads: weights 3:1), each the env map
- * texel at the interpolated lookup times the interpolated color (GS modulate). Integers after the
- * vertices: no float compares or divides in the texel loop.
+ * (AI-assisted) The original 128 x 128 wave texture, sampled at the four pixel centers
+ * (1/8, 3/8, 5/8, 7/8) of each grid cell. Keep the integer filtering and GS modulation.
  */
 void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
   const bool env_ok = update_env(t.env_tex0, rs);
@@ -512,51 +510,43 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
     verts[r][kGrid] = verts[r][0];
   }
 
-  // across: 64 samples per vertex row (3a + b, a + 3b: 4x); red and blue in the 16 bit halves
-  // of one word (at most 1020, then 4080 after the down weights: no carries between them)
-  // (AI-assisted) 3a + b and a + 3b as (a + b) + 2a and (a + b) + 2b (integers: the same), and
-  // vertex c + 1's values kept for the next square instead of read again
+  // (AI-assisted) Four samples per cell, with weights summing to eight. The packed red
+  // and blue lanes stay separate (at most 16320 after both filtering directions).
   static TexAcross across[kGrid + 1];
   for (int r = 0; r <= kGrid; r++) {
     TexAcross& o = across[r];
-    const V* row = verts[r];
-    s32 as = row[0].s, at = row[0].t, ag = row[0].g;
-    u32 arb = (u32)row[0].r | (u32)row[0].b << 16;
     for (int c = 0; c < kGrid; c++) {
-      const V& b = row[c + 1];
-      const s32 bs = b.s, bt = b.t, bg = b.g;
+      const V& a = verts[r][c];
+      const V& b = verts[r][c + 1];
+      const u32 arb = (u32)a.r | (u32)a.b << 16;
       const u32 brb = (u32)b.r | (u32)b.b << 16;
-      const s32 ss = as + bs, st = at + bt, sg = ag + bg;
-      const u32 srb = arb + brb;
-      o.s[2 * c] = ss + 2 * as;
-      o.s[2 * c + 1] = ss + 2 * bs;
-      o.t[2 * c] = st + 2 * at;
-      o.t[2 * c + 1] = st + 2 * bt;
-      o.rb[2 * c] = srb + 2 * arb;
-      o.rb[2 * c + 1] = srb + 2 * brb;
-      o.g[2 * c] = sg + 2 * ag;
-      o.g[2 * c + 1] = sg + 2 * bg;
-      as = bs;
-      at = bt;
-      ag = bg;
-      arb = brb;
+      for (int k = 0; k < 4; k++) {
+        const int wb = 2 * k + 1, wa = 8 - wb, x = 4 * c + k;
+        o.s[x] = wa * a.s + wb * b.s;
+        o.t[x] = wa * a.t + wb * b.t;
+        o.rb[x] = wa * arb + wb * brb;
+        o.g[x] = wa * a.g + wb * b.g;
+      }
     }
   }
 
-  // down, the env map lookup and the GS modulate
   m_texels.resize(kTexSize * kTexSize);
   u32* out = m_texels.data();
-  const bool env64 = ew == 64 && eh == 64;  // (the env map: shifts and saturations)
+  const bool env64 = ew == 64 && eh == 64;
   for (int y = 0; y < kTexSize; y++, out += kTexSize) {
-    const TexAcross& a = across[y >> 1];
-    const TexAcross& b = across[(y >> 1) + 1];
-    if (env64) {
-      (y & 1) ? texel_row<1, true>(a, b, out, env, ew, eh)
-              : texel_row<3, true>(a, b, out, env, ew, eh);
-    } else {
-      (y & 1) ? texel_row<1, false>(a, b, out, env, ew, eh)
-              : texel_row<3, false>(a, b, out, env, ew, eh);
+    const TexAcross& a = across[y >> 2];
+    const TexAcross& b = across[(y >> 2) + 1];
+    // Constant weights let the ARM compiler turn the fixed-point divides into shifts.
+#define OCEAN_ROW(W) \
+    if (env64) texel_row<W, true>(a, b, out, env, ew, eh); \
+    else texel_row<W, false>(a, b, out, env, ew, eh)
+    switch (y & 3) {
+      case 0: OCEAN_ROW(7); break;
+      case 1: OCEAN_ROW(5); break;
+      case 2: OCEAN_ROW(3); break;
+      case 3: OCEAN_ROW(1); break;
     }
+#undef OCEAN_ROW
   }
   const u8* bytes = (const u8*)m_texels.data();  // RGBA in memory (little endian)
   if (m_tex < 0) {

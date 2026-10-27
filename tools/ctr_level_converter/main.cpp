@@ -229,6 +229,10 @@ struct VcacheStats {
 
 // how a texture is used by the level's draws
 struct TexUse {
+  // (AI-assisted) A material mask (e.g. metal reflectivity) must retain RGB even at alpha zero.
+  // Mixed uses also retain it: an opaque draw can see texels a cutout draw cannot.
+  bool alpha_opacity = false, low_alpha_rgb_visible = false;
+  bool alpha_is_opacity() const { return alpha_opacity && !low_alpha_rgb_visible; }
   bool merc = false;        // drawn by a merc model
   bool alpha_test = false;  // drawn with an alpha test (cut-outs: keep their coverage in the mips)
   int aref = 0x26;          // the alpha test reference (GS units, 0x80 = 1.0)
@@ -256,6 +260,20 @@ struct SrcVertex {
   s8 nrm[3] = {0, 0, 0};
   u8 has_nrm = 0;
 };
+
+// (AI-assisted) Vista meshes render UVs, vertex colors and time-of-day entries too.
+// Compare the complete key, rather than treating a position hash as an identity.
+std::array<u32, 7> vista_vertex_key(const SrcVertex& v) {
+  std::array<u32, 7> key{};
+  const float attr[] = {v.x, v.y, v.z, v.s, v.t};
+  for (int i = 0; i < 5; i++) {
+    const float f = attr[i] == 0.f ? 0.f : attr[i];
+    memcpy(&key[i], &f, sizeof(f));
+  }
+  memcpy(&key[5], v.rgba, sizeof(v.rgba));
+  key[6] = v.tod;
+  return key;
+}
 
 struct SrcTri {
   u32 v[3];         // into the global SrcVertex list
@@ -452,6 +470,18 @@ struct Converter {
     mode.as_int() = mode_bits;
     auto& u = tex_use[tex];
     u.merc |= merc;
+    const auto blend = mode.get_alpha_blend();
+    const bool cutout = mode.get_at_enable() &&
+                        mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL && mode.get_aref();
+    const bool src_alpha = mode.get_ab_enable() &&
+                           (blend == DrawMode::AlphaBlend::SRC_DST_SRC_DST ||
+                            blend == DrawMode::AlphaBlend::SRC_0_SRC_DST ||
+                            blend == DrawMode::AlphaBlend::ZERO_SRC_SRC_DST);
+    // (AI-assisted) ctr_state_from_draw_mode and the PC background shaders use texture alpha
+    // for these draws even when the source TCC bit is clear.
+    const bool opacity = cutout || src_alpha;
+    u.alpha_opacity |= opacity;
+    u.low_alpha_rgb_visible |= !opacity;
     if (mode.get_at_enable() && mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL &&
         !u.alpha_test) {
       u.alpha_test = true;
@@ -1376,12 +1406,12 @@ struct Converter {
     }
     // static instances (already in world space), one vis group per instance
     // categories: normal, trans, water, the base draws of envmapped ties (drawn like the others:
-    // same colors as tfrag3, see etie_base.vert), then the envmap shine draws (not supported)
+    // same colors as tfrag3, see etie_base.vert), then the envmap shine draws (merged into their base draws below)
     u32 last_draw = tree.category_draw_indices[(int)tfrag3::TieCategory::WATER_ENVMAP + 1];
     if (last_draw == 0) {
       last_draw = tree.static_draws.size();
     }
-    // (AI-assisted, j2water2) c3l v21 (Jak II): the envmap shine draws (the second draw
+    // (AI-assisted, j2water2) c3l v21 (both games): the envmap shine draws (the second draw
     // categories, Tie3::envmap_second_pass_draw) give each envmapped prototype its envmap texture
     // and mode; its base draws carry them (DrawKey::env), with the prototype's tint (the vertices'
     // rgba, etie.vert proto_tint) and the vertices' normals: one draw instead of two
@@ -1768,12 +1798,40 @@ bool gen_merc_lod(const c3l::MercModel& mm,
   for (size_t i = 0; i < verts.size(); i++) {
     lock[i] = eye_pos.count({verts[i].pos[0], verts[i].pos[1], verts[i].pos[2]}) != 0;
   }
+  // (AI-assisted) A flat bind-pose surface can have important UV, lighting and skin-weight
+  // variation. Include them in the error metric instead of simplifying positions alone.
+  // Bone slots are local to a range's palette; topology keeps ranges separate, and seam
+  // collapses evaluate each side's attributes independently.
+  constexpr size_t kLodAttrs = c3l::kMercPaletteSize + 2 + 3 + 3;
+  static_assert(kLodAttrs <= 32);
+  std::vector<float> attrs(verts.size() * kLodAttrs, 0.f);
+  std::array<float, kLodAttrs> attr_weights;
+  attr_weights.fill(1.f);
+  for (size_t i = 0; i < verts.size(); i++) {
+    const auto& v = verts[i];
+    float* a = attrs.data() + i * kLodAttrs;
+    for (int k = 0; k < 3; k++) {
+      if (v.bones[k] < c3l::kMercPaletteSize) {
+        a[v.bones[k]] += v.weights[k] / 255.f;
+      }
+    }
+    a += c3l::kMercPaletteSize;
+    a[0] = v.st[0] / 1024.f;
+    a[1] = v.st[1] / 1024.f;
+    for (int k = 0; k < 3; k++) {
+      a[2 + k] = v.normal[k] / 127.f;
+      a[5 + k] = v.rgba[k] / 255.f;
+    }
+    // Preserve nonstandard vertex alpha exactly (the attribute budget is used above).
+    lock[i] |= v.rgba[3] != 128;
+  }
   orient_triangles(in, verts);
   const size_t target = std::max<size_t>((size_t)(in.size() / 3 * opt.gen_lod_ratio) * 3, 3);
   res.resize(in.size());
   size_t n = meshopt_simplifyWithAttributes(res.data(), in.data(), in.size(), pos.data(),
-                                            verts.size(), 3 * sizeof(float), nullptr, 0, nullptr,
-                                            0, lock.data(), target, opt.gen_lod_error,
+                                            verts.size(), 3 * sizeof(float), attrs.data(),
+                                            kLodAttrs * sizeof(float), attr_weights.data(),
+                                            kLodAttrs, lock.data(), target, opt.gen_lod_error,
                                             opt.gen_lod_lock_border ? meshopt_SimplifyLockBorder : 0,
                                             nullptr);
   res.resize(n);
@@ -2362,7 +2420,8 @@ struct MercGate {
 void compare_level(const ctr_tex::Image& ref,
                    const ctr_tex::Image& dec,
                    double* psnr,
-                   double* worst_block) {
+                   double* worst_block,
+                   bool alpha_is_opacity = true) {
   double se = 0;
   size_t n = 0;
   *worst_block = 0;
@@ -2372,7 +2431,7 @@ void compare_level(const ctr_tex::Image& ref,
       int bn = 0;
       for (int y = by; y < by + 4 && y < ref.h; y++) {
         for (int x = bx; x < bx + 4 && x < ref.w; x++) {
-          if (ref.at(x, y)[3] < 16) {
+          if (alpha_is_opacity && ref.at(x, y)[3] < 16) {
             continue;
           }
           for (int c = 0; c < 3; c++) {
@@ -2406,34 +2465,28 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
   u32 sw = tex.w, sh = tex.h;
   u32 dw = std::clamp<u32>(next_pow2(sw), 8, opt.max_tex);
   u32 dh = std::clamp<u32>(next_pow2(sh), 8, opt.max_tex);
-  ctr_tex::Image img;
-  img.w = dw;
-  img.h = dh;
-  img.rgba.resize(dw * dh * 4);
-  for (u32 y = 0; y < dh; y++) {
-    for (u32 x = 0; x < dw; x++) {
-      // box filter over the source pixels covered by this texel
-      u32 x0 = x * sw / dw, x1 = std::max(x0 + 1, (x + 1) * sw / dw);
-      u32 y0 = y * sh / dh, y1 = std::max(y0 + 1, (y + 1) * sh / dh);
-      u32 acc[4] = {0, 0, 0, 0}, n = 0;
-      for (u32 yy = y0; yy < y1 && yy < sh; yy++) {
-        for (u32 xx = x0; xx < x1 && xx < sw; xx++) {
-          u32 p = tex.data[xx + yy * sw];
-          for (int c = 0; c < 4; c++) {
-            acc[c] += (p >> (8 * c)) & 0xff;
-          }
-          n++;
-        }
-      }
-      for (int c = 0; c < 4; c++) {
-        img.rgba[4 * (x + y * dw) + c] = n ? acc[c] / n : 0;
-      }
+  ctr_tex::Image source;
+  source.w = sw;
+  source.h = sh;
+  source.rgba.resize((size_t)sw * sh * 4);
+  // (AI-assisted) Normalize alpha before filtering, and measure cutout coverage at source
+  // resolution. Transparent RGB must not darken the resized texture's visible edges.
+  for (size_t i = 0; i < (size_t)sw * sh; i++) {
+    const u32 p = tex.data[i];
+    for (int c = 0; c < 3; c++) {
+      source.rgba[4 * i + c] = (u8)(p >> (8 * c));
     }
+    source.rgba[4 * i + 3] = (u8)std::min(255u, (p >> 24) * 2u);
   }
+  ctr_tex::MipOptions mo;
+  const bool opacity = use.alpha_is_opacity();
+  mo.alpha_weighted = opacity;
+  mo.preserve_coverage = opacity && use.alpha_test;
+  mo.alpha_ref = std::clamp(use.aref * 2, 1, 255);
+  ctr_tex::Image img = ctr_tex::resize_image(source, dw, dh, mo);
   bool has_alpha = false;
   for (u32 i = 0; i < dw * dh; i++) {
-    u32 a = std::min(255u, img.rgba[4 * i + 3] * 2u);
-    img.rgba[4 * i + 3] = a;
+    const u32 a = img.rgba[4 * i + 3];
     if (a < 240) {
       has_alpha = true;
     }
@@ -2442,11 +2495,9 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
   const ctr_tex::Format fmt16 = has_alpha ? ctr_tex::Format::RGBA4 : ctr_tex::Format::RGB565;
   const ctr_tex::Format fmt_etc = has_alpha ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::ETC1;
   const int levels = opt.mips ? ctr_tex::level_count(dw, dh, 16) : 1;
-  ctr_tex::MipOptions mo;
-  mo.preserve_coverage = has_alpha && use.alpha_test;
-  mo.alpha_ref = std::clamp(use.aref * 2, 1, 255);
+  mo.preserve_coverage = has_alpha && opacity && use.alpha_test;
   auto mips = ctr_tex::make_mips(img, levels, mo);
-  if (has_alpha) {
+  if (has_alpha && opacity) {
     for (auto& m : mips) {
       ctr_tex::fill_transparent_colors(&m);
     }
@@ -2462,12 +2513,12 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
     }
     if (!use.face && !use.eye && (int)dw >= opt.etc1_merc_min && (int)dh >= opt.etc1_merc_min) {
       std::vector<u8> e, s;
-      ctr_tex::encode_level(mips[0], fmt_etc, opt.etc1_quality, &e, aref, opt.etc1_rdo);
+      ctr_tex::encode_level(mips[0], fmt_etc, opt.etc1_quality, &e, aref, opt.etc1_rdo, opacity);
       ctr_tex::encode_level(mips[0], fmt16, opt.etc1_quality, &s, aref);
       compare_level(mips[0], ctr_tex::decode_level(e.data(), dw, dh, fmt_etc), &gate->psnr,
-                    &gate->worst_block);
+                    &gate->worst_block, opacity);
       compare_level(mips[0], ctr_tex::decode_level(s.data(), dw, dh, fmt16), &gate->psnr_16,
-                    &gate->worst_block_16);
+                    &gate->worst_block_16, opacity);
       gate->tested = true;
       // RGB565 is close to the image (~48 dB): ETC1 must reach etc1_merc_psnr. RGBA4 is ~34 dB
       // (4-bit color bands): ETC1A4 is often closer than it, and passes when it is.
@@ -2484,7 +2535,7 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
     fmt = etc1 ? fmt_etc : fmt16;
   }
   for (size_t l = out.empty() ? 0 : 1; l < mips.size(); l++) {
-    ctr_tex::encode_level(mips[l], fmt, opt.etc1_quality, &out, aref, opt.etc1_rdo);
+    ctr_tex::encode_level(mips[l], fmt, opt.etc1_quality, &out, aref, opt.etc1_rdo, opacity);
   }
   if (psnr_out) {
     // quality of the first level (visible texels only)
@@ -2492,7 +2543,7 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
     double se = 0;
     size_t n = 0;
     for (u32 i = 0; i < dw * dh; i++) {
-      if (mips[0].rgba[4 * i + 3] < 16) {
+      if (opacity && mips[0].rgba[4 * i + 3] < 16) {
         continue;
       }
       for (int c = 0; c < 3; c++) {
@@ -2798,7 +2849,10 @@ void optimize_draws(Converter& cv,
     f.used = true;
     const DrawMode m = mode_of(k);
     const int cs = m.get_clamp_s_enable(), ct = m.get_clamp_t_enable();
-    if (!any_order(k) || (f.clamp_s >= 0 && f.clamp_s != cs) || (f.clamp_t >= 0 && f.clamp_t != ct)) {
+    // (AI-assisted) Formerly blended draws must keep their place among translucent draws.
+    // Combining two of them into one atlas key would move both to the earlier key's rank.
+    if (!any_order(k) || (dk.kind & c3l::kDrawBlendDropped) ||
+        (f.clamp_s >= 0 && f.clamp_s != cs) || (f.clamp_t >= 0 && f.clamp_t != ct)) {
       f.ok = false;
     }
     f.clamp_s = cs;
@@ -3349,7 +3403,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   cv.level = &level;
   // (AI-assisted, j2water2) c3l v21 envmapped tie shine: Jak II (in the extension header after
   // v20's, so with near chunks)
-  cv.env_ties_on = jak2 && opt.stream && !opt.no_env_ties;
+  cv.env_ties_on = opt.stream && !opt.no_env_ties;
   int tfrag_trees = 0, tie_trees = 0;
   MercOut merc;
   if (!opt.no_merc) {
@@ -3491,7 +3545,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   };
   // (AI-assisted, j2water2) v21: an envmap shine with fewer than kMinEnvTris triangles in the
   // level isn't worth its own draws (each shine kind splits draws off the plain ones): plain
-  {
+  if (jak2) {
     constexpr size_t kMinEnvTris = 256;
     std::vector<size_t> n(cv.draw_keys.size(), 0);
     for (const auto& t : cv.tris) {
@@ -3743,17 +3797,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
       for (auto& [gk, ids] : groups) {
         vista_src_tris += ids.size();
-        // welded by position (the representative's texture coordinates and color are kept)
-        std::unordered_map<u64, u32> weld;
+        // (AI-assisted) Keep the rendered attributes in the weld key. Position-only welding
+        // erased UV and lighting seams, even when no triangles were simplified.
+        std::map<std::array<u32, 7>, u32> weld;
         std::vector<float> pos;
         std::vector<u32> rep_src, idx;
-        auto key_of = [](const SrcVertex& v) {
-          u32 a, b, c;
-          memcpy(&a, &v.x, 4);
-          memcpy(&b, &v.y, 4);
-          memcpy(&c, &v.z, 4);
-          return ((u64)a * 0x9E3779B97F4A7C15ull) ^ ((u64)b * 0xC2B2AE3D27D4EB4Full) ^ c;
-        };
         for (u32 t : ids) {
           for (int k = 0; k < 3; k++) {
             u32 vi = cv.tris[t].v[k];
@@ -3761,7 +3809,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
               vi = cv.verts[vi].orig;  // (AI-assisted) not the atlas copy
             }
             const auto& v = cv.verts[vi];
-            auto [it, fresh] = weld.emplace(key_of(v), (u32)rep_src.size());
+            auto [it, fresh] = weld.emplace(vista_vertex_key(v), (u32)rep_src.size());
             if (fresh) {
               rep_src.push_back(vi);
               pos.insert(pos.end(), {v.x, v.y, v.z});
@@ -5458,7 +5506,7 @@ int main(int argc, char** argv) {
                "(AI-assisted, v19) no near chunks for streaming: v18 files (near versions within "
                "the level's budget, in the far versions' chunks)");
   app.add_flag("--no-env-ties", opt.no_env_ties,
-               "(AI-assisted) Jak II: no envmapped tie shine (c3l v21 ExtEnvTie)");
+               "(AI-assisted) no envmapped tie shine (c3l v21 ExtEnvTie)");
   app.add_flag("--no-proto-vis", opt.no_proto_vis,
                "(AI-assisted, v20) Jak II: no runs of their own for the prototypes the game hides "
                "by task state (drawn always, as v19)");

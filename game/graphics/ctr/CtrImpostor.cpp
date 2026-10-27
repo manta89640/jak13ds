@@ -51,6 +51,9 @@ constexpr double kQGrid = 512.0 * 4096.0;  // m_qorigin's grid (game units)
 constexpr double kQMove = 384.0 * 4096.0;  // the camera this far from it: a new origin
 constexpr float kMinLife = 4.f;        // frames a new card should stay right (camera moving): else
                                        // it stays geometry (a capture costs about its triangles)
+// (AI-assisted) CPU-bound scenes need longer reuse to repay rasterization/plane fitting.
+// Citadel's lighting pulse otherwise invalidates small cards every few frames.
+constexpr float kMinLifeBusy = 15.f;
 
 // tile sizes: widths in 16 pixel columns (the render target's bands start at multiples of 16
 // rows), heights in 8 pixel rows
@@ -659,6 +662,13 @@ void CtrImpostors::chunk_impl(u32 ci, const float clip[16], bool runs_valid, u8*
     }
     if (c.light || c.tris < kMinTris) {
       m_st.t_light += c.tris;  // (light palettes, or too small to pay)
+      continue;
+    }
+    // (AI-assisted) A held capture stays geometry. Reject it before sorting wants, testing
+    // stale colors and touching the atlas; finish_chunks used to repeat those checks each frame.
+    if (m_frame < c.tod_hold) {
+      m_st.short_life++;
+      m_st.t_short += c.tris;
       continue;
     }
     const bool had = c.slot >= 0 && m_slots[c.slot].last_used + 1 >= m_frame;
@@ -1445,6 +1455,7 @@ void CtrImpostors::finish_chunks_impl() {
   float fail_value = -1.f;
   const double cap_budget =
       ctr_level_last_build_ms() >= kBusyBuildMs ? kCaptureCpuMsBusy : kCaptureCpuMs;
+  const float min_life = ctr_level_last_build_ms() >= kBusyBuildMs ? kMinLifeBusy : kMinLife;
   for (size_t oi = 0; oi < order.size(); oi++) {
     const u32 i = order[oi];
     Want& w = m_wants[i];
@@ -1456,7 +1467,7 @@ void CtrImpostors::finish_chunks_impl() {
       m_st.over_budget += (double)(order.size() - oi);
       break;  // the rest stay geometry this frame
     }
-    if (w.tod_rate > 0.f && (float)kTodMaxErr / w.tod_rate < kMinLife) {
+    if (w.tod_rate > 0.f && (float)kTodMaxErr / w.tod_rate < min_life) {
       c.tod_hold = m_frame + 30;  // (a second, then try again)
     }
     if (m_frame < c.tod_hold) {
@@ -1535,7 +1546,7 @@ void CtrImpostors::finish_chunks_impl() {
                            : (float)(0.5 * F * (1.0 / std::max(1e-3f, w.wmin) - 1.0 / w.wmax));
       const float life_err = kp > 0.f ? set.impostor_error / (kp * m_speed) : 1e9f;
       const float life_size = kScaleTolerance * w.wmin / (m_rowlen[3] * m_speed);
-      if (std::min(life_err, life_size) < kMinLife) {
+      if (std::min(life_err, life_size) < min_life) {
         m_st.short_life++;
         m_st.t_short += c.tris;
         continue;

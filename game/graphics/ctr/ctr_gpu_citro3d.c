@@ -39,7 +39,7 @@ extern const size_t ctr_ocean_full_clip_shbin_size;
 /* (AI-assisted, j2water) Jak II's ocean with the sky reflection (loaded by the Jak II build only) */
 extern const uint8_t ctr_ocean_env_shbin[];
 extern const size_t ctr_ocean_env_shbin_size;
-/* (AI-assisted, j2water2) Jak II's envmapped ties (loaded by the Jak II build only) */
+/* (AI-assisted) Envmapped ties in both games. */
 extern const uint8_t ctr_etie_shbin[];
 extern const size_t ctr_etie_shbin_size;
 /* (AI-assisted) the Oct 2 shaders (hardware proven; the level meshes and merc without shader_opt,
@@ -1563,13 +1563,13 @@ int ctr_gpu_init(void) {
     shaderProgramInit(&g.ps->ocean_env);
     shaderProgramSetVsh(&g.ps->ocean_env, &g.ocean_env_dvlb->DVLE[0]);
   }
-  /* (AI-assisted, j2water2) Jak II's envmapped ties */
+#endif
+  /* (AI-assisted) Both games' converted ties can carry v21 reflection data. */
   g.etie_dvlb = DVLB_ParseFile((u32*)ctr_etie_shbin, (u32)ctr_etie_shbin_size);
   if (g.etie_dvlb) {
     shaderProgramInit(&g.ps->etie);
     shaderProgramSetVsh(&g.ps->etie, &g.etie_dvlb->DVLE[0]);
   }
-#endif
   prog_set_ulocs(&s_ps[0], g.mesh_fa_dvlb != NULL);
   s_ps[0].ok = 1;
   printf("[ctr] fog_alpha program: %s\n",
@@ -4853,7 +4853,12 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
   const GPU_TEXTURE_FILTER_PARAM f = st->filter ? GPU_LINEAR : GPU_NEAREST;
   u32 param = tex->param & ~(GPU_TEXTURE_MAG_FILTER(GPU_LINEAR) | GPU_TEXTURE_MIN_FILTER(GPU_LINEAR) |
                              GPU_TEXTURE_WRAP_S(3) | GPU_TEXTURE_WRAP_T(3) |
-                             GPU_TEXTURE_MIP_FILTER(GPU_LINEAR));
+                             GPU_TEXTURE_MIP_FILTER(GPU_LINEAR) | GPU_TEXTURE_MODE(7));
+  /* (AI-assisted) STQ is affine on the GS; divide by interpolated Q in the texture sampler.
+   * Position W stays one so primary color, fog and reflection coordinates stay screen-affine. */
+  if (g.cur_prog == PROG_OCEAN_FULL || g.cur_prog == PROG_OCEAN_FULL_CLIP) {
+    param |= GPU_TEXTURE_MODE(GPU_TEX_PROJECTION);
+  }
   param |= GPU_TEXTURE_MAG_FILTER(f) | GPU_TEXTURE_MIN_FILTER(f) |
            GPU_TEXTURE_WRAP_S(st->clamp_s ? GPU_CLAMP_TO_EDGE : GPU_REPEAT) |
            GPU_TEXTURE_WRAP_T(st->clamp_t ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
@@ -6948,7 +6953,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
  * without the copy, but their call / return use isn't documented and a list the GPU doesn't finish
  * hangs the console: left for a pica_bench test. */
 #define CL_ARENA_BYTES (512u * 1024u)
-#define CL_MAX_SEGS 8
+#define CL_SEGS_PER_PAGE 8
 typedef struct {
   ctr_draw_state last_state;
   int last_state_mesh;
@@ -7019,8 +7024,14 @@ typedef struct {
   ClSet set;
   int stats[CL_S_COUNT];
 } ClSeg;
+/* (AI-assisted) Citadel has more than eight program stretches. Allocate metadata in small
+ * pages so every stretch can be cached, without enlarging all levels' cache allocations. */
+typedef struct ClPage {
+  ClSeg seg[CL_SEGS_PER_PAGE];
+  struct ClPage* next;
+} ClPage;
 struct ctr_cmd_cache {
-  ClSeg seg[CL_MAX_SEGS];
+  ClPage* pages;
 };
 static struct {
   int mode;
@@ -7535,6 +7546,8 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** 
     }
   }
   ctr_cmd_cache* cc = *cache;
+  ClPage** page = &cc->pages;
+  int cache_room = 1;
   int seg = 0, start = -1, prev_prog = -1, prev_plain = 0;
   for (int i = 0; i <= n; i++) {
     int head = 1, prog = -1, plain = 0;
@@ -7552,12 +7565,20 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** 
       }
     }
     if (head && start >= 0) {
-      if (seg < CL_MAX_SEGS) {
-        cl_segment(&cc->seg[seg], calls, start, i);
+      if (cache_room && !*page) {
+        *page = (ClPage*)calloc(1, sizeof(ClPage));
+        cache_room = *page != NULL;
+      }
+      if (cache_room) {
+        cl_segment(&(*page)->seg[seg % CL_SEGS_PER_PAGE], calls, start, i);
       } else {
         cl_draw(calls, start, i);
+        s_cl.normal_calls += (u32)(i - start);
       }
       seg++;
+      if (cache_room && seg % CL_SEGS_PER_PAGE == 0) {
+        page = &(*page)->next;
+      }
       start = -1;
     }
     if (i == n) {
@@ -7576,7 +7597,13 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** 
 
 void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache) {
   if (cache && *cache) {
-    free(*cache); /* (the recordings are in the arena) */
+    ClPage* page = (*cache)->pages;
+    while (page) {
+      ClPage* next = page->next;
+      free(page); /* (the recordings themselves are in the arena) */
+      page = next;
+    }
+    free(*cache);
     *cache = NULL;
   }
 }

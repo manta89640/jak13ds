@@ -1,9 +1,4 @@
-; (AI-assisted)
-; config.ini shader_opt: ctr_ocean_full_clip.v.pica in 7 instructions (15) and 4 output registers
-; (5): texcoord0 (s, t) and texcoord1 (the fog amount as s and t) in one register, one mov with the
-; swizzle xyzz; (j1ocean) texcoord2 for the sky reflection. Same uniforms.
-; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
-
+; (AI-assisted) GS interpolation: screen-affine color/fog/reflection, projective STQ.
 .fvec gs[4]
 
 .constf consts(0.00392156862745098, 0.0, 0.0, 0.0)
@@ -13,6 +8,7 @@
 .out outtc texcoord0.xy
 .out - texcoord1 outtc.zw
 .out outclr color
+.out outtcq texcoord0w
 .out outtc2 texcoord2
 
 .alias inpos v0  ; W * (x, y, z, 1)
@@ -22,11 +18,16 @@
 
 .entry main_ctr_ocean_full_clip_opt
 .proc main_ctr_ocean_full_clip_opt
-  dp4 outpos.x, gs[0], inpos
-  dp4 outpos.y, gs[1], inpos
-  dp4 outpos.z, gs[2], inpos
-  dp4 outpos.w, gs[3], inpos
-  mov outtc, intex.xyzz
+  dp4 r0.x, gs[0], inpos
+  dp4 r0.y, gs[1], inpos
+  dp4 r0.z, gs[2], inpos
+  dp4 r0.w, gs[3], inpos
+  rcp r1.x, inpos.w
+  mul outpos, r0, r1.xxxx
+  mov outtcq, r1.xxxx
+  mul r2.xy, intex.xyyy, r1.xxxx
+  mov r2.zw, intex.zzzz
+  mov outtc, r2
   mul outclr, inv255, inclr
   mov outtc2, inenv.xyyy  ; (AI-assisted, j1ocean) texture unit 2's coordinates (the sky reflection)
   end

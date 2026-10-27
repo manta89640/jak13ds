@@ -759,12 +759,56 @@ int transition_test() {
 }
 }  // namespace
 
+// (AI-assisted) Projection textures require positive W and pre-clipped depth. Exercise a tile
+// crossing each depth plane, using the real reservation/commit path and captured GPU buffers.
+int depth_clip_test() {
+  int errors = 0;
+  for (int plane = 0; plane < 3; plane++) {
+    g_draws.clear();
+    CtrOceanBatch batch;
+    ctr_draw_state state{};
+    const u8 fog[3] = {};
+    batch.begin(state, fog);
+    ctr_ocean_full_vertex* v;
+    u16* idx;
+    int first;
+    if (!batch.reserve_clip(3, 3, &v, &idx, &first)) return 1;
+    for (int k = 0; k < 3; k++) {
+      v[k] = {};
+      v[k].q = 1;
+      v[k].x = (32000.f + 1000.f * k);
+      v[k].y = 32000.f;
+      v[k].z = 8388608.f;
+      v[k].r = 100;
+      idx[k] = (u16)(first + k);
+    }
+    if (plane == 0) v[0].q = -1;
+    if (plane == 1) v[0].z = -8388608.f;
+    if (plane == 2) v[0].z = 25165824.f;
+    batch.commit(3, 3);
+    batch.end();
+    errors += g_draws.size() != 1;
+    for (const auto& draw : g_draws) {
+      errors += draw.idx.size() < 3 || draw.idx.size() > 12;
+      for (u16 i : draw.idx) {
+        if (i >= draw.v.size()) { errors++; continue; }
+        const auto& o = draw.v[i];
+        errors += !(o.q > 0) || !std::isfinite(o.x / o.q) ||
+                  o.z < -2.f || o.z > 16777215.f * o.q + 2.f || o.r != 100;
+      }
+    }
+  }
+  g_draws.clear();
+  printf("projective ocean depth clipping: %d errors\n", errors);
+  return errors;
+}
+
 int main(int argc, char** argv) {
   // (AI-assisted) as the 3DS draws, but the wave texture every frame and the near ocean's alpha
   // as the program's (config.ini ocean_texture_rate, ocean_near_alpha): the same as emulated
   g_settings.ocean_texture_rate = 1;
   g_settings.ocean_near_alpha = 0.f;
-  const int transition_errors = transition_test();
+  const int transition_errors = depth_clip_test() + transition_test();
   if (argc < 2) {
     printf("(no dump file: ocean_replay ocean_dump.bin [iterations] replays one)\n%s\n",
            transition_errors ? "FAIL" : "OK");
@@ -837,7 +881,8 @@ int main(int argc, char** argv) {
   int errors = compare(ref, nat, 0) + compare(ref, nat, 1) + transition_errors + draws_errors;
   printf("wave texture: %s\n", tex_same ? "same" : "DIFFERENT");
   errors += !tex_same;
-  // the wave texture (64 x 64 RGBA8, as uploaded) to a file / against an earlier version's file
+  errors += g_tex.size() != 128 * 128 * 4;
+  // the wave texture (128 x 128 RGBA8, as uploaded) to a file / against an earlier version's file
   if (const char* out = getenv("OCEAN_TEX_OUT")) {
     FILE* f = fopen(out, "wb");
     fwrite(g_tex.data(), 1, g_tex.size(), f);

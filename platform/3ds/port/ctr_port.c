@@ -309,6 +309,19 @@ void ctr_platform_exit(void) {
   gfxExit();
 }
 
+_Noreturn void ctr_close_application(void) {
+  /* (AI-assisted) _exit is unsafe with live workers: __libctru_exit unmaps both heaps before
+   * APT_CloseApplication/svcExitProcess ends the process. A sleeping worker can then resume on
+   * an unmapped stack. Complete the APT handshake directly, keeping stacks and shared service
+   * state alive until the kernel terminates all threads together. aptExit prepares the close
+   * and joins its own event thread, but defers APT_CloseApplication to the loader callback. */
+  aptExit();
+  APT_CloseApplication(NULL, 0, 0);
+  svcExitProcess();
+  for (;;) {
+  }
+}
+
 int ctr_main_loop(void) {
   int running = aptMainLoop() ? 1 : 0;
   log_watchdog();
@@ -1278,13 +1291,12 @@ void ctr_crash(const char* title, const char* detail) {
     fflush(s_tee_file);
   }
   if (aptShouldClose()) {
-    /* (AI-assisted) the system is closing the app (HOME Menu): nobody sees the crash screen, and
-     * the HOME Menu waits until the app tells APT it closed, which _exit does (__appExit ->
-     * aptExit); svcExitProcess alone left it on "closing software" forever */
+    /* (AI-assisted) the system is closing the app (HOME Menu): nobody sees the crash screen.
+     * Complete the APT close handshake without freeing other threads' stacks. */
     if (s_log_on && files) {
       run_jobs(); /* a background file write (settings) */
     }
-    _exit(1);
+    ctr_close_application();
   }
   show_screen("\x1b[31m", "*** OpenGOAL crashed ***", title, detail, 1,
               "Logs: " CTR_SD_DIR "/data/log/\nPlease report stdout.log and gk.log\n"

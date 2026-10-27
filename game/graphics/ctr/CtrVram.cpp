@@ -17,6 +17,7 @@
 #include "common/log/log.h"
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
+#include "third-party/zstd/lib/common/xxhash.h"
 
 #include "fmt/format.h"
 #include "common/util/FileUtil.h"
@@ -51,19 +52,10 @@ u32 upload_end_block(u32 dest_block, u32 words) {
 }
 
 // (AI-assisted) the id of a whole chunk of a page upload (odd; see CtrVram.h): where its data comes
-// from in EE memory and a sampled hash of it (32 words, one per 512 bytes), taken when it is
+// from in EE memory and a hash of every word, taken when it is
 // written: a pending upload copies the bytes there at that time, not when it was recorded
 u64 page_chunk_id(const u8* chunk_src) {
-  u64 h = (u64)(uintptr_t)chunk_src * 0x9E3779B97F4A7C15ull;
-  for (u32 k = 0; k < 32; k++) {
-    u32 w;
-    memcpy(&w, chunk_src + 512 * k + 4 * (k & 7), 4);
-    h = (h ^ w) * 1099511628211ull;
-  }
-  h ^= h >> 29;
-  h *= 0xBF58476D1CE4E5B9ull;
-  h ^= h >> 32;
-  return h | 1;
+  return XXH64(chunk_src, kChunkWords * sizeof(u32), (u64)(uintptr_t)chunk_src) | 1;
 }
 
 // GOAL texture-page layout (see game/graphics/texture/TexturePool.h, kept GL-free here).
@@ -473,14 +465,9 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     }
   }
 #endif
-  // skip the upload if this exact data is already there (sampled hash, pages are static)
+  // (AI-assisted) Hash every word: pages can be edited or their source allocation reused.
   const u8* src = ee_mem + seg.block_data_ptr;
-  u64 hash = words;
-  for (u32 k = 0; k < 64; k++) {
-    u32 w;
-    memcpy(&w, src + 4 * ((u64)k * words / 64), 4);
-    hash = hash * 1099511628211ull ^ w;
-  }
+  const u64 hash = XXH64(src, (size_t)words * sizeof(u32), words);
   auto last = m_last_upload.find(dest_block);
   if (last != m_last_upload.end() && last->second.src == src && last->second.words == words &&
       last->second.hash == hash) {
@@ -1234,6 +1221,11 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
   // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)
   e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), CTR_TEX_CHECK_RADIAL);
+  // (AI-assisted) Allocation pressure is temporary. Keep any old entry for its stale cache,
+  // but never publish a failed handle with a valid signature: the next lookup must retry.
+  if (e.tex.handle < 0) {
+    return nullptr;
+  }
   e.first_block = tex_range.lo / kBlockBytes;
   e.end_block = tex_range.hi / kBlockBytes + 1;
   if (has_clut && !reloc) {

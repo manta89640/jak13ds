@@ -190,6 +190,46 @@ int level_count(int w, int h, int max_levels) {
   return n;
 }
 
+Image resize_image(const Image& src, int w, int h, const MipOptions& opt) {
+  if (src.w == w && src.h == h) {
+    return src;
+  }
+  Image dst;
+  dst.w = w;
+  dst.h = h;
+  dst.rgba.resize((size_t)w * h * 4);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      const int x0 = x * src.w / w, x1 = std::max(x0 + 1, (x + 1) * src.w / w);
+      const int y0 = y * src.h / h, y1 = std::max(y0 + 1, (y + 1) * src.h / h);
+      double rgb[3] = {}, fallback[3] = {}, alpha = 0;
+      int n = 0;
+      for (int sy = y0; sy < y1; sy++) {
+        for (int sx = x0; sx < x1; sx++) {
+          const uint8_t* p = src.at(sx, sy);
+          for (int c = 0; c < 3; c++) {
+            rgb[c] += (double)p[c] * p[3];
+            fallback[c] += p[c];
+          }
+          alpha += p[3];
+          n++;
+        }
+      }
+      uint8_t* p = dst.at(x, y);
+      for (int c = 0; c < 3; c++) {
+        p[c] = (uint8_t)std::clamp((int)std::lround(opt.alpha_weighted && alpha
+                                                     ? rgb[c] / alpha : fallback[c] / n),
+                                   0, 255);
+      }
+      p[3] = (uint8_t)std::lround(alpha / n);
+    }
+  }
+  if (opt.preserve_coverage) {
+    scale_alpha_to_coverage(&dst, coverage(src, opt.alpha_ref, 1.0), opt.alpha_ref);
+  }
+  return dst;
+}
+
 std::vector<Image> make_mips(const Image& base, int levels, const MipOptions& opt) {
   std::vector<Image> out;
   out.reserve(levels);
@@ -209,7 +249,7 @@ std::vector<Image> make_mips(const Image& base, int levels, const MipOptions& op
         double c[3] = {0, 0, 0}, wsum = 0, asum = 0;
         for (int k = 0; k < 4; k++) {
           const uint8_t* p = src.at(2 * x + (k & 1), 2 * y + (k >> 1));
-          const double wgt = p[3] / 255.0 + 1.0 / 1024.0;
+          const double wgt = opt.alpha_weighted ? p[3] / 255.0 + 1.0 / 1024.0 : 1.0;
           for (int ch = 0; ch < 3; ch++) {
             c[ch] += p[ch] * wgt;
           }
@@ -271,7 +311,8 @@ void encode_level(const Image& img,
                   int etc1_quality,
                   std::vector<uint8_t>* out,
                   int alpha_ref,
-                  float etc1_rdo) {
+                  float etc1_rdo,
+                  bool alpha_is_opacity) {
   const int w = img.w, h = img.h;
   const size_t start = out->size();
   out->resize(start + level_bytes(w, h, fmt));
@@ -350,7 +391,8 @@ void encode_level(const Image& img,
               for (int y = 0; y < 4; y++) {
                 for (int x = 0; x < 4; x++) {
                   const uint8_t* p = img.at(bx + x, h - 1 - (bym + y));
-                  w[y * 4 + x] = alpha ? (uint8_t)(1 + (p[3] * 15 + 127) / 255) : 16;
+                  w[y * 4 + x] = alpha && alpha_is_opacity
+                                     ? (uint8_t)(1 + (p[3] * 15 + 127) / 255) : 16;
                 }
               }
               const double lambda = etc1_rdo;

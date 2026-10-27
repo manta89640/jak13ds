@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/graphics/ctr/CtrLight.h"
+
 /*!
  * @file CtrLevel.h
  * (AI-assisted)
@@ -153,6 +155,8 @@ struct CtrLevelData {
   // where the level's low resolution tfrag isn't drawn in near mode (config lowres_vista)
   float detail_min[3] = {0, 0, 0}, detail_max[3] = {0, 0, 0};
   bool has_detail = false;
+  // (AI-assisted) Detailed geometry can extend this far past its distance-tested center.
+  float detail_radius = 0;
   // (AI-assisted) lowres_vista, per chunk: whether its sphere is outside the detailed areas of all
   // loaded levels (bit 1) / inside another loaded level's (bit 3), bits 0 / 2: worked out. Valid
   // for the set of loaded levels of CtrLevels::set_generation() == outside_gen (not the camera)
@@ -307,16 +311,11 @@ struct CtrLevelData {
     Act act;
     // per chunk: its vertex groups (VisGroup: one per visibility id of its runs when their vertex
     // ranges don't overlap, c3l v18 files, in vertex order; else one for all), each with the
-    // version its colors are (0: the file's) and the day move count then; the oldest of those,
-    // the version its light vertices are (quick outs); the palettes its vertices use (scanned: 0
+    // version its colors are (0: the file's), the day move count then, and its light version;
+    // the oldest of those per chunk (quick outs); the palettes its vertices use (scanned: 0
     // not yet (no mesh at load), 1 no time of day color, 2 some) and its mesh (a mesh made again has
     // the file's colors)
-    struct VisGroup {
-      u16 lo, hi;  // vertices [lo, hi]
-      u32 ver : 31;
-      u32 plain : 1;  // every vertex has a time of day color
-      u32 dver;
-    };
+    using VisGroup = CtrLightGroup;
     std::vector<VisGroup> groups;
     std::vector<u32> chunk_group_first;
     std::vector<u16> chunk_group_count;

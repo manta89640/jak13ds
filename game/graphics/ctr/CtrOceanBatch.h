@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cmath>
+#include <vector>
 
 #include "common/common_types.h"
 #include "common/dma/gs.h"
@@ -56,7 +58,8 @@ class CtrOceanBatch {
    */
   bool reserve_clip(int n, int m, ctr_ocean_full_vertex** v, u16** idx, int* first,
                     bool env = false) {
-    if (m_failed || !mode(env && m_env_tex >= 0 ? kModeEnv : kModeClip) || !room(n, m)) {
+    if (m_failed || !mode(env && m_env_tex >= 0 ? kModeEnv : kModeClip) ||
+        !room(n + 2 * m, 4 * m)) {
       return false;
     }
     *v = m_v + m_nv;
@@ -65,6 +68,51 @@ class CtrOceanBatch {
     return true;
   }
   void commit(int n, int m) {
+    // (AI-assisted) The shader now projects positions to W=1 for GS-affine color and fog.
+    // Clip depth crossings before that divide. Ordinary ocean tiles keep their indexed grid;
+    // only a crossing tile needs scratch storage and new vertices (at most six per triangle).
+    bool crossing = false;
+    for (int i = 0; i < n; i++) {
+      const auto& v = m_v[m_nv + i];
+      crossing |= !depth_inside(v);
+    }
+    if (crossing && m) {
+      m_clip_verts.assign(m_v + m_nv, m_v + m_nv + n);
+      m_clip_indices.assign(m_i + m_ni, m_i + m_ni + m);
+      const int first = m_nv;
+      m_nv += n;
+      for (int i = 0; i + 2 < m; i += 3) {
+        ctr_ocean_full_vertex poly[8], tmp[8];
+        for (int k = 0; k < 3; k++) {
+          poly[k] = m_clip_verts[m_clip_indices[i + k] - first];
+        }
+        int count = 3;
+        for (int plane = 0; plane < 3 && count; plane++) {
+          int out = 0;
+          for (int k = 0; k < count; k++) {
+            const auto& a = poly[k];
+            const auto& b = poly[(k + 1) % count];
+            const float da = depth_plane(a, plane), db = depth_plane(b, plane);
+            if (da >= 0) tmp[out++] = a;
+            if ((da >= 0) != (db >= 0)) tmp[out++] = mix(a, b, da / (da - db));
+          }
+          count = out;
+          std::copy(tmp, tmp + count, poly);
+        }
+        if (count >= 3) {
+          const int base = m_nv;
+          std::copy(poly, poly + count, m_v + m_nv);
+          m_nv += count;
+          for (int k = 1; k + 1 < count; k++) {
+            m_i[m_ni++] = (u16)base;
+            m_i[m_ni++] = (u16)(base + k);
+            m_i[m_ni++] = (u16)(base + k + 1);
+          }
+        }
+      }
+      vertices += m_nv - first;
+      return;
+    }
     m_nv += n;
     m_ni += m;
     vertices += n;
@@ -166,6 +214,27 @@ class CtrOceanBatch {
   }
 
  private:
+  static float depth_plane(const ctr_ocean_full_vertex& v, int plane) {
+    return plane == 0 ? v.q - 1e-8f : plane == 1 ? v.z : 16777215.f * v.q - v.z;
+  }
+  static bool depth_inside(const ctr_ocean_full_vertex& v) {
+    return depth_plane(v, 0) >= 0 && depth_plane(v, 1) >= 0 && depth_plane(v, 2) >= 0;
+  }
+  static ctr_ocean_full_vertex mix(const ctr_ocean_full_vertex& a,
+                                   const ctr_ocean_full_vertex& b, float t) {
+    ctr_ocean_full_vertex o{};
+#define OCEAN_MIX(c) o.c = a.c + t * (b.c - a.c)
+    OCEAN_MIX(x); OCEAN_MIX(y); OCEAN_MIX(z); OCEAN_MIX(q);
+    OCEAN_MIX(s); OCEAN_MIX(t); OCEAN_MIX(fog); OCEAN_MIX(es); OCEAN_MIX(et);
+#undef OCEAN_MIX
+    o.r = (u8)std::clamp(std::lround(a.r + t * (b.r - a.r)), 0l, 255l);
+    o.g = (u8)std::clamp(std::lround(a.g + t * (b.g - a.g)), 0l, 255l);
+    o.b = (u8)std::clamp(std::lround(a.b + t * (b.b - a.b)), 0l, 255l);
+    o.a = (u8)std::clamp(std::lround(a.a + t * (b.a - a.a)), 0l, 255l);
+    return o;
+  }
+  std::vector<ctr_ocean_full_vertex> m_clip_verts;
+  std::vector<u16> m_clip_indices;
   enum : u32 { kTextured = 0, kAlpha = 1, kEnvMap = 2 };
 
   //! CommonOceanRenderer::handle_near_adgif: which of the 3 passes the next packets are

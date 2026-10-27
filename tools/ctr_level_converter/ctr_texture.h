@@ -35,11 +35,16 @@ uint32_t level_bytes(int w, int h, Format fmt);
 int level_count(int w, int h, int max_levels);
 
 struct MipOptions {
+  // (AI-assisted) False when alpha is a material mask, rather than RGB opacity.
+  bool alpha_weighted = true;
   // Keep the fraction of texels that pass an alpha test (alpha >= alpha_ref, 0..255) the same in
   // every level, so cut-out textures (foliage, fences) don't fade away or fatten with distance.
   bool preserve_coverage = false;
   int alpha_ref = 76;
 };
+
+/*! (AI-assisted) Alpha-weighted box resize; cutout coverage is measured before resizing. */
+Image resize_image(const Image& src, int w, int h, const MipOptions& opt);
 
 /*!
  * Mip chain of a power of two image: [0] = the image itself. Colors are averaged weighted by
@@ -67,7 +72,8 @@ void encode_level(const Image& img,
                   int etc1_quality,
                   std::vector<uint8_t>* out,
                   int alpha_ref = 0,
-                  float etc1_rdo = 0);
+                  float etc1_rdo = 0,
+                  bool alpha_is_opacity = true);
 
 /*! (AI-assisted) RDO statistics (all threads): blocks, exact copies, reused colors. */
 struct RdoStats {

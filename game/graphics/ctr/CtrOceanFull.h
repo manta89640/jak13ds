@@ -9,8 +9,8 @@
  * instead of draw-ocean-3ds, so the two ocean buckets get the PS2's DMA, which this renders like
  * the PC renderer (game/graphics/opengl_renderer/ocean):
  *  - the wave texture (OceanTexture): the ocean-texture VU program's math on the CPU for the 33x33
- *    vertices of *ocean-verts* (color, and the env map lookup from the wave normals), then 64x64
- *    texels (the PS2's 128x128 of 4x4 texel quads at half the resolution), each the env map
+ *    vertices of *ocean-verts* (color, and the env map lookup from the wave normals), then 128x128
+ *    texels (the original 4x4 texel quads), each the env map
  *    texel at the interpolated lookup times the interpolated color (GS modulate). One texture with
  *    mip levels for both buckets, computed at most once per frame ((AI-assisted) every
  *    config.ini ocean_texture_rate frames: 2 by default).
@@ -23,8 +23,9 @@
  *    ocean-near VU program's call 39 (CtrOceanNative.cpp; OceanNear_PS2.cpp for the rest).
  * The GS packets become indexed triangle lists written straight to the frame's vertex memory
  * (ctr_gpu_ocean_full_reserve / draw, ctr_ocean_full.v.pica: the GS's S, T, Q perspective, the GS
- * fog value); the native programs' vertices are in clip space, unclipped (draw_clip,
- * ctr_ocean_full_clip.v.pica: the GPU clips).
+ * fog value); the native programs' vertices are in homogeneous GS space (draw_clip). CtrOceanBatch clips
+ * depth crossings before the shader projects to W=1; a projective sampler divides ST by Q
+ * per pixel while color, fog and reflection coordinates remain screen-affine.
  * (AI-assisted, j1ocean) The sky reflection: the PS2 draws an env map pass after the textured one
  * where the programs say so (mid tiles of call 73, the transitions, the near patches; not the far
  * ocean or call 46's tiles): environment-ocean times the time of day's env-color, at the view

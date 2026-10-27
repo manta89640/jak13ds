@@ -21,7 +21,7 @@
  * copy when something reads VRAM that it overlaps.
  *
  * (AI-assisted) What VRAM holds is tracked per 16 KB chunk (the game's upload unit): a chunk
- * written whole by a page upload has an id from its source (address in EE memory and a sampled
+ * written whole by a page upload has an id from its source (address in EE memory and a full
  * hash of the bytes copied), anything else a new number. A chunk upload whose id is already there isn't
  * written again, and a cached texture is valid while the ids of the chunks it was decoded from
  * are unchanged: no VRAM re-hashing, no cache scans when VRAM is written.

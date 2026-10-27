@@ -1172,3 +1172,33 @@ saving from the 75% reduction in shield births.
 The complete arrival introduction (`green-sagecage-introduction`) was additionally captured in
 Azahar every four game frames, with sound on. Capture timing is excluded from the performance
 comparison. Evidence and scripts: `port_test/reports/citadel-effects/`.
+
+## Citadel renderer follow-up (AI-assisted, Oct 27)
+
+Real hardware was reported at 25–27 FPS against the two-vblank 29.9 FPS target. This follow-up
+uses code inspection and CPU-only regression checks; no new emulator or hardware run was made.
+Earlier emulator timing identifies candidates, but does not establish the current hardware
+bottleneck or the FPS gain from these changes.
+
+- Time-of-day lighting now tracks freshness per visibility group. Hidden groups wait until
+  revealed; newly visible groups catch up before drawing. Full day-color rewrites run first
+  and include current light colors, avoiding a second rewrite of the same light vertices.
+  Older files with overlapping visibility ranges retain the whole-chunk fallback. The extra
+  light stamp is four bytes per group and is included in the load-time heap estimate.
+- Static command-cache metadata grows in pages of eight stretches instead of stopping at eight
+  total. The recording arena retains its existing 512 KB limit. Allocation failures draw normally
+  and retry caching on a later frame.
+- Eligible 3D sprites now trim fully transparent texture borders, as 2D sprites already did.
+  Trimming interpolates all four homogeneous position components and requires a planar affine
+  quad with full 0..1 UV coverage. Repeating/subregion UVs, procedural textures and non-affine
+  quads keep their original geometry. Particle counts, opacity and visible coverage are unchanged.
+- When render-build CPU time reaches the existing busy threshold, new impostors need an
+  estimated 15 frames of reuse rather than four. Held captures are rejected before candidate
+  sorting and atlas work. Rejected captures remain full geometry.
+
+Validation: `ctr_render_regression` covers 1,000 randomized lighting/visibility transitions,
+duplicate visibility runs, day/light overlap, reveal catch-up and homogeneous sprite trimming
+in all 24 UV corner orders. `python3 test/ctr_render/cmd_cache_test.py` compiles the actual cache
+dispatcher with CPU stubs under ASan/UBSan and checks 20 stretches, reuse, cleanup and allocation
+failure/recovery. Changed render paths also cross-compile with the 3DS SDK. Hardware FPS and
+visual validation remain unmeasured.

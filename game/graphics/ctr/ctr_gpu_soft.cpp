@@ -592,7 +592,9 @@ void raster_triangle(const ctr_draw_state& st,
                      const ctr_vertex* v_in,
                      bool tex_alpha_full = false,
                      const float* fog = nullptr,
-                     const float* env = nullptr) {
+                     const float* env = nullptr,
+                     const float* tex_q = nullptr,
+                     bool perspective_attributes = false) {
   ctr_vertex vq[3];
   const ctr_vertex* v = v_in;
   if (s_soft_f24) {
@@ -631,16 +633,24 @@ void raster_triangle(const ctr_draw_state& st,
       if (w0 < 0 || w1 < 0 || w2 < 0) {
         continue;
       }
+      const float q = tex_q ? w0 * tex_q[0] + w1 * tex_q[1] + w2 * tex_q[2] : 1.f;
+      const float p0 = perspective_attributes ? w0 * tex_q[0] / q : w0;
+      const float p1 = perspective_attributes ? w1 * tex_q[1] / q : w1;
+      const float p2 = perspective_attributes ? w2 * tex_q[2] / q : w2;
       float col[4] = {
-          w0 * v[0].r + w1 * v[1].r + w2 * v[2].r, w0 * v[0].g + w1 * v[1].g + w2 * v[2].g,
-          w0 * v[0].b + w1 * v[1].b + w2 * v[2].b, w0 * v[0].a + w1 * v[1].a + w2 * v[2].a};
+          p0 * v[0].r + p1 * v[1].r + p2 * v[2].r, p0 * v[0].g + p1 * v[1].g + p2 * v[2].g,
+          p0 * v[0].b + p1 * v[1].b + p2 * v[2].b, p0 * v[0].a + p1 * v[1].a + p2 * v[2].a};
       float z = w0 * v[0].z + w1 * v[1].z + w2 * v[2].z;
       float s = w0 * v[0].s + w1 * v[1].s + w2 * v[2].s;
       float t = w0 * v[0].t + w1 * v[1].t + w2 * v[2].t;
-      const float f = fog ? w0 * fog[0] + w1 * fog[1] + w2 * fog[2] : 0.f;
+      if (tex_q) {
+        s /= q;
+        t /= q;
+      }
+      const float f = fog ? p0 * fog[0] + p1 * fog[1] + p2 * fog[2] : 0.f;
       if (s_env.tex >= 0) {
-        s_env.s = w0 * s_env.vs[0] + w1 * s_env.vs[1] + w2 * s_env.vs[2];
-        s_env.t = w0 * s_env.vt[0] + w1 * s_env.vt[1] + w2 * s_env.vt[2];
+        s_env.s = p0 * s_env.vs[0] + p1 * s_env.vs[1] + p2 * s_env.vs[2];
+        s_env.t = p0 * s_env.vt[0] + p1 * s_env.vt[1] + p2 * s_env.vt[2];
       }
       float e[2] = {0.f, 0.f};  // (AI-assisted, j1ocean) the sky reflection's texture coordinates
       if (env) {
@@ -1066,6 +1076,7 @@ void ocean_full_draw(const ctr_draw_state* state,
   std::vector<ctr_vertex> out;
   std::vector<float> fog;  // (AI-assisted, far-fog) the vertices' fog amounts
   std::vector<float> env;  // (AI-assisted, j1ocean) es, et per vertex (with env_tex)
+  std::vector<float> tex_q;  // (AI-assisted) GS projective STQ, independent of affine color/fog
   out.reserve(index_count);
   fog.reserve(index_count);
   for (int i = 0; i + 2 < index_count; i += 3) {
@@ -1087,13 +1098,15 @@ void ocean_full_draw(const ctr_draw_state* state,
       o.x = (v.x / w / 16.f - 2048.f) / 256.f;
       o.y = (2048.f - v.y / w / 16.f) / 112.f;
       o.z = v.z / w / 16777215.f;
-      o.s = clip ? v.s : v.s / v.q;
-      o.t = clip ? v.t : v.t / v.q;
+      const float q = clip ? 1.f / v.q : v.q;
+      o.s = clip ? v.s * q : v.s;
+      o.t = clip ? v.t * q : v.t;
       o.r = v.r;
       o.g = v.g;
       o.b = v.b;
       o.a = v.a;
       out.push_back(o);
+      tex_q.push_back(q);
       fog.push_back(fog_on() ? std::clamp(v.fog, 0.f, 1.f) : 0.f);
       if (env_tex >= 0) {
         env.push_back(v.es);
@@ -1109,7 +1122,7 @@ void ocean_full_draw(const ctr_draw_state* state,
     s_env_tex = env_tex;
     for (size_t i = 0; i + 2 < out.size(); i += 3) {
       raster_triangle(*state, out.data() + i, false, fog.data() + i,
-                      env_tex >= 0 ? env.data() + 2 * i : nullptr);
+                      env_tex >= 0 ? env.data() + 2 * i : nullptr, tex_q.data() + i);
       g_soft.cur.triangles++;
       softstats::cur->tris++;
     }
@@ -1716,6 +1729,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};
+    float tex_q[3];
     bool ok = true;
     for (int k = 0; k < 3; k++) {
       const uint8_t* src = &verts[16 * indices[i + k]];
@@ -1733,6 +1747,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
         break;
       }
       fog[k] = fogged ? mesh_fog(c[3]) : 0.f;
+      tex_q[k] = 1.f / c[3];
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
@@ -1759,7 +1774,11 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
         (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
       continue;
     }
-    raster_triangle(*state, tri, true, fog);
+    for (int k = 0; k < 3; k++) {
+      tri[k].s *= tex_q[k];
+      tri[k].t *= tex_q[k];
+    }
+    raster_triangle(*state, tri, true, fog, nullptr, tex_q, true);
     g_soft.cur.triangles++;
     softstats::cur->tris++;
   }
@@ -1955,6 +1974,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};
+    float tex_q[3];
     bool ok = true;
     for (int k = 0; k < 3; k++) {
       const uint16_t vi = ibase[i + k];
@@ -1972,6 +1992,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
         ok = false;
         break;
       }
+      tex_q[k] = 1.f / c[3];
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;
@@ -2013,7 +2034,11 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
     }
     s_env.tex = env_tex;
     s_env.etie = true;
-    raster_triangle(*state, tri, true, fog);
+    for (int k = 0; k < 3; k++) {
+      tri[k].s *= tex_q[k];
+      tri[k].t *= tex_q[k];
+    }
+    raster_triangle(*state, tri, true, fog, nullptr, tex_q, true);
     s_env.tex = -1;
     s_env.etie = false;
     g_soft.cur.triangles++;

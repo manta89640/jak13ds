@@ -19,6 +19,7 @@
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrSettings.h"
+#include "game/graphics/ctr/CtrSpriteTrim.h"
 #include "game/graphics/ctr/CtrVram.h"
 
 namespace {
@@ -957,7 +958,10 @@ void CtrSpriteRenderer::resolve_state(const AdGif& ad, Mode mode) {
                           st.blend == CTR_BLEND_SUB);
     memcpy(m_last_box, trim_ok ? m_last_tex_box : kFullBox, sizeof(m_last_box));
     m_last_trim_ok = trim_ok;
+    // The alpha box is in the texture's 0..1 domain, not a fraction of arbitrary/repeating UVs.
     m_last_trim = trim_ok && m_particle_fill && m_st_k00 >= 0 &&
+                  m_st_lo[0] == 0.f && m_st_lo[1] == 0.f &&
+                  m_st_hi[0] == 1.f && m_st_hi[1] == 1.f &&
                   (m_last_box[0] > 0.f || m_last_box[1] > 0.f || m_last_box[2] < 1.f ||
                    m_last_box[3] < 1.f);
     for (int c = 0; c < 4; c++) {
@@ -1284,10 +1288,18 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     }
     const float(*st_out)[2] = m_st_out[proc ? 1 : 0];
     if (mode == MODE_3D) {
+      // (AI-assisted) Interpolate x/y/z/w together: projected-space trimming distorts the
+      // texture and fails for panels crossing the near plane. No density/opacity change.
+      const bool trimmed = m_last_trim && !proc &&
+          ctr_trim_clip_quad(clip, m_st_k00, m_st_k10, m_st_k01, m_st_sel,
+                             m_last_box, m_last_box_st);
+      m_stats.trimmed += trimmed;
       // the triangles (0, 1, 3) and (3, 1, 2) of the strip, in clip space
       for (int k = 0; k < 4; k++) {
-        clip[k].s = st_out[k][0];
-        clip[k].t = st_out[k][1];
+        if (!trimmed) {
+          clip[k].s = st_out[k][0];
+          clip[k].t = st_out[k][1];
+        }
         clip[k].r = r;
         clip[k].g = g;
         clip[k].b = b;

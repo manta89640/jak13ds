@@ -93,3 +93,7 @@ _new-all-types.gc
 /build-mips2c-test/
 /build-goalc/
 
+# (AI-assisted) Local build trees and nested development checkouts.
+/build-*/
+/.claude/worktrees/
+

@@ -36,6 +36,15 @@ int ctr_config_get(const char* key, char* out, int size);
 int ctr_config_bool(const char* key, int def);
 void ctr_platform_exit(void);
 
+/* (AI-assisted) Forced HOME/power close, after pending saves/logs and DSP shutdown. Keeps the
+ * heaps mapped until the kernel stops every thread; does not return or run destructors. */
+#ifdef __cplusplus
+[[noreturn]]
+#else
+_Noreturn
+#endif
+void ctr_close_application(void);
+
 /* Call regularly from the main thread. Returns 0 when the app should quit (HOME -> close,
  * power off...). */
 int ctr_main_loop(void);

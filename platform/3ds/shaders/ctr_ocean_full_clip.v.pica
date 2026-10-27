@@ -1,10 +1,4 @@
-; (AI-assisted)
-; Vertex shader for the PS2 ocean's natively computed parts (ctr_gpu_ocean_full_draw_clip,
-; CtrOceanFull: config.ini ocean = full). Like ctr_ocean_full.v.pica, but the CPU didn't divide by
-; w: the input is W * (GS x, GS y, GS z, 1) (12.4 fixed point x, y, 24-bit depth, W > 0 in front
-; of the camera), so gs maps it straight to PICA clip space and the GPU clips the triangles. S, T
-; are the texture coordinates (not times Q); the GPU interpolates them with perspective.
-
+; (AI-assisted) GS interpolation: screen-affine color/fog/reflection, projective STQ.
 .fvec gs[4]
 
 .constf consts(0.00392156862745098, 0.5, 0.0, 0.0)
@@ -15,6 +9,7 @@
 .out outtc0 texcoord0
 .out outtc1 texcoord1
 .out outclr color
+.out outtcq texcoord0w
 .out outtc2 texcoord2
 
 .alias inpos v0  ; W * (x, y, z, 1)
@@ -26,14 +21,17 @@
 ; others (shared procedures need distinct names)
 .entry main_ctr_ocean_full_clip
 .proc main_ctr_ocean_full_clip
-  dp4 outpos.x, gs[0], inpos
-  dp4 outpos.y, gs[1], inpos
-  dp4 outpos.z, gs[2], inpos
-  dp4 outpos.w, gs[3], inpos
+  dp4 r0.x, gs[0], inpos
+  dp4 r0.y, gs[1], inpos
+  dp4 r0.z, gs[2], inpos
+  dp4 r0.w, gs[3], inpos
+  rcp r1.x, inpos.w
+  mul outpos, r0, r1.xxxx
+  mov outtcq, r1.xxxx
   ; (AI-assisted) outputs built whole in temporaries and written once (zw = 0): partial output
   ; writes are the suspect in the new ctr_mesh.v.pica's hardware GPU hang (2026-10-03)
   mov r2.zw, consts.zzzz
-  mov r2.xy, intex.xyyy
+  mul r2.xy, intex.xyyy, r1.xxxx
   mov outtc0, r2
   mov r3.zw, consts.zzzz
   mov r3.x, intex.zzzz
