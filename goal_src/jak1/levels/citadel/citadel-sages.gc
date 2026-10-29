@@ -8,6 +8,10 @@
 
 (declare-type citb-sage process-taskable)
 
+;; 3DS: the cages' remap cache (joint-control-remap-cached!, generic-obs.gc)
+(#when TARGET_3DS
+  (define *sagecage-remap-cache* (new 'static 'joint-remap-cache)))
+
 ;; DECOMP BEGINS
 
 (defskelgroup *citb-sagecage-sg*
@@ -83,7 +87,13 @@
            (let ((gp-0 (ppointer->process (-> self parent-override))))
              (when gp-0
                (joint-control-copy! (-> self skel) (-> (the-as citb-sage gp-0) skel))
-               (joint-control-remap! (-> self skel) (-> self draw art-group) (-> (the-as citb-sage gp-0) draw art-group) '() 0 ""))))
+               (joint-control-remap-maybe-cached! *sagecage-remap-cache*
+                                                  (-> self skel)
+                                                  (-> self draw art-group)
+                                                  (-> (the-as citb-sage gp-0) draw art-group)
+                                                  '()
+                                                  0
+                                                  ""))))
           (else (ja :num! (loop!))))
         (suspend)))
   :post

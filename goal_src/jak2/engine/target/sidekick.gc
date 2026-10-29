@@ -8,6 +8,11 @@
 (declare-type sidekick process-drawable)
 (define-extern init-sidekick (function none :behavior sidekick))
 
+;; 3DS: Daxter's own remap cache (joint-control-remap-cached!, generic-obs.gc), so his churn doesn't
+;; evict the other clones' entries
+(#when TARGET_3DS
+  (define *sidekick-remap-cache* (new 'static 'joint-remap-cache)))
+
 ;; DECOMP BEGINS
 
 (defskelgroup skel-sidekick daxter daxter-lod0-jg -1
@@ -296,7 +301,8 @@
             (joint-control-copy! (-> self skel) (-> self parent 0 skel))
             )
           )
-        (joint-control-remap!
+        (joint-control-remap-maybe-cached! ;; og:preserve-this
+          *sidekick-remap-cache*
           (-> self skel)
           (-> self draw art-group)
           (-> self parent 0 draw art-group)
