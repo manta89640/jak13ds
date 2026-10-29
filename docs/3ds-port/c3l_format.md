@@ -188,9 +188,10 @@ v14 order for 8 and more (both near the bound there). The converter logs these p
   0xF) and whose every vertex alpha is >= 0x80 (the combiner's tex.a * v.a * 2 saturates at 1;
   fog_alpha puts the constant 0x80 there; (AI-assisted, opt-audit S8) the baked palette's alpha:
   the 3DS's time of day blend is RGB only, so that is the alpha it draws at every time of day. The
-  PC blends the alpha too, and it does differ between the palettes in 8 Jak 1 levels (the log's
-  `time of day` line; lavatube 1.85M vertices, ogre 1.1M, village3 409k): that difference from the
-  PC comes from the RGB only blend, not from these marks) gets alpha 1.0 everywhere: the test passes, the
+  PC blends the alpha too, and it does differ between the palettes in 8 Jak 1 levels and 44 Jak II
+  levels (the log's `time of day` line; lavatube 1.85M vertices, ogre 1.1M, village3 409k): that
+  difference from the PC comes from the RGB only blend, not from these marks) gets alpha 1.0
+  everywhere: the test passes, the
   blending leaves Cs. The bit is cleared from `mode` (the alpha test's aref stays in the mode for
   `opaque_alpha = off`, which puts the test back). Alpha tested draws of one texture and state then
   merge with the opaque ones of that texture in a chunk where those also have alpha 1.0. Not done
