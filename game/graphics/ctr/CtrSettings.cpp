@@ -18,6 +18,7 @@
 #include "common/util/FileUtil.h"
 
 #include "game/graphics/ctr/ctr_config_presets.h"
+#include "game/runtime.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 #include "fmt/format.h"
@@ -371,6 +372,16 @@ CtrSettings load() {
   // that is stored as RGBA8 there). Without it the emulator kept ~4 MB more in linear memory than
   // the 3DS, and a level that fits on the 3DS didn't there (holes, with the pipeline).
   s.vram_textures = true;
+  if (g_game_version == GameVersion::Jak2) {
+    // Jak II: the distances its city held 30 fps with, until its renderer can afford the PS2's
+    s.lod_distance = 200.f;
+    s.tie_distance_scale = 1.5f;
+    s.tie_lod_px = 4.f;
+    s.vista_distance = 3000.f;
+    s.shrub_scale = 0.8f;
+    s.mipmaps = 1;
+    s.envmap_min_px = 16.f;
+  }
   const auto dir = file_util::get_jak_project_dir();
   // (AI-assisted) config.ini, the one settings file (the sound and system keys in it are read by
   // ctr_config_get): sdmc:/3ds/jak1/config.ini on the 3DS (the project dir's parent), the project
