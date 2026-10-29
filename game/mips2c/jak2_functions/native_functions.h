@@ -37,6 +37,8 @@ u64 particle_adgif_impl(const NativeArgs& args);
 u64 pc_sp_init_fields_impl(const NativeArgs& args);
 // native_sp_callbacks.cpp (AI-assisted): a particle callback or relaunch, inline when it can be
 void sp_call_particle_fn(u32 fn, const u64 a[8], const NativeArgs& caller);
+// birth-func-set-quat inline
+bool sp_birth_set_quat(u32 fn, const u64 a[8], const NativeArgs& caller);
 // native_shadow.cpp
 extern const NativeImpl shadow_execute;
 // native_collide_func.cpp

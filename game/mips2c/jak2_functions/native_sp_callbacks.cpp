@@ -371,6 +371,37 @@ const char* kind_name(Kind k) {
 
 }  // namespace
 
+//! birth-func-set-quat (sparticle-launcher.gc): conerot.xyz = (vf0 -/+ *particle-quat*.xyz), minus
+//! when the quaternion's w is negative
+bool sp_birth_set_quat(u32 fn, const u64 a[8], const NativeArgs& caller) {
+  static FnSym birth("birth-func-set-quat");
+  static const bool off = native_turned_off("birth-func-set-quat");
+  if (off || !birth.unchanged() || fn != birth.fn) {
+    return false;
+  }
+  static const u32 quat_val = sym_val_addr("*particle-quat*");
+  const u32 vec = (u32)a[2];
+  auto run = [&]() -> u64 {
+    GC_NATIVE_FP_EXACT
+    const u32 q = gload<u32>(quat_val);
+    const bool add = fcmp_xk(gload<float>(q + 12), 0, goalc_ops::GC_FGE);
+    for (int i = 0; i < 3; i++) {
+      const float c = gload<float>(q + 4 * i);
+      gstore<float>(vec + 16 + 4 * i, add ? 0.f + c : 0.f - c);
+    }
+    return 0;
+  };
+#if MIPS2C_WRITE_LOG
+  if (native_verify_inline_on()) {
+    native_verify_inline("birth-func-set-quat", {{vec, 48}}, run,
+                         [&]() -> u64 { native_call_goal(fn, a, caller); return 0; });
+    return true;
+  }
+#endif
+  run();
+  return true;
+}
+
 /*!
  * (AI-assisted) a particle callback or relaunch (fn a0 a1 a2 a3 ...) from the particle natives:
  * run inline when there is a version for fn (above), else through native_call_goal.
