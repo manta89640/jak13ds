@@ -40,23 +40,19 @@ u32 sceSdGetAddr(u32 entry) {
 
   // Only ever used for getting NAX
 #ifdef __3DS__
-  return voice->GetPublishedNax() << 1;  // (AI-assisted) see sceSdPublishVoiceAddrs
+  return voice->GetPublishedNax() << 1;  // as the mixer left it after its last block
 #else
   return voice->GetNax() << 1;
 #endif
 }
 
-void sceSdPublishVoiceAddrs() {
-  for (auto& v : voices) {
-    if (v) {
-      v->PublishNax();
-    }
-  }
-}
-
 bool sceSdVoiceStopped(u32 entry) {
   auto* voice = voice_from_entry((entry >> 1) & 0x1f);
+#ifdef __3DS__
+  return voice && voice->StoppedPublished();
+#else
   return voice && voice->Stopped();
+#endif
 }
 
 namespace {
@@ -125,6 +121,7 @@ void sceSdSetParam(u32 entry, u32 value) {
     return;
   }
   u32 reg = entry & ~0x3f;
+  VoiceWriteLock lock;
 
   switch (reg) {
     case SD_VP_VOLL: {

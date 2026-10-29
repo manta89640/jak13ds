@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: ISC
 #pragma once
 #include <atomic>
+#include <vector>
 
 #include "bitfield.h"
 #include "envelope.h"
@@ -42,34 +43,61 @@ class Voice {
     return mADSR.GetPhase() == ADSR::Phase::Stopped;
   }
 
-  bool Stopped() { return mADSR.GetPhase() == ADSR::Phase::Stopped; }
+  // The 3DS mixer runs the voices outside its lock: between SetBusy(true) and SetBusy(false)
+  // (both under the lock, like every register write) the writes below are kept in order and
+  // SetBusy(false) applies them, as if they were made just after the mixer's block. The state
+  // other threads read meanwhile is the published one (GetPublishedNax, StoppedPublished).
+  void SetBusy(bool busy);
 
   void SetPitch(u16 reg) {
     // fmt::print("VOICE[{}] PITCH WRITE {:x}\n", m_channel, reg);
+    if (mBusy) {
+      return Defer(Op::Pitch, reg);
+    }
     mPitch = reg;
   }
   void SetAsdr1(u16 reg) {
     // fmt::print("VOICE[{}] ADSR1 WRITE {:x}\n", m_channel, reg);
+    if (mBusy) {
+      return Defer(Op::Adsr1, reg);
+    }
     mADSR.m_Reg.lo.set(reg);
   }
   void SetAsdr2(u16 reg) {
     // fmt::print("VOICE[{}] ADSR2 WRITE {:x}\n", m_channel, reg);
+    if (mBusy) {
+      return Defer(Op::Adsr2, reg);
+    }
     mADSR.m_Reg.hi.set(reg);
   }
   void SetVolume(u16 left, u16 right) {
     // fmt::print("VOICE[{}] VOLL WRITE {:x}\n", m_channel, left);
     // fmt::print("VOICE[{}] VOLR WRITE {:x}\n", m_channel, right);
-    mVolume.left.Set(left);
-    mVolume.right.Set(right);
+    SetVolumeL(left);
+    SetVolumeR(right);
   }
 
-  void SetVolumeL(u16 vol) { mVolume.left.Set(vol); }
+  void SetVolumeL(u16 vol) {
+    if (mBusy) {
+      return Defer(Op::VolumeL, vol);
+    }
+    mVolume.left.Set(vol);
+  }
 
-  void SetVolumeR(u16 vol) { mVolume.right.Set(vol); }
+  void SetVolumeR(u16 vol) {
+    if (mBusy) {
+      return Defer(Op::VolumeR, vol);
+    }
+    mVolume.right.Set(vol);
+  }
 
   s16 GetEnvx() { return mADSR.Level(); }
 
   void SetSample(u16* sample) {
+    if (mBusy) {
+      mDeferredSsa = 0;
+      return Defer(Op::Sample, 0, sample);
+    }
     mSample = sample;
     mSSA = 0;
   }
@@ -80,20 +108,47 @@ class Voice {
   // mNAX in the middle of it gave a stereo stream's two voices a chunk apart, and the overlord
   // took that for a drifted pair and restarted both (a click, ~15 times a second).
   u32 GetPublishedNax() const { return mPubNAX.load(std::memory_order_relaxed); }
-  void PublishNax() { mPubNAX.store(mNAX, std::memory_order_relaxed); }
+  void PublishNax() {
+    mPubNAX.store(mNAX, std::memory_order_relaxed);
+    mPubStopped.store(Stopped(), std::memory_order_relaxed);
+  }
+  // Stopped() as published with the NAX
+  bool StoppedPublished() const { return mPubStopped.load(std::memory_order_relaxed); }
   // (AI-assisted) played a loop end block without repeat (the end of a stream)
   bool Stopped() const { return mADSR.GetPhase() == ADSR::Phase::Stopped; }
 
-  void SetSsa(u32 addr) { mSSA = addr; }
+  void SetSsa(u32 addr) {
+    if (mBusy) {
+      mDeferredSsa = addr;
+      return Defer(Op::Ssa, addr);
+    }
+    mSSA = addr;
+  }
 
   void SetLsa(u32 addr) {
+    if (mBusy) {
+      return Defer(Op::Lsa, addr);
+    }
     mLSA = addr;
     mCustomLoop = true;
   }
 
-  void Stop() { mADSR.Stop(); }
+  void Stop();
 
  private:
+  enum class Op : u8 { Pitch, Adsr1, Adsr2, VolumeL, VolumeR, Sample, Ssa, Lsa, KeyOn, KeyOff, Stop };
+  struct Deferred {
+    Op op;
+    u32 value;
+    u16* sample;
+  };
+  void Defer(Op op, u32 value, u16* sample = nullptr) { mDeferred.push_back({op, value, sample}); }
+  bool mBusy{false};
+  std::vector<Deferred> mDeferred;
+  // the SSA after the deferred writes (for the NAX a deferred key on publishes); ~0: none deferred
+  u32 mDeferredSsa{~0u};
+  std::atomic<bool> mPubStopped{true};
+
   union ADPCMHeader {
     u16 bits;
     bitfield<u16, bool, 10, 1> LoopStart;

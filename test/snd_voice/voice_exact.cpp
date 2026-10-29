@@ -190,6 +190,7 @@ struct Pair {
 
 void Trial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
   Pair p;
+  int last_op = 0;  // 1: a key on, 2: a stop (what the published state shows while busy)
   const u32 nblocks = data.blocks();
   // an address in the data: a block start, or any word
   auto rand_addr = [&](bool aligned) {
@@ -218,6 +219,7 @@ void Trial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
     }
     p.Both([](auto& v) { v.KeyOn(); });
     st.keyons++;
+    last_op = 1;
   };
   p.Both([&](auto& v) { v.SetSample(const_cast<u16*>(data.words.data())); });
   key_on(true);
@@ -227,6 +229,7 @@ void Trial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
   std::vector<snd_ref::s16Output> ob;
   const int blocks = 20 + (int)Rand(rng, 500);
   int stopped_blocks = 0;
+  const bool deferred = Rand(rng, 2) != 0;
   for (int blk = 0; blk < blocks; blk++) {
     int n;
     switch (Rand(rng, 10)) {
@@ -252,6 +255,9 @@ void Trial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
       ob[k] = {l, r};
     }
     int ra, rb;
+    if (deferred) {
+      p.a.SetBusy(true);
+    }
     const bool per_sample = Rand(rng, 8) == 0;
     if (per_sample) {
       // the PC path (Synth::Tick() runs stopped voices too)
@@ -292,7 +298,11 @@ void Trial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
       return;
     }
 
-    // register writes and keys between blocks, the same on both
+    // register writes and keys between blocks, the same on both. In half the trials the new voice
+    // is busy meanwhile (the 3DS mixer's block, Voice::SetBusy): it keeps them and applies them
+    // after, which must give the same voice, and publish the NAX and stopped state the reference
+    // has after each write.
+    last_op = 0;
     if (Rand(rng, 100) < 3) {
       p.Both([](auto& v) { v.KeyOff(); });
     }
@@ -334,6 +344,25 @@ void Trial(Rng& rng, const Data& data, u32 ratio, Stats& st) {
     }
     if (Rand(rng, 200) < 1) {
       p.Both([](auto& v) { v.Stop(); });
+      last_op = 2;
+    }
+    if (deferred) {
+      if ((last_op == 1 && (p.a.GetPublishedNax() != p.b.GetNax() || p.a.StoppedPublished())) ||
+          (last_op == 2 && !p.a.StoppedPublished())) {
+        printf("MISMATCH (deferred writes): published nax %u, stopped %d; reference %u, %d\n",
+               p.a.GetPublishedNax(), (int)p.a.StoppedPublished(), p.b.GetNax(),
+               (int)p.b.Stopped());
+        st.mismatches++;
+        return;
+      }
+      p.a.SetBusy(false);
+      if (p.a.GetPublishedNax() != p.b.GetNax() || p.a.StoppedPublished() != p.b.Stopped()) {
+        printf("MISMATCH (deferred writes applied): published nax %u, stopped %d; reference %u, %d\n",
+               p.a.GetPublishedNax(), (int)p.a.StoppedPublished(), p.b.GetNax(),
+               (int)p.b.Stopped());
+        st.mismatches++;
+        return;
+      }
     }
     if (p.b.Stopped()) {
       // run it stopped for a while (key off, Run()), then start it again or end the trial
