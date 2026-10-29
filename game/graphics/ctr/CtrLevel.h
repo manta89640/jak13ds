@@ -168,7 +168,10 @@ struct CtrLevelData {
   // (AI-assisted) partial unload: a level only seen from a neighbouring one (far mode: only its
   // far chunks are drawn) frees the meshes of its other chunks after a while (linear memory for
   // the level the camera is in), and reads them again from its file when the camera comes back
-  // (CtrLevels::unload_detail / request_detail). Until then it is drawn in far mode.
+  // (CtrLevels::unload_detail / request_detail). (AI-assisted, streammem) Read back in jobs of at
+  // most kDetailJobBytes (the tfrag first, then the nearest), each one's meshes kept; meanwhile a
+  // camera within far_level_distance draws it in near mode with what is there (its tfrag the far
+  // tier's while some of tiers 1 / 2 are missing: detail_tfrag_missing).
   std::string path;  // the .c3l file
   u32 vertex_data_offset = 0, index_data_offset = 0;
   u32 merc_vertex_offset = 0, merc_index_offset = 0;  // (AI-assisted) for incomplete loads
@@ -177,6 +180,7 @@ struct CtrLevelData {
   bool detail_requested = false;  // their reload is queued
   u32 far_frames = 0;             // frames in a row beyond the unload distance
   u64 detail_retry_frame = 0;     // after a failed reload (no memory): not before this frame
+  u32 detail_tfrag_missing = 0;   // (AI-assisted, streammem) tier 1 / 2 tfrag chunks not back yet
   // (AI-assisted) the load ran out of linear memory even after making room: some chunk or merc
   // meshes (or the texture pool) are missing. They are made again from the file once the memory
   // is there (CtrLevels::process_pending_loads, request_repair), while the level is drawn.
@@ -568,6 +572,18 @@ class CtrLevels {
   /*! (AI-assisted, streaming) a jump of a level's tie LOD factor (the camera's focal length: a cut
    * to another camera, a zoom) */
   void stream_note_cut(u64 frame) { m_cut_frame = frame; }
+  /*! (AI-assisted, streammem) the last camera cut's frame, and where the camera will be in `frames`
+   * frames at its speed (game units; false: no camera yet) */
+  u64 stream_cut_frame() const { return m_cut_frame; }
+  bool camera_lead(float frames, float out[3]) const {
+    if (!m_cam_valid) {
+      return false;
+    }
+    for (int i = 0; i < 3; i++) {
+      out[i] = m_cam[i] + m_cam_vel[i] * frames;
+    }
+    return true;
+  }
   /*! (AI-assisted, j2intro; Jak 1's title3 has the same) draw_level (Jak II): what of a level is
    * missing in view this frame: tie LOD groups drawn far because their near chunks aren't there
    * yet, and dormant tie chunks not read back yet (not drawn at all). recent: the level was shown
@@ -706,6 +722,12 @@ class CtrLevels {
     size_t window = 0;                     // the reader's window for these reads
     u32 serial = 0;                        // (stream jobs: each its own key)
     bool urgent = false;  // (stream) holds units needed now: before a level's prefetch
+    // (AI-assisted, streammem) the linear memory the job's meshes take (parts jobs: kept free of
+    // the stream arena's growth while it is queued or runs), when it was queued (the loader's
+    // aging), a detail reload with more chunks after these (read by the next one)
+    u64 room_bytes = 0;
+    double queued_ms = 0;
+    bool detail_more = false;
     bool parts() const { return detail || repair || stream; }
     // in m_requested
     std::string key() const {
@@ -839,9 +861,19 @@ class CtrLevels {
   void stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64 end_frame);
   // the units in the arena's growth segments freed (all: a level load needs the memory; else the
   // ones not needed now); returns how many
-  u32 stream_shrink(bool all);
+  u32 stream_shrink(bool all, bool whole = false);  // (AI-assisted, streammem) whole: every unit
   static void free_stream_parts(const Job& job);
   u32 m_stream_inflight = 0;  // stream jobs queued, running or not taken (kJobsInFlight)
+  // (AI-assisted, streammem) under m_lock: the room_bytes of the parts jobs queued, running or done
+  // but not taken (by key); the stream jobs the loader ran in a row while another job waited
+  std::map<std::string, u64> m_parts_room;
+  u32 m_stream_streak = 0;
+  // (AI-assisted, streammem) housekeeping(room): the queued stream jobs and the meshes read but not
+  // taken that hold arena pieces (in its growth; all: whole) given back; returns their bytes
+  u64 stream_drop_pending(bool all);
+  // (AI-assisted, streammem) a make_room of a level load's second try: the arena's first segment too
+  bool m_room_whole = false;
+  bool m_job_level_load = false;  // (loader thread) run_job: the job is a level's load
   // the bytes the repair of incomplete levels waits for (kept free above the arena's floor)
   u32 m_stream_repair_room = 0;
   u32 m_stream_serial = 0;
@@ -899,6 +931,7 @@ class CtrLevels {
     u64 late_periods = 0, late_frames_max = 0;
     u64 shrunk = 0;  // units freed to give growth segments back
     u64 prio_evictions = 0;  // (AI-assisted, popin2) units freed for a needed one of more priority
+    u64 bulk_evictions = 0;  // (AI-assisted, streammem) units freed in bulk (far beyond their need)
     u64 packed = 0;  // the file bytes of the units read (their blocks)
     u64 late_loading = 0, late_absent = 0;
     u64 late_unwanted = 0;  // late, never wanted before (the need not foreseen)

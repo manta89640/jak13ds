@@ -16,7 +16,7 @@
  * its call stack; ctr_heap_trace_dump(tag) logs the sites holding the most.
  *
  * (AI-assisted, lavamem) A large allocation (kLinearMin or more) the heap can't serve comes from
- * linear memory instead, as a last resort: only while that keeps kLinearFloor of it free (above the
+ * linear memory instead, as a last resort: only while that keeps g_linear_floor of it free (below the
  * stream arena's floor) and such blocks stay within kLinearMax in all. free / realloc know such a
  * block by its address. Lava tube on hardware (Oct 25): 2.6 MB of the heap free but no block of
  * 557 KB (fragmented after 1 h 40 of play): the music bank failed and the impostors' table threw
@@ -174,9 +174,15 @@ void report_failure(size_t n, const char* what) {
 // ---- (AI-assisted, lavamem) large blocks from linear memory when the heap has none ----
 constexpr size_t kLinearMin = 64 * 1024;
 // A last resort only: linear memory is the near-chunk stream arena's (it grows into what's free
-// down to its 3 MB floor, stream_reserve_kb) and the level loads'. Such a block leaves more than
-// that floor free, and all of them together are at most kLinearMax.
-constexpr size_t kLinearFloor = 3584 * 1024;
+// down to its 3 MB floor, stream_reserve_kb) and the level loads'. Such a block leaves g_linear_floor
+// free, and all of them together are at most kLinearMax. (AI-assisted, streammem) The floor was a
+// fixed 3.5 MB, above the arena's floor + growth headroom (~3.3 MB free once it grew): the fallback
+// never worked in lava tube, citadel, swamp or snow. Now 1 MB under the arena's floor
+// (ctr_heap_set_linear_floor; the next frame the arena gives growth back to restore its floor),
+// far above the 128 KB the linear allocator must always keep (an empty free list re-creates its
+// heap as free: ctr_gpu_citro3d.c LINEAR_RESERVE).
+constexpr size_t kLinearFloorMin = 1024 * 1024;
+std::atomic<size_t> g_linear_floor{2048 * 1024};
 constexpr u32 kLinearMax = 2048 * 1024;
 std::atomic<u32> g_linear_blocks{0};
 std::atomic<u32> g_linear_bytes{0};
@@ -197,7 +203,8 @@ void* linear_fallback(size_t n, size_t align) {
   }
   ctr_linear_lock();
   void* p = nullptr;
-  if ((size_t)linearSpaceFree() >= n + kLinearFloor && g_linear_bytes.load() + n <= kLinearMax) {
+  if ((size_t)linearSpaceFree() >= n + g_linear_floor.load() &&
+      g_linear_bytes.load() + n <= kLinearMax) {
     p = linearMemAlign(n, align < 0x80 ? 0x80 : align);
   }
   size_t size = p ? linearGetSize(p) : 0;
@@ -527,6 +534,22 @@ void ctr_heap_stats(CtrHeapStats* st) {
     }
     st->largest = 0;
   }
+}
+
+void ctr_heap_set_linear_floor(size_t bytes) {
+  g_linear_floor.store(bytes < kLinearFloorMin ? kLinearFloorMin : bytes);
+}
+
+void* ctr_heap_malloc_optional(size_t n) {
+#ifdef OG3DS_HEAP_TRACE
+  __malloc_lock(_REENT);
+  void* p = __real_malloc(n);
+  trace_add(p, n, __builtin_return_address(0));
+  __malloc_unlock(_REENT);
+  return p;
+#else
+  return __real_malloc(n);
+#endif
 }
 
 void* ctr_heap_music_slot_take(size_t n) {

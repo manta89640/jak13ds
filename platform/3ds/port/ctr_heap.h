@@ -30,3 +30,14 @@ void ctr_heap_trace_dump(const char* tag);
 // a time (srpc.cpp unloads the old one first). take: the block for n bytes (nullptr: too big, or
 // taken); free() of it gives it back to the slot.
 void* ctr_heap_music_slot_take(size_t n);
+
+// (AI-assisted, streammem) The linear memory the heap's last-resort blocks leave free (kLinearMin
+// bytes or more that the heap has no block for come from linear memory while this much stays free
+// after them). CtrLevels sets it each frame below the stream arena's floor (stream_reserve_kb - 1
+// MB, at least 1 MB): the arena's growth keeps the heap at about its floor, so a fixed floor above
+// it never let the fallback work in the big levels.
+void ctr_heap_set_linear_floor(size_t bytes);
+// (AI-assisted, streammem) malloc for optional buffers (read-ahead windows, caches: the caller
+// copes with nullptr): from the heap only, never the linear fallback (whose budget is for the
+// allocations that must not fail: the music bank, the impostor tables), and no failure line
+void* ctr_heap_malloc_optional(size_t n);

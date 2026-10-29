@@ -180,6 +180,11 @@ branch, Oct 17: up to the linear heap's floor, `stream_reserve_kb` 3 MB):
   while 3.5 MB + 1 MB stayed free, whose unused tails left the arena's free room in pieces).
 - **At capacity**: a unit needed now (score < 0) that still doesn't fit frees units kept within
   the keep margin that aren't wanted either (beyond the wanted margin), the furthest first.
+  (AI-assisted, streammem, Oct 29) Before that, each frame (also while 2 jobs are in flight) the
+  units needed now that aren't there, beyond the arena's free and pending room, are freed in bulk
+  from the units more than 2 x the keep margin beyond their need (a level not drawn: all of
+  them), the furthest first: entering a level with the arena full of the last one's units no
+  longer ramps at one unit per frame. Log: `{} in bulk` in the streaming line.
 - **Given back**: under the floor + 128 KB the units in growth segments not needed now, under the
   floor all of them; while a level loads (it asked for a level: the load's memory first) all of
   them unless the heap keeps the floor + 12 MB, and no growth then unless it keeps that much
@@ -187,6 +192,18 @@ branch, Oct 17: up to the linear heap's floor, `stream_reserve_kb` 3 MB):
   `stream_shrink(all)`); while an incomplete level waits for a repair, its missing bytes + 256 KB
   are added to the floor. Empty growth segments are freed at the next frame (their meshes' memory
   comes back once the GPU is done with it).
+- (AI-assisted, streammem, Oct 29) **Parts jobs** (detail reloads, repairs, Jak II read backs):
+  their mesh bytes (`Job::room_bytes`, + 256 KB, at most 12 MB) are kept free of the growth while
+  they are queued or run, as a level load's 12 MB are; the growth's units not needed now are given
+  back while the heap has less than the floor + that. Before, their keys ("X#detail") didn't count
+  as a load: the memory `make_room` freed for them was taken back by the growth in the same frame,
+  the job failed and a detail reload threw everything away (lava tube, citadel: far mode for 10 s
+  at a time). `make_room` also drops the queued stream jobs and the meshes read but not taken that
+  hold growth pieces (they kept segments from emptying), and a level load's second try gives back
+  the whole arena (its first segment too: made again once the heap has `stream_kb` + the floor + 1
+  MB; a first segment that couldn't be made at the first streaming load is tried again too).
+- (AI-assisted, streammem) The heap's last-resort linear blocks (`ctr_heap.cpp`, lavamem) leave
+  `stream_reserve_kb` - 1 MB free (at least 1 MB); a fixed 3.5 MB never fitted once the arena grew.
 
 Heap (malloc): per level the unit table (32 bytes per unit),
 the groups' unit lists, the time of day groups reserved for the units (12 bytes per visibility id),
@@ -211,6 +228,14 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
 - fine_vis: units are tie chunks (never occluders); a .c3v made from the v19 file covers them.
   Regenerate the .c3v files after the reconvert (`ctr_vis_builder --all <c3l folder>`).
 - Partial unload (far mode), repair of incomplete loads: units are not theirs (never "missing").
+  (AI-assisted, streammem, Oct 29) A detail reload reads at most 2 MB per job (tier 1 / 2 tfrag
+  first, then the nearest), keeps what each job made and asks for the next at once; it starts when
+  the camera is within 30 m of the far distance now or 2 s ahead, or right after a cut within the
+  unload distance. Meanwhile a camera within far_level_distance draws the level in near mode with
+  what is there (units stream; tie LOD groups have their far versions), its tfrag by far mode's
+  rules while some tier 1 / 2 tfrag is missing. The loader ages jobs: a detail reload, repair or
+  read back goes before the urgent stream jobs after 2 of them in a row or 250 ms (a level load
+  after 250 ms, a prefetch after 1.5 s).
 - Older files (v7-v18) load whole as before; `streaming = off` with v19 files loads the core units
   with the level (v18's ties) and never the others.
 

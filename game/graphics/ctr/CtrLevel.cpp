@@ -41,7 +41,6 @@
 #include "game/overlord/jak1/fake_iso.h"  // (AI-assisted) io_heap_free
 #include "platform/3ds/port/ctr_heap.h"
 #include "platform/3ds/port/ctr_port.h"
-extern "C" u32 linearSpaceFree(void);  // (AI-assisted) libctru
 #endif
 
 // ---------------------------------------------------------------------------
@@ -106,6 +105,18 @@ constexpr u32 kRepairMargin = 256 * 1024;
 // waited for the level to be drawn (Lava Tube's background came ~40 s late on hardware).
 constexpr double kFailedRetryMs = 10000.0, kFailedRetryMinMs = 1000.0;
 constexpr u32 kFailedRetryGrowth = 256 * 1024;
+// (AI-assisted, streammem) the loader's aging while levels are drawn: a job that isn't a stream job
+// goes before the urgent stream jobs once it has waited kAgeMs (a prefetch kPrefetchAgeMs), a
+// detail reload / repair / read back also after kStreamStreak stream jobs in a row. In fast motion
+// nearly every stream job is urgent: those jobs waited until the camera stopped (far mode for good
+// on the zoomer).
+constexpr double kAgeMs = 250.0, kPrefetchAgeMs = 1500.0;
+constexpr u32 kStreamStreak = 2;
+// (AI-assisted, streammem) a detail reload reads at most this much per job (the tfrag first, then
+// the nearest chunks): what it read is kept and the next job asked for at once. Lava tube's
+// non-near chunks are 10.9 MB: one job of all of them failed for want of room and read it all again
+// 10 s later, far mode meanwhile.
+constexpr u64 kDetailJobBytes = 2u * 1024 * 1024;
 
 // (AI-assisted) what far mode draws (a level seen from a neighbouring one): its low resolution
 // tfrag (or the coarse one) and, in c3l files with chunk kinds, its ties without a distance limit
@@ -146,6 +157,20 @@ int missing_parts(const CtrLevelData& lev, u32* bytes) {
     b += lev.tex_pool_bytes;
   }
   *bytes = b;
+  return n;
+}
+
+// (AI-assisted, streammem) the tfrag chunks of tiers 1 / 2 a partial unload freed that aren't back
+// yet (draw_level draws the level's tfrag by far mode's rules while there are some: a cell's tier 1
+// or 2 version missing would be a hole, the far tier is always there)
+u32 tfrag_missing(const CtrLevelData& lev) {
+  u32 n = 0;
+  for (size_t ci = 0;
+       ci < lev.chunks.size() && ci < lev.meshes.size() && ci < lev.mesh_index_first.size(); ci++) {
+    const auto& ch = lev.chunks[ci];
+    n += (ch.lod_tier == 1 || ch.lod_tier == 2) && lev.meshes[ci] < 0 &&
+         lev.mesh_index_first[ci] != UINT32_MAX && !lev.is_unit(ci) && !far_chunk(lev, ch);
+  }
   return n;
 }
 
@@ -384,6 +409,19 @@ void CtrLevels::loader_main() {
     const bool playing = df && df + 3 >= rf;
     auto it = m_queue.end();
     if (playing) {
+      // (AI-assisted, streammem) aging (kAgeMs): the other jobs don't wait behind the urgent stream
+      // jobs for good
+      const double now = ctr_gpu_time_ms();
+      it = pick([&](const Job& j) {
+        if (j.stream || !can_start(j)) {
+          return false;
+        }
+        const double age = now - j.queued_ms;
+        return j.parts() ? (m_stream_streak >= kStreamStreak || age >= kAgeMs)
+                         : age >= (j.prefetch ? kPrefetchAgeMs : kAgeMs);
+      });
+    }
+    if (playing && it == m_queue.end()) {
       it = pick([](const Job& j) { return j.stream && j.urgent; });
     }
     if (it == m_queue.end()) {
@@ -409,6 +447,7 @@ void CtrLevels::loader_main() {
     }
     Job job = *it;
     m_queue.erase(it);
+    m_stream_streak = job.stream ? m_stream_streak + 1 : 0;  // (AI-assisted, streammem)
     m_loading = job.name;
     m_loading_prefetch = job.prefetch;
     m_cancel = false;
@@ -427,6 +466,7 @@ void CtrLevels::run_job(const Job& job) {
   Done d;
   d.job = job;
   m_room_tries = 0;
+  m_job_level_load = !job.stream && !job.parts() && !job.common;  // (AI-assisted, streammem)
   // (AI-assisted) an allocation that fails (bad_alloc) fails the job: the loader thread goes on
   // (an exception out of it is std::terminate); the render thread tries again later
   try {
@@ -490,6 +530,10 @@ void CtrLevels::request(const Job& job) {
     }
     m_requested.insert(job.key());
     m_queue.push_back(job);
+    m_queue.back().queued_ms = ctr_gpu_time_ms();  // (AI-assisted, streammem) aging
+    if (job.parts() && !job.stream) {
+      m_parts_room[job.key()] = job.room_bytes;  // (AI-assisted, streammem) stream_update
+    }
   }
   m_cv.notify_all();
 }
@@ -646,8 +690,17 @@ bool CtrLevels::housekeeping(bool room) {
     m_prefetched.erase(name);
   }
   const bool dropped = !drop.empty();
+  bool whole = false;
   if (room) {
-    stream_shrink(true);  // (AI-assisted, streaming) the arena's growth back for the load
+    {
+      std::lock_guard<std::mutex> lk(m_lock);
+      whole = m_room_whole;
+      m_room_whole = false;
+    }
+    // (AI-assisted, streammem) the queued stream jobs' and the not yet taken meshes' pieces too:
+    // they kept growth segments from emptying (SM-1)
+    stream_drop_pending(whole);
+    stream_shrink(true, whole);  // (AI-assisted, streaming) the arena's growth back for the load
     // (AI-assisted, j2strip) Jak II: the loaded levels' chunks far beyond their draw distance
     // too (freed by distance from now on while the heap is short: dist_update)
     if (g_game_version == GameVersion::Jak2) {
@@ -669,7 +722,12 @@ bool CtrLevels::housekeeping(bool room) {
     ctr_gpu_free_pending_now();
   }
   if (room) {
-    CtrStreamArena::get().release_empty();  // (AI-assisted, streaming)
+    const u32 back = CtrStreamArena::get().release_empty(whole);  // (AI-assisted, streaming)
+    if (whole) {
+      lg::warn("[ctr] making room: the stream arena given back ({} KB; made again when there is "
+               "room)",
+               back / 1024);
+    }
   }
   if (dropped) {
     update_level_count();
@@ -710,10 +768,14 @@ bool CtrLevels::make_room(const std::string& name, const char* what, u64 bytes) 
   }
   m_room_tries++;
   const u64 want = m_room_tries == 1 ? bytes : 0;
+  // (AI-assisted, streammem) a level load's second try: the stream arena's first segment too (its
+  // near chunks drawn far until the arena is made again), else the level has no background
+  const bool whole = m_room_tries == 2 && m_job_level_load;
   lg::warn("[ctr] {}: no memory for {}{}, making room and trying again", name, what,
-           m_room_tries == 1 ? "" : " (again)");
+           m_room_tries == 1 ? "" : (whole ? " (again, the whole stream arena)" : " (again)"));
   if (!m_thread) {
     m_room_bytes = want;
+    m_room_whole = whole;
     housekeeping(true);  // the loads run on the render thread (outside of a frame)
     return true;
   }
@@ -721,6 +783,7 @@ bool CtrLevels::make_room(const std::string& name, const char* what, u64 bytes) 
   const u32 serial = m_room_serial;
   m_room_wanted = true;
   m_room_bytes = want;
+  m_room_whole = whole;
   // at the render thread's next frame (or the game thread's service)
   m_cv.wait_for(lk, std::chrono::milliseconds(kRoomWaitMs),
                 [&] { return m_room_serial != serial || m_quit || cancelled(); });
@@ -782,6 +845,27 @@ struct C3lReader : c3l::Reader {
                     c3l_read_window() ? std::min(window, c3l_read_window()) : 0, buffers, dir) {}
   long size() const { return file_size(); }
 };
+
+// (AI-assisted, streammem) A mesh begun (ctr_gpu_mesh_begin) and not ended yet: ended as failed
+// (its memory and slot back) when an exception leaves the scope first. A bad_alloc between begin
+// and end (the time of day groups, the run spheres) leaked up to ~1 MB of linear memory and a slot
+// per failed load (SM-6).
+struct MeshBuild {
+  int mesh;
+  explicit MeshBuild(int m) : mesh(m) {}
+  MeshBuild(const MeshBuild&) = delete;
+  MeshBuild& operator=(const MeshBuild&) = delete;
+  ~MeshBuild() {
+    if (mesh >= 0) {
+      ctr_gpu_mesh_end(mesh, 0);
+    }
+  }
+  int end(bool ok) {
+    const int m = mesh;
+    mesh = -1;
+    return ctr_gpu_mesh_end(m, ok ? 1 : 0);
+  }
+};
 }  // namespace
 
 // (AI-assisted) Partial unload / repair: make meshes of a loaded level again (loader thread): chunk
@@ -792,6 +876,10 @@ struct C3lReader : c3l::Reader {
 // hardware; this way ~3 MB). Stops at the first mesh there's no memory for.
 void CtrLevels::run_parts_job(const Job& job, Done* d) {
   d->result = LoadResult::FAILED;
+  // (AI-assisted, streammem) no allocation after a mesh is made: one that throws would leave it
+  // in no list
+  d->meshes.reserve(job.chunks.size());
+  d->merc_meshes.reserve(job.merc.size());
   C3lReader f(job.path, &m_read_bufs);
   bool ok = f.ok();
   if (ok && !job.chunks.empty()) {
@@ -829,6 +917,7 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
         mesh = ctr_gpu_mesh_begin(c.vertex_count, count, &vdst, &idst);
       }
       if (mesh >= 0) {
+        MeshBuild mb(mesh);  // (AI-assisted, streammem)
         bool read_ok = true;
         if (chunk_indices) {
           read_ok = f.read(job.index_data_offset + c.index_first * (u32)sizeof(u16), idst,
@@ -836,10 +925,9 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
         } else {
           memcpy(idst, indices.data() + (c.index_first - lo), count * sizeof(u16));
         }
-        mesh = ctr_gpu_mesh_end(
-            mesh, read_ok && f.read(job.vertex_data_offset +
-                                        c.first_vertex * (u32)sizeof(c3l::Vertex),
-                                    vdst, c.vertex_count * sizeof(c3l::Vertex)));
+        mesh = mb.end(read_ok && f.read(job.vertex_data_offset +
+                                            c.first_vertex * (u32)sizeof(c3l::Vertex),
+                                        vdst, c.vertex_count * sizeof(c3l::Vertex)));
       }
       ok = mesh >= 0;
       if (ok) {
@@ -914,8 +1002,8 @@ void CtrLevels::delete_parts(Done& d) {
 }
 
 // (AI-assisted) render thread: what a detail reload / repair made, for the same load of the level
-// (else deleted). A detail reload counts only if it made everything (the level is drawn in far
-// mode until then), a repair keeps what it made.
+// (else deleted). (AI-assisted, streammem) Every kind keeps what it made; a detail reload's level
+// counts as loaded (detail_loaded) once its last job made everything.
 void CtrLevels::take_parts(Done& d, u64 frame) {
   const std::string& name = d.job.name;
   auto it = m_levels.find(name);
@@ -949,19 +1037,23 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
     lg::warn("[ctr] {}: {} of {} chunks read back by distance (no memory for the others yet)",
              name, d.meshes.size(), d.job.chunks.size());
   }
+  // (AI-assisted, streammem) a dormant read back or a detail reload that ran short keeps what it
+  // made too (it threw all of it away and read it all again: SM-1, SM-7); the rest is read by the
+  // next one (collect_chunks: the chunks without a mesh), soon when this one made some, else after
+  // a wait (not every frame while the memory isn't there)
   if (lev && d.job.dormant && !d.job.dist && d.result != LoadResult::LOADED) {
-    delete_parts(d);
-    lev->dormant_retry_frame = frame + 60;
-    lg::warn("[ctr] {}: dormant chunks could not be read back, retrying later", name);
-    return;
+    lev->dormant_retry_frame = frame + (d.meshes.empty() ? 120 : 30);
+    lg::warn("[ctr] {}: {} of {} dormant chunks read back (no memory for the others yet)", name,
+             d.meshes.size(), d.job.chunks.size());
   }
-  if (!lev || (d.job.detail && !d.job.dist && d.result != LoadResult::LOADED)) {
+  if (lev && d.job.detail && !d.job.dormant && d.result != LoadResult::LOADED) {
+    lev->detail_retry_frame = frame + (d.meshes.empty() ? 300 : 30);
+    lg::warn("[ctr] {}: {} of {} detail meshes read again (no memory for the others yet), the "
+             "rest later",
+             name, d.meshes.size(), d.job.chunks.size());
+  }
+  if (!lev) {
     delete_parts(d);
-    if (lev) {
-      // not every frame while the memory isn't there
-      lev->detail_retry_frame = frame + 300;
-      lg::warn("[ctr] {}: detail meshes could not be read again, retrying later", name);
-    }
     return;
   }
   int made = 0;
@@ -1006,8 +1098,14 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
   } else if (d.job.dormant) {
     lg::info("[ctr] {}: {} dormant chunks back", name, made);  // (AI-assisted, j2-mem)
   } else if (d.job.detail) {
-    lev->detail_loaded = true;
-    lg::info("[ctr] {}: detail meshes back ({})", name, made);
+    // (AI-assisted, streammem) jobs of kDetailJobBytes: the next one at the next draw
+    if (d.result == LoadResult::LOADED && !d.job.detail_more) {
+      lev->detail_loaded = true;
+      lg::info("[ctr] {}: detail meshes back ({})", name, made);
+    } else if (d.result == LoadResult::LOADED) {
+      lev->detail_retry_frame = 0;
+    }
+    lev->detail_tfrag_missing = lev->detail_loaded ? 0 : tfrag_missing(*lev);
   }
   if (lev->incomplete) {
     u32 bytes = 0;
@@ -1025,7 +1123,7 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
 }
 
 void CtrLevels::unload_detail(CtrLevelData& lev) {
-  bump_set_generation();  // (AI-assisted)
+  const bool was_loaded = lev.detail_loaded;  // (AI-assisted, streammem) or partly read back
   int freed = 0;
   for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
     // (AI-assisted) what far mode draws stays (far_chunk)
@@ -1040,7 +1138,11 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
   }
   lev.detail_loaded = false;
   lev.far_frames = 0;
-  lg::info("[ctr] {}: only seen from far away, {} detail meshes freed", lev.name, freed);
+  lev.detail_tfrag_missing = tfrag_missing(lev);  // (AI-assisted, streammem)
+  if (was_loaded || freed) {
+    bump_set_generation();  // (AI-assisted)
+    lg::info("[ctr] {}: only seen from far away, {} detail meshes freed", lev.name, freed);
+  }
 }
 
 // ---- (AI-assisted, j2-mem) Dormant levels (Jak II, config dormant_levels) ----
@@ -1064,6 +1166,10 @@ constexpr u32 kDormantFrames = 90;  // 3 s at 30 fps
 constexpr u32 kDormantHoldFrames = 120;
 constexpr float kDormFreeMeters = 100.f, kDormReadMeters = 75.f;
 constexpr float kDormLeadFrames = 45.f;  // 1.5 s at 30 fps (the camera's velocity is per frame)
+// (AI-assisted, streammem) one read back: at most this much, the nearest first (the rest by the
+// next one): ctyindb's 4.3 MB in one job failed part way under memory pressure and was read again
+// whole every 2 s
+constexpr u64 kDormJobBytes = 2u * 1024 * 1024;
 // a chunk the visibility string hides whole when it is zero: visibility runs, each with an id
 bool chunk_hideable(const CtrLevelData& lev, size_t ci) {
   const auto& ch = lev.chunks[ci];
@@ -1116,7 +1222,7 @@ void CtrLevels::dormant_update(u64 frame) {
     if (!lev.detail_loaded || lev.repair_requested) {
       continue;  // (far mode's partial unload, a repair in flight: theirs first)
     }
-    std::vector<DetailChunk> want;
+    std::vector<std::pair<float, DetailChunk>> want;  // (AI-assisted, streammem) with its distance
     u32 freed = 0, left_out = 0;
     u64 freed_bytes = 0;
     for (size_t ci = 0; ci < lev.chunks.size() && ci < lev.meshes.size(); ci++) {
@@ -1135,8 +1241,8 @@ void CtrLevels::dormant_update(u64 frame) {
       const float d = std::sqrt(d2) - ch.bsphere[3];
       if (fl == CtrLevelData::kDormFreed) {
         if (!lev.dormant || d < kDormReadMeters * kM) {
-          want.push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
-                          lev.mesh_index_end[ci]});
+          want.emplace_back(d, DetailChunk{(u32)ci, ch.first_vertex, ch.vertex_count,
+                                           lev.mesh_index_first[ci], lev.mesh_index_end[ci]});
         }
       } else if (d > kDormFreeMeters * kM && lev.meshes[ci] < 0) {
         // left out by an incomplete load (no memory): a freed one now, not one to repair
@@ -1173,18 +1279,26 @@ void CtrLevels::dormant_update(u64 frame) {
       job.path = lev.path;
       job.vertex_data_offset = lev.vertex_data_offset;
       job.index_data_offset = lev.index_data_offset;
-      std::sort(want.begin(), want.end(), [](const DetailChunk& a, const DetailChunk& b) {
+      // (AI-assisted, streammem) the nearest first, at most kDormJobBytes (then in file order)
+      std::sort(want.begin(), want.end(),
+                [](const auto& a, const auto& b) { return a.first < b.first; });
+      u64 bytes = 0;
+      for (const auto& [d, c] : want) {
+        const u32 b = CtrStreamArena::mesh_bytes(c.vertex_count, c.index_end - c.index_first);
+        if (!job.chunks.empty() && bytes + b > kDormJobBytes) {
+          break;
+        }
+        lev.chunk_dormant[c.chunk] = CtrLevelData::kDormReading;
+        bytes += b;
+        job.chunks.push_back(c);
+      }
+      std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
         return a.first_vertex < b.first_vertex;
       });
-      u64 bytes = 0;
-      for (const auto& c : want) {
-        lev.chunk_dormant[c.chunk] = CtrLevelData::kDormReading;
-        bytes += CtrStreamArena::mesh_bytes(c.vertex_count, c.index_end - c.index_first);
-      }
-      job.chunks = std::move(want);
+      job.room_bytes = bytes;
       lev.dormant_requested = true;
-      lg::info("[ctr] {}: camera near its freed ties, reading {} chunks back ({} KB)", name,
-               job.chunks.size(), bytes / 1024);
+      lg::info("[ctr] {}: camera near its freed ties, reading {} of {} chunks back ({} KB)", name,
+               job.chunks.size(), want.size(), bytes / 1024);
       request(job);
     }
   }
@@ -1452,6 +1566,7 @@ void CtrLevels::dist_update(u64 frame, u32 free_now) {
       return a.first_vertex < b.first_vertex;
     });
     lev.dormant_requested = true;
+    job.room_bytes = bytes;  // (AI-assisted, streammem)
     // (AI-assisted, j2pop) a read back that would not fit: the farthest chunks freed first, as a
     // load makes room (not the stream arena's growth, which make_room would take back too)
     if ((u64)free_now < bytes + kDistReadRoom) {
@@ -1500,13 +1615,46 @@ void CtrLevels::request_detail(CtrLevelData& lev) {
   job.path = lev.path;
   job.vertex_data_offset = lev.vertex_data_offset;
   job.index_data_offset = lev.index_data_offset;
-  collect_chunks(lev, false, &job.chunks);
-  if (job.chunks.empty()) {
+  std::vector<DetailChunk> all;
+  collect_chunks(lev, false, &all);
+  if (all.empty()) {
     lev.detail_loaded = true;
+    lev.detail_tfrag_missing = 0;
     return;
   }
+  // (AI-assisted, streammem) at most kDetailJobBytes per job: the tfrag of tiers 1 / 2 first (the
+  // level's tfrag is drawn by far mode's rules until it is all back), then the nearest chunks
+  float cam[3] = {0, 0, 0};
+  camera_lead(0.f, cam);
+  // (not tfrag, squared distance), index in all
+  std::vector<std::pair<std::pair<int, float>, u32>> order;
+  order.reserve(all.size());
+  for (u32 k = 0; k < all.size(); k++) {
+    const auto& ch = lev.chunks[all[k].chunk];
+    const float dx = ch.bsphere[0] - cam[0], dy = ch.bsphere[1] - cam[1],
+                dz = ch.bsphere[2] - cam[2];
+    const int cls = (ch.lod_tier == 1 || ch.lod_tier == 2) ? 0 : 1;
+    order.push_back({{cls, dx * dx + dy * dy + dz * dz}, k});
+  }
+  std::sort(order.begin(), order.end());
+  u64 bytes = 0;
+  for (const auto& [key, k] : order) {
+    const auto& c = all[k];
+    const u32 b = CtrStreamArena::mesh_bytes(c.vertex_count, c.index_end - c.index_first);
+    if (!job.chunks.empty() && bytes + b > kDetailJobBytes) {
+      break;
+    }
+    bytes += b;
+    job.chunks.push_back(c);
+  }
+  job.detail_more = job.chunks.size() < all.size();
+  std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
+    return a.first_vertex < b.first_vertex;
+  });
+  job.room_bytes = bytes;
   lev.detail_requested = true;
-  lg::info("[ctr] {}: camera coming back, reading {} detail meshes", lev.name, job.chunks.size());
+  lg::info("[ctr] {}: camera coming back, reading {} of {} detail meshes ({} KB)", lev.name,
+           job.chunks.size(), all.size(), bytes / 1024);
   request(job);
 }
 
@@ -1531,6 +1679,18 @@ void CtrLevels::request_repair(CtrLevelData& lev) {
     return a.file_vertex < b.file_vertex;
   });
   job.textures = lev.tex_pool < 0 && lev.tex_pool_bytes > 0;
+  // (AI-assisted, streammem) its room kept free of the stream arena's growth until it is done (it
+  // was dropped as soon as the repair was asked for: SM-1)
+  for (const auto& c : job.chunks) {
+    job.room_bytes += CtrStreamArena::mesh_bytes(c.vertex_count, c.index_end - c.index_first);
+  }
+  for (const auto& m : job.merc) {
+    job.room_bytes += (u64)m.vertex_count * sizeof(c3l::MercVertex) +
+                      (u64)(m.index_end - m.index_first) * sizeof(u16);
+  }
+  if (job.textures) {
+    job.room_bytes += lev.tex_pool_bytes;
+  }
   lev.repair_requested = true;
   request(job);
 }
@@ -1686,7 +1846,7 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   // textures, waiting for the core) and the linear memory left with this level in
   std::string mem;
 #ifdef __3DS__
-  mem = fmt::format("; linear free {} KB", linearSpaceFree() / 1024);
+  mem = fmt::format("; linear free {} KB", ctr_gpu_linear_free() / 1024);
 #endif
   lg::info(
       "[ctr] loaded {} ({} chunks, {} merc models, {} textures: {} KB, background {} KB first; {} "
@@ -4203,6 +4363,7 @@ bool CtrLevels::load_file(const fs::path& path,
       }
     }
     if (mesh >= 0) {
+      MeshBuild mb(mesh);  // (AI-assisted, streammem)
       bool read_ok = true;
       if (chunk_indices) {
         read_ok = f.read(hdr.index_data_offset + first * (u32)sizeof(u16), idst,
@@ -4279,7 +4440,7 @@ bool CtrLevels::load_file(const fs::path& path,
           tod_state = 1;
         }
       }
-      mesh = ctr_gpu_mesh_end(mesh, read_ok);
+      mesh = mb.end(read_ok);
       if (mesh >= 0 && tod_state >= 0) {
         auto& t = *out->tod;
         t.chunk_mesh[ci] = mesh;
@@ -4624,6 +4785,7 @@ void CtrLevels::process_pending_loads(u64 frame) {
     done.swap(m_done);
     for (auto& d : done) {
       m_requested.erase(d.job.key());
+      m_parts_room.erase(d.job.key());  // (AI-assisted, streammem)
     }
   }
 #ifndef __3DS__
@@ -4983,6 +5145,7 @@ void CtrLevels::set_wanted(const std::vector<std::string>& names) {
     for (auto it = m_queue.begin(); it != m_queue.end();) {
       if (!it->common && !it->prefetch && !wanted(it->name)) {
         m_requested.erase(it->key());
+        m_parts_room.erase(it->key());  // (AI-assisted, streammem)
         if (it->stream) {
           free_stream_parts(*it);  // (AI-assisted, streaming) its arena pieces back
           m_stream_inflight -= std::min<u32>(m_stream_inflight, 1);
@@ -5193,6 +5356,82 @@ void CtrLevels::free_stream_parts(const Job& job) {
   }
 }
 
+// (AI-assisted, streammem) Render thread (housekeeping with room; outside of a frame). make_room
+// freed the growth's resident units (stream_shrink), but the units of queued stream jobs (their
+// pieces taken at request) and the meshes read and not taken yet (m_take) kept their segments from
+// emptying, so release_empty gave the heap less than it looked. Those in growth segments (all:
+// every one) are given back here: their units are absent again (asked for again when wanted). The
+// job the loader runs now is the one that asked for room: no stream job.
+u64 CtrLevels::stream_drop_pending(bool all) {
+  auto& arena = CtrStreamArena::get();
+  if (!arena.ready() || (!all && !arena.has_growth())) {
+    return 0;
+  }
+  std::vector<Job> jobs;
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    for (auto it = m_queue.begin(); it != m_queue.end();) {
+      bool held = all && it->stream;
+      for (size_t k = 0; it->stream && !held && k < it->stream_parts.size(); k++) {
+        held = arena.in_growth(it->stream_parts[k].mem);
+      }
+      if (held) {
+        m_requested.erase(it->key());
+        jobs.push_back(std::move(*it));
+        it = m_queue.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  auto unit_of = [&](const std::string& name, u32 gen, u32 unit) -> CtrLevelData::StreamUnit* {
+    auto it = m_levels.find(name);
+    if (it == m_levels.end() || it->second->generation != gen ||
+        unit >= it->second->stream_units.size()) {
+      return nullptr;
+    }
+    return &it->second->stream_units[unit];
+  };
+  u64 bytes = 0;
+  for (const auto& job : jobs) {
+    m_stream_inflight -= std::min<u32>(m_stream_inflight, 1);
+    for (const auto& p : job.stream_parts) {
+      auto* su = unit_of(job.name, job.generation, p.unit);
+      if (su && su->state == CtrLevelData::kUnitLoading && su->mem == p.mem) {
+        su->state = CtrLevelData::kUnitAbsent;
+        su->mem = nullptr;
+        bytes += su->bytes;
+      }
+    }
+    free_stream_parts(job);
+  }
+  size_t kept = 0;
+  for (size_t i = 0; i < m_take.size(); i++) {
+    auto& tk = m_take[i];
+    auto* su = unit_of(tk.name, tk.generation, tk.out.unit);
+    const bool mine = su && su->state == CtrLevelData::kUnitLoading && su->mem;
+    if (!all && !(mine && arena.in_growth(su->mem))) {
+      if (kept != i) {
+        m_take[kept] = std::move(tk);
+      }
+      kept++;
+      continue;
+    }
+    ctr_gpu_mesh_delete(tk.out.mesh);  // (its piece back once the pending deletes are freed)
+    if (mine) {
+      bytes += su->bytes;
+      su->state = CtrLevelData::kUnitAbsent;
+      su->mem = nullptr;
+    }
+  }
+  m_take.resize(kept);
+  if (!jobs.empty() || bytes) {
+    lg::info("[ctr] making room: {} queued stream jobs dropped, {} KB of near chunks given back",
+             jobs.size(), bytes / 1024);
+  }
+  return bytes;
+}
+
 void CtrLevels::stream_note_camera(const math::Vector4f& t,
                                    const math::Vector4f planes[4],
                                    const math::Vector4f rot[4],
@@ -5350,9 +5589,9 @@ void CtrLevels::stream_evict(CtrLevelData& lev, u32 unit) {
   m_sst.evictions++;
 }
 
-u32 CtrLevels::stream_shrink(bool all) {
+u32 CtrLevels::stream_shrink(bool all, bool whole) {
   auto& arena = CtrStreamArena::get();
-  if (!arena.ready() || !arena.has_growth()) {
+  if (!arena.ready() || (!whole && !arena.has_growth())) {
     return 0;
   }
   u32 n = 0;
@@ -5361,7 +5600,8 @@ u32 CtrLevels::stream_shrink(bool all) {
     CtrLevelData& lev = *lp;
     for (u32 u = 0; u < lev.stream_units.size(); u++) {
       auto& su = lev.stream_units[u];
-      if (su.state != CtrLevelData::kUnitResident || !su.mem || !arena.in_growth(su.mem)) {
+      if (su.state != CtrLevelData::kUnitResident || !su.mem ||
+          (!whole && !arena.in_growth(su.mem))) {
         continue;
       }
       if (!all) {
@@ -5466,20 +5706,50 @@ void CtrLevels::stream_update(u64 frame) {
   m_sst.frames++;
   auto& arena = CtrStreamArena::get();
   bool level_loading = false;
+  // (AI-assisted, streammem) the linear memory the detail reloads, repairs and read backs queued or
+  // running take (their meshes): kept free of the growth like a level load's (SM-1). Their keys
+  // have a '#', so they didn't count as a load: the room make_room freed for them was taken back by
+  // the growth in the same frame, the job failed and a detail reload threw everything away.
+  u64 parts_room = 0;
   {
     std::lock_guard<std::mutex> lk(m_lock);
     for (const auto& key : m_requested) {
       level_loading |= key.find('#') == std::string::npos;
     }
+    for (const auto& [key, bytes] : m_parts_room) {
+      parts_room += bytes;
+    }
   }
+  const u32 parts_reserve = (u32)std::min<u64>(parts_room ? parts_room + kGrowHeadroom : 0, kLoadRoom);
   // (statistics) the linear heap's free memory at each frame's start
   const u32 free_now = ctr_gpu_linear_free();
   m_sst.linear_min = std::min<u64>(m_sst.linear_min, free_now);
   if (level_loading) {
     m_sst.linear_min_load = std::min<u64>(m_sst.linear_min_load, free_now);
   }
+  const u32 floor_bytes = (u32)ctr_settings().stream_reserve_kb * 1024u;
+#ifdef __3DS__
+  // (AI-assisted, streammem) the heap's last-resort linear blocks leave 1 MB less than the arena's
+  // floor (at least 1 MB): with the arena grown the heap sits at its floor + kGrowHeadroom, and the
+  // fallback's fixed 3.5 MB never fitted there (SM-2). The arena gives its growth back when the
+  // heap is under its floor (below), which brings the floor back.
+  ctr_heap_set_linear_floor(std::max<u32>(1024 * 1024, floor_bytes - std::min(floor_bytes, 1024u * 1024)));
+#endif
   dormant_update(frame);  // (AI-assisted, j2-mem)
   dist_update(frame, free_now);  // (AI-assisted, j2strip)
+  if (!arena.ready() && !level_loading && !parts_room && frame % kRepairCheckFrames == 0) {
+    // (AI-assisted, streammem) the arena given back to a level load out of memory (make_room), or
+    // its first segment not there at the first streaming level's load: made again once the heap
+    // has it over its floor
+    bool any = false;
+    for (const auto& [name, lp] : m_levels) {
+      any = any || lp->streaming;
+    }
+    if (any && free_now >= ctr_stream_kb() * 1024u + floor_bytes + kGrowMargin &&
+        arena.init(ctr_stream_kb() * 1024u)) {
+      lg::info("[ctr] stream arena made again ({} KB linear free)", free_now / 1024);
+    }
+  }
   if ((!m_cam_valid && !m_game_cam_new) || !arena.ready()) {
     return;
   }
@@ -5502,6 +5772,11 @@ void CtrLevels::stream_update(u64 frame) {
         drain = free_now + 512 * 1024 < need;
         m_sst.shrunk += stream_shrink(drain);
       }
+    } else if (parts_reserve && free_now < reserve + parts_reserve) {
+      // (AI-assisted, streammem) a parts job's room: the growth units not needed now (make_room
+      // frees the rest if the job runs short)
+      drain = free_now < reserve;
+      m_sst.shrunk += stream_shrink(drain);
     } else if (free_now < reserve + kPressure) {
       drain = free_now < reserve;
       m_sst.shrunk += stream_shrink(drain);
@@ -5722,15 +5997,53 @@ void CtrLevels::stream_update(u64 frame) {
     stream_idle_fill(frame);
     return;
   }
-  if (m_want.empty() || m_stream_inflight >= kJobsInFlight) {
+  if (m_want.empty()) {
+    return;
+  }
+  bool have_sorted = false;
+  bool prio_sorted = false;  // (AI-assisted, popin2) m_have_prio made, pi: its next unit
+  size_t pi = 0;
+  size_t hi = 0;
+  u64 evicted = 0;  // bytes freed now (back after the GPU is done with them: no growth for those)
+  // (AI-assisted, streammem, SM-5) Room in bulk: the units needed now that aren't there, beyond
+  // the arena's free and pending room, freed at once from the units far beyond their need (2 x
+  // the keep margin; a level not drawn: all of them), the furthest first. Also while 2 jobs are in
+  // flight: their memory is back (the GPU done with it) by the time a job slot frees. Before, at
+  // capacity one unit's worth was freed per frame and none with 2 jobs queued: entering lava tube
+  // from village3 (the arena full of village3's units) the needed 3-6 MB came over seconds, the
+  // groups drawn far and switching near on screen.
+  {
+    u64 needed = 0;
+    for (const auto& w : m_want) {
+      if (w.score < 0) {
+        needed += w.lev->stream_units[w.unit].bytes;
+      }
+    }
+    u32 free_b = 0, pending_b = 0;
+    arena.room(&free_b, &pending_b);
+    if (needed > (u64)free_b + pending_b) {
+      const u64 deficit = needed - free_b - pending_b;
+      std::sort(m_have.begin(), m_have.end(),
+                [](const StreamCand& a, const StreamCand& b) { return a.score > b.score; });
+      have_sorted = true;
+      u64 bulk = 0;
+      while (bulk < deficit && hi < m_have.size() && m_have[hi].score > 2 * kKeepMeters * kM) {
+        auto& victim = m_have[hi].lev->stream_units[m_have[hi].unit];
+        if (victim.state == CtrLevelData::kUnitResident) {
+          bulk += victim.bytes;
+          stream_evict(*m_have[hi].lev, m_have[hi].unit);
+          m_sst.bulk_evictions++;
+        }
+        hi++;
+      }
+      evicted += bulk;
+    }
+  }
+  if (m_stream_inflight >= kJobsInFlight) {
     return;
   }
   std::sort(m_want.begin(), m_want.end(),
             [](const StreamCand& a, const StreamCand& b) { return a.score < b.score; });
-  bool have_sorted = false;
-  bool prio_sorted = false;  // (AI-assisted, popin2) m_have_prio made, pi: its next unit
-  size_t pi = 0;
-  u64 evicted = 0;  // bytes freed now (back after the GPU is done with them: no growth for those)
   CtrLevelData& lev = *m_want[0].lev;
   Job job;
   job.name = lev.name;
@@ -5741,7 +6054,6 @@ void CtrLevels::stream_update(u64 frame) {
   job.index_data_offset = lev.index_data_offset;
   job.tod_ntab = lev.tod ? (u32)lev.tod->table.size() : 0;
   job.dir = lev.file_dir;
-  size_t hi = 0;
   u32 packed = 0;
   bool no_room = false;
   for (const auto& w : m_want) {
@@ -5795,7 +6107,9 @@ void CtrLevels::stream_update(u64 frame) {
     // few, large segments. While a level loads only when the heap keeps kLoadRoom more (the
     // load's memory first; a load that runs short makes room, freeing the growth).
     if (!mem && evicted < su.bytes) {
-      const u32 grow_reserve = reserve + (level_loading ? kLoadRoom : kGrowHeadroom);
+      // (AI-assisted, streammem) the room of the parts jobs in flight too (parts_reserve)
+      const u32 grow_reserve =
+          reserve + (level_loading ? kLoadRoom : std::max(kGrowHeadroom, parts_reserve));
       const u64 cap = arena.capacity();
       const u64 demand = need_now + std::max<u64>(kGrowMargin, need_now / 8);
       const u32 want = demand > cap ? (u32)std::min<u64>(demand - cap, 1u << 30) : 0;
@@ -5996,10 +6310,12 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
   Timer timer;
   d->result = LoadResult::FAILED;
   size_t i = 0;
+  int live = -1;  // (AI-assisted, streammem) part i's mesh, begun and not ended
   try {
     if (!job.dir) {
       throw std::runtime_error("no file directory");
     }
+    d->stream_out.reserve(job.stream_parts.size());  // (no allocation after a mesh is ended)
     C3lReader f(job.path, &m_read_bufs, job.window, *job.dir);
     size_t run_end = 0;
     for (; i < job.stream_parts.size(); i++) {
@@ -6044,6 +6360,7 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
       if (mesh < 0) {
         break;  // (its piece back below)
       }
+      live = mesh;
       const bool ok =
           f.read(job.index_data_offset + p.index_first * (u32)sizeof(u16), idst,
                  icount * sizeof(u16)) &&
@@ -6056,6 +6373,7 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
                           (const c3l::Vertex*)vdst, job.tod_ntab, &o.groups, &o.run_group);
         o.layout = true;
       }
+      live = -1;
       mesh = ctr_gpu_mesh_end(mesh, ok);  // (!ok: its piece back through ctr_gpu_set_ext_free)
       if (mesh < 0) {
         i++;
@@ -6070,6 +6388,11 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
     d->read_bytes = f.file_bytes_read;
   } catch (std::exception& e) {
     lg::error("[ctr] {}: reading near chunks failed: {}", job.name, e.what());
+    if (live >= 0) {
+      // (AI-assisted, streammem) its piece back through ctr_gpu_set_ext_free: not below
+      ctr_gpu_mesh_end(live, 0);
+      i++;
+    }
   }
   for (; i < job.stream_parts.size(); i++) {
     CtrStreamArena::get().free(job.stream_parts[i].mem);
@@ -6265,7 +6588,7 @@ void CtrLevels::log_memory() {
 #ifdef __3DS__
   CtrHeapStats st;
   ctr_heap_stats(&st);
-  free = fmt::format("; free: linear {} KB, heap {} KB (largest {} KB)", linearSpaceFree() / 1024,
+  free = fmt::format("; free: linear {} KB, heap {} KB (largest {} KB)", ctr_gpu_linear_free() / 1024,
                      st.free / 1024, st.largest / 1024);
 #else
   free = fmt::format("; free: linear model {} KB", ctr_gpu_linear_free() / 1024);
@@ -6332,7 +6655,7 @@ void CtrLevels::stream_log() {
            "jobs, {} near chunks read ({} KB, {} KB of their blocks; file {} KB in {} reads, {} of "
            "{} ranges in one request, {:.0f} ms reading, {:.0f} ms decoding, {:.0f} "
            "ms in jobs, longest {:.0f} ms; {:.0f} KB/s), {} freed ({} for a needed one of more "
-           "priority), {} times no room; late: {} "
+           "priority, {} in bulk), {} times no room; late: {} "
            "times, {} frames with groups drawn far for it ({} group frames), {:.0f} ms on "
            "average, at most {:.0f} ms ({} frames); needed now {:.0f} KB on average, at most "
            "{} KB; {} read with their file neighbours; linear free least {} KB ({} while a "
@@ -6345,7 +6668,7 @@ void CtrLevels::stream_log() {
            m_sst.preloads + m_sst.preload_misses,
            m_sst.read_ms, m_sst.decode_ms, m_sst.job_ms, m_sst.job_max_ms,
            secs > 0 ? m_sst.read_bytes / 1024.0 / secs : 0.0, m_sst.evictions,
-           m_sst.prio_evictions, m_sst.no_room,
+           m_sst.prio_evictions, m_sst.bulk_evictions, m_sst.no_room,
            m_sst.late_events, m_sst.late_frames, m_sst.late_group_frames,
            m_sst.late_periods ? m_sst.late_ms_total / m_sst.late_periods : 0.0,
            m_sst.late_ms_max, m_sst.late_frames_max, m_sst.need_sum / n / 1024.0,
@@ -7468,6 +7791,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // camera outside the level's bounds by more than far_level_distance: the level is only seen
   // from a neighbouring one
   bool far_level = false;
+  // (AI-assisted, streammem) the level's tfrag by far mode's rules (its far tier) while a partial
+  // unload's tier 1 / 2 tfrag isn't all back; far_level for everything else
+  bool far_tfrag = false;
   if (settings.far_level_distance > 0) {
     float d2 = 0;
     for (int c = 0; c < 3; c++) {
@@ -7485,21 +7811,41 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted) partial unload (the user's idea): a level seen only from far away for a few
     // seconds gives back the memory of the chunks far mode doesn't draw; read again when the camera
     // is within 30 m of the far distance (freed beyond 60 m: no back and forth at one edge)
+    // (AI-assisted, streammem, F3) also when the camera will be there in kReloadLeadFrames at its
+    // speed (the zoomer, running), and at once after a camera cut within the unload distance (a
+    // respawn, a cutscene). Until the meshes are back the level was drawn in far mode, the camera
+    // inside it too (coarse tfrag and landmarks only for the 1.5-2 s citadel's read takes, longer
+    // when it failed); now near mode draws it with what is there: the tie LOD groups' far versions
+    // and the far tier's tfrag are always there (far_tfrag), the rest comes as it is read (in jobs
+    // of kDetailJobBytes, each kept). A partly read back level far away again is freed again.
     constexpr float kUnloadMeters = 60.f, kReloadMeters = 30.f;
+    constexpr float kReloadLeadFrames = 60.f;  // 2 s at 30 fps (the camera's velocity is per frame)
     constexpr u32 kUnloadFrames = 300;
     const float unload_d = m + kUnloadMeters * 4096.f, reload_d = m + kReloadMeters * 4096.f;
-    if (lev.detail_loaded) {
-      lev.far_frames = d2 > unload_d * unload_d ? lev.far_frames + 1 : 0;
-      if (lev.far_frames > kUnloadFrames) {
-        m_levels->unload_detail(lev);
+    lev.far_frames = d2 > unload_d * unload_d ? lev.far_frames + 1 : 0;
+    if (lev.far_frames > kUnloadFrames && !lev.detail_requested) {
+      m_levels->unload_detail(lev);  // (resets far_frames; logs only what it freed)
+    } else if (!lev.detail_loaded && !lev.detail_requested &&
+               rs.frame_idx >= lev.detail_retry_frame) {
+      float lead[3];
+      float dl2 = 1e30f;
+      if (m_levels->camera_lead(kReloadLeadFrames, lead)) {
+        dl2 = 0;
+        for (int c = 0; c < 3; c++) {
+          const float o = lead[c] < lev.bbox_min[c]
+                              ? lev.bbox_min[c] - lead[c]
+                              : (lead[c] > lev.bbox_max[c] ? lead[c] - lev.bbox_max[c] : 0.f);
+          dl2 += o * o;
+        }
       }
-    } else if (!lev.detail_requested && rs.frame_idx >= lev.detail_retry_frame &&
-               d2 < reload_d * reload_d) {
-      m_levels->request_detail(lev);
+      const u64 cut = m_levels->stream_cut_frame();
+      const bool after_cut = cut && rs.frame_idx <= cut + 3;
+      if (d2 < reload_d * reload_d || dl2 < reload_d * reload_d ||
+          (after_cut && d2 < unload_d * unload_d)) {
+        m_levels->request_detail(lev);
+      }
     }
-    if (!lev.detail_loaded) {
-      far_level = true;  // until the meshes are back
-    }
+    far_tfrag = far_level || (!lev.detail_loaded && lev.detail_tfrag_missing > 0);
   }
   m_far_levels += far_level;
   m_level_draws++;
@@ -7596,7 +7942,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (not while another level's visibility string hides this level's tfrag: neighbour_vis)
     // why not (the first reason; statistics)
     const char* why = nullptr;
-    if (far_level) {
+    if (far_level || !lev.detail_loaded) {  // (AI-assisted, streammem: or partly read back)
       why = "far mode";
     } else if (lev.incomplete) {
       why = "incomplete load";
@@ -8570,7 +8916,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     if (!(d2 > reach * reach)) {
       return false;
     }
-    if ((f & CtrLevelData::kClTier12) && !far_level) {
+    if ((f & CtrLevelData::kClTier12) && !far_tfrag) {
       if (!(lod_dist > 0)) {
         return false;
       }
@@ -8585,7 +8931,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if ((st & 4) || chunk_q[ci] != q_now || (hold_since && hold_since[ci])) {
         return false;
       }
-      if (!far_level && (chunks[ci].lod_tier == 1 || chunks[ci].lod_tier == 2) && (st & 3) != 2) {
+      if (!far_tfrag && (chunks[ci].lod_tier == 1 || chunks[ci].lod_tier == 2) && (st & 3) != 2) {
         return false;
       }
     }
@@ -8636,7 +8982,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // versions of a cell share lod_center and see the same decisions: exactly one is drawn.
     u8& state = chunk_state[ci];
     bool lod_ok = true;
-    if (!far_level && (ch.lod_tier == 1 || ch.lod_tier == 2)) {
+    if (!far_tfrag && (ch.lod_tier == 1 || ch.lod_tier == 2)) {
       // detailed version up close, coarse version further away
       const u8 last = state & 3;
       const float f = last == 1 ? 1.1f : (last == 2 ? 0.9f : 1.f);
@@ -8685,7 +9031,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       continue;
     }
-    if (far_level) {
+    // (AI-assisted, streammem) the tfrag tiers by far_tfrag, the rest by far_level
+    if (ch.lod_tier != 0 ? far_tfrag : far_level) {
       // only the level's low resolution version (or the coarse one), no tie but (AI-assisted) the
       // landmarks (far_chunk)
       if (!far_chunk(lev, ch)) {
@@ -8738,7 +9085,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       continue;
     }
     // (AI-assisted) lowres_vista: in far mode too, not over another loaded level's detailed tfrag
-    if (vista_chunk && far_level) {
+    if (vista_chunk && far_tfrag) {
       u8& oc = lev.outside_cache[ci];
       if (!(oc & 4)) {
         bool over = false;

@@ -25,7 +25,9 @@
 class CtrStreamArena {
  public:
   static CtrStreamArena& get();
-  // the first segment (bytes, once; later calls keep it). false: no linear memory for it
+  // the first segment (bytes; later calls keep it). false: no linear memory for it. (AI-assisted,
+  // streammem) tried again at each call while it isn't there (it failed, or release_empty(true)
+  // gave it back), the error logged once
   bool init(u32 bytes);
   bool ready() const { return m_ready; }
   // a piece of `bytes` (kAlign aligned) in any segment, nullptr when none has a free piece that
@@ -44,8 +46,13 @@ class CtrStreamArena {
     return m_capacity;
   }
   // the empty growth segments back to the linear heap (render thread, or the thread of
-  // CtrLevels::service; no frame being built). Returns their bytes.
-  u32 release_empty();
+  // CtrLevels::service; no frame being built). Returns their bytes. (AI-assisted, streammem) first:
+  // the first segment too when it is empty (a level load out of memory); the arena isn't ready()
+  // then until init makes it again.
+  u32 release_empty(bool first = false);
+  // (AI-assisted, streammem) the bytes of the free pieces, and of the used ones whose mesh was
+  // deleted (back once the GPU is done with them)
+  void room(u32* free_bytes, u32* pending_bytes);
   // (fragmentation) a piece whose mesh was deleted: its memory comes back once the GPU is done
   // (counted as free by run_if_freed); and the free run that freeing p would make (its piece with
   // the free and pending pieces next to it)
@@ -91,7 +98,8 @@ class CtrStreamArena {
   Seg* seg_of(const void* p);
   std::mutex m_lock;
   std::vector<Seg> m_segs;  // [0]: the first segment
-  bool m_ready = false, m_tried = false;
+  bool m_ready = false, m_tried = false;  // (m_tried: its error was logged)
+  u32 m_pending_bytes = 0;  // (AI-assisted, streammem) room()
   bool m_draining = false;  // (AI-assisted, popin2) set_draining
   u32 m_used_bytes = 0, m_peak = 0, m_capacity = 0, m_peak_capacity = 0;
   u64 m_allocs = 0, m_failed = 0, m_grown = 0, m_released = 0;

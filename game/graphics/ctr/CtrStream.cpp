@@ -19,24 +19,30 @@ CtrStreamArena& CtrStreamArena::get() {
 
 bool CtrStreamArena::init(u32 bytes) {
   std::lock_guard<std::mutex> lk(m_lock);
-  if (m_ready || m_tried) {
+  if (m_ready) {
     return m_ready;
   }
-  m_tried = true;
+  // (AI-assisted, streammem) again at each call while it isn't there: one failure (linear memory
+  // short at the first streaming level's load) turned streaming off for the whole session
   bytes = (bytes + kAlign - 1) & ~(kAlign - 1);
   u8* base = (u8*)ctr_gpu_linear_block(bytes);
   if (!base) {
-    lg::error("[ctr] stream arena: no {} KB of linear memory: the near tie versions are not "
-              "streamed",
-              bytes / 1024);
+    if (!m_tried) {
+      lg::error("[ctr] stream arena: no {} KB of linear memory: the near tie versions are not "
+                "streamed (tried again at the next level load)",
+                bytes / 1024);
+    }
+    m_tried = true;
     return false;
   }
+  m_segs.clear();
   Seg s;
   s.base = base;
   s.size = bytes;
   s.free[0] = bytes;
   m_segs.push_back(std::move(s));
   m_capacity = m_peak_capacity = bytes;
+  m_used_bytes = m_pending_bytes = 0;
   m_ready = true;
   ctr_gpu_set_ext_free(&CtrStreamArena::free_cb);
   lg::info("[ctr] stream arena: {} KB of linear memory for the near tie versions", bytes / 1024);
@@ -104,7 +110,9 @@ void CtrStreamArena::free(void* p) {
   }
   u32 start = off, size = u->second;
   s->used.erase(u);
-  s->pending.erase(off);
+  if (s->pending.erase(off)) {
+    m_pending_bytes -= std::min(m_pending_bytes, size);
+  }
   s->used_bytes -= size;
   m_used_bytes -= size;
   // coalesce with the free neighbours
@@ -132,9 +140,15 @@ void CtrStreamArena::mark_pending(void* p) {
   }
   const u32 off = (u32)((u8*)p - s->base);
   auto u = s->used.find(off);
-  if (u != s->used.end()) {
-    s->pending[off] = u->second;
+  if (u != s->used.end() && s->pending.emplace(off, u->second).second) {
+    m_pending_bytes += u->second;
   }
+}
+
+void CtrStreamArena::room(u32* free_bytes, u32* pending_bytes) {
+  std::lock_guard<std::mutex> lk(m_lock);
+  *free_bytes = m_capacity - std::min(m_capacity, m_used_bytes);
+  *pending_bytes = m_pending_bytes;
 }
 
 u32 CtrStreamArena::run_if_freed(void* p) {
@@ -246,12 +260,18 @@ u32 CtrStreamArena::grow(u32 bytes, u32 want, u32 reserve) {
   return bytes;
 }
 
-u32 CtrStreamArena::release_empty() {
+u32 CtrStreamArena::release_empty(bool first) {
   std::vector<u8*> gone;
   u32 bytes = 0;
   {
     std::lock_guard<std::mutex> lk(m_lock);
-    for (size_t i = 1; i < m_segs.size();) {
+    // (AI-assisted, streammem) first: segment 0 too, only with every growth segment empty (it is
+    // the arena's own, segment 0 while it exists)
+    bool all_empty = first;
+    for (const auto& sg : m_segs) {
+      all_empty = all_empty && sg.used.empty();
+    }
+    for (size_t i = all_empty ? 0 : 1; i < m_segs.size();) {
       if (m_segs[i].used.empty()) {
         gone.push_back(m_segs[i].base);
         bytes += m_segs[i].size;
@@ -261,6 +281,10 @@ u32 CtrStreamArena::release_empty() {
       } else {
         i++;
       }
+    }
+    if (all_empty && m_ready) {
+      m_ready = false;  // (init makes it again)
+      m_capacity = 0;
     }
   }
   for (u8* p : gone) {

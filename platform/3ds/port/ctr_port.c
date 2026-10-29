@@ -472,7 +472,12 @@ unsigned int ctr_app_mem_free(void) {
 }
 
 unsigned int ctr_linear_mem_free(void) {
-  return (unsigned int)linearSpaceFree();
+  /* (AI-assisted, streammem) under the linear lock: libctru walks its free list, which another
+   * thread's linearAlloc / linearFree changes (nodes freed with free()) */
+  ctr_linear_lock();
+  const unsigned int n = (unsigned int)linearSpaceFree();
+  ctr_linear_unlock();
+  return n;
 }
 
 void ctr_thread_set_priority(int prio) {
@@ -601,6 +606,11 @@ static int s_log_core = 2;
 static unsigned int s_log_thread_id = 0;
 static volatile int s_log_quit = 0;
 static volatile int s_log_urgent = 0;
+/* (AI-assisted, streammem) an error line wakes the writer for an SD write at once, but at most one
+ * such write every LOG_URGENT_GAP_MS: a repeated error turned the async log back into continuous SD
+ * traffic (competing with the level and IOP reads). The crash path doesn't use the ring. */
+#define LOG_URGENT_GAP_MS 250u
+static u32 s_log_urgent_ms = 0; /* the last urgent write */
 static volatile u32 s_log_alive_ms = 0; /* the writer's last round */
 static u32 s_log_written_ms = 0;        /* the ring was last written out */
 static FILE* s_gk_file = NULL;          /* the lg log (gk.log), see lg::set_file */
@@ -826,12 +836,21 @@ static void* log_writer_main(void* arg) {
   s_log_thread_id = ctr_thread_current_id();
   for (;;) {
     LightEvent_WaitTimeout(&s_log_event, (s64)LOG_INTERVAL_MS * 1000000LL);
+    if (s_log_urgent && !s_log_quit) {
+      const u32 since = log_now_ms() - s_log_urgent_ms;
+      if (since < LOG_URGENT_GAP_MS) {
+        svcSleepThread((s64)(LOG_URGENT_GAP_MS - since) * 1000000LL);
+      }
+    }
     const int quit = s_log_quit;
     RecursiveLock_Lock(&s_drain_lock);
     const u32 now = log_now_ms();
     /* woken early by the status line or a job: the files only once a second */
     if (quit || s_log_urgent || now - s_log_written_ms >= LOG_INTERVAL_MS - 100 ||
         s_log_ring.used >= LOG_WAKE_BYTES) {
+      if (s_log_urgent) {
+        s_log_urgent_ms = now;
+      }
       s_log_urgent = 0;
       log_drain(0);
       s_log_written_ms = now;
@@ -1061,7 +1080,7 @@ void ctr_get_mem_info(ctr_mem_info* out) {
   out->app_region_used = (unsigned int)osGetMemRegionUsed(MEMREGION_APPLICATION);
   out->heap_size = (unsigned int)__ctru_heap_size;
   out->linear_size = (unsigned int)__ctru_linear_heap_size;
-  out->linear_free = (unsigned int)linearSpaceFree();
+  out->linear_free = ctr_linear_mem_free(); /* (AI-assisted, streammem) locked */
   out->is_new3ds = ctr_is_new3ds();
   out->is_hbl = envIsHomebrew() ? 1 : 0;
   out->model = "unknown model";
