@@ -9,11 +9,11 @@
  * instead of draw-ocean-3ds, so the two ocean buckets get the PS2's DMA, which this renders like
  * the PC renderer (game/graphics/opengl_renderer/ocean):
  *  - the wave texture (OceanTexture): the ocean-texture VU program's math on the CPU for the 33x33
- *    vertices of *ocean-verts* (color, and the env map lookup from the wave normals), then 128x128
- *    texels (the original 4x4 texel quads), each the env map
- *    texel at the interpolated lookup times the interpolated color (GS modulate). One texture with
- *    mip levels for both buckets, computed at most once per frame ((AI-assisted) every
- *    config.ini ocean_texture_rate frames: 2 by default).
+ *    vertices of *ocean-verts* (color, and the env map lookup from the wave normals), then the GPU
+ *    draws their 32x32 quads into a 128x128 render texture like the PS2's GS (each texel the env
+ *    map texel at the interpolated lookup times the interpolated color, GS modulate), the mip
+ *    levels 2x2 averages. One texture for both buckets, made once per frame. Without the render
+ *    texture the CPU makes the texels, every config.ini ocean_texture_rate frames (2 by default).
  *  - ocean-mid-and-far bucket (before the level, depth test off, depth written like the PC's
  *    flush_mid): the far ocean (GS packets, OceanMidAndFar::handle_ocean_far), then the mid ocean
  *    and the transition to the near ocean: the ocean-mid VU program's drawing calls as native
@@ -74,6 +74,8 @@ class CtrOceanFull : public CtrOceanEnvHook {
   struct TextureDma;
   bool read_texture_dma(DmaFollower& dma, TextureDma* out);
   void update_texture(const TextureDma& t, CtrRenderState& rs);
+  void update_texture_gpu(const TextureDma& t, CtrRenderState& rs);
+  void make_wave_rt();
   bool update_env(u64 tex0, CtrRenderState& rs);
   void read_far(DmaFollower& dma);
   void frame_stats(const CtrRenderState& rs);
@@ -88,6 +90,10 @@ class CtrOceanFull : public CtrOceanEnvHook {
   u64 m_tex_frame = ~0ull;  // the frame it was last made in
   int m_tex_rate = 1;       // (AI-assisted) config.ini ocean_texture_rate
   std::vector<u32> m_texels;
+  // the wave texture drawn by the GPU (update_texture_gpu): a mipmapped render texture (m_tex
+  // then is it); -1: none, the CPU makes it
+  int m_wave_rt = -1;
+  float m_wave_map[6] = {};  // ctr x, y of texture coordinates s, t: x = m0 + m1 s + m2 t, ...
   // the env map texture it is made from (decoded from CtrVram)
   u64 m_env_key = 0;
   u64 m_env_frame = 0;

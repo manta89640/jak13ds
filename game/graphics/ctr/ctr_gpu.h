@@ -255,6 +255,14 @@ void ctr_gpu_rt_delete(int tex);
 int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h);
 void ctr_gpu_rt_end(void);
 void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t);
+/* A square size x size render texture with mip levels (down to 8 x 8), drawn into only with
+ * ctr_gpu_rt_draw_grid; sampled like a ctr_gpu_tex_create_mipmapped texture.
+ * ctr_gpu_rt_draw_grid: the (n + 1) x (n + 1) vertices (row-major) as n x n quads into level 0
+ * (ctr coordinates [-1, 1] cover it as ctr_gpu_rt_begin's tile), each further level the 2 x 2
+ * averages of the one above; then the screen again. 1 when drawn. Only inside a frame. (The PS2
+ * ocean's wave texture: the GS draws its 32 x 32 quads, CtrOceanFull) */
+int ctr_gpu_rt_create_mipmapped(int size);
+int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex* verts, int n);
 /* (AI-assisted) a static mesh's vertices and indices as made (ctr_gpu_mesh_create / _end), to
  * read on the CPU; 0 if there is none */
 int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
@@ -793,6 +801,8 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out);
 void ctr_gpu_soft_bucket(const char* name);
 /* (AI-assisted) debugging: a texture's texels as a PNG (soft backend only) */
 void ctr_gpu_soft_dump_tex(int tex, const char* path);
+/* host tests: a texture's texels (RGBA8, top row first), NULL if there is none (soft backend) */
+const uint8_t* ctr_gpu_soft_texels(int tex, int* w, int* h);
 /* (AI-assisted) the name the draws are counted under now */
 const char* ctr_gpu_soft_bucket_name(void);
 #endif

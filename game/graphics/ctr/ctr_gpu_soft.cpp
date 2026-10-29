@@ -1399,6 +1399,41 @@ void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t) {
   *t = 1.f - ly / r->lh;
 }
 
+// (level 0 only: the soft backend samples no mip levels)
+int ctr_gpu_rt_create_mipmapped(int size) {
+  return ctr_gpu_rt_create(size, size, size);
+}
+
+int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex* verts, int n) {
+  SoftRt* r = soft_rt(tex);
+  if (!r || n < 1 || r->lw != r->lh || !ctr_gpu_rt_begin(tex, 0, 0, r->lw, r->lh)) {
+    return 0;
+  }
+  std::vector<ctr_vertex> tris;
+  tris.reserve((size_t)n * n * 6);
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      const int a = y * (n + 1) + x, b = a + 1, d = a + n + 1, e = d + 1;
+      for (int k : {a, b, d, d, b, e}) {
+        tris.push_back(verts[k]);
+      }
+    }
+  }
+  ctr_gpu_draw(state, tris.data(), (int)tris.size());
+  ctr_gpu_rt_end();
+  return 1;
+}
+
+// host tests: a texture's texels (RGBA8, top row first), nullptr if there is none
+const uint8_t* ctr_gpu_soft_texels(int tex, int* w, int* h) {
+  if (tex < 0 || tex >= (int)g_soft.textures.size() || !g_soft.textures[tex].used) {
+    return nullptr;
+  }
+  *w = g_soft.textures[tex].w;
+  *h = g_soft.textures[tex].h;
+  return g_soft.textures[tex].rgba.data();
+}
+
 // (AI-assisted) debugging: a texture's texels as a PNG (alpha forced to 255 where it isn't 0)
 void ctr_gpu_soft_dump_tex(int tex, const char* path) {
   if (tex < 0 || tex >= (int)g_soft.textures.size() || !g_soft.textures[tex].used) {

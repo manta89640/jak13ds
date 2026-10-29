@@ -6410,9 +6410,15 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
  * (that only fills VRAM on hardware): every tile is cleared by a draw (CtrImpostor::capture's
  * first quad, alpha 0 and depth 0) before it is drawn into or sampled. */
 #define MAX_RT 4
+#define RT_MIP_MAX 7
 static struct {
   int tex1; /* texture slot + 1 (0: free) */
   int lw, lh, max_w;
+  int levels; /* mip levels (ctr_gpu_rt_create_mipmapped), else 1 */
+  /* levels 1 and on are drawn into these textures, then copied into the mip levels: Azahar's
+   * rasterizer cache can't take draws into a mip level (FramebufferHelper's invalidation takes
+   * the level's row offset from level 0's height: an interval past the texture, an assert) */
+  int mip[RT_MIP_MAX];
   void* depth;   /* D16, max_w rows x lh columns */
   int depth_vram; /* (AI-assisted) depth is in VRAM (vramFree) */
   u32 dead_frame; /* ctr_gpu_rt_delete: the depth buffer is freed 3 frames later */
@@ -6441,7 +6447,37 @@ static void rt_reap(void) {
   }
 }
 
-int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
+/* a texture a mip level is drawn into (rt_create): w x h RGBA8, in VRAM when the render texture
+ * is and there is room */
+static int rt_mip_create(int w, int h, int vram) {
+  const int slot = reserve_tex_slot();
+  if (slot < 0) {
+    return -1;
+  }
+  TexSlot* t = &g.textures[slot];
+  ctr_linear_lock();
+  const int in_vram = vram && (size_t)vramSpaceFree() >= (size_t)w * h * 4u + VRAM_RESERVE &&
+                      C3D_TexInitVRAM(&t->tex, (u16)w, (u16)h, GPU_RGBA8);
+  const int ok = in_vram ||
+                 (linear_room_for_tex(w, h, 0) && C3D_TexInit(&t->tex, (u16)w, (u16)h, GPU_RGBA8));
+  ctr_linear_unlock();
+  if (!ok) {
+    release_tex_slot(slot);
+    return -1;
+  }
+  if (!in_vram) {
+    cache_flush_now(t->tex.data, t->tex.size);
+  }
+  t->pool = -1;
+  t->levels = 1;
+  t->alpha_full = 1;
+  ctr_linear_lock();
+  t->used = 1;
+  ctr_linear_unlock();
+  return slot;
+}
+
+static int rt_create(int lw, int lh, int max_tile_w, int mipmapped) {
   rt_reap();
   if (!g.ready || lw < 16 || lh < 16 || lw > 1024 || lh > 1024 || (lw & (lw - 1)) ||
       (lh & (lh - 1)) || max_tile_w < 16 || (max_tile_w & 15) || max_tile_w > lw) {
@@ -6459,15 +6495,26 @@ int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
     return -1;
   }
   TexSlot* t = &g.textures[slot];
-  const size_t color_bytes = (size_t)lw * (size_t)lh * 4u;
+  /* (down to 8 x 8, as ctr_gpu_tex_create_mipmapped) */
+  const u8 max_level = mipmapped ? (u8)C3D_TexCalcMaxLevel((u32)lh, (u32)lw) : 0;
+  const size_t color_bytes = C3D_TexCalcTotalSize((size_t)lw * (size_t)lh * 4u, max_level);
   const size_t depth_bytes = (size_t)max_tile_w * (size_t)lh * 2u;
+  const size_t mip_bytes = color_bytes - (size_t)lw * (size_t)lh * 4u;
+  for (int l = 0; l < RT_MIP_MAX; l++) {
+    s_rt[i].mip[l] = -1;
+  }
   ctr_linear_lock();
   /* the texture: lh wide (buffer columns), lw high (buffer rows). VRAM first (leaving the reserve:
    * C3D_TexInitVRAM calls libctru's vramAlloc, not safe_vram_alloc) */
-  int in_vram = (size_t)vramSpaceFree() >= color_bytes + depth_bytes + VRAM_RESERVE &&
-                C3D_TexInitVRAM(&t->tex, (u16)lh, (u16)lw, GPU_RGBA8);
+  int in_vram = (size_t)vramSpaceFree() >= color_bytes + mip_bytes + depth_bytes + VRAM_RESERVE &&
+                C3D_TexInitWithParams(&t->tex, NULL,
+                                      (C3D_TexInitParams){(u16)lh, (u16)lw, max_level, GPU_RGBA8,
+                                                          GPU_TEX_2D, true});
   int ok = in_vram ||
-           (linear_room_for_tex(lh, lw, 0) && C3D_TexInit(&t->tex, (u16)lh, (u16)lw, GPU_RGBA8));
+           (linear_room_for_tex(lh, lw, mipmapped) &&
+            C3D_TexInitWithParams(&t->tex, NULL,
+                                  (C3D_TexInitParams){(u16)lh, (u16)lw, max_level, GPU_RGBA8,
+                                                      GPU_TEX_2D, false}));
   void* depth = NULL;
   int depth_vram = 0;
   if (ok && in_vram) {
@@ -6494,27 +6541,57 @@ int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
   }
   if (!in_vram) {
     /* no dirty cache line from the memory's last use may land over what the GPU writes */
-    cache_flush_now(t->tex.data, t->tex.size);
+    cache_flush_now(t->tex.data, (u32)color_bytes);
   }
   if (!depth_vram) {
     cache_flush_now(depth, (u32)depth_bytes);
   }
+  for (int l = 1; l <= max_level; l++) {
+    s_rt[i].mip[l - 1] = rt_mip_create(lh >> l, lw >> l, in_vram);
+    if (s_rt[i].mip[l - 1] < 0) {
+      for (int k = 1; k < l; k++) {
+        ctr_gpu_tex_delete(s_rt[i].mip[k - 1]);
+        s_rt[i].mip[k - 1] = -1;
+      }
+      ctr_linear_lock();
+      C3D_TexDelete(&t->tex);
+      if (depth_vram) {
+        vramFree(depth);
+      } else {
+        linearFree(depth);
+      }
+      ctr_linear_unlock();
+      release_tex_slot(slot);
+      return -1;
+    }
+  }
   t->pool = -1;
-  t->levels = 1;
+  t->levels = (uint8_t)(max_level + 1);
+  t->alpha_full = mipmapped; /* (the ocean's wave texture: alpha 0xff = 1) */
   ctr_linear_lock();
   t->used = 1;
   ctr_linear_unlock();
   s_rt[i].tex1 = slot + 1;
+  s_rt[i].levels = max_level + 1;
   s_rt[i].lw = lw;
   s_rt[i].lh = lh;
   s_rt[i].max_w = max_tile_w;
   s_rt[i].depth = depth;
   s_rt[i].depth_vram = depth_vram;
-  printf("[ctr] render to texture: %dx%d RGBA8 in %s + D16 %dx%d in %s (%u KB)\n", lw, lh,
+  printf("[ctr] render to texture: %dx%d RGBA8 (%d levels) in %s + D16 %dx%d in %s (%u KB)\n", lw,
+         lh, max_level + 1,
          in_vram ? (vram_bank(t->tex.data) ? "VRAM B" : "VRAM A") : "linear memory", max_tile_w,
          lh, depth_vram ? (vram_bank(depth) ? "VRAM B" : "VRAM A") : "linear memory",
-         (unsigned)((color_bytes + depth_bytes) / 1024u));
+         (unsigned)((color_bytes + mip_bytes + depth_bytes) / 1024u));
   return slot;
+}
+
+int ctr_gpu_rt_create(int lw, int lh, int max_tile_w) {
+  return rt_create(lw, lh, max_tile_w, 0);
+}
+
+int ctr_gpu_rt_create_mipmapped(int size) {
+  return rt_create(size, size, size, 1);
 }
 
 static int rt_find(int tex) {
@@ -6535,9 +6612,15 @@ void ctr_gpu_rt_delete(int tex) {
     ctr_gpu_rt_end();
   }
   ctr_gpu_tex_delete(tex);
+  for (int l = 0; l < RT_MIP_MAX; l++) {
+    ctr_gpu_tex_delete(s_rt[i].mip[l]);
+    s_rt[i].mip[l] = -1;
+  }
   s_rt[i].tex1 = 0;
   s_rt[i].dead_frame = (u32)g.frame_no;
 }
+
+static void rt_target(int i, void* color, int fb_w, int fb_h, int vx, int vw, int vh);
 
 int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h) {
   const int i = rt_find(tex);
@@ -6549,6 +6632,14 @@ int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h) {
       y + h > s_rt[i].lh) {
     return 0;
   }
+  rt_target(i, (u8*)g.textures[tex].tex.data + (size_t)x * (size_t)s_rt[i].lh * 4u, s_rt[i].lh,
+            rows, y, h, w);
+  return 1;
+}
+
+/* ctr_gpu_rt_begin's switch to the render texture: color at `color` (fb_w
+ * buffer columns, fb_h rows), the viewport and scissor (vx, 0, vw, vh) */
+static void rt_target(int i, void* color, int fb_w, int fb_h, int vx, int vw, int vh) {
   if (!s_rtc.active) {
     /* a pending sky_last hook waits for the screen (it never draws into the tile) */
     s_rtc.hook = s_sky_hook;
@@ -6559,17 +6650,15 @@ int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h) {
     g_early_depth = 0;
     g_early_sky = 0;
   }
-  C3D_Tex* t = &g.textures[tex].tex;
   C3D_FrameBuf* fb = &s_rtc.fb;
   memset(fb, 0, sizeof(*fb));
-  C3D_FrameBufAttrib(fb, (u16)s_rt[i].lh, (u16)rows, false);
-  C3D_FrameBufColor(fb, (u8*)t->data + (size_t)x * (size_t)s_rt[i].lh * 4u, GPU_RB_RGBA8);
+  C3D_FrameBufAttrib(fb, (u16)fb_w, (u16)fb_h, false);
+  C3D_FrameBufColor(fb, color, GPU_RB_RGBA8);
   C3D_FrameBufDepth(fb, s_rt[i].depth, GPU_RB_DEPTH16);
   C3D_SetFrameBuf(fb);
-  C3D_SetViewport((u32)y, 0, (u32)h, (u32)w);
-  C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)y, 0, (u32)(y + h), (u32)w);
+  C3D_SetViewport((u32)vx, 0, (u32)vw, (u32)vh);
+  C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)vx, 0, (u32)(vx + vw), (u32)vh);
   s_rtc.active = 1;
-  return 1;
 }
 
 void ctr_gpu_rt_end(void) {
@@ -6599,6 +6688,119 @@ void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t) {
    * samples t = 0 from the last row in memory, see ctr_gpu_screen_uv) */
   *s = ly / (float)s_rt[i].lh;
   *t = 1.0f - lx / (float)s_rt[i].lw;
+}
+
+/* ctr_gpu_rt_draw_grid's indices: n x n quads of a row-major (n + 1)^2 grid
+ * (made once, in linear memory; the GPU reads them in every frame's lists) */
+static uint16_t* s_grid_idx;
+static int s_grid_n;
+
+int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex* verts, int n) {
+  const int i = rt_find(tex);
+  if (i < 0 || !g.ready || !g.in_frame || g.textures[tex].used != 1 || n < 1 || n > 64 ||
+      s_rt[i].lw != s_rt[i].lh || s_rt[i].max_w != s_rt[i].lw) {
+    return 0;
+  }
+  const int levels = s_rt[i].levels;
+  const int nv = (n + 1) * (n + 1), ni = n * n * 6;
+  if (s_grid_n != n) {
+    ctr_linear_lock();
+    uint16_t* idx = (uint16_t*)linearAlloc((size_t)ni * 2);
+    ctr_linear_unlock();
+    if (!idx) {
+      return 0;
+    }
+    uint16_t* o = idx;
+    for (int r = 0; r < n; r++) {
+      for (int c = 0; c < n; c++) {
+        const uint16_t a = (uint16_t)(r * (n + 1) + c), b = (uint16_t)(a + 1),
+                       d = (uint16_t)(a + n + 1), e = (uint16_t)(d + 1);
+        *o++ = a, *o++ = b, *o++ = d, *o++ = d, *o++ = b, *o++ = e;
+      }
+    }
+    cache_flush_now(idx, (u32)ni * 2);
+    /* (an earlier grid's indices stay: a list in flight may read them; n never changes) */
+    s_grid_idx = idx;
+    s_grid_n = n;
+  }
+  const size_t bytes = (size_t)nv * sizeof(ctr_vertex);
+  const size_t grid_bytes = (bytes + 15) & ~(size_t)15;
+  const size_t quad_bytes = 6 * sizeof(ctr_vertex);
+  if (!vbuf_room(grid_bytes + quad_bytes) ||
+      gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + (u32)levels * CMD_DRAW_WORDS) {
+    g.cur.dropped_draws++;
+    return 0;
+  }
+  uint8_t* dst = g.vbuf + g.vbuf_used;
+  memcpy(dst, verts, bytes);
+  /* the mip levels' quad: the source's texel corners at the target's pixel centers (2 x 2
+   * averages); s, t of ctr_gpu_rt_uv: s = logical y, t = 1 - logical x */
+  ctr_vertex* quad = (ctr_vertex*)(dst + grid_bytes);
+  static const float kQuad[6][2] = {{-1, -1}, {1, -1}, {-1, 1}, {-1, 1}, {1, -1}, {1, 1}};
+  for (int k = 0; k < 6; k++) {
+    ctr_vertex* v = &quad[k];
+    v->x = kQuad[k][0];
+    v->y = kQuad[k][1];
+    v->z = 0.5f;
+    v->s = 0.5f * (v->y + 1.0f);
+    v->t = 0.5f * (1.0f - v->x);
+    v->r = v->g = v->b = v->a = 0x80;
+  }
+  g.vbuf_used += grid_bytes + quad_bytes;
+
+  C3D_Tex* t = &g.textures[tex].tex;
+  const int dim = s_rt[i].lw;
+  rt_target(i, t->data, dim, dim, 0, dim, dim);
+  use_program(PROG_BASIC);
+  if (use_raw(state)) {
+    apply_state(state, 0, 1);
+    raw_vertex_buffer(raw_vbuf_pa((size_t)(dst - g.vbuf)), 0x210,
+                      RAW_BUF_FLAGS1(sizeof(ctr_vertex), 3, 0));
+    raw_sync();
+    raw_draw_elements(osConvertVirtToPhys(s_grid_idx), (u32)ni);
+  } else {
+    apply_state(state, 0, 0);
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, dst, sizeof(ctr_vertex), 3, 0x210);
+    C3D_DrawElements(GPU_TRIANGLES, ni, C3D_UNSIGNED_SHORT, s_grid_idx);
+  }
+  g.cur.draws++;
+  g.cur.triangles += n * n * 2;
+
+  ctr_draw_state q;
+  memset(&q, 0, sizeof(q));
+  q.tcc = 1;
+  q.decal = 1;
+  q.filter = 1;
+  q.clamp_s = q.clamp_t = 1;
+  q.blend = CTR_BLEND_OFF;
+  q.atest = CTR_TEST_ALWAYS;
+  q.ztest = CTR_TEST_ALWAYS;
+  for (int l = 1; l < levels; l++) {
+    const int d = dim >> l;
+    q.tex = l == 1 ? tex : s_rt[i].mip[l - 2];
+    rt_target(i, g.textures[s_rt[i].mip[l - 1]].tex.data, d, d, 0, d, d);
+    g.textures[tex].levels = 1; /* (level 1 samples level 0 alone) */
+    draw_immediate(&q, PROG_BASIC, (uint8_t*)quad, sizeof(ctr_vertex), 6, GPU_TRIANGLES);
+    g.textures[tex].levels = (uint8_t)levels;
+  }
+  ctr_gpu_rt_end();
+
+  /* after the draws, in the GPU's queue: the levels into place */
+  u8* level = (u8*)t->data + (size_t)dim * (size_t)dim * 4u;
+  for (int l = 1; l < levels; l++) {
+    const int d = dim >> l;
+    const u32 size = (u32)d * (u32)d * 4u;
+    u32* src = (u32*)g.textures[s_rt[i].mip[l - 1]].tex.data;
+    if (l == 1 || (s_pipeline && s_bd.frame)) {
+      sync_texture_copy(src, 0, (u32*)level, 0, size, 8);
+    } else {
+      GX_TextureCopy(src, 0, (u32*)level, 0, size, 8);
+    }
+    level += size;
+  }
+  return 1;
 }
 
 int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
