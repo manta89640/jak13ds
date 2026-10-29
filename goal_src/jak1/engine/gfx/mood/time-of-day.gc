@@ -255,6 +255,8 @@
         (if *teleport* (set! f30-0 f28-0))
         ;; ramp interpolation weights.
         (when (not (or (paused?) (= f28-0 f30-0)))
+          ;; og:preserve-this one ramp step per 60 Hz frame (see mood-ticks)
+          (dotimes (ramp-i (#if TARGET_3DS (max 1 (the int (-> *display* time-ratio))) 1))
           (let ((f0-7 (- f30-0 f28-0)))
             (set! f30-0
                   (cond
@@ -277,7 +279,7 @@
                      (+ 0.0033 f30-0))
                     (else
                      ;; ramp down.
-                     (+ -0.0033 f30-0))))))
+                     (+ -0.0033 f30-0)))))))
         ;; number of active skys
         (set! (-> arg0 active-count) (the-as uint s5-0))
         ;; interpolation value between the two level moods.
