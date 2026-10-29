@@ -34,6 +34,15 @@ class Reader {
     std::vector<uint8_t> window[2];
     std::vector<uint8_t> cache[2];
     void* zstd = nullptr;  // the zstd decoder (~100 KB, made at the first zstd block)
+    // (AI-assisted, streammem) the file a Reader made with a Dir (a stream job's) left open for the
+    // next such Reader of the same file: no open, size and seek requests per job (~4 jobs a second
+    // in motion, each request several ms on the 3DS SD card). Closed by the next file's, a read
+    // error, or the Buffers' end.
+    FILE* kept = nullptr;
+    char kept_path[256] = {};
+    long kept_size = 0;
+    bool kept_unbuffered = false;
+    void close_kept();
     Buffers() = default;
     Buffers(const Buffers&) = delete;
     Buffers& operator=(const Buffers&) = delete;
@@ -111,6 +120,8 @@ class Reader {
   bool read_block(size_t b, uint32_t offset, uint8_t* dst, size_t bytes);
 
   FILE* m_f = nullptr;
+  bool m_keep = false;  // (AI-assisted, streammem) left open in m_bufs (Buffers::kept) at the end
+  char m_path[256] = {};
   long m_file_size = 0;
   long m_pos = 0;
   bool m_error = false;

@@ -18,6 +18,15 @@ namespace c3l {
 
 Reader::Buffers::~Buffers() {
   free_zstd_ctx(zstd);
+  close_kept();
+}
+
+void Reader::Buffers::close_kept() {
+  if (kept) {
+    fclose(kept);
+    kept = nullptr;
+  }
+  kept_path[0] = 0;
 }
 
 void Reader::Buffers::reserve(size_t window_size, size_t max_block) {
@@ -100,19 +109,35 @@ Reader::Reader(const char* path, size_t window, Buffers* buffers)
 }
 
 Reader::Reader(const char* path, size_t window, Buffers* buffers, const Dir& dir)
-    : m_f(fopen(path, "rb")), m_window_cap(window) {
+    : m_window_cap(window) {
   if (buffers) {
     m_bufs = buffers;
   }
   m_windows[0].buf = &m_bufs->window[0];
   m_windows[1].buf = &m_bufs->window[1];
-  if (!m_f) {
-    return;
+  // (AI-assisted, streammem) the file the last stream job's reader left open (Buffers::kept)
+  const bool unbuffered = m_window_cap != 0;
+  m_keep = buffers && strlen(path) < sizeof(m_path);
+  if (m_keep) {
+    strcpy(m_path, path);
   }
-  setvbuf(m_f, nullptr, m_window_cap ? _IONBF : _IOFBF, m_window_cap ? 0 : 64 * 1024);
-  fseek(m_f, 0, SEEK_END);
-  m_file_size = ftell(m_f);
-  fseek(m_f, 0, SEEK_SET);
+  if (m_keep && buffers->kept && buffers->kept_unbuffered == unbuffered &&
+      !strcmp(buffers->kept_path, path)) {
+    m_f = buffers->kept;
+    m_file_size = buffers->kept_size;
+    m_pos = -1;  // (where the last reader left it: the first read seeks)
+    buffers->kept = nullptr;
+    buffers->kept_path[0] = 0;
+  } else {
+    m_f = fopen(path, "rb");
+    if (!m_f) {
+      return;
+    }
+    setvbuf(m_f, nullptr, unbuffered ? _IONBF : _IOFBF, unbuffered ? 0 : 64 * 1024);
+    fseek(m_f, 0, SEEK_END);
+    m_file_size = ftell(m_f);
+    fseek(m_f, 0, SEEK_SET);
+  }
   m_header = dir.header;
   m_bl = &dir.blocks;  // (the caller keeps dir while this reader is used)
   m_raw_size = dir.blocks.empty() ? (uint32_t)m_file_size : dir.raw_size;
@@ -132,7 +157,14 @@ Reader::Dir Reader::dir() const {
 }
 
 Reader::~Reader() {
-  if (m_f) {
+  if (m_f && m_keep && !m_error) {
+    // (AI-assisted, streammem) kept open for the next stream job (one file: the last one's closed)
+    m_bufs->close_kept();
+    m_bufs->kept = m_f;
+    strcpy(m_bufs->kept_path, m_path);
+    m_bufs->kept_size = m_file_size;
+    m_bufs->kept_unbuffered = m_window_cap != 0;
+  } else if (m_f) {
     fclose(m_f);
   }
 }

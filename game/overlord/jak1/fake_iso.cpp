@@ -431,7 +431,30 @@ static int32_t fs_read_plain(LoadStackEntry* fd, void* buffer, int32_t real_size
     }
 
     if (fread(buffer, real_size, 1, fd->fp) != 1) {
+#ifdef __3DS__
+      // (AI-assisted, streammem) an SD card read error (a handle kept open across loads that went
+      // bad, the card busy after sleep): the file opened again and the read tried again, up to
+      // kTries times, then an error naming the file instead of ASSERT(false). (Plain files only:
+      // compressed ones go through their reader, fs_read.)
+      constexpr int kTries = 3;
+      bool ok = false;
+      for (int t = 0; t < kTries && !ok; t++) {
+        lg::warn("[OVERLORD] read error in {} at {} ({} B), opening it again (try {} of {})",
+                 fd->fr->name, offset_into_file, real_size, t + 1, kTries);
+        FILE* nf = file_util::open_file(get_file_path(fd->fr), "rb");
+        if (!nf) {
+          continue;
+        }
+        fclose(fd->fp);
+        fd->fp = nf;
+        ok = fseek(fd->fp, offset_into_file, SEEK_SET) == 0 &&
+             fread(buffer, real_size, 1, fd->fp) == 1;
+      }
+      ASSERT_MSG(ok, fmt::format("[OVERLORD] SD card read error in {} at {} ({} B) after {} tries",
+                                 fd->fr->name, offset_into_file, real_size, kTries));
+#else
       ASSERT(false);
+#endif
     }
     return real_size;
   }

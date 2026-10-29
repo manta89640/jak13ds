@@ -557,7 +557,10 @@ void ctr_gpu_request_screenshot(const char* path) {
  * units, with the free ranges sorted by offset. Used by the render thread only. */
 #define ARENA_BYTES (384 * 1024)
 #define ARENA_ALIGN 128
-#define ARENA_MAX_FREE 128
+/* (AI-assisted, streammem) as many free ranges as the arena can have (every other granule free):
+ * with 128 a fragmented arena lost each freed range that had no free neighbour, for good (compact
+ * textures then went to linear memory) */
+#define ARENA_MAX_FREE (ARENA_BYTES / ARENA_ALIGN / 2 + 1)
 static struct {
   uint8_t* base;
   u32 free_off[ARENA_MAX_FREE];
@@ -3371,7 +3374,7 @@ void ctr_gpu_frame_end(void) {
     }
     g.cur.textures = count;
     g.cur.tex_bytes = bytes;
-    g.cur.linear_free = (unsigned int)linearSpaceFree();
+    g.cur.linear_free = ctr_gpu_linear_free(); /* (AI-assisted, streammem) locked */
     g.cur.vram_free = (unsigned int)vramSpaceFree();
     g.cur.linear_largest = linear_largest_block();
   }
@@ -6558,7 +6561,13 @@ void ctr_gpu_linear_block_free(void* p) {
 }
 
 unsigned int ctr_gpu_linear_free(void) {
-  return (unsigned int)linearSpaceFree();
+  /* (AI-assisted, streammem) under the linear lock (recursive): libctru walks its free list, whose
+   * nodes another thread's allocation or free unlinks and free()s (render thread every frame, the
+   * loader during loads) */
+  ctr_linear_lock();
+  const unsigned int n = (unsigned int)linearSpaceFree();
+  ctr_linear_unlock();
+  return n;
 }
 
 int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,

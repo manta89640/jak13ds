@@ -28,6 +28,8 @@
 #include "game/overlord/common/dma.h"
 #include "game/overlord/common/fake_iso.h"
 #include "game/overlord/jak1/fake_iso.h"
+
+#include "platform/3ds/port/ctr_heap.h"
 #endif
 
 using namespace iop;
@@ -250,7 +252,8 @@ void* RPC_STR(unsigned int fno, void* _cmd, int y) {
       const u32 chunk_len = sCacheJ1[cache_entry].header.sizes[cmd->chunk_id];
       u8* capture = nullptr;
       if (cmd->chunk_id == 0 && chunk_cache_wants(file_record, chunk_len)) {
-        capture = (u8*)malloc(chunk_len);
+        // (AI-assisted, streammem) optional: never the heap's linear fallback
+        capture = (u8*)ctr_heap_malloc_optional(chunk_len);
       }
       const s32 loaded =
           LoadISOFileChunkToEE(file_record, cmd->ee_addr, chunk_len,

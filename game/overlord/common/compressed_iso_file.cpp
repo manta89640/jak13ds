@@ -12,6 +12,10 @@
 #include "third-party/lz4/lz4.h"
 #include "third-party/zstd/lib/zstd.h"
 
+#ifdef __3DS__
+#include "platform/3ds/port/ctr_heap.h"
+#endif
+
 namespace iso_cz {
 
 namespace {
@@ -203,7 +207,12 @@ bool Reader::window(uint32_t block, const uint8_t** src) {
     return true;
   }
   if (!m_ra) {
+#ifdef __3DS__
+    // (AI-assisted, streammem) optional (nullptr: a block per read): never the linear fallback
+    m_ra = (uint8_t*)ctr_heap_malloc_optional(m_ra_cap);
+#else
     m_ra = (uint8_t*)malloc(m_ra_cap);
+#endif
     if (!m_ra) {
       m_ra_cap = 0;  // one block per read from now on
       return true;
