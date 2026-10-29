@@ -161,6 +161,11 @@ void ctr_gpu_tex_delete(int handle);
  * (ctr_gpu_anim_slot_set) instead while the slot has one. Slot -1: none (the default; a deleted
  * handle loses it). ctr_gpu_anim_slot_set takes effect at the next frame begin (draws within a
  * frame all see the same texture); tex -1: none. */
+/* c3l v23: the alpha of texture `handle` is texture `mask`'s (CTR_TEX_A8 / A4, the
+ * same size and levels): the level mesh (fog_alpha programs), envmapped tie and merc draws of it
+ * sample the mask on another texture unit for their alpha. -1: none (a deleted handle or mask
+ * loses it). */
+void ctr_gpu_tex_set_mask(int handle, int mask);
 #define CTR_ANIM_SLOTS 64
 void ctr_gpu_tex_set_anim_slot(int handle, int slot);
 void ctr_gpu_anim_slot_set(int slot, int tex);
@@ -328,6 +333,8 @@ enum ctr_tex_format {
   CTR_TEX_ETC1 = 2,
   CTR_TEX_ETC1A4 = 3,
   CTR_TEX_RGBA8 = 4, /* stored A, B, G, R */
+  CTR_TEX_A8 = 5,    /* alpha masks (c3l v23) */
+  CTR_TEX_A4 = 6,    /* two texels per byte, the first in the low bits */
 };
 /* Bytes of a tiled texture with `levels` mip levels (each half the size of the previous one). */
 unsigned int ctr_gpu_tex_bytes(int w, int h, int format, int levels);

@@ -176,6 +176,10 @@ uint32_t level_bytes(int w, int h, Format fmt) {
       return n;
     case Format::RGBA8:
       return n * 4;
+    case Format::A8:
+      return n;
+    case Format::A4:
+      return n / 2;
   }
   return 0;
 }
@@ -332,6 +336,21 @@ void encode_level(const Image& img,
         }
       }
       break;
+    case Format::A8:
+    case Format::A4:
+      // the GPU's A4: two texels per byte, the first in the low bits
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          const uint8_t a = img.at(x, y)[3];
+          const uint32_t idx = tiled_texel(x, h - 1 - y, w);
+          if (fmt == Format::A8) {
+            dst[idx] = a;
+          } else {
+            dst[idx / 2] |= (uint8_t)(((a + 8) / 17) << (4 * (idx & 1)));
+          }
+        }
+      }
+      break;
     case Format::RGB565:
     case Format::RGBA4:
       for (int y = 0; y < h; y++) {
@@ -469,6 +488,17 @@ Image decode_level(const uint8_t* data, int w, int h, Format fmt) {
           p[1] = data[4 * idx + 2];
           p[2] = data[4 * idx + 1];
           p[3] = data[4 * idx + 0];
+        }
+      }
+      break;
+    case Format::A8:
+    case Format::A4:
+      for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+          const uint32_t idx = tiled_texel(x, h - 1 - y, w);
+          img.at(x, y)[3] = fmt == Format::A8
+                                ? data[idx]
+                                : (uint8_t)(((data[idx / 2] >> (4 * (idx & 1))) & 0xf) * 17);
         }
       }
       break;

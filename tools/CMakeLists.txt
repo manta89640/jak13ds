@@ -46,6 +46,13 @@ add_executable(ctr_level_converter
 set_source_files_properties(${CTR_LEVEL_CONVERTER_THIRD_PARTY} PROPERTIES COMPILE_OPTIONS "-w")
 target_link_libraries(ctr_level_converter common)
 
+# the linear memory of .c3l levels and level sets on the 3DS (docs/3ds-port/c3l_format.md)
+add_executable(c3l_mem EXCLUDE_FROM_ALL
+        ctr_level_converter/c3l_mem.cpp
+        ${CMAKE_SOURCE_DIR}/game/graphics/ctr/c3l_reader.cpp
+        ${CMAKE_SOURCE_DIR}/third-party/lz4/lz4.c)
+target_link_libraries(c3l_mem common)
+
 # (AI-assisted) CPU-only regressions for the 3DS asset optimizations and VRAM cache.
 # Explicit target: no renderer, window, emulator or console is started.
 get_target_property(CTR_RENDER_TEST_SOURCES ctr_level_converter SOURCES)

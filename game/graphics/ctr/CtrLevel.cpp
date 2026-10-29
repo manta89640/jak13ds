@@ -1956,6 +1956,16 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
         m = std::min<int>(m, data[4 * i]);  // stored A, B, G, R
       }
       return m;
+    case CTR_TEX_A8:
+      for (int i = 0; i < n; i++) {
+        m = std::min<int>(m, data[i]);
+      }
+      return m;
+    case CTR_TEX_A4:
+      for (int i = 0; i < n / 2; i++) {
+        m = std::min({m, (data[i] & 0xf) * 17, (data[i] >> 4) * 17});
+      }
+      return m;
     default:
       return 0;
   }
@@ -4266,7 +4276,8 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     auto& p = plan[i];
     const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
                       !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
-    if (!pow2 || t.format > c3l::TEX_RGBA8 || (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
+    const u8 max_format = hdr.version >= c3l::kTexMaskVersion ? c3l::TEX_A4 : c3l::TEX_RGBA8;
+    if (!pow2 || t.format > max_format || (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
       continue;
     }
     if (t.data_size == 0 && hdr.version >= c3l::kAtlasVersion) {
@@ -4300,6 +4311,12 @@ bool CtrLevels::load_textures(c3l::Reader& f,
   for (const auto& d : draws) {
     if (d.texture < texs.size()) {
       background[d.texture] = 1;
+    }
+  }
+  // c3l v23: an alpha mask with its texture
+  for (size_t i = 0; i < texs.size(); i++) {
+    if (c3l::texture_is_mask(texs[i]) && c3l::texture_mask_of(texs[i]) < texs.size()) {
+      background[i] = background[c3l::texture_mask_of(texs[i])];
     }
   }
   u32 pool_bytes = 0;
@@ -4375,10 +4392,19 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     if (read_ok) {
       out->handles[i] = ctr_gpu_pool_tex(pool, p.offset, t.w, t.h, p.format, p.levels);
       // (AI-assisted, Jak II) an animated slot's base texture: drawn as the slot's animation
-      if (const u16 anim_slot = c3l::texture_anim_slot(t)) {
+      if (const u16 anim_slot = c3l::texture_is_mask(t) ? 0 : c3l::texture_anim_slot(t)) {
         ctr_gpu_tex_set_anim_slot(out->handles[i], anim_slot - 1);
       }
       out->min_alpha[i] = (u8)texture_min_alpha(dst, t.w, t.h, p.format);
+    }
+  }
+  // c3l v23: each texture's alpha mask, whose alpha its draws take
+  for (size_t i = 0; i < texs.size(); i++) {
+    const u16 c = c3l::texture_mask_of(texs[i]);
+    if (c3l::texture_is_mask(texs[i]) && c < texs.size() && out->handles[i] >= 0 &&
+        out->handles[c] >= 0) {
+      ctr_gpu_tex_set_mask(out->handles[c], out->handles[i]);
+      out->min_alpha[c] = out->min_alpha[i];
     }
   }
   for (int pool : out->pools) {

@@ -58,7 +58,12 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // without envmapped ties are v20's byte for byte but for the version).
 // v22: time of day alpha (TodColorA: the alpha of each palette, blended like the rgb); textures up
 // to 1024 texels. Otherwise v21.
-constexpr uint32_t kVersion = 22;
+// v23: alpha mask textures (TEX_A8, TEX_A4): an RGBA8 texture whose alpha needs 8 bits is stored
+// as its color (ETC1 or RGB565) and its alpha as a texture of its own, after the others (see
+// texture_mask_of). Otherwise v22.
+constexpr uint32_t kVersion = 23;
+// the first version with alpha mask textures
+constexpr uint32_t kTexMaskVersion = 23;
 // the first version whose time of day colors have alpha (TodColorA)
 constexpr uint32_t kTodAlphaVersion = 22;
 // (AI-assisted, j2water2) the first version with the envmapped tie table (ExtEnvTie)
@@ -82,6 +87,8 @@ enum TextureFormat : uint8_t {
   TEX_ETC1 = 2,    // v8: ETC1, 4 bits per texel
   TEX_ETC1A4 = 3,  // v8: ETC1 + 4 bit alpha, 8 bits per texel
   TEX_RGBA8 = 4,   // (AI-assisted) u32 stored a, b, g, r: full color (the title screen's logo)
+  TEX_A8 = 5,      // v23: 8-bit alpha, the alpha mask of another texture (texture_mask_of)
+  TEX_A4 = 6,      // v23: 4-bit alpha (two texels per byte, the first in the low bits), as TEX_A8
 };
 
 struct Header {
@@ -145,6 +152,15 @@ inline uint16_t texture_anim_slot(const Texture& t) {
 inline void set_texture_anim_slot(Texture* t, uint16_t slot) {
   t->pad[0] = (uint8_t)(slot & 0xff);
   t->pad[1] = (uint8_t)(slot >> 8);
+}
+// v23: a TEX_A8 / TEX_A4 texture is the alpha of the texture whose index Texture::pad holds (same
+// size and levels). Draws name the color texture; the runtime samples the alpha from the mask
+// (the same texels as the RGBA8 texture had). Never an animated slot's texture.
+inline bool texture_is_mask(const Texture& t) {
+  return t.format == TEX_A8 || t.format == TEX_A4;
+}
+inline uint16_t texture_mask_of(const Texture& t) {
+  return (uint16_t)(t.pad[0] | (t.pad[1] << 8));
 }
 
 /*!
@@ -515,6 +531,10 @@ inline uint32_t texture_level_bytes(uint32_t w, uint32_t h, uint8_t format) {
       return w * h;
     case TEX_RGBA8:
       return w * h * 4;
+    case TEX_A8:
+      return w * h;
+    case TEX_A4:
+      return w * h / 2;
     default:
       return w * h * 2;
   }
