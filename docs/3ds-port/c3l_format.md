@@ -32,7 +32,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--no-proto-vis` | off | (AI-assisted, v20, Jak II) no runs of their own for the prototypes the game hides by task state: they are drawn always (v19's files, but for the version). See "Prototype visibility (v20)". |
 | `--palette N` | 1 | time of day palette baked into the vertex colors (0..7): what a v16 runtime shows until its first blend, and older runtimes always. |
 | `--no-tod` | off | (AI-assisted, v16) no time of day table: the vertex colors stay the baked palette. See "Time of day". |
-| `--max-tex N` | 128 | maximum texture size. Larger textures are box-filtered down. |
+| `--max-tex N` | 1024 | maximum texture size (the GPU's largest: every PS2 texture keeps its size). Larger textures are box-filtered down. |
 | `--cell M` | 200 | chunk grid size in meters. Triangles go to the cell of their centroid. |
 | `--detail-radius M`, `--detail-dist M` | 4, 100 | tie instances smaller than the radius only drawn up to the distance |
 | `--medium-radius M`, `--medium-dist M` | 12, 300 | same for medium tie instances |
@@ -46,11 +46,11 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--merc-only` | off | only merc models (used for the common GAME.fr3 with `--all`). |
 | `--gen-lod R`, `--gen-lod-error E`, `--gen-lod-lock-border` | 0.3, 0.02, off | (AI-assisted) merc models with only `-lod0` in the level (not Jak / Daxter, (j1ocean) not the pickups: `c3l::merc_gen_lod_exempt`, (opt-audit M6) which also names the `medres-` far views and Jak II's pickups, gun, board, mech, Seal of Mars and logo; no blend shapes or rewritten vertices): a simplified copy named `<model>~genlod` (`c3l::kMercGenLodSuffix`) with the model's own vertices (same `first_vertex` / `vertex_count`) and draws of its own, aiming at R of the triangles with an error under E of the model's size (meshoptimizer; all draws together, so their seams move alike; eye draws kept, vertices at the eyes locked). No layout change: older runtimes load it as a model nobody asks for. `--gen-lod 0`: none. |
 | `--merc-cull-agree R`, `--merc-cull-cos C`, `--merc-cull-open O` | 0.99, 0.2, 0.02 | (AI-assisted) merc back face culling marks (`kMercDrawCullBack` in `palette[30]`, config `cull_merc`): an opaque, depth written draw whose texture never fails the runtime's alpha test is marked when at least R of its triangles have all three corners' normals on one side (cos >= C; each is turned to face that side) and at most O of them have an open edge (the model's draws welded by position: single sheets and holes stay unculled). Envmap passes take their draw's mark; generated LODs never have it; (AI-assisted, opt-audit M5) nor draws using a vertex the blend shapes move (faces: their triangles turn with the expressions). `--merc-cull-agree 0`: no marks. |
-| `--no-etc1` | off | 16-bit textures (RGB565 / RGBA4444) instead of ETC1 / ETC1A4. |
+| `--no-etc1` | off | RGB565 / RGBA8 textures instead of ETC1 / ETC1A4. |
 | `--etc1-merc` | off | ETC1 for all textures of merc models, without the quality test (faces too). |
-| `--etc1-merc-psnr DB` | 34 | (AI-assisted) merc textures become ETC1 / ETC1A4 when they pass the quality test (see "Formats"); 0: they stay 16-bit. |
-| `--etc1-merc-block E` | 16 | ... and no 4x4 block has an RMS error above E (0..255) or the 16-bit version's worst. |
-| `--etc1-merc-min N` | 64 | ... for merc textures at least N texels wide and high (smaller ones stay 16-bit). |
+| `--etc1-psnr DB` | 34 | textures become ETC1 / ETC1A4 when they pass the quality test (see "Formats"), else RGB565 / RGBA8; 0: none. (`--etc1-merc-psnr` is the same option.) |
+| `--etc1-block E` | 16 | ... and no 4x4 block has an RMS error above E (0..255) or the RGB565 / RGBA8 version's worst. (`--etc1-merc-block`) |
+| `--etc1-merc-min N` | 64 | ... merc textures under N texels wide or high are never ETC1. |
 | `--etc1-quality N` | 1 | ETC1 encoder: 0 fast, 1 medium, 2 high (slow). |
 | `--no-mips` | off | no mip levels. |
 | `--threads N` | 0 | texture encoding threads (0: all cores). |
@@ -277,6 +277,7 @@ Vertex (16 bytes)
   u8  rgba[4]             baked time of day color, GS units (0x80 = 1.0)
 
 TodColor (24 bytes, v16)  u8 rgb[8][3]: the color in each of the game's 8 palettes, GS units
+TodColorA (32 bytes, v22) u8 rgba[8][4]: the same with each palette's alpha (v22 files have these)
 TodMul (6 bytes, v16)     u16 color (TodColor); u8 mul[3] (128 = 1.0); u8 pad
 
 Draw (16 bytes)
@@ -290,7 +291,8 @@ Draw (16 bytes)
 
 Texture (16 bytes)
   u16 w, h                powers of two, 8..max-tex
-  u8  format              0 = RGB565, 1 = RGBA4444, 2 = ETC1, 3 = ETC1A4 (with alpha)
+  u8  format              0 = RGB565, 1 = RGBA4444 (before v22), 2 = ETC1, 3 = ETC1A4 (with alpha),
+                          4 = RGBA8
   u8  levels              mip levels in the data (v7: 0, one level)
   u8  pad[2]
   u32 data_offset, data_size
@@ -323,19 +325,23 @@ Texture (16 bytes)
   textures the fraction of texels that pass the test is kept the same in every level, so cut-outs
   (fences, leaves) don't fade away with distance. Without mips the GPU reads the full size texture
   for far away surfaces, which is slow on the 3DS (texture cache misses) and shimmers.
-- **Formats:** ETC1 (4 bits per texel) for opaque textures, ETC1A4 (8 bits) when any texel is
-  transparent: 1/4 and 1/2 of the 16-bit sizes, so the textures of a level fit in VRAM. The
-  runtime copies all textures of a level into one linear memory block and from there to VRAM (see
-  `ctr_gpu_pool_create`). The converter logs the ETC1 PSNR per level file.
-  (AI-assisted) Merc textures (characters, objects) of 64x64 and up are ETC1 / ETC1A4 when that
-  is about as good as their 16-bit version, measured on the full size level against the image:
-  a PSNR of at least 34 dB (about RGBA4's own error) or at least the 16-bit version's, and no 4x4
-  block with an RMS error above 16 or the 16-bit version's worst. RGB565 is close to the image
-  (~48 dB), so opaque ones need the 34 dB; RGBA4's 4-bit colors band (~34.5 dB), and ETC1A4 is the
-  closer one for most textures with alpha. The others stay 16-bit, and so do the textures of
-  characters with face animation (effects with blend shapes: the sages, the farmer, Jak...) and
-  the eye placeholders. Oct 3 2026, all levels: 695 merc textures tested, 526 ETC1 (16-bit
-  equivalent 22.3 MB -> 13.5 MB). The log lists every merc texture with its numbers.
+- **Formats:** (v22) every texture, background and merc alike, is ETC1 (4 bits per texel, opaque)
+  or ETC1A4 (8 bits, with alpha) when that passes the quality test, measured on the full size
+  level against the image: a PSNR of at least 34 dB (`--etc1-psnr`) or at least the fallback's,
+  and no 4x4 block with an RMS error above 16 or the fallback's worst. ETC1A4 also needs an alpha
+  that 4 bits keep: only values a 4-bit alpha holds exactly (n x 17: binary cut-outs), or a
+  texture only drawn alpha tested (its 4-bit alpha is rounded to pass or fail the test as the 8-bit
+  one does). The others are RGB565 (opaque, ~48 dB) or RGBA8 (with alpha: exact, as the PS2's 8-bit
+  CLUT colors). Merc textures under 64 texels on a side, of characters with face animation
+  (effects with blend shapes) and the eye placeholders are never ETC1. Before v22 the background's
+  textures were ETC1 / ETC1A4 with no test (as low as 28 dB), merc textures failing a 34 dB test
+  were RGBA4 (4-bit colors), and textures were cut to 128 texels a side. The log lists every
+  texture with its numbers (`texture NAME (TPAGE) WxH ...: ETC1 X dB, worst block Y; RGB565 / RGBA8
+  ...`) and a line per level (`ETC1 quality test ...`).
+- **Pools:** the runtime reads a level's textures into texture pools of at most 1 MB
+  (`kTexPoolPiece`; a larger texture gets one of its own), the background's textures first. Each
+  pool moves to VRAM while there is room (the earlier pieces first), the rest stays in linear
+  memory; small pools need no large linear block at load and fill VRAM's two banks closely.
 - **Shared textures:** (AI-assisted) the fr3 has a copy of a texture for each merc model that
   uses it (citadel: 1017 textures, 776 of them copies; pal-environment-front 90 times). Identical
   textures (size and texels) are written once and the draws share it: citadel's textures 17.6 MB
@@ -372,7 +378,18 @@ by visibility id (v18): N chunks, M vertices copied, K chunks kept as they were`
 
 The runtime (`CtrLevel.cpp`: `load_tod`, `tod_update`, `tod_recolor`, `tod_finish`) keeps the
 palettes some color uses (village3: 7 of 8), and rewrites the chunks' vertex colors in place in
-their meshes (the alpha stays; a frame the GPU still draws may see part of the change):
+their meshes (a frame the GPU still draws may see part of the change):
+
+- **Alpha (v22).** `TodColorA` has each palette's alpha. The runtime blends it as the PC does
+  (`min(128, sum(w * a) >> 6)` with the palettes' alpha weights, the high half of their itimes'
+  second word) and writes the whole vertex word; before v22 (and in older files) the vertex kept
+  its baked palette's alpha. The colors' alphas come in few kinds (lavatube 2, citadel 126): each
+  kind is blended once per move (`Tod::akinds`, `aword`). A kind at 0x80 in the day palettes (black
+  in at most 3/4 of the colors) and 0x80 or 0 in the others blends to 0x80 while the day weights
+  add up to 1.0 (the moods' palette interpolation, the interiors' palette 0 at 1.0); it is left
+  out of its colors' masks, and should its blend move anyway every entry is blended again. The
+  other kinds put their alpha palettes into their colors' masks. The converter's opaque alpha and
+  `kDrawAlpha80` marks take a vertex's lowest blend: its smallest alpha in the day palettes.
 
 - **Table.** Per entry (a color, then the TodMuls; `Vertex::tod`) its rgb, blended as the PC's
   `interp_time_of_day_slow` (per channel `min(255, sum(w * c) >> 6)`, the game's weights from the
@@ -402,9 +419,13 @@ their meshes (the alpha stays; a frame the GPU still draws may see part of the c
   draws, and groups with the file's baked colors drawn for 1-8 frames (streamed tie chunks, a
   first-drawn shrub, 1431 groups for 2 frames at Sandover's reveal): the user's "visible lag" and
   "parts of textures losing their tint for a frame or so".
-- (AI-assisted, citadel) Config `tod_pulse_step` (an approximation; 4 since Oct 29, 0 from Oct 23
-  to 28): a day palette that pulses is taken only when it moved that many 64ths from the weight
-  last taken, or once it stood still for 8 frames. Pulsing (`CtrTodPulse.h`, levellod): the
+- (AI-assisted, citadel) Config `tod_pulse_step` (4): a day palette that pulses is taken by every
+  group only when it moved that many 64ths from the weight last taken, or once it stood still for
+  8 frames. The table always has the game's weights, and a group with a color bright in the palette
+  (a channel or alpha of c with c * (step - 1) >= 64, i.e. a hold could put it a color unit or
+  more off: `Tod::color_bright`, `VisGroup::bright`) is rewritten at every move, so the pulse is
+  as smooth as the PS2's where it shows; the other groups wait (`pal_hver` / `hlut`: the moves
+  taken), at most a color unit off, the PS2's own rounding. Before, every group was held. Pulsing (`CtrTodPulse.h`, levellod): the
   weight's last three turning points (a step back of under 3/64 is no turn) within 320 frames, both
   swings 8/64 to 40/64, the first and third within 6/64 (a steady mean): citadel's palette 1, a mood
   light that 71% of its colors use, 0.875 +- 0.25 every ~128 frames. The Oct 17 detector (two
@@ -419,8 +440,9 @@ their meshes (the alpha stays; a frame the GPU still draws may see part of the c
   last drawn with, or the last level's with the same day palettes); else they show the baked
   palette until drawn (then rewritten at once).
 
-Heap: the colors (palettes used x 3 bytes), the TodMuls, per entry 9 bytes (mask, rgb, stamp), per
-chunk 28 bytes, per group 12, per run 2, and the light lists: village1 600 KB, misty 545 KB, snow
+Heap: the colors (palettes used x 3 bytes), the TodMuls, per entry 10 bytes (mask, bright, rgba,
+stamp), per color its alpha kind (with 2 kinds or more), per chunk 29 bytes, per group 16, per run
+2, and the light lists: village1 600 KB, misty 545 KB, snow
 458 KB, sunken 309 KB. On the 3DS a level whose table would leave less than 3 MB of heap free keeps
 its baked palette (`[ctr] <level>: no heap for the time of day colors`).
 

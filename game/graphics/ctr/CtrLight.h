@@ -11,7 +11,8 @@ struct CtrLightGroup {
   u16 lo, hi;  // vertices [lo, hi]
   u32 ver : 31;
   u32 plain : 1;  // every vertex has a time-of-day color
-  u32 dver;
+  u32 dver : 24;
+  u32 bright : 8;  // the palettes its vertices' colors are bright in (Tod::color_bright)
   u32 lver = 0;  // light palettes last applied to this group (hidden groups stay stale)
 };
 
