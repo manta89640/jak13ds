@@ -304,6 +304,59 @@ struct EnvTieChunk {
 static_assert(sizeof(EnvTieChunk) == 8);
 
 /*!
+ * Wind ties (Jak 1 tie trees' instanced_wind_draws: palms, plants): baked at rest in world space
+ * as the other ties, and swayed by the runtime as Tie3::render_tree_wind does, an instance at a
+ * time: do_wind_math's shear of the instance matrix, x += k.x * (y - y0), z += k.z * (y - y0) in
+ * world space (y0: the instance's origin), k from its wind_idx and stiffness and the game's wind
+ * (the tie bucket's WindWork). ExtHeader::size >= kExtHeaderV22Size, then this at ext_offset +
+ * kExtHeaderV21Size (ExtEnvTie zero when the level has no envmapped ties). Older files: at rest.
+ */
+constexpr uint32_t kExtHeaderV22Size = 96;
+struct ExtWind {
+  uint32_t inst_count;     // WindInst[]: every wind instance of the tie trees, tree by tree, in
+                           // the order the PC steps them (each step changes its wind_idx's state)
+  uint32_t insts_offset;   // absolute
+  uint32_t chunk_count;    // WindChunk[]
+  uint32_t chunks_offset;  // absolute
+};
+static_assert(sizeof(ExtWind) == kExtHeaderV22Size - kExtHeaderV21Size);
+struct WindInst {
+  uint16_t wind_idx;
+  uint16_t pad;
+  float stiffness;
+  float y0;  // world y of the instance's origin (game units)
+};
+static_assert(sizeof(WindInst) == 12);
+// a chunk's wind vertices: uint8_t slot per vertex of the chunk at slots_offset,
+// slot 0 none, slot s the instance insts[s - 1] of uint16_t insts[slot_count] at insts_offset,
+// and uint8_t[draw_count] at draws_offset: 1 for its draws with wind vertices (absolute; in the
+// extension's section, loaded with the level)
+constexpr uint32_t kWindSlots = 63;
+struct WindChunk {
+  uint32_t chunk;
+  uint32_t slots_offset;
+  uint32_t insts_offset;
+  uint32_t slot_count;  // <= kWindSlots
+  uint32_t draws_offset;
+};
+static_assert(sizeof(WindChunk) == 20);
+
+/*!
+ * Shrub fade bands (prototype-bucket-shrub dists, tools/ctr_level_converter/shrub_ps2_dists.inc):
+ * the PS2 draws a shrub in full up to x, fading out ((w - d) / (w - x)) up to w. Shrub chunks'
+ * visibility runs hold one prototype band each (at most 96 triangles). ExtHeader::size >=
+ * kExtHeaderV23Size, then this at ext_offset + kExtHeaderV22Size (ExtWind zero when the level has
+ * no wind ties). Older files: the chunk's distance class.
+ */
+constexpr uint32_t kExtHeaderV23Size = 104;
+struct ExtShrubFade {
+  uint32_t band_count;    // uint32_t[]: one per VisRun of the file from ExtHeader::runs_offset,
+                          // x << 16 | w in 1/16 m (0: none)
+  uint32_t bands_offset;  // absolute
+};
+static_assert(sizeof(ExtShrubFade) == kExtHeaderV23Size - kExtHeaderV22Size);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

@@ -17,7 +17,7 @@
 //   - vista_distance, for the vista pass (the vista tier, lowres_vista's far scenery) and for every
 //     chunk of a level with a vista tier (what draw_distance cuts goes on in its vista copies:
 //     finalboss);
-//   - none (haze 0) when that distance is 0 (no limit).
+//   - none (haze 0) when that distance is 0 (no limit) or reaches the PS2's far clip plane.
 // start: fog_start x end (0.6: 300 m of 500, 1.8 km of 3 km). Before Oct 29 a level with a vista
 // tier was hazed from fog_start x draw_distance (300 m) for all its geometry: finalboss's far city
 // and sea 26-63% fog color at 1-2 km, where the PC has none.
@@ -45,7 +45,9 @@ inline void ctr_haze_row(const CtrSettings& s, bool vista_pass, bool level_vista
   } else if (level_vista && draw > 0 && far > draw) {
     end = far;  // (a vista tier only goes on past the draw distance when vista_distance is larger)
   }
-  if (end <= 0 || !(pzw > 0)) {
+  // (geometry out to the PS2's far clip plane, math-camera f = 10 km, ends where the PS2's does)
+  constexpr float kPs2Far = 10000.f * 4096.f;
+  if (end <= 0 || end >= kPs2Far || !(pzw > 0)) {
     return;
   }
   const float start = end * std::clamp(s.fog_start, 0.f, 0.999f);

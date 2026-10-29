@@ -657,6 +657,18 @@ typedef struct {
   int mesh, first_index, index_count, nofog;
 } ctr_mesh_call;
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n);
+/* Jak 1's wind ties (c3l::ExtWind): a level mesh draw (as ctr_gpu_draw_mesh_prepared) whose
+ * vertices are sheared by their instance's wind, platform/3ds/shaders/ctr_mesh_wind.v.pica.
+ * slots_mesh holds from byte slots_offset (a multiple of 16) a uint8_t slot per vertex of the
+ * mesh; rows[4 * s] = kx, kz, cx, cz for slot s (row 0 zero: no wind), at most 64 rows: in
+ * the mesh's quantized units x += kx * y + cx, z += kz * y + cz. rows_id: new whenever the rows
+ * change (draws with the same id don't upload them again). Without the program (shader_opt off)
+ * the draw is at rest. */
+void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                            const float* rows, int row_count, uint32_t rows_id, int mesh,
+                            int slots_mesh, int slots_offset, int first_index, int index_count);
+/* 1 when the wind program can be loaded (ctr_gpu_draw_mesh_wind may sway) */
+int ctr_gpu_wind_ready(void);
 /* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call ([ctr] gpu micro ...);
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);

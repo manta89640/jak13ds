@@ -42,6 +42,9 @@ extern const size_t ctr_ocean_env_shbin_size;
 /* (AI-assisted) Envmapped ties in both games. */
 extern const uint8_t ctr_etie_shbin[];
 extern const size_t ctr_etie_shbin_size;
+/* Jak 1's wind ties (ctr_gpu_draw_mesh_wind), with shader_opt's set */
+extern const uint8_t ctr_mesh_wind_shbin[];
+extern const size_t ctr_mesh_wind_shbin_size;
 /* (AI-assisted) the Oct 2 shaders (hardware proven; the level meshes and merc without shader_opt,
  * config.ini shader_basic = old). The Oct 3 ctr_mesh / ctr_skin / ctr_skin_env (the new ctr_mesh
  * hung the real GPU), the dph bisect mesh and the shader_groups shbins were removed on Oct 16. */
@@ -294,11 +297,12 @@ enum {
   PROG_MESH_DF_FA,
   PROG_OCEAN_ENV, /* (AI-assisted, j2water) ctr_gpu_ocean_env_draw (ctr_ocean_env.v.pica) */
   PROG_ETIE,      /* (AI-assisted, j2water2) ctr_gpu_etie_draw (ctr_etie.v.pica) */
+  PROG_MESH_WIND, /* ctr_gpu_draw_mesh_wind (ctr_mesh_wind.v.pica, set 1 only) */
 };
 /* (AI-assisted) the level mesh programs (one vertex layout, the same uniforms) */
 static inline int is_mesh_prog(int prog) {
   return prog == PROG_MESH || prog == PROG_MESH_FA || prog == PROG_MESH_DF ||
-         prog == PROG_MESH_DF_FA;
+         prog == PROG_MESH_DF_FA || prog == PROG_MESH_WIND;
 }
 
 /* (AI-assisted) The vertex programs and their uniforms' places, one shbin per program. Set 0: the
@@ -330,6 +334,10 @@ typedef struct {
   shaderProgram_s etie;
   int uloc_etie_clip, uloc_etie_cam, uloc_etie_nrm, uloc_etie_scales, uloc_etie_fog0,
       uloc_etie_fog1;
+  /* wind ties (set 1; no vertexShader: not loaded): the mesh uniforms at the mesh program's
+   * places (wind_ok), then the slot rows */
+  shaderProgram_s mesh_wind;
+  int uloc_wind, wind_ok;
 } ProgSet;
 static ProgSet s_ps[2];
 
@@ -369,6 +377,8 @@ static struct {
   DVLB_s* ocean_dvlb;
   DVLB_s* ocean_env_dvlb; /* (AI-assisted, j2water) ctr_ocean_env.v.pica (Jak II) */
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
+  DVLB_s* wind_dvlb;      /* ctr_mesh_wind.v.pica */
+  u32 wind_rows_id;       /* the slot rows the GPU has (ctr_gpu_draw_mesh_wind), 0: none */
   int ocean_tex2_bound; /* texture unit 2 holds the ocean's shimmer texture */
   /* combiner stage 2 isn't pass-through: 1 a fog stage (ocean, merc fog) or Jak II's ocean env /
    * etie stage, 2 the PS2 ocean's. (AI-assisted) Only says "reset it": the merc fog draws commit
@@ -841,6 +851,7 @@ static void use_program(int prog) {
                                 : prog == PROG_MESH_DF_FA ? &g.ps->mesh_df_fa
                                 : prog == PROG_OCEAN_ENV ? &g.ps->ocean_env
                                 : prog == PROG_ETIE ? &g.ps->etie
+                                : prog == PROG_MESH_WIND ? &g.ps->mesh_wind
                                                         : &g.ps->mesh;
     const void* dvlp = sp->vertexShader ? (const void*)sp->vertexShader->dvle->dvlp : NULL;
     g.cur.prog_switches++;
@@ -942,11 +953,16 @@ static void use_program(int prog) {
     C3D_BindProgram(prog == PROG_MESH_FA      ? &g.ps->mesh_fa
                     : prog == PROG_MESH_DF    ? &g.ps->mesh_df
                     : prog == PROG_MESH_DF_FA ? &g.ps->mesh_df_fa
+                    : prog == PROG_MESH_WIND  ? &g.ps->mesh_wind
                                               : &g.ps->mesh);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
     AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord * 1024 */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
+    if (prog == PROG_MESH_WIND) {
+      AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 1); /* wind slot */
+      g.wind_rows_id = 0; /* (a switch keeps no uniforms) */
+    }
     /* (AI-assisted) skin's value (w = 1/127: no mesh shader reads w) */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f,
                   1.0f / 127.0f);
@@ -1149,7 +1165,8 @@ static void prog_set_free(ProgSet* p) {
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
     shaderProgramFree(all[i]);
   }
-  shaderProgram_s* maybe[] = {&p->mesh_fa, &p->mesh_df, &p->mesh_df_fa, &p->ocean_env, &p->etie};
+  shaderProgram_s* maybe[] = {&p->mesh_fa,   &p->mesh_df, &p->mesh_df_fa,
+                              &p->ocean_env, &p->etie,    &p->mesh_wind};
   for (size_t i = 0; i < sizeof(maybe) / sizeof(maybe[0]); i++) {
     if (maybe[i]->vertexShader) {
       shaderProgramFree(maybe[i]);
@@ -1206,7 +1223,7 @@ static struct {
   DVLE_s* dvle;
   DVLP_s* own;
   u32 main, endmain, base;
-} s_res_prog[28]; /* (AI-assisted, j2water, j2water2) 2 x 14 */
+} s_res_prog[30]; /* 2 x 15 */
 static int s_res_n;
 static int s_res_on; /* the DVLEs point at the image */
 
@@ -1234,7 +1251,7 @@ static void resident_programs(void) {
     return;
   }
   ProgSet* sets[2] = {&s_ps[0], &s_ps[1]};
-  DVLE_s* dvles[2 * 14];
+  DVLE_s* dvles[2 * 15];
   int n = 0;
   for (int k = 0; k < 2; k++) {
     ProgSet* p = sets[k];
@@ -1242,10 +1259,11 @@ static void resident_programs(void) {
       continue;
     }
     /* (AI-assisted, j2water) + ocean_env (Jak II); (j2water2) + etie (Jak II) */
-    shaderProgram_s* all[14] = {&p->basic, &p->mesh, &p->mesh_fa, &p->skin, &p->env, &p->clip,
+    shaderProgram_s* all[15] = {&p->basic, &p->mesh, &p->mesh_fa, &p->skin, &p->env, &p->clip,
                                 &p->clip2, &p->ocean, &p->ocean_full, &p->ocean_full_clip,
-                                &p->mesh_df, &p->mesh_df_fa, &p->ocean_env, &p->etie};
-    for (int i = 0; i < 14; i++) {
+                                &p->mesh_df, &p->mesh_df_fa, &p->ocean_env, &p->etie,
+                                &p->mesh_wind};
+    for (int i = 0; i < 15; i++) {
       if (!all[i]->vertexShader) {
         continue;
       }
@@ -1260,8 +1278,8 @@ static void resident_programs(void) {
     }
   }
   /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
-  DVLP_s* dvlps[2 * 14];
-  u32 base[2 * 14];
+  DVLP_s* dvlps[2 * 15];
+  u32 base[2 * 15];
   int np = 0;
   u32 code = 0, ndesc = 0;
   for (int i = 0; i < n; i++) {
@@ -1409,7 +1427,20 @@ static void load_opt_set(void) {
     shaderProgramInit(&p->etie);
     shaderProgramSetVsh(&p->etie, &g.etie_dvlb->DVLE[0]);
   }
+  g.wind_dvlb = DVLB_ParseFile((u32*)ctr_mesh_wind_shbin, (u32)ctr_mesh_wind_shbin_size);
+  if (g.wind_dvlb) {
+    shaderProgramInit(&p->mesh_wind);
+    shaderProgramSetVsh(&p->mesh_wind, &g.wind_dvlb->DVLE[0]);
+  }
   prog_set_ulocs(p, 1);
+  if (p->mesh_wind.vertexShader) {
+    shaderInstance_s* vs = p->mesh_wind.vertexShader;
+    p->uloc_wind = shaderInstanceGetUniformLocation(vs, "wind");
+    p->wind_ok = p->uloc_wind >= 0 &&
+                 shaderInstanceGetUniformLocation(vs, "clip") == p->uloc_clip &&
+                 shaderInstanceGetUniformLocation(vs, "scales") == p->uloc_scales &&
+                 shaderInstanceGetUniformLocation(vs, "fog1") == p->uloc_fog1;
+  }
   p->opt = 1;
   p->df_ok = 1;
   const shaderProgram_s* df[2] = {&p->mesh_df, &p->mesh_df_fa};
@@ -1658,7 +1689,8 @@ void ctr_gpu_exit(void) {
   }
   DVLB_s* dvlbs[] = {g.dvlb,      g.mesh_dvlb,  g.mesh_fa_dvlb, g.skin_dvlb,
                      g.env_dvlb,  g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
-                     g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb};
+                     g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb,
+                     g.wind_dvlb};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
     if (dvlbs[i]) {
       DVLB_Free(dvlbs[i]);
@@ -5051,9 +5083,10 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
   param |= GPU_TEXTURE_MAG_FILTER(f) | GPU_TEXTURE_MIN_FILTER(f) |
            GPU_TEXTURE_WRAP_S(st->clamp_s ? GPU_CLAMP_TO_EDGE : GPU_REPEAT) |
            GPU_TEXTURE_WRAP_T(st->clamp_t ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
-  /* mip levels: the nearest one (bilinear inside it), or blending two (trilinear) */
+  /* mip levels: the nearest one (bilinear inside it), or blending two (trilinear); unfiltered
+   * draws sample the top level only, as the PC (GL_NEAREST) */
   u8 max_level = 0;
-  if (slot->levels > 1 && g_mip_mode > 0) {
+  if (slot->levels > 1 && g_mip_mode > 0 && st->filter) {
     max_level = (u8)(slot->levels - 1);
     if (g_mip_mode == 2) {
       param |= GPU_TEXTURE_MIP_FILTER(GPU_LINEAR);
@@ -7033,6 +7066,68 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
     ctr_gpu_draw_mesh_prepared(calls[i].state, calls[i].matrix, calls[i].mesh,
                                calls[i].first_index, calls[i].index_count);
   }
+}
+
+/* Jak 1's wind ties (see ctr_gpu.h): ctr_gpu_draw_mesh_prepared's citro3d path with the wind
+ * program, a second attribute buffer (the slots) and the slot rows, uploaded when they change. Its
+ * combiner is the level meshes' with the fog ramp (the program has no fog_alpha variant). */
+void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                            const float* rows, int row_count, uint32_t rows_id, int mesh,
+                            int slots_mesh, int slots_offset, int first_index, int index_count) {
+  if (!g.ready || !g.in_frame || !g.ps->wind_ok || row_count <= 0 || row_count > 64 ||
+      slots_mesh < 0 || slots_mesh >= MAX_MESHES || g.meshes[slots_mesh].used != 1 ||
+      mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+    ctr_gpu_draw_mesh_prepared(state, matrix, mesh, first_index, index_count);
+    return;
+  }
+  SKY_HOOK(state);
+  if (index_count < 3 || !cmd_room()) {
+    return;
+  }
+  use_program(PROG_MESH_WIND);
+  {
+    const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
+    if (atlas != g.mesh_st_atlas) {
+      g.mesh_st_atlas = atlas;
+      mesh_scales_set(atlas, 0);
+    }
+  }
+  const MeshSlot* ms = &g.meshes[mesh];
+  const int mesh_mode = g.mesh_nofog ? 4 : 1;
+  g.cur.nofog_draws += g.mesh_nofog;
+  if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+    g.last_clip_id = matrix->id;
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
+    float r[8];
+    mesh_fog_rows(matrix->m, r);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 4, r[3], r[2], r[1], r[0]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 5, r[7], r[6], r[5], r[4]);
+  }
+  g.last_mesh_valid = 1;
+  if (g.wind_rows_id != rows_id || !rows_id) {
+    g.wind_rows_id = rows_id;
+    for (int i = 0; i < row_count; i++) {
+      const float* w = rows + 4 * i;
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_wind + i, w[0], w[1], w[2], w[3]);
+    }
+  }
+  raw_note_unif();
+  {
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, ms->verts, 16, 3, 0x210);
+    BufInfo_Add(buf, (const u8*)g.meshes[slots_mesh].verts + slots_offset, 1, 1, 0x3);
+  }
+  apply_state(state, mesh_mode, 0);
+  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
+  /* the next draws' single attribute buffer (raw_vertex_buffer / c3d_vertex_buffer: bufCount) */
+  BufInfo_Init(C3D_GetBufInfo());
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
+}
+
+int ctr_gpu_wind_ready(void) {
+  return g.ready && s_ps[1].wind_ok;
 }
 
 /* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call */

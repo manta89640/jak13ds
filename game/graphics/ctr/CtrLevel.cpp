@@ -1329,8 +1329,7 @@ constexpr float kHoldInView = 1.5f;
 // up to w). The PS2 shows a shrub out to w and the PC without a limit; the 3DS drew a run up to
 // max_dist x shrub_scale (0.8 by default): a wall of shrubs coming in at ~0.6 of the PS2's far
 // plane. Now a chunk's shrubs reach kShrubFarK x max_dist (~w: w / ((x + w) / 2) is 1.2-1.5 over
-// the table) and each run has its own limit between kShrubNearK of that (~x) and all of it, from
-// a hash of its index: the shrubs thin out over the PS2's fade zone instead of a patch at once.
+// the table) and fade out from kShrubNearK of that (~x) on, as the PS2's (emit_chunk).
 #ifdef __3DS__
 constexpr float kShrubFarK = 1.3f;
 constexpr float kShrubNearK = 0.55f;
@@ -1340,6 +1339,8 @@ static const float kShrubFarK = getenv("CTR_SHRUB_FAR_K") ? atof(getenv("CTR_SHR
 static const float kShrubNearK =
     getenv("CTR_SHRUB_NEAR_K") ? atof(getenv("CTR_SHRUB_NEAR_K")) : 0.55f;
 #endif
+// a shrub run's fade (CtrTfragRenderer::m_run_fade): blend FIX's 0x80 = drawn as it is
+constexpr u8 kRunOpaque = 0x80;
 constexpr float kDistFreeMeters = 60.f, kDistReadMeters = 30.f;
 constexpr float kDistLeadFrames = 60.f;  // 2 s at 30 fps (the camera's velocity is per frame)
 constexpr u32 kDistJobBytes = 2u * 1024 * 1024;  // one read back: at most this much (the nearest)
@@ -1363,6 +1364,8 @@ float dist_limit(const CtrLevelData& lev, const c3l::Chunk& ch) {
       d = ch.max_dist * s.detail_scale;
     }
   } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
+    // without a draw limit (tie_distance_scale none) the farthest auto_detail one still decides
+    // what a level short of memory may free
     d = ch.max_dist * std::max(s.tie_distance_scale_max, s.tie_distance_scale) * s.detail_scale;
     k = std::max(k, kHoldInView);
   }
@@ -3597,6 +3600,153 @@ void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            lev->name, used, lev->env_draws.size(), ecs.size(), total / 1024);
 }
 
+// shrub fade bands (c3l::ExtShrubFade): per file run; a shrub chunk with bands reaches its largest
+// w (its max_dist is decide_dist's class, so w / kShrubFarK)
+void load_shrub_fade(c3l::Reader& f,
+                     const c3l::Header& hdr,
+                     u32 runs_lo,
+                     size_t file_runs,
+                     CtrLevelData* lev) {
+  lev->run_band.clear();
+  lev->chunk_band_x.clear();
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !lev->shrub_ps2_dist || !file_runs || runs_lo == UINT32_MAX ||
+      !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV23Size ||
+      runs_lo < eh.runs_offset || (runs_lo - eh.runs_offset) % sizeof(c3l::VisRun)) {
+    return;
+  }
+  c3l::ExtShrubFade ef{};
+  const size_t first = (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun);
+  std::vector<u32> bands;
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderV22Size, &ef, sizeof(ef)) || !ef.bands_offset ||
+      first + file_runs > ef.band_count ||
+      !f.read_array(ef.bands_offset + (u32)(first * 4), file_runs, &bands)) {
+    return;
+  }
+  bands.resize(lev->vis_runs.size(), 0);
+  lev->chunk_band_x.assign(lev->chunks.size(), 0.f);
+  u32 chunks = 0;
+  for (size_t ci = 0; ci < lev->chunks.size(); ci++) {
+    auto& ch = lev->chunks[ci];
+    const u32 r0 = lev->chunk_first_run[ci];
+    if (ch.kind != c3l::CHUNK_KIND_SHRUB || !ch.vis_run_count || r0 + ch.vis_run_count > file_runs) {
+      continue;
+    }
+    float w = 0, x = INFINITY;
+    for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
+      if (bands[r]) {
+        w = std::max(w, (float)(bands[r] & 0xffff));
+        x = std::min(x, (float)(bands[r] >> 16));
+      }
+    }
+    if (w > 0) {
+      ch.max_dist = w * 256.f / kShrubFarK;
+      lev->chunk_band_x[ci] = x * 256.f;
+      chunks++;
+    }
+  }
+  lev->run_band = std::move(bands);
+  lg::info("[ctr] {}: shrub fade bands: {} chunks", lev->name, chunks);
+}
+
+// wind ties (c3l::ExtWind): the instances and the slots of their chunks' vertices (all in one
+// mesh's vertex memory, loaded with the level)
+void load_wind_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->wind_insts.clear();
+  lev->chunk_wind.clear();
+  lev->wind_mesh = -1;
+  if (!hdr.ext_offset || !ctr_gpu_wind_ready()) {
+    return;
+  }
+  c3l::ExtHeader eh;
+  if (!read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV22Size) {
+    return;
+  }
+  c3l::ExtWind ew{};
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderV21Size, &ew, sizeof(ew)) || !ew.inst_count ||
+      !ew.chunk_count) {
+    return;
+  }
+  std::vector<c3l::WindInst> insts;
+  std::vector<c3l::WindChunk> wcs;
+  if (ew.inst_count > 65535 || !f.read_array(ew.insts_offset, ew.inst_count, &insts) ||
+      !f.read_array(ew.chunks_offset, ew.chunk_count, &wcs)) {
+    lg::warn("[ctr] {}: bad wind tie data, at rest", lev->name);
+    return;
+  }
+  u32 total = 0, slots = 0;
+  for (const auto& wc : wcs) {
+    if (wc.chunk >= lev->chunks.size() || wc.slot_count > c3l::kWindSlots) {
+      lg::warn("[ctr] {}: bad wind tie chunk, at rest", lev->name);
+      return;
+    }
+    total += (lev->chunks[wc.chunk].vertex_count + 15) & ~15u;
+    slots += wc.slot_count;
+  }
+  std::vector<u16> slot_inst(slots);
+  std::vector<u8> draw_wind(lev->draws.size(), 0);
+  lev->chunk_wind_first.assign(lev->chunks.size(), 0);
+  lev->chunk_wind_n.assign(lev->chunks.size(), 0);
+  u32 at = 0;
+  for (const auto& wc : wcs) {
+    const auto& ch = lev->chunks[wc.chunk];
+    if (ch.first_draw + ch.draw_count > draw_wind.size() ||
+        !f.read(wc.draws_offset, draw_wind.data() + ch.first_draw, ch.draw_count) ||
+        !f.read(wc.insts_offset, slot_inst.data() + at, wc.slot_count * 2)) {
+      lg::warn("[ctr] {}: bad wind tie slots, at rest", lev->name);
+      return;
+    }
+    for (u32 k = 0; k < wc.slot_count; k++) {
+      if (slot_inst[at + k] >= insts.size()) {
+        lg::warn("[ctr] {}: bad wind tie slots, at rest", lev->name);
+        return;
+      }
+    }
+    lev->chunk_wind_first[wc.chunk] = at;
+    lev->chunk_wind_n[wc.chunk] = (u8)wc.slot_count;
+    at += wc.slot_count;
+  }
+  void* nv = nullptr;
+  uint16_t* ni = nullptr;
+  const int mesh = total ? ctr_gpu_mesh_begin((int)((total + 15) / 16), 2, &nv, &ni) : -1;
+  if (mesh < 0) {
+    lg::warn("[ctr] {}: no memory for the wind ties' slots ({} KB), at rest", lev->name,
+             total / 1024);
+    return;
+  }
+  lev->chunk_wind.assign(lev->chunks.size(), -1);
+  u32 off = 0;
+  bool ok = true;
+  for (const auto& wc : wcs) {
+    const u32 n = lev->chunks[wc.chunk].vertex_count;
+    ok = ok && f.read(wc.slots_offset, (u8*)nv + off, n);
+    lev->chunk_wind[wc.chunk] = (s32)off;
+    off += (n + 15) & ~15u;
+  }
+  ni[0] = ni[1] = 0;
+  if (!ok || ctr_gpu_mesh_end(mesh, 1) < 0) {
+    if (!ok) {
+      ctr_gpu_mesh_end(mesh, 0);
+    }
+    lg::warn("[ctr] {}: wind tie slots not made, at rest", lev->name);
+    lev->chunk_wind.clear();
+    return;
+  }
+  u32 max_idx = 0;
+  for (const auto& wi : insts) {
+    max_idx = std::max<u32>(max_idx, wi.wind_idx);
+  }
+  lev->wind_mesh = mesh;
+  lev->wind_slot_inst = std::move(slot_inst);
+  lev->draw_wind = std::move(draw_wind);
+  lev->wind_insts = std::move(insts);
+  lev->wind_vectors.assign(4 * (size_t)max_idx + 4, 0.f);
+  lev->wind_k.assign(2 * lev->wind_insts.size(), 0.f);
+  lev->wind_frame = ~0ull;
+  lg::info("[ctr] {}: wind ties: {} instances, {} chunks' slots ({} KB)", lev->name,
+           lev->wind_insts.size(), wcs.size(), total / 1024);
+}
+
 // (AI-assisted, streaming) host check, env CTR_STREAM_CHECK (CtrLevels::stream_check)
 bool stream_check_enabled() {
 #ifdef __3DS__
@@ -4402,6 +4552,7 @@ bool CtrLevels::load_file(const fs::path& path,
   load_tie_lod(f, hdr, runs_lo, file_runs, out);  // (AI-assisted) c3l v17
   // (AI-assisted, streaming) c3l v19: run spheres, near chunks
   load_stream_info(f, hdr, runs_lo, file_runs, out);
+  load_shrub_fade(f, hdr, runs_lo, file_runs, out);
   load_proto_vis(f, hdr, runs_lo, file_runs, out);  // (AI-assisted, j2vis) c3l v20
   out->streaming = !out->stream_units.empty() && out->stream_units[0].state != CtrLevelData::kUnitNever &&
                    ctr_settings().streaming &&
@@ -4781,6 +4932,7 @@ bool CtrLevels::load_file(const fs::path& path,
   }
   build_draw_order(out);
   load_env_ties(f, hdr, out);  // (AI-assisted, j2water2) c3l v21 (after the textures, draw order)
+  load_wind_ties(f, hdr, out);
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -5284,6 +5436,11 @@ void CtrLevels::unload(CtrLevelData& lev) {
   lev.tex_pools.clear();
   for (int m : lev.meshes) {
     ctr_gpu_mesh_delete(m);
+  }
+  if (lev.wind_mesh >= 0) {
+    ctr_gpu_mesh_delete(lev.wind_mesh);
+    lev.wind_mesh = -1;
+    lev.chunk_wind.clear();
   }
   if (lev.normals_mesh >= 0) {
     ctr_gpu_mesh_delete(lev.normals_mesh);  // (AI-assisted, j2water2)
@@ -7015,10 +7172,6 @@ constexpr float kDetailQ = 250.f;
 u8 detail_q(float t) {
   return (u8)std::lround(std::clamp(t, 0.f, 1.f) * kDetailQ);
 }
-inline float shrub_run_limit(float far, u32 run) {
-  const float h = (float)((run * 2654435761u) >> 24) * (1.f / 256.f);
-  return far * (kShrubNearK + (1.f - kShrubNearK) * h);
-}
 // (AI-assisted, title-popin) a sphere against the view's four planes (the chunk test of emit_chunk)
 bool sphere_in_view(const CtrBackgroundCamera& cam, const float* s) {
   for (int i = 0; i < 4; i++) {
@@ -7384,7 +7537,7 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   // background (tfrag of every kind, tie, shrub)
   if (lev && lev->drawn_frame != rs.frame_idx) {
     lev->drawn_frame = rs.frame_idx;
-    if (!lev->env_draws.empty()) {
+    if (!lev->env_draws.empty() || !lev->wind_insts.empty()) {
       // (AI-assisted) Jak 1 sends wind data then the reflection tint in the tie bucket;
       // Jak II sends its prototype mask then the tint. Both are two PC_PORT transfers.
       using B = jak1::BucketId;
@@ -7392,8 +7545,12 @@ void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
                          m_id == (int)B::TFRAG_ICE_LEVEL0 ||
                          m_id == (int)B::TFRAG_TRANS0_AND_SKY_BLEND_LEVEL0;
       m_proto_bucket[0] = (int)(slot0 ? B::TIE_LEVEL0 : B::TIE_LEVEL1);
+      m_wind_seen = false;
       env_color_scan(*lev, rs);
-      m_env_frames++;
+      m_env_frames += !lev->env_draws.empty();
+      if (m_wind_seen && !lev->wind_insts.empty()) {
+        wind_update(*lev, rs.frame_idx);
+      }
     }
     draw_level(*lev, pc_data.camera, rs);
   }
@@ -7572,7 +7729,11 @@ void CtrTfragRenderer::env_color_scan(const CtrLevelData& lev, const CtrRenderSt
       }
       continue;
     }
-    if (++after == 2) {
+    if (++after == 1 && m_jak2_slot < 0 && t.size_bytes == sizeof(WindWork)) {
+      memcpy(&m_wind_work, t.data, sizeof(WindWork));
+      m_wind_seen = true;
+    }
+    if (after == 2) {
       if (t.size_bytes == 16) {
         const float* c = (const float*)t.data;
         for (int k = 0; k < 3; k++) {
@@ -7582,6 +7743,69 @@ void CtrTfragRenderer::env_color_scan(const CtrLevelData& lev, const CtrRenderSt
       return;
     }
   }
+}
+
+// Tie3::render_tree_wind's do_wind_math for every wind instance in the PC's order (each step moves
+// its wind_idx's state), once per 60 Hz frame as the PS2: the game steps the wind time-ratio times
+// per drawn frame (update-wind), so this frame's steps are the wind_time it advanced, each with
+// the wind_array of its step (a slot written by a later step still holds last frame's value).
+// The shear factors are the last step's (lev.wind_k).
+void CtrTfragRenderer::wind_update(CtrLevelData& lev, u64 frame) {
+  if (lev.wind_frame == frame) {
+    return;
+  }
+  lev.wind_frame = frame;
+  constexpr float cx = 0.5f, cy = 100.f, cz = 0.0166f, cw = -1.f;
+  const WindWork& w = m_wind_work;
+  const u32 t1 = w.wind_time;
+  const u32 adv = lev.wind_have_last ? t1 - lev.wind_last_time : 1;
+  const u32 n = std::clamp<u32>(adv, 1, 4);
+  const u32 written = lev.wind_have_last ? std::min<u32>(adv, 64) : 0;
+  float* const vectors = lev.wind_vectors.data();
+  for (u32 j = 0; j < n; j++) {
+    const u32 tj = t1 - (n - 1 - j);
+    const bool last = j + 1 == n;
+    for (size_t i = 0; i < lev.wind_insts.size(); i++) {
+      const auto& wi = lev.wind_insts[i];
+      float* my = vectors + 4 * (size_t)wi.wind_idx;
+      const u32 slot = (tj + wi.wind_idx) & 63;
+      // written at this frame's step k = written - 1 - (t1 - slot): later than step j: the old value
+      const u32 back = (t1 - slot) & 63;
+      const bool later = back < written && written - 1 - back > j + (written - n);
+      const float* work = later ? lev.wind_last_array[slot] : w.wind_array[slot];
+      const float v16x = work[0] - (cx * my[2] + cy * my[0]);
+      const float v16z = work[2] - (cx * my[3] + cy * my[1]);
+      const float v18x = my[2] + v16x * cz, v18z = my[3] + v16z * cz;
+      const float v17x = std::min(my[0] + v18x * cz, 1.f), v17z = std::min(my[1] + v18z * cz, 1.f);
+      const float kx = std::max(v17x, cw) * wi.stiffness, kz = std::max(v17z, cw) * wi.stiffness;
+      if (last) {
+        lev.wind_k[2 * i] = std::isfinite(kx) ? kx : 0.f;
+        lev.wind_k[2 * i + 1] = std::isfinite(kz) ? kz : 0.f;
+      }
+      if (!w.paused) {
+        my[0] = kx;
+        my[1] = kz;
+        my[2] = v18x;
+        my[3] = v18z;
+      }
+    }
+  }
+  lev.wind_last_time = t1;
+  lev.wind_have_last = true;
+  memcpy(lev.wind_last_array, w.wind_array, sizeof(lev.wind_last_array));
+}
+
+// the wind tie draws collected by draw_level (their rows in m_wind_rows)
+void CtrTfragRenderer::draw_wind_calls(const CtrLevelData& lev) {
+  for (const auto& c : m_wind_calls) {
+    ctr_gpu_set_mesh_nofog(c.nofog);
+    ctr_gpu_draw_mesh_wind(c.state, c.matrix, m_wind_rows.data() + 4 * c.row_first,
+                           (int)c.row_count, c.rows_id, c.mesh, lev.wind_mesh, c.slots_offset,
+                           c.first, c.count);
+    m_wind_tris += c.count / 3;
+  }
+  m_wind_draws += m_wind_calls.size();
+  m_wind_calls.clear();
 }
 
 // (AI-assisted, j2water2) c3l v21: the envmapped tie draws collected by draw_level
@@ -7600,11 +7824,17 @@ void CtrTfragRenderer::draw_env_calls(std::vector<EnvCall>& calls) {
 }
 
 void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
-  if (rs.log_now && m_shrub_run_hid && m_level_draws) {
+  if (rs.log_now && m_wind_draws && m_level_draws) {
+    lg::info("[ctr] {}: wind ties: {:.1f} draws, {:.0f} tris per level draw", m_name,
+             (double)m_wind_draws / m_level_draws, (double)m_wind_tris / m_level_draws);
+    m_wind_draws = m_wind_tris = 0;
+  }
+  if (rs.log_now && (m_shrub_run_hid || m_fade_runs) && m_level_draws) {
     // (AI-assisted, titlemove) shrub runs beyond their distance in chunks that were drawn
-    lg::info("[ctr] {}: shrub runs hidden by distance {:.1f} per level draw", m_name,
-             (double)m_shrub_run_hid / m_level_draws);
+    lg::info("[ctr] {}: shrub runs hidden by distance {:.1f}, fading draws {:.1f} per level draw",
+             m_name, (double)m_shrub_run_hid / m_level_draws, (double)m_fade_runs / m_level_draws);
     m_shrub_run_hid = 0;
+    m_fade_runs = 0;
   }
   if (rs.log_now && m_level_draws) {
     lg::debug("[ctr] {}: {} of {} level draws seen from another level", m_name, m_far_levels,
@@ -8017,7 +8247,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               tie_k0 = settings.tie_distance_scale;
   const float shrub_k_span = std::max(settings.shrub_scale_max, shrub_k0) - shrub_k0;
   const float shrub_d_span = std::max(settings.shrub_distance_max, shrub_d0) - shrub_d0;
-  const float tie_k_span = std::max(settings.tie_distance_scale_max, tie_k0) - tie_k0;
+  // (tie_k0 0: no tie distance limit, at any auto_detail position: d = 0 below)
+  const float tie_k_span =
+      tie_k0 > 0 ? std::max(settings.tie_distance_scale_max, tie_k0) - tie_k0 : 0.f;
   const float t_now = auto_detail ? g_detail_t : 0.f;
   const float shrub_k = shrub_k0 + shrub_k_span * t_now;
   const float shrub_d = shrub_d0 + shrub_d_span * t_now;
@@ -8479,6 +8711,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (m_run_nomerge.size() < lev.vis_runs.size()) {
     m_run_nomerge.resize(lev.vis_runs.size());
   }
+  if (m_run_fade.size() < lev.vis_runs.size()) {
+    m_run_fade.resize(lev.vis_runs.size());
+  }
+  m_fade_calls.clear();
+  m_fade_states.clear();
   // (AI-assisted) a chunk that is to be drawn (mode and distance decided): the view test (the
   // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
   // runs tested against those planes on their own), the visibility bits or (vista tier) the
@@ -8628,14 +8865,18 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
         partly = shown < nr;
       }
-      // (AI-assisted, titlemove) shrubs follow the PS2's distance by their runs (a visibility
-      // node: up to 8 instances, ~10 m in radius in village1), not by their cell (~20 m in radius):
-      // a run is drawn while its sphere reaches within the chunk's distance (10% hysteresis).
-      // Before, a whole cell came in at once and stayed while any of it was within the distance
-      // (and up to 1.5x that while in view)
+      // Shrubs fade out as on the PS2 (prototype-bucket-shrub dists: full detail up to x, then
+      // alpha (w - d) / (w - x) up to w), run by run (a visibility node: up to 8 instances): w is
+      // the chunk's limit, x kShrubNearK of it; d is the nearest point of the run's sphere.
+      bool faded = false;
       if (ch.kind == c3l::CHUNK_KIND_SHRUB && !vista_tier && ci < m_shrub_lim.size() &&
           m_shrub_lim[ci] > 0 && !lev.run_spheres.empty()) {
         const float lim = m_shrub_lim[ci];
+        // per run bands (the PS2's x and w of its prototype), else the chunk's class band
+        const bool banded = !lev.run_band.empty() && lev.chunk_band_x[ci] > 0;
+        const float band_k = shrub_k * det * (1.f / 16.f) * 4096.f;
+        const float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det, lim)
+                                      : lim * kShrubNearK;
         const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
                     dcz = ch.bsphere[2] - cam.trans[2];
         const float dc = std::sqrt(dcx * dcx + dcy * dcy + dcz * dcz);
@@ -8645,8 +8886,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                 : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci]
                                                            : ch.vis_run_count);
         u8* const rin = lev.run_dist_in.data();
-        if (dc + ch.bsphere[3] <= lim * kShrubNearK) {
-          // all of it within the nearest run limit: every run in (no per run test)
+        if (dc + ch.bsphere[3] <= near_lim) {
+          // all of it within full detail: every run in, none faded (no per run test)
           for (u32 r = r0; r < r0 + nr; r++) {
             rin[r] = 1;
           }
@@ -8658,37 +8899,47 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             }
             runs_valid = true;
           }
+          const float chunk_band = 128.f / std::max(lim - near_lim, 1.f);
           u32 shown = 0;
           for (u32 r = r0; r < r0 + nr; r++) {
             const auto& rs_ = lev.run_spheres[r];
-            bool in = true;
+            u8 fade = kRunOpaque;
             if (rs_.r != 0xffff) {
               const float x = ch.origin[0] + rs_.c[0] * ch.scale - cam.trans[0];
               const float y = ch.origin[1] + rs_.c[1] * ch.scale - cam.trans[1];
               const float z = ch.origin[2] + rs_.c[2] * ch.scale - cam.trans[2];
-              // (its nearest shrub within the distance: none comes in later than the PS2's far
-              // plane; the run's own limit, fable1: shrub_run_limit)
-              const float lr = shrub_run_limit(lim, r);
-              const float l = (rin[r] ? lr * 1.1f : lr) + (float)rs_.r * ch.scale;
-              in = x * x + y * y + z * z <= l * l;
+              const float d = std::sqrt(x * x + y * y + z * z) - (float)rs_.r * ch.scale;
+              const u32 b = banded && r < lev.run_band.size() ? lev.run_band[r] : 0;
+              float rl = lim, rn = near_lim, rb = chunk_band;
+              if (b) {
+                rl = std::min((float)(b & 0xffff) * band_k, lim);
+                rn = std::min((float)(b >> 16) * band_k, rl);
+                rb = 128.f / std::max(rl - rn, 1.f);
+              }
+              if (d > rn) {
+                // 16 steps (of 8 in 0x80): neighbouring runs share a draw
+                const int q = (int)std::lround((rl - d) * rb * (1.f / 8.f)) * 8;
+                fade = (u8)std::clamp(q, 0, (int)kRunOpaque);
+              }
             }
-            rin[r] = in;
-            if (!in) {
-              // (AI-assisted, levellod) never drawn along with its neighbours either (the
-              // small-gap merge drew a hidden 96-triangle piece between two shown ones: it came
-              // and went with them, at their distance, in pairs)
+            rin[r] = fade != 0;
+            m_run_fade[r] = fade;
+            if (!fade) {
+              // never drawn along with its neighbours either (the small-gap merge)
               m_run_nomerge[r] = 1;
               if (m_run_shown[r]) {
                 m_run_shown[r] = 0;
                 m_shrub_run_hid++;
               }
+            } else if (fade < kRunOpaque && m_run_shown[r]) {
+              faded = true;
             }
             shown += m_run_shown[r];
           }
           if (!shown) {
             return;
           }
-          partly = shown < nr;
+          partly = partly || shown < nr || faded;
         }
       }
       m_visible_slot[ci] = (int)m_visible.size();
@@ -8696,6 +8947,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       vc.chunk = (u32)ci;
       vc.partly = partly;
       vc.runs_valid = runs_valid;
+      vc.faded = faded;
       vc.vista = vista_chunk;
       vc.band = 0;
       vc.nofog = false;
@@ -9186,6 +9438,45 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     c.d.shine = shine;
     (m_late_collect ? m_env_late : m_env_calls).push_back(c);
   };
+  u32 fade_di = UINT32_MAX;  // the last faded call's draw and fade (fade_submit)
+  u8 fade_fd = 0;
+  // wind ties: their draws through ctr_gpu_draw_mesh_wind with the chunk's slot rows
+  const bool wind_on = lev.wind_mesh >= 0 && lev.chunk_wind.size() == lev.chunks.size() &&
+                       lev.draw_wind.size() == lev.draws.size() &&
+                       lev.wind_k.size() == 2 * lev.wind_insts.size();
+  bool wind_inline = false;  // the ordered pass: drawn in its place
+  m_wind_calls.clear();
+  if (wind_on) {
+    m_wind_rows.clear();
+    m_wind_row_of.assign(m_visible.size(), -1);
+    m_wind_row_id.assign(m_visible.size(), 0);
+  }
+  auto wind_submit = [&](u32 di, int slot, const VisibleChunk& vc, u32 first, u32 count) {
+    const auto& ch = lev.chunks[vc.chunk];
+    const u32 n = lev.chunk_wind_n[vc.chunk];
+    if (m_wind_row_of[slot] < 0) {
+      m_wind_row_of[slot] = (s32)(m_wind_rows.size() / 4);
+      m_wind_row_id[slot] = ++m_wind_rows_id ? m_wind_rows_id : ++m_wind_rows_id;
+      m_wind_rows.insert(m_wind_rows.end(), 4, 0.f);
+      // x += kx * (y - y0) in world space is x += kx * y + kx * (origin y - y0) / scale here
+      const u16* inst = &lev.wind_slot_inst[lev.chunk_wind_first[vc.chunk]];
+      for (u32 k = 0; k < n; k++) {
+        const float kx = lev.wind_k[2 * inst[k]], kz = lev.wind_k[2 * inst[k] + 1];
+        const float c = (ch.origin[1] - lev.wind_insts[inst[k]].y0) / ch.scale;
+        const float row[4] = {kx, kz, kx * c, kz * c};
+        m_wind_rows.insert(m_wind_rows.end(), row, row + 4);
+      }
+    }
+    m_wind_calls.push_back({&lev.draw_states[di], &vc.gpu, (u32)m_wind_row_of[slot], n + 1,
+                            m_wind_row_id[slot], lev.meshes[vc.chunk], lev.chunk_wind[vc.chunk],
+                            (int)first, (int)count, vc.nofog ? 1 : 0});
+    if (wind_inline) {
+#ifdef __3DS__
+      flush_calls(0);
+#endif
+      draw_wind_calls(lev);
+    }
+  };
   auto draw = [&](u32 di) {
     const int slot = m_visible_slot[lev.draw_chunk[di]];
     if (slot < 0 || m_visible[slot].vista != vista_pass) {
@@ -9194,9 +9485,14 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const VisibleChunk& vc = m_visible[slot];
     const auto& dr = lev.draws[di];
     const int env = lev.draw_env.empty() ? -1 : lev.draw_env[di];  // (AI-assisted, j2water2)
+    const bool wind = wind_on && !vista_pass && env < 0 && lev.draw_wind[di];
 #ifdef __3DS__
     // (AI-assisted, gpu-rt) the pass's draws go to the backend in one list
     auto submit = [&](u32 first, u32 count) {
+      if (wind) {
+        wind_submit(di, slot, vc, first, count);
+        return;
+      }
       if (env >= 0) {
         env_submit(di, vc, env, first, count);
         return;
@@ -9207,6 +9503,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #else
     ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
     auto submit = [&](u32 first, u32 count) {
+      if (wind) {
+        wind_submit(di, slot, vc, first, count);
+        return;
+      }
       if (env >= 0) {
         env_submit(di, vc, env, first, count);  // (AI-assisted, j2water2)
         return;
@@ -9229,6 +9529,31 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ctr_gpu_soft_bucket(fmt::format("{}/{}{}", m_name.substr(0, 2), kKind[chs.kind & 3], chs.lod_tier).c_str());
     }
 #endif
+    // a faded shrub run: its own call with the draw's state blended by the run's fade (FIX: the
+    // GS's constant alpha; alpha blended draws keep theirs), next runs of the same fade joined
+    auto fade_submit = [&](u32 first, u32 count, u8 fade) {
+      const ctr_draw_state& st = lev.draw_states[di];
+      if (!m_fade_calls.empty() && fade_di == di && fade_fd == fade) {
+        ctr_mesh_call& last = m_fade_calls.back();
+        if (last.matrix == &vc.gpu && last.first_index + last.index_count == (int)first) {
+          last.index_count += (int)count;
+          return;
+        }
+      }
+      fade_di = di;
+      fade_fd = fade;
+      const ctr_draw_state* use = &st;
+      if (st.blend == CTR_BLEND_OFF) {
+        ctr_draw_state& f = m_fade_states.emplace_back(st);
+        f.blend = CTR_BLEND_FIX;
+        f.fix = fade;
+        f.flags &= (u8)~CTR_STATE_EARLY_DEPTH;
+        use = &f;
+      }
+      m_fade_calls.push_back(
+          {use, &vc.gpu, lev.meshes[vc.chunk], (int)first, (int)count, vc.nofog ? 1 : 0});
+      m_fade_runs++;
+    };
     if (!vc.partly || !lev.draw_run_count[di]) {
       submit(dr.first_index, dr.index_count);
       vista_indices += vista_pass ? dr.index_count : 0;
@@ -9257,10 +9582,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const c3l::VisRun* const runs = lev.vis_runs.data();
     const u8* const run_shown = m_run_shown.data();
     const u8* const run_nomerge = m_run_nomerge.data();
+    const u8* const run_fade = vc.faded ? m_run_fade.data() : nullptr;
     for (u32 r = r0; r < r_end; r++) {
       const auto& run = runs[r];
       const bool shown = run_shown[r];  // (AI-assisted) visibility bit and view test
-      if (shown) {
+      if (shown && run_fade && run_fade[r] < kRunOpaque) {
+        if (open) {
+          emit();
+        }
+        fade_submit(idx, run.index_count, run_fade[r]);
+        drawn += run.index_count;
+      } else if (shown) {
         if (!open) {
           open = true;
           start = idx;
@@ -9404,6 +9736,22 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     walk(*main_lists[0]);
   }
   walk(*main_lists[1]);
+  if (!m_wind_calls.empty()) {
+#ifdef __3DS__
+    flush_calls(0);
+#endif
+    draw_wind_calls(lev);
+  }
+  wind_inline = true;
+  // the faded shrub runs: blended, so after the opaque draws (before the ordered ones)
+#ifdef __3DS__
+  m_calls.insert(m_calls.end(), m_fade_calls.begin(), m_fade_calls.end());
+#else
+  for (const auto& c : m_fade_calls) {
+    ctr_gpu_set_mesh_nofog(c.nofog);
+    ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
+  }
+#endif
   if (m_jak2_slot >= 0) {
     // (AI-assisted, j2water) Jak II: the blended and ordered draws (water, glass, decals) wait
     // for the slot's water bucket (draw_jak2_late), after the characters (merc), as the PS2

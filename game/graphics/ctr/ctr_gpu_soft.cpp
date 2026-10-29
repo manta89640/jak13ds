@@ -2039,6 +2039,43 @@ int ctr_gpu_etie_ready(void) {
   return 1;
 }
 
+// Jak 1's wind ties: the mesh's vertices sheared as ctr_mesh_wind.v.pica does (rounded to the
+// quantized units), then drawn as the level meshes
+void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                            const float* rows, int row_count, uint32_t, int mesh, int slots_mesh,
+                            int slots_offset, int first_index, int index_count) {
+  sky_hook(state);
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+      slots_mesh < 0 || slots_mesh >= (int)g_soft.meshes.size() ||
+      !g_soft.meshes[slots_mesh].used) {
+    return;
+  }
+  softstats::prog(1);
+  const auto& m = g_soft.meshes[mesh];
+  const auto& sl = g_soft.meshes[slots_mesh].verts;
+  static std::vector<uint8_t> moved;
+  moved = m.verts;
+  const size_t n = moved.size() / 16;
+  for (size_t v = 0; v < n && slots_offset + v < sl.size(); v++) {
+    const int slot = sl[slots_offset + v];
+    if (!slot || slot >= row_count) {
+      continue;
+    }
+    const float* w = rows + 4 * slot;
+    int16_t pos[3];
+    memcpy(pos, &moved[16 * v], sizeof(pos));
+    const float y = pos[1];
+    pos[0] = (int16_t)std::clamp((int)std::lround(pos[0] + w[0] * y + w[2]), -32768, 32767);
+    pos[2] = (int16_t)std::clamp((int)std::lround(pos[2] + w[1] * y + w[3]), -32768, 32767);
+    memcpy(&moved[16 * v], pos, sizeof(pos));
+  }
+  g_soft_cur_mesh = mesh;
+  soft_mesh_tris(state, matrix->m, moved.data(), m.indices.data(), first_index, index_count);
+}
+int ctr_gpu_wind_ready(void) {
+  return 1;
+}
+
 int ctr_gpu_skinned_mesh_create(const void* verts,
                                 int vertex_count,
                                 const uint16_t* indices,

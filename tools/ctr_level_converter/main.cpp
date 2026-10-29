@@ -174,7 +174,7 @@ struct Options {
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
   // (AI-assisted) v13 vista tier (c3l::CHUNK_KIND_VISTA): the far content (low resolution tfrag,
-  // ties without a distance limit, the coarse tfrag of levels without low resolution tfrag; of a
+  // the ties (small and medium ones too), the coarse tfrag of levels without low resolution tfrag; of a
   // "spanning" level's the far cells too: VistaSpan)
   // copied into cells of vista_cell meters, the ties and coarse tfrag simplified to vista_error
   // meters (meshoptimizer, topology kept)
@@ -257,6 +257,8 @@ struct SrcVertex {
   // (AI-assisted, j2water2) c3l v21: an envmapped tie vertex's normal (world, unit length * 127)
   s8 nrm[3] = {0, 0, 0};
   u8 has_nrm = 0;
+  // a wind tie vertex's instance (Converter::wind_insts index), UINT32_MAX: none
+  u32 wind = UINT32_MAX;
 };
 
 // (AI-assisted) Vista meshes render UVs, vertex colors and time-of-day entries too.
@@ -295,6 +297,8 @@ struct SrcTri {
   // (AI-assisted, j2vis) v20: a prototype the game hides by task state (Converter::proto_vis
   // index), 0xffff: none. Its triangles are visibility runs of their own (c3l::ProtoVis)
   u16 proto = 0xffff;
+  // a shrub's PS2 fade band (c3l::ExtShrubFade: x << 16 | w, 1/16 m), 0: none
+  u32 band = 0;
 };
 
 struct DrawKey {
@@ -334,6 +338,8 @@ std::string g_dist_prefix;
 constexpr float kShrubClassMeters[] = {0.f, 35.f, 50.f, 70.f, 90.f, 120.f, 160.f, 400.f};
 constexpr int kShrubClasses = sizeof(kShrubClassMeters) / sizeof(kShrubClassMeters[0]);
 // prototypes the PS2 draws as billboards beyond w (big bushes, w = 10 m): no billboards here, the
+// a shrub run (fade band) at most this many indices: the runtime's run pieces' size
+constexpr u32 kShrubRunIndices = 96 * 3;
 // whole shrub up to this distance (v13's shrub distance plus its cells' margin)
 constexpr float kShrubBillboardMeters = 70.f;
 
@@ -348,6 +354,21 @@ bool toggled_proto(const std::string& name) {
     }
   }
   return false;
+}
+
+// the PS2 fade band of a shrub prototype of a level (c3l::ExtShrubFade), 0: not in the table.
+// Prototypes drawn as billboards beyond w (w <= x): the whole shrub up to kShrubBillboardMeters
+u32 shrub_band(const std::string& level, const std::string& proto) {
+  for (const auto& e : kShrubPs2Dists) {
+    if (level == e.level && proto == e.proto) {
+      const float x = e.w <= e.x ? kShrubBillboardMeters : e.x;
+      const float w = e.w <= e.x ? kShrubBillboardMeters : e.w;
+      const u32 qx = (u32)std::clamp((int)std::lround(x * 16.f), 1, 65535);
+      const u32 qw = (u32)std::clamp((int)std::lround(w * 16.f), 1, 65535);
+      return qx << 16 | qw;
+    }
+  }
+  return 0;
 }
 
 // distance class of a shrub prototype of a level (0: not in the table)
@@ -500,6 +521,9 @@ struct Converter {
   std::vector<EnvTie> env_ties;
   std::map<std::tuple<u16, u32, u32>, u16> env_tie_ids;
   size_t env_tie_tris = 0, env_tie_groups_missing = 0;
+  // the wind instances of the tie trees (c3l::ExtWind), each tree's first one's index
+  std::vector<c3l::WindInst> wind_insts;
+  std::map<u32, u32> wind_tree_first;
   u16 env_tie_id(u16 tex, u32 mode, const u8 tint[4]) {
     u32 t;
     memcpy(&t, tint, 4);
@@ -881,9 +905,11 @@ struct Converter {
       cur_proto = 0xffff;
       // (AI-assisted) shrub_ps2_dist: the prototype's distance class
       int sclass = 0;
+      u32 band = 0;
       if (opt.shrub_ps2_dist && d.proto_idx < tree.proto_names.size()) {
         float m = 0;
         sclass = shrub_class(g_dist_prefix + level->level_name, tree.proto_names[d.proto_idx], &m);
+        band = shrub_band(g_dist_prefix + level->level_name, tree.proto_names[d.proto_idx]);
         if (!sclass) {
           lg::warn("{}: shrub {} has no PS2 distance, drawn up to {} m", level->level_name,
                    tree.proto_names[d.proto_idx], opt.shrub_dist);
@@ -892,6 +918,7 @@ struct Converter {
       for (size_t i = first_tri; i < tris.size(); i++) {
         tris[i].detail = 3;
         tris[i].sclass = sclass;
+        tris[i].band = band;
       }
       shrub_class_tris[sclass] += tris.size() - first_tri;
       shrub_tris += tris.size() - first_tri;
@@ -1849,7 +1876,16 @@ struct Converter {
       cur_vis = 0xffff;
       cur_proto = 0xffff;
     }
-    // instances moved by the wind (plants, trees): baked at rest with their instance matrix
+    // instances moved by the wind (plants, trees): baked at rest with their instance matrix, each
+    // vertex marked with its instance (c3l::ExtWind: the runtime sways them)
+    if (!tree.instanced_wind_draws.empty() && !wind_tree_first.count(cur_tree)) {
+      wind_tree_first[cur_tree] = (u32)wind_insts.size();
+      for (const auto& wi : tree.wind_instance_info) {
+        wind_insts.push_back(c3l::WindInst{wi.wind_idx, 0, wi.stiffness, wi.matrix[3].y()});
+      }
+    }
+    const u32 wind_first =
+        wind_tree_first.count(cur_tree) ? wind_tree_first[cur_tree] : (u32)UINT32_MAX;
     for (const auto& d : tree.instanced_wind_draws) {
       const u16 tex = texture_id(d.tree_tex_id);
       note_use(tex, d.mode.as_int(), false);
@@ -1885,6 +1921,10 @@ struct Converter {
             }
             note_alpha(tree.colors, v.color_index);  // (AI-assisted)
             sv.tod = tod_color(tree.colors, v.color_index);
+            if (wind_first != UINT32_MAX &&
+                wind_first + g.instance_idx < wind_insts.size()) {
+              sv.wind = wind_first + g.instance_idx;
+            }
             it = remap.emplace(vi, verts.size()).first;
             verts.push_back(sv);
           }
@@ -3315,7 +3355,7 @@ void optimize_draws(Converter& cv,
     for (const auto& t : cv.tris) {
       const auto& dk = cv.draw_keys[t.draw_key];
       const int kind = dk.kind & 0xff;
-      const bool vista = opt.vista && (t.tier == 3 || (t.tier == 0 && kind == 1 && t.detail == 0) ||
+      const bool vista = opt.vista && (t.tier == 3 || (t.tier == 0 && kind == 1 && t.detail <= 2) ||
                                        (t.tier == 2 && kind == 0 && !has_lowres));
       if (vista && dk.texture < elsewhere.size()) {
         elsewhere[dk.texture] = 1;
@@ -4267,7 +4307,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       const int kind = std::get<4>(cp.key) & ~kEnvCellBit;  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
       const bool lowres = tier == 3;
       // (AI-assisted, streaming) not the near chunks (near versions only)
-      const bool landmark = tier == 0 && kind == 1 && detail == 0 && std::get<0>(cp.key) < 1024;
+      // small and medium ties too: the PS2 draws them at any distance, the vista beyond the draw
+      // distance
+      const bool landmark = tier == 0 && kind == 1 && detail <= 2 && std::get<0>(cp.key) < 1024;
       const bool coarse = tier == 2 && kind == 0 && (!has_lowres || coarse_copy[pi]);
       if (!lowres && !landmark && !coarse) {
         continue;
@@ -4537,6 +4579,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::VisRun> out_runs;
   std::vector<c3l::RunLod> out_run_lods;  // (AI-assisted) v17: one per out_runs
   std::vector<u16> out_run_protos;  // (AI-assisted, j2vis) v20: one per out_runs (SrcTri::proto)
+  std::vector<u32> out_run_bands;   // one per out_runs (SrcTri::band)
   size_t lod_runs = 0, lod_chunks = 0;
   std::vector<u32> chunk_first_run;
   std::vector<u8> chunk_stream_cls;  // (AI-assisted, streaming) v19: per chunk, 0 or its class
@@ -4668,6 +4711,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::EnvTieDraw> out_env_draws;
   std::map<u32, std::unordered_map<std::string, std::array<s8, 3>>> env_chunk_normals;
   size_t env_st_moved = 0;
+  // the wind instance of each wind vertex by its bytes, per chunk with any (as the normals: two
+  // vertices of different instances never have the same bytes)
+  std::map<u32, std::unordered_map<std::string, u32>> wind_chunk_verts;
 
   for (const auto& cp : plans) {
     {
@@ -4737,6 +4783,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       ch.first_vertex = out_verts.size();
       ch.vertex_count = local_src.size();
       std::unordered_map<std::string, std::array<s8, 3>>* env_normals = nullptr;
+      std::unordered_map<std::string, u32>* wind_verts = nullptr;
+      if (ch.lod_tier != c3l::kVistaTier) {
+        for (const u32 si : local_src) {
+          if (cv.verts[si].wind != UINT32_MAX) {
+            wind_verts = &wind_chunk_verts[(u32)chunks.size()];
+            break;
+          }
+        }
+      }
       for (u32 ti : cp.tris) {
         if (cv.draw_keys[cv.tris[ti].draw_key].env != 0xffff) {
           env_normals = &env_chunk_normals[(u32)chunks.size()];
@@ -4767,6 +4822,16 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         memcpy(o.rgba, v.rgba, 4);
         o.pad = (s16)cv.tod_pad(v.tod);  // (AI-assisted) v16: the time of day color
+        if (wind_verts) {
+          for (int tries = 0; tries < 64; tries++) {
+            auto [it, fresh] = wind_verts->emplace(std::string((const char*)&o, sizeof(o)), v.wind);
+            if (fresh || it->second == v.wind) {
+              break;
+            }
+            o.st[0]++;
+            env_st_moved++;
+          }
+        }
         if (env_normals) {
           // (AI-assisted, j2water2) v21
           const std::array<s8, 3> n = {v.nrm[0], v.nrm[1], v.nrm[2]};
@@ -4791,6 +4856,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::vector<c3l::VisRun> runs;
       std::vector<c3l::RunLod> run_lods;  // (AI-assisted) v17
       std::vector<u16> run_protos;        // (AI-assisted, j2vis) v20
+      std::vector<u32> run_bands;         // shrub fade bands (SrcTri::band)
+      bool any_band = false;
       bool any_vis = false, any_lod = false, any_proto = false;
       for (size_t i = 0; i < cp.tris.size(); i++) {
         const auto& t = cv.tris[cp.tris[i]];
@@ -4823,12 +4890,17 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         // (AI-assisted) v17: a run per LOD group version too (run_lods: c3l::RunLod)
         const u16 lg = t.lod ? (u16)t.lod_group : (u16)0xffff;
         // (AI-assisted, j2vis) v20: and per toggled prototype
+        // shrubs: per fade band, in pieces of kShrubRunIndices (the runtime fades run by run)
         if (new_draw || runs.back().vis != t.vis || run_lods.back().group != lg ||
-            run_lods.back().lod != t.lod || run_protos.back() != t.proto) {
+            run_lods.back().lod != t.lod || run_protos.back() != t.proto ||
+            run_bands.back() != t.band ||
+            (t.band && runs.back().index_count >= kShrubRunIndices)) {
           runs.push_back(c3l::VisRun{(u16)(out_draws.size() - 1 - ch.first_draw), t.vis, 0});
           run_lods.push_back(c3l::RunLod{lg, t.lod, 0});
           run_protos.push_back(t.proto);
+          run_bands.push_back(t.band);
         }
+        any_band |= t.band != 0;
         any_proto |= t.proto != 0xffff;
         runs.back().index_count += 3;
         if (t.vis != 0xffff) {
@@ -4983,13 +5055,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       // v17: or there are levels of detail
       // (AI-assisted, j2vis) v20: or a prototype the game hides (a shrub chunk: runs per draw and
       // prototype, vis 0xffff)
-      const bool keep_runs = any_vis || any_lod || any_proto;
+      const bool keep_runs = any_vis || any_lod || any_proto || any_band;
       chunk_first_run.push_back(keep_runs ? (u32)out_runs.size() : 0);
       ch.vis_run_count = keep_runs ? (u32)runs.size() : 0;
       if (keep_runs) {
         out_runs.insert(out_runs.end(), runs.begin(), runs.end());
         out_run_lods.insert(out_run_lods.end(), run_lods.begin(), run_lods.end());
         out_run_protos.insert(out_run_protos.end(), run_protos.begin(), run_protos.end());
+        out_run_bands.insert(out_run_bands.end(), run_bands.begin(), run_bands.end());
         lod_runs += any_lod ? runs.size() : 0;
         lod_chunks += any_lod;
       }
@@ -5339,7 +5412,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
       }
     }
-    const u32 eh_size = !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
+    bool any_band = false;
+    for (const u32 b : out_run_bands) {
+      any_band |= b != 0;
+    }
+    const u32 eh_size = any_band && out_run_bands.size() == out_runs.size()
+                            ? c3l::kExtHeaderV23Size
+                        : !wind_chunk_verts.empty() ? c3l::kExtHeaderV22Size
+                        : !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
                         : !pv_protos.empty()    ? c3l::kExtHeaderV20Size
                         : opt.stream            ? (u32)sizeof(eh)
                                                 : c3l::kExtHeaderV17Size;
@@ -5405,6 +5485,82 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                level.level_name, out_env_draws.size(), cv.env_ties.size(), cv.env_tie_tris,
                ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
                cv.env_tie_groups_missing, env_st_moved, missing);
+    }
+    if (eh_size >= c3l::kExtHeaderV23Size) {
+      // the shrub runs' PS2 fade bands (c3l::ExtShrubFade)
+      c3l::ExtShrubFade ef{};
+      ef.band_count = (u32)out_run_bands.size();
+      ef.bands_offset = append(buf, out_run_bands.data(), out_run_bands.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV22Size, &ef, sizeof(ef));
+      size_t n = 0;
+      for (const u32 b : out_run_bands) {
+        n += b != 0;
+      }
+      lg::info("{}: shrub fade bands: {} of {} runs", level.level_name, n, out_run_bands.size());
+    }
+    if (!wind_chunk_verts.empty()) {
+      // the wind instances, and per chunk with wind vertices their slots (c3l::ExtWind)
+      c3l::ExtWind ew{};
+      ew.inst_count = (u32)cv.wind_insts.size();
+      ew.insts_offset = append(buf, cv.wind_insts.data(), cv.wind_insts.size());
+      std::vector<c3l::WindChunk> wcs;
+      size_t nverts = 0, nwind = 0, over = 0, unmatched = 0, max_slots = 0;
+      for (const auto& [ci, wm] : wind_chunk_verts) {
+        const auto& ch = chunks.at(ci);
+        std::vector<u8> slots(ch.vertex_count, 0);
+        std::vector<u16> insts;
+        std::unordered_map<u32, u8> slot_of;
+        for (u32 v = 0; v < ch.vertex_count; v++) {
+          const auto& o = out_verts[ch.first_vertex + v];
+          auto it = wm.find(std::string((const char*)&o, sizeof(o)));
+          if (it == wm.end()) {
+            unmatched++;
+            continue;
+          }
+          if (it->second == UINT32_MAX) {
+            continue;
+          }
+          auto [si, fresh] = slot_of.emplace(it->second, (u8)0);
+          if (fresh) {
+            if (insts.size() < c3l::kWindSlots) {
+              insts.push_back((u16)it->second);
+              si->second = (u8)insts.size();
+            }
+          }
+          if (!si->second) {
+            over++;
+            continue;
+          }
+          slots[v] = si->second;
+          nwind++;
+        }
+        if (insts.empty()) {
+          continue;
+        }
+        max_slots = std::max(max_slots, insts.size());
+        nverts += slots.size();
+        std::vector<u8> wind_draws(ch.draw_count, 0);
+        for (u32 d = 0; d < ch.draw_count; d++) {
+          const auto& dr = out_draws[ch.first_draw + d];
+          for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && !wind_draws[d]; i++) {
+            wind_draws[d] = out_indices[i] < slots.size() && slots[out_indices[i]] != 0;
+          }
+        }
+        c3l::WindChunk wc{};
+        wc.chunk = ci;
+        wc.slots_offset = append(buf, slots.data(), slots.size());
+        wc.insts_offset = append(buf, insts.data(), insts.size());
+        wc.slot_count = (u32)insts.size();
+        wc.draws_offset = append(buf, wind_draws.data(), wind_draws.size());
+        wcs.push_back(wc);
+      }
+      ew.chunk_count = (u32)wcs.size();
+      ew.chunks_offset = append(buf, wcs.data(), wcs.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV21Size, &ew, sizeof(ew));
+      lg::info("{}: wind ties: {} instances, {} chunks with {} wind vertices of {} ({} KB), at most "
+               "{} instances per chunk, {} vertices of instances past {} at rest, {} unmatched",
+               level.level_name, cv.wind_insts.size(), wcs.size(), nwind, nverts, nverts / 1024,
+               max_slots, over, c3l::kWindSlots, unmatched);
     }
   }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
@@ -5745,8 +5901,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         vdraws += ch.draw_count;
       }
     }
-    lg::info("{}: vista tier: {} far triangles (low resolution tfrag, ties without a distance "
-             "limit, coarse tfrag without low resolution tfrag) -> {} ({:.0f}%; simplified to {:g} m, "
+    lg::info("{}: vista tier: {} far triangles (low resolution tfrag, ties "
+             "(all), coarse tfrag without low resolution tfrag) -> {} ({:.0f}%; simplified to {:g} m, "
              "then to {:.0f}% within {:g} m), {} chunks of {:g} m, {} draws",
              level.level_name, vista_src_tris, vista_tris,
              100.0 * vista_tris / std::max<size_t>(vista_src_tris, 1), opt.vista_error,

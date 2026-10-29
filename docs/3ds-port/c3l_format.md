@@ -75,7 +75,7 @@ What goes in:
 - The static draws of every tie tree (categories normal, trans, water, and the base pass of
   envmapped ties; not the envmap shine passes), with instances already in world space. Small and
   medium instances go to their own chunks with a draw distance.
-- Wind tie (palm trees, plants), baked at rest with their instance matrix.
+- Wind tie (palm trees, plants), baked at rest with their instance matrix; `c3l::ExtWind` (ExtHeader size 96) lists the instances (wind_idx, stiffness, origin y) and a slot byte per vertex of their chunks, so the runtime sways them as the PC's Tie3::render_tree_wind (do_wind_math per instance, the shear in ctr_mesh_wind.v.pica). Files without it: at rest. Shrub chunks' runs hold one prototype's PS2 fade band each (at most 96 triangles); `c3l::ExtShrubFade` (ExtHeader size 104) has the bands per run. The vista tier also copies the small and medium ties.
 - Shrubs (grass, bushes, small plants, ropes), in `--shrub-cell` chunks drawn up to their PS2
   distance class (v14, see `--shrub-one-dist`) or `--shrub-dist`.
   Their vertex colors are the base color times the time of day color (shrub.vert).
