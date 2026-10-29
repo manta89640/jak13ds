@@ -119,6 +119,10 @@ enum { CTR_TCC_ST_ATLAS = 16 };
  * fog per vertex (merc2.vert / merc2.frag), with the values of the last ctr_gpu_set_merc_fog. Only
  * set when ctr_gpu_merc_fog_ready says so. */
 enum { CTR_TCC_FOG = 32 };
+/* ctr_draw_state::tcc bits of the PS2 ocean's draws (ctr_gpu_ocean_full_draw*): its texture's mip
+ * levels blended (the GS's TEX1 MMIN 5, whatever config.ini mipmaps says); MIP_MAX1: only levels
+ * 0 and 1 (TEX1 MXL 1, the near ocean's) */
+enum { CTR_TCC_TRILINEAR = 64, CTR_TCC_MIP_MAX1 = 128 };
 /* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
  * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
@@ -155,6 +159,9 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba);
 /* New texels for a texture from ctr_gpu_tex_create(_mipmapped) (same size), during a frame: the
  * GPU finished the previous frame, and this frame's draws read the new texels. */
 void ctr_gpu_tex_update(int handle, const uint8_t* rgba);
+/* ctr_gpu_tex_update with the PS2 ocean wave texture's mip levels (ocean-texture's half size
+ * sprites): level 1's alpha halved, the others' alpha 0 */
+void ctr_gpu_tex_update_ocean(int handle, const uint8_t* rgba);
 void ctr_gpu_tex_delete(int handle);
 /* (AI-assisted, Jak II texture animation) A texture can stand for an animated texture slot (a
  * level's base texture of it: c3l::texture_anim_slot): draws of it use the slot's texture
@@ -259,8 +266,9 @@ void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t);
  * ctr_gpu_rt_draw_grid; sampled like a ctr_gpu_tex_create_mipmapped texture.
  * ctr_gpu_rt_draw_grid: the (n + 1) x (n + 1) vertices (row-major) as n x n quads into level 0
  * (ctr coordinates [-1, 1] cover it as ctr_gpu_rt_begin's tile), each further level the 2 x 2
- * averages of the one above; then the screen again. 1 when drawn. Only inside a frame. (The PS2
- * ocean's wave texture: the GS draws its 32 x 32 quads, CtrOceanFull) */
+ * averages of the one above with the alpha halved in level 1 and 0 in the others; then the screen
+ * again. 1 when drawn. Only inside a frame. (The PS2 ocean's wave texture: the GS draws its
+ * 32 x 32 quads and the mip levels, CtrOceanFull) */
 int ctr_gpu_rt_create_mipmapped(int size);
 int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex* verts, int n);
 /* (AI-assisted) a static mesh's vertices and indices as made (ctr_gpu_mesh_create / _end), to

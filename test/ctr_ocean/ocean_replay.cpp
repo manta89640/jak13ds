@@ -112,6 +112,9 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
   auto& t = handle == 2 ? g_refl_tex : g_tex;
   memcpy(t.data(), rgba, t.size());
 }
+void ctr_gpu_tex_update_ocean(int handle, const uint8_t* rgba) {
+  ctr_gpu_tex_update(handle, rgba);
+}
 void ctr_gpu_tex_delete(int) {}
 // (AI-assisted, j1ocean) the sky reflection's draws: captured like the clip space draws
 void ctr_gpu_ocean_full_draw_env(const ctr_draw_state*, int nv, int ni, uint8_t, uint8_t, uint8_t,

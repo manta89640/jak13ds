@@ -12,8 +12,10 @@
  *    vertices of *ocean-verts* (color, and the env map lookup from the wave normals), then the GPU
  *    draws their 32x32 quads into a 128x128 render texture like the PS2's GS (each texel the env
  *    map texel at the interpolated lookup times the interpolated color, GS modulate), the mip
- *    levels 2x2 averages. One texture for both buckets, made once per frame. Without the render
- *    texture the CPU makes the texels, every config.ini ocean_texture_rate frames (2 by default).
+ *    levels 2x2 averages with the PS2's alpha (halved in level 1, 0 below: the sky reflection
+ *    fades out with distance), blended between levels; the near ocean uses levels 0 and 1 (its
+ *    TEX1). Made once per frame. Without the render texture the CPU makes the texels, every
+ *    config.ini ocean_texture_rate frames (2 by default).
  *  - ocean-mid-and-far bucket (before the level, depth test off, depth written like the PC's
  *    flush_mid): the far ocean (GS packets, OceanMidAndFar::handle_ocean_far), then the mid ocean
  *    and the transition to the near ocean: the ocean-mid VU program's drawing calls as native
@@ -86,7 +88,7 @@ class CtrOceanFull : public CtrOceanEnvHook {
   std::unique_ptr<CtrOceanBatch> m_batch;
 
   // the wave texture
-  int m_tex = -1;
+  int m_tex = -1;  // with the PS2's mip levels
   u64 m_tex_frame = ~0ull;  // the frame it was last made in
   int m_tex_rate = 1;       // (AI-assisted) config.ini ocean_texture_rate
   std::vector<u32> m_texels;

@@ -1067,6 +1067,9 @@ void ocean_full_draw(const ctr_draw_state* state,
     return;
   }
   g_ocean_full_open = false;
+  ctr_draw_state masked = *state;
+  masked.tcc &= ~(CTR_TCC_TRILINEAR | CTR_TCC_MIP_MAX1);  // (mip levels: none here)
+  state = &masked;
   if (vert_count > (int)g_ocean_full_verts.size() || index_count > (int)g_ocean_full_indices.size()) {
     return;
   }
@@ -1535,6 +1538,10 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
     auto& t = g_soft.textures[handle];
     t.rgba.assign(rgba, rgba + t.w * t.h * 4);
   }
+}
+
+void ctr_gpu_tex_update_ocean(int handle, const uint8_t* rgba) {
+  ctr_gpu_tex_update(handle, rgba);  // (no mip levels here)
 }
 
 unsigned int ctr_gpu_tex_bytes(int w, int h, int format, int levels) {
