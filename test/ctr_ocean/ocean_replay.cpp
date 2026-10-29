@@ -127,7 +127,7 @@ bool CtrVram::decode_for_cpu(u64, std::vector<u32>* out, int* w, int* h) {
   *h = g_env_h;
   return true;
 }
-const void* CtrVram::upload_source(u32) const {
+const void* CtrVram::upload_source(u32, u64*) const {
   return nullptr;
 }
 namespace lg::internal {

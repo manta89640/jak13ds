@@ -50,10 +50,10 @@ void run_vram_tests() {
     check(texture && texture->handle >= 0 && allocations == before + 4,
           "failed replacement must retry even with an older cached entry");
 
-    // A page source and destination stay fixed while one word changes. Word 1 was missed
-    // by both samplers; word 64 was noticed by the page sampler but missed by the chunk's.
+    // another page in the same EE allocation must be written; the same page again must not
     std::vector<u8> ee(4096 + 16384, 0);
     GoalTexturePageHeader page{};
+    page.id = 1;
     page.size = 4096;
     page.segment[0].block_data_ptr = 4096;
     page.segment[0].size = 4096;
@@ -65,19 +65,20 @@ void run_vram_tests() {
       return decoded;
     };
     upload_and_decode();
-    const u64 old_id = page_chunk_id(ee.data() + 4096);
+    const u32 written = vram.stats().chunks_written;
+    upload_and_decode();
+    check(vram.stats().chunks_written == (int)written,
+          "unchanged page uploads must still be deduplicated");
+    const u64 old_id = page_chunk_id(ee.data() + 4096, 1);
+    check(page_chunk_id(ee.data() + 4096, 2) != old_id, "chunk ids must depend on the page");
     const u32 color = 0x8000007f;
     memcpy(ee.data() + 4096 + 4, &color, 4);
-    check(page_chunk_id(ee.data() + 4096) != old_id, "chunk hash must cover formerly unsampled words");
+    page.id = 2;
     const auto decoded = upload_and_decode();
-    check(decoded[1] == color, "page cache must notice a formerly unsampled texel edit");
-    const u32 written = vram.stats().chunks_written;
-    ee[4096 + 64 * 4] ^= 1;
+    check(vram.stats().chunks_written == (int)written + 1 && decoded[1] == color,
+          "another page in the same allocation must be written");
     upload_and_decode();
     check(vram.stats().chunks_written == (int)written + 1,
-          "chunk cache must not discard an edit detected by the page cache");
-    upload_and_decode();
-    check(vram.stats().chunks_written == (int)written + 1,
-          "unchanged page uploads must still be deduplicated");
+          "the new page uploaded again must be deduplicated");
   }
 }

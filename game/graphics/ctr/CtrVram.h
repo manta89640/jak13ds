@@ -161,9 +161,10 @@ class CtrVram {
     u32 dest_block;
     u32 end_block;
     u32 words;
+    u64 page_key;
   };
   static PendingUpload piece(const PendingUpload& p, u32 c0, u32 c1);
-  void write_upload(const u8* src, u32 dest_block, u32 words);
+  void write_upload(const u8* src, u32 dest_block, u32 words, u64 page_key);
   void write_rows(const u8* src, u32 dest_block, u32 words);
   void write_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
   bool ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const;  // (AI-assisted)

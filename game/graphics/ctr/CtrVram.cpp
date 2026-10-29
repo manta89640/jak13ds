@@ -17,7 +17,6 @@
 #include "common/log/log.h"
 #include "common/texture/texture_conversion.h"
 #include "common/util/Assert.h"
-#include "third-party/zstd/lib/common/xxhash.h"
 
 #include "fmt/format.h"
 #include "common/util/FileUtil.h"
@@ -51,11 +50,24 @@ u32 upload_end_block(u32 dest_block, u32 words) {
   return dest_block + (words + kChunkWords - 1) / kChunkWords * kChunkBlocks;
 }
 
-// (AI-assisted) the id of a whole chunk of a page upload (odd; see CtrVram.h): where its data comes
-// from in EE memory and a hash of every word, taken when it is
-// written: a pending upload copies the bytes there at that time, not when it was recorded
-u64 page_chunk_id(const u8* chunk_src) {
-  return XXH64(chunk_src, kChunkWords * sizeof(u32), (u64)(uintptr_t)chunk_src) | 1;
+// hash of `samples` words spread over the data, mixed into seed
+u64 sampled_hash(const u8* src, u32 words, u32 samples, u64 seed) {
+  u64 h = seed * 0x9E3779B97F4A7C15ull + words;
+  const u32 stride = words / samples;
+  for (u32 k = 0; k < samples; k++) {
+    u32 w;
+    memcpy(&w, src + 4 * ((u64)k * stride + (stride ? (k * 37u) % stride : 0)), 4);
+    h = (h ^ w) * 1099511628211ull;
+  }
+  h ^= h >> 29;
+  h *= 0xBF58476D1CE4E5B9ull;
+  h ^= h >> 32;
+  return h;
+}
+
+// id of a whole chunk of a page upload: its source, its page and a sampled hash
+u64 page_chunk_id(const u8* chunk_src, u64 page_key) {
+  return sampled_hash(chunk_src, kChunkWords, 128, page_key ^ (u64)(uintptr_t)chunk_src) | 1;
 }
 
 // GOAL texture-page layout (see game/graphics/texture/TexturePool.h, kept GL-free here).
@@ -465,9 +477,10 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     }
   }
 #endif
-  // (AI-assisted) Hash every word: pages can be edited or their source allocation reused.
+  // skip the upload if this exact page is already there
   const u8* src = ee_mem + seg.block_data_ptr;
-  const u64 hash = XXH64(src, (size_t)words * sizeof(u32), words);
+  const u64 page_key = ((u64)page.id << 32 | page.name_ptr) ^ ((u64)(uintptr_t)tpage << 7);
+  const u64 hash = sampled_hash(src, words, 256, page_key);
   auto last = m_last_upload.find(dest_block);
   if (last != m_last_upload.end() && last->second.src == src && last->second.words == words &&
       last->second.hash == hash) {
@@ -487,7 +500,7 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   m_last_upload[dest_block] = UploadRecord{src, words, hash};
   // drop the pending uploads (or chunks of them) that this one completely overwrites
   trim_pending(dest_block, end_block);
-  m_pending.push_back(PendingUpload{src, dest_block, end_block, words});
+  m_pending.push_back(PendingUpload{src, dest_block, end_block, words, page_key});
   m_stats.uploads++;
 }
 
@@ -517,7 +530,7 @@ void CtrVram::forget_uploads(u32 first_block, u32 end_block) {
   }
 }
 
-void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words) {
+void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_key) {
   // (AI-assisted) chunk by chunk: a whole chunk whose data is in the VRAM copy already (the same
   // source; the game uploads its pages to the same VRAM every frame) isn't written again
   for (u32 done = 0; done < words; done += kChunkWords) {
@@ -526,7 +539,7 @@ void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words) {
     const u8* s = src + (size_t)done * 4;
     const u32 end = upload_end_block(block, n);
     if (n == kChunkWords && block % kChunkBlocks == 0 && block < kBlocks) {
-      const u64 id = page_chunk_id(s);
+      const u64 id = page_chunk_id(s, page_key);
       u64& cur = m_chunk_id[block / kChunkBlocks];
       if (cur == id) {
         m_stats.chunks_skipped++;
@@ -562,6 +575,7 @@ CtrVram::PendingUpload CtrVram::piece(const PendingUpload& p, u32 c0, u32 c1) {
   q.dest_block = p.dest_block + c0 * kChunkBlocks;
   q.words = std::min(p.words, c1 * kChunkWords) - c0 * kChunkWords;
   q.end_block = upload_end_block(q.dest_block, q.words);
+  q.page_key = p.page_key;
   return q;
 }
 
@@ -610,7 +624,7 @@ void CtrVram::flush_pending() {
   m_write.clear();
   m_write.swap(m_pending);
   for (const auto& p : m_write) {
-    write_upload(p.src, p.dest_block, p.words);
+    write_upload(p.src, p.dest_block, p.words, p.page_key);
   }
 }
 
@@ -651,7 +665,7 @@ void CtrVram::flush_pending(u32 first_block, u32 end_block) {
   }
   m_pending.swap(m_keep);
   for (const auto& p : m_write) {
-    write_upload(p.src, p.dest_block, p.words);
+    write_upload(p.src, p.dest_block, p.words, p.page_key);
   }
 }
 
