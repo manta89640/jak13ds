@@ -68,6 +68,9 @@ const char* file_get(void* ctx, const char* key) {
 
 // (AI-assisted) one key's value into the settings (path, n: where it came from, for the warnings;
 // n = 0: the preset or a default)
+// (AI-assisted, levellod) the distance scale keys' floor: 0 gave "no limit" (limit_with(0) in
+// CtrLevel.cpp draw_level: every shrub / tie out to draw_distance), the opposite of "lowest"
+constexpr float kMinScale = 0.05f;
 void apply_setting(CtrSettings& s, const std::string& key, const std::string& v, const fs::path& path,
                    int n) {
   const float f = (float)std::atof(v.c_str());
@@ -83,21 +86,21 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "far_level_distance") {
       s.far_level_distance = f;
     } else if (key == "detail_scale") {
-      s.detail_scale = f;
+      s.detail_scale = std::clamp(f, 0.1f, 4.f);  // (AI-assisted, levellod: 0 drew everything far)
     } else if (key == "shrub_distance") {
       s.shrub_distance = std::max(0.f, f);
     } else if (key == "tie_distance_scale") {
-      s.tie_distance_scale = std::max(0.f, f);
+      s.tie_distance_scale = std::max(kMinScale, f);
     } else if (key == "auto_detail") {
       s.auto_detail = parse_bool(v);
     } else if (key == "shrub_scale") {
-      s.shrub_scale = std::max(0.f, f);  // (AI-assisted)
+      s.shrub_scale = std::max(kMinScale, f);  // (AI-assisted)
     } else if (key == "shrub_scale_max") {
-      s.shrub_scale_max = std::max(0.f, f);  // (AI-assisted)
+      s.shrub_scale_max = std::max(kMinScale, f);  // (AI-assisted)
     } else if (key == "shrub_distance_max") {
       s.shrub_distance_max = std::max(0.f, f);
     } else if (key == "tie_distance_scale_max") {
-      s.tie_distance_scale_max = std::max(0.f, f);
+      s.tie_distance_scale_max = std::max(kMinScale, f);
     } else if (key == "auto_detail_gpu_ms") {
       s.auto_detail_gpu_ms = std::clamp(f, 10.f, 33.f);
     } else if (key == "merc") {
@@ -122,18 +125,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.distort = parse_bool(v);
     } else if (key == "envmap") {
       s.envmap = parse_bool(v);
-    } else if (key == "impostors") {
-      s.impostors = parse_bool(v);  // (AI-assisted)
-      s.impostors_set = true;       // (AI-assisted, j2-mem2)
-    } else if (key == "impostor_distance") {
-      s.impostor_distance = std::clamp(f, 30.f, 3000.f);  // (AI-assisted)
-    } else if (key == "impostor_error") {
-      s.impostor_error = std::clamp(f, 0.25f, 8.f);  // (AI-assisted)
-    } else if (key == "impostor_budget") {
-      s.impostor_budget = std::clamp(std::atoi(v.c_str()), 0, 100000);  // (AI-assisted)
-    } else if (key == "impostor_atlas") {
-      const int kb = std::atoi(v.c_str());  // (AI-assisted)
-      s.impostor_atlas = kb >= 1024 ? 1024 : (kb >= 512 ? 512 : 256);
     } else if (key == "merc_gen_lod") {
       s.merc_gen_lod = parse_bool(v);  // (AI-assisted)
     } else if (key == "merc_lod_scale") {
@@ -261,24 +252,12 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.tie_lod_px = std::clamp(f, 0.25f, 16.f);  // (AI-assisted, title-popin)
     } else if (key == "neighbour_vis") {
       s.neighbour_vis = parse_bool(v);  // (AI-assisted)
-    } else if (key == "fine_vis") {
-      s.fine_vis = parse_bool(v);  // (AI-assisted)
-    } else if (key == "fine_vis_kb") {
-      s.fine_vis_kb = std::clamp(std::atoi(v.c_str()), 16, 1024);  // (AI-assisted)
-    } else if (key == "occ_cull") {
-      s.occ_cull = parse_bool(v);  // (AI-assisted)
-    } else if (key == "occ_cull_tris") {
-      s.occ_cull_tris = std::clamp(std::atoi(v.c_str()), 0, 100000);  // (AI-assisted)
-    } else if (key == "occ_cull_dist") {
-      s.occ_cull_dist = std::clamp(f, 5.f, 1000.f);  // (AI-assisted)
     } else if (key == "lowres_vista") {
       s.lowres_vista = parse_bool(v);  // (AI-assisted)
     } else if (key == "vista_distance") {
       s.vista_distance = std::max(0.f, f);  // (AI-assisted)
     } else if (key == "fog_stage_skip") {
       s.fog_stage_skip = parse_bool(v);  // (AI-assisted)
-    } else if (key == "vista_untextured") {
-      s.vista_untextured = parse_bool(v);  // (AI-assisted)
     } else if (key == "fog_alpha") {
       s.fog_alpha = parse_bool(v);  // (AI-assisted)
     } else if (key == "tex1_gating") {
@@ -507,7 +486,7 @@ std::string CtrSettings::summary() const {
       "merc {} sprites {} ({}) "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
       "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
-      "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} impostors {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
+      "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "static_cmdlists {} ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
@@ -556,11 +535,8 @@ std::string CtrSettings::summary() const {
       vis_culling ? "on" : "off", run_culling ? "on" : "off", tie_lod ? "on" : "off",
       streaming ? fmt::format("on ({} KB, reserve {} KB)", stream_kb, stream_reserve_kb)
                 : std::string("off"),
-      tod_pulse_step, neighbour_vis ? "on" : "off", fine_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", vista_untextured ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", shader_opt ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
+      tod_pulse_step, neighbour_vis ? "on" : "off", lowres_vista ? "on" : "off", vista_distance, fog_stage_skip ? "on" : "off", fog_alpha ? "on" : "off", tex1_gating ? "on" : "off", shader_opt ? "on" : "off", cmd_dedup ? (cmd_dedup_draw ? "on+draw" : "on") : "off", cull_ties ? (cull_flip ? "flip" : "on") : "off", cull_merc ? "on" : "off",
       merc_fog ? "on" : "off",
-      impostors ? fmt::format("on ({:.0f}m, {:.2f}px, {} tris, {} KB)", impostor_distance,
-                              impostor_error, impostor_budget, impostor_atlas)
-                : std::string("off"),
       raw_cmds ? "on" : "off",
       opaque_alpha ? "on" : "off",
       tex_cache_uploads ? "uploads" : "always",

@@ -59,10 +59,3 @@ add_executable(ctr_render_regression EXCLUDE_FROM_ALL
 target_link_libraries(ctr_render_regression common)
 add_test(NAME ctr_render_regression COMMAND ctr_render_regression)
 
-# (AI-assisted) finer visibility sidecars (.c3v) for .c3l levels (docs/3ds-port/c3l_format.md)
-add_executable(ctr_vis_builder
-        ctr_level_converter/ctr_vis_builder.cpp
-        ${CMAKE_SOURCE_DIR}/game/graphics/ctr/c3l_reader.cpp
-        ${CMAKE_SOURCE_DIR}/third-party/lz4/lz4.c)
-set_source_files_properties(${CMAKE_SOURCE_DIR}/third-party/lz4/lz4.c PROPERTIES COMPILE_OPTIONS "-w")
-target_link_libraries(ctr_vis_builder common)

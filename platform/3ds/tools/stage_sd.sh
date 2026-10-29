@@ -14,8 +14,6 @@
 #   --gk     gk.3dsx to copy (default: build-3ds/gk.3dsx)
 #   --c3l    folder with the level backgrounds (default: <proj>/out/<game>/c3l if it exists;
 #            make them with: ctr_level_converter --all out/<game>/fr3 <dir>)
-#   --c3v    (AI-assisted) folder with the levels' fine visibility sidecars (<level>.c3v, made by
-#            ctr_vis_builder; default: the .c3v files in the --c3l folder)
 # All settings go in one file, sdmc:/3ds/jak1/config.ini (docs/3ds-port/config_ini.md). It is
 # written from platform/3ds/tools/config_template.ini (the 8 user keys); the options below set keys
 # in it (the testing keys of docs/3ds-port/config_dev.md go at its end). Old flag files are removed.
@@ -56,7 +54,6 @@ SD=""
 GK=""
 GAME=jak1
 C3L=""
-C3V=""
 ARGS=""
 HAVE_ARGS=0
 LISTENER=0
@@ -84,7 +81,6 @@ while [ $# -gt 0 ]; do
     --sd) SD="$2"; SD_GIVEN=1; shift 2 ;;
     --gk) GK="$2"; shift 2 ;;
     --c3l) C3L="$2"; shift 2 ;;
-    --c3v) C3V="$2"; shift 2 ;;
     --args) ARGS="$2"; HAVE_ARGS=1; shift 2 ;;
     --listener) LISTENER=1; shift ;;
     --clean-logs) CLEAN_LOGS=1; shift ;;
@@ -246,14 +242,7 @@ if [ -d "$C3L" ]; then
     [ -f "$f" ] || continue  # (AI-assisted) .c3t: Jak II's texture animation sources
     copy "$f" "$DATA/out/$GAME/c3l/"
   done
-  # (AI-assisted) fine_vis sidecars (ctr_vis_builder): next to the levels, or from --c3v DIR
-  nc3v=0
-  for f in "$C3L"/*.c3v ${C3V:+"$C3V"/*.c3v}; do
-    [ -f "$f" ] || continue
-    copy "$f" "$DATA/out/$GAME/c3l/"
-    nc3v=$((nc3v + 1))
-  done
-  echo "staged level backgrounds from $C3L ($nc3v fine visibility files)"
+  echo "staged level backgrounds from $C3L"
 fi
 
 if [ "$CLEAN_LOGS" = 1 ]; then rm -rf "$DATA/log"; fi

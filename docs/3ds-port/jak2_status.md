@@ -486,7 +486,7 @@ all of the slot's background buckets; the first bucket with the level's camera, 
 `add-pc-tfrag3-data` packet, draws the whole level). Time of day (the level's mood itimes, as
 Jak 1), fog (`*fog-color*` from bucket 2), the game's visibility strings (bucket 2, all 6 slots;
 an all-zero string hides the level, as the PS2 and PC do: ctyindb seen from the slums), tie levels
-of detail with streaming, impostors, run culling, vista tier: all as in Jak 1. Jak II's GS y
+of detail with streaming, run culling, vista tier: all as in Jak 1. Jak II's GS y
 scale (`ctr_gs_y_scale`, j2-render-fg) in the level matrix. Jak II has no hfrag (Jak 3 only).
 The foreground (merc, sprites, HUD, text, sky, texture uploads) and the Jak II dispatch are
 j2-render-fg's.
@@ -975,7 +975,7 @@ proven shorter list.
 |---|---|---|
 | GS VRAM copy (`CtrVram`) | Kept per 16 KB chunk, made at the first write (unwritten chunks read as zeros, as before). Chunks only `relocate()` writes into PSMT8H / 4HH / 4HL (the fonts in the depth buffer's top bytes: 110 chunks) keep only the words' top bytes (4 KB). Jak II's uploads are lazy, so only what something reads is written: 1368 KB on the whole route, all of it during boot and the title | heap 2.7 MB |
 | Jak 1 code in the Jak II build | `OPENGOAL_NO_JAK1`: Jak 1's kernel entry, overlord entry and global inits, mips2c table; the linker drops the rest (Jak 1's overlord pieces Jak II uses stay: ramdisk server, fake ISO, the C-mode kernel's suspend hook) | .text 783 KB, .data 29 KB, .bss 273 KB (heap +1.06 MB) |
-| Impostors | Off for Jak II unless `impostors` is in config.ini: in the city they drew ~1000 of 75k triangles a frame as cards | heap ~0.9 MB, VRAM 576 KB (texture + depth) |
+| Impostors | Off for Jak II unless `impostors` is in config.ini: in the city they drew ~1000 of 75k triangles a frame as cards (removed from both games on Oct 29) | heap ~0.9 MB, VRAM 576 KB (texture + depth) |
 | RAMDISK | `jak1::InitRamdisk(false)`: Jak II's vis is never in the IOP (`update-vis!`: "ramdisk vis ... not supported") and nothing calls `*ramdisk-rpc*`; a load would fail like a full RAMDISK | heap 811 KB |
 | IOP coroutine stacks | 16 KB each (was 64; 11 threads). Deepest on the route: 2.7 KB. `check_stacks` now stops the game with a log line if a stack is used up (it ran into libco's context) | heap 528 KB |
 | Thread stacks | EE 128 KB (was 512: C-mode GOAL runs on its own stack in EE memory; EE used 3.9 KB), IOP 64, EE-Worker 64, DMP 48 (were 128), mixer 64 (was 128) | heap 656 KB |
