@@ -4451,28 +4451,7 @@ static void tex_mipmaps_rgba8(C3D_Tex* tex) {
   }
 }
 
-/* the PS2 ocean's mip levels (ctr_gpu_tex_update_ocean): level 1's alpha halved, the others' 0 */
-static void tex_mip_alpha_fade(C3D_Tex* tex) {
-  u8* p = (u8*)tex->data + tex->size;
-  u32 size = tex->size >> 2;
-  for (int level = 1; level <= tex->maxLevel; level++, p += size, size >>= 2) {
-    for (u32 k = 0; k < size; k += 4) {
-      p[k] = level == 1 ? (u8)((p[k] + 1) >> 1) : 0; /* (stored A, B, G, R) */
-    }
-  }
-}
-
-static void tex_update(int handle, const uint8_t* rgba, int ocean);
-
 void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
-  tex_update(handle, rgba, 0);
-}
-
-void ctr_gpu_tex_update_ocean(int handle, const uint8_t* rgba) {
-  tex_update(handle, rgba, 1);
-}
-
-static void tex_update(int handle, const uint8_t* rgba, int ocean) {
   if (handle < 0 || handle >= MAX_TEXTURES || g.textures[handle].used != 1 ||
       g.textures[handle].pool >= 0) {
     return;
@@ -4506,9 +4485,6 @@ static void tex_update(int handle, const uint8_t* rgba, int ocean) {
   swizzle_rgba8((uint8_t*)tex->data, tex->width, tex->height, rgba);
   if (tex->maxLevel > 0) {
     tex_mipmaps_rgba8(tex); /* (AI-assisted) (RGBA8 checked above) */
-    if (ocean) {
-      tex_mip_alpha_fade(tex);
-    }
   }
   cache_flush_frame(tex->data, C3D_TexCalcTotalSize(tex->size, tex->maxLevel));
   /* bind again at the next use: that clears the GPU's texture cache (it may hold old texels).
@@ -5047,6 +5023,7 @@ static void c3d_vertex_buffer(u32 pa, const void* va, u32 stride, int attribs, u
 
 static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw);
 static void apply_state(const ctr_draw_state* st, int mesh, int raw);
+static int s_ocean_fade_ok; /* (the PS2 ocean's reflection fade tables, ocean_fade_init) */
 
 /* The GPU command buffer is fixed size, and a frame's commands must all fit (libctru panics when
  * it overflows; splitting the frame doesn't make room: the buffer only restarts at the next
@@ -5352,6 +5329,18 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     C3D_TexEnvSrc(env1, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, 0);
     C3D_TexEnvFunc(env1, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvColor(env1, tint);
+  } else if (mesh == 6 && tint && s_ocean_fade_ok > 0) {
+    /* (AI-assisted) the PS2 ocean with the sky reflection: the fog with the fog color constant
+     * (unit 1 holds the depth fade table, ocean_fade_init), alpha = the reflection's weight times
+     * the fade */
+    C3D_TexEnvSrc(env1, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_TEXTURE1);
+    C3D_TexEnvOpRgb(env1, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(env1, C3D_RGB, GPU_INTERPOLATE);
+    C3D_TexEnvColor(env1, g.fog_abgr);
+    C3D_TexEnvSrc(env1, C3D_Alpha, GPU_PREVIOUS, GPU_TEXTURE1, 0);
+    C3D_TexEnvOpAlpha(env1, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA);
+    C3D_TexEnvFunc(env1, C3D_Alpha, GPU_MODULATE);
   } else if ((mesh == 1 || mesh == 6) && g.fog_tex_valid) {
     /* fog: rgb = mix(previous, fog color, fog amount) with the amount from the fog ramp texture
      * (texcoord1 from the mesh shader; bound on unit 1 at frame begin) */
@@ -6051,8 +6040,62 @@ static void apply_state(const ctr_draw_state* st, int mesh, int raw) {
 
 static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b);
 
+/* The sky reflection's depth fade (ctr_gpu_ocean_full_draw_env): texture unit 1 holds a table
+ * instead of the fog ramp for those draws, s = the fog amount (alpha, the fog ramp's), t = Q * 2^
+ * (CTR_OCEAN_ENV_FADE_K - 1.5) (the clip program's texcoord1.y): rgb = clamp(1.5 + log2 t, lo, 1)
+ * = the fade, lo 0 (mid ocean) or 0.5 (near ocean, [1]); the fog color is a combiner constant. */
+static C3D_Tex s_ocean_fade[2];
+static int s_ocean_fade_ok = -1; /* -1 not made yet, 0 no memory */
+
+static void ocean_fade_init(void) {
+  s_ocean_fade_ok = 0;
+  enum { N = 64 };
+  for (int k = 0; k < 2; k++) {
+    C3D_Tex* t = &s_ocean_fade[k];
+    ctr_linear_lock();
+    const int ok = linear_room_for_tex(N, N, 0) && C3D_TexInit(t, N, N, GPU_RGBA8);
+    ctr_linear_unlock();
+    if (!ok) {
+      if (k) {
+        ctr_linear_lock();
+        C3D_TexDelete(&s_ocean_fade[0]);
+        ctr_linear_unlock();
+      }
+      return;
+    }
+    C3D_TexSetFilter(t, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(t, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    u8* d = (u8*)t->data;
+    for (int y = 0; y < N; y++) {
+      const float tc = ((float)y + 0.5f) / (float)N; /* (image row y from the top: t = 0 there) */
+      float f = 1.5f + log2f(tc);
+      const float lo = k ? 0.5f : 0.0f;
+      f = f < lo ? lo : (f > 1.0f ? 1.0f : f);
+      const u8 v = (u8)(f * 255.0f + 0.5f);
+      for (int x = 0; x < N; x++) {
+        u8* o = d + 4 * tiled_texel(x, y, N, N);
+        o[0] = (u8)(x * 255 / (N - 1)); /* A B G R: alpha the fog ramp's */
+        o[1] = o[2] = o[3] = v;
+      }
+    }
+    cache_flush_now(t->data, t->size);
+  }
+  s_ocean_fade_ok = 1;
+}
+
+/* texture unit 1: the fog ramp again after the fade tables */
+static void ocean_fade_unbind(void) {
+  const C3D_Tex* t1 = __C3D_Context.tex[1];
+  if (g.fog_tex_valid && (t1 == &s_ocean_fade[0] || t1 == &s_ocean_fade[1])) {
+    C3D_TexBind(1, &g.fog_tex);
+  }
+}
+
 int ctr_gpu_ocean_full_reserve(int max_verts, int max_indices, ctr_ocean_full_vertex** verts,
                           uint16_t** indices) {
+  if (s_sky_hook) {
+    ocean_fade_unbind(); /* (the sky's draws read the fog ramp) */
+  }
   SKY_HOOK_ANY(); /* (AI-assisted) sky_last: before the reservation */
   _Static_assert(sizeof(ctr_ocean_full_vertex) == 40, "ctr_ocean_full.v.pica's vertex layout");
   if (!g.ready || !g.in_frame || g.ocean_full_open || max_verts <= 0 || max_indices <= 0) {
@@ -6107,6 +6150,15 @@ static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int ind
                   prog == PROG_OCEAN_FULL_CLIP;
   if (env) {
     ocean_bind_tex2_wrap(env_tex, 1);
+    if (s_ocean_fade_ok < 0) {
+      ocean_fade_init();
+    }
+    C3D_Tex* fade = &s_ocean_fade[(state->tcc & CTR_TCC_MIP_MAX1) ? 1 : 0];
+    if (s_ocean_fade_ok > 0 && __C3D_Context.tex[1] != fade) {
+      C3D_TexBind(1, fade);
+    }
+  } else {
+    ocean_fade_unbind();
   }
   /* (AI-assisted, j1hang) a draw without the reflection: texture unit 2 off (no unit on whose
    * coordinates the program may not output: ctr_ocean_full.v.pica has no texcoord2) */
@@ -6620,6 +6672,11 @@ int ctr_gpu_rt_create_mipmapped(int size) {
     ctr_gpu_rt_delete(tex);
     return -1;
   }
+  /* the texels' alpha is 0xff = 1 (the decal copies of the mip levels keep it) */
+  g.textures[tex].alpha_full = 1;
+  for (int l = 1; l <= max_level; l++) {
+    g.textures[s_rt[i].mip[l - 1]].alpha_full = 1;
+  }
   return tex;
 }
 
@@ -6790,8 +6847,7 @@ int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex*
   g.cur.draws++;
   g.cur.triangles += n * n * 2;
 
-  /* the PS2's mip levels (ocean-texture's bilinear half size sprites): level 1 with the alpha
-   * halved (sprite alpha 0x40), the others with alpha 0 */
+  /* the mip levels: 2 x 2 averages (the PS2's bilinear half size sprites) */
   ctr_draw_state q;
   memset(&q, 0, sizeof(q));
   q.tcc = 1;
@@ -6805,34 +6861,10 @@ int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex*
     const int d = dim >> l;
     q.tex = l == 1 ? tex : s_rt[i].mip[l - 2];
     rt_target(i, g.textures[s_rt[i].mip[l - 1]].tex.data, d, d, 0, d, d);
-    use_program(PROG_BASIC);
-    const int raw = use_raw(&q);
     g.textures[tex].levels = 1; /* (level 1 samples level 0 alone) */
-    apply_state(&q, 0, raw);
+    draw_immediate(&q, PROG_BASIC, (uint8_t*)quad, sizeof(ctr_vertex), 6, GPU_TRIANGLES);
     g.textures[tex].levels = (uint8_t)levels;
-    C3D_TexEnv e;
-    C3D_TexEnvInit(&e);
-    C3D_TexEnvSrc(&e, C3D_RGB, GPU_TEXTURE0, 0, 0);
-    C3D_TexEnvFunc(&e, C3D_RGB, GPU_REPLACE);
-    C3D_TexEnvSrc(&e, C3D_Alpha, GPU_TEXTURE0, GPU_CONSTANT, 0);
-    C3D_TexEnvFunc(&e, C3D_Alpha, GPU_MODULATE);
-    C3D_TexEnvColor(&e, l == 1 ? 0x80000000u : 0u);
-    commit_texenv(0, &e, raw);
-    if (raw) {
-      raw_vertex_buffer(raw_vbuf_pa((size_t)((uint8_t*)quad - g.vbuf)), 0x210,
-                        RAW_BUF_FLAGS1(sizeof(ctr_vertex), 3, 0));
-      raw_sync();
-      raw_draw_arrays(6, (u32)GPU_TRIANGLES);
-    } else {
-      C3D_BufInfo* buf = C3D_GetBufInfo();
-      BufInfo_Init(buf);
-      BufInfo_Add(buf, quad, sizeof(ctr_vertex), 3, 0x210);
-      C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
-    }
-    g.cur.draws++;
-    g.cur.triangles += 2;
   }
-  g.last_state_valid = 0; /* (stage 0 isn't what the state says) */
   ctr_gpu_rt_end();
 
   /* after the draws, in the GPU's queue: the levels into place */
@@ -7564,6 +7596,7 @@ void ctr_gpu_ocean_end(void) {
   if (!g.ready || !g.in_frame) {
     return;
   }
+  ocean_fade_unbind();
   C3Di_Context* ctx = &__C3D_Context;
   if (g.ocean_tex2_bound) {
     /* unit 2 off (C3D_TexBind can't take NULL for units 1-2) */

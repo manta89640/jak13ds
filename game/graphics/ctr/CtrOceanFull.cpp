@@ -495,11 +495,12 @@ void CtrOceanFull::make_wave_rt() {
  * The wave texture as the PS2 makes it: the ocean-texture program sends the GS the 32 x 32 quads
  * between the 33 x 33 vertices, gouraud colored, the env map at the interpolated coordinates
  * (nearest texel, clamped), GS modulate. The GPU draws the same quads into the 128 x 128 render
- * texture, then the PS2's mip levels: its bilinear half size sprites, level 1's alpha halved,
- * the others' 0 (ctr_gpu_rt_draw_grid). The mid ocean samples all of them, the near
- * ocean levels 0 and 1, both blending two levels (their TEX1: MXL 6 / 1, MMIN 5). The alpha is
- * the sky reflection's weight: it fades out with distance (and before the mid tiles without the
- * reflection, call 46's, and the far ocean).
+ * texture, then the mip levels: 2 x 2 averages, the PS2's bilinear half size sprites
+ * (ctr_gpu_rt_draw_grid). The mid ocean samples all of them, the near ocean levels 0 and 1, both
+ * blending two levels (their TEX1: MXL 6 / 1, MMIN 5). The PS2's sprites also fade the levels'
+ * alpha (1, 0.5, then 0), the sky reflection's weight: that fade follows the GS's depth based
+ * level, so the draws apply it from depth (ctr_gpu_ocean_full_draw_env), and the reflection is
+ * gone before the mid tiles without it (call 46's) and the far ocean, as on the PS2.
  */
 void CtrOceanFull::update_texture_gpu(const TextureDma& t, CtrRenderState& rs) {
   const CtrTexture* env = rs.vram ? rs.vram->get_texture(t.env_tex0) : nullptr;
@@ -646,7 +647,7 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
   if (m_tex < 0) {
     m_tex = ctr_gpu_tex_create_mipmapped(kTexSize, kTexSize, bytes);
   }
-  ctr_gpu_tex_update_ocean(m_tex, bytes);  // (the PS2's mip levels; a second copy with the pipeline)
+  ctr_gpu_tex_update(m_tex, bytes);  // (a second copy with the pipeline)
 }
 
 // ---------------------------------------------------------------------------------------------
