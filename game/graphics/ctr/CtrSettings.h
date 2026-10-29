@@ -258,12 +258,14 @@ struct CtrSettings {
   // (AI-assisted, streaming) diagnostic: a log line for each near chunk that is late (and the
   // camera's speed, its score before)
   bool stream_debug = false;
-  // (AI-assisted, citadel) time of day, an approximation (off by default since Oct 23, todlag): a
-  // day palette that pulses (its weight turned around twice within ~4 s: Gol and Maia's Citadel's
-  // update-mood-light on palette 1, which 71% of its colors use, moves 1/64 every ~2 frames) is
-  // taken only when it moved this many 64ths from the weight last taken, or once it stood still
-  // for 8 frames (CtrLevel.cpp tod_update). 0: every move (exact as the PC)
-  int tod_pulse_step = 0;
+  // (AI-assisted, citadel) time of day, an approximation: a day palette that pulses (CtrTodPulse.h:
+  // up and down around a steady mean within ~6 s; Gol and Maia's Citadel's update-mood-light on
+  // palette 1, which 71% of its colors use, moves 1/64 every ~2 frames) is taken only when it
+  // moved this many 64ths from the weight last taken, or once it stood still for 8 frames
+  // (CtrLevel.cpp tod_update; never on the title screen). 0: every move (exact as the PC).
+  // (AI-assisted, levellod) 4 since Oct 29 with the stricter detector (0 from Oct 23, todlag: the
+  // old one held the title's day; Azahar's timings don't show the hardware's FCRAM misses)
+  int tod_pulse_step = 4;
   // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
   // far version where the far version's shape error is at most this many pixels on screen (this
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).
@@ -274,20 +276,6 @@ struct CtrSettings {
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)
   bool neighbour_vis = true;
-  // (AI-assisted) the levels' finer precomputed visibility (<level>.c3v next to the .c3l, made by
-  // ctr_vis_builder): per cell of the camera's space, the level pieces that may be seen from there;
-  // the others aren't drawn (static tfrag / tie / shrub only; merc as before). A level without the
-  // file, or a camera outside the cells, draws as without it
-  bool fine_vis = false;  // (off: no .c3v files shipped, see c3l_format.md "Results")
-  // (AI-assisted) fine_vis: the memory per level for the .c3v blocks read around the camera (KB)
-  int fine_vis_kb = 128;
-  // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h): each frame
-  // the drawn opaque pieces nearest the camera (up to occ_cull_tris triangles within
-  // occ_cull_dist meters, the biggest on screen first) are rasterized on the CPU; the pieces behind
-  // them aren't drawn
-  bool occ_cull = false;  // (off: costs more CPU than it saves GPU, see config_dev.md)
-  int occ_cull_tris = 300;
-  float occ_cull_dist = 60.f;
   // (AI-assisted) the levels' low resolution tfrag (the game's far scenery) as vista: also in near
   // mode, outside the loaded levels' detailed areas (+50 m), out to vista_distance, with a haze
   // towards the fog color from draw_distance on instead of the draw distance fog (that one is
@@ -304,11 +292,6 @@ struct CtrSettings {
   // ramp. tex1_gating: texture unit 1 (the ramp) enabled only for draws whose combiner reads it
   // (raw draws switch the unit's enable bit, no texture cache clear; merc, sprites, sky, HUD and
   // shadows never read it). Both on (preset safe: off).
-  // (AI-assisted) levels converted with ctr_level_converter --vista-flat hold an untextured copy of
-  // the vista tier (each texture's average color in the vertex colors, one draw per cell): on uses
-  // it instead of the textured one (Snowy fort: 60 -> 22 vista draws, host). Read at level load
-  // (not switchable while running)
-  bool vista_untextured = true;
   bool fog_alpha = true;
   bool tex1_gating = true;
   // (AI-assisted) shader_opt: the shorter vertex programs (platform/3ds/shaders/ctr_*_opt.v.pica:
@@ -330,24 +313,6 @@ struct CtrSettings {
   // (AI-assisted) back faces of closed tie surfaces (c3l v13 draws marked by the converter) are
   // culled. cull_flip: the other screen winding (if the PICA's turns out mirrored). On: no face
   // went missing in Azahar at Sandover, Snowy's fort and start, Fire Canyon (2026-10-11)
-  // (AI-assisted) impostors (CtrImpostor): far tie objects (each visibility group, up to 8
-  // instances: trees, rocks, houses) whose nearest point is beyond impostor_distance (meters) and
-  // that cover at most 128x128 pixels are drawn into a texture at screen resolution and shown as
-  // a card (one quad per cell on the plane of the group's visible surface there) in their place,
-  // until the picture could be off by impostor_error pixels (camera moved), the time of day moved
-  // its colors, or they come nearer: then drawn again. At most impostor_budget triangles are drawn
-  // into impostors per frame (the rest stay geometry that frame). impostor_atlas: the texture's
-  // size in KB (256 | 512 | 1024; VRAM when there is room at start, else linear memory). On by
-  // default since Oct 17 (the Sentinel Beach arch depth error fixed: CtrImpostor.h)
-  bool impostors = true;  // (AI-assisted) on since Oct 17 (beach depth fix; preset safe: off)
-  // (AI-assisted, j2-mem2) impostors was in config.ini (or a preset): else Jak II has them off
-  // (ctr_init): in Haven City they drew ~1000 of 75k triangles a frame as cards (0.13 ms of GPU)
-  // for ~0.9 MB of heap (their groups) and their 512 KB texture
-  bool impostors_set = false;
-  float impostor_distance = 120.f;
-  float impostor_error = 1.f;
-  int impostor_budget = 6000;
-  int impostor_atlas = 512;
   bool cull_ties = true;
   bool cull_flip = false;
   // (AI-assisted) back faces of merc draws the converter marked (c3l kMercDrawCullBack: wound like

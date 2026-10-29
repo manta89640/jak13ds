@@ -900,7 +900,8 @@ flashes (update-mood-lightning, sky weights 128 -> 0 -> 64) are the game's own a
 
 ## Impostors on by default (AI-assisted, Oct 17, impostors)
 
-config_dev.md `impostors` has the mechanism. What changed on Oct 17, and what it costs:
+(Removed on Oct 29 with fine_vis and occ_cull: see "Citadel and the far view, Oct 29" below. The
+section is kept as the record of what they did.) What changed on Oct 17, and what it costs:
 
 - **The beach arch depth error.** Root cause: a card's grid point took the depth of the nearest
   triangle whose screen box touched any of the four cells around it. The rock in front of the
@@ -1209,3 +1210,41 @@ in all 24 UV corner orders. `python3 test/ctr_render/cmd_cache_test.py` compiles
 dispatcher with CPU stubs under ASan/UBSan and checks 20 stretches, reuse, cleanup and allocation
 failure/recovery. Changed render paths also cross-compile with the 3DS SDK. Hardware FPS and
 visual validation remain unmeasured.
+
+## Citadel and the far view, Oct 29 (AI-assisted, levellod)
+
+From the Oct 29 optimisation audit (reports/opt-audit: level-cull-lod.md F4-F12, shaders.md, the
+user's choice of removals). The user's reports: Citadel slows down on hardware, the final boss's far
+environment looks bad, parts of Lava Tube / Citadel are sometimes missing.
+
+- **Time of day pulse hold back on (tod_pulse_step = 4).** The Oct 23 default 0 came from Azahar,
+  whose timings don't show the FCRAM misses of the rewrites: the Oct 25 hardware log has ~0.19 us
+  per recolored vertex, so each move of Citadel's palette 1 (every ~2 frames) cost 10-20 ms of
+  render thread. The new detector (`CtrTodPulse.h`, c3l_format.md "Time of day") needs three
+  turning points of 8/64 or more within 320 frames around a steady mean; the title screen never
+  holds. Host check (the title flight's and Citadel's weights logged with CTR_TOD_LOG=2, run
+  through the detector): village1's day palettes over 1977 title frames (the day moving 1/64 a
+  frame): never a pulse; Citadel's palette 1 (40..72, a 128-frame sine): a pulse from its third
+  turning point on (~150 frames). The light palettes (village1's 5, Citadel's 4-6) pulse too but
+  are never held (their own path, as before).
+- **auto_detail counts the time of day for stepping down** (config_dev.md `auto_detail`): two
+  15-frame windows in a row with a frame's build (rewrites included) over the target step down, and
+  no step up while one is; not on the title screen. Before, the GPU looked idle while the render
+  thread recolored, and the ties went out to x3.
+- **auto_detail's urgent mode** (distances applied on screen): from the window's average or two
+  frames over 33 ms, never one; level load frames don't count.
+- **Haze** (`CtrHaze.h`, config_dev.md `vista_distance`): only where the port's distances cut
+  geometry. A level with a vista tier (finalboss) was hazed from 300 m for all its geometry (26-63%
+  fog color at 1-2 km, the PC has none); now from fog_start x vista_distance (1.8 km) to
+  vista_distance, like its vista pass. The same rule for merc models (ctr_haze_row).
+- **neighbour_vis with a vista tier:** a neighbour's low resolution chunks went through their vista
+  copies without the visibility bits or the detail rule (over the detailed tfrag); now by the rule,
+  narrowed by the bits.
+- **Small-gap merge:** a shrub piece hidden by its distance is never drawn along with its
+  neighbours (paired shrub pops).
+- **Smaller ones:** Jak II's distance freeing counts the shrubs' far plane (kShrubFarK) and the
+  ties' 1.5x in-view hold; far mode forced with the camera inside a level without a vista tier
+  (detail meshes not read back yet) draws its landmark ties out to draw_distance, not 200 m;
+  detail_scale 0.1-4, the scale keys at least 0.05; run_culling = off only stops the view test.
+- **Removed:** impostors, fine_vis (+ ctr_vis_builder, .c3v), occ_cull, vista_untextured, with
+  their code, keys (a note in the log), the safe preset's and gpu_profile = ab's entries.

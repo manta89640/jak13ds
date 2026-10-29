@@ -40,7 +40,6 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrShadow.h"
 #include "game/graphics/ctr/CtrSprite.h"
 #include "game/graphics/ctr/CtrVram.h"
-#include "game/graphics/ctr/CtrImpostor.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/opengl_renderer/buckets.h"
@@ -100,12 +99,6 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.vis_culling; }},
     {"run_culling", [](CtrSettings& s, bool on) { s.run_culling = on; },
      [](const CtrSettings& s) { return s.run_culling; }},
-    // (AI-assisted) the finer precomputed visibility (.c3v files; loaded with fine_vis on)
-    {"fine_vis", [](CtrSettings& s, bool on) { s.fine_vis = on; },
-     [](const CtrSettings& s) { return s.fine_vis; }},
-    // (AI-assisted) software occlusion culling of the level background (CtrOccCull.h)
-    {"occ_cull", [](CtrSettings& s, bool on) { s.occ_cull = on; },
-     [](const CtrSettings& s) { return s.occ_cull; }},
     {"cull_ties", [](CtrSettings& s, bool on) { s.cull_ties = on; },
      [](const CtrSettings& s) { return s.cull_ties; }},
     // (AI-assisted) c3l v17 tie levels of detail (off: the far versions only)
@@ -158,9 +151,6 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.merc_tex_sort; }},
     {"merc_gen_lod", [](CtrSettings& s, bool on) { s.merc_gen_lod = on; },
      [](const CtrSettings& s) { return s.merc_gen_lod; }},
-    // (AI-assisted) gpu-imp: far tie groups as cards (CtrImpostor)
-    {"impostors", [](CtrSettings& s, bool on) { s.impostors = on; },
-     [](const CtrSettings& s) { return s.impostors; }},
     {"clouds", [](CtrSettings& s, bool on) { s.clouds = on; },
      [](const CtrSettings& s) { return s.clouds; }},
     // (AI-assisted) gpu-b's keys (Oct 11). frame_overlap2: the config's mode (on; clean when the
@@ -629,6 +619,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     ctr_gpu_diag_stage("level loads (process_pending_loads)");
     m_levels->process_pending_loads(m_rs.frame_idx);
     const double load_ms = ctr_gpu_time_ms() - tl;
+    if (load_ms >= 4.0) {
+      m_auto.load_frame = m_rs.frame_idx;  // (AI-assisted, levellod) auto_detail: a load frame
+    }
     if (load_ms >= 20.0) {
       lg::info("[ctr] render thread frame {}: {:.0f} ms in level loads", m_rs.frame_idx, load_ms);
     }
@@ -724,7 +717,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
 #endif
   ctr_gpu_phase(CTR_PH_HUD);  // (AI-assisted, gpu-rt) gpu_breakdown: the fade with the HUD
   draw_pmode_fade();
-  ctr_level_fine_vis_check(m_rs.frame_idx, m_rs.log_now);  // (AI-assisted) host check only
   const double t2 = ctr_gpu_time_ms();
   ctr_gpu_frame_end();
   ctr_gpu_diag_stage("after frame_end: stats, logs");
@@ -778,9 +770,9 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.vbuf_size = gs.vbuf_size;
   m_timing.vbuf_dropped += gs.vbuf_dropped;
   m_timing.frames++;
-  // (AI-assisted) the time of day work isn't GPU load: not counted for auto_detail
+  // (AI-assisted) the time of day work isn't GPU load: auto_detail counts it only for stepping
+  // down (levellod: see auto_detail_frame)
   const double tod_ms = ctr_level_tod_take_ms();
-  ctr_level_note_build_ms(t2 - t1);  // (AI-assisted, perfv2) impostor captures' budget
   m_timing.tod_ms += tod_ms;
   m_timing.tod_max_ms = std::max(m_timing.tod_max_ms, tod_ms);
   m_timing.tod_over += tod_ms > 2.0;
@@ -790,10 +782,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     // of the hardware fit (busy ~ 10.6 ms + 0.13 ms per 1000 triangles) of this frame's triangles
     static const bool model = getenv("CTR_AUTO_DETAIL_MODEL") != nullptr;
     if (model) {
-      auto_detail_frame(10.6f + 0.13f * gs.triangles / 1000.f, 1, 0.0);
+      auto_detail_frame(10.6f + 0.13f * gs.triangles / 1000.f, 1, 0.0, 0.0);
     } else
 #endif
-    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms);
+    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms, t2 - t1);
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
@@ -936,13 +928,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       if (ctr_settings().auto_detail) {
         const auto& s = ctr_settings();
         const float t = m_auto.t;
-        lg::info("[ctr] auto detail {:.2f}: shrubs {:.0f} m (v14 files: x{:.2f}), ties x{:.2f} ({} steps up, {} down)", t,
+        lg::info("[ctr] auto detail {:.2f}: shrubs {:.0f} m (v14 files: x{:.2f}), ties x{:.2f} ({} steps up, {} down, {} of them for the time of day)", t,
                  s.shrub_distance + (std::max(s.shrub_distance_max, s.shrub_distance) - s.shrub_distance) * t,
                  s.shrub_scale + (std::max(s.shrub_scale_max, s.shrub_scale) - s.shrub_scale) * t,
                  s.tie_distance_scale +
                      (std::max(s.tie_distance_scale_max, s.tie_distance_scale) - s.tie_distance_scale) * t,
-                 m_auto.ups, m_auto.downs);
-        m_auto.ups = m_auto.downs = 0;
+                 m_auto.ups, m_auto.downs, m_auto.tod_downs);
+        m_auto.ups = m_auto.downs = m_auto.tod_downs = 0;
       }
     }
     m_timing = Timing();
@@ -1036,6 +1028,8 @@ bool CtrRenderer::profile_skips(const std::string& name) const {
 }
 
 void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
+  // (AI-assisted, levellod) auto_detail: the title screen's fast day (auto_detail_frame)
+  m_title_loaded = std::find(levels.begin(), levels.end(), "title") != levels.end();
   // the first level that isn't the title screen is the one being played
   std::string lev;
   for (const auto& l : levels) {
@@ -1059,44 +1053,66 @@ void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
 // or one frame near the 33 ms budget (target + 4 ms), pulls the shrub / tie distances in by a
 // tenth of their range; time to spare (average 4 ms under the target, no frame over it) pushes
 // them out by 4% of it. Out slowly, in fast: a frame that misses its vblank costs more than a
-// shrub that appears a little later. The render thread's own build time counts too.
-void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms) {
+// shrub that appears a little later. The render thread's own build time counts too: build_ms
+// without the time of day rewrites, build_tod_ms with them.
+// (AI-assisted, levellod, Oct 29) the time of day counts for stepping down, and holds a step up:
+// with it left out, a render thread busy rewriting colors (citadel's pulse: ~0.19 us a vertex on
+// hardware) saw a GPU with room and pushed the ties out to x3, more vertices to rewrite. Two
+// windows in a row over the target (one camera cut's burst of rewrites is one frame). Not on the
+// title screen (its fast day rewrites nearly every frame: the flight keeps its distances).
+// Frames of a level load (4 ms or more in process_pending_loads, and the 2 after: their GPU
+// time) don't count for the largest frame: one such spike pulled the distances in on screen.
+void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms,
+                                    double build_tod_ms) {
   if (!gpu_busy_frames) {
     return;  // no GPU time this frame (frame_pacing = fast): distances stay where they are
-  }
-  m_auto.busy_ms += gpu_busy_ms;
-  m_auto.busy_frames += gpu_busy_frames;
-  m_auto.busy_max = std::max(m_auto.busy_max, (double)gpu_busy_ms / gpu_busy_frames);
-  m_auto.build_max = std::max(m_auto.build_max, build_ms);
-  if (++m_auto.frames < 15) {
-    return;
   }
   // (AI-assisted, citadel) the target and margins are for fps_cap = 30's 33 ms frame: at fps_cap =
   // 60 half of them (a 27 ms target kept the distances at their far end in a 16.7 ms frame:
   // Azahar citadel-generator-start 92-99k triangles, 50 fps)
   const double k = ctr_settings().fps_cap >= 60 ? 0.5 : 1.0;
+  m_auto.busy_ms += gpu_busy_ms;
+  m_auto.busy_frames += gpu_busy_frames;
+  const bool load = m_auto.load_frame && m_rs.frame_idx <= m_auto.load_frame + 2;
+  if (!load) {
+    const double busy = (double)gpu_busy_ms / gpu_busy_frames;
+    m_auto.busy_max = std::max(m_auto.busy_max, busy);
+    m_auto.over33 += busy > 33.0 * k;
+    m_auto.build_max = std::max(m_auto.build_max, build_ms);
+    m_auto.build_tod_max = std::max(m_auto.build_tod_max, build_tod_ms);
+  }
+  if (++m_auto.frames < 15) {
+    return;
+  }
   const double target = ctr_settings().auto_detail_gpu_ms * k;
   const double avg = m_auto.busy_ms / m_auto.busy_frames;
+  const bool tod_counts = !m_title_loaded;
+  const bool tod_over = tod_counts && m_auto.build_tod_max > target;
+  m_auto.tod_over_windows = tod_over ? m_auto.tod_over_windows + 1 : 0;
   float t = m_auto.t;
-  if (avg > target || m_auto.busy_max > target + 4.0 * k || m_auto.build_max > target) {
+  if (avg > target || m_auto.busy_max > target + 4.0 * k || m_auto.build_max > target ||
+      m_auto.tod_over_windows >= 2) {
     t -= 0.1f;
     m_auto.downs++;
+    m_auto.tod_downs += m_auto.tod_over_windows >= 2;
   } else if (avg < target - 4.0 * k && m_auto.busy_max < target &&
-             m_auto.build_max < target - 8.0 * k) {
+             m_auto.build_max < target - 8.0 * k && !tod_over) {
     t += 0.04f;
     m_auto.ups++;
   }
   t = std::clamp(t, 0.f, 1.f);
   // (AI-assisted, title-popin) a GPU close to missing frames lowers the distances of what is on
   // screen too (else those keep theirs until they are out of view; the build time's spikes, the
-  // time of day recolor, don't count here)
-  ctr_level_set_detail_urgent(avg > target + 3.0 * k || m_auto.busy_max > 33.0 * k);
+  // time of day recolor, don't count here). (AI-assisted, levellod) from the window's average or
+  // two frames over 33 ms, not one: a single spike (a distort copy, a burst of uploads) made
+  // ties at the edge of their distance vanish on screen
+  ctr_level_set_detail_urgent(avg > target + 3.0 * k || m_auto.over33 >= 2);
   if (t != m_auto.t) {
     m_auto.t = t;
     ctr_level_set_detail(t);
   }
-  m_auto.busy_ms = m_auto.busy_max = m_auto.build_max = 0;
-  m_auto.busy_frames = m_auto.frames = 0;
+  m_auto.busy_ms = m_auto.busy_max = m_auto.build_max = m_auto.build_tod_max = 0;
+  m_auto.busy_frames = m_auto.frames = m_auto.over33 = 0;
 }
 
 // (AI-assisted) config.ini gpu_profile = ab. A cycle has two windows per switch of kAbSwitches
@@ -1505,15 +1521,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_compact_textures(ctr_settings().compact_textures ? 1 : 0);
   ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
   ctr_gpu_set_proctex(ctr_settings().proctex_glows ? 1 : 0);
-  // (AI-assisted, j2-mem2) Jak II: impostors off unless config.ini says (CtrSettings.h)
-  if (g_game_version == GameVersion::Jak2 && !ctr_settings().impostors_set) {
-    ctr_settings_ab().impostors = false;  // (before any frame: see ctr_settings_ab)
-    lg::info("[ctr] Jak II: impostors off (config.ini impostors = on for them)");
-  }
-  // (AI-assisted) impostors: their texture in VRAM before the level texture pools fill it
-  if (ctr_settings().impostors) {
-    ctr_impostors().reserve();
-  }
   ctr_gpu_set_vram_textures(ctr_settings().vram_textures ? 1 : 0);
   ctr_gpu_set_mip_mode(ctr_settings().mipmaps);
   ctr_gpu_set_overlap(ctr_settings().overlap ? 1 : 0);

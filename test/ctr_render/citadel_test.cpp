@@ -1,9 +1,11 @@
 // (AI-assisted) CPU-only checks for visible light rewrites and perspective-correct sprite trim.
 #include "game/graphics/ctr/CtrLight.h"
 #include "game/graphics/ctr/CtrSpriteTrim.h"
+#include "game/graphics/ctr/CtrTodPulse.h"
 #include "check.h"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <random>
 
@@ -148,9 +150,48 @@ void test_clip_trim() {
             memcmp(before, quad, sizeof(quad)) == 0,
         "non-affine quads must retain their original geometry");
 }
+// (AI-assisted, levellod) tod_pulse_step's detector: citadel's mood light pulses, the day (also
+// the title's fast one, with its rounding wobble) never does
+void test_tod_pulse() {
+  auto run = [](auto weight, u64 frames) {
+    CtrTodPulse p;
+    u8 last[3] = {0, 0, 0};
+    bool first = true, fired = false;
+    for (u64 f = 1; f <= frames; f++) {
+      const int v = std::clamp((int)std::lround(weight(f)), 0, 255);
+      const u8 w[3] = {(u8)v, (u8)v, (u8)v};
+      if (first || memcmp(w, last, 3) != 0) {
+        fired = p.move(w, f) || fired;
+        memcpy(last, w, 3);
+        first = false;
+      }
+    }
+    return std::make_pair(fired, p.pulsing(frames));
+  };
+  // citadel: 0.875 +- 0.25 every 128 frames (30 fps) or 256 (fps_cap = 60)
+  for (double period : {128.0, 256.0}) {
+    const auto r = run([&](u64 f) { return 56.0 + 16.0 * std::sin(6.2831853 * f / period); }, 1200);
+    check(r.first && r.second, "a mood light's pulse must be found");
+  }
+  // the day: up and down over 1800 frames (the title's ~60x day), with a +-0.6 rounding wobble
+  const auto day = run(
+      [](u64 f) {
+        const double x = (double)(f % 3600) / 1800.0;
+        return 64.0 * (x < 1 ? x : 2 - x) + 0.6 * std::sin(f * 1.7);
+      },
+      7200);
+  check(!day.first, "the day's own motion must never count as a pulse");
+  // a weight standing at a step boundary (63 64 63 64 ...) is no pulse either
+  const auto wobble = run([](u64 f) { return 63.5 + 0.6 * std::sin(f * 0.9); }, 2000);
+  check(!wobble.first, "rounding wobble must not count as a pulse");
+  // a slow swell (a full cycle over 30 s) is the day's kind of motion
+  const auto slow = run([](u64 f) { return 40.0 + 20.0 * std::sin(6.2831853 * f / 900.0); }, 3600);
+  check(!slow.first, "a slow cycle must not count as a pulse");
+}
 }  // namespace
 
 void run_citadel_tests() {
   test_visible_lights();
   test_clip_trim();
+  test_tod_pulse();
 }

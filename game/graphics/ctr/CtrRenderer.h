@@ -190,13 +190,20 @@ class CtrRenderer {
   // config.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);
   // (AI-assisted) config.ini auto_detail: shrub / tie distances from the GPU time per frame
-  void auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms);
+  void auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms,
+                         double build_tod_ms);
   struct AutoDetail {
     float t = 0.25f;  // ctr_level_set_detail
     double busy_ms = 0, busy_max = 0, build_max = 0;
+    double build_tod_max = 0;  // (AI-assisted, levellod) the build time with the time of day's
     int busy_frames = 0, frames = 0;
+    int over33 = 0;            // (AI-assisted, levellod) frames over 33 ms of GPU in the window
+    int tod_over_windows = 0;  // (AI-assisted, levellod) windows in a row: build_tod_max > target
+    u64 load_frame = 0;        // (AI-assisted, levellod) the last frame of a level load
     int ups = 0, downs = 0;  // steps since the last log
+    int tod_downs = 0;       // (AI-assisted, levellod) ... of them by the time of day
   } m_auto;
+  bool m_title_loaded = false;  // (AI-assisted, levellod) note_levels: "title" is loaded
   bool profile_skips(const std::string& name) const;
   // (AI-assisted) gpu_profile = ab: the A/B windows (kAbSwitches in CtrRenderer.cpp)
   void ab_frame(float gpu_busy_ms, int gpu_busy_frames, int triangles, int draws);

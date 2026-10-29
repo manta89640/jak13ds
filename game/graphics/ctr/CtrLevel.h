@@ -29,12 +29,11 @@
 #include "common/dma/gs.h"
 #include "common/util/FileUtil.h"
 
-#include "game/graphics/ctr/CtrFineVis.h"
 #include "game/graphics/ctr/CtrRenderer.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
+#include "game/graphics/ctr/CtrTodPulse.h"
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/c3l_reader.h"
-#include "game/graphics/ctr/c3v_format.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 /*! (AI-assisted) c3l v12: an effect whose vertices the game rewrites (c3l::MercModEffect). */
@@ -246,14 +245,6 @@ struct CtrLevelData {
     return ci < chunk_dormant.size() && chunk_dormant[ci] != 0;
   }
   u32 generation = 0;             // tells loads of the same level apart
-  // (AI-assisted) config fine_vis: the level's .c3v sidecar (c3v_format.h, CtrFineVis.h), opened
-  // at load when it matches the .c3l (nullptr: none, or another conversion's); its blocks are read
-  // around the camera as it moves
-  std::shared_ptr<CtrFineVis> fine;
-  // (AI-assisted) occ_cull: per run, hidden by the occlusion buffer last frame (tested every frame;
-  // the others every 4th)
-  std::vector<u8> occ_hidden;
-  float occ_ema = 1e9f;  // triangles it hid per level draw (moving average; start: run it)
   // (AI-assisted) c3l v16 time of day: the level's colors in the game's 8 palettes, blended with
   // the weights the game sends (its mood's itimes, as the PC's tfrag3 / tie3 / shrub renderers do
   // each frame) into the chunks' vertex colors (tod_* in CtrLevel.cpp). nullptr: the file's baked
@@ -288,12 +279,12 @@ struct CtrLevelData {
     u8 weights[8][3] = {};
     u8 target_w[8][3] = {};
     bool blended_valid = false;  // weights taken at least once
-    // (AI-assisted, citadel) config tod_pulse_step: per palette the direction of the game's last
-    // move (1 up, 2 down), the frames of its last two reversals and of its last move, and the
-    // level draws a pulsing palette was held (statistics)
-    u8 pulse_dir[8] = {};
-    u64 pulse_rev[8][2] = {};
+    // (AI-assisted, citadel) config tod_pulse_step: per palette its pulse detector (CtrTodPulse.h;
+    // levellod), the frame of its last move, the palettes logged as pulsing, and the level draws a
+    // pulsing palette was held (statistics)
+    CtrTodPulse pulse[8];
     u64 pulse_move[8] = {};
+    u8 pulse_logged = 0;
     u32 pulse_held = 0;
     // the palettes found pulsing in an earlier load of the level (TodSeen) and the frame of the
     // level's first draw: those count as pulsing from the start (until they don't turn around for
@@ -442,11 +433,6 @@ struct CtrLevelData {
   std::vector<s32> chunk_normals;
   int normals_mesh = -1;
 };
-
-/*! (AI-assisted) host --ctr-gfx with env CTR_FINE_VIS_CHECK: the level pieces fine_vis hid this
- * frame are drawn again against the finished frame's depth, counting their pixels that would have
- * been seen (a culling error), and logged (log_now: the totals). Before ctr_gpu_frame_end. */
-void ctr_level_fine_vis_check(u64 frame, bool log_now);
 
 /*! DrawMode (tfrag3 draw settings) to ctr_gpu state. */
 ctr_draw_state ctr_state_from_draw_mode(DrawMode mode, int tex);
@@ -982,10 +968,6 @@ float ctr_level_detail();
 /*! (AI-assisted) render thread: the time of day blend / rewrite ms since the last call (taken out
  * of auto_detail's build time). */
 double ctr_level_tod_take_ms();
-// (AI-assisted, perfv2) the render thread's build time of the frame before (CtrRenderer), for the
-// work that can wait (impostor captures)
-void ctr_level_note_build_ms(double ms);
-double ctr_level_last_build_ms();
 
 class CtrTfragRenderer : public CtrBucketRenderer {
  public:
@@ -1017,10 +999,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   void log_stats(const CtrRenderState& rs, CtrLevelData* lev);  // (AI-assisted) the log lines
   int m_jak2_slot = -1;  // (AI-assisted) Jak II: the level slot being drawn (-1: Jak 1)
   // (AI-assisted, j2cull) draw_level's phases (ticks summed since the last log line): setup, the
-  // tie LOD groups (and near chunks), the chunk loop (view / visibility / run tests), occ_cull, time
-  // of day, impostors (chunks), the draw lists (the walk and the calls made), impostor cards, the
-  // backend (flush_calls); counts: level draws, chunks emitted, runs tested, draws walked / drawn
-  enum { kPhSetup, kPhLod, kPhChunks, kPhOcc, kPhTod, kPhImp, kPhLists, kPhCards, kPhFlush, kPhN };
+  // tie LOD groups (and near chunks), the chunk loop (view / visibility / run tests), time of day,
+  // the draw lists (the walk and the calls made), the backend (flush_calls); counts: level draws,
+  // chunks emitted, runs tested, draws walked / drawn
+  enum { kPhSetup, kPhLod, kPhChunks, kPhTod, kPhLists, kPhFlush, kPhN };
   u64 m_ph[kPhN] = {};
   u64 m_ph_draws = 0, m_ph_emits = 0, m_ph_runs = 0, m_ph_walked = 0, m_ph_calls = 0;
   u64 m_ph_skipped = 0, m_ph_lod_skipped = 0;  // chunks / tie LOD groups their cluster stood for
@@ -1062,30 +1044,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<u8> m_run_nomerge;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
-  // (AI-assisted) fine_vis: the level's set this frame (nullptr: none); statistics: chunks and
-  // triangles it hid (that the other tests drew), level draws with a set / with a .c3v
-  const CtrFineVis* m_fine = nullptr;
-  const u32* m_fine_bits = nullptr;
-  float m_fine_k_lo = 1e30f, m_fine_k_hi = 0.f;  // the tie LOD factors seen (statistics)
-  u64 m_fine_chunks = 0, m_fine_tris = 0, m_fine_frames = 0, m_fine_levels = 0;
-  // (AI-assisted) occ_cull (CtrOccCull.h): the occluder candidates of a level draw; statistics:
-  // level draws, occluder triangles taken / rasterized, chunks / runs / triangles hidden, ms
-  struct OccCand {
-    float pri;
-    u32 slot, di, first, count;
-  };
-  std::vector<OccCand> m_occ_cands;
-  struct OccTri {
-    float q[3][4];
-    float size;
-  };
-  std::vector<OccTri> m_occ_tris_buf;
-  u64 m_occ_frames = 0, m_occ_tris_in = 0, m_occ_tris_drawn = 0, m_occ_chunks = 0, m_occ_runs = 0,
-      m_occ_tris = 0, m_occ_drawn_tris = 0;
-  double m_occ_ms = 0, m_occ_max_ms = 0, m_occ_phase[6] = {0, 0, 0, 0, 0, 0};
-  // (AI-assisted) host --ctr-gfx, env CTR_FINE_VIS_CHECK: the runs fine_vis hid this level draw
-  // (chunk, run; run ~0u: all of the chunk), checked against the frame's depth at its end
-  std::vector<std::pair<u32, u32>> m_fine_hidden;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
   // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
   u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;
@@ -1118,7 +1076,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     u32 chunk;
     u8 band;    // (AI-assisted) distance band for the early depth order: 0 near .. 2 far
     bool partly;  // (AI-assisted) some of its visibility runs are hidden: draw run by run
-    bool runs_valid;  // (AI-assisted) m_run_shown holds its runs' flags (impostors)
+    bool runs_valid;  // (AI-assisted) m_run_shown holds its runs' flags (time of day)
     bool vista;   // (AI-assisted) far scenery: drawn first, with the vista fog (lowres_vista)
     bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
     float clip[16];

@@ -50,7 +50,7 @@ with groups kept so.
 So a group's near runs are drawn only from a mesh that is there, and its far runs are hidden only
 when it chose near, which needs all of its near meshes there and within their distance: there is no
 frame where neither version is drawn. The rest of a unit's culling (the view test of its sphere,
-visibility bits, run culling, fine_vis) is the same as for any tie chunk and doesn't depend on
+visibility bits, run culling) is the same as for any tie chunk and doesn't depend on
 streaming; a far version's triangles lie inside its near version's corners (geometry 3's corners
 are geometry 0 vertices), so when a unit is out of view its groups' far versions are too. A level
 seen from a neighbouring one (far mode) never draws units: its groups are far there (as far mode
@@ -220,13 +220,6 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   light lists and palettes (`tod_scan`) at its first take, once per level load. Host check:
   `CTR_TOD_CHECK=1`.
 - Tie LOD: unchanged for the far chunks; a unit's runs are LOD runs like any tie LOD chunk's.
-- Impostors (merged Oct 17: cards from the tie LOD version on screen): units are never cards and
-  don't restart the level's cards when their meshes come and go. A far chunk's card holds far
-  versions only (its near versions are in units): while a unit is late its groups are far and the
-  card shows what is drawn; once they switch near their far runs are hidden, the card's cluster
-  isn't shown and the unit draws them as geometry. No recapture needed.
-- fine_vis: units are tie chunks (never occluders); a .c3v made from the v19 file covers them.
-  Regenerate the .c3v files after the reconvert (`ctr_vis_builder --all <c3l folder>`).
 - Partial unload (far mode), repair of incomplete loads: units are not theirs (never "missing").
   (AI-assisted, streammem, Oct 29) A detail reload reads at most 2 MB per job (tier 1 / 2 tfrag
   first, then the nearest), keeps what each job made and asks for the next at once; it starts when
@@ -375,7 +368,6 @@ colors, no load failures.
 - tfrag tier 1 and the shrubs are not streamed (tier 2 has holes up close: no coarse fallback that
   hides nothing); textures not streamed. Hardware SD timing not measured (Azahar reads the host's
   disk; the cost model is 5.5 MB/s + 8 ms per request).
-- .c3v files: regenerate with `ctr_vis_builder --all` on the v19 folder (checked on sunkenb).
 
 ## Jak II: dormant levels and the arena size (AI-assisted, j2-mem, Oct 18)
 

@@ -353,10 +353,6 @@ float merc_fog(float w) {
                     0.f, 1.f);
 }
 
-// (AI-assisted) ctr_gpu_soft_query_begin: count the fragments that pass, write nothing
-bool s_query = false;
-long s_query_px = 0;
-ctr_gpu_stats s_query_saved{};
 
 // (AI-assisted, Jak II texture animation) ctr_gpu_tex_set_anim_slot / ctr_gpu_anim_slot_set, as
 // the 3DS backend: a texture's slot + 1, each slot's texture + 1 (this frame, the next)
@@ -476,7 +472,7 @@ void shade_pixel(const ctr_draw_state& st,
     g = std::min(g, 255.f) + ec[1] * w;
     b = std::min(b, 255.f) + ec[2] * w;
   }
-  const bool ss_on = softstats::enabled() != 0 && !s_query;
+  const bool ss_on = softstats::enabled() != 0;
   if (ss_on) {
     softstats::cur->px++;
     if (!s_target.rt) softstats::od[px + py * kW]++;
@@ -505,13 +501,9 @@ void shade_pixel(const ctr_draw_state& st,
     return;
   }
   if (!test(st.ztest, z, s_target.depth[idx])) {
-    if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR) && !s_query) {
+    if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR)) {
       *sten = 0;
     }
-    return;
-  }
-  if (s_query) {
-    s_query_px++;  // (AI-assisted) occlusion query: counted, nothing written
     return;
   }
   if (sten) {
@@ -1230,15 +1222,6 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
 
 static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const uint8_t* verts,
                            const uint16_t* indices, int first_index, int index_count);
-
-void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
-                              const void* verts, const uint16_t* indices, int index_count) {
-  sky_hook(state);
-  softstats::prog(1);
-  if (verts && indices) {
-    soft_mesh_tris(state, matrix->m, (const uint8_t*)verts, indices, 0, index_count);
-  }
-}
 
 int ctr_gpu_copy_screen_part(float x0, float x1) {
   // (AI-assisted) the whole screen as well (no tiles here); counted like ctr_gpu_citro3d.c's rows
@@ -2404,21 +2387,6 @@ void ctr_gpu_set_depth_far(int on) {
 void ctr_gpu_set_skip_color_clear(int on) {
   s_skip_color_clear = on != 0;
 }
-void ctr_gpu_soft_query_begin(void) {
-  s_query = true;
-  s_query_px = 0;
-  s_query_saved = g_soft.cur;
-}
-
-long ctr_gpu_soft_query_count(void) {
-  return s_query_px;
-}
-
-void ctr_gpu_soft_query_end(void) {
-  s_query = false;
-  g_soft.cur = s_query_saved;
-}
-
 const char* ctr_gpu_soft_bucket_name(void) {
   return softstats::cur_name.c_str();
 }

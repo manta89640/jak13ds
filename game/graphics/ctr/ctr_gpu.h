@@ -236,7 +236,7 @@ int ctr_gpu_copy_screen_part(float x0, float x1);
 /* (AI-assisted, j2gaps) frees the screen copy's texture (the next copy makes it again): Jak II's
  * menu keeps a copy of the game's last frame only while the menu shows it */
 void ctr_gpu_screen_copy_release(void);
-/* (AI-assisted) Render to texture (impostors, CtrImpostor): an RGBA8 texture the GPU draws into,
+/* (AI-assisted) Render to texture (ocean env map, minimap): an RGBA8 texture the GPU draws into,
  * in VRAM when there is room (else linear memory: make it before the level texture pools fill
  * VRAM), and a D16 depth buffer for
  * tiles of up to max_tile_w x 256 pixels. "Logical" pixels: lw along ctr x (left to right), lh
@@ -256,7 +256,7 @@ int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h);
 void ctr_gpu_rt_end(void);
 void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t);
 /* (AI-assisted) a static mesh's vertices and indices as made (ctr_gpu_mesh_create / _end), to
- * read on the CPU (the impostors' bounding boxes); 0 if there is none */
+ * read on the CPU; 0 if there is none */
 int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
                       int* index_count);
 /* (AI-assisted) measurement: the CPU time spent in the screen copies since the last call (ms; the
@@ -660,10 +660,6 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n);
 /* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call ([ctr] gpu micro ...);
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);
-/* (AI-assisted) impostor cards (CtrImpostor): the same with this frame's vertices (c3l::Vertex)
- * and u16 indices from ctr_gpu_stream_alloc instead of a mesh's */
-void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
-                              const void* verts, const uint16_t* indices, int index_count);
 
 /* ---------------- (AI-assisted) the ocean (config ocean = waves, CtrOcean) ----------------
  * Vertices in the static mesh layout (c3l::Vertex, its st unused), drawn by
@@ -799,12 +795,6 @@ void ctr_gpu_soft_bucket(const char* name);
 void ctr_gpu_soft_dump_tex(int tex, const char* path);
 /* (AI-assisted) the name the draws are counted under now */
 const char* ctr_gpu_soft_bucket_name(void);
-/* (AI-assisted) occlusion query (CTR_FINE_VIS_CHECK): between begin and end, draws write nothing
- * and count their fragments that pass the alpha, stencil and depth tests (count: so far); the
- * frame's statistics leave them out */
-void ctr_gpu_soft_query_begin(void);
-long ctr_gpu_soft_query_count(void);
-void ctr_gpu_soft_query_end(void);
 #endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);

@@ -32,12 +32,11 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"shader_opt", "off"},       {"frame_overlap2", "off"},    {"skin_rows_f24", "off"},
     {"skin_clip_f24", "off"},    {"cmd_dedup", "off"},         {"cmd_dedup_draw", "off"},
     {"fog_alpha", "off"},        {"tex1_gating", "off"},       {"cull_merc", "off"},
-    {"sky_last", "off"},         {"tex_cache_clear", "always"}, {"vista_untextured", "off"},
+    {"sky_last", "off"},         {"tex_cache_clear", "always"},
     {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
     {"ocean_tex_half", "off"},   {"opaque_alpha", "off"},
-    {"fine_vis", "off"},         {"skip_clear", "off"},
+    {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
-    {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
     {"streaming", "off"}, /* (AI-assisted, streaming) */
     {"particle_fill", "off"}, /* (AI-assisted, perfv2) */
     /* (AI-assisted, fidelity2) the full texture and shine detail */
@@ -141,6 +140,10 @@ static const char* const ctr_cfg_removed[] = {
     "static_cmdlists", "shader_resident",
     /* (AI-assisted, cpusound, Oct 29) the Citadel cage's native birth callback: always on */
     "shield_native",
+    /* (AI-assisted, levellod, Oct 29) impostors, fine_vis, occ_cull and the untextured vista:
+     * removed (opt-audit: they cost more than they saved, or no shipped file used them) */
+    "impostors", "impostor_distance", "impostor_error", "impostor_budget", "impostor_atlas",
+    "fine_vis", "fine_vis_kb", "occ_cull", "occ_cull_tris", "occ_cull_dist", "vista_untextured",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */
