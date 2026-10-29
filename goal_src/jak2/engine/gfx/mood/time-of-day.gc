@@ -471,14 +471,15 @@
                  ((= s3-0 s5-2)
                   (if *teleport*
                       (set! (-> arg0 interp s4-1) 1.0)
-                      (set! (-> arg0 interp s4-1) (fmin 1.0 (+ 0.0166 (-> arg0 interp s4-1))))
+                      ;; og:preserve-this 3DS: one step per 60 Hz frame of the drawn frame
+                      (set! (-> arg0 interp s4-1) (fmin 1.0 (+ (* 0.0166 (the float (#if TARGET_3DS (max 1 (the int (-> *display* dog-ratio))) 1))) (-> arg0 interp s4-1))))
                       )
                   )
                  (*teleport*
                    (set! (-> arg0 interp s4-1) 0.0)
                    )
                  (else
-                   (set! (-> arg0 interp s4-1) (fmax 0.0 (+ -0.0166 (-> arg0 interp s4-1))))
+                   (set! (-> arg0 interp s4-1) (fmax 0.0 (+ (* -0.0166 (the float (#if TARGET_3DS (max 1 (the int (-> *display* dog-ratio))) 1))) (-> arg0 interp s4-1))))
                    )
                  )
                )

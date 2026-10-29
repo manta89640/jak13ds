@@ -638,7 +638,8 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
     r[4] = state;
     if (const u32 birth_func = gload<u32>(sp + 108)) {
       r[3] = launcher;
-      if (shield && sp_birth_random_rot(birth_func, r, callee)) {
+      if ((shield && sp_birth_random_rot(birth_func, r, callee)) ||
+          sp_birth_set_quat(birth_func, r, callee)) {
         v0 = 0;
       } else {
         call(birth_func);

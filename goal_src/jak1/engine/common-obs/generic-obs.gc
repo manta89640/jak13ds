@@ -9,6 +9,140 @@
 
 ;; note: changed for high fps
 
+;; 3DS: joint-control-remap! with prefix "" and its lookups cached, failed ones too. A clone
+;; finds its own animation by the name of the one it copies: a string format and a string search of
+;; its art group per channel, every frame. The result only depends on the name, both art groups and
+;; the remap list (and the seed, for names with variants in the list: those are not cached). An
+;; entry keeps a copy of the name, and a found animation must still be in the art group under a
+;; name that matches it, so reused animation memory (spooled parts, level loads) never hits.
+(#when TARGET_3DS
+  (deftype joint-remap-cache (structure)
+    ((next      int32)
+     (src       art-joint-anim 32)
+     (dst-group art-group 32)
+     (src-group art-group 32)
+     (remap     pair 32)
+     (dst-count int32 32)
+     (result    art-joint-anim 32)
+     (name      uint8 2048)))
+
+  (defun joint-remap-name=? ((buf (pointer uint8)) (name string))
+    (dotimes (i 64)
+      (let ((c (-> name data i)))
+        (if (!= c (-> buf i)) (return #f))
+        (if (zero? c) (return #t))))
+    #f)
+
+  (defun joint-remap-charp= ((a (pointer uint8)) (b (pointer uint8)))
+    (let ((i 0))
+      (while #t
+        (let ((c (-> a i)))
+          (if (!= c (-> b i)) (return #f))
+          (if (zero? c) (return #t))
+          )
+        (+! i 1)
+        )
+      )
+    #f
+    )
+
+  (defun joint-remap-name-copy! ((buf (pointer uint8)) (name string))
+    "Copy name into buf, #f if it doesn't fit"
+    (dotimes (i 64)
+      (let ((c (-> name data i)))
+        (set! (-> buf i) c)
+        (if (zero? c) (return #t))))
+    #f)
+
+  (defun joint-remap-in-group? ((group art-group) (anim art-joint-anim))
+    (dotimes (i (-> group length))
+      (if (= (-> group data i) anim) (return #t)))
+    #f)
+
+  (defun joint-control-remap-cached! ((cache joint-remap-cache)
+                                      (jc joint-control)
+                                      (dst art-group)
+                                      (src-group art-group)
+                                      (remap pair)
+                                      (seed int))
+    "joint-control-remap! with prefix \"\", cached in cache (see above)"
+    (let ((prefix-len (+ (length (-> src-group name)) 1))
+          (dst-prefix-len (+ (length (-> dst name)) 1))
+          (result #t)
+          (fallback 2))
+      (while (and (< fallback (-> dst length)) (!= (-> dst data fallback type) art-joint-anim))
+        (+! fallback 1))
+      (dotimes (ch (-> jc active-channels))
+        (let ((chan (-> jc channel ch)))
+          (when (-> chan frame-group)
+            (let ((anim (-> chan frame-group))
+                  (slot -1)
+                  (i 0))
+              (while (< i 32)
+                (when (and (= (-> cache src i) anim)
+                           (= (-> cache dst-group i) dst)
+                           (= (-> cache src-group i) src-group)
+                           (= (-> cache remap i) remap)
+                           (= (-> cache dst-count i) (-> dst length))
+                           (joint-remap-name=? (&-> cache name (* i 64)) (-> anim name))
+                           (or (not (-> cache result i))
+                               (let ((hit (-> cache result i))
+                                     (key (&-> cache name (+ (* i 64) prefix-len))))
+                                 (and (joint-remap-in-group? dst hit)
+                                      (= (-> hit type) art-joint-anim)
+                                      (or (joint-remap-charp= key (-> hit name data))
+                                          (joint-remap-charp= key (&-> hit name data dst-prefix-len)))))))
+                  (set! slot i)
+                  (set! i 32))
+                (+! i 1))
+              (cond
+                ((>= slot 0)
+                 (cond
+                   ((-> cache result slot) (set! (-> chan frame-group) (-> cache result slot)))
+                   (else
+                    (set! (-> chan frame-group) (the-as art-joint-anim (-> dst data fallback)))
+                    (set! (-> chan frame-num) 0.0)
+                    (set! result #f))))
+                (else
+                 (format (clear *temp-string*) "~S~G" "" (&+ (-> anim name data) prefix-len))
+                 (let ((variants (if (null? remap) #f (nassoc *temp-string* remap))))
+                   (when variants
+                     (let* ((a0-9 variants)
+                            (k (mod seed (+ ((method-of-type (rtype-of a0-9) length) a0-9) -1))))
+                       (format (clear *temp-string*) "~S" (ref variants (+ k 1)))))
+                   (let ((found (the-as art-joint-anim (lookup-art dst *temp-string* art-joint-anim))))
+                     (cond
+                       (found (set! (-> chan frame-group) found))
+                       (else
+                        (set! (-> chan frame-group) (the-as art-joint-anim (-> dst data fallback)))
+                        (set! (-> chan frame-num) 0.0)
+                        (set! result #f)))
+                     (when (not variants)
+                       (let* ((n (-> cache next))
+                              (buf (&-> cache name (* n 64))))
+                         (set! (-> cache next) (logand (+ n 1) 31))
+                         (cond
+                           ((joint-remap-name-copy! buf (-> anim name))
+                            (set! (-> cache src n) anim)
+                            (set! (-> cache dst-group n) dst)
+                            (set! (-> cache src-group n) src-group)
+                            (set! (-> cache remap n) remap)
+                            (set! (-> cache dst-count n) (-> dst length))
+                            (set! (-> cache result n) found))
+                           (else (set! (-> cache src n) (the-as art-joint-anim #f))))))))))))))
+      result))
+
+  (define *clone-remap-cache* (new 'static 'joint-remap-cache)))
+
+(defmacro joint-control-remap-maybe-cached! (cache jc dst src-group remap seed prefix)
+  "joint-control-remap!, through the 3DS cache when prefix is empty"
+  `(#if TARGET_3DS
+     (if (and ,prefix (zero? (-> ,prefix data 0)))
+       (joint-control-remap-cached! ,cache ,jc ,dst ,src-group ,remap ,seed)
+       (joint-control-remap! ,jc ,dst ,src-group ,remap ,seed ,prefix))
+     (joint-control-remap! ,jc ,dst ,src-group ,remap ,seed ,prefix)))
+
+
 (define-extern convert-to-hud-object (function process-drawable hud none :behavior process-drawable))
 
 ;; TODO - temporary
@@ -41,12 +175,14 @@
     (if (the-as process-drawable s5-0) (joint-control-copy! (-> self skel) (-> (the-as process-drawable s5-0) skel)))
     (cond
       ((and (the-as process-drawable s5-0)
-            (joint-control-remap! (-> self skel)
-                                  (-> self draw art-group)
-                                  (-> (the-as process-drawable s5-0) draw art-group)
-                                  '()
-                                  0
-                                  arg3))
+            ;; og:preserve-this
+            (joint-control-remap-maybe-cached! *clone-remap-cache*
+                                               (-> self skel)
+                                               (-> self draw art-group)
+                                               (-> (the-as process-drawable s5-0) draw art-group)
+                                               '()
+                                               0
+                                               arg3))
        (when arg2
          (let* ((s4-1 (-> self root))
                 (a0-7 (if (and (nonzero? s4-1) (type-type? (-> s4-1 type) collide-shape)) (the-as collide-shape s4-1))))
@@ -271,12 +407,14 @@
            (let ((gp-0 (ppointer->process (-> self parent))))
              (set! (-> self post-hook) #f)
              (joint-control-copy! (-> self skel) (-> (the-as process-drawable gp-0) skel))
-             (joint-control-remap! (-> self skel)
-                                   (-> self draw art-group)
-                                   (-> (the-as process-drawable gp-0) draw art-group)
-                                   '()
-                                   0
-                                   ""))
+             ;; og:preserve-this
+             (joint-control-remap-maybe-cached! *clone-remap-cache*
+                                                (-> self skel)
+                                                (-> self draw art-group)
+                                                (-> (the-as process-drawable gp-0) draw art-group)
+                                                '()
+                                                0
+                                                ""))
            (do-joint-math! self))
           (('clone-anim)
            (clone-anim-once (if (handle->process (-> self cur-target-handle))

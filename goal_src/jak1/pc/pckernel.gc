@@ -147,10 +147,24 @@
   (logior! (-> obj cheats-known) (-> obj cheats))
   0)
 
+(#when TARGET_3DS
+  (define *music-log-last* (the-as symbol #f))
+  (define *music-log-last-flava* -1))
+
 (defmethod update-music-log ((obj pc-settings-jak1))
   "update music log settings."
   ;; add whatever is playing to the music log.
-  (add-to-music-log obj (-> *setting-control* current music) (the int (-> *setting-control* current sound-flava)))
+  ;; 3DS: the playing music when it changes, everything every 30 frames.
+  (#if TARGET_3DS
+    (let ((music (-> *setting-control* current music))
+          (flava (the int (-> *setting-control* current sound-flava)))
+          (all? (= (mod *pc-update-count* 30) 15)))
+      (when (or all? (!= music *music-log-last*) (!= flava *music-log-last-flava*))
+        (add-to-music-log obj music flava)
+        (set! *music-log-last* music)
+        (set! *music-log-last-flava* flava))
+      (if (not all?) (return 0)))
+    (add-to-music-log obj (-> *setting-control* current music) (the int (-> *setting-control* current sound-flava))))
   ;; special cases. for example, npc's that despawn and you can't hear their music anymore.
   (if (task-closed? (game-task village1-buzzer) (task-status need-resolution))
     (add-to-music-log obj 'village1 (flava-lookup 'village1 (music-flava assistant))))
