@@ -4069,10 +4069,10 @@ void ctr_gpu_set_compact_textures(int on) {
 /* ---------------- (AI-assisted) compact textures ---------------- */
 
 /* Is a gray texture a radial gradient around its center (glows, light halos)? Its texels must be
- * within a small error of the average at their distance from the center (distances past the edge
- * count as the edge, as the procedural texture unit clamps them). On success fills lut with the
- * averages from the center (0) to the edge (RADIAL_LUT - 1): R in the low byte, alpha doubled
- * like the compact formats. */
+ * the average at their distance from the center (distances past the edge count as the edge, as
+ * the procedural texture unit clamps them), so that it draws the same pixels. On success fills
+ * lut with the averages from the center (0) to the edge (RADIAL_LUT - 1): R in the low byte,
+ * alpha doubled like the compact formats. */
 static int check_radial(int w, int h, const uint8_t* rgba, u32* lut) {
   enum { BINS = 48 };
   if (w != h || w < 16) {
@@ -4129,28 +4129,7 @@ static int check_radial(int w, int h, const uint8_t* rgba, u32* lut) {
       sa[b] = sa[f];
     }
   }
-  /* how many texels are off their ring's average */
-  int bad = 0;
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      const uint8_t* p = rgba + 4 * (y * w + x);
-      const float dx = (float)x + 0.5f - c, dy = (float)y + 0.5f - c;
-      float r = sqrtf(dx * dx + dy * dy) * inv_c;
-      if (r > 1.0f) {
-        r = 1.0f;
-      }
-      const float fb = r * (BINS - 1);
-      const int b0 = (int)fb, b1 = b0 + 1 < BINS ? b0 + 1 : b0;
-      const float t = fb - (float)b0;
-      const float el = sl[b0] + (sl[b1] - sl[b0]) * t, ea = sa[b0] + (sa[b1] - sa[b0]) * t;
-      if (fabsf((float)p[1] - el) + 2.f * fabsf((float)p[3] - ea) > 28.f) {
-        bad++;
-      }
-    }
-  }
-  if (bad * 40 > w * h) {
-    return 0; /* more than 2.5% of the texels: a pattern, not a gradient */
-  }
+  float tl[RADIAL_LUT], ta[RADIAL_LUT];
   for (int i = 0; i < RADIAL_LUT; i++) {
     const float fb = (float)i / (float)(RADIAL_LUT - 1) * (BINS - 1);
     const int b0 = (int)fb, b1 = b0 + 1 < BINS ? b0 + 1 : b0;
@@ -4158,6 +4137,44 @@ static int check_radial(int w, int h, const uint8_t* rgba, u32* lut) {
     float l = sl[b0] + (sl[b1] - sl[b0]) * t, a = 2.f * (sa[b0] + (sa[b1] - sa[b0]) * t);
     const u32 li = l > 255.f ? 255u : (u32)(l + 0.5f), ai = a > 255.f ? 255u : (u32)(a + 0.5f);
     lut[i] = (ai << 24) | (li << 16) | (li << 8) | li;
+    tl[i] = (float)li;
+    ta[i] = (float)ai;
+  }
+  /* the table must give the texture's bilinear samples (at texel centers and halfway between
+   * them, clamped to the edge) within 2 in each color channel and the doubled alpha */
+  for (int j = 0; j <= 2 * h; j++) {
+    for (int i = 0; i <= 2 * w; i++) {
+      const float X = 0.5f * (float)i, Y = 0.5f * (float)j;
+      const float fx0 = floorf(X - 0.5f), fy0 = floorf(Y - 0.5f);
+      const float fx = X - 0.5f - fx0, fy = Y - 0.5f - fy0;
+      const int x0 = fx0 < 0.f ? 0 : (int)fx0, y0 = fy0 < 0.f ? 0 : (int)fy0;
+      const int x1 = x0 + 1 < w && fx0 >= 0.f ? x0 + 1 : x0;
+      const int y1 = y0 + 1 < h && fy0 >= 0.f ? y0 + 1 : y0;
+      const uint8_t* p00 = rgba + 4 * (y0 * w + x0);
+      const uint8_t* p10 = rgba + 4 * (y0 * w + x1);
+      const uint8_t* p01 = rgba + 4 * (y1 * w + x0);
+      const uint8_t* p11 = rgba + 4 * (y1 * w + x1);
+      float v[4];
+      for (int k = 0; k < 4; k++) {
+        const float top = (float)p00[k] + ((float)p10[k] - (float)p00[k]) * fx;
+        const float bot = (float)p01[k] + ((float)p11[k] - (float)p01[k]) * fx;
+        v[k] = top + (bot - top) * fy;
+      }
+      v[3] = v[3] * 2.f > 255.f ? 255.f : v[3] * 2.f;
+      const float dx = X - c, dy = Y - c;
+      float r = sqrtf(dx * dx + dy * dy) * inv_c;
+      if (r > 1.0f) {
+        r = 1.0f;
+      }
+      const float fb = r * (RADIAL_LUT - 1);
+      const int b0 = (int)fb, b1 = b0 + 1 < RADIAL_LUT ? b0 + 1 : b0;
+      const float t = fb - (float)b0;
+      const float l = tl[b0] + (tl[b1] - tl[b0]) * t, a = ta[b0] + (ta[b1] - ta[b0]) * t;
+      if (fabsf(v[0] - l) > 2.f || fabsf(v[1] - l) > 2.f || fabsf(v[2] - l) > 2.f ||
+          fabsf(v[3] - a) > 2.f) {
+        return 0;
+      }
+    }
   }
   return 1;
 }

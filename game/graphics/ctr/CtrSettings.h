@@ -213,16 +213,15 @@ struct CtrSettings {
   // world sprites (particles, glows) at most this fraction of the screen height (0 = no limit)
   float sprite_max_size = 0.f;  // (AI-assisted) 0 since Oct 12, as the PS2 (0.5 was the 30 fps cut)
   // (AI-assisted) world sprites with a half size over ~20 pixels are left out below this alpha
-  // (the game's 0..128; all sprites are left out below 2, the old rule for every size)
-  int sprite_min_alpha = 2;  // (AI-assisted) 2 since Oct 12: the old rule only (6 was the 30 fps cut)
+  // (the game's 0..128); 2: none (only sprites drawn with alpha 0 are skipped, where that changes
+  // no pixel)
+  int sprite_min_alpha = 2;
   // (AI-assisted) blended world sprites drop their alpha 0 fragments (alpha test, where alpha 0
   // adds nothing): no framebuffer traffic for them; the picture is the same. off: no alpha test
   bool sprite_alpha_discard = true;
-  // (AI-assisted, perfv2) particle_fill = off | on | strong: fewer blended particle pixels for the
-  // GPU. on: each world particle drawn over its texture's alpha box only (the same picture), and
-  // (AI-assisted, mercsprite) big far 3D particles (the Citadel cage) thinned by alike slot pairs
-  // (CtrSprite draw_chunk_mode); strong: also big faint overlapping 2D ones. off: as before (preset
-  // safe)
+  // (AI-assisted, perfv2) particle_fill = off | on | strong. strong: big faint overlapping 2D
+  // particles thinned by alike slot pairs (CtrSprite draw_chunk_mode; an approximation); off and
+  // on draw every particle (each one over its texture's alpha box only, always: the same picture)
   int particle_fill = 1;
   // the game's own visibility data (which parts of a level can be seen from the camera's spot)
   // hides level parts behind walls and hills (needs .c3l v10 files)

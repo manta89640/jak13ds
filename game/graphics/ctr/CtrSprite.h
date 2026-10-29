@@ -75,19 +75,17 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
 
   static_assert(sizeof(AdGif) == 80);
 
-  /*! (AI-assisted) particle_fill pair thinning: what pair_weight needs of a world sprite (see
-   * draw_chunk_mode). valid: it would be drawn (on screen for 3D, not left out as faint or
-   * transparent); a: its alpha (0..128); half: its half size (2D: GS units after the size limits;
-   * 3D: world units); cx, cy: its center (2D: GS units); dist: its distance (3D, game units). */
+  /*! particle_fill = strong pair thinning of 2D world sprites: what pair_weight needs of one (see
+   * draw_chunk_mode). valid: it would be drawn (not left out as faint or transparent); a: its
+   * alpha (0..128); half: its half size in GS units after the size limits; cx, cy: its center
+   * (GS units). */
   struct PairM {
     bool valid = false;
-    float a = 0, half = 0, cx = 0, cy = 0, dist = 0;
+    float a = 0, half = 0, cx = 0, cy = 0;
   };
-  template <Mode mode>
   PairM pair_metrics(const VecData& v) const;
-  //! (AI-assisted) 0..1: how much of the partner's alpha the keeper takes (1: the partner is left
-  //! out), from both members' metrics; 0: draw both as they are
-  template <Mode mode>
+  //! 0..1: how much of the partner's alpha the keeper takes (1: the partner is left out), from
+  //! both members' metrics; 0: draw both as they are
   float pair_weight(const PairM& k, const PairM& p) const;
 
   CtrVram* m_vram;
@@ -205,7 +203,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   float m_last_tex_box[4] = {0.f, 0.f, 1.f, 1.f};
   float m_last_box[4] = {0.f, 0.f, 1.f, 1.f};
   bool m_last_trim_ok = false;  // a texel of alpha 0 changes nothing in the last state's blend
-  bool m_last_trim = false;     // ... and particle_fill trims its world particles to m_last_box
+  bool m_last_trim = false;     // ... and its world particles are trimmed to m_last_box
   float m_last_box_st[4] = {0.f, 0.f, 1.f, 1.f};  // m_last_box in texture coordinates
   int m_st_sel[4][2] = {{0, 1}, {2, 1}, {2, 3}, {0, 3}};  // corner k: its m_last_box s, t entries
   // (AI-assisted, perfv2) this frame's st corners (m_st_out[0]) as an affine frame: the corners
@@ -226,14 +224,14 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // coordinates ([1]: for the procedural texture, centered on 0)
   float m_size_cap = 0;
   // (AI-assisted) config sprite_min_alpha (GS alpha, 128 = opaque) for sprites with a half size
-  // over kBigHalfGs GS units: 20 pixels at the screen's 240 / 448 pixels per GS unit
-  float m_min_alpha_big = 2.f;
+  // over kBigHalfGs GS units: 20 pixels at the screen's 240 / 448 pixels per GS unit; 0 (the
+  // config's 2): none left out
+  float m_min_alpha_big = 0.f;
   static constexpr float kBigHalfGs = 20.f * 448.f / 240.f;
   // (AI-assisted, perfv2) config particle_fill (0 off, 1 on, 2 strong), this frame; the world 2D
   // sprites' slot (their index in the game's sparticle arrays: a particle keeps its slot while it
   // lives) at the next chunk
   int m_particle_fill = 1;
-  float m_xyz_reach = 0.5f;  // (AI-assisted) largest 3D corner offset per unit of scale
   float m_st_out[2][4][2] = {};
   // (AI-assisted) game version (see the constructor): GS y to clip y, kBigHalfGs
   bool m_jak2 = false;
@@ -243,11 +241,9 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   bool m_alpha_discard = false;  // (AI-assisted) CtrSettings::sprite_alpha_discard, this frame
   struct Stats {
     int sprites_2d = 0, sprites_hud = 0, sprites_3d = 0, draws = 0, distort = 0, capped = 0;
-    int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels
     int faint = 0;          // (AI-assisted) sprite_min_alpha: big faint ones left out
     int trimmed = 0;        // (AI-assisted, perfv2) drawn over their texture's alpha box only
     int thinned = 0;        // (AI-assisted, perfv2) big faint ones left out, their partners denser
-    int thinned_3d = 0;     // (AI-assisted) big far 3D ones left out (the Citadel cage), the same way
     int glows = 0;          // (AI-assisted) Jak II glow flares drawn
   } m_stats;
   // (AI-assisted) a frame that took more than 3 ms logs its counts (render)

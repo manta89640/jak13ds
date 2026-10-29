@@ -260,7 +260,6 @@ float shield_density() {
   static const float density = [] {
     float d = 1.f;
 #ifdef __3DS__
-    d = 0.25f;
     char v[32];
     if (ctr_config_get("shield_density", v, sizeof(v))) {
       d = strtof(v, nullptr);

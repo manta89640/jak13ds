@@ -112,7 +112,7 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"io_checksum", "off"},
     {"c3l_read_buffer", "256"},
     {"particle_density", "1"}, /* (AI-assisted, j1ocean) every particle (was 0.7) */
-    {"shield_density", "0.25"}, /* (AI-assisted) Citadel robot cage, 0.125..1 */
+    {"shield_density", "1"}, /* Citadel robot cage, 0.125..1 (1: every panel) */
     {"anim_lod", "on"},
     {"merc_lod_scale", "1"},
     {"ocean", "full"},
