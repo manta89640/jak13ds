@@ -89,7 +89,7 @@ struct Options {
   // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
   // runtime blends the palettes with the game's weights (off: the baked palette only)
   bool tod = true;
-  int max_tex = 1024;  // (the GPU's largest: every PS2 texture at its own size)
+  int max_tex = 128;
   float cell_meters = 200.f;
   // tie instances smaller than detail_radius (bounding sphere radius, meters) are only drawn up
   // to detail_dist meters away; smaller than medium_radius: up to medium_dist
