@@ -3097,11 +3097,11 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
     return;
   }
   C3D_SyncTextureCopy(in, indim, out, outdim, size, flags);
-  /* (AI-assisted, gpu-home) outside a frame citro3d waits for "the" PPF event (gspWaitForPPF), and
-   * steady pacing's transfers and fences signal it twice per frame with nobody clearing it: it
-   * returned at once while the copy still ran. The queue holds only this copy now (citro3d's safe
-   * copy waited for and cleared the rest): idle = done. */
-  gxCmdQueueWait(&__C3D_Context.gxQueue, -1);
+  /* (AI-assisted) Outside a frame citro3d waits for "the" PPF event (gspWaitForPPF), which steady
+   * pacing's transfers and fences signal with nobody clearing it, so this can return while the copy
+   * still runs (audit FS-10). Waiting for the GX queue here instead cost ~28 ms per frame in lava
+   * tube (Azahar, Oct 29: the queue also held the frames in flight), so it is not done: no caller
+   * reads the copy's result on the CPU. */
 }
 
 #define PARTIAL_MIN_DRAWS 24
