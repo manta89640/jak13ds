@@ -392,6 +392,7 @@ static struct {
    * new with every change; the clip w row the skin program's mfog was made from (C3D_FVec order)
    * and the number it was made with (0: not made since the clip upload) */
   float merc_fog_hvdf_w, merc_fog_lo, merc_fog_hi;
+  float merc_haze_k, merc_haze_c; /* (AI-assisted, mercsprite) ctr_gpu_set_merc_haze */
   uint32_t merc_fog_gen, skin_mfog_gen;
   float skin_wrow[4];
   /* (AI-assisted) cmd_dedup: the last ctr_gpu_draw_skinned_env's matrix and bones (env_valid: still
@@ -1521,6 +1522,7 @@ int ctr_gpu_init(void) {
   g.merc_fog_gen = 1; /* (AI-assisted, far-fog) no merc fog until ctr_gpu_set_merc_fog */
   g.merc_fog_hvdf_w = 255.0f;
   g.merc_fog_lo = g.merc_fog_hi = 0.0f;
+  g.merc_haze_k = g.merc_haze_c = 0.0f;
   g.fog_in_valid = 0;
   {
     /* the Oct 2 shader's form: hvdf.w, fog min, fog max, -1/255; w scale, start, 1 / range */
@@ -8135,24 +8137,28 @@ static const u32* skin_rows_words(const float* bones, const uint32_t* bones_f24,
 
 /* (AI-assisted, far-fog) ctr_skin_opt's mfog uniform: [0] the fog amount as a row for the camera
  * space position (merc2.vert: (255 - (hvdf.w - w)) / 255 = w / 255 + 1 - hvdf.w / 255, w = the clip
- * matrix's w row, skin_wrow), [1] x, y: its clamps (fog max, fog min as amounts). C3D_FVec order
- * (w z y x), f32. */
+ * matrix's w row, skin_wrow), [1] x, y: its clamps (fog max, fog min as amounts), [2]
+ * (AI-assisted, mercsprite) the haze amount as a row (k w + c, ctr_gpu_set_merc_haze). C3D_FVec
+ * order (w z y x), f32. */
 static void skin_fog_rows(int raw) {
-  C3D_FVec v[2];
+  C3D_FVec v[3];
   for (int k = 0; k < 4; k++) {
     v[0].c[k] = g.skin_wrow[k] * (1.0f / 255.0f);
+    v[2].c[k] = g.skin_wrow[k] * g.merc_haze_k;
   }
   v[0].c[0] += 1.0f - g.merc_fog_hvdf_w * (1.0f / 255.0f);
+  v[2].c[0] += g.merc_haze_c;
   v[1].c[0] = 0.0f;
   v[1].c[1] = 0.0f;
   v[1].c[2] = g.merc_fog_hi;
   v[1].c[3] = g.merc_fog_lo;
   if (raw) {
-    raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_mfog, (const u32*)v, 8, 1));
+    raw_end(raw_unif(raw_ptr(), g.ps->uloc_skin_mfog, (const u32*)v, 12, 1));
   } else {
-    C3D_FVec* dst = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.ps->uloc_skin_mfog, 2);
+    C3D_FVec* dst = C3D_FVUnifWritePtr(GPU_VERTEX_SHADER, g.ps->uloc_skin_mfog, 3);
     dst[0] = v[0];
     dst[1] = v[1];
+    dst[2] = v[2];
   }
   g.skin_mfog_gen = g.merc_fog_gen;
 }
@@ -8175,6 +8181,17 @@ void ctr_gpu_set_merc_fog(float hvdf_w, float fog_min, float fog_max, uint8_t r,
     g.merc_fog_gen = g.merc_fog_gen + 1 ? g.merc_fog_gen + 1 : 1;
   }
   fog_ramp_color(r, gr, b); /* the frame's fog color (the level renderers' too) */
+}
+
+void ctr_gpu_set_merc_haze(float k, float c) {
+  if (!g.ready) {
+    return;
+  }
+  if (k != g.merc_haze_k || c != g.merc_haze_c) {
+    g.merc_haze_k = k;
+    g.merc_haze_c = c;
+    g.merc_fog_gen = g.merc_fog_gen + 1 ? g.merc_fog_gen + 1 : 1;
+  }
 }
 
 int ctr_gpu_merc_fog_ready(void) {

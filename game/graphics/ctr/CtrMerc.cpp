@@ -267,6 +267,16 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   m_model_ordinal = 0;
   m_mod_cursor = 0;
   m_mod_frame_counted = false;
+  if (!m_snapshot_mode) {
+    // (AI-assisted) the instances' decisions of the last frame (see InstState), by model
+    m_inst_prev.swap(m_inst_cur);
+    m_inst_cur.clear();
+    std::sort(m_inst_prev.begin(), m_inst_prev.end(),
+              [](const InstState& a, const InstState& b) {
+                return std::less<const void*>()(a.model, b.model);
+              });
+    m_cam_world = m_levels->camera(rs.frame_idx, m_cam_rot, m_cam_trans);
+  }
   // same structure as Merc2::handle_all_dma, but without asserts: skip what we don't know
   if (dma.current_tag_offset() == rs.next_bucket) {
     return;
@@ -288,11 +298,23 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   // (AI-assisted, far-fog) the game's fog for this bucket's models (merc2.vert's hvdf_offset.w and
   // fog constants, the frame's fog color), and whether the GPU can draw it
   m_fog_on = false;
-  if (m_have_camera && !m_snapshot_mode && ctr_settings().merc_fog && ctr_settings().fog &&
-      ctr_gpu_merc_fog_ready()) {
-    ctr_gpu_set_merc_fog(m_hvdf_offset.w(), m_fog.y(), m_fog.z(), rs.fog_color[0],
-                         rs.fog_color[1], rs.fog_color[2]);
-    m_fog_on = true;
+  if (m_have_camera && !m_snapshot_mode && ctr_settings().merc_fog && ctr_gpu_merc_fog_ready()) {
+    // (AI-assisted, mercsprite) and the port's draw distance / vista haze, as the level meshes
+    // got it (CtrLevels::note_haze, the last level drawn: amount (w fog1[0] - fog1[1]) fog1[2],
+    // w the PS2 perspective w, the same for merc), so the models aren't at game fog strength in
+    // hazed scenery (pasted on). With fog = off only the haze (as the level meshes)
+    const float* h = m_levels->haze();
+    m_haze_k = h[0] * h[2];
+    m_haze_c = -h[1] * h[2];
+    m_game_fog = ctr_settings().fog;
+    if (m_game_fog || m_haze_k > 0.f) {
+      // fog = off: the game fog's clamps at no fog (amount 0)
+      ctr_gpu_set_merc_fog(m_hvdf_offset.w(), m_game_fog ? m_fog.y() : 255.f,
+                           m_game_fog ? m_fog.z() : 255.f, rs.fog_color[0], rs.fog_color[1],
+                           rs.fog_color[2]);
+      ctr_gpu_set_merc_haze(m_haze_k, m_haze_c);
+      m_fog_on = true;
+    }
   }
   // jak 1: test register setup + empty transfer
   if (dma.current_tag_offset() != rs.next_bucket) {
@@ -334,12 +356,6 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   g_bones.keep();  // (AI-assisted) the snapshot and game memory change before the next frame
   flush_queues();
-  // (AI-assisted) merc_gen_lod: forget instances not drawn for 10 s
-  if (++m_frame % 300 == 0) {
-    for (auto it = m_gen_lod.begin(); it != m_gen_lod.end();) {
-      it = m_frame - it->second.frame > 300 ? m_gen_lod.erase(it) : std::next(it);
-    }
-  }
   m_snap_valid = false;  // used up: the next frame needs a new snapshot
   // (AI-assisted) the cost of the rewritten vertices, once per level (the first one drawn with
   // them) after a few seconds of updates
@@ -379,6 +395,51 @@ bool CtrMercRenderer::bad_bones(const CtrMercMat* const* bones, const u8* slots,
     }
   }
   return bad & 0x80000000u;
+}
+
+u32 CtrMercRenderer::inst_state(const void* model, const math::Vector4f& t) {
+  // (AI-assisted) far enough apart for two instances of a model, more than one frame's motion
+  constexpr float kInstMatch = 4.f * 4096.f;
+  InstState s;
+  s.model = model;
+  s.world = m_cam_world;
+  if (m_cam_world) {
+    // world = camera position + camera rot * tmat[3] (see stream_note_target)
+    for (int r = 0; r < 3; r++) {
+      s.pos[r] = m_cam_trans[r] + m_cam_rot[3 * r] * t.x() + m_cam_rot[3 * r + 1] * t.y() +
+                 m_cam_rot[3 * r + 2] * t.z();
+    }
+  } else {
+    s.pos[0] = t.x();
+    s.pos[1] = t.y();
+    s.pos[2] = t.z();
+  }
+  s.low = s.env_small = kInstUnknown;
+  s.used = 0;
+  auto it = std::lower_bound(m_inst_prev.begin(), m_inst_prev.end(), model,
+                             [](const InstState& a, const void* m) {
+                               return std::less<const void*>()(a.model, m);
+                             });
+  InstState* best = nullptr;
+  float best_d2 = kInstMatch * kInstMatch;
+  for (; it != m_inst_prev.end() && it->model == model; ++it) {
+    if (it->used || it->world != s.world) {
+      continue;
+    }
+    const float dx = it->pos[0] - s.pos[0], dy = it->pos[1] - s.pos[1], dz = it->pos[2] - s.pos[2];
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < best_d2) {
+      best_d2 = d2;
+      best = &*it;
+    }
+  }
+  if (best) {
+    best->used = 1;
+    s.low = best->low;
+    s.env_small = best->env_small;
+  }
+  m_inst_cur.push_back(s);
+  return (u32)(m_inst_cur.size() - 1);
 }
 
 const CtrMercModelData* CtrMercRenderer::find_model(const u8* name, const CtrLevelData** lev) {
@@ -772,19 +833,24 @@ bool CtrMercRenderer::model_fog_visible(const CtrMercModelData& model,
                                         const u8* slots,
                                         int n) const {
   constexpr float kNoFog = 0.5f / 255.f;
-  const float fmax = std::clamp(m_fog.z(), 0.f, 255.f), fmin = std::clamp(m_fog.y(), 0.f, 255.f);
+  const float fmax = m_game_fog ? std::clamp(m_fog.z(), 0.f, 255.f) : 255.f;
+  const float fmin = m_game_fog ? std::clamp(m_fog.y(), 0.f, 255.f) : 255.f;
   const float lo = 1.f - fmax / 255.f, hi = 1.f - fmin / 255.f;
   if (lo > kNoFog) {
     return true;  // fog everywhere
   }
-  if (hi <= kNoFog) {
+  // the w where the amount reaches kNoFog: the game fog's, (AI-assisted, mercsprite) or the
+  // haze's if nearer
+  float w_fog = hi > kNoFog ? (kNoFog - 1.f) * 255.f + m_hvdf_offset.w() : INFINITY;
+  if (m_haze_k > 0.f) {
+    w_fog = std::min(w_fog, (kNoFog - m_haze_c) / m_haze_k);
+  }
+  if (!(w_fog < INFINITY)) {
     return false;  // no fog anywhere
   }
   const float* cw = m_clip + 12;  // the clip matrix's w row (camera x, y, z, 1)
   const float grad = std::sqrt(cw[0] * cw[0] + cw[1] * cw[1] + cw[2] * cw[2]);
   const float size = model.scale * 32767.f * 3.f;
-  // the w where the amount reaches kNoFog
-  const float w_fog = (kNoFog - 1.f) * 255.f + m_hvdf_offset.w();
   for (int b = 0; b < n; b++) {
     if (slots[b] >= 128) {
       continue;
@@ -1052,8 +1118,11 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     return;
   }
   // (AI-assisted, far-fog) the game's fog on this model (not HUD models: their own projection),
-  // unless it is ~0 at all of it: no fog stage then (texture unit 1 stays off)
-  const bool model_fog = m_fog_on && !hud_model && model_fog_visible(*model, bones, slots, i);
+  // unless it is ~0 at all of it: no fog stage then (texture unit 1 stays off). (AI-assisted) Nor
+  // models the game asks to draw without fog (pc-merc-bits disable-fog, bit 1, as Merc2: Jak II's
+  // searchlights and other city / stadium objects; Jak 1 never sets it)
+  const bool model_fog = m_fog_on && !hud_model && !(flags.bitflags & 2) &&
+                         model_fog_visible(*model, bones, slots, i);
 
   // the model's lights, for the skin shader's per vertex lighting (like merc2.vert)
   float light_data[28];
@@ -1128,7 +1197,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   double hud_shift[3] = {0, 0, 0};
   bool hud_shifted = false;
   float hud_shift_clip[16];
-  if ((flags.bitflags & 8) && i > 0 && slots[0] < 128) {
+  // (AI-assisted) hud_model, not the raw bit: in Jak II it is disable-envmap
+  if (hud_model && i > 0 && slots[0] < 128) {
     // the center in the rows' space: -tmat[3], then D (hud_nfix)
     const MercMat& m0 = *bones[slots[0]];
     const double c0[3] = {-(double)m0.tmat[3].x(), -(double)m0.tmat[3].y(),
@@ -1218,8 +1288,14 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   // (AI-assisted) config merc_gen_lod: the converter's generated low LOD of a model with only lod0
   // (the yeti; (j1ocean) never the pickups: CtrLevel gives those no gen_draws,
   // c3l::merc_gen_lod_exempt) when its first bone is further from the camera than max(25 m, 12.5 x the model's
-  // size) x merc_lod_scale; 10% either side of that before it switches (per instance: the
-  // address of its bone matrices)
+  // size) x merc_lod_scale; 10% either side of that before it switches (per instance: inst_state)
+  u32 inst = ~0u;  // (AI-assisted) this instance's InstState in m_inst_cur (~0u: not made yet)
+  auto inst_now = [&]() -> InstState& {
+    if (inst == ~0u) {
+      inst = inst_state(model, bones[slots[0]]->tmat[3]);
+    }
+    return m_inst_cur[inst];
+  };
   // (AI-assisted, streaming) Jak's place (his first bone's tmat[3]: world = camera position +
   // camera rot * it, checked against the game's position to 0.6 m): the level streaming prefetches
   // around him too (camera cuts land near him)
@@ -1231,15 +1307,13 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
   const std::vector<c3l::MercDraw>* draws = &model->draws;
   if (!model->gen_draws.empty() && cs.merc_gen_lod && !hud_model && i > 0 &&
       slots[0] < 128) {
-    u32 key;
-    memcpy(&key, &matrix_array[0], 4);
     const math::Vector4f& t = bones[slots[0]]->tmat[3];
     const float d = std::sqrt(t.x() * t.x() + t.y() * t.y() + t.z() * t.z()) * (1.f / 4096.f);
     const float size_m = model->scale * 32767.f * (1.f / 4096.f);
     const float at = std::max(25.f, 12.5f * size_m) * cs.merc_lod_scale;
-    auto& g = m_gen_lod[key];
-    g.frame = m_frame;
-    g.low = g.low ? d > 0.9f * at : d > 1.1f * at;
+    InstState& g = inst_now();
+    // a new instance: at the limit itself
+    g.low = g.low == kInstUnknown ? d > at : (g.low ? d > 0.9f * at : d > 1.1f * at);
     if (g.low) {
       draws = &model->gen_draws;
       m_stats.gen_lod++;
@@ -1253,25 +1327,38 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
   }
   // (AI-assisted, fidelity2) envmap_min_px: the model's size on the top screen (its bounding
-  // sphere's diameter: 2 x the quantization range x the first bone's scale, over w, as x/w spans
-  // the 400 pixels), worked out at its first envmap draw; below the limit no shine pass
+  // sphere's diameter: 2 x the quantization range x the largest scale of its sent bones, over the
+  // nearest of their origins' w, as x/w spans the 400 pixels), worked out at its first envmap draw;
+  // below the limit no shine pass. (AI-assisted) The largest and nearest bone, as hud_depth_spread
+  // (was the first bone only: a tiny or hidden root, the power cell's, lost its shine at any size);
+  // per instance (inst_state) it is left out below 0.8 x the limit and back above it, so a shiny
+  // model near the limit doesn't flicker between shiny and dull
   int env_small = -1;  // -1: not worked out yet
   auto env_too_small = [&]() -> bool {
     if (env_small < 0) {
       env_small = 0;
-      if (cs.envmap_min_px > 0.f && !(flags.bitflags & 8) && i > 0 && slots[0] < 128) {
-        const math::Vector4f* t = bones[slots[0]]->tmat;
+      if (cs.envmap_min_px > 0.f && !hud_model && i > 0 && slots[0] < 128) {
         const float* cw = m_clip + 12;
-        const float w = -(cw[0] * t[3].x() + cw[1] * t[3].y() + cw[2] * t[3].z()) + cw[3];
+        float w = INFINITY;
         float col = 0;
-        for (int c = 0; c < 3; c++) {
-          col = std::max(col, t[c].x() * t[c].x() + t[c].y() * t[c].y() + t[c].z() * t[c].z());
+        for (int b = 0; b < i; b++) {
+          if (slots[b] >= 128) {
+            continue;
+          }
+          const math::Vector4f* t = bones[slots[b]]->tmat;
+          w = std::min(w, -(cw[0] * t[3].x() + cw[1] * t[3].y() + cw[2] * t[3].z()) + cw[3]);
+          for (int c = 0; c < 3; c++) {
+            col = std::max(col, t[c].x() * t[c].x() + t[c].y() * t[c].y() + t[c].z() * t[c].z());
+          }
         }
         const float sx = std::sqrt(m_clip[0] * m_clip[0] + m_clip[1] * m_clip[1] +
                                    m_clip[2] * m_clip[2]);
         const float px = 2.f * model->scale * 32767.f * std::sqrt(col) * sx * 200.f;
+        InstState& s = inst_now();
+        const float limit = cs.envmap_min_px * (s.env_small == 0 ? 0.8f : 1.f);
         // behind the camera or nearer than its size: keep it
-        env_small = w > 0.f && px < cs.envmap_min_px * w ? 1 : 0;
+        env_small = w > 0.f && px < limit * w ? 1 : 0;
+        s.env_small = (u8)env_small;
       }
     }
     return env_small == 1;

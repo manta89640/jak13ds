@@ -88,6 +88,9 @@ class CtrMercRenderer : public CtrBucketRenderer {
                          const u8* slots,
                          int n) const;
   bool m_fog_on = false;  // (AI-assisted, far-fog) this bucket's models may get the fog
+  // (AI-assisted, mercsprite) the haze amount k w + c (CtrLevels::haze), the game fog on
+  float m_haze_k = 0.f, m_haze_c = 0.f;
+  bool m_game_fog = true;
   /*! (AI-assisted) CtrLevels::find_merc_model of the model name at name (NUL-ended, at most 127
    * bytes), through a small cache: a found model (and its level) for its name while the loaded
    * levels are the same (CtrLevels::set_generation; loading the common file, which doesn't change
@@ -153,14 +156,25 @@ class CtrMercRenderer : public CtrBucketRenderer {
   std::vector<const void*> m_q_models;  // model rank -> model
   void flush_opaque();
   void flush_queues();
-  // (AI-assisted) merc_gen_lod: per instance (the address of its bone matrices) whether it is
-  // drawn with the generated low LOD, and the frame it was last seen
-  struct GenLodState {
-    bool low = false;
-    u32 frame = 0;
+  // (AI-assisted) merc_gen_lod / envmap_min_px hysteresis: per drawn instance its model, its first
+  // bone's place (world, from the frame's level camera; else camera space) and its decisions
+  // (kInstUnknown: none yet). An instance takes over the decisions of the nearest unclaimed one of
+  // the same model in the bucket's previous frame (within kInstMatch). Was keyed by the bone
+  // matrices' DMA address, which moves with everything allocated before it in the frame: the
+  // state was lost (or another instance's taken), and a map node was made at every move.
+  static constexpr u8 kInstUnknown = 2;
+  struct InstState {
+    const void* model;
+    float pos[3];
+    u8 world;      // pos is in world space
+    u8 low;        // merc_gen_lod: drawn with the generated low LOD
+    u8 env_small;  // envmap_min_px: shine left out
+    u8 used;       // (previous frame) taken over already
   };
-  std::unordered_map<u32, GenLodState> m_gen_lod;
-  u32 m_frame = 0;
+  std::vector<InstState> m_inst_prev, m_inst_cur;  // prev: sorted by model
+  float m_cam_rot[9] = {}, m_cam_trans[3] = {};
+  bool m_cam_world = false;  // this frame's level camera is known
+  u32 inst_state(const void* model, const math::Vector4f& t);
 
   CtrLevels* m_levels;
   // (AI-assisted) game version: Jak II's records (see the constructor)
