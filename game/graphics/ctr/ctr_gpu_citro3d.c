@@ -4917,24 +4917,6 @@ static void raw_vertex_buffer(u32 pa, u32 flags0, u32 flags1) {
 /* attribute buffer 0 config of each program's vertex layout: permutation, stride, attributes */
 #define RAW_BUF_FLAGS1(stride, attribs, perm_hi) \
   ((u32)(perm_hi) | ((u32)(stride) << 16) | ((u32)(attribs) << 28))
-/* attribute buffers 0 and 1 (the wind ties' slots, the envmapped ties' normals) */
-static void raw_vertex_buffers2(u32 pa0, u32 flags00, u32 flags01, u32 pa1, u32 flags10,
-                                u32 flags11) {
-  C3D_BufInfo* b = &__C3D_Context.bufInfo;
-  const u32 v[6] = {pa0 - RAW_BUF_BASE, flags00, flags01, pa1 - RAW_BUF_BASE, flags10, flags11};
-  if (b->bufCount != 2 || b->base_paddr != RAW_BUF_BASE) {
-    /* citro3d sends the whole table (raw_sync) */
-    BufInfo_Init(b);
-    b->bufCount = 2;
-    memcpy(b->buffers, v, sizeof(v));
-    __C3D_Context.flags |= C3DiF_BufInfo;
-    return;
-  }
-  if (memcmp(b->buffers, v, sizeof(v)) != 0) {
-    raw_end(raw_n(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET, v, 6, 1));
-    memcpy(b->buffers, v, sizeof(v));
-  }
-}
 
 /* float uniforms from loc: f32 values (4 per vector, in C3D_FVec order w z y x) or float24 words
  * (3 per vector), one config write and one burst to the data port */
@@ -7389,54 +7371,16 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     return;
   }
   use_program(PROG_MESH_WIND);
-  const int raw = use_raw(state) && g.ps->opt;
   {
     const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
     if (atlas != g.mesh_st_atlas) {
       g.mesh_st_atlas = atlas;
-      mesh_scales_set(atlas, raw);
+      mesh_scales_set(atlas, 0);
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
   const int mesh_mode = g.mesh_nofog ? 4 : 1;
   g.cur.nofog_draws += g.mesh_nofog;
-  if (raw) {
-    /* ctr_gpu_draw_mesh_prepared's raw draw, the slots in buffer 1, the slot rows when changed */
-    apply_state(state, mesh_mode, 1);
-    raw_vertex_buffers2(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0),
-                        g.meshes[slots_mesh].verts_pa + (u32)slots_offset, 0x3,
-                        RAW_BUF_FLAGS1(1, 1, 0));
-    raw_sync();
-    if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
-      g.last_clip_id = matrix->id;
-      ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
-      if (mm->fog_gen != g.fog_gen) {
-        float rows8[8];
-        mesh_fog_rows(matrix->m, rows8);
-        raw_pack_f24(rows8, mm->f24 + 12);
-        raw_pack_f24(rows8 + 4, mm->f24 + 15);
-        mm->fog_gen = g.fog_gen;
-      }
-      raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 18, 0));
-      g.last_mesh_valid = 1;
-    }
-    if (g.wind_rows_id != rows_id || !rows_id) {
-      g.wind_rows_id = rows_id;
-      C3D_FVec* u = &C3D_FVUnif[GPU_VERTEX_SHADER][g.ps->uloc_wind];
-      for (int i = 0; i < row_count; i++) {
-        const float* w = rows + 4 * i;
-        u[i].x = w[0];
-        u[i].y = w[1];
-        u[i].z = w[2];
-        u[i].w = w[3];
-      }
-      raw_end(raw_unif(raw_ptr(), g.ps->uloc_wind, (const u32*)u, 4u * (u32)row_count, 1));
-    }
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
-    g.cur.draws++;
-    g.cur.triangles += index_count / 3;
-    return;
-  }
   if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
     g.last_clip_id = matrix->id;
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
@@ -7693,33 +7637,6 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
     }
   }
   const ProgSet* p = g.ps;
-  if (use_raw(state) && p->uloc_etie_nrm == p->uloc_etie_cam + 3 &&
-      p->uloc_etie_scales == p->uloc_etie_nrm + 3 && p->uloc_etie_fog0 == p->uloc_etie_scales + 1 &&
-      p->uloc_etie_fog1 == p->uloc_etie_fog0 + 1) {
-    /* the matrix as float24 (as the level meshes), the other rows as f32 in one burst */
-    apply_state_tint(state, 7, d->shine, 1);
-    raw_vertex_buffers2(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0),
-                        g.meshes[normals_mesh].verts_pa + (u32)normals_offset, 0x3,
-                        RAW_BUF_FLAGS1(4, 1, 0));
-    raw_sync();
-    C3D_FVec* u = &C3D_FVUnif[GPU_VERTEX_SHADER][p->uloc_etie_cam];
-    for (int i = 0; i < 3; i++) {
-      const float* r = d->cam[i];
-      u[i].x = r[0], u[i].y = r[1], u[i].z = r[2], u[i].w = r[3];
-      r = d->nrm[i];
-      u[3 + i].x = r[0], u[3 + i].y = r[1], u[3 + i].z = r[2], u[3 + i].w = r[3];
-    }
-    u[6].x = d->st_scale, u[6].y = 1.0f / 255.0f, u[6].z = 1.0f, u[6].w = 0.0f;
-    u[7].x = g.fog0[0], u[7].y = g.fog0[1], u[7].z = g.fog0[2], u[7].w = g.fog0[3];
-    u[8].x = g.fog1[0], u[8].y = g.fog1[1], u[8].z = g.fog1[2], u[8].w = g.fog1[3];
-    u32* q = raw_unif(raw_ptr(), p->uloc_etie_clip, d->clip.f24, 12, 0);
-    raw_end(raw_unif(q, p->uloc_etie_cam, (const u32*)u, 36, 1));
-    g.last_mesh_valid = 0; /* (the mesh programs' matrix registers) */
-    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
-    g.cur.draws++;
-    g.cur.triangles += index_count / 3;
-    return;
-  }
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, p->uloc_etie_clip, (const C3D_Mtx*)d->clip.m);
   for (int i = 0; i < 3; i++) {
     const float* r = d->cam[i];
