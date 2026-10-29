@@ -25,6 +25,8 @@
 #include "game/mips2c/jak2_functions/native2.h"
 #include "game/mips2c/native_goalc_ops.h"
 
+extern u32 g_link_generation;  // (AI-assisted) game/kernel/common/klink.h
+
 namespace Mips2C::jak2::native2 {
 
 namespace {
@@ -49,21 +51,34 @@ struct FnSym {
 };
 
 //! a method table entry of a type and the function it held at the first call
+//! (AI-assisted, cpusound) These methods are ctywide's code: after a link (ctywide unloaded and
+//! loaded again, its code at another address) the type and the entry are read again and the
+//! entry's function is taken as the new one. Between links a changed entry means the GOAL code.
 struct MethodSlot {
   const char* type;
   u32 idx;
+  u32 type_val = 0;
   u32 slot = 0;
   u32 fn = 0;
+  u32 gen = 0;
   bool resolved = false;
   MethodSlot(const char* t, u32 i) : type(t), idx(i) {}
+  void resolve() {
+    gen = g_link_generation;
+    slot = fn = 0;
+    const u32 ty = gload<u32>(type_val);
+    if (ty) {
+      slot = ty + 16 + 4 * idx;
+      fn = gload<u32>(slot);
+    }
+  }
   bool unchanged() {
     if (!resolved) {
       resolved = true;
-      const u32 ty = gload<u32>(sym_value_addr(type));
-      if (ty) {
-        slot = ty + 16 + 4 * idx;
-        fn = gload<u32>(slot);
-      }
+      type_val = sym_value_addr(type);
+      resolve();
+    } else if (gen != g_link_generation) {
+      resolve();
     }
     return fn != 0 && gload<u32>(slot) == fn;
   }

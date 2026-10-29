@@ -111,6 +111,21 @@ inline void box_bits(const M& m, u32 hash, u32 box, s64 id, bool clear) {
 }
 
 /*!
+ * (AI-assisted, cpusound) An object id argument (methods 18, 19, 33): C mode's GOAL code calls
+ * these through the direct entry (MIPS2C_NATIVE_IMPL_GOAL), which passes the low 32 bits
+ * zero-extended, so -1 would come as 2^32 - 1. Sign-extended, it is what the 64-bit register holds.
+ */
+inline s64 object_id(u64 arg) {
+  return (s64)(s32)(u32)arg;
+}
+
+//! (AI-assisted, cpusound) id has a bit in the buckets (0 .. bucket-size * 8 - 1). The original
+//! doesn't check (a -1 sets bit 7 of the byte before every bucket); out of range, nothing is done.
+inline bool id_fits(const M& m, u32 hash, s64 id) {
+  return id >= 0 && (id >> 3) < (s64)m.ld<s16>(hash + 10);
+}
+
+/*!
  * (method 22 grid-hash) sphere-to-grid-box: the grid box of a sphere, clamped to the grid
  * (vf lanes, then the integer lane ops pmaxw / pminw / ppach / ppacb), stored in the low 6 bytes of
  * the box's doubleword.
@@ -249,10 +264,13 @@ u32 do_search(const M& m, u32 hash, u32 box, u32 buf) {
 }
 
 //! (method 22 this box sphere) through the method table; the native when it holds the stub
+//! (AI-assisted, cpusound) and isn't turned off (mips2c_native_off naming it: its stub runs the
+//! mips2c version then, so this calls it too)
 void call_sphere_to_grid_box(const M& m, u32 hash, u32 box, u32 sphere, const NativeArgs& args) {
   static const u32* stub = native_stub_slot("(method 22 grid-hash)");
+  static const bool on = !native_turned_off("(method 22 grid-hash)");
   const u32 fn = method_of(m, hash, 22);
-  if (fn == *stub) {
+  if (on && fn == *stub) {
     sphere_to_grid_box(m, hash, box, sphere);
   } else {
     const u64 a[8] = {hash, box, sphere, args.a[3], args.a[4], args.a[5], args.a[6], args.a[7]};
@@ -261,10 +279,12 @@ void call_sphere_to_grid_box(const M& m, u32 hash, u32 box, u32 sphere, const Na
 }
 
 //! (method 20 this box buf) through the method table; the native when it holds the stub
+//! (AI-assisted, cpusound) and isn't turned off (see call_sphere_to_grid_box)
 void call_do_search(const M& m, u32 hash, u32 box, u32 buf, const NativeArgs& args) {
   static const u32* stub = native_stub_slot("(method 20 grid-hash)");
+  static const bool on = !native_turned_off("(method 20 grid-hash)");
   const u32 fn = method_of(m, hash, 20);
-  if (fn == *stub) {
+  if (on && fn == *stub) {
     do_search(m, hash, box, buf);
   } else {
     const u64 a[8] = {hash, box, buf, args.a[3], args.a[4], args.a[5], args.a[6], args.a[7]};
@@ -379,14 +399,20 @@ inline void line_closest(const M& m, u32 start, u32 dir, u32 sph, float inv, u32
 //! (AI-assisted) (method 18 grid-hash this box id): sets the object's bit in the box's buckets
 u64 method_18_grid_hash_impl(const NativeArgs& args) {
   const M m;
-  box_bits(m, (u32)args.a[0], (u32)args.a[1], (s64)args.a[2], false);
+  const s64 id = object_id(args.a[2]);
+  if (id_fits(m, (u32)args.a[0], id)) {
+    box_bits(m, (u32)args.a[0], (u32)args.a[1], id, false);
+  }
   return 0;
 }
 
 //! (AI-assisted) (method 19 grid-hash this box id): clears the object's bit in the box's buckets
 u64 method_19_grid_hash_impl(const NativeArgs& args) {
   const M m;
-  box_bits(m, (u32)args.a[0], (u32)args.a[1], (s64)args.a[2], true);
+  const s64 id = object_id(args.a[2]);
+  if (id_fits(m, (u32)args.a[0], id)) {
+    box_bits(m, (u32)args.a[0], (u32)args.a[1], id, true);
+  }
   return 0;
 }
 
@@ -611,8 +637,11 @@ u64 method_32_sphere_hash_impl(const NativeArgs& args) {
 u64 method_33_sphere_hash_impl(const NativeArgs& args) {
   const M m;
   const u32 h = (u32)args.a[0];
+  const s64 id = object_id(args.a[2]);
   call_sphere_to_grid_box(m, h, h + 4, (u32)args.a[1], args);
-  box_bits(m, h, h + 4, (s64)args.a[2], true);
+  if (id_fits(m, h, id)) {
+    box_bits(m, h, h + 4, id, true);
+  }
   return 0;
 }
 
@@ -625,10 +654,13 @@ u64 method_33_sphere_hash_impl(const NativeArgs& args) {
 u64 method_33_spatial_hash_impl(const NativeArgs& args) {
   const M m;
   const u32 h = (u32)args.a[0];
-  const s64 id = (s64)args.a[2];
+  const s64 id = object_id(args.a[2]);
   call_sphere_to_grid_box(m, h, h + 4, (u32)args.a[1], args);
-  box_bits(m, h, h + 4, id, true);
-  m.st<u32>((u32)((u64)(id << 4) + (u64)m.ld<u32>(h + 100)), (u32)args.st);
+  // (AI-assisted, cpusound) and an object-array entry (method 39's limit, h + 88)
+  if (id_fits(m, h, id) && id < (s64)m.ld<s16>(h + 88)) {
+    box_bits(m, h, h + 4, id, true);
+    m.st<u32>((u32)((u64)(id << 4) + (u64)m.ld<u32>(h + 100)), (u32)args.st);
+  }
   return 0;
 }
 
