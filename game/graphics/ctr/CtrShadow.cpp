@@ -177,7 +177,7 @@ bool CtrShadowVolumes::starts_object(const DmaTransfer& t) {
   return v1.kind == VifCode::Kind::UNPACK_V4_32 && VifCodeUnpack(v1).addr_qw == kVuTop;
 }
 
-float CtrShadowVolumes::object_score(const DmaTransfer& t) {
+float CtrShadowVolumes::object_score(const DmaTransfer& t, float center[3]) {
   const VifCode v1 = t.vifcode1();
   const int num = std::min(v1.num ? (int)v1.num : 256, kTableSize);
   if (t.size_bytes < (u32)num * 16 || num <= 0) {
@@ -200,6 +200,9 @@ float CtrShadowVolumes::object_score(const DmaTransfer& t) {
     const float h = 0.5f * (hi[c] - lo[c]), m = 0.5f * (hi[c] + lo[c]);
     r2 += h * h;
     d2 += m * m;
+    if (center) {
+      center[c] = m;
+    }
   }
   const float r = std::sqrt(r2);
   // (half a meter as the nearest distance: anything closer is as big as it gets)
@@ -670,26 +673,50 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   const int cap = ctr_settings().shadow_casters;
   if (cap > 0) {
     m_scores.clear();
+    m_centers.clear();
     DmaFollower scan = dma;
     while (scan.current_tag_offset() != rs.next_bucket) {
       const auto t = scan.read_and_advance();
       if (CtrShadowVolumes::starts_object(t)) {
-        m_scores.push_back(CtrShadowVolumes::object_score(t));
+        std::array<float, 3> c = {0.f, 0.f, 0.f};
+        float s = CtrShadowVolumes::object_score(t, c.data());
+        // (AI-assisted) hysteresis: one drawn last frame (a center within ~1 m + 10% of its
+        // distance of one of theirs: the camera and the object move a little per frame) keeps its
+        // place unless another one is kIncumbent x bigger. Was chosen anew every frame, so objects
+        // of about the same size at the cut swapped and their shadows blinked
+        constexpr float kIncumbent = 1.25f;
+        const float d2 = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+        const float tol2 = 4096.f * 4096.f + 0.01f * d2;
+        for (const auto& k : m_kept_prev) {
+          const float dx = k[0] - c[0], dy = k[1] - c[1], dz = k[2] - c[2];
+          if (dx * dx + dy * dy + dz * dz < tol2) {
+            s *= kIncumbent;
+            break;
+          }
+        }
+        m_scores.push_back(s);
+        m_centers.push_back(c);
       }
     }
     const int n = (int)m_scores.size();
+    m_kept_prev.clear();
     if (n > cap) {
       m_order.resize(n);
       for (int i = 0; i < n; i++) {
         m_order[i] = i;
       }
-      std::nth_element(m_order.begin(), m_order.begin() + (cap - 1), m_order.end(),
-                       [&](int a, int b) { return m_scores[a] > m_scores[b]; });
+      // (AI-assisted) equal scores by DMA order: the same pick every frame
+      std::nth_element(m_order.begin(), m_order.begin() + (cap - 1), m_order.end(), [&](int a, int b) {
+        return m_scores[a] > m_scores[b] || (m_scores[a] == m_scores[b] && a < b);
+      });
       m_keep.assign(n, 0);
       for (int i = 0; i < cap; i++) {
         m_keep[m_order[i]] = 1;
+        m_kept_prev.push_back(m_centers[m_order[i]]);
       }
       m_vol.set_keep(m_keep.data(), n);
+    } else {
+      m_kept_prev = m_centers;
     }
   }
   while (dma.current_tag_offset() != rs.next_bucket) {
