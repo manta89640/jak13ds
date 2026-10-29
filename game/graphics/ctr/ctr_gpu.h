@@ -391,10 +391,9 @@ void ctr_gpu_set_skin_rows_f24(int on);
  * and lights (21 instead of 28) as float24 too. Not bit-identical (rounded to nearest where the GPU
  * converts f32 its own way): edge pixels of models can flip. Each frame. */
 void ctr_gpu_set_skin_clip_f24(int on);
-/* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): block32 = 32x32 block
- * mode, 256x416 cropped to the screen (early_depth = block32; needs steady pacing, else the usual
- * target with early depth off), depth16 = a 16-bit depth buffer instead of 24-bit + stencil. */
-void ctr_gpu_set_framebuffer(int block32, int depth16);
+/* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): depth16 = a 16-bit
+ * depth buffer instead of 24-bit + stencil. */
+void ctr_gpu_set_framebuffer(int depth16);
 /* (AI-assisted) one line about the top render target (size, formats, VRAM addresses and banks)
  * for the log; returns its length (0 before ctr_gpu_init) */
 int ctr_gpu_describe_target(char* out, int size);
@@ -422,8 +421,12 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out);
  * a fixed number of vblanks after the game thread handed it over, so frames stay on screen for as
  * long as the game time they cover; fast (0): as soon as the GPU is done (citro3d). */
 void ctr_gpu_set_steady_pacing(int on);
-/* (AI-assisted) the game thread hands over a frame now (its release vblank, for steady pacing) */
-void ctr_gpu_note_release(void);
+/* (AI-assisted) the game thread hands over a frame: its release vblank (for steady pacing), read
+ * with ctr_gpu_release_now when the frame's logic ended. (AI-assisted, gpu-home) Noted only once
+ * the render thread is idle (the next frame's begin reads it): noted before, it could overwrite the
+ * previous frame's release while that frame was still before its begin. */
+unsigned int ctr_gpu_release_now(void);
+void ctr_gpu_note_release(unsigned int release);
 /* (AI-assisted) since the last call: frames shown for 1, 2, 3, 4, 5+ vblanks, the presentation
  * latency in vblanks (-1: steady pacing off), frames skipped and the render thread's total wait
  * for a free screen buffer; just_in_time: frames the GPU finished in the vblank before their own
@@ -643,24 +646,17 @@ void ctr_gpu_prepare_mesh_matrix(const float clip[16], ctr_mesh_matrix* out);
 void ctr_gpu_set_mesh_nofog(int on);
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count);
-/* (AI-assisted, gpu-rt) config.ini static_cmdlists. The level renderer hands a pass's draws over in
- * one list (in drawing order; nofog as ctr_gpu_set_mesh_nofog for that draw). The 3DS backend keeps
- * the raw command words of each stretch of draws with one program (after two frames drew it alike)
- * in linear memory and copies them in again while the draws, the GPU state before them and the
- * settings are the same, writing only the chunk matrices anew: the same words as drawing them one
- * by one. *cache: the pass's (NULL at first; ctr_gpu_cmd_cache_free). mode 0 off, 1 on, 2 compare
- * (every copy checked against the per-frame path, mismatches counted in the log line). */
+/* (AI-assisted, gpu-rt) the level renderer hands a pass's draws over in one list (in drawing order;
+ * nofog as ctr_gpu_set_mesh_nofog for that draw): drawn one by one */
 typedef struct {
   const ctr_draw_state* state;
   const ctr_mesh_matrix* matrix;
   int mesh, first_index, index_count, nofog;
 } ctr_mesh_call;
-typedef struct ctr_cmd_cache ctr_cmd_cache;
-void ctr_gpu_set_static_cmdlists(int mode);
-void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** cache);
-void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache);
-/* the statistics line since the last call ([ctr] static_cmdlists ...); 0: nothing to say */
-int ctr_gpu_cmdlist_line(char* out, int size);
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n);
+/* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call ([ctr] gpu micro ...);
+ * 0: nothing to say */
+int ctr_gpu_micro_line(char* out, int size);
 /* (AI-assisted) impostor cards (CtrImpostor): the same with this frame's vertices (c3l::Vertex)
  * and u16 indices from ctr_gpu_stream_alloc instead of a mesh's */
 void ctr_gpu_draw_mesh_stream(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
@@ -775,6 +771,8 @@ typedef struct {
    * frames it finished since the last frame end (gpu_busy_frames of them; 0 without frame_pacing =
    * steady, whose fence marks a frame done): done(N) - max(first work handed over(N), done(N-1)) */
   float gpu_wait_ms;
+  /* (AI-assisted, gpu-home) frame_overlap2 = on: a full running GX queue drained (in gpu_wait_ms) */
+  int queue_drains;
   float gpu_busy_ms;
   int gpu_busy_frames;
   /* (AI-assisted) the same frames from the moment their command list was handed to the GPU

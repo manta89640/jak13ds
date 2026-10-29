@@ -161,8 +161,8 @@ on). Each test builds its command list once and queues it 3-8 times back to back
 `[bench] <test> key=value ...` line to gk.log and bench.txt. The order goes from safe to risky:
 B1 floor, B2 per draw, B4 vertex cache, cull check, B5 attributes, B6 fill, B7 setup, B8 early
 depth on the usual 240x400 target; then register settings the game never used on hardware
-(COLORBUFFER_READ = 0, POST_VERTEX_CACHE_NUM 0x4 / 0x84, the 256x416 block32 target and its
-display transfer); then the bench's own vertex shaders (program switches, B3) and the game's
+(COLORBUFFER_READ = 0, POST_VERTEX_CACHE_NUM 0x4 / 0x84; the 256x416 block32 target's B8.b32 run
+went with early_depth = block32, Oct 29); then the bench's own vertex shaders (program switches, B3) and the game's
 unproven new `ctr_mesh` and `ctr_skin` (`shader_mesh = new`, `shader_skin = new`). Before each
 test a `start <test>` line is appended to bench.txt and the file closed, so if the GPU hangs (the
 game never starts; power off) the last `start` line names the culprit. A queue that doesn't finish
@@ -495,7 +495,13 @@ clear waits 2 ms for it at most, then takes PSC0's tick; the line counts the fra
 The hardware bench must say: the fixed parts (clear, transfer, overhead x lists, sky) against the
 10.6 ms, and whether PSC1 comes.
 
-**static_cmdlists = on** (default). The level renderer hands each pass (vista, main) to
+(AI-assisted, gpu-home, Oct 29) **static_cmdlists was removed**: it saved ~0.1-0.4 ms of render
+thread time only while the view held still (never in the worst frames that decide 30 fps), held
+512 KB of linear memory from boot, mirrored every tracker of the mesh draw path in ~730 lines, and
+stopped working after the first trip to the HOME Menu (citro3d's gas dirty bit, fixed now). The
+level passes are drawn one by one through `ctr_gpu_draw_mesh_calls`. What it did and measured:
+
+**static_cmdlists = on** (was the default). The level renderer hands each pass (vista, main) to
 `ctr_gpu_draw_mesh_calls` as one list. It is cut into stretches of raw draws with one program (a
 draw that switches the program, runs the sky_last hook, binds a texture that isn't a level pool's,
 goes through citro3d or draws nothing is drawn as usual and starts a new stretch). A stretch drawn

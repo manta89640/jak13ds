@@ -121,9 +121,10 @@ struct CtrSettings {
   // CPU builds frame N+1 while the GPU draws frame N
   bool pipeline = true;
   // (AI-assisted) config frame_overlap2 = off | clean | on (with the pipeline; ctr_gpu.h
-  // ctr_gpu_set_frame_overlap2): 0 the old frame end; 1 (clean, default) the frame's command list
-  // cleaned from the CPU cache before waiting for the GPU, handed over without the GSP's flush;
-  // 2 (on) the list queued behind the frame the GPU is drawing, no wait at the frame end
+  // ctr_gpu_set_frame_overlap2): 0 the old frame end (preset safe); 1 (clean) the frame's command
+  // list cleaned from the CPU cache before waiting for the GPU, handed over without the GSP's
+  // flush; 2 (on, default) the list queued behind the frame the GPU is drawing, no wait at the
+  // frame end
   int frame_overlap2 = 2;
   // (AI-assisted) frame rate cap: 30 (default: the target, steady frame times) or 60
   int fps_cap = 30;
@@ -191,12 +192,9 @@ struct CtrSettings {
   // (AI-assisted) Off by default: on a New 3DS it left large screen blocks where the level never
   // drew (Azahar ignores the early depth test, so only hardware shows it).
   bool early_depth = false;
-  // (AI-assisted) early_depth = block32: with the render target in 32x32 block mode (256x416,
-  // cropped to the screen), which the early depth test seems to need. Hardware only (off).
-  bool early_depth_block32 = false;
-  // (AI-assisted) early_depth = sky (sky32: with the block32 target): the early depth test only
+  // (AI-assisted) early_depth = sky: the early depth test only
   // for the sky, drawn last (sky_last forced on) at depth 0: its fragments behind what the opaque
-  // draws covered are dropped before texturing. With on / block32 and sky_last the sky uses it too
+  // draws covered are dropped before texturing. With on and sky_last the sky uses it too
   bool early_depth_sky = false;
   // (AI-assisted) early_depth_func = ge | gt | le | lt: the early test's function (the normal
   // depth test stays >=); early_depth_clear = the early depth data's clear value (0 = far, max =
@@ -364,12 +362,6 @@ struct CtrSettings {
   // (AI-assisted) draws write their GPU commands themselves instead of through citro3d (less CPU
   // per draw on the render thread, fewer command words)
   bool raw_cmds = true;
-  // (AI-assisted, gpu-rt) static_cmdlists: the level meshes' raw command words of a stretch of
-  // draws (same program, no citro3d update) are kept after two frames drew them alike and copied
-  // in again while the draws, the GPU state before them and the settings stay the same; only the
-  // chunk matrices are written anew. Same words (static_cmdlists = compare checks every replay
-  // against the per-frame path and logs mismatches). 0 off, 1 on, 2 compare
-  int static_cmdlists = 1;
   // (AI-assisted, gpu-rt) gpu_breakdown: every 4th frame the GPU runs each part of the frame alone
   // (clear, sky, level, merc, translucent, shadows, ocean, sprites, distort copy, HUD, transfer)
   // and its time is logged per stats window ([ctr] gpu breakdown). Serialises the GPU: slower

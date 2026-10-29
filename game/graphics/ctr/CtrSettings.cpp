@@ -48,7 +48,7 @@ void apply_rules(CtrSettings& s) {
     s.shadows = CtrSettings::ShadowMode::Blob;
     s.shadows_full_wanted = true;
   }
-  // (AI-assisted) early_depth = sky / sky32: the early test is for the sky drawn last
+  // (AI-assisted) early_depth = sky: the early test is for the sky drawn last
   if (s.early_depth_sky) {
     s.sky_last = true;
   }
@@ -212,10 +212,9 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
-      // (AI-assisted) off | on | block32 | sky | sky32
-      s.early_depth_block32 = v == "block32" || v == "sky32";
-      s.early_depth_sky = v == "sky" || v == "sky32";
-      s.early_depth = v == "block32" || (!s.early_depth_sky && parse_bool(v));
+      // (AI-assisted) off | on | sky (gpu-home, Oct 29: block32 / sky32 removed, read as off)
+      s.early_depth_sky = v == "sky";
+      s.early_depth = !s.early_depth_sky && parse_bool(v);
     } else if (key == "early_depth_func") {
       // (AI-assisted) the early test's function: ge (default) | gt | le | lt
       s.early_depth_func = v == "gt" ? 1 : (v == "le" ? 2 : (v == "lt" ? 3 : 0));
@@ -301,9 +300,6 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.merc_fog = parse_bool(v);  // (AI-assisted, far-fog)
     } else if (key == "raw_cmds") {
       s.raw_cmds = parse_bool(v);
-    } else if (key == "static_cmdlists") {
-      // (AI-assisted, gpu-rt) on | off | compare
-      s.static_cmdlists = v == "compare" ? 2 : (parse_bool(v) ? 1 : 0);
     } else if (key == "gpu_breakdown") {
       s.gpu_breakdown = parse_bool(v);  // (AI-assisted, gpu-rt)
     } else if (key == "ocean_tex_half") {
@@ -333,7 +329,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
                key == "log_async" || key == "c3l_read_buffer" || key == "text_scale" ||
                key == "text_min_height" ||
                key == "button_art" || key == "preset" || key == "gpu_micro" ||
-               key == "shader_resident" || key == "gpu_micro_ident" ||
+               key == "gpu_micro_ident" ||
                ctr_cfg_is_user_alias(key.c_str())) {
       // not the renderer's (preset, particles, text_size: ctr_config_presets.h, applied as the
       // keys they stand for) (platform/3ds/port/ctr_port.c, mips2c_native.cpp, kperf.cpp,
@@ -508,7 +504,7 @@ std::string CtrSettings::summary() const {
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
       "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} fine_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} vista_untextured {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} impostors {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
-      "static_cmdlists {} ocean_tex_half {} fast_clock {} "
+      "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
       "fog_start {:.2f} overlap {} frame_pacing {} fps_cap {} ocean_texture_rate {} ocean_near_alpha {:.2f} "
       "shader_basic {} defer_flush {} cmd_dump {} render_watchdog {} stats_period {:.0f}s"
@@ -541,8 +537,7 @@ std::string CtrSettings::summary() const {
       mipmaps == 0 ? "off" : (mipmaps == 2 ? "trilinear" : "on"), mip_bias,
       envmap_min_px,
       skin_rows_f24 ? "on" : "off", skin_clip_f24 ? "on" : "off", color16 ? "on" : "off",
-      early_depth ? (early_depth_block32 ? "block32" : "on")
-                  : (early_depth_sky ? (early_depth_block32 ? "sky32" : "sky") : "off"),
+      early_depth ? "on" : (early_depth_sky ? "sky" : "off"),
       early_depth_func || early_depth_clear
           ? fmt::format(" (func {} clear {:#x})",
                         early_depth_func == 1 ? "gt"
@@ -566,7 +561,7 @@ std::string CtrSettings::summary() const {
       tex_cache_uploads ? "uploads" : "always",
       asm_tex ? "on" : "off",
       asm_mem ? "on" : "off",
-      static_cmdlists == 2 ? "compare" : (static_cmdlists ? "on" : "off"), ocean_tex_half ? "on" : "off",
+      ocean_tex_half ? "on" : "off",
       fast_clock ? "on" : "off", fog_start, overlap ? "on" : "off", steady_pacing ? "steady" : "fast",
       fps_cap, ocean_texture_rate, ocean_near_alpha, shader_basic ? "new" : "old",
       defer_flush ? "on" : "off", cmd_dump ? "on" : "off", render_watchdog ? "on" : "off",

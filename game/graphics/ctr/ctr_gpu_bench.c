@@ -52,9 +52,12 @@ static struct {
   u64 last_tick;
 } s_pl;
 
-/* the GPU idle: citro3d's queue finished (at most 1 s) */
-static int wait_gpu_idle(s64 timeout_ns) {
-  return gxCmdQueueWait(&c3d_head()->gxQueue, timeout_ns) ? 1 : 0;
+/* (AI-assisted) gxCmdQueueWait's timeout is in system ticks, not nanoseconds */
+#define BENCH_MS_TICKS(ms) ((s64)(ms) * (s64)(SYSCLOCK_ARM11 / 1000))
+
+/* the GPU idle: citro3d's queue finished (at most timeout_ms) */
+static int wait_gpu_idle(int timeout_ms) {
+  return gxCmdQueueWait(&c3d_head()->gxQueue, BENCH_MS_TICKS(timeout_ms)) ? 1 : 0;
 }
 
 int ctr_gpu_perflog_start(void) {
@@ -62,7 +65,7 @@ int ctr_gpu_perflog_start(void) {
     return 0;
   }
   /* the GSP assumes no GPU operation in progress when the mode changes (libctru) */
-  wait_gpu_idle(1000000000LL);
+  wait_gpu_idle(1000);
   const Result r = GSPGPU_SetPerfLogMode(true);
   if (R_FAILED(r)) {
     printf("[ctr] gpu perflog: the GSP refused the performance log (%08lx)\n", (unsigned long)r);
@@ -172,7 +175,7 @@ void C3Di_UpdateContext(void);
 void C3Di_SetTex(int unit, C3D_Tex* tex);
 
 #define BENCH_FILE "sdmc:/3ds/jak1/data/log/bench.txt"
-#define BENCH_TIMEOUT_NS 3000000000LL
+#define BENCH_TIMEOUT_MS 3000
 #define BENCH_QUEUE_MAX 30 /* citro3d's GX queue has 32 entries (more is a panic) */
 #define HS_INTERVAL 8192u  /* GPU cycles per hotspot sample: 0xFFFF samples = 2 s */
 #define HWREG_HS_ENABLE 0x400064u
@@ -182,11 +185,9 @@ void C3Di_SetTex(int unit, C3D_Tex* tex);
 #define HWREG_POST_VERTEX_CACHE_NUM (0x401000u + 0x22Du * 4u)
 #define NTRAFFIC 20
 
-/* targets: T0 240x400 RGBA8 + D24S8 (the game's), T1 the same with D16, T2 256x416 block32 */
+/* targets: T0 240x400 RGBA8 + D24S8 (the game's), T1 the same with D16 */
 #define TW 240
 #define TH 400
-#define B32W 256
-#define B32H 416
 
 typedef struct {
   float x, y, z, s, t;
@@ -244,8 +245,8 @@ static struct {
   int queued;    /* GX queue entries this frame */
   u64 start_tick;
   int tests;
-  C3D_RenderTarget *t0, *t1, *t2;
-  u32* rb;       /* readback: B32W * B32H RGBA8, linear */
+  C3D_RenderTarget *t0, *t1;
+  u32* rb;       /* readback: TW * TH RGBA8, linear */
   u8* scratch;   /* display transfer output like the screen's: TW * TH RGB8, linear */
   u32* fence_src; /* 16 bytes each: the game's fence copy */
   u32* fence_dst;
@@ -413,7 +414,7 @@ static int bench_run(Meas* m) {
   }
   meas_begin(m);
   C3D_FrameEnd(GX_CMDLIST_FLUSH);
-  const int ok = gxCmdQueueWait(&c3d_head()->gxQueue, BENCH_TIMEOUT_NS) ? 1 : 0;
+  const int ok = gxCmdQueueWait(&c3d_head()->gxQueue, BENCH_MS_TICKS(BENCH_TIMEOUT_MS)) ? 1 : 0;
   meas_end(m);
   m->wall_ms = C3D_GetDrawingTime();
   if (!ok) {
@@ -715,7 +716,7 @@ static void queue_readback(C3D_RenderTarget* t) {
   const u32 flags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
                     GX_TRANSFER_RAW_COPY(0) | GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) |
                     GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGBA8) |
-                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO) | (fb->block32 ? BIT(16) : 0);
+                    GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
   GX_DisplayTransfer((u32*)fb->colorBuf, GX_BUFFER_DIM(fb->width, fb->height), B.rb,
                      GX_BUFFER_DIM(fb->width, fb->height), flags);
   B.queued++;
@@ -1744,22 +1745,18 @@ static int tex_make(int i, int w, int h, GPU_TEXCOLOR fmt, int mips) {
   return copied;
 }
 
-static C3D_RenderTarget* target_make(int w, int h, GPU_DEPTHBUF depth, int block32) {
+static C3D_RenderTarget* target_make(int w, int h, GPU_DEPTHBUF depth) {
   ctr_linear_lock();
   C3D_RenderTarget* t = C3D_RenderTargetCreate(w, h, GPU_RB_RGBA8, depth);
   ctr_linear_unlock();
-  if (t && block32) {
-    C3D_FrameBufAttrib(&t->frameBuf, (u16)w, (u16)h, true);
-  }
   return t;
 }
 
 static int setup(void) {
   B.hw_ok = 1;
-  B.t0 = target_make(TW, TH, GPU_RB_DEPTH24_STENCIL8, 0);
-  B.t1 = target_make(TW, TH, GPU_RB_DEPTH16, 0);
-  B.t2 = target_make(B32W, B32H, GPU_RB_DEPTH24_STENCIL8, 1);
-  B.rb = (u32*)lin_alloc(B32W * B32H * 4);
+  B.t0 = target_make(TW, TH, GPU_RB_DEPTH24_STENCIL8);
+  B.t1 = target_make(TW, TH, GPU_RB_DEPTH16);
+  B.rb = (u32*)lin_alloc(TW * TH * 4);
   B.scratch = (u8*)lin_alloc(TW * TH * 3);
   B.fence_src = (u32*)lin_alloc(16);
   B.fence_dst = (u32*)lin_alloc(16);
@@ -1821,9 +1818,6 @@ static void teardown(void) {
     if (B.t1) {
       C3D_RenderTargetDelete(B.t1);
     }
-    if (B.t2) {
-      C3D_RenderTargetDelete(B.t2);
-    }
   }
   ctr_linear_unlock();
   lin_free(B.rb);
@@ -1838,7 +1832,7 @@ int ctr_gpu_bench_run(void) {
   memset(&B, 0, sizeof(B));
   B.start_tick = svcGetSystemTick();
   bench_file("===== pica_bench session =====");
-  wait_gpu_idle(1000000000LL);
+  wait_gpu_idle(1000);
   /* the performance log: on for the bench (back off after it unless gpu_perflog turns it on) */
   const int pl_was_on = s_pl.on;
   B.pl_ok = pl_was_on || R_SUCCEEDED(GSPGPU_SetPerfLogMode(true));
@@ -1854,11 +1848,11 @@ int ctr_gpu_bench_run(void) {
   APT_CheckNew3DS(&is_new);
   const int ok = setup();
   bench_emitf("[bench] begin v=1 new3ds=%d emulator=%d perflog=%d upm=%.1f vblank_raw=%lu hw=%d "
-              "hs_interval=%u setup=%d t1=%d t2=%d textures=%d%d%d%d%d%d programs=basic%d,clip2%d,"
+              "hs_interval=%u setup=%d t1=%d textures=%d%d%d%d%d%d programs=basic%d,clip2%d,"
               "bench%d,sep%d,mesh_opt%d,skin_opt%d",
               is_new ? 1 : 0, ctr_gpu_is_emulator(), B.pl_ok, B.upm, (unsigned long)B.vblank_raw,
               B.hw_ok, HS_INTERVAL, ok,
-              B.t1 != NULL, B.t2 != NULL, B.tex_ok[0], B.tex_ok[1], B.tex_ok[2], B.tex_ok[3],
+              B.t1 != NULL, B.tex_ok[0], B.tex_ok[1], B.tex_ok[2], B.tex_ok[3],
               B.tex_ok[4], B.tex_ok[5], B.basic.ok, B.clip2.ok,
               B.bench.ok, B.sep.ok, B.mesh_opt.ok, B.skin_opt.ok);
   if (ok) {
@@ -1881,12 +1875,11 @@ int ctr_gpu_bench_run(void) {
     b7_one("B7.zero", 1);
     b8(B.t0, "n");
     /* register settings the game never used on hardware: colour buffer reads off, the
-     * post-vertex cache size, the 32x32 block mode (and its display transfer) */
+     * post-vertex cache size */
     ctr_log_sync();
     b6_fill("B6.cbread0", (Fill){-1, 1, 1, 0, 0, 1, 0});
     b6_cbread_probe();
     b4(1);
-    b8(B.t2, "b32");
     /* everything so far is on the card before the tests that could hang the GPU: the bench's
      * own shaders, then shader_opt's programs */
     ctr_log_sync();

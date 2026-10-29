@@ -203,10 +203,6 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   light lists and palettes (`tod_scan`) at its first take, once per level load. Host check:
   `CTR_TOD_CHECK=1`.
 - Tie LOD: unchanged for the far chunks; a unit's runs are LOD runs like any tie LOD chunk's.
-- static_cmdlists: a recorded stretch is keyed by the draws' physical vertex and index addresses,
-  counts and states: a unit freed and another read into the same arena piece with the same counts
-  writes the same command words (the data at those addresses is what the GPU reads), so nothing is
-  replayed stale (`static_cmdlists = compare` checks).
 - Impostors (merged Oct 17: cards from the tie LOD version on screen): units are never cards and
   don't restart the level's cards when their meshes come and go. A far chunk's card holds far
   versions only (its near versions are in units): while a unit is late its groups are far and the
@@ -304,8 +300,7 @@ at full detail; within run-to-run noise elsewhere.
 **Checks**: host `CTR_STREAM_CHECK=1` over level_pairs.pad, playthrough_sweep.pad, zoomer.pad and
 stream_traverse.pad: 0 near versions drawn without their data, 0 near chunks drawn with the file's
 baked colors, run spheres and kDrawAlpha80 flags of the file identical to the ones made at load
-(166k spheres, 48k draws). Azahar `static_cmdlists = compare` over level_pairs.pad: 0 mismatched
-copies (~10k stretches checked).
+(166k spheres, 48k draws). (static_cmdlists, checked here then, was removed Oct 29.)
 
 **Playthrough sweep** (host, all 68 checkpoints, CTR_STREAM_CHECK + SD model): passes (exit 0), 0
 near versions without their data, 0 near chunks with baked colors. Late times: 1377 after cuts

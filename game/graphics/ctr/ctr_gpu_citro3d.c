@@ -99,6 +99,15 @@ static inline void diag_rt(const char* stage) {
 
 /* from ctr_port.c: stop the console's buffer swaps once citro3d owns the screens */
 void ctr_port_set_gpu_active(int active);
+/* (AI-assisted, gpu-home) fn runs on the main thread after each aptMainLoop (ctr_main_loop) */
+void ctr_port_set_apt_after(void (*fn)(void));
+/* (AI-assisted, gpu-home) the HOME Menu / sleep gate (see apt_gate_hook) */
+static void apt_gate_install(void);
+static void apt_gate_remove(void);
+static void apt_gate_enter(void);
+static void apt_gate_leave(void);
+static void raw_gas_flags_clear(void);
+static void gx_queue_enlarge(void);
 void ctr_linear_lock(void);
 void ctr_linear_unlock(void);
 
@@ -130,6 +139,11 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 }
 #define linearAlloc safe_linear_alloc
 #define vramAlloc safe_vram_alloc
+
+/* (AI-assisted, gpu-home) the GX queue's entries (citro3d makes 32; 32 bytes each) */
+#define GX_QUEUE_ENTRIES 256
+/* (AI-assisted) gxCmdQueueWait's timeout is in system ticks (268 MHz), not nanoseconds */
+#define GX_WAIT_MS(ms) ((s64)(ms) * (s64)(SYSCLOCK_ARM11 / 1000))
 
 /* (AI-assisted) CPU data cache flushes for memory the GPU reads, through the GSP service. Not
  * svcFlushProcessDataCache directly: it isn't in gk.rsf's SystemCallAccess, and on hardware a
@@ -356,12 +370,14 @@ static struct {
   DVLB_s* ocean_env_dvlb; /* (AI-assisted, j2water) ctr_ocean_env.v.pica (Jak II) */
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
   int ocean_tex2_bound; /* texture unit 2 holds the ocean's shimmer texture */
-  int ocean_stage2;     /* combiner stage 2 holds the ocean's fog stage */
+  /* combiner stage 2 isn't pass-through: 1 a fog stage (ocean, merc fog) or Jak II's ocean env /
+   * etie stage, 2 the PS2 ocean's. (AI-assisted) Only says "reset it": the merc fog draws commit
+   * their stage every time (commit_texenv compares) */
+  int ocean_stage2;
   int etie_stage3;      /* (AI-assisted, j2water2) combiner stage 3 holds the envmapped ties' fog */
   /* (AI-assisted) fog_stage_skip: level draws without the fog stage (ctr_gpu_set_mesh_nofog), and
    * texture unit 1 (the fog ramp) switched off for them (raw draws) */
   int mesh_nofog;
-  int unit1_off;
   DVLB_s* ocean_full_dvlb; /* (AI-assisted) the PS2 ocean's GS vertices (ctr_ocean_full.v.pica) */
   DVLB_s* ocean_full_clip_dvlb; /* (AI-assisted) the same in clip space (ctr_ocean_full_clip.v.pica) */
   C3D_Mtx ocean_full_gs; /* GS screen units (x, y 12.4, z 24 bits) -> PICA clip space at w = 1 */
@@ -433,57 +449,24 @@ static struct {
   int vram_copy_failures;
   int screen_tex; /* texture slot of ctr_gpu_copy_screen (-1: not made yet), 256x512 RGBA8 */
   int screen_tex_vram; /* (AI-assisted) it is in VRAM (distort_copy = rows) */
+  /* (AI-assisted, gpu-home) a texture pool wanted its VRAM (update_pool_residency): made in linear
+   * memory from then on (for the session) */
+  int screen_tex_no_vram;
   char screenshot_path[256];
   int screenshot_state;  /* 0 none, 1 requested, 2 frame rendered: write at next frame begin */
 } g;
-
-/* (AI-assisted, gpu-rt) config.ini static_cmdlists: a stretch of level mesh draws being recorded
- * (ctr_gpu_draw_mesh_calls): its matrix uploads (slots: word offset from p0, then call | words <<
- * 24), and anything that makes the stretch unfit to copy again (bad: a citro3d draw; citro3d
- * updates and sky hook runs are counted) */
-static struct {
-  int on, bad, call, n, max;
-  u32* p0;
-  u32* slots;
-} s_rec;
-static u32 s_ctx_updates, s_hook_runs;
 
 static int g_color16 = 0;
 /* (AI-assisted) steady frame pacing, see pres_vblank */
 static int g_steady_pacing;
 static int pres_init(void);
 
-/* (AI-assisted) config.ini early_depth = block32: the render target in 32x32 block mode
- * (GPUREG_FRAMEBUFFER_BLOCK32), which the early depth test seems to need (OpenLara's 3DS backend
- * left it off for this: "block32 256x416 input -> 240x400 output"). Block mode needs dimensions
- * that are multiples of 32: 256x416, the picture in columns 0..239 and rows 8..407 (the viewport
- * is 8 rows in: the GPU stores y flipped, so the same rows either way). The display transfer
- * untiles 32x32 blocks (flag bit 16) but only to an output that is a multiple of 32 too (3dbrew,
- * GPU/External_Registers), so it goes to s_b32_scratch (256x416 linear), and a texture copy that
- * skips the padding crops it into the 240x400 screen buffer. Needs steady pacing (our own screen
- * buffers); without it, or without the memory, the target stays 240x400 and early depth off. */
-#define B32_W 256
-#define B32_H 416
-#define B32_ROW0 8
-#define GX_TRANSFER_BLOCK32 (1u << 16)
-static int g_block32 = 0;
-static int g_block32_failed = 0;
-static uint8_t* s_b32_scratch; /* 256x416 at 32 bits (16 with color16) */
 /* (AI-assisted) config.ini depth16: a 16-bit depth buffer (no stencil: only ocean = waves uses it) */
 static int g_depth16 = 0;
 
-/* render buffer rows the picture starts at (the viewport's y) */
-static int top_row0(void) {
-  return g_block32 ? B32_ROW0 : 0;
-}
-
-/* the viewport: the whole render target, or with block32 the 240x400 inside the padding */
+/* the viewport: the whole render target */
 static void set_top_viewport(void) {
-  if (g_block32) {
-    C3D_SetViewport(0, B32_ROW0, 240, 400);
-  } else {
-    C3D_SetViewport(0, 0, g.top->frameBuf.width, g.top->frameBuf.height);
-  }
+  C3D_SetViewport(0, 0, g.top->frameBuf.width, g.top->frameBuf.height);
 }
 
 /* The previous frame is still in the render target's color buffer (VRAM, tiled RGBA8 or RGB565,
@@ -491,9 +474,6 @@ static void set_top_viewport(void) {
 static void write_screenshot(void) {
   const int fw = 240, fh = 400;  /* render buffer dimensions */
   const uint8_t* src = (const uint8_t*)g.top->frameBuf.colorBuf;
-  if (g_block32) {
-    return; /* (AI-assisted) the 32x32 block layout isn't decoded here */
-  }
   FILE* f = fopen(g.screenshot_path, "wb");
   if (!f) {
     return;
@@ -1053,20 +1033,17 @@ static int vram_bank(const void* p) {
   return osConvertVirtToPhys(p) >= 0x18300000u;
 }
 
-/* The top screen's render target: 240x400 (or block32's 256x416), RGBA8 / RGB565 color, D24S8
+/* The top screen's render target: 240x400, RGBA8 / RGB565 color, D24S8
  * (or depth16's D16) depth. citro3d puts the depth buffer in the other VRAM bank when it fits,
  * else silently in the same one: then color and depth traffic share one bank. (AI-assisted) */
 static C3D_RenderTarget* create_top_target(void) {
-  const int w = g_block32 ? B32_W : 240, h = g_block32 ? B32_H : 400;
+  const int w = 240, h = 400;
   C3D_RenderTarget* t = C3D_RenderTargetCreate(w, h, g_color16 ? GPU_RB_RGB565 : GPU_RB_RGBA8,
                                                g_depth16 ? GPU_RB_DEPTH16 : GPU_RB_DEPTH24_STENCIL8);
   if (!t) {
     return NULL;
   }
   C3D_FrameBuf* fb = &t->frameBuf;
-  if (g_block32) {
-    C3D_FrameBufAttrib(fb, (u16)w, (u16)h, true);
-  }
   if (fb->depthBuf && vram_bank(fb->colorBuf) == vram_bank(fb->depthBuf)) {
     void* d = vramAllocAt(C3D_CalcDepthBufSize(w, h, fb->depthFmt),
                           vram_bank(fb->colorBuf) ? VRAM_ALLOC_A : VRAM_ALLOC_B);
@@ -1085,15 +1062,12 @@ int ctr_gpu_describe_target(char* out, int size) {
   const C3D_FrameBuf* fb = &g.top->frameBuf;
   const u32 c = osConvertVirtToPhys(fb->colorBuf), d = osConvertVirtToPhys(fb->depthBuf);
   return snprintf(out, (size_t)size,
-                  "%dx%d%s, color %s at 0x%08lx (VRAM %c), depth %s at 0x%08lx (VRAM %c)%s%s",
-                  fb->width, fb->height, fb->block32 ? " block32" : "",
+                  "%dx%d, color %s at 0x%08lx (VRAM %c), depth %s at 0x%08lx (VRAM %c)%s",
+                  fb->width, fb->height,
                   g_color16 ? "RGB565" : "RGBA8", (unsigned long)c, vram_bank(fb->colorBuf) ? 'B' : 'A',
                   fb->depthFmt == GPU_RB_DEPTH16 ? "D16" : "D24S8", (unsigned long)d,
                   vram_bank(fb->depthBuf) ? 'B' : 'A',
-                  vram_bank(fb->colorBuf) == vram_bank(fb->depthBuf) ? " SAME BANK" : "",
-                  g_block32_failed ? "; early_depth = block32 FAILED (needs frame_pacing = steady "
-                                     "and 0.4 MB linear memory): 240x400, early depth off"
-                                   : "");
+                  vram_bank(fb->colorBuf) == vram_bank(fb->depthBuf) ? " SAME BANK" : "");
 }
 
 /* (AI-assisted) a program set's uniform places (have_fa: its mesh_fa program is set up) */
@@ -1180,7 +1154,7 @@ static void prog_set_free(ProgSet* p) {
   memset(p, 0, sizeof(*p));
 }
 
-/* (AI-assisted, micro-gpu) config.ini shader_resident (default on): every vertex program of both
+/* (AI-assisted, micro-gpu) shader_resident (always on with gpu_micro): every vertex program of both
  * sets in one code image that stays in the GPU's shader memory. citro3d uploads a program's code
  * and operand descriptors at every switch to a program of another DVLP (C3D_BindProgram compares
  * the DVLPs): with one shbin per program, every switch (~8 per frame) wrote its code again. Here
@@ -1205,7 +1179,7 @@ int ctr_config_bool(const char* key, int def); /* platform/3ds/port */
  * s_micro = 0 and the frame after the next with all on (the same vertex buffer copy), for
  * cmd_report.py --kicks. */
 enum {
-  MICRO_RESIDENT = 1,   /* shader_resident's one code image (config.ini shader_resident too) */
+  MICRO_RESIDENT = 1,   /* shader_resident's one code image */
   MICRO_TEXREGS = 2,    /* texture unit 0: only the registers that change (with cmd_dedup) */
   MICRO_GAS = 4,        /* GAS_DELTAZ_DEPTH only with a new depth function (with cmd_dedup) */
   MICRO_PROCLUT = 8,    /* the procedural texture tables kept in the GPU's LUT memory */
@@ -1251,7 +1225,7 @@ static int res_desc_bits(u32 ins) {
 static void res_apply(int on);
 
 static void resident_programs(void) {
-  if (!ctr_config_bool("shader_resident", 1) || !(s_micro & MICRO_RESIDENT)) {
+  if (!(s_micro & MICRO_RESIDENT)) {
     printf("[ctr] shader_resident: off\n");
     return;
   }
@@ -1453,6 +1427,8 @@ int ctr_gpu_init(void) {
   if (!C3D_Init(CMDBUF_BYTES)) {
     return -1;
   }
+  apt_gate_install(); /* (AI-assisted, gpu-home) after C3D_Init: its hook runs before citro3d's */
+  gx_queue_enlarge();  /* (AI-assisted, gpu-home) */
   if (g_color16) {
     /* (AI-assisted) config.ini color16: every pixel the GPU writes, blends or clears is half the
      * memory traffic, and so is the display transfer. No destination alpha (CTR_BLEND_ADD_DST_A
@@ -1465,23 +1441,6 @@ int ctr_gpu_init(void) {
   }
   /* (AI-assisted) with steady pacing the frames go to our own screen buffers (pres_queue_frame) */
   const int pres_on = g_steady_pacing && pres_init();
-  if (g_block32) {
-    if (pres_on) {
-      ctr_linear_lock();
-      s_b32_scratch = (uint8_t*)linearAlloc(B32_W * B32_H * (g_color16 ? 2 : 4));
-      ctr_linear_unlock();
-    }
-    if (!s_b32_scratch) {
-      /* no block32 without our own screen buffers: the usual 240x400 target, early depth off */
-      C3D_RenderTargetDelete(g.top);
-      g_block32 = 0;
-      g_block32_failed = 1;
-      g.top = create_top_target();
-      if (!g.top) {
-        return -2;
-      }
-    }
-  }
   if (!pres_on) {
     C3D_RenderTargetSetOutput(g.top, GFX_TOP, GFX_LEFT,
                               g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
@@ -1580,7 +1539,7 @@ int ctr_gpu_init(void) {
   s_micro_ident = ctr_config_bool("gpu_micro_ident", 0);
   printf("[ctr] gpu_micro: %s%s\n", s_micro ? "on" : "off",
          s_micro_ident ? " (gpu_micro_ident: dumps off / on pairs)" : "");
-  resident_programs(); /* (AI-assisted, micro-gpu) config.ini shader_resident */
+  resident_programs(); /* (AI-assisted, micro-gpu) shader_resident (gpu_micro) */
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
    * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
@@ -1638,6 +1597,7 @@ void ctr_gpu_exit(void) {
   if (!g.ready) {
     return;
   }
+  apt_gate_remove(); /* (AI-assisted, gpu-home) */
   ctr_linear_lock();
   for (int i = 0; i < MAX_TEXTURES; i++) {
     if (g.textures[i].used) {
@@ -1701,12 +1661,6 @@ void ctr_gpu_exit(void) {
   }
   g.mesh_fa_dvlb = NULL;
   C3D_RenderTargetDelete(g.top);
-  if (s_b32_scratch) {
-    ctr_linear_lock();
-    linearFree(s_b32_scratch);
-    ctr_linear_unlock();
-    s_b32_scratch = NULL;
-  }
   C3D_Fini();
   ctr_port_set_gpu_active(0);
   g.ready = 0;
@@ -1908,6 +1862,10 @@ static struct {
     volatile int seen; /* (AI-assisted) the callback saw it done (its slack is counted) */
   } q[PRESENT_Q];
   volatile u32 q_head, q_tail;            /* render thread writes q_tail, the callback q_head */
+  /* (AI-assisted, gpu-home) the render thread asks the callback to drop the waiting frames
+   * (pres_queue_frame): the callback alone moves q_head (it walked stale slots for ~2^32 rounds
+   * when the render thread set q_head in the middle of its loop) */
+  volatile int drop_req;
   volatile int buf_state[PRESENT_BUFS];   /* 0 free, 1 queued, 2 requested, 3 on screen */
   volatile int requested, shown, flip;
   volatile u32 last_shown;
@@ -2293,7 +2251,24 @@ int ctr_gpu_breakdown_line(char* out, int size, const char* label) {
 static void pres_vblank(void* unused) {
   (void)unused;
   const u32 v = ++s_pres.vblanks;
+  if (s_pres.drop_req || (s32)(s_pres.q_tail - s_pres.q_head) < 0) {
+    /* (AI-assisted, gpu-home) the render thread's drop (no free screen buffer for 300 ms), or
+     * indices that went wrong: nothing waits any more */
+    s_pres.q_head = s_pres.q_tail;
+    for (int i = 0; i < PRESENT_BUFS; i++) {
+      if (s_pres.buf_state[i] == 1) {
+        s_pres.buf_state[i] = 0;
+      }
+    }
+    s_pres.drop_req = 0;
+  }
   if (s_pres.requested >= 0) {
+    if (gspIsPresentPending(GFX_TOP)) {
+      /* (AI-assisted, gpu-home) the GSP hasn't taken the last request yet (this callback ran
+       * after its vblank handling): the old buffer is still scanned out. Nothing freed or
+       * requested until it has: the next vblank. */
+      return;
+    }
     /* the buffer requested at the last vblank is on screen from this one */
     if (s_pres.shown >= 0 && s_pres.shown != s_pres.requested) {
       s_pres.buf_state[s_pres.shown] = 0;
@@ -2307,13 +2282,13 @@ static void pres_vblank(void* unused) {
     }
     s_pres.last_shown = v;
   }
-  if (s_pres.q_head == s_pres.q_tail) {
+  if ((s32)(s_pres.q_tail - s_pres.q_head) <= 0) {
     return;
   }
   svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
   const u32 done = *(volatile u32*)s_pres.fence;
   int pick = -1;
-  while (s_pres.q_head != s_pres.q_tail) {
+  while ((s32)(s_pres.q_tail - s_pres.q_head) > 0) {
     const u32 qi = s_pres.q_head % PRESENT_Q;
     const u32 id = s_pres.q[qi].id;
     const u32 target = s_pres.q[qi].target;
@@ -2397,8 +2372,12 @@ static u32 vblank_count(void) {
   return s_pres.on ? s_pres.vblanks : C3D_FrameCounter(0);
 }
 
-void ctr_gpu_note_release(void) {
-  s_pres.next_release = vblank_count();
+unsigned int ctr_gpu_release_now(void) {
+  return vblank_count();
+}
+
+void ctr_gpu_note_release(unsigned int release) {
+  s_pres.next_release = release;
 }
 
 static int pres_init(void) {
@@ -2493,14 +2472,26 @@ static void pres_queue_frame(u32* fence_id) {
       break;
     }
     if (tries > 300) {
-      /* nothing is being shown (the app in the background?): drop the waiting frames */
-      s_pres.q_head = s_pres.q_tail;
-      for (int i = 0; i < PRESENT_BUFS; i++) {
-        if (s_pres.buf_state[i] == 1) {
-          s_pres.buf_state[i] = 0;
+      /* nothing is being shown (the app in the background?): drop the waiting frames. (AI-assisted,
+       * gpu-home) The vblank callback does it (it alone moves q_head); only when it doesn't run
+       * at all (100 ms more) here, as before */
+      if (!s_pres.drop_req && tries == 301) {
+        s_pres.drop_req = 1;
+      } else if (tries > 400 && s_pres.drop_req) {
+        s_pres.drop_req = 0;
+        s_pres.q_head = s_pres.q_tail;
+        for (int i = 0; i < PRESENT_BUFS; i++) {
+          if (s_pres.buf_state[i] == 1) {
+            s_pres.buf_state[i] = 0;
+          }
         }
+        tries = 0;
+        continue;
       }
-      continue;
+      if (!s_pres.drop_req) {
+        tries = 0; /* (the callback dropped them: wait for a buffer again) */
+        continue;
+      }
     }
     pres_check_alive();
     svcSleepThread(1000000LL);
@@ -2511,22 +2502,9 @@ static void pres_queue_frame(u32* fence_id) {
     bd_transfer_mark(); /* (AI-assisted, gpu-rt) frame_overlap2 = on: the queue runs */
   }
   C3D_FrameSplit(GX_CMDLIST_FLUSH); /* the draws first */
-  if (g_block32) {
-    /* (AI-assisted) untile the 256x416 blocks into the scratch buffer, then copy rows 8..407,
-     * 240 pixels of each 256 (in 16 byte units: 720 + 48 bytes in RGB8, 480 + 32 in RGB565) */
-    const u32 bpp = g_color16 ? 2 : 3;
-    GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(B32_W, B32_H),
-                       (u32*)s_b32_scratch, GX_BUFFER_DIM(B32_W, B32_H),
-                       (g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS) |
-                           GX_TRANSFER_BLOCK32);
-    GX_TextureCopy((u32*)(s_b32_scratch + B32_ROW0 * B32_W * bpp),
-                   GX_BUFFER_DIM(240 * bpp / 16, (B32_W - 240) * bpp / 16), (u32*)s_pres.buf[b],
-                   GX_BUFFER_DIM(240 * bpp / 16, 0), 240 * 400 * bpp, 8 /* raw copy */);
-  } else {
-    GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400),
-                       (u32*)s_pres.buf[b], GX_BUFFER_DIM(240, 400),
-                       g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
-  }
+  GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(240, 400),
+                     (u32*)s_pres.buf[b], GX_BUFFER_DIM(240, 400),
+                     g_color16 ? DISPLAY_TRANSFER_FLAGS_565 : DISPLAY_TRANSFER_FLAGS);
   /* the fence: a 16 byte texture copy of this frame's number, after the transfer. Not a memory
    * fill: on hardware that unit only fills VRAM, and a fill of main memory never finished (the
    * GPU queue stalled: black top screen, frozen game, sound still playing). Azahar fills any
@@ -2657,18 +2635,41 @@ static int overlap2_on(void) {
   return s_overlap2 == 2 && s_pres.on;
 }
 
-/* before adding n entries to the GX queue (mode 2) */
-static void overlap2_room(int n) {
+/* before adding n entries to the GX queue (mode 2); returns the milliseconds waited (a full
+ * running queue drained: counted in s_ov2_drains). (AI-assisted, gpu-home) The queue has
+ * GX_QUEUE_ENTRIES (ctr_gpu_init) instead of citro3d's 32: a GPU-bound scene filled 32 in 3-4
+ * frames (6-8 entries each), and each drain left the GPU idle while the next frame was built. */
+static u32 s_ov2_drains;
+static float overlap2_room(int n) {
   gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  float ms = 0.0f;
   const int idle = gxCmdQueueWait(q, 0);
   if (idle || q->numEntries + n >= q->maxEntries) {
     if (!idle) {
+      const u64 t0 = svcGetSystemTick();
       gxCmdQueueWait(q, -1);
+      ms = (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
+      s_ov2_drains++;
     }
     gxCmdQueueStop(q);
     gxCmdQueueClear(q);
   }
   gxCmdQueueRun(q); /* active (an added entry starts it); no-op while it runs */
+  return ms;
+}
+
+/* (AI-assisted, gpu-home) ctr_gpu_init: GX_QUEUE_ENTRIES instead of citro3d's 32 (overlap2_room),
+ * resized while it is empty and idle (libctru reads maxEntries at each add; citro3d's C3D_Fini
+ * frees the array) */
+static void gx_queue_enlarge(void) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  if (gxCmdQueueWait(q, 0) && q->numEntries == 0 && q->maxEntries < GX_QUEUE_ENTRIES) {
+    gxCmdEntry_s* e = (gxCmdEntry_s*)realloc(q->entries, GX_QUEUE_ENTRIES * sizeof(gxCmdEntry_s));
+    if (e) {
+      q->entries = e;
+      q->maxEntries = GX_QUEUE_ENTRIES;
+    }
+  }
 }
 
 /* mode 2: until frame id is done (its fence landed: its draws, transfer and everything before);
@@ -2740,7 +2741,6 @@ void ctr_gpu_run_sky_hook(void) {
   const ctr_gpu_hook_fn fn = s_sky_hook;
   if (fn) {
     s_sky_hook = NULL; /* once (its own draws mustn't call it again) */
-    s_hook_runs++;     /* (AI-assisted, gpu-rt) static_cmdlists */
     const int phase = s_bd.phase; /* (AI-assisted, gpu-rt) gpu_breakdown: the sky's own part */
     ctr_gpu_phase(CTR_PH_SKY);
     fn(s_sky_hook_arg);
@@ -2794,7 +2794,6 @@ static void frame_state_reset(void) {
   s_tex_dirty = 1; /* (AI-assisted) tex_cache_clear = uploads: the frame's first bind clears */
   g.ocean_full_open = 0; /* (AI-assisted) a ctr_gpu_ocean_full_reserve never drawn */
   g.mesh_nofog = 0;      /* (AI-assisted) and unit 1 on again with the ramp (bound below) */
-  g.unit1_off = 0;
   clip_reserve_reset();  /* (AI-assisted) and a ctr_gpu_clip_reserve */
   use_program(PROG_BASIC);
   /* the fog ramp stays on texture unit 1 for the whole frame (binding a texture clears the GPU's
@@ -2804,20 +2803,6 @@ static void frame_state_reset(void) {
   }
   /* (AI-assisted) the early depth buffer starts as "far" like the depth buffer (cleared to 0;
    * larger = closer). citro3d clears it only after frames that drew; the first frame needs it. */
-  if (g_block32) {
-    /* (AI-assisted) citro3d binds the render target at the first draw, after this clear: set the
-     * block mode and the target's place and size first (as C3Di_FrameBufBind), so the early depth
-     * data is cleared for this target from the very first frame on */
-    const C3D_FrameBuf* fb = &g.top->frameBuf;
-    u32 param[3];
-    param[0] = osConvertVirtToPhys(fb->depthBuf) >> 3;
-    param[1] = osConvertVirtToPhys(fb->colorBuf) >> 3;
-    param[2] = 0x01000000 | (((u32)(fb->height - 1) & 0xFFF) << 12) | (fb->width & 0xFFF);
-    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
-    GPUCMD_AddIncrementalWrites(GPUREG_DEPTHBUFFER_LOC, param, 3);
-    GPUCMD_AddWrite(GPUREG_RENDERBUF_DIM, param[2]);
-    GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_BLOCK32, 1);
-  }
   /* (AI-assisted) GBATEK: EARLYDEPTH_DATA is the clear value of the early depth data (its own
    * storage, not the depth buffer), EARLYDEPTH_CLEAR fills it (also at the end of every citro3d
    * split): the config's value (early_depth_clear, default 0 = far), and the context keeps it so
@@ -2839,7 +2824,8 @@ static void frame_state_reset(void) {
 /* (AI-assisted) the clear color as the color buffer stores it (memory fill value) */
 static u32 color_fill_value(uint8_t r, uint8_t gr, uint8_t b) {
   if (g_color16) {
-    return ((u32)(r >> 3) << 11) | ((u32)(gr >> 2) << 5) | (u32)(b >> 3);
+    /* (AI-assisted, gpu-home) rounded, as the textures (CtrTexConv.h ctr_pack16) */
+    return ctr_pack16((u32)r | ((u32)gr << 8) | ((u32)b << 16), CTR_CONV_RGB565);
   }
   return ((u32)r << 24) | ((u32)gr << 16) | ((u32)b << 8) | 0xff;
 }
@@ -2848,7 +2834,7 @@ static void pipeline_frame_begin(u32 clear) {
   if (g.screenshot_state == 2) {
     /* (AI-assisted) the frame to save is complete once the GPU has nothing queued (this frame's
      * clear isn't queued yet): wait for it, only in frames that take a screenshot */
-    if (gxCmdQueueWait(&__C3D_Context.gxQueue, 1000000000LL)) {
+    if (gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(1000))) {
       write_screenshot();
     }
     g.screenshot_state = 0;
@@ -2863,7 +2849,7 @@ static void pipeline_frame_begin(u32 clear) {
     if (s_end_mode2) {
       process_pending_deletes(2);
     }
-    overlap2_room(8);
+    s_begin_wait_ms += overlap2_room(8); /* (AI-assisted, gpu-home) in gpu_wait_ms too */
   }
   GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
   g.cmd_base = gpuCmdBuf;
@@ -2912,7 +2898,7 @@ static void pipeline_submit(void) {
   u32 words;
   GPUCMD_Split(&list, &words);
   if (overlap2_on()) {
-    overlap2_room(4); /* (AI-assisted) this list and a copy or two after it */
+    g.cur.gpu_wait_ms += overlap2_room(4); /* (AI-assisted) this list and a copy or two after it */
   }
   if (words) {
     gt_note_submit();
@@ -2926,6 +2912,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   if (!g.ready) {
     return;
   }
+  apt_gate_enter(); /* (AI-assisted, gpu-home) waits while the HOME Menu or sleep has the GPU */
   anim_slots_frame_begin(); /* (AI-assisted) */
   if (s_micro_ident_st) {
     /* (AI-assisted, micro-gpu) gpu_micro_ident: frame k with everything off (dumped), k + 1 on,
@@ -2970,9 +2957,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   C3D_RenderTargetClear(g.top, s_skip_color_clear ? C3D_CLEAR_DEPTH : C3D_CLEAR_ALL,
                         color_fill_value(r, gr, b), 0);
   C3D_FrameDrawOn(g.top);
-  if (g_block32) {
-    set_top_viewport();
-  }
   frame_state_reset();
   g.cur.color_clear_skipped = s_skip_color_clear;
   g.cur.gpu_wait_ms = wait_ms; /* (AI-assisted) (after the reset of g.cur) */
@@ -3104,8 +3088,15 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
      * draws before the copy start right away, so their vertices must be out of the CPU cache */
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
+    C3D_SyncTextureCopy(in, indim, out, outdim, size, flags);
+    return;
   }
   C3D_SyncTextureCopy(in, indim, out, outdim, size, flags);
+  /* (AI-assisted, gpu-home) outside a frame citro3d waits for "the" PPF event (gspWaitForPPF), and
+   * steady pacing's transfers and fences signal it twice per frame with nobody clearing it: it
+   * returned at once while the copy still ran. The queue holds only this copy now (citro3d's safe
+   * copy waited for and cleared the rest): idle = done. */
+  gxCmdQueueWait(&__C3D_Context.gxQueue, -1);
 }
 
 #define PARTIAL_MIN_DRAWS 24
@@ -3124,7 +3115,7 @@ void ctr_gpu_free_pending_now(void) {
   }
   /* the GX queue holds the last frames' command lists and display transfers; with a timeout in
    * case it isn't running (then the deletes wait for the next frame begin, as before) */
-  if (!gxCmdQueueWait(&__C3D_Context.gxQueue, 200000000LL)) {
+  if (!gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(200))) {
     return;
   }
   process_pending_deletes(0);
@@ -3261,6 +3252,7 @@ static void cmd_dump_frame(void) {
 
 void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
+    apt_gate_leave(); /* (AI-assisted, gpu-home) */
     return;
   }
   ctr_gpu_rt_end(); /* (AI-assisted) impostors: a render to texture left open */
@@ -3296,7 +3288,7 @@ void ctr_gpu_frame_end(void) {
     pipeline_close_list();
   }
   if (ov2 == 2) {
-    overlap2_room(5); /* the list, the transfer(s) and the fence */
+    g.cur.gpu_wait_ms += overlap2_room(5); /* the list, the transfer(s) and the fence */
     if (s_fin_words) {
       gt_note_submit();
       GX_ProcessCommandList(s_fin_list, s_fin_words * 4, 0);
@@ -3338,8 +3330,8 @@ void ctr_gpu_frame_end(void) {
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
   }
   if (bd) {
-    /* (AI-assisted, gpu-rt) the transfer and the fence (steady pacing), block32's crop copy */
-    bd_frame_end(s_pres.on ? (g_block32 ? 3 : 2) : 1);
+    /* (AI-assisted, gpu-rt) the transfer and the fence (steady pacing) */
+    bd_frame_end(s_pres.on ? 2 : 1);
   }
   diag_rt("frame_end: stats");
   g.in_frame = 0;
@@ -3391,7 +3383,10 @@ void ctr_gpu_frame_end(void) {
       }
     }
   }
+  g.cur.queue_drains = (int)s_ov2_drains; /* (AI-assisted, gpu-home) */
+  s_ov2_drains = 0;
   g.last = g.cur;
+  apt_gate_leave(); /* (AI-assisted, gpu-home) the frame's GPU work is all queued */
 }
 
 void ctr_gpu_wait_vblank(int min_vblanks) {
@@ -3778,6 +3773,19 @@ static void update_pool_residency(void) {
         }
       }
       if (victim < 0) {
+        /* (AI-assisted, gpu-home) last, the distorter's screen copy: level textures are read for
+         * most of the screen, the copy for a few distort pixels. Only for a pool at least as big
+         * (its linear memory freed pays for the copy's, made there at the next distort sprite);
+         * the copy's VRAM is free after the next frame begin's deletes (this pool's retry). */
+        const u32 screen_bytes = 256u * 512u * (g_color16 ? 2u : 4u);
+        if (g.screen_tex >= 0 && g.screen_tex_vram && p->bytes >= screen_bytes) {
+          ctr_linear_unlock();
+          ctr_gpu_screen_copy_release();
+          ctr_linear_lock();
+          g.screen_tex_no_vram = 1;
+          printf("[ctr] distorter screen copy: VRAM given to a texture pool (%u KB)\n",
+                 p->bytes / 1024);
+        }
         break;
       }
       if (!pool_leave_vram(victim)) {
@@ -4024,12 +4032,11 @@ void ctr_gpu_set_color16(int on) {
 }
 
 void ctr_gpu_set_early_depth(int on) {
-  /* (AI-assisted) not without the block32 target it was asked for (ctr_gpu_set_framebuffer) */
-  g_early_depth = on && !g_block32_failed ? 1 : 0;
+  g_early_depth = on ? 1 : 0;
 }
 
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
-  const int s = sky && !g_block32_failed ? 1 : 0;
+  const int s = sky ? 1 : 0;
   const int f = func & 3;
   const u32 c = clear & 0xFFFFFFu;
   if (s != g_early_sky || f != g_early_func || c != g_early_clear) {
@@ -4040,10 +4047,9 @@ void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
   }
 }
 
-void ctr_gpu_set_framebuffer(int block32, int depth16) {
+void ctr_gpu_set_framebuffer(int depth16) {
   if (!g.ready) {
-    g_block32 = block32 ? 1 : 0; /* the render target is made in ctr_gpu_init */
-    g_depth16 = depth16 ? 1 : 0;
+    g_depth16 = depth16 ? 1 : 0; /* the render target is made in ctr_gpu_init */
   }
 }
 
@@ -4243,16 +4249,8 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
             d8[2 * o] = (uint8_t)a2;
             d8[2 * o + 1] = p[1];
             break;
-          case GPU_RGB565:
-            d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3));
-            break;
-          case GPU_RGBA5551:
-            d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 3) << 6) | ((p[2] >> 3) << 1) |
-                                (p[3] ? 1 : 0));
-            break;
-          default: /* GPU_RGBA4 */
-            d16[o] = (uint16_t)(((p[0] >> 4) << 12) | ((p[1] >> 4) << 8) |
-                                ((p[2] >> 4) << 4) | (a2 >> 4));
+          default: /* (AI-assisted, gpu-home) RGB565, RGBA5551, RGBA4: rounded (CtrTexConv.h) */
+            d16[o] = (uint16_t)ctr_pack16(ctr_ld32(p), conv);
             break;
         }
       }
@@ -4546,7 +4544,7 @@ static struct {
   /* (AI-assisted, micro-gpu) cmd_dedup: unit 0's border, dim, param, lod and address registers
    * as the last raw bind wrote them (valid while tex0_ctx is: see bind_texture) */
   u32 tex0_regs[5];
-  int tex0_regs_ok; /* tex0_regs hold what the GPU has (static_cmdlists: not across stretches) */
+  int tex0_regs_ok; /* tex0_regs hold what the GPU has */
 } s_raw = {.on = 1, .dedup = 1, .prim = -1};
 
 /* (AI-assisted) a citro3d draw writes the draw registers itself (c3d_draw_* below) */
@@ -4586,6 +4584,146 @@ void ctr_gpu_set_raw_cmds(int on) {
     s_raw.hooked = 1;
   }
   s_raw.on = on ? 1 : 0;
+}
+
+/* ---------------- (AI-assisted, gpu-home) the HOME Menu and sleep ----------------
+ * libctru runs the APT hooks on the thread that calls aptMainLoop: the main thread (gfx.cpp,
+ * ctr_main_loop). citro3d's hook waits for its GX queue, stops and clears it (ONSUSPEND) and marks
+ * its whole context dirty (ONRESTORE), while the render thread (or, without it, the game thread)
+ * kept building and submitting frames: Stop / Clear / Run of the two threads interleaved on the
+ * unprotected queue (gxCmdQueueClear panics on a running queue: a crash at HOME, or lost entries),
+ * GPU writes landed between GSPGPU_SaveVramSysArea and the release of the GPU (undone by the
+ * restore), and the two threads' read-modify-writes of the context's dirty flags could lose bits.
+ * This hook, registered after C3D_Init (aptHook puts the newest first), runs before citro3d's:
+ * on ONSUSPEND / ONSLEEP it closes the gate, waits for the frame being built (ctr_gpu_frame_begin
+ * .. ctr_gpu_frame_end) to end and for the GPU to finish it; citro3d's hook then finds the queue
+ * idle and nobody adding to it. The gate opens on the main thread once aptMainLoop has returned
+ * (every path: back, woken up, or closing), after citro3d's ONRESTORE; the next frame begin sees
+ * the new epoch and sends the whole GPU state again (apt_resume_state). */
+static struct {
+  LightLock lock;
+  CondVar cv;
+  volatile int gate;   /* closed: no frame may begin */
+  volatile int busy;   /* a frame is being built (between frame begin and end) */
+  volatile u32 epoch;  /* + 1 at every opening */
+  u32 seen;            /* the epoch the frames last sent the state for */
+  int hooked;
+  aptHookCookie cookie;
+  u32 suspends, timeouts;
+} s_apt;
+
+static void apt_gate_hook(APT_HookType type, void* param) {
+  (void)param;
+  if (type != APTHOOK_ONSUSPEND && type != APTHOOK_ONSLEEP) {
+    return;
+  }
+  const u64 t0 = svcGetSystemTick();
+  LightLock_Lock(&s_apt.lock);
+  s_apt.gate = 1;
+  s_apt.suspends++;
+  /* the frame being built: bounded (a frame stuck on the GPU must not keep the HOME Menu out) */
+  while (s_apt.busy && svcGetSystemTick() - t0 < (u64)GX_WAIT_MS(1000)) {
+    CondVar_WaitTimeout(&s_apt.cv, &s_apt.lock, 50000000LL);
+  }
+  const int timed_out = s_apt.busy;
+  s_apt.timeouts += (u32)timed_out;
+  LightLock_Unlock(&s_apt.lock);
+  /* what is queued (with frame_overlap2 = on the queue keeps running between frames) */
+  gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(1000));
+  printf("[ctr] %s: frames stopped (%.1f ms%s)\n", type == APTHOOK_ONSLEEP ? "sleep" : "HOME Menu",
+         (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0),
+         timed_out ? ", the frame being built did NOT end" : "");
+}
+
+/* main thread, after every aptMainLoop (ctr_port.c ctr_main_loop): open a closed gate */
+static void apt_gate_after(void) {
+  if (!s_apt.gate) {
+    return;
+  }
+  LightLock_Lock(&s_apt.lock);
+  s_apt.epoch++;
+  s_apt.gate = 0;
+  CondVar_Broadcast(&s_apt.cv);
+  LightLock_Unlock(&s_apt.lock);
+}
+
+static void apt_gate_install(void) {
+  if (s_apt.hooked) {
+    return;
+  }
+  LightLock_Init(&s_apt.lock);
+  CondVar_Init(&s_apt.cv);
+  s_apt.gate = s_apt.busy = 0;
+  aptHook(&s_apt.cookie, apt_gate_hook, NULL);
+  ctr_port_set_apt_after(apt_gate_after);
+  s_apt.hooked = 1;
+}
+
+static void apt_gate_remove(void) {
+  if (!s_apt.hooked) {
+    return;
+  }
+  ctr_port_set_apt_after(NULL);
+  aptUnhook(&s_apt.cookie);
+  s_apt.hooked = 0;
+  apt_gate_after(); /* (a thread waiting at the gate goes on) */
+}
+
+void C3Di_DirtyUniforms(GPU_SHADER_TYPE type); /* citro3d (source/internal.h) */
+
+/* the render path, at the first frame begin after an opening: what the GPU holds may be the HOME
+ * Menu's (or unknown after sleep). citro3d's ONRESTORE marked its context dirty already (main
+ * thread, while no frame ran); marked again here (sleep has no ONRESTORE), our own caches of GPU
+ * state dropped, and steady pacing's vblank callback back at once (citro3d's ONRESTORE registered
+ * its own over it; pres_check_alive would take 50 ms). The frames queued before the suspend are
+ * all due at the first vblank: the callback shows the newest and skips the rest. */
+static void apt_resume_state(void) {
+  C3Di_Context* ctx = &__C3D_Context;
+  /* AttrInfo .. GshCode, TexAll, TexEnvAll (as citro3d's ONRESTORE, but not its gas bit) */
+  ctx->flags |= BIT(2) | BIT(3) | BIT(4) | BIT(5) | BIT(6) | BIT(7) | BIT(8) | BIT(9) | BIT(10) |
+                BIT(11) | BIT(12) | (7u << 23) | (0x3Fu << 26);
+  raw_gas_flags_clear(); /* (GC-1: ONRESTORE's C3DiF_Gas) */
+  ctx->fixedAttribDirty |= ctx->fixedAttribEverDirty;
+  C3Di_DirtyUniforms(GPU_VERTEX_SHADER);
+  C3Di_DirtyUniforms(GPU_GEOMETRY_SHADER);
+  s_raw.apt_epoch++; /* raw caches, the procedural texture tables (raw_check_epoch) */
+  g.last_state_valid = 0;
+  g.last_mesh_valid = 0;
+  g.last_skin_valid = 0;
+  g.skin_bl_valid = 0;
+  g.bound_tex = NULL;
+  s_tex_dirty = 1;
+  if (s_pres.on) {
+    gspSetEventCallback(GSPGPU_EVENT_VBlank0, pres_vblank, NULL, false);
+  }
+  printf("[ctr] back from the HOME Menu / sleep (%lu): the GPU state is sent again\n",
+         (unsigned long)s_apt.suspends);
+}
+
+static void apt_gate_enter(void) {
+  if (!s_apt.hooked) {
+    return;
+  }
+  LightLock_Lock(&s_apt.lock);
+  while (s_apt.gate) {
+    CondVar_Wait(&s_apt.cv, &s_apt.lock);
+  }
+  s_apt.busy = 1;
+  LightLock_Unlock(&s_apt.lock);
+  if (s_apt.seen != s_apt.epoch) {
+    s_apt.seen = s_apt.epoch;
+    apt_resume_state();
+  }
+}
+
+static void apt_gate_leave(void) {
+  if (!s_apt.busy) {
+    return;
+  }
+  LightLock_Lock(&s_apt.lock);
+  s_apt.busy = 0;
+  CondVar_Broadcast(&s_apt.cv);
+  LightLock_Unlock(&s_apt.lock);
 }
 
 void ctr_gpu_set_cmd_dedup(int on, int draw) {
@@ -4637,10 +4775,22 @@ static void raw_frame_reset(void) {
   s_raw.unif_pending = 1;
 }
 
+/* (AI-assisted, gpu-home) citro3d's C3DiF_Gas / C3DiF_GasLut (BIT 18 / 19). Its APTHOOK_ONRESTORE
+ * sets C3DiF_Gas, and only C3Di_GasUpdate clears it, which C3Di_UpdateContext runs in gas mode
+ * only (texEnvBuf & 7 == GPU_GAS: never here). Left set, every raw_sync after a trip to the HOME
+ * Menu ran the whole context update (~1.4-2k instructions per draw, 1.5-3 ms per frame). */
+#define RAW_GAS_FLAGS ((u32)(BIT(18) | BIT(19)))
+static void raw_gas_flags_clear(void) {
+  if ((__C3D_Context.texEnvBuf & 7) != GPU_GAS) {
+    __C3D_Context.flags &= ~RAW_GAS_FLAGS;
+  }
+}
+
 /* what the raw draws compare against is gone (the HOME Menu used the GPU) */
 static void raw_check_epoch(void) {
   if (s_raw.apt_epoch != s_raw.seen_epoch) {
     s_raw.seen_epoch = s_raw.apt_epoch;
+    raw_gas_flags_clear();
     raw_forget_regs();
     g.env_valid = 0;
     g.last_mesh_valid = 0;
@@ -4656,11 +4806,12 @@ static void proc_lut_snapshot(void) {
   s_proc_lut_color_f0 = ok ? s_proc_lut_color_gpu : NULL;
 }
 
-/* before a raw draw's uniforms and the draw: citro3d sends what it has pending */
+/* before a raw draw's uniforms and the draw: citro3d sends what it has pending. (AI-assisted,
+ * gpu-home) Not for the gas bits alone (RAW_GAS_FLAGS: never cleared outside gas mode) */
 static inline void raw_sync(void) {
   raw_check_epoch();
-  if (s_raw.unif_pending || (__C3D_Context.flags & ~(u32)(C3DiF_Active | C3DiF_DrawUsed))) {
-    s_ctx_updates++; /* (AI-assisted, gpu-rt) static_cmdlists: citro3d wrote words */
+  if (s_raw.unif_pending ||
+      (__C3D_Context.flags & ~(u32)(C3DiF_Active | C3DiF_DrawUsed | RAW_GAS_FLAGS))) {
     C3Di_UpdateContext();
     s_raw.unif_pending = 0;
   }
@@ -4972,7 +5123,7 @@ static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
 static int early_depth_ok(const ctr_draw_state* st) {
   return (g_early_depth && (st->flags & CTR_STATE_EARLY_DEPTH) && st->ztest == CTR_TEST_GEQUAL &&
           st->zwrite && st->blend == CTR_BLEND_OFF) ||
-         /* (AI-assisted) early_depth = sky / sky32 (and on / block32 with sky_last): the sky at
+         /* (AI-assisted) early_depth = sky (and on with sky_last): the sky at
           * depth 0 after the opaque geometry, dropped early where it covered a block */
          (g_early_sky && g_depth_far && st->ztest == CTR_TEST_GEQUAL);
 }
@@ -5016,7 +5167,7 @@ typedef struct {
   C3Di_Effect effect;
 } StateFast;
 static StateFast s_sf;
-static u32 s_state_fast; /* statistics (ctr_gpu_cmdlist_line) */
+static u32 s_state_fast; /* statistics (ctr_gpu_micro_line) */
 static inline int words_eq(const void* a, const void* b, unsigned n) {
   const alias_u32* x = (const alias_u32*)a;
   const alias_u32* y = (const alias_u32*)b;
@@ -5341,7 +5492,6 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     } else if (!raw && need1 && is_off) {
       tctx->flags |= C3DiF_Tex(1); /* citro3d binds it again (unit on, cache cleared) */
     }
-    g.unit1_off = want_off;
   }
   if (mesh == 6) {
     /* (AI-assisted, j1ocean) the PS2 ocean's stage 2: with the sky reflection (tint 1) rgb =
@@ -5363,9 +5513,11 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     }
     commit_texenv(2, &e2, raw);
     g.ocean_stage2 = 2;
-  } else if (merc_fog && g.ocean_stage2 != 1) {
-    /* (AI-assisted, far-fog) rgb = mix(previous, fog color, fog amount), as the ocean's stage 2
-     * (ocean_stage2: stage 2 holds that fog stage) */
+  } else if (merc_fog) {
+    /* (AI-assisted, far-fog) rgb = mix(previous, fog color, fog amount), as the ocean's stage 2.
+     * (AI-assisted) Built every time: commit_texenv sends it only when stage 2 differs. A flag
+     * shortcut here lost the fog after the clouds (ctr_gpu_draw_clip2) or Jak II's ocean env /
+     * etie had changed stage 2 behind it. */
     C3D_TexEnv e2;
     C3D_TexEnvInit(&e2);
     C3D_TexEnvSrc(&e2, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
@@ -5747,6 +5899,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
    * changed its context, so the GPU kept the clouds' stage 2 for every draw after the sky (rgb
    * times twice the vertex alpha: darker particles), and citro3d's context was wrong about it. */
   C3D_TexEnvInit(C3D_GetTexEnv(2));
+  g.ocean_stage2 = 0; /* (AI-assisted) stage 2 is pass-through again */
   if (g.fog_tex_valid) {
     C3D_TexBind(1, &g.fog_tex);
   }
@@ -6119,8 +6272,8 @@ static int copy_screen_body(float x0, float x1, int part) {
     ctr_linear_lock();
     /* (AI-assisted) distort_copy = rows: in VRAM if there's room now (the copy and the distort
      * draws then stay in VRAM), leaving the reserve free (C3D_TexInitVRAM calls libctru's
-     * vramAlloc, not safe_vram_alloc). Not with block32 (its copy goes through the scratch). */
-    bool in_vram = part && !g_block32 && (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
+     * vramAlloc, not safe_vram_alloc). */
+    bool in_vram = part && !g.screen_tex_no_vram && (u32)vramSpaceFree() >= bytes + VRAM_RESERVE &&
                    C3D_TexInitVRAM(&t->tex, 256, 512, fmt);
     const bool ok = in_vram || (linear_room_for_tex(256, 512, 0) && C3D_TexInit(&t->tex, 256, 512, fmt));
     ctr_linear_unlock();
@@ -6150,25 +6303,7 @@ static int copy_screen_body(float x0, float x1, int part) {
   /* One GX copy after the draws so far (C3D_SyncTextureCopy splits the command list, which flushes
    * the framebuffer): 50 rows of 8x8 tiles, 30 tiles (7680 bytes; 3840 in RGB565) each in the
    * color buffer, 32 in the texture (a 512 / 256 byte gap). In 16 byte units. */
-  if (g_block32) {
-    /* (AI-assisted) 32x32 blocks: untiled into the scratch buffer, then tiled again in 8x8 tiles
-     * into the texture (256 wide like the render target: the same rows, see ctr_gpu_screen_uv) */
-    if (s_pipeline) {
-      pipeline_submit();
-    } else {
-      flush_vbuf();
-      C3D_FrameSplit(GX_CMDLIST_FLUSH);
-    }
-    const u32 fmt = g_color16 ? GX_TRANSFER_FMT_RGB565 : GX_TRANSFER_FMT_RGBA8;
-    GX_DisplayTransfer((u32*)g.top->frameBuf.colorBuf, GX_BUFFER_DIM(B32_W, B32_H),
-                       (u32*)s_b32_scratch, GX_BUFFER_DIM(B32_W, B32_H),
-                       GX_TRANSFER_IN_FORMAT(fmt) | GX_TRANSFER_OUT_FORMAT(fmt) |
-                           GX_TRANSFER_BLOCK32);
-    GX_DisplayTransfer((u32*)s_b32_scratch, GX_BUFFER_DIM(B32_W, B32_H),
-                       (u32*)g.textures[g.screen_tex].tex.data, GX_BUFFER_DIM(B32_W, B32_H),
-                       GX_TRANSFER_IN_FORMAT(fmt) | GX_TRANSFER_OUT_FORMAT(fmt) |
-                           GX_TRANSFER_OUT_TILED(1));
-  } else {
+  {
     const u32 row = g_color16 ? 3840 : 7680, gap = g_color16 ? 256 : 512;
     /* (AI-assisted) distort_copy = rows: tile row k holds screen columns 8k..8k+7 (the color
      * buffer is 240 wide, x along its rows); a texel of margin each side for the filter */
@@ -6197,6 +6332,7 @@ static int copy_screen_body(float x0, float x1, int part) {
 
 void ctr_gpu_screen_copy_release(void) {
   if (g.ready && g.screen_tex >= 0) {
+    g.screen_tex_vram = 0;
     ctr_gpu_tex_delete(g.screen_tex); /* (freed once the GPU is done with it) */
     if (g.bound_tex == &g.textures[g.screen_tex].tex) {
       g.bound_tex = NULL;
@@ -6215,7 +6351,7 @@ void ctr_gpu_screen_uv(float x, float y, float* s, float* t) {
   const float cx = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
   const float cy = y < -1.0f ? -1.0f : (y > 1.0f ? 1.0f : y);
   *s = 0.5f / 256.0f + (cy + 1.0f) * 0.5f * (239.0f / 256.0f);
-  *t = 1.0f - (0.5f + (float)top_row0()) / 512.0f - (cx + 1.0f) * 0.5f * (399.0f / 512.0f);
+  *t = 1.0f - 0.5f / 512.0f - (cx + 1.0f) * 0.5f * (399.0f / 512.0f);
 }
 
 /* ---------------- (AI-assisted) render to texture (impostors, CtrImpostor) ----------------
@@ -6721,7 +6857,7 @@ static void mesh_fog_rows(const float* m, float out[8]) {
  * 1/32768). (micro-gpu) raw: written straight away, the same words C3D_UpdateUniforms writes for
  * it (config, then w z y x as f32), with citro3d's copy of the uniform set and not marked: before,
  * every change made the draw's raw_sync run all of C3Di_UpdateContext (~2000 instructions) for
- * this one vector, and static_cmdlists couldn't record a stretch with one (a citro3d update).
+ * this one vector.
  * When citro3d has uniforms to send anyway (unif_pending), it sends this one with them. */
 static void mesh_scales_set(int atlas, int raw) {
   const int loc = g.ps->uloc_scales;
@@ -6792,30 +6928,14 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
           raw_pack_f24(rows + 4, mm->f24 + 15);
           mm->fog_gen = g.fog_gen;
         }
-        if (s_rec.on && s_rec.n < s_rec.max) {
-          /* (AI-assisted, gpu-rt) static_cmdlists: where this upload goes when copied again */
-          s_rec.slots[2 * s_rec.n] = (u32)(raw_ptr() - s_rec.p0);
-          s_rec.slots[2 * s_rec.n + 1] = (u32)s_rec.call | ((u32)(df ? 15 : 18) << 24);
-          s_rec.n++;
-        } else if (s_rec.on) {
-          s_rec.bad = 1;
-        }
         raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, df ? 15 : 18, 0));
       } else {
-        if (s_rec.on && s_rec.n < s_rec.max) {
-          s_rec.slots[2 * s_rec.n] = (u32)(raw_ptr() - s_rec.p0);
-          s_rec.slots[2 * s_rec.n + 1] = (u32)s_rec.call | (12u << 24);
-          s_rec.n++;
-        } else if (s_rec.on) {
-          s_rec.bad = 1;
-        }
         raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 12, 0));
       }
       g.last_mesh_valid = 1;
     }
     raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
   } else {
-    s_rec.bad = 1; /* (AI-assisted, gpu-rt) static_cmdlists: citro3d's draw (not while on) */
     /* consecutive draws of a level chunk share the matrix and the vertex buffer */
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
       g.last_clip_id = matrix->id;
@@ -6930,738 +7050,35 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state, const float clip[16], int me
   ctr_gpu_draw_mesh_prepared(state, &m, mesh, first_index, index_count);
 }
 
-/* ---------------- (AI-assisted, gpu-rt) config.ini static_cmdlists ----------------
- * The level renderer's draws of a frame are mostly the same as the frame before's: the same
- * draws in the same order, with only the chunk matrices new (the camera moved). Their raw command
- * words (state changes, vertex buffer, matrix uploads, draw templates) are then the same except
- * the matrices' uniform data. ctr_gpu_draw_mesh_calls takes a pass's draws in one list and splits
- * it into stretches of draws that run one program with nothing but raw words between them (a
- * draw that switches the program, runs the sky hook (sky_last), goes through citro3d or draws
- * nothing is drawn as usual and starts a new stretch). A stretch drawn alike in two frames in a
- * row is recorded: its words, where each matrix upload is, the GPU state the trackers (g, s_raw,
- * citro3d's context) had before and after, the settings, and the statistics it adds. While a later
- * frame's stretch has the same draws (state, texture memory, mesh buffers, counts, which draws
- * share a matrix), the same state before and the same settings, its words are copied in, each
- * matrix upload written again with this frame's matrix (and fog rows), and the trackers set to the
- * state after it: exactly what drawing it one by one writes (static_cmdlists = compare checks every
- * copy against that and counts mismatches).
- * The copies come from one block of linear memory (CL_ARENA_BYTES, taken when the setting is first
- * on: no fragmentation of what level loads need), filled from the start again (every recording
- * dropped) when it is full. The GPU reads the frame's command buffer as always: nothing in the
- * block has a GPU lifetime (a pipelined frame, frame_overlap2, level unloads change nothing).
- * GPUREG_CMDBUF_JUMP / ADDR (3dbrew: "kick" registers; buffers 16-byte aligned) could run the block
- * without the copy, but their call / return use isn't documented and a list the GPU doesn't finish
- * hangs the console: left for a pica_bench test. */
-#define CL_ARENA_BYTES (512u * 1024u)
-#define CL_SEGS_PER_PAGE 8
-typedef struct {
-  ctr_draw_state last_state;
-  int last_state_mesh;
-  uint32_t last_tint;
-  int last_state_valid;
-  const C3D_Tex* bound_tex;
-  const void* bound_data;
-  u32 bound_param;
-  int cur_prog;
-  const void* ps;
-  int last_mesh_valid;
-  int unit1_off, ocean_stage2, proc_radial;
-  int env_valid, last_skin_valid, skin_bl_valid;
-  C3Di_Effect effect;
-  C3D_TexEnv tex_env[3];
-  C3D_Tex* tex0;
-  u32 tex_config;
-  C3D_BufInfo buf;
-  u32 ctx_flags;
-  const void* program;
-  int prim, voff0;
-  const C3D_Tex* tex0_ctx;
-  u32 tex0_fmt;
-  u32 tex0_regs[5]; /* (AI-assisted, micro-gpu) */
-  int tex0_regs_ok;
-  int mesh_st_atlas; /* (AI-assisted, micro-gpu) the mesh scales the GPU has */
-  int unif_pending;
-  int tex_dirty;
-  /* the texture unit 0 binding is one no draw of the stretch uses (a texture with its own memory:
-   * sky, ocean, eyes; its texels may swap copies every frame): bound_* are 1 / 1 / 0 here, and
-   * (out) the stretch didn't bind: the binding before it stays */
-  int bound_other;
-} ClTrack;
-typedef struct {
-  int fog_alpha, tex1_gating, dedup, dedup_draw, mip_mode, tex_clear_mode;
-  int early_depth, early_sky, depth_far, early_func, cull_enable, cull_flip;
-  int depth16, fog_tex_valid, fog_df, zdef_valid, proctex;
-  u32 lod_bias, early_clear, fog_abgr, zscale0, zoffset0;
-  const void* ps;
-  u32 micro; /* (AI-assisted, micro-gpu) s_micro */
-} ClSet;
-typedef struct {
-  ctr_draw_state st;
-  u32 tex_data, tex_dim, tex_fmt;
-  u32 vpa, ipa, count, flags; /* flags: nofog | the matrix of the draw before (uploaded) << 1 */
-  u32 pad;
-} ClCall;
-_Static_assert(sizeof(ClCall) == 48, "ClCall compared as 12 words");
-#define CL_STATS(X)                                                                       \
-  X(draws) X(triangles) X(tex_binds) X(early_depth_draws) X(proctex_draws) X(nofog_draws) \
-  X(tex_clears_skipped) X(unit1_toggles) X(fog_alpha_draws)                                \
-  X(cmd_dedup_words)
-enum {
-#define CL_ENUM(f) CL_S_##f,
-  CL_STATS(CL_ENUM) CL_S_COUNT
-#undef CL_ENUM
-};
-typedef struct {
-  int valid;
-  u32 gen;       /* the arena's generation it was recorded in */
-  u32 last_hash; /* the stretch as the last frame drew it (two alike: record) */
-  int ncalls, nslots, nwords, last_up;
-  ClCall* calls;
-  u32* slots;
-  u32* words;
-  u32 bytes;
-  ClTrack in, out;
-  ClSet set;
-  int stats[CL_S_COUNT];
-} ClSeg;
-/* (AI-assisted) Citadel has more than eight program stretches. Allocate metadata in small
- * pages so every stretch can be cached, without enlarging all levels' cache allocations. */
-typedef struct ClPage {
-  ClSeg seg[CL_SEGS_PER_PAGE];
-  struct ClPage* next;
-} ClPage;
-struct ctr_cmd_cache {
-  ClPage* pages;
-};
-static struct {
-  int mode;
-  uint8_t* arena;
-  u32 used, gen;
-  u32* scratch; /* compare mode: the copied words; recording: the slots */
-  u32 scratch_words;
-  /* statistics since the last line */
-  u32 segs, replays, records, unlike, normal_calls, replay_calls, words, slots, resets, compares,
-      mismatches, frame0;
-  int logged_mismatches, logged_why;
-  u32 why[5]; /* not alike: arena restarted, draw count, settings, state before, the draws */
-  /* (AI-assisted, micro-gpu) draws drawn alone (heads of a stretch), by why: not a raw level
-   * pool draw (its texture: own memory / no mesh or count / citro3d), after such a draw, another
-   * program, the sky hook pending */
-  u32 head_why[6];
-  const C3D_Tex* bound0_tex;
-  const void* bound0_data;
-  u32 bound0_param;
-} s_cl = {.mode = 1};
-
-void ctr_gpu_set_static_cmdlists(int mode) {
-  s_cl.mode = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
-  if (s_cl.mode && !s_cl.arena && g.ready) {
-    ctr_linear_lock();
-    s_cl.arena = (uint8_t*)linearAlloc(CL_ARENA_BYTES);
-    ctr_linear_unlock();
-    if (!s_cl.arena) {
-      printf("[ctr] static_cmdlists: no linear memory for its %u KB, off\n", CL_ARENA_BYTES / 1024);
-    }
-  }
-  if (!s_cl.arena) {
-    s_cl.mode = 0;
-  }
-}
-
-static u32* cl_scratch(u32 words) {
-  if (s_cl.scratch_words < words) {
-    free(s_cl.scratch);
-    s_cl.scratch_words = words < 4096 ? 4096 : words;
-    s_cl.scratch = (u32*)malloc(s_cl.scratch_words * 4);
-    if (!s_cl.scratch) {
-      s_cl.scratch_words = 0;
-    }
-  }
-  return s_cl.scratch;
-}
-
-static void cl_track_save(ClTrack* t) {
-  memset(t, 0, sizeof(*t));
-  const C3Di_Context* ctx = &__C3D_Context;
-  t->last_state = g.last_state;
-  t->last_state_mesh = g.last_state_mesh;
-  t->last_tint = g.last_tint;
-  t->last_state_valid = g.last_state_valid;
-  t->bound_tex = g.bound_tex;
-  t->bound_data = g.bound_data;
-  t->bound_param = g.bound_param;
-  t->cur_prog = g.cur_prog;
-  t->ps = g.ps;
-  t->last_mesh_valid = g.last_mesh_valid;
-  t->unit1_off = g.unit1_off;
-  t->ocean_stage2 = g.ocean_stage2;
-  t->proc_radial = g.proc_radial;
-  t->env_valid = g.env_valid;
-  t->last_skin_valid = g.last_skin_valid;
-  t->skin_bl_valid = g.skin_bl_valid;
-  memcpy(&t->effect, &ctx->effect, sizeof(t->effect));
-  memcpy(t->tex_env, ctx->texEnv, sizeof(t->tex_env));
-  t->tex0 = ctx->tex[0];
-  t->tex_config = ctx->texConfig;
-  memcpy(&t->buf, &ctx->bufInfo, sizeof(t->buf));
-  t->ctx_flags = ctx->flags;
-  t->program = ctx->program;
-  t->prim = s_raw.prim;
-  t->voff0 = s_raw.voff0;
-  t->tex0_ctx = s_raw.tex0_ctx;
-  t->tex0_fmt = s_raw.tex0_fmt;
-  if (s_raw.tex0_ctx && s_raw.tex0_regs_ok) {
-    memcpy(t->tex0_regs, s_raw.tex0_regs, sizeof(t->tex0_regs)); /* (AI-assisted, micro-gpu) */
-    t->tex0_regs_ok = 1;
-  }
-  t->mesh_st_atlas = g.mesh_st_atlas;
-  t->unif_pending = s_raw.unif_pending;
-  t->tex_dirty = s_tex_dirty;
-  /* (the level draws only bind pool textures: cl_plain) */
-  if (g.bound_tex && ((const TexSlot*)g.bound_tex)->pool < 0) {
-    t->bound_tex = (const C3D_Tex*)1;
-    t->bound_data = (const void*)1;
-    t->bound_param = 0;
-    t->bound_other = 1;
-  }
-}
-
-static void cl_track_load(const ClTrack* t) {
-  C3Di_Context* ctx = &__C3D_Context;
-  g.last_state = t->last_state;
-  g.last_state_mesh = t->last_state_mesh;
-  g.last_tint = t->last_tint;
-  g.last_state_valid = t->last_state_valid;
-  if (!t->bound_other) {
-    g.bound_tex = t->bound_tex;
-    g.bound_data = t->bound_data;
-    g.bound_param = t->bound_param;
-  }
-  g.cur_prog = t->cur_prog;
-  g.last_mesh_valid = t->last_mesh_valid;
-  g.unit1_off = t->unit1_off;
-  g.ocean_stage2 = t->ocean_stage2;
-  g.proc_radial = t->proc_radial;
-  g.env_valid = t->env_valid;
-  g.last_skin_valid = t->last_skin_valid;
-  g.skin_bl_valid = t->skin_bl_valid;
-  memcpy(&ctx->effect, &t->effect, sizeof(t->effect));
-  memcpy(ctx->texEnv, t->tex_env, sizeof(t->tex_env));
-  ctx->tex[0] = t->tex0;
-  ctx->texConfig = t->tex_config;
-  memcpy(&ctx->bufInfo, &t->buf, sizeof(t->buf));
-  ctx->flags = t->ctx_flags;
-  s_raw.prim = t->prim;
-  s_raw.voff0 = t->voff0;
-  s_raw.tex0_ctx = t->tex0_ctx;
-  s_raw.tex0_fmt = t->tex0_fmt;
-  memcpy(s_raw.tex0_regs, t->tex0_regs, sizeof(s_raw.tex0_regs)); /* (AI-assisted, micro-gpu) */
-  s_raw.tex0_regs_ok = t->tex0_regs_ok;
-  if (g.mesh_st_atlas != t->mesh_st_atlas && is_mesh_prog(g.cur_prog) && g.ps->uloc_scales >= 0) {
-    /* (AI-assisted, micro-gpu) the stretch changed the scales (raw): citro3d's copy too */
-    C3D_FVUnif[GPU_VERTEX_SHADER][g.ps->uloc_scales].x =
-        t->mesh_st_atlas ? 1.0f / 32768.0f : 1.0f / 1024.0f;
-  }
-  g.mesh_st_atlas = t->mesh_st_atlas;
-  s_raw.unif_pending = t->unif_pending;
-  s_tex_dirty = t->tex_dirty;
-}
-
-static void cl_set_save(ClSet* t) {
-  memset(t, 0, sizeof(*t));
-  t->fog_alpha = g_fog_alpha;
-  t->tex1_gating = g_tex1_gating;
-  t->dedup = s_raw.dedup;
-  t->dedup_draw = s_raw.dedup_draw;
-  t->mip_mode = g_mip_mode;
-  t->tex_clear_mode = s_tex_clear_mode;
-  t->early_depth = g_early_depth;
-  t->early_sky = g_early_sky;
-  t->depth_far = g_depth_far;
-  t->early_func = g_early_func;
-  t->cull_enable = g_cull_enable;
-  t->cull_flip = g_cull_flip;
-  t->depth16 = g_depth16;
-  t->fog_tex_valid = g.fog_tex_valid;
-  t->fog_df = g.fog_df;
-  t->zdef_valid = s_zdef_valid;
-  t->proctex = g_proctex;
-  t->lod_bias = s_lod_bias;
-  t->early_clear = g_early_clear;
-  t->fog_abgr = g.fog_abgr;
-  t->zscale0 = s_zscale0;
-  t->zoffset0 = s_zoffset0;
-  t->ps = g.ps;
-  t->micro = s_micro;
-}
-
-static inline void cl_stats(int* out) {
-#define CL_GET(f) out[CL_S_##f] = (int)g.cur.f;
-  CL_STATS(CL_GET)
-#undef CL_GET
-}
-
-/* the program the draw takes (as ctr_gpu_draw_mesh_prepared) */
-static int cl_prog(const ctr_mesh_call* c) {
-  const int fa = g_fog_alpha && g.ps->fa_ok && (c->state->tcc & CTR_TCC_ALPHA80);
-  const int df = g.ps->df_ok && g.fog_df;
-  return fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH);
-}
-/* a draw that writes raw words only (inside a stretch) */
-static int cl_plain(const ctr_mesh_call* c) {
-  const int t = tex_res(c->state->tex);
-  return c->index_count >= 3 && c->mesh >= 0 && c->mesh < MAX_MESHES &&
-         g.meshes[c->mesh].used == 1 && use_raw(c->state) &&
-         (t < 0 || t >= MAX_TEXTURES || g.textures[t].used != 1 || g.textures[t].pool >= 0);
-}
-
-static void cl_rec_call(const ctr_mesh_call* c, const ctr_mesh_call* prev, ClCall* r) {
-  memset(r, 0, sizeof(*r));
-  r->st = *c->state;
-  const int t = tex_res(c->state->tex);
-  if (t >= 0 && t < MAX_TEXTURES && g.textures[t].used == 1) {
-    const TexSlot* ts = &g.textures[t];
-    r->tex_data = (u32)ts->tex.data;
-    r->tex_dim = ts->tex.dim;
-    r->tex_fmt = (u32)ts->tex.fmt | ((u32)ts->levels << 8) | ((u32)(ts->radial >= 0) << 16) |
-                 ((u32)ts->pool << 20);
-  }
-  const MeshSlot* ms = &g.meshes[c->mesh];
-  r->vpa = ms->verts_pa;
-  r->ipa = ms->indices_pa + 2u * (u32)c->first_index;
-  r->count = (u32)c->index_count;
-  const int same = prev ? prev->matrix == c->matrix
-                        : (g.last_mesh_valid && g.last_clip_id == c->matrix->id);
-  r->flags = (c->nofog ? 1u : 0u) | (same ? 2u : 0u);
-}
-
-static inline u32 cl_hash(u32 h, const void* p, u32 bytes) {
-  const alias_u32* w = (const alias_u32*)p;
-  for (u32 i = 0; i < bytes / 4; i++) {
-    h = (h ^ w[i]) * 16777619u;
-  }
-  return h;
-}
-
-static void cl_draw(const ctr_mesh_call* c, int a, int b) {
-  for (int i = a; i < b; i++) {
-    g.mesh_nofog = c[i].nofog ? 1 : 0;
-    ctr_gpu_draw_mesh_prepared(c[i].state, c[i].matrix, c[i].mesh, c[i].first_index,
-                               c[i].index_count);
-  }
-}
-
-/* the stretch's words at p, its matrices this frame's */
-static void cl_replay(const ClSeg* sg, const ctr_mesh_call* c, int a, int b) {
-  u32* p = raw_ptr();
-  memcpy(p, sg->words, (size_t)sg->nwords * 4);
-  for (int k = 0; k < sg->nslots; k++) {
-    ctr_mesh_matrix* m = (ctr_mesh_matrix*)c[a + (int)(sg->slots[2 * k + 1] & 0xFFFFFF)].matrix;
-    const u32 words = sg->slots[2 * k + 1] >> 24;
-    if (words > 12 && m->fog_gen != g.fog_gen) {
-      float rows[8];
-      mesh_fog_rows(m->m, rows);
-      raw_pack_f24(rows, m->f24 + 12);
-      raw_pack_f24(rows + 4, m->f24 + 15);
-      m->fog_gen = g.fog_gen;
-    }
-    raw_unif(p + sg->slots[2 * k], g.ps->uloc_clip, m->f24, words, 0);
-  }
-  raw_end(p + sg->nwords);
-  const int dirty_now = s_tex_dirty;
-  cl_track_load(&sg->out);
-  if (dirty_now && !sg->in.tex_dirty) {
-    s_tex_dirty = 1; /* set by the loader thread meanwhile: the next bind clears */
-  }
-  if (sg->last_up >= 0) {
-    g.last_clip_id = c[a + sg->last_up].matrix->id;
-  }
-#define CL_ADD(f) g.cur.f += sg->stats[CL_S_##f];
-  CL_STATS(CL_ADD)
-#undef CL_ADD
-  g.mesh_nofog = c[b - 1].nofog ? 1 : 0;
-  __C3D_Context.flags |= C3DiF_DrawUsed;
-  s_cl.replays++;
-  s_cl.replay_calls += (u32)(b - a);
-  s_cl.words += (u32)sg->nwords;
-  s_cl.slots += (u32)sg->nslots;
-}
-
-/* the arena's room for a recording, from the start again (all recordings dropped) when full */
-static uint8_t* cl_alloc(u32 bytes) {
-  bytes = (bytes + 15) & ~15u;
-  if (bytes > CL_ARENA_BYTES / 2) {
-    return NULL;
-  }
-  if (s_cl.used + bytes > CL_ARENA_BYTES) {
-    s_cl.used = 0;
-    s_cl.gen++;
-    s_cl.resets++;
-  }
-  uint8_t* p = s_cl.arena + s_cl.used;
-  s_cl.used += bytes;
-  return p;
-}
-
-/* draws c[a..b) one by one, recorded into sg if they qualify */
-static void cl_record(ClSeg* sg, const ctr_mesh_call* c, int a, int b, const ClTrack* in,
-                      const ClSet* set) {
-  const int n = b - a;
-  u32* slots = cl_scratch((u32)(2 * n));
-  if (!slots) {
-    cl_draw(c, a, b);
-    return;
-  }
-  ClCall first;
-  cl_rec_call(&c[a], NULL, &first);
-  int st0[CL_S_COUNT];
-  cl_stats(st0);
-  const int dropped0 = g.cur.dropped_draws, prog0 = g.cur.prog_switches;
-  const u32 upd0 = s_ctx_updates, hook0 = s_hook_runs;
-  u32* const buf0 = gpuCmdBuf;
-  u32* const p0 = raw_ptr();
-  s_rec.on = 1;
-  s_rec.bad = 0;
-  s_rec.n = 0;
-  s_rec.max = n;
-  s_rec.p0 = p0;
-  s_rec.slots = slots;
-  for (int i = a; i < b; i++) {
-    s_rec.call = i - a;
-    g.mesh_nofog = c[i].nofog ? 1 : 0;
-    ctr_gpu_draw_mesh_prepared(c[i].state, c[i].matrix, c[i].mesh, c[i].first_index,
-                               c[i].index_count);
-  }
-  s_rec.on = 0;
-  if (s_rec.bad || upd0 != s_ctx_updates || hook0 != s_hook_runs || gpuCmdBuf != buf0 ||
-      g.cur.dropped_draws != dropped0 || g.cur.prog_switches != prog0 || raw_ptr() <= p0) {
-    sg->valid = 0;
-    return;
-  }
-  const int nwords = (int)(raw_ptr() - p0);
-  const u32 bytes = (u32)n * sizeof(ClCall) + (u32)s_rec.n * 8u + (u32)nwords * 4u;
-  uint8_t* mem = cl_alloc(bytes);
-  if (!mem) {
-    sg->valid = 0;
-    return;
-  }
-  sg->calls = (ClCall*)mem;
-  sg->slots = (u32*)(mem + (size_t)n * sizeof(ClCall));
-  sg->words = sg->slots + 2 * s_rec.n;
-  sg->calls[0] = first;
-  for (int i = a + 1; i < b; i++) {
-    cl_rec_call(&c[i], &c[i - 1], &sg->calls[i - a]);
-  }
-  memcpy(sg->slots, slots, (size_t)s_rec.n * 8);
-  memcpy(sg->words, p0, (size_t)nwords * 4);
-  sg->ncalls = n;
-  sg->nslots = s_rec.n;
-  sg->nwords = nwords;
-  sg->last_up = s_rec.n ? (int)(slots[2 * (s_rec.n - 1) + 1] & 0xFFFFFF) : -1;
-  sg->bytes = bytes;
-  sg->in = *in;
-  sg->set = *set;
-  cl_track_save(&sg->out);
-  int st1[CL_S_COUNT];
-  cl_stats(st1);
-  for (int k = 0; k < CL_S_COUNT; k++) {
-    sg->stats[k] = st1[k] - st0[k];
-  }
-  sg->gen = s_cl.gen;
-  sg->valid = 1;
-  s_cl.records++;
-}
-
-/* compare mode: the copy just made at p0 against drawing the stretch one by one; the latter's
- * words and state stay */
-static void cl_compare(const ClSeg* sg, const ctr_mesh_call* c, int a, int b, u32* p0,
-                       const ClTrack* in, const ctr_gpu_stats* stats0, u32 clip0) {
-  const u32 nw = (u32)(raw_ptr() - p0);
-  u32* copy = cl_scratch(nw);
-  if (!copy) {
-    return;
-  }
-  memcpy(copy, p0, (size_t)nw * 4);
-  ClTrack tr;
-  cl_track_save(&tr);
-  int sr[CL_S_COUNT];
-  cl_stats(sr);
-  const u32 clip_r = g.last_clip_id;
-  /* back to the state before the copy, then the per-frame path */
-  cl_track_load(in);
-  g.bound_tex = s_cl.bound0_tex;
-  g.bound_data = s_cl.bound0_data;
-  g.bound_param = s_cl.bound0_param;
-  g.cur = *stats0;
-  g.last_clip_id = clip0;
-  raw_end(p0);
-  cl_draw(c, a, b);
-  const u32 nn = (u32)(raw_ptr() - p0);
-  ClTrack tn;
-  cl_track_save(&tn);
-  int sn[CL_S_COUNT];
-  cl_stats(sn);
-  s_cl.compares++;
-  int first = -1;
-  for (u32 i = 0; i < nw && i < nn; i++) {
-    if (copy[i] != p0[i]) {
-      first = (int)i;
-      break;
-    }
-  }
-  /* the loader thread may have set the texture cache flag meanwhile (not a difference) */
-  tn.tex_dirty = tr.tex_dirty;
-  const int words_ok = nw == nn && first < 0;
-  const int track_ok = !memcmp(&tr, &tn, sizeof(tr)) && clip_r == g.last_clip_id;
-  const int stats_ok = !memcmp(sr, sn, sizeof(sr));
-  if (!words_ok || !track_ok || !stats_ok) {
-    s_cl.mismatches++;
-    if (s_cl.logged_mismatches < 8) {
-      s_cl.logged_mismatches++;
-      printf("[ctr] static_cmdlists compare: MISMATCH frame %d, %d draws: words %lu copied / %lu "
-             "drawn (first difference at word %d: %08lx / %08lx), state %s, statistics %s\n",
-             g.frame_no, b - a, (unsigned long)nw, (unsigned long)nn, first,
-             first >= 0 ? (unsigned long)copy[first] : 0ul,
-             first >= 0 ? (unsigned long)p0[first] : 0ul, track_ok ? "same" : "DIFFERS",
-             stats_ok ? "same" : "DIFFER");
-    }
-  }
-  (void)sg;
-}
-
-static void cl_segment(ClSeg* sg, const ctr_mesh_call* c, int a, int b) {
-  s_cl.segs++;
-  /* (AI-assisted, micro-gpu) a stretch's first texture bind writes all of unit 0's registers: the
-   * ones before it (a sky or ocean texture's other copy every second frame) aren't part of what a
-   * recording depends on */
-  s_raw.tex0_regs_ok = 0;
-  ClSet set;
-  cl_set_save(&set);
-  ClTrack in;
-  cl_track_save(&in);
-  const int n = b - a;
-  int match = sg->valid && sg->gen == s_cl.gen && sg->ncalls == n &&
-              s_raw.apt_epoch == s_raw.seen_epoch && !memcmp(&sg->set, &set, sizeof(set)) &&
-              !memcmp(&sg->in, &in, sizeof(in));
-  /* the hash of the stretch as drawn now (only made once it differs from the recording: while
-   * it matches, it is the recording's) */
-  u32 h = 0;
-  int hashed = !match;
-  if (hashed) {
-    h = cl_hash(cl_hash(2166136261u, &set, sizeof(set)), &in, sizeof(in));
-  }
-  for (int i = a; i < b; i++) {
-    ClCall r;
-    cl_rec_call(&c[i], i > a ? &c[i - 1] : NULL, &r);
-    if (match && !words_equal(&r, &sg->calls[i - a], sizeof(r) / 4)) {
-      match = 0;
-      hashed = 1;
-      h = cl_hash(cl_hash(2166136261u, &set, sizeof(set)), &in, sizeof(in));
-      h = cl_hash(h, sg->calls, (u32)(i - a) * sizeof(ClCall));
-      if (s_cl.logged_why < 12 && sg->valid && sg->gen == s_cl.gen) {
-        s_cl.logged_why++;
-        const u32* x = (const u32*)&sg->calls[i - a];
-        const u32* y = (const u32*)&r;
-        for (u32 w = 0; w < 12; w++) {
-          if (x[w] != y[w]) {
-            printf("[ctr] static_cmdlists: draw %d of %d differs at word %lu (%08lx / %08lx)\n",
-                   i - a, n, (unsigned long)w, (unsigned long)x[w], (unsigned long)y[w]);
-            break;
-          }
-        }
-      }
-    }
-    if (hashed) {
-      h = cl_hash(h, &r, sizeof(r));
-    }
-  }
-  if (match) {
-    h = sg->last_hash; /* (the recording's: unchanged since) */
-  }
-  if (match && gpuCmdBufSize - gpuCmdBufOffset >=
-                   (u32)sg->nwords + CMD_RESERVE_WORDS + CMD_DRAW_WORDS) {
-    u32* const p0 = raw_ptr();
-    const ctr_gpu_stats stats0 = g.cur;
-    const u32 clip0 = g.last_clip_id;
-    s_cl.bound0_tex = g.bound_tex; /* (compare mode puts them back with the state before) */
-    s_cl.bound0_data = g.bound_data;
-    s_cl.bound0_param = g.bound_param;
-    cl_replay(sg, c, a, b);
-    if (s_cl.mode == 2) {
-      cl_compare(sg, c, a, b, p0, &in, &stats0, clip0);
-    }
-    sg->last_hash = h;
-    return;
-  }
-  if (sg->valid) {
-    s_cl.unlike++;
-    /* what differed (the log line's "not alike" split) */
-    if (sg->gen != s_cl.gen) {
-      s_cl.why[0]++;
-    } else if (sg->ncalls != n) {
-      s_cl.why[1]++;
-    } else if (memcmp(&sg->set, &set, sizeof(set))) {
-      s_cl.why[2]++;
-    } else if (memcmp(&sg->in, &in, sizeof(in))) {
-      s_cl.why[3]++;
-      if (s_cl.logged_why < 6) {
-        s_cl.logged_why++;
-        const u32* a = (const u32*)&sg->in;
-        const u32* b2 = (const u32*)&in;
-        for (u32 w = 0; w < sizeof(in) / 4; w++) {
-          if (a[w] != b2[w]) {
-            printf("[ctr] static_cmdlists: state before differs at byte %lu (%08lx / %08lx)\n",
-                   (unsigned long)(w * 4), (unsigned long)a[w], (unsigned long)b2[w]);
-            break;
-          }
-        }
-      }
-    } else {
-      s_cl.why[4]++;
-    }
-  }
-  if (s_raw.apt_epoch == s_raw.seen_epoch && h == sg->last_hash) {
-    cl_record(sg, c, a, b, &in, &set);
-  } else {
-    sg->valid = 0;
-    cl_draw(c, a, b);
-  }
-  s_cl.normal_calls += (u32)n;
-  sg->last_hash = h;
-}
-
-void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache** cache) {
+/* (AI-assisted, gpu-rt) a pass's level draws in one list (the level renderer's), one by one */
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   if (!g.ready || !g.in_frame || n <= 0) {
     return;
   }
-  if (!s_cl.mode || !s_raw.on || !cache) {
-    cl_draw(calls, 0, n);
-    return;
-  }
-  if (!*cache) {
-    *cache = (ctr_cmd_cache*)calloc(1, sizeof(ctr_cmd_cache));
-    if (!*cache) {
-      cl_draw(calls, 0, n);
-      return;
-    }
-  }
-  ctr_cmd_cache* cc = *cache;
-  ClPage** page = &cc->pages;
-  int cache_room = 1;
-  int seg = 0, start = -1, prev_prog = -1, prev_plain = 0;
-  for (int i = 0; i <= n; i++) {
-    int head = 1, prog = -1, plain = 0;
-    if (i < n) {
-      plain = cl_plain(&calls[i]);
-      prog = plain ? cl_prog(&calls[i]) : -1;
-      head = i == 0 || !plain || !prev_plain || prog != prev_prog ||
-             (s_sky_hook && !keeps_sky(calls[i].state));
-      if (head && i) {
-        const int t = tex_res(calls[i].state->tex);
-        const int own_tex = t >= 0 && t < MAX_TEXTURES && g.textures[t].used == 1 &&
-                            g.textures[t].pool < 0;
-        s_cl.head_why[!plain ? (own_tex ? 0 : 1)
-                             : (!prev_plain ? 2 : (prog != prev_prog ? 3 : 4))]++;
-      }
-    }
-    if (head && start >= 0) {
-      if (cache_room && !*page) {
-        *page = (ClPage*)calloc(1, sizeof(ClPage));
-        cache_room = *page != NULL;
-      }
-      if (cache_room) {
-        cl_segment(&(*page)->seg[seg % CL_SEGS_PER_PAGE], calls, start, i);
-      } else {
-        cl_draw(calls, start, i);
-        s_cl.normal_calls += (u32)(i - start);
-      }
-      seg++;
-      if (cache_room && seg % CL_SEGS_PER_PAGE == 0) {
-        page = &(*page)->next;
-      }
-      start = -1;
-    }
-    if (i == n) {
-      break;
-    }
-    if (head) {
-      cl_draw(calls, i, i + 1);
-      s_cl.normal_calls++;
-    } else if (start < 0) {
-      start = i;
-    }
-    prev_prog = prog;
-    prev_plain = plain;
+  for (int i = 0; i < n; i++) {
+    g.mesh_nofog = calls[i].nofog ? 1 : 0;
+    ctr_gpu_draw_mesh_prepared(calls[i].state, calls[i].matrix, calls[i].mesh,
+                               calls[i].first_index, calls[i].index_count);
   }
 }
 
-void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache) {
-  if (cache && *cache) {
-    ClPage* page = (*cache)->pages;
-    while (page) {
-      ClPage* next = page->next;
-      free(page); /* (the recordings themselves are in the arena) */
-      page = next;
-    }
-    free(*cache);
-    *cache = NULL;
-  }
-}
-
-int ctr_gpu_cmdlist_line(char* out, int size) {
-  if (!s_cl.mode && !s_cl.segs) {
-    return 0;
-  }
-  const u32 frames = (u32)g.frame_no - s_cl.frame0;
-  if (!frames) {
+/* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call */
+int ctr_gpu_micro_line(char* out, int size) {
+  static u32 frame0;
+  const u32 frames = (u32)g.frame_no - frame0;
+  if (!frames || size <= 0) {
     return 0;
   }
   const double f = frames;
-  const int len = snprintf(
-      out, size,
-      "[ctr] static_cmdlists %s: per frame %.1f stretches, %.1f copied (%.0f draws, %.1f KB of "
-      "command words, %.0f matrices written), %.1f draws drawn one by one, %.2f recorded, %.2f "
-      "not alike; arena %u of %u KB in linear memory (%u restarts)%s",
-      s_cl.mode == 2 ? "compare" : (s_cl.mode ? "on" : "off"), s_cl.segs / f, s_cl.replays / f,
-      s_cl.replay_calls / f, s_cl.words * 4.0 / 1024.0 / f, s_cl.slots / f, s_cl.normal_calls / f,
-      s_cl.records / f, s_cl.unlike / f, s_cl.used / 1024, CL_ARENA_BYTES / 1024, s_cl.resets,
-      s_cl.mode == 2 ? "" : "");
-  int l = len;
-  if (l < size && s_cl.unlike) {
-    l += snprintf(out + l, size - l,
-                  "; not alike: %u arena restarted, %u draw count, %u settings, %u state before, "
-                  "%u the draws",
-                  s_cl.why[0], s_cl.why[1], s_cl.why[2], s_cl.why[3], s_cl.why[4]);
-  }
-  memset(s_cl.why, 0, sizeof(s_cl.why));
-  if (l < size) {
-    l += snprintf(out + l, size - l,
-                  "; drawn alone: %.1f texture in own memory, %.1f other not plain, %.1f after "
-                  "those, %.1f program change, %.1f sky hook",
-                  s_cl.head_why[0] / f, s_cl.head_why[1] / f, s_cl.head_why[2] / f,
-                  s_cl.head_why[3] / f, s_cl.head_why[4] / f);
-  }
-  memset(s_cl.head_why, 0, sizeof(s_cl.head_why));
-  if (l < size) {
-    /* (AI-assisted, micro-gpu) all threads' (textures made by the loader thread too) */
-    l += snprintf(out + l, size - l, "; GSP cache flush requests %.1f per frame",
-                  s_flush_requests / f);
-  }
+  /* all threads' flush requests (textures made by the loader thread too); MICRO_TEXSTATE */
+  const int l = snprintf(out, size,
+                         "[ctr] gpu micro: GSP cache flush requests %.1f per frame; %.1f draw "
+                         "states only bound their texture",
+                         s_flush_requests / f, s_state_fast / f);
   s_flush_requests = 0;
-  if (l < size) {
-    /* (AI-assisted, micro-mg) MICRO_TEXSTATE */
-    l += snprintf(out + l, size - l, "; %.1f draw states only bound their texture",
-                  s_state_fast / f);
-  }
   s_state_fast = 0;
-  if (s_cl.mode == 2 && l < size) {
-    l += snprintf(out + l, size - l, "; compare: %u copies checked, %u MISMATCHED", s_cl.compares,
-                  s_cl.mismatches);
-  }
-  s_cl.segs = s_cl.replays = s_cl.records = s_cl.unlike = s_cl.normal_calls = s_cl.replay_calls =
-      s_cl.words = s_cl.slots = s_cl.resets = s_cl.compares = s_cl.mismatches = 0;
-  s_cl.frame0 = (u32)g.frame_no;
-  return l;
+  frame0 = (u32)g.frame_no;
+  return l < size ? l : size - 1;
 }
 
 /* ---------------- (AI-assisted) the ocean (config ocean = waves) ---------------- */
@@ -8934,8 +8351,6 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   out->stage_ms = s_hw_stage_ms;
   return 0;
 }
-
-void C3Di_DirtyUniforms(GPU_SHADER_TYPE type); /* citro3d (source/internal.h) */
 
 /* (AI-assisted) config.ini pica_bench (ctr_gpu_bench.c) used citro3d with programs, textures and
  * state of its own: take it back before the bench frees them (ctr_gpu_bench.h) */

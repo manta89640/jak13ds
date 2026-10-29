@@ -35,6 +35,81 @@ enum {
   CTR_CONV_RGBA8_W,  /* (internal) RGBA8 from a 4 byte aligned source */
 };
 
+/* (AI-assisted, gpu-home) 8 bits to 4 / 5 / 6, rounded: the value whose expansion on the GPU (the
+ * bits repeated: x5 -> x5 << 3 | x5 >> 2) is nearest. Truncating (v >> 3) made every 565 / 5551
+ * texture ~3.5 / 255 darker in red and blue, ~1.5 in green: a green cast, and steps in gradients.
+ * One table for both conversion paths (asm_tex and the plain loop), so they stay identical. */
+static const uint8_t ctr_q4[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+    8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+    10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+    11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+    12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+    13, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+};
+static const uint8_t ctr_q5[256] = {
+    0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
+    2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6,
+    6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8,
+    8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10,
+    10, 10, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 12,
+    12, 12, 12, 12, 12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13,
+    14, 14, 14, 14, 14, 14, 14, 14, 15, 15, 15, 15, 15, 15, 15, 15,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 17, 17,
+    17, 18, 18, 18, 18, 18, 18, 18, 18, 19, 19, 19, 19, 19, 19, 19,
+    19, 20, 20, 20, 20, 20, 20, 20, 20, 20, 21, 21, 21, 21, 21, 21,
+    21, 21, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 23,
+    23, 23, 24, 24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25,
+    25, 25, 25, 26, 26, 26, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27,
+    27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 29, 29, 29, 29,
+    29, 29, 29, 29, 30, 30, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31,
+};
+static const uint8_t ctr_q6[256] = {
+    0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4,
+    4, 4, 4, 5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8,
+    8, 8, 8, 9, 9, 9, 9, 10, 10, 10, 10, 11, 11, 11, 11, 12,
+    12, 12, 12, 13, 13, 13, 13, 14, 14, 14, 14, 15, 15, 15, 15, 16,
+    16, 16, 16, 16, 17, 17, 17, 17, 18, 18, 18, 18, 19, 19, 19, 19,
+    20, 20, 20, 20, 21, 21, 21, 21, 22, 22, 22, 22, 23, 23, 23, 23,
+    24, 24, 24, 24, 25, 25, 25, 25, 26, 26, 26, 26, 27, 27, 27, 27,
+    28, 28, 28, 28, 29, 29, 29, 29, 30, 30, 30, 30, 31, 31, 31, 31,
+    32, 32, 32, 32, 32, 33, 33, 33, 33, 34, 34, 34, 34, 35, 35, 35,
+    35, 36, 36, 36, 36, 37, 37, 37, 37, 38, 38, 38, 38, 39, 39, 39,
+    39, 40, 40, 40, 40, 41, 41, 41, 41, 42, 42, 42, 42, 43, 43, 43,
+    43, 44, 44, 44, 44, 45, 45, 45, 45, 46, 46, 46, 46, 47, 47, 47,
+    47, 48, 48, 48, 48, 48, 49, 49, 49, 49, 50, 50, 50, 50, 51, 51,
+    51, 51, 52, 52, 52, 52, 53, 53, 53, 53, 54, 54, 54, 54, 55, 55,
+    55, 55, 56, 56, 56, 56, 57, 57, 57, 57, 58, 58, 58, 58, 59, 59,
+    59, 59, 60, 60, 60, 60, 61, 61, 61, 61, 62, 62, 62, 62, 63, 63,
+};
+
+/* one texel (R | G << 8 | B << 16 | A << 24) to RGB565 / RGBA5551 (alpha bit: A != 0) / RGBA4
+ * (alpha doubled, saturated: GS 0x80 = 1.0) */
+static inline uint32_t ctr_pack16(uint32_t v, int fmt) {
+  const uint32_t r = v & 0xffu, g = (v >> 8) & 0xffu, b = (v >> 16) & 0xffu, a = v >> 24;
+  switch (fmt) {
+    case CTR_CONV_RGB565:
+      return ((uint32_t)ctr_q5[r] << 11) | ((uint32_t)ctr_q6[g] << 5) | ctr_q5[b];
+    case CTR_CONV_RGBA5551:
+      return ((uint32_t)ctr_q5[r] << 11) | ((uint32_t)ctr_q5[g] << 6) |
+             ((uint32_t)ctr_q5[b] << 1) | (a != 0);
+    default: /* CTR_CONV_RGBA4 */
+      return ((uint32_t)ctr_q4[r] << 12) | ((uint32_t)ctr_q4[g] << 8) |
+             ((uint32_t)ctr_q4[b] << 4) | ctr_q4[a >= 0x80u ? 255u : 2u * a];
+  }
+}
+
 /* a texel as R | G << 8 | B << 16 | A << 24 (any alignment: one ldr on the 3DS) */
 static inline uint32_t ctr_ld32(const uint8_t* p) {
   uint32_t v;
@@ -91,47 +166,26 @@ typedef struct {
 } CtrConvMasks;
 
 static inline __attribute__((always_inline)) CtrConvMasks ctr_conv_masks(int fmt) {
-  CtrConvMasks k;
-  switch (fmt) {
-    case CTR_CONV_LA8:
-      k.m0 = 0xff00ff00u, k.m1 = 0, k.m2 = 0;
-      break;
-    case CTR_CONV_RGB565:
-      k.m0 = 0x00f800f8u, k.m1 = 0xfc00fc00u, k.m2 = 0;
-      break;
-    case CTR_CONV_RGBA5551:
-      k.m0 = 0x00f800f8u, k.m1 = 0x00ff00ffu, k.m2 = 0x00010001u;
-      break;
-    default:
-      k.m0 = 0x00f000f0u, k.m1 = 0xf000f000u, k.m2 = 0;
-      break;
-  }
-  if (fmt != CTR_CONV_RGBA8 && fmt != CTR_CONV_RGBA8_W && fmt != CTR_CONV_L8) {
-    __asm__("" : "+r"(k.m0), "+r"(k.m1), "+r"(k.m2));
+  CtrConvMasks k = {0, 0, 0};
+  if (fmt == CTR_CONV_LA8) {
+    k.m0 = 0xff00ff00u;
+    __asm__("" : "+r"(k.m0));
   }
   return k;
 }
 
-/* two adjacent texels (v0, v1) to their 16 bit texels, v0 in the low half. With p = R0 G0 R1 G1
- * and q = B0 A0 B1 A1 (bytes from the low end), each field of both texels is one mask and shift. */
+/* two adjacent texels (v0, v1) to their 16 bit texels, v0 in the low half. LA8: with p = R0 G0 R1
+ * G1 and q = B0 A0 B1 A1 (bytes from the low end), one mask each. (AI-assisted, gpu-home) The
+ * colour formats rounded through ctr_pack16's tables (they were masks and shifts: truncated). */
 static inline __attribute__((always_inline)) uint32_t ctr_conv16x2(uint32_t v0,
                                                                    uint32_t v1,
                                                                    int fmt,
                                                                    CtrConvMasks k) {
-  const uint32_t p = ctr_pk_lo(v0, v1), q = ctr_pk_hi(v0, v1);
-  switch (fmt) {
-    case CTR_CONV_LA8: /* A (doubled, saturated), L */
-      return (p & k.m0) | ctr_odd_bytes(ctr_double_sat_u8x4(q));
-    case CTR_CONV_RGB565:
-      return ((p & k.m0) << 8) | ((p & k.m1) >> 5) | ((q & k.m0) >> 3);
-    case CTR_CONV_RGBA5551:
-      /* G: (p >> 8) & m0 is G's top 5 bits at 3..7; the alpha bit: (A + 255) >> 8 */
-      return ((p & k.m0) << 8) | (((p >> 8) & k.m0) << 3) | ((q & k.m0) >> 2) |
-             (((ctr_odd_bytes(q) + k.m1) >> 8) & k.m2);
-    default: /* CTR_CONV_RGBA4: alpha doubled, its top nibble */
-      return ((p & k.m0) << 8) | ((p & k.m1) >> 4) | (q & k.m0) |
-             ((ctr_double_sat_u8x4(q) & k.m1) >> 12);
+  if (fmt == CTR_CONV_LA8) { /* A (doubled, saturated), L */
+    const uint32_t p = ctr_pk_lo(v0, v1), q = ctr_pk_hi(v0, v1);
+    return (p & k.m0) | ctr_odd_bytes(ctr_double_sat_u8x4(q));
   }
+  return ctr_pack16(v0, fmt) | (ctr_pack16(v1, fmt) << 16);
 }
 
 /* 4x2 texels (a: 4 texels of the tile row with even y, b: the row after it in the tile) to their

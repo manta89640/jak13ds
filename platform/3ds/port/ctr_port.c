@@ -322,8 +322,21 @@ _Noreturn void ctr_close_application(void) {
   }
 }
 
+/* (AI-assisted, gpu-home) the GPU layer's: opens its HOME Menu / sleep gate (ctr_gpu_citro3d.c
+ * apt_gate_hook) once aptMainLoop has returned, on every path (back, woken up, closing: a frame
+ * may then be built while close_for_home_menu waits for a save; the GPU is the app's again) */
+static void (*volatile s_apt_after)(void);
+
+void ctr_port_set_apt_after(void (*fn)(void)) {
+  s_apt_after = fn;
+}
+
 int ctr_main_loop(void) {
   int running = aptMainLoop() ? 1 : 0;
+  void (*after)(void) = s_apt_after;
+  if (after) {
+    after();
+  }
   log_watchdog();
   if (s_console) {
     if (s_gpu_active) {

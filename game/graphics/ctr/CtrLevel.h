@@ -992,9 +992,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_ph_draws = 0, m_ph_emits = 0, m_ph_runs = 0, m_ph_walked = 0, m_ph_calls = 0;
   u64 m_ph_skipped = 0, m_ph_lod_skipped = 0;  // chunks / tie LOD groups their cluster stood for
   u32 m_late_in_view = 0;  // (AI-assisted, j2intro) draw_level: missing in view (note_late_in_view)
-  // (AI-assisted, gpu-rt) static_cmdlists: a pass's draws, and each pass's command cache
+  // (AI-assisted, gpu-rt) a pass's draws (flush_calls)
   std::vector<ctr_mesh_call> m_calls;
-  ctr_cmd_cache* m_cmd_cache[3] = {nullptr, nullptr, nullptr};  // (AI-assisted, j2water) 2: late
   // (AI-assisted, j2water) Jak II: the blended draws held back (draw_jak2_late), their frame and fog
   std::vector<ctr_mesh_call> m_late_calls;
   bool m_late_collect = false;  // host: submit collects them instead of drawing

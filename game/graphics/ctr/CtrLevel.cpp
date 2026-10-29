@@ -7069,7 +7069,7 @@ void CtrTfragRenderer::draw_jak2_late(const CtrRenderState& rs) {
   ctr_gpu_set_mesh_fog(m_late_fog0, m_late_fog1, m_late_fog_rgb[0], m_late_fog_rgb[1],
                        m_late_fog_rgb[2]);
   if (!m_late_calls.empty()) {
-    ctr_gpu_draw_mesh_calls(m_late_calls.data(), (int)m_late_calls.size(), &m_cmd_cache[2]);
+    ctr_gpu_draw_mesh_calls(m_late_calls.data(), (int)m_late_calls.size());
   }
   m_late_calls.clear();
   draw_env_calls(m_env_late);  // (AI-assisted, j2water2) the blended envmapped ties
@@ -7348,20 +7348,16 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
   }
 }
 
-// (AI-assisted, gpu-rt) static_cmdlists: the pass's draws collected by draw_level, to the backend
-// with the pass's command cache (0: the main pass, 1: the vista pass)
-void CtrTfragRenderer::flush_calls(int pass) {
+// (AI-assisted, gpu-rt) the pass's draws collected by draw_level, to the backend (0: the main
+// pass, 1: the vista pass)
+void CtrTfragRenderer::flush_calls(int /*pass*/) {
   if (!m_calls.empty()) {
-    ctr_gpu_draw_mesh_calls(m_calls.data(), (int)m_calls.size(), &m_cmd_cache[pass]);
+    ctr_gpu_draw_mesh_calls(m_calls.data(), (int)m_calls.size());
   }
   m_calls.clear();
 }
 
-CtrTfragRenderer::~CtrTfragRenderer() {
-  for (auto*& c : m_cmd_cache) {
-    ctr_gpu_cmd_cache_free(&c);
-  }
-}
+CtrTfragRenderer::~CtrTfragRenderer() = default;
 
 void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrBackgroundCamera& cam,
@@ -9330,7 +9326,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const auto& dr = lev.draws[di];
     const int env = lev.draw_env.empty() ? -1 : lev.draw_env[di];  // (AI-assisted, j2water2)
 #ifdef __3DS__
-    // (AI-assisted, gpu-rt) static_cmdlists: the pass's draws go to the backend in one list
+    // (AI-assisted, gpu-rt) the pass's draws go to the backend in one list
     auto submit = [&](u32 first, u32 count) {
       if (env >= 0) {
         env_submit(di, vc, env, first, count);
@@ -9503,7 +9499,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     phase(kPhLists);
     m_ph_calls += m_calls.size();
-    flush_calls(1);  // (AI-assisted, gpu-rt) static_cmdlists: the vista pass's
+    flush_calls(1);  // (AI-assisted, gpu-rt) the vista pass's
     phase(kPhFlush);
     vista_pass = false;
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
@@ -9563,7 +9559,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   phase(kPhLists);
   m_ph_calls += m_calls.size();
-  flush_calls(0);  // (AI-assisted, gpu-rt) static_cmdlists: the main pass's
+  flush_calls(0);  // (AI-assisted, gpu-rt) the main pass's
   draw_env_calls(m_env_calls);  // (AI-assisted, j2water2) (none left in Jak II's case)
   ctr_gpu_set_mesh_nofog(0);
   ctr_gpu_cull_reset();  // (AI-assisted) cull_ties

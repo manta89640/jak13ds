@@ -196,7 +196,7 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.envmap_min_px > 0.f; }},
     {"skin_rows_f24", [](CtrSettings& s, bool on) { s.skin_rows_f24 = on; },
      [](const CtrSettings& s) { return s.skin_rows_f24; }},
-    // early_depth: the config's mode (on, block32, sky, sky32) or off; nothing when the config
+    // early_depth: the config's mode (on, sky) or off; nothing when the config
     // says off (it left squares where the level never drew on a New 3DS: not tried uninvited)
     {"early_depth",
      [](CtrSettings& s, bool on) {
@@ -224,14 +224,7 @@ const AbSwitch kAbSwitches[] = {
      [](const CtrSettings& s) { return s.cmd_dedup_draw; }},
     {"skin_clip_f24", [](CtrSettings& s, bool on) { s.skin_clip_f24 = on; },
      [](const CtrSettings& s) { return s.skin_clip_f24; }},
-    // (AI-assisted, gpu-rt) static_cmdlists: the config's mode (on; on when the config says off)
-    // or off; ocean_tex_half
-    {"static_cmdlists",
-     [](CtrSettings& s, bool on) {
-       static const int kConfigMode = s.static_cmdlists > 0 ? s.static_cmdlists : 1;
-       s.static_cmdlists = on ? kConfigMode : 0;
-     },
-     [](const CtrSettings& s) { return s.static_cmdlists > 0; }},
+    // (AI-assisted, gpu-rt) ocean_tex_half
     {"ocean_tex_half", [](CtrSettings& s, bool on) { s.ocean_tex_half = on; },
      [](const CtrSettings& s) { return s.ocean_tex_half; }},
     // (AI-assisted) gpu-conv (Oct 12): c3l v15 alpha tests / blending that can't change a pixel
@@ -686,7 +679,6 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   ctr_gpu_set_shader_opt(ctr_settings().shader_opt ? 1 : 0);        // (AI-assisted)
   ctr_gpu_set_cmd_dedup(ctr_settings().cmd_dedup ? 1 : 0,           // (AI-assisted)
                         ctr_settings().cmd_dedup_draw ? 1 : 0);
-  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);  // (AI-assisted, gpu-rt)
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);          // (AI-assisted, hud3)
   const double t1 = ctr_gpu_time_ms();
   if (g_shot_every > 0 && m_rs.frame_idx > 0 && m_rs.frame_idx % g_shot_every == 0) {
@@ -776,6 +768,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   m_timing.tex_binds += gs.tex_binds;
   m_timing.draws += gs.draws;
   m_timing.gpu_wait_ms += gs.gpu_wait_ms;
+  m_timing.queue_drains += gs.queue_drains;  // (AI-assisted, gpu-home)
   m_timing.gpu_busy_ms += gs.gpu_busy_ms;
   m_timing.gpu_busy_frames += gs.gpu_busy_frames;
   m_timing.gpu_active_ms += gs.gpu_active_ms;
@@ -853,7 +846,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           "[ctr] render ms/frame over {} frames: wait-gpu {:.2f}, build {:.2f}, submit {:.2f} "
           "(cpu total {:.2f}; gpu-wait {:.2f}); gpu {:.2f} (draw {:.2f}, busy {}); {:.0f} "
           "triangles, {:.0f} draws, {:.0f} texture binds, {:.0f} KB commands (peak {:.0f} of {} KB; {:.1f} KB left "
-          "out by cmd_dedup); vertex buffer peak {} of {} KB{}{}{}",
+          "out by cmd_dedup); vertex buffer peak {} of {} KB{}{}{}{}",
           m_timing.frames, m_timing.begin_ms / n, m_timing.build_ms / n, m_timing.end_ms / n,
           (m_timing.begin_ms + m_timing.build_ms + m_timing.end_ms) / n,
           m_timing.gpu_wait_ms / n, m_timing.gpu_ms / n, m_timing.gpu_draw_ms / n, busy,
@@ -870,6 +863,10 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
           m_timing.color_clears_skipped
               ? fmt::format(", {} frames without the color clear (skip_clear)",
                             m_timing.color_clears_skipped)
+              : std::string(),
+          // (AI-assisted, gpu-home) frame_overlap2 = on: drains of a full GX queue (gpu-wait)
+          m_timing.queue_drains
+              ? fmt::format(", {} GX queue drains (queue full)", m_timing.queue_drains)
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
@@ -917,13 +914,13 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                  m_timing.tod_ms / n, m_timing.tod_max_ms, m_timing.tod_over);
       }
       {
-        // (AI-assisted, gpu-rt) gpu_breakdown, static_cmdlists
+        // (AI-assisted, gpu-rt) gpu_breakdown, gpu_micro's statistics
         char line[1024];
         if (ctr_gpu_breakdown_line(line, sizeof(line),
                                     m_profile_level.empty() ? "-" : m_profile_level.c_str()) > 0) {
           lg::info("{}", line);
         }
-        if (ctr_gpu_cmdlist_line(line, sizeof(line)) > 0) {
+        if (ctr_gpu_micro_line(line, sizeof(line)) > 0) {
           lg::info("{}", line);
         }
       }
@@ -1477,8 +1474,7 @@ void wait_render_idle() {
 int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
-  ctr_gpu_set_framebuffer(ctr_settings().early_depth_block32 ? 1 : 0,
-                          ctr_settings().depth16 ? 1 : 0);
+  ctr_gpu_set_framebuffer(ctr_settings().depth16 ? 1 : 0);
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_shader_basic(ctr_settings().shader_basic);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
@@ -1524,8 +1520,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_raw_cmds(ctr_settings().raw_cmds ? 1 : 0);
   ctr_gpu_set_cmd_dump(ctr_settings().cmd_dump ? 1 : 0);  // (AI-assisted)
   ctr_gpu_set_gpu_breakdown(ctr_settings().gpu_breakdown ? 1 : 0);  // (AI-assisted, gpu-rt)
-  // (AI-assisted, gpu-rt) its linear memory block now, before levels load
-  ctr_gpu_set_static_cmdlists(ctr_settings().static_cmdlists);
 #ifdef __3DS__
   if (ctr_settings().gpu_perflog) {
     // (AI-assisted) the GSP's performance log, read once per stats window (render_frame)
@@ -1648,7 +1642,8 @@ void ctr_send_chain(const void* data, u32 offset) {
   g_upload_mark = g_upload_total;
   g_upload_count_mark = g_upload_count_total;
   g_ee.last_send = now;
-  ctr_gpu_note_release();
+  // (AI-assisted, gpu-home) the release vblank now, noted once the render thread is idle
+  const unsigned int release = ctr_gpu_release_now();
   float game_cam[3];
   // (title3, Jak 1 only: *math-camera* through the Jak 1 kernel's symbol table)
   const bool have_game_cam = g_game_version == GameVersion::Jak1 && game_camera_trans(game_cam);
@@ -1662,6 +1657,7 @@ void ctr_send_chain(const void* data, u32 offset) {
     g_ee.prepare_ms += ctr_gpu_time_ms() - tp;
     g_job_mem = data;
     g_job_offset = offset;
+    ctr_gpu_note_release(release);
     ctr_gpu_async_submit();
   } else {
 #ifndef __3DS__
@@ -1673,6 +1669,7 @@ void ctr_send_chain(const void* data, u32 offset) {
     if (have_game_cam) {
       g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3)
     }
+    ctr_gpu_note_release(release);
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;
   }

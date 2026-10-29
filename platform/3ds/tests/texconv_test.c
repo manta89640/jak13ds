@@ -26,6 +26,20 @@ static inline u32 tiled_texel(int x, int y, int w, int h) {
   const int ty = h - 1 - y;
   return (u32)((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8((u32)x & 7, (u32)ty & 7);
 }
+/* (AI-assisted, gpu-home) the rounded quantization, worked out here (not from the header's
+ * tables): the x of `bits` bits whose GPU expansion (bits repeated) is nearest to v */
+static u32 q(u32 v, int bits) {
+  u32 best = 0, best_d = 1000;
+  for (u32 x = 0; x < (1u << bits); x++) {
+    const u32 e = (x << (8 - bits)) | (x >> (2 * bits - 8));
+    const u32 d = e > v ? e - v : v - e;
+    if (d < best_d) {
+      best_d = d;
+      best = x;
+    }
+  }
+  return best;
+}
 static void old_compact(void* data, int w, int h, const uint8_t* rgba, int fmt) {
   uint8_t* d8 = (uint8_t*)data; uint16_t* d16 = (uint16_t*)data;
   for (int y = 0; y < h; y++) {
@@ -36,9 +50,9 @@ static void old_compact(void* data, int w, int h, const uint8_t* rgba, int fmt) 
       switch (fmt) {
         case CTR_CONV_L8: d8[o] = p[1]; break;
         case CTR_CONV_LA8: d8[2 * o] = (uint8_t)a2; d8[2 * o + 1] = p[1]; break;
-        case CTR_CONV_RGB565: d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 2) << 5) | (p[2] >> 3)); break;
-        case CTR_CONV_RGBA5551: d16[o] = (uint16_t)(((p[0] >> 3) << 11) | ((p[1] >> 3) << 6) | ((p[2] >> 3) << 1) | (p[3] ? 1 : 0)); break;
-        default: d16[o] = (uint16_t)(((p[0] >> 4) << 12) | ((p[1] >> 4) << 8) | ((p[2] >> 4) << 4) | (a2 >> 4)); break;
+        case CTR_CONV_RGB565: d16[o] = (uint16_t)((q(p[0], 5) << 11) | (q(p[1], 6) << 5) | q(p[2], 5)); break;
+        case CTR_CONV_RGBA5551: d16[o] = (uint16_t)((q(p[0], 5) << 11) | (q(p[1], 5) << 6) | (q(p[2], 5) << 1) | (p[3] ? 1 : 0)); break;
+        default: d16[o] = (uint16_t)((q(p[0], 4) << 12) | (q(p[1], 4) << 8) | (q(p[2], 4) << 4) | q(a2, 4)); break;
       }
     }
   }
@@ -81,6 +95,14 @@ int main(void) {
     ctr_rgba4_to_rgba8((uint32_t*)b, src + off, n);
     cases++;
     if (memcmp(a, b, 4 * n + 16)) { printf("FAIL rgba4 n=%d\n", n); fails++; }
+  }
+  /* (AI-assisted, gpu-home) the plain loop's ctr_pack16 per texel against the reference */
+  for (u32 v = 0; v < 256; v++) {
+    cases++;
+    if (ctr_q4[v] != q(v, 4) || ctr_q5[v] != q(v, 5) || ctr_q6[v] != q(v, 6)) {
+      printf("FAIL table v=%u\n", v);
+      fails++;
+    }
   }
   printf("%d cases, %d failures\n", cases, fails);
   return fails != 0;

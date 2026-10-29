@@ -34,7 +34,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"fog_alpha", "off"},        {"tex1_gating", "off"},       {"cull_merc", "off"},
     {"sky_last", "off"},         {"tex_cache_clear", "always"}, {"vista_untextured", "off"},
     {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
-    {"static_cmdlists", "off"},  {"ocean_tex_half", "off"},    {"opaque_alpha", "off"},
+    {"ocean_tex_half", "off"},   {"opaque_alpha", "off"},
     {"fine_vis", "off"},         {"skip_clear", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"impostors", "off"}, /* (AI-assisted) on by default since Oct 17 */
@@ -92,7 +92,7 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
  * in CtrSettings.h). The callers' own fallbacks only matter without this table. */
 static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
-    {"gpu_micro", "on"}, {"shader_resident", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
+    {"gpu_micro", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
     {"sound_core", "auto"}, /* 2 on a New 3DS, else 1 */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
     /* (AI-assisted) Jak II's kernel starts the IOP from the "DVD" without -fakeiso */
@@ -137,6 +137,9 @@ static const char* const ctr_cfg_removed[] = {
     "tod_busy_half", "tod_max_ms",
     /* (AI-assisted, hudshard, Oct 25) the post-vertex cache kept across draws: the HUD shards */
     "vcache_reuse",
+    /* (AI-assisted, gpu-home, Oct 29) static_cmdlists' recordings (cost more than they gave);
+     * shader_resident's own key (always on with gpu_micro) */
+    "static_cmdlists", "shader_resident",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

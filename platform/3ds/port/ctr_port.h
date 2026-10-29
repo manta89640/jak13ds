@@ -48,6 +48,8 @@ void ctr_close_application(void);
 /* Call regularly from the main thread. Returns 0 when the app should quit (HOME -> close,
  * power off...). */
 int ctr_main_loop(void);
+/* (AI-assisted, gpu-home) fn runs on the main thread after each aptMainLoop (NULL: none) */
+void ctr_port_set_apt_after(void (*fn)(void));
 
 /* 1 on New 3DS / New 2DS XL */
 int ctr_is_new3ds(void);

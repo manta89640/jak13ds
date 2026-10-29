@@ -513,8 +513,7 @@ switched 0 against 3 there: village1's shape errors at the far-plane are 3.3 px 
 one group in ten, 19 px at most (the title camera: up to 19.7 px pops, palms and huts).
 A chunk with versioned runs is drawn run by run; a run of the other version is hidden and never
 drawn along with its neighbours (the small-gap merge), so the two versions are never on top of each
-other. Visibility bits, run culling, static_cmdlists (a version change is a new draw list for one
-frame), cull_ties (each version oriented on its own), time of day (the chunk's vertices are both
+other. Visibility bits, run culling, cull_ties (each version oriented on its own), time of day (the chunk's vertices are both
 versions') and impostors (cards show the far version) work as before.
 
 ## Near chunks (v19)

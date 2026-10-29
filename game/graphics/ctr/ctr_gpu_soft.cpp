@@ -2296,7 +2296,7 @@ int ctr_gpu_skin_rows_f24_on(void) {
 }
 void ctr_gpu_pack_skin_rows_f24(const float*, int, uint32_t*) {}
 void ctr_gpu_set_skin_clip_f24(int) {}  // (AI-assisted)      // (AI-assisted) no uniform formats here
-void ctr_gpu_set_framebuffer(int, int depth16) {
+void ctr_gpu_set_framebuffer(int depth16) {
   g_soft.depth16 = depth16 ? 1 : 0;  // (AI-assisted) no stencil, like the 3DS's D16 buffer
 }
 int ctr_gpu_describe_target(char*, int) {
@@ -2313,7 +2313,10 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   return 1;
 }
 void ctr_gpu_set_steady_pacing(int) {}
-void ctr_gpu_note_release(void) {}
+unsigned int ctr_gpu_release_now(void) {
+  return 0;
+}
+void ctr_gpu_note_release(unsigned int) {}
 void ctr_gpu_pacing_stats(unsigned int hist[5], int* latency, unsigned int* dropped,
                           double* buffer_wait_ms, unsigned int* just_in_time, int* floor) {
   *buffer_wait_ms = 0;
@@ -2338,21 +2341,15 @@ void ctr_gpu_set_overlap(int) {}
 void ctr_gpu_set_raw_cmds(int) {}
 void ctr_gpu_set_cmd_dedup(int, int) {}  // (AI-assisted) no command lists here
 void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
-// (AI-assisted, gpu-rt) static_cmdlists: no command words here, the draws one by one
-void ctr_gpu_set_static_cmdlists(int) {}
-void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n, ctr_cmd_cache**) {
+// (AI-assisted, gpu-rt) a pass's level draws, one by one
+void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   for (int i = 0; i < n; i++) {
     ctr_gpu_set_mesh_nofog(calls[i].nofog);
     ctr_gpu_draw_mesh_prepared(calls[i].state, calls[i].matrix, calls[i].mesh,
                                calls[i].first_index, calls[i].index_count);
   }
 }
-void ctr_gpu_cmd_cache_free(ctr_cmd_cache** cache) {
-  if (cache) {
-    *cache = nullptr;
-  }
-}
-int ctr_gpu_cmdlist_line(char*, int) {
+int ctr_gpu_micro_line(char*, int) {
   return 0;
 }
 // (AI-assisted, gpu-rt) gpu_breakdown: no GPU to time here
