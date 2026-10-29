@@ -268,6 +268,7 @@ struct CtrLevelData {
     // when at least lut[mask]: the last move of its palettes)
     std::vector<u8> color_mask;
     std::vector<u32> table, stamp;
+    u32 fresh_ver = ~0u;  // every entry is current at this version (tod_refresh_all)
     // per color the version its rgba last changed at (a TodMul changes only with its color)
     std::vector<u32> cver;
     // per group its vertices by table entry (CtrLevel.cpp tod_make_list; 0: not made yet,
@@ -311,6 +312,7 @@ struct CtrLevelData {
     struct LightList {
       std::vector<u16> verts;  // by the light palettes of their color, then by vertex
       std::vector<std::pair<u8, u32>> groups;  // those palettes, end of their verts
+      std::vector<u32> ranges;  // per vertex group its verts (ctr_recolor_light_groups_cached)
     };
     std::unordered_map<u32, LightList> chunk_lights;
     // weights (64 = 1.0): the game's at the level's last draw, the table's
