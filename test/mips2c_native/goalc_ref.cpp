@@ -43,6 +43,7 @@ void goalc_break(void) {
 extern const GoalcRefModule goalc_ref_collide_func;
 extern const GoalcRefModule goalc_ref_geometry;
 extern const GoalcRefModule goalc_ref_vector;
+extern const GoalcRefModule goalc_ref_main_collide;
 #endif
 extern const GoalcRefModule goalc_ref_joint;
 extern const GoalcRefModule goalc_ref_quaternion;
@@ -150,7 +151,7 @@ void load_goalc_references() {
 #else
   const std::initializer_list<const GoalcRefModule*> modules = {
       &goalc_ref_collide_func, &goalc_ref_geometry, &goalc_ref_vector, &goalc_ref_joint,
-      &goalc_ref_quaternion, &goalc_ref_bones};
+      &goalc_ref_quaternion, &goalc_ref_bones, &goalc_ref_main_collide};
 #endif
   for (const GoalcRefModule* m : modules) {
     const u32 seg = alloc_static(m->seg0_size, 16);

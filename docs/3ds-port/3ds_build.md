@@ -887,6 +887,12 @@ every platform:
   #f: host `OPENGOAL_COLLIDE_NATIVE=0` (no config.ini switch since Oct 18).
   `OPENGOAL_COLLIDE_NATIVE_VERIFY=1` (host) runs the GOAL version first on every call and compares
   what both wrote (the collide-cache object, `*collide-list*`).
+  The y-probe and line-sphere fills too: `pc-bsp-collide-y-probe` (the drawable-tree walk of
+  `(method collide-y-probe bsp-header)`), `pc-fill-from-foreground-using-y-probe` and
+  `pc-fill-from-foreground-using-line-sphere` (same switch and verify mode; the line-sphere one
+  also compares `*pc-fffuls-work*`). `instance-sphere-box-intersect?` is a def-mips2c on the 3DS
+  (`main-collide.gc`), inlined in both tree walks; tested against goalc's C of the GOAL function
+  (`test/mips2c_native` `instance-sphere-box-intersect?`, `goalc_ref/main_collide.c`).
 - (AI-assisted, Oct 11) `pc-new-bones-mtx-calc` (`native_bones.cpp`): the loop of the GOAL
   function `new-bones-mtx-calc-asm` (every merc model's skinning matrices, every frame; 0.27 ms per
   frame in Snowy Mountain on hardware). On the 3DS one VFP assembly block per bone keeps both

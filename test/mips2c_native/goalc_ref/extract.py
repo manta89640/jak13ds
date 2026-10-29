@@ -59,6 +59,10 @@ MODULES = {
     "bones": [
         "new-bones-mtx-calc-asm",
     ],
+    # the reference of the native instance-sphere-box-intersect? (native_collide_cache.cpp)
+    "main-collide": [
+        "instance-sphere-box-intersect?",
+    ],
 }
 
 # (AI-assisted) the oldest goal_c_ops.h version the fixtures compile with (ABI 6 changed the module
@@ -118,7 +122,7 @@ def main():
         for r, off, k in re.findall(
                 r"(r\d+) = GC_SEG_ADDR\(0, (\d+)\);\n  gc_symv_set\((\d+), \1\);", src):
             binds[sym_names[int(k)][1:-1]] = int(off)
-        ctx_m = re.search(r"^static struct \{\n.*?^\} gc_ctx;\n(?:#define .*\n)*", src, re.S | re.M)
+        ctx_m = re.search(r"^static struct \{\n.*?^\} gc_ctx;\n(?:#define [^\n]*\n)*", src, re.S | re.M)
         after_m = re.search(r"^static void gc_after_link\(void\) \{\n.*?^\}\n", src, re.S | re.M)
         funcs = functions(src)
         entries = []

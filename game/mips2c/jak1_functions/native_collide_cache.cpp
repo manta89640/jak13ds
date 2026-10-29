@@ -1427,21 +1427,20 @@ u64 pc_collide_frag_may_hit_impl(const NativeArgs& args) {
 
 
 // ---------------------------------------------------------------------------
-// (AI-assisted) 3DS: the box queries of the collide-cache fills, in C++
+// 3DS: the box, y-probe and line-sphere queries of the collide-cache fills, in C++
 // ---------------------------------------------------------------------------
-// fill-using-bounding-box (Jak's physics and the enemies' ground probes, every frame) walks the
-// drawable trees of every active level with GOAL methods (collide-with-box: a virtual call per
-// node, collide-cache-using-box-test and drawable-sphere-box-intersect? calls per node), then
-// fill-from-foreground-using-box walks the four collide-shape lists. In C mode their 128-bit PS2
-// ops (pcgtw, ppach) cost ~200 ARM instructions per shape. These natives do the same tests and
-// the same stores in the same order:
+// fill-using-bounding-box and fill-using-y-probe (Jak's physics, shadows and ground probes, every
+// frame) walk the drawable trees of every active level with GOAL methods (collide-with-box /
+// collide-y-probe: a virtual call per node and a sphere test call per node), then all three fills
+// walk the four collide-shape lists. In C mode their 128-bit PS2 ops (pcgtw, ppach) cost ~200 ARM
+// instructions per shape. These natives do the same tests and the same stores in the same order:
 //   pc-bsp-collide-with-box: (method collide-with-box bsp-header), after its *collide-stats* count
-//   pc-fill-from-foreground-using-box: (method fill-from-foreground-using-box collide-cache)
-// Always on (no config.ini switch since Oct 18). Both return #f when off (host debugging:
-// OPENGOAL_COLLIDE_NATIVE=0): the GOAL code then runs. The node types are recognized by their type; other types (and the
-// collide-shape-prim methods other than sphere and group) are called through their method table
-// like the original. instance-sphere-box-intersect? stays GOAL (called for the collide fragments
-// of the ties that pass the box tests).
+//   pc-bsp-collide-y-probe: (method collide-y-probe bsp-header), the same
+//   pc-fill-from-foreground-using-box / -y-probe / -line-sphere: those collide-cache methods
+// (The line-sphere fill's background walk is the collide-probe natives.) Always on. They return #f
+// when off (host debugging: OPENGOAL_COLLIDE_NATIVE=0): the GOAL code then runs. The node types are
+// recognized by their type; other types (and the collide-shape-prim methods other than sphere and
+// group) are called through their method table like the original.
 // OPENGOAL_COLLIDE_NATIVE_VERIFY=1 (host): every call runs the GOAL version first (the guards
 // return #f while it runs), keeps what it wrote (the collide-cache object or *collide-list*), puts
 // the old bytes back, runs the native one and compares.
@@ -1451,6 +1450,7 @@ struct CollideNative {
   bool verify = false;
   bool in_goal = false;  // verify: the GOAL version is running
   u64 checks = 0, mismatches = 0;
+  u64 kind_checks[5] = {};  // verify: per native (see collide_native_verify's kind)
   bool overflow_logged = false;
 };
 CollideNative g_collide_native;
@@ -1467,8 +1467,8 @@ bool collide_native_on() {
     const char* venv = getenv("OPENGOAL_COLLIDE_NATIVE_VERIFY");
     c.verify = venv && venv[0] == '1';
 #endif
-    printf("[collide] native box fills (pc-bsp-collide-with-box, "
-           "pc-fill-from-foreground-using-box) %s%s\n",
+    printf("[collide] native fills (bsp box / y-probe walks, foreground box / y-probe / "
+           "line-sphere) %s%s\n",
            c.on ? "on" : "off (OPENGOAL_COLLIDE_NATIVE=0)", c.verify ? ", verify" : "");
   }
   return c.on == 1 && !c.in_goal;
@@ -1510,20 +1510,69 @@ inline bool sphere_outside_box4w(const Vec4f& s, const Vec4i& bmin, const Vec4i&
   return out;
 }
 
-//! the 1.0 that collide-cache-using-box-test multiplies by (vf0 from memory in goalc's C: the
+//! the 1.0 of vf0.w that the GOAL code multiplies by (vf0 from memory in goalc's C: the
 //! multiplies happen, so a NaN comes out as the FPU makes it)
 volatile float g_collide_one = 1.0f;
 
-struct BoxWalk {
+/*!
+ * instance-sphere-box-intersect? (frag inst box4w): the bounding sphere of the collide fragment
+ * frag, moved by the instance-tie's origin (vector4h rows / 4096, the translation >> 10 plus the
+ * instance's bsphere) with its radius times max-scale / 4096: is its box inside [bmin, bmax]?
+ * Every operation is a separate statement, like goalc's lane-wise ops (never fused).
+ */
+inline bool tie_frag_in_box4w(u32 frag, u32 inst, const Vec4i& bmin, const Vec4i& bmax, float one) {
+  const float k = u2f(0x39800000);  // vitof12
+  s32 t[4], r0[4], r1[4], r2[4];
+  unpack_halves(t, gload<u64>(inst + 52), 10);
+  unpack_halves(r0, gload<u64>(inst + 28), 16);
+  unpack_halves(r1, gload<u64>(inst + 36), 16);
+  unpack_halves(r2, gload<u64>(inst + 44), 16);
+  const Vec4f ib = gload<Vec4f>(inst + 12);
+  const Vec4f s = gload<Vec4f>(frag + 12);
+  const float ibv[3] = {ib.x, ib.y, ib.z};
+  float scale = (float)(s32)gload<u16>(inst + 34);  // max-scale
+  scale = scale * k;
+  const float r = scale * s.w;
+  bool out = false;
+  for (int i = 0; i < 3; i++) {
+    float m0 = (float)r0[i];
+    m0 = m0 * k;
+    float m1 = (float)r1[i];
+    m1 = m1 * k;
+    float m2 = (float)r2[i];
+    m2 = m2 * k;
+    float m3 = (float)t[i];
+    m3 = m3 + ibv[i];
+    float acc = m0 * s.x;
+    float p = m1 * s.y;
+    acc = acc + p;
+    p = m2 * s.z;
+    acc = acc + p;
+    p = m3 * one;
+    const float c = acc + p;
+    const float hi = c + r;
+    const float lo = c - r;
+    out |= (cvtt(lo) > bmax.v[i]) | (bmin.v[i] > cvtt(hi));
+  }
+  return !out;
+}
+
+//! (instance-sphere-box-intersect? frag inst box4w) -> symbol
+u64 instance_sphere_box_intersect_impl(const NativeArgs& args) {
+  const u32 box = (u32)args.a[2];
+  const bool in = tie_frag_in_box4w((u32)args.a[0], (u32)args.a[1], gload<Vec4i>(box),
+                                    gload<Vec4i>(box + 16), g_collide_one);
+  return in ? args.st + 8 : args.st;
+}
+
+struct TreeWalk {
   const NativeArgs* args;
   float one;
   Vec4f neg_r;  // *collide-work* collide-sphere-neg-r
   Vec4i bmin, bmax;
-  u32 box4w;  // its address (instance-sphere-box-intersect?'s argument)
   u32 list;
   u32 t_draw_node, t_ia_node, t_tree_cfrag, t_ia_cfrag, t_cfrag, t_tree_tie, t_ia_tie, t_tie;
-  u32 drawable_method;  // (method collide-with-box drawable): does nothing
-  u32 isbi;             // instance-sphere-box-intersect?
+  u32 drawable_method;  // the method of drawable: does nothing
 };
 
 //! the value of a symbol whose address was looked up once (sym_addr hashes the name)
@@ -1532,7 +1581,7 @@ inline u32 sym_value(u32 sym) {
 }
 
 //! collide-cache-using-box-test: is the bounding sphere at addr within the query's sphere?
-inline bool box_test(const BoxWalk& w, u32 addr) {
+inline bool box_test(const TreeWalk& w, u32 addr) {
   const Vec4f b = gload<Vec4f>(addr);
   float d[4] = {b.x - w.neg_r.x, b.y - w.neg_r.y, b.z - w.neg_r.z, b.w - w.neg_r.w};
   for (int i = 0; i < 4; i++) {
@@ -1550,12 +1599,22 @@ inline bool box_test(const BoxWalk& w, u32 addr) {
   return (s64)((bits << 32) | bits) <= 0;
 }
 
-void add_list_item(BoxWalk& w, u32 mesh, u32 inst) {
+//! the node test: collide-cache-using-box-test, or collide-cache-using-y-probe-test (the sphere's
+//! box against *collide-work*'s)
+template <bool kYProbe>
+inline bool node_test(const TreeWalk& w, u32 addr) {
+  if (kYProbe) {
+    return !sphere_outside_box4w(gload<Vec4f>(addr), w.bmin, w.bmax);
+  }
+  return box_test(w, addr);
+}
+
+void add_list_item(TreeWalk& w, u32 mesh, u32 inst) {
   const s32 n = gload<s32>(w.list);
   if (n >= 256) {
-    // (AI-assisted) the original doesn't check (it writes past *collide-list*, 256 items, into the
-    // global heap; a box with an inf radius from a NaN actor adds every fragment): drop the extra
-    // entries like the probe natives (kCollideListMax in native_collide_probe.cpp)
+    // the original doesn't check (it writes past *collide-list*, 256 items, into the global heap;
+    // a box with an inf radius from a NaN actor adds every fragment): drop the extra entries like
+    // the probe natives (kCollideListMax in native_collide_probe.cpp)
     if (!g_collide_native.overflow_logged) {
       g_collide_native.overflow_logged = true;
       printf("[collide] WARNING: *collide-list* overflow (%d items, 256 fit), dropped\n", n + 1);
@@ -1568,39 +1627,41 @@ void add_list_item(BoxWalk& w, u32 mesh, u32 inst) {
   gstore<u32>(w.list, (u32)(n + 1));
 }
 
-void box_walk(BoxWalk& w, u32 obj, s64 count) {
+//! collide-with-box (kYProbe false) or collide-y-probe of obj (count of them for inline arrays)
+template <bool kYProbe>
+void tree_walk(TreeWalk& w, u32 obj, s64 count) {
   const u32 type = gload<u32>(obj - 4);
   if (type == w.t_draw_node) {
     for (s64 i = 0; i < count; i++, obj += 32) {
-      if (box_test(w, obj + 12)) {
-        box_walk(w, gload<u32>(obj + 4), gload<u8>(obj + 2));
+      if (node_test<kYProbe>(w, obj + 12)) {
+        tree_walk<kYProbe>(w, gload<u32>(obj + 4), gload<u8>(obj + 2));
       }
     }
   } else if (type == w.t_ia_node || type == w.t_ia_cfrag) {
-    box_walk(w, obj + 32, gload<s16>(obj + 2));
+    tree_walk<kYProbe>(w, obj + 32, gload<s16>(obj + 2));
   } else if (type == w.t_ia_tie) {
     const s16 n = gload<s16>(obj + 2);
     if (n != 0) {
-      box_walk(w, obj + 32, n);
+      tree_walk<kYProbe>(w, obj + 32, n);
     }
   } else if (type == w.t_tree_cfrag) {
-    box_walk(w, gload<u32>(obj + 28), gload<s16>(obj + 2));
+    tree_walk<kYProbe>(w, gload<u32>(obj + 28), gload<s16>(obj + 2));
   } else if (type == w.t_tree_tie) {
     const s16 n = gload<s16>(obj + 2);
     if (n != 0) {
-      box_walk(w, gload<u32>(obj + 28), n);
+      tree_walk<kYProbe>(w, gload<u32>(obj + 28), n);
     }
   } else if (type == w.t_cfrag) {
     for (s64 i = 0; i < count; i++, obj += 32) {
-      if (box_test(w, obj + 12) &&
-          !sphere_outside_box4w(gload<Vec4f>(obj + 12), w.bmin, w.bmax)) {
+      if (node_test<kYProbe>(w, obj + 12) &&
+          (kYProbe || !sphere_outside_box4w(gload<Vec4f>(obj + 12), w.bmin, w.bmax))) {
         add_list_item(w, gload<u32>(obj + 4), (u32)w.args->st);
       }
     }
   } else if (type == w.t_tie) {
     for (s64 i = 0; i < count; i++, obj += 64) {
-      if ((gload<u16>(obj + 42) & 1) || !box_test(w, obj + 12) ||
-          sphere_outside_box4w(gload<Vec4f>(obj + 12), w.bmin, w.bmax)) {
+      if ((gload<u16>(obj + 42) & 1) || !node_test<kYProbe>(w, obj + 12) ||
+          (!kYProbe && sphere_outside_box4w(gload<Vec4f>(obj + 12), w.bmin, w.bmax))) {
         continue;
       }
       const u32 frags = gload<u32>(gload<u32>(obj + 8) + 136);
@@ -1609,15 +1670,13 @@ void box_walk(BoxWalk& w, u32 obj, s64 count) {
       }
       u32 frag = frags + 32;
       for (s64 j = 0; j < gload<s16>(frags + 2); j++, frag += 32) {
-        const u64 call_args[8] = {frag, obj, w.box4w, w.args->a[3],
-                                  w.args->a[4], w.args->a[5], w.args->a[6], w.args->a[7]};
-        if ((u32)native_call_goal(w.isbi, call_args, *w.args) != (u32)w.args->st) {
+        if (tie_frag_in_box4w(frag, obj, w.bmin, w.bmax, w.one)) {
           add_list_item(w, gload<u32>(frag + 4), obj);
         }
       }
     }
   } else {
-    const u32 method = gload<u32>(type + 60);
+    const u32 method = gload<u32>(type + (kYProbe ? 64 : 60));
     if (method != w.drawable_method) {
       const u64 call_args[8] = {obj,          (u64)count,   w.list,       w.args->a[3],
                                 w.args->a[4], w.args->a[5], w.args->a[6], w.args->a[7]};
@@ -1626,14 +1685,14 @@ void box_walk(BoxWalk& w, u32 obj, s64 count) {
   }
 }
 
-void bsp_box_walk(const NativeArgs& args) {
+template <bool kYProbe>
+void bsp_tree_walk(const NativeArgs& args) {
   static const u32 collide_work_sym = sym_addr("*collide-work*");
-  BoxWalk w;
+  TreeWalk w;
   w.args = &args;
   w.one = g_collide_one;
   const u32 cw = gload<u32>(collide_work_sym);
   w.neg_r = gload<Vec4f>(cw);
-  w.box4w = cw + 16;
   w.bmin = gload<Vec4i>(cw + 16);
   w.bmax = gload<Vec4i>(cw + 32);
   w.list = (u32)args.a[2];
@@ -1646,7 +1705,6 @@ void bsp_box_walk(const NativeArgs& args) {
   static const u32 s_ia_tie = sym_addr("drawable-inline-array-instance-tie");
   static const u32 s_tie = sym_addr("instance-tie");
   static const u32 s_drawable = sym_addr("drawable");
-  static const u32 s_isbi = sym_addr("instance-sphere-box-intersect?");
   w.t_draw_node = sym_value(s_draw_node);
   w.t_ia_node = sym_value(s_ia_node);
   w.t_tree_cfrag = sym_value(s_tree_cfrag);
@@ -1655,51 +1713,87 @@ void bsp_box_walk(const NativeArgs& args) {
   w.t_tree_tie = sym_value(s_tree_tie);
   w.t_ia_tie = sym_value(s_ia_tie);
   w.t_tie = sym_value(s_tie);
-  w.drawable_method = gload<u32>(sym_value(s_drawable) + 60);
-  w.isbi = sym_value(s_isbi);
+  w.drawable_method = gload<u32>(sym_value(s_drawable) + (kYProbe ? 64 : 60));
   const u32 trees = gload<u32>((u32)args.a[0] + 36);
   for (s64 i = 0; i < gload<s16>(trees + 2); i++) {
     const u32 tree = gload<u32>(trees + 28 + 4 * (u32)i);
     // the bsp-header method passes its own count on
-    box_walk(w, tree, (s64)args.a[1]);
+    tree_walk<kYProbe>(w, tree, (s64)args.a[1]);
   }
 }
 
 #ifndef __3DS__
+struct VerifyRegion {
+  u32 lo, size;
+};
+
 //! verify mode: run the GOAL version (method of obj's type at method_offset), then the native one
-//! from the same memory, and compare [lo, lo + size)
+//! from the same memory, and compare the regions
 template <typename F>
 void collide_native_verify(const char* what,
+                           int kind,
                            const NativeArgs& args,
                            u32 method_offset,
-                           u32 lo,
-                           u32 size,
+                           std::initializer_list<VerifyRegion> regions,
                            F&& native) {
   auto& c = g_collide_native;
-  std::vector<u8> before(g_ee_main_mem + lo, g_ee_main_mem + lo + size);
+  std::vector<std::vector<u8>> before, goal;
+  for (const auto& r : regions) {
+    before.emplace_back(g_ee_main_mem + r.lo, g_ee_main_mem + r.lo + r.size);
+  }
   const u32 method = gload<u32>(gload<u32>((u32)args.a[0] - 4) + method_offset);
   c.in_goal = true;
   native_call_goal(method, args.a, args);
   c.in_goal = false;
-  std::vector<u8> goal(g_ee_main_mem + lo, g_ee_main_mem + lo + size);
-  memcpy(g_ee_main_mem + lo, before.data(), size);
+  size_t k = 0;
+  for (const auto& r : regions) {
+    goal.emplace_back(g_ee_main_mem + r.lo, g_ee_main_mem + r.lo + r.size);
+    memcpy(g_ee_main_mem + r.lo, before[k++].data(), r.size);
+  }
   native();
   c.checks++;
-  if (memcmp(goal.data(), g_ee_main_mem + lo, size)) {
-    u32 off = 0;
-    while (goal[off] == g_ee_main_mem[lo + off]) {
-      off++;
+  c.kind_checks[kind]++;
+  k = 0;
+  for (const auto& r : regions) {
+    const auto& g = goal[k++];
+    if (memcmp(g.data(), g_ee_main_mem + r.lo, r.size)) {
+      u32 off = 0;
+      while (g[off] == g_ee_main_mem[r.lo + off]) {
+        off++;
+      }
+      c.mismatches++;
+      printf("collide native verify MISMATCH in %s: byte 0x%x of %u at #x%x (goal %02x native %02x)\n",
+             what, off, r.size, r.lo, g[off], g_ee_main_mem[r.lo + off]);
     }
-    c.mismatches++;
-    printf("collide native verify MISMATCH in %s: byte 0x%x of %u (goal %02x native %02x)\n", what,
-           off, size, goal[off], g_ee_main_mem[lo + off]);
   }
   if ((c.checks & 0x3fff) == 0) {
-    printf("collide native verify: %llu checks, %llu mismatches\n",
-           (unsigned long long)c.checks, (unsigned long long)c.mismatches);
+    const auto n = [&](int i) { return (unsigned long long)c.kind_checks[i]; };
+    printf("collide native verify: %llu checks (bsp box %llu, bsp y-probe %llu, fg box %llu, "
+           "fg line-sphere %llu, fg y-probe %llu), %llu mismatches\n",
+           (unsigned long long)c.checks, n(0), n(1), n(2), n(3), n(4),
+           (unsigned long long)c.mismatches);
   }
 }
 #endif
+
+//! the bsp-header tree walks: method 11 (collide-with-box) or 12 (collide-y-probe)
+template <bool kYProbe>
+u64 pc_bsp_collide_impl(const NativeArgs& args) {
+  if (!collide_native_on()) {
+    return args.st;
+  }
+#ifndef __3DS__
+  if (g_collide_native.verify) {
+    collide_native_verify(kYProbe ? "pc-bsp-collide-y-probe" : "pc-bsp-collide-with-box",
+                          kYProbe ? 1 : 0, args,
+                          kYProbe ? 64 : 60, {{(u32)args.a[2], 16 + 16 * 300}},
+                          [&] { bsp_tree_walk<kYProbe>(args); });
+    return args.st + 8;
+  }
+#endif
+  bsp_tree_walk<kYProbe>(args);
+  return args.st + 8;
+}
 
 /*!
  * (pc-bsp-collide-with-box bsp count list) -> symbol
@@ -1707,32 +1801,59 @@ void collide_native_verify(const char* what,
  * drawable tree into list. #f when off.
  */
 u64 pc_bsp_collide_with_box_impl(const NativeArgs& args) {
-  if (!collide_native_on()) {
-    return args.st;
-  }
-#ifndef __3DS__
-  if (g_collide_native.verify) {
-    collide_native_verify("pc-bsp-collide-with-box", args, 60, (u32)args.a[2], 16 + 16 * 300,
-                          [&] { bsp_box_walk(args); });
-    return args.st + 8;
-  }
-#endif
-  bsp_box_walk(args);
-  return args.st + 8;
+  return pc_bsp_collide_impl<false>(args);
 }
 
-struct FgBox {
+/*!
+ * (pc-bsp-collide-y-probe bsp count list) -> symbol
+ * (method collide-y-probe bsp-header) after its *collide-stats* count. #f when off.
+ */
+u64 pc_bsp_collide_y_probe_impl(const NativeArgs& args) {
+  return pc_bsp_collide_impl<true>(args);
+}
+
+//! the three foreground queries: the add-fg-prim-using-* method each calls (method 12, 13, 14)
+enum FgQuery { kFgBox = 0, kFgLineSphere = 1, kFgYProbe = 2 };
+
+struct FgFill {
   const NativeArgs* args;
   u32 cache;
   u64 collide_with;
   Vec4i bmin, bmax;
+  float m[4][4];  // line-sphere: *collide-work* inv-mat
+  float one;
   u32 t_sphere, t_group;
 };
 
-void add_fg_prim_using_box(const FgBox& f, u32 prim);
+//! Is the box of the sphere s (moved by inv-mat for the line-sphere query) outside the box?
+template <int Q>
+inline bool fg_outside(const FgFill& f, const Vec4f& s) {
+  if (Q != kFgLineSphere) {
+    return sphere_outside_box4w(s, f.bmin, f.bmax);
+  }
+  // acc = m3 * vf0.w, acc += m0 * x, acc += m1 * y, c = acc + m2 * z: one op per statement
+  const float sv[3] = {s.x, s.y, s.z};
+  bool out = false;
+  for (int i = 0; i < 3; i++) {
+    float acc = f.m[3][i] * f.one;
+    float p = f.m[0][i] * sv[0];
+    acc = acc + p;
+    p = f.m[1][i] * sv[1];
+    acc = acc + p;
+    p = f.m[2][i] * sv[2];
+    const float c = acc + p;
+    const float lo = c - s.w;
+    const float hi = c + s.w;
+    out |= (cvtt(lo) > f.bmax.v[i]) | (f.bmin.v[i] > cvtt(hi));
+  }
+  return out;
+}
 
-//! (method add-fg-prim-using-box collide-shape-prim-sphere)
-void add_fg_sphere(const FgBox& f, u32 prim, u32 method) {
+template <int Q>
+void add_fg_prim(const FgFill& f, u32 prim);
+
+//! (method add-fg-prim-using-* collide-shape-prim-sphere): the same for the three queries
+void add_fg_sphere(const FgFill& f, u32 prim, u32 method) {
   const u32 cache = f.cache;
   const u32 n = gload<u32>(cache + 4);
   if (n == 100) {
@@ -1752,42 +1873,53 @@ void add_fg_sphere(const FgBox& f, u32 prim, u32 method) {
   gstore<u32>(slot + 32, cache);
 }
 
-//! (method add-fg-prim-using-box collide-shape-prim-group)
-void add_fg_group(const FgBox& f, u32 prim) {
+//! (method add-fg-prim-using-* collide-shape-prim-group)
+template <int Q>
+void add_fg_group(const FgFill& f, u32 prim) {
   const u32 n = gload<u32>(prim + 68);
   for (u32 k = 0; k < n; k++) {
     const u32 child = gload<u32>(prim + 76 + 4 * k);
     if (!(f.collide_with & gload<u64>(child + 28))) {
       continue;
     }
-    if (sphere_outside_box4w(gload<Vec4f>(child + 12), f.bmin, f.bmax)) {
+    if (fg_outside<Q>(f, gload<Vec4f>(child + 12))) {
       continue;
     }
-    add_fg_prim_using_box(f, child);
+    add_fg_prim<Q>(f, child);
   }
 }
 
-void add_fg_prim_using_box(const FgBox& f, u32 prim) {
-  static const u32* mesh_stub = native_stub_slot("(method 12 collide-shape-prim-mesh)");
+template <int Q>
+void add_fg_prim(const FgFill& f, u32 prim) {
+  static const u32* mesh_stub = native_stub_slot(
+      Q == kFgBox ? "(method 12 collide-shape-prim-mesh)"
+                  : (Q == kFgLineSphere ? "(method 13 collide-shape-prim-mesh)"
+                                        : "(method 14 collide-shape-prim-mesh)"));
   const u32 type = gload<u32>(prim - 4);
-  const u32 method = gload<u32>(type + 64);
+  const u32 method = gload<u32>(type + 64 + 4 * Q);
   if (type == f.t_sphere) {
     add_fg_sphere(f, prim, method);
   } else if (type == f.t_group) {
-    add_fg_group(f, prim);
+    add_fg_group<Q>(f, prim);
   } else {
     const u64 call_args[8] = {prim,          f.cache,       f.args->a[2], f.args->a[3],
                               f.args->a[4], f.args->a[5], f.args->a[6], f.args->a[7]};
     if (method == *mesh_stub) {
-      method_12_collide_shape_prim_mesh_impl(
-          NativeArgs{call_args, f.args->pp, f.args->st, f.args->stack});
+      // methods 12 and 14 are the same code
+      const NativeArgs mesh_args{call_args, f.args->pp, f.args->st, f.args->stack};
+      if (Q == kFgLineSphere) {
+        method_13_collide_shape_prim_mesh_impl(mesh_args);
+      } else {
+        method_12_collide_shape_prim_mesh_impl(mesh_args);
+      }
     } else {
       native_call_goal(method, call_args, *f.args);
     }
   }
 }
 
-void fg_box_walk_list(const FgBox& f, u32 list_sym) {
+template <int Q>
+void fg_walk_list(const FgFill& f, u32 list_sym) {
   const u32 list = gload<u32>(list_sym);
   const u32 end = list + 44;  // alive-list-end
   u32 conn = gload<u32>(list + 28);
@@ -1796,66 +1928,96 @@ void fg_box_walk_list(const FgBox& f, u32 list_sym) {
   while (conn != end) {
     const u32 shape = (u32)gload<s32>(conn + 20);  // param1
     const u32 prim = gload<u32>(shape + 156);      // root-prim
-    if ((f.collide_with & gload<u64>(prim + 28)) &&
-        !sphere_outside_box4w(gload<Vec4f>(prim + 12), f.bmin, f.bmax) &&
+    if ((f.collide_with & gload<u64>(prim + 28)) && !fg_outside<Q>(f, gload<Vec4f>(prim + 12)) &&
         proc != gload<u32>(shape + 136)) {
-      add_fg_prim_using_box(f, prim);
+      add_fg_prim<Q>(f, prim);
     }
     conn = next;
     next = gload<u32>(next);
   }
 }
 
-void fg_box_fill(const NativeArgs& args) {
+template <int Q>
+void fg_fill(const NativeArgs& args) {
   static const u32 player_sym = sym_addr("*collide-player-list*");
   static const u32 hit_by_player_sym = sym_addr("*collide-hit-by-player-list*");
   static const u32 usually_sym = sym_addr("*collide-usually-hit-by-player-list*");
   static const u32 hit_by_others_sym = sym_addr("*collide-hit-by-others-list*");
-  FgBox f;
+  FgFill f;
   f.args = &args;
   f.cache = (u32)args.a[0];
   f.collide_with = gload<u64>(f.cache + 92);
-  f.bmin = gload<Vec4i>(f.cache + 60);
-  f.bmax = gload<Vec4i>(f.cache + 76);
+  if (Q == kFgLineSphere) {
+    // *collide-work*'s box and inv-mat, which the GOAL code also keeps in *pc-fffuls-work*
+    static const u32 collide_work_sym = sym_addr("*collide-work*");
+    static const u32 fffuls_sym = sym_addr("*pc-fffuls-work*");
+    const u32 cw = gload<u32>(collide_work_sym);
+    f.bmin = gload<Vec4i>(cw + 16);
+    f.bmax = gload<Vec4i>(cw + 32);
+    const u32 fffuls = gload<u32>(fffuls_sym);
+    for (int i = 0; i < 4; i++) {
+      gload_q(f.m[i], cw + 48 + 16 * i);
+      gcopy_q(fffuls + 16 * i, cw + 48 + 16 * i);
+    }
+    f.one = g_collide_one;
+  } else {
+    f.bmin = gload<Vec4i>(f.cache + 60);
+    f.bmax = gload<Vec4i>(f.cache + 76);
+  }
   static const u32 s_sphere = sym_addr("collide-shape-prim-sphere");
   static const u32 s_group = sym_addr("collide-shape-prim-group");
   f.t_sphere = sym_value(s_sphere);
   f.t_group = sym_value(s_group);
   if (f.collide_with & 16) {
-    fg_box_walk_list(f, player_sym);
+    fg_walk_list<Q>(f, player_sym);
   }
   if (f.collide_with & 14) {
     if (f.collide_with & 2) {
-      fg_box_walk_list(f, hit_by_player_sym);
+      fg_walk_list<Q>(f, hit_by_player_sym);
     }
     if (f.collide_with & 4) {
-      fg_box_walk_list(f, usually_sym);
+      fg_walk_list<Q>(f, usually_sym);
     }
     if (f.collide_with & 8) {
-      fg_box_walk_list(f, hit_by_others_sym);
+      fg_walk_list<Q>(f, hit_by_others_sym);
     }
   }
 }
 
-/*!
- * (pc-fill-from-foreground-using-box cache) -> symbol
- * (method fill-from-foreground-using-box collide-cache). #f when off.
- */
-u64 pc_fill_from_foreground_using_box_impl(const NativeArgs& args) {
+//! the collide-cache methods 22, 23 and 24 (fill-from-foreground-using-box / -line-sphere /
+//! -y-probe). #f when off.
+template <int Q>
+u64 pc_fill_from_foreground_impl(const NativeArgs& args) {
   if (!collide_native_on()) {
     return args.st;
   }
 #ifndef __3DS__
   if (g_collide_native.verify) {
+    static const char* const names[3] = {"pc-fill-from-foreground-using-box",
+                                         "pc-fill-from-foreground-using-line-sphere",
+                                         "pc-fill-from-foreground-using-y-probe"};
+    static const u32 fffuls_sym = sym_addr("*pc-fffuls-work*");
     const u32 cache = (u32)args.a[0];
     const u32 size = gload<u16>(gload<u32>(cache - 4) + 8);
-    collide_native_verify("pc-fill-from-foreground-using-box", args, 16 + 4 * 22, cache - 4,
-                          size, [&] { fg_box_fill(args); });
+    const u32 fffuls = Q == kFgLineSphere ? gload<u32>(fffuls_sym) : cache - 4;
+    collide_native_verify(names[Q], 2 + Q, args, 16 + 4 * (22 + Q),
+                          {{cache - 4, size}, {fffuls, Q == kFgLineSphere ? 64u : 0u}},
+                          [&] { fg_fill<Q>(args); });
     return args.st + 8;
   }
 #endif
-  fg_box_fill(args);
+  fg_fill<Q>(args);
   return args.st + 8;
+}
+
+u64 pc_fill_from_foreground_using_box_impl(const NativeArgs& args) {
+  return pc_fill_from_foreground_impl<kFgBox>(args);
+}
+u64 pc_fill_from_foreground_using_line_sphere_impl(const NativeArgs& args) {
+  return pc_fill_from_foreground_impl<kFgLineSphere>(args);
+}
+u64 pc_fill_from_foreground_using_y_probe_impl(const NativeArgs& args) {
+  return pc_fill_from_foreground_impl<kFgYProbe>(args);
 }
 }  // namespace
 
@@ -1885,11 +2047,20 @@ const NativeImpl method_14_collide_shape_prim_mesh =
     MIPS2C_NATIVE_IMPL(method_12_collide_shape_prim_mesh_impl, 0, 0);
 const NativeImpl pc_upload_collide_frag = MIPS2C_NATIVE_IMPL(pc_upload_collide_frag_impl, 0, 0);
 const NativeImpl pc_collide_frag_may_hit = MIPS2C_NATIVE_IMPL_GOAL(pc_collide_frag_may_hit_impl, 0);
-// (AI-assisted) the box fills (see above): no mips2c version, OPENGOAL_COLLIDE_NATIVE=0 (host) turns them off
+// the fills (see above): no mips2c version, OPENGOAL_COLLIDE_NATIVE=0 (host) turns them off
 const NativeImpl pc_bsp_collide_with_box =
     MIPS2C_NATIVE_IMPL(pc_bsp_collide_with_box_impl, NATIVE_CALLS_GOAL, 0);
+const NativeImpl pc_bsp_collide_y_probe =
+    MIPS2C_NATIVE_IMPL(pc_bsp_collide_y_probe_impl, NATIVE_CALLS_GOAL, 0);
 const NativeImpl pc_fill_from_foreground_using_box =
     MIPS2C_NATIVE_IMPL_GOAL(pc_fill_from_foreground_using_box_impl, NATIVE_CALLS_GOAL);
+const NativeImpl pc_fill_from_foreground_using_line_sphere =
+    MIPS2C_NATIVE_IMPL_GOAL(pc_fill_from_foreground_using_line_sphere_impl, NATIVE_CALLS_GOAL);
+const NativeImpl pc_fill_from_foreground_using_y_probe =
+    MIPS2C_NATIVE_IMPL_GOAL(pc_fill_from_foreground_using_y_probe_impl, NATIVE_CALLS_GOAL);
+// GOAL code calls it directly (def-mips2c in main-collide.gc on the 3DS)
+const NativeImpl instance_sphere_box_intersect =
+    MIPS2C_NATIVE_IMPL_GOAL(instance_sphere_box_intersect_impl, 0);
 
 }  // namespace Mips2C::jak1::native
 
@@ -1906,13 +2077,30 @@ void link() {
   gLinkedFunctionTable.reg("pc-fill-from-foreground-using-box",
                            native::pc_fill_from_foreground_using_box.as_exec, 64,
                            &native::pc_fill_from_foreground_using_box);
+  gLinkedFunctionTable.reg("pc-fill-from-foreground-using-line-sphere",
+                           native::pc_fill_from_foreground_using_line_sphere.as_exec, 64,
+                           &native::pc_fill_from_foreground_using_line_sphere);
+  gLinkedFunctionTable.reg("pc-fill-from-foreground-using-y-probe",
+                           native::pc_fill_from_foreground_using_y_probe.as_exec, 64,
+                           &native::pc_fill_from_foreground_using_y_probe);
 }
 }  // namespace Mips2C::jak1::pc_collide_frag_may_hit
 
-// (AI-assisted) bsp.gc uses it, and is loaded before collide-cache.gc
+// bsp.gc uses them, and is loaded before collide-cache.gc
 namespace Mips2C::jak1::pc_bsp_collide_with_box {
 void link() {
   gLinkedFunctionTable.reg("pc-bsp-collide-with-box", native::pc_bsp_collide_with_box.as_exec, 64,
                            &native::pc_bsp_collide_with_box);
+  gLinkedFunctionTable.reg("pc-bsp-collide-y-probe", native::pc_bsp_collide_y_probe.as_exec, 64,
+                           &native::pc_bsp_collide_y_probe);
 }
 }  // namespace Mips2C::jak1::pc_bsp_collide_with_box
+
+// main-collide.gc
+namespace Mips2C::jak1::instance_sphere_box_intersect {
+void link() {
+  gLinkedFunctionTable.reg("instance-sphere-box-intersect?",
+                           native::instance_sphere_box_intersect.as_exec, 64,
+                           &native::instance_sphere_box_intersect);
+}
+}  // namespace Mips2C::jak1::instance_sphere_box_intersect

@@ -1093,6 +1093,13 @@
 ;; Foreground Y PROBE
 ;;;;;;;;;;;;;;;;;;;;;;;;;
 
+;; og:preserve-this 3DS: the y-probe and line-sphere foreground fills in C++ (native_collide_cache.cpp,
+;; the same results; always on). #f when they are off (host debugging): the GOAL code runs.
+(#when TARGET_3DS
+  (def-mips2c pc-fill-from-foreground-using-y-probe (function collide-cache symbol)))
+(#when TARGET_3DS
+  (def-mips2c pc-fill-from-foreground-using-line-sphere (function collide-cache symbol)))
+
 (defmethod fill-from-foreground-using-y-probe ((obj collide-cache))
   (local-vars
     (zero uint128)
@@ -1129,6 +1136,8 @@
     (a3-5 uint128)
     (a3-6 uint128)
     (a3-7 uint128))
+  (#when TARGET_3DS
+    (if (pc-fill-from-foreground-using-y-probe obj) (return 0)))
   (set! zero (the uint128 0))
   (rlet ((vf1 :class vf)
          (vf2 :class vf)
@@ -1450,6 +1459,8 @@
     (a3-6 uint128)
     (a3-7 uint128)
     (f31-0 none))
+  (#when TARGET_3DS
+    (if (pc-fill-from-foreground-using-line-sphere obj) (return 0)))
   (rlet ((acc :class vf)
          (vf0 :class vf)
          (vf1 :class vf)
