@@ -285,8 +285,15 @@ int ctr_platform_init(int enable_console) {
 #else
       s_sound_core = ctr_is_new3ds() ? 2 : 1;
 #endif
-      if (ctr_config_get("sound_core", v, sizeof(v)) && v[0] >= '0' && v[0] <= '3') {
-        s_sound_core = v[0] - '0';
+      /* (AI-assisted, cpusound) 1 or 2 (anything else: auto). Core 0 has the game logic, which
+       * the mixer at its priority would starve; core 3 isn't the app's (no thread there, no
+       * audio). player.cpp falls back from 2 to 1 and from 1 to 2. */
+      if (ctr_config_get("sound_core", v, sizeof(v)) && strcmp(v, "auto") != 0) {
+        if ((v[0] == '1' || v[0] == '2') && v[1] == '\0') {
+          s_sound_core = v[0] - '0';
+        } else {
+          printf("[ctr] config.ini: sound_core = %s ignored (1, 2 or auto)\n", v);
+        }
       }
     }
   }

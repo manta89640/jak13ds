@@ -11,7 +11,7 @@
 #                of --gk (the CIA's 124 MB memory mode, as on hardware; a .3dsx gets less)
 #
 #   --sound  audio output on (config.ini sound = on; CORE: sound_core = the mixer thread's core,
-#            default 2 on New 3DS, else 1; without --sound: sound = off unless the --ini sets it). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
+#            1 or 2, default 2 on New 3DS, else 1; without --sound: sound = off unless the --ini sets it). Also puts a placeholder sdmc:/3ds/dspfirm.cdc in place if there is none:
 #            Azahar's HLE DSP accepts any file (real hardware needs a real dump).
 #
 # DIR/Azahar.app and DIR/user/ (config/qt-config.ini with sdmc_directory=DIR/user/sdmc/).
@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
     --screenshots) SHOTS="$2"; shift 2 ;;
     --args) ARGS="$2"; HAVE_ARGS=1; shift 2 ;;
     --gl) GL=1; shift ;;
-    --sound) SOUND=auto; if [ $# -gt 1 ] && [[ "$2" =~ ^[0-3]$ ]]; then SOUND="$2"; shift; fi; shift ;;
+    --sound) SOUND=auto; if [ $# -gt 1 ] && [[ "$2" =~ ^[12]$ ]]; then SOUND="$2"; shift; fi; shift ;;
     --ini) INI="$2"; shift 2 ;;
     --game) GAME="$2"; shift 2 ;;
     --cia) CIA="$2"; shift 2 ;;
@@ -73,7 +73,7 @@ if [ -n "$INI" ]; then cp "$INI" "$CONFIG"; else : > "$CONFIG"; fi
 if [ "$HAVE_ARGS" = 1 ]; then echo "args = $ARGS" >> "$CONFIG"; fi
 if [ -n "$SOUND" ]; then
   echo "sound = on" >> "$CONFIG"
-  if [[ "$SOUND" =~ ^[0-3]$ ]]; then echo "sound_core = $SOUND" >> "$CONFIG"; fi
+  if [[ "$SOUND" =~ ^[12]$ ]]; then echo "sound_core = $SOUND" >> "$CONFIG"; fi
   if [ ! -f "$SD/3ds/dspfirm.cdc" ]; then
     printf 'placeholder DSP component for Azahar HLE audio\n' > "$SD/3ds/dspfirm.cdc"
   fi

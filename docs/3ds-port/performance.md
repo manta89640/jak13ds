@@ -1162,13 +1162,14 @@ particle density remains an upper bound.
 
 The birth callback `birth-func-random-rot` runs inline in C++: the original random draw sequence,
 matrix/vector operations and quaternion operations, with no intermediate GOAL ABI calls.
-`shield_native = off` keeps the generated GOAL callback. Replaced math functions fall back to
+Always on (the `shield_native` key was removed on Oct 29); `mips2c_native_off` naming
+`birth-func-random-rot` (or all) keeps the generated GOAL callback for debugging. Replaced math functions fall back to
 GOAL. Host verify: 4,350 birth calls (68 comparing all GOAL memory), zero differences; overall
 mips2c verify 971,892 calls, zero differences. The native birth takes about 24% fewer host
 instructions per call including verification wrapper overhead; ARM11 time is measured below.
 
 Azahar, private instance, sound on, the same binary and scripted Citadel view/camera sequence,
-six five-second windows after warmup. Original settings `shield_density=1, shield_native=off`
+six five-second windows after warmup. Original settings `shield_density=1, shield_native=off` (that key is gone now)
 vs defaults: logic 16.155 -> 15.863 ms/frame; process-particles 0.737 -> 0.435;
 sp-process-block-3d (included in process-particles) 0.463 -> 0.162; launch 0.510 -> 0.438.
 Render build 23.18 -> 22.91 ms/frame. Both 29.9 fps. These are scene totals, not shield-only

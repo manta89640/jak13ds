@@ -114,7 +114,6 @@ static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"c3l_read_buffer", "256"},
     {"particle_density", "1"}, /* (AI-assisted, j1ocean) every particle (was 0.7) */
     {"shield_density", "0.25"}, /* (AI-assisted) Citadel robot cage, 0.125..1 */
-    {"shield_native", "on"}, /* (AI-assisted) native cage birth callback; off for A/B */
     {"anim_lod", "on"},
     {"merc_lod_scale", "1"},
     {"ocean", "full"},
@@ -140,6 +139,8 @@ static const char* const ctr_cfg_removed[] = {
     /* (AI-assisted, gpu-home, Oct 29) static_cmdlists' recordings (cost more than they gave);
      * shader_resident's own key (always on with gpu_micro) */
     "static_cmdlists", "shader_resident",
+    /* (AI-assisted, cpusound, Oct 29) the Citadel cage's native birth callback: always on */
+    "shield_native",
 };
 
 /* config.ini's value of a key (its last line), NULL: no line. */

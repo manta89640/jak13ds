@@ -87,13 +87,18 @@ void Player::InitCubeb() {
   if (ctr_sound_config(&core)) {
     if (ctr_audio_init(kMixRate, kMixFrames, kMixBuffers) == 0) {
       // pinned: the mixer has the highest priority, so on the game's core (ctr_thread_create's
-      // fallback when the app got no share of core 1) it would take the CPU from the game, all of
-      // it once mixing falls behind (the game stops). No audio instead.
+      // fallback when the app got no share of core 1) it would take the CPU from the game. Core 1
+      // or 2 only (ctr_port.c), each the other's fallback.
       int err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, kMixerStack,
                                          CTR_PRIO_SOUND, core, &mMixerThread);
-      if (err != 0 && core == 2 && ctr_core1_enable() > 0) {
+      if (err != 0 && core >= 2 && ctr_core1_enable() > 0) {
         // no core 2 (Old 3DS): the system core, with the share of it the app got
         core = 1;
+        err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, kMixerStack,
+                                       CTR_PRIO_SOUND, core, &mMixerThread);
+      } else if (err != 0 && core == 1 && ctr_is_new3ds()) {
+        // (AI-assisted, cpusound) no share of core 1: core 2, which a New 3DS app always has
+        core = 2;
         err = ctr_thread_create_pinned(&Player::MixerThreadEntry, this, kMixerStack,
                                        CTR_PRIO_SOUND, core, &mMixerThread);
       }
@@ -139,8 +144,13 @@ void Player::MixerThread() {
   u32 last_dropped = 0;
   // (AI-assisted) The mixing time (not the sleeps that let sound calls have the lock) is averaged
   // over about a second as a share of the audio it makes; above kMaxShare it's logged. The mixer
-  // never holds back on purpose: audio must not break up (a guard that slept here made it stutter
-  // in Azahar). See the summary line every ~10 s.
+  // doesn't hold back while it keeps up: audio must not break up (a guard that slept here made it
+  // stutter in Azahar). See the summary line every ~10 s.
+  // (AI-assisted, cpusound) Only once it can't keep up (share above 100%: the DSP runs dry
+  // between buffers anyway) it sleeps kBehindSleepUs after each buffer. Otherwise a buffer is
+  // always free, it never waits for the DSP, and at the highest priority it would take its whole
+  // core: on core 2 the render thread, the level loader and the save worker.
+  constexpr unsigned kBehindSleepUs = 500;
   constexpr double kBufferMs = 1000.0 * kMixFrames / kMixRate;
   constexpr double kMaxShare = 0.85;
   double share = 0.0;
@@ -195,6 +205,9 @@ void Player::MixerThread() {
                    share * 100.0, mHandlers.size(), mSynth.VoiceCount());
           last_warn_ms = now;
         }
+      }
+      if (share > 1.0) {
+        ctr_thread_sleep_us(kBehindSleepUs);
       }
     }
     u32 dropped = ctr_audio_dropped_frames();

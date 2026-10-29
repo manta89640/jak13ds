@@ -57,7 +57,7 @@ code: `OPENGOAL_MIPS2C_NATIVE=0`, `OPENGOAL_BONES_NATIVE=0`, `OPENGOAL_COLLIDE_N
 
 ```ini
 sound = on                 # (user key) sound output (off: silent; it costs CPU time). On by default since Oct 16
-sound_core = auto          # CPU core of the sound mixer: 2 (Jak 1's default on New 3DS: the render thread's core, which has room; core 0 runs the game logic), 1 (Jak II's default: the system core, 40% share; its render thread fills core 2), 0
+sound_core = auto          # CPU core of the sound mixer: 2 (Jak 1's default on New 3DS: the render thread's core, which has room; core 0 runs the game logic), 1 (Jak II's default: the system core, 40% share; its render thread fills core 2). Each falls back to the other; other values: auto
 mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names (also pc-new-bones-mtx-calc). Debugging only
 perf_sections = off        # on: per-section timing in the log (slower)
 args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)
@@ -143,7 +143,6 @@ sprites = on               # world particles; the HUD is always drawn
 max_sprites = 2176         # world particles per frame. (AI-assisted) 2176 (default since Oct 12) = the game's own capacity (1920 2d + 256 3d), nothing the PS2 draws is left out; 1000 was the 30 fps era cut
 particle_density = 1       # (AI-assisted) the share of particles launched (bursts, periodic emitters; 0.1 .. 1). (j1ocean) 1 = every particle, like the PS2 (default since Oct 25; 0.7 before, now only with particles = reduced, e.g. the safe preset)
 shield_density = 0.25      # (AI-assisted) Citadel robot cage birth density (0.125..1); 1 restores the original. The smaller of this and particle_density is used. Other shield-texture effects are unchanged.
-shield_native = on         # (AI-assisted) native birth-func-random-rot; off selects generated GOAL code for A/B measurement.
 ocean = full               # the ocean: off, flat (= on, static grid), waves (+ waves near the camera), full (the PS2 ocean: the game builds its DMA, more CPU on both threads, see 3ds_build.md) (default full since Oct 16)
                            # (AI-assisted) waves: a 3 m grid out to ~45 m around the camera moves with the game's own wave heights (what boats and floating things ride), crests brighter, plus a second scrolling wave texture over all of the ocean. ~0.1 ms render thread CPU, a few hundred microseconds of GPU. Log line: [ctr] ocean waves. With depth16 (no stencil) the flat ocean beyond is lowered by the deepest trough
 ocean_texture_rate = 2     # (AI-assisted) ocean = full: the wave texture is made every nth frame (1 = every frame, up to 8); it costs the render thread 1-1.7 ms each time. Log line: [ctr] ocean full (... texture ... in N% of frames)
