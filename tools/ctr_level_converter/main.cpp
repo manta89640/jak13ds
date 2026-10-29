@@ -174,7 +174,8 @@ struct Options {
   // surfaces oriented outward and marked for back face culling (c3l::kDrawCullBack)
   bool tie_winding = true;
   // (AI-assisted) v13 vista tier (c3l::CHUNK_KIND_VISTA): the far content (low resolution tfrag,
-  // ties without a distance limit, the coarse tfrag of levels without low resolution tfrag)
+  // ties without a distance limit, the coarse tfrag of levels without low resolution tfrag; of a
+  // "spanning" level's the far cells too: VistaSpan)
   // copied into cells of vista_cell meters, the ties and coarse tfrag simplified to vista_error
   // meters (meshoptimizer, topology kept)
   bool vista = true;
@@ -184,10 +185,6 @@ struct Options {
   // vista_sloppy_error meters of error
   float vista_ratio = 0.25f;
   float vista_sloppy_error = 10.f;
-  // (AI-assisted) also an untextured copy of the vista tier (c3l::CHUNK_KIND_VISTA_FLAT): each
-  // texture's average color (alpha weighted) baked into the vertex colors, one draw per cell and
-  // mode; config vista_untextured picks it at load
-  bool vista_flat = false;
   // (AI-assisted) merc back face culling marks (c3l::kMercDrawCullBack, config cull_merc), see
   // mark_merc_cull: at least merc_cull_agree of a draw's triangles agree clearly with their vertex
   // normals (each corner's normal within acos(merc_cull_cos) of the face's side), at most
@@ -397,6 +394,21 @@ struct Converter {
       tod_colors.push_back(e);
     }
     return it->second;
+  }
+  // (AI-assisted, opt-audit S8) vertices whose alpha differs between the 8 time of day palettes
+  // (for the log). The PC blends all four channels; the 3DS's time of day blend is RGB only
+  // (c3l::TodColor has no alpha), so it shows the baked alpha at every time of day. The opaque
+  // alpha and kDrawAlpha80 marks therefore follow the baked alpha (exact for what the 3DS draws);
+  // requiring them in all 8 palettes would change no pixel and only drop marks.
+  size_t alpha_varies = 0;
+  void note_alpha(const tfrag3::PackedTimeOfDay& c, u32 color) {
+    const u32 a0 = c.read(color, 0, 3);
+    for (int p = 1; p < 8; p++) {
+      if (c.read(color, p, 3) != a0) {
+        alpha_varies++;
+        return;
+      }
+    }
   }
   // a time of day color times mul / 128 (u8 per channel)
   u32 tod_mul(u32 id, const u8 mul[3]) {
@@ -712,6 +724,7 @@ struct Converter {
       for (int c = 0; c < 4; c++) {
         sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
       }
+      note_alpha(tree.colors, v.color_index);  // (AI-assisted)
       sv.tod = tod_color(tree.colors, v.color_index);
       verts.push_back(sv);
     }
@@ -800,6 +813,7 @@ struct Converter {
         sv.rgba[c] = (u8)std::min(255, v.rgba_base[c] * tod * 2 / 255);
       }
       sv.rgba[3] = tree.time_of_day_colors.read(v.color_index, opt.palette, 3);
+      note_alpha(tree.time_of_day_colors, v.color_index);  // (AI-assisted)
       {
         // (AI-assisted) v16: the time of day color times the base color (/ 128, as above)
         u8 mul[3];
@@ -868,14 +882,180 @@ struct Converter {
   }
   // statistics: tie triangles looked at, marked for culling
   size_t orient_tris = 0, orient_culled = 0, orient_flipped = 0;
+  // (AI-assisted, opt-audit F2) triangles of surfaces (>= 8 triangles, consistently wound) left
+  // unmarked: open parts that are neither small holes nor on the ground; no clear inside by the
+  // volume test; by the rays. And open parts on the ground by height that the collision didn't
+  // confirm (surfaces).
+  size_t orient_open_tris = 0, orient_volume_tris = 0, orient_parity_tris = 0, orient_no_ground = 0;
+  // an open part of a surface up to this vector area is a small hole (game units^2: 0.25 m^2)
+  static constexpr double kHoleArea = 0.25 * 4096.0 * 4096.0;
+  static constexpr int kParityPoints = 8, kParityRays = 3;
+  static constexpr double kParityAgree = 0.8;
+
+  // (AI-assisted, opt-audit F2) the level's collision (the ground the game stands on) by 4 m
+  // column, for orient_ties' ground test; levels without collision in their .fr3 have none
+  struct GroundTri {
+    float x[3], y[3], z[3];
+  };
+  std::vector<GroundTri> ground_tris;
+  std::unordered_map<u64, std::vector<u32>> ground_cells;
+  int ground_state = -1;  // -1 not built, 0 none, 1 built
+  static constexpr float kGroundCell = 4.f * 4096.f;
+  static u64 ground_key(int cx, int cz) { return ((u64)(u32)cx << 32) | (u32)cz; }
+  bool has_ground() {
+    if (ground_state < 0) {
+      ground_state = 0;
+      const auto& v = level->collision.vertices;
+      for (size_t i = 0; i + 3 <= v.size(); i += 3) {
+        GroundTri t;
+        float lo[2] = {1e30f, 1e30f}, hi[2] = {-1e30f, -1e30f};
+        for (int k = 0; k < 3; k++) {
+          t.x[k] = v[i + k].x;
+          t.y[k] = v[i + k].y;
+          t.z[k] = v[i + k].z;
+          lo[0] = std::min(lo[0], t.x[k]);
+          hi[0] = std::max(hi[0], t.x[k]);
+          lo[1] = std::min(lo[1], t.z[k]);
+          hi[1] = std::max(hi[1], t.z[k]);
+        }
+        const int x0 = (int)std::floor(lo[0] / kGroundCell), x1 = (int)std::floor(hi[0] / kGroundCell);
+        const int z0 = (int)std::floor(lo[1] / kGroundCell), z1 = (int)std::floor(hi[1] / kGroundCell);
+        if ((s64)(x1 - x0 + 1) * (z1 - z0 + 1) > 4096) {
+          continue;  // (a huge triangle: none expected)
+        }
+        const u32 id = (u32)ground_tris.size();
+        ground_tris.push_back(t);
+        for (int cx = x0; cx <= x1; cx++) {
+          for (int cz = z0; cz <= z1; cz++) {
+            ground_cells[ground_key(cx, cz)].push_back(id);
+          }
+        }
+      }
+      ground_state = ground_tris.empty() ? 0 : 1;
+    }
+    return ground_state == 1;
+  }
+  // is there ground (a collision triangle) at (x, z) with its height in [lo, hi]
+  bool ground_between(float x, float z, float lo, float hi) {
+    auto it = ground_cells.find(ground_key((int)std::floor(x / kGroundCell),
+                                           (int)std::floor(z / kGroundCell)));
+    if (it == ground_cells.end()) {
+      return false;
+    }
+    for (u32 id : it->second) {
+      const auto& t = ground_tris[id];
+      const double d = (double)(t.x[1] - t.x[0]) * (t.z[2] - t.z[0]) -
+                       (double)(t.x[2] - t.x[0]) * (t.z[1] - t.z[0]);
+      if (std::abs(d) < 1e-6) {
+        continue;  // a wall seen from above
+      }
+      const double u = ((double)(x - t.x[0]) * (t.z[2] - t.z[0]) -
+                        (double)(t.x[2] - t.x[0]) * (z - t.z[0])) / d;
+      const double v = ((double)(t.x[1] - t.x[0]) * (z - t.z[0]) -
+                        (double)(x - t.x[0]) * (t.z[1] - t.z[0])) / d;
+      constexpr double e = 1e-3;
+      if (u < -e || v < -e || u + v > 1 + e) {
+        continue;
+      }
+      const double y = t.y[0] + u * (t.y[1] - t.y[0]) + v * (t.y[2] - t.y[0]);
+      if (y >= lo && y <= hi) {
+        return true;
+      }
+    }
+    return false;
+  }
+  /*!
+   * (AI-assisted, opt-audit F2) Does the closed surface `tris` (the first `n` are the surface's
+   * own triangles; `sign` +1: their winding faces outward, -1: inward) hold the space behind its
+   * faces: from kParityPoints points just behind spread triangles, kParityRays rays each, at least
+   * kParityAgree of the rays cross it an odd number of times.
+   */
+  static bool encloses(const std::vector<std::array<std::array<double, 3>, 3>>& tris,
+                       size_t n,
+                       double sign) {
+    // directions spread over the sphere (a golden-angle spiral, none along an axis)
+    static const std::vector<std::array<double, 3>> dirs = [] {
+      std::vector<std::array<double, 3>> d;
+      const int m = kParityPoints * kParityRays;
+      for (int i = 0; i < m; i++) {
+        const double y = 1 - (i + 0.5) * 2.0 / m;
+        const double r = std::sqrt(std::max(0.0, 1 - y * y));
+        const double a = i * 2.399963229728653 + 0.3;
+        d.push_back({r * std::cos(a), y, r * std::sin(a)});
+      }
+      return d;
+    }();
+    auto sub = [](const std::array<double, 3>& a, const std::array<double, 3>& b) {
+      return std::array<double, 3>{a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+    };
+    auto cross = [](const std::array<double, 3>& a, const std::array<double, 3>& b) {
+      return std::array<double, 3>{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                                   a[0] * b[1] - a[1] * b[0]};
+    };
+    auto dot = [](const std::array<double, 3>& a, const std::array<double, 3>& b) {
+      return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    int rays = 0, odd = 0;
+    for (int s = 0; s < kParityPoints; s++) {
+      // the next non-degenerate triangle from an even spread of the surface's
+      size_t ti = (size_t)s * n / kParityPoints;
+      std::array<double, 3> nrm{};
+      double len = 0;
+      for (size_t tries = 0; tries < n; tries++, ti = (ti + 1) % n) {
+        nrm = cross(sub(tris[ti][1], tris[ti][0]), sub(tris[ti][2], tris[ti][0]));
+        len = std::sqrt(dot(nrm, nrm));
+        if (len > 1.0) {
+          break;
+        }
+      }
+      if (len <= 1.0) {
+        return false;
+      }
+      // behind it by 2 cm at most (a tenth of its size for small triangles)
+      const double eps = std::clamp(0.1 * std::sqrt(0.5 * len), 4.0, 0.02 * 4096.0);
+      std::array<double, 3> o;
+      for (int k = 0; k < 3; k++) {
+        o[k] = (tris[ti][0][k] + tris[ti][1][k] + tris[ti][2][k]) / 3 - sign * nrm[k] / len * eps;
+      }
+      for (int r = 0; r < kParityRays; r++) {
+        const auto& d = dirs[s * kParityRays + r];
+        int hits = 0;
+        for (const auto& t : tris) {
+          // Moller-Trumbore
+          const auto e1 = sub(t[1], t[0]), e2 = sub(t[2], t[0]);
+          const auto p = cross(d, e2);
+          const double det = dot(e1, p);
+          if (std::abs(det) <= 1e-12 * std::sqrt(dot(e1, e1) * dot(e2, e2))) {
+            continue;
+          }
+          const double inv = 1.0 / det;
+          const auto sv = sub(o, t[0]);
+          const double u = dot(sv, p) * inv;
+          if (u < 0 || u > 1) {
+            continue;
+          }
+          const auto q = cross(sv, e1);
+          const double v = dot(d, q) * inv;
+          if (v < 0 || u + v > 1) {
+            continue;
+          }
+          hits += dot(e2, q) * inv > 0;
+        }
+        rays++;
+        odd += hits & 1;
+      }
+    }
+    return rays && odd >= kParityAgree * rays;
+  }
   /*!
    * (AI-assisted) The tie triangles [first, end): per visibility group (up to 8 instances), the
    * cullable triangles welded by position into surfaces (edges shared by exactly two triangles),
    * each surface oriented consistently from one of its triangles (the PS2 strips start either
-   * way). A surface that is closed enough (at most 10% open edges, no edge with three or more
-   * triangles, no contradiction) and has a clear inside (signed volume at least half of its
-   * unsigned volume) gets its triangles turned to face outward and marked: their back faces can't
-   * be seen from outside, and from inside they are the backs of the walls.
+   * way). A surface that is closed (no edge with three or more triangles, no contradiction; its
+   * open edges only small holes or on the ground, see the F2 note inside) and has a clear inside
+   * (signed volume at least half of its unsigned volume, rays from behind its faces cross it an
+   * odd number of times) gets its triangles turned to face outward and marked: their back faces
+   * can't be seen from outside, and from inside they are the backs of the walls.
    */
   void orient_ties(size_t first, size_t end) {
     std::map<u16, std::vector<u32>> groups;
@@ -946,7 +1126,7 @@ struct Converter {
         comp[seed] = cid;
         bool bad = false;
         size_t open = 0, total = 0;
-        float open_top = -1e30f;  // the highest corner of an open edge
+        std::vector<u64> open_edges;  // (AI-assisted) the open edges (one triangle each)
         std::set<u64> seen;
         while (!stack.empty()) {
           const u32 t = stack.back();
@@ -959,7 +1139,7 @@ struct Converter {
             total++;
             if (list.size() == 1) {
               open++;
-              open_top = std::max({open_top, pos[(u32)(key >> 32)][1], pos[(u32)key][1]});
+              open_edges.push_back(key);
               continue;
             }
             if (list.size() > 2) {
@@ -981,8 +1161,22 @@ struct Converter {
             }
           }
         }
-        // open edges allowed only at the bottom (on the ground: a rock or a house standing on the
-        // terrain), up to half of the edges
+        if (bad || members.size() < 8 || open * 2 > total) {
+          continue;
+        }
+        // (AI-assisted, opt-audit F2) A real enclosure test. Before, up to 10% open edges anywhere
+        // passed and the volume test passes for any consistently wound sheet: tessellated curved
+        // walls, tunnel sections and domes (lavatube, citadel) were turned to face their convex
+        // side and culled from the concave side, where the camera is. Now the open edges, joined
+        // at their corners into boundary parts, must each be either
+        //  - on the ground: below 15% of the surface's height (+ 0.5 m) and, where the level has
+        //    collision, every corner on or under the ground (a rock or a house on the terrain, not
+        //    a canopy, an awning or a door), or
+        //  - a small hole: at most kHoleArea of vector area (welding cracks and slits are ~0; the
+        //    ends of a tube, the rim of a sheet or a door are not).
+        // Those parts are closed with fans, and the closed surface must have a clear inside: the
+        // signed volume test as before, and rays from just behind sampled faces must leave through
+        // it an odd number of times (kParityRays of them, kParityAgree of their results).
         float ymin = 1e30f, ymax = -1e30f;
         for (u32 t : members) {
           for (int c = 0; c < 3; c++) {
@@ -990,11 +1184,117 @@ struct Converter {
             ymax = std::max(ymax, pos[w[t][c]][1]);
           }
         }
-        const bool open_ok = open * 10 <= total ||
-                             (open * 2 <= total &&
-                              open_top <= ymin + 0.15f * (ymax - ymin) + 0.5f * 4096.f);
-        if (bad || members.size() < 8 || !open_ok) {
+        const float base_y = ymin + 0.15f * (ymax - ymin) + 0.5f * 4096.f;
+        // the open edges in the surface's consistent winding (a -> b as its triangle runs it)
+        std::vector<std::array<u32, 2>> bedges;
+        bedges.reserve(open_edges.size());
+        std::unordered_map<u32, u32> bpart;  // corner -> union-find parent (corners of open edges)
+        auto find = [&](u32 x) {
+          while (true) {
+            const u32 p = bpart[x];
+            if (p == x) {
+              return x;
+            }
+            const u32 g = bpart[p];
+            bpart[x] = g;
+            x = g;
+          }
+        };
+        for (u64 key : open_edges) {
+          const u32 lo = (u32)(key >> 32), hi = (u32)key;
+          const auto [t, d] = edges[key][0];
+          const bool from_lo = d != (flip[t] != 0);
+          bedges.push_back(from_lo ? std::array<u32, 2>{lo, hi} : std::array<u32, 2>{hi, lo});
+          bpart.emplace(lo, lo);
+          bpart.emplace(hi, hi);
+        }
+        for (const auto& e : bedges) {
+          const u32 a = find(e[0]), b = find(e[1]);
+          if (a != b) {
+            bpart[a] = b;
+          }
+        }
+        struct Part {
+          double area[3] = {0, 0, 0};  // vector area (twice), around `o`
+          double cen[3] = {0, 0, 0};
+          u32 o = 0, n = 0;
+          float top = -1e30f;
+          std::vector<u32> corners;
+        };
+        std::unordered_map<u32, Part> parts;
+        for (const auto& [c, p] : bpart) {
+          (void)p;
+          Part& pt = parts[find(c)];
+          if (pt.corners.empty()) {
+            pt.o = c;
+          }
+          pt.corners.push_back(c);
+          pt.top = std::max(pt.top, pos[c][1]);
+          for (int k = 0; k < 3; k++) {
+            pt.cen[k] += pos[c][k];
+          }
+        }
+        for (const auto& e : bedges) {
+          Part& pt = parts[find(e[0])];
+          double a[3], b[3];
+          for (int k = 0; k < 3; k++) {
+            a[k] = (double)pos[e[0]][k] - pos[pt.o][k];
+            b[k] = (double)pos[e[1]][k] - pos[pt.o][k];
+          }
+          pt.area[0] += a[1] * b[2] - a[2] * b[1];
+          pt.area[1] += a[2] * b[0] - a[0] * b[2];
+          pt.area[2] += a[0] * b[1] - a[1] * b[0];
+        }
+        bool parts_ok = true;
+        for (auto& [r, pt] : parts) {
+          (void)r;
+          for (double& c : pt.cen) {
+            c /= (double)pt.corners.size();
+          }
+          const double area = 0.5 * std::sqrt(pt.area[0] * pt.area[0] + pt.area[1] * pt.area[1] +
+                                               pt.area[2] * pt.area[2]);
+          if (area <= kHoleArea) {
+            continue;  // a small hole
+          }
+          bool base = pt.top <= base_y;
+          if (base && has_ground()) {
+            // every corner (up to 64 of them, spread) on or under the ground: the ground from
+            // 1.5 m below it to 1 m above the surface's top (no camera gets under it)
+            const size_t step = std::max<size_t>(1, pt.corners.size() / 64);
+            for (size_t i = 0; i < pt.corners.size() && base; i += step) {
+              const auto& c = pos[pt.corners[i]];
+              base = ground_between(c[0], c[2], c[1] - 1.5f * 4096.f, ymax + 1.f * 4096.f);
+            }
+            if (!base) {
+              orient_no_ground++;
+            }
+          }
+          if (!base) {
+            parts_ok = false;
+            break;
+          }
+        }
+        if (!parts_ok) {
+          orient_open_tris += members.size();
           continue;
+        }
+        // the closed surface: the triangles (consistent winding) and the parts' fans
+        std::vector<std::array<std::array<double, 3>, 3>> closed;
+        closed.reserve(members.size() + bedges.size());
+        for (u32 t : members) {
+          std::array<std::array<double, 3>, 3> tri;
+          for (int c = 0; c < 3; c++) {
+            const u32 v = w[t][flip[t] && c ? 3 - c : c];
+            tri[c] = {pos[v][0], pos[v][1], pos[v][2]};
+          }
+          closed.push_back(tri);
+        }
+        for (const auto& e : bedges) {
+          const Part& pt = parts[find(e[0])];
+          // the fan runs the edge the other way: b -> a -> the part's center
+          closed.push_back({std::array<double, 3>{pos[e[1]][0], pos[e[1]][1], pos[e[1]][2]},
+                            std::array<double, 3>{pos[e[0]][0], pos[e[0]][1], pos[e[0]][2]},
+                            std::array<double, 3>{pt.cen[0], pt.cen[1], pt.cen[2]}});
         }
         // signed and unsigned volume around the surface's centroid
         double cen[3] = {0, 0, 0};
@@ -1009,16 +1309,11 @@ struct Converter {
           c /= 3.0 * members.size();
         }
         double vs = 0, va = 0;
-        for (u32 t : members) {
+        for (const auto& tri : closed) {
           double p[3][3];
           for (int c = 0; c < 3; c++) {
             for (int k = 0; k < 3; k++) {
-              p[c][k] = pos[w[t][c]][k] - cen[k];
-            }
-          }
-          if (flip[t]) {
-            for (int k = 0; k < 3; k++) {
-              std::swap(p[1][k], p[2][k]);
+              p[c][k] = tri[c][k] - cen[k];
             }
           }
           const double v = p[0][0] * (p[1][1] * p[2][2] - p[1][2] * p[2][1]) -
@@ -1028,6 +1323,11 @@ struct Converter {
           va += std::abs(v);
         }
         if (va <= 0 || std::abs(vs) < 0.5 * va) {
+          orient_volume_tris += members.size();
+          continue;
+        }
+        if (!encloses(closed, members.size(), vs < 0 ? -1.0 : 1.0)) {
+          orient_parity_tris += members.size();
           continue;
         }
         const u8 inward = vs < 0 ? 1 : 0;
@@ -1401,6 +1701,7 @@ struct Converter {
       for (int c = 0; c < 4; c++) {
         sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
       }
+      note_alpha(tree.colors, v.color_index);  // (AI-assisted)
       sv.tod = tod_color(tree.colors, v.color_index);
       verts.push_back(sv);
     }
@@ -1538,6 +1839,7 @@ struct Converter {
             for (int c = 0; c < 4; c++) {
               sv.rgba[c] = tree.colors.read(v.color_index, opt.palette, c);
             }
+            note_alpha(tree.colors, v.color_index);  // (AI-assisted)
             sv.tod = tod_color(tree.colors, v.color_index);
             it = remap.emplace(vi, verts.size()).first;
             verts.push_back(sv);
@@ -1656,6 +1958,7 @@ struct MercOut {
          cull_flipped = 0;
   // why draws weren't marked (blended / cut-out texture, open edges (sheets), normals)
   size_t cull_no_mode = 0, cull_no_surface = 0, cull_no_normals = 0;
+  size_t cull_no_blerc = 0;  // (AI-assisted, opt-audit M5) draws using blend shape vertices
 };
 
 /*!
@@ -1908,17 +2211,31 @@ bool gen_merc_lod(const c3l::MercModel& mm,
  * keeps single sheets (capes, cloth hems, flags, leaves: seen from both sides on the PS2, which
  * doesn't cull) and the parts around holes unculled. Envmap draws repeat a draw's triangles and
  * take its mark. Was a closed surface test like the ties' (orient_ties) first: merc models are
- * rarely watertight (2% of Jak's and 13% of Snowy's merc triangles passed).
+ * rarely watertight (2% of Jak's and 13% of Snowy's merc triangles passed). (AI-assisted) Draws
+ * using a vertex the blend shapes move are never marked (opt-audit M5).
  */
 void mark_merc_cull(const c3l::MercModel& mm,
                     const std::vector<c3l::MercVertex>& verts,
                     Converter& cv,
                     MercOut* out) {
-  (void)mm;
   const Options& opt = cv.opt;
   const size_t d0 = mm.first_draw, d1 = out->draws.size();
   if (opt.merc_cull_agree <= 0.f || d1 <= d0) {
     return;
+  }
+  // (AI-assisted, opt-audit M5) the vertices the blend shapes move (faces: mouth, eyelids): a draw
+  // using one is never marked. Its triangles are oriented by the bind pose, and an expression can
+  // turn one away from the camera where the PS2 and PC draw both sides.
+  std::vector<u8> blerc_moved;
+  for (u32 b = mm.blerc_first; b < mm.blerc_first + mm.blerc_count; b++) {
+    const auto& bv = out->blerc_verts[b];
+    for (u32 k = 0; k < bv.dest_count; k++) {
+      const u16 vi = out->blerc_dests[bv.first_dest + k];
+      if (vi >= blerc_moved.size()) {
+        blerc_moved.resize(vi + 1, 0);
+      }
+      blerc_moved[vi] = 1;
+    }
   }
   // texture alpha against the runtime's merc alpha test (CtrMercRenderer: GS alpha < 17 dropped)
   auto tex_ok = [&](u16 tex) {
@@ -1976,6 +2293,17 @@ void mark_merc_cull(const c3l::MercModel& mm,
     if (mode.get_ab_enable() || !mode.get_depth_write_enable() || !it->second || !n) {
       out->cull_no_mode++;
       continue;
+    }
+    if (!blerc_moved.empty()) {
+      bool moved = false;
+      for (u32 i = d.first_index; i < d.first_index + d.index_count && !moved; i++) {
+        const u16 vi = out->indices[i];
+        moved = vi < blerc_moved.size() && blerc_moved[vi];
+      }
+      if (moved) {
+        out->cull_no_blerc++;
+        continue;
+      }
     }
     size_t clear = 0, open = 0;
     std::vector<u8> turn(n, 0);
@@ -2362,7 +2690,8 @@ void convert_merc(const tfrag3::MercModelGroup& group, Converter& cv, MercOut* o
     // (AI-assisted) a generated low LOD for "<base>-lod0" without lower LODs (not with blend
     // shapes or rewritten vertices: those move per frame)
     // (not Jak and Daxter: always close and in view, their look stays the PS2's; (AI-assisted,
-    // j1ocean) not the pickups: power cells, scout flies, orbs always full detail)
+    // j1ocean) not the pickups: power cells, scout flies, orbs always full detail; (opt-audit M6)
+    // nor the far views and Jak II's pickups and gun: c3l::merc_gen_lod_exempt)
     const auto p = model.name.rfind("-lod0");
     if (cv.opt.gen_lod_ratio > 0.f && p != std::string::npos && p + 5 == model.name.size() &&
         model.name.rfind("eichar-", 0) != 0 && model.name.rfind("sidekick-", 0) != 0 &&
@@ -3350,6 +3679,21 @@ float stream_class_cell(const Options& opt, int nc) {
   return nc < (int)opt.stream_class_cells.size() ? opt.stream_class_cells[nc] : opt.stream_cell;
 }
 
+// (AI-assisted, opt-audit F1) the vista tier of a level with low resolution tfrag whose coarse
+// tfrag reaches far past its playable area (see the vista tier in convert)
+constexpr double kSpanFar = 1000;   // meters past the playable area: a spanning level
+constexpr double kSpanDraw = 450;   // a coarse cell farther from a playable point gets a copy
+                                    // (0.9 x the default draw_distance: its hysteresis)
+constexpr double kSpanCell = 100;   // lowres over copied coarse tfrag: by columns of this (m)
+constexpr float kSpanDy = 30.f;     // ... within this of their heights (m)
+struct VistaSpan {
+  bool spanning = false;
+  double reach_m = 0;  // how far the coarse tfrag reaches past the playable box
+  const char* play_source = "";
+  size_t coarse_plans = 0, coarse_src_tris = 0, coarse_tris = 0;
+  size_t lowres_dropped = 0, lowres_moved = 0;
+};
+
 bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   Options opt = opt_in;
   if (opt.game.empty()) {
@@ -3727,7 +4071,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   // (AI-assisted) the vista tier (Options::vista): copies of the far content, in large cells
   const size_t normal_plans = plans.size();
-  size_t vista_src_tris = 0, vista_tris = 0, vista_flat_tris = 0;
+  size_t vista_src_tris = 0, vista_tris = 0;
+  VistaSpan span;  // (AI-assisted, opt-audit F1)
   if (opt.vista && !opt.merc_only) {
     bool has_lowres = false;
     for (const auto& cp : plans) {
@@ -3735,35 +4080,131 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     const float vcell = opt.vista_cell * 4096.f;
     std::map<CellKey, std::vector<u32>> vcells;
-    // (AI-assisted) vista_flat: the untextured copies' cells, and the textures' average colors
-    // (alpha weighted, 0..255; untextured: 128 = the vertex color unchanged)
-    std::map<CellKey, std::vector<u32>> fcells;
-    std::map<u16, std::array<float, 3>> tex_avg;
-    auto avg_color = [&](u16 tex) {
-      auto it = tex_avg.find(tex);
-      if (it != tex_avg.end()) {
-        return it->second;
-      }
-      std::array<float, 3> c = {128.f, 128.f, 128.f};
-      if (tex != 0xffff) {
-        const auto& t = cv.level->textures.at(cv.tex_order.at(tex));
-        double sum[3] = {0, 0, 0}, w = 0, plain[3] = {0, 0, 0};
-        for (u32 p : t.data) {
-          const double a = (p >> 24) & 0xff;
-          for (int k = 0; k < 3; k++) {
-            const double v = (p >> (8 * k)) & 0xff;
-            sum[k] += v * a;
-            plain[k] += v;
+    // (AI-assisted, opt-audit F1) Levels with low resolution tfrag got no vista copy of their
+    // coarse tfrag: beyond the draw distance it was cut, and the lowres (inside the level's own
+    // detail bounds) only came back beyond draw * 1.1 + 2 x the largest tfrag chunk radius. In
+    // finalboss (a 15 x 10 km landscape around a 1 km arena, chunks up to 417 m) nothing was
+    // drawn from 500 m to ~1.5 km. A level whose coarse tfrag reaches more than kSpanFar past
+    // the playable area (its collision; ties without collision) is a "spanning" level: there
+    // - every coarse cell that can be beyond kSpanDraw (+ its radius) of a playable point is
+    //   copied as well, simplified only to vista_error (no sloppy step: it is already the PS2's
+    //   coarsest version, ~1 vertex per 500 m^2 in finalboss), and
+    // - the lowres triangles over the same ground (a copied coarse triangle in their
+    //   kSpanCell column within kSpanDy of its height) are left out of the vista tier, and the
+    //   other lowres triangles within a copied coarse cell's sphere are drawn with that cell's
+    //   copy (its run's vis): from where the cell leaves the draw distance on, not only beyond
+    //   the lowres rule's ~1.5 km.
+    // Such a level is never seen in far mode (its bounds hold its neighbours), so the lowres
+    // left out isn't missed there; the runtime is unchanged.
+    std::vector<u8> coarse_copy(normal_plans, 0);
+    std::vector<std::array<double, 4>> plan_sphere(normal_plans, {0, 0, 0, 0});
+    for (size_t pi = 0; pi < normal_plans; pi++) {
+      double lo[3] = {1e30, 1e30, 1e30}, hi[3] = {-1e30, -1e30, -1e30};
+      for (u32 t : plans[pi].tris) {
+        for (u32 vi : cv.tris[t].v) {
+          const double p[3] = {cv.verts[vi].x, cv.verts[vi].y, cv.verts[vi].z};
+          for (int c = 0; c < 3; c++) {
+            lo[c] = std::min(lo[c], p[c]);
+            hi[c] = std::max(hi[c], p[c]);
           }
-          w += a;
-        }
-        for (int k = 0; k < 3; k++) {
-          c[k] = (float)(w > 0 ? sum[k] / w : (t.data.empty() ? 128.0 : plain[k] / t.data.size()));
         }
       }
-      tex_avg[tex] = c;
-      return c;
+      if (!plans[pi].tris.empty()) {
+        plan_sphere[pi] = {(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2,
+                           0.5 * std::sqrt((hi[0] - lo[0]) * (hi[0] - lo[0]) +
+                                           (hi[1] - lo[1]) * (hi[1] - lo[1]) +
+                                           (hi[2] - lo[2]) * (hi[2] - lo[2]))};
+      }
+    }
+    auto plan_is = [&](size_t pi, int want_tier, int want_kind) {
+      const auto& k = plans[pi].key;
+      return std::get<0>(k) / 4 % 16 == want_tier &&
+             (std::get<4>(k) & ~kEnvCellBit) == want_kind && !plans[pi].tris.empty();
     };
+    if (has_lowres) {
+      // the playable points: the collision's corners (or the ties'), at most ~4096
+      std::vector<std::array<double, 3>> play;
+      if (cv.has_ground()) {
+        span.play_source = "collision";
+        const size_t step = std::max<size_t>(1, cv.ground_tris.size() / 4096);
+        for (size_t i = 0; i < cv.ground_tris.size(); i += step) {
+          const auto& g = cv.ground_tris[i];
+          play.push_back({g.x[0], g.y[0], g.z[0]});
+        }
+      } else {
+        span.play_source = "ties";
+        for (size_t pi = 0; pi < normal_plans; pi++) {
+          if (plan_is(pi, 0, 1)) {
+            play.push_back({plan_sphere[pi][0], plan_sphere[pi][1], plan_sphere[pi][2]});
+          }
+        }
+      }
+      double plo[3] = {1e30, 1e30, 1e30}, phi[3] = {-1e30, -1e30, -1e30};
+      for (const auto& p : play) {
+        for (int c = 0; c < 3; c++) {
+          plo[c] = std::min(plo[c], p[c]);
+          phi[c] = std::max(phi[c], p[c]);
+        }
+      }
+      // how far the coarse tfrag reaches past the playable box
+      for (size_t pi = 0; pi < normal_plans && !play.empty(); pi++) {
+        if (!plan_is(pi, 2, 0)) {
+          continue;
+        }
+        const auto& s = plan_sphere[pi];
+        double d2 = 0;
+        for (int c = 0; c < 3; c++) {
+          const double o = s[c] < plo[c] ? plo[c] - s[c] : (s[c] > phi[c] ? s[c] - phi[c] : 0);
+          d2 += o * o;
+        }
+        span.reach_m = std::max(span.reach_m, (std::sqrt(d2) + s[3]) / 4096.0);
+      }
+      span.spanning = span.reach_m > kSpanFar;
+      if (span.spanning) {
+        for (size_t pi = 0; pi < normal_plans; pi++) {
+          if (!plan_is(pi, 2, 0)) {
+            continue;
+          }
+          const auto& s = plan_sphere[pi];
+          const double lim = kSpanDraw * 4096.0 + s[3];
+          for (const auto& p : play) {
+            const double dx = p[0] - s[0], dy = p[1] - s[1], dz = p[2] - s[2];
+            if (dx * dx + dy * dy + dz * dz > lim * lim) {
+              coarse_copy[pi] = 1;
+              span.coarse_plans++;
+              break;
+            }
+          }
+        }
+      }
+    }
+    // (opt-audit F1) the copied coarse tfrag's height range per kSpanCell column
+    const double scell = kSpanCell * 4096.0;
+    std::unordered_map<u64, std::array<float, 2>> coarse_cols;
+    auto col_key = [&](double x, double z) {
+      return ((u64)(u32)(int)std::floor(x / scell) << 32) | (u32)(int)std::floor(z / scell);
+    };
+    if (span.spanning) {
+      for (size_t pi = 0; pi < normal_plans; pi++) {
+        if (!coarse_copy[pi]) {
+          continue;
+        }
+        for (u32 t : plans[pi].tris) {
+          double c[3] = {0, 0, 0};
+          for (u32 vi : cv.tris[t].v) {
+            c[0] += cv.verts[vi].x / 3;
+            c[1] += cv.verts[vi].y / 3;
+            c[2] += cv.verts[vi].z / 3;
+          }
+          auto [it, fresh] =
+              coarse_cols.emplace(col_key(c[0], c[2]), std::array<float, 2>{(float)c[1], (float)c[1]});
+          if (!fresh) {
+            it->second[0] = std::min(it->second[0], (float)c[1]);
+            it->second[1] = std::max(it->second[1], (float)c[1]);
+          }
+        }
+      }
+    }
     for (size_t pi = 0; pi < normal_plans && pi < 0xffff; pi++) {
       const auto& cp = plans[pi];
       const int tier = std::get<0>(cp.key) / 4 % 16, detail = std::get<0>(cp.key) % 4;
@@ -3771,32 +4212,61 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       const bool lowres = tier == 3;
       // (AI-assisted, streaming) not the near chunks (near versions only)
       const bool landmark = tier == 0 && kind == 1 && detail == 0 && std::get<0>(cp.key) < 1024;
-      const bool coarse = tier == 2 && kind == 0 && !has_lowres;
+      const bool coarse = tier == 2 && kind == 0 && (!has_lowres || coarse_copy[pi]);
       if (!lowres && !landmark && !coarse) {
         continue;
       }
       // by vista cell and draw: simplified on their own (each copy stays one source chunk's)
       // (AI-assisted, j2vis) and by toggled prototype (v20: its copies are runs of their own too;
       // 0xffff for all the others, so their groups don't change)
-      std::map<std::tuple<int, int, u32, u16>, std::vector<u32>> groups;
+      // (AI-assisted, opt-audit F1) and by the chunk whose decisions draw it (its run's vis: the
+      // source chunk, or for a spanning level's lowres the copied coarse cell around it)
+      std::map<std::tuple<int, int, u32, u16, u32>, std::vector<u32>> groups;
       for (u32 t : cp.tris) {
         const auto& tr = cv.tris[t];
         if (tr.lod == c3l::kRunLodNear) {
           continue;  // (AI-assisted) v17: the vista copies the far versions
         }
-        float cx = 0, cz = 0;
+        float cx = 0, cy = 0, cz = 0;
         for (int k = 0; k < 3; k++) {
           cx += cv.verts[tr.v[k]].x / 3;
+          cy += cv.verts[tr.v[k]].y / 3;
           cz += cv.verts[tr.v[k]].z / 3;
+        }
+        u32 src = (u32)pi;
+        if (lowres && span.spanning) {
+          auto it = coarse_cols.find(col_key(cx, cz));
+          if (it != coarse_cols.end() && cy >= it->second[0] - kSpanDy * 4096.f &&
+              cy <= it->second[1] + kSpanDy * 4096.f) {
+            span.lowres_dropped++;
+            continue;
+          }
+          double best = 1e300;
+          for (size_t qi = 0; qi < normal_plans && qi < 0xffff; qi++) {
+            if (!coarse_copy[qi]) {
+              continue;
+            }
+            const auto& s = plan_sphere[qi];
+            const double d2 = (cx - s[0]) * (cx - s[0]) + (cy - s[1]) * (cy - s[1]) +
+                              (cz - s[2]) * (cz - s[2]);
+            if (d2 < s[3] * s[3] && d2 < best) {
+              best = d2;
+              src = (u32)qi;
+            }
+          }
+          span.lowres_moved += src != (u32)pi;
         }
         // (AI-assisted) v15: with the draw key and vertices from before the atlas (welded by
         // position below: the atlas copies' shifted texture coordinates would mix)
         groups[{(int)std::floor(cx / vcell), (int)std::floor(cz / vcell),
-                tr.orig_key == UINT32_MAX ? tr.draw_key : tr.orig_key, tr.proto}]
+                tr.orig_key == UINT32_MAX ? tr.draw_key : tr.orig_key, tr.proto, src}]
             .push_back(t);
       }
       for (auto& [gk, ids] : groups) {
         vista_src_tris += ids.size();
+        if (coarse_copy[pi]) {
+          span.coarse_src_tris += ids.size();
+        }
         // (AI-assisted) Keep the rendered attributes in the weld key. Position-only welding
         // erased UV and lighting seams, even when no triangles were simplified.
         std::map<std::array<u32, 7>, u32> weld;
@@ -3825,7 +4295,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                                             meshopt_SimplifyErrorAbsolute, nullptr);
           out_idx.resize(n);
           const size_t want = (size_t)(idx.size() * opt.vista_ratio) / 3 * 3;
-          if (n > want && want >= 3 && opt.vista_sloppy_error > 0) {
+          // (opt-audit F1: not a spanning level's coarse tfrag)
+          if (n > want && want >= 3 && opt.vista_sloppy_error > 0 && !coarse_copy[pi]) {
             float ext = 1.f;
             for (int c = 0; c < 3; c++) {
               float lo = 1e30f, hi = -1e30f;
@@ -3847,9 +4318,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           }
         }
         // new vertices (their quantizing grid is the vista cell's alone)
-        std::unordered_map<u32, u32> made, made_flat;
-        // (AI-assisted) vista_flat: the copies' draw key (untextured, the draw mode without its
-        // texture parts: clamp, filter, tcc, alpha test) and color
+        std::unordered_map<u32, u32> made;
         u32 src_key_id = cv.tris[ids[0]].orig_key == UINT32_MAX ? cv.tris[ids[0]].draw_key
                                                                    : cv.tris[ids[0]].orig_key;
         if (cv.draw_keys[src_key_id].env != 0xffff) {
@@ -3858,15 +4327,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           nk.env = 0xffff;
           src_key_id = cv.key_id(nk);
         }
-        const DrawKey src_key = cv.draw_keys[src_key_id];
-        constexpr u32 kTextureModeBits = 0x00E7FFE0;  // bits 5-18, 21-23
-        const u32 flat_key =
-            opt.vista_flat
-                ? cv.key_id(DrawKey{src_key.mode & ~kTextureModeBits, 0xffff,
-                                    (u16)(c3l::CHUNK_KIND_VISTA_FLAT - c3l::CHUNK_KIND_TFRAG)})
-                : 0;
-        const std::array<float, 3> flat_rgb =
-            opt.vista_flat ? avg_color(src_key.texture) : std::array<float, 3>{128.f, 128.f, 128.f};
         for (size_t i = 0; i + 2 < out_idx.size(); i += 3) {
           SrcTri nt = cv.tris[ids[0]];
           nt.draw_key = src_key_id;  // (AI-assisted) not the atlas's
@@ -3885,51 +4345,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           }
           nt.detail = 0;
           nt.tier = c3l::kVistaTier;
-          nt.vis = (u16)pi;  // the source chunk
+          nt.vis = (u16)std::get<4>(gk);  // the source chunk (opt-audit F1: or its coarse cell)
           vcells[std::make_tuple((int)(4 * c3l::kVistaTier), std::get<0>(gk), 0, std::get<1>(gk),
                                  (int)(c3l::CHUNK_KIND_VISTA - c3l::CHUNK_KIND_TFRAG))]
               .push_back((u32)cv.tris.size());
           cv.tris.push_back(nt);
           vista_tris++;
-          if (opt.vista_flat) {
-            // (AI-assisted) the untextured copy: textured output = texture * vertex / 128
-            SrcTri ft = nt;
-            for (int k = 0; k < 3; k++) {
-              const u32 r = out_idx[i + k];
-              auto [it, fresh] = made_flat.emplace(r, (u32)cv.verts.size());
-              if (fresh) {
-                SrcVertex v = cv.verts[rep_src[r]];
-                for (int c = 0; c < 3; c++) {
-                  v.rgba[c] = (u8)std::clamp((int)std::lround(v.rgba[c] * flat_rgb[c] / 128.f), 0,
-                                             255);
-                }
-                {
-                  // (AI-assisted) v16: the time of day color times the texture's color
-                  u8 mul[3];
-                  for (int c = 0; c < 3; c++) {
-                    mul[c] = (u8)std::clamp((int)std::lround(flat_rgb[c]), 0, 255);
-                  }
-                  v.tod = cv.tod_mul(v.tod, mul);
-                }
-                cv.verts.push_back(v);
-                vista_vertex.resize(cv.verts.size(), 0);
-                vista_vertex.back() = 1;
-              }
-              ft.v[k] = it->second;
-            }
-            ft.draw_key = flat_key;
-            fcells[std::make_tuple((int)(4 * c3l::kVistaTier), std::get<0>(gk), 0,
-                                   std::get<1>(gk),
-                                   (int)(c3l::CHUNK_KIND_VISTA_FLAT - c3l::CHUNK_KIND_TFRAG))]
-                .push_back((u32)cv.tris.size());
-            cv.tris.push_back(ft);
-            vista_flat_tris++;
+          if (coarse_copy[pi]) {
+            span.coarse_tris++;
           }
         }
       }
     }
     make_plans(vcells);
-    make_plans(fcells);  // (AI-assisted) after the textured vista: the end of the chunk list
   }
 
   // ---- (AI-assisted) quantizing grids ----
@@ -5123,10 +5551,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     // (AI-assisted) merc back face culling marks (mark_merc_cull)
     lg::info("{}: merc culling: {} of {} draws marked ({} of {} triangles, {:.0f}%; {} turned to "
              "face outward); not marked: {} blended / cut-out, {} with open edges (sheets), {} "
-             "unclear normals",
+             "unclear normals, (AI-assisted) {} moved by blend shapes",
              level.level_name, merc.cull_marked_draws, merc.cull_draws, merc.cull_marked_tris,
              merc.cull_tris, 100.0 * merc.cull_marked_tris / std::max<size_t>(merc.cull_tris, 1),
-             merc.cull_flipped, merc.cull_no_mode, merc.cull_no_surface, merc.cull_no_normals);
+             merc.cull_flipped, merc.cull_no_mode, merc.cull_no_surface, merc.cull_no_normals,
+             merc.cull_no_blerc);
   }
   if (!merc.mod_effects.empty()) {
     lg::info("{}: {} merc effects with game-rewritten vertices ({} vertex writes)", level.level_name,
@@ -5176,11 +5605,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // (AI-assisted) v16
   {
     const size_t n = cv.tod_colors.size() + cv.tod_muls.size();
-    lg::info("{}: time of day: {} colors, {} multiplied ({} KB){}", level.level_name,
-             cv.tod_colors.size(), cv.tod_muls.size(),
+    lg::info("{}: time of day: {} colors, {} multiplied ({} KB){}; (AI-assisted, S8) {} vertices "
+             "with an alpha that differs between the palettes (the 3DS keeps the baked one)",
+             level.level_name, cv.tod_colors.size(), cv.tod_muls.size(),
              (cv.tod_colors.size() * sizeof(c3l::TodColor) + cv.tod_muls.size() * sizeof(c3l::TodMul)) /
                  1024,
-             n >= 0xffff ? " TOO MANY: left out (the baked palette only)" : "");
+             n >= 0xffff ? " TOO MANY: left out (the baked palette only)" : "", cv.alpha_varies);
   }
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
@@ -5242,23 +5672,27 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              100.0 * vista_tris / std::max<size_t>(vista_src_tris, 1), opt.vista_error,
              100.0 * opt.vista_ratio, opt.vista_sloppy_error, vchunks,
              opt.vista_cell, vdraws);
-    if (opt.vista_flat) {
-      // (AI-assisted)
-      size_t fchunks = 0, fdraws = 0;
-      for (const auto& ch : chunks) {
-        if (ch.kind == c3l::CHUNK_KIND_VISTA_FLAT) {
-          fchunks++;
-          fdraws += ch.draw_count;
-        }
-      }
-      lg::info("{}: untextured vista tier: {} triangles, {} chunks, {} draws", level.level_name,
-               vista_flat_tris, fchunks, fdraws);
+    if (span.spanning || span.reach_m > 0) {
+      // (AI-assisted, opt-audit F1)
+      lg::info("{}: vista tier: coarse tfrag reaches {:.0f} m past the playable area ({}){}",
+               level.level_name, span.reach_m, span.play_source,
+               span.spanning
+                   ? fmt::format(": spanning level, {} coarse cells copied ({} -> {} triangles, "
+                                 "simplified to {:g} m), {} lowres triangles over the same ground "
+                                 "left out, {} drawn with a coarse cell's copy",
+                                 span.coarse_plans, span.coarse_src_tris, span.coarse_tris,
+                                 opt.vista_error, span.lowres_dropped, span.lowres_moved)
+                   : std::string(""));
     }
   }
   if (opt.tie_winding) {
     lg::info("{}: tie winding: {} of {} cullable tie triangles on closed surfaces, marked for back "
-             "face culling ({} turned to face outward)",
-             level.level_name, cv.orient_culled, cv.orient_tris, cv.orient_flipped);
+             "face culling ({} turned to face outward); (AI-assisted) not marked: {} with open parts "
+             "neither small holes nor on the ground ({} parts at the base not on the collision{}), "
+             "{} without a clear inside, {} failing the rays",
+             level.level_name, cv.orient_culled, cv.orient_tris, cv.orient_flipped,
+             cv.orient_open_tris, cv.orient_no_ground, cv.ground_state == 1 ? "" : ", no collision",
+             cv.orient_volume_tris, cv.orient_parity_tris);
   }
   if (!opt.merc_only) {
     // (AI-assisted) v15 draw optimisations
@@ -5607,9 +6041,6 @@ int main(int argc, char** argv) {
   app.add_flag("--no-tie-winding", no_tie_winding,
                "keep the strips' triangle order (no flipping, no back face culling marks)");
   app.add_flag("--no-vista", no_vista, "no vista tier (far scenery cells)");
-  app.add_flag("--vista-flat", opt.vista_flat,
-               "also an untextured vista tier (average texture colors in the vertex colors, one "
-               "draw per cell and mode; config vista_untextured)");
   app.add_option("--vista-cell", opt.vista_cell, "vista tier cell size (meters)");
   app.add_option("--merc-cull-agree", opt.merc_cull_agree,
                  "merc back face culling marks: share of a draw's triangles agreeing with their "

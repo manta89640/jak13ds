@@ -176,14 +176,16 @@ constexpr uint32_t CHUNK_KIND_UNKNOWN = 0, CHUNK_KIND_TFRAG = 1, CHUNK_KIND_TIE 
 // levels without low resolution tfrag; the last two simplified), merged into large cells, one draw
 // per texture and mode. Its VisRuns' `vis` is the SOURCE CHUNK (index into the level's chunks) the
 // run's triangles were copied from: a run stands in for its source chunk where that one isn't drawn
-// because of its distance (beyond the draw distance, up to the vista distance).
+// because of its distance (beyond the draw distance, up to the vista distance). (AI-assisted,
+// opt-audit F1) In a "spanning" level (low resolution tfrag, coarse tfrag reaching > 1 km past the
+// playable area: finalboss, training) the far coarse cells are copied too, and a lowres run's `vis`
+// may name the coarse tfrag chunk around it instead (drawn with that cell's copy). No layout change.
 constexpr uint32_t CHUNK_KIND_VISTA = 4;
-// (AI-assisted) The vista tier untextured (ctr_level_converter --vista-flat): the same far content
-// with each texture's average color baked into the vertex colors and no texture, one draw per cell
-// and mode (draws untextured, alpha test dropped). After the CHUNK_KIND_VISTA chunks, at the end of
-// the chunk list. The runtime keeps one of the two sets (config vista_untextured) and drops the
-// other at load. No layout change (an older runtime would draw these as ordinary chunks: use them
-// with a current runtime).
+// (AI-assisted) The vista tier untextured (the removed ctr_level_converter --vista-flat): the same
+// far content with each texture's average color baked into the vertex colors and no texture, one
+// draw per cell and mode, after the CHUNK_KIND_VISTA chunks at the end of the chunk list. No
+// shipped file has it and the converter no longer writes it; the kind stays reserved for files
+// that do.
 constexpr uint32_t CHUNK_KIND_VISTA_FLAT = 5;
 constexpr uint32_t kVistaTier = 4;
 
@@ -512,10 +514,15 @@ constexpr char kMercGenLodSuffix[] = "~genlod";
 // the pickups (power cells, scout flies, precursor orbs, orb caches, eco vents), small things the
 // player looks for from far away. The converter makes no low LOD for them; the runtime ignores one
 // that older files have.
+// (AI-assisted, opt-audit M6) Also the far views of other levels (medres-*: seen from kilometers,
+// their switch distance is never reached anyway) and Jak II's: the pickups (collectables-*: health,
+// the pickup blasts), Jak's gun and its upgrade, his board, Daxter's mech, the Seal of Mars and
+// the title logo.
 inline bool merc_gen_lod_exempt(std::string_view name) {
-  constexpr std::string_view kPrefixes[] = {"fuel-cell-", "fuelcell-naked-", "powercellalt-",
-                                            "buzzer-",    "money-",          "orb-cache-top-",
-                                            "ecovalve-"};
+  constexpr std::string_view kPrefixes[] = {
+      "fuel-cell-",    "fuelcell-naked-", "powercellalt-",  "buzzer-",      "money-",
+      "orb-cache-top-", "ecovalve-",      "medres-",        "collectables-", "gun-lod0",
+      "gun-upgrade-",  "board-lod0",      "mecha-daxter-",  "seal-of-mar",  "jak-logo-"};
   for (const auto p : kPrefixes) {
     if (name.substr(0, p.size()) == p) {
       return true;
