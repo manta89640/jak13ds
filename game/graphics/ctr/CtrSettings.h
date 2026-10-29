@@ -263,10 +263,9 @@ struct CtrSettings {
   // up and down around a steady mean within ~6 s; Gol and Maia's Citadel's update-mood-light on
   // palette 1, which 71% of its colors use, moves 1/64 every ~2 frames) is taken only when it
   // moved this many 64ths from the weight last taken, or once it stood still for 8 frames
-  // (CtrLevel.cpp tod_update; never on the title screen). 0: every move (exact as the PC).
-  // (AI-assisted, levellod) 4 since Oct 29 with the stricter detector (0 from Oct 23, todlag: the
-  // old one held the title's day; Azahar's timings don't show the hardware's FCRAM misses)
-  int tod_pulse_step = 4;
+  // (CtrLevel.cpp tod_update; never on the title screen). 0 (default): every move, exact as the
+  // PC (a rewrite writes only the vertices whose color changed: cheaper than the hold was)
+  int tod_pulse_step = 0;
   // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
   // far version where the far version's shape error is at most this many pixels on screen (this
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).

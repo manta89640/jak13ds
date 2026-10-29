@@ -268,6 +268,20 @@ struct CtrLevelData {
     // when at least lut[mask]: the last move of its palettes)
     std::vector<u8> color_mask;
     std::vector<u32> table, stamp;
+    // per color the version its rgba last changed at (a TodMul changes only with its color)
+    std::vector<u32> cver;
+    // per group its vertices by table entry (CtrLevel.cpp tod_make_list; 0: not made yet,
+    // kNoList: none), made as the group is first written: a rewrite writes only the vertices of
+    // the entries whose color changed since. Lists made before the shared room was last emptied
+    // (list_gen) are gone.
+    static constexpr u32 kNoList = 0xffffffffu;
+    std::vector<u32> group_list;
+    u32 list_gen = 0;
+    // vertices of groups without a list written in this level draw and the last one; the title's
+    // fast day (nearly every entry changes every frame: no lists)
+    u32 whole_now = 0, whole_last = 0;
+    u64 whole_frame = 0;
+    bool fast_day = false;
     // c3l v22 alpha: the colors' alpha in the 8 palettes by kind (each different one once), per
     // color its kind (empty: one kind), per kind its blend << 24 (the table's alpha byte; without
     // alpha the vertex keeps its own: keep_alpha), the palettes some kind has alpha in and the
@@ -327,6 +341,10 @@ struct CtrLevelData {
       u32 n = 0;
       u8 slot3[8] = {};
       u8 w[8][3] = {};
+      // by palette (bit p of mask): its slot in colors, its weights (r | b << 16, g)
+      u32 mask = 0;
+      u8 off[8] = {};
+      u32 wrb[8] = {}, wg[8] = {};
     };
     Act act;
     // per chunk: its vertex groups (VisGroup: one per visibility id of its runs when their vertex
@@ -350,7 +368,8 @@ struct CtrLevelData {
         lights += (u32)(l.verts.size() * 2 + l.groups.size() * 8) + 48;
       }
       return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + color_mask.size() +
-                   table.size() * 8 + akind.size() + akinds.size() * 13 + color_bright.size() +
+                   table.size() * 8 + cver.size() * 4 + group_list.size() * 4 + akind.size() +
+                   akinds.size() * 13 + color_bright.size() +
                    groups.size() * sizeof(VisGroup) + run_group.size() * 2 +
                    chunk_group_first.size() * 24) +
              lights;
@@ -1134,6 +1153,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tod_frames = 0, m_tod_blends = 0, m_tod_verts = 0, m_tod_max = 0;
   u64 m_tod_light_verts = 0;  // (AI-assisted, perfv2) of m_tod_verts: the light pass's
   u64 m_tod_deferred = 0;     // (AI-assisted, perfv2) group rewrites spread to a later frame
+  u64 m_tod_unchanged = 0;    // groups behind whose colors all blended as before
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
   u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;

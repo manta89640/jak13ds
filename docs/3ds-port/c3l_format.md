@@ -410,6 +410,15 @@ their meshes (a frame the GPU still draws may see part of the change):
   without version checks (`tod_write_fresh`: ~6.5 instructions per vertex instead of ~17).
   The rewritten ranges are flushed together after the level's pass (sorted, merged within 64 KB:
   a few `ctr_gpu_flush_range` per frame).
+- **Changed colors only (todperf).** Each color keeps the version its rgba last changed at
+  (`Tod::cver`; a TodMul changes only with its color). A group written whole once gets a list of
+  its vertices by table entry, in runs by palette mask (`tod_make_list`, one shared room of 256 KB
+  for all levels, emptied when full at most every 300 frames; groups over 8192 vertices have none).
+  A group behind then writes only the vertices of the entries whose color changed since it was
+  written (`tod_list_write`): runs whose palettes didn't move are passed over, and no vertex is read.
+  The light pass does the same for its moved light palettes. The output is the same vertex for vertex
+  as writing the group whole (`test/ctr_render/tod_diff/run.sh`). On the title screen (its fast day
+  changes nearly every color every frame) the groups are written whole as before.
 - Removed Oct 23 (todlag): config `tod_busy_half` (sunken's cycling lights taken every second
   frame), `tod_max_ms` (2 ms of rewrites per frame; a day move waited until the vertices drawn
   could be rewritten within it; groups 3 moves behind or with the file's colors waited beyond
@@ -419,7 +428,8 @@ their meshes (a frame the GPU still draws may see part of the change):
   draws, and groups with the file's baked colors drawn for 1-8 frames (streamed tie chunks, a
   first-drawn shrub, 1431 groups for 2 frames at Sandover's reveal): the user's "visible lag" and
   "parts of textures losing their tint for a frame or so".
-- (AI-assisted, citadel) Config `tod_pulse_step` (4): a day palette that pulses is taken by every
+- (AI-assisted, citadel) Config `tod_pulse_step` (0 since todperf, before 4; 0: every move, exact as the
+  PC): with N > 0, a day palette that pulses is taken by every
   group only when it moved that many 64ths from the weight last taken, or once it stood still for
   8 frames. The table always has the game's weights, and a group with a color bright in the palette
   (a channel or alpha of c with c * (step - 1) >= 64, i.e. a hold could put it a color unit or
