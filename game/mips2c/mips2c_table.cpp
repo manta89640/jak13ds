@@ -97,6 +97,9 @@ namespace bones_mtx_calc { extern void link(); }
 namespace cspace_parented_transformq_joint { extern void link(); }
 namespace pc_anim_decomp_request { extern void link(); }
 namespace pc_anim_finalize_frame { extern void link(); }
+namespace pc_new_joint_decompressor { extern void link(); }
+namespace mem_copy { extern void link(); }  // native_misc.cpp
+namespace pc_sp_spawn { extern void link(); }
 namespace draw_bones_merc { extern void link(); }
 namespace draw_bones_check_longest_edge_asm { extern void link(); }
 namespace blerc_execute { extern void link(); }
@@ -571,10 +574,11 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
 #if OPENGOAL_NO_JAK1
     {},  // (AI-assisted, j2-mem2) see game_common_types.h
 #else
-    {{"font", {jak1::draw_string::link}},
+    {{"types-h", {jak1::mem_copy::link}},  // mem-copy! (native_misc.cpp)
+     {"font", {jak1::draw_string::link}},
      {"sparticle-launcher",
       {jak1::particle_adgif::link, jak1::sp_launch_particles_var::link,
-       jak1::pc_sp_init_fields::link}},
+       jak1::pc_sp_init_fields::link, jak1::pc_sp_spawn::link}},
      {"sparticle", {jak1::sp_process_block_3d::link, jak1::sp_process_block_2d::link}},
      {"texture", {jak1::adgif_shader_texture_with_update::link}},
      {"sky-tng",
@@ -612,7 +616,8 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak1::method_10_collide_edge_hold_list::link, jak1::method_18_collide_edge_work::link}},
      {"joint",
       {jak1::calc_animation_from_spr::link, jak1::cspace_parented_transformq_joint::link,
-       jak1::pc_anim_decomp_request::link, jak1::pc_anim_finalize_frame::link}},
+       jak1::pc_anim_decomp_request::link, jak1::pc_anim_finalize_frame::link,
+       jak1::pc_new_joint_decompressor::link}},
      {"bones",
       {jak1::bones_mtx_calc::link, jak1::draw_bones_merc::link,
        jak1::draw_bones_check_longest_edge_asm::link, jak1::pc_new_bones_mtx_calc::link}},

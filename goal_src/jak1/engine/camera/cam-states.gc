@@ -963,13 +963,15 @@
         (f30-0 2.0))
     0.0
     (vector-! s5-0 arg1 arg0)
-    (fill-using-line-sphere s4-0
-                            arg0
-                            s5-0
-                            (-> *CAM_STRING-bank* los-coll-rad2)
-                            (collide-kind background cak-3 wall-object ground-object cak-14)
-                            (the-as process-drawable #f)
-                            arg2)
+    ;; og:preserve-this perf sections (3DS: camera-slave's split)
+    (with-profiler "cam-los-spline-fill"
+      (fill-using-line-sphere s4-0
+                              arg0
+                              s5-0
+                              (-> *CAM_STRING-bank* los-coll-rad2)
+                              (collide-kind background cak-3 wall-object ground-object cak-14)
+                              (the-as process-drawable #f)
+                              arg2))
     (let* ((f0-2 (vector-length s5-0))
            (f28-0 (cond
                     ((< f0-2 (-> *CAMERA-bank* min-detectable-velocity)) 0.0)
@@ -1086,13 +1088,14 @@
     (let ((s0-0 *collide-cache*)
           (f26-0 (vector-length arg1))
           (f30-0 (vector-normalize-ret-len! s4-0 (the-as float 1.0))))
-      (fill-using-line-sphere s0-0
-                              arg0
-                              arg1
-                              (-> *CAM_STRING-bank* los-coll-rad)
-                              (collide-kind background cak-3 wall-object ground-object cak-14)
-                              (the-as process-drawable #f)
-                              arg3)
+      (with-profiler "cam-los-fill"
+        (fill-using-line-sphere s0-0
+                                arg0
+                                arg1
+                                (-> *CAM_STRING-bank* los-coll-rad)
+                                (collide-kind background cak-3 wall-object ground-object cak-14)
+                                (the-as process-drawable #f)
+                                arg3))
       (let ((s1-1 (-> s0-0 tris))
             (f28-0 (/ 2048.0 f26-0))
             (f26-1 (/ (+ -8192.0 f26-0) f26-0)))
@@ -1536,13 +1539,14 @@
 
 (defbehavior cam-string-code camera-slave ()
   (if *debug-segment* (cam-debug-reset-coll-tri))
-  (cam-string-follow)
-  (if (logtest? (-> self options) 512) (cam-string-line-of-sight))
-  (if (not (paused?)) (cam-string-joystick))
+  (with-profiler "cam-string-follow" (cam-string-follow))
+  (if (logtest? (-> self options) 512) (with-profiler "cam-string-los" (cam-string-line-of-sight)))
+  (if (not (paused?)) (with-profiler "cam-string-joystick" (cam-string-joystick)))
   (let ((gp-0 (new-stack-vector0)))
     (vector--float*! gp-0 (-> self view-flat) (-> *camera* local-down) (+ (-> *camera* target-height) (-> self view-off y)))
     (vector+! (-> self desired-pos) (-> *camera* tpos-curr-adj) gp-0))
-  (if (logtest? (-> self options) 64) (cam-string-find-hidden))
+  (if (logtest? (-> self options) 64) (with-profiler "cam-string-find-hidden" (cam-string-find-hidden)))
+  (profiler-start-event "cam-string-move")
   (cond
     ((logtest? (-> self options) 4096)
      (when *debug-segment*
@@ -1557,6 +1561,8 @@
      (let ((f0-2 (vector-length (-> self view-flat))))
        (if (< f0-2 (-> self min-z-override)) (set! (-> self min-z-override) f0-2))))
     (else (cam-string-move)))
+  (profiler-end-event)
+  (profiler-start-event "cam-string-spline")
   (tracking-spline-method-17 (-> self position-spline)
                              (-> self string-trans)
                              (the-as float 0.04096)
@@ -1569,7 +1575,9 @@
      (tracking-spline-method-21 (-> self position-spline) (-> self trans) (the-as float 40.96) (the-as float 4096.0)))
     ((logtest? (-> self options) 256)
      (tracking-spline-method-21 (-> self position-spline) (-> self trans) (the-as float 102.4) (the-as float 2457.6)))
-    (else (tracking-spline-method-21 (-> self position-spline) (-> self trans) (the-as float 20.48) (the-as float 2457.6)))))
+    (else (tracking-spline-method-21 (-> self position-spline) (-> self trans) (the-as float 20.48) (the-as float 2457.6))))
+  (profiler-end-event)
+  (none))
 
 (defbehavior set-string-parms camera-slave ()
   (when (not (-> self string-val-locked))

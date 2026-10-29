@@ -13,7 +13,15 @@
  * order, with the values kept in registers in between.
  */
 
+#include <cstdlib>
+#include <vector>
+
+#include "common/log/log.h"
+
+#include "game/kernel/jak1/kscheme.h"
 #include "game/mips2c/jak1_functions/native_functions.h"
+#include "game/mips2c/native_anim_cache.h"
+#include "game/mips2c/native_goalc_ops.h"
 
 #if defined(__clang__)
 #pragma clang fp contract(off)
@@ -166,70 +174,27 @@ struct Stream {
   }
 };
 
-/*!
- * (decomp-request output-frame num-joints request): adds the request's animation (fixed part,
- * frame, and the next frame weighted by frame-interp) times its amount to the output frame.
- */
-u64 decomp_request_impl(const NativeArgs& args) {
-  u8* const m = g_ee_main_mem;
-  const u32 out = (u32)args.a[0];
-  // (C mode passes the low half: the count is small)
-  const s64 num_joints = (s32)args.a[1];
-  const u32 req = (u32)args.a[2];
-
-  const u32 jacc = ld<u32>(m, req);
-  const u32 frame = (u32)ld<u64>(m, req + 8);
-  const float interp = ld<float>(m, req + 16);
-  const float amount = ld<float>(m, req + 20);
-  // the fixed part: a joint-anim-compressed-fixed, whose header is also the frames' header
-  const u32 fixed = ld<u32>(m, jacc + 12);
-  const u32 mbits = ld<u32>(m, fixed + 60);
-  // (!= 0.0 frame-interp) on the bits, like goalc: denormals count as zero
-  const bool two = (f2u(interp) & 0x7f800000u) != 0;
-
+//! the stream positions of a request where a joint range starts (anim_cache tail)
+struct RequestState {
   Stream fx, f0, f1;
-  fx.init(m, fixed + 80, fixed + 64, amount);
-  const float w0 = 1.f - interp;
-  const u32 cur = ld<u32>(m, jacc + 16 + 4 * frame);
-  f0.init(m, cur + 16, cur, w0 * amount);
-  if (two) {
-    const u32 next = ld<u32>(m, jacc + 16 + 4 * (frame + 1));
-    f1.init(m, next + 16, next, interp * amount);
-  }
+  u32 fixed;
+  u32 two;
+};
+static_assert(sizeof(RequestState) <= anim_cache::kTailBytes);
 
-  // matrices (the GOAL passes do these before their joints; they are separate outputs)
-  if (!(mbits & 1)) {
-    fx.matrix(m, out);
-  }
-  if (!(mbits & 2)) {
-    fx.matrix(m, out + 64);
-  }
-  if (mbits & 1) {
-    f0.matrix(m, out);
-  }
-  if (mbits & 2) {
-    f0.matrix(m, out + 64);
-  }
-  if (two) {
-    if (mbits & 1) {
-      f1.matrix(m, out);
-    }
-    if (mbits & 2) {
-      f1.matrix(m, out + 64);
-    }
-  }
-
-  u32 tq = out + 128;
-  for (s64 i = 0; i < num_joints; i++, tq += 48) {
-    const u32 ctrl = (ld<u32>(m, fixed + 4 * (u32)(i >> 3)) >> (4 * (i & 7))) & 0xf;
+//! the request's contribution to transformqs [begin, end)
+void decomp_joints(u8* m, u32 out, s64 begin, s64 end, RequestState& r) {
+  u32 tq = out + 128 + 48 * (u32)begin;
+  for (s64 i = begin; i < end; i++, tq += 48) {
+    const u32 ctrl = (ld<u32>(m, r.fixed + 4 * (u32)(i >> 3)) >> (4 * (i & 7))) & 0xf;
     float t[3] = {ld<float>(m, tq), ld<float>(m, tq + 4), ld<float>(m, tq + 8)};
     if (ctrl & 1) {
-      f0.trans(m, t, ctrl & 8);
-      if (two) {
-        f1.trans(m, t, ctrl & 8);
+      r.f0.trans(m, t, ctrl & 8);
+      if (r.two) {
+        r.f1.trans(m, t, ctrl & 8);
       }
     } else {
-      fx.trans(m, t, ctrl & 8);
+      r.fx.trans(m, t, ctrl & 8);
     }
     st<float>(m, tq, t[0]);
     st<float>(m, tq + 4, t[1]);
@@ -237,27 +202,92 @@ u64 decomp_request_impl(const NativeArgs& args) {
     float q[4];
     ld4(q, m, tq + 16);
     if (ctrl & 2) {
-      f0.quat(m, q);
-      if (two) {
-        f1.quat(m, q);
+      r.f0.quat(m, q);
+      if (r.two) {
+        r.f1.quat(m, q);
       }
     } else {
-      fx.quat(m, q);
+      r.fx.quat(m, q);
     }
     st4(m, tq + 16, q);
     float s[3] = {ld<float>(m, tq + 32), ld<float>(m, tq + 36), ld<float>(m, tq + 40)};
     if (ctrl & 4) {
-      f0.scale(m, s);
-      if (two) {
-        f1.scale(m, s);
+      r.f0.scale(m, s);
+      if (r.two) {
+        r.f1.scale(m, s);
       }
     } else {
-      fx.scale(m, s);
+      r.fx.scale(m, s);
     }
     st<float>(m, tq + 32, s[0]);
     st<float>(m, tq + 36, s[1]);
     st<float>(m, tq + 40, s[2]);
   }
+}
+
+/*!
+ * (decomp-request output-frame num-joints request): adds the request's animation (fixed part,
+ * frame, and the next frame weighted by frame-interp) times its amount to the output frame.
+ * With save, the stream positions at joint save_at go there.
+ */
+void decomp_request(u8* m, u32 out, s64 num_joints, u32 req, s64 save_at, RequestState* save) {
+  RequestState r;
+  const u32 jacc = ld<u32>(m, req);
+  const u32 frame = (u32)ld<u64>(m, req + 8);
+  const float interp = ld<float>(m, req + 16);
+  const float amount = ld<float>(m, req + 20);
+  // the fixed part: a joint-anim-compressed-fixed, whose header is also the frames' header
+  r.fixed = ld<u32>(m, jacc + 12);
+  const u32 mbits = ld<u32>(m, r.fixed + 60);
+  // (!= 0.0 frame-interp) on the bits, like goalc: denormals count as zero
+  r.two = (f2u(interp) & 0x7f800000u) != 0;
+
+  r.fx.init(m, r.fixed + 80, r.fixed + 64, amount);
+  const float w0 = 1.f - interp;
+  const u32 cur = ld<u32>(m, jacc + 16 + 4 * frame);
+  r.f0.init(m, cur + 16, cur, w0 * amount);
+  if (r.two) {
+    const u32 next = ld<u32>(m, jacc + 16 + 4 * (frame + 1));
+    r.f1.init(m, next + 16, next, interp * amount);
+  } else {
+    r.f1 = Stream{};
+  }
+
+  // matrices (the GOAL passes do these before their joints; they are separate outputs)
+  if (!(mbits & 1)) {
+    r.fx.matrix(m, out);
+  }
+  if (!(mbits & 2)) {
+    r.fx.matrix(m, out + 64);
+  }
+  if (mbits & 1) {
+    r.f0.matrix(m, out);
+  }
+  if (mbits & 2) {
+    r.f0.matrix(m, out + 64);
+  }
+  if (r.two) {
+    if (mbits & 1) {
+      r.f1.matrix(m, out);
+    }
+    if (mbits & 2) {
+      r.f1.matrix(m, out + 64);
+    }
+  }
+
+  if (save) {
+    const s64 mid = save_at < num_joints ? save_at : num_joints;
+    decomp_joints(m, out, 0, mid, r);
+    *save = r;
+    decomp_joints(m, out, mid, num_joints, r);
+  } else {
+    decomp_joints(m, out, 0, num_joints, r);
+  }
+}
+
+u64 decomp_request_impl(const NativeArgs& args) {
+  // (C mode passes the low half: the count is small)
+  decomp_request(g_ee_main_mem, (u32)args.a[0], (s32)args.a[1], (u32)args.a[2], 0, nullptr);
   return 0;
 }
 
@@ -280,10 +310,7 @@ inline void normalize(float q[4]) {
  * (finalize-joint-frame output-frame num-joints): trans.w and scale.w = 1, quaternion
  * normalized, for the num-joints - 2 transformqs.
  */
-u64 finalize_frame_impl(const NativeArgs& args) {
-  u8* const m = g_ee_main_mem;
-  const u32 out = (u32)args.a[0];
-  const s64 num_joints = (s32)args.a[1];
+void finalize_frame(u8* m, u32 out, s64 num_joints) {
   u32 tq = out + 128;
   // two at a time: one's square root and divide overlap the other's multiplies
   s64 i = 0;
@@ -308,7 +335,314 @@ u64 finalize_frame_impl(const NativeArgs& args) {
     st<float>(m, tq + 44, 1.f);
     st4(m, tq + 16, q);
   }
+}
+
+u64 finalize_frame_impl(const NativeArgs& args) {
+  finalize_frame(g_ee_main_mem, (u32)args.a[0], (s32)args.a[1]);
   return 0;
+}
+
+u32 sym_addr(const char* name) {
+  return ::jak1::intern_from_c(name).offset;
+}
+
+// joint-control (basic: offsets from the object)
+constexpr u32 kJcStatus = 0;           // janim-status, uint16
+constexpr u32 kJcActiveChannels = 20;  // int32
+constexpr u32 kJcChannel = 44;         // joint-control-channel, 48 bytes each
+constexpr u16 kStatusSpool = 0x20;
+// joint-control-channel
+constexpr u32 kChCommand = 4;      // symbol
+constexpr u32 kChFrameInterp = 8;  // float
+constexpr u32 kChFrameGroup = 12;  // art-joint-anim (frames at +40)
+constexpr u32 kChFrameNum = 16;    // float
+constexpr u32 kChInspector = 44;   // float
+// new-joint-decompressor-work
+constexpr u32 kWorkNumRequests = 768;  // int32; requests (32 bytes each) at 0
+constexpr u32 kWorkBlendStack = 784;   // blend-tree-stack-frame, 96 bytes each (24 weights)
+constexpr u32 kWorkSize = kWorkBlendStack + 4 * 96;
+constexpr u32 kMinWeight = 0x3a83126fu;  // 0.001
+
+//! blend stack frame k (k may be negative: the GOAL code's address)
+inline u32 blend_frame(u32 work, s64 k) {
+  return work + kWorkBlendStack + (u32)(96 * (s32)k);
+}
+
+anim_cache::Cache* g_cache = nullptr;
+
+/*!
+ * The output frame from the requests in the work area: process-requests! and finalize-frame!,
+ * through the frame cache when the joint-control may use it.
+ */
+void frame_from_requests(u8* m, u32 dst, s64 num_joints, u32 jc, u32 work) {
+  using namespace anim_cache;
+  const s32 nreq = ld<s32>(m, work + kWorkNumRequests);
+  const u32 head = head_bytes(num_joints);
+  const s64 tail_at = tail_begin(num_joints);
+  Slot* slot = nullptr;
+  Req key[kMaxReqs];
+  bool same = false;
+  if (nreq >= 0 && nreq <= kMaxReqs && head <= kMaxHead &&
+      !(ld<u16>(m, jc + kJcStatus) & kStatusSpool)) {
+    for (s32 i = 0; i < nreq; i++) {
+      const u32 req = work + 32 * (u32)i;
+      key[i] = {ld<u32>(m, req), ld<u32>(m, req + 8), ld<u32>(m, req + 12), ld<u32>(m, req + 16),
+                ld<u32>(m, req + 20)};
+    }
+    slot = &cache_for(g_cache).slot(jc);
+    same = Cache::same(*slot, (s32)num_joints, nreq, key);
+    if (same && slot->has) {
+      MIPS2C_NATIVE_LOG_STORE(dst, head);
+      memcpy(m + dst, slot->data, head);
+      for (s32 i = 0; i < nreq; i++) {
+        RequestState r;
+        memcpy(&r, slot->data + head + kTailBytes * (u32)i, sizeof(r));
+        decomp_joints(m, dst, tail_at, num_joints, r);
+      }
+      st<u32>(m, work + kWorkNumRequests, 0);
+      return;
+    }
+  }
+
+  // init-frame!
+  {
+    const float zero[4] = {0, 0, 0, 0};
+    for (u32 p = dst; p != dst + head; p += 16) {
+      st4(m, p, zero);
+    }
+  }
+  // process-requests! (the count read every time, like the GOAL loop)
+  RequestState saved[kMaxReqs];
+  const bool store = same;
+  for (s32 i = 0; i < ld<s32>(m, work + kWorkNumRequests); i++) {
+    decomp_request(m, dst, num_joints, work + 32 * (u32)i, tail_at, store ? &saved[i] : nullptr);
+  }
+  st<u32>(m, work + kWorkNumRequests, 0);
+  finalize_frame(m, dst, num_joints);
+
+  if (slot) {
+    if (!same) {
+      Cache::set_key(*slot, (s32)num_joints, nreq, key);
+    } else if (u8* data = g_cache->reserve(*slot, head, nreq)) {
+      // the head as the next calls start from it: the tail is added to whatever is there
+      memcpy(data, m + dst, head);
+      for (s32 i = 0; i < nreq; i++) {
+        memcpy(data + head + kTailBytes * (u32)i, &saved[i], sizeof(RequestState));
+      }
+      slot->has = true;
+    }
+  }
+}
+
+//! the whole new-joint-decompressor; false (nothing written) where the GOAL code would (break!)
+bool decompress(u32 dst, s64 num_joints, u32 jc, u32 work) {
+  static const u32 sym_push = sym_addr("push");
+  static const u32 sym_blend = sym_addr("blend");
+  static const u32 sym_push1 = sym_addr("push1");
+  static const u32 sym_stack = sym_addr("stack");
+  u8* const m = g_ee_main_mem;
+  const s64 num_channels = ld<s32>(m, jc + kJcActiveChannels);
+  if (num_channels > 24) {
+    return false;
+  }
+  {
+    s64 top = 0;
+    for (s64 i = 0; i < num_channels; i++) {
+      const u32 cmd = ld<u32>(m, jc + kJcChannel + 48 * (u32)i + kChCommand);
+      if (cmd == sym_push) {
+        if (top > 4) {
+          return false;
+        }
+        top++;
+      } else if (cmd == sym_stack) {
+        top--;
+      }
+    }
+  }
+
+  // eval-blend-tree!
+  s64 top = 0;
+  for (s64 i = 0; i < num_channels; i++) {
+    const u32 chan = jc + kJcChannel + 48 * (u32)i;
+    const u32 cmd = ld<u32>(m, chan + kChCommand);
+    if (cmd == sym_push) {
+      const u32 f = blend_frame(work, top);
+      const float zero[4] = {0, 0, 0, 0};
+      for (int q = 0; q < 6; q++) {
+        st4(m, f + 16 * q, zero);
+      }
+      st<float>(m, f + 4 * (u32)i, 1.f);
+      top++;
+    } else if (cmd == sym_blend || cmd == sym_push1) {
+      const u32 f = blend_frame(work, top - 1);
+      const float nw = ld<float>(m, chan + kChFrameInterp);
+      const float ow = 1.f - nw;
+      for (int q = 0; q < 6; q++) {
+        float v[4];
+        ld4(v, m, f + 16 * q);
+        for (int l = 0; l < 4; l++) {
+          v[l] = v[l] * ow;
+        }
+        st4(m, f + 16 * q, v);
+      }
+      const float w = ld<float>(m, f + 4 * (u32)i);
+      st<float>(m, f + 4 * (u32)i, w + nw);
+    } else if (cmd == sym_stack) {
+      const u32 f0 = blend_frame(work, top - 1);
+      const u32 f1 = blend_frame(work, top - 2);
+      const float w0 = ld<float>(m, chan + kChFrameInterp);
+      const float w1 = 1.f - w0;
+      for (int q = 0; q < 6; q++) {
+        float a[4], b[4];
+        ld4(a, m, f0 + 16 * q);
+        ld4(b, m, f1 + 16 * q);
+        for (int l = 0; l < 4; l++) {
+          a[l] = a[l] * w0;
+          b[l] = b[l] * w1;
+          a[l] = a[l] + b[l];
+        }
+        st4(m, f1 + 16 * q, a);
+      }
+      top--;
+    }
+  }
+
+  // output-blend-tree!
+  const u32 weights = work + kWorkBlendStack;
+  for (s64 i = 0; i < num_channels; i++) {
+    st<float>(m, jc + kJcChannel + 48 * (u32)i + kChInspector, ld<float>(m, weights + 4 * (u32)i));
+  }
+
+  // build-requests!
+  st<u32>(m, work + kWorkNumRequests, 0);
+  for (s64 i = 0; i < num_channels; i++) {
+    const float w = ld<float>(m, weights + 4 * (u32)i);
+    if (goalc_ops::fcmp_xk(w, kMinWeight, goalc_ops::GC_FLE)) {
+      continue;
+    }
+    const u32 chan = jc + kJcChannel + 48 * (u32)i;
+    const s32 n = ld<s32>(m, work + kWorkNumRequests);
+    const u32 req = work + (u32)((s64)n << 5);
+    const u32 jacc = ld<u32>(m, ld<u32>(m, chan + kChFrameGroup) + 40);
+    const float frame_num = ld<float>(m, chan + kChFrameNum);
+    s64 base = goalc_ops::f2i(frame_num);
+    float frac = frame_num - goalc_ops::i2f(base);
+    const s64 last = (s64)((u64)ld<u32>(m, jacc) - 1);
+    st<u32>(m, work + kWorkNumRequests, (u32)((s64)n + 1));
+    if (!(base < last)) {
+      frac = 0.f;
+      base = last;
+    }
+    st<u32>(m, req, jacc);
+    st<u64>(m, req + 8, (u64)base);
+    st<float>(m, req + 16, frac);
+    st<float>(m, req + 20, w);
+  }
+
+  frame_from_requests(m, dst, num_joints, jc, work);
+  return true;
+}
+
+#if MIPS2C_WRITE_LOG
+// verify mode (host, OPENGOAL_MIPS2C_VERIFY=1): the native on a copy of what it writes, then the
+// GOAL code (the nested call returns #f), compared
+int g_verify = -1;
+bool g_nested = false;
+u64 g_verify_calls = 0, g_verify_goal_only = 0, g_verify_mismatches = 0;
+
+bool anim_verify_on() {
+  if (g_verify < 0) {
+    const char* v = getenv("OPENGOAL_MIPS2C_VERIFY");
+    g_verify = (v && v[0] && v[0] != '0') ? 1 : 0;
+    if (g_verify) {
+      atexit([] {
+        lg::info("anim verify: {} calls ({} left to the GOAL code), {} mismatches", g_verify_calls,
+                 g_verify_goal_only, g_verify_mismatches);
+      });
+    }
+  }
+  return g_verify == 1;
+}
+
+void anim_verify(const NativeArgs& args, u32 dst, s64 num_joints, u32 jc, u32 work) {
+  struct Region {
+    u32 addr, size;
+    const char* name;
+  };
+  u8* const m = g_ee_main_mem;
+  const s64 num_channels = ld<s32>(m, jc + kJcActiveChannels);
+  const s64 qwc = num_joints > 2 ? 8 + 3 * (num_joints - 2) : 8;
+  const s64 tq_end = 128 + 48 * (num_joints > 0 ? num_joints : 0);
+  const u32 out_size = (u32)(16 * qwc > tq_end ? 16 * qwc : tq_end);
+  const Region regions[3] = {
+      {dst, out_size, "output frame"},
+      {work, kWorkSize, "work"},
+      {jc + kJcChannel, (u32)(48 * (num_channels > 0 ? num_channels : 0)), "channels"}};
+  std::vector<u8> before[3], native[3];
+  for (int r = 0; r < 3; r++) {
+    before[r].assign(m + regions[r].addr, m + regions[r].addr + regions[r].size);
+  }
+  const bool done = decompress(dst, num_joints, jc, work);
+  for (int r = 0; r < 3; r++) {
+    native[r].assign(m + regions[r].addr, m + regions[r].addr + regions[r].size);
+    memcpy(m + regions[r].addr, before[r].data(), regions[r].size);
+  }
+  static const u32 goal_fn_sym = sym_addr("new-joint-decompressor");
+  g_nested = true;
+  native_call_goal(gload<u32>(goal_fn_sym), args.a, args);
+  g_nested = false;
+  g_verify_calls++;
+  if (!done) {
+    g_verify_goal_only++;
+    return;
+  }
+  for (int r = 0; r < 3; r++) {
+    const u8* g = m + regions[r].addr;
+    if (memcmp(g, native[r].data(), regions[r].size)) {
+      g_verify_mismatches++;
+      if (g_verify_mismatches <= 10) {
+        u32 k = 0;
+        while (g[k] == native[r][k]) {
+          k++;
+        }
+        u32 gw, nw;
+        memcpy(&gw, g + (k & ~3u), 4);
+        memcpy(&nw, native[r].data() + (k & ~3u), 4);
+        lg::error("anim verify MISMATCH (call {}, {} joints, {} channels): {} byte {}: GOAL "
+                  "{:08x} native {:08x}",
+                  g_verify_calls, num_joints, num_channels, regions[r].name, k, gw, nw);
+      }
+      break;
+    }
+  }
+}
+#endif
+
+/*!
+ * (pc-new-joint-decompressor dst num-joints jc) -> symbol: new-joint-decompressor's work. #f when
+ * the GOAL code must run: where it would (break!), or when turned off (mips2c_native_off).
+ */
+u64 new_joint_decompressor_impl(const NativeArgs& args) {
+  static const bool off = native_turned_off("pc-new-joint-decompressor");
+  if (off) {
+    return args.st;
+  }
+  static const u32 work_sym = sym_addr("*new-joint-decompressor-work*");
+  const u32 dst = (u32)args.a[0];
+  // (C mode passes the low half: the count is small)
+  const s64 num_joints = (s32)(u32)args.a[1];
+  const u32 jc = (u32)args.a[2];
+  const u32 work = gload<u32>(work_sym);
+#if MIPS2C_WRITE_LOG
+  if (anim_verify_on()) {
+    if (g_nested) {
+      return args.st;
+    }
+    anim_verify(args, dst, num_joints, jc, work);
+    return args.st + 8;
+  }
+#endif
+  return decompress(dst, num_joints, jc, work) ? args.st + 8 : args.st;
 }
 
 }  // namespace
@@ -319,6 +653,8 @@ const NativeImpl anim_decomp_request =
     MIPS2C_NATIVE_IMPL_GOAL(decomp_request_impl, NATIVE_V0_UNDEFINED);
 const NativeImpl anim_finalize_frame =
     MIPS2C_NATIVE_IMPL_GOAL(finalize_frame_impl, NATIVE_V0_UNDEFINED);
+const NativeImpl new_joint_decompressor =
+    MIPS2C_NATIVE_IMPL_GOAL(new_joint_decompressor_impl, NATIVE_V0_UNDEFINED);
 
 }  // namespace Mips2C::jak1::native
 
@@ -337,4 +673,10 @@ void link() {
                            &native::anim_finalize_frame);
 }
 }  // namespace pc_anim_finalize_frame
+namespace pc_new_joint_decompressor {
+void link() {
+  gLinkedFunctionTable.reg("pc-new-joint-decompressor", native::new_joint_decompressor.as_exec, 64,
+                           &native::new_joint_decompressor);
+}
+}  // namespace pc_new_joint_decompressor
 }  // namespace Mips2C::jak1

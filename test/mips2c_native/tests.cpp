@@ -19,6 +19,8 @@ void register_goal_collide_tests();
 void register_anim_tests();
 void register_shadow_tests();
 void register_bones_tests();  // (AI-assisted)
+void register_sp_spawn_tests();
+void register_misc_tests();
 
 void register_all() {
   register_collide_func_tests();
@@ -35,5 +37,7 @@ void register_all() {
   register_anim_tests();
   register_shadow_tests();
   register_bones_tests();
+  register_sp_spawn_tests();
+  register_misc_tests();
 }
 }  // namespace tests

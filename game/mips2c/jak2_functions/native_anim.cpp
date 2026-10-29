@@ -35,6 +35,7 @@
 #include "game/mips2c/jak2_functions/native_functions.h"
 #include "game/mips2c/mips2c_native.h"
 #include "game/mips2c/mips2c_private.h"
+#include "game/mips2c/native_anim_cache.h"
 #include "game/mips2c/native_goalc_ops.h"
 
 #ifdef __3DS__
@@ -110,6 +111,8 @@ constexpr u32 kZero = 0;                          // 0.0
 constexpr u32 kMinWeight = 0x3a83126fu;           // 0.001
 
 // joint-control (basic: offsets from the object, the type at -4)
+constexpr u32 kJcStatus = 0;              // joint-control-status, uint16
+constexpr u16 kStatusSpooling = 0x2;
 constexpr u32 kJcActiveChannels = 3;     // uint8
 constexpr u32 kJcActiveFrameInterp = 17; // uint8
 constexpr u32 kJcFloatChannels = 18;     // uint8
@@ -222,71 +225,27 @@ struct Stream {
   }
 };
 
-/*!
- * process-request!: decomp-fixed, decomp-frame of the frame and, when frame-interp isn't 0, of the
- * next one, added to the output frame. For a value of a joint, either the fixed part or the frames
- * have it (the same control bits pick it), so one pass over the joints gives the GOAL passes' sums
- * in the same order; the matrices come before the joints in each GOAL pass and are separate
- * outputs.
- */
-void process_request(u8* m, u32 out, s64 num_joints, u32 req, u32 stats) {
-  // stats: num-anims, num-joints
-  st<u32>(m, stats + 4, (u32)(ld<s32>(m, stats + 4) + 1));
-  st<u32>(m, stats + 8, (u32)((s64)ld<s32>(m, stats + 8) + (num_joints + 2)));
+//! the stream positions of a request where a joint range starts (anim_cache tail)
+struct RequestState {
+  Stream fx, f0, f1;
+  u32 fixed;
+  u32 two;
+};
+static_assert(sizeof(RequestState) <= anim_cache::kTailBytes);
 
-  const u32 jacc = ld<u32>(m, req);
-  const u64 frame = ld<u64>(m, req + 8);
-  const float interp = ld<float>(m, req + 16);
-  const float amount = ld<float>(m, req + 20);
-  // the fixed part: a joint-anim-compressed-fixed, whose header is also the frames' header
-  const u32 fixed = ld<u32>(m, jacc + 12);
-  const u32 mbits = ld<u32>(m, fixed + 60);
-  // (!= 0.0 frame-interp): goalc's gc_fcmp(0.0, interp, GC_FEQ) skips the second frame
-  const bool two = !fcmp_xk(interp, kZero, GC_FEQ);
-
-  Stream fx, f0, f1{};  // f1 only when two (zeroed: GCC warns otherwise)
-  fx.init(m, fixed + 80, fixed + 64, amount);
-  float w0 = 1.f - interp;
-  w0 = w0 * amount;
-  const u32 cur = ld<u32>(m, (u32)((frame << 2) + 16 + jacc));
-  f0.init(m, cur + 16, cur, w0);
-  if (two) {
-    const u32 next = ld<u32>(m, (u32)(((1 + frame) << 2) + 16 + jacc));
-    f1.init(m, next + 16, next, interp * amount);
-  }
-
-  if (!(mbits & 1)) {
-    fx.matrix(m, out);
-  }
-  if (!(mbits & 2)) {
-    fx.matrix(m, out + 64);
-  }
-  if (mbits & 1) {
-    f0.matrix(m, out);
-  }
-  if (mbits & 2) {
-    f0.matrix(m, out + 64);
-  }
-  if (two) {
-    if (mbits & 1) {
-      f1.matrix(m, out);
-    }
-    if (mbits & 2) {
-      f1.matrix(m, out + 64);
-    }
-  }
-
-  u32 tq = out + 128;
-  for (s64 i = 0; i < num_joints; i++, tq += 48) {
-    const u32 ctrl = (ld<u32>(m, fixed + 4 * (u32)(i >> 3)) >> (4 * (i & 7))) & 0xf;
+//! the request's contribution to transformqs [begin, end)
+void decomp_joints(u8* m, u32 out, s64 begin, s64 end, RequestState& r) {
+  u32 tq = out + 128 + 48 * (u32)begin;
+  for (s64 i = begin; i < end; i++, tq += 48) {
+    const u32 ctrl = (ld<u32>(m, r.fixed + 4 * (u32)(i >> 3)) >> (4 * (i & 7))) & 0xf;
     float t[3] = {ld<float>(m, tq), ld<float>(m, tq + 4), ld<float>(m, tq + 8)};
     if (ctrl & 1) {
-      f0.trans(m, t, ctrl & 8);
-      if (two) {
-        f1.trans(m, t, ctrl & 8);
+      r.f0.trans(m, t, ctrl & 8);
+      if (r.two) {
+        r.f1.trans(m, t, ctrl & 8);
       }
     } else {
-      fx.trans(m, t, ctrl & 8);
+      r.fx.trans(m, t, ctrl & 8);
     }
     st<float>(m, tq, t[0]);
     st<float>(m, tq + 4, t[1]);
@@ -294,26 +253,102 @@ void process_request(u8* m, u32 out, s64 num_joints, u32 req, u32 stats) {
     float q[4];
     ld4(q, m, tq + 16);
     if (ctrl & 2) {
-      f0.quat(m, q);
-      if (two) {
-        f1.quat(m, q);
+      r.f0.quat(m, q);
+      if (r.two) {
+        r.f1.quat(m, q);
       }
     } else {
-      fx.quat(m, q);
+      r.fx.quat(m, q);
     }
     st4(m, tq + 16, q);
     float s[3] = {ld<float>(m, tq + 32), ld<float>(m, tq + 36), ld<float>(m, tq + 40)};
     if (ctrl & 4) {
-      f0.scale(m, s);
-      if (two) {
-        f1.scale(m, s);
+      r.f0.scale(m, s);
+      if (r.two) {
+        r.f1.scale(m, s);
       }
     } else {
-      fx.scale(m, s);
+      r.fx.scale(m, s);
     }
     st<float>(m, tq + 32, s[0]);
     st<float>(m, tq + 36, s[1]);
     st<float>(m, tq + 40, s[2]);
+  }
+}
+
+//! process-request!'s stats: num-anims, num-joints
+inline void request_stats(u8* m, u32 stats, s64 num_joints) {
+  st<u32>(m, stats + 4, (u32)(ld<s32>(m, stats + 4) + 1));
+  st<u32>(m, stats + 8, (u32)((s64)ld<s32>(m, stats + 8) + (num_joints + 2)));
+}
+
+/*!
+ * process-request!: decomp-fixed, decomp-frame of the frame and, when frame-interp isn't 0, of the
+ * next one, added to the output frame. For a value of a joint, either the fixed part or the frames
+ * have it (the same control bits pick it), so one pass over the joints gives the GOAL passes' sums
+ * in the same order; the matrices come before the joints in each GOAL pass and are separate
+ * outputs. With save, the stream positions at joint save_at go there.
+ */
+void process_request(u8* m,
+                     u32 out,
+                     s64 num_joints,
+                     u32 req,
+                     u32 stats,
+                     s64 save_at,
+                     RequestState* save) {
+  request_stats(m, stats, num_joints);
+
+  RequestState r;
+  const u32 jacc = ld<u32>(m, req);
+  const u64 frame = ld<u64>(m, req + 8);
+  const float interp = ld<float>(m, req + 16);
+  const float amount = ld<float>(m, req + 20);
+  // the fixed part: a joint-anim-compressed-fixed, whose header is also the frames' header
+  r.fixed = ld<u32>(m, jacc + 12);
+  const u32 mbits = ld<u32>(m, r.fixed + 60);
+  // (!= 0.0 frame-interp): goalc's gc_fcmp(0.0, interp, GC_FEQ) skips the second frame
+  r.two = !fcmp_xk(interp, kZero, GC_FEQ);
+
+  r.fx.init(m, r.fixed + 80, r.fixed + 64, amount);
+  float w0 = 1.f - interp;
+  w0 = w0 * amount;
+  const u32 cur = ld<u32>(m, (u32)((frame << 2) + 16 + jacc));
+  r.f0.init(m, cur + 16, cur, w0);
+  if (r.two) {
+    const u32 next = ld<u32>(m, (u32)(((1 + frame) << 2) + 16 + jacc));
+    r.f1.init(m, next + 16, next, interp * amount);
+  } else {
+    r.f1 = Stream{};
+  }
+
+  if (!(mbits & 1)) {
+    r.fx.matrix(m, out);
+  }
+  if (!(mbits & 2)) {
+    r.fx.matrix(m, out + 64);
+  }
+  if (mbits & 1) {
+    r.f0.matrix(m, out);
+  }
+  if (mbits & 2) {
+    r.f0.matrix(m, out + 64);
+  }
+  if (r.two) {
+    if (mbits & 1) {
+      r.f1.matrix(m, out);
+    }
+    if (mbits & 2) {
+      r.f1.matrix(m, out + 64);
+    }
+  }
+
+  if (save) {
+    const s64 mid = save_at < num_joints ? save_at : num_joints;
+    decomp_joints(m, out, 0, mid, r);
+    *save = r;
+    decomp_joints(m, out, mid, num_joints, r);
+  } else {
+    decomp_joints(m, out, 0, num_joints, r);
   }
 }
 
@@ -335,6 +370,85 @@ inline void normalize(float q[4]) {
 //! the 6 quadwords (24 weights) of blend stack frame k (k may be -1: the GOAL code's address)
 inline u32 blend_frame(u32 work, s64 k) {
   return work + kWorkBlendStack + (u32)(96 * (s32)k);
+}
+
+anim_cache::Cache* g_cache = nullptr;
+
+/*!
+ * The output frame from the requests in the work area: init-frame!, process-requests! and
+ * finalize-frame!, through the frame cache when the joint-control may use it.
+ */
+void frame_from_requests(u8* m, u32 dst, s64 num_joints, u32 jc, u32 work, u32 stats) {
+  using namespace anim_cache;
+  const s32 nreq = ld<s32>(m, work + kWorkNumRequests);
+  const u32 head = head_bytes(num_joints);
+  const s64 tail_at = tail_begin(num_joints);
+  Slot* slot = nullptr;
+  Req key[kMaxReqs];
+  bool same = false;
+  if (nreq >= 0 && nreq <= kMaxReqs && head <= kMaxHead &&
+      !(ld<u16>(m, jc + kJcStatus) & kStatusSpooling)) {
+    for (s32 i = 0; i < nreq; i++) {
+      const u32 req = work + 32 * (u32)i;
+      key[i] = {ld<u32>(m, req), ld<u32>(m, req + 8), ld<u32>(m, req + 12), ld<u32>(m, req + 16),
+                ld<u32>(m, req + 20)};
+    }
+    slot = &cache_for(g_cache).slot(jc);
+    same = Cache::same(*slot, (s32)num_joints, nreq, key);
+    if (same && slot->has) {
+      MIPS2C_NATIVE_LOG_STORE(dst, head);
+      memcpy(m + dst, slot->data, head);
+      for (s32 i = 0; i < nreq; i++) {
+        request_stats(m, stats, num_joints);
+        RequestState r;
+        memcpy(&r, slot->data + head + kTailBytes * (u32)i, sizeof(r));
+        decomp_joints(m, dst, tail_at, num_joints, r);
+      }
+      st<u32>(m, work + kWorkNumRequests, 0);
+      return;
+    }
+  }
+
+  // init-frame!
+  {
+    const float zero[4] = {0, 0, 0, 0};
+    for (u32 p = dst; p != dst + head; p += 16) {
+      st4(m, p, zero);
+    }
+  }
+  // process-requests!
+  RequestState saved[kMaxReqs];
+  const bool store = same;
+  for (s64 i = 0; i < (s64)ld<s32>(m, work + kWorkNumRequests); i++) {
+    process_request(m, dst, num_joints, work + (u32)(i << 5), stats, tail_at,
+                    store ? &saved[i] : nullptr);
+  }
+  st<u32>(m, work + kWorkNumRequests, 0);
+
+  // finalize-frame!
+  if (num_joints > 2) {
+    u32 tq = dst + 128;
+    for (s64 i = 0; i < num_joints - 2; i++, tq += 48) {
+      st<float>(m, tq + 12, 1.f);
+      st<float>(m, tq + 44, 1.f);
+      float q[4];
+      ld4(q, m, tq + 16);
+      normalize(q);
+      st4(m, tq + 16, q);
+    }
+  }
+
+  if (slot) {
+    if (!same) {
+      Cache::set_key(*slot, (s32)num_joints, nreq, key);
+    } else if (u8* data = g_cache->reserve(*slot, head, nreq)) {
+      memcpy(data, m + dst, head);
+      for (s32 i = 0; i < nreq; i++) {
+        memcpy(data + head + kTailBytes * (u32)i, &saved[i], sizeof(RequestState));
+      }
+      slot->has = true;
+    }
+  }
 }
 
 //! the whole new-joint-decompressor; false (nothing written) where the GOAL code would (break!)
@@ -444,37 +558,7 @@ bool decompress(u32 dst, s64 num_joints, u32 jc, u32 work, u32 stats) {
     st<float>(m, req + 20, w);
   }
 
-  // init-frame!
-  {
-    s64 qwc = 8;
-    if (num_joints > 2) {
-      qwc = qwc + (s64)(s32)(3 * (s32)(num_joints - 2));
-    }
-    const float zero[4] = {0, 0, 0, 0};
-    const u32 end = dst + (u32)(qwc << 4);
-    for (u32 p = dst; p != end; p += 16) {
-      st4(m, p, zero);
-    }
-  }
-
-  // process-requests!
-  for (s64 i = 0; i < (s64)ld<s32>(m, work + kWorkNumRequests); i++) {
-    process_request(m, dst, num_joints, work + (u32)(i << 5), stats);
-  }
-  st<u32>(m, work + kWorkNumRequests, 0);
-
-  // finalize-frame!
-  if (num_joints > 2) {
-    u32 tq = dst + 128;
-    for (s64 i = 0; i < num_joints - 2; i++, tq += 48) {
-      st<float>(m, tq + 12, 1.f);
-      st<float>(m, tq + 44, 1.f);
-      float q[4];
-      ld4(q, m, tq + 16);
-      normalize(q);
-      st4(m, tq + 16, q);
-    }
-  }
+  frame_from_requests(m, dst, num_joints, jc, work, stats);
   return true;
 }
 

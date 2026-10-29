@@ -47,6 +47,7 @@ extern const GoalcRefModule goalc_ref_vector;
 extern const GoalcRefModule goalc_ref_joint;
 extern const GoalcRefModule goalc_ref_quaternion;
 extern const GoalcRefModule goalc_ref_bones;  // (AI-assisted)
+extern const GoalcRefModule goalc_ref_sparticle_launcher;
 }
 
 // referenced by goalc_context.cpp (the kernel's suspend), never called here
@@ -146,11 +147,11 @@ void load_goalc_references() {
   // (AI-assisted) built without the old fixtures (run.sh with MIPS2C_TEST_NO_GOALC_REF=1: they
   // are for another GOALC_ABI_VERSION): the tests against them fail, the others run
   const std::initializer_list<const GoalcRefModule*> modules = {
-      &goalc_ref_joint, &goalc_ref_quaternion, &goalc_ref_bones};
+      &goalc_ref_joint, &goalc_ref_quaternion, &goalc_ref_bones, &goalc_ref_sparticle_launcher};
 #else
   const std::initializer_list<const GoalcRefModule*> modules = {
       &goalc_ref_collide_func, &goalc_ref_geometry, &goalc_ref_vector, &goalc_ref_joint,
-      &goalc_ref_quaternion, &goalc_ref_bones};
+      &goalc_ref_quaternion, &goalc_ref_bones, &goalc_ref_sparticle_launcher};
 #endif
   for (const GoalcRefModule* m : modules) {
     const u32 seg = alloc_static(m->seg0_size, 16);

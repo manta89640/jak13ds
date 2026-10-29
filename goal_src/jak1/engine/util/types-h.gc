@@ -88,3 +88,10 @@
 
 (defmacro tex-dbg (fmt-str &rest args)
   (if DEBUG_TEX `(format 0 ,(string-append "[TEX] " fmt-str) ,@args) '(empty)))
+
+;; og:preserve-this mem-copy! (gcommon.gc) in C++ (game/mips2c/jak1_functions/native_misc.cpp: memmove
+;; when the ranges allow it, the same bytes). Here, the first file of GAME: __pc-get-mips2c works
+;; once the kernel is loaded.
+(#when PC_PORT
+  (set! mem-copy! (the-as (function pointer pointer int pointer)
+                          (__pc-get-mips2c "mem-copy!" (__c-abi-wide-mask (function pointer pointer int pointer))))))
