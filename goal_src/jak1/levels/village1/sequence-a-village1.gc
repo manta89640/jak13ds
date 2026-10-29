@@ -296,6 +296,12 @@
                    (-> *math-camera* hvdf-off w)))
     (let ((f0-9 (fmin 1.0 (* 0.008333334 (- 1000.0 (ja-aframe-num 0))))))
       (set! (-> *part-id-table* 2860 init-specs 8 initial-valuef) (* 128.0 f0-9))
+      ;; og:preserve-this (AI-assisted) PC widescreen (and the 3DS's 5:3): HUD sprites keep their 4:3
+      ;; proportions (sprite.gc), so this screen fill, sized for the PS2's 4:3 screen, left the sides
+      ;; uncovered. Widened to the screen's aspect, as part-progress-hud-tint-func does.
+      (#when PC_PORT
+        (set! (-> *part-id-table* 2860 init-specs 3 initial-valuef)
+              (if (-> *pc-settings* use-vis?) (meters 15) (* (meters 15) (-> *pc-settings* aspect-ratio-scale)))))
       (cond
         ((< f0-9 1.0)
          (set! (-> *part-id-table* 2858 init-specs 1 initial-valuef) 0.0)
