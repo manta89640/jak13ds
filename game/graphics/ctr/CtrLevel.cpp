@@ -2629,12 +2629,15 @@ std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
 }
 
 // The vertex lists of every level's groups (render thread, Tod::group_list): per group a record
-// of u16s: runs, wide; per run (its entries' palette mask | 0x100 for TodMuls, entries, vertices);
-// per entry its table entry; per entry its vertex count (u8); then the entries' vertices from the
-// group's first (u8, u16 when wide), in vertex order per entry. Emptied when full (each list made
-// again as its group is written), at most once in kKeep frames.
+// of u16s: runs, wide; per run (its entries' palette mask | 0x100 for TodMuls, entries, bytes of
+// their vertices); per entry its table entry (a TodMul's: then its color); per entry its vertex
+// count | the escapes below << 8;
+// then the entries' vertices in vertex order per entry, a byte each: from the group's first, or
+// when wide (over 255 vertices) from the entry's vertex before (its first from the group's; 255:
+// the next two bytes hold it). An entry of more than 255 vertices is several. Emptied when full
+// (each list made again as its group is written), at most once in kKeep frames.
 struct TodLists {
-  static constexpr u32 kRoom = 128 * 1024, kKeep = 300, kMaxGroup = 8192;
+  static constexpr u32 kRoom = 192 * 1024, kKeep = 300, kMaxGroup = 8192;
   u16* room = nullptr;  // (made at the first list, kept)
   bool no_room = false;
   u32 used = 0, gen = 1;
@@ -2659,9 +2662,9 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
     t.group_list[g] = CtrLevelData::Tod::kNoList;
     return;
   }
-  const bool wide = nv > 256;
+  const bool wide = nv > 255;
   const bool may_empty = frame - L.emptied >= TodLists::kKeep;
-  const u32 least = 6 + (wide ? nv : (nv + 1) / 2);
+  const u32 least = 6 + (nv + 1) / 2;
   if (L.no_room || (!may_empty && (L.full || L.used + least > TodLists::kRoom))) {
     return;  // (full for now: written whole until then)
   }
@@ -2708,15 +2711,36 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
     order[i] = (u16)i;
   }
   std::sort(order.begin(), order.end(), [&](u16 a, u16 b) { return es[a].key < es[b].key; });
-  u32 runs = 0, ne = 0, at = 0;
+  u32 runs = 0, ne = 0, nm = 0, at = 0;
   for (u32 i = 0; i < (u32)order.size(); i++) {
     auto& x = es[order[i]];
     runs += i == 0 || x.key >> 16 != es[order[i - 1]].key >> 16;
     ne += (x.count + 254) / 255;
+    nm += (x.key >> 24) ? (x.count + 254) / 255 : 0;
     x.at = at;
     at += x.count;
   }
-  const u32 size = 2 + 3 * runs + ne + (ne + 1) / 2 + (wide ? nk : (nk + 1) / 2);
+  // the vertices in entry order, and their bytes
+  auto& offs = L.offs;
+  offs.resize(nk);
+  for (int i = first; i < end; i++) {
+    const u32 idx = (u16)v[i].pad;
+    if (idx < ntab) {
+      offs[es[slot(idx) & 0xffff].at++] = (u16)(i - first);
+    }
+  }
+  u32 bytes = nk;
+  if (wide) {
+    for (u32 i = 0, k = 0; i < (u32)order.size(); i++) {
+      u32 last = 0;
+      for (u32 j = 0; j < es[order[i]].count; j++, k++) {
+        last = j % 255 ? last : 0;
+        bytes += offs[k] - last >= 255 ? 2 : 0;
+        last = offs[k];
+      }
+    }
+  }
+  const u32 size = 2 + 3 * runs + 2 * ne + nm + (bytes + 1) / 2;
   if (size > TodLists::kRoom || ne > 0xffff) {
     t.group_list[g] = CtrLevelData::Tod::kNoList;
     return;
@@ -2743,23 +2767,13 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
       return;
     }
   }
-  // the vertices in entry order
-  auto& offs = L.offs;
-  offs.resize(nk);
-  for (int i = first; i < end; i++) {
-    const u32 idx = (u16)v[i].pad;
-    if (idx < ntab) {
-      offs[es[slot(idx) & 0xffff].at++] = (u16)(i - first);
-    }
-  }
   u16* const r = L.room + L.used;
   r[0] = (u16)runs;
   r[1] = wide ? 1 : 0;
   u16* run = r + 2 - 3;
   u16* e = r + 2 + 3 * runs;
-  u8* cnt = (u8*)(e + ne);
-  u8* o8 = (u8*)(e + ne + (ne + 1) / 2);
-  u16* o16 = e + ne + (ne + 1) / 2;
+  u16* cnt = e + ne + nm;
+  u8* o = (u8*)(e + 2 * ne + nm);
   u32 k = 0;
   for (u32 i = 0; i < (u32)order.size(); i++) {
     const auto& x = es[order[i]];
@@ -2768,21 +2782,31 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
       run[0] = (u16)(x.key >> 16);
       run[1] = run[2] = 0;
     }
+    u8* const o0 = o;
     for (u32 left = x.count; left;) {
       const u32 c = std::min<u32>(left, 255);
       run[1]++;
-      run[2] += (u16)c;
       *e++ = (u16)x.key;
-      *cnt++ = (u8)c;
+      if (x.key >> 24) {
+        *e++ = t.muls[(x.key & 0xffff) - nc].color;
+      }
+      u32 escapes = 0, last = 0;
+      for (u32 j = 0; j < c; j++, k++) {
+        const u32 d = wide ? offs[k] - last : offs[k];
+        if (d >= 255) {
+          *o++ = 255;
+          *o++ = (u8)d;
+          *o++ = (u8)(d >> 8);
+          escapes++;
+        } else {
+          *o++ = (u8)d;
+        }
+        last = offs[k];
+      }
+      *cnt++ = (u16)(c | escapes << 8);
       left -= c;
     }
-    for (u32 j = 0; j < x.count; j++, k++) {
-      if (wide) {
-        *o16++ = offs[k];
-      } else {
-        *o8++ = (u8)offs[k];
-      }
-    }
+    run[2] += (u16)(o - o0);
   }
   t.group_list[g] = L.used + 1;
   L.used += size;
@@ -2793,55 +2817,75 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
 // entries using a palette of only (kTodAllRuns: all of them). A run of entries whose palettes
 // didn't move since is passed over whole. Returns the vertices written.
 constexpr u32 kTodAllRuns = ~0u;
-template <typename Off>
+template <bool kWide>
 u32 tod_list_write(CtrLevelData::Tod& t, const u16* r, c3l::Vertex* v, int first, u32 since,
                    bool all, u32 only) {
   const u32 nr = r[0];
   const u16* run = r + 2;
   const u16* e = run + 3 * nr;
-  u32 ne = 0;
+  u32 ne = 0, nm = 0;
   for (u32 k = 0; k < nr; k++) {
     ne += run[3 * k + 1];
+    nm += run[3 * k] >> 8 ? run[3 * k + 1] : 0;
   }
-  const u8* c = (const u8*)(e + ne);
-  const Off* o = (const Off*)(e + ne + (ne + 1) / 2);
+  const u16* c = e + ne + nm;
+  const u8* o = (const u8*)(e + 2 * ne + nm);
   tod_word* const w = (tod_word*)(v + first);
   const u32* const stamp = t.stamp.data();
   const u32* const cver = t.cver.data();
   const u32* const tab = t.table.data();
-  const c3l::TodMul* const muls = t.muls.data();
-  const u32 nc = t.color_count, keep = t.keep_alpha;
+  const u32 keep = t.keep_alpha;
   u32 written = 0;
   for (const u16* const run_end = e; run < run_end; run += 3) {
     const u32 last = t.lut[run[0] & 0xff], n = run[1];
+    const u32 step = run[0] >> 8 ? 2 : 1;  // (a TodMul: its color after it)
     if ((!all && last <= since) || (only != kTodAllRuns && !(run[0] & only))) {
       // (none of these entries was blended again since)
-      e += n;
+      e += n * step;
       c += n;
       o += run[2];
       continue;
     }
-    const bool mul = run[0] >> 8;
-    for (const u16* const end = e + n; e < end; e++, c++) {
-      const u32 idx = *e, cnt = *c;
+    for (const u16* const end = e + n * step; e < end; e += step, c++) {
+      const u32 idx = *e, cnt = *c & 0xff;
       if (stamp[idx] < last) {
         tod_entry_slow(t, idx);
       }
-      if (all || cver[mul ? muls[idx - nc].color : idx] > since) {
+      if (all || cver[e[step - 1]] > since) {
         const u32 rgba = tab[idx];
-        if (!keep) {
-          for (u32 j = 0; j < cnt; j++) {
-            w[4 * o[j] + 3] = rgba;
+        if (!kWide) {
+          if (!keep) {
+            for (u32 j = 0; j < cnt; j++) {
+              w[4 * o[j] + 3] = rgba;
+            }
+          } else {
+            for (u32 j = 0; j < cnt; j++) {
+              tod_word* x = w + 4 * o[j] + 3;
+              *x = (*x & keep) | rgba;
+            }
           }
+          o += cnt;
         } else {
+          u32 at = 0;
           for (u32 j = 0; j < cnt; j++) {
-            tod_word* x = w + 4 * o[j] + 3;
-            *x = (*x & keep) | rgba;
+            u32 d = *o++;
+            if (d == 255) {
+              d = o[0] | (u32)o[1] << 8;
+              o += 2;
+            }
+            at += d;
+            tod_word* x = w + 4 * at + 3;
+            if (keep) {
+              *x = (*x & keep) | rgba;
+            } else {
+              *x = rgba;
+            }
           }
         }
         written += cnt;
+      } else {
+        o += cnt + 2 * (*c >> 8);
       }
-      o += cnt;
     }
   }
   return written;
@@ -2850,8 +2894,8 @@ u32 tod_list_write(CtrLevelData::Tod& t, const u16* r, c3l::Vertex* v, int first
 u32 tod_list_write(CtrLevelData::Tod& t, u32 gl, c3l::Vertex* v, int first, u32 since, bool all,
                    u32 only) {
   const u16* r = g_tod_lists.room + gl - 1;
-  return r[1] ? tod_list_write<u16>(t, r, v, first, since, all, only)
-              : tod_list_write<u8>(t, r, v, first, since, all, only);
+  return r[1] ? tod_list_write<true>(t, r, v, first, since, all, only)
+              : tod_list_write<false>(t, r, v, first, since, all, only);
 }
 
 // The chunk's vertex colors brought up to date in its mesh (in place: a frame the GPU still draws
@@ -3480,7 +3524,8 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   // Allow for the added light stamp and list of every possible visibility group (at most one per
   // run, plus the whole-chunk fallback).
   [[maybe_unused]] const u32 need = nc * t->palette_count * 3 + nm * (u32)sizeof(c3l::TodMul) +
-                                     (nc + nm) * 10 + nc * 5 + TodLists::kRoom * 2 +
+                                     (nc + nm) * 10 + nc * 5 +
+                                     (g_tod_lists.room ? 0 : TodLists::kRoom * 2) +
                                      (u32)lev->chunks.size() * 29 + (u32)lev->vis_runs.size() * 2 +
                                      (u32)(lev->chunks.size() + lev->vis_runs.size()) * 8;
 #ifdef __3DS__

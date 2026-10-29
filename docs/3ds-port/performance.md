@@ -1248,3 +1248,64 @@ environment looks bad, parts of Lava Tube / Citadel are sometimes missing.
   detail_scale 0.1-4, the scale keys at least 0.05; run_culling = off only stops the view test.
 - **Removed:** impostors, fine_vis (+ ctr_vis_builder, .c3v), occ_cull, vista_untextured, with
   their code, keys (a note in the log), the safe preset's and gpu_profile = ab's entries.
+
+## Time of day: only the vertices whose color changed (AI-assisted, Oct 29, todperf)
+
+convtex's exact Citadel pulse (bright groups follow every move of palette 1) cost 3.3-5.5 ms of
+render thread per frame in Azahar, against 1.3-1.6 ms with the full hold. The PS2 blends every color
+every frame (time-of-day-interp-colors in background.gc), so there is no lower rate to match.
+
+- **Per-color change versions** (`Tod::cver`): the version at which a color's rgba last changed.
+  A TodMul changes only with its color.
+- **Per-group vertex lists** (`tod_make_list`): made as the group is first written whole. Each list
+  holds the group's vertices by table entry, in runs by palette mask. A group that is behind writes
+  only the vertices of the entries whose color changed since it was written. Runs whose palettes
+  didn't move are passed over, and no vertex memory is read.
+- **The light pass uses the lists too**, for its moved light palettes.
+- **The blend adds only the palettes a color isn't black in.**
+- **The title screen keeps the old whole-group path.** Its fast day changes nearly every color every
+  frame, so the lists don't pay there.
+- **Memory.** One room for every level's lists, 384 KB, allocated at the first list. When full it is
+  emptied, at most every 300 frames. A group without a list is written whole, as before. On top of
+  that, 4 bytes per color per level (Citadel 50 KB).
+- **tod_pulse_step now 0 by default**: every move, exact as the PC and the PS2. It now costs less than
+  the hold did.
+
+The output is the same as the old code, vertex for vertex: `test/ctr_render/tod_diff/run.sh`. It
+runs the base commit's time of day code and the working tree's side by side on a real level file.
+- **Traces:** Citadel's host weight trace (875 frames) and three random 400-frame traces.
+- **Settings:** pulse step 4 and 0.
+- **Visibility:** all runs shown, or runs shown and hidden at random.
+- **Variants:** an older file's table, and the title screen switched on or off halfway.
+- **Levels:** Citadel, village1 and Jak II's atoll each pass 40 of 40 cases. Further runs on the title
+  flight's trace, a 6K room (list drops) and every chunk drawn are also exact.
+
+ARM instructions per Citadel level draw (`run.sh --arm`; devkitARM -O2 under Unicorn, mean after 32
+warm-up draws, runs shown and hidden at random):
+
+| drawn vertices | full hold (before convtex) | convtex head | this, pulse step 0 (exact) | this, step 4 |
+|---|---|---|---|---|
+| 118k | 765k | 1006k | 588k | 548k |
+| 217k | 1166k | 1299k | 1013k | - |
+
+Vertices written per draw (Citadel's trace, all runs shown, 118k drawn):
+- full hold: 19.2k
+- convtex head: 28.0k (34.8k at step 0)
+- this: 10.2k
+
+Each written vertex costs about 0.19 us on hardware (FCRAM). The lists also read no vertex
+memory for the vertices they skip.
+
+The title flight (village1, its fast day, whole groups) costs 715k against 701k (+2%).
+
+One Azahar run (emu-fable, silent). It used a diagnostic A/B build: every 300 frames it switched
+between the old path and the lists. Both phases ran without bright groups, because the level loaded
+during a step-0 phase. That build had a 256 KB room:
+- old path (full hold): 6.3-6.8 ms per Citadel draw, 37-46k vertices
+- lists: 7.8-8.0 ms, 38-40k vertices
+
+So the lists were slower there. The host model shows why: that room is too small for Citadel's drawn
+set (150k+ vertices drawn in game), so most groups had no list. The same model, with a 217k-vertex
+drawn set and that room, gives 1.28M instructions against 1.17M for the full hold, the same ordering
+as Azahar. With the 384 KB room and the leaner lists of the final code it gives 1.01M. The final
+build was not run in Azahar.
