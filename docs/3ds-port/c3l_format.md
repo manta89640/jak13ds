@@ -357,10 +357,23 @@ Texture (16 bytes)
   values)`. `c3l_mem` (tools/ctr_level_converter/c3l_mem.cpp) prints each level's linear memory and
   that of level sets, and `c3l_mem --compare-alpha OLD NEW` checks every mask against the RGBA8
   texture it replaces.
-- **Pools:** the runtime reads a level's textures into texture pools of at most 1 MB
+- **Pools:** the runtime reads a level's textures into texture pools of at most 256 KB
   (`kTexPoolPiece`; a larger texture gets one of its own), the background's textures first. Each
-  pool moves to VRAM while there is room (the earlier pieces first), the rest stays in linear
-  memory; small pools need no large linear block at load and fill VRAM's two banks closely.
+  pool moves to VRAM while there is room (the earlier pieces first; a pool that doesn't fit whole
+  puts at least 64 KB of its start there), the rest stays in linear memory. With 1 MB pieces
+  rolling+village2 left 843 KB of VRAM free in pieces too small for them and 516 KB of its
+  textures in linear memory.
+- **Sharing between levels:** (v23) `ExtTexKey` (ExtHeader::size >= 112, at ext_offset + 104;
+  every file in stream mode has an extension header now, the merc-only ones too) holds each
+  texture's content key (`c3l::texture_content_key`: size, format, levels, texels, and a color
+  texture's mask texels; 0 for masks and animated slots). `ctr_level_converter --all` writes
+  `texshare.c3t` (`c3l::TexShareHeader`) next to the files: the keys that more than one level has,
+  each with its group, the textures exactly the same levels have (`--texshare DIR DIR` writes it
+  again for a folder). The runtime loads a group once, into a pool of its own, for the first loaded
+  level that has it, and the other loaded levels use those textures; the group goes with the last
+  of them. Every texture of a group is in every level that has the group, so none of it is unused
+  while it is loaded. Jak 1: 511 textures in 123 groups. Log: `[ctr] LEVEL: shared textures: X KB
+  loaded for the levels that also have them, Y KB from the loaded ones`.
 - **Shared textures:** (AI-assisted) the fr3 has a copy of a texture for each merc model that
   uses it (citadel: 1017 textures, 776 of them copies; pal-environment-front 90 times). Identical
   textures (size and texels) are written once and the draws share it: citadel's textures 17.6 MB

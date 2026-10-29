@@ -232,7 +232,7 @@ LevelMem level_mem(const CtrLevelData& lev) {
       m.heap += vec_bytes(e.mask) + vec_bytes(e.dests) + sizeof(e);
     }
   }
-  m.tex = lev.tex_pools.empty() ? 0 : lev.tex_pool_bytes;
+  m.tex = (lev.tex_pools.empty() ? 0 : lev.tex_pool_bytes) + lev.tex_shared_bytes;
   m.heap += vec_bytes(lev.chunks) + vec_bytes(lev.draws) + vec_bytes(lev.draw_states) +
             vec_bytes(lev.draw_alpha80) + vec_bytes(lev.sorted_draws) +
             vec_bytes(lev.ordered_draws) + vec_bytes(lev.early_draws) + vec_bytes(lev.draw_chunk) +
@@ -976,12 +976,15 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
 }
 
 void CtrLevels::delete_textures(TexLoad* t) {
-  for (int h : t->handles) {
-    ctr_gpu_tex_delete(h);
+  for (size_t i = 0; i < t->handles.size(); i++) {
+    if (!(i < t->shared.size() && t->shared[i])) {
+      ctr_gpu_tex_delete(t->handles[i]);
+    }
   }
   for (int pool : t->pools) {
     ctr_gpu_pool_delete(pool);  // after its textures
   }
+  release_share_groups(t->share_groups);
   *t = TexLoad();
 }
 
@@ -1084,6 +1087,9 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
     lev->tex_pools = std::move(d.tex.pools);
     lev->textures = std::move(d.tex.handles);
     lev->tex_min_alpha = std::move(d.tex.min_alpha);
+    lev->tex_shared = std::move(d.tex.shared);
+    lev->tex_share_groups.insert(lev->tex_share_groups.end(), d.tex.share_groups.begin(),
+                                 d.tex.share_groups.end());
     d.tex = TexLoad();
     build_draw_order(lev);  // the draws' GPU states hold the texture handles
     made++;
@@ -1921,8 +1927,9 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   const int missing = missing_parts(*out, &missing_bytes);
   out->incomplete = missing > 0;
   if (missing) {
-    lg::warn("[ctr] {}: {} parts ({} KB) left out, made again when memory frees", name, missing,
-             missing_bytes / 1024);
+    lg::error("[ctr] {}: {} parts ({} KB) left out for lack of linear memory ({} KB free), made "
+              "again when memory frees",
+              name, missing, missing_bytes / 1024, ctr_gpu_linear_free() / 1024);
   }
   return LoadResult::LOADED;
 }
@@ -4242,7 +4249,7 @@ void make_cull_clusters(CtrLevelData& lev) {
 
 // A level's texture pools: VRAM first by the level's priority, within it the earlier pieces (the
 // background's textures) first.
-constexpr u32 kTexPoolPiece = 1024 * 1024;
+constexpr u32 kTexPoolPiece = 256 * 1024;
 void set_tex_priority(const std::vector<int>& pools, int priority) {
   for (size_t i = 0; i < pools.size(); i++) {
     ctr_gpu_pool_set_priority(pools[i], priority * 16 + 15 - (int)std::min<size_t>(i, 15));
@@ -4314,20 +4321,82 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     }
   }
   // c3l v23: an alpha mask with its texture
+  std::vector<int> mask_idx(texs.size(), -1);
   for (size_t i = 0; i < texs.size(); i++) {
     if (c3l::texture_is_mask(texs[i]) && c3l::texture_mask_of(texs[i]) < texs.size()) {
       background[i] = background[c3l::texture_mask_of(texs[i])];
+      mask_idx[c3l::texture_mask_of(texs[i])] = (int)i;
+    }
+  }
+  out->handles.assign(texs.size(), -1);
+  out->min_alpha.assign(texs.size(), 0);
+  out->shared.assign(texs.size(), 0);
+  // c3l v23: the textures other levels have too (texshare.c3t), by their content keys: a group
+  // another loaded level holds is used as it is, one nobody holds is loaded here into a pool of its
+  // own (group_of), for the levels that come later
+  std::vector<int> group_of(texs.size(), -1);
+  std::vector<u64> keys;
+  {
+    c3l::ExtHeader eh;
+    c3l::ExtTexKey tk{};
+    if (hdr.version >= c3l::kTexMaskVersion && read_ext_header(f, hdr, &eh) &&
+        eh.size >= c3l::kExtHeaderTexKeySize &&
+        f.read(hdr.ext_offset + c3l::kExtHeaderV23Size, &tk, sizeof(tk)) &&
+        tk.count == texs.size() && !f.read_array(tk.offset, tk.count, &keys)) {
+      keys.clear();
+    }
+  }
+  std::vector<u32> creating;
+  if (keys.size() == texs.size()) {
+    std::lock_guard<std::mutex> lk(m_share_lock);
+    for (size_t i = 0; i < texs.size(); i++) {
+      const int g = plan[i].ok && keys[i] && !c3l::texture_is_mask(texs[i])
+                        ? share_group_of(keys[i])
+                        : -1;
+      if (g < 0) {
+        continue;
+      }
+      auto& grp = m_share_groups[(u32)g];
+      if (std::find(out->share_groups.begin(), out->share_groups.end(), (u32)g) ==
+          out->share_groups.end()) {
+        out->share_groups.push_back((u32)g);
+        if (grp.users++ == 0) {
+          creating.push_back((u32)g);
+        }
+      }
+      const int m = mask_idx[i];
+      auto it = grp.tex.find(keys[i]);
+      if (it != grp.tex.end()) {
+        out->handles[i] = it->second.handle;
+        out->min_alpha[i] = it->second.min_alpha;
+        out->shared[i] = 1;
+        out->borrowed_bytes += plan[i].file_bytes;
+        plan[i].ok = false;
+        if (m >= 0) {
+          out->handles[m] = it->second.mask;
+          out->shared[m] = 1;
+          out->borrowed_bytes += plan[m].file_bytes;
+          plan[m].ok = false;
+        }
+      } else if (std::find(creating.begin(), creating.end(), (u32)g) != creating.end()) {
+        group_of[i] = g;
+        if (m >= 0) {
+          group_of[m] = g;
+        }
+      }
     }
   }
   u32 pool_bytes = 0;
   std::vector<u32> piece_bytes;
+  std::vector<int> piece_group;  // -1: the level's own piece, else a share group's pool
   for (int pass = 0; pass < 2; pass++) {
     for (size_t i = 0; i < texs.size(); i++) {
       auto& p = plan[i];
-      if (p.ok && background[i] == (pass == 0)) {
+      if (p.ok && group_of[i] < 0 && background[i] == (pass == 0)) {
         const u32 b = (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
         if (piece_bytes.empty() || piece_bytes.back() + b > kTexPoolPiece) {
           piece_bytes.push_back(0);
+          piece_group.push_back(-1);
         }
         p.piece = (u32)piece_bytes.size() - 1;
         p.offset = piece_bytes.back();
@@ -4340,8 +4409,25 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     }
   }
   out->pool_bytes = pool_bytes;
-  out->handles.assign(texs.size(), -1);
-  out->min_alpha.assign(texs.size(), 0);
+  for (const u32 g : creating) {
+    bool any = false;
+    for (size_t i = 0; i < texs.size(); i++) {
+      auto& p = plan[i];
+      if (p.ok && group_of[i] == (int)g) {
+        if (!any) {
+          piece_bytes.push_back(0);
+          piece_group.push_back((int)g);
+          any = true;
+        }
+        const u32 b = (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
+        p.piece = (u32)piece_bytes.size() - 1;
+        p.offset = piece_bytes.back();
+        piece_bytes.back() += b;
+        out->shared_bytes += b;
+      }
+    }
+  }
+  std::vector<int> all_pools;
   std::vector<u8*> bases;
   for (const u32 b : piece_bytes) {
     int pool = ctr_gpu_pool_create(b);
@@ -4350,16 +4436,25 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     }
     if (pool < 0) {
       lg::error("[ctr] {}: no memory for the textures ({} KB, a piece of {} KB)", name,
-                pool_bytes / 1024, b / 1024);
-      for (int q : out->pools) {
+                (pool_bytes + out->shared_bytes) / 1024, b / 1024);
+      for (int q : all_pools) {
         ctr_gpu_pool_delete(q);
       }
-      out->pools.clear();
+      all_pools.clear();
       bases.clear();
       break;
     }
-    out->pools.push_back(pool);
+    all_pools.push_back(pool);
     bases.push_back((u8*)ctr_gpu_pool_data(pool));
+  }
+  for (size_t k = 0; k < all_pools.size(); k++) {
+    if (piece_group[k] < 0) {
+      out->pools.push_back(all_pools[k]);
+    } else {
+      std::lock_guard<std::mutex> lk(m_share_lock);
+      m_share_groups[(u32)piece_group[k]].pool = all_pools[k];
+      ctr_gpu_pool_set_priority(all_pools[k], 2 * 16 + 15);
+    }
   }
   std::vector<u8> texels;
   for (size_t i = 0; i < texs.size(); i++) {
@@ -4371,7 +4466,7 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     if (!p.ok || bases.empty()) {
       continue;
     }
-    const int pool = out->pools[p.piece];
+    const int pool = all_pools[p.piece];
     u8* dst = bases[p.piece] + p.offset;
     bool read_ok;
     if (!p.expand) {
@@ -4402,15 +4497,84 @@ bool CtrLevels::load_textures(c3l::Reader& f,
   for (size_t i = 0; i < texs.size(); i++) {
     const u16 c = c3l::texture_mask_of(texs[i]);
     if (c3l::texture_is_mask(texs[i]) && c < texs.size() && out->handles[i] >= 0 &&
-        out->handles[c] >= 0) {
+        out->handles[c] >= 0 && !out->shared[c]) {
       ctr_gpu_tex_set_mask(out->handles[c], out->handles[i]);
       out->min_alpha[c] = out->min_alpha[i];
     }
   }
-  for (int pool : out->pools) {
+  // the share groups loaded here, for the levels that load later
+  if (!creating.empty()) {
+    std::lock_guard<std::mutex> lk(m_share_lock);
+    for (size_t i = 0; i < texs.size(); i++) {
+      if (group_of[i] < 0 || c3l::texture_is_mask(texs[i]) || out->handles[i] < 0) {
+        continue;
+      }
+      const int m = mask_idx[i];
+      if (m >= 0 && out->handles[m] < 0) {
+        continue;
+      }
+      auto& st = m_share_groups[(u32)group_of[i]].tex[keys[i]];
+      st.handle = out->handles[i];
+      st.mask = m >= 0 ? out->handles[m] : -1;
+      st.min_alpha = out->min_alpha[i];
+      out->shared[i] = 1;
+      if (m >= 0) {
+        out->shared[m] = 1;
+      }
+    }
+  }
+  for (int pool : all_pools) {
     ctr_gpu_pool_ready(pool);
   }
   return true;
+}
+
+int CtrLevels::share_group_of(u64 key) {
+  if (!m_share_read) {
+    m_share_read = true;
+    const auto path = ctr_level_c3l_dir() / "texshare.c3t";
+    if (FILE* fp = fopen(path.string().c_str(), "rb")) {
+      c3l::TexShareHeader h{};
+      if (fread(&h, sizeof(h), 1, fp) == 1 && !memcmp(h.magic, c3l::kTexShareMagic, 4) &&
+          h.version == 1 && h.count < (1u << 20)) {
+        m_share_table.resize(h.count);
+        if (h.count && fread(m_share_table.data(), sizeof(c3l::TexShareEntry), h.count, fp) !=
+                           h.count) {
+          m_share_table.clear();
+        }
+      }
+      fclose(fp);
+      lg::info("[ctr] texshare.c3t: {} textures in {} levels' share groups", m_share_table.size(),
+               m_share_table.empty() ? 0 : 1 + std::max_element(m_share_table.begin(),
+                                                                m_share_table.end(),
+                                                                [](const auto& a, const auto& b) {
+                                                                  return a.group < b.group;
+                                                                })->group);
+    }
+  }
+  auto it = std::lower_bound(m_share_table.begin(), m_share_table.end(), key,
+                             [](const c3l::TexShareEntry& e, u64 k) { return e.key < k; });
+  return it != m_share_table.end() && it->key == key ? (int)it->group : -1;
+}
+
+void CtrLevels::release_share_groups(const std::vector<u32>& groups) {
+  std::lock_guard<std::mutex> lk(m_share_lock);
+  for (const u32 g : groups) {
+    auto it = m_share_groups.find(g);
+    if (it == m_share_groups.end() || --it->second.users) {
+      continue;
+    }
+    for (const auto& [key, t] : it->second.tex) {
+      ctr_gpu_tex_delete(t.handle);
+      if (t.mask >= 0) {
+        ctr_gpu_tex_delete(t.mask);
+      }
+    }
+    if (it->second.pool >= 0) {
+      ctr_gpu_pool_delete(it->second.pool);  // after its textures
+    }
+    m_share_groups.erase(it);
+  }
 }
 
 bool CtrLevels::load_file(const fs::path& path,
@@ -4601,6 +4765,14 @@ bool CtrLevels::load_file(const fs::path& path,
     out->tex_empty = tl.empty;
     out->textures = std::move(tl.handles);
     out->tex_min_alpha = std::move(tl.min_alpha);
+    out->tex_shared = std::move(tl.shared);
+    out->tex_share_groups = std::move(tl.share_groups);
+    out->tex_shared_bytes = tl.shared_bytes;
+    if (tl.shared_bytes || tl.borrowed_bytes) {
+      lg::info("[ctr] {}: shared textures: {} KB loaded for the levels that also have them, {} KB "
+               "from the loaded ones",
+               name, tl.shared_bytes / 1024, tl.borrowed_bytes / 1024);
+    }
     if (!ok) {
       return false;
     }
@@ -5453,13 +5625,18 @@ void CtrLevels::retry_failed_loads(u64 frame) {
 
 void CtrLevels::unload(CtrLevelData& lev) {
   bump_set_generation();  // (AI-assisted)
-  for (int t : lev.textures) {
-    ctr_gpu_tex_delete(t);
+  for (size_t i = 0; i < lev.textures.size(); i++) {
+    if (!(i < lev.tex_shared.size() && lev.tex_shared[i])) {
+      ctr_gpu_tex_delete(lev.textures[i]);
+    }
   }
   for (int pool : lev.tex_pools) {
     ctr_gpu_pool_delete(pool);  // after its textures (freed together, after the frame)
   }
   lev.tex_pools.clear();
+  release_share_groups(lev.tex_share_groups);  // c3l v23: the shared ones, with the last user
+  lev.tex_share_groups.clear();
+  lev.tex_shared.clear();
   for (int m : lev.meshes) {
     ctr_gpu_mesh_delete(m);
   }

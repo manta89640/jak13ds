@@ -211,7 +211,7 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
 #define VBUF_BYTES (512 * 1024)
 #define MAX_STAGING 1024
 #define MAX_TEXTURES 2048
-#define MAX_POOLS 64
+#define MAX_POOLS 256
 /* GPU command buffer: a frame's commands must all fit (splitting it doesn't make room). 2 MB of
  * linear memory; a busy frame (3000 level draws) takes ~1 MB. */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
@@ -3940,7 +3940,7 @@ static void update_pool_residency(void) {
     if (!v) {
       /* (AI-assisted) not all of it: as much as fits in the VRAM that's left (whole textures from
        * the start), so the GPU reads those fast and they leave linear memory */
-      const unsigned int kStep = 128 * 1024, kMinPart = 256 * 1024;
+      const unsigned int kStep = 32 * 1024, kMinPart = 64 * 1024;
       unsigned int want = (unsigned int)vramSpaceFree();
       want = want > VRAM_RESERVE ? want - VRAM_RESERVE : 0;
       if (want > p->bytes) {

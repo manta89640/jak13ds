@@ -373,6 +373,55 @@ struct ExtShrubFade {
 static_assert(sizeof(ExtShrubFade) == kExtHeaderV23Size - kExtHeaderV22Size);
 
 /*!
+ * v23: each texture's content key (texture_content_key: its size, format, levels and texels, a
+ * color's alpha mask's texels too; 0: never shared, as masks and animated slots), for sharing a
+ * texture between the loaded levels that have it (texshare.c3t). ExtHeader::size >=
+ * kExtHeaderTexKeySize, then this at ext_offset + kExtHeaderV23Size.
+ */
+constexpr uint32_t kExtHeaderTexKeySize = 112;
+struct ExtTexKey {
+  uint32_t count;   // uint64_t[count]: by texture index
+  uint32_t offset;  // absolute
+};
+static_assert(sizeof(ExtTexKey) == kExtHeaderTexKeySize - kExtHeaderV23Size);
+inline uint64_t texture_key_add(uint64_t h, const void* data, size_t bytes) {
+  const uint8_t* p = (const uint8_t*)data;
+  for (size_t i = 0; i < bytes; i++) {
+    h = (h ^ p[i]) * 1099511628211ull;
+  }
+  return h;
+}
+inline uint64_t texture_content_key(const Texture& t, const void* data, const void* mask,
+                                    size_t mask_bytes) {
+  const uint32_t d[4] = {t.w, t.h, t.format, t.levels};
+  uint64_t h = texture_key_add(1469598103934665603ull, d, sizeof(d));
+  h = texture_key_add(h, data, t.data_size);
+  h = texture_key_add(h, mask, mask_bytes);
+  return h ? h : 1;
+}
+
+/*!
+ * texshare.c3t (next to the .c3l files, ctr_level_converter --all): the content keys of the
+ * textures that more than one level of the game has, each with its group: the textures that the
+ * same levels have. A group is loaded once, by the first loaded level of those, into a texture pool
+ * of its own, and the levels share it until the last of them unloads (every texture of a group is
+ * in every level that uses the group, so none of it is unused while it is loaded).
+ */
+constexpr char kTexShareMagic[4] = {'C', '3', 'S', 'H'};
+struct TexShareHeader {
+  char magic[4];
+  uint32_t version;  // 1
+  uint32_t count;    // TexShareEntry[count], by key
+  uint32_t groups;
+};
+struct TexShareEntry {
+  uint64_t key;
+  uint32_t group;
+  uint32_t pad;
+};
+static_assert(sizeof(TexShareEntry) == 16);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

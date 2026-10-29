@@ -25,12 +25,14 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "game/graphics/ctr/c3l_format.h"
 #include "game/graphics/ctr/c3l_reader.h"
+#include "texshare.h"
 
 namespace fs = std::filesystem;
 using u8 = uint8_t;
@@ -41,11 +43,14 @@ namespace {
 
 struct LevelMem {
   u64 tex = 0, tex_masks = 0, meshes = 0, near = 0, merc = 0, normals = 0, wind = 0;
+  // the meshes Jak II's distance freeing can leave out (shrubs and ties with a distance limit)
+  u64 dist_free = 0;
   // textures only drawn by the chunks a far level frees (CtrLevels::unload_detail)
   u64 tex_detail = 0;
   u64 by_format[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   // each texture's (size, texels) hash and pool bytes: the same texture in several levels
   std::vector<std::pair<u64, u32>> tex_ids;
+  std::vector<u64> keys;  // the content keys (ExtTexKey)
   bool ok = false;
   u64 linear() const { return meshes + merc + normals + wind; }
 };
@@ -175,6 +180,10 @@ LevelMem level_mem(const fs::path& path) {
       continue;
     }
     (near[ci] ? m.near : m.meshes) += mesh_bytes(ch.vertex_count, hi - lo);
+    if (!near[ci] && ch.lod_tier == 0 && ch.max_dist > 0.f &&
+        (ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE)) {
+      m.dist_free += mesh_bytes(ch.vertex_count, hi - lo);
+    }
   }
   // one mesh per vertex range (a generated LOD shares its model's)
   std::map<u32, std::pair<u32, std::pair<u32, u32>>> ranges;
@@ -190,6 +199,10 @@ LevelMem level_mem(const fs::path& path) {
   for (const auto& [first, r] : ranges) {
     const u32 lo = r.second.first, hi = r.second.second;
     m.merc += (u64)r.first * sizeof(c3l::MercVertex) + (hi > lo ? (hi - lo) * 2u : 0);
+  }
+  texshare::LevelKeys lk;
+  if (texshare::read_level_keys(path, &lk)) {
+    m.keys = std::move(lk.keys);
   }
   m.ok = true;
   return m;
@@ -257,11 +270,16 @@ int main(int argc, char** argv) {
   const fs::path dir = argv[1];
   std::string sets_file;
   u64 vram = 4650, total = 0, arena = 4096, reserve = 3072;
-  bool formats = false;
+  bool formats = false, share = false, pools = false;
   for (int i = 2; i < argc; i += 2) {
     const std::string k = argv[i];
-    if (k == "--formats") {
-      formats = true;
+    if (k == "--formats" || k == "--share" || k == "--pools") {
+      if (k == "--pools") {
+        pools = true;
+        i--;
+        continue;
+      }
+      (k == "--formats" ? formats : share) = true;
       i--;
       continue;
     }
@@ -314,10 +332,23 @@ int main(int argc, char** argv) {
   if (sets_file.empty()) {
     return 0;
   }
+  // texshare.c3t: the share groups (--pools: the texture pools a set's levels make)
+  std::map<u64, u32> group_of;
+  {
+    std::ifstream ts(dir / "texshare.c3t", std::ios::binary);
+    c3l::TexShareHeader h{};
+    if (ts.read((char*)&h, sizeof(h)) && !memcmp(h.magic, c3l::kTexShareMagic, 4)) {
+      std::vector<c3l::TexShareEntry> e(h.count);
+      ts.read((char*)e.data(), (std::streamsize)(e.size() * sizeof(e[0])));
+      for (const auto& x : e) {
+        group_of[x.key] = x.group;
+      }
+    }
+  }
   std::ifstream in(sets_file);
   std::string line;
   printf("\nset                                   textures  in linear  meshes+  free KB  "
-         "margin KB  shared  detail\n");
+         "margin KB  shared  detail  floor\n");
   while (std::getline(in, line)) {
     std::istringstream ss(line);
     std::vector<std::string> names{"GAME"};
@@ -330,7 +361,7 @@ int main(int argc, char** argv) {
     if (names.size() < 2) {
       continue;
     }
-    u64 tex = 0, lin = 0, shared = 0, detail = 0;
+    u64 tex = 0, lin = 0, shared = 0, detail = 0, dfree = 0;
     std::string label, missing;
     std::map<u64, int> seen;
     for (const auto& nm : names) {
@@ -341,6 +372,7 @@ int main(int argc, char** argv) {
       }
       tex += it->second.tex;
       lin += it->second.linear();
+      dfree += it->second.dist_free;
       // the most a far level gives back: the largest one's (one level is the camera's)
       if (nm != "GAME") {
         detail = std::max(detail, it->second.tex_detail);
@@ -354,12 +386,37 @@ int main(int argc, char** argv) {
         label += (label.empty() ? "" : "+") + nm;
       }
     }
+    if (pools) {
+      std::set<u32> groups;
+      u64 own = 0;
+      for (const auto& nm : names) {
+        auto it = levels.find(nm);
+        if (it == levels.end()) {
+          continue;
+        }
+        for (size_t t = 0; t < it->second.keys.size(); t++) {
+          auto g = group_of.find(it->second.keys[t]);
+          if (g != group_of.end()) {
+            groups.insert(g->second);
+          }
+        }
+        own += it->second.tex / (256 * 1024) + 1;
+      }
+      printf("  pools: %llu own pieces (at most), %zu share groups\n", (unsigned long long)own,
+             groups.size());
+    }
+    // with --share: a texture several of the set's levels have is loaded once
+    if (share) {
+      tex -= shared;
+    }
     const u64 tex_linear = tex / 1024 > vram ? tex / 1024 - vram : 0;
     const long long free_kb = (long long)total - (long long)(lin / 1024 + tex_linear + arena);
-    printf("%-36s %9llu %10llu %8llu %8lld %10lld %7llu %7llu%s\n", label.c_str(),
+    // the least linear memory the set needs (Jak II: all distance-limited meshes left out)
+    const unsigned long long floor_kb = (lin - dfree) / 1024 + tex_linear + arena;
+    printf("%-36s %9llu %10llu %8llu %8lld %10lld %7llu %7llu %6llu%s\n", label.c_str(),
            (unsigned long long)tex / 1024, (unsigned long long)tex_linear,
            (unsigned long long)lin / 1024, free_kb, free_kb - (long long)reserve,
-           (unsigned long long)shared / 1024, (unsigned long long)detail / 1024,
+           (unsigned long long)shared / 1024, (unsigned long long)detail / 1024, floor_kb,
            missing.empty() ? "" : (" (missing:" + missing + ")").c_str());
   }
   return 0;

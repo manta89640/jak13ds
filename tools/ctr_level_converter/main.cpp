@@ -30,6 +30,7 @@
 #include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "keira_model.h"
+#include "texshare.h"
 #include "tie_lod.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -5485,6 +5486,28 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                mask_count - mask_a4, mask_before / 1024, mask_after / 1024);
     }
   }
+  // each texture's content key (c3l::ExtTexKey): the levels sharing it find it by that
+  std::vector<u64> tex_keys(tex_descs.size(), 0);
+  {
+    std::vector<int> mask_of(tex_descs.size(), -1);
+    for (size_t i = 0; i < tex_descs.size(); i++) {
+      if (c3l::texture_is_mask(tex_descs[i]) && c3l::texture_mask_of(tex_descs[i]) < mask_of.size()) {
+        mask_of[c3l::texture_mask_of(tex_descs[i])] = (int)i;
+      }
+    }
+    for (size_t i = 0; i < tex_descs.size(); i++) {
+      auto d = tex_descs[i];
+      if (tex_datas[i].empty() || c3l::texture_is_mask(d) || c3l::texture_anim_slot(d) ||
+          (i < cv.tex_use.size() && cv.tex_use[i].anim_slot)) {
+        continue;
+      }
+      d.data_size = (u32)tex_datas[i].size();
+      const int m = mask_of[i];
+      tex_keys[i] = c3l::texture_content_key(d, tex_datas[i].data(),
+                                             m >= 0 ? tex_datas[m].data() : nullptr,
+                                             m >= 0 ? tex_datas[m].size() : 0);
+    }
+  }
   // ---- write ----
   std::vector<u8> buf(sizeof(c3l::Header));
   c3l::Header hdr{};
@@ -5528,7 +5551,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   // (AI-assisted) v17: tie levels of detail (c3l::ExtHeader)
   // (AI-assisted, streaming) v19: always with runs (the run spheres), 48 bytes; v18: 32
-  if ((!cv.lod_groups.empty() || opt.stream) && !out_runs.empty() &&
+  // (v23: also without runs, for the texture keys)
+  if ((!cv.lod_groups.empty() || opt.stream) && (!out_runs.empty() || opt.stream) &&
       out_run_lods.size() == out_runs.size()) {
     c3l::ExtHeader eh{};
     memcpy(eh.magic, c3l::kExtMagic, 4);
@@ -5577,8 +5601,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     for (const u32 b : out_run_bands) {
       any_band |= b != 0;
     }
-    const u32 eh_size = any_band && out_run_bands.size() == out_runs.size()
-                            ? c3l::kExtHeaderV23Size
+    const bool bands = any_band && out_run_bands.size() == out_runs.size();
+    const u32 eh_size = opt.stream && !tex_descs.empty() ? c3l::kExtHeaderTexKeySize
+                        : bands                          ? c3l::kExtHeaderV23Size
                         : !wind_chunk_verts.empty() ? c3l::kExtHeaderV22Size
                         : !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
                         : !pv_protos.empty()    ? c3l::kExtHeaderV20Size
@@ -5647,7 +5672,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
                cv.env_tie_groups_missing, env_st_moved, missing);
     }
-    if (eh_size >= c3l::kExtHeaderV23Size) {
+    if (eh_size >= c3l::kExtHeaderTexKeySize) {
+      c3l::ExtTexKey tk{};
+      tk.count = (u32)tex_keys.size();
+      tk.offset = append(buf, tex_keys.data(), tex_keys.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV23Size, &tk, sizeof(tk));
+    }
+    if (bands) {
       // the shrub runs' PS2 fade bands (c3l::ExtShrubFade)
       c3l::ExtShrubFade ef{};
       ef.band_count = (u32)out_run_bands.size();
@@ -6309,6 +6340,10 @@ int main(int argc, char** argv) {
   app.add_option("input", in, "input .fr3 (or folder with --all)")->required();
   app.add_option("output", out, "output .c3l (or folder with --all)")->required();
   app.add_flag("--all", all, "convert every .fr3 in the input folder");
+  bool texshare_only = false;
+  app.add_flag("--texshare", texshare_only,
+               "write input/texshare.c3t (the textures several levels share) from the .c3l files "
+               "in the folder input (output: the same folder); --all writes it too");
   bool texanim = false;
   app.add_flag("--texanim", texanim,
                "(AI-assisted, Jak II) write the texture animations' textures from GAME.fr3 "
@@ -6484,6 +6519,9 @@ int main(int argc, char** argv) {
   if (texanim) {
     return write_texanim(in, out) ? 0 : 1;
   }
+  if (texshare_only) {
+    return texshare::write_table(in) ? 0 : 1;
+  }
   if (all) {
     file_util::create_dir_if_needed(out);
     // (AI-assisted) Jak II: the texture animations' textures (CtrTexAnimJak2)
@@ -6501,6 +6539,9 @@ int main(int argc, char** argv) {
           return 1;
         }
       }
+    }
+    if (!texshare::write_table(out)) {
+      return 1;
     }
     // (AI-assisted) the "play as Keira" easter egg's KEIRA.c3l (from GAME.fr3 and village1.fr3)
     const fs::path game_fr3 = fs::path(in) / "GAME.fr3", village1_fr3 = fs::path(in) / "village1.fr3";
