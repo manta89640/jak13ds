@@ -357,8 +357,10 @@ logs: `CTR_KEIRA_IK_LOG`, `CTR_KEIRA_DAX_LOG`, `CTR_KEIRA_VOICE_LOG`.
   handlers, VAG streaming) runs as on PC. Audio output is on by default (`sound = on` in
   `config.ini`; opt-in before Oct 16) (`platform/3ds/port/ctr_port.c`, `ctr_audio_*`): the 989snd software
   mixer (48 kHz stereo, PS2 SPU emulation, unchanged) runs on its own thread at `CTR_PRIO_SOUND`
-  on the core `sound_core` names (default 2 on New 3DS, else 1; core 1 is the system core: the
-  app gets 80% of it with `APT_SetAppCpuTimeLimit` and may create one thread there),
+  on the core `sound_core` names (1 or 2, each the other's fallback; default 2 on New 3DS, else
+  1; core 1 is the system core: the app gets 80% of it with `APT_SetAppCpuTimeLimit` and may
+  create one thread there; (AI-assisted, cpusound) once mixing can't keep up with real time, the
+  mixer sleeps 0.5 ms after each buffer so the threads below it on its core still run),
   filling 3 buffers of 1024 frames (21 ms each) that one ndsp channel plays; the DSP resamples
   to its 32.7 kHz. It needs the DSP firmware `sdmc:/3ds/dspfirm.cdc` (real hardware: dump it
   once with the DSP1 homebrew; Azahar's HLE audio accepts any file, the scripts create a

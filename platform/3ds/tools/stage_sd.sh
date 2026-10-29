@@ -30,7 +30,7 @@
 #   --screenshots N  screenshots = N: a screenshot every N frames to data/log/shot_<frame>.bmp
 #   --pad-script FILE  pad_script = pad_script.txt (copied): scripted controller input for tests
 #   --use-syscore  (removed Oct 16 with io_on_system_core: accepted, ignored)
-#   --sound [CORE]  sound = on (the default now; and sound_core = CORE; default: 2 on New 3DS, else 1)
+#   --sound [CORE]  sound = on (the default now; and sound_core = CORE, 1 or 2; default: 2 on New 3DS, else 1)
 #   --no-sound  sound = off. With sound on the game needs sdmc:/3ds/dspfirm.cdc: a real dump on hardware (DSP1 homebrew), any file for
 #            Azahar's HLE audio (a placeholder is created on the emulator's SD card if missing).
 #   --perf-sections  perf_sections = on: per-section frame timing in the log
@@ -96,7 +96,7 @@ while [ $# -gt 0 ]; do
     --keep-config) KEEP_CONFIG=1; shift ;;
     --no-sound) NO_SOUND=1; shift ;;
     --perf-sections) PERF_SECTIONS=1; shift ;;
-    --sound) SOUND=auto; if [ $# -gt 1 ] && [[ "$2" =~ ^[0-3]$ ]]; then SOUND="$2"; shift; fi; shift ;;
+    --sound) SOUND=auto; if [ $# -gt 1 ] && [[ "$2" =~ ^[12]$ ]]; then SOUND="$2"; shift; fi; shift ;;
     --render-ini|--config) RENDER_INI="$2"; shift 2 ;;
     --compress) COMPRESS=lz4; if [ $# -gt 1 ] && [[ "$2" =~ ^(lz4|zstd)$ ]]; then COMPRESS="$2"; shift; fi; shift ;;
     --compress-types) COMPRESS_TYPES="$2"; shift 2 ;;

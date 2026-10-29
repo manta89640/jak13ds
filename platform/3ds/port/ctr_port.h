@@ -157,7 +157,8 @@ unsigned int ctr_audio_dropped_frames(void);
 unsigned int ctr_audio_late_buffers(void);
 
 /* Sound settings from config.ini (sound, sound_core): returns 1 if sound = on (audio output
- * on); *core = the core for the mixer thread (sound_core; default 0 on New 3DS, else 1). */
+ * on); *core = the core for the mixer thread (sound_core = 1 or 2; default (auto): Jak 1 2 on
+ * New 3DS, else 1; Jak II 1). */
 int ctr_sound_config(int* core);
 
 /* Rough CPU clock and memory load latencies (L1, L2, RAM), one line for the log: shows whether the
