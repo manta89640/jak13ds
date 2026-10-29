@@ -7226,7 +7226,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // camera outside the level's bounds by more than far_level_distance: the level is only seen
   // from a neighbouring one
   bool far_level = false;
-  float far_ramp = 1.f;  // (AI-assisted, levellod) far mode's landmark ramp (the chunk loop)
+  bool far_inside = true;  // (AI-assisted, levellod) the camera within the near switch (chunk loop)
   if (settings.far_level_distance > 0) {
     float d2 = 0;
     for (int c = 0; c < 3; c++) {
@@ -7241,11 +7241,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const float mf = m * (lev.was_far ? 0.9f : 1.1f);
     far_level = d2 > mf * mf;
     lev.was_far = far_level;
-    {
-      // (AI-assisted, levellod) 0 from kLandmarkRamp meters outside the near switch on, 1 at it
-      constexpr float kLandmarkRamp = 100.f * 4096.f;
-      far_ramp = std::clamp((m * 0.9f + kLandmarkRamp - std::sqrt(d2)) / kLandmarkRamp, 0.f, 1.f);
-    }
+    far_inside = d2 <= (m * 0.9f) * (m * 0.9f);
     // (AI-assisted) partial unload (the user's idea): a level seen only from far away for a few
     // seconds gives back the memory of the chunks far mode doesn't draw; read again when the camera
     // is within 30 m of the far distance (freed beyond 60 m: no back and forth at one edge)
@@ -8332,15 +8328,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       // (AI-assisted) landmarks only within the LOD distance: a neighbouring level has no
       // visibility data here, and its landmark ties are 57k-152k triangles (village2, lavatube).
-      // (AI-assisted, levellod) a level without a vista tier (citadel: 375 of its 411 landmark
-      // chunks, nothing stands in for them) brings them in out to draw_distance over the last
-      // 100 m before the near switch (far_ramp): they all came in at once there (the near mode
-      // draws them to draw_distance), no more than near mode costs
+      // (AI-assisted, levellod) but out to draw_distance, as near mode draws them, while far mode
+      // is forced with the camera where near mode would be (its detail meshes not read back yet:
+      // a respawn, a cut) in a level without a vista tier (citadel: 375 of its 411 landmark
+      // chunks, nothing stands in for them beyond 200 m). Not when seen from a neighbour (Lava
+      // Tube's end from Citadel): the far-to-near pop stays rather than up to 152k more triangles
       if (ch.lod_tier == 0 && lod_dist > 0) {
         const float dx = ch.bsphere[0] - cx, dy = ch.bsphere[1] - cy, dz = ch.bsphere[2] - cz;
-        const float reach = !lev.has_vista && draw_dist > lod_dist
-                                ? lod_dist + (draw_dist - lod_dist) * far_ramp
-                                : lod_dist;
+        const float reach =
+            !lev.has_vista && far_inside && draw_dist > lod_dist ? draw_dist : lod_dist;
         const float lim = reach + ch.bsphere[3];
         if (dx * dx + dy * dy + dz * dz > lim * lim) {
           vista_source(ci);

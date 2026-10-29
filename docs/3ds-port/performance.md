@@ -1236,8 +1236,8 @@ environment looks bad, parts of Lava Tube / Citadel are sometimes missing.
 - **Small-gap merge:** a shrub piece hidden by its distance is never drawn along with its
   neighbours (paired shrub pops).
 - **Smaller ones:** Jak II's distance freeing counts the shrubs' far plane (kShrubFarK) and the
-  ties' 1.5x in-view hold; far mode brings a level's landmark ties in out to draw_distance over the
-  last 100 m before the near switch in levels without a vista tier (Citadel's came in at once);
+  ties' 1.5x in-view hold; far mode forced with the camera inside a level without a vista tier
+  (detail meshes not read back yet) draws its landmark ties out to draw_distance, not 200 m;
   detail_scale 0.1-4, the scale keys at least 0.05; run_culling = off only stops the view test.
 - **Removed:** impostors, fine_vis (+ ctr_vis_builder, .c3v), occ_cull, vista_untextured, with
   their code, keys (a note in the log), the safe preset's and gpu_profile = ab's entries.
