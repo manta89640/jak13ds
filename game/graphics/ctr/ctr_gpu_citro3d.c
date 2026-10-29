@@ -200,7 +200,7 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
 #define VBUF_BYTES (512 * 1024)
 #define MAX_STAGING 1024
 #define MAX_TEXTURES 2048
-#define MAX_POOLS 16
+#define MAX_POOLS 64
 /* GPU command buffer: a frame's commands must all fit (splitting it doesn't make room). 2 MB of
  * linear memory; a busy frame (3000 level draws) takes ~1 MB. */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2

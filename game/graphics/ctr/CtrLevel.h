@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -137,8 +138,10 @@ struct CtrLevelData {
   std::vector<int> textures;  // ctr_gpu handles
   std::vector<u8> tex_min_alpha;  // (AI-assisted) smallest texel alpha per texture (0xff = 1.0)
   u32 tex_empty = 0;  // (AI-assisted) c3l v15: textures the file has no texels for (in atlases)
-  int tex_pool = -1;          // ctr_gpu texture pool holding all of them (VRAM when there's room)
-  u32 tex_pool_bytes = 0;     // (AI-assisted) its size (0: no textures)
+  // ctr_gpu texture pools holding all of them, in pieces of at most kTexPoolPiece bytes (no large
+  // linear block needed; each moves to VRAM while there's room, the background's first)
+  std::vector<int> tex_pools;
+  u32 tex_pool_bytes = 0;     // (AI-assisted) their size (0: no textures)
   u32 tex_background_bytes = 0;  // (AI-assisted) its start: the background's textures (VRAM first)
   std::vector<int> meshes;    // one per chunk
   std::vector<c3l::MercBlercVertex> blerc_verts;
@@ -265,6 +268,27 @@ struct CtrLevelData {
     // when at least lut[mask]: the last move of its palettes)
     std::vector<u8> color_mask;
     std::vector<u32> table, stamp;
+    // c3l v22 alpha: the colors' alpha in the 8 palettes by kind (each different one once), per
+    // color its kind (empty: one kind), per kind its blend << 24 (the table's alpha byte; without
+    // alpha the vertex keeps its own: keep_alpha), the palettes some kind has alpha in and the
+    // alpha weights last blended. A kind at 0x80 in the day palettes (and 0x80 or 0 in the others)
+    // isn't in its colors' masks: it blends to 0x80 while the day weights add up to 1.0 or more;
+    // when its blend moves, every entry is blended again (tod_update)
+    std::vector<std::array<u8, 8>> akinds;
+    std::vector<u8> akind;
+    std::vector<u32> aword;
+    std::vector<u8> akind_full;
+    u32 apal_mask = 0;
+    u8 wa[8] = {};
+    u32 keep_alpha = 0xff000000u;
+    // per entry the palettes holding it back (tod_pulse_step) would put it a color unit or
+    // more off; the held palettes' own versions (pal_hver, hlut: only the moves taken while held,
+    // so a group with none of those palettes bright skips the moves in between)
+    std::vector<u8> color_bright;
+    u32 pal_hver[8] = {};
+    u32 hlut[256] = {};
+    u8 held_w[8][3] = {};
+    u8 held_wa[8] = {};
     // "light" palettes: used by few colors (the lamps, the lava glow: the game moves their weights
     // every frame); per chunk its vertices with a light color (by the light palettes they use),
     // rewritten alone when only those move
@@ -297,6 +321,7 @@ struct CtrLevelData {
     u64 day_move_frame = 0;  // (AI-assisted, perfv2) the frame of the last day move (dver + 1)
     u32 pal_ver[8] = {};
     u32 lut[256] = {};
+    u32 track_mask = 0;  // the palettes whose weights are watched (rgb or alpha)
     // the palettes a blend adds (weight not 0): their slots in colors and weights
     struct Act {
       u32 n = 0;
@@ -317,6 +342,7 @@ struct CtrLevelData {
     std::vector<u16> run_group;  // per run (CtrLevelData::vis_runs): its group in the chunk
     std::vector<u32> chunk_min_ver, chunk_min_dver, chunk_light_ver;
     std::vector<u8> chunk_mask, chunk_scanned;
+    std::vector<u8> chunk_bright;  // its groups' bright palettes (VisGroup::bright)
     std::vector<int> chunk_mesh;
     u32 bytes() const {
       u32 lights = 0;
@@ -324,7 +350,7 @@ struct CtrLevelData {
         lights += (u32)(l.verts.size() * 2 + l.groups.size() * 8) + 48;
       }
       return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + color_mask.size() +
-                   table.size() * 8 +
+                   table.size() * 8 + akind.size() + akinds.size() * 13 + color_bright.size() +
                    groups.size() * sizeof(VisGroup) + run_group.size() * 2 +
                    chunk_group_first.size() * 24) +
              lights;
@@ -726,7 +752,7 @@ class CtrLevels {
   };
   // (AI-assisted) a level's texture pool and textures (load_textures)
   struct TexLoad {
-    int pool = -1;
+    std::vector<int> pools;
     u32 pool_bytes = 0;
     u32 background_bytes = 0;  // the pool's start: the background's textures
     std::vector<int> handles;

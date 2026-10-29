@@ -9,6 +9,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -88,7 +89,7 @@ struct Options {
   // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
   // runtime blends the palettes with the game's weights (off: the baked palette only)
   bool tod = true;
-  int max_tex = 128;
+  int max_tex = 1024;  // (the GPU's largest: every PS2 texture at its own size)
   float cell_meters = 200.f;
   // tie instances smaller than detail_radius (bounding sphere radius, meters) are only drawn up
   // to detail_dist meters away; smaller than medium_radius: up to medium_dist
@@ -119,21 +120,20 @@ struct Options {
   // the model's open edges (holes, cards) stay where they are. Off by default: with the draws
   // simplified together the only open edges are the model's own, which move along themselves
   bool gen_lod_lock_border = false;
-  // Textures: ETC1 (opaque) / ETC1A4 (with alpha) instead of RGB565 / RGBA4: 1/4 and 1/2 of the
-  // memory, so a level's textures fit in VRAM. Textures of merc models (characters): see below;
-  // etc1_merc: all ETC1 (faces and small details show ETC1's 4x4 blocks up close).
+  // Textures: ETC1 (opaque) / ETC1A4 (with alpha) where they pass the quality test, else RGB565
+  // (opaque) / RGBA8 (with alpha). etc1_merc: merc textures ETC1 without the test (faces too).
   bool etc1 = true;
   bool etc1_merc = false;
-  // (AI-assisted) unless etc1_merc: merc textures of etc1_merc_min texels and more on both sides
-  // become ETC1 / ETC1A4 when that is about as good as their 16-bit version (merc textures were
-  // 75-95% of the levels' texture memory). Measured on the full size level against the image:
-  // the PSNR is at least etc1_merc_psnr dB (about RGBA4's own error, the 16-bit format of the ones
-  // with alpha) or the 16-bit version's, and no 4x4 block has an RMS error above etc1_merc_block
-  // (0..255) or the 16-bit version's worst. Characters with face animation (effects with blend
-  // shapes) and eye placeholders stay 16-bit. etc1_merc_psnr 0: all stay 16-bit.
-  float etc1_merc_psnr = 34.f;
+  // The quality test, measured on the full size level against the image: the ETC1 version's PSNR
+  // is at least etc1_psnr dB (or the fallback's), and no 4x4 block has an RMS error above
+  // etc1_block (0..255) or the fallback's worst. ETC1A4 also needs an alpha 4 bits keep: only
+  // values a 4-bit alpha holds exactly, or a texture only drawn alpha tested (the 4-bit alpha is
+  // rounded to pass or fail the test as the 8-bit one does). Merc textures under etc1_merc_min
+  // texels on a side, of characters with face animation (blend shapes) and eye placeholders are
+  // never ETC1. etc1_psnr 0: no ETC1 but for etc1_merc.
+  float etc1_psnr = 34.f;
   int etc1_merc_min = 64;
-  float etc1_merc_block = 16.f;
+  float etc1_block = 16.f;
   int etc1_quality = 1;  // 0 low, 1 medium, 2 high (slow)
   // (AI-assisted) ETC1 rate-distortion optimisation strength (ctr_texture.h), 0: off
   float etc1_rdo = 10;
@@ -232,8 +232,9 @@ struct TexUse {
   bool alpha_is_opacity() const { return alpha_opacity && !low_alpha_rgb_visible; }
   bool merc = false;        // drawn by a merc model
   bool alpha_test = false;  // drawn with an alpha test (cut-outs: keep their coverage in the mips)
+  bool blend = false;       // drawn alpha blended with its alpha
   int aref = 0x26;          // the alpha test reference (GS units, 0x80 = 1.0)
-  // (AI-assisted) merc uses that keep a texture 16-bit (Options::etc1_merc_psnr): an eye draw's
+  // (AI-assisted) merc uses that keep a texture out of ETC1 (Options::etc1_psnr): an eye draw's
   // placeholder, a draw of an effect with blend shapes (a face). envmap: an envmap pass's texture.
   bool eye = false, face = false, envmap = false;
   // (AI-assisted) Jak II: the animated texture slot (jak2_animated_texture_slots index + 1) whose
@@ -374,7 +375,7 @@ struct Converter {
   std::vector<SrcVertex> verts;
   // (AI-assisted) v16: the level's time of day colors and multiplied colors (each once)
   static constexpr u32 kTodNone = 0xffffffffu, kTodMulBit = 0x80000000u;
-  std::vector<c3l::TodColor> tod_colors;
+  std::vector<c3l::TodColorA> tod_colors;
   std::vector<c3l::TodMul> tod_muls;
   std::unordered_map<std::string, u32> tod_color_ids, tod_mul_ids;
   // a tfrag / tie / shrub time of day color: its 8 palettes
@@ -382,10 +383,10 @@ struct Converter {
     if (!opt.tod) {
       return kTodNone;
     }
-    c3l::TodColor e;
+    c3l::TodColorA e;
     for (int p = 0; p < 8; p++) {
-      for (int ch = 0; ch < 3; ch++) {
-        e.rgb[p][ch] = c.read(color, p, ch);
+      for (int ch = 0; ch < 4; ch++) {
+        e.rgba[p][ch] = c.read(color, p, ch);
       }
     }
     auto [it, fresh] =
@@ -396,11 +397,53 @@ struct Converter {
     return it->second;
   }
   // (AI-assisted, opt-audit S8) vertices whose alpha differs between the 8 time of day palettes
-  // (for the log). The PC blends all four channels; the 3DS's time of day blend is RGB only
-  // (c3l::TodColor has no alpha), so it shows the baked alpha at every time of day. The opaque
-  // alpha and kDrawAlpha80 marks therefore follow the baked alpha (exact for what the 3DS draws);
-  // requiring them in all 8 palettes would change no pixel and only drop marks.
+  // (for the log). The runtime blends the alpha as the PC does (c3l v22).
   size_t alpha_varies = 0;
+  // The lowest alpha a time of day color can blend to: its smallest alpha in the level's day
+  // palettes (black in no more than 3/4 of the colors, as the runtime's light test). The moods'
+  // day weights add up to 1.0 at least (one palette at 1.0, or two shared); the light palettes'
+  // add to that, and the blend is at most 0x80. The opaque alpha and kDrawAlpha80 marks use it.
+  std::vector<u8> tod_alpha_lo;
+  void tod_alpha_bounds() {
+    size_t used[8] = {};
+    for (const auto& c : tod_colors) {
+      for (int p = 0; p < 8; p++) {
+        used[p] += (c.rgba[p][0] | c.rgba[p][1] | c.rgba[p][2]) != 0;
+      }
+    }
+    u32 day = 0;
+    for (int p = 0; p < 8; p++) {
+      if (used[p] && used[p] * 4 > tod_colors.size()) {
+        day |= 1u << p;
+      }
+    }
+    tod_alpha_lo.assign(tod_colors.size(), 0);
+    for (size_t i = 0; i < tod_colors.size(); i++) {
+      int lo = day ? 0x80 : 0;
+      for (int p = 0; p < 8; p++) {
+        if (day >> p & 1) {
+          lo = std::min<int>(lo, tod_colors[i].rgba[p][3]);
+        }
+      }
+      tod_alpha_lo[i] = (u8)lo;
+    }
+  }
+  // a vertex's lowest alpha: its baked one, and with a time of day color the color's lowest blend
+  u8 alpha_lo_of_tod(u32 id, u8 baked) const {
+    if (id == kTodNone) {
+      return baked;
+    }
+    const u32 c = id & kTodMulBit ? tod_muls[id & ~kTodMulBit].color : id;
+    return c < tod_alpha_lo.size() ? std::min(baked, tod_alpha_lo[c]) : baked;
+  }
+  u8 alpha_lo_of_pad(u16 pad, u8 baked) const {
+    if (pad == 0xffff) {
+      return baked;
+    }
+    const u32 nc = (u32)tod_colors.size();
+    const u32 c = pad < nc ? pad : (pad - nc < tod_muls.size() ? tod_muls[pad - nc].color : nc);
+    return c < tod_alpha_lo.size() ? std::min(baked, tod_alpha_lo[c]) : baked;
+  }
   void note_alpha(const tfrag3::PackedTimeOfDay& c, u32 color) {
     const u32 a0 = c.read(color, 0, 3);
     for (int p = 1; p < 8; p++) {
@@ -494,6 +537,7 @@ struct Converter {
     const bool opacity = cutout || src_alpha;
     u.alpha_opacity |= opacity;
     u.low_alpha_rgb_visible |= !opacity;
+    u.blend |= src_alpha;
     if (mode.get_at_enable() && mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL &&
         !u.alpha_test) {
       u.alpha_test = true;
@@ -1437,7 +1481,7 @@ struct Converter {
       const auto& v = verts[vi];
       if (v.tod != kTodNone && !(v.tod & kTodMulBit) && v.tod < tod_colors.size()) {
         for (int k = 0; k < kC; k++) {
-          c[k] = tod_colors[v.tod].rgb[k / 3][k % 3];
+          c[k] = tod_colors[v.tod].rgba[k / 3][k % 3];
         }
       } else {
         for (int k = 0; k < kC; k++) {
@@ -2725,22 +2769,32 @@ u32 next_pow2(u32 v) {
 struct TexStats {
   u64 bytes_16bit = 0;  // what the textures took as single level 16-bit textures (c3l v7)
   u64 bytes = 0;
-  int etc1 = 0, etc1a4 = 0, rgb565 = 0, rgba4 = 0;
+  int etc1 = 0, etc1a4 = 0, rgb565 = 0, rgba8 = 0;
   double psnr_sum = 0, psnr_min = 99;
   int psnr_count = 0;
-  // (AI-assisted) merc textures: all, ETC1 / ETC1A4 by the quality test, tested, kept 16-bit as
-  // faces or eyes (of the size to be tested), bytes before (all 16-bit) and after
-  int merc = 0, merc_etc1 = 0, merc_tested = 0, merc_face = 0;
-  u64 merc_bytes_16 = 0, merc_bytes = 0;
+  // (AI-assisted) textures: tested, ETC1 / ETC1A4 by the quality test, failed on their alpha, kept
+  // out as faces / eyes / small merc ones; bytes if all were the fallback (RGB565 / RGBA8)
+  int tested = 0, passed = 0, alpha_failed = 0, merc = 0, merc_face = 0;
+  u64 bytes_fallback = 0;
 };
 
-// (AI-assisted) the ETC1 quality test of a merc texture (Options::etc1_merc_psnr)
+// (AI-assisted) the ETC1 quality test of a texture (Options::etc1_psnr)
 struct MercGate {
-  bool tested = false, etc1 = false;
-  // against the image: PSNR (dB) and the worst 4x4 block's RMS error, of ETC1 and 16-bit
+  bool tested = false, etc1 = false, alpha_ok = true;
+  // against the image: PSNR (dB) and the worst 4x4 block's RMS error, of ETC1 and the fallback
   double psnr = 0, worst_block = 0, psnr_16 = 0, worst_block_16 = 0;
-  u32 bytes_16 = 0;  // the 16-bit version's size (with mips)
+  u32 bytes_16 = 0;  // the fallback's size (with mips)
 };
+
+// (AI-assisted) every texel's alpha is one a 4-bit alpha holds exactly (n * 17)
+bool alpha_fits_4bit(const ctr_tex::Image& img) {
+  for (size_t i = 3; i < img.rgba.size(); i += 4) {
+    if (img.rgba[i] % 17) {
+      return false;
+    }
+  }
+  return true;
+}
 
 /*!
  * (AI-assisted) A decoded level against the image it was encoded from: PSNR and the largest RMS
@@ -2782,7 +2836,7 @@ void compare_level(const ctr_tex::Image& ref,
 
 /*!
  * One level texture -> the 3DS layout (see ctr_texture.h): power of two, at most max_tex, with mip
- * levels, in ETC1 / ETC1A4 / RGB565 / RGBA4.
+ * levels, in ETC1 / ETC1A4 / RGB565 / RGBA8.
  */
 std::vector<u8> convert_texture(const tfrag3::Texture& tex,
                                 const Options& opt,
@@ -2820,8 +2874,7 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
       has_alpha = true;
     }
   }
-  bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
-  const ctr_tex::Format fmt16 = has_alpha ? ctr_tex::Format::RGBA4 : ctr_tex::Format::RGB565;
+  const ctr_tex::Format fmt_full = has_alpha ? ctr_tex::Format::RGBA8 : ctr_tex::Format::RGB565;
   const ctr_tex::Format fmt_etc = has_alpha ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::ETC1;
   const int levels = opt.mips ? ctr_tex::level_count(dw, dh, 16) : 1;
   mo.preserve_coverage = has_alpha && opacity && use.alpha_test;
@@ -2833,35 +2886,37 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
   }
   const int aref = mo.preserve_coverage ? mo.alpha_ref : 0;
   std::vector<u8> out;
-  // (AI-assisted) a merc texture: ETC1 if it is about as close to the image as the 16-bit
-  // version (Options::etc1_merc_psnr). The full size level is encoded both ways and compared with
-  // the image; the kept one starts the output.
-  if (!etc1 && opt.etc1 && use.merc && !opt.full_color && opt.etc1_merc_psnr > 0 && gate) {
+  bool etc1 = opt.etc1 && use.merc && opt.etc1_merc;
+  // (AI-assisted) the quality test (Options::etc1_psnr): the full size level is encoded both ways
+  // and compared with the image; the kept one starts the output
+  const bool merc_kept = use.merc && (use.face || use.eye || (int)dw < opt.etc1_merc_min ||
+                                      (int)dh < opt.etc1_merc_min);
+  if (!etc1 && opt.etc1 && !opt.full_color && opt.etc1_psnr > 0 && gate) {
     for (const auto& m : mips) {
-      gate->bytes_16 += ctr_tex::level_bytes(m.w, m.h, fmt16);
+      gate->bytes_16 += ctr_tex::level_bytes(m.w, m.h, fmt_full);
     }
-    if (!use.face && !use.eye && (int)dw >= opt.etc1_merc_min && (int)dh >= opt.etc1_merc_min) {
-      std::vector<u8> e, s;
+    gate->alpha_ok = !has_alpha || alpha_fits_4bit(mips[0]) ||
+                     (use.alpha_test && !use.blend && !use.low_alpha_rgb_visible);
+    if (!merc_kept && gate->alpha_ok) {
+      std::vector<u8> e, f;
       ctr_tex::encode_level(mips[0], fmt_etc, opt.etc1_quality, &e, aref, opt.etc1_rdo, opacity);
-      ctr_tex::encode_level(mips[0], fmt16, opt.etc1_quality, &s, aref);
+      ctr_tex::encode_level(mips[0], fmt_full, opt.etc1_quality, &f, aref);
       compare_level(mips[0], ctr_tex::decode_level(e.data(), dw, dh, fmt_etc), &gate->psnr,
                     &gate->worst_block, opacity);
-      compare_level(mips[0], ctr_tex::decode_level(s.data(), dw, dh, fmt16), &gate->psnr_16,
+      compare_level(mips[0], ctr_tex::decode_level(f.data(), dw, dh, fmt_full), &gate->psnr_16,
                     &gate->worst_block_16, opacity);
       gate->tested = true;
-      // RGB565 is close to the image (~48 dB): ETC1 must reach etc1_merc_psnr. RGBA4 is ~34 dB
-      // (4-bit color bands): ETC1A4 is often closer than it, and passes when it is.
       gate->etc1 = etc1 =
-          (gate->psnr >= opt.etc1_merc_psnr || gate->psnr >= gate->psnr_16) &&
-          gate->worst_block <= std::max<double>(opt.etc1_merc_block, gate->worst_block_16);
-      out = etc1 ? std::move(e) : std::move(s);
+          (gate->psnr >= opt.etc1_psnr || gate->psnr >= gate->psnr_16) &&
+          gate->worst_block <= std::max<double>(opt.etc1_block, gate->worst_block_16);
+      out = etc1 ? std::move(e) : std::move(f);
     }
   }
   ctr_tex::Format fmt;
   if (opt.full_color) {
     fmt = ctr_tex::Format::RGBA8;
   } else {
-    fmt = etc1 ? fmt_etc : fmt16;
+    fmt = etc1 ? fmt_etc : fmt_full;
   }
   for (size_t l = out.empty() ? 0 : 1; l < mips.size(); l++) {
     ctr_tex::encode_level(mips[l], fmt, opt.etc1_quality, &out, aref, opt.etc1_rdo, opacity);
@@ -3013,7 +3068,7 @@ void optimize_draws(Converter& cv,
   for (const auto& t : cv.tris) {
     key_tris[t.draw_key]++;
     for (u32 v : t.v) {
-      if (cv.verts[v].rgba[3] < 0x80) {
+      if (cv.alpha_lo_of_tod(cv.verts[v].tod, cv.verts[v].rgba[3]) < 0x80) {
         key_va[t.draw_key] = 0;
       }
     }
@@ -3275,7 +3330,7 @@ void optimize_draws(Converter& cv,
   for (u16 t = 0; t < fit.size(); t++) {
     const auto& d = tex_descs[t];
     if (!fit[t].used || !fit[t].ok || d.w > opt.atlas_max || d.h > opt.atlas_max ||
-        d.format == c3l::TEX_RGBA8 || (t < tex_use.size() && tex_use[t].anim_slot)) {
+        (t < tex_use.size() && tex_use[t].anim_slot)) {
       continue;
     }
     st->atlas_textures_fit++;
@@ -3857,6 +3912,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
 
+  cv.tod_alpha_bounds();
   // ---- textures (in parallel: ETC1 encoding is slow) ----
   // (AI-assisted) before the chunks: the v15 draw optimisations look at the encoded texels
   std::vector<c3l::Texture> tex_descs(cv.tex_order.size());
@@ -4959,7 +5015,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       const auto& ch = chunks[ci];
       bool all = true;
       for (u32 v = 0; v < ch.vertex_count && all; v++) {
-        all = out_verts[ch.first_vertex + v].rgba[3] == 0x80;
+        const auto& ov = out_verts[ch.first_vertex + v];
+        all = ov.rgba[3] == 0x80 && cv.alpha_lo_of_pad((u16)ov.pad, 0x80) >= 0x80;
       }
       u32 i_lo = UINT32_MAX, i_hi = 0;
       for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
@@ -4971,7 +5028,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           ok = true;
           for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && ok; i++) {
             const u16 ix = out_indices[i];
-            ok = ix < ch.vertex_count && out_verts[ch.first_vertex + ix].rgba[3] == 0x80;
+            ok = ix < ch.vertex_count && out_verts[ch.first_vertex + ix].rgba[3] == 0x80 &&
+                 cv.alpha_lo_of_pad((u16)out_verts[ch.first_vertex + ix].pad, 0x80) >= 0x80;
           }
         }
         if (ok) {
@@ -5132,7 +5190,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         tstats.rgb565++;
         break;
       default:
-        tstats.rgba4++;
+        tstats.rgba8++;
         break;
     }
     if (d.format == c3l::TEX_ETC1 || d.format == c3l::TEX_ETC1A4) {
@@ -5140,27 +5198,32 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       tstats.psnr_min = std::min(tstats.psnr_min, tex_psnr[i]);
       tstats.psnr_count++;
     }
-    // (AI-assisted) merc textures and their ETC1 quality test
+    // (AI-assisted) the ETC1 quality test
     const auto& u = cv.tex_use[i];
     const auto& g = tex_gate[i];
-    if (u.merc && g.bytes_16) {
+    if (g.bytes_16) {
       const auto& t = level.textures.at(cv.tex_order[i]);
-      const bool sized = d.w >= opt.etc1_merc_min && d.h >= opt.etc1_merc_min;
-      tstats.merc++;
-      tstats.merc_etc1 += g.etc1;
-      tstats.merc_tested += g.tested;
-      tstats.merc_face += sized && (u.face || u.eye);
-      tstats.merc_bytes_16 += g.bytes_16;
-      tstats.merc_bytes += tex_datas[i].size();
-      lg::debug("{}: merc texture {} ({}) {}x{}{}{}{}{}: {}", in.stem().string(), t.debug_name,
-                t.debug_tpage_name, d.w, d.h,
-                d.format == c3l::TEX_ETC1A4 || d.format == c3l::TEX_RGBA4 ? " alpha" : "",
+      const bool kept = u.merc && (u.face || u.eye || d.w < opt.etc1_merc_min ||
+                                   d.h < opt.etc1_merc_min);
+      tstats.merc += u.merc;
+      tstats.tested += g.tested;
+      tstats.passed += g.etc1;
+      tstats.alpha_failed += !g.alpha_ok && !kept;
+      tstats.merc_face += kept;
+      tstats.bytes_fallback += g.bytes_16;
+      lg::debug("{}: texture {} ({}) {}x{}{}{}{}{}{}: {}", in.stem().string(), t.debug_name,
+                t.debug_tpage_name, d.w, d.h, u.merc ? " merc" : "",
+                d.format == c3l::TEX_ETC1A4 || d.format == c3l::TEX_RGBA8 ? " alpha" : "",
                 u.face ? " face" : "", u.eye ? " eye" : "", u.envmap ? " envmap" : "",
-                g.tested ? fmt::format("ETC1 {:.1f} dB, worst block {:.1f}; 16-bit {:.1f} dB, "
+                g.tested ? fmt::format("ETC1 {:.1f} dB, worst block {:.1f}; {} {:.1f} dB, "
                                        "{:.1f} -> {}",
-                                       g.psnr, g.worst_block, g.psnr_16, g.worst_block_16,
-                                       g.etc1 ? "ETC1" : "16-bit")
-                         : "16-bit");
+                                       g.psnr, g.worst_block,
+                                       d.format == c3l::TEX_ETC1A4 || d.format == c3l::TEX_RGBA8
+                                           ? "RGBA8"
+                                           : "RGB565",
+                                       g.psnr_16, g.worst_block_16, g.etc1 ? "ETC1" : "kept")
+                : !g.alpha_ok && !kept ? std::string("alpha needs 8 bits: RGBA8")
+                                       : std::string("not tested"));
     }
   }
 
@@ -5214,7 +5277,17 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   if (!cv.tod_colors.empty() && cv.tod_colors.size() + cv.tod_muls.size() < 0xffff) {
     hdr.tod_color_count = cv.tod_colors.size();
     hdr.tod_mul_count = cv.tod_muls.size();
-    hdr.tod_offset = append(buf, cv.tod_colors.data(), cv.tod_colors.size());
+    if (hdr.version >= c3l::kTodAlphaVersion) {
+      hdr.tod_offset = append(buf, cv.tod_colors.data(), cv.tod_colors.size());
+    } else {
+      std::vector<c3l::TodColor> rgb(cv.tod_colors.size());
+      for (size_t i = 0; i < rgb.size(); i++) {
+        for (int p = 0; p < 8; p++) {
+          memcpy(rgb[i].rgb[p], cv.tod_colors[i].rgba[p], 3);
+        }
+      }
+      hdr.tod_offset = append(buf, rgb.data(), rgb.size());
+    }
     buf.insert(buf.end(), (const u8*)cv.tod_muls.data(),
                (const u8*)(cv.tod_muls.data() + cv.tod_muls.size()));
     align16(buf);
@@ -5562,9 +5635,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              merc.mod_effects.size(), merc.mod_dests.size());
   }
   lg::info("{}: textures {} KB with mip levels (16-bit, no mips: {} KB): {} ETC1, {} ETC1A4, {} "
-           "RGB565, {} RGBA4; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
+           "RGB565, {} RGBA8; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
            level.level_name, tstats.bytes / 1024, tstats.bytes_16bit / 1024, tstats.etc1,
-           tstats.etc1a4, tstats.rgb565, tstats.rgba4,
+           tstats.etc1a4, tstats.rgb565, tstats.rgba8,
            tstats.psnr_count ? tstats.psnr_sum / tstats.psnr_count : 0.0,
            tstats.psnr_count ? tstats.psnr_min : 0.0);
   if (cv.tex_copies) {
@@ -5576,15 +5649,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              "texture",
              level.level_name, cv.slot_tex_map.size(), cv.slot_tex_first_plain);
   }
-  if (tstats.merc) {
-    lg::info("{}: merc textures: {}, {} of {}x{} and up: {} faces / eyes kept 16-bit, {} "
-             "tested, {} ETC1 (PSNR >= {:g} dB or the 16-bit's, blocks <= {:g} or the "
-             "16-bit's): {} KB -> {} KB",
-             level.level_name, tstats.merc, tstats.merc_tested + tstats.merc_face,
-             opt.etc1_merc_min, opt.etc1_merc_min, tstats.merc_face, tstats.merc_tested,
-             tstats.merc_etc1, opt.etc1_merc_psnr, opt.etc1_merc_block,
-             tstats.merc_bytes_16 / 1024, tstats.merc_bytes / 1024);
-  }
+  lg::info("{}: ETC1 quality test (PSNR >= {:g} dB or the fallback's, blocks <= {:g} or the "
+           "fallback's): {} tested, {} ETC1 / ETC1A4; {} with an alpha 4 bits don't hold, {} merc "
+           "faces / eyes / under {} texels (of {} merc) not tested; all RGB565 / RGBA8: {} KB",
+           level.level_name, opt.etc1_psnr, opt.etc1_block, tstats.tested, tstats.passed,
+           tstats.alpha_failed, tstats.merc_face, opt.etc1_merc_min, tstats.merc,
+           tstats.bytes_fallback / 1024);
   lg::info("{}: post-vertex cache: vertices shaded per triangle (meshoptimizer's model 8 / 16) "
            "{:.3f} / {:.3f}{}; FIFO 4 / 8 / 16 / 32: {}{}",
            level.level_name, vc_before.shaded8 / std::max<u64>(vc_before.tris, 1),
@@ -5605,12 +5675,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // (AI-assisted) v16
   {
     const size_t n = cv.tod_colors.size() + cv.tod_muls.size();
+    std::set<std::array<u8, 8>> alphas;
+    for (const auto& c : cv.tod_colors) {
+      std::array<u8, 8> a;
+      for (int p = 0; p < 8; p++) {
+        a[p] = c.rgba[p][3];
+      }
+      alphas.insert(a);
+    }
     lg::info("{}: time of day: {} colors, {} multiplied ({} KB){}; (AI-assisted, S8) {} vertices "
-             "with an alpha that differs between the palettes (the 3DS keeps the baked one)",
+             "with an alpha that differs between the palettes, {} different alphas (v22: blended)",
              level.level_name, cv.tod_colors.size(), cv.tod_muls.size(),
-             (cv.tod_colors.size() * sizeof(c3l::TodColor) + cv.tod_muls.size() * sizeof(c3l::TodMul)) /
+             (cv.tod_colors.size() * sizeof(c3l::TodColorA) +
+              cv.tod_muls.size() * sizeof(c3l::TodMul)) /
                  1024,
-             n >= 0xffff ? " TOO MANY: left out (the baked palette only)" : "", cv.alpha_varies);
+             n >= 0xffff ? " TOO MANY: left out (the baked palette only)" : "", cv.alpha_varies,
+             alphas.size());
   }
   if (opt.vcache) {
     lg::info("{}: {} duplicate vertices merged", level.level_name, welded_verts);
@@ -5987,15 +6067,15 @@ int main(int argc, char** argv) {
   app.add_flag("--gen-lod-lock-border", opt.gen_lod_lock_border,
                "the generated low LOD keeps the model's open edges in place");
   bool no_etc1 = false, no_mips = false;
-  app.add_flag("--no-etc1", no_etc1, "16-bit textures (RGB565 / RGBA4) instead of ETC1 / ETC1A4");
+  app.add_flag("--no-etc1", no_etc1, "RGB565 / RGBA8 textures instead of ETC1 / ETC1A4");
   app.add_flag("--etc1-merc", opt.etc1_merc,
                "ETC1 for all textures of merc models (no quality test, faces too)");
-  app.add_option("--etc1-merc-psnr", opt.etc1_merc_psnr,
-                 "merc textures: ETC1 when its PSNR against the image is at least this or the "
-                 "16-bit version's (dB; 0: merc textures stay 16-bit)");
-  app.add_option("--etc1-merc-block", opt.etc1_merc_block,
-                 "... and no 4x4 block has an RMS error above this or the 16-bit version's worst "
-                 "(0..255)");
+  app.add_option("--etc1-psnr,--etc1-merc-psnr", opt.etc1_psnr,
+                 "ETC1 when its PSNR against the image is at least this or the RGB565 / RGBA8 "
+                 "version's (dB; 0: no ETC1)");
+  app.add_option("--etc1-block,--etc1-merc-block", opt.etc1_block,
+                 "... and no 4x4 block has an RMS error above this or the RGB565 / RGBA8 version's "
+                 "worst (0..255)");
   app.add_option("--etc1-merc-min", opt.etc1_merc_min,
                  "... for merc textures at least this many texels wide and high");
   app.add_option("--etc1-quality", opt.etc1_quality, "ETC1 encoder quality: 0 low, 1 medium, 2 high");

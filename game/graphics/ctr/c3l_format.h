@@ -56,7 +56,11 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // Otherwise v19 (files without such prototypes are v19's byte for byte but for the version).
 // (AI-assisted, j2water2) v21: envmapped tie shine (Jak II), see ExtEnvTie. Otherwise v20 (files
 // without envmapped ties are v20's byte for byte but for the version).
-constexpr uint32_t kVersion = 21;
+// v22: time of day alpha (TodColorA: the alpha of each palette, blended like the rgb); textures up
+// to 1024 texels. Otherwise v21.
+constexpr uint32_t kVersion = 22;
+// the first version whose time of day colors have alpha (TodColorA)
+constexpr uint32_t kTodAlphaVersion = 22;
 // (AI-assisted, j2water2) the first version with the envmapped tie table (ExtEnvTie)
 constexpr uint32_t kEnvTieVersion = 21;
 // (AI-assisted, j2vis) the first version with the prototype visibility table (ExtProtoVis)
@@ -119,7 +123,7 @@ static_assert(sizeof(Header) == 128);
 /*!
  * Texture, already in the 3DS GPU layout: 8x8 tiles (rows of tiles), Morton order inside a tile,
  * bottom row of the image first (ETC1: see tools/ctr_level_converter/ctr_texture.h). Power of two,
- * 8..128. v8: `levels` mip levels one after the other (each half the size of the previous one, the
+ * 8..1024. v8: `levels` mip levels one after the other (each half the size of the previous one, the
  * last one at least 8 texels on its short side); v7: always one level (levels = 0).
  */
 struct Texture {
@@ -354,6 +358,12 @@ struct TodColor {
   uint8_t rgb[8][3];
 };
 static_assert(sizeof(TodColor) == 24);
+// v22: the same with each palette's alpha (GS units), blended as the PC does: min(128, sum(w[p] *
+// a[p]) >> 6) with the palettes' alpha weights. TodMul colors take their color's alpha.
+struct TodColorA {
+  uint8_t rgba[8][4];
+};
+static_assert(sizeof(TodColorA) == 32);
 
 /*!
  * (AI-assisted) v16: a time of day color times a vertex color: min(255, color * mul / 128) per

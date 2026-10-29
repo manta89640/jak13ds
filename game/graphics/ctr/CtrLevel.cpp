@@ -151,7 +151,7 @@ int missing_parts(const CtrLevelData& lev, u32* bytes) {
            (m.index_end - m.index_first) * (u32)sizeof(u16);
     }
   }
-  if (lev.tex_pool < 0 && lev.tex_pool_bytes) {
+  if (lev.tex_pools.empty() && lev.tex_pool_bytes) {
     n++;
     b += lev.tex_pool_bytes;
   }
@@ -232,7 +232,7 @@ LevelMem level_mem(const CtrLevelData& lev) {
       m.heap += vec_bytes(e.mask) + vec_bytes(e.dests) + sizeof(e);
     }
   }
-  m.tex = lev.tex_pool >= 0 ? lev.tex_pool_bytes : 0;
+  m.tex = lev.tex_pools.empty() ? 0 : lev.tex_pool_bytes;
   m.heap += vec_bytes(lev.chunks) + vec_bytes(lev.draws) + vec_bytes(lev.draw_states) +
             vec_bytes(lev.draw_alpha80) + vec_bytes(lev.sorted_draws) +
             vec_bytes(lev.ordered_draws) + vec_bytes(lev.early_draws) + vec_bytes(lev.draw_chunk) +
@@ -970,7 +970,7 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
     }
   }
   if (d->meshes.size() == job.chunks.size() && d->merc_meshes.size() == job.merc.size() &&
-      (!job.textures || d->tex.pool >= 0)) {
+      (!job.textures || !d->tex.pools.empty())) {
     d->result = LoadResult::LOADED;
   }
 }
@@ -979,8 +979,8 @@ void CtrLevels::delete_textures(TexLoad* t) {
   for (int h : t->handles) {
     ctr_gpu_tex_delete(h);
   }
-  if (t->pool >= 0) {
-    ctr_gpu_pool_delete(t->pool);  // after its textures
+  for (int pool : t->pools) {
+    ctr_gpu_pool_delete(pool);  // after its textures
   }
   *t = TexLoad();
 }
@@ -1080,8 +1080,8 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
     }
   }
   d.merc_meshes.clear();
-  if (d.tex.pool >= 0 && lev->tex_pool < 0) {
-    lev->tex_pool = d.tex.pool;
+  if (!d.tex.pools.empty() && lev->tex_pools.empty()) {
+    lev->tex_pools = std::move(d.tex.pools);
     lev->textures = std::move(d.tex.handles);
     lev->tex_min_alpha = std::move(d.tex.min_alpha);
     d.tex = TexLoad();
@@ -1701,7 +1701,7 @@ void CtrLevels::request_repair(CtrLevelData& lev) {
   std::sort(job.merc.begin(), job.merc.end(), [](const RepairMerc& a, const RepairMerc& b) {
     return a.file_vertex < b.file_vertex;
   });
-  job.textures = lev.tex_pool < 0 && lev.tex_pool_bytes > 0;
+  job.textures = lev.tex_pools.empty() && lev.tex_pool_bytes > 0;
   // (AI-assisted, streammem) its room kept free of the stream arena's growth until it is done (it
   // was dropped as soon as the repair was asked for: SM-1)
   for (const auto& c : job.chunks) {
@@ -1964,8 +1964,8 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
 // and its neighbours, starts with those)
 struct TodSeen {
   std::mutex lock;
-  std::map<std::string, std::array<u8, 24>> by_level;
-  std::array<u8, 24> last{};
+  std::map<std::string, std::array<u8, 32>> by_level;  // rgb weights, then the alpha weights
+  std::array<u8, 32> last{};
   u32 last_day_mask = 0;
   std::map<std::string, u8> pulse;  // (AI-assisted, citadel) per level its pulsing palettes
 };
@@ -1992,16 +1992,37 @@ void tod_weights(const CtrBackgroundCamera& cam, u8 w[8][3]) {
   }
 }
 
+// c3l v22: the game's alpha weight of palette p (64 = 1.0), as interp_time_of_day_slow reads it
+void tod_alpha_weights(const CtrBackgroundCamera& cam, u8 wa[8]) {
+  for (int p = 0; p < 8; p++) {
+    wa[p] = (u8)(((u32)cam.itimes[p / 2][(p % 2) * 2 + 1] >> 16) & 0xff);
+  }
+}
+
+// an alpha kind blended: min(128, sum(w * a) >> 6), the table's alpha byte
+inline u32 tod_blend_alpha(const std::array<u8, 8>& a, const u8 wa[8]) {
+  u32 s = 0;
+  for (int p = 0; p < 8; p++) {
+    s += (u32)wa[p] * a[p];
+  }
+  return std::min<u32>(128, s >> 6) << 24;
+}
+
+inline u32 tod_alpha_of(const CtrLevelData::Tod& t, u32 c) {
+  return t.akind.empty() ? (t.aword.empty() ? 0 : t.aword[0]) : t.aword[t.akind[c]];
+}
+
 // (AI-assisted) render thread: the time of day work of this frame (blends and rewrites), taken out
 // of auto_detail's build time (ctr_level_tod_take_ms): it is not GPU load, and counting it pulled
 // the tie / shrub distances in while the title screen's day ran
 double g_tod_frame_ms = 0;
 
-// a blended color times a TodMul (shrubs' base color, the untextured vista's texture average)
+// a blended color times a TodMul (shrubs' base color, the untextured vista's texture average);
+// the color's alpha as it is
 inline u32 tod_mul_rgb(u32 c, const c3l::TodMul& m) {
   return std::min<u32>(255, ((c & 0xff) * m.mul[0] + 64) >> 7) |
          std::min<u32>(255, (((c >> 8) & 0xff) * m.mul[1] + 64) >> 7) << 8 |
-         std::min<u32>(255, (((c >> 16) & 0xff) * m.mul[2] + 64) >> 7) << 16;
+         std::min<u32>(255, (((c >> 16) & 0xff) * m.mul[2] + 64) >> 7) << 16 | (c & 0xff000000u);
 }
 
 // The palettes a blend with weights w adds (weight not 0).
@@ -2041,7 +2062,7 @@ __attribute__((noinline)) u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx) {
   const u32 nc = t.color_count;
   u32 rgb;
   if (idx < nc) {
-    rgb = tod_blend_rgb(t, idx, t.act);
+    rgb = tod_blend_rgb(t, idx, t.act) | tod_alpha_of(t, idx);
   } else {
     const auto& m = t.muls[idx - nc];
     rgb = tod_mul_rgb(tod_entry(t, m.color), m);
@@ -2069,6 +2090,9 @@ void tod_refresh_colors(CtrLevelData::Tod& t) {
   u32* const stamp = t.stamp.data();
   const u8* const cm = t.color_mask.data();
   const u32* const lut = t.lut;
+  const u8* const ak = t.akind.empty() ? nullptr : t.akind.data();
+  const u32* const aw = t.aword.data();
+  const u32 a0 = t.aword.empty() ? 0 : t.aword[0];
   for (u32 c = 0; c < nc; c++, src += stride) {
     if (stamp[c] >= lut[cm[c]]) {
       continue;
@@ -2080,7 +2104,7 @@ void tod_refresh_colors(CtrLevelData::Tod& t) {
       g += (u32)x[1] * w[k];
     }
     table[c] = std::min<u32>(255, (rb & 0xffff) >> 6) | std::min<u32>(255, g >> 6) << 8 |
-               std::min<u32>(255, rb >> 22) << 16;
+               std::min<u32>(255, rb >> 22) << 16 | (ak ? aw[ak[c]] : a0);
     stamp[c] = ver;
   }
 }
@@ -2133,29 +2157,23 @@ void tod_refresh_all(CtrLevelData::Tod& t) {
 }
 
 // Every level draw: the game's weights into target_w (the table's entries follow lazily, exact as
-// the PC). (AI-assisted, levellod) config tod_pulse_step (default 4 since Oct 29) holds a pulsing
-// day palette back a little; no_hold (the title screen): every frame's weights. Returns 2: day
-// palettes taken, 1: only light palettes, 0: nothing.
+// the PC). (AI-assisted, levellod) config tod_pulse_step (default 4): a pulsing day palette's moves
+// are taken by the groups bright in it at once and by the others only every tod_pulse_step 64ths
+// (or once it stood still for kTodPulseSettle frames: pal_hver / hlut); a group none of whose
+// colors is bright in it is then at most a color unit off. no_hold (the title screen): every
+// group every move. Returns 2: day palettes taken, 1: only light or held palettes, 0: nothing.
 constexpr u64 kTodPulseSettle = 8;  // (AI-assisted, citadel)
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
                u64 frame, bool no_hold) {
   u8 w[8][3];
   tod_weights(cam, w);
-  // (palettes no color uses don't matter)
-  u32 used = 0;
-  for (u32 k = 0; k < t.palette_count; k++) {
-    used |= 1u << t.palettes[k];
-  }
+  u8 wa[8];
+  tod_alpha_weights(cam, wa);
   // (AI-assisted, citadel) config tod_pulse_step: a day palette that pulses (CtrTodPulse.h: a mood
   // light's weight going up and down around a steady mean within ~6 s; citadel's palette 1, 1/64
-  // every ~2 frames, 71% of its colors) is taken only when it moved tod_pulse_step 64ths from the
-  // weight last taken, or once it stood still for kTodPulseSettle frames: each move rewrites every
-  // vertex drawn that uses it (hardware: ~0.19 us a vertex, 10-20 ms per move in citadel). The
-  // day's own moves (one way for hours, the title's fast day too) and the lights as before. A
-  // palette found pulsing is remembered per level (TodSeen::pulse): a reload holds it at once,
-  // until it stops turning for CtrTodPulse::kKeep frames. (AI-assisted, levellod, Oct 29) the
-  // stricter detector: the Oct 17 one took two direction changes of any size for a pulse and held
-  // the title's day palettes, which is why the default was 0 from Oct 23 (todlag).
+  // every ~2 frames, 71% of its colors). A palette found pulsing is remembered per level
+  // (TodSeen::pulse): a reload holds it at once, until it stops turning for CtrTodPulse::kKeep
+  // frames.
   const int pulse_step = no_hold ? 0 : ctr_settings().tod_pulse_step;
   if (!t.first_frame) {
     t.first_frame = frame;
@@ -2186,28 +2204,54 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
       t.pulse_move[p] = frame;
     }
   }
-  u32 changed = 0, day = 0;
-  for (u32 k = 0; k < t.palette_count; k++) {
-    const int p = t.palettes[k];
+  u32 changed = 0, taken = 0, day = 0;
+  for (u32 m = t.track_mask; m; m &= m - 1) {
+    const int p = __builtin_ctz(m);
+    const bool a_moved = (t.apal_mask >> p & 1) && t.wa[p] != wa[p];
+    if (t.blended_valid && !a_moved && memcmp(t.target_w[p], w[p], 3) == 0) {
+      continue;
+    }
+    changed |= 1u << p;
     if (pulse_step > 0 && t.blended_valid && !(t.light_mask >> p & 1) && pulsing(p) &&
-        frame - t.pulse_move[p] < kTodPulseSettle && memcmp(t.target_w[p], w[p], 3) != 0) {
-      int diff = 0;
+        frame - t.pulse_move[p] < kTodPulseSettle) {
+      int diff = (t.apal_mask >> p & 1) ? std::abs((int)wa[p] - (int)t.held_wa[p]) : 0;
       for (int c = 0; c < 3; c++) {
-        diff = std::max(diff, std::abs((int)w[p][c] - (int)t.target_w[p][c]));
+        diff = std::max(diff, std::abs((int)w[p][c] - (int)t.held_w[p][c]));
       }
       if (diff < pulse_step) {
         t.pulse_held++;
-        continue;  // (held: target_w stays)
+        continue;  // (held: only the groups bright in it follow)
       }
     }
-    if (!t.blended_valid || memcmp(t.target_w[p], w[p], 3) != 0) {
-      changed |= 1u << p;
-      if (!(t.light_mask >> p & 1)) {
-        day |= 1u << p;
-      }
+    taken |= 1u << p;
+    memcpy(t.held_w[p], w[p], 3);
+    t.held_wa[p] = wa[p];
+    if (!(t.light_mask >> p & 1)) {
+      day |= 1u << p;
     }
   }
   memcpy(t.weights, w, sizeof(w));
+  // the alpha kinds: a kind outside its colors' masks that blends to another alpha makes every
+  // entry blend again
+  if (!t.akinds.empty() && (!t.blended_valid || (changed & t.apal_mask))) {
+    bool all = false;
+    for (size_t k = 0; k < t.akinds.size(); k++) {
+      const u32 a = tod_blend_alpha(t.akinds[k], wa);
+      all = all || (t.akind_full[k] && a != t.aword[k]);
+      t.aword[k] = a;
+    }
+    if (all && t.blended_valid) {
+      changed |= t.track_mask;
+      taken |= t.track_mask;
+      day |= t.track_mask & ~t.light_mask;
+      for (u32 m = t.track_mask; m; m &= m - 1) {
+        const int p = __builtin_ctz(m);
+        memcpy(t.held_w[p], w[p], 3);
+        t.held_wa[p] = wa[p];
+      }
+    }
+  }
+  memcpy(t.wa, wa, sizeof(wa));
   t.blended_valid = true;
   if (!changed) {
     return 0;
@@ -2220,18 +2264,24 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   for (u32 c = changed; c; c &= c - 1) {
     t.pal_ver[__builtin_ctz(c)] = t.ver;
   }
+  for (u32 c = taken; c; c &= c - 1) {
+    t.pal_hver[__builtin_ctz(c)] = t.ver;
+  }
   t.lut[0] = 0;
+  t.hlut[0] = 0;
   for (u32 m = 1; m < 256; m++) {
     t.lut[m] = std::max(t.lut[m & (m - 1)], t.pal_ver[__builtin_ctz(m)]);
+    t.hlut[m] = std::max(t.hlut[m & (m - 1)], t.pal_hver[__builtin_ctz(m)]);
   }
   tod_make_act(t, t.target_w, &t.act);
   if (day) {
-    t.dver++;
+    t.dver = (t.dver + 1) & 0xffffffu;
     t.day_move_frame = frame;  // (AI-assisted, perfv2) the spread of its rewrites (TodPass)
     auto& seen = tod_seen();
     std::lock_guard<std::mutex> lk(seen.lock);
     auto& wl = seen.by_level[level];
     memcpy(wl.data(), t.target_w, 24);
+    memcpy(wl.data() + 24, t.wa, 8);
     seen.last = wl;
     seen.last_day_mask = tod_day_mask(t);
     return 2;
@@ -2245,8 +2295,8 @@ static_assert(offsetof(c3l::Vertex, pad) == 6 && offsetof(c3l::Vertex, rgba) == 
 static_assert(sizeof(c3l::Vertex) == 16);
 
 // (AI-assisted, todlag) vertices [first, end) of a plain group from a table that is all up to date
-// (tod_refresh_all): no version checks, and the rgb written as a halfword and a byte (the alpha
-// byte isn't read): ~6 instructions per vertex instead of ~15
+// (tod_refresh_all): no version checks; the rgb written as a halfword and a byte (the vertex keeps
+// its alpha), or the whole word with the blended alpha (c3l v22)
 typedef u16 __attribute__((may_alias)) tod_half;
 // (AI-assisted, perfv2) the vertex rewrites run through level meshes in FCRAM (~200 ns a missed
 // cache line on hardware, 2 vertices a line: the loops wait on memory, Azahar can't show it): the
@@ -2256,6 +2306,19 @@ inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int firs
   const u32* const tab = t.table.data();
   u8* p = (u8*)(v + first);
   u8* const e = (u8*)(v + end);
+  if (!t.keep_alpha) {
+    for (; p + 32 <= e; p += 32) {
+      __builtin_prefetch(p + kTodPrefetch, 1);
+      const u32 a = tab[*(const tod_half*)(p + 6)];
+      const u32 b = tab[*(const tod_half*)(p + 22)];
+      *(tod_word*)(p + 12) = a;
+      *(tod_word*)(p + 28) = b;
+    }
+    if (p < e) {
+      *(tod_word*)(p + 12) = tab[*(const tod_half*)(p + 6)];
+    }
+    return;
+  }
   for (; p + 32 <= e; p += 32) {
     __builtin_prefetch(p + kTodPrefetch, 1);  // (AI-assisted, perfv2)
     const u32 a = tab[*(const tod_half*)(p + 6)];
@@ -2272,12 +2335,14 @@ inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int firs
   }
 }
 
-// Vertices [first, end) from the table (the alpha stays; plain: every one has a time of day color).
+// Vertices [first, end) from the table (without c3l v22 alpha the vertex keeps its own; plain: every
+// one has a time of day color).
 inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end, bool plain) {
   const u32* const tab = t.table.data();
   const u32* const stamp = t.stamp.data();
   const u8* const cm = t.color_mask.data();
   const u32* const lut = t.lut;
+  const u32 keep = t.keep_alpha;
   tod_word* w = (tod_word*)(v + first);
   tod_word* const e = (tod_word*)(v + end);
   if (plain) {
@@ -2285,7 +2350,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
       __builtin_prefetch(w + kTodPrefetch / 4, 1);  // (AI-assisted, perfv2)
       const u32 idx = w[1] >> 16;
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
-      w[3] = (w[3] & 0xff000000u) | rgb;
+      w[3] = (w[3] & keep) | rgb;
     }
     return;
   }
@@ -2295,7 +2360,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
     const u32 idx = w[1] >> 16;
     if (idx < ntab) {
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
-      w[3] = (w[3] & 0xff000000u) | rgb;
+      w[3] = (w[3] & keep) | rgb;
     }
   }
 }
@@ -2452,13 +2517,25 @@ void tod_reserve_unit(CtrLevelData* out, u32 ci) {
 // loop).
 void tod_mark_plain(CtrLevelData::Tod& t, u32 ci, const c3l::Vertex* v, int n) {
   const u32 ntab = (u32)t.table.size();
+  const u8* const cb = t.color_bright.empty() ? nullptr : t.color_bright.data();
+  u8 chunk_bright = 0;
   for (u32 g = t.chunk_group_first[ci]; g < t.chunk_group_first[ci] + t.chunk_group_count[ci]; g++) {
     auto& gr = t.groups[g];
     bool plain = true;
-    for (int i = gr.lo; i <= std::min<int>(gr.hi, n - 1) && plain; i++) {
-      plain = (u16)v[i].pad < ntab;
+    u8 bright = 0;
+    for (int i = gr.lo; i <= std::min<int>(gr.hi, n - 1); i++) {
+      const u32 idx = (u16)v[i].pad;
+      plain = plain && idx < ntab;
+      if (cb && idx < ntab) {
+        bright |= cb[idx];
+      }
     }
     gr.plain = plain ? 1 : 0;
+    gr.bright = bright;
+    chunk_bright |= bright;
+  }
+  if (ci < t.chunk_bright.size()) {
+    t.chunk_bright[ci] = chunk_bright;
   }
 }
 
@@ -2536,7 +2613,10 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   // the last move of the chunk's day / light palettes
   const u32 m = t.chunk_mask[ci];
   const u32 dm = m & ~t.light_mask, lm = m & t.light_mask;
-  const u32 day_last = std::max<u32>(1, t.lut[dm]), light_last = t.lut[lm];
+  // (a group behind only by held moves of palettes it isn't bright in waits: hlut)
+  const u32 cb = ci < t.chunk_bright.size() ? t.chunk_bright[ci] : 0;
+  const u32 day_last = std::max<u32>(1, std::max(t.lut[dm & cb], t.hlut[dm & ~cb]));
+  const u32 light_last = t.lut[lm];
   // quick out: every group up to date
   const bool day_ok = t.chunk_min_ver[ci] >= day_last;
   const bool light_ok = t.chunk_light_ver[ci] >= light_last;
@@ -2585,7 +2665,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
               const auto ahead = p + std::min<ptrdiff_t>(8, last - p - 1);
               __builtin_prefetch(w + 4 * *ahead, 1);
               tod_word* x = w + 4 * *p;
-              x[3] = (x[3] & 0xff000000u) | tod_entry(t, x[1] >> 16);
+              x[3] = (x[3] & t.keep_alpha) | tod_entry(t, x[1] >> 16);
             }
             flo = std::min<int>(flo, *first);
             fhi = std::max<int>(fhi, *(last - 1));
@@ -2600,16 +2680,19 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     bool any = false;
     auto day_group = [&](u32 g) {
       auto& gr = t.groups[g];
-      if (gr.ver >= day_last) {
+      const u32 gb = gr.bright;
+      if (gr.ver >= std::max<u32>(1, std::max(t.lut[dm & gb], t.hlut[dm & ~gb]))) {
         return;
       }
+      // behind only by held moves: its entries blended as they are read, not the whole table
+      const bool held_only = gr.ver >= std::max<u32>(1, t.hlut[dm]);
       const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
       if (ps.spread && gr.ver != 0 && gr.dver + 1 == t.dver && ps.spread_left < end - first) {
         ps.deferred++;  // (AI-assisted, perfv2) one day step behind: a later frame of the spread
         return;
       }
       ps.spread_left -= std::max(0, end - first);
-      if (ps.fresh_ok && !ps.fresh) {
+      if (ps.fresh_ok && !ps.fresh && !held_only) {
         // (at the frame's first group to rewrite; versions don't move until the next tod_update)
         tod_refresh_all(t);
         ps.fresh = true;
@@ -2702,7 +2785,7 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   }
   const auto& t = *lev.tod;
   struct St {
-    u64 frames = 0, verts = 0, stale = 0, stale_frames = 0, steps = 0;
+    u64 frames = 0, verts = 0, stale = 0, stale_frames = 0, steps = 0, astale = 0;
     int max_err = 0, max_step = 0;
     std::array<u8, 24> prev{};
     bool have_prev = false;
@@ -2720,6 +2803,19 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   auto& st = stats[lev.name];
   u8 w[8][3];
   tod_weights(cam, w);
+  // c3l v22: the alpha each entry blends to with this frame's alpha weights
+  u8 wa[8];
+  tod_alpha_weights(cam, wa);
+  std::vector<u8> akind_alpha(t.akinds.size());
+  for (size_t k = 0; k < t.akinds.size(); k++) {
+    akind_alpha[k] = (u8)(tod_blend_alpha(t.akinds[k], wa) >> 24);
+  }
+  auto alpha_now = [&](u32 idx) -> int {
+    const u32 nc = t.color_count;
+    const u32 c = idx < nc ? idx : t.muls[idx - nc].color;
+    return akind_alpha.empty() ? -1 : akind_alpha[t.akind.empty() ? 0 : t.akind[c]];
+  };
+  u64 astale = 0;
   auto exact = [&](const u8 (*wt)[3], std::vector<u32>& e) {
     const u32 nc = t.color_count, nm = (u32)t.muls.size();
     e.resize(nc + nm);
@@ -2841,6 +2937,9 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
       }
       stale += e > 0;
       far += e > 4;
+      if (!t.keep_alpha) {
+        astale += alpha_now(idx) != (int)(rgb >> 24);
+      }
       const int gi = group_of(i);
       if (gi >= 0) {
         g_n[gi]++;
@@ -2885,6 +2984,7 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   st.frames++;
   st.verts += verts;
   st.stale += stale;
+  st.astale += astale;
   st.stale_frames += stale > 0;
   st.max_err = std::max(st.max_err, err);
   st.max_step = std::max(st.max_step, step);
@@ -2903,9 +3003,10 @@ void tod_check(CtrLevelData& lev, const CtrBackgroundCamera& cam, const CtrRende
   }
   if (rs.log_now) {
     lg::info("[ctr] tod check {}: {} frames, {:.0f} vertices drawn per frame, {} stale vertices in "
-             "{} frames (max error {}), {} frames with a color step (max step {})",
+             "{} frames (max error {}), {} frames with a color step (max step {}); {} vertices "
+             "with another alpha than the blend",
              lev.name, st.frames, (double)st.verts / std::max<u64>(1, st.frames), st.stale,
-             st.stale_frames, st.max_err, st.steps, st.max_step);
+             st.stale_frames, st.max_err, st.steps, st.max_step, st.astale);
     lg::info("[ctr] tod check {}: color age of the vertices drawn {} frames at most ({} = none of "
              "the last {}), {:.3f} on average, {} frames with a color more than 1 frame old; "
              "{} of {} group draws 3+ frames old ({} with the file's colors)",
@@ -2932,40 +3033,117 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     return;
   }
   const u32 nc = hdr.tod_color_count, nm = hdr.tod_mul_count;
+  // c3l v22: TodColorA (alpha blended); older: TodColor (the vertices keep their alpha)
+  const bool alpha = hdr.version >= c3l::kTodAlphaVersion;
+  const u32 csize = alpha ? (u32)sizeof(c3l::TodColorA) : (u32)sizeof(c3l::TodColor);
   constexpr u32 kPiece = 2048;
-  std::vector<c3l::TodColor> piece;
-  u32 mask = 0, used[8] = {};
+  std::vector<c3l::TodColorA> piece;
+  std::vector<c3l::TodColor> piece_rgb;
+  auto read_piece = [&](u32 i, u32 n) {
+    if (alpha) {
+      return f.read_array(hdr.tod_offset + i * csize, n, &piece);
+    }
+    if (!f.read_array(hdr.tod_offset + i * csize, n, &piece_rgb)) {
+      return false;
+    }
+    piece.assign(n, c3l::TodColorA{});
+    for (u32 j = 0; j < n; j++) {
+      for (int p = 0; p < 8; p++) {
+        memcpy(piece[j].rgba[p], piece_rgb[j].rgb[p], 3);
+      }
+    }
+    return true;
+  };
+  auto alpha_of = [](const c3l::TodColorA& c) {
+    std::array<u8, 8> a;
+    for (int p = 0; p < 8; p++) {
+      a[p] = c.rgba[p][3];
+    }
+    return a;
+  };
+  auto rgb_mask = [](const c3l::TodColorA& c) {
+    u32 m = 0;
+    for (int p = 0; p < 8; p++) {
+      if (c.rgba[p][0] | c.rgba[p][1] | c.rgba[p][2]) {
+        m |= 1u << p;
+      }
+    }
+    return m;
+  };
+  // the alpha kinds: all 0 (never moves); 0x80 in the day palettes (black in no more than 3/4
+  // of the colors: the moods' weights for them add up to 1.0 or more) and 0x80 or 0 in the others
+  // ("full": it blends to 0x80, outside the masks); the others move with their palettes
+  std::map<std::array<u8, 8>, u32> kind_of;
+  u32 mask = 0, rgb_used[8] = {};
   for (u32 i = 0; i < nc; i += kPiece) {
     const u32 n = std::min(kPiece, nc - i);
-    if (!f.read_array(hdr.tod_offset + i * (u32)sizeof(c3l::TodColor), n, &piece)) {
+    if (!read_piece(i, n)) {
       lg::warn("[ctr] {}: bad time of day table, not used", lev->name);
       return;
     }
     for (const auto& c : piece) {
+      const u32 m = rgb_mask(c);
+      mask |= m;
       for (int p = 0; p < 8; p++) {
-        if (c.rgb[p][0] | c.rgb[p][1] | c.rgb[p][2]) {
-          mask |= 1u << p;
-          used[p]++;
-        }
+        rgb_used[p] += m >> p & 1;
+      }
+      if (alpha && kind_of.size() <= 256) {
+        kind_of.emplace(alpha_of(c), 0);
       }
     }
   }
   auto t = std::make_unique<CtrLevelData::Tod>();
+  if (alpha && kind_of.size() > 256) {
+    lg::warn("[ctr] {}: {} time of day alphas (at most 256): the vertices keep their alpha",
+             lev->name, kind_of.size());
+  } else if (alpha) {
+    t->keep_alpha = 0;
+    u32 day = 0;
+    for (int p = 0; p < 8; p++) {
+      if (rgb_used[p] * 4 > nc) {
+        day |= 1u << p;
+      }
+    }
+    for (auto& [a, k] : kind_of) {
+      k = (u32)t->akinds.size();
+      t->akinds.push_back(a);
+      bool full = day != 0, zero = true;
+      for (int p = 0; p < 8; p++) {
+        full = full && (a[p] == 0x80 || (a[p] == 0 && !(day >> p & 1)));
+        zero = zero && a[p] == 0;
+        if (a[p]) {
+          t->apal_mask |= 1u << p;
+        }
+      }
+      t->akind_full.push_back(full && !zero);
+    }
+    t->aword.assign(t->akinds.size(), 0);
+  }
+  auto kind_mask = [&](u32 k) {
+    u32 m = 0;
+    for (int p = 0; p < 8; p++) {
+      if (t->akinds[k][p]) {
+        m |= 1u << p;
+      }
+    }
+    return m;
+  };
   for (int p = 0; p < 8; p++) {
     if (mask & (1u << p)) {
       t->palettes[t->palette_count++] = (u8)p;
-      // a light palette: a quarter of the colors or fewer
-      if (used[p] * 4 <= nc) {
-        t->light_mask |= 1u << p;
-      }
     }
   }
+  t->track_mask = mask | t->apal_mask;
+  // the pulse hold's error: a color bright in a palette (channel * (tod_pulse_step - 1) >= 64)
+  // would be a color unit or more off while the palette is held
+  const int step = ctr_settings().tod_pulse_step;
+  auto bright_of = [&](u32 v) { return step > 1 && v * (u32)(step - 1) >= 64; };
   // (colors, TodMuls, per entry its mask, rgb and stamp, per chunk 28 bytes with its groups, per
   // run 2). (AI-assisted) Allow for the added light stamp of every possible visibility group
   // (at most one per run, plus the whole-chunk fallback).
   [[maybe_unused]] const u32 need = nc * t->palette_count * 3 + nm * (u32)sizeof(c3l::TodMul) +
-                                     (nc + nm) * 9 +
-                                     (u32)lev->chunks.size() * 28 + (u32)lev->vis_runs.size() * 2 +
+                                     (nc + nm) * 10 + nc +
+                                     (u32)lev->chunks.size() * 29 + (u32)lev->vis_runs.size() * 2 +
                                      (u32)(lev->chunks.size() + lev->vis_runs.size()) * sizeof(u32);
 #ifdef __3DS__
   {
@@ -2983,28 +3161,53 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   t->color_count = nc;
   t->colors.resize((size_t)nc * t->palette_count * 3);
   t->color_mask.assign(nc + nm, 0);
+  t->color_bright.assign(nc + nm, 0);
+  if (t->akinds.size() > 1) {
+    t->akind.assign(nc, 0);
+  }
   for (u32 i = 0; i < nc; i += kPiece) {
     const u32 n = std::min(kPiece, nc - i);
-    if (!f.read_array(hdr.tod_offset + i * (u32)sizeof(c3l::TodColor), n, &piece)) {
+    if (!read_piece(i, n)) {
       return;
     }
     u8* dst = t->colors.data() + (size_t)i * t->palette_count * 3;
     for (u32 j = 0; j < n; j++) {
       const auto& c = piece[j];
-      u8 m = 0;
+      u32 m = 0;
+      u8 bright = 0;
       for (u32 k = 0; k < t->palette_count; k++) {
-        const u8* rgb = c.rgb[t->palettes[k]];
+        const u8* rgb = c.rgba[t->palettes[k]];
         memcpy(dst, rgb, 3);
         dst += 3;
         if (rgb[0] | rgb[1] | rgb[2]) {
-          m |= (u8)(1u << t->palettes[k]);
+          m |= 1u << t->palettes[k];
+        }
+        if (bright_of(std::max({rgb[0], rgb[1], rgb[2]}))) {
+          bright |= (u8)(1u << t->palettes[k]);
         }
       }
-      t->color_mask[i + j] = m;
-      t->light_color_count += (m & t->light_mask) != 0;
+      if (!t->akinds.empty()) {
+        const u32 k = kind_of[alpha_of(c)];
+        if (!t->akind.empty()) {
+          t->akind[i + j] = (u8)k;
+        }
+        const u32 km = kind_mask(k);
+        if (!t->akind_full[k] || !m) {
+          m |= km;  // (its alpha moves with these palettes; a black color: so it is blended)
+        }
+        if (!t->akind_full[k]) {
+          for (int p = 0; p < 8; p++) {
+            if (bright_of(c.rgba[p][3])) {
+              bright |= (u8)(1u << p);
+            }
+          }
+        }
+      }
+      t->color_mask[i + j] = (u8)m;
+      t->color_bright[i + j] = bright;
     }
   }
-  if (nm && !f.read_array(hdr.tod_offset + nc * (u32)sizeof(c3l::TodColor), nm, &t->muls)) {
+  if (nm && !f.read_array(hdr.tod_offset + nc * csize, nm, &t->muls)) {
     lg::warn("[ctr] {}: bad time of day table, not used", lev->name);
     return;
   }
@@ -3015,7 +3218,35 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     }
   }
   for (u32 j = 0; j < nm; j++) {
-    t->color_mask[nc + j] = t->color_mask[t->muls[j].color];
+    const auto& mu = t->muls[j];
+    t->color_mask[nc + j] = t->color_mask[mu.color];
+    // (bright in the colors' palettes times the largest factor)
+    const u8* src = t->colors.data() + (size_t)mu.color * t->palette_count * 3;
+    const u32 f = std::max({mu.mul[0], mu.mul[1], mu.mul[2]});
+    u8 bright = t->color_bright[mu.color];
+    for (u32 k = 0; k < t->palette_count; k++, src += 3) {
+      if (bright_of(std::max({src[0], src[1], src[2]}) * f / 128)) {
+        bright |= (u8)(1u << t->palettes[k]);
+      }
+    }
+    t->color_bright[nc + j] = bright;
+  }
+  // light palettes: a quarter of the colors or fewer
+  {
+    u32 used[8] = {};
+    for (u32 i = 0; i < nc; i++) {
+      for (u32 m = t->color_mask[i]; m; m &= m - 1) {
+        used[__builtin_ctz(m)]++;
+      }
+    }
+    for (int p = 0; p < 8; p++) {
+      if ((t->track_mask >> p & 1) && used[p] * 4 <= nc) {
+        t->light_mask |= 1u << p;
+      }
+    }
+    for (u32 i = 0; i < nc; i++) {
+      t->light_color_count += (t->color_mask[i] & t->light_mask) != 0;
+    }
   }
   t->table.assign(nc + nm, 0);
   t->stamp.assign(nc + nm, 0);
@@ -3027,6 +3258,7 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   t->chunk_min_dver.assign(nch, 0);
   t->chunk_light_ver.assign(nch, 0);
   t->chunk_mask.assign(nch, 0);
+  t->chunk_bright.assign(nch, 0);
   t->chunk_scanned.assign(nch, 0);
   t->chunk_mesh.assign(nch, -1);
   // the weights the level was last drawn with, else the last level's with the same day palettes:
@@ -3034,7 +3266,7 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   // draw. Else they keep the file's colors until drawn (tod_recolor).
   {
     auto& seen = tod_seen();
-    std::array<u8, 24> w{};
+    std::array<u8, 32> w{};
     bool have = false;
     {
       std::lock_guard<std::mutex> lk(seen.lock);
@@ -3053,22 +3285,35 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     if (have) {
       memcpy(t->weights, w.data(), 24);
       memcpy(t->target_w, w.data(), 24);
+      memcpy(t->held_w, w.data(), 24);
+      memcpy(t->wa, w.data() + 24, 8);
+      memcpy(t->held_wa, w.data() + 24, 8);
+      for (size_t k = 0; k < t->akinds.size(); k++) {
+        t->aword[k] = tod_blend_alpha(t->akinds[k], t->wa);
+      }
       t->blended_valid = true;
       // version 1: the colors the meshes get as they are read
       t->ver = 1;
-      for (u32 k = 0; k < t->palette_count; k++) {
-        t->pal_ver[t->palettes[k]] = 1;
+      for (u32 m = t->track_mask; m; m &= m - 1) {
+        t->pal_ver[__builtin_ctz(m)] = 1;
+        t->pal_hver[__builtin_ctz(m)] = 1;
       }
       for (u32 m = 1; m < 256; m++) {
         t->lut[m] = std::max(t->lut[m & (m - 1)], t->pal_ver[__builtin_ctz(m)]);
+        t->hlut[m] = std::max(t->hlut[m & (m - 1)], t->pal_hver[__builtin_ctz(m)]);
       }
       tod_make_act(*t, t->target_w, &t->act);
     }
   }
+  size_t bright = 0;
+  for (u8 b : t->color_bright) {
+    bright += b != 0;
+  }
   lg::info("[ctr] {}: time of day: {} colors in {} palettes (lights {:02x}: {} colors), {} "
-           "multiplied ({} KB)",
+           "multiplied ({} KB); {} alpha kinds{}, {} entries bright in a palette",
            lev->name, nc, t->palette_count, t->light_mask, t->light_color_count, nm,
-           t->bytes() / 1024);
+           t->bytes() / 1024, t->akinds.size(), t->keep_alpha ? " (the vertices' alpha)" : "",
+           bright);
   lev->tod = std::move(t);
 }
 
@@ -3835,11 +4080,20 @@ void make_cull_clusters(CtrLevelData& lev) {
 }
 }  // namespace
 
-// All textures (with their mip levels) in one pool: the renderer moves it to VRAM when there's
-// room, with one GPU copy. The texels are read straight into it. (AI-assisted) When VRAM is short
-// only the pool's start goes there (~2.6 MB): the textures of the background (tfrag, tie, shrub)
-// come first, then the ones only merc models (characters) use, which were 75-95% of a level's
-// pool and came first in the file. They are read in file order all the same.
+// A level's texture pools: VRAM first by the level's priority, within it the earlier pieces (the
+// background's textures) first.
+constexpr u32 kTexPoolPiece = 1024 * 1024;
+void set_tex_priority(const std::vector<int>& pools, int priority) {
+  for (size_t i = 0; i < pools.size(); i++) {
+    ctr_gpu_pool_set_priority(pools[i], priority * 16 + 15 - (int)std::min<size_t>(i, 15));
+  }
+}
+
+// All textures (with their mip levels) in pools of at most kTexPoolPiece (a texture bigger than
+// that in one of its own): the renderer moves each to VRAM when there's room, with one GPU copy.
+// The texels are read straight into them. (AI-assisted) The textures of the background (tfrag,
+// tie, shrub) come first, then the ones only merc models (characters) use, which were 75-95% of a
+// level's textures and came first in the file. They are read in file order all the same.
 bool CtrLevels::load_textures(c3l::Reader& f,
                               const c3l::Header& hdr,
                               const std::vector<c3l::Texture>& texs,
@@ -3852,7 +4106,8 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     int format = 0;       // ctr_tex_format
     int levels = 1;
     u32 file_bytes = 0;   // of the levels used, as stored in the file
-    u32 offset = 0;       // in the pool
+    u32 offset = 0;       // in its pool
+    u32 piece = 0;        // its pool
   };
   std::vector<Plan> plan(texs.size());
   const bool rgba4_as_rgba8 = ctr_gpu_rgba4_as_rgba8() != 0;
@@ -3898,12 +4153,19 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     }
   }
   u32 pool_bytes = 0;
+  std::vector<u32> piece_bytes;
   for (int pass = 0; pass < 2; pass++) {
     for (size_t i = 0; i < texs.size(); i++) {
       auto& p = plan[i];
       if (p.ok && background[i] == (pass == 0)) {
-        p.offset = pool_bytes;
-        pool_bytes += (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
+        const u32 b = (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
+        if (piece_bytes.empty() || piece_bytes.back() + b > kTexPoolPiece) {
+          piece_bytes.push_back(0);
+        }
+        p.piece = (u32)piece_bytes.size() - 1;
+        p.offset = piece_bytes.back();
+        piece_bytes.back() += b;
+        pool_bytes += b;
       }
     }
     if (pass == 0) {
@@ -3913,15 +4175,25 @@ bool CtrLevels::load_textures(c3l::Reader& f,
   out->pool_bytes = pool_bytes;
   out->handles.assign(texs.size(), -1);
   out->min_alpha.assign(texs.size(), 0);
-  int pool = pool_bytes ? ctr_gpu_pool_create(pool_bytes) : -1;
-  while (pool_bytes && pool < 0 && make_room(name, "the textures", pool_bytes)) {
-    pool = ctr_gpu_pool_create(pool_bytes);
+  std::vector<u8*> bases;
+  for (const u32 b : piece_bytes) {
+    int pool = ctr_gpu_pool_create(b);
+    while (pool < 0 && make_room(name, "the textures", b)) {
+      pool = ctr_gpu_pool_create(b);
+    }
+    if (pool < 0) {
+      lg::error("[ctr] {}: no memory for the textures ({} KB, a piece of {} KB)", name,
+                pool_bytes / 1024, b / 1024);
+      for (int q : out->pools) {
+        ctr_gpu_pool_delete(q);
+      }
+      out->pools.clear();
+      bases.clear();
+      break;
+    }
+    out->pools.push_back(pool);
+    bases.push_back((u8*)ctr_gpu_pool_data(pool));
   }
-  if (pool_bytes && pool < 0) {
-    lg::error("[ctr] {}: no memory for the textures ({} KB)", name, pool_bytes / 1024);
-  }
-  out->pool = pool;
-  u8* base = pool >= 0 ? (u8*)ctr_gpu_pool_data(pool) : nullptr;
   std::vector<u8> texels;
   for (size_t i = 0; i < texs.size(); i++) {
     if (cancelled()) {
@@ -3929,10 +4201,11 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     }
     const auto& t = texs[i];
     const auto& p = plan[i];
-    if (!p.ok || !base) {
+    if (!p.ok || bases.empty()) {
       continue;
     }
-    u8* dst = base + p.offset;
+    const int pool = out->pools[p.piece];
+    u8* dst = bases[p.piece] + p.offset;
     bool read_ok;
     if (!p.expand) {
       read_ok = f.read(t.data_offset, dst, p.file_bytes);
@@ -3958,7 +4231,7 @@ bool CtrLevels::load_textures(c3l::Reader& f,
       out->min_alpha[i] = (u8)texture_min_alpha(dst, t.w, t.h, p.format);
     }
   }
-  if (pool >= 0) {
+  for (int pool : out->pools) {
     ctr_gpu_pool_ready(pool);
   }
   return true;
@@ -4145,7 +4418,7 @@ bool CtrLevels::load_file(const fs::path& path,
     TexLoad tl;
     const bool ok = load_textures(f, hdr, texs, out->draws, name, &tl);
     // in the level also when cancelled: unloaded with it
-    out->tex_pool = tl.pool;
+    out->tex_pools = std::move(tl.pools);
     out->tex_pool_bytes = tl.pool_bytes;
     out->tex_background_bytes = tl.background_bytes;
     out->tex_empty = tl.empty;
@@ -4838,7 +5111,7 @@ void CtrLevels::process_pending_loads(u64 frame) {
     if (d.job.common && name != "GAME") {
       // (AI-assisted) load_extra
       if (d.result == LoadResult::LOADED) {
-        ctr_gpu_pool_set_priority(d.lev->tex_pool, 3);
+        set_tex_priority(d.lev->tex_pools, 3);
         lg::info("[ctr] loaded {}.c3l ({} models)", name, d.lev->merc_models.size());
         m_extras[name] = std::move(d.lev);
         rebuild_merc_index();
@@ -4851,7 +5124,7 @@ void CtrLevels::process_pending_loads(u64 frame) {
       if (d.result == LoadResult::LOADED) {
         m_common = std::move(d.lev);
         // Jak and the shared models: on screen all the time, and small
-        ctr_gpu_pool_set_priority(m_common->tex_pool, 3);
+        set_tex_priority(m_common->tex_pools, 3);
         rebuild_merc_index();
       } else {
         lg::warn("[ctr] no common models ({}/GAME.c3l): Jak won't be drawn",
@@ -5005,10 +5278,10 @@ void CtrLevels::unload(CtrLevelData& lev) {
   for (int t : lev.textures) {
     ctr_gpu_tex_delete(t);
   }
-  if (lev.tex_pool >= 0) {
-    ctr_gpu_pool_delete(lev.tex_pool);  // after its textures (freed together, after the frame)
-    lev.tex_pool = -1;
+  for (int pool : lev.tex_pools) {
+    ctr_gpu_pool_delete(pool);  // after its textures (freed together, after the frame)
   }
+  lev.tex_pools.clear();
   for (int m : lev.meshes) {
     ctr_gpu_mesh_delete(m);
   }
@@ -7717,7 +7990,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   }
   // this level's textures: VRAM first if the camera is in it (see ctr_gpu_pool_create)
-  ctr_gpu_pool_set_priority(lev.tex_pool, far_level ? 1 : 2);
+  set_tex_priority(lev.tex_pools, far_level ? 1 : 2);
   // Jak 1 scissor adjust (tfrag3.vert: y *= 512 / 448); (AI-assisted) Jak II's 512 / 416 * 0.5
   const float kYScale = ctr_gs_y_scale();
   m_visible.clear();
