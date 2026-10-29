@@ -2759,12 +2759,13 @@
   (if *debug-segment*
       (cam-debug-reset-coll-tri)
       )
-  (cam-string-follow)
+  ;; og:preserve-this perf sections (3DS: camera-slave's split)
+  (with-pc-profiler "cam-string-follow" (cam-string-follow))
   (if (logtest? (-> self options) (cam-slave-options-u32 LINE_OF_SIGHT))
-      (cam-string-line-of-sight)
+      (with-pc-profiler "cam-string-los" (cam-string-line-of-sight))
       )
   (if (not (paused?))
-      (cam-string-joystick)
+      (with-pc-profiler "cam-string-joystick" (cam-string-joystick))
       )
   (let ((gp-0 (new-stack-vector0)))
     (vector--float*!
@@ -2777,8 +2778,9 @@
     )
   (set! (-> self desired-pos y) (fmin (-> self desired-pos y) (-> *camera* settings string-camera-ceiling)))
   (if (logtest? (-> self options) (cam-slave-options-u32 FIND_HIDDEN_TARGET))
-      (cam-string-find-hidden)
+      (with-pc-profiler "cam-string-find-hidden" (cam-string-find-hidden))
       )
+  (profiler-start-event "cam-string-move")
   (cond
     ((logtest? (-> self options) (cam-slave-options-u32 GOTO_GOOD_POINT))
      (when *debug-segment*
@@ -2802,6 +2804,7 @@
       (cam-string-move)
       )
     )
+  (profiler-end-event)
   (tracking-spline-method-17 (-> self position-spline) (-> self string-trans) 0.04096 4096.0 #t)
   (let ((f30-0 (-> self clock clock-ratio)))
     (let ((gp-2 (max 2 (the int (+ 0.5 (-> self clock time-adjust-ratio))))))

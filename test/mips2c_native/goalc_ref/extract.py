@@ -50,6 +50,19 @@ MODULES = {
         "decomp-frame",
         "decomp-request",
         "finalize-joint-frame",
+        # the reference of pc-new-joint-decompressor (native_anim.cpp)
+        "new-joint-decompressor",
+        "method:eval-blend-tree! new-joint-decompressor-work",
+        "method:output-blend-tree! new-joint-decompressor-work",
+        "method:build-requests! new-joint-decompressor-work",
+        "method:init-frame! new-joint-decompressor-work",
+        "method:process-request! new-joint-decompressor-work",
+        "method:process-requests! new-joint-decompressor-work",
+        "method:finalize-frame! new-joint-decompressor-work",
+    ],
+    # the reference of pc-sp-spawn (native_sp_spawn.cpp)
+    "sparticle-launcher": [
+        "method:spawn sparticle-launch-control",
     ],
     "quaternion": [
         "quaternion-normalize!",
@@ -127,11 +140,23 @@ def main():
         funcs = functions(src)
         entries = []
         body = []
+        # every function value the top level makes: GC_SEG_ADDR(0, value)
+        values = [int(v) for v in re.findall(r"GC_SEG_ADDR\(0, (\d+)\)", src)]
         for name in wanted:
-            off = binds[name]  # function value: segment offset of the stub + 4
-            (tag,) = struct.unpack_from("<I", seg, off + 4)
-            assert tag & 0x80000000, (mod, name, hex(tag))
-            idx = tag & 0x7fffffff
+            if name.startswith("method:"):
+                # "method:NAME TYPE": the function after the comment "// (method NAME TYPE)"; its
+                # value is the stub whose tag holds its index. Named "(method NAME TYPE)".
+                header = "// (method " + name[len("method:"):] + ")\n"
+                m = re.search(re.escape(header) + r"static (?:u64|v128) gc_f(\d+)\(", src)
+                idx = int(m.group(1))
+                name = header[3:-1]
+                off = next(v for v in values if v + 8 <= len(seg) and
+                           struct.unpack_from("<I", seg, v + 4)[0] == (0x80000000 | idx))
+            else:
+                off = binds[name]  # function value: segment offset of the stub + 4
+                (tag,) = struct.unpack_from("<I", seg, off + 4)
+                assert tag & 0x80000000, (mod, name, hex(tag))
+                idx = tag & 0x7fffffff
             arity = len(re.findall(r"(?:u32|u64|v128) a\d+", funcs[idx].split("{", 1)[0]))
             entries.append((name, off, idx, arity))
             body.append(funcs[idx])

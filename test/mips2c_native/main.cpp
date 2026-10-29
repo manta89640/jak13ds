@@ -74,6 +74,9 @@ LINK(moving_sphere_sphere_intersect)
 LINK(closest_pt_in_triangle)
 LINK(instance_sphere_box_intersect)
 LINK(pc_anim_decomp_request)
+LINK(pc_new_joint_decompressor)
+LINK(pc_sp_spawn)
+LINK(mem_copy)
 LINK(pc_anim_finalize_frame)
 LINK(pc_new_bones_mtx_calc)
 LINK(shadow_execute)
@@ -227,6 +230,11 @@ int main(int argc, char** argv) {
   pc_anim_finalize_frame::link();
   harness::use_goalc_reference("pc-anim-decomp-request", "decomp-request");
   harness::use_goalc_reference("pc-anim-finalize-frame", "finalize-joint-frame");
+  pc_new_joint_decompressor::link();
+  harness::use_goalc_reference("pc-new-joint-decompressor", "new-joint-decompressor");
+  pc_sp_spawn::link();
+  mem_copy::link();
+  harness::use_goalc_reference("pc-sp-spawn", "(method spawn sparticle-launch-control)");
   for (const char* name : {"add-scaled-matrix!", "decomp-fixed", "decomp-frame",
                            "quaternion-normalize!"}) {
     harness::bind_goalc_reference(name);

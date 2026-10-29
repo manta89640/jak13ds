@@ -47,17 +47,23 @@
 
 (define *new-joint-decompressor-work* (new 'global 'new-joint-decompressor-work))
 
+;; og:preserve-this 3DS: the whole decompressor in C++ with a per-actor frame cache
+;; (game/mips2c/jak1_functions/native_anim.cpp, same results). #f when this GOAL code must run.
+(#when TARGET_3DS
+  (def-mips2c pc-new-joint-decompressor (function joint-anim-frame int joint-control symbol)))
+
 (defun new-joint-decompressor ((dst joint-anim-frame) (num-joints int) (jc joint-control))
   "Decompress a joint animation!"
-  ;; determine anim weights, write them out to the joint-control for other stuff to see.
-  (eval-blend-tree! *new-joint-decompressor-work* jc)
-  (output-blend-tree! *new-joint-decompressor-work* jc)
-  ;; figure out which animations need decompression
-  (build-requests! *new-joint-decompressor-work* jc)
-  ;; run the decompression
-  (init-frame! *new-joint-decompressor-work* dst num-joints)
-  (process-requests! *new-joint-decompressor-work* dst num-joints)
-  (finalize-frame! *new-joint-decompressor-work* dst num-joints)
+  (when (#if TARGET_3DS (not (pc-new-joint-decompressor dst num-joints jc)) #t)
+    ;; determine anim weights, write them out to the joint-control for other stuff to see.
+    (eval-blend-tree! *new-joint-decompressor-work* jc)
+    (output-blend-tree! *new-joint-decompressor-work* jc)
+    ;; figure out which animations need decompression
+    (build-requests! *new-joint-decompressor-work* jc)
+    ;; run the decompression
+    (init-frame! *new-joint-decompressor-work* dst num-joints)
+    (process-requests! *new-joint-decompressor-work* dst num-joints)
+    (finalize-frame! *new-joint-decompressor-work* dst num-joints))
   (none))
 
 (defmethod eval-blend-tree! ((this new-joint-decompressor-work) (jc joint-control))

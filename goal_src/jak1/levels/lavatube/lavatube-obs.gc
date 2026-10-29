@@ -373,6 +373,8 @@
 (defbehavior darkecobarrel-mover-pos darkecobarrel-mover ()
   (let ((f30-0 (darkecobarrel-base-pos (-> self start-time))))
     (if (darkecobarrel-base-done? f30-0) (deactivate self))
+    ;; og:preserve-this perf section (3DS)
+    (profiler-start-event "darkecobarrel-pos")
     (eval-path-curve! (-> self path) (-> self root trans) f30-0 'interp)
     (+! (-> self root trans y) (* 4096.0 (-> self y-offset osc value)))
     (+! (-> self root trans y) -4096.0)
@@ -398,6 +400,7 @@
   (if (< (vector-vector-xz-distance-squared (-> self root trans) (camera-pos)) 1073741800.0)
     (logior! (-> self draw status) (draw-status skip-bones))
     (set! (-> self draw status) (the-as draw-status (logclear (-> self draw status) (draw-status skip-bones)))))
+  (profiler-end-event)
   (none))
 
 (defstate darkecobarrel-mover-die (darkecobarrel-mover)
@@ -454,10 +457,12 @@
                        (set! (-> self leak (+ (-> self hits) -1) offset y) (+ -49152.0 (-> self leak (+ (-> self hits) -1) offset y)))))))))))))))
   :trans
     (behavior ()
-      (update! (-> self y-offset) 0.0)
-      (if (and (at-min? (-> self y-offset)) (< (-> self y-offset osc vel) 0.03))
-        (set! (-> self y-offset osc vel) (fabs (update! (-> self y-offset-tgt)))))
-      (update! (-> self down) (update-with-delay! (-> self down-tgt)))
+      ;; og:preserve-this perf sections (3DS)
+      (with-profiler "darkecobarrel-osc"
+        (update! (-> self y-offset) 0.0)
+        (if (and (at-min? (-> self y-offset)) (< (-> self y-offset osc vel) 0.03))
+          (set! (-> self y-offset osc vel) (fabs (update! (-> self y-offset-tgt)))))
+        (update! (-> self down) (update-with-delay! (-> self down-tgt))))
       (darkecobarrel-mover-pos))
   :code
     (behavior ()
@@ -470,7 +475,9 @@
       (loop
         (ja :num-func num-func-identity :frame-num 0.0)
         (suspend)))
-  :post pusher-post)
+  :post
+    (behavior ()
+      (with-profiler "darkecobarrel-post" (pusher-post))))
 
 (defbehavior darkecobarrel-mover-init-by-other darkecobarrel-mover ((arg0 res-lump) (arg1 float) (arg2 time-frame) (arg3 time-frame))
   (let ((s2-0 (new 'process 'collide-shape-moving self (collide-list-enum usually-hit-by-player))))

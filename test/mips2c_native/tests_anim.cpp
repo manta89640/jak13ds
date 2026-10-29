@@ -8,6 +8,8 @@
 
 #include "fakes.h"
 
+extern u32 g_link_generation;  // fakes.cpp
+
 namespace tests {
 
 using namespace harness;
@@ -66,9 +68,109 @@ u32 gen_output(Gen& g, int num_joints) {
   return out;
 }
 
+//! a compressed animation (joint-anim-compressed-control) of num_frames frames for num_joints
+u32 gen_jacc(Gen& g, int num_joints, int num_frames) {
+  const u32 fixed = alloc(80 + stream_bytes(num_joints));
+  for (int i = 0; i < 14; i++) {
+    st<u32>(fixed + 4 * i,
+            g.chance(0.2f) ? g.pick(std::vector<u32>{0, 0xffffffff}) : g.u32_());
+  }
+  st<u32>(fixed + 56, num_joints);
+  st<u32>(fixed + 60, g.range(0, 3));  // matrix-bits
+  gen_streams(g, fixed + 80, fixed + 64, num_joints);
+  const u32 jacc = alloc(16 + 4 * num_frames);
+  st<u32>(jacc, num_frames);
+  st<u32>(jacc + 12, fixed);
+  for (int f = 0; f < num_frames; f++) {
+    const u32 fr = alloc(16 + stream_bytes(num_joints));
+    gen_streams(g, fr + 16, fr, num_joints);
+    st<u32>(jacc + 16 + 4 * f, fr);
+  }
+  return jacc;
+}
+
+void setup_new_joint_decompressor() {
+  static bool done = false;
+  if (done) {
+    return;
+  }
+  done = true;
+  const u32 type = make_type("new-joint-decompressor-work", 16);
+  const char* methods[7] = {"eval-blend-tree!", "output-blend-tree!", "build-requests!",
+                            "init-frame!",      "process-request!",   "process-requests!",
+                            "finalize-frame!"};
+  for (int i = 0; i < 7; i++) {
+    const std::string name =
+        std::string("(method ") + methods[i] + " new-joint-decompressor-work)";
+    bind_goalc_reference(name);
+    set_method(type, 9 + i, sym_value(name));
+  }
+  set_sym("*new-joint-decompressor-work*", alloc_static(1168 + 192, 16) + 96);
+  set_sym("*pc-3ds-anim-native*", true_sym());
+  bind_mips2c_symbol("pc-anim-decomp-request");
+  bind_mips2c_symbol("pc-anim-finalize-frame");
+}
+
 }  // namespace
 
 void register_anim_tests() {
+  // groups of 3 cases with the same inputs: the frame cache records the requests, stores the
+  // frame, then copies it; every group starts a new link generation (new data at reused addresses)
+  add_test({"pc-new-joint-decompressor",
+            "pc-new-joint-decompressor",
+            9000,
+            setup_new_joint_decompressor,
+            [](Case& c) {
+              if (c.index % 3 == 0) {
+                g_link_generation++;
+              }
+              Gen g(0x5eed1234u ^ (u32)(c.index / 3) * 0x85ebca6bu);
+              const int num_joints = g.chance(0.05f) ? g.range(0, 2) : g.range(3, 60);
+              // the work area: whatever the last call left
+              const u32 work = sym_value("*new-joint-decompressor-work*");
+              for (u32 i = 0; i < 1168; i += 4) {
+                st<float>(work + i, g.chance(0.5f) ? 0.f : g.f(-2.f, 2.f));
+              }
+              const u32 out = gen_output(g, num_joints);
+              const int num_channels = g.chance(0.05f) ? g.range(0, 6) : g.range(1, 3);
+              const u32 jc = alloc(44 + 48 * num_channels + 16) + 4;
+              st<u16>(jc, g.chance(0.1f) ? 0x20 : (u16)g.range(0, 0x1f));
+              st<s32>(jc + 20, num_channels);
+              const int nanims = g.range(1, 2);
+              std::vector<u32> groups;
+              for (int a = 0; a < nanims; a++) {
+                const u32 ag = alloc(48);
+                const int nf = g.range(1, 5);
+                st<u32>(ag + 40, gen_jacc(g, num_joints, nf));
+                groups.push_back(ag);
+              }
+              const std::vector<std::string> cmds = {"push", "blend", "push1", "stack", "stack1"};
+              for (int i = 0; i < num_channels; i++) {
+                const u32 ch = jc + 44 + 48 * i;
+                std::string cmd = i == 0 ? "push" : g.pick(cmds);
+                if (i == 0 && g.chance(0.03f)) {
+                  cmd = g.pick(cmds);
+                }
+                st<u32>(ch + 4, sym(cmd));
+                float interp = g.f(0.f, 1.f);
+                if (g.chance(0.3f)) {
+                  interp = g.pick(std::vector<float>{0.f, 1.f, 0.5f});
+                }
+                st<float>(ch + 8, interp);
+                st<u32>(ch + 12, g.pick(groups));
+                float fn = g.f(0.f, 6.f);
+                if (g.chance(0.4f)) {
+                  fn = (float)g.range(0, 5);
+                }
+                st<float>(ch + 16, fn);
+                st<float>(ch + 44, g.f(-1.f, 1.f));
+              }
+              c.args[0] = out;
+              c.args[1] = num_joints;
+              c.args[2] = jc;
+            },
+            {}});
+
   add_test({"pc-anim-decomp-request",
             "pc-anim-decomp-request",
             6000,

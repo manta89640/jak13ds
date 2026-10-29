@@ -212,6 +212,7 @@ set(RUNTIME_SOURCE
         mips2c/jak1_functions/native_collide_edge_grab.cpp
         mips2c/jak1_functions/native_collide_func.cpp
         mips2c/jak1_functions/native_collide_mesh.cpp
+        mips2c/jak1_functions/native_misc.cpp
         mips2c/jak1_functions/native_collide_probe.cpp
         mips2c/jak1_functions/native_geometry.cpp
         mips2c/jak1_functions/native_joint.cpp
@@ -220,6 +221,7 @@ set(RUNTIME_SOURCE
         mips2c/jak1_functions/native_sparticle.cpp
         mips2c/jak1_functions/native_sp_init.cpp
         mips2c/jak1_functions/native_sp_callbacks.cpp
+        mips2c/jak1_functions/native_sp_spawn.cpp
         mips2c/jak1_functions/native_sparticle_launcher.cpp
         mips2c/jak1_functions/merc_blend_shape.cpp
         mips2c/jak1_functions/ocean_vu0.cpp

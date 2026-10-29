@@ -692,7 +692,15 @@
              (sphere-in-view-frustum? (the-as sphere gp-1))
              (sphere-in-view-frustum? (the-as sphere (begin (*! (-> gp-1 w) 8.0) gp-1))))))))))
 
+;; og:preserve-this 3DS: spawn in C++ (game/mips2c/jak1_functions/native_sp_spawn.cpp, same results)
+(#when TARGET_3DS
+  (def-mips2c pc-sp-spawn (function sparticle-launch-control vector symbol))
+  (defun pc-sp-spawn-error ()
+    (format 0 "spawn called for non-sparticle-launcher~%")))
+
 (defmethod spawn ((this sparticle-launch-control) (arg0 vector))
+  (#when TARGET_3DS
+    (if (pc-sp-spawn this arg0) (return (the-as object 0))))
   (set! (-> this center quad) (-> arg0 quad))
   ;; og:preserve-this
   ;; check if we are visible (remove this check to force particles to be drawn.)
