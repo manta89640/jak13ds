@@ -610,7 +610,7 @@
                         (if (not (-> *pc-settings* ps2-lod-dist?))
                           (set! lod-to-use (minmax (-> *pc-settings* lod-force-actor) 0 (-> arg1 lod-set max-lod))))))
                     ;; og:preserve-this lod hacks
-                    ;; (AI-assisted) 3DS: the PS2's distance cull (and closest-object below) always,
+                    ;; (AI-assisted) 3DS: the PS2's distance cull always (not closest-object below),
                     ;; whatever a saved pc-settings or the debug menu's PS2 LOD says (off drew every
                     ;; actor at any distance, so anim_lod never skipped them either)
                     (if (#if (not PC_PORT)
@@ -621,7 +621,10 @@
                           (a0-26 (+ (-> arg1 sink-group merc-sink foreground-texture-page) 6)))
                       (when (#if (not PC_PORT)
                               (not (logtest? (-> arg1 status) (draw-status do-not-check-distance)))
-                              (and (#if TARGET_3DS #t (-> *pc-settings* ps2-lod-dist?)) (not (logtest? (-> arg1 status) (draw-status do-not-check-distance)))))
+                              ;; (AI-assisted) not forced on the 3DS: closest-object picks the texture
+                              ;; pages the game uploads (forced, they changed every frame: ~28 ms of
+                              ;; texture uploads per frame in the title and lava tube, Oct 29)
+                              (and (-> *pc-settings* ps2-lod-dist?) (not (logtest? (-> arg1 status) (draw-status do-not-check-distance)))))
                         (if (< cam-dist (-> v1-64 closest-object a0-26)) (set! (-> v1-64 closest-object a0-26) cam-dist))
                         (when (and (!= a0-26 6) (!= (-> arg1 level-index) 2))
                           (let ((a1-45 (cond
