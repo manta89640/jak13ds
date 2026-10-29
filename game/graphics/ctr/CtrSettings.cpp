@@ -90,7 +90,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "shrub_distance") {
       s.shrub_distance = std::max(0.f, f);
     } else if (key == "tie_distance_scale") {
-      s.tie_distance_scale = std::max(kMinScale, f);
+      s.tie_distance_scale = v == "none" ? 0.f : std::max(kMinScale, f);
     } else if (key == "auto_detail") {
       s.auto_detail = parse_bool(v);
     } else if (key == "shrub_scale") {
@@ -496,9 +496,10 @@ std::string CtrSettings::summary() const {
       auto_detail && shrub_scale_max > shrub_scale
           ? fmt::format("{:.2f}-{:.2f}", shrub_scale, shrub_scale_max)
           : fmt::format("{:.2f}", shrub_scale),
-      auto_detail ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
-                                std::max(tie_distance_scale, tie_distance_scale_max))
-                  : fmt::format("{:.1f}", tie_distance_scale),
+      !(tie_distance_scale > 0) ? std::string("none")
+      : auto_detail ? fmt::format("{:.1f}-{:.1f}", tie_distance_scale,
+                                  std::max(tie_distance_scale, tie_distance_scale_max))
+                    : fmt::format("{:.1f}", tie_distance_scale),
       fog ? "on" : "off",
       merc ? "on" : "off", sprites ? "on" : "off", max_sprites, pipeline ? "on" : "off",
       frame_overlap2 == 2 ? "on" : (frame_overlap2 == 1 ? "clean" : "off"), !ocean ? "off" : (ocean_mode == OceanMode::Full ? "full" : (ocean_mode == OceanMode::Waves ? "waves" : "flat")),

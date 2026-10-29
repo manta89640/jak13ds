@@ -23,8 +23,9 @@ struct CtrSettings {
   // the game's own distance fog (like the PC renderer)
   bool fog = true;
   // tfrag: the detailed version up to this distance, the coarse one beyond (meters, 0 = always
-  // detailed). Needs .c3l files with both versions (ctr_level_converter --far-lod).
-  float lod_distance = 200.f;
+  // detailed, as the PS2: its tfrag has no distance LOD). Needs .c3l files with both versions
+  // (ctr_level_converter --far-lod).
+  float lod_distance = 0.f;
   // a level whose bounds are further than this from the camera (seen from a neighbouring level)
   // is drawn with only its low resolution tfrag, no tie (meters, 0 = off). (AI-assisted) 80 (was
   // 40): ties popped in at 40 m; c3l files with chunk kinds also keep the ties without a distance
@@ -36,7 +37,8 @@ struct CtrSettings {
   // shrubs up to this distance (meters, times detail_scale; 0 = the converter's, 100 m), and the
   // converter's distances of small and medium ties (100 / 300 m) times this
   float shrub_distance = 50.f;
-  float tie_distance_scale = 1.5f;
+  // 0 (config "none"): ties without a distance limit, as the PS2 (geometry 3 beyond the far-plane)
+  float tie_distance_scale = 0.f;
   // (AI-assisted) auto_detail: those two grow toward shrub_distance_max / tie_distance_scale_max
   // while the GPU has time to spare (its time per frame under auto_detail_gpu_ms) and go back
   // when it hasn't, so the distances are as far as each place allows (Precursor Basin has room,
@@ -48,7 +50,7 @@ struct CtrSettings {
   // PS2 distance (the middle of its PS2 fade: the fort wall ropes 155 m, grass 60-75 m) times
   // shrub_scale (growing toward shrub_scale_max with auto_detail), times detail_scale.
   // shrub_distance / shrub_distance_max are for older files.
-  float shrub_scale = 0.8f;
+  float shrub_scale = 1.f;
   float shrub_scale_max = 1.f;
   float auto_detail_gpu_ms = 27.f;
   // renderers
@@ -73,7 +75,7 @@ struct CtrSettings {
   bool envmap = true;
   // (AI-assisted, fidelity2) envmap_min_px: no shine pass for models smaller than this on the top
   // screen (their bounding sphere's diameter in pixels; 0 = every model). HUD models always keep it
-  float envmap_min_px = 16.f;
+  float envmap_min_px = 0.f;
   // (AI-assisted) the envmap draws of a merc bucket queued and drawn together at its end (or before
   // a blended / no depth write draw): one skin -> env shader switch pair instead of one per draw
   bool envmap_batch = true;
@@ -142,9 +144,9 @@ struct CtrSettings {
   // memory). Default (auto): on, in the emulator too (it draws VRAM textures right; only RGBA4 is
   // noise there, see rgba4_as_rgba8).
   bool vram_textures = true;
-  // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default), 2 trilinear
-  // (blends two levels: smoother, slower).
-  int mipmaps = 1;
+  // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level, 2 trilinear (default, as
+  // the PC: blends two levels).
+  int mipmaps = 2;
   // (AI-assisted) the LOD bias of mipmapped level / model textures (+0.5, +1: the next smaller
   // level sooner, blurrier, fewer texels read); 0 = none. (AI-assisted, fidelity2) +0.25 by default
   // (+0.5 looked too blurry to the user in Azahar; safe preset: 0)
@@ -269,9 +271,9 @@ struct CtrSettings {
   // (AI-assisted, title-popin) files with shape errors (current converter): a group switches to its
   // far version where the far version's shape error is at most this many pixels on screen (this
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).
-  // 1 px costs ~+30-70k triangles on the title and in Snowy; 4 keeps the worst views about where
-  // they were (host, Oct 17)
-  float tie_lod_px = 4.f;
+  // 1 px: the switch can't be seen, as the PS2's morph to geometry 3 (~+30-70k triangles on the
+  // title and in Snowy against 4 px)
+  float tie_lod_px = 1.f;
   // (AI-assisted) a neighbouring level's visibility string (the camera is in the other level): its
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)
@@ -281,8 +283,9 @@ struct CtrSettings {
   // towards the fog color from draw_distance on instead of the draw distance fog (that one is
   // solid fog color from draw_distance on). Off: only in far mode, within draw_distance.
   bool lowres_vista = true;
-  // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here
-  float vista_distance = 3000.f;
+  // (AI-assisted) meters: far scenery (lowres_vista, the vista tier) is drawn up to here (the
+  // PS2's far clip plane, math-camera f: 10 km)
+  float vista_distance = 10000.f;
   // (AI-assisted) level chunks entirely in front of where both fogs start are drawn without the
   // fog stage (texture combiner pass-through, texture unit 1 off). On (preset safe: off)
   bool fog_stage_skip = true;

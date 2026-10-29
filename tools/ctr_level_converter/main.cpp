@@ -256,6 +256,8 @@ struct SrcVertex {
   // (AI-assisted, j2water2) c3l v21: an envmapped tie vertex's normal (world, unit length * 127)
   s8 nrm[3] = {0, 0, 0};
   u8 has_nrm = 0;
+  // a wind tie vertex's instance (Converter::wind_insts index), UINT32_MAX: none
+  u32 wind = UINT32_MAX;
 };
 
 // (AI-assisted) Vista meshes render UVs, vertex colors and time-of-day entries too.
@@ -457,6 +459,9 @@ struct Converter {
   std::vector<EnvTie> env_ties;
   std::map<std::tuple<u16, u32, u32>, u16> env_tie_ids;
   size_t env_tie_tris = 0, env_tie_groups_missing = 0;
+  // the wind instances of the tie trees (c3l::ExtWind), each tree's first one's index
+  std::vector<c3l::WindInst> wind_insts;
+  std::map<u32, u32> wind_tree_first;
   u16 env_tie_id(u16 tex, u32 mode, const u8 tint[4]) {
     u32 t;
     memcpy(&t, tint, 4);
@@ -1805,7 +1810,16 @@ struct Converter {
       cur_vis = 0xffff;
       cur_proto = 0xffff;
     }
-    // instances moved by the wind (plants, trees): baked at rest with their instance matrix
+    // instances moved by the wind (plants, trees): baked at rest with their instance matrix, each
+    // vertex marked with its instance (c3l::ExtWind: the runtime sways them)
+    if (!tree.instanced_wind_draws.empty() && !wind_tree_first.count(cur_tree)) {
+      wind_tree_first[cur_tree] = (u32)wind_insts.size();
+      for (const auto& wi : tree.wind_instance_info) {
+        wind_insts.push_back(c3l::WindInst{wi.wind_idx, 0, wi.stiffness, wi.matrix[3].y()});
+      }
+    }
+    const u32 wind_first =
+        wind_tree_first.count(cur_tree) ? wind_tree_first[cur_tree] : (u32)UINT32_MAX;
     for (const auto& d : tree.instanced_wind_draws) {
       const u16 tex = texture_id(d.tree_tex_id);
       note_use(tex, d.mode.as_int(), false);
@@ -1841,6 +1855,10 @@ struct Converter {
             }
             note_alpha(tree.colors, v.color_index);  // (AI-assisted)
             sv.tod = tod_color(tree.colors, v.color_index);
+            if (wind_first != UINT32_MAX &&
+                wind_first + g.instance_idx < wind_insts.size()) {
+              sv.wind = wind_first + g.instance_idx;
+            }
             it = remap.emplace(vi, verts.size()).first;
             verts.push_back(sv);
           }
@@ -4612,6 +4630,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   std::vector<c3l::EnvTieDraw> out_env_draws;
   std::map<u32, std::unordered_map<std::string, std::array<s8, 3>>> env_chunk_normals;
   size_t env_st_moved = 0;
+  // the wind instance of each wind vertex by its bytes, per chunk with any (as the normals: two
+  // vertices of different instances never have the same bytes)
+  std::map<u32, std::unordered_map<std::string, u32>> wind_chunk_verts;
 
   for (const auto& cp : plans) {
     {
@@ -4681,6 +4702,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       ch.first_vertex = out_verts.size();
       ch.vertex_count = local_src.size();
       std::unordered_map<std::string, std::array<s8, 3>>* env_normals = nullptr;
+      std::unordered_map<std::string, u32>* wind_verts = nullptr;
+      if (ch.lod_tier != c3l::kVistaTier) {
+        for (const u32 si : local_src) {
+          if (cv.verts[si].wind != UINT32_MAX) {
+            wind_verts = &wind_chunk_verts[(u32)chunks.size()];
+            break;
+          }
+        }
+      }
       for (u32 ti : cp.tris) {
         if (cv.draw_keys[cv.tris[ti].draw_key].env != 0xffff) {
           env_normals = &env_chunk_normals[(u32)chunks.size()];
@@ -4711,6 +4741,16 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         memcpy(o.rgba, v.rgba, 4);
         o.pad = (s16)cv.tod_pad(v.tod);  // (AI-assisted) v16: the time of day color
+        if (wind_verts) {
+          for (int tries = 0; tries < 64; tries++) {
+            auto [it, fresh] = wind_verts->emplace(std::string((const char*)&o, sizeof(o)), v.wind);
+            if (fresh || it->second == v.wind) {
+              break;
+            }
+            o.st[0]++;
+            env_st_moved++;
+          }
+        }
         if (env_normals) {
           // (AI-assisted, j2water2) v21
           const std::array<s8, 3> n = {v.nrm[0], v.nrm[1], v.nrm[2]};
@@ -5266,7 +5306,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
       }
     }
-    const u32 eh_size = !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
+    const u32 eh_size = !wind_chunk_verts.empty() ? c3l::kExtHeaderV22Size
+                        : !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
                         : !pv_protos.empty()    ? c3l::kExtHeaderV20Size
                         : opt.stream            ? (u32)sizeof(eh)
                                                 : c3l::kExtHeaderV17Size;
@@ -5332,6 +5373,70 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                level.level_name, out_env_draws.size(), cv.env_ties.size(), cv.env_tie_tris,
                ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
                cv.env_tie_groups_missing, env_st_moved, missing);
+    }
+    if (!wind_chunk_verts.empty()) {
+      // the wind instances, and per chunk with wind vertices their slots (c3l::ExtWind)
+      c3l::ExtWind ew{};
+      ew.inst_count = (u32)cv.wind_insts.size();
+      ew.insts_offset = append(buf, cv.wind_insts.data(), cv.wind_insts.size());
+      std::vector<c3l::WindChunk> wcs;
+      size_t nverts = 0, nwind = 0, over = 0, unmatched = 0, max_slots = 0;
+      for (const auto& [ci, wm] : wind_chunk_verts) {
+        const auto& ch = chunks.at(ci);
+        std::vector<u8> slots(ch.vertex_count, 0);
+        std::vector<u16> insts;
+        std::unordered_map<u32, u8> slot_of;
+        for (u32 v = 0; v < ch.vertex_count; v++) {
+          const auto& o = out_verts[ch.first_vertex + v];
+          auto it = wm.find(std::string((const char*)&o, sizeof(o)));
+          if (it == wm.end()) {
+            unmatched++;
+            continue;
+          }
+          if (it->second == UINT32_MAX) {
+            continue;
+          }
+          auto [si, fresh] = slot_of.emplace(it->second, (u8)0);
+          if (fresh) {
+            if (insts.size() < c3l::kWindSlots) {
+              insts.push_back((u16)it->second);
+              si->second = (u8)insts.size();
+            }
+          }
+          if (!si->second) {
+            over++;
+            continue;
+          }
+          slots[v] = si->second;
+          nwind++;
+        }
+        if (insts.empty()) {
+          continue;
+        }
+        max_slots = std::max(max_slots, insts.size());
+        nverts += slots.size();
+        std::vector<u8> wind_draws(ch.draw_count, 0);
+        for (u32 d = 0; d < ch.draw_count; d++) {
+          const auto& dr = out_draws[ch.first_draw + d];
+          for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && !wind_draws[d]; i++) {
+            wind_draws[d] = out_indices[i] < slots.size() && slots[out_indices[i]] != 0;
+          }
+        }
+        c3l::WindChunk wc{};
+        wc.chunk = ci;
+        wc.slots_offset = append(buf, slots.data(), slots.size());
+        wc.insts_offset = append(buf, insts.data(), insts.size());
+        wc.slot_count = (u32)insts.size();
+        wc.draws_offset = append(buf, wind_draws.data(), wind_draws.size());
+        wcs.push_back(wc);
+      }
+      ew.chunk_count = (u32)wcs.size();
+      ew.chunks_offset = append(buf, wcs.data(), wcs.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV21Size, &ew, sizeof(ew));
+      lg::info("{}: wind ties: {} instances, {} chunks with {} wind vertices of {} ({} KB), at most "
+               "{} instances per chunk, {} vertices of instances past {} at rest, {} unmatched",
+               level.level_name, cv.wind_insts.size(), wcs.size(), nwind, nverts, nverts / 1024,
+               max_slots, over, c3l::kWindSlots, unmatched);
     }
   }
   hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());

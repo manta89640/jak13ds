@@ -1,0 +1,44 @@
+; Jak 1's wind ties (c3l::ExtWind, ctr_gpu_draw_mesh_wind): ctr_mesh_opt.v.pica with each vertex
+; sheared by its instance's wind first (Tie3::render_tree_wind / do_wind_math: the instance
+; matrix's x and z columns += k * its y column, in world space x += kx * (y - y0)). A second
+; attribute buffer has the vertex's slot (0: none); wind[slot] = (kx, kz, cx, cz) in the chunk's
+; quantized units: x += kx * y + cx, z += kz * y + cz. The uniforms before wind are
+; ctr_mesh_opt's, at the same places.
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[6]       ; as ctr_mesh_opt.v.pica
+.fvec scales
+.fvec fog1
+.fvec wind[64]      ; per slot: kx, kz, cx, cz (slot 0: zero)
+
+.out outpos position
+.out outtc texcoord0.xy
+.out - texcoord1 outtc.zw
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+.alias inslot v3
+
+.entry main_ctr_mesh_wind
+.proc main_ctr_mesh_wind
+  mova a0.x, inslot.x
+  mov r1.yw, inpos
+  mul outtc.xy, scales.xxxx, intex.xyyy
+  ; r2.x = kx * y + cx, r2.z = kz * y + cz
+  mul r2.xz, wind[a0.x].xxyy, inpos.yyyy
+  add r2.xz, wind[a0.x].zzww, r2
+  add r1.xz, inpos, r2
+  ; from here ctr_mesh_opt on the swayed position r1
+  dph r0.x, r1, clip[5]
+  dph r0.y, r1, clip[4]
+  dph outpos.x, r1, clip[0]
+  dph outpos.y, r1, clip[1]
+  max r0.xy, fog1.xyxy, r0.xyxy
+  dph outpos.z, r1, clip[2]
+  max outtc.zw, -r0.xxxx, r0.yyyy
+  dph outpos.w, r1, clip[3]
+  mul outclr, scales.yyyy, inclr
+  end
+.end

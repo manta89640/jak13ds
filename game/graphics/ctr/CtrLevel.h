@@ -432,6 +432,19 @@ struct CtrLevelData {
   std::vector<s16> draw_env;
   std::vector<s32> chunk_normals;
   int normals_mesh = -1;
+  // wind ties (c3l::ExtWind): the instances, per chunk its slots' byte offset in wind_mesh (-1:
+  // none) and its slot instances (chunk_wind_first, chunk_wind_n into wind_slot_inst); the PC's
+  // wind state per wind_idx (Tie3 m_wind_vectors) and this frame's shear per instance (kx, kz)
+  std::vector<c3l::WindInst> wind_insts;
+  std::vector<s32> chunk_wind;
+  std::vector<u32> chunk_wind_first;
+  std::vector<u8> chunk_wind_n;
+  std::vector<u16> wind_slot_inst;
+  std::vector<u8> draw_wind;  // per draw: it has wind vertices
+  int wind_mesh = -1;
+  std::vector<float> wind_vectors;
+  std::vector<float> wind_k;
+  u64 wind_frame = ~0ull;
 };
 
 /*! DrawMode (tfrag3 draw settings) to ctr_gpu state. */
@@ -1027,6 +1040,35 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   float m_env_color[3] = {128.f, 128.f, 128.f};
   u64 m_env_draws = 0, m_env_tris = 0, m_env_frames = 0;
   void env_color_scan(const CtrLevelData& lev, const CtrRenderState& rs);
+  // Jak 1's wind (Tie3::WindWork, the tie bucket's first PC_PORT transfer after the level's data)
+  struct WindWork {
+    u32 paused;
+    u32 pad[3];
+    float wind_array[64][4];
+    float wind_normal[4];
+    float wind_temp[4];
+    float wind_force[64];
+    u32 wind_time;
+    u32 pad2[3];
+  };
+  WindWork m_wind_work{};
+  bool m_wind_seen = false;
+  void wind_update(CtrLevelData& lev, u64 frame);
+  // the wind tie draws: opaque ones after the opaque pass, the others in their place; their rows
+  // (c3l::ExtWind slots: kx, kz, cx, cz) per visible chunk in m_wind_rows from row_first
+  struct WindCall {
+    const ctr_draw_state* state;
+    const ctr_mesh_matrix* matrix;
+    u32 row_first, row_count, rows_id;
+    int mesh, slots_offset, first, count, nofog;
+  };
+  std::vector<WindCall> m_wind_calls;
+  std::vector<float> m_wind_rows;
+  std::vector<s32> m_wind_row_of;  // per visible chunk (m_visible index): its rows, -1 none yet
+  std::vector<u32> m_wind_row_id;
+  u32 m_wind_rows_id = 0;
+  u64 m_wind_draws = 0, m_wind_tris = 0;
+  void draw_wind_calls(const CtrLevelData& lev);
   void draw_env_calls(std::vector<EnvCall>& calls);
   CtrLevels* m_levels;
   int m_far_levels = 0;  // level draws in the "seen from another level" mode (statistics)
@@ -1042,6 +1084,12 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // of its group (hidden, and never drawn along with neighbouring runs); statistics: groups at
   // their near version, triangles drawn of near / far versions (over m_lod_frames level draws)
   std::vector<u8> m_run_nomerge;
+  // per run of the level being drawn: a shrub run's fade (0x80: opaque), read for faded chunks
+  std::vector<u8> m_run_fade;
+  // the faded shrub runs' draws (blend FIX with their fade), after the opaque level draws
+  std::vector<ctr_mesh_call> m_fade_calls;
+  std::deque<ctr_draw_state> m_fade_states;
+  u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
@@ -1077,6 +1125,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     u8 band;    // (AI-assisted) distance band for the early depth order: 0 near .. 2 far
     bool partly;  // (AI-assisted) some of its visibility runs are hidden: draw run by run
     bool runs_valid;  // (AI-assisted) m_run_shown holds its runs' flags (time of day)
+    bool faded;   // shrub runs in their fade zone (m_run_fade)
     bool vista;   // (AI-assisted) far scenery: drawn first, with the vista fog (lowres_vista)
     bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
     float clip[16];
