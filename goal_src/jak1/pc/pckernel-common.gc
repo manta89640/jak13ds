@@ -179,11 +179,21 @@
   "are we in an actual cutscene and should letterbox the view?"
   (and (nonzero? movie?) (movie?)))
 
+(#when TARGET_3DS
+  ;; frames since boot, for the updates that run every 30 frames
+  (define *pc-update-count* 0))
+
 (defmethod update ((obj pc-settings))
   "Update settings to/from PC kernel. Call this at the start of every frame.
    This will update things like the aspect-ratio, which will be used for graphics code later."
   (update-from-os obj)
-  (update-to-os obj)
+  ;; 3DS: update-to-os only copies settings to the C kernel (about 8 kernel calls with symbol lookups).
+  ;; Settings change in the paused menus, so it runs every frame there and every 30 frames otherwise.
+  (#if TARGET_3DS
+    (begin
+      (if (or (zero? (mod *pc-update-count* 30)) (paused?)) (update-to-os obj))
+      (+! *pc-update-count* 1))
+    (update-to-os obj))
   ;; 3DS port: no Discord or auto-splitter there. The Discord update searches the process tree by
   ;; name several times per frame, which is expensive on the 3DS.
   (#unless TARGET_3DS

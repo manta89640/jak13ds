@@ -709,6 +709,9 @@
 
 (defmethod update-music-log ((obj pc-settings-jak2))
   "update the music log"
+  ;; 3DS: every 30 frames (task checks only)
+  (#when TARGET_3DS
+    (if (!= (mod *pc-update-count* 30) 15) (return 0)))
 
   (dotimes (i (-> *music-player-tracks* length))
     (when (or (logtest? (-> *game-info* secrets) (game-secrets hero-mode))
