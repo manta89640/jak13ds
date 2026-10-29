@@ -21,6 +21,8 @@
 #include "game/mips2c/native_goalc_ops.h"
 #include "game/mips2c/native_sp_init_fields.h"
 
+extern u32 g_link_generation;  // (AI-assisted) game/kernel/common/klink.h
+
 namespace Mips2C::jak1::native {
 
 namespace {
@@ -33,11 +35,20 @@ struct FnSym {
   u32 sym = 0;
   u32 fn = 0;
   bool resolved = false;
-  explicit FnSym(const char* n) : name(n) {}
+  //! (AI-assisted, cpusound) a level's function: a new value after a link (the level loaded
+  //! again, into the other heap) is the same code at another address, taken as the new one
+  bool level_code = false;
+  u32 gen = 0;
+  explicit FnSym(const char* n, bool level = false) : name(n), level_code(level) {}
   bool unchanged() {
     if (!resolved) {
       resolved = true;
       sym = ::jak1::intern_from_c(name).offset;
+      fn = gload<u32>(sym);
+      gen = g_link_generation;
+    }
+    if (level_code && gen != g_link_generation) {
+      gen = g_link_generation;
       fn = gload<u32>(sym);
     }
     return fn != 0 && gload<u32>(sym) == fn;
@@ -180,18 +191,20 @@ bool run_inline(Kind kind, const u64 a[8], const NativeArgs& caller) {
 // (AI-assisted) This level callback is called for every cage panel. Keep the same float
 // operations/random draws as GOAL, but avoid its stack matrices and nested ABI calls.
 bool sp_birth_random_rot(u32 fn, const u64 a[8], const NativeArgs& caller) {
-  static FnSym birth("birth-func-random-rot");
+  static FnSym birth("birth-func-random-rot", true);  // citadel-part.gc (Citadel's code)
   if (!birth.unchanged() || fn != birth.fn) {
     return false;
   }
+  // (AI-assisted, cpusound) always on (no config key): off only for debugging, with
+  // mips2c_native_off = all or naming birth-func-random-rot (host: OPENGOAL_SHIELD_NATIVE=0)
   static const bool enabled = [] {
-#ifdef __3DS__
-    char v[32];
-    return !ctr_config_get("shield_native", v, sizeof(v)) || strcmp(v, "off");
-#else
+#ifndef __3DS__
     const char* v = getenv("OPENGOAL_SHIELD_NATIVE");
-    return !v || strcmp(v, "0");
+    if (v && !strcmp(v, "0")) {
+      return false;
+    }
 #endif
+    return !native_turned_off("birth-func-random-rot");
   }();
   if (!enabled) {
     return false;

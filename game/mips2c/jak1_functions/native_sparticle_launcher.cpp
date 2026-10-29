@@ -277,6 +277,25 @@ float shield_density() {
   return density;
 }
 
+/*!
+ * (AI-assisted, cpusound) The launcher lies in the heap of a level named citadel that isn't
+ * inactive. *part-id-table*[2420] keeps the cage's launcher after Citadel unloads
+ * (unlink-part-group-by-heap leaves the table alone): once that heap is reused, an unrelated
+ * launcher at the same address would get the cage's density and birth callback.
+ */
+bool in_loaded_citadel(u32 level_group, u32 launcher) {
+  static const u32 citadel = sym_addr("citadel");
+  static const u32 inactive = sym_addr("inactive");
+  // level0 / level1 (inline in the level-group at 96 / 2704): name +0, status +16, heap +28
+  for (u32 lev : {level_group + 96u, level_group + 2704u}) {
+    if (gload<u32>(lev) == citadel && gload<u32>(lev + 16) != inactive &&
+        launcher - gload<u32>(lev + 28) < gload<u32>(lev + 32) - gload<u32>(lev + 28)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   static const u32 level_sym = sym_addr("*level*");
   static const u32 enable_sym = sym_addr("*sp-launcher-enable*");
@@ -363,7 +382,8 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   // The array's entries start at +12. Resolve its value each time: level unload/reload
   // replaces launcher pointers. Do not intern a level symbol before its module loads.
   const u32 part_table = gload<u32>(part_table_sym);
-  const bool shield = launcher == gload<u32>(part_table + 12 + 2420 * 4);
+  const bool shield = launcher == gload<u32>(part_table + 12 + 2420 * 4) &&
+                      in_loaded_citadel(gload<u32>(level_sym), (u32)launcher);
   if (shield) {
     births *= std::min(shield_density(), particle_density());
   }
