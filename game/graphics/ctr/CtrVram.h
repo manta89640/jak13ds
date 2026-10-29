@@ -105,8 +105,10 @@ class CtrVram {
   /*!
    * (AI-assisted) The source data of the texture page upload that last wrote this block (nullptr if
    * none): tells apart two textures at the same VRAM address (two levels' pages, CtrSky's cache).
+   * (AI-assisted) hash: the upload's data hash (0 if none): another level's page loaded to the same
+   * EE address.
    */
-  const void* upload_source(u32 block) const;
+  const void* upload_source(u32 block, u64* hash = nullptr) const;
 
   /*!
    * (AI-assisted, Jak II texture animation) A texture made on the CPU (CtrTexAnimJak2) that

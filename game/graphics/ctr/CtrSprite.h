@@ -75,6 +75,21 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
 
   static_assert(sizeof(AdGif) == 80);
 
+  /*! (AI-assisted) particle_fill pair thinning: what pair_weight needs of a world sprite (see
+   * draw_chunk_mode). valid: it would be drawn (on screen for 3D, not left out as faint or
+   * transparent); a: its alpha (0..128); half: its half size (2D: GS units after the size limits;
+   * 3D: world units); cx, cy: its center (2D: GS units); dist: its distance (3D, game units). */
+  struct PairM {
+    bool valid = false;
+    float a = 0, half = 0, cx = 0, cy = 0, dist = 0;
+  };
+  template <Mode mode>
+  PairM pair_metrics(const VecData& v) const;
+  //! (AI-assisted) 0..1: how much of the partner's alpha the keeper takes (1: the partner is left
+  //! out), from both members' metrics; 0: draw both as they are
+  template <Mode mode>
+  float pair_weight(const PairM& k, const PairM& p) const;
+
   CtrVram* m_vram;
   std::unique_ptr<CtrDirect> m_direct;
 
@@ -218,7 +233,7 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
   // sprites' slot (their index in the game's sparticle arrays: a particle keeps its slot while it
   // lives) at the next chunk
   int m_particle_fill = 1;
-  u32 m_slot2d = 0;
+  float m_xyz_reach = 0.5f;  // (AI-assisted) largest 3D corner offset per unit of scale
   float m_st_out[2][4][2] = {};
   // (AI-assisted) game version (see the constructor): GS y to clip y, kBigHalfGs
   bool m_jak2 = false;
@@ -231,7 +246,8 @@ class CtrSpriteRenderer : public CtrBucketRenderer {
     int distort_small = 0;  // (AI-assisted) distort_copy = rows: left out, under 8 pixels
     int faint = 0;          // (AI-assisted) sprite_min_alpha: big faint ones left out
     int trimmed = 0;        // (AI-assisted, perfv2) drawn over their texture's alpha box only
-    int thinned = 0;        // (AI-assisted, perfv2) big faint ones left out, their neighbours denser
+    int thinned = 0;        // (AI-assisted, perfv2) big faint ones left out, their partners denser
+    int thinned_3d = 0;     // (AI-assisted) big far 3D ones left out (the Citadel cage), the same way
     int glows = 0;          // (AI-assisted) Jak II glow flares drawn
   } m_stats;
   // (AI-assisted) a frame that took more than 3 ms logs its counts (render)

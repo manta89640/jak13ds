@@ -491,11 +491,17 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   m_stats.uploads++;
 }
 
-const void* CtrVram::upload_source(u32 block) const {
+const void* CtrVram::upload_source(u32 block, u64* hash) const {
   for (const auto& [b0, r] : m_last_upload) {
     if (block >= b0 && block < upload_end_block(b0, r.words)) {
+      if (hash) {
+        *hash = r.hash;
+      }
       return r.src;
     }
+  }
+  if (hash) {
+    *hash = 0;
   }
   return nullptr;
 }

@@ -251,12 +251,13 @@ void CtrSpriteRenderer::log_slow_frame(CtrRenderState& rs,
       const Stats& s = m_stats;
       lg::info(
           "[ctr] sprite build {:.1f} ms (distort {:.1f} ms; {} frames over 3 ms since the last "
-          "line): {} 2d ({} made smaller, {} trimmed, {} thinned), {} hud, {} 3d, {} distort sprites, {} draws; "
+          "line): {} 2d ({} made smaller, {} trimmed, {} thinned), {} hud, {} 3d ({} thinned), {} distort sprites, {} draws; "
           "textures {} decoded, {} revived, {} cached lookups; VRAM chunks {} written, {} already "
           "there; {} page uploads this frame",
           ms, m_distort_ms, m_slow_frames, s.sprites_2d - s0.sprites_2d, s.capped - s0.capped,
           s.trimmed - s0.trimmed, s.thinned - s0.thinned,
-          s.sprites_hud - s0.sprites_hud, s.sprites_3d - s0.sprites_3d, s.distort - s0.distort,
+          s.sprites_hud - s0.sprites_hud, s.sprites_3d - s0.sprites_3d,
+          s.thinned_3d - s0.thinned_3d, s.distort - s0.distort,
           s.draws - s0.draws, v.decoded - v0.decoded, v.revived - v0.revived,
           v.cached - v0.cached, v.chunks_written - v0.chunks_written,
           v.chunks_skipped - v0.chunks_skipped, frame_uploads);
@@ -296,7 +297,6 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
   const CtrSettings& cs = ctr_settings();
   m_alpha_discard = cs.sprite_alpha_discard;
   m_particle_fill = cs.particle_fill;  // (AI-assisted, perfv2)
-  m_slot2d = 0;
   m_world_left = cs.sprites ? cs.max_sprites : 0;
   // direct GS data sent before the sprites
   m_direct->reset_state();
@@ -363,6 +363,11 @@ void CtrSpriteRenderer::build_sprites(DmaFollower& dma, CtrRenderState& rs) {
       xy = std::max({xy, std::abs(a.x()), std::abs(a.y())});
     }
     m_corner_reach = b * xy;
+    float r3 = 0;
+    for (auto& a : m_xyz_array) {
+      r3 = std::max({r3, std::abs(a.x()), std::abs(a.z())});
+    }
+    m_xyz_reach = r3;
   }
   m_size_cap = cs.sprite_max_size * (m_jak2 ? 416.f : 224.f);
   m_min_alpha_big = (float)cs.sprite_min_alpha;
@@ -1006,6 +1011,92 @@ void CtrSpriteRenderer::canary_report(Mode mode, u32 i, u32 count, const VecData
   }
 }
 
+template <CtrSpriteRenderer::Mode mode>
+CtrSpriteRenderer::PairM CtrSpriteRenderer::pair_metrics(const VecData& v) const {
+  // (AI-assisted) the same numbers as draw_chunk_mode's (its tests that leave a sprite out too)
+  PairM out;
+  const float* m = m_camera;
+  const float px = v.xyz_sx.x(), py = v.xyz_sx.y(), pz = v.xyz_sx.z();
+  const float sx = v.xyz_sx.w(), sy = v.flag_rot_sy.w();
+  if (m_jak2 && as_int(v.flag_rot_sy.y()) == -1) {
+    return out;
+  }
+  const float tw = m[15] + m[3] * px + m[7] * py + m[11] * pz;
+  if (tw == 0) {
+    return out;
+  }
+  const float Q = m_pfog0 / tw;
+  float scale_x = sx * Q, scale_y = sy * Q;
+  const float a = color_byte(v.rgba.w()) * std::min(scale_x * scale_y * m_inv_area, 1.f);
+  if (a < 2.f || (a < m_min_alpha_big &&
+                  std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach > m_big_half_gs)) {
+    return out;
+  }
+  out.a = std::floor(a);  // (as the drawn u8)
+  const float tx = m[12] + m[0] * px + m[4] * py + m[8] * pz;
+  const float ty = m[13] + m[1] * px + m[5] * py + m[9] * pz;
+  if (mode == MODE_3D) {
+    // the center in clip space (w = -tw, see the corner loop) against the screen, grown by the
+    // sprite's reach (its half size through the matrix' x / y rows)
+    const float w = -tw;
+    if (!(w > 0.f)) {
+      return out;
+    }
+    const float kx = m_pfog0 * (1.f / 256.f), ox = (m_hvdf_offset.x() - 2048.f) * (1.f / 256.f);
+    const float ky = -m_pfog0 * m_inv_y, oy = (2048.f - m_hvdf_offset.y()) * m_inv_y;
+    const float cx = -tx * kx + w * ox, cy = -ty * ky + w * oy;
+    out.half = std::max(std::abs(sx), std::abs(sy)) * m_xyz_reach;
+    const float rx = out.half * std::abs(kx) * std::sqrt(m[0] * m[0] + m[4] * m[4] + m[8] * m[8]);
+    const float ry = out.half * std::abs(ky) * std::sqrt(m[1] * m[1] + m[5] * m[5] + m[9] * m[9]);
+    if (cx - rx > w || cx + rx < -w || cy - ry > w || cy + ry < -w) {
+      return out;
+    }
+    out.dist = w;
+  } else {
+    scale_y = std::clamp(scale_y, m_min_scale, m_max_scale);
+    scale_x = std::clamp(scale_x, m_min_scale, m_max_scale);
+    out.half = std::max(std::abs(scale_x), std::abs(scale_y)) * m_corner_reach;
+    if (m_size_cap > 0.f) {
+      out.half = std::min(out.half, m_size_cap);
+    }
+    out.cx = tx * Q + m_hvdf_offset.x();
+    out.cy = ty * Q + m_hvdf_offset.y();
+  }
+  out.valid = true;
+  return out;
+}
+
+template <CtrSpriteRenderer::Mode mode>
+float CtrSpriteRenderer::pair_weight(const PairM& k, const PairM& p) const {
+  auto ramp = [](float x, float lo, float hi) { return std::clamp((x - lo) / (hi - lo), 0.f, 1.f); };
+  if (mode == MODE_3D) {
+    // (AI-assisted) big far 3D sprites: fully from 64 m and 4 m half size, none under 48 m or
+    // 3 m; alpha up to 0.5 (fully), none from 0.75 (the cage's flash)
+    auto one = [&](const PairM& m) {
+      return ramp(m.dist, 48.f * 4096.f, 64.f * 4096.f) *
+             ramp(m.half, 3.f * 4096.f, 4.f * 4096.f) * ramp(-m.a, -96.f, -64.f);
+    };
+    return std::min(one(k), one(p));
+  }
+  // 2D (strong): alpha up to 0.25 (fully) / none from 0.375, half size from 12 pixels (fully) /
+  // none under 9, and overlapping: centers within half the smaller half size (fully), none from
+  // 0.75 of it. (AI-assisted) The pixel size in GS units: Jak II's screen is 832 units high, Jak
+  // 1's 448 (was 448 for both: Jak II thinned from ~6.5 pixels)
+  const float max_a = 32.f;
+  const float min_half = 12.f * (m_jak2 ? 832.f : 448.f) / 240.f;
+  auto one = [&](const PairM& m) {
+    return ramp(-m.a, -1.5f * max_a, -max_a) * ramp(m.half, 0.75f * min_half, min_half);
+  };
+  const float both = std::min(one(k), one(p));
+  if (!(both > 0.f)) {
+    return 0.f;
+  }
+  const float h = std::min(k.half, p.half);
+  const float dx = k.cx - p.cx, dy = k.cy - p.cy;
+  const float d = std::sqrt(dx * dx + dy * dy);
+  return both * ramp(-d, -0.75f * h, -0.5f * h);
+}
+
 void CtrSpriteRenderer::draw_chunk(u32 count, Mode mode) {
   // (AI-assisted) one loop per mode: the mode's tests and paths decided at compile time
   switch (mode) {
@@ -1045,17 +1136,17 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     m_clamp_s = m_clamp_t = true;
     m_have_last_ad = false;
   }
-  const u32 slot0 = m_slot2d;  // (AI-assisted, perfv2) particle_fill
-  if (mode == MODE_2D) {
-    m_slot2d += count;
-  }
   const int fill = m_particle_fill;
+  // (AI-assisted) particle_fill pair thinning: the keeper drawn last (its index in the chunk) and
+  // how much of its partner's alpha it took
+  u32 pair_keeper = ~0u;
+  float pair_w = 0.f;
   for (u32 i = 0; i < count; i++) {
-    if (mode != MODE_HUD) {
-      if (m_world_left <= 0) {
-        return;
-      }
-      m_world_left--;
+    // (AI-assisted) max_sprites counts the world sprites drawn (the decrement is after the tests
+    // below): it counted array slots, holes and sprites left out included (3D first), so with
+    // 1000 the 2D particles in slots above ~744 were gone however few were alive
+    if (mode != MODE_HUD && m_world_left <= 0) {
+      return;
     }
     const VecData& v = m_vec[i];
     const AdGif& ad = m_adgif[i];
@@ -1260,31 +1351,52 @@ void CtrSpriteRenderer::draw_chunk_mode(u32 count) {
     u8 a = (u8)(color_byte(v.rgba.w()) * alpha_scale);
     // procedural texture (radial glow): texture coordinates centered on 0
     const bool proc = (m_last_bucket_ptr->state.flags & CTR_STATE_PROCTEX) != 0;
-    // (AI-assisted, perfv2) config particle_fill: big faint particles thinned. Of those (half size
-    // 16+ pixels, alpha 0.375 or less; strong: 12+, 0.25), one particle slot in n is drawn with the
-    // alpha of n layers (alpha blending 1 - (1 - a)^n, additive n a), the others are left out:
-    // the clouds keep their brightness and extent with 1/n of the blended pixels. By slot, so a
-    // particle is drawn or not for its whole life (no flicker). Only for blends weighted by the
-    // texture's alpha (m_last_trim_ok, see resolve_state)
-    if (mode == MODE_2D && fill && !proc && m_last_trim_ok) {
-      const int n = fill >= 2 ? 3 : 2;
-      const float min_half = (fill >= 2 ? 12.f : 16.f) * (448.f / 240.f);
-      const int max_a = fill >= 2 ? 32 : 48;
-      const float half = std::max(std::abs(scale_x), std::abs(scale_y)) * corner_reach;
-      if (a <= max_a && half >= min_half) {
-        if ((slot0 + i) % (u32)n) {
-          m_stats.thinned++;
+    // (AI-assisted, perfv2) config particle_fill: thinning by pairs. The particle slots (2j, 2j + 1)
+    // of a chunk (48 slots: a pair never spans two) are a pair when both use the same texture and
+    // state, the blend is weighted by the texture's alpha (m_last_trim_ok, see resolve_state) and
+    // pair_weight finds them alike: big faint 2D particles that overlap (strong), or big far 3D
+    // ones (on and strong: the Citadel robot's cage, ~60 panels 6-12 x 31 m out to 250 m, which
+    // no other fill cut reaches). The even one (the keeper) takes w of the odd one's alpha (alpha
+    // blending 1 - (1 - a)(1 - w a'), additive / subtractive a + w a'), the odd one is drawn with
+    // (1 - w) of its own, so left out at w = 1. w goes smoothly from 0 to 1 over bands of alpha,
+    // size, distance and overlap: no pop where a particle crosses a limit, and a particle with no
+    // alike partner (a lone light shaft, another emitter's particle in the next slot) is drawn as
+    // it is. Was one slot in n (strong: 3) left out whatever its neighbour was, its neighbour
+    // given n layers' alpha, stepping at alpha 48 / 16 px: lone particles in odd slots vanished
+    // and fading ones blinked. The doubled layer is approximate where the texture's alpha is soft:
+    // the vertex alpha can't give 1 - (1 - a At)(1 - a' At) (At: the texel's alpha), it gives
+    // (1 - (1 - a)(1 - a')) At, a little fainter at the soft edges (-15% at a = 0.375, At = 0.25);
+    // additive is exact.
+    if (mode != MODE_HUD && !proc && m_last_trim_ok && (mode == MODE_3D ? fill >= 1 : fill >= 2)) {
+      if (!(i & 1)) {
+        if (i + 1 < count && same_state_words(ad, m_adgif[i + 1])) {
+          const PairM km = pair_metrics<mode>(v);
+          const PairM pm = km.valid ? pair_metrics<mode>(m_vec[i + 1]) : PairM();
+          const float w = pm.valid ? pair_weight<mode>(km, pm) : 0.f;
+          if (w > 0.f) {
+            const float af = a * (1.f / 128.f), ap = pm.a * (1.f / 128.f);
+            const float an = m_last_bucket_ptr->state.blend == CTR_BLEND_ALPHA
+                                 ? 1.f - (1.f - af) * (1.f - std::min(ap, 1.f) * w)
+                                 : af + ap * w;
+            a = (u8)std::min(128.f, an * 128.f + 0.5f);
+            pair_keeper = i;
+            pair_w = w;
+          }
+        }
+      } else if (pair_keeper == i - 1) {
+        if (pair_w >= 1.f) {
+          if (mode == MODE_3D) {
+            m_stats.thinned_3d++;
+          } else {
+            m_stats.thinned++;
+          }
           continue;
         }
-        const float af = a * (1.f / 128.f);
-        float an;
-        if (m_last_bucket_ptr->state.blend == CTR_BLEND_ALPHA) {
-          an = 1.f - (n == 2 ? (1.f - af) * (1.f - af) : (1.f - af) * (1.f - af) * (1.f - af));
-        } else {
-          an = af * (float)n;  // additive / subtractive: the n layers' sum
-        }
-        a = (u8)std::min(128.f, an * 128.f + 0.5f);
+        a = (u8)(a * (1.f - pair_w) + 0.5f);
       }
+    }
+    if (mode != MODE_HUD) {
+      m_world_left--;  // (AI-assisted) drawn: see max_sprites at the top
     }
     const float(*st_out)[2] = m_st_out[proc ? 1 : 0];
     if (mode == MODE_3D) {
