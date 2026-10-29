@@ -552,11 +552,6 @@ class CtrLevels {
    * (detail_scale x focal / tie_lod_px x 1.1), the hidden levels' factor before any streaming level
    * was drawn */
   void note_k_any(float k) { m_k_any = k; }
-  /*! (AI-assisted, mercsprite) draw_level: the draw distance / vista haze its level meshes got
-   * (ctr_gpu_set_mesh_fog's fog1: amount = (clip w x fog1[0] - fog1[1]) x fog1[2], 0 when fog1[2]
-   * is 0); the merc renderer gives its models the same haze (the last level drawn) */
-  void note_haze(const float fog1[4]) { memcpy(m_haze, fog1, sizeof(m_haze)); }
-  const float* haze() const { return m_haze; }
   void note_game_camera(const float* trans) {
     for (int i = 0; i < 3; i++) {
       m_game_cam_next[i] = trans[i];
@@ -884,7 +879,6 @@ class CtrLevels {
   float m_game_cam_next[3] = {0, 0, 0}, m_game_cam[3] = {0, 0, 0}, m_game_vel[3] = {0, 0, 0};
   bool m_game_cam_new = false, m_game_cam_valid = false;
   float m_k_last = 0.f, m_k_any = 0.f;
-  float m_haze[4] = {0.f, 1.f, 0.f, 0.f};  // (AI-assisted, mercsprite) note_haze
   // scheduling (kept to avoid allocations)
   struct StreamCand {
     CtrLevelData* lev;

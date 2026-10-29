@@ -20,6 +20,7 @@
 #include "common/log/log.h"
 
 #include "game/graphics/ctr/CtrEye.h"
+#include "game/graphics/ctr/CtrHaze.h"
 #include "game/graphics/ctr/CtrKeiraRig.h"
 #include "game/graphics/ctr/CtrMicro.h"
 #include "game/graphics/ctr/CtrLevel.h"
@@ -190,6 +191,13 @@ void hud_depth_spread(float* clip,
 }
 }  // namespace
 
+// (AI-assisted, mercsprite) CtrHaze.h's "a level with a vista tier is drawn near" (levellod defines
+// it in CtrLevel.cpp, set by draw_level): weak, so that one replaces it; alone: never
+__attribute__((weak)) bool ctr_haze_vista(unsigned long long frame) {
+  (void)frame;
+  return false;
+}
+
 CtrMercRenderer::CtrMercRenderer(std::string name, int id, CtrLevels* levels)
     : CtrBucketRenderer(std::move(name), id), m_levels(levels) {
   // (AI-assisted) Jak II's model records: no uses-water quadword, one link after each model
@@ -299,11 +307,13 @@ void CtrMercRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   // fog constants, the frame's fog color), and whether the GPU can draw it
   m_fog_on = false;
   if (m_have_camera && !m_snapshot_mode && ctr_settings().merc_fog && ctr_gpu_merc_fog_ready()) {
-    // (AI-assisted, mercsprite) and the port's draw distance / vista haze, as the level meshes
-    // got it (CtrLevels::note_haze, the last level drawn: amount (w fog1[0] - fog1[1]) fog1[2],
-    // w the PS2 perspective w, the same for merc), so the models aren't at game fog strength in
-    // hazed scenery (pasted on). With fog = off only the haze (as the level meshes)
-    const float* h = m_levels->haze();
+    // (AI-assisted, mercsprite) and the port's distance haze, the level meshes' rule (CtrHaze.h:
+    // amount (w row[0] - row[1]) row[2], w the PS2 perspective w, the same for merc; the vista
+    // rule while a level with a vista tier is drawn near), so the models aren't at game fog
+    // strength in hazed scenery (pasted on). With fog = off only the haze (as the level meshes)
+    float h[4];
+    ctr_haze_row(ctr_settings(), false, ctr_haze_vista(rs.frame_idx),
+                 std::abs(m_perspective[2][3]), h);
     m_haze_k = h[0] * h[2];
     m_haze_c = -h[1] * h[2];
     m_game_fog = ctr_settings().fog;

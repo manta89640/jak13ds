@@ -7709,7 +7709,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
     ctr_gpu_set_mesh_fog(fog0, fog1, rs.fog_color[0], rs.fog_color[1], rs.fog_color[2]);
-    m_levels->note_haze(fog1);  // (AI-assisted, mercsprite) the merc models' haze (CtrMerc)
   }
   // (AI-assisted) config opaque_alpha (gpu_profile = ab switches it): the v15 draws' alpha tests /
   // blending back, or out again
