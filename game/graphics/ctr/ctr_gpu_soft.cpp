@@ -329,6 +329,7 @@ uint8_t s_fog_rgb[3] = {0, 0, 0};
 int s_env_tex = -1;  // (AI-assisted, j1ocean) the sky reflection's texture (ocean_full_draw)
 bool s_nofog = false;
 float s_mfog_hvdf_w = 255.f, s_mfog_lo = 0.f, s_mfog_hi = 0.f;
+float s_mhaze_k = 0.f, s_mhaze_c = 0.f;  // (AI-assisted, mercsprite) ctr_gpu_set_merc_haze
 int s_shader_opt = 1;
 bool fog_on() {
   static const bool off = getenv("CTR_SOFT_NO_FOG") != nullptr;
@@ -345,7 +346,11 @@ float mesh_fog(float w) {
 }
 // merc2.vert's fog amount at clip w
 float merc_fog(float w) {
-  return std::clamp(w / 255.f + 1.f - s_mfog_hvdf_w / 255.f, s_mfog_lo, s_mfog_hi);
+  // (AI-assisted, mercsprite) and the haze, as ctr_skin_opt (max of the two)
+  return std::clamp(std::max(std::clamp(w / 255.f + 1.f - s_mfog_hvdf_w / 255.f, s_mfog_lo,
+                                        s_mfog_hi),
+                             s_mhaze_k * w + s_mhaze_c),
+                    0.f, 1.f);
 }
 
 // (AI-assisted) ctr_gpu_soft_query_begin: count the fragments that pass, write nothing
@@ -2229,6 +2234,11 @@ void ctr_gpu_set_merc_fog(float hvdf_w, float fog_min, float fog_max, uint8_t r,
   s_fog_rgb[0] = r;
   s_fog_rgb[1] = g;
   s_fog_rgb[2] = b;
+}
+
+void ctr_gpu_set_merc_haze(float k, float c) {
+  s_mhaze_k = k;
+  s_mhaze_c = c;
 }
 
 // (AI-assisted, far-fog) as the 3DS: only shader_opt's skin program has the fog

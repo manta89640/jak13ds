@@ -592,7 +592,7 @@
                          ;; og:preserve-this lod hacks
                          (if (#if (not PC_PORT)
                                (< (-> arg1 lod-set lod (-> arg1 lod-set max-lod) dist) cam-dist)
-                               (and (-> *pc-settings* ps2-lod-dist?) (< (-> arg1 lod-set lod (-> arg1 lod-set max-lod) dist) cam-dist)))
+                               (and (#if TARGET_3DS #t (-> *pc-settings* ps2-lod-dist?)) (< (-> arg1 lod-set lod (-> arg1 lod-set max-lod) dist) cam-dist)))
                            (return #f)))
                         (else
                          ;; og:preserve-this (AI-assisted) 3DS: the lower detail models sooner, at
@@ -610,15 +610,18 @@
                         (if (not (-> *pc-settings* ps2-lod-dist?))
                           (set! lod-to-use (minmax (-> *pc-settings* lod-force-actor) 0 (-> arg1 lod-set max-lod))))))
                     ;; og:preserve-this lod hacks
+                    ;; (AI-assisted) 3DS: the PS2's distance cull (and closest-object below) always,
+                    ;; whatever a saved pc-settings or the debug menu's PS2 LOD says (off drew every
+                    ;; actor at any distance, so anim_lod never skipped them either)
                     (if (#if (not PC_PORT)
                           (and (< (-> arg1 lod-set lod lod-to-use dist) cam-dist) (< (-> arg1 force-lod) 0))
-                          (and (-> *pc-settings* ps2-lod-dist?) (< (-> arg1 lod-set lod lod-to-use dist) cam-dist) (< (-> arg1 force-lod) 0)))
+                          (and (#if TARGET_3DS #t (-> *pc-settings* ps2-lod-dist?)) (< (-> arg1 lod-set lod lod-to-use dist) cam-dist) (< (-> arg1 force-lod) 0)))
                       (return #f))
                     (let ((v1-64 (-> arg1 sink-group level))
                           (a0-26 (+ (-> arg1 sink-group merc-sink foreground-texture-page) 6)))
                       (when (#if (not PC_PORT)
                               (not (logtest? (-> arg1 status) (draw-status do-not-check-distance)))
-                              (and (-> *pc-settings* ps2-lod-dist?) (not (logtest? (-> arg1 status) (draw-status do-not-check-distance)))))
+                              (and (#if TARGET_3DS #t (-> *pc-settings* ps2-lod-dist?)) (not (logtest? (-> arg1 status) (draw-status do-not-check-distance)))))
                         (if (< cam-dist (-> v1-64 closest-object a0-26)) (set! (-> v1-64 closest-object a0-26) cam-dist))
                         (when (and (!= a0-26 6) (!= (-> arg1 level-index) 2))
                           (let ((a1-45 (cond

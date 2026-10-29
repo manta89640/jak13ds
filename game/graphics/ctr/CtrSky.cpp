@@ -103,14 +103,19 @@ void CtrSky::blend(DmaFollower& dma, CtrRenderState& rs, u64 salt) {
     }
     constexpr u32 kRedecodeFrames = 300;
     // (AI-assisted) keyed by the uploads the texels and the CLUT came from too: another level's
-    // page at the same VRAM address (same tex0) is a different texture
+    // page at the same VRAM address (same tex0) is a different texture. (AI-assisted) And by their
+    // data's hashes: a level loaded into the same slot puts its sky page at the same EE address,
+    // and its old level's decoded source was blended for up to kRedecodeFrames (a wrong sky)
     u64 key = tex0 ^ (salt << 1);
     {
       GsTex0 kt(tex0);
-      const u64 p0 = (u64)(uintptr_t)rs.vram->upload_source(kt.tbp0());
-      const u64 p1 = (u64)(uintptr_t)rs.vram->upload_source(kt.cbp());
+      u64 h0 = 0, h1 = 0;
+      const u64 p0 = (u64)(uintptr_t)rs.vram->upload_source(kt.tbp0(), &h0);
+      const u64 p1 = (u64)(uintptr_t)rs.vram->upload_source(kt.cbp(), &h1);
       key = (key ^ p0) * 1099511628211ull;
       key = (key ^ p1) * 1099511628211ull;
+      key = (key ^ h0) * 1099511628211ull;
+      key = (key ^ h1) * 1099511628211ull;
     }
     if (m_sources.size() > 64 && !m_sources.count(key)) {
       // old levels' sources (this frame's copies so far find theirs missing: no blend this frame)
@@ -480,7 +485,20 @@ void CtrSkyBlendRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (dma.current_tag_offset() != rs.next_bucket && dma.current_tag().kind != DmaTag::Kind::CALL &&
       dma.current_tag().qwc == 8) {
     dma.read_and_advance();  // set-display-gs-state
-    m_sky->blend(dma, rs, (u64)(uintptr_t)this);
+    if (ctr_settings().sky) {
+      m_sky->blend(dma, rs, (u64)(uintptr_t)this);
+    } else {
+      // (AI-assisted) sky = off: nothing is drawn from the blend (CtrSky::draw), so no sources
+      // decoded or blended either (~3 ms on the Misty zoomer course); the copies (2 transfers
+      // each, as blend reads them) are skipped
+      while (dma.current_tag().qwc == 6 && dma.current_tag_offset() != rs.next_bucket) {
+        dma.read_and_advance();
+        if (dma.current_tag_offset() == rs.next_bucket) {
+          break;
+        }
+        dma.read_and_advance();
+      }
+    }
   }
   // (AI-assisted) the trans tfrag's camera: draws the level background if no normal tfrag bucket
   // did this frame (CtrTfragRenderer draws a level once per frame)

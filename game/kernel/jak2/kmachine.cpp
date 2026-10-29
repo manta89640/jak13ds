@@ -48,6 +48,11 @@
 
 using namespace ee;
 
+#ifdef __3DS__
+extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
+extern "C" int ctr_config_bool(const char* key, int def);              // platform/3ds/port
+#endif
+
 bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
 u32 ctr_frame_vblanks();                  // game/graphics/ctr/CtrRenderer.cpp
 
@@ -694,6 +699,26 @@ void InitMachine_PCPort() {
         on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   });
 #endif
+  // (AI-assisted) config.ini shadows: only full draws Jak II's shadow volumes (CtrShadowJak2;
+  // Jak II has no blob shadow, so blob is off), and only with the stencil buffer (not depth16 =
+  // on). Otherwise the game doesn't make them either (drawable.gc, TARGET_3DS: no
+  // shadow-execute-all). Other builds: always.
+  {
+    bool volumes = true;
+#ifdef __3DS__
+    char v[32];
+    if (ctr_config_get("shadows", v, sizeof(v))) {
+      const std::string sh(v);
+      volumes = !(sh == "blob" || sh == "off" || sh == "0" || sh == "no" || sh == "false" ||
+                  sh == "none");
+    }
+    if (volumes && ctr_config_bool("depth16", 0)) {
+      volumes = false;
+    }
+#endif
+    intern_from_c("*pc-3ds-shadow-volumes?*")->value() =
+        volumes ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+  }
 }
 
 /*!

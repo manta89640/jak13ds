@@ -616,6 +616,9 @@ void ctr_gpu_pack_skin_rows_f24(const float* bones, int palette_count, uint32_t*
  * fog (shader_opt's ctr_skin_opt; the Oct 2 ctr_skin_old has none) and the fog ramp exists. */
 void ctr_gpu_set_merc_fog(float hvdf_w, float fog_min, float fog_max, uint8_t r, uint8_t g,
                           uint8_t b);
+/* (AI-assisted, mercsprite) and the port's draw distance / vista haze on them, as the level
+ * meshes': amount = max(the game's, k x clip w + c) (k = c = 0: none) */
+void ctr_gpu_set_merc_haze(float k, float c);
 int ctr_gpu_merc_fog_ready(void);
 
 /* The envmap pass of a skinned mesh draw (emerc.vert): texture coordinates from the camera space

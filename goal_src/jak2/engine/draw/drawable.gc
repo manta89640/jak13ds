@@ -901,6 +901,11 @@
 ;;      - does bone calcs for merc
 ;;      - does VU0/CPU stuff for generic/shadow/lightning
 
+;; og:preserve-this (AI-assisted) 3DS: set by the kernel (kmachine.cpp): #f when config.ini shadows
+;; isn't full or there is no stencil buffer (the 3DS renderer draws no shadow volumes then)
+(#when TARGET_3DS
+  (define-extern *pc-3ds-shadow-volumes?* symbol))
+
 ;; og:preserve-this (AI-assisted) 3DS: the light-hash part of dma-add-process-drawable (the lights of
 ;; the active levels' light hashes near the origin, added to lg) as a function, run by the native
 ;; pc-light-hash-add-lights! (game/mips2c/jak2_functions/native2_misc.cpp: the same results, verified
@@ -1248,7 +1253,7 @@
                          ;; og:preserve-this force high lods
                          (if (#if (not PC_PORT)
                                   (< (-> dc lod-set lod (-> dc lod-set max-lod) dist) dist-w)
-                                  (and (-> *pc-settings* ps2-lod-dist?) (< (-> dc lod-set lod (-> dc lod-set max-lod) dist) dist-w)))
+                                  (and (#if TARGET_3DS #t (-> *pc-settings* ps2-lod-dist?)) (< (-> dc lod-set lod (-> dc lod-set max-lod) dist) dist-w)))
                              (return #f)
                              )
                          )
@@ -1260,8 +1265,11 @@
                         )
                       )
                     ;; og:preserve-this lod hacks!
+                    ;; (AI-assisted) 3DS: the PS2's LOD choice and distance cull always, whatever a
+                    ;; saved pc-settings, the LOD menu or the debug menu's PS2 LOD says (off drew
+                    ;; every actor at any distance, with its most detailed model)
                     (with-pc
-                      (when (not (-> *pc-settings* ps2-lod-dist?))
+                      (when (not (#if TARGET_3DS #t (-> *pc-settings* ps2-lod-dist?)))
                         (set! lod-idx (minmax (-> *pc-settings* lod-force-actor) 0 (-> dc lod-set max-lod)))
                         (when (> (-> dc force-lod) -1)
                           (set! lod-idx (-> dc force-lod))
@@ -1270,7 +1278,7 @@
                       )
                     (if (#if (not PC_PORT)
                              (and (< (-> dc lod-set lod lod-idx dist) dist-w) (< (-> dc force-lod) 0))
-                             (and (-> *pc-settings* ps2-lod-dist?) (< (-> dc lod-set lod lod-idx dist) dist-w) (< (-> dc force-lod) 0))
+                             (and (#if TARGET_3DS #t (-> *pc-settings* ps2-lod-dist?)) (< (-> dc lod-set lod lod-idx dist) dist-w) (< (-> dc force-lod) 0))
                              )
                         (return #f)
                         )
@@ -1520,7 +1528,11 @@
     (bones-mtx-calc-execute)
     ;; generic-merc/shadow have VU0/CPU parts that need bones, run them here.
     (generic-merc-execute-all gp-0)
-    (shadow-execute-all gp-0)
+    ;; og:preserve-this (AI-assisted) 3DS: the shadow volumes only when the renderer draws them
+    ;; (config.ini shadows = full with a stencil buffer: *pc-3ds-shadow-volumes?*, kmachine.cpp)
+    (#if TARGET_3DS
+      (if *pc-3ds-shadow-volumes?* (shadow-execute-all gp-0))
+      (shadow-execute-all gp-0))
     )
   (lightning-draw-all)
   (none)

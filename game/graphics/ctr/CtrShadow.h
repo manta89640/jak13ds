@@ -40,6 +40,7 @@
  * else back (886).
  */
 
+#include <array>
 #include <vector>
 
 #include "common/common_types.h"
@@ -95,8 +96,8 @@ class CtrShadowVolumes {
   static bool starts_object(const DmaTransfer& t);
   //! (AI-assisted) config shadow_casters: how big the object whose vertex table starts with this
   //! transfer looks from the camera (its vertices' bounding sphere radius over the distance of its
-  //! nearest side); 0 for bad numbers.
-  static float object_score(const DmaTransfer& t);
+  //! nearest side); 0 for bad numbers. center: its bounding box's center (camera space), if asked.
+  static float object_score(const DmaTransfer& t, float center[3] = nullptr);
   //! (AI-assisted) after begin: only the objects k with keep[k] != 0 (in DMA order; objects past
   //! n are kept) are drawn; nullptr: all
   void set_keep(const u8* keep, int n) {
@@ -206,4 +207,7 @@ class CtrShadowRenderer : public CtrBucketRenderer {
   std::vector<float> m_scores;
   std::vector<u8> m_keep;
   std::vector<int> m_order;
+  // (AI-assisted) the objects' centers this frame, and those of the ones drawn last frame (an
+  // object near one of those scores kIncumbent x more: no blinking at the cut)
+  std::vector<std::array<float, 3>> m_centers, m_kept_prev;
 };

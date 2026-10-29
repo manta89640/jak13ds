@@ -9,13 +9,40 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+
+#include "common/log/log.h"
 
 #include "game/mips2c/jak2_functions/native_functions.h"
 #include "game/mips2c/native_sp_init_fields.h"
 
+#ifdef __3DS__
+extern "C" int ctr_config_get(const char* key, char* out, int size);  // platform/3ds/port
+#endif
+
 namespace Mips2C::jak2::native {
 
 namespace {
+
+/*!
+ * (AI-assisted) config.ini particle_density (0.1 .. 1, default 1; particles = reduced: 0.7), as
+ * Jak 1's (jak1_functions/native_sparticle_launcher.cpp): the share of particles launched. Jak II
+ * had no density cut, so particles = reduced only changed the sprite limits.
+ */
+float particle_density() {
+  static float density = -1.f;
+  if (density < 0.f) {
+    density = 1.f;
+#ifdef __3DS__
+    char v[32];
+    if (ctr_config_get("particle_density", v, sizeof(v))) {
+      density = std::clamp((float)atof(v), 0.1f, 1.f);
+    }
+    lg::info("particles: density {:.2f} (config.ini particle_density)", density);
+#endif
+  }
+  return density;
+}
 
 //! lw: a word, sign-extended like the 64-bit register it goes to
 inline u64 lw(u32 addr) {
@@ -203,7 +230,16 @@ u64 sp_launch_particles_var_impl(const NativeArgs& args) {
   r[4] = t;
   init_fields_call(gload<u32>(init_fields_sym));
   gstore<u32>(sp + 12, (u32)v0);
-  const float births = gload<float>(sp + 180) * rate;
+  float births = gload<float>(sp + 180) * rate;
+  {
+    // (AI-assisted) particle_density, as Jak 1's: fewer particles from bursts and periodic
+    // emitters; a launch of exactly one particle (a glow, a sparkle relaunched every frame) and a
+    // launch with a sound (birthinfo sound, +24) stay as they are
+    const float d = particle_density();
+    if (d < 1.f && std::abs(births - 1.f) > 1e-3f && gload<u32>(sp + 184) == 0) {
+      births = births > 1.f ? std::max(1.f, births * d) : births * d;
+    }
+  }
   // the accumulator: the launch state's (which then gets the launch control), or the launcher's
   const u32 accum_addr = state != st ? (u32)state + 24 : (u32)launcher;
   {
