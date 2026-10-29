@@ -69,46 +69,35 @@ class CtrOceanBatch {
   }
   void commit(int n, int m) {
     // (AI-assisted) The shader now projects positions to W=1 for GS-affine color and fog.
-    // Clip depth crossings before that divide. Ordinary ocean tiles keep their indexed grid;
-    // only a crossing tile needs scratch storage and new vertices (at most six per triangle).
-    bool crossing = false;
-    for (int i = 0; i < n; i++) {
-      const auto& v = m_v[m_nv + i];
-      crossing |= !depth_inside(v);
+    // Clip depth crossings before that divide. Triangles inside every depth plane keep the tile's
+    // indexed vertices; only a crossing triangle is cut into new ones (at most six).
+    ctr_ocean_full_vertex* const tv = m_v + m_nv;
+    if ((int)m_codes.size() < n) {
+      m_codes.resize(n);
     }
-    if (crossing && m) {
-      m_clip_verts.assign(m_v + m_nv, m_v + m_nv + n);
+    u8* const code = m_codes.data();
+    u8 any = 0;
+    for (int i = 0; i < n; i++) {
+      const auto& v = tv[i];
+      const u8 c = (u8)(!(depth_plane(v, 0) >= 0) | !(depth_plane(v, 1) >= 0) << 1 |
+                        !(depth_plane(v, 2) >= 0) << 2);
+      code[i] = c;
+      any |= c;
+    }
+    if (any && m) {
       m_clip_indices.assign(m_i + m_ni, m_i + m_ni + m);
       const int first = m_nv;
       m_nv += n;
+      const u16* const ix = m_clip_indices.data();
       for (int i = 0; i + 2 < m; i += 3) {
-        ctr_ocean_full_vertex poly[8], tmp[8];
-        for (int k = 0; k < 3; k++) {
-          poly[k] = m_clip_verts[m_clip_indices[i + k] - first];
+        const int a = ix[i] - first, b = ix[i + 1] - first, c = ix[i + 2] - first;
+        if (!(code[a] | code[b] | code[c])) {
+          m_i[m_ni++] = ix[i];
+          m_i[m_ni++] = ix[i + 1];
+          m_i[m_ni++] = ix[i + 2];
+          continue;
         }
-        int count = 3;
-        for (int plane = 0; plane < 3 && count; plane++) {
-          int out = 0;
-          for (int k = 0; k < count; k++) {
-            const auto& a = poly[k];
-            const auto& b = poly[(k + 1) % count];
-            const float da = depth_plane(a, plane), db = depth_plane(b, plane);
-            if (da >= 0) tmp[out++] = a;
-            if ((da >= 0) != (db >= 0)) tmp[out++] = mix(a, b, da / (da - db));
-          }
-          count = out;
-          std::copy(tmp, tmp + count, poly);
-        }
-        if (count >= 3) {
-          const int base = m_nv;
-          std::copy(poly, poly + count, m_v + m_nv);
-          m_nv += count;
-          for (int k = 1; k + 1 < count; k++) {
-            m_i[m_ni++] = (u16)base;
-            m_i[m_ni++] = (u16)(base + k);
-            m_i[m_ni++] = (u16)(base + k + 1);
-          }
-        }
+        clip_triangle(tv[a], tv[b], tv[c]);
       }
       vertices += m_nv - first;
       return;
@@ -217,9 +206,6 @@ class CtrOceanBatch {
   static float depth_plane(const ctr_ocean_full_vertex& v, int plane) {
     return plane == 0 ? v.q - 1e-8f : plane == 1 ? v.z : 16777215.f * v.q - v.z;
   }
-  static bool depth_inside(const ctr_ocean_full_vertex& v) {
-    return depth_plane(v, 0) >= 0 && depth_plane(v, 1) >= 0 && depth_plane(v, 2) >= 0;
-  }
   static ctr_ocean_full_vertex mix(const ctr_ocean_full_vertex& a,
                                    const ctr_ocean_full_vertex& b, float t) {
     ctr_ocean_full_vertex o{};
@@ -233,7 +219,43 @@ class CtrOceanBatch {
     o.a = (u8)std::clamp(std::lround(a.a + t * (b.a - a.a)), 0l, 255l);
     return o;
   }
-  std::vector<ctr_ocean_full_vertex> m_clip_verts;
+  //! a triangle cut by the depth planes in turn (Sutherland-Hodgman), drawn as a fan of new
+  //! vertices
+  void clip_triangle(const ctr_ocean_full_vertex& a, const ctr_ocean_full_vertex& b,
+                     const ctr_ocean_full_vertex& c) {
+    ctr_ocean_full_vertex made[24];
+    int nmade = 0;
+    const ctr_ocean_full_vertex* poly[8] = {&a, &b, &c};
+    const ctr_ocean_full_vertex* tmp[8];
+    int count = 3;
+    for (int plane = 0; plane < 3 && count; plane++) {
+      int out = 0;
+      for (int k = 0; k < count && out < 7; k++) {
+        const auto& p = *poly[k];
+        const auto& q = *poly[(k + 1) % count];
+        const float dp = depth_plane(p, plane), dq = depth_plane(q, plane);
+        if (dp >= 0) tmp[out++] = &p;
+        if ((dp >= 0) != (dq >= 0)) {
+          made[nmade] = mix(p, q, dp / (dp - dq));
+          tmp[out++] = &made[nmade++];
+        }
+      }
+      count = out;
+      std::copy(tmp, tmp + count, poly);
+    }
+    if (count >= 3) {
+      const int base = m_nv;
+      for (int k = 0; k < count; k++) {
+        m_v[m_nv++] = *poly[k];
+      }
+      for (int k = 1; k + 1 < count; k++) {
+        m_i[m_ni++] = (u16)base;
+        m_i[m_ni++] = (u16)(base + k);
+        m_i[m_ni++] = (u16)(base + k + 1);
+      }
+    }
+  }
+  std::vector<u8> m_codes;  // per vertex of the tile committed: the depth planes it is outside of
   std::vector<u16> m_clip_indices;
   enum : u32 { kTextured = 0, kAlpha = 1, kEnvMap = 2 };
 

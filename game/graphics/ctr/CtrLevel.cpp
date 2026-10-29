@@ -2134,6 +2134,10 @@ void tod_refresh_colors(CtrLevelData::Tod& t) {
 // frame whose group rewrites touch many more vertices than the table has entries (the title's fast
 // day, citadel's pulse): the rewrites then read the table without the version checks.
 void tod_refresh_all(CtrLevelData::Tod& t) {
+  if (t.fresh_ver == t.ver) {
+    return;
+  }
+  t.fresh_ver = t.ver;
   const auto& a = t.act;
   bool packed = a.n >= 1 && a.n <= 8;
   u32 sum = 0;
@@ -3010,18 +3014,24 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
           gr.lver = t.ver;
         }
       }
-      const auto& lights = it->second;
+      auto& lights = it->second;
       tod_word* const w = (tod_word*)v;
-      t.chunk_light_ver[ci] = ctr_recolor_light_groups(
+      t.chunk_light_ver[ci] = ctr_recolor_light_groups_cached(
           t.groups.data() + g0, ng, by_runs ? shown : nullptr,
           by_runs ? t.run_group.data() + r0 : nullptr, nr, t.ver, light_last, lm,
-          t.pal_ver, lights.verts, lights.groups, ps.light_visible,
+          t.pal_ver, lights.verts, lights.groups, ps.light_visible, lights.ranges,
           [&](auto first, auto last) {
-            for (auto p = first; p != last; ++p) {
-              const auto ahead = p + std::min<ptrdiff_t>(8, last - p - 1);
-              __builtin_prefetch(w + 4 * *ahead, 1);
+            const u32 keep = t.keep_alpha;
+            auto p = first;
+            for (; last - p > 8; ++p) {
+              __builtin_prefetch(w + 4 * p[8], 1);
               tod_word* x = w + 4 * *p;
-              x[3] = (x[3] & t.keep_alpha) | tod_entry(t, x[1] >> 16);
+              x[3] = (x[3] & keep) | tod_entry(t, x[1] >> 16);
+            }
+            for (; p != last; ++p) {
+              __builtin_prefetch(w + 4 * *(last - 1), 1);
+              tod_word* x = w + 4 * *p;
+              x[3] = (x[3] & keep) | tod_entry(t, x[1] >> 16);
             }
             flo = std::min<int>(flo, *first);
             fhi = std::max<int>(fhi, *(last - 1));
@@ -3633,6 +3643,7 @@ void load_tod(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   }
   t->table.assign(nc + nm, 0);
   t->stamp.assign(nc + nm, 0);
+  t->fresh_ver = ~0u;
   t->cver.assign(nc, 0);
   const size_t nch = lev->chunks.size();
   t->chunk_group_first.assign(nch, 0);

@@ -119,7 +119,7 @@ class CtrOceanFull : public CtrOceanEnvHook {
   double m_tex_ms = 0, m_mid_ms = 0, m_near_ms = 0, m_max_frame_ms = 0, m_cur_frame_ms = 0;
   int m_mid_runs = 0, m_near_runs = 0, m_failed = 0, m_tex_updates = 0;
   int m_refl_updates = 0;  // (AI-assisted, j1ocean) sky reflection textures made
-  u32 m_window_gen = 0, m_logged_gen = ~0u;
+  u32 m_window_gen = 0;
   // (AI-assisted) the warning about parts not drawn (frame_stats)
   int m_failed_unlogged = 0;
   u64 m_warn_frame = ~0ull;

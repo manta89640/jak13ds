@@ -777,9 +777,9 @@ void CtrOceanFull::note_levels(const std::vector<std::string>& levels) {
 }
 
 /*!
- * Per frame: the frame's ms so far into the window's sums; once per level (set of levels), after
- * 150 frames with the ocean, one log line with the averages. (AI-assisted) Whenever parts of the
- * ocean weren't drawn (unexpected DMA, no vertex memory, refused transition pieces): a warning
+ * Per frame: the frame's ms so far into the window's sums; every 450 frames (and at a change of
+ * the levels) a new window, logged with its averages when the ocean was drawn in it. (AI-assisted)
+ * Whenever parts of the ocean weren't drawn (unexpected DMA, no vertex memory, refused transition pieces): a warning
  * with the counts since the last one, at most every 300 frames.
  */
 void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
@@ -798,7 +798,7 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
     m_failed_unlogged = m_batch->dropped_unlogged = m_batch->rejected_unlogged = 0;
   }
   const u32 gen = g_levels_gen.load();
-  if (gen != m_window_gen) {
+  if (gen != m_window_gen || m_frames == 450) {
     m_window_gen = gen;
     m_frames = m_mid_runs = m_near_runs = m_failed = m_tex_updates = m_refl_updates = 0;
     m_batch->env_draws = 0;
@@ -807,8 +807,7 @@ void CtrOceanFull::frame_stats(const CtrRenderState& rs) {
     m_batch->rejected = 0;
   }
   m_frames++;
-  if (m_frames == 150 && m_logged_gen != gen) {
-    m_logged_gen = gen;
+  if (m_frames == 450 && m_mid_runs + m_near_runs) {
     const double n = m_frames - 1;  // (this frame hasn't run yet)
     lg::info(
         "[ctr] ocean full ({}): render thread {:.2f} ms/frame (texture {:.2f} in {:.0f}% of "
