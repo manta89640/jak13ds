@@ -191,13 +191,6 @@ void hud_depth_spread(float* clip,
 }
 }  // namespace
 
-// (AI-assisted, mercsprite) CtrHaze.h's "a level with a vista tier is drawn near" (levellod defines
-// it in CtrLevel.cpp, set by draw_level): weak, so that one replaces it; alone: never
-__attribute__((weak)) bool ctr_haze_vista(unsigned long long frame) {
-  (void)frame;
-  return false;
-}
-
 CtrMercRenderer::CtrMercRenderer(std::string name, int id, CtrLevels* levels)
     : CtrBucketRenderer(std::move(name), id), m_levels(levels) {
   // (AI-assisted) Jak II's model records: no uses-water quadword, one link after each model
