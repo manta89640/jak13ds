@@ -7,6 +7,11 @@
 #include "fakes.h"
 
 #include <cstdlib>
+#include <functional>
+#include <random>
+#include <string>
+
+#include "common/log/log.h"
 
 namespace tests {
 
@@ -45,4 +50,32 @@ bool logic_micro_on() {
   }
   return on == 1;
 }
+}  // namespace Mips2C
+
+// (AI-assisted, cpusound) more of what the natives use from the runtime (not linked into the
+// harness), so it links again: pc-rand's generator (game/kernel/common/kmachine.cpp), the log
+// (common/log), and mips2c_native.cpp's switches (no native turned off, no inline verify: the
+// harness compares the versions itself)
+std::mt19937 extra_random_generator;
+u32 pc_rand() {
+  return (u32)extra_random_generator();
+}
+namespace lg::internal {
+void log_message(level, LogTime&, const char*) {}
+}  // namespace lg::internal
+namespace Mips2C {
+bool native_turned_off(const std::string&) {
+  return false;
+}
+#if MIPS2C_WRITE_LOG
+bool native_verify_inline_on() {
+  return false;
+}
+u64 native_verify_inline(const char*,
+                         std::initializer_list<NativeVerifyRegion>,
+                         const std::function<u64()>& native,
+                         const std::function<u64()>&) {
+  return native();
+}
+#endif
 }  // namespace Mips2C
