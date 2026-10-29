@@ -175,7 +175,7 @@ const AbSwitch kAbSwitches[] = {
      },
      [](const CtrSettings& s) { return s.mip_bias != 0.f; }},
     // (AI-assisted) Compare texture detail at a fixed camera, including grazing surfaces.
-    {"mipmaps", [](CtrSettings& s, bool on) { s.mipmaps = on ? 1 : 0; },
+    {"mipmaps", [](CtrSettings& s, bool on) { s.mipmaps = on ? 2 : 0; },
      [](const CtrSettings& s) { return s.mipmaps != 0; }},
     // (AI-assisted, fidelity2) envmap_min_px: the config's limit (on; 16 when it says 0) or 0 (off)
     {"envmap_min_px",

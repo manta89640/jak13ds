@@ -362,17 +362,22 @@
 (defstate windspinner-idle (windspinner)
   :trans
     (behavior ()
-      (let* ((f0-0 0.992)
-             (f1-0 0.008090864)
-             (a0-0 (-> self root trans))
-             (f0-1 (* f0-0
-                      (+ (* f1-0
-                            (-> *wind-work* wind-force (logand (+ (the int (-> a0-0 x)) (the int (-> a0-0 z)) (-> *wind-work* wind-time)) 63)))
-                         (-> self angle-vel)))))
-        (if (< 291.27112 f0-1) (set! f0-1 291.27112))
-        (set! (-> self angle-vel) f0-1))
-      (let ((f0-3 (+ (-> self angle) (-> self angle-vel))))
-        (set! (-> self angle) (- f0-3 (* (the float (the int (/ f0-3 65536.0))) 65536.0))))
+      ;; 3DS: once per 60 Hz step of the frame, with the wind each step had (wind-force-step)
+      (dotimes (step (#if TARGET_3DS *wind-steps* 1))
+        (let* ((f0-0 0.992)
+               (f1-0 0.008090864)
+               (a0-0 (-> self root trans))
+               (wi (+ (the int (-> a0-0 x)) (the int (-> a0-0 z)) (-> *wind-work* wind-time)))
+               (f0-1 (* f0-0
+                        (+ (* f1-0
+                              (#if TARGET_3DS
+                                   (wind-force-step (- wi (- *wind-steps* 1 step)) step)
+                                   (-> *wind-work* wind-force (logand wi 63))))
+                           (-> self angle-vel)))))
+          (if (< 291.27112 f0-1) (set! f0-1 291.27112))
+          (set! (-> self angle-vel) f0-1))
+        (let ((f0-3 (+ (-> self angle) (-> self angle-vel))))
+          (set! (-> self angle) (- f0-3 (* (the float (the int (/ f0-3 65536.0))) 65536.0)))))
       (quaternion-axis-angle! (-> self root quat)
                               (-> self blade-normal x)
                               (-> self blade-normal y)

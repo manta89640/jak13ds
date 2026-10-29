@@ -441,10 +441,18 @@ struct CtrLevelData {
   std::vector<u8> chunk_wind_n;
   std::vector<u16> wind_slot_inst;
   std::vector<u8> draw_wind;  // per draw: it has wind vertices
+  // shrub fade bands (c3l::ExtShrubFade) per run, x << 16 | w in 1/16 m (0: the chunk's class),
+  // and per shrub chunk with bands its smallest x (game units)
+  std::vector<u32> run_band;
+  std::vector<float> chunk_band_x;
   int wind_mesh = -1;
   std::vector<float> wind_vectors;
   std::vector<float> wind_k;
   u64 wind_frame = ~0ull;
+  // the last WindWork's wind_time and wind_array (wind_update: the 60 Hz steps of a frame)
+  u32 wind_last_time = 0;
+  bool wind_have_last = false;
+  float wind_last_array[64][4] = {};
 };
 
 /*! DrawMode (tfrag3 draw settings) to ctr_gpu state. */

@@ -3355,6 +3355,55 @@ void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            lev->name, used, lev->env_draws.size(), ecs.size(), total / 1024);
 }
 
+// shrub fade bands (c3l::ExtShrubFade): per file run; a shrub chunk with bands reaches its largest
+// w (its max_dist is decide_dist's class, so w / kShrubFarK)
+void load_shrub_fade(c3l::Reader& f,
+                     const c3l::Header& hdr,
+                     u32 runs_lo,
+                     size_t file_runs,
+                     CtrLevelData* lev) {
+  lev->run_band.clear();
+  lev->chunk_band_x.clear();
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !lev->shrub_ps2_dist || !file_runs || runs_lo == UINT32_MAX ||
+      !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV23Size ||
+      runs_lo < eh.runs_offset || (runs_lo - eh.runs_offset) % sizeof(c3l::VisRun)) {
+    return;
+  }
+  c3l::ExtShrubFade ef{};
+  const size_t first = (runs_lo - eh.runs_offset) / sizeof(c3l::VisRun);
+  std::vector<u32> bands;
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderV22Size, &ef, sizeof(ef)) || !ef.bands_offset ||
+      first + file_runs > ef.band_count ||
+      !f.read_array(ef.bands_offset + (u32)(first * 4), file_runs, &bands)) {
+    return;
+  }
+  bands.resize(lev->vis_runs.size(), 0);
+  lev->chunk_band_x.assign(lev->chunks.size(), 0.f);
+  u32 chunks = 0;
+  for (size_t ci = 0; ci < lev->chunks.size(); ci++) {
+    auto& ch = lev->chunks[ci];
+    const u32 r0 = lev->chunk_first_run[ci];
+    if (ch.kind != c3l::CHUNK_KIND_SHRUB || !ch.vis_run_count || r0 + ch.vis_run_count > file_runs) {
+      continue;
+    }
+    float w = 0, x = INFINITY;
+    for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
+      if (bands[r]) {
+        w = std::max(w, (float)(bands[r] & 0xffff));
+        x = std::min(x, (float)(bands[r] >> 16));
+      }
+    }
+    if (w > 0) {
+      ch.max_dist = w * 256.f / kShrubFarK;
+      lev->chunk_band_x[ci] = x * 256.f;
+      chunks++;
+    }
+  }
+  lev->run_band = std::move(bands);
+  lg::info("[ctr] {}: shrub fade bands: {} chunks", lev->name, chunks);
+}
+
 // wind ties (c3l::ExtWind): the instances and the slots of their chunks' vertices (all in one
 // mesh's vertex memory, loaded with the level)
 void load_wind_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
@@ -4230,6 +4279,7 @@ bool CtrLevels::load_file(const fs::path& path,
   load_tie_lod(f, hdr, runs_lo, file_runs, out);  // (AI-assisted) c3l v17
   // (AI-assisted, streaming) c3l v19: run spheres, near chunks
   load_stream_info(f, hdr, runs_lo, file_runs, out);
+  load_shrub_fade(f, hdr, runs_lo, file_runs, out);
   load_proto_vis(f, hdr, runs_lo, file_runs, out);  // (AI-assisted, j2vis) c3l v20
   out->streaming = !out->stream_units.empty() && out->stream_units[0].state != CtrLevelData::kUnitNever &&
                    ctr_settings().streaming &&
@@ -7423,7 +7473,10 @@ void CtrTfragRenderer::env_color_scan(const CtrLevelData& lev, const CtrRenderSt
 }
 
 // Tie3::render_tree_wind's do_wind_math for every wind instance in the PC's order (each step moves
-// its wind_idx's state), once per frame: the shear factors of this frame (lev.wind_k)
+// its wind_idx's state), once per 60 Hz frame as the PS2: the game steps the wind time-ratio times
+// per drawn frame (update-wind), so this frame's steps are the wind_time it advanced, each with
+// the wind_array of its step (a slot written by a later step still holds last frame's value).
+// The shear factors are the last step's (lev.wind_k).
 void CtrTfragRenderer::wind_update(CtrLevelData& lev, u64 frame) {
   if (lev.wind_frame == frame) {
     return;
@@ -7431,25 +7484,42 @@ void CtrTfragRenderer::wind_update(CtrLevelData& lev, u64 frame) {
   lev.wind_frame = frame;
   constexpr float cx = 0.5f, cy = 100.f, cz = 0.0166f, cw = -1.f;
   const WindWork& w = m_wind_work;
+  const u32 t1 = w.wind_time;
+  const u32 adv = lev.wind_have_last ? t1 - lev.wind_last_time : 1;
+  const u32 n = std::clamp<u32>(adv, 1, 4);
+  const u32 written = lev.wind_have_last ? std::min<u32>(adv, 64) : 0;
   float* const vectors = lev.wind_vectors.data();
-  for (size_t i = 0; i < lev.wind_insts.size(); i++) {
-    const auto& wi = lev.wind_insts[i];
-    float* my = vectors + 4 * (size_t)wi.wind_idx;
-    const float* work = w.wind_array[(w.wind_time + wi.wind_idx) & 63];
-    const float v16x = work[0] - (cx * my[2] + cy * my[0]);
-    const float v16z = work[2] - (cx * my[3] + cy * my[1]);
-    const float v18x = my[2] + v16x * cz, v18z = my[3] + v16z * cz;
-    const float v17x = std::min(my[0] + v18x * cz, 1.f), v17z = std::min(my[1] + v18z * cz, 1.f);
-    const float kx = std::max(v17x, cw) * wi.stiffness, kz = std::max(v17z, cw) * wi.stiffness;
-    lev.wind_k[2 * i] = std::isfinite(kx) ? kx : 0.f;
-    lev.wind_k[2 * i + 1] = std::isfinite(kz) ? kz : 0.f;
-    if (!w.paused) {
-      my[0] = kx;
-      my[1] = kz;
-      my[2] = v18x;
-      my[3] = v18z;
+  for (u32 j = 0; j < n; j++) {
+    const u32 tj = t1 - (n - 1 - j);
+    const bool last = j + 1 == n;
+    for (size_t i = 0; i < lev.wind_insts.size(); i++) {
+      const auto& wi = lev.wind_insts[i];
+      float* my = vectors + 4 * (size_t)wi.wind_idx;
+      const u32 slot = (tj + wi.wind_idx) & 63;
+      // written at this frame's step k = written - 1 - (t1 - slot): later than step j: the old value
+      const u32 back = (t1 - slot) & 63;
+      const bool later = back < written && written - 1 - back > j + (written - n);
+      const float* work = later ? lev.wind_last_array[slot] : w.wind_array[slot];
+      const float v16x = work[0] - (cx * my[2] + cy * my[0]);
+      const float v16z = work[2] - (cx * my[3] + cy * my[1]);
+      const float v18x = my[2] + v16x * cz, v18z = my[3] + v16z * cz;
+      const float v17x = std::min(my[0] + v18x * cz, 1.f), v17z = std::min(my[1] + v18z * cz, 1.f);
+      const float kx = std::max(v17x, cw) * wi.stiffness, kz = std::max(v17z, cw) * wi.stiffness;
+      if (last) {
+        lev.wind_k[2 * i] = std::isfinite(kx) ? kx : 0.f;
+        lev.wind_k[2 * i + 1] = std::isfinite(kz) ? kz : 0.f;
+      }
+      if (!w.paused) {
+        my[0] = kx;
+        my[1] = kz;
+        my[2] = v18x;
+        my[3] = v18z;
+      }
     }
   }
+  lev.wind_last_time = t1;
+  lev.wind_have_last = true;
+  memcpy(lev.wind_last_array, w.wind_array, sizeof(lev.wind_last_array));
 }
 
 // the wind tie draws collected by draw_level (their rows in m_wind_rows)
@@ -8529,7 +8599,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (ch.kind == c3l::CHUNK_KIND_SHRUB && !vista_tier && ci < m_shrub_lim.size() &&
           m_shrub_lim[ci] > 0 && !lev.run_spheres.empty()) {
         const float lim = m_shrub_lim[ci];
-        const float near_lim = lim * kShrubNearK;
+        // per run bands (the PS2's x and w of its prototype), else the chunk's class band
+        const bool banded = !lev.run_band.empty() && lev.chunk_band_x[ci] > 0;
+        const float band_k = shrub_k * det * (1.f / 16.f) * 4096.f;
+        const float near_lim = banded ? std::min(lev.chunk_band_x[ci] * shrub_k * det, lim)
+                                      : lim * kShrubNearK;
         const float dcx = ch.bsphere[0] - cam.trans[0], dcy = ch.bsphere[1] - cam.trans[1],
                     dcz = ch.bsphere[2] - cam.trans[2];
         const float dc = std::sqrt(dcx * dcx + dcy * dcy + dcz * dcz);
@@ -8552,7 +8626,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             }
             runs_valid = true;
           }
-          const float band = 128.f / std::max(lim - near_lim, 1.f);
+          const float chunk_band = 128.f / std::max(lim - near_lim, 1.f);
           u32 shown = 0;
           for (u32 r = r0; r < r0 + nr; r++) {
             const auto& rs_ = lev.run_spheres[r];
@@ -8562,9 +8636,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               const float y = ch.origin[1] + rs_.c[1] * ch.scale - cam.trans[1];
               const float z = ch.origin[2] + rs_.c[2] * ch.scale - cam.trans[2];
               const float d = std::sqrt(x * x + y * y + z * z) - (float)rs_.r * ch.scale;
-              if (d > near_lim) {
+              const u32 b = banded && r < lev.run_band.size() ? lev.run_band[r] : 0;
+              float rl = lim, rn = near_lim, rb = chunk_band;
+              if (b) {
+                rl = std::min((float)(b & 0xffff) * band_k, lim);
+                rn = std::min((float)(b >> 16) * band_k, rl);
+                rb = 128.f / std::max(rl - rn, 1.f);
+              }
+              if (d > rn) {
                 // 16 steps (of 8 in 0x80): neighbouring runs share a draw
-                const int q = (int)std::lround((lim - d) * band * (1.f / 8.f)) * 8;
+                const int q = (int)std::lround((rl - d) * rb * (1.f / 8.f)) * 8;
                 fade = (u8)std::clamp(q, 0, (int)kRunOpaque);
               }
             }

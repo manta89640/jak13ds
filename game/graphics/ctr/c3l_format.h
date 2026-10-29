@@ -338,6 +338,21 @@ struct WindChunk {
 static_assert(sizeof(WindChunk) == 20);
 
 /*!
+ * Shrub fade bands (prototype-bucket-shrub dists, tools/ctr_level_converter/shrub_ps2_dists.inc):
+ * the PS2 draws a shrub in full up to x, fading out ((w - d) / (w - x)) up to w. Shrub chunks'
+ * visibility runs hold one prototype band each (at most 96 triangles). ExtHeader::size >=
+ * kExtHeaderV23Size, then this at ext_offset + kExtHeaderV22Size (ExtWind zero when the level has
+ * no wind ties). Older files: the chunk's distance class.
+ */
+constexpr uint32_t kExtHeaderV23Size = 104;
+struct ExtShrubFade {
+  uint32_t band_count;    // uint32_t[]: one per VisRun of the file from ExtHeader::runs_offset,
+                          // x << 16 | w in 1/16 m (0: none)
+  uint32_t bands_offset;  // absolute
+};
+static_assert(sizeof(ExtShrubFade) == kExtHeaderV23Size - kExtHeaderV22Size);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

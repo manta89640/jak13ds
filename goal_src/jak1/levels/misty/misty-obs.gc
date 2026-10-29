@@ -1012,11 +1012,20 @@
   :code
     (behavior ()
       (loop
-        (let* ((a0-0 (-> self root trans))
-               (f2-0 (-> *wind-work* wind-force (logand (+ (the int (-> a0-0 x)) (the int (-> a0-0 z)) (-> *wind-work* wind-time)) 63)))
-               (f0-5 (* 0.992 (+ (-> self angle-speed) (* 3.6408892 f2-0)))))
-          (set! (-> self angle-speed) (fmin 65536.0 f0-5)))
-        (quaternion-rotate-local-y! (-> self root quat) (-> self root quat) (* -1.0 (seconds-per-frame) (-> self angle-speed)))
+        ;; 3DS: once per 60 Hz step of the frame, with the wind each step had (wind-force-step)
+        (dotimes (step (#if TARGET_3DS *wind-steps* 1))
+          (let* ((a0-0 (-> self root trans))
+                 (wi (+ (the int (-> a0-0 x)) (the int (-> a0-0 z)) (-> *wind-work* wind-time)))
+                 (f2-0 (#if TARGET_3DS
+                            (wind-force-step (- wi (- *wind-steps* 1 step)) step)
+                            (-> *wind-work* wind-force (logand wi 63))))
+                 (f0-5 (* 0.992 (+ (-> self angle-speed) (* 3.6408892 f2-0)))))
+            (set! (-> self angle-speed) (fmin 65536.0 f0-5)))
+          (quaternion-rotate-local-y! (-> self root quat)
+                                      (-> self root quat)
+                                      (* -1.0
+                                         (/ (seconds-per-frame) (the float (#if TARGET_3DS *wind-steps* 1)))
+                                         (-> self angle-speed))))
         (if (-> self spawn-particle-enable) (spawn (-> self part) (-> self root trans)))
         (suspend)))
   :post ja-post)
