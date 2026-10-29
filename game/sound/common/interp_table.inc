@@ -1,4 +1,4 @@
-std::array<std::array<s16, 4>, 256> interp_table = { {
+alignas(8) const std::array<std::array<s16, 4>, 256> interp_table = { {
     { 0x12C7, 0x59B3, 0x1307, -0x0001 },
     { 0x1288, 0x59B2, 0x1347, -0x0001 },
     { 0x1249, 0x59B0, 0x1388, -0x0001 },

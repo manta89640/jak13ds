@@ -343,7 +343,7 @@ s32 snd_GetVoiceStatus(s32 voice) {
 
 void snd_keyOnVoiceRaw(u32 core, u32 voice_id) {
   if (voices[0]) {
-    snd_LockVoiceWrites();  // (AI-assisted) between mixer chunks, see snd_LockVoiceWrites
+    snd_LockVoiceWrites();  // see snd_LockVoiceWrites
     voices[0]->KeyOn();
     snd_UnlockVoiceWrites();
   }

@@ -50,10 +50,6 @@ static constexpr unsigned kMixRate = 32728;
 static constexpr unsigned kMixFrames = 768;
 static constexpr unsigned kMixBuffers = 3;
 static constexpr u32 kTickRatio = (u32)((48000ull * 65536 + kMixRate / 2) / kMixRate);
-// The mixer takes mTickLock per chunk, not per buffer: a sound call waits for one chunk at most
-// (128 frames: 2.7 ms of audio, mixed in about that long on hardware with many sounds playing).
-static constexpr unsigned kMixChunk = 128;
-static_assert(kMixFrames % kMixChunk == 0);
 
 // the mixer thread (ctr_thread_current_id): its own waits for the lock aren't counted
 static std::atomic<unsigned> g_mixer_thread_id{0};
@@ -162,24 +158,22 @@ void Player::MixerThread() {
   while (!mHandlerThreadStop) {
     short* buf;
     while (!mHandlerThreadStop && (buf = ctr_audio_get_buffer()) != nullptr) {
-      u64 t_mix = 0, t_wait = 0;
-      for (unsigned done = 0; done < kMixFrames; done += kMixChunk) {
-        const u64 t0 = kperf::ticks();
-        Tick((s16Output*)buf + done, kMixChunk);
-        const u64 t1 = kperf::ticks();
-        t_mix += t1 - t0;
-        // let waiting sound calls have the lock (see TickLock), for up to 2 ms
-        for (int w = 0; w < 40 && mTickLock.contended(); w++) {
-          ctr_thread_sleep_us(50);
-        }
-        t_wait += kperf::ticks() - t1;
+      const u64 t0 = kperf::ticks();
+      Tick((s16Output*)buf, kMixFrames);
+      const u64 t1 = kperf::ticks();
+      const u64 t_mix = t1 - t0;
+      // let waiting sound calls have the lock (see TickLock), for up to 2 ms
+      for (int w = 0; w < 40 && mTickLock.contended(); w++) {
+        ctr_thread_sleep_us(50);
       }
+      const u64 t_wait = kperf::ticks() - t1;
       sum_mix_ms += kperf::ticks_to_ms(t_mix);
       sum_wait_ms += kperf::ticks_to_ms(t_wait);
       if (++sum_buffers == 480) {
         const double handler_ms = kperf::ticks_to_ms(g_handler_ticks);
         g_handler_ticks = 0;
         const double real_ms = sum_buffers * kBufferMs;
+        std::scoped_lock lock(mTickLock);
         // (AI-assisted) late buffers: the DSP ran out of sound before the mixer's next buffer
         // came (a gap), which the dropped DSP frames don't show
         lg::info(
@@ -369,41 +363,54 @@ void Player::state_callback([[maybe_unused]] cubeb_stream* stream,
 #endif
 
 void Player::Tick(s16Output* stream, int samples) {
-  std::scoped_lock lock(mTickLock);
 #ifdef __3DS__
   // (AI-assisted) the same as below, but the synth mixes the samples between two handler ticks
-  // at once, at kMixRate: spu = SPU ticks since the last handler tick, times kMixRate
+  // at once, at kMixRate: spu = SPU ticks since the last handler tick, times kMixRate. The voices
+  // are mixed without the lock (Synth::BeginBlock): a sound call waits only for the handler
+  // ticks, not for the mixing, which on a core the system shares can be held up for milliseconds.
   static u64 spu = 200ull * kMixRate;
   for (int i = 0; i < samples;) {
-    if (spu >= 200ull * kMixRate) {
-      const u64 th = kperf::ticks();
-      struct HandlerTime {
-        u64 t0;
-        ~HandlerTime() { g_handler_ticks += kperf::ticks() - t0; }
-      } handler_time{th};
-      mTick++;
-      for (auto it = mHandlers.begin(); it != mHandlers.end();) {
-        bool done = it->second->Tick();
-        if (done) {
-          mHandleAllocator.FreeId(it->first);
-          it = mHandlers.erase(it);
-        } else {
-          ++it;
+    int n;
+    {
+      std::scoped_lock lock(mTickLock);
+      if (spu >= 200ull * kMixRate) {
+        const u64 th = kperf::ticks();
+        struct HandlerTime {
+          u64 t0;
+          ~HandlerTime() { g_handler_ticks += kperf::ticks() - t0; }
+        } handler_time{th};
+        mTick++;
+        for (auto it = mHandlers.begin(); it != mHandlers.end();) {
+          bool done = it->second->Tick();
+          if (done) {
+            mHandleAllocator.FreeId(it->first);
+            it = mHandlers.erase(it);
+          } else {
+            ++it;
+          }
         }
+        spu -= 200ull * kMixRate;
       }
-      spu -= 200ull * kMixRate;
+      // output samples until the next handler tick
+      // (AI-assisted) left <= 200 * kMixRate fits 32 bits: a 32-bit divide by a constant is a
+      // multiply, the 64-bit one a libgcc call (the ARM11 has no divide instruction)
+      const u32 left = (u32)(200ull * kMixRate - spu);
+      n = (int)std::min<u32>((u32)(samples - i), (left + 47999u) / 48000u);
+      mSynth.BeginBlock();
+      mMixing.store(true, std::memory_order_relaxed);
     }
-    // output samples until the next handler tick
-    // (AI-assisted) left <= 200 * kMixRate fits 32 bits: a 32-bit divide by a constant is a
-    // multiply, the 64-bit one a libgcc call (the ARM11 has no divide instruction)
-    const u32 left = (u32)(200ull * kMixRate - spu);
-    const int n = (int)std::min<u32>((u32)(samples - i), (left + 47999u) / 48000u);
-    mSynth.Tick(stream + i, n, kTickRatio);
+    mSynth.Mix(stream + i, n, kTickRatio);
+    mMixing.store(false, std::memory_order_release);
+    {
+      std::scoped_lock lock(mTickLock);
+      mSynth.EndBlock();  // also publishes the voices' NAX, all at this moment
+    }
     spu += (u64)n * 48000;
     i += n;
   }
-  sceSdPublishVoiceAddrs();  // (AI-assisted) the overlord's stream voices, all at this moment
   return;
+#else
+  std::scoped_lock lock(mTickLock);
 #endif
   static int htick = 200;
   static int stick = 48000;
@@ -620,7 +627,7 @@ void Player::SetMasterVolume(u32 group, s32 volume) {
 
 BankHandle Player::LoadBank(std::span<u8> bank) {
   // (AI-assisted) Parse outside the lock (it copies all the samples of the bank), install under
-  // it: the mixer holds the lock while it mixes, so a long parse under it held up the audio.
+  // it: the mixer takes the lock between its blocks, so a long parse under it held up the audio.
   auto parsed = Loader::ParseBank(bank);
   std::scoped_lock lock(mTickLock);
   auto handle = mLoader.AddBank(std::move(parsed));
@@ -667,6 +674,12 @@ void Player::UnloadBank(BankHandle bank_handle) {
     }
   }
 
+#ifdef __3DS__
+  // the voices being mixed may still read the bank's samples: their stops apply after the block
+  while (mMixing.load(std::memory_order_acquire)) {
+    ctr_thread_sleep_us(50);
+  }
+#endif
   mLoader.UnloadBank(bank_handle);
   mBankBytes.erase(bank_handle);
 }

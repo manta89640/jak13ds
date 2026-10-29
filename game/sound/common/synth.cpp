@@ -34,16 +34,47 @@ s16Output Synth::Tick() {
 }
 
 #ifdef __3DS__
-void Synth::Tick(s16Output* out, int samples, u32 ratio) {
+void Synth::BeginBlock() {
+  mVoices.remove_if([](std::shared_ptr<Voice>& v) { return v->Dead(); });
+  for (auto& v : mVoices) {
+    v->SetBusy(true);
+  }
+  mBusy = true;
+}
+
+void Synth::EndBlock() {
+  mBusy = false;
+  for (auto& v : mVoices) {
+    v->SetBusy(false);
+  }
+  for (auto& v : mPendingVoices) {
+    mVoices.emplace_front(std::move(v));
+  }
+  mPendingVoices.clear();
+  if (mMasterVolPending) {
+    mMasterVolPending = false;
+    SetMasterVol(mPendingMasterVol);
+  }
+}
+
+void Synth::Mix(s16Output* out, int samples, u32 ratio) {
   for (int i = 0; i < samples; i++) {
     out[i] = s16Output{};
   }
-  mVoices.remove_if([](std::shared_ptr<Voice>& v) { return v->Dead(); });
   for (auto& v : mVoices) {
     // the same order of (saturating) additions per sample as Tick(); a voice that stops is
     // skipped from then on, like there. (AI-assisted) RunBlock: the same samples, with the
     // envelope steps done in one go while they only advance a counter.
     v->RunBlock(out, samples, ratio);
+  }
+  if (!mVolume.left.Sweeping() && !mVolume.right.Sweeping()) {
+    // Run() does nothing without a sweep
+    const s32 vol_l = mVolume.left.Get(), vol_r = mVolume.right.Get();
+    for (int i = 0; i < samples; i++) {
+      out[i].left = ApplyVolume(out[i].left, vol_l);
+      out[i].right = ApplyVolume(out[i].right, vol_r);
+    }
+    return;
   }
   for (int i = 0; i < samples; i++) {
     out[i].left = ApplyVolume(out[i].left, mVolume.left.Get());
@@ -54,10 +85,23 @@ void Synth::Tick(s16Output* out, int samples, u32 ratio) {
 #endif
 
 void Synth::AddVoice(std::shared_ptr<Voice> voice) {
+#ifdef __3DS__
+  if (mBusy) {
+    mPendingVoices.push_back(std::move(voice));
+    return;
+  }
+#endif
   mVoices.emplace_front(voice);
 }
 
 void Synth::SetMasterVol(u32 volume) {
+#ifdef __3DS__
+  if (mBusy) {
+    mPendingMasterVol = volume;
+    mMasterVolPending = true;
+    return;
+  }
+#endif
   mVolume.left.Set(volume);
   mVolume.right.Set(volume);
 }

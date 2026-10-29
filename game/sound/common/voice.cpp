@@ -85,6 +85,35 @@ static inline s32 Lo16(u32 v) {
 static inline s32 Hi16(u32 v) {
   return (s32)v >> 16;
 }
+// SMULxy: products of the bottom (b) or top (t) halves of a and b. On the 3DS as instructions:
+// GCC otherwise takes the halves of a pair out of the loop into two registers.
+#if defined(SND_TEST_ARM_DSP)
+static inline s32 Smulbb(u32 a, u32 b) {
+  return Lo16(a) * Lo16(b);
+}
+static inline s32 Smulbt(u32 a, u32 b) {
+  return Lo16(a) * Hi16(b);
+}
+static inline s32 Smultt(u32 a, u32 b) {
+  return Hi16(a) * Hi16(b);
+}
+#else
+static inline s32 Smulbb(u32 a, u32 b) {
+  s32 d;
+  asm("smulbb %0, %1, %2" : "=r"(d) : "r"(a), "r"(b));
+  return d;
+}
+static inline s32 Smulbt(u32 a, u32 b) {
+  s32 d;
+  asm("smulbt %0, %1, %2" : "=r"(d) : "r"(a), "r"(b));
+  return d;
+}
+static inline s32 Smultt(u32 a, u32 b) {
+  s32 d;
+  asm("smultt %0, %1, %2" : "=r"(d) : "r"(a), "r"(b));
+  return d;
+}
+#endif
 #endif
 
 // (AI-assisted) Decodes `count` ADPCM data words from src (4 samples each, the lowest nibble
@@ -223,6 +252,12 @@ static s16 ApplyVolume(s16 sample, s32 volume) {
 }
 
 void Voice::KeyOn() {
+  if (mBusy) {
+    // published now, as a key on outside the mixer's block would
+    mPubNAX.store((mDeferredSsa != ~0u ? mDeferredSsa : mSSA) + 1, std::memory_order_relaxed);
+    mPubStopped.store(false, std::memory_order_relaxed);
+    return Defer(Op::KeyOn, 0);
+  }
   mNAX = mSSA;
   mNAX++;
   PublishNax();  // (AI-assisted) the new address at once, not after the next mixer chunk
@@ -236,12 +271,72 @@ void Voice::KeyOn() {
   mDecodeHist2 = 0;
   mDecodeBuf.Reset();
   mCustomLoop = false;
+  mPubStopped.store(false, std::memory_order_relaxed);
   // Console.WriteLn("SPU[%d]:VOICE[%d] Key On, SSA %08x", m_SPU.m_Id, m_Id, m_SSA);
 }
 
 void Voice::KeyOff() {
+  if (mBusy) {
+    return Defer(Op::KeyOff, 0);
+  }
   mADSR.Release();
   // fmt::print("Key Off\n");
+}
+
+void Voice::Stop() {
+  if (mBusy) {
+    mPubStopped.store(true, std::memory_order_relaxed);
+    return Defer(Op::Stop, 0);
+  }
+  mADSR.Stop();
+  mPubStopped.store(true, std::memory_order_relaxed);
+}
+
+void Voice::SetBusy(bool busy) {
+  mBusy = busy;
+  if (busy) {
+    return;
+  }
+  for (const auto& d : mDeferred) {
+    switch (d.op) {
+      case Op::Pitch:
+        SetPitch((u16)d.value);
+        break;
+      case Op::Adsr1:
+        SetAsdr1((u16)d.value);
+        break;
+      case Op::Adsr2:
+        SetAsdr2((u16)d.value);
+        break;
+      case Op::VolumeL:
+        SetVolumeL((u16)d.value);
+        break;
+      case Op::VolumeR:
+        SetVolumeR((u16)d.value);
+        break;
+      case Op::Sample:
+        SetSample(d.sample);
+        break;
+      case Op::Ssa:
+        SetSsa(d.value);
+        break;
+      case Op::Lsa:
+        SetLsa(d.value);
+        break;
+      case Op::KeyOn:
+        KeyOn();
+        break;
+      case Op::KeyOff:
+        KeyOff();
+        break;
+      case Op::Stop:
+        Stop();
+        break;
+    }
+  }
+  mDeferred.clear();
+  mDeferredSsa = ~0u;
+  PublishNax();
 }
 
 #if defined(SND_ARM_DSP)
@@ -284,8 +379,9 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
   const s32 vol_l = mVolume.left.GetCurrent(), vol_r = mVolume.right.GetCurrent();
   // (AI-assisted) 1 / ratio as a 0.32 fixed point number, for the span lengths below: a 32-bit
   // division per span was a libgcc call (the 3DS's ARM11 has no divide instruction), and in
-  // Jak II's city about a quarter of the voice samples are in spans shorter than 16 samples
-  const u32 inv_ratio = 0xFFFFFFFFu / ratio;
+  // Jak II's city about a quarter of the voice samples are in spans shorter than 16 samples.
+  // Computed when a span first needs it: most calls run one span to the end of the block.
+  u32 inv_ratio = 0;
 #if defined(SND_ARM_DSP)
   // (AI-assisted) the volumes as a pair: left at the bottom
   const u32 vol = (u32)(u16)vol_l | ((u32)(u16)vol_r << 16);
@@ -299,10 +395,49 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
   // interpolation (none when the sample is 0 whatever the voice plays), the pitch counter. False:
   // a loop end without repeat stopped the voice, Run() gives 0 for this sample (the ADSR level is 0
   // now) and the voice isn't run again.
+  // the interpolated sample at p (the counter's fraction), at the envelope level and the volumes,
+  // added to o
+  auto mix = [&](s16Output& o, const s16* p, u32 frac, s16 level) SND_ALWAYS_INLINE {
+#if defined(SND_ARM_DSP)
+    // the 4 samples and their coefficients loaded as pairs, multiplied half by half (SMULBB /
+    // SMULTT): the same products as one by one
+    u32 p01, p23, c01, c23;
+    std::memcpy(&p01, p, 4);
+    std::memcpy(&p23, p + 2, 4);
+    u64 c0123;  // one LDRD: the table is 8-byte aligned
+    std::memcpy(&c0123, interp_table[frac >> 4].data(), 8);
+    c01 = (u32)c0123;
+    c23 = (u32)(c0123 >> 32);
+    // Run() wraps the sum to s16 after each term: the same as wrapping the total
+    const s32 sum = (Smulbb(p01, c01) >> 15) + (Smultt(p01, c01) >> 15) +
+                    (Smulbb(p23, c23) >> 15) + (Smultt(p23, c23) >> 15);
+    // the s16 sample is the bottom half of `sample` (SMULBB reads it); left and right as a
+    // pair, PKHBT: the bottom halves of left >> 15 and right >> 15
+    const s32 sample = Smulbb(sum, (u32)level) >> 15;
+    MixInto(o, PkhbtLsl1(Smulbb(sample, vol) >> 15, Smulbt(sample, vol)));
+#else
+    const auto& coef = interp_table[frac >> 4];
+    // Run() wraps the sum to s16 after each term: the same as wrapping the total
+    const s32 sum = ((p[0] * coef[0]) >> 15) + ((p[1] * coef[1]) >> 15) +
+                    ((p[2] * coef[2]) >> 15) + ((p[3] * coef[3]) >> 15);
+    const s16 sample = static_cast<s16>((static_cast<s16>(sum) * level) >> 15);
+    o += s16Output{static_cast<s16>((sample * vol_l) >> 15),
+                   static_cast<s16>((sample * vol_r) >> 15)};
+#endif
+  };
+  auto advance = [&]() SND_ALWAYS_INLINE {
+    counter += step;
+    rd += counter >> 12;
+    counter &= 0xFFF;
+  };
+  // One output sample as Run() makes it, without the envelope and volume steps: decoding,
+  // interpolation (none when the sample is 0 whatever the voice plays), the pitch counter. False:
+  // a loop end without repeat stopped the voice, Run() gives 0 for this sample (the ADSR level is 0
+  // now) and the voice isn't run again.
   auto run_sample = [&](s16Output& o, s16 level, bool silent) SND_ALWAYS_INLINE {
     if (wr - rd < 16) {
-      // (AI-assisted) DecodeSamples(), with more calls until 16 samples are buffered when ahead:
-      // the samples are there already, only a block's last word does more
+      // DecodeSamples(), with more calls until 16 samples are buffered when ahead: the samples
+      // are there already, only a block's last word does more
       do {
         wr += 4;
         if (wr == end) [[unlikely]] {
@@ -318,36 +453,9 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
       } while (ahead && wr - rd < 16);
     }
     if (!silent) {
-#if defined(SND_ARM_DSP)
-      // (AI-assisted) the 4 samples and their coefficients loaded as pairs, multiplied half by
-      // half (SMULBB / SMULTT): the same products as one by one
-      u32 p01, p23, c01, c23;
-      std::memcpy(&p01, buf + rd, 4);
-      std::memcpy(&p23, buf + rd + 2, 4);
-      const s16* coef = interp_table[(counter >> 4) & 0xFF].data();
-      std::memcpy(&c01, coef, 4);
-      std::memcpy(&c23, coef + 2, 4);
-      // Run() wraps the sum to s16 after each term: the same as wrapping the total
-      const s32 sum = ((Lo16(p01) * Lo16(c01)) >> 15) + ((Hi16(p01) * Hi16(c01)) >> 15) +
-                      ((Lo16(p23) * Lo16(c23)) >> 15) + ((Hi16(p23) * Hi16(c23)) >> 15);
-      // the s16 sample is the bottom half of `sample` (SMULBB reads it); left and right as a
-      // pair, PKHBT: the bottom halves of left >> 15 and right >> 15
-      const s32 sample = (Lo16(sum) * level) >> 15;
-      MixInto(o, PkhbtLsl1((Lo16(sample) * Lo16(vol)) >> 15, Lo16(sample) * Hi16(vol)));
-#else
-      const s16* p = buf + rd;
-      const auto& coef = interp_table[(counter >> 4) & 0xFF];
-      // Run() wraps the sum to s16 after each term: the same as wrapping the total
-      const s32 sum = ((p[0] * coef[0]) >> 15) + ((p[1] * coef[1]) >> 15) +
-                      ((p[2] * coef[2]) >> 15) + ((p[3] * coef[3]) >> 15);
-      const s16 sample = static_cast<s16>((static_cast<s16>(sum) * level) >> 15);
-      o += s16Output{static_cast<s16>((sample * vol_l) >> 15),
-                     static_cast<s16>((sample * vol_r) >> 15)};
-#endif
+      mix(o, buf + rd, counter, level);
     }
-    counter += step;
-    rd += counter >> 12;
-    counter &= 0xFFF;
+    advance();
     return true;
   };
   while (i < n) {
@@ -395,6 +503,9 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
       // the largest k with mTickFrac + k * ratio < (quiet + 1) << 16 (quiet < 2 * left here):
       // num / ratio. (AI-assisted) num * inv_ratio >> 32 is at most 2 below it, then counted up.
       const u32 num = ((quiet + 1) << 16) - 1 - mTickFrac;
+      if (inv_ratio == 0) {
+        inv_ratio = 0xFFFFFFFFu / ratio;
+      }
       run = (u32)(((u64)num * inv_ratio) >> 32);
       while ((u64)(run + 1) * ratio <= num) {
         run++;
@@ -407,11 +518,59 @@ int Voice::RunBlockImpl(s16Output* out, int n, u32 ratio) {
       s16Output* const first = out + i;
       s16Output* o = first;
       s16Output* const last = first + run;
-      for (; o != last; o++) {
-        if (!run_sample(*o, level, silent_span)) {
-          o++;
-          stopped = true;
-          break;
+      if constexpr (ahead) {
+        while (o != last) {
+          // run_sample's decoding reaches the block end only once rd >= end - 19 (it adds words
+          // up to 16 samples past rd): the samples before need no decoder check
+          const size_t lim = end > 19 ? end - 19 : 0;
+          if (rd >= lim) {
+            if (!run_sample(*o, level, silent_span)) {
+              o++;
+              stopped = true;
+              break;
+            }
+            o++;
+            continue;
+          }
+          // the read position as a pointer, the counter's integer part added to it
+          const s16* p = buf + rd;
+          const s16* const p_lim = buf + lim;
+          u32 c = counter;
+          if (silent_span) {
+            do {
+              c += step;
+              const u32 whole = c >> 12;
+              p += whole;
+              c -= whole << 12;
+              o++;
+            } while (o != last && p < p_lim);
+          } else {
+            do {
+              mix(*o, p, c, level);
+              c += step;
+              const u32 whole = c >> 12;
+              p += whole;
+              c -= whole << 12;
+              o++;
+            } while (o != last && p < p_lim);
+          }
+          rd = (size_t)(p - buf);
+          counter = c;
+          // wr as the checks skipped above leave it: 16 samples past the last sample's read
+          // position (the counter before that sample's step was step + counter - 4096 * k, in
+          // 0..0xFFF)
+          const size_t rd_last = rd - ((step + 0xFFF - counter) >> 12);
+          if (wr < rd_last + 16) {
+            wr += (rd_last + 16 - wr + 3) & ~(size_t)3;
+          }
+        }
+      } else {
+        for (; o != last; o++) {
+          if (!run_sample(*o, level, silent_span)) {
+            o++;
+            stopped = true;
+            break;
+          }
         }
       }
       done = (u32)(o - first);

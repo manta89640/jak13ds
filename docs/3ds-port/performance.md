@@ -103,8 +103,8 @@ What changed (c3l v8, see c3l_format.md):
   and binds with the same texture and parameters are skipped.
 - **Sprites:** indexed quads written straight into the vertex buffer, cheaper sin/cos.
 - **Sound:** the mixer mixes blocks of samples per voice instead of one sample at a time over all
-  voices. It took 30-60% of the core it ran on at the beach; put it on a core without the render
-  thread (`sound_core` in `config.ini`).
+  voices, on core 1 (the system core, with a share of it), outside its lock (`3ds_build.md`
+  "Mixing outside the lock"); `sound_core = 2` puts it on the render thread's core.
 
 To see where the GPU time goes on hardware: `gpu_profile = 1` in `config.ini` leaves out one
 group of renderers at a time (level, merc + eyes, sprites, ocean, direct; 2.5 s each, then

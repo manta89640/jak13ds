@@ -94,7 +94,7 @@ void ctr_port_set_gpu_active(int active) {
 static int s_irrst = 0;
 static int s_cpu_limit = 0; /* the app got a share of core 1 (APT_SetAppCpuTimeLimit) */
 static int s_sound = 0;
-static int s_sound_core = 1; /* 2 on New 3DS: see ctr_platform_init */
+static int s_sound_core = 1; /* see ctr_platform_init */
 static u32* s_soc_buffer = NULL;
 /* (AI-assisted) the log writer (below) */
 static void log_stop(void);
@@ -263,28 +263,18 @@ int ctr_platform_init(int enable_console) {
   ctr_thread_install_crash_handler();
   /* (AI-assisted) The IO / IOP threads stay on core 0: config.ini io_on_system_core (core 1 for
    * them) was removed on Oct 16 (boot hung at the first IOP file load in Azahar). */
-  /* Audio output (config.ini: sound = on, sound_core = N). Default core: 2 on New 3DS, else 1.
-   * (AI-assisted) 2026-10-02: core 2 again. It went to core 0 when the render thread on core 2 was
-   * the limit (~11 fps); now the game thread on core 0 is (logic 10-30 ms of 33) and the render
-   * thread has room (9-16 ms), and the mixer cost the game's core 2-7 ms per frame. Its priority
-   * (CTR_PRIO_SOUND) is above the render thread's, so audio isn't starved there.
-   * Core 1 is the system core: the system's services (GPU, SD card, DSP, input) run there, so a
-   * busy mixer on it slows every service call of the game on real hardware, and the app only gets
-   * a share of it (APT_SetAppCpuTimeLimit; the kernel allows one app thread there). */
+  /* Audio output (config.ini: sound = on, sound_core = N). Default core: 1, the system core, with
+   * the share of it the app asks for (ctr_core1_enable; the kernel allows one app thread there).
+   * Core 0 runs the game logic and the IOP, core 2 the render thread, the level loader and the
+   * save worker. The system's time on core 1 holds the mixer up for milliseconds at a time; it
+   * mixes without its lock (player.cpp), so sound calls don't wait for that, and its 3 buffers
+   * (70 ms) cover it. */
   /* (AI-assisted) config.ini: sound = on, sound_core = N */
   {
     char v[16];
     if (ctr_config_bool("sound", 1)) { /* (AI-assisted) on by default since Oct 16 */
       s_sound = 1;
-#ifdef OG3DS_GAME_JAK2
-      /* (AI-assisted, j2-sound) Jak II: core 1 with a share of it (ctr_core1_enable). On core 2
-       * the mixer (4.5-7.2 ms per frame in the city, Azahar) pushed Jak II's render thread, which
-       * is at its limit there, over 33 ms (slums 29.8 -> 25-29 fps); core 0 has the game logic
-       * (~27 ms) and the IOP. */
       s_sound_core = 1;
-#else
-      s_sound_core = ctr_is_new3ds() ? 2 : 1;
-#endif
       /* (AI-assisted, cpusound) 1 or 2 (anything else: auto). Core 0 has the game logic, which
        * the mixer at its priority would starve; core 3 isn't the app's (no thread there, no
        * audio). player.cpp falls back from 2 to 1 and from 1 to 2. */

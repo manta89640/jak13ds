@@ -28,11 +28,11 @@
 namespace snd {
 
 #ifdef __3DS__
-// (AI-assisted) mTickLock on the 3DS. The mixer thread holds it while it synthesizes, and the
-// overlord's sound calls (IOP thread, on the game's core) block on it, which in turn stalls the
-// game in its sound RPC. It counts the time other threads wait for it (kperf "sound lock"), and
-// tells the mixer when someone waits: a released lock goes to whoever takes it first, and that is
-// the mixer, which doesn't sleep between buffers while it is behind.
+// (AI-assisted) mTickLock on the 3DS. The mixer thread holds it for the sound handler ticks and
+// around each block of voice mixing (Synth::BeginBlock / EndBlock), not while it mixes. The
+// overlord's sound calls (IOP thread, on the game's core) take it too, which stalls the game in
+// its sound RPC while they wait. It counts the time other threads wait for it (kperf "sound
+// lock"), and tells the mixer when someone waits.
 class TickLock {
  public:
   void lock();
@@ -103,7 +103,10 @@ class Player {
   void PauseAllSoundsInGroup(u8 group);
   void ContinueAllSoundsInGroup(u8 group);
   void SetSoundVolPan(s32 sound_handle, s32 vol, s32 pan);
-  void SubmitVoice(std::shared_ptr<Voice>& voice) { mSynth.AddVoice(voice); };
+  void SubmitVoice(std::shared_ptr<Voice>& voice) {
+    std::scoped_lock lock(mTickLock);
+    mSynth.AddVoice(voice);
+  };
   void SetSoundPmod(s32 sound_handle, s32 mod);
   void InitCubeb();
   void DestroyCubeb();
@@ -118,6 +121,7 @@ class Player {
  private:
 #ifdef __3DS__
   TickLock mTickLock;
+  std::atomic<bool> mMixing{false};  // Synth::Mix running (outside the lock)
 #else
   std::recursive_mutex mTickLock;  // TODO does not need to recursive with some light restructuring
 #endif

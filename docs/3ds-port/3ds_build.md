@@ -357,8 +357,8 @@ logs: `CTR_KEIRA_IK_LOG`, `CTR_KEIRA_DAX_LOG`, `CTR_KEIRA_VOICE_LOG`.
   handlers, VAG streaming) runs as on PC. Audio output is on by default (`sound = on` in
   `config.ini`; opt-in before Oct 16) (`platform/3ds/port/ctr_port.c`, `ctr_audio_*`): the 989snd software
   mixer (48 kHz stereo, PS2 SPU emulation, unchanged) runs on its own thread at `CTR_PRIO_SOUND`
-  on the core `sound_core` names (1 or 2, each the other's fallback; default 2 on New 3DS, else
-  1; core 1 is the system core: the app gets 80% of it with `APT_SetAppCpuTimeLimit` and may
+  on the core `sound_core` names (1 or 2, each the other's fallback; default 1, the system core:
+  the app gets 40% of it on New 3DS, 80% on Old 3DS, with `APT_SetAppCpuTimeLimit` and may
   create one thread there; (AI-assisted, cpusound) once mixing can't keep up with real time, the
   mixer sleeps 0.5 ms after each buffer so the threads below it on its core still run),
   filling 3 buffers of 1024 frames (21 ms each) that one ndsp channel plays; the DSP resamples
@@ -608,10 +608,23 @@ into one ndsp channel. `sound = on` is the default (`config_template_jak2.ini`);
   never ended when nothing played them (a likely cause of baseline B's subtitle that stayed on
   screen in Azahar with sound off). Jak 1 keeps its fake VAG clock. Not run yet: it needs a
   `sound = off` 3DS run (the host has no such thread).
-- **Mixer core: 1 for Jak II** (`ctr_port.c`; `sound_core` still overrides it). The app asks for
+- **Mixer core: 1, both games** (`ctr_port.c`; `sound_core` still overrides it). The app asks for
   40% of core 1 on New 3DS (`ctr_core1_enable`, 30% if refused; Old 3DS 80% first, as before).
-  On core 2 the mixer shared the render thread's core, which Jak II already fills; core 0 has the
-  game logic (~22-27 ms) and the IOP.
+  On core 2 the mixer shares the render thread's core, which Jak II fills and which limits Jak 1
+  in Citadel; core 0 has the game logic and the IOP. On core 1 the system's time there holds the
+  mixer up for milliseconds at a time (its mixing time per buffer is ~4x its CPU time): while it
+  held its lock for whole chunks, the overlord's sound calls waited for it on the game's core
+  (Jak II hardware log, Oct 25: "sound lock" 1.5-3.2 ms per frame). It now mixes without the lock
+  (next item).
+- **Mixing outside the lock** (`Player::Tick`, `Synth::BeginBlock` / `Mix` / `EndBlock`,
+  `Voice::SetBusy`): the lock is held for the sound handler ticks and around each block (the
+  samples between two handler ticks), not while the voices run. Register writes, key ons / offs,
+  new voices and the master volume set during a block are kept in order and applied after it,
+  which is where a sound call that waited for the lock applied them before; the overlord reads
+  the published NAX / stopped state (updated at once by its own key ons and stops). A bank unload
+  waits for the block in progress before it frees the samples (its voices' stops apply after the
+  block). Exact: `test/snd_voice` runs half its trials with the writes made while the voice is
+  busy.
 - **Measured** (Azahar, the CIA, `jak2_city.pad`, instance muted, Oct 18; compressed files):
   the title stream (`title-disk-intro`), CITY1 music, the CTYWIDE1-3 banks and guard lines
   (`kg010`) played; 0 DSP frames dropped, 0 late buffers, in both runs. Slums (city-stand /
@@ -633,9 +646,27 @@ into one ndsp channel. `sound = on` is the default (`config_template_jak2.ini`);
   samples where the envelope changes at every tick (~15%: long release tails) run in their own
   loop without the span setup. Mixer cost per voice in the city: ~0.88% -> ~0.7% of real time
   (Azahar, two runs, so only roughly).
-- **Voice registers vs the mixer** (j2-title2): the overlord's key on / off and address writes
-  wait for the mixer between chunks (`snd_LockVoiceWrites`), and `sceSdGetAddr` reads the voice
-  addresses published after each chunk; without this, Jak II's title intro stream got a garbage
+- **Where the mixer's time goes** (Citadel, Oct 29): it is linear in the voices playing, ~57 ARM
+  instructions per voice and output sample (Azahar's "% of real time" matches that count; on
+  hardware ~80 cycles), at 32728 samples a second. Citadel has 13-30 voices with only 4-10
+  sounds: the music's notes release linearly over 3-11 s (release shift 16-18) and keep their
+  voices, plus the looping ambients. The envelopes are cheap there (attack to full in 4 ticks,
+  sustain constant), so nearly every sample is in the span loop: the interpolation and mixing
+  (~40 instructions), the decoder check per sample (~4) and the ADPCM decode (~8 per decoded
+  sample plus ~4 per block). The span loop now runs the samples that can't reach the block's
+  last word without the decoder check (`rd < end - 19`; the decoder position is set once after
+  them): 32 instructions per sample, no stack loads. The 1/ratio division is made only when a
+  span ends inside the block, the master volume is applied without a call per sample, and the
+  mixer makes a whole buffer per call (one block per handler tick: ~283 voice calls a second
+  instead of ~496). Exact (`test/snd_voice`). Not done: caching decoded loops (a loop's decode
+  repeats only when its history at the loop start repeats, and Citadel's ambient loops are
+  seconds long), per-voice DSP channels (different interpolation, not exact).
+- **Overlord sound name lookup** (Jak 1, `LookupSoundIndex`): every looping ambient in range is
+  played by name every frame, and each lookup scanned the common bank's ~460 names with a
+  `memcmp` call each; it now compares the first 4 bytes as a word first (same first match).
+- **Voice registers vs the mixer** (j2-title2): the overlord's register, key on / off and address
+  writes take the mixer's lock (`snd_LockVoiceWrites`), and `sceSdGetAddr` reads the voice
+  addresses published after each block; without this, Jak II's title intro stream got a garbage
   play position and the scene froze (jak2_status.md "Title intro on the 3DS"). The VAG stream log:
   `OPENGOAL_VAG_DEBUG=1` (host), `-DOG_VAG_DEBUG` (3DS build).
 - Logs: `[sound] VAG stream NAME (id, EE|plugin)` per stream started. On the host,

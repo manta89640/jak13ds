@@ -30,7 +30,12 @@ class Synth {
   // (AI-assisted) `samples` outputs at once, the same as calling Tick() that many times (nothing
   // else changes the voices meanwhile): one voice at a time over the block. ratio: SPU ticks per
   // output sample, 16.16 (see Voice::RunBlock).
-  void Tick(s16Output* out, int samples, u32 ratio = 0x10000);
+  // In three steps, so the mixer runs the voices without holding its lock: BeginBlock() and
+  // EndBlock() under the lock, Mix() between them without it. Meanwhile register writes to the
+  // voices, AddVoice and SetMasterVol are kept and EndBlock() applies them (Voice::SetBusy).
+  void BeginBlock();
+  void Mix(s16Output* out, int samples, u32 ratio);
+  void EndBlock();
 #endif
   // (AI-assisted) voices that aren't stopped (statistics)
   int VoiceCount() const {
@@ -45,6 +50,12 @@ class Synth {
 
  private:
   std::forward_list<std::shared_ptr<Voice>> mVoices;
+#ifdef __3DS__
+  bool mBusy{false};
+  std::vector<std::shared_ptr<Voice>> mPendingVoices;
+  u32 mPendingMasterVol{0};
+  bool mMasterVolPending{false};
+#endif
 
   VolumePair mVolume{};
 };

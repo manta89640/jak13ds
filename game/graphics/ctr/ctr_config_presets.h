@@ -92,7 +92,7 @@ static const ctr_cfg_alias ctr_cfg_aliases[] = {
 static const ctr_cfg_kv ctr_cfg_defaults[] = {
     {"sound", "on"},
     {"gpu_micro", "on"}, {"gpu_micro_ident", "off"}, /* micro-gpu */
-    {"sound_core", "auto"}, /* 2 on a New 3DS, else 1 */
+    {"sound_core", "auto"}, /* 1 (the system core, with a share of it) */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
     /* (AI-assisted) Jak II's kernel starts the IOP from the "DVD" without -fakeiso */
     {"args", "-boot -fakeiso -cbackend"},

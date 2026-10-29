@@ -114,13 +114,20 @@ SoundBank* AllocateBankName(const char* name) {
 }
 
 s32 LookupSoundIndex(const char* name, SoundBank** bank_out) {
+  // the first 4 bytes compared as a word first: the game plays its looping sounds by name every
+  // frame, and the common bank alone has ~460 names
+  u32 first;
+  memcpy(&first, name, 4);
   for (auto bank : gBanks) {
     if (!bank->bank_handle) {
       continue;
     }
 
     for (int i = 0; i < (int)bank->sound_count; i++) {
-      if (memcmp(bank->sound[i].name.data(), name, 16) == 0) {
+      const char* entry = bank->sound[i].name.data();
+      u32 entry_first;
+      memcpy(&entry_first, entry, 4);
+      if (entry_first == first && memcmp(entry, name, 16) == 0) {
         *bank_out = bank;
         return i;
       }

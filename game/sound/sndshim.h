@@ -35,11 +35,12 @@ u32 snd_ResidentBankBytes(u32* count);
 // uses the fake VAG clock instead (overlord/jak1/iso.cpp). No effect elsewhere.
 void snd_RunStreamsWithoutOutput(bool on);
 // (AI-assisted) 3DS: the overlord's SPU voice register writes (sdshim.cpp: key on / off, start and
-// loop addresses; snd_keyOnVoiceRaw / snd_keyOffVoiceRaw) wait for the mixer between chunks. The
-// mixer (another core) runs a voice a chunk at a time with its decoder state in registers
-// (Voice::RunBlock), so a key on in the middle of it was undone or mixed with the old state: the
-// stream's play address (NAX) became garbage. No effect elsewhere (the host mixes sample by
-// sample).
+// loop addresses, volumes, pitch, envelope; snd_keyOnVoiceRaw / snd_keyOffVoiceRaw) take the
+// mixer's lock. The mixer (another core) runs a voice a block at a time with its decoder state in
+// registers (Voice::RunBlock), so a write in the middle of it was undone or mixed with the old
+// state: the stream's play address (NAX) became garbage. Under the lock, a write to a voice the
+// mixer is running is kept until its block ends (Voice::SetBusy). No effect elsewhere (the host
+// mixes sample by sample).
 void snd_LockVoiceWrites();
 void snd_UnlockVoiceWrites();
 s32 snd_GetTick();
