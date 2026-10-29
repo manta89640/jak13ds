@@ -72,6 +72,7 @@ LINK(ray_sphere_intersect)
 LINK(ray_cylinder_intersect)
 LINK(moving_sphere_sphere_intersect)
 LINK(closest_pt_in_triangle)
+LINK(instance_sphere_box_intersect)
 LINK(pc_anim_decomp_request)
 LINK(pc_anim_finalize_frame)
 LINK(pc_new_bones_mtx_calc)
@@ -207,9 +208,11 @@ int main(int argc, char** argv) {
   ray_cylinder_intersect::link();
   moving_sphere_sphere_intersect::link();
   closest_pt_in_triangle::link();
+  instance_sphere_box_intersect::link();
 #ifndef GOALC_REF_NONE  // (AI-assisted) (see run.sh: MIPS2C_TEST_NO_GOALC_REF)
   for (const char* name : {"ray-sphere-intersect", "ray-cylinder-intersect",
-                           "moving-sphere-sphere-intersect", "closest-pt-in-triangle"}) {
+                           "moving-sphere-sphere-intersect", "closest-pt-in-triangle",
+                           "instance-sphere-box-intersect?"}) {
     harness::use_goalc_reference(name);
     harness::bind_mips2c_symbol(name);
   }

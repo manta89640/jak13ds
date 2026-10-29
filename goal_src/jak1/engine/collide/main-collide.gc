@@ -55,6 +55,10 @@
 ;; definition for function instance-sphere-box-intersect?
 ;; WARN: Function may read a register that is not set: f31
 ;; Used lq/sq
+;; og:preserve-this 3DS: in C++ (native_collide_cache.cpp), the same results as this GOAL code
+;; compiled by goalc (test/mips2c_native checks it).
+(#if TARGET_3DS
+  (def-mips2c instance-sphere-box-intersect? (function drawable instance-tie bounding-box4w symbol))
 (defun instance-sphere-box-intersect? ((arg0 drawable) (arg1 instance-tie) (arg2 bounding-box4w))
   (local-vars
     (zero uint128)
@@ -150,7 +154,7 @@
       (.pcgtw v1-3 v1-2 a0-2))
     (.por v1-4 a1-2 v1-3)
     (.ppach v1-5 zero v1-4)
-    (let ((v1-6 (shl (the-as int v1-5) 16))) (nop!) (zero? v1-6))))
+    (let ((v1-6 (shl (the-as int v1-5) 16))) (nop!) (zero? v1-6)))))
 
 ;; definition for function instance-tfragment-add-debug-sphere
 ;; Used lq/sq

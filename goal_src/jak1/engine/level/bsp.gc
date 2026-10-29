@@ -356,11 +356,13 @@
 ;; Collision
 ;;;;;;;;;;;;;;;
 
-;; og:preserve-this (AI-assisted) 3DS: the box walk of the drawable trees in C++
+;; og:preserve-this 3DS: the box and y-probe walks of the drawable trees in C++
 ;; (native_collide_cache.cpp, the same results; always on). #f when it is off (host debugging):
 ;; the GOAL methods run.
 (#when TARGET_3DS
   (def-mips2c pc-bsp-collide-with-box (function bsp-header int collide-list symbol)))
+(#when TARGET_3DS
+  (def-mips2c pc-bsp-collide-y-probe (function bsp-header int collide-list symbol)))
 
 (defmethod collide-with-box ((this bsp-header) (arg0 int) (arg1 collide-list))
   "Top level collision with a box function. I think the arg0 length doesn't really matter here."
@@ -374,6 +376,8 @@
 
 (defmethod collide-y-probe ((this bsp-header) (arg0 int) (arg1 collide-list))
   (+! (-> *collide-stats* calls) 1)
+  (#when TARGET_3DS
+    (if (pc-bsp-collide-y-probe this arg0 arg1) (return 0)))
   (let ((s4-0 (-> this drawable-trees)))
     (dotimes (s3-0 (-> s4-0 length))
       (collide-y-probe (-> s4-0 trees s3-0) arg0 arg1)))

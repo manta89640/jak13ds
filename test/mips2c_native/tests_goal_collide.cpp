@@ -3,7 +3,8 @@
  * (AI-assisted)
  * Tests for the native versions of GOAL collision functions (native_collide_func.cpp,
  * native_geometry.cpp): ray-sphere-intersect, ray-cylinder-intersect,
- * moving-sphere-sphere-intersect, closest-pt-in-triangle. The reference version is the C code
+ * moving-sphere-sphere-intersect, closest-pt-in-triangle, and native_collide_cache.cpp's
+ * instance-sphere-box-intersect?. The reference version is the C code
  * goalc makes of the GOAL functions (goalc_ref/).
  */
 
@@ -260,9 +261,83 @@ void gen_closest_pt(Case& c) {
   }
 }
 
+//! (instance-sphere-box-intersect? frag inst box4w): a tie's collide fragment (bsphere at +12),
+//! the instance (bsphere +12, origin vector4h rows +28..+59, max-scale +34) and an int box near
+//! the fragment's world sphere (overlapping it, touching it, or away)
+void gen_isbi(Case& c) {
+  Gen& g = c.g;
+  const u32 frag = alloc(48) + 4;
+  const u32 inst = alloc(80) + 4;
+  const u32 box = alloc(32);
+  float ib[4];
+  rand_point(g, ib, kOrigin, 1000000.f);
+  ib[3] = g.f(0.f, 100000.f);
+  st_bytes(inst + 12, ib, 16);
+  // rows of the rotation / scale (4096 = 1.0), the translation (>> 10 as an s16 << 16: * 64)
+  s16 rows[4][4];
+  for (int r = 0; r < 3; r++) {
+    for (int i = 0; i < 4; i++) {
+      rows[r][i] = g.chance(0.1f) ? (s16)g.u32_() : (s16)g.range(-4096 * 3, 4096 * 3);
+    }
+  }
+  for (int i = 0; i < 4; i++) {
+    rows[3][i] = (s16)(g.chance(0.2f) ? g.u32_() : g.range(-2000, 2000));
+  }
+  st_bytes(inst + 28, rows, 32);
+  // max-scale overlays the w of the first row
+  const u16 scale = g.chance(0.1f) ? (u16)g.u32_() : (u16)g.range(2048, 8192);
+  st<u16>(inst + 34, scale);
+  float fs[4];
+  rand_point(g, fs, kOrigin, 40000.f);
+  fs[3] = g.chance(0.05f) ? -g.f(0.f, 1000.f) : g.f(0.f, 30000.f);
+  if (g.chance(0.02f)) {
+    fs[g.range(0, 3)] = bits_f(g.chance(0.5f) ? 0x7fc00000u : 0x7f800000u);  // NaN, inf
+  }
+  st_bytes(frag + 12, fs, 16);
+  // where the fragment's sphere ends up (roughly), and a box around, next to or away from it
+  double center[3];
+  for (int i = 0; i < 3; i++) {
+    center[i] = rows[3][i] * 64.0 + ib[i];
+    for (int r = 0; r < 3; r++) {
+      center[i] += rows[r][i] / 4096.0 * fs[r];
+    }
+  }
+  const double radius = std::abs(fs[3]) * scale / 4096.0;
+  s32 bmin[4], bmax[4];
+  for (int i = 0; i < 4; i++) {
+    const double half = g.chance(0.5f) ? g.f(0.f, 4096.f) : g.f(0.f, 100000.f);
+    double mid = i < 3 ? center[i] : 0.0;
+    switch (g.range(0, 3)) {
+      case 0:
+        mid += (radius + half) * (g.chance(0.5f) ? 1 : -1) + g.f(-2.f, 2.f);  // touching
+        break;
+      case 1:
+        mid += g.f(-3.f, 3.f) * (radius + half);
+        break;
+      default:
+        break;
+    }
+    bmin[i] = (s32)std::clamp(mid - half, -2e9, 2e9);
+    bmax[i] = (s32)std::clamp(mid + half, -2e9, 2e9);
+  }
+  if (g.chance(0.05f)) {
+    std::swap(bmin[0], bmax[0]);  // empty
+  }
+  st_bytes(box, bmin, 16);
+  st_bytes(box + 16, bmax, 16);
+  c.args[0] = frag;
+  c.args[1] = inst;
+  c.args[2] = box;
+  for (int i = 3; i < 8; i++) {
+    c.args[i] = g.u32_();
+  }
+}
+
 }  // namespace
 
 void register_goal_collide_tests() {
+  add_test({"instance-sphere-box-intersect?", "instance-sphere-box-intersect?", 40000, nullptr,
+            gen_isbi, {}});
   add_test({"ray-sphere-intersect",
             "ray-sphere-intersect",
             30000,
