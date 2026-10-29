@@ -327,6 +327,9 @@ void sky_hook(const ctr_draw_state* st) {
 float s_fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f}, s_fog1[4] = {0.f, 1.f, 0.f, 0.f};
 uint8_t s_fog_rgb[3] = {0, 0, 0};
 int s_env_tex = -1;  // (AI-assisted, j1ocean) the sky reflection's texture (ocean_full_draw)
+// the sky reflection weight's depth fade (ocean_full_draw, ctr_gpu_ocean_full_draw_env): its
+// lowest value (0, or 0.5 for the near ocean; -1: none) and the pixel's
+float s_env_fade_lo = -1.f, s_env_fade = 1.f;
 bool s_nofog = false;
 float s_mfog_hvdf_w = 255.f, s_mfog_lo = 0.f, s_mfog_hi = 0.f;
 float s_mhaze_k = 0.f, s_mhaze_c = 0.f;  // (AI-assisted, mercsprite) ctr_gpu_set_merc_haze
@@ -456,7 +459,7 @@ void shade_pixel(const ctr_draw_state& st,
     es.clamp_s = es.clamp_t = 1;
     float ec[4];
     sample(g_soft.textures[s_env_tex], es, env[0], env[1], ec);
-    const float w = tex_a / 255.f * ((st.tcc & 1) ? col[3] / 128.f : 1.f);
+    const float w = tex_a / 255.f * ((st.tcc & 1) ? col[3] / 128.f : 1.f) * s_env_fade;
     r = std::min(r, 255.f) + ec[0] * w;
     g = std::min(g, 255.f) + ec[1] * w;
     b = std::min(b, 255.f) + ec[2] * w;
@@ -653,6 +656,9 @@ void raster_triangle(const ctr_draw_state& st,
       if (env) {
         e[0] = w0 * env[0] + w1 * env[2] + w2 * env[4];
         e[1] = w0 * env[1] + w1 * env[3] + w2 * env[5];
+        s_env_fade = s_env_fade_lo < 0.f || !tex_q
+                         ? 1.f
+                         : std::clamp(CTR_OCEAN_ENV_FADE_K + std::log2(q), s_env_fade_lo, 1.f);
       }
       shade_pixel(st, px, py, z, col, s, t, tex_alpha_full, f, env ? e : nullptr);
     }
@@ -1067,6 +1073,10 @@ void ocean_full_draw(const ctr_draw_state* state,
     return;
   }
   g_ocean_full_open = false;
+  ctr_draw_state masked = *state;
+  masked.tcc &= ~(CTR_TCC_TRILINEAR | CTR_TCC_MIP_MAX1);  // (mip levels: none here)
+  s_env_fade_lo = env_tex >= 0 ? ((state->tcc & CTR_TCC_MIP_MAX1) ? 0.5f : 0.f) : -1.f;
+  state = &masked;
   if (vert_count > (int)g_ocean_full_verts.size() || index_count > (int)g_ocean_full_indices.size()) {
     return;
   }
@@ -1399,6 +1409,41 @@ void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t) {
   *t = 1.f - ly / r->lh;
 }
 
+// (level 0 only: the soft backend samples no mip levels)
+int ctr_gpu_rt_create_mipmapped(int size) {
+  return ctr_gpu_rt_create(size, size, size);
+}
+
+int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex* verts, int n) {
+  SoftRt* r = soft_rt(tex);
+  if (!r || n < 1 || r->lw != r->lh || !ctr_gpu_rt_begin(tex, 0, 0, r->lw, r->lh)) {
+    return 0;
+  }
+  std::vector<ctr_vertex> tris;
+  tris.reserve((size_t)n * n * 6);
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      const int a = y * (n + 1) + x, b = a + 1, d = a + n + 1, e = d + 1;
+      for (int k : {a, b, d, d, b, e}) {
+        tris.push_back(verts[k]);
+      }
+    }
+  }
+  ctr_gpu_draw(state, tris.data(), (int)tris.size());
+  ctr_gpu_rt_end();
+  return 1;
+}
+
+// host tests: a texture's texels (RGBA8, top row first), nullptr if there is none
+const uint8_t* ctr_gpu_soft_texels(int tex, int* w, int* h) {
+  if (tex < 0 || tex >= (int)g_soft.textures.size() || !g_soft.textures[tex].used) {
+    return nullptr;
+  }
+  *w = g_soft.textures[tex].w;
+  *h = g_soft.textures[tex].h;
+  return g_soft.textures[tex].rgba.data();
+}
+
 // (AI-assisted) debugging: a texture's texels as a PNG (alpha forced to 255 where it isn't 0)
 void ctr_gpu_soft_dump_tex(int tex, const char* path) {
   if (tex < 0 || tex >= (int)g_soft.textures.size() || !g_soft.textures[tex].used) {
@@ -1501,6 +1546,7 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
     t.rgba.assign(rgba, rgba + t.w * t.h * 4);
   }
 }
+
 
 unsigned int ctr_gpu_tex_bytes(int w, int h, int format, int levels) {
   const unsigned bits = format == CTR_TEX_ETC1     ? 4

@@ -2,6 +2,8 @@
 .fvec gs[4]
 
 .constf consts(0.00392156862745098, 0.0, 0.0, 0.0)
+; texcoord1 = (fog, Q * 2^(CTR_OCEAN_ENV_FADE_K - 1.5)): the sky reflection's depth fade table
+.constf kfade(273.18794257326687, 0.0, 0.0, 0.0)
 .alias inv255 consts.xxxx
 
 .out outpos position
@@ -26,7 +28,8 @@
   mul outpos, r0, r1.xxxx
   mov outtcq, r1.xxxx
   mul r2.xy, intex.xyyy, r1.xxxx
-  mov r2.zw, intex.zzzz
+  mov r2.z, intex.zzzz
+  mul r2.w, kfade.xxxx, r1.xxxx
   mov outtc, r2
   mul outclr, inv255, inclr
   mov outtc2, inenv.xyyy  ; (AI-assisted, j1ocean) texture unit 2's coordinates (the sky reflection)

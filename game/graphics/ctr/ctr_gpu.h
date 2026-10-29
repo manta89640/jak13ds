@@ -119,6 +119,10 @@ enum { CTR_TCC_ST_ATLAS = 16 };
  * fog per vertex (merc2.vert / merc2.frag), with the values of the last ctr_gpu_set_merc_fog. Only
  * set when ctr_gpu_merc_fog_ready says so. */
 enum { CTR_TCC_FOG = 32 };
+/* ctr_draw_state::tcc bits of the PS2 ocean's draws (ctr_gpu_ocean_full_draw*): its texture's mip
+ * levels blended (the GS's TEX1 MMIN 5, whatever config.ini mipmaps says); MIP_MAX1: only levels
+ * 0 and 1 (TEX1 MXL 1, the near ocean's; also its sky reflection's fade) */
+enum { CTR_TCC_TRILINEAR = 64, CTR_TCC_MIP_MAX1 = 128 };
 /* (AI-assisted) config.ini fog_alpha (CTR_TCC_ALPHA80 draws: fog in the vertex alpha, no fog ramp
  * texture) and tex1_gating (texture unit 1 enabled only for draws whose combiner reads it), each
  * frame (gpu_profile = ab switches them). ctr_gpu_fog_alpha_ready: the program for it is loaded
@@ -255,6 +259,15 @@ void ctr_gpu_rt_delete(int tex);
 int ctr_gpu_rt_begin(int tex, int x, int y, int w, int h);
 void ctr_gpu_rt_end(void);
 void ctr_gpu_rt_uv(int tex, float lx, float ly, float* s, float* t);
+/* A square size x size render texture with mip levels (down to 8 x 8), drawn into only with
+ * ctr_gpu_rt_draw_grid; sampled like a ctr_gpu_tex_create_mipmapped texture.
+ * ctr_gpu_rt_draw_grid: the (n + 1) x (n + 1) vertices (row-major) as n x n quads into level 0
+ * (ctr coordinates [-1, 1] cover it as ctr_gpu_rt_begin's tile), each further level the 2 x 2
+ * averages of the one above; then the screen again. 1 when drawn. Only inside a frame. (The PS2
+ * ocean's wave texture: the GS draws its 32 x 32 quads and the mip levels, CtrOceanFull; their
+ * alpha fade is ctr_gpu_ocean_full_draw_env's) */
+int ctr_gpu_rt_create_mipmapped(int size);
+int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex* verts, int n);
 /* (AI-assisted) a static mesh's vertices and indices as made (ctr_gpu_mesh_create / _end), to
  * read on the CPU; 0 if there is none */
 int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
@@ -312,7 +325,13 @@ void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state* state, int vert_count, i
  *   tcc set (mid ocean, opaque):  rgb = fog(tex * v) + env * (tex.a * v.a / 128), a = tex.a * v.a
  *   tcc clear (near ocean, blended): rgb = fog(tex * v) + env * tex.a, a = v.a
  * (the near ocean's alpha blending then weights both by v.a, as the PS2's alpha-only pass did).
+ * The weight also fades with depth as the PS2's did: the GS picks the wave texture's mip level
+ * from Q alone, LOD = 2 log2(1 / Q) - 17.1875 (TEX1 L 1, K 0xeed), and its levels' alpha is 1,
+ * 0.5, 0, ... (ocean-texture's mip sprites), blended (MMIN 5): weight x clamp(CTR_OCEAN_ENV_FADE_K
+ * + log2 Q, 0, 1), at least 0.5 for the near ocean (MXL 1, CTR_TCC_MIP_MAX1 in its state); per
+ * pixel, Q interpolated in screen space like the GS's (texture unit 1's t, a table).
  * ctr_gpu_ocean_end after the bucket's draws (texture unit 2 off, combiner stage 2 reset). */
+#define CTR_OCEAN_ENV_FADE_K 9.59375f
 void ctr_gpu_ocean_full_draw_env(const ctr_draw_state* state, int vert_count, int index_count,
                                  uint8_t fog_r, uint8_t fog_g, uint8_t fog_b, int env_tex);
 
@@ -805,6 +824,8 @@ void ctr_gpu_get_stats(ctr_gpu_stats* out);
 void ctr_gpu_soft_bucket(const char* name);
 /* (AI-assisted) debugging: a texture's texels as a PNG (soft backend only) */
 void ctr_gpu_soft_dump_tex(int tex, const char* path);
+/* host tests: a texture's texels (RGBA8, top row first), NULL if there is none (soft backend) */
+const uint8_t* ctr_gpu_soft_texels(int tex, int* w, int* h);
 /* (AI-assisted) the name the draws are counted under now */
 const char* ctr_gpu_soft_bucket_name(void);
 #endif

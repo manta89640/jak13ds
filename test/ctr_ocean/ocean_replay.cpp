@@ -87,6 +87,17 @@ void ctr_gpu_ocean_full_draw_clip(const ctr_draw_state*, int nv, int ni, uint8_t
                                   uint8_t) {
   draw(nv, ni, true);
 }
+// no render texture here: the CPU's wave texture (the reference)
+int ctr_gpu_rt_create_mipmapped(int) {
+  return -1;
+}
+void ctr_gpu_rt_uv(int, float, float, float* s, float* t) {
+  *s = *t = 0.f;
+}
+int ctr_gpu_rt_draw_grid(int, const ctr_draw_state*, const ctr_vertex*, int) {
+  return 0;
+}
+void ctr_gpu_rt_delete(int) {}
 int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
   g_tex.assign(rgba, rgba + 4 * w * h);
   return 1;
@@ -126,6 +137,9 @@ bool CtrVram::decode_for_cpu(u64, std::vector<u32>* out, int* w, int* h) {
   *w = g_env_w;
   *h = g_env_h;
   return true;
+}
+const CtrTexture* CtrVram::get_texture(u64) {  // the GPU wave path
+  return nullptr;
 }
 const void* CtrVram::upload_source(u32, u64*) const {
   return nullptr;

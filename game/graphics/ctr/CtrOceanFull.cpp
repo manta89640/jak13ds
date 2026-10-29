@@ -462,10 +462,105 @@ void texel_row(const TexAcross& a, const TexAcross& b, u32* out, const u32* env,
 }  // namespace
 
 /*!
+ * The wave texture's render texture (update_texture_gpu), made with the renderer (VRAM is still
+ * free then). None: the CPU makes the texture (update_texture).
+ */
+void CtrOceanFull::make_wave_rt() {
+  m_wave_rt = ctr_gpu_rt_create_mipmapped(kTexSize);
+  if (m_wave_rt < 0) {
+    m_wave_rt = -1;
+    lg::warn("[ctr] ocean full: no render texture for the wave texture, made on the CPU");
+    return;
+  }
+  // ctr x, y of texture coordinates: ctr_gpu_rt_uv's inverse (logical pixels to s, t; the
+  // backends lay the texture out differently)
+  float s0, t0, s1, t1, s2, t2;
+  ctr_gpu_rt_uv(m_wave_rt, 0, 0, &s0, &t0);
+  ctr_gpu_rt_uv(m_wave_rt, kTexSize, 0, &s1, &t1);
+  ctr_gpu_rt_uv(m_wave_rt, 0, kTexSize, &s2, &t2);
+  // (s, t) = (s0, t0) + lx (a, c) + ly (b, d), lx, ly in 0..1 = ctr (x + 1) / 2, (y + 1) / 2
+  const float a = s1 - s0, b = s2 - s0, c = t1 - t0, d = t2 - t0;
+  const float det = a * d - b * c;
+  const float ia = d / det, ib = -b / det, ic = -c / det, id = a / det;
+  m_wave_map[0] = -1.f - 2.f * (ia * s0 + ib * t0);
+  m_wave_map[1] = 2.f * ia;
+  m_wave_map[2] = 2.f * ib;
+  m_wave_map[3] = -1.f - 2.f * (ic * s0 + id * t0);
+  m_wave_map[4] = 2.f * ic;
+  m_wave_map[5] = 2.f * id;
+  m_tex = m_wave_rt;
+}
+
+/*!
+ * The wave texture as the PS2 makes it: the ocean-texture program sends the GS the 32 x 32 quads
+ * between the 33 x 33 vertices, gouraud colored, the env map at the interpolated coordinates
+ * (nearest texel, clamped), GS modulate. The GPU draws the same quads into the 128 x 128 render
+ * texture, then the mip levels: 2 x 2 averages, the PS2's bilinear half size sprites
+ * (ctr_gpu_rt_draw_grid). The mid ocean samples all of them, the near ocean levels 0 and 1, both
+ * blending two levels (their TEX1: MXL 6 / 1, MMIN 5). The PS2's sprites also fade the levels'
+ * alpha (1, 0.5, then 0), the sky reflection's weight: that fade follows the GS's depth based
+ * level, so the draws apply it from depth (ctr_gpu_ocean_full_draw_env), and the reflection is
+ * gone before the mid tiles without it (call 46's) and the far ocean, as on the PS2.
+ */
+void CtrOceanFull::update_texture_gpu(const TextureDma& t, CtrRenderState& rs) {
+  const CtrTexture* env = rs.vram ? rs.vram->get_texture(t.env_tex0) : nullptr;
+  ctr_draw_state st;
+  memset(&st, 0, sizeof(st));
+  st.tex = env ? env->handle : -1;  // (none: the vertex colors alone, alpha 1, like the CPU's)
+  st.tcc = 1;
+  st.filter = 0;
+  st.clamp_s = st.clamp_t = 1;
+  st.blend = CTR_BLEND_OFF;
+  st.atest = CTR_TEST_ALWAYS;
+  st.ztest = CTR_TEST_ALWAYS;
+  st.zwrite = 0;
+
+  // update_texture's vertex math, normalized env map coordinates
+  static ctr_vertex grid[(kGrid + 1) * (kGrid + 1)];
+  const float cx = t.constants.cam_nrm[0], cy = t.constants.cam_nrm[1],
+              cz = t.constants.cam_nrm[2];
+  const float k0 = t.constants.constants[0], k1 = t.constants.constants[1];
+  const float* m = m_wave_map;
+  for (int r = 0; r <= kGrid; r++) {
+    ctr_vertex* row = grid + r * (kGrid + 1);
+    const float tt_pos = (float)r / kGrid;
+    for (int g = 0; g < kGrid / 4; g++) {
+      const float(*q)[4] = (const float(*)[4])(t.rows[r] + g * 8 * 16);
+      const float* nx = q[1];
+      const float* ny = q[3];
+      const float* nz = q[5];
+      for (int k = 0; k < 4; k++) {
+        const float refl = (nx[k] * cx + ny[k] * cy) + nz[k] * cz;
+        const float w = q[2 * k][3];
+        ctr_vertex& v = row[4 * g + k];
+        v.s = (nx[k] * refl * w + cx) * k0 + k1;
+        v.t = (ny[k] * refl * w + cy) * k0 + k1;
+        v.r = (u8)((s32)q[2 * k][0] & 0xff);  // ftoi0, then the GS's 8 bits
+        v.g = (u8)((s32)q[2 * k][1] & 0xff);
+        v.b = (u8)((s32)q[2 * k][2] & 0xff);
+        v.a = 0x80;
+      }
+    }
+    row[kGrid] = row[0];
+    for (int c = 0; c <= kGrid; c++) {
+      const float ss_pos = (float)c / kGrid;
+      row[c].x = m[0] + m[1] * ss_pos + m[2] * tt_pos;
+      row[c].y = m[3] + m[4] * ss_pos + m[5] * tt_pos;
+      row[c].z = 0.5f;
+    }
+  }
+  ctr_gpu_rt_draw_grid(m_wave_rt, &st, grid, kGrid);  // (not drawn: the last one stays)
+}
+
+/*!
  * (AI-assisted) The original 128 x 128 wave texture, sampled at the four pixel centers
  * (1/8, 3/8, 5/8, 7/8) of each grid cell. Keep the integer filtering and GS modulation.
  */
 void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
+  if (m_wave_rt >= 0) {
+    update_texture_gpu(t, rs);
+    return;
+  }
   const bool env_ok = update_env(t.env_tex0, rs);
   const int ew = env_ok ? m_env_w : 1, eh = env_ok ? m_env_h : 1;
   const u32 gray = 0x80808080;  // no env map: the vertex colors alone (alpha 1)
@@ -551,9 +646,8 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
   const u8* bytes = (const u8*)m_texels.data();  // RGBA in memory (little endian)
   if (m_tex < 0) {
     m_tex = ctr_gpu_tex_create_mipmapped(kTexSize, kTexSize, bytes);
-  } else {
-    ctr_gpu_tex_update(m_tex, bytes);  // (a second copy with the pipeline)
   }
+  ctr_gpu_tex_update(m_tex, bytes);  // (a second copy with the pipeline)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -571,12 +665,19 @@ CtrOceanFull::CtrOceanFull()
   m_near->set_alpha_floor(floor);
   m_mid->set_env_hook(this);  // (AI-assisted, j1ocean) the sky reflection
   m_near->set_env_hook(this);
-  lg::info("[ctr] ocean full: wave texture every {} frame(s), near ocean alpha at least {:.2f}",
-           m_tex_rate, floor / 128.0);
+  make_wave_rt();
+  if (m_wave_rt >= 0) {
+    m_tex_rate = 1;  // (the PS2 draws it every frame)
+  }
+  lg::info("[ctr] ocean full: wave texture by the {} every {} frame(s), near ocean alpha at least "
+           "{:.2f}",
+           m_wave_rt >= 0 ? "GPU" : "CPU", m_tex_rate, floor / 128.0);
 }
 
 CtrOceanFull::~CtrOceanFull() {
-  if (m_tex >= 0) {
+  if (m_wave_rt >= 0) {
+    ctr_gpu_rt_delete(m_wave_rt);  // (m_tex with it)
+  } else {
     ctr_gpu_tex_delete(m_tex);
   }
   if (m_refl >= 0) {
@@ -770,7 +871,7 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
   st.tex = m_tex;
-  st.tcc = 1;
+  st.tcc = 1 | CTR_TCC_TRILINEAR;  // (the GS's TEX1: MXL 6, MMIN 5)
   st.filter = 1;
   st.blend = CTR_BLEND_OFF;
   st.atest = CTR_TEST_ALWAYS;
@@ -851,7 +952,7 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
   st.tex = m_tex;
-  st.tcc = 0;
+  st.tcc = CTR_TCC_TRILINEAR | CTR_TCC_MIP_MAX1;  // (TEX1: MXL 1, MMIN 5)
   st.filter = 1;
   st.blend = CTR_BLEND_ALPHA;
   st.atest = CTR_TEST_ALWAYS;
@@ -874,6 +975,9 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
   }
   drain(dma, rs);
   if (!dump_near.empty() && ++g_dump.frames == 200) {
+    if (!m_env_ok) {
+      update_env(tex.env_tex0, rs);  // (the GPU's wave texture doesn't decode it)
+    }
     g_dump.write(dump_near, m_env_ok ? m_env : std::vector<u32>(1, 0xff808080u),
                  m_env_ok ? m_env_w : 1, m_env_ok ? m_env_h : 1);
   }
