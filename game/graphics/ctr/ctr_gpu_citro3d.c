@@ -4179,6 +4179,16 @@ static int check_radial(int w, int h, const uint8_t* rgba, u32* lut) {
   return 1;
 }
 
+/* the GPU expands 5 / 6 bit channels by bit replication */
+static inline int exact5(uint8_t v) {
+  const uint8_t c = ctr_q5[v];
+  return (uint8_t)((c << 3) | (c >> 2)) == v;
+}
+static inline int exact6(uint8_t v) {
+  const uint8_t c = ctr_q6[v];
+  return (uint8_t)((c << 2) | (c >> 4)) == v;
+}
+
 int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
   if (!g_compact) {
     return ctr_gpu_tex_create(w, h, rgba);
@@ -4187,13 +4197,19 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
     return -1;
   }
   const int n = w * h;
-  int gray = 1, opaque = 1, binary = 1;
+  /* only formats that keep every texel exactly */
+  int gray = 1, opaque = 1, binary = 1, fit565 = 1, fit5551 = 1;
   unsigned amax = 0;
   for (int i = 0; i < n; i++) {
     const uint8_t* p = rgba + 4 * i;
-    const int dr = (int)p[0] - (int)p[1], db = (int)p[2] - (int)p[1];
-    if (dr > 3 || dr < -3 || db > 3 || db < -3) {
+    if (p[0] != p[1] || p[2] != p[1]) {
       gray = 0;
+    }
+    if (!exact5(p[0]) || !exact6(p[1]) || !exact5(p[2])) {
+      fit565 = 0;
+    }
+    if (!exact5(p[0]) || !exact5(p[1]) || !exact5(p[2])) {
+      fit5551 = 0;
     }
     if (p[3] != 0x80) {
       opaque = 0;
@@ -4210,9 +4226,9 @@ int ctr_gpu_tex_create_compact(int w, int h, const uint8_t* rgba, int flags) {
   GPU_TEXCOLOR fmt;
   if (gray) {
     fmt = opaque ? GPU_L8 : GPU_LA8;
-  } else if (opaque) {
+  } else if (opaque && fit565) {
     fmt = GPU_RGB565;
-  } else if (binary) {
+  } else if (binary && fit5551) {
     fmt = GPU_RGBA5551;
   } else {
     /* (AI-assisted) colored with soft alpha (glows, flares, the HUD orb's halo): kept at 8 bits per
