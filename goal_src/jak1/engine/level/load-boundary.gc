@@ -753,7 +753,13 @@
           (triangulate-boundary gp-2)
           (find-bounding-circle gp-2))
         (if *display-load-boundaries* (render-boundary gp-2))
-        (check-boundary gp-2)
+        ;; og:preserve-this 3DS: check-boundary's circle reject, inline (it does nothing outside the circle)
+        (#if TARGET_3DS
+          (let* ((a1-0 (if (logtest? (-> gp-2 flags) (load-boundary-flags player)) (-> *load-boundary-target* 1) (-> *load-boundary-target* 0)))
+                 (f0-1 (- (-> a1-0 x) (-> gp-2 rejector x)))
+                 (f1-2 (- (-> a1-0 z) (-> gp-2 rejector z))))
+            (if (< (+ (square f0-1) (square f1-2)) (* (-> gp-2 rejector w) (-> gp-2 rejector w))) (check-boundary gp-2)))
+          (check-boundary gp-2))
         (set! gp-2 (-> gp-2 next)))))
   (if *display-load-boundaries* (edit-load-boundaries))
   0
