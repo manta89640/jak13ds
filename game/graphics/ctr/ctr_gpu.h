@@ -551,6 +551,11 @@ void ctr_gpu_mesh_delete(int mesh);
  * index_count indices to; end makes it drawable (ok) or frees it (!ok) and returns the handle or
  * -1. Not drawn or deleted between the two. */
 int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices);
+/* The same with tail_bytes more after the vertices (at verts + vertex_count * 16; not vertices
+ * for ctr_gpu_mesh_peek / _vertices_inplace): data a draw reads beside them (envmapped tie
+ * normals), freed with the mesh. */
+int ctr_gpu_mesh_begin_tail(int vertex_count, int tail_bytes, int index_count, void** verts,
+                            uint16_t** indices);
 int ctr_gpu_mesh_end(int mesh, int ok);
 /* (AI-assisted, streaming) The same in memory the caller owns (linear memory: the level stream
  * arena, CtrStream.h): mem holds the vertices (vertex_count * 16 bytes) and then the indices at
@@ -559,6 +564,11 @@ int ctr_gpu_mesh_end(int mesh, int ok);
  * (render thread, or the thread of ctr_gpu_free_pending_now; with the linear lock held). */
 int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
                            uint16_t** indices);
+/* The same with tail_bytes of draw data (envmapped tie normals) at mem + tail_off (after the
+ * indices), written at *tail; a draw names it by tail_off from the vertices. */
+int ctr_gpu_mesh_begin_ext_tail(void* mem, int vertex_count, int index_count, unsigned int tail_off,
+                                unsigned int tail_bytes, void** verts, uint16_t** indices,
+                                void** tail);
 void ctr_gpu_set_ext_free(void (*fn)(void* mem));
 static inline unsigned int ctr_gpu_ext_index_offset(int vertex_count) {
   return ((unsigned int)vertex_count * 16u + 127u) & ~127u;

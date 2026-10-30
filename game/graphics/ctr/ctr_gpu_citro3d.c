@@ -276,6 +276,7 @@ typedef struct {
   /* (AI-assisted, streaming) ctr_gpu_mesh_begin_ext: verts is the caller's block (indices inside
    * it), given back to s_ext_free instead of freed */
   int ext;
+  u32 tail_off, tail_bytes; /* ctr_gpu_mesh_begin_tail / _ext_tail: at verts + tail_off */
 } MeshSlot;
 static void (*s_ext_free)(void* mem); /* (AI-assisted, streaming) ctr_gpu_set_ext_free */
 
@@ -6995,7 +6996,12 @@ int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int siz
 
 /* (AI-assisted) begin/end: the slot stays reserved (used = 3) while the loader fills it */
 int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices) {
-  if (!g.ready) {
+  return ctr_gpu_mesh_begin_tail(vertex_count, 0, index_count, verts, indices);
+}
+
+int ctr_gpu_mesh_begin_tail(int vertex_count, int tail_bytes, int index_count, void** verts,
+                            uint16_t** indices) {
+  if (!g.ready || tail_bytes < 0) {
     return -1;
   }
   const int slot = reserve_mesh_slot();
@@ -7005,7 +7011,7 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
   size_t vbytes = (size_t)vertex_count * 16;
   size_t ibytes = (size_t)index_count * 2;
   ctr_linear_lock();
-  void* v = linearAlloc(vbytes);
+  void* v = linearAlloc(vbytes + (size_t)tail_bytes);
   uint16_t* ix = (uint16_t*)linearAlloc(ibytes);
   if (!v || !ix) {
     if (v) {
@@ -7024,6 +7030,8 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
   g.meshes[slot].indices = ix;
   g.meshes[slot].fill_vbytes = (u32)vbytes;
   g.meshes[slot].fill_ibytes = (u32)ibytes;
+  g.meshes[slot].tail_off = (u32)vbytes;
+  g.meshes[slot].tail_bytes = (u32)tail_bytes;
   *verts = v;
   *indices = ix;
   return slot;
@@ -7062,6 +7070,12 @@ unsigned int ctr_gpu_linear_free(void) {
 
 int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
                            uint16_t** indices) {
+  return ctr_gpu_mesh_begin_ext_tail(mem, vertex_count, index_count, 0, 0, verts, indices, NULL);
+}
+
+int ctr_gpu_mesh_begin_ext_tail(void* mem, int vertex_count, int index_count, unsigned int tail_off,
+                                unsigned int tail_bytes, void** verts, uint16_t** indices,
+                                void** tail) {
   if (!g.ready || !mem) {
     return -1;
   }
@@ -7076,8 +7090,13 @@ int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** 
   g.meshes[slot].ext = 1;
   g.meshes[slot].fill_vbytes = (u32)vertex_count * 16u;
   g.meshes[slot].fill_ibytes = (u32)index_count * 2u;
+  g.meshes[slot].tail_off = tail_off;
+  g.meshes[slot].tail_bytes = tail_bytes;
   *verts = mem;
   *indices = g.meshes[slot].indices;
+  if (tail) {
+    *tail = (uint8_t*)mem + tail_off;
+  }
   return slot;
 }
 
@@ -7110,6 +7129,10 @@ int ctr_gpu_mesh_end(int mesh, int ok) {
   }
   cache_flush_now(g.meshes[mesh].verts, g.meshes[mesh].fill_vbytes);
   cache_flush_now(g.meshes[mesh].indices, g.meshes[mesh].fill_ibytes);
+  if (g.meshes[mesh].tail_bytes) {
+    cache_flush_now((uint8_t*)g.meshes[mesh].verts + g.meshes[mesh].tail_off,
+                    g.meshes[mesh].tail_bytes);
+  }
   g.meshes[mesh].verts_pa = osConvertVirtToPhys(g.meshes[mesh].verts);
   g.meshes[mesh].indices_pa = osConvertVirtToPhys(g.meshes[mesh].indices);
   g.meshes[mesh].used = 1;

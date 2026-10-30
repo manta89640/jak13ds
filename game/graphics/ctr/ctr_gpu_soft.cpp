@@ -49,6 +49,8 @@ struct SoftMesh {
   std::vector<uint8_t> verts;
   std::vector<uint16_t> indices;
   void* ext = nullptr;  // (AI-assisted, streaming) ctr_gpu_mesh_begin_ext's block (given back)
+  size_t tail = 0;      // ctr_gpu_mesh_begin_tail's bytes after the vertices
+  size_t vertex_bytes() const { return verts.size() - tail; }
 };
 
 struct SoftPool {
@@ -1471,7 +1473,7 @@ int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uin
   }
   const auto& m = g_soft.meshes[mesh];
   *verts = m.verts.data();
-  *vertex_count = (int)(m.verts.size() / 16);
+  *vertex_count = (int)(m.vertex_bytes() / 16);
   *indices = m.indices.data();
   *index_count = (int)m.indices.size();
   return 1;
@@ -1615,6 +1617,11 @@ void ctr_gpu_pool_delete(int pool) {
 void ctr_gpu_pool_set_priority(int, int) {}
 
 int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t** indices) {
+  return ctr_gpu_mesh_begin_tail(vertex_count, 0, index_count, verts, indices);
+}
+
+int ctr_gpu_mesh_begin_tail(int vertex_count, int tail_bytes, int index_count, void** verts,
+                            uint16_t** indices) {
   int slot = -1;
   for (size_t i = 0; i < g_soft.meshes.size(); i++) {
     if (!g_soft.meshes[i].used) {
@@ -1628,7 +1635,8 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
   }
   auto& m = g_soft.meshes[slot];
   m.used = true;  // (AI-assisted) reserved; drawn once filled (the loader runs between frames)
-  m.verts.resize((size_t)vertex_count * 16);
+  m.tail = (size_t)std::max(tail_bytes, 0);
+  m.verts.resize((size_t)vertex_count * 16 + m.tail);
   m.indices.resize(index_count);
   *verts = m.verts.data();
   *indices = m.indices.data();
@@ -1680,12 +1688,26 @@ static void soft_mesh_free(int mesh) {
 }
 int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
                            uint16_t** indices) {
+  return ctr_gpu_mesh_begin_ext_tail(mem, vertex_count, index_count, 0, 0, verts, indices,
+                                     nullptr);
+}
+
+// the tail in the host's copy at the same offset from the vertices (a draw names it so)
+int ctr_gpu_mesh_begin_ext_tail(void* mem, int vertex_count, int index_count, unsigned int tail_off,
+                                unsigned int tail_bytes, void** verts, uint16_t** indices,
+                                void** tail) {
   if (!mem) {
     return -1;
   }
-  const int slot = ctr_gpu_mesh_begin(vertex_count, index_count, verts, indices);
+  const int vbytes = vertex_count * 16;
+  const int extra = tail_bytes ? (int)(tail_off + tail_bytes) - vbytes : 0;
+  const int slot = ctr_gpu_mesh_begin_tail(vertex_count, std::max(extra, 0), index_count, verts,
+                                           indices);
   if (slot >= 0) {
     g_soft.meshes[slot].ext = mem;
+    if (tail) {
+      *tail = g_soft.meshes[slot].verts.data() + tail_off;
+    }
   }
   return slot;
 }
@@ -2149,7 +2171,7 @@ void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
       g_soft.meshes[mesh].stride != 16) {
     return nullptr;
   }
-  *vertex_count = (int)(g_soft.meshes[mesh].verts.size() / 16);
+  *vertex_count = (int)(g_soft.meshes[mesh].vertex_bytes() / 16);
   return g_soft.meshes[mesh].verts.data();
 }
 

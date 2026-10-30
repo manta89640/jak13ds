@@ -896,7 +896,8 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
     auto parts_left_bytes = [](const Job& j, const DetailChunk* c) {
       u64 b = 0;
       for (const DetailChunk* k = c; k != j.chunks.data() + j.chunks.size(); k++) {
-        b += CtrStreamArena::mesh_bytes(k->vertex_count, k->index_end - k->index_first);
+        b += CtrStreamArena::mesh_bytes(k->vertex_count, k->index_end - k->index_first) +
+             (k->normals_offset ? k->vertex_count * 4 : 0);
       }
       return b;
     };
@@ -908,9 +909,10 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       void* vdst;
       u16* idst;
       const u32 count = c.index_end - c.index_first;
-      int mesh = ctr_gpu_mesh_begin(c.vertex_count, count, &vdst, &idst);
+      const int tail = c.normals_offset ? (int)c.vertex_count * 4 : 0;
+      int mesh = ctr_gpu_mesh_begin_tail(c.vertex_count, tail, count, &vdst, &idst);
       while (mesh < 0 && make_room(job.name, "meshes", parts_left_bytes(job, &c))) {
-        mesh = ctr_gpu_mesh_begin(c.vertex_count, count, &vdst, &idst);
+        mesh = ctr_gpu_mesh_begin_tail(c.vertex_count, tail, count, &vdst, &idst);
       }
       if (mesh >= 0) {
         MeshBuild mb(mesh);  // (AI-assisted, streammem)
@@ -921,9 +923,12 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
         } else {
           memcpy(idst, indices.data() + (c.index_first - lo), count * sizeof(u16));
         }
-        mesh = mb.end(read_ok && f.read(job.vertex_data_offset +
-                                            c.first_vertex * (u32)sizeof(c3l::Vertex),
-                                        vdst, c.vertex_count * sizeof(c3l::Vertex)));
+        read_ok = read_ok && f.read(job.vertex_data_offset +
+                                        c.first_vertex * (u32)sizeof(c3l::Vertex),
+                                    vdst, c.vertex_count * sizeof(c3l::Vertex));
+        // its envmapped tie normals, freed and read back with it
+        mesh = mb.end(read_ok && (!tail || f.read(c.normals_offset,
+                                                  (u8*)vdst + c.vertex_count * 16, tail)));
       }
       ok = mesh >= 0;
       if (ok) {
@@ -1238,7 +1243,10 @@ void CtrLevels::dormant_update(u64 frame) {
       if (fl == CtrLevelData::kDormFreed) {
         if (!lev.dormant || d < kDormReadMeters * kM) {
           want.emplace_back(d, DetailChunk{(u32)ci, ch.first_vertex, ch.vertex_count,
-                                           lev.mesh_index_first[ci], lev.mesh_index_end[ci]});
+                                           lev.mesh_index_first[ci], lev.mesh_index_end[ci],
+                                           lev.normals_tail_bytes(ci)
+                                               ? lev.chunk_normals_file[ci]
+                                               : 0u});
         }
       } else if (d > kDormFreeMeters * kM && lev.meshes[ci] < 0) {
         // left out by an incomplete load (no memory): a freed one now, not one to repair
@@ -1440,7 +1448,8 @@ u64 CtrLevels::dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, f
     const auto& ch = lev.chunks[ci];
     if (lev.meshes[ci] >= 0) {
       bytes += CtrStreamArena::mesh_bytes(ch.vertex_count,
-                                          lev.mesh_index_end[ci] - lev.mesh_index_first[ci]);
+                                          lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
+               lev.normals_tail_bytes(ci);
       ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
       lev.meshes[ci] = -1;
       if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
@@ -1579,13 +1588,15 @@ void CtrLevels::dist_update(u64 frame, u32 free_now) {
     for (const auto& [d, ci] : near) {
       const auto& ch = lev.chunks[ci];
       const u32 b = CtrStreamArena::mesh_bytes(ch.vertex_count,
-                                               lev.mesh_index_end[ci] - lev.mesh_index_first[ci]);
+                                               lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
+                    lev.normals_tail_bytes(ci);
       if (!job.chunks.empty() && bytes + b > kDistJobBytes) {
         break;
       }
       bytes += b;
       job.chunks.push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
-                            lev.mesh_index_end[ci]});
+                            lev.mesh_index_end[ci],
+                            lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u});
       lev.chunk_dormant[ci] = CtrLevelData::kDistReading;
     }
     std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
@@ -1622,7 +1633,8 @@ void CtrLevels::collect_chunks(const CtrLevelData& lev,
         !(ci < lev.chunk_dormant.size() && lev.chunk_dormant[ci] >= CtrLevelData::kDistFreed) &&
         (!missing_only || ((lev.detail_loaded || far_chunk(lev, ch)) && !lev.dormant_freed(ci)))) {
       out->push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
-                      lev.mesh_index_end[ci]});
+                      lev.mesh_index_end[ci],
+                      lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u});
     }
   }
   std::sort(out->begin(), out->end(), [](const DetailChunk& a, const DetailChunk& b) {
@@ -3915,13 +3927,13 @@ void load_proto_vis(c3l::Reader& f,
            lev->protos.size(), found, bad ? fmt::format(" ({} bad runs)", bad) : "");
 }
 
-// (AI-assisted, j2water2) c3l v21 envmapped ties (c3l::ExtEnvTie): the listed base draws and the
-// normals of their chunks (all in one mesh's vertex memory, loaded with the level)
-void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
-  lev->env_draws.clear();
-  lev->draw_env.clear();
+// c3l v21 envmapped ties (c3l::ExtEnvTie): the table of the chunks with
+// normals, read before the chunks' meshes are made. Each chunk carries its normals in its own
+// mesh's tail (kNormalsInMesh: normals_offset_in_mesh), so they are freed and read back with it
+// (distance freeing, dormant levels, streamed near chunks).
+void load_env_tie_chunks(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   lev->chunk_normals.clear();
-  lev->normals_mesh = -1;
+  lev->chunk_normals_file.clear();
   if (hdr.version < c3l::kEnvTieVersion || !hdr.ext_offset || !ctr_gpu_etie_ready()) {
     return;
   }
@@ -3933,63 +3945,64 @@ void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   if (!f.read(hdr.ext_offset + c3l::kExtHeaderV20Size, &et, sizeof(et)) || !et.draw_count) {
     return;
   }
-  std::vector<c3l::EnvTieDraw> eds;
   std::vector<c3l::EnvTieChunk> ecs;
-  if (et.draw_count > 65535 || !f.read_array(et.draws_offset, et.draw_count, &eds) ||
-      !f.read_array(et.chunks_offset, et.chunk_count, &ecs)) {
+  if (et.draw_count > 65535 || !f.read_array(et.chunks_offset, et.chunk_count, &ecs)) {
     lg::warn("[ctr] {}: bad envmapped tie data, not used", lev->name);
     return;
   }
-  u32 total = 0;
   for (const auto& ec : ecs) {
-    if (ec.chunk >= lev->chunks.size()) {
+    if (ec.chunk >= lev->chunks.size() || !ec.normals_offset) {
       lg::warn("[ctr] {}: bad envmapped tie chunk, not used", lev->name);
       return;
     }
-    total += lev->chunks[ec.chunk].vertex_count * 4;
-  }
-  void* nv = nullptr;
-  uint16_t* ni = nullptr;
-  const int mesh = total ? ctr_gpu_mesh_begin((int)((total + 15) / 16), 2, &nv, &ni) : -1;
-  if (mesh < 0) {
-    lg::warn("[ctr] {}: no memory for the envmapped ties' normals ({} KB)", lev->name,
-             total / 1024);
-    return;
   }
   lev->chunk_normals.assign(lev->chunks.size(), -1);
-  u32 off = 0;
-  bool ok = true;
+  lev->chunk_normals_file.assign(lev->chunks.size(), 0);
   for (const auto& ec : ecs) {
-    const u32 n = lev->chunks[ec.chunk].vertex_count * 4;
-    ok = ok && f.read(ec.normals_offset, (u8*)nv + off, n);
-    lev->chunk_normals[ec.chunk] = (s32)off;
-    off += n;
+    lev->chunk_normals_file[ec.chunk] = ec.normals_offset;
+    lev->chunk_normals[ec.chunk] = CtrLevelData::kNormalsInMesh;
   }
-  ni[0] = ni[1] = 0;
-  if (!ok || ctr_gpu_mesh_end(mesh, 1) < 0) {
-    if (ok) {
-      lg::warn("[ctr] {}: envmapped tie normals not made", lev->name);
-    } else {
-      ctr_gpu_mesh_end(mesh, 0);
-      lg::warn("[ctr] {}: bad envmapped tie normals, not used", lev->name);
-    }
+}
+
+// the listed base draws (after the chunks, textures and draw order)
+void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->env_draws.clear();
+  lev->draw_env.clear();
+  lev->normals_mesh = -1;
+  if (lev->chunk_normals.size() != lev->chunks.size()) {
     lev->chunk_normals.clear();
     return;
   }
-  lev->normals_mesh = mesh;
+  c3l::ExtEnvTie et{};
+  std::vector<c3l::EnvTieDraw> eds;
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderV20Size, &et, sizeof(et)) ||
+      !f.read_array(et.draws_offset, et.draw_count, &eds)) {
+    lg::warn("[ctr] {}: bad envmapped tie data, not used", lev->name);
+    lev->chunk_normals.clear();
+    return;
+  }
+  u32 chunks = 0, bytes = 0;
+  for (size_t ci = 0; ci < lev->chunks.size(); ci++) {
+    if (lev->chunk_normals[ci] == CtrLevelData::kNormalsInMesh) {
+      chunks++;
+      bytes += lev->chunks[ci].vertex_count * 4;
+    }
+  }
   lev->draw_env.assign(lev->draws.size(), -1);
   u32 used = 0;
   for (size_t i = 0; i < eds.size(); i++) {
     const auto& e = eds[i];
+    const size_t ci = lev->draw_chunk.size() > e.draw ? lev->draw_chunk[e.draw] : 0;
     if (e.draw < lev->draws.size() && e.texture < lev->textures.size() &&
-        lev->chunk_normals[lev->draw_chunk.size() > e.draw ? lev->draw_chunk[e.draw] : 0] >= 0) {
+        lev->chunk_normals[ci] == CtrLevelData::kNormalsInMesh) {
       lev->draw_env[e.draw] = (s16)i;
       used++;
     }
   }
   lev->env_draws = std::move(eds);
-  lg::info("[ctr] {}: envmapped ties: {} of {} draws with their shine, {} chunks' normals ({} KB)",
-           lev->name, used, lev->env_draws.size(), ecs.size(), total / 1024);
+  lg::info("[ctr] {}: envmapped ties: {} of {} draws with their shine, {} chunks' normals ({} KB, "
+           "in the chunks' meshes)",
+           lev->name, used, lev->env_draws.size(), chunks, bytes / 1024);
 }
 
 // shrub fade bands (c3l::ExtShrubFade): per file run; a shrub chunk with bands reaches its largest
@@ -5020,6 +5033,7 @@ bool CtrLevels::load_file(const fs::path& path,
   // (AI-assisted, j2strip) Jak II: meshes that don't fit the free linear memory (with
   // kDistLoadMargin, the merc models' too): the chunks far beyond their draw distance are left for
   // later, read back by distance ("Distance freeing")
+  load_env_tie_chunks(f, hdr, out);  // before the meshes: their tails
   std::vector<u8> dist_skip;
   if (g_game_version == GameVersion::Jak2) {
     auto chunk_range = [&](const c3l::Chunk& ch, u32* first, u32* end) {
@@ -5035,7 +5049,8 @@ bool CtrLevels::load_file(const fs::path& path,
     for (size_t ci = 0; ci < out->chunks.size(); ci++) {
       u32 first, end;
       if (chunk_range(out->chunks[ci], &first, &end) && !(out->is_unit(ci) && out->streaming)) {
-        need += CtrStreamArena::mesh_bytes(out->chunks[ci].vertex_count, end - first);
+        need += CtrStreamArena::mesh_bytes(out->chunks[ci].vertex_count, end - first) +
+                out->normals_tail_bytes(ci);
       }
     }
     const u64 free_now = ctr_gpu_linear_free();
@@ -5112,7 +5127,8 @@ bool CtrLevels::load_file(const fs::path& path,
     bool skip = false;
     if (out->is_unit(ci)) {
       auto& su = out->stream_units[out->chunk_unit[ci]];
-      su.bytes = CtrStreamArena::mesh_bytes(ch.vertex_count, end - first);
+      su.bytes = CtrStreamArena::mesh_bytes(ch.vertex_count, end - first) +
+                 out->normals_tail_bytes(ci);
       su.packed = packed_of(hdr.vertex_data_offset + ch.first_vertex * (u32)sizeof(c3l::Vertex),
                             ch.vertex_count * (u32)sizeof(c3l::Vertex)) +
                   packed_of(hdr.index_data_offset + first * (u32)sizeof(u16),
@@ -5140,10 +5156,11 @@ bool CtrLevels::load_file(const fs::path& path,
     if (dskip) {
       out->chunk_dormant[ci] = CtrLevelData::kDistFreed;
     }
+    const int ntail = (int)out->normals_tail_bytes(ci);
     if (end <= index_total && !skip && !dskip) {
-      mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
+      mesh = ctr_gpu_mesh_begin_tail(ch.vertex_count, ntail, end - first, &vdst, &idst);
       while (mesh < 0 && make_room(name, "meshes", load_left_bytes(ci))) {
-        mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
+        mesh = ctr_gpu_mesh_begin_tail(ch.vertex_count, ntail, end - first, &vdst, &idst);
       }
     }
     if (mesh >= 0) {
@@ -5157,6 +5174,8 @@ bool CtrLevels::load_file(const fs::path& path,
       }
       read_ok = read_ok && f.read(hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
                                   vdst, ch.vertex_count * sizeof(c3l::Vertex));
+      read_ok = read_ok && (!ntail || f.read(out->chunk_normals_file[ci],
+                                             (u8*)vdst + ch.vertex_count * 16, ntail));
       if (read_ok && !out->run_spheres.empty()) {
         // (AI-assisted, streaming) host check: the v19 file's spheres are these
         std::vector<CtrLevelData::RunSphere> file_sp;
@@ -6443,6 +6462,7 @@ void CtrLevels::stream_idle_fill(u64 frame) {
     part.vertex_count = ch.vertex_count;
     part.index_first = lev.mesh_index_first[ci];
     part.index_end = lev.mesh_index_end[ci];
+    part.normals_offset = lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u;
     part.mem = mem;
     part.layout = lev.tod && !su.tod_layout;
     if (part.layout) {
@@ -6984,6 +7004,7 @@ void CtrLevels::stream_update(u64 frame) {
     part.vertex_count = ch.vertex_count;
     part.index_first = lev.mesh_index_first[ci];
     part.index_end = lev.mesh_index_end[ci];
+    part.normals_offset = lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u;
     part.mem = mem;
     part.layout = lev.tod && !su.tod_layout;
     if (part.layout) {
@@ -7063,6 +7084,7 @@ void CtrLevels::stream_update(u64 frame) {
       part.vertex_count = ch.vertex_count;
       part.index_first = lev.mesh_index_first[ci];
       part.index_end = lev.mesh_index_end[ci];
+      part.normals_offset = lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u;
       part.mem = mem;
       part.layout = lev.tod && !su.tod_layout;
       if (part.layout) {
@@ -7142,7 +7164,12 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
       void* vdst;
       u16* idst;
       const u32 icount = p.index_end - p.index_first;
-      int mesh = ctr_gpu_mesh_begin_ext(p.mem, (int)p.vertex_count, (int)icount, &vdst, &idst);
+      // its envmapped tie normals after the indices (CtrLevelData::normals_offset_in_mesh)
+      const u32 ntail = p.normals_offset ? p.vertex_count * 4 : 0;
+      void* ndst = nullptr;
+      int mesh = ctr_gpu_mesh_begin_ext_tail(p.mem, (int)p.vertex_count, (int)icount,
+                                             CtrStreamArena::mesh_bytes(p.vertex_count, icount),
+                                             ntail, &vdst, &idst, &ndst);
       if (mesh < 0) {
         break;  // (its piece back below)
       }
@@ -7151,7 +7178,8 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
           f.read(job.index_data_offset + p.index_first * (u32)sizeof(u16), idst,
                  icount * sizeof(u16)) &&
           f.read(job.vertex_data_offset + p.first_vertex * (u32)sizeof(c3l::Vertex), vdst,
-                 p.vertex_count * sizeof(c3l::Vertex));
+                 p.vertex_count * sizeof(c3l::Vertex)) &&
+          (!ntail || f.read(p.normals_offset, ndst, ntail));
       Done::StreamOut o;
       o.unit = p.unit;
       if (ok && p.layout) {
@@ -9805,8 +9833,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     c.state = &lev.draw_states[di];
     c.env_tex = e.texture < lev.textures.size() ? lev.textures[e.texture] : -1;
     c.mesh = lev.meshes[vc.chunk];
-    c.normals_mesh = lev.normals_mesh;
-    c.normals_offset = lev.chunk_normals[vc.chunk];
+    c.normals_mesh = c.mesh;
+    c.normals_offset = (int)lev.normals_offset_in_mesh(vc.chunk);
     c.first = (int)first;
     c.count = (int)count;
     c.d.clip = vc.gpu;
@@ -10209,4 +10237,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     g_pop.taken = 0;
   }
   phase(kPhSetup);
+}
+
+u32 CtrLevelData::normals_offset_in_mesh(size_t ci) const {
+  const auto& ch = chunks[ci];
+  return is_unit(ci) && streaming
+             ? CtrStreamArena::mesh_bytes(ch.vertex_count, mesh_index_end[ci] - mesh_index_first[ci])
+             : ch.vertex_count * 16;
 }
