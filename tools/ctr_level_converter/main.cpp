@@ -30,6 +30,7 @@
 #include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "keira_model.h"
+#include "texshare.h"
 #include "tie_lod.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -2986,6 +2987,76 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
   return out;
 }
 
+/*!
+ * c3l v23: an RGBA8 texture (every level, as convert_texture wrote it) as its color
+ * and its alpha. The color is ETC1 when it passes convert_texture's quality test against RGB565
+ * (allow_etc1), else RGB565; the alpha is a mask texture with the same texels: A4 when every
+ * alpha is one 4 bits hold exactly (n * 17), else A8.
+ */
+struct MaskSplit {
+  c3l::Texture color_desc{}, mask_desc{};
+  std::vector<u8> color, mask;
+  MercGate gate;
+  int alpha_values = 0;  // distinct alphas (all levels)
+};
+void split_mask_texture(const c3l::Texture& d,
+                        const std::vector<u8>& data,
+                        const Options& opt,
+                        bool allow_etc1,
+                        bool opacity,
+                        MaskSplit* out) {
+  const int levels = std::max<int>(1, d.levels);
+  std::vector<ctr_tex::Image> imgs;
+  bool a4 = true;
+  u32 off = 0;
+  for (int l = 0; l < levels; l++) {
+    const int w = d.w >> l, h = d.h >> l;
+    imgs.push_back(ctr_tex::decode_level(data.data() + off, w, h, ctr_tex::Format::RGBA8));
+    off += c3l::texture_level_bytes(w, h, c3l::TEX_RGBA8);
+    a4 = a4 && alpha_fits_4bit(imgs.back());
+  }
+  std::array<u8, 256> seen{};
+  for (const auto& m : imgs) {
+    for (size_t i = 3; i < m.rgba.size(); i += 4) {
+      seen[m.rgba[i]] = 1;
+    }
+  }
+  for (u8 v : seen) {
+    out->alpha_values += v;
+  }
+  const auto fa = a4 ? ctr_tex::Format::A4 : ctr_tex::Format::A8;
+  for (const auto& m : imgs) {
+    ctr_tex::encode_level(m, fa, opt.etc1_quality, &out->mask);
+  }
+  auto& g = out->gate;
+  bool etc1 = false;
+  std::vector<u8> e, f;
+  ctr_tex::encode_level(imgs[0], ctr_tex::Format::RGB565, opt.etc1_quality, &f);
+  for (const auto& m : imgs) {
+    g.bytes_16 += ctr_tex::level_bytes(m.w, m.h, ctr_tex::Format::RGB565);
+  }
+  if (allow_etc1 && opt.etc1 && opt.etc1_psnr > 0) {
+    ctr_tex::encode_level(imgs[0], ctr_tex::Format::ETC1, opt.etc1_quality, &e, 0, opt.etc1_rdo,
+                          opacity);
+    compare_level(imgs[0], ctr_tex::decode_level(e.data(), d.w, d.h, ctr_tex::Format::ETC1),
+                  &g.psnr, &g.worst_block, opacity);
+    compare_level(imgs[0], ctr_tex::decode_level(f.data(), d.w, d.h, ctr_tex::Format::RGB565),
+                  &g.psnr_16, &g.worst_block_16, opacity);
+    g.tested = true;
+    g.etc1 = etc1 = (g.psnr >= opt.etc1_psnr || g.psnr >= g.psnr_16) &&
+                    g.worst_block <= std::max<double>(opt.etc1_block, g.worst_block_16);
+  }
+  const auto fc = etc1 ? ctr_tex::Format::ETC1 : ctr_tex::Format::RGB565;
+  out->color = etc1 ? std::move(e) : std::move(f);
+  for (int l = 1; l < levels; l++) {
+    ctr_tex::encode_level(imgs[l], fc, opt.etc1_quality, &out->color, 0, opt.etc1_rdo, opacity);
+  }
+  out->color_desc = d;
+  out->color_desc.format = (u8)fc;
+  out->mask_desc = d;
+  out->mask_desc.format = a4 ? c3l::TEX_A4 : c3l::TEX_A8;
+}
+
 // ---------------- output ----------------
 
 void align16(std::vector<u8>& buf) {
@@ -5327,6 +5398,119 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
     }
   }
+  // c3l v23 mask textures: an RGBA8 texture whose every draw can sample its alpha
+  // from a texture of its own (the runtime binds the mask: the fog_alpha level programs on unit 1,
+  // their envmapped tie program, the merc mask program on unit 2) becomes its color and its alpha
+  // (split_mask_texture). Not the draws that can't: level draws whose vertex alpha isn't 0x80
+  // everywhere (the fog_alpha programs have the fog in its place), wind ties, the merc envmap
+  // passes' textures (their alpha is written as the destination alpha), eye placeholders and
+  // animated slots.
+  size_t mask_count = 0, mask_etc1 = 0, mask_a4 = 0;
+  u64 mask_before = 0, mask_after = 0;
+  if (opt.stream && opt.shrub_ps2_dist && !opt.full_color) {
+    const size_t n = tex_descs.size();
+    std::vector<u8> ok(n, 0);
+    for (size_t i = 0; i < n; i++) {
+      const bool ext = i < cv.tex_use.size();
+      ok[i] = tex_descs[i].format == c3l::TEX_RGBA8 && !tex_datas[i].empty() &&
+              (!ext || (!cv.tex_use[i].anim_slot && !cv.tex_use[i].envmap && !cv.tex_use[i].eye));
+    }
+    std::vector<u8> wind_chunk(chunks.size(), 0);
+    for (const auto& [ci, wm] : wind_chunk_verts) {
+      if (ci < wind_chunk.size()) {
+        wind_chunk[ci] = 1;
+      }
+    }
+    for (size_t ci = 0; ci < chunks.size(); ci++) {
+      for (u32 di = chunks[ci].first_draw; di < chunks[ci].first_draw + chunks[ci].draw_count;
+           di++) {
+        const auto& d = out_draws[di];
+        if (d.texture < n && (wind_chunk[ci] || !(d.kind & c3l::kDrawAlpha80))) {
+          ok[d.texture] = 0;
+        }
+      }
+    }
+    for (const auto& d : merc.draws) {
+      if (d.eye_id == c3l::kMercEnvmapDraw && d.texture < n) {
+        ok[d.texture] = 0;
+      }
+    }
+    std::vector<u16> todo;
+    for (size_t i = 0; i < n; i++) {
+      if (ok[i]) {
+        todo.push_back((u16)i);
+      }
+    }
+    std::vector<MaskSplit> splits(todo.size());
+    {
+      BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
+      pool.push_loop(todo.size(), [&](size_t a, size_t b) {
+        for (size_t k = a; k < b; k++) {
+          const u16 t = todo[k];
+          const auto& d = tex_descs[t];
+          const TexUse use = t < cv.tex_use.size() ? cv.tex_use[t] : TexUse{};
+          const bool kept = use.merc && (use.face || use.eye || d.w < opt.etc1_merc_min ||
+                                         d.h < opt.etc1_merc_min);
+          split_mask_texture(d, tex_datas[t], opt, !kept, use.alpha_is_opacity(), &splits[k]);
+        }
+      });
+      pool.wait_for_tasks();
+    }
+    for (size_t k = 0; k < todo.size(); k++) {
+      const u16 t = todo[k];
+      auto& s = splits[k];
+      mask_before += tex_datas[t].size();
+      mask_after += s.color.size() + s.mask.size();
+      mask_count++;
+      mask_etc1 += s.color_desc.format == c3l::TEX_ETC1;
+      mask_a4 += s.mask_desc.format == c3l::TEX_A4;
+      if (t < cv.tex_order.size()) {
+        const auto& lt = level.textures.at(cv.tex_order[t]);
+        lg::debug("{}: texture {} ({}) {}x{}: color {}{}, alpha {} ({} values)", in.stem().string(),
+                  lt.debug_name, lt.debug_tpage_name, s.color_desc.w, s.color_desc.h,
+                  s.color_desc.format == c3l::TEX_ETC1 ? "ETC1" : "RGB565",
+                  s.gate.tested ? fmt::format(" ({:.1f} dB, worst block {:.1f}; RGB565 {:.1f} dB)",
+                                              s.gate.psnr, s.gate.worst_block, s.gate.psnr_16)
+                                : std::string(),
+                  s.mask_desc.format == c3l::TEX_A4 ? "A4" : "A8", s.alpha_values);
+      }
+      tex_descs[t] = s.color_desc;
+      tex_datas[t] = std::move(s.color);
+      c3l::Texture md = s.mask_desc;
+      md.pad[0] = (u8)(t & 0xff);
+      md.pad[1] = (u8)(t >> 8);
+      tex_descs.push_back(md);
+      tex_datas.push_back(std::move(s.mask));
+    }
+    if (mask_count) {
+      lg::info("{}: alpha masks: {} RGBA8 textures as their color ({} ETC1, {} RGB565) and alpha "
+               "({} A4, {} A8): {} KB -> {} KB",
+               level.level_name, mask_count, mask_etc1, mask_count - mask_etc1, mask_a4,
+               mask_count - mask_a4, mask_before / 1024, mask_after / 1024);
+    }
+  }
+  // each texture's content key (c3l::ExtTexKey): the levels sharing it find it by that
+  std::vector<u64> tex_keys(tex_descs.size(), 0);
+  {
+    std::vector<int> mask_of(tex_descs.size(), -1);
+    for (size_t i = 0; i < tex_descs.size(); i++) {
+      if (c3l::texture_is_mask(tex_descs[i]) && c3l::texture_mask_of(tex_descs[i]) < mask_of.size()) {
+        mask_of[c3l::texture_mask_of(tex_descs[i])] = (int)i;
+      }
+    }
+    for (size_t i = 0; i < tex_descs.size(); i++) {
+      auto d = tex_descs[i];
+      if (tex_datas[i].empty() || c3l::texture_is_mask(d) || c3l::texture_anim_slot(d) ||
+          (i < cv.tex_use.size() && cv.tex_use[i].anim_slot)) {
+        continue;
+      }
+      d.data_size = (u32)tex_datas[i].size();
+      const int m = mask_of[i];
+      tex_keys[i] = c3l::texture_content_key(d, tex_datas[i].data(),
+                                             m >= 0 ? tex_datas[m].data() : nullptr,
+                                             m >= 0 ? tex_datas[m].size() : 0);
+    }
+  }
   // ---- write ----
   std::vector<u8> buf(sizeof(c3l::Header));
   c3l::Header hdr{};
@@ -5370,7 +5554,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   // (AI-assisted) v17: tie levels of detail (c3l::ExtHeader)
   // (AI-assisted, streaming) v19: always with runs (the run spheres), 48 bytes; v18: 32
-  if ((!cv.lod_groups.empty() || opt.stream) && !out_runs.empty() &&
+  // (v23: also without runs, for the texture keys)
+  if ((!cv.lod_groups.empty() || opt.stream) && (!out_runs.empty() || opt.stream) &&
       out_run_lods.size() == out_runs.size()) {
     c3l::ExtHeader eh{};
     memcpy(eh.magic, c3l::kExtMagic, 4);
@@ -5419,8 +5604,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     for (const u32 b : out_run_bands) {
       any_band |= b != 0;
     }
-    const u32 eh_size = any_band && out_run_bands.size() == out_runs.size()
-                            ? c3l::kExtHeaderV23Size
+    const bool bands = any_band && out_run_bands.size() == out_runs.size();
+    const u32 eh_size = opt.stream && !tex_descs.empty() ? c3l::kExtHeaderTexKeySize
+                        : bands                          ? c3l::kExtHeaderV23Size
                         : !wind_chunk_verts.empty() ? c3l::kExtHeaderV22Size
                         : !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
                         : !pv_protos.empty()    ? c3l::kExtHeaderV20Size
@@ -5489,7 +5675,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
                cv.env_tie_groups_missing, env_st_moved, missing);
     }
-    if (eh_size >= c3l::kExtHeaderV23Size) {
+    if (eh_size >= c3l::kExtHeaderTexKeySize) {
+      c3l::ExtTexKey tk{};
+      tk.count = (u32)tex_keys.size();
+      tk.offset = append(buf, tex_keys.data(), tex_keys.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV23Size, &tk, sizeof(tk));
+    }
+    if (bands) {
       // the shrub runs' PS2 fade bands (c3l::ExtShrubFade)
       c3l::ExtShrubFade ef{};
       ef.band_count = (u32)out_run_bands.size();
@@ -6151,6 +6343,10 @@ int main(int argc, char** argv) {
   app.add_option("input", in, "input .fr3 (or folder with --all)")->required();
   app.add_option("output", out, "output .c3l (or folder with --all)")->required();
   app.add_flag("--all", all, "convert every .fr3 in the input folder");
+  bool texshare_only = false;
+  app.add_flag("--texshare", texshare_only,
+               "write input/texshare.c3t (the textures several levels share) from the .c3l files "
+               "in the folder input (output: the same folder); --all writes it too");
   bool texanim = false;
   app.add_flag("--texanim", texanim,
                "(AI-assisted, Jak II) write the texture animations' textures from GAME.fr3 "
@@ -6326,6 +6522,9 @@ int main(int argc, char** argv) {
   if (texanim) {
     return write_texanim(in, out) ? 0 : 1;
   }
+  if (texshare_only) {
+    return texshare::write_table(in) ? 0 : 1;
+  }
   if (all) {
     file_util::create_dir_if_needed(out);
     // (AI-assisted) Jak II: the texture animations' textures (CtrTexAnimJak2)
@@ -6343,6 +6542,9 @@ int main(int argc, char** argv) {
           return 1;
         }
       }
+    }
+    if (!texshare::write_table(out)) {
+      return 1;
     }
     // (AI-assisted) the "play as Keira" easter egg's KEIRA.c3l (from GAME.fr3 and village1.fr3)
     const fs::path game_fr3 = fs::path(in) / "GAME.fr3", village1_fr3 = fs::path(in) / "village1.fr3";

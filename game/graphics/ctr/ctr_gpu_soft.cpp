@@ -238,6 +238,13 @@ std::vector<uint8_t> untile(const uint8_t* data, int w, int h, int format) {
         continue;
       }
       const uint32_t idx = ((ty / 8) * (w / 8) + (x / 8)) * 64 + morton8(x & 7, ty & 7);
+      if (format == CTR_TEX_A8 || format == CTR_TEX_A4) {
+        p[0] = p[1] = p[2] = 0;
+        p[3] = format == CTR_TEX_A8
+                   ? data[idx]
+                   : (uint8_t)(((data[idx / 2] >> (4 * (idx & 1))) & 0xf) * 17);
+        continue;
+      }
       if (format == CTR_TEX_RGBA8) {
         const uint8_t* t = data + 4 * idx;  // A, B, G, R
         p[0] = t[3];
@@ -1294,10 +1301,42 @@ int ctr_gpu_tex_create(int w, int h, const uint8_t* rgba) {
   return slot;
 }
 
+// c3l v23 alpha masks: (texture, mask) pairs; the mask's alpha goes into the
+// texture's decoded texels (the RGBA8 texture's own)
+static std::vector<std::pair<int, int>> s_tex_masks;
+static void apply_mask(const std::pair<int, int>& m) {
+  const int n = (int)g_soft.textures.size();
+  if (m.first < 0 || m.second < 0 || m.first >= n || m.second >= n) {
+    return;
+  }
+  auto& t = g_soft.textures[m.first];
+  const auto& a = g_soft.textures[m.second];
+  if (t.used && a.used && t.rgba.size() == a.rgba.size()) {
+    for (size_t i = 3; i < t.rgba.size(); i += 4) {
+      t.rgba[i] = a.rgba[i];
+    }
+  }
+}
+
+void ctr_gpu_tex_set_mask(int handle, int mask) {
+  s_tex_masks.erase(std::remove_if(s_tex_masks.begin(), s_tex_masks.end(),
+                                   [&](const auto& m) { return m.first == handle; }),
+                    s_tex_masks.end());
+  if (handle >= 0 && mask >= 0 && handle != mask) {
+    s_tex_masks.emplace_back(handle, mask);
+    apply_mask(s_tex_masks.back());
+  }
+}
+
 void ctr_gpu_tex_delete(int handle) {
   if (handle >= 0 && handle < (int)g_soft.textures.size()) {
     g_soft.textures[handle] = SoftTex();
   }
+  s_tex_masks.erase(std::remove_if(s_tex_masks.begin(), s_tex_masks.end(),
+                                   [&](const auto& m) {
+                                     return m.first == handle || m.second == handle;
+                                   }),
+                    s_tex_masks.end());
   if (handle >= 0 && handle < (int)s_tex_anim_slot.size()) {
     s_tex_anim_slot[handle] = 0;  // (AI-assisted)
   }
@@ -1549,10 +1588,10 @@ void ctr_gpu_tex_update(int handle, const uint8_t* rgba) {
 
 
 unsigned int ctr_gpu_tex_bytes(int w, int h, int format, int levels) {
-  const unsigned bits = format == CTR_TEX_ETC1     ? 4
-                        : format == CTR_TEX_ETC1A4 ? 8
-                        : format == CTR_TEX_RGBA8  ? 32
-                                                   : 16;
+  const unsigned bits = format == CTR_TEX_ETC1 || format == CTR_TEX_A4     ? 4
+                        : format == CTR_TEX_ETC1A4 || format == CTR_TEX_A8 ? 8
+                        : format == CTR_TEX_RGBA8                          ? 32
+                                                                           : 16;
   unsigned total = 0;
   for (int l = 0; l < levels; l++) {
     total += (unsigned)((w >> l) * (h >> l)) * bits / 8;
@@ -1602,6 +1641,14 @@ void ctr_gpu_pool_ready(int pool) {
   for (const auto& t : p.pending) {
     auto rgba = untile(p.data.data() + t.offset, t.w, t.h, t.format);
     ctr_gpu_tex_update(t.handle, rgba.data());
+  }
+  for (const auto& m : s_tex_masks) {
+    for (const auto& t : p.pending) {
+      if (t.handle == m.first || t.handle == m.second) {
+        apply_mask(m);
+        break;
+      }
+    }
   }
   p.pending.clear();
 }

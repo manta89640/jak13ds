@@ -12,7 +12,8 @@
 .fvec fog1          ; x: -(the game fog's upper clamp), y: the game fog's lower clamp
 
 .out outpos position
-.out outtc0 texcoord0
+.out outtc0 texcoord0.xy
+.out - texcoord1 outtc0.zw   ; the same coordinates, for the alpha mask textures (c3l v23) on unit 1
 .out outclr color
 
 .alias inpos v0
@@ -30,6 +31,6 @@
   mul outclr.xyz, scales.yyyy, inclr
   max outclr.w, -r0.xxxx, r0.yyyy
   dph outpos.w, inpos, clip[3]
-  mul outtc0, scales.xxxx, intex
+  mul outtc0, scales.xxxx, intex.xyxy
   end
 .end

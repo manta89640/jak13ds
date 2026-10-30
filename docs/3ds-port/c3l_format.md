@@ -292,7 +292,7 @@ Draw (16 bytes)
 Texture (16 bytes)
   u16 w, h                powers of two, 8..max-tex
   u8  format              0 = RGB565, 1 = RGBA4444 (before v22), 2 = ETC1, 3 = ETC1A4 (with alpha),
-                          4 = RGBA8
+                          4 = RGBA8, 5 = A8, 6 = A4 (v23: alpha masks)
   u8  levels              mip levels in the data (v7: 0, one level)
   u8  pad[2]
   u32 data_offset, data_size
@@ -338,10 +338,42 @@ Texture (16 bytes)
   were RGBA4 (4-bit colors), and textures were cut to 128 texels a side. The log lists every
   texture with its numbers (`texture NAME (TPAGE) WxH ...: ETC1 X dB, worst block Y; RGB565 / RGBA8
   ...`) and a line per level (`ETC1 quality test ...`).
-- **Pools:** the runtime reads a level's textures into texture pools of at most 1 MB
+- **Alpha masks:** (v23) an RGBA8 texture whose every draw can sample its alpha from a texture of
+  its own is stored as its color and its alpha. The color is ETC1 when it passes the quality test
+  above against RGB565 (RGB565 for the merc textures that are never ETC1), else RGB565; the alpha is
+  a mask texture after all the others, `A4` when every alpha is one 4 bits hold exactly (n x 17),
+  else `A8`, with the same texels in every level as the RGBA8 texture had (`Texture::pad`: the index
+  of its color texture, `c3l::texture_mask_of`). Draws name the color texture; the runtime binds
+  the mask with the color's sampling settings and takes the alpha from it: the fog_alpha level
+  programs (`ctr_mesh_*_fa`, texcoord1 = texcoord0 in the same output register) on texture unit 1,
+  the envmapped ties' `ctr_etie_fa` on unit 1 (the fog in the vertex color's alpha), merc's
+  `ctr_skin_*_mask` on unit 2 (texcoord2). The same alpha reaches the alpha test, the blending and
+  the destination alpha the merc envmap pass reads. Not split: textures of level draws whose vertex
+  alpha isn't 0x80 everywhere (`kDrawAlpha80`: the fog_alpha programs carry the fog there), of wind
+  ties, the merc envmap passes' own textures (their alpha goes to the destination alpha), eye
+  placeholders and animated slots. Rolling 2.7 MB of RGBA8 -> 1.2 MB, village2 2.4 -> 1.15 MB,
+  Jak II village1 2.8 -> 1.8 MB. The log: `alpha masks: N RGBA8 textures as their color (...) and
+  alpha (...): X KB -> Y KB`, and per texture `color ETC1 / RGB565 (dB ...), alpha A8 / A4 (N
+  values)`. `c3l_mem` (tools/ctr_level_converter/c3l_mem.cpp) prints each level's linear memory and
+  that of level sets, and `c3l_mem --compare-alpha OLD NEW` checks every mask against the RGBA8
+  texture it replaces.
+- **Pools:** the runtime reads a level's textures into texture pools of at most 256 KB
   (`kTexPoolPiece`; a larger texture gets one of its own), the background's textures first. Each
-  pool moves to VRAM while there is room (the earlier pieces first), the rest stays in linear
-  memory; small pools need no large linear block at load and fill VRAM's two banks closely.
+  pool moves to VRAM while there is room (the earlier pieces first; a pool that doesn't fit whole
+  puts at least 64 KB of its start there), the rest stays in linear memory. With 1 MB pieces
+  rolling+village2 left 843 KB of VRAM free in pieces too small for them and 516 KB of its
+  textures in linear memory.
+- **Sharing between levels:** (v23) `ExtTexKey` (ExtHeader::size >= 112, at ext_offset + 104;
+  every file in stream mode has an extension header now, the merc-only ones too) holds each
+  texture's content key (`c3l::texture_content_key`: size, format, levels, texels, and a color
+  texture's mask texels; 0 for masks and animated slots). `ctr_level_converter --all` writes
+  `texshare.c3t` (`c3l::TexShareHeader`) next to the files: the keys that more than one level has,
+  each with its group, the textures exactly the same levels have (`--texshare DIR DIR` writes it
+  again for a folder). The runtime loads a group once, into a pool of its own, for the first loaded
+  level that has it, and the other loaded levels use those textures; the group goes with the last
+  of them. Every texture of a group is in every level that has the group, so none of it is unused
+  while it is loaded. Jak 1: 511 textures in 123 groups. Log: `[ctr] LEVEL: shared textures: X KB
+  loaded for the levels that also have them, Y KB from the loaded ones`.
 - **Shared textures:** (AI-assisted) the fr3 has a copy of a texture for each merc model that
   uses it (citadel: 1017 textures, 776 of them copies; pal-environment-front 90 times). Identical
   textures (size and texels) are written once and the draws share it: citadel's textures 17.6 MB

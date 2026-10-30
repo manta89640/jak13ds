@@ -42,6 +42,14 @@ extern const size_t ctr_ocean_env_shbin_size;
 /* (AI-assisted) Envmapped ties in both games. */
 extern const uint8_t ctr_etie_shbin[];
 extern const size_t ctr_etie_shbin_size;
+/* the draws whose texture has an alpha mask (c3l v23): ctr_skin_old / _opt and
+ * ctr_etie with the mask's texture coordinates */
+extern const uint8_t ctr_skin_old_mask_shbin[];
+extern const size_t ctr_skin_old_mask_shbin_size;
+extern const uint8_t ctr_skin_opt_mask_shbin[];
+extern const size_t ctr_skin_opt_mask_shbin_size;
+extern const uint8_t ctr_etie_fa_shbin[];
+extern const size_t ctr_etie_fa_shbin_size;
 /* Jak 1's wind ties (ctr_gpu_draw_mesh_wind), with shader_opt's set */
 extern const uint8_t ctr_mesh_wind_shbin[];
 extern const size_t ctr_mesh_wind_shbin_size;
@@ -203,7 +211,7 @@ static inline int words_equal(const void* a, const void* b, unsigned n) {
 #define VBUF_BYTES (512 * 1024)
 #define MAX_STAGING 1024
 #define MAX_TEXTURES 2048
-#define MAX_POOLS 64
+#define MAX_POOLS 256
 /* GPU command buffer: a frame's commands must all fit (splitting it doesn't make room). 2 MB of
  * linear memory; a busy frame (3000 level draws) takes ~1 MB. */
 #if defined(OG3DS_GAME_JAK2) && OG3DS_GAME_JAK2
@@ -298,6 +306,8 @@ enum {
   PROG_OCEAN_ENV, /* (AI-assisted, j2water) ctr_gpu_ocean_env_draw (ctr_ocean_env.v.pica) */
   PROG_ETIE,      /* (AI-assisted, j2water2) ctr_gpu_etie_draw (ctr_etie.v.pica) */
   PROG_MESH_WIND, /* ctr_gpu_draw_mesh_wind (ctr_mesh_wind.v.pica, set 1 only) */
+  PROG_SKIN_MASK, /* PROG_SKIN for textures with an alpha mask (on unit 2) */
+  PROG_ETIE_FA,   /* PROG_ETIE for textures with an alpha mask (on unit 1) */
 };
 /* (AI-assisted) the level mesh programs (one vertex layout, the same uniforms) */
 static inline int is_mesh_prog(int prog) {
@@ -338,6 +348,9 @@ typedef struct {
    * places (wind_ok), then the slot rows */
   shaderProgram_s mesh_wind;
   int uloc_wind, wind_ok;
+  /* the alpha mask programs (c3l v23), their uniforms at skin's / etie's places */
+  shaderProgram_s skin_mask, etie_fa;
+  int mask_ok, etie_fa_ok;
 } ProgSet;
 static ProgSet s_ps[2];
 
@@ -378,6 +391,9 @@ static struct {
   DVLB_s* ocean_env_dvlb; /* (AI-assisted, j2water) ctr_ocean_env.v.pica (Jak II) */
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
   DVLB_s* wind_dvlb;      /* ctr_mesh_wind.v.pica */
+  /* ctr_skin_old_mask, ctr_skin_opt_mask, ctr_etie_fa.v.pica */
+  DVLB_s* skin_mask_dvlb[2];
+  DVLB_s* etie_fa_dvlb;
   u32 wind_rows_id;       /* the slot rows the GPU has (ctr_gpu_draw_mesh_wind), 0: none */
   int ocean_tex2_bound; /* texture unit 2 holds the ocean's shimmer texture */
   /* combiner stage 2 isn't pass-through: 1 a fog stage (ocean, merc fog) or Jak II's ocean env /
@@ -704,6 +720,32 @@ static inline int tex_res(int t) {
 uint64_t ctr_gpu_anim_slots_drawn(void) {
   return s_anim_drawn_last | s_anim_drawn;
 }
+/* c3l v23 alpha masks (ctr_gpu_tex_set_mask): a texture's mask + 1 and a mask's
+ * texture + 1 (0: none) */
+static int16_t s_tex_mask[MAX_TEXTURES], s_mask_of[MAX_TEXTURES];
+/* the masks units 1 and 2 hold (unit 1: NULL while it has the fog ramp) */
+static const C3D_Tex* s_tex1_mask;
+static const C3D_Tex* s_tex2_mask;
+void ctr_gpu_tex_set_mask(int handle, int mask) {
+  if (handle < 0 || handle >= MAX_TEXTURES) {
+    return;
+  }
+  ctr_linear_lock();
+  if (s_tex_mask[handle]) {
+    s_mask_of[s_tex_mask[handle] - 1] = 0;
+  }
+  s_tex_mask[handle] = 0;
+  if (mask >= 0 && mask < MAX_TEXTURES && mask != handle) {
+    s_tex_mask[handle] = (int16_t)(mask + 1);
+    s_mask_of[mask] = (int16_t)(handle + 1);
+  }
+  ctr_linear_unlock();
+}
+/* the mask of texture t when it is ready (-1: none) */
+static inline int tex_mask(int t) {
+  const int m = t >= 0 && t < MAX_TEXTURES ? s_tex_mask[t] - 1 : -1;
+  return m >= 0 && g.textures[m].used == 1 ? m : -1;
+}
 void ctr_gpu_tex_set_anim_slot(int handle, int slot) {
   if (handle >= 0 && handle < MAX_TEXTURES) {
     s_tex_anim_slot[handle] = slot >= 0 && slot < CTR_ANIM_SLOTS ? (uint8_t)(slot + 1) : 0;
@@ -852,6 +894,8 @@ static void use_program(int prog) {
                                 : prog == PROG_OCEAN_ENV ? &g.ps->ocean_env
                                 : prog == PROG_ETIE ? &g.ps->etie
                                 : prog == PROG_MESH_WIND ? &g.ps->mesh_wind
+                                : prog == PROG_SKIN_MASK ? &g.ps->skin_mask
+                                : prog == PROG_ETIE_FA ? &g.ps->etie_fa
                                                         : &g.ps->mesh;
     const void* dvlp = sp->vertexShader ? (const void*)sp->vertexShader->dvle->dvlp : NULL;
     g.cur.prog_switches++;
@@ -909,9 +953,9 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
     AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord (unused) */
     AttrInfo_AddLoader(attr, 2, GPU_UNSIGNED_BYTE, 4); /* color */
-  } else if (prog == PROG_ETIE) {
+  } else if (prog == PROG_ETIE || prog == PROG_ETIE_FA) {
     /* (AI-assisted, j2water2) the static mesh layout + the normals (attribute buffer 1) */
-    C3D_BindProgram(&g.ps->etie);
+    C3D_BindProgram(prog == PROG_ETIE ? &g.ps->etie : &g.ps->etie_fa);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
     AttrInfo_AddLoader(attr, 1, GPU_SHORT, 2);         /* texcoord */
@@ -934,8 +978,10 @@ static void use_program(int prog) {
                                              : g.ps->uloc_ocean_full_clip_gs,
                      &g.ocean_full_gs);
     unif_vectors += 4;
-  } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV) {
-    C3D_BindProgram(prog == PROG_SKIN ? &g.ps->skin : &g.ps->env);
+  } else if (prog == PROG_SKIN || prog == PROG_SKIN_ENV || prog == PROG_SKIN_MASK) {
+    C3D_BindProgram(prog == PROG_SKIN        ? &g.ps->skin
+                    : prog == PROG_SKIN_MASK ? &g.ps->skin_mask
+                                             : &g.ps->env);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 3);         /* position */
     AttrInfo_AddLoader(attr, 1, GPU_UNSIGNED_BYTE, 3); /* bone indices */
@@ -944,7 +990,7 @@ static void use_program(int prog) {
     AttrInfo_AddLoader(attr, 4, GPU_UNSIGNED_BYTE, 4); /* color */
     AttrInfo_AddLoader(attr, 5, GPU_BYTE, 3);          /* normal * 127 */
     C3D_FVUnifSet(GPU_VERTEX_SHADER,
-                  prog == PROG_SKIN ? g.ps->uloc_skin_scales : g.ps->uloc_env_scales,
+                  prog == PROG_SKIN_ENV ? g.ps->uloc_env_scales : g.ps->uloc_skin_scales,
                   1.0f / 1024.0f, 1.0f / 255.0f, 1.0f, 1.0f / 127.0f);
     unif_vectors += 1;
   } else {
@@ -988,12 +1034,19 @@ static void use_program(int prog) {
 /* (AI-assisted) config.ini shader_opt, each frame (gpu_profile = ab switches it): the program set
  * for the rest of the frame. Every cache of what the GPU has is dropped with a change. */
 static int s_want_opt;
+static void res_apply(int on);
+static void resident_programs(const ProgSet* rp);
+static const ProgSet* s_res_set;
 static void prog_set_select(void) {
   ProgSet* want = s_want_opt && s_ps[1].ok ? &s_ps[1] : &s_ps[0];
   if (!g.ready || want == g.ps) {
     return;
   }
   g.ps = want;
+  if (s_res_set && s_res_set != want) {
+    res_apply(0);
+    resident_programs(want);
+  }
   const int prog = g.cur_prog;
   g.cur_prog = PROG_NONE;
   if (prog != PROG_NONE) {
@@ -1154,6 +1207,28 @@ static void prog_set_ulocs(ProgSet* p, int have_fa) {
     p->uloc_etie_fog0 = shaderInstanceGetUniformLocation(vs, "fog0");
     p->uloc_etie_fog1 = shaderInstanceGetUniformLocation(vs, "fog1");
   }
+  /* the alpha mask programs: usable when their uniforms are at the same places */
+  p->mask_ok = 0;
+  if (p->skin_mask.vertexShader) {
+    vs = p->skin_mask.vertexShader;
+    p->mask_ok = shaderInstanceGetUniformLocation(vs, "clip") == p->uloc_skin_clip &&
+                 shaderInstanceGetUniformLocation(vs, "row0") == p->uloc_skin_rows[0] &&
+                 shaderInstanceGetUniformLocation(vs, "row1") == p->uloc_skin_rows[1] &&
+                 shaderInstanceGetUniformLocation(vs, "row2") == p->uloc_skin_rows[2] &&
+                 shaderInstanceGetUniformLocation(vs, "scales") == p->uloc_skin_scales &&
+                 shaderInstanceGetUniformLocation(vs, "lights") == p->uloc_skin_lights &&
+                 shaderInstanceGetUniformLocation(vs, "mfog") == p->uloc_skin_mfog;
+  }
+  p->etie_fa_ok = 0;
+  if (p->etie_fa.vertexShader && p->etie.vertexShader) {
+    vs = p->etie_fa.vertexShader;
+    p->etie_fa_ok = shaderInstanceGetUniformLocation(vs, "clip") == p->uloc_etie_clip &&
+                    shaderInstanceGetUniformLocation(vs, "cam") == p->uloc_etie_cam &&
+                    shaderInstanceGetUniformLocation(vs, "nrm") == p->uloc_etie_nrm &&
+                    shaderInstanceGetUniformLocation(vs, "scales") == p->uloc_etie_scales &&
+                    shaderInstanceGetUniformLocation(vs, "fog0") == p->uloc_etie_fog0 &&
+                    shaderInstanceGetUniformLocation(vs, "fog1") == p->uloc_etie_fog1;
+  }
 }
 
 static void prog_set_free(ProgSet* p) {
@@ -1165,8 +1240,8 @@ static void prog_set_free(ProgSet* p) {
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
     shaderProgramFree(all[i]);
   }
-  shaderProgram_s* maybe[] = {&p->mesh_fa,   &p->mesh_df, &p->mesh_df_fa,
-                              &p->ocean_env, &p->etie,    &p->mesh_wind};
+  shaderProgram_s* maybe[] = {&p->mesh_fa, &p->mesh_df,   &p->mesh_df_fa, &p->ocean_env,
+                              &p->etie,    &p->mesh_wind, &p->skin_mask,  &p->etie_fa};
   for (size_t i = 0; i < sizeof(maybe) / sizeof(maybe[0]); i++) {
     if (maybe[i]->vertexShader) {
       shaderProgramFree(maybe[i]);
@@ -1175,9 +1250,9 @@ static void prog_set_free(ProgSet* p) {
   memset(p, 0, sizeof(*p));
 }
 
-/* (AI-assisted, micro-gpu) shader_resident (always on with gpu_micro): every vertex program of both
- * sets in one code image that stays in the GPU's shader memory. citro3d uploads a program's code
- * and operand descriptors at every switch to a program of another DVLP (C3D_BindProgram compares
+/* (AI-assisted, micro-gpu) shader_resident (always on with gpu_micro): every vertex program of the
+ * set in use in one code image that stays in the GPU's shader memory. citro3d uploads a program's
+ * code and operand descriptors at every switch to a program of another DVLP (C3D_BindProgram compares
  * the DVLPs): with one shbin per program, every switch (~8 per frame) wrote its code again. Here
  * the shbins' code is put one after another (351 of 512 instruction slots) and their operand
  * descriptors into one table without duplicates (49 of 128; the ones a MAD uses first, MAD has 5
@@ -1223,7 +1298,7 @@ static struct {
   DVLE_s* dvle;
   DVLP_s* own;
   u32 main, endmain, base;
-} s_res_prog[30]; /* 2 x 15 */
+} s_res_prog[34]; /* 2 x 17 */
 static int s_res_n;
 static int s_res_on; /* the DVLEs point at the image */
 
@@ -1245,25 +1320,26 @@ static int res_desc_bits(u32 ins) {
 
 static void res_apply(int on);
 
-static void resident_programs(void) {
+/* the set the image holds (both sets' programs don't fit in shader memory with the alpha mask
+ * programs): made again when the set in use changes (prog_set_select) */
+static void resident_programs(const ProgSet* rp) {
+  s_res_set = rp;
+  s_res_n = 0;
   if (!(s_micro & MICRO_RESIDENT)) {
     printf("[ctr] shader_resident: off\n");
     return;
   }
-  ProgSet* sets[2] = {&s_ps[0], &s_ps[1]};
-  DVLE_s* dvles[2 * 15];
+  DVLE_s* dvles[2 * 17];
   int n = 0;
-  for (int k = 0; k < 2; k++) {
-    ProgSet* p = sets[k];
-    if (!p->ok && k) {
-      continue;
-    }
+  for (int k = 0; k < 1; k++) {
+    const ProgSet* p = rp;
     /* (AI-assisted, j2water) + ocean_env (Jak II); (j2water2) + etie (Jak II) */
-    shaderProgram_s* all[15] = {&p->basic, &p->mesh, &p->mesh_fa, &p->skin, &p->env, &p->clip,
-                                &p->clip2, &p->ocean, &p->ocean_full, &p->ocean_full_clip,
-                                &p->mesh_df, &p->mesh_df_fa, &p->ocean_env, &p->etie,
-                                &p->mesh_wind};
-    for (int i = 0; i < 15; i++) {
+    const shaderProgram_s* all[17] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
+                                &p->env,       &p->clip,       &p->clip2,      &p->ocean,
+                                &p->ocean_full, &p->ocean_full_clip, &p->mesh_df, &p->mesh_df_fa,
+                                &p->ocean_env, &p->etie,       &p->mesh_wind,  &p->skin_mask,
+                                &p->etie_fa};
+    for (int i = 0; i < 17; i++) {
       if (!all[i]->vertexShader) {
         continue;
       }
@@ -1278,8 +1354,8 @@ static void resident_programs(void) {
     }
   }
   /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
-  DVLP_s* dvlps[2 * 15];
-  u32 base[2 * 15];
+  DVLP_s* dvlps[2 * 17];
+  u32 base[2 * 17];
   int np = 0;
   u32 code = 0, ndesc = 0;
   for (int i = 0; i < n; i++) {
@@ -1427,6 +1503,16 @@ static void load_opt_set(void) {
     shaderProgramInit(&p->etie);
     shaderProgramSetVsh(&p->etie, &g.etie_dvlb->DVLE[0]);
   }
+  if (g.etie_fa_dvlb) {
+    shaderProgramInit(&p->etie_fa); /* set 0's */
+    shaderProgramSetVsh(&p->etie_fa, &g.etie_fa_dvlb->DVLE[0]);
+  }
+  g.skin_mask_dvlb[1] =
+      DVLB_ParseFile((u32*)ctr_skin_opt_mask_shbin, (u32)ctr_skin_opt_mask_shbin_size);
+  if (g.skin_mask_dvlb[1]) {
+    shaderProgramInit(&p->skin_mask);
+    shaderProgramSetVsh(&p->skin_mask, &g.skin_mask_dvlb[1]->DVLE[0]);
+  }
   g.wind_dvlb = DVLB_ParseFile((u32*)ctr_mesh_wind_shbin, (u32)ctr_mesh_wind_shbin_size);
   if (g.wind_dvlb) {
     shaderProgramInit(&p->mesh_wind);
@@ -1565,6 +1651,18 @@ int ctr_gpu_init(void) {
     shaderProgramInit(&g.ps->etie);
     shaderProgramSetVsh(&g.ps->etie, &g.etie_dvlb->DVLE[0]);
   }
+  /* the alpha mask programs (c3l v23) */
+  g.etie_fa_dvlb = DVLB_ParseFile((u32*)ctr_etie_fa_shbin, (u32)ctr_etie_fa_shbin_size);
+  if (g.etie_fa_dvlb) {
+    shaderProgramInit(&g.ps->etie_fa);
+    shaderProgramSetVsh(&g.ps->etie_fa, &g.etie_fa_dvlb->DVLE[0]);
+  }
+  g.skin_mask_dvlb[0] =
+      DVLB_ParseFile((u32*)ctr_skin_old_mask_shbin, (u32)ctr_skin_old_mask_shbin_size);
+  if (g.skin_mask_dvlb[0]) {
+    shaderProgramInit(&g.ps->skin_mask);
+    shaderProgramSetVsh(&g.ps->skin_mask, &g.skin_mask_dvlb[0]->DVLE[0]);
+  }
   prog_set_ulocs(&s_ps[0], g.mesh_fa_dvlb != NULL);
   s_ps[0].ok = 1;
   printf("[ctr] fog_alpha program: %s\n",
@@ -1575,7 +1673,7 @@ int ctr_gpu_init(void) {
   s_micro_ident = ctr_config_bool("gpu_micro_ident", 0);
   printf("[ctr] gpu_micro: %s%s\n", s_micro ? "on" : "off",
          s_micro_ident ? " (gpu_micro_ident: dumps off / on pairs)" : "");
-  resident_programs(); /* (AI-assisted, micro-gpu) shader_resident (gpu_micro) */
+  resident_programs(g.ps); /* (AI-assisted, micro-gpu) shader_resident (gpu_micro) */
   g.cur_prog = PROG_NONE;
   /* (AI-assisted) the procedural texture unit for radial textures (CTR_STATE_PROCTEX): distance
    * from the center (sqrt(u^2 + v^2) of the absolute texture coordinates, clamped to 1) looks up
@@ -1690,7 +1788,7 @@ void ctr_gpu_exit(void) {
   DVLB_s* dvlbs[] = {g.dvlb,      g.mesh_dvlb,  g.mesh_fa_dvlb, g.skin_dvlb,
                      g.env_dvlb,  g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
                      g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb,
-                     g.wind_dvlb};
+                     g.wind_dvlb, g.skin_mask_dvlb[0], g.skin_mask_dvlb[1], g.etie_fa_dvlb};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
     if (dvlbs[i]) {
       DVLB_Free(dvlbs[i]);
@@ -2837,6 +2935,7 @@ static void frame_state_reset(void) {
    * texture cache: once per frame, not at every level draw) */
   if (g.fog_tex_valid) {
     C3D_TexBind(1, &g.fog_tex);
+    s_tex1_mask = NULL;
   }
   /* (AI-assisted) the early depth buffer starts as "far" like the depth buffer (cleared to 0;
    * larger = closer). citro3d clears it only after frames that drew; the first frame needs it. */
@@ -3521,6 +3620,10 @@ static GPU_TEXCOLOR gpu_format(int format) {
       return GPU_ETC1;
     case CTR_TEX_ETC1A4:
       return GPU_ETC1A4;
+    case CTR_TEX_A8:
+      return GPU_A8;
+    case CTR_TEX_A4:
+      return GPU_A4;
     default:
       return GPU_RGBA8;
   }
@@ -3532,8 +3635,10 @@ static unsigned int format_bits(int format) {
     case CTR_TEX_RGBA4:
       return 16;
     case CTR_TEX_ETC1:
+    case CTR_TEX_A4:
       return 4;
     case CTR_TEX_ETC1A4:
+    case CTR_TEX_A8:
       return 8;
     default:
       return 32;
@@ -3835,7 +3940,7 @@ static void update_pool_residency(void) {
     if (!v) {
       /* (AI-assisted) not all of it: as much as fits in the VRAM that's left (whole textures from
        * the start), so the GPU reads those fast and they leave linear memory */
-      const unsigned int kStep = 128 * 1024, kMinPart = 256 * 1024;
+      const unsigned int kStep = 32 * 1024, kMinPart = 64 * 1024;
       unsigned int want = (unsigned int)vramSpaceFree();
       want = want > VRAM_RESERVE ? want - VRAM_RESERVE : 0;
       if (want > p->bytes) {
@@ -4535,6 +4640,14 @@ void ctr_gpu_tex_delete(int handle) {
   }
   ctr_linear_lock();
   s_tex_anim_slot[handle] = 0; /* (AI-assisted) */
+  if (s_tex_mask[handle]) {
+    s_mask_of[s_tex_mask[handle] - 1] = 0;
+    s_tex_mask[handle] = 0;
+  }
+  if (s_mask_of[handle]) {
+    s_tex_mask[s_mask_of[handle] - 1] = 0;
+    s_mask_of[handle] = 0;
+  }
   if (g.textures[handle].used == 1) {
     g.textures[handle].used = 2; /* pending */
     g.pending_delete[g.pending_delete_count++] = handle;
@@ -5068,6 +5181,46 @@ static int cmd_room(void) {
   return 1;
 }
 
+/* c3l v23: the alpha mask on texture unit 1 (instead of the fog ramp) or 2, bound
+ * with its texture's sampling (filter, wrap, mip levels: the same texels' alpha as the RGBA8
+ * texture had) */
+static const C3D_Tex* s_ocean_tex2;
+static const void* s_etie_tex2;
+static const void* s_mask_data[3];
+static u32 s_mask_param[3], s_mask_lod[3];
+static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
+  C3D_Tex* t = &m->tex;
+  t->param = color->param & ~(u32)GPU_TEXTURE_ETC1_PARAM;
+  t->maxLevel = color->maxLevel;
+  t->minLevel = color->minLevel;
+  t->lodBias = color->lodBias;
+  const C3D_Tex** cur = unit == 1 ? &s_tex1_mask : &s_tex2_mask;
+  if (*cur == t && s_mask_data[unit] == t->data && s_mask_param[unit] == t->param &&
+      s_mask_lod[unit] == t->lodParam) {
+    return;
+  }
+  C3D_TexBind(unit, t);
+  *cur = t;
+  s_mask_data[unit] = t->data;
+  s_mask_param[unit] = t->param;
+  s_mask_lod[unit] = t->lodParam;
+  if (unit == 2) {
+    g.ocean_tex2_bound = 1; /* the ocean and the envmapped ties bind theirs again */
+    s_ocean_tex2 = NULL;
+    s_etie_tex2 = NULL;
+  }
+  g.cur.tex_binds++;
+}
+static void unit2_mask_release(void) {
+  C3Di_Context* ctx = &__C3D_Context;
+  ctx->tex[2] = NULL;
+  ctx->flags |= C3DiF_Tex(2);
+  g.ocean_tex2_bound = 0;
+  s_ocean_tex2 = NULL;
+  s_etie_tex2 = NULL;
+  s_tex2_mask = NULL;
+}
+
 /* Texture unit 0: only bound again (which clears the GPU's texture cache) when the texture, its
  * memory (pools move to VRAM) or its parameters change. */
 static void bind_texture(TexSlot* slot, const ctr_draw_state* st, int raw) {
@@ -5295,8 +5448,15 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   /* (AI-assisted, micro-mg) gpu_micro: the same state but for its texture (see StateFast) */
   const int stex0 = tex_res(st->tex); /* (AI-assisted) an animated slot's texture */
   const int textured0 = stex0 >= 0 && stex0 < MAX_TEXTURES && g.textures[stex0].used == 1;
+  /* c3l v23: the texture's alpha mask, for the programs that give it coordinates
+   * (unit 2 for merc, unit 1 for the fog_alpha level meshes and envmapped ties) */
+  const int mask_prog =
+      g.cur_prog == PROG_SKIN_MASK || g.cur_prog == PROG_ETIE_FA ||
+      (mesh == 5 && (g.cur_prog == PROG_MESH_FA || g.cur_prog == PROG_MESH_DF_FA));
+  const int smask = textured0 && mask_prog ? tex_mask(stex0) : -1;
   const alias_u32* stw = (const alias_u32*)st;
-  if (raw && s_sf.valid && (s_micro & MICRO_TEXSTATE) && s_sf.mesh == mesh && s_sf.tint == tint &&
+  if (raw && s_sf.valid && smask < 0 && (s_micro & MICRO_TEXSTATE) && s_sf.mesh == mesh &&
+      s_sf.tint == tint &&
       /* (the filter and clamp bytes only matter to the bind) */
       !((((stw[1] ^ s_sf.words[0]) & 0x0000FFFFu) | ((stw[2] ^ s_sf.words[1]) & 0xFFFFFF00u) |
          (stw[3] ^ s_sf.words[2]))) &&
@@ -5443,6 +5603,9 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     if (!proc) {
       bind_texture(slot, st, raw);
     }
+    if (smask >= 0) {
+      bind_mask(&g.textures[smask], &slot->tex, mesh == 2 ? 2 : 1);
+    }
     if (mesh == 6) {
       /* (AI-assisted, j1ocean) the PS2 ocean (ctr_gpu_ocean_full_draw*): GS modulate (texture
        * alpha 0xff = 1, vertex color 0x80 = 1). Alpha: TCC set = tex.a * v.a; clear = v.a, or with
@@ -5471,8 +5634,10 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       }
       if (mesh == 5) {
         /* (AI-assisted) fog_alpha: the vertex alpha (0x80) as this stage's constant */
-        C3D_TexEnvSrc(env, C3D_Alpha, tsrc, GPU_CONSTANT, 0);
+        C3D_TexEnvSrc(env, C3D_Alpha, smask >= 0 ? GPU_TEXTURE1 : tsrc, GPU_CONSTANT, 0);
         C3D_TexEnvColor(env, 0x80000000u);
+      } else if (smask >= 0) {
+        C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE2, GPU_PRIMARY_COLOR, 0); /* merc */
       }
     } else if (st->decal) {
       C3D_TexEnvSrc(env, C3D_RGB, tsrc, 0, 0);
@@ -5519,6 +5684,12 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
     C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvColor(env, tint);
     C3D_TexEnvSrc(env, C3D_Alpha, textured ? tsrc : GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, 0);
+    if (smask >= 0) {
+      /* ctr_etie_fa: the mask times the vertex alpha 0x80 (the color's alpha is the
+       * fog amount) */
+      C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE1, GPU_CONSTANT, 0);
+      C3D_TexEnvColor(env, (tint & 0x00FFFFFFu) | 0x80000000u);
+    }
     C3D_TexEnvFunc(env, C3D_Alpha, textured ? GPU_MODULATE : GPU_REPLACE);
     C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
     C3D_TexEnvInit(env1);
@@ -5539,7 +5710,14 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
       C3D_TexEnvFunc(&e2, C3D_RGB, GPU_ADD);
     }
     C3D_TexEnvInit(&e3);
-    if (g.fog_tex_valid) {
+    if (smask >= 0) {
+      /* ctr_etie_fa: the fog as the fog_alpha level meshes' (mesh 5's stage 1) */
+      C3D_TexEnvSrc(&e3, C3D_RGB, GPU_CONSTANT, GPU_PREVIOUS, GPU_PRIMARY_COLOR);
+      C3D_TexEnvOpRgb(&e3, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                      GPU_TEVOP_RGB_SRC_ALPHA);
+      C3D_TexEnvFunc(&e3, C3D_RGB, GPU_INTERPOLATE);
+      C3D_TexEnvColor(&e3, g.fog_abgr);
+    } else if (g.fog_tex_valid) {
       C3D_TexEnvSrc(&e3, C3D_RGB, GPU_TEXTURE1, GPU_PREVIOUS, GPU_TEXTURE1);
       C3D_TexEnvOpRgb(&e3, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
                       GPU_TEVOP_RGB_SRC_ALPHA);
@@ -5561,9 +5739,18 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   /* (AI-assisted, far-fog) a merc draw with the game's fog (CTR_TCC_FOG): the fog ramp stage in
    * stage 2 (the ocean's), its amount from texture unit 1 (ctr_skin_opt's texcoord1) */
   const int merc_fog = mesh == 2 && (st->tcc & CTR_TCC_FOG) && g.fog_tex_valid;
+  /* unit 1 back to the fog ramp after an alpha mask, for the draws that read it */
+  const int need_ramp = mesh == 1 || mesh == 3 || mesh == 6 || (mesh == 7 && smask < 0) || merc_fog;
+  if (need_ramp && s_tex1_mask && g.fog_tex_valid) {
+    C3D_TexBind(1, &g.fog_tex);
+    s_tex1_mask = NULL;
+  }
+  if (s_tex2_mask && mesh != 3 && mesh != 6 && mesh != 7 && !(smask >= 0 && mesh == 2)) {
+    unit2_mask_release();
+  }
   if (g.fog_tex_valid) {
     C3Di_Context* tctx = &__C3D_Context;
-    const int need1 = mesh == 1 || mesh == 3 || mesh == 6 || mesh == 7 || merc_fog;
+    const int need1 = need_ramp || (smask >= 0 && mesh != 2);
     const int want_off = g_tex1_gating ? !need1 : mesh == 4;
     const int is_off = !(tctx->texConfig & BIT(1));
     /* (AI-assisted, micro-mg) a glow drawn raw (MICRO_RAWGLOW) leaves unit 1 as the citro3d draw
@@ -5798,7 +5985,7 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   raw_end(p);
   *c = e;
   /* (AI-assisted, micro-mg) what this full raw state worked from and wrote (StateFast) */
-  if (!proc && mesh != 3 && mesh != 6 && g.proc_radial < 0) {
+  if (!proc && mesh != 3 && mesh != 6 && g.proc_radial < 0 && smask < 0) {
     s_sf.valid = 1;
     s_sf.env2 = ctx->texEnv[2]; /* (AI-assisted, far-fog) */
     s_sf.stage2 = g.ocean_stage2;
@@ -5990,6 +6177,7 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   g.ocean_stage2 = 0; /* (AI-assisted) stage 2 is pass-through again */
   if (g.fog_tex_valid) {
     C3D_TexBind(1, &g.fog_tex);
+    s_tex1_mask = NULL;
   }
   g.last_state_valid = 0;
 }
@@ -6199,6 +6387,7 @@ static void ocean_full_draw(const ctr_draw_state* state, int vert_count, int ind
     __C3D_Context.tex[2] = NULL;
     __C3D_Context.flags |= C3DiF_Tex(2);
     g.ocean_tex2_bound = 0;
+    s_tex2_mask = NULL;
     s_ocean_tex2 = NULL;
   }
   /* (AI-assisted, j1hang) all 4 attributes (40 bytes, the whole stride) for both programs */
@@ -7252,7 +7441,8 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
   /* (AI-assisted) fog_alpha: draws whose vertex alpha is 0x80 everywhere (CTR_TCC_ALPHA80) take
    * the fog in the color's alpha (mesh 5, no fog ramp and texcoord1); the fog stage's cost is the
    * same with no fog (fog_stage_skip is for the ramp's texture unit) */
-  const int fa = g_fog_alpha && g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80);
+  const int fa = g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80) &&
+                 (g_fog_alpha || tex_mask(tex_res(state->tex)) >= 0);
   /* (AI-assisted) shader_opt with the game fog off: the programs with only the draw distance fog */
   const int df = g.ps->df_ok && g.fog_df;
   use_program(fa ? (df ? PROG_MESH_DF_FA : PROG_MESH_FA) : (df ? PROG_MESH_DF : PROG_MESH));
@@ -7490,6 +7680,7 @@ static void ocean_bind_tex2_wrap(int handle, int clamp) {
   s_ocean_tex2_data = tex->data;
   s_ocean_tex2_param = param;
   g.ocean_tex2_bound = 1;
+  s_tex2_mask = NULL;
   g.cur.tex_binds++;
 }
 static void ocean_bind_tex2(int handle) {
@@ -7617,7 +7808,8 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
   if (!cmd_room()) {
     return;
   }
-  use_program(PROG_ETIE);
+  /* c3l v23: a texture with an alpha mask (on unit 1; the vertex alpha is 0x80) */
+  use_program(g.ps->etie_fa_ok && tex_mask(tex_res(state->tex)) >= 0 ? PROG_ETIE_FA : PROG_ETIE);
   {
     TexSlot* slot = &g.textures[env_tex];
     C3D_Tex* tex = &slot->tex;
@@ -7633,6 +7825,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
       s_etie_tex2 = tex;
       s_ocean_tex2 = NULL; /* the ocean binds its own again */
       g.ocean_tex2_bound = 1;
+      s_tex2_mask = NULL;
       g.cur.tex_binds++;
     }
   }
@@ -7673,6 +7866,7 @@ void ctr_gpu_etie_end(void) {
     ctx->tex[2] = NULL;
     ctx->flags |= C3DiF_Tex(2);
     g.ocean_tex2_bound = 0;
+    s_tex2_mask = NULL;
     s_ocean_tex2 = NULL;
   }
   s_etie_tex2 = NULL;
@@ -7698,6 +7892,7 @@ void ctr_gpu_ocean_end(void) {
     ctx->tex[2] = NULL;
     ctx->flags |= C3DiF_Tex(2);
     g.ocean_tex2_bound = 0;
+    s_tex2_mask = NULL;
     s_ocean_tex2 = NULL;
   }
   C3D_TexEnv e;
@@ -8068,7 +8263,8 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state, const float clip[16], con
   if (!cmd_room() || gpuCmdBufSize - gpuCmdBufOffset < CMD_RESERVE_WORDS + CMD_DRAW_WORDS + 320) {
     return;
   }
-  use_program(PROG_SKIN);
+  /* c3l v23: a texture with an alpha mask (on unit 2) */
+  use_program(g.ps->mask_ok && tex_mask(tex_res(state->tex)) >= 0 ? PROG_SKIN_MASK : PROG_SKIN);
   const MeshSlot* ms = &g.meshes[mesh];
   const int raw = use_raw(state);
   if (raw) {
@@ -8586,6 +8782,7 @@ static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b) {
   if (!write) {
     if (g.in_frame) {
       C3D_TexBind(1, &g.fog_tex);
+      s_tex1_mask = NULL;
     }
     g.last_state_valid = 0;
     return;
@@ -8607,6 +8804,7 @@ static void fog_ramp_color(uint8_t r, uint8_t gr, uint8_t b) {
   cache_flush_frame(g.fog_tex.data, C3D_TexCalcTotalSize(g.fog_tex.size, g.fog_tex.maxLevel));
   if (g.in_frame) {
     C3D_TexBind(1, &g.fog_tex); /* clears the texture cache: the GPU must not use the old texels */
+    s_tex1_mask = NULL;
   }
   g.last_state_valid = 0;
 }

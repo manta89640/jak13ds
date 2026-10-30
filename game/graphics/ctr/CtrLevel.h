@@ -143,6 +143,11 @@ struct CtrLevelData {
   std::vector<int> tex_pools;
   u32 tex_pool_bytes = 0;     // (AI-assisted) their size (0: no textures)
   u32 tex_background_bytes = 0;  // (AI-assisted) its start: the background's textures (VRAM first)
+  // c3l v23 shared textures (texshare.c3t): per texture 1 when its handle is a share group's (not
+  // the level's to delete), and the groups the level holds (CtrLevels::release_share_groups)
+  std::vector<u8> tex_shared;
+  std::vector<u32> tex_share_groups;
+  u32 tex_shared_bytes = 0;  // of the groups this level loaded
   std::vector<int> meshes;    // one per chunk
   std::vector<c3l::MercBlercVertex> blerc_verts;
   std::vector<c3l::MercBlercTarget> blerc_targets;
@@ -800,7 +805,27 @@ class CtrLevels {
     std::vector<int> handles;
     std::vector<u8> min_alpha;
     u32 empty = 0;  // (AI-assisted) c3l v15: textures without texels (all in atlases): no handle
+    std::vector<u8> shared;          // as CtrLevelData::tex_shared
+    std::vector<u32> share_groups;   // the groups held (one reference each)
+    u32 shared_bytes = 0, borrowed_bytes = 0;  // groups loaded here / ones other levels had
   };
+  // c3l v23 texture sharing between loaded levels (texshare.c3t): a group of textures the same
+  // levels have, in a pool of its own while a loaded level holds it (m_share_lock)
+  struct ShareTex {
+    int handle = -1, mask = -1;
+    u8 min_alpha = 0;
+  };
+  struct ShareGroup {
+    u32 users = 0;
+    int pool = -1;
+    std::unordered_map<u64, ShareTex> tex;
+  };
+  std::mutex m_share_lock;
+  bool m_share_read = false;
+  std::vector<c3l::TexShareEntry> m_share_table;  // by key
+  std::unordered_map<u32, ShareGroup> m_share_groups;
+  int share_group_of(u64 key);  // -1: not shared (m_share_lock held)
+  void release_share_groups(const std::vector<u32>& groups);
   struct Done {
     Job job;
     std::unique_ptr<CtrLevelData> lev;
@@ -837,8 +862,8 @@ class CtrLevels {
                      TexLoad* out);
   // (AI-assisted) render thread: the results of a detail reload / repair
   void take_parts(Done& d, u64 frame);
-  static void delete_parts(Done& d);
-  static void delete_textures(TexLoad* t);
+  void delete_parts(Done& d);
+  void delete_textures(TexLoad* t);
   void collect_chunks(const CtrLevelData& lev, bool missing_only, std::vector<DetailChunk>* out);
   void request_repair(CtrLevelData& lev);
   // (AI-assisted) render thread (or service): unload the parked prefetches the game gave up on;

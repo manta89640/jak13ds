@@ -14,7 +14,8 @@
 .alias zero consts.xxxx
 
 .out outpos position
-.out outtc0 texcoord0
+.out outtc0 texcoord0.xy
+.out - texcoord1 outtc0.zw   ; the same coordinates, for the alpha mask textures (c3l v23) on unit 1
 .out outclr color
 
 .alias inpos v0
@@ -30,6 +31,6 @@
   max outclr.w, zero, r0.xxxx
   dph outpos.w, inpos, clip[3]
   mul outclr.xyz, scales.yyyy, inclr
-  mul outtc0, scales.xxxx, intex
+  mul outtc0, scales.xxxx, intex.xyxy
   end
 .end

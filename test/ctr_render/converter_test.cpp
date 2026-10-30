@@ -228,6 +228,52 @@ void test_merc_lod(int feature) {
   }
   check(kept, "LOD must retain a flat surface's UV, skin-weight or normal feature");
 }
+
+// c3l v23: an RGBA8 texture's alpha mask has the same alpha in every texel of every level
+void test_alpha_mask(bool four_bit) {
+  ctr_tex::Image img{64, 32, std::vector<u8>(64 * 32 * 4, 0)};
+  for (int y = 0; y < img.h; y++) {
+    for (int x = 0; x < img.w; x++) {
+      u8* p = img.at(x, y);
+      p[0] = (u8)(x * 4);
+      p[1] = (u8)(y * 8);
+      p[2] = (u8)((x * y) & 0xff);
+      p[3] = four_bit ? (u8)(17 * ((x + y) % 16)) : (u8)(40 + (x * 3 + y * 5) % 90);
+    }
+  }
+  ctr_tex::MipOptions mo;
+  mo.alpha_weighted = false;
+  const auto mips = ctr_tex::make_mips(img, 3, mo);
+  std::vector<u8> data;
+  c3l::Texture d{};
+  d.w = 64;
+  d.h = 32;
+  d.levels = (u8)mips.size();
+  d.format = c3l::TEX_RGBA8;
+  for (const auto& m : mips) {
+    ctr_tex::encode_level(m, ctr_tex::Format::RGBA8, 1, &data);
+  }
+  Options opt;
+  MaskSplit s;
+  split_mask_texture(d, data, opt, true, false, &s);
+  check(s.mask_desc.format == (four_bit ? c3l::TEX_A4 : c3l::TEX_A8),
+        "a mask is A4 exactly when every alpha is n * 17");
+  check(s.color_desc.format == c3l::TEX_ETC1 || s.color_desc.format == c3l::TEX_RGB565,
+        "a mask texture's color is ETC1 or RGB565");
+  u32 off = 0, moff = 0;
+  for (int l = 0; l < d.levels; l++) {
+    const int w = d.w >> l, h = d.h >> l;
+    const auto ref = ctr_tex::decode_level(data.data() + off, w, h, ctr_tex::Format::RGBA8);
+    const auto m =
+        ctr_tex::decode_level(s.mask.data() + moff, w, h, (ctr_tex::Format)s.mask_desc.format);
+    for (int i = 0; i < w * h; i++) {
+      check(m.rgba[4 * i + 3] == ref.rgba[4 * i + 3], "a mask texel must keep the RGBA8 alpha");
+    }
+    off += c3l::texture_level_bytes(w, h, c3l::TEX_RGBA8);
+    moff += c3l::texture_level_bytes(w, h, s.mask_desc.format);
+  }
+  check(moff == s.mask.size() && s.color.size() < data.size(), "mask and color sizes");
+}
 }  // namespace
 
 int main() {
@@ -240,6 +286,8 @@ int main() {
     for (int feature = 0; feature < 3; feature++) {
       test_merc_lod(feature);
     }
+    test_alpha_mask(false);
+    test_alpha_mask(true);
     run_vram_tests();
     run_citadel_tests();
     fmt::print("3DS rendering regressions passed (CPU only).\n");
