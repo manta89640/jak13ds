@@ -17,6 +17,7 @@
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 
+#include "game/graphics/ctr/CtrAutoDetail.h"
 #include "game/graphics/ctr/ctr_config_presets.h"
 #include "game/runtime.h"
 #include "game/graphics/ctr/ctr_gpu.h"
@@ -488,6 +489,22 @@ CtrSettings load() {
 }  // namespace
 
 std::string CtrSettings::summary() const {
+  // (AI-assisted, autodetail) the relief's ranges (CtrAutoDetail.h)
+  auto auto_detail_relief_text = [&]() {
+    ctr_detail::Relief rl;
+    rl.init(tie_lod_px, lod_distance, tie_distance_scale, draw_distance);
+    std::string r;
+    for (ctr_detail::Knob k : ctr_detail::kOrder) {
+      if (rl.stage[k] < 0) {
+        continue;
+      }
+      r += r.empty() ? "; over it toward " : ", ";
+      r += k == ctr_detail::kTieLodPx ? fmt::format("tie_lod_px {:.0f}", rl.to[k])
+           : k == ctr_detail::kLodDistance ? fmt::format("lod {:.0f}m", rl.to[k])
+                                            : fmt::format("ties x{:.1f}", rl.to[k]);
+    }
+    return r;
+  };
   return fmt::format(
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
@@ -501,8 +518,9 @@ std::string CtrSettings::summary() const {
       "{}{}{}{}{}{}{}",
       draw_distance, lod_distance, far_level_distance, detail_scale,
       // (AI-assisted) with auto_detail: the range the distances move in
-      auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms)", shrub_distance,
-                                std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms)
+      auto_detail ? fmt::format("{:.0f}-{:.0f}m (auto, GPU under {:.0f} ms{})", shrub_distance,
+                                std::max(shrub_distance, shrub_distance_max), auto_detail_gpu_ms,
+                                auto_detail_relief_text())
                   : fmt::format("{:.0f}m", shrub_distance),
       auto_detail && shrub_scale_max > shrub_scale
           ? fmt::format("{:.2f}-{:.2f}", shrub_scale, shrub_scale_max)
