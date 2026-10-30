@@ -10866,7 +10866,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         return;
       }
       m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
-                         (int)count, vc.nofog ? 1 : 0});
+                         (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0});
     };
 #else
     ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
@@ -10882,7 +10882,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (m_late_collect) {
         // (AI-assisted, j2water) Jak II's blended draws, drawn later (draw_jak2_late)
         m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
-                           (int)count, vc.nofog ? 1 : 0});
+                           (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0});
         return;
       }
       if (morph) {
@@ -10926,7 +10926,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         use = &f;
       }
       m_fade_calls.push_back(
-          {use, &vc.gpu, lev.meshes[vc.chunk], (int)first, (int)count, vc.nofog ? 1 : 0});
+          {use, &vc.gpu, lev.meshes[vc.chunk], (int)first, (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0});
       m_fade_runs++;
     };
     if (!vc.partly || !lev.draw_run_count[di]) {
