@@ -827,3 +827,10 @@ Ptr<Symbol> intern_from_c(const char* name) {
   return Ptr<Symbol>(harness::sym(name));
 }
 }  // namespace jak1
+
+// Jak 2 natives: a symbol's value is where the harness keeps it (see load_goalc_references)
+namespace Mips2C::jak2::native {
+u32 sym_val_addr(const char* name) {
+  return harness::sym(name);
+}
+}  // namespace Mips2C::jak2::native

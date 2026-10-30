@@ -42,6 +42,8 @@ MIPS2C_SRCS=(collide_func collide_cache collide_probe collide_mesh collide_edge_
              sparticle_launcher ocean_vu0 ripple ocean sky_tng shadow)
 HARNESS_SRCS=("$HERE"/*.cpp)
 NATIVE_SRCS=("$M2C"/native_*.cpp)
+# Jak 2 natives with a test (objects named j2_*)
+NATIVE_SRCS+=("$ROOT/game/mips2c/jak2_functions/native_sp_spawn.cpp")
 
 COMMON_FLAGS=(-std=gnu++20 -I"$ROOT" -I"$ROOT/third-party/fmt/include" -DFMT_HEADER_ONLY=1
               -fsigned-char -Wall -Wno-unused-variable -Wno-unused-but-set-variable
@@ -64,9 +66,11 @@ build() {
   local pids=()
   for src in "${HARNESS_SRCS[@]}" "${NATIVE_SRCS[@]}"; do
     local obj="$dir/$(basename "${src%.cpp}").o"
+    [[ "$src" == */jak2_functions/* ]] && obj="$dir/j2_$(basename "${src%.cpp}").o"
     objs+=("$obj")
     if [[ ! -f "$obj" || "$src" -nt "$obj" || "$HERE/harness.h" -nt "$obj" || "$HERE/fakes.h" -nt "$obj" ||
-          "$ROOT/game/mips2c/mips2c_native.h" -nt "$obj" || "$M2C/native_functions.h" -nt "$obj" ]]; then
+          "$ROOT/game/mips2c/mips2c_native.h" -nt "$obj" || "$M2C/native_functions.h" -nt "$obj" ||
+          "$ROOT/game/mips2c/jak2_functions/native_functions.h" -nt "$obj" ]]; then
       local extra=()
       [[ "$(basename "$src")" == native_* ]] && extra=(${NATIVE_EXTRA_FLAGS--O3})
       "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" ${extra[@]+"${extra[@]}"} -c "$src" -o "$obj" &

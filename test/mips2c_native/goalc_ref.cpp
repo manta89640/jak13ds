@@ -14,6 +14,7 @@
 #include "goalc_ref/goalc_ref.h"
 
 #include <array>
+#include <cstring>
 #include <exception>
 #include <map>
 #include <stdexcept>
@@ -49,6 +50,7 @@ extern const GoalcRefModule goalc_ref_joint;
 extern const GoalcRefModule goalc_ref_quaternion;
 extern const GoalcRefModule goalc_ref_bones;  // (AI-assisted)
 extern const GoalcRefModule goalc_ref_sparticle_launcher;
+extern const GoalcRefModule goalc_ref_jak2_sparticle_launcher;
 }
 
 // referenced by goalc_context.cpp (the kernel's suspend), never called here
@@ -148,12 +150,13 @@ void load_goalc_references() {
   // (AI-assisted) built without the old fixtures (run.sh with MIPS2C_TEST_NO_GOALC_REF=1: they
   // are for another GOALC_ABI_VERSION): the tests against them fail, the others run
   const std::initializer_list<const GoalcRefModule*> modules = {
-      &goalc_ref_joint, &goalc_ref_quaternion, &goalc_ref_bones, &goalc_ref_sparticle_launcher};
+      &goalc_ref_joint, &goalc_ref_quaternion, &goalc_ref_bones, &goalc_ref_sparticle_launcher,
+      &goalc_ref_jak2_sparticle_launcher};
 #else
   const std::initializer_list<const GoalcRefModule*> modules = {
       &goalc_ref_collide_func, &goalc_ref_geometry, &goalc_ref_vector, &goalc_ref_joint,
       &goalc_ref_quaternion, &goalc_ref_bones, &goalc_ref_main_collide,
-      &goalc_ref_sparticle_launcher};
+      &goalc_ref_sparticle_launcher, &goalc_ref_jak2_sparticle_launcher};
 #endif
   for (const GoalcRefModule* m : modules) {
     const u32 seg = alloc_static(m->seg0_size, 16);
@@ -161,8 +164,10 @@ void load_goalc_references() {
     m->seg_base[0] = seg;
     m->seg_base[1] = 0;  // the debug and top level segments are not loaded
     m->seg_base[2] = 0;
+    // Jak 2 code reads a symbol's value at the symbol - 1: + 1 puts it where the harness keeps it
+    const s32 value_offset = strncmp(m->name, "jak2:", 5) == 0 ? 1 : 0;
     for (u32 k = 0; k < m->n_syms; k++) {
-      m->sym_offsets[k] = (s32)(sym(m->sym_names[k]) - kSymTable);
+      m->sym_offsets[k] = (s32)(sym(m->sym_names[k]) - kSymTable) + value_offset;
     }
     if (m->after_link) {
       m->after_link();  // (AI-assisted) ABI 6 fixtures
