@@ -208,40 +208,15 @@ float one_sided2(const std::vector<Tri>& a, const std::vector<Tri>& b, float flo
 void collect(const tfrag3::TieTree& tree,
              u32 tree_idx,
              int slot,
-             std::unordered_map<u64, Group>* out,
-             bool by_instance) {
-  std::vector<std::pair<u32, s32>> src;
-  if (by_instance) {
-    unpacked_sources(tree, &src);
-  }
+             std::unordered_map<u64, Group>* out) {
   for (const auto& d : tree.static_draws) {
     size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
     for (const auto& g : d.vis_groups) {
+      auto& grp = (*out)[static_key(tree_idx, g.vis_idx_in_pc_bvh, g.tie_proto_idx)];
+      grp.proto = g.tie_proto_idx;
       const size_t n = std::min<size_t>(g.num_inds, tree.unpacked.indices.size() - idx);
-      const u32* ix = tree.unpacked.indices.data() + idx;
-      if (!by_instance) {
-        auto& grp = (*out)[static_key(tree_idx, g.vis_idx_in_pc_bvh, g.tie_proto_idx)];
-        grp.proto = g.tie_proto_idx;
-        strips_to_tris(ix, n, tree.unpacked.vertices, nullptr, &grp.tris[slot], &grp.corners[slot]);
-      } else {
-        // strip by strip (each is one instance's)
-        size_t a = 0;
-        while (a < n) {
-          size_t b = a;
-          while (b < n && ix[b] != UINT32_MAX) {
-            b++;
-          }
-          if (b > a && ix[a] < src.size()) {
-            const s32 mat = src[ix[a]].second;
-            auto& grp = (*out)[mat < 0 ? static_key(tree_idx, g.vis_idx_in_pc_bvh, g.tie_proto_idx)
-                                       : instance_key(tree_idx, (u32)mat)];
-            grp.proto = g.tie_proto_idx;
-            strips_to_tris(ix + a, b - a, tree.unpacked.vertices, nullptr, &grp.tris[slot],
-                           &grp.corners[slot]);
-          }
-          a = b + 1;
-        }
-      }
+      strips_to_tris(tree.unpacked.indices.data() + idx, n, tree.unpacked.vertices, nullptr,
+                     &grp.tris[slot], &grp.corners[slot]);
       idx += g.num_inds;
     }
   }

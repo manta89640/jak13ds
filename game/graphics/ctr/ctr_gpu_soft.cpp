@@ -2419,19 +2419,19 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
   const SoftVerts sv = soft_verts(moved.data(), m.col_off);
   const size_t n = m.vertex_bytes() / 16;
   for (size_t v = 0; v < n && (size_t)morph_offset + 8 * v + 8 <= m.verts.size(); v++) {
-    const uint8_t* rec = &m.verts[morph_offset + 8 * v];
-    const int row = rec[6];
+    const int8_t* rec = (const int8_t*)&m.verts[morph_offset + 8 * v];
+    const int row = rec[3];
     if (!row || row >= CTR_MORPH_ROWS || !rows ||
         std::find(list, list + list_n, row) == list + list_n) {
       continue;
     }
-    const float f = rows[4 * row];
-    int16_t pos[3], d[3];
+    const float f = rows[4 * row], f2 = rows[4 * row + 1];
+    int16_t pos[3];
     uint8_t* const at = (uint8_t*)sv.p((int)v);
     memcpy(pos, at, sizeof(pos));
-    memcpy(d, rec, sizeof(d));
     for (int c = 0; c < 3; c++) {
-      pos[c] = (int16_t)std::clamp((int)std::lround(pos[c] + f * d[c]), -32768, 32767);
+      pos[c] = (int16_t)std::clamp((int)std::lround(pos[c] + f * rec[c] + f2 * rec[4 + c]), -32768,
+                                   32767);
     }
     memcpy(at, pos, sizeof(pos));
   }

@@ -1045,8 +1045,8 @@ static void use_program(int prog) {
       g.wind_rows_id = 0; /* (a switch keeps no uniforms) */
     }
     if (prog == PROG_MESH_MORPH || prog == PROG_MESH_MORPH_FA) {
-      AttrInfo_AddLoader(attr, 3, GPU_SHORT, 3);         /* c3l::MorphVertex delta */
-      AttrInfo_AddLoader(attr, 4, GPU_UNSIGNED_BYTE, 2); /* row, pad */
+      AttrInfo_AddLoader(attr, 3, GPU_BYTE, 4); /* c3l::MorphVertex delta, row */
+      AttrInfo_AddLoader(attr, 4, GPU_BYTE, 4); /* delta2, pad */
       memset(g.morph_slot_id, 0, sizeof(g.morph_slot_id));
     }
     /* (AI-assisted) skin's value (w = 1/127: no mesh shader reads w) */
@@ -5189,14 +5189,18 @@ static inline void raw_sync(void) {
   }
 }
 
-/* attribute buffers 0 and 1 of the draws (n = 1: buffer 1 unused, zero as BufInfo_Init leaves
- * it) at physical addresses pa0 and pa1 */
-static void raw_vertex_buffers(int n, u32 pa0, u32 f00, u32 f01, u32 pa1, u32 f10, u32 f11) {
+/* attribute buffers 0..n-1 of the draws (n <= 3; the others up to 2 zero, as BufInfo_Init leaves
+ * them): want[k] = physical address, flags 0, flags 1 */
+static void raw_vertex_buffers_n(int n, const u32 (*want_pa)[3]) {
   C3D_BufInfo* b = &__C3D_Context.bufInfo;
-  const u32 want[2][3] = {{pa0 - RAW_BUF_BASE, f00, f01},
-                          {n > 1 ? pa1 - RAW_BUF_BASE : 0, n > 1 ? f10 : 0, n > 1 ? f11 : 0}};
-  if (b->bufCount < 1 || b->bufCount > 2 || b->base_paddr != RAW_BUF_BASE) {
-    /* not citro3d's layout of one or two buffers yet: citro3d sends all of it (raw_sync) */
+  u32 want[3][3];
+  for (int k = 0; k < 3; k++) {
+    want[k][0] = k < n ? want_pa[k][0] - RAW_BUF_BASE : 0;
+    want[k][1] = k < n ? want_pa[k][1] : 0;
+    want[k][2] = k < n ? want_pa[k][2] : 0;
+  }
+  if (b->bufCount < 1 || b->bufCount > 3 || b->base_paddr != RAW_BUF_BASE) {
+    /* not citro3d's layout of one to three buffers yet: citro3d sends all of it (raw_sync) */
     BufInfo_Init(b);
     b->bufCount = n;
     for (int k = 0; k < n; k++) {
@@ -5207,7 +5211,7 @@ static void raw_vertex_buffers(int n, u32 pa0, u32 f00, u32 f01, u32 pa1, u32 f1
     __C3D_Context.flags |= C3DiF_BufInfo;
     return;
   }
-  for (int k = 0; k < 2; k++) {
+  for (int k = 0; k < 3; k++) {
     C3D_BufCfg* c = &b->buffers[k];
     if (c->flags[0] != want[k][1] || c->flags[1] != want[k][2]) {
       raw_end(raw_n(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET + 3 * k, want[k], 3, 1));
@@ -5221,6 +5225,10 @@ static void raw_vertex_buffers(int n, u32 pa0, u32 f00, u32 f01, u32 pa1, u32 f1
     c->flags[1] = want[k][2];
   }
   b->bufCount = n;
+}
+static void raw_vertex_buffers(int n, u32 pa0, u32 f00, u32 f01, u32 pa1, u32 f10, u32 f11) {
+  const u32 w[2][3] = {{pa0, f00, f01}, {pa1, f10, f11}};
+  raw_vertex_buffers_n(n, w);
 }
 
 /* attribute buffer 0 (the only one most draws use) at physical address pa */
@@ -7901,13 +7909,64 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
     if (atlas != g.mesh_st_atlas) {
       g.mesh_st_atlas = atlas;
-      mesh_scales_set(atlas, 0);
+      mesh_scales_set(atlas, use_raw(state));
     }
   }
   const MeshSlot* ms = &g.meshes[mesh];
   const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
   g.cur.nofog_draws += g.mesh_nofog && !fa;
   g.cur.fog_alpha_draws += fa;
+  if (use_raw(state)) {
+    /* as ctr_gpu_draw_mesh_prepared's raw path, with the records' buffer and the rows the draw
+     * uses (sent after raw_sync: a program switch makes citro3d send its own copies first) */
+    apply_state(state, mesh_mode, 1);
+    const u32 rec_pa = ms->verts_pa + (u32)morph_offset;
+    if (!ms->col_off) {
+      const u32 w[2][3] = {{ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0)},
+                           {rec_pa, 0x43, RAW_BUF_FLAGS1(8, 2, 0)}};
+      raw_vertex_buffers_n(2, w);
+    } else {
+      const u32 w[3][3] = {{ms->verts_pa, 0x10, RAW_BUF_FLAGS1(12, 2, 0)},
+                           {ms->verts_pa + ms->col_off, 0x2, RAW_BUF_FLAGS1(4, 1, 0)},
+                           {rec_pa, 0x43, RAW_BUF_FLAGS1(8, 2, 0)}};
+      raw_vertex_buffers_n(3, w);
+    }
+    raw_sync();
+    if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+      g.last_clip_id = matrix->id;
+      ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
+      if (mm->fog_gen != g.fog_gen) {
+        float fr[8];
+        mesh_fog_rows(matrix->m, fr);
+        raw_pack_f24(fr, mm->f24 + 12);
+        raw_pack_f24(fr + 4, mm->f24 + 15);
+        mm->fog_gen = g.fog_gen;
+      }
+      raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 18, 0));
+      g.last_mesh_valid = 1;
+    }
+    u32* p = raw_ptr();
+    if (!g.morph_slot_id[0]) {
+      g.morph_slot_id[0] = 1;
+      const u32 z[4] = {0, 0, 0, 0};
+      p = raw_unif(p, g.ps->uloc_morph, z, 4, 1);
+    }
+    for (int i = 0; i < list_n; i++) {
+      const int r = list[i];
+      if (r > 0 && r < CTR_MORPH_ROWS && g.morph_slot_id[r] != rows_id) {
+        g.morph_slot_id[r] = rows_id;
+        u32 v[4] = {0, 0, 0, 0}; /* w z y x */
+        memcpy(&v[2], &rows[4 * r + 1], 4);
+        memcpy(&v[3], &rows[4 * r], 4);
+        p = raw_unif(p, g.ps->uloc_morph + r, v, 4, 1);
+      }
+    }
+    raw_end(p);
+    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    g.cur.draws++;
+    g.cur.triangles += index_count / 3;
+    return;
+  }
   if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
     g.last_clip_id = matrix->id;
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
@@ -7925,7 +7984,8 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     const int r = list[i];
     if (r > 0 && r < CTR_MORPH_ROWS && g.morph_slot_id[r] != rows_id) {
       g.morph_slot_id[r] = rows_id;
-      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_morph + r, rows[4 * r], 0.f, 0.f, 0.f);
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_morph + r, rows[4 * r], rows[4 * r + 1], 0.f,
+                    0.f);
     }
   }
   raw_note_unif();

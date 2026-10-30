@@ -450,15 +450,17 @@ static_assert(sizeof(CullCondPlane) == 16);
 /*!
  * The PS2's tie geomorph (common/custom_data/TieMorph.h). A morph group (TieLodGroup with
  * group_mid > 0) has three versions: RunLod kRunLodNear (geometry 0), kRunLodMid (geometry 2), both
- * in near chunks, and kRunLodFar (geometry 3). Each of its instances has a morph factor per band,
- * f = clamp((d - start) * rlen, 0, 1) with d its sphere's view depth minus its radius: band 1 moves
- * geometry 0's vertices onto geometry 2's surface by the mid-plane, band 2 geometry 2's onto
- * geometry 3's by the far-plane. Every version draws the same surface: a group may show the near
- * version while the PS2 would draw geometry 2 or 3, and the mid version once no instance is nearer
- * than the mid-plane, the far version beyond the far-plane.
+ * in near chunks, and kRunLodFar (geometry 3). Each instance has two morph factors, f_b = clamp((d
+ * - start_b) * rlen_b, 0, 1) with d its distance minus its radius: band 1 (from the near-plane)
+ * moves geometry 0's own moving vertices onto geometry 2's surface by the mid-plane, band 2 (from
+ * the mid-plane) moves geometry 2 onto geometry 3's surface by the far-plane, and geometry 0's
+ * vertices with it (with the point of geometry 2 they reached). Every version draws the same
+ * surface: a group shows the near version within the mid-plane of its nearest point, the mid
+ * version within the far-plane, else the far version.
  * A near chunk with moving vertices (MorphChunk) has a MorphVertex per vertex (at records_offset,
- * the runtime's mesh tail as the envmapped tie normals'); the vertex at morph factor f of its row is
- * at pos + f * delta. ExtHeader::size >= kExtHeaderMorphSize, then this at ext_offset +
+ * the runtime's mesh tail as the envmapped tie normals'); the vertex is at pos + (f_1 * delta + f_2 *
+ * delta2) * delta_scale with its row's factors. ExtHeader::size >= kExtHeaderMorphSize, then this
+ * at ext_offset +
  * kExtHeaderV24Size.
  */
 constexpr uint32_t kExtHeaderMorphSize = 160;
@@ -467,7 +469,7 @@ struct ExtMorph {
   uint32_t insts_offset;      // absolute
   uint32_t chunk_count;       // MorphChunk[]
   uint32_t chunks_offset;     // absolute
-  uint32_t row_count;         // uint32_t[]: inst | band << 30 (band 1, 2), the chunks' rows
+  uint32_t row_count;         // uint32_t[]: MorphInst index, the chunks' rows
   uint32_t rows_offset;       // absolute
   uint32_t group_mid_offset;  // float[ExtHeader::lod_group_count]: mid-plane (game units), 0: none
   uint32_t draw_rows_size;    // uint8_t[]: per morph chunk draw n, then the n rows its vertices use
@@ -490,13 +492,16 @@ struct MorphChunk {
   uint32_t row_first;       // ExtMorph rows [row_first, row_first + row_count): rows 1..row_count
   uint32_t row_count;
   uint32_t draw_rows;       // its draws' lists in ExtMorph's draw rows, from here in draw order
-  uint32_t records_offset;  // MorphVertex[vertex_count] (absolute; after the chunk's vertices)
+  uint32_t records_offset;  // MorphVertex[vertex_count] (absolute)
+  float delta_scale;        // MorphVertex deltas x this = the chunk's quantized units
+  uint32_t pad;
 };
-static_assert(sizeof(MorphChunk) == 24);
+static_assert(sizeof(MorphChunk) == 32);
 struct MorphVertex {
-  int16_t delta[3];  // in the chunk's quantized units
-  uint8_t row;       // 0: doesn't move
-  uint8_t pad;
+  int8_t delta[3];   // band 1 (x MorphChunk::delta_scale)
+  int8_t row;        // 0: doesn't move
+  int8_t delta2[3];  // band 2
+  int8_t pad;
 };
 static_assert(sizeof(MorphVertex) == 8);
 

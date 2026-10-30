@@ -708,48 +708,56 @@ geometry 0 only, unmorphed).
   (`common/custom_data/TieMorph.h`: per geometry and tie tree each packed vertex's offset, the
   prototypes' dists and rdists, the instances' spheres). The converter reads it from the .fr3's
   folder or `--tie-morph-dir` (`--no-tie-morph`: without it, as before).
-- **Versions.** With the data every static tie instance is a LOD group of its own (the PS2 switches
-  each instance by its own distance; a group of a visibility node's instances would show geometry 0
-  for an instance already past the mid-plane, whose geometry 2 vertices would then move on an
-  unflattened surface) and gets a third version, geometry 2 (RunLod kRunLodMid), in the near chunks
-  with its near version (geometry 0); its far version stays geometry 3. TieLodGroup::dist is the
-  PS2 far-plane, ExtMorph's group mid-plane the PS2's, the group's sphere holds the instance's PS2
-  sphere. Wind instances keep the screen-space switch (no morph: the wind program has no room for
-  the rows).
-- **Morph per vertex.** A near chunk vertex that moves gets a MorphVertex (delta in the chunk's
-  quantized units, its row): geometry 0's moving vertices are band 1, geometry 2's band 2, and the
-  same vertices in geometry 0 (still at rest there while the instance is nearer than the mid-plane)
-  band 2 as well, so geometry 0 and 2 share them. A chunk's records (MorphChunk::records_offset,
-  8 bytes per vertex, after its vertices in the file) are its mesh's tail at runtime, as the
-  envmapped tie normals (a chunk with both: the records, then the normals, 12 bytes per vertex)
-  (CtrLevelData::tail_k / tail_file: read, streamed and freed with the mesh, after the color stream's
-  split vertices). A chunk's rows are its (instance, band) pairs, at most 79 (the converter puts a
-  near cell's groups in bins of their own above that); per draw the rows its vertices use (draw
-  rows).
+- **Versions.** A static tie group with the data (a prototype's instances in one visibility node,
+  as before) gets a third version, geometry 2 (RunLod kRunLodMid), in the near chunks with its near
+  version (geometry 0); its far version stays geometry 3. TieLodGroup::dist is the PS2 far-plane,
+  ExtMorph's group mid-plane the PS2's, the group's sphere holds its instances' PS2 spheres. Wind
+  instances keep the screen-space switch (the wind program has no room for the rows).
+- **Two bands per vertex, one surface for every version.** Each moving vertex has two offsets,
+  band 1 (near-plane to mid-plane) and band 2 (mid-plane to far-plane): geometry 2's moving vertices
+  move onto geometry 3's surface in band 2; geometry 0's own moving vertices move onto geometry 2's
+  surface in band 1 and then with the point of it they reached in band 2 (its triangle's corners'
+  band 2 offsets by the point's barycentric weights); geometry 0's vertices that are geometry 2's
+  moving ones move as those. So at any distance geometry 0, 2 and (beyond the far-plane) 3 draw the
+  PS2's surface, and a group may show any version its instances are past the start of: by its
+  nearest point (its sphere), each instance morphing by its own distance. Geometry 2's vertices take
+  geometry 0's colors where they are (all of them are geometry 0 vertices; village1: 2.6k of 229k
+  differed): the switch from geometry 0 to 2 changes nothing but the triangles. The PS2 does the same
+  per instance; groups (up to 8 instances) keep the runs and draws of the old layout.
+- **Records.** A near chunk vertex gets a MorphVertex: int8 delta[3], row, int8 delta2[3], pad (8
+  bytes; x MorphChunk::delta_scale, the chunk's largest delta / 127, in its quantized units). A
+  chunk's records (MorphChunk::records_offset) are its mesh's tail at runtime, as the envmapped tie
+  normals (a chunk with both: the records, then the normals) (CtrLevelData::tail_k / tail_file:
+  read, streamed and freed with the mesh, after the color stream's split vertices). A chunk's rows
+  are its instances, at most 79 (the converter puts a near cell's groups in bins of their own above
+  that); per draw the rows its vertices use (draw rows).
 - **Runtime.** A morph group is drawn with its near version while the distance to its sphere is
   under the mid-plane x k, its mid version under the far-plane x k, else its far version (k:
-  detail_scale, x 1 .. 0.5 with auto_detail's tie relief); no hysteresis: every version draws the
-  same morphed surface, but not the same vertex colors (geometry 2's and 3's own), so the title's
-  flight keeps titlemove's rule: no version switch nearer than kTitleLodMin (the near version, still
-  morphing, up to 100 m; host title start: 0 switches in view nearer than 99.9 m, 334 in the first
-  2 s without it), and a group drawn far for want of its data stays far while in view (1 s). Each visible chunk's rows get the PS2's factor of their instance, f =
-  clamp((d - start x k) x rlength / k, 0, 1), d the distance to its sphere minus its radius. The
-  PS2 takes the view depth instead (a turn of the camera changes it); the distance is never less, so
-  an instance off the screen's center morphs as if up to 1 / cos(its angle) farther (the edges of
-  the gameplay view ~1.27x, the title's wider one ~1.6x), and the near data that streaming brings
-  within the far-plane by distance is always there when a version needs it.
-  and its draws go through `ctr_gpu_draw_mesh_morph` (platform/3ds/shaders/ctr_mesh_morph(_fa).v.pica:
-  ctr_mesh_opt with pos + f x delta first, 13 instructions; the rows a draw uses are sent when the
-  GPU doesn't have them). Near chunk data is needed within the far-plane (+ radius): StreamChunk
-  need_e 0, the unit bound from need_d. Colors: each vertex keeps its own (as the PC), and geometry
-  2's vertices their geometry's (the PS2's); the PS2 also blends a moving vertex's color toward its
-  neighbours' (the .fr3 doesn't have the indices).
+  detail_scale, x 1 .. 0.5 with auto_detail's tie relief), no hysteresis. On the title flight the
+  far version not nearer than kTitleLodMin (100 m): geometry 3's colors are the converter's fit
+  (lod-light), not the PS2's color morph, and titlemove's flight showed those steps; the PS2 itself
+  has no title rule (draw-inline-array-instance-tie uses only the prototypes' dists;
+  prototype-bucket-recalc-fields: rlength-near = 1 / (mid - near), rlength-mid = 1 / (far - mid), so
+  the morph completes exactly at each switch). A group drawn far for want of its data stays far
+  while in view (1 s). A chunk's rows (f_1, f_2 x delta_scale per instance, f_b = clamp((d - start_b
+  x k) x rlength_b / k, 0, 1), d the distance to its sphere minus its radius) are made at its first
+  morph draw of the frame. The PS2 takes the view depth instead (a turn of the camera changes it);
+  the distance is never less, so an instance off the screen's center morphs as if up to 1 / cos(its
+  angle) farther (the edges of the gameplay view ~1.27x, the title's wider one ~1.6x), and the near
+  data that streaming brings within the far-plane by distance is always there when a version needs
+  it. Its draws go through `ctr_gpu_draw_mesh_morph` (platform/3ds/shaders/ctr_mesh_morph(_fa).v.pica:
+  ctr_mesh_opt with pos + f_1 x delta + f_2 x delta2 first, 15 instructions; the raw command path:
+  a third attribute buffer, the rows a draw uses sent when the GPU doesn't have them), after the
+  other draws of their list (each switch between the morph and the mesh program sends citro3d's
+  whole context: 163 switches per frame interleaved, ~30 so). Near chunk data is needed within the
+  far-plane (+ radius; on the title 100 m): StreamChunk need_e 0, the unit bound from need_d.
 - Run spheres and the chunk's sphere hold the moved vertices. ExtHeader size >= kExtHeaderMorphSize
   (160): `ExtMorph {inst_count, insts_offset, chunk_count, chunks_offset, row_count, rows_offset,
   group_mid_offset, draw_rows_size, draw_rows_offset, pad}` at ext_offset + 120; `MorphInst {float
   c[3], r, start[2], rlen[2]}`, `MorphChunk {chunk, vertex_count, row_first, row_count, draw_rows,
-  records_offset}`, `MorphVertex {s16 delta[3]; u8 row, pad}`, rows `inst | band << 30`, draw rows
-  per draw of a morph chunk `n, row...` (u8).
+  records_offset, float delta_scale, pad}`, rows: MorphInst indices, draw rows per draw of a morph
+  chunk `n, row...` (u8). Files with the older one-band records are refused (the ties switch as
+  before).
 - Converter log: `tie geomorph (the PS2's): N groups with a mid version (geo 2, T tris), I instances;
   C near chunks with moving vertices (...; at most R rows, r per chunk, r per draw of D draws)`.
 

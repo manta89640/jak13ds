@@ -1487,3 +1487,18 @@ Vertex program 13 instructions for the near chunks' draws (10 before), +8 bytes 
 Not done: wind instances (palms) keep the screen-space switch (the wind program has no room left for
 the rows); the PS2's color morph of the moving vertices (the .fr3 has no indices of the colors they
 blend to); Jak II (Haven City would need ~7x the near data at the PS2's distances).
+
+**Title flight, render thread (Azahar, emu-final, same build, late flight window).** The first
+version cost 10.7 -> 14.9 ms in the level lists (per-instance groups: 14k runs, 1372 draws walked;
+the title's 100 m kept geometry 0). Now: groups per visibility node again (exact through the
+two-band morph), the morph draws on the raw command path and after the other draws of their list
+(program switches 163 -> 33 per frame), each chunk's rows made at its first morph draw:
+
+| late window | build | l1-tfrag | lists | runs | draws walked | triangles |
+|---|---|---|---|---|---|---|
+| same build, no morph (`--no-tie-morph`) | 31.9 ms* | 21.5 | 9.7 | 8243 | 1622 | 237k |
+| with the morph | 30.1 ms | 20.6 | 8.7 | 9846 | 1554 | 185k |
+| the merged first version (lead's h-j1) | 38.0 ms | 27.7 | 14.9 | 14149 | 1372 | 195k |
+
+(*a build with timing counters: ~+0.5 ms.) The rest of the window's 30 ms is the base, not the
+morph: the same build without it takes as long.

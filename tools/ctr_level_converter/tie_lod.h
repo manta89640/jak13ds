@@ -42,22 +42,12 @@ inline u64 static_key(u32 tree, u32 vis, u32 proto) {
 inline u64 wind_key(u32 tree, u32 instance) {
   return (1ull << 63) | ((u64)tree << 40) | instance;
 }
-// a static instance on its own (the PS2's geomorph: each instance switches by its own distance),
-// by its matrix in the tree's packed_vertices
-inline u64 instance_key(u32 tree, u32 matrix) {
-  return (1ull << 62) | ((u64)tree << 40) | matrix;
-}
 inline u32 key_tree(u64 key) {
   return (u32)((key >> 40) & 0x3fffff);
 }
 
-/*! The groups' triangles of an unpacked tie tree (slot 0: near geometry, 1: far); by_instance: the
- * static instances' each a group of their own (instance_key). */
-void collect(const tfrag3::TieTree& tree,
-             u32 tree_idx,
-             int slot,
-             std::unordered_map<u64, Group>* out,
-             bool by_instance = false);
+/*! The groups' triangles of an unpacked tie tree (slot 0: near geometry, 1: far). */
+void collect(const tfrag3::TieTree& tree, u32 tree_idx, int slot, std::unordered_map<u64, Group>* out);
 
 /*!
  * How much the far geometry's shape differs from the near one's: the larger of the two one-sided

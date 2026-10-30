@@ -5,7 +5,7 @@
 .fvec clip[6]       ; as ctr_mesh_opt.v.pica
 .fvec scales
 .fvec fog1
-.fvec morph[80]     ; per row: x = the morph factor
+.fvec morph[80]     ; per row: x, y = the morph factors of band 1, 2
 
 .out outpos position
 .out outtc0 texcoord0.xy
@@ -15,15 +15,17 @@
 .alias inpos v0
 .alias intex v1
 .alias inclr v2
-.alias indelta v3
-.alias inrow v4
+.alias indelta v3   ; xyz: band 1 offset, w: row
+.alias indelta2 v4  ; xyz: band 2 offset
 
 .entry main_ctr_mesh_morph_fa
 .proc main_ctr_mesh_morph_fa
-  mova a0.x, inrow.x
+  mova a0.x, indelta.w
   mul outtc0, scales.xxxx, intex.xyxy
-  mul r1, morph[a0.x].xxxx, indelta
-  add r1, inpos, r1
+  mul r1.xyz, morph[a0.x].xxxx, indelta
+  mul r2.xyz, morph[a0.x].yyyy, indelta2
+  add r1.xyz, r1, r2
+  add r1.xyz, inpos, r1
   dph r0.x, r1, clip[5]
   dph r0.y, r1, clip[4]
   dph outpos.x, r1, clip[0]

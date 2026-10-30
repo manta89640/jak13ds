@@ -725,9 +725,9 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
 int ctr_gpu_wind_ready(void);
 /* The PS2's tie geomorph (c3l::ExtMorph): a level mesh draw (as ctr_gpu_draw_mesh_prepared) whose
  * vertices move by their row's morph factor, platform/3ds/shaders/ctr_mesh_morph.v.pica. The mesh
- * holds from byte morph_offset (a multiple of 16) a c3l::MorphVertex per vertex (8 bytes: int16
- * delta[3] in its quantized units, uint8 row, pad): the vertex is drawn at pos + f * delta, f =
- * rows[4 * row] (row 0: 0). list: the rows the draw's vertices use (1 .. CTR_MORPH_ROWS - 1);
+ * holds from byte morph_offset (a multiple of 16) a c3l::MorphVertex per vertex (8 bytes: int8
+ * delta[3], row, delta2[3], pad): the vertex is drawn at pos + f * delta + f2 * delta2, f =
+ * rows[4 * row], f2 = rows[4 * row + 1] (row 0: 0; the caller folds the deltas' scale in). list: the rows the draw's vertices use (1 .. CTR_MORPH_ROWS - 1);
  * rows_id: new whenever the rows change (rows the GPU has for this id aren't sent again). Without
  * the program it is drawn at rest. */
 #define CTR_MORPH_ROWS 80

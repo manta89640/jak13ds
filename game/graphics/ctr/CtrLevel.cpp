@@ -4371,13 +4371,13 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   for (size_t i = 0; ok && i < lev->morph_chunks.size(); i++) {
     const auto& mc = lev->morph_chunks[i];
     ok = mc.chunk < lev->chunks.size() && lev->chunk_morph[mc.chunk] < 0 && mc.records_offset &&
+         mc.delta_scale >= 1.f &&
          mc.vertex_count == lev->chunks[mc.chunk].vertex_count &&
          !(mc.chunk < lev->chunk_normals.size() && lev->chunk_normals[mc.chunk] >= 0) &&
          mc.row_count < c3l::kMorphRows && mc.row_first + mc.row_count <= lev->morph_rows.size();
     for (u32 r = 0; ok && r < mc.row_count; r++) {
       const u32 row = lev->morph_rows[mc.row_first + r];
-      const u32 band = row >> 30;
-      ok = (row & 0x3fffffffu) < lev->morph_insts.size() && (band == 1 || band == 2);
+      ok = row < lev->morph_insts.size();
     }
     // its draws' row lists
     const auto& ch = ok ? lev->chunks[mc.chunk] : lev->chunks[0];
@@ -9728,17 +9728,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
       if (morph_on && lev.group_mid[g] > 0) {
-        // the PS2's rule (c3l::ExtMorph), by the distance to the group's sphere (no instance is
-        // nearer): the near version within the mid-plane, the mid version within the far-plane.
-        // Every version draws the instances' morphed surface: no hysteresis. The versions' own
-        // vertex colors still differ: the title's flight (titlemove) switches none nearer than
-        // kTitleLodMin, the near version up to there
+        // the PS2's rule (c3l::ExtMorph) by the group's nearest point (its sphere: no instance is
+        // nearer): the near version within the mid-plane, the mid version within the far-plane;
+        // each instance morphs by its own distance, and every version draws that surface (geometry
+        // 2 with geometry 0's colors): no hysteresis. Geometry 3 has colors of its own (fitted to
+        // the near surface): the title's flight (titlemove) has none nearer than kTitleLodMin
         const float dv = std::sqrt(dx2(lg.bsphere)) - lg.bsphere[3];
         const float tmin = lev.lod_min_e * k;
-        u8 v = !(kd > 0)                                            ? 2
-               : dv < std::max(lev.group_mid[g] * kd, tmin)         ? 0
-               : dv < std::max(lg.dist * kd, tmin)                  ? 1
-                                                                    : 2;
+        u8 v = !(kd > 0)                                    ? 2
+               : dv < lev.group_mid[g] * kd                 ? 0
+               : dv < std::max(lg.dist * kd, tmin)          ? 1
+                                                            : 2;
 #ifndef __3DS__
         if (morph_ab == 1 && (rs.frame_idx & 1)) {
           v = 0;  // (host A/B: every group's near version, the surface the same)
@@ -10800,48 +10800,51 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // start) * rlength, 0, 1)), the distances x morph_k
   const bool morph_draws = !lev.chunk_morph.empty() && !lev.group_mid.empty() &&
                            lev.draw_morph_rows.size() == lev.draws.size();
+  // (each chunk's on its first morph draw: most visible chunks have none drawn)
+  const float morph_kd = lev.morph_k;
   if (morph_draws) {
-    const float kd = lev.morph_k;
-    const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
     size_t n = 0;
-    for (const auto& vc : m_visible) {
-      const s32 mi = lev.chunk_morph[vc.chunk];
-      n += mi >= 0 ? 4 * (lev.morph_chunks[mi].row_count + 1) : 0;
-    }
-    m_morph_rows.resize(n);
     m_morph_row_of.assign(m_visible.size(), -1);
     m_morph_row_id.assign(m_visible.size(), 0);
-    float* out = m_morph_rows.data();
-    size_t at = 0;
     for (size_t slot = 0; slot < m_visible.size(); slot++) {
       const s32 mi = lev.chunk_morph[m_visible[slot].chunk];
-      if (mi < 0) {
-        continue;
+      if (mi >= 0) {
+        m_morph_row_of[slot] = (s32)n;
+        n += 4 * (lev.morph_chunks[mi].row_count + 1);
       }
-      const auto& mc = lev.morph_chunks[mi];
-      m_morph_row_of[slot] = (s32)at;
-      m_morph_row_id[slot] = ++m_morph_rows_id ? m_morph_rows_id : ++m_morph_rows_id;
-      float* row = out + at;
-      row[0] = row[1] = row[2] = row[3] = 0.f;
-      const u32* keys = &lev.morph_rows[mc.row_first];
-      for (u32 r = 0; r < mc.row_count; r++) {
-        const u32 key = keys[r];
-        const auto& in = lev.morph_insts[key & 0x3fffffffu];
-        const int b = (int)(key >> 30) - 1;
-        const float ex = in.c[0] - px, ey = in.c[1] - py, ez = in.c[2] - pz;
-        const float d = std::sqrt(ex * ex + ey * ey + ez * ez) - in.r;
-        const float f = kd > 0 ? (d - in.start[b] * kd) * in.rlen[b] / kd : 0.f;
-        row[4 * (r + 1)] = std::clamp(f, 0.f, 1.f);
-#ifndef __3DS__
-        static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
-        if (morph_ab == 2 && (rs.frame_idx & 1)) {
-          row[4 * (r + 1)] = 0.f;
-        }
-#endif
-      }
-      at += 4 * (mc.row_count + 1);
     }
+    m_morph_rows.resize(n);
   }
+  auto morph_rows_of = [&](int slot) -> const float* {
+    float* row = &m_morph_rows[m_morph_row_of[slot]];
+    if (m_morph_row_id[slot]) {
+      return row;
+    }
+    m_morph_row_id[slot] = ++m_morph_rows_id ? m_morph_rows_id : ++m_morph_rows_id;
+    const auto& mc = lev.morph_chunks[lev.chunk_morph[m_visible[slot].chunk]];
+    const float kd = morph_kd;
+    const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
+    row[0] = row[1] = row[2] = row[3] = 0.f;
+    const u32* keys = &lev.morph_rows[mc.row_first];
+    for (u32 r = 0; r < mc.row_count; r++) {
+      const auto& in = lev.morph_insts[keys[r]];
+      const float ex = in.c[0] - px, ey = in.c[1] - py, ez = in.c[2] - pz;
+      const float d = std::sqrt(ex * ex + ey * ey + ez * ez) - in.r;
+      float* rr = row + 4 * (r + 1);
+      for (int b = 0; b < 2; b++) {
+        const float f = kd > 0 ? (d - in.start[b] * kd) * in.rlen[b] / kd : 0.f;
+        rr[b] = std::clamp(f, 0.f, 1.f) * mc.delta_scale;
+      }
+      rr[2] = rr[3] = 0.f;
+#ifndef __3DS__
+      static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
+      if (morph_ab == 2 && (rs.frame_idx & 1)) {
+        rr[0] = rr[1] = 0.f;
+      }
+#endif
+    }
+    return row;
+  };
   // wind ties: their draws through ctr_gpu_draw_mesh_wind with the chunk's slot rows
   const bool wind_on = lev.wind_mesh >= 0 && lev.chunk_wind.size() == lev.chunks.size() &&
                        lev.draw_wind.size() == lev.draws.size() &&
@@ -10893,7 +10896,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                                                      : UINT32_MAX;
     const bool morph = mlist != UINT32_MAX && lev.morph_draw_rows[mlist] &&
                        m_morph_row_of[slot] >= 0;
-    const float* const mrows = morph ? &m_morph_rows[m_morph_row_of[slot]] : nullptr;
+    const float* const mrows = morph ? morph_rows_of(slot) : nullptr;
     const int moff = morph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
 #ifdef __3DS__
     // (AI-assisted, gpu-rt) the pass's draws go to the backend in one list
@@ -11146,6 +11149,28 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
   };
+  // the tie geomorph's draws after the others of their list: each switch between the morph program
+  // and the mesh program sends citro3d's whole context again (163 per frame interleaved, ~20 so)
+  const u32* const morph_list = morph_draws ? lev.draw_morph_rows.data() : nullptr;
+  auto is_morph = [&](u32 di) {
+    return morph_list[di] != UINT32_MAX && lev.morph_draw_rows[morph_list[di]] &&
+           !(wind_on && lev.draw_wind[di]) && (lev.draw_env.empty() || lev.draw_env[di] < 0);
+  };
+  auto walk_split = [&](const std::vector<u32>& list) {
+    if (!morph_list) {
+      walk(list);
+      return;
+    }
+    m_ph_walked += list.size();
+    for (int pass = 0; pass < 2; pass++) {
+      for (u32 di : list) {
+        const int slot = vslot[draw_chunk[di]];
+        if (slot >= 0 && !vchunks[slot].vista && is_morph(di) == (pass == 1)) {
+          draw(di);
+        }
+      }
+    }
+  };
   if (early_depth) {
     for (u8 band = 0; band < 3; band++) {
       for (u32 di : *main_lists[0]) {
@@ -11156,9 +11181,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
   } else {
-    walk(*main_lists[0]);
+    walk_split(*main_lists[0]);
   }
-  walk(*main_lists[1]);
+  walk_split(*main_lists[1]);
   if (!m_wind_calls.empty()) {
 #ifdef __3DS__
     flush_calls(0);
