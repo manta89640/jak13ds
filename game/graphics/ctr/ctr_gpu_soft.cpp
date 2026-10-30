@@ -111,6 +111,7 @@ struct B {
   double copy_rows = 0;  // (AI-assisted) screen copy: 8-column tile rows (50 = the whole screen)
   double unif = 0;       // (AI-assisted) skin / env vertex uniforms uploaded (vectors), as the
                          // 3DS backend caches them
+  double nopix = 0;  // level mesh triangles on screen without a pixel
   double sub = 0;  // (AI-assisted) level mesh triangles submitted (what the 3DS GPU's vertex stage
                    // gets: before clipping and back face culling; tris counts the drawn ones)
 };
@@ -132,6 +133,17 @@ using DrawKey = std::tuple<std::string, int, int, int>;
 std::map<DrawKey, std::array<double, 5>> draw_px;
 std::array<double, 5>* cur_dp = nullptr;
 double cull_px[2] = {0, 0};  // level mesh fragments in draws without / with CTR_TCC_CULL_BACK
+// level mesh triangles by what they give the picture (CTR_SOFT_STATS): near-clipped (crude here),
+// culled back faces, back faces drawn (would be culled), outside the screen, on screen without a
+// pixel center, 1-4 fragments, fragments but none passing the depth test, passing but no pixel of
+// the final frame, a pixel of the final frame
+enum { TC_FLAT, TC_NEAR, TC_CULLED, TC_BACK_DRAWN, TC_OFF, TC_NOPIX, TC_TINY, TC_ZFAIL, TC_HIDDEN, TC_SHOWN,
+       TC_N };
+double tri_class[TC_N] = {};
+uint32_t tri_id = 0;         // the level mesh triangle being drawn (0: none)
+uint32_t tri_frags = 0, tri_zpass = 0;
+std::vector<uint32_t> owner;  // per pixel: the mesh triangle that wrote it last
+std::vector<uint8_t> zpassed; // per mesh triangle of the frame: a fragment passed the depth test
 bool draw_px_on() {
   static const bool on = getenv("CTR_SOFT_DRAW_PX") != nullptr;
   return on;
@@ -147,6 +159,7 @@ int enabled() {
     const char* e = getenv("CTR_SOFT_STATS");
     every = e ? atoi(e) : 0;
     od.assign(400 * 240, 0);
+    owner.assign(400 * 240, 0);
   }
   return every;
 }
@@ -485,6 +498,7 @@ void shade_pixel(const ctr_draw_state& st,
       softstats::cur->px_invis++;
     }
     if (softstats::cur_tp) softstats::cur_tp->first++;
+    if (softstats::tri_id) softstats::tri_frags++;
     if (softstats::cur_dp) {
       (*softstats::cur_dp)[0]++;
       softstats::cull_px[(*softstats::cur_dp)[4] != 0]++;
@@ -522,6 +536,7 @@ void shade_pixel(const ctr_draw_state& st,
   }
   if (ss_on) {
     if (softstats::cur_dp) (*softstats::cur_dp)[1]++;
+    if (softstats::tri_id) softstats::tri_zpass++;
     softstats::cur->px_z++;
     if (st.blend != CTR_BLEND_OFF) softstats::cur->px_blend++;
   }
@@ -530,6 +545,9 @@ void shade_pixel(const ctr_draw_state& st,
   }
   if (st.flags & CTR_STATE_NO_COLOR) {
     return;
+  }
+  if (ss_on && !s_target.rt && st.blend == CTR_BLEND_OFF) {
+    softstats::owner[px + py * kW] = softstats::tri_id;
   }
   uint8_t* d = &s_target.color[4 * idx];
   float as = std::min(a / 128.f, 2.f);
@@ -707,6 +725,25 @@ void ctr_gpu_frame_end(void) {
   ctr_gpu_rt_end();  // (AI-assisted) impostors: a render to texture left open
   ctr_gpu_run_sky_hook();
   g_soft.frame++;
+  if (softstats::enabled()) {
+    // the mesh triangles that own a pixel of the final frame
+    auto& zp = softstats::zpassed;
+    std::vector<uint8_t> shown(zp.size(), 0);
+    for (uint32_t o : softstats::owner) {
+      if (o && o <= shown.size()) shown[o - 1] = 1;
+    }
+    for (size_t i = 0; i < zp.size(); i++) {
+      if (!zp[i]) continue;
+      if (shown[i]) {
+        softstats::tri_class[softstats::TC_SHOWN]++;
+      } else {
+        softstats::tri_class[softstats::TC_HIDDEN]++;
+      }
+      if (zp[i] == 2) softstats::tri_class[softstats::TC_TINY]++;
+    }
+    zp.clear();
+    std::fill(softstats::owner.begin(), softstats::owner.end(), 0);
+  }
   if (softstats::enabled() && ++softstats::frames >= softstats::every) {
     const double n = softstats::frames;
     std::string line = fmt::format("[softstats] frame {} ({} frames, per frame):", g_soft.frame, softstats::frames);
@@ -717,12 +754,25 @@ void ctr_gpu_frame_end(void) {
           name, b.draws / n, b.tris / n, b.px / n, b.px / n / 96000.0, b.px_atest / n, b.px_z / n, b.px_blend / n, b.px_invis / n, b.px_proc / n, b.tex_changes / n, b.state_changes / n, b.prog_switches / n);
       if (b.copy_rows) line += fmt::format(" copyrows {:5.1f}", b.copy_rows / n);
       if (b.unif) line += fmt::format(" unif {:6.0f}", b.unif / n);
-      if (b.sub) line += fmt::format(" sub {:8.0f}", b.sub / n);
+      if (b.sub) line += fmt::format(" sub {:8.0f} nopix {:8.0f}", b.sub / n, b.nopix / n);
       tot.sub += b.sub;
       tot.draws += b.draws; tot.tris += b.tris; tot.px += b.px; tot.px_blend += b.px_blend; tot.px_invis += b.px_invis; tot.px_z += b.px_z; tot.prog_switches += b.prog_switches; tot.tex_changes += b.tex_changes;
     }
     line += fmt::format("\n  {:<14} draws {:6.1f} tris {:8.0f} px {:8.0f} ({:5.2f} scr) zpass {:8.0f} blend {:8.0f} invis {:8.0f} texchg {:5.1f} progsw {:4.1f}", "TOTAL", tot.draws / n, tot.tris / n, tot.px / n, tot.px / n / 96000.0, tot.px_z / n, tot.px_blend / n, tot.px_invis / n, tot.tex_changes / n, tot.prog_switches / n);
     line += fmt::format(" level mesh tris submitted {:.0f}", tot.sub / n);
+    {
+      const double* c = softstats::tri_class;
+      line += fmt::format(
+          "\n  level mesh tris: without area in the file {:.0f} (in the classes after too); "
+          "near-clipped {:.0f}, culled back faces {:.0f} (back faces drawn "
+          "{:.0f}, in the classes after too), off screen {:.0f}, no pixel {:.0f}, every fragment "
+          "failing the depth test {:.0f}, passing but overdrawn {:.0f}, in the final picture "
+          "{:.0f} (of the passing: {:.0f} with 1-4 fragments)",
+          c[softstats::TC_FLAT] / n, c[softstats::TC_NEAR] / n, c[softstats::TC_CULLED] / n, c[softstats::TC_BACK_DRAWN] / n,
+          c[softstats::TC_OFF] / n, c[softstats::TC_NOPIX] / n, c[softstats::TC_ZFAIL] / n,
+          c[softstats::TC_HIDDEN] / n, c[softstats::TC_SHOWN] / n, c[softstats::TC_TINY] / n);
+      std::fill(std::begin(softstats::tri_class), std::end(softstats::tri_class), 0.0);
+    }
     // the textures with the most fragments in sprite / merc buckets
     std::vector<std::pair<double, std::pair<std::string, int>>> top;
     for (auto& [k, v] : softstats::tex_px) top.push_back({v.first, k});
@@ -1765,10 +1815,14 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
     float fog[3] = {0.f, 0.f, 0.f};
     float tex_q[3];
     bool ok = true;
+    int64_t ip[3][3];
     for (int k = 0; k < 3; k++) {
       const uint8_t* src = &verts[16 * indices[i + k]];
       int16_t pos[3], st[2];
       memcpy(pos, src, 6);
+      ip[k][0] = pos[0];
+      ip[k][1] = pos[1];
+      ip[k][2] = pos[2];
       memcpy(st, src + 8, 4);
       float in[4] = {(float)pos[0], (float)pos[1], (float)pos[2], 1.f};
       float c[4];
@@ -1792,16 +1846,37 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       tri[k].b = src[14];
       tri[k].a = src[15];
     }
+    const bool ss = softstats::enabled() != 0;
+    if (ss) {
+      // no area in the file's own positions: no pixel from any view
+      const int64_t e1[3] = {ip[1][0] - ip[0][0], ip[1][1] - ip[0][1], ip[1][2] - ip[0][2]};
+      const int64_t e2[3] = {ip[2][0] - ip[0][0], ip[2][1] - ip[0][1], ip[2][2] - ip[0][2]};
+      if (e1[1] * e2[2] - e1[2] * e2[1] == 0 && e1[2] * e2[0] - e1[0] * e2[2] == 0 &&
+          e1[0] * e2[1] - e1[1] * e2[0] == 0) {
+        softstats::tri_class[softstats::TC_FLAT]++;
+      }
+    }
     if (!ok) {
+      if (ss) softstats::tri_class[softstats::TC_NEAR]++;
       continue;
     }
+    const float area = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
+                       (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+    const bool back = g_soft_cull_flip ? area > 0 : area < 0;
     // (AI-assisted) cull_ties
     if (state && (state->tcc & CTR_TCC_CULL_BACK) && g_soft_cull_enable) {
-      const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
-                      (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
-      if (g_soft_cull_flip ? a > 0 : a < 0) {
+      if (back) {
+        if (ss) softstats::tri_class[softstats::TC_CULLED]++;
         continue;
       }
+    }
+    if (ss && back) softstats::tri_class[softstats::TC_BACK_DRAWN]++;
+    if (ss && (std::max({tri[0].x, tri[1].x, tri[2].x}) < -1.f ||
+               std::min({tri[0].x, tri[1].x, tri[2].x}) > 1.f ||
+               std::max({tri[0].y, tri[1].y, tri[2].y}) < -1.f ||
+               std::min({tri[0].y, tri[1].y, tri[2].y}) > 1.f)) {
+      softstats::tri_class[softstats::TC_OFF]++;
+      continue;
     }
     // behind the far plane / outside z
     if ((tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
@@ -1812,7 +1887,23 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       tri[k].s *= tex_q[k];
       tri[k].t *= tex_q[k];
     }
+    if (ss && !s_target.rt) {
+      softstats::zpassed.push_back(0);
+      softstats::tri_id = (uint32_t)softstats::zpassed.size();
+      softstats::tri_frags = softstats::tri_zpass = 0;
+    }
     raster_triangle(*state, tri, true, fog, nullptr, tex_q, true);
+    if (softstats::tri_id) {
+      if (!softstats::tri_frags) {
+        softstats::tri_class[softstats::TC_NOPIX]++;
+        softstats::cur->nopix++;
+      } else if (!softstats::tri_zpass) {
+        softstats::tri_class[softstats::TC_ZFAIL]++;
+      } else {
+        softstats::zpassed[softstats::tri_id - 1] = softstats::tri_frags <= 4 ? 2 : 1;
+      }
+      softstats::tri_id = 0;
+    }
     g_soft.cur.triangles++;
     softstats::cur->tris++;
   }
