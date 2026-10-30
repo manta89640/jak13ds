@@ -148,17 +148,24 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 /* (AI-assisted) gxCmdQueueWait's timeout is in system ticks (268 MHz), not nanoseconds */
 #define GX_WAIT_MS(ms) ((s64)(ms) * (s64)(SYSCLOCK_ARM11 / 1000))
 
-/* (AI-assisted) CPU data cache flushes for memory the GPU reads: the kernel call GSP's
- * FlushDataCache makes for us, made here without the IPC to GSP (gk.rsf allows it, as the
- * InvalidateProcessDataCache the vblank callback makes). GSP stays the fallback. Any thread. */
+/* (AI-assisted) CPU data cache flushes for memory the GPU reads. Started as a title, the kernel
+ * call GSP's FlushDataCache would make for us, without the IPC (gk.rsf allows it). From the
+ * Homebrew Launcher the exheader isn't ours (a svc it doesn't allow raises an exception): GSP.
+ * Any thread. */
 static u32 s_flush_requests; /* statistics: GSP flush requests */
 static u32 s_flush_svcs;     /* statistics: kernel flushes */
-static int s_kernel_flush = 1;
+static int s_kernel_flush = -1;
+static inline int kernel_flush_on(void) {
+  if (s_kernel_flush < 0) {
+    s_kernel_flush = envIsHomebrew() ? 0 : 1;
+  }
+  return s_kernel_flush;
+}
 static void cache_flush_now(const void* addr, u32 size) {
   if (!size) {
     return;
   }
-  if (s_kernel_flush) {
+  if (kernel_flush_on()) {
     if (R_SUCCEEDED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)addr, size))) {
       s_flush_svcs++;
       return;
@@ -3053,7 +3060,7 @@ static void cache_flush_frame(const void* addr, u32 size) {
     /* (AI-assisted, micro-mg) MICRO_FLUSHGAP: into a range of the linear heap less than DEFER_GAP2
      * away, rather than a request of its own now */
     const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
-    if (!s_kernel_flush && (s_micro & MICRO_FLUSHGAP) && a >= lin0 && e <= lin1) {
+    if (!kernel_flush_on() && (s_micro & MICRO_FLUSHGAP) && a >= lin0 && e <= lin1) {
       for (int i = 0; i < s_defer.n; i++) {
         if (s_defer.start[i] >= lin0 && s_defer.end[i] <= lin1 && a <= s_defer.end[i] + DEFER_GAP2 &&
             e + DEFER_GAP2 >= s_defer.start[i]) {
@@ -3091,7 +3098,7 @@ static void flush_vbuf(void) {
       s_defer.end[j + 1] = e;
     }
     const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
-    const u32 gap = s_kernel_flush                ? DEFER_GAP_KERNEL
+    const u32 gap = kernel_flush_on()             ? DEFER_GAP_KERNEL
                     : (s_micro & MICRO_FLUSHGAP) ? DEFER_GAP2
                                                  : DEFER_GAP;
     int k = 0;
