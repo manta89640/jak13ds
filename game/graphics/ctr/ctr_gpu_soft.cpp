@@ -49,8 +49,26 @@ struct SoftMesh {
   std::vector<uint16_t> indices;
   void* ext = nullptr;  // (AI-assisted, streaming) ctr_gpu_mesh_begin_ext's block (given back)
   size_t tail = 0;      // ctr_gpu_mesh_begin_tail's bytes after the vertices
+  size_t col_off = 0;   // ctr_gpu_mesh_split_colors: the colors at verts + col_off (0: interleaved)
   size_t vertex_bytes() const { return verts.size() - tail; }
 };
+
+// A static mesh's vertices as the draws read them: position, pad and texture coordinates of vertex
+// i at pos + stride * i, its color at col + col_stride * i.
+struct SoftVerts {
+  const uint8_t* pos;
+  int stride;
+  const uint8_t* col;
+  int col_stride;
+  const uint8_t* p(int i) const { return pos + stride * i; }
+  const uint8_t* c(int i) const { return col + col_stride * i; }
+};
+SoftVerts soft_verts(const uint8_t* base, size_t col_off) {
+  if (col_off) {
+    return {base, 12, base + col_off, 4};
+  }
+  return {base, 16, base + 12, 16};
+}
 
 struct SoftPool {
   bool used = false;
@@ -1358,7 +1376,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
   ctr_gpu_draw_mesh(state, matrix->m, mesh, first_index, index_count);
 }
 
-static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const uint8_t* verts,
+static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const SoftVerts& verts,
                            const uint16_t* indices, int first_index, int index_count);
 
 int ctr_gpu_copy_screen_part(float x0, float x1) {
@@ -1881,6 +1899,14 @@ int ctr_gpu_mesh_begin_ext_tail(void* mem, int vertex_count, int index_count, un
   return slot;
 }
 
+void ctr_gpu_mesh_split_colors(int mesh) {
+  if (mesh >= 0 && mesh < (int)g_soft.meshes.size() && g_soft.meshes[mesh].used &&
+      g_soft.meshes[mesh].stride == 16 && g_soft.meshes[mesh].vertex_bytes()) {
+    g_soft.meshes[mesh].col_off =
+        ctr_gpu_mesh_color_offset((int)(g_soft.meshes[mesh].vertex_bytes() / 16));
+  }
+}
+
 int ctr_gpu_mesh_end(int mesh, int ok) {
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size()) {
     return -1;
@@ -1931,11 +1957,12 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     return;
   }
   const auto& m = g_soft.meshes[mesh];
-  soft_mesh_tris(state, clip, m.verts.data(), m.indices.data(), first_index, index_count);
+  soft_mesh_tris(state, clip, soft_verts(m.verts.data(), m.col_off), m.indices.data(), first_index,
+                 index_count);
 }
 
 // (AI-assisted) the triangles of ctr_gpu_draw_mesh / ctr_gpu_draw_mesh_stream
-static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const uint8_t* verts,
+static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const SoftVerts& verts,
                            const uint16_t* indices, int first_index, int index_count) {
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
@@ -1958,7 +1985,8 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
     bool ok = true;
     int64_t ip[3][3];
     for (int k = 0; k < 3; k++) {
-      const uint8_t* src = &verts[16 * indices[i + k]];
+      const uint8_t* src = verts.p(indices[i + k]);
+      const uint8_t* col = verts.c(indices[i + k]);
       int16_t pos[3], st[2];
       memcpy(pos, src, 6);
       ip[k][0] = pos[0];
@@ -1982,10 +2010,10 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
       tri[k].s = st[0] * st_scale;
       tri[k].t = st[1] * st_scale;
-      tri[k].r = src[12];
-      tri[k].g = src[13];
-      tri[k].b = src[14];
-      tri[k].a = src[15];
+      tri[k].r = col[0];
+      tri[k].g = col[1];
+      tri[k].b = col[2];
+      tri[k].a = col[3];
     }
     const bool ss = softstats::enabled() != 0;
     if (ss) {
@@ -2078,16 +2106,19 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
   softstats::prog(8);
   const uint8_t* vbase = (const uint8_t*)verts;
   const uint16_t* ibase = indices;
+  size_t col_off = 0;
   if (mesh >= 0) {
     if (mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
       return;
     }
     vbase = g_soft.meshes[mesh].verts.data();
     ibase = g_soft.meshes[mesh].indices.data();
+    col_off = g_soft.meshes[mesh].col_off;
   }
   if (!vbase || !ibase) {
     return;
   }
+  const SoftVerts sv = soft_verts(vbase, col_off);
   const float* clip = d->clip.m;  // row-major (the soft prepare keeps the GL matrix)
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
@@ -2096,7 +2127,8 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
     float fog[3] = {0.f, 0.f, 0.f};  // (AI-assisted, far-fog) the ocean's fog stage
     bool ok = true;
     for (int k = 0; k < 3; k++) {
-      const uint8_t* src = vbase + 16 * ibase[i + k];
+      const uint8_t* src = sv.p(ibase[i + k]);
+      const uint8_t* col = sv.c(ibase[i + k]);
       int16_t pos[3];
       memcpy(pos, src, 6);
       const float in[3] = {(float)pos[0], (float)pos[1], (float)pos[2]};
@@ -2117,10 +2149,10 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
       tri[k].t = d->tex[1][0] * in[0] + d->tex[1][1] * in[1] + d->tex[1][2] * in[2] + d->tex[1][3];
       const float f = 1.f + d->crest[0] * 255.f * in[1];
       auto ch = [&](uint8_t v) { return (uint8_t)std::clamp(v * f, 0.f, 255.f); };
-      tri[k].r = ch(src[12]);
-      tri[k].g = ch(src[13]);
-      tri[k].b = ch(src[14]);
-      tri[k].a = src[15];
+      tri[k].r = ch(col[0]);
+      tri[k].g = ch(col[1]);
+      tri[k].b = ch(col[2]);
+      tri[k].a = col[3];
     }
     if (!ok || (tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
         (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
@@ -2147,6 +2179,7 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state,
   }
   const uint8_t* vbase = g_soft.meshes[mesh].verts.data();
   const uint16_t* ibase = g_soft.meshes[mesh].indices.data();
+  const SoftVerts sv = soft_verts(vbase, g_soft.meshes[mesh].col_off);
   const float* clip = d->clip.m;
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
@@ -2158,7 +2191,8 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state,
     float fog[3] = {0.f, 0.f, 0.f};
     bool ok = true;
     for (int k = 0; k < 3; k++) {
-      const uint8_t* src = vbase + 16 * ibase[i + k];
+      const uint8_t* src = sv.p(ibase[i + k]);
+      const uint8_t* col = sv.c(ibase[i + k]);
       int16_t pos[3];
       memcpy(pos, src, 6);
       const float in[3] = {(float)pos[0], (float)pos[1], (float)pos[2]};
@@ -2183,10 +2217,10 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state,
                     d->env[0][3];
       s_env.vt[k] = (d->env[1][0] * dv[0] + d->env[1][1] * dv[1] + d->env[1][2] * dv[2]) * inv +
                     d->env[1][3];
-      tri[k].r = src[12];
-      tri[k].g = src[13];
-      tri[k].b = src[14];
-      tri[k].a = src[15];
+      tri[k].r = col[0];
+      tri[k].g = col[1];
+      tri[k].b = col[2];
+      tri[k].a = col[3];
     }
     if (!ok || (tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
         (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
@@ -2223,6 +2257,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
   const void* normals = g_soft.meshes[normals_mesh].verts.data() + normals_offset;
   const uint8_t* vbase = g_soft.meshes[mesh].verts.data();
   const uint16_t* ibase = g_soft.meshes[mesh].indices.data();
+  const SoftVerts sv = soft_verts(vbase, g_soft.meshes[mesh].col_off);
   const int8_t* nbase = (const int8_t*)normals;
   const float* clip = d->clip.m;
   g_soft.cur.draws++;
@@ -2245,7 +2280,8 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
     bool ok = true;
     for (int k = 0; k < 3; k++) {
       const uint16_t vi = ibase[i + k];
-      const uint8_t* src = vbase + 16 * vi;
+      const uint8_t* src = sv.p(vi);
+      const uint8_t* col = sv.c(vi);
       int16_t pos[3], st[2];
       memcpy(pos, src, 6);
       memcpy(st, src + 8, 4);
@@ -2266,10 +2302,10 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
       fog[k] = fogged ? mesh_fog(c[3]) : 0.f;
       tri[k].s = st[0] * d->st_scale;
       tri[k].t = st[1] * d->st_scale;
-      tri[k].r = src[12];
-      tri[k].g = src[13];
-      tri[k].b = src[14];
-      tri[k].a = src[15];
+      tri[k].r = col[0];
+      tri[k].g = col[1];
+      tri[k].b = col[2];
+      tri[k].a = col[3];
       // the envmap coordinates (ctr_etie.v.pica)
       const float nin[3] = {(float)nbase[4 * vi], (float)nbase[4 * vi + 1],
                             (float)nbase[4 * vi + 2]};
@@ -2334,7 +2370,8 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
   const auto& sl = g_soft.meshes[slots_mesh].verts;
   static std::vector<uint8_t> moved;
   moved = m.verts;
-  const size_t n = moved.size() / 16;
+  const SoftVerts sv = soft_verts(moved.data(), m.col_off);
+  const size_t n = m.vertex_bytes() / 16;
   for (size_t v = 0; v < n && slots_offset + v < sl.size(); v++) {
     const int slot = sl[slots_offset + v];
     if (!slot || slot >= row_count) {
@@ -2342,14 +2379,15 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     }
     const float* w = rows + 4 * slot;
     int16_t pos[3];
-    memcpy(pos, &moved[16 * v], sizeof(pos));
+    uint8_t* const at = (uint8_t*)sv.p((int)v);
+    memcpy(pos, at, sizeof(pos));
     const float y = pos[1];
     pos[0] = (int16_t)std::clamp((int)std::lround(pos[0] + w[0] * y + w[2]), -32768, 32767);
     pos[2] = (int16_t)std::clamp((int)std::lround(pos[2] + w[1] * y + w[3]), -32768, 32767);
-    memcpy(&moved[16 * v], pos, sizeof(pos));
+    memcpy(at, pos, sizeof(pos));
   }
   g_soft_cur_mesh = mesh;
-  soft_mesh_tris(state, matrix->m, moved.data(), m.indices.data(), first_index, index_count);
+  soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
 }
 int ctr_gpu_wind_ready(void) {
   return 1;
@@ -2376,6 +2414,14 @@ void* ctr_gpu_mesh_vertices(int mesh) {
 void ctr_gpu_mesh_flush(int, int, int) {}
 void ctr_gpu_flush_range(const void*, unsigned int) {}  // (AI-assisted, micro-mg)
 void ctr_gpu_set_micro_mask(unsigned int) {}
+
+void* ctr_gpu_mesh_colors_inplace(int mesh) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+      !g_soft.meshes[mesh].col_off) {
+    return nullptr;
+  }
+  return g_soft.meshes[mesh].verts.data() + g_soft.meshes[mesh].col_off;
+}
 
 void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||

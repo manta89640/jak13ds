@@ -37,7 +37,19 @@ inline ShimSettings& ctr_settings() {
 inline double ctr_gpu_time_ms() {
   return 0;
 }
-inline void ctr_gpu_flush_range(const void*, u32) {}
+extern "C" void tod_flush_note(u32 bytes);
+inline void ctr_gpu_flush_range(const void*, u32 bytes) {
+  tod_flush_note(bytes);
+}
+#ifdef __3DS__
+// (the ARM build: the list room may always grow)
+struct CtrHeapStats {
+  u32 free, largest;
+};
+inline void ctr_heap_stats(CtrHeapStats* s) {
+  s->free = s->largest = 64u << 20;
+}
+#endif
 struct CtrBackgroundCamera {
   s32 itimes[4][4];
 };
@@ -50,6 +62,9 @@ struct DumpChunk {
   const c3l::Vertex* v;
   u32 ngroups;
   const u16* groups;  // lo, hi pairs
+  float origin[3], scale;
+  u32 nindices;
+  const u16* indices;  // the chunk's draws' (triangle lists)
 };
 struct Dump {
   u32 nc, nm;
@@ -84,6 +99,12 @@ inline Dump parse_dump(const u8* p) {
     c.ngroups = get32();
     c.groups = (const u16*)p;
     p += c.ngroups * 4;
+    memcpy(c.origin, p, 12);
+    memcpy(&c.scale, p + 12, 4);
+    p += 16;
+    c.nindices = get32();
+    c.indices = (const u16*)p;
+    p += c.nindices * 2;
     d.chunks.push_back(c);
   }
   return d;

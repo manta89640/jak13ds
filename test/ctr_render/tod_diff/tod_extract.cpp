@@ -102,6 +102,21 @@ int main(int argc, char** argv) {
       put(o, &g.lo, 2);
       put(o, &g.hi, 2);
     }
+    // its quantization and its draws' indices (tod_diff pixels)
+    put(o, c.origin, 12);
+    put(o, &c.scale, 4);
+    uint32_t i0 = UINT32_MAX, i1 = 0;
+    for (uint32_t k = 0; k < c.draw_count; k++) {
+      const auto& d = draws[c.first_draw + k];
+      i0 = std::min(i0, d.first_index);
+      i1 = std::max(i1, d.first_index + d.index_count);
+    }
+    std::vector<uint16_t> ind;
+    if (i1 > i0) {
+      f.read_array(h.index_data_offset + i0 * 2, i1 - i0, &ind);
+    }
+    put32(o, (uint32_t)ind.size());
+    put(o, ind.data(), ind.size() * 2);
     verts += c.vertex_count;
     groups += gs.size();
   }

@@ -299,6 +299,7 @@ typedef struct {
    * it), given back to s_ext_free instead of freed */
   int ext;
   u32 tail_off, tail_bytes; /* ctr_gpu_mesh_begin_tail / _ext_tail: at verts + tail_off */
+  u32 col_off; /* ctr_gpu_mesh_split_colors: the colors' buffer at verts + col_off (0: none) */
 } MeshSlot;
 static void (*s_ext_free)(void* mem); /* (AI-assisted, streaming) ctr_gpu_set_ext_free */
 
@@ -788,6 +789,7 @@ static int reserve_mesh_slot(void) {
   for (int i = 0; i < MAX_MESHES; i++) {
     if (g.meshes[i].used == 0) {
       g.meshes[i].used = 3;
+      g.meshes[i].col_off = 0;
       slot = i;
       break;
     }
@@ -5140,32 +5142,43 @@ static inline void raw_sync(void) {
   }
 }
 
-/* attribute buffer 0 (the only one the draws use) at physical address pa */
-static void raw_vertex_buffer(u32 pa, u32 flags0, u32 flags1) {
+/* attribute buffers 0 and 1 of the draws (n = 1: buffer 1 unused, zero as BufInfo_Init leaves
+ * it) at physical addresses pa0 and pa1 */
+static void raw_vertex_buffers(int n, u32 pa0, u32 f00, u32 f01, u32 pa1, u32 f10, u32 f11) {
   C3D_BufInfo* b = &__C3D_Context.bufInfo;
-  const u32 off = pa - RAW_BUF_BASE;
-  C3D_BufCfg* c = &b->buffers[0];
-  if (b->bufCount != 1 || b->base_paddr != RAW_BUF_BASE) {
-    /* not citro3d's single buffer layout yet: citro3d sends all of it (raw_sync) */
+  const u32 want[2][3] = {{pa0 - RAW_BUF_BASE, f00, f01},
+                          {n > 1 ? pa1 - RAW_BUF_BASE : 0, n > 1 ? f10 : 0, n > 1 ? f11 : 0}};
+  if (b->bufCount < 1 || b->bufCount > 2 || b->base_paddr != RAW_BUF_BASE) {
+    /* not citro3d's layout of one or two buffers yet: citro3d sends all of it (raw_sync) */
     BufInfo_Init(b);
-    b->bufCount = 1;
-    c->offset = off;
-    c->flags[0] = flags0;
-    c->flags[1] = flags1;
+    b->bufCount = n;
+    for (int k = 0; k < n; k++) {
+      b->buffers[k].offset = want[k][0];
+      b->buffers[k].flags[0] = want[k][1];
+      b->buffers[k].flags[1] = want[k][2];
+    }
     __C3D_Context.flags |= C3DiF_BufInfo;
     return;
   }
-  if (c->flags[0] != flags0 || c->flags[1] != flags1) {
-    const u32 v[3] = {off, flags0, flags1};
-    raw_end(raw_n(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET, v, 3, 1));
-  } else if (c->offset != off) {
-    raw_end(raw_w(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET, 0xF, off));
-  } else {
-    return;
+  for (int k = 0; k < 2; k++) {
+    C3D_BufCfg* c = &b->buffers[k];
+    if (c->flags[0] != want[k][1] || c->flags[1] != want[k][2]) {
+      raw_end(raw_n(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET + 3 * k, want[k], 3, 1));
+    } else if (c->offset != want[k][0]) {
+      raw_end(raw_w(raw_ptr(), GPUREG_ATTRIBBUFFER0_OFFSET + 3 * k, 0xF, want[k][0]));
+    } else {
+      continue;
+    }
+    c->offset = want[k][0];
+    c->flags[0] = want[k][1];
+    c->flags[1] = want[k][2];
   }
-  c->offset = off;
-  c->flags[0] = flags0;
-  c->flags[1] = flags1;
+  b->bufCount = n;
+}
+
+/* attribute buffer 0 (the only one most draws use) at physical address pa */
+static void raw_vertex_buffer(u32 pa, u32 flags0, u32 flags1) {
+  raw_vertex_buffers(1, pa, flags0, flags1, 0, 0, 0);
 }
 /* attribute buffer 0 config of each program's vertex layout: permutation, stride, attributes */
 #define RAW_BUF_FLAGS1(stride, attribs, perm_hi) \
@@ -5304,6 +5317,45 @@ static void c3d_vertex_buffer(u32 pa, const void* va, u32 stride, int attribs, u
   C3D_BufInfo* buf = C3D_GetBufInfo();
   BufInfo_Init(buf);
   BufInfo_Add(buf, va, stride, attribs, perm);
+}
+
+/* a static mesh's attribute buffers for the programs of its layout (position, texcoord, color):
+ * one, or with ctr_gpu_mesh_split_colors two (12-byte records, the colors) */
+static void raw_mesh_buffers(const MeshSlot* ms) {
+  if (!ms->col_off) {
+    raw_vertex_buffer(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
+  } else {
+    raw_vertex_buffers(2, ms->verts_pa, 0x10, RAW_BUF_FLAGS1(12, 2, 0), ms->verts_pa + ms->col_off,
+                       0x2, RAW_BUF_FLAGS1(4, 1, 0));
+  }
+}
+/* through citro3d; extra: a further buffer of one attribute (3: wind slots, normals), or NULL */
+static void c3d_mesh_buffers(const MeshSlot* ms, const void* extra, u32 extra_stride) {
+  if (!ms->col_off && !extra) {
+    c3d_vertex_buffer(ms->verts_pa, ms->verts, 16, 3, 0x210);
+    return;
+  }
+  if (!extra) {
+    const C3D_BufInfo* b = &__C3D_Context.bufInfo;
+    const u32 off0 = ms->verts_pa - RAW_BUF_BASE;
+    if (b->bufCount == 2 && b->base_paddr == RAW_BUF_BASE && b->buffers[0].offset == off0 &&
+        b->buffers[1].offset == off0 + ms->col_off && b->buffers[0].flags[0] == 0x10 &&
+        b->buffers[0].flags[1] == RAW_BUF_FLAGS1(12, 2, 0) && b->buffers[1].flags[0] == 0x2 &&
+        b->buffers[1].flags[1] == RAW_BUF_FLAGS1(4, 1, 0)) {
+      return;
+    }
+  }
+  C3D_BufInfo* buf = C3D_GetBufInfo();
+  BufInfo_Init(buf);
+  if (ms->col_off) {
+    BufInfo_Add(buf, ms->verts, 12, 2, 0x10);
+    BufInfo_Add(buf, (const u8*)ms->verts + ms->col_off, 4, 1, 0x2);
+  } else {
+    BufInfo_Add(buf, ms->verts, 16, 3, 0x210);
+  }
+  if (extra) {
+    BufInfo_Add(buf, extra, extra_stride, 1, 0x3);
+  }
 }
 
 static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, int raw);
@@ -7432,6 +7484,12 @@ int ctr_gpu_mesh_begin_ext_tail(void* mem, int vertex_count, int index_count, un
   return slot;
 }
 
+void ctr_gpu_mesh_split_colors(int mesh) {
+  if (mesh >= 0 && mesh < MAX_MESHES && g.meshes[mesh].used == 3 && g.meshes[mesh].fill_vbytes) {
+    g.meshes[mesh].col_off = ctr_gpu_mesh_color_offset((int)(g.meshes[mesh].fill_vbytes / 16u));
+  }
+}
+
 int ctr_gpu_mesh_end(int mesh, int ok) {
   if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 3) {
     return -1;
@@ -7630,7 +7688,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
     /* (AI-assisted) raw: state, vertex buffer, then (after citro3d's pending updates) the matrix
      * as float24 and the draw */
     apply_state(state, mesh_mode, 1);
-    raw_vertex_buffer(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
+    raw_mesh_buffers(ms);
     raw_sync();
     if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
       g.last_clip_id = matrix->id;
@@ -7667,7 +7725,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matr
       }
     }
     g.last_mesh_valid = 1;
-    c3d_vertex_buffer(ms->verts_pa, ms->verts, 16, 3, 0x210);
+    c3d_mesh_buffers(ms, NULL, 0);
     apply_state(state, mesh_mode, 0);
     C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
   }
@@ -7754,12 +7812,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     }
   }
   raw_note_unif();
-  {
-    C3D_BufInfo* buf = C3D_GetBufInfo();
-    BufInfo_Init(buf);
-    BufInfo_Add(buf, ms->verts, 16, 3, 0x210);
-    BufInfo_Add(buf, (const u8*)g.meshes[slots_mesh].verts + slots_offset, 1, 1, 0x3);
-  }
+  c3d_mesh_buffers(ms, (const u8*)g.meshes[slots_mesh].verts + slots_offset, 1);
   apply_state(state, mesh_mode, 0);
   C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
   /* the next draws' single attribute buffer (raw_vertex_buffer / c3d_vertex_buffer: bufCount) */
@@ -7868,11 +7921,12 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
   u32 vpa, ipa;
   const void* vva;
   const uint16_t* iva;
+  const MeshSlot* ms = NULL;
   if (mesh >= 0) {
     if (mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
       return;
     }
-    const MeshSlot* ms = &g.meshes[mesh];
+    ms = &g.meshes[mesh];
     vpa = ms->verts_pa;
     vva = ms->verts;
     ipa = ms->indices_pa;
@@ -7895,7 +7949,11 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
   ocean_bind_tex2(tex2);
   if (use_raw(state)) {
     apply_state(state, 3, 1);
-    raw_vertex_buffer(vpa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
+    if (ms) {
+      raw_mesh_buffers(ms);
+    } else {
+      raw_vertex_buffer(vpa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));
+    }
     raw_sync();
     /* the matrix and the 5 rows (texture coordinates, crest) as float24, two bursts */
     u32 rows[15];
@@ -7914,7 +7972,11 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state, int tex2, const ctr_ocean_d
       const float* r = i < 4 ? d->tex[i] : d->crest;
       C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_ocean_tex + i, r[0], r[1], r[2], r[3]);
     }
-    c3d_vertex_buffer(vpa, vva, 16, 3, 0x210);
+    if (ms) {
+      c3d_mesh_buffers(ms, NULL, 0);
+    } else {
+      c3d_vertex_buffer(vpa, vva, 16, 3, 0x210);
+    }
     apply_state(state, 3, 0);
     C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, iva);
   }
@@ -7955,7 +8017,7 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state, int env_tex, const ctr_
   C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
   C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_oenv_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
   raw_note_unif();
-  c3d_vertex_buffer(ms->verts_pa, ms->verts, 16, 3, 0x210);
+  c3d_mesh_buffers(ms, NULL, 0);
   apply_state_tint(state, 3, 1, 0);
   C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
   g.cur.draws++;
@@ -8012,12 +8074,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state, int env_tex, const ctr_etie_
   C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_etie_fog0, g.fog0[0], g.fog0[1], g.fog0[2], g.fog0[3]);
   C3D_FVUnifSet(GPU_VERTEX_SHADER, p->uloc_etie_fog1, g.fog1[0], g.fog1[1], g.fog1[2], g.fog1[3]);
   raw_note_unif();
-  {
-    C3D_BufInfo* buf = C3D_GetBufInfo();
-    BufInfo_Init(buf);
-    BufInfo_Add(buf, ms->verts, 16, 3, 0x210);
-    BufInfo_Add(buf, (const u8*)g.meshes[normals_mesh].verts + normals_offset, 4, 1, 0x3);
-  }
+  c3d_mesh_buffers(ms, (const u8*)g.meshes[normals_mesh].verts + normals_offset, 4);
   apply_state_tint(state, 7, d->shine, 0);
   C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
   g.cur.draws++;
@@ -8157,6 +8214,14 @@ void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
   }
   *vertex_count = (int)(g.meshes[mesh].fill_vbytes / 16u);
   return g.meshes[mesh].verts;
+}
+
+void* ctr_gpu_mesh_colors_inplace(int mesh) {
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 || !g.meshes[mesh].col_off ||
+      g.meshes[mesh].verts_alt) {
+    return NULL;
+  }
+  return (uint8_t*)g.meshes[mesh].verts + g.meshes[mesh].col_off;
 }
 
 void ctr_gpu_set_micro_mask(unsigned int mask) {

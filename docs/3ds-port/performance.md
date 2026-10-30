@@ -1325,6 +1325,47 @@ drawn set and that room, gives 1.28M instructions against 1.17M for the full hol
 as Azahar. With the 384 KB room and the leaner lists of the final code it gives 1.01M. The final
 build was not run in Azahar.
 
+## Time of day: the vertex colors in their own attribute buffer (colorstream)
+
+The time of day rewrites the level meshes' colors in place in FCRAM. With the colors inside the
+16-byte vertices every rewritten color filled a 32-byte line of two vertices and wrote all of it
+back. Each chunk mesh now keeps the same 16 bytes per vertex as two attribute buffers:
+12-byte records (position, the entry in `pad`, texture coordinates) and then the colors
+(`ctr_gpu_mesh_split_colors`). The loader reads the file's vertices whole as before and splits them
+in place (a transient 4 bytes per vertex of heap). No file format change, no extra memory, the
+shaders unchanged: the draws give the PICA two buffers (stride 12 with two attributes, stride 4
+with the color; each buffer's attributes add up to its stride), wind and envmapped ties a third.
+
+Host model, `run.sh --arm` with `TOD_ARM_LINES=1` (devkitARM -O2 under Unicorn, every load and
+store into the meshes, 32-byte lines; FCRAM traffic = lines touched (filled) + lines written
+(written back); 120 level draws, stride 5, pulse step 0, the first draw writing every group whole):
+
+| level, trace | | line moves, mean | most | lines written, mean | most | ARM instructions, mean |
+|---|---|---|---|---|---|---|
+| village2, lightning | before | 8993 | 104473 | 3879 | 50305 | 538k |
+| | after | 4896 (-46%) | 67045 (-36%) | 1305 | 12877 | 535k |
+| lavatube, lamps | before | 30034 | 361504 | 15017 | 180752 | 1441k |
+| | after | 12544 (-58%) | 226113 (-37%) | 5708 | 45361 | 1422k |
+| citadel, its trace | before | 13435 | 92763 | 5888 | 33899 | 1093k |
+| | after | 6730 (-50%) | 69382 (-25%) | 2219 | 10518 | 1085k |
+
+- List writes (most frames) read no record and write 8 colors per line: up to 4x fewer line moves.
+- A whole-group write (the "most" column: loads, camera cuts, the title start) still reads each
+  vertex's entry from the records (12 of the 16 bytes, clean lines), so it fills as many lines as
+  before and writes back a quarter: -25..-37%.
+- The cache flushes cover 25-29% fewer bytes (the ranges are merged within 64 KB, which now spans
+  the records between two meshes' colors).
+
+What is left: the entries for a whole-group write could live in a 2-byte stream of their own (10 +
+2 + 4 bytes, about 3x fewer line moves there), but then the GPU's record stride is 10, which no
+hardware test has shown to be safe. `pica_bench`'s `B5.split` measures what the second attribute
+buffer costs the GPU per vertex against `B5.short`.
+
+Exact: `run.sh` (every vertex of every level draw against the base code) on village1, village2,
+lavatube, citadel, swamp, ctysluma and ctyindb, and `run.sh --pixels` (each version's chunks drawn
+from its own layout by the host soft renderer every 25th draw, textured, every pixel compared) on
+village1, village2, lavatube, citadel and ctysluma: 0 vertices and 0 pixels differ.
+
 ## What the GPU time buys: a cost model from the hardware logs (gpuspeed)
 
 **Hardware data.** Every `render ms/frame` window of the Jak 1 hardware logs (oct12, oct25, oct25b,

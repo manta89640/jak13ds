@@ -23,11 +23,42 @@ struct CtrLevelData {
   std::vector<SU> stream_units;
 };
 static GameVersion g_game_version = GameVersion::Jak1;
-static std::vector<std::vector<c3l::Vertex>>* g_vb = nullptr;
-static void* ctr_gpu_mesh_vertices_inplace(int mesh, int* n) {
+// a chunk's mesh memory, from TOD_ARENA (one block: tod_arm.py models its cache lines): n
+// c3l::Vertex, or (TOD_SPLIT: the version keeps the colors on their own) n 12-byte records and
+// then the n colors
+struct MeshBuf {
+  u8* p = nullptr;
+  u32 n = 0;
+  c3l::Vertex vertex(u32 i) const {
+    c3l::Vertex v;
+    if (TOD_SPLIT) {
+      memcpy(&v, p + 12 * i, 12);
+      memcpy(v.rgba, p + 12 * n + 4 * i, 4);
+    } else {
+      memcpy(&v, p + 16 * i, 16);
+    }
+    return v;
+  }
+};
+static std::vector<MeshBuf>* g_vb = nullptr;
+static size_t g_arena_used = 0;
+static u8* arena_take(size_t bytes) {
+  bytes = (bytes + 31) & ~(size_t)31;
+  if (g_arena_used + bytes > sizeof(TOD_ARENA)) {
+    abort();  // (a bigger TOD_ARENA_MB)
+  }
+  u8* p = TOD_ARENA + g_arena_used;
+  g_arena_used += bytes;
+  return p;
+}
+[[maybe_unused]] static void* ctr_gpu_mesh_vertices_inplace(int mesh, int* n) {
   auto& v = (*g_vb)[mesh];
-  *n = (int)v.size();
-  return v.data();
+  *n = (int)v.n;
+  return v.p;
+}
+[[maybe_unused]] static void* ctr_gpu_mesh_colors_inplace(int mesh) {
+  auto& v = (*g_vb)[mesh];
+  return TOD_SPLIT ? v.p + 12 * v.n : nullptr;
 }
 // draw_level's heavy frames in Jak 1 (a version without tod_day_jump: in play too)
 struct TodNoJump {};
@@ -49,10 +80,19 @@ namespace {
 
 struct Sim {
   CtrLevelData lev;
-  std::vector<std::vector<c3l::Vertex>> vb;
+  std::vector<MeshBuf> vb;
   std::vector<u32> visible;
   bool heavy = false;
   u64 verts = 0;
+
+  // a chunk's vertices as the version's tod_scan / tod_mark_plain take them
+  auto verts_of(size_t ci) {
+#if TOD_SPLIT
+    return TodVerts{vb[ci].p, (tod_word*)(vb[ci].p + 12 * vb[ci].n)};
+#else
+    return (const c3l::Vertex*)vb[ci].p;
+#endif
+  }
 
   // load_tod (v22, with alpha) and the chunk loop's time of day part
   void setup(const Dump& d, const std::vector<u32>& vis, int bright_step) {
@@ -233,8 +273,16 @@ struct Sim {
         T.chunk_scanned[ci] = 1;
         continue;
       }
-      vb[ci].resize(c.vertex_count);
-      memcpy(vb[ci].data(), c.v, c.vertex_count * sizeof(c3l::Vertex));
+      vb[ci].n = c.vertex_count;
+      vb[ci].p = arena_take(c.vertex_count * sizeof(c3l::Vertex));
+      for (u32 i = 0; i < c.vertex_count; i++) {
+        if (TOD_SPLIT) {
+          memcpy(vb[ci].p + 12 * i, &c.v[i], 12);
+          memcpy(vb[ci].p + 12 * c.vertex_count + 4 * i, c.v[i].rgba, 4);
+        } else {
+          memcpy(vb[ci].p + 16 * i, &c.v[i], 16);
+        }
+      }
       lev.meshes[ci] = (int)ci;
       lev.chunk_first_run[ci] = (u32)T.run_group.size();
       lev.chunks[ci] = {c.vertex_count, c.ngroups, 0, 0};
@@ -247,9 +295,9 @@ struct Sim {
       }
       T.chunk_group_count[ci] = (u16)c.ngroups;
       CtrLevelData::Tod::LightList lights;
-      const u8 m = tod_scan(T, vb[ci].data(), (int)c.vertex_count, &lights);
+      const u8 m = tod_scan(T, verts_of(ci), (int)c.vertex_count, &lights);
       if (m) {
-        tod_mark_plain(T, (u32)ci, vb[ci].data(), (int)c.vertex_count);
+        tod_mark_plain(T, (u32)ci, verts_of(ci), (int)c.vertex_count);
       }
       T.chunk_mask[ci] = m;
       T.chunk_scanned[ci] = m ? 2 : 1;

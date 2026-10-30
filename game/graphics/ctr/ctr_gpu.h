@@ -564,6 +564,14 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
 int ctr_gpu_mesh_begin_tail(int vertex_count, int tail_bytes, int index_count, void** verts,
                             uint16_t** indices);
 int ctr_gpu_mesh_end(int mesh, int ok);
+/* Between begin and end: the mesh's vertex_count * 16 bytes are written as two attribute buffers,
+ * vertex_count records of 12 bytes (s16 pos[3], s16 pad, s16 st[2]) and then the colors (u8
+ * rgba[4] each) at ctr_gpu_mesh_color_offset: a rewrite of the colors (the level's time of day)
+ * touches only theirs. Drawn like the interleaved layout. */
+void ctr_gpu_mesh_split_colors(int mesh);
+static inline unsigned int ctr_gpu_mesh_color_offset(int vertex_count) {
+  return (unsigned int)vertex_count * 12u;
+}
 /* (AI-assisted, streaming) The same in memory the caller owns (linear memory: the level stream
  * arena, CtrStream.h): mem holds the vertices (vertex_count * 16 bytes) and then the indices at
  * mem + ctr_gpu_ext_index_offset(vertex_count). Nothing is allocated; once a deleted (or failed)
@@ -614,6 +622,9 @@ void* ctr_gpu_mesh_vertices(int mesh);
  * part of the change. For slow changes (the level's time of day colors). Then ctr_gpu_mesh_flush.
  * NULL if there is none. */
 void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count);
+/* The colors of a mesh made with ctr_gpu_mesh_split_colors, in place the same way (NULL for
+ * another mesh) */
+void* ctr_gpu_mesh_colors_inplace(int mesh);
 void ctr_gpu_mesh_flush(int mesh, int offset, int size);
 /* (AI-assisted, micro-mg) Bytes the CPU wrote that the GPU reads in this frame (any memory: linear
  * heap ranges are what matter): queued, not flushed now. In a frame (between ctr_gpu_frame_begin

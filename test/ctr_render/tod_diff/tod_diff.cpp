@@ -30,29 +30,71 @@ auto tod_diff_pass_frame(P& ps, u64 f, int) -> decltype(ps.frame = f, void()) {
 template <typename P>
 void tod_diff_pass_frame(P&, u64, long) {}
 
+// the bytes the version's cache flushes cover (tod_arm.py reads it per level draw)
+extern "C" {
+u32 g_tod_flush_bytes = 0;
+void tod_flush_note(u32 bytes) {
+  g_tod_flush_bytes += bytes;
+}
+}
+
+// each version's chunk meshes in one block (run.sh: REF_SPLIT / NEU_SPLIT, the version keeps the
+// colors on their own)
+#ifndef TOD_ARENA_MB
+#define TOD_ARENA_MB 24
+#endif
+alignas(32) u8 g_arena_ref[TOD_ARENA_MB << 20];
+alignas(32) u8 g_arena_neu[TOD_ARENA_MB << 20];
+
 namespace ref {
 #define TOD_LIGHT "ref.light.h"
 #define TOD_STRUCT "ref.struct.inc"
 #define TOD_CODE "ref.code.inc"
+#define TOD_ARENA g_arena_ref
+#define TOD_SPLIT REF_SPLIT
 #include "tod_driver.inc"
 #undef TOD_LIGHT
 #undef TOD_STRUCT
 #undef TOD_CODE
+#undef TOD_ARENA
+#undef TOD_SPLIT
 }  // namespace ref
 namespace neu {
 #define TOD_LIGHT "neu.light.h"
 #define TOD_STRUCT "neu.struct.inc"
 #define TOD_CODE "neu.code.inc"
+#define TOD_ARENA g_arena_neu
+#define TOD_SPLIT NEU_SPLIT
 #include "tod_driver.inc"
 #undef TOD_LIGHT
 #undef TOD_STRUCT
 #undef TOD_CODE
+#undef TOD_ARENA
+#undef TOD_SPLIT
 }  // namespace neu
+
+#ifdef TOD_PIXELS
+// pixels: the chunks drawn, of both versions, through the host soft renderer from their own mesh
+// layout, every 25th level draw (tod_pixels.cpp)
+#include "tod_pixels.h"
+template <typename B>
+static std::vector<unsigned char> draw_pixels(const Dump& d, const std::vector<u32>& vis,
+                                              const std::vector<B>& vb, bool split) {
+  std::vector<TodPxChunk> cs;
+  for (u32 ci : vis) {
+    const auto& c = d.chunks[ci];
+    cs.push_back({c.bsphere, c.origin, c.scale, c.indices, c.nindices, vb[ci].p, vb[ci].n});
+  }
+  return tod_draw_pixels(cs.data(), cs.size(), split);
+}
+#endif
 
 extern "C" __attribute__((noinline)) void sim_mark(int phase) {
   asm volatile("" ::"r"(phase) : "memory");
 }
 static void no_mark(int) {}
+
+u32 g_px_frames = 0, g_px_bad_frames = 0, g_px_bad = 0, g_px_lit = 0;
 
 enum : int {
   kRunRef = 1,
@@ -68,11 +110,13 @@ enum : int {
 };
 
 // vertices of the chunks drawn whose rgb isn't the PC's blend (interp_time_of_day_slow) of w
-static u32 inexact_vertices(const Dump& d, const std::vector<u32>& vis,
-                            const std::vector<std::vector<c3l::Vertex>>& vb, const u8 w[8][4]) {
+template <typename B>
+static u32 inexact_vertices(const Dump& d, const std::vector<u32>& vis, const std::vector<B>& vb,
+                            const u8 w[8][4]) {
   u32 bad = 0;
   for (u32 ci : vis) {
-    for (const auto& v : vb[ci]) {
+    for (u32 i = 0; i < vb[ci].n; i++) {
+      const c3l::Vertex v = vb[ci].vertex(i);
       const u32 idx = (u16)v.pad;
       if (idx >= d.nc + d.nm) {
         continue;
@@ -155,13 +199,29 @@ extern "C" int sim_main(const u8* dump, const u32* trace, int nframes, int mode,
     if ((mode & (kRunRef | kRunNeu | kCompare)) == (kRunRef | kRunNeu | kCompare)) {
       u32 bad = 0;
       for (u32 ci : vis) {
-        for (size_t i = 0; i < r.vb[ci].size(); i++) {
-          bad += memcmp(&r.vb[ci][i], &n.vb[ci][i], sizeof(c3l::Vertex)) != 0;
+        for (u32 i = 0; i < r.vb[ci].n; i++) {
+          const c3l::Vertex a = r.vb[ci].vertex(i), b = n.vb[ci].vertex(i);
+          bad += memcmp(&a, &b, sizeof(c3l::Vertex)) != 0;
         }
       }
       bad_frames += bad != 0;
       bad_verts += bad;
     }
+#ifdef TOD_PIXELS
+    if ((mode & (kRunRef | kRunNeu | kCompare)) == (kRunRef | kRunNeu | kCompare) && f % 25 == 0) {
+      const auto pr = draw_pixels(d, vis, r.vb, REF_SPLIT != 0);
+      const auto pn = draw_pixels(d, vis, n.vb, NEU_SPLIT != 0);
+      u32 px = 0, lit = 0;
+      for (size_t i = 0; i + 3 < pr.size() && pr.size() == pn.size(); i += 4) {
+        px += memcmp(&pr[i], &pn[i], 4) != 0;
+        lit += (pr[i] | pr[i + 1] | pr[i + 2]) != 0;
+      }
+      g_px_frames++;
+      g_px_bad += px;
+      g_px_lit += lit;
+      g_px_bad_frames += px != 0 || pr.size() != pn.size();
+    }
+#endif
     if ((mode & (kRunNeu | kExact)) == (kRunNeu | kExact)) {
       const u32 off = inexact_vertices(d, vis, n.vb, w);
       off_frames += off != 0;
@@ -232,7 +292,11 @@ int main(int argc, char** argv) {
   if (mode & kExact) {
     printf("; neu not the blend: %u frames, %u vertices", out[5], out[6]);
   }
+  if (g_px_frames) {
+    printf("; pixels: %u frames drawn (%u lit pixels), %u frames, %u pixels differ", g_px_frames,
+           g_px_lit, g_px_bad_frames, g_px_bad);
+  }
   printf("\n");
-  return out[1] || out[5] ? 1 : 0;
+  return out[1] || out[5] || g_px_bad_frames ? 1 : 0;
 }
 #endif
