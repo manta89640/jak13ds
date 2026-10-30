@@ -357,6 +357,31 @@ struct ExtShrubFade {
 static_assert(sizeof(ExtShrubFade) == kExtHeaderV23Size - kExtHeaderV22Size);
 
 /*!
+ * The opening planes of the kDrawCullCond draws. ExtHeader::size >=
+ * kExtHeaderV24Size, then this at ext_offset + kExtHeaderV23Size (the sections before it zero when
+ * the level has none). A draw's back faces may be culled in a frame where the camera position p
+ * (world, game units) has dot(n, p) < d for every one of its planes.
+ */
+constexpr uint32_t kExtHeaderV24Size = 112;
+struct ExtCullCond {
+  uint32_t draw_count;     // CullCondDraw[]
+  uint32_t draws_offset;   // absolute
+};
+static_assert(sizeof(ExtCullCond) == kExtHeaderV24Size - kExtHeaderV23Size);
+struct CullCondDraw {
+  uint32_t draw;           // index into the file's draws
+  uint32_t plane_count;    // CullCondPlane[]
+  uint32_t planes_offset;  // absolute
+  uint32_t pad;
+};
+static_assert(sizeof(CullCondDraw) == 16);
+struct CullCondPlane {
+  float n[3];  // the opening's outward unit normal
+  float d;
+};
+static_assert(sizeof(CullCondPlane) == 16);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the
@@ -467,6 +492,11 @@ constexpr uint16_t kDrawAlphaTestDropped = 0x800;
 // CTR_TCC_ALPHA80: before v19 worked out at load from the chunk's vertices, which a near chunk
 // doesn't have then)
 constexpr uint16_t kDrawAlpha80 = 0x1000;
+// kDrawCullCond: closed, consistently wound tie surfaces (as kDrawCullBack) but for
+// planar openings (the open back of a rock): their back faces can only be seen through an
+// opening, so from the outer side of its plane. The draw's planes (c3l::ExtCullCond) say when its
+// back faces may be culled; a reader without them draws both sides.
+constexpr uint16_t kDrawCullCond = 0x2000;
 constexpr uint32_t kAtlasVersion = 15;
 
 /*!

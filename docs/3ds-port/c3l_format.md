@@ -76,6 +76,19 @@ What goes in:
   envmapped ties; not the envmap shine passes), with instances already in world space. Small and
   medium instances go to their own chunks with a draw distance.
 - Wind tie (palm trees, plants), baked at rest with their instance matrix; `c3l::ExtWind` (ExtHeader size 96) lists the instances (wind_idx, stiffness, origin y) and a slot byte per vertex of their chunks, so the runtime sways them as the PC's Tie3::render_tree_wind (do_wind_math per instance, the shear in ctr_mesh_wind.v.pica). Files without it: at rest. Shrub chunks' runs hold one prototype's PS2 fade band each (at most 96 triangles); `c3l::ExtShrubFade` (ExtHeader size 104) has the bands per run. The vista tier also copies the small and medium ties.
+- Tie surfaces whose open parts are not small holes or on the ground: an open part counts as closed
+  when its whole edge (sampled every 0.25 m) lies within 5 cm of, or is buried behind, geometry that
+  is drawn whenever the surface is (tfrag; ties of the same or a farther detail class; the
+  surface's own LOD version, or both versions of another group). A surface left with only planar
+  open parts (corners within min(0.25 m, 5% of the part's radius) of a plane) is marked
+  `kDrawCullCond`: its back faces can only be seen through those openings, so from the outer side
+  of their planes. `c3l::ExtCullCond` (ExtHeader size 112) lists per such draw its planes (outward
+  normal n, d: the plane's offset minus the corners' spread and 0.1 m); the runtime culls the
+  draw's back faces in a frame where the camera has dot(n, p) < d for each of them. Such draws are
+  grouped by the way their openings face (four directions). The vista copies draw both sides.
+  Blended tie keys may be marked too; the marks go again from keys whose blending the draw
+  optimisations keep. Host check: `CTR_SOFT_CULL_PROBE=1` counts culled back-face pixels in front
+  of the finished frame's depth (`[softcull]` lines).
 - Shrubs (grass, bushes, small plants, ropes), in `--shrub-cell` chunks drawn up to their PS2
   distance class (v14, see `--shrub-one-dist`) or `--shrub-dist`.
   Their vertex colors are the base color times the time of day color (shrub.vert).
@@ -286,7 +299,8 @@ Draw (16 bytes)
   u16 texture             texture index, 0xffff = untextured
   u16 kind                0 = tfrag, 1 = tie, 2 = shrub (low byte); flags: 0x100 kDrawCullBack (v13),
                           0x200 kDrawAtlasUV, 0x400 kDrawBlendDropped, 0x800 kDrawAlphaTestDropped (v15),
-                          0x1000 kDrawAlpha80 (v19: every vertex the draw uses has alpha 0x80)
+                          0x1000 kDrawAlpha80 (v19: every vertex the draw uses has alpha 0x80),
+                          0x2000 kDrawCullCond (ExtHeader size 112: culled per frame, see below)
   u32 first_index, index_count   triangle list; indices are relative to the chunk's first_vertex
 
 Texture (16 bytes)

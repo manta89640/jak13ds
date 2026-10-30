@@ -3992,6 +3992,37 @@ void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            lev->name, used, lev->env_draws.size(), ecs.size(), total / 1024);
 }
 
+// the kDrawCullCond draws' opening planes (c3l::ExtCullCond); without them those
+// draws keep both sides
+void load_cull_cond(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->cond_draws.clear();
+  lev->cond_planes.clear();
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV24Size) {
+    return;
+  }
+  c3l::ExtCullCond ec{};
+  std::vector<c3l::CullCondDraw> cds;
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderV23Size, &ec, sizeof(ec)) || !ec.draw_count ||
+      ec.draw_count > lev->draws.size() || !f.read_array(ec.draws_offset, ec.draw_count, &cds)) {
+    return;
+  }
+  for (const auto& cd : cds) {
+    std::vector<c3l::CullCondPlane> ps;
+    if (cd.draw >= lev->draws.size() || !(lev->draws[cd.draw].kind & c3l::kDrawCullCond) ||
+        !cd.plane_count || !f.read_array(cd.planes_offset, cd.plane_count, &ps)) {
+      lg::warn("[ctr] {}: bad opening planes, those draws keep both sides", lev->name);
+      lev->cond_draws.clear();
+      lev->cond_planes.clear();
+      return;
+    }
+    lev->cond_draws.push_back({cd.draw, (u32)lev->cond_planes.size(), cd.plane_count});
+    lev->cond_planes.insert(lev->cond_planes.end(), ps.begin(), ps.end());
+  }
+  lg::info("[ctr] {}: culling by opening planes: {} draws, {} planes", lev->name,
+           lev->cond_draws.size(), lev->cond_planes.size());
+}
+
 // shrub fade bands (c3l::ExtShrubFade): per file run; a shrub chunk with bands reaches its largest
 // w (its max_dist is decide_dist's class, so w / kShrubFarK)
 void load_shrub_fade(c3l::Reader& f,
@@ -5325,6 +5356,7 @@ bool CtrLevels::load_file(const fs::path& path,
   build_draw_order(out);
   load_env_ties(f, hdr, out);  // (AI-assisted, j2water2) c3l v21 (after the textures, draw order)
   load_wind_ties(f, hdr, out);
+  load_cull_cond(f, hdr, out);
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -8242,6 +8274,11 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_vis_frames, m_vis_own_frames);
     m_vis_chunks = m_vis_tris = m_vis_frames = m_vis_own_frames = 0;
   }
+  if (rs.log_now && m_cond_draws) {
+    lg::info("[ctr] {}: culling by opening planes: {:.1f}% of {} draws culled", m_name,
+             100.0 * m_cond_culled / m_cond_draws, m_cond_draws);
+    m_cond_draws = m_cond_culled = 0;
+  }
   if (rs.log_now && m_cull_frames) {
     lg::info("[ctr] {}: run culling tested {:.0f} runs, hid {:.0f} chunks and {:.0f} tris per level "
              "draw ({} level draws)",
@@ -9817,6 +9854,26 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
   // of their textures. Then the others (blending, decals) in their order, over the opaque ones.
   // The order is made at load (sorted_draws, ordered_draws): only the visible chunks' draws.
+  if (!lev.cond_draws.empty()) {
+    // kDrawCullCond: back faces culled while the camera is inside every opening
+    // plane of the draw (they can only be seen through an opening, from outside its plane)
+    const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
+    const c3l::CullCondPlane* const planes = lev.cond_planes.data();
+    for (const auto& cd : lev.cond_draws) {
+      if (m_visible_slot[lev.draw_chunk[cd.draw]] < 0) {
+        continue;
+      }
+      bool in = true;
+      for (u32 k = cd.first; k < cd.first + cd.count && in; k++) {
+        const auto& p = planes[k];
+        in = p.n[0] * px + p.n[1] * py + p.n[2] * pz < p.d;
+      }
+      auto& st = lev.draw_states[cd.draw];
+      st.tcc = (u8)(in ? (st.tcc | CTR_TCC_CULL_BACK) : (st.tcc & ~CTR_TCC_CULL_BACK));
+      m_cond_draws++;
+      m_cond_culled += in;
+    }
+  }
   bool vista_pass = false;  // (AI-assisted) the pass drawing: the vista chunks or the others
   u64 vista_indices = 0;    // (AI-assisted) drawn by the vista pass (statistics)
   // (AI-assisted, j2water2) c3l v21: an envmapped tie draw (its shine in the same draw, drawn

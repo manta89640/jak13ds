@@ -18,7 +18,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include <map>
 
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
@@ -664,6 +663,75 @@ void raster_triangle(const ctr_draw_state& st,
     }
   }
 }
+// env CTR_SOFT_CULL_PROBE: the level's culled back faces (the screen triangles),
+// tested at the frame's end against its depth: a pixel where one of them is in front of what was
+// drawn is one that drawing both sides (the PS2) would have shown ("[softcull]" line per 60 frames)
+struct CullProbe {
+  std::vector<std::array<float, 9>> tris;
+  double px = 0, front = 0, frames = 0, worst = 0;
+} s_probe;
+bool cull_probe_on() {
+  static const bool on = getenv("CTR_SOFT_CULL_PROBE") != nullptr;
+  return on;
+}
+void cull_probe_add(const ctr_vertex* tri) {
+  if (!cull_probe_on() || s_target.rt) {
+    return;
+  }
+  std::array<float, 9> t;
+  for (int k = 0; k < 3; k++) {
+    t[3 * k] = s_target.ox + tri[k].x * s_target.sx;
+    t[3 * k + 1] = s_target.oy - tri[k].y * s_target.sy;
+    t[3 * k + 2] = tri[k].z;
+  }
+  s_probe.tris.push_back(t);
+}
+void cull_probe_frame() {
+  if (!cull_probe_on()) {
+    return;
+  }
+  double front = 0;
+  for (const auto& t : s_probe.tris) {
+    float area = (t[3] - t[0]) * (t[7] - t[1]) - (t[6] - t[0]) * (t[4] - t[1]);
+    if (std::abs(area) < 1e-6f || (t[2] < 0 && t[5] < 0 && t[8] < 0) ||
+        (t[2] > 1 && t[5] > 1 && t[8] > 1)) {
+      continue;
+    }
+    const int x0 = std::max(0, (int)std::floor(std::min({t[0], t[3], t[6]})));
+    const int x1 = std::min(kW - 1, (int)std::ceil(std::max({t[0], t[3], t[6]})));
+    const int y0 = std::max(0, (int)std::floor(std::min({t[1], t[4], t[7]})));
+    const int y1 = std::min(kH - 1, (int)std::ceil(std::max({t[1], t[4], t[7]})));
+    for (int py = y0; py <= y1; py++) {
+      for (int px = x0; px <= x1; px++) {
+        const float fx = px + 0.5f, fy = py + 0.5f;
+        const float w0 = ((t[3] - fx) * (t[7] - fy) - (t[6] - fx) * (t[4] - fy)) / area;
+        const float w1 = ((t[6] - fx) * (t[1] - fy) - (t[0] - fx) * (t[7] - fy)) / area;
+        const float w2 = 1.f - w0 - w1;
+        if (w0 < 0 || w1 < 0 || w2 < 0) {
+          continue;
+        }
+        const float z = w0 * t[2] + w1 * t[5] + w2 * t[8];
+        if (z < 0 || z > 1) {
+          continue;
+        }
+        s_probe.px++;
+        // (GS z: larger is nearer) clearly in front of the frame's surface there
+        if (z > g_soft.depth[px + py * kW] + 1e-4f) {
+          front++;
+        }
+      }
+    }
+  }
+  s_probe.tris.clear();
+  s_probe.front += front;
+  s_probe.worst = std::max(s_probe.worst, front);
+  if (++s_probe.frames >= 60) {
+    lg::info("[softcull] culled back faces: {:.0f} px per frame, {:.1f} px per frame in front of "
+             "the frame's surfaces (most in a frame {:.0f})",
+             s_probe.px / s_probe.frames, s_probe.front / s_probe.frames, s_probe.worst);
+    s_probe = CullProbe{};
+  }
+}
 }  // namespace
 
 extern "C" {
@@ -706,6 +774,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
 void ctr_gpu_frame_end(void) {
   ctr_gpu_rt_end();  // (AI-assisted) impostors: a render to texture left open
   ctr_gpu_run_sky_hook();
+  cull_probe_frame();
   g_soft.frame++;
   if (softstats::enabled() && ++softstats::frames >= softstats::every) {
     const double n = softstats::frames;
@@ -1800,6 +1869,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
                       (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
       if (g_soft_cull_flip ? a > 0 : a < 0) {
+        cull_probe_add(tri);
         continue;
       }
     }

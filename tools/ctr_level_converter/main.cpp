@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -299,6 +300,15 @@ struct SrcTri {
   u16 proto = 0xffff;
   // a shrub's PS2 fade band (c3l::ExtShrubFade: x << 16 | w, 1/16 m), 0: none
   u32 band = 0;
+  // c3l::kDrawCullCond: the surface's openings (Converter::cond_sets), UINT32_MAX: none
+  u32 cond = UINT32_MAX;
+};
+
+// a planar opening of a tie surface marked c3l::kDrawCullCond (Converter::orient_ties):
+// n its outward unit normal, c its center, eps how far its corners are from the plane; d: the
+// surface's back faces can't be seen while dot(n, camera) < d
+struct CondPlane {
+  float n[3], c[3], eps, d;
 };
 
 struct DrawKey {
@@ -308,8 +318,11 @@ struct DrawKey {
   // (AI-assisted, j2water2) c3l v21: the envmapped tie base draw's shine (Converter::env_ties
   // index), 0xffff: none. Kept by every key made from this one (copy it, then change fields).
   u16 env = 0xffff;
+  // c3l::kDrawCullCond: which way the openings face (1-4), 0: none
+  u8 cond_bin = 0;
   bool operator<(const DrawKey& o) const {
-    return std::tie(mode, texture, kind, env) < std::tie(o.mode, o.texture, o.kind, o.env);
+    return std::tie(mode, texture, kind, env, cond_bin) <
+           std::tie(o.mode, o.texture, o.kind, o.env, o.cond_bin);
   }
 };
 // (AI-assisted, j2water2) a key made from dk: its env kept
@@ -926,8 +939,9 @@ struct Converter {
   }
 
   // (AI-assisted) tie_winding: back face culling of closed tie surfaces.
-  // Can a triangle of this draw key be culled: no blending, and the alpha test (if any) never
-  // fails on its texture (a cut-out card shows its back through the holes)
+  // Can a triangle of this draw key be culled: no blending (or blending that may turn out to do
+  // nothing, see cull_fixup), and the alpha test (if any) never fails on its texture (a cut-out
+  // card shows its back through the holes)
   std::unordered_map<u32, bool> cullable_key;
   bool key_cullable(u32 key) {
     auto it = cullable_key.find(key);
@@ -937,7 +951,11 @@ struct Converter {
     const auto& dk = draw_keys[key];
     DrawMode mode;
     mode.as_int() = dk.mode;
-    bool ok = !mode.get_ab_enable() && mode.get_depth_write_enable();
+    // blending Cs * As + Cd * (1 - As) too: optimize_draws drops it where As is
+    // 1.0 everywhere, and cull_fixup takes the marks back from the keys that keep it
+    bool ok = mode.get_depth_write_enable() &&
+              (!mode.get_ab_enable() ||
+               mode.get_alpha_blend() == DrawMode::AlphaBlend::SRC_DST_SRC_DST);
     if (ok && mode.get_at_enable() && mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL &&
         dk.texture != 0xffff) {
       const auto& t = level->textures.at(tex_order.at(dk.texture));
@@ -1118,6 +1136,289 @@ struct Converter {
     }
     return rays && odd >= kParityAgree * rays;
   }
+  // Open parts sealed by contact (seals_part): the end of the tier 0 tfrag triangles, the tie
+  // ranges oriented once every tie is in (orient_all), the triangles of such parts
+  size_t tfrag0_end = 0;
+  std::vector<std::pair<size_t, size_t>> orient_ranges;
+  size_t orient_sealed_tris = 0;
+  size_t orient_cond_tris = 0;
+  // the planar openings of the surfaces marked kDrawCullCond (SrcTri::cond indexes them)
+  std::vector<std::vector<CondPlane>> cond_sets;
+  static constexpr double kCondMargin = 0.1 * 4096.0, kCondFlat = 0.25 * 4096.0;
+  // an open part's edge is sealed where it lies within kSealDist of other opaque geometry that is
+  // drawn wherever the surface is
+  static constexpr double kSealDist = 0.05 * 4096.0;
+  static constexpr double kSealStep = 0.25 * 4096.0;
+  static constexpr float kSealCell = 2.f * 4096.f;
+  std::unordered_map<u64, std::vector<u32>> seal_cells;
+  static u64 seal_key(int x, int y, int z) {
+    return ((u64)(x & 0x1fffff) << 42) | ((u64)(y & 0x1fffff) << 21) | (u64)(z & 0x1fffff);
+  }
+  // the contact geometry: the detailed tfrag and the ties, not blended, with every texel passing
+  // the alpha test (which of them seal a surface: sealed_at)
+  void build_seal_cells() {
+    seal_cells.clear();
+    auto add = [&](size_t i) {
+      float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+      for (int c = 0; c < 3; c++) {
+        const auto& v = verts[tris[i].v[c]];
+        const float p[3] = {v.x, v.y, v.z};
+        for (int k = 0; k < 3; k++) {
+          lo[k] = std::min(lo[k], p[k] - (float)kSealDist);
+          hi[k] = std::max(hi[k], p[k] + (float)kSealDist);
+        }
+      }
+      int a[3], b[3];
+      for (int k = 0; k < 3; k++) {
+        a[k] = (int)std::floor(lo[k] / kSealCell);
+        b[k] = (int)std::floor(hi[k] / kSealCell);
+      }
+      if ((s64)(b[0] - a[0] + 1) * (b[1] - a[1] + 1) * (b[2] - a[2] + 1) > 4096) {
+        return;  // (a huge triangle: left out, which only seals less)
+      }
+      for (int x = a[0]; x <= b[0]; x++) {
+        for (int y = a[1]; y <= b[1]; y++) {
+          for (int z = a[2]; z <= b[2]; z++) {
+            seal_cells[seal_key(x, y, z)].push_back((u32)i);
+          }
+        }
+      }
+    };
+    auto opaque = [&](u32 key) {
+      DrawMode mode;
+      mode.as_int() = draw_keys[key].mode;
+      return !mode.get_ab_enable() && key_cullable(key);
+    };
+    for (size_t i = 0; i < tfrag0_end; i++) {
+      if (opaque(tris[i].draw_key)) {
+        add(i);
+      }
+    }
+    for (const auto& [a, b] : orient_ranges) {
+      for (size_t i = a; i < b; i++) {
+        if (opaque(tris[i].draw_key)) {
+          add(i);
+        }
+      }
+    }
+  }
+  // the closest point of triangle abc to p (Ericson, Real-Time Collision Detection 5.1.5)
+  static std::array<double, 3> closest_on_tri(const std::array<double, 3>& p,
+                                              const std::array<double, 3>& a,
+                                              const std::array<double, 3>& b,
+                                              const std::array<double, 3>& c) {
+    auto sub = [](const std::array<double, 3>& x, const std::array<double, 3>& y) {
+      return std::array<double, 3>{x[0] - y[0], x[1] - y[1], x[2] - y[2]};
+    };
+    auto dot = [](const std::array<double, 3>& x, const std::array<double, 3>& y) {
+      return x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    };
+    auto at = [](const std::array<double, 3>& o, double u, const std::array<double, 3>& e1,
+                 double v, const std::array<double, 3>& e2) {
+      return std::array<double, 3>{o[0] + u * e1[0] + v * e2[0], o[1] + u * e1[1] + v * e2[1],
+                                   o[2] + u * e1[2] + v * e2[2]};
+    };
+    const auto ab = sub(b, a), ac = sub(c, a), ap = sub(p, a);
+    const double d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0 && d2 <= 0) {
+      return a;
+    }
+    const auto bp = sub(p, b);
+    const double d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0 && d4 <= d3) {
+      return b;
+    }
+    const double vc = d1 * d4 - d3 * d2;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+      return at(a, d1 / (d1 - d3), ab, 0, ab);
+    }
+    const auto cp = sub(p, c);
+    const double d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0 && d5 <= d6) {
+      return c;
+    }
+    const double vb = d5 * d2 - d1 * d6;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+      return at(a, 0, ab, d2 / (d2 - d6), ac);
+    }
+    const double va = d3 * d6 - d5 * d4;
+    if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+      return at(b, (d4 - d3) / ((d4 - d3) + (d5 - d6)), sub(c, b), 0, ab);
+    }
+    const double den = 1.0 / (va + vb + vc);
+    return at(a, vb * den, ab, vc * den, ac);
+  }
+  // Is the surface's open edge sealed at p: p lies within kSealDist of geometry drawn whenever the
+  // surface is, or the surface's triangle at that edge passes through such geometry on the way
+  // from p to `inner` (its third corner): its edge is buried behind it. `own`: the surface's
+  // triangles (tris indices, sorted); `shell` one of them. Geometry drawn whenever the surface is:
+  // tfrag, a tie drawn as far (detail class) and of no other LOD group (or the surface's own
+  // version of its group), or both versions of another LOD group (one of them is drawn).
+  bool sealed_at(const std::array<double, 3>& p,
+                 const std::array<double, 3>& inner,
+                 const std::vector<u32>& own,
+                 const SrcTri& shell) {
+    const std::array<double, 3> dir = {inner[0] - p[0], inner[1] - p[1], inner[2] - p[2]};
+    const double len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    std::vector<u64> keys;
+    const int steps = std::max(1, (int)std::ceil(len / (0.5 * kSealCell)));
+    for (int i = 0; i <= steps; i++) {
+      const double f = (double)i / steps;
+      const u64 k = seal_key((int)std::floor((p[0] + f * dir[0]) / kSealCell),
+                             (int)std::floor((p[1] + f * dir[1]) / kSealCell),
+                             (int)std::floor((p[2] + f * dir[2]) / kSealCell));
+      if (std::find(keys.begin(), keys.end(), k) == keys.end()) {
+        keys.push_back(k);
+      }
+    }
+    std::unordered_map<u32, u8> versions;  // LOD group -> versions touched (bit per version)
+    std::vector<u32> seen;
+    for (size_t ki = 0; ki < keys.size(); ki++) {
+      auto it = seal_cells.find(keys[ki]);
+      if (it == seal_cells.end()) {
+        continue;
+      }
+      for (u32 t : it->second) {
+        const SrcTri& c = tris[t];
+        if (t >= tfrag0_end) {
+          const bool drawn_as_far = c.detail == 0 || c.detail == shell.detail ||
+                                    (shell.detail == 1 && c.detail == 2);
+          const bool other_version = c.lod != c3l::kRunLodAlways &&
+                                     c.lod_group == shell.lod_group && c.lod != shell.lod;
+          if (!drawn_as_far || other_version) {
+            continue;
+          }
+        }
+        if (std::binary_search(own.begin(), own.end(), t)) {
+          continue;
+        }
+        if (ki > 0) {
+          if (std::find(seen.begin(), seen.end(), t) != seen.end()) {
+            continue;
+          }
+          seen.push_back(t);
+        }
+        std::array<double, 3> v[3];
+        for (int k = 0; k < 3; k++) {
+          const auto& q = verts[c.v[k]];
+          v[k] = {q.x, q.y, q.z};
+        }
+        bool hit = false;
+        if (ki == 0) {
+          const auto q = closest_on_tri(p, v[0], v[1], v[2]);
+          const double dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+          hit = dx * dx + dy * dy + dz * dz <= kSealDist * kSealDist;
+        }
+        if (!hit) {
+          // the segment p -> inner against the triangle (Moller-Trumbore)
+          const std::array<double, 3> e1 = {v[1][0] - v[0][0], v[1][1] - v[0][1],
+                                            v[1][2] - v[0][2]};
+          const std::array<double, 3> e2 = {v[2][0] - v[0][0], v[2][1] - v[0][1],
+                                            v[2][2] - v[0][2]};
+          const std::array<double, 3> pv = {dir[1] * e2[2] - dir[2] * e2[1],
+                                            dir[2] * e2[0] - dir[0] * e2[2],
+                                            dir[0] * e2[1] - dir[1] * e2[0]};
+          const double det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2];
+          if (std::abs(det) > 1e-9) {
+            const double inv = 1.0 / det;
+            const std::array<double, 3> sv = {p[0] - v[0][0], p[1] - v[0][1], p[2] - v[0][2]};
+            const double u = (sv[0] * pv[0] + sv[1] * pv[1] + sv[2] * pv[2]) * inv;
+            if (u >= 0 && u <= 1) {
+              const std::array<double, 3> qv = {sv[1] * e1[2] - sv[2] * e1[1],
+                                                sv[2] * e1[0] - sv[0] * e1[2],
+                                                sv[0] * e1[1] - sv[1] * e1[0]};
+              const double w = (dir[0] * qv[0] + dir[1] * qv[1] + dir[2] * qv[2]) * inv;
+              const double tt = (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) * inv;
+              hit = w >= 0 && u + w <= 1 && tt >= 0 && tt <= 1;
+            }
+          }
+        }
+        if (!hit) {
+          continue;
+        }
+        if (t < tfrag0_end || c.lod == c3l::kRunLodAlways || c.lod_group == shell.lod_group) {
+          return true;
+        }
+        if ((versions[c.lod_group] |= (u8)(1u << c.lod)) ==
+            ((1u << c3l::kRunLodNear) | (1u << c3l::kRunLodFar))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  // after optimize_draws: the culling marks of keys that still blend go (their triangles back to
+  // the key without them: a translucent surface shows its back faces)
+  size_t cull_fixup_tris = 0;
+  void cull_fixup() {
+    std::unordered_map<u32, u32> to;
+    for (auto& t : tris) {
+      const DrawKey& dk = draw_keys[t.draw_key];
+      if (!(dk.kind & (c3l::kDrawCullBack | c3l::kDrawCullCond))) {
+        continue;
+      }
+      DrawMode mode;
+      mode.as_int() = dk.mode;
+      if (!mode.get_ab_enable()) {
+        continue;
+      }
+      auto it = to.find(t.draw_key);
+      if (it == to.end()) {
+        DrawKey nk = dk;
+        nk.kind &= (u16)~(c3l::kDrawCullBack | c3l::kDrawCullCond);
+        nk.cond_bin = 0;
+        const u32 id = key_id(nk);
+        rank_merge(id, t.draw_key);
+        it = to.emplace(t.draw_key, id).first;
+      }
+      t.draw_key = it->second;
+      t.cond = UINT32_MAX;
+      cull_fixup_tris++;
+    }
+  }
+  // every tie tree's orient_ties, once all of them are in (their contact geometry)
+  void orient_all() {
+    build_seal_cells();
+    for (const auto& [a, b] : orient_ranges) {
+      orient_ties(a, b);
+    }
+    orient_ranges.clear();
+    seal_cells.clear();
+  }
+  // an open part (the open edges whose corners `find` takes to `root`; bthird: each edge's
+  // triangle's third corner) is sealed along its whole length: its edges sampled every kSealStep
+  template <typename Find>
+  bool seals_part(const std::vector<std::array<u32, 2>>& bedges,
+                  const std::vector<u32>& bthird,
+                  u32 root,
+                  Find& find,
+                  const std::vector<std::array<float, 3>>& pos,
+                  const std::vector<u32>& own) {
+    for (size_t ei = 0; ei < bedges.size(); ei++) {
+      const auto& e = bedges[ei];
+      if (find(e[0]) != root) {
+        continue;
+      }
+      const auto& a = pos[e[0]];
+      const auto& b = pos[e[1]];
+      const auto& c = pos[bthird[ei]];
+      const std::array<double, 3> inner = {c[0], c[1], c[2]};
+      const double len = std::sqrt((double)(b[0] - a[0]) * (b[0] - a[0]) +
+                                   (double)(b[1] - a[1]) * (b[1] - a[1]) +
+                                   (double)(b[2] - a[2]) * (b[2] - a[2]));
+      const int n = std::max(1, (int)std::ceil(len / kSealStep));
+      // (the edge's end is the next edge's start)
+      for (int i = 0; i < n; i++) {
+        const double f = (double)i / n;
+        const std::array<double, 3> p = {a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]),
+                                         a[2] + f * (b[2] - a[2])};
+        if (!sealed_at(p, inner, own, tris[own[0]])) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
   /*!
    * (AI-assisted) The tie triangles [first, end): per visibility group (up to 8 instances), the
    * cullable triangles welded by position into surfaces (edges shared by exactly two triangles),
@@ -1258,6 +1559,7 @@ struct Converter {
         const float base_y = ymin + 0.15f * (ymax - ymin) + 0.5f * 4096.f;
         // the open edges in the surface's consistent winding (a -> b as its triangle runs it)
         std::vector<std::array<u32, 2>> bedges;
+        std::vector<u32> bthird;
         bedges.reserve(open_edges.size());
         std::unordered_map<u32, u32> bpart;  // corner -> union-find parent (corners of open edges)
         auto find = [&](u32 x) {
@@ -1276,6 +1578,12 @@ struct Converter {
           const auto [t, d] = edges[key][0];
           const bool from_lo = d != (flip[t] != 0);
           bedges.push_back(from_lo ? std::array<u32, 2>{lo, hi} : std::array<u32, 2>{hi, lo});
+          // (the edge's triangle's third corner, for seals_part)
+          u32 third = w[t][0];
+          for (int c = 0; c < 3; c++) {
+            third = w[t][c] != lo && w[t][c] != hi ? w[t][c] : third;
+          }
+          bthird.push_back(third);
           bpart.emplace(lo, lo);
           bpart.emplace(hi, hi);
         }
@@ -1293,6 +1601,37 @@ struct Converter {
           std::vector<u32> corners;
         };
         std::unordered_map<u32, Part> parts;
+        // an open part whose corners are within kCondFlat of one plane (and 5% of its size): the
+        // plane (normal along the part's vector area, through its center; eps the largest distance)
+        auto open_plane = [](const Part& pt, const std::vector<std::array<float, 3>>& p)
+            -> std::optional<CondPlane> {
+          const double an = std::sqrt(pt.area[0] * pt.area[0] + pt.area[1] * pt.area[1] +
+                                      pt.area[2] * pt.area[2]);
+          if (an <= 0) {
+            return std::nullopt;
+          }
+          double eps = 0, rad = 0;
+          for (u32 c : pt.corners) {
+            double dn = 0, r2 = 0;
+            for (int k = 0; k < 3; k++) {
+              const double v = p[c][k] - pt.cen[k];
+              dn += v * pt.area[k] / an;
+              r2 += v * v;
+            }
+            eps = std::max(eps, std::abs(dn));
+            rad = std::max(rad, std::sqrt(r2));
+          }
+          if (eps > std::min(kCondFlat, 0.05 * rad)) {
+            return std::nullopt;
+          }
+          CondPlane cp;
+          for (int k = 0; k < 3; k++) {
+            cp.n[k] = (float)(pt.area[k] / an);
+            cp.c[k] = (float)pt.cen[k];
+          }
+          cp.eps = (float)eps;
+          return cp;
+        };
         for (const auto& [c, p] : bpart) {
           (void)p;
           Part& pt = parts[find(c)];
@@ -1317,6 +1656,10 @@ struct Converter {
           pt.area[2] += a[0] * b[1] - a[1] * b[0];
         }
         bool parts_ok = true;
+        bool sealed_parts = false;
+        std::vector<CondPlane> cond_parts;  // (not yet oriented: n along the part's vector area)
+        std::vector<u32> own;  // (the surface's triangles, for seals_part)
+        bool own_alike = true;
         for (auto& [r, pt] : parts) {
           (void)r;
           for (double& c : pt.cen) {
@@ -1341,6 +1684,27 @@ struct Converter {
             }
           }
           if (!base) {
+            if (own.empty()) {
+              for (u32 t : members) {
+                own.push_back(ids[t]);
+              }
+              std::sort(own.begin(), own.end());
+              const SrcTri& f = tris[own[0]];
+              for (u32 t : own) {
+                // (one detail class and LOD version: what seals it is drawn with all of it)
+                own_alike = own_alike && tris[t].detail == f.detail && tris[t].lod == f.lod &&
+                            tris[t].lod_group == f.lod_group;
+              }
+            }
+            if (own_alike && seals_part(bedges, bthird, find(r), find, pos, own)) {
+              sealed_parts = true;
+              continue;
+            }
+            // (a planar opening: its plane decides per frame, see CondPlane)
+            if (const auto cp = open_plane(pt, pos)) {
+              cond_parts.push_back(*cp);
+              continue;
+            }
             parts_ok = false;
             break;
           }
@@ -1402,13 +1766,45 @@ struct Converter {
           continue;
         }
         const u8 inward = vs < 0 ? 1 : 0;
+        orient_sealed_tris += sealed_parts ? members.size() : 0;
+        u32 cond = UINT32_MAX;
+        u8 cond_bin = 0;
+        if (!cond_parts.empty()) {
+          // the openings' outward normals: against the boundary's vector area when the surface is
+          // wound outward (the fan runs the boundary the other way)
+          cond = (u32)cond_sets.size();
+          auto& set = cond_sets.emplace_back();
+          float hx = 0, hz = 0;
+          for (auto cp : cond_parts) {
+            const float sgn = inward ? 1.f : -1.f;
+            for (float& c : cp.n) {
+              c *= sgn;
+            }
+            cp.d = cp.n[0] * cp.c[0] + cp.n[1] * cp.c[1] + cp.n[2] * cp.c[2] - cp.eps -
+                   (float)kCondMargin;
+            set.push_back(cp);
+            hx += cp.n[0];
+            hz += cp.n[2];
+          }
+          // draws of openings that face about the same way (one of four), so that a draw's planes
+          // agree with each other: the camera is inside all of them as often as each
+          cond_bin = (u8)(1 + (std::abs(hx) > std::abs(hz) ? (hx > 0 ? 0 : 1) : (hz > 0 ? 2 : 3)));
+          orient_cond_tris += members.size();
+        }
         for (u32 t : members) {
           auto& tri = tris[ids[t]];
           if (flip[t] ^ inward) {
             std::swap(tri.v[1], tri.v[2]);
             orient_flipped++;
           }
-          const auto dk = draw_keys[tri.draw_key];
+          auto dk = draw_keys[tri.draw_key];
+          if (cond != UINT32_MAX) {
+            dk.cond_bin = cond_bin;
+            tri.draw_key =
+                key_id(key_like(dk, dk.mode, dk.texture, (u16)(dk.kind | c3l::kDrawCullCond)));
+            tri.cond = cond;
+            continue;
+          }
           tri.draw_key = key_id(key_like(dk, dk.mode, dk.texture, (u16)(dk.kind | c3l::kDrawCullBack)));
           orient_culled++;
         }
@@ -1940,7 +2336,7 @@ struct Converter {
       }
     }
     if (opt.tie_winding) {
-      orient_ties(tree_first_tri, tris.size());  // (AI-assisted)
+      orient_ranges.push_back({tree_first_tri, tris.size()});  // orient_all
     }
   }
 };
@@ -3173,7 +3569,8 @@ void optimize_draws(Converter& cv,
     // groups of opaque keys that differ only in their alpha test: the ones whose alpha is 1.0
     // everywhere become one key without the test (the largest aref kept for config opaque_alpha
     // = off); blended ones (alpha blending of Cs * As + Cd * (1 - As)) lose the blending in place
-    std::map<std::tuple<u32, u16, u16, u16>, std::vector<u32>> groups;  // (+ env, j2water2)
+    // (+ env, j2water2; + cond_bin)
+    std::map<std::tuple<u32, u16, u16, u16, u8>, std::vector<u32>> groups;
     for (u32 k = 0; k < nk; k++) {
       if (!key_tris[k]) {
         continue;
@@ -3209,7 +3606,7 @@ void optimize_draws(Converter& cv,
         st->blocked_coplanar += at && key_blocked[k];
         continue;
       }
-      groups[{dk.mode & ~kAtBits, dk.texture, dk.kind, dk.env}].push_back(k);
+      groups[{dk.mode & ~kAtBits, dk.texture, dk.kind, dk.env, dk.cond_bin}].push_back(k);
     }
     for (auto& [g, keys] : groups) {
       int aref = -1;
@@ -3228,6 +3625,7 @@ void optimize_draws(Converter& cv,
       nm.set_alpha_test(DrawMode::AlphaTest::GEQUAL);
       DrawKey tk{nm.as_int(), std::get<1>(g), (u16)(std::get<2>(g) | c3l::kDrawAlphaTestDropped)};
       tk.env = std::get<3>(g);  // (AI-assisted, j2water2)
+      tk.cond_bin = std::get<4>(g);
       const u32 to = cv.key_id(tk);
       for (u32 k : keys) {
         remap[k] = to;
@@ -3890,6 +4288,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
   size_t far_first = cv.tris.size();
+  cv.tfrag0_end = far_first;
   const char* far_source = "none";
   if (two_tiers && !opt.merc_only) {
     // coarse version of each grid cell: the coarsest tfrag level of detail
@@ -3932,6 +4331,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
     }
     cv.cur_lod_slot = -1;
+    cv.orient_all();
     if (lod && opt.tie_far_near_colors) {
       // (AI-assisted, lod-light)
       Converter::FarColorStats fs;
@@ -3976,6 +4376,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   DrawOptStats dstats;
   if (!opt.merc_only) {
     optimize_draws(cv, opt, tex_descs, tex_datas, cv.tex_use, &dstats);
+    cv.cull_fixup();
     tex_psnr.resize(tex_descs.size(), 99.0);
     tex_gate.resize(tex_descs.size());
   }
@@ -4428,12 +4829,20 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           nk.env = 0xffff;
           src_key_id = cv.key_id(nk);
         }
+        if (cv.draw_keys[src_key_id].kind & c3l::kDrawCullCond) {
+          // simplified: no opening planes, both sides drawn
+          DrawKey nk = cv.draw_keys[src_key_id];
+          nk.kind &= (u16)~c3l::kDrawCullCond;
+          nk.cond_bin = 0;
+          src_key_id = cv.key_id(nk);
+        }
         for (size_t i = 0; i + 2 < out_idx.size(); i += 3) {
           SrcTri nt = cv.tris[ids[0]];
           nt.draw_key = src_key_id;  // (AI-assisted) not the atlas's
           nt.orig_key = UINT32_MAX;
           nt.lod = c3l::kRunLodAlways;  // (AI-assisted) v17: one version
           nt.lod_group = UINT32_MAX;
+          nt.cond = UINT32_MAX;
           for (int k = 0; k < 3; k++) {
             const u32 r = out_idx[i + k];
             auto [it, fresh] = made.emplace(r, (u32)cv.verts.size());
@@ -4712,6 +5121,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // bytes and different normals: the later one's s moved by 1/1024 until it differs), so welding,
   // the vertex orders and copies after this keep them (looked up again at the end)
   std::vector<c3l::EnvTieDraw> out_env_draws;
+  // kDrawCullCond: per such output draw the opening sets of its triangles
+  std::map<u32, std::set<u32>> out_cond_sets;
   std::map<u32, std::unordered_map<std::string, std::array<s8, 3>>> env_chunk_normals;
   size_t env_st_moved = 0;
   // the wind instance of each wind vertex by its bytes, per chunk with any (as the normals: two
@@ -4890,6 +5301,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           out_indices.push_back(local.at(t.v[k]));
         }
         out_draws.back().index_count += 3;
+        if (t.cond != UINT32_MAX && (out_draws.back().kind & c3l::kDrawCullCond)) {
+          out_cond_sets[(u32)out_draws.size() - 1].insert(t.cond);
+        }
         // (AI-assisted) v17: a run per LOD group version too (run_lods: c3l::RunLod)
         const u16 lg = t.lod ? (u16)t.lod_group : (u16)0xffff;
         // (AI-assisted, j2vis) v20: and per toggled prototype
@@ -5419,7 +5833,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     for (const u32 b : out_run_bands) {
       any_band |= b != 0;
     }
-    const u32 eh_size = any_band && out_run_bands.size() == out_runs.size()
+    const u32 eh_size = !out_cond_sets.empty() ? c3l::kExtHeaderV24Size
+                        : any_band && out_run_bands.size() == out_runs.size()
                             ? c3l::kExtHeaderV23Size
                         : !wind_chunk_verts.empty() ? c3l::kExtHeaderV22Size
                         : !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
@@ -5489,7 +5904,29 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
                cv.env_tie_groups_missing, env_st_moved, missing);
     }
-    if (eh_size >= c3l::kExtHeaderV23Size) {
+    if (!out_cond_sets.empty()) {
+      // the kDrawCullCond draws' opening planes (c3l::ExtCullCond)
+      std::vector<c3l::CullCondDraw> cds;
+      size_t planes = 0;
+      for (const auto& [di, sets] : out_cond_sets) {
+        std::vector<c3l::CullCondPlane> ps;
+        for (u32 si : sets) {
+          for (const auto& cp : cv.cond_sets.at(si)) {
+            ps.push_back(c3l::CullCondPlane{{cp.n[0], cp.n[1], cp.n[2]}, cp.d});
+          }
+        }
+        planes += ps.size();
+        cds.push_back(c3l::CullCondDraw{di, (u32)ps.size(), append(buf, ps.data(), ps.size()), 0});
+      }
+      c3l::ExtCullCond ec{};
+      ec.draw_count = (u32)cds.size();
+      ec.draws_offset = append(buf, cds.data(), cds.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV23Size, &ec, sizeof(ec));
+      lg::info("{}: culling by opening planes: {} draws, {} planes", level.level_name, cds.size(),
+               planes);
+    }
+    if (eh_size >= c3l::kExtHeaderV23Size && any_band &&
+        out_run_bands.size() == out_runs.size()) {
       // the shrub runs' PS2 fade bands (c3l::ExtShrubFade)
       c3l::ExtShrubFade ef{};
       ef.band_count = (u32)out_run_bands.size();
@@ -5926,12 +6363,18 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   if (opt.tie_winding) {
     lg::info("{}: tie winding: {} of {} cullable tie triangles on closed surfaces, marked for back "
-             "face culling ({} turned to face outward); (AI-assisted) not marked: {} with open parts "
+             "face culling ({} turned to face outward; {} closed by contact); (AI-assisted) not "
+             "marked: {} with open parts "
              "neither small holes nor on the ground ({} parts at the base not on the collision{}), "
              "{} without a clear inside, {} failing the rays",
              level.level_name, cv.orient_culled, cv.orient_tris, cv.orient_flipped,
-             cv.orient_open_tris, cv.orient_no_ground, cv.ground_state == 1 ? "" : ", no collision",
+             cv.orient_sealed_tris, cv.orient_open_tris, cv.orient_no_ground,
+             cv.ground_state == 1 ? "" : ", no collision",
              cv.orient_volume_tris, cv.orient_parity_tris);
+    lg::info("{}: tie winding: {} triangles in {} surfaces with planar openings, culled while the "
+             "camera is on the inner side of their opening planes (c3l::kDrawCullCond); {} "
+             "triangles of both kinds unmarked again (their draws still blend)",
+             level.level_name, cv.orient_cond_tris, cv.cond_sets.size(), cv.cull_fixup_tris);
   }
   if (!opt.merc_only) {
     // (AI-assisted) v15 draw optimisations
