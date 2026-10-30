@@ -352,8 +352,11 @@ void* RPC_Player(unsigned int /*fno*/, void* data, int size) {
         }
       } break;
       case Jak2SoundCommand::set_reverb: {
-        lg::warn("RPC_Player: unimplemented set_reverb");
-        // TODO reverb
+        // as the PS2 overlord: the effect mode and depth (EVOL, the low 16 bits) of the cores in
+        // the mask, no delay or feedback, effects on
+        const u32 core = cmd->reverb.core & (SND_CORE_0 | SND_CORE_1);
+        snd_SetReverbType(core, cmd->reverb.reverb);
+        snd_SetReverbDepth(core, (s16)(u16)cmd->reverb.left, (s16)(u16)cmd->reverb.right);
       } break;
       case Jak2SoundCommand::set_ear_trans: {
         SetEarTrans(&cmd->ear_trans_j2.ear_trans0, &cmd->ear_trans_j2.ear_trans1,

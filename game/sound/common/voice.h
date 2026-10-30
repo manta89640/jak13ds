@@ -135,7 +135,13 @@ class Voice {
 
   void Stop();
 
+  // the voice's output goes to the effect unit too (the SPU2's wet voice mix bits); set before
+  // the synth gets the voice
+  void SetReverbSend(bool on) { mReverbSend = on; }
+  bool ReverbSend() const { return mReverbSend; }
+
  private:
+  bool mReverbSend{false};
   enum class Op : u8 { Pitch, Adsr1, Adsr2, VolumeL, VolumeR, Sample, Ssa, Lsa, KeyOn, KeyOff, Stop };
   struct Deferred {
     Op op;

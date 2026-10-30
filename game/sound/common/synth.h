@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "envelope.h"
+#include "reverb.h"
 #include "sound_types.h"
 #include "voice.h"
 
@@ -47,6 +48,11 @@ class Synth {
   }
   void AddVoice(std::shared_ptr<Voice> voice);
   void SetMasterVol(u32 volume);
+  void SetOutputRate(u32 rate) { mReverb.SetOutputRate(rate); }
+  // the SPU2 effect unit (both cores' effect settings are the same in the games): libsd mode
+  // and depth (EVOL)
+  void SetReverbMode(u32 mode);
+  void SetReverbDepth(s16 left, s16 right);
 
  private:
   std::forward_list<std::shared_ptr<Voice>> mVoices;
@@ -55,7 +61,12 @@ class Synth {
   std::vector<std::shared_ptr<Voice>> mPendingVoices;
   u32 mPendingMasterVol{0};
   bool mMasterVolPending{false};
+  bool mReverbModePending{false}, mReverbDepthPending{false};
+  u32 mPendingReverbMode{0};
+  s16 mPendingDepthL{0}, mPendingDepthR{0};
 #endif
+  Reverb mReverb;
+  std::vector<s16Output> mWet;
 
   VolumePair mVolume{};
 };

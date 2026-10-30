@@ -13,6 +13,7 @@ set(SOUND_SOURCES
   989snd/lfo.cpp
   989snd/util.cpp
   common/synth.cpp
+  common/reverb.cpp
   common/voice.cpp
   common/envelope.cpp
   sndshim.cpp
