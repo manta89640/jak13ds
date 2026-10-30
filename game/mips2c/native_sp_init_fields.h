@@ -11,9 +11,9 @@
  *
  * Same results as goalc's C code of the GOAL functions: the same float operations in the same
  * order (each on its own: no multiply-adds), the int conversions of goalc (gc_cvtt: truncate,
- * saturate, NaN -> 0; (the float i) of the low 32 bits), the same field id compares (unsigned, the
- * field ids zero-extended), and rand-vu's register update with pc-rand (the same mt19937 draws in
- * the same order).
+ * saturate, NaN -> INT32_MIN; (the float i) of the low 32 bits), the same field id compares
+ * (unsigned, the field ids zero-extended), and rand-vu's register update with pc-rand (the same
+ * mt19937 draws in the same order).
  *
  * The two games differ in: where a symbol's value is (Jak 1: at the symbol, Jak 2: at the symbol
  * - 1), and Jak 2's float-store (flag 7: a float that is also stored in *sp-temp*), which Jak 1's
