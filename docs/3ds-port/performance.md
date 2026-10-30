@@ -1088,6 +1088,16 @@ default (on). It never had anything to do with the red HUD shard (see below).
   stay. Tried first and dropped: writing every second group per move (alternating by group index):
   only ~10% less, because the whole-table refresh and the per-chunk bookkeeping cost as much as the
   vertex writes.
+  Jak 1 now does this on the title only: Rock Village draws 3x its
+  table every frame, so in play its lightning flashes (a new palette 2/3 weight every frame) and its
+  flames showed every second weight. Jak II keeps every third frame, except when a day palette
+  jumps (a flash). A day palette's jump (more than one 64th) is never spread over frames
+  (`kTodSpreadFrames`): only the day's own 1/64 steps are. A whole group's rewrite stores only the
+  colors that differ, so the lines whose vertices keep their colors stay clean (no FCRAM
+  write-back). Azahar, village2-start at 22:00, standing, six 15 s windows: time of day 3.1 -> 4.4
+  ms per frame, most in one frame 18.5-20.6 -> 21.9-28.5 ms, build 22.1-23.3 -> 23.3-25.2 ms (the
+  flash frames now rewrite every changed vertex in the frame it changes). Then the list room grows
+  (below): host model, flash frames after the lists are made, 217k -> 114k vertices written.
 - **Shrubs to the PS2's far plane, thinning out** (`kShrubFarK`, `kShrubNearK`, `shrub_run_limit`):
   a c3l v14 shrub chunk's `max_dist` is its PS2 distance class, the middle of the prototype's
   fade (shrub_ps2_dists.inc: full detail to x, the fading version to w). The PS2 shows a shrub to
@@ -1268,8 +1278,10 @@ every frame (time-of-day-interp-colors in background.gc), so there is no lower r
 - **The blend adds only the palettes a color isn't black in.**
 - **The title screen keeps the old whole-group path.** Its fast day changes nearly every color every
   frame, so the lists don't pay there.
-- **Memory.** One room for every level's lists, 384 KB, allocated at the first list. When full it is
-  emptied, at most every 300 frames. A group without a list is written whole, as before. On top of
+- **Memory.** One room for every level's lists, 384 KB, allocated at the first list. When full it
+  grows once to 768 KB while the heap keeps 5 MB free after it (log line "room grown"; Rock
+  Village's drawn set needs ~690 KB, and each lightning flash wrote its groups without a list
+  whole), else it is emptied, at most every 300 frames. A group without a list is written whole, as before. On top of
   that, 4 bytes per color per level (Citadel 50 KB).
 - **tod_pulse_step now 0 by default**: every move, exact as the PC and the PS2. It now costs less than
   the hold did.

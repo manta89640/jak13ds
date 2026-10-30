@@ -29,6 +29,20 @@ static void* ctr_gpu_mesh_vertices_inplace(int mesh, int* n) {
   *n = (int)v.size();
   return v.data();
 }
+// draw_level's heavy frames in Jak 1 (a version without tod_day_jump: in play too)
+struct TodNoJump {};
+template <typename... A>
+TodNoJump tod_day_jump(const A&...) {
+  return {};
+}
+template <typename J>
+bool tod_skip_rule(bool heavy, u64 frame_idx, const J&) {
+  if constexpr (std::is_same_v<J, TodNoJump>) {
+    return heavy && (frame_idx % 2) != 0;
+  } else {
+    return heavy && (frame_idx % 2) != 0 && g_title;
+  }
+}
 namespace {
 #include TOD_CODE
 }  // namespace
@@ -258,7 +272,8 @@ struct Sim {
     }
     auto& t = *lev.tod;
     mark(0);
-    const bool tod_skip = heavy && (frame_idx % 2) != 0;  // (draw_level: Jak 1)
+    // (draw_level: Jak 1)
+    const bool tod_skip = tod_skip_rule(heavy, frame_idx, tod_day_jump(t, cam));
     if (!tod_skip) {
       tod_update(t, lev.name, cam, frame_idx, g_title);
     }

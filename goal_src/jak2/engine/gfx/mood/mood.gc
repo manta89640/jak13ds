@@ -995,7 +995,8 @@
               )
             )
           (when (not (paused?))
-            (let ((v0-2 (the-as number (+ (-> this lightning-time) 1))))
+            ;; og:preserve-this 3DS: one step per 60 Hz frame of the drawn frame
+            (let ((v0-2 (the-as number (+ (-> this lightning-time) (#if TARGET_3DS (max 1 (the int (-> *display* dog-ratio))) 1)))))
               (set! (-> this lightning-time) (the-as int v0-2))
               v0-2
               )

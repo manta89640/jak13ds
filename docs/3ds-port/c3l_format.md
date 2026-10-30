@@ -461,7 +461,8 @@ their meshes (a frame the GPU still draws may see part of the change):
 - **Changed colors only (todperf).** Each color keeps the version its rgba last changed at
   (`Tod::cver`; a TodMul changes only with its color). A group written whole once gets a list of
   its vertices by table entry, in runs by palette mask (`tod_make_list`, one shared room of 384 KB
-  for all levels, emptied when full at most every 300 frames; groups over 8192 vertices have none).
+  for all levels, grown once to 768 KB while the heap keeps 5 MB free after it, else emptied when
+  full at most every 300 frames; groups over 8192 vertices have none).
   A group behind then writes only the vertices of the entries whose color changed since it was
   written (`tod_list_write`): runs whose palettes didn't move are passed over, and no vertex is read.
   The light pass does the same for its moved light palettes; a group without a list has its light
