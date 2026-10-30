@@ -167,9 +167,9 @@
 ;;;;;;;;;;;;;;;;;;;;;;;
 
 ;; og:preserve-this
-;; (AI-assisted) 3DS: 80, as upstream's PC_BIG_MEMORY. The 3DS processes particles at 30 fps, two
-;; PS2 frames of rain / splash drops (check-drop-level-*) per pass, so the 32 queued launches ran
-;; out ("queue is full", one log line each). 48 more entries are 1.5 KB of global heap.
+;; 3DS: 80, as upstream's PC_BIG_MEMORY. A pass at 30 fps covers two PS2 frames of
+;; splash launches from check-drop-level-* (at most 12 ticks, 2.4 frames: set-particle-frame-time's
+;; 0.04 s), so the PS2's 32 per frame need 77 entries; a full queue then means the PS2 dropped too.
 ;(#if (not PC_BIG_MEMORY)
 (#if TARGET_3DS
   (defconstant SPARTICLE_QUEUE_SIZE 80)
