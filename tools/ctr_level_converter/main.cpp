@@ -90,7 +90,7 @@ struct Options {
   // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
   // runtime blends the palettes with the game's weights (off: the baked palette only)
   bool tod = true;
-  int max_tex = 128;
+  int max_tex = 1024;  // (the GPU's largest: every PS2 texture at its own size)
   float cell_meters = 200.f;
   // tie instances smaller than detail_radius (bounding sphere radius, meters) are only drawn up
   // to detail_dist meters away; smaller than medium_radius: up to medium_dist
@@ -2915,9 +2915,7 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
       has_alpha = true;
     }
   }
-  // RGBA4 / level textures ETC1 without the test for now: the 8-bit versions need the texture
-  // memory work (alpha masks, sharing) first
-  const ctr_tex::Format fmt_full = has_alpha ? ctr_tex::Format::RGBA4 : ctr_tex::Format::RGB565;
+  const ctr_tex::Format fmt_full = has_alpha ? ctr_tex::Format::RGBA8 : ctr_tex::Format::RGB565;
   const ctr_tex::Format fmt_etc = has_alpha ? ctr_tex::Format::ETC1A4 : ctr_tex::Format::ETC1;
   const int levels = opt.mips ? ctr_tex::level_count(dw, dh, 16) : 1;
   mo.preserve_coverage = has_alpha && opacity && use.alpha_test;
@@ -2929,17 +2927,18 @@ std::vector<u8> convert_texture(const tfrag3::Texture& tex,
   }
   const int aref = mo.preserve_coverage ? mo.alpha_ref : 0;
   std::vector<u8> out;
-  bool etc1 = opt.etc1 && (!use.merc || opt.etc1_merc);
+  bool etc1 = opt.etc1 && use.merc && opt.etc1_merc;
   // (AI-assisted) the quality test (Options::etc1_psnr): the full size level is encoded both ways
   // and compared with the image; the kept one starts the output
   const bool merc_kept = use.merc && (use.face || use.eye || (int)dw < opt.etc1_merc_min ||
                                       (int)dh < opt.etc1_merc_min);
-  if (!etc1 && opt.etc1 && use.merc && !opt.full_color && opt.etc1_psnr > 0 && gate) {
+  if (!etc1 && opt.etc1 && !opt.full_color && opt.etc1_psnr > 0 && gate) {
     for (const auto& m : mips) {
       gate->bytes_16 += ctr_tex::level_bytes(m.w, m.h, fmt_full);
     }
-    gate->alpha_ok = true;
-    if (!merc_kept) {
+    gate->alpha_ok = !has_alpha || alpha_fits_4bit(mips[0]) ||
+                     (use.alpha_test && !use.blend && !use.low_alpha_rgb_visible);
+    if (!merc_kept && gate->alpha_ok) {
       std::vector<u8> e, f;
       ctr_tex::encode_level(mips[0], fmt_etc, opt.etc1_quality, &e, aref, opt.etc1_rdo, opacity);
       ctr_tex::encode_level(mips[0], fmt_full, opt.etc1_quality, &f, aref);
