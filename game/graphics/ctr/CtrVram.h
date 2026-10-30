@@ -164,13 +164,23 @@ class CtrVram {
     u64 page_key;
   };
   static PendingUpload piece(const PendingUpload& p, u32 c0, u32 c1);
-  void write_upload(const u8* src, u32 dest_block, u32 words, u64 page_key);
+  // bytes = false: whole chunks only take their id, their bytes are written when read (lazy)
+  void write_upload(const u8* src, u32 dest_block, u32 words, u64 page_key, bool bytes = true);
   void write_rows(const u8* src, u32 dest_block, u32 words);
   void write_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
   bool ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const;  // (AI-assisted)
   // write the pending uploads (all, or only those overlapping the given block ranges)
   void flush_pending();
-  void flush_pending(u32 first_block, u32 end_block);
+  void flush_pending(u32 first_block, u32 end_block, bool bytes = true);
+  // (AI-assisted) Lazy chunks: a whole chunk of a page upload whose id is current but whose bytes
+  // are not written yet (their source and page). Textures are matched by chunk ids, so a page that
+  // alternates with another in the same VRAM needs its bytes only when something decodes or reads
+  // VRAM there; every byte read or partial write writes them first.
+  const u8* m_lazy_src[256] = {};
+  u64 m_lazy_key[256] = {};
+  u32 m_lazy_n = 0;
+  void materialize(u32 first_block, u32 end_block);
+  void materialize_all() { materialize(0, kChunkCount * 64); }
   // (AI-assisted) drop the chunks of pending uploads that [first_block, end_block) overwrites
   void trim_pending(u32 first_block, u32 end_block);
   struct RelocateRecord {

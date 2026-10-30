@@ -81,4 +81,53 @@ void run_vram_tests() {
     check(vram.stats().chunks_written == (int)written + 1,
           "the new page uploaded again must be deduplicated");
   }
+
+  // two pages alternating in the same VRAM, each read by its texture: the textures stay cached
+  // and the chunks' bytes are written only when something decodes
+  for (bool sparse : {false, true}) {
+    CtrVram vram(sparse);
+    std::vector<u8> ee(4096 + 2 * 16384, 0);
+    GoalTexturePageHeader pages[2]{};
+    for (int i = 0; i < 2; i++) {
+      pages[i].id = 10 + i;
+      pages[i].size = 4096;
+      pages[i].segment[0].block_data_ptr = 4096 + 16384 * i;
+      pages[i].segment[0].size = 4096;
+      for (u32 k = 0; k < 4096; k++) {
+        const u32 v = 0x80000000u | (k * 2654435761u >> 8) ^ (i ? 0x5a5a5au : 0);
+        memcpy(ee.data() + 4096 + 16384 * i + 4 * k, &v, 4);
+      }
+    }
+    const u64 tex[2] = {kTex0, (1ull << 14) | (4ull << 26) | (4ull << 30)};
+    auto reference = [&](int i, u64 t0) {
+      CtrVram ref(sparse);
+      ref.upload_texture_page_now((const u8*)&pages[i], -1, ee.data(), 0);
+      std::vector<u32> out;
+      int w, h;
+      check(ref.decode(t0, &out, &w, &h), "reference decode");
+      return out;
+    };
+    for (int round = 0; round < 4; round++) {
+      for (int i = 0; i < 2; i++) {
+        vram.upload_texture_page((const u8*)&pages[i], -1, ee.data(), 0);
+        const int written = vram.stats().chunks_written;
+        const auto* t = vram.get_texture(tex[i]);
+        check(t && t->handle >= 0, "alternating page texture");
+        if (round > 0) {
+          check(vram.stats().chunks_written == written,
+                "an alternating page whose textures are cached must not be written");
+        }
+      }
+    }
+    for (int i = 0; i < 2; i++) {
+      vram.upload_texture_page((const u8*)&pages[i], -1, ee.data(), 0);
+      check(vram.get_texture(tex[i]) != nullptr, "alternating page texture");
+      std::vector<u32> out;
+      int w, h;
+      check(vram.decode_for_cpu(tex[i], &out, &w, &h) && out == reference(i, tex[i]),
+            "a lazy chunk must decode as the page written");
+      check(vram.decode_for_cpu(tex[1 - i], &out, &w, &h) && out == reference(i, tex[1 - i]),
+            "the other texture must read the page written last");
+    }
+  }
 }
