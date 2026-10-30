@@ -369,10 +369,12 @@ Texture (16 bytes)
   texture's mask texels; 0 for masks and animated slots). `ctr_level_converter --all` writes
   `texshare.c3t` (`c3l::TexShareHeader`) next to the files: the keys that more than one level has,
   each with its group, the textures exactly the same levels have (`--texshare DIR DIR` writes it
-  again for a folder). The runtime loads a group once, into a pool of its own, for the first loaded
-  level that has it, and the other loaded levels use those textures; the group goes with the last
-  of them. Every texture of a group is in every level that has the group, so none of it is unused
-  while it is loaded. Jak 1: 511 textures in 123 groups. Log: `[ctr] LEVEL: shared textures: X KB
+  again for a folder). The runtime loads a group once, into pools of its own (256 KB pieces), for
+  the first loaded level that has it, and the other loaded levels use those textures; the group
+  goes with the last of them. While that load runs, the other levels make their own copies; a
+  load that fails or is cancelled gives the group up, and the next level that has it makes it.
+  Every texture of a group is in every level that has the group, so none of it is unused while it
+  is loaded. A stale `texshare.c3t` only loses sharing: the keys are the texels. Jak 1: 511 textures in 123 groups. Log: `[ctr] LEVEL: shared textures: X KB
   loaded for the levels that also have them, Y KB from the loaded ones`.
 - **Shared textures:** (AI-assisted) the fr3 has a copy of a texture for each merc model that
   uses it (citadel: 1017 textures, 776 of them copies; pal-environment-front 90 times). Identical
