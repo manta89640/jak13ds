@@ -901,7 +901,14 @@ class CtrLevels {
 
   // ---- (AI-assisted, streaming) ----
   void stream_update(u64 frame);
-  void run_stream_job(const Job& job, Done* d);
+  void run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bufs = nullptr);
+  // a level load's breaks (loader thread, while levels are drawn): the urgent stream jobs queued
+  // meanwhile, read with buffers of their own instead of after the load
+  void serve_streams_in_load();
+  c3l::Reader::Buffers m_load_stream_bufs;
+  bool m_load_stream_tried = false, m_load_stream_ok = false;
+  u32 m_load_streams_served = 0;
+  std::atomic<bool> m_stream_urgent_queued{false};
   void take_stream(Done& d, u64 frame);
   void stream_evict(CtrLevelData& lev, u32 unit);
   void stream_idle_fill(u64 frame);
@@ -942,13 +949,23 @@ class CtrLevels {
   int dist_positions(float pos[4][3]) const;
   // (AI-assisted, j2pop) min_excess: only the chunks more than that (game units) beyond their
   // freeing distance
-  u64 dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, float min_excess = 0.f);
+  u64 dist_free_far(CtrLevelData& lev,
+                    const float pos[4][3],
+                    int np,
+                    float min_excess,
+                    float meters,
+                    bool log);
   // (AI-assisted, j2pop) a load that made room: the farthest chunks first, until want bytes are
   // freed (0: all of those far beyond their distance); returns the bytes freed
-  u64 dist_make_room(u64 want);
+  u64 dist_make_room(u64 want, float meters = 0.f, bool log = true);  // meters 0: kDistFreeMeters
   float m_dist_snap[4][3] = {};
   int m_dist_snap_n = 0;
-  u64 m_dist_log_frame = 0;
+  u64 m_dist_play_frame = 0;
+  // distance freeing per stats period (stream_log)
+  struct DistStats {
+    u64 play_frees = 0, freed_chunks = 0, freed_bytes = 0, read_jobs = 0, read_chunks = 0,
+        read_bytes = 0;
+  } m_dst;
   math::Vector4f m_planes[4];  // the view's planes (as CtrBackgroundCamera::planes)
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
   u64 m_lv_frame = 0;  // (AI-assisted, j2intro) note_late_in_view

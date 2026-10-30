@@ -49,6 +49,8 @@ class Reader {
     ~Buffers();
     // (the memory for a reader of this window size and files with blocks of up to max_block)
     void reserve(size_t window_size, size_t max_block);
+    // the windows' and caches' memory back, the kept file closed (the zstd decoder stays)
+    void release();
   };
 
   // (AI-assisted) window: 0, reads through a 64 KB stdio buffer and windows of kWindow packed

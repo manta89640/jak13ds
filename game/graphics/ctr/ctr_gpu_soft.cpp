@@ -1671,6 +1671,9 @@ unsigned int ctr_gpu_linear_free(void) {
   }
   return used >= total ? 0u : (unsigned int)(total - used);
 }
+unsigned int ctr_gpu_linear_largest(void) {
+  return ctr_gpu_linear_free();  // (the model has no pieces)
+}
 static void soft_mesh_free(int mesh) {
   void* ext = g_soft.meshes[mesh].ext;
   g_soft.meshes[mesh] = SoftMesh();

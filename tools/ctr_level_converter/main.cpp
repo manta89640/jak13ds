@@ -3356,7 +3356,7 @@ void optimize_draws(Converter& cv,
     for (const auto& t : cv.tris) {
       const auto& dk = cv.draw_keys[t.draw_key];
       const int kind = dk.kind & 0xff;
-      const bool vista = opt.vista && (t.tier == 3 || (t.tier == 0 && kind == 1 && t.detail <= (opt.game == "jak2" ? 0 : 2)) ||
+      const bool vista = opt.vista && (t.tier == 3 || (t.tier == 0 && kind == 1 && t.detail <= 2) ||
                                        (t.tier == 2 && kind == 0 && !has_lowres));
       if (vista && dk.texture < elsewhere.size()) {
         elsewhere[dk.texture] = 1;
@@ -4310,9 +4310,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       // (AI-assisted, streaming) not the near chunks (near versions only)
       // small and medium ties too: the PS2 draws them at any distance, the vista beyond the draw
       // distance
-      // Jak II: large ties only until the city's linear memory has room for more meshes
-      const bool landmark = tier == 0 && kind == 1 && detail <= (opt.game == "jak2" ? 0 : 2) &&
-                            std::get<0>(cp.key) < 1024;
+      const bool landmark = tier == 0 && kind == 1 && detail <= 2 && std::get<0>(cp.key) < 1024;
       const bool coarse = tier == 2 && kind == 0 && (!has_lowres || coarse_copy[pi]);
       if (!lowres && !landmark && !coarse) {
         continue;

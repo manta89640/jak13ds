@@ -126,6 +126,26 @@ bool far_chunk(const CtrLevelData& lev, const c3l::Chunk& ch) {
          ch.kind == c3l::CHUNK_KIND_VISTA;  // (AI-assisted) v13 vista tier: far scenery
 }
 
+// what a chunk is, for the lines about parts not made
+std::string chunk_section(const c3l::Chunk& ch) {
+  switch (ch.kind) {
+    case c3l::CHUNK_KIND_TIE:
+      return ch.max_dist > 0.f ? "distance-limited ties" : "ties";
+    case c3l::CHUNK_KIND_SHRUB:
+      return "shrubs";
+    case c3l::CHUNK_KIND_VISTA:
+      return "vista";
+    default:
+      return fmt::format("tfrag tier {}", ch.lod_tier);
+  }
+}
+
+// the linear heap's room, for those lines
+std::string linear_room_text() {
+  return fmt::format("linear free {} KB, largest block {} KB", ctr_gpu_linear_free() / 1024,
+                     ctr_gpu_linear_largest() / 1024);
+}
+
 // (AI-assisted) the parts of a loaded level that should be there and aren't (no memory when it
 // loaded): chunk meshes (only the ones far mode draws while its detail is unloaded), merc model
 // meshes, the texture pool. Returns how many, and the linear memory they take.
@@ -473,6 +493,8 @@ void CtrLevels::run_job(const Job& job) {
     } else {
       d.lev = std::make_unique<CtrLevelData>();
       d.lev->generation = ++m_generation;
+      m_load_stream_tried = m_load_stream_ok = false;
+      m_load_streams_served = 0;
       d.result = load(job.name, d.lev.get());
     }
   } catch (std::exception& e) {
@@ -482,6 +504,14 @@ void CtrLevels::run_job(const Job& job) {
       unload(*d.lev);
     }
     d.result = LoadResult::FAILED;
+  }
+  if (m_load_stream_ok) {
+    m_load_stream_bufs.release();
+    m_load_stream_ok = false;
+  }
+  if (m_load_streams_served) {
+    lg::info("[ctr] {}: {} near chunk jobs read during its load", job.name, m_load_streams_served);
+    m_load_streams_served = 0;
   }
   if (!job.parts() && d.result != LoadResult::LOADED) {
     d.lev.reset();
@@ -499,6 +529,82 @@ void CtrLevels::run_job(const Job& job) {
     d.heap_largest = st.largest;
   }
 #endif
+  std::lock_guard<std::mutex> lk(m_lock);
+  m_done.push_back(std::move(d));
+}
+
+namespace {
+// a stream job read during a level load: windows this big (two) and the block caches
+constexpr size_t kLoadStreamWindow = 128 * 1024;
+constexpr size_t kLoadStreamHeapMargin = 2u * 1024 * 1024;
+}  // namespace
+
+void CtrLevels::serve_streams_in_load() {
+  if (!m_stream_urgent_queued.load(std::memory_order_relaxed) || !m_job_level_load ||
+      cancelled() || !c3l_read_window() || (m_load_stream_tried && !m_load_stream_ok)) {
+    return;
+  }
+  auto pick = [&]() {
+    const u64 rf = m_render_frame.load(), df = m_drawn_frame.load();
+    if (!(df && df + 3 >= rf)) {
+      return m_queue.end();  // nothing drawn: the game waits for this load
+    }
+    auto it = std::find_if(m_queue.begin(), m_queue.end(),
+                           [](const Job& j) { return j.stream && j.urgent; });
+    if (it == m_queue.end()) {
+      m_stream_urgent_queued = false;
+    }
+    return it;
+  };
+  if (!m_load_stream_tried) {
+    {
+      std::lock_guard<std::mutex> lk(m_lock);
+      if (pick() == m_queue.end()) {
+        return;
+      }
+    }
+    m_load_stream_tried = true;
+    size_t largest = SIZE_MAX;
+#ifdef __3DS__
+    CtrHeapStats st;
+    ctr_heap_stats(&st);
+    largest = st.largest;
+#endif
+    if (largest >= 2 * kLoadStreamWindow + 2 * kC3lMaxBlock + kLoadStreamHeapMargin) {
+      try {
+        m_load_stream_bufs.reserve(kLoadStreamWindow, kC3lMaxBlock);
+        m_load_stream_ok = true;
+      } catch (std::bad_alloc&) {
+        m_load_stream_bufs.release();
+      }
+    }
+    if (!m_load_stream_ok) {
+      return;
+    }
+  }
+  Job job;
+  {
+    std::lock_guard<std::mutex> lk(m_lock);
+    auto it = pick();
+    if (it == m_queue.end()) {
+      return;
+    }
+    job = *it;
+    m_queue.erase(it);
+  }
+  job.window = std::min(job.window, kLoadStreamWindow);
+  Done d;
+  d.job = job;
+  m_load_stream_bufs.zstd = m_read_bufs.zstd;  // (one decoder: the load waits meanwhile)
+  try {
+    run_stream_job(job, &d, &m_load_stream_bufs);
+  } catch (std::exception& e) {
+    lg::error("[ctr] {}: loading failed: {}", job.name, e.what());
+    d.result = LoadResult::FAILED;
+  }
+  m_read_bufs.zstd = m_load_stream_bufs.zstd;
+  m_load_stream_bufs.zstd = nullptr;
+  m_load_streams_served++;
   std::lock_guard<std::mutex> lk(m_lock);
   m_done.push_back(std::move(d));
 }
@@ -527,6 +633,9 @@ void CtrLevels::request(const Job& job) {
     m_requested.insert(job.key());
     m_queue.push_back(job);
     m_queue.back().queued_ms = ctr_gpu_time_ms();  // (AI-assisted, streammem) aging
+    if (job.stream && job.urgent) {
+      m_stream_urgent_queued = true;
+    }
     if (job.parts() && !job.stream) {
       m_parts_room[job.key()] = job.room_bytes;  // (AI-assisted, streammem) stream_update
     }
@@ -912,6 +1021,16 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       while (mesh < 0 && make_room(job.name, "meshes", parts_left_bytes(job, &c))) {
         mesh = ctr_gpu_mesh_begin(c.vertex_count, count, &vdst, &idst);
       }
+      if (mesh < 0 && !cancelled()) {
+        lg::error("[ctr] {}: {}: {} of {} meshes not made, no linear memory ({} KB needed; {})",
+                  job.name,
+                  job.dist      ? "read back by distance"
+                  : job.dormant ? "dormant read back"
+                  : job.detail  ? "detail reload"
+                                : "repair",
+                  job.chunks.size() - d->meshes.size(), job.chunks.size(),
+                  parts_left_bytes(job, &c) / 1024, linear_room_text());
+      }
       if (mesh >= 0) {
         MeshBuild mb(mesh);  // (AI-assisted, streammem)
         bool read_ok = true;
@@ -951,6 +1070,12 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
         while (mesh < 0 && make_room(job.name, "models",
                                      (u64)m.vertex_count * sizeof(c3l::MercVertex) + count * 2u)) {
           mesh = ctr_gpu_skinned_mesh_create(verts.data(), m.vertex_count, ix, count);
+        }
+        if (mesh < 0 && !cancelled()) {
+          lg::error("[ctr] {}: repair: merc model mesh not made, no linear memory ({} KB needed; "
+                    "{})",
+                    job.name, ((u64)m.vertex_count * sizeof(c3l::MercVertex) + count * 2u) / 1024,
+                    linear_room_text());
         }
       }
       ok = mesh >= 0;
@@ -1311,8 +1436,9 @@ void CtrLevels::dormant_update(u64 frame) {
 // hysteresis, at the largest auto_detail distance) from the camera now, 2 s ahead at its speed and
 // Jak; a load that runs short and makes room (housekeeping: dist_make_room) frees those of the
 // loaded levels, the farthest first and about as much as it wants (all of them at its second try),
-// and turns dist_free on for them. (AI-assisted, j2pop) Nothing else frees them: only a load that
-// would fail otherwise (a read back too, as it makes room). A freed chunk is
+// and turns dist_free on for them. While the loaded levels leave less than kDistPlayRoom above the
+// stream arena's floor (its growth counted as free), dist_update frees the chunks more than
+// kDistPlayFreeMeters beyond their distance, the farthest first. A freed chunk is
 // read back (a dormant job of its level, the nearest first) as soon as the camera is within
 // kDistReadMeters beyond its distance. A chunk not back yet within its distance is not drawn: one
 // in view stays hidden while in view once it came, as a dormant level's (draw_level, the screen
@@ -1342,6 +1468,12 @@ static const float kShrubNearK =
 // a shrub run's fade (CtrTfragRenderer::m_run_fade): blend FIX's 0x80 = drawn as it is
 constexpr u8 kRunOpaque = 0x80;
 constexpr float kDistFreeMeters = 60.f, kDistReadMeters = 30.f;
+// in play (dist_update): while the loaded levels leave less than kDistPlayRoom above the stream
+// arena's floor (its growth counted as free), the chunks this far beyond their distance go, the
+// farthest first; checked every kDistPlayEvery frames, not within kDistPlayCutFrames of a cut
+constexpr float kDistPlayFreeMeters = 90.f;
+constexpr u64 kDistPlayRoom = 12u * 1024 * 1024;
+constexpr u64 kDistPlayEvery = 15, kDistPlayCutFrames = 60;
 constexpr float kDistLeadFrames = 60.f;  // 2 s at 30 fps (the camera's velocity is per frame)
 constexpr u32 kDistJobBytes = 2u * 1024 * 1024;  // one read back: at most this much (the nearest)
 constexpr u64 kDistLoadMargin = 1536 * 1024;     // a load is tight with less left than this
@@ -1418,7 +1550,12 @@ int CtrLevels::dist_positions(float pos[4][3]) const {
 
 // the chunks of lev distance freeing may free that are far beyond their distance: freed (or, left
 // out by an incomplete load, not repaired); returns the bytes freed
-u64 CtrLevels::dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, float min_excess) {
+u64 CtrLevels::dist_free_far(CtrLevelData& lev,
+                             const float pos[4][3],
+                             int np,
+                             float min_excess,
+                             float meters,
+                             bool log) {
   if (lev.chunk_dormant.size() != lev.chunks.size()) {
     lev.chunk_dormant.assign(lev.chunks.size(), 0);
     lev.chunk_hold_since.assign(lev.chunks.size(), 0);
@@ -1432,9 +1569,8 @@ u64 CtrLevels::dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, f
                       ci < lev.mesh_index_first.size();
        ci++) {
     if (lev.chunk_dormant[ci] != 0 || lev.mesh_index_first[ci] == UINT32_MAX ||
-        !dist_frees(lev, ci) || !dist_beyond(lev, lev.chunks[ci], pos, np, kDistFreeMeters) ||
-        (min_excess > 0 &&
-         dist_excess(lev, lev.chunks[ci], pos, np, kDistFreeMeters) <= min_excess)) {
+        !dist_frees(lev, ci) || !dist_beyond(lev, lev.chunks[ci], pos, np, meters) ||
+        (min_excess > 0 && dist_excess(lev, lev.chunks[ci], pos, np, meters) <= min_excess)) {
       continue;
     }
     const auto& ch = lev.chunks[ci];
@@ -1458,11 +1594,15 @@ u64 CtrLevels::dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, f
       u32 b = 0;
       lev.incomplete = missing_parts(lev, &b) > 0;
     }
-    lg::info("[ctr] {}: linear memory short: {} chunks far beyond their draw distance freed ({} "
-             "KB){}; linear free {} KB",
-             lev.name, freed, bytes / 1024,
-             left_out ? fmt::format(", {} left out by its load not repaired", left_out) : "",
-             ctr_gpu_linear_free() / 1024);
+    if (log) {
+      lg::info("[ctr] {}: linear memory short: {} chunks far beyond their draw distance freed ({} "
+               "KB){}; linear free {} KB",
+               lev.name, freed, bytes / 1024,
+               left_out ? fmt::format(", {} left out by its load not repaired", left_out) : "",
+               ctr_gpu_linear_free() / 1024);
+    }
+    m_dst.freed_chunks += freed;
+    m_dst.freed_bytes += bytes;
   }
   return bytes;
 }
@@ -1472,7 +1612,10 @@ u64 CtrLevels::dist_free_far(CtrLevelData& lev, const float pos[4][3], int np, f
 // 0: all of them (make_room's second try in a job). The HW log of Oct 25 (a continue to the
 // slums): one texture pool of 2.7 MB freed 7.7 MB, 2 MB of it around where the camera went next,
 // read back over seconds in view.
-u64 CtrLevels::dist_make_room(u64 want) {
+u64 CtrLevels::dist_make_room(u64 want, float meters, bool log) {
+  if (meters <= 0.f) {
+    meters = kDistFreeMeters;
+  }
   float pos[4][3];
   const int np = dist_positions(pos);
   std::vector<std::pair<float, u32>> cand;  // excess, bytes
@@ -1490,7 +1633,7 @@ u64 CtrLevels::dist_make_room(u64 want) {
           continue;
         }
         const auto& ch = lev.chunks[ci];
-        const float e = dist_excess(lev, ch, pos, np, kDistFreeMeters);
+        const float e = dist_excess(lev, ch, pos, np, meters);
         if (e > 0) {
           cand.emplace_back(e, CtrStreamArena::mesh_bytes(
                                    ch.vertex_count,
@@ -1517,7 +1660,7 @@ u64 CtrLevels::dist_make_room(u64 want) {
   u64 bytes = 0;
   for (auto& [n, lp] : m_levels) {
     lp->dist_free = true;
-    bytes += dist_free_far(*lp, pos, np, min_excess);
+    bytes += dist_free_far(*lp, pos, np, min_excess, meters, log);
   }
   return bytes;
 }
@@ -1536,10 +1679,16 @@ void CtrLevels::dist_update(u64 frame, u32 free_now) {
   if (!np) {
     return;
   }
-  // (AI-assisted, j2pop) nothing is freed here any more: only a load that would fail otherwise
-  // frees chunks (make_room: dist_make_room). Freeing whenever the heap was under the stream
-  // arena's floor (stream_reserve_kb) triggered in normal city play (the arena keeps the heap
-  // near its floor): chunks freed and read back as the camera turned (HW log Oct 25: 13 times).
+  // short of a level load's room: free by position before a load has to (read back 60 m nearer)
+  if (frame >= m_dist_play_frame + kDistPlayEvery && frame > m_cut_frame + kDistPlayCutFrames) {
+    m_dist_play_frame = frame;
+    const u32 cap = CtrStreamArena::get().capacity(), first = ctr_stream_kb() * 1024u;
+    const u64 avail = (u64)free_now + (cap > first ? cap - first : 0);
+    const u64 room = (u64)ctr_settings().stream_reserve_kb * 1024u + kDistPlayRoom;
+    if (avail < room) {
+      m_dst.play_frees += dist_make_room(room - avail, kDistPlayFreeMeters, false) > 0;
+    }
+  }
   for (auto& [name, lp] : m_levels) {
     CtrLevelData& lev = *lp;
     if (!lev.dist_free) {
@@ -1598,12 +1747,9 @@ void CtrLevels::dist_update(u64 frame, u32 free_now) {
     if ((u64)free_now < bytes + kDistReadRoom) {
       dist_make_room(bytes);
     }
-    if (frame >= m_dist_log_frame + 30) {
-      m_dist_log_frame = frame;
-      lg::info("[ctr] {}: camera near chunks freed by distance, reading {} of {} back ({} KB); "
-               "linear free {} KB",
-               name, job.chunks.size(), near.size(), bytes / 1024, free_now / 1024);
-    }
+    m_dst.read_jobs++;
+    m_dst.read_chunks += job.chunks.size();
+    m_dst.read_bytes += bytes;
     request(job);
   }
 }
@@ -1913,16 +2059,16 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   }
 #endif
   if (failed) {
-    lg::error("[ctr] {}: {} textures/meshes could not be created (out of GPU memory?)", name,
-              failed);
+    lg::error("[ctr] {}: {} textures/meshes could not be created ({})", name, failed,
+              linear_room_text());
   }
   // (AI-assisted) made again when the memory is there (process_pending_loads)
   u32 missing_bytes = 0;
   const int missing = missing_parts(*out, &missing_bytes);
   out->incomplete = missing > 0;
   if (missing) {
-    lg::warn("[ctr] {}: {} parts ({} KB) left out, made again when memory frees", name, missing,
-             missing_bytes / 1024);
+    lg::error("[ctr] {}: {} parts ({} KB) left out, made again when memory frees ({})", name,
+              missing, missing_bytes / 1024, linear_room_text());
   }
   return LoadResult::LOADED;
 }
@@ -4724,8 +4870,8 @@ bool CtrLevels::load_textures(c3l::Reader& f,
       pool = ctr_gpu_pool_create(b);
     }
     if (pool < 0) {
-      lg::error("[ctr] {}: no memory for the textures ({} KB, a piece of {} KB)", name,
-                pool_bytes / 1024, b / 1024);
+      lg::error("[ctr] {}: textures: pool not made, no linear memory ({} KB, a piece of {} KB; {})",
+                name, pool_bytes / 1024, b / 1024, linear_room_text());
       for (int q : out->pools) {
         ctr_gpu_pool_delete(q);
       }
@@ -5039,6 +5185,9 @@ bool CtrLevels::load_file(const fs::path& path,
       }
     }
     const u64 free_now = ctr_gpu_linear_free();
+    out->dist_free = true;  // (freed in play by distance too: dist_update)
+    out->chunk_dormant.assign(out->chunks.size(), 0);
+    out->chunk_hold_since.assign(out->chunks.size(), 0);
     if (need + kDistLoadMargin > free_now) {
       float pos[4][3];
       int np;
@@ -5047,7 +5196,6 @@ bool CtrLevels::load_file(const fs::path& path,
         memcpy(pos, m_dist_snap, sizeof(pos));
         np = m_dist_snap_n;
       }
-      out->dist_free = true;
       dist_skip.assign(out->chunks.size(), 0);
       u64 skipped = 0;
       u32 n = 0;
@@ -5061,8 +5209,6 @@ bool CtrLevels::load_file(const fs::path& path,
           n++;
         }
       }
-      out->chunk_dormant.assign(out->chunks.size(), 0);
-      out->chunk_hold_since.assign(out->chunks.size(), 0);
       lg::info("[ctr] {}: linear memory short (meshes {} KB, free {} KB): {} chunks ({} KB) far "
                "beyond their draw distance{} left for later, read back by distance",
                name, need / 1024, free_now / 1024, n, skipped / 1024,
@@ -5070,6 +5216,7 @@ bool CtrLevels::load_file(const fs::path& path,
     }
   }
   u32 stream_skipped = 0, stream_core_kb = 0;
+  std::map<std::string, std::pair<u32, u64>> not_made;  // section: chunks, bytes
   // (AI-assisted, j2pop) make_room: the meshes still to be made from chunk ci on (the near chunks
   // streamed and those left for later not counted), the merc models'
   auto load_left_bytes = [&](size_t ci) {
@@ -5092,6 +5239,7 @@ bool CtrLevels::load_file(const fs::path& path,
     if (cancelled()) {
       return false;
     }
+    serve_streams_in_load();
     const size_t ci = out->meshes.size();
     // the chunk's draws cover a contiguous range of the index data
     u32 first = UINT32_MAX, end = 0;
@@ -5144,6 +5292,11 @@ bool CtrLevels::load_file(const fs::path& path,
       mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
       while (mesh < 0 && make_room(name, "meshes", load_left_bytes(ci))) {
         mesh = ctr_gpu_mesh_begin(ch.vertex_count, end - first, &vdst, &idst);
+      }
+      if (mesh < 0 && !cancelled()) {
+        auto& nm = not_made[chunk_section(ch)];
+        nm.first++;
+        nm.second += CtrStreamArena::mesh_bytes(ch.vertex_count, end - first);
       }
     }
     if (mesh >= 0) {
@@ -5253,6 +5406,10 @@ bool CtrLevels::load_file(const fs::path& path,
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
       out->draws[d].first_index -= first;
     }
+  }
+  for (const auto& [sec, nm] : not_made) {
+    lg::error("[ctr] {}: {}: {} meshes not made, no linear memory ({} KB needed; {})", name, sec,
+              nm.first, nm.second / 1024, linear_room_text());
   }
   // (AI-assisted, streaming) c3l v19 near chunks
   if (out->streaming) {
@@ -5402,6 +5559,7 @@ bool CtrLevels::load_file(const fs::path& path,
       if (cancelled()) {
         return false;
       }
+      serve_streams_in_load();
       CtrMercModelData md;
       md.name = std::string(m.name, strnlen(m.name, sizeof(m.name)));
       md.scale = m.scale;
@@ -5521,6 +5679,12 @@ bool CtrLevels::load_file(const fs::path& path,
                            (u64)m.vertex_count * sizeof(c3l::MercVertex) + (end - first) * 2u)) {
             md.mesh = ctr_gpu_skinned_mesh_create(mverts.data(), m.vertex_count, mindices.data(),
                                                   end - first);
+          }
+          if (md.mesh < 0 && !cancelled()) {
+            lg::error("[ctr] {}: merc model {}: mesh not made, no linear memory ({} KB needed; {})",
+                      name, md.name,
+                      ((u64)m.vertex_count * sizeof(c3l::MercVertex) + (end - first) * 2u) / 1024,
+                      linear_room_text());
           }
         }
       }
@@ -7092,7 +7256,7 @@ void CtrLevels::stream_update(u64 frame) {
 // Loader thread: a stream job's near chunks, each read (indices, then vertices) straight into its
 // arena piece; their time of day groups made from the indices where asked. Stops at the first that
 // fails (the rest's pieces go back to the arena; the render thread asks again).
-void CtrLevels::run_stream_job(const Job& job, Done* d) {
+void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bufs) {
   Timer timer;
   d->result = LoadResult::FAILED;
   size_t i = 0;
@@ -7102,7 +7266,7 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
       throw std::runtime_error("no file directory");
     }
     d->stream_out.reserve(job.stream_parts.size());  // (no allocation after a mesh is ended)
-    C3lReader f(job.path, &m_read_bufs, job.window, *job.dir);
+    C3lReader f(job.path, bufs ? bufs : &m_read_bufs, job.window, *job.dir);
     size_t run_end = 0;
     for (; i < job.stream_parts.size(); i++) {
       const auto& p = job.stream_parts[i];
@@ -7144,6 +7308,8 @@ void CtrLevels::run_stream_job(const Job& job, Done* d) {
       const u32 icount = p.index_end - p.index_first;
       int mesh = ctr_gpu_mesh_begin_ext(p.mem, (int)p.vertex_count, (int)icount, &vdst, &idst);
       if (mesh < 0) {
+        lg::error("[ctr] {}: near chunks: {} of {} not made, no GPU mesh slot", job.name,
+                  job.stream_parts.size() - i, job.stream_parts.size());
         break;  // (its piece back below)
       }
       live = mesh;
@@ -7467,6 +7633,13 @@ void CtrLevels::stream_log() {
                                           : std::to_string(m_sst.linear_min_load / 1024),
            m_sst.sched_ms / n, m_sst.sched_max_ms,
            levels.empty() ? std::string("no levels") : levels);
+  if (m_dst.freed_chunks || m_dst.read_jobs) {
+    lg::info("[ctr] distance freeing: {} chunks freed ({} KB; {} times in play), {} read backs of "
+             "{} chunks ({} KB)",
+             m_dst.freed_chunks, m_dst.freed_bytes / 1024, m_dst.play_frees, m_dst.read_jobs,
+             m_dst.read_chunks, m_dst.read_bytes / 1024);
+  }
+  m_dst = DistStats();
 #ifdef __3DS__
   ctr_heap_trace_dump("stats");  // (AI-assisted, lavamem) trace builds only
 #endif

@@ -23,6 +23,7 @@
 #endif
 #ifdef __3DS__
 #include "game/overlord/jak1/fake_iso.h"  // (AI-assisted) io_heap_free
+#include "platform/3ds/port/ctr_heap.h"
 #endif
 
 using namespace iop;
@@ -805,11 +806,24 @@ constexpr int kBankLoadRetryMs = 300;
 struct BankLoad {
   std::string path;
   bool compressed = false;
+  bool music = false;  // read into the heap's music slot (ctr_heap_music_slot_take)
   snd::BankHandle handle = nullptr;
   size_t size = 0;
   double read_ms = 0;
   int tries = 0;
 };
+
+// the bank's memory: a music bank in the block kept for it (freed back to it)
+u8* bank_buffer([[maybe_unused]] const BankLoad* b, size_t size) {
+#ifdef __3DS__
+  if (b->music) {
+    if (u8* slot = (u8*)ctr_heap_music_slot_take(size)) {
+      return slot;
+    }
+  }
+#endif
+  return new u8[size];
+}
 
 snd::BankHandle bank_load_try(BankLoad* b) {
   std::unique_ptr<u8[]> buf;
@@ -826,7 +840,7 @@ snd::BankHandle bank_load_try(BankLoad* b) {
       return nullptr;
     }
     size = r.size();
-    buf.reset(new u8[size]);
+    buf.reset(bank_buffer(b, size));
     if (r.read(0, buf.get(), size) != (int64_t)size) {
       return nullptr;
     }
@@ -845,7 +859,7 @@ snd::BankHandle bank_load_try(BankLoad* b) {
     try {
       if (ok) {
         size = (size_t)len;
-        buf.reset(new u8[size]);
+        buf.reset(bank_buffer(b, size));
         ok = fread(buf.get(), size, 1, fp) == 1;
       }
     } catch (...) {
@@ -886,9 +900,10 @@ void bank_load_job(BankLoad* b, s32 thread_to_wake) {
   iop::iWakeupThread(thread_to_wake);
 }
 
-snd::BankHandle load_bank_file(FileRecord* file) {
+snd::BankHandle load_bank_file(FileRecord* file, bool music = false) {
   BankLoad b;
   b.path = get_file_path(file);
+  b.music = music;
 #ifdef __3DS__
   if (!snd_HasOutput()) {
     // (AI-assisted, j2-mem2) No audio output (sound = off, or no DSP): the bank's samples would
@@ -961,7 +976,7 @@ uint32_t FS_LoadMusic(char* name, snd::BankHandle* bank_handle) {
     return CMD_STATUS_FAILED_TO_OPEN;
   }
 
-  handle = load_bank_file(file);  // (AI-assisted) was snd_BankLoadEx: see load_bank_file
+  handle = load_bank_file(file, true);  // (AI-assisted) was snd_BankLoadEx: see load_bank_file
   snd_ResolveBankXREFS();
   *bank_handle = handle;
 
