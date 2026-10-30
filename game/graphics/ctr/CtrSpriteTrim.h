@@ -10,7 +10,8 @@ inline bool ctr_trim_clip_quad(ctr_clip_vertex quad[4],
                                int k00, int k10, int k01,
                                const int select[4][2],
                                const float box[4],
-                               const float st[4]) {
+                               const float st[4],
+                               bool affine_known = false) {
   if (k00 < 0 || k10 < 0 || k01 < 0 || k00 > 3 || k10 > 3 || k01 > 3 ||
       k00 == k10 || k00 == k01 || k10 == k01) {
     return false;
@@ -24,7 +25,7 @@ inline bool ctr_trim_clip_quad(ctr_clip_vertex quad[4],
   const float u[4] = {b.x - a.x, b.y - a.y, b.z - a.z, b.w - a.w};
   const float v[4] = {c.x - a.x, c.y - a.y, c.z - a.z, c.w - a.w};
   const float fourth[4] = {d.x, d.y, d.z, d.w};
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 4 && !affine_known; i++) {
     const float expect = origin[i] + u[i] + v[i];
     const float scale = std::max({1.f, std::abs(origin[i]), std::abs(u[i]), std::abs(v[i])});
     if (!std::isfinite(expect) || !std::isfinite(fourth[i]) ||

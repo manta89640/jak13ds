@@ -1199,26 +1199,43 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   }
 #endif
 
-  // (AI-assisted, perfv2) the texels with alpha (CtrTexture::box)
-  float box[4] = {0.f, 0.f, 1.f, 1.f};
+  // the texels with alpha, per alpha level (CtrTexture::box)
+  float box[8][4];
+  int max_alpha = 0;
   {
-    int x0 = w, y0 = h, x1 = -1, y1 = -1;
+    // the bounds of the texels whose alpha's highest bit is j, then those of j and above
+    int x0[8], y0[8], x1[8], y1[8];
+    for (int j = 0; j < 8; j++) {
+      x0[j] = w, y0[j] = h, x1[j] = -1, y1[j] = -1;
+    }
     for (int y = 0; y < h; y++) {
       const u32* row = data.data() + (size_t)y * w;
       for (int x = 0; x < w; x++) {
-        if (row[x] >> 24) {
-          x0 = std::min(x0, x);
-          x1 = std::max(x1, x);
-          y0 = std::min(y0, y);
-          y1 = std::max(y1, y);
+        const u32 a = row[x] >> 24;
+        if (a) {
+          const int j = 31 - __builtin_clz(a);
+          x0[j] = std::min(x0[j], x);
+          x1[j] = std::max(x1[j], x);
+          y0[j] = std::min(y0[j], y);
+          y1[j] = std::max(y1[j], y);
+          max_alpha = std::max(max_alpha, (int)a);
         }
       }
     }
-    if (x1 >= 0) {
-      box[0] = (float)std::max(0, x0 - 1) / (float)w;
-      box[1] = (float)std::max(0, y0 - 1) / (float)h;
-      box[2] = (float)std::min(w, x1 + 2) / (float)w;
-      box[3] = (float)std::min(h, y1 + 2) / (float)h;
+    for (int j = 6; j >= 0; j--) {
+      x0[j] = std::min(x0[j], x0[j + 1]);
+      x1[j] = std::max(x1[j], x1[j + 1]);
+      y0[j] = std::min(y0[j], y0[j + 1]);
+      y1[j] = std::max(y1[j], y1[j + 1]);
+    }
+    for (int j = 0; j < 8; j++) {
+      box[j][0] = 0.f, box[j][1] = 0.f, box[j][2] = 1.f, box[j][3] = 1.f;
+      if (x1[j] >= 0) {
+        box[j][0] = (float)std::max(0, x0[j] - 1) / (float)w;
+        box[j][1] = (float)std::max(0, y0[j] - 1) / (float)h;
+        box[j][2] = (float)std::min(w, x1[j] + 2) / (float)w;
+        box[j][3] = (float)std::min(h, y1[j] + 2) / (float)h;
+      }
     }
   }
 
@@ -1238,6 +1255,7 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   e.tex.w = gw;
   e.tex.h = gh;
   memcpy(e.tex.box, box, sizeof(box));
+  e.tex.max_alpha = max_alpha;
   // (AI-assisted) the smallest 3DS format that holds it (sprites, HUD, font), checked for being a
   // radial glow (CtrSpriteRenderer draws those with the procedural texture unit)
   e.tex.handle = ctr_gpu_tex_create_compact(gw, gh, (const uint8_t*)data.data(), CTR_TEX_CHECK_RADIAL);

@@ -4,9 +4,10 @@
 Extracts GOAL functions compiled to C by goalc (--instruction-set c) into test fixtures: the
 reference versions of GOAL functions that have a native replacement (see goalc_ref.h).
 
-  extract.py CSRC_DIR OBJ_DIR OUT_DIR [MODULE...]
+  extract.py [--jak2] CSRC_DIR OBJ_DIR OUT_DIR [MODULE...]
 
-With MODULE names, only those fixtures are written.
+With MODULE names, only those fixtures are written. --jak2: the Jak 2 modules (MODULES_JAK2, from
+out/jak2), written as jak2_<module>.c with their functions named "jak2:<name>".
 
 CSRC_DIR / OBJ_DIR: out/jak1/csrc and out/jak1/obj of a project built with
   goalc --game jak1 --instruction-set c -c '(make-group "all-code")'
@@ -78,6 +79,14 @@ MODULES = {
     ],
 }
 
+# Jak 2 modules (--jak2)
+MODULES_JAK2 = {
+    # the reference of Jak 2's pc-sp-spawn (jak2_functions/native_sp_spawn.cpp)
+    "sparticle-launcher": [
+        "method:spawn sparticle-launch-control",
+    ],
+}
+
 # (AI-assisted) the oldest goal_c_ops.h version the fixtures compile with (ABI 6 changed the module
 # shape, not the calling convention: fixtures from either version work with the ABI 6 header)
 ABI_VERSION = 5
@@ -109,12 +118,19 @@ def functions(src):
 
 
 def main():
-    if len(sys.argv) < 4:
+    argv = sys.argv[1:]
+    jak2 = bool(argv) and argv[0] == "--jak2"
+    if jak2:
+        argv = argv[1:]
+    if len(argv) < 3:
         print(__doc__)
         sys.exit(2)
-    csrc, obj_dir, out_dir = sys.argv[1:4]
-    only = sys.argv[4:]
-    for mod, wanted in MODULES.items():
+    csrc, obj_dir, out_dir = argv[0:3]
+    only = argv[3:]
+    # Jak 2: the loader puts a symbol's value at the harness's symbol address (goalc_ref.cpp)
+    prefix = "jak2_" if jak2 else ""
+    fn_prefix = "jak2:" if jak2 else ""
+    for mod, wanted in (MODULES_JAK2 if jak2 else MODULES).items():
         if only and mod not in only:
             continue
         src = open(os.path.join(csrc, mod + ".c")).read()
@@ -190,13 +206,13 @@ def main():
         lines += ["};", ""]
         lines.append(f"static const GoalcRefFunc gc_ref_funcs[{len(entries)}] = {{")
         for name, off, idx, arity in entries:
-            lines.append(f'  {{"{name}", {off}, {arity}, (void*)gc_f{idx}}},')
+            lines.append(f'  {{"{fn_prefix}{name}", {off}, {arity}, (void*)gc_f{idx}}},')
         lines += ["};", ""]
-        lines.append(f"const GoalcRefModule goalc_ref_{c_ident(mod)} = {{")
-        lines.append(f'  "{mod}", {n_syms}, gc_sym_names, gc_sym_offsets, gc_seg_base, gc_seg0, '
+        lines.append(f"const GoalcRefModule goalc_ref_{prefix}{c_ident(mod)} = {{")
+        lines.append(f'  "{fn_prefix}{mod}", {n_syms}, gc_sym_names, gc_sym_offsets, gc_seg_base, gc_seg0, '
                      f"{len(seg)}, {len(entries)}, gc_ref_funcs, "
                      f"{'gc_after_link' if after_m else '0'}}};")
-        path = os.path.join(out_dir, c_ident(mod) + ".c")
+        path = os.path.join(out_dir, prefix + c_ident(mod) + ".c")
         with open(path, "w") as f:
             f.write("\n".join(lines) + "\n")
         # like the rest of test/ (task format), so formatting doesn't change the fixtures

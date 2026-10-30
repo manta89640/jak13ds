@@ -1036,8 +1036,16 @@
   (none)
   )
 
+;; og:preserve-this 3DS: spawn in C++ (game/mips2c/jak2_functions/native_sp_spawn.cpp, same results)
+(#when TARGET_3DS
+  (def-mips2c pc-sp-spawn (function sparticle-launch-control vector symbol))
+  (defun pc-sp-spawn-error ()
+    (format 0 "spawn called for non-sparticle-launcher~%")))
+
 ;; WARN: Function (method 11 sparticle-launch-control) has a return type of none, but the expression builder found a return statement.
 (defmethod spawn ((this sparticle-launch-control) (arg0 vector))
+  (#when TARGET_3DS
+    (if (pc-sp-spawn this arg0) (return 0)))
   (with-pp
     (set! (-> this origin trans quad) (-> arg0 quad))
     (if (not (or (is-visible? this arg0) (logtest? (-> this group flags) (sp-group-flag always-draw screen-space))))

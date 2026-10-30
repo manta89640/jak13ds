@@ -172,6 +172,7 @@ namespace draw_boundary_polygon { extern void link(); }
 namespace particle_adgif { extern void link(); }
 namespace sp_launch_particles_var { extern void link(); }
 namespace pc_sp_init_fields { extern void link(); }  // (AI-assisted) native_sp_init.cpp
+namespace pc_sp_spawn { extern void link(); }
 namespace sparticle_motion_blur { extern void link(); }
 namespace sp_process_block_2d { extern void link(); }
 namespace sp_process_block_3d { extern void link(); }
@@ -670,7 +671,7 @@ PerGameVersion<std::unordered_map<std::string, std::vector<void (*)()>>> gMips2C
        jak2::draw_boundary_polygon::link}},
      {"sparticle-launcher",
       {jak2::particle_adgif::link, jak2::sp_launch_particles_var::link,
-       jak2::sparticle_motion_blur::link, jak2::pc_sp_init_fields::link}},
+       jak2::sparticle_motion_blur::link, jak2::pc_sp_init_fields::link, jak2::pc_sp_spawn::link}},
      {"sparticle", {jak2::sp_process_block_2d::link, jak2::sp_process_block_3d::link}},
      {"sky-tng",
       {jak2::set_tex_offset::link, jak2::draw_large_polygon::link, jak2::render_sky_quad::link,

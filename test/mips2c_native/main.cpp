@@ -25,6 +25,8 @@
 
 #include "harness.h"
 
+#include "game/mips2c/jak2_functions/native_functions.h"
+
 namespace Mips2C::jak1 {
 #define LINK(ns)      \
   namespace ns {      \
@@ -235,6 +237,10 @@ int main(int argc, char** argv) {
   pc_sp_spawn::link();
   mem_copy::link();
   harness::use_goalc_reference("pc-sp-spawn", "(method spawn sparticle-launch-control)");
+  // Jak 2's pc-sp-spawn, under its own name (its reference: the Jak 2 fixture)
+  harness::register_mips2c("jak2:pc-sp-spawn", Mips2C::jak2::native::sp_spawn.as_exec, 64,
+                           &Mips2C::jak2::native::sp_spawn);
+  harness::use_goalc_reference("jak2:pc-sp-spawn", "jak2:(method spawn sparticle-launch-control)");
   for (const char* name : {"add-scaled-matrix!", "decomp-fixed", "decomp-frame",
                            "quaternion-normalize!"}) {
     harness::bind_goalc_reference(name);
