@@ -4201,6 +4201,37 @@ void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
            lev->name, used, lev->env_draws.size(), ecs.size(), total / 1024);
 }
 
+// the kDrawCullCond draws' opening planes (c3l::ExtCullCond); without them those
+// draws keep both sides
+void load_cull_cond(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->cond_draws.clear();
+  lev->cond_planes.clear();
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV24Size) {
+    return;
+  }
+  c3l::ExtCullCond ec{};
+  std::vector<c3l::CullCondDraw> cds;
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderTexKeySize, &ec, sizeof(ec)) || !ec.draw_count ||
+      ec.draw_count > lev->draws.size() || !f.read_array(ec.draws_offset, ec.draw_count, &cds)) {
+    return;
+  }
+  for (const auto& cd : cds) {
+    std::vector<c3l::CullCondPlane> ps;
+    if (cd.draw >= lev->draws.size() || !(lev->draws[cd.draw].kind & c3l::kDrawCullCond) ||
+        !cd.plane_count || !f.read_array(cd.planes_offset, cd.plane_count, &ps)) {
+      lg::warn("[ctr] {}: bad opening planes, those draws keep both sides", lev->name);
+      lev->cond_draws.clear();
+      lev->cond_planes.clear();
+      return;
+    }
+    lev->cond_draws.push_back({cd.draw, (u32)lev->cond_planes.size(), cd.plane_count});
+    lev->cond_planes.insert(lev->cond_planes.end(), ps.begin(), ps.end());
+  }
+  lg::info("[ctr] {}: culling by opening planes: {} draws, {} planes", lev->name,
+           lev->cond_draws.size(), lev->cond_planes.size());
+}
+
 // shrub fade bands (c3l::ExtShrubFade): per file run; a shrub chunk with bands reaches its largest
 // w (its max_dist is decide_dist's class, so w / kShrubFarK)
 void load_shrub_fade(c3l::Reader& f,
@@ -5757,6 +5788,7 @@ bool CtrLevels::load_file(const fs::path& path,
   build_draw_order(out);
   load_env_ties(f, hdr, out);  // (AI-assisted, j2water2) c3l v21 (after the textures, draw order)
   load_wind_ties(f, hdr, out);
+  load_cull_cond(f, hdr, out);
   // merc models: one skinned mesh per model
   if (hdr.num_merc_models) {
     std::vector<c3l::MercModel> models;
@@ -8717,6 +8749,11 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_vis_frames, m_vis_own_frames);
     m_vis_chunks = m_vis_tris = m_vis_frames = m_vis_own_frames = 0;
   }
+  if (rs.log_now && m_cond_draws) {
+    lg::info("[ctr] {}: culling by opening planes: {:.1f}% of {} draws culled", m_name,
+             100.0 * m_cond_culled / m_cond_draws, m_cond_draws);
+    m_cond_draws = m_cond_culled = 0;
+  }
   if (rs.log_now && m_cull_frames) {
     lg::info("[ctr] {}: run culling tested {:.0f} runs, hid {:.0f} chunks and {:.0f} tris per level "
              "draw ({} level draws)",
@@ -9610,30 +9647,55 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // source chunks, then its matrix. vista: drawn in the vista pass.
   // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
   // The translation is done in double: world coordinates are large.
-  auto make_clip = [&](const c3l::Chunk& ch, float* m) {
-    double d[3];
+  // (the camera's columns converted to double once per level draw, the loops unrolled: the same
+  // operations in the same order as per chunk before)
+  double rd[4][3], cam_d[3];
+  float rn[4][3];
+  for (int c = 0; c < 4; c++) {
     for (int i = 0; i < 3; i++) {
-      d[i] = (double)ch.origin[i] - (double)cam.trans[i];
+      rd[c][i] = (double)R[i][c];
+      rn[c][i] = -R[i][c];
     }
+  }
+  const double r3d[3] = {(double)R[3][0], (double)R[3][1], (double)R[3][2]};
+  for (int i = 0; i < 3; i++) {
+    cam_d[i] = (double)cam.trans[i];
+  }
+  auto make_clip = [&](const c3l::Chunk& ch, float* m) {
+    const double d0 = (double)ch.origin[0] - cam_d[0], d1 = (double)ch.origin[1] - cam_d[1],
+                 d2 = (double)ch.origin[2] - cam_d[2];
+    const float s = ch.scale;
+#pragma GCC unroll 4
     for (int c = 0; c < 4; c++) {
       double t = 0;
-      for (int i = 0; i < 3; i++) {
-        m[4 * c + i] = -R[i][c] * ch.scale;
-        t += (double)R[i][c] * d[i];
-      }
+      t += rd[c][0] * d0;
+      t += rd[c][1] * d1;
+      t += rd[c][2] * d2;
       if (c < 3) {
-        t += R[3][c];
+        t += r3d[c];
       }
-      m[4 * c + 3] = (float)-t;
-    }
-    for (int i = 0; i < 4; i++) {
-      m[4 + i] *= kYScale;
+      float m0 = rn[c][0] * s, m1 = rn[c][1] * s, m2 = rn[c][2] * s, m3 = (float)-t;
+      if (c == 1) {
+        m0 *= kYScale;
+        m1 *= kYScale;
+        m2 *= kYScale;
+        m3 *= kYScale;
+      }
+      m[4 * c + 0] = m0;
+      m[4 * c + 1] = m1;
+      m[4 * c + 2] = m2;
+      m[4 * c + 3] = m3;
     }
   };
   // (AI-assisted) a chunk that is to be drawn (mode and distance decided): the view test (the
   // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
   // runs tested against those planes on their own), the visibility bits or (vista tier) the
   // source chunks, then its matrix. vista: drawn in the vista pass.
+  // the run loop's inputs that are the same for every chunk (filled before the chunk loop)
+  RunLoopIn run_in;
+  float run_po[4], run_pk[4][3];
+  run_in.po = run_po;
+  run_in.pk = run_pk;
   auto emit_chunk = [&](size_t ci, bool vista_chunk) {
     m_ph_emits++;
     const auto& ch = lev.chunks[ci];
@@ -9685,7 +9747,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
         // the crossed planes: distance of the chunk's origin, and its change per quantized unit
-        float po[4], pk[4][3];
+        float* const po = run_po;
+        float (*const pk)[3] = run_pk;
         int np = 0;
         if (straddles) {
           for (int i = 0; i < 4; i++) {
@@ -9701,21 +9764,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           m_cull_runs += nr;
         }
         // (AI-assisted, micro-level) the loop is run_loop: one copy per combination of the tests
-        RunLoopIn in;
-        in.runs = lev.vis_runs.data();
-        in.spheres = lev.run_spheres.data();
-        in.run_lod = lev.run_lod.data();
-        in.lod_state = lev.lod_state.data();
-        in.vis = m_vis;
-        in.vista_src = m_vista_src.data();
-        in.vista_src_n = m_vista_src.size();
+        RunLoopIn& in = run_in;
         in.vista_tier = vista_tier;
-        in.po = po;
-        in.pk = pk;
         in.np = np;
         in.scale = ch.scale;
-        in.shown_out = m_run_shown.data();
-        in.nomerge_out = m_run_nomerge.data();
         RunLoopOut o;
         m_ph_runs += nr;
         kRunLoops[vis_test ? 1 : 0][straddles ? np : 0][lod_chunk ? 1 : 0](in, r0, nr, &o);
@@ -9860,6 +9912,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ctr_gpu_prepare_mesh_matrix(vc.clip, &vc.gpu);
   };
   m_vista_src.assign(lev.has_vista ? lev.chunks.size() : 0, 0);
+  run_in.runs = lev.vis_runs.data();
+  run_in.spheres = lev.run_spheres.data();
+  run_in.run_lod = lev.run_lod.data();
+  run_in.lod_state = lev.lod_state.data();
+  run_in.vis = m_vis;
+  run_in.vista_src = m_vista_src.data();
+  run_in.vista_src_n = m_vista_src.size();
+  run_in.shown_out = m_run_shown.data();
+  run_in.nomerge_out = m_run_nomerge.data();
   // (AI-assisted) vista tier: a chunk not drawn because of its distance, within vista_distance
   auto vista_source = [&](size_t ci) {
     if (!lev.has_vista) {
@@ -10314,6 +10375,26 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // across chunks: every texture change clears the GPU's texture cache, and the chunks share most
   // of their textures. Then the others (blending, decals) in their order, over the opaque ones.
   // The order is made at load (sorted_draws, ordered_draws): only the visible chunks' draws.
+  if (!lev.cond_draws.empty()) {
+    // kDrawCullCond: back faces culled while the camera is inside every opening
+    // plane of the draw (they can only be seen through an opening, from outside its plane)
+    const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
+    const c3l::CullCondPlane* const planes = lev.cond_planes.data();
+    for (const auto& cd : lev.cond_draws) {
+      if (m_visible_slot[lev.draw_chunk[cd.draw]] < 0) {
+        continue;
+      }
+      bool in = true;
+      for (u32 k = cd.first; k < cd.first + cd.count && in; k++) {
+        const auto& p = planes[k];
+        in = p.n[0] * px + p.n[1] * py + p.n[2] * pz < p.d;
+      }
+      auto& st = lev.draw_states[cd.draw];
+      st.tcc = (u8)(in ? (st.tcc | CTR_TCC_CULL_BACK) : (st.tcc & ~CTR_TCC_CULL_BACK));
+      m_cond_draws++;
+      m_cond_culled += in;
+    }
+  }
   bool vista_pass = false;  // (AI-assisted) the pass drawing: the vista chunks or the others
   u64 vista_indices = 0;    // (AI-assisted) drawn by the vista pass (statistics)
   // (AI-assisted, j2water2) c3l v21: an envmapped tie draw (its shine in the same draw, drawn

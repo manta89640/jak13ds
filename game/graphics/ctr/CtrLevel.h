@@ -480,6 +480,12 @@ struct CtrLevelData {
   // its normals in normals_mesh (-1: none), the mesh holding all of them (ctr_gpu, -1: none)
   std::vector<c3l::EnvTieDraw> env_draws;
   std::vector<s16> draw_env;
+  // c3l::kDrawCullCond draws (c3l::ExtCullCond): each one's planes in cond_planes
+  struct CondDraw {
+    u32 draw, first, count;
+  };
+  std::vector<CondDraw> cond_draws;
+  std::vector<c3l::CullCondPlane> cond_planes;
   std::vector<s32> chunk_normals;
   int normals_mesh = -1;
   // wind ties (c3l::ExtWind): the instances, per chunk its slots' byte offset in wind_mesh (-1:
@@ -1189,6 +1195,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_fade_runs = 0;
   u64 m_lod_groups_near = 0, m_lod_frames = 0, m_lod_tris[2] = {0, 0};
   u64 m_cull_runs = 0, m_cull_tris = 0, m_cull_chunks = 0, m_cull_frames = 0;
+  // kDrawCullCond draws of visible chunks, and of them culled (camera inside)
+  u64 m_cond_draws = 0, m_cond_culled = 0;
   // (AI-assisted) lowres_vista / neighbour_vis: low resolution chunks drawn in near mode, and the
   // vista pass's chunks and triangles (statistics); the levels' detailed areas (per level draw)
   u64 m_lowres_near = 0, m_vista_chunks = 0, m_vista_tris = 0, m_vista_frames = 0;
