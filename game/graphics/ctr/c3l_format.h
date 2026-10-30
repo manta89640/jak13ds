@@ -171,7 +171,7 @@ struct Chunk {
   float bsphere[4];  // x, y, z, radius (world)
   float origin[3];
   float scale;
-  uint32_t first_vertex;  // index into the vertex data
+  uint32_t first_vertex;  // index into the vertex data (16-byte rows: mesh tails between chunks)
   uint32_t vertex_count;  // <= 65536
   uint32_t first_draw;    // index into the draw data
   uint32_t draw_count;
@@ -312,7 +312,8 @@ struct EnvTieDraw {
 };
 static_assert(sizeof(EnvTieDraw) == 16);
 // a chunk with envmapped tie draws: int8_t normal[4] (x, y, z: world space * 127, 0) per vertex of
-// the chunk at normals_offset (absolute; in the extension's section, loaded with the level)
+// the chunk at normals_offset (absolute): its mesh tail, right after its vertices (after its
+// MorphVertex records in a morph chunk) in files written since the layout in load order
 struct EnvTieChunk {
   uint32_t chunk;
   uint32_t normals_offset;
@@ -489,7 +490,7 @@ struct MorphChunk {
   uint32_t row_first;       // ExtMorph rows [row_first, row_first + row_count): rows 1..row_count
   uint32_t row_count;
   uint32_t draw_rows;       // its draws' lists in ExtMorph's draw rows, from here in draw order
-  uint32_t records_offset;  // MorphVertex[vertex_count] (absolute)
+  uint32_t records_offset;  // MorphVertex[vertex_count] (absolute; after the chunk's vertices)
 };
 static_assert(sizeof(MorphChunk) == 24);
 struct MorphVertex {

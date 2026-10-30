@@ -89,6 +89,9 @@ class Reader {
   // after it need no other request (a stream job's near chunks, which lie together in the file).
   // false: not done (too big, not window mode); the reads work as without it.
   bool preload(uint32_t offset, uint32_t bytes);
+  // a small range (up to kKeepMax bytes) read now and kept: later reads inside it are copied from
+  // it (the extension headers, which every part of the loader reads again)
+  bool keep(uint32_t offset, uint32_t bytes);
   template <typename T>
   bool read_array(uint32_t offset, size_t count, std::vector<T>* out) {
     out->resize(count);
@@ -113,6 +116,9 @@ class Reader {
 
  private:
   static constexpr uint32_t kWindow = 128 * 1024;
+  static constexpr uint32_t kKeepMax = 1024;
+  std::vector<uint8_t> m_kept;
+  uint32_t m_kept_offset = 0;
   bool file_read(long offset, void* dst, size_t bytes);
   // (AI-assisted) bytes [offset, offset + bytes) of the file: through the window in window mode
   bool raw_read(long offset, void* dst, size_t bytes);
@@ -133,7 +139,9 @@ class Reader {
   std::vector<Block> m_own_blocks;
   const std::vector<Block>* m_bl = &m_own_blocks;
   // (AI-assisted) file bytes [offset, offset + size): one window (stdio mode) or two in window
-  // mode, the one used longest ago replaced (a level's index and vertex data are read in turns)
+  // mode. A read that starts in a window or right at its end continues it (one stream of reads
+  // going forward); any other replaces the one used longest ago (a level's index and vertex data
+  // are read in turns)
   Buffers m_own;
   Buffers* m_bufs = &m_own;
   struct Window {
@@ -146,6 +154,8 @@ class Reader {
   uint64_t m_window_uses = 0;
   // the bytes [offset, offset + bytes) if a window holds them (nullptr: none)
   const uint8_t* in_window(long offset, size_t bytes);
+  // the window a read from the file at offset goes into
+  Window* window_for(long offset);
   // a window of `want` file bytes from offset on (nullptr on a read error)
   const uint8_t* load_window(long offset, size_t want);
   // block m_cache_block, decoded (m_bufs->cache[0], sized max_block)

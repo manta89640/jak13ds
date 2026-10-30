@@ -132,7 +132,7 @@ struct CtrLevelData {
   float lod_switch_error(size_t g) const {
     // (a morph group's near data: within its far-plane)
     if (g < group_mid.size() && group_mid[g] > 0) {
-      return lod_groups[g].dist * lod_floor_k;
+      return std::max(lod_groups[g].dist * lod_floor_k, lod_min_e);
     }
     return std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
   }
@@ -514,9 +514,15 @@ struct CtrLevelData {
   //! c3l::MorphVertex records (the tie geomorph), at normals_offset_in_mesh
   u32 tail_k(size_t ci) const {
     if (ci < chunk_morph.size() && chunk_morph[ci] >= 0) {
-      return (u32)sizeof(c3l::MorphVertex);
+      return (u32)sizeof(c3l::MorphVertex) + (morph_normals(ci) ? 4 : 0);
     }
     return ci < chunk_normals.size() && chunk_normals[ci] == kNormalsInMesh ? 4 : 0;
+  }
+  //! a morph chunk whose envmapped tie normals follow its records in the file (then in its tail)
+  bool morph_normals(size_t ci) const {
+    return ci < chunk_normals.size() && chunk_normals[ci] == kNormalsInMesh &&
+           chunk_normals_file[ci] == morph_chunks[chunk_morph[ci]].records_offset +
+                                         chunks[ci].vertex_count * (u32)sizeof(c3l::MorphVertex);
   }
   u32 normals_tail_bytes(size_t ci) const { return chunks[ci].vertex_count * tail_k(ci); }
   //! the file offset of chunk ci's tail (0: none)
