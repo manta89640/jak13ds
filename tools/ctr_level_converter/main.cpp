@@ -32,6 +32,7 @@
 #include "c3l_pack.h"
 #include "ctr_texture.h"
 #include "keira_model.h"
+#include "c3l_compare.h"
 #include "texshare.h"
 #include "tie_lod.h"
 #include "fmt/format.h"
@@ -6368,6 +6369,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
   // ---- write ----
+  // The sections in the order CtrLevels::load_file reads them, so a load goes through the file
+  // once, front to back: the extension header, chunks, draws, visibility runs, the tables read
+  // before the meshes, time of day, textures, the meshes (each chunk's tail, its envmapped tie
+  // normals or morph records, right after its vertices: read and streamed with them), the tables
+  // read after the meshes, the merc models.
   std::vector<u8> buf(sizeof(c3l::Header));
   c3l::Header hdr{};
   memcpy(hdr.magic, c3l::kMagic, 4);
@@ -6378,17 +6384,130 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                                     : c3l::kStreamVersion - 1;
   strncpy(hdr.level_name, level.level_name.c_str(), sizeof(hdr.level_name) - 1);
   hdr.num_chunks = chunks.size();
-  // (AI-assisted) the visibility runs first: the chunks point at them
-  u32 runs_offset = 0;
-  {
-    runs_offset = out_runs.empty() ? 0 : append(buf, out_runs.data(), out_runs.size());
-    for (size_t i = 0; i < chunks.size(); i++) {
-      chunks[i].vis_runs_offset =
-          chunks[i].vis_run_count ? runs_offset + chunk_first_run[i] * (u32)sizeof(c3l::VisRun)
-                                  : 0;
+  // (AI-assisted) v17: tie levels of detail (c3l::ExtHeader)
+  // (AI-assisted, streaming) v19: always with runs (the run spheres), 48 bytes; v18: 32
+  // (v23: also without runs, for the texture keys)
+  const bool ext_out = (!cv.lod_groups.empty() || opt.stream) &&
+                       (!out_runs.empty() || opt.stream) && out_run_lods.size() == out_runs.size();
+  c3l::ExtHeader eh{};
+  memcpy(eh.magic, c3l::kExtMagic, 4);
+  // (AI-assisted, j2vis) v20: the prototype visibility table (c3l::ExtProtoVis) after it, when the
+  // level has toggled prototypes (else v19's 48 bytes)
+  std::vector<c3l::ProtoVis> pv_protos;
+  std::vector<u32> pv_runs;
+  if (ext_out && opt.stream && opt.proto_vis && out_run_protos.size() == out_runs.size()) {
+    for (size_t p = 0; p < cv.proto_vis.size(); p++) {
+      c3l::ProtoVis pv{};
+      strncpy(pv.name, cv.proto_vis[p].name.c_str(), sizeof(pv.name) - 1);
+      pv.kind = cv.proto_vis[p].kind;
+      pv.first_run = (u32)pv_runs.size();
+      u32 tris = 0;
+      for (u32 r = 0; r < out_run_protos.size(); r++) {
+        if (out_run_protos[r] == p) {
+          pv_runs.push_back(r);
+          tris += out_runs[r].index_count / 3;
+        }
+      }
+      pv.run_count = (u32)pv_runs.size() - pv.first_run;
+      if (pv.run_count) {
+        pv_protos.push_back(pv);
+        // where it is (meters; the box of its triangles, vista copies left out)
+        float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+        for (const auto& t : cv.tris) {
+          if (t.proto != p || t.tier == c3l::kVistaTier) {
+            continue;
+          }
+          for (u32 vi : t.v) {
+            const float q[3] = {cv.verts[vi].x, cv.verts[vi].y, cv.verts[vi].z};
+            for (int c = 0; c < 3; c++) {
+              mn[c] = std::min(mn[c], q[c] / 4096.f);
+              mx[c] = std::max(mx[c], q[c] / 4096.f);
+            }
+          }
+        }
+        lg::info("{}: prototype visibility (v20): {} {} in {} runs, {} triangles, box ({:.1f} "
+                 "{:.1f} {:.1f}) .. ({:.1f} {:.1f} {:.1f}) m",
+                 level.level_name, pv.kind == c3l::kProtoTie ? "tie" : "shrub", pv.name,
+                 pv.run_count, tris, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
+      }
     }
   }
+  bool any_band = false;
+  for (const u32 b : out_run_bands) {
+    any_band |= b != 0;
+  }
+  const bool bands = ext_out && any_band && out_run_bands.size() == out_runs.size();
+  const bool morph_out = ext_out && !out_morph_chunks.empty();
+  const bool env_out = ext_out && !out_env_draws.empty();
+  const bool wind_out = ext_out && !wind_chunk_verts.empty();
+  const bool cond_out = ext_out && !out_cond_sets.empty();
+  const u32 eh_size = !ext_out                           ? 0
+                      : morph_out                        ? c3l::kExtHeaderMorphSize
+                      : cond_out                         ? c3l::kExtHeaderV24Size
+                      : opt.stream && !tex_descs.empty() ? c3l::kExtHeaderTexKeySize
+                      : bands                            ? c3l::kExtHeaderV23Size
+                      : wind_out                         ? c3l::kExtHeaderV22Size
+                      : env_out                          ? c3l::kExtHeaderV21Size
+                      : !pv_protos.empty()               ? c3l::kExtHeaderV20Size
+                      : opt.stream                       ? (u32)sizeof(eh)
+                                                         : c3l::kExtHeaderV17Size;
+  eh.size = eh_size;
+  // the extension header and the headers of its tables (filled at the end)
+  std::vector<u8> ext_bytes(eh_size, 0);
+  if (ext_out) {
+    hdr.ext_offset = append(buf, ext_bytes.data(), ext_bytes.size());
+  }
+  auto ext_put = [&](u32 at, const void* p, size_t n) { memcpy(ext_bytes.data() + at, p, n); };
+  // chunks (first_vertex and vis_runs_offset filled at the end), draws, visibility runs
   hdr.chunks_offset = append(buf, chunks.data(), chunks.size());
+  hdr.draw_data_offset = append(buf, out_draws.data(), out_draws.size());
+  hdr.draw_data_size = out_draws.size() * sizeof(c3l::Draw);
+  const u32 runs_offset = out_runs.empty() ? 0 : append(buf, out_runs.data(), out_runs.size());
+  for (size_t i = 0; i < chunks.size(); i++) {
+    chunks[i].vis_runs_offset =
+        chunks[i].vis_run_count ? runs_offset + chunk_first_run[i] * (u32)sizeof(c3l::VisRun) : 0;
+  }
+  // the extension's tables read before the meshes: tie levels of detail (load_tie_lod), run
+  // spheres and near chunks (load_stream_info), shrub fade bands, prototype visibility
+  align16(buf);
+  const u32 ext_tables_offset = (u32)buf.size();
+  if (ext_out) {
+    eh.lod_group_count = cv.lod_groups.size();
+    eh.lod_groups_offset =
+        cv.lod_groups.empty() ? 0 : append(buf, cv.lod_groups.data(), cv.lod_groups.size());
+    eh.run_lod_count = out_run_lods.size();
+    eh.run_lod_offset = append(buf, out_run_lods.data(), out_run_lods.size());
+    eh.runs_offset = runs_offset;
+    if (!cv.lod_groups.empty() && cv.lod_group_error.size() == cv.lod_groups.size()) {
+      eh.lod_error_offset = append(buf, cv.lod_group_error.data(), cv.lod_group_error.size());
+    }
+    if (opt.stream) {
+      eh.run_sphere_offset = append(buf, run_spheres.data(), run_spheres.size());
+      eh.stream_count = stream_chunks.size();
+      eh.stream_offset =
+          stream_chunks.empty() ? 0 : append(buf, stream_chunks.data(), stream_chunks.size());
+    }
+    if (bands) {
+      // the shrub runs' PS2 fade bands (c3l::ExtShrubFade)
+      c3l::ExtShrubFade ef{};
+      ef.band_count = (u32)out_run_bands.size();
+      ef.bands_offset = append(buf, out_run_bands.data(), out_run_bands.size());
+      ext_put(c3l::kExtHeaderV22Size, &ef, sizeof(ef));
+      size_t n = 0;
+      for (const u32 b : out_run_bands) {
+        n += b != 0;
+      }
+      lg::info("{}: shrub fade bands: {} of {} runs", level.level_name, n, out_run_bands.size());
+    }
+    if (!pv_protos.empty()) {
+      c3l::ExtProtoVis ep{};
+      ep.proto_count = (u32)pv_protos.size();
+      ep.protos_offset = append(buf, pv_protos.data(), pv_protos.size());
+      ep.proto_run_count = (u32)pv_runs.size();
+      ep.proto_runs_offset = append(buf, pv_runs.data(), pv_runs.size());
+      ext_put(sizeof(eh), &ep, sizeof(ep));
+    }
+  }
   // (AI-assisted) v16: the time of day table
   if (!cv.tod_colors.empty() && cv.tod_colors.size() + cv.tod_muls.size() < 0xffff) {
     hdr.tod_color_count = cv.tod_colors.size();
@@ -6408,270 +6527,291 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                (const u8*)(cv.tod_muls.data() + cv.tod_muls.size()));
     align16(buf);
   }
-  // (AI-assisted) v17: tie levels of detail (c3l::ExtHeader)
-  // (AI-assisted, streaming) v19: always with runs (the run spheres), 48 bytes; v18: 32
-  // (v23: also without runs, for the texture keys)
-  if ((!cv.lod_groups.empty() || opt.stream) && (!out_runs.empty() || opt.stream) &&
-      out_run_lods.size() == out_runs.size()) {
-    c3l::ExtHeader eh{};
-    memcpy(eh.magic, c3l::kExtMagic, 4);
-    // (AI-assisted, j2vis) v20: the prototype visibility table (c3l::ExtProtoVis) after it, when the
-    // level has toggled prototypes (else v19's 48 bytes)
-    std::vector<c3l::ProtoVis> pv_protos;
-    std::vector<u32> pv_runs;
-    if (opt.stream && opt.proto_vis && out_run_protos.size() == out_runs.size()) {
-      for (size_t p = 0; p < cv.proto_vis.size(); p++) {
-        c3l::ProtoVis pv{};
-        strncpy(pv.name, cv.proto_vis[p].name.c_str(), sizeof(pv.name) - 1);
-        pv.kind = cv.proto_vis[p].kind;
-        pv.first_run = (u32)pv_runs.size();
-        u32 tris = 0;
-        for (u32 r = 0; r < out_run_protos.size(); r++) {
-          if (out_run_protos[r] == p) {
-            pv_runs.push_back(r);
-            tris += out_runs[r].index_count / 3;
-          }
-        }
-        pv.run_count = (u32)pv_runs.size() - pv.first_run;
-        if (pv.run_count) {
-          pv_protos.push_back(pv);
-          // where it is (meters; the box of its triangles, vista copies left out)
-          float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-          for (const auto& t : cv.tris) {
-            if (t.proto != p || t.tier == c3l::kVistaTier) {
-              continue;
-            }
-            for (u32 vi : t.v) {
-              const float q[3] = {cv.verts[vi].x, cv.verts[vi].y, cv.verts[vi].z};
-              for (int c = 0; c < 3; c++) {
-                mn[c] = std::min(mn[c], q[c] / 4096.f);
-                mx[c] = std::max(mx[c], q[c] / 4096.f);
-              }
-            }
-          }
-          lg::info("{}: prototype visibility (v20): {} {} in {} runs, {} triangles, box ({:.1f} "
-                   "{:.1f} {:.1f}) .. ({:.1f} {:.1f} {:.1f}) m",
-                   level.level_name, pv.kind == c3l::kProtoTie ? "tie" : "shrub", pv.name,
-                   pv.run_count, tris, mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
-        }
-      }
-    }
-    bool any_band = false;
-    for (const u32 b : out_run_bands) {
-      any_band |= b != 0;
-    }
-    const bool bands = any_band && out_run_bands.size() == out_runs.size();
-    const bool morph_out = !out_morph_chunks.empty();
-    const u32 eh_size = morph_out                           ? c3l::kExtHeaderMorphSize
-                        : !out_cond_sets.empty()              ? c3l::kExtHeaderV24Size
-                        : opt.stream && !tex_descs.empty() ? c3l::kExtHeaderTexKeySize
-                        : bands                          ? c3l::kExtHeaderV23Size
-                        : !wind_chunk_verts.empty() ? c3l::kExtHeaderV22Size
-                        : !out_env_draws.empty() ? c3l::kExtHeaderV21Size  // (AI-assisted, j2water2)
-                        : !pv_protos.empty()    ? c3l::kExtHeaderV20Size
-                        : opt.stream            ? (u32)sizeof(eh)
-                                                : c3l::kExtHeaderV17Size;
-    eh.size = eh_size;
-    align16(buf);
-    hdr.ext_offset = (u32)buf.size();
-    buf.insert(buf.end(), (const u8*)&eh, (const u8*)&eh + std::min<u32>(eh_size, sizeof(eh)));
-    buf.resize(hdr.ext_offset + eh_size, 0);  // (AI-assisted, j2vis) v20: ExtProtoVis, below
-    eh.lod_group_count = cv.lod_groups.size();
-    eh.lod_groups_offset =
-        cv.lod_groups.empty() ? 0 : append(buf, cv.lod_groups.data(), cv.lod_groups.size());
-    eh.run_lod_count = out_run_lods.size();
-    eh.run_lod_offset = append(buf, out_run_lods.data(), out_run_lods.size());
-    eh.runs_offset = runs_offset;
-    if (!cv.lod_groups.empty() && cv.lod_group_error.size() == cv.lod_groups.size()) {
-      eh.lod_error_offset = append(buf, cv.lod_group_error.data(), cv.lod_group_error.size());
-    }
-    if (opt.stream) {
-      eh.run_sphere_offset = append(buf, run_spheres.data(), run_spheres.size());
-      eh.stream_count = stream_chunks.size();
-      eh.stream_offset =
-          stream_chunks.empty() ? 0 : append(buf, stream_chunks.data(), stream_chunks.size());
-    }
-    memcpy(buf.data() + hdr.ext_offset, &eh, std::min<u32>(eh_size, sizeof(eh)));
-    if (!pv_protos.empty()) {
-      c3l::ExtProtoVis ep{};
-      ep.proto_count = (u32)pv_protos.size();
-      ep.protos_offset = append(buf, pv_protos.data(), pv_protos.size());
-      ep.proto_run_count = (u32)pv_runs.size();
-      ep.proto_runs_offset = append(buf, pv_runs.data(), pv_runs.size());
-      memcpy(buf.data() + hdr.ext_offset + sizeof(eh), &ep, sizeof(ep));
-    }
-    if (!out_env_draws.empty()) {
-      // (AI-assisted, j2water2) v21: the envmapped tie draws, their chunks' normals
-      c3l::ExtEnvTie et{};
-      et.draw_count = (u32)out_env_draws.size();
-      et.draws_offset = append(buf, out_env_draws.data(), out_env_draws.size());
-      std::vector<c3l::EnvTieChunk> ecs;
-      size_t missing = 0, nverts = 0, nv_dist = 0, nv_near = 0;
-      for (const auto& [ci, nm] : env_chunk_normals) {
-        const auto& ch = chunks.at(ci);
-        nv_dist += ch.max_dist > 0 ? ch.vertex_count : 0;
-        nv_near += chunk_stream_cls[ci] ? ch.vertex_count : 0;
-        std::vector<std::array<s8, 4>> n(ch.vertex_count, {0, 0, 0, 0});
-        for (u32 v = 0; v < ch.vertex_count; v++) {
-          const auto& o = out_verts[ch.first_vertex + v];
-          auto it = nm.find(std::string((const char*)&o, sizeof(o)));
-          if (it == nm.end()) {
-            missing++;
-            continue;
-          }
-          n[v] = {it->second[0], it->second[1], it->second[2], 0};
-        }
-        nverts += n.size();
-        ecs.push_back(c3l::EnvTieChunk{ci, append(buf, n.data(), n.size())});
-      }
-      et.chunk_count = (u32)ecs.size();
-      et.chunks_offset = append(buf, ecs.data(), ecs.size());
-      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV20Size, &et, sizeof(et));
-      lg::info("{}: envmapped ties (v21): {} draws ({} shine kinds), {} tris, {} chunks with "
-               "{} normals ({} KB; {} KB in distance-limited chunks, {} KB in near chunks), {} "
-               "groups without a shine, {} s moved, {} vertices unmatched",
-               level.level_name, out_env_draws.size(), cv.env_ties.size(), cv.env_tie_tris,
-               ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
-               cv.env_tie_groups_missing, env_st_moved, missing);
-    }
-    if (eh_size >= c3l::kExtHeaderTexKeySize) {
-      c3l::ExtTexKey tk{};
-      tk.count = (u32)tex_keys.size();
-      tk.offset = append(buf, tex_keys.data(), tex_keys.size());
-      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV23Size, &tk, sizeof(tk));
-    }
-    if (!out_cond_sets.empty()) {
-      // the kDrawCullCond draws' opening planes (c3l::ExtCullCond)
-      std::vector<c3l::CullCondDraw> cds;
-      size_t planes = 0;
-      for (const auto& [di, sets] : out_cond_sets) {
-        std::vector<c3l::CullCondPlane> ps;
-        for (u32 si : sets) {
-          for (const auto& cp : cv.cond_sets.at(si)) {
-            ps.push_back(c3l::CullCondPlane{{cp.n[0], cp.n[1], cp.n[2]}, cp.d});
-          }
-        }
-        planes += ps.size();
-        cds.push_back(c3l::CullCondDraw{di, (u32)ps.size(), append(buf, ps.data(), ps.size()), 0});
-      }
-      c3l::ExtCullCond ec{};
-      ec.draw_count = (u32)cds.size();
-      ec.draws_offset = append(buf, cds.data(), cds.size());
-      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderTexKeySize, &ec, sizeof(ec));
-      lg::info("{}: culling by opening planes: {} draws, {} planes", level.level_name, cds.size(),
-               planes);
-    }
-    if (morph_out) {
-      // the PS2's tie geomorph (c3l::ExtMorph)
-      c3l::ExtMorph em{};
-      em.inst_count = (u32)cv.morph_insts.size();
-      em.insts_offset = append(buf, cv.morph_insts.data(), cv.morph_insts.size());
-      for (size_t i = 0; i < out_morph_chunks.size(); i++) {
-        out_morph_chunks[i].records_offset =
-            append(buf, out_morph_recs[i].data(), out_morph_recs[i].size());
-      }
-      em.chunk_count = (u32)out_morph_chunks.size();
-      em.chunks_offset = append(buf, out_morph_chunks.data(), out_morph_chunks.size());
-      em.row_count = (u32)out_morph_rows.size();
-      em.rows_offset = append(buf, out_morph_rows.data(), out_morph_rows.size());
-      std::vector<float> mids(cv.lod_groups.size(), 0.f);
-      for (size_t g = 0; g < mids.size() && g < cv.lod_group_mid.size(); g++) {
-        mids[g] = cv.lod_group_mid[g];
-      }
-      em.group_mid_offset = append(buf, mids.data(), mids.size());
-      em.draw_rows_size = (u32)out_morph_draw_rows.size();
-      em.draw_rows_offset = append(buf, out_morph_draw_rows.data(), out_morph_draw_rows.size());
-      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV24Size, &em, sizeof(em));
-    }
-    if (bands) {
-      // the shrub runs' PS2 fade bands (c3l::ExtShrubFade)
-      c3l::ExtShrubFade ef{};
-      ef.band_count = (u32)out_run_bands.size();
-      ef.bands_offset = append(buf, out_run_bands.data(), out_run_bands.size());
-      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV22Size, &ef, sizeof(ef));
-      size_t n = 0;
-      for (const u32 b : out_run_bands) {
-        n += b != 0;
-      }
-      lg::info("{}: shrub fade bands: {} of {} runs", level.level_name, n, out_run_bands.size());
-    }
-    if (!wind_chunk_verts.empty()) {
-      // the wind instances, and per chunk with wind vertices their slots (c3l::ExtWind)
-      c3l::ExtWind ew{};
-      ew.inst_count = (u32)cv.wind_insts.size();
-      ew.insts_offset = append(buf, cv.wind_insts.data(), cv.wind_insts.size());
-      std::vector<c3l::WindChunk> wcs;
-      size_t nverts = 0, nwind = 0, over = 0, unmatched = 0, max_slots = 0;
-      for (const auto& [ci, wm] : wind_chunk_verts) {
-        const auto& ch = chunks.at(ci);
-        std::vector<u8> slots(ch.vertex_count, 0);
-        std::vector<u16> insts;
-        std::unordered_map<u32, u8> slot_of;
-        for (u32 v = 0; v < ch.vertex_count; v++) {
-          const auto& o = out_verts[ch.first_vertex + v];
-          auto it = wm.find(std::string((const char*)&o, sizeof(o)));
-          if (it == wm.end()) {
-            unmatched++;
-            continue;
-          }
-          if (it->second == UINT32_MAX) {
-            continue;
-          }
-          auto [si, fresh] = slot_of.emplace(it->second, (u8)0);
-          if (fresh) {
-            if (insts.size() < c3l::kWindSlots) {
-              insts.push_back((u16)it->second);
-              si->second = (u8)insts.size();
-            }
-          }
-          if (!si->second) {
-            over++;
-            continue;
-          }
-          slots[v] = si->second;
-          nwind++;
-        }
-        if (insts.empty()) {
+  // the texture table (data_offset filled below), the texture keys, the texels
+  hdr.num_textures = tex_descs.size();
+  hdr.textures_offset = append(buf, tex_descs.data(), tex_descs.size());
+  u32 tex_keys_offset = 0;
+  if (eh_size >= c3l::kExtHeaderTexKeySize) {
+    c3l::ExtTexKey tk{};
+    tk.count = (u32)tex_keys.size();
+    tk.offset = tex_keys_offset = append(buf, tex_keys.data(), tex_keys.size());
+    ext_put(c3l::kExtHeaderV23Size, &tk, sizeof(tk));
+  }
+  align16(buf);
+  hdr.texture_data_offset = buf.size();
+  for (size_t i = 0; i < tex_descs.size(); i++) {
+    tex_descs[i].data_offset = append(buf, tex_datas[i].data(), tex_datas[i].size());
+    tex_descs[i].data_size = tex_datas[i].size();
+  }
+  align16(buf);
+  hdr.texture_data_size = buf.size() - hdr.texture_data_offset;
+  memcpy(buf.data() + hdr.textures_offset, tex_descs.data(),
+         tex_descs.size() * sizeof(c3l::Texture));
+  // the chunks' mesh tails: (AI-assisted, j2water2) v21 envmapped tie normals, the tie geomorph's
+  // records; their offsets are filled when the vertices are written
+  std::map<u32, std::vector<u8>> tails;  // by chunk
+  std::vector<c3l::EnvTieChunk> ecs;
+  if (env_out) {
+    size_t missing = 0, nverts = 0, nv_dist = 0, nv_near = 0;
+    for (const auto& [ci, nm] : env_chunk_normals) {
+      const auto& ch = chunks.at(ci);
+      nv_dist += ch.max_dist > 0 ? ch.vertex_count : 0;
+      nv_near += chunk_stream_cls[ci] ? ch.vertex_count : 0;
+      std::vector<std::array<s8, 4>> n(ch.vertex_count, {0, 0, 0, 0});
+      for (u32 v = 0; v < ch.vertex_count; v++) {
+        const auto& o = out_verts[ch.first_vertex + v];
+        auto it = nm.find(std::string((const char*)&o, sizeof(o)));
+        if (it == nm.end()) {
+          missing++;
           continue;
         }
-        max_slots = std::max(max_slots, insts.size());
-        nverts += slots.size();
-        std::vector<u8> wind_draws(ch.draw_count, 0);
-        for (u32 d = 0; d < ch.draw_count; d++) {
-          const auto& dr = out_draws[ch.first_draw + d];
-          for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && !wind_draws[d]; i++) {
-            wind_draws[d] = out_indices[i] < slots.size() && slots[out_indices[i]] != 0;
-          }
-        }
-        c3l::WindChunk wc{};
-        wc.chunk = ci;
-        wc.slots_offset = append(buf, slots.data(), slots.size());
-        wc.insts_offset = append(buf, insts.data(), insts.size());
-        wc.slot_count = (u32)insts.size();
-        wc.draws_offset = append(buf, wind_draws.data(), wind_draws.size());
-        wcs.push_back(wc);
+        n[v] = {it->second[0], it->second[1], it->second[2], 0};
       }
-      ew.chunk_count = (u32)wcs.size();
-      ew.chunks_offset = append(buf, wcs.data(), wcs.size());
-      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV21Size, &ew, sizeof(ew));
-      lg::info("{}: wind ties: {} instances, {} chunks with {} wind vertices of {} ({} KB), at most "
-               "{} instances per chunk, {} vertices of instances past {} at rest, {} unmatched",
-               level.level_name, cv.wind_insts.size(), wcs.size(), nwind, nverts, nverts / 1024,
-               max_slots, over, c3l::kWindSlots, unmatched);
+      nverts += n.size();
+      tails[ci].assign((const u8*)n.data(), (const u8*)(n.data() + n.size()));
+      ecs.push_back(c3l::EnvTieChunk{ci, 0});
+    }
+    lg::info("{}: envmapped ties (v21): {} draws ({} shine kinds), {} tris, {} chunks with "
+             "{} normals ({} KB; {} KB in distance-limited chunks, {} KB in near chunks), {} "
+             "groups without a shine, {} s moved, {} vertices unmatched",
+             level.level_name, out_env_draws.size(), cv.env_ties.size(), cv.env_tie_tris,
+             ecs.size(), nverts, nverts * 4 / 1024, nv_dist * 4 / 1024, nv_near * 4 / 1024,
+             cv.env_tie_groups_missing, env_st_moved, missing);
+  }
+  std::map<u32, u32> tail_offset;  // by chunk: its first byte
+  if (morph_out) {
+    for (size_t i = 0; i < out_morph_chunks.size(); i++) {
+      const auto& r = out_morph_recs[i];
+      // (a chunk with envmapped tie normals too: the records, then the normals)
+      auto& t = tails[out_morph_chunks[i].chunk];
+      t.insert(t.begin(), (const u8*)r.data(), (const u8*)(r.data() + r.size()));
     }
   }
-  hdr.vertex_data_offset = append(buf, out_verts.data(), out_verts.size());
-  hdr.vertex_data_size = out_verts.size() * sizeof(c3l::Vertex);
+  // the tables read with them before the meshes (load_env_tie_chunks, load_morph)
+  u32 ecs_offset = 0, morph_chunks_offset = 0;
+  if (env_out) {
+    ecs_offset = append(buf, ecs.data(), ecs.size());
+  }
+  c3l::ExtMorph em{};
+  if (morph_out) {
+    // the PS2's tie geomorph (c3l::ExtMorph)
+    em.inst_count = (u32)cv.morph_insts.size();
+    em.insts_offset = append(buf, cv.morph_insts.data(), cv.morph_insts.size());
+    em.chunk_count = (u32)out_morph_chunks.size();
+    em.chunks_offset = morph_chunks_offset =
+        append(buf, out_morph_chunks.data(), out_morph_chunks.size());
+    em.row_count = (u32)out_morph_rows.size();
+    em.rows_offset = append(buf, out_morph_rows.data(), out_morph_rows.size());
+    em.draw_rows_size = (u32)out_morph_draw_rows.size();
+    em.draw_rows_offset = append(buf, out_morph_draw_rows.data(), out_morph_draw_rows.size());
+    std::vector<float> mids(cv.lod_groups.size(), 0.f);
+    for (size_t g = 0; g < mids.size() && g < cv.lod_group_mid.size(); g++) {
+      mids[g] = cv.lod_group_mid[g];
+    }
+    em.group_mid_offset = append(buf, mids.data(), mids.size());
+  }
+  // a tail goes right after its chunk's vertices unless that is inside another chunk's vertices
+  bool tails_inline = true;
+  for (const auto& [ci, t] : tails) {
+    const u32 at = chunks[ci].first_vertex + chunks[ci].vertex_count;
+    for (const auto& d : chunks) {
+      tails_inline = tails_inline && !(d.first_vertex < at && at < d.first_vertex + d.vertex_count);
+    }
+  }
+  if (!tails_inline) {
+    lg::warn("{}: chunk vertices overlap: the mesh tails apart from the vertices",
+             level.level_name);
+    for (const auto& [ci, t] : tails) {
+      tail_offset[ci] = append(buf, t.data(), t.size());
+    }
+  }
+  // the vertices, with the tails; a chunk's first_vertex counts the 16-byte rows of the tails
+  // before it
+  std::vector<u32> file_first_vertex(chunks.size());
+  u64 tail_bytes = 0;
+  {
+    std::vector<std::pair<u32, u32>> ins;  // (the old vertex index it goes before, chunk)
+    if (tails_inline) {
+      for (const auto& [ci, t] : tails) {
+        ins.push_back({chunks[ci].first_vertex + chunks[ci].vertex_count, ci});
+      }
+      std::sort(ins.begin(), ins.end());
+    }
+    align16(buf);
+    hdr.vertex_data_offset = buf.size();
+    std::vector<u32> ins_at, ins_rows;  // prefix sums of the rows inserted, by position
+    u32 pos = 0, rows = 0;
+    for (const auto& [at, ci] : ins) {
+      buf.insert(buf.end(), (const u8*)(out_verts.data() + pos),
+                 (const u8*)(out_verts.data() + at));
+      pos = at;
+      const auto& t = tails[ci];
+      tail_offset[ci] = (u32)buf.size();
+      buf.insert(buf.end(), t.begin(), t.end());
+      align16(buf);
+      tail_bytes += t.size();
+      rows += (u32)((t.size() + 15) / 16);
+      ins_at.push_back(at);
+      ins_rows.push_back(rows);
+    }
+    buf.insert(buf.end(), (const u8*)(out_verts.data() + pos),
+               (const u8*)(out_verts.data() + out_verts.size()));
+    hdr.vertex_data_size = buf.size() - hdr.vertex_data_offset;
+    for (size_t i = 0; i < chunks.size(); i++) {
+      const u32 fv = chunks[i].first_vertex;
+      const size_t k = std::upper_bound(ins_at.begin(), ins_at.end(), fv) - ins_at.begin();
+      file_first_vertex[i] = fv + (k ? ins_rows[k - 1] : 0);
+    }
+  }
+  std::set<u32> morph_chunk_set;
+  for (auto& mc : out_morph_chunks) {
+    mc.records_offset = tail_offset.at(mc.chunk);
+    morph_chunk_set.insert(mc.chunk);
+  }
+  for (auto& e : ecs) {
+    e.normals_offset = tail_offset.at(e.chunk) +
+                       (morph_chunk_set.count(e.chunk)
+                            ? chunks[e.chunk].vertex_count * (u32)sizeof(c3l::MorphVertex)
+                            : 0);
+  }
+  if (env_out) {
+    memcpy(buf.data() + ecs_offset, ecs.data(), ecs.size() * sizeof(c3l::EnvTieChunk));
+  }
+  if (morph_out) {
+    memcpy(buf.data() + morph_chunks_offset, out_morph_chunks.data(),
+           out_morph_chunks.size() * sizeof(c3l::MorphChunk));
+  }
+  if (!tails.empty()) {
+    lg::info("{}: mesh tails: {} chunks, {} KB, {}", level.level_name, tails.size(),
+             tail_bytes / 1024, tails_inline ? "after their vertices" : "apart");
+  }
   hdr.index_data_offset = append(buf, out_indices.data(), out_indices.size());
   hdr.index_data_size = out_indices.size() * 2;
-  hdr.draw_data_offset = append(buf, out_draws.data(), out_draws.size());
-  hdr.draw_data_size = out_draws.size() * sizeof(c3l::Draw);
+  // the extension's tables read after the meshes: envmapped tie draws (load_env_ties), wind ties
+  // (load_wind_ties), opening planes (load_cull_cond)
+  align16(buf);
+  const u32 ext_late_offset = (u32)buf.size();
+  if (env_out) {
+    c3l::ExtEnvTie et{};
+    et.draw_count = (u32)out_env_draws.size();
+    et.draws_offset = append(buf, out_env_draws.data(), out_env_draws.size());
+    et.chunk_count = (u32)ecs.size();
+    et.chunks_offset = ecs_offset;
+    ext_put(c3l::kExtHeaderV20Size, &et, sizeof(et));
+  }
+  if (wind_out) {
+    // the wind instances, and per chunk with wind vertices their slots (c3l::ExtWind): the chunk
+    // table, then each chunk's draws and instances, then each chunk's slots
+    c3l::ExtWind ew{};
+    ew.inst_count = (u32)cv.wind_insts.size();
+    ew.insts_offset = append(buf, cv.wind_insts.data(), cv.wind_insts.size());
+    struct WindOut {
+      c3l::WindChunk wc;
+      std::vector<u8> slots, wind_draws;
+      std::vector<u16> insts;
+    };
+    std::vector<WindOut> wos;
+    size_t nverts = 0, nwind = 0, over = 0, unmatched = 0, max_slots = 0;
+    for (const auto& [ci, wm] : wind_chunk_verts) {
+      const auto& ch = chunks.at(ci);
+      std::vector<u8> slots(ch.vertex_count, 0);
+      std::vector<u16> insts;
+      std::unordered_map<u32, u8> slot_of;
+      for (u32 v = 0; v < ch.vertex_count; v++) {
+        const auto& o = out_verts[ch.first_vertex + v];
+        auto it = wm.find(std::string((const char*)&o, sizeof(o)));
+        if (it == wm.end()) {
+          unmatched++;
+          continue;
+        }
+        if (it->second == UINT32_MAX) {
+          continue;
+        }
+        auto [si, fresh] = slot_of.emplace(it->second, (u8)0);
+        if (fresh) {
+          if (insts.size() < c3l::kWindSlots) {
+            insts.push_back((u16)it->second);
+            si->second = (u8)insts.size();
+          }
+        }
+        if (!si->second) {
+          over++;
+          continue;
+        }
+        slots[v] = si->second;
+        nwind++;
+      }
+      if (insts.empty()) {
+        continue;
+      }
+      max_slots = std::max(max_slots, insts.size());
+      nverts += slots.size();
+      std::vector<u8> wind_draws(ch.draw_count, 0);
+      for (u32 d = 0; d < ch.draw_count; d++) {
+        const auto& dr = out_draws[ch.first_draw + d];
+        for (u32 i = dr.first_index; i < dr.first_index + dr.index_count && !wind_draws[d]; i++) {
+          wind_draws[d] = out_indices[i] < slots.size() && slots[out_indices[i]] != 0;
+        }
+      }
+      WindOut wo;
+      wo.wc.chunk = ci;
+      wo.wc.slot_count = (u32)insts.size();
+      wo.slots = std::move(slots);
+      wo.insts = std::move(insts);
+      wo.wind_draws = std::move(wind_draws);
+      wos.push_back(std::move(wo));
+    }
+    std::vector<c3l::WindChunk> wcs(wos.size());
+    ew.chunk_count = (u32)wcs.size();
+    ew.chunks_offset = append(buf, wcs.data(), wcs.size());
+    for (auto& wo : wos) {
+      wo.wc.draws_offset = append(buf, wo.wind_draws.data(), wo.wind_draws.size());
+      wo.wc.insts_offset = append(buf, wo.insts.data(), wo.insts.size());
+    }
+    for (size_t i = 0; i < wos.size(); i++) {
+      wos[i].wc.slots_offset = append(buf, wos[i].slots.data(), wos[i].slots.size());
+      wcs[i] = wos[i].wc;
+    }
+    memcpy(buf.data() + ew.chunks_offset, wcs.data(), wcs.size() * sizeof(c3l::WindChunk));
+    ext_put(c3l::kExtHeaderV21Size, &ew, sizeof(ew));
+    lg::info("{}: wind ties: {} instances, {} chunks with {} wind vertices of {} ({} KB), at most "
+             "{} instances per chunk, {} vertices of instances past {} at rest, {} unmatched",
+             level.level_name, cv.wind_insts.size(), wcs.size(), nwind, nverts, nverts / 1024,
+             max_slots, over, c3l::kWindSlots, unmatched);
+  }
+  if (cond_out) {
+    // the kDrawCullCond draws' opening planes (c3l::ExtCullCond): the draw table, then the planes
+    std::vector<c3l::CullCondDraw> cds;
+    std::vector<std::vector<c3l::CullCondPlane>> pss;
+    size_t planes = 0;
+    for (const auto& [di, sets] : out_cond_sets) {
+      std::vector<c3l::CullCondPlane> ps;
+      for (u32 si : sets) {
+        for (const auto& cp : cv.cond_sets.at(si)) {
+          ps.push_back(c3l::CullCondPlane{{cp.n[0], cp.n[1], cp.n[2]}, cp.d});
+        }
+      }
+      planes += ps.size();
+      cds.push_back(c3l::CullCondDraw{di, (u32)ps.size(), 0, 0});
+      pss.push_back(std::move(ps));
+    }
+    c3l::ExtCullCond ec{};
+    ec.draw_count = (u32)cds.size();
+    ec.draws_offset = append(buf, cds.data(), cds.size());
+    for (size_t i = 0; i < cds.size(); i++) {
+      cds[i].planes_offset = append(buf, pss[i].data(), pss[i].size());
+    }
+    memcpy(buf.data() + ec.draws_offset, cds.data(), cds.size() * sizeof(c3l::CullCondDraw));
+    ext_put(c3l::kExtHeaderTexKeySize, &ec, sizeof(ec));
+    lg::info("{}: culling by opening planes: {} draws, {} planes", level.level_name, cds.size(),
+             planes);
+  }
+  if (morph_out) {
+    ext_put(c3l::kExtHeaderV24Size, &em, sizeof(em));
+  }
+  // the merc models: the tables, then their vertices and indices
   hdr.num_merc_models = merc.models.size();
   hdr.merc_models_offset = append(buf, merc.models.data(), merc.models.size());
-  hdr.merc_vertex_offset = append(buf, merc.verts.data(), merc.verts.size());
-  hdr.merc_vertex_size = merc.verts.size() * sizeof(c3l::MercVertex);
-  hdr.merc_index_offset = append(buf, merc.indices.data(), merc.indices.size());
-  hdr.merc_index_size = merc.indices.size() * 2;
   hdr.merc_draw_offset = append(buf, merc.draws.data(), merc.draws.size());
   hdr.merc_draw_size = merc.draws.size() * sizeof(c3l::MercDraw);
   u32 merc_mod_offset = 0;
@@ -6706,17 +6846,20 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     hdr.merc_blerc_size = buf.size() - hdr.merc_blerc_offset;
   }
+  hdr.merc_vertex_offset = append(buf, merc.verts.data(), merc.verts.size());
+  hdr.merc_vertex_size = merc.verts.size() * sizeof(c3l::MercVertex);
+  hdr.merc_index_offset = append(buf, merc.indices.data(), merc.indices.size());
+  hdr.merc_index_size = merc.indices.size() * 2;
   align16(buf);
-  hdr.texture_data_offset = buf.size();
-  for (size_t i = 0; i < tex_descs.size(); i++) {
-    tex_descs[i].data_offset = append(buf, tex_datas[i].data(), tex_datas[i].size());
-    tex_descs[i].data_size = tex_datas[i].size();
+  // the tables written before the offsets they hold were known
+  for (size_t i = 0; i < chunks.size(); i++) {
+    chunks[i].first_vertex = file_first_vertex[i];
   }
-  align16(buf);
-  hdr.texture_data_size = buf.size() - hdr.texture_data_offset;
-  hdr.num_textures = tex_descs.size();
-  hdr.textures_offset = append(buf, tex_descs.data(), tex_descs.size());
-  align16(buf);
+  memcpy(buf.data() + hdr.chunks_offset, chunks.data(), chunks.size() * sizeof(c3l::Chunk));
+  if (ext_out) {
+    ext_put(0, &eh, std::min<u32>(eh_size, sizeof(eh)));
+    memcpy(buf.data() + hdr.ext_offset, ext_bytes.data(), ext_bytes.size());
+  }
   memcpy(buf.data(), &hdr, sizeof(hdr));
 
   // (AI-assisted) v11: compressed blocks. Sections (and the padding after them) are packed
@@ -6725,23 +6868,33 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   {
     std::vector<std::pair<u32, std::string>> starts = {
         {hdr.chunks_offset, "chunks"},
+        {hdr.draw_data_offset, "draws"},
         {hdr.vertex_data_offset, "vertices"},
         {hdr.index_data_offset, "indices"},
-        {hdr.draw_data_offset, "draws"},
         {hdr.merc_models_offset, "merc models"},
+        {hdr.merc_draw_offset, "merc draws"},
         {hdr.merc_vertex_offset, "merc vertices"},
         {hdr.merc_index_offset, "merc indices"},
-        {hdr.merc_draw_offset, "merc draws"},
-        {hdr.texture_data_offset, "textures"},
-        {hdr.textures_offset, "texture table"}};
+        {hdr.textures_offset, "texture table"},
+        {hdr.texture_data_offset, "textures"}};
     if (hdr.tod_offset) {
       starts.push_back({hdr.tod_offset, "time of day"});  // (AI-assisted) v16
     }
     if (hdr.ext_offset) {
-      starts.push_back({hdr.ext_offset, "tie lod"});  // (AI-assisted) v17
+      starts.push_back({hdr.ext_offset, "ext header"});
+      starts.push_back({ext_tables_offset, "tie lod"});  // (AI-assisted) v17
+      starts.push_back({ext_late_offset, "ext after meshes"});
     }
-    if (!out_runs.empty()) {
-      starts.push_back({(u32)sizeof(c3l::Header), "vis runs"});
+    if (tex_keys_offset) {
+      starts.push_back({tex_keys_offset, "texture keys"});
+    }
+    if (env_out) {
+      starts.push_back({ecs_offset, "ext mesh tables"});
+    } else if (morph_out) {
+      starts.push_back({em.insts_offset, "ext mesh tables"});
+    }
+    if (runs_offset) {
+      starts.push_back({runs_offset, "vis runs"});
     }
     if (hdr.merc_blerc_offset) {
       starts.push_back({hdr.merc_blerc_offset, "merc blend shapes"});
@@ -7268,6 +7421,10 @@ int main(int argc, char** argv) {
   app.add_flag("--texshare", texshare_only,
                "write input/texshare.c3t (the textures several levels share) from the .c3l files "
                "in the folder input (output: the same folder); --all writes it too");
+  bool compare = false;
+  app.add_flag("--compare", compare,
+               "input and output are two .c3l files (or folders of them): the same contents, "
+               "every table and piece the runtime reads, whatever their layout");
   bool texanim = false;
   app.add_flag("--texanim", texanim,
                "(AI-assisted, Jak II) write the texture animations' textures from GAME.fr3 "
@@ -7453,6 +7610,9 @@ int main(int argc, char** argv) {
   }
   if (texshare_only) {
     return texshare::write_table(in) ? 0 : 1;
+  }
+  if (compare) {
+    return c3l_compare::compare(in, out) ? 0 : 1;
   }
   if (all) {
     file_util::create_dir_if_needed(out);

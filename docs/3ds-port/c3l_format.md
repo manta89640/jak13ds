@@ -150,7 +150,31 @@ block is still under 16 KB, and never lets a block span two sections. v7..v10 fi
 256 KB): the file is opened unbuffered and every read from it is one request of a whole window (or
 one exact read of a bigger piece), into one of two windows (the one used longest ago is replaced),
 stored blocks and uncompressed files included. Each chunk's indices are then read straight into
-its index buffer between its vertex reads, each section keeping its own window.
+its index buffer between its vertex reads, each section keeping its own window. A read continues a
+window when it starts in it or at its end; any other read is another stream and replaces the window
+used longest ago, and a new window stops before the blocks the other one holds. The extension
+header is read once and kept (`Reader::keep`).
+
+**Layout in load order.** The converter writes the sections in the order `CtrLevels::load_file`
+reads them, so a load reads each block once, front to back: the extension header, chunks, draws,
+visibility runs, the extension's tables read before the meshes (tie levels of detail, run spheres,
+near chunks, shrub fade bands, prototype visibility), time of day, the texture table, texture keys,
+texels, the envmapped tie chunk table and the geomorph tables, the vertices, the indices, the
+extension's tables read after the meshes (envmapped tie draws, wind ties, opening planes), the merc
+tables, merc vertices and indices. A chunk's mesh tail (its envmapped tie normals, its MorphVertex
+records, or both: the records, then the normals) lies right after its vertices in the vertex data,
+padded to 16 bytes; the next chunk's `first_vertex` counts those rows. A stream job's request for
+its chunks' vertices then holds their tails too. No version change: the offsets stay absolute, and
+files in the old order still load (more bytes read). Before this layout a village1 load read
+16.3 MB in 71 requests for 7.7 MB of blocks, and the title's stream jobs 11x their blocks (the
+tails in the extension section made a third stream of reads for two windows). Now 8.5 MB in 39
+requests, and the stream jobs read their blocks once. The rest at a load: time of day's second
+pass over its colors (one window less than the section, ~0.3 MB for village1) and the windows that
+run on past a section's last piece read (near chunk data, the start of the indices).
+`ctr_level_converter --compare A B` (two .c3l files, or every .c3l of two folders) checks that two
+conversions hold the same tables and pieces whatever their layout. Host check: `CTR_READ_TRACE=FILE`
+writes every reader, request and piece; `platform/3ds/tools/c3l_read_trace.py FILE` sums up the
+bytes requested, read again and needed per load and per stream job, by section.
 
 The codec is picked per block by a cost model, the load time on the New 3DS:
 `packed / sd_mbps + raw / decode_mbps`. The decode speeds come from instruction counts of the
@@ -696,7 +720,8 @@ geometry 0 only, unmorphed).
   quantized units, its row): geometry 0's moving vertices are band 1, geometry 2's band 2, and the
   same vertices in geometry 0 (still at rest there while the instance is nearer than the mid-plane)
   band 2 as well, so geometry 0 and 2 share them. A chunk's records (MorphChunk::records_offset,
-  8 bytes per vertex) are its mesh's tail at runtime, as the envmapped tie normals
+  8 bytes per vertex, after its vertices in the file) are its mesh's tail at runtime, as the
+  envmapped tie normals (a chunk with both: the records, then the normals, 12 bytes per vertex)
   (CtrLevelData::tail_k / tail_file: read, streamed and freed with the mesh, after the color stream's
   split vertices). A chunk's rows are its (instance, band) pairs, at most 79 (the converter puts a
   near cell's groups in bins of their own above that); per draw the rows its vertices use (draw
