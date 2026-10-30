@@ -4329,8 +4329,10 @@ void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   for (size_t i = 0; i < eds.size(); i++) {
     const auto& e = eds[i];
     const size_t ci = lev->draw_chunk.size() > e.draw ? lev->draw_chunk[e.draw] : 0;
+    // (a morph chunk's normals are in its tail only after its records)
     if (e.draw < lev->draws.size() && e.texture < lev->textures.size() &&
-        lev->chunk_normals[ci] == CtrLevelData::kNormalsInMesh) {
+        lev->chunk_normals[ci] == CtrLevelData::kNormalsInMesh &&
+        (ci >= lev->chunk_morph.size() || lev->chunk_morph[ci] < 0 || lev->morph_normals(ci))) {
       lev->draw_env[e.draw] = (s16)i;
       used++;
     }
@@ -5477,6 +5479,13 @@ bool CtrLevels::load_file(const fs::path& path,
              : hdr.version < 9 ? "no envmap shine on models"
                                : "no visibility culling");
   }
+  if (hdr.ext_offset) {
+    u32 magic_size[2];
+    if (f.read(hdr.ext_offset, magic_size, sizeof(magic_size)) &&
+        !memcmp(magic_size, c3l::kExtMagic, 4)) {
+      f.keep(hdr.ext_offset, magic_size[1]);
+    }
+  }
   out->name = name;
   out->shrub_ps2_dist = hdr.version >= c3l::kShrubPs2DistVersion;  // (AI-assisted)
   if (!f.read_array(hdr.chunks_offset, hdr.num_chunks, &out->chunks) ||
@@ -5786,8 +5795,11 @@ bool CtrLevels::load_file(const fs::path& path,
       auto& su = out->stream_units[out->chunk_unit[ci]];
       su.bytes = CtrStreamArena::mesh_bytes(ch.vertex_count, end - first) +
                  out->normals_tail_bytes(ci);
-      su.packed = packed_of(hdr.vertex_data_offset + ch.first_vertex * (u32)sizeof(c3l::Vertex),
-                            ch.vertex_count * (u32)sizeof(c3l::Vertex)) +
+      const u32 vfile = hdr.vertex_data_offset + ch.first_vertex * (u32)sizeof(c3l::Vertex);
+      const u32 vbytes = ch.vertex_count * (u32)sizeof(c3l::Vertex);
+      su.packed = packed_of(vfile, vbytes + (out->tail_file(ci) == vfile + vbytes
+                                                 ? out->normals_tail_bytes(ci)
+                                                 : 0)) +
                   packed_of(hdr.index_data_offset + first * (u32)sizeof(u16),
                             (end - first) * (u32)sizeof(u16));
       if (su.state == CtrLevelData::kUnitNever) {
@@ -7821,18 +7833,23 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
         // the parts lying one after the other in the file from here: their index and vertex
         // bytes in one request each (the converter put the near chunks together, in spatial order)
         // (and across small gaps: reading a few KB more costs less than another request)
-        constexpr u32 kGapVerts = 48 * 1024 / 16, kGapIndices = 16 * 1024 / 2;
+        constexpr u32 kGapVertexBytes = 48 * 1024, kGapIndices = 16 * 1024 / 2;
         constexpr u32 kSpanBytes = 384 * 1024;
+        // a part's vertex bytes in the file, with its tail when that follows them
+        auto vbegin = [&](const Job::StreamPart& q) {
+          return job.vertex_data_offset + q.first_vertex * (u32)sizeof(c3l::Vertex);
+        };
+        auto vend = [&](const Job::StreamPart& q) {
+          const u32 e = vbegin(q) + q.vertex_count * (u32)sizeof(c3l::Vertex);
+          return q.normals_offset == e ? e + q.vertex_count * q.tail_k : e;
+        };
         run_end = i + 1;
         while (run_end < job.stream_parts.size()) {
           const auto& a = job.stream_parts[run_end - 1];
           const auto& b = job.stream_parts[run_end];
-          const u32 a_vend = a.first_vertex + a.vertex_count;
-          if (b.first_vertex < a_vend || b.index_first < a.index_end ||
-              b.first_vertex - a_vend > kGapVerts || b.index_first - a.index_end > kGapIndices ||
-              (b.first_vertex + b.vertex_count - p.first_vertex) * 16u +
-                      (b.index_end - p.index_first) * 2u >
-                  kSpanBytes) {
+          if (vbegin(b) < vend(a) || b.index_first < a.index_end ||
+              vbegin(b) - vend(a) > kGapVertexBytes || b.index_first - a.index_end > kGapIndices ||
+              vend(b) - vbegin(p) + (b.index_end - p.index_first) * 2u > kSpanBytes) {
             break;
           }
           run_end++;
@@ -7841,9 +7858,7 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
         for (const bool ok :
              {f.preload(job.index_data_offset + p.index_first * (u32)sizeof(u16),
                         (last.index_end - p.index_first) * (u32)sizeof(u16)),
-              f.preload(job.vertex_data_offset + p.first_vertex * (u32)sizeof(c3l::Vertex),
-                        (last.first_vertex + last.vertex_count - p.first_vertex) *
-                            (u32)sizeof(c3l::Vertex))}) {
+              f.preload(vbegin(p), vend(last) - vbegin(p))}) {
           (ok ? d->preloads : d->preload_misses)++;
         }
       }
@@ -10744,6 +10759,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     c.mesh = lev.meshes[vc.chunk];
     c.normals_mesh = c.mesh;
     c.normals_offset = (int)lev.normals_offset_in_mesh(vc.chunk);
+    if (vc.chunk < lev.chunk_morph.size() && lev.chunk_morph[vc.chunk] >= 0) {
+      c.normals_offset += (int)(ch.vertex_count * sizeof(c3l::MorphVertex));  // (after the records)
+    }
     c.first = (int)first;
     c.count = (int)count;
     c.d.clip = vc.gpu;

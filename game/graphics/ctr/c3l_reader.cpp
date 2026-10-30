@@ -7,6 +7,7 @@
 #include "c3l_reader.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 
 #include "common/util/Timer.h"
@@ -15,6 +16,20 @@
 #include "third-party/zstd/lib/zstd.h"
 
 namespace c3l {
+
+#ifndef __3DS__
+namespace {
+// host CTR_READ_TRACE=FILE: each reader (o L|S path), each request to the file (r path offset
+// bytes), each piece asked for (p raw_offset bytes), the reader's end (c reads bytes)
+FILE* read_trace() {
+  static FILE* f = [] {
+    const char* p = getenv("CTR_READ_TRACE");
+    return p && *p ? fopen(p, "w") : nullptr;
+  }();
+  return f;
+}
+}  // namespace
+#endif
 
 Reader::Buffers::~Buffers() {
   free_zstd_ctx(zstd);
@@ -63,6 +78,14 @@ Reader::Reader(const char* path, size_t window, Buffers* buffers)
   }
   m_windows[0].buf = &m_bufs->window[0];
   m_windows[1].buf = &m_bufs->window[1];
+  if (strlen(path) < sizeof(m_path)) {
+    strcpy(m_path, path);
+  }
+#ifndef __3DS__
+  if (FILE* t = read_trace()) {
+    fprintf(t, "o L %s\n", path);
+  }
+#endif
   if (!m_f) {
     return;
   }
@@ -128,6 +151,11 @@ Reader::Reader(const char* path, size_t window, Buffers* buffers, const Dir& dir
   if (m_keep) {
     strcpy(m_path, path);
   }
+#ifndef __3DS__
+  if (FILE* t = read_trace()) {
+    fprintf(t, "o S %s\n", path);
+  }
+#endif
   if (m_keep && buffers->kept && buffers->kept_unbuffered == unbuffered &&
       !strcmp(buffers->kept_path, path)) {
     m_f = buffers->kept;
@@ -164,6 +192,12 @@ Reader::Dir Reader::dir() const {
 }
 
 Reader::~Reader() {
+#ifndef __3DS__
+  if (FILE* t = read_trace()) {
+    fprintf(t, "c %u %llu\n", file_reads, (unsigned long long)file_bytes_read);
+    fflush(t);
+  }
+#endif
   if (m_f && m_keep && !m_error) {
     // (AI-assisted, streammem) kept open for the next stream job (one file: the last one's closed)
     m_bufs->close_kept();
@@ -194,6 +228,11 @@ bool Reader::file_read(long offset, void* dst, size_t bytes) {
     return false;
   }
   m_pos = offset + (long)bytes;
+#ifndef __3DS__
+  if (FILE* tf = read_trace()) {
+    fprintf(tf, "r %s %ld %zu\n", m_path[0] ? m_path : "?", offset, bytes);
+  }
+#endif
   file_bytes_read += bytes;
   read_ms += t.getMs();
   file_reads++;
@@ -210,19 +249,22 @@ const uint8_t* Reader::in_window(long offset, size_t bytes) {
   return nullptr;
 }
 
-const uint8_t* Reader::load_window(long offset, size_t want) {
-  Window* w = &m_windows[0];
-  if (m_window_cap) {
-    // the window this read continues (the nearest one before it: the same stream of reads, now
-    // past its end), else the one used longest ago
-    Window* behind = nullptr;
-    for (auto& c : m_windows) {
-      if (c.size && c.offset <= offset && (!behind || c.offset > behind->offset)) {
-        behind = &c;
-      }
-    }
-    w = behind ? behind : (m_windows[1].used < m_windows[0].used ? &m_windows[1] : &m_windows[0]);
+Reader::Window* Reader::window_for(long offset) {
+  if (!m_window_cap) {
+    return &m_windows[0];
   }
+  // the window this read continues (it starts in it or at its end), else the one used longest
+  // ago: a jump elsewhere is another stream of reads
+  for (auto& c : m_windows) {
+    if (c.size && c.offset <= offset && offset <= c.offset + (long)c.size) {
+      return &c;
+    }
+  }
+  return m_windows[1].used < m_windows[0].used ? &m_windows[1] : &m_windows[0];
+}
+
+const uint8_t* Reader::load_window(long offset, size_t want) {
+  Window* w = window_for(offset);
   if (w->buf->size() < want) {
     w->buf->resize(want);
   }
@@ -309,11 +351,15 @@ const uint8_t* Reader::packed_bytes(size_t bi) {
   size_t want = std::max<size_t>(size, m_window_cap ? m_window_cap : kWindow);
   want = std::min<size_t>(want, (size_t)(m_file_size - start));
   if (m_window_cap) {
-    // (AI-assisted) whole blocks only: a block cut at the window's end was read again with the next
+    // (AI-assisted) whole blocks only (a block cut at the window's end was read again with the
+    // next), and none the other window holds (it keeps them)
+    const Window* other = window_for(start) == &m_windows[0] ? &m_windows[1] : &m_windows[0];
     size_t whole = size;
     for (size_t j = bi + 1; j < (*m_bl).size(); j++) {
       const Block& n = (*m_bl)[j];
-      if ((long)n.file_offset != start + (long)whole || whole + n.packed_size() > want) {
+      if ((long)n.file_offset != start + (long)whole || whole + n.packed_size() > want ||
+          (other->size && (long)n.file_offset >= other->offset &&
+           (long)n.file_offset < other->offset + (long)other->size)) {
         break;
       }
       whole += n.packed_size();
@@ -411,6 +457,19 @@ bool Reader::preload(uint32_t offset, uint32_t bytes) {
   return load_window(start, (size_t)(end - start)) != nullptr;
 }
 
+bool Reader::keep(uint32_t offset, uint32_t bytes) {
+  if (bytes > kKeepMax) {
+    return false;
+  }
+  std::vector<uint8_t> v(bytes);
+  if (!read(offset, v.data(), bytes)) {
+    return false;
+  }
+  m_kept = std::move(v);
+  m_kept_offset = offset;
+  return true;
+}
+
 bool Reader::read(uint32_t offset, void* dst_v, size_t bytes) {
   if (!ok() || (uint64_t)offset + bytes > m_raw_size) {
     m_error = true;
@@ -419,6 +478,16 @@ bool Reader::read(uint32_t offset, void* dst_v, size_t bytes) {
   if (bytes == 0) {
     return true;
   }
+  if (!m_kept.empty() && offset >= m_kept_offset &&
+      (uint64_t)offset + bytes <= (uint64_t)m_kept_offset + m_kept.size()) {
+    memcpy(dst_v, m_kept.data() + (offset - m_kept_offset), bytes);
+    return true;
+  }
+#ifndef __3DS__
+  if (FILE* t = read_trace()) {
+    fprintf(t, "p %u %zu\n", offset, bytes);
+  }
+#endif
   if ((*m_bl).empty()) {
     return raw_read((long)offset, dst_v, bytes);
   }
