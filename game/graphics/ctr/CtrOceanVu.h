@@ -10,7 +10,7 @@
  * (CtrOceanVuMid.cpp, CtrOceanVuNear.cpp: with OCEAN_VU_FOR_CTR, OceanMid.h / OceanNear.h include
  * this header instead of their OpenGL classes). The VU memory, registers and helpers below are the
  * ones the PC classes have; xgkick hands the GS packets to CtrOceanBatch (CtrOceanFull.cpp)
- * instead of CommonOceanRenderer. Jak 1 only (the _jak2 programs are compiled, never called).
+ * instead of CommonOceanRenderer. Jak II runs the _jak2 programs (set_jak2).
  */
 
 #include "common/dma/dma.h"
@@ -44,9 +44,12 @@ class CtrOceanMidVu {
   void set_native(bool on) { m_native = on; }
   //! (AI-assisted, j1ocean) see CtrOceanEnvHook
   void set_env_hook(CtrOceanEnvHook* h) { m_env_hook = h; }
+  //! Jak II's programs (the _jak2 calls; the env map's t from the camera space y, not z)
+  void set_jak2(bool on) { m_jak2 = on; }
 
  private:
   CtrOceanEnvHook* m_env_hook = nullptr;
+  bool m_jak2 = false;
   // (AI-assisted) the native programs (CtrOceanNative.cpp): the textured pass of call 46 / 73 (a
   // mid ocean tile) and call 107 / 275 (the transition to the near ocean: quads / a fan), as
   // clip-space triangles (the GPU clips, so the VU's clipping is left out). (AI-assisted, j1ocean)
@@ -226,9 +229,12 @@ class CtrOceanNearVu {
   void set_alpha_floor(int a) { m_alpha_floor = a < 0 ? 0 : (a > 0x80 ? 0x80 : a); }
   //! (AI-assisted, j1ocean) see CtrOceanEnvHook
   void set_env_hook(CtrOceanEnvHook* h) { m_env_hook = h; }
+  //! Jak II's program (one more constant: the fade in constants5, the addresses after it + 1)
+  void set_jak2(bool on) { m_jak2 = on; }
 
  private:
   CtrOceanEnvHook* m_env_hook = nullptr;
+  bool m_jak2 = false;
   bool m_env_sent = false;  // this bucket's call to the hook made
   // (AI-assisted) the native program (CtrOceanNative.cpp): call 39's textured pass, in clip space
   void native_patch();

@@ -49,6 +49,15 @@ class CtrOceanBatch {
   }
   //! (AI-assisted, j1ocean) the sky reflection's texture for the env draws (-1: drawn without)
   void set_env(int tex) { m_env_tex = tex; }
+  //! the env texture's layout (Jak II's render target): its s = m[0] + m[1] u + m[2] v, t = m[3] +
+  //! m[4] u + m[5] v at the PS2's env map coordinates u, v; nullptr: s, t = u, v
+  void set_env_map(const float* m) {
+    m_env_mapped = m != nullptr;
+    if (m) {
+      memcpy(m_env_map, m, sizeof(m_env_map));
+    }
+  }
+  const float* env_map() const { return m_env_mapped ? m_env_map : nullptr; }
   void end() { flush(); }
 
   /*!
@@ -403,6 +412,8 @@ class CtrOceanBatch {
   bool m_open = false, m_failed = false;
   int m_mode = kModeGs;
   int m_env_tex = -1;  // (AI-assisted, j1ocean)
+  bool m_env_mapped = false;
+  float m_env_map[6] = {0, 1, 0, 0, 0, 1};
   ctr_ocean_full_vertex* m_v = nullptr;
   u16* m_i = nullptr;
   int m_nv = 0, m_ni = 0, m_max_v = 0, m_max_i = 0;

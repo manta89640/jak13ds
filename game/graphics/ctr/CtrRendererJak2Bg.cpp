@@ -16,8 +16,10 @@
 
 #include "game/graphics/ctr/CtrRendererJak2.h"
 #include "game/graphics/ctr/CtrOcean.h"
+#include "game/graphics/ctr/CtrOceanFull.h"
 #include "game/graphics/ctr/CtrSettings.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -103,10 +105,23 @@ class CtrJak2VisBucket : public CtrBucketRenderer {
 void ctr_jak2_background_buckets(const CtrJak2BucketSet& set, CtrLevels* levels, CtrVram* vram) {
   using B = jak2::BucketId;
   set(B::BUCKET_2, std::make_unique<CtrJak2VisBucket>("vis", (int)B::BUCKET_2, levels));
-  // (AI-assisted) the ocean: the packet of ocean-3ds-packet (goal_src/jak2/engine/gfx/ocean/
-  // ocean.gc, TARGET_3DS) in ocean-near, drawn from the map like Jak 1's (CtrOcean.h; ocean = full
-  // is the flat ocean too: the PS2 ocean's DMA isn't sent)
-  if (ctr_settings().ocean) {
+  // the ocean. config.ini ocean = full: the PS2 ocean's DMA (both buckets,
+  // CtrOceanFull; the kernel's *pc-3ds-ocean-full*, on the PC OPENGOAL_OCEAN_FULL=1). Else the
+  // packet of ocean-3ds-packet (goal_src/jak2/engine/gfx/ocean/ocean.gc, TARGET_3DS) in ocean-near,
+  // drawn from the map like Jak 1's (CtrOcean.h)
+#ifdef __3DS__
+  const bool full = ctr_settings().ocean_mode == CtrSettings::OceanMode::Full;
+#else
+  const char* full_env = getenv("OPENGOAL_OCEAN_FULL");
+  const bool full = full_env && full_env[0] == '1';
+#endif
+  if (ctr_settings().ocean && full) {
+    auto ocean = std::make_shared<CtrOceanFull>();
+    set(B::OCEAN_MID_FAR,
+        std::make_unique<CtrOceanFullBucket>("ocean", (int)B::OCEAN_MID_FAR, ocean, false));
+    set(B::OCEAN_NEAR,
+        std::make_unique<CtrOceanFullBucket>("ocean", (int)B::OCEAN_NEAR, ocean, true));
+  } else if (ctr_settings().ocean) {
     set(B::OCEAN_NEAR, std::make_unique<CtrOceanRenderer>("ocean", (int)B::OCEAN_NEAR));
     // (AI-assisted, j2water) the sky reflection's env map (ocean-3ds-envmap)
     set(B::OCEAN_MID_FAR, std::make_unique<CtrOceanEnvJak2>("ocean", (int)B::OCEAN_MID_FAR, vram));

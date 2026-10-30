@@ -38,26 +38,53 @@ constexpr int kMidEnvScale = 737, kMidEnvOffset = 738;
  * scale.y + offset.y (scale 0.5, offset 0.5: the view direction's horizontal part, which a flat
  * mirror reflects unchanged; the PS2's Q = scale.z * v.z + offset.z = 1). The GPU interpolates them
  * with perspective, as the GS did with S, T, Q times the textured pass's Q.
+ * Jak II: t from v.y (its programs leave out the y = z move), and the env texture is a render target
+ * laid out differently (map: CtrOceanBatch::set_env_map, folded into the coefficients).
  */
 struct EnvXform {
   float m[4][3];  // the camera matrix's x, y, z rows
   float sx, ox, sz, oz;
-  EnvXform(const Vf* cam, const Vf& scale, const Vf& offset) {
+  bool use_y = false, general = false;
+  float a0, a1, a2, b0, b1, b2;  // general: s = a0 + a1 x + a2 t', t = b0 + b1 x + b2 t'
+  EnvXform(const Vf* cam, const Vf& scale, const Vf& offset, bool jak2 = false,
+           const float* map = nullptr) {
     for (int j = 0; j < 4; j++) {
       m[j][0] = cam[j].x();
       m[j][1] = cam[j].y();
       m[j][2] = cam[j].z();
     }
-    sx = scale.x();
-    sz = scale.y();
-    ox = offset.x();
-    oz = offset.y();
+    init(scale.x(), offset.x(), scale.y(), offset.y(), jak2, map);
+  }
+  EnvXform(float scale_s, float off_s, float scale_t, float off_t, bool jak2, const float* map) {
+    init(scale_s, off_s, scale_t, off_t, jak2, map);
+  }
+  void init(float scale_s, float off_s, float scale_t, float off_t, bool jak2, const float* map) {
+    sx = scale_s;
+    ox = off_s;
+    sz = scale_t;
+    oz = off_t;
+    use_y = jak2;
+    general = map != nullptr;
+    if (map) {
+      a0 = map[0] + map[1] * ox + map[2] * oz;
+      a1 = map[1] * sx;
+      a2 = map[2] * sz;
+      b0 = map[3] + map[4] * ox + map[5] * oz;
+      b1 = map[4] * sx;
+      b2 = map[5] * sz;
+    }
   }
   //! from the camera space vector (vx, vy, vz)
   void st_cam(float vx, float vy, float vz, float* es, float* et) const {
     const float r = 1.f / std::sqrt(vx * vx + vy * vy + vz * vz);
-    *es = vx * r * sx + ox;
-    *et = vz * r * sz + oz;
+    const float ux = vx * r, ut = (use_y ? vy : vz) * r;
+    if (general) {
+      *es = a0 + a1 * ux + a2 * ut;
+      *et = b0 + b1 * ux + b2 * ut;
+    } else {
+      *es = ux * sx + ox;
+      *et = ut * sz + oz;
+    }
   }
   //! for the point (x, y, z, 1)
   void st(float x, float y, float z, float* es, float* et) const {
@@ -169,7 +196,8 @@ void CtrOceanMidVu::native_tile(bool env) {
     return;
   }
   // (AI-assisted, j1ocean) call 73 (L32) also draws the env map pass, call 46 doesn't
-  const EnvXform ex(in, m_vu_data[kMidEnvScale], m_vu_data[kMidEnvOffset]);
+  const EnvXform ex(in, m_vu_data[kMidEnvScale], m_vu_data[kMidEnvOffset], m_jak2,
+                    m_batch->env_map());
 
   // grid point (r, c) = (x[c], 0, z[r], 1): out = col0 * x[c] + (col2 * z[r] + col3)
   float cx[9][4];
@@ -267,7 +295,8 @@ void CtrOceanMidVu::native_transition(bool fan) {
   }
   const ClipXform xf(in + 4, m_vu_data[kHmge], m_vu_data[kHvdf], m_vu_data[kFogConst]);
   // (AI-assisted, j1ocean) calls 107 / 275 draw the env map pass too (L19 / L24)
-  const EnvXform ex(in, m_vu_data[kMidEnvScale], m_vu_data[kMidEnvOffset]);
+  const EnvXform ex(in, m_vu_data[kMidEnvScale], m_vu_data[kMidEnvOffset], m_jak2,
+                    m_batch->env_map());
   const Vf* corner = m_vu_data + kCorners;
   // (AI-assisted) the call's corners, colors and texture coordinates in locals: the vertex stores
   // could be to the VU memory as far as the compiler knows, which made it read all 40 of them
@@ -347,7 +376,7 @@ namespace {
 constexpr int kNearHeights = 32;  // the 32 x 32 wave heights (absolute addresses)
 constexpr int kNearGrid = 290;    // 9 x 9 (x, -, z, 1), 3 quadwords apart, made by call 0
 constexpr int kNearHmge = 951, kNearHvdf = 953, kNearFog = 954, kNearFade = 955, kNearAlpha = 956,
-              kNearStep = 957, kNearColor = 958, kNearIndex = 983;
+              kNearStep = 957, kNearColor = 958, kNearFade2 = 959;
 
 //! min / max of non-negative floats, as integers (no float compare and vmrs)
 inline float min_pos(float a, float b) {
@@ -396,8 +425,10 @@ void CtrOceanNearVu::native_patch() {
   const ClipXform xf(in + 4, vu[kNearHmge], vu[kNearHvdf], vu[kNearFog]);
   // (AI-assisted, j1ocean) the env map pass (L15's camera space vertex, L21): constants (fade) and
   // constants2 (alpha) hold its scale and offset in x, y
-  const float env_sx = vu[kNearFade].x(), env_sz = vu[kNearFade].y();
-  const float env_ox = vu[kNearAlpha].x(), env_oz = vu[kNearAlpha].y();
+  const EnvXform ex(vu[kNearFade].x(), vu[kNearAlpha].x(), vu[kNearFade].y(), vu[kNearAlpha].y(),
+                    m_jak2, m_batch->env_map());
+  // Jak II: the fade in constants5 (L15's vf05), the env map's scale stays in constants
+  const Vf& fade = vu[m_jak2 ? kNearFade2 : kNearFade];
 
   // heights: rows 0..7 from in[10].x / .y (the 9th column), row 8 from .z / .w
   float h[9][9];
@@ -416,7 +447,7 @@ void CtrOceanNearVu::native_patch() {
   const Vf& cam1 = in[1];
   const Vf& cam2 = in[2];
   const Vf& cam3 = in[3];
-  const float fade_k = vu[kNearFade].w(), fade_min = vu[kNearFade].x();
+  const float fade_k = fade.w(), fade_min = fade.x();
   const float alpha_k = vu[kNearAlpha].w();
   const float col_x = vu[kNearColor].x(), col_z = vu[kNearColor].z();
   const s32 col_max = (s32)vu[kNearColor].y();
@@ -451,8 +482,14 @@ void CtrOceanNearVu::native_patch() {
       const float f0 = min_pos(d * fade_k, 1.f);
       {
         const float r = 1.f / d;
-        o->es = vx * r * env_sx + env_ox;
-        o->et = vz * r * env_sz + env_oz;
+        const float ux = vx * r, ut = (ex.use_y ? vy : vz) * r;
+        if (ex.general) {
+          o->es = ex.a0 + ex.a1 * ux + ex.a2 * ut;
+          o->et = ex.b0 + ex.b1 * ux + ex.b2 * ut;
+        } else {
+          o->es = ux * ex.sx + ex.ox;
+          o->et = ut * ex.sz + ex.oz;
+        }
       }
       const float hy = y * (1.f - f0);
       const float f = max_pos(f0, fade_min);
