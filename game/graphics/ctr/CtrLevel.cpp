@@ -9119,30 +9119,55 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // source chunks, then its matrix. vista: drawn in the vista pass.
   // clip = -(R * (origin + q * scale - cam_trans)) (tfrag3.vert), as a matrix on (q, 1).
   // The translation is done in double: world coordinates are large.
-  auto make_clip = [&](const c3l::Chunk& ch, float* m) {
-    double d[3];
+  // (the camera's columns converted to double once per level draw, the loops unrolled: the same
+  // operations in the same order as per chunk before)
+  double rd[4][3], cam_d[3];
+  float rn[4][3];
+  for (int c = 0; c < 4; c++) {
     for (int i = 0; i < 3; i++) {
-      d[i] = (double)ch.origin[i] - (double)cam.trans[i];
+      rd[c][i] = (double)R[i][c];
+      rn[c][i] = -R[i][c];
     }
+  }
+  const double r3d[3] = {(double)R[3][0], (double)R[3][1], (double)R[3][2]};
+  for (int i = 0; i < 3; i++) {
+    cam_d[i] = (double)cam.trans[i];
+  }
+  auto make_clip = [&](const c3l::Chunk& ch, float* m) {
+    const double d0 = (double)ch.origin[0] - cam_d[0], d1 = (double)ch.origin[1] - cam_d[1],
+                 d2 = (double)ch.origin[2] - cam_d[2];
+    const float s = ch.scale;
+#pragma GCC unroll 4
     for (int c = 0; c < 4; c++) {
       double t = 0;
-      for (int i = 0; i < 3; i++) {
-        m[4 * c + i] = -R[i][c] * ch.scale;
-        t += (double)R[i][c] * d[i];
-      }
+      t += rd[c][0] * d0;
+      t += rd[c][1] * d1;
+      t += rd[c][2] * d2;
       if (c < 3) {
-        t += R[3][c];
+        t += r3d[c];
       }
-      m[4 * c + 3] = (float)-t;
-    }
-    for (int i = 0; i < 4; i++) {
-      m[4 + i] *= kYScale;
+      float m0 = rn[c][0] * s, m1 = rn[c][1] * s, m2 = rn[c][2] * s, m3 = (float)-t;
+      if (c == 1) {
+        m0 *= kYScale;
+        m1 *= kYScale;
+        m2 *= kYScale;
+        m3 *= kYScale;
+      }
+      m[4 * c + 0] = m0;
+      m[4 * c + 1] = m1;
+      m[4 * c + 2] = m2;
+      m[4 * c + 3] = m3;
     }
   };
   // (AI-assisted) a chunk that is to be drawn (mode and distance decided): the view test (the
   // chunk's sphere against the four planes; with run_culling, a chunk that crosses planes has its
   // runs tested against those planes on their own), the visibility bits or (vista tier) the
   // source chunks, then its matrix. vista: drawn in the vista pass.
+  // the run loop's inputs that are the same for every chunk (filled before the chunk loop)
+  RunLoopIn run_in;
+  float run_po[4], run_pk[4][3];
+  run_in.po = run_po;
+  run_in.pk = run_pk;
   auto emit_chunk = [&](size_t ci, bool vista_chunk) {
     m_ph_emits++;
     const auto& ch = lev.chunks[ci];
@@ -9194,7 +9219,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                            ? ch.vis_run_count
                            : (lev.chunk_run_count[ci] ? lev.chunk_run_count[ci] : ch.vis_run_count);
         // the crossed planes: distance of the chunk's origin, and its change per quantized unit
-        float po[4], pk[4][3];
+        float* const po = run_po;
+        float (*const pk)[3] = run_pk;
         int np = 0;
         if (straddles) {
           for (int i = 0; i < 4; i++) {
@@ -9210,21 +9236,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           m_cull_runs += nr;
         }
         // (AI-assisted, micro-level) the loop is run_loop: one copy per combination of the tests
-        RunLoopIn in;
-        in.runs = lev.vis_runs.data();
-        in.spheres = lev.run_spheres.data();
-        in.run_lod = lev.run_lod.data();
-        in.lod_state = lev.lod_state.data();
-        in.vis = m_vis;
-        in.vista_src = m_vista_src.data();
-        in.vista_src_n = m_vista_src.size();
+        RunLoopIn& in = run_in;
         in.vista_tier = vista_tier;
-        in.po = po;
-        in.pk = pk;
         in.np = np;
         in.scale = ch.scale;
-        in.shown_out = m_run_shown.data();
-        in.nomerge_out = m_run_nomerge.data();
         RunLoopOut o;
         m_ph_runs += nr;
         kRunLoops[vis_test ? 1 : 0][straddles ? np : 0][lod_chunk ? 1 : 0](in, r0, nr, &o);
@@ -9369,6 +9384,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ctr_gpu_prepare_mesh_matrix(vc.clip, &vc.gpu);
   };
   m_vista_src.assign(lev.has_vista ? lev.chunks.size() : 0, 0);
+  run_in.runs = lev.vis_runs.data();
+  run_in.spheres = lev.run_spheres.data();
+  run_in.run_lod = lev.run_lod.data();
+  run_in.lod_state = lev.lod_state.data();
+  run_in.vis = m_vis;
+  run_in.vista_src = m_vista_src.data();
+  run_in.vista_src_n = m_vista_src.size();
+  run_in.shown_out = m_run_shown.data();
+  run_in.nomerge_out = m_run_nomerge.data();
   // (AI-assisted) vista tier: a chunk not drawn because of its distance, within vista_distance
   auto vista_source = [&](size_t ci) {
     if (!lev.has_vista) {
