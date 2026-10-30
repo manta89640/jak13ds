@@ -148,6 +148,7 @@ struct CtrLevelData {
   std::vector<u8> tex_shared;
   std::vector<u32> tex_share_groups;
   u32 tex_shared_bytes = 0;  // of the groups this level loaded
+  bool tex_missing = false;  // the texture load failed (tex_pool_bytes: what it needs), repaired
   std::vector<int> meshes;    // one per chunk
   std::vector<c3l::MercBlercVertex> blerc_verts;
   std::vector<c3l::MercBlercTarget> blerc_targets;
@@ -808,6 +809,7 @@ class CtrLevels {
     std::vector<u8> shared;          // as CtrLevelData::tex_shared
     std::vector<u32> share_groups;   // the groups held (one reference each)
     u32 shared_bytes = 0, borrowed_bytes = 0;  // groups loaded here / ones other levels had
+    bool loaded = false;  // every pool made and every texel read (own pools may be none)
   };
   // c3l v23 texture sharing between loaded levels (texshare.c3t): a group of textures the same
   // levels have, in a pool of its own while a loaded level holds it (m_share_lock)
@@ -817,7 +819,8 @@ class CtrLevels {
   };
   struct ShareGroup {
     u32 users = 0;
-    int pool = -1;
+    std::vector<int> pools;  // pieces of at most kTexPoolPiece, as a level's
+    bool loading = false;  // a level's load is making its pool (the others make their own copies)
     std::unordered_map<u64, ShareTex> tex;
   };
   std::mutex m_share_lock;

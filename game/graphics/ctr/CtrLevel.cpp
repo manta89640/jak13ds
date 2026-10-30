@@ -24,6 +24,7 @@
 #include <new>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_set>
 
 #include "common/dma/dma.h"
 #include "common/dma/gs.h"
@@ -151,7 +152,7 @@ int missing_parts(const CtrLevelData& lev, u32* bytes) {
            (m.index_end - m.index_first) * (u32)sizeof(u16);
     }
   }
-  if (lev.tex_pools.empty() && lev.tex_pool_bytes) {
+  if (lev.tex_missing) {
     n++;
     b += lev.tex_pool_bytes;
   }
@@ -232,7 +233,7 @@ LevelMem level_mem(const CtrLevelData& lev) {
       m.heap += vec_bytes(e.mask) + vec_bytes(e.dests) + sizeof(e);
     }
   }
-  m.tex = (lev.tex_pools.empty() ? 0 : lev.tex_pool_bytes) + lev.tex_shared_bytes;
+  m.tex = (lev.tex_missing ? 0 : lev.tex_pool_bytes) + lev.tex_shared_bytes;
   m.heap += vec_bytes(lev.chunks) + vec_bytes(lev.draws) + vec_bytes(lev.draw_states) +
             vec_bytes(lev.draw_alpha80) + vec_bytes(lev.sorted_draws) +
             vec_bytes(lev.ordered_draws) + vec_bytes(lev.early_draws) + vec_bytes(lev.draw_chunk) +
@@ -970,7 +971,7 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
     }
   }
   if (d->meshes.size() == job.chunks.size() && d->merc_meshes.size() == job.merc.size() &&
-      (!job.textures || !d->tex.pools.empty())) {
+      (!job.textures || d->tex.loaded)) {
     d->result = LoadResult::LOADED;
   }
 }
@@ -1083,9 +1084,13 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
     }
   }
   d.merc_meshes.clear();
-  if (!d.tex.pools.empty() && lev->tex_pools.empty()) {
+  if (d.job.textures && d.tex.loaded && lev->tex_missing) {
     lev->tex_pools = std::move(d.tex.pools);
-    lev->textures = std::move(d.tex.handles);
+    lev->tex_pool_bytes = d.tex.pool_bytes;
+    lev->tex_background_bytes = d.tex.background_bytes;
+    lev->tex_shared_bytes = d.tex.shared_bytes;
+    lev->tex_missing = false;
+    lev->textures = std::move(d.tex.handles);  // the failed load's were only borrowed ones
     lev->tex_min_alpha = std::move(d.tex.min_alpha);
     lev->tex_shared = std::move(d.tex.shared);
     lev->tex_share_groups.insert(lev->tex_share_groups.end(), d.tex.share_groups.begin(),
@@ -1710,7 +1715,7 @@ void CtrLevels::request_repair(CtrLevelData& lev) {
   std::sort(job.merc.begin(), job.merc.end(), [](const RepairMerc& a, const RepairMerc& b) {
     return a.file_vertex < b.file_vertex;
   });
-  job.textures = lev.tex_pools.empty() && lev.tex_pool_bytes > 0;
+  job.textures = lev.tex_missing;
   // (AI-assisted, streammem) its room kept free of the stream arena's growth until it is done (it
   // was dropped as soon as the repair was asked for: SM-1)
   for (const auto& c : job.chunks) {
@@ -4741,6 +4746,7 @@ bool CtrLevels::load_textures(c3l::Reader& f,
   std::vector<u32> creating;
   if (keys.size() == texs.size()) {
     std::lock_guard<std::mutex> lk(m_share_lock);
+    std::unordered_set<u64> placed;  // a texture twice in the file: the copy stays the level's
     for (size_t i = 0; i < texs.size(); i++) {
       const int g = plan[i].ok && keys[i] && !c3l::texture_is_mask(texs[i])
                         ? share_group_of(keys[i])
@@ -4752,7 +4758,9 @@ bool CtrLevels::load_textures(c3l::Reader& f,
       if (std::find(out->share_groups.begin(), out->share_groups.end(), (u32)g) ==
           out->share_groups.end()) {
         out->share_groups.push_back((u32)g);
-        if (grp.users++ == 0) {
+        grp.users++;
+        if (!grp.loading && grp.pools.empty() && grp.tex.empty()) {
+          grp.loading = true;
           creating.push_back((u32)g);
         }
       }
@@ -4770,7 +4778,8 @@ bool CtrLevels::load_textures(c3l::Reader& f,
           out->borrowed_bytes += plan[m].file_bytes;
           plan[m].ok = false;
         }
-      } else if (std::find(creating.begin(), creating.end(), (u32)g) != creating.end()) {
+      } else if (std::find(creating.begin(), creating.end(), (u32)g) != creating.end() &&
+                 placed.insert(keys[i]).second) {
         group_of[i] = g;
         if (m >= 0) {
           group_of[m] = g;
@@ -4806,12 +4815,12 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     for (size_t i = 0; i < texs.size(); i++) {
       auto& p = plan[i];
       if (p.ok && group_of[i] == (int)g) {
-        if (!any) {
+        const u32 b = (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
+        if (!any || piece_bytes.back() + b > kTexPoolPiece) {
           piece_bytes.push_back(0);
           piece_group.push_back((int)g);
           any = true;
         }
-        const u32 b = (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
         p.piece = (u32)piece_bytes.size() - 1;
         p.offset = piece_bytes.back();
         piece_bytes.back() += b;
@@ -4821,6 +4830,26 @@ bool CtrLevels::load_textures(c3l::Reader& f,
   }
   std::vector<int> all_pools;
   std::vector<u8*> bases;
+  // the groups this load makes are given up (failed or cancelled): a later load makes them
+  auto drop_creating = [&]() {
+    for (size_t i = 0; i < texs.size(); i++) {
+      if (group_of[i] >= 0 && out->handles[i] >= 0) {
+        ctr_gpu_tex_delete(out->handles[i]);
+        out->handles[i] = -1;
+      }
+    }
+    std::lock_guard<std::mutex> lk(m_share_lock);
+    for (size_t k = 0; k < all_pools.size(); k++) {
+      if (piece_group[k] >= 0) {
+        ctr_gpu_pool_delete(all_pools[k]);  // after its textures
+      }
+    }
+    for (const u32 g : creating) {
+      m_share_groups[g].loading = false;
+      m_share_groups[g].pools.clear();
+    }
+    creating.clear();
+  };
   for (const u32 b : piece_bytes) {
     int pool = ctr_gpu_pool_create(b);
     while (pool < 0 && make_room(name, "the textures", b)) {
@@ -4834,6 +4863,7 @@ bool CtrLevels::load_textures(c3l::Reader& f,
       }
       all_pools.clear();
       bases.clear();
+      drop_creating();
       break;
     }
     all_pools.push_back(pool);
@@ -4844,13 +4874,14 @@ bool CtrLevels::load_textures(c3l::Reader& f,
       out->pools.push_back(all_pools[k]);
     } else {
       std::lock_guard<std::mutex> lk(m_share_lock);
-      m_share_groups[(u32)piece_group[k]].pool = all_pools[k];
+      m_share_groups[(u32)piece_group[k]].pools.push_back(all_pools[k]);
       ctr_gpu_pool_set_priority(all_pools[k], 2 * 16 + 15);
     }
   }
   std::vector<u8> texels;
   for (size_t i = 0; i < texs.size(); i++) {
     if (cancelled()) {
+      drop_creating();
       return false;
     }
     const auto& t = texs[i];
@@ -4914,10 +4945,14 @@ bool CtrLevels::load_textures(c3l::Reader& f,
         out->shared[m] = 1;
       }
     }
+    for (const u32 g : creating) {
+      m_share_groups[g].loading = false;
+    }
   }
   for (int pool : all_pools) {
     ctr_gpu_pool_ready(pool);
   }
+  out->loaded = piece_bytes.empty() || !bases.empty();
   return true;
 }
 
@@ -4962,8 +4997,8 @@ void CtrLevels::release_share_groups(const std::vector<u32>& groups) {
         ctr_gpu_tex_delete(t.mask);
       }
     }
-    if (it->second.pool >= 0) {
-      ctr_gpu_pool_delete(it->second.pool);  // after its textures
+    for (int pool : it->second.pools) {
+      ctr_gpu_pool_delete(pool);  // after its textures
     }
     m_share_groups.erase(it);
   }
@@ -5152,14 +5187,15 @@ bool CtrLevels::load_file(const fs::path& path,
     const bool ok = load_textures(f, hdr, texs, out->draws, name, &tl);
     // in the level also when cancelled: unloaded with it
     out->tex_pools = std::move(tl.pools);
-    out->tex_pool_bytes = tl.pool_bytes;
+    out->tex_missing = !tl.loaded;
+    out->tex_pool_bytes = tl.loaded ? tl.pool_bytes : tl.pool_bytes + tl.shared_bytes;
     out->tex_background_bytes = tl.background_bytes;
     out->tex_empty = tl.empty;
     out->textures = std::move(tl.handles);
     out->tex_min_alpha = std::move(tl.min_alpha);
     out->tex_shared = std::move(tl.shared);
     out->tex_share_groups = std::move(tl.share_groups);
-    out->tex_shared_bytes = tl.shared_bytes;
+    out->tex_shared_bytes = tl.loaded ? tl.shared_bytes : 0;
     if (tl.shared_bytes || tl.borrowed_bytes) {
       lg::info("[ctr] {}: shared textures: {} KB loaded for the levels that also have them, {} KB "
                "from the loaded ones",
