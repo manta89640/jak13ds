@@ -10926,7 +10926,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         use = &f;
       }
       m_fade_calls.push_back(
-          {use, &vc.gpu, lev.meshes[vc.chunk], (int)first, (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0});
+          {use, &vc.gpu, lev.meshes[vc.chunk], (int)first, (int)count, vc.nofog ? 1 : 0, nullptr,
+           nullptr, 0, 0, 0});
       m_fade_runs++;
     };
     if (!vc.partly || !lev.draw_run_count[di]) {

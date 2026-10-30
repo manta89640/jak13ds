@@ -5,20 +5,20 @@
  * The PS2's tie geomorph data of a level, which the .fr3 leaves out: written by the level extractor
  * next to the level's .fr3 as <level>.tiemorph, read by tools/ctr_level_converter.
  *
- * The PS2 draws a tie instance with one of its prototype's four geometries, by the view depth of the
- * instance's sphere minus its radius (d) against the prototype's dists (near-plane x, mid-plane z,
- * far-plane w; draw-inline-array-instance-tie): geometry 0 within 8 m or where it needs clipping,
- * geometry 1 up to the mid-plane, geometry 2 up to the far-plane, geometry 3 beyond. Geometry 1 is
- * geometry 0, and the "interpolated" vertices of geometries 0-2 move with the instance's morph
- * factor (the tie VU program: position = xyofs + morph.x * vtx): geometry 1 by
- * max(0, (d - near-plane) * rlength-near), reaching geometry 2's surface at the mid-plane, geometry 2
- * by max(0, (d - mid-plane) * rlength-mid), reaching geometry 3's surface at the far-plane. The
- * .fr3 has each vertex at morph 0 (xyofs); this file has the rest.
+ * The PS2 draws a tie instance with one of its prototype's four geometries, by the view depth of
+ * the instance's sphere minus its radius (d) against the prototype's dists (near-plane x, mid-plane
+ * z, far-plane w; draw-inline-array-instance-tie): geometry 0 within 8 m or where it needs
+ * clipping, geometry 1 up to the mid-plane, geometry 2 up to the far-plane, geometry 3 beyond.
+ * Geometry 1 is geometry 0, and the "interpolated" vertices of geometries 0-2 move with the
+ * instance's morph factor (the tie VU program: position = xyofs + morph.x * vtx): geometry 1 by
+ * max(0, (d - near-plane) * rlength-near), reaching geometry 2's surface at the mid-plane,
+ * geometry 2 by max(0, (d - mid-plane) * rlength-mid), reaching geometry 3's surface at the
+ * far-plane. The .fr3 has each vertex at morph 0 (xyofs); this file has the rest.
  *
- * Little endian: FileHeader, then per (geometry, tie tree) in extraction order a TreeHeader followed
- * by vertex_count Vertex (parallel to that TieTree's packed_vertices.vertices), proto_count Proto
- * (its proto_names order), inst_count Inst (its packed_vertices.matrices order) and wind_count Inst
- * (its wind_instance_info order).
+ * Little endian: FileHeader, then per (geometry, tie tree) in extraction order a TreeHeader
+ * followed by vertex_count Vertex (parallel to that TieTree's packed_vertices.vertices),
+ * proto_count Proto (its proto_names order), inst_count Inst (its packed_vertices.matrices order)
+ * and wind_count Inst (its wind_instance_info order).
  */
 
 #include <cstdint>
