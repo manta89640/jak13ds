@@ -1,5 +1,7 @@
 // (AI-assisted) tod_diff: included in a namespace with one version's Tod struct and time of day
-// code (TOD_STRUCT, TOD_CODE): a level with the file's chunks, drawn every frame as draw_level does
+// code (TOD_LIGHT: its CtrLight.h, TOD_STRUCT, TOD_CODE): a level with the file's chunks, drawn
+// every frame as draw_level does
+#include TOD_LIGHT
 struct CtrLevelData {
 #include TOD_STRUCT
   std::string name = "citadel";

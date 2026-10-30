@@ -315,11 +315,7 @@ struct CtrLevelData {
     // rewritten alone when only those move
     u32 light_mask = 0;  // palette bits
     u32 light_color_count = 0;
-    struct LightList {
-      std::vector<u16> verts;  // by the light palettes of their color, then by vertex
-      std::vector<std::pair<u8, u32>> groups;  // those palettes, end of their verts
-      std::vector<u32> ranges;  // per vertex group its verts (ctr_recolor_light_groups_cached)
-    };
+    using LightList = CtrLightLists;
     std::unordered_map<u32, LightList> chunk_lights;
     // weights (64 = 1.0): the game's at the level's last draw, the table's
     u8 weights[8][3] = {};
@@ -373,7 +369,8 @@ struct CtrLevelData {
     u32 bytes() const {
       u32 lights = 0;
       for (const auto& [ci, l] : chunk_lights) {
-        lights += (u32)(l.verts.size() * 2 + l.groups.size() * 8) + 48;
+        lights += (u32)(l.verts.size() * 2 + l.masks.size() * 8 + l.runs.size() * 4 +
+                        l.ranges.size() * 4) + 96;
       }
       return (u32)(colors.size() + muls.size() * sizeof(c3l::TodMul) + color_mask.size() +
                    table.size() * 8 + cver.size() * 4 + group_list.size() * 4 + akind.size() +

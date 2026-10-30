@@ -450,7 +450,11 @@ their meshes (a frame the GPU still draws may see part of the change):
   for all levels, emptied when full at most every 300 frames; groups over 8192 vertices have none).
   A group behind then writes only the vertices of the entries whose color changed since it was
   written (`tod_list_write`): runs whose palettes didn't move are passed over, and no vertex is read.
-  The light pass does the same for its moved light palettes. The output is the same vertex for vertex
+  The light pass does the same for its moved light palettes; a group without a list has its light
+  vertices by table entry per light mask (`ctr_light_layout`, made once per group layout): one blend
+  per entry, and an entry whose color didn't change since that part was last written is passed over
+  without reading its vertices. A list's runs keep the version they were last written at too. The
+  output is the same vertex for vertex
   as writing the group whole (`test/ctr_render/tod_diff/run.sh`). On the title screen (its fast day
   changes nearly every color every frame) the groups are written whole as before.
 - Removed Oct 23 (todlag): config `tod_busy_half` (sunken's cycling lights taken every second
@@ -487,7 +491,8 @@ their meshes (a frame the GPU still draws may see part of the change):
 Heap: the colors (palettes used x 3 bytes), the TodMuls, per entry 10 bytes (mask, bright, rgba,
 stamp), per color its alpha kind (with 2 kinds or more), per chunk 29 bytes, per group 16, per run
 2, and the light lists: village1 600 KB, misty 545 KB, snow
-458 KB, sunken 309 KB. On the 3DS a level whose table would leave less than 3 MB of heap free keeps
+458 KB, sunken 309 KB; once drawn, 4 bytes more per light entry of each group and mask and 12 per
+group and mask (lavatube up to ~0.5 MB more, citadel ~0.35 MB). On the 3DS a level whose table would leave less than 3 MB of heap free keeps
 its baked palette (`[ctr] <level>: no heap for the time of day colors`).
 
 Azahar (Oct 23, todlag, New 3DS, preset normal, render thread per 15 s window; before: the

@@ -1261,7 +1261,10 @@ every frame (time-of-day-interp-colors in background.gc), so there is no lower r
   holds the group's vertices by table entry, in runs by palette mask. A group that is behind writes
   only the vertices of the entries whose color changed since it was written. Runs whose palettes
   didn't move are passed over, and no vertex memory is read.
-- **The light pass uses the lists too**, for its moved light palettes.
+- **The light pass uses the lists too**, for its moved light palettes. Groups without a list keep
+  their light vertices by table entry (one blend per entry, unchanged colors passed over without
+  reading the vertex): host model, lavatube's mood light 54% fewer ARM instructions and 67% fewer
+  vertex writes in the light pass, Haven City's flames and neon 13% / 24%.
 - **The blend adds only the palettes a color isn't black in.**
 - **The title screen keeps the old whole-group path.** Its fast day changes nearly every color every
   frame, so the lists don't pay there.

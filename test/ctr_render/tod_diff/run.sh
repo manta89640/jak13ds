@@ -10,7 +10,8 @@
 #   --base REV   the reference version (default HEAD)
 #   --trace FILE a weight trace (lines: frame, then per palette r g b alpha; host CTR_TOD_LOG=2
 #                lines converted by the same layout); default citadel_weights.txt (Citadel, 875
-#                frames of the host game) plus random traces (tod_trace.py)
+#                frames of the host game) plus random traces (tod_trace.py; one with palettes
+#                1-3 moving every frame, the others rarely: light palettes)
 #   --arm        also the ARM instructions per level draw of both versions (devkitARM build run
 #                under Unicorn, like test/mips2c_native/unicorn; ARMBENCH_PYTHON: a python3 with
 #                unicorn)
@@ -37,7 +38,8 @@ done
 [ -n "$C3L" ] || { echo "usage: see header" >&2; exit 2; }
 mkdir -p "$OUT"
 
-# the two versions' time of day code: from "struct TodSeen {" to the host check, and the Tod struct
+# the two versions' time of day code: from "struct TodSeen {" to the host check, the Tod struct
+# and CtrLight.h
 extract() {
   awk '/^struct TodSeen \{/{on=1} /^#if !defined\(__3DS__\) \|\| defined\(CTR_TOD_CHECK_BUILD\)/{if(on){exit}} on' "$1" |
     sed 's/std::mutex/shim_mutex/g' > "$3.code.inc"
@@ -47,6 +49,8 @@ git -C "$ROOT" show "$BASE:game/graphics/ctr/CtrLevel.cpp" > "$OUT/ref_CtrLevel.
 git -C "$ROOT" show "$BASE:game/graphics/ctr/CtrLevel.h" > "$OUT/ref_CtrLevel.h"
 extract "$OUT/ref_CtrLevel.cpp" "$OUT/ref_CtrLevel.h" "$OUT/ref"
 extract "$ROOT/game/graphics/ctr/CtrLevel.cpp" "$ROOT/game/graphics/ctr/CtrLevel.h" "$OUT/neu"
+git -C "$ROOT" show "$BASE:game/graphics/ctr/CtrLight.h" > "$OUT/ref.light.h"
+cp "$ROOT/game/graphics/ctr/CtrLight.h" "$OUT/neu.light.h"
 
 CXX="${CXX:-c++}"
 CC="${CC:-cc}"
@@ -73,6 +77,8 @@ else
     python3 "$HERE/tod_trace.py" $seed 400 > "$OUT/random$seed.txt"
     TRACES+=("$OUT/random$seed.txt")
   done
+  python3 "$HERE/tod_trace.py" 4 400 lights 0x0e > "$OUT/random-lights.txt"
+  TRACES+=("$OUT/random-lights.txt")
 fi
 status=0
 for tr in "${TRACES[@]}"; do

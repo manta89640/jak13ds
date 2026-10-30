@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 # (AI-assisted) tod_diff: random time of day weights, one line per frame: frame, then per palette
 # r g b alpha (64 = 1.0): small steps, jumps (flicker), one channel alone, alpha apart from rgb.
-#   tod_trace.py <seed> <frames>
+#   tod_trace.py <seed> <frames> [lights MASK]
+# lights MASK: the palettes in MASK move every frame (lamps, lava glow), the others rarely
 import random
 import sys
 
 seed, frames = int(sys.argv[1]), int(sys.argv[2])
+lights = int(sys.argv[4], 0) if len(sys.argv) > 4 and sys.argv[3] == 'lights' else None
 random.seed(seed)
 w = [[random.choice([0, 0, 32, 64, 128]) for c in range(4)] for p in range(8)]
 for f in range(frames):
     for p in range(8):
         r = random.random()
+        if lights is not None and not (lights >> p & 1):
+            r = 1.0 if random.random() < 0.98 else 0.0
+        elif lights is not None:
+            r = min(r, 0.37)
         if r < 0.3:
             d = random.choice([-2, -1, 1, 2])
             for c in range(3):
