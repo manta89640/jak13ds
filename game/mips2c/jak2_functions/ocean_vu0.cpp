@@ -2,6 +2,7 @@
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak2/kscheme.h"
+#include "game/mips2c/jak2_functions/native_functions.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
 namespace method_14_ocean {
@@ -181,7 +182,7 @@ end_of_function:
 
 void link() {
   cache.ocean_wave_frames = intern_from_c("*ocean-wave-frames*").c();
-  gLinkedFunctionTable.reg("(method 14 ocean)", execute, 256);
+  gLinkedFunctionTable.reg("(method 14 ocean)", execute, 256, &native::method_14_ocean);
 }
 
 } // namespace method_14_ocean
@@ -251,7 +252,7 @@ end_of_function:
 }
 
 void link() {
-  gLinkedFunctionTable.reg("(method 15 ocean)", execute, 128);
+  gLinkedFunctionTable.reg("(method 15 ocean)", execute, 128, &native::method_15_ocean);
 }
 
 } // namespace method_15_ocean
@@ -853,7 +854,7 @@ void link() {
   cache.upload_vu0_program = intern_from_c("upload-vu0-program").c();
   cache.vu_lights_light_group = intern_from_c("vu-lights<-light-group!").c();
   cache.ocean_generate_verts_vector = intern_from_c("*ocean-generate-verts-vector*").c();
-  gLinkedFunctionTable.reg("(method 16 ocean)", execute, 128);
+  gLinkedFunctionTable.reg("(method 16 ocean)", execute, 128, &native::method_16_ocean);
 }
 
 } // namespace method_16_ocean

@@ -85,6 +85,8 @@ u32 add_goal_fn(const std::string& name, int arity, GoalFn fn);
 
 //! the stub (function object) of a registered mips2c function
 u32 mips2c_stub(const std::string& name);
+//! Put before the names the mips2c link functions register from now on (Jak 2's: "jak2:")
+void set_mips2c_name_prefix(const std::string& prefix);
 //! Bind the symbol of the same name to a registered mips2c function (like def-mips2c)
 void bind_mips2c_symbol(const std::string& name);
 

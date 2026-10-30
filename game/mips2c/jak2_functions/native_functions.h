@@ -57,4 +57,9 @@ extern const NativeImpl method_9_collide_cache_prim;
 extern const NativeImpl method_10_collide_cache_prim;
 extern const NativeImpl method_9_collide_puss_work;
 extern const NativeImpl method_10_collide_puss_work;
+// native_ocean.cpp
+extern const NativeImpl render_ocean_quad;
+extern const NativeImpl method_14_ocean;
+extern const NativeImpl method_15_ocean;
+extern const NativeImpl method_16_ocean;
 }  // namespace Mips2C::jak2::native

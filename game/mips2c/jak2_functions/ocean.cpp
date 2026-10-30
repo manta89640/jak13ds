@@ -283,6 +283,7 @@ void link() {
 // clang-format off
 #include "game/mips2c/mips2c_private.h"
 #include "game/kernel/jak2/kscheme.h"
+#include "game/mips2c/jak2_functions/native_functions.h"
 using ::jak2::intern_from_c;
 namespace Mips2C::jak2 {
 namespace render_ocean_quad {
@@ -375,7 +376,7 @@ end_of_function:
 void link() {
   cache.fake_scratchpad_data = intern_from_c("*fake-scratchpad-data*").c();
   cache.draw_large_polygon_ocean = intern_from_c("draw-large-polygon-ocean").c();
-  gLinkedFunctionTable.reg("render-ocean-quad", execute, 256);
+  gLinkedFunctionTable.reg("render-ocean-quad", execute, 256, &native::render_ocean_quad);
 }
 
 } // namespace render_ocean_quad
