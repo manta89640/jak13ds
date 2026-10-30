@@ -139,6 +139,7 @@ set(RUNTIME_SOURCE
         kernel/common/kmachine.cpp
         kernel/common/kmalloc.cpp
         kernel/common/kperf.cpp
+        kernel/common/stack_watch.cpp
         kernel/common/kmemcard.cpp
         kernel/common/kprint.cpp
         kernel/common/kscheme.cpp

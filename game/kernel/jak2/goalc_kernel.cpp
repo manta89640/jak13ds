@@ -34,6 +34,7 @@
 
 #include "game/kernel/common/goalc_runtime.h"
 #include "game/kernel/common/kperf.h"
+#include "game/kernel/common/stack_watch.h"
 #include "game/kernel/jak1/goalc_kernel.h"
 #include "game/kernel/jak2/kscheme.h"
 
@@ -251,6 +252,28 @@ u64 dead_on_return_entry(void*) {
   call_return_from_thread_dead(result);
 }
 
+std::string watch_run_name(u32 type, u32 thread_name) {
+  return fmt::format("{}/{}", symbol_name_cstr(*Ptr<Type>(type)->symbol),
+                     symbol_name_cstr(*Ptr<Symbol4<u32>>(thread_name)));
+}
+
+//! stack_watch.h: after a run of thread returned to the kernel
+void watch_run(u64 thread) {
+  if (!stack_watch::on()) {
+    return;
+  }
+  if (!stack_watch::configured()) {
+    const u32 base = intern_from_c("*dram-stack*")->value();
+    if (!base) {
+      return;
+    }
+    // DPROCESS_STACK_SIZE and PROCESS_STACK_SIZE (gkernel-h.gc)
+    stack_watch::configure({base + 0x8000, 0x8000, 0x4000, &watch_run_name});
+  }
+  const u32 t = (u32)thread;
+  stack_watch::after_run(word(t + THREAD_STACK_TOP), word(word(t + THREAD_PROCESS) - 4), word(t));
+}
+
 u32 stack_copy_size(u32 stack_top, u32 sp) {
   // the native code copies 8 bytes at a time, from stack-top down to (and including) sp.
   return (stack_top - sp + 7) & ~7u;
@@ -282,6 +305,7 @@ u64 goalc_k_reset_and_call(u64 thread, u32 func) {
     ASSERT_NOT_REACHED();
   }
   g_kernel_frame = kf.prev;
+  watch_run(thread);
   return kf.value;
 }
 
@@ -401,6 +425,7 @@ u64 goalc_k_thread_resume(u64 thread_arg) {
     ASSERT_NOT_REACHED();
   }
   g_kernel_frame = kf.prev;
+  watch_run(thread_arg);
   return kf.value;
 }
 
