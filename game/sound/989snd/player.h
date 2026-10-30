@@ -123,6 +123,8 @@ class Player {
                        SFXUserData* dst);
 
  private:
+  u32 mReverbMode{0};
+  s16 mReverbDepthL{0}, mReverbDepthR{0};
 #ifdef __3DS__
   TickLock mTickLock;
   std::atomic<bool> mMixing{false};  // Synth::Mix running (outside the lock)

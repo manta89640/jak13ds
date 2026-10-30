@@ -776,6 +776,10 @@ void Player::SetReverbMode(u32 mode) {
   }
 #endif
   std::scoped_lock lock(mTickLock);
+  if (mode != mReverbMode) {
+    mReverbMode = mode;
+    lg::info("sound: SPU2 effect mode {}", mode);
+  }
   mSynth.SetReverbMode(mode);
 }
 
@@ -786,6 +790,11 @@ void Player::SetReverbDepth(s16 left, s16 right) {
   }
 #endif
   std::scoped_lock lock(mTickLock);
+  if (left != mReverbDepthL || right != mReverbDepthR) {
+    mReverbDepthL = left;
+    mReverbDepthR = right;
+    lg::info("sound: SPU2 effect depth {} {}", left, right);
+  }
   mSynth.SetReverbDepth(left, right);
 }
 
