@@ -1450,7 +1450,7 @@ struct CollideNative {
   bool verify = false;
   bool in_goal = false;  // verify: the GOAL version is running
   u64 checks = 0, mismatches = 0;
-  u64 kind_checks[5] = {};  // verify: per native (see collide_native_verify's kind)
+  u64 kind_checks[7] = {};  // verify: per native (see collide_native_verify's kind)
   bool overflow_logged = false;
 };
 CollideNative g_collide_native;
@@ -1474,19 +1474,21 @@ bool collide_native_on() {
   return c.on == 1 && !c.in_goal;
 }
 
-//! vftoi0 as goalc's C does it (gc_cvtt): truncate, saturate, NaN gives 0
+//! vftoi0 as goalc's C does it (gc_cvtt): truncate, saturate, NaN gives INT32_MIN
 inline s32 cvtt(float f) {
 #if defined(__arm__) && defined(__ARM_FP)
-  // VFP's round-towards-zero conversion saturates and gives 0 for NaN (as gc_cvtt on ARM): the
-  // compares below would each wait for the VFP pipeline in VMRS
+  // VFP's round-towards-zero conversion saturates (NaN gives 0, fixed on the bits as gc_cvtt
+  // does): the compares below would each wait for the VFP pipeline in VMRS
   float r;
   __asm__("vcvt.s32.f32 %0, %1" : "=t"(r) : "t"(f));
   s32 i;
   memcpy(&i, &r, 4);
-  return i;
+  u32 b;
+  memcpy(&b, &f, 4);
+  return (b << 1) > 0xff000000u ? INT32_MIN : i;
 #endif
   if (f != f) {
-    return 0;
+    return INT32_MIN;
   }
   if (f >= 2147483648.0f) {
     return INT32_MAX;
@@ -1769,8 +1771,9 @@ void collide_native_verify(const char* what,
   if ((c.checks & 0x3fff) == 0) {
     const auto n = [&](int i) { return (unsigned long long)c.kind_checks[i]; };
     printf("collide native verify: %llu checks (bsp box %llu, bsp y-probe %llu, fg box %llu, "
-           "fg line-sphere %llu, fg y-probe %llu), %llu mismatches\n",
-           (unsigned long long)c.checks, n(0), n(1), n(2), n(3), n(4),
+           "fg line-sphere %llu, fg y-probe %llu, line-sphere %llu, background %llu), %llu "
+           "mismatches\n",
+           (unsigned long long)c.checks, n(0), n(1), n(2), n(3), n(4), n(5), n(6),
            (unsigned long long)c.mismatches);
   }
 }
@@ -2019,6 +2022,384 @@ u64 pc_fill_from_foreground_using_line_sphere_impl(const NativeArgs& args) {
 u64 pc_fill_from_foreground_using_y_probe_impl(const NativeArgs& args) {
   return pc_fill_from_foreground_impl<kFgYProbe>(args);
 }
+
+// ---------------------------------------------------------------------------
+// fill-from-background and fill-using-line-sphere (collide-cache methods 21 and 14)
+// ---------------------------------------------------------------------------
+// The GOAL code of fill-from-background calls a find function per level (the line-sphere query:
+// collide-probe-make-list) and then 4 functions per fragment, all of them natives already.
+// pc-fill-from-background does the same calls directly. fill-using-line-sphere's setup of the
+// rotated box (VU0 code in goalc's C) is done here with the same float operations in the same
+// order, one operation per statement as goalc's lane-wise helpers do them.
+
+//! a function GOAL code calls through a symbol or a method table: the native, if it is the one
+u64 call_native_or_goal(u32 fn, const u32* stub, const NativeImpl& impl, const u64 a[8],
+                        const NativeArgs& caller) {
+  if (fn == *stub) {
+    return impl.fn(NativeArgs{a, caller.pp, caller.st, caller.stack});
+  }
+  return native_call_goal(fn, a, caller);
+}
+
+//! (reset! (-> *perf-stats* data 14)) or (read! ...) around a level's probe walk (method 11 or 12
+//! of perf-stat: `nothing` without the debug segment)
+void perf_stat_14(u32 method_offset, const NativeArgs& args) {
+  static const u32 perf_stats_sym = sym_addr("*perf-stats*");
+  static const u32 perf_stat_sym = sym_addr("perf-stat");
+  static const u32 nothing_sym = sym_addr("nothing");
+  const u32 method = gload<u32>(sym_value(perf_stat_sym) + method_offset);
+  if (method == sym_value(nothing_sym)) {
+    return;
+  }
+  const u64 a[8] = {sym_value(perf_stats_sym) + 0x2e4};
+  native_call_goal(method, a, args);
+}
+
+//! collide-probe-make-list (collide-probe.gc) for one level (its collide-upload-vu0 does nothing)
+void probe_make_list(u32 level, u32 list, const NativeArgs& args) {
+  static const u32 s_tree_tie = sym_addr("drawable-tree-instance-tie");
+  static const u32 s_tree_cfrag = sym_addr("drawable-tree-collide-fragment");
+  static const u32 s_probe_tie = sym_addr("collide-probe-instance-tie");
+  static const u32 s_probe_node = sym_addr("collide-probe-node");
+  static const u32* tie_stub = native_stub_slot("collide-probe-instance-tie");
+  static const u32* node_stub = native_stub_slot("collide-probe-node");
+  const u32 trees = gload<u32>(gload<u32>(level + 44) + 36);
+  for (s64 i = 0; i < gload<s16>(trees + 2); i++) {
+    const u32 tree = gload<u32>(trees + 28 + 4 * (u32)i);
+    const u32 type = gload<u32>(tree - 4);
+    const s16 len = gload<s16>(tree + 2);
+    if (type == sym_value(s_tree_tie)) {
+      if (len >= 1) {
+        const u32 arr = gload<u32>(tree + 28);
+        const u64 a[8] = {arr + 32, (u32)(s32)gload<s16>(arr + 2), list, 1 < len ? 1u : 0u};
+        call_native_or_goal(sym_value(s_probe_tie), tie_stub, collide_probe_instance_tie, a, args);
+      }
+    } else if (type == sym_value(s_tree_cfrag)) {
+      if (1 < len) {
+        const u32 arr = gload<u32>(tree + 28);
+        const u64 a[8] = {arr + 32, (u32)(s32)gload<s16>(arr + 2), list};
+        call_native_or_goal(sym_value(s_probe_node), node_stub, collide_probe_node, a, args);
+      }
+    }
+  }
+}
+
+/*!
+ * fill-from-background (cache find import). false (nothing written) when find isn't one of the
+ * bsp-header methods collide-ray, collide-with-box or collide-y-probe: the GOAL code runs then.
+ */
+bool bg_fill(const NativeArgs& args, u32 cache, u32 find, u32 import) {
+  static const u32 s_bsp_header = sym_addr("bsp-header");
+  static const u32 s_collide_cache = sym_addr("collide-cache");
+  static const u32 s_level = sym_addr("*level*");
+  static const u32 s_collide_list = sym_addr("*collide-list*");
+  static const u32 s_collide_stats = sym_addr("*collide-stats*");
+  static const u32 s_active = sym_addr("active");
+  static const u32 s_backgnd = sym_addr("*collide-shape-prim-backgnd*");
+  static const u32* stub_26 = native_stub_slot("(method 26 collide-cache)");
+  static const u32* stub_27 = native_stub_slot("(method 27 collide-cache)");
+  static const u32* stub_28 = native_stub_slot("(method 28 collide-cache)");
+  static const u32* stub_29 = native_stub_slot("(method 29 collide-cache)");
+  static const u32* stub_32 = native_stub_slot("(method 32 collide-cache)");
+  const u32 bsp_type = sym_value(s_bsp_header);
+  int kind;
+  if (find == gload<u32>(bsp_type + 68)) {
+    kind = 0;
+  } else if (find == gload<u32>(bsp_type + 60)) {
+    kind = 1;
+  } else if (find == gload<u32>(bsp_type + 64)) {
+    kind = 2;
+  } else {
+    return false;
+  }
+  const u32 list = sym_value(s_collide_list);
+  gstore<s32>(list, 0);
+  const u32 levels = sym_value(s_level);
+  for (s64 i = 0; i < gload<s32>(levels); i++) {
+    const u32 level = levels + 0x60 + 0xa30 * (u32)i;
+    if (gload<u32>(level + 16) != s_active) {
+      continue;
+    }
+    if (kind == 0) {
+      perf_stat_14(60, args);
+      probe_make_list(level, list, args);
+      perf_stat_14(64, args);
+    } else {
+      // (method collide-with-box / collide-y-probe bsp-header): the count, then the tree walk
+      const u32 stats = sym_value(s_collide_stats);
+      gstore<u32>(stats + 28, gload<u32>(stats + 28) + 1);
+      const u64 a[8] = {gload<u32>(level + 44), 0, list};
+      const NativeArgs walk_args{a, args.pp, args.st, args.stack};
+      if (kind == 1) {
+        bsp_tree_walk<false>(walk_args);
+      } else {
+        bsp_tree_walk<true>(walk_args);
+      }
+    }
+  }
+  if (gload<s32>(list) <= 0) {
+    return true;
+  }
+  const u32 cc_type = sym_value(s_collide_cache);
+  const u32 mode = (import == gload<u32>(cc_type + 120) || import == gload<u32>(cc_type + 128))
+                       ? 0
+                       : (import == gload<u32>(cc_type + 124) ? 1 : 2);
+  const NativeImpl& import_impl = import == *stub_26   ? method_26_collide_cache
+                                  : import == *stub_27 ? method_27_collide_cache
+                                  : import == *stub_28 ? method_28_collide_cache
+                                                       : method_29_collide_cache;
+  const u32* import_stub = import == *stub_26   ? stub_26
+                           : import == *stub_27 ? stub_27
+                           : import == *stub_28 ? stub_28
+                                                : stub_29;
+  for (s64 i = 0; i < gload<s32>(list); i++) {
+    const u32 item = list + 16 + 16 * (u32)i;
+    {
+      const u64 a[8] = {cache, gload<u32>(item), gload<u32>(item + 4), mode};
+      if (pc_collide_frag_may_hit_impl(NativeArgs{a, args.pp, args.st, args.stack}) == args.st) {
+        continue;
+      }
+    }
+    {
+      const u32 mesh = gload<u32>(item);
+      const u64 a[8] = {gload<u32>(mesh), gload<u8>(mesh + 25), gload<u8>(mesh + 24)};
+      pc_upload_collide_frag_impl(NativeArgs{a, args.pp, args.st, args.stack});
+    }
+    {
+      const u64 a[8] = {cache, gload<u32>(item), gload<u32>(item + 4), 0};
+      call_native_or_goal(gload<u32>(gload<u32>(cache - 4) + 144), stub_32,
+                          method_32_collide_cache, a, args);
+    }
+    {
+      const u64 a[8] = {cache, gload<u32>(item)};
+      call_native_or_goal(import, import_stub, import_impl, a, args);
+    }
+  }
+  const s32 num_tris = gload<s32>(cache);
+  if (num_tris > 0) {
+    // the background as one prim
+    const u32 prim = cache + 108;
+    const u32 bg = sym_value(s_backgnd);
+    gstore<u16>(prim + 42, (u16)num_tris);
+    gstore<u32>(prim + 36, bg);
+    gstore<s32>(cache + 4, 1);
+    gstore<u16>(prim + 40, 0);
+    gstore<u32>(prim + 32, cache);
+    gcopy_q(prim, bg + 12);
+    gcopy_q(prim + 16, bg + 28);
+  }
+  return true;
+}
+
+inline float vmin(float a, float b) {
+  return a < b ? a : b;
+}
+inline float vmax(float a, float b) {
+  return a > b ? a : b;
+}
+
+//! a line of x, y or z over #x1000 (pabsw, pcgtw, ppach, dsll 16 of its ftoi): else the GOAL
+//! code fills a bounding box instead
+bool line_sphere_is_long(u32 move) {
+  float v3[4];
+  gload_q(v3, move);
+  bool is_long = false;
+  for (int i = 0; i < 3; i++) {
+    const s32 t = cvtt(v3[i]);
+    is_long |= (t <= 0 ? (s32)(0u - (u32)t) : t) > 0x1000;
+  }
+  return is_long;
+}
+
+//! fill-using-line-sphere's rotated box (a long line) in *collide-work* and the cache's header
+void line_sphere_setup(const NativeArgs& args) {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+  static const u32 collide_work_sym = sym_addr("*collide-work*");
+  const u32 cache = (u32)args.a[0];
+  float v1[4], v3[4];
+  gload_q(v1, (u32)args.a[1]);
+  gload_q(v3, (u32)args.a[2]);
+  const float rad = u2f((u32)args.a[3]);
+  const u32 cw = gload<u32>(collide_work_sym);
+  gstore<u32>(cache + 8, (u32)args.a[6]);  // ignore-mask
+  float v8[4], v2[4], v4[4], v5[4];
+  for (int i = 0; i < 4; i++) {
+    v8[i] = v3[i] * v3[i];
+    v2[i] = v1[i] + v3[i];
+  }
+  v8[0] = v8[0] + v8[1];
+  gstore<s32>(cache, 0);  // num-tris
+  for (int i = 0; i < 4; i++) {
+    v4[i] = vmin(v1[i], v2[i]);
+    v5[i] = vmax(v1[i], v2[i]);
+  }
+  gstore<s32>(cache + 4, 0);  // num-prims
+  gstore<u64>(cache + 92, args.a[4]);  // collide-with
+  gstore<u32>(cache + 12, (u32)args.a[5]);  // proc
+  v8[0] = v8[0] + v8[2];
+  float v10[4] = {0.f - rad, 0.f - rad, 0.f - rad, 0.f};
+  for (int i = 0; i < 3; i++) {
+    v4[i] = v4[i] - rad;
+    v5[i] = v5[i] + rad;
+  }
+  float q = 1.f / std::sqrt(v8[0]);
+  float v11[4] = {0.f + rad, 0.f + rad, 0.f + rad, 0.f};
+  const s32 box_min[4] = {cvtt(v10[0]), cvtt(v10[1]), cvtt(v10[2]), cvtt(v10[3])};
+  gstore<Vec4i>(cw + 16, Vec4i{{box_min[0], box_min[1], box_min[2], box_min[3]}});
+  gstore_q(cache + 28, v4);
+  gstore_q(cache + 44, v5);
+  gstore<Vec4i>(cache + 60, Vec4i{{cvtt(v4[0]), cvtt(v4[1]), cvtt(v4[2]), cvtt(v4[3])}});
+  gstore<Vec4i>(cache + 76, Vec4i{{cvtt(v5[0]), cvtt(v5[1]), cvtt(v5[2]), cvtt(v5[3])}});
+  float v13[4] = {0.f, 0.f, 0.f, 1.f};
+  v8[0] = 0.f + q;
+  float v12[4];
+  for (int i = 0; i < 4; i++) {
+    v12[i] = v3[i] * v8[0];
+  }
+  q = 1.f / v8[0];
+  float v22[4], v23[4];
+  for (int i = 0; i < 4; i++) {
+    v22[i] = v12[i] * v12[i];
+    v23[i] = vmax(v12[i], 0.f - v12[i]);
+  }
+  v22[0] = v22[0] + v22[1];
+  v8[0] = 0.f + q;
+  // a0-7: the bits of |x| and |y| of vf12
+  if (f2u(v23[0]) == 0 && f2u(v23[1]) == 0) {
+    v13[0] = 0.f + v12[2];
+  } else {
+    v13[0] = 0.f - v12[1];
+    q = 1.f / std::sqrt(v22[0]);
+    v13[1] = 0.f + v12[0];
+    v13[0] = v13[0] * q;
+    v13[1] = v13[1] * q;
+  }
+  // outer product: vf14 = vf12.yzx * vf13.zxy - vf13.yzx * vf12.zxy (w: x * x - x * x)
+  float v14[4];
+  {
+    const float a[4] = {v12[1] * v13[2], v12[2] * v13[0], v12[0] * v13[1], v12[0] * v13[0]};
+    const float b[4] = {v13[1] * v12[2], v13[2] * v12[0], v13[0] * v12[1], v13[0] * v12[0]};
+    for (int i = 0; i < 4; i++) {
+      v14[i] = a[i] - b[i];
+    }
+  }
+  v11[0] = v11[0] + v8[0];
+  gstore<Vec4i>(cw + 32, Vec4i{{cvtt(v11[0]), cvtt(v11[1]), cvtt(v11[2]), cvtt(v11[3])}});
+  float v17[4] = {v12[0], 0.f, 0.f, 1.f};
+  float v18[4] = {0.f, v13[1], 0.f, 1.f};
+  float v19[4] = {0.f, 0.f, v14[2], 1.f};
+  v17[1] = v17[1] + v13[0];
+  v18[0] = v18[0] + v12[1];
+  v19[0] = v19[0] + v12[2];
+  v17[2] = v17[2] + v14[0];
+  v18[2] = v18[2] + v14[1];
+  v19[1] = v19[1] + v13[2];
+  float v20[4];
+  for (int i = 0; i < 4; i++) {
+    float acc = v17[i] * v1[0];
+    const float y = v18[i] * v1[1];
+    acc = acc + y;
+    const float z = v19[i] * v1[2];
+    acc = acc + z;
+    v20[i] = (i == 3 ? 1.f : 0.f) - acc;
+  }
+  gstore_q(cw + 48, v17);
+  gstore_q(cw + 64, v18);
+  gstore_q(cw + 80, v19);
+  gstore_q(cw + 96, v20);
+}
+
+//! the rest of fill-using-line-sphere: background, water, foreground
+void line_sphere_fill(const NativeArgs& args) {
+  const u32 cache = (u32)args.a[0];
+  const u64 kind = args.a[4];
+  line_sphere_setup(args);
+  if (kind & 1) {
+    static const u32 s_bsp_header = sym_addr("bsp-header");
+    static const u32 s_collide_cache = sym_addr("collide-cache");
+    const u32 find = gload<u32>(sym_value(s_bsp_header) + 68);
+    const u32 import = gload<u32>(sym_value(s_collide_cache) + 124);
+    bg_fill(args, cache, find, import);
+  }
+  if (kind & 0x20) {
+    const u64 a[8] = {cache, gload<u32>((u32)args.a[5] + 152)};
+    native_call_goal(gload<u32>(gload<u32>(cache - 4) + 116), a, args);
+  }
+  if (kind & 0x1e) {
+    const u64 a[8] = {cache};
+    const NativeArgs fg_args{a, args.pp, args.st, args.stack};
+    if (pc_fill_from_foreground_impl<kFgLineSphere>(fg_args) == args.st) {
+      native_call_goal(gload<u32>(gload<u32>(cache - 4) + 108), a, args);
+    }
+  }
+}
+
+/*!
+ * (pc-fill-using-line-sphere cache start move radius collide-with proc ignore-pat) -> symbol
+ * (method fill-using-line-sphere collide-cache). #f for a short line (a bounding box fill) or
+ * when off: the GOAL code runs.
+ */
+u64 pc_fill_using_line_sphere_impl(const NativeArgs& args) {
+  if (!collide_native_on() || !line_sphere_is_long((u32)args.a[2])) {
+    return args.st;
+  }
+#ifndef __3DS__
+  if (g_collide_native.verify) {
+    static const u32 s_collide_work = sym_addr("*collide-work*");
+    static const u32 s_collide_list = sym_addr("*collide-list*");
+    static const u32 s_perf_stats = sym_addr("*perf-stats*");
+    static const u32 fffuls_sym = sym_addr("*pc-fffuls-work*");
+    const u32 cache = (u32)args.a[0];
+    collide_native_verify("pc-fill-using-line-sphere", 5, args, 72,
+                          {{cache - 4, (u32)gload<u16>(gload<u32>(cache - 4) + 8)},
+                           {sym_value(s_collide_work), 112},
+                           {sym_value(s_collide_list), 16 + 16 * 256},
+                           {sym_value(s_perf_stats) + 0x2e4, 48},
+                           {sym_value(fffuls_sym), 64}},
+                          [&] { line_sphere_fill(args); });
+    return args.st + 8;
+  }
+#endif
+  line_sphere_fill(args);
+  return args.st + 8;
+}
+
+/*!
+ * (pc-fill-from-background cache find import) -> symbol
+ * (method fill-from-background collide-cache). #f for other find functions or when off.
+ */
+u64 pc_fill_from_background_impl(const NativeArgs& args) {
+  if (!collide_native_on()) {
+    return args.st;
+  }
+  static const u32 s_bsp_header = sym_addr("bsp-header");
+  const u32 find = (u32)args.a[1];
+  const u32 bsp_type = sym_value(s_bsp_header);
+  if (find != gload<u32>(bsp_type + 68) && find != gload<u32>(bsp_type + 60) &&
+      find != gload<u32>(bsp_type + 64)) {
+    return args.st;
+  }
+#ifndef __3DS__
+  if (g_collide_native.verify) {
+    static const u32 s_collide_list = sym_addr("*collide-list*");
+    static const u32 s_collide_stats = sym_addr("*collide-stats*");
+    static const u32 s_perf_stats = sym_addr("*perf-stats*");
+    const u32 cache = (u32)args.a[0];
+    collide_native_verify(
+        "pc-fill-from-background", 6, args, 100,
+        {{cache - 4, (u32)gload<u16>(gload<u32>(cache - 4) + 8)},
+         {sym_value(s_collide_list), 16 + 16 * 256},
+         {sym_value(s_collide_stats), 32},
+         {sym_value(s_perf_stats) + 0x2e4, 48}},
+        [&] { bg_fill(args, cache, find, (u32)args.a[2]); });
+    return args.st + 8;
+  }
+#endif
+  bg_fill(args, (u32)args.a[0], find, (u32)args.a[2]);
+  return args.st + 8;
+}
 }  // namespace
 
 // scratch: the two vectors, then moving-sphere-triangle-intersect's (called directly)
@@ -2058,6 +2439,10 @@ const NativeImpl pc_fill_from_foreground_using_line_sphere =
     MIPS2C_NATIVE_IMPL_GOAL(pc_fill_from_foreground_using_line_sphere_impl, NATIVE_CALLS_GOAL);
 const NativeImpl pc_fill_from_foreground_using_y_probe =
     MIPS2C_NATIVE_IMPL_GOAL(pc_fill_from_foreground_using_y_probe_impl, NATIVE_CALLS_GOAL);
+const NativeImpl pc_fill_from_background =
+    MIPS2C_NATIVE_IMPL_GOAL(pc_fill_from_background_impl, NATIVE_CALLS_GOAL);
+const NativeImpl pc_fill_using_line_sphere =
+    MIPS2C_NATIVE_IMPL_GOAL(pc_fill_using_line_sphere_impl, NATIVE_CALLS_GOAL);
 // GOAL code calls it directly (def-mips2c in main-collide.gc on the 3DS)
 const NativeImpl instance_sphere_box_intersect =
     MIPS2C_NATIVE_IMPL_GOAL(instance_sphere_box_intersect_impl, 0);
@@ -2083,6 +2468,10 @@ void link() {
   gLinkedFunctionTable.reg("pc-fill-from-foreground-using-y-probe",
                            native::pc_fill_from_foreground_using_y_probe.as_exec, 64,
                            &native::pc_fill_from_foreground_using_y_probe);
+  gLinkedFunctionTable.reg("pc-fill-from-background", native::pc_fill_from_background.as_exec, 64,
+                           &native::pc_fill_from_background);
+  gLinkedFunctionTable.reg("pc-fill-using-line-sphere", native::pc_fill_using_line_sphere.as_exec,
+                           64, &native::pc_fill_using_line_sphere);
 }
 }  // namespace Mips2C::jak1::pc_collide_frag_may_hit
 

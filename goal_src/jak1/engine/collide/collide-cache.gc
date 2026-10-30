@@ -106,9 +106,18 @@
 (#when TARGET_3DS
   (def-mips2c pc-collide-frag-may-hit? (function collide-cache collide-frag-mesh basic int symbol)))
 
+;; og:preserve-this 3DS: fill-from-background and fill-using-line-sphere in C++
+;; (native_collide_cache.cpp, the same results). #f: the GOAL code runs.
+(#when TARGET_3DS
+  (def-mips2c pc-fill-from-background (function collide-cache function function symbol))
+  (def-mips2c pc-fill-using-line-sphere
+              (function collide-cache vector vector float collide-kind process-drawable pat-surface symbol)))
+
 (defmethod fill-from-background ((obj collide-cache) (bsp-find-mesh-func (function bsp-header int collide-list none)) (import-mesh-func (function collide-cache object none)))
   "This terrible function fills the collide cache with background tris from a bounding box."
   (local-vars (a0-4 int) (a0-6 int))
+  (#when TARGET_3DS
+    (if (pc-fill-from-background obj bsp-find-mesh-func import-mesh-func) (return 0)))
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
   ;; Step 1: Build Collide List
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -482,6 +491,8 @@
 
 (defmethod fill-using-line-sphere ((obj collide-cache) (arg0 vector) (arg1 vector) (arg2 float) (arg3 collide-kind) (arg4 process-drawable) (arg5 pat-surface))
   (local-vars (zero uint128) (a0-2 uint128) (a0-3 uint128) (a0-7 int) (t0-1 uint128) (t0-2 uint128))
+  (#when TARGET_3DS
+    (if (pc-fill-using-line-sphere obj arg0 arg1 arg2 arg3 arg4 arg5) (return 0)))
   (rlet ((acc :class vf)
          (Q :class vf)
          (vf0 :class vf)
