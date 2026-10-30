@@ -132,7 +132,7 @@ struct CtrLevelData {
   float lod_switch_error(size_t g) const {
     // (a morph group's near data: within its far-plane)
     if (g < group_mid.size() && group_mid[g] > 0) {
-      return lod_groups[g].dist * lod_floor_k;
+      return std::max(lod_groups[g].dist * lod_floor_k, lod_min_e);
     }
     return std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
   }

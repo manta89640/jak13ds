@@ -704,7 +704,10 @@ geometry 0 only, unmorphed).
 - **Runtime.** A morph group is drawn with its near version while the distance to its sphere is
   under the mid-plane x k, its mid version under the far-plane x k, else its far version (k:
   detail_scale, x 1 .. 0.5 with auto_detail's tie relief); no hysteresis: every version draws the
-  same morphed surface. Each visible chunk's rows get the PS2's factor of their instance, f =
+  same morphed surface, but not the same vertex colors (geometry 2's and 3's own), so the title's
+  flight keeps titlemove's rule: no version switch nearer than kTitleLodMin (the near version, still
+  morphing, up to 100 m; host title start: 0 switches in view nearer than 99.9 m, 334 in the first
+  2 s without it), and a group drawn far for want of its data stays far while in view (1 s). Each visible chunk's rows get the PS2's factor of their instance, f =
   clamp((d - start x k) x rlength / k, 0, 1), d the distance to its sphere minus its radius. The
   PS2 takes the view depth instead (a turn of the camera changes it); the distance is never less, so
   an instance off the screen's center morphs as if up to 1 / cos(its angle) farther (the edges of

@@ -9715,9 +9715,15 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (morph_on && lev.group_mid[g] > 0) {
         // the PS2's rule (c3l::ExtMorph), by the distance to the group's sphere (no instance is
         // nearer): the near version within the mid-plane, the mid version within the far-plane.
-        // Every version draws the instances' morphed surface: no hysteresis
+        // Every version draws the instances' morphed surface: no hysteresis. The versions' own
+        // vertex colors still differ: the title's flight (titlemove) switches none nearer than
+        // kTitleLodMin, the near version up to there
         const float dv = std::sqrt(dx2(lg.bsphere)) - lg.bsphere[3];
-        u8 v = !(kd > 0) ? 2 : dv < lev.group_mid[g] * kd ? 0 : dv < lg.dist * kd ? 1 : 2;
+        const float tmin = lev.lod_min_e * k;
+        u8 v = !(kd > 0)                                            ? 2
+               : dv < std::max(lev.group_mid[g] * kd, tmin)         ? 0
+               : dv < std::max(lg.dist * kd, tmin)                  ? 1
+                                                                    : 2;
 #ifndef __3DS__
         if (morph_ab == 1 && (rs.frame_idx & 1)) {
           v = 0;  // (host A/B: every group's near version, the surface the same)
@@ -9731,6 +9737,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             ok = lev.unit_ok[gu[j]] == 1;
             late = late || lev.unit_ok[gu[j]] == 3;
           }
+          bool keep_far = (st & 4) != 0 && !g_screen_black;
           if (!ok) {
             v = 2;
             if (late) {
@@ -9743,11 +9750,33 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               const bool seen = sphere_in_view(cam, lg.bsphere);
               m_late_in_view += seen;
               late_view += seen;
+              if (!keep_far && !g_screen_black && seen) {
+                keep_far = true;
+                lev.lod_hold_since[g] = (u32)rs.frame_idx;
+              }
+            }
+          } else if (keep_far) {
+            // drawn far in view for want of its data: kept so while in view (at most kHoldFrames),
+            // a switch at a morph factor short of 1 would show
+            if (sphere_in_view(cam, lg.bsphere) &&
+                (u32)rs.frame_idx - lev.lod_hold_since[g] < kHoldFrames) {
+              v = 2;
+              held_groups++;
+            } else {
+              keep_far = false;
             }
           }
+          st = (u8)(st & ~4) | (keep_far ? 4 : 0);
+        }
+        if (pop_log_on() && (st & 2) && ((st & 1) ? ((st & 8) ? 1 : 0) : 2) != v &&
+            sphere_in_view(cam, lg.bsphere)) {
+          (v < 2 ? g_pop.lod_up : g_pop.lod_down)++;
+          lg::info("[popL] f={} {} g{} morph {} -> {} d={:.1f} mid={:.1f} far={:.1f} r={:.1f}",
+                   rs.frame_idx, lev.name, g, (st & 1) ? ((st & 8) ? 1 : 0) : 2, v, dv / 4096.f,
+                   lev.group_mid[g] / 4096.f, lg.dist / 4096.f, lg.bsphere[3] / 4096.f);
         }
         lod_q[g] = q_now;
-        st = (u8)(2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0));
+        st = (u8)((st & 4) | 2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0));
         near += v < 2;
         continue;
       }
