@@ -275,6 +275,7 @@ set(RUNTIME_SOURCE
         mips2c/jak2_functions/native2_merc_request.cpp
         mips2c/jak2_functions/native2_sky_light.cpp
         mips2c/jak2_functions/native2_traffic.cpp
+        mips2c/jak2_functions/native2_actors.cpp
         mips2c/jak2_functions/ocean_vu0.cpp
         mips2c/jak2_functions/ocean.cpp
         mips2c/jak2_functions/ripple.cpp
