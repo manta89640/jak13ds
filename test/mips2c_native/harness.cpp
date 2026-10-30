@@ -340,6 +340,11 @@ u64 dispatch_call(u32 f, const u64* args, u64 pp) {
   return dispatch(f, args, pp);
 }
 
+std::string g_name_prefix;
+void set_mips2c_name_prefix(const std::string& prefix) {
+  g_name_prefix = prefix;
+}
+
 void register_mips2c(const std::string& name,
                      u64 (*exec)(void*),
                      u32 stack_size,
@@ -789,7 +794,7 @@ void LinkedFunctionTable::reg(const std::string& name,
                               u64 (*exec)(void*),
                               u32 goal_stack_size,
                               const NativeImpl* native) {
-  harness::register_mips2c(name, exec, goal_stack_size, native);
+  harness::register_mips2c(harness::g_name_prefix + name, exec, goal_stack_size, native);
 }
 
 u32 LinkedFunctionTable::get(const std::string& name) {

@@ -99,6 +99,21 @@ LINK(shadow_add_double_edges)
 #undef LINK
 }  // namespace Mips2C::jak1
 
+// Jak 2 mips2c functions, registered as "jak2:<name>"
+namespace Mips2C::jak2 {
+#define LINK(ns)      \
+  namespace ns {      \
+  extern void link(); \
+  }
+LINK(init_ocean_far_regs)
+LINK(draw_large_polygon_ocean)
+LINK(render_ocean_quad)
+LINK(method_14_ocean)
+LINK(method_15_ocean)
+LINK(method_16_ocean)
+#undef LINK
+}  // namespace Mips2C::jak2
+
 namespace tests {
 void register_all();
 }
@@ -250,6 +265,15 @@ int main(int argc, char** argv) {
   pc_new_bones_mtx_calc::link();
   harness::use_goalc_reference("pc-new-bones-mtx-calc", "new-bones-mtx-calc-asm");
   harness::bind_goalc_reference("new-bones-mtx-calc-asm");
+
+  harness::set_mips2c_name_prefix("jak2:");
+  Mips2C::jak2::init_ocean_far_regs::link();
+  Mips2C::jak2::draw_large_polygon_ocean::link();
+  Mips2C::jak2::render_ocean_quad::link();
+  Mips2C::jak2::method_14_ocean::link();
+  Mips2C::jak2::method_15_ocean::link();
+  Mips2C::jak2::method_16_ocean::link();
+  harness::set_mips2c_name_prefix("");
 
   tests::register_all();
   const int failed = harness::run_tests(opt);

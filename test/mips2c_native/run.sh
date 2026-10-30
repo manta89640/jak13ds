@@ -43,7 +43,12 @@ MIPS2C_SRCS=(collide_func collide_cache collide_probe collide_mesh collide_edge_
 HARNESS_SRCS=("$HERE"/*.cpp)
 NATIVE_SRCS=("$M2C"/native_*.cpp)
 # Jak 2 natives with a test (objects named j2_*)
-NATIVE_SRCS+=("$ROOT/game/mips2c/jak2_functions/native_sp_spawn.cpp")
+NATIVE_SRCS+=("$ROOT/game/mips2c/jak2_functions/native_sp_spawn.cpp"
+             "$ROOT/game/mips2c/jak2_functions/native_ocean.cpp"
+             "$ROOT/game/mips2c/jak2_functions/native2_sky.cpp")
+# Jak 2 mips2c functions with a test (objects named m2c_j2_*; sky: the clippers the ocean calls)
+M2C_J2="$ROOT/game/mips2c/jak2_functions"
+MIPS2C_J2_SRCS=(ocean ocean_vu0 sky)
 
 COMMON_FLAGS=(-std=gnu++20 -I"$ROOT" -I"$ROOT/third-party/fmt/include" -DFMT_HEADER_ONLY=1
               -fsigned-char -Wall -Wno-unused-variable -Wno-unused-but-set-variable
@@ -82,6 +87,16 @@ build() {
     local obj="$dir/m2c_$name.o"
     objs+=("$obj")
     if [[ ! -f "$obj" || "$src" -nt "$obj" || "$M2C/native_functions.h" -nt "$obj" ||
+          "$ROOT/game/mips2c/mips2c_private.h" -nt "$obj" ]]; then
+      "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" ${M2C_EXTRA_FLAGS:-} -c "$src" -o "$obj" &
+      pids+=($!)
+    fi
+  done
+  for name in "${MIPS2C_J2_SRCS[@]}"; do
+    local src="$M2C_J2/$name.cpp"
+    local obj="$dir/m2c_j2_$name.o"
+    objs+=("$obj")
+    if [[ ! -f "$obj" || "$src" -nt "$obj" || "$M2C_J2/native_functions.h" -nt "$obj" ||
           "$ROOT/game/mips2c/mips2c_private.h" -nt "$obj" ]]; then
       "$cxx" "${COMMON_FLAGS[@]}" "${flags[@]}" ${M2C_EXTRA_FLAGS:-} -c "$src" -o "$obj" &
       pids+=($!)
