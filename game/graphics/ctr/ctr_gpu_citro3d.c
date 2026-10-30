@@ -148,15 +148,22 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 /* (AI-assisted) gxCmdQueueWait's timeout is in system ticks (268 MHz), not nanoseconds */
 #define GX_WAIT_MS(ms) ((s64)(ms) * (s64)(SYSCLOCK_ARM11 / 1000))
 
-/* (AI-assisted) CPU data cache flushes for memory the GPU reads, through the GSP service. Not
- * svcFlushProcessDataCache directly: it isn't in gk.rsf's SystemCallAccess, and on hardware a
- * system call the exheader doesn't allow raises an exception instead of returning an error (the
- * render thread died at its first flush: black top screen, the game hung after a few seconds).
- * Azahar doesn't check the list. Any thread. */
-static u32 s_flush_requests; /* (AI-assisted, micro-gpu) statistics: GSP flush requests */
+/* (AI-assisted) CPU data cache flushes for memory the GPU reads: the kernel call GSP's
+ * FlushDataCache makes for us, made here without the IPC to GSP (gk.rsf allows it, as the
+ * InvalidateProcessDataCache the vblank callback makes). GSP stays the fallback. Any thread. */
+static u32 s_flush_requests; /* statistics: GSP flush requests */
+static u32 s_flush_svcs;     /* statistics: kernel flushes */
+static int s_kernel_flush = 1;
 static void cache_flush_now(const void* addr, u32 size) {
   if (!size) {
     return;
+  }
+  if (s_kernel_flush) {
+    if (R_SUCCEEDED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)addr, size))) {
+      s_flush_svcs++;
+      return;
+    }
+    s_kernel_flush = 0;
   }
   s_flush_requests++;
   GSPGPU_FlushDataCache(addr, size);
@@ -2734,8 +2741,8 @@ static float overlap2_wait_frame(u32 id) {
 }
 
 /* modes 1 and 2: the rest of the frame's command list closed as C3Di_SplitFrame does (the
- * framebuffer flush and the early depth clear after its draws) and cleaned from the CPU cache:
- * s_fin_list, s_fin_words (0: nothing left) */
+ * framebuffer flush and the early depth clear after its draws): s_fin_list, s_fin_words (0:
+ * nothing left). GSP cleans it from the CPU cache when it takes it (GX_CMDLIST_FLUSH). */
 static void pipeline_close_list(void) {
   s_fin_list = NULL;
   s_fin_words = 0;
@@ -2749,7 +2756,6 @@ static void pipeline_close_list(void) {
     GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
   }
   GPUCMD_Split(&s_fin_list, &s_fin_words);
-  cache_flush_now(s_fin_list, s_fin_words * 4);
 }
 
 /* ---------------- (AI-assisted) config.ini sky_last / skip_clear ----------------
@@ -3002,13 +3008,14 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
 
 /* Immediate draws copy their vertices into g.vbuf. The GPU reads them only when the frame's GX
  * queue runs (C3D_FrameEnd; C3D_FrameBegin stopped the queue, so command list splits wait in it
- * until then), so one cache flush of what this frame wrote is enough. Each flush is an IPC to the
- * GSP service: one per draw cost tens of microseconds each on hardware (free in Azahar). */
+ * until then), so one cache flush of what this frame wrote is enough. */
 /* (AI-assisted) The render thread's flushes for this frame's GPU work (texture updates: sky,
  * clouds, ocean, eyes; blend shape vertices; the fog ramp) wait here until the frame's commands
  * go to the GPU (flush_vbuf, at every submission point), merged where the ranges touch. */
 #define DEFER_FLUSH_MAX 48
 #define DEFER_GAP (8u * 1024u) /* (AI-assisted, micro-gpu) see flush_vbuf */
+/* with kernel flushes a call costs less than cleaning a gap's lines: only near ranges merge */
+#define DEFER_GAP_KERNEL 1024u
 /* (AI-assisted, micro-mg) with MICRO_FLUSHGAP. Azahar charges ~16.7k ticks (62 us) of the render
  * thread for each GSP flush request (an IPC; tens of microseconds on hardware too), and the level's
  * time of day colors alone flushed 20-35 ranges per frame (Snowy, Misty). Cleaning the cache lines
@@ -3027,11 +3034,13 @@ void ctr_gpu_set_defer_flush(int on) {
   g_defer_flush = on;
 }
 
+static u32 s_defer_added, s_defer_flushed; /* statistics: ranges deferred, flushed at submits */
 static void cache_flush_frame(const void* addr, u32 size) {
   if (!g.in_frame || !g_defer_flush) {
     cache_flush_now(addr, size);
     return;
   }
+  s_defer_added++;
   const u32 a = (u32)addr, e = a + size;
   for (int i = 0; i < s_defer.n; i++) {
     if (a <= s_defer.end[i] && e >= s_defer.start[i]) {
@@ -3044,7 +3053,7 @@ static void cache_flush_frame(const void* addr, u32 size) {
     /* (AI-assisted, micro-mg) MICRO_FLUSHGAP: into a range of the linear heap less than DEFER_GAP2
      * away, rather than a request of its own now */
     const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
-    if ((s_micro & MICRO_FLUSHGAP) && a >= lin0 && e <= lin1) {
+    if (!s_kernel_flush && (s_micro & MICRO_FLUSHGAP) && a >= lin0 && e <= lin1) {
       for (int i = 0; i < s_defer.n; i++) {
         if (s_defer.start[i] >= lin0 && s_defer.end[i] <= lin1 && a <= s_defer.end[i] + DEFER_GAP2 &&
             e + DEFER_GAP2 >= s_defer.start[i]) {
@@ -3067,9 +3076,8 @@ static void flush_vbuf(void) {
     cache_flush_frame(g.vbuf + g.vbuf_flushed, (u32)(g.vbuf_used - g.vbuf_flushed));
     g.vbuf_flushed = g.vbuf_used;
   }
-  /* (AI-assisted, micro-gpu) ranges of the linear heap less than DEFER_GAP apart in one request:
-   * each request is an IPC to the GSP (tens of microseconds on hardware), cleaning a few more
-   * cache lines between them costs far less (the gap's lines: at most 256) */
+  /* (AI-assisted, micro-gpu) ranges of the linear heap less than the gap apart in one flush: a GSP
+   * request is an IPC, cleaning a few more cache lines between them costs far less */
   if (s_defer.n > 1 && (s_micro & MICRO_FLUSHMERGE)) {
     for (int i = 1; i < s_defer.n; i++) { /* by start (insertion sort, at most 48) */
       const u32 a = s_defer.start[i], e = s_defer.end[i];
@@ -3083,7 +3091,9 @@ static void flush_vbuf(void) {
       s_defer.end[j + 1] = e;
     }
     const u32 lin0 = __ctru_linear_heap, lin1 = __ctru_linear_heap + __ctru_linear_heap_size;
-    const u32 gap = (s_micro & MICRO_FLUSHGAP) ? DEFER_GAP2 : DEFER_GAP;
+    const u32 gap = s_kernel_flush                ? DEFER_GAP_KERNEL
+                    : (s_micro & MICRO_FLUSHGAP) ? DEFER_GAP2
+                                                 : DEFER_GAP;
     int k = 0;
     for (int i = 1; i < s_defer.n; i++) {
       const u32 a = s_defer.start[i], e = s_defer.end[i];
@@ -3100,6 +3110,7 @@ static void flush_vbuf(void) {
   for (int i = 0; i < s_defer.n; i++) {
     cache_flush_now((const void*)s_defer.start[i], s_defer.end[i] - s_defer.start[i]);
   }
+  s_defer_flushed += (u32)s_defer.n;
   s_defer.n = 0;
 }
 
@@ -3328,7 +3339,7 @@ void ctr_gpu_frame_end(void) {
     g.cur.gpu_wait_ms += overlap2_room(5); /* the list, the transfer(s) and the fence */
     if (s_fin_words) {
       gt_note_submit();
-      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, 0);
+      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, GX_CMDLIST_FLUSH);
     }
     s_buf_frame[s_k] = (u32)g.frame_no;
     s_end_mode2 = 1;
@@ -3346,7 +3357,7 @@ void ctr_gpu_frame_end(void) {
     C3D_FrameDrawOn(g.top);
     gt_note_submit();
     if (ov2 == 1 && s_fin_words) {
-      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, 0); /* cleaned before the wait */
+      GX_ProcessCommandList(s_fin_list, s_fin_words * 4, GX_CMDLIST_FLUSH);
     }
     s_buf_frame[s_k] = 0;
     s_end_mode2 = 0;
@@ -7480,12 +7491,17 @@ int ctr_gpu_micro_line(char* out, int size) {
     return 0;
   }
   const double f = frames;
-  /* all threads' flush requests (textures made by the loader thread too); MICRO_TEXSTATE */
+  /* all threads' flushes (textures made by the loader thread too); MICRO_TEXSTATE */
   const int l = snprintf(out, size,
-                         "[ctr] gpu micro: GSP cache flush requests %.1f per frame; %.1f draw "
+                         "[ctr] gpu micro: cache flushes %.1f per frame by the kernel, %.1f GSP "
+                         "requests (%.1f merged ranges at submits of %.1f deferred); %.1f draw "
                          "states only bound their texture",
-                         s_flush_requests / f, s_state_fast / f);
+                         s_flush_svcs / f, s_flush_requests / f, s_defer_flushed / f,
+                         s_defer_added / f, s_state_fast / f);
   s_flush_requests = 0;
+  s_flush_svcs = 0;
+  s_defer_added = 0;
+  s_defer_flushed = 0;
   s_state_fast = 0;
   frame0 = (u32)g.frame_no;
   return l < size ? l : size - 1;
