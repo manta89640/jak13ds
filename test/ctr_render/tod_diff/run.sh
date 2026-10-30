@@ -11,7 +11,9 @@
 #   --trace FILE a weight trace (lines: frame, then per palette r g b alpha; host CTR_TOD_LOG=2
 #                lines converted by the same layout); default citadel_weights.txt (Citadel, 875
 #                frames of the host game) plus random traces (tod_trace.py; one with palettes
-#                1-3 moving every frame, the others rarely: light palettes)
+#                1-3 moving every frame, the others rarely: light palettes) and a lightning trace
+#                (Rock Village's flashes and flames, no day steps: neu also checked against the PC's
+#                blend of every frame)
 #   --arm        also the ARM instructions per level draw of both versions (devkitARM build run
 #                under Unicorn, like test/mips2c_native/unicorn; ARMBENCH_PYTHON: a python3 with
 #                unicorn)
@@ -79,6 +81,8 @@ else
   done
   python3 "$HERE/tod_trace.py" 4 400 lights 0x0e > "$OUT/random-lights.txt"
   TRACES+=("$OUT/random-lights.txt")
+  python3 "$HERE/tod_trace.py" 5 900 lightning > "$OUT/lightning.txt"
+  TRACES+=("$OUT/lightning.txt")
 fi
 status=0
 for tr in "${TRACES[@]}"; do
@@ -88,6 +92,9 @@ for tr in "${TRACES[@]}"; do
       "$OUT/tod_diff" "$LEVEL" "$tr" 100000 5 $step $opts || status=1
     done
   done
+  if [ "$(basename "$tr")" = lightning.txt ]; then
+    "$OUT/tod_diff" "$LEVEL" "$tr" 100000 5 0 exact || status=1
+  fi
 done
 
 if [ "$ARM" = 1 ]; then

@@ -4,7 +4,9 @@
 //   tod_diff <level.tod> <trace> <frames> <stride> <pulse_step> [vis] [keep] [title] [title-half]
 // stride: every stride-th chunk drawn; vis: runs shown and hidden at random (both versions alike);
 // keep: an older file's table (no alpha, the vertices keep theirs); title: the title screen (no
-// hold, fast day); title-half: title for the first half of the frames only.
+// hold, fast day); title-half: title for the first half of the frames only; exact: every vertex of
+// neu's chunks also against the PC's blend of the frame's weights (a trace without day steps:
+// lightning, lamps).
 // Built for ARM too (tod_arm.cpp): ARM instructions per level draw of one version.
 #include <cstdio>
 
@@ -62,10 +64,40 @@ enum : int {
   kKeep = 64,
   kTitle = 128,
   kTitleHalf = 256,
+  kExact = 512,
 };
 
+// vertices of the chunks drawn whose rgb isn't the PC's blend (interp_time_of_day_slow) of w
+static u32 inexact_vertices(const Dump& d, const std::vector<u32>& vis,
+                            const std::vector<std::vector<c3l::Vertex>>& vb, const u8 w[8][4]) {
+  u32 bad = 0;
+  for (u32 ci : vis) {
+    for (const auto& v : vb[ci]) {
+      const u32 idx = (u16)v.pad;
+      if (idx >= d.nc + d.nm) {
+        continue;
+      }
+      const u32 col = idx < d.nc ? idx : d.muls[idx - d.nc].color;
+      bool same = true;
+      for (int c = 0; c < 3; c++) {
+        u32 s = 0;
+        for (int p = 0; p < 8; p++) {
+          s += w[p][c] * d.colors[col].rgba[p][c];
+        }
+        u32 x = std::min<u32>(255, s >> 6);
+        if (idx >= d.nc) {
+          x = std::min<u32>(255, (x * d.muls[idx - d.nc].mul[c] + 64) >> 7);
+        }
+        same = same && v.rgba[c] == x;
+      }
+      bad += !same;
+    }
+  }
+  return bad;
+}
+
 // out: [0] vertices drawn, [1] frames that differ, [2] vertices that differ, [3] / [4] vertices
-// written by ref / neu
+// written by ref / neu, [5] frames with neu's colors not the blend (exact), [6] such vertices
 extern "C" int sim_main(const u8* dump, const u32* trace, int nframes, int mode, int stride,
                         int step, u32* out) {
   Dump d = parse_dump(dump);
@@ -98,7 +130,7 @@ extern "C" int sim_main(const u8* dump, const u32* trace, int nframes, int mode,
   if (mode & kRunNeu) {
     n.setup(d, vis, step);
   }
-  u32 bad_frames = 0, bad_verts = 0;
+  u32 bad_frames = 0, bad_verts = 0, off_frames = 0, off_verts = 0;
   for (int f = 0; f < nframes; f++) {
     const u32* row = trace + f * 33;
     u8 w[8][4];
@@ -130,7 +162,14 @@ extern "C" int sim_main(const u8* dump, const u32* trace, int nframes, int mode,
       bad_frames += bad != 0;
       bad_verts += bad;
     }
+    if ((mode & (kRunNeu | kExact)) == (kRunNeu | kExact)) {
+      const u32 off = inexact_vertices(d, vis, n.vb, w);
+      off_frames += off != 0;
+      off_verts += off;
+    }
   }
+  out[5] = off_frames;
+  out[6] = off_verts;
   out[1] = bad_frames;
   out[2] = bad_verts;
   out[3] = (u32)r.verts;
@@ -175,6 +214,7 @@ int main(int argc, char** argv) {
             : a == "keep"       ? kKeep
             : a == "title"      ? kTitle
             : a == "title-half" ? kTitleHalf
+            : a == "exact"      ? kExact
                                 : 0;
     opts += " " + a;
   }
@@ -186,9 +226,13 @@ int main(int argc, char** argv) {
     return s ? s + 1 : p;
   };
   printf("%s %s: %d frames, stride %s, pulse step %s%s: %u vertices drawn; %u frames, %u vertices "
-         "differ; written ref %u, neu %u\n",
+         "differ; written ref %u, neu %u",
          base(argv[1]), base(argv[2]), nframes, argv[4], argv[5], opts.c_str(), out[0], out[1],
          out[2], out[3], out[4]);
-  return out[1] ? 1 : 0;
+  if (mode & kExact) {
+    printf("; neu not the blend: %u frames, %u vertices", out[5], out[6]);
+  }
+  printf("\n");
+  return out[1] || out[5] ? 1 : 0;
 }
 #endif

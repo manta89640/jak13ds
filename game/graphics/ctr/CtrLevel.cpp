@@ -2367,6 +2367,32 @@ void tod_refresh_all(CtrLevelData::Tod& t) {
 // colors is bright in it is then at most a color unit off. no_hold (the title screen): every
 // group every move. Returns 2: day palettes taken, 1: only light or held palettes, 0: nothing.
 constexpr u64 kTodPulseSettle = 8;  // (AI-assisted, citadel)
+// palette p's new weights move by more than one 64th from the table's (the day steps by one)
+inline bool tod_weight_jump(const CtrLevelData::Tod& t, int p, const u8 w[3], u8 wa) {
+  bool jump = (t.apal_mask >> p & 1) && std::abs((int)wa - (int)t.wa[p]) > 1;
+  for (int c = 0; c < 3; c++) {
+    jump = jump || std::abs((int)w[c] - (int)t.target_w[p][c]) > 1;
+  }
+  return jump;
+}
+// Whether the game's weights jump in a day palette since the table's last blend (a lightning
+// flash: draw_level's heavy frames in Jak II)
+bool tod_day_jump(const CtrLevelData::Tod& t, const CtrBackgroundCamera& cam) {
+  if (!t.blended_valid) {
+    return true;
+  }
+  u8 w[8][3];
+  tod_weights(cam, w);
+  u8 wa[8];
+  tod_alpha_weights(cam, wa);
+  for (u32 m = t.track_mask & ~t.light_mask; m; m &= m - 1) {
+    const int p = __builtin_ctz(m);
+    if (tod_weight_jump(t, p, w[p], wa[p])) {
+      return true;
+    }
+  }
+  return false;
+}
 int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
                u64 frame, bool no_hold) {
   u8 w[8][3];
@@ -2414,6 +2440,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
     }
   }
   u32 changed = 0, taken = 0, day = 0;
+  bool day_jump = !t.blended_valid;
   for (u32 m = t.track_mask; m; m &= m - 1) {
     const int p = __builtin_ctz(m);
     const bool a_moved = (t.apal_mask >> p & 1) && t.wa[p] != wa[p];
@@ -2421,6 +2448,9 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
       continue;
     }
     changed |= 1u << p;
+    if (!(t.light_mask >> p & 1) && tod_weight_jump(t, p, w[p], wa[p])) {
+      day_jump = true;
+    }
     if (pulse_step > 0 && t.blended_valid && !(t.light_mask >> p & 1) && pulsing(p) &&
         frame - t.pulse_move[p] < kTodPulseSettle) {
       int diff = (t.apal_mask >> p & 1) ? std::abs((int)wa[p] - (int)t.held_wa[p]) : 0;
@@ -2485,7 +2515,9 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   tod_make_act(t, t.target_w, &t.act);
   if (day) {
     t.dver = (t.dver + 1) & 0xffffffu;
-    t.day_move_frame = frame;  // (AI-assisted, perfv2) the spread of its rewrites (TodPass)
+    // (AI-assisted, perfv2) the spread of its rewrites (TodPass): a step of the day only; a jump
+    // (lightning) is drawn at once
+    t.day_move_frame = day_jump ? 0 : frame;
     auto& seen = tod_seen();
     std::lock_guard<std::mutex> lk(seen.lock);
     auto& wl = seen.by_level[level];
@@ -8893,8 +8925,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // 25, the title flight over the slums (ctysluma, 0 day moves) 5.1-5.3 ms of time of day per
     // frame, build 22-27 ms, 40-66 of 150 frames at 3 vblanks (the game thread waiting 5-10 ms
     // per frame for the render thread). A flicker at 10 Hz instead of 15 looks the same.
+    // Jak 1 leaves frames out on the title only: in play (village2 draws 3x its table every frame)
+    // every frame's weights are drawn. Jak II never leaves out a frame where a day palette jumps
+    // (a lightning flash: a new weight every frame).
     const u64 tod_period = g_game_version == GameVersion::Jak2 ? 3 : 2;
-    const bool tod_skip = m_tod_heavy && (rs.frame_idx % tod_period) != 0;
+    const bool tod_skip =
+        m_tod_heavy && (rs.frame_idx % tod_period) != 0 &&
+        (g_game_version == GameVersion::Jak2 ? !tod_day_jump(*lev.tod, cam) : title_on);
     m_tod_skipped += tod_skip;
     if (!tod_skip) {
       // (AI-assisted, levellod) no pulse hold on the title screen (its fast day: todlag)
