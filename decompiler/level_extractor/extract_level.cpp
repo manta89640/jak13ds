@@ -161,7 +161,8 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
                                               const TextureDB& tex_db,
                                               const std::string& dgo_name,
                                               const Config& config,
-                                              tfrag3::Level& level_data) {
+                                              tfrag3::Level& level_data,
+                                              std::vector<u8>* tie_morph) {
   auto hacks = config.hacks;
   auto bsp_rec = get_bsp_file(db.obj_files_by_dgo.at(dgo_name), dgo_name);
   if (!bsp_rec) {
@@ -229,7 +230,8 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
       auto as_tie_tree = dynamic_cast<level_tools::DrawableTreeInstanceTie*>(draw_tree.get());
       ASSERT(as_tie_tree);
       extract_tie(as_tie_tree, fmt::format("{}-{}-tie", dgo_name, i++),
-                  bsp_header.texture_remap_table, tex_db, level_data, false, db.version());
+                  bsp_header.texture_remap_table, tex_db, level_data, false, db.version(),
+                  tie_morph);
     } else if (draw_tree->my_type() == "drawable-tree-instance-shrub") {
       auto as_shrub_tree =
           dynamic_cast<level_tools::shrub_types::DrawableTreeInstanceShrub*>(draw_tree.get());
@@ -366,7 +368,13 @@ void extract_from_level(const ObjectFileDB& db,
   add_all_textures_from_level(level_data, dgo_name, tex_db);
 
   // the bsp header file data
-  auto bsp_header = extract_bsp_from_level(db, tex_db, dgo_name, config, level_data);
+  std::vector<u8> tie_morph;
+  auto bsp_header = extract_bsp_from_level(db, tex_db, dgo_name, config, level_data, &tie_morph);
+  // the PS2's tie geomorph data, for the 3DS level converter (common/custom_data/TieMorph.h)
+  if (!tie_morph.empty()) {
+    file_util::write_binary_file(output_folder / fmt::format("{}.tiemorph", level_data.level_name),
+                                 tie_morph.data(), tie_morph.size());
+  }
   extract_art_groups_from_level(db, tex_db, bsp_header.texture_remap_table, dgo_name, level_data,
                                 art_group_data);
 

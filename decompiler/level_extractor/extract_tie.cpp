@@ -2,6 +2,7 @@
 
 #include <array>
 
+#include "common/custom_data/TieMorph.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 #include "common/util/string_util.h"
@@ -251,6 +252,9 @@ struct TieProtoVertex {
   // then you look up the color in the _proto_'s interpolated color palette.
   u32 color_index_index;
   math::Vector<u8, 4> envmap_tint_color;
+  // an interpolated vertex: the PS2 draws it at pos + morph factor * morph (TieMorph.h)
+  bool moves = false;
+  math::Vector<float, 3> morph = math::Vector<float, 3>::zero();
 };
 
 // a tie fragment is made up of strips. Each strip has a single adgif info, and vertices
@@ -370,6 +374,7 @@ struct TieProtoInfo {
   std::optional<AdgifInfo> envmap_adgif;
   std::vector<TimeOfDayColor> time_of_day_colors;  // c++ type for time of day data
   std::vector<TieFrag> frags;                      // the fragments of the prototype
+  math::Vector4f dists, rdists;                    // the level of detail distances (TieMorph.h)
 };
 
 /*!
@@ -643,6 +648,10 @@ void update_proto_info(std::vector<TieProtoInfo>* out,
     info.name = proto.name;
     // wind "stiffness" nonzero value means it has the wind effect
     info.stiffness = proto.stiffness;
+    for (int k = 0; k < 4; k++) {
+      info.dists[k] = proto.dists.data[k];
+      info.rdists[k] = proto.rdists.data[k];
+    }
     math::Vector<u8, 4> jak2_tint_color;
     if (proto.has_envmap_shader) {
       std::vector<u8> adgif;
@@ -1785,6 +1794,8 @@ void emulate_tie_instance_program(std::vector<TieProtoInfo>& protos, GameVersion
 
           TieProtoVertex vertex_info;
           vertex_info.color_index_index = clr_idx_idx;
+          vertex_info.moves = true;
+          vertex_info.morph = math::Vector<float, 3>(vert_pos.x(), vert_pos.y(), vert_pos.z());
           // random guess
           vert_pos = xy_offs;
           vertex_info.pos.x() = vert_pos.x();
@@ -1819,6 +1830,8 @@ void emulate_tie_instance_program(std::vector<TieProtoInfo>& protos, GameVersion
 
           TieProtoVertex vertex_info;
           vertex_info.color_index_index = clr_idx_idx;
+          vertex_info.moves = true;
+          vertex_info.morph = math::Vector<float, 3>(vert_pos.x(), vert_pos.y(), vert_pos.z());
           // random guess
           vert_pos = xy_offs;
           vertex_info.pos.x() = vert_pos.x();
@@ -2544,7 +2557,10 @@ void add_vertices_and_static_draw(tfrag3::TieTree& tree,
                                   tfrag3::Level& lev,
                                   const TextureDB& tdb,
                                   const std::vector<TieProtoInfo>& protos,
-                                  GameVersion version) {
+                                  GameVersion version,
+                                  std::vector<tie_morph::Vertex>* morph_verts,
+                                  std::vector<tie_morph::Inst>* morph_insts,
+                                  std::vector<tie_morph::Inst>* morph_wind) {
   // our current approach for static draws is just to flatten to giant mesh, except for wind stuff.
   // this map sorts these two types of draws by texture.
   std::unordered_map<s32, std::vector<u32>> static_draws_by_tex;
@@ -2602,6 +2618,8 @@ void add_vertices_and_static_draw(tfrag3::TieTree& tree,
               {vert.pos.x(), vert.pos.y(), vert.pos.z(), vert.tex.x(), vert.tex.y(), vert.nrm.x(),
                vert.nrm.y(), vert.nrm.z(), vert.envmap_tint_color.x(), vert.envmap_tint_color.y(),
                vert.envmap_tint_color.z(), vert.envmap_tint_color.w()});
+          morph_verts->push_back(
+              {{vert.morph.x(), vert.morph.y(), vert.morph.z()}, vert.moves ? 1u : 0u});
           // TODO: check if this means anything.
           // ASSERT(vert.tex.z() == 1.);
         }
@@ -2618,6 +2636,9 @@ void add_vertices_and_static_draw(tfrag3::TieTree& tree,
       // so the non-instanced models don't get a C++ renderer instance ID
       u32 wind_instance_idx = tree.wind_instance_info.size();
       u32 matrix_idx = tree.packed_vertices.matrices.size();
+      (using_wind ? morph_wind : morph_insts)
+          ->push_back({{inst.bsphere.x(), inst.bsphere.y(), inst.bsphere.z(), inst.bsphere.w()},
+                       (u32)proto_idx});
       if (using_wind) {
         tfrag3::TieWindInstance wind_instance_info;
         wind_instance_info.wind_idx = inst.wind_index;   // which wind value to apply in the table
@@ -2743,13 +2764,58 @@ void merge_groups(std::vector<tfrag3::PackedTieVertices::MatrixGroup>& grps) {
   std::swap(result, grps);
 }
 
+/*!
+ * Append a tie tree's TieMorph.h records (the first call writes the file header).
+ */
+void add_tie_morph(std::vector<u8>* out,
+                   int geo,
+                   size_t tree_idx,
+                   const std::vector<TieProtoInfo>& protos,
+                   const std::vector<tie_morph::Vertex>& verts,
+                   const std::vector<tie_morph::Inst>& insts,
+                   const std::vector<tie_morph::Inst>& wind) {
+  auto put = [&](const void* p, size_t n) {
+    out->insert(out->end(), (const u8*)p, (const u8*)p + n);
+  };
+  if (out->empty()) {
+    tie_morph::FileHeader fh{};
+    memcpy(fh.magic, tie_morph::kMagic, 4);
+    fh.version = tie_morph::kVersion;
+    put(&fh, sizeof(fh));
+  }
+  tie_morph::FileHeader fh;
+  memcpy(&fh, out->data(), sizeof(fh));
+  fh.tree_count++;
+  memcpy(out->data(), &fh, sizeof(fh));
+  tie_morph::TreeHeader th{};
+  th.geo = geo;
+  th.tree = (u32)tree_idx;
+  th.vertex_count = (u32)verts.size();
+  th.proto_count = (u32)protos.size();
+  th.inst_count = (u32)insts.size();
+  th.wind_count = (u32)wind.size();
+  put(&th, sizeof(th));
+  put(verts.data(), verts.size() * sizeof(tie_morph::Vertex));
+  for (const auto& p : protos) {
+    tie_morph::Proto tp{};
+    for (int k = 0; k < 4; k++) {
+      tp.dists[k] = p.dists[k];
+      tp.rdists[k] = p.rdists[k];
+    }
+    put(&tp, sizeof(tp));
+  }
+  put(insts.data(), insts.size() * sizeof(tie_morph::Inst));
+  put(wind.data(), wind.size() * sizeof(tie_morph::Inst));
+}
+
 void extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
                  const std::string& debug_name,
                  const std::vector<level_tools::TextureRemap>& tex_map,
                  const TextureDB& tex_db,
                  tfrag3::Level& out,
                  bool dump_level,
-                 GameVersion version) {
+                 GameVersion version,
+                 std::vector<u8>* morph_out) {
   for (int geo = 0; geo < GEOM_MAX; ++geo) {
     // as far as I can tell, this one has bad colors
     if (debug_name == "PRECD.DGO-2-tie" && geo == 3) {
@@ -2820,7 +2886,14 @@ void extract_tie(const level_tools::DrawableTreeInstanceTie* tree,
     auto full_palette = make_big_palette(info);
 
     // create draws
-    add_vertices_and_static_draw(this_tree, out, tex_db, info, version);
+    std::vector<tie_morph::Vertex> morph_verts;
+    std::vector<tie_morph::Inst> morph_insts, morph_wind;
+    add_vertices_and_static_draw(this_tree, out, tex_db, info, version, &morph_verts, &morph_insts,
+                                 &morph_wind);
+    if (morph_out) {
+      add_tie_morph(morph_out, geo, out.tie_trees[geo].size(), info, morph_verts, morph_insts,
+                    morph_wind);
+    }
 
     // remap vis indices and merge
     for (auto& draw : this_tree.static_draws) {
