@@ -447,6 +447,59 @@ struct CullCondPlane {
 static_assert(sizeof(CullCondPlane) == 16);
 
 /*!
+ * The PS2's tie geomorph (common/custom_data/TieMorph.h). A morph group (TieLodGroup with
+ * group_mid > 0) has three versions: RunLod kRunLodNear (geometry 0), kRunLodMid (geometry 2), both
+ * in near chunks, and kRunLodFar (geometry 3). Each of its instances has a morph factor per band,
+ * f = clamp((d - start) * rlen, 0, 1) with d its sphere's view depth minus its radius: band 1 moves
+ * geometry 0's vertices onto geometry 2's surface by the mid-plane, band 2 geometry 2's onto
+ * geometry 3's by the far-plane. Every version draws the same surface: a group may show the near
+ * version while the PS2 would draw geometry 2 or 3, and the mid version once no instance is nearer
+ * than the mid-plane, the far version beyond the far-plane.
+ * A near chunk with moving vertices (MorphChunk) has a MorphVertex per vertex (at records_offset,
+ * the runtime's mesh tail as the envmapped tie normals'); the vertex at morph factor f of its row is
+ * at pos + f * delta. ExtHeader::size >= kExtHeaderMorphSize, then this at ext_offset +
+ * kExtHeaderV24Size.
+ */
+constexpr uint32_t kExtHeaderMorphSize = 160;
+struct ExtMorph {
+  uint32_t inst_count;        // MorphInst[]
+  uint32_t insts_offset;      // absolute
+  uint32_t chunk_count;       // MorphChunk[]
+  uint32_t chunks_offset;     // absolute
+  uint32_t row_count;         // uint32_t[]: inst | band << 30 (band 1, 2), the chunks' rows
+  uint32_t rows_offset;       // absolute
+  uint32_t group_mid_offset;  // float[ExtHeader::lod_group_count]: mid-plane (game units), 0: none
+  uint32_t draw_rows_size;    // uint8_t[]: per morph chunk draw n, then the n rows its vertices use
+  uint32_t draw_rows_offset;  // absolute
+  uint32_t pad;
+};
+static_assert(sizeof(ExtMorph) == kExtHeaderMorphSize - kExtHeaderV24Size);
+struct MorphInst {
+  float c[3];      // world (game units)
+  float r;
+  float start[2];  // band 1: near-plane, band 2: mid-plane (game units)
+  float rlen[2];   // rlength-near, rlength-mid (1 / game units)
+};
+static_assert(sizeof(MorphInst) == 32);
+// the morph shader's rows: row 0 is zero (vertices that don't move)
+constexpr uint32_t kMorphRows = 80;
+struct MorphChunk {
+  uint32_t chunk;
+  uint32_t vertex_count;    // its Chunk::vertex_count
+  uint32_t row_first;       // ExtMorph rows [row_first, row_first + row_count): rows 1..row_count
+  uint32_t row_count;
+  uint32_t draw_rows;       // its draws' lists in ExtMorph's draw rows, from here in draw order
+  uint32_t records_offset;  // MorphVertex[vertex_count] (absolute)
+};
+static_assert(sizeof(MorphChunk) == 24);
+struct MorphVertex {
+  int16_t delta[3];  // in the chunk's quantized units
+  uint8_t row;       // 0: doesn't move
+  uint8_t pad;
+};
+static_assert(sizeof(MorphVertex) == 8);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the
@@ -483,7 +536,7 @@ struct TieLodGroup {
   float dist;        // the near version up to this distance of the sphere (game units)
 };
 static_assert(sizeof(TieLodGroup) == 20);
-constexpr uint8_t kRunLodAlways = 0, kRunLodNear = 1, kRunLodFar = 2;
+constexpr uint8_t kRunLodAlways = 0, kRunLodNear = 1, kRunLodFar = 2, kRunLodMid = 3;
 struct RunLod {
   uint16_t group;  // TieLodGroup index (0xffff with kRunLodAlways)
   uint8_t lod;     // kRunLod*

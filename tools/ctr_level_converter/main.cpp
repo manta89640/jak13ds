@@ -17,6 +17,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/custom_data/Tfrag3Data.h"
@@ -63,6 +64,12 @@ struct Options {
   // geometry 0 only): no change of light on a surface at the switch (Converter::far_colors_from_near).
   // false: each geometry's own colors (the PS2's)
   bool tie_far_near_colors = true;
+  // the PS2's tie geomorph (<level>.tiemorph from the level extractor, in tie_morph_dir; "": next
+  // to the .fr3): geometry 2 as a third version and the morph of geometries 0 and 2 (c3l::ExtMorph).
+  // Jak II only with --tie-morph: at the PS2's distances Haven City needs ~7x the near data
+  bool tie_morph = true;
+  bool tie_morph_jak2 = false;
+  std::string tie_morph_dir;
   float tie_lod_budget_kb = -1.f;
   // smallest shape error worth a near version, as an angle (radians) at the larger of the group's
   // radius and tie_lod_view_m meters (0.002: half a pixel on the top screen)
@@ -261,6 +268,21 @@ struct SrcVertex {
   u8 has_nrm = 0;
   // a wind tie vertex's instance (Converter::wind_insts index), UINT32_MAX: none
   u32 wind = UINT32_MAX;
+  // a tie vertex the PS2 morphs: its instance (Converter::morph_insts), band (1, 2; 0: none) and
+  // world offset at morph factor 1
+  u32 minst = UINT32_MAX;
+  u8 mband = 0;
+  float mdelta[3] = {0, 0, 0};
+};
+
+// a near chunk vertex's morph (c3l::MorphVertex before its row): instance | band << 30 (0: doesn't
+// move), offset in the chunk's quantized units
+struct MorphRec {
+  u32 key = 0;
+  s16 d[3] = {0, 0, 0};
+  bool operator==(const MorphRec& o) const {
+    return key == o.key && d[0] == o.d[0] && d[1] == o.d[1] && d[2] == o.d[2];
+  }
 };
 
 // (AI-assisted) Vista meshes render UVs, vertex colors and time-of-day entries too.
@@ -836,9 +858,10 @@ struct Converter {
   }
 
   // bounding sphere radius of the triangles from `first` on
-  float tris_radius(size_t first) const {
+  float tris_radius(size_t first, size_t end = SIZE_MAX) const {
+    end = std::min(end, tris.size());
     float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
-    for (size_t i = first; i < tris.size(); i++) {
+    for (size_t i = first; i < end; i++) {
       for (u32 vi : tris[i].v) {
         const auto& v = verts[vi];
         const float p[3] = {v.x, v.y, v.z};
@@ -848,7 +871,7 @@ struct Converter {
         }
       }
     }
-    if (first >= tris.size()) {
+    if (first >= end) {
       return 0;
     }
     float dx = mx[0] - mn[0], dy = mx[1] - mn[1], dz = mx[2] - mn[2];
@@ -856,21 +879,22 @@ struct Converter {
   }
 
   size_t radius_hist[8] = {};
-  void mark_small(size_t first) {
-    const float r = tris_radius(first);
+  void mark_small(size_t first, size_t end = SIZE_MAX) {
+    end = std::min(end, tris.size());
+    const float r = tris_radius(first, end);
     {
       int b = 0;
       for (float lim = 2 * 4096.f; b < 7 && r >= lim; lim *= 2) {
         b++;
       }
-      radius_hist[b] += tris.size() - first;
+      radius_hist[b] += end - first;
     }
     u32 detail = r < opt.detail_radius * 4096.f ? 1 : (r < opt.medium_radius * 4096.f ? 2 : 0);
     if (detail) {
-      for (size_t i = first; i < tris.size(); i++) {
+      for (size_t i = first; i < end; i++) {
         tris[i].detail = detail;
       }
-      small_tris += tris.size() - first;
+      small_tris += end - first;
     }
   }
   size_t small_tris = 0;
@@ -1340,8 +1364,8 @@ struct Converter {
         if (t < tfrag0_end || c.lod == c3l::kRunLodAlways || c.lod_group == shell.lod_group) {
           return true;
         }
-        if ((versions[c.lod_group] |= (u8)(1u << c.lod)) ==
-            ((1u << c3l::kRunLodNear) | (1u << c3l::kRunLodFar))) {
+        const u8 vv = (versions[c.lod_group] |= (u8)(1u << c.lod));
+        if ((vv & (1u << c3l::kRunLodNear)) && (vv & (1u << c3l::kRunLodFar))) {
           return true;
         }
       }
@@ -1825,32 +1849,80 @@ struct Converter {
   // -1 without levels of detail (every group, as before v17), 0 the near geometry (only the
   // selected groups), 1 the far geometry (every group; the selected ones as their far version)
   u32 cur_tree = 0;
-  int cur_lod_slot = -1;
-  size_t lod_tris[2] = {0, 0};
-  // a group's triangles [first, end) were added: their LOD version and detail class (selected
-  // groups), else mark_small. Returns false for a group the near tree doesn't add.
-  bool lod_wanted(u64 key) const {
-    return cur_lod_slot != 0 || lod_group_of.count(key);
+  int cur_lod_slot = -1;  // (2: geometry 2, the mid version of the morph groups)
+  size_t lod_tris[3] = {0, 0, 0};
+  // the PS2's tie geomorph (Options::tie_morph): per group its mid-plane (0: not a morph group), the
+  // morphing instances (by tree << 32 | matrix) and the level's data
+  std::vector<float> lod_group_mid;
+  std::vector<c3l::MorphInst> morph_insts;
+  std::unordered_map<u64, u32> morph_inst_of;
+  const tie_lod::Morph* morph = nullptr;
+  size_t morph_moving[3] = {0, 0, 0};  // vertices by band (0: geometry 0 vertices of band 2)
+  size_t morph_unmatched = 0;          // geometry 0 vertices not found in geometry 2
+  bool morph_group(u64 key) const {
+    auto it = lod_group_of.find(key);
+    return it != lod_group_of.end() && it->second < lod_group_mid.size() &&
+           lod_group_mid[it->second] > 0;
   }
-  void lod_mark(u64 key, size_t first) {
+  // a group's triangles [first, end) were added: their LOD version and detail class (selected
+  // groups), else mark_small. Returns false for a group the near / mid tree doesn't add.
+  bool lod_wanted(u64 key) const {
+    return cur_lod_slot == 2 ? morph_group(key) : cur_lod_slot != 0 || lod_group_of.count(key);
+  }
+  void lod_mark(u64 key, size_t first, size_t end = SIZE_MAX) {
+    end = std::min(end, tris.size());
     auto it = cur_lod_slot >= 0 ? lod_group_of.find(key) : lod_group_of.end();
     if (it == lod_group_of.end()) {
-      mark_small(first);
+      mark_small(first, end);
       return;
     }
     const u32 detail = lod_group_detail[it->second];
     // (AI-assisted, streaming) v19: the near versions go to near chunks
-    const u8 stream = cur_lod_slot == 0 && opt.stream
+    const u8 stream = cur_lod_slot != 1 && opt.stream
                           ? (lod_group_core[it->second] ? (u8)c3l::kStreamCore : (u8)c3l::kStreamExtra)
                           : (u8)0;
-    for (size_t i = first; i < tris.size(); i++) {
-      tris[i].lod = cur_lod_slot == 0 ? c3l::kRunLodNear : c3l::kRunLodFar;
+    for (size_t i = first; i < end; i++) {
+      tris[i].lod = cur_lod_slot == 0   ? c3l::kRunLodNear
+                    : cur_lod_slot == 2 ? c3l::kRunLodMid
+                                        : c3l::kRunLodFar;
       tris[i].lod_group = it->second;
       tris[i].detail = detail;
       tris[i].stream = stream;
     }
-    small_tris += detail ? tris.size() - first : 0;
-    lod_tris[cur_lod_slot] += tris.size() - first;
+    small_tris += detail ? end - first : 0;
+    lod_tris[cur_lod_slot] += end - first;
+  }
+  // the PS2's geomorph: the trees whose static instances are groups of their own
+  // (tie_lod::instance_key), and the tree being added's unpacked vertices' matrices
+  std::set<u32> morph_trees;
+  std::vector<std::pair<u32, s32>> cur_src;
+  // the triangles [first, end) just added for the vis group with key lkey: by instance, each its
+  // own group's (those not selected: dropped from the near and mid trees, else mark_small)
+  void lod_mark_instances(u64 lkey, size_t first, u32 base) {
+    std::vector<std::pair<u64, SrcTri>> ts;
+    for (size_t i = first; i < tris.size(); i++) {
+      const u32 uv = tris[i].v[0] - base;
+      const s32 mat = uv < cur_src.size() ? cur_src[uv].second : -1;
+      ts.emplace_back(mat < 0 ? lkey : tie_lod::instance_key(cur_tree, (u32)mat), tris[i]);
+    }
+    std::stable_sort(ts.begin(), ts.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    tris.resize(first);
+    size_t i = 0;
+    while (i < ts.size()) {
+      size_t j = i;
+      while (j < ts.size() && ts[j].first == ts[i].first) {
+        j++;
+      }
+      if (lod_wanted(ts[i].first)) {
+        const size_t at = tris.size();
+        for (size_t k = i; k < j; k++) {
+          tris.push_back(ts[k].second);
+        }
+        lod_mark(ts[i].first, at, tris.size());
+      }
+      i = j;
+    }
   }
 
   // (AI-assisted, lod-light) far_colors_from_near's statistics: the far surface's color against
@@ -2153,6 +2225,100 @@ struct Converter {
     }
   }
 
+  // a packed tie vertex of a prototype, by its bytes (position and texture coordinates)
+  static std::string morph_key(u32 proto, const tfrag3::PackedTieVertices::Vertex& v) {
+    const float f[5] = {v.x, v.y, v.z, v.s, v.t};
+    std::string k((const char*)&proto, 4);
+    k.append((const char*)f, sizeof(f));
+    return k;
+  }
+
+  /*!
+   * The PS2's morph of the static instances' vertices of the tree being added (geometry 0 at slot
+   * 0, geometry 2 at slot 2; verts from base on are its unpacked vertices): geometry 0's moving
+   * vertices are band 1 (onto geometry 2's surface by the mid-plane); geometry 2's band 2 (onto
+   * geometry 3's by the far-plane), and so are the same vertices in geometry 0, where they are
+   * still at rest while the instance is nearer than the mid-plane.
+   */
+  void add_tie_morph(const tfrag3::TieTree& tree, u32 base) {
+    const int geo = cur_lod_slot == 0 ? 0 : 2;
+    const auto& mts = morph->trees[geo];
+    if (cur_tree >= mts.size() || !tie_lod::morph_matches(mts[cur_tree], tree)) {
+      return;
+    }
+    const auto& mt = mts[cur_tree];
+    std::unordered_map<std::string, const tie_morph::Vertex*> mid_moving;
+    const auto& trees2 = level->tie_trees[2];
+    if (geo == 0 && cur_tree < morph->trees[2].size() && cur_tree < trees2.size() &&
+        tie_lod::morph_matches(morph->trees[2][cur_tree], trees2[cur_tree])) {
+      const auto& t2 = trees2[cur_tree];
+      const auto& m2 = morph->trees[2][cur_tree];
+      for (const auto& grp : t2.packed_vertices.matrix_groups) {
+        if (grp.matrix_idx < 0) {
+          continue;
+        }
+        const u32 proto = m2.insts[grp.matrix_idx].proto;
+        for (u32 src = grp.start_vert; src < grp.end_vert; src++) {
+          const auto& mv = m2.verts[src];
+          if (mv.moves && (mv.morph[0] || mv.morph[1] || mv.morph[2])) {
+            mid_moving.emplace(morph_key(proto, t2.packed_vertices.vertices[src]), &mv);
+          }
+        }
+      }
+    }
+    std::vector<std::pair<u32, s32>> src;
+    tie_lod::unpacked_sources(tree, &src);
+    if (src.size() != tree.unpacked.vertices.size()) {
+      return;
+    }
+    for (size_t i = 0; i < src.size(); i++) {
+      const auto [pv, mat] = src[i];
+      if (mat < 0) {
+        continue;
+      }
+      const auto& inst = mt.insts[mat];
+      const auto& mv = mt.verts[pv];
+      const tie_morph::Vertex* m = nullptr;
+      u8 band = 0;
+      if (mv.moves && (mv.morph[0] || mv.morph[1] || mv.morph[2])) {
+        m = &mv;
+        band = geo == 0 ? 1 : 2;
+      } else if (geo == 0) {
+        auto it = mid_moving.find(morph_key(inst.proto, tree.packed_vertices.vertices[pv]));
+        if (it != mid_moving.end()) {
+          m = it->second;
+          band = 2;
+        }
+      }
+      if (!m) {
+        continue;
+      }
+      const u64 ikey = ((u64)cur_tree << 32) | (u32)mat;
+      auto [it, fresh] = morph_inst_of.emplace(ikey, (u32)morph_insts.size());
+      if (fresh) {
+        const auto& pd = mt.protos[inst.proto];
+        c3l::MorphInst mi{};
+        for (int c = 0; c < 3; c++) {
+          mi.c[c] = inst.bsphere[c];
+        }
+        mi.r = inst.bsphere[3];
+        mi.start[0] = pd.dists[0];
+        mi.start[1] = pd.dists[2];
+        mi.rlen[0] = pd.rdists[0];
+        mi.rlen[1] = pd.rdists[2];
+        morph_insts.push_back(mi);
+      }
+      auto& sv = verts[base + i];
+      const auto& mm = tree.packed_vertices.matrices[mat];
+      for (int c = 0; c < 3; c++) {
+        sv.mdelta[c] = mm[0][c] * m->morph[0] + mm[1][c] * m->morph[1] + mm[2][c] * m->morph[2];
+      }
+      sv.mband = band;
+      sv.minst = it->second;
+      morph_moving[geo == 0 && band == 2 ? 0 : band]++;
+    }
+  }
+
   void add_tie_tree(tfrag3::TieTree& tree) {
     const size_t tree_first_tri = tris.size();
     if (tree.unpacked.indices.empty()) {
@@ -2172,6 +2338,14 @@ struct Converter {
       note_alpha(tree.colors, v.color_index);  // (AI-assisted)
       sv.tod = tod_color(tree.colors, v.color_index);
       verts.push_back(sv);
+    }
+    if (morph && (cur_lod_slot == 0 || cur_lod_slot == 2)) {
+      add_tie_morph(tree, base);
+    }
+    const bool by_inst = cur_lod_slot >= 0 && morph_trees.count(cur_tree);
+    cur_src.clear();
+    if (by_inst) {
+      tie_lod::unpacked_sources(tree, &cur_src);
     }
     // static instances (already in world space), one vis group per instance
     // categories: normal, trans, water, the base draws of envmapped ties (drawn like the others:
@@ -2209,7 +2383,7 @@ struct Converter {
         size_t first_tri = tris.size();
         // (AI-assisted) v17: the group's levels of detail
         const u64 lkey = tie_lod::static_key(cur_tree, g.vis_idx_in_pc_bvh, g.tie_proto_idx);
-        if (!lod_wanted(lkey)) {
+        if (!by_inst && !lod_wanted(lkey)) {
           idx += g.num_inds;
           continue;
         }
@@ -2267,7 +2441,11 @@ struct Converter {
         if (key != plain_key) {
           env_tie_tris += tris.size() - first_tri;  // (AI-assisted, j2water2)
         }
-        lod_mark(lkey, first_tri);
+        if (by_inst) {
+          lod_mark_instances(lkey, first_tri, base);
+        } else {
+          lod_mark(lkey, first_tri);
+        }
         idx += g.num_inds;
       }
       cur_vis = 0xffff;
@@ -4058,6 +4236,7 @@ constexpr TieLodBudget kTieLodBudgets[] = {
 struct TieLodStats {
   size_t groups = 0, candidates = 0, selected = 0, no_dist = 0;
   size_t core = 0;  // (AI-assisted, streaming) selected groups the budget took
+  size_t morph = 0;  // selected groups with the PS2's geomorph (three versions)
   size_t near_tris = 0, far_tris = 0;          // all groups: near / far geometry
   size_t sel_near_tris = 0, sel_far_tris = 0;  // the selected groups
   double cost_kb = 0, cost_all_kb = 0;         // estimated extra vertex + index data
@@ -4083,13 +4262,25 @@ struct TieLodStats {
 void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, TieLodStats* st) {
   Timer timer;
   std::unordered_map<u64, tie_lod::Group> groups;
+  // the PS2's geomorph: the trees with its data for geometries 0, 2 and 3 have a group per instance
+  cv->morph_trees.clear();
+  for (u32 t = 0; cv->morph && t < level.tie_trees[3].size(); t++) {
+    bool ok = true;
+    for (int geo : {0, 2, 3}) {
+      ok = ok && t < cv->morph->trees[geo].size() && t < level.tie_trees[geo].size() &&
+           tie_lod::morph_matches(cv->morph->trees[geo][t], level.tie_trees[geo][t]);
+    }
+    if (ok) {
+      cv->morph_trees.insert(t);
+    }
+  }
   for (int slot = 0; slot < 2; slot++) {
     auto& trees = level.tie_trees[slot ? opt.tie_geo : opt.tie_near_geo];
     for (u32 t = 0; t < trees.size(); t++) {
       if (trees[t].unpacked.indices.empty()) {
         trees[t].unpack();
       }
-      tie_lod::collect(trees[t], t, slot, &groups);
+      tie_lod::collect(trees[t], t, slot, &groups, cv->morph_trees.count(t) > 0);
     }
   }
   std::vector<std::pair<u64, const tie_lod::Group*>> list;
@@ -4118,7 +4309,7 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
   std::vector<float> dists(list.size());
   for (size_t i = 0; i < list.size(); i++) {
     const auto& g = *list[i].second;
-    const u32 tree = (u32)((list[i].first >> 40) & 0x7fffff);
+    const u32 tree = tie_lod::key_tree(list[i].first);
     const auto& far_trees = level.tie_trees[opt.tie_geo];
     names[i] = g.proto != 0xffff && tree < far_trees.size() &&
                        g.proto < far_trees[tree].proto_names.size()
@@ -4199,6 +4390,20 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
       lg.bsphere[c] = bs[c];
     }
     lg.dist = dists[i];
+    // the PS2's geomorph: a static group of a tree with the morph data of geometries 0, 2 and 3
+    float mid = 0;
+    const u32 tree = tie_lod::key_tree(list[i].first);
+    if (cv->morph && g.proto != 0xffff && (list[i].first >> 62) == 1) {
+      if (g.proto < cv->morph->trees[0][tree].protos.size()) {
+        const auto& pd = cv->morph->trees[0][tree].protos[g.proto];
+        if (pd.dists[2] > 0 && pd.dists[3] > pd.dists[2]) {
+          mid = pd.dists[2];
+          lg.dist = pd.dists[3];
+          st->morph++;
+        }
+      }
+    }
+    cv->lod_group_mid.push_back(mid);
     cv->lod_group_error.push_back(err[i]);
     cv->lod_group_core.push_back(core[i]);  // (AI-assisted, streaming)
     st->core += core[i];
@@ -4220,6 +4425,7 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
     cv->lod_group_detail.resize(0xfffe);
     cv->lod_group_error.resize(0xfffe);
     cv->lod_group_core.resize(0xfffe);
+    cv->lod_group_mid.resize(0xfffe);
     for (auto it = cv->lod_group_of.begin(); it != cv->lod_group_of.end();) {
       it = it->second >= 0xfffe ? cv->lod_group_of.erase(it) : std::next(it);
     }
@@ -4232,7 +4438,10 @@ void select_tie_lods(tfrag3::Level& level, const Options& opt, Converter* cv, Ti
 constexpr float kStreamNeedK = 256.f / 4.f * 1.1f;
 int stream_need_class(const Converter& cv, const Options& opt, u32 g) {
   const float e = g < cv.lod_group_error.size() ? cv.lod_group_error[g] : cv.lod_groups[g].dist;
-  const float m = (e * kStreamNeedK + cv.lod_groups[g].bsphere[3]) / 4096.f;
+  // a morph group's near and mid versions: within its far-plane
+  const bool mg = g < cv.lod_group_mid.size() && cv.lod_group_mid[g] > 0;
+  const float m =
+      ((mg ? cv.lod_groups[g].dist : e * kStreamNeedK) + cv.lod_groups[g].bsphere[3]) / 4096.f;
   int c = 0;
   while (c < (int)opt.stream_classes.size() && m >= opt.stream_classes[c]) {
     c++;
@@ -4383,10 +4592,24 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   const size_t far_tris = cv.tris.size() - far_first;
   cv.cur_tier = 0;
   TieLodStats lstats;
+  tie_lod::Morph morph_data;
   if (!opt.no_tie && !opt.merc_only) {
     // (AI-assisted) v17: which instance groups get a near version (select_tie_lods)
     const bool lod = opt.tie_lod && opt.tie_near_geo >= 0 && opt.tie_near_geo < opt.tie_geo &&
                      level.tie_trees[opt.tie_near_geo].size() == level.tie_trees[opt.tie_geo].size();
+    // the PS2's tie geomorph data (common/custom_data/TieMorph.h), with the PS2's own geometries
+    // 0 and 3 as the near and far versions
+    if (lod && opt.tie_morph && (!jak2 || opt.tie_morph_jak2) && opt.stream &&
+        opt.tie_near_geo == 0 && opt.tie_geo == 3 &&
+        level.tie_trees[2].size() == level.tie_trees[3].size()) {
+      const fs::path dir = opt.tie_morph_dir.empty() ? in.parent_path() : fs::path(opt.tie_morph_dir);
+      const fs::path mp = dir / (in.stem().string() + ".tiemorph");
+      if (tie_lod::read_morph(mp.string(), &morph_data)) {
+        cv.morph = &morph_data;
+      } else if (fs::exists(mp)) {
+        lg::warn("{}: {} is not tie geomorph data", in.stem().string(), mp.string());
+      }
+    }
     if (lod) {
       select_tie_lods(level, opt, &cv, &lstats);
     }
@@ -4398,9 +4621,50 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       if (lod && !cv.lod_groups.empty()) {
         cv.cur_lod_slot = 0;
         cv.add_tie_tree(level.tie_trees[opt.tie_near_geo][t]);
+        if (cv.morph && t < level.tie_trees[2].size()) {
+          cv.cur_lod_slot = 2;
+          cv.add_tie_tree(level.tie_trees[2][t]);
+        }
       }
     }
     cv.cur_lod_slot = -1;
+    if (cv.morph) {
+      // a morph group's (an instance's) sphere holds the instance's sphere: the runtime switches it
+      // by its sphere, the instance morphs by its own
+      for (const auto& t : cv.tris) {
+        if (t.lod_group >= cv.lod_groups.size() || !(cv.lod_group_mid[t.lod_group] > 0)) {
+          continue;
+        }
+        float* b = cv.lod_groups[t.lod_group].bsphere;
+        for (int k = 0; k < 3; k++) {
+          const auto& sv = cv.verts[t.v[k]];
+          if (!sv.mband) {
+            continue;
+          }
+          const auto& mi = cv.morph_insts[sv.minst];
+          const double dx = mi.c[0] - b[0], dy = mi.c[1] - b[1], dz = mi.c[2] - b[2];
+          const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+          if (d + mi.r <= b[3]) {
+            continue;
+          }
+          if (d + b[3] <= mi.r) {
+            for (int c = 0; c < 3; c++) {
+              b[c] = mi.c[c];
+            }
+            b[3] = mi.r;
+            continue;
+          }
+          const double r = (d + mi.r + b[3]) / 2;
+          if (d > 0) {
+            const double m = (r - b[3]) / d;
+            b[0] += (float)(dx * m);
+            b[1] += (float)(dy * m);
+            b[2] += (float)(dz * m);
+          }
+          b[3] = (float)r * 1.0001f;
+        }
+      }
+    }
     cv.orient_all();
     if (lod && opt.tie_far_near_colors) {
       // (AI-assisted, lod-light)
@@ -4526,6 +4790,61 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                                    (cv.draw_keys[t.draw_key].env != 0xffff ? kEnvCellBit : 0));
     cells[key].push_back(i);
   }
+  // a near cell whose moving vertices need more morph rows (instance and band) than the shader has
+  // (kMorphRows - 1): its groups in bins of their own, in group order (the BVH's: neighbours)
+  if (cv.morph) {
+    std::vector<std::pair<CellKey, std::vector<u32>>> split;
+    for (auto it = cells.begin(); it != cells.end();) {
+      if (std::get<0>(it->first) < 1024) {
+        ++it;
+        continue;
+      }
+      std::map<u32, std::vector<u32>> by_group;
+      std::map<u32, std::set<u32>> group_rows;
+      std::set<u32> all_rows;
+      for (u32 ti : it->second) {
+        const auto& t = cv.tris[ti];
+        by_group[t.lod_group].push_back(ti);
+        for (int k = 0; k < 3; k++) {
+          const auto& sv = cv.verts[t.v[k]];
+          if (sv.mband) {
+            group_rows[t.lod_group].insert(sv.minst | (u32)sv.mband << 30);
+            all_rows.insert(sv.minst | (u32)sv.mband << 30);
+          }
+        }
+      }
+      if (all_rows.size() <= c3l::kMorphRows - 1) {
+        ++it;
+        continue;
+      }
+      std::vector<std::vector<u32>> bins(1);
+      std::set<u32> rows;
+      for (auto& [g, ts] : by_group) {
+        const auto& gr = group_rows[g];
+        size_t fresh = 0;
+        for (u32 r : gr) {
+          fresh += !rows.count(r);
+        }
+        if (rows.size() + fresh > c3l::kMorphRows - 1 && !bins.back().empty()) {
+          bins.emplace_back();
+          rows.clear();
+        }
+        rows.insert(gr.begin(), gr.end());
+        bins.back().insert(bins.back().end(), ts.begin(), ts.end());
+      }
+      const CellKey k = it->first;
+      it = cells.erase(it);
+      for (size_t b = 0; b < bins.size(); b++) {
+        CellKey kb = k;
+        std::get<2>(kb) += (int)(b << 16);
+        split.emplace_back(kb, std::move(bins[b]));
+      }
+    }
+    for (auto& [k, ts] : split) {
+      auto& c = cells[k];
+      c.insert(c.end(), ts.begin(), ts.end());
+    }
+  }
 
   // (AI-assisted) The chunks' triangles and vertices first: their quantizing grids depend on each
   // other (see below).
@@ -4557,10 +4876,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         if (ta.draw_key != tb.draw_key) {
           return ta.draw_key < tb.draw_key;
         }
-        // (AI-assisted) v17: a draw's near versions, then the triangles of one version, then the
-        // far versions (c3l::RunLod), each by visibility id (BVH order: near runs drawn together
-        // are mostly neighbours), then LOD group
-        constexpr u8 kLodRank[3] = {1, 0, 2};
+        // (AI-assisted) v17: a draw's near versions, the mid versions, then the triangles of one
+        // version, then the far versions (c3l::RunLod), each by visibility id (BVH order: near runs
+        // drawn together are mostly neighbours), then LOD group
+        constexpr u8 kLodRank[4] = {2, 0, 3, 1};
         if (ta.lod != tb.lod) {
           return kLodRank[ta.lod] < kLodRank[tb.lod];
         }
@@ -4586,6 +4905,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           if (cp.src.size() + new_verts > 65535) {
             break;
           }
+
           for (int k = 0; k < 3; k++) {
             if (!cp.local.count(t.v[k])) {
               cp.local[t.v[k]] = cp.src.size();
@@ -4794,7 +5114,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::map<std::tuple<int, int, u32, u16, u32>, std::vector<u32>> groups;
       for (u32 t : cp.tris) {
         const auto& tr = cv.tris[t];
-        if (tr.lod == c3l::kRunLodNear) {
+        if (tr.lod == c3l::kRunLodNear || tr.lod == c3l::kRunLodMid) {
           continue;  // (AI-assisted) v17: the vista copies the far versions
         }
         float cx = 0, cy = 0, cz = 0;
@@ -5196,6 +5516,83 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // the wind instance of each wind vertex by its bytes, per chunk with any (as the normals: two
   // vertices of different instances never have the same bytes)
   std::map<u32, std::unordered_map<std::string, u32>> wind_chunk_verts;
+  // the PS2's tie geomorph (c3l::ExtMorph): the near chunks with moving vertices, their rows
+  std::vector<c3l::MorphChunk> out_morph_chunks;
+  std::vector<std::vector<c3l::MorphVertex>> out_morph_recs;  // per morph chunk
+  std::vector<u32> out_morph_rows;
+  std::vector<u8> out_morph_draw_rows;
+  struct MorphStats {
+    size_t chunks = 0, verts = 0, moving = 0, over_rows = 0, over_verts = 0, max_rows = 0;
+    size_t draws = 0, draw_rows = 0, rows = 0;
+    double max_delta_m = 0;
+  } mst;
+  // a near chunk's MorphVertex records (its mesh's tail at runtime), its rows
+  auto add_morph_trailer = [&](c3l::Chunk& ch,
+                               const std::unordered_map<std::string, MorphRec>& recs) {
+    const u32 nv = ch.vertex_count;
+    std::vector<c3l::MorphVertex> mv(nv);
+    std::vector<u32> rows;
+    std::unordered_map<u32, u8> row_of;
+    double maxd = 0;
+    size_t moving = 0;
+    for (u32 v = 0; v < nv; v++) {
+      const auto& o = out_verts[ch.first_vertex + v];
+      auto it = recs.find(std::string((const char*)&o, sizeof(o)));
+      auto& m = mv[v];
+      if (it == recs.end() || !it->second.key) {
+        continue;
+      }
+      auto [ri, fresh] = row_of.emplace(it->second.key, (u8)(rows.size() + 1));
+      if (fresh) {
+        rows.push_back(it->second.key);
+        if (rows.size() >= c3l::kMorphRows) {
+          mst.over_rows++;
+          return;
+        }
+      }
+      m.row = ri->second;
+      double d2 = 0;
+      for (int c = 0; c < 3; c++) {
+        m.delta[c] = it->second.d[c];
+        d2 += (double)m.delta[c] * m.delta[c];
+      }
+      maxd = std::max(maxd, std::sqrt(d2) * ch.scale);
+      moving++;
+    }
+    if (!moving) {
+      return;
+    }
+    c3l::MorphChunk mc{};
+    mc.draw_rows = (u32)out_morph_draw_rows.size();
+    for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
+      std::set<u8> used;
+      for (u32 i = out_draws[d].first_index; i < out_draws[d].first_index + out_draws[d].index_count;
+           i++) {
+        if (mv[out_indices[i]].row) {
+          used.insert(mv[out_indices[i]].row);
+        }
+      }
+      out_morph_draw_rows.push_back((u8)used.size());
+      out_morph_draw_rows.insert(out_morph_draw_rows.end(), used.begin(), used.end());
+      mst.draws++;
+      mst.draw_rows += used.size();
+    }
+    mc.chunk = (u32)chunks.size();
+    mc.vertex_count = nv;
+    mc.row_first = (u32)out_morph_rows.size();
+    mc.row_count = (u32)rows.size();
+    out_morph_chunks.push_back(mc);
+    out_morph_rows.insert(out_morph_rows.end(), rows.begin(), rows.end());
+    out_morph_recs.push_back(std::move(mv));
+    mst.rows += rows.size();
+    // the surface moves by up to maxd: the chunk's sphere holds it at every morph factor
+    ch.bsphere[3] += (float)maxd;
+    mst.chunks++;
+    mst.verts += nv;
+    mst.moving += moving;
+    mst.max_rows = std::max(mst.max_rows, rows.size());
+    mst.max_delta_m = std::max(mst.max_delta_m, maxd / 4096.0);
+  };
 
   for (const auto& cp : plans) {
     {
@@ -5280,6 +5677,16 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           break;
         }
       }
+      std::unordered_map<std::string, MorphRec> morph_map;
+      std::unordered_map<std::string, MorphRec>* morph_verts = nullptr;
+      if (stream_cls) {
+        for (const u32 si : local_src) {
+          if (cv.verts[si].mband) {
+            morph_verts = &morph_map;
+            break;
+          }
+        }
+      }
       for (size_t i = 0; i < local_src.size(); i++) {
         const auto& v = cv.verts[local_src[i]];
         c3l::Vertex o{};
@@ -5304,32 +5711,51 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         memcpy(o.rgba, v.rgba, 4);
         o.pad = (s16)cv.tod_pad(v.tod);  // (AI-assisted) v16: the time of day color
-        if (wind_verts) {
-          for (int tries = 0; tries < 64; tries++) {
-            auto [it, fresh] = wind_verts->emplace(std::string((const char*)&o, sizeof(o)), v.wind);
-            if (fresh || it->second == v.wind) {
-              break;
-            }
-            o.st[0]++;
-            env_st_moved++;
+        // the PS2's morph of the vertex: its instance and band, its offset in the chunk's units
+        MorphRec mr{};
+        if (morph_verts && v.mband) {
+          mr.key = v.minst | (u32)v.mband << 30;
+          for (int c = 0; c < 3; c++) {
+            mr.d[c] = (s16)std::clamp(std::lround(v.mdelta[c] / cp.grid), -32767l, 32767l);
           }
         }
-        if (env_normals) {
-          // (AI-assisted, j2water2) v21
-          const std::array<s8, 3> n = {v.nrm[0], v.nrm[1], v.nrm[2]};
-          for (int tries = 0; tries < 64; tries++) {
-            auto [it, fresh] =
-                env_normals->emplace(std::string((const char*)&o, sizeof(o)), n);
-            if (fresh || it->second == n || !v.has_nrm) {
-              break;
-            }
-            if (!it->second[0] && !it->second[1] && !it->second[2]) {
-              it->second = n;  // a vertex without a normal came first
-              break;
-            }
-            o.st[0]++;
-            env_st_moved++;
+        // two vertices with the same bytes are one after the welds: their wind instance, normal
+        // and morph must agree, else this one's s moves by 1/1024
+        const std::array<s8, 3> n = {v.nrm[0], v.nrm[1], v.nrm[2]};
+        for (int tries = 0; tries < 64; tries++) {
+          const std::string b((const char*)&o, sizeof(o));
+          bool ok = true;
+          if (wind_verts) {
+            auto it = wind_verts->find(b);
+            ok = ok && (it == wind_verts->end() || it->second == v.wind);
           }
+          if (env_normals && v.has_nrm) {
+            // (AI-assisted, j2water2) v21 (a vertex without a normal came first: this one's)
+            auto it = env_normals->find(b);
+            ok = ok && (it == env_normals->end() || it->second == n ||
+                        (!it->second[0] && !it->second[1] && !it->second[2]));
+          }
+          if (morph_verts) {
+            auto it = morph_verts->find(b);
+            ok = ok && (it == morph_verts->end() || it->second == mr);
+          }
+          if (ok || tries == 63) {
+            if (wind_verts) {
+              wind_verts->emplace(b, v.wind);
+            }
+            if (env_normals) {
+              auto [it, fresh] = env_normals->emplace(b, n);
+              if (!fresh && v.has_nrm && !it->second[0] && !it->second[1] && !it->second[2]) {
+                it->second = n;
+              }
+            }
+            if (morph_verts) {
+              morph_verts->emplace(b, mr);
+            }
+            break;
+          }
+          o.st[0]++;
+          env_st_moved++;
         }
         out_verts.push_back(o);
       }
@@ -5551,6 +5977,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         lod_runs += any_lod ? runs.size() : 0;
         lod_chunks += any_lod;
       }
+      if (morph_verts) {
+        add_morph_trailer(ch, *morph_verts);
+      }
       chunks.push_back(ch);
       chunk_stream_cls.push_back((u8)stream_cls);
     }
@@ -5567,10 +5996,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     u64 tris[3] = {0, 0, 0};
     u64 other_bytes = 0;  // every other chunk's
   } sst;
+  std::unordered_map<u32, size_t> morph_chunk_of;
+  for (size_t i = 0; i < out_morph_chunks.size(); i++) {
+    morph_chunk_of[out_morph_chunks[i].chunk] = i;
+  }
   if (opt.stream) {
     run_spheres.assign(out_runs.size(), c3l::RunSphere{{0, 0, 0}, 0xffff});
     for (size_t ci = 0; ci < chunks.size(); ci++) {
       const auto& ch = chunks[ci];
+      // a chunk's moving vertices: its runs' spheres hold them at every morph factor
+      const c3l::MorphVertex* mvp = nullptr;
+      if (auto mit = morph_chunk_of.find((u32)ci); mit != morph_chunk_of.end()) {
+        mvp = out_morph_recs[mit->second].data();
+      }
       bool all = true;
       for (u32 v = 0; v < ch.vertex_count && all; v++) {
         const auto& ov = out_verts[ch.first_vertex + v];
@@ -5624,8 +6062,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           const u16 v = out_indices[i];
           ok = v < ch.vertex_count;
           for (int c = 0; ok && c < 3; c++) {
-            mn[c] = std::min<int>(mn[c], out_verts[ch.first_vertex + v].pos[c]);
-            mx[c] = std::max<int>(mx[c], out_verts[ch.first_vertex + v].pos[c]);
+            const int p = out_verts[ch.first_vertex + v].pos[c];
+            const int q = mvp ? p + mvp[v].delta[c] : p;
+            mn[c] = std::min(mn[c], std::min(p, q));
+            mx[c] = std::max(mx[c], std::max(p, q));
           }
         }
         idx += n;
@@ -5641,16 +6081,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         }
         // a near chunk's groups: where it is needed
         const auto& rl = out_run_lods[r];
-        if (cls && rl.lod == c3l::kRunLodNear && rl.group < cv.lod_groups.size()) {
+        if (cls && (rl.lod == c3l::kRunLodNear || rl.lod == c3l::kRunLodMid) &&
+            rl.group < cv.lod_groups.size()) {
           const auto& g = cv.lod_groups[rl.group];
           float dd = 0;
           for (int c = 0; c < 3; c++) {
             dd += (g.bsphere[c] - ch.bsphere[c]) * (g.bsphere[c] - ch.bsphere[c]);
           }
           need_a = std::max(need_a, std::sqrt(dd) + g.bsphere[3]);
-          need_e = std::max(need_e, rl.group < cv.lod_group_error.size()
-                                        ? cv.lod_group_error[rl.group]
-                                        : g.dist);
+          // (a morph group's: within its far-plane, the runtime's StreamUnit::need_d)
+          const bool mg = rl.group < cv.lod_group_mid.size() && cv.lod_group_mid[rl.group] > 0;
+          need_e = std::max(need_e, mg                                         ? 0.f
+                                    : rl.group < cv.lod_group_error.size() ? cv.lod_group_error[rl.group]
+                                                                           : g.dist);
         }
       }
       if (cls) {
@@ -5678,7 +6121,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
       u.bytes = (u64)ch.vertex_count * 16 + (hi > lo ? (u64)(hi - lo) * 2 : 0);
       for (u32 r = chunk_first_run[sc.chunk]; r < chunk_first_run[sc.chunk] + ch.vis_run_count; r++) {
-        if (out_run_lods[r].lod == c3l::kRunLodNear) {
+        if (out_run_lods[r].lod == c3l::kRunLodNear || out_run_lods[r].lod == c3l::kRunLodMid) {
           u.groups.push_back(out_run_lods[r].group);
         }
       }
@@ -5688,8 +6131,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     std::vector<float> lim(cv.lod_groups.size());
     for (size_t g = 0; g < cv.lod_groups.size(); g++) {
-      lim[g] = (g < cv.lod_group_error.size() ? cv.lod_group_error[g] : cv.lod_groups[g].dist) *
-                   kNeedK +
+      const bool mg = g < cv.lod_group_mid.size() && cv.lod_group_mid[g] > 0;
+      lim[g] = (mg ? cv.lod_groups[g].dist
+                   : (g < cv.lod_group_error.size() ? cv.lod_group_error[g] : cv.lod_groups[g].dist) *
+                         kNeedK) +
                cv.lod_groups[g].bsphere[3];
     }
     u64 mx = 0;
@@ -6016,7 +6461,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       any_band |= b != 0;
     }
     const bool bands = any_band && out_run_bands.size() == out_runs.size();
-    const u32 eh_size = !out_cond_sets.empty()              ? c3l::kExtHeaderV24Size
+    const bool morph_out = !out_morph_chunks.empty();
+    const u32 eh_size = morph_out                           ? c3l::kExtHeaderMorphSize
+                        : !out_cond_sets.empty()              ? c3l::kExtHeaderV24Size
                         : opt.stream && !tex_descs.empty() ? c3l::kExtHeaderTexKeySize
                         : bands                          ? c3l::kExtHeaderV23Size
                         : !wind_chunk_verts.empty() ? c3l::kExtHeaderV22Size
@@ -6113,6 +6560,28 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderTexKeySize, &ec, sizeof(ec));
       lg::info("{}: culling by opening planes: {} draws, {} planes", level.level_name, cds.size(),
                planes);
+    }
+    if (morph_out) {
+      // the PS2's tie geomorph (c3l::ExtMorph)
+      c3l::ExtMorph em{};
+      em.inst_count = (u32)cv.morph_insts.size();
+      em.insts_offset = append(buf, cv.morph_insts.data(), cv.morph_insts.size());
+      for (size_t i = 0; i < out_morph_chunks.size(); i++) {
+        out_morph_chunks[i].records_offset =
+            append(buf, out_morph_recs[i].data(), out_morph_recs[i].size());
+      }
+      em.chunk_count = (u32)out_morph_chunks.size();
+      em.chunks_offset = append(buf, out_morph_chunks.data(), out_morph_chunks.size());
+      em.row_count = (u32)out_morph_rows.size();
+      em.rows_offset = append(buf, out_morph_rows.data(), out_morph_rows.size());
+      std::vector<float> mids(cv.lod_groups.size(), 0.f);
+      for (size_t g = 0; g < mids.size() && g < cv.lod_group_mid.size(); g++) {
+        mids[g] = cv.lod_group_mid[g];
+      }
+      em.group_mid_offset = append(buf, mids.data(), mids.size());
+      em.draw_rows_size = (u32)out_morph_draw_rows.size();
+      em.draw_rows_offset = append(buf, out_morph_draw_rows.data(), out_morph_draw_rows.size());
+      memcpy(buf.data() + hdr.ext_offset + c3l::kExtHeaderV24Size, &em, sizeof(em));
     }
     if (bands) {
       // the shrub runs' PS2 fade bands (c3l::ExtShrubFade)
@@ -6360,6 +6829,19 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              lstats.budget_kb >= 1e11 ? std::string("all groups") : fmt::format("{:.0f} KB", lstats.budget_kb),
              lstats.cost_all_kb, lod_runs,
              lod_chunks, cv.lod_tris[0], cv.lod_tris[1], lstats.ms);
+    if (cv.morph) {
+      lg::info("{}: tie geomorph (the PS2's): {} groups with a mid version (geo 2, {} tris), {} "
+               "instances; {} near chunks with moving vertices ({} of {} vertices move: {} of geo 0 "
+               "onto geo 2, {} of geo 2 onto geo 3 ({} of them in geo 0), up to {:.2f} m; at most "
+               "{} rows, {:.1f} per chunk, {:.1f} per draw of {} draws); not morphed: {} chunks over {} "
+               "rows",
+               level.level_name, lstats.morph, cv.lod_tris[2], cv.morph_insts.size(), mst.chunks,
+               mst.moving, mst.verts, cv.morph_moving[1], cv.morph_moving[2] + cv.morph_moving[0],
+               cv.morph_moving[0], mst.max_delta_m, mst.max_rows,
+               (double)mst.rows / std::max<size_t>(mst.chunks, 1),
+               (double)mst.draw_rows / std::max<size_t>(mst.draws, 1), mst.draws, mst.over_rows,
+               c3l::kMorphRows - 1);
+    }
     std::vector<std::pair<std::string, TieLodStats::Proto>> left(lstats.protos.begin(),
                                                                  lstats.protos.end());
     std::sort(left.begin(), left.end(),
@@ -6799,6 +7281,13 @@ int main(int argc, char** argv) {
                "(AI-assisted, v17) no near versions of ties: all at --tie-geo, as v16");
   app.add_option("--tie-near-geo", opt.tie_near_geo,
                  "(v17) geometry of the ties' near versions (0 = most detailed)");
+  bool no_tie_morph = false;
+  app.add_flag("--no-tie-morph", no_tie_morph,
+               "no PS2 tie geomorph (geometry 2 and the morph from <level>.tiemorph)");
+  app.add_flag("--tie-morph", opt.tie_morph_jak2,
+               "the PS2 tie geomorph for Jak II too (default: Jak 1 only)");
+  app.add_option("--tie-morph-dir", opt.tie_morph_dir,
+                 "where the <level>.tiemorph files are (default: next to the .fr3)");
   app.add_option("--tie-lod-budget-kb", opt.tie_lod_budget_kb,
                  "(v17) extra vertex and index data for near tie versions per level (KB; default: "
                  "the level's planned budget, else all groups)");
@@ -6938,6 +7427,7 @@ int main(int argc, char** argv) {
   opt.tie_winding = !no_tie_winding;
   opt.tie_far_near_colors = !tie_far_own_colors;
   opt.tie_lod = !no_tie_lod;
+  opt.tie_morph = !no_tie_morph;
   opt.stream = !no_stream;
   opt.vista = !no_vista;
   opt.tod = !no_tod;

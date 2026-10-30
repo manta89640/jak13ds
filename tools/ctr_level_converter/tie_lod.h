@@ -16,6 +16,7 @@
 
 #include "common/common_types.h"
 #include "common/custom_data/Tfrag3Data.h"
+#include "common/custom_data/TieMorph.h"
 
 namespace tie_lod {
 
@@ -41,9 +42,22 @@ inline u64 static_key(u32 tree, u32 vis, u32 proto) {
 inline u64 wind_key(u32 tree, u32 instance) {
   return (1ull << 63) | ((u64)tree << 40) | instance;
 }
+// a static instance on its own (the PS2's geomorph: each instance switches by its own distance),
+// by its matrix in the tree's packed_vertices
+inline u64 instance_key(u32 tree, u32 matrix) {
+  return (1ull << 62) | ((u64)tree << 40) | matrix;
+}
+inline u32 key_tree(u64 key) {
+  return (u32)((key >> 40) & 0x3fffff);
+}
 
-/*! The groups' triangles of an unpacked tie tree (slot 0: near geometry, 1: far). */
-void collect(const tfrag3::TieTree& tree, u32 tree_idx, int slot, std::unordered_map<u64, Group>* out);
+/*! The groups' triangles of an unpacked tie tree (slot 0: near geometry, 1: far); by_instance: the
+ * static instances' each a group of their own (instance_key). */
+void collect(const tfrag3::TieTree& tree,
+             u32 tree_idx,
+             int slot,
+             std::unordered_map<u64, Group>* out,
+             bool by_instance = false);
 
 /*!
  * How much the far geometry's shape differs from the near one's: the larger of the two one-sided
@@ -63,5 +77,22 @@ std::array<float, 4> bounds(const Group& g);
 
 /*! The PS2 distances of a tie prototype (tie_ps2_dists.inc), meters; false: not in the table. */
 bool ps2_dists(const std::string& level, const std::string& proto, float* mid, float* far);
+
+/*! A level's PS2 tie geomorph data (common/custom_data/TieMorph.h), by geometry and tie tree. */
+struct MorphTree {
+  std::vector<tie_morph::Vertex> verts;
+  std::vector<tie_morph::Proto> protos;
+  std::vector<tie_morph::Inst> insts, wind;
+};
+struct Morph {
+  std::vector<MorphTree> trees[4];
+};
+/*! false: no such file, or not a TieMorph.h file */
+bool read_morph(const std::string& path, Morph* out);
+/*! The tree's data has the TieTree's vertices, prototypes and instances. */
+bool morph_matches(const MorphTree& m, const tfrag3::TieTree& tree);
+/*! For each unpacked vertex of the tree (TieTree::unpack's order): its packed vertex, its matrix
+ * (-1: none). */
+void unpacked_sources(const tfrag3::TieTree& tree, std::vector<std::pair<u32, s32>>* out);
 
 }  // namespace tie_lod

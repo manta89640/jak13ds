@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 
 namespace tie_lod {
 
@@ -207,15 +208,40 @@ float one_sided2(const std::vector<Tri>& a, const std::vector<Tri>& b, float flo
 void collect(const tfrag3::TieTree& tree,
              u32 tree_idx,
              int slot,
-             std::unordered_map<u64, Group>* out) {
+             std::unordered_map<u64, Group>* out,
+             bool by_instance) {
+  std::vector<std::pair<u32, s32>> src;
+  if (by_instance) {
+    unpacked_sources(tree, &src);
+  }
   for (const auto& d : tree.static_draws) {
     size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
     for (const auto& g : d.vis_groups) {
-      auto& grp = (*out)[static_key(tree_idx, g.vis_idx_in_pc_bvh, g.tie_proto_idx)];
-      grp.proto = g.tie_proto_idx;
       const size_t n = std::min<size_t>(g.num_inds, tree.unpacked.indices.size() - idx);
-      strips_to_tris(tree.unpacked.indices.data() + idx, n, tree.unpacked.vertices, nullptr,
-                     &grp.tris[slot], &grp.corners[slot]);
+      const u32* ix = tree.unpacked.indices.data() + idx;
+      if (!by_instance) {
+        auto& grp = (*out)[static_key(tree_idx, g.vis_idx_in_pc_bvh, g.tie_proto_idx)];
+        grp.proto = g.tie_proto_idx;
+        strips_to_tris(ix, n, tree.unpacked.vertices, nullptr, &grp.tris[slot], &grp.corners[slot]);
+      } else {
+        // strip by strip (each is one instance's)
+        size_t a = 0;
+        while (a < n) {
+          size_t b = a;
+          while (b < n && ix[b] != UINT32_MAX) {
+            b++;
+          }
+          if (b > a && ix[a] < src.size()) {
+            const s32 mat = src[ix[a]].second;
+            auto& grp = (*out)[mat < 0 ? static_key(tree_idx, g.vis_idx_in_pc_bvh, g.tie_proto_idx)
+                                       : instance_key(tree_idx, (u32)mat)];
+            grp.proto = g.tie_proto_idx;
+            strips_to_tris(ix + a, b - a, tree.unpacked.vertices, nullptr, &grp.tris[slot],
+                           &grp.corners[slot]);
+          }
+          a = b + 1;
+        }
+      }
       idx += g.num_inds;
     }
   }
@@ -335,6 +361,75 @@ bool ps2_dists(const std::string& level, const std::string& proto, float* mid, f
     }
   }
   return false;
+}
+
+bool read_morph(const std::string& path, Morph* out) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) {
+    return false;
+  }
+  std::vector<char> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  size_t at = 0;
+  auto take = [&](void* dst, size_t n) {
+    if (at + n > data.size()) {
+      return false;
+    }
+    memcpy(dst, data.data() + at, n);
+    at += n;
+    return true;
+  };
+  tie_morph::FileHeader fh;
+  if (!take(&fh, sizeof(fh)) || memcmp(fh.magic, tie_morph::kMagic, 4) ||
+      fh.version != tie_morph::kVersion) {
+    return false;
+  }
+  for (u32 t = 0; t < fh.tree_count; t++) {
+    tie_morph::TreeHeader th;
+    if (!take(&th, sizeof(th)) || th.geo >= 4) {
+      return false;
+    }
+    auto& trees = out->trees[th.geo];
+    if (trees.size() <= th.tree) {
+      trees.resize(th.tree + 1);
+    }
+    auto& mt = trees[th.tree];
+    mt.verts.resize(th.vertex_count);
+    mt.protos.resize(th.proto_count);
+    mt.insts.resize(th.inst_count);
+    mt.wind.resize(th.wind_count);
+    if (!take(mt.verts.data(), mt.verts.size() * sizeof(tie_morph::Vertex)) ||
+        !take(mt.protos.data(), mt.protos.size() * sizeof(tie_morph::Proto)) ||
+        !take(mt.insts.data(), mt.insts.size() * sizeof(tie_morph::Inst)) ||
+        !take(mt.wind.data(), mt.wind.size() * sizeof(tie_morph::Inst))) {
+      return false;
+    }
+  }
+  return at == data.size();
+}
+
+bool morph_matches(const MorphTree& m, const tfrag3::TieTree& tree) {
+  if (m.verts.size() != tree.packed_vertices.vertices.size() ||
+      m.protos.size() != tree.proto_names.size() ||
+      m.insts.size() != tree.packed_vertices.matrices.size() ||
+      m.wind.size() != tree.wind_instance_info.size()) {
+    return false;
+  }
+  for (const auto& in : m.insts) {
+    if (in.proto >= m.protos.size()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void unpacked_sources(const tfrag3::TieTree& tree, std::vector<std::pair<u32, s32>>* out) {
+  out->clear();
+  out->reserve(tree.packed_vertices.color_indices.size());
+  for (const auto& grp : tree.packed_vertices.matrix_groups) {
+    for (u32 src = grp.start_vert; src < grp.end_vert; src++) {
+      out->emplace_back(src, grp.matrix_idx);
+    }
+  }
 }
 
 }  // namespace tie_lod
