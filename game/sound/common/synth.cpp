@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: ISC
 #include "synth.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace snd {
@@ -11,7 +12,8 @@ static s16 ApplyVolume(s16 sample, s32 volume) {
 }
 
 s16Output Synth::Tick() {
-  s16Output out{};
+  s16Output out{}, wet{};
+  const bool reverb = mReverb.Active();
 
   mVoices.remove_if([](std::shared_ptr<Voice>& v) { return v->Dead(); });
   for (auto& v : mVoices) {
@@ -22,8 +24,13 @@ s16Output Synth::Tick() {
       continue;
     }
 #endif
-    out += v->Run();
+    const s16Output s = v->Run();
+    out += s;
+    if (reverb && v->ReverbSend()) {
+      wet += s;
+    }
   }
+  mReverb.Process(&wet, &out, 1);
 
   out.left = ApplyVolume(out.left, mVolume.left.Get());
   out.right = ApplyVolume(out.right, mVolume.right.Get());
@@ -55,18 +62,40 @@ void Synth::EndBlock() {
     mMasterVolPending = false;
     SetMasterVol(mPendingMasterVol);
   }
+  if (mReverbModePending) {
+    mReverbModePending = false;
+    mReverb.SetMode(mPendingReverbMode);
+  }
+  if (mReverbDepthPending) {
+    mReverbDepthPending = false;
+    mReverb.SetDepth(mPendingDepthL, mPendingDepthR);
+  }
 }
 
 void Synth::Mix(s16Output* out, int samples, u32 ratio) {
   for (int i = 0; i < samples; i++) {
     out[i] = s16Output{};
   }
+  const bool reverb = mReverb.Active();
+  if (reverb) {
+    if (mWet.size() < (size_t)samples) {
+      mWet.resize(samples);
+    }
+    std::fill_n(mWet.begin(), samples, s16Output{});
+  }
   for (auto& v : mVoices) {
     // the same order of (saturating) additions per sample as Tick(); a voice that stops is
     // skipped from then on, like there. (AI-assisted) RunBlock: the same samples, with the
     // envelope steps done in one go while they only advance a counter.
-    v->RunBlock(out, samples, ratio);
+    v->RunBlock(reverb && v->ReverbSend() ? mWet.data() : out, samples, ratio);
   }
+  if (reverb) {
+    // the voices sent to the effect play dry too
+    for (int i = 0; i < samples; i++) {
+      out[i] += mWet[i];
+    }
+  }
+  mReverb.Process(mWet.data(), out, reverb ? samples : 0);
   if (!mVolume.left.Sweeping() && !mVolume.right.Sweeping()) {
     // Run() does nothing without a sweep
     const s32 vol_l = mVolume.left.Get(), vol_r = mVolume.right.Get();
@@ -92,6 +121,29 @@ void Synth::AddVoice(std::shared_ptr<Voice> voice) {
   }
 #endif
   mVoices.emplace_front(voice);
+}
+
+void Synth::SetReverbMode(u32 mode) {
+#ifdef __3DS__
+  if (mBusy) {
+    mPendingReverbMode = mode;
+    mReverbModePending = true;
+    return;
+  }
+#endif
+  mReverb.SetMode(mode);
+}
+
+void Synth::SetReverbDepth(s16 left, s16 right) {
+#ifdef __3DS__
+  if (mBusy) {
+    mPendingDepthL = left;
+    mPendingDepthR = right;
+    mReverbDepthPending = true;
+    return;
+  }
+#endif
+  mReverb.SetDepth(left, right);
 }
 
 void Synth::SetMasterVol(u32 volume) {

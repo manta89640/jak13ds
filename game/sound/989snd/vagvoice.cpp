@@ -38,6 +38,8 @@ void VoiceManager::StartTone(std::shared_ptr<VagVoice> voice) {
   voice->SetAsdr2(voice->tone.ADSR2);
 
   voice->SetSample((u16*)(voice->tone.Sample));
+  // 989snd sets the voice's wet mix bit from the tone's reverb flag at every start
+  voice->SetReverbSend((voice->tone.Flags & (u16)toneflag::out_reverb) != 0);
 
   voice->KeyOn();
 

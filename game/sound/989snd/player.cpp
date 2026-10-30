@@ -79,6 +79,7 @@ constexpr unsigned kMixerStack = 128 * 1024;
 void Player::InitCubeb() {
   mHandlerThreadStop = false;
   g_output_active = false;
+  mSynth.SetOutputRate(kMixRate);
   int core = 1;
   if (ctr_sound_config(&core)) {
     if (ctr_audio_init(kMixRate, kMixFrames, kMixBuffers) == 0) {
@@ -138,6 +139,7 @@ void Player::MixerThread() {
   ctr_thread_install_crash_handler();
   g_mixer_thread_id.store(ctr_thread_current_id(), std::memory_order_relaxed);
   u32 last_dropped = 0;
+  u32 last_gap_us = 0;
   // (AI-assisted) The mixing time (not the sleeps that let sound calls have the lock) is averaged
   // over about a second as a share of the audio it makes; above kMaxShare it's logged. The mixer
   // doesn't hold back while it keeps up: audio must not break up (a guard that slept here made it
@@ -204,11 +206,18 @@ void Player::MixerThread() {
         ctr_thread_sleep_us(kBehindSleepUs);
       }
     }
-    u32 dropped = ctr_audio_dropped_frames();
-    if (dropped != last_dropped) {
-      lg::warn("3DS sound: DSP dropped {} frames (mixer late)", dropped - last_dropped);
+    // the count reads 0 once the audio is closed for exit
+    const u32 dropped = ctr_audio_dropped_frames();
+    const u32 gap_us = ctr_audio_take_max_frame_gap_us();
+    if (dropped > last_dropped) {
+      lg::warn(
+          "3DS sound: DSP dropped {} frames (its frame update came late; longest gap between "
+          "ndsp frames just before {:.1f} ms; the mixer's late buffers so far {})",
+          dropped - last_dropped, std::max(gap_us, last_gap_us) / 1000.0,
+          ctr_audio_late_buffers());
       last_dropped = dropped;
     }
+    last_gap_us = gap_us;
     ctr_audio_wait(20000);
   }
 }
@@ -748,6 +757,36 @@ void Player::SetSoundPmod(s32 sound_handle, s32 mod) {
     return;
 
   handler->second->SetPMod(mod);
+}
+
+void Player::SetSoundPBend(s32 sound_handle, s32 bend) {
+  std::scoped_lock lock(mTickLock);
+  auto handler = mHandlers.find(sound_handle);
+  if (handler == mHandlers.end())
+    return;
+
+  handler->second->SetPBend(bend);
+}
+
+void Player::SetReverbMode(u32 mode) {
+#ifdef __3DS__
+  // nothing is heard without audio output (the stream voices still run silently)
+  if (!g_output_active) {
+    return;
+  }
+#endif
+  std::scoped_lock lock(mTickLock);
+  mSynth.SetReverbMode(mode);
+}
+
+void Player::SetReverbDepth(s16 left, s16 right) {
+#ifdef __3DS__
+  if (!g_output_active) {
+    return;
+  }
+#endif
+  std::scoped_lock lock(mTickLock);
+  mSynth.SetReverbDepth(left, right);
 }
 
 void Player::StopAllSounds() {

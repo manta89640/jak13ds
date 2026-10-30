@@ -118,9 +118,17 @@ void snd_SetMixerMode(s32 channel_mode, s32 reverb_mode) {}
 
 void snd_SetGroupVoiceRange(s32 group, s32 min, s32 max) {}
 
-void snd_SetReverbDepth(s32 core, s32 left, s32 right) {}
+void snd_SetReverbDepth(s32 core, s32 left, s32 right) {
+  if (player && (core & (SND_CORE_0 | SND_CORE_1))) {
+    player->SetReverbDepth((s16)left, (s16)right);
+  }
+}
 
-void snd_SetReverbType(s32 core, s32 type) {}
+void snd_SetReverbType(s32 core, s32 type) {
+  if (player && (core & (SND_CORE_0 | SND_CORE_1))) {
+    player->SetReverbMode((u32)type);
+  }
+}
 
 void snd_SetPanTable(s16* table) {
   if (player) {
@@ -255,8 +263,8 @@ void snd_SetSoundPitchModifier(s32 sound_handle, s32 pitch_mod) {
 }
 
 void snd_SetSoundPitchBend(s32 sound_handle, s32 bend) {
-  // TODO
-  if (bend != 0) {
+  if (player) {
+    player->SetSoundPBend(sound_handle, bend);
   }
 }
 

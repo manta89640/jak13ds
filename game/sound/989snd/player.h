@@ -108,6 +108,10 @@ class Player {
     mSynth.AddVoice(voice);
   };
   void SetSoundPmod(s32 sound_handle, s32 mod);
+  void SetSoundPBend(s32 sound_handle, s32 bend);
+  // libsd effect attributes; the port mixes both SPU2 cores as one, so any core sets the one unit
+  void SetReverbMode(u32 mode);
+  void SetReverbDepth(s16 left, s16 right);
   void InitCubeb();
   void DestroyCubeb();
   s32 GetTick() { return mTick; };

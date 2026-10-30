@@ -1594,9 +1594,25 @@ static unsigned int s_audio_next = 0; /* the next buffer to hand out (round robi
 static unsigned int s_audio_late = 0;
 static LightEvent s_audio_event;
 
+static u64 s_audio_last_frame_tick = 0;
+static volatile u32 s_audio_max_frame_gap = 0; /* system ticks */
+
 static void audio_frame_callback(void* data) {
   (void)data;
+  const u64 now = svcGetSystemTick();
+  if (s_audio_last_frame_tick) {
+    const u64 gap = now - s_audio_last_frame_tick;
+    if (gap > s_audio_max_frame_gap) {
+      s_audio_max_frame_gap = gap > 0xffffffffu ? 0xffffffffu : (u32)gap;
+    }
+  }
+  s_audio_last_frame_tick = now;
   LightEvent_Signal(&s_audio_event);
+}
+
+unsigned int ctr_audio_take_max_frame_gap_us(void) {
+  const u32 gap = __atomic_exchange_n(&s_audio_max_frame_gap, 0, __ATOMIC_RELAXED);
+  return (unsigned int)((u64)gap * 1000000u / SYSCLOCK_ARM11);
 }
 
 int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
