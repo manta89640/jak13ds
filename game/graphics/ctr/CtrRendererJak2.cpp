@@ -23,6 +23,7 @@
 
 #include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrEye.h"
+#include "game/graphics/ctr/CtrGenericJak2.h"
 #include "game/graphics/ctr/CtrLevel.h"
 #include "game/graphics/ctr/CtrMerc.h"
 #include "game/graphics/ctr/CtrRenderer.h"
@@ -656,6 +657,23 @@ void CtrRenderer::init_buckets_jak2() {
   merc(BucketId::MERC_LCOM_PRIS2);
   tex(BucketId::TEX_LCOM_WATER);
   merc(BucketId::MERC_LCOM_WATER);
+  // generic merc (Generic2): the death dissolve, cross-fade, force-mercneric and warp effects
+  for (int i = 0; i < kLevels; i++) {
+    for (auto [l0, l1] : {std::pair{BucketId::GMERC_L0_TFRAG, BucketId::GMERC_L1_TFRAG},
+                          std::pair{BucketId::GMERC_L0_SHRUB, BucketId::GMERC_L1_SHRUB},
+                          std::pair{BucketId::GMERC_L0_ALPHA, BucketId::GMERC_L1_ALPHA},
+                          std::pair{BucketId::GMERC_L0_PRIS, BucketId::GMERC_L1_PRIS},
+                          std::pair{BucketId::GMERC_L0_PRIS2, BucketId::GMERC_L1_PRIS2},
+                          std::pair{BucketId::GMERC_L0_WATER, BucketId::GMERC_L1_WATER}}) {
+      const BucketId id = level_bucket(l0, l1, i);
+      set(id, ctr_make_generic_jak2("generic", (int)id, false));
+    }
+  }
+  for (auto id : {BucketId::GMERC_LCOM_TFRAG, BucketId::GMERC_LCOM_SHRUB, BucketId::GMERC_LCOM_PRIS,
+                  BucketId::GMERC_LCOM_PRIS2, BucketId::GMERC_LCOM_WATER}) {
+    set(id, ctr_make_generic_jak2("generic", (int)id, false));
+  }
+  set(BucketId::GMERC_WARP, ctr_make_generic_jak2("generic-warp", (int)BucketId::GMERC_WARP, true));
   // shadow volumes (Shadow2): config.ini shadows = full with a stencil buffer
   set(BucketId::SHADOW, std::make_unique<CtrShadowJak2Renderer>("shadow", (int)BucketId::SHADOW));
   set(BucketId::SHADOW2,
