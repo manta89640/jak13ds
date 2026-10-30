@@ -1,0 +1,22 @@
+# Tie levels of detail at the PS2's distances (the tie geomorph, c3l::ExtMorph): the title flight,
+# Fire Canyon and village2. Each view: a "view" window (the [softstats] lines in it) and named shots.
+# Host: CTR_SOFT_STATS=60 gk --ctr-gfx --ctr-dump DIR ...
+0 wait *target* target-title-wait
+1200 log view-begin title
+1300 shot ps2lod_title_1300
+1800 shot ps2lod_title_1800
+2300 shot ps2lod_title_2300
+2310 log view-end title
+2320 continue firecanyon-start
+2321 wait *target* target-continue
+2322 wait *target* target-stance
+2620 log view-begin firecanyon
+2980 shot ps2lod_firecanyon
+2981 log view-end firecanyon
+2990 continue village2-start
+2991 wait *target* target-continue
+2992 wait *target* target-stance
+3290 log view-begin village2
+3650 shot ps2lod_village2
+3651 log view-end village2
+3660 exit

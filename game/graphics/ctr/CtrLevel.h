@@ -130,6 +130,10 @@ struct CtrLevelData {
   // the PS2 far-plane x detail_scale (+ hysteresis, + radius): never coarser than the PS2
   float lod_floor_k = 0.f;
   float lod_switch_error(size_t g) const {
+    // (a morph group's near data: within its far-plane)
+    if (g < group_mid.size() && group_mid[g] > 0) {
+      return lod_groups[g].dist * lod_floor_k;
+    }
     return std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
   }
   // (AI-assisted, titlemove) the title screen's least switch distance, in the units of
@@ -489,16 +493,38 @@ struct CtrLevelData {
   };
   std::vector<CondDraw> cond_draws;
   std::vector<c3l::CullCondPlane> cond_planes;
+  // the PS2's tie geomorph (c3l::ExtMorph): per LOD group its mid-plane (0: switched as before),
+  // the morphing instances, the near chunks' rows (instance | band << 30) and per draw the rows
+  // its vertices use; per chunk its MorphChunk (-1: none)
+  std::vector<float> group_mid;
+  std::vector<c3l::MorphInst> morph_insts;
+  std::vector<u32> morph_rows;
+  std::vector<u8> morph_draw_rows;
+  std::vector<c3l::MorphChunk> morph_chunks;
+  std::vector<s32> chunk_morph;
+  std::vector<u32> draw_morph_rows;  // per draw of a morph chunk: its list in morph_draw_rows
+  bool morph_group(size_t g) const { return g < group_mid.size() && group_mid[g] > 0; }
+  float morph_k = 1.f;  // the last draw's distance factor of the morph groups and rows
   std::vector<s32> chunk_normals;
   std::vector<u32> chunk_normals_file;
   int normals_mesh = -1;
   //! where chunk ci's normals are in its mesh (bytes from its vertices)
   u32 normals_offset_in_mesh(size_t ci) const;
-  //! the bytes of chunk ci's normals in its mesh's tail (0: none)
-  u32 normals_tail_bytes(size_t ci) const {
-    return ci < chunk_normals.size() && chunk_normals[ci] == kNormalsInMesh
-               ? chunks[ci].vertex_count * 4
-               : 0;
+  //! the bytes of chunk ci's mesh tail per vertex (0: none): its envmapped tie normals, or its
+  //! c3l::MorphVertex records (the tie geomorph), at normals_offset_in_mesh
+  u32 tail_k(size_t ci) const {
+    if (ci < chunk_morph.size() && chunk_morph[ci] >= 0) {
+      return (u32)sizeof(c3l::MorphVertex);
+    }
+    return ci < chunk_normals.size() && chunk_normals[ci] == kNormalsInMesh ? 4 : 0;
+  }
+  u32 normals_tail_bytes(size_t ci) const { return chunks[ci].vertex_count * tail_k(ci); }
+  //! the file offset of chunk ci's tail (0: none)
+  u32 tail_file(size_t ci) const {
+    if (ci < chunk_morph.size() && chunk_morph[ci] >= 0) {
+      return morph_chunks[chunk_morph[ci]].records_offset;
+    }
+    return tail_k(ci) ? chunk_normals_file[ci] : 0u;
   }
   // wind ties (c3l::ExtWind): the instances, per chunk its slots' byte offset in wind_mesh (-1:
   // none) and its slot instances (chunk_wind_first, chunk_wind_n into wind_slot_inst); the PC's
@@ -755,7 +781,8 @@ class CtrLevels {
     u32 chunk;
     u32 first_vertex, vertex_count;
     u32 index_first, index_end;
-    u32 normals_offset = 0;  // envmapped tie normals for the mesh's tail (file offset, 0: none)
+    u32 normals_offset = 0;  // the mesh's tail (CtrLevelData::tail_file, 0: none)
+    u32 tail_k = 0;          // its bytes per vertex (CtrLevelData::tail_k)
   };
   // (AI-assisted) a merc model mesh to make again (repair)
   struct RepairMerc {
@@ -785,7 +812,8 @@ class CtrLevels {
     struct StreamPart {
       u32 unit, chunk;
       u32 first_vertex, vertex_count, index_first, index_end;
-      u32 normals_offset = 0;  // envmapped tie normals after the indices (file offset, 0: none)
+      u32 normals_offset = 0;  // the mesh's tail after the indices (CtrLevelData::tail_file)
+      u32 tail_k = 0;          // its bytes per vertex
       void* mem = nullptr;
       // the chunk's draws (first_index relative to its indices) and runs, for its time of day
       // groups (layout: not made yet)
@@ -1185,6 +1213,12 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<u32> m_wind_row_id;
   u32 m_wind_rows_id = 0;
   u64 m_wind_draws = 0, m_wind_tris = 0;
+  // the tie geomorph's rows (c3l::ExtMorph: f at 4 * row) per visible chunk with moving vertices
+  // (m_visible index: its first row in m_morph_rows, -1 none) and their ids
+  std::vector<float> m_morph_rows;
+  std::vector<s32> m_morph_row_of;
+  std::vector<u32> m_morph_row_id;
+  u32 m_morph_rows_id = 0;
   void draw_wind_calls(const CtrLevelData& lev);
   void draw_env_calls(std::vector<EnvCall>& calls);
   CtrLevels* m_levels;

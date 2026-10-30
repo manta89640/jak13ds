@@ -1,0 +1,40 @@
+; The PS2's tie geomorph (c3l::ExtMorph, ctr_gpu_draw_mesh_morph): ctr_mesh_opt.v.pica with each
+; vertex moved first by its row's morph factor: pos + morph[row].x * delta, delta in the chunk's
+; quantized units (a second attribute buffer: c3l::MorphVertex; row 0 is zero). The uniforms before
+; morph are ctr_mesh_opt's, at the same places.
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[6]       ; as ctr_mesh_opt.v.pica
+.fvec scales
+.fvec fog1
+.fvec morph[80]     ; per row: x = the morph factor
+
+.out outpos position
+.out outtc texcoord0.xy
+.out - texcoord1 outtc.zw
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+.alias indelta v3
+.alias inrow v4
+
+.entry main_ctr_mesh_morph
+.proc main_ctr_mesh_morph
+  mova a0.x, inrow.x
+  mul outtc.xy, scales.xxxx, intex.xyyy
+  mul r1, morph[a0.x].xxxx, indelta
+  add r1, inpos, r1
+  ; from here ctr_mesh_opt on the moved position r1 (dph reads its xyz)
+  dph r0.x, r1, clip[5]
+  dph r0.y, r1, clip[4]
+  dph outpos.x, r1, clip[0]
+  dph outpos.y, r1, clip[1]
+  max r0.xy, fog1.xyxy, r0.xyxy
+  dph outpos.z, r1, clip[2]
+  max outtc.zw, -r0.xxxx, r0.yyyy
+  dph outpos.w, r1, clip[3]
+  mul outclr, scales.yyyy, inclr
+  end
+.end

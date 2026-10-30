@@ -2392,6 +2392,43 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
 int ctr_gpu_wind_ready(void) {
   return 1;
 }
+void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                             const float* rows, const uint8_t* list, int list_n, uint32_t,
+                             int mesh, int morph_offset, int first_index, int index_count) {
+  sky_hook(state);
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+      morph_offset < 0 || (size_t)morph_offset > g_soft.meshes[mesh].verts.size()) {
+    return;
+  }
+  softstats::prog(1);
+  const auto& m = g_soft.meshes[mesh];
+  static std::vector<uint8_t> moved;
+  moved = m.verts;
+  const SoftVerts sv = soft_verts(moved.data(), m.col_off);
+  const size_t n = m.vertex_bytes() / 16;
+  for (size_t v = 0; v < n && (size_t)morph_offset + 8 * v + 8 <= m.verts.size(); v++) {
+    const uint8_t* rec = &m.verts[morph_offset + 8 * v];
+    const int row = rec[6];
+    if (!row || row >= CTR_MORPH_ROWS || !rows ||
+        std::find(list, list + list_n, row) == list + list_n) {
+      continue;
+    }
+    const float f = rows[4 * row];
+    int16_t pos[3], d[3];
+    uint8_t* const at = (uint8_t*)sv.p((int)v);
+    memcpy(pos, at, sizeof(pos));
+    memcpy(d, rec, sizeof(d));
+    for (int c = 0; c < 3; c++) {
+      pos[c] = (int16_t)std::clamp((int)std::lround(pos[c] + f * d[c]), -32768, 32767);
+    }
+    memcpy(at, pos, sizeof(pos));
+  }
+  g_soft_cur_mesh = mesh;
+  soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
+}
+int ctr_gpu_morph_ready(void) {
+  return 1;
+}
 
 int ctr_gpu_skinned_mesh_create(const void* verts,
                                 int vertex_count,
@@ -2699,9 +2736,14 @@ void ctr_gpu_set_cmd_dump(int) {}  // (AI-assisted)
 // (AI-assisted, gpu-rt) a pass's level draws, one by one
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
   for (int i = 0; i < n; i++) {
-    ctr_gpu_set_mesh_nofog(calls[i].nofog);
-    ctr_gpu_draw_mesh_prepared(calls[i].state, calls[i].matrix, calls[i].mesh,
-                               calls[i].first_index, calls[i].index_count);
+    const ctr_mesh_call& c = calls[i];
+    ctr_gpu_set_mesh_nofog(c.nofog);
+    if (c.morph_rows) {
+      ctr_gpu_draw_mesh_morph(c.state, c.matrix, c.morph_rows, c.morph_list, c.morph_list_n,
+                              c.morph_id, c.mesh, c.morph_offset, c.first_index, c.index_count);
+    } else {
+      ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
+    }
   }
 }
 int ctr_gpu_micro_line(char*, int) {

@@ -1046,7 +1046,7 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       u64 b = 0;
       for (const DetailChunk* k = c; k != j.chunks.data() + j.chunks.size(); k++) {
         b += CtrStreamArena::mesh_bytes(k->vertex_count, k->index_end - k->index_first) +
-             (k->normals_offset ? k->vertex_count * 4 : 0);
+             k->vertex_count * k->tail_k;
       }
       return b;
     };
@@ -1058,7 +1058,7 @@ void CtrLevels::run_parts_job(const Job& job, Done* d) {
       void* vdst;
       u16* idst;
       const u32 count = c.index_end - c.index_first;
-      const int tail = c.normals_offset ? (int)c.vertex_count * 4 : 0;
+      const int tail = c.normals_offset ? (int)(c.vertex_count * c.tail_k) : 0;
       int mesh = ctr_gpu_mesh_begin_tail(c.vertex_count, tail, count, &vdst, &idst);
       while (mesh < 0 && make_room(job.name, "meshes", parts_left_bytes(job, &c))) {
         mesh = ctr_gpu_mesh_begin_tail(c.vertex_count, tail, count, &vdst, &idst);
@@ -1422,9 +1422,7 @@ void CtrLevels::dormant_update(u64 frame) {
         if (!lev.dormant || d < kDormReadMeters * kM) {
           want.emplace_back(d, DetailChunk{(u32)ci, ch.first_vertex, ch.vertex_count,
                                            lev.mesh_index_first[ci], lev.mesh_index_end[ci],
-                                           lev.normals_tail_bytes(ci)
-                                               ? lev.chunk_normals_file[ci]
-                                               : 0u});
+                                           lev.tail_file(ci), lev.tail_k(ci)});
         }
       } else if (d > kDormFreeMeters * kM && lev.meshes[ci] < 0) {
         // left out by an incomplete load (no memory): a freed one now, not one to repair
@@ -1797,8 +1795,7 @@ void CtrLevels::dist_update(u64 frame, u32 free_now) {
       }
       bytes += b;
       job.chunks.push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
-                            lev.mesh_index_end[ci],
-                            lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u});
+                            lev.mesh_index_end[ci], lev.tail_file(ci), lev.tail_k(ci)});
       lev.chunk_dormant[ci] = CtrLevelData::kDistReading;
     }
     std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
@@ -1832,8 +1829,7 @@ void CtrLevels::collect_chunks(const CtrLevelData& lev,
         !(ci < lev.chunk_dormant.size() && lev.chunk_dormant[ci] >= CtrLevelData::kDistFreed) &&
         (!missing_only || ((lev.detail_loaded || far_chunk(lev, ch)) && !lev.dormant_freed(ci)))) {
       out->push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
-                      lev.mesh_index_end[ci],
-                      lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u});
+                      lev.mesh_index_end[ci], lev.tail_file(ci), lev.tail_k(ci)});
     }
   }
   std::sort(out->begin(), out->end(), [](const DetailChunk& a, const DetailChunk& b) {
@@ -4133,7 +4129,7 @@ void load_tie_lod(c3l::Reader& f,
         break;
       }
       auto rl = all[first + r];
-      if (rl.lod != c3l::kRunLodAlways && (rl.group >= lev->lod_groups.size() || rl.lod > 2)) {
+      if (rl.lod != c3l::kRunLodAlways && (rl.group >= lev->lod_groups.size() || rl.lod > 3)) {
         bad++;
         rl = c3l::RunLod{0xffff, c3l::kRunLodAlways, 0};
       }
@@ -4343,6 +4339,77 @@ void load_env_ties(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   lg::info("[ctr] {}: envmapped ties: {} of {} draws with their shine, {} chunks' normals ({} KB, "
            "in the chunks' meshes)",
            lev->name, used, lev->env_draws.size(), chunks, bytes / 1024);
+}
+
+// the PS2's tie geomorph (c3l::ExtMorph), before the meshes: their tails (the MorphVertex
+// records, as the envmapped tie normals). Without it the mid versions are never drawn (their
+// groups switch between near and far as before)
+void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
+  lev->group_mid.clear();
+  lev->morph_insts.clear();
+  lev->morph_rows.clear();
+  lev->morph_draw_rows.clear();
+  lev->morph_chunks.clear();
+  lev->chunk_morph.clear();
+  lev->draw_morph_rows.clear();
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || lev->lod_groups.empty() || !read_ext_header(f, hdr, &eh) ||
+      eh.size < c3l::kExtHeaderMorphSize) {
+    return;
+  }
+  c3l::ExtMorph em{};
+  bool ok = f.read(hdr.ext_offset + c3l::kExtHeaderV24Size, &em, sizeof(em)) && em.chunk_count &&
+            f.read_array(em.insts_offset, em.inst_count, &lev->morph_insts) &&
+            f.read_array(em.chunks_offset, em.chunk_count, &lev->morph_chunks) &&
+            f.read_array(em.rows_offset, em.row_count, &lev->morph_rows) &&
+            f.read_array(em.draw_rows_offset, em.draw_rows_size, &lev->morph_draw_rows) &&
+            f.read_array(em.group_mid_offset, (u32)lev->lod_groups.size(), &lev->group_mid);
+  lev->chunk_morph.assign(lev->chunks.size(), -1);
+  lev->draw_morph_rows.assign(lev->draws.size(), UINT32_MAX);
+  for (size_t i = 0; ok && i < lev->morph_chunks.size(); i++) {
+    const auto& mc = lev->morph_chunks[i];
+    ok = mc.chunk < lev->chunks.size() && lev->chunk_morph[mc.chunk] < 0 && mc.records_offset &&
+         mc.vertex_count == lev->chunks[mc.chunk].vertex_count &&
+         !(mc.chunk < lev->chunk_normals.size() && lev->chunk_normals[mc.chunk] >= 0) &&
+         mc.row_count < c3l::kMorphRows && mc.row_first + mc.row_count <= lev->morph_rows.size();
+    for (u32 r = 0; ok && r < mc.row_count; r++) {
+      const u32 row = lev->morph_rows[mc.row_first + r];
+      const u32 band = row >> 30;
+      ok = (row & 0x3fffffffu) < lev->morph_insts.size() && (band == 1 || band == 2);
+    }
+    // its draws' row lists
+    const auto& ch = ok ? lev->chunks[mc.chunk] : lev->chunks[0];
+    u32 at = mc.draw_rows;
+    for (u32 d = ch.first_draw; ok && d < ch.first_draw + ch.draw_count; d++) {
+      ok = d < lev->draws.size() && at < lev->morph_draw_rows.size() &&
+           at + 1 + lev->morph_draw_rows[at] <= lev->morph_draw_rows.size();
+      for (u32 k = 0; ok && k < lev->morph_draw_rows[at]; k++) {
+        const u8 r = lev->morph_draw_rows[at + 1 + k];
+        ok = r >= 1 && r <= mc.row_count;
+      }
+      if (ok) {
+        lev->draw_morph_rows[d] = at;
+        at += 1 + lev->morph_draw_rows[at];
+      }
+    }
+    if (ok) {
+      lev->chunk_morph[mc.chunk] = (s32)i;
+    }
+  }
+  if (!ok) {
+    lg::warn("[ctr] {}: bad tie geomorph data: the ties switch as before, at rest", lev->name);
+    lev->group_mid.clear();
+    lev->morph_chunks.clear();
+    lev->chunk_morph.clear();
+    lev->draw_morph_rows.clear();
+    return;
+  }
+  size_t groups = 0;
+  for (const float m : lev->group_mid) {
+    groups += m > 0;
+  }
+  lg::info("[ctr] {}: tie geomorph: {} groups, {} instances, {} near chunks with moving vertices",
+           lev->name, groups, lev->morph_insts.size(), lev->morph_chunks.size());
 }
 
 // the kDrawCullCond draws' opening planes (c3l::ExtCullCond); without them those
@@ -4618,7 +4685,7 @@ void load_stream_info(c3l::Reader& f,
         for (u32 r = lev->chunk_first_run[ci]; r < lev->chunk_first_run[ci] + ch.vis_run_count;
              r++) {
           const auto& rl = lev->run_lod[r];
-          if (rl.lod != c3l::kRunLodNear || rl.group >= ng) {
+          if ((rl.lod != c3l::kRunLodNear && rl.lod != c3l::kRunLodMid) || rl.group >= ng) {
             why = "a near chunk run that isn't a near version";
             break;
           }
@@ -4993,7 +5060,7 @@ void make_cull_clusters(CtrLevelData& lev) {
   const bool err = lev.lod_error.size() == ng;
   for (auto& cl : lev.lod_clusters) {
     for (u32 g = cl.first; g < cl.first + cl.count; g++) {
-      cl.raw[0] = std::max(cl.raw[0], err ? lev.lod_error[g] : 0.f);
+      cl.raw[0] = std::max(cl.raw[0], err && !lev.morph_group(g) ? lev.lod_error[g] : 0.f);
       cl.raw[1] = std::max(cl.raw[1], lev.lod_groups[g].dist);
       if ((err && !(lev.lod_error[g] >= 0)) || !(lev.lod_groups[g].dist >= 0)) {
         cl.flags |= CtrLevelData::kClPlain;  // (a negative switch distance: one by one)
@@ -5621,6 +5688,7 @@ bool CtrLevels::load_file(const fs::path& path,
   // kDistLoadMargin, the merc models' too): the chunks far beyond their draw distance are left for
   // later, read back by distance ("Distance freeing")
   load_env_tie_chunks(f, hdr, out);  // before the meshes: their tails
+  load_morph(f, hdr, out);
   std::vector<u8> dist_skip;
   if (g_game_version == GameVersion::Jak2) {
     auto chunk_range = [&](const c3l::Chunk& ch, u32* first, u32* end) {
@@ -5770,7 +5838,7 @@ bool CtrLevels::load_file(const fs::path& path,
       read_ok = read_ok &&
                 read_split_vertices(f, hdr.vertex_data_offset + ch.first_vertex * sizeof(c3l::Vertex),
                                     ch.vertex_count, vdst);
-      read_ok = read_ok && (!ntail || f.read(out->chunk_normals_file[ci],
+      read_ok = read_ok && (!ntail || f.read(out->tail_file(ci),
                                              (u8*)vdst + ch.vertex_count * 16, ntail));
       if (read_ok && !out->run_spheres.empty()) {
         // (AI-assisted, streaming) host check: the v19 file's spheres are these
@@ -7077,7 +7145,8 @@ void CtrLevels::stream_idle_fill(u64 frame) {
     part.vertex_count = ch.vertex_count;
     part.index_first = lev.mesh_index_first[ci];
     part.index_end = lev.mesh_index_end[ci];
-    part.normals_offset = lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u;
+    part.normals_offset = lev.tail_file(ci);
+    part.tail_k = lev.tail_k(ci);
     part.mem = mem;
     part.layout = lev.tod && !su.tod_layout;
     if (part.layout) {
@@ -7619,7 +7688,8 @@ void CtrLevels::stream_update(u64 frame) {
     part.vertex_count = ch.vertex_count;
     part.index_first = lev.mesh_index_first[ci];
     part.index_end = lev.mesh_index_end[ci];
-    part.normals_offset = lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u;
+    part.normals_offset = lev.tail_file(ci);
+    part.tail_k = lev.tail_k(ci);
     part.mem = mem;
     part.layout = lev.tod && !su.tod_layout;
     if (part.layout) {
@@ -7699,7 +7769,8 @@ void CtrLevels::stream_update(u64 frame) {
       part.vertex_count = ch.vertex_count;
       part.index_first = lev.mesh_index_first[ci];
       part.index_end = lev.mesh_index_end[ci];
-      part.normals_offset = lev.normals_tail_bytes(ci) ? lev.chunk_normals_file[ci] : 0u;
+      part.normals_offset = lev.tail_file(ci);
+      part.tail_k = lev.tail_k(ci);
       part.mem = mem;
       part.layout = lev.tod && !su.tod_layout;
       if (part.layout) {
@@ -7779,8 +7850,8 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
       void* vdst;
       u16* idst;
       const u32 icount = p.index_end - p.index_first;
-      // its envmapped tie normals after the indices (CtrLevelData::normals_offset_in_mesh)
-      const u32 ntail = p.normals_offset ? p.vertex_count * 4 : 0;
+      // its tail after the indices (CtrLevelData::normals_offset_in_mesh)
+      const u32 ntail = p.normals_offset ? p.vertex_count * p.tail_k : 0;
       void* ndst = nullptr;
       int mesh = ctr_gpu_mesh_begin_ext_tail(p.mem, (int)p.vertex_count, (int)icount,
                                              CtrStreamArena::mesh_bytes(p.vertex_count, icount),
@@ -8336,8 +8407,10 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     u8 nomerge = 0, lod_version = 0;
     if (LOD) {
       const auto& rl = run_lod[r];
-      if (rl.lod != c3l::kRunLodAlways &&
-          (rl.lod == c3l::kRunLodNear) != (bool)(lod_state[rl.group] & 1)) {
+      // (bit 3: a morph group's mid version, c3l::ExtMorph)
+      const u8 gs = rl.lod != c3l::kRunLodAlways ? lod_state[rl.group] : 0;
+      const u8 want = (gs & 1) ? ((gs & 8) ? c3l::kRunLodMid : c3l::kRunLodNear) : c3l::kRunLodFar;
+      if (rl.lod != c3l::kRunLodAlways && rl.lod != want) {
         nomerge = 1;
         if (s) {
           s = false;
@@ -8368,7 +8441,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     shown_out[r] = s;
     shown += s;
     if (LOD && s && lod_version) {
-      (lod_version == 1 ? lod_tris1 : lod_tris2) += run.index_count / 3;  // (AI-assisted)
+      (lod_version == c3l::kRunLodFar ? lod_tris2 : lod_tris1) += run.index_count / 3;
     }
   }
   out->shown = shown;
@@ -9577,6 +9650,24 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
     // view once the data came (1 s at 30 fps)
     constexpr u32 kHoldFrames = 30;  // (AI-assisted, lodnear: was 120)
+    // the PS2's geomorph (c3l::ExtMorph): its distances x detail_scale, pulled in by auto_detail's
+    // relief (tie_lod_px 1 -> 4: x 1 -> 0.5; the morph rows use the same factor, so it shows no
+    // switch)
+    const bool morph_on = !lev.group_mid.empty();
+    float kd = k0;
+    if (morph_on && settings.auto_detail) {
+      const float px0 = std::max(settings.tie_lod_px, 0.25f);
+      kd = k0 * std::sqrt(px0 / std::max(relief.at(t_pos).tie_lod_px, px0));
+    }
+    auto dx2 = [&](const float* c) {
+      const float x = c[0] - cx, y = c[1] - cy, z = c[2] - cz;
+      return x * x + y * y + z * z;
+    };
+    lev.morph_k = kd;
+#ifndef __3DS__
+    // host A/B, env CTR_MORPH_AB: on odd frames 1 every morph group's near version, 2 no morph
+    static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
+#endif
     // (AI-assisted, j2cull) cluster by cluster (CtrLevelData::CullCluster): a cluster beyond every
     // member's near distance (largest switch distance x k, with margins for float rounding) whose
     // members all were far and not held last frame (state 2) stands for their decisions: each
@@ -9621,6 +9712,45 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (size_t g = gcl.first, g_end = gcl.first + gcl.count; g < g_end; g++) {
       const auto& lg = lev.lod_groups[g];
       u8& st = lev.lod_state[g];
+      if (morph_on && lev.group_mid[g] > 0) {
+        // the PS2's rule (c3l::ExtMorph), by the distance to the group's sphere (no instance is
+        // nearer): the near version within the mid-plane, the mid version within the far-plane.
+        // Every version draws the instances' morphed surface: no hysteresis
+        const float dv = std::sqrt(dx2(lg.bsphere)) - lg.bsphere[3];
+        u8 v = !(kd > 0) ? 2 : dv < lev.group_mid[g] * kd ? 0 : dv < lg.dist * kd ? 1 : 2;
+#ifndef __3DS__
+        if (morph_ab == 1 && (rs.frame_idx & 1)) {
+          v = 0;  // (host A/B: every group's near version, the surface the same)
+        }
+#endif
+        if (v < 2 && has_units) {
+          bool ok = g < lev.group_unit_count.size() && lev.group_unit_count[g] > 0;
+          bool late = false;
+          const u32* gu = ok ? &lev.group_units[lev.group_unit_first[g]] : nullptr;
+          for (u32 j = 0; ok && j < lev.group_unit_count[g]; j++) {
+            ok = lev.unit_ok[gu[j]] == 1;
+            late = late || lev.unit_ok[gu[j]] == 3;
+          }
+          if (!ok) {
+            v = 2;
+            if (late) {
+              late_groups++;
+              for (u32 j = 0; j < lev.group_unit_count[g]; j++) {
+                if (lev.unit_ok[gu[j]] == 3) {
+                  m_levels->stream_late(lev, gu[j], rs.frame_idx);
+                }
+              }
+              const bool seen = sphere_in_view(cam, lg.bsphere);
+              m_late_in_view += seen;
+              late_view += seen;
+            }
+          }
+        }
+        lod_q[g] = q_now;
+        st = (u8)(2 | (v < 2 ? 1 : 0) | (v == 1 ? 8 : 0));
+        near += v < 2;
+        continue;
+      }
       const float dx = lg.bsphere[0] - cx, dy = lg.bsphere[1] - cy, dz = lg.bsphere[2] - cz;
       const float d2 = dx * dx + dy * dy + dz * dz;
       const float sw = by_error ? lev.lod_switch_error(g) : lg.dist;
@@ -10617,6 +10747,54 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   };
   u32 fade_di = UINT32_MAX;  // the last faded call's draw and fade (fade_submit)
   u8 fade_fd = 0;
+  // the tie geomorph (c3l::ExtMorph): each visible chunk's rows, its instances' morph factors as
+  // the PS2's (d the distance to the instance's sphere: the PS2 takes its view depth, which turning
+  // the camera changes; band 1 from the near-plane, band 2 from the mid-plane, f = clamp((d -
+  // start) * rlength, 0, 1)), the distances x morph_k
+  const bool morph_draws = !lev.chunk_morph.empty() && !lev.group_mid.empty() &&
+                           lev.draw_morph_rows.size() == lev.draws.size();
+  if (morph_draws) {
+    const float kd = lev.morph_k;
+    const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
+    size_t n = 0;
+    for (const auto& vc : m_visible) {
+      const s32 mi = lev.chunk_morph[vc.chunk];
+      n += mi >= 0 ? 4 * (lev.morph_chunks[mi].row_count + 1) : 0;
+    }
+    m_morph_rows.resize(n);
+    m_morph_row_of.assign(m_visible.size(), -1);
+    m_morph_row_id.assign(m_visible.size(), 0);
+    float* out = m_morph_rows.data();
+    size_t at = 0;
+    for (size_t slot = 0; slot < m_visible.size(); slot++) {
+      const s32 mi = lev.chunk_morph[m_visible[slot].chunk];
+      if (mi < 0) {
+        continue;
+      }
+      const auto& mc = lev.morph_chunks[mi];
+      m_morph_row_of[slot] = (s32)at;
+      m_morph_row_id[slot] = ++m_morph_rows_id ? m_morph_rows_id : ++m_morph_rows_id;
+      float* row = out + at;
+      row[0] = row[1] = row[2] = row[3] = 0.f;
+      const u32* keys = &lev.morph_rows[mc.row_first];
+      for (u32 r = 0; r < mc.row_count; r++) {
+        const u32 key = keys[r];
+        const auto& in = lev.morph_insts[key & 0x3fffffffu];
+        const int b = (int)(key >> 30) - 1;
+        const float ex = in.c[0] - px, ey = in.c[1] - py, ez = in.c[2] - pz;
+        const float d = std::sqrt(ex * ex + ey * ey + ez * ez) - in.r;
+        const float f = kd > 0 ? (d - in.start[b] * kd) * in.rlen[b] / kd : 0.f;
+        row[4 * (r + 1)] = std::clamp(f, 0.f, 1.f);
+#ifndef __3DS__
+        static const int morph_ab = getenv("CTR_MORPH_AB") ? atoi(getenv("CTR_MORPH_AB")) : 0;
+        if (morph_ab == 2 && (rs.frame_idx & 1)) {
+          row[4 * (r + 1)] = 0.f;
+        }
+#endif
+      }
+      at += 4 * (mc.row_count + 1);
+    }
+  }
   // wind ties: their draws through ctr_gpu_draw_mesh_wind with the chunk's slot rows
   const bool wind_on = lev.wind_mesh >= 0 && lev.chunk_wind.size() == lev.chunks.size() &&
                        lev.draw_wind.size() == lev.draws.size() &&
@@ -10663,6 +10841,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const auto& dr = lev.draws[di];
     const int env = lev.draw_env.empty() ? -1 : lev.draw_env[di];  // (AI-assisted, j2water2)
     const bool wind = wind_on && !vista_pass && env < 0 && lev.draw_wind[di];
+    // the tie geomorph: a draw whose vertices move
+    const u32 mlist = morph_draws && !vista_pass && !wind && env < 0 ? lev.draw_morph_rows[di]
+                                                                     : UINT32_MAX;
+    const bool morph = mlist != UINT32_MAX && lev.morph_draw_rows[mlist] &&
+                       m_morph_row_of[slot] >= 0;
+    const float* const mrows = morph ? &m_morph_rows[m_morph_row_of[slot]] : nullptr;
+    const int moff = morph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
 #ifdef __3DS__
     // (AI-assisted, gpu-rt) the pass's draws go to the backend in one list
     auto submit = [&](u32 first, u32 count) {
@@ -10672,6 +10857,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       if (env >= 0) {
         env_submit(di, vc, env, first, count);
+        return;
+      }
+      if (morph) {
+        m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
+                           (int)count, vc.nofog ? 1 : 0, mrows, &lev.morph_draw_rows[mlist + 1],
+                           lev.morph_draw_rows[mlist], moff, m_morph_row_id[slot]});
         return;
       }
       m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
@@ -10692,6 +10883,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         // (AI-assisted, j2water) Jak II's blended draws, drawn later (draw_jak2_late)
         m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
                            (int)count, vc.nofog ? 1 : 0});
+        return;
+      }
+      if (morph) {
+        ctr_gpu_draw_mesh_morph(&lev.draw_states[di], &vc.gpu, mrows,
+                                &lev.morph_draw_rows[mlist + 1], lev.morph_draw_rows[mlist],
+                                m_morph_row_id[slot], lev.meshes[vc.chunk], moff, (int)first,
+                                (int)count);
         return;
       }
       ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], first,

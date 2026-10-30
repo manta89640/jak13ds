@@ -53,6 +53,11 @@ extern const size_t ctr_etie_fa_shbin_size;
 /* Jak 1's wind ties (ctr_gpu_draw_mesh_wind), with shader_opt's set */
 extern const uint8_t ctr_mesh_wind_shbin[];
 extern const size_t ctr_mesh_wind_shbin_size;
+/* the PS2's tie geomorph (ctr_gpu_draw_mesh_morph), with shader_opt's set */
+extern const uint8_t ctr_mesh_morph_shbin[];
+extern const size_t ctr_mesh_morph_shbin_size;
+extern const uint8_t ctr_mesh_morph_fa_shbin[];
+extern const size_t ctr_mesh_morph_fa_shbin_size;
 /* (AI-assisted) the Oct 2 shaders (hardware proven; the level meshes and merc without shader_opt,
  * config.ini shader_basic = old). The Oct 3 ctr_mesh / ctr_skin / ctr_skin_env (the new ctr_mesh
  * hung the real GPU), the dph bisect mesh and the shader_groups shbins were removed on Oct 16. */
@@ -324,11 +329,14 @@ enum {
   PROG_MESH_WIND, /* ctr_gpu_draw_mesh_wind (ctr_mesh_wind.v.pica, set 1 only) */
   PROG_SKIN_MASK, /* PROG_SKIN for textures with an alpha mask (on unit 2) */
   PROG_ETIE_FA,   /* PROG_ETIE for textures with an alpha mask (on unit 1) */
+  PROG_MESH_MORPH,    /* ctr_gpu_draw_mesh_morph (ctr_mesh_morph.v.pica, set 1 only) */
+  PROG_MESH_MORPH_FA, /* the same with the fog in the alpha (ctr_mesh_morph_fa.v.pica) */
 };
 /* (AI-assisted) the level mesh programs (one vertex layout, the same uniforms) */
 static inline int is_mesh_prog(int prog) {
   return prog == PROG_MESH || prog == PROG_MESH_FA || prog == PROG_MESH_DF ||
-         prog == PROG_MESH_DF_FA || prog == PROG_MESH_WIND;
+         prog == PROG_MESH_DF_FA || prog == PROG_MESH_WIND || prog == PROG_MESH_MORPH ||
+         prog == PROG_MESH_MORPH_FA;
 }
 
 /* (AI-assisted) The vertex programs and their uniforms' places, one shbin per program. Set 0: the
@@ -364,6 +372,10 @@ typedef struct {
    * places (wind_ok), then the slot rows */
   shaderProgram_s mesh_wind;
   int uloc_wind, wind_ok;
+  /* the tie geomorph (set 1; no vertexShader: not loaded): the mesh uniforms at the mesh program's
+   * places (morph_ok), then the rows */
+  shaderProgram_s mesh_morph, mesh_morph_fa;
+  int uloc_morph, morph_ok;
   /* the alpha mask programs (c3l v23), their uniforms at skin's / etie's places */
   shaderProgram_s skin_mask, etie_fa;
   int mask_ok, etie_fa_ok;
@@ -407,10 +419,12 @@ static struct {
   DVLB_s* ocean_env_dvlb; /* (AI-assisted, j2water) ctr_ocean_env.v.pica (Jak II) */
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
   DVLB_s* wind_dvlb;      /* ctr_mesh_wind.v.pica */
+  DVLB_s* morph_dvlb[2];  /* ctr_mesh_morph(_fa).v.pica */
   /* ctr_skin_old_mask, ctr_skin_opt_mask, ctr_etie_fa.v.pica */
   DVLB_s* skin_mask_dvlb[2];
   DVLB_s* etie_fa_dvlb;
   u32 wind_rows_id;       /* the slot rows the GPU has (ctr_gpu_draw_mesh_wind), 0: none */
+  u32 morph_slot_id[CTR_MORPH_ROWS]; /* each row's rows_id on the GPU (ctr_gpu_draw_mesh_morph) */
   int ocean_tex2_bound; /* texture unit 2 holds the ocean's shimmer texture */
   /* combiner stage 2 isn't pass-through: 1 a fog stage (ocean, merc fog) or Jak II's ocean env /
    * etie stage, 2 the PS2 ocean's. (AI-assisted) Only says "reset it": the merc fog draws commit
@@ -911,6 +925,8 @@ static void use_program(int prog) {
                                 : prog == PROG_OCEAN_ENV ? &g.ps->ocean_env
                                 : prog == PROG_ETIE ? &g.ps->etie
                                 : prog == PROG_MESH_WIND ? &g.ps->mesh_wind
+                                : prog == PROG_MESH_MORPH ? &g.ps->mesh_morph
+                                : prog == PROG_MESH_MORPH_FA ? &g.ps->mesh_morph_fa
                                 : prog == PROG_SKIN_MASK ? &g.ps->skin_mask
                                 : prog == PROG_ETIE_FA ? &g.ps->etie_fa
                                                         : &g.ps->mesh;
@@ -1017,6 +1033,8 @@ static void use_program(int prog) {
                     : prog == PROG_MESH_DF    ? &g.ps->mesh_df
                     : prog == PROG_MESH_DF_FA ? &g.ps->mesh_df_fa
                     : prog == PROG_MESH_WIND  ? &g.ps->mesh_wind
+                    : prog == PROG_MESH_MORPH ? &g.ps->mesh_morph
+                    : prog == PROG_MESH_MORPH_FA ? &g.ps->mesh_morph_fa
                                               : &g.ps->mesh);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
@@ -1025,6 +1043,11 @@ static void use_program(int prog) {
     if (prog == PROG_MESH_WIND) {
       AttrInfo_AddLoader(attr, 3, GPU_UNSIGNED_BYTE, 1); /* wind slot */
       g.wind_rows_id = 0; /* (a switch keeps no uniforms) */
+    }
+    if (prog == PROG_MESH_MORPH || prog == PROG_MESH_MORPH_FA) {
+      AttrInfo_AddLoader(attr, 3, GPU_SHORT, 3);         /* c3l::MorphVertex delta */
+      AttrInfo_AddLoader(attr, 4, GPU_UNSIGNED_BYTE, 2); /* row, pad */
+      memset(g.morph_slot_id, 0, sizeof(g.morph_slot_id));
     }
     /* (AI-assisted) skin's value (w = 1/127: no mesh shader reads w) */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f,
@@ -1257,8 +1280,9 @@ static void prog_set_free(ProgSet* p) {
   for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
     shaderProgramFree(all[i]);
   }
-  shaderProgram_s* maybe[] = {&p->mesh_fa, &p->mesh_df,   &p->mesh_df_fa, &p->ocean_env,
-                              &p->etie,    &p->mesh_wind, &p->skin_mask,  &p->etie_fa};
+  shaderProgram_s* maybe[] = {&p->mesh_fa,   &p->mesh_df,       &p->mesh_df_fa, &p->ocean_env,
+                              &p->etie,      &p->mesh_wind,     &p->skin_mask,  &p->etie_fa,
+                              &p->mesh_morph, &p->mesh_morph_fa};
   for (size_t i = 0; i < sizeof(maybe) / sizeof(maybe[0]); i++) {
     if (maybe[i]->vertexShader) {
       shaderProgramFree(maybe[i]);
@@ -1315,7 +1339,7 @@ static struct {
   DVLE_s* dvle;
   DVLP_s* own;
   u32 main, endmain, base;
-} s_res_prog[34]; /* 2 x 17 */
+} s_res_prog[38]; /* 2 x 19 */
 static int s_res_n;
 static int s_res_on; /* the DVLEs point at the image */
 
@@ -1346,17 +1370,17 @@ static void resident_programs(const ProgSet* rp) {
     printf("[ctr] shader_resident: off\n");
     return;
   }
-  DVLE_s* dvles[2 * 17];
+  DVLE_s* dvles[2 * 19];
   int n = 0;
   for (int k = 0; k < 1; k++) {
     const ProgSet* p = rp;
     /* (AI-assisted, j2water) + ocean_env (Jak II); (j2water2) + etie (Jak II) */
-    const shaderProgram_s* all[17] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
+    const shaderProgram_s* all[19] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
                                 &p->env,       &p->clip,       &p->clip2,      &p->ocean,
                                 &p->ocean_full, &p->ocean_full_clip, &p->mesh_df, &p->mesh_df_fa,
                                 &p->ocean_env, &p->etie,       &p->mesh_wind,  &p->skin_mask,
-                                &p->etie_fa};
-    for (int i = 0; i < 17; i++) {
+                                &p->etie_fa,   &p->mesh_morph, &p->mesh_morph_fa};
+    for (int i = 0; i < 19; i++) {
       if (!all[i]->vertexShader) {
         continue;
       }
@@ -1371,8 +1395,8 @@ static void resident_programs(const ProgSet* rp) {
     }
   }
   /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
-  DVLP_s* dvlps[2 * 17];
-  u32 base[2 * 17];
+  DVLP_s* dvlps[2 * 19];
+  u32 base[2 * 19];
   int np = 0;
   u32 code = 0, ndesc = 0;
   for (int i = 0; i < n; i++) {
@@ -1535,7 +1559,29 @@ static void load_opt_set(void) {
     shaderProgramInit(&p->mesh_wind);
     shaderProgramSetVsh(&p->mesh_wind, &g.wind_dvlb->DVLE[0]);
   }
+  g.morph_dvlb[0] = DVLB_ParseFile((u32*)ctr_mesh_morph_shbin, (u32)ctr_mesh_morph_shbin_size);
+  g.morph_dvlb[1] =
+      DVLB_ParseFile((u32*)ctr_mesh_morph_fa_shbin, (u32)ctr_mesh_morph_fa_shbin_size);
+  if (g.morph_dvlb[0] && g.morph_dvlb[1]) {
+    shaderProgramInit(&p->mesh_morph);
+    shaderProgramSetVsh(&p->mesh_morph, &g.morph_dvlb[0]->DVLE[0]);
+    shaderProgramInit(&p->mesh_morph_fa);
+    shaderProgramSetVsh(&p->mesh_morph_fa, &g.morph_dvlb[1]->DVLE[0]);
+  }
   prog_set_ulocs(p, 1);
+  if (p->mesh_morph.vertexShader && p->mesh_morph_fa.vertexShader) {
+    p->morph_ok = 1;
+    const shaderProgram_s* mp[2] = {&p->mesh_morph, &p->mesh_morph_fa};
+    p->uloc_morph = shaderInstanceGetUniformLocation(mp[0]->vertexShader, "morph");
+    for (int i = 0; i < 2; i++) {
+      shaderInstance_s* vs = mp[i]->vertexShader;
+      p->morph_ok &= p->uloc_morph >= 0 &&
+                     shaderInstanceGetUniformLocation(vs, "morph") == p->uloc_morph &&
+                     shaderInstanceGetUniformLocation(vs, "clip") == p->uloc_clip &&
+                     shaderInstanceGetUniformLocation(vs, "scales") == p->uloc_scales &&
+                     shaderInstanceGetUniformLocation(vs, "fog1") == p->uloc_fog1;
+    }
+  }
   if (p->mesh_wind.vertexShader) {
     shaderInstance_s* vs = p->mesh_wind.vertexShader;
     p->uloc_wind = shaderInstanceGetUniformLocation(vs, "wind");
@@ -1805,7 +1851,8 @@ void ctr_gpu_exit(void) {
   DVLB_s* dvlbs[] = {g.dvlb,      g.mesh_dvlb,  g.mesh_fa_dvlb, g.skin_dvlb,
                      g.env_dvlb,  g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
                      g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb,
-                     g.wind_dvlb, g.skin_mask_dvlb[0], g.skin_mask_dvlb[1], g.etie_fa_dvlb};
+                     g.wind_dvlb, g.skin_mask_dvlb[0], g.skin_mask_dvlb[1], g.etie_fa_dvlb,
+                     g.morph_dvlb[0], g.morph_dvlb[1]};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
     if (dvlbs[i]) {
       DVLB_Free(dvlbs[i]);
@@ -7762,9 +7809,15 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
     return;
   }
   for (int i = 0; i < n; i++) {
-    g.mesh_nofog = calls[i].nofog ? 1 : 0;
-    ctr_gpu_draw_mesh_prepared(calls[i].state, calls[i].matrix, calls[i].mesh,
-                               calls[i].first_index, calls[i].index_count);
+    const ctr_mesh_call* c = &calls[i];
+    g.mesh_nofog = c->nofog ? 1 : 0;
+    if (c->morph_rows) {
+      ctr_gpu_draw_mesh_morph(c->state, c->matrix, c->morph_rows, c->morph_list, c->morph_list_n,
+                              c->morph_id, c->mesh, c->morph_offset, c->first_index,
+                              c->index_count);
+    } else {
+      ctr_gpu_draw_mesh_prepared(c->state, c->matrix, c->mesh, c->first_index, c->index_count);
+    }
   }
 }
 
@@ -7823,6 +7876,80 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
 
 int ctr_gpu_wind_ready(void) {
   return g.ready && s_ps[1].wind_ok;
+}
+
+/* the PS2's tie geomorph (see ctr_gpu.h): ctr_gpu_draw_mesh_prepared's citro3d path with the morph
+ * program, a second attribute buffer (the mesh's MorphVertex records) and the rows, uploaded when
+ * they change. Without the program: at rest. */
+void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                             const float* rows, const uint8_t* list, int list_n, uint32_t rows_id,
+                             int mesh, int morph_offset, int first_index, int index_count) {
+  if (!g.ready || !g.in_frame || !g.ps->morph_ok || !rows || list_n < 0 || !rows_id ||
+      morph_offset < 0 || (morph_offset & 15) || mesh < 0 || mesh >= MAX_MESHES ||
+      g.meshes[mesh].used != 1) {
+    ctr_gpu_draw_mesh_prepared(state, matrix, mesh, first_index, index_count);
+    return;
+  }
+  SKY_HOOK(state);
+  if (index_count < 3 || !cmd_room()) {
+    return;
+  }
+  const int fa = g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80) &&
+                 (g_fog_alpha || tex_mask(tex_res(state->tex)) >= 0);
+  use_program(fa ? PROG_MESH_MORPH_FA : PROG_MESH_MORPH);
+  {
+    const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
+    if (atlas != g.mesh_st_atlas) {
+      g.mesh_st_atlas = atlas;
+      mesh_scales_set(atlas, 0);
+    }
+  }
+  const MeshSlot* ms = &g.meshes[mesh];
+  const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
+  g.cur.nofog_draws += g.mesh_nofog && !fa;
+  g.cur.fog_alpha_draws += fa;
+  if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+    g.last_clip_id = matrix->id;
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
+    float r[8];
+    mesh_fog_rows(matrix->m, r);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 4, r[3], r[2], r[1], r[0]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 5, r[7], r[6], r[5], r[4]);
+  }
+  g.last_mesh_valid = 1;
+  if (!g.morph_slot_id[0]) {
+    g.morph_slot_id[0] = 1;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_morph, 0.f, 0.f, 0.f, 0.f);
+  }
+  for (int i = 0; i < list_n; i++) {
+    const int r = list[i];
+    if (r > 0 && r < CTR_MORPH_ROWS && g.morph_slot_id[r] != rows_id) {
+      g.morph_slot_id[r] = rows_id;
+      C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_morph + r, rows[4 * r], 0.f, 0.f, 0.f);
+    }
+  }
+  raw_note_unif();
+  {
+    /* each buffer's attributes add up to its stride (j1hang: the real GPU hangs else) */
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    if (ms->col_off) {
+      BufInfo_Add(buf, ms->verts, 12, 2, 0x10);
+      BufInfo_Add(buf, (const u8*)ms->verts + ms->col_off, 4, 1, 0x2);
+    } else {
+      BufInfo_Add(buf, ms->verts, 16, 3, 0x210);
+    }
+    BufInfo_Add(buf, (const u8*)ms->verts + morph_offset, 8, 2, 0x43);
+  }
+  apply_state(state, mesh_mode, 0);
+  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
+  BufInfo_Init(C3D_GetBufInfo());
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
+}
+
+int ctr_gpu_morph_ready(void) {
+  return g.ready && s_ps[1].morph_ok;
 }
 
 /* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call */

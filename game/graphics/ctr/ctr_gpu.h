@@ -704,6 +704,11 @@ typedef struct {
   const ctr_draw_state* state;
   const ctr_mesh_matrix* matrix;
   int mesh, first_index, index_count, nofog;
+  /* morph_rows: a ctr_gpu_draw_mesh_morph draw (its other arguments here); NULL: none */
+  const float* morph_rows;
+  const uint8_t* morph_list;
+  int morph_list_n, morph_offset;
+  uint32_t morph_id;
 } ctr_mesh_call;
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n);
 /* Jak 1's wind ties (c3l::ExtWind): a level mesh draw (as ctr_gpu_draw_mesh_prepared) whose
@@ -718,6 +723,19 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
                             int slots_mesh, int slots_offset, int first_index, int index_count);
 /* 1 when the wind program can be loaded (ctr_gpu_draw_mesh_wind may sway) */
 int ctr_gpu_wind_ready(void);
+/* The PS2's tie geomorph (c3l::ExtMorph): a level mesh draw (as ctr_gpu_draw_mesh_prepared) whose
+ * vertices move by their row's morph factor, platform/3ds/shaders/ctr_mesh_morph.v.pica. The mesh
+ * holds from byte morph_offset (a multiple of 16) a c3l::MorphVertex per vertex (8 bytes: int16
+ * delta[3] in its quantized units, uint8 row, pad): the vertex is drawn at pos + f * delta, f =
+ * rows[4 * row] (row 0: 0). list: the rows the draw's vertices use (1 .. CTR_MORPH_ROWS - 1);
+ * rows_id: new whenever the rows change (rows the GPU has for this id aren't sent again). Without
+ * the program it is drawn at rest. */
+#define CTR_MORPH_ROWS 80
+void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                             const float* rows, const uint8_t* list, int list_n, uint32_t rows_id,
+                             int mesh, int morph_offset, int first_index, int index_count);
+/* 1 when the morph program can be loaded (ctr_gpu_draw_mesh_morph moves the vertices) */
+int ctr_gpu_morph_ready(void);
 /* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call ([ctr] gpu micro ...);
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);
