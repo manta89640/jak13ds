@@ -49,6 +49,13 @@ void Reader::Buffers::reserve(size_t window_size, size_t max_block) {
   }
 }
 
+void Reader::Buffers::release() {
+  for (auto* v : {&window[0], &window[1], &cache[0], &cache[1]}) {
+    std::vector<uint8_t>().swap(*v);
+  }
+  close_kept();
+}
+
 Reader::Reader(const char* path, size_t window, Buffers* buffers)
     : m_f(fopen(path, "rb")), m_window_cap(window) {
   if (buffers) {

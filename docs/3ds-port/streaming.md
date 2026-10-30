@@ -139,6 +139,14 @@ groups, 50 m: 4.2 / 6.3 Snowy).
   each one's time of day colors written first with the current blend (below), at most 16k vertices
   a frame (a chunk at least; the rest the next frame): the unit is there from that frame on.
 
+- **During a level load** (a neighbour's, while levels are drawn): between the load's chunk and
+  model reads the loader runs the urgent stream jobs queued meanwhile (`serve_streams_in_load`),
+  with reader buffers of their own (two 128 KB windows and the block caches, ~384 KB of heap,
+  taken at the first such job of the load only while the heap has a block that big + 2 MB, given
+  back at its end; the zstd decoder is shared). A load the game waits for (nothing drawn) is not
+  interrupted. Before, the near chunks needed right after entering a level waited for the whole
+  neighbour load (seconds). Log: `<level>: N near chunk jobs read during its load`.
+
 ## Levels not drawn yet, level starts (title3, Oct 22)
 
 - **Hidden levels**: a level that is loaded but not drawn in any mode for 3 frames (Sandover behind
@@ -410,3 +418,21 @@ Host switches: `CTR_SOFT_NO_RASTER=1` (no pixels: long memory runs ~10x faster),
 `CTR_MEM_LOG_EVERY=N` (the `[ctr] memory` line every N frames; it is also logged every stats
 period: per level linear / heap KB, the linear memory by kind, the free linear memory and heap on
 the 3DS), `CTR_MEM_FIELDS=1` (a level's biggest heap tables at load).
+
+## Jak II: distance freeing in play (citymem)
+
+Haven City's sets (two districts, ctywide, lwidea) hold more meshes than the linear heap has; most
+of it is shrubs and distance-limited ties, never drawn beyond their distance. Every Jak II level
+has `dist_free` on from its load. While the loaded levels leave less than 12 MB above the stream
+arena's floor (`kDistPlayRoom`, the room a level load wants; the arena's growth counted as free),
+`dist_update` frees, every 15 frames and not within 2 s of a camera cut, the chunks more than 90 m
+(`kDistPlayFreeMeters`) beyond their largest draw distance from the camera, its lead positions and
+Jak, the farthest first. They come back as before, 30 m beyond their distance (no back and forth
+in between). A load short of memory still leaves far chunks out and makes room as before. The
+statistics line `distance freeing: N chunks freed (KB; M times in play), J read backs of K chunks
+(KB)` replaces the per-read log lines.
+
+Failed or left-out parts now log an error with the level, the section (tfrag tier, ties,
+distance-limited ties, shrubs, vista, merc model, textures, a read back's kind), the bytes needed
+and the linear heap's free memory and largest block.
+

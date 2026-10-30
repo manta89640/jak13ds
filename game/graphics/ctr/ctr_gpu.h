@@ -576,6 +576,8 @@ static inline unsigned int ctr_gpu_ext_index_offset(int vertex_count) {
 void* ctr_gpu_linear_block(unsigned int bytes);
 void ctr_gpu_linear_block_free(void* p);
 unsigned int ctr_gpu_linear_free(void);
+/* the largest block of linear memory one allocation can get now (probes: not every frame) */
+unsigned int ctr_gpu_linear_largest(void);
 /* (AI-assisted) Free the deleted textures, pools and meshes now instead of at the next frame
  * begin, once the GPU has finished what it was given (a level was unloaded and the next one loads
  * on another thread: with no frames drawn meanwhile its memory stayed taken). Only while no frame

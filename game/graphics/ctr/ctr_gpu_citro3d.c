@@ -7249,6 +7249,10 @@ unsigned int ctr_gpu_linear_free(void) {
   return n;
 }
 
+unsigned int ctr_gpu_linear_largest(void) {
+  return linear_largest_block();
+}
+
 int ctr_gpu_mesh_begin_ext(void* mem, int vertex_count, int index_count, void** verts,
                            uint16_t** indices) {
   if (!g.ready || !mem) {
