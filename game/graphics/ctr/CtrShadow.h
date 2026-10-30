@@ -13,13 +13,17 @@
  *
  * CtrShadowVolumes is that program as native code: each object's vertices are transformed once to
  * OpenGL-style clip space (ctr_clip_vertex), and every triangle the program would draw before its
- * own clipping goes to a front or a back index list, with the program's own facing test. The GPU
- * clips. CtrShadowRenderer then draws all objects at once (ctr_gpu_clip_draw_ranges):
+ * own clipping goes to a front or a back index list, with the program's own facing test. A
+ * triangle with a corner outside the guard band (clip space |x|, |y| <= 2 w) or the near / far
+ * plane is cut to them on the CPU, as the program cuts to its own (the PICA drops triangles far
+ * off screen, and a dropped face leaves its count in the stencil). CtrShadowRenderer then draws
+ * all objects at once (ctr_gpu_clip_draw_ranges):
  *  1. the front list: stencil + 1 where a face passes the depth test, no color or depth writes
  *  2. the back list: stencil - 1 likewise (z-pass, saturating like the PC's GL_INCR / GL_DECR)
- *  3. a rectangle over each object's volume on screen: where the stencil isn't 0, the color times
- *     the game's shadow color (as the PC: Cd * 2 * rgb / 255, alpha kept), and the stencil back to
- *     0 (the ocean's marks after this bucket expect 0 everywhere)
+ *  3. the front list again: where the stencil isn't 0, the color times the game's shadow color
+ *     (as the PC: Cd * 2 * rgb / 255, alpha kept), and the stencil back to 0 (the ocean's marks
+ *     after this bucket expect 0 everywhere). Only front faces count up, so they cover every
+ *     pixel to darken; the first one there clears it.
  *
  * The VU1 data memory the program reads (quadwords, the unpacks of shadow-add-verts and
  * shadow-add-facing-single-tris / -single-edges / -double-tris / -double-edges, shadow.cpp):
@@ -60,18 +64,13 @@ class CtrShadowVolumes {
   // the sprites fill the buffer); what's used stays (Jak: ~9 KB)
   static constexpr int kMaxVerts = 4096;
   static constexpr int kMaxIndices = 3 * 8192;
-  // screen rectangles of the darkening pass, one per object (more objects: the last one grows)
-  static constexpr int kMaxRects = 16;
-
-  struct Rect {
-    float x0, y0, x1, y1;  // ctr_gpu coordinates: x, y in [-1, 1], y up
-  };
   // (the host test) one triangle (n = 3) or side quad (n = 4: triangles 0 1 2 and 0 2 3) the VU1
   // program would draw, in its order: output vertex indices and the program's facing
   struct Prim {
     u16 v[4];
     u8 n;
     u8 front;
+    u16 base;  // the object's first output vertex
   };
   struct Stats {
     int objects = 0;          // objects with triangles
@@ -80,6 +79,7 @@ class CtrShadowVolumes {
     int bad_packets = 0;      // index lists that didn't fit their transfer, unknown entry points
     int no_camera = 0;        // index lists before the constants and matrix
     int capped = 0;           // (AI-assisted) left out by shadow_casters (smallest / furthest)
+    int clipped = 0;          // triangles cut to the guard band (or the near / far plane)
   };
 
   //! A new frame. The output: vertices (room for vert_cap, at most 65536), the front list (in
@@ -107,17 +107,13 @@ class CtrShadowVolumes {
   //! One DMA transfer of the shadow bucket: the constants, matrix, vertex tables, index lists with
   //! their MSCAL, and the end packets with the shadow color; anything else is ignored.
   void transfer(const DmaTransfer& t);
-  //! After the last transfer: the rectangles are final.
+  //! After the last transfer.
   void end();
 
   int vert_count() const { return m_nv; }
   int front_count() const { return m_nf; }
   int back_count() const { return m_nb; }
-  //! the darkening rectangles: one full screen one when a volume reaches behind the camera
-  int rect_count() const { return m_full_screen ? 1 : m_nrects; }
-  Rect rect(int i) const;
-  bool full_screen() const { return m_full_screen; }
-  //! the darkening color for the vertex color of the rectangles (untextured: 0xff = 1.0): twice
+  //! the darkening color for the vertices' color (untextured: 0xff = 1.0): twice
   //! the game's shadow color (like the PC renderer's shadow.frag), saturated
   void color(u8 out[3]) const;
   const Stats& stats() const { return m_stats; }
@@ -131,9 +127,10 @@ class CtrShadowVolumes {
   void close_object();
   void drop_object();
   template <bool kTrace>
-  void tris(const u8* entries, int count, bool double_sided);
+  bool tris(const u8* entries, int count, bool double_sided);
   template <bool kTrace>
-  void edges(const u8* entries, int count);
+  bool edges(const u8* entries, int count);
+  bool clip_tri(u16*& p, const u16 idx[3], u32 planes);
   void make_clip_matrix();
   // (AI-assisted) "play as Keira" (CtrKeiraRig.h): Jak's shadow is replaced by hers. An object is
   // Jak's when its vertices' center is within kKeiraMatch of her hulls' center; its light and
@@ -168,8 +165,7 @@ class CtrShadowVolumes {
   bool m_obj_any = false;          // it has triangles
   int m_obj_base = 0;              // output index of T[0] (D[0]: m_obj_base + m_ntop)
   int m_obj_f0 = 0, m_obj_b0 = 0;  // the lists' lengths before it (to take it back out)
-  Rect m_obj_rect{};
-  bool m_obj_full = false;
+  u8 m_oc[2 * 170];                // its vertices' outcodes (T, then D: 170 each at most)
 
   // output
   ctr_clip_vertex* m_out = nullptr;
@@ -177,9 +173,6 @@ class CtrShadowVolumes {
   u16* m_back = nullptr;
   int m_vcap = 0, m_icap = 0;
   int m_nv = 0, m_nf = 0, m_nb = 0;
-  Rect m_rects[kMaxRects]{};
-  int m_nrects = 0;
-  bool m_full_screen = false;
   u8 m_rgb[3] = {0x40, 0x40, 0x40};  // the PS2's default shadow color (shadow-dma-end)
 
   Stats m_stats;

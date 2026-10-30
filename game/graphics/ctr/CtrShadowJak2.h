@@ -6,9 +6,11 @@
  * Jak II's shadow volumes for the 3DS renderer (buckets shadow and shadow2), like the PC's
  * Shadow2: the game's shadow-cpu sends camera space volume vertices (top and bottom) and byte
  * index lists for the caps and walls; the faces turned to the camera add 1 to the stencil, the
- * others take 1 away (depth test, no color or depth writes), then a screen rectangle darkens
+ * others take 1 away (depth test, no color or depth writes), then the front faces again darken
  * where the stencil isn't 0, by the shadow color (multiplied, like Jak 1's CtrShadow; the PC
- * subtracts). The same GPU passes as CtrShadow (ctr_gpu_clip_reserve / clip_draw_ranges).
+ * subtracts). Faces with a corner outside the guard band (clip space |x|, |y| <= 2 w) or the
+ * near / far plane are cut to them on the CPU. The same GPU passes as CtrShadow
+ * (ctr_gpu_clip_reserve / clip_draw_ranges).
  */
 
 #include <vector>
@@ -30,6 +32,8 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   // stencil increment pass), the others to the back list (decrement)
   void add_caps(const u8* idx, bool flip, bool flippable, int k);
   void add_walls(const u8* idx);
+  // one face (m_verts indices) to the front or back list, cut to the guard band if it leaves it
+  void add_face(const u16 idx[3], bool away);
   bool reserve();
   void draw();
 
@@ -40,17 +44,7 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   int m_src_count[2] = {0, 0};
   int m_base[2] = {-1, -1};
   int m_nf = 0, m_nb = 0;  // front indices (in m_indices), back indices (in m_back)
-  // (AI-assisted, j2gpu + gpuopt) per volume (from one top vertex upload to the next) its camera
-  // space box: the darkening rectangles cover only their projections
-  struct Box {
-    float lo[3] = {1e30f, 1e30f, 1e30f};
-    float hi[3] = {-1e30f, -1e30f, -1e30f};
-  };
-  std::vector<Box> m_boxes;
-  struct Rect {
-    float x0, y0, x1, y1;  // clip space x, y / w
-  };
-  std::vector<Rect> m_rects;
+  std::vector<u8> m_oc;  // the outcodes of m_verts (CtrShadowJak2.cpp outcode)
   ctr_clip_vertex* m_verts = nullptr;
   u16* m_indices = nullptr;
   bool m_reserved = false, m_full = false;
@@ -60,6 +54,6 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   u8 m_color[4] = {0x80, 0x80, 0x80, 0x80};
   int m_no_room = 0;
   struct Stats {
-    int frames = 0, faces = 0, dropped = 0;
+    int frames = 0, faces = 0, dropped = 0, clipped = 0;
   } m_stats;
 };

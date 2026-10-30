@@ -1079,6 +1079,18 @@ void clip_draw_triangle(const ctr_draw_state& st, const ctr_clip_vertex* const t
     }
   }
   ctr_vertex out[8];
+  // CTR_SOFT_GUARD=T: a triangle with a corner beyond T (x / w or y / w, after the
+  // near and far clipping) is dropped, as the PICA drops triangles far off screen
+  static const float s_guard =
+      getenv("CTR_SOFT_GUARD") ? (float)atof(getenv("CTR_SOFT_GUARD")) : 0.f;
+  if (s_guard > 0.f) {
+    for (int i = 0; i < n; i++) {
+      const float w = poly[i].c[3];
+      if (w > 0 && (std::abs(poly[i].c[0] / w) > s_guard || std::abs(poly[i].c[1] / w) > s_guard)) {
+        return;
+      }
+    }
+  }
   for (int i = 0; i < n; i++) {
     const float w = poly[i].c[3];
     if (!(w > 0)) {

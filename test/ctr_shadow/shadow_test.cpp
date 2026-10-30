@@ -487,7 +487,7 @@ struct Totals {
   int tris_native[2] = {0, 0}, tris_vu[2] = {0, 0};  // [back, front]
   int failures = 0;
   double max_xy = 0, max_z = 0, max_area = 0;
-  int rects = 0, full_screen = 0;
+  int cut = 0;  // triangles the decoder cut to the guard band
 };
 
 std::mt19937 g_rng(1234);
@@ -559,22 +559,31 @@ void run_case(const char* name, const Camera& cam, const std::vector<Object>& ob
            vol.stats().no_camera);
     tot.failures++;
   }
-  // the camera space position of each output vertex (objects in order: T, then D)
-  std::vector<const float*> cam_of;
-  for (const auto& o : objects) {
-    for (const auto& v : o.top) {
-      cam_of.push_back(v.data());
+  // the camera space position of each output vertex of the objects (in order: T, then D; the
+  // corners of the triangles cut to the guard band after each object's)
+  std::vector<const float*> cam_of(vol.vert_count(), nullptr);
+  {
+    std::vector<int> bases;
+    for (const auto& p : trace) {
+      if (bases.empty() || bases.back() != p.base) {
+        bases.push_back(p.base);
+      }
     }
-    for (const auto& v : o.dual) {
-      cam_of.push_back(v.data());
+    if (bases.size() != objects.size()) {
+      printf("%s: %zu objects in the trace, expected %zu\n", name, bases.size(), objects.size());
+      tot.failures++;
+      return;
+    }
+    for (size_t o = 0; o < objects.size(); o++) {
+      int i = bases[o];
+      for (const auto& v : objects[o].top) {
+        cam_of[i++] = v.data();
+      }
+      for (const auto& v : objects[o].dual) {
+        cam_of[i++] = v.data();
+      }
     }
   }
-  if ((int)cam_of.size() != vol.vert_count()) {
-    printf("%s: %d vertices, expected %zu\n", name, vol.vert_count(), cam_of.size());
-    tot.failures++;
-    return;
-  }
-
   // reference
   g_kicks.clear();
   auto ref = std::make_unique<ShadowRenderer>("shadow", 0);
@@ -688,53 +697,40 @@ void run_case(const char* name, const Camera& cam, const std::vector<Object>& ob
   if (k != g_kicks.size()) {
     fail("the program sent " + std::to_string(g_kicks.size() - k) + " more packets");
   }
-  // every index in range, lists as long as the trace says
+  // every index in range, every corner inside the guard band and the near / far planes (what
+  // the decoder cut), the lists at least as long as the trace's uncut triangles that are inside
   int nf = 0, nb = 0;
   for (const auto& p : trace) {
-    (p.front ? nf : nb) += 3 * (p.n - 2);
-  }
-  if (nf != vol.front_count() || nb != vol.back_count()) {
-    fail("list lengths differ from the trace");
-  }
-  for (int i = 0; i < vol.front_count(); i++) {
-    if (front[i] >= vol.vert_count()) {
-      fail("front index out of range");
-      break;
+    bool cut = false;
+    for (int j = 0; j < p.n; j++) {
+      const ctr_clip_vertex& v = verts[p.v[j]];
+      cut |= !(std::abs(v.x) <= 2.f * v.w && std::abs(v.y) <= 2.f * v.w && std::abs(v.z) <= v.w);
+    }
+    if (!cut) {
+      (p.front ? nf : nb) += 3 * (p.n - 2);
     }
   }
-  for (int i = 0; i < vol.back_count(); i++) {
-    if (back[i] >= vol.vert_count()) {
-      fail("back index out of range");
-      break;
-    }
+  if (nf > vol.front_count() || nb > vol.back_count()) {
+    fail("lists shorter than the trace's whole triangles");
   }
-  // the darkening rectangles: every vertex of a front face that is on screen is inside one; a
-  // vertex at or behind the camera makes them the whole screen
-  for (int i = 0; i < vol.front_count(); i++) {
-    const ctr_clip_vertex& v = verts[front[i]];
-    if (!(v.w > 1e-4f)) {
-      if (!vol.full_screen()) {
-        fail("a front face reaches behind the camera, but the rectangle isn't the screen");
+  for (int pass = 0; pass < 2; pass++) {
+    const u16* list = pass ? back.data() : front.data();
+    const int n = pass ? vol.back_count() : vol.front_count();
+    for (int i = 0; i < n; i++) {
+      if (list[i] >= vol.vert_count()) {
+        fail("index out of range");
         break;
       }
-      continue;
-    }
-    const float x = v.x / v.w, y = v.y / v.w;
-    if (std::abs(x) > 1.f || std::abs(y) > 1.f) {
-      continue;
-    }
-    bool in = false;
-    for (int r = 0; r < vol.rect_count(); r++) {
-      const auto rc = vol.rect(r);
-      in |= x >= rc.x0 && x <= rc.x1 && y >= rc.y0 && y <= rc.y1;
-    }
-    if (!in) {
-      fail("a front face's corner on screen is outside the rectangles");
-      break;
+      const ctr_clip_vertex& v = verts[list[i]];
+      const float e = 1e-4f * std::abs(v.w) + 1e-6f;
+      if (!(std::abs(v.x) <= 2.f * v.w + 2 * e && std::abs(v.y) <= 2.f * v.w + 2 * e &&
+            std::abs(v.z) <= v.w + e)) {
+        fail("a corner outside the guard band");
+        break;
+      }
     }
   }
-  tot.rects += vol.rect_count();
-  tot.full_screen += vol.full_screen();
+  tot.cut += vol.stats().clipped;
   u8 col[3];
   vol.color(col);
   if (col[0] != 0x60 || col[1] != 0x70 || col[2] != 0x80) {
@@ -930,7 +926,7 @@ int main() {
          tot.tris_vu[1], tot.tris_vu[0]);
   printf("largest differences: screen x / y %.4f px, depth %.1f (of 2^24), clipped area %.3f px^2\n",
          tot.max_xy, tot.max_z, tot.max_area);
-  printf("darkening rectangles: %d (%d frames full screen)\n", tot.rects, tot.full_screen);
+  printf("cut to the guard band: %d triangles\n", tot.cut);
   if (tot.tris_native[0] != tot.tris_vu[0] || tot.tris_native[1] != tot.tris_vu[1]) {
     printf("triangle counts per facing differ\n");
     tot.failures++;
