@@ -782,10 +782,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     // of the hardware fit (busy ~ 10.6 ms + 0.13 ms per 1000 triangles) of this frame's triangles
     static const bool model = getenv("CTR_AUTO_DETAIL_MODEL") != nullptr;
     if (model) {
-      auto_detail_frame(10.6f + 0.13f * gs.triangles / 1000.f, 1, 0.0, 0.0);
+      const float ms = 10.6f + 0.13f * gs.triangles / 1000.f;
+      auto_detail_frame(ms, ms, 1, 0.0, 0.0);
     } else
 #endif
-    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms, t2 - t1);
+    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_active_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms,
+                      t2 - t1);
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
@@ -1089,9 +1091,10 @@ void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
 // Frames of a level load (4 ms or more in process_pending_loads, and the 2 after: their GPU
 // time) don't count for the largest frame: one such spike pulled the distances in on screen.
 // The t range only runs where the config gives one (t_range); at its near end the relief
-// (CtrAutoDetail.h) follows the GPU's busy time alone, frame by frame.
-void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms,
-                                    double build_tod_ms) {
+// (CtrAutoDetail.h) follows the GPU's time from the frame's command list on (active: without the
+// GPU's wait for the render thread after the frame's clear), frame by frame.
+void CtrRenderer::auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int gpu_busy_frames,
+                                    double build_ms, double build_tod_ms) {
   const auto& cs = ctr_settings();
   const double now = ctr_gpu_time_ms();
   if (!m_auto.init) {
@@ -1121,7 +1124,8 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, doub
   bool moved = false;
   // the relief moves only with the shrub / tie distances at their near end
   if (m_auto.t <= 0) {
-    moved = m_auto.ctl.step(busy, !load, target, k);
+    moved = m_auto.ctl.step((double)gpu_active_ms / gpu_busy_frames, build_tod_ms, !load, target,
+                            k);
   }
   if (m_auto.t_range) {
     m_auto.busy_ms += gpu_busy_ms;

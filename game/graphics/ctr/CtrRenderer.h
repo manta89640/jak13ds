@@ -191,8 +191,8 @@ class CtrRenderer {
   // config.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);
   // (AI-assisted) config.ini auto_detail: shrub / tie distances from the GPU time per frame
-  void auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms,
-                         double build_tod_ms);
+  void auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int gpu_busy_frames,
+                         double build_ms, double build_tod_ms);
   struct AutoDetail {
     float t = 0.25f;  // ctr_level_set_detail
     double busy_ms = 0, busy_max = 0, build_max = 0;

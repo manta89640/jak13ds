@@ -65,12 +65,15 @@ void test_ranges() {
         "a knob at its old value is left out of the order");
 }
 
-// a view: its GPU ms per frame at the PS2 values, and what each knob saves at its old value
+// a view: its GPU ms per frame at the PS2 values, and what each knob saves at its old value;
+// build: the render thread's ms (0: busy - 10, a GPU-bound frame as on hardware; < 0: busy + this,
+// Azahar's busy that follows the build)
 struct View {
   const char* name;
   double busy0;
   double save[kKnobs];
   int frames;
+  double build = 0;
 };
 
 struct Run {
@@ -108,8 +111,9 @@ Run simulate(const std::vector<View>& views, unsigned seed, bool print) {
       pending.push_back(busy);
       const double measured = pending.front();  // one frame late
       pending.erase(pending.begin());
+      const double build = v.build < 0 ? busy + v.build + noise(rng) : busy - 10.0 + noise(rng);
       const float r0 = c.r;
-      c.step(measured, true, 27.0);
+      c.step(measured, build, true, 27.0);
       if (c.r != r0) {
         const int dir = c.r > r0 ? 1 : -1;
         out.reversals += last_dir && dir != last_dir;
@@ -143,6 +147,7 @@ Run simulate(const std::vector<View>& views, unsigned seed, bool print) {
     if (v.busy0 > 33.0 && r_start < (float)c.n) {
       check(vr.first_step >= 0 && vr.first_step <= 8, "an overload is answered within 8 frames");
     }
+    out.r_max = std::max(out.r_max, vr.r_max);
     out.over33 += vr.over33;
     out.frames += vr.frames;
     out.first_step = out.first_step < 0 ? vr.first_step : out.first_step;
@@ -175,9 +180,22 @@ void test_controller() {
   for (unsigned seed = 2; seed < 40; seed++) {
     simulate(session, seed, false);
   }
+  // each hardware view on its own, from the PS2 values (60 s)
+  if (verbose) {
+    std::printf("each view from the PS2 values:\n");
+  }
+  for (const View& v : session) {
+    View one = v;
+    one.frames = 1800;
+    simulate({one}, 11, verbose);
+  }
   // a view right at the target: stays put or creeps, no oscillation
   std::vector<View> edge = {{"edge 27.5 ms", 27.5, {3.0, 1.0, 0.5}, 3000}};
   const Run e = simulate(edge, 7, verbose);
+  // Azahar: busy ~ the build + 0.9 ms (title flight 19-27 ms): no GPU limit, no relief
+  std::vector<View> az = {{"azahar title (busy ~ build)", 27.5, {3.0, 1.0, 0.5}, 3000, -0.9}};
+  const Run a = simulate(az, 3, verbose);
+  check(a.r_max == 0, "Azahar's busy time (the build) never moves the knobs");
   check(e.reversals < 12, "at the edge of the budget: few direction changes");
 }
 }  // namespace

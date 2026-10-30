@@ -43,7 +43,8 @@ struct Relief {
     to[kTieLodPx] = kOldTieLodPx;
     from[kLodDistance] = lod > 0 ? lod : (draw_distance > 0 ? draw_distance : 2000.f);
     to[kLodDistance] = kOldLodDistance;
-    from[kTieDistance] = tie > 0 ? tie : (draw_distance > 0 ? draw_distance : 2000.f) / kSmallTieMeters;
+    from[kTieDistance] =
+        tie > 0 ? tie : (draw_distance > 0 ? draw_distance : 2000.f) / kSmallTieMeters;
     to[kTieDistance] = kOldTieScale;
     n = 0;
     for (Knob k : kOrder) {
@@ -73,7 +74,10 @@ struct Relief {
 // before the next), back after
 // kRoomFrames with room, as far as the room is worth at kMsPerUnit; a step toward the old values
 // soon after a step back doubles the wait before the next step back (no back and forth at the
-// edge of the budget).
+// edge of the budget). Only a GPU that is the limit counts as over: its time lasts kGpuLead past
+// the render thread's build on average; else the render thread is the limit (or, in Azahar, the
+// commands run as they are handed over and the time follows the build) and a frame counts at most
+// as the target: fewer triangles would hardly help, so it never steps toward the old values.
 struct Controller {
   static constexpr int kFastFrames = 4;
   static constexpr int kSettleFrames = 24;
@@ -81,11 +85,13 @@ struct Controller {
   static constexpr double kMsPerUnit = 4.0;  // GPU ms one unit of r is taken to save
   static constexpr double kRoomMargin = 2.0;   // ms under the target, scaled like it
   static constexpr double kUrgentMargin = 3.0;  // ms over it: changes apply in view too
+  static constexpr double kGpuLead = 3.0;
   static constexpr float kStepMin = 0.04f, kStepMax = 0.1f, kStepBack = 0.05f, kBackMax = 0.5f;
   static constexpr int kHoldMin = 60, kHoldMax = 480, kBackoffFrames = 90, kCalmFrames = 300;
 
   float r = 0;
   int n = 0;
+  double lead = 0;  // busy - build, averaged
   bool urgent = false;
   long frame = 0;
   int hold = kHoldMin;
@@ -97,12 +103,17 @@ struct Controller {
   int room_n = 0, room_over = 0;
   int towards = 0, backs = 0;  // steps since the last log
 
-  // busy: this frame's GPU ms (counted false: no measurement, or a level load's frame); k: 1 at
-  // fps_cap 30, 0.5 at 60. Returns true when r moved.
-  bool step(double busy, bool counted, double target, double k = 1.0) {
+  // busy: this frame's GPU ms (active), build: the render thread's (counted false: no
+  // measurement, or a level load's frame); k: 1 at fps_cap 30, 0.5 at 60. Returns true when r
+  // moved.
+  bool step(double busy, double build, bool counted, double target, double k = 1.0) {
     frame++;
     if (!counted) {
       return false;
+    }
+    lead += (busy - build - lead) * 0.25;
+    if (lead < kGpuLead * k) {
+      busy = std::min(busy, target);
     }
     fast_sum += busy;
     fast_n++;
