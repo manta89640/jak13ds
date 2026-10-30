@@ -428,6 +428,13 @@ The runtime (`CtrLevel.cpp`: `load_tod`, `tod_update`, `tod_recolor`, `tod_finis
 palettes some color uses (village3: 7 of 8), and rewrites the chunks' vertex colors in place in
 their meshes (a frame the GPU still draws may see part of the change):
 
+- **Color stream.** In memory a chunk's mesh keeps its vertices as two attribute buffers in the
+  same 16 bytes per vertex: the 12-byte records (`pos`, `tod`, `st`) and then the colors
+  (`ctr_gpu_mesh_split_colors`; the loader reads the file's `Vertex` array and splits it in place). A
+  color rewrite touches only the colors' cache lines: 8 vertices per 32-byte line instead of 2, and
+  only those lines are written back to FCRAM and flushed. A list write (below) reads no record; a
+  whole-group write reads each vertex's `tod` from the records (clean lines, no write-back).
+
 - **Alpha (v22).** `TodColorA` has each palette's alpha. The runtime blends it as the PC does
   (`min(128, sum(w * a) >> 6)` with the palettes' alpha weights, the high half of their itimes'
   second word) and writes the whole vertex word; before v22 (and in older files) the vertex kept

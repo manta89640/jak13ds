@@ -16,7 +16,9 @@
 #                checked against the PC's blend of every frame)
 #   --arm        also the ARM instructions per level draw of both versions (devkitARM build run
 #                under Unicorn, like test/mips2c_native/unicorn; ARMBENCH_PYTHON: a python3 with
-#                unicorn)
+#                unicorn). TOD_ARM_LINES=1: and the mesh cache lines each draw touches and writes
+#   --pixels     also the chunks drawn, every 25th level draw, through the host soft renderer from
+#                each version's own mesh layout: every pixel compared
 #
 # Cases: every 5th chunk drawn (about one view's worth), pulse step 4 and 0, all runs shown and
 # runs shown/hidden at random, an older file's table (vertices keep their alpha), the title screen
@@ -29,11 +31,13 @@ C3L=""
 BASE=HEAD
 TRACE=""
 ARM=0
+PIXELS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) BASE="$2"; shift 2 ;;
     --trace) TRACE="$2"; shift 2 ;;
     --arm) ARM=1; shift ;;
+    --pixels) PIXELS=1; shift ;;
     *) C3L="$1"; shift ;;
   esac
 done
@@ -64,7 +68,7 @@ INC=(-I"$ROOT" -I"$HERE" -I"$OUT" -I"$ROOT/third-party/fmt/include" -DFMT_HEADER
 split_of() { grep -q ctr_gpu_mesh_colors_inplace "$1" && echo 1 || echo 0; }
 SPLIT=(-DREF_SPLIT="$(split_of "$OUT/ref.code.inc")" -DNEU_SPLIT="$(split_of "$OUT/neu.code.inc")")
 # the level file reader with its decoders
-if [ ! -x "$OUT/tod_extract" ]; then
+if [ ! -x "$OUT/tod_extract" ] || [ "$HERE/tod_extract.cpp" -nt "$OUT/tod_extract" ]; then
   ZSTD=("$ROOT"/third-party/zstd/lib/common/*.c "$ROOT"/third-party/zstd/lib/decompress/*.c)
   for s in "$ROOT/third-party/lz4/lz4.c" "${ZSTD[@]}"; do
     "$CC" -O2 -DZSTD_DISABLE_ASM -c "$s" -o "$OUT/$(basename "${s%.c}").o"
@@ -72,7 +76,12 @@ if [ ! -x "$OUT/tod_extract" ]; then
   "$CXX" -std=gnu++20 -O2 "${INC[@]}" "$HERE/tod_extract.cpp" "$ROOT/game/graphics/ctr/c3l_reader.cpp" \
     "$ROOT/common/util/Timer.cpp" "$OUT"/*.o -o "$OUT/tod_extract"
 fi
-"$CXX" -std=gnu++20 -O2 "${INC[@]}" "${SPLIT[@]}" "$HERE/tod_diff.cpp" -o "$OUT/tod_diff"
+PX=()
+if [ "$PIXELS" = 1 ]; then
+  PX=(-DTOD_PIXELS -DOPENGOAL_SMALL_MEMORY=1 -I"$ROOT/third-party" -I"$ROOT/third-party/SDL/include"
+      "$ROOT/game/graphics/ctr/ctr_gpu_soft.cpp" "$HERE/tod_pixels.cpp")
+fi
+"$CXX" -std=gnu++20 -O2 "${INC[@]}" "${SPLIT[@]}" "$HERE/tod_diff.cpp" "${PX[@]}" -o "$OUT/tod_diff"
 
 LEVEL="$OUT/$(basename "${C3L%.c3l}").tod"
 "$OUT/tod_extract" "$C3L" "$LEVEL"

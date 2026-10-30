@@ -73,10 +73,28 @@ namespace neu {
 #undef TOD_SPLIT
 }  // namespace neu
 
+#ifdef TOD_PIXELS
+// pixels: the chunks drawn, of both versions, through the host soft renderer from their own mesh
+// layout, every 25th level draw (tod_pixels.cpp)
+#include "tod_pixels.h"
+template <typename B>
+static std::vector<unsigned char> draw_pixels(const Dump& d, const std::vector<u32>& vis,
+                                              const std::vector<B>& vb, bool split) {
+  std::vector<TodPxChunk> cs;
+  for (u32 ci : vis) {
+    const auto& c = d.chunks[ci];
+    cs.push_back({c.bsphere, c.origin, c.scale, c.indices, c.nindices, vb[ci].p, vb[ci].n});
+  }
+  return tod_draw_pixels(cs.data(), cs.size(), split);
+}
+#endif
+
 extern "C" __attribute__((noinline)) void sim_mark(int phase) {
   asm volatile("" ::"r"(phase) : "memory");
 }
 static void no_mark(int) {}
+
+u32 g_px_frames = 0, g_px_bad_frames = 0, g_px_bad = 0, g_px_lit = 0;
 
 enum : int {
   kRunRef = 1,
@@ -189,6 +207,21 @@ extern "C" int sim_main(const u8* dump, const u32* trace, int nframes, int mode,
       bad_frames += bad != 0;
       bad_verts += bad;
     }
+#ifdef TOD_PIXELS
+    if ((mode & (kRunRef | kRunNeu | kCompare)) == (kRunRef | kRunNeu | kCompare) && f % 25 == 0) {
+      const auto pr = draw_pixels(d, vis, r.vb, REF_SPLIT != 0);
+      const auto pn = draw_pixels(d, vis, n.vb, NEU_SPLIT != 0);
+      u32 px = 0, lit = 0;
+      for (size_t i = 0; i + 3 < pr.size() && pr.size() == pn.size(); i += 4) {
+        px += memcmp(&pr[i], &pn[i], 4) != 0;
+        lit += (pr[i] | pr[i + 1] | pr[i + 2]) != 0;
+      }
+      g_px_frames++;
+      g_px_bad += px;
+      g_px_lit += lit;
+      g_px_bad_frames += px != 0 || pr.size() != pn.size();
+    }
+#endif
     if ((mode & (kRunNeu | kExact)) == (kRunNeu | kExact)) {
       const u32 off = inexact_vertices(d, vis, n.vb, w);
       off_frames += off != 0;
@@ -259,7 +292,11 @@ int main(int argc, char** argv) {
   if (mode & kExact) {
     printf("; neu not the blend: %u frames, %u vertices", out[5], out[6]);
   }
+  if (g_px_frames) {
+    printf("; pixels: %u frames drawn (%u lit pixels), %u frames, %u pixels differ", g_px_frames,
+           g_px_lit, g_px_bad_frames, g_px_bad);
+  }
   printf("\n");
-  return out[1] || out[5] ? 1 : 0;
+  return out[1] || out[5] || g_px_bad_frames ? 1 : 0;
 }
 #endif

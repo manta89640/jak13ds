@@ -975,22 +975,40 @@ struct MeshBuild {
 };
 
 // A chunk's n vertices (c3l::Vertex in the file at offset) into its mesh's memory as
-// ctr_gpu_mesh_split_colors keeps them, a block at a time.
+// ctr_gpu_mesh_split_colors keeps them: read whole as before (whole blocks decode straight into
+// it, the reader's caches keep the indices' blocks), then split in place.
 bool read_split_vertices(c3l::Reader& f, u32 offset, u32 n, void* dst) {
-  constexpr u32 kBlock = 256;
-  c3l::Vertex buf[kBlock];
   u8* const rec = (u8*)dst;
   u8* const col = rec + ctr_gpu_mesh_color_offset((int)n);
-  for (u32 i = 0; i < n; i += kBlock) {
-    const u32 k = std::min(kBlock, n - i);
-    if (!f.read(offset + i * (u32)sizeof(c3l::Vertex), buf, k * sizeof(c3l::Vertex))) {
-      return false;
+  std::unique_ptr<u32[]> colors(new (std::nothrow) u32[std::max<u32>(n, 1)]);
+  if (!colors) {
+    // (no heap for the colors: a block at a time)
+    constexpr u32 kBlock = 256;
+    c3l::Vertex buf[kBlock];
+    for (u32 i = 0; i < n; i += kBlock) {
+      const u32 k = std::min(kBlock, n - i);
+      if (!f.read(offset + i * (u32)sizeof(c3l::Vertex), buf, k * sizeof(c3l::Vertex))) {
+        return false;
+      }
+      for (u32 j = 0; j < k; j++) {
+        memcpy(rec + 12 * (i + j), &buf[j], 12);
+        memcpy(col + 4 * (i + j), buf[j].rgba, 4);
+      }
     }
-    for (u32 j = 0; j < k; j++) {
-      memcpy(rec + 12 * (i + j), &buf[j], 12);
-      memcpy(col + 4 * (i + j), buf[j].rgba, 4);
-    }
+    return true;
   }
+  if (!f.read(offset, dst, n * sizeof(c3l::Vertex))) {
+    return false;
+  }
+  for (u32 i = 0; i < n; i++) {
+    memcpy(&colors[i], rec + 16 * i + 12, 4);
+  }
+  for (u32 i = 0; i < n; i++) {
+    u32 w[3];
+    memcpy(w, rec + 16 * i, 12);  // (all of it read before the write: the first ones overlap)
+    memcpy(rec + 12 * i, w, 12);
+  }
+  memcpy(col, colors.get(), 4 * (size_t)n);
   return true;
 }
 }  // namespace

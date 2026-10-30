@@ -5319,9 +5319,8 @@ static void c3d_vertex_buffer(u32 pa, const void* va, u32 stride, int attribs, u
   BufInfo_Add(buf, va, stride, attribs, perm);
 }
 
-/* a static mesh's attribute buffers for the programs of its layout
- * (position, texcoord, color): one, or with ctr_gpu_mesh_split_colors two (12-byte records, the
- * colors) */
+/* a static mesh's attribute buffers for the programs of its layout (position, texcoord, color):
+ * one, or with ctr_gpu_mesh_split_colors two (12-byte records, the colors) */
 static void raw_mesh_buffers(const MeshSlot* ms) {
   if (!ms->col_off) {
     raw_vertex_buffer(ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0));

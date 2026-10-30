@@ -564,10 +564,10 @@ int ctr_gpu_mesh_begin(int vertex_count, int index_count, void** verts, uint16_t
 int ctr_gpu_mesh_begin_tail(int vertex_count, int tail_bytes, int index_count, void** verts,
                             uint16_t** indices);
 int ctr_gpu_mesh_end(int mesh, int ok);
-/* Between begin and end: the mesh's vertex_count * 16 bytes are
- * written as two attribute buffers, vertex_count records of 12 bytes (s16 pos[3], s16 pad,
- * s16 st[2]) and then the colors (u8 rgba[4] each) at ctr_gpu_mesh_color_offset: a rewrite of the
- * colors (the level's time of day) touches only theirs. Drawn like the interleaved layout. */
+/* Between begin and end: the mesh's vertex_count * 16 bytes are written as two attribute buffers,
+ * vertex_count records of 12 bytes (s16 pos[3], s16 pad, s16 st[2]) and then the colors (u8
+ * rgba[4] each) at ctr_gpu_mesh_color_offset: a rewrite of the colors (the level's time of day)
+ * touches only theirs. Drawn like the interleaved layout. */
 void ctr_gpu_mesh_split_colors(int mesh);
 static inline unsigned int ctr_gpu_mesh_color_offset(int vertex_count) {
   return (unsigned int)vertex_count * 12u;

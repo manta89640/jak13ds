@@ -62,6 +62,9 @@ struct DumpChunk {
   const c3l::Vertex* v;
   u32 ngroups;
   const u16* groups;  // lo, hi pairs
+  float origin[3], scale;
+  u32 nindices;
+  const u16* indices;  // the chunk's draws' (triangle lists)
 };
 struct Dump {
   u32 nc, nm;
@@ -96,6 +99,12 @@ inline Dump parse_dump(const u8* p) {
     c.ngroups = get32();
     c.groups = (const u16*)p;
     p += c.ngroups * 4;
+    memcpy(c.origin, p, 12);
+    memcpy(&c.scale, p + 12, 4);
+    p += 16;
+    c.nindices = get32();
+    c.indices = (const u16*)p;
+    p += c.nindices * 2;
     d.chunks.push_back(c);
   }
   return d;
