@@ -219,7 +219,9 @@ _Static_assert(sizeof(VtxF) == 24 && sizeof(VtxS) == 16 && sizeof(VtxB) == 10 &&
                    sizeof(VtxC2) == 36 && sizeof(VtxSkin) == 24,
                "vertex layouts");
 
-enum { L_FLOAT, L_SHORT, L_BYTE, L_CLIP2, L_SKIN };
+/* L_SPLIT: L_SHORT's attributes from two buffers, 12-byte records then the colors (the level
+ * meshes, ctr_gpu_mesh_split_colors) */
+enum { L_FLOAT, L_SHORT, L_BYTE, L_CLIP2, L_SKIN, L_SPLIT };
 
 typedef struct {
   GSPGPU_PerfLog pl0, pl1;
@@ -551,6 +553,7 @@ static void attrs(int layout) {
       AttrInfo_AddLoader(a, 2, GPU_UNSIGNED_BYTE, 4);
       break;
     case L_SHORT:
+    case L_SPLIT:
       AttrInfo_AddLoader(a, 0, GPU_SHORT, 4);
       AttrInfo_AddLoader(a, 1, GPU_SHORT, 2);
       AttrInfo_AddLoader(a, 2, GPU_UNSIGNED_BYTE, 4);
@@ -584,6 +587,11 @@ static void vbuf(const void* data, int layout) {
   static const u64 perm[] = {0x210, 0x210, 0x210, 0x3210, 0x543210};
   C3D_BufInfo* b = C3D_GetBufInfo();
   BufInfo_Init(b);
+  if (layout == L_SPLIT) {
+    BufInfo_Add(b, data, 12, 2, 0x10);
+    BufInfo_Add(b, (const u8*)data + 12 * CULL_VERTS, 4, 1, 0x2);
+    return;
+  }
   BufInfo_Add(b, data, stride[layout], count[layout], perm[layout]);
 }
 
@@ -1196,6 +1204,16 @@ static void b5_one(const char* id, const void* buf, int layout) {
 
 static void b5(void) {
   b5_one("B5.short", B.cull_s, L_SHORT);
+  u8* sp = (u8*)lin_alloc(CULL_VERTS * sizeof(VtxS));
+  if (sp) {
+    for (int i = 0; i < CULL_VERTS; i++) {
+      memcpy(sp + 12 * i, &B.cull_s[i], 12);
+      memcpy(sp + 12 * CULL_VERTS + 4 * i, &B.cull_s[i].r, 4);
+    }
+    GSPGPU_FlushDataCache(sp, CULL_VERTS * sizeof(VtxS));
+    b5_one("B5.split", sp, L_SPLIT);
+    lin_free(sp);
+  }
   VtxF* f = (VtxF*)lin_alloc(CULL_VERTS * sizeof(VtxF));
   if (f) {
     for (int i = 0; i < CULL_VERTS; i++) {

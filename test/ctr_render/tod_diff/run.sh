@@ -53,10 +53,16 @@ extract "$OUT/ref_CtrLevel.cpp" "$OUT/ref_CtrLevel.h" "$OUT/ref"
 extract "$ROOT/game/graphics/ctr/CtrLevel.cpp" "$ROOT/game/graphics/ctr/CtrLevel.h" "$OUT/neu"
 git -C "$ROOT" show "$BASE:game/graphics/ctr/CtrLight.h" > "$OUT/ref.light.h"
 cp "$ROOT/game/graphics/ctr/CtrLight.h" "$OUT/neu.light.h"
+# (GCC's #pragma once takes two copies with the same bytes and time for one file)
+echo "// ref" >> "$OUT/ref.light.h"
+echo "// neu" >> "$OUT/neu.light.h"
 
 CXX="${CXX:-c++}"
 CC="${CC:-cc}"
 INC=(-I"$ROOT" -I"$HERE" -I"$OUT" -I"$ROOT/third-party/fmt/include" -DFMT_HEADER_ONLY=1)
+# a version that keeps the mesh colors on their own (ctr_gpu_mesh_split_colors)
+split_of() { grep -q ctr_gpu_mesh_colors_inplace "$1" && echo 1 || echo 0; }
+SPLIT=(-DREF_SPLIT="$(split_of "$OUT/ref.code.inc")" -DNEU_SPLIT="$(split_of "$OUT/neu.code.inc")")
 # the level file reader with its decoders
 if [ ! -x "$OUT/tod_extract" ]; then
   ZSTD=("$ROOT"/third-party/zstd/lib/common/*.c "$ROOT"/third-party/zstd/lib/decompress/*.c)
@@ -66,7 +72,7 @@ if [ ! -x "$OUT/tod_extract" ]; then
   "$CXX" -std=gnu++20 -O2 "${INC[@]}" "$HERE/tod_extract.cpp" "$ROOT/game/graphics/ctr/c3l_reader.cpp" \
     "$ROOT/common/util/Timer.cpp" "$OUT"/*.o -o "$OUT/tod_extract"
 fi
-"$CXX" -std=gnu++20 -O2 "${INC[@]}" "$HERE/tod_diff.cpp" -o "$OUT/tod_diff"
+"$CXX" -std=gnu++20 -O2 "${INC[@]}" "${SPLIT[@]}" "$HERE/tod_diff.cpp" -o "$OUT/tod_diff"
 
 LEVEL="$OUT/$(basename "${C3L%.c3l}").tod"
 "$OUT/tod_extract" "$C3L" "$LEVEL"
@@ -102,7 +108,8 @@ if [ "$ARM" = 1 ]; then
   DKA="${DEVKITARM:-/opt/devkitpro/devkitARM}"
   FLAGS=(-fno-threadsafe-statics -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft -marm
          -D__3DS__ -fsigned-char -ffunction-sections -fdata-sections -mword-relocations
-         -std=gnu++20 -fno-strict-aliasing -fno-math-errno -Wno-psabi -O2 -DSIM_ARM "${INC[@]}")
+         -std=gnu++20 -fno-strict-aliasing -fno-math-errno -Wno-psabi -O2 -DSIM_ARM "${INC[@]}"
+         "${SPLIT[@]}" -DTOD_ARENA_MB=12)
   "$DKA/bin/arm-none-eabi-g++" "${FLAGS[@]}" -c "$HERE/tod_diff.cpp" -o "$OUT/arm_diff.o"
   "$DKA/bin/arm-none-eabi-g++" "${FLAGS[@]}" -c "$HERE/tod_arm.cpp" -o "$OUT/arm_main.o"
   "$DKA/bin/arm-none-eabi-gcc" -march=armv6k -mfloat-abi=hard -c "$ROOT/platform/3ds/port/ctr_mem.S" \
@@ -114,10 +121,11 @@ if [ "$ARM" = 1 ]; then
     "$OUT/ctr_mem.o" "$OUT/ctr_mem_c.o" -o "$OUT/tod_arm.elf"
   PY="${ARMBENCH_PYTHON:-python3}"
   tr="${TRACES[0]}"
-  for step in 4 0; do
+  for step in ${TOD_ARM_STEPS:-4 0}; do
     for who in ref neu; do
       echo "--- ARM, $who, pulse step $step, $(basename "$tr")"
-      "$PY" "$HERE/tod_arm.py" "$OUT/tod_arm.elf" "$LEVEL" "$tr" 288 $who 5 $step 32
+      "$PY" "$HERE/tod_arm.py" "$OUT/tod_arm.elf" "$LEVEL" "$tr" "${TOD_ARM_FRAMES:-288}" $who 5 $step "${TOD_ARM_SKIP:-32}" \
+        ${TOD_ARM_LINES:+lines}
     done
   done
 fi

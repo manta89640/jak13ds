@@ -37,7 +37,19 @@ inline ShimSettings& ctr_settings() {
 inline double ctr_gpu_time_ms() {
   return 0;
 }
-inline void ctr_gpu_flush_range(const void*, u32) {}
+extern "C" void tod_flush_note(u32 bytes);
+inline void ctr_gpu_flush_range(const void*, u32 bytes) {
+  tod_flush_note(bytes);
+}
+#ifdef __3DS__
+// (the ARM build: the list room may always grow)
+struct CtrHeapStats {
+  u32 free, largest;
+};
+inline void ctr_heap_stats(CtrHeapStats* s) {
+  s->free = s->largest = 64u << 20;
+}
+#endif
 struct CtrBackgroundCamera {
   s32 itimes[4][4];
 };
