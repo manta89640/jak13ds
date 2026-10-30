@@ -20,6 +20,7 @@
 #include "common/common_types.h"
 #include "common/dma/dma_chain_read.h"
 
+#include "game/graphics/ctr/CtrAutoDetail.h"
 #include "game/graphics/gfx.h"
 
 /*!
@@ -190,8 +191,8 @@ class CtrRenderer {
   // config.ini gpu_profile: modes 1.. leave one kind of renderer out (by name, see kProfileModes)
   void profile_frame(double gpu_draw_ms);
   // (AI-assisted) config.ini auto_detail: shrub / tie distances from the GPU time per frame
-  void auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms,
-                         double build_tod_ms);
+  void auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int gpu_busy_frames,
+                         double build_ms, double build_tod_ms);
   struct AutoDetail {
     float t = 0.25f;  // ctr_level_set_detail
     double busy_ms = 0, busy_max = 0, build_max = 0;
@@ -202,6 +203,13 @@ class CtrRenderer {
     u64 load_frame = 0;        // (AI-assisted, levellod) the last frame of a level load
     int ups = 0, downs = 0;  // steps since the last log
     int tod_downs = 0;       // (AI-assisted, levellod) ... of them by the time of day
+    bool init = false;
+    bool urgent_t = false;  // the t range's window: a GPU about to miss frames
+    bool t_range = false;  // the shrub / tie distances have a near-to-far range (t moves)
+    ctr_detail::Relief relief;
+    ctr_detail::Controller ctl;
+    ctr_detail::KnobTime time;
+    double last_ms = 0;
   } m_auto;
   bool m_title_loaded = false;  // (AI-assisted, levellod) note_levels: "title" is loaded
   bool profile_skips(const std::string& name) const;

@@ -782,10 +782,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
     // of the hardware fit (busy ~ 10.6 ms + 0.13 ms per 1000 triangles) of this frame's triangles
     static const bool model = getenv("CTR_AUTO_DETAIL_MODEL") != nullptr;
     if (model) {
-      auto_detail_frame(10.6f + 0.13f * gs.triangles / 1000.f, 1, 0.0, 0.0);
+      const float ms = 10.6f + 0.13f * gs.triangles / 1000.f;
+      auto_detail_frame(ms, ms, 1, 0.0, 0.0);
     } else
 #endif
-    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms, t2 - t1);
+    auto_detail_frame(gs.gpu_busy_ms, gs.gpu_active_ms, gs.gpu_busy_frames, t2 - t1 - tod_ms,
+                      t2 - t1);
   }
   if (!ctr_settings().gpu_profile && ctr_settings().gpu_counters) {
     hw_counters_frame();
@@ -925,16 +927,42 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         }
       }
 #endif
-      if (ctr_settings().auto_detail) {
+      if (ctr_settings().auto_detail && m_auto.init) {
         const auto& s = ctr_settings();
         const float t = m_auto.t;
-        lg::info("[ctr] auto detail {:.2f}: shrubs {:.0f} m (v14 files: x{:.2f}), ties x{:.2f} ({} steps up, {} down, {} of them for the time of day)", t,
-                 s.shrub_distance + (std::max(s.shrub_distance_max, s.shrub_distance) - s.shrub_distance) * t,
-                 s.shrub_scale + (std::max(s.shrub_scale_max, s.shrub_scale) - s.shrub_scale) * t,
-                 s.tie_distance_scale +
-                     (std::max(s.tie_distance_scale_max, s.tie_distance_scale) - s.tie_distance_scale) * t,
-                 m_auto.ups, m_auto.downs, m_auto.tod_downs);
+        std::string range;
+        if (m_auto.t_range) {
+          range = fmt::format(
+              " {:.2f}: shrubs {:.0f} m (v14 files: x{:.2f}), ties x{:.2f} ({} steps up, {} down, "
+              "{} of them for the time of day);",
+              t, s.shrub_distance + (std::max(s.shrub_distance_max, s.shrub_distance) - s.shrub_distance) * t,
+              s.shrub_scale + (std::max(s.shrub_scale_max, s.shrub_scale) - s.shrub_scale) * t,
+              s.tie_distance_scale +
+                  (std::max(s.tie_distance_scale_max, s.tie_distance_scale) - s.tie_distance_scale) * t,
+              m_auto.ups, m_auto.downs, m_auto.tod_downs);
+        }
+        // each relief knob now, and its seconds at the config value / between / the old value
+        const auto& rl = m_auto.relief;
+        const float r = m_auto.ctl.r;
+        const auto kn = rl.at(r);
+        const auto& tm = m_auto.time.ms;
+        auto secs = [&](int i) {
+          return fmt::format("{:.1f}/{:.1f}/{:.1f} s", tm[i][0] / 1000.0, tm[i][1] / 1000.0,
+                             tm[i][2] / 1000.0);
+        };
+        lg::info("[ctr] auto detail{} tie_lod_px {:.1f} ({}), lod_distance {} ({}), ties {} ({}) "
+                 "at the config / between / old value; relief {:.2f} of {}, {} steps toward the "
+                 "old values, {} back (next back after {} frames of room)",
+                 range, kn.tie_lod_px, secs(ctr_detail::kTieLodPx),
+                 kn.lod_distance > 0 ? fmt::format("{:.0f} m", kn.lod_distance) : std::string("off"),
+                 secs(ctr_detail::kLodDistance),
+                 kn.tie_distance_scale > 0 ? fmt::format("x{:.2f}", kn.tie_distance_scale)
+                                           : std::string("none"),
+                 secs(ctr_detail::kTieDistance), r, rl.n, m_auto.ctl.towards, m_auto.ctl.backs,
+                 m_auto.ctl.hold);
         m_auto.ups = m_auto.downs = m_auto.tod_downs = 0;
+        m_auto.ctl.towards = m_auto.ctl.backs = 0;
+        m_auto.time = ctr_detail::KnobTime();
       }
     }
     m_timing = Timing();
@@ -1062,57 +1090,87 @@ void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
 // title screen (its fast day rewrites nearly every frame: the flight keeps its distances).
 // Frames of a level load (4 ms or more in process_pending_loads, and the 2 after: their GPU
 // time) don't count for the largest frame: one such spike pulled the distances in on screen.
-void CtrRenderer::auto_detail_frame(float gpu_busy_ms, int gpu_busy_frames, double build_ms,
-                                    double build_tod_ms) {
+// The t range only runs where the config gives one (t_range); at its near end the relief
+// (CtrAutoDetail.h) follows the GPU's time from the frame's command list on (active: without the
+// GPU's wait for the render thread after the frame's clear), frame by frame.
+void CtrRenderer::auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int gpu_busy_frames,
+                                    double build_ms, double build_tod_ms) {
+  const auto& cs = ctr_settings();
+  const double now = ctr_gpu_time_ms();
+  if (!m_auto.init) {
+    m_auto.init = true;
+    m_auto.t_range = cs.shrub_scale_max > cs.shrub_scale ||
+                     (cs.tie_distance_scale > 0 && cs.tie_distance_scale_max > cs.tie_distance_scale);
+    m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance);
+    m_auto.ctl.n = m_auto.relief.n;
+    if (!m_auto.t_range) {
+      m_auto.t = 0;
+    }
+    ctr_level_set_detail(m_auto.t);
+    m_auto.last_ms = now;
+  }
+  m_auto.time.add(m_auto.relief, m_auto.ctl.r, now - m_auto.last_ms);
+  m_auto.last_ms = now;
   if (!gpu_busy_frames) {
     return;  // no GPU time this frame (frame_pacing = fast): distances stay where they are
   }
   // (AI-assisted, citadel) the target and margins are for fps_cap = 30's 33 ms frame: at fps_cap =
   // 60 half of them (a 27 ms target kept the distances at their far end in a 16.7 ms frame:
   // Azahar citadel-generator-start 92-99k triangles, 50 fps)
-  const double k = ctr_settings().fps_cap >= 60 ? 0.5 : 1.0;
-  m_auto.busy_ms += gpu_busy_ms;
-  m_auto.busy_frames += gpu_busy_frames;
+  const double k = cs.fps_cap >= 60 ? 0.5 : 1.0;
+  const double target = cs.auto_detail_gpu_ms * k;
   const bool load = m_auto.load_frame && m_rs.frame_idx <= m_auto.load_frame + 2;
-  if (!load) {
-    const double busy = (double)gpu_busy_ms / gpu_busy_frames;
-    m_auto.busy_max = std::max(m_auto.busy_max, busy);
-    m_auto.over33 += busy > 33.0 * k;
-    m_auto.build_max = std::max(m_auto.build_max, build_ms);
-    m_auto.build_tod_max = std::max(m_auto.build_tod_max, build_tod_ms);
+  const double busy = (double)gpu_busy_ms / gpu_busy_frames;
+  bool moved = false;
+  // the relief moves only with the shrub / tie distances at their near end
+  if (m_auto.t <= 0) {
+    moved = m_auto.ctl.step((double)gpu_active_ms / gpu_busy_frames, build_tod_ms, !load, target,
+                            k);
   }
-  if (++m_auto.frames < 15) {
-    return;
+  if (m_auto.t_range) {
+    m_auto.busy_ms += gpu_busy_ms;
+    m_auto.busy_frames += gpu_busy_frames;
+    if (!load) {
+      m_auto.busy_max = std::max(m_auto.busy_max, busy);
+      m_auto.over33 += busy > 33.0 * k;
+      m_auto.build_max = std::max(m_auto.build_max, build_ms);
+      m_auto.build_tod_max = std::max(m_auto.build_tod_max, build_tod_ms);
+    }
+    if (++m_auto.frames >= 15) {
+      const double avg = m_auto.busy_ms / m_auto.busy_frames;
+      const bool tod_counts = !m_title_loaded;
+      const bool tod_over = tod_counts && m_auto.build_tod_max > target;
+      m_auto.tod_over_windows = tod_over ? m_auto.tod_over_windows + 1 : 0;
+      float t = m_auto.t;
+      if (avg > target || m_auto.busy_max > target + 4.0 * k || m_auto.build_max > target ||
+          m_auto.tod_over_windows >= 2) {
+        t -= 0.1f;
+        m_auto.downs++;
+        m_auto.tod_downs += m_auto.tod_over_windows >= 2;
+      } else if (avg < target - 4.0 * k && m_auto.busy_max < target &&
+                 m_auto.build_max < target - 8.0 * k && !tod_over && m_auto.ctl.r <= 0) {
+        t += 0.04f;
+        m_auto.ups++;
+      }
+      t = std::clamp(t, 0.f, 1.f);
+      // (AI-assisted, title-popin) a GPU close to missing frames lowers the distances of what is
+      // on screen too (else those keep theirs until they are out of view; the build time's spikes,
+      // the time of day recolor, don't count here). (AI-assisted, levellod) from the window's
+      // average or two frames over 33 ms, not one: a single spike (a distort copy, a burst of
+      // uploads) made ties at the edge of their distance vanish on screen
+      m_auto.urgent_t = avg > target + 3.0 * k || m_auto.over33 >= 2;
+      if (t != m_auto.t) {
+        m_auto.t = t;
+        moved = true;
+      }
+      m_auto.busy_ms = m_auto.busy_max = m_auto.build_max = m_auto.build_tod_max = 0;
+      m_auto.busy_frames = m_auto.frames = m_auto.over33 = 0;
+    }
   }
-  const double target = ctr_settings().auto_detail_gpu_ms * k;
-  const double avg = m_auto.busy_ms / m_auto.busy_frames;
-  const bool tod_counts = !m_title_loaded;
-  const bool tod_over = tod_counts && m_auto.build_tod_max > target;
-  m_auto.tod_over_windows = tod_over ? m_auto.tod_over_windows + 1 : 0;
-  float t = m_auto.t;
-  if (avg > target || m_auto.busy_max > target + 4.0 * k || m_auto.build_max > target ||
-      m_auto.tod_over_windows >= 2) {
-    t -= 0.1f;
-    m_auto.downs++;
-    m_auto.tod_downs += m_auto.tod_over_windows >= 2;
-  } else if (avg < target - 4.0 * k && m_auto.busy_max < target &&
-             m_auto.build_max < target - 8.0 * k && !tod_over) {
-    t += 0.04f;
-    m_auto.ups++;
+  ctr_level_set_detail_urgent(m_auto.urgent_t || m_auto.ctl.urgent);
+  if (moved) {
+    ctr_level_set_detail(m_auto.ctl.r > 0 ? -m_auto.ctl.r : m_auto.t);
   }
-  t = std::clamp(t, 0.f, 1.f);
-  // (AI-assisted, title-popin) a GPU close to missing frames lowers the distances of what is on
-  // screen too (else those keep theirs until they are out of view; the build time's spikes, the
-  // time of day recolor, don't count here). (AI-assisted, levellod) from the window's average or
-  // two frames over 33 ms, not one: a single spike (a distort copy, a burst of uploads) made
-  // ties at the edge of their distance vanish on screen
-  ctr_level_set_detail_urgent(avg > target + 3.0 * k || m_auto.over33 >= 2);
-  if (t != m_auto.t) {
-    m_auto.t = t;
-    ctr_level_set_detail(t);
-  }
-  m_auto.busy_ms = m_auto.busy_max = m_auto.build_max = m_auto.build_tod_max = 0;
-  m_auto.busy_frames = m_auto.frames = m_auto.over33 = 0;
 }
 
 // (AI-assisted) config.ini gpu_profile = ab. A cycle has two windows per switch of kAbSwitches
