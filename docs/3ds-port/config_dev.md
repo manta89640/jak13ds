@@ -68,6 +68,7 @@ sound = on                 # (user key) sound output (off: silent; it costs CPU 
 sound_core = auto          # CPU core of the sound mixer: 1 (the default: the system core, 40% share on New 3DS; the mixer runs its voices without its lock, so sound calls don't wait while the system holds core 1 up), 2 (the render thread's core). Each falls back to the other; other values: auto
 mips2c_native_off = off    # all: the mips2c versions instead of the native functions; or names (also pc-new-bones-mtx-calc). Debugging only
 perf_sections = off        # on: per-section timing in the log (slower)
+stack_watch = off          # on: measure the GOAL process stacks (pattern fill, scan after every run; slower): "[stack]" lines with the deepest run per process type and thread every 30 s
 args = -boot -cbackend     # the game's arguments (-debug etc. like on PC)
 listener = off             # on: Wi-Fi REPL (goalc can connect; 1 MB of RAM)
 screenshots = 0            # N: save the top screen every N frames to data/log

@@ -2199,6 +2199,45 @@
 ;; ERROR: Stack slot load at 96 mismatch: defined as size 4, got size 16
 ;; ERROR: Stack slot load at 96 mismatch: defined as size 4, got size 16
 ;; WARN: Function (method 17 level-group) has a return type of none, but the expression builder found a return statement.
+;; og:preserve-this 3DS: the *vis-actors* loop below skips the entities it would do nothing for in
+;; C++ (native2_actors.cpp, the same tests). pc-actors-vis-skip? is the GOAL version of that test
+;; (host verify mode).
+(#when TARGET_3DS
+  (def-mips2c pc-actors-vis-next (function level entity-links-array int int vector task-mask symbol int int))
+  (defun pc-actors-vis-skip? ((arg0 level) (arg1 entity-links) (arg2 vector) (arg3 task-mask) (arg4 symbol))
+    (if (and (#if PC_PORT (or (with-pc (and (not (-> *pc-settings* ps2-actor-vis?))
+                                             ;; ban specific entities
+                                             (not (let ((name (res-lump-struct (-> arg1 entity) 'name string)))
+                                                  (or (string= name "fort-entry-gate-11")
+                                                      (string= name "fort-elec-gate-11")
+                                                      (string= name "fort-elec-gate-12")
+                                                      (string= name "com-airlock-outer-13")
+                                                      (string= name "com-airlock-inner-41")
+                                                      (string= name "under-lift-4")
+                                                      (string= name "under-locking-1")
+                                                      (string= name "under-locking-2"))))))
+                               (is-object-visible? arg0 (-> arg1 vis-id)))
+                           (is-object-visible? arg0 (-> arg1 vis-id)))
+            (not (logtest? (-> arg1 perm status) (entity-perm-status bit-9 bit-10)))
+            (not (logtest? (-> arg1 kill-mask) arg3))
+            (or (-> arg0 vis-info 0) (< (vector-vector-distance (-> arg1 trans) arg2) (-> arg1 vis-dist)))
+            (#if PC_PORT
+                (or (not (type-type? (-> arg1 entity type) entity-actor)) (and (valid? (-> (the-as entity-actor (-> arg1 entity)) etype) type "entity-type-check etype" #f *stdcon*)
+                                                                                (valid? (-> (the-as entity-actor (-> arg1 entity)) etype symbol) symbol "entity-type-check symbol" #f *stdcon*)
+                                                                                (valid? (-> (the-as entity-actor (-> arg1 entity)) etype symbol value) type "entity-type-check value" #f *stdcon*)
+                                                                                (= (-> (the-as entity-actor (-> arg1 entity)) etype) (-> (the-as entity-actor (-> arg1 entity)) etype symbol value))
+                                                                                ))
+                #f)
+            )
+        (or (-> arg1 process) (logtest? (-> arg1 perm status) (entity-perm-status bit-0 dead)) arg4)
+        (not (and (-> arg1 process)
+                  (not (logtest? (-> arg1 perm status) (entity-perm-status no-kill)))
+                  (not (logtest? (-> arg1 process mask) (process-mask no-kill)))
+                  ))
+        )
+    )
+  )
+
 (defmethod actors-update ((this level-group))
   (local-vars
     (sv-16 vector)
@@ -2347,6 +2386,10 @@
                        (s0-0 #f)
                        )
                   (dotimes (s1-1 s2-3)
+                    ;; og:preserve-this 3DS: skip to the next entity the body acts on
+                    (#when TARGET_3DS
+                      (set! s1-1 (pc-actors-vis-next s4-1 s3-4 s1-1 s2-3 sv-16 sv-32 s0-0 sv-24)))
+                    (when (< s1-1 s2-3)
                     (set! sv-48 (-> s3-4 data s1-1))
                     (cond
                         ;; og:preserve-this entity blacklist
@@ -2406,6 +2449,7 @@
                     (if (>= sv-24 (-> *ACTOR-bank* birth-max))
                         (return #f)
                         )
+                    )
                     )
                   )
                 )

@@ -408,8 +408,8 @@ shape (and needs the matching `goal_c_ops.h`):
   instruction in flight has finished; a float loaded from memory now goes straight to a core
   register. Exact for every non-NaN value with flush-to-zero semantics (denormals compare like 0,
   as on the PS2 and in RunFast mode).
-- `gc_cvtt` (float to int) uses `vcvt.s32.f32` on ARM, which already saturates and gives 0 for NaN,
-  instead of three compares.
+- `gc_cvtt` (float to int) uses `vcvt.s32.f32` on ARM, which already saturates, instead of three
+  compares; a NaN (the bits, one integer compare) gives INT32_MIN.
 
 Measured (Jak 1, 518 modules, devkitARM -O2, module objects): instructions 1,377,731 -> 1,417,153
 (+2.9%; the float changes alone are -6.9%, the guards add ~+10% on top, mostly the out-of-line
@@ -435,9 +435,10 @@ often hoisted out of loops). Not measured on hardware yet.
   includes the NaNs in a set of the other sign (`(< x 0.0)`: two compares). Exhaustively tested
   against a model of the x86 rules (2 x 10^8 cases, both operand orders, special values). Cost:
   +11,975 ARM instructions over the 518 modules (+0.8%).
-- Float to int conversion keeps the PS2/ARM64 behaviour (saturating, NaN gives 0), not x86's
-  `0x80000000` for every out of range value: no Jak 1 code depends on the x86 value, and a NaN or
-  infinite index then stays in range more often.
+- Float to int conversion saturates like the PS2 (CVT.W.S, VU ftoi) for finite and infinite
+  values, not x86's `0x80000000` for every out of range value. NaN, which the PS2 never makes,
+  gives `0x80000000` like the PC port (cvttss2si / cvttps2dq): a NaN count or index is negative,
+  so loops don't run and grid lookups reject it, as on the PC.
 - `GC_STACK_INIT(gc_stack)` at the start of every function with stack variables: nothing by
   default. Build the modules with `-DGOALC_STACK_POISON` (fill with `0xff`: NaN floats, -1
   integers, faulting pointers) to find code that reads `stack-no-clear` memory before writing it

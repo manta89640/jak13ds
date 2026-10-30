@@ -289,23 +289,25 @@ GC_INLINE u64 gc_sar(u64 a, u64 s) {
 // float math
 // ---------------------------------------------------------------------------
 
-//! float to int32, truncating and saturating like the EE (CVT.W.S) and the ARM64 backend.
-//! NaN gives 0 (the EE has no NaNs, ARM64 gives 0).
+//! float to int32, truncating and saturating like the EE (CVT.W.S). NaN gives INT32_MIN like the
+//! PC port's cvttss2si / cvttps2dq (the EE has no NaNs).
 GC_INLINE s32 gc_cvtt(float f) {
 #if defined(__arm__) && defined(__ARM_FP)
-  // (AI-assisted) VFP's round-towards-zero conversion already saturates and gives 0 for NaN.
-  // C leaves out of range conversions undefined, so use the instruction itself (the generic code
-  // below costs three compares, each waiting for the VFP pipeline to drain in VMRS).
+  // VFP's round-towards-zero conversion already saturates (NaN gives 0, fixed below
+  // on the bits). C leaves out of range conversions undefined, so use the instruction itself (the
+  // generic code below costs three compares, each waiting for the VFP pipeline to drain in VMRS).
   if (!__builtin_constant_p(f)) {
     float r;
     __asm__("vcvt.s32.f32 %0, %1" : "=t"(r) : "t"(f));
     s32 i;
     memcpy(&i, &r, 4);
-    return i;
+    u32 b;
+    memcpy(&b, &f, 4);
+    return (b << 1) > 0xff000000u ? INT32_MIN : i;
   }
 #endif
   if (f != f) {
-    return 0;
+    return INT32_MIN;
   }
   if (f >= 2147483648.0f) {
     return INT32_MAX;

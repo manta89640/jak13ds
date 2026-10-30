@@ -924,6 +924,14 @@ every platform:
   also compares `*pc-fffuls-work*`). `instance-sphere-box-intersect?` is a def-mips2c on the 3DS
   (`main-collide.gc`), inlined in both tree walks; tested against goalc's C of the GOAL function
   (`test/mips2c_native` `instance-sphere-box-intersect?`, `goalc_ref/main_collide.c`).
+- The rest of the fills' GOAL code: `pc-fill-from-background` (collide-cache method
+  21 for every fill: the per-level walks, then may-hit, upload, unpack and import per fragment, all
+  called directly instead of through GOAL) and `pc-fill-using-line-sphere` (method 14: the rotated
+  box of a long line in `*collide-work*`, the same float operations as goalc's C of its VU0 code,
+  then the background, water and foreground fills; a short line still runs the GOAL bounding-box
+  fill). Same switch and verify mode (it also compares `*collide-work*`, `*perf-stats*` 14 and
+  `*collide-stats*`). The camera's line of sight is two of these fills per frame; its background
+  walk was already the native `collide-probe-node` / `collide-probe-instance-tie`.
 - (AI-assisted, Oct 11) `pc-new-bones-mtx-calc` (`native_bones.cpp`): the loop of the GOAL
   function `new-bones-mtx-calc-asm` (every merc model's skinning matrices, every frame; 0.27 ms per
   frame in Snowy Mountain on hardware). On the 3DS one VFP assembly block per bone keeps both

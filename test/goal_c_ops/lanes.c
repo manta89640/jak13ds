@@ -1,6 +1,7 @@
 // (AI-assisted) goal_c_ops.h: the lane-by-lane 128-bit integer ops (gc_pcgtw, gc_pshuflw, ...)
 // against the gc_m128 byte/halfword loop versions (gc_*_u), bit for bit, on random and special
 // inputs (NaN and infinity bit patterns, sign bits, 0, -1), every shuffle control and shift amount.
+// Also float to int (gc_vf_ftoi, so gc_cvtt) against a model on the bits.
 //   cc -std=gnu11 -O2 -fno-strict-aliasing -Igoalc/cbackend -Igame/kernel/common \
 //      test/goal_c_ops/lanes.c -o /tmp/lanes && /tmp/lanes
 // (also -O0, and -arch x86_64 on an Apple silicon Mac). -DLANES_BARE: no stdio (main returns
@@ -70,6 +71,31 @@ static void check(const char* name, u32 arg, v128 a, v128 b, v128 got, v128 want
 #endif
   }
 }
+//! float to int on the bits: truncate, saturate like CVT.W.S (infinities too), NaN gives INT32_MIN
+//! like the PC port, denormals give 0
+static u32 cvtt_model(u32 b) {
+  const u32 e = (b >> 23) & 0xff;
+  if (e == 0xff && (b & 0x7fffff)) {
+    return 0x80000000u;
+  }
+  if (e >= 158) {
+    return (b >> 31) ? 0x80000000u : 0x7fffffffu;
+  }
+  if (e < 127) {
+    return 0;
+  }
+  const u32 m = (b & 0x7fffff) | 0x800000;
+  const int sh = (int)e - 150;
+  const u32 v = sh >= 0 ? m << sh : m >> -sh;
+  return (b >> 31) ? 0u - v : v;
+}
+static void check_ftoi(v128 a) {
+  const u32* x = (const u32*)&a;
+  const v128 want = {gc_bitsf(cvtt_model(x[0])), gc_bitsf(cvtt_model(x[1])),
+                     gc_bitsf(cvtt_model(x[2])), gc_bitsf(cvtt_model(x[3]))};
+  check("vf_ftoi", 0, a, a, gc_vf_ftoi(a), want);
+}
+
 #define CHK2(op)                                                       \
   check(#op, 0, a, b, gc_##op(a, b), gc_um(gc_##op##_u(gc_mu(a), gc_mu(b))))
 #define CHK1(op, n) check(#op, n, a, b, gc_##op(a, n), gc_um(gc_##op##_u(gc_mu(a), n)))
@@ -81,6 +107,7 @@ int main(void) {
     if ((it & 7) == 0) {
       b = a;  // equal lanes for the compares
     }
+    check_ftoi(a);
     CHK2(pextlb);
     CHK2(pextub);
     CHK2(pextlh);

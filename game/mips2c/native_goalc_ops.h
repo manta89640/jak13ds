@@ -131,10 +131,11 @@ inline bool fcmp_xk(float x, u32 cb, int op) {
   return gc_fcmp_k(fbits(x), cb, op, gc_fnanres(op));
 }
 
-//! goalc's (the int f): truncate and saturate like CVT.W.S, NaN -> 0 (gc_cvtt), sign-extended
+//! goalc's (the int f): truncate and saturate like CVT.W.S, NaN -> INT32_MIN (gc_cvtt),
+//! sign-extended
 inline s64 f2i(float f) {
   if (f != f) {
-    return 0;
+    return INT32_MIN;
   }
   if (f >= 2147483648.0f) {
     return INT32_MAX;
