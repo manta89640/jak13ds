@@ -719,6 +719,21 @@ void InitMachine_PCPort() {
     intern_from_c("*pc-3ds-shadow-volumes?*")->value() =
         volumes ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   }
+  // config.ini ocean = full: the PS2 ocean's DMA (draw-ocean) for CtrOceanFull instead of
+  // ocean-3ds-packet's for CtrOceanRenderer (ocean.gc, TARGET_3DS)
+  {
+    bool ocean_full = false;
+#ifdef __3DS__
+    char v[32];
+    ocean_full = ctr_config_get("ocean", v, sizeof(v)) && std::string(v) == "full";
+#else
+    if (const char* e = getenv("OPENGOAL_OCEAN_FULL")) {
+      ocean_full = e[0] == '1';
+    }
+#endif
+    intern_from_c("*pc-3ds-ocean-full*")->value() =
+        ocean_full ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
+  }
 }
 
 /*!

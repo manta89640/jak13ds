@@ -42,6 +42,11 @@
  * + env * v.a * tex.a) but for where the sum reaches white (the GS saturates once at the end).
  * config.ini ocean_near_alpha (default 0: the PS2's own alpha) is a floor on the near alpha.
  *
+ * Jak II (the same programs' _jak2 versions): the mid-and-far bucket starts with the env map's
+ * first pass (ocean-method-89, drawn like CtrOceanEnvJak2; the warp is CtrOceanEnvWarpJak2's), the
+ * wave texture is the vertex colors times environment-ocean-alphamod at (0.5 + n.x, 0.5 + n.z),
+ * and the env map pass's t comes from the view direction's y.
+ *
  * Log: "[ctr] ocean full:" once per level (set of levels), the render thread's ms per frame;
  * (AI-assisted) a warning when parts weren't drawn (at most every 300 frames, see frame_stats).
  */
@@ -52,9 +57,11 @@
 
 #include "common/common_types.h"
 
+#include "game/graphics/ctr/CtrOcean.h"
 #include "game/graphics/ctr/CtrOceanVu.h"
 #include "game/graphics/ctr/CtrRenderer.h"
 
+class CtrDirect;
 class CtrOceanMidVu;
 class CtrOceanNearVu;
 class CtrOceanBatch;
@@ -75,6 +82,9 @@ class CtrOceanFull : public CtrOceanEnvHook {
  private:
   struct TextureDma;
   bool read_texture_dma(DmaFollower& dma, TextureDma* out);
+  bool read_texture_dma_jak2(DmaFollower& dma, TextureDma* out);
+  bool read_texture_rows(DmaFollower& dma, TextureDma* out);
+  bool begin_bucket(DmaFollower& dma, const CtrRenderState& rs);
   void update_texture(const TextureDma& t, CtrRenderState& rs);
   void update_texture_gpu(const TextureDma& t, CtrRenderState& rs);
   void make_wave_rt();
@@ -86,6 +96,10 @@ class CtrOceanFull : public CtrOceanEnvHook {
   std::unique_ptr<CtrOceanMidVu> m_mid;
   std::unique_ptr<CtrOceanNearVu> m_near;
   std::unique_ptr<CtrOceanBatch> m_batch;
+  // Jak II: the env map (ocean-method-89's first pass, drawn here; the warp)
+  bool m_jak2 = false;
+  std::unique_ptr<CtrDirect> m_env_direct;
+  CtrOceanEnvWarpJak2 m_env_warp;
 
   // the wave texture
   int m_tex = -1;  // with the PS2's mip levels

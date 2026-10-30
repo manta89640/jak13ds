@@ -36,6 +36,7 @@
 #define private public
 #include "game/graphics/ctr/CtrOceanFull.cpp"
 #undef private
+#include "test/ctr_ocean/jak2_stubs.h"
 
 // ---------------------------------------------------------------------------------------------
 // stubs: the env map, the settings, the log, file output

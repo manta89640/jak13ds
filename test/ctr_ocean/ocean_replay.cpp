@@ -125,6 +125,8 @@ double ctr_gpu_time_ms(void) {
 }
 // (AI-assisted) config.ini: the defaults, changed in main
 // (CtrSettings.h's inline ctr_settings reads ctr_settings_detail::g_settings: pointed at this one)
+#include "test/ctr_ocean/jak2_stubs.h"
+
 CtrSettings g_settings;
 namespace ctr_settings_detail {
 const CtrSettings* g_settings = &::g_settings;

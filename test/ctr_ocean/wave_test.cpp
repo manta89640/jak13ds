@@ -50,6 +50,8 @@ std::vector<u32> g_env;
 CtrTexture g_env_tex;
 }  // namespace
 
+#include "test/ctr_ocean/jak2_stubs.h"
+
 CtrSettings g_settings;
 namespace ctr_settings_detail {
 const CtrSettings* g_settings = &::g_settings;

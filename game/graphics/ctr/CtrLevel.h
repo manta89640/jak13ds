@@ -476,8 +476,11 @@ struct CtrLevelData {
   std::vector<u32> proto_hidden_runs;
   std::vector<u8> chunk_proto_hidden;
   // (AI-assisted, j2water2) c3l v21 envmapped ties (c3l::ExtEnvTie): the listed base draws (their
-  // shine), per draw its index there (-1: none; empty: no such draws), per chunk the byte offset of
-  // its normals in normals_mesh (-1: none), the mesh holding all of them (ctr_gpu, -1: none)
+  // shine), per draw its index there (-1: none; empty: no such draws), per chunk whether it has
+  // normals (kNormalsInMesh: in its own mesh, after the vertices or, for a streamed near chunk,
+  // after the indices; freed and read back with it; -1: none) and their file offset (0: none).
+  // normals_mesh: unused (-1).
+  static constexpr s32 kNormalsInMesh = -2;
   std::vector<c3l::EnvTieDraw> env_draws;
   std::vector<s16> draw_env;
   // c3l::kDrawCullCond draws (c3l::ExtCullCond): each one's planes in cond_planes
@@ -487,7 +490,16 @@ struct CtrLevelData {
   std::vector<CondDraw> cond_draws;
   std::vector<c3l::CullCondPlane> cond_planes;
   std::vector<s32> chunk_normals;
+  std::vector<u32> chunk_normals_file;
   int normals_mesh = -1;
+  //! where chunk ci's normals are in its mesh (bytes from its vertices)
+  u32 normals_offset_in_mesh(size_t ci) const;
+  //! the bytes of chunk ci's normals in its mesh's tail (0: none)
+  u32 normals_tail_bytes(size_t ci) const {
+    return ci < chunk_normals.size() && chunk_normals[ci] == kNormalsInMesh
+               ? chunks[ci].vertex_count * 4
+               : 0;
+  }
   // wind ties (c3l::ExtWind): the instances, per chunk its slots' byte offset in wind_mesh (-1:
   // none) and its slot instances (chunk_wind_first, chunk_wind_n into wind_slot_inst); the PC's
   // wind state per wind_idx (Tie3 m_wind_vectors) and this frame's shear per instance (kx, kz)
@@ -743,6 +755,7 @@ class CtrLevels {
     u32 chunk;
     u32 first_vertex, vertex_count;
     u32 index_first, index_end;
+    u32 normals_offset = 0;  // envmapped tie normals for the mesh's tail (file offset, 0: none)
   };
   // (AI-assisted) a merc model mesh to make again (repair)
   struct RepairMerc {
@@ -772,6 +785,7 @@ class CtrLevels {
     struct StreamPart {
       u32 unit, chunk;
       u32 first_vertex, vertex_count, index_first, index_end;
+      u32 normals_offset = 0;  // envmapped tie normals after the indices (file offset, 0: none)
       void* mem = nullptr;
       // the chunk's draws (first_index relative to its indices) and runs, for its time of day
       // groups (layout: not made yet)

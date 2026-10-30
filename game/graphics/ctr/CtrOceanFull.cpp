@@ -16,6 +16,7 @@
 #include "common/dma/gs.h"
 #include "common/log/log.h"
 
+#include "game/graphics/ctr/CtrDirect.h"
 #include "game/graphics/ctr/CtrOceanBatch.h"
 #include "game/graphics/ctr/CtrOceanVu.h"
 #include "game/graphics/ctr/CtrSettings.h"
@@ -204,13 +205,15 @@ bool CtrOceanMidVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
           native ? native_tile(false) : run_call46_vu2c();
           break;
         case 73:
-          native ? native_tile(true) : run_call73_vu2c();
+          native ? native_tile(true) : (m_jak2 ? run_call73_vu2c_jak2() : run_call73_vu2c());
           break;
         case 107:
-          native ? native_transition(false) : run_call107_vu2c();
+          native ? native_transition(false)
+                 : (m_jak2 ? run_call107_vu2c_jak2() : run_call107_vu2c());
           break;
         case 275:
-          native ? native_transition(true) : run_call275_vu2c();
+          native ? native_transition(true)
+                 : (m_jak2 ? run_call275_vu2c_jak2() : run_call275_vu2c());
           break;
         default:
           return false;
@@ -283,20 +286,21 @@ bool CtrOceanNearVu::run(DmaFollower& dma, CtrOceanBatch* batch) {
     } else if (v0.kind == VifCode::Kind::MSCALF && v1.kind == VifCode::Kind::STMOD) {
       switch (v0.immediate) {
         case 0:
-          run_call0_vu2c();
+          m_jak2 ? run_call0_vu2c_jak2() : run_call0_vu2c();
           break;
         case 39:
           if (m_native && m_env_hook && !m_env_sent) {
             // (AI-assisted, j1ocean) the env map pass's texture and color, from the constants
-            // (ocean-near-constants: env-texture's TEX0 at 970, env-color at 976)
+            // (ocean-near-constants: env-texture's TEX0 at 970, env-color at 976; Jak II + 1)
             m_env_sent = true;
+            const int k = m_jak2 ? 1 : 0;
             u64 tex0;
-            memcpy(&tex0, &m_vu_data[970], 8);
-            const float col[4] = {m_vu_data[976].x(), m_vu_data[976].y(), m_vu_data[976].z(),
-                                  m_vu_data[976].w()};
+            memcpy(&tex0, &m_vu_data[970 + k], 8);
+            const Vf& c = m_vu_data[976 + k];
+            const float col[4] = {c.x(), c.y(), c.z(), c.w()};
             m_env_hook->ocean_env(tex0, col);
           }
-          m_native ? native_patch() : run_call39_vu2c();
+          m_native ? native_patch() : (m_jak2 ? run_call39_vu2c_jak2() : run_call39_vu2c());
           break;
         default:
           return false;
@@ -358,6 +362,37 @@ bool CtrOceanFull::read_texture_dma(DmaFollower& dma, TextureDma* out) {
     memcpy(&ad, data.data + 16, sizeof(AdGifData));
     out->env_tex0 = ad.tex0_data;
   }
+  return read_texture_rows(dma, out);
+}
+
+/*!
+ * Jak II's ocean-texture DMA (OceanTexture::handle_ocean_texture_jak2): set-display-gs-state, the
+ * env map adgif (environment-ocean-alphamod), the GS setup and the program, the constants, then the
+ * uploads and calls as Jak 1's.
+ */
+bool CtrOceanFull::read_texture_dma_jak2(DmaFollower& dma, TextureDma* out) {
+  dma.read_and_advance();  // set-display-gs-state
+  {
+    auto data = dma.read_and_advance();
+    if (data.size_bytes != sizeof(AdGifData) + 16 || data.vifcode1().kind != VifCode::Kind::DIRECT) {
+      return false;
+    }
+    AdGifData ad;
+    memcpy(&ad, data.data + 16, sizeof(AdGifData));
+    out->env_tex0 = ad.tex0_data;
+  }
+  for (int guard = 0; guard < 8; guard++) {
+    auto data = dma.read_and_advance();
+    if (data.vifcode1().kind == VifCode::Kind::UNPACK_V4_32 &&
+        data.size_bytes == sizeof(TextureDma::Constants)) {
+      memcpy(&out->constants, data.data, sizeof(TextureDma::Constants));
+      return read_texture_rows(dma, out);
+    }
+  }
+  return false;
+}
+
+bool CtrOceanFull::read_texture_rows(DmaFollower& dma, TextureDma* out) {
   // uploads (192, then 9 x 192 after the calls, then 128 + 64 quadwords) and the 12 calls
   int rows = 0;
   for (int guard = 0; guard < 32; guard++) {
@@ -530,11 +565,16 @@ void CtrOceanFull::update_texture_gpu(const TextureDma& t, CtrRenderState& rs) {
       const float* ny = q[3];
       const float* nz = q[5];
       for (int k = 0; k < 4; k++) {
-        const float refl = (nx[k] * cx + ny[k] * cy) + nz[k] * cz;
-        const float w = q[2 * k][3];
         ctr_vertex& v = row[4 * g + k];
-        v.s = (nx[k] * refl * w + cx) * k0 + k1;
-        v.t = (ny[k] * refl * w + cy) * k0 + k1;
+        if (m_jak2) {
+          v.s = nx[k] + k0;  // (Jak II's constants: 0.5, 0.5)
+          v.t = nz[k] + k1;
+        } else {
+          const float refl = (nx[k] * cx + ny[k] * cy) + nz[k] * cz;
+          const float w = q[2 * k][3];
+          v.s = (nx[k] * refl * w + cx) * k0 + k1;
+          v.t = (ny[k] * refl * w + cy) * k0 + k1;
+        }
         v.r = (u8)((s32)q[2 * k][0] & 0xff);  // ftoi0, then the GS's 8 bits
         v.g = (u8)((s32)q[2 * k][1] & 0xff);
         v.b = (u8)((s32)q[2 * k][2] & 0xff);
@@ -585,13 +625,20 @@ void CtrOceanFull::update_texture(const TextureDma& t, CtrRenderState& rs) {
       const float* nz = q[5];
       // four independent vertices (the VU's 4 lanes): the VFP pipelines them
       float refl[4], s[4], tt[4];
-      for (int k = 0; k < 4; k++) {
-        refl[k] = (nx[k] * cx + ny[k] * cy) + nz[k] * cz;
-      }
-      for (int k = 0; k < 4; k++) {
-        const float w = q[2 * k][3];
-        s[k] = (nx[k] * refl[k] * w + cx) * k0 + k1;
-        tt[k] = (ny[k] * refl[k] * w + cy) * k0 + k1;
+      if (m_jak2) {
+        for (int k = 0; k < 4; k++) {
+          s[k] = nx[k] + k0;
+          tt[k] = nz[k] + k1;
+        }
+      } else {
+        for (int k = 0; k < 4; k++) {
+          refl[k] = (nx[k] * cx + ny[k] * cy) + nz[k] * cz;
+        }
+        for (int k = 0; k < 4; k++) {
+          const float w = q[2 * k][3];
+          s[k] = (nx[k] * refl[k] * w + cx) * k0 + k1;
+          tt[k] = (ny[k] * refl[k] * w + cy) * k0 + k1;
+        }
       }
       for (int k = 0; k < 4; k++) {
         V& v = verts[r][4 * g + k];
@@ -665,6 +712,9 @@ CtrOceanFull::CtrOceanFull()
   m_near->set_alpha_floor(floor);
   m_mid->set_env_hook(this);  // (AI-assisted, j1ocean) the sky reflection
   m_near->set_env_hook(this);
+  m_jak2 = ctr_is_jak2();
+  m_mid->set_jak2(m_jak2);
+  m_near->set_jak2(m_jak2);
   make_wave_rt();
   if (m_wave_rt >= 0) {
     m_tex_rate = 1;  // (the PS2 draws it every frame)
@@ -698,6 +748,21 @@ void CtrOceanFull::ocean_env(u64 tex0, const float color[4]) {
     return;
   }
   CtrRenderState& rs = *m_rs;
+  if (m_jak2) {
+    // the env texture: the warped env map (tex0 names its VRAM block) or, without the sky,
+    // environment-ocean (named by tex0)
+    const bool sky = CtrOceanEnvWarpJak2::first_pass_fresh(rs);
+    m_batch->end();  // (the warp draws into the frame's vertex memory the open draw holds)
+    if (!m_env_warp.update(color, sky, sky ? 0 : tex0, rs)) {
+      m_batch->set_env(-1);
+      return;
+    }
+    const float* uv = m_env_warp.uv();
+    const float map[6] = {uv[0], uv[2], uv[4], uv[1], uv[3], uv[5]};
+    m_batch->set_env(m_env_warp.rt());
+    m_batch->set_env_map(map);
+    return;
+  }
   GsTex0 t(tex0);
   u64 key = tex0;
   key = (key ^ (u64)(uintptr_t)rs.vram->upload_source(t.tbp0())) * 1099511628211ull;
@@ -837,6 +902,20 @@ bool CtrOceanFull::texture_due(const CtrRenderState& rs) const {
   return rs.frame_idx - m_tex_frame >= (u64)m_tex_rate;
 }
 
+/*!
+ * The bucket's first transfer; false (the bucket read to its end) when the game drew no ocean in
+ * it: Jak 1 then has a CALL, Jak II nothing more.
+ */
+bool CtrOceanFull::begin_bucket(DmaFollower& dma, const CtrRenderState& rs) {
+  dma.read_and_advance();
+  if (m_jak2 ? dma.current_tag_offset() == rs.next_bucket
+             : dma.current_tag().kind == DmaTag::Kind::CALL) {
+    drain(dma, rs);
+    return false;
+  }
+  return true;
+}
+
 void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
   frame_stats(rs);
   if (g_dump.armed()) {
@@ -844,14 +923,19 @@ void CtrOceanFull::render_mid_and_far(DmaFollower& dma, CtrRenderState& rs) {
     OceanDump::bucket(g_dump.mid, dma, rs, 0);
   }
   const double t0 = ctr_gpu_time_ms();
-  // OceanMidAndFar::render_jak1: the bucket's first transfer, then a CALL if the game drew none
-  dma.read_and_advance();
-  if (dma.current_tag().kind == DmaTag::Kind::CALL) {
-    drain(dma, rs);
+  if (!begin_bucket(dma, rs)) {
     return;
   }
+  if (m_jak2) {
+    // OceanMidAndFar::render_jak2: the env map first
+    if (!m_env_direct) {
+      m_env_direct = std::make_unique<CtrDirect>(rs.vram);
+      m_env_direct->enable_envmap();
+    }
+    CtrOceanEnvJak2::draw_first_pass(m_env_direct.get(), dma, rs);
+  }
   TextureDma tex;
-  if (!read_texture_dma(dma, &tex)) {
+  if (!(m_jak2 ? read_texture_dma_jak2(dma, &tex) : read_texture_dma(dma, &tex))) {
     m_failed++;
     m_failed_unlogged++;
     drain(dma, rs);
@@ -923,14 +1007,12 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
     OceanDump::bucket(dump_near, dma, rs, 1);
   }
   const double t0 = ctr_gpu_time_ms();
-  // OceanNear::render_jak1
-  dma.read_and_advance();
-  if (dma.current_tag().kind == DmaTag::Kind::CALL) {
-    drain(dma, rs);
+  // OceanNear::render_jak1 / render_jak2
+  if (!begin_bucket(dma, rs)) {
     return;
   }
   TextureDma tex;
-  if (!read_texture_dma(dma, &tex)) {
+  if (!(m_jak2 ? read_texture_dma_jak2(dma, &tex) : read_texture_dma(dma, &tex))) {
     m_failed++;
     m_failed_unlogged++;
     drain(dma, rs);
@@ -951,7 +1033,8 @@ void CtrOceanFull::render_near(DmaFollower& dma, CtrRenderState& rs) {
   ctr_draw_state st;
   memset(&st, 0, sizeof(st));
   st.tex = m_tex;
-  st.tcc = CTR_TCC_TRILINEAR | CTR_TCC_MIP_MAX1;  // (TEX1: MXL 1, MMIN 5)
+  // (TEX1: MXL 1, MMIN 5; Jak II's MXL 3: all levels, and no floor on the reflection's fade)
+  st.tcc = CTR_TCC_TRILINEAR | (m_jak2 ? 0 : CTR_TCC_MIP_MAX1);
   st.filter = 1;
   st.blend = CTR_BLEND_ALPHA;
   st.atest = CTR_TEST_ALWAYS;
