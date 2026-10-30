@@ -1439,3 +1439,51 @@ twice in measured frames.
 - `auto_detail` reads GPU busy, which counts the idle time between the clear and the first command
   list: Lava Tube / Citadel windows have busy 4-11 ms above active (33.6 vs 27.1), so they aren't
   GPU-bound although busy says so.
+
+## Ties at the PS2's distances: its own geometries and its geomorph (ps2lod)
+
+**What the PS2 does** (`draw-inline-array-instance-tie`, the tie VU program; `c3l_format.md` "The
+PS2's tie geomorph"): an instance is drawn with geometry 0 up to its prototype's mid-plane
+(morphing from the near-plane on toward geometry 2's surface), geometry 2 up to the far-plane
+(morphing toward geometry 3's), geometry 3 beyond. Geometry 1 is geometry 0. The far versions the
+port drew before were already the PS2's own geometry 3; what cost triangles was where it switched:
+the screen-space floor (`tie_lod_px` 1) kept geometry 0 out to max(shape error distance, far-plane),
+because switching 0 against 3 at the far-plane popped by 3-19 px. The PS2 shows no pop there because
+of the morph. With the morph the port switches at the PS2's distances and nothing shows.
+
+**Triangles per frame** (host soft renderer, `CTR_SOFT_STATS=60`, `platform/3ds/tests/ps2lod.pad`;
+before: the same converter with `--no-tie-morph`):
+
+| view | level triangles | ties | draws | est. GPU (0.136 ms / 1k) |
+|---|---|---|---|---|
+| title flight (18-19 windows) | 189.6k -> 124.7k | 89.5k -> 42.9k | 1183 -> 961 | -8.8 ms |
+| Fire Canyon start (6) | 159.1k -> 145.6k (shrubs 47.9k / 53.2k: the camera) | 45.2k -> 22.8k | 789 -> 717 | -3.0 ms (ties) |
+| village2 start (6) | 200.1k -> 114.1k | 94.7k -> 41.3k | 1431 -> 994 | -11.7 ms |
+
+Title, triangles with no pixel center 54.9k -> 33.2k, all fragments behind 59.1k -> 41.6k.
+
+**The same picture.** Host A/B in one run (`CTR_MORPH_AB`: on odd frames 1 every group's near
+version with the morph, 2 the PS2's versions without the morph; pairs of consecutive frames at the
+Fire Canyon and village2 starts, mean |difference| outside what moves between two frames of a
+control run): the near version everywhere against the PS2's choice 0.33-0.48 levels, 0.4-0.7% of
+pixels > 16, in the diff images on animated things (Jak, birds, the warp gate glow, lamps) and a few
+tie spots where geometry 2's own vertex colors differ from geometry 0's (the PS2 changes them
+there too); the morph itself 0.49-0.64 levels, 0.5-0.8% > 16, on the rock silhouettes (what a
+switch at the PS2's distances without it would pop). A group of a visibility node's instances
+instead of one per instance showed geometry 0 for instances past the mid-plane with their
+geometry 2 vertices moving on an unflattened surface (7 levels): hence one group per instance.
+
+**Memory.** Files +13-18% (village1 12.1 -> 14.3 MB, Fire Canyon 11.9 -> 13.5, village2 11.9 ->
+13.9, beach 9.5 -> 11.0). Near chunks: geometry 2's indices and its vertices that differ from
+geometry 0's (colors), 8 bytes of morph records per vertex in the mesh tail (village1 7.7 -> 9.5 MB
++ 2.7 MB records). What streaming needs at once fell: Azahar `needed now` 2.9-6.6 MB at the title
+and Fire Canyon, against 8-11 MB in the oct30 hardware log, because the PS2's far-planes (30-140 m)
+are nearer than the shape error distances at `tie_lod_px` 1.
+
+**CPU.** Per-instance groups: +50-60% runs tested (title 8.5k -> 13.6k), the morph rows (one sqrt
+per instance and band of the visible near chunks), the rows a draw uses sent with it (4-5 per draw).
+Vertex program 13 instructions for the near chunks' draws (10 before), +8 bytes fetched per vertex.
+
+Not done: wind instances (palms) keep the screen-space switch (the wind program has no room left for
+the rows); the PS2's color morph of the moving vertices (the .fr3 has no indices of the colors they
+blend to); Jak II (Haven City would need ~7x the near data at the PS2's distances).

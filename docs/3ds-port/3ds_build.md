@@ -810,6 +810,10 @@ PC it runs with `gk --ctr-gfx`.
   `data/log/shot_<frame>.bmp`, read back from the GPU render target. `run_emu.sh` converts them
   to PNG in `build-3ds/emu-run/`.
 
+The level extractor writes `<level>.tiemorph` (the PS2's tie geomorph, `c3l_format.md` "The
+PS2's tie geomorph") next to each `.fr3`; the converter reads it from there (or
+`--tie-morph-dir DIR`). Levels converted without it switch their ties as before.
+
 ```sh
 build-plat-native/tools/ctr_level_converter --all out/jak1/fr3 ../p3ds/out/jak1/c3l
 platform/3ds/tools/stage_sd.sh --proj ../p3ds --clean-logs --screenshots 120

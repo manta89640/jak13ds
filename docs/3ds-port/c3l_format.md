@@ -25,6 +25,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--tie-lod-budget-kb K` | per level | (v17) extra vertex and index data for near versions per level; default: the level's planned budget (`kTieLodBudgets` in main.cpp), else every group. |
 | `--tie-lod-min-angle A`, `--tie-lod-view-m M` | 0.002, 15 | (v17) a group gets a near version when its shape error seen from the larger of its radius and M meters is at least A radians. |
 | `--tie-lod-default-m M` | 60 | (v17) near version distance of groups without a PS2 distance (wind instances). |
+| `--no-tie-morph`, `--tie-morph`, `--tie-morph-dir DIR` | Jak 1 on, Jak II off; the .fr3's folder | the PS2's tie geomorph from `<level>.tiemorph` (the level extractor's): geometry 2 as a third version and the morph of geometries 0 and 2. `--tie-morph`: Jak II too (Haven City needs ~7x the near data at the PS2's distances: not yet). See "The PS2's tie geomorph". |
 | `--tie-far-own-colors` | off | (AI-assisted, lod-light) tie far versions keep geometry 3's own vertex colors (the PS2's) instead of colors fitted to their near version. See "Far version colors". |
 | `--no-stream` | off | (AI-assisted, v19) no near chunks: a v18 file (near versions within `kTieLodBudgets`, in the far versions' chunks). See "Near chunks (v19)" and `streaming.md`. |
 | `--stream-classes M,...`, `--stream-class-cells M,...` | 30,60,120,240 / 50,50,100,100,200 | (v19) near chunks per need class: a group's near version is needed within error x 70.4 + radius of its center (gameplay focal 256 / tie_lod_px 4 x 1.1); the classes' bounds (meters) and each class's cell size. |
@@ -661,6 +662,68 @@ group its near version, in chunks of their own that the runtime streams (`stream
   (v18 157 MB). The converter logs per level `streaming (v19): N near chunks (cells by need
   distance: ...): core ..., extra ...; other chunks K KB` and `near chunk data needed at once, the
   camera at the groups' centers: A KB on average, at most M KB`.
+
+## The PS2's tie geomorph (ExtMorph)
+
+The PS2 doesn't switch a tie instance between two shapes. Its prototypes have four geometries and
+an instance is drawn with one of them by d, the view depth of its sphere minus its radius, against
+the prototype's dists (`draw-inline-array-instance-tie`, game/mips2c/jak1_functions/tie_methods.cpp):
+geometry 0 within 8 m or where it needs clipping, geometry 1 up to the mid-plane, geometry 2 up to
+the far-plane, geometry 3 beyond. Geometry 1 is geometry 0. The tie VU program moves the
+"interpolated" vertices of geometries 0-2 by the instance's morph factor (position = xyofs +
+morph.x * vtx): geometry 0/1 by max(0, (d - near-plane) * rlength-near), geometry 2 by
+max(0, (d - mid-plane) * rlength-mid); rlength-near = 1 / (mid - near), rlength-mid = 1 / (far -
+mid). The extractor checked it: geometry 0's moving vertices land on geometry 2's surface (p50 8 mm,
+94% within 2 cm; at rest p50 6-12 cm), geometry 2's on geometry 3's; geometry 2's other vertices
+are geometry 0 vertices that don't move there, geometry 3 has none that move. So the PS2 shows one
+surface that flattens continuously from geometry 0's at the near-plane to geometry 3's at the
+far-plane, and its switches show nothing. The .fr3 has every vertex at morph 0 (the PC draws
+geometry 0 only, unmorphed).
+
+- **Data.** The level extractor writes `<level>.tiemorph` next to the .fr3
+  (`common/custom_data/TieMorph.h`: per geometry and tie tree each packed vertex's offset, the
+  prototypes' dists and rdists, the instances' spheres). The converter reads it from the .fr3's
+  folder or `--tie-morph-dir` (`--no-tie-morph`: without it, as before).
+- **Versions.** With the data every static tie instance is a LOD group of its own (the PS2 switches
+  each instance by its own distance; a group of a visibility node's instances would show geometry 0
+  for an instance already past the mid-plane, whose geometry 2 vertices would then move on an
+  unflattened surface) and gets a third version, geometry 2 (RunLod kRunLodMid), in the near chunks
+  with its near version (geometry 0); its far version stays geometry 3. TieLodGroup::dist is the
+  PS2 far-plane, ExtMorph's group mid-plane the PS2's, the group's sphere holds the instance's PS2
+  sphere. Wind instances keep the screen-space switch (no morph: the wind program has no room for
+  the rows).
+- **Morph per vertex.** A near chunk vertex that moves gets a MorphVertex (delta in the chunk's
+  quantized units, its row): geometry 0's moving vertices are band 1, geometry 2's band 2, and the
+  same vertices in geometry 0 (still at rest there while the instance is nearer than the mid-plane)
+  band 2 as well, so geometry 0 and 2 share them. A chunk's records (MorphChunk::records_offset,
+  8 bytes per vertex) are its mesh's tail at runtime, as the envmapped tie normals
+  (CtrLevelData::tail_k / tail_file: read, streamed and freed with the mesh, after the color stream's
+  split vertices). A chunk's rows are its (instance, band) pairs, at most 79 (the converter puts a
+  near cell's groups in bins of their own above that); per draw the rows its vertices use (draw
+  rows).
+- **Runtime.** A morph group is drawn with its near version while the distance to its sphere is
+  under the mid-plane x k, its mid version under the far-plane x k, else its far version (k:
+  detail_scale, x 1 .. 0.5 with auto_detail's tie relief); no hysteresis: every version draws the
+  same morphed surface. Each visible chunk's rows get the PS2's factor of their instance, f =
+  clamp((d - start x k) x rlength / k, 0, 1), d the distance to its sphere minus its radius. The
+  PS2 takes the view depth instead (a turn of the camera changes it); the distance is never less, so
+  an instance off the screen's center morphs as if up to 1 / cos(its angle) farther (the edges of
+  the gameplay view ~1.27x, the title's wider one ~1.6x), and the near data that streaming brings
+  within the far-plane by distance is always there when a version needs it.
+  and its draws go through `ctr_gpu_draw_mesh_morph` (platform/3ds/shaders/ctr_mesh_morph(_fa).v.pica:
+  ctr_mesh_opt with pos + f x delta first, 13 instructions; the rows a draw uses are sent when the
+  GPU doesn't have them). Near chunk data is needed within the far-plane (+ radius): StreamChunk
+  need_e 0, the unit bound from need_d. Colors: each vertex keeps its own (as the PC), and geometry
+  2's vertices their geometry's (the PS2's); the PS2 also blends a moving vertex's color toward its
+  neighbours' (the .fr3 doesn't have the indices).
+- Run spheres and the chunk's sphere hold the moved vertices. ExtHeader size >= kExtHeaderMorphSize
+  (160): `ExtMorph {inst_count, insts_offset, chunk_count, chunks_offset, row_count, rows_offset,
+  group_mid_offset, draw_rows_size, draw_rows_offset, pad}` at ext_offset + 120; `MorphInst {float
+  c[3], r, start[2], rlen[2]}`, `MorphChunk {chunk, vertex_count, row_first, row_count, draw_rows,
+  records_offset}`, `MorphVertex {s16 delta[3]; u8 row, pad}`, rows `inst | band << 30`, draw rows
+  per draw of a morph chunk `n, row...` (u8).
+- Converter log: `tie geomorph (the PS2's): N groups with a mid version (geo 2, T tris), I instances;
+  C near chunks with moving vertices (...; at most R rows, r per chunk, r per draw of D draws)`.
 
 ## Merc
 
