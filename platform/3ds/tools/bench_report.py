@@ -284,12 +284,14 @@ def report(s):
 BD = re.compile(r"\[ctr\] gpu breakdown (\S+) over (\d+) frames.*?\(lists per frame\):(.*?); sum ([\d.]+); "
                 r"overhead ([\d.]+) ms per list")
 BD_ITEM = re.compile(r"(\w+) ([\d.]+) \(([\d.]+)\)")
+BD_GEO = re.compile(r"; geometry ms, triangles, draws, texture binds:(.*)$")
+BD_GEO_ITEM = re.compile(r"(\w+) ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+)")
 REND = re.compile(r"render ms/frame over \d+ frames:.*?; ([\d.]+) triangles, ([\d.]+) draws")
 
 
 def breakdown(paths):
     """(AI-assisted, gpu-rt) per level: frame-weighted mean ms per phase (lists per frame)"""
-    levels, rows, last_rend = {}, [], None
+    levels, rows, last_rend, geo_rows = {}, [], None, []
     for p in paths:
         for raw in open(p, encoding="utf-8", errors="replace"):
             m = REND.search(raw)
@@ -300,7 +302,13 @@ def breakdown(paths):
             if not m:
                 continue
             lev, frames = m.group(1), int(m.group(2))
-            items = {k: (float(ms), float(n)) for k, ms, n in BD_ITEM.findall(m.group(3))}
+            geo_part = BD_GEO.search(m.group(3))
+            items = {k: (float(ms), float(n)) for k, ms, n in
+                     BD_ITEM.findall(m.group(3)[:geo_part.start()] if geo_part else m.group(3))}
+            if geo_part:
+                for k, g, t, dr, tb in BD_GEO_ITEM.findall(geo_part.group(1)):
+                    geo_rows.append((lev, k, items.get(k, (0.0, 0.0))[0], float(g), float(t),
+                                     float(dr), float(tb), frames))
             d = levels.setdefault(lev, {"frames": 0, "ms": {}, "lists": {}, "sum": 0.0, "ovh": 0.0,
                                          "tris": 0.0, "draws": 0.0})
             d["frames"] += frames
@@ -349,7 +357,57 @@ def breakdown(paths):
             pa, pb = fit([r[2].get(k, (0.0, 0.0))[0] for r in rows])
             parts.append(f"{k} {pa:.2f}+{pb:.3f}")
         print("  per phase (fixed ms + ms per 1k triangles): " + ", ".join(parts))
+    if geo_rows:
+        geometry(geo_rows)
     return True
+
+
+def lstsq(X, y):
+    """least squares by the normal equations (no numpy): the coefficients for the columns of X"""
+    n = len(X[0])
+    A = [[sum(r[i] * r[j] for r in X) for j in range(n)] for i in range(n)]
+    b = [sum(r[i] * v for r, v in zip(X, y)) for i in range(n)]
+    for c in range(n):
+        piv = max(range(c, n), key=lambda r: abs(A[r][c]))
+        if abs(A[piv][c]) < 1e-12:
+            return None
+        A[c], A[piv], b[c], b[piv] = A[piv], A[c], b[piv], b[c]
+        for r in range(n):
+            if r != c:
+                f = A[r][c] / A[c][c]
+                A[r] = [x - f * yv for x, yv in zip(A[r], A[c])]
+                b[r] -= f * b[c]
+    return [b[i] / A[i][i] for i in range(n)]
+
+
+def geometry(geo_rows):
+    """each part again under a one pixel scissor: its geometry (vertices,
+    clipping, setup) against its fill (the rest), per level, and fits over the windows"""
+    print("== gpu breakdown, geometry and fill per part (ms per measured frame; geometry = the part's "
+          "list again under a one pixel scissor, fill = the part - geometry)")
+    print(f"  {'level':12s} {'part':8s} {'ms':>7s} {'geom':>7s} {'fill':>7s} {'tris':>8s} "
+          f"{'draws':>6s} {'binds':>6s} {'ns/tri(geom)':>12s}")
+    acc = {}
+    for lev, k, ms, g, t, dr, tb, fr in geo_rows:
+        a = acc.setdefault((lev, k), [0.0] * 6)
+        for i, v in enumerate((ms, g, t, dr, tb, 1.0)):
+            a[i] += v * fr
+    for (lev, k), a in acc.items():
+        n = a[5]
+        ms, g, t, dr, tb = (x / n for x in a[:5])
+        per = f"{g / t * 1e6:12.0f}" if t > 0 else f"{'':>12s}"
+        print(f"  {lev:12s} {k:8s} {ms:7.2f} {g:7.2f} {ms - g:7.2f} {t:8.0f} {dr:6.0f} {tb:6.0f} {per}")
+    for k in sorted({r[1] for r in geo_rows}):
+        rs = [r for r in geo_rows if r[1] == k]
+        if len(rs) < 4:
+            continue
+        geo = lstsq([[1.0, r[4] / 1000.0, r[5] / 100.0] for r in rs], [r[3] for r in rs])
+        fill = lstsq([[1.0, r[6] / 100.0] for r in rs], [r[2] - r[3] for r in rs])
+        if geo:
+            print(f"  {k}: geometry = {geo[0]:.2f} ms + {geo[1]:.3f} ms per 1k triangles + "
+                  f"{geo[2]:.3f} ms per 100 draws ({len(rs)} windows)")
+        if fill:
+            print(f"  {k}: fill = {fill[0]:.2f} ms + {fill[1]:.3f} ms per 100 texture binds")
 
 
 def main():

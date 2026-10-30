@@ -909,7 +909,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
       }
       {
         // (AI-assisted, gpu-rt) gpu_breakdown, gpu_micro's statistics
-        char line[1024];
+        char line[2048];
         if (ctr_gpu_breakdown_line(line, sizeof(line),
                                     m_profile_level.empty() ? "-" : m_profile_level.c_str()) > 0) {
           lg::info("{}", line);

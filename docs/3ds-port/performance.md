@@ -1312,3 +1312,77 @@ set (150k+ vertices drawn in game), so most groups had no list. The same model, 
 drawn set and that room, gives 1.28M instructions against 1.17M for the full hold, the same ordering
 as Azahar. With the 384 KB room and the leaner lists of the final code it gives 1.01M. The final
 build was not run in Azahar.
+
+## What the GPU time buys: a cost model from the hardware logs (gpuspeed)
+
+**Hardware data.** Every `render ms/frame` window of the Jak 1 hardware logs (oct12, oct25, oct25b,
+oct30; 531 windows of 100+ frames) fitted by least squares, with one intercept per log:
+
+| fit (GPU busy ms) | per item | rms |
+|---|---|---|
+| oct30 alone, triangles | 14.9 ms + 0.136 ms per 1k triangles | 3.5 |
+| oct30 alone, triangles + draws | draws add 0.14 ms per 100 (nothing) | 3.5 |
+| all logs, triangles | 0.113 ms per 1k | 3.7 |
+| all logs, texture binds | 7.5 ms per 100 | 3.3 |
+| all logs, triangles + texture binds | 0.033 ms per 1k + 6.0 ms per 100 binds | 3.2 |
+
+Triangles, draws, texture binds and command words move together (r = 0.7-0.99), so the windows
+alone can't split the time between them. The oct30 log has the widest triangle range (35k-216k)
+and fits triangles best. 60 us per texture bind (15k GPU cycles for a cache clear and a 256 byte
+refill) is not a plausible cost of its own: binds stand in for something that grows with them.
+
+**What a frame draws** (host soft renderer, `CTR_SOFT_STATS`, title flight, frames 1200-2310, 38
+windows; the same defaults as the oct30 hardware build). Level triangles submitted per frame:
+205k (the hardware's title window: 216k triangles in all, 35.3 ms busy, 35.3 active).
+
+| level triangles | per frame | share |
+|---|---|---|
+| on screen, no pixel center inside (no fragment) | 103k | 50% |
+| every fragment fails the depth test | 52k | 25% |
+| some fragment passes, none left in the final picture | 21k | 10% |
+| culled back faces (cull_ties) | 14.5k | 7% |
+| off screen | 8k | 4% |
+| near-clipped | 1k | 0.5% |
+| a pixel of the final picture | 5k | 2.6% |
+
+(Back faces drawn by draws without culling: 87k, 43%, counted in the rows above too. Triangles
+without area in the file's own positions: 1.1k, 0.6%.) No pixel, by bucket: tfrag 46%, shrubs 48%,
+ties 38%. Fragments: 4.5 screens in all (level 2.6, sky 1.1, merc 0.7); only 1.2 level fragments
+per level triangle.
+
+**Model.** At the title the frame is 216k triangles and ~430k fragments in 35.3 ms. If triangles
+cost 33 ns (the binds fit), the fragments would need ~60 ns each (16 GPU cycles), far beyond any
+texture fetch, depth test and colour write. So the title is triangle-bound: ~110-135 ns per
+triangle (30-36 GPU cycles, 1.1 vertices of a 10-instruction program each) for ~25-30 ms, fill
+~5 ms. Village2-like views (55-100k triangles at 26-31 ms) carry more fill per triangle (7-14
+screens, perfv2). Confidence: moderate. Hardware numbers that settle it: pica_bench B3 (ns per
+vertex per instruction), B7 (ns per triangle, zero area / one pixel), B6 (fill per format,
+trilinear), B2.rebind vs B2.rebind_clr (a texture bind with its cache clear), and gpu_breakdown's
+geometry / fill split.
+
+**gpu_breakdown geometry.** In the measured frames each part's command list begins by sending the
+GPU state its draws use (as after the HOME Menu, but not the framebuffer, viewport and scissor) and
+runs a second time under a one pixel scissor: the part's geometry (vertex fetch and program,
+clipping, triangle setup) without its fragments. The line lists per part the geometry ms with the
+part's triangles, draws and texture binds; `bench_report.py` prints geometry and fill (the part
+minus its geometry) per part and level and fits geometry per 1k triangles and 100 draws, fill per
+100 texture binds. Partial submits are off in measured frames (they took the level's commands
+before its part was timed). Lists that set the scissor or the framebuffer (a render to texture, the
+frame's first part) run once only (counted). The top left pixel gets the blended and stencil draws
+twice in measured frames.
+
+**What follows, if the model holds.**
+- Half the title's level triangles cover no pixel center. On a 400x240 screen the far geometry is
+  denser than the pixels: each costs a full vertex and setup slot (~5-14 ms at the title). Only a
+  level of detail removes them (not exact). The PS2 itself draws tie geometry 1 and 2 from 8 m up
+  to the prototype's far plane (`tie_ps2_dists.inc`); the port draws geometry 0 there for its near
+  groups. A per-group screen size switch to geometry 1/2 would be the PS2's own picture.
+- A quarter are fully hidden behind nearer geometry (late depth test: their vertices, setup and
+  texture fetches are spent). Only occlusion culling removes them.
+- Exact options in the GPU backend are spent: 10-instruction programs, 16 byte vertices, vertex
+  cache order at its bound (1.06-1.15 vertices per triangle, the converter log), colour and depth in
+  different VRAM banks, texture unit 1 off for level draws, closed tie surfaces culled. Dropping
+  the zero-area triangles saves 0.6%.
+- `auto_detail` reads GPU busy, which counts the idle time between the clear and the first command
+  list: Lava Tube / Citadel windows have busy 4-11 ms above active (33.6 vs 27.1), so they aren't
+  GPU-bound although busy says so.

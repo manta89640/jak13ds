@@ -2155,6 +2155,13 @@ static struct {
   u32* probe; /* 4 words in linear memory: a framebuffer flush and the end (overhead) */
   double ms[CTR_GPU_PHASES];
   u32 lists[CTR_GPU_PHASES];
+  /* what each part drew, and the part's list run again with a one pixel scissor (its geometry:
+   * vertices, clipping, setup; almost no fragments): fill = ms - geo_ms */
+  double tris[CTR_GPU_PHASES], draws[CTR_GPU_PHASES], binds[CTR_GPU_PHASES];
+  double geo_ms[CTR_GPU_PHASES];
+  u32 geo_lists[CTR_GPU_PHASES], geo_skipped;
+  int c_tris, c_draws, c_binds; /* g.cur's counts when the part began */
+  u32* scis;                    /* 16 words in linear memory: the scissor lists (set, restore) */
   double overhead_ms;
   u32 overhead_n, frames, timeouts, psc1_seen;
   u64 xfer_t0;
@@ -2197,8 +2204,9 @@ void ctr_gpu_set_gpu_breakdown(int on) {
   }
   ctr_linear_lock();
   s_bd.probe = (u32*)linearAlloc(16);
+  s_bd.scis = (u32*)linearAlloc(64);
   ctr_linear_unlock();
-  if (!s_bd.probe) {
+  if (!s_bd.probe || !s_bd.scis) {
     s_bd.on = 0;
     printf("[ctr] gpu_breakdown: no linear memory, off\n");
     return;
@@ -2247,7 +2255,44 @@ static u64 bd_wait(int k, u32 n0, u32 want) {
   return s_bd.t[k];
 }
 
-/* one command list alone on the GPU, timed for phase */
+static void bd_resend(void);
+
+/* a list of 8 words at w: a framebuffer flush, the 3 scissor registers, the end */
+static void bd_scissor_list(u32* w, u32 mode, u32 pos, u32 end) {
+  w[0] = 1;
+  w[1] = GPUREG_FRAMEBUFFER_FLUSH | (0xFu << 16);
+  w[2] = mode;
+  w[3] = GPUREG_SCISSORTEST_MODE | (0xFu << 16) | (2u << 20) | (1u << 31);
+  w[4] = pos;
+  w[5] = end;
+  w[6] = 0x12345678;
+  w[7] = GPUREG_FINALIZE | (0xFu << 16);
+}
+
+/* does the list write the scissor registers or the framebuffer's place (then it can't be run
+ * again under another scissor) */
+static int bd_list_sets_target(const u32* list, u32 words) {
+  for (u32 i = 0; i + 1 < words;) {
+    const u32 h = list[i + 1];
+    const u32 id = h & 0xFFFF, extra = (h >> 20) & 0xFF, seq = h >> 31;
+    const u32 last = seq ? id + extra : id;
+    if ((id <= GPUREG_SCISSORTEST_DIM && last >= GPUREG_SCISSORTEST_MODE) ||
+        (id <= GPUREG_FRAMEBUFFER_DIM && last >= GPUREG_DEPTHBUFFER_LOC)) {
+      return 1;
+    }
+    i += (2 + extra + 1) & ~1u;
+  }
+  return 0;
+}
+
+static void bd_run(u32* list, u32 bytes) {
+  const u32 n0 = s_bd.n[BD_P3D];
+  GX_ProcessCommandList(list, bytes, 0);
+  bd_wait(BD_P3D, n0, 1);
+}
+
+/* one command list alone on the GPU, timed for phase; then again with only the top left pixel
+ * in the scissor (opaque draws write the same values there again) for its geometry's time */
 static void bd_list(u32* list, u32 words, int phase) {
   bd_idle();
   cache_flush_now(list, words * 4);
@@ -2257,10 +2302,38 @@ static void bd_list(u32* list, u32 words, int phase) {
   const u64 t1 = bd_wait(BD_P3D, n0, 1);
   s_bd.ms[phase] += ticks_ms(t1 - t0);
   s_bd.lists[phase]++;
+  if (bd_list_sets_target(list, words)) {
+    s_bd.geo_skipped++;
+    return;
+  }
+  const C3Di_Context* ctx = &__C3D_Context;
+  bd_scissor_list(s_bd.scis, GPU_SCISSOR_NORMAL, 0, 0);
+  bd_scissor_list(s_bd.scis + 8, ctx->scissor[0], ctx->scissor[1], ctx->scissor[2]);
+  cache_flush_now(s_bd.scis, 64);
+  bd_run(s_bd.scis, 32);
+  const u32 n1 = s_bd.n[BD_P3D];
+  const u64 t2 = svcGetSystemTick();
+  GX_ProcessCommandList(list, words * 4, 0);
+  const u64 t3 = bd_wait(BD_P3D, n1, 1);
+  bd_run(s_bd.scis + 8, 32);
+  s_bd.geo_ms[phase] += ticks_ms(t3 - t2);
+  s_bd.geo_lists[phase]++;
+}
+
+/* the draws counted since the last call belong to the current part */
+static void bd_count(void) {
+  const int ph = s_bd.phase;
+  s_bd.tris[ph] += g.cur.triangles - s_bd.c_tris;
+  s_bd.draws[ph] += g.cur.draws - s_bd.c_draws;
+  s_bd.binds[ph] += g.cur.tex_binds - s_bd.c_binds;
+  s_bd.c_tris = g.cur.triangles;
+  s_bd.c_draws = g.cur.draws;
+  s_bd.c_binds = g.cur.tex_binds;
 }
 
 /* the commands built since the last split, as a part of the current phase */
 static void bd_part(void) {
+  bd_count();
   if (!gpuCmdBufOffset) {
     return;
   }
@@ -2274,6 +2347,7 @@ static void bd_part(void) {
     gt_note_submit();
     bd_list(list, words, s_bd.phase);
   }
+  bd_resend();
 }
 
 void ctr_gpu_phase(int phase) {
@@ -2282,6 +2356,8 @@ void ctr_gpu_phase(int phase) {
   }
   if (s_bd.frame && phase != s_bd.phase && g.in_frame) {
     bd_part();
+  } else if (s_bd.frame) {
+    bd_count();
   }
   s_bd.phase = phase;
 }
@@ -2290,8 +2366,10 @@ void ctr_gpu_phase(int phase) {
 static void bd_frame_begin(void) {
   s_bd.frame = s_bd.on && s_bd.hooked && s_pipeline && (g.frame_no % BD_EVERY) == 0;
   s_bd.phase = CTR_PH_OTHER;
+  s_bd.c_tris = s_bd.c_draws = s_bd.c_binds = 0; /* (g.cur restarts after this) */
   if (s_bd.frame) {
     bd_idle();
+    bd_resend();
   }
 }
 
@@ -2377,6 +2455,18 @@ int ctr_gpu_breakdown_line(char* out, int size, const char* label) {
     len += snprintf(out + len, size - len, " %s %.2f (%.1f)", kPhaseNames[i], s_bd.ms[i] / n,
                     s_bd.lists[i] / n);
   }
+  /* per part: its geometry alone (the list again under a one pixel scissor) and what it drew */
+  if (len < size) {
+    len += snprintf(out + len, size - len, "; geometry ms, triangles, draws, texture binds:");
+  }
+  for (int i = 0; i < CTR_GPU_PHASES && len < size; i++) {
+    if (!s_bd.lists[i] || !s_bd.geo_lists[i]) {
+      continue;
+    }
+    len += snprintf(out + len, size - len, " %s %.2f %.0f %.0f %.0f", kPhaseNames[i],
+                    s_bd.geo_ms[i] / s_bd.geo_lists[i] * (s_bd.lists[i] / n), s_bd.tris[i] / n,
+                    s_bd.draws[i] / n, s_bd.binds[i] / n);
+  }
   u32 lists = 0;
   for (int i = 0; i < CTR_GPU_PHASES; i++) {
     lists += s_bd.lists[i];
@@ -2386,12 +2476,18 @@ int ctr_gpu_breakdown_line(char* out, int size, const char* label) {
     len += snprintf(out + len, size - len,
                     "; sum %.2f; overhead %.3f ms per list (an empty list's submit to its event, "
                     "included above: %.2f ms per frame); clear: second fill unit's event in %u of "
-                    "%u frames%s",
-                    sum / n, ovh, ovh * lists / n, s_bd.psc1_seen, s_bd.frames,
+                    "%u frames; %u lists not run again (they set the scissor or the target)%s",
+                    sum / n, ovh, ovh * lists / n, s_bd.psc1_seen, s_bd.frames, (unsigned)s_bd.geo_skipped,
                     s_bd.timeouts ? "; TIMEOUTS (an event didn't come in 50 ms)" : "");
   }
   memset(s_bd.ms, 0, sizeof(s_bd.ms));
   memset(s_bd.lists, 0, sizeof(s_bd.lists));
+  memset(s_bd.tris, 0, sizeof(s_bd.tris));
+  memset(s_bd.draws, 0, sizeof(s_bd.draws));
+  memset(s_bd.binds, 0, sizeof(s_bd.binds));
+  memset(s_bd.geo_ms, 0, sizeof(s_bd.geo_ms));
+  memset(s_bd.geo_lists, 0, sizeof(s_bd.geo_lists));
+  s_bd.geo_skipped = 0;
   s_bd.overhead_ms = 0;
   s_bd.overhead_n = s_bd.frames = s_bd.timeouts = s_bd.psc1_seen = 0;
   return len;
@@ -3284,7 +3380,7 @@ void ctr_gpu_set_overlap(int on) {
  * the queue, citro3d only runs it at the frame end otherwise). Draw order is kept: the queue runs
  * its entries in order, and the frame end adds the rest and the display transfer after them. */
 void ctr_gpu_submit_partial(void) {
-  if (!s_overlap || !g.ready || !g.in_frame ||
+  if (!s_overlap || !g.ready || !g.in_frame || s_bd.frame ||
       s_partials >= (s_pipeline ? PIPE_PARTIAL_MAX : PARTIAL_MAX) ||
       g.cur.draws < s_partial_draws + (s_pipeline ? PIPE_PARTIAL_MIN_DRAWS : PARTIAL_MIN_DRAWS)) {
     return;
@@ -4871,6 +4967,7 @@ static void apt_gate_remove(void) {
 }
 
 void C3Di_DirtyUniforms(GPU_SHADER_TYPE type); /* citro3d (source/internal.h) */
+void C3Di_ProcTexDirty(C3Di_Context* ctx);       /* citro3d (source/proctex.c) */
 
 /* the render path, at the first frame begin after an opening: what the GPU holds may be the HOME
  * Menu's (or unknown after sleep). citro3d's ONRESTORE marked its context dirty already (main
@@ -4899,6 +4996,30 @@ static void apt_resume_state(void) {
   }
   printf("[ctr] back from the HOME Menu / sleep (%lu): the GPU state is sent again\n",
          (unsigned long)s_apt.suspends);
+}
+
+/* gpu_breakdown: each part's list begins by sending the GPU state its
+ * draws use (as after the HOME Menu, but not the framebuffer, viewport and scissor), so that it
+ * can run a second time from the same state */
+static void bd_resend(void) {
+  if (!s_bd.frame) {
+    return;
+  }
+  C3Di_Context* ctx = &__C3D_Context;
+  /* AttrInfo, BufInfo, Effect, Program, TexEnvBuf, LightEnv, VshCode, TexStatus, TexAll,
+   * TexEnvAll */
+  ctx->flags |= BIT(2) | BIT(3) | BIT(4) | BIT(8) | BIT(9) | BIT(10) | BIT(11) | BIT(14) |
+                (7u << 23) | (0x3Fu << 26);
+  C3Di_ProcTexDirty(ctx);
+  ctx->fixedAttribDirty |= ctx->fixedAttribEverDirty;
+  C3Di_DirtyUniforms(GPU_VERTEX_SHADER);
+  s_raw.apt_epoch++;
+  g.last_state_valid = 0;
+  g.last_mesh_valid = 0;
+  g.last_skin_valid = 0;
+  g.skin_bl_valid = 0;
+  g.bound_tex = NULL;
+  s_tex_dirty = 1;
 }
 
 static void apt_gate_enter(void) {
