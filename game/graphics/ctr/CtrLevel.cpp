@@ -2543,6 +2543,19 @@ typedef u16 __attribute__((may_alias)) tod_half;
 // cache line on hardware, 2 vertices a line: the loops wait on memory, Azahar can't show it): the
 // line this many bytes ahead is asked for early (PLD, as ctr_mem.S's copies)
 constexpr int kTodPrefetch = 128;
+// A color is stored only where it differs: a line whose vertices keep their colors stays clean (no
+// write-back to FCRAM; a lightning flash changes about half of the vertices it touches).
+inline void tod_store(tod_word* x, u32 c) {
+  if (*x != c) {
+    *x = c;
+  }
+}
+inline void tod_store_rgb(u8* x, u32 c) {
+  if ((*(const tod_word*)x & 0xffffffu) != (c & 0xffffffu)) {
+    *(tod_half*)x = (u16)c;
+    x[2] = (u8)(c >> 16);
+  }
+}
 inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int first, int end) {
   const u32* const tab = t.table.data();
   u8* p = (u8*)(v + first);
@@ -2552,11 +2565,11 @@ inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int firs
       __builtin_prefetch(p + kTodPrefetch, 1);
       const u32 a = tab[*(const tod_half*)(p + 6)];
       const u32 b = tab[*(const tod_half*)(p + 22)];
-      *(tod_word*)(p + 12) = a;
-      *(tod_word*)(p + 28) = b;
+      tod_store((tod_word*)(p + 12), a);
+      tod_store((tod_word*)(p + 28), b);
     }
     if (p < e) {
-      *(tod_word*)(p + 12) = tab[*(const tod_half*)(p + 6)];
+      tod_store((tod_word*)(p + 12), tab[*(const tod_half*)(p + 6)]);
     }
     return;
   }
@@ -2564,15 +2577,11 @@ inline void tod_write_fresh(const CtrLevelData::Tod& t, c3l::Vertex* v, int firs
     __builtin_prefetch(p + kTodPrefetch, 1);  // (AI-assisted, perfv2)
     const u32 a = tab[*(const tod_half*)(p + 6)];
     const u32 b = tab[*(const tod_half*)(p + 22)];
-    *(tod_half*)(p + 12) = (u16)a;
-    p[14] = (u8)(a >> 16);
-    *(tod_half*)(p + 28) = (u16)b;
-    p[30] = (u8)(b >> 16);
+    tod_store_rgb(p + 12, a);
+    tod_store_rgb(p + 28, b);
   }
   if (p < e) {
-    const u32 a = tab[*(const tod_half*)(p + 6)];
-    *(tod_half*)(p + 12) = (u16)a;
-    p[14] = (u8)(a >> 16);
+    tod_store_rgb(p + 12, tab[*(const tod_half*)(p + 6)]);
   }
 }
 
@@ -2591,7 +2600,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
       __builtin_prefetch(w + kTodPrefetch / 4, 1);  // (AI-assisted, perfv2)
       const u32 idx = w[1] >> 16;
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
-      w[3] = (w[3] & keep) | rgb;
+      tod_store(w + 3, (w[3] & keep) | rgb);
     }
     return;
   }
@@ -2601,7 +2610,7 @@ inline void tod_write_range(CtrLevelData::Tod& t, c3l::Vertex* v, int first, int
     const u32 idx = w[1] >> 16;
     if (idx < ntab) {
       const u32 rgb = stamp[idx] >= lut[cm[idx]] ? tab[idx] : tod_entry_slow(t, idx);
-      w[3] = (w[3] & keep) | rgb;
+      tod_store(w + 3, (w[3] & keep) | rgb);
     }
   }
 }

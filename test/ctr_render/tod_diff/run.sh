@@ -12,8 +12,8 @@
 #                lines converted by the same layout); default citadel_weights.txt (Citadel, 875
 #                frames of the host game) plus random traces (tod_trace.py; one with palettes
 #                1-3 moving every frame, the others rarely: light palettes) and a lightning trace
-#                (Rock Village's flashes and flames, no day steps: neu also checked against the PC's
-#                blend of every frame)
+#                (Rock Village's flashes and flames, no day steps; village2 and swamp: neu also
+#                checked against the PC's blend of every frame)
 #   --arm        also the ARM instructions per level draw of both versions (devkitARM build run
 #                under Unicorn, like test/mips2c_native/unicorn; ARMBENCH_PYTHON: a python3 with
 #                unicorn)
@@ -92,7 +92,8 @@ for tr in "${TRACES[@]}"; do
       "$OUT/tod_diff" "$LEVEL" "$tr" 100000 5 $step $opts || status=1
     done
   done
-  if [ "$(basename "$tr")" = lightning.txt ]; then
+  # (the levels whose mood the trace is: update-mood-village2 / update-mood-swamp)
+  if [ "$(basename "$tr")" = lightning.txt ] && [[ "$(basename "$C3L")" =~ ^(village2|swamp) ]]; then
     "$OUT/tod_diff" "$LEVEL" "$tr" 100000 5 0 exact || status=1
   fi
 done
