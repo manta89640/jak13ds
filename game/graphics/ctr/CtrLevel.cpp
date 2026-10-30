@@ -2855,14 +2855,17 @@ std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
 // count | the escapes below << 8;
 // then the entries' vertices in vertex order per entry, a byte each: from the group's first, or
 // when wide (over 255 vertices) from the entry's vertex before (its first from the group's; 255:
-// the next two bytes hold it). An entry of more than 255 vertices is several. Emptied when full
-// (each list made again as its group is written), at most once in kKeep frames.
+// the next two bytes hold it). An entry of more than 255 vertices is several. When full the room
+// grows once to kRoomMax while the heap keeps kTodListReserve free after it (a lightning flash
+// rewrites a group without a list whole), else it is emptied (each list made again as its group
+// is written), at most once in kKeep frames.
 struct TodLists {
-  static constexpr u32 kRoom = 192 * 1024, kKeep = 300, kMaxGroup = 8192;
+  static constexpr u32 kRoom = 192 * 1024, kRoomMax = 384 * 1024, kKeep = 300, kMaxGroup = 8192;
   u16* room = nullptr;  // (made at the first list, kept)
+  u32 cap = kRoom;      // u16s in room
   bool no_room = false;
   u32 used = 0, gen = 1;
-  u64 emptied = 0;
+  u64 emptied = 0, grow_tried = ~0ull;
   bool full = false;
   struct Entry {
     u32 key;  // palette mask | 0x100 for a TodMul, then the entry
@@ -2873,6 +2876,35 @@ struct TodLists {
   std::vector<u16> order, offs;
 };
 TodLists g_tod_lists;
+constexpr u32 kTodListReserve = 5u << 20;
+
+// The room grown to kRoomMax with its lists (tried at most once in kKeep frames).
+bool tod_lists_grow(u64 frame) {
+  auto& L = g_tod_lists;
+  if (!L.room || L.cap >= TodLists::kRoomMax ||
+      (L.grow_tried != ~0ull && frame - L.grow_tried < TodLists::kKeep)) {
+    return false;
+  }
+  L.grow_tried = frame;
+#ifdef __3DS__
+  CtrHeapStats st;
+  ctr_heap_stats(&st);
+  if (st.free < kTodListReserve + TodLists::kRoomMax * 2 || st.largest < TodLists::kRoomMax * 2) {
+    return false;
+  }
+#endif
+  u16* const r = new (std::nothrow) u16[TodLists::kRoomMax];
+  if (!r) {
+    return false;
+  }
+  memcpy(r, L.room, L.used * sizeof(u16));
+  delete[] L.room;
+  L.room = r;
+  L.cap = TodLists::kRoomMax;
+  L.full = false;
+  lg::info("[ctr] time of day vertex lists: room grown to {} KB", TodLists::kRoomMax * 2 / 1024);
+  return true;
+}
 
 // Group g's list from its vertices [first, end) (just written: every one shows the table).
 void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first, int end,
@@ -2886,7 +2918,8 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
   const bool wide = nv > 255;
   const bool may_empty = frame - L.emptied >= TodLists::kKeep;
   const u32 least = 6 + (nv + 1) / 2;
-  if (L.no_room || (!may_empty && (L.full || L.used + least > TodLists::kRoom))) {
+  if (L.no_room ||
+      (!may_empty && (L.full || L.used + least > L.cap) && !tod_lists_grow(frame))) {
     return;  // (full for now: written whole until then)
   }
   const u32 nc = t.color_count, ntab = (u32)t.table.size();
@@ -2966,7 +2999,7 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
     t.group_list[g] = CtrLevelData::Tod::kNoList;
     return;
   }
-  if (L.used + size > TodLists::kRoom) {
+  if (L.used + size > L.cap && !tod_lists_grow(frame)) {
     if (!may_empty) {
       L.full = true;
       return;
