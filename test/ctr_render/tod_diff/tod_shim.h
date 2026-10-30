@@ -10,10 +10,10 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/common_types.h"
-#include "game/graphics/ctr/CtrLight.h"
 #include "game/graphics/ctr/CtrTodPulse.h"
 #include "game/graphics/ctr/c3l_format.h"
 

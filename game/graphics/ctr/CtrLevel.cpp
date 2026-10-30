@@ -2432,12 +2432,20 @@ u8 tod_scan(const CtrLevelData::Tod& t, const c3l::Vertex* v, int n, CtrLevelDat
   std::stable_sort(lv.begin(), lv.end(),
                    [](const auto& a, const auto& b) { return a.first < b.first; });
   lights->verts.clear();
-  lights->groups.clear();
+  lights->masks.clear();
+  lights->runs.clear();
+  lights->ranges.clear();
+  if (!lv.empty()) {
+    lights->verts.reserve(lv.size() + CtrLightLists::kPad);
+  }
   for (size_t k = 0; k < lv.size(); k++) {
     lights->verts.push_back(lv[k].second);
     if (k + 1 == lv.size() || lv[k + 1].first != lv[k].first) {
-      lights->groups.emplace_back(lv[k].first, (u32)k + 1);
+      lights->masks.emplace_back(lv[k].first, (u32)k + 1);
     }
+  }
+  if (!lv.empty()) {
+    lights->verts.resize(lv.size() + CtrLightLists::kPad, 0);
   }
   // (all black colors: palette 0 stands for them, so the chunk counts as colored)
   return any ? (u8)(mask ? mask : 1) : 0;
@@ -2634,7 +2642,7 @@ std::vector<std::pair<uintptr_t, uintptr_t>>& tod_dirty() {
 
 // The vertex lists of every level's groups (render thread, Tod::group_list): per group a record
 // of u16s: runs, wide; per run (its entries' palette mask | 0x100 for TodMuls, entries, bytes of
-// their vertices); per entry its table entry (a TodMul's: then its color); per entry its vertex
+// their vertices, the version all of them were last written at, low and high half); per entry its table entry (a TodMul's: then its color); per entry its vertex
 // count | the escapes below << 8;
 // then the entries' vertices in vertex order per entry, a byte each: from the group's first, or
 // when wide (over 255 vertices) from the entry's vertex before (its first from the group's; 255:
@@ -2744,7 +2752,7 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
       }
     }
   }
-  const u32 size = 2 + 3 * runs + 2 * ne + nm + (bytes + 1) / 2;
+  const u32 size = 2 + 5 * runs + 2 * ne + nm + (bytes + 1) / 2;
   if (size > TodLists::kRoom || ne > 0xffff) {
     t.group_list[g] = CtrLevelData::Tod::kNoList;
     return;
@@ -2774,17 +2782,17 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
   u16* const r = L.room + L.used;
   r[0] = (u16)runs;
   r[1] = wide ? 1 : 0;
-  u16* run = r + 2 - 3;
-  u16* e = r + 2 + 3 * runs;
+  u16* run = r + 2 - 5;
+  u16* e = r + 2 + 5 * runs;
   u16* cnt = e + ne + nm;
   u8* o = (u8*)(e + 2 * ne + nm);
   u32 k = 0;
   for (u32 i = 0; i < (u32)order.size(); i++) {
     const auto& x = es[order[i]];
     if (i == 0 || x.key >> 16 != es[order[i - 1]].key >> 16) {
-      run += 3;
+      run += 5;
       run[0] = (u16)(x.key >> 16);
-      run[1] = run[2] = 0;
+      run[1] = run[2] = run[3] = run[4] = 0;
     }
     u8* const o0 = o;
     for (u32 left = x.count; left;) {
@@ -2819,18 +2827,19 @@ void tod_make_list(CtrLevelData::Tod& t, u32 g, const c3l::Vertex* v, int first,
 // Group g's vertices [first, ...) of the table entries whose color changed since version since
 // (all: every one) written from the table (r: its list), brought up to date for them; only the
 // entries using a palette of only (kTodAllRuns: all of them). A run of entries whose palettes
-// didn't move since is passed over whole. Returns the vertices written.
+// didn't move since is passed over whole; a run written since then counts from its own write.
+// Returns the vertices written.
 constexpr u32 kTodAllRuns = ~0u;
 template <bool kWide>
-u32 tod_list_write(CtrLevelData::Tod& t, const u16* r, c3l::Vertex* v, int first, u32 since,
+u32 tod_list_write(CtrLevelData::Tod& t, u16* r, c3l::Vertex* v, int first, u32 group_since,
                    bool all, u32 only) {
   const u32 nr = r[0];
-  const u16* run = r + 2;
-  const u16* e = run + 3 * nr;
+  u16* run = r + 2;
+  const u16* e = run + 5 * nr;
   u32 ne = 0, nm = 0;
   for (u32 k = 0; k < nr; k++) {
-    ne += run[3 * k + 1];
-    nm += run[3 * k] >> 8 ? run[3 * k + 1] : 0;
+    ne += run[5 * k + 1];
+    nm += run[5 * k] >> 8 ? run[5 * k + 1] : 0;
   }
   const u16* c = e + ne + nm;
   const u8* o = (const u8*)(e + 2 * ne + nm);
@@ -2840,9 +2849,11 @@ u32 tod_list_write(CtrLevelData::Tod& t, const u16* r, c3l::Vertex* v, int first
   const u32* const tab = t.table.data();
   const u32 keep = t.keep_alpha;
   u32 written = 0;
-  for (const u16* const run_end = e; run < run_end; run += 3) {
+  const u32 ver = t.ver;
+  for (const u16* const run_end = e; run < run_end; run += 5) {
     const u32 last = t.lut[run[0] & 0xff], n = run[1];
     const u32 step = run[0] >> 8 ? 2 : 1;  // (a TodMul: its color after it)
+    const u32 since = std::max<u32>(group_since, run[3] | (u32)run[4] << 16);
     if ((!all && last <= since) || (only != kTodAllRuns && !(run[0] & only))) {
       // (none of these entries was blended again since)
       e += n * step;
@@ -2891,13 +2902,15 @@ u32 tod_list_write(CtrLevelData::Tod& t, const u16* r, c3l::Vertex* v, int first
         o += cnt + 2 * (*c >> 8);
       }
     }
+    run[3] = (u16)ver;
+    run[4] = (u16)(ver >> 16);
   }
   return written;
 }
 
 u32 tod_list_write(CtrLevelData::Tod& t, u32 gl, c3l::Vertex* v, int first, u32 since, bool all,
                    u32 only) {
-  const u16* r = g_tod_lists.room + gl - 1;
+  u16* r = g_tod_lists.room + gl - 1;
   return r[1] ? tod_list_write<true>(t, r, v, first, since, all, only)
               : tod_list_write<false>(t, r, v, first, since, all, only);
 }
@@ -2960,7 +2973,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
     const u8 mask = tod_scan(t, v, n, &lights);
     t.chunk_scanned[ci] = mask ? 2 : 1;
     t.chunk_mask[ci] = mask;
-    if (!lights.verts.empty()) {
+    if (!lights.empty()) {
       t.chunk_lights[(u32)ci] = std::move(lights);
     }
     if (!mask) {
@@ -3016,27 +3029,55 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       }
       auto& lights = it->second;
       tod_word* const w = (tod_word*)v;
+      const u32* const stamp = t.stamp.data();
+      const u32* const tab = t.table.data();
+      const u32* const cver = t.cver.data();
+      const u8* const cm = t.color_mask.data();
+      const u32* const lut = t.lut;
+      const c3l::TodMul* const muls = t.muls.data();
+      const u32 keep = t.keep_alpha, nc = t.color_count;
+      // (t.cver isn't kept during the fast day)
+      const bool track = !t.fast_day && !t.cver.empty();
       t.chunk_light_ver[ci] = ctr_recolor_light_groups_cached(
           t.groups.data() + g0, ng, by_runs ? shown : nullptr,
-          by_runs ? t.run_group.data() + r0 : nullptr, nr, t.ver, light_last, lm,
-          t.pal_ver, lights.verts, lights.groups, ps.light_visible, lights.ranges,
-          [&](auto first, auto last) {
-            const u32 keep = t.keep_alpha;
-            auto p = first;
-            for (; last - p > 8; ++p) {
-              __builtin_prefetch(w + 4 * p[8], 1);
-              tod_word* x = w + 4 * *p;
-              x[3] = (x[3] & keep) | tod_entry(t, x[1] >> 16);
+          by_runs ? t.run_group.data() + r0 : nullptr, nr, t.ver, light_last, lm, t.pal_ver,
+          lights, ps.light_visible, [&](u32 i) { return (u16)v[i].pad; },
+          [&](const CtrLightGroup& gr, u32 first, u32 rf, u32 rl, u32 lowest, u32 highest,
+              u32& at) {
+            // per entry its vertices; an entry whose color didn't change since they were all
+            // last current (the group's day write or this part's last write) is passed over
+            const u32 since = track && gr.ver ? std::max<u32>(gr.ver, at) : 0;
+            at = t.ver;
+            const u16* p = lights.verts.data() + first;
+            const u32* const runs = lights.runs.data();
+            u32 written = 0;
+            for (u32 r = rf; r < rl; r++) {
+              const u32 e = runs[r] & 0xffff, c = runs[r] >> 16;
+              const u32 rgb = stamp[e] >= lut[cm[e]] ? tab[e] : tod_entry_slow(t, e);
+              if (since && cver[e < nc ? e : muls[e - nc].color] <= since) {
+                p += c;
+                continue;
+              }
+              written += c;
+              if (!keep) {
+                for (const u16* const end = p + c; p < end; p++) {
+                  __builtin_prefetch(w + 4 * p[CtrLightLists::kPad], 1);
+                  w[4 * *p + 3] = rgb;
+                }
+              } else {
+                for (const u16* const end = p + c; p < end; p++) {
+                  __builtin_prefetch(w + 4 * p[CtrLightLists::kPad], 1);
+                  tod_word* const x = w + 4 * *p + 3;
+                  *x = (*x & keep) | rgb;
+                }
+              }
             }
-            for (; p != last; ++p) {
-              __builtin_prefetch(w + 4 * *(last - 1), 1);
-              tod_word* x = w + 4 * *p;
-              x[3] = (x[3] & keep) | tod_entry(t, x[1] >> 16);
+            if (written) {
+              flo = std::min<int>(flo, (int)lowest);
+              fhi = std::max<int>(fhi, (int)highest);
+              looked += written;
+              ps.light_verts += written;
             }
-            flo = std::min<int>(flo, *first);
-            fhi = std::max<int>(fhi, *(last - 1));
-            looked += (u32)(last - first);
-            ps.light_verts += (u32)(last - first);
           });
     } else {
       t.chunk_light_ver[ci] = t.ver;
@@ -5216,7 +5257,7 @@ bool CtrLevels::load_file(const fs::path& path,
         if (tod_mask) {
           tod_mark_plain(t, (u32)out->meshes.size(), vv, (int)ch.vertex_count);
         }
-        if (!lights.verts.empty()) {
+        if (!lights.empty()) {
           t.chunk_lights[(u32)out->meshes.size()] = std::move(lights);
         }
         if (tod_state == 2 && t.blended_valid) {
@@ -7305,7 +7346,7 @@ void CtrLevels::stream_take_pending(u64 frame) {
           const u8 mask = tod_scan(t, v, n, &lights);
           t.chunk_scanned[ci] = mask ? 2 : 1;
           t.chunk_mask[ci] = mask;
-          if (!lights.verts.empty()) {
+          if (!lights.empty()) {
             t.chunk_lights[ci] = std::move(lights);
           }
           if (mask) {

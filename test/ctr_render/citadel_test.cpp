@@ -24,14 +24,24 @@ void test_visible_lights() {
     sorted.emplace_back(vertex_mask[i], (uint16_t)i);
   }
   std::sort(sorted.begin(), sorted.end());
-  std::vector<uint16_t> vertices;
-  std::vector<std::pair<uint8_t, uint32_t>> masks;
+  CtrLightLists lists;
   for (size_t i = 0; i < sorted.size(); i++) {
-    vertices.push_back(sorted[i].second);
+    lists.verts.push_back(sorted[i].second);
     if (i + 1 == sorted.size() || sorted[i].first != sorted[i + 1].first) {
-      masks.emplace_back(sorted[i].first, (uint32_t)i + 1);
+      lists.masks.emplace_back(sorted[i].first, (uint32_t)i + 1);
     }
   }
+  lists.verts.resize(lists.verts.size() + CtrLightLists::kPad, 0);
+  auto entry = [](uint32_t i) { return (uint16_t)(i % 7); };
+  // each part's vertices, by its runs (every one in its run's entry)
+  auto each = [&](uint32_t first, uint32_t rf, uint32_t rl, auto fn) {
+    for (uint32_t r = rf; r < rl; r++) {
+      for (uint32_t c = 0; c < lists.runs[r] >> 16; c++, first++) {
+        check(entry(lists.verts[first]) == (lists.runs[r] & 0xffff), "a run's vertices use its entry");
+        fn(lists.verts[first]);
+      }
+    }
+  };
   uint32_t versions[8] = {};
   std::array<uint32_t, nv> colors{};
   std::vector<uint8_t> scratch;
@@ -67,16 +77,18 @@ void test_visible_lights() {
       }
     }
     std::array<uint8_t, nv> writes{};
-    const uint32_t minimum = ctr_recolor_light_groups(
-        groups.data(), ng, shown.data(), run_groups.data(), (uint32_t)shown.size(),
-        frame, frame, 15, versions, vertices, masks, scratch, [&](auto first, auto last) {
-          for (; first != last; ++first) {
-            const int i = *first, g = i / (nv / ng);
+    const uint32_t minimum = ctr_recolor_light_groups_cached(
+        groups.data(), ng, shown.data(), run_groups.data(), (uint32_t)shown.size(), frame, frame,
+        15, versions, lists, scratch, entry,
+        [&](const CtrLightGroup&, uint32_t first, uint32_t rf, uint32_t rl, uint32_t, uint32_t,
+            uint32_t&) {
+          each(first, rf, rl, [&](int i) {
+            const int g = i / (nv / ng);
             check(visible[g], "light pass must not touch a hidden group");
             check(!full[g], "full day rewrites must not be repeated by the light pass");
             check(++writes[i] == 1, "duplicate runs must not duplicate light writes");
             colors[i] = expected(i);
-          }
+          });
         });
     uint32_t actual_min = frame;
     for (int g = 0; g < ng; g++) {
@@ -92,9 +104,12 @@ void test_visible_lights() {
   // No visibility table/older files: update the entire chunk safely.
   versions[0] = 1001;
   uint32_t touched = 0;
-  ctr_recolor_light_groups(groups.data(), ng, nullptr, nullptr, 0, 1001, 1001, 15,
-                           versions, vertices, masks, scratch,
-                           [&](auto first, auto last) { touched += (uint32_t)(last - first); });
+  ctr_recolor_light_groups_cached(
+      groups.data(), ng, nullptr, nullptr, 0, 1001, 1001, 15, versions, lists, scratch, entry,
+      [&](const CtrLightGroup&, uint32_t first, uint32_t rf, uint32_t rl, uint32_t, uint32_t,
+            uint32_t&) {
+        each(first, rf, rl, [&](int) { touched++; });
+      });
   check(touched > 0, "chunks without visibility groups must still update");
 }
 

@@ -29,16 +29,20 @@ template <typename P>
 void tod_diff_pass_frame(P&, u64, long) {}
 
 namespace ref {
+#define TOD_LIGHT "ref.light.h"
 #define TOD_STRUCT "ref.struct.inc"
 #define TOD_CODE "ref.code.inc"
 #include "tod_driver.inc"
+#undef TOD_LIGHT
 #undef TOD_STRUCT
 #undef TOD_CODE
 }  // namespace ref
 namespace neu {
+#define TOD_LIGHT "neu.light.h"
 #define TOD_STRUCT "neu.struct.inc"
 #define TOD_CODE "neu.code.inc"
 #include "tod_driver.inc"
+#undef TOD_LIGHT
 #undef TOD_STRUCT
 #undef TOD_CODE
 }  // namespace neu
