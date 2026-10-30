@@ -259,6 +259,7 @@ void CtrVram::upload_ct32(const u8* data, u32 dest_block, u32 width, u32 height)
     flush_pending(dest_block, end);
   }
   forget_uploads(dest_block, end);
+  materialize(dest_block, end);
   // (AI-assisted, j2intro) the same image again (draw-raw-image sends the Dolby / title screen
   // cards every frame for seconds while the title's levels load): VRAM already holds it, so the
   // textures decoded from it stay valid. Rewriting it made a new copy of its chunks' ids and the
@@ -530,7 +531,7 @@ void CtrVram::forget_uploads(u32 first_block, u32 end_block) {
   }
 }
 
-void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_key) {
+void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_key, bool bytes) {
   // (AI-assisted) chunk by chunk: a whole chunk whose data is in the VRAM copy already (the same
   // source; the game uploads its pages to the same VRAM every frame) isn't written again
   for (u32 done = 0; done < words; done += kChunkWords) {
@@ -539,20 +540,62 @@ void CtrVram::write_upload(const u8* src, u32 dest_block, u32 words, u64 page_ke
     const u8* s = src + (size_t)done * 4;
     const u32 end = upload_end_block(block, n);
     if (n == kChunkWords && block % kChunkBlocks == 0 && block < kBlocks) {
+      const u32 c = block / kChunkBlocks;
       const u64 id = page_chunk_id(s, page_key);
-      u64& cur = m_chunk_id[block / kChunkBlocks];
-      if (cur == id) {
+      u64& cur = m_chunk_id[c];
+      if (cur == id && (!bytes || !m_lazy_src[c])) {
         m_stats.chunks_skipped++;
         continue;
       }
-      write_rows(s, block, n);
+      if (bytes) {
+        write_rows(s, block, n);
+        m_stats.chunks_written++;
+        if (m_lazy_src[c]) {
+          m_lazy_src[c] = nullptr;
+          m_lazy_n--;
+        }
+      } else {
+        if (!m_lazy_src[c]) {
+          m_lazy_n++;
+        }
+        m_lazy_src[c] = s;
+        m_lazy_key[c] = page_key;
+      }
       cur = id;
     } else {
+      materialize(block, end);
       write_rows(s, block, n);
+      m_stats.chunks_written++;
       mark_unique(block, end);
     }
-    m_stats.chunks_written++;
     note_write(block, end);
+  }
+}
+
+void CtrVram::materialize(u32 first_block, u32 end_block) {
+  if (!m_lazy_n || end_block <= first_block) {
+    return;
+  }
+  const u32 c0 = first_block / kChunkBlocks, c1 = (end_block - 1) / kChunkBlocks;
+  for (u32 k = c0; k <= c1 && k < c0 + kChunks; k++) {
+    const u32 c = k % kChunks;
+    const u8* s = m_lazy_src[c];
+    if (!s) {
+      continue;
+    }
+    m_lazy_src[c] = nullptr;
+    m_lazy_n--;
+    write_rows(s, c * kChunkBlocks, kChunkWords);
+    m_stats.chunks_written++;
+    const u64 id = page_chunk_id(s, m_lazy_key[c]);
+    if (id != m_chunk_id[c]) {
+      // the source changed since: what it holds now, under an id of its own
+      m_chunk_id[c] = id;
+      note_write(c * kChunkBlocks, (c + 1) * kChunkBlocks);
+    }
+    if (!m_lazy_n) {
+      return;
+    }
   }
 }
 
@@ -628,7 +671,7 @@ void CtrVram::flush_pending() {
   }
 }
 
-void CtrVram::flush_pending(u32 first_block, u32 end_block) {
+void CtrVram::flush_pending(u32 first_block, u32 end_block, bool bytes) {
   // write the uploads that overlap the range, in order; keep the others pending.
   // (AI-assisted) Only the 32 row chunks of an upload that overlap the range are written (a 128
   // pixel wide PSMCT32 image: each chunk is 4096 words at 64 consecutive blocks); its other chunks
@@ -665,7 +708,7 @@ void CtrVram::flush_pending(u32 first_block, u32 end_block) {
   }
   m_pending.swap(m_keep);
   for (const auto& p : m_write) {
-    write_upload(p.src, p.dest_block, p.words, p.page_key);
+    write_upload(p.src, p.dest_block, p.words, p.page_key, bytes);
   }
 }
 
@@ -723,8 +766,8 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
                    : (info.psm == (u32)GsTex0::PSM::PSMT8) ? 8
                                                             : 32;
   const u32 src_blocks = ((u32)info.w * info.h * bits / 8 + 8191) / 8192 * 32;
-  flush_pending(src_block, src_block + src_blocks);
-  flush_pending(info.clutdest, info.clutdest + 4);
+  flush_pending(src_block, src_block + src_blocks, false);
+  flush_pending(info.clutdest, info.clutdest + 4, false);
   // the game relocates the font every frame: skip if the source and CLUT didn't change (and
   // nothing was written over the result: note_write). (AI-assisted) By the ids of their chunks,
   // not a hash of their bytes (~64 KB, every frame)
@@ -737,6 +780,7 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     m_stats.relocates_skipped++;
     return;
   }
+  materialize_all();
   const u32 width = std::max<u32>(1, info.width) * 64;
   Range range;
   // (AI-assisted) whether any byte changed: relocating the same again leaves the chunks' ids (and
@@ -1021,6 +1065,7 @@ u32 texture_block_span(const GsTex0& t) {
 
 bool CtrVram::decode(u64 tex0, std::vector<u32>* out, int* w, int* h) const {
   const_cast<CtrVram*>(this)->flush_pending();
+  const_cast<CtrVram*>(this)->materialize_all();
   Range r;
   return decode_impl(this, view(), tex0, out, w, h, &r,
                      [this](u32 cbp, u32 cpsm, u32 e) { return clut_color(cbp, cpsm, e); });
@@ -1035,6 +1080,7 @@ bool CtrVram::decode_for_cpu(u64 tex0, std::vector<u32>* out, int* w, int* h) {
     flush_pending(t.tbp0(), t.tbp0() + blocks);
     flush_pending(t.cbp(), t.cbp() + 4);
   }
+  materialize_all();
   const Relocation* reloc = find_relocation(t.tbp0(), (u32)t.psm());
   Range r;
   if (reloc) {
@@ -1129,10 +1175,10 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   const u64 data_key = data_tex0(key);
   GsTex0 t(data_tex0(tex0));
   if (!m_pending.empty()) {
-    // write the pending uploads this texture (or its cached version) may read
+    // the ids of the pending uploads this texture (or its cached version) may read
     const u32 blocks = texture_block_span(t);
-    flush_pending(t.tbp0(), t.tbp0() + blocks);
-    flush_pending(t.cbp(), t.cbp() + 4);
+    flush_pending(t.tbp0(), t.tbp0() + blocks, false);
+    flush_pending(t.cbp(), t.cbp() + 4, false);
   }
   if (cached && entry_sig(*cached) == cached->sig) {
     m_stats.cached++;  // the uploads written were the data already there
@@ -1161,6 +1207,7 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     }
   }
 
+  materialize_all();
   std::vector<u32> data;
   int w = 0, h = 0;
   Range tex_range;
