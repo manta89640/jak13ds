@@ -31,6 +31,8 @@ int ctr_gpu_bench_run(void);
  * citro3d's state as the game set it up and all of it marked for sending, the raw draws' caches
  * dropped as after the HOME Menu) */
 void ctr_gpu_bench_restore(void);
+/* the HOME gate (ctr_gpu_citro3d.c): 1 holds it as a frame does, 0 lets it go */
+void ctr_gpu_bench_gate(int enter);
 
 #ifdef __cplusplus
 }

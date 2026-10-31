@@ -105,6 +105,7 @@ class CtrOceanFull : public CtrOceanEnvHook {
   int m_tex = -1;  // with the PS2's mip levels
   u64 m_tex_frame = ~0ull;  // the frame it was last made in
   int m_tex_rate = 1;       // (AI-assisted) config.ini ocean_texture_rate
+  int m_refl_rate = 1;      // the same for the sky reflection (the GPU wave texture leaves it)
   std::vector<u32> m_texels;
   // the wave texture drawn by the GPU (update_texture_gpu): a mipmapped render texture (m_tex
   // then is it); -1: none, the CPU makes it
