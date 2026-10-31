@@ -35,6 +35,7 @@ constexpr u32 kThreadBytes = 256;
 struct State {
   int on = -1;
   bool filled = false;
+  u32 deepest = 0;  // the lowest word any scan found written (refilled every run)
   Config cfg;
   struct Record {
     u32 depth = 0;
@@ -118,6 +119,7 @@ void after_run(u32 stack_top, u32 type, u32 thread_name) {
   const u32 bottom = top - g.cfg.stack_size;
   if (!g.filled) {
     g.filled = true;
+    g.deepest = top;
     fill(bottom, top);
     return;
   }
@@ -140,7 +142,9 @@ void after_run(u32 stack_top, u32 type, u32 thread_name) {
       break;
     }
   }
-  fill(lowest, top);
+  // from the deepest word seen: a run that left a gap above its deeper words is refilled there too
+  g.deepest = std::min(g.deepest, lowest);
+  fill(g.deepest, top);
   const u32 depth = top - lowest;
   const u64 key = ((u64)type << 32) | thread_name;
   auto& rec = g.max_depth[key];
