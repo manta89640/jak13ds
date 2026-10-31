@@ -502,13 +502,20 @@ struct CtrLevelData {
   static constexpr s32 kNormalsInMesh = -2;
   std::vector<c3l::EnvTieDraw> env_draws;
   std::vector<s16> draw_env;
-  // c3l::kDrawCullCond draws (c3l::ExtCullCond): each one's planes in cond_planes
+  // c3l::kDrawCullCond draws (c3l::ExtCullCond): each one's planes in cond_planes, its boxes in
+  // cond_boxes (box_first..): u16 steps of cond_box_step from cond_box_origin, rounded outward
   struct CondDraw {
     u32 draw, first, count;
-    u32 boxes;  // c3l::CullCondBox after its planes in cond_planes (two records each)
+    u32 box_first, boxes;
+  };
+  struct CondBox {
+    u16 lo[3], hi[3];
   };
   std::vector<CondDraw> cond_draws;
   std::vector<c3l::CullCondPlane> cond_planes;
+  std::vector<CondBox> cond_boxes;
+  float cond_box_origin[3] = {0, 0, 0};
+  float cond_box_step = 1.f;
   // the PS2's tie geomorph (c3l::ExtMorph): per LOD group its mid-plane (0: switched as before),
   // the morphing instances, the near chunks' rows (instance | band << 30) and per draw the rows
   // its vertices use; per chunk its MorphChunk (-1: none)

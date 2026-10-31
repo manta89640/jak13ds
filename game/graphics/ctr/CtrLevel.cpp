@@ -5137,6 +5137,7 @@ constexpr float kCondNearReach = 1.f * 4096.f;
 void load_cull_cond(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   lev->cond_draws.clear();
   lev->cond_planes.clear();
+  lev->cond_boxes.clear();
   c3l::ExtHeader eh;
   if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderV24Size) {
     return;
@@ -5147,27 +5148,77 @@ void load_cull_cond(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
       ec.draw_count > lev->draws.size() || !f.read_array(ec.draws_offset, ec.draw_count, &cds)) {
     return;
   }
+  size_t n_planes = 0, n_boxes = 0;
   for (const auto& cd : cds) {
-    std::vector<c3l::CullCondPlane> ps;
     if (cd.draw >= lev->draws.size() || !(lev->draws[cd.draw].kind & c3l::kDrawCullCond) ||
-        !cd.plane_count || cd.box_count > 0xffff ||
-        !f.read_array(cd.planes_offset, cd.plane_count + 2 * cd.box_count, &ps)) {
+        !cd.plane_count || cd.plane_count > 0xffff || cd.box_count > 0xffff) {
+      lg::warn("[ctr] {}: bad opening planes, those draws keep both sides", lev->name);
+      return;
+    }
+    n_planes += cd.plane_count;
+    n_boxes += cd.box_count;
+  }
+  // the boxes stay as floats only while loading, then become u16 steps (12 bytes, not 32)
+  std::vector<c3l::CullCondBox> fboxes;
+  std::vector<c3l::CullCondPlane> rec;
+  fboxes.reserve(n_boxes);
+  lev->cond_planes.reserve(n_planes);
+  lev->cond_draws.reserve(cds.size());
+  float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+  for (const auto& cd : cds) {
+    if (!f.read_array(cd.planes_offset, cd.plane_count + 2 * cd.box_count, &rec)) {
       lg::warn("[ctr] {}: bad opening planes, those draws keep both sides", lev->name);
       lev->cond_draws.clear();
       lev->cond_planes.clear();
       return;
     }
     lev->cond_draws.push_back(
-        {cd.draw, (u32)lev->cond_planes.size(), cd.plane_count, cd.box_count});
-    lev->cond_planes.insert(lev->cond_planes.end(), ps.begin(), ps.end());
+        {cd.draw, (u32)lev->cond_planes.size(), cd.plane_count, (u32)fboxes.size(), cd.box_count});
+    lev->cond_planes.insert(lev->cond_planes.end(), rec.begin(), rec.begin() + cd.plane_count);
+    for (u32 k = 0; k < cd.box_count; k++) {
+      c3l::CullCondBox bx;
+      memcpy(&bx, &rec[cd.plane_count + 2 * k], sizeof(bx));
+      for (int a = 0; a < 3; a++) {
+        lo[a] = std::min(lo[a], bx.lo[a]);
+        hi[a] = std::max(hi[a], bx.hi[a]);
+      }
+      fboxes.push_back(bx);
+    }
   }
-  u32 boxes = 0;
-  for (const auto& cd : lev->cond_draws) {
-    boxes += cd.boxes;
+  if (!fboxes.empty()) {
+    float span = 0;
+    for (int a = 0; a < 3; a++) {
+      lev->cond_box_origin[a] = std::floor(lo[a]);
+      span = std::max(span, hi[a] - lev->cond_box_origin[a]);
+    }
+    float step = 1.f;
+    while (span / step > 65000.f) {
+      step *= 2.f;
+    }
+    lev->cond_box_step = step;
+    lev->cond_boxes.resize(fboxes.size());
+    for (size_t i = 0; i < fboxes.size(); i++) {
+      for (int a = 0; a < 3; a++) {
+        const float o = lev->cond_box_origin[a];
+        lev->cond_boxes[i].lo[a] =
+            (u16)std::clamp(std::floor((fboxes[i].lo[a] - o) / step), 0.f, 65535.f);
+        lev->cond_boxes[i].hi[a] =
+            (u16)std::clamp(std::ceil((fboxes[i].hi[a] - o) / step), 0.f, 65535.f);
+      }
+    }
   }
   lg::info("[ctr] {}: culling by opening planes: {} draws, {} planes, {} boxes{}", lev->name,
-           lev->cond_draws.size(), lev->cond_planes.size() - 2 * boxes, boxes,
-           boxes ? "" : " (an older file: both sides drawn)");
+           lev->cond_draws.size(), lev->cond_planes.size(), lev->cond_boxes.size(),
+           lev->cond_boxes.empty() ? " (an older file: both sides drawn)" : "");
+}
+
+// a cond box in world game units
+void cond_box(const CtrLevelData& lev, u32 i, float* lo, float* hi) {
+  const auto& b = lev.cond_boxes[i];
+  for (int a = 0; a < 3; a++) {
+    lo[a] = lev.cond_box_origin[a] + b.lo[a] * lev.cond_box_step;
+    hi[a] = lev.cond_box_origin[a] + b.hi[a] * lev.cond_box_step;
+  }
 }
 
 // shrub fade bands (c3l::ExtShrubFade): per file run; a shrub chunk with bands reaches its largest
@@ -9518,10 +9569,11 @@ void ctr_level_probe_explain(const void* state, double px) {
         in_d = std::max(in_d, p.n[0] * c[0] + p.n[1] * c[1] + p.n[2] * c[2] - p.d);
       }
       for (u32 k = 0; k < cd.boxes; k++) {
-        const auto* b = (const c3l::CullCondBox*)&lp->cond_planes[cd.first + cd.count + 2 * k];
+        float blo[3], bhi[3];
+        cond_box(*lp, cd.box_first + k, blo, bhi);
         float o2 = 0;
         for (int a = 0; a < 3; a++) {
-          const float o = std::max({b->lo[a] - c[a], c[a] - b->hi[a], 0.f});
+          const float o = std::max({blo[a] - c[a], c[a] - bhi[a], 0.f});
           o2 += o * o;
         }
         box_d = std::min(box_d, std::sqrt(o2));
@@ -9576,9 +9628,9 @@ const CtrBackgroundCamera& host_cam_pose(const CtrLevelData& lev,
   if (pts.empty() && lev.name == name) {
     for (const auto& cd : lev.cond_draws) {
       if (cd.count >= 2 && cd.boxes) {
-        const auto* b = (const c3l::CullCondBox*)&lev.cond_planes[cd.first + cd.count];
-        pts.push_back({(b->lo[0] + b->hi[0]) / 2, (b->lo[1] + b->hi[1]) / 2,
-                       (b->lo[2] + b->hi[2]) / 2});
+        float blo[3], bhi[3];
+        cond_box(lev, cd.box_first, blo, bhi);
+        pts.push_back({(blo[0] + bhi[0]) / 2, (blo[1] + bhi[1]) / 2, (blo[2] + bhi[2]) / 2});
       }
     }
     lg::info("[condpose] {}: {} poses", name, pts.size());
@@ -11899,7 +11951,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // inside the surface, or the near plane may cut its wall away). No boxes: both sides
     const float px = cam.trans[0], py = cam.trans[1], pz = cam.trans[2];
     const c3l::CullCondPlane* const planes = lev.cond_planes.data();
-    constexpr float g = kCondNearReach;
+    // the camera and the grown reach in the boxes' u16 steps
+    const float inv = 1.f / lev.cond_box_step, g = kCondNearReach * inv;
+    const float qx = (px - lev.cond_box_origin[0]) * inv, qy = (py - lev.cond_box_origin[1]) * inv,
+                qz = (pz - lev.cond_box_origin[2]) * inv;
 #ifndef __3DS__
     static const bool probe = getenv("CTR_SOFT_CULL_PROBE") != nullptr;
     if (probe) {
@@ -11922,9 +11977,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #endif
       bool in = cd.boxes > 0;
       for (u32 k = 0; k < cd.boxes && in && !no_box; k++) {
-        const auto* b = (const c3l::CullCondBox*)&planes[cd.first + cd.count + 2 * k];
-        in = px < b->lo[0] - g || px > b->hi[0] + g || py < b->lo[1] - g || py > b->hi[1] + g ||
-             pz < b->lo[2] - g || pz > b->hi[2] + g;
+        const auto& b = lev.cond_boxes[cd.box_first + k];
+        in = qx < b.lo[0] - g || qx > b.hi[0] + g || qy < b.lo[1] - g || qy > b.hi[1] + g ||
+             qz < b.lo[2] - g || qz > b.hi[2] + g;
       }
       for (u32 k = cd.first; k < cd.first + cd.count && in; k++) {
         const auto& p = planes[k];
