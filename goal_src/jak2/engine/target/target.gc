@@ -481,6 +481,11 @@
     )
   )
 
+;; og:preserve-this 3DS: init-var-jump's early-press mask for mod-var-jump (one target)
+(#when TARGET_3DS
+  (define *pc-3ds-var-jump-early* 0)
+  )
+
 (defbehavior init-var-jump target ((arg0 float) (arg1 float) (arg2 symbol) (arg3 symbol) (arg4 vector) (arg5 float))
   (when (and (focus-test? self dark)
              (nonzero? (-> self darkjak))
@@ -519,7 +524,7 @@
       (set! (-> self control unknown-float37) 0.0)
       ;; og:preserve-this 3DS: buttons pressed before this frame's middle 60 Hz sample (mod-var-jump)
       (#when TARGET_3DS
-        (set! (-> self control unknown-word06) (the-as int (-> self control cpad sub-early)))
+        (set! *pc-3ds-var-jump-early* (the-as int (-> self control cpad sub-early)))
         )
       (cond
         (arg3
@@ -577,7 +582,7 @@
         (when (and (nonzero? (-> pad sub-valid)) (< 1.5 tar) (< tar 2.5))
           (let* ((h (the int (+ 0.5 (* 2.5 tar))))
                  (t (+ (- (current-time) (-> self state-time))
-                       (if (logtest? (the-as pad-buttons (-> self control unknown-word06)) arg4) h 0)
+                       (if (logtest? (the-as pad-buttons *pc-3ds-var-jump-early*) arg4) h 0)
                        )
                     )
                  (open (<= 0.0 (-> self control unknown-float36)))
