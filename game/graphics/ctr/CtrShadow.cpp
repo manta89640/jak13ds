@@ -65,29 +65,15 @@ inline u32 sign_bit(float f) {
   return float_bits(f) >> 31;
 }
 
-//! the planes v is outside of: bits 0-3 the guard band (+x, -x, +y, -y), 4 near, 5 far
-inline u8 outcode(float x, float y, float z, float w) {
+//! the planes v is outside of: bits 0-3 the guard band (+x, -x, +y, -y), 4 near, 5 far (the
+//! planes a face is cut to), bits 8-11 the screen's edges (+x, -x, +y, -y)
+constexpr u32 kCutPlanes = 0x3f;
+inline u16 outcode(float x, float y, float z, float w) {
   const float g = kGuard * w;
-  return (u8)(sign_bit(g - x) | (sign_bit(g + x) << 1) | (sign_bit(g - y) << 2) |
-              (sign_bit(g + y) << 3) | (sign_bit(w - z) << 4) | (sign_bit(w + z) << 5));
-}
-
-//! the distance of v to plane k of outcode (>= 0 inside)
-inline float plane_dist(const ctr_clip_vertex& v, int k) {
-  switch (k) {
-    case 0:
-      return kGuard * v.w - v.x;
-    case 1:
-      return kGuard * v.w + v.x;
-    case 2:
-      return kGuard * v.w - v.y;
-    case 3:
-      return kGuard * v.w + v.y;
-    case 4:
-      return v.w - v.z;
-    default:
-      return v.w + v.z;
-  }
+  return (u16)(sign_bit(g - x) | (sign_bit(g + x) << 1) | (sign_bit(g - y) << 2) |
+               (sign_bit(g + y) << 3) | (sign_bit(w - z) << 4) | (sign_bit(w + z) << 5) |
+               (sign_bit(w - x) << 8) | (sign_bit(w + x) << 9) | (sign_bit(w - y) << 10) |
+               (sign_bit(w + y) << 11));
 }
 
 /*!
@@ -96,7 +82,7 @@ inline float plane_dist(const ctr_clip_vertex& v, int k) {
  * locals: in registers for the whole loop (through the pointer, every store to dst would reload
  * it).
  */
-void transform(const float* src, int n, const float* mp, ctr_clip_vertex* dst, u8* oc, u32& big) {
+void transform(const float* src, int n, const float* mp, ctr_clip_vertex* dst, u16* oc, u32& big) {
   const float m0 = mp[0], m1 = mp[1], m2 = mp[2], m3 = mp[3], m4 = mp[4], m5 = mp[5], m6 = mp[6],
               m7 = mp[7], m8 = mp[8], m9 = mp[9], m10 = mp[10], m11 = mp[11], m12 = mp[12],
               m13 = mp[13], m14 = mp[14], m15 = mp[15];
@@ -122,6 +108,22 @@ void transform(const float* src, int n, const float* mp, ctr_clip_vertex* dst, u
     oc[i] = outcode(cx, cy, cz, cw);
   }
   big = b;
+}
+
+//! the distance of clip space point c (x, y, z, w) to plane k of outcode (>= 0 inside)
+inline float plane_dist(const float* c, int k) {
+  // m * w - c (k even) or m * w + c (k odd), c = x, y, z for k / 2 = 0, 1, 2
+  const float m = k < 4 ? kGuard : 1.f;
+  return (k & 1) ? m * c[3] + c[k >> 1] : m * c[3] - c[k >> 1];
+}
+
+//! the point where an edge from inside point vi (distance di) to outside point vo (dout) meets
+//! the plane, interpolated from its inside end (two faces sharing the edge get the same point)
+inline void cut_point(const float* vi, const float* vo, float di, float dout, float* q) {
+  const float s = di / (di - dout);
+  for (int c = 0; c < 4; c++) {
+    q[c] = vi[c] + (vo[c] - vi[c]) * s;
+  }
 }
 
 // GIF tag of the shadow color's sprite (shadow-dma-end): NLOOP 1, REGLIST, NREG 2: PRIM, RGBAQ
@@ -276,6 +278,7 @@ bool CtrShadowVolumes::ensure_transformed() {
   m_obj_f0 = m_nf;
   m_obj_b0 = m_nb;
   m_nv += m_ntop + m_ndual;
+  std::fill(m_dcut, m_dcut + std::min(m_ndual, kTableSize), -1);
   m_obj_transformed = true;
   return true;
 }
@@ -443,70 +446,102 @@ void CtrShadowVolumes::close_object() {
  * in both (interpolated from its inside end). False: no room left (the object is left out).
  */
 bool CtrShadowVolumes::clip_tri(u16*& p, const u16 idx[3], u32 planes) {
-  struct P {
-    ctr_clip_vertex v;
-    int index;  // m_out index, -1: new
+  struct V {
+    float c[4];  // x, y, z, w
+    int index;   // m_out index, -1: new
   };
-  P poly[9], tmp[9];
+  V buf[2][9];
+  V* in = buf[0];
+  V* out = buf[1];
   int n = 3;
   for (int k = 0; k < 3; k++) {
-    poly[k] = P{m_out[idx[k]], idx[k]};
+    const ctr_clip_vertex& v = m_out[idx[k]];
+    in[k] = V{{v.x, v.y, v.z, v.w}, idx[k]};
   }
-  for (int k = 0; k < 6; k++) {
-    if (!(planes & (1u << k))) {
-      continue;
-    }
-    int m = 0;
+  for (u32 pl = planes; pl; pl &= pl - 1) {
+    const int k = __builtin_ctz(pl);
+    float d[9];
     for (int i = 0; i < n; i++) {
-      const P& a = poly[i];
-      const P& b = poly[i + 1 == n ? 0 : i + 1];
-      const float da = plane_dist(a.v, k), db = plane_dist(b.v, k);
-      const bool ina = da >= 0, inb = db >= 0;
+      d[i] = plane_dist(in[i].c, k);
+    }
+    int o = 0;
+    for (int i = 0; i < n; i++) {
+      const int j = i + 1 == n ? 0 : i + 1;
+      const bool ina = d[i] >= 0, inb = d[j] >= 0;
       if (ina) {
-        tmp[m++] = a;
+        out[o++] = in[i];
       }
       if (ina != inb) {
-        const ctr_clip_vertex& vi = ina ? a.v : b.v;
-        const ctr_clip_vertex& vo = ina ? b.v : a.v;
-        const float di = ina ? da : db, dout = ina ? db : da;
-        const float s = di / (di - dout);
-        P q{};
-        q.v.x = vi.x + (vo.x - vi.x) * s;
-        q.v.y = vi.y + (vo.y - vi.y) * s;
-        q.v.z = vi.z + (vo.z - vi.z) * s;
-        q.v.w = vi.w + (vo.w - vi.w) * s;
-        q.index = -1;
-        tmp[m++] = q;
+        const V& vi = ina ? in[i] : in[j];
+        const V& vo = ina ? in[j] : in[i];
+        cut_point(vi.c, vo.c, ina ? d[i] : d[j], ina ? d[j] : d[i], out[o].c);
+        out[o++].index = -1;
       }
     }
-    n = m;
+    n = o;
     if (n < 3) {
       return true;  // (nothing inside)
     }
-    std::copy(tmp, tmp + n, poly);
+    std::swap(in, out);
   }
   int fresh = 0;
   for (int i = 0; i < n; i++) {
-    fresh += poly[i].index < 0;
+    fresh += in[i].index < 0;
   }
   // (m_nf, m_nb: the lists' lengths before this triangle)
   if (m_nv + fresh > m_vcap || m_nf + m_nb + 3 * (n - 2) > m_icap) {
     return false;
   }
   for (int i = 0; i < n; i++) {
-    if (poly[i].index < 0) {
-      m_out[m_nv] = poly[i].v;
-      poly[i].index = m_nv++;
+    if (in[i].index < 0) {
+      in[i].index = new_vertex(in[i].c);
     }
   }
   for (int i = 1; i + 1 < n; i++) {
-    p[0] = (u16)poly[0].index;
-    p[1] = (u16)poly[i].index;
-    p[2] = (u16)poly[i + 1].index;
+    p[0] = (u16)in[0].index;
+    p[1] = (u16)in[i].index;
+    p[2] = (u16)in[i + 1].index;
     p += 3;
   }
   m_stats.clipped++;
+  for (u32 pl = planes; pl; pl &= pl - 1) {
+    m_stats.cut_planes[__builtin_ctz(pl)]++;
+  }
   return true;
+}
+
+/*!
+ * Bottom vertex i's edge from the top (T[i] inside the band, D[i] outside plane k alone) cut at
+ * plane k, made once per object: its vertex, -2 if there is no room or the point is outside
+ * another plane (then the faces are cut one by one).
+ */
+int CtrShadowVolumes::dual_cut(int i, int k) {
+  int& c = m_dcut[i];
+  if (c != -1) {
+    return c;
+  }
+  c = -2;
+  const ctr_clip_vertex& t = m_out[m_obj_base + i];
+  const ctr_clip_vertex& d = m_out[m_obj_base + m_ntop + i];
+  const float vt[4] = {t.x, t.y, t.z, t.w}, vd[4] = {d.x, d.y, d.z, d.w};
+  float q[4];
+  cut_point(vt, vd, plane_dist(vt, k), plane_dist(vd, k), q);
+  if ((outcode(q[0], q[1], q[2], q[3]) & kCutPlanes & ~(1u << k)) || m_nv >= m_vcap) {
+    return c;
+  }
+  c = new_vertex(q);
+  return c;
+}
+
+int CtrShadowVolumes::new_vertex(const float c[4]) {
+  ctr_clip_vertex& v = m_out[m_nv];
+  v.x = c[0];
+  v.y = c[1];
+  v.z = c[2];
+  v.w = c[3];
+  v.s = v.t = 0.f;
+  memset(&v.r, 0, 4);
+  return m_nv++;
 }
 
 /*!
@@ -525,7 +560,7 @@ bool CtrShadowVolumes::tris(const u8* e, int count, bool double_sided) {
   for (int cap = 0; cap < 2; cap++) {
     const float* V = cap ? D : T;
     const u16 base = cap ? db : tb;
-    const u8* oc = m_oc + (cap ? m_ntop : 0);
+    const u16* oc = m_oc + (cap ? m_ntop : 0);
     for (int k = 0; k < count; k++) {
       const u8* t = e + 4 * k;
       const int i0 = t[0];
@@ -540,13 +575,17 @@ bool CtrShadowVolumes::tris(const u8* e, int count, bool double_sided) {
       if (swap) {
         std::swap(i1, i2);
       }
+      const u32 o0 = oc[i0], o1 = oc[i1], o2 = oc[i2];
+      if (!kTrace && (o0 & o1 & o2)) {
+        continue;  // (off screen or outside a plane: no pixel)
+      }
       const u32 f = vu_front(V + 4 * i0, V + 4 * i1, V + 4 * i2);
       const u16 idx[3] = {(u16)(base + i0), (u16)(base + i1), (u16)(base + i2)};
       if constexpr (kTrace) {
         m_trace->push_back(Prim{{idx[0], idx[1], idx[2], 0}, 3, (u8)f, tb});
       }
-      const u32 o0 = oc[i0], o1 = oc[i1], o2 = oc[i2];
-      if (!(o0 | o1 | o2)) {
+      const u32 any = o0 | o1 | o2;
+      if (!any || (!(any & kCutPlanes) && !(o0 & o1 & o2))) {
         u16* p = cur[f];
         p[0] = idx[0];
         p[1] = idx[1];
@@ -555,7 +594,7 @@ bool CtrShadowVolumes::tris(const u8* e, int count, bool double_sided) {
       } else if (!(o0 & o1 & o2) && room) {
         m_nb = (int)(cur[0] - m_back);
         m_nf = (int)(cur[1] - m_front);
-        room = clip_tri(cur[f], idx, o0 | o1 | o2);
+        room = clip_tri(cur[f], idx, any & kCutPlanes);
       }
     }
   }
@@ -574,8 +613,8 @@ bool CtrShadowVolumes::edges(const u8* e, int count) {
   const float* T = m_top;
   const float* D = m_dual;
   const int tb = m_obj_base, db = m_obj_base + m_ntop;
-  const u8* oct = m_oc;
-  const u8* ocd = m_oc + m_ntop;
+  const u16* oct = m_oc;
+  const u16* ocd = m_oc + m_ntop;
   u16* cur[2] = {m_back + m_nb, m_front + m_nf};
   bool room = true;
   for (int k = 0; k < count; k++) {
@@ -588,13 +627,17 @@ bool CtrShadowVolumes::edges(const u8* e, int count) {
     if (t[2] == 0) {
       std::swap(a, b);  // (T[b], T[a], D[a], D[b])
     }
+    const u32 o0 = oct[a], o1 = oct[b], o2 = ocd[b], o3 = ocd[a];
+    if (!kTrace && (o0 & o1 & o2 & o3)) {
+      continue;  // (off screen or outside a plane: no pixel)
+    }
     const u32 f = vu_front(T + 4 * a, T + 4 * b, D + 4 * b);
     const u16 q0 = (u16)(tb + a), q1 = (u16)(tb + b), q2 = (u16)(db + b), q3 = (u16)(db + a);
     if constexpr (kTrace) {
       m_trace->push_back(Prim{{q0, q1, q2, q3}, 4, (u8)f, (u16)tb});
     }
-    const u32 o0 = oct[a], o1 = oct[b], o2 = ocd[b], o3 = ocd[a];
-    if (!(o0 | o1 | o2 | o3)) {
+    const u32 any4 = o0 | o1 | o2 | o3;
+    if (!any4 || (!(any4 & kCutPlanes) && !(o0 & o1 & o2) && !(o0 & o2 & o3))) {
       u16* p = cur[f];
       p[0] = q0;
       p[1] = q1;
@@ -605,21 +648,45 @@ bool CtrShadowVolumes::edges(const u8* e, int count) {
       cur[f] = p + 6;
       continue;
     }
+    // the top edge inside the band and both bottom corners outside the same plane alone: the
+    // quad is cut along its two side edges, at the points made once per bottom vertex (the same
+    // area as its two triangles cut one by one, without the point on their shared edge)
+    const u32 c2 = o2 & kCutPlanes;
+    if (!((o0 | o1) & kCutPlanes) && c2 && c2 == (o3 & kCutPlanes) && !(c2 & (c2 - 1))) {
+      const int k = __builtin_ctz(c2);
+      const int ib = dual_cut(b, k), ia = ib >= 0 ? dual_cut(a, k) : -2;
+      if (ia >= 0) {
+        u16* p = cur[f];
+        p[0] = q0;
+        p[1] = q1;
+        p[2] = (u16)ib;
+        p[3] = q0;
+        p[4] = (u16)ib;
+        p[5] = (u16)ia;
+        cur[f] = p + 6;
+        m_stats.clipped += 2;
+        m_stats.cut_planes[k] += 2;
+        continue;
+      }
+    }
     // (q0 q1 q2), (q0 q2 q3), each whole, cut or left out
     const u16 tri[2][3] = {{q0, q1, q2}, {q0, q2, q3}};
     const u32 oc[2][3] = {{o0, o1, o2}, {o0, o2, o3}};
     for (int h = 0; h < 2; h++) {
       const u32 any = oc[h][0] | oc[h][1] | oc[h][2];
-      if (!any) {
+      if (oc[h][0] & oc[h][1] & oc[h][2]) {
+        continue;  // (off screen or outside a plane: no pixel)
+      }
+      if (!(any & kCutPlanes)) {
         u16* p = cur[f];
         p[0] = tri[h][0];
         p[1] = tri[h][1];
         p[2] = tri[h][2];
         cur[f] = p + 3;
-      } else if (!(oc[h][0] & oc[h][1] & oc[h][2]) && room) {
+      } else if (room) {
         m_nb = (int)(cur[0] - m_back);
         m_nf = (int)(cur[1] - m_front);
-        room = clip_tri(cur[f], tri[h], any);
+        room = clip_tri(cur[f], tri[h], any & kCutPlanes);
       }
     }
   }
@@ -826,11 +893,13 @@ void CtrShadowRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   if (rs.log_now) {
     const auto& st = m_vol.stats();
     lg::debug("[ctr] shadow: {} objects ({} left out, {} over shadow_casters), {} vertices, {} "
-              "front + {} back triangles, {} cut to the guard band; {} bad entries, {} bad "
-              "packets, {} without camera; Keira's shadow drawn {} times",
+              "front + {} back triangles, {} cut to the guard band (planes +x {} -x {} +y {} -y {} "
+              "near {} far {}); {} bad entries, {} bad packets, {} without camera; Keira's shadow "
+              "drawn {} times",
               st.objects, st.dropped_objects, st.capped, m_vol.vert_count(), m_vol.front_count() / 3,
-              m_vol.back_count() / 3, st.clipped, st.bad_entries, st.bad_packets, st.no_camera,
-              m_vol.keira_replaced());
+              m_vol.back_count() / 3, st.clipped, st.cut_planes[0], st.cut_planes[1],
+              st.cut_planes[2], st.cut_planes[3], st.cut_planes[4], st.cut_planes[5],
+              st.bad_entries, st.bad_packets, st.no_camera, m_vol.keira_replaced());
   }
 }
 

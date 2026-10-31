@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -561,6 +562,9 @@ struct Result {
   long fill = 0;  // fragments of the darkening pass
   long old_rect = 0;  // the bounding rectangle the darkening pass covered before
   bool full_screen = false;
+  int clipped = 0;     // triangles cut to the guard band
+  int tris = 0;        // triangles sent to the GPU (front + back)
+  double build_us = 0;  // the volume's CPU build (host, best of a few runs)
 };
 
 Result run_pose(const Mesh& mesh, const Camera& cam, const Pose& pose, const Model& md,
@@ -582,6 +586,27 @@ Result run_pose(const Mesh& mesh, const Camera& cam, const Pose& pose, const Mod
   }
   v.end();
   Result res;
+  res.clipped = v.stats().clipped;
+  res.tris = (v.front_count() + v.back_count()) / 3;
+  {
+    // the CPU cost of the build alone (no trace), best of 5
+    static std::vector<ctr_clip_vertex> tv(CtrShadowVolumes::kMaxVerts);
+    static std::vector<u16> tf(CtrShadowVolumes::kMaxIndices), tb(CtrShadowVolumes::kMaxIndices);
+    double best = 1e30;
+    for (int rep = 0; rep < 5; rep++) {
+      CtrShadowVolumes tvol;
+      const auto t0 = std::chrono::steady_clock::now();
+      tvol.begin(tv.data(), CtrShadowVolumes::kMaxVerts, tf.data(), tb.data(),
+                 CtrShadowVolumes::kMaxIndices);
+      for (const auto& t : dma.transfers()) {
+        tvol.transfer(t);
+      }
+      tvol.end();
+      const auto t1 = std::chrono::steady_clock::now();
+      best = std::min(best, std::chrono::duration<double, std::micro>(t1 - t0).count());
+    }
+    res.build_us = best;
+  }
   if (dump) {
     printf("tris %zu edges %zu: front %d back %d verts %d clipped %d (%d); T0 (%.0f %.0f %.0f) D0 "
            "(%.0f %.0f %.0f)\n",
@@ -774,7 +799,8 @@ int main(int argc, char** argv) {
   }
   int quads = 0, bad = 0;
   long false_total = 0, dark_total = 0, missing_total = 0, fill_total = 0, dropped_total = 0,
-       old_rect_total = 0;
+       old_rect_total = 0, clipped_total = 0, tris_total = 0;
+  double build_total = 0;
   int worst = -1;
   double worst_frac = 0;
   Result worst_r;
@@ -786,6 +812,9 @@ int main(int argc, char** argv) {
     fill_total += r.fill;
     old_rect_total += r.old_rect;
     dropped_total += r.dropped;
+    clipped_total += r.clipped;
+    tris_total += r.tris;
+    build_total += r.build_us;
     const double frac = r.rect_area ? (double)r.false_dark / r.rect_area : 0;
     bad += r.false_dark > 20;
     if (frac > 0.5 && r.false_dark > 500) {
@@ -804,6 +833,9 @@ int main(int argc, char** argv) {
   printf("darkening pass fragments %ld (the bounding rectangles: %ld), triangles dropped by the "
          "GPU model %ld\n",
          fill_total, old_rect_total, dropped_total);
+  printf("volume build (host CPU): %.1f ms over the poses, %ld triangles cut to the guard band, %ld "
+         "triangles to the GPU\n",
+         build_total / 1000.0, clipped_total, tris_total);
   if (worst >= 0) {
     const Pose& p = poses[worst];
     printf("worst pose %d: camera (%.2f %.2f %.2f) m looking at (%.2f %.2f %.2f) m: false %d of "

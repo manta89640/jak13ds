@@ -384,11 +384,61 @@ CtrDirectBucketRenderer::CtrDirectBucketRenderer(std::string name, int id, CtrVr
 
 CtrDirectBucketRenderer::~CtrDirectBucketRenderer() = default;
 
+namespace {
+// a direct bucket's packets kept (per transfer: size, vif0, vif1, then the data) at most this big
+constexpr size_t kKeptBytesMax = 64 * 1024;
+}  // namespace
+
+bool CtrDirectBucketRenderer::same_as_kept(DmaFollower& dma, const CtrRenderState& rs) const {
+  const u8* k = m_kept_bytes.data();
+  const u8* const end = k + m_kept_bytes.size();
+  while (dma.current_tag_offset() != rs.next_bucket) {
+    auto data = dma.read_and_advance();
+    const u32 head[3] = {data.size_bytes, data.vif0(), data.vif1()};
+    if ((size_t)(end - k) < sizeof(head) + data.size_bytes || memcmp(k, head, sizeof(head)) ||
+        memcmp(k + sizeof(head), data.data, data.size_bytes)) {
+      return false;
+    }
+    k += sizeof(head) + data.size_bytes;
+    if (dma.current_tag_offset() == rs.default_regs_buffer) {
+      dma.read_and_advance();  // cnt
+      dma.read_and_advance();  // ret
+    }
+  }
+  return k == end;
+}
+
 void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   m_direct->reset_state();
   const int triangles_before = m_direct->stats().triangles;
+  // the debug text (the title's PRESS START, the HUD's counters: a packet per glyph) is mostly the
+  // same bytes frame after frame: then the same draws as last frame, the packets not read again
+  if (!m_sky) {
+    const DmaFollower start = dma;
+    if (m_kept_ok && same_as_kept(dma, rs) && m_direct->draw_kept()) {
+      m_drew = m_kept_drew;
+      return;
+    }
+    dma = start;
+  }
+  m_kept_ok = false;
+  bool keep = !m_sky;
+  if (keep) {
+    m_kept_bytes.clear();
+    m_direct->begin_keep();
+  }
   while (dma.current_tag_offset() != rs.next_bucket) {
     auto data = dma.read_and_advance();
+    if (keep) {
+      if (m_kept_bytes.size() + 12 + data.size_bytes > kKeptBytesMax) {
+        keep = false;
+      } else {
+        const u32 head[3] = {data.size_bytes, data.vif0(), data.vif1()};
+        const u8* h = (const u8*)head;
+        m_kept_bytes.insert(m_kept_bytes.end(), h, h + sizeof(head));
+        m_kept_bytes.insert(m_kept_bytes.end(), data.data, data.data + data.size_bytes);
+      }
+    }
     if (m_sky && data.vifcode1().kind == VifCode::Kind::PC_PORT &&
         data.size_bytes == CtrSky::kPacketBytes) {
       if (ctr_settings().sky_last) {
@@ -411,6 +461,11 @@ void CtrDirectBucketRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
   }
   m_direct->flush();
   m_drew = m_direct->stats().triangles != triangles_before;
+  if (!m_sky) {
+    m_direct->end_keep();
+    m_kept_ok = keep;
+    m_kept_drew = m_drew;
+  }
   if (rs.log_now) {
     const auto& st = m_direct->stats();
     lg::debug("[ctr] {}: {} packets, {} triangles, {} draws, {} skipped prims", m_name, st.packets,

@@ -87,6 +87,16 @@ class CtrDirect {
   bool has_recorded() const { return !m_rec.empty(); }
   void replay_recorded(bool depth_tested);
 
+  /*!
+   * Keep mode: the batches flush() draws are also kept (and the textures the packets named), until
+   * end_keep. draw_kept: those batches drawn again, false (nothing drawn) if a texture lookup now
+   * gives another texture or nothing was kept. For a bucket whose packets are the same bytes as
+   * when kept: the same draws without reading them again.
+   */
+  void begin_keep();
+  void end_keep();
+  bool draw_kept();
+
   struct Stats {
     int packets = 0;
     int triangles = 0;
@@ -161,6 +171,15 @@ class CtrDirect {
   bool m_record = false;
   std::vector<RecBatch> m_rec;
   std::vector<ctr_vertex> m_rec_verts;
+  // begin_keep / draw_kept
+  struct Lookup {
+    u64 tex0;
+    int handle;
+  };
+  bool m_keep = false, m_kept_valid = false;
+  std::vector<RecBatch> m_kept;
+  std::vector<ctr_vertex> m_kept_verts;
+  std::vector<Lookup> m_kept_lookups;
 
   Stats m_stats;
 };
