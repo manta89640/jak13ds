@@ -25,6 +25,7 @@ build/tools/ctr_level_converter --all out/jak1/fr3 out/jak1/c3l   # every level
 | `--tie-lod-budget-kb K` | per level | (v17) extra vertex and index data for near versions per level; default: the level's planned budget (`kTieLodBudgets` in main.cpp), else every group. |
 | `--tie-lod-min-angle A`, `--tie-lod-view-m M` | 0.002, 15 | (v17) a group gets a near version when its shape error seen from the larger of its radius and M meters is at least A radians. |
 | `--tie-lod-default-m M` | 60 | (v17) near version distance of groups without a PS2 distance (wind instances). |
+| `--no-tfrag-morph`, `--tfrag-morph-dir DIR` | Jak 1 on; the .fr3's folder | the PS2's tfrag geomorph from `<level>.tfragmorph` (the level extractor's): geometries 1 and 2 as the near tier's mid and far versions of each tfrag visibility group, geometries 0 and 1 morphing. See "The PS2's tfrag geomorph". |
 | `--no-tie-morph`, `--tie-morph`, `--tie-morph-dir DIR` | Jak 1 on, Jak II off; the .fr3's folder | the PS2's tie geomorph from `<level>.tiemorph` (the level extractor's): geometry 2 as a third version and the morph of geometries 0 and 2. `--tie-morph`: Jak II too (Haven City needs ~7x the near data at the PS2's distances: not yet). See "The PS2's tie geomorph". |
 | `--tie-far-own-colors` | off | (AI-assisted, lod-light) tie far versions keep geometry 3's own vertex colors (the PS2's) instead of colors fitted to their near version. See "Far version colors". |
 | `--no-stream` | off | (AI-assisted, v19) no near chunks: a v18 file (near versions within `kTieLodBudgets`, in the far versions' chunks). See "Near chunks (v19)" and `streaming.md`. |
@@ -760,6 +761,71 @@ geometry 0 only, unmorphed).
   before).
 - Converter log: `tie geomorph (the PS2's): N groups with a mid version (geo 2, T tris), I instances;
   C near chunks with moving vertices (...; at most R rows, r per chunk, r per draw of D draws)`.
+
+## The PS2's tfrag geomorph (ExtTfrag)
+
+The PS2 draws each tfragment with one of three geometries and moves its "interpolated" points with
+their own view depth, so no switch shows. Read from `draw-inline-array-tfrag`
+(game/mips2c/jak1_functions/tfrag.cpp), `update-subdivide-settings!` / `set-tfrag-dists!`
+(subdivide.gc) and the tfrag VU program (docs/progress-notes/jak1/scratch/tfrag.txt):
+
+- **Distances.** Per level close and far (bsp-header unk-data-4 / 5, 0: 30 / 70 m); s = (far -
+  close) / 7, m3 = close + s / 2, m2 = m3 + s, m1 = m2 + 2 s, m0 = far: 38.6 / 50 / 70 m by default.
+- **Selection** by the view depth of the fragment's sphere: base (.fr3 geometry 2) when its nearest
+  point is beyond m0, level0 (geometry 1) beyond m1, else level1 (geometry 0); a fragment entirely
+  within close goes to the near renderer (clipping, the same geometry 0).
+- **Morph** (VU L17/L18, L25/L26): each level0 point has two parents (its draw point's z and an
+  interpolation entry's draw point); at clip depth w it is at P + f0 (mid(A, B) - P), f0 going 0 ->
+  1 from m1 to m0, its color (the vertex's second quadword) the same. Level1 points do so from m2 to
+  m1, their parents (level0 points) moved first. So geometry 0 at depth >= m1 is geometry 1's
+  surface and geometry 1 at >= m0 is the base's.
+- **Edges.** In fragments that straddle a band's end, points whose parents are both beyond it snap
+  to their first parent (L33-L36; shared edge points L47-L63) instead of sitting at the midpoint:
+  the same surface; the port moves them as the others (no snap).
+- **Data.** The .fr3 has the points where they are (the PC draws geometry 0, unmoved). The level
+  extractor writes `<level>.tfragmorph` (common/custom_data/TfragMorph.h: per vertex of geometries
+  0 and 1 its offsets at the end of band 0 and band 1, its kind, the color indices its color goes
+  to; the level's close / far). Jak 1 only.
+
+In the file (Jak 1, with the .tfragmorph; `--no-tfrag-morph`: as before):
+
+- **Versions.** Each tfrag visibility group (a BVH node, up to 8 fragments) of the near tier (lod
+  tier 1) has its geometry 0, 1 and 2 as RunLod kRunLodNear / kRunLodMid / kRunLodFar runs (in
+  `ExtTfrag`'s RunLod array, not the ExtHeader's), in the cells of the group's center. A version
+  the same as the one before it (fragments whose chains are the same) is left out and the group
+  switches past it (TfragGroup mid = far, or far = FLT_MAX); a group with one geometry is always
+  drawn. The far tier (geometry 2 cells beyond lod_distance) stays as it was.
+- **Near chunks.** A near or mid version that a coarser one follows is in a near chunk (Chunk::kind
+  CHUNK_KIND_TFRAG, lod tier 1, StreamChunk cls kStreamCore, need class cells as the ties'),
+  streamed in while the camera is within need_a (each group's offset + radius + the depth its
+  last streamed version is drawn to) of the chunk's center; the far versions (and mid versions
+  without a far one, and groups with one version) stay in the level's own chunks, which so hold
+  geometry 2 where they held geometry 0. While a group's near chunk isn't there it shows its
+  coarser version (kept while in view for 1 s once the data came). Only near chunks have moving
+  vertices, so the records live in the stream arena.
+- **Records** (the chunk's mesh tail, after its vertices): `TfragMorphVertex {int8 band0[3], u8
+  color0, int8 band1[3], u8 color1, u8 m[4], u8 t[4]}` per vertex: the offsets x delta_scale in
+  the chunk's quantized units; color0 / color1 1 where the color moves in that band; m and t the
+  colors at the end of band 1 / band 0. `TfragMorphColor {u16 vertex, m[2], t[4], pad}` per moving
+  vertex (by vertex): the time of day colors whose means m and t are.
+- `ExtTfrag` (ExtHeader size >= kExtHeaderTfragSize 208, at ext_offset + 160): `{float dists[4]
+  (m2, m1, m0, 0), group_count, groups_offset, chunk_count, chunks_offset, run_lod_count,
+  run_lod_offset, color_count, colors_offset}`; `TfragGroup {float bsphere[4], mid, far, pad[2]}`
+  (the unmoved vertices of every version), `TfragChunk {chunk, run_first, records_offset (0:
+  none), float delta_scale, color_first, color_count, pad[2]}`.
+
+Runtime (`CtrLevel.cpp`): per level draw each group's version by the view depth of its nearest
+point in clip w (`tf_state`, the run loop's LOD test as the tie groups'), x detail_scale; a version
+in a near chunk only while every near chunk of the group is there (`tf_units`, unit_ok). A chunk
+with near or mid runs shown draws through `ctr_gpu_draw_mesh_tmorph`
+(platform/3ds/shaders/ctr_tfrag_morph(_fa).v.pica: f0, f1 from the vertex's own clip w, the
+uniforms tband (the bands in clip w) and tscale (delta_scale); the tail as a fourth attribute
+buffer of 4 attributes), in a pass after its list's other draws. `tf_morph_colors` writes m and t
+for the time of day groups with near or mid runs shown, when a palette of their entries moved
+(the means of the blended table entries; files without time of day: the baked palette's).
+Log: `[ctr] <level>: tfrag geomorph: N groups in C chunks, ...` at load, `[ctr] l*-tfrag: tfrag
+geomorph: groups near / mid / far ...` with the stats. Host A/B: env `CTR_TFRAG_AB=1` draws every
+group's near version on odd frames.
 
 ## Merc
 

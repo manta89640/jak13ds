@@ -812,7 +812,9 @@ PC it runs with `gk --ctr-gfx`.
 
 The level extractor writes `<level>.tiemorph` (the PS2's tie geomorph, `c3l_format.md` "The
 PS2's tie geomorph") next to each `.fr3`; the converter reads it from there (or
-`--tie-morph-dir DIR`). Levels converted without it switch their ties as before.
+`--tie-morph-dir DIR`). Levels converted without it switch their ties as before. It also writes
+`<level>.tfragmorph` (Jak 1: the PS2's tfrag geomorph, "The PS2's tfrag geomorph"), read the same
+way (`--tfrag-morph-dir DIR`); without it the tfrag is geometry 0 everywhere, as before.
 
 ```sh
 build-plat-native/tools/ctr_level_converter --all out/jak1/fr3 ../p3ds/out/jak1/c3l

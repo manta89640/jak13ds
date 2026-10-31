@@ -1502,3 +1502,39 @@ two-band morph), the morph draws on the raw command path and after the other dra
 
 (*a build with timing counters: ~+0.5 ms.) The rest of the window's 30 ms is the base, not the
 morph: the same build without it takes as long.
+
+## tfrag at the PS2's distances: its three geometries and its geomorph (tfraglod)
+
+**What the PS2 does** (`c3l_format.md` "The PS2's tfrag geomorph"): each tfragment is drawn with
+its base geometry when its sphere's nearest point is beyond m0 (70 m of view depth by default),
+level0 beyond m1 (50 m), else level1; the VU moves the interpolated points by their own view depth
+onto their parents' midpoint, so the surface never switches. The port drew level1 (geometry 0)
+out to the draw distance. Now each tfrag group (BVH node) shows the PS2's version by the view
+depth of its nearest point and every vertex morphs as the PS2's does (ctr_tfrag_morph.v.pica,
+from its own clip w). The near and mid versions stream in near chunks; the level's own chunks
+hold the far versions.
+
+**Triangles per frame** (host soft renderer, `CTR_SOFT_STATS=60`, `platform/3ds/tests/tfraglod.pad`;
+the same gk on both level sets, the runs side by side; before: `--no-tfrag-morph`):
+
+| view | level tris | tfrag tris | tfrag no pixel | draws | est. GPU (0.136 ms / 1k) |
+|---|---|---|---|---|---|
+| title flight (19 windows) | 144.3k -> 131.6k | 27.1k -> 15.7k | 8.6k -> 2.3k | 1078 -> 1145 | -1.7 ms |
+| Fire Canyon start (6) | 148.4k -> 144.6k | 6.5k -> 2.8k | 3.1k -> 0.9k | 708 -> 709 | -0.5 ms |
+| village2 start (6) | 124.2k -> 112.7k | 25.9k -> 15.1k | 11.4k -> 4.6k | 985 -> 998 | -1.6 ms |
+| Lava Tube start (6) | 34.3k -> 34.1k | 0.8k -> 0.8k | | 338 -> 337 | 0 |
+| Citadel start (6) | 23.0k -> 22.8k | 0.1k -> 0.05k | | 638 -> 625 | 0 |
+
+Lava Tube and Citadel are ties; their tfrag is mostly base-only fragments (one geometry).
+
+**Render thread** (host phases per level draw, short pad, side by side): title tod 0.30 -> 0.37 ms
+(the fast day moves every palette every frame: ~0.7k-2.2k morph colors per level draw), the
+vertices tod recolors 50-70k -> 45-60k (the far versions have fewer); village2 tod 0.141 -> 0.142,
+runs tested 6526 -> 6806, draws walked 1116 -> 1219; lod and chunks phases +0.002 ms. The title's
++67 draws are the near chunks' own draws and the far versions' runs around the near groups.
+
+**Memory** (`c3l_mem`, linear memory resident per level): village1 11555 -> 10676 KB, village2
+13388 -> 12893, Fire Canyon 10513 -> 10292, ogre 16208 -> 15727, rolling 16141 -> 15416 (the level's
+chunks hold geometry 2 where they held geometry 0); near chunk data +1.4 MB (village1); heap +0.6
+MB at most (village1's color lists). The tightest pairs (ogre+village2, rolling+village2) keep 2.6-2.9
+MB above the 3 MB reserve (1.6 before). Files +1-7%.
