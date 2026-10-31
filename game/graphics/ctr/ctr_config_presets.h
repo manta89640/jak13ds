@@ -35,7 +35,7 @@ static const ctr_cfg_kv ctr_cfg_preset_safe[] = {
     {"sky_last", "off"},         {"tex_cache_clear", "always"},
     {"c3l_read_buffer", "0"},    {"fog_stage_skip", "off"},
     {"ocean_tex_half", "off"},   {"opaque_alpha", "off"},
-    {"skip_clear", "off"},
+    {"skip_clear", "off"},       {"early_depth", "off"},
     {"tie_lod", "off"},          {"gpu_micro", "off"},         {"merc_fog", "off"},
     {"streaming", "off"}, /* (AI-assisted, streaming) */
     {"particle_fill", "off"}, /* (AI-assisted, perfv2) */

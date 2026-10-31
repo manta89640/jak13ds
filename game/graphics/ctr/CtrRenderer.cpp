@@ -919,11 +919,12 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
               : std::string());
       lg::info("[ctr] textures: {} level pools {} KB, {} in VRAM ({} KB); linear free {} KB "
                "(largest block {} KB), VRAM free {} KB; {} compact textures {} KB ({} in reserved "
-               "VRAM, {} radial); last frame: {} early depth draws, {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear",
+               "VRAM, {} radial); last frame: {} early depth draws (self-test {}), {} proctex draws, {} level draws without the fog stage, {} with the fog in the vertex alpha ({} texture unit 1 switches); {} program switches, {} with a shader upload, {} uniform vectors at switches; {} texture binds without the cache clear",
                gs.pools, gs.pool_bytes / 1024, gs.pools_in_vram, gs.pool_vram_bytes / 1024,
                gs.linear_free / 1024, gs.linear_largest / 1024, gs.vram_free / 1024,
                gs.compact_textures, gs.compact_bytes / 1024, gs.compact_in_vram,
-               gs.radial_textures, gs.early_depth_draws, gs.proctex_draws, gs.nofog_draws,
+               gs.radial_textures, gs.early_depth_draws,
+               ctr_gpu_early_depth_active() ? "passed" : "off or failed", gs.proctex_draws, gs.nofog_draws,
                gs.fog_alpha_draws, gs.unit1_toggles, gs.prog_switches, gs.prog_uploads,
                gs.prog_unif_vectors, gs.tex_clears_skipped);
       // build time by bucket renderer
@@ -1621,6 +1622,18 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   }
 #ifdef __3DS__
   ctr_boot_mark("8 GPU ready (first top screen frame drawn)");
+  if (ctr_settings().early_depth || ctr_settings().early_depth_sky) {
+    // (AI-assisted) the early depth test checked on this console before anything uses it
+    ctr_gpu_set_early_depth_params(
+        ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
+        ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
+    ctr_boot_mark("8a early depth self-test");
+    const int passed = ctr_gpu_early_depth_selftest();
+    const std::string line = fmt::format("early depth self-test: {} -> early depth {}",
+                                         ctr_gpu_early_depth_status(), passed ? "on" : "off");
+    lg::info("[ctr] {}", line);
+    ctr_boot_mark(("8a " + line).c_str());
+  }
   if (ctr_settings().pica_bench) {
     // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
     lg::info("[ctr] pica_bench: GPU microbenchmark before the game starts");
