@@ -593,10 +593,9 @@
 
 (defmethod load-game! ((this game-info) (save game-save))
   "Copy save data from a game-save to a game-info"
-  ;; (AI-assisted) 3DS: Keira or Jak, as the save says
+  ;; 3DS: always Jak, even for saves made as Keira
   (#when TARGET_3DS
-    (set! *pc-3ds-keira* (= (-> save info-int32 8) PC_3DS_KEIRA_MAGIC))
-    (if *pc-3ds-keira* (format 0 "3DS: this save plays as Keira~%")))
+    (set! *pc-3ds-keira* #f))
   (let ((save-data (the-as game-save-tag (-> save tag))))
     ;; loop over all tags
     (while (< (the-as int save-data) (the-as int (+ (+ (-> save length) 76) (the-as int save))))
