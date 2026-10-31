@@ -16,7 +16,10 @@
  * own clipping goes to a front or a back index list, with the program's own facing test. A
  * triangle with a corner outside the guard band (clip space |x|, |y| <= 2 w) or the near / far
  * plane is cut to them on the CPU, as the program cuts to its own (the PICA drops triangles far
- * off screen, and a dropped face leaves its count in the stencil). CtrShadowRenderer then draws
+ * off screen, and a dropped face leaves its count in the stencil). A triangle with all corners
+ * beyond one edge of the screen covers no pixel and is left out. A side quad whose bottom corners
+ * alone leave the band through one plane is cut along its side edges, at a point made once per
+ * bottom vertex (the same area as its two triangles cut one by one). CtrShadowRenderer then draws
  * all objects at once (ctr_gpu_clip_draw_ranges):
  *  1. the front list: stencil + 1 where a face passes the depth test, no color or depth writes
  *  2. the back list: stencil - 1 likewise (z-pass, saturating like the PC's GL_INCR / GL_DECR)
@@ -80,6 +83,7 @@ class CtrShadowVolumes {
     int no_camera = 0;        // index lists before the constants and matrix
     int capped = 0;           // (AI-assisted) left out by shadow_casters (smallest / furthest)
     int clipped = 0;          // triangles cut to the guard band (or the near / far plane)
+    int cut_planes[6] = {};   // ... per plane (outcode bits 0-5)
   };
 
   //! A new frame. The output: vertices (room for vert_cap, at most 65536), the front list (in
@@ -131,6 +135,8 @@ class CtrShadowVolumes {
   template <bool kTrace>
   bool edges(const u8* entries, int count);
   bool clip_tri(u16*& p, const u16 idx[3], u32 planes);
+  int new_vertex(const float c[4]);
+  int dual_cut(int i, int k);
   void make_clip_matrix();
   // (AI-assisted) "play as Keira" (CtrKeiraRig.h): Jak's shadow is replaced by hers. An object is
   // Jak's when its vertices' center is within kKeiraMatch of her hulls' center; its light and
@@ -165,7 +171,10 @@ class CtrShadowVolumes {
   bool m_obj_any = false;          // it has triangles
   int m_obj_base = 0;              // output index of T[0] (D[0]: m_obj_base + m_ntop)
   int m_obj_f0 = 0, m_obj_b0 = 0;  // the lists' lengths before it (to take it back out)
-  u8 m_oc[2 * 170];                // its vertices' outcodes (T, then D: 170 each at most)
+  u16 m_oc[2 * 170];               // its vertices' outcodes (T, then D: 170 each at most)
+  // per bottom vertex: where its edge from the top meets the guard band's plane (side quads that
+  // leave the band through their bottom edge alone; -1 not made, -2 can't be used)
+  int m_dcut[170];
 
   // output
   ctr_clip_vertex* m_out = nullptr;

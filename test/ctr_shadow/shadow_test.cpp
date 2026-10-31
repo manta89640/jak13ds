@@ -699,14 +699,18 @@ void run_case(const char* name, const Camera& cam, const std::vector<Object>& ob
   }
   // every index in range, every corner inside the guard band and the near / far planes (what
   // the decoder cut), the lists at least as long as the trace's uncut triangles that are inside
+  // (and not all beyond one edge of the screen: no pixel, left out)
   int nf = 0, nb = 0;
   for (const auto& p : trace) {
     bool cut = false;
+    u32 off = 0xf;
     for (int j = 0; j < p.n; j++) {
       const ctr_clip_vertex& v = verts[p.v[j]];
       cut |= !(std::abs(v.x) <= 2.f * v.w && std::abs(v.y) <= 2.f * v.w && std::abs(v.z) <= v.w);
+      off &= (v.x > v.w ? 1u : 0u) | (v.x < -v.w ? 2u : 0u) | (v.y > v.w ? 4u : 0u) |
+             (v.y < -v.w ? 8u : 0u);
     }
-    if (!cut) {
+    if (!cut && !off) {
       (p.front ? nf : nb) += 3 * (p.n - 2);
     }
   }

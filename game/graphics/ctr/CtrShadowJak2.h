@@ -9,7 +9,8 @@
  * others take 1 away (depth test, no color or depth writes), then the front faces again darken
  * where the stencil isn't 0, by the shadow color (multiplied, like Jak 1's CtrShadow; the PC
  * subtracts). Faces with a corner outside the guard band (clip space |x|, |y| <= 2 w) or the
- * near / far plane are cut to them on the CPU. The same GPU passes as CtrShadow
+ * near / far plane are cut to them on the CPU; faces beyond one edge of the screen are left out
+ * (no pixel). The same GPU passes as CtrShadow
  * (ctr_gpu_clip_reserve / clip_draw_ranges).
  */
 
@@ -44,7 +45,7 @@ class CtrShadowJak2Renderer : public CtrBucketRenderer {
   int m_src_count[2] = {0, 0};
   int m_base[2] = {-1, -1};
   int m_nf = 0, m_nb = 0;  // front indices (in m_indices), back indices (in m_back)
-  std::vector<u8> m_oc;  // the outcodes of m_verts (CtrShadowJak2.cpp outcode)
+  std::vector<u16> m_oc;  // the outcodes of m_verts (CtrShadowJak2.cpp outcode)
   ctr_clip_vertex* m_verts = nullptr;
   u16* m_indices = nullptr;
   bool m_reserved = false, m_full = false;

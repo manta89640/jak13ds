@@ -81,7 +81,7 @@ if [ "$PIXELS" = 1 ]; then
   PX=(-DTOD_PIXELS -DOPENGOAL_SMALL_MEMORY=1 -I"$ROOT/third-party" -I"$ROOT/third-party/SDL/include"
       "$ROOT/game/graphics/ctr/ctr_gpu_soft.cpp" "$HERE/tod_pixels.cpp")
 fi
-"$CXX" -std=gnu++20 -O2 "${INC[@]}" "${SPLIT[@]}" "$HERE/tod_diff.cpp" "${PX[@]}" -o "$OUT/tod_diff"
+"$CXX" -std=gnu++20 -O2 "${INC[@]}" "${SPLIT[@]}" "$HERE/tod_diff.cpp" ${PX[@]+"${PX[@]}"} -o "$OUT/tod_diff"
 
 LEVEL="$OUT/$(basename "${C3L%.c3l}").tod"
 "$OUT/tod_extract" "$C3L" "$LEVEL"

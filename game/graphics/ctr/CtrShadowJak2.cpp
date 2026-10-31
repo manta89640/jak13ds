@@ -87,13 +87,19 @@ inline Clip clip_dists(const float* m, const float* p) {
   const float g = kGuard * w;
   return Clip{{g - x, g + x, g - y, g + y, w - z, w + z}};
 }
-//! the planes p is outside of: bits 0-3 the guard band (+x, -x, +y, -y), 4 near, 5 far
-inline u8 outcode(const Clip& c) {
-  u32 o = 0;
-  for (int k = 0; k < 6; k++) {
-    o |= sign_bit(c.d[k]) << k;
-  }
-  return (u8)o;
+//! the planes camera space p is outside of: bits 0-3 the guard band (+x, -x, +y, -y), 4 near,
+//! 5 far (the planes a face is cut to), bits 8-11 the screen's edges (+x, -x, +y, -y)
+constexpr u32 kCutPlanes = 0x3f;
+inline u16 outcode(const float* m, const float* p) {
+  const float x = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
+  const float y = m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7];
+  const float z = m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11];
+  const float w = m[12] * p[0] + m[13] * p[1] + m[14] * p[2] + m[15];
+  const float g = kGuard * w;
+  return (u16)(sign_bit(g - x) | (sign_bit(g + x) << 1) | (sign_bit(g - y) << 2) |
+               (sign_bit(g + y) << 3) | (sign_bit(w - z) << 4) | (sign_bit(w + z) << 5) |
+               (sign_bit(w - x) << 8) | (sign_bit(w + x) << 9) | (sign_bit(w - y) << 10) |
+               (sign_bit(w + y) << 11));
 }
 }  // namespace
 
@@ -118,7 +124,7 @@ int CtrShadowJak2Renderer::upload_base(int k) {
     v->w = 1.f;
     v->s = v->t = 0.f;
     v->r = v->g = v->b = v->a = 0;
-    m_oc[m_nv + i] = outcode(clip_dists(m_clip, p));
+    m_oc[m_nv + i] = outcode(m_clip, p);
   }
   m_base[k] = m_nv;
   m_nv += n;
@@ -136,7 +142,11 @@ bool CtrShadowJak2Renderer::index_room(int count) {
 void CtrShadowJak2Renderer::add_face(const u16 idx[3], bool away) {
   u16* out = away ? m_back.data() + m_nb : m_indices + m_nf;
   const u32 o0 = m_oc[idx[0]], o1 = m_oc[idx[1]], o2 = m_oc[idx[2]];
-  if (!(o0 | o1 | o2)) {
+  const u32 any = o0 | o1 | o2;
+  if (o0 & o1 & o2) {
+    return;  // (off screen or outside a plane: no pixel)
+  }
+  if (!(any & kCutPlanes)) {
     if (m_nf + m_nb + 3 > m_cap_indices) {
       m_stats.dropped++;  // (the cut faces before took more room than counted)
       return;
@@ -147,9 +157,6 @@ void CtrShadowJak2Renderer::add_face(const u16 idx[3], bool away) {
     (away ? m_nb : m_nf) += 3;
     return;
   }
-  if (o0 & o1 & o2) {
-    return;  // (all of it outside one plane)
-  }
   // cut to the planes in camera space (clip space is linear in it): the corners that stay keep
   // their vertices, the new ones go after the frame's vertices
   struct P {
@@ -157,75 +164,74 @@ void CtrShadowJak2Renderer::add_face(const u16 idx[3], bool away) {
     Clip c;
     int index;  // m_verts index, -1: new
   };
-  P poly[9], tmp[9];
+  P buf[2][9];
+  P* in = buf[0];
+  P* cut = buf[1];
   int n = 3;
   for (int k = 0; k < 3; k++) {
     const ctr_clip_vertex& v = m_verts[idx[k]];
-    poly[k].p[0] = v.x;
-    poly[k].p[1] = v.y;
-    poly[k].p[2] = v.z;
-    poly[k].c = clip_dists(m_clip, poly[k].p);
-    poly[k].index = idx[k];
+    in[k].p[0] = v.x;
+    in[k].p[1] = v.y;
+    in[k].p[2] = v.z;
+    in[k].c = clip_dists(m_clip, in[k].p);
+    in[k].index = idx[k];
   }
-  const u32 planes = o0 | o1 | o2;
-  for (int k = 0; k < 6; k++) {
-    if (!(planes & (1u << k))) {
-      continue;
-    }
+  for (u32 pl = any & kCutPlanes; pl; pl &= pl - 1) {
+    const int k = __builtin_ctz(pl);
     int m = 0;
     for (int i = 0; i < n; i++) {
-      const P& a = poly[i];
-      const P& b = poly[i + 1 == n ? 0 : i + 1];
+      const P& a = in[i];
+      const P& b = in[i + 1 == n ? 0 : i + 1];
       const bool ina = a.c.d[k] >= 0, inb = b.c.d[k] >= 0;
       if (ina) {
-        tmp[m++] = a;
+        cut[m++] = a;
       }
       if (ina != inb) {
         const P& pi = ina ? a : b;
         const P& po = ina ? b : a;
         const float s = pi.c.d[k] / (pi.c.d[k] - po.c.d[k]);
-        P q;
+        P& q = cut[m++];
         for (int j = 0; j < 3; j++) {
           q.p[j] = pi.p[j] + (po.p[j] - pi.p[j]) * s;
         }
-        for (int j = 0; j < 6; j++) {
+        // (the planes after this one only)
+        for (int j = k + 1; j < 6; j++) {
           q.c.d[j] = pi.c.d[j] + (po.c.d[j] - pi.c.d[j]) * s;
         }
         q.index = -1;
-        tmp[m++] = q;
       }
     }
     n = m;
     if (n < 3) {
       return;
     }
-    std::copy(tmp, tmp + n, poly);
+    std::swap(in, cut);
   }
   int fresh = 0;
   for (int i = 0; i < n; i++) {
-    fresh += poly[i].index < 0;
+    fresh += in[i].index < 0;
   }
   if (m_nv + fresh > m_cap_verts || !index_room(3 * (n - 2))) {
     return;
   }
   for (int i = 0; i < n; i++) {
-    if (poly[i].index < 0) {
+    if (in[i].index < 0) {
       ctr_clip_vertex& v = m_verts[m_nv];
-      v.x = poly[i].p[0];
-      v.y = poly[i].p[1];
-      v.z = poly[i].p[2];
+      v.x = in[i].p[0];
+      v.y = in[i].p[1];
+      v.z = in[i].p[2];
       v.w = 1.f;
       v.s = v.t = 0.f;
       v.r = v.g = v.b = v.a = 0;
       m_oc.push_back(0);
-      poly[i].index = m_nv++;
+      in[i].index = m_nv++;
     }
   }
   out = away ? m_back.data() + m_nb : m_indices + m_nf;
   for (int i = 1; i + 1 < n; i++) {
-    out[0] = (u16)poly[0].index;
-    out[1] = (u16)poly[i].index;
-    out[2] = (u16)poly[i + 1].index;
+    out[0] = (u16)in[0].index;
+    out[1] = (u16)in[i].index;
+    out[2] = (u16)in[i + 1].index;
     out += 3;
   }
   (away ? m_nb : m_nf) += 3 * (n - 2);
