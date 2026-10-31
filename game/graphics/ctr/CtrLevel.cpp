@@ -4875,8 +4875,8 @@ void build_draw_order(CtrLevelData* out) {
     set_opaque_alpha(&st, d, ctr_settings().opaque_alpha, min_alpha);
     out->draw_states.push_back(st);
   }
-  // sort keys: the state without its texture first, then the texture. A texture change with the
-  // same state only binds the texture; a state change runs the backend's whole state path
+  // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
+  // the state (numbered per level)
   std::vector<ctr_draw_state> states;
   // (AI-assisted) only needed here: not kept in the level (10-35 KB of the heap per level)
   std::vector<u32> draw_sort_keys(out->draws.size());
@@ -4892,34 +4892,12 @@ void build_draw_order(CtrLevelData* out) {
     if (id == states.size()) {
       states.push_back(st);
     }
-    draw_sort_keys[di] = ((id & 0xffff) << 16) | ((u32)(tex + 1) & 0xffff);
+    draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
     // blending, or drawn over what's there without writing depth (decals): keep the order.
     // (AI-assisted) v15 kDrawBlendDropped draws keep their place too (moving them before the
     // blended draws drawn ahead of them could change what those pixels show)
     draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite ||
                        (out->draws[di].kind & c3l::kDrawBlendDropped);
-  }
-  {
-    // the states numbered in an order that puts those differing only in what the texture bind
-    // reads (filter, wrap, mip bits, atlas scale) next to each other
-    auto rank = [](const ctr_draw_state& a) {
-      constexpr u8 kBindTcc = (u8)CTR_TCC_ST_ATLAS | (u8)CTR_TCC_TRILINEAR | (u8)CTR_TCC_MIP_MAX1;
-      return std::make_tuple((u8)(a.tcc & ~kBindTcc), a.decal, a.blend, a.fix, a.atest, a.aref,
-                             a.ztest, a.zwrite, a.flags, a.tcc, a.filter, a.clamp_s, a.clamp_t);
-    };
-    std::vector<u32> order(states.size());
-    for (u32 i = 0; i < order.size(); i++) {
-      order[i] = i;
-    }
-    std::sort(order.begin(), order.end(),
-              [&](u32 a, u32 b) { return rank(states[a]) < rank(states[b]); });
-    std::vector<u32> new_id(states.size());
-    for (u32 i = 0; i < order.size(); i++) {
-      new_id[order[i]] = i;
-    }
-    for (auto& k : draw_sort_keys) {
-      k = (new_id[k >> 16] << 16) | (k & 0xffff);
-    }
   }
   // drawing order, made once (see sorted_draws)
   out->draw_chunk.assign(out->draws.size(), 0);
