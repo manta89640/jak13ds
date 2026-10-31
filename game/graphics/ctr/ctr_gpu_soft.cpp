@@ -783,21 +783,27 @@ void raster_triangle(const ctr_draw_state& st,
     }
   }
 }
+}  // namespace
+// (CtrLevel.cpp, host) which level draw a culled back face in front came from
+void ctr_level_probe_explain(const void* state, double px);
+namespace {
 // env CTR_SOFT_CULL_PROBE: the level's culled back faces (the screen triangles),
 // tested at the frame's end against its depth: a pixel where one of them is in front of what was
 // drawn is one that drawing both sides (the PS2) would have shown ("[softcull]" line per 60 frames)
 struct CullProbe {
   std::vector<std::array<float, 9>> tris;
+  std::vector<const void*> states;  // each tri's draw state (attribution)
   double px = 0, front = 0, frames = 0, worst = 0;
 } s_probe;
 bool cull_probe_on() {
   static const bool on = getenv("CTR_SOFT_CULL_PROBE") != nullptr;
   return on;
 }
-void cull_probe_add(const ctr_vertex* tri) {
+void cull_probe_add(const ctr_vertex* tri, const void* state) {
   if (!cull_probe_on() || s_target.rt) {
     return;
   }
+  s_probe.states.push_back(state);
   std::array<float, 9> t;
   for (int k = 0; k < 3; k++) {
     t[3 * k] = s_target.ox + tri[k].x * s_target.sx;
@@ -811,7 +817,9 @@ void cull_probe_frame() {
     return;
   }
   double front = 0;
-  for (const auto& t : s_probe.tris) {
+  std::map<const void*, double> by_state;
+  for (size_t ti = 0; ti < s_probe.tris.size(); ti++) {
+    const auto& t = s_probe.tris[ti];
     float area = (t[3] - t[0]) * (t[7] - t[1]) - (t[6] - t[0]) * (t[4] - t[1]);
     if (std::abs(area) < 1e-6f || (t[2] < 0 && t[5] < 0 && t[8] < 0) ||
         (t[2] > 1 && t[5] > 1 && t[8] > 1)) {
@@ -838,11 +846,24 @@ void cull_probe_frame() {
         // (GS z: larger is nearer) clearly in front of the frame's surface there
         if (z > g_soft.depth[px + py * kW] + 1e-4f) {
           front++;
+          by_state[s_probe.states[ti]]++;
         }
       }
     }
   }
+  if (front >= 200) {
+    // (host, the level draws' attribution: ctr_level_probe_explain)
+    std::vector<std::pair<double, const void*>> top;
+    for (const auto& [st, n] : by_state) {
+      top.push_back({n, st});
+    }
+    std::sort(top.rbegin(), top.rend());
+    for (size_t i = 0; i < top.size() && i < 3; i++) {
+      ctr_level_probe_explain(top[i].second, top[i].first);
+    }
+  }
   s_probe.tris.clear();
+  s_probe.states.clear();
   s_probe.front += front;
   s_probe.worst = std::max(s_probe.worst, front);
   if (++s_probe.frames >= 60) {
@@ -2067,6 +2088,92 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
                  index_count);
 }
 
+// CTR_SOFT_CULL_PROBE: a level triangle reaching behind the camera, clipped at the near plane as
+// the GPU does (the default drops it: from inside a tube its walls would go and show what's behind)
+static void near_clip_probe(const float clip[16],
+                            const SoftVerts& verts,
+                            const uint16_t* idx,
+                            float st_scale,
+                            bool fogged,
+                            const ctr_draw_state* state) {
+  struct CV {
+    float c[4], s, t, col[4];
+  };
+  CV in[3];
+  for (int k = 0; k < 3; k++) {
+    const uint8_t* src = verts.p(idx[k]);
+    const uint8_t* col = verts.c(idx[k]);
+    int16_t pos[3], st[2];
+    memcpy(pos, src, 6);
+    memcpy(st, src + 8, 4);
+    for (int r = 0; r < 4; r++) {
+      in[k].c[r] = clip[4 * r] * pos[0] + clip[4 * r + 1] * pos[1] + clip[4 * r + 2] * pos[2] +
+                   clip[4 * r + 3];
+    }
+    in[k].s = st[0] * st_scale;
+    in[k].t = st[1] * st_scale;
+    for (int j = 0; j < 4; j++) {
+      in[k].col[j] = col[j];
+    }
+  }
+  // keep w - z >= 0 (GS z <= 1: beyond the near plane) and w > 0
+  auto dist = [](const CV& v) { return std::min(v.c[3] - v.c[2], v.c[3] - 1e-3f); };
+  CV poly[4];
+  int n = 0;
+  for (int k = 0; k < 3; k++) {
+    const CV& a = in[k];
+    const CV& b = in[(k + 1) % 3];
+    const float da = dist(a), db = dist(b);
+    if (da >= 0) {
+      poly[n++] = a;
+    }
+    if ((da >= 0) != (db >= 0) && n < 4) {
+      const float f = da / (da - db);
+      CV m;
+      for (int r = 0; r < 4; r++) {
+        m.c[r] = a.c[r] + f * (b.c[r] - a.c[r]);
+        m.col[r] = a.col[r] + f * (b.col[r] - a.col[r]);
+      }
+      m.s = a.s + f * (b.s - a.s);
+      m.t = a.t + f * (b.t - a.t);
+      poly[n++] = m;
+    }
+  }
+  for (int f0 = 1; f0 + 1 < n; f0++) {
+    const CV* v3[3] = {&poly[0], &poly[f0], &poly[f0 + 1]};
+    ctr_vertex tri[3];
+    float fog[3], tex_q[3];
+    for (int k = 0; k < 3; k++) {
+      const CV& v = *v3[k];
+      fog[k] = fogged ? mesh_fog(v.c[3]) : 0.f;
+      tex_q[k] = 1.f / v.c[3];
+      tri[k].x = v.c[0] / v.c[3];
+      tri[k].y = v.c[1] / v.c[3];
+      tri[k].z = (1.f + v.c[2] / v.c[3]) * 0.5f;
+      tri[k].s = v.s;
+      tri[k].t = v.t;
+      tri[k].r = (uint8_t)v.col[0];
+      tri[k].g = (uint8_t)v.col[1];
+      tri[k].b = (uint8_t)v.col[2];
+      tri[k].a = (uint8_t)v.col[3];
+    }
+    const float area = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
+                       (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
+    const bool back = g_soft_cull_flip ? area > 0 : area < 0;
+    if (state && (state->tcc & CTR_TCC_CULL_BACK) && g_soft_cull_enable && back) {
+      cull_probe_add(tri, state);
+      continue;
+    }
+    for (int k = 0; k < 3; k++) {
+      tri[k].s *= tex_q[k];
+      tri[k].t *= tex_q[k];
+    }
+    if (state) {
+      raster_triangle(*state, tri, true, fog, nullptr, tex_q, true);
+    }
+  }
+}
+
 // (AI-assisted) the triangles of ctr_gpu_draw_mesh / ctr_gpu_draw_mesh_stream
 static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], const SoftVerts& verts,
                            const uint16_t* indices, int first_index, int index_count) {
@@ -2107,6 +2214,9 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       }
       if (c[3] < 1e-3f) {
         ok = false;  // crude near clipping: drop the triangle
+        if (cull_probe_on()) {
+          near_clip_probe(clip, verts, indices + i, st_scale, fogged, state);  // (clipped there)
+        }
         break;
       }
       fog[k] = fogged ? mesh_fog(c[3]) : 0.f;
@@ -2135,6 +2245,10 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       if (ss) softstats::tri_class[softstats::TC_NEAR]++;
       continue;
     }
+    if (cull_probe_on() && (tri[0].z > 1 || tri[1].z > 1 || tri[2].z > 1)) {
+      near_clip_probe(clip, verts, indices + i, st_scale, fogged, state);
+      continue;
+    }
     const float area = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
                        (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
     const bool back = g_soft_cull_flip ? area > 0 : area < 0;
@@ -2142,7 +2256,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
     if (state && (state->tcc & CTR_TCC_CULL_BACK) && g_soft_cull_enable) {
       if (back) {
         if (ss) softstats::tri_class[softstats::TC_CULLED]++;
-        cull_probe_add(tri);
+        cull_probe_add(tri, state);
         continue;
       }
     }

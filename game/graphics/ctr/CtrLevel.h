@@ -411,6 +411,7 @@ struct CtrLevelData {
     // (AI-assisted, lodnear) this frame (stream_update): one of its groups is within its distance
     // by shape error (its far version would show more than tie_lod_px), not only by the PS2 floor
     bool urgent = false;
+    bool tf = false;  // a tfrag geomorph near chunk (c3l::ExtTfrag): wanted with or without tie_lod
     // its bound with the factor k: within this of its sphere's center one of its groups is near
     float bound(float k, float floor_k, float min_e = 0.f) const {
       return need_a + k * std::max(std::max(need_e, need_d * floor_k), min_e);
@@ -450,6 +451,11 @@ struct CtrLevelData {
   float stream_k = 0.f;   // the last draw's tie LOD factor (a group is near within its error x
                           // this + its radius; 0: no near versions)
   u64 stream_frame = 0;   // the last draw's frame
+  double dist_warn_ms = 0;  // the last "read back by distance" shortage line
+  // the tfrag geomorph's units' factor while stream_k is 0 (tie_lod off, no tie LOD groups): 1 while
+  // its versions are drawn, else 0
+  float stream_tf_k = 0.f;
+  float unit_k(const StreamUnit& su, float k) const { return su.tf && k <= 0 ? stream_tf_k : k; }
   float stream_k_hi = 0.f;  // its recent largest (decaying 1% a frame): the scheduler's headroom
                             // for a camera that zooms (the factor follows the focal length)
   u32 stream_resident = 0;  // bytes of the units there
@@ -499,6 +505,7 @@ struct CtrLevelData {
   // c3l::kDrawCullCond draws (c3l::ExtCullCond): each one's planes in cond_planes
   struct CondDraw {
     u32 draw, first, count;
+    u32 boxes;  // c3l::CullCondBox after its planes in cond_planes (two records each)
   };
   std::vector<CondDraw> cond_draws;
   std::vector<c3l::CullCondPlane> cond_planes;
@@ -901,6 +908,7 @@ class CtrLevels {
   struct ShareTex {
     int handle = -1, mask = -1;
     u8 min_alpha = 0;
+    u64 desc = 0;  // c3l::texture_share_desc
   };
   struct ShareGroup {
     u32 users = 0;
@@ -985,6 +993,9 @@ class CtrLevels {
   std::condition_variable m_cv;
   std::deque<Job> m_queue;
   std::vector<Done> m_done;
+  // (render thread) the buffer m_done gets next (process_pending_loads): room for kDoneRoom
+  std::vector<Done> m_done_room;
+  static constexpr size_t kDoneRoom = 16;
   std::string m_loading;  // the level the loader works on ("" if none)
   bool m_loading_prefetch = false;  // ... for a prefetch (cancelled when the game loads another)
   std::atomic<bool> m_cancel{false};  // m_loading is no longer wanted: stop early
@@ -1021,6 +1032,12 @@ class CtrLevels {
   c3l::Reader::Buffers m_load_stream_bufs;
   bool m_load_stream_tried = false, m_load_stream_ok = false;
   u32 m_load_streams_served = 0;
+  // (loader thread) the last "meshes not made" line per level and parts job kind
+  std::unordered_map<std::string, double> m_parts_log_ms;
+  static constexpr double kPartsLogMs = 10000;
+  // the level load's start and the time of the stream jobs it served (kServeShare of it at most)
+  double m_load_t0_ms = 0, m_load_served_ms = 0;
+  static constexpr double kServeShare = 0.25;
   std::atomic<bool> m_stream_urgent_queued{false};
   void take_stream(Done& d, u64 frame);
   void stream_evict(CtrLevelData& lev, u32 unit);
@@ -1263,7 +1280,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<float> m_morph_rows;
   std::vector<s32> m_morph_row_of;
   std::vector<u32> m_morph_row_id;
-  u32 m_morph_rows_id = 0;
   void draw_wind_calls(const CtrLevelData& lev);
   void draw_env_calls(std::vector<EnvCall>& calls);
   CtrLevels* m_levels;
@@ -1338,7 +1354,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   float m_tf_band[4] = {0, 0, 0, 0};
   std::vector<float> m_tf_unif;
   std::vector<u32> m_tf_unif_id;
-  u32 m_tf_unif_ids = 0;
   u64 m_tf_groups[3] = {0, 0, 0};
   u64 m_tf_tris[2] = {0, 0};
   u64 m_tf_colors_written = 0, m_tf_frames = 0;

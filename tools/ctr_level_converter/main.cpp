@@ -293,7 +293,7 @@ struct SrcVertex {
 // offsets in the chunk's quantized units
 struct MorphRec {
   u32 key = 0;
-  s16 d[6] = {0, 0, 0, 0, 0, 0};
+  s32 d[6] = {0, 0, 0, 0, 0, 0};  // (32 bits: a fine grid can't hold every offset in 16)
   bool operator==(const MorphRec& o) const {
     return key == o.key && memcmp(d, o.d, sizeof(d)) == 0;
   }
@@ -1332,12 +1332,22 @@ struct Converter {
   // Open parts sealed by contact (seals_part): the end of the tier 0 tfrag triangles, the tie
   // ranges oriented once every tie is in (orient_all), the triangles of such parts
   size_t tfrag0_end = 0;
+  // the end of the tfrag geomorph's other versions (mid, far: from tfrag0_end on)
+  size_t tfrag_ver_end = 0;
   std::vector<std::pair<size_t, size_t>> orient_ranges;
   size_t orient_sealed_tris = 0;
   size_t orient_cond_tris = 0;
-  // the planar openings of the surfaces marked kDrawCullCond (SrcTri::cond indexes them)
+  size_t orient_wide_unsealed = 0;
+  // the planar openings of the surfaces marked kDrawCullCond (SrcTri::cond indexes them) and each
+  // surface's box (lo xyz, hi xyz; the morphs' reach in it): from inside it the walls show
   std::vector<std::vector<CondPlane>> cond_sets;
-  static constexpr double kCondMargin = 0.1 * 4096.0, kCondFlat = 0.25 * 4096.0;
+  std::vector<std::array<float, 6>> cond_boxes;
+  // kCondFlat: an opening's corners within this of its plane (its fan, the closed surface's
+  // virtual wall, then leans so little that a view through it at a grazing angle sees at most
+  // that thin a band); kSealWide: a wider opening is sealed by contact only where the geometry
+  // covers it (covers_part)
+  static constexpr double kCondMargin = 0.1 * 4096.0, kCondFlat = 0.015 * 4096.0;
+  static constexpr double kSealWide = 0.5 * 4096.0;
   // an open part's edge is sealed where it lies within kSealDist of other opaque geometry that is
   // drawn wherever the surface is
   static constexpr double kSealDist = 0.05 * 4096.0;
@@ -1382,7 +1392,7 @@ struct Converter {
       mode.as_int() = draw_keys[key].mode;
       return !mode.get_ab_enable() && key_cullable(key);
     };
-    for (size_t i = 0; i < tfrag0_end; i++) {
+    for (size_t i = 0; i < tfrag_ver_end; i++) {
       if (opaque(tris[i].draw_key)) {
         add(i);
       }
@@ -1465,6 +1475,7 @@ struct Converter {
       }
     }
     std::unordered_map<u32, u8> versions;  // LOD group -> versions touched (bit per version)
+    std::unordered_map<u32, u8> tversions;  // tfrag geomorph group -> versions touched
     std::vector<u32> seen;
     for (size_t ki = 0; ki < keys.size(); ki++) {
       auto it = seal_cells.find(keys[ki]);
@@ -1473,7 +1484,8 @@ struct Converter {
       }
       for (u32 t : it->second) {
         const SrcTri& c = tris[t];
-        if (t >= tfrag0_end) {
+        const bool tfrag = t < tfrag_ver_end;
+        if (!tfrag) {
           const bool drawn_as_far = c.detail == 0 || c.detail == shell.detail ||
                                     (shell.detail == 1 && c.detail == 2);
           const bool other_version = c.lod != c3l::kRunLodAlways &&
@@ -1529,11 +1541,32 @@ struct Converter {
         if (!hit) {
           continue;
         }
-        if (t < tfrag0_end || c.lod == c3l::kRunLodAlways || c.lod_group == shell.lod_group) {
+        // a group with versions seals where each version it has touches (one of them is drawn;
+        // the morphs move between them)
+        if (tfrag) {
+          const u32 g = c.tgroup;
+          if (c.tlod == 0 || g >= tgroup_mid.size()) {
+            return true;
+          }
+          const u8 need = (u8)((1u << c3l::kRunLodNear) |
+                               (tgroup_mid[g] < tgroup_far[g] ? 1u << c3l::kRunLodMid : 0u) |
+                               (tgroup_far[g] < std::numeric_limits<float>::max()
+                                    ? 1u << c3l::kRunLodFar
+                                    : 0u));
+          const u8 tv = (tversions[g] |= (u8)(1u << c.tlod));
+          if ((tv & need) == need) {
+            return true;
+          }
+          continue;
+        }
+        if (c.lod == c3l::kRunLodAlways || c.lod_group == shell.lod_group) {
           return true;
         }
+        const bool mid = c.lod_group < lod_group_mid.size() && lod_group_mid[c.lod_group] > 0;
+        const u8 need = (u8)((1u << c3l::kRunLodNear) | (1u << c3l::kRunLodFar) |
+                             (mid ? 1u << c3l::kRunLodMid : 0u));
         const u8 vv = (versions[c.lod_group] |= (u8)(1u << c.lod));
-        if ((vv & (1u << c3l::kRunLodNear)) && (vv & (1u << c3l::kRunLodFar))) {
+        if ((vv & need) == need) {
           return true;
         }
       }
@@ -1607,6 +1640,111 @@ struct Converter {
                                          a[2] + f * (b[2] - a[2])};
         if (!sealed_at(p, inner, own, tris[own[0]])) {
           return false;
+        }
+      }
+    }
+    return true;
+  }
+  // an open part's edges (pe: bedges indices) each within kSlit of another of its edges that
+  // doesn't share a corner with it: a crack between two unwelded sides, seen through as a line
+  static constexpr double kSlit = 0.01 * 4096.0;
+  static double seg_dist2(const std::array<float, 3>& p1, const std::array<float, 3>& q1,
+                          const std::array<float, 3>& p2, const std::array<float, 3>& q2) {
+    // (Ericson, Real-Time Collision Detection 5.1.9)
+    double d1[3], d2[3], r[3];
+    for (int k = 0; k < 3; k++) {
+      d1[k] = (double)q1[k] - p1[k];
+      d2[k] = (double)q2[k] - p2[k];
+      r[k] = (double)p1[k] - p2[k];
+    }
+    auto dot = [](const double* x, const double* y) { return x[0] * y[0] + x[1] * y[1] + x[2] * y[2]; };
+    const double a = dot(d1, d1), e = dot(d2, d2), f = dot(d2, r);
+    double s = 0, t = 0;
+    if (a <= 1e-12 && e <= 1e-12) {
+      s = t = 0;
+    } else if (a <= 1e-12) {
+      t = std::clamp(f / e, 0.0, 1.0);
+    } else {
+      const double c = dot(d1, r);
+      if (e <= 1e-12) {
+        s = std::clamp(-c / a, 0.0, 1.0);
+      } else {
+        const double b = dot(d1, d2), den = a * e - b * b;
+        s = den > 1e-12 ? std::clamp((b * f - c * e) / den, 0.0, 1.0) : 0.0;
+        t = (b * s + f) / e;
+        if (t < 0) {
+          t = 0;
+          s = std::clamp(-c / a, 0.0, 1.0);
+        } else if (t > 1) {
+          t = 1;
+          s = std::clamp((b - c) / a, 0.0, 1.0);
+        }
+      }
+    }
+    double d2s = 0;
+    for (int k = 0; k < 3; k++) {
+      const double v = (p1[k] + s * d1[k]) - (p2[k] + t * d2[k]);
+      d2s += v * v;
+    }
+    return d2s;
+  }
+  static bool slit_part(const std::vector<size_t>& pe,
+                        const std::vector<std::array<u32, 2>>& bedges,
+                        const std::vector<std::array<float, 3>>& pos) {
+    if (pe.size() < 4) {
+      return false;
+    }
+    for (size_t i : pe) {
+      bool near = false;
+      for (size_t j : pe) {
+        const auto &a = bedges[i], &b = bedges[j];
+        if (a[0] == b[0] || a[0] == b[1] || a[1] == b[0] || a[1] == b[1]) {
+          continue;
+        }
+        if (seg_dist2(pos[a[0]], pos[a[1]], pos[b[0]], pos[b[1]]) <= kSlit * kSlit) {
+          near = true;
+          break;
+        }
+      }
+      if (!near) {
+        return false;
+      }
+    }
+    return true;
+  }
+  // a wide open part sealed by contact must also be covered: its closing fan (its edges to its
+  // center, sampled every kSealStep, the center first) within kSealDist of geometry drawn
+  // whenever the surface is
+  bool covers_part(const std::vector<size_t>& pe,
+                   const std::vector<std::array<u32, 2>>& bedges,
+                   const std::vector<std::array<float, 3>>& pos,
+                   const double* cen,
+                   const std::vector<u32>& own) {
+    const SrcTri& shell = tris[own[0]];
+    const std::array<double, 3> c = {cen[0], cen[1], cen[2]};
+    if (!sealed_at(c, c, own, shell)) {
+      return false;
+    }
+    for (size_t ei : pe) {
+      const auto& pa = pos[bedges[ei][0]];
+      const auto& pb = pos[bedges[ei][1]];
+      double ab[3], ac[3], l = 0;
+      for (int k = 0; k < 3; k++) {
+        ab[k] = (double)pb[k] - pa[k];
+        ac[k] = c[k] - pa[k];
+      }
+      l = std::max(std::sqrt(ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]),
+                   std::sqrt(ac[0] * ac[0] + ac[1] * ac[1] + ac[2] * ac[2]));
+      const int n = std::max(1, (int)std::ceil(l / kSealStep));
+      for (int i = 0; i <= n; i++) {
+        for (int j = 0; i + j <= n; j++) {
+          const double u = (double)i / n, v = (double)j / n;
+          const std::array<double, 3> p = {pa[0] + u * ab[0] + v * ac[0],
+                                           pa[1] + u * ab[1] + v * ac[1],
+                                           pa[2] + u * ab[2] + v * ac[2]};
+          if (!sealed_at(p, p, own, shell)) {
+            return false;
+          }
         }
       }
     }
@@ -1858,10 +1996,27 @@ struct Converter {
           for (double& c : pt.cen) {
             c /= (double)pt.corners.size();
           }
-          const double area = 0.5 * std::sqrt(pt.area[0] * pt.area[0] + pt.area[1] * pt.area[1] +
-                                               pt.area[2] * pt.area[2]);
-          if (area <= kHoleArea) {
-            continue;  // a small hole
+          // a small hole: its closing fan (what the inside could be seen through) is small, or
+          // it is a slit (the vector area cancels for two loops joined by a seam)
+          std::vector<size_t> pe;
+          double fan = 0, rad = 0;
+          for (size_t ei = 0; ei < bedges.size(); ei++) {
+            if (find(bedges[ei][0]) != r) {
+              continue;
+            }
+            pe.push_back(ei);
+            double a[3], b[3];
+            for (int k = 0; k < 3; k++) {
+              a[k] = pos[bedges[ei][0]][k] - pt.cen[k];
+              b[k] = pos[bedges[ei][1]][k] - pt.cen[k];
+            }
+            const double x = a[1] * b[2] - a[2] * b[1], y = a[2] * b[0] - a[0] * b[2],
+                         z = a[0] * b[1] - a[1] * b[0];
+            fan += 0.5 * std::sqrt(x * x + y * y + z * z);
+            rad = std::max(rad, std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]));
+          }
+          if (fan <= kHoleArea || slit_part(pe, bedges, pos)) {
+            continue;
           }
           bool base = pt.top <= base_y;
           if (base && has_ground()) {
@@ -1889,9 +2044,14 @@ struct Converter {
                             tris[t].lod_group == f.lod_group;
               }
             }
+            // (a wide opening: only where the sealing geometry covers it, not just its rim:
+            // two tubes rim to rim touch but see into each other)
             if (own_alike && seals_part(bedges, bthird, find(r), find, pos, own)) {
-              sealed_parts = true;
-              continue;
+              if (2.0 * rad <= kSealWide || covers_part(pe, bedges, pos, pt.cen, own)) {
+                sealed_parts = true;
+                continue;
+              }
+              orient_wide_unsealed++;
             }
             // (a planar opening: its plane decides per frame, see CondPlane)
             if (const auto cp = open_plane(pt, pos)) {
@@ -1966,6 +2126,25 @@ struct Converter {
           // the openings' outward normals: against the boundary's vector area when the surface is
           // wound outward (the fan runs the boundary the other way)
           cond = (u32)cond_sets.size();
+          // the surface's box, with every position its morph moves a vertex through (the
+          // camera inside it may be inside the surface)
+          std::array<float, 6> box = {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f};
+          for (u32 t : members) {
+            for (int c = 0; c < 3; c++) {
+              const auto& v = verts[tris[ids[t]].v[c]];
+              for (int m = 0; m < 4; m++) {
+                const float f1 = v.mband && (m & 1) ? 1.f : 0.f, f2 = v.mband && (m & 2) ? 1.f : 0.f;
+                const float q[3] = {v.x + f1 * v.mdelta[0] + f2 * v.mdelta2[0],
+                                    v.y + f1 * v.mdelta[1] + f2 * v.mdelta2[1],
+                                    v.z + f1 * v.mdelta[2] + f2 * v.mdelta2[2]};
+                for (int k = 0; k < 3; k++) {
+                  box[k] = std::min(box[k], q[k]);
+                  box[3 + k] = std::max(box[3 + k], q[k]);
+                }
+              }
+            }
+          }
+          cond_boxes.push_back(box);
           auto& set = cond_sets.emplace_back();
           float hx = 0, hz = 0;
           for (auto cp : cond_parts) {
@@ -4854,6 +5033,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
   }
   cv.tfrag0_end = cv.tris.size();
+  cv.tfrag_ver_end = cv.tris.size();
   size_t tfrag_mid_tris = 0, tfrag_far_tris = 0;
   if (cv.tmorph) {
     // (after every near version: the contact geometry is the near versions)
@@ -4896,6 +5076,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
     }
   }
+  cv.tfrag_ver_end = cv.tris.size();
   size_t far_first = cv.tris.size();
   const char* far_source = "none";
   if (two_tiers && !opt.merc_only) {
@@ -5891,7 +6072,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       m.row = (s8)ri->second;
       double a2 = 0, b2 = 0;
       for (int c = 0; c < 6; c++) {
-        dmax = std::max(dmax, std::abs((int)it->second.d[c]));
+        dmax = std::max(dmax, std::abs(it->second.d[c]));
       }
       for (int c = 0; c < 3; c++) {
         a2 += (double)it->second.d[c] * it->second.d[c];
@@ -6178,8 +6359,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         if (morph_verts && v.mband) {
           mr.key = v.minst + 1;
           for (int c = 0; c < 3; c++) {
-            mr.d[c] = (s16)std::clamp(std::lround(v.mdelta[c] / cp.grid), -32767l, 32767l);
-            mr.d[3 + c] = (s16)std::clamp(std::lround(v.mdelta2[c] / cp.grid), -32767l, 32767l);
+            mr.d[c] = (s32)std::lround(v.mdelta[c] / cp.grid);
+            mr.d[3 + c] = (s32)std::lround(v.mdelta2[c] / cp.grid);
           }
         }
         TfragRec tr{};
@@ -6595,11 +6776,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           auto& sp = run_spheres[r];
           float d2 = 0;
           for (int c = 0; c < 3; c++) {
-            sp.c[c] = (s16)((mn[c] + mx[c]) >> 1);
+            // (morph offsets reach past the chunk's 16-bit box: the center kept in it, the
+            // radius from there)
+            sp.c[c] = (s16)std::clamp((mn[c] + mx[c]) >> 1, -32768, 32767);
             const float h = (float)std::max(sp.c[c] - mn[c], mx[c] - sp.c[c]);
             d2 += h * h;
           }
-          sp.r = (u16)std::min(65534.f, std::ceil(std::sqrt(d2)) + 1.f);
+          const float rr = std::ceil(std::sqrt(d2)) + 1.f;
+          sp.r = rr <= 65534.f ? (u16)rr : (u16)0xffff;  // (0xffff: never hidden by it)
         }
         // a near chunk's groups: where it is needed
         const auto& rl = out_run_lods[r];
@@ -7140,27 +7324,6 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   // the tables read with them before the meshes (load_env_tie_chunks, load_morph, load_tfrag_lod)
   u32 ecs_offset = 0, morph_chunks_offset = 0, tfrag_chunks_offset = 0;
-  c3l::ExtTfrag etf{};
-  if (tfrag_out) {
-    for (int k = 0; k < 3; k++) {
-      etf.dists[k] = tfrag_dists[k];
-    }
-    std::vector<c3l::TfragGroup> tg(cv.tgroups.size());
-    for (size_t g = 0; g < tg.size(); g++) {
-      memcpy(tg[g].bsphere, cv.tgroups[g].data(), sizeof(tg[g].bsphere));
-      tg[g].mid = cv.tgroup_mid[g];
-      tg[g].far = cv.tgroup_far[g];
-    }
-    etf.group_count = (u32)tg.size();
-    etf.groups_offset = append(buf, tg.data(), tg.size());
-    etf.chunk_count = (u32)out_tfrag_chunks.size();
-    etf.chunks_offset = tfrag_chunks_offset =
-        append(buf, out_tfrag_chunks.data(), out_tfrag_chunks.size());
-    etf.run_lod_count = (u32)out_tfrag_run_lods.size();
-    etf.run_lod_offset = append(buf, out_tfrag_run_lods.data(), out_tfrag_run_lods.size());
-    etf.color_count = (u32)out_tfrag_colors.size();
-    etf.colors_offset = append(buf, out_tfrag_colors.data(), out_tfrag_colors.size());
-  }
   if (env_out) {
     ecs_offset = append(buf, ecs.data(), ecs.size());
   }
@@ -7181,6 +7344,28 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       mids[g] = cv.lod_group_mid[g];
     }
     em.group_mid_offset = append(buf, mids.data(), mids.size());
+  }
+  // (then the tfrag geomorph's: load_tfrag_lod reads them after the morph tables)
+  c3l::ExtTfrag etf{};
+  if (tfrag_out) {
+    for (int k = 0; k < 3; k++) {
+      etf.dists[k] = tfrag_dists[k];
+    }
+    std::vector<c3l::TfragGroup> tg(cv.tgroups.size());
+    for (size_t g = 0; g < tg.size(); g++) {
+      memcpy(tg[g].bsphere, cv.tgroups[g].data(), sizeof(tg[g].bsphere));
+      tg[g].mid = cv.tgroup_mid[g];
+      tg[g].far = cv.tgroup_far[g];
+    }
+    etf.group_count = (u32)tg.size();
+    etf.groups_offset = append(buf, tg.data(), tg.size());
+    etf.chunk_count = (u32)out_tfrag_chunks.size();
+    etf.chunks_offset = tfrag_chunks_offset =
+        append(buf, out_tfrag_chunks.data(), out_tfrag_chunks.size());
+    etf.run_lod_count = (u32)out_tfrag_run_lods.size();
+    etf.run_lod_offset = append(buf, out_tfrag_run_lods.data(), out_tfrag_run_lods.size());
+    etf.color_count = (u32)out_tfrag_colors.size();
+    etf.colors_offset = append(buf, out_tfrag_colors.data(), out_tfrag_colors.size());
   }
   // a tail goes right after its chunk's vertices unless that is inside another chunk's vertices
   bool tails_inline = true;
@@ -7371,8 +7556,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           ps.push_back(c3l::CullCondPlane{{cp.n[0], cp.n[1], cp.n[2]}, cp.d});
         }
       }
-      planes += ps.size();
-      cds.push_back(c3l::CullCondDraw{di, (u32)ps.size(), 0, 0});
+      const u32 np = (u32)ps.size();
+      // then each surface's box (c3l::CullCondBox: two plane records)
+      for (u32 si : sets) {
+        const auto& b = cv.cond_boxes.at(si);
+        ps.push_back(c3l::CullCondPlane{{b[0], b[1], b[2]}, 0.f});
+        ps.push_back(c3l::CullCondPlane{{b[3], b[4], b[5]}, 0.f});
+      }
+      planes += np;
+      cds.push_back(c3l::CullCondDraw{di, np, 0, (u32)sets.size()});
       pss.push_back(std::move(ps));
     }
     c3l::ExtCullCond ec{};
@@ -7776,9 +7968,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              cv.ground_state == 1 ? "" : ", no collision",
              cv.orient_volume_tris, cv.orient_parity_tris);
     lg::info("{}: tie winding: {} triangles in {} surfaces with planar openings, culled while the "
-             "camera is on the inner side of their opening planes (c3l::kDrawCullCond); {} "
-             "triangles of both kinds unmarked again (their draws still blend)",
-             level.level_name, cv.orient_cond_tris, cv.cond_sets.size(), cv.cull_fixup_tris);
+             "camera is on the inner side of their opening planes and outside their box "
+             "(c3l::kDrawCullCond); {} triangles of both kinds unmarked again (their draws still "
+             "blend); {} wide openings touching geometry that doesn't cover them",
+             level.level_name, cv.orient_cond_tris, cv.cond_sets.size(), cv.cull_fixup_tris,
+             cv.orient_wide_unsealed);
   }
   if (!opt.merc_only) {
     // (AI-assisted) v15 draw optimisations

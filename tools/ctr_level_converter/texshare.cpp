@@ -35,11 +35,19 @@ bool read_level_keys(const fs::path& path, LevelKeys* out) {
     return false;
   }
   out->bytes.assign(texs.size(), 0);
+  std::vector<int> mask_of(texs.size(), -1);
   for (size_t i = 0; i < texs.size(); i++) {
     const size_t owner = c3l::texture_is_mask(texs[i]) ? c3l::texture_mask_of(texs[i]) : i;
     if (owner < texs.size()) {
       out->bytes[owner] += (texs[i].data_size + 127) & ~127u;
+      if (owner != i) {
+        mask_of[owner] = (int)i;
+      }
     }
+  }
+  out->desc.resize(texs.size());
+  for (size_t i = 0; i < texs.size(); i++) {
+    out->desc[i] = c3l::texture_share_desc(texs[i], mask_of[i] >= 0 ? &texs[mask_of[i]] : nullptr);
   }
   return true;
 }
@@ -58,9 +66,19 @@ bool write_table(const fs::path& dir) {
   std::sort(levels.begin(), levels.end(),
             [](const LevelKeys& a, const LevelKeys& b) { return a.name < b.name; });
   std::map<uint64_t, std::vector<uint32_t>> where;
+  std::map<uint64_t, uint64_t> desc_of;
+  std::map<uint64_t, bool> clash;  // a key with two descriptors: never shared
   for (uint32_t l = 0; l < levels.size(); l++) {
-    for (uint64_t k : levels[l].keys) {
-      if (k && (where[k].empty() || where[k].back() != l)) {
+    for (size_t i = 0; i < levels[l].keys.size(); i++) {
+      const uint64_t k = levels[l].keys[i];
+      if (!k) {
+        continue;
+      }
+      auto [it, fresh] = desc_of.emplace(k, levels[l].desc[i]);
+      if (!fresh && it->second != levels[l].desc[i]) {
+        clash[k] = true;
+      }
+      if (where[k].empty() || where[k].back() != l) {
         where[k].push_back(l);
       }
     }
@@ -68,7 +86,7 @@ bool write_table(const fs::path& dir) {
   std::map<std::vector<uint32_t>, uint32_t> group_of;
   std::vector<c3l::TexShareEntry> entries;
   for (const auto& [k, ls] : where) {
-    if (ls.size() < 2) {
+    if (ls.size() < 2 || clash.count(k)) {
       continue;
     }
     auto it = group_of.emplace(ls, (uint32_t)group_of.size()).first;
@@ -88,8 +106,9 @@ bool write_table(const fs::path& dir) {
                   (entries.empty() ||
                    fwrite(entries.data(), sizeof(entries[0]), entries.size(), fp) == entries.size());
   fclose(fp);
-  printf("texshare.c3t: %zu levels, %zu textures in more than one of them, %u groups\n",
-         levels.size(), entries.size(), h.groups);
+  printf("texshare.c3t: %zu levels, %zu textures in more than one of them, %u groups, %zu keys "
+         "left out (two textures with one key)\n",
+         levels.size(), entries.size(), h.groups, clash.size());
   return ok;
 }
 

@@ -78,19 +78,29 @@ What goes in:
   envmapped ties; not the envmap shine passes), with instances already in world space. Small and
   medium instances go to their own chunks with a draw distance.
 - Wind tie (palm trees, plants), baked at rest with their instance matrix; `c3l::ExtWind` (ExtHeader size 96) lists the instances (wind_idx, stiffness, origin y) and a slot byte per vertex of their chunks, so the runtime sways them as the PC's Tie3::render_tree_wind (do_wind_math per instance, the shear in ctr_mesh_wind.v.pica). Files without it: at rest. Shrub chunks' runs hold one prototype's PS2 fade band each (at most 96 triangles); `c3l::ExtShrubFade` (ExtHeader size 104) has the bands per run. The vista tier also copies the small and medium ties.
-- Tie surfaces whose open parts are not small holes or on the ground: an open part counts as closed
-  when its whole edge (sampled every 0.25 m) lies within 5 cm of, or is buried behind, geometry that
-  is drawn whenever the surface is (tfrag; ties of the same or a farther detail class; the
-  surface's own LOD version, or both versions of another group). A surface left with only planar
-  open parts (corners within min(0.25 m, 5% of the part's radius) of a plane) is marked
-  `kDrawCullCond`: its back faces can only be seen through those openings, so from the outer side
-  of their planes. `c3l::ExtCullCond` (ExtHeader size 112) lists per such draw its planes (outward
-  normal n, d: the plane's offset minus the corners' spread and 0.1 m); the runtime culls the
-  draw's back faces in a frame where the camera has dot(n, p) < d for each of them. Such draws are
+- Tie surfaces whose open parts are not small holes (a closing fan of at most 0.25 m², or a slit:
+  every edge within 1 cm of another) or on the ground: an open part counts as closed when its whole
+  edge (sampled every 0.25 m) lies within 5 cm of, or is buried behind, geometry that is drawn
+  whenever the surface is (tfrag, each version of a tfrag geomorph group; ties of the same or a
+  farther detail class; the surface's own LOD version, or every version of another group, the mid
+  one of a morph group too), and, for an opening wider than 0.5 m, its closing fan (sampled every
+  0.25 m) lies within 5 cm of such geometry too. A surface left with only planar open parts
+  (corners within min(1.5 cm, 5% of the part's radius) of a plane) is marked `kDrawCullCond`: its
+  back faces can only be seen through those openings, so from the outer side of their planes, or
+  from inside the surface. `c3l::ExtCullCond` (ExtHeader size 112) lists per such draw its planes
+  (outward normal n, d: the plane's offset minus the corners' spread and 0.1 m) and, after them,
+  its surfaces' boxes (`CullCondBox`, `CullCondDraw::box_count`; the morphs' reach included); the
+  runtime culls the draw's back faces in a frame where the camera has dot(n, p) < d for each plane
+  and is outside every box grown by 1 m (the near plane's reach). Files without boxes: both
+  sides. Such draws are
   grouped by the way their openings face (four directions). The vista copies draw both sides.
   Blended tie keys may be marked too; the marks go again from keys whose blending the draw
   optimisations keep. Host check: `CTR_SOFT_CULL_PROBE=1` counts culled back-face pixels in front
-  of the finished frame's depth (`[softcull]` lines).
+  of the finished frame's depth (`[softcull]` lines; triangles reaching behind the camera clipped
+  at the near plane as on the GPU; `[probex]`: the draw of a frame's worst ones).
+  `CTR_PROBE_COND_ONLY=1`: only the `kDrawCullCond` draws culled. `CTR_COND_POSES=N
+  CTR_COND_POSE_LEVEL=NAME`: from frame N on, the camera at a box center of NAME's two-plane
+  surfaces (tubes), the next every 10 frames. `CTR_COND_NO_BOX=1`: the planes alone.
 - Shrubs (grass, bushes, small plants, ropes), in `--shrub-cell` chunks drawn up to their PS2
   distance class (v14, see `--shrub-one-dist`) or `--shrub-dist`.
   Their vertex colors are the base color times the time of day color (shrub.vert).

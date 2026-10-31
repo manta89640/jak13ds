@@ -401,6 +401,16 @@ inline uint64_t texture_content_key(const Texture& t, const void* data, const vo
   return h ? h : 1;
 }
 
+// a shared texture's descriptor (its size, format, levels and bytes, its mask's too; 0: no mask):
+// a level whose texture has the group's key but another descriptor loads its own copy (a key
+// collision), and texshare.c3t leaves such keys out
+inline uint64_t texture_share_desc(const Texture& t, const Texture* mask) {
+  const uint32_t d[10] = {t.w,         t.h,         t.format,         t.levels,         t.data_size,
+                          mask ? mask->w : 0u, mask ? mask->h : 0u, mask ? mask->format : 0u,
+                          mask ? mask->levels : 0u, mask ? mask->data_size : 0u};
+  return texture_key_add(1469598103934665603ull, d, sizeof(d));
+}
+
 /*!
  * texshare.c3t (next to the .c3l files, ctr_level_converter --all): the content keys of the
  * textures that more than one level of the game has, each with its group: the textures that the
@@ -426,7 +436,10 @@ static_assert(sizeof(TexShareEntry) == 16);
  * The opening planes of the kDrawCullCond draws. ExtHeader::size >=
  * kExtHeaderV24Size, then this at ext_offset + kExtHeaderTexKeySize (the sections before it zero when
  * the level has none). A draw's back faces may be culled in a frame where the camera position p
- * (world, game units) has dot(n, p) < d for every one of its planes.
+ * (world, game units) has dot(n, p) < d for every one of its planes and is outside each of its
+ * surfaces' boxes grown by the near plane's reach (from inside a box the camera may be inside the
+ * surface, or see its inside where the near plane cuts its walls). Files without boxes
+ * (box_count 0, the field was padding): both sides drawn.
  */
 constexpr uint32_t kExtHeaderV24Size = 120;
 struct ExtCullCond {
@@ -438,7 +451,7 @@ struct CullCondDraw {
   uint32_t draw;           // index into the file's draws
   uint32_t plane_count;    // CullCondPlane[]
   uint32_t planes_offset;  // absolute
-  uint32_t pad;
+  uint32_t box_count;      // CullCondBox[], right after the planes
 };
 static_assert(sizeof(CullCondDraw) == 16);
 struct CullCondPlane {
@@ -446,6 +459,13 @@ struct CullCondPlane {
   float d;
 };
 static_assert(sizeof(CullCondPlane) == 16);
+struct CullCondBox {
+  float lo[3];  // world, game units: the surface's vertices wherever its morph moves them
+  float pad0;
+  float hi[3];
+  float pad1;
+};
+static_assert(sizeof(CullCondBox) == 2 * sizeof(CullCondPlane));
 
 /*!
  * The PS2's tie geomorph (common/custom_data/TieMorph.h). A morph group (TieLodGroup with
