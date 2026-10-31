@@ -458,6 +458,11 @@ int ctr_early_selftest(const CtrEarlyTestIn* in, char* status, int size) {
     vram_free(c32);
     vram_free(d32);
     ok |= check_target(&top, "block8", part8, sizeof(part8)) > 0 ? CTR_EARLY_OK_BLOCK8 : 0;
+    /* the screen shows this buffer next: nothing of the test may be left in it */
+    if (frame_begin()) {
+      C3D_FrameBufClear(&top.fb, C3D_CLEAR_ALL, top.cbytes == 4 ? 0x000000FFu : 0u, 0);
+      frame_end();
+    }
     snprintf(status, (size_t)size, "%s, %s (func %d, clear 0x%06lx)%s", part8, part32, E.func,
              (unsigned long)E.clear, in->emulator ? " (emulator: it has no early depth test)" : "");
   }

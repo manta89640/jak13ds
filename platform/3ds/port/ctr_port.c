@@ -250,6 +250,20 @@ int ctr_platform_init(int enable_console) {
   osSetSpeedupEnable(true); /* 804 MHz + L2 cache on New 3DS, no-op otherwise */
   ctr_boot_mark("3 speedup");
   gfxInitDefault();
+  /* the screens show these buffers at once: black, not what the memory held */
+  for (int pass = 0; pass < 2; pass++) {
+    const gfxScreen_t scr[2] = {GFX_TOP, GFX_BOTTOM};
+    for (int i = 0; i < 2; i++) {
+      u16 w = 0, h = 0;
+      u8* fb = gfxGetFramebuffer(scr[i], GFX_LEFT, &w, &h);
+      if (fb) {
+        memset(fb, 0, (size_t)w * h * gspGetBytesPerPixel(gfxGetScreenFormat(scr[i])));
+      }
+    }
+    gfxFlushBuffers();
+    gfxSwapBuffers();
+  }
+  gspWaitForVBlank();
   ctr_boot_mark("4 screens");
   if (enable_console) {
     consoleInit(GFX_BOTTOM, &s_stat_con);
