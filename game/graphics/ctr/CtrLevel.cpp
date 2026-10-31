@@ -4875,8 +4875,8 @@ void build_draw_order(CtrLevelData* out) {
     set_opaque_alpha(&st, d, ctr_settings().opaque_alpha, min_alpha);
     out->draw_states.push_back(st);
   }
-  // sort keys: texture first (a texture change clears the GPU's texture cache), then the rest of
-  // the state (numbered per level)
+  // sort keys: the state without its texture first, then the texture. A texture change with the
+  // same state only binds the texture; a state change runs the backend's whole state path
   std::vector<ctr_draw_state> states;
   // (AI-assisted) only needed here: not kept in the level (10-35 KB of the heap per level)
   std::vector<u32> draw_sort_keys(out->draws.size());
@@ -4892,12 +4892,34 @@ void build_draw_order(CtrLevelData* out) {
     if (id == states.size()) {
       states.push_back(st);
     }
-    draw_sort_keys[di] = ((u32)(tex + 1) << 16) | (id & 0xffff);
+    draw_sort_keys[di] = ((id & 0xffff) << 16) | ((u32)(tex + 1) & 0xffff);
     // blending, or drawn over what's there without writing depth (decals): keep the order.
     // (AI-assisted) v15 kDrawBlendDropped draws keep their place too (moving them before the
     // blended draws drawn ahead of them could change what those pixels show)
     draw_ordered[di] = st.blend != CTR_BLEND_OFF || !st.zwrite ||
                        (out->draws[di].kind & c3l::kDrawBlendDropped);
+  }
+  {
+    // the states numbered in an order that puts those differing only in what the texture bind
+    // reads (filter, wrap, mip bits, atlas scale) next to each other
+    auto rank = [](const ctr_draw_state& a) {
+      constexpr u8 kBindTcc = (u8)CTR_TCC_ST_ATLAS | (u8)CTR_TCC_TRILINEAR | (u8)CTR_TCC_MIP_MAX1;
+      return std::make_tuple((u8)(a.tcc & ~kBindTcc), a.decal, a.blend, a.fix, a.atest, a.aref,
+                             a.ztest, a.zwrite, a.flags, a.tcc, a.filter, a.clamp_s, a.clamp_t);
+    };
+    std::vector<u32> order(states.size());
+    for (u32 i = 0; i < order.size(); i++) {
+      order[i] = i;
+    }
+    std::sort(order.begin(), order.end(),
+              [&](u32 a, u32 b) { return rank(states[a]) < rank(states[b]); });
+    std::vector<u32> new_id(states.size());
+    for (u32 i = 0; i < order.size(); i++) {
+      new_id[order[i]] = i;
+    }
+    for (auto& k : draw_sort_keys) {
+      k = (new_id[k >> 16] << 16) | (k & 0xffff);
+    }
   }
   // drawing order, made once (see sorted_draws)
   out->draw_chunk.assign(out->draws.size(), 0);
@@ -8958,6 +8980,11 @@ void CtrTfragRenderer::wind_update(CtrLevelData& lev, u64 frame) {
 
 // the wind tie draws collected by draw_level (their rows in m_wind_rows)
 void CtrTfragRenderer::draw_wind_calls(const CtrLevelData& lev) {
+  const u64 t0 = ctr_gpu_ticks();
+  // opaque (the early and sorted lists' wind draws): a chunk's draws together, so its matrix,
+  // wind rows and attribute buffers are sent once
+  std::stable_sort(m_wind_calls.begin(), m_wind_calls.end(),
+                   [](const WindCall& a, const WindCall& b) { return a.mesh < b.mesh; });
   for (const auto& c : m_wind_calls) {
     ctr_gpu_set_mesh_nofog(c.nofog);
     ctr_gpu_draw_mesh_wind(c.state, c.matrix, m_wind_rows.data() + 4 * c.row_first,
@@ -8967,12 +8994,25 @@ void CtrTfragRenderer::draw_wind_calls(const CtrLevelData& lev) {
   }
   m_wind_draws += m_wind_calls.size();
   m_wind_calls.clear();
+  m_back_pending += ctr_gpu_ticks() - t0;
 }
 
 // (AI-assisted, j2water2) c3l v21: the envmapped tie draws collected by draw_level
 void CtrTfragRenderer::draw_env_calls(std::vector<EnvCall>& calls) {
   if (calls.empty()) {
     return;
+  }
+  const u64 t0 = ctr_gpu_ticks();
+  // each run of opaque draws by chunk (their uniforms and buffers sent once per chunk), the others
+  // in their order
+  for (size_t i = 0; i < calls.size();) {
+    size_t j = i;
+    while (j < calls.size() && calls[j].state->blend == CTR_BLEND_OFF && calls[j].state->zwrite) {
+      j++;
+    }
+    std::stable_sort(calls.begin() + i, calls.begin() + j,
+                     [](const EnvCall& a, const EnvCall& b) { return a.mesh < b.mesh; });
+    i = j + 1;
   }
   for (const auto& c : calls) {
     ctr_gpu_etie_draw(c.state, c.env_tex, &c.d, c.mesh, c.normals_mesh, c.normals_offset, c.first,
@@ -8982,6 +9022,7 @@ void CtrTfragRenderer::draw_env_calls(std::vector<EnvCall>& calls) {
   m_env_draws += calls.size();
   ctr_gpu_etie_end();
   calls.clear();
+  m_back_pending += ctr_gpu_ticks() - t0;
 }
 
 void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
@@ -9065,8 +9106,8 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              "{:.0f} chunks emitted, {:.0f} runs tested, {:.0f} draws walked, {:.0f} calls; "
              "clusters stood for {:.0f} chunks, {:.0f} tie LOD groups ({} level draws)",
              m_name, tot, ms[kPhSetup], ms[kPhLod], ms[kPhChunks], ms[kPhTod], ms[kPhLists],
-             ms[kPhFlush], m_ph_emits / n, m_ph_runs / n,
-             m_ph_walked / n, m_ph_calls / n, m_ph_skipped / n, m_ph_lod_skipped / n, m_ph_draws);
+             ms[kPhFlush], m_ph_emits / n, m_ph_runs / n, m_ph_walked / n, m_ph_calls / n,
+             m_ph_skipped / n, m_ph_lod_skipped / n, m_ph_draws);
     m_ph_draws = m_ph_emits = m_ph_runs = m_ph_walked = m_ph_calls = 0;
     m_ph_skipped = m_ph_lod_skipped = 0;
   }
@@ -9099,7 +9140,10 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
 // pass, 1: the vista pass)
 void CtrTfragRenderer::flush_calls(int /*pass*/) {
   if (!m_calls.empty()) {
+    const u64 t0 = ctr_gpu_ticks();
     ctr_gpu_draw_mesh_calls(m_calls.data(), (int)m_calls.size());
+    m_back_pending += ctr_gpu_ticks() - t0;
+    m_ph_calls += m_calls.size();
   }
   m_calls.clear();
 }
@@ -9111,9 +9155,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                   const CtrRenderState& rs) {
   // (AI-assisted, j2cull) the phases' ticks (m_ph)
   u64 ph_t = ctr_gpu_ticks();
+  // (the backend's calls made in a phase count as flush)
+  m_back_pending = 0;
   auto phase = [&](int k) {
     const u64 now = ctr_gpu_ticks();
-    m_ph[k] += now - ph_t;
+    m_ph[k] += now - ph_t - m_back_pending;
+    m_ph[kPhFlush] += m_back_pending;
+    m_back_pending = 0;
     ph_t = now;
   };
   m_ph_draws++;
@@ -11125,7 +11173,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       draw(di);
     }
     phase(kPhLists);
-    m_ph_calls += m_calls.size();
     flush_calls(1);  // (AI-assisted, gpu-rt) the vista pass's
     phase(kPhFlush);
     vista_pass = false;
@@ -11162,13 +11209,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       return;
     }
     m_ph_walked += list.size();
-    for (int pass = 0; pass < 2; pass++) {
-      for (u32 di : list) {
-        const int slot = vslot[draw_chunk[di]];
-        if (slot >= 0 && !vchunks[slot].vista && is_morph(di) == (pass == 1)) {
+    m_morph_later.clear();
+    for (u32 di : list) {
+      const int slot = vslot[draw_chunk[di]];
+      if (slot >= 0 && !vchunks[slot].vista) {
+        if (is_morph(di)) {
+          m_morph_later.push_back(di);
+        } else {
           draw(di);
         }
       }
+    }
+    for (u32 di : m_morph_later) {
+      draw(di);
     }
   };
   if (early_depth) {
@@ -11220,7 +11273,6 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     walk(*main_lists[2]);
   }
   phase(kPhLists);
-  m_ph_calls += m_calls.size();
   flush_calls(0);  // (AI-assisted, gpu-rt) the main pass's
   draw_env_calls(m_env_calls);  // (AI-assisted, j2water2) (none left in Jak II's case)
   ctr_gpu_set_mesh_nofog(0);
