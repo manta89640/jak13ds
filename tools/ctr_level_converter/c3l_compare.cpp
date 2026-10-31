@@ -184,7 +184,7 @@ bool compare_file(const std::string& pa, const std::string& pb) {
     auto kb = b.arr<EnvTieChunk>(xb.chunks_offset, xb.chunk_count);
     for (size_t i = 0; i < ka.size() && i < kb.size(); i++) {
       same("env chunk", &ka[i].chunk, 4, &kb[i].chunk, 4);
-      const uint32_t n = ca[ka[i].chunk].vertex_count * 4;
+      const uint32_t n = ka[i].chunk < ca.size() ? ca[ka[i].chunk].vertex_count * 4 : 0;
       same_v("env normals", a.get(ka[i].normals_offset, n), b.get(kb[i].normals_offset, n));
     }
     same("env chunk count", &xa.chunk_count, 4, &xb.chunk_count, 4);
@@ -224,8 +224,10 @@ bool compare_file(const std::string& pa, const std::string& pb) {
     auto kb = b.arr<CullCondDraw>(xb.draws_offset, xb.draw_count);
     same("cond count", &xa.draw_count, 4, &xb.draw_count, 4);
     for (size_t i = 0; i < ka.size() && i < kb.size(); i++) {
-      same_v("cond planes", a.arr<CullCondPlane>(ka[i].planes_offset, ka[i].plane_count),
-             b.arr<CullCondPlane>(kb[i].planes_offset, kb[i].plane_count));
+      // (the planes, then the boxes: two plane records each)
+      same_v("cond planes",
+             a.arr<CullCondPlane>(ka[i].planes_offset, ka[i].plane_count + 2 * ka[i].box_count),
+             b.arr<CullCondPlane>(kb[i].planes_offset, kb[i].plane_count + 2 * kb[i].box_count));
       ka[i].planes_offset = kb[i].planes_offset = 0;
     }
     same_v("cond draws", ka, kb);
@@ -249,6 +251,32 @@ bool compare_file(const std::string& pa, const std::string& pb) {
       ka[i].records_offset = kb[i].records_offset = 0;
     }
     same_v("morph chunks", ka, kb);
+  }
+  {
+    auto xa = a.sub<ExtTfrag>(kExtHeaderMorphSize), xb = b.sub<ExtTfrag>(kExtHeaderMorphSize);
+    same("tfrag dists", xa.dists, sizeof(xa.dists), xb.dists, sizeof(xb.dists));
+    same_v("tfrag groups", a.arr<TfragGroup>(xa.groups_offset, xa.group_count),
+           b.arr<TfragGroup>(xb.groups_offset, xb.group_count));
+    same_v("tfrag run lods", a.arr<RunLod>(xa.run_lod_offset, xa.run_lod_count),
+           b.arr<RunLod>(xb.run_lod_offset, xb.run_lod_count));
+    same_v("tfrag colors", a.arr<TfragMorphColor>(xa.colors_offset, xa.color_count),
+           b.arr<TfragMorphColor>(xb.colors_offset, xb.color_count));
+    auto ka = a.arr<TfragChunk>(xa.chunks_offset, xa.chunk_count);
+    auto kb = b.arr<TfragChunk>(xb.chunks_offset, xb.chunk_count);
+    for (size_t i = 0; i < ka.size() && i < kb.size(); i++) {
+      const uint32_t na = ka[i].records_offset && ka[i].chunk < ca.size()
+                              ? ca[ka[i].chunk].vertex_count
+                              : 0;
+      const uint32_t nb = kb[i].records_offset && kb[i].chunk < cb.size()
+                              ? cb[kb[i].chunk].vertex_count
+                              : 0;
+      same_v("tfrag morph records", a.arr<TfragMorphVertex>(ka[i].records_offset, na),
+             b.arr<TfragMorphVertex>(kb[i].records_offset, nb));
+      const uint32_t sa = ka[i].records_offset ? 1 : 0, sb = kb[i].records_offset ? 1 : 0;
+      same("tfrag records set", &sa, 4, &sb, 4);
+      ka[i].records_offset = kb[i].records_offset = 0;
+    }
+    same_v("tfrag chunks", ka, kb);
   }
   if (g_diff) {
     lg::error("{} vs {}: {} differences", pa, pb, g_diff);

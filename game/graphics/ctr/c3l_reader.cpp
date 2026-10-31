@@ -458,6 +458,11 @@ bool Reader::preload(uint32_t offset, uint32_t bytes) {
 }
 
 bool Reader::keep(uint32_t offset, uint32_t bytes) {
+  // (a size past the file's end: what is there; a read past it fails the reader for good)
+  if (!ok() || offset >= m_raw_size) {
+    return false;
+  }
+  bytes = std::min(bytes, m_raw_size - offset);
   if (bytes > kKeepMax) {
     return false;
   }
