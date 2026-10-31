@@ -9266,6 +9266,9 @@ void CtrTfragRenderer::wind_update(CtrLevelData& lev, u64 frame) {
   memcpy(lev.wind_last_array, w.wind_array, sizeof(lev.wind_last_array));
 }
 
+// one sequence for every level's renderer: the GPU keeps the last rows by this id
+static u32 g_wind_rows_id = 0;
+
 // the wind tie draws collected by draw_level (their rows in m_wind_rows)
 void CtrTfragRenderer::draw_wind_calls(const CtrLevelData& lev) {
   for (const auto& c : m_wind_calls) {
@@ -11226,7 +11229,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     const u32 n = lev.chunk_wind_n[vc.chunk];
     if (m_wind_row_of[slot] < 0) {
       m_wind_row_of[slot] = (s32)(m_wind_rows.size() / 4);
-      m_wind_row_id[slot] = ++m_wind_rows_id ? m_wind_rows_id : ++m_wind_rows_id;
+      m_wind_row_id[slot] = ++g_wind_rows_id ? g_wind_rows_id : ++g_wind_rows_id;
       m_wind_rows.insert(m_wind_rows.end(), 4, 0.f);
       // x += kx * (y - y0) in world space is x += kx * y + kx * (origin y - y0) / scale here
       const u16* inst = &lev.wind_slot_inst[lev.chunk_wind_first[vc.chunk]];
