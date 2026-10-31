@@ -1569,7 +1569,7 @@ farthest depth of its pixels, updated between draws.
 At the fill cost in gpuspeed's model (~12 ns per shaded fragment), 205k fragments are at most
 ~2.4 ms of GPU time per frame in village2. The real gain is less: the hardware's test is per tile of
 a triangle and its data updates later. The band order costs no CPU over the old path: one walk
-instead of two or three, about 2.5 more texture changes per frame.
+instead of two or three (not timed on its own), about 2.5 more texture changes per frame.
 
 **Hardware test.**
 1. Boot. In gk.log and boot.txt, find `early depth self-test: block8 ..., block32 ... -> early
