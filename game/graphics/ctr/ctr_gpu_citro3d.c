@@ -9751,8 +9751,12 @@ void ctr_gpu_bench_gate(int enter) {
 }
 
 void ctr_gpu_bench_restore(void) {
-  for (int i = 0; i < 3; i++) {
-    C3D_TexBind(i, NULL);
+  /* units 1 and 2 can't take NULL (citro3d reads its type): the fog ramp, which lives as long as
+   * the GPU layer, replaces the bench's textures there */
+  C3D_TexBind(0, NULL);
+  if (g.fog_tex_valid) {
+    C3D_TexBind(1, &g.fog_tex);
+    C3D_TexBind(2, &g.fog_tex);
   }
   tex_units_forget();
   for (int i = 0; i < 6; i++) {

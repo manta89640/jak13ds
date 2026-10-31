@@ -668,9 +668,7 @@ static void plain_state(void) {
   C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
   C3D_EarlyDepthTest(false, GPU_EARLYDEPTH_GEQUAL, 0);
   C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
-  for (int i = 0; i < 3; i++) {
-    C3D_TexBind(i, NULL);
-  }
+  C3D_TexBind(0, NULL); /* units 1 and 2 can't take NULL (citro3d reads its type) */
   combiners(0, 1, 0);
 }
 

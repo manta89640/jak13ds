@@ -150,9 +150,8 @@ static void common_state(void) {
       C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
     }
   }
-  for (int i = 0; i < 3; i++) {
-    C3D_TexBind(i, NULL);
-  }
+  /* citro3d reads the texture's type for units 1 and 2: NULL only on unit 0 */
+  C3D_TexBind(0, NULL);
   C3D_CullFace(GPU_CULL_NONE);
   C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
   C3D_DepthMap(true, -1.0f, 0.0f);
