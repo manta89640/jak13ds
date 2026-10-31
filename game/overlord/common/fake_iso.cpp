@@ -112,9 +112,13 @@ int fake_iso_FS_Init() {
   for (const auto& f : fs::directory_iterator(file_util::get_jak_project_dir() / "out" /
                                               game_version_names[g_game_version] / "iso")) {
     if (f.is_regular_file() || f.is_symlink()) {
+      std::string file_name = f.path().filename().string();
+      // macOS writes "._X" and ".DS_Store" next to files it copies to a FAT card
+      if (!file_name.empty() && file_name[0] == '.') {
+        continue;
+      }
       ASSERT(fake_iso_entry_count < MAX_ISO_FILES);
       FakeIsoEntry* e = &fake_iso_entries[fake_iso_entry_count];
-      std::string file_name = f.path().filename().string();
       std::string iso_name = file_name;
       bool compressed = false;
 #ifdef OG_ISO_OGZ
