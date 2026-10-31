@@ -9673,7 +9673,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted) fog_stage_skip
   const bool fog_skip = settings.fog_stage_skip;
-  const bool early_depth = settings.early_depth;  // (AI-assisted) the band order below
+  const bool early_depth = ctr_gpu_early_depth_active() != 0;  // (AI-assisted) the band order
   const float pzw = std::abs(cam.perspective[2][3]);
   constexpr float kNoFog = 0.5f / 255.f;
   float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
@@ -11537,12 +11537,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
   };
   if (early_depth) {
-    for (u8 band = 0; band < 3; band++) {
-      for (u32 di : *main_lists[0]) {
-        const int slot = m_visible_slot[lev.draw_chunk[di]];
-        if (slot >= 0 && m_visible[slot].band == band) {
-          draw(di);
-        }
+    // (AI-assisted) one walk: the bands nearest first, each in list order with its morph draws last
+    for (auto& b : m_band_draws) {
+      b.clear();
+    }
+    m_ph_walked += main_lists[0]->size();
+    for (u32 di : *main_lists[0]) {
+      const int slot = vslot[draw_chunk[di]];
+      if (slot >= 0 && !vchunks[slot].vista) {
+        m_band_draws[vchunks[slot].band * 2 + (morph_list && is_morph(di) ? 1 : 0)].push_back(di);
+      }
+    }
+    for (const auto& b : m_band_draws) {
+      for (u32 di : b) {
+        draw(di);
       }
     }
   } else {

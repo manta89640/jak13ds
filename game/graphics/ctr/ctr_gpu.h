@@ -395,12 +395,20 @@ void ctr_gpu_set_mip_mode(int mode);
  * compact: ctr_gpu_tex_create_compact picks small formats (off: RGBA8 like ctr_gpu_tex_create). */
 void ctr_gpu_set_color16(int on);
 void ctr_gpu_set_early_depth(int on);
-/* (AI-assisted) config.ini early_depth modes (pica_bench B8 decides): sky = the sky's draws
+/* (AI-assisted) config.ini early_depth modes (used once the self-test passed): sky = the sky's draws
  * (sky_last: depth 0, after the opaque geometry) use the early depth test too; func = the early
  * test's function (GPU_EARLYDEPTHFUNC: 0 >=, 1 >, 2 <=, 3 <; the depth test stays >=); clear =
  * the early depth data's clear value (GPUREG_EARLYDEPTH_DATA, 24 bits; every early depth clear
  * uses it). Defaults 0, 0, 0 = the old state. Any time. */
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
+/* (AI-assisted) the early depth test checked on this console (ctr_gpu_early.c): after
+ * ctr_gpu_init and ctr_gpu_set_early_depth_params, before the game's first frame. Until it
+ * passes the early test stays off. 1: passed. */
+int ctr_gpu_early_depth_selftest(void);
+/* (AI-assisted) the early test in use (asked for and the self-test passed) */
+int ctr_gpu_early_depth_active(void);
+/* (AI-assisted) the self-test's result, one line ("" before it ran) */
+const char* ctr_gpu_early_depth_status(void);
 /* (AI-assisted) config.ini tex_cache_clear: 0 always (each texture unit 0 bind clears the GPU's
  * texture cache, as citro3d does), 1 uploads (a bind that keeps a level pool texture and only
  * changes its sampling settings doesn't clear it unless a pool was filled or moved since the last

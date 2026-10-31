@@ -14,6 +14,7 @@
 
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/ctr/ctr_gpu_bench.h"
+#include "game/graphics/ctr/ctr_gpu_early.h"
 #include "game/graphics/ctr/CtrTexConv.h"
 
 #include <3ds.h>
@@ -3019,6 +3020,22 @@ static void pipeline_close_list(void) {
 static int g_early_sky = 0;
 static int g_early_func = GPU_EARLYDEPTH_GEQUAL;
 static u32 g_early_clear = 0;
+/* (AI-assisted) the boot self-test's verdict (ctr_gpu_early_depth_selftest) and what the config
+ * asks for: the early test is used only with both */
+static int g_early_hw = 0;
+static int g_early_want = 0, g_early_want_sky = 0;
+static int s_early_stale; /* a depth write since the early data began may have gone farther */
+static char s_early_status[384];
+static int early_depth_in_use(void) {
+  return g_early_hw && (g_early_want || g_early_want_sky);
+}
+
+void ctr_gpu_early_establish(void) {
+  C3Di_UpdateContext(); /* the framebuffer bind citro3d has pending, first */
+  GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
+  GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+  s_early_stale = 0;
+}
 static ctr_gpu_hook_fn s_sky_hook;
 static void* s_sky_hook_arg;
 static int g_depth_far;       /* ctr_gpu_set_depth_far */
@@ -3096,15 +3113,16 @@ static void frame_state_reset(void) {
     C3D_TexBind(1, &g.fog_tex);
     s_tex1_mask = NULL;
   }
-  /* (AI-assisted) the early depth buffer starts as "far" like the depth buffer (cleared to 0;
-   * larger = closer). citro3d clears it only after frames that drew; the first frame needs it. */
-  /* (AI-assisted) GBATEK: EARLYDEPTH_DATA is the clear value of the early depth data (its own
-   * storage, not the depth buffer), EARLYDEPTH_CLEAR fills it (also at the end of every citro3d
-   * split): the config's value (early_depth_clear, default 0 = far), and the context keeps it so
-   * every later clear uses the same */
-  GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
-  GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+  /* (AI-assisted) the early depth data starts as "far" like the depth buffer (cleared to 0;
+   * larger = closer): EARLYDEPTH_DATA is its clear value, EARLYDEPTH_CLEAR fills it. With the
+   * early test in use, after the top target is bound (as the self-test checked it) */
   C3D_EarlyDepthTest(false, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
+  if (early_depth_in_use()) {
+    ctr_gpu_early_establish();
+  } else {
+    GPUCMD_AddMaskedWrite(GPUREG_EARLYDEPTH_DATA, 0x7, g_early_clear);
+    GPUCMD_AddWrite(GPUREG_EARLYDEPTH_CLEAR, 1);
+  }
   C3D_ProcTexBind(0, NULL);
   g.proc_radial = -1;
   g.vbuf_used = 0;
@@ -4308,7 +4326,7 @@ int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
 
 /* ---------------- (AI-assisted) 3DS hardware features: settings ---------------- */
 
-static int g_early_depth = 0; /* config.ini early_depth (off by default) */
+static int g_early_depth = 0; /* config.ini early_depth, if the self-test passed */
 /* (AI-assisted) cull_ties: which PICA mode culls the c3l back faces (see ctr_gpu_set_cull_flip) */
 static int g_cull_flip = 0;
 static int g_cull_enable = 0;
@@ -4338,13 +4356,69 @@ void ctr_gpu_set_color16(int on) {
 }
 
 void ctr_gpu_set_early_depth(int on) {
-  g_early_depth = on ? 1 : 0;
+  g_early_want = on ? 1 : 0;
+  g_early_depth = g_early_want && g_early_hw;
+}
+
+int ctr_gpu_early_depth_active(void) {
+  return g_early_want && g_early_hw;
+}
+
+const char* ctr_gpu_early_depth_status(void) {
+  return s_early_status;
+}
+
+/* the GPU's queue run to its end (nothing left waiting for a run) */
+static void gpu_drain(void) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  const u64 t0 = svcGetSystemTick();
+  while ((s64)(svcGetSystemTick() - t0) < GX_WAIT_MS(1000)) {
+    if (gxCmdQueueWait(q, 0)) {
+      if (q->lastEntry >= q->numEntries) {
+        return;
+      }
+      gxCmdQueueRun(q);
+    }
+    gspWaitForAnyEvent();
+  }
+}
+
+int ctr_gpu_early_depth_selftest(void) {
+  if (!g.ready || g.in_frame) {
+    return 0;
+  }
+  gpu_drain(); /* the boot frame */
+  CtrEarlyTestIn in;
+  in.top = &g.top->frameBuf;
+  in.func = g_early_func;
+  in.clear = g_early_clear;
+  in.emulator = ctr_gpu_is_emulator();
+  const int ok = ctr_early_selftest(&in, s_early_status, sizeof(s_early_status));
+  g_early_hw = (ok & CTR_EARLY_OK_BLOCK8) ? 1 : 0;
+  g_early_depth = g_early_want && g_early_hw;
+  g_early_sky = g_early_want_sky && g_early_hw;
+  /* the test's program and state replaced by the game's again */
+  g.cur_prog = PROG_NONE;
+  use_program(PROG_BASIC);
+  C3D_SetFrameBuf(&g.top->frameBuf);
+  set_top_viewport();
+  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+  C3D_CullFace(GPU_CULL_NONE);
+  g.last_state_valid = 0;
+  g.bound_tex = NULL;
+  s_tex_dirty = 1;
+  return g_early_hw;
 }
 
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
-  const int s = sky ? 1 : 0;
+  g_early_want_sky = sky ? 1 : 0;
   const int f = func & 3;
   const u32 c = clear & 0xFFFFFFu;
+  if (g_early_hw && (f != g_early_func || c != g_early_clear)) {
+    g_early_hw = 0; /* (AI-assisted) the self-test checked another function or clear value */
+    g_early_depth = 0;
+  }
+  const int s = g_early_want_sky && g_early_hw;
   if (s != g_early_sky || f != g_early_func || c != g_early_clear) {
     g_early_sky = s;
     g_early_func = f;
@@ -5692,6 +5766,14 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   g.last_state_mesh = mesh;
   g.last_tint = tint;
   g.last_state_valid = 1;
+  /* (AI-assisted) a depth write without a >= / > test can leave the depth farther than the early
+   * depth data says: that data begins again before the next draw that uses it */
+  if (st->zwrite && st->ztest != CTR_TEST_GEQUAL && st->ztest != CTR_TEST_GREATER &&
+      st->ztest != CTR_TEST_NEVER) {
+    s_early_stale = 1;
+  } else if (s_early_stale && early_depth_ok(st)) {
+    ctr_gpu_early_establish();
+  }
   /* (AI-assisted, micro-mg) gpu_micro: the same state but for its texture (see StateFast) */
   const int stex0 = tex_res(st->tex); /* (AI-assisted) an animated slot's texture */
   const int textured0 = stex0 >= 0 && stex0 < MAX_TEXTURES && g.textures[stex0].used == 1;
@@ -6408,6 +6490,9 @@ void ctr_gpu_draw_clip2(const ctr_draw_state* state, uint32_t const0, uint32_t c
   /* (AI-assisted) early_depth = sky: the clouds too; else off, with the configured function and
    * clear value (the defaults GEQUAL, 0 as before: EARLYDEPTH_DATA is the clear value) */
   const int early = g_early_sky && g_depth_far && state->ztest == CTR_TEST_GEQUAL;
+  if (early && s_early_stale) {
+    ctr_gpu_early_establish(); /* (AI-assisted) as apply_state_tint */
+  }
   C3D_EarlyDepthTest(early != 0, (GPU_EARLYDEPTHFUNC)g_early_func, g_early_clear);
   g.cur.early_depth_draws += early;
   C3D_BufInfo* buf = C3D_GetBufInfo();
@@ -7218,6 +7303,9 @@ void ctr_gpu_rt_end(void) {
   s_sky_hook_arg = s_rtc.hook_arg;
   g_early_depth = s_rtc.early;
   g_early_sky = s_rtc.early_sky;
+  if (g_early_depth || g_early_sky) {
+    ctr_gpu_early_establish(); /* (AI-assisted) the target's early depth data begins again */
+  }
   /* the texture cache may hold the tile's old texels: the next bind clears it */
   g.bound_tex = NULL;
   s_tex_dirty = 1;

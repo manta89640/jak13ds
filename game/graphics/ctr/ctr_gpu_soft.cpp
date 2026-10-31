@@ -122,6 +122,51 @@ struct SoftRt {
 };
 std::vector<SoftRt> s_rts;
 
+// (AI-assisted) env CTR_SOFT_EARLY_PROBE: what an exact early depth test would drop of the early
+// depth draws' fragments: one depth per 32x32 block, the farthest of its pixels, updated between
+// draws, cleared at the frame begin and after a render to texture ("[softearly]" per 60 frames).
+// 1: with the band order (ctr_gpu_early_depth_active), 2: without it, 3: both, 60 frames each
+struct EarlyProbe {
+  static constexpr int kBX = (kW + 31) / 32, kBY = (kH + 31) / 32;
+  float block_min[kBX * kBY] = {};
+  bool dirty[kBX * kBY] = {};
+  bool any_dirty = false;
+  double px = 0, zfail = 0, rej = 0, frames = 0;
+} s_early;
+int early_probe_mode() {
+  static const int mode = getenv("CTR_SOFT_EARLY_PROBE") ? atoi(getenv("CTR_SOFT_EARLY_PROBE")) : 0;
+  return mode;
+}
+bool early_probe_bands() {
+  const int m = early_probe_mode();
+  return m == 1 || (m == 3 && (g_soft.frame / 60) % 2 == 0);
+}
+void early_probe_clear() {
+  std::fill(std::begin(s_early.block_min), std::end(s_early.block_min), 0.f);
+  std::fill(std::begin(s_early.dirty), std::end(s_early.dirty), false);
+  s_early.any_dirty = false;
+}
+void early_probe_draw() {
+  if (!early_probe_mode() || !s_early.any_dirty) {
+    return;
+  }
+  for (int b = 0; b < EarlyProbe::kBX * EarlyProbe::kBY; b++) {
+    if (!s_early.dirty[b]) {
+      continue;
+    }
+    const int bx = b % EarlyProbe::kBX, by = b / EarlyProbe::kBX;
+    float m = 1e30f;
+    for (int y = by * 32; y < std::min(kH, by * 32 + 32); y++) {
+      for (int x = bx * 32; x < std::min(kW, bx * 32 + 32); x++) {
+        m = std::min(m, g_soft.depth[x + y * kW]);
+      }
+    }
+    s_early.block_min[b] = m;
+    s_early.dirty[b] = false;
+  }
+  s_early.any_dirty = false;
+}
+
 // ---- (AI-assisted) snow-gpu-audit: per-bucket draw/fill statistics (env CTR_SOFT_STATS=N) ----
 namespace softstats {
 struct B {
@@ -183,6 +228,7 @@ int enabled() {
   return every;
 }
 void draw(const ctr_draw_state& st) {
+  early_probe_draw();
   if (!enabled()) return;
   cur->draws++;
   cur_tp = &tex_px[{cur_name, st.tex}];
@@ -543,6 +589,11 @@ void shade_pixel(const ctr_draw_state& st,
   if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR) && *sten == 0) {
     return;
   }
+  if (early_probe_mode() && !s_target.rt && (st.flags & CTR_STATE_EARLY_DEPTH)) {
+    s_early.px++;
+    s_early.zfail += z < s_target.depth[idx];
+    s_early.rej += z < s_early.block_min[px / 32 + (py / 32) * EarlyProbe::kBX];
+  }
   if (!test(st.ztest, z, s_target.depth[idx])) {
     if (sten && (st.flags & CTR_STATE_STENCIL_CLEAR)) {
       *sten = 0;
@@ -568,6 +619,10 @@ void shade_pixel(const ctr_draw_state& st,
   }
   if (st.zwrite) {
     s_target.depth[idx] = z;
+    if (early_probe_mode() && !s_target.rt) {
+      s_early.dirty[px / 32 + (py / 32) * EarlyProbe::kBX] = true;
+      s_early.any_dirty = true;
+    }
   }
   if (st.flags & CTR_STATE_NO_COLOR) {
     return;
@@ -814,12 +869,21 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   std::fill(g_soft.depth.begin(), g_soft.depth.end(), 0.f);
   std::fill(g_soft.stencil.begin(), g_soft.stencil.end(), 0);
   s_stream.clear();
+  early_probe_clear();
 }
 
 void ctr_gpu_frame_end(void) {
   ctr_gpu_rt_end();  // (AI-assisted) impostors: a render to texture left open
   ctr_gpu_run_sky_hook();
   cull_probe_frame();
+  if (early_probe_mode() && ++s_early.frames >= 60) {
+    const double n = s_early.frames;
+    lg::info("[softearly] band order {}: early depth draws' fragments {:.0f} per frame, {:.0f} "
+             "fail the depth test, {:.0f} ({:.1f}%) an exact 32x32 early test drops",
+             early_probe_bands() ? "on" : "off", s_early.px / n, s_early.zfail / n,
+             s_early.rej / n, s_early.px > 0 ? 100.0 * s_early.rej / s_early.px : 0.0);
+    s_early.px = s_early.zfail = s_early.rej = s_early.frames = 0;
+  }
   g_soft.frame++;
   if (softstats::enabled()) {
     // the mesh triangles that own a pixel of the final frame
@@ -1553,6 +1617,7 @@ void ctr_gpu_rt_end(void) {
   s_target.color = g_soft.color.data();
   s_target.depth = g_soft.depth.data();
   s_target.stencil = g_soft.stencil.data();
+  early_probe_clear();  // (AI-assisted) as the 3DS clears the early depth data after it
 }
 
 void ctr_gpu_rt_delete(int tex) {
@@ -2691,6 +2756,15 @@ void ctr_gpu_set_vram_textures(int) {}
 void ctr_gpu_set_color16(int) {}
 void ctr_gpu_set_early_depth(int) {}
 void ctr_gpu_set_early_depth_params(int, int, unsigned int) {}  // (AI-assisted) no early test
+int ctr_gpu_early_depth_selftest() {
+  return 0;
+}
+int ctr_gpu_early_depth_active() {
+  return early_probe_bands();
+}
+const char* ctr_gpu_early_depth_status() {
+  return "not run (host)";
+}
 void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
 void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips
 void ctr_gpu_set_skin_rows_f24(int) {}

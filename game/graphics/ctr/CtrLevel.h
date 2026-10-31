@@ -1306,6 +1306,8 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) with vista chunks: the visible draws of early_draws, sorted_draws and
   // ordered_draws split in one walk, in list order: the vista pass's, and the main pass's lists
   std::vector<u32> m_vista_draws, m_main_draws[3];
+  // (AI-assisted) the early draws by distance band (and morph program last in each), nearest first
+  std::vector<u32> m_band_draws[6];
   // (AI-assisted, j2cull) the visible draws' places per list (bit sets), and those draws in order
   std::vector<u32> m_list_bits[3], m_list_vis[3];
 };
