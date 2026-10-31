@@ -708,6 +708,7 @@ CtrOceanFull::CtrOceanFull()
   // (AI-assisted) config.ini ocean_texture_rate, ocean_near_alpha (CtrSettings.h)
   const CtrSettings& s = ctr_settings();
   m_tex_rate = std::clamp(s.ocean_texture_rate, 1, 8);
+  m_refl_rate = m_tex_rate;
   const int floor = (int)(std::clamp(s.ocean_near_alpha, 0.f, 1.f) * 128.f + 0.5f);
   m_near->set_alpha_floor(floor);
   m_mid->set_env_hook(this);  // (AI-assisted, j1ocean) the sky reflection
@@ -799,7 +800,7 @@ void CtrOceanFull::ocean_env(u64 tex0, const float color[4]) {
   }
   const u32 col = c[0] | (c[1] << 8) | (c[2] << 16);
   const bool due = m_refl_made == ~0ull || rs.frame_idx < m_refl_made ||
-                   rs.frame_idx - m_refl_made >= (u64)m_tex_rate;
+                   rs.frame_idx - m_refl_made >= (u64)m_refl_rate;
   if (m_refl < 0 || src_new || (col != m_refl_color && due)) {
     const size_t n = (size_t)m_refl_w * m_refl_h;
     m_refl_texels.resize(n);

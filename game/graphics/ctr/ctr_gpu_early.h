@@ -13,10 +13,12 @@ extern "C" {
 #endif
 
 typedef struct {
-  C3D_FrameBuf* top;  /* the top render target (its own memory, mode and formats) */
-  int func;           /* GPU_EARLYDEPTHFUNC the game uses */
-  u32 clear;          /* EARLYDEPTH_DATA the game uses */
-  int emulator;       /* Azahar: no early depth test to check */
+  C3D_FrameBuf* top;     /* the top render target (its own memory, mode and formats) */
+  shaderProgram_s* prog; /* the game's ctr_basic program (it outlives the test) */
+  int uloc_projection;   /* its projection uniform */
+  int func;              /* GPU_EARLYDEPTHFUNC the game uses */
+  u32 clear;             /* EARLYDEPTH_DATA the game uses */
+  int emulator;          /* Azahar: no early depth test to check */
 } CtrEarlyTestIn;
 
 enum {

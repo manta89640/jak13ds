@@ -319,6 +319,9 @@ static void bench_start(const char* id) {
            (double)(svcGetSystemTick() - B.start_tick) / SYSCLOCK_ARM11, id);
   ctr_console_status(B.status);
   B.tests++;
+  /* between tests the HOME Menu or sleep may take the GPU */
+  ctr_gpu_bench_gate(0);
+  ctr_gpu_bench_gate(1);
 }
 
 /* ---------------- GPU counters ---------------- */
@@ -1847,6 +1850,7 @@ static void teardown(void) {
 }
 
 int ctr_gpu_bench_run(void) {
+  ctr_gpu_bench_gate(1);
   memset(&B, 0, sizeof(B));
   B.start_tick = svcGetSystemTick();
   bench_file("===== pica_bench session =====");
@@ -1925,5 +1929,6 @@ int ctr_gpu_bench_run(void) {
   }
   ctr_console_status("");
   ctr_log_sync();
+  ctr_gpu_bench_gate(0);
   return B.dead;
 }

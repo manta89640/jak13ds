@@ -15,8 +15,6 @@
 #include <stdio.h>
 #include <string.h>
 
-extern const uint8_t ctr_basic_shbin[];
-extern const size_t ctr_basic_shbin_size;
 void ctr_linear_lock(void);
 void ctr_linear_unlock(void);
 
@@ -69,10 +67,9 @@ typedef struct {
 } EdOut;
 
 static struct {
-  DVLB_s* dvlb;
-  shaderProgram_s prog;
-  int prog_ok;
+  shaderProgram_s* prog;
   int uloc;
+  int timeout; /* a GPU wait timed out: the GPU may still write the test's buffers */
   EdVtx* vb;
   int nv;
   u8* rb;
@@ -136,7 +133,7 @@ static void use_target(C3D_FrameBuf* fb, int scissor) {
 
 /* program, vertex layout, combiners (vertex color), no texture, culling or stencil */
 static void common_state(void) {
-  C3D_BindProgram(&E.prog);
+  C3D_BindProgram(E.prog);
   C3D_AttrInfo* a = C3D_GetAttrInfo();
   AttrInfo_Init(a);
   AttrInfo_AddLoader(a, 0, GPU_FLOAT, 3);
@@ -207,7 +204,11 @@ static int frame_end(void) {
     GSPGPU_FlushDataCache(E.vb, (u32)E.nv * sizeof(EdVtx));
   }
   C3D_FrameEnd(GX_CMDLIST_FLUSH);
-  return gxCmdQueueWait(ed_queue(), ED_TIMEOUT) ? 1 : 0;
+  if (!gxCmdQueueWait(ed_queue(), ED_TIMEOUT)) {
+    E.timeout = 1;
+    return 0;
+  }
+  return 1;
 }
 
 /* the events of feats, then the far layer and the sky, as the game draws them (after its frame
@@ -419,20 +420,16 @@ int ctr_early_selftest(const CtrEarlyTestIn* in, char* status, int size) {
   status[0] = 0;
   EdTarget top;
   target_init(&top, in->top);
-  E.dvlb = DVLB_ParseFile((u32*)ctr_basic_shbin, (u32)ctr_basic_shbin_size);
-  if (E.dvlb) {
-    shaderProgramInit(&E.prog);
-    shaderProgramSetVsh(&E.prog, &E.dvlb->DVLE[0]);
-    E.prog_ok = 1;
-    E.uloc = shaderInstanceGetUniformLocation(E.prog.vertexShader, "projection");
-  }
+  E.prog = in->prog;
+  E.uloc = in->uloc_projection;
   E.rb_bytes = (u32)B32_W * B32_H * 4;
   E.vb = (EdVtx*)lin_alloc(ED_VERTS * sizeof(EdVtx));
   E.rb = (u8*)lin_alloc(E.rb_bytes);
   E.rt_color = lin_alloc(RT_W * RT_H * 4);
   E.rt_depth = lin_alloc(RT_W * RT_H * 2);
   int ok = 0;
-  if (!E.prog_ok || E.uloc < 0 || !E.vb || !E.rb || !E.rt_color || !E.rt_depth) {
+  if (!E.prog || !E.prog->vertexShader || E.uloc < 0 || !E.vb || !E.rb || !E.rt_color ||
+      !E.rt_depth) {
     snprintf(status, (size_t)size, "not run (no memory)");
   } else {
     memset(E.rt_color, 0, RT_W * RT_H * 4);
@@ -455,8 +452,10 @@ int ctr_early_selftest(const CtrEarlyTestIn* in, char* status, int size) {
     } else {
       snprintf(part32, sizeof(part32), "block32 not run (no VRAM)");
     }
-    vram_free(c32);
-    vram_free(d32);
+    if (!E.timeout) {
+      vram_free(c32);
+      vram_free(d32);
+    }
     ok |= check_target(&top, "block8", part8, sizeof(part8)) > 0 ? CTR_EARLY_OK_BLOCK8 : 0;
     /* the screen shows this buffer next: nothing of the test may be left in it */
     if (frame_begin()) {
@@ -468,15 +467,11 @@ int ctr_early_selftest(const CtrEarlyTestIn* in, char* status, int size) {
   }
   C3D_EarlyDepthTest(false, (GPU_EARLYDEPTHFUNC)E.func, E.clear);
   C3D_DepthMap(true, -1.0f, 0.0f);
-  lin_free(E.vb);
-  lin_free(E.rb);
-  lin_free(E.rt_color);
-  lin_free(E.rt_depth);
-  if (E.prog_ok) {
-    shaderProgramFree(&E.prog);
-  }
-  if (E.dvlb) {
-    DVLB_Free(E.dvlb);
+  if (!E.timeout) {
+    lin_free(E.vb);
+    lin_free(E.rb);
+    lin_free(E.rt_color);
+    lin_free(E.rt_depth);
   }
   return ok;
 }
