@@ -265,6 +265,9 @@ struct PolyVert {
   float p[4], st[4], c[4];
 };
 static_assert(sizeof(PolyVert) == 48);
+// a clip pass keeps its k inside vertices and adds at most 2 * min(k, n - k) crossings, so at most
+// 1.5 n: 4 -> 6 -> 9 -> 13 -> 19 over the four planes, and the first vertex again at the end
+constexpr int kPolyMax = 20;
 
 inline void store_vert(u32 addr, const PolyVert& v) {
   gstore_q(addr, v.p);
@@ -372,7 +375,7 @@ u64 render_ocean_quad_impl(const NativeArgs& args) {
     k14[i] = vf[14].f[i];
   }
   float pos[4][4];
-  PolyVert poly_a[16], poly_b[16];
+  PolyVert poly_a[kPolyMax], poly_b[kPolyMax];
   for (int v = 0; v < 4; v++) {
     float p[4];
     gload_q(p, src + 48 * v);
