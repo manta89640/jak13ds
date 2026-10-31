@@ -100,7 +100,8 @@ void ctr_thread_install_crash_handler(void); /* platform/3ds/port */
 static void gl_to_pica_check(void); /* (AI-assisted) */
 
 /* (AI-assisted) hardware hang bisect: where the render thread is (ctr_gpu_diag_stage) and how
- * many frames it finished, logged once per second for the first 60 s by a watchdog thread */
+ * many frames it finished, logged once per second for the first 60 s by a watchdog thread, and
+ * whenever it has no frame for 3 s (diag_stall_report) */
 static const char* volatile s_diag_stage = "not started";
 static volatile u32 s_diag_frames;
 static volatile Thread s_diag_render_thread;
@@ -2948,6 +2949,7 @@ static float overlap2_room(int n) {
   if (idle || q->numEntries + n >= q->maxEntries) {
     if (!idle) {
       const u64 t0 = svcGetSystemTick();
+      diag_rt("frame_overlap2: waiting for room in the GX queue");
       gxCmdQueueWait(q, -1);
       ms = (float)((double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0));
       s_ov2_drains++;
@@ -2981,6 +2983,7 @@ static float overlap2_wait_frame(u32 id) {
   }
   gxCmdQueue_s* q = &__C3D_Context.gxQueue;
   const u64 t0 = svcGetSystemTick();
+  diag_rt("frame_overlap2: waiting for the frame before last (fence)");
   for (;;) {
     svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)s_pres.fence, 16);
     if ((s32)(*(volatile u32*)s_pres.fence - id) >= 0) {
@@ -9199,15 +9202,37 @@ int ctr_gpu_async_start(ctr_gpu_job_fn fn, void* arg) {
   return 1;
 }
 
+/* render_watchdog: the render thread without a frame for 3 s: where it is and the GX queue */
+static void diag_stall_report(int sec) {
+  gxCmdQueue_s* q = &__C3D_Context.gxQueue;
+  printf("[ctr] render stalled %ds: stage %s, frame %lu, GX queue %u entries, %u sent, %u done, "
+         "idle %d; fence %lu\n",
+         sec, s_diag_stage, (unsigned long)g.frame_no, q->numEntries, q->curEntry, q->lastEntry,
+         (int)gxCmdQueueWait(q, 0),
+         s_pres.fence ? (unsigned long)*(volatile u32*)s_pres.fence : 0ul);
+  for (int e = q->lastEntry; e < q->numEntries && e < q->lastEntry + 4; e++) {
+    const u32* d = q->entries[e].data;
+    printf("[ctr]   entry %d (%s): %08lx %08lx %08lx %08lx\n", e,
+           e < q->curEntry ? "sent" : "waiting", (unsigned long)d[0], (unsigned long)d[1],
+           (unsigned long)d[2], (unsigned long)d[3]);
+  }
+}
 static void diag_thread_main(void* unused) {
   (void)unused;
   u32 last = 0;
-  for (int i = 1; i <= 60; i++) {
+  int still = 0;
+  for (int i = 1;; i++) {
     svcSleepThread(1000000000LL);
     const u32 f = s_diag_frames;
-    printf("[ctr] render alive %ds: frame %lu, last stage %s%s\n", i, (unsigned long)f,
-           s_diag_stage, f == last ? " (no frame in the last second)" : "");
+    if (i <= 60) {
+      printf("[ctr] render alive %ds: frame %lu, last stage %s%s\n", i, (unsigned long)f,
+             s_diag_stage, f == last ? " (no frame in the last second)" : "");
+    }
+    still = f == last ? still + 1 : 0;
     last = f;
+    if (still == 3) {
+      diag_stall_report(i);
+    }
   }
 }
 

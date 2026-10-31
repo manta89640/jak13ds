@@ -1228,7 +1228,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<float> m_wind_rows;
   std::vector<s32> m_wind_row_of;  // per visible chunk (m_visible index): its rows, -1 none yet
   std::vector<u32> m_wind_row_id;
-  u32 m_wind_rows_id = 0;
   u64 m_wind_draws = 0, m_wind_tris = 0;
   // the tie geomorph's rows (c3l::ExtMorph: f at 4 * row) per visible chunk with moving vertices
   // (m_visible index: its first row in m_morph_rows, -1 none) and their ids
