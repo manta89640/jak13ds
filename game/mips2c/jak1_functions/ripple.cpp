@@ -528,7 +528,7 @@ u64 native_impl(const NativeArgs& args) {
       const u32 w = gp + 16 + 28 * (u32)i;
       const s32 xi = gload<s16>(w + 8), zi = gload<s16>(w + 10);
       const float angle = float_ret(call(cache.atan, float_arg((float)zi), float_arg((float)xi)));
-      // (AI-assisted, cpusound) as the original: 32-bit products (mult3), a 64-bit add, the low
+      // as the original: 32-bit products (mult3), a 64-bit add, the low
       // word (cvt.s.w), sqrt.s of its magnitude. |xi| = |zi| = 32768 sums to 2^31: -2^31 there,
       // not an int overflow (sqrtf of a negative int would give NaN waves)
       const s32 len2 = (s32)(u32)((s64)xi * xi + (s64)zi * zi);

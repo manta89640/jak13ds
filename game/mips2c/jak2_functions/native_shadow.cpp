@@ -903,7 +903,7 @@ u64 add_double_tris(Mem m, u32 hdr, u32 dc, u32 data, u64 out) {
 /*!
  * shadow-add-single-tris (settings flag 64): all the single triangles' words (to 344), the count
  * word with 256 set, mscalf 6
- * (AI-assisted, cpusound) On purpose not like the original here: its copy loop counts the word
+ * On purpose not like the original here: its copy loop counts the word
  * with 256 set (ori a1, a1, 256), so it copies count | 256 words, about 1 KB past the end of the
  * packet; this copies count words. CtrShadowJak2 reads only count & 255 entries, so the picture
  * is the same, but verify mode (OPENGOAL_MIPS2C_VERIFY=1) reports a MISMATCH past the packet on
@@ -1068,7 +1068,7 @@ u64 shadow_execute_impl(const NativeArgs& args) {
 
 }  // namespace
 
-// (AI-assisted, cpusound) NATIVE_CALLS_GOAL: with *shadow-debug* set it calls debug-draw-settings
+// NATIVE_CALLS_GOAL: with *shadow-debug* set it calls debug-draw-settings
 // (GOAL code that stores to GOAL memory), which verify mode checks only with the whole-memory
 // compare
 const NativeImpl shadow_execute = MIPS2C_NATIVE_IMPL(shadow_execute_impl, NATIVE_CALLS_GOAL, 0);
