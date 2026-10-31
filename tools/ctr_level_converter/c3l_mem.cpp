@@ -43,6 +43,8 @@ namespace {
 
 struct LevelMem {
   u64 tex = 0, tex_masks = 0, meshes = 0, near = 0, merc = 0, normals = 0, wind = 0;
+  // the tfrag geomorph (c3l::ExtTfrag): the records in the meshes' tails, the color lists (heap)
+  u64 tmorph = 0, tmorph_heap = 0;
   // the meshes Jak II's distance freeing can leave out (shrubs and ties with a distance limit)
   u64 dist_free = 0;
   // textures only drawn by the chunks a far level frees (CtrLevels::unload_detail)
@@ -52,7 +54,7 @@ struct LevelMem {
   std::vector<std::pair<u64, u32>> tex_ids;
   std::vector<u64> keys;  // the content keys (ExtTexKey)
   bool ok = false;
-  u64 linear() const { return meshes + merc + normals + wind; }
+  u64 linear() const { return meshes + merc + normals + wind + tmorph; }
 };
 
 u32 mesh_bytes(u32 vertex_count, u32 index_count) {
@@ -156,6 +158,22 @@ LevelMem level_mem(const fs::path& path) {
           n += e.chunk < chunks.size() ? chunks[e.chunk].vertex_count * 4u : 0;
         }
         m.normals = mesh_bytes((u32)((n + 15) / 16), 2);
+      }
+    }
+    if (ext.size >= c3l::kExtHeaderTfragSize) {
+      c3l::ExtTfrag et{};
+      std::vector<c3l::TfragChunk> tcs;
+      if (f.read(hdr.ext_offset + c3l::kExtHeaderMorphSize, &et, sizeof(et)) && et.chunk_count &&
+          f.read_array(et.chunks_offset, et.chunk_count, &tcs)) {
+        // (near chunks' records live in the stream arena with them)
+        for (const auto& t : tcs) {
+          m.tmorph += t.records_offset && t.chunk < chunks.size() && !near[t.chunk]
+                          ? chunks[t.chunk].vertex_count * (u64)sizeof(c3l::TfragMorphVertex)
+                          : 0;
+        }
+        m.tmorph_heap = (u64)et.color_count * sizeof(c3l::TfragMorphColor) +
+                        (u64)et.group_count * sizeof(c3l::TfragGroup) +
+                        (u64)et.run_lod_count * sizeof(c3l::RunLod);
       }
     }
     if (ext.size >= c3l::kExtHeaderV22Size) {
@@ -305,19 +323,21 @@ int main(int argc, char** argv) {
       levels[e.path().stem().string()] = level_mem(e.path());
     }
   }
-  printf("level              textures (masks) (detail)  meshes   near   merc normals wind  "
-         "linear KB\n");
+  printf("level              textures (masks) (detail)  meshes   near   merc normals wind tmorph "
+         "linear KB (tmorph heap)\n");
   for (const auto& [name, m] : levels) {
     if (!m.ok) {
       printf("%-16s unreadable\n", name.c_str());
       continue;
     }
-    printf("%-16s %8llu (%5llu) (%6llu) %7llu %6llu %6llu %7llu %4llu %8llu\n", name.c_str(),
-           (unsigned long long)m.tex / 1024, (unsigned long long)m.tex_masks / 1024,
+    printf("%-16s %8llu (%5llu) (%6llu) %7llu %6llu %6llu %7llu %4llu %6llu %8llu (%llu)\n",
+           name.c_str(), (unsigned long long)m.tex / 1024, (unsigned long long)m.tex_masks / 1024,
            (unsigned long long)m.tex_detail / 1024,
            (unsigned long long)m.meshes / 1024, (unsigned long long)m.near / 1024,
            (unsigned long long)m.merc / 1024, (unsigned long long)m.normals / 1024,
-           (unsigned long long)m.wind / 1024, (unsigned long long)(m.linear() + m.tex) / 1024);
+           (unsigned long long)m.wind / 1024, (unsigned long long)m.tmorph / 1024,
+           (unsigned long long)(m.linear() + m.tex) / 1024,
+           (unsigned long long)m.tmorph_heap / 1024);
   }
   if (formats) {
     printf("\nlevel            RGB565 RGBA4  ETC1 ETC1A4 RGBA8    A8    A4 KB\n");

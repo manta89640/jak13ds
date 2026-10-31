@@ -506,6 +506,67 @@ struct MorphVertex {
 static_assert(sizeof(MorphVertex) == 8);
 
 /*!
+ * The PS2's tfrag geomorph (common/custom_data/TfragMorph.h). Each tfrag visibility group of the
+ * near tier (lod_tier 1) has three versions as runs of its chunks (RunLod in ExtTfrag's array, not
+ * the ExtHeader's): kRunLodNear (geometry 0), kRunLodMid (geometry 1), kRunLodFar (geometry 2),
+ * sharing their vertices. A vertex at clip depth w (in the units of dists) is at pos + (f0 *
+ * band0 + f1 * band1) * delta_scale with f0 = clamp((w - dists[1]) / (dists[2] - dists[1]), 0, 1),
+ * f1 = clamp((w - dists[0]) / (dists[1] - dists[0]), 0, 1), its color c + f1 * color1 * (m - c) +
+ * f0 * color0 * (t - m): every version draws the PS2's surface where it is drawn, the mid version
+ * where the group's nearest point is beyond TfragGroup::mid, the far one beyond far. m and t are
+ * the means of the TfragMorphColor entries' colors (written by the runtime with the time of day).
+ * ExtHeader::size >= kExtHeaderTfragSize, then this at ext_offset + kExtHeaderMorphSize.
+ */
+constexpr uint32_t kExtHeaderTfragSize = 208;
+struct ExtTfrag {
+  float dists[4];           // m2, m1, m0 (view depth, game units), 0
+  uint32_t group_count;     // TfragGroup[]
+  uint32_t groups_offset;   // absolute
+  uint32_t chunk_count;     // TfragChunk[]
+  uint32_t chunks_offset;   // absolute
+  uint32_t run_lod_count;   // RunLod[] of the TfragChunks' runs (group: TfragGroup index)
+  uint32_t run_lod_offset;  // absolute
+  uint32_t color_count;     // TfragMorphColor[]
+  uint32_t colors_offset;   // absolute
+};
+static_assert(sizeof(ExtTfrag) == kExtHeaderTfragSize - kExtHeaderMorphSize);
+struct TfragGroup {
+  float bsphere[4];  // world: x, y, z, radius (every version, unmoved)
+  // its mid version from this view depth of its nearest point on, its far version from far on
+  // (game units: ExtTfrag dists[1] and dists[2]; a version the same as the one before is left out:
+  // mid = far, or far = FLT_MAX)
+  float mid, far;
+  float pad[2];
+};
+static_assert(sizeof(TfragGroup) == 32);
+struct TfragChunk {
+  uint32_t chunk;
+  uint32_t run_first;       // its vis_run_count runs' RunLod in ExtTfrag's array, from here
+  uint32_t records_offset;  // TfragMorphVertex[vertex_count] (absolute; the mesh tail), 0: none
+  float delta_scale;        // band0 / band1 x this = the chunk's quantized units
+  uint32_t color_first;     // TfragMorphColor [color_first, color_first + color_count), by vertex
+  uint32_t color_count;
+  uint32_t pad[2];
+};
+static_assert(sizeof(TfragChunk) == 32);
+struct TfragMorphVertex {
+  int8_t band0[3];
+  uint8_t color0;  // 1: the color moves in band 0
+  int8_t band1[3];
+  uint8_t color1;  // 1: the color moves in band 1
+  uint8_t m[4];    // the color at the end of band 1 (rgba)
+  uint8_t t[4];    // at the end of band 0
+};
+static_assert(sizeof(TfragMorphVertex) == 16);
+struct TfragMorphColor {
+  uint16_t vertex;  // in its chunk
+  uint16_t m[2];    // TodColor indices: m is their mean
+  uint16_t t[4];    // t is their mean
+  uint16_t pad;
+};
+static_assert(sizeof(TfragMorphColor) == 16);
+
+/*!
  * (AI-assisted, streaming) v19: a run's bounding sphere in its chunk's quantized units (world =
  * origin + c * scale, radius r * scale): the center of the box of the run's vertices (rounded down)
  * and the length of the larger half of the box per axis, ceil + 1 (as the runtime made them from the

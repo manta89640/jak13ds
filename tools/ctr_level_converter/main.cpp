@@ -34,6 +34,7 @@
 #include "keira_model.h"
 #include "c3l_compare.h"
 #include "texshare.h"
+#include "tfrag_lod.h"
 #include "tie_lod.h"
 #include "fmt/format.h"
 #include "game/graphics/ctr/c3l_format.h"
@@ -71,6 +72,11 @@ struct Options {
   bool tie_morph = true;
   bool tie_morph_jak2 = false;
   std::string tie_morph_dir;
+  // the PS2's tfrag geomorph (<level>.tfragmorph from the level extractor, in tfrag_morph_dir; "":
+  // next to the .fr3): geometries 1 and 2 as the near tier's mid and far versions, the morph of
+  // geometries 0 and 1 (c3l::ExtTfrag). Jak 1 only
+  bool tfrag_morph = true;
+  std::string tfrag_morph_dir;
   float tie_lod_budget_kb = -1.f;
   // smallest shape error worth a near version, as an angle (radians) at the larger of the group's
   // radius and tie_lod_view_m meters (0.002: half a pixel on the top screen)
@@ -275,6 +281,12 @@ struct SrcVertex {
   u8 mband = 0;
   float mdelta[3] = {0, 0, 0};
   float mdelta2[3] = {0, 0, 0};
+  // a tfrag vertex of the PS2's tfrag geomorph (c3l::ExtTfrag): tfrag_morph::Kind + 1 (0: none),
+  // its world offsets at the end of band 0 and band 1, the colors (tod ids) its color goes to
+  u8 tkind = 0;
+  float tband0[3] = {0, 0, 0};
+  float tband1[3] = {0, 0, 0};
+  u32 tcol[6] = {0, 0, 0, 0, 0, 0};
 };
 
 // a near chunk vertex's morph (c3l::MorphVertex): instance + 1 (0: doesn't move), the two bands'
@@ -284,6 +296,18 @@ struct MorphRec {
   s16 d[6] = {0, 0, 0, 0, 0, 0};
   bool operator==(const MorphRec& o) const {
     return key == o.key && memcmp(d, o.d, sizeof(d)) == 0;
+  }
+};
+
+// a tfrag vertex's geomorph (c3l::TfragMorphVertex, TfragMorphColor): its kind (tfrag_morph::Kind
+// + 1, 0: none), its offsets at the end of band 0 and band 1 in the chunk's quantized units, the
+// time of day colors (Vertex::pad) its color goes to
+struct TfragRec {
+  u8 kind = 0;
+  s32 d[6] = {0, 0, 0, 0, 0, 0};
+  u16 col[6] = {0, 0, 0, 0, 0, 0};
+  bool operator==(const TfragRec& o) const {
+    return kind == o.kind && memcmp(d, o.d, sizeof(d)) == 0 && memcmp(col, o.col, sizeof(col)) == 0;
   }
 };
 
@@ -327,6 +351,9 @@ struct SrcTri {
   u32 band = 0;
   // c3l::kDrawCullCond: the surface's openings (Converter::cond_sets), UINT32_MAX: none
   u32 cond = UINT32_MAX;
+  // the tfrag geomorph's version (c3l::kRunLod*, 0: none) of tfrag group tgroup (c3l::ExtTfrag)
+  u8 tlod = 0;
+  u32 tgroup = UINT32_MAX;
 };
 
 // a planar opening of a tie surface marked c3l::kDrawCullCond (Converter::orient_ties):
@@ -817,10 +844,127 @@ struct Converter {
       tris[i].tier = cur_tier;
     }
   }
+  // the PS2's tfrag geomorph (Options::tfrag_morph): the version and morph of the tree being added
+  const tfrag_lod::Morph* tmorph = nullptr;
+  const std::vector<tfrag_morph::Vertex>* cur_tmorph = nullptr;
+  u8 cur_tlod = 0;
+  u32 cur_ttree = 0;
+  std::map<u32, u32> tgroup_of;  // vis id (or 0x10000 + tree without one) -> tfrag group
+  std::vector<std::array<float, 4>> tgroups;  // their spheres (made by tfrag_group_spheres)
+  // per tfrag group the view depths its mid and far versions start at (c3l::TfragGroup)
+  std::vector<float> tgroup_mid, tgroup_far;
+  size_t tfrag_same_dropped = 0, tfrag_always_groups = 0;
+  // a version the same as the one before it (fragments with fewer geometries: their chains are
+  // the same) is left out, the group switching to the next one where that one began; a group
+  // whose three versions are the same is one version, always drawn
+  void tfrag_drop_same_versions(size_t first, float mid_d, float far_d) {
+    using Tri = std::array<float, 10>;
+    const size_t ng = tgroup_of.size();
+    std::vector<std::vector<Tri>> sig[3];
+    for (auto& v : sig) {
+      v.resize(ng);
+    }
+    auto version = [](u8 l) { return l == c3l::kRunLodNear ? 0 : l == c3l::kRunLodMid ? 1 : 2; };
+    for (size_t i = first; i < tris.size(); i++) {
+      const auto& t = tris[i];
+      if (t.tgroup == UINT32_MAX) {
+        continue;
+      }
+      int r = 0;
+      for (int k = 1; k < 3; k++) {
+        const auto& a = verts[t.v[k]];
+        const auto& b = verts[t.v[r]];
+        if (std::tie(a.x, a.y, a.z) < std::tie(b.x, b.y, b.z)) {
+          r = k;
+        }
+      }
+      Tri x;
+      for (int k = 0; k < 3; k++) {
+        const auto& v = verts[t.v[(r + k) % 3]];
+        x[3 * k] = v.x;
+        x[3 * k + 1] = v.y;
+        x[3 * k + 2] = v.z;
+      }
+      x[9] = (float)t.draw_key;
+      sig[version(t.tlod)][t.tgroup].push_back(x);
+    }
+    tgroup_mid.assign(ng, mid_d);
+    tgroup_far.assign(ng, far_d);
+    std::vector<u8> drop(ng, 0);  // bit 0: the mid version, 1: the far one, 2: both (always)
+    for (size_t g = 0; g < ng; g++) {
+      for (auto& v : sig) {
+        std::sort(v[g].begin(), v[g].end());
+      }
+      const bool same01 = sig[0][g] == sig[1][g], same12 = sig[1][g] == sig[2][g];
+      if (same01 && same12) {
+        drop[g] = 4;
+        tfrag_always_groups++;
+      } else if (same01) {
+        drop[g] = 1;
+        tgroup_mid[g] = far_d;
+      } else if (same12) {
+        drop[g] = 2;
+        tgroup_far[g] = std::numeric_limits<float>::max();
+      }
+    }
+    size_t out = first;
+    for (size_t i = first; i < tris.size(); i++) {
+      auto t = tris[i];
+      if (t.tgroup != UINT32_MAX) {
+        const u8 d = drop[t.tgroup];
+        const int v = version(t.tlod);
+        if ((d == 1 && v == 1) || (d == 2 && v == 2) || (d == 4 && v > 0)) {
+          tfrag_same_dropped++;
+          continue;
+        }
+        if (d == 4) {
+          t.tlod = 0;
+        }
+      }
+      tris[out++] = t;
+    }
+    tris.resize(out);
+  }
+  // each tfrag group's sphere: its unmoved vertices of every version (the box's center)
+  void tfrag_group_spheres() {
+    std::vector<std::array<float, 6>> box(tgroup_of.size(),
+                                          {1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f});
+    for (const auto& t : tris) {
+      if (t.tgroup == UINT32_MAX) {
+        continue;
+      }
+      auto& b = box[t.tgroup];
+      for (u32 vi : t.v) {
+        const float p[3] = {verts[vi].x, verts[vi].y, verts[vi].z};
+        for (int c = 0; c < 3; c++) {
+          b[c] = std::min(b[c], p[c]);
+          b[3 + c] = std::max(b[3 + c], p[c]);
+        }
+      }
+    }
+    tgroups.assign(box.size(), {0, 0, 0, 0});
+    for (size_t g = 0; g < box.size(); g++) {
+      for (int c = 0; c < 3; c++) {
+        tgroups[g][c] = 0.5f * (box[g][c] + box[g][3 + c]);
+      }
+    }
+    for (const auto& t : tris) {
+      if (t.tgroup == UINT32_MAX) {
+        continue;
+      }
+      auto& sp = tgroups[t.tgroup];
+      for (u32 vi : t.v) {
+        const float dx = verts[vi].x - sp[0], dy = verts[vi].y - sp[1], dz = verts[vi].z - sp[2];
+        sp[3] = std::max(sp[3], std::sqrt(dx * dx + dy * dy + dz * dz));
+      }
+    }
+  }
   void add_tfrag_tree_impl(tfrag3::TfragTree& tree) {
     tree.unpack();
     u32 base = verts.size();
-    for (auto& v : tree.unpacked.vertices) {
+    const bool tm = cur_tmorph && cur_tmorph->size() == tree.unpacked.vertices.size();
+    for (size_t vi = 0; vi < tree.unpacked.vertices.size(); vi++) {
+      const auto& v = tree.unpacked.vertices[vi];
       SrcVertex sv;
       sv.x = v.x;
       sv.y = v.y;
@@ -832,6 +976,19 @@ struct Converter {
       }
       note_alpha(tree.colors, v.color_index);  // (AI-assisted)
       sv.tod = tod_color(tree.colors, v.color_index);
+      if (tm) {
+        const auto& m = (*cur_tmorph)[vi];
+        sv.tkind = (u8)(m.kind + 1);
+        for (int c = 0; c < 3; c++) {
+          sv.tband0[c] = m.band0[c];
+          sv.tband1[c] = m.band1[c];
+        }
+        const u16 cs[6] = {m.color_m[0], m.color_m[1], m.color_t[0],
+                           m.color_t[1], m.color_t[2], m.color_t[3]};
+        for (int k = 0; k < 6; k++) {
+          sv.tcol[k] = cs[k] < tree.colors.color_count ? tod_color(tree.colors, cs[k]) : sv.tod;
+        }
+      }
       verts.push_back(sv);
     }
     for (auto& d : tree.draws) {
@@ -842,6 +999,7 @@ struct Converter {
       size_t idx = d.unpacked.idx_of_first_idx_in_full_buffer;
       for (const auto& g : d.vis_groups) {
         cur_vis = vis_id(tree.bvh, g.vis_idx_in_pc_bvh);
+        const size_t tri0 = tris.size();
         if (tree.use_strips) {
           add_strips(tree.unpacked.indices, idx, g.num_inds, base, id);
         } else {
@@ -851,6 +1009,14 @@ struct Converter {
                                    base + tree.unpacked.indices[i + 2]},
                                   id});
             tris.back().vis = cur_vis;
+          }
+        }
+        if (cur_tlod) {
+          const u32 key = cur_vis != 0xffff ? cur_vis : 0x10000u + cur_ttree;
+          const u32 grp = tgroup_of.emplace(key, (u32)tgroup_of.size()).first->second;
+          for (size_t i = tri0; i < tris.size(); i++) {
+            tris[i].tlod = cur_tlod;
+            tris[i].tgroup = grp;
           }
         }
         idx += g.num_inds;
@@ -4517,6 +4683,21 @@ int stream_need_class(const Converter& cv, const Options& opt, u32 g) {
   }
   return c;
 }
+// a tfrag group's near chunk is needed within the distance its last streamed version is drawn to
+// (its far version's start, else its mid's) + its radius (c3l::ExtTfrag)
+float tfrag_need(const Converter& cv, u32 g) {
+  const float to =
+      cv.tgroup_far[g] < std::numeric_limits<float>::max() ? cv.tgroup_far[g] : cv.tgroup_mid[g];
+  return to + cv.tgroups[g][3];
+}
+int tfrag_need_class(const Converter& cv, const Options& opt, u32 g) {
+  const float m = tfrag_need(cv, g) / 4096.f;
+  int c = 0;
+  while (c < (int)opt.stream_classes.size() && m >= opt.stream_classes[c]) {
+    c++;
+  }
+  return c;
+}
 float stream_class_cell(const Options& opt, int nc) {
   return nc < (int)opt.stream_class_cells.size() ? opt.stream_class_cells[nc] : opt.stream_cell;
 }
@@ -4626,17 +4807,96 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       palette_line("tie", tree.colors);
     }
   }
-  for (auto& tree : level.tfrag_trees[opt.tfrag_geo]) {
+  // the PS2's tfrag geomorph (common/custom_data/TfragMorph.h): geometry 1 and 2 as the near
+  // tier's mid and far versions of each visibility group, geometries 0 and 1 morphing
+  tfrag_lod::Morph tfrag_morph_data;
+  float tfrag_dists[3] = {0, 0, 0};
+  if (two_tiers && !opt.merc_only && opt.tfrag_morph && !jak2 && opt.stream &&
+      opt.tfrag_geo == 0 && opt.far_tfrag_geo == 2) {
+    const fs::path dir =
+        opt.tfrag_morph_dir.empty() ? in.parent_path() : fs::path(opt.tfrag_morph_dir);
+    const fs::path mp = dir / (in.stem().string() + ".tfragmorph");
+    if (tfrag_lod::read_morph(mp.string(), &tfrag_morph_data)) {
+      bool ok = level.tfrag_trees[1].size() == level.tfrag_trees[0].size() &&
+                level.tfrag_trees[2].size() == level.tfrag_trees[0].size();
+      for (int g = 0; g < 2 && ok; g++) {
+        ok = tfrag_morph_data.trees[g].size() == level.tfrag_trees[g].size();
+        for (size_t t = 0; ok && t < level.tfrag_trees[g].size(); t++) {
+          ok = tfrag_morph_data.trees[g][t].size() ==
+                   level.tfrag_trees[g][t].packed_vertices.vertices.size() &&
+               level.tfrag_trees[g][t].kind == level.tfrag_trees[2][t].kind;
+        }
+      }
+      if (ok) {
+        cv.tmorph = &tfrag_morph_data;
+        tfrag_lod::subdivide_dists(tfrag_morph_data.close, tfrag_morph_data.far, tfrag_dists);
+      } else {
+        lg::warn("{}: {} doesn't match the .fr3's tfrag: no tfrag geomorph", in.stem().string(),
+                 mp.string());
+      }
+    } else if (fs::exists(mp)) {
+      lg::warn("{}: {} is not tfrag geomorph data", in.stem().string(), mp.string());
+    }
+  }
+  for (size_t t = 0; t < level.tfrag_trees[opt.tfrag_geo].size(); t++) {
+    auto& tree = level.tfrag_trees[opt.tfrag_geo][t];
     if (opt.merc_only) {
       break;
     }
     if (is_drawn_tfrag_kind(tree.kind)) {
+      if (cv.tmorph) {
+        cv.cur_ttree = (u32)t;
+        cv.cur_tlod = c3l::kRunLodNear;
+        cv.cur_tmorph = &tfrag_morph_data.trees[0][t];
+      }
       cv.add_tfrag_tree(tree);
       tfrag_trees++;
     }
   }
+  cv.tfrag0_end = cv.tris.size();
+  size_t tfrag_mid_tris = 0, tfrag_far_tris = 0;
+  if (cv.tmorph) {
+    // (after every near version: the contact geometry is the near versions)
+    for (size_t t = 0; t < level.tfrag_trees[0].size(); t++) {
+      if (!is_drawn_tfrag_kind(level.tfrag_trees[0][t].kind)) {
+        continue;
+      }
+      cv.cur_ttree = (u32)t;
+      size_t n0 = cv.tris.size();
+      cv.cur_tlod = c3l::kRunLodMid;
+      cv.cur_tmorph = &tfrag_morph_data.trees[1][t];
+      cv.add_tfrag_tree(level.tfrag_trees[1][t]);
+      tfrag_mid_tris += cv.tris.size() - n0;
+      n0 = cv.tris.size();
+      cv.cur_tlod = c3l::kRunLodFar;
+      cv.cur_tmorph = nullptr;
+      cv.add_tfrag_tree(level.tfrag_trees[2][t]);
+      tfrag_far_tris += cv.tris.size() - n0;
+    }
+    cv.cur_tlod = 0;
+    cv.cur_tmorph = nullptr;
+    cv.tfrag_drop_same_versions(0, tfrag_dists[1], tfrag_dists[2]);
+    cv.tfrag0_end = tfrag_mid_tris = tfrag_far_tris = 0;
+    for (const auto& t : cv.tris) {
+      cv.tfrag0_end += t.tlod == 0 || t.tlod == c3l::kRunLodNear;
+      tfrag_mid_tris += t.tlod == c3l::kRunLodMid;
+      tfrag_far_tris += t.tlod == c3l::kRunLodFar;
+    }
+    cv.tfrag_group_spheres();
+    // the near and mid versions that a coarser one follows go to near chunks (streamed: needed
+    // only within its distance), the others stay in the level's own chunks
+    if (opt.stream) {
+      for (auto& t : cv.tris) {
+        if (t.tgroup < cv.tgroups.size() &&
+            (t.tlod == c3l::kRunLodNear ||
+             (t.tlod == c3l::kRunLodMid &&
+              cv.tgroup_far[t.tgroup] < std::numeric_limits<float>::max()))) {
+          t.stream = c3l::kStreamCore;
+        }
+      }
+    }
+  }
   size_t far_first = cv.tris.size();
-  cv.tfrag0_end = far_first;
   const char* far_source = "none";
   if (two_tiers && !opt.merc_only) {
     // coarse version of each grid cell: the coarsest tfrag level of detail
@@ -4833,6 +5093,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       cx = 3 * g.bsphere[0];
       cy = 3 * g.bsphere[1];
       cz = 3 * g.bsphere[2];
+    } else if (t.tgroup < cv.tgroups.size()) {
+      // a tfrag group's versions in its center's cell: they share the chunk's vertices
+      cx = 3 * cv.tgroups[t.tgroup][0];
+      cy = 3 * cv.tgroups[t.tgroup][1];
+      cz = 3 * cv.tgroups[t.tgroup][2];
     } else {
       for (int k = 0; k < 3; k++) {
         cx += cv.verts[t.v[k]].x;
@@ -4845,6 +5110,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     int nc = 0;
     if (t.stream && t.lod_group < cv.lod_groups.size()) {
       nc = stream_need_class(cv, opt, t.lod_group);
+    } else if (t.stream && t.tgroup < cv.tgroups.size()) {
+      nc = tfrag_need_class(cv, opt, t.tgroup);
     }
     const float cell = t.stream ? stream_class_cell(opt, nc) * 4096.f : cell_of_detail((int)t.detail);
     // (AI-assisted) detail + 4 * tier + 64 * shrub distance class (+ 1024 * (stream class + 3 *
@@ -4949,8 +5216,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         // version, then the far versions (c3l::RunLod), each by visibility id (BVH order: near runs
         // drawn together are mostly neighbours), then LOD group
         constexpr u8 kLodRank[4] = {2, 0, 3, 1};
-        if (ta.lod != tb.lod) {
-          return kLodRank[ta.lod] < kLodRank[tb.lod];
+        const u8 la = ta.lod ? ta.lod : ta.tlod, lb = tb.lod ? tb.lod : tb.tlod;
+        if (la != lb) {
+          return kLodRank[la] < kLodRank[lb];
         }
         if (ta.vis != tb.vis) {
           return ta.vis < tb.vis;
@@ -5681,6 +5949,105 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     mst.max_delta_m = std::max(mst.max_delta_m, maxd / 4096.0);
   };
 
+  // the PS2's tfrag geomorph (c3l::ExtTfrag): the near tier's chunks with versioned runs, their
+  // runs' versions, records (the mesh tail) and color lists
+  std::vector<c3l::TfragChunk> out_tfrag_chunks;
+  std::vector<std::vector<c3l::TfragMorphVertex>> out_tfrag_recs;  // per TfragChunk
+  std::vector<c3l::RunLod> out_tfrag_run_lods;
+  std::vector<c3l::TfragMorphColor> out_tfrag_colors;
+  struct TfragStats {
+    size_t chunks = 0, morph_chunks = 0, verts = 0, moving = 0, level1 = 0;
+    double max_delta_m = 0;
+  } tfst;
+  auto tod_rgba = [&](u16 pad, u8* out) {
+    if (pad < cv.tod_colors.size()) {
+      memcpy(out, cv.tod_colors[pad].rgba[opt.palette], 4);
+    }
+  };
+  auto add_tfrag_trailer = [&](c3l::Chunk& ch,
+                               const std::unordered_map<std::string, TfragRec>& recs,
+                               const std::vector<c3l::RunLod>& run_tlods) {
+    c3l::TfragChunk tc{};
+    tc.chunk = (u32)chunks.size();
+    tc.run_first = (u32)out_tfrag_run_lods.size();
+    out_tfrag_run_lods.insert(out_tfrag_run_lods.end(), run_tlods.begin(), run_tlods.end());
+    tfst.chunks++;
+    const u32 nv = ch.vertex_count;
+    std::vector<const TfragRec*> rv(nv, nullptr);
+    s32 dmax = 0;
+    for (u32 v = 0; v < nv; v++) {
+      const auto& o = out_verts[ch.first_vertex + v];
+      auto it = recs.find(std::string((const char*)&o, sizeof(o)));
+      if (it == recs.end() || it->second.kind <= tfrag_morph::kBase + 1) {
+        continue;
+      }
+      rv[v] = &it->second;
+      for (int c = 0; c < 6; c++) {
+        dmax = std::max(dmax, std::abs(it->second.d[c]));
+      }
+    }
+    // the deltas in 8 bits, one step per chunk (at most 1/254 of its largest delta off)
+    const float dscale = std::max(1.f, (float)dmax / 127.f);
+    std::vector<c3l::TfragMorphVertex> mv(nv);
+    tc.color_first = (u32)out_tfrag_colors.size();
+    double maxd = 0;
+    for (u32 v = 0; v < nv; v++) {
+      const auto& o = out_verts[ch.first_vertex + v];
+      auto& m = mv[v];
+      memcpy(m.m, o.rgba, 4);
+      memcpy(m.t, o.rgba, 4);
+      if (!rv[v]) {
+        continue;
+      }
+      const auto& r = *rv[v];
+      double a2 = 0, b2 = 0;
+      for (int c = 0; c < 3; c++) {
+        m.band0[c] = (s8)std::clamp((int)std::lround(r.d[c] / dscale), -127, 127);
+        m.band1[c] = (s8)std::clamp((int)std::lround(r.d[3 + c] / dscale), -127, 127);
+        a2 += (double)r.d[c] * r.d[c];
+        b2 += (double)r.d[3 + c] * r.d[3 + c];
+      }
+      maxd = std::max(maxd, (std::sqrt(a2) + std::sqrt(b2)) * ch.scale);
+      const bool l1 = r.kind == tfrag_morph::kLevel1 + 1;
+      m.color0 = 1;
+      m.color1 = l1 ? 1 : 0;
+      // the file's colors: the means in the baked palette (the runtime's with the time of day)
+      u8 c6[6][4];
+      for (int k = 0; k < 6; k++) {
+        memcpy(c6[k], o.rgba, 4);
+        tod_rgba(r.col[k], c6[k]);
+      }
+      for (int c = 0; c < 3; c++) {
+        m.m[c] = l1 ? (u8)((c6[0][c] + c6[1][c] + 1) / 2) : o.rgba[c];
+        m.t[c] = (u8)((c6[2][c] + c6[3][c] + c6[4][c] + c6[5][c] + 2) / 4);
+      }
+      c3l::TfragMorphColor mc{};
+      mc.vertex = (u16)v;
+      for (int k = 0; k < 2; k++) {
+        mc.m[k] = l1 ? r.col[k] : (u16)o.pad;
+      }
+      for (int k = 0; k < 4; k++) {
+        mc.t[k] = r.col[2 + k];
+      }
+      out_tfrag_colors.push_back(mc);
+      tfst.moving++;
+      tfst.level1 += l1;
+    }
+    tc.color_count = (u32)out_tfrag_colors.size() - tc.color_first;
+    tfst.verts += nv;
+    if (tc.color_count) {
+      tc.delta_scale = dscale;
+      tfst.morph_chunks++;
+      tfst.max_delta_m = std::max(tfst.max_delta_m, maxd / 4096.0);
+      // the surface moves by up to maxd: the chunk's sphere holds it at every morph factor
+      ch.bsphere[3] += (float)maxd;
+      out_tfrag_recs.push_back(std::move(mv));
+    } else {
+      out_tfrag_recs.emplace_back();
+    }
+    out_tfrag_chunks.push_back(tc);
+  };
+
   for (const auto& cp : plans) {
     {
       const auto& key = cp.key;
@@ -5766,6 +6133,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       }
       std::unordered_map<std::string, MorphRec> morph_map;
       std::unordered_map<std::string, MorphRec>* morph_verts = nullptr;
+      std::unordered_map<std::string, TfragRec> tfrag_map;
+      std::unordered_map<std::string, TfragRec>* tfrag_verts = nullptr;
+      for (u32 ti : cp.tris) {
+        if (cv.tris[ti].tlod) {
+          tfrag_verts = &tfrag_map;
+          break;
+        }
+      }
       if (stream_cls) {
         for (const u32 si : local_src) {
           if (cv.verts[si].mband) {
@@ -5807,6 +6182,17 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             mr.d[3 + c] = (s16)std::clamp(std::lround(v.mdelta2[c] / cp.grid), -32767l, 32767l);
           }
         }
+        TfragRec tr{};
+        if (tfrag_verts && v.tkind) {
+          tr.kind = v.tkind;
+          for (int c = 0; c < 3; c++) {
+            tr.d[c] = (s32)std::lround(v.tband0[c] / cp.grid);
+            tr.d[3 + c] = (s32)std::lround(v.tband1[c] / cp.grid);
+          }
+          for (int k = 0; k < 6; k++) {
+            tr.col[k] = cv.tod_pad(v.tcol[k]);
+          }
+        }
         // two vertices with the same bytes are one after the welds: their wind instance, normal
         // and morph must agree, else this one's s moves by 1/1024
         const std::array<s8, 3> n = {v.nrm[0], v.nrm[1], v.nrm[2]};
@@ -5827,6 +6213,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             auto it = morph_verts->find(b);
             ok = ok && (it == morph_verts->end() || it->second == mr);
           }
+          if (tfrag_verts) {
+            auto it = tfrag_verts->find(b);
+            ok = ok && (it == tfrag_verts->end() || it->second == tr);
+          }
           if (ok || tries == 63) {
             if (wind_verts) {
               wind_verts->emplace(b, v.wind);
@@ -5839,6 +6229,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             }
             if (morph_verts) {
               morph_verts->emplace(b, mr);
+            }
+            if (tfrag_verts) {
+              tfrag_verts->emplace(b, tr);
             }
             break;
           }
@@ -5853,8 +6246,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       std::vector<c3l::RunLod> run_lods;  // (AI-assisted) v17
       std::vector<u16> run_protos;        // (AI-assisted, j2vis) v20
       std::vector<u32> run_bands;         // shrub fade bands (SrcTri::band)
+      std::vector<c3l::RunLod> run_tlods;  // the tfrag geomorph's versions (c3l::ExtTfrag)
       bool any_band = false;
-      bool any_vis = false, any_lod = false, any_proto = false;
+      bool any_vis = false, any_lod = false, any_proto = false, any_tlod = false;
       for (size_t i = 0; i < cp.tris.size(); i++) {
         const auto& t = cv.tris[cp.tris[i]];
         const bool new_draw = t.draw_key != cur_key;
@@ -5890,12 +6284,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         const u16 lg = t.lod ? (u16)t.lod_group : (u16)0xffff;
         // (AI-assisted, j2vis) v20: and per toggled prototype
         // shrubs: per fade band, in pieces of kShrubRunIndices (the runtime fades run by run)
+        const u16 tg = t.tlod ? (u16)t.tgroup : (u16)0xffff;
         if (new_draw || runs.back().vis != t.vis || run_lods.back().group != lg ||
             run_lods.back().lod != t.lod || run_protos.back() != t.proto ||
-            run_bands.back() != t.band ||
+            run_bands.back() != t.band || run_tlods.back().group != tg ||
+            run_tlods.back().lod != t.tlod ||
             (t.band && runs.back().index_count >= kShrubRunIndices)) {
           runs.push_back(c3l::VisRun{(u16)(out_draws.size() - 1 - ch.first_draw), t.vis, 0});
           run_lods.push_back(c3l::RunLod{lg, t.lod, 0});
+          run_tlods.push_back(c3l::RunLod{tg, t.tlod, 0});
           run_protos.push_back(t.proto);
           run_bands.push_back(t.band);
         }
@@ -5907,6 +6304,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           vis_tris++;
         }
         any_lod |= t.lod != c3l::kRunLodAlways;
+        any_tlod |= t.tlod != c3l::kRunLodAlways;
       }
       ch.draw_count = out_draws.size() - ch.first_draw;
       // (AI-assisted) vertex cache order (meshoptimizer). Only inside a visibility run (the runs
@@ -6054,7 +6452,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       // v17: or there are levels of detail
       // (AI-assisted, j2vis) v20: or a prototype the game hides (a shrub chunk: runs per draw and
       // prototype, vis 0xffff)
-      const bool keep_runs = any_vis || any_lod || any_proto || any_band;
+      const bool keep_runs = any_vis || any_lod || any_proto || any_band || any_tlod;
       chunk_first_run.push_back(keep_runs ? (u32)out_runs.size() : 0);
       ch.vis_run_count = keep_runs ? (u32)runs.size() : 0;
       if (keep_runs) {
@@ -6068,9 +6466,22 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       if (morph_verts) {
         add_morph_trailer(ch, *morph_verts);
       }
+      if (any_tlod && keep_runs) {
+        add_tfrag_trailer(ch, tfrag_map, run_tlods);
+      }
       chunks.push_back(ch);
       chunk_stream_cls.push_back((u8)stream_cls);
     }
+  }
+  if (cv.tmorph) {
+    lg::info("{}: tfrag geomorph (the PS2's): {} groups ({} with one version), versions near / "
+             "mid / far {} / {} / {} tris ({} tris of versions the same as the one before left "
+             "out), switching at {:.1f} / {:.1f} m of view depth (band 1 from {:.1f} m); {} chunks "
+             "({} with moving vertices: {} of {} vertices move, {} of them level1, up to {:.2f} m)",
+             level.level_name, cv.tgroups.size(), cv.tfrag_always_groups, cv.tfrag0_end,
+             tfrag_mid_tris, tfrag_far_tris, cv.tfrag_same_dropped, tfrag_dists[1] / 4096.f,
+             tfrag_dists[2] / 4096.f, tfrag_dists[0] / 4096.f, tfst.chunks, tfst.morph_chunks,
+             tfst.moving, tfst.verts, tfst.level1, tfst.max_delta_m);
   }
   // (AI-assisted, streaming) v19: what the runtime worked out from a chunk's vertices at load and
   // can't for a near chunk that isn't there yet: each draw's kDrawAlpha80 (fog_alpha: every vertex
@@ -6084,9 +6495,16 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     u64 tris[3] = {0, 0, 0};
     u64 other_bytes = 0;  // every other chunk's
   } sst;
-  std::unordered_map<u32, size_t> morph_chunk_of;
+  std::unordered_map<u32, size_t> morph_chunk_of, tfrag_chunk_of;
   for (size_t i = 0; i < out_morph_chunks.size(); i++) {
     morph_chunk_of[out_morph_chunks[i].chunk] = i;
+  }
+  std::unordered_map<u32, size_t> tfrag_lod_chunk_of;
+  for (size_t i = 0; i < out_tfrag_chunks.size(); i++) {
+    tfrag_lod_chunk_of[out_tfrag_chunks[i].chunk] = i;
+    if (out_tfrag_chunks[i].color_count) {
+      tfrag_chunk_of[out_tfrag_chunks[i].chunk] = i;
+    }
   }
   if (opt.stream) {
     run_spheres.assign(out_runs.size(), c3l::RunSphere{{0, 0, 0}, 0xffff});
@@ -6098,6 +6516,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       if (auto mit = morph_chunk_of.find((u32)ci); mit != morph_chunk_of.end()) {
         mvp = out_morph_recs[mit->second].data();
         mvs = out_morph_chunks[mit->second].delta_scale;
+      }
+      const c3l::TfragMorphVertex* tvp = nullptr;
+      float tvs = 1.f;
+      if (auto tit = tfrag_chunk_of.find((u32)ci); tit != tfrag_chunk_of.end()) {
+        tvp = out_tfrag_recs[tit->second].data();
+        tvs = out_tfrag_chunks[tit->second].delta_scale;
       }
       bool all = true;
       for (u32 v = 0; v < ch.vertex_count && all; v++) {
@@ -6157,6 +6581,13 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
             const int q2 = mvp ? q + (int)std::lround(mvp[v].delta2[c] * mvs) : p;
             mn[c] = std::min(mn[c], std::min(p, std::min(q, q2)));
             mx[c] = std::max(mx[c], std::max(p, std::max(q, q2)));
+            if (tvp) {
+              // the tfrag geomorph: each band anywhere from 0 to 1
+              const int a = (int)std::lround(tvp[v].band0[c] * tvs),
+                        b = (int)std::lround(tvp[v].band1[c] * tvs);
+              mn[c] = std::min({mn[c], p + a, p + b, p + a + b});
+              mx[c] = std::max({mx[c], p + a, p + b, p + a + b});
+            }
           }
         }
         idx += n;
@@ -6185,6 +6616,25 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           need_e = std::max(need_e, mg                                         ? 0.f
                                     : rl.group < cv.lod_group_error.size() ? cv.lod_group_error[rl.group]
                                                                            : g.dist);
+        }
+      }
+      if (cls && ch.kind == c3l::CHUNK_KIND_TFRAG) {
+        // the tfrag geomorph's near chunk: each group's need distance from its center
+        auto tit = tfrag_lod_chunk_of.find((u32)ci);
+        if (tit != tfrag_lod_chunk_of.end()) {
+          const auto& tc = out_tfrag_chunks[tit->second];
+          for (u32 r = 0; r < ch.vis_run_count; r++) {
+            const auto& rl = out_tfrag_run_lods[tc.run_first + r];
+            if (rl.lod == c3l::kRunLodAlways || rl.group >= cv.tgroups.size()) {
+              continue;
+            }
+            const auto& g = cv.tgroups[rl.group];
+            float dd = 0;
+            for (int c = 0; c < 3; c++) {
+              dd += (g[c] - ch.bsphere[c]) * (g[c] - ch.bsphere[c]);
+            }
+            need_a = std::max(need_a, std::sqrt(dd) + tfrag_need(cv, rl.group));
+          }
         }
       }
       if (cls) {
@@ -6528,10 +6978,12 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   }
   const bool bands = ext_out && any_band && out_run_bands.size() == out_runs.size();
   const bool morph_out = ext_out && !out_morph_chunks.empty();
+  const bool tfrag_out = ext_out && !out_tfrag_chunks.empty();
   const bool env_out = ext_out && !out_env_draws.empty();
   const bool wind_out = ext_out && !wind_chunk_verts.empty();
   const bool cond_out = ext_out && !out_cond_sets.empty();
   const u32 eh_size = !ext_out                           ? 0
+                      : tfrag_out                        ? c3l::kExtHeaderTfragSize
                       : morph_out                        ? c3l::kExtHeaderMorphSize
                       : cond_out                         ? c3l::kExtHeaderV24Size
                       : opt.stream && !tex_descs.empty() ? c3l::kExtHeaderTexKeySize
@@ -6669,6 +7121,15 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              cv.env_tie_groups_missing, env_st_moved, missing);
   }
   std::map<u32, u32> tail_offset;  // by chunk: its first byte
+  if (tfrag_out) {
+    for (size_t i = 0; i < out_tfrag_chunks.size(); i++) {
+      const auto& r = out_tfrag_recs[i];
+      if (!r.empty()) {
+        tails[out_tfrag_chunks[i].chunk].assign((const u8*)r.data(),
+                                                (const u8*)(r.data() + r.size()));
+      }
+    }
+  }
   if (morph_out) {
     for (size_t i = 0; i < out_morph_chunks.size(); i++) {
       const auto& r = out_morph_recs[i];
@@ -6677,8 +7138,29 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       t.insert(t.begin(), (const u8*)r.data(), (const u8*)(r.data() + r.size()));
     }
   }
-  // the tables read with them before the meshes (load_env_tie_chunks, load_morph)
-  u32 ecs_offset = 0, morph_chunks_offset = 0;
+  // the tables read with them before the meshes (load_env_tie_chunks, load_morph, load_tfrag_lod)
+  u32 ecs_offset = 0, morph_chunks_offset = 0, tfrag_chunks_offset = 0;
+  c3l::ExtTfrag etf{};
+  if (tfrag_out) {
+    for (int k = 0; k < 3; k++) {
+      etf.dists[k] = tfrag_dists[k];
+    }
+    std::vector<c3l::TfragGroup> tg(cv.tgroups.size());
+    for (size_t g = 0; g < tg.size(); g++) {
+      memcpy(tg[g].bsphere, cv.tgroups[g].data(), sizeof(tg[g].bsphere));
+      tg[g].mid = cv.tgroup_mid[g];
+      tg[g].far = cv.tgroup_far[g];
+    }
+    etf.group_count = (u32)tg.size();
+    etf.groups_offset = append(buf, tg.data(), tg.size());
+    etf.chunk_count = (u32)out_tfrag_chunks.size();
+    etf.chunks_offset = tfrag_chunks_offset =
+        append(buf, out_tfrag_chunks.data(), out_tfrag_chunks.size());
+    etf.run_lod_count = (u32)out_tfrag_run_lods.size();
+    etf.run_lod_offset = append(buf, out_tfrag_run_lods.data(), out_tfrag_run_lods.size());
+    etf.color_count = (u32)out_tfrag_colors.size();
+    etf.colors_offset = append(buf, out_tfrag_colors.data(), out_tfrag_colors.size());
+  }
   if (env_out) {
     ecs_offset = append(buf, ecs.data(), ecs.size());
   }
@@ -6770,6 +7252,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   if (morph_out) {
     memcpy(buf.data() + morph_chunks_offset, out_morph_chunks.data(),
            out_morph_chunks.size() * sizeof(c3l::MorphChunk));
+  }
+  if (tfrag_out) {
+    for (auto& tc : out_tfrag_chunks) {
+      tc.records_offset = tc.color_count ? tail_offset.at(tc.chunk) : 0;
+    }
+    memcpy(buf.data() + tfrag_chunks_offset, out_tfrag_chunks.data(),
+           out_tfrag_chunks.size() * sizeof(c3l::TfragChunk));
+    ext_put(c3l::kExtHeaderMorphSize, &etf, sizeof(etf));
   }
   if (!tails.empty()) {
     lg::info("{}: mesh tails: {} chunks, {} KB, {}", level.level_name, tails.size(),
@@ -7534,6 +8024,11 @@ int main(int argc, char** argv) {
                "no PS2 tie geomorph (geometry 2 and the morph from <level>.tiemorph)");
   app.add_flag("--tie-morph", opt.tie_morph_jak2,
                "the PS2 tie geomorph for Jak II too (default: Jak 1 only)");
+  bool no_tfrag_morph = false;
+  app.add_flag("--no-tfrag-morph", no_tfrag_morph,
+               "no PS2 tfrag geomorph (geometries 1 and 2 and the morph from <level>.tfragmorph)");
+  app.add_option("--tfrag-morph-dir", opt.tfrag_morph_dir,
+                 "where the <level>.tfragmorph files are (default: next to the .fr3)");
   app.add_option("--tie-morph-dir", opt.tie_morph_dir,
                  "where the <level>.tiemorph files are (default: next to the .fr3)");
   app.add_option("--tie-lod-budget-kb", opt.tie_lod_budget_kb,
@@ -7676,6 +8171,7 @@ int main(int argc, char** argv) {
   opt.tie_far_near_colors = !tie_far_own_colors;
   opt.tie_lod = !no_tie_lod;
   opt.tie_morph = !no_tie_morph;
+  opt.tfrag_morph = !no_tfrag_morph;
   opt.stream = !no_stream;
   opt.vista = !no_vista;
   opt.tod = !no_tod;
