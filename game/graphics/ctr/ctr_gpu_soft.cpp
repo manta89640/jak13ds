@@ -34,6 +34,12 @@ std::map<int, std::string>& ctr_soft_mesh_desc() {
 
 namespace {
 constexpr int kW = 400;
+// CTR_SOFT_TIES=1: opaque fragments at another draw's depth with another color (the draws whose
+// order decides a pixel)
+const bool s_ties_on = getenv("CTR_SOFT_TIES") != nullptr;
+uint32_t s_tie_draw = 1;
+std::vector<uint32_t> s_tie_writer;
+uint64_t s_ties, s_ties_diff, s_tie_frames;
 constexpr int kH = 240;
 
 struct SoftTex {
@@ -566,6 +572,20 @@ void shade_pixel(const ctr_draw_state& st,
     softstats::cur->px_z++;
     if (st.blend != CTR_BLEND_OFF) softstats::cur->px_blend++;
   }
+  if (s_ties_on && !s_target.rt && st.zwrite && st.blend == CTR_BLEND_OFF &&
+      !(st.flags & CTR_STATE_NO_COLOR)) {
+    if (s_tie_writer.size() != (size_t)kW * 240) {
+      s_tie_writer.assign((size_t)kW * 240, 0);
+    }
+    const int ti = px + py * kW;
+    if (z == s_target.depth[idx] && s_tie_writer[ti] && s_tie_writer[ti] != s_tie_draw) {
+      s_ties++;
+      const uint8_t* d0 = &s_target.color[4 * idx];
+      const float c[3] = {std::min(r, 255.f), std::min(g, 255.f), std::min(b, 255.f)};
+      s_ties_diff += (uint8_t)c[0] != d0[0] || (uint8_t)c[1] != d0[1] || (uint8_t)c[2] != d0[2];
+    }
+    s_tie_writer[ti] = s_tie_draw;
+  }
   if (st.zwrite) {
     s_target.depth[idx] = z;
   }
@@ -817,6 +837,14 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void ctr_gpu_frame_end(void) {
+  if (s_ties_on) {
+    std::fill(s_tie_writer.begin(), s_tie_writer.end(), 0);
+    if (++s_tie_frames % 150 == 0) {
+      lg::info("[ties] per frame: {:.1f} opaque fragments at another draw's depth, {:.1f} of them "
+               "another color", (double)s_ties / 150, (double)s_ties_diff / 150);
+      s_ties = s_ties_diff = 0;
+    }
+  }
   ctr_gpu_rt_end();  // (AI-assisted) impostors: a render to texture left open
   ctr_gpu_run_sky_hook();
   cull_probe_frame();
@@ -1385,6 +1413,7 @@ void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state,
                                 int mesh,
                                 int first_index,
                                 int index_count) {
+  s_tie_draw++;
   ctr_gpu_draw_mesh(state, matrix->m, mesh, first_index, index_count);
 }
 
@@ -2259,6 +2288,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
                        int normals_offset,
                        int first_index,
                        int index_count) {
+  s_tie_draw++;
   sky_hook(state);
   softstats::prog(11);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used || !state ||
@@ -2371,6 +2401,7 @@ int ctr_gpu_etie_ready(void) {
 void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                             const float* rows, int row_count, uint32_t, int mesh, int slots_mesh,
                             int slots_offset, int first_index, int index_count) {
+  s_tie_draw++;
   sky_hook(state);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
       slots_mesh < 0 || slots_mesh >= (int)g_soft.meshes.size() ||
@@ -2407,6 +2438,7 @@ int ctr_gpu_wind_ready(void) {
 void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                              const float* rows, const uint8_t* list, int list_n, uint32_t,
                              int mesh, int morph_offset, int first_index, int index_count) {
+  s_tie_draw++;
   sky_hook(state);
   if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
       morph_offset < 0 || (size_t)morph_offset > g_soft.meshes[mesh].verts.size()) {
