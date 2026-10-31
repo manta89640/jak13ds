@@ -1115,6 +1115,8 @@
       (#when TARGET_3DS
         (set! *kernel-pre-run-hook* (lambda () (cpad-reread 0) (none)))
         (set! *kernel-pre-run-proc* *target*)
+        (set! *kernel-pre-pool-hook* (lambda () (cpad-reread-strip 0) (none)))
+        (set! *kernel-pre-pool* *target-pool*)
         )
       (with-profiler 'actors *profile-actors-color*
         (suspend)

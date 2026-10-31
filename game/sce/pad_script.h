@@ -18,6 +18,8 @@
  *   mid       the entry's buttons change half a frame early, at the 60 Hz sample in the middle of
  *             its frame (a PS2 frame earlier), e.g. "1600 x mid" then "1602 mid" holds X for
  *             4 PS2 frames from the middle of frame 1600
+ *   late      the entry's buttons change after its frame's first read, before the read again
+ *             right before Jak (3DS): the pools before his see them a frame later
  *   print SYM print the value of a GOAL symbol to the log (for example: print *target*)
  *   wait SYM STATE  stop the script's clock (with all buttons released) until the process in SYM
  *             is in STATE, for example "wait *target* target-stance". Gives up after 30000 game
@@ -90,6 +92,7 @@ namespace pad_script {
 struct PadState {
   u16 buttons = 0;  // PadData::ButtonIndex bits
   u16 mid_buttons = 0;  // at the 60 Hz sample half a frame before (next_frame only)
+  u16 late_buttons = 0;  // at the frame's second read (next_frame only)
   u8 lx = 128, ly = 128, rx = 128, ry = 128;
 };
 

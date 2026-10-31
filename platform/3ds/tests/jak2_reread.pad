@@ -1,0 +1,54 @@
+# Jak II: the 30 fps variable jump with presses before the middle sample (init-var-jump's early
+# mask), a jump pressed "late" (between the first read and the read again before Jak: one jump),
+# then start pressed late (the pause menu opens and stays open: start reaches each pool once).
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1020 wait *target* target-stance
+1021 log jump frames 2 press-mid 0 expect level 3
+1022 pos *target*
+1024 x pos *target*
+1025 x pos *target*
+1026 pos *target*
+1028 pos *target*
+1030 pos *target*
+1032 pos *target*
+1034 pos *target*
+1036 pos *target*
+1040 pos *target*
+1080 wait *target* target-stance
+1081 log jump frames 1 press-mid 1 expect level 2
+1082 pos *target*
+1083 x mid pos *target*
+1084 mid pos *target*
+1086 pos *target*
+1088 pos *target*
+1090 pos *target*
+1092 pos *target*
+1094 pos *target*
+1096 pos *target*
+1100 pos *target*
+1140 wait *target* target-stance
+1141 log jump late
+1142 pos *target*
+1144 x late pos *target*
+1145 print *cpad-reread-down*
+1146 pos *target*
+1148 -
+1150 pos *target*
+1154 pos *target*
+1158 pos *target*
+1162 pos *target*
+1170 pos *target*
+1200 wait *target* target-stance
+1201 log start late
+1202 start late
+1203 print *cpad-reread-down*
+1205 -
+1210 print *master-mode*
+1240 print *master-mode*
+1260 start
+1262 -
+1290 print *master-mode*
+1300 log reread end
+1302 exit
