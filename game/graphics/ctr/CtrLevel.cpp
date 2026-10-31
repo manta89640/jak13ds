@@ -1198,6 +1198,8 @@ void CtrLevels::take_parts(Done& d, u64 frame) {
           fl = CtrLevelData::kDormFreed;
         } else if (fl == CtrLevelData::kDistReading) {
           fl = CtrLevelData::kDistFreed;  // (AI-assisted, j2strip)
+        } else if (fl == CtrLevelData::kTitleReading) {
+          fl = CtrLevelData::kTitleFreed;
         }
       }
     }
@@ -1815,6 +1817,267 @@ void CtrLevels::dist_update(u64 frame, u32 free_now) {
   }
 }
 
+// ---- Title screen (Jak 1) ----
+// The title's attract camera (the logo-cam animation, title-obs.gc) flies one fixed path over
+// Sandover: a glimpse under the logo, then the end of logo-intro-2 and logo-loop, which repeats
+// without a cut. kTitlePath is that path to within 1.3 m (meters, the host's CTR_TITLE_VIS_LOG).
+// While the title level is wanted, a chunk no point of the path can draw is left out of the load
+// (kTitleFreed), or freed if the level was there before: one beyond its largest draw distance at
+// any auto_detail position, a vista copy whose sources are drawn from all of the path. The view
+// isn't used: the loop turns all the way round, it would leave out < 0.1 MB more. If the camera
+// leaves the path, or the title ends, every such chunk is read back, the nearest first.
+namespace {
+constexpr s16 kTitlePath[][3] = {
+    {-133, 47, 224}, {-161, 59, 165}, {-127, 52, 295}, {-134, 52, 292}, {-142, 53, 280},
+    {-163, 55, 256}, {-199, 57, 225}, {-208, 58, 209}, {-211, 58, 194}, {-209, 58, 185},
+    {-205, 57, 178}, {-199, 57, 172}, {-191, 56, 168}, {-163, 50, 163}, {-146, 41, 158},
+    {-135, 33, 153}, {-126, 23, 146}, {-120, 16, 139}, {-116, 11, 131}, {-115, 9, 119},
+    {-121, 12, 102}, {-135, 16, 81}, {-144, 21, 70}, {-152, 32, 56}, {-154, 37, 43},
+    {-151, 37, 26}, {-143, 35, 14}, {-129, 33, 7}, {-114, 30, 7}, {-103, 26, 12}, {-94, 22, 20},
+    {-89, 19, 29}, {-86, 17, 42}, {-86, 16, 55}, {-90, 16, 70}, {-111, 14, 122}, {-116, 13, 136},
+    {-117, 11, 146}, {-115, 10, 161}, {-99, 10, 211}, {-97, 11, 224}, {-96, 15, 236},
+    {-96, 26, 253}, {-99, 39, 271}, {-106, 47, 281}, {-110, 49, 283}, {-114, 52, 282},
+    {-134, 57, 273}, {-153, 59, 263}, {-188, 70, 235}, {-201, 70, 223}, {-210, 65, 206},
+    {-211, 62, 196}, {-210, 58, 186}, {-203, 52, 173}, {-195, 48, 165}, {-189, 46, 160},
+    {-181, 45, 158}, {-157, 43, 156}, {-139, 36, 153}, {-131, 30, 150}, {-124, 22, 144},
+    {-119, 16, 137}, {-116, 12, 129}, {-115, 10, 123}, {-116, 9, 115}, {-123, 12, 97},
+    {-133, 20, 78}, {-150, 33, 57}, {-154, 37, 44}, {-153, 38, 31}, {-147, 37, 19}, {-139, 36, 11},
+    {-127, 34, 7}, {-113, 31, 7}, {-100, 26, 14}, {-91, 20, 25}, {-86, 17, 39}, {-86, 16, 53},
+    {-90, 16, 69}, {-111, 14, 122}, {-116, 13, 135}, {-117, 11, 146}, {-115, 10, 161},
+    {-99, 10, 210}, {-97, 11, 222}, {-96, 14, 232}, {-95, 22, 247}, {-97, 34, 264},
+    {-102, 43, 275}, {-108, 48, 282}, {-113, 52, 282}, {-120, 54, 280}, {-135, 58, 273},
+    {-149, 59, 265}, {-160, 61, 258},
+};
+// its polylines: [kTitlePathParts[k], kTitlePathParts[k + 1])
+constexpr u32 kTitlePathParts[] = {0, 2, std::size(kTitlePath)};
+// meters: farther from the path the camera has left it; what any point within kTitleMargin of
+// the path can draw is kept
+constexpr float kTitleOffPath = 8.f, kTitleMargin = 10.f;
+
+// the squared distance from p (game units) to the path
+float title_path_d2(const float* p) {
+  constexpr float kM = 4096.f;
+  float best = 1e30f;
+  for (size_t k = 0; k + 1 < std::size(kTitlePathParts); k++) {
+    for (u32 i = kTitlePathParts[k]; i + 1 < kTitlePathParts[k + 1]; i++) {
+      float ab[3], ap[3];
+      float len2 = 0, dot = 0;
+      for (int c = 0; c < 3; c++) {
+        ab[c] = (float)(kTitlePath[i + 1][c] - kTitlePath[i][c]) * kM;
+        ap[c] = p[c] - (float)kTitlePath[i][c] * kM;
+        len2 += ab[c] * ab[c];
+        dot += ab[c] * ap[c];
+      }
+      const float t = len2 > 0 ? std::clamp(dot / len2, 0.f, 1.f) : 0.f;
+      float d2 = 0;
+      for (int c = 0; c < 3; c++) {
+        const float d = ap[c] - t * ab[c];
+        d2 += d * d;
+      }
+      best = std::min(best, d2);
+    }
+  }
+  return best;
+}
+
+// the largest distance from p (game units) to a point of the path
+float title_path_far(const float* p) {
+  float best = 0;
+  for (const auto& q : kTitlePath) {
+    float d2 = 0;
+    for (int c = 0; c < 3; c++) {
+      const float d = p[c] - (float)q[c] * 4096.f;
+      d2 += d * d;
+    }
+    best = std::max(best, d2);
+  }
+  return std::sqrt(best);
+}
+
+// whether some point of the path may draw chunk ci (draw_level's rules, the settings now, any
+// auto_detail position)
+bool title_needed(const CtrLevelData& lev, size_t ci) {
+  constexpr float kM = 4096.f;
+  const auto& s = ctr_settings();
+  const auto& ch = lev.chunks[ci];
+  const float margin = kTitleMargin * kM;
+  const float draw = s.draw_distance * kM;
+  auto within = [&](float reach) {
+    if (!(reach > 0)) {
+      return true;
+    }
+    const float lim = reach + ch.bsphere[3] + margin;
+    return title_path_d2(ch.bsphere) <= lim * lim;
+  };
+  if (ch.kind == c3l::CHUNK_KIND_VISTA) {
+    if (!within(s.vista_distance * kM * 1.1f)) {
+      return false;
+    }
+    // a run shows where its source chunk is beyond its distance: one with a limit of its own
+    // (auto_detail moves it), or one the path leaves the draw distance (far mode: the LOD
+    // distance) of
+    float lim = draw;
+    if (s.lod_distance > 0) {
+      lim = lim > 0 ? std::min(lim, s.lod_distance * kM) : s.lod_distance * kM;
+    }
+    const u32 r0 = lev.chunk_first_run[ci];
+    for (u32 r = r0; r < r0 + ch.vis_run_count && r < lev.vis_runs.size(); r++) {
+      const u32 src = lev.vis_runs[r].vis;
+      if (src >= lev.chunks.size()) {
+        return true;
+      }
+      const auto& sc = lev.chunks[src];
+      if (sc.lod_tier == 3 || sc.max_dist > 0 || sc.kind == c3l::CHUNK_KIND_SHRUB ||
+          (lim > 0 && title_path_far(sc.bsphere) > lim + sc.bsphere[3] - margin)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (ch.lod_tier == 3) {
+    return true;
+  }
+  // decide_dist's largest: its own limit (held in view), at most the draw distance's with 10%
+  const float own = ch.kind == c3l::CHUNK_KIND_SHRUB || ch.kind == c3l::CHUNK_KIND_TIE
+                        ? dist_limit(lev, ch)
+                        : ch.max_dist * s.detail_scale * kHoldInView;
+  float reach = draw > 0 ? draw * 1.1f : 0.f;
+  if (own > 0) {
+    reach = reach > 0 ? std::min(reach, own) : own;
+  }
+  return within(reach);
+}
+}  // namespace
+
+void CtrLevels::title_update(u64 frame) {
+  if (g_game_version != GameVersion::Jak1) {
+    return;
+  }
+  const bool title = m_title_on.load(std::memory_order_relaxed);
+  if (!title) {
+    m_title_off_path = false;
+  }
+  for (auto& [name, lp] : m_levels) {
+    CtrLevelData& lev = *lp;
+    if (name == "title" || lev.mesh_index_first.size() != lev.chunks.size() ||
+        lev.meshes.size() != lev.chunks.size()) {
+      continue;
+    }
+    const bool drawn = m_cam_valid && lev.last_draw_frame + 2 >= frame;
+    if (title && drawn && !m_title_off_path) {
+      const float off = kTitleOffPath * 4096.f;
+      if (title_path_d2(m_cam) > off * off) {
+        m_title_off_path = true;
+        lg::warn("[ctr] {}: the title's camera is off its path ({:.0f} {:.0f} {:.0f} m): what the "
+                 "title left out is read back",
+                 name, m_cam[0] / 4096.f, m_cam[1] / 4096.f, m_cam[2] / 4096.f);
+      }
+    }
+    const bool keep_out = title && !m_title_off_path;
+    if (!keep_out) {
+      lev.title_pass = false;
+    }
+    // the title came with the level there: what the path can't draw freed, once
+    if (keep_out && drawn && !lev.title_pass && lev.detail_loaded && !lev.repair_requested) {
+      lev.title_pass = true;
+      if (lev.chunk_dormant.size() != lev.chunks.size()) {
+        lev.chunk_dormant.assign(lev.chunks.size(), 0);
+        lev.chunk_hold_since.assign(lev.chunks.size(), 0);
+      }
+      u32 freed = 0;
+      u64 bytes = 0;
+      for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+        if (lev.chunk_dormant[ci] != 0 || lev.meshes[ci] < 0 || lev.is_unit(ci) ||
+            lev.mesh_index_first[ci] == UINT32_MAX || title_needed(lev, ci)) {
+          continue;
+        }
+        const auto& ch = lev.chunks[ci];
+        bytes += CtrStreamArena::mesh_bytes(ch.vertex_count,
+                                            lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
+                 lev.normals_tail_bytes(ci);
+        ctr_gpu_mesh_delete(lev.meshes[ci]);  // freed after the GPU is done with it
+        lev.meshes[ci] = -1;
+        if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
+          lev.tod->chunk_mesh[ci] = -1;
+        }
+        lev.chunk_dormant[ci] = CtrLevelData::kTitleFreed;
+        freed++;
+      }
+      if (freed) {
+        lev.title_left += freed;
+        bump_set_generation();
+        lg::info("[ctr] {}: title screen: {} chunks its camera can't show freed ({} KB)", name,
+                 freed, bytes / 1024);
+      }
+    }
+    if (!lev.title_left) {
+      continue;
+    }
+    // what is left out; read back once the title is over or off its path, the nearest first
+    std::vector<std::pair<float, size_t>> back;
+    u32 left = 0;
+    for (size_t ci = 0; ci < lev.chunk_dormant.size(); ci++) {
+      const u8 fl = lev.chunk_dormant[ci];
+      left += fl == CtrLevelData::kTitleFreed || fl == CtrLevelData::kTitleReading;
+      if (fl == CtrLevelData::kTitleFreed && !keep_out) {
+        float d2 = 0;
+        for (int c = 0; c < 3; c++) {
+          const float d = lev.chunks[ci].bsphere[c] - m_cam[c];
+          d2 += d * d;
+        }
+        back.emplace_back(d2, ci);
+      }
+    }
+    lev.title_left = left;
+    if (!left) {
+      if (!keep_out) {
+        // nothing of the title's left: as a level that never had it
+        lg::info("[ctr] {}: the chunks the title left out are back", name);
+        lev.chunk_dormant.clear();
+        lev.chunk_hold_since.clear();
+      }
+      continue;
+    }
+    if (back.empty() || lev.dormant_requested || lev.detail_requested || lev.repair_requested ||
+        frame < lev.dormant_retry_frame) {
+      continue;
+    }
+    std::sort(back.begin(), back.end());
+    Job job;
+    job.name = lev.name;
+    job.detail = true;
+    job.dormant = true;
+    job.dist = true;
+    job.generation = lev.generation;
+    job.path = lev.path;
+    job.vertex_data_offset = lev.vertex_data_offset;
+    job.index_data_offset = lev.index_data_offset;
+    u64 bytes = 0;
+    for (const auto& [d2, ci] : back) {
+      const auto& ch = lev.chunks[ci];
+      const u32 b = CtrStreamArena::mesh_bytes(ch.vertex_count,
+                                               lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
+                    lev.normals_tail_bytes(ci);
+      if (!job.chunks.empty() && bytes + b > kDetailJobBytes) {
+        break;
+      }
+      bytes += b;
+      job.chunks.push_back({(u32)ci, ch.first_vertex, ch.vertex_count, lev.mesh_index_first[ci],
+                            lev.mesh_index_end[ci], lev.tail_file(ci), lev.tail_k(ci)});
+      lev.chunk_dormant[ci] = CtrLevelData::kTitleReading;
+    }
+    std::sort(job.chunks.begin(), job.chunks.end(), [](const DetailChunk& a, const DetailChunk& b) {
+      return a.first_vertex < b.first_vertex;
+    });
+    lev.dormant_requested = true;
+    job.room_bytes = bytes;
+    lg::info("[ctr] {}: {}: reading {} of the {} chunks it left out ({} KB)", name,
+             title ? "the title's camera is off its path" : "the title is over", job.chunks.size(),
+             left, bytes / 1024);
+    request(job);
+  }
+}
+
 // (AI-assisted) the chunks without a mesh (missing_only: the ones missing_parts counts), in file
 // order (one pass over the vertex data)
 void CtrLevels::collect_chunks(const CtrLevelData& lev,
@@ -2070,7 +2333,8 @@ CtrLevels::LoadResult CtrLevels::load(const std::string& name, CtrLevelData* out
   for (size_t i = 0; i < out->meshes.size(); i++) {
     // (AI-assisted, j2strip) not the ones left for later by distance (load_file)
     failed += out->meshes[i] < 0 && out->chunks[i].draw_count > 0 && !out->is_unit(i) &&
-              !out->dormant_freed(i);
+              !out->dormant_freed(i) &&
+              !(i < out->mesh_index_first.size() && out->mesh_index_first[i] == UINT32_MAX);
   }
   for (auto& m : out->merc_models) {
     failed += m.mesh < 0;
@@ -5750,6 +6014,37 @@ bool CtrLevels::load_file(const fs::path& path,
   }
   u32 stream_skipped = 0, stream_core_kb = 0;
   std::map<std::string, std::pair<u32, u64>> not_made;  // section: chunks, bytes
+  // per chunk: kLeaveLowres the low resolution tfrag of a level with a vista tier (never drawn:
+  // its vista copies stand in for it, draw_level), kLeaveTitle what the Jak 1 title's camera can't
+  // show ("Title screen")
+  constexpr u8 kLeaveLowres = 1, kLeaveTitle = 2;
+  std::vector<u8> leave(out->chunks.size(), 0);
+  {
+    bool vista = false;
+    for (const auto& ch : out->chunks) {
+      vista = vista || ch.kind == c3l::CHUNK_KIND_VISTA;
+    }
+    const bool title = g_game_version == GameVersion::Jak1 && name != "title" &&
+                       m_title_on.load(std::memory_order_relaxed);
+    if (title) {
+      out->chunk_dormant.assign(out->chunks.size(), 0);
+      out->chunk_hold_since.assign(out->chunks.size(), 0);
+      out->title_pass = true;
+    }
+    for (size_t ci = 0; ci < out->chunks.size(); ci++) {
+      const auto& ch = out->chunks[ci];
+      if (out->is_unit(ci) || !ch.draw_count) {
+        continue;
+      }
+      if (vista && ch.lod_tier == 3) {
+        leave[ci] = kLeaveLowres;
+      } else if (title && !title_needed(*out, ci)) {
+        leave[ci] = kLeaveTitle;
+      }
+    }
+  }
+  u32 title_n = 0;
+  u64 title_bytes = 0;
   // (AI-assisted, j2pop) make_room: the meshes still to be made from chunk ci on (the near chunks
   // streamed and those left for later not counted), the merc models'
   auto load_left_bytes = [&](size_t ci) {
@@ -5762,7 +6057,7 @@ bool CtrLevels::load_file(const fs::path& path,
         hi = std::max<u32>(hi, out->draws[d].first_index + out->draws[d].index_count);
       }
       if (lo != UINT32_MAX && !(out->is_unit(k) && out->streaming) &&
-          !(k < dist_skip.size() && dist_skip[k])) {
+          !(k < dist_skip.size() && dist_skip[k]) && !leave[k]) {
         b += CtrStreamArena::mesh_bytes(c.vertex_count, hi - lo);
       }
     }
@@ -5786,8 +6081,14 @@ bool CtrLevels::load_file(const fs::path& path,
       out->mesh_index_end.push_back(0);
       continue;
     }
-    out->mesh_index_first.push_back(first);
-    out->mesh_index_end.push_back(end);
+    out->mesh_index_first.push_back(leave[ci] == kLeaveLowres ? UINT32_MAX : first);
+    out->mesh_index_end.push_back(leave[ci] == kLeaveLowres ? 0 : end);
+    if (leave[ci] == kLeaveTitle) {
+      out->chunk_dormant[ci] = CtrLevelData::kTitleFreed;
+      title_n++;
+      title_bytes += CtrStreamArena::mesh_bytes(ch.vertex_count, end - first) +
+                     out->normals_tail_bytes(ci);
+    }
     // (AI-assisted, streaming) a near chunk: read later (streaming) or never (the ones the v18
     // budget left out, without streaming); the core ones without streaming now
     bool skip = false;
@@ -5826,7 +6127,7 @@ bool CtrLevels::load_file(const fs::path& path,
       out->chunk_dormant[ci] = CtrLevelData::kDistFreed;
     }
     const int ntail = (int)out->normals_tail_bytes(ci);
-    if (end <= index_total && !skip && !dskip) {
+    if (end <= index_total && !skip && !dskip && !leave[ci]) {
       mesh = ctr_gpu_mesh_begin_tail(ch.vertex_count, ntail, end - first, &vdst, &idst);
       while (mesh < 0 && make_room(name, "meshes", load_left_bytes(ci))) {
         mesh = ctr_gpu_mesh_begin_tail(ch.vertex_count, ntail, end - first, &vdst, &idst);
@@ -5950,6 +6251,12 @@ bool CtrLevels::load_file(const fs::path& path,
     for (u32 d = ch.first_draw; d < ch.first_draw + ch.draw_count; d++) {
       out->draws[d].first_index -= first;
     }
+  }
+  out->title_left = title_n;
+  if (title_n) {
+    lg::info("[ctr] {}: title screen: {} chunks its camera can't show left out ({} KB; read when "
+             "the title is over)",
+             name, title_n, title_bytes / 1024);
   }
   for (const auto& [sec, nm] : not_made) {
     lg::error("[ctr] {}: {}: {} meshes not made, no linear memory ({} KB needed; {})", name, sec,
@@ -6635,6 +6942,8 @@ CtrLevelData* CtrLevels::get(const std::string& name, u64 frame) {
 
 void CtrLevels::set_wanted(const std::vector<std::string>& names) {
   m_wanted = names;
+  m_title_on = g_game_version == GameVersion::Jak1 &&
+               std::find(names.begin(), names.end(), "title") != names.end();
   // stop loads of levels that are no longer wanted (prefetches are for levels to come: kept; the
   // ones the game gave up on are dropped by prefetch / housekeeping)
   {
@@ -7239,6 +7548,7 @@ void CtrLevels::stream_update(u64 frame) {
 #endif
   dormant_update(frame);  // (AI-assisted, j2-mem)
   dist_update(frame, free_now);  // (AI-assisted, j2strip)
+  title_update(frame);
   if (!arena.ready() && !level_loading && !parts_room && frame % kRepairCheckFrames == 0) {
     // (AI-assisted, streammem) the arena given back to a level load out of memory (make_room), or
     // its first segment not there at the first streaming level's load: made again once the heap
@@ -10392,6 +10702,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     return true;
   };
+  const u32 late0 = m_late_in_view;  // (the chunks' share: Jak 1's report below)
   for (const auto& cl : lev.chunk_clusters) {
     float cl_d2 = 0;
     if (!(cl.flags & CtrLevelData::kClPlain) && cluster_beyond(cl, &cl_d2)) {
@@ -10510,9 +10821,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       }
     }
-    if (meshes[ci] < 0 || !dist_ok) {
+    // (a level with a vista tier draws its low resolution tfrag through the copies: no mesh)
+    if ((meshes[ci] < 0 && !(lev.has_vista && ch.lod_tier == 3)) || !dist_ok) {
       if (!dist_ok && ch.lod_tier != 3) {
         vista_source(ci);
+      } else if (dorm && ch.lod_tier != 0 && lev.chunk_dormant[ci] >= CtrLevelData::kTitleFreed &&
+                 sphere_in_view(cam, ch.bsphere)) {
+        m_late_in_view++;  // left out by the title, not back yet
       }
       continue;
     }
@@ -10632,19 +10947,69 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted, j2cull) the vista chunks' list (in index order, as the walk over all chunks)
     for (const u32 ci : lev.vista_chunks) {
       const auto& ch = lev.chunks[ci];
-      if (lev.meshes[ci] < 0 || !ch.vis_run_count) {
+      if (!ch.vis_run_count) {
         continue;
       }
       const float dx = ch.bsphere[0] - cam.trans[0], dy = ch.bsphere[1] - cam.trans[1],
                   dz = ch.bsphere[2] - cam.trans[2];
       const float lim = vista_dist + ch.bsphere[3];
       if (dx * dx + dy * dy + dz * dz < lim * lim) {
-        emit_chunk(ci, true);
+        if (lev.meshes[ci] >= 0) {
+          emit_chunk(ci, true);
+        } else if (dorm && lev.chunk_dormant[ci] >= CtrLevelData::kTitleFreed &&
+                   sphere_in_view(cam, ch.bsphere)) {
+          // left out by the title, not back yet: late if a run of it would show
+          const u32 r0 = lev.chunk_first_run[ci];
+          for (u32 r = r0; r < r0 + ch.vis_run_count; r++) {
+            const u16 src = lev.vis_runs[r].vis;
+            if (src < m_vista_src.size() && m_vista_src[src]) {
+              m_late_in_view++;
+              break;
+            }
+          }
+        }
       }
     }
   }
+  if (m_jak2_slot < 0 && m_late_in_view > late0) {
+    // chunks the title left out, in view and not back yet (its tie LOD groups: reported above)
+    m_levels->note_late_in_view(rs.frame_idx, m_late_in_view - late0,
+                                rs.frame_idx < lev.reveal_frame + 90);
+  }
   phase(kPhChunks);
 #ifndef __3DS__
+  // host diagnostic, env CTR_TITLE_VIS_LOG=FILE: per title frame the camera and the chunks drawn
+  if (const char* tvl = getenv("CTR_TITLE_VIS_LOG"); tvl && title_on && lev.name != "title") {
+    static FILE* tvf = fopen(tvl, "w");
+    static bool tv_hdr = false;
+    if (tvf && !tv_hdr) {
+      tv_hdr = true;
+      for (size_t ci = 0; ci < lev.chunks.size(); ci++) {
+        const auto& ch = lev.chunks[ci];
+        fprintf(tvf, "C %zu %u %u %.1f %.1f %.1f %.1f %.1f %u %u %d\n", ci, ch.kind, ch.lod_tier,
+                ch.bsphere[0], ch.bsphere[1], ch.bsphere[2], ch.bsphere[3], ch.max_dist,
+                ch.vertex_count,
+                ci < lev.mesh_index_end.size() && lev.mesh_index_first[ci] != UINT32_MAX
+                    ? lev.mesh_index_end[ci] - lev.mesh_index_first[ci]
+                    : 0u,
+                lev.is_unit(ci) ? 1 : 0);
+      }
+    }
+    if (tvf) {
+      fprintf(tvf, "F %llu %.1f %.1f %.1f", (unsigned long long)rs.frame_idx, cam.trans[0],
+              cam.trans[1], cam.trans[2]);
+      for (int i = 0; i < 4; i++) {
+        fprintf(tvf, " %.6f %.6f %.6f %.1f", cam.planes[0][i], cam.planes[1][i], cam.planes[2][i],
+                cam.planes[3][i]);
+      }
+      fprintf(tvf, " late %u |", m_late_in_view - late0);
+      for (const auto& vc : m_visible) {
+        fprintf(tvf, " %u", vc.chunk);
+      }
+      fprintf(tvf, "\n");
+      fflush(tvf);
+    }
+  }
   // (AI-assisted, perfv2) host diagnostic, env CTR_SOFT_DRAW_PX: what each mesh drawn is (the
   // soft renderer's per-draw fragment list names them)
   if (getenv("CTR_SOFT_DRAW_PX")) {
