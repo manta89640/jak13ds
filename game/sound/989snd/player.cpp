@@ -164,6 +164,7 @@ void Player::MixerThread() {
       Tick((s16Output*)buf, kMixFrames);
       const u64 t1 = kperf::ticks();
       const u64 t_mix = t1 - t0;
+      ctr_audio_submit(buf);
       // let waiting sound calls have the lock (see TickLock), for up to 2 ms
       for (int w = 0; w < 40 && mTickLock.contended(); w++) {
         ctr_thread_sleep_us(50);
@@ -175,21 +176,25 @@ void Player::MixerThread() {
         const double handler_ms = kperf::ticks_to_ms(g_handler_ticks);
         g_handler_ticks = 0;
         const double real_ms = sum_buffers * kBufferMs;
-        std::scoped_lock lock(mTickLock);
-        // (AI-assisted) late buffers: the DSP ran out of sound before the mixer's next buffer
-        // came (a gap), which the dropped DSP frames don't show
+        size_t sounds;
+        int voices;
+        {
+          std::scoped_lock lock(mTickLock);
+          sounds = mHandlers.size();
+          voices = mSynth.VoiceCount();
+        }
+        // late buffers: the DSP ran out of sound before the mixer's next buffer came (a gap),
+        // which the dropped DSP frames don't show
         lg::info(
             "3DS sound: {:.0f}% of real time ({:.0f}% sound effect handlers, {:.0f}% voices), "
             "waiting for sound calls {:.0f}%, {} sounds, {} voices, {} DSP frames dropped so far, "
             "{} late buffers so far",
             100.0 * sum_mix_ms / real_ms, 100.0 * handler_ms / real_ms,
-            100.0 * (sum_mix_ms - handler_ms) / real_ms, 100.0 * sum_wait_ms / real_ms,
-            mHandlers.size(), mSynth.VoiceCount(), ctr_audio_dropped_frames(),
-            ctr_audio_late_buffers());
+            100.0 * (sum_mix_ms - handler_ms) / real_ms, 100.0 * sum_wait_ms / real_ms, sounds,
+            voices, ctr_audio_dropped_frames(), ctr_audio_late_buffers());
         sum_mix_ms = sum_wait_ms = 0.0;
         sum_buffers = 0;
       }
-      ctr_audio_submit(buf);
       kperf::add_thread(kperf::Thread::SOUND, t_mix, 1);
       kperf::set_gauge(kperf::Gauge::SOUND_HANDLERS, (u32)mHandlers.size());
       const double mix_ms = kperf::ticks_to_ms(t_mix);

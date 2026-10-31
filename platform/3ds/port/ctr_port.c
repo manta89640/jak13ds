@@ -1666,14 +1666,27 @@ static LightEvent s_audio_event;
 
 static u64 s_audio_last_frame_tick = 0;
 static volatile u32 s_audio_max_frame_gap = 0; /* system ticks */
+static volatile u32 s_audio_dsp_woke = 0;      /* the next gap spans a DSP sleep (HOME, sleep) */
+static dspHookCookie s_audio_dsp_hook;
+
+static void audio_dsp_hook(DSP_HookType hook) {
+  /* (before ndsp's own hook, registered earlier, lets its thread run again) */
+  if (hook == DSPHOOK_ONWAKEUP || hook == DSPHOOK_ONCANCEL) {
+    __atomic_store_n(&s_audio_dsp_woke, 1, __ATOMIC_RELEASE);
+  }
+}
 
 static void audio_frame_callback(void* data) {
   (void)data;
   const u64 now = svcGetSystemTick();
-  if (s_audio_last_frame_tick) {
-    const u64 gap = now - s_audio_last_frame_tick;
-    if (gap > s_audio_max_frame_gap) {
-      s_audio_max_frame_gap = gap > 0xffffffffu ? 0xffffffffu : (u32)gap;
+  const u32 woke = __atomic_exchange_n(&s_audio_dsp_woke, 0, __ATOMIC_ACQUIRE);
+  if (s_audio_last_frame_tick && !woke) {
+    const u64 gap64 = now - s_audio_last_frame_tick;
+    const u32 gap = gap64 > 0xffffffffu ? 0xffffffffu : (u32)gap64;
+    /* a max the mixer's take (exchange with 0) can't lose */
+    u32 cur = __atomic_load_n(&s_audio_max_frame_gap, __ATOMIC_RELAXED);
+    while (gap > cur && !__atomic_compare_exchange_n(&s_audio_max_frame_gap, &cur, gap, 1,
+                                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
     }
   }
   s_audio_last_frame_tick = now;
@@ -1739,6 +1752,7 @@ int ctr_audio_init(unsigned int rate, unsigned int frames, unsigned int nbufs) {
   s_audio_late = 0;
   LightEvent_Init(&s_audio_event, RESET_ONESHOT);
   ndspSetCallback(audio_frame_callback, NULL);
+  dspHook(&s_audio_dsp_hook, audio_dsp_hook);
   s_audio_on = 1;
   printf("[ctr] audio: ndsp on, %u Hz, %u buffers of %u frames (%.1f ms each)\n", rate, nbufs,
          frames, 1000.0 * frames / rate);
@@ -1750,6 +1764,7 @@ void ctr_audio_exit(void) {
     return;
   }
   ndspSetCallback(NULL, NULL);
+  dspUnhook(&s_audio_dsp_hook);
   ndspChnWaveBufClear(0);
   ctr_linear_lock();
   ndspExit();
@@ -1768,6 +1783,7 @@ void ctr_audio_close_for_exit(void) {
   s_audio_on = 0;
   __dsb();
   ndspSetCallback(NULL, NULL);
+  dspUnhook(&s_audio_dsp_hook);
   ndspChnWaveBufClear(0);
   ndspExit();
 }
