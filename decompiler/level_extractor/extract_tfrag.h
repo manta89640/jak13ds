@@ -30,6 +30,10 @@ void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
                    tfrag3::Level& out,
                    bool dump_level,
                    const std::string& level_name,
-                   bool disable_atest_in_normal);
+                   bool disable_atest_in_normal,
+                   std::vector<u8>* morph_file = nullptr);
+
+// the morph statistics of the levels extracted so far (log line)
+std::string tfrag_morph_stats();
 
 }  // namespace decompiler

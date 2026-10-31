@@ -5,6 +5,7 @@
 
 #include "extract_anim.h"
 
+#include "common/custom_data/TfragMorph.h"
 #include "common/log/log.h"
 #include "common/util/FileUtil.h"
 #include "common/util/SimpleThreadGroup.h"
@@ -162,7 +163,8 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
                                               const std::string& dgo_name,
                                               const Config& config,
                                               tfrag3::Level& level_data,
-                                              std::vector<u8>* tie_morph) {
+                                              std::vector<u8>* tie_morph,
+                                              std::vector<u8>* tfrag_morph) {
   auto hacks = config.hacks;
   auto bsp_rec = get_bsp_file(db.obj_files_by_dgo.at(dgo_name), dgo_name);
   if (!bsp_rec) {
@@ -178,6 +180,10 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
   level_tools::BspHeader bsp_header;
   bsp_header.read_from_file(bsp_file.linked_data, db.dts, db.version());
   ASSERT((int)bsp_header.drawable_tree_array.trees.size() == bsp_header.drawable_tree_array.length);
+  if (db.version() != GameVersion::Jak1) {
+    tfrag_morph = nullptr;
+  }
+  std::vector<u8> tfrag_morph_trees;
 
   // grrr.....
   if (db.version() == GameVersion::Jak1 && dgo_name == "TIT.DGO" && bsp_header.name == "intro") {
@@ -225,7 +231,8 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
       }
       extract_tfrag(as_tfrag_tree, fmt::format("{}-{}", dgo_name, i++),
                     bsp_header.texture_remap_table, tex_db, expected_missing_textures, level_data,
-                    false, bsp_header.name, atest_disable_flag);
+                    false, bsp_header.name, atest_disable_flag,
+                    tfrag_morph ? &tfrag_morph_trees : nullptr);
     } else if (draw_tree->my_type() == "drawable-tree-instance-tie") {
       auto as_tie_tree = dynamic_cast<level_tools::DrawableTreeInstanceTie*>(draw_tree.get());
       ASSERT(as_tie_tree);
@@ -261,6 +268,22 @@ level_tools::BspHeader extract_bsp_from_level(const ObjectFileDB& db,
     extract_hfrag(bsp_header, tex_db, &level_data);
   }
   level_data.level_name = bsp_header.name;
+  if (tfrag_morph && !tfrag_morph_trees.empty()) {
+    tfrag_morph::FileHeader fh{};
+    memcpy(fh.magic, tfrag_morph::kMagic, 4);
+    fh.version = tfrag_morph::kVersion;
+    for (size_t at = 0; at < tfrag_morph_trees.size();) {
+      tfrag_morph::TreeHeader th;
+      memcpy(&th, tfrag_morph_trees.data() + at, sizeof(th));
+      at += sizeof(th) + th.vertex_count * sizeof(tfrag_morph::Vertex);
+      fh.tree_count++;
+    }
+    fh.close = bsp_header.subdivide_close;
+    fh.far = bsp_header.subdivide_far;
+    const u8* hp = (const u8*)&fh;
+    tfrag_morph->assign(hp, hp + sizeof(fh));
+    tfrag_morph->insert(tfrag_morph->end(), tfrag_morph_trees.begin(), tfrag_morph_trees.end());
+  }
 
   return bsp_header;
 }
@@ -368,12 +391,20 @@ void extract_from_level(const ObjectFileDB& db,
   add_all_textures_from_level(level_data, dgo_name, tex_db);
 
   // the bsp header file data
-  std::vector<u8> tie_morph;
-  auto bsp_header = extract_bsp_from_level(db, tex_db, dgo_name, config, level_data, &tie_morph);
+  std::vector<u8> tie_morph, tfrag_morph;
+  auto bsp_header =
+      extract_bsp_from_level(db, tex_db, dgo_name, config, level_data, &tie_morph, &tfrag_morph);
   // the PS2's tie geomorph data, for the 3DS level converter (common/custom_data/TieMorph.h)
   if (!tie_morph.empty()) {
     file_util::write_binary_file(output_folder / fmt::format("{}.tiemorph", level_data.level_name),
                                  tie_morph.data(), tie_morph.size());
+  }
+  // the PS2's tfrag geomorph data, for the 3DS level converter (common/custom_data/TfragMorph.h)
+  if (!tfrag_morph.empty()) {
+    file_util::write_binary_file(
+        output_folder / fmt::format("{}.tfragmorph", level_data.level_name), tfrag_morph.data(),
+        tfrag_morph.size());
+    lg::info("{}: tfrag geomorph: {}", level_data.level_name, tfrag_morph_stats());
   }
   extract_art_groups_from_level(db, tex_db, bsp_header.texture_remap_table, dgo_name, level_data,
                                 art_group_data);

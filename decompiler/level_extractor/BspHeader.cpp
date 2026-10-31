@@ -2129,6 +2129,10 @@ void BspHeader::read_from_file(const decompiler::LinkedObjectFile& file,
   }
 
   texture_page_count = read_plain_data_field<s32>(ref, "texture-page-count", dts);
+  if (version == GameVersion::Jak1) {
+    subdivide_close = read_plain_data_field<float>(ref, "unk-data-4", dts);
+    subdivide_far = read_plain_data_field<float>(ref, "unk-data-5", dts);
+  }
   if (texture_page_count > 0) {
     auto tex_id_ptr = deref_label(get_field_ref(ref, "texture-ids", dts));
     for (int i = 0; i < texture_page_count; i++) {

@@ -1,5 +1,6 @@
 #include "extract_tfrag.h"
 
+#include "common/custom_data/TfragMorph.h"
 #include "common/custom_data/pack_helpers.h"
 #include "common/dma/dma.h"
 #include "common/dma/gs.h"
@@ -544,7 +545,8 @@ struct TFragColorUnpack {
   }
 };
 
-void emulate_dma_building_for_tfrag(int geom,
+// returns the chain uploaded: 0 base, 1 level0, 2 level1
+int emulate_dma_building_for_tfrag(int geom,
                                     const level_tools::TFragment& frag,
                                     std::vector<u8>& vu_mem,
                                     TFragColorUnpack& color_indices,
@@ -555,13 +557,16 @@ void emulate_dma_building_for_tfrag(int geom,
   state.cl = 4;
 
   // do the "canned" unpacks
+  int chain = 2;
   if (frag.num_level0_colors == 0 || geom == 2) {
+    chain = 0;
     // we're using base
     // ASSERT(frag.num_level1_colors == 0);
     stats->num_base++;
     emulate_chain(state, frag.dma_qwc[1] * 4, (const u32*)frag.dma_base.data(), vu_mem.data());
 
   } else if (frag.num_level1_colors == 0 || geom == 1) {
+    chain = 1;
     stats->num_l0++;
     emulate_chain(state, frag.dma_qwc[3] * 4, (const u32*)frag.dma_common_and_level0.data(),
                   vu_mem.data());
@@ -593,6 +598,7 @@ void emulate_dma_building_for_tfrag(int geom,
   // :vif1 (new 'static 'vif-tag :imm #xc000 :cmd (vif-cmd unpack-v4-8)) ;; flg, unsigned
   color_indices.indices = frag.color_indices;
   color_indices.unpack_qw_addr = frag.color_offset;
+  return chain;
 }
 
 /*
@@ -673,6 +679,8 @@ struct TFragVertexData {
   Vector3f stq;  // stq?
   u16 rgba;      // unlike actual tfrag, these are still indices
   bool end_of_strip = false;
+  u16 vu_addr = 0;  // the vertex's quadword in VU memory
+  tfrag_morph::Vertex morph{};
 
   // pos = cam.rot * pctp.xyz + cam.trans
   // q = fog.x / pctp.w
@@ -1106,6 +1114,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
   // ??? something with the vertex.
   // Vector4f vf20_vtx_rgba_0 = mem.load_vector_data(vi04_vtx_ptr + 1);
   u16 vf20_vtx_rgba_0 = color_indices.load_color_idx(vi04_vtx_ptr + 1);
+  u16 a20 = vi04_vtx_ptr;
 
   //  iaddiu vi12, vi12, 0x80    |  nop
   vi12_vert_count += 0x80;  // ??
@@ -1180,6 +1189,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
   //  lq.xyzw vf21, 1(vi04)      |  maddz.xyzw vf12, vf08, vf12
   // Vector4f vf21_vtx_unk_1 = mem.load_vector_data(vi04_vtx_ptr + 1);
   u16 vf21_vtx_rgba_1 = color_indices.load_color_idx(vi04_vtx_ptr + 1);
+  u16 a21 = vi04_vtx_ptr;
 
   // vars.vf12_root_pos_0 = acc + in.vf08_cam_mat_z * vars.vf12_root_pos_0.z();
 
@@ -1245,6 +1255,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
   //  lq.xyzw vf22, 1(vi04)      |  maddz.xyzw vf13, vf08, vf13
   // Vector4f vf22_vtx_rgba_2 = mem.load_vector_data(vi04_vtx_ptr + 1);
   u16 vf22_vtx_rgba_2 = color_indices.load_color_idx(vi04_vtx_ptr + 1);
+  u16 a22 = vi04_vtx_ptr;
 
   //  sqi.xyzw vf06, vi06        |  add.xyzw vf12, vf12, vf10
   vi06_kick_zone_ptr++;
@@ -1275,6 +1286,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
 
   Vector4f vf27_vtx_stq_3;
   u16 vf23_vtx_rgba_3;
+  u16 a23 = 0;
   Vector4f vf15_vtx_pos_3;
 
   while (true) {
@@ -1323,6 +1335,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
 
     //  lq.xyzw vf23, 1(vi04)      |  maddz.xyzw vf14, vf08, vf14
     vf23_vtx_rgba_3 = color_indices.load_color_idx(vi04_vtx_ptr + 1);
+    a23 = vi04_vtx_ptr;
     // vars.vf14_loop_pos_0 = m_acc + in.vf08_cam_mat_z * vars.vf14_loop_pos_0.z();
 
     //  sqi.xyz vf24, vi06         |  add.xyzw vf13, vf13, vf10
@@ -1336,6 +1349,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
     //  sqi.xyzw vf20, vi06        |  ftoi4.xyzw vf12, vf12
     // store_vector_kick_zone(vars.vi06_kick_zone_ptr, vars.vf20);
     vertex_pipeline[0].rgba = vf20_vtx_rgba_0;
+    vertex_pipeline[0].vu_addr = a20;
     // leaving out ftoi4
     vi06_kick_zone_ptr++;
     // vars.vf12_root_pos_0 = ftoi4(vars.vf12_root_pos_0);
@@ -1421,6 +1435,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
 
     //  lq.xyzw vf20, 1(vi04)      |  maddz.xyzw vf15, vf08, vf15
     vf20_vtx_rgba_0 = color_indices.load_color_idx(vi04_vtx_ptr + 1);
+    a20 = vi04_vtx_ptr;
     // vars.vf15_loop_pos_1 = m_acc + in.vf08_cam_mat_z * vars.vf15_loop_pos_1.z();
 
     //  sqi.xyzw vf25, vi06        |  add.xyzw vf14, vf14, vf10
@@ -1435,6 +1450,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
     //  sqi.xyzw vf21, vi06        |  ftoi4.xyzw vf13, vf13
     // store_vector_kick_zone(vars.vi06_kick_zone_ptr, vars.vf21);
     vertex_pipeline[1].rgba = vf21_vtx_rgba_1;
+    vertex_pipeline[1].vu_addr = a21;
     // lg::print("B: vf21 store: {}\n", int_vec_debug(vars.vf21));
     vi06_kick_zone_ptr++;
     // vars.vf13_root_pos_1 = ftoi4(vars.vf13_root_pos_1);
@@ -1519,6 +1535,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
 
     //  lq.xyzw vf21, 1(vi04)      |  maddz.xyzw vf12, vf08, vf12
     vf21_vtx_rgba_1 = color_indices.load_color_idx(vi04_vtx_ptr + 1);
+    a21 = vi04_vtx_ptr;
     //  lg::print("vf21 load from: {}\n", vars.vi04 + 1);
     // vars.vf12_root_pos_0 = m_acc + in.vf08_cam_mat_z * vars.vf12_root_pos_0.z();
 
@@ -1534,6 +1551,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
     //  sqi.xyzw vf22, vi06        |  ftoi4.xyzw vf14, vf14
     // store_vector_kick_zone(vars.vi06_kick_zone_ptr, vars.vf22);
     vertex_pipeline[2].rgba = vf22_vtx_rgba_2;
+    vertex_pipeline[2].vu_addr = a22;
     // lg::print("B: vf22 store: {}\n", int_vec_debug(vars.vf22));
     vi06_kick_zone_ptr++;
     // vars.vf14_loop_pos_0 = ftoi4(vars.vf14_loop_pos_0);
@@ -1618,6 +1636,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
 
     //  lq.xyzw vf22, 1(vi04)      |  maddz.xyzw vf13, vf08, vf13
     vf22_vtx_rgba_2 = color_indices.load_color_idx(vi04_vtx_ptr + 1);
+    a22 = vi04_vtx_ptr;
     // vars.vf13_root_pos_1 = m_acc + in.vf08_cam_mat_z * vars.vf13_root_pos_1.z();
 
     //  sqi.xyzw vf27, vi06        |  add.xyzw vf12, vf12, vf10
@@ -1632,6 +1651,7 @@ std::vector<TFragDraw> emulate_tfrag_execution(const level_tools::TFragment& fra
     //  sqi.xyzw vf23, vi06        |  ftoi4.xyzw vf15, vf15
     // store_vector_kick_zone(vars.vi06_kick_zone_ptr, vars.vf23);
     vertex_pipeline[3].rgba = vf23_vtx_rgba_3;
+    vertex_pipeline[3].vu_addr = a23;
 
     // lg::print("B: vf23 store: {}\n", int_vec_debug(vars.vf23));
     vi06_kick_zone_ptr++;
@@ -2082,6 +2102,7 @@ s32 find_or_add_texture_to_level(u32 combo_tex_id,
 void make_tfrag3_data(std::map<u32, std::vector<GroupedDraw>>& draws,
                       tfrag3::TfragTree& tree_out,
                       std::vector<tfrag3::PreloadedVertex>& vertices,
+                      std::vector<tfrag_morph::Vertex>* morph_out,
                       std::vector<tfrag3::Texture>& texture_pool,
                       const TextureDB& tdb,
                       const std::vector<std::pair<int, int>>& expected_missing_textures,
@@ -2126,12 +2147,129 @@ void make_tfrag3_data(std::map<u32, std::vector<GroupedDraw>>& draws,
           ASSERT((vert.rgba & 3) == 0);
 
           vertices.push_back(vtx);
+          if (morph_out) {
+            morph_out->push_back(vert.morph);
+          }
         }
         tdraw.runs.push_back(run);
         tdraw.vis_groups.push_back(vgroup);
       }
 
       tree_out.draws.push_back(tdraw);
+    }
+  }
+}
+
+
+// The PS2's morph of a fragment's interpolated points (common/custom_data/TfragMorph.h), from the
+// lists of the tfrag-control block at the start of VU memory: per point a draw point [s t B P]
+// (B: the second parent's vertex, P: its own) and an interpolation entry pointing at the first
+// parent's draw point; level0 points (and the shared ones on the fragment's edge) move by band 0,
+// level1 points by band 1 with their parents' band 0 (tfrag VU program L17-L36, L47-L63). The
+// shared points snap at the band's end on the PS2 in fragments that straddle it; here they move
+// as the others.
+struct TfragMorphStats {
+  u64 level0 = 0, level1 = 0, level1_on_level1 = 0, bad = 0;
+};
+thread_local TfragMorphStats g_tfrag_morph_stats;
+
+void add_tfrag_morph(int chain,
+                     const std::vector<u8>& m,
+                     TFragColorUnpack& ci,
+                     std::vector<TFragDraw>& draws) {
+  if (chain == 0) {
+    return;
+  }
+  constexpr u32 kMaxQw = 328;
+  auto word = [&](u32 qw, int c) {
+    u32 v;
+    memcpy(&v, m.data() + qw * 16 + c * 4, 4);
+    return v;
+  };
+  auto ctl = [&](int i) { return word(i / 4, i % 4) & 0xffff; };
+  auto pos = [&](u32 addr, int c) {
+    s32 v;
+    memcpy(&v, m.data() + addr * 16 + c * 4, 4);
+    return (float)v;
+  };
+  auto color = [&](u32 addr) -> u16 {
+    const u16 idx = ci.load_color_idx(addr + 1);
+    return idx == 0xffff ? 0xffff : idx / 4;
+  };
+  std::unordered_map<u16, tfrag_morph::Vertex> out;
+  auto parent = [&](u16 addr) {
+    tfrag_morph::Vertex v{};
+    auto it = out.find(addr);
+    if (it != out.end()) {
+      v = it->second;
+    } else {
+      v.kind = tfrag_morph::kBase;
+      const u16 c = color(addr);
+      v.color_m[0] = v.color_m[1] = c;
+      for (auto& t : v.color_t) {
+        t = c;
+      }
+    }
+    return v;
+  };
+  auto add_list = [&](u16 kind, u32 n, u32 points, u32 interp) {
+    for (u32 i = 0; i < n; i++) {
+      const u32 e = points + i, ie = interp + i / 4;
+      if (e >= kMaxQw || ie >= kMaxQw) {
+        g_tfrag_morph_stats.bad++;
+        continue;
+      }
+      const u32 a_entry = word(ie, i % 4) & 0xffff;
+      if (a_entry >= kMaxQw) {
+        g_tfrag_morph_stats.bad++;
+        continue;
+      }
+      const u16 p = word(e, 3) & 0xffff, b = word(e, 2) & 0xffff, a = word(a_entry, 3) & 0xffff;
+      if (p + 1 >= kMaxQw || a + 1 >= kMaxQw || b + 1 >= kMaxQw) {
+        g_tfrag_morph_stats.bad++;
+        continue;
+      }
+      const auto pa = parent(a), pb = parent(b);
+      tfrag_morph::Vertex v{};
+      v.kind = kind;
+      const u16 c = color(p);
+      float* own = kind == tfrag_morph::kLevel0 ? v.band0 : v.band1;
+      for (int k = 0; k < 3; k++) {
+        own[k] = 0.5f * (pos(a, k) + pos(b, k)) - pos(p, k);
+      }
+      if (kind == tfrag_morph::kLevel0) {
+        v.color_m[0] = v.color_m[1] = c;
+        v.color_t[0] = v.color_t[1] = color(a);
+        v.color_t[2] = v.color_t[3] = color(b);
+        g_tfrag_morph_stats.level0++;
+      } else {
+        // its parents' own moves of band 0 (and of band 1, linearly, for a level1 parent)
+        for (int k = 0; k < 3; k++) {
+          v.band0[k] = 0.5f * (pa.band0[k] + pb.band0[k]);
+          v.band1[k] += 0.5f * (pa.band1[k] + pb.band1[k]);
+        }
+        g_tfrag_morph_stats.level1_on_level1 +=
+            (pa.kind == tfrag_morph::kLevel1) + (pb.kind == tfrag_morph::kLevel1);
+        v.color_m[0] = pa.kind == tfrag_morph::kLevel1 ? pa.color_m[0] : color(a);
+        v.color_m[1] = pb.kind == tfrag_morph::kLevel1 ? pb.color_m[0] : color(b);
+        v.color_t[0] = pa.color_t[0];
+        v.color_t[1] = pa.color_t[2];
+        v.color_t[2] = pb.color_t[0];
+        v.color_t[3] = pb.color_t[2];
+        g_tfrag_morph_stats.level1++;
+      }
+      out[p] = v;
+    }
+  };
+  add_list(tfrag_morph::kLevel0, ctl(2), ctl(9), ctl(14));
+  add_list(tfrag_morph::kLevel0, ctl(3), ctl(10), ctl(15));
+  if (chain == 2) {
+    add_list(tfrag_morph::kLevel1, ctl(4), ctl(11), ctl(16));
+    add_list(tfrag_morph::kLevel1, ctl(5), ctl(12), ctl(17));
+  }
+  for (auto& d : draws) {
+    for (auto& v : d.verts) {
+      v.morph = parent(v.vu_addr);
     }
   }
 }
@@ -2147,7 +2285,8 @@ void emulate_tfrags(int geom,
                     const std::vector<std::pair<int, int>>& expected_missing_textures,
                     bool dump_level,
                     const std::string& level_name,
-                    bool disable_alpha_test_in_normal) {
+                    bool disable_alpha_test_in_normal,
+                    std::vector<tfrag_morph::Vertex>* morph_out) {
   TFragExtractStats stats;
 
   std::vector<u8> vu_mem;
@@ -2157,16 +2296,20 @@ void emulate_tfrags(int geom,
 
   for (auto& frag : frags) {
     TFragColorUnpack color_indices;
-    emulate_dma_building_for_tfrag(geom, frag, vu_mem, color_indices, &stats);
+    const int chain = emulate_dma_building_for_tfrag(geom, frag, vu_mem, color_indices, &stats);
     VuMemWrapper mem(vu_mem);
     auto draws = emulate_tfrag_execution<false>(frag, mem, color_indices, &stats);
+    if (morph_out) {
+      add_tfrag_morph(chain, vu_mem, color_indices, draws);
+    }
     all_draws.insert(all_draws.end(), draws.begin(), draws.end());
   }
 
   process_draw_mode(all_draws, map, tree_out.kind, disable_alpha_test_in_normal);
   auto groups = make_draw_groups(all_draws);
 
-  make_tfrag3_data(groups, tree_out, vertices, level_out.textures, tdb, expected_missing_textures,
+  make_tfrag3_data(groups, tree_out, vertices, morph_out, level_out.textures, tdb,
+                   expected_missing_textures,
                    level_name);
 
   if (dump_level) {
@@ -2198,6 +2341,13 @@ void merge_groups(std::vector<tfrag3::StripDraw::VisGroup>& grps) {
 
 }  // namespace
 
+std::string tfrag_morph_stats() {
+  const auto st = g_tfrag_morph_stats;
+  g_tfrag_morph_stats = {};
+  return fmt::format("{} level0 and {} level1 points ({} parents moving in band 1, {} bad entries)",
+                     st.level0, st.level1, st.level1_on_level1, st.bad);
+}
+
 void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
                    const std::string& debug_name,
                    const std::vector<level_tools::TextureRemap>& map,
@@ -2206,7 +2356,8 @@ void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
                    tfrag3::Level& out,
                    bool dump_level,
                    const std::string& level_name,
-                   bool disable_atest_in_normal) {
+                   bool disable_atest_in_normal,
+                   std::vector<u8>* morph_file) {
   // go through 3 lods(?)
   for (int geom = 0; geom < GEOM_MAX; ++geom) {
     tfrag3::TfragTree this_tree;
@@ -2268,9 +2419,22 @@ void extract_tfrag(const level_tools::DrawableTreeTfrag* tree,
     //  ASSERT(result.vis_nodes.last_child_node + 1 == idx);
 
     std::vector<tfrag3::PreloadedVertex> vertices;
+    std::vector<tfrag_morph::Vertex> morph;
+    const bool with_morph = morph_file && geom < 2;
     emulate_tfrags(geom, as_tfrag_array->tfragments, debug_name, map, out, this_tree, vertices,
                    tex_db, expected_missing_textures, dump_level, level_name,
-                   disable_atest_in_normal);
+                   disable_atest_in_normal, with_morph ? &morph : nullptr);
+    if (with_morph) {
+      ASSERT(morph.size() == vertices.size());
+      tfrag_morph::TreeHeader th{};
+      th.geo = geom;
+      th.tree = out.tfrag_trees[geom].size();
+      th.vertex_count = morph.size();
+      const u8* hp = (const u8*)&th;
+      morph_file->insert(morph_file->end(), hp, hp + sizeof(th));
+      const u8* vp = (const u8*)morph.data();
+      morph_file->insert(morph_file->end(), vp, vp + morph.size() * sizeof(tfrag_morph::Vertex));
+    }
     pack_tfrag_vertices(&this_tree.packed_vertices, vertices);
     extract_time_of_day(tree, this_tree);
 
