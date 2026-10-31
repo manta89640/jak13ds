@@ -9782,7 +9782,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // Jak 1 leaves frames out on the title only: in play (village2 draws 3x its table every frame)
     // every frame's weights are drawn. Jak II never leaves out a frame where a day palette jumps
     // (a lightning flash: a new weight every frame).
-    const u64 tod_period = g_game_version == GameVersion::Jak2 ? 3 : 2;
+    // Jak 1's title takes new weights every fourth frame (its 20x day moves every palette)
+    const u64 tod_period = g_game_version == GameVersion::Jak2 ? 3 : 4;
     const bool tod_skip =
         m_tod_heavy && (rs.frame_idx % tod_period) != 0 &&
         (g_game_version == GameVersion::Jak2 ? !tod_day_jump(*lev.tod, cam) : title_on);
