@@ -155,6 +155,9 @@ static void* safe_vram_alloc(size_t size) {
   }
   return vramAlloc(size);
 }
+static int vram_room(size_t size) {
+  return (size_t)vramSpaceFree() >= size + VRAM_RESERVE;
+}
 /* room for a texture citro3d allocates (worst case: 32 bits per texel, mip levels) */
 static int linear_room_for_tex(int w, int h, int mipmapped) {
   const size_t bytes = (size_t)w * (size_t)h * 4u * (mipmapped ? 2u : 1u);
@@ -290,6 +293,7 @@ typedef struct {
   unsigned int linear_off;
   int priority;
   int no_room_frame;  /* last frame it didn't fit in VRAM (don't try again every frame) */
+  int vram_frame;     /* the frame its copy to VRAM was queued (it has run 3 frames later) */
 } TexPool;
 
 #define MAX_MESHES 8192
@@ -4209,6 +4213,9 @@ static int pool_leave_vram(int pool) {
     if (!full) {
       return 0;
     }
+    if (g.frame_no - p->vram_frame < 3) {
+      gxCmdQueueWait(&__C3D_Context.gxQueue, -1); /* its copy to VRAM may not have run yet */
+    }
     memcpy(full, p->vram, p->linear_off);
     if (p->linear && p->bytes > p->linear_off) {
       memcpy(full + p->linear_off, p->linear, p->bytes - p->linear_off);
@@ -4265,6 +4272,7 @@ static void update_pool_residency(void) {
   int copies = 0;
   int tried[MAX_POOLS] = {0};
   int stuck[MAX_POOLS] = {0}; /* can't leave VRAM (no linear memory to go back to) */
+  int evictions = 0; /* each one reads VRAM back with the CPU */
   while (copies < POOL_COPIES_PER_FRAME) {
     int best = -1;
     ctr_linear_lock();
@@ -4285,13 +4293,14 @@ static void update_pool_residency(void) {
     tried[best] = 1;
     TexPool* p = &g.pools[best];
     ctr_linear_lock();
-    void* v = vramAlloc(p->bytes);
-    while (!v && p->bytes <= s_vram_max_block) {
+    void* v = safe_vram_alloc(p->bytes);
+    while (!v && p->bytes <= s_vram_max_block && evictions < 2) {
       /* move out the resident pool with the lowest priority below this one's */
       int victim = -1;
       for (int i = 0; i < MAX_POOLS; i++) {
         const TexPool* q = &g.pools[i];
         if (q->used == 1 && q->vram && !stuck[i] && q->priority < p->priority &&
+            g.frame_no - q->vram_frame >= 3 &&
             (victim < 0 || q->priority < g.pools[victim].priority)) {
           victim = i;
         }
@@ -4317,7 +4326,8 @@ static void update_pool_residency(void) {
         stuck[victim] = 1;
         continue;
       }
-      v = vramAlloc(p->bytes);
+      evictions++;
+      v = safe_vram_alloc(p->bytes);
     }
     unsigned int part = p->bytes;
     if (!v) {
@@ -4353,6 +4363,7 @@ static void update_pool_residency(void) {
     uint8_t* old = p->linear;
     sync_texture_copy((u32*)old, 0, (u32*)v, 0, part, 8);
     texchk_note(best, old, part);
+    p->vram_frame = g.frame_no;
     p->vram = v;
     p->vram_bytes = part;
     /* the VRAM part leaves linear memory: the rest (if any) gets a buffer of its own; the old one
@@ -4384,7 +4395,7 @@ static void* tex_alloc(C3D_Tex* tex, int w, int h, GPU_TEXCOLOR fmt, int* on_vra
   ctr_linear_lock();
   /* only outside of a frame: a copy in a frame needs a command list split and a queue entry
    * each, and a level's worth of them overflows the GX queue */
-  if (allow_vram && g_vram_dynamic && !g.in_frame &&
+  if (allow_vram && g_vram_dynamic && !g.in_frame && vram_room((size_t)w * h * 4u) &&
       C3D_TexInitVRAM(tex, (u16)w, (u16)h, fmt)) {
     void* staging = linearAlloc(tex->size);
     if (staging) {
@@ -7457,7 +7468,7 @@ static int rt_create(int lw, int lh, int max_tile_w, int max_level, int depth_on
     if ((size_t)vramSpaceFree() >= depth_bytes + VRAM_RESERVE) {
       depth = vramAllocAt(depth_bytes, vram_bank(t->tex.data) ? VRAM_ALLOC_A : VRAM_ALLOC_B);
     }
-    if (!depth) {
+    if (!depth && vram_room(depth_bytes)) {
       depth = vramAlloc(depth_bytes);
     }
     depth_vram = depth != NULL;
