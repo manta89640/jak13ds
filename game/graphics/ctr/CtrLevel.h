@@ -253,6 +253,11 @@ struct CtrLevelData {
   // or tie chunk with a draw distance, its mesh left out (or freed) while the camera is far beyond
   // that distance, read back by distance (being read)
   static constexpr u8 kDistFreed = 3, kDistReading = 4;
+  // Jak 1 title screen: a chunk its attract camera can't show, left out (CtrLevel.cpp "Title
+  // screen"); being read back
+  static constexpr u8 kTitleFreed = 5, kTitleReading = 6;
+  u32 title_left = 0;       // chunks in those states
+  bool title_pass = false;  // this title's leave-out was applied (at load, or freed)
   bool dist_free = false;  // its load ran short of linear memory, or a load made room: on
   bool dormant_freed(size_t ci) const {
     return ci < chunk_dormant.size() && chunk_dormant[ci] != 0;
@@ -1040,6 +1045,11 @@ class CtrLevels {
   float m_dist_snap[4][3] = {};
   int m_dist_snap_n = 0;
   u64 m_dist_play_frame = 0;
+  // Jak 1 title screen (CtrLevel.cpp "Title screen"): the title level is wanted (set_wanted; the
+  // loader reads it), the camera left the attract path this title, the per-frame residency update
+  std::atomic<bool> m_title_on{false};
+  bool m_title_off_path = false;
+  void title_update(u64 frame);
   // distance freeing per stats period (stream_log)
   struct DistStats {
     u64 play_frees = 0, freed_chunks = 0, freed_bytes = 0, read_jobs = 0, read_chunks = 0,
