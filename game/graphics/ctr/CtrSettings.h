@@ -191,9 +191,9 @@ struct CtrSettings {
   // smoke) add less than one color step each and vanish, and gradients band.
   bool color16 = false;
   // the GPU's early depth test for opaque level draws, drawn front to back in distance bands.
-  // (AI-assisted) Off by default: on a New 3DS it left large screen blocks where the level never
-  // drew (Azahar ignores the early depth test, so only hardware shows it).
-  bool early_depth = false;
+  // (AI-assisted) Used only if the boot self-test (ctr_gpu_early.c) shows it changes no pixel on
+  // this console: it once left large screen blocks where the level never drew on a New 3DS.
+  bool early_depth = true;
   // (AI-assisted) early_depth = sky: the early depth test only
   // for the sky, drawn last (sky_last forced on) at depth 0: its fragments behind what the opaque
   // draws covered are dropped before texturing. With on and sky_last the sky uses it too

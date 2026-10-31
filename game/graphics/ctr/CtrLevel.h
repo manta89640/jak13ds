@@ -1205,6 +1205,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_ph[kPhN] = {};
   u64 m_ph_draws = 0, m_ph_emits = 0, m_ph_runs = 0, m_ph_walked = 0, m_ph_calls = 0;
   u64 m_ph_skipped = 0, m_ph_lod_skipped = 0;  // chunks / tie LOD groups their cluster stood for
+  u64 m_back_pending = 0;  // backend ticks not yet moved to kPhFlush
   u32 m_late_in_view = 0;  // (AI-assisted, j2intro) draw_level: missing in view (note_late_in_view)
   // (AI-assisted, gpu-rt) a pass's draws (flush_calls)
   std::vector<ctr_mesh_call> m_calls;
@@ -1252,7 +1253,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<float> m_wind_rows;
   std::vector<s32> m_wind_row_of;  // per visible chunk (m_visible index): its rows, -1 none yet
   std::vector<u32> m_wind_row_id;
-  u32 m_wind_rows_id = 0;
   u64 m_wind_draws = 0, m_wind_tris = 0;
   // the tie geomorph's rows (c3l::ExtMorph: f at 4 * row) per visible chunk with moving vertices
   // (m_visible index: its first row in m_morph_rows, -1 none) and their ids
@@ -1342,6 +1342,10 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // (AI-assisted) with vista chunks: the visible draws of early_draws, sorted_draws and
   // ordered_draws split in one walk, in list order: the vista pass's, and the main pass's lists
   std::vector<u32> m_vista_draws, m_main_draws[3];
+  // (AI-assisted) the early draws by distance band (and morph program last in each), nearest first
+  std::vector<u32> m_band_draws[9];
   // (AI-assisted, j2cull) the visible draws' places per list (bit sets), and those draws in order
   std::vector<u32> m_list_bits[3], m_list_vis[3];
+  std::vector<u32> m_morph_later;  // a list's tie geomorph draws, drawn after its others
+  std::vector<u32> m_tmorph_later;  // and its tfrag geomorph draws, before those
 };

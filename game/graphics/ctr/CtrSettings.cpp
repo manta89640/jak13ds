@@ -205,9 +205,9 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
     } else if (key == "color16") {
       s.color16 = parse_bool(v);
     } else if (key == "early_depth") {
-      // (AI-assisted) off | on | sky (gpu-home, Oct 29: block32 / sky32 removed, read as off)
+      // (AI-assisted) on | off | sky, on only after the boot self-test (block32 / sky32: off)
       s.early_depth_sky = v == "sky";
-      s.early_depth = !s.early_depth_sky && parse_bool(v);
+      s.early_depth = !s.early_depth_sky && (parse_bool(v) || v == "auto");
     } else if (key == "early_depth_func") {
       // (AI-assisted) the early test's function: ge (default) | gt | le | lt
       s.early_depth_func = v == "gt" ? 1 : (v == "le" ? 2 : (v == "lt" ? 3 : 0));

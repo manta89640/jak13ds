@@ -1503,6 +1503,84 @@ two-band morph), the morph draws on the raw command path and after the other dra
 (*a build with timing counters: ~+0.5 ms.) The rest of the window's 30 ms is the base, not the
 morph: the same build without it takes as long.
 
+## The early depth test, checked on the console (AI-assisted, earlydepth)
+
+**What is public.** Registers only (3dbrew, GBATEK): `EARLYDEPTH_FUNC` 0x061 (>=, >, <=, <),
+`EARLYDEPTH_TEST1` 0x062 and `EARLYDEPTH_TEST2` 0x118 (enables), `EARLYDEPTH_CLEAR` 0x063 (trigger;
+it doesn't touch the depth buffer), `EARLYDEPTH_DATA` 0x06A (24-bit clear value). citro3d writes
+both enables together and, copying Nintendo's driver, an `EARLYDEPTH_CLEAR` after the framebuffer
+flush at every target switch and command list split. No emulator has the test (Azahar issue #551
+is open), so only a console shows what it does.
+
+**What the squares were (hypothesis, ~80% for 8x8 block mode).** The early data holds one depth per
+32x32 screen block, filled from the 8x8 tiles the framebuffer unit writes, each write replacing the
+block's value instead of combining it. With the usual 8x8 block render target, one near tile (a rock
+in front) then stands for its 15 neighbours, and the farther level in the same 32x32 block is dropped
+tile by tile: blocks of the screen where the level never draws. The evidence:
+- The Oct 2 New 3DS report.
+- The Diddy Kong Racing 3DS port's New 3DS snapshot: squares on a 32-pixel grid, made of whole 8x8
+  tiles, near ground drawn and farther ground in the same square missing.
+- OpenLara's citro3d backend: early depth left off with "TODO block32".
+- The register map: 0x062 / 0x063 / 0x06A sit with the rasterizer's registers, 0x118 with the
+  framebuffer's. So the test runs before shading, and its data comes from the framebuffer side.
+
+In 32x32 block mode the tile and the block are the same. Whether the value is then the farthest
+depth of the whole block (exact) or something less (DKR still lost scenery there) is unknown, ~50%.
+
+**What the game does.**
+- **Boot self-test** (`ctr_gpu_early.c`, after the GPU starts, unless `early_depth = off`). One frame
+  goes into the real top render target, drawn twice: with the early test on the draws a game frame
+  uses it on, and with it off.
+  - It holds every event a frame has: the clear, the frame before, a near 8x8 tile, a 4x4 inside a
+    tile, a 32x32 mosaic at two depths with a near square last, sloped quads over a covered block,
+    an alpha-tested draw and a blended draw without depth write (both with the test off), a render
+    target switch, a command list split (flush, invalidate), a depth write without the test going
+    farther, the far layer, and the sky at depth 0.
+  - Color and depth are read back (GX copy) and compared as 64-bit hashes. The frame is first drawn
+    twice with the test off: a readback that doesn't repeat proves nothing and counts as a fail.
+    Azahar's depth readback doesn't repeat, so the test fails there.
+  - On a mismatch each event runs alone, and the log names the ones that differ (color / depth,
+    clear color pixels gained).
+  - A 256x416 target in 32x32 block mode gets the same check, for the log only.
+- **Gate.** `early_depth` (default on) and the sky's use of the test work only if the 8x8 check
+  passed with the configured function and clear value.
+- **Rules in a frame.**
+  - The early data is cleared after the top target is bound, not before: at the frame begin, after
+    every render-to-texture (`rt_end`), and before the next early draw after any depth write that
+    may go farther (depth test not >= / >: the ocean's far and mid, GS draws with the test off).
+  - Partial submits keep the data (only flush and invalidate), as the self-test's split event does.
+  - Only opaque, depth-writing, >= draws whose alpha test can't fail use the test (as before), plus
+    the sky.
+- **Order.** CtrLevel draws the early draws in one walk bucketed by distance band (<30 m, <100 m,
+  farther), each band in its texture-sorted order with its morph draws last. It replaces three
+  walks over the list.
+
+**Host estimate** (`CTR_SOFT_EARLY_PROBE=3`, village2-start end view, band order on and off in
+alternate 60-frame windows of one run). The model is an exact early test: per 32x32 block the
+farthest depth of its pixels, updated between draws.
+
+| | band order on | off |
+|---|---|---|
+| early draws' fragments / frame | 434k (4.5 screens) | 434k |
+| fail the depth test | 266k | 250k |
+| an exact 32x32 early test drops | **205k (47%)** | 176k (41%) |
+| texture changes / frame | ~61 | ~58.6 |
+
+At the fill cost in gpuspeed's model (~12 ns per shaded fragment), 205k fragments are at most
+~2.4 ms of GPU time per frame in village2. The real gain is less: the hardware's test is per tile of
+a triangle and its data updates later. The band order costs no CPU over the old path: one walk
+instead of two or three (not timed on its own), about 2.5 more texture changes per frame.
+
+**Hardware test.**
+1. Boot. In gk.log and boot.txt, find `early depth self-test: block8 ..., block32 ... -> early
+   depth on|off`. Expected if the hypothesis holds: block8 FAIL naming tile8 / mosaic / slope, and
+   block32 pass or FAIL with its list. Either way the picture is the one without early depth.
+2. If it says `on`: in village2, look at the cliffs for 5 minutes for squares or missing blocks.
+   Compare `gpu active` / busy ms with a session where config.ini says `early_depth = off`.
+3. If block8 fails and block32 passes: next comes a block32 top target without the extra copy (the
+   LCD reads 240 of each 256-pixel line through the framebuffer stride). Pass it through the same
+   self-test.
+
 ## tfrag at the PS2's distances: its three geometries and its geomorph (tfraglod)
 
 **What the PS2 does** (`c3l_format.md` "The PS2's tfrag geomorph"): each tfragment is drawn with
