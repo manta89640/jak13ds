@@ -804,7 +804,8 @@
       (let ((f1-8 (-> this summed-len)))
         0.0
         (let* ((f1-9 (- f1-8 (* f0-0 (-> this point v1-0 tp-length))))
-               (f1-11 (fmin 204.8 (- f1-9 (-> this sample-len))))
+               ;; og:preserve-this 3DS: the PS2 ran this twice per 60 Hz frame (time-adjust-ratio 0.5)
+               (f1-11 (fmin (#if TARGET_3DS (* 409.6 (-> pp clock time-adjust-ratio)) 204.8) (- f1-9 (-> this sample-len))))
                )
           (set! (-> this sample-len) (fmin 16384.0 (+ (-> this sample-len) f1-11)))
           )
@@ -1165,7 +1166,7 @@
                     (lerp-clamp
                       (the-as float 0.7)
                       (the-as float 0.4)
-                      (parameter-ease-sin-clamp (* 0.00081380206 (+ -409.6 f30-0)))
+                      (parameter-ease-sin-clamp (* 0.00081380206 (+ -409.6 (/ f30-0 (cam-dt)))))
                       )
                     )
                   (f0-7 (acos (vector-dot s0-0 s1-0)))
@@ -1254,7 +1255,7 @@
               )
             (cond
               (arg2
-                (vector-seek-3d-smooth! (-> arg0 follow-off) s2-1 (* 20480.0 (seconds-per-frame)) 0.05)
+                (vector-seek-3d-smooth! (-> arg0 follow-off) s2-1 (* 20480.0 (seconds-per-frame)) (cam-part 0.05))
                 (if (logtest? (cam-slave-options VERTICAL_FOLLOW_MATCHES_CAMERA) (-> *camera* settings slave-options))
                     (set! (-> arg0 follow-height-extra vel) 0.0)
                     (update! (-> arg0 follow-height-extra) 0.0)
@@ -1364,11 +1365,19 @@
                 (quaternion-negate! gp-0 gp-0)
                 )
             (let ((f28-0 (acos (-> gp-0 w))))
-              (if (< (* f28-0 (-> *setting-control* cam-current matrix-blend-max-partial) (-> pp clock time-adjust-ratio))
+              (if (< (* f28-0 (#if TARGET_3DS
+                                   (cam-part (-> *setting-control* cam-current matrix-blend-max-partial))
+                                   (* (-> *setting-control* cam-current matrix-blend-max-partial) (-> pp clock time-adjust-ratio))
+                                   )
+                            )
                      f30-0
                      )
                   (set! f30-0
-                        (* f28-0 (-> *setting-control* cam-current matrix-blend-max-partial) (-> pp clock time-adjust-ratio))
+                        (* f28-0 (#if TARGET_3DS
+                                   (cam-part (-> *setting-control* cam-current matrix-blend-max-partial))
+                                   (* (-> *setting-control* cam-current matrix-blend-max-partial) (-> pp clock time-adjust-ratio))
+                                   )
+                            )
                         )
                   )
               (cond

@@ -19,6 +19,31 @@
 
 (declare-type camera-combiner process)
 
+;; og:preserve-this 3DS: camera smoothing written per 60 Hz PS2 frame, run for the PS2 frames a
+;; frame covers (time-ratio 2 at 30 fps). Off the 3DS these are the original per-frame values.
+(#if TARGET_3DS
+  (defmacro cam-steps () `(max 1 (the int (+ 0.5 (-> *display* time-ratio)))))
+  (defmacro cam-steps () 1))
+
+(#if TARGET_3DS (defmacro cam-dt () `(-> *display* time-adjust-ratio)) (defmacro cam-dt () 1.0))
+
+(#when TARGET_3DS
+  (defun cam-frame-pow ((k float))
+    "k to the power of the PS2 frames in this frame"
+    (let ((v k))
+      (dotimes (i (+ (cam-steps) -1))
+        (set! v (* v k)))
+      v)))
+
+;; part of a value kept after this frame, when a PS2 frame keeps k
+(#if TARGET_3DS (defmacro cam-keep (k) `(cam-frame-pow ,k)) (defmacro cam-keep (k) k))
+
+;; part of the way moved in this frame, when a PS2 frame moves p
+(#if TARGET_3DS (defmacro cam-part (p) `(- 1.0 (cam-frame-pow (- 1.0 ,p)))) (defmacro cam-part (p) p))
+
+;; an amount per PS2 frame, for this frame
+(#if TARGET_3DS (defmacro cam-step (x) `(* ,x (cam-dt))) (defmacro cam-step (x) x))
+
 ;; TODO - for cam-master
 ;; TODO - for camera
 (define-extern camera-line-rel-len (function vector vector float vector4w none))
@@ -179,15 +204,16 @@
   (none))
 
 (defmethod update! ((this cam-float-seeker) (offset float))
-  0.0
-  0.0
-  (let* ((pos-error (- (+ (-> this target) offset) (-> this value)))
-         (partial-velocity-limit (* (-> this max-partial) (fabs pos-error))))
-    (let ((daccel (* pos-error (* (-> this accel) (-> *display* time-adjust-ratio))))) (+! (-> this vel) daccel))
-    (let ((abs-vel (fabs (-> this vel)))
-          (abs-vel-limit (fmin partial-velocity-limit (-> this max-vel))))
-      (if (< abs-vel-limit abs-vel) (set! (-> this vel) (* (-> this vel) (/ abs-vel-limit abs-vel))))))
-  (let ((dpos (* (-> this vel) (-> *display* time-adjust-ratio)))) (+! (-> this value) dpos))
+  ;; og:preserve-this 3DS: one PS2 frame step per PS2 frame (one step of time-adjust-ratio overshot)
+  (let ((dt (/ (-> *display* time-adjust-ratio) (the float (cam-steps)))))
+    (dotimes (i (cam-steps))
+      (let* ((pos-error (- (+ (-> this target) offset) (-> this value)))
+             (partial-velocity-limit (* (-> this max-partial) (fabs pos-error))))
+        (let ((daccel (* pos-error (* (-> this accel) dt)))) (+! (-> this vel) daccel))
+        (let ((abs-vel (fabs (-> this vel)))
+              (abs-vel-limit (fmin partial-velocity-limit (-> this max-vel))))
+          (if (< abs-vel-limit abs-vel) (set! (-> this vel) (* (-> this vel) (/ abs-vel-limit abs-vel))))))
+      (let ((dpos (* (-> this vel) dt))) (+! (-> this value) dpos))))
   0
   (none))
 
@@ -218,19 +244,21 @@
   (none))
 
 (defmethod update! ((this cam-vector-seeker) (arg0 vector))
-  (let ((gp-0 (new 'stack-no-clear 'vector)))
-    0.0
-    (cond
-      (arg0 (vector+! gp-0 (-> this target) arg0) (vector-! gp-0 gp-0 (-> this value)))
-      (else (vector-! gp-0 (-> this target) (-> this value))))
-    (let ((f30-1 (* (-> this max-partial) (vector-length gp-0))))
-      (vector-float*! gp-0 gp-0 (* (-> this accel) (-> *display* time-adjust-ratio)))
-      (vector+! (-> this vel) (-> this vel) gp-0)
-      (let ((f0-4 (vector-length (-> this vel)))
-            (f1-2 (fmin f30-1 (-> this max-vel))))
-        (if (< f1-2 f0-4) (vector-float*! (-> this vel) (-> this vel) (/ f1-2 f0-4)))))
-    (vector-float*! gp-0 (-> this vel) (-> *display* time-adjust-ratio))
-    (vector+! (-> this value) (-> this value) gp-0))
+  ;; og:preserve-this 3DS: one PS2 frame step per PS2 frame
+  (let ((gp-0 (new 'stack-no-clear 'vector))
+        (dt (/ (-> *display* time-adjust-ratio) (the float (cam-steps)))))
+    (dotimes (i (cam-steps))
+      (cond
+        (arg0 (vector+! gp-0 (-> this target) arg0) (vector-! gp-0 gp-0 (-> this value)))
+        (else (vector-! gp-0 (-> this target) (-> this value))))
+      (let ((f30-1 (* (-> this max-partial) (vector-length gp-0))))
+        (vector-float*! gp-0 gp-0 (* (-> this accel) dt))
+        (vector+! (-> this vel) (-> this vel) gp-0)
+        (let ((f0-4 (vector-length (-> this vel)))
+              (f1-2 (fmin f30-1 (-> this max-vel))))
+          (if (< f1-2 f0-4) (vector-float*! (-> this vel) (-> this vel) (/ f1-2 f0-4)))))
+      (vector-float*! gp-0 (-> this vel) dt)
+      (vector+! (-> this value) (-> this value) gp-0)))
   0
   (none))
 
