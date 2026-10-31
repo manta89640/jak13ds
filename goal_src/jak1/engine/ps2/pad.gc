@@ -88,7 +88,15 @@
    ;; status = 0x70 | (data length / 2)
    (abutton uint8 12) ;; pressure sensitivity information
    ;; pad buffer needs to be 32 bytes large.
-   (dummy   uint8 12)))
+   ;; og:preserve-this the frame's two 60 Hz samples (3DS, pad scripts; sub-valid 0 elsewhere):
+   ;; half a PS2 frame ago and now, presses since the last read, presses before the middle sample
+   (sub-mid   uint16)
+   (sub-end   uint16)
+   (sub-down  uint16)
+   (sub-early uint16)
+   (sub-valid uint8)
+   (sub-reread uint8) ;; set before cpad-get-data: a second read in the same frame
+   (dummy     uint8 2)))
 
 ;; data from hardware + additional info calculated here.
 (deftype cpad-info (hw-cpad)
@@ -269,6 +277,35 @@
 
 (#if PC_PORT (defconstant STICK_DEADZONE (-> *pc-settings* stick-deadzone)) (defconstant STICK_DEADZONE 0.3))
 
+(defun cpad-stick-update! ((pad cpad-info))
+  "Compute a speed and direction for stick0"
+  ;; compute a speed and direction for stick0
+  (set! (-> pad stick0-speed) 1.0)
+  (cond
+    ;; check if controller is a valid dualshock 2
+    ((= (shr (-> pad status) 4) 7)
+     ;; invert analogs if mirrored mode. trust me, you'll need this.
+     (#when PC_PORT
+       (when (pc-cheats? (-> *pc-settings* cheats) mirror)
+         (set! (-> pad leftx) (- 255 (-> pad leftx)))
+         (set! (-> pad rightx) (- 255 (-> pad rightx)))))
+     ;; compute speed and direction, with deadband.
+     (let ((f30-0 (* 0.0078125 (the float (+ (-> pad leftx) -128))))
+           (f28-0 (* 0.0078125 (the float (- 127 (the-as int (-> pad lefty)))))))
+       (set! (-> pad stick0-dir) (atan (- f30-0) f28-0))
+       (set! (-> pad stick0-speed) (fmin 1.0 (sqrtf (+ (* f30-0 f30-0) (* f28-0 f28-0))))))
+     (if (< (-> pad stick0-speed) STICK_DEADZONE) (set! (-> pad stick0-speed) 0.0))
+     ;; (format *stdcon* "pad ~D - left: ~3D / ~3D (~f at ~f)~%" pad-idx (-> pad leftx) (-> pad lefty) (/ (* 360.0 (-> pad stick0-dir)) DEGREES_PER_ROT) (-> pad stick0-speed))
+     )
+    (else
+     ;; analog is invalid? set to zero.
+     (set! (-> pad leftx) (the-as uint 128))
+     (set! (-> pad lefty) (the-as uint 128))
+     (set! (-> pad rightx) (the-as uint 128))
+     (set! (-> pad righty) (the-as uint 128))
+     (set! (-> pad stick0-dir) 0.0)
+     (set! (-> pad stick0-speed) 0.0))))
+
 (defun service-cpads ()
   "Read from cpads and update vibration"
   ;; iterate over pads
@@ -344,37 +381,14 @@
              (set! (-> history button0-abs 0) (-> pad button0-abs 0)))
            ;; buttons going down
            (set! (-> pad button0-rel 0) (logclear (-> pad button0-abs 0) (-> pad button0-abs 1)))
+           ;; og:preserve-this a release and press again within one frame is a press too
+           (logior! (-> pad button0-rel 0) (the-as pad-buttons (-> pad sub-down)))
            (set! (-> history button0-rel 0) (-> pad button0-rel 0))
            ;; some debugging thing they wrote at some point
            (when *cpad-debug*
              (set! (-> pad leftx) (the-as uint 255))
              (set! (-> pad rightx) (the-as uint 255)))
-           ;; compute a speed and direction for stick0
-           (set! (-> pad stick0-speed) 1.0)
-           (cond
-             ;; check if controller is a valid dualshock 2
-             ((= (shr (-> pad status) 4) 7)
-              ;; invert analogs if mirrored mode. trust me, you'll need this.
-              (#when PC_PORT
-                (when (pc-cheats? (-> *pc-settings* cheats) mirror)
-                  (set! (-> pad leftx) (- 255 (-> pad leftx)))
-                  (set! (-> pad rightx) (- 255 (-> pad rightx)))))
-              ;; compute speed and direction, with deadband.
-              (let ((f30-0 (* 0.0078125 (the float (+ (-> pad leftx) -128))))
-                    (f28-0 (* 0.0078125 (the float (- 127 (the-as int (-> pad lefty)))))))
-                (set! (-> pad stick0-dir) (atan (- f30-0) f28-0))
-                (set! (-> pad stick0-speed) (fmin 1.0 (sqrtf (+ (* f30-0 f30-0) (* f28-0 f28-0))))))
-              (if (< (-> pad stick0-speed) STICK_DEADZONE) (set! (-> pad stick0-speed) 0.0))
-              ;; (format *stdcon* "pad ~D - left: ~3D / ~3D (~f at ~f)~%" pad-idx (-> pad leftx) (-> pad lefty) (/ (* 360.0 (-> pad stick0-dir)) DEGREES_PER_ROT) (-> pad stick0-speed))
-              )
-             (else
-              ;; analog is invalid? set to zero.
-              (set! (-> pad leftx) (the-as uint 128))
-              (set! (-> pad lefty) (the-as uint 128))
-              (set! (-> pad rightx) (the-as uint 128))
-              (set! (-> pad righty) (the-as uint 128))
-              (set! (-> pad stick0-dir) 0.0)
-              (set! (-> pad stick0-speed) 0.0)))
+           (cpad-stick-update! pad)
            ;; if the pad was changed or stick0 pushed, update the last changed time.
            (if (or (!= (-> pad button0-abs 0) (-> pad button0-abs 1))
                    (or (< STICK_DEADZONE (-> pad stick0-speed)) (zero? (-> pad change-time))))
@@ -383,6 +397,28 @@
            ;; invalid bits set, controller is not connected.
            (cpad-invalid! pad))))))
   *cpad-list*)
+
+;; og:preserve-this 3DS: the pad is read again right before Jak runs (kernel-dispatcher). Newer
+;; presses, releases and sticks; presses cleared since the frame's first read stay cleared.
+(#when TARGET_3DS
+  (defun cpad-reread ((idx int))
+    (let ((pad (-> *cpad-list* cpads idx))
+          (history (-> *cpad-history-list* cpads idx)))
+      (when (zero? (logand (-> pad valid) 128))
+        (set! (-> pad sub-reread) 1)
+        (cpad-get-data pad)
+        (when (zero? (logand (-> pad valid) 128))
+          (let ((now (the-as pad-buttons (-> pad button0)))
+                (down (the-as pad-buttons (-> pad sub-down))))
+            (set! (-> pad button0-shadow-abs 0) (logior (logand (-> pad button0-shadow-abs 0) now) down))
+            (set! (-> pad button0-abs 0) (logior (logand (-> pad button0-abs 0) now) down))
+            (logior! (-> pad button0-rel 0) down)
+            (set! (-> history button0-abs 0) (-> pad button0-abs 0))
+            (logior! (-> history button0-rel 0) down)
+            (if (nonzero? down) (set! (-> pad change-time) (get-current-time))))
+          (cpad-stick-update! pad)
+          (if (< STICK_DEADZONE (-> pad stick0-speed)) (set! (-> pad change-time) (get-current-time))))))
+    0))
 
 (defun buzz-stop! ((idx int))
   "Set the buzz to 0 on both vibration motors of the given cpad."

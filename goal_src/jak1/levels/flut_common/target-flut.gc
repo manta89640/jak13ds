@@ -566,7 +566,7 @@
         enter-state
         'stuck
         (go target-flut-hit-ground))
-      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
       (seek! (-> self control unknown-float122)
              (fmax 0.0 (fmin 1.0 (* 0.000048828126 (+ -10240.0 (-> self control ctrl-xz-vel)))))
              (seconds-per-frame)))
@@ -627,8 +627,9 @@
                     (time-elapsed? (-> self control last-time-of-stuck) (the-as time-frame (-> *TARGET-bank* stuck-timeout)))
                     (< 4096.0 (target-height-above-ground))))
         (go target-flut-air-attack (-> *FLUT-bank* air-attack-speed)))
-      (if (!= (-> self state-time) (current-time))
-        (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv)))
+      ;; og:preserve-this 3DS: the first frame holds a PS2 frame after the press too
+      (if (#if TARGET_3DS #t (!= (-> self state-time) (current-time)))
+        (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x)))
       (if (ja-group? eichar-flut-double-jump-ja) (sound-play "flut-flap" :id (-> self flut flap-sound-id)))
       (seek! (-> self control unknown-float122)
              (fmax 0.0 (fmin 1.0 (* 0.000048828126 (+ -10240.0 (-> self control ctrl-xz-vel)))))

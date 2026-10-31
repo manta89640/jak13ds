@@ -1650,7 +1650,8 @@
           (logclear! (-> this button0) (pad-buttons left))
           (logior! (-> this button0) (pad-buttons right)))
         (set! (-> this abutton (abutton-idx right)) left-pressure) ;; og:preserve-this abutton indexing
-        (set! (-> this abutton (abutton-idx left)) right-pressure)))) ;; og:preserve-this abutton indexing
+        (set! (-> this abutton (abutton-idx left)) right-pressure)) ;; og:preserve-this abutton indexing
+      (cpad-sub-swap! this (pad-buttons left) (pad-buttons right))))
   0)
 
 (defmethod game-info-method-28 ((this game-info) (arg0 game-score) (arg1 float))

@@ -59,12 +59,17 @@ int ctr_is_new3ds(void);
  *          L2, R2, L1, R1, TRIANGLE, CIRCLE, CROSS, SQUARE=15), 1 = pressed.
  * sticks: 0..255, 127/128 = neutral, y grows downwards like on the PS2. */
 typedef struct {
-  unsigned short buttons;
+  unsigned short buttons; /* held now, or pressed since the last read */
   unsigned char lx, ly, rx, ry;
+  /* 60 Hz samples of the frame (ctr_pad_ring.h): half a PS2 frame ago and now, presses since the
+   * last read, and the ones before the middle sample */
+  unsigned short mid, end, down, early;
+  unsigned char subframe;
 } ctr_pad_state;
 
-/* Scan HID and return the current state. Call from a single thread only. */
-void ctr_pad_read(ctr_pad_state* out);
+/* Scan HID and return the current state. Call from a single thread only. reread: again in the
+ * same frame (samples over the whole frame, down = presses since the frame's first read). */
+void ctr_pad_read(ctr_pad_state* out, int reread);
 
 /* Start the soc:U service (BSD sockets) for the REPL listener. Uses `buffer_size` bytes of
  * memory (must be a multiple of 0x1000). Returns 0 on success. */

@@ -4,6 +4,7 @@
  */
 
 #include "ctr_port.h"
+#include "ctr_pad_ring.h"
 #include "ctr_logring.h"
 
 #include "game/graphics/ctr/ctr_config_presets.h"
@@ -395,35 +396,90 @@ enum {
   B_SQUARE
 };
 
-void ctr_pad_read(ctr_pad_state* out) {
+static unsigned short map_buttons(u32 keys) {
+  unsigned short b = 0;
+  /* face buttons by position: A right, B bottom, Y left, X top */
+  if (keys & KEY_A) b |= 1 << B_CIRCLE;
+  if (keys & KEY_B) b |= 1 << B_CROSS;
+  if (keys & KEY_Y) b |= 1 << B_SQUARE;
+  if (keys & KEY_X) b |= 1 << B_TRIANGLE;
+  if (keys & KEY_L) b |= 1 << B_L1;
+  if (keys & KEY_R) b |= 1 << B_R1;
+  if (keys & KEY_ZL) b |= 1 << B_L2;
+  if (keys & KEY_ZR) b |= 1 << B_R2;
+  if (keys & KEY_START) b |= 1 << B_START;
+  if (keys & KEY_SELECT) b |= 1 << B_SELECT;
+  if (keys & KEY_DUP) b |= 1 << B_UP;
+  if (keys & KEY_DDOWN) b |= 1 << B_DOWN;
+  if (keys & KEY_DLEFT) b |= 1 << B_LEFT;
+  if (keys & KEY_DRIGHT) b |= 1 << B_RIGHT;
+  return b;
+}
+
+/* buttons in HID's PAD ring (ZL/ZR come from ir:rst, touch from its own section) */
+#define PAD_RING_KEYS                                                                       \
+  (KEY_A | KEY_B | KEY_SELECT | KEY_START | KEY_DRIGHT | KEY_DLEFT | KEY_DUP | KEY_DDOWN | \
+   KEY_R | KEY_L | KEY_X | KEY_Y)
+
+static ctr_pad_ring_state s_pad_ring;       /* after the latest read */
+static ctr_pad_ring_state s_pad_frame_base; /* after the previous frame's last read */
+
+static void pad_ring_snapshot(ctr_pad_ring_snap* s) {
+  vu32* m = hidSharedMem;
+  for (int tries = 0; tries < 3; tries++) {
+    u32 i0 = m[4];
+    s->tick0 = (int64_t)((u64)m[0] | ((u64)m[1] << 32));
+    s->tick0_prev = (int64_t)((u64)m[2] | ((u64)m[3] << 32));
+    for (int j = 0; j < 8; j++) {
+      s->e[j].held = m[10 + j * 4];
+      s->e[j].pressed = m[11 + j * 4];
+      s->e[j].released = m[12 + j * 4];
+    }
+    s->newest = i0 > 7 ? 7 : i0;
+    if (m[4] == i0) {
+      return;
+    }
+  }
+}
+
+void ctr_pad_read(ctr_pad_state* out, int reread) {
   hidScanInput();
   if (s_irrst) {
     irrstScanInput();
   }
-  u32 held = hidKeysHeld();
-  unsigned short b = 0;
-  /* face buttons by position: A right, B bottom, Y left, X top */
-  if (held & KEY_A) b |= 1 << B_CIRCLE;
-  if (held & KEY_B) b |= 1 << B_CROSS;
-  if (held & KEY_Y) b |= 1 << B_SQUARE;
-  if (held & KEY_X) b |= 1 << B_TRIANGLE;
-  if (held & KEY_L) b |= 1 << B_L1;
-  if (held & KEY_R) b |= 1 << B_R1;
-  if (held & KEY_ZL) b |= 1 << B_L2;
-  if (held & KEY_ZR) b |= 1 << B_R2;
-  if (held & KEY_START) b |= 1 << B_START;
-  if (held & KEY_SELECT) b |= 1 << B_SELECT;
-  if (held & KEY_DUP) b |= 1 << B_UP;
-  if (held & KEY_DDOWN) b |= 1 << B_DOWN;
-  if (held & KEY_DLEFT) b |= 1 << B_LEFT;
-  if (held & KEY_DRIGHT) b |= 1 << B_RIGHT;
+  u32 other = hidKeysHeld() & ~(u32)PAD_RING_KEYS;
+  ctr_pad_ring_snap snap;
+  pad_ring_snapshot(&snap);
+  int64_t now = (int64_t)svcGetSystemTick();
+  const int64_t period = SYSCLOCK_ARM11 / 234, half = SYSCLOCK_ARM11 / 60;
+  ctr_pad_ring_out r;
+  u32 down;
+  if (!reread) {
+    s_pad_frame_base = s_pad_ring;
+    ctr_pad_ring_read(&s_pad_ring, &snap, now, period, half, &r);
+    down = r.down;
+  } else {
+    /* the frame's samples from the previous frame's last read; presses new since this frame's read */
+    ctr_pad_ring_state base = s_pad_frame_base;
+    ctr_pad_ring_read(&base, &snap, now, period, half, &r);
+    ctr_pad_ring_out since;
+    ctr_pad_ring_read(&s_pad_ring, &snap, now, period, half, &since);
+    down = since.down;
+  }
+  unsigned short touch = 0;
   /* no stick clicks on the 3DS: touching the lower/upper half of the touch screen */
-  if (held & KEY_TOUCH) {
+  if (other & KEY_TOUCH) {
     touchPosition t;
     hidTouchRead(&t);
-    b |= 1 << (t.py < 120 ? B_L3 : B_R3);
+    touch = 1 << (t.py < 120 ? B_L3 : B_R3);
   }
-  out->buttons = b;
+  unsigned short other_b = map_buttons(other) | touch;
+  out->buttons = map_buttons(r.held | down) | other_b;
+  out->mid = map_buttons(r.mid) | other_b;
+  out->end = map_buttons(r.end) | other_b;
+  out->down = map_buttons(down);
+  out->early = map_buttons(r.early);
+  out->subframe = 1;
 
   circlePosition cp;
   hidCircleRead(&cp);

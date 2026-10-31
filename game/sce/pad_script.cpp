@@ -38,6 +38,7 @@ struct Entry {
   bool handoff = false;
   bool crash = false;
   bool save = false;
+  bool mid = false;  // buttons change at the frame's middle sample
   std::vector<std::pair<int, int>> tasks;  // (AI-assisted) "tasks A B"
   std::vector<int> progress;  // (AI-assisted) "progress N"
   std::vector<float> tod;     // (AI-assisted) "tod H"
@@ -150,6 +151,8 @@ void load() {
         e.joints.push_back(j);
       } else if (item == "wait") {
         ss >> e.wait_sym >> e.wait_state;
+      } else if (item == "mid") {
+        e.mid = true;
       } else if (item == "exit") {
         e.exit = true;
       } else if (item == "handoff") {
@@ -259,10 +262,14 @@ PadState next_frame() {
     }
   }
   u64 frame = g_script.frame++;
+  u16 mid = g_script.current.buttons;
   while (g_script.next < g_script.entries.size() &&
          g_script.entries[g_script.next].frame <= frame) {
     const Entry& e = g_script.entries[g_script.next++];
     g_script.current = e.state;
+    if (e.mid) {
+      mid = e.state.buttons;
+    }
     for (auto& l : e.logs) {
       lg::info("[pad script] frame {}:{}", frame, l);
     }
@@ -376,7 +383,9 @@ PadState next_frame() {
       }
     }
   }
-  return g_script.current;
+  PadState out = g_script.current;
+  out.mid_buttons = mid;
+  return out;
 }
 
 void set_print_symbol_hook(PrintSymbolHook hook) {

@@ -1649,6 +1649,12 @@
 
 (define-extern *active-pool* process-tree)
 
+;; og:preserve-this 3DS: called right before that process runs each frame (the pad read again
+;; right before Jak, main.gc)
+(#when TARGET_3DS
+  (define *kernel-pre-run-proc* (the-as process #f))
+  (define *kernel-pre-run-hook* (the-as (function none) #f)))
+
 (defun kernel-dispatcher ()
   "Run the kernel!
    This is the entry point from C++ to GOAL."
@@ -1673,6 +1679,8 @@
                               ((or (eq? (-> this status) 'waiting-to-run) (eq? (-> this status) 'suspended))
                                ;; begin event in profiler.
                                (profiler-start-event (process-name-as-string this))
+                               (#when TARGET_3DS
+                                 (if (and *kernel-pre-run-hook* (eq? this *kernel-pre-run-proc*)) (*kernel-pre-run-hook*)))
                                ;; set current process to us
                                (set! (-> context current-process) this)
                                ;; pause tricks to prevent debug text and drawings from disappearing when pausing:

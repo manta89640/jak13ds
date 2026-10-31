@@ -134,7 +134,15 @@ The cpad-set-buzz! function can be used for vibration.
    (abutton uint8  12) ;; pressure sensitivity information
 
    ;; pad buffer needs to be 32 bytes large.
-   (dummy   uint8  12)
+   ;; og:preserve-this the frame's two 60 Hz samples (3DS, pad scripts; sub-valid 0 elsewhere):
+   ;; half a PS2 frame ago and now, presses since the last read, presses before the middle sample
+   (sub-mid    uint16)
+   (sub-end    uint16)
+   (sub-down   uint16)
+   (sub-early  uint16)
+   (sub-valid  uint8)
+   (sub-reread uint8) ;; set before cpad-get-data: a second read in the same frame
+   (dummy      uint8  2)
    )
   )
 
@@ -376,6 +384,83 @@ The cpad-set-buzz! function can be used for vibration.
     (defconstant STICK_DEADZONE 0.3)
     )
 
+(defun cpad-add-confirm ((buttons-pushed pad-buttons))
+  "Add confirm for the buttons that confirm in this language and territory"
+  (let ((v1-123 (get-current-language)))
+    (cond
+      ((or (= v1-123 (language-enum japanese)) (= v1-123 (language-enum korean)))
+       (case (scf-get-territory)
+         ((GAME_TERRITORY_SCEI GAME_TERRITORY_SCEK)
+          (if (logtest? buttons-pushed (pad-buttons circle))
+              (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
+              )
+          )
+         (else
+           (if (logtest? buttons-pushed (pad-buttons circle x))
+               (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
+               )
+           )
+         )
+       )
+      ((let ((v1-135 (scf-get-territory)))
+         (or (= v1-135 GAME_TERRITORY_SCEI) (= v1-135 GAME_TERRITORY_SCEK))
+         )
+       (if (logtest? buttons-pushed (pad-buttons circle x))
+           (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
+           )
+       )
+      (else
+        (if (logtest? buttons-pushed (pad-buttons x))
+            (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
+            )
+        )
+      )
+    )
+  buttons-pushed
+  )
+
+(defun cpad-stick-update! ((pad cpad-info))
+  "Compute a speed and direction for stick0"
+  (set! (-> pad stick0-speed) 1.0)
+  (cond
+    ((= (shr (-> pad status) 4) 7)
+     (let ((f30-0 (* 0.0078125 (the float (+ (-> pad leftx) -128))))
+           (f28-0 (* 0.0078125 (the float (- 127 (the-as int (-> pad lefty))))))
+           )
+       (set! (-> pad stick0-dir) (atan (- f30-0) f28-0))
+       (set! (-> pad stick0-speed) (fmin 1.0 (sqrtf (+ (* f30-0 f30-0) (* f28-0 f28-0)))))
+       )
+     (if (< (-> pad stick0-speed) STICK_DEADZONE)
+         (set! (-> pad stick0-speed) 0.0)
+         )
+     )
+    (else
+      (set! (-> pad leftx) (the-as uint 128))
+      (set! (-> pad lefty) (the-as uint 128))
+      (set! (-> pad rightx) (the-as uint 128))
+      (set! (-> pad righty) (the-as uint 128))
+      (set! (-> pad stick0-dir) 0.0)
+      (set! (-> pad stick0-speed) 0.0)
+      )
+    )
+  0
+  )
+
+;; og:preserve-this the sub-frame samples get the button swaps button0 gets
+(defun cpad-sub-swap! ((pad cpad-info) (a pad-buttons) (b pad-buttons))
+  (dotimes (i 4)
+    (let* ((v (the-as pad-buttons (case i ((0) (-> pad sub-mid)) ((1) (-> pad sub-end)) ((2) (-> pad sub-down)) (else (-> pad sub-early)))))
+           (out (logclear v (logior a b))))
+      (if (logtest? v a) (set! out (logior out b)))
+      (if (logtest? v b) (set! out (logior out a)))
+      (case i
+        ((0) (set! (-> pad sub-mid) (the-as uint out)))
+        ((1) (set! (-> pad sub-end) (the-as uint out)))
+        ((2) (set! (-> pad sub-down) (the-as uint out)))
+        (else (set! (-> pad sub-early) (the-as uint out))))))
+  0
+  )
+
 (defun service-cpads ()
   "Read from cpads and update vibration"
   (let ((pads *cpad-list*))
@@ -584,41 +669,14 @@ The cpad-set-buzz! function can be used for vibration.
                 (set! buttons-pushed (logior (pad-buttons r-analog-right) buttons-pushed))
                 )
                )
-             (let ((v1-123 (get-current-language)))
-               (cond
-                 ((or (= v1-123 (language-enum japanese)) (= v1-123 (language-enum korean)))
-                  (case (scf-get-territory)
-                    ((GAME_TERRITORY_SCEI GAME_TERRITORY_SCEK)
-                     (if (logtest? buttons-pushed (pad-buttons circle))
-                         (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
-                         )
-                     )
-                    (else
-                      (if (logtest? buttons-pushed (pad-buttons circle x))
-                          (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
-                          )
-                      )
-                    )
-                  )
-                 ((let ((v1-135 (scf-get-territory)))
-                    (or (= v1-135 GAME_TERRITORY_SCEI) (= v1-135 GAME_TERRITORY_SCEK))
-                    )
-                  (if (logtest? buttons-pushed (pad-buttons circle x))
-                      (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
-                      )
-                  )
-                 (else
-                   (if (logtest? buttons-pushed (pad-buttons x))
-                       (set! buttons-pushed (logior (pad-buttons confirm) buttons-pushed))
-                       )
-                   )
-                 )
-               )
+             (set! buttons-pushed (cpad-add-confirm buttons-pushed))
              (set! (-> pad button0-shadow-abs 0) buttons-pushed)
              (set! (-> pad button0-abs 0) buttons-pushed)
              (set! (-> history button0-abs 0) (-> pad button0-abs 0))
              )
            (set! (-> pad button0-rel 0) (logclear (-> pad button0-abs 0) (-> pad button0-abs 1)))
+           ;; og:preserve-this a release and press again within one frame is a press too
+           (logior! (-> pad button0-rel 0) (cpad-add-confirm (the-as pad-buttons (-> pad sub-down))))
            (set! (-> history button0-rel 0) (-> pad button0-rel 0))
 
 
@@ -626,28 +684,7 @@ The cpad-set-buzz! function can be used for vibration.
              (set! (-> pad leftx) (the-as uint 255))
              (set! (-> pad rightx) (the-as uint 255))
              )
-           (set! (-> pad stick0-speed) 1.0)
-           (cond
-             ((= (shr (-> pad status) 4) 7)
-              (let ((f30-0 (* 0.0078125 (the float (+ (-> pad leftx) -128))))
-                    (f28-0 (* 0.0078125 (the float (- 127 (the-as int (-> pad lefty))))))
-                    )
-                (set! (-> pad stick0-dir) (atan (- f30-0) f28-0))
-                (set! (-> pad stick0-speed) (fmin 1.0 (sqrtf (+ (* f30-0 f30-0) (* f28-0 f28-0)))))
-                )
-              (if (< (-> pad stick0-speed) STICK_DEADZONE)
-                  (set! (-> pad stick0-speed) 0.0)
-                  )
-              )
-             (else
-               (set! (-> pad leftx) (the-as uint 128))
-               (set! (-> pad lefty) (the-as uint 128))
-               (set! (-> pad rightx) (the-as uint 128))
-               (set! (-> pad righty) (the-as uint 128))
-               (set! (-> pad stick0-dir) 0.0)
-               (set! (-> pad stick0-speed) 0.0)
-               )
-             )
+           (cpad-stick-update! pad)
            (if (or (!= (-> pad button0-abs 0) (-> pad button0-abs 1))
                    (or (< STICK_DEADZONE (-> pad stick0-speed)) (zero? (-> pad change-time)))
                    )
@@ -662,6 +699,47 @@ The cpad-set-buzz! function can be used for vibration.
       )
     )
   *cpad-list*
+  )
+
+;; og:preserve-this 3DS: the pad is read again right before Jak runs (kernel-dispatcher). Newer
+;; presses, releases and sticks; presses cleared since the frame's first read stay cleared.
+(#when TARGET_3DS
+  (defun cpad-reread ((idx int))
+    (let ((pad (-> *cpad-list* cpads idx))
+          (history (-> *cpad-history-list* cpads idx)))
+      (when (not (logtest? (-> pad valid) 128))
+        (set! (-> pad sub-reread) 1)
+        (cpad-get-data pad)
+        (adjust-to-screen-flip pad)
+        (gun-trigger-buttons-swap! pad)
+        (when (not (logtest? (-> pad valid) 128))
+          (let* ((now (the-as pad-buttons (-> pad button0)))
+                 (sticks (pad-buttons)))
+            (cond
+              ((< (-> pad lefty) (the-as uint 30)) (logior! sticks (pad-buttons l-analog-up)))
+              ((< (the-as uint 225) (-> pad lefty)) (logior! sticks (pad-buttons l-analog-down))))
+            (cond
+              ((< (-> pad leftx) (the-as uint 30)) (logior! sticks (pad-buttons l-analog-left)))
+              ((< (the-as uint 225) (-> pad leftx)) (logior! sticks (pad-buttons l-analog-right))))
+            (cond
+              ((< (-> pad righty) (the-as uint 30)) (logior! sticks (pad-buttons r-analog-up)))
+              ((< (the-as uint 225) (-> pad righty)) (logior! sticks (pad-buttons r-analog-down))))
+            (cond
+              ((< (-> pad rightx) (the-as uint 30)) (logior! sticks (pad-buttons r-analog-left)))
+              ((< (the-as uint 225) (-> pad rightx)) (logior! sticks (pad-buttons r-analog-right))))
+            (let* ((now (cpad-add-confirm (logior now sticks)))
+                   (down (logior (cpad-add-confirm (the-as pad-buttons (-> pad sub-down)))
+                                 (logand sticks (lognot (-> pad button0-shadow-abs 0))))))
+              (set! (-> pad button0-shadow-abs 0) (logior (logand (-> pad button0-shadow-abs 0) now) down))
+              (set! (-> pad button0-abs 0) (logior (logand (-> pad button0-abs 0) now) down))
+              (logior! (-> pad button0-rel 0) down)
+              (set! (-> history button0-abs 0) (-> pad button0-abs 0))
+              (logior! (-> history button0-rel 0) down)
+              (if (nonzero? down) (set! (-> pad change-time) (get-current-time)))))
+          (cpad-stick-update! pad)
+          (if (< STICK_DEADZONE (-> pad stick0-speed)) (set! (-> pad change-time) (get-current-time))))))
+    0
+    )
   )
 
 (defun buzz-stop! ((arg0 int))

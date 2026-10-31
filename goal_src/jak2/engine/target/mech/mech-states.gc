@@ -2215,7 +2215,7 @@
             )
           )
     ((-> target-mech-carry-falling trans))
-    (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+    (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
     (cond
       ((>= (vector-dot (-> self control dynam gravity-normal) (-> self control transv)) 0.0)
        (set! (-> self mech jump-thrust) 0.0)

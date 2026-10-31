@@ -917,7 +917,7 @@
             (* 0.003921569 (the float (-> *cpad-list* cpads (-> self control cpad number) abutton (abutton-idx x)))) ;; og:preserve-this abutton indexing
             )
           )
-    (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+    (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
     (set! (-> self board slow-transv quad) (-> self control transv quad))
     (set! (-> self board shock-offset) (* 0.8 (-> self board shock-offset)))
     )
@@ -1461,7 +1461,7 @@
                 (* 0.003921569 (the float (-> *cpad-list* cpads (-> self control cpad number) abutton (abutton-idx x)))) ;; og:preserve-this abutton indexing
                 )
               )
-        (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+        (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
         )
       )
     (set! (-> self board slow-transv quad) (-> self control transv quad))
@@ -1613,7 +1613,7 @@
                 (* 0.003921569 (the float (-> *cpad-list* cpads (-> self control cpad number) abutton (abutton-idx x)))) ;; og:preserve-this abutton indexing
                 )
               )
-        (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+        (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
         )
       )
     (set! (-> self board slow-transv quad) (-> self control transv quad))
@@ -1750,7 +1750,7 @@
               (* 0.003921569 (the float (-> *cpad-list* cpads (-> self control cpad number) abutton (abutton-idx x)))) ;; og:preserve-this abutton indexing
               )
             )
-      (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+      (mod-var-jump #t #f (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
       )
     (when (jump-hit-ground-stuck?)
       (set-time! (-> self board jump-land-time))

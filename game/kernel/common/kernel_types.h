@@ -13,7 +13,14 @@ struct CPadInfo {
   u8 leftx;
   u8 lefty;
   u8 abutton[12];
-  u8 dummy[12];
+  // the frame's 60 Hz samples (3DS, pad scripts): see hw-cpad in pad.gc
+  u16 sub_mid;
+  u16 sub_end;
+  u16 sub_down;
+  u16 sub_early;
+  u8 sub_valid;
+  u8 sub_reread;  // set by the game: read again within the frame
+  u8 dummy[2];
   s32 number;
   s32 cpad_file;
   u32 button0_abs[3];

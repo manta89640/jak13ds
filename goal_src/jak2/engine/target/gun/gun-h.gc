@@ -39,7 +39,8 @@
         (logclear! (-> obj button0) (pad-buttons r2))
         (logior! (-> obj button0) (pad-buttons r1)))
       (set! (-> obj abutton (abutton-idx r1)) r2-pressure)
-      (set! (-> obj abutton (abutton-idx r2)) r1-pressure)))
+      (set! (-> obj abutton (abutton-idx r2)) r1-pressure))
+    (cpad-sub-swap! obj (pad-buttons r1) (pad-buttons r2)))
   (none))
 
 ;; DECOMP BEGINS

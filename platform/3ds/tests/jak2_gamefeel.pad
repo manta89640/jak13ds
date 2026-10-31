@@ -1,0 +1,158 @@
+# Jak II: the 30 fps variable jump (see gamefeel.pad), then a camera turn.
+1000 continue ctysluma-start
+1001 -
+1002 wait *target* target-stance
+1010 log gamefeel start
+1020 wait *target* target-stance
+1021 log jump 0 frames 1 press-mid 0 release-mid 1 expect level 0
+1022 pos *target*
+1024 x pos *target*
+1025 mid pos *target*
+1026 pos *target*
+1027 pos *target*
+1028 pos *target*
+1029 pos *target*
+1030 pos *target*
+1031 pos *target*
+1032 pos *target*
+1033 pos *target*
+1034 pos *target*
+1035 pos *target*
+1036 pos *target*
+1037 pos *target*
+1038 pos *target*
+1039 pos *target*
+1040 pos *target*
+1041 pos *target*
+1042 pos *target*
+1043 pos *target*
+1044 pos *target*
+1045 pos *target*
+1046 pos *target*
+1047 pos *target*
+1048 pos *target*
+1049 pos *target*
+1050 pos *target*
+1051 pos *target*
+1052 pos *target*
+1053 pos *target*
+1054 pos *target*
+1055 pos *target*
+1056 pos *target*
+1057 pos *target*
+1080 wait *target* target-stance
+1081 log jump 1 frames 2 press-mid 0 release-mid 0 expect level 3
+1082 pos *target*
+1084 x pos *target*
+1085 x pos *target*
+1086 pos *target*
+1087 pos *target*
+1088 pos *target*
+1089 pos *target*
+1090 pos *target*
+1091 pos *target*
+1092 pos *target*
+1093 pos *target*
+1094 pos *target*
+1095 pos *target*
+1096 pos *target*
+1097 pos *target*
+1098 pos *target*
+1099 pos *target*
+1100 pos *target*
+1101 pos *target*
+1102 pos *target*
+1103 pos *target*
+1104 pos *target*
+1105 pos *target*
+1106 pos *target*
+1107 pos *target*
+1108 pos *target*
+1109 pos *target*
+1110 pos *target*
+1111 pos *target*
+1112 pos *target*
+1113 pos *target*
+1114 pos *target*
+1115 pos *target*
+1116 pos *target*
+1117 pos *target*
+1140 wait *target* target-stance
+1141 log jump 2 frames 1 press-mid 1 release-mid 0 expect level 2
+1142 pos *target*
+1144 x mid pos *target*
+1145 pos *target*
+1146 pos *target*
+1147 pos *target*
+1148 pos *target*
+1149 pos *target*
+1150 pos *target*
+1151 pos *target*
+1152 pos *target*
+1153 pos *target*
+1154 pos *target*
+1155 pos *target*
+1156 pos *target*
+1157 pos *target*
+1158 pos *target*
+1159 pos *target*
+1160 pos *target*
+1161 pos *target*
+1162 pos *target*
+1163 pos *target*
+1164 pos *target*
+1165 pos *target*
+1166 pos *target*
+1167 pos *target*
+1168 pos *target*
+1169 pos *target*
+1170 pos *target*
+1171 pos *target*
+1172 pos *target*
+1173 pos *target*
+1174 pos *target*
+1175 pos *target*
+1176 pos *target*
+1177 pos *target*
+1200 wait *target* target-stance
+1201 log jump 3 frames 5 press-mid 0 release-mid 0 expect level 6
+1202 pos *target*
+1204 x pos *target*
+1205 x pos *target*
+1206 x pos *target*
+1207 x pos *target*
+1208 x pos *target*
+1209 pos *target*
+1210 pos *target*
+1211 pos *target*
+1212 pos *target*
+1213 pos *target*
+1214 pos *target*
+1215 pos *target*
+1216 pos *target*
+1217 pos *target*
+1218 pos *target*
+1219 pos *target*
+1220 pos *target*
+1221 pos *target*
+1222 pos *target*
+1223 pos *target*
+1224 pos *target*
+1225 pos *target*
+1226 pos *target*
+1227 pos *target*
+1228 pos *target*
+1229 pos *target*
+1230 pos *target*
+1231 pos *target*
+1232 pos *target*
+1233 pos *target*
+1234 pos *target*
+1235 pos *target*
+1236 pos *target*
+1237 pos *target*
+1260 wait *target* target-stance
+1262 rx=255
+1292 shot shot_j2_cam_turn
+1300 log gamefeel end
+1302 exit

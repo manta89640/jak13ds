@@ -397,7 +397,7 @@
       (target-racing-smack-check)
       (if (time-elapsed? (-> self state-time) (seconds 1))
         (logior! (-> self control root-prim prim-core action) (collide-action racer-grounded)))
-      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) l1 r1) (-> self control transv))
+      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) l1 r1) (-> self control transv) (pad-buttons l1 r1))
       (set! (-> self racer shock-offset) (* 0.8 (-> self racer shock-offset)))
       (racer-buzz 0.4))
   :code
@@ -440,7 +440,7 @@
       (if (and (logtest? (-> self control status) (cshape-moving-flags onsurf))
                (time-elapsed? (-> self state-time) (seconds 0.1)))
         (go target-racing))
-      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) l1 r1) (-> self control transv))
+      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) l1 r1) (-> self control transv) (pad-buttons l1 r1))
       (target-racing-smack-check)
       (racer-buzz 0.4))
   :code

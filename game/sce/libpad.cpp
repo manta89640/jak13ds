@@ -72,8 +72,37 @@ int scePadRead(int port, int /*slot*/, u8* rdata) {
   cpad->status = 0x70 /* (dualshock2) */ | (20 / 2); /* (dualshock2 data size) */
 
   // scripted input for automated tests (pad_script.h) replaces controller 0
+  bool reread = cpad->sub_reread != 0;
+  cpad->sub_reread = 0;
+  static pad_script::PadState s_last_script;
+  if (reread && port == 0 && pad_script::active()) {
+    // the script advances once a frame: nothing new
+    cpad->sub_down = 0;
+    cpad->leftx = s_last_script.lx;
+    cpad->lefty = s_last_script.ly;
+    cpad->rightx = s_last_script.rx;
+    cpad->righty = s_last_script.ry;
+    return 32;
+  }
+
+  // no sub-frame samples unless the source has them
+  cpad->sub_valid = 0;
+  cpad->sub_down = cpad->sub_early = 0;
+
   if (port == 0 && pad_script::active()) {
     auto state = pad_script::next_frame();
+    s_last_script = state;
+    // entries marked "mid" change the pad half a frame early (pad_script.h)
+    static u16 s_prev_end = 0;
+    u16 early = state.mid_buttons & ~s_prev_end;
+    u16 down = early | (state.buttons & ~state.mid_buttons);
+    s_prev_end = state.buttons;
+    cpad->sub_mid = state.mid_buttons;
+    cpad->sub_end = state.buttons;
+    cpad->sub_down = down;
+    cpad->sub_early = early;
+    cpad->sub_valid = 1;
+    state.buttons |= down;
     cpad->button0 = state.buttons;
     cpad->leftx = state.lx;
     cpad->lefty = state.ly;
@@ -96,14 +125,20 @@ int scePadRead(int port, int /*slot*/, u8* rdata) {
 #ifdef __3DS__
   // 3DS buttons and circle pad (C-stick on New 3DS) are controller 0. No second controller.
   cpad->button0 = 0;
+  cpad->sub_mid = cpad->sub_end = 0;
   cpad->leftx = cpad->lefty = cpad->rightx = cpad->righty = 127;
   for (auto& p : cpad->abutton) {
     p = 0;
   }
   if (port == 0) {
     ctr_pad_state state;
-    ctr_pad_read(&state);
+    ctr_pad_read(&state, reread ? 1 : 0);
     cpad->button0 = state.buttons;
+    cpad->sub_mid = state.mid;
+    cpad->sub_end = state.end;
+    cpad->sub_down = state.down;
+    cpad->sub_early = state.early;
+    cpad->sub_valid = state.subframe;
     cpad->leftx = state.lx;
     cpad->lefty = state.ly;
     cpad->rightx = state.rx;
@@ -147,6 +182,7 @@ int scePadRead(int port, int /*slot*/, u8* rdata) {
       cpad->button0 |= pad_data.value()->button_data.at(i) << i;
     }
   }
+  cpad->sub_mid = cpad->sub_end = cpad->button0;
 
   return 32;
 }

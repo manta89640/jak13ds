@@ -568,6 +568,10 @@
       (with-profiler "update-pc"
         (#when PC_PORT
           (update *pc-settings*)))
+      ;; og:preserve-this 3DS: Jak runs after every entity: read the pad again right before him
+      (#when TARGET_3DS
+        (set! *kernel-pre-run-hook* (lambda () (cpad-reread 0) (none)))
+        (set! *kernel-pre-run-proc* *target*))
       ;; suspend
       (suspend)))
   0)

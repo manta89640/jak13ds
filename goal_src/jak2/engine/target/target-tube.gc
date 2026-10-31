@@ -731,7 +731,7 @@
     (if (logtest? (-> self control status) (collide-status on-surface))
         (go target-tube)
         )
-    (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+    (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
     (seek!
       (-> self control unknown-float35)
       (fmax 0.0 (fmin 1.0 (* 0.00012207031 (+ -2048.0 (-> self control ctrl-xz-vel)))))

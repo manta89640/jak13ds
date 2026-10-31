@@ -1462,7 +1462,7 @@
     (if (logtest? (-> self control status) (collide-status on-surface))
         (go target-hit-ground #f)
         )
-    (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+    (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
     (if (and (= (-> self control danger-mode) 'uppercut)
              (< (vector-dot (-> self control dynam gravity-normal) (-> self control transv)) -8192.0)
              )

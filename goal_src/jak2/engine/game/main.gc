@@ -1111,6 +1111,11 @@
     (set! (-> gp-1 dog-ratio) 1.0)
     (while *run*
       (display-loop-main gp-1)
+      ;; og:preserve-this 3DS: Jak runs after every entity: read the pad again right before him
+      (#when TARGET_3DS
+        (set! *kernel-pre-run-hook* (lambda () (cpad-reread 0) (none)))
+        (set! *kernel-pre-run-proc* *target*)
+        )
       (with-profiler 'actors *profile-actors-color*
         (suspend)
         )

@@ -1,0 +1,428 @@
+# 30 fps variable jump against the PS2 (platform/3ds/tests/pad_ring_test.c has the model).
+# One jump in place per press length; "mid" = the change lands on the frame's middle 60 Hz sample.
+# Expect the apex to rise ~0.41 m per level (2.49 m / 6), then camera turns.
+0 wait *target* target-title-wait
+300 continue beach-start
+301 wait *target* target-continue
+302 wait *target* target-stance
+330 log gamefeel start
+340 wait *target* target-stance
+341 log jump 0 frames 1 press-mid 0 release-mid 1 expect level 0
+342 pos *target*
+344 x pos *target*
+345 mid pos *target*
+346 pos *target*
+347 pos *target*
+348 pos *target*
+349 pos *target*
+350 pos *target*
+351 pos *target*
+352 pos *target*
+353 pos *target*
+354 pos *target*
+355 pos *target*
+356 pos *target*
+357 pos *target*
+358 pos *target*
+359 pos *target*
+360 pos *target*
+361 pos *target*
+362 pos *target*
+363 pos *target*
+364 pos *target*
+365 pos *target*
+366 pos *target*
+367 pos *target*
+368 pos *target*
+369 pos *target*
+370 pos *target*
+371 pos *target*
+372 pos *target*
+373 pos *target*
+374 pos *target*
+375 pos *target*
+376 pos *target*
+377 pos *target*
+400 wait *target* target-stance
+401 log jump 1 frames 1 press-mid 0 release-mid 0 expect level 1
+402 pos *target*
+404 x pos *target*
+405 pos *target*
+406 pos *target*
+407 pos *target*
+408 pos *target*
+409 pos *target*
+410 pos *target*
+411 pos *target*
+412 pos *target*
+413 pos *target*
+414 pos *target*
+415 pos *target*
+416 pos *target*
+417 pos *target*
+418 pos *target*
+419 pos *target*
+420 pos *target*
+421 pos *target*
+422 pos *target*
+423 pos *target*
+424 pos *target*
+425 pos *target*
+426 pos *target*
+427 pos *target*
+428 pos *target*
+429 pos *target*
+430 pos *target*
+431 pos *target*
+432 pos *target*
+433 pos *target*
+434 pos *target*
+435 pos *target*
+436 pos *target*
+437 pos *target*
+460 wait *target* target-stance
+461 log jump 2 frames 2 press-mid 0 release-mid 1 expect level 2
+462 pos *target*
+464 x pos *target*
+465 x pos *target*
+466 mid pos *target*
+467 pos *target*
+468 pos *target*
+469 pos *target*
+470 pos *target*
+471 pos *target*
+472 pos *target*
+473 pos *target*
+474 pos *target*
+475 pos *target*
+476 pos *target*
+477 pos *target*
+478 pos *target*
+479 pos *target*
+480 pos *target*
+481 pos *target*
+482 pos *target*
+483 pos *target*
+484 pos *target*
+485 pos *target*
+486 pos *target*
+487 pos *target*
+488 pos *target*
+489 pos *target*
+490 pos *target*
+491 pos *target*
+492 pos *target*
+493 pos *target*
+494 pos *target*
+495 pos *target*
+496 pos *target*
+497 pos *target*
+520 wait *target* target-stance
+521 log jump 3 frames 2 press-mid 0 release-mid 0 expect level 3
+522 pos *target*
+524 x pos *target*
+525 x pos *target*
+526 pos *target*
+527 pos *target*
+528 pos *target*
+529 pos *target*
+530 pos *target*
+531 pos *target*
+532 pos *target*
+533 pos *target*
+534 pos *target*
+535 pos *target*
+536 pos *target*
+537 pos *target*
+538 pos *target*
+539 pos *target*
+540 pos *target*
+541 pos *target*
+542 pos *target*
+543 pos *target*
+544 pos *target*
+545 pos *target*
+546 pos *target*
+547 pos *target*
+548 pos *target*
+549 pos *target*
+550 pos *target*
+551 pos *target*
+552 pos *target*
+553 pos *target*
+554 pos *target*
+555 pos *target*
+556 pos *target*
+557 pos *target*
+580 wait *target* target-stance
+581 log jump 4 frames 3 press-mid 0 release-mid 1 expect level 4
+582 pos *target*
+584 x pos *target*
+585 x pos *target*
+586 x pos *target*
+587 mid pos *target*
+588 pos *target*
+589 pos *target*
+590 pos *target*
+591 pos *target*
+592 pos *target*
+593 pos *target*
+594 pos *target*
+595 pos *target*
+596 pos *target*
+597 pos *target*
+598 pos *target*
+599 pos *target*
+600 pos *target*
+601 pos *target*
+602 pos *target*
+603 pos *target*
+604 pos *target*
+605 pos *target*
+606 pos *target*
+607 pos *target*
+608 pos *target*
+609 pos *target*
+610 pos *target*
+611 pos *target*
+612 pos *target*
+613 pos *target*
+614 pos *target*
+615 pos *target*
+616 pos *target*
+617 pos *target*
+640 wait *target* target-stance
+641 log jump 5 frames 3 press-mid 0 release-mid 0 expect level 5
+642 pos *target*
+644 x pos *target*
+645 x pos *target*
+646 x pos *target*
+647 pos *target*
+648 pos *target*
+649 pos *target*
+650 pos *target*
+651 pos *target*
+652 pos *target*
+653 pos *target*
+654 pos *target*
+655 pos *target*
+656 pos *target*
+657 pos *target*
+658 pos *target*
+659 pos *target*
+660 pos *target*
+661 pos *target*
+662 pos *target*
+663 pos *target*
+664 pos *target*
+665 pos *target*
+666 pos *target*
+667 pos *target*
+668 pos *target*
+669 pos *target*
+670 pos *target*
+671 pos *target*
+672 pos *target*
+673 pos *target*
+674 pos *target*
+675 pos *target*
+676 pos *target*
+677 pos *target*
+700 wait *target* target-stance
+701 log jump 6 frames 4 press-mid 0 release-mid 1 expect level 6
+702 pos *target*
+704 x pos *target*
+705 x pos *target*
+706 x pos *target*
+707 x pos *target*
+708 mid pos *target*
+709 pos *target*
+710 pos *target*
+711 pos *target*
+712 pos *target*
+713 pos *target*
+714 pos *target*
+715 pos *target*
+716 pos *target*
+717 pos *target*
+718 pos *target*
+719 pos *target*
+720 pos *target*
+721 pos *target*
+722 pos *target*
+723 pos *target*
+724 pos *target*
+725 pos *target*
+726 pos *target*
+727 pos *target*
+728 pos *target*
+729 pos *target*
+730 pos *target*
+731 pos *target*
+732 pos *target*
+733 pos *target*
+734 pos *target*
+735 pos *target*
+736 pos *target*
+737 pos *target*
+760 wait *target* target-stance
+761 log jump 7 frames 1 press-mid 1 release-mid 1 expect level 1
+762 pos *target*
+764 x mid pos *target*
+765 mid pos *target*
+766 pos *target*
+767 pos *target*
+768 pos *target*
+769 pos *target*
+770 pos *target*
+771 pos *target*
+772 pos *target*
+773 pos *target*
+774 pos *target*
+775 pos *target*
+776 pos *target*
+777 pos *target*
+778 pos *target*
+779 pos *target*
+780 pos *target*
+781 pos *target*
+782 pos *target*
+783 pos *target*
+784 pos *target*
+785 pos *target*
+786 pos *target*
+787 pos *target*
+788 pos *target*
+789 pos *target*
+790 pos *target*
+791 pos *target*
+792 pos *target*
+793 pos *target*
+794 pos *target*
+795 pos *target*
+796 pos *target*
+797 pos *target*
+820 wait *target* target-stance
+821 log jump 8 frames 1 press-mid 1 release-mid 0 expect level 2
+822 pos *target*
+824 x mid pos *target*
+825 pos *target*
+826 pos *target*
+827 pos *target*
+828 pos *target*
+829 pos *target*
+830 pos *target*
+831 pos *target*
+832 pos *target*
+833 pos *target*
+834 pos *target*
+835 pos *target*
+836 pos *target*
+837 pos *target*
+838 pos *target*
+839 pos *target*
+840 pos *target*
+841 pos *target*
+842 pos *target*
+843 pos *target*
+844 pos *target*
+845 pos *target*
+846 pos *target*
+847 pos *target*
+848 pos *target*
+849 pos *target*
+850 pos *target*
+851 pos *target*
+852 pos *target*
+853 pos *target*
+854 pos *target*
+855 pos *target*
+856 pos *target*
+857 pos *target*
+880 wait *target* target-stance
+881 log jump 9 frames 2 press-mid 1 release-mid 0 expect level 4
+882 pos *target*
+884 x mid pos *target*
+885 x pos *target*
+886 pos *target*
+887 pos *target*
+888 pos *target*
+889 pos *target*
+890 pos *target*
+891 pos *target*
+892 pos *target*
+893 pos *target*
+894 pos *target*
+895 pos *target*
+896 pos *target*
+897 pos *target*
+898 pos *target*
+899 pos *target*
+900 pos *target*
+901 pos *target*
+902 pos *target*
+903 pos *target*
+904 pos *target*
+905 pos *target*
+906 pos *target*
+907 pos *target*
+908 pos *target*
+909 pos *target*
+910 pos *target*
+911 pos *target*
+912 pos *target*
+913 pos *target*
+914 pos *target*
+915 pos *target*
+916 pos *target*
+917 pos *target*
+940 wait *target* target-stance
+941 log jump 10 frames 5 press-mid 0 release-mid 0 expect level 6
+942 pos *target*
+944 x pos *target*
+945 x pos *target*
+946 x pos *target*
+947 x pos *target*
+948 x pos *target*
+949 pos *target*
+950 pos *target*
+951 pos *target*
+952 pos *target*
+953 pos *target*
+954 pos *target*
+955 pos *target*
+956 pos *target*
+957 pos *target*
+958 pos *target*
+959 pos *target*
+960 pos *target*
+961 pos *target*
+962 pos *target*
+963 pos *target*
+964 pos *target*
+965 pos *target*
+966 pos *target*
+967 pos *target*
+968 pos *target*
+969 pos *target*
+970 pos *target*
+971 pos *target*
+972 pos *target*
+973 pos *target*
+974 pos *target*
+975 pos *target*
+976 pos *target*
+977 pos *target*
+1000 wait *target* target-stance
+1001 log camera turn right
+1002 rx=255
+1012 rx=255 shot shot_cam_turn_a
+1032 shot shot_cam_turn_b
+1040 shot shot_cam_turn_c
+1042 log camera turn left
+1044 rx=0
+1074 shot shot_cam_turn_d
+1080 ly=0
+1140 shot shot_cam_walk
+1150 log gamefeel end
+1152 exit

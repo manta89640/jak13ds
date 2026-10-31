@@ -669,6 +669,9 @@
       (+! (-> self control transv z) (-> self control rider-last-move z))))
   (set! (-> self control unknown-float123) 0.0)
   (set! (-> self control unknown-float124) 0.0)
+  ;; og:preserve-this 3DS: buttons pressed before this frame's middle 60 Hz sample (mod-var-jump)
+  (#when TARGET_3DS
+    (set! (-> self control unknown-int35) (the-as int (-> self control cpad sub-early))))
   (cond
     (arg3
      (set! (-> self control unknown-uint20) (the-as uint (- arg0 (+ -409.6 (-> *TARGET-bank* jump-collide-offset)))))
@@ -691,10 +694,11 @@
                   (vector-float*! s4-1 s4-1 (/ f0-17 f1-11))))))
   (let ((v0-2 (-> self control unknown-vector102))) (set! (-> v0-2 quad) (-> self control trans quad)) v0-2))
 
-(defbehavior mod-var-jump target ((arg0 symbol) (arg1 symbol) (arg2 symbol) (arg3 vector))
+(defbehavior mod-var-jump target ((arg0 symbol) (arg1 symbol) (arg2 symbol) (arg3 vector) (arg4 pad-buttons))
   (local-vars (v0-2 vector))
   (let ((f30-0 (* 0.033333335 (the float (- (current-time) (-> self state-time)))))
-        (last-sample #f))
+        (last-sample #f)
+        (end-after #f))
     ;; og:preserve-this 3DS: low frame rates (AI-assisted).
     ;; The jump rises higher while the button is held during its first 0.1 s (f30-0 from 0 to 1),
     ;; but the button is read once a frame. Below ~20 fps (time-ratio 3-4: a frame is 0.05-0.067 s
@@ -705,11 +709,33 @@
     ;; when the game lags, a release counts as happening at the read that sees it.
     ;; unknown-float124 (not used elsewhere) keeps the last raise: below 1.0 the jump can still rise.
     (#when TARGET_3DS
-      (when (< (-> self control unknown-float124) 1.0)
-        (set! f30-0 (fmin 1.0 f30-0))
-        (when (and (not arg2) (< 2.5 (-> *display* time-ratio)))
-          (set! arg2 #t)
-          (set! last-sample #t))))
+      (let ((pad (-> self control cpad)))
+        (cond
+          ((and (nonzero? (-> pad sub-valid)) (< 1.5 (-> *display* time-ratio)) (< (-> *display* time-ratio) 2.5))
+           ;; 30 fps: replay the frame's two 60 Hz pad samples like the PS2 read them. The hold counts
+           ;; from the PS2 frame of the press (one earlier if it came before the middle sample).
+           (let ((t (+ (- (current-time) (-> self state-time))
+                       (if (logtest? (the-as pad-buttons (-> self control unknown-int35)) arg4) 5 0)))
+                 (open (<= 0.0 (-> self control unknown-float123)))
+                 (f -1.0))
+             (dotimes (i 2)
+               (let ((s (if (zero? i) (+ t -5) t)))
+                 (when (and open (>= s 0))
+                   (let ((sf (* 0.033333335 (the float s))))
+                     (if (and (< 1.0 sf) (< (-> self control unknown-float124) 1.0) (< f 1.0)) (set! sf 1.0))
+                     (if (or (< 1.0 sf)
+                             (not (logtest? (the-as pad-buttons (if (zero? i) (-> pad sub-mid) (-> pad sub-end))) arg4)))
+                       (set! open #f)
+                       (set! f sf))))))
+             (set! f30-0 f)
+             (set! arg2 (<= 0.0 f))
+             (set! end-after (and arg2 (not open)))))
+          (else
+           (when (< (-> self control unknown-float124) 1.0)
+             (set! f30-0 (fmin 1.0 f30-0))
+             (when (and (not arg2) (< 2.5 (-> *display* time-ratio)))
+               (set! arg2 #t)
+               (set! last-sample #t)))))))
     (cond
       ((or (< 1.0 f30-0) (< (-> self control unknown-float123) 0.0) (not arg2))
        (set! (-> self control unknown-float123) -1.0)
@@ -737,7 +763,11 @@
                             (* 0.008333334 (- (-> self control dynam gravity-length))))))
              (vector+! arg3
                        (vector-float*! arg3 (-> self control dynam gravity-normal) f0-13)
-                       (vector-float*! s4-0 s4-0 (/ f28-0 f26-0)))))))))
+                       (vector-float*! s4-0 s4-0 (/ f28-0 f26-0))))))))
+    (#when TARGET_3DS
+      (when end-after
+        (set! (-> self control unknown-float123) -1.0)
+        (set! (-> self control unknown-float124) 1.0))))
   0
   (when (and arg1 (ja-group) (and (-> (ja-group) extra) #t))
     (let ((v1-57 (res-lump-struct (-> (ja-group) extra) 'collide-offset vector :time (ja-frame-num 0))))
@@ -900,7 +930,7 @@
             (the-as float 65502.96)
             (the-as float -163840.0)
             (the-as float (if (= (-> *cpad-list* cpads (-> self control cpad number) stick0-speed) 0.0) 0.0 68812.8))))
-      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
       (slide-down-test)
       (seek! (-> self control unknown-float122)
              (fmax 0.0 (fmin 1.0 (* 0.000048828126 (+ -10240.0 (-> self control ctrl-xz-vel)))))
@@ -982,8 +1012,9 @@
             (the-as float 33775.48)
             (the-as float -122880.0)
             (the-as float (if (= (-> *cpad-list* cpads (-> self control cpad number) stick0-speed) 0.0) 0.0 68812.8))))
-      (if (!= (-> self state-time) (current-time))
-        (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv)))
+      ;; og:preserve-this 3DS: the first frame holds a PS2 frame after the press too
+      (if (#if TARGET_3DS #t (!= (-> self state-time) (current-time)))
+        (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x)))
       (seek! (-> self control unknown-float122)
              (fmax 0.0 (fmin 1.0 (* 0.000048828126 (+ -10240.0 (-> self control ctrl-xz-vel)))))
              (seconds-per-frame)))
@@ -1039,7 +1070,7 @@
             (the-as float 33775.48)
             (the-as float -122880.0)
             (the-as float (if (= (-> *cpad-list* cpads (-> self control cpad number) stick0-speed) 0.0) 0.0 68812.8))))
-      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
       (seek! (-> self control unknown-float122)
              (fmax 0.0 (fmin 1.0 (* 0.00012207031 (+ -2048.0 (-> self control ctrl-xz-vel)))))
              (seconds-per-frame)))
@@ -1565,7 +1596,7 @@
                (ja-group? eichar-attack-uppercut-ja)
                (>= (ja-aframe-num 0) 12.0))
         (go target-attack-air 'uppercut))
-      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv))
+      (mod-var-jump #t #t (cpad-hold? (-> self control cpad number) x) (-> self control transv) (pad-buttons x))
       (when (and (= (-> self fact eco-type) (pickup-type eco-red)) (>= (-> self fact eco-level) 1.0))
         (effect-control-method-10 (-> self skel effect) 'group-red-eco-spinkick (ja-frame-num 0) 23)
         (cpad-set-buzz! (-> *cpad-list* cpads 0) 1 153 (seconds 0.1)))

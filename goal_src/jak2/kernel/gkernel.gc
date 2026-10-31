@@ -1886,6 +1886,13 @@
   (the-as process #f)
   )
 
+;; og:preserve-this 3DS: called right before that process runs each frame (the pad read again
+;; right before Jak, main.gc)
+(#when TARGET_3DS
+  (define *kernel-pre-run-proc* (the-as process #f))
+  (define *kernel-pre-run-hook* (the-as (function none) #f))
+  )
+
 ;; decomp deviation
 (defun kernel-dispatcher ()
   "Main entry point to GOAL from C++."
@@ -1919,6 +1926,11 @@
           (('waiting-to-run 'suspended)
            ;; we'll run this process
            (profiler-start-event (-> arg0 name))
+           (#when TARGET_3DS
+             (if (and *kernel-pre-run-hook* (eq? arg0 *kernel-pre-run-proc*))
+                 (*kernel-pre-run-hook*)
+                 )
+             )
            (set! (-> s5-0 current-process) arg0)
            (cond
              ((logtest? (-> arg0 mask) (process-mask pause))
