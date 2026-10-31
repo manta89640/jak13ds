@@ -1671,6 +1671,75 @@ static void load_opt_set(void) {
          p->df_ok ? "ready" : "off");
 }
 
+/* Boot check of the CPU cache cleaning the GPU depends on: data written on another core,
+ * cleaned from this one by the method under test (0 kernel, 1 GSP), copied by the GPU, read back.
+ * Returns the words that differ (all: the test could not run). */
+typedef struct {
+  u32* buf;
+  u32 words, seed;
+} FlushFill;
+static void flush_fill(void* arg) {
+  const FlushFill* f = (const FlushFill*)arg;
+  for (u32 i = 0; i < f->words; i++) {
+    f->buf[i] = (i * 2654435761u) ^ f->seed;
+  }
+}
+static u32 flush_check(int method, int other_core, u32 bytes, u32 seed) {
+  const u32 words = bytes / 4;
+  u32* src = (u32*)linearAlloc(bytes);
+  u32* dst = (u32*)linearAlloc(bytes);
+  u32 bad = words;
+  if (src && dst) {
+    C3D_SyncMemoryFill(dst, 0, dst + words, BIT(0) | (2 << 8), NULL, 0, NULL, 0);
+    FlushFill f = {src, words, seed};
+    s32 me = svcGetProcessorID();
+    Thread t = other_core ? threadCreate(flush_fill, &f, 4096, 0x30, me == 0 ? 2 : 0, false) : NULL;
+    if (t) {
+      threadJoin(t, U64_MAX);
+      threadFree(t);
+    } else {
+      flush_fill(&f);
+    }
+    if (method == 0) {
+      svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)src, bytes);
+    } else {
+      GSPGPU_FlushDataCache(src, bytes);
+    }
+    C3D_SyncTextureCopy(src, 0, dst, 0, bytes, 8);
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)dst, bytes);
+    bad = 0;
+    for (u32 i = 0; i < words; i++) {
+      bad += dst[i] != ((i * 2654435761u) ^ seed);
+    }
+  }
+  linearFree(src);
+  linearFree(dst);
+  return bad;
+}
+static void flush_selftest(void) {
+  static const char* const kName[2] = {"kernel", "GSP"};
+  static const u32 kBytes[2] = {4096, 256 * 1024};
+  u32 bad[2] = {0, 0};
+  char txt[2][96];
+  u32 seed = 0x9e3779b9u;
+  for (int m = 0; m < 2; m++) {
+    u32 r[4];
+    for (int c = 0; c < 2; c++) {
+      for (int z = 0; z < 2; z++) {
+        r[c * 2 + z] = flush_check(m, c, kBytes[z], seed += 0x6d2b79f5u);
+        bad[m] += r[c * 2 + z];
+      }
+    }
+    snprintf(txt[m], sizeof(txt[m]), "%s: same core %lu/%lu, other core %lu/%lu words wrong",
+             kName[m], (unsigned long)r[0], (unsigned long)r[1], (unsigned long)r[2],
+             (unsigned long)r[3]);
+  }
+  const int was = kernel_flush_on();
+  s_kernel_flush = was && bad[0] == 0;
+  printf("[ctr] cache flush self-test (4 KB/256 KB): %s; %s -> %s\n", txt[0], txt[1],
+         s_kernel_flush ? "kernel" : "GSP");
+}
+
 int ctr_gpu_init(void) {
   if (g.ready) {
     return 0;
@@ -1848,6 +1917,7 @@ int ctr_gpu_init(void) {
   use_program(PROG_BASIC);
   C3D_CullFace(GPU_CULL_NONE);
   ctr_port_set_gpu_active(1);
+  flush_selftest();
   g.ready = 1;
   /* one dark frame right away: until the game draws its first frame (after loading the common
    * files and the title level), the top screen keeps the HOME Menu's launch logo and the boot
@@ -3923,6 +3993,64 @@ static void tex_init_external(C3D_Tex* tex, void* data, int w, int h, int format
 
 /* ---------------- texture pools ---------------- */
 
+/* Texture check: 16 words of each pool's VRAM part as uploaded, compared with VRAM a few frames
+ * later and every few seconds after (one pool per frame). The first check failing: the GPU copied
+ * stale memory (CPU cache not cleaned); a later one: something wrote over the texels. */
+#define TEXCHK_N 16
+static u32 s_texchk[MAX_POOLS][TEXCHK_N];
+static u32 s_texchk_frame[MAX_POOLS];
+static uint8_t s_texchk_state[MAX_POOLS]; /* 0 none, 1 uploaded, 2 checked good, 3 bad (logged) */
+static u32 s_texchk_next, s_texchk_checks, s_texchk_bad_first, s_texchk_bad_later;
+static void texchk_note(int pool, const uint8_t* src, unsigned int bytes) {
+  const u32 words = bytes / 4;
+  for (int k = 0; k < TEXCHK_N; k++) {
+    s_texchk[pool][k] = ((const u32*)src)[(u32)k * (words / TEXCHK_N)];
+  }
+  s_texchk_frame[pool] = g.frame_no;
+  s_texchk_state[pool] = 1;
+}
+static void texchk_step(void) {
+  for (int n = 0; n < MAX_POOLS; n++) {
+    const int i = (int)(s_texchk_next++ % MAX_POOLS);
+    TexPool* p = &g.pools[i];
+    const uint8_t st = s_texchk_state[i];
+    if (p->used != 1 || !p->vram || st == 0 || st == 3 || g.frame_no - s_texchk_frame[i] < 4) {
+      continue;
+    }
+    const u32 words = p->vram_bytes / 4;
+    const volatile u32* v = (const volatile u32*)p->vram;
+    int bad = 0;
+    for (int k = 0; k < TEXCHK_N; k++) {
+      bad += v[(u32)k * (words / TEXCHK_N)] != s_texchk[i][k];
+    }
+    s_texchk_checks++;
+    if (bad) {
+      s_texchk_state[i] = 3;
+      if (st == 1) {
+        s_texchk_bad_first++;
+      } else {
+        s_texchk_bad_later++;
+      }
+      printf("[ctr] texture check: pool %d (%u KB in VRAM) differs from its upload in %d of %d "
+             "words, %s (%lu frames after the upload)\n",
+             i, p->vram_bytes / 1024u, bad, TEXCHK_N,
+             st == 1 ? "at the first check: the GPU copied stale memory"
+                     : "after a good check: something wrote over it",
+             (unsigned long)(g.frame_no - s_texchk_frame[i]));
+    } else {
+      s_texchk_state[i] = 2;
+      s_texchk_frame[i] = g.frame_no + 150; /* again in about 5 s */
+    }
+    break;
+  }
+  if (g.frame_no % 900 == 0 && s_texchk_checks) {
+    printf("[ctr] texture check: %lu checks, %lu pools wrong at the first check, %lu later\n",
+           (unsigned long)s_texchk_checks, (unsigned long)s_texchk_bad_first,
+           (unsigned long)s_texchk_bad_later);
+  }
+}
+
+
 int ctr_gpu_pool_create(unsigned int bytes) {
   if (!g.ready || bytes == 0) {
     return -1;
@@ -3940,6 +4068,7 @@ int ctr_gpu_pool_create(unsigned int bytes) {
     if (mem) {
       TexPool* p = &g.pools[slot];
       memset(p, 0, sizeof(*p));
+      s_texchk_state[slot] = 0;
       p->used = 3;
       p->linear = mem;
       p->bytes = bytes;
@@ -4101,6 +4230,7 @@ static int pool_leave_vram(int pool) {
  * first, moving pools with a lower priority out if that makes room. The copies are queued ahead of
  * this frame's draws, which read the VRAM copy. */
 static void update_pool_residency(void) {
+  texchk_step();
   if (!g_vram_textures) {
     for (int i = 0; i < MAX_POOLS; i++) {
       if (g.pools[i].used == 1 && g.pools[i].vram) {
@@ -4220,6 +4350,7 @@ static void update_pool_residency(void) {
     /* one GPU copy of the part (in a frame: queued, runs before the draws) */
     uint8_t* old = p->linear;
     sync_texture_copy((u32*)old, 0, (u32*)v, 0, part, 8);
+    texchk_note(best, old, part);
     p->vram = v;
     p->vram_bytes = part;
     /* the VRAM part leaves linear memory: the rest (if any) gets a buffer of its own; the old one
