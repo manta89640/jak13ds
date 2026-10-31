@@ -422,7 +422,7 @@ void frame_from_requests(u8* m, u32 dst, s64 num_joints, u32 jc, u32 work) {
 
   if (slot) {
     if (!same) {
-      Cache::set_key(*slot, (s32)num_joints, nreq, key);
+      g_cache->set_key(*slot, (s32)num_joints, nreq, key);
     } else if (u8* data = g_cache->reserve(*slot, head, nreq)) {
       // the head as the next calls start from it: the tail is added to whatever is there
       memcpy(data, m + dst, head);

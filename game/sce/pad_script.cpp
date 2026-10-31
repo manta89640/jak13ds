@@ -39,6 +39,7 @@ struct Entry {
   bool crash = false;
   bool save = false;
   bool mid = false;  // buttons change at the frame's middle sample
+  bool late = false;                       // buttons change after the frame's first read
   std::vector<std::pair<int, int>> tasks;  // (AI-assisted) "tasks A B"
   std::vector<int> progress;  // (AI-assisted) "progress N"
   std::vector<float> tod;     // (AI-assisted) "tod H"
@@ -153,6 +154,8 @@ void load() {
         ss >> e.wait_sym >> e.wait_state;
       } else if (item == "mid") {
         e.mid = true;
+      } else if (item == "late") {
+        e.late = true;
       } else if (item == "exit") {
         e.exit = true;
       } else if (item == "handoff") {
@@ -263,6 +266,8 @@ PadState next_frame() {
   }
   u64 frame = g_script.frame++;
   u16 mid = g_script.current.buttons;
+  const u16 before = g_script.current.buttons;
+  bool late = false;
   while (g_script.next < g_script.entries.size() &&
          g_script.entries[g_script.next].frame <= frame) {
     const Entry& e = g_script.entries[g_script.next++];
@@ -270,6 +275,7 @@ PadState next_frame() {
     if (e.mid) {
       mid = e.state.buttons;
     }
+    late |= e.late;
     for (auto& l : e.logs) {
       lg::info("[pad script] frame {}:{}", frame, l);
     }
@@ -385,6 +391,10 @@ PadState next_frame() {
   }
   PadState out = g_script.current;
   out.mid_buttons = mid;
+  out.late_buttons = out.buttons;
+  if (late) {
+    out.buttons = out.mid_buttons = before;
+  }
   return out;
 }
 

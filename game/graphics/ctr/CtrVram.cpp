@@ -428,6 +428,7 @@ void CtrVram::note_tex_info(const u8* tpage, s32 count, const u8* ee_mem, u32 s7
 void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr) {
   GoalTexturePageHeader page;
   memcpy(&page, tpage, sizeof(page));
+  m_page_first = m_page_end = 0;
   // (AI-assisted) Like add-to-dma-buffer / upload-vram-pages (texture.gc): ONE 128 pixel wide
   // PSMCT32 image from the first uploaded segment's data to its dest, in whole 4096 word chunks
   // (32 rows), not one image per segment of exactly its size. The page layouts depend on that: the
@@ -466,6 +467,10 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
     words = ((u32)EE_MAIN_MEM_SIZE - seg.block_data_ptr) / 4 / 128 * 128;
   }
   const u32 dest_block = seg.dest / 64;
+  // whole 32 row chunks of a 128 pixel wide image: a contiguous block range
+  const u32 end_block = upload_end_block(dest_block, words);
+  m_page_first = dest_block;
+  m_page_end = end_block;
 #ifndef __3DS__
   {
     static const bool log_uploads = getenv("CTR_UPLOAD_LOG") != nullptr;  // (AI-assisted) host
@@ -492,8 +497,6 @@ void CtrVram::upload_texture_page(const u8* tpage, int mode, const u8* ee_mem, u
   // check: a page uploaded again unchanged has them there already (another page uploaded over it
   // in between fails the check)
   note_tex_info(tpage, page.length, ee_mem, s7_ptr);
-  // whole 32 row chunks of a 128 pixel wide image: a contiguous block range
-  const u32 end_block = upload_end_block(dest_block, words);
   // Other uploads this one overwrites are no longer "already there": without this, a page
   // that is uploaded again after another page covered its area (the common textures, e.g.
   // the eye textures, after a level's pris page) was skipped and read back as garbage.

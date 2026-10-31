@@ -1827,9 +1827,24 @@
     )
   )
 
+;; og:preserve-this 3DS: called right before that process runs each frame (the pad read again
+;; right before Jak, main.gc), and right before that pool's processes (its tidy-up, even when he
+;; doesn't run)
+(#when TARGET_3DS
+  (define *kernel-pre-run-proc* (the-as process #f))
+  (define *kernel-pre-run-hook* (the-as (function none) #f))
+  (define *kernel-pre-pool* (the-as process-tree #f))
+  (define *kernel-pre-pool-hook* (the-as (function none) #f))
+  )
+
 (defun execute-process-tree ((arg0 process-tree) (arg1 (function object object)) (arg2 kernel-context))
   "Iterate over the process tree, running only if the mask doesn't prevent it.
    Update the mask of the process-tree to have kernel-run if and only if we run at least one process."
+  (#when TARGET_3DS
+    (if (and *kernel-pre-pool-hook* (eq? arg0 *kernel-pre-pool*))
+        (*kernel-pre-pool-hook*)
+        )
+    )
 
   ;; start with this cleared
   (logclear! (-> arg0 mask) (process-mask kernel-run))
@@ -1884,13 +1899,6 @@
       )
     )
   (the-as process #f)
-  )
-
-;; og:preserve-this 3DS: called right before that process runs each frame (the pad read again
-;; right before Jak, main.gc)
-(#when TARGET_3DS
-  (define *kernel-pre-run-proc* (the-as process #f))
-  (define *kernel-pre-run-hook* (the-as (function none) #f))
   )
 
 ;; decomp deviation

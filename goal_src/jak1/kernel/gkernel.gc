@@ -1602,9 +1602,20 @@
              (set! brother old-brother))))))
     ret))
 
+;; og:preserve-this 3DS: called right before that process runs each frame (the pad read again
+;; right before Jak, main.gc), and right before that pool's processes (its tidy-up, even when he
+;; doesn't run)
+(#when TARGET_3DS
+  (define *kernel-pre-run-proc* (the-as process #f))
+  (define *kernel-pre-run-hook* (the-as (function none) #f))
+  (define *kernel-pre-pool* (the-as process-tree #f))
+  (define *kernel-pre-pool-hook* (the-as (function none) #f)))
+
 (defun execute-process-tree ((this process-tree) (func (function object object)) (context kernel-context))
   "Like iterate, but also requires that prevent-from-run's mask doesn't block, and that run-logic?
   is true in order to call the function."
+  (#when TARGET_3DS
+    (if (and *kernel-pre-pool-hook* (eq? this *kernel-pre-pool*)) (*kernel-pre-pool-hook*)))
   ;; check mask for tree, mask for prevent, run-logic?, then run!
   (let ((ret (or (process-mask? (-> this mask) process-tree)
                  (not (and (or (zero? (logand (-> context prevent-from-run) (-> this mask)))) (run-logic? this)))
@@ -1648,12 +1659,6 @@
 (define-extern *listener-process* process)
 
 (define-extern *active-pool* process-tree)
-
-;; og:preserve-this 3DS: called right before that process runs each frame (the pad read again
-;; right before Jak, main.gc)
-(#when TARGET_3DS
-  (define *kernel-pre-run-proc* (the-as process #f))
-  (define *kernel-pre-run-hook* (the-as (function none) #f)))
 
 (defun kernel-dispatcher ()
   "Run the kernel!

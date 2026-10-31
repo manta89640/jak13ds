@@ -441,7 +441,7 @@
 (defmethod collide-y-probe ((obj collide-fragment) (arg0 int) (arg1 collide-list))
   *collide-work*
   (dotimes (s3-0 arg0)
-    ;; og:preserve-this (AI-assisted, cpusound) 3DS: no more than the 256 items *collide-list* holds
+    ;; og:preserve-this 3DS: no more than the 256 items *collide-list* holds
     ;; (the original writes past it into the global heap), like the collide natives
     (when (and (collide-cache-using-y-probe-test (-> obj bsphere))
                (#if TARGET_3DS (< (-> arg1 num-items) 256) #t))
@@ -460,7 +460,7 @@
         (when (nonzero? s2-0)
           (let ((s1-0 (the-as object (-> s2-0 data))))
             (dotimes (s0-0 (-> s2-0 length))
-              ;; og:preserve-this (AI-assisted, cpusound) 3DS: at most 256 items (see above)
+              ;; og:preserve-this 3DS: at most 256 items (see above)
               (when (and (#if TARGET_3DS (< (-> arg1 num-items) 256) #t)
                          (instance-sphere-box-intersect? (the-as collide-fragment s1-0) obj (-> *collide-work* collide-box4w)))
                 (let ((v1-11 (-> arg1 items (-> arg1 num-items))))

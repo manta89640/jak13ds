@@ -699,7 +699,7 @@ void InitMachine_PCPort() {
         on ? offset_of_s7() + jak2_symbols::FIX_SYM_TRUE : offset_of_s7();
   });
 #endif
-  // (AI-assisted) config.ini shadows: only full draws Jak II's shadow volumes (CtrShadowJak2;
+  // config.ini shadows: only full draws Jak II's shadow volumes (CtrShadowJak2;
   // Jak II has no blob shadow, so blob is off), and only with the stencil buffer (not depth16 =
   // on). Otherwise the game doesn't make them either (drawable.gc, TARGET_3DS: no
   // shadow-execute-all). Other builds: always.

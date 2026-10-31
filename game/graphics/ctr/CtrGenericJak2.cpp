@@ -92,6 +92,8 @@ struct Work {
   std::vector<u32> order;
   std::vector<int> tex;
   std::vector<u8> warp;
+  std::vector<int> nverts, nidx;  // per bucket: what draw_batch writes (0: left out)
+  std::vector<u8> fog;            // per bucket: has a fog pass
   std::vector<ctr_draw_state> states;
   std::vector<int> first, count;
   void reset() {
@@ -107,6 +109,35 @@ Work g_work;
 
 int g_copy = -1;
 u64 g_copy_frame = ~0ull;
+
+// Generic2::build_index_buffer: a kicked vertex continues the strip, an unkicked one starts it
+// again with the vertex before it. put(vertex index) -> output index, tri(a, b, c)
+template <typename Put, typename Tri>
+void walk_strip(const Adgif& ad, const std::vector<Vertex>& verts, Put&& put, Tri&& tri) {
+  int a = -1, b = -1, last = -1;
+  for (u32 i = 0; i < ad.vtx_count; i++) {
+    const u32 vi = ad.vtx_idx + i;
+    const int c = put(vi);
+    if (verts[vi].adc) {
+      if (a >= 0) {
+        tri(a, b, c);
+      }
+      a = b;
+    } else if (i > 0) {
+      a = last;
+    } else if (vi > 0) {
+      a = put(vi - 1);
+    } else {
+      a = -1;
+    }
+    b = c;
+    last = c;
+  }
+}
+
+void count_strip(const Adgif& ad, const std::vector<Vertex>& verts, int& nv, int& ni) {
+  walk_strip(ad, verts, [&](u32) { return nv++; }, [&](int, int, int) { ni += 3; });
+}
 
 VifCode vif_at(const u8* data, u32 off) {
   u32 v;
@@ -700,7 +731,7 @@ class CtrGenericJak2Renderer : public CtrBucketRenderer {
           g_copy = ctr_gpu_copy_screen();
           g_copy_frame = rs.frame_idx;
         }
-        w.tex[i] = g_copy;
+        w.tex[i] = g_copy;  // (-1: no copy, the bucket is left out)
         w.warp[i] = 1;
       } else {
         const CtrTexture* t = rs.vram->get_texture(first.data.tex0_data);
@@ -751,6 +782,7 @@ class CtrGenericJak2Renderer : public CtrBucketRenderer {
     }
     m_frags += (int)w.frags.size();
     bucket_textures(rs, w);
+    bucket_sizes(w);
     float proj_clip[16], hud_clip[16];
     make_clip(m_proj, m_pfog0, m_hvdf, proj_clip);
     make_clip(m_hud, m_pfog0, m_hvdf, hud_clip);
@@ -758,36 +790,88 @@ class CtrGenericJak2Renderer : public CtrBucketRenderer {
     size_t k = 0;
     while (k < w.order.size()) {
       const bool hud = k >= m_first_hud;
-      int nv = 0, ni = 0;
+      int nv = 0;
       size_t end = k;
       while (end < w.order.size() && (end >= m_first_hud) == hud) {
-        int bv = 0, bi = 0;
-        for (u32 a = w.buckets[w.order[end]].start; a != UINT32_MAX; a = w.ads[a].next) {
-          bv += (int)w.ads[a].vtx_count + 1;
-          bi += 3 * (int)w.ads[a].vtx_count;
-        }
-        if (fog_pass_ok(w.ads[w.buckets[w.order[end]].start])) {
-          bv *= 2;
-          bi *= 2;
-        }
+        const int bv = w.nverts[w.order[end]];
         if (end > k && nv + bv > kMaxBatchVerts) {
           break;
         }
         nv += bv;
-        ni += bi;
         end++;
       }
-      if (nv > kMaxBatchVerts) {
-        m_dropped++;
-        k = end;
-        continue;
-      }
-      draw_batch(rs, w, k, end, hud, hud ? hud_clip : proj_clip, nv, ni);
+      draw_range(rs, w, k, end, hud, hud ? hud_clip : proj_clip);
       k = end;
     }
   }
 
-  void draw_batch(CtrRenderState& rs,
+  // the vertices and indices draw_batch writes per bucket, and whether it has a fog pass
+  void bucket_sizes(Work& w) const {
+    const size_t n = w.buckets.size();
+    w.nverts.assign(n, 0);
+    w.nidx.assign(n, 0);
+    w.fog.assign(n, 0);
+    for (u32 i = 0; i < n; i++) {
+      if (w.warp[i] && w.tex[i] < 0) {
+        continue;
+      }
+      const Adgif& first = w.ads[w.buckets[i].start];
+      const Proj& proj = first.hud ? m_hud : m_proj;
+      int nv = 0, ni = 0;
+      for (u32 a = w.buckets[i].start; a != UINT32_MAX; a = w.ads[a].next) {
+        count_strip(w.ads[a], w.verts, nv, ni);
+      }
+      if (fog_pass_ok(first)) {
+        bool any = false;
+        for (u32 a = w.buckets[i].start; a != UINT32_MAX && !any; a = w.ads[a].next) {
+          const Adgif& ad = w.ads[a];
+          for (u32 j = 0; ad.fog && j < ad.vtx_count && !any; j++) {
+            any = fog_of(proj, w.verts[ad.vtx_idx + j].xyz[2]) != 0;
+          }
+        }
+        if (any) {
+          w.fog[i] = 1;
+          for (u32 a = w.buckets[i].start; a != UINT32_MAX; a = w.ads[a].next) {
+            if (w.ads[a].fog) {
+              count_strip(w.ads[a], w.verts, nv, ni);
+            }
+          }
+        }
+      }
+      w.nverts[i] = nv;
+      w.nidx[i] = ni;
+    }
+  }
+
+  // buckets [from, to) in one reservation, or in halves when it doesn't fit
+  void draw_range(CtrRenderState& rs,
+                  Work& w,
+                  size_t from,
+                  size_t to,
+                  bool hud,
+                  const float* clip) {
+    int nv = 0, ni = 0;
+    for (size_t k = from; k < to; k++) {
+      nv += w.nverts[w.order[k]];
+      ni += w.nidx[w.order[k]];
+    }
+    if (ni < 3) {
+      return;
+    }
+    if (nv <= kMaxBatchVerts && draw_batch(rs, w, from, to, hud, clip, nv, ni)) {
+      return;
+    }
+    if (to - from > 1) {
+      const size_t mid = from + (to - from) / 2;
+      draw_range(rs, w, from, mid, hud, clip);
+      draw_range(rs, w, mid, to, hud, clip);
+      return;
+    }
+    m_dropped++;
+  }
+
+  // false: no room for the reservation
+  bool draw_batch(CtrRenderState& rs,
                   Work& w,
                   size_t from,
                   size_t to,
@@ -795,14 +879,10 @@ class CtrGenericJak2Renderer : public CtrBucketRenderer {
                   const float* clip,
                   int max_verts,
                   int max_indices) {
-    if (max_indices < 3) {
-      return;
-    }
     ctr_clip_vertex* out;
     u16* idx;
     if (!ctr_gpu_clip_reserve(max_verts, max_indices, &out, &idx)) {
-      m_dropped += (int)(to - from);
-      return;
+      return false;
     }
     const Proj& proj = hud ? m_hud : m_proj;
     int nv = 0, ni = 0;
@@ -842,44 +922,34 @@ class CtrGenericJak2Renderer : public CtrBucketRenderer {
         o.r = v.rgba[0];
         o.g = v.rgba[1];
         o.b = v.rgba[2];
-        o.a = (u8)std::min(255, 2 * (int)v.rgba[3]);
+        o.a = v.rgba[3];  // GS units: the texture stage scales it (0x80 = 1)
       }
       return nv++;
     };
-    // Generic2::build_index_buffer: a kicked vertex continues the strip, an unkicked one starts
-    // it again with the vertex before it
     auto strips = [&](const Adgif& ad, bool warp, bool fog_vertex) {
       auto fog_a = [&](const Vertex& v) {
         return fog_vertex && ad.fog ? fog_of(proj, v.xyz[2]) : (u8)0;
       };
-      int a = -1, b = -1, last = -1;
-      for (u32 i = 0; i < ad.vtx_count; i++) {
-        const u32 vi = ad.vtx_idx + i;
-        const Vertex& v = w.verts[vi];
-        const int c = put(v, warp, fog_a(v), fog_vertex);
-        if (v.adc) {
-          if (a >= 0) {
+      walk_strip(
+          ad, w.verts,
+          [&](u32 vi) {
+            const Vertex& v = w.verts[vi];
+            return put(v, warp, fog_a(v), fog_vertex);
+          },
+          [&](int a, int b, int c) {
             idx[ni++] = (u16)a;
             idx[ni++] = (u16)b;
             idx[ni++] = (u16)c;
             m_tris += !fog_vertex;
-          }
-          a = b;
-        } else if (i > 0) {
-          a = last;
-        } else if (vi > 0) {
-          a = put(w.verts[vi - 1], warp, fog_a(w.verts[vi - 1]), fog_vertex);
-        } else {
-          a = -1;
-        }
-        b = c;
-        last = c;
-      }
+          });
     };
     for (size_t k = from; k < to; k++) {
       const u32 bi = w.order[k];
       const Adgif& first = w.ads[w.buckets[bi].start];
       const bool warp = w.warp[bi];
+      if (warp && w.tex[bi] < 0) {
+        continue;  // no screen copy this frame
+      }
       const int range_start = ni;
       for (u32 a = w.buckets[bi].start; a != UINT32_MAX; a = w.ads[a].next) {
         strips(w.ads[a], warp, false);
@@ -890,17 +960,7 @@ class CtrGenericJak2Renderer : public CtrBucketRenderer {
         w.count.push_back(ni - range_start);
         m_draws++;
       }
-      if (!fog_pass_ok(first)) {
-        continue;
-      }
-      bool any = false;
-      for (u32 a = w.buckets[bi].start; a != UINT32_MAX && !any; a = w.ads[a].next) {
-        const Adgif& ad = w.ads[a];
-        for (u32 i = 0; ad.fog && i < ad.vtx_count && !any; i++) {
-          any = fog_of(proj, w.verts[ad.vtx_idx + i].xyz[2]) != 0;
-        }
-      }
-      if (!any) {
+      if (!w.fog[bi]) {
         continue;
       }
       const int fog_start = ni;
@@ -930,6 +990,7 @@ class CtrGenericJak2Renderer : public CtrBucketRenderer {
       ctr_gpu_clip_draw_ranges_mtx(clip, n, w.states.data(), w.first.data(), w.count.data(), n,
                                    nv, ni);
     }
+    return true;
   }
 
   bool m_warp;

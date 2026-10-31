@@ -18,9 +18,9 @@
  * plane is cut to them on the CPU, as the program cuts to its own (the PICA drops triangles far
  * off screen, and a dropped face leaves its count in the stencil). A triangle with all corners
  * beyond one edge of the screen covers no pixel and is left out. A side quad whose bottom corners
- * alone leave the band through one plane is cut along its side edges, at a point made once per
- * bottom vertex (the same area as its two triangles cut one by one). CtrShadowRenderer then draws
- * all objects at once (ctr_gpu_clip_draw_ranges):
+ * alone leave the band through one guard-band plane is cut along its side edges, at a point made
+ * once per bottom vertex (the same pixels as its two triangles cut one by one). CtrShadowRenderer
+ * then draws all objects at once (ctr_gpu_clip_draw_ranges):
  *  1. the front list: stencil + 1 where a face passes the depth test, no color or depth writes
  *  2. the back list: stencil - 1 likewise (z-pass, saturating like the PC's GL_INCR / GL_DECR)
  *  3. the front list again: where the stencil isn't 0, the color times the game's shadow color
@@ -131,10 +131,10 @@ class CtrShadowVolumes {
   void close_object();
   void drop_object();
   template <bool kTrace>
-  bool tris(const u8* entries, int count, bool double_sided);
+  bool tris(const u8* entries, int count, bool double_sided, int after);
   template <bool kTrace>
-  bool edges(const u8* entries, int count);
-  bool clip_tri(u16*& p, const u16 idx[3], u32 planes);
+  bool edges(const u8* entries, int count, int after);
+  bool clip_tri(u16*& p, const u16 idx[3], u32 planes, int rest);
   int new_vertex(const float c[4]);
   int dual_cut(int i, int k);
   void make_clip_matrix();

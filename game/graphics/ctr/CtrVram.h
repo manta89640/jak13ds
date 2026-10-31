@@ -74,6 +74,8 @@ class CtrVram {
   void upload_texture_page_now(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr) {
     upload_texture_page(tpage, mode, ee_mem, s7_ptr);
     flush_pending();
+    // also chunks an identical earlier upload left lazy (that upload is skipped)
+    materialize(m_page_first, m_page_end);
   }
 
   /*!
@@ -183,6 +185,7 @@ class CtrVram {
   const u8* m_lazy_src[256] = {};
   u64 m_lazy_key[256] = {};
   u32 m_lazy_n = 0;
+  u32 m_page_first = 0, m_page_end = 0;  // the last upload_texture_page's blocks
   void materialize(u32 first_block, u32 end_block);
   void materialize_all() { materialize(0, kChunkCount * 64); }
   // (AI-assisted) drop the chunks of pending uploads that [first_block, end_block) overwrites

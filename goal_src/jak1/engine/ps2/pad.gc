@@ -306,6 +306,12 @@
      (set! (-> pad stick0-dir) 0.0)
      (set! (-> pad stick0-speed) 0.0))))
 
+;; og:preserve-this 3DS, per pad: the presses the re-read added (seen from Jak on), and the ones the
+;; next first read then gives to the pools before Jak's (taken out again before his pool)
+(#when TARGET_3DS
+  (define *cpad-reread-down* (new 'static 'array uint32 4))
+  (define *cpad-reread-late* (new 'static 'array uint32 4)))
+
 (defun service-cpads ()
   "Read from cpads and update vibration"
   ;; iterate over pads
@@ -383,6 +389,12 @@
            (set! (-> pad button0-rel 0) (logclear (-> pad button0-abs 0) (-> pad button0-abs 1)))
            ;; og:preserve-this a release and press again within one frame is a press too
            (logior! (-> pad button0-rel 0) (the-as pad-buttons (-> pad sub-down)))
+           ;; og:preserve-this 3DS: the last re-read's presses, for the pools that ran before it
+           (#when TARGET_3DS
+             (let ((late (logclear (the-as pad-buttons (-> *cpad-reread-down* pad-idx)) (-> pad button0-rel 0))))
+               (logior! (-> pad button0-rel 0) late)
+               (set! (-> *cpad-reread-late* pad-idx) (the-as uint late))
+               (set! (-> *cpad-reread-down* pad-idx) (the-as uint 0))))
            (set! (-> history button0-rel 0) (-> pad button0-rel 0))
            ;; some debugging thing they wrote at some point
            (when *cpad-debug*
@@ -415,9 +427,19 @@
             (logior! (-> pad button0-rel 0) down)
             (set! (-> history button0-abs 0) (-> pad button0-abs 0))
             (logior! (-> history button0-rel 0) down)
+            (set! (-> *cpad-reread-down* idx) (the-as uint down))
             (if (nonzero? down) (set! (-> pad change-time) (get-current-time))))
           (cpad-stick-update! pad)
           (if (< STICK_DEADZONE (-> pad stick0-speed)) (set! (-> pad change-time) (get-current-time))))))
+    0)
+  ;; og:preserve-this before Jak's pool (kernel-dispatcher), even when he doesn't run: the presses the
+  ;; pools before it got late, which his pool and the later ones saw at the last re-read
+  (defun cpad-reread-strip ((idx int))
+    (let ((late (the-as pad-buttons (-> *cpad-reread-late* idx))))
+      (when (nonzero? late)
+        (logclear! (-> *cpad-list* cpads idx button0-rel 0) late)
+        (logclear! (-> *cpad-history-list* cpads idx button0-rel 0) late)
+        (set! (-> *cpad-reread-late* idx) (the-as uint 0))))
     0))
 
 (defun buzz-stop! ((idx int))

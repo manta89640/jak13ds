@@ -25,7 +25,7 @@
 #include "game/mips2c/jak2_functions/native2.h"
 #include "game/mips2c/native_goalc_ops.h"
 
-extern u32 g_link_generation;  // (AI-assisted) game/kernel/common/klink.h
+extern u32 g_link_generation;  // game/kernel/common/klink.h
 
 namespace Mips2C::jak2::native2 {
 
@@ -51,7 +51,7 @@ struct FnSym {
 };
 
 //! a method table entry of a type and the function it held at the first call
-//! (AI-assisted, cpusound) These methods are ctywide's code: after a link (ctywide unloaded and
+//! These methods are ctywide's code: after a link (ctywide unloaded and
 //! loaded again, its code at another address) the type and the entry are read again and the
 //! entry's function is taken as the new one. Between links a changed entry means the GOAL code.
 struct MethodSlot {

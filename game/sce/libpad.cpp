@@ -76,8 +76,13 @@ int scePadRead(int port, int /*slot*/, u8* rdata) {
   cpad->sub_reread = 0;
   static pad_script::PadState s_last_script;
   if (reread && port == 0 && pad_script::active()) {
-    // the script advances once a frame: nothing new
-    cpad->sub_down = 0;
+    // the script advances once a frame: only an entry marked "late" changes the pad here
+    if (s_last_script.late_buttons != s_last_script.buttons) {
+      cpad->sub_down = s_last_script.late_buttons & ~s_last_script.buttons;
+      cpad->button0 = s_last_script.late_buttons;
+    } else {
+      cpad->sub_down = 0;
+    }
     cpad->leftx = s_last_script.lx;
     cpad->lefty = s_last_script.ly;
     cpad->rightx = s_last_script.rx;
@@ -96,7 +101,7 @@ int scePadRead(int port, int /*slot*/, u8* rdata) {
     static u16 s_prev_end = 0;
     u16 early = state.mid_buttons & ~s_prev_end;
     u16 down = early | (state.buttons & ~state.mid_buttons);
-    s_prev_end = state.buttons;
+    s_prev_end = state.late_buttons;
     cpad->sub_mid = state.mid_buttons;
     cpad->sub_end = state.buttons;
     cpad->sub_down = down;

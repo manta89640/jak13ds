@@ -411,7 +411,8 @@ void CtrShadowVolumes::keira_emit() {
       m_obj_open = false;
       break;
     }
-    if (!tris<false>(hv.tris, hv.ntris, false) || !edges<false>(hv.edges, hv.nedges)) {
+    if (!tris<false>(hv.tris, hv.ntris, false, 6 * hv.nedges) ||
+        !edges<false>(hv.edges, hv.nedges, 0)) {
       drop_object();
       m_obj_open = false;
       break;
@@ -443,9 +444,10 @@ void CtrShadowVolumes::close_object() {
  * A triangle with a corner outside the guard band or the near / far plane (planes: the union of
  * its corners' outcodes), cut to them, as a fan at p: the corners that stay keep their vertices,
  * the new ones go after the frame's vertices. An edge cut in two triangles gives the same point
- * in both (interpolated from its inside end). False: no room left (the object is left out).
+ * in both (interpolated from its inside end). rest: the indices budgeted for the primitives after
+ * it. False: no room left (the object is left out).
  */
-bool CtrShadowVolumes::clip_tri(u16*& p, const u16 idx[3], u32 planes) {
+bool CtrShadowVolumes::clip_tri(u16*& p, const u16 idx[3], u32 planes, int rest) {
   struct V {
     float c[4];  // x, y, z, w
     int index;   // m_out index, -1: new
@@ -489,7 +491,7 @@ bool CtrShadowVolumes::clip_tri(u16*& p, const u16 idx[3], u32 planes) {
     fresh += in[i].index < 0;
   }
   // (m_nf, m_nb: the lists' lengths before this triangle)
-  if (m_nv + fresh > m_vcap || m_nf + m_nb + 3 * (n - 2) > m_icap) {
+  if (m_nv + fresh > m_vcap || m_nf + m_nb + 3 * (n - 2) + rest > m_icap) {
     return false;
   }
   for (int i = 0; i < n; i++) {
@@ -547,10 +549,10 @@ int CtrShadowVolumes::new_vertex(const float c[4]) {
 /*!
  * MSCAL 2 (facing single tris) and 6 (double-sided tris): count entries (i0, i1, i2, faces), the
  * top cap (T) for all of them, then the bottom cap (D) reversed (see CtrShadow.h). False: no room
- * for the triangles cut to the guard band.
+ * for the triangles cut to the guard band. after: the indices budgeted for the lists after it.
  */
 template <bool kTrace>
-bool CtrShadowVolumes::tris(const u8* e, int count, bool double_sided) {
+bool CtrShadowVolumes::tris(const u8* e, int count, bool double_sided, int after) {
   const int lim = std::min(m_ntop, m_dual ? m_ndual : 0);
   const float* T = m_top;
   const float* D = m_dual;
@@ -594,7 +596,8 @@ bool CtrShadowVolumes::tris(const u8* e, int count, bool double_sided) {
       } else if (!(o0 & o1 & o2) && room) {
         m_nb = (int)(cur[0] - m_back);
         m_nf = (int)(cur[1] - m_front);
-        room = clip_tri(cur[f], idx, any & kCutPlanes);
+        room = clip_tri(cur[f], idx, any & kCutPlanes,
+                        after + 3 * ((1 - cap) * count + count - k - 1));
       }
     }
   }
@@ -605,10 +608,10 @@ bool CtrShadowVolumes::tris(const u8* e, int count, bool double_sided) {
 
 /*!
  * MSCAL 4 (silhouette edges): count entries (a, b, flip, 0), each the side quad between the caps.
- * False: no room for the triangles cut to the guard band.
+ * False: no room for the triangles cut to the guard band. after: as in tris.
  */
 template <bool kTrace>
-bool CtrShadowVolumes::edges(const u8* e, int count) {
+bool CtrShadowVolumes::edges(const u8* e, int count, int after) {
   const int lim = std::min(m_ntop, m_dual ? m_ndual : 0);
   const float* T = m_top;
   const float* D = m_dual;
@@ -648,11 +651,12 @@ bool CtrShadowVolumes::edges(const u8* e, int count) {
       cur[f] = p + 6;
       continue;
     }
-    // the top edge inside the band and both bottom corners outside the same plane alone: the
-    // quad is cut along its two side edges, at the points made once per bottom vertex (the same
-    // area as its two triangles cut one by one, without the point on their shared edge)
+    // the top edge inside the band and both bottom corners outside the same guard-band plane
+    // alone: the quad is cut along its two side edges, at the points made once per bottom vertex
+    // (the same pixels as its two triangles cut one by one: the part left out lies off screen)
     const u32 c2 = o2 & kCutPlanes;
-    if (!((o0 | o1) & kCutPlanes) && c2 && c2 == (o3 & kCutPlanes) && !(c2 & (c2 - 1))) {
+    if (!((o0 | o1) & kCutPlanes) && c2 && c2 == (o3 & kCutPlanes) && !(c2 & (c2 - 1)) &&
+        c2 < (1u << 4)) {
       const int k = __builtin_ctz(c2);
       const int ib = dual_cut(b, k), ia = ib >= 0 ? dual_cut(a, k) : -2;
       if (ia >= 0) {
@@ -686,7 +690,8 @@ bool CtrShadowVolumes::edges(const u8* e, int count) {
       } else if (room) {
         m_nb = (int)(cur[0] - m_back);
         m_nf = (int)(cur[1] - m_front);
-        room = clip_tri(cur[f], tri[h], any & kCutPlanes);
+        room =
+            clip_tri(cur[f], tri[h], any & kCutPlanes, after + 6 * (count - k - 1) + 3 * (1 - h));
       }
     }
   }
@@ -774,8 +779,9 @@ void CtrShadowVolumes::transfer(const DmaTransfer& t) {
     }
     const u8* e = t.data + 4;
     const bool dbl = entry == 6;
-    const bool room = edge_list ? (m_trace ? edges<true>(e, count) : edges<false>(e, count))
-                                : (m_trace ? tris<true>(e, count, dbl) : tris<false>(e, count, dbl));
+    const bool room =
+        edge_list ? (m_trace ? edges<true>(e, count, 0) : edges<false>(e, count, 0))
+                  : (m_trace ? tris<true>(e, count, dbl, 0) : tris<false>(e, count, dbl, 0));
     if (!room) {
       drop_object();
       return;

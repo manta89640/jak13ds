@@ -440,7 +440,7 @@ void frame_from_requests(u8* m, u32 dst, s64 num_joints, u32 jc, u32 work, u32 s
 
   if (slot) {
     if (!same) {
-      Cache::set_key(*slot, (s32)num_joints, nreq, key);
+      g_cache->set_key(*slot, (s32)num_joints, nreq, key);
     } else if (u8* data = g_cache->reserve(*slot, head, nreq)) {
       memcpy(data, m + dst, head);
       for (s32 i = 0; i < nreq; i++) {

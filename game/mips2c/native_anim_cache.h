@@ -64,6 +64,7 @@ struct Slot {
 struct Cache {
   Slot slots[kSlots];
   u32 used = 0;
+  u32 swept_gen = 0;  // the generation whose stale slots were last given back
 
   static u32 index(u32 jc) { return ((jc >> 4) ^ (jc >> 12)) & (kSlots - 1); }
 
@@ -81,8 +82,19 @@ struct Cache {
     return true;
   }
 
+  //! a slot's room back to the budget
+  void release(Slot& s) {
+    free(s.data);
+    used -= s.cap;
+    s.data = nullptr;
+    s.cap = 0;
+  }
+
   //! a new key for the slot (its stored frame, if any, is no longer valid)
-  static void set_key(Slot& s, s32 num_joints, s32 nreq, const Req* req) {
+  void set_key(Slot& s, s32 num_joints, s32 nreq, const Req* req) {
+    if (s.gen != g_link_generation) {
+      release(s);
+    }
     s.gen = g_link_generation;
     s.num_joints = num_joints;
     s.nreq = nreq;
@@ -96,6 +108,15 @@ struct Cache {
     const u32 size = head_size + kTailBytes * (u32)nreq;
     if (size > s.cap) {
       const u32 cap = (size + 255) & ~255u;
+      if (used - s.cap + cap > kBudget && swept_gen != g_link_generation) {
+        // once per link: the room of slots made before it
+        swept_gen = g_link_generation;
+        for (Slot& o : slots) {
+          if (o.gen != g_link_generation) {
+            release(o);
+          }
+        }
+      }
       if (used - s.cap + cap > kBudget) {
         return nullptr;
       }

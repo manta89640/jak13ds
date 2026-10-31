@@ -73,7 +73,7 @@ void gen_create_wave_table(Case& c) {
     st<s16>(w + 8, (s16)g.range(-48, 48));              // xdiv
     st<s16>(w + 10, (s16)g.range(-48, 48));             // zdiv
     if (g.chance(0.1f)) {
-      // (AI-assisted, cpusound) the extremes: |x| = |z| = 32768 sums to 2^31 (the low word -2^31)
+      // the extremes: |x| = |z| = 32768 sums to 2^31 (the low word -2^31)
       st<s16>(w + 8, g.pick(std::vector<s16>{-32768, 32767, -32767}));
       st<s16>(w + 10, g.pick(std::vector<s16>{-32768, 32767, -32768}));
     }
