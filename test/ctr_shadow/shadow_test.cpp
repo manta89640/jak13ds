@@ -837,6 +837,54 @@ int budget_test() {
   return failures;
 }
 
+// index buffers filled to every capacity with objects cut to the guard band: the lists never pass
+// the capacity, after any transfer (a cut triangle takes up to 21 indices, a list budgets 3 or 6)
+int fill_test() {
+  int failures = 0, cut = 0;
+  const float down[3] = {0, -3.f * 4096, 0};
+  const int counts[4] = {40, 30, 20, 15};
+  static std::vector<ctr_clip_vertex> verts(CtrShadowVolumes::kMaxVerts);
+  constexpr int kGuard = 64;
+  constexpr u16 kCanary = 0xbeef;
+  for (int seed = 0; seed < 4; seed++) {
+    g_rng.seed(1000 + seed);
+    const Camera cam = make_camera(64.f, false);
+    Dma dma;
+    add_init(dma, cam);
+    for (int o = 0; o < 6; o++) {
+      const float z = rnd(4096, 20000);
+      const float c[3] = {(o % 2 ? 1 : -1) * 0.625f * z * rnd(1.f, 5.f), rnd(-0.6f, 0.6f) * z, z};
+      add_object(dma, make_object(c, z * 0.6f, down, rndi(10, 60), counts));
+    }
+    const auto tr = dma.transfers();
+    for (int cap = 60; cap < 4000; cap++) {
+      std::vector<u16> front(cap + kGuard, kCanary), back(cap + kGuard, kCanary);
+      CtrShadowVolumes vol;
+      vol.begin(verts.data(), CtrShadowVolumes::kMaxVerts, front.data(), back.data(), cap);
+      bool bad = false;
+      for (const auto& t : tr) {
+        vol.transfer(t);
+        bad |= vol.front_count() + vol.back_count() > cap;
+      }
+      vol.end();
+      for (int i = cap; i < cap + kGuard; i++) {
+        bad |= front[i] != kCanary || back[i] != kCanary;
+      }
+      for (int i = 0; i < vol.front_count(); i++) {
+        bad |= front[i] >= vol.vert_count();
+      }
+      for (int i = 0; i < vol.back_count(); i++) {
+        bad |= back[i] >= vol.vert_count();
+      }
+      failures += bad;
+      cut += vol.stats().clipped;
+    }
+  }
+  printf("index fill: %d triangles cut, %d capacities over: %d failures\n", cut, failures,
+         failures);
+  return failures;
+}
+
 // time of the decoder for a frame like Geyser Rock's: Jak (~100 vertices, 80 facing triangles,
 // 40 silhouette edges) and two smaller objects
 void timing() {
@@ -937,6 +985,7 @@ int main() {
   }
   tot.failures += garbage_test();
   tot.failures += budget_test();
+  tot.failures += fill_test();
   timing();
   printf("%s (%d failures)\n", tot.failures ? "FAILED" : "OK", tot.failures);
   return tot.failures ? 1 : 0;
