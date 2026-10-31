@@ -175,9 +175,10 @@ static int linear_room_for_tex(int w, int h, int mipmapped) {
 static u32 s_flush_requests; /* statistics: GSP flush requests */
 static u32 s_flush_svcs;     /* statistics: kernel flushes */
 static int s_kernel_flush = -1;
+int ctr_kernel_flush_cfg = 1; /* config.ini kernel_flush */
 static inline int kernel_flush_on(void) {
   if (s_kernel_flush < 0) {
-    s_kernel_flush = envIsHomebrew() ? 0 : 1;
+    s_kernel_flush = envIsHomebrew() || !ctr_kernel_flush_cfg ? 0 : 1;
   }
   return s_kernel_flush;
 }
@@ -1741,13 +1742,10 @@ static void flush_selftest(void) {
          s_kernel_flush ? "kernel" : "GSP");
 }
 
-static void ctr_gpu_regdump(const char* tag);
-
 int ctr_gpu_init(void) {
   if (g.ready) {
     return 0;
   }
-  ctr_gpu_regdump("boot");
   if (!C3D_Init(CMDBUF_BYTES)) {
     return -1;
   }
@@ -3367,9 +3365,6 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     return;
   }
   apt_gate_enter(); /* (AI-assisted, gpu-home) waits while the HOME Menu or sleep has the GPU */
-  if (g.frame_no == 450 || g.frame_no == 900 || g.frame_no == 1800) {
-    ctr_gpu_regdump(g.frame_no == 450 ? "15s" : g.frame_no == 900 ? "30s" : "60s");
-  }
   anim_slots_frame_begin(); /* (AI-assisted) */
   if (s_micro_ident_st) {
     /* (AI-assisted, micro-gpu) gpu_micro_ident: frame k with everything off (dumped), k + 1 on,
@@ -5248,90 +5243,6 @@ static struct {
   u32 suspends, timeouts;
 } s_apt;
 
-/* Diagnostic: the PICA's internal registers read back through GSP (0x401000 + 4 * id), skipping
- * the IRQ block, triggers and data ports. Boot = the system's state before we touch the GPU. */
-#define REGDUMP_N 0x300
-static u32 s_reg_boot[REGDUMP_N], s_reg_prev[REGDUMP_N], s_reg_now[REGDUMP_N];
-static int s_reg_have_boot, s_reg_have_prev;
-static int reg_skip(int r) {
-  return r < 0x40 || r == 0x110 || r == 0x111 || (r >= 0xB0 && r <= 0xB7) ||
-         (r >= 0xE8 && r <= 0xEF) || r == 0x124 || (r >= 0x1C8 && r <= 0x1CF) ||
-         r == 0x22E || r == 0x22F || r == 0x231 || (r >= 0x233 && r <= 0x235) ||
-         (r >= 0x238 && r <= 0x23D) || (r >= 0x291 && r <= 0x298) || (r >= 0x29C && r <= 0x2A3) ||
-         (r >= 0x2A6 && r <= 0x2AD) || (r >= 0x2C1 && r <= 0x2C8) || (r >= 0x2CC && r <= 0x2D3) ||
-         (r >= 0x2D6 && r <= 0x2DD);
-}
-static int reg_read_all(u32* out) {
-  for (int r = 0; r < REGDUMP_N; r++) {
-    out[r] = 0;
-  }
-  for (int base = 0; base < REGDUMP_N; base += 32) {
-    int any_skip = 0;
-    for (int r = base; r < base + 32; r++) {
-      any_skip |= reg_skip(r);
-    }
-    if (!any_skip) {
-      if (R_FAILED(GSPGPU_ReadHWRegs(0x401000u + 4u * (u32)base, &out[base], 32 * 4))) {
-        return 0;
-      }
-      continue;
-    }
-    for (int r = base; r < base + 32; r++) {
-      if (!reg_skip(r) && R_FAILED(GSPGPU_ReadHWRegs(0x401000u + 4u * (u32)r, &out[r], 4))) {
-        return 0;
-      }
-    }
-  }
-  return 1;
-}
-/* tag: "boot" stores the reference; "suspend" stores the state the HOME Menu gets; "resume" logs
- * what is still as we left it and not as at boot (the HOME Menu never set it); others log the
- * registers that differ from boot */
-static void ctr_gpu_regdump(const char* tag) {
-  const int boot = !strcmp(tag, "boot"), suspend = !strcmp(tag, "suspend"),
-            resume = !strcmp(tag, "resume");
-  u32* dst = boot ? s_reg_boot : suspend ? s_reg_prev : s_reg_now;
-  if (!reg_read_all(dst)) {
-    printf("[ctr] gpu regs %s: GSP refused the read\n", tag);
-    return;
-  }
-  if (boot) {
-    s_reg_have_boot = 1;
-    printf("[ctr] gpu regs boot: read\n");
-    return;
-  }
-  if (suspend) {
-    s_reg_have_prev = 1;
-    return;
-  }
-  if (!s_reg_have_boot || (resume && !s_reg_have_prev)) {
-    return;
-  }
-  int n = 0;
-  char line[200];
-  int len = snprintf(line, sizeof(line), "[ctr] gpu regs %s:", tag);
-  for (int r = 0; r < REGDUMP_N; r++) {
-    if (reg_skip(r) || s_reg_now[r] == s_reg_boot[r]) {
-      continue;
-    }
-    if (resume && s_reg_now[r] != s_reg_prev[r]) {
-      continue;
-    }
-    n++;
-    len += snprintf(line + len, sizeof(line) - (size_t)len, " %03x:%08lx>%08lx", r,
-                    (unsigned long)s_reg_boot[r], (unsigned long)s_reg_now[r]);
-    if (len > 150) {
-      printf("%s\n", line);
-      len = snprintf(line, sizeof(line), "[ctr] gpu regs %s:", tag);
-    }
-  }
-  if (len > (int)strlen("[ctr] gpu regs :") + (int)strlen(tag)) {
-    printf("%s\n", line);
-  }
-  printf("[ctr] gpu regs %s: %d registers %s\n", tag, n,
-         resume ? "kept our value through the HOME Menu (boot>now)" : "differ from boot (boot>now)");
-}
-
 static void apt_gate_hook(APT_HookType type, void* param) {
   (void)param;
   if (type != APTHOOK_ONSUSPEND && type != APTHOOK_ONSLEEP) {
@@ -5350,7 +5261,6 @@ static void apt_gate_hook(APT_HookType type, void* param) {
   LightLock_Unlock(&s_apt.lock);
   /* what is queued (with frame_overlap2 = on the queue keeps running between frames) */
   gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(1000));
-  ctr_gpu_regdump("suspend");
   printf("[ctr] %s: frames stopped (%.1f ms%s)\n", type == APTHOOK_ONSLEEP ? "sleep" : "HOME Menu",
          (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0),
          timed_out ? ", the frame being built did NOT end" : "");
@@ -5400,7 +5310,6 @@ void C3Di_ProcTexDirty(C3Di_Context* ctx);       /* citro3d (source/proctex.c) *
  * its own over it; pres_check_alive would take 50 ms). The frames queued before the suspend are
  * all due at the first vblank: the callback shows the newest and skips the rest. */
 static void apt_resume_state(void) {
-  ctr_gpu_regdump("resume");
   C3Di_Context* ctx = &__C3D_Context;
   /* AttrInfo .. GshCode, TexAll, TexEnvAll (as citro3d's ONRESTORE, but not its gas bit) */
   ctx->flags |= BIT(2) | BIT(3) | BIT(4) | BIT(5) | BIT(6) | BIT(7) | BIT(8) | BIT(9) | BIT(10) |

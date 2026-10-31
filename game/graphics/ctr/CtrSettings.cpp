@@ -301,7 +301,7 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       s.asm_mem = parse_bool(v);
     } else if (key == "fast_clock") {
       s.fast_clock = parse_bool(v);
-    } else if (key == "sound" || key == "sound_core" ||
+    } else if (key == "sound" || key == "sound_core" || key == "kernel_flush" ||
                key == "mips2c_native_off" || key == "perf_sections" || key == "args" ||
                key == "listener" || key == "screenshots" || key == "pad_script" ||
                key == "debug_log" || key == "particle_density" ||

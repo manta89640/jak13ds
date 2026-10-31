@@ -242,9 +242,10 @@ int ctr_platform_init(int enable_console) {
   /* (AI-assisted) hardware hang bisect (config.ini, default on): ctr_mem.S's memcpy / memmove /
    * memset (off: ctr_mem_c.c's loops, also used until here) and ctr_clock.cpp's steady_clock */
   {
-    extern int ctr_mem_asm, ctr_fast_clock;
+    extern int ctr_mem_asm, ctr_fast_clock, ctr_kernel_flush_cfg;
     ctr_mem_asm = ctr_config_bool("asm_mem", 1);
     ctr_fast_clock = ctr_config_bool("fast_clock", 1);
+    ctr_kernel_flush_cfg = ctr_config_bool("kernel_flush", 1);
   }
   chdir("sdmc:/");
   osSetSpeedupEnable(true); /* 804 MHz + L2 cache on New 3DS, no-op otherwise */
