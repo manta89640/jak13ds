@@ -78,6 +78,9 @@ struct Relief {
 // the render thread's build on average; else the render thread is the limit (or, in Azahar, the
 // commands run as they are handed over and the time follows the build) and a frame counts at most
 // as the target: fewer triangles would hardly help, so it never steps toward the old values.
+// The render thread's own build counts as well, averaged over kFastFrames (the title's time of day
+// lands every fourth frame): over the target it steps the same way, never urgent (fewer vertices
+// and draws shorten the time of day rewrites and the list walk; the in-view holds stay).
 struct Controller {
   static constexpr int kFastFrames = 4;
   static constexpr int kSettleFrames = 24;
@@ -96,16 +99,28 @@ struct Controller {
   long frame = 0;
   int hold = kHoldMin;
   long last_toward = -1000000, last_back = -1000000;
-  double fast_sum = 0;
+  double fast_sum = 0, fast_gpu = 0, fast_cpu = 0;
   int fast_n = 0, fast_over = 0;
   bool last_over = false;  // the window before was over the target
   double room_sum = 0;
   int room_n = 0, room_over = 0;
   int towards = 0, backs = 0;  // steps since the last log
+  int towards_cpu = 0;         // of them for the render thread
+  double builds[kFastFrames] = {};
+  int builds_n = 0;
 
-  // busy: this frame's GPU ms (active), build: the render thread's (counted false: no
-  // measurement, or a level load's frame); k: 1 at fps_cap 30, 0.5 at 60. Returns true when r
-  // moved.
+  // back at the config values, the windows started again
+  void reset() {
+    r = 0;
+    urgent = last_over = false;
+    fast_sum = fast_gpu = fast_cpu = room_sum = lead = 0;
+    fast_n = fast_over = room_n = room_over = builds_n = 0;
+    last_back = frame;
+  }
+
+  // busy: this frame's GPU ms (active), build: the render thread's, its time of day included
+  // (counted false: no measurement, or a level load's frame); k: 1 at fps_cap 30, 0.5 at 60.
+  // Returns true when r moved.
   bool step(double busy, double build, bool counted, double target, double k = 1.0) {
     frame++;
     if (!counted) {
@@ -115,16 +130,26 @@ struct Controller {
     if (lead < kGpuLead * k) {
       busy = std::min(busy, target);
     }
-    fast_sum += busy;
+    builds[frame % kFastFrames] = build;
+    builds_n = std::min(builds_n + 1, kFastFrames);
+    double cpu = 0;
+    for (int i = 0; i < builds_n; i++) {
+      cpu += builds[i];
+    }
+    cpu /= builds_n;
+    const double load = std::max(busy, cpu);
+    fast_sum += load;
+    fast_gpu += busy;
+    fast_cpu += cpu;
     fast_n++;
     fast_over += busy > 33.0 * k;
-    room_sum += busy;
+    room_sum += load;
     room_n++;
-    room_over += busy > target;
+    room_over += load > target;
     bool moved = false;
     if (fast_n >= kFastFrames) {
       const double avg = fast_sum / fast_n;
-      urgent = avg > target + kUrgentMargin * k || fast_over >= 2;
+      urgent = fast_gpu / fast_n > target + kUrgentMargin * k || fast_over >= 2;
       const bool over = avg > target;
       if (over && r < (float)n &&
           (urgent || (last_over && frame - last_toward >= kSettleFrames))) {
@@ -136,12 +161,13 @@ struct Controller {
         }
         last_toward = frame;
         towards++;
+        towards_cpu += fast_cpu > fast_gpu;
         moved = true;
         room_sum = 0;
         room_n = room_over = 0;
       }
       last_over = over;
-      fast_sum = 0;
+      fast_sum = fast_gpu = fast_cpu = 0;
       fast_n = fast_over = 0;
     }
     if (room_n >= kRoomFrames) {

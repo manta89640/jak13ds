@@ -54,6 +54,7 @@ std::map<int, std::string>& ctr_soft_mesh_desc();
 #endif
 
 namespace {
+void tod_drop_entries(CtrLevelData::Tod& t, size_t ci);
 // (AI-assisted, title3) host diagnostic, env CTR_POP_LOG: per level draw, what changed on screen
 // (chunks appearing / going by distance in view, tie LOD switches in view, groups late or held
 // far, time of day rewrites, units taken): which mechanism a visible change is
@@ -1317,6 +1318,7 @@ void CtrLevels::unload_detail(CtrLevelData& lev) {
       lev.meshes[ci] = -1;
       if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
         lev.tod->chunk_mesh[ci] = -1;  // (AI-assisted) (a mesh made later may get this one's id)
+        tod_drop_entries(*lev.tod, ci);
       }
       freed++;
     }
@@ -1441,6 +1443,7 @@ void CtrLevels::dormant_update(u64 frame) {
         lev.meshes[ci] = -1;
         if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
           lev.tod->chunk_mesh[ci] = -1;
+          tod_drop_entries(*lev.tod, ci);
         }
         lev.chunk_dormant[ci] = CtrLevelData::kDormFreed;
         freed++;
@@ -1647,6 +1650,7 @@ u64 CtrLevels::dist_free_far(CtrLevelData& lev,
       lev.meshes[ci] = -1;
       if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
         lev.tod->chunk_mesh[ci] = -1;
+        tod_drop_entries(*lev.tod, ci);
       }
       freed++;
     } else {
@@ -2003,6 +2007,7 @@ void CtrLevels::title_update(u64 frame) {
         lev.meshes[ci] = -1;
         if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
           lev.tod->chunk_mesh[ci] = -1;
+          tod_drop_entries(*lev.tod, ci);
         }
         lev.chunk_dormant[ci] = CtrLevelData::kTitleFreed;
         freed++;
@@ -2505,12 +2510,21 @@ inline u32 tod_alpha_of(const CtrLevelData::Tod& t, u32 c) {
 // the tie / shrub distances in while the title screen's day ran
 double g_tod_frame_ms = 0;
 
+// min(255, x) for x < 2^31 (USAT on ARM)
+inline u32 tod_sat8(u32 x) {
+#if defined(__arm__) && defined(__ARM_FEATURE_SAT)
+  return (u32)__builtin_arm_usat((s32)x, 8);
+#else
+  return std::min<u32>(255, x);
+#endif
+}
+
 // a blended color times a TodMul (shrubs' base color, the untextured vista's texture average);
 // the color's alpha as it is
 inline u32 tod_mul_rgb(u32 c, const c3l::TodMul& m) {
-  return std::min<u32>(255, ((c & 0xff) * m.mul[0] + 64) >> 7) |
-         std::min<u32>(255, (((c >> 8) & 0xff) * m.mul[1] + 64) >> 7) << 8 |
-         std::min<u32>(255, (((c >> 16) & 0xff) * m.mul[2] + 64) >> 7) << 16 | (c & 0xff000000u);
+  return tod_sat8(((c & 0xff) * m.mul[0] + 64) >> 7) |
+         tod_sat8((((c >> 8) & 0xff) * m.mul[1] + 64) >> 7) << 8 |
+         tod_sat8((((c >> 16) & 0xff) * m.mul[2] + 64) >> 7) << 16 | (c & 0xff000000u);
 }
 
 // The palettes a blend with weights w adds (weight not 0).
@@ -2577,7 +2591,7 @@ __attribute__((noinline)) u32 tod_entry_slow(CtrLevelData::Tod& t, u32 idx) {
 // whose weights are the same for r, g and b and add up to at most 256: r and b in the two halves
 // of one word (each sum <= 255 * 256 < 65536), g in another, the palettes' offsets and weights in
 // registers: ~6 instructions per palette instead of ~14 (tod_blend_rgb), the same sums.
-template <int N, bool kChange>
+template <int N, bool kChange, bool kKinds>
 void tod_refresh_colors(CtrLevelData::Tod& t) {
   const auto& a = t.act;
   u32 off[N], w[N];
@@ -2591,27 +2605,42 @@ void tod_refresh_colors(CtrLevelData::Tod& t) {
   u32* const stamp = t.stamp.data();
   const u8* const cm = t.color_mask.data();
   const u32* const lut = t.lut;
-  const u8* const ak = t.akind.empty() ? nullptr : t.akind.data();
+  const u8* const ak = t.akind.data();
   const u32* const aw = t.aword.data();
   const u32 a0 = t.aword.empty() ? 0 : t.aword[0];
   u32* const cver = t.cver.data();
   for (u32 c = 0; c < nc; c++, src += stride) {
-    if (stamp[c] >= lut[cm[c]]) {
+    // (the fast day: every color blended, the current ones to what they hold)
+    if (kChange && stamp[c] >= lut[cm[c]]) {
       continue;
     }
     u32 rb = 0, g = 0;
+#pragma GCC unroll 8
     for (int k = 0; k < N; k++) {
       const u8* x = src + off[k];
       rb += ((u32)x[0] | (u32)x[2] << 16) * w[k];
       g += (u32)x[1] * w[k];
     }
-    const u32 rgba = std::min<u32>(255, (rb & 0xffff) >> 6) | std::min<u32>(255, g >> 6) << 8 |
-                     std::min<u32>(255, rb >> 22) << 16 | (ak ? aw[ak[c]] : a0);
-    if (kChange && rgba != table[c]) {
-      cver[c] = ver;
+    const u32 rgba = tod_sat8((rb & 0xffff) >> 6) | tod_sat8(g >> 6) << 8 |
+                     tod_sat8(rb >> 22) << 16 | (kKinds ? aw[ak[c]] : a0);
+    if (kChange) {
+      if (rgba != table[c]) {
+        cver[c] = ver;
+      }
+      stamp[c] = ver;
     }
     table[c] = rgba;
-    stamp[c] = ver;
+  }
+  if (!kChange) {
+    std::fill(stamp, stamp + nc, ver);
+  }
+}
+template <int N, bool kChange>
+void tod_refresh_colors(CtrLevelData::Tod& t) {
+  if (t.akind.empty()) {
+    tod_refresh_colors<N, kChange, false>(t);
+  } else {
+    tod_refresh_colors<N, kChange, true>(t);
   }
 }
 
@@ -2668,6 +2697,13 @@ void tod_refresh_all(CtrLevelData::Tod& t) {
   }
   // the TodMuls from their (now current) colors, as tod_entry_slow
   const c3l::TodMul* const muls = t.muls.data();
+  if (packed && t.fast_day) {
+    for (u32 idx = nc; idx < n; idx++) {
+      table[idx] = tod_mul_rgb(table[muls[idx - nc].color], muls[idx - nc]);
+    }
+    std::fill(stamp + nc, stamp + n, ver);
+    return;
+  }
   for (u32 idx = nc; idx < n; idx++) {
     if (stamp[idx] < lut[cm[idx]]) {
       const auto& m = muls[idx - nc];
@@ -2675,6 +2711,21 @@ void tod_refresh_all(CtrLevelData::Tod& t) {
       stamp[idx] = ver;
     }
   }
+}
+
+// The title's entry copies (Tod::chunk_entries): u32 count, then the entries
+void tod_drop_entries(CtrLevelData::Tod& t, size_t ci) {
+  if (ci < t.chunk_entries.size() && t.chunk_entries[ci]) {
+    u32 n;
+    memcpy(&n, t.chunk_entries[ci].get(), 4);
+    t.entries_bytes -= 4 + 2 * n;
+    t.chunk_entries[ci].reset();
+  }
+}
+void tod_drop_all_entries(CtrLevelData::Tod& t) {
+  t.chunk_entries.clear();
+  t.chunk_entries.shrink_to_fit();
+  t.entries_bytes = 0;
 }
 
 // Every level draw: the game's weights into target_w (the table's entries follow lazily, exact as
@@ -2725,6 +2776,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   if (t.fast_day && !no_hold) {
     // (the colors' changes weren't kept: every group's colors may have changed)
     std::fill(t.cver.begin(), t.cver.end(), t.ver);
+    tod_drop_all_entries(t);
   }
   t.fast_day = no_hold;
   if (!t.first_frame) {
@@ -2922,6 +2974,122 @@ inline void tod_write_fresh(const CtrLevelData::Tod& t, const TodVerts& v, int f
     return;
   }
   tod_each(v, first, end, [tab](u32 idx, tod_word* c) { tod_store_rgb((u8*)c, tab[idx]); });
+}
+
+// The heap the title's entry copies may still take (checked at most every kTodEntryCheck frames);
+// they leave kTodEntryKeep free
+struct TodEntryRoom {
+  s64 left = 0;
+  u64 frame = ~0ull;
+};
+TodEntryRoom g_tod_entry_room;
+constexpr u64 kTodEntryCheck = 30;
+constexpr s64 kTodEntryKeep = 4 << 20;
+// Chunk ci's vertices' table entries (the title's fast day: made at its first whole rewrite), or
+// nullptr when the heap has no room for them
+const u16* tod_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n, u64 frame) {
+  if (ci < t.chunk_entries.size() && t.chunk_entries[ci]) {
+    return t.chunk_entries[ci].get() + 2;
+  }
+  auto& room = g_tod_entry_room;
+  if (room.frame == ~0ull || frame - room.frame >= kTodEntryCheck) {
+    room.frame = frame;
+#ifdef __3DS__
+    CtrHeapStats st;
+    ctr_heap_stats(&st);
+    room.left = std::min<s64>((s64)st.free - kTodEntryKeep, (s64)st.largest / 2);
+#else
+    room.left = 64 << 20;
+#endif
+  }
+  const s64 bytes = 4 + 2 * (s64)n;
+  if (n <= 0 || ci >= t.chunk_mesh.size() || bytes > room.left) {
+    return nullptr;
+  }
+  u16* const p = new (std::nothrow) u16[2 + n];
+  if (!p) {
+    room.left = 0;
+    return nullptr;
+  }
+  room.left -= bytes;
+  const u32 nv = (u32)n;
+  memcpy(p, &nv, 4);
+  for (int i = 0; i < n; i++) {
+    p[2 + i] = (u16)v.entry(i);
+  }
+  if (t.chunk_entries.size() < t.chunk_mesh.size()) {
+    t.chunk_entries.resize(t.chunk_mesh.size());
+  }
+  t.chunk_entries[ci].reset(p);
+  t.entries_bytes += (u32)bytes;
+  return p + 2;
+}
+// Vertices [first, end) of a plain group from a table that is all up to date, through the chunk's
+// entries (e, 4-byte aligned): every color stored, 8 vertices from 4 entry words
+inline void tod_write_entries(const u32* tab, const u16* e, tod_word* c, int first, int end) {
+  int i = first;
+  if ((i & 1) && i < end) {
+    c[i] = tab[e[i]];
+    i++;
+  }
+  const tod_word* w = (const tod_word*)(e + i);
+  tod_word* d = c + i;
+  int n = end - i;
+#if defined(__arm__)
+  // (23 instructions per 8 vertices: one LDM of entries, two STMs of colors)
+  if (n >= 8) {
+    int blocks = n >> 3;
+    n &= 7;
+    asm volatile(
+        "1:\n\t"
+        "pld [%[w], #64]\n\t"
+        "pld [%[d], #128]\n\t"
+        "ldmia %[w]!, {r4, r5, r6, r7}\n\t"
+        "uxth r8, r4\n\t"
+        "lsr r9, r4, #16\n\t"
+        "uxth r10, r5\n\t"
+        "lsr ip, r5, #16\n\t"
+        "ldr r8, [%[tab], r8, lsl #2]\n\t"
+        "ldr r9, [%[tab], r9, lsl #2]\n\t"
+        "ldr r10, [%[tab], r10, lsl #2]\n\t"
+        "ldr ip, [%[tab], ip, lsl #2]\n\t"
+        "stmia %[d]!, {r8, r9, r10, ip}\n\t"
+        "uxth r8, r6\n\t"
+        "lsr r9, r6, #16\n\t"
+        "uxth r10, r7\n\t"
+        "lsr ip, r7, #16\n\t"
+        "ldr r8, [%[tab], r8, lsl #2]\n\t"
+        "ldr r9, [%[tab], r9, lsl #2]\n\t"
+        "ldr r10, [%[tab], r10, lsl #2]\n\t"
+        "ldr ip, [%[tab], ip, lsl #2]\n\t"
+        "stmia %[d]!, {r8, r9, r10, ip}\n\t"
+        "subs %[k], %[k], #1\n\t"
+        "bne 1b\n\t"
+        : [w] "+r"(w), [d] "+r"(d), [k] "+r"(blocks)
+        : [tab] "r"(tab)
+        : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "ip", "cc", "memory");
+  }
+#endif
+  for (; n >= 8; n -= 8, w += 4, d += 8) {
+    __builtin_prefetch(w + 16, 0);
+    __builtin_prefetch(d + kTodPrefetch / 4, 1);
+    const u32 a = w[0], b = w[1];
+    const u32 x0 = tab[a & 0xffff], x1 = tab[a >> 16], x2 = tab[b & 0xffff], x3 = tab[b >> 16];
+    d[0] = x0;
+    d[1] = x1;
+    d[2] = x2;
+    d[3] = x3;
+    const u32 a2 = w[2], b2 = w[3];
+    const u32 y0 = tab[a2 & 0xffff], y1 = tab[a2 >> 16], y2 = tab[b2 & 0xffff], y3 = tab[b2 >> 16];
+    d[4] = y0;
+    d[5] = y1;
+    d[6] = y2;
+    d[7] = y3;
+  }
+  const u16* r = (const u16*)w;
+  for (int j = 0; j < n; j++) {
+    d[j] = tab[r[j]];
+  }
 }
 
 // Vertices [first, end) from the table (without c3l v22 alpha the vertex keeps its own; plain: every
@@ -3508,6 +3676,7 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   if (t.chunk_mesh[ci] != mesh) {
     // a mesh made after the load (its vertices as in the file)
     t.chunk_mesh[ci] = mesh;
+    tod_drop_entries(t, ci);
     for (u32 g = g0; g < g0 + ng; g++) {
       t.groups[g].ver = 0;
       t.groups[g].dver = 0;
@@ -3701,7 +3870,12 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
         ps.fresh = true;
       }
       if (end > first) {
-        if (ps.fresh && gr.plain) {
+        const u16* ents = ps.fresh && gr.plain && t.fast_day && !t.keep_alpha
+                              ? tod_entries(t, ci, v, n, ps.frame)
+                              : nullptr;
+        if (ents) {
+          tod_write_entries(t.table.data(), ents, v.rgba, first, end);
+        } else if (ps.fresh && gr.plain) {
           tod_write_fresh(t, v, first, end);
         } else {
           tod_write_range(t, v, first, end, gr.plain);
@@ -3798,6 +3972,7 @@ u32 tf_morph_colors(CtrLevelData& lev, size_t ci, const u8* shown) {
   // the mean of two rgba words, byte by byte (rounded down)
   auto avg = [](u32 a, u32 b) { return (a & b) + (((a ^ b) & 0xfefefefeu) >> 1); };
   const u32 nt = (u32)t.table.size();
+  const u32* const tab = t.table.data();
   u32 written = 0, lo = UINT32_MAX, hi = 0;
   for (u32 g = 0; g < ng; g++) {
     if (!need[g]) {
@@ -3840,24 +4015,32 @@ u32 tf_morph_colors(CtrLevelData& lev, size_t ci, const u8* shown) {
       }
     }
     ver = std::max<u32>(t.ver, 1);
-    for (const auto* x = it; x < end; x++) {
-      if (!(x->pad & moved)) {
-        continue;
+    auto colors = [&](auto fresh) {
+      for (const auto* x = it; x < end; x++) {
+        if (!(x->pad & moved)) {
+          continue;
+        }
+        auto e = [&](u16 i) { return i < nt ? (fresh ? tab[i] : tod_entry(t, i)) : 0u; };
+        // (a level0 point's m is its own color, its t the mean of two)
+        const u32 a = e(x->m[0]);
+        const u32 m = x->m[1] == x->m[0] ? a : avg(a, e(x->m[1]));
+        const u32 t0 = e(x->t[0]);
+        const u32 t1 = x->t[1] == x->t[0] ? t0 : avg(t0, e(x->t[1]));
+        const u32 t2 = e(x->t[2]);
+        const u32 t3 = x->t[3] == x->t[2] ? t2 : avg(t2, e(x->t[3]));
+        tod_word* const r = (tod_word*)(tail + 16u * x->vertex);
+        r[2] = m;
+        r[3] = avg(t1, t3);
+        lo = std::min<u32>(lo, x->vertex);
+        hi = std::max<u32>(hi, x->vertex);
+        written++;
       }
-      auto e = [&](u16 i) { return i < nt ? tod_entry(t, i) : 0u; };
-      // (a level0 point's m is its own color, its t the mean of two)
-      const u32 a = e(x->m[0]);
-      const u32 m = x->m[1] == x->m[0] ? a : avg(a, e(x->m[1]));
-      const u32 t0 = e(x->t[0]);
-      const u32 t1 = x->t[1] == x->t[0] ? t0 : avg(t0, e(x->t[1]));
-      const u32 t2 = e(x->t[2]);
-      const u32 t3 = x->t[3] == x->t[2] ? t2 : avg(t2, e(x->t[3]));
-      tod_word* const r = (tod_word*)(tail + 16u * x->vertex);
-      r[2] = m;
-      r[3] = avg(t1, t3);
-      lo = std::min<u32>(lo, x->vertex);
-      hi = std::max<u32>(hi, x->vertex);
-      written++;
+    };
+    // (a table all up to date, tod_refresh_all: read without the version checks)
+    if (t.fresh_ver == t.ver) {
+      colors(std::true_type{});
+    } else {
+      colors(std::false_type{});
     }
   }
   if (written) {
@@ -7626,6 +7809,7 @@ void CtrLevels::stream_evict(CtrLevelData& lev, u32 unit) {
   }
   if (lev.tod && ci < lev.tod->chunk_mesh.size()) {
     lev.tod->chunk_mesh[ci] = -1;
+    tod_drop_entries(*lev.tod, ci);
   }
   su.state = CtrLevelData::kUnitAbsent;
   su.mem = nullptr;

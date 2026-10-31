@@ -1008,16 +1008,17 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         };
         lg::info("[ctr] auto detail{} tie_lod_px {:.1f} ({}), lod_distance {} ({}), ties {} ({}) "
                  "at the config / between / old value; relief {:.2f} of {}, {} steps toward the "
-                 "old values, {} back (next back after {} frames of room)",
+                 "old values ({} for the render thread), {} back (next back after {} frames of "
+                 "room)",
                  range, kn.tie_lod_px, secs(ctr_detail::kTieLodPx),
                  kn.lod_distance > 0 ? fmt::format("{:.0f} m", kn.lod_distance) : std::string("off"),
                  secs(ctr_detail::kLodDistance),
                  kn.tie_distance_scale > 0 ? fmt::format("x{:.2f}", kn.tie_distance_scale)
                                            : std::string("none"),
-                 secs(ctr_detail::kTieDistance), r, rl.n, m_auto.ctl.towards, m_auto.ctl.backs,
-                 m_auto.ctl.hold);
+                 secs(ctr_detail::kTieDistance), r, rl.n, m_auto.ctl.towards,
+                 m_auto.ctl.towards_cpu, m_auto.ctl.backs, m_auto.ctl.hold);
         m_auto.ups = m_auto.downs = m_auto.tod_downs = 0;
-        m_auto.ctl.towards = m_auto.ctl.backs = 0;
+        m_auto.ctl.towards = m_auto.ctl.towards_cpu = m_auto.ctl.backs = 0;
         m_auto.time = ctr_detail::KnobTime();
       }
     }
@@ -1148,7 +1149,8 @@ void CtrRenderer::note_levels(const std::vector<std::string>& levels) {
 // time) don't count for the largest frame: one such spike pulled the distances in on screen.
 // The t range only runs where the config gives one (t_range); at its near end the relief
 // (CtrAutoDetail.h) follows the GPU's time from the frame's command list on (active: without the
-// GPU's wait for the render thread after the frame's clear), frame by frame.
+// GPU's wait for the render thread after the frame's clear) and the render thread's build, frame
+// by frame.
 void CtrRenderer::auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int gpu_busy_frames,
                                     double build_ms, double build_tod_ms) {
   const auto& cs = ctr_settings();
@@ -1178,10 +1180,17 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int 
   const bool load = m_auto.load_frame && m_rs.frame_idx <= m_auto.load_frame + 2;
   const double busy = (double)gpu_busy_ms / gpu_busy_frames;
   bool moved = false;
+  // the title's relief (its late flight) isn't carried into play: the level starts at the config
+  if (m_auto.title && !m_title_loaded && m_auto.ctl.r > 0) {
+    m_auto.ctl.reset();
+    moved = true;
+  }
+  m_auto.title = m_title_loaded;
   // the relief moves only with the shrub / tie distances at their near end
   if (m_auto.t <= 0) {
     moved = m_auto.ctl.step((double)gpu_active_ms / gpu_busy_frames, build_tod_ms, !load, target,
-                            k);
+                            k) ||
+            moved;
   }
   if (m_auto.t_range) {
     m_auto.busy_ms += gpu_busy_ms;

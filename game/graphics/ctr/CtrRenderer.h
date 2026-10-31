@@ -214,6 +214,7 @@ class CtrRenderer {
     ctr_detail::Controller ctl;
     ctr_detail::KnobTime time;
     double last_ms = 0;
+    bool title = false;  // the title screen at the last frame (its relief ends with it)
   } m_auto;
   bool m_title_loaded = false;  // (AI-assisted, levellod) note_levels: "title" is loaded
   bool profile_skips(const std::string& name) const;

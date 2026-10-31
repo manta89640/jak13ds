@@ -67,13 +67,15 @@ void test_ranges() {
 
 // a view: its GPU ms per frame at the PS2 values, and what each knob saves at its old value;
 // build: the render thread's ms (0: busy - 10, a GPU-bound frame as on hardware; < 0: busy + this,
-// Azahar's busy that follows the build)
+// Azahar's busy that follows the build); spike: ms more every fourth frame (the title's time of
+// day update), in busy and build alike
 struct View {
   const char* name;
   double busy0;
   double save[kKnobs];
   int frames;
   double build = 0;
+  double spike = 0;
 };
 
 struct Run {
@@ -105,7 +107,8 @@ Run simulate(const std::vector<View>& views, unsigned seed, bool print) {
       for (int k = 0; k < kKnobs; k++) {
         save += v.save[k] * rl.part(k, (float)eff_r);
       }
-      const double busy = std::max(5.0, v.busy0 - save + noise(rng));
+      const double busy =
+          std::max(5.0, v.busy0 - save + noise(rng)) + (frame % 4 == 0 ? v.spike : 0.0);
       vr.over33 += busy > 33.4;
       vr.frames++;
       pending.push_back(busy);
@@ -192,11 +195,38 @@ void test_controller() {
   // a view right at the target: stays put or creeps, no oscillation
   std::vector<View> edge = {{"edge 27.5 ms", 27.5, {3.0, 1.0, 0.5}, 3000}};
   const Run e = simulate(edge, 7, verbose);
-  // Azahar: busy ~ the build + 0.9 ms (title flight 19-27 ms): no GPU limit, no relief
-  std::vector<View> az = {{"azahar title (busy ~ build)", 27.5, {3.0, 1.0, 0.5}, 3000, -0.9}};
-  const Run a = simulate(az, 3, verbose);
-  check(a.r_max == 0, "Azahar's busy time (the build) never moves the knobs");
   check(e.reversals < 12, "at the edge of the budget: few direction changes");
+  // Azahar: busy ~ the build + 0.9 ms, the render thread is the limit. Gameplay views that hold 30
+  // fps there (lava tube and citadel 11-15 ms, fire canyon 22.7 ms) never move
+  for (unsigned seed = 3; seed < 23; seed++) {
+    const std::vector<View> play = {{"light (azahar lava tube)", 13.5, {1.0, 0.3, 0.2}, 900, -0.9},
+                                    {"light (azahar fire canyon)", 22.7, {3.0, 1.0, 0.5}, 900, -0.9},
+                                    {"light (azahar citadel)", 15.0, {1.0, 0.3, 0.2}, 900, -0.9}};
+    const Run a = simulate(play, seed, verbose && seed == 3);
+    check(a.r_max == 0, "Azahar gameplay that holds 30 fps never moves the knobs");
+  }
+  // the late title flight in Azahar: a 26 ms build plus a 12 ms time of day update every fourth
+  // frame (29 ms on average): steps toward the old values until the average is in budget
+  std::vector<View> title = {{"azahar late title", 26.0, {4.0, 1.5, 1.0}, 1800, -0.9, 12.0},
+                             {"light (azahar title, open sea)", 19.0, {2.0, 0.6, 0.4}, 1800, -0.9,
+                              6.0}};
+  const Run t = simulate(title, 5, verbose);
+  check(t.first_step >= 0 && t.first_step <= 40, "a render thread over budget steps within 40 frames");
+  check(t.r_max > 0.3 && t.r_max < 2.0, "the late title settles part way");
+  check(t.r_end == 0, "back at the PS2 values in a light stretch");
+  // the title's end (CtrRenderer::auto_detail_frame): the relief starts again at the config values
+  Controller c;
+  c.n = 3;
+  for (int f = 0; f < 300; f++) {
+    c.step(32.5, 32.0, true, 27.0);
+  }
+  check(c.r > 0, "a render thread at 32 ms steps toward the old values");
+  c.reset();
+  check(c.r == 0 && !c.urgent, "reset: the config values");
+  for (int f = 0; f < 120; f++) {
+    c.step(15.5, 15.0, true, 27.0);
+  }
+  check(c.r == 0, "a light view after the reset stays at the config values");
 }
 }  // namespace
 

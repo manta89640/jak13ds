@@ -47,7 +47,9 @@ mkdir -p "$OUT"
 # the two versions' time of day code: from "struct TodSeen {" to the host check, the Tod struct
 # and CtrLight.h
 extract() {
-  awk '/^struct TodSeen \{/{on=1} /^#if !defined\(__3DS__\) \|\| defined\(CTR_TOD_CHECK_BUILD\)/{if(on){exit}} on' "$1" |
+  # (tf_morph_colors left out: the tfrag geomorph's level fields aren't modelled)
+  awk '/^struct TodSeen \{/{on=1} /^#if !defined\(__3DS__\) \|\| defined\(CTR_TOD_CHECK_BUILD\)/{if(on){exit}}
+       /^u32 tf_morph_colors\(/{skip=1} on && !skip; skip && /^}/{skip=0}' "$1" |
     sed 's/std::mutex/shim_mutex/g' > "$3.code.inc"
   awk '/^  struct Tod \{/{on=1} on{print} on && /^  \};/{exit}' "$2" > "$3.struct.inc"
 }

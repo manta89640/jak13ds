@@ -375,6 +375,10 @@ struct CtrLevelData {
     std::vector<u8> chunk_mask, chunk_scanned;
     std::vector<u8> chunk_bright;  // its groups' bright palettes (VisGroup::bright)
     std::vector<int> chunk_mesh;
+    // the title's fast day: per chunk its vertices' table entries (CtrLevel.cpp tod_entries), so a
+    // whole rewrite reads 2 bytes a vertex, not its 12-byte record; gone with the title or the mesh
+    std::vector<std::unique_ptr<u16[]>> chunk_entries;
+    u32 entries_bytes = 0;
     u32 bytes() const {
       u32 lights = 0;
       for (const auto& [ci, l] : chunk_lights) {
@@ -385,7 +389,7 @@ struct CtrLevelData {
                    table.size() * 8 + cver.size() * 4 + group_list.size() * 4 + akind.size() +
                    akinds.size() * 13 + color_bright.size() +
                    groups.size() * sizeof(VisGroup) + run_group.size() * 2 +
-                   chunk_group_first.size() * 24) +
+                   chunk_group_first.size() * 24 + chunk_entries.size() * 4 + entries_bytes) +
              lights;
     }
   };

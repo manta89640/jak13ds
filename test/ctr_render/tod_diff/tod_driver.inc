@@ -71,7 +71,7 @@ bool tod_skip_rule(bool heavy, u64 frame_idx, const J&) {
   if constexpr (std::is_same_v<J, TodNoJump>) {
     return heavy && (frame_idx % 2) != 0;
   } else {
-    return heavy && (frame_idx % 2) != 0 && g_title;
+    return heavy && (frame_idx % 4) != 0 && g_title;
   }
 }
 namespace {
