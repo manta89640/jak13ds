@@ -107,6 +107,7 @@ enum : int {
   kTitle = 128,
   kTitleHalf = 256,
   kExact = 512,
+  kChurn = 1024,
 };
 
 // vertices of the chunks drawn whose rgb isn't the PC's blend (interp_time_of_day_slow) of w
@@ -175,6 +176,8 @@ extern "C" int sim_main(const u8* dump, const u32* trace, int nframes, int mode,
     n.setup(d, vis, step);
   }
   u32 bad_frames = 0, bad_verts = 0, off_frames = 0, off_verts = 0;
+  std::vector<u32> churned;
+  std::vector<int> churn_at;
   for (int f = 0; f < nframes; f++) {
     const u32* row = trace + f * 33;
     u8 w[8][4];
@@ -189,6 +192,29 @@ extern "C" int sim_main(const u8* dump, const u32* trace, int nframes, int mode,
     }
     if ((mode & kTitleHalf) && f == nframes / 2) {
       g_title = !g_title;
+    }
+    // churn: every 7th frame a drawn chunk's mesh is freed, and made again 3 frames later
+    if ((mode & kChurn) && !vis.empty()) {
+      if (f % 7 == 0) {
+        rng = rng * 1664525u + 1013904223u;
+        const u32 ci = vis[(rng >> 8) % vis.size()];
+        if (std::find(churned.begin(), churned.end(), ci) == churned.end()) {
+          churned.push_back(ci);
+          churn_at.push_back(f + 3);
+          r.mesh_free(ci);
+          n.mesh_free(ci);
+        }
+      }
+      for (size_t k = 0; k < churned.size();) {
+        if (churn_at[k] == f) {
+          r.mesh_remake(d, churned[k]);
+          n.mesh_remake(d, churned[k]);
+          churned.erase(churned.begin() + k);
+          churn_at.erase(churn_at.begin() + k);
+        } else {
+          k++;
+        }
+      }
     }
     if (mode & kRunRef) {
       r.frame(w, row[0], (mode & kMarkRef) ? sim_mark : no_mark);
@@ -274,6 +300,7 @@ int main(int argc, char** argv) {
             : a == "keep"       ? kKeep
             : a == "title"      ? kTitle
             : a == "title-half" ? kTitleHalf
+            : a == "churn" ? kChurn
             : a == "exact"      ? kExact
                                 : 0;
     opts += " " + a;

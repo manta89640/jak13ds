@@ -2989,7 +2989,12 @@ constexpr s64 kTodEntryKeep = 4 << 20;
 // nullptr when the heap has no room for them
 const u16* tod_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n, u64 frame) {
   if (ci < t.chunk_entries.size() && t.chunk_entries[ci]) {
-    return t.chunk_entries[ci].get() + 2;
+    u32 had;
+    memcpy(&had, t.chunk_entries[ci].get(), 4);
+    if (had == (u32)n) {
+      return t.chunk_entries[ci].get() + 2;
+    }
+    tod_drop_entries(t, ci);  // (made for another mesh of the chunk)
   }
   auto& room = g_tod_entry_room;
   if (room.frame == ~0ull || frame - room.frame >= kTodEntryCheck) {

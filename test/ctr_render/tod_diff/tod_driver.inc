@@ -41,6 +41,7 @@ struct MeshBuf {
   }
 };
 static std::vector<MeshBuf>* g_vb = nullptr;
+static std::vector<u32>* g_mesh_chunk = nullptr;  // mesh id -> its chunk's MeshBuf
 static size_t g_arena_used = 0;
 static u8* arena_take(size_t bytes) {
   bytes = (bytes + 31) & ~(size_t)31;
@@ -52,12 +53,12 @@ static u8* arena_take(size_t bytes) {
   return p;
 }
 [[maybe_unused]] static void* ctr_gpu_mesh_vertices_inplace(int mesh, int* n) {
-  auto& v = (*g_vb)[mesh];
+  auto& v = (*g_vb)[(*g_mesh_chunk)[mesh]];
   *n = (int)v.n;
   return v.p;
 }
 [[maybe_unused]] static void* ctr_gpu_mesh_colors_inplace(int mesh) {
-  auto& v = (*g_vb)[mesh];
+  auto& v = (*g_vb)[(*g_mesh_chunk)[mesh]];
   return TOD_SPLIT ? v.p + 12 * v.n : nullptr;
 }
 // draw_level's heavy frames in Jak 1 (a version without tod_day_jump: in play too)
@@ -77,10 +78,18 @@ bool tod_skip_rule(bool heavy, u64 frame_idx, const J&) {
 namespace {
 #include TOD_CODE
 }  // namespace
+// a version with the title's entry copies: drop chunk ci's (as at a mesh free)
+template <typename T>
+auto tod_diff_drop(T& t, size_t ci, int) -> decltype(t.chunk_entries, void()) {
+  tod_drop_entries(t, ci);
+}
+template <typename T>
+void tod_diff_drop(T&, size_t, long) {}
 
 struct Sim {
   CtrLevelData lev;
   std::vector<MeshBuf> vb;
+  std::vector<u32> mesh_chunk;
   std::vector<u32> visible;
   bool heavy = false;
   u64 verts = 0;
@@ -97,6 +106,7 @@ struct Sim {
   // load_tod (v22, with alpha) and the chunk loop's time of day part
   void setup(const Dump& d, const std::vector<u32>& vis, int bright_step) {
     g_vb = &vb;
+    g_mesh_chunk = &mesh_chunk;
     ctr_settings().tod_pulse_step = bright_step;
     visible = vis;
     const u32 nc = d.nc, nm = d.nm;
@@ -283,7 +293,8 @@ struct Sim {
           memcpy(vb[ci].p + 16 * i, &c.v[i], 16);
         }
       }
-      lev.meshes[ci] = (int)ci;
+      lev.meshes[ci] = (int)mesh_chunk.size();
+      mesh_chunk.push_back((u32)ci);
       lev.chunk_first_run[ci] = (u32)T.run_group.size();
       lev.chunks[ci] = {c.vertex_count, c.ngroups, 0, 0};
       for (u32 g = 0; g < c.ngroups; g++) {
@@ -304,13 +315,36 @@ struct Sim {
       if (!lights.verts.empty()) {
         T.chunk_lights[(u32)ci] = std::move(lights);
       }
-      T.chunk_mesh[ci] = (int)ci;
+      T.chunk_mesh[ci] = lev.meshes[ci];
     }
+  }
+
+  // churn: chunk ci's mesh freed (as the distance / dormant / title / stream frees do) ...
+  void mesh_free(u32 ci) {
+    lev.meshes[ci] = -1;
+    lev.tod->chunk_mesh[ci] = -1;
+    tod_diff_drop(*lev.tod, ci, 0);
+  }
+  // ... and made again later from the file, in new memory with a new mesh id
+  void mesh_remake(const Dump& d, u32 ci) {
+    const auto& c = d.chunks[ci];
+    vb[ci].p = arena_take(c.vertex_count * sizeof(c3l::Vertex));
+    for (u32 i = 0; i < c.vertex_count; i++) {
+      if (TOD_SPLIT) {
+        memcpy(vb[ci].p + 12 * i, &c.v[i], 12);
+        memcpy(vb[ci].p + 12 * c.vertex_count + 4 * i, c.v[i].rgba, 4);
+      } else {
+        memcpy(vb[ci].p + 16 * i, &c.v[i], 16);
+      }
+    }
+    lev.meshes[ci] = (int)mesh_chunk.size();
+    mesh_chunk.push_back(ci);
   }
 
   // one level draw (draw_level's time of day): w[p] = r, g, b, alpha weights
   void frame(const u8 w[8][4], u64 frame_idx, void (*mark)(int)) {
     g_vb = &vb;
+    g_mesh_chunk = &mesh_chunk;
     CtrBackgroundCamera cam{};
     for (int p = 0; p < 8; p++) {
       u32& a = (u32&)cam.itimes[p / 2][(p % 2) * 2];

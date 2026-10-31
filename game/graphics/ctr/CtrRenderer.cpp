@@ -1188,8 +1188,10 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int 
   m_auto.title = m_title_loaded;
   // the relief moves only with the shrub / tie distances at their near end
   if (m_auto.t <= 0) {
+    // (a level's first ~3 s: its first draws rewrite every vertex's time of day, citadel 65 ms)
+    const bool settled = !m_auto.load_frame || m_rs.frame_idx > m_auto.load_frame + 90;
     moved = m_auto.ctl.step((double)gpu_active_ms / gpu_busy_frames, build_tod_ms, !load, target,
-                            k) ||
+                            k, settled) ||
             moved;
   }
   if (m_auto.t_range) {

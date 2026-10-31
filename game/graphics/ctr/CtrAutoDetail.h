@@ -78,12 +78,14 @@ struct Relief {
 // the render thread's build on average; else the render thread is the limit (or, in Azahar, the
 // commands run as they are handed over and the time follows the build) and a frame counts at most
 // as the target: fewer triangles would hardly help, so it never steps toward the old values.
-// The render thread's own build counts as well, averaged over kFastFrames (the title's time of day
-// lands every fourth frame): over the target it steps the same way, never urgent (fewer vertices
-// and draws shorten the time of day rewrites and the list walk; the in-view holds stay).
+// The render thread's own build counts as well, averaged over kBuildFrames (the title's time of day
+// lands every fourth frame; a camera cut rewrites what comes in view once): over the target it
+// steps the same way, never urgent (fewer vertices and draws shorten the time of day rewrites and
+// the list walk; the in-view holds stay).
 struct Controller {
   static constexpr int kFastFrames = 4;
   static constexpr int kSettleFrames = 24;
+  static constexpr int kBuildFrames = 8;  // the build's mean (a camera cut's rewrite is 1/8 of it)
   static constexpr int kRoomFrames = 30;
   static constexpr double kMsPerUnit = 4.0;  // GPU ms one unit of r is taken to save
   static constexpr double kRoomMargin = 2.0;   // ms under the target, scaled like it
@@ -106,22 +108,24 @@ struct Controller {
   int room_n = 0, room_over = 0;
   int towards = 0, backs = 0;  // steps since the last log
   int towards_cpu = 0;         // of them for the render thread
-  double builds[kFastFrames] = {};
-  int builds_n = 0;
+  double builds[kBuildFrames] = {};
 
   // back at the config values, the windows started again
   void reset() {
     r = 0;
     urgent = last_over = false;
     fast_sum = fast_gpu = fast_cpu = room_sum = lead = 0;
-    fast_n = fast_over = room_n = room_over = builds_n = 0;
+    fast_n = fast_over = room_n = room_over = 0;
+    std::fill(builds, builds + kBuildFrames, 0.0);
     last_back = frame;
   }
 
   // busy: this frame's GPU ms (active), build: the render thread's, its time of day included
-  // (counted false: no measurement, or a level load's frame); k: 1 at fps_cap 30, 0.5 at 60.
-  // Returns true when r moved.
-  bool step(double busy, double build, bool counted, double target, double k = 1.0) {
+  // (counted false: no measurement, or a level load's frame; build_counts false: a level's first
+  // draws, whose rewrites of everything don't count for the render thread); k: 1 at fps_cap 30,
+  // 0.5 at 60. Returns true when r moved.
+  bool step(double busy, double build, bool counted, double target, double k = 1.0,
+            bool build_counts = true) {
     frame++;
     if (!counted) {
       return false;
@@ -130,13 +134,13 @@ struct Controller {
     if (lead < kGpuLead * k) {
       busy = std::min(busy, target);
     }
-    builds[frame % kFastFrames] = build;
-    builds_n = std::min(builds_n + 1, kFastFrames);
+    // (the mean of the last kBuildFrames, the missing ones 0: a start doesn't count one frame alone)
+    builds[frame % kBuildFrames] = build_counts ? build : 0.0;
     double cpu = 0;
-    for (int i = 0; i < builds_n; i++) {
-      cpu += builds[i];
+    for (double b : builds) {
+      cpu += b;
     }
-    cpu /= builds_n;
+    cpu /= kBuildFrames;
     const double load = std::max(busy, cpu);
     fast_sum += load;
     fast_gpu += busy;

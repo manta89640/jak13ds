@@ -76,6 +76,8 @@ struct View {
   int frames;
   double build = 0;
   double spike = 0;
+  double first = 0;  // build ms more in the view's first frame, less in the 7 after (a level's
+                     // first time of day draws, after its load: they don't count for the build)
 };
 
 struct Run {
@@ -114,9 +116,10 @@ Run simulate(const std::vector<View>& views, unsigned seed, bool print) {
       pending.push_back(busy);
       const double measured = pending.front();  // one frame late
       pending.erase(pending.begin());
-      const double build = v.build < 0 ? busy + v.build + noise(rng) : busy - 10.0 + noise(rng);
+      const double build = (v.build < 0 ? busy + v.build + noise(rng) : busy - 10.0 + noise(rng)) +
+                           (f < 8 ? v.first * (f == 0 ? 1.0 : 0.6 / f) : 0.0);
       const float r0 = c.r;
-      c.step(measured, build, true, 27.0);
+      c.step(measured, build, true, 27.0, 1.0, !(v.first > 0 && f < 90));
       if (c.r != r0) {
         const int dir = c.r > r0 ? 1 : -1;
         out.reversals += last_dir && dir != last_dir;
@@ -197,11 +200,16 @@ void test_controller() {
   const Run e = simulate(edge, 7, verbose);
   check(e.reversals < 12, "at the edge of the budget: few direction changes");
   // Azahar: busy ~ the build + 0.9 ms, the render thread is the limit. Gameplay views that hold 30
-  // fps there (lava tube and citadel 11-15 ms, fire canyon 22.7 ms) never move
+  // fps there (lava tube and citadel 11-15 ms, fire canyon 22.7 ms) never move, a level's first
+  // draws (citadel: 65 ms of time of day in one frame) included
   for (unsigned seed = 3; seed < 23; seed++) {
     const std::vector<View> play = {{"light (azahar lava tube)", 13.5, {1.0, 0.3, 0.2}, 900, -0.9},
                                     {"light (azahar fire canyon)", 22.7, {3.0, 1.0, 0.5}, 900, -0.9},
-                                    {"light (azahar citadel)", 15.0, {1.0, 0.3, 0.2}, 900, -0.9}};
+                                    {"light (azahar citadel)", 15.0, {1.0, 0.3, 0.2}, 900, -0.9},
+                                    {"light (azahar citadel arrival)", 14.0, {1.0, 0.3, 0.2}, 900,
+                                     -0.9, 0.0, 65.0},
+                                    {"light (azahar fire canyon arrival)", 22.7, {3.0, 1.0, 0.5},
+                                     900, -0.9, 0.0, 25.0}};
     const Run a = simulate(play, seed, verbose && seed == 3);
     check(a.r_max == 0, "Azahar gameplay that holds 30 fps never moves the knobs");
   }
