@@ -58,6 +58,11 @@ extern const uint8_t ctr_mesh_morph_shbin[];
 extern const size_t ctr_mesh_morph_shbin_size;
 extern const uint8_t ctr_mesh_morph_fa_shbin[];
 extern const size_t ctr_mesh_morph_fa_shbin_size;
+/* the PS2's tfrag geomorph (ctr_gpu_draw_mesh_tmorph), with shader_opt's set */
+extern const uint8_t ctr_tfrag_morph_shbin[];
+extern const size_t ctr_tfrag_morph_shbin_size;
+extern const uint8_t ctr_tfrag_morph_fa_shbin[];
+extern const size_t ctr_tfrag_morph_fa_shbin_size;
 /* (AI-assisted) the Oct 2 shaders (hardware proven; the level meshes and merc without shader_opt,
  * config.ini shader_basic = old). The Oct 3 ctr_mesh / ctr_skin / ctr_skin_env (the new ctr_mesh
  * hung the real GPU), the dph bisect mesh and the shader_groups shbins were removed on Oct 16. */
@@ -331,12 +336,14 @@ enum {
   PROG_ETIE_FA,   /* PROG_ETIE for textures with an alpha mask (on unit 1) */
   PROG_MESH_MORPH,    /* ctr_gpu_draw_mesh_morph (ctr_mesh_morph.v.pica, set 1 only) */
   PROG_MESH_MORPH_FA, /* the same with the fog in the alpha (ctr_mesh_morph_fa.v.pica) */
+  PROG_TFRAG_MORPH,    /* ctr_gpu_draw_mesh_tmorph (ctr_tfrag_morph.v.pica, set 1 only) */
+  PROG_TFRAG_MORPH_FA, /* the same with the fog in the alpha (ctr_tfrag_morph_fa.v.pica) */
 };
 /* (AI-assisted) the level mesh programs (one vertex layout, the same uniforms) */
 static inline int is_mesh_prog(int prog) {
   return prog == PROG_MESH || prog == PROG_MESH_FA || prog == PROG_MESH_DF ||
          prog == PROG_MESH_DF_FA || prog == PROG_MESH_WIND || prog == PROG_MESH_MORPH ||
-         prog == PROG_MESH_MORPH_FA;
+         prog == PROG_MESH_MORPH_FA || prog == PROG_TFRAG_MORPH || prog == PROG_TFRAG_MORPH_FA;
 }
 
 /* (AI-assisted) The vertex programs and their uniforms' places, one shbin per program. Set 0: the
@@ -376,6 +383,10 @@ typedef struct {
    * places (morph_ok), then the rows */
   shaderProgram_s mesh_morph, mesh_morph_fa;
   int uloc_morph, morph_ok;
+  /* the tfrag geomorph (set 1; no vertexShader: not loaded): the mesh uniforms at the mesh
+   * program's places (tmorph_ok), then tband, tscale */
+  shaderProgram_s tfrag_morph, tfrag_morph_fa;
+  int uloc_tband, tmorph_ok;
   /* the alpha mask programs (c3l v23), their uniforms at skin's / etie's places */
   shaderProgram_s skin_mask, etie_fa;
   int mask_ok, etie_fa_ok;
@@ -420,6 +431,8 @@ static struct {
   DVLB_s* etie_dvlb;      /* (AI-assisted, j2water2) ctr_etie.v.pica (Jak II) */
   DVLB_s* wind_dvlb;      /* ctr_mesh_wind.v.pica */
   DVLB_s* morph_dvlb[2];  /* ctr_mesh_morph(_fa).v.pica */
+  DVLB_s* tmorph_dvlb[2]; /* ctr_tfrag_morph(_fa).v.pica */
+  u32 tmorph_unif_id;     /* the tfrag geomorph uniforms the GPU has (ctr_gpu_draw_mesh_tmorph) */
   /* ctr_skin_old_mask, ctr_skin_opt_mask, ctr_etie_fa.v.pica */
   DVLB_s* skin_mask_dvlb[2];
   DVLB_s* etie_fa_dvlb;
@@ -927,6 +940,8 @@ static void use_program(int prog) {
                                 : prog == PROG_MESH_WIND ? &g.ps->mesh_wind
                                 : prog == PROG_MESH_MORPH ? &g.ps->mesh_morph
                                 : prog == PROG_MESH_MORPH_FA ? &g.ps->mesh_morph_fa
+                                : prog == PROG_TFRAG_MORPH ? &g.ps->tfrag_morph
+                                : prog == PROG_TFRAG_MORPH_FA ? &g.ps->tfrag_morph_fa
                                 : prog == PROG_SKIN_MASK ? &g.ps->skin_mask
                                 : prog == PROG_ETIE_FA ? &g.ps->etie_fa
                                                         : &g.ps->mesh;
@@ -1035,6 +1050,8 @@ static void use_program(int prog) {
                     : prog == PROG_MESH_WIND  ? &g.ps->mesh_wind
                     : prog == PROG_MESH_MORPH ? &g.ps->mesh_morph
                     : prog == PROG_MESH_MORPH_FA ? &g.ps->mesh_morph_fa
+                    : prog == PROG_TFRAG_MORPH ? &g.ps->tfrag_morph
+                    : prog == PROG_TFRAG_MORPH_FA ? &g.ps->tfrag_morph_fa
                                               : &g.ps->mesh);
     g.last_state_valid = 0;
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);         /* position (+ pad) */
@@ -1048,6 +1065,13 @@ static void use_program(int prog) {
       AttrInfo_AddLoader(attr, 3, GPU_BYTE, 4); /* c3l::MorphVertex delta, row */
       AttrInfo_AddLoader(attr, 4, GPU_BYTE, 4); /* delta2, pad */
       memset(g.morph_slot_id, 0, sizeof(g.morph_slot_id));
+    }
+    if (prog == PROG_TFRAG_MORPH || prog == PROG_TFRAG_MORPH_FA) {
+      AttrInfo_AddLoader(attr, 3, GPU_BYTE, 4);          /* c3l::TfragMorphVertex band0, color0 */
+      AttrInfo_AddLoader(attr, 4, GPU_BYTE, 4);          /* band1, color1 */
+      AttrInfo_AddLoader(attr, 5, GPU_UNSIGNED_BYTE, 4); /* m */
+      AttrInfo_AddLoader(attr, 6, GPU_UNSIGNED_BYTE, 4); /* t */
+      g.tmorph_unif_id = 0;
     }
     /* (AI-assisted) skin's value (w = 1/127: no mesh shader reads w) */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_scales, 1.0f / 1024.0f, 1.0f / 255.0f, 1.0f,
@@ -1282,7 +1306,8 @@ static void prog_set_free(ProgSet* p) {
   }
   shaderProgram_s* maybe[] = {&p->mesh_fa,   &p->mesh_df,       &p->mesh_df_fa, &p->ocean_env,
                               &p->etie,      &p->mesh_wind,     &p->skin_mask,  &p->etie_fa,
-                              &p->mesh_morph, &p->mesh_morph_fa};
+                              &p->mesh_morph, &p->mesh_morph_fa, &p->tfrag_morph,
+                              &p->tfrag_morph_fa};
   for (size_t i = 0; i < sizeof(maybe) / sizeof(maybe[0]); i++) {
     if (maybe[i]->vertexShader) {
       shaderProgramFree(maybe[i]);
@@ -1370,17 +1395,18 @@ static void resident_programs(const ProgSet* rp) {
     printf("[ctr] shader_resident: off\n");
     return;
   }
-  DVLE_s* dvles[2 * 19];
+  DVLE_s* dvles[2 * 21];
   int n = 0;
   for (int k = 0; k < 1; k++) {
     const ProgSet* p = rp;
     /* (AI-assisted, j2water) + ocean_env (Jak II); (j2water2) + etie (Jak II) */
-    const shaderProgram_s* all[19] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
+    const shaderProgram_s* all[21] = {&p->basic,     &p->mesh,       &p->mesh_fa,    &p->skin,
                                 &p->env,       &p->clip,       &p->clip2,      &p->ocean,
                                 &p->ocean_full, &p->ocean_full_clip, &p->mesh_df, &p->mesh_df_fa,
                                 &p->ocean_env, &p->etie,       &p->mesh_wind,  &p->skin_mask,
-                                &p->etie_fa,   &p->mesh_morph, &p->mesh_morph_fa};
-    for (int i = 0; i < 19; i++) {
+                                &p->etie_fa,   &p->mesh_morph, &p->mesh_morph_fa,
+                                &p->tfrag_morph, &p->tfrag_morph_fa};
+    for (int i = 0; i < 21; i++) {
       if (!all[i]->vertexShader) {
         continue;
       }
@@ -1395,8 +1421,8 @@ static void resident_programs(const ProgSet* rp) {
     }
   }
   /* the distinct DVLPs, their code places, and the descriptor table (MAD's first) */
-  DVLP_s* dvlps[2 * 19];
-  u32 base[2 * 19];
+  DVLP_s* dvlps[2 * 21];
+  u32 base[2 * 21];
   int np = 0;
   u32 code = 0, ndesc = 0;
   for (int i = 0; i < n; i++) {
@@ -1568,7 +1594,30 @@ static void load_opt_set(void) {
     shaderProgramInit(&p->mesh_morph_fa);
     shaderProgramSetVsh(&p->mesh_morph_fa, &g.morph_dvlb[1]->DVLE[0]);
   }
+  g.tmorph_dvlb[0] = DVLB_ParseFile((u32*)ctr_tfrag_morph_shbin, (u32)ctr_tfrag_morph_shbin_size);
+  g.tmorph_dvlb[1] =
+      DVLB_ParseFile((u32*)ctr_tfrag_morph_fa_shbin, (u32)ctr_tfrag_morph_fa_shbin_size);
+  if (g.tmorph_dvlb[0] && g.tmorph_dvlb[1]) {
+    shaderProgramInit(&p->tfrag_morph);
+    shaderProgramSetVsh(&p->tfrag_morph, &g.tmorph_dvlb[0]->DVLE[0]);
+    shaderProgramInit(&p->tfrag_morph_fa);
+    shaderProgramSetVsh(&p->tfrag_morph_fa, &g.tmorph_dvlb[1]->DVLE[0]);
+  }
   prog_set_ulocs(p, 1);
+  if (p->tfrag_morph.vertexShader && p->tfrag_morph_fa.vertexShader) {
+    p->tmorph_ok = 1;
+    const shaderProgram_s* tp[2] = {&p->tfrag_morph, &p->tfrag_morph_fa};
+    p->uloc_tband = shaderInstanceGetUniformLocation(tp[0]->vertexShader, "tband");
+    for (int i = 0; i < 2; i++) {
+      shaderInstance_s* vs = tp[i]->vertexShader;
+      p->tmorph_ok &= p->uloc_tband >= 0 &&
+                      shaderInstanceGetUniformLocation(vs, "tband") == p->uloc_tband &&
+                      shaderInstanceGetUniformLocation(vs, "tscale") == p->uloc_tband + 1 &&
+                      shaderInstanceGetUniformLocation(vs, "clip") == p->uloc_clip &&
+                      shaderInstanceGetUniformLocation(vs, "scales") == p->uloc_scales &&
+                      shaderInstanceGetUniformLocation(vs, "fog1") == p->uloc_fog1;
+    }
+  }
   if (p->mesh_morph.vertexShader && p->mesh_morph_fa.vertexShader) {
     p->morph_ok = 1;
     const shaderProgram_s* mp[2] = {&p->mesh_morph, &p->mesh_morph_fa};
@@ -1852,7 +1901,7 @@ void ctr_gpu_exit(void) {
                      g.env_dvlb,  g.clip_dvlb,  g.clip2_dvlb,   g.ocean_dvlb,
                      g.ocean_full_dvlb, g.ocean_full_clip_dvlb, g.ocean_env_dvlb, g.etie_dvlb,
                      g.wind_dvlb, g.skin_mask_dvlb[0], g.skin_mask_dvlb[1], g.etie_fa_dvlb,
-                     g.morph_dvlb[0], g.morph_dvlb[1]};
+                     g.morph_dvlb[0], g.morph_dvlb[1], g.tmorph_dvlb[0], g.tmorph_dvlb[1]};
   for (size_t i = 0; i < sizeof(dvlbs) / sizeof(dvlbs[0]); i++) {
     if (dvlbs[i]) {
       DVLB_Free(dvlbs[i]);
@@ -7823,6 +7872,9 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
       ctr_gpu_draw_mesh_morph(c->state, c->matrix, c->morph_rows, c->morph_list, c->morph_list_n,
                               c->morph_id, c->mesh, c->morph_offset, c->first_index,
                               c->index_count);
+    } else if (c->tmorph) {
+      ctr_gpu_draw_mesh_tmorph(c->state, c->matrix, c->tmorph, c->morph_id, c->mesh,
+                               c->tmorph_offset, c->first_index, c->index_count);
     } else {
       ctr_gpu_draw_mesh_prepared(c->state, c->matrix, c->mesh, c->first_index, c->index_count);
     }
@@ -8010,6 +8062,109 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
 
 int ctr_gpu_morph_ready(void) {
   return g.ready && s_ps[1].morph_ok;
+}
+
+/* the PS2's tfrag geomorph (see ctr_gpu.h): ctr_gpu_draw_mesh_morph's paths with the tfrag morph
+ * program, the records' buffer (4 attributes) and its two uniforms, sent when they change. Without
+ * the program: at rest. */
+void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                              const float* unif, uint32_t unif_id, int mesh, int tail_offset,
+                              int first_index, int index_count) {
+  if (!g.ready || !g.in_frame || !g.ps->tmorph_ok || !unif || !unif_id || tail_offset < 0 ||
+      (tail_offset & 15) || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+    ctr_gpu_draw_mesh_prepared(state, matrix, mesh, first_index, index_count);
+    return;
+  }
+  SKY_HOOK(state);
+  if (index_count < 3 || !cmd_room()) {
+    return;
+  }
+  const int fa = g.ps->fa_ok && (state->tcc & CTR_TCC_ALPHA80) &&
+                 (g_fog_alpha || tex_mask(tex_res(state->tex)) >= 0);
+  use_program(fa ? PROG_TFRAG_MORPH_FA : PROG_TFRAG_MORPH);
+  {
+    const int atlas = (state->tcc & CTR_TCC_ST_ATLAS) ? 1 : 0;
+    if (atlas != g.mesh_st_atlas) {
+      g.mesh_st_atlas = atlas;
+      mesh_scales_set(atlas, use_raw(state));
+    }
+  }
+  const MeshSlot* ms = &g.meshes[mesh];
+  const int mesh_mode = fa ? 5 : (g.mesh_nofog ? 4 : 1);
+  g.cur.nofog_draws += g.mesh_nofog && !fa;
+  g.cur.fog_alpha_draws += fa;
+  if (use_raw(state)) {
+    apply_state(state, mesh_mode, 1);
+    const u32 rec_pa = ms->verts_pa + (u32)tail_offset;
+    if (!ms->col_off) {
+      const u32 w[2][3] = {{ms->verts_pa, 0x210, RAW_BUF_FLAGS1(16, 3, 0)},
+                           {rec_pa, 0x6543, RAW_BUF_FLAGS1(16, 4, 0)}};
+      raw_vertex_buffers_n(2, w);
+    } else {
+      const u32 w[3][3] = {{ms->verts_pa, 0x10, RAW_BUF_FLAGS1(12, 2, 0)},
+                           {ms->verts_pa + ms->col_off, 0x2, RAW_BUF_FLAGS1(4, 1, 0)},
+                           {rec_pa, 0x6543, RAW_BUF_FLAGS1(16, 4, 0)}};
+      raw_vertex_buffers_n(3, w);
+    }
+    raw_sync();
+    if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+      g.last_clip_id = matrix->id;
+      ctr_mesh_matrix* mm = (ctr_mesh_matrix*)matrix;
+      if (mm->fog_gen != g.fog_gen) {
+        float fr[8];
+        mesh_fog_rows(matrix->m, fr);
+        raw_pack_f24(fr, mm->f24 + 12);
+        raw_pack_f24(fr + 4, mm->f24 + 15);
+        mm->fog_gen = g.fog_gen;
+      }
+      raw_end(raw_unif(raw_ptr(), g.ps->uloc_clip, matrix->f24, 18, 0));
+      g.last_mesh_valid = 1;
+    }
+    if (g.tmorph_unif_id != unif_id) {
+      g.tmorph_unif_id = unif_id;
+      u32 v[8]; /* w z y x, per vector */
+      for (int k = 0; k < 8; k++) {
+        memcpy(&v[k], &unif[(k & ~3) + 3 - (k & 3)], 4);
+      }
+      raw_end(raw_unif(raw_ptr(), g.ps->uloc_tband, v, 8, 1));
+    }
+    raw_draw_elements(ms->indices_pa + 2u * (u32)first_index, (u32)index_count);
+    g.cur.draws++;
+    g.cur.triangles += index_count / 3;
+    return;
+  }
+  if (!g.last_mesh_valid || g.last_clip_id != matrix->id) {
+    g.last_clip_id = matrix->id;
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, g.ps->uloc_clip, (const C3D_Mtx*)matrix->m);
+    float r[8];
+    mesh_fog_rows(matrix->m, r);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 4, r[3], r[2], r[1], r[0]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_clip + 5, r[7], r[6], r[5], r[4]);
+  }
+  g.last_mesh_valid = 1;
+  if (g.tmorph_unif_id != unif_id) {
+    g.tmorph_unif_id = unif_id;
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_tband, unif[0], unif[1], unif[2], unif[3]);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, g.ps->uloc_tband + 1, unif[4], unif[5], unif[6], unif[7]);
+  }
+  raw_note_unif();
+  {
+    /* each buffer's attributes add up to its stride (j1hang: the real GPU hangs else) */
+    C3D_BufInfo* buf = C3D_GetBufInfo();
+    BufInfo_Init(buf);
+    if (ms->col_off) {
+      BufInfo_Add(buf, ms->verts, 12, 2, 0x10);
+      BufInfo_Add(buf, (const u8*)ms->verts + ms->col_off, 4, 1, 0x2);
+    } else {
+      BufInfo_Add(buf, ms->verts, 16, 3, 0x210);
+    }
+    BufInfo_Add(buf, (const u8*)ms->verts + tail_offset, 16, 4, 0x6543);
+  }
+  apply_state(state, mesh_mode, 0);
+  C3D_DrawElements(GPU_TRIANGLES, index_count, C3D_UNSIGNED_SHORT, ms->indices + first_index);
+  BufInfo_Init(C3D_GetBufInfo());
+  g.cur.draws++;
+  g.cur.triangles += index_count / 3;
 }
 
 /* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call */

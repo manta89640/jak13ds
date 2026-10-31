@@ -1,0 +1,10 @@
+# tfraglod.pad's title flight and village2 views only (the render thread's phases there)
+0 wait *target* target-title-wait
+1200 log view-begin title
+2310 log view-end title
+2320 continue village2-start
+2321 wait *target* target-continue
+2322 wait *target* target-stance
+2620 log view-begin village2
+2980 log view-end village2
+2990 exit

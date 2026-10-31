@@ -709,6 +709,10 @@ typedef struct {
   const uint8_t* morph_list;
   int morph_list_n, morph_offset;
   uint32_t morph_id;
+  /* tmorph: a ctr_gpu_draw_mesh_tmorph draw (its uniforms, morph_id their id, its tail at
+   * tmorph_offset); NULL: none */
+  const float* tmorph;
+  int tmorph_offset;
 } ctr_mesh_call;
 void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n);
 /* Jak 1's wind ties (c3l::ExtWind): a level mesh draw (as ctr_gpu_draw_mesh_prepared) whose
@@ -736,6 +740,15 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
                              int mesh, int morph_offset, int first_index, int index_count);
 /* 1 when the morph program can be loaded (ctr_gpu_draw_mesh_morph moves the vertices) */
 int ctr_gpu_morph_ready(void);
+/* The PS2's tfrag geomorph (c3l::ExtTfrag): a level mesh draw whose vertices move by their own clip
+ * w, platform/3ds/shaders/ctr_tfrag_morph.v.pica. The mesh holds from byte tail_offset (a multiple
+ * of 16) a c3l::TfragMorphVertex per vertex (16 bytes). unif: f0 = clamp(w * unif[0] + unif[2],
+ * 0, 1), f1 = clamp(w * unif[1] + unif[3], 0, 1), unif[4] the records' delta_scale: the vertex is
+ * at pos + (f0 * band0 + f1 * band1) * unif[4], its rgb c + f1 * color1 * (m - c) + f0 * color0 *
+ * (t - m). unif_id: new whenever unif changes. Without the program it is drawn at rest. */
+void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                              const float* unif, uint32_t unif_id, int mesh, int tail_offset,
+                              int first_index, int index_count);
 /* (AI-assisted, micro-gpu) the gpu_micro statistics line since the last call ([ctr] gpu micro ...);
  * 0: nothing to say */
 int ctr_gpu_micro_line(char* out, int size);

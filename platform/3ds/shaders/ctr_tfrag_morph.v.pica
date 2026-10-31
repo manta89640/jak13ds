@@ -1,0 +1,62 @@
+; The PS2's tfrag geomorph (c3l::ExtTfrag, ctr_gpu_draw_mesh_tmorph): ctr_mesh_opt.v.pica with each
+; vertex moved first by its own clip w, as the PS2's VU moves its interpolated points by theirs:
+; f0 = clamp(w * tband.x + tband.z), f1 = clamp(w * tband.y + tband.w), pos + (f0 * band0 + f1 *
+; band1) * tscale.x, rgb c + f1 * color1 * (m - c) + f0 * color0 * (t - m) (another attribute
+; buffer: c3l::TfragMorphVertex). The uniforms before tband are ctr_mesh_opt's, at the same places.
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[6]       ; as ctr_mesh_opt.v.pica
+.fvec scales
+.fvec fog1
+.fvec tband         ; x, y: band 0 / 1 per unit of clip w; z, w: their offsets
+.fvec tscale        ; x: the records' delta_scale
+
+.constf tconst(0.0, 1.0, 0.0, 0.0)
+
+.out outpos position
+.out outtc texcoord0.xy
+.out - texcoord1 outtc.zw
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+.alias inb0 v3      ; xyz: band 0 offset, w: 1 when the color moves in band 0
+.alias inb1 v4      ; xyz: band 1 offset, w: 1 when the color moves in band 1
+.alias inm v5       ; the color at the end of band 1
+.alias intc v6      ; the color at the end of band 0
+
+.entry main_ctr_tfrag_morph
+.proc main_ctr_tfrag_morph
+  ; the factors from the unmoved vertex's clip w
+  dph r0.w, inpos, clip[3]
+  mul r1.xy, tband.xyyy, r0.wwww
+  add r1.xy, tband.zwww, r1.xyyy
+  max r1.xy, tconst.xxxx, r1.xyyy
+  min r1.xy, tconst.yyyy, r1.xyyy
+  mul r2.x, inb0.wwww, r1.xxxx
+  mul r2.y, inb1.wwww, r1.yyyy
+  mul r1.xy, tscale.xxxx, r1.xyyy
+  mul r3.xyz, r1.xxxx, inb0.xyzz
+  mad r3.xyz, r1.yyyy, inb1.xyzz, r3.xyzz
+  add r3.xyz, inpos.xyzz, r3.xyzz
+  ; from here ctr_mesh_opt on the moved position r3 (dph reads its xyz)
+  dph r0.x, r3, clip[5]
+  dph r0.y, r3, clip[4]
+  dph outpos.x, r3, clip[0]
+  dph outpos.y, r3, clip[1]
+  max r0.xy, fog1.xyxy, r0.xyxy
+  dph outpos.z, r3, clip[2]
+  mul outtc.xy, scales.xxxx, intex.xyyy
+  max outtc.zw, -r0.xxxx, r0.yyyy
+  dph outpos.w, r3, clip[3]
+  ; the color: c + f1 * (m - c) + f0 * (t - m)
+  mov r4.xyz, inm.xyzz
+  add r5.xyz, -inclr.xyzz, r4.xyzz
+  mad r5.xyz, r2.yyyy, r5.xyzz, inclr.xyzz
+  add r6.xyz, intc.xyzz, -r4.xyzz
+  mad r5.xyz, r2.xxxx, r6.xyzz, r5.xyzz
+  mul outclr.xyz, scales.yyyy, r5.xyzz
+  mul outclr.w, scales.yyyy, inclr.wwww
+  end
+.end

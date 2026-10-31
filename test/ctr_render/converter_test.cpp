@@ -276,6 +276,48 @@ void test_alpha_mask(bool four_bit) {
 }
 }  // namespace
 
+// the tfrag geomorph's versions (c3l::ExtTfrag): a version the same as the one before it left out
+void test_tfrag_versions() {
+  float d[3];
+  tfrag_lod::subdivide_dists(0, 0, d);
+  check(std::abs(d[0] / 4096.f - 38.5714f) < 0.01f && d[1] == 50.f * 4096.f &&
+            d[2] == 70.f * 4096.f,
+        "the default subdivide distances are 38.6 / 50 / 70 m");
+  Converter cv;
+  for (int i = 0; i < 4; i++) {
+    SrcVertex v;
+    v.x = (float)(i & 1);
+    v.y = (float)(i >> 1);
+    v.z = 0;
+    cv.verts.push_back(v);
+  }
+  auto tri = [&](u32 g, u8 lod, u32 c) {
+    SrcTri t{{0, 1, c}, 0};
+    t.tgroup = g;
+    t.tlod = lod;
+    cv.tris.push_back(t);
+  };
+  // group 0: three versions the same; 1: mid = far; 2: near = mid; 3: all different
+  for (u32 g = 0; g < 4; g++) {
+    cv.tgroup_of[g] = g;
+  }
+  tri(0, c3l::kRunLodNear, 2), tri(0, c3l::kRunLodMid, 2), tri(0, c3l::kRunLodFar, 2);
+  tri(1, c3l::kRunLodNear, 2), tri(1, c3l::kRunLodMid, 3), tri(1, c3l::kRunLodFar, 3);
+  tri(2, c3l::kRunLodNear, 2), tri(2, c3l::kRunLodMid, 2), tri(2, c3l::kRunLodFar, 3);
+  tri(3, c3l::kRunLodNear, 2), tri(3, c3l::kRunLodMid, 3), tri(3, c3l::kRunLodFar, 1);
+  cv.tfrag_drop_same_versions(0, 50.f, 70.f);
+  std::map<u32, std::vector<u8>> lods;
+  for (const auto& t : cv.tris) {
+    lods[t.tgroup].push_back(t.tlod);
+  }
+  check(lods[0] == std::vector<u8>{c3l::kRunLodAlways}, "one geometry: always drawn");
+  check(lods[1].size() == 2 && cv.tgroup_far[1] == std::numeric_limits<float>::max(),
+        "mid = far: no far version");
+  check(lods[2].size() == 2 && cv.tgroup_mid[2] == 70.f, "near = mid: near until the far one");
+  check(lods[3].size() == 3 && cv.tgroup_mid[3] == 50.f && cv.tgroup_far[3] == 70.f,
+        "three versions");
+}
+
 int main() {
   try {
     lg::initialize();
@@ -288,6 +330,7 @@ int main() {
     }
     test_alpha_mask(false);
     test_alpha_mask(true);
+    test_tfrag_versions();
     run_vram_tests();
     run_citadel_tests();
     fmt::print("3DS rendering regressions passed (CPU only).\n");

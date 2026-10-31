@@ -1,0 +1,55 @@
+; ctr_tfrag_morph.v.pica with the fog in the color's alpha (ctr_mesh_opt_fa.v.pica's outputs): the
+; draws whose vertices all have alpha 0x80, and the alpha mask textures (c3l v23) on unit 1.
+; Every output component is written exactly once (platform/3ds/tools/check_shaders.py).
+
+.fvec clip[6]       ; as ctr_mesh_opt.v.pica
+.fvec scales
+.fvec fog1
+.fvec tband
+.fvec tscale
+
+.constf tconst(0.0, 1.0, 0.0, 0.0)
+
+.out outpos position
+.out outtc0 texcoord0.xy
+.out - texcoord1 outtc0.zw
+.out outclr color
+
+.alias inpos v0
+.alias intex v1
+.alias inclr v2
+.alias inb0 v3
+.alias inb1 v4
+.alias inm v5
+.alias intc v6
+
+.entry main_ctr_tfrag_morph_fa
+.proc main_ctr_tfrag_morph_fa
+  dph r0.w, inpos, clip[3]
+  mul r1.xy, tband.xyyy, r0.wwww
+  add r1.xy, tband.zwww, r1.xyyy
+  max r1.xy, tconst.xxxx, r1.xyyy
+  min r1.xy, tconst.yyyy, r1.xyyy
+  mul r2.x, inb0.wwww, r1.xxxx
+  mul r2.y, inb1.wwww, r1.yyyy
+  mul r1.xy, tscale.xxxx, r1.xyyy
+  mul r3.xyz, r1.xxxx, inb0.xyzz
+  mad r3.xyz, r1.yyyy, inb1.xyzz, r3.xyzz
+  add r3.xyz, inpos.xyzz, r3.xyzz
+  dph r0.x, r3, clip[5]
+  dph r0.y, r3, clip[4]
+  dph outpos.x, r3, clip[0]
+  dph outpos.y, r3, clip[1]
+  max r0.xy, fog1.xyxy, r0.xyxy
+  dph outpos.z, r3, clip[2]
+  mul outtc0, scales.xxxx, intex.xyxy
+  dph outpos.w, r3, clip[3]
+  mov r4.xyz, inm.xyzz
+  add r5.xyz, -inclr.xyzz, r4.xyzz
+  mad r5.xyz, r2.yyyy, r5.xyzz, inclr.xyzz
+  add r6.xyz, intc.xyzz, -r4.xyzz
+  mad r5.xyz, r2.xxxx, r6.xyzz, r5.xyzz
+  mul outclr.xyz, scales.yyyy, r5.xyzz
+  max outclr.w, -r0.xxxx, r0.yyyy
+  end
+.end

@@ -515,9 +515,31 @@ struct CtrLevelData {
   int normals_mesh = -1;
   //! where chunk ci's normals are in its mesh (bytes from its vertices)
   u32 normals_offset_in_mesh(size_t ci) const;
+  // the PS2's tfrag geomorph (c3l::ExtTfrag): the near tier's groups (their version this frame in
+  // tf_state, as lod_state: bit 0 near or mid, bit 3 mid), per chunk its TfragChunk (-1: none),
+  // the color lists; per time of day group the version its morph colors were made at
+  std::vector<c3l::TfragGroup> tf_groups;
+  std::vector<u8> tf_state;
+  std::vector<c3l::TfragChunk> tf_chunks;
+  std::vector<s32> chunk_tf;
+  std::vector<c3l::TfragMorphColor> tf_colors;
+  float tf_dists[3] = {0, 0, 0};
+  std::vector<u32> tf_color_ver;
+  std::vector<u16> tf_color_mask;  // per time of day group: the palettes of its morph colors
+  std::vector<int> tf_mesh;       // per chunk: the mesh its morph colors were made in
+  // per group its near chunks (stream_units holding its near or mid version) and the frame it was
+  // first held coarser in view for want of them
+  std::vector<u32> tf_unit_first, tf_unit_count, tf_units, tf_hold_since;
+  bool tf_morph(size_t ci) const {
+    return ci < chunk_tf.size() && chunk_tf[ci] >= 0 && tf_chunks[chunk_tf[ci]].records_offset;
+  }
   //! the bytes of chunk ci's mesh tail per vertex (0: none): its envmapped tie normals, or its
-  //! c3l::MorphVertex records (the tie geomorph), at normals_offset_in_mesh
+  //! c3l::MorphVertex records (the tie geomorph), or its c3l::TfragMorphVertex records (the tfrag
+  //! geomorph), at normals_offset_in_mesh
   u32 tail_k(size_t ci) const {
+    if (tf_morph(ci)) {
+      return (u32)sizeof(c3l::TfragMorphVertex);
+    }
     if (ci < chunk_morph.size() && chunk_morph[ci] >= 0) {
       return (u32)sizeof(c3l::MorphVertex) + (morph_normals(ci) ? 4 : 0);
     }
@@ -532,6 +554,9 @@ struct CtrLevelData {
   u32 normals_tail_bytes(size_t ci) const { return chunks[ci].vertex_count * tail_k(ci); }
   //! the file offset of chunk ci's tail (0: none)
   u32 tail_file(size_t ci) const {
+    if (tf_morph(ci)) {
+      return tf_chunks[chunk_tf[ci]].records_offset;
+    }
     if (ci < chunk_morph.size() && chunk_morph[ci] >= 0) {
       return morph_chunks[chunk_morph[ci]].records_offset;
     }
@@ -1298,10 +1323,21 @@ class CtrTfragRenderer : public CtrBucketRenderer {
     bool faded;   // shrub runs in their fade zone (m_run_fade)
     bool vista;   // (AI-assisted) far scenery: drawn first, with the vista fog (lowres_vista)
     bool nofog;   // (AI-assisted) in front of where both fogs start (fog_stage_skip)
+    bool tmorph;  // the tfrag geomorph: near or mid versions shown (the morph program)
     float clip[16];
     ctr_mesh_matrix gpu;  // clip, converted for the GPU once per frame
   };
   std::vector<VisibleChunk> m_visible;
+  // the tfrag geomorph (c3l::ExtTfrag): this level draw's bands in clip w (f0 = clamp(w * x + z),
+  // f1 = clamp(w * y + w)); per visible chunk its morph uniforms (the bands, delta_scale) and their
+  // id; the groups near / mid / far (statistics)
+  float m_tf_band[4] = {0, 0, 0, 0};
+  std::vector<float> m_tf_unif;
+  std::vector<u32> m_tf_unif_id;
+  u32 m_tf_unif_ids = 0;
+  u64 m_tf_groups[3] = {0, 0, 0};
+  u64 m_tf_tris[2] = {0, 0};
+  u64 m_tf_colors_written = 0, m_tf_frames = 0;
   std::vector<int> m_visible_slot;  // per chunk: index in m_visible, -1: not drawn
   // (AI-assisted) with vista chunks: the visible draws of early_draws, sorted_draws and
   // ordered_draws split in one walk, in list order: the vista pass's, and the main pass's lists

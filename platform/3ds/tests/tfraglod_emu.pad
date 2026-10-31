@@ -1,0 +1,14 @@
+# The PS2's tfrag geomorph on the 3DS (Azahar): the title flight, then Fire Canyon and village2
+# (shots on the way; the [ctr] tfrag geomorph and streaming lines in the log).
+0 wait *target* target-title-wait
+600 shot tfraglod_emu_title_600
+1200 shot tfraglod_emu_title_1200
+1500 continue firecanyon-start
+1501 wait *target* target-continue
+1502 wait *target* target-stance
+1800 shot tfraglod_emu_firecanyon
+2100 continue village2-start
+2101 wait *target* target-continue
+2102 wait *target* target-stance
+2400 shot tfraglod_emu_village2
+2700 exit

@@ -2441,6 +2441,48 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
 int ctr_gpu_morph_ready(void) {
   return 1;
 }
+// the PS2's tfrag geomorph: the mesh's vertices moved and recolored as ctr_tfrag_morph.v.pica does
+// (the positions rounded to the quantized units)
+void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
+                              const float* unif, uint32_t, int mesh, int tail_offset,
+                              int first_index, int index_count) {
+  sky_hook(state);
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used || !unif ||
+      tail_offset < 0 || (size_t)tail_offset > g_soft.meshes[mesh].verts.size()) {
+    return;
+  }
+  softstats::prog(1);
+  const auto& m = g_soft.meshes[mesh];
+  static std::vector<uint8_t> moved;
+  moved = m.verts;
+  const SoftVerts sv = soft_verts(moved.data(), m.col_off);
+  const size_t n = m.vertex_bytes() / 16;
+  const float* clip = matrix->m;
+  for (size_t v = 0; v < n && (size_t)tail_offset + 16 * v + 16 <= m.verts.size(); v++) {
+    const int8_t* rec = (const int8_t*)&m.verts[tail_offset + 16 * v];
+    const uint8_t* cm = (const uint8_t*)rec + 8;
+    const uint8_t* ct = (const uint8_t*)rec + 12;
+    int16_t pos[3];
+    uint8_t* const at = (uint8_t*)sv.p((int)v);
+    memcpy(pos, at, sizeof(pos));
+    const float w = clip[12] * pos[0] + clip[13] * pos[1] + clip[14] * pos[2] + clip[15];
+    const float f0 = std::clamp(w * unif[0] + unif[2], 0.f, 1.f);
+    const float f1 = std::clamp(w * unif[1] + unif[3], 0.f, 1.f);
+    for (int c = 0; c < 3; c++) {
+      pos[c] = (int16_t)std::clamp(
+          (int)std::lround(pos[c] + (f0 * rec[c] + f1 * rec[4 + c]) * unif[4]), -32768, 32767);
+    }
+    memcpy(at, pos, sizeof(pos));
+    uint8_t* const col = (uint8_t*)sv.c((int)v);
+    const float g0 = f0 * rec[3], g1 = f1 * rec[7];
+    for (int c = 0; c < 3; c++) {
+      const float x = col[c] + g1 * (cm[c] - col[c]) + g0 * (ct[c] - cm[c]);
+      col[c] = (uint8_t)std::clamp((int)std::lround(x), 0, 255);
+    }
+  }
+  g_soft_cur_mesh = mesh;
+  soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
+}
 
 int ctr_gpu_skinned_mesh_create(const void* verts,
                                 int vertex_count,
@@ -2753,6 +2795,9 @@ void ctr_gpu_draw_mesh_calls(const ctr_mesh_call* calls, int n) {
     if (c.morph_rows) {
       ctr_gpu_draw_mesh_morph(c.state, c.matrix, c.morph_rows, c.morph_list, c.morph_list_n,
                               c.morph_id, c.mesh, c.morph_offset, c.first_index, c.index_count);
+    } else if (c.tmorph) {
+      ctr_gpu_draw_mesh_tmorph(c.state, c.matrix, c.tmorph, c.morph_id, c.mesh, c.tmorph_offset,
+                               c.first_index, c.index_count);
     } else {
       ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
     }

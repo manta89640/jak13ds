@@ -1,0 +1,42 @@
+# The PS2's tfrag geomorph (c3l::ExtTfrag): the title flight, Fire Canyon, village2, Lava Tube and
+# Citadel. Each view: a "view" window (the [softstats] lines in it) and pairs of shots on
+# consecutive frames (with CTR_TFRAG_AB=1 the odd one has every group's near version).
+# Host: CTR_SOFT_STATS=60 gk --ctr-gfx --ctr-dump DIR ...
+0 wait *target* target-title-wait
+1200 log view-begin title
+1300 shot tfraglod_title_1300
+1301 shot tfraglod_title_1301
+1800 shot tfraglod_title_1800
+1801 shot tfraglod_title_1801
+2300 shot tfraglod_title_2300
+2301 shot tfraglod_title_2301
+2310 log view-end title
+2320 continue firecanyon-start
+2321 wait *target* target-continue
+2322 wait *target* target-stance
+2620 log view-begin firecanyon
+2980 shot tfraglod_firecanyon_a
+2981 shot tfraglod_firecanyon_b
+2982 log view-end firecanyon
+2990 continue village2-start
+2991 wait *target* target-continue
+2992 wait *target* target-stance
+3290 log view-begin village2
+3650 shot tfraglod_village2_a
+3651 shot tfraglod_village2_b
+3652 log view-end village2
+3660 continue lavatube-start
+3661 wait *target* target-continue
+3662 wait *target* target-stance
+3960 log view-begin lavatube
+4320 shot tfraglod_lavatube_a
+4321 shot tfraglod_lavatube_b
+4322 log view-end lavatube
+4330 continue citadel-start
+4331 wait *target* target-continue
+4332 wait *target* target-stance
+4630 log view-begin citadel
+4990 shot tfraglod_citadel_a
+4991 shot tfraglod_citadel_b
+4992 log view-end citadel
+5000 exit

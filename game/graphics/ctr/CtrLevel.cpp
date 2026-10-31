@@ -223,7 +223,8 @@ LevelMem level_mem(const CtrLevelData& lev) {
     }
     const auto& ch = lev.chunks[ci];
     const u64 b = CtrStreamArena::mesh_bytes(ch.vertex_count,
-                                             lev.mesh_index_end[ci] - lev.mesh_index_first[ci]);
+                                             lev.mesh_index_end[ci] - lev.mesh_index_first[ci]) +
+                  (lev.tf_morph(ci) ? lev.normals_tail_bytes(ci) : 0);
     bool hideable = ch.vis_run_count > 0 && !lev.vis_runs.empty();
     for (u32 r = 0; hideable && r < ch.vis_run_count; r++) {
       hideable = lev.vis_runs[lev.chunk_first_run[ci] + r].vis != 0xffff;
@@ -262,7 +263,10 @@ LevelMem level_mem(const CtrLevelData& lev) {
             vec_bytes(lev.draw_first_run) + vec_bytes(lev.draw_run_count) +
             vec_bytes(lev.run_spheres) + vec_bytes(lev.chunk_run_count) +
             vec_bytes(lev.lod_groups) + vec_bytes(lev.run_lod) + vec_bytes(lev.chunk_lod) +
-            vec_bytes(lev.lod_state) + vec_bytes(lev.lod_error) + vec_bytes(lev.textures) +
+            vec_bytes(lev.lod_state) + vec_bytes(lev.lod_error) + vec_bytes(lev.tf_groups) +
+            vec_bytes(lev.tf_state) + vec_bytes(lev.tf_chunks) + vec_bytes(lev.chunk_tf) +
+            vec_bytes(lev.tf_colors) + vec_bytes(lev.tf_color_ver) + vec_bytes(lev.tf_color_mask) +
+            vec_bytes(lev.textures) +
             vec_bytes(lev.tex_min_alpha) + vec_bytes(lev.meshes) + vec_bytes(lev.blerc_verts) +
             vec_bytes(lev.blerc_targets) + vec_bytes(lev.blerc_dests) +
             vec_bytes(lev.outside_cache) + vec_bytes(lev.mesh_index_first) +
@@ -3744,6 +3748,124 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
   return looked;
 }
 
+// The PS2's tfrag geomorph's colors (c3l::ExtTfrag): the morph vertices' m and t (the means of
+// their TfragMorphColor entries' blended colors) in chunk ci's mesh tail, for its time of day
+// groups with near or mid runs shown, when a palette of those entries moved since they were made.
+// Returns the vertices written.
+u32 tf_morph_colors(CtrLevelData& lev, size_t ci, const u8* shown) {
+  auto& t = *lev.tod;
+  const int mesh = ci < lev.meshes.size() ? lev.meshes[ci] : -1;
+  if (mesh < 0 || !t.blended_valid || !lev.tf_morph(ci) || ci >= t.chunk_group_first.size()) {
+    return 0;
+  }
+  int n = 0;
+  u8* const base = (u8*)ctr_gpu_mesh_vertices_inplace(mesh, &n);
+  if (!base || (u32)n != lev.chunks[ci].vertex_count) {
+    return 0;
+  }
+  const auto& tc = lev.tf_chunks[lev.chunk_tf[ci]];
+  const u32 g0 = t.chunk_group_first[ci], ng = t.chunk_group_count[ci];
+  if (lev.tf_color_ver.size() != t.groups.size()) {
+    lev.tf_color_ver.assign(t.groups.size(), 0);
+    lev.tf_color_mask.assign(t.groups.size(), 0);
+    lev.tf_mesh.assign(lev.chunks.size(), -1);
+  }
+  if (lev.tf_mesh[ci] != mesh) {
+    lev.tf_mesh[ci] = mesh;
+    for (u32 g = g0; g < g0 + ng; g++) {
+      lev.tf_color_ver[g] = 0;
+    }
+  }
+  static std::vector<u8> need;  // (render thread)
+  need.assign(ng, shown ? 0 : 1);
+  const u32 r0 = lev.chunk_first_run[ci], nr = lev.chunks[ci].vis_run_count;
+  if (shown && r0 + nr <= t.run_group.size()) {
+    // (a group entirely nearer than band 1's start: nothing moves, its colors made when it is)
+    for (u32 r = 0; r < nr; r++) {
+      const auto& rl = lev.run_lod[r0 + r];
+      if (shown[r] && (rl.lod == c3l::kRunLodNear || rl.lod == c3l::kRunLodMid) &&
+          t.run_group[r0 + r] < ng && rl.group < lev.tf_state.size() &&
+          (lev.tf_state[rl.group] & 32)) {
+        need[t.run_group[r0 + r]] = 1;
+      }
+    }
+  } else {
+    need.assign(ng, 1);
+  }
+  u8* const tail = base + lev.normals_offset_in_mesh(ci);
+  c3l::TfragMorphColor* const mc = lev.tf_colors.data() + tc.color_first;
+  const u32 nm = tc.color_count;
+  // the mean of two rgba words, byte by byte (rounded down)
+  auto avg = [](u32 a, u32 b) { return (a & b) + (((a ^ b) & 0xfefefefeu) >> 1); };
+  const u32 nt = (u32)t.table.size();
+  u32 written = 0, lo = UINT32_MAX, hi = 0;
+  for (u32 g = 0; g < ng; g++) {
+    if (!need[g]) {
+      continue;
+    }
+    const auto& gr = t.groups[g0 + g];
+    c3l::TfragMorphColor* it = std::lower_bound(
+        mc, mc + nm, gr.lo, [](const c3l::TfragMorphColor& a, u32 v) { return a.vertex < v; });
+    c3l::TfragMorphColor* const end = std::upper_bound(
+        it, mc + nm, gr.hi, [](u32 v, const c3l::TfragMorphColor& a) { return v < a.vertex; });
+    if (it == end) {
+      continue;
+    }
+    u16& mask = lev.tf_color_mask[g0 + g];
+    if (!mask) {
+      // the palettes its entries use (bit 8: made), each vertex's in its pad
+      u32 m = 0x100;
+      for (auto* x = it; x < end; x++) {
+        u32 vm = 0;
+        for (u16 e : {x->m[0], x->m[1], x->t[0], x->t[1], x->t[2], x->t[3]}) {
+          vm |= e < t.color_mask.size() ? t.color_mask[e] : 0xff;
+        }
+        x->pad = (u16)vm;
+        m |= vm;
+      }
+      mask = (u16)m;
+    }
+    u32& ver = lev.tf_color_ver[g0 + g];
+    if (ver && ver >= t.lut[mask & 0xff]) {
+      continue;
+    }
+    // the palettes that moved since its colors were made: only the vertices with a color of
+    // theirs (a lamp's flicker moves a few)
+    u32 moved = 0xff;
+    if (ver) {
+      moved = 0;
+      for (u32 pm = mask & 0xff; pm; pm &= pm - 1) {
+        const int pi = __builtin_ctz(pm);
+        moved |= t.pal_ver[pi] > ver ? 1u << pi : 0;
+      }
+    }
+    ver = std::max<u32>(t.ver, 1);
+    for (const auto* x = it; x < end; x++) {
+      if (!(x->pad & moved)) {
+        continue;
+      }
+      auto e = [&](u16 i) { return i < nt ? tod_entry(t, i) : 0u; };
+      // (a level0 point's m is its own color, its t the mean of two)
+      const u32 a = e(x->m[0]);
+      const u32 m = x->m[1] == x->m[0] ? a : avg(a, e(x->m[1]));
+      const u32 t0 = e(x->t[0]);
+      const u32 t1 = x->t[1] == x->t[0] ? t0 : avg(t0, e(x->t[1]));
+      const u32 t2 = e(x->t[2]);
+      const u32 t3 = x->t[3] == x->t[2] ? t2 : avg(t2, e(x->t[3]));
+      tod_word* const r = (tod_word*)(tail + 16u * x->vertex);
+      r[2] = m;
+      r[3] = avg(t1, t3);
+      lo = std::min<u32>(lo, x->vertex);
+      hi = std::max<u32>(hi, x->vertex);
+      written++;
+    }
+  }
+  if (written) {
+    tod_dirty().emplace_back((uintptr_t)(tail + 16u * lo), (uintptr_t)(tail + 16u * (hi + 1)));
+  }
+  return written;
+}
+
 // After a level draw's tod_recolor calls: the rewritten vertices' cache flushes (the ranges sorted
 // and merged where less than 64 KB apart: a few ctr_gpu_flush_range per frame rather than one per
 // chunk, see ctr_gpu_citro3d.c DEFER_GAP2).
@@ -4624,8 +4746,10 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
     return;
   }
   c3l::ExtMorph em{};
-  bool ok = f.read(hdr.ext_offset + c3l::kExtHeaderV24Size, &em, sizeof(em)) && em.chunk_count &&
-            f.read_array(em.insts_offset, em.inst_count, &lev->morph_insts) &&
+  if (!f.read(hdr.ext_offset + c3l::kExtHeaderV24Size, &em, sizeof(em)) || !em.chunk_count) {
+    return;  // (a file with the tfrag geomorph only)
+  }
+  bool ok = f.read_array(em.insts_offset, em.inst_count, &lev->morph_insts) &&
             f.read_array(em.chunks_offset, em.chunk_count, &lev->morph_chunks) &&
             f.read_array(em.rows_offset, em.row_count, &lev->morph_rows) &&
             f.read_array(em.draw_rows_offset, em.draw_rows_size, &lev->morph_draw_rows) &&
@@ -4676,6 +4800,110 @@ void load_morph(c3l::Reader& f, const c3l::Header& hdr, CtrLevelData* lev) {
   }
   lg::info("[ctr] {}: tie geomorph: {} groups, {} instances, {} near chunks with moving vertices",
            lev->name, groups, lev->morph_insts.size(), lev->morph_chunks.size());
+}
+
+// the PS2's tfrag geomorph (c3l::ExtTfrag), before the meshes: their tails (the TfragMorphVertex
+// records), the runs' versions. Without it the near tier draws every version of its groups
+void load_tfrag_lod(c3l::Reader& f, const c3l::Header& hdr, size_t file_runs, CtrLevelData* lev) {
+  lev->tf_groups.clear();
+  lev->tf_state.clear();
+  lev->tf_chunks.clear();
+  lev->chunk_tf.clear();
+  lev->tf_colors.clear();
+  lev->tf_color_ver.clear();
+  lev->tf_color_mask.clear();
+  c3l::ExtHeader eh;
+  if (!hdr.ext_offset || !read_ext_header(f, hdr, &eh) || eh.size < c3l::kExtHeaderTfragSize) {
+    return;
+  }
+  c3l::ExtTfrag et{};
+  std::vector<c3l::RunLod> rl;
+  bool ok = f.read(hdr.ext_offset + c3l::kExtHeaderMorphSize, &et, sizeof(et)) && et.chunk_count &&
+            f.read_array(et.groups_offset, et.group_count, &lev->tf_groups) &&
+            f.read_array(et.chunks_offset, et.chunk_count, &lev->tf_chunks) &&
+            f.read_array(et.run_lod_offset, et.run_lod_count, &rl) &&
+            f.read_array(et.colors_offset, et.color_count, &lev->tf_colors) &&
+            et.dists[0] > 0 && et.dists[1] > et.dists[0] && et.dists[2] > et.dists[1];
+  if (!et.chunk_count) {
+    return;
+  }
+  lev->chunk_tf.assign(lev->chunks.size(), -1);
+  if (lev->run_lod.size() < lev->vis_runs.size()) {
+    lev->run_lod.assign(lev->vis_runs.size(), c3l::RunLod{0xffff, c3l::kRunLodAlways, 0});
+  }
+  if (lev->chunk_lod.size() != lev->chunks.size()) {
+    lev->chunk_lod.assign(lev->chunks.size(), 0);
+  }
+  for (size_t i = 0; ok && i < lev->tf_chunks.size(); i++) {
+    const auto& tc = lev->tf_chunks[i];
+    ok = tc.chunk < lev->chunks.size() && lev->chunk_tf[tc.chunk] < 0 &&
+         !(tc.chunk < lev->chunk_normals.size() && lev->chunk_normals[tc.chunk] >= 0) &&
+         !(tc.chunk < lev->chunk_morph.size() && lev->chunk_morph[tc.chunk] >= 0) &&
+         (!tc.records_offset || tc.delta_scale >= 1.f) &&
+         tc.color_first + tc.color_count <= lev->tf_colors.size();
+    const auto& ch = ok ? lev->chunks[tc.chunk] : lev->chunks[0];
+    const u32 r0 = ok ? lev->chunk_first_run[tc.chunk] : 0;
+    ok = ok && ch.vis_run_count && tc.run_first + ch.vis_run_count <= rl.size() &&
+         r0 + ch.vis_run_count <= file_runs;
+    for (u32 c = tc.color_first; ok && c < tc.color_first + tc.color_count; c++) {
+      ok = lev->tf_colors[c].vertex < ch.vertex_count &&
+           (c == tc.color_first || lev->tf_colors[c].vertex > lev->tf_colors[c - 1].vertex);
+    }
+    for (u32 r = 0; ok && r < ch.vis_run_count; r++) {
+      const auto& x = rl[tc.run_first + r];
+      ok = x.lod == c3l::kRunLodAlways || (x.group < lev->tf_groups.size() && x.lod <= 3);
+    }
+    if (ok) {
+      lev->chunk_tf[tc.chunk] = (s32)i;
+    }
+  }
+  if (!ok) {
+    lg::warn("[ctr] {}: bad tfrag geomorph data: every version drawn", lev->name);
+    lev->tf_groups.clear();
+    lev->tf_chunks.clear();
+    lev->chunk_tf.clear();
+    lev->tf_colors.clear();
+    return;
+  }
+  for (const auto& tc : lev->tf_chunks) {
+    const u32 r0 = lev->chunk_first_run[tc.chunk];
+    for (u32 r = 0; r < lev->chunks[tc.chunk].vis_run_count; r++) {
+      lev->run_lod[r0 + r] = rl[tc.run_first + r];
+    }
+    lev->chunk_lod[tc.chunk] = 2;
+  }
+  memcpy(lev->tf_dists, et.dists, sizeof(lev->tf_dists));
+  lev->tf_state.assign(lev->tf_groups.size(), 1);
+  // each group's near chunks (streaming units holding its near or mid version)
+  lev->tf_unit_first.assign(lev->tf_groups.size(), 0);
+  lev->tf_unit_count.assign(lev->tf_groups.size(), 0);
+  lev->tf_units.clear();
+  if (!lev->chunk_unit.empty()) {
+    std::vector<std::vector<u32>> gu(lev->tf_groups.size());
+    for (const auto& tc : lev->tf_chunks) {
+      const u32 u = lev->chunk_unit[tc.chunk];
+      if (u == UINT32_MAX) {
+        continue;
+      }
+      const u32 r0 = lev->chunk_first_run[tc.chunk];
+      for (u32 r = 0; r < lev->chunks[tc.chunk].vis_run_count; r++) {
+        const auto& x = lev->run_lod[r0 + r];
+        if ((x.lod == c3l::kRunLodNear || x.lod == c3l::kRunLodMid) &&
+            (gu[x.group].empty() || gu[x.group].back() != u)) {
+          gu[x.group].push_back(u);
+        }
+      }
+    }
+    for (size_t g = 0; g < gu.size(); g++) {
+      lev->tf_unit_first[g] = (u32)lev->tf_units.size();
+      lev->tf_unit_count[g] = (u32)gu[g].size();
+      lev->tf_units.insert(lev->tf_units.end(), gu[g].begin(), gu[g].end());
+    }
+  }
+  lg::info("[ctr] {}: tfrag geomorph: {} groups in {} chunks, {} moving vertices; versions at "
+           "{:.1f} / {:.1f} m of view depth",
+           lev->name, lev->tf_groups.size(), lev->tf_chunks.size(), lev->tf_colors.size(),
+           et.dists[1] / 4096.f, et.dists[2] / 4096.f);
 }
 
 // the kDrawCullCond draws' opening planes (c3l::ExtCullCond); without them those
@@ -4915,8 +5143,11 @@ void load_stream_info(c3l::Reader& f,
   lev->chunk_unit.assign(lev->chunks.size(), UINT32_MAX);
   for (size_t i = 0; !why && i < sc.size(); i++) {
     const auto& c = sc[i];
+    // (a tfrag one: the tfrag geomorph's near and mid versions, c3l::ExtTfrag)
     if (c.chunk >= lev->chunks.size() || lev->chunk_unit[c.chunk] != UINT32_MAX ||
-        lev->chunks[c.chunk].kind != c3l::CHUNK_KIND_TIE || !lev->chunks[c.chunk].vis_run_count ||
+        (lev->chunks[c.chunk].kind != c3l::CHUNK_KIND_TIE &&
+         lev->chunks[c.chunk].kind != c3l::CHUNK_KIND_TFRAG) ||
+        !lev->chunks[c.chunk].vis_run_count ||
         (c.cls != c3l::kStreamCore && c.cls != c3l::kStreamExtra) || lev->run_lod.empty()) {
       why = "bad near chunk";
       break;
@@ -4948,6 +5179,9 @@ void load_stream_info(c3l::Reader& f,
       for (u32 u = 0; u < lev->stream_units.size() && !why; u++) {
         const u32 ci = lev->stream_units[u].chunk;
         const auto& ch = lev->chunks[ci];
+        if (ch.kind == c3l::CHUNK_KIND_TFRAG) {
+          continue;  // (its groups: load_tfrag_lod)
+        }
         for (u32 r = lev->chunk_first_run[ci]; r < lev->chunk_first_run[ci] + ch.vis_run_count;
              r++) {
           const auto& rl = lev->run_lod[r];
@@ -5962,6 +6196,7 @@ bool CtrLevels::load_file(const fs::path& path,
   // later, read back by distance ("Distance freeing")
   load_env_tie_chunks(f, hdr, out);  // before the meshes: their tails
   load_morph(f, hdr, out);
+  load_tfrag_lod(f, hdr, file_runs, out);
   std::vector<u8> dist_skip;
   if (g_game_version == GameVersion::Jak2) {
     auto chunk_range = [&](const c3l::Chunk& ch, u32* first, u32* end) {
@@ -7732,7 +7967,12 @@ void CtrLevels::stream_update(u64 frame) {
       const bool floor_on = lev.lod_floor_k > 0 && has_err;
       bool urgent = !floor_on;
       float prio = 0.f;  // (AI-assisted, popin2) StreamUnit::prio before the in-view factor
-      if (!lev.unit_group_first.empty()) {
+      if (lev.chunks[su.chunk].kind == c3l::CHUNK_KIND_TFRAG) {
+        // the tfrag geomorph's near chunk (no tie groups): needed within its bound, its far
+        // versions showing less detail meanwhile
+        urgent = true;
+        prio = 1.f;
+      } else if (!lev.unit_group_first.empty()) {
         float best = 1e30f;
         for (u32 j = lev.unit_group_first[u]; j < lev.unit_group_first[u + 1]; j++) {
           const u32 g = lev.unit_groups[j];
@@ -9388,6 +9628,17 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              m_name, m_lod_groups_near / n, m_lod_tris[0] / n, m_lod_tris[1] / n, m_lod_frames);
     m_lod_groups_near = m_lod_frames = m_lod_tris[0] = m_lod_tris[1] = 0;
   }
+  if (rs.log_now && m_tf_frames) {
+    // the PS2's tfrag geomorph (c3l::ExtTfrag)
+    const double n = (double)m_tf_frames;
+    lg::info("[ctr] {}: tfrag geomorph: groups near / mid / far {:.0f} / {:.0f} / {:.0f}, {:.0f} "
+             "near + mid and {:.0f} far version tris drawn, {:.0f} morph colors written per level "
+             "draw ({} level draws)",
+             m_name, m_tf_groups[0] / n, m_tf_groups[1] / n, m_tf_groups[2] / n, m_tf_tris[0] / n,
+             m_tf_tris[1] / n, m_tf_colors_written / n, m_tf_frames);
+    m_tf_groups[0] = m_tf_groups[1] = m_tf_groups[2] = m_tf_tris[0] = m_tf_tris[1] = 0;
+    m_tf_colors_written = m_tf_frames = 0;
+  }
   if (rs.log_now && m_tod_frames) {
     lg::info("[ctr] {}: time of day {} blends, {:.0f} vertices recolored ({:.0f} light) {:.2f} ms "
              "per level draw (most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
@@ -10283,6 +10534,88 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     lev.stream_k = 0.f;
     lev.lod_floor_k = 0.f;
   }
+  // the PS2's tfrag geomorph (c3l::ExtTfrag): each group's version by the view depth of its
+  // nearest point (draw-inline-array-tfrag's frag-dists), in clip w as the morph shader's bands.
+  // A version in near chunks not there yet: the coarser one (kept while in view for 1 s once
+  // the data came, as the tie groups)
+  const bool tf_on = !lev.tf_groups.empty() && lev.tf_state.size() == lev.tf_groups.size();
+  if (tf_on) {
+    const float wv[3] = {-R[0][3], -R[1][3], -R[2][3]};
+    const float wl = std::sqrt(wv[0] * wv[0] + wv[1] * wv[1] + wv[2] * wv[2]);
+    const float k = settings.detail_scale * wl;
+    const float w2 = lev.tf_dists[0] * k, w1 = lev.tf_dists[1] * k, w0 = lev.tf_dists[2] * k;
+    m_tf_band[0] = 1.f / (w0 - w1);
+    m_tf_band[1] = 1.f / (w1 - w2);
+    m_tf_band[2] = -w1 / (w0 - w1);
+    m_tf_band[3] = -w2 / (w1 - w2);
+    const bool tf_units = has_units && lev.tf_unit_count.size() == lev.tf_groups.size();
+    if (lev.tf_hold_since.size() != lev.tf_groups.size()) {
+      lev.tf_hold_since.assign(lev.tf_groups.size(), 0);
+    }
+    constexpr u32 kTfHoldFrames = 30;
+    u32 n[3] = {0, 0, 0};
+    for (size_t g = 0; g < lev.tf_groups.size(); g++) {
+      const auto& tg = lev.tf_groups[g];
+      const float* b = tg.bsphere;
+      const float w = wv[0] * (b[0] - cx) + wv[1] * (b[1] - cy) + wv[2] * (b[2] - cz) - b[3] * wl;
+      u8 v = w < tg.mid * k ? 1 : (w < tg.far * k ? 9 : 0);
+#ifndef __3DS__
+      // host A/B, env CTR_TFRAG_AB: on odd frames every group's near version
+      static const int tf_ab = getenv("CTR_TFRAG_AB") ? atoi(getenv("CTR_TFRAG_AB")) : 0;
+      if (tf_ab == 1 && (rs.frame_idx & 1)) {
+        v = 1;
+      }
+#endif
+      u8& st = lev.tf_state[g];
+      bool hold = (st & 16) != 0;
+      const u32 cnt = tf_units ? lev.tf_unit_count[g] : 0;
+      if (v && cnt) {
+        bool ok = true, late = false;
+        const u32* const gu = &lev.tf_units[lev.tf_unit_first[g]];
+        for (u32 j = 0; j < cnt; j++) {
+          ok = ok && lev.unit_ok[gu[j]] == 1;
+          late = late || lev.unit_ok[gu[j]] == 3;
+        }
+        // (its coarser version in the level's own chunks: the mid one when there is no far one)
+        const u8 fallback = tg.far < std::numeric_limits<float>::max() ? 0 : 9;
+        if (!ok) {
+          if (late) {
+            late_groups++;
+            for (u32 j = 0; j < cnt; j++) {
+              if (lev.unit_ok[gu[j]] == 3) {
+                m_levels->stream_late(lev, gu[j], rs.frame_idx);
+              }
+            }
+            const bool seen = sphere_in_view(cam, b);
+            m_late_in_view += seen;
+            late_view += seen;
+            if (!hold && !g_screen_black && seen) {
+              hold = true;
+              lev.tf_hold_since[g] = (u32)rs.frame_idx;
+            }
+          }
+          v = std::min(v, fallback);
+        } else if (hold) {
+          if (sphere_in_view(cam, b) && (u32)rs.frame_idx - lev.tf_hold_since[g] < kTfHoldFrames) {
+            v = std::min(v, fallback);
+            held_groups++;
+          } else {
+            hold = false;
+          }
+        }
+      } else {
+        hold = false;
+      }
+      // (bit 5: its far point reaches band 1's start, some of its vertices may move)
+      const bool moves = w + 2.f * b[3] * wl >= w2;
+      st = (u8)(v | (hold ? 16 : 0) | (moves ? 32 : 0));
+      n[v == 1 ? 0 : v == 9 ? 1 : 2]++;
+    }
+    m_tf_groups[0] += n[0];
+    m_tf_groups[1] += n[1];
+    m_tf_groups[2] += n[2];
+    m_tf_frames++;
+  }
   if (has_units) {
     lev.stream_frame = rs.frame_idx;
     m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx);
@@ -10389,6 +10722,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       const bool straddles = cross != 0;
       bool partly = false;
+      bool tmorph = false;  // the tfrag geomorph: near or mid versions shown
       bool runs_valid = false;  // (AI-assisted) m_run_shown holds this chunk's runs
       // (AI-assisted) ties always; tfrag with the level's own string (not its low resolution
       // version), or every tier with a neighbour's (neighbour_vis)
@@ -10396,7 +10730,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                             (ch.lod_tier == 0 || (vis_own && ch.lod_tier < 3) ||
                              (vis_nb && ch.lod_tier <= 3));
       // (AI-assisted) c3l v17: a chunk with tie levels of detail shows one version of each group
-      const bool lod_chunk = tie_lod && lev.chunk_lod[ci];
+      // the tfrag geomorph's groups: one version each (c3l::ExtTfrag, their states in tf_state)
+      const bool tf_chunk = tf_on && lev.chunk_lod[ci] == 2;
+      const bool lod_chunk = tf_chunk || (tie_lod && lev.chunk_lod[ci] == 1);
       // (AI-assisted, j2vis) c3l v20: runs of prototypes the game hides
       const bool proto_chunk = proto_hide && lev.chunk_proto_hidden[ci];
       if (vis_test || straddles || vista_tier || lod_chunk || proto_chunk) {
@@ -10426,6 +10762,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         // (AI-assisted, micro-level) the loop is run_loop: one copy per combination of the tests
         RunLoopIn& in = run_in;
         in.vista_tier = vista_tier;
+        in.lod_state = tf_chunk ? lev.tf_state.data() : lev.lod_state.data();
         in.np = np;
         in.scale = ch.scale;
         RunLoopOut o;
@@ -10447,8 +10784,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         view_hidden = o.view_hidden;
         view_tris = o.view_tris;
         lod_hid = o.lod_hid;
-        m_lod_tris[0] += o.lod_tris[0];
-        m_lod_tris[1] += o.lod_tris[1];
+        u64* const lt = tf_chunk ? m_tf_tris : m_lod_tris;
+        lt[0] += o.lod_tris[0];
+        lt[1] += o.lod_tris[1];
         m_cull_tris += view_tris;
         runs_valid = true;
         if (!shown) {
@@ -10464,6 +10802,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
           return;
         }
         partly = shown < nr;
+        tmorph = tf_chunk && o.lod_tris[0] && lev.tf_morph(ci);
       }
       // Shrubs fade out as on the PS2 (prototype-bucket-shrub dists: full detail up to x, then
       // alpha (w - d) / (w - x) up to w), run by run (a visibility node: up to 8 instances): w is
@@ -10549,6 +10888,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       vc.runs_valid = runs_valid;
       vc.faded = faded;
       vc.vista = vista_chunk;
+      vc.tmorph = tmorph;
       vc.band = 0;
       vc.nofog = false;
       // (AI-assisted) only read with early_depth (band) or fog_stage_skip (nofog)
@@ -11055,6 +11395,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     for (const auto& vc : m_visible) {
       tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
     }
+    for (const auto& vc : m_visible) {
+      if (vc.tmorph) {
+        m_tf_colors_written += tf_morph_colors(lev, vc.chunk, shown_of(vc));
+      }
+    }
     tod_finish();
     tod_ms += tod_now_ms() - t0;
     if (has_units && stream_check_enabled() && lev.tod->blended_valid) {
@@ -11210,6 +11555,21 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     return row;
   };
+  // the tfrag geomorph (c3l::ExtTfrag): a visible chunk's morph uniforms (the bands, its scale)
+  if (m_tf_unif.size() < m_visible.size() * 8) {
+    m_tf_unif.resize(m_visible.size() * 8);
+  }
+  m_tf_unif_id.assign(m_visible.size(), 0);
+  auto tf_unif_of = [&](int slot) -> const float* {
+    float* u = &m_tf_unif[(size_t)slot * 8];
+    if (!m_tf_unif_id[slot]) {
+      m_tf_unif_id[slot] = ++m_tf_unif_ids ? m_tf_unif_ids : ++m_tf_unif_ids;
+      memcpy(u, m_tf_band, sizeof(m_tf_band));
+      u[4] = lev.tf_chunks[lev.chunk_tf[m_visible[slot].chunk]].delta_scale;
+      u[5] = u[6] = u[7] = 0.f;
+    }
+    return u;
+  };
   // wind ties: their draws through ctr_gpu_draw_mesh_wind with the chunk's slot rows
   const bool wind_on = lev.wind_mesh >= 0 && lev.chunk_wind.size() == lev.chunks.size() &&
                        lev.draw_wind.size() == lev.draws.size() &&
@@ -11263,6 +11623,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                        m_morph_row_of[slot] >= 0;
     const float* const mrows = morph ? morph_rows_of(slot) : nullptr;
     const int moff = morph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
+    // the tfrag geomorph: a chunk with near or mid versions shown
+    const bool tmorph = vc.tmorph && !vista_pass && !wind && env < 0;
+    const float* const tunif = tmorph ? tf_unif_of(slot) : nullptr;
+    const int toff = tmorph ? (int)lev.normals_offset_in_mesh(vc.chunk) : 0;
 #ifdef __3DS__
     // (AI-assisted, gpu-rt) the pass's draws go to the backend in one list
     auto submit = [&](u32 first, u32 count) {
@@ -11277,11 +11641,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (morph) {
         m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
                            (int)count, vc.nofog ? 1 : 0, mrows, &lev.morph_draw_rows[mlist + 1],
-                           lev.morph_draw_rows[mlist], moff, m_morph_row_id[slot]});
+                           lev.morph_draw_rows[mlist], moff, m_morph_row_id[slot], nullptr, 0});
+        return;
+      }
+      if (tmorph) {
+        m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
+                           (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0,
+                           m_tf_unif_id[slot], tunif, toff});
         return;
       }
       m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
-                         (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0});
+                         (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0, nullptr, 0});
     };
 #else
     ctr_gpu_set_mesh_nofog(vc.nofog);  // (AI-assisted) fog_stage_skip
@@ -11297,7 +11667,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (m_late_collect) {
         // (AI-assisted, j2water) Jak II's blended draws, drawn later (draw_jak2_late)
         m_calls.push_back({&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], (int)first,
-                           (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0});
+                           (int)count, vc.nofog ? 1 : 0, nullptr, nullptr, 0, 0, 0, nullptr, 0});
         return;
       }
       if (morph) {
@@ -11305,6 +11675,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
                                 &lev.morph_draw_rows[mlist + 1], lev.morph_draw_rows[mlist],
                                 m_morph_row_id[slot], lev.meshes[vc.chunk], moff, (int)first,
                                 (int)count);
+        return;
+      }
+      if (tmorph) {
+        ctr_gpu_draw_mesh_tmorph(&lev.draw_states[di], &vc.gpu, tunif, m_tf_unif_id[slot],
+                                 lev.meshes[vc.chunk], toff, (int)first, (int)count);
         return;
       }
       ctr_gpu_draw_mesh_prepared(&lev.draw_states[di], &vc.gpu, lev.meshes[vc.chunk], first,
@@ -11342,7 +11717,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
       m_fade_calls.push_back(
           {use, &vc.gpu, lev.meshes[vc.chunk], (int)first, (int)count, vc.nofog ? 1 : 0, nullptr,
-           nullptr, 0, 0, 0});
+           nullptr, 0, 0, 0, nullptr, 0});
       m_fade_runs++;
     };
     if (!vc.partly || !lev.draw_run_count[di]) {
@@ -11517,20 +11892,34 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   // the tie geomorph's draws after the others of their list: each switch between the morph program
   // and the mesh program sends citro3d's whole context again (163 per frame interleaved, ~20 so)
   const u32* const morph_list = morph_draws ? lev.draw_morph_rows.data() : nullptr;
-  auto is_morph = [&](u32 di) {
-    return morph_list[di] != UINT32_MAX && lev.morph_draw_rows[morph_list[di]] &&
-           !(wind_on && lev.draw_wind[di]) && (lev.draw_env.empty() || lev.draw_env[di] < 0);
+  // (the tfrag geomorph's draws in a pass of their own: 1; the tie geomorph's: 2)
+  auto morph_pass = [&](u32 di, int slot) {
+    if (morph_list && morph_list[di] != UINT32_MAX && lev.morph_draw_rows[morph_list[di]] &&
+        !(wind_on && lev.draw_wind[di]) && (lev.draw_env.empty() || lev.draw_env[di] < 0)) {
+      return 2;
+    }
+    return vchunks[slot].tmorph && !(wind_on && lev.draw_wind[di]) &&
+                   (lev.draw_env.empty() || lev.draw_env[di] < 0)
+               ? 1
+               : 0;
   };
+  bool any_tmorph = false;
+  for (const auto& vc : m_visible) {
+    any_tmorph = any_tmorph || vc.tmorph;
+  }
   auto walk_split = [&](const std::vector<u32>& list) {
-    if (!morph_list) {
+    if (!morph_list && !any_tmorph) {
       walk(list);
       return;
     }
     m_ph_walked += list.size();
-    for (int pass = 0; pass < 2; pass++) {
+    for (int pass = 0; pass < 3; pass++) {
+      if ((pass == 1 && !any_tmorph) || (pass == 2 && !morph_list)) {
+        continue;
+      }
       for (u32 di : list) {
         const int slot = vslot[draw_chunk[di]];
-        if (slot >= 0 && !vchunks[slot].vista && is_morph(di) == (pass == 1)) {
+        if (slot >= 0 && !vchunks[slot].vista && morph_pass(di, slot) == pass) {
           draw(di);
         }
       }
