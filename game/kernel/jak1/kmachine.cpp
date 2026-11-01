@@ -60,6 +60,7 @@ using namespace ee;
 #ifdef __3DS__
 bool ctr_level_ready(const char* name);  // game/graphics/ctr/CtrRenderer.cpp
 #endif
+bool ctr_arrival_ready();  // game/graphics/ctr/CtrRenderer.cpp
 
 namespace jak1 {
 
@@ -648,6 +649,10 @@ void InitMachine_PCPort() {
     return s7.offset + true_symbol_offset(g_game_version);
   });
 #endif
+  // target-continue keeps its blackout until the renderer has ring 0 in view (ctr renderer only)
+  make_function_symbol_from_c("pc-3ds-arrival-ready?", +[]() -> u64 {
+    return ctr_arrival_ready() ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
+  });
   // (AI-assisted) config.ini merc_lod_scale: characters and objects switch to their lower detail
   // models (all in the .c3l files) at this fraction of the game's distances (drawable.gc,
   // TARGET_3DS). Set on every build: the small memory PC build runs the 3DS GOAL code too.

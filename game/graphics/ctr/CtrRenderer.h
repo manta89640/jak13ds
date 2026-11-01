@@ -256,6 +256,7 @@ class CtrRenderer {
   float m_shown_alp = 1.f;
   bool m_hold_black = false;
   bool m_hold_ramp = false;  // after the hold: faded in from black (1/8 a frame), not cut in
+  double m_black_t0 = 0, m_fade_t0 = 0;  // Jak 1: since when black; the fade in's start
   double m_hold_t0 = 0;
   u32 m_hold_late = 0, m_hold_frames = 0;
   u32 m_hold_least = 0;          // (AI-assisted, j2pop) the least missing since the hold began

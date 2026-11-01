@@ -50,16 +50,52 @@ void test_ranges() {
               (b.tie_distance_scale > 0 && b.tie_distance_scale <= a.tie_distance_scale),
           "the tie limit never grows with r");
   }
+  check(rl.stage[kShrubFar] < 0 && rl.stage[kTieFar] < 0 && rl.stage[kVista] < 0 &&
+            rl.stage[kTfragFar] < 0 && rl.stage[kTieFar2] < 0,
+        "Jak II's rules: no far levers");
   Relief j1;
   j1.init(4.f, 0.f, 1.5f, 500.f, true);  // Jak 1's defaults
-  check(j1.n == 1 && j1.stage[kTieDistance] == 0 && j1.stage[kLodDistance] < 0 &&
-            j1.stage[kTieLodPx] < 0,
-        "Jak 1: only the far ring's tie limit moves");
+  check(j1.n == 6 && j1.stage[kTieDistance] == 0 && j1.stage[kShrubFar] == 1 &&
+            j1.stage[kTieFar] == 2 && j1.stage[kVista] == 3 && j1.stage[kTfragFar] == 4 &&
+            j1.stage[kTieFar2] == 5 && j1.stage[kLodDistance] < 0 && j1.stage[kTieLodPx] < 0,
+        "Jak 1: the far ring only: tie limit, shrubs, far ties, vista, tfrag, far ties again");
   check(near(j1.at(1.f).tie_distance_scale, 1.f), "Jak 1: the tie limit down to x1");
+  {
+    const Knobs a = j1.at(1.f), z = j1.at(6.f);
+    check(a.shrub_far == 1.f && a.tie_far == 0.f && a.vista_far == 0.f && a.tfrag_far == 0.f,
+          "Jak 1 r 1: the far levers at the config");
+    check(near(z.shrub_far, kShrubFarK) && near(z.tie_far, kTieFar2Meters) &&
+              near(z.vista_far, kVistaFarMeters) && near(z.tfrag_far, kTfragFarMeters),
+          "Jak 1 r 6: every far lever at its floor");
+    check(near(j1.at(5.f).tie_far, kTieFarMeters), "Jak 1 r 5: far ties at 250 m before 150 m");
+    check(near(j1.at(2.f).shrub_far, kShrubFarK) && j1.at(2.f).tie_far == 0.f,
+          "Jak 1 r 2: shrubs before the far ties");
+    check(near(j1.at(3.f).tie_far, kTieFarMeters) && j1.at(3.f).vista_far == 0.f,
+          "Jak 1 r 3: far ties before vista");
+    check(near(j1.at(4.f).vista_far, kVistaFarMeters) && j1.at(4.f).tfrag_far == 0.f,
+          "Jak 1 r 4: vista before tfrag");
+    check(near(j1.at(2.5f).tie_far, 500.f * std::sqrt(kTieFarMeters / 500.f), 0.5f),
+          "far ties: halfway in the ratio of the distances");
+    for (float r = 0; r < 6.f; r += 0.01f) {
+      const Knobs p = j1.at(r), q = j1.at(r + 0.01f);
+      check(q.shrub_far <= p.shrub_far, "shrubs never come back with r");
+      auto le = [](float b, float a) { return !(a > 0) || (b > 0 && b <= a + 1e-3f); };
+      check(le(q.tie_far, p.tie_far), "far ties never grow with r");
+      check(!(p.tie_far > 0) || q.tie_far > 0, "far ties: once cut, stay cut");
+      check(!(p.vista_far > 0) || (q.vista_far > 0 && q.vista_far <= p.vista_far + 1e-3f),
+            "vista never grows with r");
+      check(!(p.tfrag_far > 0) || (q.tfrag_far > 0 && q.tfrag_far <= p.tfrag_far + 1e-3f),
+            "tfrag never grows with r");
+    }
+  }
+  Relief j1v;
+  j1v.init(4.f, 0.f, 1.5f, 500.f, true, 800.f);  // vista_distance under the lever's floor
+  check(j1v.n == 5 && j1v.stage[kVista] < 0, "Jak 1: a short vista_distance leaves vista alone");
   Relief j1old;
   j1old.init(1.f, 0.f, 0.f, 500.f, true);  // Jak 1 with the PS2 values in config.ini
-  check(j1old.n == 2 && j1old.stage[kTieDistance] == 0 && j1old.stage[kTieLodPx] == 1,
-        "Jak 1 at the PS2 values: the tie limit, then tie_lod_px");
+  check(j1old.n == 7 && j1old.stage[kTieDistance] == 0 && j1old.stage[kTfragFar] == 4 &&
+            j1old.stage[kTieFar2] == 5 && j1old.stage[kTieLodPx] == 6,
+        "Jak 1 at the PS2 values: the far ring, then tie_lod_px");
   for (float r = 0; r <= 3.f; r += 0.25f) {
     check(j1old.at(r).lod_distance == 0.f, "Jak 1: lod_distance stays the config's");
   }
@@ -88,6 +124,32 @@ void test_near_ring() {
     check(ring_limit(0.f, cfg, R) == 0.f, "no limit stays no limit");
   }
   check(ring_limit(10.f, 0.f, R) == R, "a config without a limit: the relief's from ring 0 on");
+  // the far caps: what the config draws within ring 0 stays
+  for (float d : {0.f, 5.f, 30.f, 39.f, 40.f, 60.f, 150.f, 300.f, 450.f}) {
+    for (float cap : {0.f, 10.f, 40.f, 120.f, 250.f, 1000.f}) {
+      const float lim = far_cap(d, cap, R);
+      check(!(d > 0) || lim >= std::min(d, R) - 1e-4f, "far cap: never under the config in ring 0");
+      check(!(d > 0) || lim <= d + 1e-4f, "far cap: never beyond the config");
+      check(d > 0 || !(cap > 0) || lim >= R, "far cap of no limit: at least ring 0");
+      check(cap > 0 || lim == d, "no cap: the config");
+    }
+  }
+  // the shrub bands: alpha (full to x, 0 at w) within ring 0 exactly as at the config
+  auto alpha = [](float d, float x, float w) {
+    return d <= x ? 1.f : std::clamp((w - d) / std::max(w - x, 1e-3f), 0.f, 1.f);
+  };
+  for (float x = 5.f; x <= 160.f; x += 7.f) {
+    for (float wk = 1.f; wk <= 2.f; wk += 0.25f) {
+      for (float k = 0.3f; k <= 1.f; k += 0.1f) {
+        float nx = x, nw = x * wk;
+        shrub_band(&nx, &nw, k, R);
+        check(nw <= x * wk + 1e-3f && nx <= x + 1e-3f, "shrub lever: never further");
+        for (float d = 0; d < R; d += 0.5f) {
+          check(near(alpha(d, x, x * wk), alpha(d, nx, nw), 1e-4f), "shrub lever: ring 0 as before");
+        }
+      }
+    }
+  }
   // every relief position of both games' defaults and of the PS2 values: the small ties' limit
   // (100 m x the scale) stays beyond ring 0, tie_lod_px at most the old 4
   const float cfgs[][3] = {{4.f, 0.f, 1.5f}, {1.f, 0.f, 0.f}, {4.f, 200.f, 1.5f}};
@@ -100,6 +162,9 @@ void test_near_ring() {
         check(!(kn.tie_distance_scale > 0) || kn.tie_distance_scale * kSmallTieMeters >= R,
               "relief: small ties drawn beyond ring 0");
         check(kn.tie_lod_px <= std::max(c[0], kOldTieLodPx), "relief: tie_lod_px at most 4");
+        check(!(kn.tie_far > 0) || kn.tie_far >= 100.f, "relief: far ties beyond 100 m");
+        check(!(kn.tfrag_far > 0) || kn.tfrag_far >= 100.f, "relief: tfrag beyond 100 m");
+        check(!(kn.vista_far > 0) || kn.vista_far >= 500.f, "relief: vista beyond the draw distance");
       }
     }
   }
@@ -199,10 +264,10 @@ struct View {
 
 // the GPU model (host title flight, triangles x the hardware's 0.164 ms per 1000): the PS2 values
 // (tie_lod_px 1, no tie limit) cost kOldSave ms more than Jak 1's defaults, tie_lod_px alone
-// kOldSavePx of it (wind ties); the new x: kUpMs per unit above (ties x1.5 -> x3), kDownMs per
-// unit below (x1.5 -> x1)
+// kOldSavePx of it (wind ties); the new x: kUpMs per unit above (ties x1.5 -> x3), below it the far
+// levers' kJak1LeverMs (relief_saving)
 constexpr double kOldSave = 1.5, kOldSavePx = 1.3;
-constexpr double kUpMs = 0.5, kDownMs = 0.25;
+constexpr double kUpMs = 0.5;
 
 struct Run {
   int over33 = 0, frames = 0, reversals = 0, swings = 0, max_window_steps = 0, steps = 0;
@@ -212,12 +277,29 @@ struct Run {
 
 // lag: a step's change comes in with a time constant (frames): the GPU times are one frame late,
 // and what is in view keeps its decisions until out of view (urgent: at once)
+// Jak 1's relief: its levers' GPU ms, unit by unit (kJak1LeverMs in stage order)
+Relief jak1_relief() {
+  Relief rl;
+  rl.init(4.f, 0.f, 1.5f, 500.f, true);
+  return rl;
+}
+double relief_saving(double r) {
+  static const Relief rl = jak1_relief();
+  double ms = 0;
+  for (int k = 0; k < kKnobs; k++) {
+    ms += rl.part(k, (float)r) * kJak1LeverMs[k];
+  }
+  return ms;
+}
+
 template <bool OLD>
 Run simulate(const std::vector<View>& views, unsigned seed, double target = 27.0) {
   OldController oc;
   oc.n = 2;  // Jak 1 at the PS2 values: tie_lod_px, then the tie limit
   Controller c;
-  c.range(-1.f, 1.f);  // Jak 1's defaults: the tie limit x1 .. x3
+  const Relief rl = jak1_relief();
+  c.range(-(float)rl.n, 1.f);  // Jak 1's defaults: the far levers .. ties x3
+  c.unit_costs(rl, kJak1LeverMs);
   std::mt19937 rng(seed);
   std::normal_distribution<double> noise(0.0, 1.5);
   double eff = 0;
@@ -234,7 +316,7 @@ Run simulate(const std::vector<View>& views, unsigned seed, double target = 27.0
         cost = v.busy + kOldSave - kOldSavePx * std::clamp(r, 0.0, 1.0) -
                (kOldSave - kOldSavePx) * std::clamp(r - 1.0, 0.0, 1.0);
       } else {
-        cost = v.busy + (eff > 0 ? kUpMs * eff : kDownMs * eff);
+        cost = v.busy + (eff > 0 ? kUpMs * eff : -relief_saving(-eff));
       }
       const double busy = std::max(5.0, cost + noise(rng)) + (frame % 4 == 0 ? v.spike : 0.0);
       out.over33 += busy > 33.4;
@@ -335,13 +417,16 @@ void test_hw_replay() {
   check(o.max_window_steps >= 15, "old: 15 or more steps in a 15 s window, as on hardware");
   // the new one settles: no full swings, few steps, fewer frames over budget
   check(n.swings == 0, "new: no full swings");
-  check(n.max_window_steps <= 6, "new: at most 6 steps in a 15 s window");
+  check(n.max_window_steps <= 8, "new: at most 8 steps in a 15 s window (6 levers to go through)");
+  check(n.reversals <= 6, "new: few direction changes");
   check(n.steps * 4 < o.steps, "new: a quarter of the old steps or fewer");
   check(n.over33 < o.over33, "new: fewer frames over 33 ms than the old");
   for (unsigned seed = 2; seed < 30; seed++) {
     const auto s = hw_session(seed);
     const Run a = simulate<false>(s, seed);
-    check(a.swings == 0 && a.max_window_steps <= 6, "new: settles for every seed");
+    // (at most one shed per kShedGap: 10 in 15 s)
+    check(a.swings == 0 && a.max_window_steps <= 450 / Controller::kShedGap,
+          "new: settles for every seed");
     const Run b = simulate<true>(s, seed);
     check(a.over33 <= b.over33, "new: no more frames over 33 ms than the old, every seed");
   }
@@ -403,6 +488,24 @@ void test_controller() {
   check(ct.x == 0 && !ct.urgent, "reset: the config values");
   for (int f = 0; f < 120; f++) {
     check(!ct.step(15.5, 15.0, true, 27.0), "after the reset a light view waits before more");
+  }
+  // Jak 1's levers: a shed is GPU ms (at most 1), so the cheap far levers go in the first sheds
+  {
+    Controller cj;
+    const Relief rl = jak1_relief();
+    cj.range(-(float)rl.n, 1.f);
+    cj.unit_costs(rl, kJak1LeverMs);
+    int sheds_to_far_ties = 0;
+    for (int f = 0; f < 900 && cj.x > -5.f; f++) {
+      sheds_to_far_ties += cj.step(36.0, 26.0, true, 27.0);
+    }
+    check(cj.x <= -5.f && sheds_to_far_ties <= 3, "Jak 1: the cheap far levers in 3 sheds");
+    Controller cu;
+    cu.range(-(float)rl.n, 1.f);
+    for (int f = 0; f < 900 && cu.x > -5.f; f++) {
+      cu.step(36.0, 26.0, true, 27.0);
+    }
+    check(cu.x > -5.f, "without the costs (4 ms a unit) it would take more than 30 s");
   }
   // Jak II's defaults: nothing below the config, the tie range above (x1.5 .. x3)
   Controller j2;

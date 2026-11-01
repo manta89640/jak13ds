@@ -31,6 +31,9 @@
                   (set! a1-0 (car a0-1))))
               #f))))
 
+(#when TARGET_3DS
+  (define-extern pc-3ds-arrival-ready? (function symbol)))
+
 (defstate target-continue (target)
   :event target-generic-event-handler
   :exit
@@ -139,6 +142,11 @@
         ;; vis info check added for PC, don't bother waiting for vis if the level doesn't have it.
         (when (and s5-2 (-> s5-2 vis-info 0))
           (while (and (= (-> s5-2 all-visible?) 'loading) (-> *level* vis?))
+            (suspend))))
+      ;; 3DS: the blackout lasts until the renderer has the scenery near the camera (at most 4 s)
+      (#when TARGET_3DS
+        (when (not (logtest? (-> arg0 flags) (continue-flags title)))
+          (while (not (pc-3ds-arrival-ready?))
             (suspend))))
       (set! *spawn-actors* #t)
       (set! *teleport* #t)

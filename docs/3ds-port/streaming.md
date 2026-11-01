@@ -266,8 +266,11 @@ the file's block directory (16 bytes per block: village1 ~22 KB, lavatube ~50 KB
   distance in view, tie LOD switches in view, groups late / held far, time of day groups rewritten,
   left behind, waiting, impostor cards and captures, near chunks taken) and `[pop] soft frame N`
   after each dumped frame (`--ctr-dump DIR --ctr-dump-every 1`: frame_N.png).
-- Host: `CTR_STREAM_SIM=5.5` takes each stream job only when a New 3DS SD card (5.5 MB/s, 8 ms per
-  request) and decoder would have finished it, in frames of the fps cap (game time); `CTR_SOFT_LINEAR_KB`
+- Host: `CTR_STREAM_SIM=5.5` runs a loader thread as on the 3DS (its job order) that stays busy with
+  each job as long as a New 3DS would (SD card 5.5 MB/s, 8 ms per request, decoding 14 MB/s of
+  meshes, 24 ms per job, a level load ~300 ms per MB read: hw-nov01f), in frames of the fps cap
+  (game time); `CTR_ARRIVAL_OFF` / `CTR_BURST_OFF`: Jak 1's arrival order, holds and faster reading
+  off (A/B); `CTR_SOFT_LINEAR_KB`
   (default 34000) is the soft backend's model of the linear heap for the growth rule;
   `CTR_STREAM_CHECK=1` (above).
 - Since stream-arena: the late line also gives the late times **for lack of room in the arena**

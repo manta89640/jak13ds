@@ -53,6 +53,11 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 
 // (AI-assisted) PMODE alpha from the game thread (ctr_set_pmode_alp), 1 = no fade
 static std::atomic<float> g_pmode_alp{1.f};
+// Jak 1: what is missing in ring 0 in view at the last frame, and the frames counted
+// (ctr_arrival_ready, game thread)
+static std::atomic<u32> g_arrival_late{0};
+static std::atomic<u64> g_arrival_frame{0};
+static std::atomic<double> g_arrival_done_ms{-1e9};  // the game's wait (ctr_arrival_ready) ended
 
 // (AI-assisted) see CtrRenderer.h; set by the CtrRenderer constructor
 static float g_gs_y_scale = 512.f / 448.f;
@@ -620,6 +625,9 @@ CtrRenderer::CtrRenderer()
 CtrRenderer::~CtrRenderer() = default;
 
 void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
+#ifndef __3DS__
+  std::lock_guard<std::mutex> host_gpu(g_host_gpu_mutex);
+#endif
   m_rs.ee_mem = (const u8*)ee_mem;
   m_rs.offset_of_s7 = s7.offset;
   m_rs.vram = m_vram.get();
@@ -1009,7 +1017,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
         const float ties = r > 0 ? kn.tie_distance_scale : tie_t;
         lg::info("[ctr] auto detail x {:.2f} (ceiling {:.2f}, mean {:.1f} ms, band {:.0f} +- {:.0f}; "
                  "{:.1f} s above the config): ties {}, shrubs x{:.2f}; relief {:.2f} of {}: "
-                 "tie_lod_px {:.1f} ({}), lod_distance {} ({}), tie limit ({}) at the config / "
+                 "tie_lod_px {:.1f} ({}), lod_distance {} ({}), tie limit ({}){} at the config / "
                  "between / old value; {} steps down ({} for the render thread), {} up",
                  c.x, c.ceil, c.mean, s.auto_detail_gpu_ms, ctr_detail::Controller::kBand,
                  m_auto.above_ms / 1000.0,
@@ -1017,8 +1025,19 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
                  s.shrub_scale + (std::max(s.shrub_scale_max, s.shrub_scale) - s.shrub_scale) * t,
                  r, rl.n, kn.tie_lod_px, secs(ctr_detail::kTieLodPx),
                  kn.lod_distance > 0 ? fmt::format("{:.0f} m", kn.lod_distance) : std::string("off"),
-                 secs(ctr_detail::kLodDistance), secs(ctr_detail::kTieDistance), c.sheds,
-                 c.sheds_cpu, c.restores);
+                 secs(ctr_detail::kLodDistance), secs(ctr_detail::kTieDistance),
+                 rl.stage[ctr_detail::kShrubFar] < 0
+                     ? std::string()
+                     : fmt::format(", shrubs x{:.2f} ({}), far ties {} ({}), vista {} ({}), "
+                                   "tfrag {} ({})",
+                                   kn.shrub_far, secs(ctr_detail::kShrubFar),
+                                   kn.tie_far > 0 ? fmt::format("{:.0f} m", kn.tie_far) : "-",
+                                   secs(ctr_detail::kTieFar) + " / " + secs(ctr_detail::kTieFar2),
+                                   kn.vista_far > 0 ? fmt::format("{:.0f} m", kn.vista_far) : "-",
+                                   secs(ctr_detail::kVista),
+                                   kn.tfrag_far > 0 ? fmt::format("{:.0f} m", kn.tfrag_far) : "-",
+                                   secs(ctr_detail::kTfragFar)),
+                 c.sheds, c.sheds_cpu, c.restores);
         m_auto.ctl.sheds = m_auto.ctl.sheds_cpu = m_auto.ctl.restores = 0;
         m_auto.time = ctr_detail::KnobTime();
         m_auto.above_ms = 0;
@@ -1150,14 +1169,28 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
         cs.shrub_scale_max > cs.shrub_scale ||
         (cs.tie_distance_scale > 0 && cs.tie_distance_scale_max > cs.tie_distance_scale);
     m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance,
-                       g_game_version == GameVersion::Jak1);
+                       g_game_version == GameVersion::Jak1, cs.vista_distance);
     m_auto.ctl.range(-(float)m_auto.relief.n, t_range ? 1.f : 0.f);
+    if (g_game_version == GameVersion::Jak1) {
+      m_auto.ctl.unit_costs(m_auto.relief, ctr_detail::kJak1LeverMs);
+    }
     ctr_level_set_detail(m_auto.ctl.x);
     m_auto.last_ms = now;
   }
   m_auto.time.add(m_auto.relief, m_auto.ctl.r(), now - m_auto.last_ms);
   m_auto.above_ms += m_auto.ctl.x > 0 ? now - m_auto.last_ms : 0.0;
   m_auto.last_ms = now;
+#ifndef __3DS__
+  // host, env CTR_DETAIL_FORCE=X: the position pinned at X (lever measurements)
+  if (const char* fx = getenv("CTR_DETAIL_FORCE")) {
+    const float x = std::clamp((float)atof(fx), m_auto.ctl.lo, m_auto.ctl.hi);
+    if (m_auto.ctl.x != x || m_rs.frame_idx % 30 == 0) {
+      m_auto.ctl.x = x;
+      ctr_level_set_detail(x);
+    }
+    return;
+  }
+#endif
   if (!gpu_busy_frames) {
     return;  // no GPU time this frame (frame_pacing = fast): the detail stays
   }
@@ -1180,6 +1213,7 @@ void CtrRenderer::auto_detail_frame(float /*gpu_busy_ms*/, float gpu_active_ms,
   moved = m_auto.ctl.step((double)gpu_active_ms / gpu_busy_frames, build_tod_ms, !load, target, k,
                           settled) ||
           moved;
+
   ctr_level_set_detail_urgent(m_auto.ctl.urgent);
   if (moved) {
     ctr_level_set_detail(m_auto.ctl.x);
@@ -1358,13 +1392,24 @@ void CtrRenderer::draw_pmode_fade() {
 // follows its voice stream): only the picture waits. (Was at most 1.5 s: HW Oct 25, the title
 // intro gave up with 102 tie LOD groups drawn far and a continue to the slums with 200, read back
 // over the next seconds in view: the user's "rocks pop in".)
+// Jak 1: held until ring 0 in view is there (at most 4 s); a black of kLongBlackMs or more (an
+// arrival) fades in over kFadeInMs.
 float CtrRenderer::hold_black(float alp) {
-  // (Jak 1: 1.5 s, as before)
-  const double kMaxHoldMs = m_jak2 ? 6000.0 : 1500.0, kStallMs = m_jak2 ? 2500.0 : 1500.0;
+  const bool old = !m_jak2 && ctr_arrival_off();  // (host A/B: Jak 1 as before)
+  const double kMaxHoldMs = m_jak2 ? 6000.0 : old ? 1500.0 : 4000.0;
+  const double kStallMs = old ? 1500.0 : 2500.0;
+  constexpr double kLongBlackMs = 400.0, kFadeInMs = 500.0;
   bool shown_or_cut = false;
-  const u32 late = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut);
+  u32 ring0 = 0;
+  const u32 all = m_levels->late_in_view(m_rs.frame_idx, &shown_or_cut, &ring0);
+  const u32 late = m_jak2 || old ? all : ring0;
+  g_arrival_late.store(late, std::memory_order_relaxed);
+  g_arrival_frame.fetch_add(1, std::memory_order_relaxed);
   const double now = ctr_gpu_time_ms();
-  if (!m_hold_black && m_shown_alp < 0.01f && alp >= 0.01f && late > 0 && shown_or_cut) {
+  // (not again while fading in, nor right after the game's own wait for the same)
+  const bool game_waited = !old && now - g_arrival_done_ms.load() < 1000.0;
+  if (!m_hold_black && !m_hold_ramp && !game_waited && m_shown_alp < 0.01f && alp >= 0.01f &&
+      late > 0 && shown_or_cut) {
     m_hold_black = true;
     m_hold_t0 = now;
     m_hold_late = 0;
@@ -1381,6 +1426,7 @@ float CtrRenderer::hold_black(float alp) {
     if (late == 0 || now - m_hold_t0 >= kMaxHoldMs || now - m_hold_progress_t >= kStallMs) {
       m_hold_black = false;
       m_hold_ramp = true;
+      m_fade_t0 = now;
       lg::info("[ctr] screen kept black {:.0f} ms ({} frames) for what is missing in view{} (at most "
                "{} tie LOD groups drawn far / dormant chunks not back)",
                now - m_hold_t0, m_hold_frames, late ? ", given up" : "", m_hold_late);
@@ -1389,10 +1435,25 @@ float CtrRenderer::hold_black(float alp) {
       alp = 0.f;
     }
   }
+  if (!m_jak2 && !old) {
+    if (m_shown_alp < 0.01f && m_black_t0 <= 0) {
+      m_black_t0 = now;
+    }
+    if (!m_hold_ramp && !m_hold_black && alp >= 0.01f && m_shown_alp < 0.01f &&
+        now - m_black_t0 >= kLongBlackMs) {
+      m_hold_ramp = true;
+      m_fade_t0 = now;
+    }
+  }
   if (m_hold_ramp && !m_hold_black) {
     const float game_alp = alp;
-    alp = std::min(alp, m_shown_alp + 0.125f);
+    alp = m_jak2 || old
+              ? std::min(alp, m_shown_alp + 0.125f)
+              : std::min(alp, std::max(m_shown_alp, (float)((now - m_fade_t0) / kFadeInMs)));
     m_hold_ramp = alp < game_alp;
+  }
+  if (alp >= 0.01f) {
+    m_black_t0 = 0;
   }
   m_shown_alp = alp;
   return alp;
@@ -2017,6 +2078,38 @@ bool ctr_level_ready(const char* name) {
     return true;
   }
   return false;
+}
+
+// Jak 1, game thread (pc-3ds-arrival-ready?, target-continue): a continue's blackout lasts until
+// ring 0 in view is there at a frame drawn since the wait began, at most kCapMs
+bool ctr_arrival_ready() {
+  constexpr double kCapMs = 4000.0;
+  if (!g_ctr_ready || g_is_jak2 || ctr_arrival_off()) {
+    return true;
+  }
+  static double since = 0, last = 0;
+  static u64 f0 = 0;
+  static u32 most = 0;
+  const double now = ctr_gpu_time_ms();
+  const u64 f = g_arrival_frame.load(std::memory_order_relaxed);
+  if (since <= 0 || now - last > 1000.0) {
+    since = now;
+    f0 = f;
+    most = 0;
+  }
+  last = now;
+  const u32 late = g_arrival_late.load(std::memory_order_relaxed);
+  most = std::max(most, late);
+  const bool ready = f >= f0 + 2 && late == 0;
+  if (!ready && now - since < kCapMs) {
+    return false;
+  }
+  lg::info("[ctr] arrival: the game's blackout held {:.0f} ms for ring 0 in view{} (at most {} "
+           "tie LOD groups drawn far / chunks missing)",
+           now - since, ready ? "" : ", given up", most);
+  since = 0;
+  g_arrival_done_ms = now;
+  return true;
 }
 
 // (AI-assisted) The overlord (IOP thread) started loading a level's DGO: start reading the

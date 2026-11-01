@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <set>
 #include <string>
 #include <string_view>
@@ -770,20 +771,26 @@ class CtrLevels {
     m_game_black.store(black, std::memory_order_relaxed);
     m_hold_black.store(hold, std::memory_order_relaxed);
   }
-  void note_late_in_view(u64 frame, u32 n, bool recent) {
+  //! ring0: of n, the ones within ring 0 (and chunks missing whole)
+  void note_late_in_view(u64 frame, u32 n, bool recent, u32 ring0 = 0) {
     if (m_lv_frame != frame) {
       m_lv_frame = frame;
       m_lv_count = 0;
+      m_lv_ring0 = 0;
       m_lv_recent = false;
     }
     m_lv_count += n;
+    m_lv_ring0 += ring0;
     m_lv_recent = m_lv_recent || recent;
   }
   //! this frame's count (note_late_in_view), and whether a level was shown or the camera cut
   //! within the last 3 s
-  u32 late_in_view(u64 frame, bool* shown_or_cut) const {
+  u32 late_in_view(u64 frame, bool* shown_or_cut, u32* ring0 = nullptr) const {
     const bool now = m_lv_frame == frame;
     *shown_or_cut = (now && m_lv_recent) || (m_cut_frame && frame < m_cut_frame + 90);
+    if (ring0) {
+      *ring0 = now ? m_lv_ring0 : 0;
+    }
     return now ? m_lv_count : 0;
   }
   /*! (AI-assisted, streaming) the streaming statistics, logged (render thread) */
@@ -977,13 +984,16 @@ class CtrLevels {
     u64 read_bytes = 0;
     u32 reads = 0;
     u32 preloads = 0, preload_misses = 0;  // (streaming) runs read in one request each, or not
-    u64 ready_frame = 0;  // host, env CTR_STREAM_SIM: taken from this frame on (SD card model)
+    bool yielded = false;  // stopped early for an arrival's level load (the rest asked again)
     // (AI-assisted, j2intro) host, env CTR_LOAD_DELAY_MS: a level load handed over from then on
     double sim_ready_ms = 0;
   };
   void request(const Job& job);  // render thread
   void run_job(const Job& job);  // loader thread (or inline without one)
   void run_parts_job(const Job& job, Done* d);
+#ifndef __3DS__
+  void sim_loader_time(const Job& job, const Done& d, u64 f0);
+#endif
   bool load_textures(c3l::Reader& f,
                      const c3l::Header& hdr,
                      const std::vector<c3l::Texture>& texs,
@@ -1033,6 +1043,13 @@ class CtrLevels {
   std::string m_loading;  // the level the loader works on ("" if none)
   bool m_loading_prefetch = false;  // ... for a prefetch (cancelled when the game loads another)
   std::atomic<bool> m_cancel{false};  // m_loading is no longer wanted: stop early
+  // a level load the game will wait for is queued: a running read back or stream job stops early
+  std::atomic<bool> m_arrival_queued{false};
+  bool yield_to_arrival(const Job& job) const {
+    return (job.stream || job.dormant || job.detail) &&
+           m_arrival_queued.load(std::memory_order_relaxed);
+  }
+  bool arrival_job(const Job& j) const;  // under m_lock
   bool m_quit = false;
   // (AI-assisted) the level whose DGO the overlord loads (the last prefetch): parked prefetches of
   // other levels are unloaded, the game gave up on them (Jak died while the next level loaded)
@@ -1051,6 +1068,9 @@ class CtrLevels {
   std::atomic<bool> m_hold_black{false};  // the renderer's black hold (CtrRenderer::hold_black)
   std::set<std::string> m_resident;  // names in m_levels + m_prefetched (a prefetch skips them)
   void* m_thread = nullptr;
+#ifndef __3DS__
+  std::thread m_host_loader;  // (host, CTR_STREAM_SIM)
+#endif
   std::set<std::string> m_requested;  // queued, loading or done but not taken (under m_lock)
   struct Prefetched {
     std::unique_ptr<CtrLevelData> lev;
@@ -1104,7 +1124,6 @@ class CtrLevels {
   // the bytes the repair of incomplete levels waits for (kept free above the arena's floor)
   u32 m_stream_repair_room = 0;
   u32 m_stream_serial = 0;
-  std::vector<Done> m_stream_delayed;  // host, CTR_STREAM_SIM: done, not taken yet
   std::vector<Done> m_load_delayed;    // (AI-assisted, j2intro) host, CTR_LOAD_DELAY_MS: the same
   // the camera: where it was last drawn from, its velocity (game units per ms, smoothed)
   float m_cam[3] = {0, 0, 0}, m_cam_vel[3] = {0, 0, 0};
@@ -1141,6 +1160,7 @@ class CtrLevels {
   u64 m_cut_frame = 0;         // the last camera cut (a jump of > kCutMeters, or of the factor)
   u64 m_lv_frame = 0;  // (AI-assisted, j2intro) note_late_in_view
   u32 m_lv_count = 0;
+  u32 m_lv_ring0 = 0;
   bool m_lv_recent = false;
   u64 m_idle_frame = 0;        // the last idle fill job
   // Jak: camera space (stream_note_target, its frame), then world (stream_note_camera)
@@ -1197,6 +1217,7 @@ class CtrLevels {
     // ring 0 (ctr_detail::kNearRingMeters): the bytes of its units per frame, units freed for
     // them, in-view group frames there drawn far for want of their data
     u64 ring0_sum = 0, ring0_max = 0, ring0_evictions = 0, ring0_late = 0;
+    u64 burst_frames = 0;
   } m_sst;
 };
 
@@ -1220,6 +1241,13 @@ void ctr_level_set_detail(float t);
 // (AI-assisted, title-popin) auto_detail: the GPU is over its budget (frames about to miss their
 // vblank): lower distances apply to what is in view too
 void ctr_level_set_detail_urgent(bool urgent);
+// host A/B, env CTR_ARRIVAL_OFF: the arrival changes off (load order, faster reading, holds)
+bool ctr_arrival_off();
+#ifndef __3DS__
+// host, CTR_STREAM_SIM: the loader thread's jobs and the render thread's frames one at a time
+// (the soft GPU backend is not thread safe)
+extern std::mutex g_host_gpu_mutex;
+#endif
 /*! (AI-assisted, j2intro; as Jak 1's title3) render thread, before the frame's level draws (Jak II):
  * the screen is black this frame (the game's blackout, or the renderer holding it). Nothing is
  * kept hidden or far "in view" for late data then (nobody saw it missing): dormant chunks read
