@@ -16,6 +16,7 @@ void UnqueueMessage(IsoMessage* cmd);
 IsoMessage* GetMessage();
 void ProcessMessageData();
 bool QueuesEmpty();  // (AI-assisted) no queued command at any priority
+void IsoQueueLogState();
 void ReturnMessage(IsoMessage* cmd);
 IsoBufferHeader* TryAllocateBuffer(uint32_t size);
 

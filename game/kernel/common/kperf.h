@@ -93,6 +93,8 @@ void note_level_poll(const char* name);
 void watchdog_tick();
 //! the GOAL process that runs now (game version specific), for the watchdog's line
 void set_process_name_hook(bool (*hook)(char* out, int size));
+//! the IOP's state, logged with a stall in an RPC call, sync or poll
+void set_iop_state_hook(void (*hook)());
 
 struct Scope {
   explicit Scope(Cat c) : cat(c), start(now_us()) {}

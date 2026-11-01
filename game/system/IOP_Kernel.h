@@ -95,6 +95,7 @@ struct IopThread {
   u32 priority = 0;
   s32 thID = -1;
   s32 wakeupCount = 0;
+  s32 waitId = -1;  // the semaphore, mailbox or event flag waited on
   // (AI-assisted) DelayThreadNotifiable / NotifyThread
   bool wait_notifiable = false;  // in DelayThreadNotifiable: NotifyThread ends the delay
   bool notified = false;         // NotifyThread came while the thread wasn't in it
@@ -240,6 +241,9 @@ class IOP_Kernel {
   void signal_vblank() { vblank_recieved = true; };
 
   bool sif_busy(u32 id);
+  // for a stall report: every thread, the RPC servers' calls, the overlord's queues (no locks)
+  void log_state();
+  void set_overlord_state_hook(void (*hook)()) { m_overlord_state = hook; }
 
   void sif_rpc(s32 rpcChannel,
                u32 fno,
@@ -268,6 +272,9 @@ class IOP_Kernel {
   cothread_t kernel_thread;
   s32 _nextThID = 0;
   IopThread* _currentThread = nullptr;
+  std::atomic<IopThread*> m_running{nullptr};
+  std::atomic<s64> m_run_start_us{0};
+  void (*m_overlord_state)() = nullptr;
   std::vector<IopThread> threads;
   std::vector<Messagebox> mbxs;
   std::vector<SifRecord> sif_records;

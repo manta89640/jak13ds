@@ -9,6 +9,8 @@
 #include "common/util/Assert.h"
 #include "common/util/FileUtil.h"
 
+#include "fmt/format.h"
+
 #include "game/common/ee_mem_write.h"
 #include "game/kernel/common/kperf.h"
 #include "game/sce/iop.h"
@@ -287,6 +289,7 @@ s32 IOP_Kernel::WaitSema(s32 id) {
   sema.wait_list.push_back(_currentThread);
   _currentThread->state = IopThread::State::Wait;
   _currentThread->waitType = IopThread::Wait::Semaphore;
+  _currentThread->waitId = id;
   leaveThread();
 
   return KE_OK;
@@ -331,6 +334,7 @@ s32 IOP_Kernel::WaitEventFlag(s32 flag, u32 pattern, u32 mode) {
 
     _currentThread->state = IopThread::State::Wait;
     _currentThread->waitType = IopThread::Wait::EventFlag;
+    _currentThread->waitId = flag;
     leaveThread();
 
     return KE_OK;
@@ -370,6 +374,7 @@ s32 IOP_Kernel::ReceiveMbx(void** msg, s32 id) {
   box.wait_thread = _currentThread;
   _currentThread->state = IopThread::State::Wait;
   _currentThread->waitType = IopThread::Wait::Messagebox;
+  _currentThread->waitId = id;
   leaveThread();
 
   auto ret = PollMbx(msg, id);
@@ -459,7 +464,12 @@ void IOP_Kernel::runThread(IopThread* thread) {
   ASSERT(_currentThread == nullptr);  // should run in the kernel thread
   _currentThread = thread;
   thread->state = IopThread::State::Run;
+  m_run_start_us.store(
+      time_point_cast<microseconds>(steady_clock::now()).time_since_epoch().count(),
+      std::memory_order_relaxed);
+  m_running.store(thread, std::memory_order_relaxed);
   co_switch(thread->thread);
+  m_running.store(nullptr, std::memory_order_relaxed);
   _currentThread = nullptr;
 }
 
@@ -589,6 +599,77 @@ std::optional<time_stamp> IOP_Kernel::dispatch() {
   // reaction by 100 us.
 #endif
   return nextWakeup();
+}
+
+void IOP_Kernel::log_state() {
+  static const char* kState[] = {"run", "ready", "wait", "wait-suspend", "suspend", "dormant"};
+  static const char* kWait[] = {"", "sleep", "sema", "delay", "mbx", "event"};
+  const auto now = time_point_cast<microseconds>(steady_clock::now());
+  IopThread* running = m_running.load(std::memory_order_relaxed);
+  if (running) {
+    const s64 us = now.time_since_epoch().count() - m_run_start_us.load(std::memory_order_relaxed);
+    printf("[iop] running %s for %.1f s without a switch\n", running->name.c_str(), us / 1e6);
+  } else {
+    printf("[iop] no thread running (the kernel waits or dispatches)\n");
+  }
+  std::string line;
+  for (size_t i = 0; i < threads.size(); i++) {
+    const auto& t = threads[i];
+    if (!t.function) {
+      continue;
+    }
+    line += fmt::format(" {} {}", t.name, kState[(int)t.state]);
+    if (t.state == IopThread::State::Wait) {
+      line += fmt::format(" {}", kWait[(int)t.waitType]);
+      if (t.waitType == IopThread::Wait::Semaphore) {
+        line += fmt::format(" {} (count {})", t.waitId, semas[t.waitId].count);
+      } else if (t.waitType == IopThread::Wait::Messagebox ||
+                 t.waitType == IopThread::Wait::EventFlag) {
+        line += fmt::format(" {}", t.waitId);
+      } else if (t.waitType == IopThread::Wait::Delay) {
+        line += fmt::format(" {} ms", (t.resumeTime - now).count() / 1000);
+      }
+    }
+    if (t.wakeupCount) {
+      line += fmt::format(" (wakeups {})", t.wakeupCount);
+    }
+    line += ",";
+  }
+  if (!line.empty()) {
+    line.pop_back();
+  }
+  printf("[iop] threads:%s\n", line.c_str());
+  line.clear();
+  for (const auto& r : sif_records) {
+    const char* name = r.thread_to_wake < threads.size() ? threads[r.thread_to_wake].name.c_str()
+                                                         : "?";
+    line += fmt::format(" {:x} {} {}", r.qd->serve_data->command, name,
+                        r.cmd.finished ? "idle" : (r.cmd.started ? "serving" : "sent"));
+    if (!r.cmd.finished) {
+      line += fmt::format(" (fno {}, {} B)", r.cmd.fno, r.cmd.size);
+    }
+    line += ",";
+  }
+  if (!line.empty()) {
+    line.pop_back();
+  }
+  printf("[iop] rpc servers:%s\n", line.c_str());
+  line.clear();
+  for (size_t i = 1; i < mbxs.size(); i++) {
+    if (!mbxs[i].messages.empty() || mbxs[i].wait_thread) {
+      line += fmt::format(" {}: {} messages{}{},", i, mbxs[i].messages.size(),
+                          mbxs[i].wait_thread ? ", waited on by " : "",
+                          mbxs[i].wait_thread ? mbxs[i].wait_thread->name : "");
+    }
+  }
+  if (!line.empty()) {
+    line.pop_back();
+  }
+  printf("[iop] mailboxes:%s\n", line.empty() ? " all empty" : line.c_str());
+  if (m_overlord_state) {
+    m_overlord_state();
+  }
+  fflush(stdout);
 }
 
 void IOP_Kernel::set_rpc_queue(iop::sceSifQueueData* qd, u32 thread) {

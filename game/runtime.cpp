@@ -46,6 +46,7 @@
 #include "game/kernel/common/kmachine.h"
 #include "game/kernel/common/kmalloc.h"
 #include "game/kernel/common/kmemcard.h"
+#include "game/kernel/common/kperf.h"
 #include "game/kernel/common/kprint.h"
 #include "game/kernel/common/kscheme.h"
 #include "game/kernel/jak1/kboot.h"
@@ -364,6 +365,24 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
   iop.reset_allocator();
   ee::LIBRARY_sceSif_register(&iop);
   iop::LIBRARY_register(&iop);
+  static IOP* s_iop_for_watchdog = nullptr;
+  s_iop_for_watchdog = &iop;
+  kperf::set_iop_state_hook([]() { s_iop_for_watchdog->kernel.log_state(); });
+#ifndef __3DS__
+  // the 3DS's game thread watchdog (ctr_gpu_citro3d.c diag thread) on the host
+  if (const char* e = getenv("OPENGOAL_WATCHDOG"); e && e[0] == '1') {
+    static bool s_started = false;
+    if (!s_started) {
+      s_started = true;
+      std::thread([]() {
+        for (;;) {
+          std::this_thread::sleep_for(std::chrono::seconds(1));
+          kperf::watchdog_tick();
+        }
+      }).detach();
+    }
+  }
+#endif
 #ifdef __3DS__
   // (AI-assisted) wake the IOP for its vblank handler: it doesn't poll every millisecond any more
   Gfx::register_vsync_callback([&iop]() {
@@ -422,6 +441,7 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
     lg::debug("[IOP] Run!");
   } else {
     lg::debug("[IOP] Shutdown!");
+    kperf::set_iop_state_hook(nullptr);
     return;
   }
 
@@ -479,6 +499,7 @@ void iop_runner(SystemThreadInterface& iface, GameVersion version) {
     }
   }
 
+  kperf::set_iop_state_hook(nullptr);
   Gfx::clear_vsync_callback();
 }
 }  // namespace

@@ -11,12 +11,15 @@
 #include "game/overlord/jak1/iso.h"
 #include "game/sce/iop.h"
 
+#include "fmt/format.h"
+
 using namespace iop;
 
 namespace jak1 {
 constexpr int N_BUFFERS = 4;
 constexpr int N_STR_BUFFERS = 1;
 constexpr int N_VAG_CMDS = 64;
+static_assert(N_VAG_CMDS <= 64, "vag_cmd_used has a bit per command");
 
 struct IsoBuffer {
   IsoBufferHeader header;
@@ -35,7 +38,7 @@ static IsoStrBuffer* sFreeStrBuffer;
 PriStackEntry gPriStack[N_PRIORITIES];
 
 u32 vag_cmd_cnt;
-u32 vag_cmd_used;
+u64 vag_cmd_used;  // a bit per command: a u32 gave 32 of the 64, and GetVAGCommand spun at 32
 u32 max_vag_cmd_cnt;
 VagCommand vag_cmds[N_VAG_CMDS];
 
@@ -272,6 +275,29 @@ bool QueuesEmpty() {
   return true;
 }
 
+void IsoQueueLogState() {
+  std::string line;
+  for (int pri = N_PRIORITIES - 1; pri >= 0; pri--) {
+    for (u32 i = 0; i < gPriStack[pri].n && i < PRI_STACK_LENGTH; i++) {
+      const IsoMessage* cmd = gPriStack[pri].cmds[i];
+      u32 buffers = 0;
+      for (auto* b = cmd ? cmd->callback_buffer : nullptr; b && buffers < 8;
+           b = (IsoBufferHeader*)b->next) {
+        buffers++;
+      }
+      line += fmt::format(" p{} {} (status {}, {} buffers{}),", pri, gPriStack[pri].names[i].c_str(),
+                          cmd ? (s32)cmd->status : -99, buffers,
+                          cmd && cmd->fd ? "" : ", no file");
+    }
+  }
+  if (!line.empty()) {
+    line.pop_back();
+  }
+  printf("[iop] iso queue:%s; vag commands %u in use of %d (most %u); free buffers %s/%s\n",
+         line.empty() ? " empty" : line.c_str(), vag_cmd_cnt, N_VAG_CMDS, max_vag_cmd_cnt,
+         sFreeBuffer ? "page" : "none", sFreeStrBuffer ? "str" : "none");
+}
+
 /*!
  * Execute callbacks and maintain buffers for finished reads in the priority stack
  */
@@ -352,12 +378,15 @@ VagCommand* GetVAGCommand() {
 
     // try to get something.
     for (s32 i = 0; i < N_VAG_CMDS; i++) {
-      if (!((vag_cmd_used >> (i & 0x1f)) & 1)) {
+      if (!((vag_cmd_used >> i) & 1)) {
         // free!
-        vag_cmd_used |= (1 << (i & 0x1f));
+        vag_cmd_used |= (1ull << i);
         vag_cmd_cnt++;
         if (vag_cmd_cnt > max_vag_cmd_cnt) {
           max_vag_cmd_cnt = vag_cmd_cnt;
+          if (vag_cmd_cnt % 16 == 0) {
+            lg::warn("[iop] {} VAG commands queued for the ISO thread", vag_cmd_cnt);
+          }
         }
         SignalSema(sSema);
         return &vag_cmds[i];
@@ -370,11 +399,11 @@ VagCommand* GetVAGCommand() {
 
 void FreeVAGCommand(VagCommand* cmd) {
   s32 idx = cmd - vag_cmds;
-  if (idx >= 0 && idx < N_VAG_CMDS && ((vag_cmd_used >> (idx & 0x1f)) & 1)) {
+  if (idx >= 0 && idx < N_VAG_CMDS && ((vag_cmd_used >> idx) & 1)) {
     while (WaitSema(sSema)) {
     }
 
-    vag_cmd_used &= ~(1 << (idx & 0x1f));
+    vag_cmd_used &= ~(1ull << idx);
     vag_cmd_cnt--;
     SignalSema(sSema);
   } else {

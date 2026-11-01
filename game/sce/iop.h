@@ -118,6 +118,8 @@ void DelayThread(u32 usec);
 // (AI-assisted) see IOP_Kernel::DelayThreadNotifiable / SetMbxNotifyThread
 void DelayThreadNotifiable(u32 usec);
 void SetMbxNotifyThread(s32 mbx, s32 thid);
+// the overlord's part of IOP_Kernel::log_state
+void SetOverlordStateHook(void (*hook)());
 void YieldThread();
 s32 CreateThread(ThreadParam* param);
 s32 ExitThread();

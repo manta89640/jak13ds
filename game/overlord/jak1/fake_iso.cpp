@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <span>
+#include <thread>
 
 #include "common/log/log.h"
 #include "common/util/Assert.h"
@@ -461,6 +464,41 @@ static int32_t fs_read_plain(LoadStackEntry* fd, void* buffer, int32_t real_size
   return 0;
 }
 
+// debug: slow card reads of one file, "NAME:MS" or "NAME:rMS" (random 0 to MS);
+// config.ini io_delay on the 3DS, OPENGOAL_IO_DELAY on the host
+static void debug_read_delay(const char* file) {
+  struct Delay {
+    char name[32] = {};
+    int ms = 0;
+    bool random = false;
+  };
+  static const Delay d = [] {
+    Delay r;
+    char v[48] = {};
+#ifdef __3DS__
+    ctr_config_get("io_delay", v, sizeof(v));
+#else
+    if (const char* e = getenv("OPENGOAL_IO_DELAY")) {
+      strncpy(v, e, sizeof(v) - 1);
+    }
+#endif
+    if (char* colon = strchr(v, ':')) {
+      *colon = 0;
+      strncpy(r.name, v, sizeof(r.name) - 1);
+      r.random = colon[1] == 'r';
+      r.ms = atoi(colon + 1 + r.random);
+      if (r.ms > 0) {
+        lg::warn("[io] debug: reads of {} slowed by {}{} ms", r.name, r.random ? "0 to " : "",
+                 r.ms);
+      }
+    }
+    return r;
+  }();
+  if (d.ms > 0 && !strncmp(file, d.name, strlen(d.name))) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(d.random ? rand() % (d.ms + 1) : d.ms));
+  }
+}
+
 void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) {
   // (AI-assisted) slow SD card reads are logged: a freeze in the game can be the game waiting for
   // one (with the [hitch] lines of kperf)
@@ -528,6 +566,7 @@ void fs_read(LoadStackEntry* fd, void* buffer, int32_t len, s32 thread_to_wake) 
 
   fd->location += (len / SECTOR_SIZE);
   sReadInfo = fd;
+  debug_read_delay(fd->fr->name);
   {
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                 t_start)

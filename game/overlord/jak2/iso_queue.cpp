@@ -558,7 +558,7 @@ void FreeVAGCommand(VagCmd* cmd) {
   u32 vag_idx;
 
   // get array index
-  vag_idx = (cmd - vag_cmds) / sizeof(VagCmd);
+  vag_idx = ((uintptr_t)cmd - (uintptr_t)vag_cmds) / sizeof(VagCmd);  // was 0 for every command
 
   if ((vag_idx < 0x1f) && ((vag_cmd_used >> vag_idx) & 1U) != 0) {
     while (WaitSema(sSema))

@@ -183,6 +183,7 @@ u32 InitISOFS(const char* fs_mode, const char* loading_screen) {
   SetMbxNotifyThread(iso_mbx, iso_thread);
   SetMbxNotifyThread(sync_mbx, iso_thread);
 #endif
+  SetOverlordStateHook(IsoQueueLogState);
 
   thread_param.attr = TH_C;
   thread_param.initPriority = 98;

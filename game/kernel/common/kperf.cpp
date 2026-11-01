@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -122,7 +123,12 @@ std::atomic<const char*> g_wd_level{nullptr};
 std::atomic<u32> g_wd_level_polls{0};
 std::atomic<const char*> g_wd_section{nullptr};
 bool (*g_process_hook)(char*, int) = nullptr;
+std::atomic<void (*)()> g_iop_state_hook{nullptr};
 }  // namespace
+
+void set_iop_state_hook(void (*hook)()) {
+  g_iop_state_hook.store(hook);
+}
 
 void note_level_poll(const char* name) {
   g_wd_level.store(name, std::memory_order_relaxed);
@@ -157,6 +163,10 @@ void watchdog_tick() {
          g_wd_rpc_channel.load(std::memory_order_relaxed),
          g_wd_level_polls.load(std::memory_order_relaxed), level ? level : "-");
   fflush(stdout);
+  const bool iop_wait = (stage && strstr(stage, "IOP")) || g_wd_rpc_polls.load() > 0;
+  if (auto* hook = g_iop_state_hook.load(); hook && iop_wait) {
+    hook();
+  }
 }
 
 u64 ticks() {
