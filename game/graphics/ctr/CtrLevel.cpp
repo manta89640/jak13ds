@@ -677,8 +677,11 @@ void CtrLevels::serve_streams_in_load() {
     if (!(df && df + 3 >= rf) || m_game_black.load(std::memory_order_relaxed)) {
       return m_queue.end();  // nothing drawn or black: the game waits for this load
     }
-    auto it = std::find_if(m_queue.begin(), m_queue.end(),
-                           [](const Job& j) { return j.stream && j.urgent; });
+    // (Jak 1: an arrival's load serves ring 0 only, so it is done before its DGO)
+    const bool ring0_only = g_game_version == GameVersion::Jak1 && !ctr_arrival_off();
+    auto it = std::find_if(m_queue.begin(), m_queue.end(), [&](const Job& j) {
+      return j.stream && j.urgent && (!ring0_only || j.ring0);
+    });
     if (it == m_queue.end()) {
       m_stream_urgent_queued = false;
     }
@@ -8857,6 +8860,7 @@ void CtrLevels::stream_update(u64 frame) {
     job.stream_parts.push_back(std::move(part));
     packed += su.packed;
     job.urgent = job.urgent || w.score < 0;
+    job.ring0 = job.ring0 || (job.stream_parts.size() == 1 && su.ring0);
     // (a backlog of needed units, after a cut: bigger jobs, fewer requests per byte)
     const u32 limit = burst                  ? kBurstBatch * kBatchBytes
                       : need_now > 1024 * 1024 ? 2 * kBatchBytes

@@ -914,6 +914,7 @@ class CtrLevels {
     size_t window = 0;                     // the reader's window for these reads
     u32 serial = 0;                        // (stream jobs: each its own key)
     bool urgent = false;  // (stream) holds units needed now: before a level's prefetch
+    bool ring0 = false;   // (stream) starts with ring 0 units
     // (AI-assisted, streammem) the linear memory the job's meshes take (parts jobs: kept free of
     // the stream arena's growth while it is queued or runs), when it was queued (the loader's
     // aging), a detail reload with more chunks after these (read by the next one)
