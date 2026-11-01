@@ -55,11 +55,11 @@ class CtrVram {
  public:
   /*!
    * (AI-assisted, j2-mem2) sparse: the VRAM copy is kept per 16 KB chunk, made when something is
-   * first written there (unwritten chunks read as zeros, as the whole copy did); Jak II only
-   * writes the areas something reads (uploads are lazy), ~a third of the 4 MB. Else (Jak 1) one
-   * 4 MB block, as before.
+   * first written there (unwritten chunks read as zeros, as the whole copy did); uploads are
+   * lazy, so only the areas something reads are written (Jak II ~1.4 MB, Jak 1 ~2.7 MB of the
+   * 4). Else one 4 MB block. prewarm: Jak 1's boot pages and fonts decoded ahead (queue_prewarm).
    */
-  explicit CtrVram(bool sparse = false);
+  explicit CtrVram(bool sparse = false, bool prewarm = false);
   ~CtrVram();
 
   /*!
@@ -241,7 +241,8 @@ class CtrVram {
   u8* m_top[256];
   u8 m_is_top[256];
   bool m_sparse = false;
-  std::unique_ptr<u8[]> m_mem;  // not sparse (Jak 1): all chunks
+  bool m_prewarm_on = false;
+  std::unique_ptr<u8[]> m_mem;  // not sparse: all chunks
   std::unique_ptr<u8[]> m_own[256];  // sparse: the chunk's memory
   u32 m_full_chunks = 0, m_top_chunks = 0;
   u8* wr(u32 addr) {

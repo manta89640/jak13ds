@@ -137,15 +137,8 @@ struct Range {
 }  // namespace
 
 namespace {
-#if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
-// (AI-assisted, j2-mem2) what unwritten chunks of a sparse VRAM copy read as (not in the Jak 1 3DS
-// build: its copy is never sparse)
+// (AI-assisted, j2-mem2) what unwritten chunks of a sparse VRAM copy read as
 alignas(16) const u8 kZeroChunk[16384] = {};
-constexpr bool kSparseBuild = true;
-#else
-const u8* const kZeroChunk = nullptr;
-constexpr bool kSparseBuild = false;
-#endif
 std::atomic<u32> g_copy_bytes{0};  // of the last CtrVram made (the renderer's)
 }  // namespace
 
@@ -153,8 +146,7 @@ unsigned ctr_vram_copy_kb() {
   return g_copy_bytes.load(std::memory_order_relaxed) / 1024;
 }
 
-CtrVram::CtrVram(bool sparse) : m_sparse(sparse && kSparseBuild) {
-  sparse = m_sparse;
+CtrVram::CtrVram(bool sparse, bool prewarm) : m_sparse(sparse), m_prewarm_on(prewarm) {
   static_assert(kChunks == kChunkCount);
   static_assert(kChunks * kChunkBytes == kVramBytes);
   memset(m_top, 0, sizeof(m_top));
@@ -787,7 +779,7 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     m_stats.relocates_skipped++;
     return;
   }
-  if (!m_sparse) {
+  if (m_prewarm_on) {
     // the font, as font-set-tex0 gives it to the font templates (its CBP is not in the key)
     auto lg2 = [](u32 x) { return (u64)(31 - __builtin_clz(std::max(x, 1u))) & 0xf; };
     const u64 tex0 = (u64)(dest_block & 0x3fff) | (u64)(info.width & 0x3f) << 14 |
@@ -1400,7 +1392,7 @@ void CtrVram::queue_prewarm(const u8* tpage, const u8* ee_mem, u32 s7_ptr) {
   GoalTexturePageHeader page;
   memcpy(&page, tpage, sizeof(page));
   const char* name = (const char*)(ee_mem + page.name_ptr + 4);
-  if (m_sparse || (strcmp(name, "effects") != 0 && strcmp(name, "common") != 0) ||
+  if (!m_prewarm_on || (strcmp(name, "effects") != 0 && strcmp(name, "common") != 0) ||
       !m_page_end) {
     return;
   }

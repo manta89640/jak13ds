@@ -501,8 +501,8 @@ void CtrDirectBucketRenderer::deferred_sky(void* arg) {
 // ---------------------------------------------------------------------------
 
 CtrRenderer::CtrRenderer()
-    // (AI-assisted, j2-mem2) Jak II: the VRAM copy only where something is written (sparse)
-    : m_vram(std::make_unique<CtrVram>(g_game_version == GameVersion::Jak2)),
+    // the VRAM copy only where something is written (sparse); Jak 1 prewarms its boot pages
+    : m_vram(std::make_unique<CtrVram>(true, g_game_version != GameVersion::Jak2)),
       m_levels(std::make_unique<CtrLevels>()) {
 #if !defined(__3DS__) || defined(OG3DS_GAME_JAK2)
   // (AI-assisted) Jak II: its own bucket table (CtrRendererJak2.cpp)
