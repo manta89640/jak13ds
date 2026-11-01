@@ -6148,8 +6148,10 @@ static u32 s_mask_param[3], s_mask_lod[3];
 static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
   C3D_Tex* t = &m->tex;
   t->param = color->param & ~(u32)GPU_TEXTURE_ETC1_PARAM;
-  t->maxLevel = color->maxLevel;
-  t->minLevel = color->minLevel;
+  /* the mask's own levels: a colour texture can have more */
+  const u8 mask_max = m->levels > 0 ? (u8)(m->levels - 1) : 0;
+  t->maxLevel = color->maxLevel < mask_max ? color->maxLevel : mask_max;
+  t->minLevel = color->minLevel < t->maxLevel ? color->minLevel : t->maxLevel;
   t->lodBias = color->lodBias;
   const C3D_Tex** cur = unit == 1 ? &s_tex1_mask : &s_tex2_mask;
   if (*cur == t && s_mask_data[unit] == t->data && s_mask_param[unit] == t->param &&
