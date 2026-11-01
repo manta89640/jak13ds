@@ -204,7 +204,7 @@ struct CtrSettings {
   // top_block32 = auto | off | on. auto: if the early depth self-test passes only in 32x32 block
   // mode, the top render target becomes 256x416 in that mode (the screen shows 240x400 of it).
   // on: that target always (a test; early depth still needs its self-test)
-  int top_block32 = 1;
+  int top_block32 = 0; /* off: on hardware game frames lose blocks with block32 early depth */
   // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
   // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
   // ocean = waves marks are left out). Off by default.
