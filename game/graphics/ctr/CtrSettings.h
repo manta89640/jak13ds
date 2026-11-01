@@ -140,13 +140,11 @@ struct CtrSettings {
   // RGBA4 level/model textures stored as RGBA8 (twice the memory): Azahar renders RGBA4 as noise.
   // Default (auto): on in the emulator, off on the 3DS.
   bool rgba4_as_rgba8 = false;
-  // Level textures in VRAM while there is room (the GPU reads VRAM much faster than the main
-  // memory). Default (auto): on, in the emulator too (it draws VRAM textures right; only RGBA4 is
-  // noise there, see rgba4_as_rgba8).
+  // Level textures in VRAM while there is room. Default (auto): off (TODO.md: corruption on hardware).
   bool vram_textures = true;
-  // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level, 2 trilinear (default, as
-  // the PC: blends two levels).
-  int mipmaps = 2;
+  // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default: one texel fetch),
+  // 2 trilinear (blends two levels, as the PC).
+  int mipmaps = 1;
   // (AI-assisted) the LOD bias of mipmapped level / model textures (+0.5, +1: the next smaller
   // level sooner, blurrier, fewer texels read); 0 = none. (AI-assisted, fidelity2) +0.25 by default
   // (+0.5 looked too blurry to the user in Azahar; safe preset: 0)
