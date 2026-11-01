@@ -6050,6 +6050,10 @@ void make_cull_clusters(CtrLevelData& lev) {
 // A level's texture pools: VRAM first by the level's priority, within it the earlier pieces (the
 // background's textures) first.
 constexpr u32 kTexPoolPiece = 256 * 1024;
+// config.ini texshare = off: the pieces before texture sharing
+static u32 tex_pool_piece() {
+  return ctr_settings().texshare ? kTexPoolPiece : 1024 * 1024;
+}
 void set_tex_priority(const std::vector<int>& pools, int priority) {
   for (size_t i = 0; i < pools.size(); i++) {
     ctr_gpu_pool_set_priority(pools[i], priority * 16 + 15 - (int)std::min<size_t>(i, 15));
@@ -6230,7 +6234,7 @@ bool CtrLevels::load_textures(c3l::Reader& f,
         auto& p = plan[i];
         if (p.ok && group_of[i] < 0 && background[i] == (pass == 0)) {
           const u32 b = (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
-          if (piece_bytes.empty() || piece_bytes.back() + b > kTexPoolPiece) {
+          if (piece_bytes.empty() || piece_bytes.back() + b > tex_pool_piece()) {
             piece_bytes.push_back(0);
             piece_group.push_back(-1);
           }
@@ -6251,7 +6255,7 @@ bool CtrLevels::load_textures(c3l::Reader& f,
         auto& p = plan[i];
         if (p.ok && group_of[i] == (int)g) {
           const u32 b = (ctr_gpu_tex_bytes(texs[i].w, texs[i].h, p.format, p.levels) + 127) & ~127u;
-          if (!any || piece_bytes.back() + b > kTexPoolPiece) {
+          if (!any || piece_bytes.back() + b > tex_pool_piece()) {
             piece_bytes.push_back(0);
             piece_group.push_back((int)g);
             any = true;
@@ -6385,6 +6389,10 @@ bool CtrLevels::load_textures(c3l::Reader& f,
 }
 
 int CtrLevels::share_group_of(u64 key) {
+  if (!m_share_read && !ctr_settings().texshare) {
+    m_share_read = true;
+    lg::info("[ctr] texshare = off: no shared texture groups, 1 MB level texture pools");
+  }
   if (!m_share_read) {
     m_share_read = true;
     const auto path = ctr_level_c3l_dir() / "texshare.c3t";
