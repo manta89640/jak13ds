@@ -717,6 +717,13 @@ class CtrLevels {
     }
     m_game_cam_new = true;
   }
+  //! game thread, render thread idle: the camera position of the game's continue point
+  void note_continue_camera(const float* trans, bool valid) {
+    for (int i = 0; i < 3 && valid; i++) {
+      m_cont_cam[i] = trans[i];
+    }
+    m_cont_valid = valid;
+  }
   /*! (AI-assisted, streaming) Jak's first bone in camera space (merc renderer, any frame) */
   void stream_note_target(float x, float y, float z, u64 frame) {
     m_target_cam[0] = x;
@@ -745,6 +752,11 @@ class CtrLevels {
    * again (its dormancy ended) within the last 3 s. The renderer keeps a screen that comes out of
    * black black while there is such a thing after a level was shown or the camera cut
    * (CtrRenderer::draw_pmode_fade), at most 1.5 s (Jak II: while it gets fewer, at most 6 s). */
+  //! render thread, each frame: the game's own blackout (not the renderer's black hold)
+  void set_game_black(bool black, bool hold) {
+    m_game_black.store(black, std::memory_order_relaxed);
+    m_hold_black.store(hold, std::memory_order_relaxed);
+  }
   void note_late_in_view(u64 frame, u32 n, bool recent) {
     if (m_lv_frame != frame) {
       m_lv_frame = frame;
@@ -1020,6 +1032,8 @@ class CtrLevels {
   std::set<std::string> m_parked;
   std::atomic<u64> m_render_frame{0};  // the render thread's frame (process_pending_loads)
   std::atomic<u64> m_drawn_frame{0};   // (AI-assisted, streaming) the last frame a level was drawn
+  std::atomic<bool> m_game_black{false};  // the game's blackout (a continue or load): it waits
+  std::atomic<bool> m_hold_black{false};  // the renderer's black hold (CtrRenderer::hold_black)
   std::set<std::string> m_resident;  // names in m_levels + m_prefetched (a prefetch skips them)
   void* m_thread = nullptr;
   std::set<std::string> m_requested;  // queued, loading or done but not taken (under m_lock)
@@ -1123,6 +1137,8 @@ class CtrLevels {
   // and its velocity (game units per frame, smoothed); the tie LOD factor of the last level drawn
   float m_game_cam_next[3] = {0, 0, 0}, m_game_cam[3] = {0, 0, 0}, m_game_vel[3] = {0, 0, 0};
   bool m_game_cam_new = false, m_game_cam_valid = false;
+  float m_cont_cam[3] = {0, 0, 0};  // note_continue_camera
+  bool m_cont_valid = false;
   float m_k_last = 0.f, m_k_any = 0.f;
   // scheduling (kept to avoid allocations)
   struct StreamCand {

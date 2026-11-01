@@ -441,9 +441,23 @@ void CtrLevels::loader_main() {
     // With nothing drawn (a load the game waits for, black screen) the level loads go first. (A
     // rule by the game's ready() calls was tried: it polls them for the neighbour too.)
     const u64 rf = m_render_frame.load(), df = m_drawn_frame.load();
-    const bool playing = df && df + 3 >= rf;
+    // a black screen is a continue or load the game waits for: its level first
+    const bool black = m_game_black.load(std::memory_order_relaxed);
+    const bool playing = df && df + 3 >= rf && !black;
     auto it = m_queue.end();
-    if (playing) {
+    if (black) {
+      it = pick([&](const Job& j) { return j.prefetch && j.name == m_dgo_level && can_start(j); });
+      if (it == m_queue.end()) {
+        it = pick([&](const Job& j) { return !j.parts() && !j.prefetch && can_start(j); });
+      }
+      if (it == m_queue.end()) {
+        it = pick([](const Job& j) { return j.stream && j.urgent; });
+      }
+    } else if (m_hold_black.load(std::memory_order_relaxed)) {
+      // the renderer keeps the screen black for what is missing in view: that first
+      it = pick([](const Job& j) { return j.stream && j.urgent; });
+    }
+    if (playing && it == m_queue.end()) {
       // (AI-assisted, streammem) aging (kAgeMs): the other jobs don't wait behind the urgent stream
       // jobs for good
       const double now = ctr_gpu_time_ms();
@@ -568,8 +582,8 @@ void CtrLevels::serve_streams_in_load() {
   }
   auto pick = [&]() {
     const u64 rf = m_render_frame.load(), df = m_drawn_frame.load();
-    if (!(df && df + 3 >= rf)) {
-      return m_queue.end();  // nothing drawn: the game waits for this load
+    if (!(df && df + 3 >= rf) || m_game_black.load(std::memory_order_relaxed)) {
+      return m_queue.end();  // nothing drawn or black: the game waits for this load
     }
     auto it = std::find_if(m_queue.begin(), m_queue.end(),
                            [](const Job& j) { return j.stream && j.urgent; });
@@ -8204,7 +8218,7 @@ void CtrLevels::stream_update(u64 frame) {
     }
     return true;
   };
-  float p[kLeadSteps + 1][3];
+  float p[kLeadSteps + 2][3];
   for (int i = 0; i < kLeadSteps; i++) {
     for (int c = 0; c < 3; c++) {
       p[i][c] = m_cam[c] + m_cam_vel[c] * kLeadFrames * (float)i / (kLeadSteps - 1);
@@ -8225,13 +8239,21 @@ void CtrLevels::stream_update(u64 frame) {
     }
     np++;
   }
+  // the game black (a continue or load): where it puts the camera too, read before the reveal
+  const bool cont = m_cont_valid && m_game_black.load(std::memory_order_relaxed);
+  if (cont) {
+    for (int c = 0; c < 3; c++) {
+      p[np][c] = m_cont_cam[c];
+    }
+    np++;
+  }
   constexpr float kM = 4096.f;
   // (AI-assisted, title3) the game's camera this frame (note_game_camera) and where its speed takes
   // it: a level loaded but not drawn lately (Sandover behind the title's logo, for seconds before
   // the logo reveals it at the attract camera's start; a level the game shows later) reads the near
   // chunks needed there, with the tie LOD factor of the last level drawn. They are there when it is
   // shown: no groups drawn far at its first frames, then switching near on screen.
-  float pg[kLeadSteps][3];
+  float pg[kLeadSteps + 1][3];
   int ngp = 0;
   if (m_game_cam_new) {
     m_game_cam_new = false;
@@ -8253,6 +8275,12 @@ void CtrLevels::stream_update(u64 frame) {
       for (int c = 0; c < 3; c++) {
         pg[i][c] = m_game_cam[c] + m_game_vel[c] * kLeadFrames * (float)i / (kLeadSteps - 1);
       }
+    }
+    if (cont) {
+      for (int c = 0; c < 3; c++) {
+        pg[ngp][c] = m_cont_cam[c];
+      }
+      ngp++;
     }
   }
   for (auto& [name, lp] : m_levels) {

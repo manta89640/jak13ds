@@ -16,6 +16,8 @@
  * preempt the game thread.
  */
 
+#include <atomic>
+
 #include "common/common_types.h"
 
 namespace kperf {
@@ -77,6 +79,20 @@ struct SectionScope {
   }
   bool on;
 };
+
+//! Game thread watchdog: what the game thread does now (a static string), set at its waits.
+//! watchdog_tick (once a second, from another thread) logs it when the game's frames stop.
+extern std::atomic<const char*> g_stage;
+struct Stage {
+  explicit Stage(const char* s) : prev(g_stage.exchange(s, std::memory_order_relaxed)) {}
+  ~Stage() { g_stage.store(prev, std::memory_order_relaxed); }
+  const char* prev;
+};
+//! the level the game asked the renderer about last (ctr_level_ready)
+void note_level_poll(const char* name);
+void watchdog_tick();
+//! the GOAL process that runs now (game version specific), for the watchdog's line
+void set_process_name_hook(bool (*hook)(char* out, int size));
 
 struct Scope {
   explicit Scope(Cat c) : cat(c), start(now_us()) {}

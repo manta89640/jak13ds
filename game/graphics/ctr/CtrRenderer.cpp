@@ -42,6 +42,7 @@ extern "C" void ctr_thread_sleep_us(unsigned int us);  // platform/3ds/port/ctr_
 #include "game/graphics/ctr/CtrVram.h"
 #include "game/graphics/ctr/CtrSettings.h"
 #include "game/graphics/ctr/ctr_gpu.h"
+#include "game/kernel/common/kperf.h"
 #include "game/graphics/opengl_renderer/buckets.h"
 #include "game/kernel/common/kboot.h"
 #include "game/kernel/common/kmachine.h"
@@ -758,6 +759,8 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted, j2intro / title3) the screen is black this frame (the game's blackout since the
   // last frame, or held black by draw_pmode_fade): the level draws keep nothing hidden or far for
   // late data
+  m_levels->set_game_black(!m_jak2 && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f,
+                           !m_jak2 && m_hold_black);
   ctr_level_set_screen_black(
       m_hold_black ||
       (m_shown_alp < 0.01f && g_pmode_alp.load(std::memory_order_relaxed) < 0.01f));
@@ -1704,9 +1707,8 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   g_ctr->levels().load_common();
   g_ctr->levels().prefetch("title");
   g_async = ctr_gpu_async_start(render_job, nullptr) != 0;
-  if (ctr_settings().render_watchdog) {
-    ctr_gpu_diag_start();  // (AI-assisted) config.ini render_watchdog
-  }
+  // the game thread watchdog always; the render thread's lines with config.ini render_watchdog
+  ctr_gpu_diag_start(ctr_settings().render_watchdog ? 1 : 0);
   g_ctr_ready = true;
   g_ctr->set_async(g_async);
   lg::info("[ctr] renderer ready ({})",
@@ -1784,6 +1786,41 @@ bool game_camera_trans(float* out) {
   return true;
 }
 
+// the camera position of *game-info*'s current continue point (game units), Jak 1
+bool continue_camera_trans(float* out) {
+  static u32 sym = 0;
+  static u32 tries = 0;
+  if (!sym) {
+    if (tries++ % 64) {
+      return false;
+    }
+    sym = jak1::find_symbol_from_c("*game-info*").offset;
+    if (!sym) {
+      return false;
+    }
+  }
+  auto basic_ok = [](u32 a) {
+    return (a & OFFSET_MASK) == BASIC_OFFSET && a >= 0x100000 && a + 256 < (u32)EE_MAIN_MEM_SIZE;
+  };
+  const u32 gi = Ptr<jak1::Symbol>(sym)->value;
+  if (!basic_ok(gi)) {
+    return false;
+  }
+  // game-info current-continue: offset 108; continue-point camera-trans: offset 48
+  const u32 cp = *Ptr<u32>(gi + 108 - 4).c();
+  if (!basic_ok(cp)) {
+    return false;
+  }
+  const float* t = Ptr<float>(cp + 48 - 4).c();
+  for (int i = 0; i < 3; i++) {
+    if (!std::isfinite(t[i])) {
+      return false;
+    }
+    out[i] = t[i];
+  }
+  return t[0] != 0.f || t[1] != 0.f || t[2] != 0.f;
+}
+
 void ctr_send_chain(const void* data, u32 offset) {
   if (!g_ctr) {
     return;
@@ -1810,11 +1847,15 @@ void ctr_send_chain(const void* data, u32 offset) {
   float game_cam[3];
   // (title3, Jak 1 only: *math-camera* through the Jak 1 kernel's symbol table)
   const bool have_game_cam = g_game_version == GameVersion::Jak1 && game_camera_trans(game_cam);
+  float cont_cam[3];
+  const bool have_cont_cam =
+      g_game_version == GameVersion::Jak1 && continue_camera_trans(cont_cam);
   if (g_async) {
     wait_render_idle();
     if (have_game_cam) {
       g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3; render thread idle)
     }
+    g_ctr->levels().note_continue_camera(cont_cam, have_cont_cam);
     const double tp = ctr_gpu_time_ms();
     g_ctr->prepare_frame(data, offset);
     g_ee.prepare_ms += ctr_gpu_time_ms() - tp;
@@ -1832,6 +1873,7 @@ void ctr_send_chain(const void* data, u32 offset) {
     if (have_game_cam) {
       g_ctr->levels().note_game_camera(game_cam);  // (AI-assisted, title3)
     }
+    g_ctr->levels().note_continue_camera(cont_cam, have_cont_cam);
     ctr_gpu_note_release(release);
     g_ctr->render_frame(data, offset);
     g_ee.render_ms += ctr_gpu_time_ms() - now;
@@ -1873,6 +1915,7 @@ void ctr_send_chain(const void* data, u32 offset) {
 
 void ctr_texture_upload_now(const u8* tpage, int mode, u32 s7_ptr) {
   if (g_ctr) {
+    kperf::Stage stage("texture upload");
     wait_render_idle();
     const double t0 = ctr_gpu_time_ms();
     g_ctr->vram().upload_texture_page_now(tpage, mode, g_ee_main_mem, s7_ptr);
@@ -1899,6 +1942,7 @@ void ctr_texture_relocate(u32 destination, u32 source, u32 format) {
 
 void ctr_set_levels(const std::vector<std::string>& levels) {
   if (g_ctr) {
+    kperf::Stage stage("set-levels (the renderer's level list)");
     wait_render_idle();
     g_ctr->levels().set_wanted(levels);
     g_ctr->note_levels(levels);
@@ -1924,11 +1968,17 @@ u32 ctr_frame_vblanks() {
   return g_frame_vblanks;
 }
 
+void ctr_game_watchdog_tick(void) {
+  kperf::watchdog_tick();
+}
+
 bool ctr_level_ready(const char* name) {
   constexpr double kMaxWaitMs = 20000.0;
   if (!name || !g_ctr_ready) {
     return true;
   }
+  kperf::note_level_poll(name);
+  kperf::Stage stage("level ready (the renderer's .c3l)");
   // (AI-assisted) when the wait started and the last poll: the game drops levels that are still
   // loading when its level list changes, which left the entry behind; a later load of that level
   // then found an old start time and started without its background. A wait nobody polled for 2 s

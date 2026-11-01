@@ -111,6 +111,53 @@ int g_windows = 0;
 
 bool g_sections_enabled = false;
 u64 g_counters[(int)Counter::COUNT] = {};
+std::atomic<const char*> g_stage{"boot"};
+
+namespace {
+// watchdog: the game frames, the last RPC poll and level poll (game thread writes, relaxed)
+std::atomic<u64> g_wd_frames{0};
+std::atomic<int> g_wd_rpc_channel{-1};
+std::atomic<u32> g_wd_rpc_polls{0};
+std::atomic<const char*> g_wd_level{nullptr};
+std::atomic<u32> g_wd_level_polls{0};
+std::atomic<const char*> g_wd_section{nullptr};
+bool (*g_process_hook)(char*, int) = nullptr;
+}  // namespace
+
+void note_level_poll(const char* name) {
+  g_wd_level.store(name, std::memory_order_relaxed);
+  g_wd_level_polls.fetch_add(1, std::memory_order_relaxed);
+}
+
+void set_process_name_hook(bool (*hook)(char* out, int size)) {
+  g_process_hook = hook;
+}
+
+void watchdog_tick() {
+  static u64 last = ~0ull;
+  static int still = 0;
+  const u64 f = g_wd_frames.load(std::memory_order_relaxed);
+  still = f == last ? still + 1 : 0;
+  last = f;
+  // after 3 s without a frame, then every 10 s
+  if (still < 3 || (still - 3) % 10) {
+    return;
+  }
+  char proc[64] = "?";
+  if (g_process_hook && !g_process_hook(proc, sizeof(proc))) {
+    snprintf(proc, sizeof(proc), "none");
+  }
+  const char* stage = g_stage.load(std::memory_order_relaxed);
+  const char* level = g_wd_level.load(std::memory_order_relaxed);
+  const char* section = g_wd_section.load(std::memory_order_relaxed);
+  printf("[game] stalled %ds: frame %llu, stage %s, GOAL process %s, section %s; this frame: %u "
+         "polls of RPC channel %d, %u level ready polls (last %s)\n",
+         still, (unsigned long long)f, stage ? stage : "?", proc, section ? section : "-",
+         g_wd_rpc_polls.load(std::memory_order_relaxed),
+         g_wd_rpc_channel.load(std::memory_order_relaxed),
+         g_wd_level_polls.load(std::memory_order_relaxed), level ? level : "-");
+  fflush(stdout);
+}
 
 u64 ticks() {
 #ifdef __3DS__
@@ -152,6 +199,8 @@ void rpc_poll(int channel, bool busy) {
   if (channel < 0 || channel >= kRpcChannels) {
     return;
   }
+  g_wd_rpc_channel.store(channel, std::memory_order_relaxed);
+  g_wd_rpc_polls.fetch_add(1, std::memory_order_relaxed);
   // polls further apart than 2 ms were not a wait loop (the game did other work in between)
 #ifdef __3DS__
   constexpr u64 kMaxGap = 2 * 268112;  // ticks
@@ -204,6 +253,7 @@ void section_begin(const char* name) {
     g_open[g_open_count] = {name, ticks()};
   }
   g_open_count++;
+  g_wd_section.store(name, std::memory_order_relaxed);
 }
 
 void section_end() {
@@ -216,6 +266,8 @@ void section_end() {
   if (g_open_count >= kMaxOpen) {
     return;
   }
+  g_wd_section.store(g_open_count > 0 ? g_open[g_open_count - 1].name : nullptr,
+                     std::memory_order_relaxed);
   const auto& o = g_open[g_open_count];
   auto& s = g_sections[o.name];
   if (s.name.empty()) {
@@ -376,6 +428,9 @@ void log_instr(double frames) {
 #endif
 
 void frame_done() {
+  g_wd_frames.fetch_add(1, std::memory_order_relaxed);
+  g_wd_rpc_polls.store(0, std::memory_order_relaxed);
+  g_wd_level_polls.store(0, std::memory_order_relaxed);
   u64 now = now_us();
   hitch_check(now);
   if (!g_window_start) {

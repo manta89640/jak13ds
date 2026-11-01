@@ -20,6 +20,7 @@
 
 #include "game/sce/sif_ee.h"
 #include "game/sce/sif_ee_memcard.h"
+#include "game/kernel/common/kperf.h"
 
 #include "fmt/format.h"
 
@@ -74,6 +75,22 @@ static void* save_worker(void*) {
 }
 bool MC_save_in_progress() {
   return s_save_state.load() == 1;
+}
+void pc_game_load_synch();
+bool file_is_present(int id, int bank);
+// loads too: their SD reads held up a game frame (~450 ms on hardware)
+static void* load_worker(void*) {
+  Timer t;
+  t.start();
+  if (!file_is_present(op.param2, 0)) {
+    op.operation = MemoryCardOperationKind::NO_OP;
+    op.result = McStatusCode::NO_MEMORY;
+  } else {
+    pc_game_load_synch();
+  }
+  lg::info("[mc] load of slot {} done on the worker thread in {:.0f} ms", op.param2, t.getMs());
+  s_save_state.store(2);
+  return nullptr;
 }
 #endif
 #ifndef __3DS__
@@ -223,7 +240,7 @@ u32 mc_checksum(Ptr<u8> data, s32 size) {
 /*!
  * PC port function that returns whether a given bank ID's file exists or not.
  */
-bool file_is_present(int id, int bank = 0) {
+bool file_is_present(int id, int bank) {
   auto bankname = mc_get_filename(g_game_version, 4 + id * 2 + bank);
   if (!fs::exists(bankname) ||
       int(fs::file_size(bankname)) < mc_get_total_bank_size(g_game_version)) {
@@ -256,7 +273,7 @@ void pc_update_card() {
   mc_last_file = -1;
   for (s32 file = 0; file < 4; file++) {
     auto bankname = mc_get_filename(g_game_version, 4 + file * 2);
-    mc_files[file].present = file_is_present(file);
+    mc_files[file].present = file_is_present(file, 0);
     if (mc_files[file].present) {
       auto bankdata = file_util::read_binary_file(bankname.string());
       auto header1 = reinterpret_cast<McHeader*>(bankdata.data());
@@ -309,7 +326,7 @@ void pc_game_save_synch() {
   file_util::create_dir_if_needed_for_file(path.string());
 
   // cd_reprobe_save //
-  if (!file_is_present(op.param2)) {
+  if (!file_is_present(op.param2, 0)) {
     mc_print("reprobe save: first time!");
     // first time saving!
     p2 = 0;  // save count 0
@@ -515,7 +532,10 @@ void pc_game_load_open_file(FILE* fd) {
 void pc_game_load_synch() {
   Timer mc_timer;
   mc_timer.start();
+#ifndef __3DS__
+  // (3DS: the slot table is current, see pc_game_save_synch)
   pc_update_card();
+#endif
 
   // cb_reprobe_load //
   p2 = 0;
@@ -538,6 +558,7 @@ void pc_game_load_synch() {
  *  - every now and then, recheck cards.
  */
 void MC_run() {
+  kperf::Stage stage("MC_run (memory card)");
 #ifdef __3DS__
   if (s_save_state.load() == 2) {
     ctr_thread_join(s_save_thread);
@@ -615,7 +636,14 @@ void MC_run() {
   } else if (op.operation == MemoryCardOperationKind::LOAD) {
     // load game save.
     // potato.
-    if (!file_is_present(op.param2)) {
+#ifdef __3DS__
+    s_save_state.store(1);
+    if (ctr_thread_create(load_worker, nullptr, 64 * 1024, 0x3D, 2, &s_save_thread) == 0) {
+      return;
+    }
+    s_save_state.store(0);  // no thread: load here, as before
+#endif
+    if (!file_is_present(op.param2, 0)) {
       // tried to load, but there's no save data in the file.
       op.operation = MemoryCardOperationKind::NO_OP;
       op.result = McStatusCode::NO_MEMORY;
@@ -784,7 +812,11 @@ void MC_makefile(s32 port, s32 size) {
  * Get the result of the currently executing (or most recently executed) command
  */
 u32 MC_check_result() {
-#ifndef __3DS__
+#ifdef __3DS__
+  if (s_save_state.load() != 0) {
+    return (u32)McStatusCode::BUSY;  // the worker's result once MC_run joined it
+  }
+#else
   if (s_save_delay_active) {
     if (s_save_delay_timer.getMs() < save_delay_ms()) {
       return (u32)McStatusCode::BUSY;

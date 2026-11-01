@@ -489,6 +489,7 @@ void pc_memmove(u32 dst, u32 src, u32 size) {
 
 void send_gfx_dma_chain(u32 /*bank*/, u32 chain) {
   kperf::Scope perf_scope(kperf::Cat::RENDER);
+  kperf::Stage stage("send-chain (the frame to the renderer)");
   if (Gfx::GetCurrentRenderer()) {
     Gfx::GetCurrentRenderer()->send_chain(g_ee_main_mem, chain);
   }

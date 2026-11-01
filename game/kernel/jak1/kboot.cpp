@@ -124,6 +124,7 @@ void KernelCheckAndDispatch() {
     //(**kernel_dispatcher)();
 
     Timer kernel_dispatch_timer;
+    kperf::g_stage.store("GOAL dispatch (game logic)", std::memory_order_relaxed);
     if (MasterUseKernel) {
       // use the GOAL kernel.
       call_goal_on_stack(Ptr<Function>(kernel_dispatcher->value), goal_stack, s7.offset,
@@ -148,7 +149,9 @@ void KernelCheckAndDispatch() {
     }
 #endif
 
+    kperf::g_stage.store("ClearPending (the game's prints)", std::memory_order_relaxed);
     ClearPending();
+    kperf::g_stage.store("between frames", std::memory_order_relaxed);
 
     // if the listener function changed, it means the kernel ran it, so we should notify compiler.
     if (MasterDebug && ListenerFunction->value != old_listener) {
