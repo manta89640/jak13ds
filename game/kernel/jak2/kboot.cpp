@@ -111,6 +111,7 @@ void KernelDispatch(u32 dispatcher_func) {
 
   // run the kernel!
   Timer dispatch_timer;
+  kperf::g_stage.store("GOAL dispatch (game logic)", std::memory_order_relaxed);
   if (MasterUseKernel) {
     call_goal_on_stack(Ptr<Function>(dispatcher_func), goal_stack, s7.offset, g_ee_main_mem);
   } else {
@@ -140,7 +141,9 @@ void KernelDispatch(u32 dispatcher_func) {
 #endif
 
   // flush stdout
+  kperf::g_stage.store("ClearPending (the game's prints)", std::memory_order_relaxed);
   ClearPending();
+  kperf::g_stage.store("between frames", std::memory_order_relaxed);
 
   // now run the extra "kernel function"
   auto bonus_function = KernelFunction->value();

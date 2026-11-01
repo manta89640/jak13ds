@@ -9820,12 +9820,17 @@ static void diag_stall_report(int sec) {
            (unsigned long)d[2], (unsigned long)d[3]);
   }
 }
+static int s_diag_render_lines;
 static void diag_thread_main(void* unused) {
   (void)unused;
   u32 last = 0;
   int still = 0;
   for (int i = 1;; i++) {
     svcSleepThread(1000000000LL);
+    ctr_game_watchdog_tick();
+    if (!s_diag_render_lines) {
+      continue;
+    }
     const u32 f = s_diag_frames;
     if (i <= 60) {
       printf("[ctr] render alive %ds: frame %lu, last stage %s%s\n", i, (unsigned long)f,
@@ -9839,7 +9844,8 @@ static void diag_thread_main(void* unused) {
   }
 }
 
-void ctr_gpu_diag_start(void) {
+void ctr_gpu_diag_start(int render_lines) {
+  s_diag_render_lines = render_lines;
   /* core 0 at a high priority: it sleeps nearly all the time, and must run while the render
    * thread (core 2) or the game thread spins */
   if (!threadCreate(diag_thread_main, NULL, 16 * 1024, 0x18, 0, true)) {

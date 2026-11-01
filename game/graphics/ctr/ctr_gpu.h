@@ -532,7 +532,9 @@ int ctr_gpu_asm_tex(void);
  * render_watchdog), so a hang shows the
  * stage it stopped in */
 void ctr_gpu_diag_stage(const char* stage);
-void ctr_gpu_diag_start(void);
+/* render_lines 0: only the game thread watchdog (ctr_game_watchdog_tick, once a second) */
+void ctr_gpu_diag_start(int render_lines);
+void ctr_game_watchdog_tick(void);
 void ctr_gpu_submit_partial(void);
 /* (AI-assisted) Pipeline: build frame N+1 while the GPU draws frame N (config.ini pipeline).
  * Outside of a frame only. Returns whether it's on (needs ~3.5 MB of linear memory). */

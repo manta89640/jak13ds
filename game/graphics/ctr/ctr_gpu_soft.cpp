@@ -3052,7 +3052,7 @@ int ctr_gpu_asm_tex(void) {
   return 1;
 }
 void ctr_gpu_diag_stage(const char*) {}
-void ctr_gpu_diag_start(void) {}
+void ctr_gpu_diag_start(int) {}
 void ctr_gpu_submit_partial(void) {}
 unsigned int ctr_gpu_cmd_buffer_kb() {
   return 0;  // (AI-assisted, j2-mem2) no command buffer here

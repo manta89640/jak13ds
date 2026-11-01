@@ -66,6 +66,7 @@ u64 RpcCall_wrapper(void* _args) {
   auto send_size = args->get_as<s32>(4);
   auto recv_buff = args->get_as<u64>(5);
   auto recv_size = args->get_as<s32>(6);
+  kperf::Stage stage("RpcCall (sending to the IOP)");
   return sceSifCallRpc(&cd[rpcChannel], fno, async, Ptr<u8>(send_buff).c(), send_size,
                        Ptr<u8>(recv_buff).c(), recv_size, nullptr, nullptr);
 }
@@ -86,6 +87,7 @@ u32 RpcBusy(s32 channel) {
 void RpcSync(s32 channel) {
   if (RpcBusy(channel)) {
     kperf::SectionScope perf_section("rpc-sync-wait");
+    kperf::Stage stage("RpcSync (waiting for the IOP)");
     if (sShowStallMsg) {
       Msg(6, "STALL: [kernel] waiting for IOP on RPC port #%d\n", channel);
     }

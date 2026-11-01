@@ -592,7 +592,38 @@ u64 pc_3ds_level_ready(u32 name) {
 }
 #endif
 
+// game thread watchdog (kperf::watchdog_tick): *kernel-context*'s current-process name
+bool current_process_name(char* out, int size) {
+  static u32 sym = 0;
+  if (!sym) {
+    sym = find_symbol_from_c("*kernel-context*").offset;
+    if (!sym) {
+      return false;
+    }
+  }
+  auto ok = [](u32 a) {
+    return (a & OFFSET_MASK) == BASIC_OFFSET && a >= 0x100000 && a + 64 < (u32)EE_MAIN_MEM_SIZE;
+  };
+  const u32 ctx = Ptr<Symbol>(sym)->value;
+  if (!ok(ctx)) {
+    return false;
+  }
+  const u32 proc = *Ptr<u32>(ctx + 24 - 4).c();  // current-process (offset 24)
+  if (!ok(proc)) {
+    return false;
+  }
+  const u32 name = *Ptr<u32>(proc + 4 - 4).c();  // process-tree name (offset 4)
+  if (!ok(name)) {
+    return false;
+  }
+  const s32 len = std::clamp(*Ptr<s32>(name).c(), 0, size - 1);  // string length, then data
+  memcpy(out, Ptr<char>(name + 4).c(), len);
+  out[len] = 0;
+  return true;
+}
+
 void InitMachine_PCPort() {
+  kperf::set_process_name_hook(current_process_name);
   // PC Port added functions
   init_common_pc_port_functions(
       make_function_symbol_from_c,
@@ -808,11 +839,13 @@ void InitMachine_PCPort() {
 namespace {
 u32 syncv_timed(u32 mode) {
   kperf::Scope perf_scope(kperf::Cat::VSYNC);
+  kperf::Stage stage("vsync (waiting for the vblank)");
   return sceGsSyncV(mode);
 }
 // (AI-assisted) the game waiting for the 3DS render thread ("wait" in the perf lines, not logic)
 u32 sync_path_timed(u32 mode, u32 timeout) {
   kperf::Scope perf_scope(kperf::Cat::WAIT);
+  kperf::Stage stage("sync-path (waiting for the render thread)");
   return sceGsSyncPath(mode, timeout);
 }
 }  // namespace
