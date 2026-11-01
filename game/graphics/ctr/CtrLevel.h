@@ -1422,19 +1422,30 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   // f1 = clamp(w * y + w)); per visible chunk its morph uniforms (the bands, delta_scale) and their
   // id; the groups near / mid / far (statistics)
   float m_tf_band[4] = {0, 0, 0, 0};
+  // the clip w row (world, from the camera) and the w up to which no vertex moves (band 1's start)
+  float m_tf_wv[4] = {0, 0, 0, 0};
+  float m_tf_still_w = -1.f;
+  // a tfrag geomorph draw's range: its runs (index, count, moves), the hidden ones after it, the
+  // stretches drawn
+  struct TfPiece {
+    u32 idx, n;
+    bool mv;
+  };
+  std::vector<TfPiece> m_tf_pcs, m_tf_gap, m_tf_seg;
   std::vector<float> m_tf_unif;
   std::vector<u32> m_tf_unif_id;
   u64 m_tf_groups[3] = {0, 0, 0};
   u64 m_tf_tris[2] = {0, 0};
   u64 m_tf_colors_written = 0, m_tf_frames = 0;
+  u64 m_morph_prog_tris[2] = {0, 0};  // triangles drawn by the tie / tfrag morph programs
   std::vector<int> m_visible_slot;  // per chunk: index in m_visible, -1: not drawn
   // (AI-assisted) with vista chunks: the visible draws of early_draws, sorted_draws and
   // ordered_draws split in one walk, in list order: the vista pass's, and the main pass's lists
   std::vector<u32> m_vista_draws, m_main_draws[3];
-  // (AI-assisted) the early draws by distance band (and morph program last in each), nearest first
-  std::vector<u32> m_band_draws[9];
+  // (AI-assisted) the early draws by distance band, nearest first
+  std::vector<u32> m_band_draws[3];
   // (AI-assisted, j2cull) the visible draws' places per list (bit sets), and those draws in order
   std::vector<u32> m_list_bits[3], m_list_vis[3];
-  std::vector<u32> m_morph_later;  // a list's tie geomorph draws, drawn after its others
-  std::vector<u32> m_tmorph_later;  // and its tfrag geomorph draws, before those
+  std::vector<u32> m_morph_later;  // a list's moving tie geomorph draws, drawn after its others
+  std::vector<u32> m_tmorph_later;  // and its tfrag geomorph draws (their moving runs), before those
 };
