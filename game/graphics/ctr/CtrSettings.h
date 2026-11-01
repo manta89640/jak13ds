@@ -143,6 +143,8 @@ struct CtrSettings {
   bool rgba4_as_rgba8 = false;
   // Level textures in VRAM while there is room. Default (auto): off (TODO.md: corruption on hardware).
   bool vram_textures = true;
+  // config.ini texshare = off: no shared texture groups, 1 MB level pools (as before sharing)
+  bool texshare = true;
   // Mip levels of the level textures (c3l v8): 0 off, 1 nearest level (default: one texel fetch),
   // 2 trilinear (blends two levels, as the PC).
   int mipmaps = 1;

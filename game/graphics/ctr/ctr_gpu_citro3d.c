@@ -15,6 +15,8 @@
 #include "game/graphics/ctr/ctr_gpu.h"
 #include "game/graphics/ctr/ctr_gpu_bench.h"
 #include "game/graphics/ctr/ctr_gpu_early.h"
+#define CTR_VPROBE_WRAP
+#include "game/graphics/ctr/ctr_gpu_vprobe.h"
 #include "game/graphics/ctr/CtrTexConv.h"
 
 #include <3ds.h>
@@ -131,6 +133,7 @@ static void apt_gate_enter(void);
 static void apt_gate_leave(void);
 static void raw_gas_flags_clear(void);
 static void gx_queue_enlarge(void);
+static void vprobe_frame(void);
 void ctr_linear_lock(void);
 void ctr_linear_unlock(void);
 
@@ -153,7 +156,11 @@ static void* safe_vram_alloc(size_t size) {
   if ((size_t)vramSpaceFree() < size + VRAM_RESERVE) {
     return NULL;
   }
-  return vramAlloc(size);
+  void* p = vramAlloc(size);
+  if (ctr_vprobe_on && p) {
+    ctr_vprobe_vram_add(p, __LINE__);
+  }
+  return p;
 }
 static int vram_room(size_t size) {
   return (size_t)vramSpaceFree() >= size + VRAM_RESERVE;
@@ -931,6 +938,7 @@ static void process_pending_deletes(int hold) {
       p->used = 4;
     } else if (p->used == 2 || p->used == 4) {
       if (p->vram) {
+        ctr_vprobe_pool_out(i, p->vram, __LINE__);
         vramFree(p->vram);
       }
       if (p->linear) {
@@ -1783,10 +1791,12 @@ static void flush_selftest(void) {
 }
 
 static int top_target_setup(void);
+static void vprobe_boot(void);
 int ctr_gpu_init(void) {
   if (g.ready) {
     return 0;
   }
+  ctr_vprobe_enable(ctr_config_bool("vram_probe", 0));
   if (!C3D_Init(CMDBUF_BYTES)) {
     return -1;
   }
@@ -1960,6 +1970,7 @@ int ctr_gpu_init(void) {
     g.ready = 0;
     return -2;
   }
+  vprobe_boot();
   /* one dark frame right away: until the game draws its first frame (after loading the common
    * files and the title level), the top screen keeps the HOME Menu's launch logo and the boot
    * looks frozen */
@@ -1972,6 +1983,7 @@ void ctr_gpu_exit(void) {
   if (!g.ready) {
     return;
   }
+  ctr_vprobe_exit();
   apt_gate_remove(); /* (AI-assisted, gpu-home) */
   ctr_linear_lock();
   for (int i = 0; i < MAX_TEXTURES; i++) {
@@ -3395,6 +3407,9 @@ static void pipeline_frame_begin(u32 clear) {
   gt_note_first(); /* (AI-assisted) the clear below starts the GPU on this frame */
   /* copies to VRAM wait for the GPU first (citro3d's safe copy outside of a frame) */
   update_pool_residency();
+  if (!s_bd.frame) {
+    vprobe_frame();
+  }
   if (s_bd.frame) {
     bd_clear_begin();
   }
@@ -3485,6 +3500,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   process_pending_deletes(0);
   /* before any draw: copies to VRAM are queued ahead of this frame's draws */
   update_pool_residency();
+  vprobe_frame();
   if (g.screenshot_state == 2) {
     write_screenshot();
     g.screenshot_state = 0;
@@ -4334,6 +4350,7 @@ static int pool_leave_vram(int pool) {
   p->vram = NULL;
   p->vram_bytes = 0;
   pool_repoint(pool);
+  ctr_vprobe_pool_out(pool, v, __LINE__);
   /* at frame begin: the GPU finished the frames that read it, and this frame reads the linear
    * copy from now on */
   vramFree(v);
@@ -4438,7 +4455,13 @@ static void update_pool_residency(void) {
     if (!v) {
       /* (AI-assisted) not all of it: as much as fits in the VRAM that's left (whole textures from
        * the start), so the GPU reads those fast and they leave linear memory */
-      const unsigned int kStep = 32 * 1024, kMinPart = 64 * 1024;
+      /* (config.ini texshare = off: the steps from before texture sharing) */
+      static int s_texshare = -1;
+      if (s_texshare < 0) {
+        s_texshare = ctr_config_bool("texshare", 1);
+      }
+      const unsigned int kStep = s_texshare ? 32 * 1024 : 128 * 1024,
+                         kMinPart = s_texshare ? 64 * 1024 : 256 * 1024;
       unsigned int want = (unsigned int)vramSpaceFree();
       want = want > VRAM_RESERVE ? want - VRAM_RESERVE : 0;
       if (want > p->bytes) {
@@ -4468,6 +4491,7 @@ static void update_pool_residency(void) {
     uint8_t* old = p->linear;
     sync_texture_copy((u32*)old, 0, (u32*)v, 0, part, 8);
     texchk_note(best, old, part);
+    ctr_vprobe_pool_in(best, v, old, part);
     p->vram_frame = g.frame_no;
     p->vram = v;
     p->vram_bytes = part;
@@ -4491,6 +4515,49 @@ static void update_pool_residency(void) {
     pool_repoint(best);
     copies++;
   }
+}
+
+/* config.ini vram_probe: textures checked against the VRAM allocations (128 slots a frame), one
+ * pool texture in VRAM for the live probe, then the probes (ctr_gpu_vprobe.c) */
+static void vprobe_frame(void) {
+  if (!ctr_vprobe_on) {
+    return;
+  }
+  static int scan, live_scan;
+  for (int k = 0; k < 128; k++) {
+    const int i = scan;
+    scan = (scan + 1) % MAX_TEXTURES;
+    const TexSlot* t = &g.textures[i];
+    if (t->used != 1 || !t->tex.data) {
+      continue;
+    }
+    const TexPool* p = t->pool >= 0 ? &g.pools[t->pool] : NULL;
+    const u32 bytes = p ? t->bytes : C3D_TexCalcTotalSize(t->tex.size, t->tex.maxLevel);
+    ctr_vprobe_tex_check(t->tex.data, bytes, i, t->pool, p ? p->vram : NULL,
+                         p ? p->vram_bytes : 0);
+  }
+  CtrVprobeTex live;
+  memset(&live, 0, sizeof(live));
+  for (int k = 0; k < 256 && !live.tex; k++) {
+    const int i = live_scan;
+    live_scan = (live_scan + 1) % MAX_TEXTURES;
+    const TexSlot* t = &g.textures[i];
+    if (t->used != 1 || t->pool < 0 || t->bytes > 32u * 1024u) {
+      continue;
+    }
+    const TexPool* p = &g.pools[t->pool];
+    const uint8_t* d = (const uint8_t*)t->tex.data;
+    if (!p->vram || d < (const uint8_t*)p->vram ||
+        d + t->bytes > (const uint8_t*)p->vram + p->vram_bytes || g.frame_no - p->vram_frame < 3) {
+      continue;
+    }
+    live.tex = &t->tex;
+    live.bytes = t->bytes;
+    live.levels = t->levels;
+    live.slot = i;
+    live.pool = t->pool;
+  }
+  ctr_vprobe_frame((u32)g.frame_no, live.tex ? &live : NULL);
 }
 
 /* allow_vram: only from the render thread (the copy to VRAM goes through the GX queue) */
@@ -4736,6 +4803,32 @@ static int early_selftest_run(void) {
   tex_units_forget();
   apt_gate_leave();
   return ok;
+}
+
+/* config.ini vram_probe: buffers, calibration and the first probe, outside a frame */
+static void vprobe_boot(void) {
+  if (!ctr_vprobe_on) {
+    return;
+  }
+  apt_gate_enter();
+  gpu_drain();
+  CtrVprobeIn in;
+  in.prog = &g.ps->basic;
+  in.uloc_projection = g.ps->uloc_projection;
+  in.emulator = ctr_gpu_is_emulator();
+  in.cpu_vram_read = !envIsHomebrew();
+  ctr_vprobe_init(&in);
+  g.cur_prog = PROG_NONE;
+  use_program(PROG_BASIC);
+  C3D_SetFrameBuf(&g.top->frameBuf);
+  set_top_viewport();
+  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+  C3D_CullFace(GPU_CULL_NONE);
+  g.last_state_valid = 0;
+  g.bound_tex = NULL;
+  s_tex_dirty = 1;
+  tex_units_forget();
+  apt_gate_leave();
 }
 
 int ctr_gpu_early_depth_selftest(void) {
@@ -5490,6 +5583,9 @@ static void apt_gate_hook(APT_HookType type, void* param) {
   const int timed_out = s_apt.busy;
   s_apt.timeouts += (u32)timed_out;
   LightLock_Unlock(&s_apt.lock);
+  if (ctr_vprobe_on) {
+    ctr_vprobe_st(VP_APT, __LINE__, (u32)type, (u32)timed_out, s_apt.suspends, 0);
+  }
   /* what is queued (with frame_overlap2 = on the queue keeps running between frames) */
   gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(1000));
   printf("[ctr] %s: frames stopped (%.1f ms%s)\n", type == APTHOOK_ONSLEEP ? "sleep" : "HOME Menu",
@@ -5501,6 +5597,9 @@ static void apt_gate_hook(APT_HookType type, void* param) {
 static void apt_gate_after(void) {
   if (!s_apt.gate) {
     return;
+  }
+  if (ctr_vprobe_on) {
+    ctr_vprobe_st(VP_APT, __LINE__, 0xFF, 0, s_apt.suspends, 0);
   }
   LightLock_Lock(&s_apt.lock);
   s_apt.epoch++;
@@ -6058,6 +6157,9 @@ static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
     return;
   }
   C3D_TexBind(unit, t);
+  if (ctr_vprobe_on) {
+    ctr_vprobe_st(VP_MASK, __LINE__, (u32)t->data, (u32)unit, t->param, t->lodParam);
+  }
   *cur = t;
   s_mask_data[unit] = t->data;
   s_mask_param[unit] = t->param;
@@ -6070,6 +6172,9 @@ static void bind_mask(TexSlot* m, const C3D_Tex* color, int unit) {
   g.cur.tex_binds++;
 }
 static void unit2_mask_release(void) {
+  if (ctr_vprobe_on) {
+    ctr_vprobe_st(VP_MASK, __LINE__, 0, 2, 0, 0);
+  }
   C3Di_Context* ctx = &__C3D_Context;
   ctx->tex[2] = NULL;
   ctx->flags |= C3DiF_Tex(2);
@@ -7788,6 +7893,10 @@ static int rt_create(int lw, int lh, int max_tile_w, int max_level, int depth_on
   s_rt[i].max_w = max_tile_w;
   s_rt[i].depth = depth;
   s_rt[i].depth_vram = depth_vram;
+  if (ctr_vprobe_on) {
+    ctr_vprobe_ev(VP_RT_TEX, __LINE__, (u32)t->tex.data, (u32)color_bytes, (u32)depth,
+                  ((u32)lw << 16) | (u32)lh);
+  }
   char dtxt[48] = "no depth";
   if (depth) {
     snprintf(dtxt, sizeof(dtxt), "D16 %dx%d in %s", max_tile_w, lh,
