@@ -112,7 +112,7 @@ void run_vram_tests() {
     // the game's TEX0 (adgif-shader<-texture!), with a texture function of its own
     const u64 game_tex0 = 64 | 1ull << 14 | 4ull << 26 | 4ull << 30 | 1ull << 34 | 1ull << 35 |
                           1ull << 61;
-    CtrVram ref(false), vram(false);
+    CtrVram ref(true, true), vram(true, true);  // Jak 1: sparse, boot pages prewarmed
     ref.upload_texture_page_now((const u8*)&tp, -1, ee.data(), 0);
     vram.upload_texture_page_now((const u8*)&tp, -1, ee.data(), 0);
     for (int f = 0; f < 40; f++) {
