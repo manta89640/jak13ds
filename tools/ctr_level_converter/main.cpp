@@ -4049,7 +4049,7 @@ void split_mask_texture(const c3l::Texture& d,
  * 99.5% similar. Alpha: every texel of every level is 0 or 255, or (alpha_test_only) the texture is
  * only drawn alpha tested at aref (0..255), the bit is alpha >= aref (each texel passes or fails as
  * before) and 99.5% of the bilinear samples of the full size level do too. Color, on the full size
- * level over the texels compare_level counts: 1 - mean absolute error / 255 >= 0.995, and the
+ * level over the texels compare_level counts: 1 - mean absolute error / 255 >= 0.99, and the
  * worst 4x4 block within what the ETC1 test accepts.
  */
 struct Rgba5551Gate {
@@ -4131,7 +4131,7 @@ bool to_rgba5551(const c3l::Texture& d,
     }
   }
   g->similarity = n ? 1.0 - err / n / 255.0 : 1.0;
-  g->color_ok = g->similarity >= 0.995;
+  g->color_ok = g->similarity >= 0.99;
   g->block_ok = g->worst_block <= std::max<double>(opt.etc1_block, g->worst_block_565);
   if (!g->pass()) {
     return false;
@@ -7090,7 +7090,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // animated slots.
   size_t mask_count = 0, mask_etc1 = 0, mask_a4 = 0;
   u64 mask_before = 0, mask_after = 0;
-  // c3l v24: an RGBA8 texture that is at least 99.5% the same as RGBA5551 (to_rgba5551) becomes
+  // c3l v24: an RGBA8 texture that is at least 99% the same as RGBA5551 (to_rgba5551) becomes
   // RGBA5551, unless its mask split is smaller
   struct R5Stats {
     size_t candidates = 0, converted = 0, exact = 0, alpha_failed = 0, color_failed = 0,

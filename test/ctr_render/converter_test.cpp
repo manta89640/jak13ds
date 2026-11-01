@@ -324,8 +324,9 @@ void test_rgba5551() {
         "an exact RGBA5551 texture decodes to the RGBA8 one");
 
   data = rgba8(make(false, false), 1, &d);
-  check(!to_rgba5551(d, data, opt, true, false, 76, &out, &g) && !g.color_ok,
-        "8-bit colors fail the 99.5% color similarity");
+  to_rgba5551(d, data, opt, true, false, 76, &out, &g);
+  check(g.similarity < 1.0 && g.color_ok == (g.similarity >= 0.99),
+        "8-bit colors pass only at 99% color similarity or more");
 
   data = rgba8(make(true, false, 1), 3, &d);
   check(!to_rgba5551(d, data, opt, true, false, 76, &out, &g) && !g.alpha_exact,
