@@ -401,9 +401,9 @@ void ctr_gpu_set_early_depth(int on);
  * the early depth data's clear value (GPUREG_EARLYDEPTH_DATA, 24 bits; every early depth clear
  * uses it). Defaults 0, 0, 0 = the old state. Any time. */
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
-/* (AI-assisted) the early depth test checked on this console (ctr_gpu_early.c): after
- * ctr_gpu_init and ctr_gpu_set_early_depth_params, before the game's first frame. Until it
- * passes the early test stays off. 1: passed. */
+/* (AI-assisted) the early depth test checked on this console (ctr_gpu_early.c). ctr_gpu_init runs
+ * it when early depth was asked for before it (ctr_gpu_set_early_depth, _params); then this
+ * returns that result. Until it passes the early test stays off. 1: passed. */
 int ctr_gpu_early_depth_selftest(void);
 /* (AI-assisted) the early test in use (asked for and the self-test passed) */
 int ctr_gpu_early_depth_active(void);
@@ -428,6 +428,10 @@ void ctr_gpu_set_skin_clip_f24(int on);
 /* (AI-assisted) the top render target, set before ctr_gpu_init (config.ini): depth16 = a 16-bit
  * depth buffer instead of 24-bit + stencil. */
 void ctr_gpu_set_framebuffer(int depth16);
+/* config.ini top_block32 (off = 0, auto = 1, on = 2), set before ctr_gpu_init. auto: when the
+ * early depth self-test passes only in 32x32 block mode, the top target becomes 256x416 in that
+ * mode; on: that target always (early depth still only if its self-test passed) */
+void ctr_gpu_set_top_block32(int mode);
 /* (AI-assisted) one line about the top render target (size, formats, VRAM addresses and banks)
  * for the log; returns its length (0 before ctr_gpu_init) */
 int ctr_gpu_describe_target(char* out, int size);

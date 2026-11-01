@@ -215,6 +215,8 @@ void apply_setting(CtrSettings& s, const std::string& key, const std::string& v,
       // (AI-assisted) the early depth data's clear value: 0 (default) | max | a number (24 bits)
       s.early_depth_clear =
           v == "max" ? 0xFFFFFFu : (unsigned int)(std::strtoul(v.c_str(), nullptr, 0) & 0xFFFFFFu);
+    } else if (key == "top_block32") {
+      s.top_block32 = v == "auto" ? 1 : (parse_bool(v) ? 2 : 0);
     } else if (key == "depth16") {
       s.depth16 = parse_bool(v);
     } else if (key == "compact_textures") {
@@ -508,7 +510,7 @@ std::string CtrSettings::summary() const {
       "dist {:.0f}m lod {:.0f}m far-level {:.0f}m detail x{:.1f} shrub {} (v14 files: x{}) tie x{} fog {} "
       "merc {} sprites {} ({}) "
       "pipeline {} frame_overlap2 {} ocean {} sky {} clouds {} sky_last {} skip_clear {} distort {} distort_copy {} envmap {} envmap_batch {} merc_tex_sort {} merc_gen_lod {} (x{:.2f}) shadows {} shadow_casters {} rgba4_as_rgba8 {} vram_textures {} mipmaps {} mip_bias {:.2f} envmap_min_px {:.0f} skin_rows_f24 {} skin_clip_f24 {} "
-      "color16 {} early_depth {}{} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
+      "color16 {} early_depth {}{} top_block32 {} compact_textures {} proctex_glows {} sprite_max_size {:.2f} sprite_min_alpha {} sprite_alpha_discard {} particle_fill {} "
       "vis_culling {} run_culling {} tie_lod {} streaming {} tod_pulse_step {} neighbour_vis {} lowres_vista {} vista {:.0f}m fog_stage_skip {} fog_alpha {} tex1_gating {} shader_opt {} cmd_dedup {} cull_ties {} cull_merc {} merc_fog {} raw_cmds {} opaque_alpha {} tex_cache_clear {} asm_tex {} asm_mem {} "
       "ocean_tex_half {} fast_clock {} "
       // (AI-assisted) Oct 16: the rest of the keys, so the line holds every setting
@@ -553,6 +555,7 @@ std::string CtrSettings::summary() const {
                                                                        : (early_depth_func == 3 ? "lt" : "ge")),
                         early_depth_clear)
           : std::string(),
+      top_block32 == 1 ? "auto" : (top_block32 ? "on" : "off"),
       compact_textures ? "on" : "off", proctex_glows ? "on" : "off",
       sprite_max_size, sprite_min_alpha, sprite_alpha_discard ? "on" : "off",
       particle_fill == 2 ? "strong" : (particle_fill ? "on" : "off"),

@@ -201,6 +201,10 @@ struct CtrSettings {
   // 0xFFFFFF, or a number). pica_bench B8.*.c3 shows which pair passes everything after a clear
   int early_depth_func = 0;
   unsigned int early_depth_clear = 0;
+  // top_block32 = auto | off | on. auto: if the early depth self-test passes only in 32x32 block
+  // mode, the top render target becomes 256x416 in that mode (the screen shows 240x400 of it).
+  // on: that target always (a test; early depth still needs its self-test)
+  int top_block32 = 1;
   // (AI-assisted) 16-bit depth buffer instead of 24-bit + stencil: half the depth traffic, but
   // 256x coarser depth (z-fighting far away) and no stencil (shadows = full becomes blob, the
   // ocean = waves marks are left out). Off by default.
