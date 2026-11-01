@@ -52,7 +52,8 @@ class CtrMercRenderer : public CtrBucketRenderer {
                   int effect_count,
                   const struct CtrMercModelData& model);
   /*! (AI-assisted) Unpack what gather_mod copied (from m_mod_bytes[pos]) into the model's mesh. */
-  void apply_mod(const struct CtrMercModelData& model, size_t pos);
+  // ys, ns: the ripple y and normal x/z scales taken out of its bones
+  void apply_mod(const struct CtrMercModelData& model, size_t pos, float ys = 1.f, float ns = 1.f);
 
  public:
   /*! Game thread, before the frame is handed to the render thread: copy the bone matrices the
@@ -219,6 +220,7 @@ class CtrMercRenderer : public CtrBucketRenderer {
   struct ModSnap {
     u32 ordinal;
     size_t pos;  // in m_mod_bytes
+    float ys = 1.f, ns = 1.f;  // ripple scales moved from the bones to the vertices
   };
   std::vector<ModSnap> m_mod_snaps;
   std::vector<u8> m_mod_bytes;

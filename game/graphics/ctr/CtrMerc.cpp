@@ -655,6 +655,41 @@ void put_u32(std::vector<u8>& out, u32 v) {
   out.resize(at + 4);
   memcpy(out.data() + at, &v, 4);
 }
+
+// ripple bones scale tmat row 1 and nmat rows 0, 2, but the shaders turn normals with tmat: undo it
+// (row 1 = s^2 nmat row 1) and return the scales for the vertices
+bool ripple_unscale(const u8* bone, MercMat* out, float* ys, float* ns) {
+  float t[2][4], n[2][4];
+  memcpy(t, bone, 32);
+  memcpy(n, bone + 64, 32);
+  auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+  const float lt = std::sqrt(dot(t[0], t[0])), ln = std::sqrt(dot(n[1], n[1]));
+  if (!(lt > 0.f) || !(ln > 0.f)) {
+    return false;
+  }
+  const float k = lt / ln;
+  const float r1[3] = {n[1][0] * k, n[1][1] * k, n[1][2] * k};
+  const float y = dot(t[1], r1) / (lt * lt);
+  const float m = dot(n[0], t[0]) / (lt * ln);
+  if (!std::isfinite(y) || !std::isfinite(m) ||
+      (std::abs(y - 1.f) < 1e-3f && std::abs(m - 1.f) < 1e-3f)) {
+    return false;
+  }
+  memcpy(out, bone, sizeof(MercMat));
+  memcpy(&out->tmat[1], r1, 12);
+  *ys = y;
+  *ns = m;
+  return true;
+}
+
+// every vertex of the model is rewritten each frame (the unscaled bones fit no other vertex)
+bool mod_covers_all(const CtrMercModelData& model) {
+  size_t n = 0;
+  for (const auto& e : model.mod) {
+    n += e.dests.size();
+  }
+  return model.vertex_count && n == model.vertex_count;
+}
 }  // namespace
 
 void CtrMercRenderer::gather_mod(const u8* ee_mem,
@@ -704,7 +739,7 @@ void CtrMercRenderer::gather_mod(const u8* ee_mem,
   }
 }
 
-void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos) {
+void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos, float ys, float ns) {
   const double t0 = ctr_gpu_time_ms();
   u8* verts = (u8*)ctr_gpu_mesh_vertices(model.mesh);
   if (!verts) {
@@ -735,10 +770,20 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos) {
     ModV* out = m_mod_tmp.data();
     const s16* st_lut = e.st_lut;
     const s8* nrm_lut = g_normal_lut.v;
+    // normal x and z times ns (y over ns when ns > 1: the same direction within s8)
+    const s8 *nxz_lut = nrm_lut, *ny_lut = nrm_lut;
+    s8 scaled_lut[256];
+    if (ns != 1.f) {
+      const float f = ns > 1.f ? 1.f / ns : ns;
+      for (int b = 0; b < 256; b++) {
+        scaled_lut[b] = (s8)std::clamp((int)std::lround((b / 128.f - 1.f) * 127.f * f), -127, 127);
+      }
+      (ns > 1.f ? ny_lut : nxz_lut) = scaled_lut;
+    }
     // position: (float bits (0x4b010000 + byte) + fragment offset) * xyz_scale (Merc2), in
     // MercVertex units (/ model scale), rounded by adding 1.5 * 2^23: the float's low mantissa
     // bits are then the integer (no float -> int conversion or compare in the loop)
-    const float k = e.pos_k;
+    const float k = e.pos_k, ky = e.pos_k * ys;
     constexpr float kRound = 12582912.f;
     u32 done = 0;
     while (done < total) {
@@ -760,7 +805,7 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos) {
         memcpy(&fy, &by, 4);
         memcpy(&fz, &bz, 4);
         fx = (fx + off[0]) * k + kRound;
-        fy = (fy + off[1]) * k + kRound;
+        fy = (fy + off[1]) * ky + kRound;
         fz = (fz + off[2]) * k + kRound;
         s32 ix, iy, iz;
         memcpy(&ix, &fx, 4);
@@ -769,9 +814,9 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos) {
         out->pos[0] = sat16(ix - 0x4b400000);
         out->pos[1] = sat16(iy - 0x4b400000);
         out->pos[2] = sat16(iz - 0x4b400000);
-        out->nrm[0] = nrm_lut[v[2]];
-        out->nrm[1] = nrm_lut[v[6]];
-        out->nrm[2] = nrm_lut[v[10]];
+        out->nrm[0] = nxz_lut[v[2]];
+        out->nrm[1] = ny_lut[v[6]];
+        out->nrm[2] = nxz_lut[v[10]];
         out->pad = 0;
         out->st[0] = st_lut[v[8]];
         out->st[1] = st_lut[v[9]];
@@ -789,16 +834,17 @@ void CtrMercRenderer::apply_mod(const CtrMercModelData& model, size_t pos) {
         memcpy(&fv, verts + sizeof(c3l::MercVertex) * d.vertex, sizeof(fv));
         const ModV& s = src[d.src];
         dxz = std::max({dxz, std::abs(fv.pos[0] - s.pos[0]), std::abs(fv.pos[2] - s.pos[2])});
-        dy = std::max(dy, std::abs(fv.pos[1] - s.pos[1]));
+        dy = std::max(dy, std::abs((int)std::lround(fv.pos[1] * ys) - s.pos[1]));
         dst = std::max({dst, std::abs(fv.st[0] - s.st[0]), std::abs(fv.st[1] - s.st[1])});
         for (int c = 0; c < 3; c++) {
-          dn = std::max(dn, std::abs(fv.normal[c] - s.nrm[c]));
+          const float f = (c == 1) == (ns > 1.f) ? (ns > 1.f ? 1.f / ns : ns) : 1.f;
+          dn = std::max(dn, std::abs((int)std::lround(fv.normal[c] * f) - s.nrm[c]));
         }
       }
       lg::info("[ctr] merc vertex updates for {} effect {}: {} vertices -> {} model vertices; "
                "largest difference to the file: x/z {}, y {} (scale {}), st {} (1/1024), "
-               "normal {} (1/127)",
-               model.name, e.effect, total, e.dests.size(), dxz, dy, model.scale, dst, dn);
+               "normal {} (1/127); ripple y x{}, normal x/z x{}",
+               model.name, e.effect, total, e.dests.size(), dxz, dy, model.scale, dst, dn, ys, ns);
     }
     for (const auto& d : e.dests) {
       u8* dst = verts + sizeof(c3l::MercVertex) * d.vertex;
@@ -915,6 +961,20 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
         if (model && !model->mod.empty()) {
           m_mod_snaps.push_back({m_model_ordinal, m_mod_bytes.size()});
           gather_mod(rs.ee_mem, ptrs, ec, *model);
+          if (mod_covers_all(*model)) {
+            ModSnap& ms = m_mod_snaps.back();
+            bool first = true;
+            for (int b = 0; b < n; b++) {
+              u32 addr;
+              memcpy(&addr, &ma[b * 4], 4);
+              float ys, ns;
+              if (sl[b] < 128 && ripple_unscale(rs.ee_mem + addr, &dst[b], &ys, &ns) && first) {
+                ms.ys = ys;
+                ms.ns = ns;
+                first = false;
+              }
+            }
+          }
         }
         m_mod_gather_ms += ctr_gpu_time_ms() - t0;
       }
@@ -1101,7 +1161,8 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
     }
     if (m_snap_valid) {
       if (m_mod_cursor < m_mod_snaps.size() && m_mod_snaps[m_mod_cursor].ordinal == ordinal) {
-        apply_mod(*model, m_mod_snaps[m_mod_cursor].pos);
+        const ModSnap& ms = m_mod_snaps[m_mod_cursor];
+        apply_mod(*model, ms.pos, ms.ys, ms.ns);
       }
     } else {
       const int ec = std::min<int>(flags.effect_count, 64);
@@ -1109,7 +1170,25 @@ void CtrMercRenderer::handle_model(const DmaTransfer& init, CtrRenderState& rs) 
                        ((ec * 4 + 15) / 16) * 16;
       m_mod_bytes.clear();
       gather_mod(rs.ee_mem, ptrs, ec, *model);
-      apply_mod(*model, 0);
+      float ys = 1.f, ns = 1.f;
+      if (mod_covers_all(*model)) {
+        bool first = true;
+        for (int b = 0; b < i; b++) {
+          u32 addr;
+          memcpy(&addr, &matrix_array[b * 4], 4);
+          float y, m;
+          if (slots[b] < 128 && !(addr & 3) &&
+              ripple_unscale(rs.ee_mem + addr, &g_bones.kept[slots[b]], &y, &m)) {
+            g_bones.set(slots[b], &g_bones.kept[slots[b]]);
+            if (first) {
+              ys = y;
+              ns = m;
+              first = false;
+            }
+          }
+        }
+      }
+      apply_mod(*model, 0, ys, ns);
     }
   }
 
