@@ -446,7 +446,7 @@ static int stencil_case(EdTarget* t, int kind) {
     return -1;
   }
   C3D_FrameBufClear(&t->fb, C3D_CLEAR_ALL, t->clear_color, 0);
-  use_target(&t->fb, 0);
+  use_target(&t->fb, t->vw, t->vh, 0);
   common_state();
   state(0, 1, 0, 0);
   sq(16, 16, 0.5f, 0, 64);
