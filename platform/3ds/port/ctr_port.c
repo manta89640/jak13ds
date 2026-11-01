@@ -39,7 +39,9 @@
  * check. */
 u32 __ctru_linear_heap_size = 34 << 20;
 #else
-u32 __ctru_linear_heap_size = 40 << 20;
+/* 41 MB: the sparse VRAM copy gave the heap back 1.4 MB (4096 -> ~2700 KB); 1 MB of it is here,
+ * for the near tie stream arena */
+u32 __ctru_linear_heap_size = 41 << 20;
 #endif
 
 extern char* fake_heap_start;
