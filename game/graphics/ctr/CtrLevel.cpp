@@ -2466,6 +2466,13 @@ int texture_min_alpha(const u8* data, int w, int h, int format) {
         m = std::min<int>(m, data[4 * i]);  // stored A, B, G, R
       }
       return m;
+    case CTR_TEX_RGBA5551:
+      for (int i = 0; i < n; i++) {
+        if (!(data[2 * i] & 1)) {
+          return 0;
+        }
+      }
+      return 255;
     case CTR_TEX_A8:
       for (int i = 0; i < n; i++) {
         m = std::min<int>(m, data[i]);
@@ -5908,7 +5915,9 @@ bool CtrLevels::load_textures(c3l::Reader& f,
     auto& p = plan[i];
     const bool pow2 = t.w >= 8 && t.h >= 8 && t.w <= 1024 && t.h <= 1024 &&
                       !(t.w & (t.w - 1)) && !(t.h & (t.h - 1));
-    const u8 max_format = hdr.version >= c3l::kTexMaskVersion ? c3l::TEX_A4 : c3l::TEX_RGBA8;
+    const u8 max_format = hdr.version >= c3l::kTex5551Version   ? c3l::TEX_RGBA5551
+                          : hdr.version >= c3l::kTexMaskVersion ? c3l::TEX_A4
+                                                                : c3l::TEX_RGBA8;
     if (!pow2 || t.format > max_format || (hdr.version < 8 && t.format > c3l::TEX_RGBA4)) {
       continue;
     }

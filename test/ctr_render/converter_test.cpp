@@ -274,6 +274,88 @@ void test_alpha_mask(bool four_bit) {
   }
   check(moff == s.mask.size() && s.color.size() < data.size(), "mask and color sizes");
 }
+
+// RGBA5551: the PICA layout (r in the high bits, alpha in bit 0) and the 99.5% similarity gate
+void test_rgba5551() {
+  ctr_tex::Image px{8, 8, std::vector<u8>(8 * 8 * 4, 0)};
+  px.at(0, 7)[0] = 255;  // bottom row first: texel 0
+  px.at(0, 7)[3] = 255;
+  std::vector<u8> one;
+  ctr_tex::encode_level(px, ctr_tex::Format::RGBA5551, 0, &one);
+  check(one.size() == 128 && one[0] == 0x01 && one[1] == 0xf8, "RGBA5551 is r5 g5 b5 a1");
+
+  // colors a 5-bit channel holds, alpha 0 / 255 in every level: kept exactly
+  auto make = [](bool exact_color, bool soft_alpha, int cell = 8, u8 opaque = 255) {
+    ctr_tex::Image img{32, 32, std::vector<u8>(32 * 32 * 4, 0)};
+    for (int y = 0; y < 32; y++) {
+      for (int x = 0; x < 32; x++) {
+        u8* p = img.at(x, y);
+        for (int c = 0; c < 3; c++) {
+          const int q = (x * 3 + y * 7 + c * 11) % 32;
+          p[c] = exact_color ? (u8)((q << 3) | (q >> 2)) : (u8)((x * 37 + y * 11 + c * 53) % 256);
+        }
+        p[3] = (x / cell + y / cell) % 2 ? opaque : (soft_alpha ? (u8)(20 + x * 2) : 0);
+      }
+    }
+    return img;
+  };
+  auto rgba8 = [](const ctr_tex::Image& img, int levels, c3l::Texture* d) {
+    std::vector<u8> data;
+    ctr_tex::MipOptions mo;
+    for (const auto& m : ctr_tex::make_mips(img, levels, mo)) {
+      ctr_tex::encode_level(m, ctr_tex::Format::RGBA8, 1, &data);
+    }
+    *d = c3l::Texture{};
+    d->w = d->h = 32;
+    d->levels = (u8)levels;
+    d->format = c3l::TEX_RGBA8;
+    return data;
+  };
+  Options opt;
+  c3l::Texture d;
+  std::vector<u8> out;
+  Rgba5551Gate g;
+  auto data = rgba8(make(true, false), 1, &d);
+  check(to_rgba5551(d, data, opt, true, false, 76, &out, &g) && g.alpha_exact &&
+            g.similarity == 1.0 && out.size() == 32 * 32 * 2,
+        "5-bit colors with 0 / 1 alpha pass exactly");
+  const auto ref = ctr_tex::decode_level(data.data(), 32, 32, ctr_tex::Format::RGBA8);
+  check(ctr_tex::decode_level(out.data(), 32, 32, ctr_tex::Format::RGBA5551).rgba == ref.rgba,
+        "an exact RGBA5551 texture decodes to the RGBA8 one");
+
+  data = rgba8(make(false, false), 1, &d);
+  check(!to_rgba5551(d, data, opt, true, false, 76, &out, &g) && !g.color_ok,
+        "8-bit colors fail the 99.5% color similarity");
+
+  data = rgba8(make(true, false, 1), 3, &d);
+  check(!to_rgba5551(d, data, opt, true, false, 76, &out, &g) && !g.alpha_exact,
+        "mips with blended alpha need the alpha test rule");
+
+  data = rgba8(make(true, true), 1, &d);
+  check(!to_rgba5551(d, data, opt, true, false, 76, &out, &g) && !g.alpha_ok,
+        "soft alpha without the alpha test fails");
+  check(!to_rgba5551(d, data, opt, true, true, 76, &out, &g) && g.coverage < 0.995,
+        "soft alpha whose filtered edge moves fails");
+  // alpha 0 / 254 (GS 0x7f), alpha tested: the filtered samples pass or fail as before
+  data = rgba8(make(true, false, 8, 254), 3, &d);
+  check(!to_rgba5551(d, data, opt, true, false, 76, &out, &g) && !g.alpha_exact,
+        "alpha 254 is not 1 bit");
+  check(to_rgba5551(d, data, opt, true, true, 76, &out, &g) && g.coverage == 1.0,
+        "alpha tested: every sample passes or fails as before");
+  u32 off = 0, off5 = 0;
+  for (int l = 0; l < 3; l++) {
+    const int w = 32 >> l;
+    const auto dec = ctr_tex::decode_level(out.data() + off5, w, w, ctr_tex::Format::RGBA5551);
+    const auto src = ctr_tex::decode_level(data.data() + off, w, w, ctr_tex::Format::RGBA8);
+    for (int i = 0; i < w * w; i++) {
+      check((dec.rgba[4 * i + 3] >= 76) == (src.rgba[4 * i + 3] >= 76),
+            "the alpha bit keeps each texel's alpha test result in every level");
+    }
+    off += c3l::texture_level_bytes(w, w, c3l::TEX_RGBA8);
+    off5 += c3l::texture_level_bytes(w, w, c3l::TEX_RGBA5551);
+  }
+  check(off5 == out.size(), "RGBA5551 levels: 2 bytes per texel");
+}
 }  // namespace
 
 // the tfrag geomorph's versions (c3l::ExtTfrag): a version the same as the one before it left out
@@ -330,6 +412,7 @@ int main() {
     }
     test_alpha_mask(false);
     test_alpha_mask(true);
+    test_rgba5551();
     test_tfrag_versions();
     run_vram_tests();
     run_citadel_tests();

@@ -342,7 +342,7 @@ Draw (16 bytes)
 Texture (16 bytes)
   u16 w, h                powers of two, 8..max-tex
   u8  format              0 = RGB565, 1 = RGBA4444 (before v22), 2 = ETC1, 3 = ETC1A4 (with alpha),
-                          4 = RGBA8, 5 = A8, 6 = A4 (v23: alpha masks)
+                          4 = RGBA8, 5 = A8, 6 = A4 (v23: alpha masks), 7 = RGBA5551 (v24)
   u8  levels              mip levels in the data (v7: 0, one level)
   u8  pad[2]
   u32 data_offset, data_size
@@ -407,6 +407,14 @@ Texture (16 bytes)
   values)`. `c3l_mem` (tools/ctr_level_converter/c3l_mem.cpp) prints each level's linear memory and
   that of level sets, and `c3l_mem --compare-alpha OLD NEW` checks every mask against the RGBA8
   texture it replaces.
+- **RGBA5551:** (v24) an RGBA8 texture becomes RGBA5551 (u16 r5 g5 b5 a1, alpha in bit 0) when
+  that is at least 99.5% the same, and it is smaller than its alpha mask split. Alpha: every texel
+  of every level is 0 or 255, or the texture is only drawn by level draws alpha tested at one
+  reference with vertex alpha 0x80 (no blending, not merc), the bit is alpha >= reference, and
+  bilinear samples (4x4 per texel of the full size level) pass or fail as with the 8-bit alpha in
+  at least 99.5% of the texture. Color, over the texels the quality test counts: 1 - mean absolute
+  error / 255 >= 0.995, and the worst 4x4 block within what the ETC1 test accepts. The log:
+  `RGBA5551: N of M RGBA8 textures (...)` and `RGBA5551 alpha failures: ...`.
 - **Pools:** the runtime reads a level's textures into texture pools of at most 256 KB
   (`kTexPoolPiece`; a larger texture gets one of its own), the background's textures first. Each
   pool moves to VRAM while there is room (the earlier pieces first; a pool that doesn't fit whole

@@ -26,7 +26,8 @@ struct Image {
   const uint8_t* at(int x, int y) const { return &rgba[4 * (x + y * w)]; }
 };
 
-// A8, A4: the alpha alone (c3l v23 mask textures); their decode has rgb 0
+// A8, A4: the alpha alone (c3l v23 mask textures); their decode has rgb 0. RGBA5551: alpha bit set
+// where alpha >= alpha_ref (encode_level; 128 when alpha_ref is 0)
 enum class Format : uint8_t {
   RGB565 = 0,
   RGBA4 = 1,
@@ -34,7 +35,8 @@ enum class Format : uint8_t {
   ETC1A4 = 3,
   RGBA8 = 4,
   A8 = 5,
-  A4 = 6
+  A4 = 6,
+  RGBA5551 = 7  // u16: r5 g5 b5 a1 (r in the high bits, a in bit 0)
 };
 
 /*! Bytes of one level. */

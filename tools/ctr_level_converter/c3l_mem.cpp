@@ -340,10 +340,10 @@ int main(int argc, char** argv) {
            (unsigned long long)m.tmorph_heap / 1024);
   }
   if (formats) {
-    printf("\nlevel            RGB565 RGBA4  ETC1 ETC1A4 RGBA8    A8    A4 KB\n");
+    printf("\nlevel            RGB565 RGBA4  ETC1 ETC1A4 RGBA8    A8    A4  5551 KB\n");
     for (const auto& [name, m] : levels) {
       printf("%-16s", name.c_str());
-      for (int k = 0; k < 7; k++) {
+      for (int k = 0; k < 8; k++) {
         printf(" %5llu", (unsigned long long)m.by_format[k] / 1024);
       }
       printf("\n");
