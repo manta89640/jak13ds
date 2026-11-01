@@ -76,7 +76,19 @@ class CtrVram {
     flush_pending();
     // also chunks an identical earlier upload left lazy (that upload is skipped)
     materialize(m_page_first, m_page_end);
+    queue_prewarm(tpage, ee_mem, s7_ptr);
   }
+  /*!
+   * Decode queued textures of the boot sprite and HUD pages ahead of their first draw, for up to
+   * budget_ms (render thread, in a frame). The textures are the ones their first draw would make.
+   */
+  void prewarm(double budget_ms);
+  /*!
+   * A boot common page the game uploads only when it draws it (the start menu's): uploaded as the
+   * game does and its textures decoded, for up to budget_ms a frame, once the queue above is done.
+   * False: not all yet (call again next frame).
+   */
+  bool prewarm_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr, double budget_ms);
 
   /*!
    * Emulate the VRAM to VRAM copy of texture-relocate (the font is moved into the upper bits of
@@ -172,6 +184,17 @@ class CtrVram {
   static PendingUpload piece(const PendingUpload& p, u32 c0, u32 c1);
   // bytes = false: whole chunks only take their id, their bytes are written when read (lazy)
   void write_upload(const u8* src, u32 dest_block, u32 words, u64 page_key, bool bytes = true);
+  // the TEX0 of each texture of a boot sprite / HUD page, as adgif-shader<-texture! makes it
+  void queue_prewarm(const u8* tpage, const u8* ee_mem, u32 s7_ptr);
+  std::vector<u64> m_prewarm;
+  int m_prewarm_hold = 0;
+  size_t m_prewarm_at = 0;
+  int m_prewarm_decoded = 0;
+  std::vector<u64> m_page_keys;  // prewarm_page's
+  size_t m_page_at = 0;
+  double m_prewarm_ms = 0;
+  // the decode; lazy_all: write every lazy chunk first (else only the texture's and its CLUT's)
+  const CtrTexture* get_texture_impl(u64 tex0, bool lazy_all);
   void write_rows(const u8* src, u32 dest_block, u32 words);
   void write_ct32(const u8* data, u32 dest_block, u32 width, u32 height);
   bool ct32_same(const u8* data, u32 dest_block, u32 width, u32 height) const;  // (AI-assisted)

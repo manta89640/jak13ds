@@ -216,6 +216,7 @@ class CtrRenderer {
     double last_ms = 0;
     bool title = false;  // the title screen at the last frame (its relief ends with it)
   } m_auto;
+  bool m_menu_page_done = false;  // CtrVram::prewarm_page of the start menu's page
   bool m_title_loaded = false;  // (AI-assisted, levellod) note_levels: "title" is loaded
   bool profile_skips(const std::string& name) const;
   // (AI-assisted) gpu_profile = ab: the A/B windows (kAbSwitches in CtrRenderer.cpp)

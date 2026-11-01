@@ -43,6 +43,10 @@ constexpr u32 kBlocks = kVramBytes / kBlockBytes;
 constexpr u32 kChunkWords = 4096;
 constexpr u32 kChunkBlocks = kChunkWords * 4 / kBlockBytes;
 constexpr u32 kChunks = kBlocks / kChunkBlocks;
+// prewarm (CtrVram::prewarm) only while this much linear memory is free
+[[maybe_unused]] constexpr u32 kPrewarmLinearKeep = 6u << 20;
+// and from this many frames after the last boot page upload or relocation (each makes new chunk ids)
+constexpr int kPrewarmHoldFrames = 30;
 
 // the blocks a 128 pixel wide PSMCT32 upload of `words` writes: whole chunks (the rows of a partial
 // chunk still spread over all of its pages' blocks)
@@ -783,6 +787,17 @@ void CtrVram::relocate(u32 dest_block, u32 src_block, u32 dest_psm) {
     m_stats.relocates_skipped++;
     return;
   }
+  if (!m_sparse) {
+    // the font, as font-set-tex0 gives it to the font templates (its CBP is not in the key)
+    auto lg2 = [](u32 x) { return (u64)(31 - __builtin_clz(std::max(x, 1u))) & 0xf; };
+    const u64 tex0 = (u64)(dest_block & 0x3fff) | (u64)(info.width & 0x3f) << 14 |
+                     (u64)(dest_psm & 0x3f) << 20 | lg2(info.w) << 26 | lg2(info.h) << 30 |
+                     1ull << 34 | 1ull << 61;
+    if (std::find(m_prewarm.begin(), m_prewarm.end(), tex0) == m_prewarm.end()) {
+      m_prewarm.push_back(tex0);
+    }
+    m_prewarm_hold = kPrewarmHoldFrames;
+  }
   materialize_all();
   const u32 width = std::max<u32>(1, info.width) * 64;
   Range range;
@@ -1148,6 +1163,10 @@ void CtrVram::clear_override(u32 tbp) {
 }
 
 const CtrTexture* CtrVram::get_texture(u64 tex0) {
+  return get_texture_impl(tex0, true);
+}
+
+const CtrTexture* CtrVram::get_texture_impl(u64 tex0, bool lazy_all) {
   // (AI-assisted) Jak II's animated textures (set_override; none in Jak 1)
   if (!m_overrides.empty()) {
     auto ov = m_overrides.find((u32)(tex0 & 0x3fff));
@@ -1158,6 +1177,15 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   // the parts of TEX0 that select the texture data (not TCC / TFX / CLUT load control)
   constexpr u64 kKeyMask = ~((0b111ull << 34) | (0b111ull << 61));
   u64 key = tex0 & kKeyMask;
+  {
+    // a relocated texture decodes with the CLUT it was moved with: one entry whatever its CBP
+    const u32 psm = (u32)(key >> 20) & 0x3f;
+    if ((psm == (u32)GsTex0::PSM::PSMT8H || psm == (u32)GsTex0::PSM::PSMT4HH ||
+         psm == (u32)GsTex0::PSM::PSMT4HL) &&
+        find_relocation(GsTex0(data_tex0(key)).tbp0(), psm)) {
+      key &= ~(0x3ffffull << 37);
+    }
+  }
   // (AI-assisted) the 3DS button art (CtrButtonArt.h) changed where it goes: decode the textures
   // it may draw on again
   if (m_art_gen != ctr_button_art::generation()) {
@@ -1210,7 +1238,12 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
     }
   }
 
-  materialize_all();
+  if (lazy_all) {
+    materialize_all();
+  } else {
+    materialize(t.tbp0(), t.tbp0() + texture_block_span(t));
+    materialize(t.cbp(), t.cbp() + 4);
+  }
   std::vector<u32> data;
   int w = 0, h = 0;
   Range tex_range;
@@ -1335,6 +1368,109 @@ const CtrTexture* CtrVram::get_texture(u64 tex0) {
   }
   auto res = m_cache.emplace(key, e);
   return &res.first->second.tex;
+}
+
+namespace {
+// each texture's TEX0 as adgif-shader<-texture! makes it
+void page_tex0s(const u8* tpage, const u8* ee_mem, u32 s7_ptr, std::vector<u64>* out) {
+  GoalTexturePageHeader page;
+  memcpy(&page, tpage, sizeof(page));
+  for (s32 i = 0; i < page.length && i < 1024; i++) {
+    u32 ptr;
+    memcpy(&ptr, tpage + sizeof(GoalTexturePageHeader) + 4 * i, 4);
+    if (!ptr || ptr == s7_ptr || ptr + sizeof(GoalTexture) > (u32)EE_MAIN_MEM_SIZE) {
+      continue;
+    }
+    GoalTexture gt;
+    memcpy(&gt, ee_mem + ptr, sizeof(gt));
+    if (gt.w <= 0 || gt.h <= 0 || gt.dest[0] >= kBlocks) {
+      continue;
+    }
+    auto lg2 = [](u32 x) { return (u64)(31 - __builtin_clz(x)) & 0xf; };
+    out->push_back((u64)gt.dest[0] | (u64)(gt.width[0] & 0x3f) << 14 |
+                   (u64)(gt.psm & 0x3f) << 20 | lg2((u32)gt.w) << 26 | lg2((u32)gt.h) << 30 |
+                   1ull << 34 | (u64)(gt.clut_dest & 0x3fff) << 37 |
+                   (u64)(gt.clutpsm & 0xf) << 51 | 1ull << 61);
+  }
+}
+}  // namespace
+
+// The boot pages whose textures sprites and the HUD draw (common particles, HUD icons)
+void CtrVram::queue_prewarm(const u8* tpage, const u8* ee_mem, u32 s7_ptr) {
+  GoalTexturePageHeader page;
+  memcpy(&page, tpage, sizeof(page));
+  const char* name = (const char*)(ee_mem + page.name_ptr + 4);
+  if (m_sparse || (strcmp(name, "effects") != 0 && strcmp(name, "common") != 0) ||
+      !m_page_end) {
+    return;
+  }
+  page_tex0s(tpage, ee_mem, s7_ptr, &m_prewarm);
+  m_prewarm_hold = kPrewarmHoldFrames;
+}
+
+bool CtrVram::prewarm_page(const u8* tpage, int mode, const u8* ee_mem, u32 s7_ptr,
+                           double budget_ms) {
+  if (m_prewarm_at < m_prewarm.size() || m_prewarm_hold > 0) {
+    return false;
+  }
+#ifdef __3DS__
+  if (ctr_gpu_linear_free() < kPrewarmLinearKeep) {
+    return false;
+  }
+#endif
+  const double t0 = ctr_gpu_time_ms();
+  if (m_page_keys.empty()) {
+    page_tex0s(tpage, ee_mem, s7_ptr, &m_page_keys);
+    m_page_at = 0;
+  }
+  // the page is in VRAM only for this frame (the level's pages come back over it): uploaded again
+  // each frame, at least one texture decoded per frame
+  upload_texture_page(tpage, mode, ee_mem, s7_ptr);
+  do {
+    const int before = m_stats.decoded;
+    get_texture_impl(m_page_keys[m_page_at++], false);
+    m_prewarm_decoded += m_stats.decoded - before;
+  } while (m_page_at < m_page_keys.size() && ctr_gpu_time_ms() - t0 < budget_ms);
+  m_prewarm_ms += ctr_gpu_time_ms() - t0;
+  if (m_page_at < m_page_keys.size()) {
+    return false;
+  }
+  lg::info("[ctr] start menu textures decoded ahead of their first draw: {} of {} ({:.0f} ms)",
+           m_prewarm_decoded, m_page_keys.size(), m_prewarm_ms);
+  m_page_keys.clear();
+  m_page_keys.shrink_to_fit();
+  return true;
+}
+
+void CtrVram::prewarm(double budget_ms) {
+  if (m_prewarm_at >= m_prewarm.size()) {
+    return;
+  }
+  if (m_prewarm_hold > 0) {
+    m_prewarm_hold--;  // (boot: more pages and the font's relocation still to come)
+    return;
+  }
+  const double t0 = ctr_gpu_time_ms();
+  while (m_prewarm_at < m_prewarm.size() && ctr_gpu_time_ms() - t0 < budget_ms) {
+#ifdef __3DS__
+    if (ctr_gpu_linear_free() < kPrewarmLinearKeep) {
+      return;  // (tried again next frame)
+    }
+#endif
+    const int before = m_stats.decoded;
+    get_texture_impl(m_prewarm[m_prewarm_at++], false);
+    m_prewarm_decoded += m_stats.decoded - before;
+  }
+  m_prewarm_ms += ctr_gpu_time_ms() - t0;
+  if (m_prewarm_at >= m_prewarm.size()) {
+    lg::info("[ctr] sprite and HUD textures decoded ahead of their first draw: {} of {} ({:.0f} ms)",
+             m_prewarm_decoded, m_prewarm.size(), m_prewarm_ms);
+    m_prewarm.clear();
+    m_prewarm.shrink_to_fit();
+    m_prewarm_at = 0;
+    m_prewarm_decoded = 0;
+    m_prewarm_ms = 0;
+  }
 }
 
 void CtrVram::keep_stale(u64 key, const Entry& e) {

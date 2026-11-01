@@ -1447,6 +1447,9 @@ float CtrRenderer::hold_black(float alp) {
   return alp;
 }
 
+// (find_menu_page)
+std::atomic<u32> g_menu_page{0};
+
 void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   // same structure as OpenGLRenderer::dispatch_buckets_jak1
   m_rs.buckets_base = dma.current_tag_offset() + 16;  // offset by 1 qw for the initial call
@@ -1475,6 +1478,12 @@ void CtrRenderer::dispatch_buckets_jak1(DmaFollower dma) {
   m_rs.vis_valid[0] = m_rs.vis_valid[1] = false;
   m_rs.vis_packets = 0;
   run_buckets(dma, (size_t)jak1::BucketId::ALPHA_TEX_LEVEL0, 0);
+  m_vram->prewarm(2.0);  // the boot sprite and HUD textures, before their first draw
+  if (!m_menu_page_done) {
+    const u32 page = g_menu_page.load(std::memory_order_relaxed);
+    m_menu_page_done = page && m_vram->prewarm_page((const u8*)g_ee_main_mem + page, -2,
+                                                    (const u8*)g_ee_main_mem, m_rs.offset_of_s7, 2.0);
+  }
 }
 
 void CtrRenderer::dispatch_buckets_jak2(DmaFollower dma) {
@@ -1821,6 +1830,30 @@ bool continue_camera_trans(float* out) {
   return t[0] != 0.f || t[1] != 0.f || t[2] != 0.f;
 }
 
+// the start menu's boot common page (texture-pool common-page 0, uploaded only while the menu
+// draws), found by the game thread for CtrVram::prewarm_page
+void find_menu_page() {
+  static u32 sym = 0;
+  static u32 tries = 0;
+  if (g_menu_page.load(std::memory_order_relaxed) || tries++ % 64) {
+    return;
+  }
+  if (!sym) {
+    sym = jak1::find_symbol_from_c("*texture-pool*").offset;
+    if (!sym) {
+      return;
+    }
+  }
+  const u32 pool = Ptr<jak1::Symbol>(sym)->value;
+  if ((pool & OFFSET_MASK) != BASIC_OFFSET || pool < 0x100000 || pool + 0x2b0 >= (u32)EE_MAIN_MEM_SIZE) {
+    return;
+  }
+  const u32 page = Ptr<u32>(pool + 52 - 4).c()[0];  // common-page 0 (a basic's fields from - 4)
+  if ((page & OFFSET_MASK) == BASIC_OFFSET && page >= 0x100000 && page + 128 < (u32)EE_MAIN_MEM_SIZE) {
+    g_menu_page = page;
+  }
+}
+
 void ctr_send_chain(const void* data, u32 offset) {
   if (!g_ctr) {
     return;
@@ -1850,6 +1883,9 @@ void ctr_send_chain(const void* data, u32 offset) {
   float cont_cam[3];
   const bool have_cont_cam =
       g_game_version == GameVersion::Jak1 && continue_camera_trans(cont_cam);
+  if (g_game_version == GameVersion::Jak1) {
+    find_menu_page();
+  }
   if (g_async) {
     wait_render_idle();
     if (have_game_cam) {
