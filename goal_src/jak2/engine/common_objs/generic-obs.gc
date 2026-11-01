@@ -987,9 +987,10 @@
            (do-effect (-> self skel effect) (the-as symbol (-> block param 0)) (the-as float (-> block param 1)) -1)
            )
        )
+      ;; og:preserve-this the PS2 passed the event's registers through; C mode needs them explicit
       (else
         (if (-> self cur-event-hook)
-            ((-> self cur-event-hook))
+            ((the-as (function process int symbol event-message-block object) (-> self cur-event-hook)) proc argc message block)
             )
         )
       )
