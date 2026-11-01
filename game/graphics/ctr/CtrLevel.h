@@ -134,8 +134,19 @@ struct CtrLevelData {
     if (g < group_mid.size() && group_mid[g] > 0) {
       return std::max(lod_groups[g].dist * lod_floor_k, lod_min_e);
     }
-    return std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
+    const float e = std::max(std::max(lod_error[g], lod_groups[g].dist * lod_floor_k), lod_min_e);
+    if (lod_ring_e > 0) {
+      // the relief's factor: within ring 0 the config's switch
+      const float e_cfg = std::max(std::max(lod_error[g] * lod_cfg_ratio,
+                                            lod_groups[g].dist * lod_floor_k), lod_min_e);
+      return std::max(e, std::min(e_cfg, lod_ring_e));
+    }
+    return e;
   }
+  // the relief moved the factor (else 0): ring 0 in the units of lod_switch_error, and the
+  // config's factor / this one
+  float lod_ring_e = 0.f, lod_cfg_ratio = 1.f;
+  float lod_bound_e() const { return std::max(lod_min_e, lod_ring_e); }
   // (AI-assisted, titlemove) the title screen's least switch distance, in the units of
   // lod_switch_error (distance / factor; 0 elsewhere)
   float lod_min_e = 0.f;

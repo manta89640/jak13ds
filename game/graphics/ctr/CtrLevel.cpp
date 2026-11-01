@@ -8086,7 +8086,7 @@ u32 CtrLevels::stream_shrink(bool all, bool whole) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k = lev.unit_k(su, lev.stream_k);
-        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k, lev.lod_floor_k, lev.lod_min_e) <
+        if (k > 0 && std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k, lev.lod_floor_k, lev.lod_bound_e()) <
                          kKeepMeters * kM) {
           continue;
         }
@@ -8395,7 +8395,7 @@ void CtrLevels::stream_update(u64 frame) {
         dmin = std::min(dmin, dx * dx + dy * dy + dz * dz);
       }
       // (squared first: most units are far beyond their bound, no root for them)
-      const float bound = su.bound(k, lev.lod_floor_k, lev.lod_min_e);
+      const float bound = su.bound(k, lev.lod_floor_k, lev.lod_bound_e());
       const float far_lim = bound + (resident ? kKeepMeters * kM : want_m);
       if (dmin > far_lim * far_lim) {
         if (resident) {
@@ -8761,7 +8761,7 @@ void CtrLevels::stream_update(u64 frame) {
         const float* c = lev.chunks[su.chunk].bsphere;
         const float dx = m_cam[0] - c[0], dy = m_cam[1] - c[1], dz = m_cam[2] - c[2];
         const float k2 = lev.stream_frame + 3 >= frame ? lev.unit_k(su, lev.stream_k) : 0.f;
-        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k2, lev.lod_floor_k, lev.lod_min_e)
+        score = k2 > 0 ? std::sqrt(dx * dx + dy * dy + dz * dz) - su.bound(k2, lev.lod_floor_k, lev.lod_bound_e())
                        : 1e30f;
       }
       if (score > kKeepMeters * kM) {
@@ -9334,7 +9334,7 @@ struct ReliefAt {
   ctr_detail::Knobs kn{};
   explicit ReliefAt(const CtrSettings& s) {
     rl.init(s.tie_lod_px, s.lod_distance, s.tie_distance_scale, s.draw_distance,
-            g_game_version != GameVersion::Jak1);
+            g_game_version == GameVersion::Jak1);
   }
   const ctr_detail::Knobs& at(float tt) {
     if (tt != t) {
@@ -10617,6 +10617,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const bool shrub_ps2 = lev.shrub_ps2_dist;
   const bool shrub_fixed = settings.shrub_distance > 0;
   const float shrub_fixed_dist = shrub_d * 4096.f * det;
+  // a tie chunk's limit with factor kk at position t: the relief's never under ring 0
+  const float ring0 = ctr_detail::kNearRingMeters * 4096.f;
+  auto tie_dist = [&](const c3l::Chunk& ch, float kk, float t) {
+    const float d = ch.max_dist * kk * det;
+    return t < 0 ? ctr_detail::ring_limit(d, ch.max_dist * tie_k0 * det, ring0) : d;
+  };
   // (AI-assisted, title-popin) a chunk's own distance limit (0: none) at auto_detail position t
   auto chunk_limit = [&](const c3l::Chunk& ch, float t) {
     const float tp = std::max(t, 0.f);
@@ -10625,7 +10631,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
       return (shrub_d0 + shrub_d_span * tp) * 4096.f * det;
     } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-      return ch.max_dist * tie_k_at(t) * det;
+      return tie_dist(ch, tie_k_at(t), t);
     }
     return ch.max_dist * det;
   };
@@ -10658,7 +10664,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       } else if (ch.kind == c3l::CHUNK_KIND_SHRUB && shrub_fixed) {
         d = shrub_fixed_dist;
       } else if (ch.kind == c3l::CHUNK_KIND_TIE) {
-        d = ch.max_dist * tie_k * det;
+        d = tie_dist(ch, tie_k, t_pos);
       } else {
         d = ch.max_dist * det;
       }
@@ -10761,7 +10767,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         const float* c = lev.chunks[ci].bsphere;
         const float dx = c[0] - cx, dy = c[1] - cy, dz = c[2] - cz;
         const float ku = su.tf && kb <= 0 ? lev.stream_tf_k : kb;
-        const float lim = su.bound(ku, lev.lod_floor_k, lev.lod_min_e);
+        const float lim = su.bound(ku, lev.lod_floor_k, lev.lod_bound_e());
         if (ku > 0 && dx * dx + dy * dy + dz * dz > lim * lim) {
           lev.unit_ok[u] = 2;
           continue;
@@ -10828,6 +10834,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     lev.lod_floor_k = by_error && k > 0 ? k0 / k : 0.f;
     // (AI-assisted, titlemove) the title: no group switches nearer than kTitleLodMin meters
     lev.lod_min_e = title_on && by_error && k > 0 ? title_min * 4096.f / k : 0.f;
+    // ring 0: the relief's factor never moves a switch nearer than kNearRingMeters
+    const float k_cfg = by_error ? k0 * focal / std::max(settings.tie_lod_px, 0.25f) : k0;
+    const bool ring_on = by_error && k > 0 && k < k_cfg;
+    lev.lod_ring_e = ring_on ? ctr_detail::kNearRingMeters * 4096.f / k : 0.f;
+    lev.lod_cfg_ratio = ring_on ? k_cfg / k : 1.f;
 #ifndef __3DS__
     static const bool no_floor = getenv("CTR_LOD_NO_FLOOR") != nullptr;  // (host A/B: as before)
     if (no_floor) {
@@ -10872,7 +10883,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       if (lod_skip && !(gcl.flags & CtrLevelData::kClPlain)) {
         // (lod_switch_error: lodnear's PS2 floor and titlemove's title minimum raise the error)
         const float sw = by_error ? std::max(std::max(gcl.raw[0], gcl.raw[1] * lev.lod_floor_k),
-                                             lev.lod_min_e)
+                                             lev.lod_bound_e())
                                   : gcl.raw[1];
         bool far = !(k > 0);
         if (!far) {
@@ -10976,10 +10987,17 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       auto near_at = [&](float kk) {
         // (AI-assisted, autodetail) at another factor the PS2 floor and the title's least distance
         // stay where they are (lod_switch_error has this frame's factor in them)
-        const float swk = by_error && kk != k
-                              ? std::max(std::max(lev.lod_error[g] * kk, lg.dist * lev.lod_floor_k * k),
-                                         lev.lod_min_e * k)
-                              : sw * kk;
+        float swk = by_error && kk != k
+                        ? std::max(std::max(lev.lod_error[g] * kk, lg.dist * lev.lod_floor_k * k),
+                                   lev.lod_min_e * k)
+                        : sw * kk;
+        if (by_error && kk != k && kk < k_cfg) {
+          swk = ctr_detail::ring_limit(
+              swk,
+              std::max(std::max(lev.lod_error[g] * k_cfg, lg.dist * lev.lod_floor_k * k),
+                       lev.lod_min_e * k),
+              ctr_detail::kNearRingMeters * 4096.f);
+        }
         const float lim = swk * f + lg.bsphere[3];
         return kk > 0 && d2 < lim * lim;
       };

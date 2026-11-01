@@ -1,6 +1,7 @@
-// auto_detail's relief (game/graphics/ctr/CtrAutoDetail.h): the knobs' ranges, and the controller
-// against a model of the GPU's busy time per frame (a view's time at the PS2 values minus what
-// each knob saves at its position, reached with a lag, plus noise).
+// auto_detail (game/graphics/ctr/CtrAutoDetail.h): the knobs' ranges, ring 0, and the controller
+// against a model of the GPU's busy time per frame (a view's time at the config values plus or
+// minus what the far ring's detail costs at the position, reached with a lag, plus noise); the
+// hardware log hw-nov01e replayed through the old controller and the new one.
 //   c++ -std=c++17 -O2 -I. test/ctr_render/auto_detail_test.cpp -o /tmp/auto_detail_test && /tmp/auto_detail_test [-v]
 #include "game/graphics/ctr/CtrAutoDetail.h"
 #include "check.h"
@@ -23,24 +24,20 @@ bool near(float a, float b, float e = 1e-3f) {
 
 void test_ranges() {
   Relief rl;
-  rl.init(1.f, 0.f, 0.f, 500.f);  // the PS2 values, draw_distance 500
+  rl.init(1.f, 0.f, 0.f, 500.f);  // the PS2 values, draw_distance 500 (Jak II's rules)
   check(rl.n == 3, "PS2 values: three knobs move");
-  check(rl.stage[kTieLodPx] == 0 && rl.stage[kLodDistance] == 1 && rl.stage[kTieDistance] == 2,
-        "order: tie_lod_px, lod_distance, tie distance");
+  check(rl.stage[kTieDistance] == 0 && rl.stage[kLodDistance] == 1 && rl.stage[kTieLodPx] == 2,
+        "order: the far ring first (tie limit, lod_distance, tie_lod_px)");
   Knobs k = rl.at(0.f);
   check(k.tie_lod_px == 1.f && k.lod_distance == 0.f && k.tie_distance_scale == 0.f,
         "r 0: the config values exactly");
-  k = rl.at(0.5f);
-  check(near(k.tie_lod_px, 2.f) && k.lod_distance == 0.f && k.tie_distance_scale == 0.f,
-        "r 0.5: tie_lod_px halfway (geometric), the others untouched");
-  k = rl.at(1.f);
-  check(near(k.tie_lod_px, 4.f) && k.lod_distance == 0.f, "r 1: tie_lod_px at 4");
-  k = rl.at(1.0001f);
-  check(near(k.lod_distance, 500.f, 0.1f), "lod_distance starts at the draw distance (no change)");
-  k = rl.at(2.f);
-  check(near(k.lod_distance, 200.f) && k.tie_distance_scale == 0.f, "r 2: lod_distance 200");
-  k = rl.at(2.0001f);
+  k = rl.at(0.0001f);
   check(near(k.tie_distance_scale, 5.f, 0.01f), "the tie limit starts at the draw distance's equal");
+  k = rl.at(1.f);
+  check(near(k.tie_distance_scale, 1.5f) && k.lod_distance == 0.f && k.tie_lod_px == 1.f,
+        "r 1: the tie limit at x1.5, the others untouched");
+  k = rl.at(2.f);
+  check(near(k.lod_distance, 200.f) && k.tie_lod_px == 1.f, "r 2: lod_distance 200");
   k = rl.at(3.f);
   check(near(k.tie_lod_px, 4.f) && near(k.lod_distance, 200.f) && near(k.tie_distance_scale, 1.5f),
         "r 3: the old values");
@@ -54,11 +51,17 @@ void test_ranges() {
           "the tie limit never grows with r");
   }
   Relief j1;
-  j1.init(1.f, 0.f, 0.f, 500.f, false);  // Jak 1: no tfrag tier switch
-  check(j1.n == 2 && j1.stage[kLodDistance] < 0 && j1.stage[kTieDistance] == 1,
-        "Jak 1: lod_distance doesn't move");
+  j1.init(4.f, 0.f, 1.5f, 500.f, true);  // Jak 1's defaults
+  check(j1.n == 1 && j1.stage[kTieDistance] == 0 && j1.stage[kLodDistance] < 0 &&
+            j1.stage[kTieLodPx] < 0,
+        "Jak 1: only the far ring's tie limit moves");
+  check(near(j1.at(1.f).tie_distance_scale, 1.f), "Jak 1: the tie limit down to x1");
+  Relief j1old;
+  j1old.init(1.f, 0.f, 0.f, 500.f, true);  // Jak 1 with the PS2 values in config.ini
+  check(j1old.n == 2 && j1old.stage[kTieDistance] == 0 && j1old.stage[kTieLodPx] == 1,
+        "Jak 1 at the PS2 values: the tie limit, then tie_lod_px");
   for (float r = 0; r <= 3.f; r += 0.25f) {
-    check(j1.at(r).lod_distance == 0.f, "Jak 1: lod_distance stays the config's");
+    check(j1old.at(r).lod_distance == 0.f, "Jak 1: lod_distance stays the config's");
   }
   Relief j2;
   j2.init(4.f, 200.f, 1.5f, 500.f);  // Jak II's defaults: already the old values
@@ -66,189 +69,357 @@ void test_ranges() {
   k = j2.at(3.f);
   check(k.tie_lod_px == 4.f && k.lod_distance == 200.f && k.tie_distance_scale == 1.5f,
         "Jak II: the config values at any r");
-  Relief part;
-  part.init(2.f, 0.f, 1.5f, 500.f);
-  check(part.n == 2 && part.stage[kTieDistance] < 0 && part.stage[kLodDistance] == 1,
-        "a knob at its old value is left out of the order");
 }
 
-// a view: its GPU ms per frame at the PS2 values, and what each knob saves at its old value;
-// build: the render thread's ms (0: busy - 10, a GPU-bound frame as on hardware; < 0: busy + this,
-// Azahar's busy that follows the build); spike: ms more every fourth frame (the title's time of
-// day update), in busy and build alike
+// ring 0: what the config draws within kNearRingMeters (its nearest point), the relief draws too,
+// with the same version (tie chunk limits, tie LOD switch distances; meters)
+void test_near_ring() {
+  const float R = kNearRingMeters;
+  const float small[] = {5.f, 20.f, 39.f, 40.f, 60.f, 100.f, 300.f};
+  for (float cfg : small) {
+    for (float rel = 0.5f; rel <= cfg; rel *= 1.3f) {
+      const float lim = ring_limit(rel, cfg, R);
+      check(lim >= std::min(cfg, R) - 1e-4f, "ring 0: a relief limit never under the config's there");
+      check(lim <= std::max(rel, std::min(cfg, R)) + 1e-4f, "ring 0: no more than the config's");
+      for (float d = 0; d < R; d += 0.5f) {
+        check((d <= cfg) == (d <= lim) || d > cfg, "ring 0: drawn as at the config");
+      }
+    }
+    check(ring_limit(0.f, cfg, R) == 0.f, "no limit stays no limit");
+  }
+  check(ring_limit(10.f, 0.f, R) == R, "a config without a limit: the relief's from ring 0 on");
+  // every relief position of both games' defaults and of the PS2 values: the small ties' limit
+  // (100 m x the scale) stays beyond ring 0, tie_lod_px at most the old 4
+  const float cfgs[][3] = {{4.f, 0.f, 1.5f}, {1.f, 0.f, 0.f}, {4.f, 200.f, 1.5f}};
+  for (const auto& c : cfgs) {
+    for (bool jak1 : {true, false}) {
+      Relief rl;
+      rl.init(c[0], c[1], c[2], 500.f, jak1);
+      for (float r = 0; r <= kReliefMax; r += 0.05f) {
+        const Knobs kn = rl.at(r);
+        check(!(kn.tie_distance_scale > 0) || kn.tie_distance_scale * kSmallTieMeters >= R,
+              "relief: small ties drawn beyond ring 0");
+        check(kn.tie_lod_px <= std::max(c[0], kOldTieLodPx), "relief: tie_lod_px at most 4");
+      }
+    }
+  }
+}
+
+// the controller before (the old relief, 15 frame windows, 60-480 frame holds, fast steps)
+struct OldController {
+  static constexpr int kFastFrames = 4, kSettleFrames = 24, kBuildFrames = 8, kRoomFrames = 30;
+  static constexpr double kMsPerUnit = 4.0, kRoomMargin = 2.0, kUrgentMargin = 3.0, kGpuLead = 3.0;
+  static constexpr float kStepMin = 0.04f, kStepMax = 0.1f, kStepBack = 0.05f, kBackMax = 0.5f;
+  static constexpr int kHoldMin = 60, kHoldMax = 480, kBackoffFrames = 90, kCalmFrames = 300;
+  float r = 0;
+  int n = 0;
+  double lead = 0;
+  bool urgent = false;
+  long frame = 0;
+  int hold = kHoldMin;
+  long last_toward = -1000000, last_back = -1000000;
+  double fast_sum = 0, fast_gpu = 0, fast_cpu = 0;
+  int fast_n = 0, fast_over = 0;
+  bool last_over = false;
+  double room_sum = 0;
+  int room_n = 0, room_over = 0;
+  double builds[kBuildFrames] = {};
+  bool step(double busy, double build, double target) {
+    frame++;
+    lead += (busy - build - lead) * 0.25;
+    if (lead < kGpuLead) {
+      busy = std::min(busy, target);
+    }
+    builds[frame % kBuildFrames] = build;
+    double cpu = 0;
+    for (double b : builds) {
+      cpu += b;
+    }
+    cpu /= kBuildFrames;
+    const double load = std::max(busy, cpu);
+    fast_sum += load;
+    fast_gpu += busy;
+    fast_cpu += cpu;
+    fast_n++;
+    fast_over += busy > 33.0;
+    room_sum += load;
+    room_n++;
+    room_over += load > target;
+    bool moved = false;
+    if (fast_n >= kFastFrames) {
+      const double avg = fast_sum / fast_n;
+      urgent = fast_gpu / fast_n > target + kUrgentMargin || fast_over >= 2;
+      const bool over = avg > target;
+      if (over && r < (float)n && (urgent || (last_over && frame - last_toward >= kSettleFrames))) {
+        const float s =
+            std::clamp((float)(kStepMin + 0.02 * (avg - target)), kStepMin, kStepMax);
+        r = std::min((float)n, r + s);
+        if (frame - last_back < kBackoffFrames) {
+          hold = std::min(hold * 2, kHoldMax);
+        }
+        last_toward = frame;
+        moved = true;
+        room_sum = 0;
+        room_n = room_over = 0;
+      }
+      last_over = over;
+      fast_sum = fast_gpu = fast_cpu = 0;
+      fast_n = fast_over = 0;
+    }
+    if (room_n >= kRoomFrames) {
+      const double room = target - kRoomMargin - room_sum / room_n;
+      if (r > 0 && room > 0 && room_over <= 1 && frame - last_toward >= hold) {
+        r = std::max(0.f, r - std::clamp((float)(room / kMsPerUnit), kStepBack, kBackMax));
+        last_back = frame;
+        moved = true;
+      }
+      if (frame - last_toward > kCalmFrames) {
+        hold = kHoldMin;
+      }
+      room_sum = 0;
+      room_n = room_over = 0;
+    }
+    if (r <= 0) {
+      urgent = false;
+    }
+    return moved;
+  }
+};
+
+// a view: its GPU ms per frame at Jak 1's defaults (the old values: tie_lod_px 4, ties x1.5),
+// frames; build: the render thread's ms (0: busy - 10, GPU-bound as on hardware; < 0: busy +
+// this, Azahar); spike: ms more every fourth frame (the title's time of day), in busy and build
 struct View {
   const char* name;
-  double busy0;
-  double save[kKnobs];
+  double busy;
   int frames;
   double build = 0;
   double spike = 0;
-  double first = 0;  // build ms more in the view's first frame, less in the 7 after (a level's
-                     // first time of day draws, after its load: they don't count for the build)
 };
+
+// the GPU model (host title flight, triangles x the hardware's 0.164 ms per 1000): the PS2 values
+// (tie_lod_px 1, no tie limit) cost kOldSave ms more than Jak 1's defaults, tie_lod_px alone
+// kOldSavePx of it (wind ties); the new x: kUpMs per unit above (ties x1.5 -> x3), kDownMs per
+// unit below (x1.5 -> x1)
+constexpr double kOldSave = 1.5, kOldSavePx = 1.3;
+constexpr double kUpMs = 0.5, kDownMs = 0.25;
 
 struct Run {
-  int over33 = 0, frames = 0, reversals = 0, first_step = -1;
-  double r_max = 0, r_end = 0, at_ps2 = 0;
-  double sec_part[kKnobs][3] = {};
+  int over33 = 0, frames = 0, reversals = 0, swings = 0, max_window_steps = 0, steps = 0;
+  int first_step = -1;
+  double x_min = 0, x_max = 0, x_end = 0, at_config = 0;
 };
 
-// lag: a step's saving comes in with a time constant (frames): the GPU times are one frame late,
-// and the chunks and tie groups in view keep their decisions until out of view (urgent: at once)
-Run simulate(const std::vector<View>& views, unsigned seed, bool print) {
-  Relief rl;
-  rl.init(1.f, 0.f, 0.f, 500.f);
+// lag: a step's change comes in with a time constant (frames): the GPU times are one frame late,
+// and what is in view keeps its decisions until out of view (urgent: at once)
+template <bool OLD>
+Run simulate(const std::vector<View>& views, unsigned seed, double target = 27.0) {
+  OldController oc;
+  oc.n = 2;  // Jak 1 at the PS2 values: tie_lod_px, then the tie limit
   Controller c;
-  c.n = rl.n;
-  KnobTime kt;
+  c.range(-1.f, 1.f);  // Jak 1's defaults: the tie limit x1 .. x3
   std::mt19937 rng(seed);
   std::normal_distribution<double> noise(0.0, 1.5);
-  double eff_r = 0;  // the relief the picture has reached
-  std::vector<double> pending(2, 0.0);
+  double eff = 0;
+  double pending = views.empty() ? 0.0 : views[0].busy;
   Run out;
   int last_dir = 0;
-  int frame = 0;
+  int frame = 0, window_steps = 0;
+  bool low = false;  // at the bottom of the range since the last swing
   for (const auto& v : views) {
-    Run vr;
-    const float r_start = c.r;
     for (int f = 0; f < v.frames; f++, frame++) {
-      double save = 0;
-      for (int k = 0; k < kKnobs; k++) {
-        save += v.save[k] * rl.part(k, (float)eff_r);
+      double cost;
+      if (OLD) {
+        const double r = eff;
+        cost = v.busy + kOldSave - kOldSavePx * std::clamp(r, 0.0, 1.0) -
+               (kOldSave - kOldSavePx) * std::clamp(r - 1.0, 0.0, 1.0);
+      } else {
+        cost = v.busy + (eff > 0 ? kUpMs * eff : kDownMs * eff);
       }
-      const double busy =
-          std::max(5.0, v.busy0 - save + noise(rng)) + (frame % 4 == 0 ? v.spike : 0.0);
-      vr.over33 += busy > 33.4;
-      vr.frames++;
-      pending.push_back(busy);
-      const double measured = pending.front();  // one frame late
-      pending.erase(pending.begin());
-      const double build = (v.build < 0 ? busy + v.build + noise(rng) : busy - 10.0 + noise(rng)) +
-                           (f < 8 ? v.first * (f == 0 ? 1.0 : 0.6 / f) : 0.0);
-      const float r0 = c.r;
-      c.step(measured, build, true, 27.0, 1.0, !(v.first > 0 && f < 90));
-      if (c.r != r0) {
-        const int dir = c.r > r0 ? 1 : -1;
+      const double busy = std::max(5.0, cost + noise(rng)) + (frame % 4 == 0 ? v.spike : 0.0);
+      out.over33 += busy > 33.4;
+      out.frames++;
+      const double measured = pending;  // one frame late
+      pending = busy;
+      const double build = (v.build < 0 ? busy + v.build : busy - 10.0) + noise(rng);
+      const double pos0 = OLD ? -oc.r : c.x;
+      if (OLD) {
+        oc.step(measured, build, target);
+      } else {
+        c.step(measured, build, true, target);
+      }
+      const double pos = OLD ? -oc.r : c.x;
+      if (pos != pos0) {
+        const int dir = pos > pos0 ? 1 : -1;
         out.reversals += last_dir && dir != last_dir;
         last_dir = dir;
-        if (dir > 0 && vr.first_step < 0) {
-          vr.first_step = f;
+        out.steps++;
+        window_steps++;
+        if (dir < 0 && out.first_step < 0) {
+          out.first_step = frame;
         }
       }
-      const double tau = c.urgent ? 2.0 : 15.0;
-      eff_r += (c.r - eff_r) / tau;
-      kt.add(rl, c.r, 1000.0 / 30.0);
-      vr.r_max = std::max(vr.r_max, (double)c.r);
-      vr.at_ps2 += c.r <= 0;
+      if (frame % 450 == 449) {
+        out.max_window_steps = std::max(out.max_window_steps, window_steps);
+        window_steps = 0;
+      }
+      // a full swing: back to the top of the range after its bottom (the old relief 0 <- 2, the
+      // new x 0 <- -1)
+      const double lo_edge = OLD ? -1.9 : -0.9, hi_edge = -0.1;
+      if (pos <= lo_edge) {
+        low = true;
+      } else if (low && pos >= hi_edge) {
+        low = false;
+        out.swings++;
+      }
+      const bool urgent = OLD ? oc.urgent : c.urgent;
+      const double tau = urgent ? 2.0 : 15.0;
+      const double target_pos = OLD ? oc.r : c.x;
+      eff += (target_pos - eff) / tau;
+      out.x_min = std::min(out.x_min, pos);
+      out.x_max = std::max(out.x_max, pos);
+      out.at_config += pos == 0;
     }
-    vr.r_end = c.r;
-    if (print) {
-      const Knobs k = rl.at(c.r);
-      std::printf("  %-28s %5.1f ms at the PS2 values: first step after %3d frames, r max %.2f, "
-                  "end %.2f (px %.1f, lod %s, ties %s), frames over 33 ms %4.1f%%, at the PS2 "
-                  "values %5.1f%%\n",
-                  v.name, v.busy0, vr.first_step, vr.r_max, vr.r_end, k.tie_lod_px,
-                  k.lod_distance > 0 ? std::to_string((int)k.lod_distance).c_str() : "off",
-                  k.tie_distance_scale > 0 ? std::to_string(k.tie_distance_scale).substr(0, 4).c_str()
-                                           : "none",
-                  100.0 * vr.over33 / vr.frames, 100.0 * vr.at_ps2 / vr.frames);
-    }
-    if (std::strncmp(v.name, "light", 5) == 0) {
-      check(vr.r_max <= r_start, "a light view never moves toward the old values");
-      check(r_start > 0 || vr.at_ps2 == vr.frames, "a light view stays at the PS2 values");
-    }
-    if (v.busy0 > 33.0 && r_start < (float)c.n) {
-      check(vr.first_step >= 0 && vr.first_step <= 8, "an overload is answered within 8 frames");
-    }
-    out.r_max = std::max(out.r_max, vr.r_max);
-    out.over33 += vr.over33;
-    out.frames += vr.frames;
-    out.first_step = out.first_step < 0 ? vr.first_step : out.first_step;
-    out.r_end = vr.r_end;
   }
-  std::memcpy(out.sec_part, kt.ms, sizeof(kt.ms));
+  out.x_end = OLD ? -oc.r : c.x;
   return out;
 }
 
+void print_run(const char* name, const Run& r) {
+  std::printf("  %-34s frames over 33 ms %5.1f%%, steps %4d (most in 15 s %2d), reversals %3d, full "
+              "swings %2d, position %.2f .. %.2f (end %.2f)\n",
+              name, 100.0 * r.over33 / std::max(r.frames, 1), r.steps, r.max_window_steps,
+              r.reversals, r.swings, r.x_min, r.x_max, r.x_end);
+}
+
+// hw-nov01e (New 3DS, title -> village1 -> beach -> jungle, 8 min): per 15 s window the GPU's
+// active ms and the old relief at its end. Each window becomes three 5 s views (the window's time
+// -2, +0, +2 ms in a seeded order); a window that ended below r 2 had more detail on than the
+// defaults for part of it: its time at the defaults is lower by that share of kOldSave
+constexpr double kHw[][2] = {
+    {34.20, 2.00}, {33.24, 2.00}, {30.86, 2.00}, {26.17, 1.76}, {29.09, 2.00}, {30.79, 2.00},
+    {33.28, 2.00}, {31.76, 2.00}, {33.56, 2.00}, {33.70, 2.00}, {28.13, 2.00}, {28.51, 2.00},
+    {25.98, 0.00}, {25.99, 0.60}, {28.33, 2.00}, {27.75, 1.30}, {27.94, 2.00}, {35.73, 2.00},
+    {33.17, 2.00}, {28.55, 2.00}, {25.15, 2.00}, {27.84, 1.91}, {24.26, 0.00}, {23.10, 0.76},
+    {27.31, 1.50}, {25.92, 1.27}, {28.62, 2.00}, {18.98, 0.00}, {25.21, 2.00}, {33.09, 2.00},
+    {24.53, 0.94}, {21.58, 2.00}, {38.05, 2.00}, {30.19, 2.00}, {21.58, 0.00}, {26.62, 2.00},
+    {25.12, 0.30}, {27.51, 2.00}, {32.22, 2.00}, {27.65, 2.00}};
+
+std::vector<View> hw_session(unsigned seed) {
+  std::mt19937 rng(seed);
+  std::vector<View> v;
+  for (const auto& w : kHw) {
+    const double at_defaults = w[0] - kOldSave * (1.0 - w[1] / 2.0) * 0.5;
+    double d[3] = {-2.0, 0.0, 2.0};
+    std::shuffle(d, d + 3, rng);
+    for (double e : d) {
+      v.push_back({"hw", at_defaults + e, 150});
+    }
+  }
+  return v;
+}
+
+void test_hw_replay() {
+  if (verbose) {
+    std::printf("hw-nov01e replayed (seed 1):\n");
+  }
+  const auto session = hw_session(1);
+  const Run o = simulate<true>(session, 1);
+  const Run n = simulate<false>(session, 1);
+  if (verbose) {
+    print_run("old controller, PS2 values", o);
+    print_run("new controller, Jak 1 defaults", n);
+  }
+  // the hardware pattern: the old relief swings over its whole range again and again
+  check(o.swings >= 4, "old: full 2 -> 0 swings, as on hardware");
+  check(o.max_window_steps >= 15, "old: 15 or more steps in a 15 s window, as on hardware");
+  // the new one settles: no full swings, few steps, fewer frames over budget
+  check(n.swings == 0, "new: no full swings");
+  check(n.max_window_steps <= 6, "new: at most 6 steps in a 15 s window");
+  check(n.steps * 4 < o.steps, "new: a quarter of the old steps or fewer");
+  check(n.over33 < o.over33, "new: fewer frames over 33 ms than the old");
+  for (unsigned seed = 2; seed < 30; seed++) {
+    const auto s = hw_session(seed);
+    const Run a = simulate<false>(s, seed);
+    check(a.swings == 0 && a.max_window_steps <= 6, "new: settles for every seed");
+    const Run b = simulate<true>(s, seed);
+    check(a.over33 <= b.over33, "new: no more frames over 33 ms than the old, every seed");
+  }
+}
+
 void test_controller() {
-  // hw-oct30 (New 3DS, PS2 values): GPU busy per 15 s window; busy ~ 14.9 ms + 0.136 ms per 1000
-  // triangles over the log. The savings per knob are estimates (see the report): tie_lod_px 1 -> 4
-  // ~30-70k triangles in open views, lod_distance and the tie limit a few ms at most.
-  const std::vector<View> session = {
-      {"light (village1 hut)", 14.6, {1.0, 0.3, 0.2}, 600},
-      {"title flight", 35.3, {6.0, 2.5, 1.5}, 900},
-      {"light (lava tube start)", 19.9, {1.5, 0.5, 0.3}, 900},
-      {"fire canyon", 38.4, {7.0, 2.0, 1.0}, 900},
-      {"lava tube", 33.6, {5.0, 1.0, 1.0}, 900},
-      {"rolling / ogre (edge)", 28.5, {3.0, 0.8, 0.5}, 1800},
-      {"light (after)", 16.9, {1.0, 0.3, 0.2}, 1800},
-  };
+  // a light stretch: the far ring gains detail, slowly; a heavy view: it sheds, quickly a little
+  const std::vector<View> light = {{"light", 18.0, 3600}};
+  const Run l = simulate<false>(light, 3);
+  check(l.x_min == 0 && l.x_max > 0.5, "a light view: detail above the config, never below");
+  check(l.max_window_steps <= 2, "a light view: at most 2 steps up per 15 s");
+  const std::vector<View> heavy = {{"heavy", 34.0, 1800}};
+  const Run h = simulate<false>(heavy, 4);
+  check(h.first_step >= 0 && h.first_step <= 45, "an overload sheds within 1.5 s");
+  check(h.x_end < 0, "a heavy view: below the config");
+  // a view right at the budget, inside the dead band: nothing moves
+  const std::vector<View> edge = {{"edge", 27.5, 3600}};
+  const Run e = simulate<false>(edge, 7);
+  check(e.steps <= 2, "inside the dead band: (almost) no steps");
+  // light, then heavy, then light again: the light stretch after it doesn't go back above what
+  // didn't fit (the ceiling), until it has been calm for a while
+  std::vector<View> cyc;
+  for (int i = 0; i < 6; i++) {
+    cyc.push_back({"light", 21.0, 900});
+    cyc.push_back({"heavy", 31.5, 450});
+  }
+  const Run c = simulate<false>(cyc, 9);
+  const Run co = simulate<true>(cyc, 9);
   if (verbose) {
-    std::printf("model run (seed 1):\n");
+    std::printf("light 30 s / heavy 15 s, six times:\n");
+    print_run("old controller, PS2 values", co);
+    print_run("new controller, Jak 1 defaults", c);
   }
-  const Run r = simulate(session, 1, verbose);
-  check(r.r_end == 0, "back at the PS2 values after a light stretch");
-  // the edge of the budget: no back and forth every second
-  check(r.reversals < 40, "few direction changes over the session");
-  for (unsigned seed = 2; seed < 40; seed++) {
-    simulate(session, seed, false);
+  check(c.reversals <= 6, "light / heavy cycles: few direction changes");
+  check(c.over33 <= co.over33, "light / heavy cycles: no more frames over 33 ms than the old");
+  // Azahar: busy ~ the build + 0.9 ms, the render thread the limit: views that hold 30 fps there
+  // never move below the config
+  for (unsigned seed = 3; seed < 13; seed++) {
+    const std::vector<View> play = {{"azahar lava tube", 13.5, 900, -0.9},
+                                    {"azahar fire canyon", 22.7, 900, -0.9},
+                                    {"azahar citadel", 15.0, 900, -0.9}};
+    const Run a = simulate<false>(play, seed);
+    check(a.x_min == 0, "Azahar gameplay that holds 30 fps never sheds");
   }
-  // each hardware view on its own, from the PS2 values (60 s)
-  if (verbose) {
-    std::printf("each view from the PS2 values:\n");
+  // a late title flight in Azahar: a 28 ms build plus 12 ms every fourth frame (31 ms mean)
+  const std::vector<View> title = {{"azahar late title", 28.0, 1800, -0.9, 12.0}};
+  const Run t = simulate<false>(title, 5);
+  check(t.x_min < 0, "a render thread over budget sheds");
+  // reset (the title's end) and a new area
+  Controller ct;
+  ct.range(-1.f, 1.f);
+  for (int f = 0; f < 600; f++) {
+    ct.step(36.0, 26.0, true, 27.0);
   }
-  for (const View& v : session) {
-    View one = v;
-    one.frames = 1800;
-    simulate({one}, 11, verbose);
-  }
-  // a view right at the target: stays put or creeps, no oscillation
-  std::vector<View> edge = {{"edge 27.5 ms", 27.5, {3.0, 1.0, 0.5}, 3000}};
-  const Run e = simulate(edge, 7, verbose);
-  check(e.reversals < 12, "at the edge of the budget: few direction changes");
-  // Azahar: busy ~ the build + 0.9 ms, the render thread is the limit. Gameplay views that hold 30
-  // fps there (lava tube and citadel 11-15 ms, fire canyon 22.7 ms) never move, a level's first
-  // draws (citadel: 65 ms of time of day in one frame) included
-  for (unsigned seed = 3; seed < 23; seed++) {
-    const std::vector<View> play = {{"light (azahar lava tube)", 13.5, {1.0, 0.3, 0.2}, 900, -0.9},
-                                    {"light (azahar fire canyon)", 22.7, {3.0, 1.0, 0.5}, 900, -0.9},
-                                    {"light (azahar citadel)", 15.0, {1.0, 0.3, 0.2}, 900, -0.9},
-                                    {"light (azahar citadel arrival)", 14.0, {1.0, 0.3, 0.2}, 900,
-                                     -0.9, 0.0, 65.0},
-                                    {"light (azahar fire canyon arrival)", 22.7, {3.0, 1.0, 0.5},
-                                     900, -0.9, 0.0, 25.0}};
-    const Run a = simulate(play, seed, verbose && seed == 3);
-    check(a.r_max == 0, "Azahar gameplay that holds 30 fps never moves the knobs");
-  }
-  // the late title flight in Azahar: a 26 ms build plus a 12 ms time of day update every fourth
-  // frame (29 ms on average): steps toward the old values until the average is in budget
-  std::vector<View> title = {{"azahar late title", 26.0, {4.0, 1.5, 1.0}, 1800, -0.9, 12.0},
-                             {"light (azahar title, open sea)", 19.0, {2.0, 0.6, 0.4}, 1800, -0.9,
-                              6.0}};
-  const Run t = simulate(title, 5, verbose);
-  check(t.first_step >= 0 && t.first_step <= 40, "a render thread over budget steps within 40 frames");
-  check(t.r_max > 0.3 && t.r_max < 2.0, "the late title settles part way");
-  check(t.r_end == 0, "back at the PS2 values in a light stretch");
-  // the title's end (CtrRenderer::auto_detail_frame): the relief starts again at the config values
-  Controller c;
-  c.n = 3;
-  for (int f = 0; f < 300; f++) {
-    c.step(32.5, 32.0, true, 27.0);
-  }
-  check(c.r > 0, "a render thread at 32 ms steps toward the old values");
-  c.reset();
-  check(c.r == 0 && !c.urgent, "reset: the config values");
+  check(ct.x < 0 && ct.ceil < 0, "a long overload: below the config, the ceiling too");
+  ct.new_area();
+  check(ct.ceil == 1.f, "a new area lifts the ceiling");
+  ct.reset();
+  check(ct.x == 0 && !ct.urgent, "reset: the config values");
   for (int f = 0; f < 120; f++) {
-    c.step(15.5, 15.0, true, 27.0);
+    check(!ct.step(15.5, 15.0, true, 27.0), "after the reset a light view waits before more");
   }
-  check(c.r == 0, "a light view after the reset stays at the config values");
+  // Jak II's defaults: nothing below the config, the tie range above (x1.5 .. x3)
+  Controller j2;
+  j2.range(0.f, 1.f);
+  for (int f = 0; f < 900; f++) {
+    j2.step(40.0, 30.0, true, 27.0);
+  }
+  check(j2.x == 0, "Jak II's defaults: nothing to shed below the config");
 }
 }  // namespace
 
 int main(int argc, char** argv) {
   verbose = argc > 1 && std::strcmp(argv[1], "-v") == 0;
   test_ranges();
+  test_near_ring();
   test_controller();
+  test_hw_replay();
   std::printf("auto_detail_test: ok\n");
   return 0;
 }

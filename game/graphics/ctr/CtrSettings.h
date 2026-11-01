@@ -37,8 +37,9 @@ struct CtrSettings {
   // shrubs up to this distance (meters, times detail_scale; 0 = the converter's, 100 m), and the
   // converter's distances of small and medium ties (100 / 300 m) times this
   float shrub_distance = 50.f;
-  // 0 (config "none"): ties without a distance limit, as the PS2 (geometry 3 beyond the far-plane)
-  float tie_distance_scale = 0.f;
+  // 0 (config "none"): ties without a distance limit, as the PS2 (geometry 3 beyond the far-plane).
+  // 1.5: small ties to 150 m, medium to 450 m (the baseline auto_detail rarely needs to leave)
+  float tie_distance_scale = 1.5f;
   // (AI-assisted) auto_detail: those two grow toward shrub_distance_max / tie_distance_scale_max
   // while the GPU has time to spare (its time per frame under auto_detail_gpu_ms) and go back
   // when it hasn't, so the distances are as far as each place allows (Precursor Basin has room,
@@ -273,7 +274,8 @@ struct CtrSettings {
   // frame's projection), not at the PS2 distance (3 px median, up to 19 px pops in village1).
   // 1 px: the switch can't be seen, as the PS2's morph to geometry 3 (~+30-70k triangles on the
   // title and in Snowy against 4 px)
-  float tie_lod_px = 1.f;
+  // 4: the PS2 far-plane floor keeps the PS2's look; 1 cost the title ~2.5 ms of wind ties
+  float tie_lod_px = 4.f;
   // (AI-assisted) a neighbouring level's visibility string (the camera is in the other level): its
   // tfrag is hidden by the bits too, and its low resolution tfrag drawn where they say, as the
   // PS2 and PC do (else only its ties used the bits)

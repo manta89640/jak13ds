@@ -198,22 +198,14 @@ class CtrRenderer {
   void auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int gpu_busy_frames,
                          double build_ms, double build_tod_ms);
   struct AutoDetail {
-    float t = 0.25f;  // ctr_level_set_detail
-    double busy_ms = 0, busy_max = 0, build_max = 0;
-    double build_tod_max = 0;  // (AI-assisted, levellod) the build time with the time of day's
-    int busy_frames = 0, frames = 0;
-    int over33 = 0;            // (AI-assisted, levellod) frames over 33 ms of GPU in the window
-    int tod_over_windows = 0;  // (AI-assisted, levellod) windows in a row: build_tod_max > target
     u64 load_frame = 0;        // (AI-assisted, levellod) the last frame of a level load
-    int ups = 0, downs = 0;  // steps since the last log
-    int tod_downs = 0;       // (AI-assisted, levellod) ... of them by the time of day
     bool init = false;
-    bool urgent_t = false;  // the t range's window: a GPU about to miss frames
-    bool t_range = false;  // the shrub / tie distances have a near-to-far range (t moves)
+    bool area = false;  // a new level is played (note_levels): the controller's ceiling lifts
     ctr_detail::Relief relief;
     ctr_detail::Controller ctl;
     ctr_detail::KnobTime time;
     double last_ms = 0;
+    double above_ms = 0;  // since the last log: x above the config (the far ring's extra detail)
     bool title = false;  // the title screen at the last frame (its relief ends with it)
   } m_auto;
   bool m_menu_page_done = false;  // CtrVram::prewarm_page of the start menu's page
