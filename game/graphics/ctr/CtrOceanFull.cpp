@@ -529,7 +529,7 @@ void CtrOceanFull::make_wave_rt() {
 /*!
  * The wave texture as the PS2 makes it: the ocean-texture program sends the GS the 32 x 32 quads
  * between the 33 x 33 vertices, gouraud colored, the env map at the interpolated coordinates
- * (nearest texel, clamped), GS modulate. The GPU draws the same quads into the 128 x 128 render
+ * (bilinear, clamped, as the PC's OceanTexture), GS modulate. The GPU draws the same quads into the 128 x 128 render
  * texture, then the mip levels: 2 x 2 averages, the PS2's bilinear half size sprites
  * (ctr_gpu_rt_draw_grid). The mid ocean samples all of them, the near ocean levels 0 and 1, both
  * blending two levels (their TEX1: MXL 6 / 1, MMIN 5). The PS2's sprites also fade the levels'
@@ -543,7 +543,7 @@ void CtrOceanFull::update_texture_gpu(const TextureDma& t, CtrRenderState& rs) {
   memset(&st, 0, sizeof(st));
   st.tex = env ? env->handle : -1;  // (none: the vertex colors alone, alpha 1, like the CPU's)
   st.tcc = 1;
-  st.filter = 0;
+  st.filter = 1;
   st.clamp_s = st.clamp_t = 1;
   st.blend = CTR_BLEND_OFF;
   st.atest = CTR_TEST_ALWAYS;
