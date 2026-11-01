@@ -405,6 +405,10 @@ void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear);
  * it when early depth was asked for before it (ctr_gpu_set_early_depth, _params); then this
  * returns that result. Until it passes the early test stays off. 1: passed. */
 int ctr_gpu_early_depth_selftest(void);
+/* the shadow volumes' stencil passes checked on this console (ctr_gpu_early.c), before the game's
+ * first frame; 1: passed. ctr_gpu_stencil_status: its log line */
+int ctr_gpu_stencil_selftest(void);
+const char* ctr_gpu_stencil_status(void);
 /* (AI-assisted) the early test in use (asked for and the self-test passed) */
 int ctr_gpu_early_depth_active(void);
 /* (AI-assisted) the self-test's result, one line ("" before it ran) */

@@ -415,6 +415,124 @@ static void target_init(EdTarget* t, C3D_FrameBuf* fb) {
   t->clear_color = t->cbytes == 4 ? 0x203040FFu : 0x2104u;
 }
 
+/* a 32 x 32 quad of gray g at depth z, its triangles wound one way or the other (flip) */
+static void sq(float x0, float y0, float z, int flip, u8 g) {
+  const float x1 = x0 + 32, y1 = y0 + 32;
+  const float a[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x0, y1}, {x1, y0}, {x1, y1}};
+  const float b[6][2] = {{x0, y0}, {x0, y1}, {x1, y0}, {x0, y1}, {x1, y1}, {x1, y0}};
+  if (E.nv + 6 > ED_VERTS) {
+    return;
+  }
+  EdVtx* v = E.vb + E.nv;
+  for (int k = 0; k < 6; k++) {
+    v[k].x = flip ? b[k][0] : a[k][0];
+    v[k].y = flip ? b[k][1] : a[k][1];
+    v[k].z = z;
+    v[k].s = v[k].t = 0.0f;
+    v[k].r = v[k].g = v[k].b = g;
+    v[k].a = 255;
+  }
+  C3D_DrawArrays(GPU_TRIANGLES, E.nv, 6);
+  E.nv += 6;
+}
+
+/* the shadow passes over a receiver: a front quad + 1, then (kind > 0) a back quad - 1, then a
+ * white quad where the stencil isn't 0 (read back from the color buffer: an emulator's depth
+ * buffer readback lags). kind: 0 no back quad, 1 the op changed by a lone STENCIL_OP write, 2 by
+ * citro3d's block, 3 the block and the back quad wound as the front one, 4 the block with
+ * DECR_WRAP. -1: the GPU didn't finish, else the pixels left marked */
+static int stencil_case(EdTarget* t, int kind) {
+  if (!frame_begin()) {
+    return -1;
+  }
+  C3D_FrameBufClear(&t->fb, C3D_CLEAR_ALL, t->clear_color, 0);
+  use_target(&t->fb, 0);
+  common_state();
+  state(0, 1, 0, 0);
+  sq(16, 16, 0.5f, 0, 64);
+  C3D_DepthTest(true, GPU_GEQUAL, 0);
+  C3D_StencilTest(true, GPU_ALWAYS, 0, 0xFF, 0xFF);
+  C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_INCR);
+  sq(16, 16, 0.9f, 0, 128);
+  if (kind == 1) {
+    GPUCMD_AddWrite(GPUREG_STENCIL_OP, (u32)GPU_STENCIL_DECR << 8);
+  } else if (kind > 1) {
+    C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP,
+                  kind == 4 ? GPU_STENCIL_DECR_WRAP : GPU_STENCIL_DECR);
+  }
+  if (kind > 0) {
+    sq(16, 16, 0.8f, kind != 3, 128);
+  }
+  C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
+  C3D_StencilTest(true, GPU_NOTEQUAL, 0, 0xFF, 0);
+  C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
+  sq(16, 16, 0.9f, 0, 255);
+  C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+  if (!frame_end()) {
+    return -1;
+  }
+  const u32 px = (u32)t->fb.width * t->fb.height;
+  if (!copy_back(t->fb.colorBuf, px * (u32)t->cbytes)) {
+    return -1;
+  }
+  int n = 0;
+  if (t->cbytes == 4) {
+    const u32* c = (const u32*)E.rb;
+    for (u32 i = 0; i < px; i++) {
+      n += c[i] == 0xFFFFFFFFu;
+    }
+  } else {
+    const u16* c = (const u16*)E.rb;
+    for (u32 i = 0; i < px; i++) {
+      n += c[i] == 0xFFFFu;
+    }
+  }
+  return n;
+}
+
+int ctr_stencil_selftest(const CtrEarlyTestIn* in, char* status, int size) {
+  memset(&E, 0, sizeof(E));
+  status[0] = 0;
+  EdTarget top;
+  target_init(&top, in->top);
+  E.prog = in->prog;
+  E.uloc = in->uloc_projection;
+  E.rb_bytes = (u32)top.fb.width * top.fb.height * 4;
+  E.vb = (EdVtx*)lin_alloc(ED_VERTS * sizeof(EdVtx));
+  E.rb = (u8*)lin_alloc(E.rb_bytes);
+  int ok = 0;
+  if (top.dbytes != 4) {
+    snprintf(status, (size_t)size, "not run (no stencil)");
+  } else if (!E.prog || !E.prog->vertexShader || E.uloc < 0 || !E.vb || !E.rb) {
+    snprintf(status, (size_t)size, "not run (no memory)");
+  } else {
+    static const char* const kCase[5] = {"incr only", "lone op write", "block", "same winding",
+                                         "decr wrap"};
+    int r[5];
+    for (int k = 0; k < 5; k++) {
+      r[k] = E.timeout ? -1 : stencil_case(&top, k);
+    }
+    int len = 0;
+    for (int k = 0; k < 5 && len < size; k++) {
+      len += snprintf(status + len, (size_t)(size - len), "%s%s %d px", k ? ", " : "", kCase[k],
+                      r[k]);
+    }
+    if (len < size) {
+      snprintf(status + len, (size_t)(size - len), " (expected 1024, then 0)");
+    }
+    ok = r[0] == 1024 && r[2] == 0;
+    if (frame_begin()) {
+      C3D_FrameBufClear(&top.fb, C3D_CLEAR_ALL, top.cbytes == 4 ? 0x000000FFu : 0u, 0);
+      frame_end();
+    }
+  }
+  if (!E.timeout) {
+    lin_free(E.vb);
+    lin_free(E.rb);
+  }
+  return ok;
+}
+
 int ctr_early_selftest(const CtrEarlyTestIn* in, char* status, int size) {
   memset(&E, 0, sizeof(E));
   E.func = in->func;

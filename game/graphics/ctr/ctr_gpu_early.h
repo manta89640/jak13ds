@@ -29,6 +29,10 @@ enum {
 /* bits CTR_EARLY_OK_*; status: one line for the log */
 int ctr_early_selftest(const CtrEarlyTestIn* in, char* status, int size);
 
+/* the shadow volumes' stencil passes checked on the console: 1 when the front pass counts up
+ * and the back pass (op changed by citro3d's register block) counts back down; status: the log */
+int ctr_stencil_selftest(const CtrEarlyTestIn* in, char* status, int size);
+
 /* the early depth data made valid for the framebuffer citro3d has bound: the bind sent first,
  * then EARLYDEPTH_DATA and EARLYDEPTH_CLEAR (frame begin, after a render target switch) */
 void ctr_gpu_early_establish(void);
