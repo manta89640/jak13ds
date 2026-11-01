@@ -8030,8 +8030,9 @@ void CtrLevels::stream_late_end(CtrLevelData::StreamUnit& su, double end_ms, u64
 }
 
 void CtrLevels::stream_note_level(CtrLevelData& lev, u32 late_groups, u32 held_groups,
-                                  u64 frame) {
+                                  u64 frame, u32 ring0_late) {
   (void)lev;
+  m_sst.ring0_late += ring0_late;
   if (held_groups) {
     m_sst.held_group_frames += held_groups;
     if (m_sst.last_held_frame != frame) {
@@ -8350,7 +8351,7 @@ void CtrLevels::stream_update(u64 frame) {
   if (m_k_last <= 0) {
     m_k_last = m_k_any * 1.15f;  // (no streaming level drawn yet: the title's logo)
   }
-  u64 need_now = 0;
+  u64 need_now = 0, ring0_now = 0;
   for (auto& [name, lp] : m_levels) {
     CtrLevelData& lev = *lp;
     if (!lev.streaming) {
@@ -8381,6 +8382,7 @@ void CtrLevels::stream_update(u64 frame) {
       // far the camera (now or where it goes) is beyond the nearest group's near distance
       const bool resident = su.state == CtrLevelData::kUnitResident;
       su.urgent = false;
+      su.ring0 = false;
       su.prio = 0.f;
       if (k <= 0) {
         if (resident) {
@@ -8409,6 +8411,9 @@ void CtrLevels::stream_update(u64 frame) {
         continue;
       }
       float score = std::sqrt(dmin) - bound;
+      // ring 0: a group needed from the camera now whose surface is within kNearRingMeters
+      bool ring0 = false;
+      const float ring_m = ctr_detail::kNearRingMeters * kM;
       // (AI-assisted, lodnear) with the PS2 floor, a unit needed only by it (its groups' far
       // versions within tie_lod_px there) is less urgent than one whose groups' far versions
       // would show: those first, and they may take the others' room at capacity
@@ -8421,6 +8426,7 @@ void CtrLevels::stream_update(u64 frame) {
         // versions showing less detail meanwhile
         urgent = true;
         prio = 1.f;
+        ring0 = !hidden && score < 0 && std::sqrt(dmin) - c[3] < ring_m;
       } else if (!lev.unit_group_first.empty()) {
         float best = 1e30f;
         for (u32 j = lev.unit_group_first[u]; j < lev.unit_group_first[u + 1]; j++) {
@@ -8437,6 +8443,13 @@ void CtrLevels::stream_update(u64 frame) {
           if (!urgent) {
             const float lim_e = lev.lod_error[g] * k + lg.bsphere[3];
             urgent = g2 < lim_e * lim_e;
+          }
+          if (!hidden && !ring0) {
+            const float dx = pp[0][0] - lg.bsphere[0], dy = pp[0][1] - lg.bsphere[1],
+                        dz = pp[0][2] - lg.bsphere[2];
+            const float n2 = dx * dx + dy * dy + dz * dz;
+            const float rr = ring_m + lg.bsphere[3];
+            ring0 = n2 < lim * lim && n2 < rr * rr;
           }
           if (has_err) {
             // (AI-assisted, popin2) its far version's error from the camera now (not the lead
@@ -8461,6 +8474,12 @@ void CtrLevels::stream_update(u64 frame) {
       }
       su.last_score = score;
       su.urgent = urgent && score < 0;
+      su.ring0 = ring0 && score < 0;
+      ring0_now += su.ring0 ? su.bytes : 0;
+#ifndef __3DS__
+      static const bool no_ring0 = getenv("CTR_STREAM_NO_RING0") != nullptr;  // (host A/B)
+      su.ring0 = su.ring0 && !no_ring0;
+#endif
       const bool view = (resident || score < 0) && !hidden && in_view(c);
       su.prio = prio * (view ? kInViewPrio : 1.f);
       if (resident) {
@@ -8469,11 +8488,14 @@ void CtrLevels::stream_update(u64 frame) {
         // (needed now and on screen: first; (AI-assisted, lodnear) then the urgent ones; title3:
         // not for hidden levels). (AI-assisted, popin2) with shape errors: the needed ones by
         // priority, the most first (where the far versions show most), then the others by score
-        const float key =
+        float key =
             has_err && score < 0
                 ? -kM * (1.f + 100.f * su.prio)
                 : (score < 0 && view ? score - kInViewMeters * kM : score) -
                       (su.urgent ? kInViewMeters * kM : 0.f);
+        if (su.ring0) {
+          key = -1e20f + score * 1e10f;  // ring 0 before everything, the most needed first
+        }
         m_want.push_back({&lev, u, key});
         if (!su.want_frame) {
           su.want_frame = frame;
@@ -8485,6 +8507,8 @@ void CtrLevels::stream_update(u64 frame) {
   }
   m_sst.need_max = std::max<u64>(m_sst.need_max, need_now);
   m_sst.need_sum += need_now;
+  m_sst.ring0_max = std::max<u64>(m_sst.ring0_max, ring0_now);
+  m_sst.ring0_sum += ring0_now;
   if (pop_log_on()) {  // (AI-assisted, titlemove) CTR_POP_LOG: the streaming's view of the frame
     u32 want_now = 0;
     for (const auto& w : m_want) want_now += w.score < 0;
@@ -8618,6 +8642,40 @@ void CtrLevels::stream_update(u64 frame) {
         mem = arena.alloc(su.bytes);
       }
     }
+    // Ring 0: every unit outside it gives way (no hysteresis, no residency), those not needed now
+    // first; each time the one whose freeing makes the largest free run (fragmentation), until a
+    // run fits this unit
+    if (!mem && evicted < su.bytes && su.ring0) {
+      bool fits = false;
+      u64 freed_for = 0;
+      for (int tier = 0; tier < 2 && !mem && !fits; tier++) {
+        while (!mem && !fits && freed_for < 4ull * su.bytes) {
+          const StreamCand* best = nullptr;
+          u32 best_run = 0;
+          for (const auto& h : m_have) {
+            const auto& hu = h.lev->stream_units[h.unit];
+            if (hu.state != CtrLevelData::kUnitResident || hu.ring0 ||
+                (tier == 0) != (h.score >= 0)) {
+              continue;
+            }
+            const u32 run = arena.run_if_freed(hu.mem);
+            if (!best || run > best_run) {
+              best = &h;
+              best_run = run;
+            }
+          }
+          if (!best) {
+            break;
+          }
+          freed_for += best->lev->stream_units[best->unit].bytes;
+          evicted += best->lev->stream_units[best->unit].bytes;
+          stream_evict(*best->lev, best->unit);
+          m_sst.ring0_evictions++;
+          mem = arena.alloc(su.bytes);
+          fits = best_run >= su.bytes;  // (its memory is back once the GPU is done: next frame)
+        }
+      }
+    }
     // The arena at its most (the heap at its floor) and this unit needed now: the units kept
     // within the keep margin that aren't wanted (beyond the wanted margin: not read now either)
     // make room for it
@@ -8635,7 +8693,7 @@ void CtrLevels::stream_update(u64 frame) {
       u64 freed_for = 0;
       for (size_t j = hi; !mem && j < m_have.size() && freed_for < su.bytes; j++) {
         auto& victim = m_have[j].lev->stream_units[m_have[j].unit];
-        if (victim.state != CtrLevelData::kUnitResident || victim.urgent) {
+        if (victim.state != CtrLevelData::kUnitResident || victim.urgent || victim.ring0) {
           continue;
         }
         freed_for += arena.run_if_freed(victim.mem) >= su.bytes ? su.bytes : victim.bytes;
@@ -8673,7 +8731,7 @@ void CtrLevels::stream_update(u64 frame) {
         if (h.score * kPrioHyst >= su.prio) {
           break;  // (the rest have more)
         }
-        if (victim.state != CtrLevelData::kUnitResident ||
+        if (victim.state != CtrLevelData::kUnitResident || victim.ring0 ||
             frame < victim.resident_frame + kMinResidentFrames) {
           continue;
         }
@@ -9195,7 +9253,9 @@ void CtrLevels::stream_log() {
            "times, {} frames with groups drawn far for it ({} group frames), {:.0f} ms on "
            "average, at most {:.0f} ms ({} frames); needed now {:.0f} KB on average, at most "
            "{} KB; {} read with their file neighbours; linear free least {} KB ({} while a "
-           "level loaded); scheduling {:.3f} ms/frame (most {:.2f}); {}",
+           "level loaded); scheduling {:.3f} ms/frame (most {:.2f}); ring 0 ({:.0f} m): needed "
+           "{:.0f} KB on average, at most {} KB, {} units freed for it, {} group frames in view "
+           "drawn far for want of data; {}",
            as.used / 1024, as.capacity / 1024, as.peak / 1024, as.largest_free / 1024, as.pieces,
            as.growth / 1024, as.segments ? as.segments - 1 : 0, as.peak_capacity / 1024, as.grown,
            as.released, m_sst.shrunk,
@@ -9212,7 +9272,9 @@ void CtrLevels::stream_log() {
            m_sst.linear_min == ~0ull ? 0 : m_sst.linear_min / 1024,
            m_sst.linear_min_load == ~0ull ? std::string("-")
                                           : std::to_string(m_sst.linear_min_load / 1024),
-           m_sst.sched_ms / n, m_sst.sched_max_ms,
+           m_sst.sched_ms / n, m_sst.sched_max_ms, ctr_detail::kNearRingMeters,
+           m_sst.ring0_sum / n / 1024.0, m_sst.ring0_max / 1024, m_sst.ring0_evictions,
+           m_sst.ring0_late,
            levels.empty() ? std::string("no levels") : levels);
   if (m_dst.freed_chunks || m_dst.read_jobs) {
     lg::info("[ctr] distance freeing: {} chunks freed ({} KB; {} times in play), {} read backs of "
@@ -10799,6 +10861,13 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
 #endif
   u32 late_view = 0;    // (AI-assisted, title3) ... late and in view
+  // ... late, in view and within ring 0 (its surface)
+  u32 ring0_late = 0;
+  auto ring0_seen = [&](const float* b) {
+    const float x = b[0] - cx, y = b[1] - cy, z = b[2] - cz;
+    const float r = ctr_detail::kNearRingMeters * 4096.f + b[3];
+    return x * x + y * y + z * z < r * r;
+  };
   if (tie_lod) {
     u32 near = 0;
     // (AI-assisted, title-popin) files with shape errors: the near version while the far one's
@@ -10950,6 +11019,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               const bool seen = sphere_in_view(cam, lg.bsphere);
               m_late_in_view += seen;
               late_view += seen;
+              ring0_late += seen && ring0_seen(lg.bsphere);
               if (!keep_far && !g_screen_black && seen) {
                 keep_far = true;
                 lev.lod_hold_since[g] = (u32)rs.frame_idx;
@@ -11064,6 +11134,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
               const bool seen = sphere_in_view(cam, lg.bsphere);
               m_late_in_view += seen;  // (AI-assisted, j2intro) Jak II
               late_view += seen;       // (AI-assisted, title3) Jak 1
+              ring0_late += seen && ring0_seen(lg.bsphere);
               // (AI-assisted, j2intro / title3) not while the screen is black: it switches as
               // soon as the data is there
               if (!keep_far && !g_screen_black && seen) {
@@ -11220,6 +11291,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             const bool seen = sphere_in_view(cam, b);
             m_late_in_view += seen;
             late_view += seen;
+            ring0_late += seen && ring0_seen(b);
             if (!hold && !g_screen_black && seen) {
               hold = true;
               lev.tf_hold_since[g] = (u32)rs.frame_idx;
@@ -11250,7 +11322,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   lev.stream_tf_k = tf_on && !(j2_hidden && settings.dormant_levels) ? 1.f : 0.f;
   if (has_units) {
     lev.stream_frame = rs.frame_idx;
-    m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx);
+    m_levels->stream_note_level(lev, late_groups, held_groups, rs.frame_idx, ring0_late);
     if (m_jak2_slot < 0) {
       // (AI-assisted, title3) Jak 1 (Jak II reports after the chunk loop: m_late_in_view)
       m_levels->note_late_in_view(rs.frame_idx, late_view, rs.frame_idx < lev.reveal_frame + 90);

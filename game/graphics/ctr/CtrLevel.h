@@ -445,6 +445,8 @@ struct CtrLevelData {
     // needed one whose priority is kPrioHyst x larger
     float prio = 0;
     u64 resident_frame = 0;  // (AI-assisted, popin2) the frame it was last taken (became there)
+    // this frame: needed now by a group whose surface is within ring 0 of the camera
+    bool ring0 = false;
   };
   static constexpr u8 kUnitAbsent = 0, kUnitLoading = 1, kUnitResident = 2, kUnitNever = 3;
   std::vector<StreamUnit> stream_units;
@@ -804,7 +806,8 @@ class CtrLevels {
   /*! (AI-assisted, streaming) a unit needed (draw_level): late statistics */
   void stream_late(CtrLevelData& lev, u32 unit, u64 frame);
   /*! (AI-assisted, streaming) a level drawn: its groups drawn far because their data was late */
-  void stream_note_level(CtrLevelData& lev, u32 late_groups, u32 held_groups, u64 frame);
+  void stream_note_level(CtrLevelData& lev, u32 late_groups, u32 held_groups, u64 frame,
+                         u32 ring0_late = 0);
   /*! (AI-assisted) What the render thread does at the start of each frame for the loader: a
    * parked prefetch the game gave up on to unload, or the loader waiting for memory (make_room).
    * The game can wait for a level without drawing frames (both level slots empty: it loads in a
@@ -1191,6 +1194,9 @@ class CtrLevels {
     // the linear heap's free bytes at the frame's start: least, least while a level loaded
     u64 linear_min = ~0ull, linear_min_load = ~0ull;
     double since_ms = 0;  // the window's start
+    // ring 0 (ctr_detail::kNearRingMeters): the bytes of its units per frame, units freed for
+    // them, in-view group frames there drawn far for want of their data
+    u64 ring0_sum = 0, ring0_max = 0, ring0_evictions = 0, ring0_late = 0;
   } m_sst;
 };
 

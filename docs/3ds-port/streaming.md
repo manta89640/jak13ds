@@ -122,6 +122,17 @@ groups, 50 m: 4.2 / 6.3 Snowy).
     average, up to 10 s. Its groups stayed far meanwhile and then switched on screen up close.
   - Now a group left far for lack of room is one whose far version shows little. It comes in once
     it shows more than what is there.
+- **Ring 0 first.** A unit needed now by a group whose surface is within 40 m of the camera
+  (`ctr_detail::kNearRingMeters`, `StreamUnit::ring0`) is read before every other unit, the
+  most needed first. When it has no room after the steps above, it frees units outside ring 0
+  with no priority hysteresis and no minimum residency: first the units not needed now, then the
+  needed ones, each time the one whose freeing makes the largest free run in the arena (with the
+  free and pending pieces next to it), until a run fits it. Ring 0 units are never freed for a
+  unit outside ring 0. The streaming line reports ring 0's bytes per frame, the units freed for it,
+  and the in-view group frames within ring 0 drawn far for want of data.
+  - Why: in hw-nov01e (jungle + village1) the near data needed (~8 MB) was larger than the arena
+    (6.6 MB at the linear heap's floor), and 400-449 frames of every 449 had groups drawn far for
+    want of room, some right next to Jak, late by 2-5 s on average.
 - (AI-assisted, popin2) **Draining.** While the linear heap is below its floor, all of the
   arena's growth units are freed so the growth segments can go back to the heap. While that
   happens, `CtrStreamArena::alloc` takes no piece in a growth segment (`set_draining`).
