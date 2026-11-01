@@ -2979,6 +2979,7 @@ int ctr_gpu_hwprof_end(ctr_gpu_hwprof* out) {
   return 1;
 }
 void ctr_gpu_set_steady_pacing(int) {}
+void ctr_gpu_set_top_block32(int) {}
 unsigned int ctr_gpu_release_now(void) {
   return 0;
 }

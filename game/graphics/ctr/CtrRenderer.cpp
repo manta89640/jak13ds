@@ -1617,11 +1617,24 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
   ctr_gpu_set_color16(ctr_settings().color16 ? 1 : 0);  // the render target's format
   ctr_gpu_set_steady_pacing(ctr_settings().steady_pacing ? 1 : 0);
   ctr_gpu_set_framebuffer(ctr_settings().depth16 ? 1 : 0);
+  // the early depth self-test runs in ctr_gpu_init (it picks the top target's tile mode)
+  ctr_gpu_set_top_block32(ctr_settings().top_block32);
+  ctr_gpu_set_early_depth(ctr_settings().early_depth ? 1 : 0);
+  if (ctr_settings().early_depth || ctr_settings().early_depth_sky) {
+    ctr_gpu_set_early_depth_params(
+        ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
+        ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
+  }
   // (AI-assisted) hardware hang bisect switches (config.ini, CtrSettings.h)
   ctr_gpu_set_shader_basic(ctr_settings().shader_basic);
   ctr_gpu_set_asm_tex(ctr_settings().asm_tex ? 1 : 0);
   ctr_gpu_set_defer_flush(ctr_settings().defer_flush ? 1 : 0);
   lg::info("[ctr] diag: defer_flush {}", ctr_settings().defer_flush ? "on" : "off");
+#ifdef __3DS__
+  if (ctr_settings().early_depth || ctr_settings().early_depth_sky) {
+    ctr_boot_mark("7a GPU init with the early depth self-test");
+  }
+#endif
   if (ctr_gpu_init() != 0) {
     lg::error("[ctr] GPU init failed");
     return 1;
@@ -1639,7 +1652,6 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
     ctr_gpu_set_early_depth_params(
         ctr_settings().early_depth_sky || (ctr_settings().early_depth && ctr_settings().sky_last),
         ctr_settings().early_depth_func, ctr_settings().early_depth_clear);
-    ctr_boot_mark("8a early depth self-test");
     const int passed = ctr_gpu_early_depth_selftest();
     const std::string line = fmt::format("early depth self-test: {} -> early depth {}",
                                          ctr_gpu_early_depth_status(), passed ? "on" : "off");

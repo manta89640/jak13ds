@@ -57,6 +57,7 @@ static const char* const kFeat[F_COUNT] = {"frame", "tile8", "partial", "mosaic"
 
 typedef struct {
   C3D_FrameBuf fb;
+  int vw, vh; /* the viewport (the game's 240x400 in the block32 target) */
   u32 clear_color;
   int cbytes, dbytes; /* per pixel */
 } EdTarget;
@@ -118,16 +119,16 @@ static void mtx_px(C3D_Mtx* m, float w, float h) {
   m->r[3].w = 1.0f;
 }
 
-static void use_target(C3D_FrameBuf* fb, int scissor) {
+static void use_target(C3D_FrameBuf* fb, int vw, int vh, int scissor) {
   C3D_SetFrameBuf(fb);
-  C3D_SetViewport(0, 0, fb->width, fb->height);
+  C3D_SetViewport(0, 0, vw, vh);
   if (scissor) {
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, fb->width, fb->height);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, vw, vh);
   } else {
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
   }
   C3D_Mtx m;
-  mtx_px(&m, fb->width, fb->height);
+  mtx_px(&m, vw, vh);
   C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, E.uloc, &m);
 }
 
@@ -213,7 +214,7 @@ static int frame_end(void) {
 /* the events of feats, then the far layer and the sky, as the game draws them (after its frame
  * begin: the clear, the target bound, ctr_gpu_early_establish) */
 static void draw_events(EdTarget* t, u32 f, int early) {
-  const float w = t->fb.width, h = t->fb.height;
+  const float w = t->vw, h = t->vh;
   if (f & F_TILE8) {
     state(early, 1, 0, 0);
     quad(8, 8, 16, 16, Z_NEAR, Z_NEAR, 0xff0000, 255, 255);
@@ -247,10 +248,10 @@ static void draw_events(EdTarget* t, u32 f, int early) {
     quad(96, 64, 128, 96, 0.8f, 0.4f, 0x0080ff, 255, 255);
   }
   if (f & F_RT) {
-    use_target(&E.rt, 1);
+    use_target(&E.rt, RT_W, RT_H, 1);
     state(0, 1, 0, 0);
     quad(0, 0, RT_W, RT_H, 0.99f, 0.99f, 0xff00ff, 255, 255);
-    use_target(&t->fb, 0);
+    use_target(&t->fb, t->vw, t->vh, 0);
     ctr_gpu_early_establish();
   }
   if (f & F_SPLIT) {
@@ -335,11 +336,11 @@ static int run(EdTarget* t, u32 f, int early, EdOut* o) {
     if (!frame_begin()) {
       return 0;
     }
-    use_target(&t->fb, 0);
+    use_target(&t->fb, t->vw, t->vh, 0);
     common_state();
     ctr_gpu_early_establish();
     state(early, 1, 0, 0);
-    quad(0, 0, t->fb.width, t->fb.height, 0.95f, 0.95f, 0xffffff, 255, 255);
+    quad(0, 0, t->vw, t->vh, 0.95f, 0.95f, 0xffffff, 255, 255);
     if (!frame_end()) {
       return 0;
     }
@@ -348,7 +349,7 @@ static int run(EdTarget* t, u32 f, int early, EdOut* o) {
     return 0;
   }
   C3D_FrameBufClear(&t->fb, C3D_CLEAR_ALL, t->clear_color, 0);
-  use_target(&t->fb, 0);
+  use_target(&t->fb, t->vw, t->vh, 0);
   common_state();
   ctr_gpu_early_establish();
   draw_events(t, f, early);
@@ -407,6 +408,8 @@ static int check_target(EdTarget* t, const char* tag, char* out, int size) {
 
 static void target_init(EdTarget* t, C3D_FrameBuf* fb) {
   t->fb = *fb;
+  t->vw = fb->width;
+  t->vh = fb->height;
   t->cbytes = fb->colorFmt == GPU_RB_RGBA8 ? 4 : 2;
   t->dbytes = fb->depthFmt == GPU_RB_DEPTH16 ? 2 : 4;
   t->clear_color = t->cbytes == 4 ? 0x203040FFu : 0x2104u;
@@ -439,7 +442,8 @@ int ctr_early_selftest(const CtrEarlyTestIn* in, char* status, int size) {
     C3D_FrameBufColor(&E.rt, E.rt_color, GPU_RB_RGBA8);
     C3D_FrameBufDepth(&E.rt, E.rt_depth, GPU_RB_DEPTH16);
     char part32[160], part8[200];
-    /* 32x32 block mode first (the log only), the top target last: the GPU ends bound to it */
+    /* 32x32 block mode first, as the game would use it (its 240x400 viewport in 256x416), the top
+     * target last: the GPU ends bound to it */
     EdTarget b32 = top;
     void* c32 = vram_alloc((size_t)B32_W * B32_H * top.cbytes);
     void* d32 = vram_alloc((size_t)B32_W * B32_H * top.dbytes);
