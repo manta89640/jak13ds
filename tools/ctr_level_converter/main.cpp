@@ -101,6 +101,8 @@ struct Options {
   // isn't needed from far away for one large group in it
   std::vector<float> stream_classes = {30.f, 60.f, 120.f, 240.f};
   std::vector<float> stream_class_cells = {50.f, 50.f, 100.f, 100.f, 200.f};
+  // largest near chunk (KB in memory): bigger cells are split between their groups by place
+  float stream_unit_kb = 128.f;
   int palette = -1;   // time of day palette to bake (0..7; -1: auto_palette)
   // (AI-assisted) v16: every vertex gets its time of day color (c3l::TodColor / TodMul, Vertex::pad), the
   // runtime blends the palettes with the game's weights (off: the baked palette only)
@@ -5464,6 +5466,111 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
       c.insert(c.end(), ts.begin(), ts.end());
     }
   }
+  // A near chunk is the runtime's unit of residency and one piece of its stream arena: a near cell
+  // over stream_unit_kb is split between its groups, halving the groups' centers along their
+  // longest extent until each part fits. Whole cells were up to ~1 MB (jungle), needed whole for one
+  // group near the camera and only placeable in an arena hole that big.
+  constexpr int kUnitBinShift = 8;  // a part's index in the key's kind, above the env bit
+  size_t unit_splits = 0;
+  if (opt.stream_unit_kb > 0) {
+    const u64 cap = (u64)(opt.stream_unit_kb * 1024.f);
+    struct UnitGroup {
+      float c[3] = {0, 0, 0};
+      u64 bytes = 0;
+      std::vector<u32> tris;
+    };
+    std::vector<std::pair<CellKey, std::vector<u32>>> split;
+    for (auto it = cells.begin(); it != cells.end();) {
+      if (std::get<0>(it->first) < 1024) {
+        ++it;
+        continue;
+      }
+      std::map<u64, UnitGroup> groups;
+      // (the vertices the chunk's welding would keep: alike in position, st, color and time of day)
+      std::map<u64, std::set<std::array<u32, 7>>> group_verts;
+      for (u32 ti : it->second) {
+        const auto& t = cv.tris[ti];
+        const u64 g = t.lod_group != UINT32_MAX ? t.lod_group
+                      : t.tgroup != UINT32_MAX  ? (1ull << 32) | t.tgroup
+                                                : (2ull << 32);
+        groups[g].tris.push_back(ti);
+        for (int k = 0; k < 3; k++) {
+          group_verts[g].insert(vista_vertex_key(cv.verts[t.v[k]]));
+        }
+      }
+      u64 total = 0;
+      for (auto& [g, ug] : groups) {
+        // vertices, their morph or tfrag geomorph records, indices
+        const u64 rec = (g >> 32) == 0 ? (cv.morph ? 8 : 0) : (g >> 32) == 1 ? 16 : 0;
+        ug.bytes = group_verts[g].size() * (16 + rec) + ug.tris.size() * 6;
+        total += ug.bytes;
+        if ((g >> 32) == 0) {
+          for (int k = 0; k < 3; k++) {
+            ug.c[k] = cv.lod_groups[(u32)g].bsphere[k];
+          }
+        } else if ((g >> 32) == 1) {
+          for (int k = 0; k < 3; k++) {
+            ug.c[k] = cv.tgroups[(u32)g][k];
+          }
+        }
+      }
+      if (total <= cap || groups.size() < 2) {
+        ++it;
+        continue;
+      }
+      std::vector<UnitGroup*> all;
+      for (auto& [g, ug] : groups) {
+        all.push_back(&ug);
+      }
+      std::vector<std::vector<UnitGroup*>> parts;
+      std::function<void(std::vector<UnitGroup*>)> halve = [&](std::vector<UnitGroup*> v) {
+        u64 b = 0;
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        for (auto* ug : v) {
+          b += ug->bytes;
+          for (int k = 0; k < 3; k++) {
+            lo[k] = std::min(lo[k], ug->c[k]);
+            hi[k] = std::max(hi[k], ug->c[k]);
+          }
+        }
+        if (b <= cap || v.size() < 2) {
+          parts.push_back(std::move(v));
+          return;
+        }
+        int ax = 0;
+        for (int k = 1; k < 3; k++) {
+          ax = hi[k] - lo[k] > hi[ax] - lo[ax] ? k : ax;
+        }
+        std::stable_sort(v.begin(), v.end(),
+                         [ax](const UnitGroup* a, const UnitGroup* b) { return a->c[ax] < b->c[ax]; });
+        // at the bytes' median, one group at least on each side
+        size_t m = 1;
+        for (u64 acc = v[0]->bytes; m + 1 < v.size() && acc + v[m]->bytes <= b / 2; m++) {
+          acc += v[m]->bytes;
+        }
+        halve(std::vector<UnitGroup*>(v.begin(), v.begin() + m));
+        halve(std::vector<UnitGroup*>(v.begin() + m, v.end()));
+      };
+      halve(std::move(all));
+      const CellKey k = it->first;
+      it = cells.erase(it);
+      for (size_t p = 0; p < parts.size(); p++) {
+        CellKey kp = k;
+        std::get<4>(kp) |= (int)(p << kUnitBinShift);
+        std::vector<u32> ts;
+        for (auto* ug : parts[p]) {
+          ts.insert(ts.end(), ug->tris.begin(), ug->tris.end());
+        }
+        split.emplace_back(kp, std::move(ts));
+      }
+      unit_splits++;
+    }
+    for (auto& [k, ts] : split) {
+      cells[k] = std::move(ts);
+    }
+  }
+  // the key's Draw::kind (without the env bit and the part index)
+  auto key_kind = [&](const CellKey& k) { return std::get<4>(k) & 0xff & ~kEnvCellBit; };
 
   // (AI-assisted) The chunks' triangles and vertices first: their quantizing grids depend on each
   // other (see below).
@@ -5627,7 +5734,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     auto plan_is = [&](size_t pi, int want_tier, int want_kind) {
       const auto& k = plans[pi].key;
       return std::get<0>(k) / 4 % 16 == want_tier &&
-             (std::get<4>(k) & ~kEnvCellBit) == want_kind && !plans[pi].tris.empty();
+             key_kind(k) == want_kind && !plans[pi].tris.empty();
     };
     if (has_lowres) {
       // the playable points: the collision's corners (or the ties'), at most ~4096
@@ -5716,7 +5823,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     for (size_t pi = 0; pi < normal_plans && pi < 0xffff; pi++) {
       const auto& cp = plans[pi];
       const int tier = std::get<0>(cp.key) / 4 % 16, detail = std::get<0>(cp.key) % 4;
-      const int kind = std::get<4>(cp.key) & ~kEnvCellBit;  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
+      const int kind = key_kind(cp.key);  // Draw::kind: 0 tfrag, 1 tie, 2 shrub
       const bool lowres = tier == 3;
       // (AI-assisted, streaming) not the near chunks (near versions only)
       // small and medium ties too: the PS2 draws them at any distance, the vista beyond the draw
@@ -6355,7 +6462,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                     : detail == 3 ? (sclass ? kShrubClassMeters[sclass] : opt.shrub_dist) * 4096.f
                                   : 0.f;
       // (AI-assisted) Draw::kind 0 tfrag, 1 tie, 2 shrub
-      ch.kind = (u32)(std::get<4>(key) & ~kEnvCellBit) + c3l::CHUNK_KIND_TFRAG;
+      ch.kind = (u32)key_kind(key) + c3l::CHUNK_KIND_TFRAG;
       // (AI-assisted) the positions on their grid (see "quantizing grids"), the old quantizer's
       // error for the stats
       std::vector<std::array<double, 3>> snapped(local_src.size());
@@ -6777,6 +6884,7 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     u64 bytes[3] = {0, 0, 0};  // vertex + index data
     u64 tris[3] = {0, 0, 0};
     u64 other_bytes = 0;  // every other chunk's
+    u64 draws = 0, largest = 0;  // the near chunks'
   } sst;
   std::unordered_map<u32, size_t> morph_chunk_of, tfrag_chunk_of;
   for (size_t i = 0; i < out_morph_chunks.size(); i++) {
@@ -6836,6 +6944,8 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         sst.chunks[cls]++;
         sst.bytes[cls] += bytes;
         sst.tris[cls] += i_hi > i_lo ? (i_hi - i_lo) / 3 : 0;
+        sst.draws += ch.draw_count;
+        sst.largest = std::max(sst.largest, bytes);
       } else {
         sst.other_bytes += bytes;
       }
@@ -7989,10 +8099,11 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     lg::info("{}: streaming (v19): {} near chunks (cells by need distance: {}): core {} ({} KB, {} "
              "tris), extra {} ({} KB, {} tris); {} groups in the budget's core set of {}; other "
-             "chunks {} KB",
+             "chunks {} KB; {} cells over {:g} KB split, largest {} KB, {} draws",
              level.level_name, sst.chunks[1] + sst.chunks[2], cls, sst.chunks[1],
              sst.bytes[1] / 1024, sst.tris[1], sst.chunks[2], sst.bytes[2] / 1024, sst.tris[2],
-             lstats.core, lstats.selected, sst.other_bytes / 1024);
+             lstats.core, lstats.selected, sst.other_bytes / 1024, unit_splits,
+             opt.stream_unit_kb, sst.largest / 1024, sst.draws);
   }
   if (cv.shrub_tris && opt.shrub_ps2_dist) {
     // (AI-assisted) shrub triangles by distance class
@@ -8448,6 +8559,8 @@ int main(int argc, char** argv) {
   app.add_option("--stream-class-cells", opt.stream_class_cells,
                  "(AI-assisted, v19) near chunk cell size per need class (meters)")
       ->delimiter(',');
+  app.add_option("--stream-unit-kb", opt.stream_unit_kb,
+                 "largest near chunk in memory (KB; 0: whole cells)");
   app.add_option("--far-tfrag-geo", opt.far_tfrag_geo,
                  "tfrag level of detail for far away cells (-1: no far version)");
   app.add_option("--palette", opt.palette,

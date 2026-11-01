@@ -95,6 +95,17 @@ cell of small details made the whole cell needed from 300 m away. Snowy's near d
 4.0 / 6.2 MB; village2 3.5 / 4.7 -> 2.5 / 3.6, lavatube 3.5 / 5.6 -> 2.1 / 3.4 (finer cells for all
 groups, 50 m: 4.2 / 6.3 Snowy).
 
+**Unit size cap** (`--stream-unit-kb`, 128 KB): a near cell bigger than that in memory (vertices,
+morph records, indices) is split between its groups, halving their centers along the longest extent
+until each part fits. The geomorph groups are needed within their PS2 far-plane (~70-90 m), so
+their class's 100 m cells grew to 50k triangles, 0.7-0.9 MB each in the jungle: one group near the
+camera made the whole cell needed (ring 0 alone 2.6-4.7 MB on hardware), and the arena could only
+place such a unit in a hole that big (2.3 MB free in pieces of at most 443 KB: 298 times no room per
+15 s). Needed at once (camera at the groups' centers): jungle 3.0 / 5.3 -> 2.1 / 3.0 MB, beach
+1.6 / 2.7 -> 1.3 / 2.1, village1 3.0 / 4.5 -> 2.8 / 4.2; largest unit 930 -> 129 KB; the near
+chunks' draws ~2x (jungle 1113 -> 2165 in the level, ~1.5x among the units needed at once). The
+arena takes the smallest free piece a unit fits (best fit, the first segment first).
+
 ## Scheduling (render thread, `stream_update`, each frame)
 
 - The units of the loaded levels are scored (a level not drawn for 3 frames wants nothing).

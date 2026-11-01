@@ -676,7 +676,8 @@ group its near version, in chunks of their own that the runtime streams (`stream
   cell size by its *need class*: the distance its near version is drawn within is error x
   70.4 + radius (the runtime's screen-space rule at gameplay's focal length 256 and tie_lod_px 4,
   x 1.1 hysteresis); classes < 30, < 60, < 120, < 240 m and beyond, cells 50, 50, 100, 100, 200 m
-  (`--stream-classes`, `--stream-class-cells`). Without the classes one large rock made its whole
+  (`--stream-classes`, `--stream-class-cells`); a cell over `--stream-unit-kb` (128 KB in memory)
+  is split between its groups by place (no format change). Without the classes one large rock made its whole
   100 m cell needed from 300 m away: Snowy needed up to 9.2 MB of near data at once (camera at each
   group's center), with them 6.2 MB. A near chunk holds near versions only (RunLod kRunLodNear runs,
   visibility ids as before) and its own vertices (the shared ones are copied: the far chunk keeps
