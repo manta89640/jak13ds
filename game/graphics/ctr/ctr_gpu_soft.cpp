@@ -2953,6 +2953,12 @@ int ctr_gpu_early_depth_active() {
 const char* ctr_gpu_early_depth_status() {
   return "not run (host)";
 }
+int ctr_gpu_stencil_selftest() {
+  return 0;
+}
+const char* ctr_gpu_stencil_status() {
+  return "not run (host)";
+}
 void ctr_gpu_set_tex_cache_clear(int) {}  // (AI-assisted) no texture cache
 void ctr_gpu_set_mip_bias(float) {}         // (AI-assisted) the soft textures have no mips
 void ctr_gpu_set_skin_rows_f24(int) {}

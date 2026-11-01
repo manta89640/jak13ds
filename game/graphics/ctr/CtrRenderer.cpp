@@ -1645,6 +1645,12 @@ int ctr_init(GfxGlobalSettings& /*settings*/) {
     lg::info("[ctr] {}", line);
     ctr_boot_mark(("8a " + line).c_str());
   }
+  if (ctr_settings().shadows == CtrSettings::ShadowMode::Full && !ctr_settings().depth16) {
+    ctr_boot_mark("8c stencil self-test");
+    const int passed = ctr_gpu_stencil_selftest();
+    lg::info("[ctr] stencil self-test: {} -> {}", ctr_gpu_stencil_status(),
+             passed ? "pass" : "FAIL");
+  }
   if (ctr_settings().pica_bench) {
     // (AI-assisted) the GPU microbenchmark, before anything else uses the GPU
     lg::info("[ctr] pica_bench: GPU microbenchmark before the game starts");

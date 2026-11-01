@@ -11,7 +11,9 @@
  *    the near plane, clamped at 0 (front faces first, saturating like the GPU)
  *  - the GPU models: env STENCIL_F24=1 rounds the clip space vertices to float24 (the PICA's
  *    vertex input), STENCIL_GUARD=T drops a triangle with a corner beyond T (x / w or y / w after
- *    the near clip), STENCIL_NOCLIP=1 doesn't clip at the near plane (only w > 0)
+ *    the near clip), STENCIL_NOCLIP=1 doesn't clip at the near plane (only w > 0),
+ *    STENCIL_BACK_INCR=1 counts the back faces up too (the front pass's op kept)
+ *  - STENCIL_SCENE=ledge: Jak in the air beside a ledge, a cliff face below (the console's band)
  * It reports the darkened pixels where the exact count is 0 (a shadow where there is none) and
  * the poses where they cover most of the darkening area (the solid quad).
  *
@@ -369,11 +371,19 @@ struct Plane {
   V3 n;  // world
   double d;
   double xmin, xmax;  // world x range
+  double ymin = -1e30, ymax = 1e30;  // world y range
 };
 const Plane kReceivers[] = {
     {{0, 1, 0}, 0.0, -1e30, 0.4 * kM},
     {{0, 1, 0}, 2.0 * kM, 0.4 * kM, 1e30},
     {{0, 0, -1}, 1.2 * kM, -1e30, 1e30},  // z = 1.2 m
+};
+// STENCIL_SCENE=ledge: Jak in the air 0.5 m above a path whose edge is 0.35 m to his left, a
+// cliff face down to the ground 4 m below him
+const Plane kLedge[] = {
+    {{0, 1, 0}, 0.5 * kM, -1e30, -0.35 * kM},
+    {{1, 0, 0}, 0.35 * kM, -1e30, 1e30, -4.0 * kM, -0.5 * kM},
+    {{0, 1, 0}, 4.0 * kM, -0.35 * kM, 1e30},
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -384,6 +394,7 @@ constexpr int kW = 400, kH = 240;
 
 struct Model {
   bool f24 = false, noclip = false;
+  bool back_incr = false;  // the back pass kept the front pass's INCR op
   float guard = 0.f;
 };
 
@@ -651,7 +662,9 @@ Result run_pose(const Mesh& mesh, const Camera& cam, const Pose& pose, const Mod
       const V3 dir = norm(sub(unproject(nx, ny, -0.5), unproject(nx, ny, 0.0)));
       // nearest receiver
       double best = 1e30;
-      for (const auto& pl : kReceivers) {
+      static const bool ledge = getenv("STENCIL_SCENE") && !strcmp(getenv("STENCIL_SCENE"), "ledge");
+      for (const auto& pl : ledge ? std::vector<Plane>(std::begin(kLedge), std::end(kLedge))
+                                  : std::vector<Plane>(std::begin(kReceivers), std::end(kReceivers))) {
         const V3 nc = view.dir_to_cam(pl.n);
         const double dc = pl.d + dot(pl.n, view.pos);
         const double den = dot(nc, dir);
@@ -664,7 +677,7 @@ Result run_pose(const Mesh& mesh, const Camera& cam, const Pose& pose, const Mod
         }
         const V3 hit_w = add(view.pos, add(add(mul(view.ax, t * dir[0]), mul(view.ay, t * dir[1])),
                                            mul(view.az, t * dir[2])));
-        if (hit_w[0] < pl.xmin || hit_w[0] >= pl.xmax) {
+        if (hit_w[0] < pl.xmin || hit_w[0] >= pl.xmax || hit_w[1] < pl.ymin || hit_w[1] >= pl.ymax) {
           continue;
         }
         best = t;
@@ -696,7 +709,7 @@ Result run_pose(const Mesh& mesh, const Camera& cam, const Pose& pose, const Mod
     const int nidx = pass ? v.back_count() : v.front_count();
     for (int k = 0; k + 2 < nidx; k += 3) {
       const ctr_clip_vertex* t[3] = {&verts[list[k]], &verts[list[k + 1]], &verts[list[k + 2]]};
-      draw_tri(md, t, depth.data(), sten, pass ? -1 : 1, res.dropped);
+      draw_tri(md, t, depth.data(), sten, pass && !md.back_incr ? -1 : 1, res.dropped);
     }
   }
   // the darkening pass: the front faces again (where the stencil isn't 0)
@@ -764,6 +777,7 @@ int main(int argc, char** argv) {
   Model md;
   md.f24 = getenv("STENCIL_F24") != nullptr;
   md.noclip = getenv("STENCIL_NOCLIP") != nullptr;
+  md.back_incr = getenv("STENCIL_BACK_INCR") != nullptr;
   md.guard = getenv("STENCIL_GUARD") ? (float)atof(getenv("STENCIL_GUARD")) : 0.f;
   const Mesh mesh = make_caster();
   const Camera cam = make_camera(64.f);

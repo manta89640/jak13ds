@@ -4620,6 +4620,41 @@ int ctr_gpu_early_depth_selftest(void) {
   return g_early_hw;
 }
 
+static char s_stencil_status[256];
+const char* ctr_gpu_stencil_status(void) {
+  return s_stencil_status;
+}
+
+int ctr_gpu_stencil_selftest(void) {
+  if (!g.ready || g.in_frame) {
+    return 0;
+  }
+  apt_gate_enter();
+  gpu_drain();
+  CtrEarlyTestIn in;
+  memset(&in, 0, sizeof(in));
+  in.top = &g.top->frameBuf;
+  in.prog = &g.ps->basic;
+  in.uloc_projection = g.ps->uloc_projection;
+  in.emulator = ctr_gpu_is_emulator();
+  const int ok = ctr_stencil_selftest(&in, s_stencil_status, sizeof(s_stencil_status));
+  /* the game's program and state again, as after the early depth test */
+  g.cur_prog = PROG_NONE;
+  use_program(PROG_BASIC);
+  C3D_SetFrameBuf(&g.top->frameBuf);
+  set_top_viewport();
+  C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+  C3D_CullFace(GPU_CULL_NONE);
+  C3D_StencilTest(false, GPU_ALWAYS, 0, 0xFF, 0);
+  C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_KEEP);
+  g.last_state_valid = 0;
+  g.bound_tex = NULL;
+  s_tex_dirty = 1;
+  tex_units_forget();
+  apt_gate_leave();
+  return ok;
+}
+
 void ctr_gpu_set_early_depth_params(int sky, int func, unsigned int clear) {
   g_early_want_sky = sky ? 1 : 0;
   const int f = func & 3;
@@ -6574,16 +6609,19 @@ static void apply_state_tint(const ctr_draw_state* st, int mesh, uint32_t tint, 
   /* raw: the registers C3Di_EffectBind writes for the fields that changed */
   C3Di_Effect* c = &ctx->effect;
   u32* p = raw_ptr();
-  if (e.alphaTest != c->alphaTest) {
+  /* a stencil change: alpha test, stencil test, stencil op and depth/color mask in one block, as
+   * citro3d writes them (the shadows' INCR -> DECR change was the only lone STENCIL_OP write) */
+  const int stencil_block = e.stencilMode != c->stencilMode || e.stencilOp != c->stencilOp;
+  if (stencil_block) {
+    p = raw_n(p, GPUREG_FRAGOP_ALPHA_TEST, &e.alphaTest, 4, 1);
+    if ((e.depthTest ^ c->depthTest) & 0x70u) {
+      p = raw_w(p, GPUREG_GAS_DELTAZ_DEPTH, 0x8,
+                (u32)GPU_MAKEGASDEPTHFUNC((e.depthTest >> 4) & 7) << 24);
+    }
+  } else if (e.alphaTest != c->alphaTest) {
     p = raw_w(p, GPUREG_FRAGOP_ALPHA_TEST, 0xF, e.alphaTest);
   }
-  if (e.stencilMode != c->stencilMode) {
-    p = raw_w(p, GPUREG_STENCIL_TEST, 0xF, e.stencilMode);
-  }
-  if (e.stencilOp != c->stencilOp) {
-    p = raw_w(p, GPUREG_STENCIL_OP, 0xF, e.stencilOp);
-  }
-  if (e.depthTest != c->depthTest) {
+  if (e.depthTest != c->depthTest && !stencil_block) {
     /* (AI-assisted, micro-gpu) cmd_dedup: GAS_DELTAZ_DEPTH's byte only depends on the depth
      * function (citro3d writes it from the context's, which is the GPU's): left out when only the
      * enable or the write mask changes */
