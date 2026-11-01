@@ -744,13 +744,14 @@ geometry 0 only, unmorphed).
   that); per draw the rows its vertices use (draw rows).
 - **Runtime.** A morph group is drawn with its near version while the distance to its sphere is
   under the mid-plane x k, its mid version under the far-plane x k, else its far version (k:
-  detail_scale, x 1 .. 0.5 with auto_detail's tie relief), no hysteresis. On the title flight the
-  far version not nearer than kTitleLodMin (100 m): geometry 3's colors are the converter's fit
-  (lod-light), not the PS2's color morph, and titlemove's flight showed those steps; the PS2 itself
-  has no title rule (draw-inline-array-instance-tie uses only the prototypes' dists;
-  prototype-bucket-recalc-fields: rlength-near = 1 / (mid - near), rlength-mid = 1 / (far - mid), so
-  the morph completes exactly at each switch). A group drawn far for want of its data stays far
-  while in view (1 s). A chunk's rows (f_1, f_2 x delta_scale per instance, f_b = clamp((d - start_b
+  detail_scale; auto_detail's relief never pulls them in: geometry 3's colors can't carry
+  geometry 0's lighting, and nearer than the far-plane the switch showed as the light changing),
+  no hysteresis. On the title flight the far version not nearer than kTitleLodMin (100 m):
+  geometry 3's colors are the converter's fit (lod-light), not the PS2's color morph, and
+  titlemove's flight showed those steps; the PS2 itself has no title rule
+  (draw-inline-array-instance-tie uses only the prototypes' dists; prototype-bucket-recalc-fields:
+  rlength-near = 1 / (mid - near), rlength-mid = 1 / (far - mid), so the morph completes exactly
+  at each switch). A group drawn far for want of its data stays far while in view (1 s). A chunk's rows (f_1, f_2 x delta_scale per instance, f_b = clamp((d - start_b
   x k) x rlength_b / k, 0, 1), d the distance to its sphere minus its radius) are made at its first
   morph draw of the frame. The PS2 takes the view depth instead (a turn of the camera changes it);
   the distance is never less, so an instance off the screen's center morphs as if up to 1 / cos(its

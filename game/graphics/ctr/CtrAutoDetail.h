@@ -36,13 +36,15 @@ struct Relief {
   int stage[kKnobs] = {-1, -1, -1};  // the knob's unit of r (-1: nothing to move)
   int n = 0;
 
-  // the start of a range is where the knob begins to cut (none -> the draw distance's equal)
-  void init(float px, float lod, float tie, float draw_distance) {
+  // the start of a range is where the knob begins to cut (none -> the draw distance's equal).
+  // tier_lod false: lod_distance stays (Jak 1: its coarse tier is the tfrag geomorph's far version,
+  // so a tier switch saves nothing and only shows)
+  void init(float px, float lod, float tie, float draw_distance, bool tier_lod = true) {
     base = {px, lod, tie};
     from[kTieLodPx] = px;
     to[kTieLodPx] = kOldTieLodPx;
     from[kLodDistance] = lod > 0 ? lod : (draw_distance > 0 ? draw_distance : 2000.f);
-    to[kLodDistance] = kOldLodDistance;
+    to[kLodDistance] = tier_lod ? kOldLodDistance : from[kLodDistance];
     from[kTieDistance] =
         tie > 0 ? tie : (draw_distance > 0 ? draw_distance : 2000.f) / kSmallTieMeters;
     to[kTieDistance] = kOldTieScale;
