@@ -3949,6 +3949,8 @@ static GPU_TEXCOLOR gpu_format(int format) {
       return GPU_A8;
     case CTR_TEX_A4:
       return GPU_A4;
+    case CTR_TEX_RGBA5551:
+      return GPU_RGBA5551;
     default:
       return GPU_RGBA8;
   }
@@ -3958,6 +3960,7 @@ static unsigned int format_bits(int format) {
   switch (format) {
     case CTR_TEX_RGB565:
     case CTR_TEX_RGBA4:
+    case CTR_TEX_RGBA5551:
       return 16;
     case CTR_TEX_ETC1:
     case CTR_TEX_A4:

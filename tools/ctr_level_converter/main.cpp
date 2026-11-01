@@ -250,6 +250,7 @@ struct TexUse {
   bool alpha_test = false;  // drawn with an alpha test (cut-outs: keep their coverage in the mips)
   bool blend = false;       // drawn alpha blended with its alpha
   int aref = 0x26;          // the alpha test reference (GS units, 0x80 = 1.0)
+  bool aref_mixed = false;  // alpha tested with more than one reference
   // (AI-assisted) merc uses that keep a texture out of ETC1 (Options::etc1_psnr): an eye draw's
   // placeholder, a draw of an effect with blend shapes (a face). envmap: an envmap pass's texture.
   bool eye = false, face = false, envmap = false;
@@ -627,10 +628,12 @@ struct Converter {
     u.alpha_opacity |= opacity;
     u.low_alpha_rgb_visible |= !opacity;
     u.blend |= src_alpha;
-    if (mode.get_at_enable() && mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL &&
-        !u.alpha_test) {
-      u.alpha_test = true;
-      u.aref = mode.get_aref();
+    if (mode.get_at_enable() && mode.get_alpha_test() == DrawMode::AlphaTest::GEQUAL) {
+      u.aref_mixed |= u.alpha_test && u.aref != (int)mode.get_aref();
+      if (!u.alpha_test) {
+        u.alpha_test = true;
+        u.aref = mode.get_aref();
+      }
     }
   }
 
@@ -4041,6 +4044,105 @@ void split_mask_texture(const c3l::Texture& d,
   out->mask_desc.format = a4 ? c3l::TEX_A4 : c3l::TEX_A8;
 }
 
+/*!
+ * An RGBA8 texture (every level, as convert_texture wrote it) as RGBA5551, if that is at least
+ * 99.5% similar. Alpha: every texel of every level is 0 or 255, or (alpha_test_only) the texture is
+ * only drawn alpha tested at aref (0..255), the bit is alpha >= aref (each texel passes or fails as
+ * before) and 99.5% of the bilinear samples of the full size level do too. Color, on the full size
+ * level over the texels compare_level counts: 1 - mean absolute error / 255 >= 0.995, and the
+ * worst 4x4 block within what the ETC1 test accepts.
+ */
+struct Rgba5551Gate {
+  bool alpha_exact = false, alpha_ok = false, color_ok = false, block_ok = false;
+  double similarity = 0, worst_block = 0, worst_block_565 = 0;
+  // alpha test route: the filtered samples that pass or fail alike, of all / of those covered
+  double coverage = 1, coverage_edge = 1;
+  bool pass() const { return alpha_ok && color_ok && block_ok; }
+};
+bool to_rgba5551(const c3l::Texture& d,
+                 const std::vector<u8>& data,
+                 const Options& opt,
+                 bool opacity,
+                 bool alpha_test_only,
+                 int aref,
+                 std::vector<u8>* out,
+                 Rgba5551Gate* g) {
+  const int levels = std::max<int>(1, d.levels);
+  std::vector<ctr_tex::Image> imgs;
+  u32 off = 0;
+  g->alpha_exact = true;
+  for (int l = 0; l < levels; l++) {
+    const int w = d.w >> l, h = d.h >> l;
+    imgs.push_back(ctr_tex::decode_level(data.data() + off, w, h, ctr_tex::Format::RGBA8));
+    off += c3l::texture_level_bytes(w, h, c3l::TEX_RGBA8);
+    for (size_t i = 3; i < imgs.back().rgba.size() && g->alpha_exact; i += 4) {
+      g->alpha_exact = imgs.back().rgba[i] == 0 || imgs.back().rgba[i] == 255;
+    }
+  }
+  g->alpha_ok = g->alpha_exact || alpha_test_only;
+  const int ref = g->alpha_exact ? 0 : aref;
+  std::vector<u8> e, f;
+  ctr_tex::encode_level(imgs[0], ctr_tex::Format::RGBA5551, 0, &e, ref);
+  if (!g->alpha_exact && alpha_test_only) {
+    // bilinear filtering moves the test's edge: 4x4 samples per texel, pass or fail with both
+    const ctr_tex::Image& im = imgs[0];
+    const int w = im.w, h = im.h;
+    auto alpha = [&](int x, int y, bool one_bit) {
+      const int a = im.at((x + w) % w, (y + h) % h)[3];
+      return one_bit ? (a >= ref ? 255.0 : 0.0) : (double)a;
+    };
+    u64 differ = 0, covered = 0;
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        for (int k = 0; k < 16; k++) {
+          const double u = x + ((k & 3) + 0.5) / 4 - 0.5, v = y + ((k >> 2) + 0.5) / 4 - 0.5;
+          const int x0 = (int)std::floor(u), y0 = (int)std::floor(v);
+          const double fx = u - x0, fy = v - y0;
+          bool pass[2];
+          for (int b = 0; b < 2; b++) {
+            const double top = alpha(x0, y0, b) * (1 - fx) + alpha(x0 + 1, y0, b) * fx;
+            const double bot = alpha(x0, y0 + 1, b) * (1 - fx) + alpha(x0 + 1, y0 + 1, b) * fx;
+            pass[b] = top * (1 - fy) + bot * fy >= ref;
+          }
+          differ += pass[0] != pass[1];
+          covered += pass[0] || pass[1];
+        }
+      }
+    }
+    g->coverage = 1.0 - (double)differ / (16.0 * w * h);
+    g->coverage_edge = covered ? 1.0 - (double)differ / covered : 1.0;
+    g->alpha_ok = g->coverage >= 0.995;
+  }
+  ctr_tex::encode_level(imgs[0], ctr_tex::Format::RGB565, 0, &f);
+  const auto dec = ctr_tex::decode_level(e.data(), d.w, d.h, ctr_tex::Format::RGBA5551);
+  double psnr, psnr_565;
+  compare_level(imgs[0], dec, &psnr, &g->worst_block, opacity);
+  compare_level(imgs[0], ctr_tex::decode_level(f.data(), d.w, d.h, ctr_tex::Format::RGB565),
+                &psnr_565, &g->worst_block_565, opacity);
+  double err = 0;
+  size_t n = 0;
+  for (size_t i = 0; i < imgs[0].rgba.size(); i += 4) {
+    if (opacity && imgs[0].rgba[i + 3] < 16) {
+      continue;
+    }
+    for (int c = 0; c < 3; c++) {
+      err += std::abs((int)imgs[0].rgba[i + c] - (int)dec.rgba[i + c]);
+      n++;
+    }
+  }
+  g->similarity = n ? 1.0 - err / n / 255.0 : 1.0;
+  g->color_ok = g->similarity >= 0.995;
+  g->block_ok = g->worst_block <= std::max<double>(opt.etc1_block, g->worst_block_565);
+  if (!g->pass()) {
+    return false;
+  }
+  for (int l = 1; l < levels; l++) {
+    ctr_tex::encode_level(imgs[l], ctr_tex::Format::RGBA5551, 0, &e, ref);
+  }
+  *out = std::move(e);
+  return true;
+}
+
 // ---------------- output ----------------
 
 void align16(std::vector<u8>& buf) {
@@ -6988,13 +7090,24 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
   // animated slots.
   size_t mask_count = 0, mask_etc1 = 0, mask_a4 = 0;
   u64 mask_before = 0, mask_after = 0;
+  // c3l v24: an RGBA8 texture that is at least 99.5% the same as RGBA5551 (to_rgba5551) becomes
+  // RGBA5551, unless its mask split is smaller
+  struct R5Stats {
+    size_t candidates = 0, converted = 0, exact = 0, alpha_failed = 0, color_failed = 0,
+           block_failed = 0, split_smaller = 0;
+    u64 before = 0, after = 0, rgba8 = 0;
+    double sim_min = 1, sim_max = 0;
+    std::map<std::string, int> alpha_why;
+  } r5;
+  std::vector<u8> is_5551(tex_descs.size(), 0);
   if (opt.stream && opt.shrub_ps2_dist && !opt.full_color) {
     const size_t n = tex_descs.size();
-    std::vector<u8> ok(n, 0);
+    std::vector<u8> ok(n, 0), cand(n, 0), vert80(n, 1);
     for (size_t i = 0; i < n; i++) {
       const bool ext = i < cv.tex_use.size();
-      ok[i] = tex_descs[i].format == c3l::TEX_RGBA8 && !tex_datas[i].empty() &&
-              (!ext || (!cv.tex_use[i].anim_slot && !cv.tex_use[i].envmap && !cv.tex_use[i].eye));
+      cand[i] = tex_descs[i].format == c3l::TEX_RGBA8 && !tex_datas[i].empty() &&
+                (!ext || (!cv.tex_use[i].anim_slot && !cv.tex_use[i].eye));
+      ok[i] = cand[i] && (!ext || !cv.tex_use[i].envmap);
     }
     std::vector<u8> wind_chunk(chunks.size(), 0);
     for (const auto& [ci, wm] : wind_chunk_verts) {
@@ -7009,6 +7122,9 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
         if (d.texture < n && (wind_chunk[ci] || !(d.kind & c3l::kDrawAlpha80))) {
           ok[d.texture] = 0;
         }
+        if (d.texture < n && !(d.kind & c3l::kDrawAlpha80)) {
+          vert80[d.texture] = 0;
+        }
       }
     }
     for (const auto& d : merc.draws) {
@@ -7018,11 +7134,14 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     }
     std::vector<u16> todo;
     for (size_t i = 0; i < n; i++) {
-      if (ok[i]) {
+      if (cand[i]) {
         todo.push_back((u16)i);
       }
     }
     std::vector<MaskSplit> splits(todo.size());
+    std::vector<Rgba5551Gate> gates(todo.size());
+    std::vector<std::vector<u8>> r5_data(todo.size());
+    std::vector<u8> r5_pass(todo.size(), 0);
     {
       BS::thread_pool pool(opt.threads > 0 ? opt.threads : std::thread::hardware_concurrency());
       pool.push_loop(todo.size(), [&](size_t a, size_t b) {
@@ -7030,9 +7149,17 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
           const u16 t = todo[k];
           const auto& d = tex_descs[t];
           const TexUse use = t < cv.tex_use.size() ? cv.tex_use[t] : TexUse{};
-          const bool kept = use.merc && (use.face || use.eye || d.w < opt.etc1_merc_min ||
-                                         d.h < opt.etc1_merc_min);
-          split_mask_texture(d, tex_datas[t], opt, !kept, use.alpha_is_opacity(), &splits[k]);
+          // the alpha only decides the level draws' alpha test, at one reference, vertex alpha 1.0
+          const bool test_only = t < cv.tex_use.size() && !use.merc && use.alpha_test &&
+                                 !use.blend && !use.low_alpha_rgb_visible && !use.aref_mixed &&
+                                 vert80[t];
+          r5_pass[k] = to_rgba5551(d, tex_datas[t], opt, use.alpha_is_opacity(), test_only,
+                                   std::clamp(use.aref * 2, 1, 255), &r5_data[k], &gates[k]);
+          if (ok[t]) {
+            const bool kept = use.merc && (use.face || use.eye || d.w < opt.etc1_merc_min ||
+                                           d.h < opt.etc1_merc_min);
+            split_mask_texture(d, tex_datas[t], opt, !kept, use.alpha_is_opacity(), &splits[k]);
+          }
         }
       });
       pool.wait_for_tasks();
@@ -7040,21 +7167,68 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
     for (size_t k = 0; k < todo.size(); k++) {
       const u16 t = todo[k];
       auto& s = splits[k];
+      const auto& g = gates[k];
+      const u64 split_bytes = ok[t] ? s.color.size() + s.mask.size() : tex_datas[t].size();
+      const char* lt_name = "";
+      std::string lt_page;
+      if (t < cv.tex_order.size()) {
+        const auto& lt = level.textures.at(cv.tex_order[t]);
+        lt_name = lt.debug_name.c_str();
+        lt_page = lt.debug_tpage_name;
+      }
+      // why the alpha test rule doesn't apply (for the log)
+      const TexUse use = t < cv.tex_use.size() ? cv.tex_use[t] : TexUse{};
+      const char* why = g.alpha_ok              ? ""
+                        : g.coverage < 0.995    ? "filtered edge moves"
+                        : t >= cv.tex_use.size() ? "atlas"
+                        : use.merc              ? "merc"
+                        : use.blend             ? "blended"
+                        : !use.alpha_test       ? "not alpha tested"
+                        : use.low_alpha_rgb_visible ? "also drawn without the test"
+                        : use.aref_mixed        ? "several alpha refs"
+                                                : "vertex alpha";
+      if (!g.alpha_ok) {
+        r5.alpha_why[why]++;
+      }
+      r5.candidates++;
+      r5.alpha_failed += !g.alpha_ok;
+      r5.color_failed += g.alpha_ok && !g.color_ok;
+      r5.block_failed += g.alpha_ok && g.color_ok && !g.block_ok;
+      lg::debug("{}: texture {} ({}) {}x{}: RGBA5551 {} (alpha {}, coverage {:.4f} / {:.4f}, "
+                "similarity {:.4f}, worst block {:.1f}, RGB565's {:.1f})",
+                in.stem().string(), lt_name, lt_page, tex_descs[t].w, tex_descs[t].h,
+                r5_pass[k] ? "passes" : "fails",
+                g.alpha_exact ? "0 / 1" : g.alpha_ok ? "alpha test" : fmt::format("needs more bits, {}", why),
+                g.coverage, g.coverage_edge, g.similarity, g.worst_block, g.worst_block_565);
+      if (r5_pass[k] && r5_data[k].size() < split_bytes) {
+        r5.converted++;
+        r5.exact += g.alpha_exact;
+        r5.before += split_bytes;
+        r5.after += r5_data[k].size();
+        r5.rgba8 += tex_datas[t].size();
+        r5.sim_min = std::min(r5.sim_min, g.similarity);
+        r5.sim_max = std::max(r5.sim_max, g.similarity);
+        tex_descs[t].format = c3l::TEX_RGBA5551;
+        tex_datas[t] = std::move(r5_data[k]);
+        is_5551[t] = 1;
+        continue;
+      }
+      r5.split_smaller += r5_pass[k] != 0;
+      if (!ok[t]) {
+        continue;
+      }
       mask_before += tex_datas[t].size();
       mask_after += s.color.size() + s.mask.size();
       mask_count++;
       mask_etc1 += s.color_desc.format == c3l::TEX_ETC1;
       mask_a4 += s.mask_desc.format == c3l::TEX_A4;
-      if (t < cv.tex_order.size()) {
-        const auto& lt = level.textures.at(cv.tex_order[t]);
-        lg::debug("{}: texture {} ({}) {}x{}: color {}{}, alpha {} ({} values)", in.stem().string(),
-                  lt.debug_name, lt.debug_tpage_name, s.color_desc.w, s.color_desc.h,
-                  s.color_desc.format == c3l::TEX_ETC1 ? "ETC1" : "RGB565",
-                  s.gate.tested ? fmt::format(" ({:.1f} dB, worst block {:.1f}; RGB565 {:.1f} dB)",
-                                              s.gate.psnr, s.gate.worst_block, s.gate.psnr_16)
-                                : std::string(),
-                  s.mask_desc.format == c3l::TEX_A4 ? "A4" : "A8", s.alpha_values);
-      }
+      lg::debug("{}: texture {} ({}) {}x{}: color {}{}, alpha {} ({} values)", in.stem().string(),
+                lt_name, lt_page, s.color_desc.w, s.color_desc.h,
+                s.color_desc.format == c3l::TEX_ETC1 ? "ETC1" : "RGB565",
+                s.gate.tested ? fmt::format(" ({:.1f} dB, worst block {:.1f}; RGB565 {:.1f} dB)",
+                                            s.gate.psnr, s.gate.worst_block, s.gate.psnr_16)
+                              : std::string(),
+                s.mask_desc.format == c3l::TEX_A4 ? "A4" : "A8", s.alpha_values);
       tex_descs[t] = s.color_desc;
       tex_datas[t] = std::move(s.color);
       c3l::Texture md = s.mask_desc;
@@ -7068,6 +7242,26 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
                "({} A4, {} A8): {} KB -> {} KB",
                level.level_name, mask_count, mask_etc1, mask_count - mask_etc1, mask_a4,
                mask_count - mask_a4, mask_before / 1024, mask_after / 1024);
+    }
+    // bandwidth proxy: the level draws' triangles with an RGBA5551 texture
+    u64 tris_all = 0, tris_5551 = 0;
+    for (const auto& d : out_draws) {
+      tris_all += d.index_count / 3;
+      tris_5551 += d.texture < is_5551.size() && is_5551[d.texture] ? d.index_count / 3 : 0;
+    }
+    lg::info("{}: RGBA5551: {} of {} RGBA8 textures ({} with 0 / 1 alpha, {} by the alpha test), "
+             "{} KB -> {} KB; similarity {:.4f} .. {:.4f}; failed: {} alpha, {} color, {} block; "
+             "{} passed but their mask split is smaller; {} of {} level triangles",
+             level.level_name, r5.converted, r5.candidates, r5.exact, r5.converted - r5.exact,
+             r5.before / 1024, r5.after / 1024, r5.converted ? r5.sim_min : 0.0,
+             r5.converted ? r5.sim_max : 0.0, r5.alpha_failed, r5.color_failed, r5.block_failed,
+             r5.split_smaller, tris_5551, tris_all);
+    if (!r5.alpha_why.empty()) {
+      std::string w;
+      for (const auto& [k, v] : r5.alpha_why) {
+        w += fmt::format("{}{} {}", w.empty() ? "" : ", ", v, k);
+      }
+      lg::info("{}: RGBA5551 alpha failures: {}", level.level_name, w);
     }
   }
   // each texture's content key (c3l::ExtTexKey): the levels sharing it find it by that
@@ -7827,9 +8021,10 @@ bool convert(const fs::path& in, const fs::path& out, const Options& opt_in) {
              merc.mod_effects.size(), merc.mod_dests.size());
   }
   lg::info("{}: textures {} KB with mip levels (16-bit, no mips: {} KB): {} ETC1, {} ETC1A4, {} "
-           "RGB565, {} RGBA8; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
-           level.level_name, tstats.bytes / 1024, tstats.bytes_16bit / 1024, tstats.etc1,
-           tstats.etc1a4, tstats.rgb565, tstats.rgba8,
+           "RGB565, {} RGBA8, {} RGBA5551; ETC1 PSNR avg {:.1f} dB, min {:.1f} dB",
+           level.level_name, (tstats.bytes + r5.after - r5.rgba8) / 1024,
+           tstats.bytes_16bit / 1024, tstats.etc1, tstats.etc1a4, tstats.rgb565,
+           tstats.rgba8 - r5.converted, r5.converted,
            tstats.psnr_count ? tstats.psnr_sum / tstats.psnr_count : 0.0,
            tstats.psnr_count ? tstats.psnr_min : 0.0);
   if (cv.tex_copies) {

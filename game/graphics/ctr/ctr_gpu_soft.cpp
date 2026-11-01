@@ -339,7 +339,12 @@ std::vector<uint8_t> untile(const uint8_t* data, int w, int h, int format) {
       }
       uint16_t v;
       memcpy(&v, data + 2 * idx, 2);
-      if (format == CTR_TEX_RGB565) {
+      if (format == CTR_TEX_RGBA5551) {
+        p[0] = (uint8_t)((((v >> 11) & 31) << 3) | (((v >> 11) & 31) >> 2));
+        p[1] = (uint8_t)((((v >> 6) & 31) << 3) | (((v >> 6) & 31) >> 2));
+        p[2] = (uint8_t)((((v >> 1) & 31) << 3) | (((v >> 1) & 31) >> 2));
+        p[3] = (v & 1) ? 255 : 0;
+      } else if (format == CTR_TEX_RGB565) {
         p[0] = ((v >> 11) & 31) << 3;
         p[1] = ((v >> 5) & 63) << 2;
         p[2] = (v & 31) << 3;

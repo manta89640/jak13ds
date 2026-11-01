@@ -61,7 +61,10 @@ constexpr char kMagic[4] = {'C', '3', 'L', 'V'};
 // v23: alpha mask textures (TEX_A8, TEX_A4): an RGBA8 texture whose alpha needs 8 bits is stored
 // as its color (ETC1 or RGB565) and its alpha as a texture of its own, after the others (see
 // texture_mask_of). Otherwise v22.
-constexpr uint32_t kVersion = 23;
+// v24: TEX_RGBA5551 textures. Otherwise v23.
+constexpr uint32_t kVersion = 24;
+// the first version with RGBA5551 textures
+constexpr uint32_t kTex5551Version = 24;
 // the first version with alpha mask textures
 constexpr uint32_t kTexMaskVersion = 23;
 // the first version whose time of day colors have alpha (TodColorA)
@@ -89,6 +92,7 @@ enum TextureFormat : uint8_t {
   TEX_RGBA8 = 4,   // (AI-assisted) u32 stored a, b, g, r: full color (the title screen's logo)
   TEX_A8 = 5,      // v23: 8-bit alpha, the alpha mask of another texture (texture_mask_of)
   TEX_A4 = 6,      // v23: 4-bit alpha (two texels per byte, the first in the low bits), as TEX_A8
+  TEX_RGBA5551 = 7,  // v24: u16: r5 g5 b5 a1 (r in the high bits, a in bit 0)
 };
 
 struct Header {

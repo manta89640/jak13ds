@@ -354,6 +354,7 @@ enum ctr_tex_format {
   CTR_TEX_RGBA8 = 4, /* stored A, B, G, R */
   CTR_TEX_A8 = 5,    /* alpha masks (c3l v23) */
   CTR_TEX_A4 = 6,    /* two texels per byte, the first in the low bits */
+  CTR_TEX_RGBA5551 = 7,
 };
 /* Bytes of a tiled texture with `levels` mip levels (each half the size of the previous one). */
 unsigned int ctr_gpu_tex_bytes(int w, int h, int format, int levels);

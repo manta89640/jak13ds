@@ -38,6 +38,18 @@ uint8_t from_bits(uint32_t v, uint32_t bits) {
   return (uint8_t)((v << (8 - bits)) | (v >> (2 * bits - 8)));
 }
 
+// 5 bits whose expansion on the GPU (bit replication) is nearest
+uint32_t nearest5(uint32_t v) {
+  const uint32_t q = to_bits(v, 31);
+  uint32_t best = q;
+  for (uint32_t c = q > 0 ? q - 1 : 0; c <= std::min<uint32_t>(31, q + 1); c++) {
+    if (std::abs((int)from_bits(c, 5) - (int)v) < std::abs((int)from_bits(best, 5) - (int)v)) {
+      best = c;
+    }
+  }
+  return best;
+}
+
 // 4-bit alpha, rounded to nearest but on the same side of an alpha test reference as the 8-bit value
 uint32_t alpha4(uint32_t a, int ref) {
   uint32_t q = to_bits(a, 15);
@@ -169,6 +181,7 @@ uint32_t level_bytes(int w, int h, Format fmt) {
   switch (fmt) {
     case Format::RGB565:
     case Format::RGBA4:
+    case Format::RGBA5551:
       return n * 2;
     case Format::ETC1:
       return n / 2;
@@ -353,11 +366,15 @@ void encode_level(const Image& img,
       break;
     case Format::RGB565:
     case Format::RGBA4:
+    case Format::RGBA5551:
       for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
           const uint8_t* p = img.at(x, y);
           uint16_t v;
-          if (fmt == Format::RGBA4) {
+          if (fmt == Format::RGBA5551) {
+            v = (uint16_t)((nearest5(p[0]) << 11) | (nearest5(p[1]) << 6) | (nearest5(p[2]) << 1) |
+                           (p[3] >= (alpha_ref > 0 ? alpha_ref : 128) ? 1 : 0));
+          } else if (fmt == Format::RGBA4) {
             v = (uint16_t)((to_bits(p[0], 15) << 12) | (to_bits(p[1], 15) << 8) |
                            (to_bits(p[2], 15) << 4) | alpha4(p[3], alpha_ref));
           } else {
@@ -504,12 +521,18 @@ Image decode_level(const uint8_t* data, int w, int h, Format fmt) {
       break;
     case Format::RGB565:
     case Format::RGBA4:
+    case Format::RGBA5551:
       for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
           const uint32_t idx = tiled_texel(x, h - 1 - y, w);
           const uint16_t v = (uint16_t)(data[2 * idx] | (data[2 * idx + 1] << 8));
           uint8_t* p = img.at(x, y);
-          if (fmt == Format::RGBA4) {
+          if (fmt == Format::RGBA5551) {
+            p[0] = from_bits((v >> 11) & 0x1f, 5);
+            p[1] = from_bits((v >> 6) & 0x1f, 5);
+            p[2] = from_bits((v >> 1) & 0x1f, 5);
+            p[3] = (v & 1) ? 255 : 0;
+          } else if (fmt == Format::RGBA4) {
             p[0] = from_bits((v >> 12) & 0xf, 4);
             p[1] = from_bits((v >> 8) & 0xf, 4);
             p[2] = from_bits((v >> 4) & 0xf, 4);
