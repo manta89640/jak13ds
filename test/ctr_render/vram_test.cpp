@@ -22,6 +22,7 @@ int ctr_gpu_tex_create(int, int, const uint8_t*) { return allocate_texture(); }
 int ctr_gpu_tex_create_compact(int, int, const uint8_t*, int) { return allocate_texture(); }
 void ctr_gpu_tex_delete(int) {}
 void ctr_gpu_tex_update(int, const uint8_t*) {}
+double ctr_gpu_time_ms() { return 0; }
 }
 namespace ctr_button_art {
 u32 generation() { return 0; }
@@ -80,6 +81,51 @@ void run_vram_tests() {
     upload_and_decode();
     check(vram.stats().chunks_written == (int)written + 1,
           "the new page uploaded again must be deduplicated");
+  }
+
+  // a boot "effects" page: its texture decoded ahead (prewarm) is the one its first draw gets
+  {
+    std::vector<u8> ee(65536, 0);
+    const char name[] = "effects";
+    memcpy(ee.data() + 64 + 4, name, sizeof(name));
+    GoalTexture gt{};
+    gt.w = gt.h = 16;
+    gt.psm = 0;
+    gt.dest[0] = 64;
+    gt.width[0] = 1;
+    memcpy(ee.data() + 128, &gt, sizeof(gt));
+    for (u32 k = 0; k < 4096; k++) {
+      const u32 v = 0x40000000u | (k * 2654435761u >> 8);
+      memcpy(ee.data() + 4096 + 4 * k, &v, 4);
+    }
+    struct {
+      GoalTexturePageHeader h;
+      u32 ptrs[1];
+    } tp{};
+    tp.h.name_ptr = 64;
+    tp.h.length = 1;
+    tp.h.size = 4096;
+    tp.h.segment[0].block_data_ptr = 4096;
+    tp.h.segment[0].size = 4096;
+    tp.h.segment[0].dest = 64 * 64;
+    tp.ptrs[0] = 128;
+    // the game's TEX0 (adgif-shader<-texture!), with a texture function of its own
+    const u64 game_tex0 = 64 | 1ull << 14 | 4ull << 26 | 4ull << 30 | 1ull << 34 | 1ull << 35 |
+                          1ull << 61;
+    CtrVram ref(false), vram(false);
+    ref.upload_texture_page_now((const u8*)&tp, -1, ee.data(), 0);
+    vram.upload_texture_page_now((const u8*)&tp, -1, ee.data(), 0);
+    for (int f = 0; f < 40; f++) {
+      vram.prewarm(1.0);
+    }
+    check(vram.stats().decoded == 1, "the page's texture must be decoded ahead");
+    const auto* a = ref.get_texture(game_tex0);
+    const auto* b = vram.get_texture(game_tex0);
+    check(a && b && vram.stats().decoded == 1 && vram.stats().cached == 1,
+          "the first draw must find the texture decoded ahead");
+    check(a->w == b->w && a->h == b->h && a->max_alpha == b->max_alpha &&
+              memcmp(a->box, b->box, sizeof(a->box)) == 0,
+          "the texture decoded ahead must be the first draw's");
   }
 
   // two pages alternating in the same VRAM, each read by its texture: the textures stay cached

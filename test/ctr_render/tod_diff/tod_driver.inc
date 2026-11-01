@@ -85,6 +85,25 @@ auto tod_diff_drop(T& t, size_t ci, int) -> decltype(t.chunk_entries, void()) {
 }
 template <typename T>
 void tod_diff_drop(T&, size_t, long) {}
+// a version that makes the title's copies at load: as load_file does on a title load
+template <typename T, typename V>
+auto tod_diff_load_entries(T& t, size_t ci, const V& v, int n, int)
+    -> decltype(tod_load_entries(t, ci, v, n, (s64*)nullptr), void()) {
+  s64 room = 64 << 20;
+  if (g_title) {
+    tod_load_entries(t, ci, v, n, &room);
+  }
+}
+template <typename T, typename V>
+void tod_diff_load_entries(T&, size_t, const V&, int, long) {}
+// a version that makes the light layouts at load
+template <typename T, typename V, typename L>
+auto tod_diff_load_layout(T& t, size_t ci, const V& v, L& lights, int)
+    -> decltype(tod_load_light_layout(t, ci, v, lights), void()) {
+  tod_load_light_layout(t, ci, v, lights);
+}
+template <typename T, typename V, typename L>
+void tod_diff_load_layout(T&, size_t, const V&, L&, long) {}
 
 struct Sim {
   CtrLevelData lev;
@@ -309,10 +328,12 @@ struct Sim {
       const u8 m = tod_scan(T, verts_of(ci), (int)c.vertex_count, &lights);
       if (m) {
         tod_mark_plain(T, (u32)ci, verts_of(ci), (int)c.vertex_count);
+        tod_diff_load_entries(T, ci, verts_of(ci), (int)c.vertex_count, 0);
       }
       T.chunk_mask[ci] = m;
       T.chunk_scanned[ci] = m ? 2 : 1;
       if (!lights.verts.empty()) {
+        tod_diff_load_layout(T, ci, verts_of(ci), lights, 0);
         T.chunk_lights[(u32)ci] = std::move(lights);
       }
       T.chunk_mesh[ci] = lev.meshes[ci];

@@ -944,6 +944,7 @@ class CtrLevels {
       bool layout = false;
       std::vector<CtrLevelData::Tod::VisGroup> groups;
       std::vector<u16> run_group;  // per run of the chunk
+      std::unique_ptr<u16[]> entries;  // the title's entry copy (CtrLevel.cpp tod_entries)
     };
     std::vector<StreamOut> stream_out;
     double ms = 0, read_ms = 0, decode_ms = 0;  // the job's time, its file reads', decoding

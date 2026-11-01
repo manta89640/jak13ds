@@ -2813,7 +2813,9 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
   if (t.fast_day && !no_hold) {
     // (the colors' changes weren't kept: every group's colors may have changed)
     std::fill(t.cver.begin(), t.cver.end(), t.ver);
-    tod_drop_all_entries(t);
+  }
+  if (!no_hold && !t.chunk_entries.empty()) {
+    tod_drop_all_entries(t);  // (also a title load's copies when the title ended before its draw)
   }
   t.fast_day = no_hold;
   if (!t.first_frame) {
@@ -3022,8 +3024,54 @@ struct TodEntryRoom {
 TodEntryRoom g_tod_entry_room;
 constexpr u64 kTodEntryCheck = 30;
 constexpr s64 kTodEntryKeep = 4 << 20;
-// Chunk ci's vertices' table entries (the title's fast day: made at its first whole rewrite), or
-// nullptr when the heap has no room for them
+s64 tod_entry_room_now() {
+#ifdef __3DS__
+  CtrHeapStats st;
+  ctr_heap_stats(&st);
+  return std::min<s64>((s64)st.free - kTodEntryKeep, (s64)st.largest / 2);
+#else
+  return 64 << 20;
+#endif
+}
+// An entry copy (u32 count, then each vertex's entry) from a mesh's records
+u16* tod_copy_entries(const TodVerts& v, int n) {
+  u16* const p = new (std::nothrow) u16[2 + n];
+  if (p) {
+    const u32 nv = (u32)n;
+    memcpy(p, &nv, 4);
+    for (int i = 0; i < n; i++) {
+      p[2 + i] = (u16)v.entry(i);
+    }
+  }
+  return p;
+}
+void tod_put_entries(CtrLevelData::Tod& t, size_t ci, u16* p) {
+  u32 n;
+  memcpy(&n, p, 4);
+  tod_drop_entries(t, ci);
+  if (t.chunk_entries.size() < t.chunk_mesh.size()) {
+    t.chunk_entries.resize(t.chunk_mesh.size());
+  }
+  t.chunk_entries[ci].reset(p);
+  t.entries_bytes += 4 + 2 * n;
+}
+// Chunk ci's entry copy from its records, if room (bytes) allows; nullptr if not
+const u16* tod_make_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n,
+                            s64* room) {
+  const s64 bytes = 4 + 2 * (s64)n;
+  if (n <= 0 || ci >= t.chunk_mesh.size() || bytes > *room) {
+    return nullptr;
+  }
+  u16* const p = tod_copy_entries(v, n);
+  if (!p) {
+    *room = 0;
+    return nullptr;
+  }
+  *room -= bytes;
+  tod_put_entries(t, ci, p);
+  return p + 2;
+}
+// Chunk ci's vertices' table entries (the title's fast day), or nullptr when the heap has no room
 const u16* tod_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n, u64 frame) {
   if (ci < t.chunk_entries.size() && t.chunk_entries[ci]) {
     u32 had;
@@ -3036,35 +3084,37 @@ const u16* tod_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n
   auto& room = g_tod_entry_room;
   if (room.frame == ~0ull || frame - room.frame >= kTodEntryCheck) {
     room.frame = frame;
-#ifdef __3DS__
-    CtrHeapStats st;
-    ctr_heap_stats(&st);
-    room.left = std::min<s64>((s64)st.free - kTodEntryKeep, (s64)st.largest / 2);
-#else
-    room.left = 64 << 20;
-#endif
+    room.left = tod_entry_room_now();
   }
-  const s64 bytes = 4 + 2 * (s64)n;
-  if (n <= 0 || ci >= t.chunk_mesh.size() || bytes > room.left) {
-    return nullptr;
+  return tod_make_entries(t, ci, v, n, &room.left);
+}
+// A loaded chunk's light layout (loader thread), as its first light pass would make it
+void tod_load_light_layout(CtrLevelData::Tod& t, size_t ci, const TodVerts& v,
+                           CtrLevelData::Tod::LightList& lights) {
+  if (lights.empty() || ci >= t.chunk_group_first.size()) {
+    return;
   }
-  u16* const p = new (std::nothrow) u16[2 + n];
-  if (!p) {
-    room.left = 0;
-    return nullptr;
+  ctr_light_layout(t.groups.data() + t.chunk_group_first[ci], t.chunk_group_count[ci], lights,
+                   [&](u32 i) { return v.entry((int)i); });
+}
+// A title load's chunk (loader thread): its copy made from the records just read, so the first
+// whole rewrite reads entries like every later one
+bool tod_wants_entries(const CtrLevelData::Tod& t, size_t ci) {
+  if (t.keep_alpha || ci >= t.chunk_group_first.size()) {
+    return false;
   }
-  room.left -= bytes;
-  const u32 nv = (u32)n;
-  memcpy(p, &nv, 4);
-  for (int i = 0; i < n; i++) {
-    p[2 + i] = (u16)v.entry(i);
+  const u32 g0 = t.chunk_group_first[ci], ng = t.chunk_group_count[ci];
+  for (u32 g = g0; g < g0 + ng; g++) {
+    if (t.groups[g].plain) {
+      return true;
+    }
   }
-  if (t.chunk_entries.size() < t.chunk_mesh.size()) {
-    t.chunk_entries.resize(t.chunk_mesh.size());
+  return false;
+}
+void tod_load_entries(CtrLevelData::Tod& t, size_t ci, const TodVerts& v, int n, s64* room) {
+  if (tod_wants_entries(t, ci)) {
+    tod_make_entries(t, ci, v, n, room);
   }
-  t.chunk_entries[ci].reset(p);
-  t.entries_bytes += (u32)bytes;
-  return p + 2;
 }
 // Vertices [first, end) of a plain group from a table that is all up to date, through the chunk's
 // entries (e, 4-byte aligned): every color stored, 8 vertices from 4 entry words
@@ -6616,6 +6666,8 @@ bool CtrLevels::load_file(const fs::path& path,
   }
   u32 title_n = 0;
   u64 title_bytes = 0;
+  // the title's entry copies, made as the chunks are read
+  s64 entry_room = out->title_pass && out->tod ? tod_entry_room_now() : 0;
   // (AI-assisted, j2pop) make_room: the meshes still to be made from chunk ci on (the near chunks
   // streamed and those left for later not counted), the merc models'
   auto load_left_bytes = [&](size_t ci) {
@@ -6784,8 +6836,12 @@ bool CtrLevels::load_file(const fs::path& path,
         tod_state = tod_mask ? 2 : 0;
         if (tod_mask) {
           tod_mark_plain(t, (u32)out->meshes.size(), vv, (int)ch.vertex_count);
+          if (entry_room > 0) {
+            tod_load_entries(t, ci, vv, (int)ch.vertex_count, &entry_room);
+          }
         }
         if (!lights.empty()) {
+          tod_load_light_layout(t, ci, vv, lights);
           t.chunk_lights[(u32)out->meshes.size()] = std::move(lights);
         }
         if (tod_state == 2 && t.blended_valid) {
@@ -6794,6 +6850,9 @@ bool CtrLevels::load_file(const fs::path& path,
         }
       }
       mesh = mb.end(read_ok);
+      if (mesh < 0 && out->tod) {
+        tod_drop_entries(*out->tod, ci);
+      }
       if (mesh >= 0 && tod_state >= 0) {
         auto& t = *out->tod;
         t.chunk_mesh[ci] = mesh;
@@ -8729,6 +8788,11 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
   d->result = LoadResult::FAILED;
   size_t i = 0;
   int live = -1;  // (AI-assisted, streammem) part i's mesh, begun and not ended
+  // the title's entry copies, made as the chunks are read
+  s64 entry_room = g_game_version == GameVersion::Jak1 && job.name != "title" && job.tod_ntab &&
+                           m_title_on.load(std::memory_order_relaxed)
+                       ? tod_entry_room_now()
+                       : 0;
   try {
     if (!job.dir) {
       throw std::runtime_error("no file directory");
@@ -8799,12 +8863,17 @@ void CtrLevels::run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bu
           (!ntail || f.read(p.normals_offset, ndst, ntail));
       Done::StreamOut o;
       o.unit = p.unit;
+      const TodVerts sv{
+          (u8*)vdst, (tod_word*)((u8*)vdst + ctr_gpu_mesh_color_offset((int)p.vertex_count))};
       if (ok && p.layout) {
-        const TodVerts sv{
-            (u8*)vdst, (tod_word*)((u8*)vdst + ctr_gpu_mesh_color_offset((int)p.vertex_count))};
         stream_tod_layout(this, p.vertex_count, icount, p.draws, p.runs, idst, sv, job.tod_ntab,
                           &o.groups, &o.run_group);
         o.layout = true;
+      }
+      if (ok && entry_room >= 4 + 2 * (s64)p.vertex_count) {
+        // the title's entry copy, taken with the mesh (CtrLevels::take)
+        o.entries.reset(tod_copy_entries(sv, (int)p.vertex_count));
+        entry_room = o.entries ? entry_room - (4 + 2 * (s64)p.vertex_count) : 0;
       }
       live = -1;
       mesh = ctr_gpu_mesh_end(mesh, ok);  // (!ok: its piece back through ctr_gpu_set_ext_free)
@@ -8979,6 +9048,9 @@ void CtrLevels::stream_take_pending(u64 frame) {
           m_sst.colored++;
         }
         t.chunk_mesh[ci] = o.mesh;  // (colored: tod_recolor keeps it)
+        if (o.entries && t.chunk_scanned[ci] == 2 && tod_wants_entries(t, ci)) {
+          tod_put_entries(t, ci, o.entries.release());
+        }
       }
     }
     if (su.late_ms > 0) {
