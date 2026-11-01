@@ -10734,15 +10734,10 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // (AI-assisted, streaming) the longest a group drawn far for want of its data is kept far in
     // view once the data came (1 s at 30 fps)
     constexpr u32 kHoldFrames = 30;  // (AI-assisted, lodnear: was 120)
-    // the PS2's geomorph (c3l::ExtMorph): its distances x detail_scale, pulled in by auto_detail's
-    // relief (tie_lod_px 1 -> 4: x 1 -> 0.5; the morph rows use the same factor, so it shows no
-    // switch)
+    // the PS2's geomorph (c3l::ExtMorph): its distances x detail_scale, never pulled in by the
+    // relief (geometry 3's own vertex colors can't carry geometry 0's lighting: nearer, it shows)
     const bool morph_on = !lev.group_mid.empty();
-    float kd = k0;
-    if (morph_on && settings.auto_detail) {
-      const float px0 = std::max(settings.tie_lod_px, 0.25f);
-      kd = k0 * std::sqrt(px0 / std::max(relief.at(t_pos).tie_lod_px, px0));
-    }
+    const float kd = k0;
     auto dx2 = [&](const float* c) {
       const float x = c[0] - cx, y = c[1] - cy, z = c[2] - cz;
       return x * x + y * y + z * z;
