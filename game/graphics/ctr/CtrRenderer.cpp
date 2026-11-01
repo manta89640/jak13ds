@@ -1159,7 +1159,8 @@ void CtrRenderer::auto_detail_frame(float gpu_busy_ms, float gpu_active_ms, int 
     m_auto.init = true;
     m_auto.t_range = cs.shrub_scale_max > cs.shrub_scale ||
                      (cs.tie_distance_scale > 0 && cs.tie_distance_scale_max > cs.tie_distance_scale);
-    m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance);
+    m_auto.relief.init(cs.tie_lod_px, cs.lod_distance, cs.tie_distance_scale, cs.draw_distance,
+                       g_game_version != GameVersion::Jak1);
     m_auto.ctl.n = m_auto.relief.n;
     if (!m_auto.t_range) {
       m_auto.t = 0;

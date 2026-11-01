@@ -492,7 +492,8 @@ std::string CtrSettings::summary() const {
   // (AI-assisted, autodetail) the relief's ranges (CtrAutoDetail.h)
   auto auto_detail_relief_text = [&]() {
     ctr_detail::Relief rl;
-    rl.init(tie_lod_px, lod_distance, tie_distance_scale, draw_distance);
+    rl.init(tie_lod_px, lod_distance, tie_distance_scale, draw_distance,
+            g_game_version != GameVersion::Jak1);
     std::string r;
     for (ctr_detail::Knob k : ctr_detail::kOrder) {
       if (rl.stage[k] < 0) {

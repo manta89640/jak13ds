@@ -53,6 +53,13 @@ void test_ranges() {
               (b.tie_distance_scale > 0 && b.tie_distance_scale <= a.tie_distance_scale),
           "the tie limit never grows with r");
   }
+  Relief j1;
+  j1.init(1.f, 0.f, 0.f, 500.f, false);  // Jak 1: no tfrag tier switch
+  check(j1.n == 2 && j1.stage[kLodDistance] < 0 && j1.stage[kTieDistance] == 1,
+        "Jak 1: lod_distance doesn't move");
+  for (float r = 0; r <= 3.f; r += 0.25f) {
+    check(j1.at(r).lod_distance == 0.f, "Jak 1: lod_distance stays the config's");
+  }
   Relief j2;
   j2.init(4.f, 200.f, 1.5f, 500.f);  // Jak II's defaults: already the old values
   check(j2.n == 0, "Jak II's defaults: nothing to move");

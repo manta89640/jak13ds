@@ -9224,7 +9224,8 @@ struct ReliefAt {
   float t = 2.f;
   ctr_detail::Knobs kn{};
   explicit ReliefAt(const CtrSettings& s) {
-    rl.init(s.tie_lod_px, s.lod_distance, s.tie_distance_scale, s.draw_distance);
+    rl.init(s.tie_lod_px, s.lod_distance, s.tie_distance_scale, s.draw_distance,
+            g_game_version != GameVersion::Jak1);
   }
   const ctr_detail::Knobs& at(float tt) {
     if (tt != t) {
@@ -11633,6 +11634,19 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
             }
           }
         }
+      }
+#ifndef __3DS__
+      // host A/B, env CTR_TIER_AB: on odd frames every cell's coarse tier
+      static const bool tier_ab = getenv("CTR_TIER_AB") != nullptr;
+      if (tier_ab && (rs.frame_idx & 1)) {
+        near = false;
+      }
+#endif
+      if (pop_log_on() && last && last != (near ? 1 : 2) && ch.lod_tier == 1 &&
+          sphere_in_view(cam, &lev.lod_cell_sphere[ci * 4])) {
+        lg::info("[popT] f={} {} ci={} tier {} d={:.1f} r={:.1f}", rs.frame_idx, lev.name, ci,
+                 near ? "2 -> 1" : "1 -> 2", std::sqrt(d2) / 4096.f,
+                 lev.lod_cell_sphere[ci * 4 + 3] / 4096.f);
       }
       state = (u8)((state & ~3) | (near ? 1 : 2));
       lod_ok = near == (ch.lod_tier == 1);
