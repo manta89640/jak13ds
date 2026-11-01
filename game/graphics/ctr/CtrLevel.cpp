@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -12548,11 +12547,20 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     }
     return false;
   };
-  // a tfrag geomorph run moves only if its group reaches band 1's start (tf_state bit 5); the
-  // others are drawn by the plain program (factors 0: the same position and color)
-  auto tf_run_moving = [&](u32 r) {
+  // a tfrag geomorph run moves only if its group reaches band 1's start (tf_state bit 5: its morph
+  // colors are kept) and so does its own sphere (clip w row wr, its length wl); the others are
+  // drawn by the plain program (factors 0: the same position and color)
+  auto tf_run_moving = [&](u32 r, const float* wr, float wl) {
     const auto& rl = lev.run_lod[r];
-    return !(rl.group < lev.tf_state.size() && !(lev.tf_state[rl.group] & 32));
+    if (rl.group < lev.tf_state.size() && !(lev.tf_state[rl.group] & 32)) {
+      return false;
+    }
+    if (r >= lev.run_spheres.size() || lev.run_spheres[r].r == 0xffff) {
+      return true;
+    }
+    const auto& sp = lev.run_spheres[r];
+    const float w = wr[0] * sp.c[0] + wr[1] * sp.c[1] + wr[2] * sp.c[2] + wr[3] + sp.r * wl;
+    return !(w <= m_tf_still_w);
   };
   // what of a tfrag geomorph draw to draw: all of it, its runs that don't move or those that do
   enum { kPartAll, kPartStill, kPartMoving };
@@ -12582,6 +12590,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     // per range of runs: the morph program only where a vertex may move
     const bool tsplit = tmorph && lev.run_lod.size() >= lev.vis_runs.size();
     bool tm_call = tmorph;
+    const float* const wr = vc.clip + 12;  // (the chunk's quantized units)
+    const float wl = tsplit ? std::sqrt(wr[0] * wr[0] + wr[1] * wr[1] + wr[2] * wr[2]) : 0.f;
 #ifdef __3DS__
     // (AI-assisted, gpu-rt) the pass's draws go to the backend in one list
     auto submit = [&](u32 first, u32 count) {
@@ -12778,12 +12788,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         gap = 0;
         len += run.index_count;
         if (tsplit) {
-          pcs.push_back({idx, run.index_count, tf_run_moving(r)});
+          pcs.push_back({idx, run.index_count, tf_run_moving(r, wr, wl)});
         }
       } else if (open) {
         gap += run.index_count;
         if (tsplit) {
-          gpcs.push_back({idx, run.index_count, tf_run_moving(r)});
+          gpcs.push_back({idx, run.index_count, tf_run_moving(r, wr, wl)});
         }
         // (AI-assisted) c3l v17: the other version of a tie LOD group is never drawn along
         if (gap > kMaxGap || run_nomerge[r]) {
@@ -12925,32 +12935,16 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   auto morph_pass = [&](u32 di, int slot) {
     return morph_list && is_morph(di, slot) ? 2 : any_tmorph && is_tmorph(di, slot) ? 1 : 0;
   };
-  // the morph draws (the tfrag geomorph's moving runs, then the tie geomorph's) right after the
-  // other draws of their texture: the texture is bound once for all of them (a later pass bound it
-  // again, a cache clear and refill; a program switch costs less)
-  auto walk_grouped = [&](const std::vector<u32>& list) {
+  // the morph draws after the others of their list (the tfrag geomorph's moving runs, then the tie
+  // geomorph's): each switch between the morph program and the mesh program sends citro3d's whole
+  // context again (163 per frame interleaved, ~20 so)
+  auto walk_morph_last = [&](const std::vector<u32>& list) {
     m_morph_later.clear();
     m_tmorph_later.clear();
-    auto later = [&]() {
-      for (u32 di : m_tmorph_later) {
-        draw(di, kPartMoving);
-      }
-      for (u32 di : m_morph_later) {
-        draw(di);
-      }
-      m_tmorph_later.clear();
-      m_morph_later.clear();
-    };
-    int tex = INT_MIN;
     for (u32 di : list) {
       const int slot = vslot[draw_chunk[di]];
       if (slot < 0 || vchunks[slot].vista) {
         continue;
-      }
-      const int t = lev.draw_states[di].tex;
-      if (t != tex) {
-        later();
-        tex = t;
       }
       const int mp = morph_pass(di, slot);
       if (mp == 2) {
@@ -12962,7 +12956,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         draw(di);
       }
     }
-    later();
+    for (u32 di : m_tmorph_later) {
+      draw(di, kPartMoving);
+    }
+    for (u32 di : m_morph_later) {
+      draw(di);
+    }
   };
   auto walk_split = [&](const std::vector<u32>& list) {
     if (!morph_list && !any_tmorph) {
@@ -12970,11 +12969,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       return;
     }
     m_ph_walked += list.size();
-    walk_grouped(list);
+    walk_morph_last(list);
   };
   if (early_depth) {
     // (AI-assisted) one walk: the bands nearest first, each in list order with its morph draws
-    // after the others of their texture (opaque and depth tested as the others)
+    // last (the tfrag geomorph's, then the tie geomorph's: opaque and depth tested as the others)
     for (auto& b : m_band_draws) {
       b.clear();
     }
@@ -12986,7 +12985,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       }
     }
     for (int b = 0; b < 3; b++) {
-      walk_grouped(m_band_draws[b]);
+      walk_morph_last(m_band_draws[b]);
     }
   } else {
     walk_split(*main_lists[0]);

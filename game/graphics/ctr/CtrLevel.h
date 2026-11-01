@@ -1446,6 +1446,6 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   std::vector<u32> m_band_draws[3];
   // (AI-assisted, j2cull) the visible draws' places per list (bit sets), and those draws in order
   std::vector<u32> m_list_bits[3], m_list_vis[3];
-  std::vector<u32> m_morph_later;  // a texture's moving tie geomorph draws, after its others
+  std::vector<u32> m_morph_later;  // a list's moving tie geomorph draws, drawn after its others
   std::vector<u32> m_tmorph_later;  // and its tfrag geomorph draws (their moving runs), before those
 };
