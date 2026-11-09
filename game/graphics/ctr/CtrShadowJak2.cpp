@@ -66,8 +66,8 @@ bool faces_away(const float* p0, const float* p1, const float* p2) {
 
 // the guard band (clip space |x|, |y| <= kGuard * w): a face with a corner beyond it, or beyond
 // the near / far plane, is cut to them on the CPU (the PICA drops triangles far off screen, and a
-// dropped face leaves its stencil count wherever it covers)
-constexpr float kGuard = 2.f;
+// dropped face leaves its stencil count wherever it covers). 1: the screen itself.
+constexpr float kGuard = 1.f;
 
 inline u32 sign_bit(float f) {
   u32 u;

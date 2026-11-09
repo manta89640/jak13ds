@@ -14,9 +14,10 @@
  * CtrShadowVolumes is that program as native code: each object's vertices are transformed once to
  * OpenGL-style clip space (ctr_clip_vertex), and every triangle the program would draw before its
  * own clipping goes to a front or a back index list, with the program's own facing test. A
- * triangle with a corner outside the guard band (clip space |x|, |y| <= 2 w) or the near / far
- * plane is cut to them on the CPU, as the program cuts to its own (the PICA drops triangles far
- * off screen, and a dropped face leaves its count in the stencil). A triangle with all corners
+ * triangle with a corner outside the guard band (the screen: clip space |x|, |y| <= w) or the
+ * near / far plane is cut to them on the CPU, as the program cuts to its own (the PICA drops
+ * triangles far off screen, and a dropped face leaves its count in the stencil; cut to the
+ * screen, no corner is left for it to judge). A triangle with all corners
  * beyond one edge of the screen covers no pixel and is left out. A side quad whose bottom corners
  * alone leave the band through one guard-band plane is cut along its side edges, at a point made
  * once per bottom vertex (the same pixels as its two triangles cut one by one). CtrShadowRenderer

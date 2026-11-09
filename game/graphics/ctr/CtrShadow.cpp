@@ -58,8 +58,9 @@ constexpr float kMaxCamera = 1e8f;
 constexpr float kMaxMatrix = 1e6f;
 // the guard band (clip space |x|, |y| <= kGuard * w): a triangle with a corner beyond it is cut
 // to it on the CPU, as the VU1 program clips to its own. The PICA drops a triangle whose corners
-// are far off screen, and a dropped face leaves its stencil count wherever it covers.
-constexpr float kGuard = 2.f;
+// are far off screen, and a dropped face leaves its stencil count wherever it covers. 1: the
+// screen itself, so what the PICA does with a corner off screen never decides a count.
+constexpr float kGuard = 1.f;
 
 inline u32 sign_bit(float f) {
   return float_bits(f) >> 31;

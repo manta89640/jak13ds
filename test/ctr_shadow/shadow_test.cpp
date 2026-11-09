@@ -727,8 +727,7 @@ void run_case(const char* name, const Camera& cam, const std::vector<Object>& ob
       }
       const ctr_clip_vertex& v = verts[list[i]];
       const float e = 1e-4f * std::abs(v.w) + 1e-6f;
-      if (!(std::abs(v.x) <= 2.f * v.w + 2 * e && std::abs(v.y) <= 2.f * v.w + 2 * e &&
-            std::abs(v.z) <= v.w + e)) {
+      if (!(std::abs(v.x) <= v.w + e && std::abs(v.y) <= v.w + e && std::abs(v.z) <= v.w + e)) {
         fail("a corner outside the guard band");
         break;
       }
