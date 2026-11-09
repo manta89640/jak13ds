@@ -309,6 +309,7 @@ struct CtrLevelData {
     // fast day (nearly every entry changes every frame: no lists)
     u32 whole_now = 0, whole_last = 0;
     u64 whole_frame = 0;
+    u32 sweep_at = 0;  // the next chunk of the catch-up while the level is not drawn
     bool fast_day = false;
     // c3l v22 alpha: the colors' alpha in the 8 palettes by kind (each different one once), per
     // color its kind (empty: one kind), per kind its blend << 24 (the table's alpha byte; without
@@ -673,6 +674,9 @@ class CtrLevels {
   /*! Start the loads get()/set_wanted asked for and take the finished ones (render thread, outside
    * of a GPU frame). Doesn't wait for loads on the 3DS. */
   void process_pending_loads(u64 frame);
+  /*! The render thread's time for the last frame: the hidden levels' time of day catch-up
+   * (tod_sweep_hidden) runs after frames that left room. */
+  void note_frame_ms(double ms) { m_tod_sweep_ok = ms < 26.0; }
   /*! Levels the game wants (set_levels): others are unloaded. */
   void set_wanted(const std::vector<std::string>& names);
   /*! The level's .c3l is loaded (or failed, or there is none, or no load is pending for it):
@@ -1080,6 +1084,9 @@ class CtrLevels {
   std::map<std::string, Prefetched> m_prefetched;
   void update_level_count();
 
+  void tod_sweep_hidden(u64 frame);
+  bool m_tod_sweep_ok = true;
+
   // ---- (AI-assisted, streaming) ----
   void stream_update(u64 frame);
   void run_stream_job(const Job& job, Done* d, c3l::Reader::Buffers* bufs = nullptr);
@@ -1385,6 +1392,7 @@ class CtrTfragRenderer : public CtrBucketRenderer {
   u64 m_tod_light_verts = 0;  // (AI-assisted, perfv2) of m_tod_verts: the light pass's
   u64 m_tod_deferred = 0;     // (AI-assisted, perfv2) group rewrites spread to a later frame
   u64 m_tod_unchanged = 0;    // groups behind whose colors all blended as before
+  u64 m_tod_black_late = 0;   // group rewrites left to a later frame while the screen is black
   // (AI-assisted) groups rewritten, chunks drawn behind; sampled level draws, the most day moves a
   // group drawn was behind, draws with one 2 or more behind
   u64 m_tod_spread = 0, m_tod_fresh = 0, m_tod_held = 0;

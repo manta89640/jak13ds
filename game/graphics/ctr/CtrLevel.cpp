@@ -2930,12 +2930,8 @@ bool tod_day_jump(const CtrLevelData::Tod& t, const CtrBackgroundCamera& cam) {
   }
   return false;
 }
-int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
-               u64 frame, bool no_hold) {
-  u8 w[8][3];
-  tod_weights(cam, w);
-  u8 wa[8];
-  tod_alpha_weights(cam, wa);
+int tod_update_w(CtrLevelData::Tod& t, const std::string& level, const u8 (*w)[3], const u8* wa,
+                 u64 frame, bool no_hold) {
   // (AI-assisted, citadel) config tod_pulse_step: a day palette that pulses (CtrTodPulse.h: a mood
   // light's weight going up and down around a steady mean within ~6 s; citadel's palette 1, 1/64
   // every ~2 frames, 71% of its colors). A palette found pulsing is remembered per level
@@ -3009,7 +3005,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
       day |= 1u << p;
     }
   }
-  memcpy(t.weights, w, sizeof(w));
+  memcpy(t.weights, w, sizeof(t.weights));
   // the alpha kinds: a kind outside its colors' masks that blends to another alpha makes every
   // entry blend again
   if (!t.akinds.empty() && (!t.blended_valid || (changed & t.apal_mask))) {
@@ -3030,7 +3026,7 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
       }
     }
   }
-  memcpy(t.wa, wa, sizeof(wa));
+  memcpy(t.wa, wa, sizeof(t.wa));
   t.blended_valid = true;
   if (!changed) {
     return 0;
@@ -3068,6 +3064,15 @@ int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgrou
     return 2;
   }
   return 1;
+}
+
+int tod_update(CtrLevelData::Tod& t, const std::string& level, const CtrBackgroundCamera& cam,
+               u64 frame, bool no_hold) {
+  u8 w[8][3];
+  tod_weights(cam, w);
+  u8 wa[8];
+  tod_alpha_weights(cam, wa);
+  return tod_update_w(t, level, w, wa, frame, no_hold);
 }
 
 // may_alias words of a vertex color (u8 rgba[4], little endian)
@@ -3573,6 +3578,8 @@ constexpr u64 kTodFreshRatio = 3;
 // fast day): rewritten at once.
 constexpr u64 kTodSpreadFrames = 6;
 constexpr s64 kTodSpreadMin = 4000;
+// the vertices of the groups rewritten in a level draw while the screen is black
+constexpr s64 kTodBlackVerts = 16000;
 // (AI-assisted, todlag) the time of day's clock: ctr_gpu_time_ms; on the host times env
 // CTR_TOD_TIME_SCALE (statistics only: the host is ~10x faster than Azahar)
 inline double tod_now_ms() {
@@ -3601,6 +3608,11 @@ struct TodPass {
   u32 unchanged = 0;  // groups behind whose colors all blend as before (not written)
   u64 frame = 0;
   s64 list_left = 8 * 1024;  // vertices whose lists may be made in this pass
+  // the frame is black (nothing of it is seen): group rewrites past black_left vertices wait for
+  // a later frame, whatever they are behind by; the arrival's black lasts until none waits
+  bool black = false;
+  s64 black_left = 0;
+  u32 black_late = 0;
   std::vector<u8> light_visible;  // scratch, reused for each chunk's visibility groups
   std::vector<u8> list_visible;
 };
@@ -4103,10 +4115,15 @@ u32 tod_recolor(CtrLevelData& lev, size_t ci, const u8* shown, TodPass& ps) {
       // behind only by held moves: its entries blended as they are read, not the whole table
       const bool held_only = gr.ver >= std::max<u32>(1, t.hlut[dm]);
       const int first = gr.lo, end = std::min<int>(gr.hi + 1, n);
+      if (ps.black && ps.black_left < end - first && ps.black_left != kTodBlackVerts) {
+        ps.black_late++;
+        return;
+      }
       if (ps.spread && gr.ver != 0 && gr.dver + 1 == t.dver && ps.spread_left < end - first) {
         ps.deferred++;  // (AI-assisted, perfv2) one day step behind: a later frame of the spread
         return;
       }
+      ps.black_left -= std::max(0, end - first);
       ps.spread_left -= std::max(0, end - first);
       const u32 gl = t.group_list[g];
       if (gl && gl != CtrLevelData::Tod::kNoList && lists) {
@@ -7360,6 +7377,60 @@ bool CtrLevels::load_file(const fs::path& path,
   return true;
 }
 
+// A level that is loaded and not drawn (the neighbour behind a load boundary) kept the colors of
+// its load, and its first draw rewrote every group in view at once. Each frame a share of its
+// groups is brought to the day weights of the last level draw with the same day palettes (the
+// weights its load took), so its first draw finds them a day step behind at most.
+void CtrLevels::tod_sweep_hidden(u64 frame) {
+  constexpr s64 kVerts = 4000;
+  constexpr u32 kChunks = 96;
+  if (g_game_version != GameVersion::Jak1 || m_title_on || !m_tod_sweep_ok) {
+    return;
+  }
+  s64 left = kVerts;
+  for (auto& [name, lp] : m_levels) {
+    auto& lev = *lp;
+    if (!lev.tod || lev.last_draw_frame + 2 >= frame) {
+      continue;
+    }
+    auto& t = *lev.tod;
+    const u32 n = (u32)t.chunk_mask.size();
+    if (!t.blended_valid || t.fast_day || !n) {
+      continue;
+    }
+    std::array<u8, 32> day;
+    {
+      auto& seen = tod_seen();
+      std::lock_guard<std::mutex> lk(seen.lock);
+      if (!seen.last_day_mask || seen.last_day_mask != tod_day_mask(t)) {
+        continue;
+      }
+      day = seen.last;
+    }
+    u8 w[8][3], wa[8];
+    memcpy(w, t.target_w, sizeof(w));
+    memcpy(wa, t.wa, sizeof(wa));
+    for (u32 m = tod_day_mask(t); m; m &= m - 1) {
+      const int p = __builtin_ctz(m);
+      memcpy(w[p], day.data() + 3 * p, 3);
+      wa[p] = day[24 + p];
+    }
+    tod_update_w(t, name, w, wa, frame, false);
+    TodPass ps;
+    ps.frame = frame;
+    ps.pass = kTodRound;
+    ps.list_left = 0;
+    for (u32 k = 0; k < std::min(n, kChunks) && left > 0; k++) {
+      const u32 ci = t.sweep_at < n ? t.sweep_at : 0;
+      t.sweep_at = ci + 1;
+      left -= tod_recolor(lev, ci, nullptr, ps);
+    }
+  }
+  if (left != kVerts) {
+    tod_finish();
+  }
+}
+
 void CtrLevels::process_pending_loads(u64 frame) {
   m_render_frame.store(frame);
 #ifndef __3DS__
@@ -7539,6 +7610,7 @@ void CtrLevels::process_pending_loads(u64 frame) {
   }
   stream_take_pending(frame);  // (AI-assisted, streaming) the near chunks read, colored
   stream_update(frame);        // (AI-assisted, streaming) the near chunks around the camera
+  tod_sweep_hidden(frame);
   // (AI-assisted) levels that loaded with parts left out (no memory then): made again once the last
   // frame's free linear memory covers them (another level was unloaded, or this one's textures
   // moved to VRAM), but not while a level loads (the game waits for that one: its memory first)
@@ -10513,13 +10585,13 @@ void CtrTfragRenderer::log_stats(const CtrRenderState& rs, CtrLevelData* lev) {
              "per level draw (most {} vertices, {:.2f} ms; {} level draws); {} groups rewritten, the table "
              "refreshed whole in {} level draws ({} heavy frames took no new weights); a pulsing "
              "palette held in {} level draws; {} group rewrites spread to a later frame; {} groups "
-             "behind with no color changed",
+             "behind with no color changed; {} group rewrites left to a later black frame",
              m_name, m_tod_blends, (double)m_tod_verts / m_tod_frames,
              (double)m_tod_light_verts / m_tod_frames, m_tod_ms / m_tod_frames,
              m_tod_max, m_tod_max_ms, m_tod_frames, m_tod_spread, m_tod_fresh, m_tod_skipped,
-             m_tod_held, m_tod_deferred, m_tod_unchanged);
+             m_tod_held, m_tod_deferred, m_tod_unchanged, m_tod_black_late);
     m_tod_frames = m_tod_blends = m_tod_verts = m_tod_max = m_tod_held = m_tod_light_verts = m_tod_deferred = 0;
-    m_tod_unchanged = 0;
+    m_tod_unchanged = m_tod_black_late = 0;
     m_tod_spread = m_tod_fresh = m_tod_skipped = 0;
     m_tod_ms = m_tod_max_ms = 0;
   }
@@ -12381,6 +12453,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
       ps.fresh_ok = drawn >= kTodFreshRatio * t.table.size();
       ps.spread = t.day_move_frame && rs.frame_idx - t.day_move_frame < kTodSpreadFrames;
       ps.spread_left = std::max<s64>(kTodSpreadMin, (s64)(drawn / kTodSpreadFrames));
+      ps.black = g_screen_black && !t.fast_day;
+      ps.black_left = kTodBlackVerts;
       for (const auto& vc : m_visible) {
         tod_verts += tod_recolor(lev, vc.chunk, shown_of(vc), ps);
       }
@@ -12422,6 +12496,11 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
     m_tod_light_verts += ps.light_verts;
     m_tod_deferred += ps.deferred;
     m_tod_unchanged += ps.unchanged;
+    if (ps.black_late && m_jak2_slot < 0) {
+      m_tod_black_late += ps.black_late;
+      m_levels->note_late_in_view(rs.frame_idx, ps.black_late,
+                                  rs.frame_idx < lev.reveal_frame + 90, ps.black_late);
+    }
   }
 
   phase(kPhTod);

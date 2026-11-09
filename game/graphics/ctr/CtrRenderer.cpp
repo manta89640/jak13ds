@@ -848,6 +848,7 @@ void CtrRenderer::render_frame(const void* ee_mem, u32 chain_offset) {
   // (AI-assisted) the time of day work isn't GPU load: auto_detail counts it only for stepping
   // down (levellod: see auto_detail_frame)
   const double tod_ms = ctr_level_tod_take_ms();
+  m_levels->note_frame_ms(t3 - t0);
   if (long_frame_log && t3 - t0 >= kRenderLongMs) {
     std::string by;
     for (size_t i = 0; i < m_buckets.size() && i < bucket_ms_before.size(); i++) {
