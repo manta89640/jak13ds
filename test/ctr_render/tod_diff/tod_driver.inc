@@ -57,6 +57,9 @@ static u8* arena_take(size_t bytes) {
   *n = (int)v.n;
   return v.p;
 }
+[[maybe_unused]] static unsigned int ctr_gpu_mesh_color_offset(int vertex_count) {
+  return (unsigned int)vertex_count * 12u;
+}
 [[maybe_unused]] static void* ctr_gpu_mesh_colors_inplace(int mesh) {
   auto& v = (*g_vb)[(*g_mesh_chunk)[mesh]];
   return TOD_SPLIT ? v.p + 12 * v.n : nullptr;
@@ -115,7 +118,9 @@ struct Sim {
 
   // a chunk's vertices as the version's tod_scan / tod_mark_plain take them
   auto verts_of(size_t ci) {
-#if TOD_SPLIT
+#if TOD_DUAL
+    return tod_verts_at(vb[ci].p, (int)vb[ci].n, TOD_SPLIT != 0);
+#elif TOD_SPLIT
     return TodVerts{vb[ci].p, (tod_word*)(vb[ci].p + 12 * vb[ci].n)};
 #else
     return (const c3l::Vertex*)vb[ci].p;

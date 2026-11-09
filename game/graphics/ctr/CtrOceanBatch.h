@@ -100,10 +100,15 @@ class CtrOceanBatch {
       const u16* const ix = m_clip_indices.data();
       for (int i = 0; i + 2 < m; i += 3) {
         const int a = ix[i] - first, b = ix[i + 1] - first, c = ix[i + 2] - first;
-        if (!(code[a] | code[b] | code[c])) {
+        const u32 out = code[a] | code[b] | code[c];
+        if (!out) {
           m_i[m_ni++] = ix[i];
           m_i[m_ni++] = ix[i + 1];
           m_i[m_ni++] = ix[i + 2];
+          continue;
+        }
+        // all three outside the first plane any of them is outside of: that plane leaves nothing
+        if (code[a] & code[b] & code[c] & (out & -out)) {
           continue;
         }
         clip_triangle(tv[a], tv[b], tv[c]);
@@ -222,11 +227,15 @@ class CtrOceanBatch {
     OCEAN_MIX(x); OCEAN_MIX(y); OCEAN_MIX(z); OCEAN_MIX(q);
     OCEAN_MIX(s); OCEAN_MIX(t); OCEAN_MIX(fog); OCEAN_MIX(es); OCEAN_MIX(et);
 #undef OCEAN_MIX
-    o.r = (u8)std::clamp(std::lround(a.r + t * (b.r - a.r)), 0l, 255l);
-    o.g = (u8)std::clamp(std::lround(a.g + t * (b.g - a.g)), 0l, 255l);
-    o.b = (u8)std::clamp(std::lround(a.b + t * (b.b - a.b)), 0l, 255l);
-    o.a = (u8)std::clamp(std::lround(a.a + t * (b.a - a.a)), 0l, 255l);
+    o.r = round_u8(a.r + t * (b.r - a.r));
+    o.g = round_u8(a.g + t * (b.g - a.g));
+    o.b = round_u8(a.b + t * (b.b - a.b));
+    o.a = round_u8(a.a + t * (b.a - a.a));
     return o;
+  }
+  // lround, then clamped to a byte: half away from zero, exact in double
+  static u8 round_u8(float x) {
+    return (u8)std::clamp((long)((double)x + (x < 0 ? -0.5 : 0.5)), 0l, 255l);
   }
   //! a triangle cut by the depth planes in turn (Sutherland-Hodgman), drawn as a fan of new
   //! vertices

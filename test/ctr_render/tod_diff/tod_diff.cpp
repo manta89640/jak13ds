@@ -40,6 +40,12 @@ void tod_flush_note(u32 bytes) {
 
 // each version's chunk meshes in one block (run.sh: REF_SPLIT / NEU_SPLIT, the version keeps the
 // colors on their own)
+#ifndef REF_DUAL
+#define REF_DUAL 0
+#endif
+#ifndef NEU_DUAL
+#define NEU_DUAL 0
+#endif
 #ifndef TOD_ARENA_MB
 #define TOD_ARENA_MB 24
 #endif
@@ -52,7 +58,9 @@ namespace ref {
 #define TOD_CODE "ref.code.inc"
 #define TOD_ARENA g_arena_ref
 #define TOD_SPLIT REF_SPLIT
+#define TOD_DUAL REF_DUAL
 #include "tod_driver.inc"
+#undef TOD_DUAL
 #undef TOD_LIGHT
 #undef TOD_STRUCT
 #undef TOD_CODE
@@ -65,7 +73,9 @@ namespace neu {
 #define TOD_CODE "neu.code.inc"
 #define TOD_ARENA g_arena_neu
 #define TOD_SPLIT NEU_SPLIT
+#define TOD_DUAL NEU_DUAL
 #include "tod_driver.inc"
+#undef TOD_DUAL
 #undef TOD_LIGHT
 #undef TOD_STRUCT
 #undef TOD_CODE

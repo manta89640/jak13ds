@@ -66,9 +66,21 @@ echo "// neu" >> "$OUT/neu.light.h"
 CXX="${CXX:-c++}"
 CC="${CC:-cc}"
 INC=(-I"$ROOT" -I"$HERE" -I"$OUT" -I"$ROOT/third-party/fmt/include" -DFMT_HEADER_ONLY=1)
-# a version that keeps the mesh colors on their own (ctr_gpu_mesh_split_colors)
-split_of() { grep -q ctr_gpu_mesh_colors_inplace "$1" && echo 1 || echo 0; }
-SPLIT=(-DREF_SPLIT="$(split_of "$OUT/ref.code.inc")" -DNEU_SPLIT="$(split_of "$OUT/neu.code.inc")")
+# a version that keeps the mesh colors on their own (ctr_gpu_mesh_split_colors); one that takes
+# either layout (tod_verts_at) runs interleaved, as the game does by default, or split with
+# TOD_REF_SPLIT=1 / TOD_NEU_SPLIT=1
+dual_of() { grep -q tod_verts_at "$1" && echo 1 || echo 0; }
+split_of() {
+  if [ "$(dual_of "$1")" = 1 ]; then
+    echo "${2:-0}"
+  else
+    grep -q ctr_gpu_mesh_colors_inplace "$1" && echo 1 || echo 0
+  fi
+}
+SPLIT=(-DREF_SPLIT="$(split_of "$OUT/ref.code.inc" "${TOD_REF_SPLIT:-}")"
+       -DNEU_SPLIT="$(split_of "$OUT/neu.code.inc" "${TOD_NEU_SPLIT:-}")"
+       -DREF_DUAL="$(dual_of "$OUT/ref.code.inc")" -DNEU_DUAL="$(dual_of "$OUT/neu.code.inc")")
+echo "layouts: ref ${SPLIT[0]#-DREF_SPLIT=} neu ${SPLIT[1]#-DNEU_SPLIT=} (1: split colors)"
 # the level file reader with its decoders
 if [ ! -x "$OUT/tod_extract" ] || [ "$HERE/tod_extract.cpp" -nt "$OUT/tod_extract" ]; then
   ZSTD=("$ROOT"/third-party/zstd/lib/common/*.c "$ROOT"/third-party/zstd/lib/decompress/*.c)

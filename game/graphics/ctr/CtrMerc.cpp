@@ -544,27 +544,31 @@ void CtrMercRenderer::flush_opaque() {
     return;
   }
   const u32 n = (u32)m_q_opaque.size();
-  // by model (in the order they came), then draw, then the instances in the order they came (the
-  // queue index: the order std::stable_sort gave, without its buffer from the heap every frame).
-  // (AI-assisted) As one 64-bit key per draw (model rank, draw index, queue index: all distinct,
-  // so the same order as the comparison of the three), sorted without touching the queued draws
+  // by texture (a bind clears the GPU's texture cache: each texture once for all the queued
+  // models), then model (in the order they came), draw and the instances in the order they came
+  // (the queue index). As one 64-bit key per draw (all distinct, so the same order as the
+  // comparison of the four), sorted without touching the queued draws
   m_q_order.resize(n);
-  bool fits = n < (1u << 20);
+  bool fits = n < (1u << 18);
   for (u32 i = 0; i < n; i++) {
     const auto& q = m_q_opaque[i];
-    fits = fits && q.model_rank < (1u << 24) && q.draw_index < (1u << 20);
-    m_q_order[i] = (u64)q.model_rank << 40 | (u64)q.draw_index << 20 | i;
+    const u32 tex = (u32)(q.st.tex + 1);
+    fits = fits && tex < (1u << 16) && q.model_rank < (1u << 14) && q.draw_index < (1u << 16);
+    m_q_order[i] = (u64)tex << 48 | (u64)q.model_rank << 34 | (u64)q.draw_index << 18 | i;
   }
   if (fits) {
     std::sort(m_q_order.begin(), m_q_order.end());
   } else {
-    // (never: more than a million queued draws or draws per model)
+    // (never: more queued draws, textures, models or draws per model than the key holds)
     for (u32 i = 0; i < n; i++) {
       m_q_order[i] = i;
     }
     std::sort(m_q_order.begin(), m_q_order.end(), [&](u64 a, u64 b) {
       const auto& qa = m_q_opaque[a];
       const auto& qb = m_q_opaque[b];
+      if (qa.st.tex != qb.st.tex) {
+        return qa.st.tex < qb.st.tex;
+      }
       if (qa.model_rank != qb.model_rank) {
         return qa.model_rank < qb.model_rank;
       }
@@ -576,7 +580,7 @@ void CtrMercRenderer::flush_opaque() {
   }
   const float* d = m_qdata.data();
   for (u64 key : m_q_order) {
-    const auto& q = m_q_opaque[fits ? (u32)(key & 0xfffff) : (u32)key];
+    const auto& q = m_q_opaque[fits ? (u32)(key & 0x3ffff) : (u32)key];
     ctr_gpu_draw_skinned(&q.st, d + q.clip, d + q.rows, q.palette_count,
                          q.rows_f24 == ~0u ? nullptr : m_qf24.data() + q.rows_f24, q.bones_id,
                          d + q.lights, q.mesh, q.first_index, q.index_count);
