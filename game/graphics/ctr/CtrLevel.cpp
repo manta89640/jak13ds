@@ -10313,6 +10313,9 @@ void CtrTfragRenderer::draw_env_calls(std::vector<EnvCall>& calls) {
                      [](const EnvCall& a, const EnvCall& b) { return a.mesh < b.mesh; });
     i = j + 1;
   }
+#ifndef __3DS__
+  ctr_gpu_soft_bucket((m_name.substr(0, 2) + "/etie").c_str());
+#endif
   for (const auto& c : calls) {
     ctr_gpu_etie_draw(c.state, c.env_tex, &c.d, c.mesh, c.normals_mesh, c.normals_offset, c.first,
                       c.count);
@@ -10730,6 +10733,9 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   const bool fog_skip = settings.fog_stage_skip;
   const bool early_depth = ctr_gpu_early_depth_active() != 0;  // (AI-assisted) the band order
   const float pzw = std::abs(cam.perspective[2][3]);
+#ifndef __3DS__
+  ctr_gpu_soft_view_depth(pzw * 4096.f);
+#endif
   constexpr float kNoFog = 0.5f / 255.f;
   float fog0[4] = {0.f, 255.f, 255.f, -1.f / 255.f};
   float fog1[4] = {0.f, 1.f, 0.f, 0.f};
@@ -13002,6 +13008,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   if (!m_wind_calls.empty()) {
 #ifdef __3DS__
     flush_calls(0);
+#else
+    ctr_gpu_soft_bucket((m_name.substr(0, 2) + "/wind").c_str());
 #endif
     draw_wind_calls(lev);
   }
@@ -13010,6 +13018,7 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
 #ifdef __3DS__
   m_calls.insert(m_calls.end(), m_fade_calls.begin(), m_fade_calls.end());
 #else
+  ctr_gpu_soft_bucket((m_name.substr(0, 2) + "/shrubfade").c_str());
   for (const auto& c : m_fade_calls) {
     ctr_gpu_set_mesh_nofog(c.nofog);
     ctr_gpu_draw_mesh_prepared(c.state, c.matrix, c.mesh, c.first_index, c.index_count);
