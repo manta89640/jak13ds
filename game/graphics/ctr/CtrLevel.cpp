@@ -9671,17 +9671,7 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
   u8* const shown_out = in.shown_out;
   u8* const nomerge_out = in.nomerge_out;
   const bool vista_tier = in.vista_tier;
-  // four runs (a cache line of each array) at a time, the lines four ahead asked for early: the
-  // arrays are read once per frame, in order
-  for (u32 r = r0, r_end = r0 + nr; r < r_end;) {
-    __builtin_prefetch(&runs[r + 16]);
-    if (STR) {
-      __builtin_prefetch(&spheres[r + 16]);
-    }
-    if (LOD) {
-      __builtin_prefetch(&run_lod[r + 32]);
-    }
-    for (const u32 blk = std::min(r_end, r + 4); r < blk; r++) {
+  for (u32 r = r0; r < r0 + nr; r++) {
     const c3l::VisRun& run = runs[r];
     bool s = true;
     if (VIS) {
@@ -9732,7 +9722,6 @@ void run_loop(const RunLoopIn& in, u32 r0, u32 nr, RunLoopOut* out) {
     shown += s;
     if (LOD && s && lod_version) {
       (lod_version == c3l::kRunLodFar ? lod_tris2 : lod_tris1) += run.index_count / 3;
-    }
     }
   }
   out->shown = shown;
