@@ -55,6 +55,13 @@ std::map<int, std::string>& ctr_soft_mesh_desc();
 #endif
 
 namespace {
+// chunks a level draw wanted in view whose mesh is not there (logged)
+struct Holes {
+  u64 frame = ~0ull;
+  u32 this_frame = 0, most = 0, frames_with = 0;
+  u32 chunk_frames[4] = {};
+};
+Holes g_holes;
 void tod_drop_entries(CtrLevelData::Tod& t, size_t ci);
 // chunk ci's mesh freed or made again (a later mesh may get the same id): its time of day and
 // tfrag morph colors are made again
@@ -9951,6 +9958,19 @@ const CtrBackgroundCamera& host_cam_pose(const CtrLevelData& lev,
 #endif
 
 void CtrTfragRenderer::render(DmaFollower& dma, CtrRenderState& rs) {
+  if (g_holes.frame != rs.frame_idx) {
+    g_holes.frame = rs.frame_idx;
+    g_holes.frames_with += g_holes.this_frame != 0;
+    g_holes.most = std::max(g_holes.most, g_holes.this_frame);
+    g_holes.this_frame = 0;
+    if (rs.log_now && g_holes.frames_with) {
+      lg::warn("[ctr] chunks in view within their distance WITHOUT their mesh (not drawn): {} frames, "
+               "at most {} in one; chunk frames: tfrag {}, tie {}, shrub {}, other {}",
+               g_holes.frames_with, g_holes.most, g_holes.chunk_frames[1], g_holes.chunk_frames[2],
+               g_holes.chunk_frames[3], g_holes.chunk_frames[0]);
+      g_holes = Holes{rs.frame_idx};
+    }
+  }
   {
     // (AI-assisted, streaming) the streaming statistics, once per log period (from the first
     // background bucket of the frame: a level slot may be empty)
@@ -12070,6 +12090,12 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
         }
       }
     }
+    if (meshes[ci] < 0 && dist_ok && lod_ok && !(lev.has_vista && ch.lod_tier == 3) &&
+        (!(ch.lod_tier != 0 ? far_tfrag : far_level) || far_chunk(lev, ch)) &&
+        sphere_in_view(cam, ch.bsphere)) {
+      g_holes.chunk_frames[std::min<u32>(ch.kind, 3)]++;
+      g_holes.this_frame++;
+    }
     // (a level with a vista tier draws its low resolution tfrag through the copies: no mesh)
     if ((meshes[ci] < 0 && !(lev.has_vista && ch.lod_tier == 3)) || !dist_ok) {
       if (!dist_ok && ch.lod_tier != 3) {
@@ -12261,7 +12287,8 @@ void CtrTfragRenderer::draw_level(CtrLevelData& lev,
   }
   // (AI-assisted, perfv2) host diagnostic, env CTR_SOFT_DRAW_PX: what each mesh drawn is (the
   // soft renderer's per-draw fragment list names them)
-  if (getenv("CTR_SOFT_DRAW_PX")) {
+  static const bool mesh_desc = getenv("CTR_SOFT_DRAW_PX") || getenv("CTR_GPU_LIFE");
+  if (mesh_desc) {
     for (const auto& vc : m_visible) {
       if (vc.chunk < lev.meshes.size() && lev.meshes[vc.chunk] >= 0) {
         const auto& ch = lev.chunks[vc.chunk];

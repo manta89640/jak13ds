@@ -131,6 +131,9 @@ static void apt_gate_install(void);
 static void apt_gate_remove(void);
 static void apt_gate_enter(void);
 static void apt_gate_leave(void);
+static int gx_begin(void);
+static void gx_end(void);
+static int gx_lost(void);
 static void raw_gas_flags_clear(void);
 static void gx_queue_enlarge(void);
 static void vprobe_frame(void);
@@ -1724,15 +1727,20 @@ static void load_opt_set(void) {
 
 /* Boot check of the CPU cache cleaning the GPU depends on: data written on another core,
  * cleaned from this one by the method under test (0 kernel, 1 GSP), copied by the GPU, read back.
+ * The writer spins on its core meanwhile: its lines are still in that core's cache.
  * Returns the words that differ (all: the test could not run). */
 typedef struct {
   u32* buf;
   u32 words, seed;
+  volatile int spin, written, release;
 } FlushFill;
 static void flush_fill(void* arg) {
-  const FlushFill* f = (const FlushFill*)arg;
+  FlushFill* f = (FlushFill*)arg;
   for (u32 i = 0; i < f->words; i++) {
     f->buf[i] = (i * 2654435761u) ^ f->seed;
+  }
+  f->written = 1;
+  while (f->spin && !f->release) {
   }
 }
 static u32 flush_check(int method, int other_core, u32 bytes, u32 seed) {
@@ -1743,13 +1751,15 @@ static u32 flush_check(int method, int other_core, u32 bytes, u32 seed) {
   if (src && dst) {
     memset(dst, 0, bytes);
     GSPGPU_FlushDataCache(dst, bytes);
-    FlushFill f = {src, words, seed};
+    FlushFill f = {src, words, seed, other_core, 0, 0};
     s32 me = svcGetProcessorID();
     Thread t = other_core ? threadCreate(flush_fill, &f, 4096, 0x30, me == 0 ? 2 : 0, false) : NULL;
     if (t) {
-      threadJoin(t, U64_MAX);
-      threadFree(t);
+      while (!f.written) {
+        svcSleepThread(100000LL);
+      }
     } else {
+      f.spin = 0;
       flush_fill(&f);
     }
     if (method == 0) {
@@ -1762,6 +1772,11 @@ static u32 flush_check(int method, int other_core, u32 bytes, u32 seed) {
     bad = 0;
     for (u32 i = 0; i < words; i++) {
       bad += dst[i] != ((i * 2654435761u) ^ seed);
+    }
+    if (t) {
+      f.release = 1;
+      threadJoin(t, U64_MAX);
+      threadFree(t);
     }
   }
   linearFree(src);
@@ -1788,7 +1803,8 @@ static void flush_selftest(void) {
   }
   const int was = kernel_flush_on();
   s_kernel_flush = was && bad[0] == 0;
-  printf("[ctr] cache flush self-test (4 KB/256 KB): %s; %s -> %s\n", txt[0], txt[1],
+  printf("[ctr] cache flush self-test (4 KB/256 KB, the writer still on its core): %s; %s -> %s\n",
+         txt[0], txt[1],
          s_kernel_flush ? "kernel" : "GSP");
 }
 
@@ -2742,9 +2758,13 @@ int ctr_gpu_breakdown_line(char* out, int size, const char* label) {
   return len;
 }
 
+static int apt_gate_closed(void);
 static void pres_vblank(void* unused) {
   (void)unused;
   const u32 v = ++s_pres.vblanks;
+  if (apt_gate_closed()) {
+    return;
+  }
   if (s_pres.drop_req || (s32)(s_pres.q_tail - s_pres.q_head) < 0) {
     /* (AI-assisted, gpu-home) the render thread's drop (no free screen buffer for 300 ms), or
      * indices that went wrong: nothing waits any more */
@@ -3175,6 +3195,9 @@ static u32 s_ov2_drains;
 static float overlap2_room(int n) {
   gxCmdQueue_s* q = &__C3D_Context.gxQueue;
   float ms = 0.0f;
+  if (!gx_begin()) {
+    return ms;
+  }
   const int idle = gxCmdQueueWait(q, 0);
   if (idle || q->numEntries + n >= q->maxEntries) {
     if (!idle) {
@@ -3188,6 +3211,7 @@ static float overlap2_room(int n) {
     gxCmdQueueClear(q);
   }
   gxCmdQueueRun(q); /* active (an added entry starts it); no-op while it runs */
+  gx_end();
   return ms;
 }
 
@@ -3223,7 +3247,11 @@ static float overlap2_wait_frame(u32 id) {
       if (q->lastEntry >= q->numEntries) {
         break; /* nothing left to run (the queue was emptied after the frame finished) */
       }
+      if (!gx_begin()) {
+        break;
+      }
       gxCmdQueueRun(q);
+      gx_end();
     }
     gspWaitForAnyEvent();
   }
@@ -3380,6 +3408,19 @@ static u32 color_fill_value(uint8_t r, uint8_t gr, uint8_t b) {
   return ((u32)r << 24) | ((u32)gr << 16) | ((u32)b << 8) | 0xff;
 }
 
+/* a C3D_FrameBegin whose frame was abandoned: ended with nothing to send, the gate open again */
+static int s_c3d_open;
+static void c3d_frame_abort(void) {
+  if (!s_c3d_open) {
+    return;
+  }
+  s_c3d_open = 0;
+  GPUCMD_SetBuffer(gpuCmdBuf, gpuCmdBufSize, 0);
+  __C3D_Context.flags &= ~(u32)C3DiF_DrawUsed;
+  g.top->used = false;
+  C3D_FrameEnd(GX_CMDLIST_FLUSH);
+}
+
 static void pipeline_frame_begin(u32 clear) {
   if (g.screenshot_state == 2) {
     /* (AI-assisted) the frame to save is complete once the GPU has nothing queued (this frame's
@@ -3395,10 +3436,19 @@ static void pipeline_frame_begin(u32 clear) {
     /* (AI-assisted) frame_overlap2 = on: the frame before the last one drew from these buffers;
      * then the deletes (as the frame end does in the other modes; not twice after one of those) */
     s_begin_wait_ms = overlap2_wait_frame(s_buf_frame[s_k]);
-    s_buf_frame[s_k] = 0;
-    if (s_end_mode2) {
-      process_pending_deletes(2);
+    if (!gx_lost()) {
+      s_buf_frame[s_k] = 0;
+      if (s_end_mode2) {
+        process_pending_deletes(2);
+      }
     }
+  }
+  /* the frame's first GPU work in one piece: all of it queued, or the frame abandoned */
+  if (gx_lost() || !gx_begin()) {
+    return;
+  }
+  c3d_frame_abort();
+  if (overlap2_on()) {
     s_begin_wait_ms += overlap2_room(8); /* (AI-assisted, gpu-home) in gpu_wait_ms too */
   }
   GPUCMD_SetBuffer(s_cmdbufs[s_k], PIPE_CMD_BYTES / 4, 0);
@@ -3439,11 +3489,15 @@ static void pipeline_frame_begin(u32 clear) {
   frame_state_reset();
   g.cur.color_clear_skipped = s_skip_color_clear;
   g.cur.gpu_wait_ms = s_begin_wait_ms; /* (AI-assisted) frame_overlap2 = on (after the reset) */
+  gx_end();
 }
 
 /* send what's built so far to the GPU (pipeline: our command buffer, citro3d isn't in a frame) */
 static void pipeline_submit(void) {
   flush_vbuf();
+  if (!gx_begin()) {
+    return;
+  }
   GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
   GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
   u32* list;
@@ -3456,6 +3510,7 @@ static void pipeline_submit(void) {
     gt_note_submit();
     GX_ProcessCommandList(list, words * 4, GX_CMDLIST_FLUSH);
   }
+  gx_end();
 }
 
 static volatile int s_cmd_dump_next;
@@ -3491,9 +3546,14 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
     pipeline_frame_begin(color_fill_value(r, gr, b));
     return;
   }
+  if (!gx_begin()) {
+    return;
+  }
+  c3d_frame_abort();
   diag_rt("frame_begin: C3D_FrameBegin (wait for GPU)");
   const u64 wait0 = svcGetSystemTick();
   C3D_FrameBegin(0); /* waits for the GPU; the game thread already paces to vblank */
+  s_c3d_open = 1;
   const float wait_ms = (float)((double)(svcGetSystemTick() - wait0) / (SYSCLOCK_ARM11 / 1000.0));
   diag_rt("frame_begin: deletes, VRAM pool copies");
   g.cmd_base = gpuCmdBuf;
@@ -3514,6 +3574,7 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t gr, uint8_t b) {
   frame_state_reset();
   g.cur.color_clear_skipped = s_skip_color_clear;
   g.cur.gpu_wait_ms = wait_ms; /* (AI-assisted) (after the reset of g.cur) */
+  gx_end();
   diag_rt("draw build");
 }
 
@@ -3632,15 +3693,21 @@ static void flush_vbuf(void) {
  * and texture state, broken draws) in every frame with a copy (the distorter's screen copy, a
  * texture pool moving to VRAM). Split here with the flush first; C3D_SyncTextureCopy's own split
  * then has nothing left to send. */
-static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
+/* Returns 0 when the copy was not queued (the HOME Menu or sleep has the GPU). */
+static int sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size, u32 flags) {
+  if (!gx_begin()) {
+    return 0;
+  }
   if (g.in_frame && s_pipeline) {
     if (s_bd.frame) {
       bd_copy(in, indim, out, outdim, size, flags); /* (AI-assisted, gpu-rt) gpu_breakdown */
-      return;
+      gx_end();
+      return 1;
     }
     pipeline_submit(); /* the draws before the copy, then the copy, in the GPU's queue */
     GX_TextureCopy(in, indim, out, outdim, size, flags);
-    return;
+    gx_end();
+    return 1;
   }
   if (g.in_frame) {
     /* (AI-assisted) with overlap the queue may already be running (ctr_gpu_submit_partial): the
@@ -3648,9 +3715,12 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
     C3D_SyncTextureCopy(in, indim, out, outdim, size, flags);
-    return;
+    gx_end();
+    return 1;
   }
   C3D_SyncTextureCopy(in, indim, out, outdim, size, flags);
+  gx_end();
+  return 1;
   /* (AI-assisted) Outside a frame citro3d waits for "the" PPF event (gspWaitForPPF), which steady
    * pacing's transfers and fences signal with nobody clearing it, so this can return while the copy
    * still runs (audit FS-10). Waiting for the GX queue here instead cost ~28 ms per frame in lava
@@ -3660,15 +3730,19 @@ static void sync_texture_copy(u32* in, u32 indim, u32* out, u32 outdim, u32 size
 
 /* sync_texture_copy's display transfer (first: the draws so far go to the GPU before it) */
 static void sync_display_transfer(u32* in, u32 indim, u32* out, u32 outdim, u32 flags, int first) {
+  if (!gx_begin()) {
+    return;
+  }
   if (g.in_frame && s_pipeline) {
     if (s_bd.frame) {
       bd_copy(in, indim, out, outdim, 0, flags);
-      return;
+    } else {
+      if (first) {
+        pipeline_submit();
+      }
+      GX_DisplayTransfer(in, indim, out, outdim, flags);
     }
-    if (first) {
-      pipeline_submit();
-    }
-    GX_DisplayTransfer(in, indim, out, outdim, flags);
+    gx_end();
     return;
   }
   if (g.in_frame && first) {
@@ -3676,6 +3750,7 @@ static void sync_display_transfer(u32* in, u32 indim, u32* out, u32 outdim, u32 
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
   }
   C3D_SyncDisplayTransfer(in, indim, out, outdim, flags);
+  gx_end();
 }
 
 #define PARTIAL_MIN_DRAWS 24
@@ -3716,12 +3791,13 @@ void ctr_gpu_submit_partial(void) {
   }
   if (s_pipeline) {
     pipeline_submit();
-  } else {
+  } else if (gx_begin()) {
     flush_vbuf();
     C3D_FrameSplit(GX_CMDLIST_FLUSH);
     gt_note_first(); /* (AI-assisted) the queue (stopped since C3D_FrameBegin) starts here */
     gt_note_submit();
     gxCmdQueueRun(&__C3D_Context.gxQueue);
+    gx_end();
   }
   s_partial_draws = g.cur.draws;
   s_partials++;
@@ -3831,6 +3907,9 @@ static void cmd_dump_frame(void) {
 
 void ctr_gpu_frame_end(void) {
   if (!g.ready || !g.in_frame) {
+    if (g.ready) {
+      ctr_gpu_rt_end();
+    }
     apt_gate_leave(); /* (AI-assisted, gpu-home) */
     return;
   }
@@ -3848,6 +3927,10 @@ void ctr_gpu_frame_end(void) {
     g.vbuf_used += 16;
   }
   flush_vbuf();
+  /* the rest of the frame's GPU work in one piece: all of it queued, or none */
+  if (!gx_begin()) {
+    return;
+  }
   const int bd = s_bd.frame;
   if (bd) {
     /* (AI-assisted, gpu-rt) gpu_breakdown: the rest of the frame's commands alone (the frame
@@ -3881,6 +3964,7 @@ void ctr_gpu_frame_end(void) {
     const u32 size = gpuCmdBufSize, offset = gpuCmdBufOffset;
     const u64 wait0 = svcGetSystemTick();
     C3D_FrameBegin(0);
+    s_c3d_open = 1;
     g.cur.gpu_wait_ms =
         (float)((double)(svcGetSystemTick() - wait0) / (SYSCLOCK_ARM11 / 1000.0));
     process_pending_deletes(1);
@@ -3908,11 +3992,13 @@ void ctr_gpu_frame_end(void) {
   }
   if (ov2 != 2) {
     C3D_FrameEnd(GX_CMDLIST_FLUSH);
+    s_c3d_open = 0;
   }
   if (bd) {
     /* (AI-assisted, gpu-rt) the transfer and the fence (steady pacing) */
     bd_frame_end(s_pres.on ? 2 : 1);
   }
+  gx_end();
   diag_rt("frame_end: stats");
   g.in_frame = 0;
   if (g.screenshot_state == 1) {
@@ -4138,11 +4224,15 @@ static void cache_invalidate_now(const void* addr, u32 size) {
  * 0: not queued */
 static int queue_texture_copy(void* in, void* out, u32 size) {
   if (s_pipeline && overlap2_on() && !s_bd.frame) {
+    if (!gx_begin()) {
+      return 0;
+    }
     s_begin_wait_ms += overlap2_room(1);
-    return R_SUCCEEDED(GX_TextureCopy((u32*)in, 0, (u32*)out, 0, size, 8));
+    const int ok = R_SUCCEEDED(GX_TextureCopy((u32*)in, 0, (u32*)out, 0, size, 8));
+    gx_end();
+    return ok;
   }
-  sync_texture_copy((u32*)in, 0, (u32*)out, 0, size, 8);
-  return 1;
+  return sync_texture_copy((u32*)in, 0, (u32*)out, 0, size, 8);
 }
 
 /* everything queued up to frame f's begin has run */
@@ -5363,7 +5453,11 @@ static void migrate_small_textures(void) {
     pos += sizes[j];
   }
   cache_flush_now(staging, total);
-  sync_texture_copy((u32*)staging, 0, (u32*)(s_arena.base + off), 0, total, 8);
+  if (!sync_texture_copy((u32*)staging, 0, (u32*)(s_arena.base + off), 0, total, 8)) {
+    arena_free((u32)off, total);
+    defer_linear_free(staging);
+    return;
+  }
   pos = 0;
   for (int j = 0; j < npick; j++) {
     TexSlot* t = &g.textures[pick[j]];
@@ -5651,7 +5745,16 @@ static struct {
   int hooked;
   aptHookCookie cookie;
   u32 suspends, timeouts;
+  /* gx_begin: the thread holding the lock and its depth; lost: the frame met a closed gate */
+  Thread owner, frame_thread;
+  int depth;
+  volatile int lost;
+  u32 abandoned;
 } s_apt;
+
+static int apt_gate_closed(void) {
+  return s_apt.gate;
+}
 
 static void apt_gate_hook(APT_HookType type, void* param) {
   (void)param;
@@ -5674,9 +5777,11 @@ static void apt_gate_hook(APT_HookType type, void* param) {
   }
   /* what is queued (with frame_overlap2 = on the queue keeps running between frames) */
   gxCmdQueueWait(&__C3D_Context.gxQueue, GX_WAIT_MS(1000));
-  printf("[ctr] %s: frames stopped (%.1f ms%s)\n", type == APTHOOK_ONSLEEP ? "sleep" : "HOME Menu",
+  printf("[ctr] %s: frames stopped (%.1f ms%s; %lu frames abandoned unsent so far)\n",
+         type == APTHOOK_ONSLEEP ? "sleep" : "HOME Menu",
          (double)(svcGetSystemTick() - t0) / (SYSCLOCK_ARM11 / 1000.0),
-         timed_out ? ", the frame being built did NOT end" : "");
+         timed_out ? ", the frame being built did NOT end: nothing more of it is sent" : "",
+         (unsigned long)s_apt.abandoned);
 }
 
 /* main thread, after every aptMainLoop (ctr_port.c ctr_main_loop): open a closed gate */
@@ -5786,6 +5891,8 @@ static void apt_gate_enter(void) {
     CondVar_Wait(&s_apt.cv, &s_apt.lock);
   }
   s_apt.busy = 1;
+  s_apt.lost = 0;
+  s_apt.frame_thread = threadGetCurrent();
   LightLock_Unlock(&s_apt.lock);
   if (s_apt.seen != s_apt.epoch) {
     s_apt.seen = s_apt.epoch;
@@ -5801,6 +5908,43 @@ static void apt_gate_leave(void) {
   s_apt.busy = 0;
   CondVar_Broadcast(&s_apt.cv);
   LightLock_Unlock(&s_apt.lock);
+}
+
+/* GX queue work only between gx_begin and gx_end (nests); 0: gate closed, frame abandoned */
+static int gx_begin(void) {
+  if (!s_apt.hooked) {
+    return 1;
+  }
+  const Thread me = threadGetCurrent();
+  if (s_apt.depth && s_apt.owner == me) {
+    s_apt.depth++;
+    return 1;
+  }
+  LightLock_Lock(&s_apt.lock);
+  if (!s_apt.gate) {
+    s_apt.owner = me;
+    s_apt.depth = 1;
+    return 1;
+  }
+  if (s_apt.busy && s_apt.frame_thread == me) {
+    s_apt.busy = 0;
+    s_apt.lost = 1;
+    s_apt.abandoned++;
+    g.in_frame = 0;
+    CondVar_Broadcast(&s_apt.cv);
+  }
+  LightLock_Unlock(&s_apt.lock);
+  return 0;
+}
+
+static void gx_end(void) {
+  if (s_apt.hooked && --s_apt.depth == 0) {
+    LightLock_Unlock(&s_apt.lock);
+  }
+}
+
+static int gx_lost(void) {
+  return s_apt.lost;
 }
 
 void ctr_gpu_set_cmd_dedup(int on, int draw) {
@@ -8237,9 +8381,14 @@ int ctr_gpu_rt_draw_grid(int tex, const ctr_draw_state* state, const ctr_vertex*
     const u32 size = (u32)d * (u32)d * 4u;
     u32* src = (u32*)g.textures[s_rt[i].mip[l - 1]].tex.data;
     if (l == 1 || bd) {
-      sync_texture_copy(src, 0, (u32*)level, 0, size, 8);
-    } else {
+      if (!sync_texture_copy(src, 0, (u32*)level, 0, size, 8)) {
+        return 0;
+      }
+    } else if (gx_begin()) {
       GX_TextureCopy(src, 0, (u32*)level, 0, size, 8);
+      gx_end();
+    } else {
+      return 0;
     }
     level += size;
   }
@@ -8600,8 +8749,11 @@ static void mesh_scales_set(int atlas, int raw) {
 void ctr_gpu_draw_mesh_prepared(const ctr_draw_state* state, const ctr_mesh_matrix* matrix,
                                 int mesh, int first_index, int index_count) {
   SKY_HOOK(state);
-  if (!g.ready || !g.in_frame || mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1 ||
-      index_count < 3) {
+  if (!g.ready || !g.in_frame || index_count < 3) {
+    return;
+  }
+  if (mesh < 0 || mesh >= MAX_MESHES || g.meshes[mesh].used != 1) {
+    g.cur.dead_draws++;
     return;
   }
   if (!cmd_room()) {
@@ -9382,6 +9534,7 @@ void* ctr_gpu_mesh_vertices(int mesh) {
       ctr_linear_unlock();
       if (m->verts_alt) {
         memcpy(m->verts_alt, m->verts, m->vbytes);
+        cache_flush_frame(m->verts_alt, m->vbytes); /* (the caller flushes only what it moves) */
       }
     }
     if (m->verts_alt && m->alt_frame != g.frame_no) {

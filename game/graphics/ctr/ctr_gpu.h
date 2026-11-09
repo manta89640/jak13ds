@@ -892,6 +892,7 @@ typedef struct {
   unsigned int vbuf_used; /* (AI-assisted) immediate vertex buffer bytes this frame (of vbuf_size) */
   unsigned int vbuf_size;
   int vbuf_dropped;       /* draws dropped: the vertex buffer was full */
+  int dead_draws;         /* level draws skipped: their mesh is not there (deleted or not made) */
   /* (AI-assisted) filled only in the frame after ctr_gpu_want_detailed_stats (it scans all texture
    * slots and probes the linear heap): textures, tex_bytes, compact_*, radial_textures,
    * linear_free, vram_free and linear_largest (the largest block linearAlloc can give) */

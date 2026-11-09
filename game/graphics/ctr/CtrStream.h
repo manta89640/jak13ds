@@ -60,6 +60,8 @@ class CtrStreamArena {
   u32 run_if_freed(void* p);
   // in a growth segment (those are emptied first); any growth segment
   bool in_growth(const void* p);
+  // the size of the used piece at p (0: none)
+  u32 piece_bytes(const void* p);
   bool has_growth() {
     std::lock_guard<std::mutex> lk(m_lock);
     return m_segs.size() > 1;

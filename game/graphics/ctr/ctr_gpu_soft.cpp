@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -24,6 +25,7 @@
 
 #include "fmt/format.h"
 #include "game/graphics/ctr/CtrRenderer.h"
+#include "game/graphics/ctr/CtrStream.h"
 #include "game/graphics/ctr/ctr_gpu.h"
 
 // (AI-assisted, perfv2) host diagnostic: mesh handle -> what it is (CtrLevel fills it)
@@ -109,6 +111,143 @@ struct SoftState {
 } g_soft;
 // (AI-assisted) ctr_gpu_stream_alloc: the frame's vertices, until the next frame begins
 static std::vector<std::vector<uint8_t>> s_stream;
+
+// env CTR_GPU_LIFE=1 (2: every event): the GPU reads RAM one to two frames after a draw is built
+namespace life {
+const int s_mode = getenv("CTR_GPU_LIFE") ? atoi(getenv("CTR_GPU_LIFE")) : 0;
+inline bool on() {
+  return s_mode > 0;
+}
+constexpr int kMax = 16384;
+struct Mesh {
+  uint8_t state = 0;  // 0 free, 1 live, 2 deleted, 4 held one more frame
+  bool alt = false;   // ctr_gpu_mesh_vertices made its second buffer (never flushed whole)
+  bool told = false;
+  uint64_t geom = 0;
+  uint32_t drawn = 0;  // frame + 1 of its last draw
+  std::vector<uint8_t> ram;
+  void* ext = nullptr;
+  size_t ext_bytes = 0;
+};
+Mesh s_m[kMax];
+std::vector<int> s_pending;
+std::mutex s_lock;
+uint32_t s_frame = 1;
+struct Counts {
+  uint64_t dead_draws, dead_deletes, stale_meshes, stale_bytes, geom_changed, overlaps, too_small,
+      outside, inflight_colors, inflight_verts, checked, frees, held_frees;
+} s_c;
+
+uint64_t fnv(const uint8_t* p, size_t n, uint64_t h) {
+  for (size_t i = 0; i < n; i++) {
+    h = (h ^ p[i]) * 1099511628211ull;
+  }
+  return h;
+}
+// positions, pad and texture coordinates (not the colors) and the indices
+uint64_t geom_hash(const SoftMesh& m) {
+  uint64_t h = 1469598103934665603ull;
+  const size_t vb = m.vertex_bytes();
+  if (m.stride == 16 && m.col_off) {
+    h = fnv(m.verts.data(), std::min(m.col_off, vb), h);
+  } else if (m.stride == 16) {
+    for (size_t o = 0; o + 16 <= vb; o += 16) {
+      h = fnv(m.verts.data() + o, 12, h);
+    }
+  }
+  return fnv((const uint8_t*)m.indices.data(), m.indices.size() * 2, h);
+}
+std::string desc(int mesh) {
+  auto it = ctr_soft_mesh_desc().find(mesh);
+  return it == ctr_soft_mesh_desc().end() ? fmt::format("mesh {}", mesh) : it->second;
+}
+void say(const std::string& what) {
+  if (s_mode > 1) {
+    lg::info("[gpulife] frame {}: {}", s_frame, what);
+  }
+}
+void summary() {
+  lg::info("[gpulife] after {} frames: {} draws of meshes not live, {} deletes of meshes not live, "
+           "{} mesh frames drawn with bytes never flushed ({} bytes), {} with geometry changed "
+           "after their load, arena pieces: {} overlapping a live mesh, {} too small, {} outside the "
+           "arena; {} color and {} vertex rewrites of meshes the frame before drew; {} mesh frames "
+           "checked, {} meshes freed after the hold ({} at a GPU idle wait)",
+           s_frame, s_c.dead_draws, s_c.dead_deletes, s_c.stale_meshes, s_c.stale_bytes,
+           s_c.geom_changed, s_c.overlaps, s_c.too_small, s_c.outside, s_c.inflight_colors,
+           s_c.inflight_verts, s_c.checked, s_c.frees, s_c.held_frees);
+}
+
+void made(int mesh) {
+  if (!on() || mesh < 0 || mesh >= kMax) {
+    return;
+  }
+  std::lock_guard<std::mutex> lk(s_lock);
+  const SoftMesh& m = g_soft.meshes[mesh];
+  Mesh& l = s_m[mesh];
+  void* const ext = l.ext;
+  const size_t ext_bytes = l.ext_bytes;
+  l = Mesh();
+  l.ext = ext;
+  l.ext_bytes = ext_bytes;
+  l.state = 1;
+  l.ram = m.verts;
+  l.geom = geom_hash(m);
+}
+// a caller's block for a mesh: inside one arena piece, no mesh still in it
+void ext_begin(int mesh, void* mem, size_t bytes) {
+  if (!on() || mesh < 0 || mesh >= kMax) {
+    return;
+  }
+  std::lock_guard<std::mutex> lk(s_lock);
+  const uint8_t* a = (const uint8_t*)mem;
+  for (int i = 0; i < kMax; i++) {
+    const Mesh& o = s_m[i];
+    if (i != mesh && o.ext && a < (const uint8_t*)o.ext + o.ext_bytes &&
+        (const uint8_t*)o.ext < a + bytes) {
+      s_c.overlaps++;
+      lg::error("[gpulife] frame {}: arena block {} (+{}) given to mesh {} while {} (state {}) "
+                "still has {} (+{})", s_frame, mem, bytes, mesh, desc(i), o.state, o.ext,
+                o.ext_bytes);
+    }
+  }
+  const uint32_t piece = CtrStreamArena::get().piece_bytes(mem);
+  if (!piece) {
+    s_c.outside++;
+    lg::error("[gpulife] frame {}: mesh {} begun in a block that is no arena piece", s_frame, mesh);
+  } else if (piece < bytes) {
+    s_c.too_small++;
+    lg::error("[gpulife] frame {}: mesh {} needs {} bytes, its arena piece has {}", s_frame, mesh,
+              bytes, piece);
+  }
+  s_m[mesh].ext = mem;
+  s_m[mesh].ext_bytes = bytes;
+}
+}  // namespace life
+
+// a mesh a draw or an accessor may use; life: as the 3DS backend's slots (used == 1)
+static bool soft_mesh_ok(int mesh, bool draw) {
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+    if (draw && life::on() && mesh >= 0) {
+      life::s_c.dead_draws++;
+      life::say(fmt::format("draw of {}: not there", life::desc(mesh)));
+    }
+    return false;
+  }
+  if (life::on() && mesh < life::kMax) {
+    life::Mesh& l = life::s_m[mesh];
+    if (l.state != 1) {
+      if (draw) {
+        life::s_c.dead_draws++;
+        life::say(fmt::format("draw of {}: state {}", life::desc(mesh), l.state));
+      }
+      return false;
+    }
+    if (draw) {
+      l.drawn = life::s_frame;
+    }
+  }
+  return true;
+}
 
 // (AI-assisted) where draws go: the screen, or a tile of a render to texture (ctr_gpu_rt_begin)
 struct SoftTarget {
@@ -898,6 +1037,7 @@ void ctr_gpu_exit(void) {
   g_soft.textures.clear();
 }
 
+static void life_deletes(bool all);
 void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   memcpy(s_anim_slot_tex, s_anim_slot_next, sizeof(s_anim_slot_tex));  // (AI-assisted)
   s_anim_drawn_last = s_anim_drawn;
@@ -916,9 +1056,58 @@ void ctr_gpu_frame_begin(uint8_t r, uint8_t g, uint8_t b) {
   std::fill(g_soft.stencil.begin(), g_soft.stencil.end(), 0);
   s_stream.clear();
   early_probe_clear();
+  if (life::on()) {
+    life::s_frame++;
+    life_deletes(false);
+  }
+}
+
+// life, at the frame's last submit: every mesh the frame drew, as the GPU reads it
+static void life_frame_end() {
+  std::lock_guard<std::mutex> lk(life::s_lock);
+  const int n = std::min<int>((int)g_soft.meshes.size(), life::kMax);
+  for (int i = 0; i < n; i++) {
+    life::Mesh& l = life::s_m[i];
+    const SoftMesh& m = g_soft.meshes[i];
+    if (l.state != 1 || l.drawn != life::s_frame || !m.used) {
+      continue;
+    }
+    life::s_c.checked++;
+    if (l.ram.size() == m.verts.size() && memcmp(l.ram.data(), m.verts.data(), l.ram.size())) {
+      size_t bad = 0, first = 0, last = 0;
+      for (size_t b = 0; b < l.ram.size(); b++) {
+        if (l.ram[b] != m.verts[b]) {
+          first = bad ? first : b;
+          last = b;
+          bad++;
+        }
+      }
+      life::s_c.stale_meshes++;
+      life::s_c.stale_bytes += bad;
+      if (!l.told || life::s_mode > 1) {
+        l.told = true;
+        lg::error("[gpulife] frame {}: {} (stride {}, {} bytes{}) drawn with {} bytes the GPU "
+                  "would read stale: [{}, {}] never flushed",
+                  life::s_frame, life::desc(i), m.stride, m.verts.size(),
+                  l.alt ? ", second vertex buffer" : "", bad, first, last);
+      }
+    }
+    if (m.stride == 16 && life::geom_hash(m) != l.geom) {
+      life::s_c.geom_changed++;
+      lg::error("[gpulife] frame {}: {}: positions or indices changed after its load",
+                life::s_frame, life::desc(i));
+      l.geom = life::geom_hash(m);
+    }
+  }
+  if (life::s_frame % 600 == 0) {
+    life::summary();
+  }
 }
 
 void ctr_gpu_frame_end(void) {
+  if (life::on()) {
+    life_frame_end();
+  }
   if (s_ties_on) {
     std::fill(s_tie_writer.begin(), s_tie_writer.end(), 0);
     if (++s_tie_frames % 150 == 0) {
@@ -1775,8 +1964,7 @@ void ctr_gpu_soft_dump_tex(int tex, const char* path) {
 
 int ctr_gpu_mesh_peek(int mesh, const void** verts, int* vertex_count, const uint16_t** indices,
                       int* index_count) {
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
-      g_soft.meshes[mesh].stride != 16) {
+  if (!soft_mesh_ok(mesh, false) || g_soft.meshes[mesh].stride != 16) {
     return 0;
   }
   const auto& m = g_soft.meshes[mesh];
@@ -2000,6 +2188,10 @@ unsigned int ctr_gpu_linear_largest(void) {
 }
 static void soft_mesh_free(int mesh) {
   void* ext = g_soft.meshes[mesh].ext;
+  if (life::on() && mesh < life::kMax) {
+    std::lock_guard<std::mutex> lk(life::s_lock);
+    life::s_m[mesh] = life::Mesh();
+  }
   g_soft.meshes[mesh] = SoftMesh();
   if (ext && s_soft_ext_free) {
     s_soft_ext_free(ext);
@@ -2024,6 +2216,9 @@ int ctr_gpu_mesh_begin_ext_tail(void* mem, int vertex_count, int index_count, un
                                            indices);
   if (slot >= 0) {
     g_soft.meshes[slot].ext = mem;
+    life::ext_begin(slot, mem,
+                    std::max<size_t>(ctr_gpu_ext_index_offset(vertex_count) + (size_t)index_count * 2,
+                                     tail_bytes ? (size_t)tail_off + tail_bytes : 0));
     if (tail) {
       *tail = g_soft.meshes[slot].verts.data() + tail_off;
     }
@@ -2047,6 +2242,7 @@ int ctr_gpu_mesh_end(int mesh, int ok) {
     soft_mesh_free(mesh);
     return -1;
   }
+  life::made(mesh);
   return mesh;
 }
 
@@ -2059,15 +2255,58 @@ int ctr_gpu_mesh_create(const void* verts,
   const int slot = ctr_gpu_mesh_begin(vertex_count, index_count, &v, &ix);
   memcpy(v, verts, (size_t)vertex_count * 16);
   memcpy(ix, indices, (size_t)index_count * 2);
+  life::made(slot);
   return slot;
 }
 
-void ctr_gpu_free_pending_now(void) {}
+// life: the 3DS backend's hold: freed at the second frame begin after the delete, or all at once
+static void life_deletes(bool all) {
+  std::vector<int> gone;
+  {
+    std::lock_guard<std::mutex> lk(life::s_lock);
+    size_t kept = 0;
+    for (int h : life::s_pending) {
+      life::Mesh& l = life::s_m[h];
+      if (!all && l.state == 2) {
+        l.state = 4;
+        life::s_pending[kept++] = h;
+      } else {
+        gone.push_back(h);
+        (all ? life::s_c.held_frees : life::s_c.frees)++;
+      }
+    }
+    life::s_pending.resize(kept);
+  }
+  for (int h : gone) {
+    life::s_m[h] = life::Mesh();
+    soft_mesh_free(h);
+  }
+}
+
+void ctr_gpu_free_pending_now(void) {
+  if (life::on()) {
+    life_deletes(true);
+  }
+}
 
 void ctr_gpu_mesh_delete(int mesh) {
-  if (mesh >= 0 && mesh < (int)g_soft.meshes.size()) {
-    soft_mesh_free(mesh);
+  if (mesh < 0 || mesh >= (int)g_soft.meshes.size()) {
+    return;
   }
+  if (life::on() && mesh < life::kMax) {
+    std::lock_guard<std::mutex> lk(life::s_lock);
+    life::Mesh& l = life::s_m[mesh];
+    if (l.state != 1) {
+      life::s_c.dead_deletes++;
+      lg::error("[gpulife] frame {}: delete of {}: state {}", life::s_frame, life::desc(mesh),
+                l.state);
+      return;
+    }
+    l.state = 2;
+    life::s_pending.push_back(mesh);
+    return;
+  }
+  soft_mesh_free(mesh);
 }
 
 // (AI-assisted) cull_ties (ctr_gpu_set_cull_flip)
@@ -2085,7 +2324,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
   g_soft_cur_mesh = mesh;
   // (AI-assisted) fog_alpha: the 3DS backend's second mesh program (9) for CTR_TCC_ALPHA80 draws
   softstats::prog(g_soft_fog_alpha && state && (state->tcc & CTR_TCC_ALPHA80) ? 9 : 1);
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+  if (!soft_mesh_ok(mesh, true)) {
     return;
   }
   const auto& m = g_soft.meshes[mesh];
@@ -2333,7 +2572,7 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
   const uint16_t* ibase = indices;
   size_t col_off = 0;
   if (mesh >= 0) {
-    if (mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+    if (!soft_mesh_ok(mesh, true)) {
       return;
     }
     vbase = g_soft.meshes[mesh].verts.data();
@@ -2399,7 +2638,7 @@ void ctr_gpu_ocean_env_draw(const ctr_draw_state* state,
                             int index_count) {
   sky_hook(state);
   softstats::prog(10);
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+  if (!soft_mesh_ok(mesh, true)) {
     return;
   }
   const uint8_t* vbase = g_soft.meshes[mesh].verts.data();
@@ -2475,7 +2714,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
   s_tie_draw++;
   sky_hook(state);
   softstats::prog(11);
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used || !state ||
+  if (!soft_mesh_ok(mesh, true) || !state ||
       normals_mesh < 0 || normals_mesh >= (int)g_soft.meshes.size() ||
       !g_soft.meshes[normals_mesh].used) {
     return;
@@ -2587,7 +2826,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
                             int slots_offset, int first_index, int index_count) {
   s_tie_draw++;
   sky_hook(state);
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+  if (!soft_mesh_ok(mesh, true) ||
       slots_mesh < 0 || slots_mesh >= (int)g_soft.meshes.size() ||
       !g_soft.meshes[slots_mesh].used) {
     return;
@@ -2624,7 +2863,7 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
                              int mesh, int morph_offset, int first_index, int index_count) {
   s_tie_draw++;
   sky_hook(state);
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+  if (!soft_mesh_ok(mesh, true) ||
       morph_offset < 0 || (size_t)morph_offset > g_soft.meshes[mesh].verts.size()) {
     return;
   }
@@ -2663,7 +2902,7 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
                               const float* unif, uint32_t, int mesh, int tail_offset,
                               int first_index, int index_count) {
   sky_hook(state);
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used || !unif ||
+  if (!soft_mesh_ok(mesh, true) || !unif ||
       tail_offset < 0 || (size_t)tail_offset > g_soft.meshes[mesh].verts.size()) {
     return;
   }
@@ -2708,34 +2947,74 @@ int ctr_gpu_skinned_mesh_create(const void* verts,
   auto& m = g_soft.meshes[h];
   m.stride = 20;
   m.verts.assign((const uint8_t*)verts, (const uint8_t*)verts + vertex_count * 24);
+  life::made(h);
   return h;
 }
 
 void* ctr_gpu_mesh_vertices(int mesh) {
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+  if (!soft_mesh_ok(mesh, false)) {
     return nullptr;
+  }
+  if (life::on() && mesh < life::kMax && !life::s_m[mesh].alt) {
+    // the second vertex buffer is flushed whole when made (CTR_GPU_LIFE_OLD_ALT: never)
+    static const bool old_alt = getenv("CTR_GPU_LIFE_OLD_ALT") != nullptr;
+    life::Mesh& l = life::s_m[mesh];
+    l.alt = true;
+    for (auto& b : l.ram) {
+      b = old_alt ? (uint8_t)~b : b;
+    }
   }
   return g_soft.meshes[mesh].verts.data();
 }
 
-void ctr_gpu_mesh_flush(int, int, int) {}
-void ctr_gpu_flush_range(const void*, unsigned int) {}  // (AI-assisted, micro-mg)
+// life: the flushed bytes are what the GPU reads from now on
+void ctr_gpu_flush_range(const void* addr, unsigned int size) {
+  if (!life::on() || !addr) {
+    return;
+  }
+  std::lock_guard<std::mutex> lk(life::s_lock);
+  const uint8_t* a = (const uint8_t*)addr;
+  const int n = std::min<int>((int)g_soft.meshes.size(), life::kMax);
+  for (int i = 0; i < n; i++) {
+    life::Mesh& l = life::s_m[i];
+    const auto& v = g_soft.meshes[i].verts;
+    if (l.state != 1 || v.empty() || l.ram.size() != v.size()) {
+      continue;
+    }
+    const uint8_t* lo = std::max(a, v.data());
+    const uint8_t* hi = std::min(a + size, v.data() + v.size());
+    if (lo < hi) {
+      memcpy(l.ram.data() + (lo - v.data()), lo, (size_t)(hi - lo));
+    }
+  }
+}
+void ctr_gpu_mesh_flush(int mesh, int offset, int size) {
+  if (life::on() && soft_mesh_ok(mesh, false) && offset >= 0 && size > 0) {
+    ctr_gpu_flush_range(g_soft.meshes[mesh].verts.data() + offset, (unsigned int)size);
+  }
+}
 void ctr_gpu_set_micro_mask(unsigned int) {}
 
 void* ctr_gpu_mesh_colors_inplace(int mesh) {
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+  if (!soft_mesh_ok(mesh, false) ||
       !g_soft.meshes[mesh].col_off) {
     return nullptr;
+  }
+  if (life::on() && mesh < life::kMax && life::s_m[mesh].drawn + 1 == life::s_frame) {
+    life::s_c.inflight_colors++;
   }
   return g_soft.meshes[mesh].verts.data() + g_soft.meshes[mesh].col_off;
 }
 
 void* ctr_gpu_mesh_vertices_inplace(int mesh, int* vertex_count) {
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used ||
+  if (!soft_mesh_ok(mesh, false) ||
       g_soft.meshes[mesh].stride != 16) {
     return nullptr;
   }
   *vertex_count = (int)(g_soft.meshes[mesh].vertex_bytes() / 16);
+  if (life::on() && mesh < life::kMax && life::s_m[mesh].drawn + 1 == life::s_frame) {
+    life::s_c.inflight_verts++;
+  }
   return g_soft.meshes[mesh].verts.data();
 }
 
@@ -2768,7 +3047,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
                             (changed(last_lights, lights, 28) ? 7 : 0);
   }
   softstats::prog(2);
-  if (mesh < 0 || mesh >= (int)g_soft.meshes.size() || !g_soft.meshes[mesh].used) {
+  if (!soft_mesh_ok(mesh, true)) {
     return;
   }
   const auto& m = g_soft.meshes[mesh];
