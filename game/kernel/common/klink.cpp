@@ -70,9 +70,15 @@ u64 g_load_budget_start = 0;
 u64 g_load_budget_end = 0;  // 0: no limit
 }  // namespace
 
-void load_budget_begin(double ms) {
-  g_load_budget_start = read_ee_timer();
-  g_load_budget_end = g_load_budget_start + (u64)(ms * kEeTicksPerMs);
+bool load_budget_begin(double ms) {
+  const u64 now = read_ee_timer();
+  // (load-continue calls itself for a level's last object; a budget nobody ended is forgotten)
+  if (g_load_budget_end && now - g_load_budget_start < (u64)(100.0 * kEeTicksPerMs)) {
+    return false;
+  }
+  g_load_budget_start = now;
+  g_load_budget_end = now + (u64)(ms * kEeTicksPerMs);
+  return true;
 }
 
 void load_budget_end() {

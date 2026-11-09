@@ -1665,6 +1665,13 @@ int g_upload_count_total = 0, g_upload_count_mark = 0;
 std::vector<std::string> g_levels_pending;
 bool g_levels_pending_set = false;
 
+void apply_levels(const std::vector<std::string>& levels) {
+  kperf::SectionScope section("set-levels");
+  g_ctr->levels().set_wanted(levels);
+  g_ctr->note_levels(levels);
+  CtrOceanFull::note_levels(levels);  // (AI-assisted) its log: once per level
+}
+
 void render_job(void*) {
   g_ctr->render_frame(g_job_mem, g_job_offset);
 }
@@ -1807,16 +1814,6 @@ u32 ctr_vsync() {
   }
   g_frame_idx++;
   return g_frame_idx & 1;
-}
-
-// Game thread: the time left until the frame's flip (the last one plus the frame cap's vblanks);
-// negative when the game is behind or draws no frames, large before the first frame.
-double ctr_frame_ms_left() {
-  if (!g_ctr_ready || g_last_vsync_ms == 0) {
-    return 1e9;
-  }
-  const double period = (ctr_settings().fps_cap <= 30 ? 2 : 1) * (1000.0 / 59.8261);
-  return g_last_vsync_ms + period - ctr_gpu_time_ms();
 }
 
 u32 ctr_sync_path() {
@@ -2039,13 +2036,6 @@ void ctr_texture_relocate(u32 destination, u32 source, u32 format) {
   }
 }
 
-void apply_levels(const std::vector<std::string>& levels) {
-  kperf::SectionScope section("set-levels");
-  g_ctr->levels().set_wanted(levels);
-  g_ctr->note_levels(levels);
-  CtrOceanFull::note_levels(levels);  // (AI-assisted) its log: once per level
-}
-
 // With a render thread the list is taken at the frame's hand-over (ctr_send_chain), where the
 // render thread is idle anyway: the frames drawn see the same list as when the game waited for
 // the render thread here, in the middle of its frame.
@@ -2075,6 +2065,16 @@ void ctr_set_pmode_alp(float alp) {
 // the level's .c3l is loaded, so the player doesn't start in a level with nothing drawn yet. Gives
 // up after kMaxWaitMs per level (then the level appears when its load is done, as before).
 // (AI-assisted) the 60 Hz vblanks the last frame took (g_frame_vblanks; Jak II's kmachine.cpp)
+// Game thread: the time left until the frame's flip (the last one plus the frame cap's vblanks);
+// negative when the game is behind or draws no frames, large before the first frame.
+double ctr_frame_ms_left() {
+  if (!g_ctr_ready || g_last_vsync_ms == 0) {
+    return 1e9;
+  }
+  const double period = (ctr_settings().fps_cap <= 30 ? 2 : 1) * (1000.0 / 59.8261);
+  return g_last_vsync_ms + period - ctr_gpu_time_ms();
+}
+
 u32 ctr_frame_vblanks() {
   return g_frame_vblanks;
 }

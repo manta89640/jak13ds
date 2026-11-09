@@ -646,7 +646,18 @@ void InitMachine_PCPort() {
   make_function_symbol_from_c("pc-3ds-level-ready?", pc_3ds_level_ready);
 #else
   // (AI-assisted) host builds running the 3DS GOAL code (small memory): no .c3l to wait for
-  make_function_symbol_from_c("pc-3ds-level-ready?", +[](u32) -> u64 {
+  make_function_symbol_from_c("pc-3ds-level-ready?", +[](u32 name) -> u64 {
+    // OPENGOAL_LEVEL_DUMP=DIR: the level's heap as its login ends, to DIR/<level>.bin (the load
+    // budget's check: the same bytes whatever the budget, but for the C functions' host addresses)
+    static const char* dump = getenv("OPENGOAL_LEVEL_DUMP");
+    if (dump) {
+      auto heap = Ptr<kheapinfo>(intern_from_c("loading-level")->value);
+      const std::string path = fmt::format("{}/{}.bin", dump, Ptr<String>(name).c()->data());
+      if (FILE* f = fopen(path.c_str(), "wb")) {
+        fwrite(heap->base.c(), 1, heap->current.offset - heap->base.offset, f);
+        fclose(f);
+      }
+    }
     return s7.offset + true_symbol_offset(g_game_version);
   });
 #endif
@@ -662,8 +673,7 @@ void InitMachine_PCPort() {
       ms = atof(env);
     }
 #endif
-    load_budget_begin(ms);
-    return 0;
+    return load_budget_begin(ms) ? s7.offset + true_symbol_offset(g_game_version) : s7.offset;
   });
   make_function_symbol_from_c("pc-3ds-load-end", +[]() -> u64 {
     load_budget_end();

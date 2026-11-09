@@ -66,8 +66,8 @@ extern u32 g_link_generation;
 
 //! The level load work of one frame (the linker, load-continue and the level login in level.gc):
 //! begun with the time the frame has left, it stops when that is used up. No limit outside of
-//! begin / end.
-void load_budget_begin(double ms);
+//! begin / end. begin returns false inside a budget (nothing begun: its caller doesn't end it).
+bool load_budget_begin(double ms);
 void load_budget_end();
 //! false once the budget is used up, or a unit was put off to the next frame
 bool load_budget_left();
