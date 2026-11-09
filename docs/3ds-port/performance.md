@@ -1440,6 +1440,28 @@ twice in measured frames.
   list: Lava Tube / Citadel windows have busy 4-11 ms above active (33.6 vs 27.1), so they aren't
   GPU-bound although busy says so.
 
+## What a gameplay frame asks of the GPU: the host's triangle budget (tribudget)
+
+`CTR_SOFT_STATS=N gk --ctr-gfx ...` also writes `[tb]` lines per window of N frames, and
+`platform/3ds/tools/tri_budget.py LOG [--view NAME] [--binds] [--extra] [--tex]` turns them into
+tables. A view is the span between a pad script's `log view-begin NAME` and `log view-end NAME`.
+
+- Per bucket (level chunk kind and tier, `+morph` / `+tmorph` / `wind` / `etie` / `shrubfade`
+  passes, merc, sky, sprites, shadow; `CTR_SOFT_MERC_MODELS=1`: per merc model): draws, texture
+  binds, indices, vertices used, fragments, fragments written, pixels of the final picture.
+- Per bucket and view depth band (10 / 20 / 40 / 70 / 120 / 250 / 500 m): triangles by what
+  became of them: reaching behind the camera, off screen, culled back face, no pixel center, no
+  fragment written, written but covered later, in the final picture.
+- Vertices: program instructions and attribute buffers per vertex, a 16-entry post-vertex cache
+  cleared per draw or kept, vertices unique by position / texture coordinates / color.
+- Textures: fragments by format and mip level, 8x8 tiles touched first after each bind at LOD
+  bias 0 / 0.5 / 1, tile reads with a cache of 1 and of 16 tiles, the textures sampled.
+- `zties`: opaque fragments at exactly another draw's depth with another color, the only pixels
+  a reordering of opaque draws can change.
+
+The host does not draw `ocean = full` in gameplay runs (CtrOceanFull: "unexpected DMA"), so the
+ocean is missing from these tables. Results of Nov 9: `reports/nov09/tribudget.md`.
+
 ## Ties at the PS2's distances: its own geometries and its geomorph (ps2lod)
 
 **What the PS2 does** (`draw-inline-array-instance-tie`, the tie VU program; `c3l_format.md` "The

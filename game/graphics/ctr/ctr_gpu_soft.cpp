@@ -48,6 +48,12 @@ struct SoftTex {
   bool used = false;
   int w = 0, h = 0;
   std::vector<uint8_t> rgba;
+  // statistics: ctr_tex_format (-1: made at runtime), mip levels, its alpha mask's format
+  int format = -1, levels = 1, mask_format = -1;
+  std::vector<uint32_t> tb_stamp[4];
+  uint32_t tb_off[8] = {};
+  double tb_frags = 0;
+  std::string tb_first;
 };
 
 struct SoftMesh {
@@ -314,7 +320,32 @@ void early_probe_draw() {
 
 // ---- (AI-assisted) snow-gpu-audit: per-bucket draw/fill statistics (env CTR_SOFT_STATS=N) ----
 namespace softstats {
+// what became of a triangle (TF_VIS: in the final picture, or blended with a fragment written)
+enum { TF_NEAR, TF_OFF, TF_BACK, TF_NOPIX, TF_KILL, TF_HID, TF_VIS, TF_N };
+// view depth bands in meters; the last band: screen space draws
+constexpr int kTbBands = 9;
+constexpr float kTbBandM[kTbBands - 2] = {10.f, 20.f, 40.f, 70.f, 120.f, 250.f, 500.f};
+constexpr int kTbFmt = 9, kTbLvl = 8;
 struct B {
+  double fate[kTbBands][TF_N] = {};
+  double bfrag[kTbBands] = {}, bpass[kTbBands] = {};
+  double ahist[8] = {};  // by screen area: < 1/8, 1/2, 1, 2, 4, 16, 64 px, more
+  double verts = 0, idx = 0, final_px = 0;
+  // level draws' vertices, unique by position, + texture coordinates, + color
+  double upos = 0, upst = 0, upstc = 0;
+  // the same with texture coordinates a whole repeat apart taken as equal
+  double upstm = 0, upstmc = 0;
+  // tile reads with a cache of 1 and 16 tiles at LOD bias 0, then at bias 1
+  double tmiss[4][kTbFmt] = {};
+  // vertices x program instructions, x buffers; a 16 entry cache cleared per draw, and kept
+  double vinstr = 0, vbufs = 0, vc16 = 0, vc16_keep = 0;
+  // level triangles without area, repeating a triangle's vertices, its positions
+  double flat = 0, dup_idx = 0, dup_pos = 0;
+  // opaque fragments at another draw's exact depth with another color (order shows there)
+  double zties = 0;
+  // by format and mip level: fragments; tiles new in the frame, since the bind at bias 0, 0.5, 1
+  double tfrag[kTbFmt][kTbLvl] = {};
+  double tiles[4][kTbFmt][kTbLvl] = {};
   double draws = 0, tris = 0, px = 0, px_atest = 0, px_z = 0, px_blend = 0, px_invis = 0,
          px_proc = 0, tex_changes = 0, state_changes = 0, area_bbox = 0, prog_switches = 0;
   double copy_rows = 0;  // (AI-assisted) screen copy: 8-column tile rows (50 = the whole screen)
@@ -363,24 +394,192 @@ void prog(int p) {
     cur_prog = p;
   }
 }  // (bucket, tex): px, draws
+struct TbTri {
+  B* b;
+  uint8_t band;
+};
+std::vector<TbTri> tb_tris;      // the frame's opaque screen triangles with a fragment written
+std::vector<uint32_t> tb_owner;  // per pixel: the one that wrote it last (index + 1)
+uint32_t tb_cur = 0, tb_frag = 0, tb_pass = 0;
+float tb_w = -1.f;        // the next triangle's mean clip w (the caller's; < 0: none)
+float tb_w_per_m = 0.f;   // ctr_gpu_soft_view_depth
+int tb_lvl[3] = {0, 0, 0};
+uint32_t tb_bind = 1, tb_frame = 1;
+B* tb_rt = nullptr;
+int tb_instr = 7, tb_bufs = 1;  // the next draw's program length and attribute buffers
+uint32_t tb_draw_serial = 1;
+std::vector<uint32_t> tb_zwriter;  // per pixel: the draw that wrote its depth last (opaque)
 int enabled() {
   if (every < 0) {
     const char* e = getenv("CTR_SOFT_STATS");
     every = e ? atoi(e) : 0;
     od.assign(400 * 240, 0);
     owner.assign(400 * 240, 0);
+    tb_owner.assign(400 * 240, 0);
+    tb_zwriter.assign(400 * 240, 0);
   }
   return every;
+}
+// the bucket of the draws now: a render to texture's are counted apart
+B* tb_bucket() {
+  if (!s_target.rt) {
+    return cur;
+  }
+  if (!tb_rt) {
+    tb_rt = &acc[cur_name + "@rt"];
+  }
+  return tb_rt;
+}
+int tb_band(float w) {
+  if (!(w >= 0.f) || !(tb_w_per_m > 0.f)) {
+    return kTbBands - 1;
+  }
+  const float m = w / tb_w_per_m;
+  int b = 0;
+  while (b < kTbBands - 2 && m >= kTbBandM[b]) {
+    b++;
+  }
+  return b;
+}
+// a triangle that never reaches the rasterizer
+void tb_drop(int fate, float w) {
+  if (enabled()) {
+    tb_bucket()->fate[tb_band(w)][fate]++;
+  }
+}
+// an indexed draw: its indices and the vertices it uses (each shaded once at best)
+void tb_verts(const uint16_t* idx, int n) {
+  if (!enabled() || n <= 0) {
+    return;
+  }
+  static std::vector<uint32_t> seen(65536, 0);
+  static uint32_t serial = 0;
+  serial++;
+  int u = 0;
+  for (int i = 0; i < n; i++) {
+    if (seen[idx[i]] != serial) {
+      seen[idx[i]] = serial;
+      u++;
+    }
+  }
+  B* b = tb_bucket();
+  b->idx += n;
+  b->verts += u;
+  b->vinstr += (double)u * tb_instr;
+  b->vbufs += (double)u * tb_bufs;
+}
+void tb_level_cache(int mesh, const float clip[16], const uint16_t* idx, int n) {
+  if (!enabled() || n <= 0) {
+    return;
+  }
+  static uint16_t fifo[2][16];
+  static int used[2] = {0, 0}, at[2] = {0, 0};
+  static int last_mesh = -2;
+  static float last_clip[16];
+  used[0] = at[0] = 0;
+  if (mesh != last_mesh || memcmp(clip, last_clip, sizeof(last_clip))) {
+    used[1] = at[1] = 0;
+  }
+  last_mesh = mesh;
+  memcpy(last_clip, clip, sizeof(last_clip));
+  int miss[2] = {0, 0};
+  for (int i = 0; i < n; i++) {
+    for (int c = 0; c < 2; c++) {
+      bool hit = false;
+      for (int k = 0; k < used[c] && !hit; k++) {
+        hit = fifo[c][k] == idx[i];
+      }
+      if (!hit) {
+        miss[c]++;
+        fifo[c][at[c]] = idx[i];
+        at[c] = (at[c] + 1) & 15;
+        used[c] = std::min(used[c] + 1, 16);
+      }
+    }
+  }
+  B* b = tb_bucket();
+  b->vc16 += miss[0];
+  b->vc16_keep += miss[1];
+}
+void tb_level_verts(const SoftVerts& v, const uint16_t* idx, int n, bool repeat) {
+  if (!enabled() || n <= 0) {
+    return;
+  }
+  static std::unordered_map<uint64_t, uint8_t> seen[5];
+  for (auto& m : seen) {
+    m.clear();
+  }
+  auto mix = [](uint64_t h, uint64_t x) {
+    h ^= x + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    return h * 0xff51afd7ed558ccdull;
+  };
+  for (int i = 0; i < n; i++) {
+    uint64_t pos = 0, st = 0, col = 0;
+    memcpy(&pos, v.p(idx[i]), 6);
+    memcpy(&st, v.p(idx[i]) + 8, 4);
+    memcpy(&col, v.c(idx[i]), 4);
+    seen[0].emplace(pos, 1);
+    const uint64_t h1 = mix(pos, st);
+    seen[1].emplace(h1, 1);
+    seen[2].emplace(mix(h1, col), 1);
+    const uint64_t h2 = mix(pos, repeat ? st & 0x03ff03ffull : st);
+    seen[3].emplace(h2, 1);
+    seen[4].emplace(mix(h2, col), 1);
+  }
+  B* b = tb_bucket();
+  b->upos += seen[0].size();
+  b->upst += seen[1].size();
+  b->upstc += seen[2].size();
+  b->upstm += seen[3].size();
+  b->upstmc += seen[4].size();
+  static std::unordered_map<uint64_t, uint8_t> tri_idx, tri_pos;
+  tri_idx.clear();
+  tri_pos.clear();
+  for (int i = 0; i + 2 < n; i += 3) {
+    uint64_t a[3] = {idx[i], idx[i + 1], idx[i + 2]};
+    std::sort(a, a + 3);
+    uint64_t q[3] = {0, 0, 0};
+    for (int k = 0; k < 3; k++) {
+      memcpy(&q[k], v.p(idx[i + k]), 6);
+    }
+    std::sort(q, q + 3);
+    if (q[0] == q[1] || q[1] == q[2]) {
+      continue;
+    }
+    if (!tri_idx.emplace(a[0] | (a[1] << 16) | (a[2] << 32), 1).second) {
+      b->dup_idx++;
+    } else if (!tri_pos.emplace(mix(mix(q[0], q[1]), q[2]), 1).second) {
+      b->dup_pos++;
+    }
+  }
+}
+void tb_verts_n(int n) {
+  if (enabled() && n > 0) {
+    B* b = tb_bucket();
+    b->idx += n;
+    b->verts += n;
+    b->vinstr += (double)n * tb_instr;
+    b->vbufs += (double)n * tb_bufs;
+  }
+}
+// the next draw's vertex program (instructions with its end, shader_stats.py) and buffers
+void tb_prog(int instr, int bufs) {
+  tb_instr = instr;
+  tb_bufs = bufs;
 }
 void draw(const ctr_draw_state& st) {
   early_probe_draw();
   if (!enabled()) return;
+  tb_draw_serial++;
   cur->draws++;
   cur_tp = &tex_px[{cur_name, st.tex}];
   cur_tp->second++;
   cur_dp = nullptr;  // (AI-assisted, perfv2) set again by soft_mesh_tris
   if (!last_valid || memcmp(&st, &last_st, sizeof(st))) cur->state_changes++;
-  if (st.tex != last_tex) cur->tex_changes++;
+  if (st.tex != last_tex) {
+    cur->tex_changes++;
+    tb_bind++;
+  }
   last_tex = st.tex;
   last_st = st;
   last_valid = true;
@@ -389,6 +588,10 @@ void draw(const ctr_draw_state& st) {
 extern "C" void ctr_gpu_soft_bucket(const char* name) {
   softstats::cur_name = name;
   softstats::cur = &softstats::acc[name];
+  softstats::tb_rt = nullptr;
+}
+extern "C" void ctr_gpu_soft_view_depth(float w_per_meter) {
+  softstats::tb_w_per_m = w_per_meter;
 }
 
 uint32_t morton8(uint32_t x, uint32_t y) {
@@ -619,6 +822,100 @@ struct SoftEnv {
 };
 SoftEnv s_env;
 
+namespace softstats {
+// the mip level of a triangle's fragments at LOD bias 0, 0.5 and 1 (d: ds/dx, ds/dy, dt/dx, dt/dy)
+void tb_tex_tri(const ctr_draw_state& st, const float d[4]) {
+  tb_lvl[0] = tb_lvl[1] = tb_lvl[2] = 0;
+  const int tex = soft_tex_res(st.tex);
+  if (tex < 0 || tex >= (int)g_soft.textures.size() || !g_soft.textures[tex].used) {
+    return;
+  }
+  const SoftTex& t = g_soft.textures[tex];
+  const float rho =
+      std::max(std::hypot(d[0] * t.w, d[2] * t.h), std::hypot(d[1] * t.w, d[3] * t.h));
+  const float lod = rho > 1e-9f ? std::log2(rho) : -99.f;
+  for (int k = 0; k < 3; k++) {
+    tb_lvl[k] = std::clamp((int)std::floor(lod + 0.5f * k + 0.5f), 0,
+                           std::min(t.levels, kTbLvl) - 1);
+  }
+}
+// a fragment's texels: the 8x8 tiles its bilinear footprint is in
+void tb_tex_frag(const ctr_draw_state& st, int tex, float s, float t) {
+  SoftTex& tx = g_soft.textures[tex];
+  B* b = tb_bucket();
+  const int f = tx.format < 0 || tx.format >= kTbFmt - 1 ? kTbFmt - 1 : tx.format;
+  if (tx.tb_stamp[0].empty()) {
+    uint32_t n = 0;
+    for (int l = 0; l < kTbLvl; l++) {
+      tx.tb_off[l] = n;
+      n += (uint32_t)((std::max(tx.w >> l, 1) + 7) >> 3) * ((std::max(tx.h >> l, 1) + 7) >> 3);
+    }
+    for (auto& v : tx.tb_stamp) {
+      v.assign(n, 0);
+    }
+  }
+  if (tx.tb_first.empty()) {
+    tx.tb_first = s_target.rt ? cur_name + "@rt" : cur_name;
+  }
+  tx.tb_frags++;
+  b->tfrag[f][tb_lvl[0]]++;
+  {
+    static uint64_t lru[4][16];
+    static const int kSize[4] = {1, 16, 1, 16};
+    for (int m = 0; m < 4; m++) {
+      const int l = tb_lvl[m < 2 ? 0 : 2];
+      const int w = std::max(tx.w >> l, 1), h = std::max(tx.h >> l, 1);
+      int x = (int)std::floor(s * w), y = (int)std::floor(t * h);
+      x = st.clamp_s ? std::clamp(x, 0, w - 1) : ((x % w) + w) % w;
+      y = st.clamp_t ? std::clamp(y, 0, h - 1) : ((y % h) + h) % h;
+      const uint64_t key = ((uint64_t)(tex + 1) << 40) | ((uint64_t)l << 32) |
+                           ((uint64_t)(y >> 3) << 16) | (uint64_t)(x >> 3);
+      int at = -1;
+      for (int k = 0; k < kSize[m] && at < 0; k++) {
+        at = lru[m][k] == key ? k : -1;
+      }
+      if (at < 0) {
+        b->tmiss[m][f]++;
+        if (tx.mask_format >= 0 && tx.mask_format < kTbFmt - 1) {
+          b->tmiss[m][tx.mask_format]++;
+        }
+        at = kSize[m] - 1;
+      }
+      for (int k = at; k > 0; k--) {
+        lru[m][k] = lru[m][k - 1];
+      }
+      lru[m][0] = key;
+    }
+  }
+  auto wrap = [](int i, int size, bool clamp) {
+    if (clamp) {
+      return std::clamp(i, 0, size - 1);
+    }
+    i %= size;
+    return i < 0 ? i + size : i;
+  };
+  for (int v = 0; v < 4; v++) {
+    const int l = tb_lvl[v ? v - 1 : 0];
+    const int w = std::max(tx.w >> l, 1), h = std::max(tx.h >> l, 1);
+    const uint32_t stamp = v ? tb_bind : tb_frame;
+    const int tw = (w + 7) >> 3;
+    const int x0 = (int)std::floor(s * w - (st.filter ? 0.5f : 0.f));
+    const int y0 = (int)std::floor(t * h - (st.filter ? 0.5f : 0.f));
+    for (int k = 0; k < (st.filter ? 4 : 1); k++) {
+      const int x = wrap(x0 + (k & 1), w, st.clamp_s), y = wrap(y0 + (k >> 1), h, st.clamp_t);
+      uint32_t& at = tx.tb_stamp[v][tx.tb_off[l] + (y >> 3) * tw + (x >> 3)];
+      if (at != stamp) {
+        at = stamp;
+        b->tiles[v][f][l]++;
+        if (tx.mask_format >= 0 && tx.mask_format < kTbFmt - 1) {
+          b->tiles[v][tx.mask_format][l]++;
+        }
+      }
+    }
+  }
+}
+}  // namespace softstats
+
 void shade_pixel(const ctr_draw_state& st,
                  int px,
                  int py,
@@ -629,6 +926,7 @@ void shade_pixel(const ctr_draw_state& st,
                  bool tex_alpha_full = false,
                  float fog = 0.f,
                  const float* env = nullptr) {
+  const bool ss_on = softstats::enabled() != 0;
   // color in GS units (0x80 = 1.0 for vertex color / alpha)
   float r = col[0], g = col[1], b = col[2], a = col[3];
   float tex_a = 255.f;  // (AI-assisted, j1ocean) the texture's alpha (the sky reflection's weight)
@@ -643,6 +941,9 @@ void shade_pixel(const ctr_draw_state& st,
   if (stex >= 0 && stex < (int)g_soft.textures.size() && g_soft.textures[stex].used) {
     float tc[4];
     sample(g_soft.textures[stex], st, s, t, tc);
+    if (ss_on) {
+      softstats::tb_tex_frag(st, stex, s, t);
+    }
     tex_a = tc[3];
     if (st.decal) {
       r = tc[0];
@@ -710,8 +1011,8 @@ void shade_pixel(const ctr_draw_state& st,
     g = std::min(g, 255.f) + ec[1] * w;
     b = std::min(b, 255.f) + ec[2] * w;
   }
-  const bool ss_on = softstats::enabled() != 0;
   if (ss_on) {
+    softstats::tb_frag++;
     softstats::cur->px++;
     if (!s_target.rt) softstats::od[px + py * kW]++;
     if (st.flags & CTR_STATE_PROCTEX) softstats::cur->px_proc++;
@@ -764,8 +1065,22 @@ void shade_pixel(const ctr_draw_state& st,
   if (ss_on) {
     if (softstats::cur_dp) (*softstats::cur_dp)[1]++;
     if (softstats::tri_id) softstats::tri_zpass++;
+    softstats::tb_pass++;
     softstats::cur->px_z++;
     if (st.blend != CTR_BLEND_OFF) softstats::cur->px_blend++;
+  }
+  if (ss_on && !s_target.rt && st.zwrite && st.blend == CTR_BLEND_OFF &&
+      !(st.flags & CTR_STATE_NO_COLOR)) {
+    const int ti = px + py * kW;
+    uint32_t& zw = softstats::tb_zwriter[ti];
+    if (z == s_target.depth[idx] && zw && zw != softstats::tb_draw_serial) {
+      const uint8_t* d0 = &s_target.color[4 * idx];
+      const float c[3] = {std::min(r, 255.f), std::min(g, 255.f), std::min(b, 255.f)};
+      if ((uint8_t)c[0] != d0[0] || (uint8_t)c[1] != d0[1] || (uint8_t)c[2] != d0[2]) {
+        softstats::tb_bucket()->zties++;
+      }
+    }
+    zw = softstats::tb_draw_serial;
   }
   if (s_ties_on && !s_target.rt && st.zwrite && st.blend == CTR_BLEND_OFF &&
       !(st.flags & CTR_STATE_NO_COLOR)) {
@@ -793,6 +1108,7 @@ void shade_pixel(const ctr_draw_state& st,
   }
   if (ss_on && !s_target.rt && st.blend == CTR_BLEND_OFF) {
     softstats::owner[px + py * kW] = softstats::tri_id;
+    softstats::tb_owner[px + py * kW] = softstats::tb_cur;
   }
   uint8_t* d = &s_target.color[4 * idx];
   float as = std::min(a / 128.f, 2.f);
@@ -880,8 +1196,51 @@ void raster_triangle(const ctr_draw_state& st,
     sy[i] = s_target.oy - v[i].y * s_target.sy;
   }
   float area = (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sx[2] - sx[0]) * (sy[1] - sy[0]);
+  const bool tb = softstats::enabled() != 0;
+  softstats::B* tbb = nullptr;
+  int tb_band = 0;
+  bool tb_opaque = false;
+  if (tb) {
+    tbb = softstats::tb_bucket();
+    tb_band = softstats::tb_band(softstats::tb_w);
+    softstats::tb_w = -1.f;
+    softstats::tb_cur = 0;
+    if (std::max({sx[0], sx[1], sx[2]}) < (float)s_target.x0 ||
+        std::min({sx[0], sx[1], sx[2]}) > (float)s_target.x1 ||
+        std::max({sy[0], sy[1], sy[2]}) < (float)s_target.y0 ||
+        std::min({sy[0], sy[1], sy[2]}) > (float)s_target.y1) {
+      tbb->fate[tb_band][softstats::TF_OFF]++;
+      return;
+    }
+    const float a = std::abs(area) * 0.5f;
+    tbb->ahist[a < 0.125f ? 0 : a < 0.5f ? 1 : a < 1.f ? 2 : a < 2.f ? 3 : a < 4.f ? 4
+               : a < 16.f ? 5 : a < 64.f ? 6 : 7]++;
+  }
   if (std::abs(area) < 1e-6f) {
+    if (tb) {
+      tbb->fate[tb_band][softstats::TF_NOPIX]++;
+    }
     return;
+  }
+  if (tb) {
+    float u[3], w[3];
+    for (int i = 0; i < 3; i++) {
+      const float q = tex_q ? tex_q[i] : 1.f;
+      u[i] = v[i].s / q;
+      w[i] = v[i].t / q;
+    }
+    const float ax = sx[1] - sx[0], ay = sy[1] - sy[0], bx = sx[2] - sx[0], by = sy[2] - sy[0];
+    const float d[4] = {((u[1] - u[0]) * by - (u[2] - u[0]) * ay) / area,
+                        ((u[2] - u[0]) * ax - (u[1] - u[0]) * bx) / area,
+                        ((w[1] - w[0]) * by - (w[2] - w[0]) * ay) / area,
+                        ((w[2] - w[0]) * ax - (w[1] - w[0]) * bx) / area};
+    softstats::tb_tex_tri(st, d);
+    softstats::tb_frag = softstats::tb_pass = 0;
+    tb_opaque = !s_target.rt && st.blend == CTR_BLEND_OFF && !(st.flags & CTR_STATE_NO_COLOR);
+    if (tb_opaque) {
+      softstats::tb_tris.push_back({tbb, (uint8_t)tb_band});
+      softstats::tb_cur = (uint32_t)softstats::tb_tris.size();
+    }
   }
   int x0 = std::max(s_target.x0, (int)std::floor(std::min({sx[0], sx[1], sx[2]})));
   int x1 = std::min(s_target.x1 - 1, (int)std::ceil(std::max({sx[0], sx[1], sx[2]})));
@@ -925,6 +1284,19 @@ void raster_triangle(const ctr_draw_state& st,
       }
       shade_pixel(st, px, py, z, col, s, t, tex_alpha_full, f, env ? e : nullptr);
     }
+  }
+  if (tb) {
+    tbb->bfrag[tb_band] += softstats::tb_frag;
+    tbb->bpass[tb_band] += softstats::tb_pass;
+    if (!softstats::tb_frag || !softstats::tb_pass) {
+      tbb->fate[tb_band][softstats::tb_frag ? softstats::TF_KILL : softstats::TF_NOPIX]++;
+      if (tb_opaque) {
+        softstats::tb_tris.pop_back();
+      }
+    } else if (!tb_opaque) {
+      tbb->fate[tb_band][softstats::TF_VIS]++;
+    }
+    softstats::tb_cur = 0;
   }
 }
 }  // namespace
@@ -1146,6 +1518,22 @@ void ctr_gpu_frame_end(void) {
     }
     zp.clear();
     std::fill(softstats::owner.begin(), softstats::owner.end(), 0);
+    auto& tt = softstats::tb_tris;
+    std::vector<uint8_t> seen(tt.size(), 0);
+    for (uint32_t o : softstats::tb_owner) {
+      if (o && o <= tt.size()) {
+        seen[o - 1] = 1;
+        tt[o - 1].b->final_px++;
+      }
+    }
+    for (size_t i = 0; i < tt.size(); i++) {
+      tt[i].b->fate[tt[i].band][seen[i] ? softstats::TF_VIS : softstats::TF_HID]++;
+    }
+    tt.clear();
+    std::fill(softstats::tb_owner.begin(), softstats::tb_owner.end(), 0);
+    std::fill(softstats::tb_zwriter.begin(), softstats::tb_zwriter.end(), 0);
+    softstats::tb_frame++;
+    softstats::tb_bind++;
   }
   if (softstats::enabled() && ++softstats::frames >= softstats::every) {
     const double n = softstats::frames;
@@ -1207,6 +1595,67 @@ void ctr_gpu_frame_end(void) {
       softstats::cur_dp = nullptr;
     }
     lg::info("{}", line);
+    {
+      // totals over the window, one record per line (platform/3ds/tools/tri_budget.py)
+      std::string tb = fmt::format("[tb] win frame {} frames {} wpm {}", g_soft.frame,
+                                   softstats::frames, softstats::tb_w_per_m);
+      for (auto& [name, b] : softstats::acc) {
+        if (!b.draws && !b.px && !b.idx) {
+          continue;
+        }
+        tb += fmt::format(
+            "\n[tb] b {} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} "
+            "{:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f}",
+            name, b.draws, b.tex_changes, b.idx, b.verts, b.px, b.px_z, b.final_px, b.upos, b.upst,
+            b.upstc, b.vinstr, b.vbufs, b.vc16, b.vc16_keep, b.px_blend, b.px_atest, b.flat,
+            b.dup_idx, b.dup_pos);
+        tb += fmt::format(" {:.0f} {:.0f} {:.0f}", b.upstm, b.upstmc, b.zties);
+        for (int f = 0; f < softstats::kTbFmt; f++) {
+          if (b.tmiss[0][f]) {
+            tb += fmt::format("\n[tb] m {} {} {:.0f} {:.0f} {:.0f} {:.0f}", name, f, b.tmiss[0][f],
+                              b.tmiss[1][f], b.tmiss[2][f], b.tmiss[3][f]);
+          }
+        }
+        for (int k = 0; k < softstats::kTbBands; k++) {
+          double any = b.bfrag[k];
+          for (double f : b.fate[k]) {
+            any += f;
+          }
+          if (!any) {
+            continue;
+          }
+          tb += fmt::format("\n[tb] f {} {}", name, k);
+          for (double f : b.fate[k]) {
+            tb += fmt::format(" {:.0f}", f);
+          }
+          tb += fmt::format(" {:.0f} {:.0f}", b.bfrag[k], b.bpass[k]);
+        }
+        tb += fmt::format("\n[tb] a {}", name);
+        for (double a : b.ahist) {
+          tb += fmt::format(" {:.0f}", a);
+        }
+        for (int f = 0; f < softstats::kTbFmt; f++) {
+          for (int l = 0; l < softstats::kTbLvl; l++) {
+            if (b.tfrag[f][l] || b.tiles[1][f][l] || b.tiles[2][f][l] || b.tiles[3][f][l]) {
+              tb += fmt::format("\n[tb] x {} {} {} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f}", name, f, l,
+                                b.tfrag[f][l], b.tiles[0][f][l], b.tiles[1][f][l],
+                                b.tiles[2][f][l], b.tiles[3][f][l]);
+            }
+          }
+        }
+      }
+      for (size_t i = 0; i < g_soft.textures.size(); i++) {
+        auto& t = g_soft.textures[i];
+        if (t.used && t.tb_frags) {
+          tb += fmt::format("\n[tb] t {} {} {} {} {} {} {:.0f} {}", i, t.w, t.h, t.format, t.levels,
+                            t.mask_format, t.tb_frags, t.tb_first);
+        }
+        t.tb_frags = 0;
+        t.tb_first.clear();
+      }
+      tb += "\n[tb] end";
+      lg::info("{}", tb);
+    }
     if (!g_soft.dump_dir.empty()) {
       std::vector<uint8_t> img(400 * 240 * 4);
       for (int i = 0; i < 400 * 240; i++) {
@@ -1219,6 +1668,7 @@ void ctr_gpu_frame_end(void) {
     softstats::acc.clear();
     softstats::tex_px.clear();
     softstats::cur_tp = nullptr;
+    softstats::tb_rt = nullptr;
     softstats::cur = &softstats::acc[softstats::cur_name];
     std::fill(softstats::od.begin(), softstats::od.end(), 0);
     softstats::frames = 0;
@@ -1307,6 +1757,8 @@ void ctr_gpu_draw_clip(const ctr_draw_state* state, const ctr_clip_vertex* verts
   if (getenv("CTR_SOFT_STATS")) {
     g_soft.cur.draws++;
     softstats::draw(*state);
+    softstats::tb_prog(7, 1);
+    softstats::tb_verts_n(count);
     for (int i = 0; i + 2 < count; i += 3) {
       const ctr_clip_vertex* tri[3] = {&verts[i], &verts[i + 1], &verts[i + 2]};
       clip_draw_triangle(*state, tri);
@@ -1379,6 +1831,7 @@ void clip_draw_triangle(const ctr_draw_state& st, const ctr_clip_vertex* const t
     }
     n = m;
     if (n < 3) {
+      softstats::tb_drop(softstats::TF_OFF, -1.f);
       return;
     }
     for (int i = 0; i < n; i++) {
@@ -1472,6 +1925,8 @@ void ctr_gpu_clip_draw_ranges(const ctr_draw_state* states, const int* first, co
     }
     g_soft.cur.draws++;
     softstats::draw(states[i]);
+    softstats::tb_prog(7, 1);
+    softstats::tb_verts(g_clip_indices.data() + first[i], count[i]);
     for (int k = first[i]; k + 2 < first[i] + count[i]; k += 3) {
       const ctr_clip_vertex* tri[3];
       bool ok = true;
@@ -1560,6 +2015,7 @@ void ocean_full_draw(const ctr_draw_state* state,
         behind |= !(g_ocean_full_verts[g_ocean_full_indices[i + k]].q > 0);
       }
       if (behind) {
+        softstats::tb_drop(softstats::TF_NEAR, -1.f);
         continue;
       }
     }
@@ -1591,6 +2047,8 @@ void ocean_full_draw(const ctr_draw_state* state,
     softstats::prog(0);
     g_soft.cur.draws++;
     if (state) softstats::draw(*state);
+    softstats::tb_prog(clip ? 14 : 10, 1);
+    softstats::tb_verts(g_ocean_full_indices.data(), index_count);
     s_env_tex = env_tex;
     for (size_t i = 0; i + 2 < out.size(); i += 3) {
       raster_triangle(*state, out.data() + i, false, fog.data() + i,
@@ -1784,6 +2242,10 @@ void ctr_gpu_tex_set_mask(int handle, int mask) {
   if (handle >= 0 && mask >= 0 && handle != mask) {
     s_tex_masks.emplace_back(handle, mask);
     apply_mask(s_tex_masks.back());
+    const int n = (int)g_soft.textures.size();
+    if (handle < n && mask < n) {
+      g_soft.textures[handle].mask_format = g_soft.textures[mask].format;
+    }
   }
 }
 
@@ -1980,6 +2442,8 @@ void ctr_gpu_draw(const ctr_draw_state* state, const ctr_vertex* verts, int coun
   softstats::prog(0);
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  softstats::tb_prog(7, 1);
+  softstats::tb_verts_n(count);
   for (int i = 0; i + 2 < count; i += 3) {
     raster_triangle(*state, verts + i);
     g_soft.cur.triangles++;
@@ -2004,6 +2468,8 @@ void ctr_gpu_draw_quads(const ctr_draw_state* state, const ctr_vertex* verts, in
   softstats::prog(0);
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  softstats::tb_prog(7, 1);
+  softstats::tb_verts_n(4 * quad_count);
   for (int q = 0; q < quad_count; q++) {
     const ctr_vertex* v = verts + 4 * q;
     const ctr_vertex t0[3] = {v[0], v[1], v[3]};
@@ -2021,6 +2487,8 @@ void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, in
   softstats::prog(0);
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  softstats::tb_prog(7, 1);
+  softstats::tb_verts_n(count);
   for (int k = 0; k + 2 < count; k++) {
     const ctr_vertex t[3] = {verts[k], verts[k + 1], verts[k + 2]};
     raster_triangle(*state, t);
@@ -2031,7 +2499,9 @@ void ctr_gpu_draw_strip(const ctr_draw_state* state, const ctr_vertex* verts, in
 
 int ctr_gpu_tex_create_tiled(int w, int h, int format, const void* data, int /*size*/) {
   auto rgba = untile((const uint8_t*)data, w, h, format);
-  return ctr_gpu_tex_create(w, h, rgba.data());
+  const int handle = ctr_gpu_tex_create(w, h, rgba.data());
+  g_soft.textures[handle].format = format;
+  return handle;
 }
 
 int ctr_gpu_tex_create_mipmapped(int w, int h, const uint8_t* rgba) {
@@ -2088,6 +2558,8 @@ int ctr_gpu_pool_tex(int pool, unsigned int offset, int w, int h, int format, in
   // a placeholder until the pool is ready
   std::vector<uint8_t> blank(w * h * 4, 0);
   const int handle = ctr_gpu_tex_create(w, h, blank.data());
+  g_soft.textures[handle].format = format;
+  g_soft.textures[handle].levels = std::max(levels, 1);
   g_soft.pools[pool].pending.push_back({handle, offset, w, h, format, levels});
   return handle;
 }
@@ -2328,6 +2800,7 @@ void ctr_gpu_draw_mesh(const ctr_draw_state* state,
     return;
   }
   const auto& m = g_soft.meshes[mesh];
+  softstats::tb_prog(11, m.col_off ? 2 : 1);
   soft_mesh_tris(state, clip, soft_verts(m.verts.data(), m.col_off), m.indices.data(), first_index,
                  index_count);
 }
@@ -2431,7 +2904,12 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
     (*softstats::cur_dp)[3]++;
     (*softstats::cur_dp)[4] = (state->tcc & CTR_TCC_CULL_BACK) ? 1 : 0;
   }
+  softstats::tb_level_cache(g_soft_cur_mesh, clip, indices + first_index, index_count);
   g_soft_cur_mesh = -1;
+  softstats::tb_verts(indices + first_index, index_count);
+  softstats::tb_level_verts(verts, indices + first_index, index_count,
+                            state && !(state->tcc & CTR_TCC_ST_ATLAS) && !state->clamp_s &&
+                                !state->clamp_t);
   // (AI-assisted) c3l v15 atlas draws: texture coordinates in 1/32768
   const float st_scale = state && (state->tcc & CTR_TCC_ST_ATLAS) ? 1.f / 32768.f : 1.f / 1024.f;
   const bool fogged = fog_on() && !s_nofog;  // (AI-assisted, far-fog)
@@ -2439,6 +2917,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};
     float tex_q[3];
+    float cw = 0.f;
     bool ok = true;
     int64_t ip[3][3];
     for (int k = 0; k < 3; k++) {
@@ -2465,6 +2944,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       }
       fog[k] = fogged ? mesh_fog(c[3]) : 0.f;
       tex_q[k] = 1.f / c[3];
+      cw += c[3] * (1.f / 3.f);
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
@@ -2483,10 +2963,12 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       if (e1[1] * e2[2] - e1[2] * e2[1] == 0 && e1[2] * e2[0] - e1[0] * e2[2] == 0 &&
           e1[0] * e2[1] - e1[1] * e2[0] == 0) {
         softstats::tri_class[softstats::TC_FLAT]++;
+        softstats::tb_bucket()->flat++;
       }
     }
     if (!ok) {
       if (ss) softstats::tri_class[softstats::TC_NEAR]++;
+      softstats::tb_drop(softstats::TF_NEAR, 0.f);
       continue;
     }
     if (cull_probe_on() && (tri[0].z > 1 || tri[1].z > 1 || tri[2].z > 1)) {
@@ -2500,6 +2982,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
     if (state && (state->tcc & CTR_TCC_CULL_BACK) && g_soft_cull_enable) {
       if (back) {
         if (ss) softstats::tri_class[softstats::TC_CULLED]++;
+        softstats::tb_drop(softstats::TF_BACK, cw);
         cull_probe_add(tri, state);
         continue;
       }
@@ -2510,11 +2993,13 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
                std::max({tri[0].y, tri[1].y, tri[2].y}) < -1.f ||
                std::min({tri[0].y, tri[1].y, tri[2].y}) > 1.f)) {
       softstats::tri_class[softstats::TC_OFF]++;
+      softstats::tb_drop(softstats::TF_OFF, cw);
       continue;
     }
     // behind the far plane / outside z
     if ((tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
         (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
+      softstats::tb_drop(softstats::TF_OFF, cw);
       continue;
     }
     for (int k = 0; k < 3; k++) {
@@ -2526,6 +3011,7 @@ static void soft_mesh_tris(const ctr_draw_state* state, const float clip[16], co
       softstats::tri_id = (uint32_t)softstats::zpassed.size();
       softstats::tri_frags = softstats::tri_zpass = 0;
     }
+    softstats::tb_w = cw;
     raster_triangle(*state, tri, true, fog, nullptr, tex_q, true);
     if (softstats::tri_id) {
       if (!softstats::tri_frags) {
@@ -2586,6 +3072,8 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
   const float* clip = d->clip.m;  // row-major (the soft prepare keeps the GL matrix)
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  softstats::tb_prog(24, 1);
+  softstats::tb_verts(ibase + first_index, index_count);
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};  // (AI-assisted, far-fog) the ocean's fog stage
@@ -2620,6 +3108,7 @@ void ctr_gpu_ocean_draw(const ctr_draw_state* state,
     }
     if (!ok || (tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
         (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
+      softstats::tb_drop(ok ? softstats::TF_OFF : softstats::TF_NEAR, -1.f);
       continue;
     }
     raster_triangle(*state, tri, true, fog);
@@ -2727,6 +3216,8 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
   const float* clip = d->clip.m;
   g_soft.cur.draws++;
   softstats::draw(*state);
+  softstats::tb_prog(30, g_soft.meshes[mesh].col_off ? 3 : 2);
+  softstats::tb_verts(ibase + first_index, index_count);
   const bool fogged = fog_on() && !s_nofog;
   auto row = [](const float* r, const float* in) {
     return r[0] * in[0] + r[1] * in[1] + r[2] * in[2] + r[3];
@@ -2742,6 +3233,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};
     float tex_q[3];
+    float cw = 0.f;
     bool ok = true;
     for (int k = 0; k < 3; k++) {
       const uint16_t vi = ibase[i + k];
@@ -2761,6 +3253,7 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
         break;
       }
       tex_q[k] = 1.f / c[3];
+      cw += c[3] * (1.f / 3.f);
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;
@@ -2787,19 +3280,23 @@ void ctr_gpu_etie_draw(const ctr_draw_state* state,
       s_env.vt[k] = (n[1] * dot + rfl[1]) * (-0.5f / len) + 0.5f;
     }
     if (!ok) {
+      softstats::tb_drop(softstats::TF_NEAR, 0.f);
       continue;
     }
     if ((state->tcc & CTR_TCC_CULL_BACK) && g_soft_cull_enable) {
       const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
                       (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
       if (g_soft_cull_flip ? a > 0 : a < 0) {
+        softstats::tb_drop(softstats::TF_BACK, cw);
         continue;
       }
     }
     if ((tri[0].z < 0 && tri[1].z < 0 && tri[2].z < 0) ||
         (tri[0].z > 1 && tri[1].z > 1 && tri[2].z > 1)) {
+      softstats::tb_drop(softstats::TF_OFF, cw);
       continue;
     }
+    softstats::tb_w = cw;
     s_env.tex = env_tex;
     s_env.etie = true;
     for (int k = 0; k < 3; k++) {
@@ -2853,6 +3350,7 @@ void ctr_gpu_draw_mesh_wind(const ctr_draw_state* state, const ctr_mesh_matrix* 
     memcpy(at, pos, sizeof(pos));
   }
   g_soft_cur_mesh = mesh;
+  softstats::tb_prog(16, m.col_off ? 3 : 2);
   soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
 }
 int ctr_gpu_wind_ready(void) {
@@ -2891,7 +3389,15 @@ void ctr_gpu_draw_mesh_morph(const ctr_draw_state* state, const ctr_mesh_matrix*
     memcpy(at, pos, sizeof(pos));
   }
   g_soft_cur_mesh = mesh;
+  softstats::tb_prog(16, m.col_off ? 3 : 2);
+  const std::string keep = softstats::cur_name;
+  if (softstats::enabled()) {
+    ctr_gpu_soft_bucket((keep + "+morph").c_str());
+  }
   soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
+  if (softstats::enabled()) {
+    ctr_gpu_soft_bucket(keep.c_str());
+  }
 }
 int ctr_gpu_morph_ready(void) {
   return 1;
@@ -2936,7 +3442,15 @@ void ctr_gpu_draw_mesh_tmorph(const ctr_draw_state* state, const ctr_mesh_matrix
     }
   }
   g_soft_cur_mesh = mesh;
+  softstats::tb_prog(27, m.col_off ? 3 : 2);
+  const std::string keep = softstats::cur_name;
+  if (softstats::enabled()) {
+    ctr_gpu_soft_bucket((keep + "+tmorph").c_str());
+  }
   soft_mesh_tris(state, matrix->m, sv, m.indices.data(), first_index, index_count);
+  if (softstats::enabled()) {
+    ctr_gpu_soft_bucket(keep.c_str());
+  }
 }
 
 int ctr_gpu_skinned_mesh_create(const void* verts,
@@ -3053,11 +3567,14 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
   const auto& m = g_soft.meshes[mesh];
   g_soft.cur.draws++;
   if (state) softstats::draw(*state);
+  softstats::tb_prog(39, 1);
+  softstats::tb_verts(m.indices.data() + first_index, index_count);
   // (AI-assisted, far-fog) merc_fog
   const bool fogged = fog_on() && state && (state->tcc & CTR_TCC_FOG);
   for (int i = first_index; i + 2 < first_index + index_count; i += 3) {
     ctr_vertex tri[3];
     float fog[3] = {0.f, 0.f, 0.f};
+    float cw = 0.f;
     bool ok = true;
     for (int k = 0; k < 3; k++) {
       const uint8_t* src = &m.verts[24 * m.indices[i + k]];
@@ -3125,6 +3642,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
         break;
       }
       fog[k] = fogged ? merc_fog(c[3]) : 0.f;
+      cw += c[3] * (1.f / 3.f);
       tri[k].x = c[0] / c[3];
       tri[k].y = c[1] / c[3];
       tri[k].z = (1.f + c[2] / c[3]) * 0.5f;  // GS z: larger = closer (zn = +1 near)
@@ -3138,6 +3656,7 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
       tri[k].a = (uint8_t)std::clamp(rgba[3] * lit_a, 0.f, 255.f);
     }
     if (!ok) {
+      softstats::tb_drop(softstats::TF_NEAR, 0.f);
       continue;
     }
     // (AI-assisted) cull_merc (CTR_TCC_CULL_OWN), the level meshes' winding test
@@ -3146,9 +3665,11 @@ void ctr_gpu_draw_skinned(const ctr_draw_state* state,
       const float a = (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y) -
                       (tri[2].x - tri[0].x) * (tri[1].y - tri[0].y);
       if (g_soft_cull_flip ? a > 0 : a < 0) {
+        softstats::tb_drop(softstats::TF_BACK, cw);
         continue;
       }
     }
+    softstats::tb_w = cw;
     raster_triangle(*state, tri, true, fog);
     g_soft.cur.triangles++;
     softstats::cur->tris++;

@@ -909,6 +909,8 @@ void ctr_gpu_soft_dump_tex(int tex, const char* path);
 const uint8_t* ctr_gpu_soft_texels(int tex, int* w, int* h);
 /* (AI-assisted) the name the draws are counted under now */
 const char* ctr_gpu_soft_bucket_name(void);
+/* the frame's clip w per meter of view depth (soft backend statistics by distance) */
+void ctr_gpu_soft_view_depth(float w_per_meter);
 #endif
 /* (AI-assisted) the next ctr_gpu_frame_end also fills the detailed counts (once per log line) */
 void ctr_gpu_want_detailed_stats(void);
